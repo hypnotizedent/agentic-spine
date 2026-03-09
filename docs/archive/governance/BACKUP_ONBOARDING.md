@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-25
+last_verified: 2026-03-08
 scope: backup-onboarding
 ---
 
@@ -37,10 +37,16 @@ Use this checklist with D69 VM creation governance and backup domain SSOT.
 ## 3. App-Level Backup Decision
 
 - Decide app-level requirement (`required` or `vzdump-only`) with written rationale.
+- Freeze exclusions up front so regenerable payloads do not creep into canonical backups.
+- Explicitly record if the service falls into one of these excluded classes:
+  - large media payload
+  - duplicate MinIO payload copy
+  - Immich photo corpus
+  - regenerable metadata/cache surface
 - If required:
   - Implement executable backup script on owning host.
   - Schedule cron/systemd timer.
-  - Ensure destination storage (NAS/offsite) exists and is writable.
+  - Ensure canonical destination storage exists and is writable.
   - Run one live backup and confirm artifacts.
 
 ## 4. SSOT Registration
@@ -65,6 +71,7 @@ Use this checklist with D69 VM creation governance and backup domain SSOT.
 ## 6. Offsite + Notification Wiring
 
 - Decide offsite replication required/not-required (with reason).
+- Backup receipts and backup-monitor alerts must target `backups@spine.ronny.works`.
 - Ensure degraded backup alerts are wired (`backup.monitor` + communications queue).
 - Verify queue path remains healthy:
 
@@ -83,3 +90,9 @@ Use this checklist with D69 VM creation governance and backup domain SSOT.
 
 - Confirm new targets show expected freshness.
 - Close linked loop gaps with strict receipts only after verification passes.
+
+## Canonical Plane Reminder
+
+- Shop VM/LXC source artifacts: `tank/backups/vzdump/dump/`
+- Shop cold backups: `md1400/backup-cold/...`
+- Home HA + home Pi-hole: Synology

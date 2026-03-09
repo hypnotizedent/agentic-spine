@@ -13,6 +13,26 @@ Canonical domain policy for `backup`.
 inventory but the current network/auth context cannot probe freshness from this
 machine.
 
+## Canonical Model
+
+- `tank/backups/vzdump/dump/` is the shop VM/LXC source backup plane.
+- `md1400/backup-cold/...` is the shop cold backup plane for app/state and promoted shop VM/LXC copies.
+- Synology is the canonical home backup plane for Home Assistant VM `100` and home Pi-hole LXC `105`.
+
+## Explicit Exclusions
+
+- Large media payloads remain excluded; only media config-state is backed up.
+- MinIO duplicate payload backups remain excluded by policy.
+- Immich photos stay on their existing photo-backup story and are not duplicated into the shop backup plane.
+- Regenerable metadata caches must stay excluded from media-config backups, including:
+  - `Radarr` / `Sonarr` / `Lidarr` `MediaCover`
+  - `Jellyfin` metadata cache
+
+## Reporting
+
+- Canonical recipient for backup receipts and backup-monitor alerts: `backups@spine.ronny.works`
+- Runtime implementation: Stalwart alias to `alerts@spine.ronny.works`
+
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog
 Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.

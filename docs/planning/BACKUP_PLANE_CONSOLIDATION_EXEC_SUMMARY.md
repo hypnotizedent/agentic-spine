@@ -1,8 +1,16 @@
 # Backup Plane Consolidation - Executive Summary
 
+> Superseded on 2026-03-08 by the live green backup posture on `main`.
+> This document remains as historical execution context only.
+> Current canonical truth is in:
+> - `ops/bindings/backup.inventory.yaml`
+> - `ops/bindings/backup.posture.snapshot.yaml`
+> - `docs/contracts/BACKUP_730XD_CANONICAL_PATH_MAPPING.md`
+> - `docs/governance/SYNOLOGY_918_STORAGE_MANIFEST_V1.md`
+
 **Date**: 2026-03-08
 **Loop**: LOOP-BACKUP-PLANE-CONSOLIDATION-730XD-E2E-20260308
-**Status**: PARTIAL_CONSOLIDATION_WITH_EXACT_REMAINING_EXECUTION
+**Status**: SUPERSEDED_HISTORICAL_EXECUTION_SUMMARY
 
 ## What Was Completed
 

@@ -79,6 +79,15 @@
 - Canonical cold copies are promoted to `/md1400/backup-cold/vzdump/pve/`
 - Home/local vzdump generation and canonical retention remain on Synology-backed storage via proxmox-home
 
+## Explicit Scope / Exclusions
+
+- `md1400` is for the 730XD/shop environment only.
+- Home canonical backups stay on Synology (`vm-100`, `lxc-105`).
+- Large media payloads are excluded; only media config-state is backed up to `md1400`.
+- Duplicate MinIO payload backup is excluded by policy.
+- Immich photos remain on their existing photo-backup story, not the shop cold plane.
+- Regenerable metadata caches stay excluded from media-config backups, including `MediaCover` and Jellyfin metadata.
+
 ## Authority Update Required
 
 `ops/bindings/backup.inventory.yaml` COMPLETED 2026-03-08:
