@@ -15,7 +15,7 @@
 - **Utilization**: Empty (128K used) vs 33% used (2.8TB)
 - **Purpose**: Dedicated backup pool per naming convention
 - **Growth**: Massive headroom for app/business backup expansion
-- **Cold Copies**: md1400 now carries the canonical cold plane for both app backups and promoted VM/LXC artifacts
+- **Cold Copies**: md1400 carries the canonical cold plane for the 730XD/shop environment only
 
 ## Storage Architecture
 
@@ -31,7 +31,7 @@
 - **Purpose**: Canonical cold backup plane
 - **Path**: `/md1400/backup-cold/{apps,vzdump,...}`
 - **Usage**: 128K (essentially empty)
-- **Scope**: Finance, Mint, Communications, Infra-core, Dev-tools, media config-state, n8n, archive-SMB snapshot manifests, promoted VM/LXC cold copies
+- **Scope**: Finance, Mint, Communications, Infra-core, Dev-tools, media config-state, n8n, archive-SMB snapshot manifests, promoted shop VM/LXC cold copies
 
 ## Canonical App Backup Paths
 
@@ -57,8 +57,7 @@
 
 ```
 /md1400/backup-cold/vzdump/
-├── pve/
-└── home/
+└── pve/
 ```
 
 ## Operator-Facing Path
@@ -78,15 +77,14 @@
 ### VM/LXC Backups → md1400 Cold Copies
 - Shop/local vzdump generation remains on `/tank/backups/vzdump/dump/`
 - Canonical cold copies are promoted to `/md1400/backup-cold/vzdump/pve/`
-- Home/local vzdump generation remains on proxmox-home storage
-- Canonical cold copies are promoted to `/md1400/backup-cold/vzdump/home/`
+- Home/local vzdump generation and canonical retention remain on Synology-backed storage via proxmox-home
 
 ## Authority Update Required
 
 `ops/bindings/backup.inventory.yaml` COMPLETED 2026-03-08:
 - ✅ Created new destination lanes pointing to `/md1400/backup-cold/apps/<domain>/`
 - ✅ Deprecated `nas-app-backups` lane (all business backups migrated to 730XD)
-- ✅ Promoted home and shop VM/LXC cold targets toward md1400 canonical paths
+- ✅ Promoted shop VM/LXC cold targets toward md1400 canonical paths
 
 ## Verification Commands
 
@@ -99,7 +97,6 @@ ssh pve "df -h | grep md1400"
 
 # Verify promoted VM/LXC cold copies
 ssh pve "ls /md1400/backup-cold/vzdump/pve | wc -l"
-ssh pve "ls /md1400/backup-cold/vzdump/home | wc -l"
 ```
 
 ## Implementation Evidence

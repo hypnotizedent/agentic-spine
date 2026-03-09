@@ -15,6 +15,7 @@ RETENTION_DAYS=14
 TIMESTAMP="$(date -u +%Y-%m-%dT%H%M%SZ)"
 
 declare -a INCLUDE_PATHS
+declare -a EXCLUDE_PATHS
 case "$STACK_NAME" in
   download-stack)
     INCLUDE_PATHS=(
@@ -36,6 +37,11 @@ case "$STACK_NAME" in
       /opt/appdata/qbittorrent
       /opt/appdata/trailarr
     )
+    EXCLUDE_PATHS=(
+      /mnt/docker/volumes/radarr/config/MediaCover
+      /mnt/docker/volumes/sonarr/config/MediaCover
+      /mnt/docker/volumes/lidarr/config/MediaCover
+    )
     ;;
   streaming-stack)
     INCLUDE_PATHS=(
@@ -48,6 +54,9 @@ case "$STACK_NAME" in
       /opt/appdata/navidrome
       /opt/appdata/jellyseerr
       /opt/appdata/bazarr
+    )
+    EXCLUDE_PATHS=(
+      /mnt/docker/volumes/jellyfin/config/metadata
     )
     ;;
   *)
@@ -84,6 +93,20 @@ for path in "${INCLUDE_PATHS[@]}"; do
   [[ -e "$path" ]] && RELATIVE_PATHS+=("${path#/}")
 done
 
+TAR_EXCLUDES=()
+RELATIVE_EXCLUDES=()
+for path in "${EXCLUDE_PATHS[@]}"; do
+  [[ -e "$path" ]] || continue
+  rel="${path#/}"
+  RELATIVE_EXCLUDES+=("$rel")
+  TAR_EXCLUDES+=("--exclude=$rel")
+done
+
+TAR_COMPRESSOR=(gzip)
+if command -v pigz >/dev/null 2>&1; then
+  TAR_COMPRESSOR=(pigz)
+fi
+
 if [[ "${#RELATIVE_PATHS[@]}" -eq 0 ]]; then
   log "FAIL: no configured paths exist for $STACK_NAME"
   exit 1
@@ -91,7 +114,22 @@ fi
 
 ARTIFACT="$STAGING_DIR/${STACK_NAME}-config-${TIMESTAMP}.tar.gz"
 MANIFEST="$STAGING_DIR/${STACK_NAME}-config-${TIMESTAMP}.txt"
-tar -czf "$ARTIFACT" -C / "${RELATIVE_PATHS[@]}"
+TAR_LOG="$(mktemp)"
+set +e
+tar "${TAR_EXCLUDES[@]}" -I "${TAR_COMPRESSOR[*]}" -cf "$ARTIFACT" -C / "${RELATIVE_PATHS[@]}" 2>"$TAR_LOG"
+TAR_RC=$?
+set -e
+if [[ $TAR_RC -ne 0 ]]; then
+  if [[ $TAR_RC -eq 1 ]] && [[ -s "$TAR_LOG" ]] && ! grep -Ev '(file changed as we read it$|File removed before we read it$|socket ignored$)' "$TAR_LOG" >/dev/null; then
+    log "WARN: continuing after transient file-changed warnings during tar"
+  else
+    cat "$TAR_LOG" >&2
+    rm -f "$TAR_LOG"
+    log "FAIL: tar exited with status $TAR_RC"
+    exit "$TAR_RC"
+  fi
+fi
+rm -f "$TAR_LOG"
 
 {
   echo "timestamp_utc=$TIMESTAMP"
@@ -99,6 +137,10 @@ tar -czf "$ARTIFACT" -C / "${RELATIVE_PATHS[@]}"
   echo "include_count=${#RELATIVE_PATHS[@]}"
   for rel in "${RELATIVE_PATHS[@]}"; do
     echo "include=$rel"
+  done
+  echo "exclude_count=${#RELATIVE_EXCLUDES[@]}"
+  for rel in "${RELATIVE_EXCLUDES[@]}"; do
+    echo "exclude=$rel"
   done
 } >"$MANIFEST"
 

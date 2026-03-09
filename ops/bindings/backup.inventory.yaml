@@ -39,7 +39,7 @@ model:
     daily-home-primary-est:
       cron: "0 3 * * *"
       timezone: "America/New_York"
-      note: "Home daily-primary cadence for proxmox-home source backups; canonical cold copies are promoted into md1400."
+      note: "Home daily-primary cadence for proxmox-home source backups; canonical recovery remains on Synology."
     daily-config-est:
       cron: "45 3 * * *"
       timezone: "America/New_York"
@@ -70,7 +70,7 @@ model:
     pve-vzdump-primary:
       host: pve
       base_path: /tank/backups/vzdump/dump
-      max_total_gb: 2500
+      max_total_gb: 4000
       max_file_count: 120
       description: "Local pve vzdump generation lane. Canonical cold copies are promoted from here into /md1400/backup-cold/vzdump/pve."
     r730xd-finance-backups:
@@ -111,10 +111,10 @@ model:
       description: "Canonical 730XD backup plane for media config-state (download-stack, streaming-stack). Media payload remains regenerable."
     nas-home-local-exception:
       host: nas
-      base_path: /volume1/backups
+      base_path: /volume1/backups/proxmox_backups/dump
       max_total_gb: 1600
       max_file_count: 400
-      description: "Home local-generation lane for proxmox-home artifacts. Canonical cold copies are promoted into /md1400/backup-cold/vzdump/home."
+      description: "Canonical home-local backup lane on Synology for proxmox-home artifacts (Home Assistant VM 100 and home Pi-hole LXC 105)."
     # nas-app-backups REMOVED 2026-03-08: Fully deprecated, migration complete to 730XD canonical plane.
     media-config-backups:
       host_group:
@@ -128,7 +128,7 @@ model:
       max_file_count: 800
     r730xd-archive-smb-snapshots:
       host: pve
-      base_path: md1400
+      base_path: /md1400/backup-cold/archive-smb/snapshots
       snapshot_retention_days: 14
       description: "ZFS snapshot protection for archive-SMB datasets (ronny-projects 11.9G, mint-legacy 127G). Cron-managed daily snapshots via /etc/cron.d/archive-smb-snapshot with 14-day retention."
   backup_admission_states:
@@ -148,7 +148,6 @@ runtime_units:
     schedule_class: daily-primary-est
     restore_class: vm-dry-run-quarterly
     inventory_targets:
-      - vm-200-docker-host-primary
       - vm-202-primary
       - vm-203-primary
       - vm-204-infra-core-primary
@@ -180,9 +179,9 @@ runtime_units:
       - home-vm-100-ha-primary
       - home-lxc-105-pihole-primary
     backup_admission_state: production_ready
-    description: "Home hypervisor VM/LXC backups. Local generation occurs on proxmox-home; canonical cold copies are promoted into md1400."
+    description: "Home hypervisor VM/LXC backups. Local generation and canonical recovery both remain on Synology-backed storage mounted by proxmox-home."
   # machine-nas REMOVED 2026-03-08: All business backup authority migrated to 730XD canonical plane.
-  # Home systems may still generate local artifacts on Synology-backed storage, but governed cold copies are promoted into md1400.
+  # Home systems remain canonical on Synology-backed storage; md1400 is reserved for the 730XD/shop environment.
   # Former targets migrated to r730xd-*-backups lanes (finance, infra-core, dev-tools, communications).
   - unit_id: vm-200-docker-host
     kind: vm
@@ -430,7 +429,7 @@ runtime_units:
     inventory_targets:
       - home-vm-100-ha-primary
     backup_admission_state: production_ready
-    description: "Home Assistant VM 100. Source generation remains on proxmox-home; canonical cold copy is promoted into md1400."
+    description: "Home Assistant VM 100 canonical backup on Synology via proxmox-home."
   - unit_id: vm-105-pihole-home
     kind: vm
     hostname: pihole-home
@@ -446,7 +445,7 @@ runtime_units:
     inventory_targets:
       - home-lxc-105-pihole-primary
     backup_admission_state: production_ready
-    description: "Home Pi-hole LXC 105. Source generation remains on proxmox-home; canonical cold copy is promoted into md1400."
+    description: "Home Pi-hole LXC 105 canonical backup on Synology via proxmox-home."
   - unit_id: lxc-220-archive-smb
     kind: lxc
     hostname: archive-smb
@@ -688,6 +687,8 @@ runtime_units:
     inventory_targets:
       - vm-214-communications-stack-primary
       - app-mail-archiver
+      - app-mail-archiver-offsite
+      - app-stalwart-offsite
     backup_admission_state: production_ready
 targets:
   # =============================================================================
@@ -696,7 +697,7 @@ targets:
   # restore plane is md1400 cold storage.
   # =============================================================================
   - name: vm-200-docker-host-primary
-    enabled: true
+    enabled: false
     kind: file_glob
     host: pve
     base_path: "/md1400/backup-cold/vzdump/pve"
@@ -917,28 +918,28 @@ targets:
     classification: critical
     description: "Disabled: 186GB backup cannot fit in nightly offsite window at 10-20 Mbps."
   # =============================================================================
-  # HOME VM/LXC BACKUPS - CANONICAL COLD COPIES (md1400) - sourced from proxmox-home
-  # Local generation on proxmox-home still lands on synology-backups; the governed
-  # restore plane is md1400 cold storage on pve.
+  # HOME VM/LXC BACKUPS - SYNOLGY CANONICAL EXCEPTIONS
+  # Home-local backups remain canonical on Synology for fault-domain separation
+  # from the 730XD/shop environment.
   # =============================================================================
   - name: home-vm-100-ha-primary
     enabled: true
     kind: file_glob
-    host: pve
-    base_path: "/md1400/backup-cold/vzdump/home"
+    host: nas
+    base_path: "/volume1/backups/proxmox_backups/dump"
     glob: "vzdump-qemu-100-*.vma.zst"
     stale_after_hours: 26
     classification: critical
-    description: "Home Assistant VM 100 canonical cold copy on md1400. Source generation remains local vzdump on proxmox-home; canonical recovery copy is synced to /md1400/backup-cold/vzdump/home."
+    description: "Home Assistant VM 100 canonical backup on Synology. Generated by proxmox-home vzdump job backup-home-p0-daily."
   - name: home-lxc-105-pihole-primary
     enabled: true
     kind: file_glob
-    host: pve
-    base_path: "/md1400/backup-cold/vzdump/home"
+    host: nas
+    base_path: "/volume1/backups/proxmox_backups/dump"
     glob: "vzdump-lxc-105-*.tar.zst"
     stale_after_hours: 168
     classification: rebuildable
-    description: "Home Pi-hole LXC 105 canonical cold copy on md1400. Source generation remains local vzdump on proxmox-home; canonical recovery copy is synced to /md1400/backup-cold/vzdump/home."
+    description: "Home Pi-hole LXC 105 canonical backup on Synology. Generated by proxmox-home vzdump job backup-home-p2-weekly."
   # =============================================================================
   # APP-LEVEL BACKUPS (NAS at house, Tailscale)
   # =============================================================================

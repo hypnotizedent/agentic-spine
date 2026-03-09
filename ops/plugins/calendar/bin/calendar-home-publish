@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -33,6 +34,54 @@ def load_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         fail(f"YAML root must be mapping: {path}")
     return payload
+
+
+def load_backup_calendar_events(root: Path) -> tuple[list[dict[str, Any]], list[str], str]:
+    binding_path = root / "ops/bindings/backup.calendar.yaml"
+    payload = load_yaml(binding_path)
+    tz_name = str(payload.get("timezone", "America/New_York")).strip()
+    dtstart_date = str(payload.get("dtstart_date", "2026-02-10")).strip()
+    source_ref = "ops/bindings/backup.calendar.yaml"
+    raw_events = payload.get("events") or []
+    if not isinstance(raw_events, list):
+        fail(f"backup calendar events must be a list: {binding_path}")
+
+    try:
+        anchor = datetime.strptime(dtstart_date, "%Y-%m-%d")
+    except ValueError as exc:
+        fail(f"invalid backup calendar dtstart_date {dtstart_date!r}: {exc}")
+
+    events: list[dict[str, Any]] = []
+    for item in raw_events:
+        if not isinstance(item, dict):
+            continue
+        event_id = str(item.get("id", "")).strip()
+        if not event_id:
+            continue
+        byhour = int(item.get("byhour", 0) or 0)
+        byminute = int(item.get("byminute", 0) or 0)
+        duration = int(item.get("duration_minutes", 60) or 60)
+        start = anchor.replace(hour=byhour, minute=byminute, second=0)
+        end = start + timedelta(minutes=duration)
+        byday = item.get("byday") or []
+        if isinstance(byday, str):
+            byday = [byday]
+        events.append(
+            {
+                "uid": f"spine-backup-{event_id}@agentic-spine",
+                "summary": str(item.get("summary", event_id)).strip(),
+                "description": str(item.get("description", "")).strip(),
+                "layer": "backup",
+                "authority": "backup.calendar",
+                "source_ref": source_ref,
+                "freq": str(item.get("freq", "DAILY")).strip() or "DAILY",
+                "byday": [str(day).strip() for day in byday if str(day).strip()],
+                "dtstart_local": start.strftime("%Y%m%dT%H%M%S"),
+                "dtend_local": end.strftime("%Y%m%dT%H%M%S"),
+            }
+        )
+
+    return events, ["backup"], tz_name
 
 
 def read_secret_var(name: str) -> str:
@@ -374,9 +423,15 @@ def main() -> None:
     if not dtstamp:
         dtstamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 
+    backup_events, backup_layers, backup_tz = load_backup_calendar_events(root)
+    events.extend(backup_events)
+    valid_layers = set(index.get("layers") or [])
+    valid_layers.update(backup_layers)
+    if backup_events:
+        tz_name = backup_tz or tz_name
+
     # --- Apply layer filter ---
     if args.layers:
-        valid_layers = set(index.get("layers") or [])
         for layer in args.layers:
             if layer not in valid_layers:
                 fail(f"unknown layer '{layer}' — valid: {sorted(valid_layers)}")

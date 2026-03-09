@@ -9,7 +9,7 @@ LOCK_FILE="/var/lock/vzdump-md1400-cold-sync.lock"
 TIMESTAMP="$(date -u +%Y-%m-%dT%H%M%SZ)"
 KEEP_PER_GUEST=2
 
-QEMU_VMIDS=(202 203 204 205 206 207 209 210 211 212 213 214 215 200)
+QEMU_VMIDS=(202 203 204 205 206 207 209 210 211 212 213 214 215)
 LXC_VMIDS=(220)
 
 log() { echo "[$(date -Iseconds)] $*"; }

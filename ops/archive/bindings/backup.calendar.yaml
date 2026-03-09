@@ -1,8 +1,8 @@
 # Status: authoritative
-# Last verified: 2026-03-01
+# Last verified: 2026-03-08
 
 version: 1
-updated_at: "2026-03-01"
+updated_at: "2026-03-08"
 owner: "@ronny"
 
 # Calendar timezone for scheduled tasks. Must be an IANA TZ (for iPhone).
@@ -15,120 +15,133 @@ dtstart_date: "2026-02-10"
 calendar_name: "Spine Backups"
 
 events:
-  # Proxmox vzdump schedule from receipt:
-  # - receipts/sessions/RCAP-20260210-092928__backup.vzdump.status__Rtqd959679/receipt.md
   - id: "pve-vzdump-daily"
     summary: "Proxmox vzdump (pve) daily"
     freq: "DAILY"
-    byhour: 1
+    byhour: 2
     byminute: 0
     duration_minutes: 180
-    description: "pve daily vzdump window at 01:00 local; storage tank-backups. Moved out of the DST 02:00 hole on 2026-03-08. Canonical VM target source: ops/bindings/backup.inventory.yaml (runtime verify: backup.vzdump.status)."
+    description: "Canonical pve vzdump job backup-ronny-daily-2026-01-22 writes shop VM/LXC source artifacts to tank-backups before md1400 cold sync."
+    source: "ops/archive/bindings/backup.schedule.yaml"
 
-  # Home vzdump schedules (enabled 2026-02-11)
-  - id: "home-vzdump-p0-daily"
-    summary: "Home vzdump P0 (HA) daily"
+  - id: "backup-home-p0-daily"
+    summary: "Home Assistant vzdump (Synology)"
     freq: "DAILY"
     byhour: 3
     byminute: 0
-    duration_minutes: 30
-    description: "proxmox-home P0 daily vzdump window at 03:00 local; storage synology-backups. Canonical VM target source: ops/bindings/backup.inventory.yaml (runtime verify: backup.vzdump.status)."
+    duration_minutes: 45
+    description: "Canonical home Home Assistant backup on proxmox-home to Synology-backed storage."
+    source: "ops/archive/bindings/backup.schedule.yaml"
 
-  - id: "home-vzdump-p2-weekly"
-    summary: "Home vzdump P2 (pihole) weekly"
+  - id: "backup-home-p2-weekly"
+    summary: "Home Pi-hole vzdump (Synology)"
     freq: "WEEKLY"
+    byday:
+      - "SU"
     byhour: 4
     byminute: 0
-    duration_minutes: 120
-    description: "proxmox-home P2 weekly vzdump window (Sun 04:00 local); storage synology-backups. Canonical VM target source: ops/bindings/backup.inventory.yaml (runtime verify: backup.vzdump.status)."
+    duration_minutes: 90
+    description: "Canonical home Pi-hole backup on proxmox-home to Synology-backed storage."
+    source: "ops/archive/bindings/backup.schedule.yaml"
 
-  # App-level backups (authoritative docs):
-  - id: "vaultwarden-backup"
-    summary: "Vaultwarden app backup (infra-core -> 730XD)"
+  - id: "archive-smb-zfs-snapshot-daily"
+    summary: "Archive-SMB ZFS snapshot"
     freq: "DAILY"
-    byhour: 2
-    byminute: 45
+    byhour: 1
+    byminute: 5
+    duration_minutes: 10
+    description: "Daily ZFS snapshot/manifest for md1400/ronny-projects and md1400/mint-legacy on pve."
+    source: "ops/archive/bindings/backup.schedule.yaml"
+
+  - id: "mail-archiver-backup"
+    summary: "Mail-archiver backup + offsite verify"
+    freq: "DAILY"
+    byhour: 3
+    byminute: 0
+    duration_minutes: 240
+    description: "Root cron on communications-stack runs mail-archiver-backup.sh for pg_dump, uploads archive, local last-good, and md1400 offsite verification."
+    source: "ops/archive/bindings/backup.schedule.yaml"
+
+  - id: "n8n-workflows-cold-sync-daily"
+    summary: "n8n workflows cold sync"
+    freq: "DAILY"
+    byhour: 3
+    byminute: 15
     duration_minutes: 15
-    description: "Cron on infra-core runs daily at 02:45; tar.gz lands on /md1400/backup-cold/apps/infra-core/vaultwarden/ on pve (730XD canonical plane)."
-    source: "docs/governance/VAULTWARDEN_BACKUP_RESTORE.md"
+    description: "Cold sync latest n8n workflow export to md1400."
+    source: "ops/archive/bindings/backup.schedule.yaml"
 
-  - id: "infisical-backup"
-    summary: "Infisical DB backup (infra-core -> 730XD)"
+  - id: "media-config-download-stack-cold-sync-daily"
+    summary: "Download-stack config backup"
     freq: "DAILY"
-    byhour: 2
-    byminute: 50
-    duration_minutes: 15
-    description: "Cron on infra-core runs daily at 02:50; pg_dump lands on /md1400/backup-cold/apps/infra-core/infisical/ on pve (730XD canonical plane)."
-    source: "docs/governance/INFISICAL_BACKUP_RESTORE.md"
+    byhour: 4
+    byminute: 10
+    duration_minutes: 90
+    description: "Archive download-stack config-state only and sync to md1400. Media payload remains excluded."
+    source: "ops/archive/bindings/backup.schedule.yaml"
 
-  - id: "gitea-backup"
-    summary: "Gitea backup (dev-tools -> 730XD)"
+  - id: "media-config-streaming-stack-cold-sync-daily"
+    summary: "Streaming-stack config backup"
     freq: "DAILY"
-    byhour: 2
-    byminute: 55
-    duration_minutes: 20
-    description: "Cron on dev-tools runs daily at 02:55; gitea dump + pg_dump land on /md1400/backup-cold/apps/dev-tools/gitea/ on pve (730XD canonical plane)."
-    source: "docs/governance/GITEA_BACKUP_RESTORE.md"
+    byhour: 4
+    byminute: 20
+    duration_minutes: 90
+    description: "Archive streaming-stack config-state only and sync to md1400. Media payload remains excluded."
+    source: "ops/archive/bindings/backup.schedule.yaml"
 
   - id: "finance-stack-backup"
-    summary: "Finance stack app backups (VM 211 -> 730XD)"
+    summary: "Finance stack app backups"
     freq: "DAILY"
     byhour: 6
     byminute: 20
     duration_minutes: 45
-    description: "Cron on finance-stack runs daily at 06:20; firefly + ghostfolio + paperless DB dumps and the Paperless export land on /md1400/backup-cold/apps/finance/ on pve (730XD canonical plane). Legacy NAS copies are a transitional mirror only."
-    source: "docs/governance/FINANCE_STACK_BACKUP_RESTORE.md"
+    description: "Firefly, Ghostfolio, Paperless DB/export, and finance manifest land on the md1400 canonical finance plane."
+    source: "ops/archive/bindings/backup.schedule.yaml"
 
-  - id: "mail-archiver-backup"
-    summary: "Mail-archiver app backups (VM 214 communications-stack)"
+  - id: "pve-vzdump-md1400-cold-sync-daily"
+    summary: "pve vzdump cold sync to md1400"
     freq: "DAILY"
-    byhour: 2
-    byminute: 20
-    duration_minutes: 15
-    description: "pg_dump + uploads tar on communications-stack VM 214. Schedule: 02:20 (pg_dump), 02:35 (uploads). Retention: 30d postgres, 14d uploads."
-    source: "ops/bindings/backup.schedule.yaml"
-
-  - id: "media-config-backup"
-    summary: "Media config-state backup (download + streaming)"
-    freq: "DAILY"
-    byhour: 3
-    byminute: 45
-    duration_minutes: 30
-    description: "Create config-state archives for media stacks from /mnt/docker/volumes + /opt/appdata. Payload media paths are excluded."
-    source: "ops/bindings/backup.schedule.yaml"
+    byhour: 8
+    byminute: 30
+    duration_minutes: 180
+    description: "Promote latest successful pve vzdump artifacts from tank-backups into the md1400 shop cold plane."
+    source: "ops/archive/bindings/backup.schedule.yaml"
 
   - id: "backup-monitor-hourly"
-    summary: "Backup monitor + alert dispatch check"
+    summary: "Backup monitor + alert dispatch"
     freq: "HOURLY"
     byminute: 15
     duration_minutes: 5
-    description: "Runs backup.monitor for freshness degradation detection and governed alert intent dispatch."
-    source: "ops/bindings/backup.schedule.yaml"
+    description: "Run backup.monitor for freshness degradation detection and governed alert intent dispatch."
+    source: "ops/archive/bindings/backup.schedule.yaml"
 
-  - id: "media-config-restore-drill"
-    summary: "Media config restore drill (dry-run)"
+  - id: "mail-archiver-restore-drill-monthly"
+    summary: "Mail-archiver restore drill"
     freq: "MONTHLY"
+    bymonthday: 1
+    byhour: 4
+    byminute: 0
+    duration_minutes: 30
+    description: "Monthly dry-run restore drill for communications mail-archiver backup posture."
+    source: "ops/archive/bindings/backup.schedule.yaml"
+
+  - id: "media-config-restore-drill-monthly"
+    summary: "Media config restore drill"
+    freq: "MONTHLY"
+    bymonthday: 1
     byhour: 4
     byminute: 30
     duration_minutes: 20
-    description: "Dry-run restore drill for media config-state class using governed media.backup.restore flow."
-    source: "ops/bindings/backup.schedule.yaml"
+    description: "Dry-run restore drill for media config-state class."
+    source: "ops/archive/bindings/backup.schedule.yaml"
 
-  - id: "tier1-small-state-restore-drill"
-    summary: "Tier1 small-state restore drill (dry-run)"
+  - id: "infisical-restore-drill-quarterly"
+    summary: "Infisical restore drill"
     freq: "MONTHLY"
+    interval: 3
+    bymonthday: 1
     byhour: 5
     byminute: 0
     duration_minutes: 20
-    description: "Quarterly dry-run restore drill for tier1 small-state assets (Infisical anchor)."
-    source: "ops/bindings/backup.schedule.yaml"
-
-  # Offsite sync (binding note):
-  - id: "vzdump-offsite-sync"
-    summary: "Offsite sync: critical vzdump -> NAS"
-    freq: "DAILY"
-    byhour: 9
-    byminute: 0
-    duration_minutes: 60
-    description: "pve:/usr/local/bin/vzdump-offsite-sync.sh (cron 09:00 local). Syncs critical VM backups to NAS over Tailscale."
-    source: "ops/bindings/backup.inventory.yaml"
+    description: "Quarterly dry-run restore drill for tier1 small-state assets anchored on Infisical."
+    source: "ops/archive/bindings/backup.schedule.yaml"

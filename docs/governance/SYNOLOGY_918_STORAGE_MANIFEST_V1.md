@@ -16,10 +16,10 @@ loop: LOOP-BACKUP-PLANE-CONSOLIDATION-730XD-E2E-20260308
 As of **2026-03-08**, the Synology has exactly three active roles:
 
 1. **Business-app grace mirror only** under `/volume1/backups/apps/*`; canonical cold recovery is on `pve:/md1400/backup-cold/apps/...`.
-2. **Home-local generation surface** for `proxmox-home` VM/LXC artifacts under `/volume1/backups/proxmox_backups/dump/`; canonical cold recovery is promoted to `pve:/md1400/backup-cold/vzdump/home/`.
+2. **Canonical home backup surface** for `proxmox-home` VM/LXC artifacts under `/volume1/backups/proxmox_backups/dump/`.
 3. **Home/personal storage host** for Immich, photo archives, media staging, documents, and homelab payloads.
 
-The Synology is **not** the canonical server-backup authority for shop or business workloads. Historical `/volume1/backups/proxmox/vzdump/critical/` residue may remain on disk, but the canonical cold recovery plane now lives on the 730XD under `pve:/md1400/backup-cold/...`.
+The Synology is **not** the canonical server-backup authority for shop or business workloads. Historical `/volume1/backups/proxmox/vzdump/critical/` residue may remain on disk, but the canonical cold recovery plane for the shop environment now lives on the 730XD under `pve:/md1400/backup-cold/...`.
 
 ## Device Snapshot
 
@@ -38,7 +38,7 @@ The Synology is **not** the canonical server-backup authority for shop or busine
 |--------|--------------|---------------------|-----------|
 | `/volume1/backups/apps/*` | Legacy grace mirror only | 730XD `pve:/md1400/backup-cold/apps/*` | Fresh 730XD finance/infra/dev-tools/mint-data/communications artifacts on 2026-03-08 |
 | `/volume1/backups/proxmox/vzdump/critical/` | Historical shop residue only | 730XD `pve:/md1400/backup-cold/vzdump/pve/` | Residual shop artifacts remain on disk; do not treat as active authority |
-| `/volume1/backups/proxmox_backups/dump/` | Home-local generation surface | 730XD `pve:/md1400/backup-cold/vzdump/home/` | Latest `vm-100` artifact `2026-03-08`; latest `lxc-105` artifact present `2026-03-08` |
+| `/volume1/backups/proxmox_backups/dump/` | Canonical home VM/LXC backup surface | Synology | Latest `vm-100` artifact `2026-03-08`; latest `lxc-105` artifact present `2026-03-08` |
 | `/volume1/im2ch`, `/volume1/photo-keepers`, `/volume1/media-staging`, `/volume1/documents`, `/volume1/homelab` | Home/personal canonical data | Synology | Live storage families remain mounted and in use |
 
 ## Business App Backup Mirror
@@ -95,7 +95,7 @@ The Synology remains canonical for home-local backup storage and home/personal d
 
 | Path | Size | Role |
 |------|------|------|
-| `/volume1/backups/proxmox_backups/dump/` | `60G` | Home-local primary backup surface |
+| `/volume1/backups/proxmox_backups/dump/` | `60G` | Home-local canonical backup surface |
 | `/volume1/im2ch/` | `2.3T` | Immich photo library |
 | `/volume1/photo-keepers/` | `1.9T` | Personal photo archive |
 | `/volume1/media-staging/` | `602G` | Media staging |
@@ -109,8 +109,8 @@ Current home backup artifacts:
 
 Interpretation:
 
-- `vm-100` and `lxc-105` remain the active home local-generation exceptions on Synology.
-- Canonical cold recovery for both is promoted into `/md1400/backup-cold/vzdump/home/`; Synology is the local generation surface, not the canonical cold plane.
+- `vm-100` and `lxc-105` remain the active home backup exceptions on Synology.
+- Synology is both the generation surface and the canonical recovery plane for these home artifacts.
 
 ## Deletion / Retention Posture
 
@@ -118,6 +118,6 @@ Do **not** delete historical backups casually. Current operator posture is:
 
 - Keep `/volume1/backups/apps/*` as a short grace mirror only; do not treat it as canonical.
 - Keep `/volume1/backups/proxmox/vzdump/critical/` only as historical residue until a governed cleanup lane retires it.
-- Keep `/volume1/backups/proxmox_backups/dump/` for home local-generation artifacts, with canonical cold copies promoted into md1400.
+- Keep `/volume1/backups/proxmox_backups/dump/` as the canonical home backup surface.
 - Keep home and personal data families on Synology.
 - Delete or retire stale legacy roots only through a separate governed cleanup lane with retention proof.

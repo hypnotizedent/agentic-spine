@@ -85,6 +85,9 @@ for i in $(seq 0 $((EVENT_COUNT - 1))); do
   eid="$(yq -r ".events[$i].id // \"event-$i\"" "$BINDING")"
   summary="$(yq -r ".events[$i].summary // \"Backup $i\"" "$BINDING")"
   freq="$(yq -r ".events[$i].freq // \"DAILY\"" "$BINDING")"
+  interval="$(yq -r ".events[$i].interval // 1" "$BINDING")"
+  byday="$(yq -r ".events[$i].byday // [] | .[]" "$BINDING" 2>/dev/null | paste -sd, -)"
+  bymonthday="$(yq -r ".events[$i].bymonthday // \"\"" "$BINDING")"
   byhour="$(yq -r ".events[$i].byhour // 0" "$BINDING")"
   byminute="$(yq -r ".events[$i].byminute // 0" "$BINDING")"
   dur="$(yq -r ".events[$i].duration_minutes // 60" "$BINDING")"
@@ -117,7 +120,17 @@ for i in $(seq 0 $((EVENT_COUNT - 1))); do
   ics+="DTSTAMP:${DTSTAMP}\r\n"
   ics+="DTSTART;TZID=${TZ_NAME}:${dtstart}\r\n"
   ics+="DTEND;TZID=${TZ_NAME}:${dtend}\r\n"
-  ics+="RRULE:FREQ=${freq}\r\n"
+  rrule="FREQ=${freq}"
+  if [[ -n "${interval:-}" && "${interval:-}" != "1" && "${interval:-}" != "null" ]]; then
+    rrule="${rrule};INTERVAL=${interval}"
+  fi
+  if [[ -n "${byday:-}" && "${byday:-}" != "null" ]]; then
+    rrule="${rrule};BYDAY=${byday}"
+  fi
+  if [[ -n "${bymonthday:-}" && "${bymonthday:-}" != "null" ]]; then
+    rrule="${rrule};BYMONTHDAY=${bymonthday}"
+  fi
+  ics+="RRULE:${rrule}\r\n"
   ics+="SUMMARY:${summary}\r\n"
   if [[ -n "$folded_desc" ]]; then
     ics+="${folded_desc}"

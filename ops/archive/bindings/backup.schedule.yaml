@@ -8,17 +8,57 @@ scope: backup-schedule-v1
 timezone: "America/New_York"
 
 jobs:
-  - id: vm-214-vzdump-daily
+  - id: pve-vzdump-daily
     enabled: true
     kind: vm-vzdump
-    stack: communications-stack
+    stack: backup
     host: pve
     schedule_cron: "0 2 * * *"
     schedule_class: daily-primary-est
-    inventory_target: vm-214-communications-stack-primary
-    vm_lifecycle_backup_target: vm-214-communications-stack-primary
+    inventory_targets:
+      - vm-202-primary
+      - vm-203-primary
+      - vm-204-infra-core-primary
+      - vm-205-observability-primary
+      - vm-206-dev-tools-primary
+      - vm-207-ai-consolidation-primary
+      - vm-209-download-stack-primary
+      - vm-210-streaming-stack-primary
+      - vm-211-finance-stack-primary
+      - vm-212-mint-data-primary
+      - vm-213-mint-apps-primary
+      - vm-214-communications-stack-primary
+      - vm-215-surveillance-stack-primary
+      - lxc-220-archive-smb-primary
     retention: keep-last=2
-    evidence_ref: ops/bindings/backup.inventory.yaml
+    evidence_ref: /etc/pve/jobs.cfg
+    note: "Canonical pve vzdump job backup-ronny-daily-2026-01-22. Docker-host VM 200 is excluded from active md1400 cold-sync governance."
+
+  - id: backup-home-p0-daily
+    enabled: true
+    kind: vm-vzdump
+    stack: home
+    host: proxmox-home
+    schedule_cron: "0 3 * * *"
+    schedule_class: daily-home-primary-est
+    inventory_target: home-vm-100-ha-primary
+    vm_lifecycle_backup_target: home-vm-100-ha-primary
+    retention: keep-last=3
+    evidence_ref: /etc/pve/jobs.cfg
+    note: "Canonical home Home Assistant vzdump job to Synology-backed storage."
+
+  - id: backup-home-p2-weekly
+    enabled: true
+    kind: vm-vzdump
+    stack: home
+    host: proxmox-home
+    schedule_cron: "0 4 * * 0"
+    schedule_class: weekly-est
+    inventory_target: home-lxc-105-pihole-primary
+    vm_lifecycle_backup_target: home-lxc-105-pihole-primary
+    retention: keep-last=2
+    evidence_ref: /etc/pve/jobs.cfg
+    note: "Canonical home Pi-hole vzdump job to Synology-backed storage."
 
   - id: mail-archiver-db-pgdump-daily
     enabled: true
@@ -117,20 +157,6 @@ jobs:
     script_ref: /usr/local/bin/vzdump-md1400-cold-sync.sh
     retention_days: 2
     note: "Promotes latest successful pve vzdump artifacts from tank-backups into the md1400 canonical cold plane. Runtime should execute at low IO priority (ionice/nice)."
-
-  - id: home-vzdump-md1400-cold-sync-daily
-    enabled: true
-    kind: artifact-sync
-    stack: backup
-    host: pve
-    schedule_cron: "30 5 * * *"
-    schedule_class: daily-primary-est
-    script_ref: /usr/local/bin/home-vzdump-md1400-pull.sh
-    retention_days: 3
-    inventory_targets:
-      - home-vm-100-ha-primary
-      - home-lxc-105-pihole-primary
-    note: "Runs on pve and pulls the latest proxmox-home HA and Pi-hole vzdump artifacts into the md1400 canonical cold plane."
 
   - id: backup-monitor-hourly
     enabled: true
