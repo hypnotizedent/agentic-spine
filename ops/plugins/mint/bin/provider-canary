@@ -80,6 +80,9 @@ PAYMENT_PORT="$(mint_service_port payment)"
 [[ -n "$SHIPPING_PORT" ]] || stop "missing shipping port"
 [[ -n "$PAYMENT_PORT" ]] || stop "missing payment port"
 
+SHIPPING_BASE="http://${APP_PROBE_HOST}:${SHIPPING_PORT}"
+PAYMENT_BASE="http://${APP_PROBE_HOST}:${PAYMENT_PORT}"
+
 SSH_OPTS=(-o ConnectTimeout=6 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
 
 mkdir -p "$RECEIPTS_DIR"
@@ -88,11 +91,6 @@ container_env_value() {
   local container="$1" key="$2"
   ssh "${SSH_OPTS[@]}" "${APP_USER}@${APP_SSH_HOST}" \
     "docker inspect $container --format '{{range .Config.Env}}{{println .}}{{end}}' | awk -F= -v K='$key' '\$1==K{sub(\$1\"=\",\"\"); print; exit}'"
-}
-
-app_http_url() {
-  local port="$1" route="$2"
-  printf 'http://%s:%s%s\n' "$APP_PROBE_HOST" "$port" "$route"
 }
 
 json_escape() {
@@ -132,7 +130,7 @@ run_shipping_canary() {
     -H "x-api-key: $api_key" \
     -H 'content-type: application/json' \
     -d '{"to_address":{"name":"Mint Canary","street1":"805 SE 1st Way","street2":"Ste 5","city":"Deerfield Beach","state":"FL","zip":"33441","country":"US","phone":"5619005432"},"parcel":{"weight_oz":4,"length":9,"width":6,"height":1}}' \
-    "$(app_http_url "$SHIPPING_PORT" "/api/v1/shipping/rates")")"
+    "${SHIPPING_BASE}/api/v1/shipping/rates")"
 
   local shipment_id rate_id rate_count
   shipment_id="$(printf '%s' "$rate_json" | jq -r '.shipmentId // ""')"
@@ -147,7 +145,7 @@ run_shipping_canary() {
     -H "x-api-key: $api_key" \
     -H 'content-type: application/json' \
     -d "$(jq -cn --arg sid "$shipment_id" --arg rid "$rate_id" '{shipmentId:$sid, rateId:$rid, createdBy:"mint-provider-canary"}')" \
-    "$(app_http_url "$SHIPPING_PORT" "/api/v1/shipping/labels")")"
+    "${SHIPPING_BASE}/api/v1/shipping/labels")"
 
   local label_id tracking_number
   label_id="$(printf '%s' "$label_json" | jq -r '.id // empty')"
@@ -158,10 +156,10 @@ run_shipping_canary() {
   local refund_json history_json
   refund_json="$(curl -sS -m 20 -X POST \
     -H "x-api-key: $api_key" \
-    "$(app_http_url "$SHIPPING_PORT" "/api/v1/shipping/${label_id}/refund")")"
+    "${SHIPPING_BASE}/api/v1/shipping/${label_id}/refund")"
   history_json="$(curl -sS -m 20 \
     -H "x-api-key: $api_key" \
-    "$(app_http_url "$SHIPPING_PORT" "/api/v1/shipping/history?page=1&limit=1")")"
+    "${SHIPPING_BASE}/api/v1/shipping/history?page=1&limit=1")"
 
   local latest_tracking latest_refund
   latest_tracking="$(printf '%s' "$history_json" | jq -r '.labels[0].tracking_number // empty')"
@@ -200,7 +198,7 @@ run_payment_canary() {
     -H "x-api-key: $api_key" \
     -H 'content-type: application/json' \
     -d "$(jq -cn --arg oid "$order_id" '{order_id:$oid, amount_cents:100, currency:"usd", customer_email:"ops+mint-canary@mintprints.com", payment_type:"deposit", description:"Mint Stripe canary"}')" \
-    "$(app_http_url "$PAYMENT_PORT" "/api/v1/payments/checkout-session")")"
+    "${PAYMENT_BASE}/api/v1/payments/checkout-session")"
 
   local session_id
   session_id="$(printf '%s' "$checkout_json" | jq -r '.checkout_session_id // empty')"
@@ -209,7 +207,7 @@ run_payment_canary() {
   local session_json
   session_json="$(curl -sS -m 20 \
     -H "x-api-key: $api_key" \
-    "$(app_http_url "$PAYMENT_PORT" "/api/v1/payments/checkout-session/${session_id}")")"
+    "${PAYMENT_BASE}/api/v1/payments/checkout-session/${session_id}")"
   [[ "$(printf '%s' "$session_json" | jq -r '.id // empty')" == "$session_id" ]] || stop "payment canary failed: checkout session fetch mismatch"
 
   local ts event_id payload sig header webhook_json db_json
@@ -223,7 +221,7 @@ run_payment_canary() {
     -H 'content-type: application/json' \
     -H "stripe-signature: $header" \
     --data-binary "$payload" \
-    "$(app_http_url "$PAYMENT_PORT" "/api/v1/payments/webhooks/stripe")")"
+    "${PAYMENT_BASE}/api/v1/payments/webhooks/stripe")"
   [[ "$(printf '%s' "$webhook_json" | jq -r '.received // false')" == "true" ]] || stop "payment canary failed: webhook not acknowledged"
 
   db_json="$(ssh "${SSH_OPTS[@]}" "${APP_USER}@${APP_SSH_HOST}" "docker exec -e SESSION_ID='$session_id' -i payment node -e \"const pg=require('pg');(async()=>{const c=new pg.Client({connectionString:process.env.DATABASE_URL});await c.connect();const r=await c.query('select order_id,status,stripe_checkout_session_id from payment_records where stripe_checkout_session_id = \\\$1 order by created_at desc limit 1',[process.env.SESSION_ID]);console.log(JSON.stringify(r.rows[0]||null));await c.end();})().catch(e=>{console.error(e);process.exit(1)})\"")"
