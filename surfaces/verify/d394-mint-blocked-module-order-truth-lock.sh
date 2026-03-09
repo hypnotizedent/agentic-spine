@@ -72,16 +72,21 @@ if [[ -f "$orders_readme" ]]; then
   fi
 fi
 
-# Rule 5: digital-proofs must acknowledge order_line_id and artwork_binding in contract
-# ProofJob input must use canonical order_line_id, not raw folder paths
+# Rule 5: digital-proofs must acknowledge canonical bindings as optional (not required before order truth exists)
+# ProofJob must use proof_scope_ref as intake-adjacent anchor, canonical bindings optional
 proofs_spec="$MINT_ROOT/digital-proofs/SPEC.md"
 if [[ -f "$proofs_spec" ]]; then
-  # Verify ProofJob contract mentions order_id (already present)
-  rg -q '"order_id":\s*"string"' "$proofs_spec" || fail "digital-proofs SPEC.md ProofJob missing canonical order_id field"
+  # Verify proof_scope_ref exists as the intake-adjacent anchor
+  rg -q 'proof_scope_ref' "$proofs_spec" || fail "digital-proofs SPEC.md must use proof_scope_ref as intake-adjacent anchor (not freeform order_id)"
 
-  # Verify line_item field acknowledges canonical naming (should be order_line_id or acknowledge artwork_binding)
-  if ! rg -q 'order_line_id|artwork_binding' "$proofs_spec"; then
-    fail "digital-proofs SPEC.md must acknowledge order_line_id or artwork_binding (cannot rely on folder path heuristics)"
+  # Verify canonical bindings acknowledged but optional (in bindings section)
+  if ! rg -q 'order_id.*order_line_id.*artwork_binding_id' "$proofs_spec"; then
+    fail "digital-proofs SPEC.md must acknowledge canonical bindings (order_id, order_line_id, artwork_binding_id) as optional fields"
+  fi
+
+  # Verify it doesn't require order_id before order truth exists
+  if rg -q '"order_id":\s*"(string|uuid)"[^?]' "$proofs_spec"; then
+    fail "digital-proofs SPEC.md must not require order_id before canonical order truth exists (use proof_scope_ref, make order_id optional)"
   fi
 fi
 
