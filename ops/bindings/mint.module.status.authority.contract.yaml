@@ -1,0 +1,128 @@
+# Status: authoritative
+# Last verified: 2026-03-09
+# Scope: mint-module-status-capture-authority
+
+version: 1
+updated_at: "2026-03-09"
+owner: "@ronny"
+status: authoritative
+scope: mint-module-status-capture-authority
+
+contracts:
+  intake_lifecycle: ops/bindings/intake.lifecycle.contract.yaml
+  intake_envelope_schema: ops/bindings/intake.envelope.schema.yaml
+  master_registry: ops/bindings/master.inventory.registry.yaml
+  projection_contract: ops/bindings/domain.projection.contract.yaml
+  vm_lifecycle: ops/bindings/vm.lifecycle.yaml
+  services_health: ops/bindings/services.health.yaml
+  sequence_contract: ops/bindings/mint.module.sequence.contract.yaml
+
+authority:
+  master_row_id: authority.mint.module.status
+  projection_id: projection.mint.module.status
+  projection_path: ops/bindings/mint.module.status.projected.yaml
+  generator_capability: mint.module.status.projection.build
+  intake_root: mailroom/outbox/intake
+  intake_file_pattern: ITK-YYYYMMDD-mint-module-status-*.yaml
+
+runtime_inventory:
+  app_plane_vm_id: 213
+  data_plane_vm_id: 212
+  app_plane_runtime_source: ops/bindings/vm.lifecycle.yaml
+  data_plane_runtime_source: ops/bindings/vm.lifecycle.yaml
+  expected_runtime_surfaces:
+    - mint.deploy.status
+    - mint.modules.health
+    - mint.live.baseline.status
+    - mint.runtime.proof
+
+module_policy:
+  auth:
+    route_exposure: internal_api
+    health_component: auth
+    proof_checks: []
+  files-api:
+    route_exposure: internal_api
+    health_component: files-api
+    proof_checks:
+      - artwork.upload_prepare
+  quote-page:
+    route_exposure: public_form
+    health_component: quote-page
+    proof_checks: []
+  order-intake:
+    route_exposure: internal_api
+    health_component: order-intake
+    proof_checks: []
+  finance-adapter:
+    route_exposure: internal_adapter
+    health_component: finance-adapter
+    proof_checks: []
+  pricing:
+    route_exposure: internal_api
+    health_component: pricing
+    proof_checks:
+      - pricing.health
+  suppliers:
+    route_exposure: internal_api
+    health_component: suppliers
+    proof_checks:
+      - suppliers.search
+      - suppliers.stock
+  shipping:
+    route_exposure: internal_api
+    health_component: shipping
+    proof_checks:
+      - shipping.env
+      - shipping.shop_address
+      - shipping.history
+      - shipping.labels.invalid
+      - shipping.easypost.invalid
+  payment:
+    route_exposure: provider_webhook
+    health_component: payment
+    proof_checks:
+      - payment.env
+      - payment.health
+      - payment.checkout.invalid
+      - payment.stripe.invalid
+  shopify-module:
+    route_exposure: inbound_channel_bridge
+    health_component: null
+    proof_checks: []
+  digital-proofs:
+    route_exposure: internal_worker
+    health_component: null
+    proof_checks: []
+
+data_plane_policy:
+  mint-modules-minio:
+    component_id: minio
+    health_component: minio
+  mint-modules-postgres:
+    component_id: postgres
+    health_component: postgres
+  mint-modules-redis:
+    component_id: redis
+    health_component: null
+
+baseline_rows:
+  - probe_target_green
+  - live_health_green
+  - contract_parity_green
+  - agent_smoke_green
+  - queue_marker_green
+
+capture_policy:
+  default_owner_agent: flying-dutchman
+  default_requested_by: "@ronny"
+  default_intake_mode: governed_capability
+  emit_intake_by_default: true
+  authoritative_status_surface: ops/bindings/mint.module.status.projected.yaml
+  do_not_use_for_operational_truth:
+    - /Users/ronnyworks/code/mint-modules/docs/PLANNING/
+  guidance: >
+    Operational Mint runtime/session captures must be refreshed through
+    mint.module.status.projection.build so receipts, intake lineage, and the
+    generated projection stay aligned. Freeform planning docs may exist for
+    feature design, but they are never runtime/status authority.

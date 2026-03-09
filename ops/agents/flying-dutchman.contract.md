@@ -25,6 +25,7 @@ Flying Dutchman is the top-level Mint orchestrator. It owns cross-repo coordinat
 ## Responsibilities
 
 - Run Mint-wide status, health, ingress proof, public canary, verify, and deploy surfaces.
+- Own the canonical Mint runtime status projection and capture path in Spine.
 - Own Mint deploy/topology/orchestration language in Spine.
 - Route operator work to the correct employee:
   - Morpheus for customer/operator routing
@@ -50,12 +51,14 @@ Those belong to Morpheus, Fin, Artie, or the underlying Mint modules.
 |---------|-----------|
 | Topology / routing / worker map | `ops/bindings/agents.registry.yaml`, `ops/bindings/terminal.role.contract.yaml` |
 | Mint verify / deploy / health | `ops/plugins/mint/` |
+| Mint status projection / capture lineage | `ops/bindings/mint.module.status.projected.yaml`, `ops/bindings/mint.module.status.authority.contract.yaml` |
 | Worker catalog projection | `ops/bindings/terminal.worker.catalog.yaml` |
 | Workbench launcher | `~/code/workbench/scripts/root/operator/flying-dutchman.sh` |
 
 ## Primary Commands
 
 - `./bin/ops cap run mint.live.baseline.status`
+- `./bin/ops cap run mint.module.status.projection.build`
 - `./bin/ops cap run verify.pack.run mint`
 - `./bin/ops cap run mint.modules.health`
 - `./bin/ops cap run mint.runtime.proof`

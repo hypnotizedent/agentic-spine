@@ -58,6 +58,7 @@ Those belong to Fin, Artie, Flying Dutchman, or the underlying Mint modules. Act
 | Operator/runtime governance | `docs/governance/SPINE.md` |
 | Agent identity + routing | `ops/bindings/agents.registry.yaml` |
 | Mint runtime authority | `~/code/mint-modules/docs/CANONICAL/ACTIVE_AUTHORITY.md` |
+| Mint runtime status capture/projection | `ops/bindings/mint.module.status.projected.yaml` via `./bin/ops cap run mint.module.status.projection.build` |
 | Mint storage/operator baseline | `~/code/mint-modules/docs/CANONICAL/MINT_STORAGE_RUNTIME_CONTRACT.yaml` |
 | Customer resolve | `~/code/mint-modules/customers/scripts/customer-resolve.ts` |
 | Archive preview/move | `~/code/mint-modules/artwork/scripts/archive-assistant.ts` |
@@ -73,6 +74,7 @@ Those belong to Fin, Artie, Flying Dutchman, or the underlying Mint modules. Act
 Primary governed Spine path remains capability execution with receipts:
 
 - `mint.modules.health`
+- `mint.module.status.projection.build`
 - `mint.seeds.query`
 - `mint.intake.validate`
 
@@ -137,6 +139,7 @@ When Morpheus runs a tool, its closeout must report the underlying receipt/ledge
 | Tool | Safety | Description |
 |------|--------|-------------|
 | `mint.modules.health` | read-only | Health probe for mint app/data endpoints |
+| `mint.module.status.projection.build` | mutating | Refresh governed Mint runtime status projection + canonical ITK capture |
 | `mint.seeds.query` | read-only | Query artwork seed records on mint-data |
 | `mint.intake.validate` | read-only | Validate intake payload against order-intake contract |
 

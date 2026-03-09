@@ -1,0 +1,576 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+from pathlib import Path
+import re
+import subprocess
+import sys
+from typing import Any
+from urllib.parse import urlparse
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+OPS_BIN = ROOT / "bin" / "ops"
+CONTRACT_PATH = ROOT / "ops/bindings/mint.module.status.authority.contract.yaml"
+VM_LIFECYCLE_PATH = ROOT / "ops/bindings/vm.lifecycle.yaml"
+SERVICES_HEALTH_PATH = ROOT / "ops/bindings/services.health.yaml"
+SEQUENCE_CONTRACT_PATH = ROOT / "ops/bindings/mint.module.sequence.contract.yaml"
+
+
+HEALTH_ENDPOINT_ALIASES = {
+    "files-api": "files-api-v2",
+    "quote-page": "quote-page-v2",
+    "order-intake": "order-intake-v2",
+    "finance-adapter": "finance-adapter",
+    "auth": "auth-v1",
+    "pricing": "pricing-v2",
+    "suppliers": "suppliers-v2",
+    "shipping": "shipping-v2",
+    "payment": "payment-v2",
+    "minio": "mint-modules-minio",
+}
+
+
+class Fail(Exception):
+    pass
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"mint.module.status.projection.build FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_utc_iso() -> str:
+    return now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:  # pragma: no cover - defensive
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def rel(path: Path) -> str:
+    return str(path.resolve().relative_to(ROOT))
+
+
+def ensure_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="module-status-projection-build")
+    parser.add_argument(
+        "--no-intake",
+        action="store_true",
+        help="Refresh projection only; skip ITK envelope emission.",
+    )
+    parser.add_argument(
+        "--owner-agent",
+        default="",
+        help="Override owner_agent written into the ITK envelope.",
+    )
+    parser.add_argument(
+        "--requested-by",
+        default="",
+        help="Override requested_by written into the ITK envelope.",
+    )
+    return parser.parse_args()
+
+
+def run_capability(capability_id: str) -> dict[str, Any]:
+    if not OPS_BIN.is_file():
+        fail(f"missing ops runner: {OPS_BIN}", exit_code=2)
+
+    proc = subprocess.run(
+        [str(OPS_BIN), "cap", "run", capability_id],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    output = f"{proc.stdout}{proc.stderr}"
+    if proc.returncode != 0:
+        fail(f"{capability_id} failed (rc={proc.returncode})\n{output}")
+
+    run_key_match = re.search(r"^Run Key:\s+(\S+)\s*$", output, re.MULTILINE)
+    receipt_match = re.search(r"^Receipt:\s+(\S+)\s*$", output, re.MULTILINE)
+    output_match = re.search(r"^Output:\s+(\S+)\s*$", output, re.MULTILINE)
+    if not run_key_match or not receipt_match:
+        fail(f"{capability_id} output missing run key/receipt path")
+
+    receipt_path = Path(receipt_match.group(1)).resolve()
+    if not receipt_path.is_file():
+        fail(f"{capability_id} receipt missing at {receipt_path}")
+
+    output_path = Path(output_match.group(1)).resolve() if output_match else receipt_path.with_name("output.txt")
+    if not output_path.is_file():
+        fail(f"{capability_id} output missing at {output_path}")
+
+    return {
+        "capability_id": capability_id,
+        "run_key": run_key_match.group(1),
+        "receipt_path": receipt_path,
+        "receipt_ref": rel(receipt_path),
+        "output_path": output_path,
+        "output_text": output_path.read_text(encoding="utf-8"),
+    }
+
+
+def parse_port_from_endpoint(service_alias: str, endpoints_by_id: dict[str, dict[str, Any]]) -> int | None:
+    endpoint_id = HEALTH_ENDPOINT_ALIASES.get(service_alias)
+    if not endpoint_id:
+        return None
+    endpoint = endpoints_by_id.get(endpoint_id)
+    if not isinstance(endpoint, dict):
+        return None
+    url = str(endpoint.get("url") or "").strip()
+    if not url:
+        return None
+    parsed = urlparse(url)
+    return parsed.port
+
+
+def vm_record(doc: dict[str, Any], vm_id: int) -> dict[str, Any]:
+    for row in doc.get("vms") or []:
+        if isinstance(row, dict) and int(row.get("id") or 0) == vm_id:
+            return row
+    fail(f"vm.lifecycle missing vm_id={vm_id}")
+
+
+def parse_deploy_status(text: str) -> dict[str, dict[str, str]]:
+    containers: dict[str, dict[str, str]] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if not line or line.startswith("STACK") or line.startswith("===") or line.startswith("summary:") or line.startswith("status:"):
+            continue
+        match = re.match(r"^(?P<stack>\S+)\s+(?P<container>\S+)\s+(?P<state>\S+)\s+(?P<status>.+?)\s{2,}(?P<image>\S+)$", line)
+        if not match:
+            continue
+        container = match.group("container")
+        status_text = match.group("status").strip()
+        health = "unknown"
+        health_match = re.search(r"\(([^)]+)\)", status_text)
+        if health_match:
+            health = health_match.group(1).strip()
+        containers[container] = {
+            "stack": match.group("stack"),
+            "container": container,
+            "state": match.group("state"),
+            "status_text": status_text,
+            "image": match.group("image"),
+            "docker_health": health,
+        }
+    return containers
+
+
+def parse_table_rows(text: str, header: str) -> dict[str, dict[str, str]]:
+    rows: dict[str, dict[str, str]] = {}
+    started = False
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if line.startswith(header):
+            started = True
+            continue
+        if not started:
+            continue
+        if not line:
+            continue
+        if line.startswith("status:"):
+            break
+        parts = re.split(r"\s{2,}", line.strip(), maxsplit=3)
+        if len(parts) < 3:
+            continue
+        row_id = parts[0]
+        rows[row_id] = {
+            "id": row_id,
+            "state": parts[1],
+            "detail_a": parts[2],
+            "detail_b": parts[3] if len(parts) > 3 else "",
+        }
+    return rows
+
+
+def row_detail(row: dict[str, str] | None) -> str:
+    if not row:
+        return ""
+    return row.get("detail_b") or row.get("detail_a") or ""
+
+
+def parse_baseline(text: str) -> tuple[dict[str, dict[str, str]], str]:
+    rows = parse_table_rows(text, "CHECK")
+    auth_state = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        match = re.search(r"auth_state=([A-Za-z0-9_-]+)", line)
+        if match:
+            auth_state = match.group(1)
+    return rows, auth_state
+
+
+def projection_snapshot(doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    modules = doc.get("app_plane_modules") or []
+    out: dict[str, dict[str, Any]] = {}
+    if not isinstance(modules, list):
+        return out
+    for row in modules:
+        if not isinstance(row, dict):
+            continue
+        module_id = str(row.get("id") or "").strip()
+        if module_id:
+            out[module_id] = row
+    return out
+
+
+def status_signature(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "runtime_state": row.get("runtime_state"),
+        "docker_health": row.get("docker_health"),
+        "health_probe_state": row.get("health_probe_state"),
+        "proof_state": row.get("proof_state"),
+    }
+
+
+def stable_intake_path(intake_root: Path, intake_id: str) -> Path:
+    candidate = intake_root / f"{intake_id}.yaml"
+    if not candidate.exists():
+        return candidate
+    suffix = 2
+    while True:
+        alt = intake_root / f"{intake_id}-{suffix}.yaml"
+        if not alt.exists():
+            return alt
+        suffix += 1
+
+
+def yaml_dump(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=False)
+
+
+def main() -> None:
+    args = parse_args()
+
+    contract = load_yaml(CONTRACT_PATH)
+    vm_doc = load_yaml(VM_LIFECYCLE_PATH)
+    health_doc = load_yaml(SERVICES_HEALTH_PATH)
+    sequence_doc = load_yaml(SEQUENCE_CONTRACT_PATH)
+
+    projection_path = (ROOT / contract["authority"]["projection_path"]).resolve()
+    intake_root = (ROOT / contract["authority"]["intake_root"]).resolve()
+    ensure_dir(projection_path)
+    intake_root.mkdir(parents=True, exist_ok=True)
+
+    endpoints_by_id = {
+        str(row.get("id") or "").strip(): row
+        for row in (health_doc.get("endpoints") or [])
+        if isinstance(row, dict) and str(row.get("id") or "").strip()
+    }
+
+    app_vm = vm_record(vm_doc, int(contract["runtime_inventory"]["app_plane_vm_id"]))
+    data_vm = vm_record(vm_doc, int(contract["runtime_inventory"]["data_plane_vm_id"]))
+    module_policy = contract.get("module_policy") or {}
+    data_plane_policy = contract.get("data_plane_policy") or {}
+    baseline_expected_rows = list(contract.get("baseline_rows") or [])
+
+    receipt_chain = [
+        run_capability(cap_id)
+        for cap_id in (contract["runtime_inventory"]["expected_runtime_surfaces"] or [])
+    ]
+    receipt_by_cap = {row["capability_id"]: row for row in receipt_chain}
+
+    deploy_rows = parse_deploy_status(receipt_by_cap["mint.deploy.status"]["output_text"])
+    health_rows = parse_table_rows(receipt_by_cap["mint.modules.health"]["output_text"], "COMPONENT")
+    proof_rows = parse_table_rows(receipt_by_cap["mint.runtime.proof"]["output_text"], "CHECK")
+    baseline_rows, baseline_auth_state = parse_baseline(receipt_by_cap["mint.live.baseline.status"]["output_text"])
+
+    previous_projection: dict[str, Any] = {}
+    if projection_path.is_file():
+        previous_projection = load_yaml(projection_path)
+    previous_modules = projection_snapshot(previous_projection)
+    previous_baseline = previous_projection.get("baseline") if isinstance(previous_projection, dict) else {}
+    previous_generated_at = str(previous_projection.get("generated_at_utc") or "").strip() if isinstance(previous_projection, dict) else ""
+    previous_latest_intake_ref = (
+        str(previous_projection.get("latest_intake_ref") or "").strip()
+        if isinstance(previous_projection, dict)
+        else ""
+    )
+
+    app_plane_modules: list[dict[str, Any]] = []
+    changed_modules: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    running_modules = 0
+    health_ok = 0
+    proof_pass = 0
+
+    for service_id in app_vm.get("services") or []:
+        module_id = str(service_id).strip()
+        policy = module_policy.get(module_id) or {}
+        deploy = deploy_rows.get(module_id)
+        health_component = policy.get("health_component")
+        health_row = health_rows.get(health_component) if health_component else None
+        proof_checks = list(policy.get("proof_checks") or [])
+        proof_items = [
+            {
+                "id": check_id,
+                "state": (proof_rows.get(check_id) or {}).get("state", "UNKNOWN"),
+                "detail": row_detail(proof_rows.get(check_id)),
+            }
+            for check_id in proof_checks
+        ]
+        proof_state = "not_applicable"
+        if proof_items:
+            proof_state = "PASS" if all(item["state"] == "PASS" for item in proof_items) else "FAIL"
+
+        row = {
+            "id": module_id,
+            "route_exposure": policy.get("route_exposure", "unspecified"),
+            "vm_id": int(app_vm.get("id") or 0),
+            "vm_host": str(app_vm.get("hostname") or "").strip(),
+            "runtime_state": (deploy or {}).get("state", "absent"),
+            "docker_status": (deploy or {}).get("status_text", "not_found_in_deploy_status"),
+            "docker_health": (deploy or {}).get("docker_health", "unknown"),
+            "image": (deploy or {}).get("image", ""),
+            "port": parse_port_from_endpoint(str(health_component), endpoints_by_id) if health_component else None,
+            "health_probe_component": health_component,
+            "health_probe_state": (health_row or {}).get("state", "UNPROBED" if not health_component else "MISSING"),
+            "health_probe_note": row_detail(health_row),
+            "proof_state": proof_state,
+            "proof_checks": proof_items,
+        }
+        if row["runtime_state"] == "running":
+            running_modules += 1
+        if row["health_probe_state"] == "OK":
+            health_ok += 1
+        if row["proof_state"] == "PASS":
+            proof_pass += 1
+        if row["runtime_state"] == "absent":
+            warnings.append(f"runtime module absent from deploy surface: {module_id}")
+        if health_component and not health_row:
+            warnings.append(f"health probe missing from modules.health output: {module_id}")
+
+        previous_row = previous_modules.get(module_id)
+        if previous_row and status_signature(previous_row) != status_signature(row):
+            changed_modules.append(
+                {
+                    "id": module_id,
+                    "before": status_signature(previous_row),
+                    "after": status_signature(row),
+                }
+            )
+        elif not previous_row:
+            changed_modules.append(
+                {
+                    "id": module_id,
+                    "before": "missing",
+                    "after": status_signature(row),
+                }
+            )
+
+        app_plane_modules.append(row)
+
+    data_plane_components: list[dict[str, Any]] = []
+    for service_id in data_vm.get("services") or []:
+        component_id = str(service_id).strip()
+        policy = data_plane_policy.get(component_id) or {}
+        canonical_component = policy.get("component_id", component_id)
+        deploy = deploy_rows.get(component_id)
+        health_component = policy.get("health_component")
+        health_row = health_rows.get(health_component) if health_component else None
+        row = {
+            "id": canonical_component,
+            "service_id": component_id,
+            "vm_id": int(data_vm.get("id") or 0),
+            "vm_host": str(data_vm.get("hostname") or "").strip(),
+            "runtime_state": (deploy or {}).get("state", "absent"),
+            "docker_status": (deploy or {}).get("status_text", "not_found_in_deploy_status"),
+            "docker_health": (deploy or {}).get("docker_health", "unknown"),
+            "image": (deploy or {}).get("image", ""),
+            "health_probe_component": health_component,
+            "health_probe_state": (health_row or {}).get("state", "UNPROBED" if not health_component else "MISSING"),
+            "health_probe_note": row_detail(health_row),
+            "port": parse_port_from_endpoint(str(health_component), endpoints_by_id) if health_component else None,
+        }
+        data_plane_components.append(row)
+
+    baseline_rows_projection = []
+    changed_baseline_rows: list[dict[str, Any]] = []
+    previous_baseline_checks = {}
+    if isinstance(previous_baseline, dict):
+        for row in previous_baseline.get("checks") or []:
+            if isinstance(row, dict) and row.get("id"):
+                previous_baseline_checks[str(row["id"])] = row
+
+    for row_id in baseline_expected_rows:
+        row = baseline_rows.get(row_id) or {"state": "MISSING", "detail_b": ""}
+        baseline_entry = {
+            "id": row_id,
+            "state": row.get("state", "MISSING"),
+            "detail": row_detail(row),
+        }
+        previous_row = previous_baseline_checks.get(row_id)
+        if previous_row and previous_row.get("state") != baseline_entry["state"]:
+            changed_baseline_rows.append(
+                {
+                    "id": row_id,
+                    "before": previous_row.get("state"),
+                    "after": baseline_entry["state"],
+                }
+            )
+        elif not previous_row:
+            changed_baseline_rows.append(
+                {
+                    "id": row_id,
+                    "before": "missing",
+                    "after": baseline_entry["state"],
+                }
+            )
+        baseline_rows_projection.append(baseline_entry)
+
+    explicit_auth_state = (
+        baseline_auth_state
+        or str((sequence_doc.get("auth_module") or {}).get("state") or "").strip()
+        or "unknown"
+    )
+    baseline_status = "green" if all(row["state"] == "GREEN" for row in baseline_rows_projection) else "red"
+
+    summary = {
+        "runtime_modules_expected": len(app_plane_modules),
+        "runtime_modules_running": running_modules,
+        "http_health_components_total": len([row for row in app_plane_modules if row.get("health_probe_component")])
+        + len([row for row in data_plane_components if row.get("health_probe_component")]),
+        "http_health_components_ok": health_ok
+        + len([row for row in data_plane_components if row.get("health_probe_state") == "OK"]),
+        "runtime_proof_checks_total": len(proof_rows),
+        "runtime_proof_checks_pass": len([row for row in proof_rows.values() if row.get("state") == "PASS"]),
+        "baseline_checks_total": len(baseline_rows_projection),
+        "baseline_checks_green": len([row for row in baseline_rows_projection if row.get("state") == "GREEN"]),
+        "baseline_status": baseline_status,
+        "projection_warnings": len(warnings),
+    }
+
+    projection_generated_at = now_utc_iso()
+    projection_doc = {
+        "projection_of": rel(CONTRACT_PATH),
+        "authority_state": "projection",
+        "status": "generated",
+        "generated_at_utc": projection_generated_at,
+        "source_capability": "mint.module.status.projection.build",
+        "latest_intake_ref": previous_latest_intake_ref or None,
+        "source_receipts": [
+            {
+                "capability_id": row["capability_id"],
+                "run_key": row["run_key"],
+                "receipt_ref": row["receipt_ref"],
+            }
+            for row in receipt_chain
+        ],
+        "summary": summary,
+        "baseline": {
+            "state": baseline_status,
+            "auth_state": explicit_auth_state,
+            "checks": baseline_rows_projection,
+        },
+        "app_plane_modules": app_plane_modules,
+        "data_plane_components": data_plane_components,
+        "runtime_proof_checks": [
+            {
+                "id": row_id,
+                "state": row["state"],
+                "detail": row_detail(row),
+            }
+            for row_id, row in proof_rows.items()
+        ],
+        "change_summary": {
+            "previous_generated_at_utc": previous_generated_at or None,
+            "changed_modules": changed_modules,
+            "changed_baseline_checks": changed_baseline_rows,
+        },
+        "warnings": warnings,
+    }
+
+    intake_path: Path | None = None
+    if not args.no_intake:
+        stamp = now_utc().strftime("%Y%m%d")
+        suffix = now_utc().strftime("%H%M%S").lower()
+        intake_id = f"ITK-{stamp}-mint-module-status-{suffix}"
+        intake_path = stable_intake_path(intake_root, intake_id)
+        intake_doc = {
+            "intake_id": intake_path.stem,
+            "chain_step": "intake",
+            "domain_id": "mint",
+            "concern_id": "module_runtime_status",
+            "authority_path": rel(projection_path),
+            "master_row_id": str(contract["authority"]["master_row_id"]),
+            "intake_mode": str(contract["capture_policy"]["default_intake_mode"]),
+            "evidence_refs": [row["receipt_ref"] for row in receipt_chain] + [rel(CONTRACT_PATH), rel(projection_path)],
+            "requested_by": args.requested_by or str(contract["capture_policy"]["default_requested_by"]),
+            "owner_agent": args.owner_agent or str(contract["capture_policy"]["default_owner_agent"]),
+            "created_at": projection_generated_at,
+            "updated_at": projection_generated_at,
+            "source_capability": "mint.module.status.projection.build",
+            "projection_generated_at_utc": projection_generated_at,
+            "summary": summary,
+            "baseline": {
+                "state": baseline_status,
+                "auth_state": explicit_auth_state,
+            },
+            "module_snapshot": [
+                {
+                    "id": row["id"],
+                    "runtime_state": row["runtime_state"],
+                    "health_probe_state": row["health_probe_state"],
+                    "proof_state": row["proof_state"],
+                }
+                for row in app_plane_modules
+            ],
+            "change_summary": projection_doc["change_summary"],
+            "run_keys": {row["capability_id"]: row["run_key"] for row in receipt_chain},
+        }
+        intake_path.write_text(yaml_dump(intake_doc), encoding="utf-8")
+        projection_doc["latest_intake_ref"] = rel(intake_path)
+
+    header = (
+        "# Mint Module Status Projection\n"
+        "# projection_of: ops/bindings/mint.module.status.authority.contract.yaml\n"
+        "# Auto-generated by mint.module.status.projection.build.\n"
+        "# Do not hand-edit.\n"
+    )
+    projection_path.write_text(header + "\n" + yaml_dump(projection_doc), encoding="utf-8")
+
+    print("mint.module.status.projection.build")
+    print(f"projection: {rel(projection_path)}")
+    if intake_path:
+        print(f"intake: {rel(intake_path)}")
+    print(f"baseline_status: {baseline_status}")
+    print(f"auth_state: {explicit_auth_state}")
+    print(f"runtime_modules_running: {running_modules}/{len(app_plane_modules)}")
+    print(
+        "health_ok: "
+        f"{summary['http_health_components_ok']}/{summary['http_health_components_total']}"
+    )
+    print(
+        "proof_pass: "
+        f"{summary['runtime_proof_checks_pass']}/{summary['runtime_proof_checks_total']}"
+    )
+    print(f"warnings: {len(warnings)}")
+    for row in receipt_chain:
+        print(f"receipt[{row['capability_id']}]: {row['receipt_ref']}")
+    print("status: OK")
+
+
+if __name__ == "__main__":
+    main()
