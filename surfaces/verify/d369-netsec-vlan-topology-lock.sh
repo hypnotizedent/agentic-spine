@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 CONTRACT="$ROOT/ops/bindings/network.vlan.topology.contract.yaml"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
-INFISICAL_AGENT="$ROOT/ops/tools/infisical-agent.sh"
+INFISICAL_AGENT="$ROOT/ops/plugins/providers/bin/infisical-agent.sh"
 
 GATE_ID="D369"
 PASS_COUNT=0

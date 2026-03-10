@@ -4,14 +4,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONTRACT="$ROOT/ops/bindings/secrets.enforcement.contract.yaml"
-AGENT="$ROOT/ops/tools/infisical-agent.sh"
+AGENT="$ROOT/ops/plugins/providers/bin/infisical-agent.sh"
 
 fail() { echo "D213 FAIL: $*" >&2; exit 1; }
 
 command -v yq >/dev/null 2>&1 || fail "required tool missing: yq"
 [[ -f "$CONTRACT" ]] || fail "missing contract: ops/bindings/secrets.enforcement.contract.yaml"
 yq e '.' "$CONTRACT" >/dev/null 2>&1 || fail "invalid YAML: ops/bindings/secrets.enforcement.contract.yaml"
-[[ -x "$AGENT" ]] || fail "missing executable agent: ops/tools/infisical-agent.sh"
+[[ -x "$AGENT" ]] || fail "missing executable agent: ops/plugins/providers/bin/infisical-agent.sh"
 
 [[ "$(yq e -r '.mode // ""' "$CONTRACT")" == "strict" ]] || fail "contract mode must be strict"
 [[ "$(yq e -r '.enforcement.unknown_infrastructure_keys_allowed' "$CONTRACT")" == "false" ]] || fail "unknown_infrastructure_keys_allowed must be false"

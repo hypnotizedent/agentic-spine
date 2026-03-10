@@ -17,7 +17,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 
 ## Write Scope
 - `ops/plugins/immich/`
-- `ops/agents/immich-agent.contract.md`
+- `../agentic-foundation/docs/agents/immich-agent.contract.md`
 
 ## Capabilities (7)
 - `immich.ingest.watch`

@@ -21,7 +21,11 @@ alert_yaml() {
 
 alert_channel_bridge_push() {
   local alert_file="$1"
-  local outbox_file="$ROOT/$(yq -r '.channels."bridge-push".outbox_file // "mailroom/outbox/alerts/bridge-push.log"' "$ROOT/ops/bindings/alerting.rules.yaml")"
+  local outbox_rel
+  outbox_rel="$(yq -r '.channels."bridge-push".outbox_file // ""' "$ROOT/ops/bindings/alerting.rules.yaml")"
+  [[ -n "$outbox_rel" && "$outbox_rel" != "null" ]] || outbox_rel="$SPINE_OUTBOX/alerts/bridge-push.log"
+  local outbox_file
+  outbox_file="$(spine_resolve_mailroom_path "$outbox_rel")"
   mkdir -p "$(dirname "$outbox_file")"
 
   {

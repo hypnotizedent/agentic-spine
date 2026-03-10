@@ -107,7 +107,7 @@ def resolve_pricing_api_key(spine_root: Path) -> str:
     if env_value:
         return env_value
 
-    infisical_agent = spine_root / "ops/tools/infisical-agent.sh"
+    infisical_agent = spine_root / "ops/plugins/providers/bin/infisical-agent.sh"
     if not infisical_agent.exists():
         return ""
 

@@ -17,7 +17,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 
 ## Write Scope
 - `ops/plugins/communications/`
-- `ops/agents/communications-agent.contract.md`
+- `../agentic-foundation/docs/agents/communications-agent.contract.md`
 
 ## Capabilities (14)
 - `communications.delivery.anomaly.dispatch`

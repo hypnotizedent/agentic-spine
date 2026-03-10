@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 RULES_FILE="$ROOT/ops/bindings/alerting.rules.yaml"
 JSON_MODE=0
 
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
 usage() {
   cat <<'USAGE'
 alerting-status
@@ -39,8 +42,9 @@ done
 
 [[ -f "$RULES_FILE" ]] || { echo "FAIL: missing rules file: $RULES_FILE" >&2; exit 1; }
 
-ALERT_DIR_REL="$(yq -r '.defaults.alert_outbox_dir // "mailroom/outbox/alerts"' "$RULES_FILE")"
-ALERT_DIR="$ROOT/$ALERT_DIR_REL"
+ALERT_DIR_REL="$(yq -r '.defaults.alert_outbox_dir // ""' "$RULES_FILE")"
+[[ -n "$ALERT_DIR_REL" && "$ALERT_DIR_REL" != "null" ]] || ALERT_DIR_REL="$SPINE_OUTBOX/alerts"
+ALERT_DIR="$(spine_resolve_mailroom_path "$ALERT_DIR_REL")"
 COOLDOWN_DIR="$ALERT_DIR/.cooldown"
 mkdir -p "$ALERT_DIR" "$COOLDOWN_DIR"
 

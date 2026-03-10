@@ -7,7 +7,9 @@ set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
-SNAPSHOT_FILE="${SPINE_ROOT}/mailroom/outbox/alerts/mcp-runtime-anti-drift-latest.json"
+source "${SPINE_ROOT}/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+SNAPSHOT_FILE="${SPINE_OUTBOX}/alerts/mcp-runtime-anti-drift-latest.json"
 source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
 
 TMP_DIR="$(mktemp -d)"

@@ -470,7 +470,7 @@ def maybe_resolve_customer(
         return customer_ref, "\n".join(notes), "skipped"
 
     customer_resolve_script = mint_modules_root / "customers/scripts/customer-resolve.ts"
-    infisical_agent = spine_root / "ops/tools/infisical-agent.sh"
+    infisical_agent = spine_root / "ops/plugins/providers/bin/infisical-agent.sh"
 
     if not customer_resolve_script.exists() or not infisical_agent.exists():
         customer_ref.setdefault("identity_state", "provisional")

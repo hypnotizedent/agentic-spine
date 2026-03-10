@@ -5,8 +5,10 @@ set -euo pipefail
 # LaunchAgent: com.ronny.verify-gate-review-consumer-daily
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-QUEUE_FILE="${VERIFY_GATE_REVIEW_QUEUE_FILE:-$SPINE_ROOT/mailroom/outbox/alerts/verify-gate-review-queue.ndjson}"
-ARCHIVE_FILE="${VERIFY_GATE_REVIEW_ARCHIVE_FILE:-$SPINE_ROOT/mailroom/outbox/alerts/verify-gate-review-queue.archive.ndjson}"
+source "${SPINE_ROOT}/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+QUEUE_FILE="${VERIFY_GATE_REVIEW_QUEUE_FILE:-$SPINE_OUTBOX/alerts/verify-gate-review-queue.ndjson}"
+ARCHIVE_FILE="${VERIFY_GATE_REVIEW_ARCHIVE_FILE:-$SPINE_OUTBOX/alerts/verify-gate-review-queue.archive.ndjson}"
 source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
 
 consume_gate_review_queue() {
@@ -70,4 +72,3 @@ consume_gate_review_queue() {
 echo "[verify-gate-review-consumer-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 spine_job_run "verify-gate-review-consumer-daily:consume" consume_gate_review_queue
 echo "[verify-gate-review-consumer-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-

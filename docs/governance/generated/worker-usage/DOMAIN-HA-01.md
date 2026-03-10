@@ -17,7 +17,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 
 ## Write Scope
 - `ops/plugins/ha/`
-- `ops/agents/home-assistant-agent.contract.md`
+- `../agentic-foundation/docs/agents/home-assistant-agent.contract.md`
 
 ## Capabilities (13)
 - `ha.automation.create`

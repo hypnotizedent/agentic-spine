@@ -22,7 +22,7 @@ def detect_root() -> Path:
 
 ROOT = detect_root()
 DEFAULT_CONTRACT = ROOT / "ops/bindings/provider.orchestration.bundle.yaml"
-INF_AGENT = ROOT / "ops/tools/infisical-agent.sh"
+INF_AGENT = ROOT / "ops/plugins/providers/bin/infisical-agent.sh"
 
 
 def shutil_which(name: str) -> str | None:

@@ -16,7 +16,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Verify Command: `./bin/ops cap run verify.pack.run mint`
 
 ## Write Scope
-- `ops/agents/mint-os-agent.contract.md`
+- `../agentic-foundation/docs/agents/mint-os-agent.contract.md`
 
 ## Capabilities (1)
 - `mcp.runtime.status`

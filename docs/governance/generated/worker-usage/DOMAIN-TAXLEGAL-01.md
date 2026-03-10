@@ -17,7 +17,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 
 ## Write Scope
 - `ops/plugins/taxlegal/`
-- `ops/agents/tax-legal-agent.contract.md`
+- `../agentic-foundation/docs/agents/tax-legal-agent.contract.md`
 - `runtime/domain-state/taxlegal/cases/`
 
 ## Capabilities (8)

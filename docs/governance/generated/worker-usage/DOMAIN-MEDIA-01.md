@@ -17,7 +17,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 
 ## Write Scope
 - `ops/plugins/media/`
-- `ops/agents/media-agent.contract.md`
+- `../agentic-foundation/docs/agents/media-agent.contract.md`
 
 ## Capabilities (7)
 - `media.backup.create`

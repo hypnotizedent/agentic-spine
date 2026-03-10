@@ -16,10 +16,10 @@ WB="${WORKBENCH_ROOT:-$HOME/code/workbench}"
 fail() { echo "D25 FAIL: $*" >&2; exit 1; }
 warn() { echo "WARN $*"; }
 
-CANONICAL_INFISICAL="$ROOT/ops/tools/infisical-agent.sh"
+CANONICAL_INFISICAL="$ROOT/ops/plugins/providers/bin/infisical-agent.sh"
 VENDORED_INFISICAL="$WB/scripts/agents/infisical-agent.sh"
 
-CANONICAL_CF="$ROOT/ops/tools/cloudflare-agent.sh"
+CANONICAL_CF="$ROOT/ops/plugins/providers/bin/cloudflare-agent.sh"
 VENDORED_CF="$WB/scripts/agents/cloudflare-agent.sh"
 
 # Canonical scripts must exist and be executable.

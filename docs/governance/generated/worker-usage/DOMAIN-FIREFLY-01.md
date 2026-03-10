@@ -16,7 +16,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Verify Command: `./bin/ops cap run verify.pack.run finance`
 
 ## Write Scope
-- `ops/agents/firefly-agent.contract.md`
+- `../agentic-foundation/docs/agents/firefly-agent.contract.md`
 
 ## Capabilities (1)
 - `finance.stack.status`

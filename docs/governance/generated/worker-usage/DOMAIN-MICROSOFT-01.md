@@ -17,7 +17,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 
 ## Write Scope
 - `ops/plugins/microsoft/`
-- `ops/agents/microsoft-agent.contract.md`
+- `../agentic-foundation/docs/agents/microsoft-agent.contract.md`
 
 ## Capabilities (4)
 - `microsoft.calendar.get`

@@ -17,7 +17,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 
 ## Write Scope
 - `ops/plugins/mint/`
-- `ops/agents/flying-dutchman.contract.md`
+- `../agentic-foundation/docs/agents/flying-dutchman.contract.md`
 
 ## Capabilities (7)
 - `mint.deploy.status`

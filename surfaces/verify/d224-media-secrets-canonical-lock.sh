@@ -105,7 +105,7 @@ for key in SPOTIFY_CLIENT_ID SPOTIFY_CLIENT_SECRET NAVIDROME_USERNAME NAVIDROME_
 done
 
 # ── 3. Runtime API key parity checks (prevents half-complete rotations) ────
-INFISICAL_AGENT="$ROOT/ops/tools/infisical-agent.sh"
+INFISICAL_AGENT="$ROOT/ops/plugins/providers/bin/infisical-agent.sh"
 if [[ ! -x "$INFISICAL_AGENT" ]]; then
   err "missing infisical agent: $INFISICAL_AGENT"
 else

@@ -32,10 +32,11 @@ if [[ "$CHECK_MODE" -eq 0 ]]; then
   fi
 
   spine_tx_init
-  spine_tx_track "$ROOT/ops/bindings/routing.dispatch.yaml"
+  spine_tx_track "$ROOT/ops/bindings/terminal.worker.catalog.yaml"
+  spine_tx_track "$ROOT/docs/governance/generated/worker-usage"
 fi
 
-if ! python3 "$ROOT/bin/generators/gen-terminal-worker-runtime-v2.py" --target dispatch "$@"; then
+if ! python3 "$ROOT/ops/plugins/ops/bin/gen-terminal-worker-runtime-v2.py" --target catalog --target usage "$@"; then
   if [[ "$CHECK_MODE" -eq 0 ]]; then
     spine_tx_rollback
   fi

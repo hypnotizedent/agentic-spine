@@ -8,6 +8,8 @@ set -euo pipefail
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 STACK_CONTRACT="${SPINE_ROOT}/ops/bindings/communications.stack.contract.yaml"
+source "${SPINE_ROOT}/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
 
 require_cmd() {
@@ -41,7 +43,7 @@ body+=$'Generated (UTC): '"$generated"$'\n'
 body+=$'Overall status: '"$overall"$'\n\n'
 body+=$'Section summary:\n'
 body+="${sections}"$'\n\n'
-body+=$'Artifact: '"${SPINE_ROOT}/mailroom/outbox/briefing/briefing-latest.md"
+body+=$'Artifact: '"${SPINE_OUTBOX}/briefing/briefing-latest.md"
 
 vars_json="$(jq -cn --arg subject "$subject" --arg body_text "$body" '{subject:$subject, body_text:$body_text}')"
 

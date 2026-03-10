@@ -17,7 +17,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 
 ## Write Scope
 - `ops/plugins/n8n/`
-- `ops/agents/n8n-agent.contract.md`
+- `../agentic-foundation/docs/agents/n8n-agent.contract.md`
 
 ## Capabilities (11)
 - `n8n.infra.health`
