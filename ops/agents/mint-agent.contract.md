@@ -4,7 +4,7 @@
 > **Domain:** mint
 > **Owner:** @ronny
 > **Created:** 2026-02-12
-> **Last Updated:** 2026-03-09
+> **Last Updated:** 2026-03-10
 > **Loop:** LOOP-MINT-AGENT-CANONICALIZATION-20260216
 
 ---
@@ -180,6 +180,9 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
   - Gaps tracked in `quote_packet.open_gaps[]`
   - Work objects stored at `runtime/domain-state/mint/quote-packets/<PACKET_ID>.yaml`
   - Line items must use the canonical field names/completeness classes from `mint.quote.line_item.normalization.contract.yaml`
+  - Messy evidence must normalize into `customer_ref`, `source_refs`, `line_items`, `artwork_bindings`, `open_gaps`, `confidence`, and `operator_notes`; do not preserve active work in recap docs
+  - Do not invent quantity, decoration method, or supplier truth just to make a packet look complete
+  - When clarification is required in writing, store the next outbound ask in `customer_message_draft`
 
 - **`mint.quote.show <PACKET_ID>`** — Read current quote_packet state
   - Shows resolved customer, intake seed, pricing details, open gaps
@@ -202,6 +205,7 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
 - Pricing calculations via pricing module when normalized inputs + secrets exist
 - Gap-driven resumable workflow
 - Draft quote text generation (without payment link)
+- Honest intake normalization for incomplete/VIP shorthand requests via `quote_packet` gaps + confidence
 
 **What Does NOT Work Yet:**
 - Suppliers stock execution (blocked on missing bulk endpoint)
@@ -215,3 +219,6 @@ Morpheus must NEVER generate payment links with invented `order_id` values. Paym
 
 **Resumability Guidance:**
 If `quote_packet.state = approved_to_send` but `quote_id` is missing, the next step is `mint.quote.promote` (not yet implemented). Surface this blocker clearly to operators instead of attempting workarounds.
+
+**Artie Routing Guidance:**
+Route to Artie only when proof work is actually needed, artwork is at least proof-adequate, and the target line items are specific enough to support a truthful mockup. Do not route artwork-missing, product-ambiguous, or spec-ambiguous packets to Artie just to "figure it out."

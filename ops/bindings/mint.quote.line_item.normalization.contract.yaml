@@ -4,7 +4,7 @@
 # Scope: quote-to-pay-line-item-normalization
 
 version: 1
-updated_at: "2026-03-09"
+updated_at: "2026-03-10"
 owner: "@ronny"
 status: authoritative
 scope: quote-to-pay-line-item-normalization
@@ -44,8 +44,9 @@ canonical_field_set:
 
   quantity:
     type: integer
-    required_for: [creation_minimum, stock_lookup_ready, pricing_ready, quote_ready]
-    description: Number of units being quoted
+    required_for: [stock_lookup_ready, pricing_ready, quote_ready]
+    optional_for: [creation_minimum]
+    description: Number of units being quoted once quantity is known
     validation: "> 0"
 
   # Supplier lookup fields (stock check)
@@ -235,11 +236,12 @@ canonical_field_set:
 
 completeness_classes:
   creation_minimum:
-    description: Minimum fields required to create a line_item in a quote_packet
+    description: >
+      Minimum fields required to create a resumable line_item candidate in a
+      quote_packet before quantity or decoration are fully known
     required_fields:
       - line_item_id
       - product_type
-      - quantity
     gap_on_missing: GAP-MINT-LINE-ITEM-CREATION-INCOMPLETE
     use_case: Agent can initialize a line_item skeleton for progressive enrichment
 
@@ -445,7 +447,7 @@ examples:
   creation_minimum:
     line_item_id: "550e8400-e29b-41d4-a716-446655440000"
     product_type: "t-shirt"
-    quantity: 50
+    description: "customer asked for tees but exact quantity is still pending"
 
   stock_lookup_ready:
     line_item_id: "550e8400-e29b-41d4-a716-446655440000"
@@ -507,6 +509,10 @@ implementation_notes:
     Line items start at creation_minimum and progress toward quote_ready
     as agents resolve gaps. The completeness_classes define explicit
     checkpoints where agents can emit gaps and resume work.
+  quantity_truth: >
+    creation_minimum is allowed to exist without quantity so Morpheus can
+    preserve real inbound intent honestly. Quantity becomes mandatory before
+    stock lookup, pricing, or quote readiness.
   module_api_stability: >
     The pricing and suppliers modules are considered stable for these
     field mappings as of 2026-03-09. If module APIs change, update the

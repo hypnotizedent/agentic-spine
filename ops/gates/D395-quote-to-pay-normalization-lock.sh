@@ -15,36 +15,118 @@ PAYMENT_BRIDGE="ops/bindings/mint.quote.payment_bridge.authority.yaml"
 QUOTE_PACKET_AUTHORITY="ops/bindings/mint.quote.packet.authority.yaml"
 MINT_AGENT_CONTRACT="ops/agents/mint-agent.contract.md"
 
-# Check 1-2: Contract files exist
-[[ -f "$NORMALIZATION_CONTRACT" ]] || { echo "FAIL: Missing $NORMALIZATION_CONTRACT"; exit 1; }
-[[ -f "$PAYMENT_BRIDGE" ]] || { echo "FAIL: Missing $PAYMENT_BRIDGE"; exit 1; }
+fail() {
+  echo "FAIL D395: $*" >&2
+  exit 1
+}
 
-# Check 3-4: Quote packet authority references both new contracts
-grep -q "mint.quote.line_item.normalization.contract.yaml" "$QUOTE_PACKET_AUTHORITY" || { echo "FAIL: Quote packet authority must reference line_item.normalization.contract.yaml"; exit 1; }
-grep -q "mint.quote.payment_bridge.authority.yaml" "$QUOTE_PACKET_AUTHORITY" || { echo "FAIL: Quote packet authority must reference payment_bridge.authority.yaml"; exit 1; }
+pass() {
+  echo "PASS D395: $*"
+}
 
-# Check 5: Completeness classes defined
+require_file() {
+  local file="$1"
+  [[ -f "$file" ]] || fail "Missing $file"
+  CHECKS=$((CHECKS + 1))
+}
+
+require_fixed() {
+  local needle="$1"
+  local file="$2"
+  local message="$3"
+  grep -Fq "$needle" "$file" || fail "$message"
+  CHECKS=$((CHECKS + 1))
+}
+
+require_yq_item() {
+  local expr="$1"
+  local expected="$2"
+  local file="$3"
+  local message="$4"
+  local values
+  values="$(yq e "$expr" "$file" 2>/dev/null || true)"
+  grep -Fxq "$expected" <<<"$values" || fail "$message"
+  CHECKS=$((CHECKS + 1))
+}
+
+forbid_yq_item() {
+  local expr="$1"
+  local forbidden="$2"
+  local file="$3"
+  local message="$4"
+  local values
+  values="$(yq e "$expr" "$file" 2>/dev/null || true)"
+  if grep -Fxq "$forbidden" <<<"$values"; then
+    fail "$message"
+  fi
+  CHECKS=$((CHECKS + 1))
+}
+
+require_yq_value() {
+  local expr="$1"
+  local file="$2"
+  local message="$3"
+  local value
+  value="$(yq e "$expr // \"__missing__\"" "$file" 2>/dev/null || true)"
+  [[ -n "$value" && "$value" != "__missing__" && "$value" != "null" ]] || fail "$message"
+  CHECKS=$((CHECKS + 1))
+}
+
+CHECKS=0
+command -v yq >/dev/null 2>&1 || fail "yq is required"
+
+# Core authority files must exist.
+require_file "$NORMALIZATION_CONTRACT"
+require_file "$PAYMENT_BRIDGE"
+require_file "$QUOTE_PACKET_AUTHORITY"
+require_file "$MINT_AGENT_CONTRACT"
+
+# Quote packet authority must point at the canonical contract surfaces.
+require_fixed "mint.quote.line_item.normalization.contract.yaml" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must reference line_item.normalization.contract.yaml"
+require_fixed "mint.quote.payment_bridge.authority.yaml" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must reference payment_bridge.authority.yaml"
+
+# Line-item normalization must preserve the canonical completeness progression.
 for class in creation_minimum stock_lookup_ready pricing_ready quote_ready; do
-  grep -q "$class:" "$NORMALIZATION_CONTRACT" || { echo "FAIL: Missing completeness class: $class"; exit 1; }
+  require_fixed "$class:" "$NORMALIZATION_CONTRACT" "Missing completeness class: $class"
 done
+require_fixed "line_item_id:" "$NORMALIZATION_CONTRACT" "Normalization contract must use canonical line_item_id"
+if grep -Eq '^[[:space:]]*line_id:' "$NORMALIZATION_CONTRACT"; then
+  fail "Normalization contract must not introduce alternate line_id identity"
+fi
+CHECKS=$((CHECKS + 1))
+require_yq_item '.completeness_classes.creation_minimum.required_fields[]' 'line_item_id' "$NORMALIZATION_CONTRACT" "creation_minimum must require line_item_id"
+require_yq_item '.completeness_classes.creation_minimum.required_fields[]' 'product_type' "$NORMALIZATION_CONTRACT" "creation_minimum must require product_type"
+forbid_yq_item '.completeness_classes.creation_minimum.required_fields[]' 'quantity' "$NORMALIZATION_CONTRACT" "creation_minimum must not require quantity"
+require_yq_item '.completeness_classes.stock_lookup_ready.required_fields[]' 'quantity' "$NORMALIZATION_CONTRACT" "stock_lookup_ready must require quantity"
+require_yq_item '.completeness_classes.pricing_ready.required_fields[]' 'quantity' "$NORMALIZATION_CONTRACT" "pricing_ready must require quantity"
 
-# Check 6: Canonical field identity must use line_item_id only
-grep -q "line_item_id:" "$NORMALIZATION_CONTRACT" || { echo "FAIL: Normalization contract must use canonical line_item_id"; exit 1; }
-grep -q "^[[:space:]]*line_id:" "$NORMALIZATION_CONTRACT" && { echo "FAIL: Normalization contract must not introduce alternate line_id identity"; exit 1; }
+# Module mappings and payment bridge guardrails must remain present.
+require_fixed "module_field_mapping:" "$NORMALIZATION_CONTRACT" "Missing module_field_mapping"
+require_fixed "suppliers_stock:" "$NORMALIZATION_CONTRACT" "Missing suppliers_stock mapping"
+require_fixed "pricing_job_estimator:" "$NORMALIZATION_CONTRACT" "Missing pricing_job_estimator mapping"
+require_fixed "no_line_id:" "$NORMALIZATION_CONTRACT" "Missing no_line_id alias guard"
+require_fixed "promotion_boundary:" "$PAYMENT_BRIDGE" "Missing promotion_boundary"
+require_fixed "no_fake_order_id:" "$PAYMENT_BRIDGE" "Payment bridge must forbid fake order_id"
 
-# Check 7-10: Module mappings, alias guardrails, and promotion boundary
-grep -q "module_field_mapping:" "$NORMALIZATION_CONTRACT" || { echo "FAIL: Missing module_field_mapping"; exit 1; }
-grep -q "suppliers_stock:" "$NORMALIZATION_CONTRACT" || { echo "FAIL: Missing suppliers_stock mapping"; exit 1; }
-grep -q "pricing_job_estimator:" "$NORMALIZATION_CONTRACT" || { echo "FAIL: Missing pricing_job_estimator mapping"; exit 1; }
-grep -q "no_line_id:" "$NORMALIZATION_CONTRACT" || { echo "FAIL: Missing no_line_id alias guard"; exit 1; }
-grep -q "promotion_boundary:" "$PAYMENT_BRIDGE" || { echo "FAIL: Missing promotion_boundary"; exit 1; }
+# Quote packet authority must carry the Morpheus intake normalization surface.
+require_yq_value '.quote_packet_schema.optional_fields.operator_notes.type' "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must define operator_notes"
+require_yq_item '.quote_packet_schema.required_fields.source_refs.elements[]' 'ref_type (optional: seed|quote_form|email|attachment|pdf|product_link|historical_quote|historical_invoice|operator_note)' "$QUOTE_PACKET_AUTHORITY" "source_refs must define ref_type"
+require_yq_item '.quote_packet_schema.required_fields.source_refs.elements[]' 'source_locator (optional: path, URL, message-id, or external identifier)' "$QUOTE_PACKET_AUTHORITY" "source_refs must define source_locator"
+require_yq_item '.quote_packet_schema.required_fields.source_refs.elements[]' 'summary (optional: one-line statement of what this evidence contributes)' "$QUOTE_PACKET_AUTHORITY" "source_refs must define summary"
+require_yq_item '.quote_packet_schema.required_fields.source_refs.elements[]' 'artifact_state (optional: received|derived|missing|failed|low_quality)' "$QUOTE_PACKET_AUTHORITY" "source_refs must define artifact_state"
+for section in morpheus_intake_normalization messy_input_patterns confidence_scoring_rules clarification_rules artie_routing_rules pricing_progression_rules ready_for_review_rules normalization_examples; do
+  require_fixed "$section:" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority missing $section"
+done
+require_fixed "shipping_ambiguity" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must govern shipping_ambiguity gaps"
+require_fixed "clarification_required" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must govern clarification_required gaps"
+require_fixed "proof_routing_blocked" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must govern proof_routing_blocked gaps"
 
-# Check 11: Payment bridge defines forbidden shortcuts
-grep -q "no_fake_order_id:" "$PAYMENT_BRIDGE" || { echo "FAIL: Payment bridge must forbid fake order_id"; exit 1; }
+# Morpheus contract must stay aligned with the normalization and routing rules.
+require_fixed "mint.quote.packet.authority.yaml" "$MINT_AGENT_CONTRACT" "Mint agent must reference quote packet authority"
+require_fixed "mint.quote.line_item.normalization.contract.yaml" "$MINT_AGENT_CONTRACT" "Mint agent must reference normalization contract"
+require_fixed "mint.quote.payment_bridge.authority.yaml" "$MINT_AGENT_CONTRACT" "Mint agent must reference payment bridge"
+require_fixed '| `mint.quote.render` | mutating |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.render as mutating"
+require_fixed "Do not invent quantity, decoration method, or supplier truth" "$MINT_AGENT_CONTRACT" "Mint agent must forbid invented quote facts"
+require_fixed "**Artie Routing Guidance:**" "$MINT_AGENT_CONTRACT" "Mint agent must document Artie routing guidance"
 
-# Check 12-14: Mint agent references authorities and keeps capability safety truthful
-grep -q "mint.quote.line_item.normalization.contract.yaml" "$MINT_AGENT_CONTRACT" || { echo "FAIL: Mint agent must reference normalization contract"; exit 1; }
-grep -q "mint.quote.payment_bridge.authority.yaml" "$MINT_AGENT_CONTRACT" || { echo "FAIL: Mint agent must reference payment bridge"; exit 1; }
-grep -q '| `mint.quote.render` | mutating |' "$MINT_AGENT_CONTRACT" || { echo "FAIL: Mint agent must describe mint.quote.render as mutating"; exit 1; }
-
-echo "PASS: All 14 Quote-to-Pay normalization checks passed"
+pass "$CHECKS normalization checks passed"

@@ -4,7 +4,7 @@
 # Scope: mint-quote-packet-work-object
 
 version: 1
-updated_at: "2026-03-09"
+updated_at: "2026-03-10"
 owner: "@ronny"
 status: authoritative
 scope: mint-quote-packet-work-object
@@ -84,11 +84,15 @@ quote_packet_schema:
         - customer_query or customer_id
     source_refs:
       type: array
-      description: References to intake seed evidence or manual input
+      description: References to intake seed evidence, inbound artifacts, or reused historical evidence
       elements:
         - seed_id (optional)
         - intake_channel (web|email|phone|manual)
         - source_timestamp
+        - ref_type (optional: seed|quote_form|email|attachment|pdf|product_link|historical_quote|historical_invoice|operator_note)
+        - source_locator (optional: path, URL, message-id, or external identifier)
+        - summary (optional: one-line statement of what this evidence contributes)
+        - artifact_state (optional: received|derived|missing|failed|low_quality)
     line_items:
       type: array
       description: >
@@ -99,7 +103,7 @@ quote_packet_schema:
         - line_item_id (uuid)
         - description (optional)
         - product_type
-        - quantity
+        - quantity (required by stock_lookup_ready and beyond)
         - size_breakdown (optional)
         - decoration_method (optional)
         - placement (optional)
@@ -146,10 +150,10 @@ quote_packet_schema:
         - confidence_level (high|medium|low)
     open_gaps:
       type: array
-      description: Explicit gaps blocking readiness
+      description: Explicit gaps and warnings affecting packet readiness
       elements:
         - gap_id (sequential per packet)
-        - gap_type (missing_artwork|stock_unavailable|pricing_ambiguous|customer_unresolved|other)
+        - gap_type (customer_unresolved|product_unresolved|quantity_unresolved|decoration_unresolved|artwork_missing|artwork_inadequate|supplier_unresolved|shipping_ambiguity|pricing_policy_review|stock_unavailable|clarification_required|proof_routing_blocked|other)
         - description
         - severity (blocking|warning)
         - discovered_at (timestamp)
@@ -184,7 +188,13 @@ quote_packet_schema:
         - generated_at (timestamp)
     customer_message_draft:
       type: string
-      description: Draft customer-facing message for quote send
+      description: Draft customer-facing clarification or quote-send message
+    operator_notes:
+      type: string
+      description: >
+        Internal normalization notes for cross-line decisions, historical-price
+        context, white-label rerouting rationale, VIP shorthand interpretation,
+        and other governed context that does not belong in customer-facing copy
     quote_id:
       type: uuid
       description: Canonical quote_id once quote is sent (references order truth quote entity)
@@ -314,7 +324,7 @@ operational_rules:
       - agent orchestration request
     required_inputs:
       - customer_ref (provisional or resolved)
-      - at least one line_item (may be incomplete)
+      - at least one creation_minimum line_item when product_type is known, OR a blocking product_unresolved gap when product family is still unclear
     forbidden_shortcuts:
       - creating quote_packet from seed alone without normalization
       - creating quote_packet without customer_ref
@@ -340,6 +350,315 @@ operational_rules:
       - state = sent AND quote expired/superseded
     manual_close_allowed:
       - any state (operator discretion)
+
+morpheus_intake_normalization:
+  purpose: >
+    Define the smallest governed Morpheus output that converts messy inbound
+    customer evidence into resumable quote_packet truth without inventing new
+    order, quote, proof, customer, or line-item models.
+  minimal_output_shape:
+    required_packet_fields:
+      - state
+      - customer_ref
+      - source_refs
+      - line_items
+      - open_gaps
+      - confidence
+    optional_enrichment_fields:
+      - artwork_bindings
+      - inventory_snapshot
+      - pricing_snapshot
+      - quote_draft_ref
+      - customer_message_draft
+      - operator_notes
+    creation_rules:
+      - line_items may begin at creation_minimum when only product family is known; quantity and decoration_method may remain unresolved until later completeness classes
+      - if product family itself is unresolved, line_items may remain empty only when open_gaps contains a blocking product_unresolved gap
+      - every inference must be traceable to source_refs and preserved in operator_notes or line_items.operator_notes
+      - when written clarification is required, customer_message_draft must contain the next outbound clarification draft instead of leaving the packet dependent on prose notes
+  safe_to_continue_missing_information:
+    severity: warning
+    rules:
+      - relationship pricing or courtesy adjustment is not yet confirmed, but base pricing inputs are otherwise complete
+      - shipping is not yet final, but totals are explicitly marked shipping_pending or excluded from current customer-facing totals
+      - a white-label link is detected, but product family is clear enough to continue supplier identification
+      - proof routing has not been executed yet, but pricing work is still incomplete
+  blocks_quote_readiness:
+    severity: blocking
+    rules:
+      - customer identity is unresolved or ambiguous
+      - product family, blank selection, or supplier source remains too ambiguous to support stock or blank-cost truth
+      - quantity is missing or contradictory for any price-bearing line item
+      - decoration method is unresolved and materially affects pricing or feasibility
+      - artwork is missing, failed, or low quality when proofing, sizing, or method validation depends on it
+      - a historical-price match, courtesy discount, or absorbed-cost promise requires operator approval before totals are truthful
+      - clarification_required remains open
+  historical_evidence_reuse_rule: >
+    Morpheus may reuse historical quote or invoice evidence only when source_refs
+    show the same customer and materially similar request. Historical evidence
+    may downgrade confidence, but it may never justify silent defaulting from
+    industry norms alone.
+  no_freeform_capture_rule: >
+    The normalized quote_packet is the resumable truth. Do not rely on ad hoc
+    planning notes for active quote preparation once facts, gaps, and decisions
+    can be stored in quote_packet fields.
+
+messy_input_patterns:
+  incomplete_product_descriptions:
+    field_mapping:
+      - customer_ref: preserve current provisional or resolved identity; do not infer relationship tier from tone alone
+      - source_refs: capture the raw wording, linked PDFs/links, and any supplier candidate discovered during normalization
+      - line_items: normalize product_type plus description; leave style, supplier, and SKU fields blank until resolved
+      - artwork_bindings: leave empty unless artwork arrived with the request
+      - inventory_snapshot: leave absent until supplier/source is known
+      - pricing_snapshot: leave absent until the line item reaches pricing_ready
+      - open_gaps: emit product_unresolved when blank or style choice materially affects pricing or stock
+      - confidence: downgrade overall, pricing, and stock confidence to low or medium
+      - quote_draft_ref: leave absent
+      - customer_message_draft: draft product clarification when product family or blank choice is still ambiguous
+    default_rule: block ready_for_review; continue drafting only when product_type is clear enough to normalize honestly
+  vague_quantities:
+    field_mapping:
+      - customer_ref: unchanged from current evidence
+      - source_refs: preserve the original vague quantity wording or contradictory revisions
+      - line_items: create creation_minimum candidates without quantity only when product family is known
+      - artwork_bindings: unchanged unless artwork references quantity-specific placements
+      - inventory_snapshot: leave absent because quantity-dependent stock checks are not truthful yet
+      - pricing_snapshot: leave absent because quantity drives pricing tiers
+      - open_gaps: emit quantity_unresolved as blocking until exact price-bearing quantities are known
+      - confidence: set pricing_confidence and stock_confidence to none or low
+      - quote_draft_ref: leave absent
+      - customer_message_draft: ask for exact quantities or latest authoritative counts
+    default_rule: continue packet creation, but block pricing and ready_for_review
+  unstated_decoration_methods:
+    field_mapping:
+      - customer_ref: unchanged
+      - source_refs: capture the exact request text and any artwork or historical evidence that suggests a method
+      - line_items: preserve product_type and quantity; leave decoration_method blank unless current or historical evidence is explicit
+      - artwork_bindings: preserve any supplied artwork without claiming proof readiness
+      - inventory_snapshot: may proceed only if product/source is otherwise clear
+      - pricing_snapshot: leave absent until decoration_method, print_locations, and color_count are truthful
+      - open_gaps: emit decoration_unresolved when method choice changes cost, feasibility, or proof requirements
+      - confidence: pricing_confidence low or none
+      - quote_draft_ref: leave absent
+      - customer_message_draft: ask for method confirmation when the method cannot be grounded in current or historical evidence
+    default_rule: never assume a method from product category alone; block pricing when method materially changes totals
+  artwork_missing_failed_or_low_quality:
+    field_mapping:
+      - customer_ref: unchanged
+      - source_refs: record failed uploads, missing attachments, screenshots, or low-quality files with artifact_state
+      - line_items: keep normalized product intent separate from artwork adequacy
+      - artwork_bindings: store received seed_refs and asset_refs when present; leave unmapped if files are missing or unusable
+      - inventory_snapshot: may proceed only if artwork is not needed for stock truth
+      - pricing_snapshot: proceed only when artwork does not determine size tier or method feasibility; otherwise leave blocked
+      - open_gaps: emit artwork_missing or artwork_inadequate with severity based on whether proofing or pricing depends on the asset
+      - confidence: artwork_confidence none, low, or medium based on asset quality
+      - quote_draft_ref: leave absent when proof is required and artwork is not adequate
+      - customer_message_draft: request upload, vector replacement, or higher-quality art when needed
+    default_rule: route to clarification before Artie when artwork is missing, failed, or not proof-adequate
+  white_label_product_links:
+    field_mapping:
+      - customer_ref: unchanged
+      - source_refs: retain the original product link and mark it as product_link evidence
+      - line_items: normalize product_type and description from the link, then record any upstream supplier candidate in operator_notes
+      - artwork_bindings: unchanged
+      - inventory_snapshot: leave absent until a canonical supplier/source is selected
+      - pricing_snapshot: leave absent or provisional until blank source is grounded in a real supplier path
+      - open_gaps: emit supplier_unresolved as warning or blocking depending on whether the upstream product match is known
+      - confidence: stock_confidence and pricing_confidence reduced until canonical sourcing is chosen
+      - quote_draft_ref: leave absent unless sourcing is settled
+      - customer_message_draft: use only if written sourcing clarification is needed; do not force white-label jargon into customer copy
+    default_rule: continue normalization, but do not treat the reseller link as canonical supplier truth
+  relationship_pricing_or_courtesy_adjustments:
+    field_mapping:
+      - customer_ref: preserve identity state and relationship evidence only through source_refs or operator_notes
+      - source_refs: attach historical quotes, invoices, or explicit operator notes that justify courtesy pricing
+      - line_items: keep commercial facts separate from discretionary discount logic
+      - artwork_bindings: unchanged
+      - inventory_snapshot: unchanged
+      - pricing_snapshot: store base pricing once inputs are complete, then record discount/absorption rationale in notes or pricing receipts
+      - open_gaps: emit pricing_policy_review when a historical-price match or courtesy adjustment requires operator sign-off
+      - confidence: pricing_confidence medium at best until the discretionary step is confirmed
+      - quote_draft_ref: leave absent until the final commercial posture is truthful
+      - customer_message_draft: draft a careful follow-up only when the customer explicitly asked for historical or special pricing confirmation
+    default_rule: continue base pricing when possible, but block ready_for_review if discretionary pricing is still unresolved
+  shipping_ambiguity:
+    field_mapping:
+      - customer_ref: unchanged
+      - source_refs: retain supplier shipping notes, customer ship-on-account requests, and any historical shipping evidence
+      - line_items: unchanged unless ship method affects SKU/source choice
+      - artwork_bindings: unchanged
+      - inventory_snapshot: may stay provisional if supplier choice drives freight truth
+      - pricing_snapshot: either omit shipping from totals with explicit note or block final totals when shipping is required for truth
+      - open_gaps: emit shipping_ambiguity as warning for provisional estimates or blocking when final totals depend on freight truth
+      - confidence: pricing_confidence reduced until shipping posture is explicit
+      - quote_draft_ref: leave absent if the final quote total is still ambiguous
+      - customer_message_draft: ask for ship method, ship-on-account preference, or in-hands constraints when needed
+    default_rule: safe to continue for estimates; block ready_for_review when final customer-facing totals depend on unresolved shipping
+  vip_shorthand_or_minimal_detail_customers:
+    field_mapping:
+      - customer_ref: resolve the known customer if possible, but preserve broker or intermediary context in operator_notes
+      - source_refs: retain the short inbound message plus any historical quote or invoice evidence used to translate intent
+      - line_items: create only the product candidates supported by current or historical evidence; do not expand vague requests into speculative multi-line quotes
+      - artwork_bindings: unchanged until files exist
+      - inventory_snapshot: leave absent until product, quantity, and source are honest
+      - pricing_snapshot: leave absent until quantity and method are grounded
+      - open_gaps: emit the specific missing facts (quantity_unresolved, decoration_unresolved, product_unresolved) rather than a generic VIP gap
+      - confidence: overall confidence is low until shorthand is translated into concrete commercial facts
+      - quote_draft_ref: leave absent unless enough truth exists to draft a governed estimate
+      - customer_message_draft: draft short, targeted clarification that matches the customer's communication style
+    default_rule: VIP status changes how concise the clarification can be, not whether canonical fields may be skipped
+
+confidence_scoring_rules:
+  customer_confidence:
+    high: resolved customer_id with matching current channel/contact evidence
+    medium: provisional customer uniquely identifiable from current evidence
+    low: multiple plausible matches or broker relationship unresolved
+    none: no trustworthy customer match
+  artwork_confidence:
+    high: mapped vector or proof-adequate asset tied to the intended line item
+    medium: usable mockup or raster evidence adequate for proof discussion but not final production
+    low: screenshots, partial files, or low-resolution assets
+    none: no artwork evidence or failed upload only
+  stock_confidence:
+    high: supplier_code and supplier_sku resolved with fresh inventory_snapshot
+    medium: blank candidate resolved but live stock not yet confirmed
+    low: source inferred from description or white-label link only
+    none: no trustworthy supplier/source candidate
+  pricing_confidence:
+    high: every price-bearing line item is pricing_ready and discretionary pricing policy is settled
+    medium: pricing inputs complete, but shipping or relationship pricing still carries warning-level caveats
+    low: pricing depends on documented assumptions or unresolved sourcing
+    none: pricing is blocked
+  overall_rule: >
+    overall confidence is low whenever any blocking gap remains. overall may
+    reach medium when only warning gaps remain. overall is high only when
+    customer, pricing, and required product truth are all grounded enough for
+    ready_for_review.
+
+clarification_rules:
+  written_clarification_required_when:
+    - current evidence contains contradictory quantities, product groupings, or revisions
+    - product or decoration choices cannot be grounded in current or historical evidence
+    - artwork is missing, failed, or inadequate and proof or pricing depends on it
+    - customer explicitly asks for same-as-last-time pricing and the historical match is not provable from source_refs
+    - shipping or timeline commitments depend on customer decisions not yet stated in writing
+  clarification_not_required_when:
+    - historical evidence in source_refs proves the same customer is reordering materially identical specs
+    - missing information affects only warning-level context and is clearly surfaced in operator_notes or customer_message_draft
+    - the next safe step is internal enrichment only (for example, supplier comparison after product family is already clear)
+
+artie_routing_rules:
+  route_to_artie_when:
+    - a proof or mockup is required by workflow, operator direction, or customer expectation
+    - artwork_confidence is at least medium
+    - target line items have normalized product_type plus enough blank/color context to generate a truthful proof
+    - no blocking product_unresolved, artwork_inadequate, or clarification_required gap remains for the proofed line items
+  do_not_route_to_artie_when:
+    - artwork is missing, failed, or low quality
+    - product family, blank selection, color, decoration method, or placement is still too ambiguous for truthful proof work
+    - the requested product is outside Artie's current proofable template or mockup coverage
+    - the packet still needs written clarification before proof work would be valid
+  routing_note: >
+    Route to Artie only after Morpheus has normalized the line-item and artwork
+    evidence. Artie is for proof/mockup execution, not for resolving missing
+    customer facts.
+
+pricing_progression_rules:
+  pricing_allowed_when:
+    - each price-bearing line item has product_type, quantity, decoration_method, and the pricing-ready facts required by the line_item_normalization contract
+    - blank cost is grounded in a canonical supplier path or trustworthy historical evidence recorded in source_refs
+    - shipping posture is either priced or honestly excluded from the current total
+    - discretionary relationship pricing has been resolved or explicitly deferred out of the current total
+  pricing_blocked_when:
+    - quantity is missing or contradictory
+    - product, supplier, or blank selection is not grounded enough to choose blanks_cost_cents truthfully
+    - decoration_method, print_locations, or color_count is missing
+    - artwork adequacy materially affects size tier, proof feasibility, or method validation
+    - customer-requested historical-price matching or courtesy pricing still requires operator decision
+  blocked_state: needs_input
+
+ready_for_review_rules:
+  packet_may_be_ready_for_review_when:
+    - customer_ref.identity_state = resolved
+    - every customer-facing line item is at least pricing_ready and commercially stable
+    - pricing_snapshot exists with confidence >= medium
+    - no blocking open_gaps remain
+    - quote_draft_ref exists
+    - customer_message_draft exists
+    - proof requirement is satisfied, explicitly waived, or truthfully marked not required
+  packet_must_not_be_ready_for_review_when:
+    - any blocking clarification gap remains
+    - pricing depends on unresolved shipping or discretionary pricing policy
+    - proof work is still required but not routed or completed
+    - artwork or line-item ambiguity would make the customer-facing draft misleading
+
+normalization_examples:
+  kennedy_presidential_bully_kennel:
+    evidence_date: "2026-03-06"
+    normalized_outcome:
+      state: needs_input
+      customer_ref:
+        identity_state: provisional
+        customer_query: "Steven Kennedy / Kennedy presidential bully kennel / stevenk485@gmail.com"
+      line_item_completeness:
+        - t_shirts: creation_minimum with quantity 20 and notes for left-chest + full-back screen print request
+      open_gaps:
+        - artwork_inadequate (blocking): quote-form upload failed; no usable asset refs
+        - supplier_unresolved (blocking): shirt style/blank source not specified
+        - clarification_required (warning): email mentions hoodies and track suits, but only shirts are concretely scoped
+      confidence:
+        overall: low
+        artwork_confidence: none
+        pricing_confidence: none
+        stock_confidence: none
+        customer_confidence: medium
+      readiness: not_ready_for_review
+      artie_route: do_not_route
+  lisa_peirce_events:
+    evidence_date: "2026-03-09"
+    normalized_outcome:
+      state: needs_input
+      customer_ref:
+        identity_state: resolved
+        customer_id: "resolved_customer_required_by_prepare_surface"
+      line_item_completeness:
+        - latest revision quantities can normalize multiple apparel/headwear line items at creation_minimum from the March 9 revision
+        - mockup-derived shirt, hat, hoodie, pant, zip, and bag candidates can carry source-backed descriptions and size breakdowns, but several remain below pricing_ready
+        - dance floor designs and PJs remain blocked because the design grouping and PJ style are not yet truthful
+      open_gaps:
+        - clarification_required (blocking): dance floor design grouping unresolved across revisions
+        - product_unresolved (blocking): PJs style number missing
+        - decoration_unresolved (blocking): several lines still lack fully grounded print locations/color counts despite strong mockup evidence
+      confidence:
+        overall: low
+        artwork_confidence: medium
+        pricing_confidence: low
+        stock_confidence: low
+        customer_confidence: high
+      readiness: not_ready_for_review
+      artie_route: partial_only_after_clarification
+  moe_humble_religion:
+    evidence_date: "2026-03-09"
+    normalized_outcome:
+      state: needs_input
+      customer_ref:
+        identity_state: resolved
+        customer_id: "resolved_vip_customer_required_by_prepare_surface"
+      line_item_completeness:
+        - ribbed_tank_candidate: creation_minimum using translated product_type plus operator_notes for LA Apparel 21X408GD research
+      open_gaps:
+        - quantity_unresolved (blocking): no quantity provided
+        - shipping_ambiguity (blocking): LA Apparel freight posture materially affects truthful totals
+        - pricing_policy_review (warning): VIP/broker context may affect how research is preserved or honored
+      confidence:
+        overall: low
+        artwork_confidence: none
+        pricing_confidence: none
+        stock_confidence: low
+        customer_confidence: high
+      readiness: not_ready_for_review
+      artie_route: do_not_route
 
 storage_contract:
   canonical_location:
