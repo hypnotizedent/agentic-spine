@@ -152,6 +152,7 @@ When Morpheus runs a tool, its closeout must report the underlying receipt/ledge
 | `mint.quote.packet.price` | mutating | Persist a real `pricing_snapshot` from governed `quote_packet` line items |
 | `mint.quote.render` | mutating | Generate review-ready quote draft/message from governed `quote_packet` state |
 | `mint.quote.promote` | mutating | Promote an approved `quote_packet` into canonical order/revision/quote runtime records |
+| `mint.quote.generate_payment_link` | mutating | Generate a Stripe checkout session from promoted canonical quote truth and persist `payment_ref` |
 
 ## Minimum V1 Command Surface
 
@@ -169,7 +170,7 @@ The alias `mintctl operator ...` must resolve to the same command surface.
 
 ## Quote-to-Pay Lane (Operator-Driven)
 
-**Status:** Partial — normalization + supplier sourcing + packet pricing + review draft + first promotion are real, payment link blocked on checkout generation
+**Status:** Partial — normalization + supplier sourcing + packet pricing + review draft + first promotion + payment link are real; governed send/webhook reconciliation remain downstream
 
 **Authority:**
 - `ops/bindings/mint.quote.packet.authority.yaml` (quote_packet work object)
@@ -228,10 +229,17 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
   - Writes `order_id`, `order_revision_id`, and `quote_id` back to the packet without sending anything yet
   - Blocks honestly when intake seed lineage, resolved customer contact, quote-ready line items, or pricing truth are missing
 
+- **`mint.quote.generate_payment_link <QUOTE_ID>`** — Generate the governed Stripe checkout session from promoted quote truth
+  - Consumes canonical `quote_id`, `order_id`, `amount_cents`, and resolved customer email after promotion
+  - Calls payment module `POST /api/v1/payments/checkout-session` with canonical order truth, never timestamp-generated ids
+  - Persists the same `payment_ref` onto the canonical quote record and the source `quote_packet`
+  - Reuses an existing generated checkout session on rerun instead of creating duplicates
+  - Blocks honestly when the quote is unpromoted, already paid, missing resolved email, or payment service access is unavailable
+
 **Blockers:**
 - Bulk/pack-level supplier stock execution is still not implemented; sourcing runs per line item
-- Payment link generation is still not implemented after promotion
-- Governed quote send is still blocked on payment-link generation + communications integration
+- Governed quote send is still blocked on communications integration
+- Payment webhook projection back into canonical order/quote/packet state is not implemented yet
 - Later order_revision supersession after first promotion is not implemented yet
 
 **What Works:**
@@ -241,21 +249,22 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
 - Gap-driven resumable workflow
 - Draft quote text generation from packet state (without payment link)
 - First-promotion persistence of canonical order/revision/quote truth from approved packets
+- Governed Stripe checkout-session generation from promoted quote truth with idempotent `payment_ref` persistence
 - Honest intake normalization for incomplete/VIP shorthand requests via `quote_packet` gaps + confidence
 
 **What Does NOT Work Yet:**
 - Automatic supplier resolution from vague/generic product descriptions with no trustworthy style/SKU cues
 - Bulk supplier stock execution across many packet lines in one call
-- Payment link generation (`mint.quote.generate_payment_link` — design-only)
-- Quote send to customer (`mint.quote.send` — blocked on payment link)
+- Quote send to customer (`mint.quote.send` — blocked on communications integration)
+- Payment webhook projection back into canonical order/quote/packet state
 - Later revision promotion / quote supersession after first canonical promotion
-- End-to-end quote → payment flow (stops after canonical promotion, before checkout/send)
+- End-to-end quote → payment flow after checkout creation (stops before governed send + webhook reconciliation)
 
 **No Fake Order IDs:**
 Morpheus must NEVER generate payment links with invented `order_id` values. Payment module's POST `/v2/checkout` generates timestamp-based order_id, but this violates order truth authority. The governed path is: promotion → canonical order_id → payment link. See payment bridge authority for why timestamp-based order_id is rejected.
 
 **Resumability Guidance:**
-If `quote_packet.state = approved_to_send` but `quote_id` is missing, the next step is `mint.quote.promote`. If `quote_id` exists and `payment_ref` is still missing, the next step is payment-link generation rather than another promotion.
+If `quote_packet.state = approved_to_send` but `quote_id` is missing, the next step is `mint.quote.promote`. If `quote_id` exists and `payment_ref` is still missing, the next step is `mint.quote.generate_payment_link` rather than another promotion.
 
 **Artie Routing Guidance:**
 Route to Artie only when proof work is actually needed, artwork is at least proof-adequate, and the target line items are specific enough to support a truthful mockup. Do not route artwork-missing, product-ambiguous, or spec-ambiguous packets to Artie just to "figure it out."

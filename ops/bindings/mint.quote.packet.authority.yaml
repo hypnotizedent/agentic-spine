@@ -19,8 +19,8 @@ purpose: >
   prepare (REAL customer resolution + service checks) → source (REAL supplier
   blank + garment-cost enrichment) → price (REAL pricing snapshot) → render
   (review draft) → promote (REAL canonical order/revision/quote persistence) →
-  BLOCKED at payment link generation until the governed Stripe bridge is
-  implemented.
+  generate payment link (REAL canonical Stripe checkout bridge) → send
+  (still blocked on governed communications execution).
 
   IMPLEMENTATION STATUS (2026-03-10):
     - Customer resolution: REAL (mint-modules customers service)
@@ -29,7 +29,7 @@ purpose: >
     - Pricing: REAL packet-driven execution when canonical pricing-ready inputs + PRICING_API_KEY exist; otherwise blocked honestly
     - Quote draft: REAL review boundary from governed packet state (inline draft, Printavo integration pending)
     - Promotion: REAL for first-promotion runtime persistence into canonical order/revision/quote records under runtime/domain-state/mint/
-    - Payment link: BLOCKED pending mint.quote.generate_payment_link
+    - Payment link: REAL from canonical quote/order truth through the payment module checkout-session endpoint
     - Receipt tracking: REAL (appends SPINE_CAP_RUN_KEY receipts)
     - Packet index: REAL (runtime/domain-state/mint/quote-packets-index.yaml)
 
@@ -189,10 +189,16 @@ quote_packet_schema:
       description: Reference to payment link/checkout
       structure:
         - payment_provider (stripe|other)
-        - payment_link_id (optional)
-        - payment_link_url (optional)
+        - payment_link_id (Stripe checkout_session_id alias)
+        - checkout_session_id
+        - payment_link_url
+        - payment_link_state (generated)
         - payment_amount (decimal)
+        - payment_amount_cents
         - payment_currency (USD)
+        - payment_type (deposit|balance|full|partial)
+        - quote_id
+        - order_id
         - generated_at (timestamp)
     customer_message_draft:
       type: string
@@ -778,23 +784,25 @@ capability_surface:
       - later order_revision supersession is not implemented yet
   generate_payment_link:
     name: mint.quote.generate_payment_link
-    description: Generate Stripe checkout URL for a promoted quote (design-only)
-    implementation_status: DESIGN_ONLY (not yet implemented)
+    description: Generate Stripe checkout URL for a promoted canonical quote and mirror the payment_ref back to the source quote_packet
+    implementation_status: REAL (runtime_active_in_spine; idempotent checkout bridge from canonical quote/order truth into payment_ref)
     authority_ref: ops/bindings/mint.quote.payment_bridge.authority.yaml
     inputs:
       - quote_id (required, canonical quote entity)
     outputs:
-      - payment_link_url (Stripe checkout URL)
-      - checkout_session_id (Stripe session ID)
+      - payment_ref (Stripe checkout session + URL + canonical quote/order linkage)
+      - quote record updated with payment_ref
       - quote_packet updated with payment_ref
     safety: mutating
     approval_requirement: auto (if quote already approved)
     blockers:
-      - requires mint.quote.promote to be implemented first
+      - requires mint.quote.promote to have already persisted canonical quote/order refs
+      - quote must still be draft, order must not already be paid, and resolved customer email must exist
+      - payment module access still depends on canonical PAYMENT_API_KEY availability
   send:
     name: mint.quote.send
     description: Send quote to customer (approval-gated)
-    implementation_status: BLOCKED (promotion + payment link prerequisites not met)
+    implementation_status: BLOCKED (payment link is real; governed communications execution is still pending)
     authority_ref: ops/bindings/mint.quote.payment_bridge.authority.yaml
     inputs:
       - quote_packet_id (required)
@@ -807,7 +815,7 @@ capability_surface:
     approval_requirement: manual
     blockers:
       - cannot send quote without payment link
-      - payment link blocked on mint.quote.generate_payment_link implementation
+      - communications preview/execute wiring is still required for governed send
 
 agent_guidance:
   default_read_path: ops/bindings/mint.quote.packet.authority.yaml

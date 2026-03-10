@@ -158,30 +158,43 @@ capability_roadmap:
       - quote_packet remains mutable; order, order_revision, quote, pricing_snapshot, and artwork_binding records are immutable promotion outputs
 
   mint.quote.generate_payment_link:
-    capability_state: design_only
+    capability_state: runtime_active_in_spine
     purpose: Generate Stripe checkout URL for a promoted quote
-    implementation_status: not_implemented
+    implementation_status: implemented_in_spine_runtime
     design_complete: true
     inputs:
       - quote_id (required, canonical quote entity)
     outputs:
-      - payment_link_url (Stripe checkout URL)
-      - checkout_session_id (Stripe session ID)
+      - payment_ref (Stripe checkout session, checkout URL, payment type, canonical quote/order linkage)
+      - quote updated with payment_ref
       - quote_packet updated with payment_ref
     safety: mutating
     approval_requirement: auto (if quote already approved_to_send)
     blockers:
       - Requires mint.quote.promote to have already persisted canonical order/revision/quote refs
-      - Requires quote entity to expose order_id, amount_cents, customer_email
+      - Requires quote entity to expose order_id and amount_cents
+      - Requires resolved customer email and unpaid order state
     dependencies:
       - quote entity must exist with quote.order_id populated
       - pricing_snapshot must exist with calculated_totals
       - customer_ref must have resolved email
+    runtime_surface:
+      storage_root: runtime/domain-state/mint
+      quotes_dir: runtime/domain-state/mint/quotes/
+      quote_packets_dir: runtime/domain-state/mint/quote-packets/
+      quotes_index: runtime/domain-state/mint/quotes-index.yaml
     implementation_path: >
-      Call payment module POST /api/v1/payments/checkout-session with order_id
-      from quote.order_id, amount_cents from pricing_snapshot, customer_email
-      from resolved customer_ref. Store checkout_url and session_id in
+      Read the canonical quote entity by quote_id, follow source_quote_packet_id
+      back to the mutable quote_packet, then call payment module
+      POST /api/v1/payments/checkout-session with order_id from quote.order_id,
+      amount_cents from quote.amount_cents, customer_email from resolved
+      customer_ref, and optional reconciled line_items from the promoted packet.
+      Store checkout_url and checkout_session_id in both quote.payment_ref and
       quote_packet.payment_ref.
+    canonical_mapping_rules:
+      - Payment links are always keyed by canonical quote_id and order_id from promotion output; no timestamp-based order ids are allowed
+      - Reruns are idempotent: if quote.payment_ref or quote_packet.payment_ref already carries a generated checkout_session_id, reuse it instead of creating a second session
+      - Packet state remains approved_to_send (or sent on later reruns); payment-link generation does not promote, send, or mark the order paid
 
   mint.quote.send:
     capability_state: specified_but_blocked
@@ -189,12 +202,12 @@ capability_roadmap:
     implementation_status: specified_in_capabilities_yaml
     blockers:
       - Cannot send quote without payment link
-      - Payment link blocked on mint.quote.generate_payment_link implementation
       - Email send mechanism (comms stack) not yet wired
     current_capability_entry: >
-      mint.quote.send exists in ops/capabilities.yaml but remains blocked on the
-      payment-link prerequisite. Implementation must wait for payment link
-      generation and communications execution wiring.
+      mint.quote.send exists in ops/capabilities.yaml but remains blocked on
+      communications execution wiring. The payment-link prerequisite is now
+      implemented; the next send wave must consume the persisted payment_ref
+      instead of inventing quote/order ids.
 
 honest_implementation_status:
   current_reality:
@@ -206,8 +219,8 @@ honest_implementation_status:
     - canonical order revision creation: IMPLEMENTED in Spine runtime storage
     - canonical quote entity creation: IMPLEMENTED in Spine runtime storage
     - canonical pricing_snapshot persistence: IMPLEMENTED in Spine runtime storage
-    - payment link generation: BLOCKED (promotion is real; Stripe checkout bridge still not implemented)
-    - quote send: BLOCKED (requires payment link)
+    - payment link generation: IMPLEMENTED (canonical quote/order truth now bridges into the Stripe checkout-session endpoint)
+    - quote send: BLOCKED (requires communications execution wiring)
     - promotion boundary: IMPLEMENTED for first promotion in Spine runtime
 
   what_is_unblocked_in_design:
@@ -219,7 +232,6 @@ honest_implementation_status:
     - Agents know the capability names (mint.quote.promote, mint.quote.generate_payment_link)
 
   what_remains_blocked_in_implementation:
-    - Payment checkout session generation from promoted quote truth
     - Governed quote send through communications preview/execute path
     - Payment webhook projection back into canonical order/quote/packet state
     - Later revision promotion (new order_revision / quote supersession) is not implemented yet
@@ -251,6 +263,5 @@ conclusion: >
   Quote-to-Pay now has a governed runtime promotion boundary:
   quote_packet → mint.quote.promote → order/revision/quote entities →
   mint.quote.generate_payment_link → POST /api/v1/payments/checkout-session →
-  mint.quote.send. The payment module endpoint already exists and is ready to
-  consume canonical order_id once mint.quote.generate_payment_link is
-  implemented. No fake order_id shortcuts are permitted.
+  mint.quote.send. The payment module endpoint now consumes canonical order_id
+  from promoted quote truth. No fake order_id shortcuts are permitted.
