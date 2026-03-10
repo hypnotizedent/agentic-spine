@@ -6,7 +6,7 @@
 | `bin/generate-scaffold.sh` | 1 |
 | `docs/brain` | 10 |
 | `docs/contracts` | 1 |
-| `docs/governance` | 38 |
+| `docs/governance` | 41 |
 | `docs/jd` | 4 |
 | `docs/pillars` | 3 |
 | `docs/product` | 13 |
