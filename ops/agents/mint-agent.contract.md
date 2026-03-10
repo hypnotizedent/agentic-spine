@@ -144,7 +144,9 @@ When Morpheus runs a tool, its closeout must report the underlying receipt/ledge
 | `mint.module.status.projection.build` | mutating | Refresh governed Mint runtime status projection + canonical ITK capture |
 | `mint.seeds.query` | read-only | Query artwork seed records on mint-data |
 | `mint.intake.validate` | read-only | Validate intake payload against order-intake contract |
+| `mint.quote.packet.normalize` | mutating | Normalize messy inbound evidence into a persisted governed `quote_packet` |
 | `mint.quote.prepare` | mutating | Create or update quote_packet for operator-driven quote workflows |
+| `mint.quote.packet.show` | read-only | Read governed `quote_packet` state without rerunning normalization |
 | `mint.quote.show` | read-only | Read quote_packet by ID for resumability and status |
 | `mint.quote.render` | mutating | Generate draft quote artifacts (payment blocked until governed promotion/payment bridge exists) |
 
@@ -174,6 +176,11 @@ The alias `mintctl operator ...` must resolve to the same command surface.
 
 Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capability surface:
 
+- **`mint.quote.packet.normalize --evidence-file PATH`** — Canonical quote-packet normalizer runtime
+  - Accepts messy inbound evidence payloads and persists resumable `quote_packet` truth
+  - Canonical path for email/form/manual evidence normalization
+  - `mint.quote.prepare` remains a compatibility alias to the same governed runtime
+
 - **`mint.quote.prepare --customer "NAME"`** — Create or update quote_packet work object
   - Orchestrates intake → pricing → suppliers readiness checks
   - Resumable: run multiple times as gaps are resolved
@@ -183,6 +190,9 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
   - Messy evidence must normalize into `customer_ref`, `source_refs`, `line_items`, `artwork_bindings`, `open_gaps`, `confidence`, and `operator_notes`; do not preserve active work in recap docs
   - Do not invent quantity, decoration method, or supplier truth just to make a packet look complete
   - When clarification is required in writing, store the next outbound ask in `customer_message_draft`
+
+- **`mint.quote.packet.show <PACKET_ID>`** — Canonical read surface for normalized packet state
+  - `mint.quote.show` remains a compatibility alias
 
 - **`mint.quote.show <PACKET_ID>`** — Read current quote_packet state
   - Shows resolved customer, intake seed, pricing details, open gaps

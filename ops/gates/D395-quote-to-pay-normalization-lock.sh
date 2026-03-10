@@ -14,6 +14,10 @@ NORMALIZATION_CONTRACT="ops/bindings/mint.quote.line_item.normalization.contract
 PAYMENT_BRIDGE="ops/bindings/mint.quote.payment_bridge.authority.yaml"
 QUOTE_PACKET_AUTHORITY="ops/bindings/mint.quote.packet.authority.yaml"
 MINT_AGENT_CONTRACT="ops/agents/mint-agent.contract.md"
+CAPABILITIES="ops/capabilities.yaml"
+CAPABILITY_MAP="ops/bindings/capability_map.yaml"
+QUOTE_PREPARE_BIN="ops/plugins/mint/bin/quote-prepare"
+QUOTE_PACKET_NORMALIZER="ops/plugins/mint/lib/quote_packet_normalize.py"
 
 fail() {
   echo "FAIL D395: $*" >&2
@@ -80,6 +84,10 @@ require_file "$NORMALIZATION_CONTRACT"
 require_file "$PAYMENT_BRIDGE"
 require_file "$QUOTE_PACKET_AUTHORITY"
 require_file "$MINT_AGENT_CONTRACT"
+require_file "$CAPABILITIES"
+require_file "$CAPABILITY_MAP"
+require_file "$QUOTE_PREPARE_BIN"
+require_file "$QUOTE_PACKET_NORMALIZER"
 
 # Quote packet authority must point at the canonical contract surfaces.
 require_fixed "mint.quote.line_item.normalization.contract.yaml" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must reference line_item.normalization.contract.yaml"
@@ -121,10 +129,19 @@ require_fixed "shipping_ambiguity" "$QUOTE_PACKET_AUTHORITY" "Quote packet autho
 require_fixed "clarification_required" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must govern clarification_required gaps"
 require_fixed "proof_routing_blocked" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must govern proof_routing_blocked gaps"
 
+# Runtime surface must stay pinned to the governed quote_packet normalizer.
+require_fixed "quote_packet_normalize.py" "$QUOTE_PREPARE_BIN" "quote-prepare must delegate to the governed quote_packet normalizer"
+require_fixed "mint.quote.packet.normalize:" "$CAPABILITIES" "Capabilities must register mint.quote.packet.normalize"
+require_fixed "mint.quote.packet.show:" "$CAPABILITIES" "Capabilities must register mint.quote.packet.show"
+require_fixed "mint.quote.packet.normalize:" "$CAPABILITY_MAP" "Capability map must register mint.quote.packet.normalize"
+require_fixed "mint.quote.packet.show:" "$CAPABILITY_MAP" "Capability map must register mint.quote.packet.show"
+
 # Morpheus contract must stay aligned with the normalization and routing rules.
 require_fixed "mint.quote.packet.authority.yaml" "$MINT_AGENT_CONTRACT" "Mint agent must reference quote packet authority"
 require_fixed "mint.quote.line_item.normalization.contract.yaml" "$MINT_AGENT_CONTRACT" "Mint agent must reference normalization contract"
 require_fixed "mint.quote.payment_bridge.authority.yaml" "$MINT_AGENT_CONTRACT" "Mint agent must reference payment bridge"
+require_fixed '| `mint.quote.packet.normalize` | mutating |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.packet.normalize as mutating"
+require_fixed '| `mint.quote.packet.show` | read-only |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.packet.show as read-only"
 require_fixed '| `mint.quote.render` | mutating |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.render as mutating"
 require_fixed "Do not invent quantity, decoration method, or supplier truth" "$MINT_AGENT_CONTRACT" "Mint agent must forbid invented quote facts"
 require_fixed "**Artie Routing Guidance:**" "$MINT_AGENT_CONTRACT" "Mint agent must document Artie routing guidance"
