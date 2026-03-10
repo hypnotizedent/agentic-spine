@@ -45,9 +45,11 @@ mkdir -p "$PACKETS_DIR"
 cp "$FIXTURES_DIR/approved.packet.yaml" "$PACKETS_DIR/quote_packet_reconcile-paid-full.yaml"
 cp "$FIXTURES_DIR/approved.packet.yaml" "$PACKETS_DIR/quote_packet_reconcile-processing.yaml"
 cp "$FIXTURES_DIR/approved.packet.yaml" "$PACKETS_DIR/quote_packet_reconcile-deposit.yaml"
+cp "$FIXTURES_DIR/approved.packet.yaml" "$PACKETS_DIR/quote_packet_reconcile-refunded.yaml"
 yq -i '.quote_packet_id = "reconcile-paid-full"' "$PACKETS_DIR/quote_packet_reconcile-paid-full.yaml"
 yq -i '.quote_packet_id = "reconcile-processing"' "$PACKETS_DIR/quote_packet_reconcile-processing.yaml"
 yq -i '.quote_packet_id = "reconcile-deposit"' "$PACKETS_DIR/quote_packet_reconcile-deposit.yaml"
+yq -i '.quote_packet_id = "reconcile-refunded"' "$PACKETS_DIR/quote_packet_reconcile-refunded.yaml"
 
 run_promote() {
   MINT_QUOTE_PACKETS_DIR="$PACKETS_DIR" \
@@ -224,6 +226,7 @@ section "Promote canonical quote fixtures and prepare sent payment refs"
 run_promote reconcile-paid-full --approved-by MINT-OPERATOR-01 >/dev/null
 run_promote reconcile-processing --approved-by MINT-OPERATOR-01 >/dev/null
 run_promote reconcile-deposit --approved-by MINT-OPERATOR-01 >/dev/null
+run_promote reconcile-refunded --approved-by MINT-OPERATOR-01 >/dev/null
 
 paid_packet="$PACKETS_DIR/quote_packet_reconcile-paid-full.yaml"
 paid_quote_id="$(yq '.quote_id' "$paid_packet")"
@@ -242,6 +245,17 @@ deposit_quote_id="$(yq '.quote_id' "$deposit_packet")"
 deposit_order_id="$(yq '.order_id' "$deposit_packet")"
 deposit_quote_file="$QUOTES_DIR/quote_${deposit_quote_id}.yaml"
 mark_sent_and_attach_payment_ref "$deposit_packet" "$deposit_quote_file" "$deposit_quote_id" "$deposit_order_id" "cs_deposit" "deposit" "50000"
+
+refunded_packet="$PACKETS_DIR/quote_packet_reconcile-refunded.yaml"
+refunded_quote_id="$(yq '.quote_id' "$refunded_packet")"
+refunded_order_id="$(yq '.order_id' "$refunded_packet")"
+refunded_quote_file="$QUOTES_DIR/quote_${refunded_quote_id}.yaml"
+refunded_order_file="$ORDERS_DIR/order_${refunded_order_id}.yaml"
+mark_sent_and_attach_payment_ref "$refunded_packet" "$refunded_quote_file" "$refunded_quote_id" "$refunded_order_id" "cs_refunded" "full" "121968"
+# Simulate that this order was already paid and transitioned to production (so we can test operator_review_required)
+yq -i '.state = "paid" | .paid_at = "2026-03-10T18:10:00Z"' "$refunded_packet"
+yq -i '.quote_state = "accepted"' "$refunded_quote_file"
+yq -i '.payment_state = "paid" | .lifecycle_state = "production"' "$refunded_order_file"
 
 cat >"$SCENARIO_FILE" <<JSON
 {
@@ -278,6 +292,17 @@ cat >"$SCENARIO_FILE" <<JSON
       "payment_record_status": "succeeded",
       "stripe_payment_intent_id": "pi_deposit",
       "record_updated_at": "2026-03-10T18:07:00.000Z"
+    },
+    "$refunded_order_id": {
+      "order_id": "$refunded_order_id",
+      "session_id": "cs_refunded",
+      "payment_type": "full",
+      "payment_amount_cents": 121968,
+      "provider_checkout_status": "complete",
+      "provider_payment_status": "paid",
+      "payment_record_status": "refunded",
+      "stripe_payment_intent_id": "pi_refunded",
+      "record_updated_at": "2026-03-10T18:20:00.000Z"
     }
   }
 }
@@ -324,6 +349,18 @@ deposit_output="$(run_reconcile "$payment_base" "$deposit_quote_id")"
 [[ "$(yq '.payment_ref.payment_link_state' "$deposit_packet")" == "paid" ]] || fail "deposit payment must mark the payment link itself paid"
 grep -Fq "reconciliation_state: partially_paid" <<<"$deposit_output" || fail "deposit reconciliation must report partially_paid"
 pass "deposit payment reconciliation preserves the packet/state distinction honestly"
+
+section "Refund projection mirrors refund truth without automatic lifecycle rollback"
+refund_output="$(run_reconcile "$payment_base" "$refunded_quote_id")"
+[[ "$(yq '.payment_state' "$refunded_order_file")" == "refunded" ]] || fail "refund must project order.payment_state=refunded"
+[[ "$(yq '.lifecycle_state' "$refunded_order_file")" == "production" ]] || fail "refund must preserve order.lifecycle_state (no automatic rollback)"
+[[ "$(yq '.quote_state' "$refunded_quote_file")" == "accepted" ]] || fail "refund must preserve quote.quote_state (no automatic rejection)"
+[[ "$(yq '.state' "$refunded_packet")" == "paid" ]] || fail "refund must preserve quote_packet.state (no automatic rollback)"
+[[ "$(yq '.payment_ref.operator_review_required' "$refunded_packet")" == "true" ]] || fail "refund on production order must require operator review"
+[[ "$(yq '.payment_ref.operator_review_reason' "$refunded_packet")" == "refund detected on production order" ]] || fail "refund must include operator review reason"
+[[ "$(yq '.payment_ref.payment_link_state' "$refunded_packet")" == "refunded" ]] || fail "refund must sync payment_ref.payment_link_state=refunded"
+grep -Fq "reconciliation_state: refunded" <<<"$refund_output" || fail "refund reconciliation must report refunded"
+pass "refund reconciliation projects read-only truth without automatic business rollback"
 
 section "Summary"
 echo "Quote payment reconciliation checks passed"

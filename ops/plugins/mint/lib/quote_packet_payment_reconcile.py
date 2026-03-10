@@ -379,6 +379,9 @@ def main(argv: list[str]) -> int:
         if current_lifecycle in {"production", "fulfilled"}:
             synced_ref["operator_review_required"] = True
             synced_ref["operator_review_reason"] = f"refund detected on {current_lifecycle} order"
+            # Re-sync packet and quote payment_ref after adding operator review fields
+            packet["payment_ref"] = copy.deepcopy(synced_ref)
+            quote["payment_ref"] = copy.deepcopy(synced_ref)
 
         # Do NOT mutate: order.lifecycle_state, quote.quote_state, quote_packet.state
         # Refund does not mean quote was rejected or production should cancel

@@ -170,7 +170,7 @@ require_fixed "shipping_ambiguity" "$QUOTE_PACKET_AUTHORITY" "Quote packet autho
 require_fixed "clarification_required" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must govern clarification_required gaps"
 require_fixed "proof_routing_blocked" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must govern proof_routing_blocked gaps"
 require_fixed "checkout_session_id" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must define checkout_session_id in payment_ref"
-require_fixed "payment_link_state (generated|processing|paid|failed|expired|cancelled)" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must define canonical payment_link_state progression"
+require_fixed "payment_link_state (generated|processing|paid|failed|expired|cancelled|refunded)" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must define canonical payment_link_state progression"
 require_fixed "payment_amount_cents" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must define payment_amount_cents"
 require_fixed "payment_type (deposit|balance|full|partial)" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must define canonical payment_type"
 require_fixed "provider_payment_status" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must define provider payment reconciliation fields"
