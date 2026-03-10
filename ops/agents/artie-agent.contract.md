@@ -49,6 +49,8 @@ Artie must never own:
 ## Primary Commands
 
 - `~/code/workbench/scripts/root/operator/artie.sh whoami`
+- `~/code/workbench/scripts/root/operator/artie.sh up`
+- `~/code/workbench/scripts/root/operator/artie.sh doctor`
 - `~/code/workbench/scripts/root/operator/artie.sh generate [payload.json]`
 - `~/code/workbench/scripts/root/operator/artie.sh status <run_id>`
 - `~/code/workbench/scripts/root/operator/artie.sh list`
