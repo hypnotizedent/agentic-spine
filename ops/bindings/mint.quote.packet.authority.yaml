@@ -704,21 +704,20 @@ capability_surface:
     safety: read-only
   render:
     name: mint.quote.render
-    description: Generate customer-facing artifacts (quote draft, customer message)
-    implementation_status: PARTIAL (quote draft stub, payment blocked pending promotion/payment bridge implementation)
+    description: Generate review-ready customer-facing draft artifacts directly from quote_packet state
+    implementation_status: REAL (review boundary operational; payment remains downstream of promotion)
     inputs:
       - quote_packet_id (required)
     outputs:
-      - quote_draft_ref (stub: inline summary, Printavo pending)
-      - payment_ref (BLOCKED: requires canonical order_id from promotion)
-      - customer_message_draft (includes blocker note)
-      - updated state (needs_input if payment blocked, NOT ready_for_review)
+      - quote_draft_ref (inline structured draft from normalized line_items + pricing_snapshot + shipping posture)
+      - customer_message_draft (customer-facing review draft, not clarification-only copy)
+      - updated state (ready_for_review when packet meets authority conditions; approved_to_send preserved if already approved)
       - receipts (SPINE_CAP_RUN_KEY appended)
     safety: mutating
     blockers:
-      - payment link generation BLOCKED until quote_packet promotion to canonical order/revision/quote is implemented
-      - promotion path defined in mint.quote.payment_bridge.authority.yaml but not yet implemented
-      - quote draft is inline stub, not Printavo integration
+      - blocking gaps for proof, shipping, pricing, or clarification must be resolved before render succeeds
+      - pricing_snapshot confidence must be medium or high
+      - payment link generation remains downstream of quote_packet promotion to canonical order/revision/quote
   promote:
     name: mint.quote.promote
     description: Promote quote_packet to canonical order/revision/quote entities (design-only)

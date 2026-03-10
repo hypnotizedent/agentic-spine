@@ -148,7 +148,7 @@ When Morpheus runs a tool, its closeout must report the underlying receipt/ledge
 | `mint.quote.prepare` | mutating | Create or update quote_packet for operator-driven quote workflows |
 | `mint.quote.packet.show` | read-only | Read governed `quote_packet` state without rerunning normalization |
 | `mint.quote.show` | read-only | Read quote_packet by ID for resumability and status |
-| `mint.quote.render` | mutating | Generate draft quote artifacts (payment blocked until governed promotion/payment bridge exists) |
+| `mint.quote.render` | mutating | Generate review-ready quote draft/message from governed `quote_packet` state |
 
 ## Minimum V1 Command Surface
 
@@ -198,11 +198,11 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
   - Shows resolved customer, intake seed, pricing details, open gaps
   - Use `mint.quote.show --list` to see all packets
 
-- **`mint.quote.render <PACKET_ID>`** — Generate draft quote artifacts
-  - Produces quote draft text and message preview
-  - **Payment link BLOCKED** — requires canonical `order_id` from quote_packet promotion
-  - Promotion path: quote_packet → order → order_revision → quote → payment
-  - See `mint.quote.payment_bridge.authority.yaml` for promotion boundary design
+- **`mint.quote.render <PACKET_ID>`** — Generate review-ready quote draft artifacts
+  - Consumes only governed `quote_packet` state
+  - Produces `quote_draft_ref` plus a customer-facing `customer_message_draft`
+  - Sets `ready_for_review` when the packet meets authority rules, even though payment remains downstream
+  - Blocks honestly when proof, shipping, pricing, or clarification gaps remain
 
 **Blockers:**
 - Suppliers stock execution not yet active (bulk stock endpoint missing)

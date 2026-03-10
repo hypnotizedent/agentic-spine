@@ -18,6 +18,8 @@ CAPABILITIES="ops/capabilities.yaml"
 CAPABILITY_MAP="ops/bindings/capability_map.yaml"
 QUOTE_PREPARE_BIN="ops/plugins/mint/bin/quote-prepare"
 QUOTE_PACKET_NORMALIZER="ops/plugins/mint/lib/quote_packet_normalize.py"
+QUOTE_RENDER_BIN="ops/plugins/mint/bin/quote-render"
+QUOTE_PACKET_RENDERER="ops/plugins/mint/lib/quote_packet_render.py"
 
 fail() {
   echo "FAIL D395: $*" >&2
@@ -88,6 +90,8 @@ require_file "$CAPABILITIES"
 require_file "$CAPABILITY_MAP"
 require_file "$QUOTE_PREPARE_BIN"
 require_file "$QUOTE_PACKET_NORMALIZER"
+require_file "$QUOTE_RENDER_BIN"
+require_file "$QUOTE_PACKET_RENDERER"
 
 # Quote packet authority must point at the canonical contract surfaces.
 require_fixed "mint.quote.line_item.normalization.contract.yaml" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must reference line_item.normalization.contract.yaml"
@@ -128,9 +132,16 @@ done
 require_fixed "shipping_ambiguity" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must govern shipping_ambiguity gaps"
 require_fixed "clarification_required" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must govern clarification_required gaps"
 require_fixed "proof_routing_blocked" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must govern proof_routing_blocked gaps"
+require_fixed "implementation_status: REAL (review boundary operational; payment remains downstream of promotion)" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must keep mint.quote.render as a real review boundary"
+require_fixed "updated state (ready_for_review when packet meets authority conditions; approved_to_send preserved if already approved)" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must allow ready_for_review before payment generation"
+if grep -Fq "updated state (needs_input if payment blocked, NOT ready_for_review)" "$QUOTE_PACKET_AUTHORITY"; then
+  fail "Quote packet authority must not force render back to needs_input just because payment is downstream"
+fi
+CHECKS=$((CHECKS + 1))
 
 # Runtime surface must stay pinned to the governed quote_packet normalizer.
 require_fixed "quote_packet_normalize.py" "$QUOTE_PREPARE_BIN" "quote-prepare must delegate to the governed quote_packet normalizer"
+require_fixed "quote_packet_render.py" "$QUOTE_RENDER_BIN" "quote-render must delegate to the governed quote_packet renderer"
 require_fixed "mint.quote.packet.normalize:" "$CAPABILITIES" "Capabilities must register mint.quote.packet.normalize"
 require_fixed "mint.quote.packet.show:" "$CAPABILITIES" "Capabilities must register mint.quote.packet.show"
 require_fixed "mint.quote.packet.normalize:" "$CAPABILITY_MAP" "Capability map must register mint.quote.packet.normalize"
@@ -143,6 +154,7 @@ require_fixed "mint.quote.payment_bridge.authority.yaml" "$MINT_AGENT_CONTRACT" 
 require_fixed '| `mint.quote.packet.normalize` | mutating |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.packet.normalize as mutating"
 require_fixed '| `mint.quote.packet.show` | read-only |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.packet.show as read-only"
 require_fixed '| `mint.quote.render` | mutating |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.render as mutating"
+require_fixed 'Sets `ready_for_review` when the packet meets authority rules, even though payment remains downstream' "$MINT_AGENT_CONTRACT" "Mint agent must document render readiness before payment generation"
 require_fixed "Do not invent quantity, decoration method, or supplier truth" "$MINT_AGENT_CONTRACT" "Mint agent must forbid invented quote facts"
 require_fixed "**Artie Routing Guidance:**" "$MINT_AGENT_CONTRACT" "Mint agent must document Artie routing guidance"
 

@@ -1,172 +1,20 @@
 #!/usr/bin/env bash
-# quote-render - Generate customer-facing artifacts (quote draft, message)
-#
-# Usage:
-#   quote-render <quote_packet_id>
-#
-# Mutating. Updates quote_packet with rendered artifacts.
-#
-# HONEST IMPLEMENTATION: Does NOT generate fake payment links.
-# Payment link generation is BLOCKED until quote_packet promotion to canonical
-# order/revision/quote and the governed payment bridge are implemented.
+# quote-render - Compatibility wrapper for governed quote_packet render
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
-PACKETS_DIR="$SPINE_ROOT/runtime/domain-state/mint/quote-packets"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+RENDERER="$SCRIPT_DIR/../lib/quote_packet_render.py"
 
-stop(){ echo "STOP (2): $*" >&2; exit 2; }
-fail(){ echo "FAIL (1): $*" >&2; exit 1; }
-
-command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
-
-# Parse arguments
-PACKET_ID=""
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -h|--help)
-      cat <<'EOF'
-Usage:
-  quote-render <quote_packet_id>
-
-Generate customer-facing artifacts for a quote_packet.
-
-Outputs:
-  - quote_draft_ref (inline draft payload)
-  - customer_message_draft
-
-BLOCKED:
-  - payment_ref generation (requires governed quote_packet promotion to canonical quote/order truth)
-
-Example:
-  quote-render 550e8400-e29b-41d4-a716-446655440000
-EOF
-      exit 0
-      ;;
-    --)
-      shift
-      break
-      ;;
-    *)
-      if [[ -z "$PACKET_ID" ]]; then
-        PACKET_ID="$1"
-      else
-        fail "unexpected argument: $1"
-      fi
-      shift
-      ;;
-  esac
-done
-
-if [[ -z "$PACKET_ID" ]]; then
-  fail "quote_packet_id required"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "STOP (2): missing dependency: $PYTHON_BIN" >&2
+  exit 2
 fi
 
-PACKET_FILE="$PACKETS_DIR/quote_packet_${PACKET_ID}.yaml"
-[[ -f "$PACKET_FILE" ]] || fail "packet not found: $PACKET_ID"
-
-TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-# Validate preconditions
-STATE=$(yq '.state' "$PACKET_FILE")
-BLOCKING_GAPS=$(yq '.open_gaps | map(select(.severity == "blocking")) | length' "$PACKET_FILE")
-
-if [[ "$BLOCKING_GAPS" -gt 0 ]]; then
-  fail "cannot render: packet has $BLOCKING_GAPS blocking gaps (state: $STATE)"
+if [[ ! -f "$RENDERER" ]]; then
+  echo "STOP (2): renderer not found: $RENDERER" >&2
+  exit 2
 fi
 
-CUSTOMER_STATE=$(yq '.customer_ref.identity_state' "$PACKET_FILE")
-if [[ "$CUSTOMER_STATE" != "resolved" ]]; then
-  fail "cannot render: customer identity not resolved (state: $CUSTOMER_STATE)"
-fi
-
-PRICING_EXISTS=$(yq '.pricing_snapshot' "$PACKET_FILE")
-if [[ "$PRICING_EXISTS" == "null" ]] || [[ -z "$PRICING_EXISTS" ]]; then
-  fail "cannot render: pricing_snapshot missing (run quote-prepare first)"
-fi
-
-PRICING_STATE=$(yq '.pricing_snapshot.pricing_state' "$PACKET_FILE")
-if [[ "$PRICING_STATE" == "blocked_insufficient_inputs" ]] || [[ "$PRICING_STATE" == "service_unavailable" ]]; then
-  fail "cannot render: pricing not complete (state: $PRICING_STATE)"
-fi
-
-echo "Rendering quote_packet: $PACKET_ID"
-
-# Append receipt for this capability run
-if [[ -n "${SPINE_CAP_RUN_KEY:-}" ]]; then
-  RECEIPT_PATH="receipts/sessions/R${SPINE_CAP_RUN_KEY}/receipt.md"
-  yq -i ".receipts += [{\"receipt_path\": \"$RECEIPT_PATH\", \"capability_name\": \"mint.quote.render\", \"run_key\": \"$SPINE_CAP_RUN_KEY\", \"executed_at\": \"$TIMESTAMP\"}]" "$PACKET_FILE"
-fi
-
-# Step 1: Generate quote draft
-echo "Step 1/3: Generating quote draft..."
-
-CUSTOMER_QUERY=$(yq '.customer_ref.customer_query // .customer_ref.customer_id' "$PACKET_FILE")
-LINE_ITEMS_COUNT=$(yq '.line_items | length' "$PACKET_FILE")
-TOTAL=$(yq '.pricing_snapshot.calculated_totals.total' "$PACKET_FILE")
-
-# Build inline draft payload (stub - would integrate with Printavo API)
-DRAFT_SUMMARY="Quote Draft for $CUSTOMER_QUERY (Line Items: $LINE_ITEMS_COUNT, Total: \$$TOTAL)"
-
-yq -i ".quote_draft_ref = {\"draft_type\": \"inline\", \"draft_payload\": \"$DRAFT_SUMMARY\", \"generated_at\": \"$TIMESTAMP\", \"integration_state\": \"stub_printavo_pending\"}" "$PACKET_FILE"
-echo "  Quote draft: inline (Printavo integration pending)"
-
-# Step 2: Payment link generation - HONEST BLOCKED STATE
-echo "Step 2/3: Payment link generation..."
-echo "  BLOCKED: Payment module requires canonical order/quote truth before checkout"
-echo "  Reason: quote_packet promotion/payment bridge not yet implemented"
-
-PAYMENT_AMOUNT=$(yq '.pricing_snapshot.calculated_totals.total' "$PACKET_FILE")
-yq -i ".payment_ref = {\"payment_provider\": \"stripe\", \"payment_link_state\": \"blocked_requires_order_id\", \"payment_amount\": $PAYMENT_AMOUNT, \"payment_currency\": \"USD\", \"blocking_reason\": \"Payment module checkout requires canonical order/quote truth; quote-to-payment bridge not yet implemented\", \"resolution_path\": \"Promote quote_packet to canonical order/revision/quote, then generate payment link via the governed payment bridge\", \"generated_at\": \"$TIMESTAMP\"}" "$PACKET_FILE"
-echo "  Payment link: BLOCKED (not faking Stripe URL)"
-
-# Step 3: Generate customer message draft
-echo "Step 3/3: Generating customer message draft..."
-
-MESSAGE_DRAFT=$(cat <<EOF
-Hi $CUSTOMER_QUERY,
-
-Thank you for requesting a quote from Mint Prints!
-
-I've prepared your quote with $LINE_ITEMS_COUNT item(s). The total is \$$TOTAL.
-
-[Payment link generation is currently blocked - manual payment coordination required]
-
-If you have any questions or need to make changes, just let me know!
-
-Best regards,
-Ronny
-Mint Prints
-EOF
-)
-
-yq -i ".customer_message_draft = \"$MESSAGE_DRAFT\"" "$PACKET_FILE"
-echo "  Customer message: generated (with payment link blocker note)"
-
-# Update state - HONEST: do NOT claim ready_for_review if payment link is blocked
-if [[ "$TOTAL" -gt 0 ]]; then
-  NEW_STATE="needs_input"
-  echo "  State remains needs_input (payment link blocked)"
-else
-  NEW_STATE="ready_for_review"
-  echo "  State: ready_for_review (zero-dollar quote, no payment needed)"
-fi
-
-yq -i ".state = \"$NEW_STATE\"" "$PACKET_FILE"
-yq -i ".updated_at = \"$TIMESTAMP\"" "$PACKET_FILE"
-
-echo ""
-echo "quote_packet_id: $PACKET_ID"
-echo "state: $STATE -> $NEW_STATE"
-echo "render_status: partial_success"
-echo "quote_draft: generated"
-echo "payment_link: BLOCKED (requires order_id)"
-echo "customer_message: generated (with blocker note)"
-echo ""
-echo "next_step: Implement quote_packet promotion + governed payment bridge"
-echo ""
-echo "packet_file: $PACKET_FILE"
-
-exit 0
+exec "$PYTHON_BIN" "$RENDERER" "$@"
