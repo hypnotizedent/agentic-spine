@@ -5,10 +5,13 @@
 # Owner: @ronny
 # Last verified: 2026-03-10
 
-version: 1
+version: 2
 description: |
   Registry of curated mockup assets for Artie proof generation.
   Each entry defines an approved base image for a specific style/color/view combination.
+
+  V2: Added supplier provenance tracking to support supplier-backed promotion workflows.
+  Registry is DOWNSTREAM of suppliers module — assets are promoted from suppliers OR manually curated.
 
   V1 seed set: CC1717, PC54, PC78 (hoodie), PC90 (longsleeve)
   Views: front (all), back (where curated exists)
@@ -23,16 +26,45 @@ schema:
     - view
     - asset_ref
     - source_type
-    - quality_state
+    - approval_state          # V2: renamed from quality_state
     - placement_profile_id
     - approved_at
+    - promoted_from_supplier  # V2: provenance tracking
+
+  optional_fields:
+    - color_hex
+    - source_url              # V2: original supplier image URL
+    - supplier_product_id     # V2: supplier's product ID if promoted
+    - promoted_at             # V2: when promotion occurred (if promoted_from_supplier=true)
+    - approved_by             # V2: who approved it for client use
+    - override_reason         # V2: why manual override/curation was needed
+
+  field_definitions:
+    mockup_asset_id: Unique identifier for this mockup asset (style-color-view-version)
+    supplier: Supplier name (sanmar, ssactivewear, generic, etc.)
+    style_code: Supplier style code (or __family__ for family fallbacks)
+    color_name: Human-readable color name
+    color_hex: Hex color code for UI display (optional)
+    product_family: Product category (tee, hoodie, sweatshirt, longsleeve, etc.)
+    view: Mockup view angle (front, back, left, right, etc.)
+    asset_ref: Path to asset file in artwork-registry repo
+    source_type: How this asset was sourced (curated, supplier_approved, family_fallback)
+    approval_state: Current approval status (approved, review, deprecated)
+    placement_profile_id: Reference to placement profile in artie.mockup.placement.profiles.yaml
+    approved_at: ISO date when asset was approved
+    promoted_from_supplier: Boolean - true if auto-promoted from supplier API, false if manually curated
+    source_url: Original supplier image URL (for traceability, especially if promoted)
+    supplier_product_id: Supplier's product ID (e.g., SanMar product ID) if promoted from supplier
+    promoted_at: ISO timestamp when asset was promoted from supplier (if applicable)
+    approved_by: Username/agent who approved this asset for client use
+    override_reason: Explanation if manual curation/override was needed (e.g., "supplier image low quality")
 
   source_type_values:
-    - curated              # Hand-selected professional mockup
-    - supplier_approved    # Supplier image explicitly approved for client use
-    - family_fallback      # Generic family-level fallback (use sparingly)
+    - curated              # Hand-selected professional mockup (manually curated, NOT from supplier API)
+    - supplier_approved    # Supplier image explicitly approved for client use (promoted from supplier)
+    - family_fallback      # Generic family-level fallback (use sparingly, manual curation)
 
-  quality_state_values:
+  approval_state_values:  # V2: renamed from quality_state_values
     - approved      # Ready for client-facing proofs
     - review        # Under review, not yet approved
     - deprecated    # Replaced by newer asset
@@ -41,8 +73,34 @@ schema:
     - front
     - back
 
+provenance_workflow:
+  description: |
+    V2: Mockup registry is DOWNSTREAM of suppliers module, not a parallel product catalog.
+    Assets enter the registry via two paths:
+
+    1. SUPPLIER-PROMOTED (promoted_from_supplier: true):
+       - Supplier API provides product image (primary_image_url)
+       - Promotion capability evaluates image for proof-suitability
+       - If approved, asset is promoted to registry with full provenance tracking
+       - source_url, supplier_product_id, promoted_at are populated
+       - approval_state starts as 'review', operator can upgrade to 'approved'
+
+    2. MANUAL CURATION (promoted_from_supplier: false):
+       - Operator manually sources professional mockup (e.g., from supplier website, stock photo, commissioned)
+       - Asset is curated, uploaded to artwork-registry, and added to this registry
+       - source_url MAY be populated if URL is known (for traceability)
+       - supplier_product_id is typically null (unless explicitly linking to supplier product)
+       - override_reason MAY explain why manual curation was needed
+       - approval_state is set by operator (typically 'approved' for curated assets)
+
+  backward_compatibility: |
+    V1 assets (without provenance fields) are treated as manually curated:
+    - promoted_from_supplier defaults to false
+    - All V1 seed assets were manually curated, not auto-promoted
+
 assets:
   # Generic black tee family fallback for local demo/operator use
+  # PROVENANCE: Manually curated generic fallback, not from supplier API
   - mockup_asset_id: family-tee-black-front-v1
     supplier: generic
     style_code: __family__
@@ -52,11 +110,15 @@ assets:
     view: front
     asset_ref: artwork-registry/mockup-assets/family/tee/black/front.png
     source_type: family_fallback
-    quality_state: review
+    approval_state: review  # V2: renamed from quality_state
     placement_profile_id: family.tee.front.fallback
     approved_at: "2026-03-10"
+    promoted_from_supplier: false  # V2: manually curated, not auto-promoted
+    approved_by: operator  # V2: manual curation
+    override_reason: "Generic family fallback for demo/operator use only"
 
   # CC1717 - Comfort Colors Sweatshirt
+  # PROVENANCE: Manually curated professional mockup, not auto-promoted from supplier
   - mockup_asset_id: cc1717-black-front-v1
     supplier: sanmar
     style_code: CC1717
@@ -66,10 +128,13 @@ assets:
     view: front
     asset_ref: artwork-registry/mockup-assets/sanmar/CC1717/black/front.png
     source_type: curated
-    quality_state: approved
+    approval_state: approved  # V2: renamed from quality_state
     placement_profile_id: cc1717.front.v1
     approved_at: "2026-03-10"
+    promoted_from_supplier: false  # V2: manually curated, not auto-promoted
+    approved_by: operator  # V2: manual curation
 
+  # PROVENANCE: Manually curated professional mockup, not auto-promoted from supplier
   - mockup_asset_id: cc1717-black-back-v1
     supplier: sanmar
     style_code: CC1717
@@ -79,11 +144,14 @@ assets:
     view: back
     asset_ref: artwork-registry/mockup-assets/sanmar/CC1717/black/back.png
     source_type: curated
-    quality_state: approved
+    approval_state: approved  # V2: renamed from quality_state
     placement_profile_id: cc1717.back.v1
     approved_at: "2026-03-10"
+    promoted_from_supplier: false  # V2: manually curated, not auto-promoted
+    approved_by: operator  # V2: manual curation
 
   # PC54 - Port & Company Tee
+  # PROVENANCE: Manually curated professional mockup, not auto-promoted from supplier
   - mockup_asset_id: pc54-white-front-v1
     supplier: sanmar
     style_code: PC54
@@ -93,11 +161,14 @@ assets:
     view: front
     asset_ref: artwork-registry/mockup-assets/sanmar/PC54/white/front.png
     source_type: curated
-    quality_state: approved
+    approval_state: approved  # V2: renamed from quality_state
     placement_profile_id: pc54.front.v1
     approved_at: "2026-03-10"
+    promoted_from_supplier: false  # V2: manually curated, not auto-promoted
+    approved_by: operator  # V2: manual curation
 
   # PC78 - Port & Company Hoodie
+  # PROVENANCE: Manually curated professional mockup, not auto-promoted from supplier
   - mockup_asset_id: pc78-navy-front-v1
     supplier: sanmar
     style_code: PC78
@@ -107,11 +178,14 @@ assets:
     view: front
     asset_ref: artwork-registry/mockup-assets/sanmar/PC78/navy/front.png
     source_type: curated
-    quality_state: approved
+    approval_state: approved  # V2: renamed from quality_state
     placement_profile_id: pc78.front.v1
     approved_at: "2026-03-10"
+    promoted_from_supplier: false  # V2: manually curated, not auto-promoted
+    approved_by: operator  # V2: manual curation
 
   # PC90 - Port & Company Longsleeve
+  # PROVENANCE: Manually curated professional mockup, not auto-promoted from supplier
   - mockup_asset_id: pc90-athletic-heather-front-v1
     supplier: sanmar
     style_code: PC90
@@ -121,30 +195,54 @@ assets:
     view: front
     asset_ref: artwork-registry/mockup-assets/sanmar/PC90/athletic-heather/front.png
     source_type: curated
-    quality_state: approved
+    approval_state: approved  # V2: renamed from quality_state
     placement_profile_id: pc90.front.v1
     approved_at: "2026-03-10"
+    promoted_from_supplier: false  # V2: manually curated, not auto-promoted
+    approved_by: operator  # V2: manual curation
 
 fallback_policy:
   description: |
-    Fallback selection order when exact curated asset not found:
-    1. Curated style+color+view exact match (preferred)
-    2. Curated style+view with generic/matched color (if exists)
-    3. Family-level fallback only if explicitly allowed by policy
-    4. Supplier primary_image_url only if explicitly allowed by policy
+    V2: Fallback behavior depends on proof readiness level (draft vs client-ready).
+
+    Fallback selection order when exact approved asset not found:
+    1. Registry asset with approval_state=approved for exact style+color+view (PREFERRED)
+    2. Registry asset with approval_state=approved for style+view with color match (if exists)
+    3. Family-level fallback (if allowed by policy and proof_readiness permits)
+    4. Supplier primary_image_url (if allowed by policy and proof_readiness permits)
     5. Fail honestly with mockup_asset_insufficient
 
-  # V1: Allow supplier fallback while curated assets are being collected
-  # TODO: Set to false once curated assets are uploaded
-  allowed_fallback_to_supplier: true
-  allowed_fallback_to_family: true
-  require_curated_for_client_ready: true
+    CLIENT-READY PROOF POLICY:
+    - Client-facing proofs (for quote approval, final delivery) MUST use registry assets with approval_state=approved
+    - Supplier primary_image_url fallback is NEVER allowed for client-ready proofs
+    - Family fallback is NEVER allowed for client-ready proofs
+    - If no approved registry asset exists, proof generation should fail with mockup_asset_insufficient
+
+    DRAFT/INTERNAL PROOF POLICY:
+    - Draft proofs (operator review, internal testing) MAY fall back to supplier primary_image_url
+    - Draft proofs MAY fall back to family-level fallback
+    - Fallback is allowed ONLY if explicitly enabled below
+
+  # V2: Strict separation between draft and client-ready proof requirements
+  require_exact_match_for_client_proofs: true  # V2: client-ready proofs MUST use registry assets (no fallback)
+  allowed_fallback_to_supplier_for_drafts: true  # V2: drafts can use supplier primary_image_url as fallback
+  allowed_fallback_to_family_for_drafts: true    # V2: drafts can use family fallback
+
+  # V1 DEPRECATED FLAGS (kept for backward compatibility, ignored in V2 logic)
+  # Use require_exact_match_for_client_proofs and allowed_fallback_*_for_drafts instead
+  allowed_fallback_to_supplier: true  # DEPRECATED: use allowed_fallback_to_supplier_for_drafts
+  allowed_fallback_to_family: true    # DEPRECATED: use allowed_fallback_to_family_for_drafts
+  require_curated_for_client_ready: true  # DEPRECATED: use require_exact_match_for_client_proofs
 
 coverage_status:
+  schema_version: 2
   v1_seed_complete: true
-  styles_covered: 4
+  v2_provenance_tracking_enabled: true
+  styles_covered: 4  # CC1717, PC54, PC78, PC90
   views_covered:
     front: 4
     back: 1
-  colors_covered: 4
+  colors_covered: 4  # Black, White, Navy, Athletic Heather
   total_assets: 5
+  manually_curated_assets: 5  # All V1 seed assets are manually curated (promoted_from_supplier: false)
+  supplier_promoted_assets: 0  # No auto-promoted assets yet (will increase as promotion capability is used)
