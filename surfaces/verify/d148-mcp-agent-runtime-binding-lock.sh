@@ -170,7 +170,7 @@ contract_source_dir="$(yq e -r '.paths.source_dir // ""' "$LAUNCHD_CONTRACT")"
 source_dir="$contract_source_dir"
 # Use the current repo checkout for template comparisons to avoid cross-worktree
 # false drift when contract paths point at the canonical machine checkout.
-worktree_source_dir="$ROOT/ops/runtime/launchd"
+worktree_source_dir="$ROOT/ops/plugins/host/launchd"
 if [[ -d "$worktree_source_dir" ]]; then
   source_dir="$worktree_source_dir"
 fi
@@ -179,10 +179,10 @@ log_root="$(yq e -r '.paths.canonical_log_root // ""' "$LAUNCHD_CONTRACT")"
 ssot_tz="$(yq e -r '.runtime.timezone // "America/New_York"' "$TENANT_PROFILE")"
 expected_launchd_spine_root="$(yq e -r '.runtime.spine_root // ""' "$TENANT_PROFILE")"
 if [[ -z "$expected_launchd_spine_root" || "$expected_launchd_spine_root" == "null" ]]; then
-  if [[ "$contract_source_dir" == */ops/runtime/launchd ]]; then
-    expected_launchd_spine_root="${contract_source_dir%/ops/runtime/launchd}"
-  elif [[ "$source_dir" == */ops/runtime/launchd ]]; then
-    expected_launchd_spine_root="${source_dir%/ops/runtime/launchd}"
+  if [[ "$contract_source_dir" == */ops/plugins/host/launchd ]]; then
+    expected_launchd_spine_root="${contract_source_dir%/ops/plugins/host/launchd}"
+  elif [[ "$source_dir" == */ops/plugins/host/launchd ]]; then
+    expected_launchd_spine_root="${source_dir%/ops/plugins/host/launchd}"
   fi
 fi
 if [[ -z "$expected_launchd_spine_root" || "$expected_launchd_spine_root" == "null" ]]; then

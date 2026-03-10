@@ -188,7 +188,7 @@ def _extract_command_target(command: str) -> dict[str, Any]:
             "command": command,
         }
 
-    inbox_match = re.search(r"\./ops/runtime/inbox/([^\s]+)", command)
+    inbox_match = re.search(r"\./ops/plugins/agent/bin/([^\s]+)", command)
     if inbox_match:
         script = inbox_match.group(1)
         remainder = command[inbox_match.end() :].strip()
