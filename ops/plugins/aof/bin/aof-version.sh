@@ -3,6 +3,8 @@
 set -euo pipefail
 
 SP="${SPINE_ROOT:-${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}}"
+source "$SP/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 SCHEMA_VERSION="1.1.0"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 JSON_MODE=0
@@ -20,7 +22,7 @@ fi
 git_sha="$(git -C "$SP" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 git_branch="$(git -C "$SP" branch --show-current 2>/dev/null || echo unknown)"
 
-contract="$SP/docs/product/AOF_PRODUCT_CONTRACT.md"
+contract="$SPINE_FOUNDATION_ROOT/docs/product/AOF_PRODUCT_CONTRACT.md"
 contract_present=false
 contract_last_verified=""
 contract_scope=""

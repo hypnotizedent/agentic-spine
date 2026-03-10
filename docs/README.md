@@ -34,6 +34,7 @@ Keep additions there instead of creating new governance roots.
 - [core/AGENTIC_GAP_MAP.md](core/AGENTIC_GAP_MAP.md) - extraction and boundary tracking
 - [core/STACK_ALIGNMENT.md](core/STACK_ALIGNMENT.md) - stack inventory alignment notes
 - [CONTRIBUTING.md](CONTRIBUTING.md) - doc placement and minimality rules
+- `../agentic-foundation/docs/product/` - extracted product and operator-heavy contracts that no longer live in the spine repo
 
 ## Directory Map
 

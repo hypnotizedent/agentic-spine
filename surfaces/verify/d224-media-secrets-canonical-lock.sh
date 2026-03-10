@@ -5,10 +5,12 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 POLICY="$ROOT/ops/bindings/secrets.namespace.policy.yaml"
 RUNWAY="$ROOT/ops/bindings/secrets.runway.contract.yaml"
-DL_COMPOSE="$ROOT/ops/staged/download-stack/docker-compose.yml"
-ST_COMPOSE="$ROOT/ops/staged/streaming-stack/docker-compose.yml"
+DL_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/staged/download-stack/docker-compose.yml"
+ST_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/staged/streaming-stack/docker-compose.yml"
 SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
 
 ERRORS=0

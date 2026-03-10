@@ -6,12 +6,14 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 CONTRACT="$ROOT/ops/bindings/mcp.runtime.contract.yaml"
 LAUNCHD_CONTRACT="$ROOT/ops/bindings/launchd.runtime.contract.yaml"
 LAUNCHD_REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
 TENANT_PROFILE="$ROOT/ops/bindings/tenant.profile.yaml"
 REGISTRY="$ROOT/ops/bindings/agents.registry.yaml"
-DOC="$ROOT/docs/product/AOF_V1_1_SURFACE_UNIFICATION.md"
+DOC="$SPINE_FOUNDATION_ROOT/docs/product/AOF_V1_1_SURFACE_UNIFICATION.md"
 SKIP_LIVE_LAUNCHCTL="${D148_SKIP_LIVE_LAUNCHCTL:-0}"
 
 ERRORS=0
@@ -156,10 +158,10 @@ done
 
 # 3) Product docs must not advertise stale registration state for activated MCP agents.
 if grep -q 'communications-agent: registered' "$DOC"; then
-  err "stale status in docs/product/AOF_V1_1_SURFACE_UNIFICATION.md for communications-agent"
+  err "stale status in ${DOC} for communications-agent"
 fi
 if grep -q 'immich-agent: registered' "$DOC"; then
-  err "stale status in docs/product/AOF_V1_1_SURFACE_UNIFICATION.md for immich-agent"
+  err "stale status in ${DOC} for immich-agent"
 fi
 
 # 4) Required LaunchAgents must exist in governed source templates, be installed in user launchd,

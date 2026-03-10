@@ -7,6 +7,9 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+FOUNDATION_ROOT="${SPINE_FOUNDATION_ROOT}"
 
 ERRORS=0
 err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }
@@ -14,16 +17,16 @@ ok() { [[ "${DRIFT_VERBOSE:-0}" == "1" ]] && echo "  OK: $*" || true; }
 
 # ── 1. Required product docs ──
 PRODUCT_DOCS=(
-  "docs/product/AOF_PRODUCT_CONTRACT.md"
-  "docs/product/AOF_ACCEPTANCE_GATES.md"
-  "docs/product/AOF_DEPLOYMENT_PLAYBOOK.md"
-  "docs/product/AOF_SUPPORT_SLO.md"
+  "$FOUNDATION_ROOT/docs/product/AOF_PRODUCT_CONTRACT.md"
+  "$FOUNDATION_ROOT/docs/product/AOF_ACCEPTANCE_GATES.md"
+  "$FOUNDATION_ROOT/docs/product/AOF_DEPLOYMENT_PLAYBOOK.md"
+  "$FOUNDATION_ROOT/docs/product/AOF_SUPPORT_SLO.md"
 )
 
 for doc in "${PRODUCT_DOCS[@]}"; do
-  if [[ -f "$ROOT/$doc" ]]; then
+  if [[ -f "$doc" ]]; then
     # Check frontmatter has required fields
-    if ! grep -q '^status: authoritative' "$ROOT/$doc"; then
+    if ! grep -q '^status: authoritative' "$doc"; then
       err "$doc missing 'status: authoritative' frontmatter"
     else
       ok "$doc exists with valid frontmatter"
@@ -112,10 +115,10 @@ DOCS_README="$ROOT/docs/README.md"
 # GOV_INDEX removed — consolidated in lean-reset
 
 if [[ -f "$DOCS_README" ]]; then
-  if grep -q 'product/' "$DOCS_README" 2>/dev/null; then
-    ok "docs/README.md references product/"
+  if grep -q 'agentic-foundation/docs/product' "$DOCS_README" 2>/dev/null; then
+    ok "docs/README.md references extracted product docs"
   else
-    err "docs/README.md does not reference product/ directory"
+    err "docs/README.md does not reference agentic-foundation/docs/product"
   fi
 else
   err "docs/README.md does not exist"

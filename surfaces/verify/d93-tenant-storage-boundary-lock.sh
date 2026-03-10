@@ -5,6 +5,9 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+FOUNDATION_ROOT="${SPINE_FOUNDATION_ROOT}"
 
 ERRORS=0
 err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }
@@ -67,10 +70,10 @@ else
 fi
 
 # ── Check 7: Product doc exists ──
-if [[ -f "$ROOT/docs/product/AOF_TENANT_STORAGE_MODEL.md" ]]; then
+if [[ -f "$FOUNDATION_ROOT/docs/product/AOF_TENANT_STORAGE_MODEL.md" ]]; then
   ok "product doc exists"
 else
-  err "docs/product/AOF_TENANT_STORAGE_MODEL.md does not exist"
+  err "$FOUNDATION_ROOT/docs/product/AOF_TENANT_STORAGE_MODEL.md does not exist"
 fi
 
 # ── Result ──
