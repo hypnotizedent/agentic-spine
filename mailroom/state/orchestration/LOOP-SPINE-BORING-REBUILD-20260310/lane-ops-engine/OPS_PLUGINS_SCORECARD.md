@@ -1,0 +1,73 @@
+# Ops Plugins Scorecard
+
+Immediate children under `ops/plugins/`.
+
+| Surface | Primary bucket | Counts |
+|---|---|---|
+| `MANIFEST.yaml` | `spine-source` | spine:1 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `PLUGIN_LAYOUT.md` | `spine-source` | spine:1 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `SCRIPT_TEMPLATE.sh` | `spine-source` | spine:1 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `agent` | `spine-source` | spine:4 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `alerting` | `foundation-source` | spine:0 | foundation:4 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `aof` | `foundation-source` | spine:0 | foundation:17 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `audit` | `needs-operator-decision` | spine:3 | foundation:0 | runtime:1 | evidence:0 | archive:0 | needs:0 |
+| `authority` | `spine-source` | spine:15 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `backup` | `foundation-source` | spine:0 | foundation:13 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `briefing` | `foundation-source` | spine:0 | foundation:11 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `budget` | `spine-source` | spine:1 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `calendar` | `needs-operator-decision` | spine:0 | foundation:24 | runtime:10 | evidence:0 | archive:0 | needs:0 |
+| `cloudflare` | `foundation-source` | spine:0 | foundation:24 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `communications` | `needs-operator-decision` | spine:0 | foundation:38 | runtime:4 | evidence:0 | archive:0 | needs:0 |
+| `conflicts` | `foundation-source` | spine:0 | foundation:1 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `context` | `foundation-source` | spine:0 | foundation:1 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `docker` | `foundation-source` | spine:0 | foundation:5 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `docs` | `spine-source` | spine:18 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `domains` | `foundation-source` | spine:0 | foundation:3 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `evidence` | `needs-operator-decision` | spine:20 | foundation:0 | runtime:2 | evidence:0 | archive:0 | needs:0 |
+| `finance` | `foundation-source` | spine:0 | foundation:2 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `github` | `foundation-source` | spine:0 | foundation:4 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `ha` | `foundation-source` | spine:0 | foundation:39 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `handoff` | `spine-source` | spine:6 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `home` | `foundation-source` | spine:0 | foundation:7 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `host` | `needs-operator-decision` | spine:0 | foundation:12 | runtime:1 | evidence:0 | archive:0 | needs:0 |
+| `immich` | `foundation-source` | spine:0 | foundation:5 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `inbox-shield` | `foundation-source` | spine:0 | foundation:1 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `infra` | `foundation-source` | spine:0 | foundation:28 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `lifecycle` | `needs-operator-decision` | spine:36 | foundation:0 | runtime:6 | evidence:0 | archive:0 | needs:0 |
+| `loops` | `spine-source` | spine:15 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `mailroom-bridge` | `needs-operator-decision` | spine:0 | foundation:22 | runtime:2 | evidence:0 | archive:0 | needs:0 |
+| `maker` | `foundation-source` | spine:0 | foundation:3 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `mcp` | `foundation-source` | spine:0 | foundation:4 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `mcp-gateway` | `needs-operator-decision` | spine:0 | foundation:1 | runtime:1 | evidence:0 | archive:0 | needs:0 |
+| `media` | `foundation-source` | spine:0 | foundation:26 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `microsoft` | `foundation-source` | spine:0 | foundation:3 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `mint` | `needs-operator-decision` | spine:0 | foundation:63 | runtime:7 | evidence:0 | archive:0 | needs:0 |
+| `monolith` | `foundation-source` | spine:0 | foundation:2 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `n8n` | `foundation-source` | spine:0 | foundation:4 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `network` | `foundation-source` | spine:0 | foundation:30 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `observability` | `needs-operator-decision` | spine:0 | foundation:23 | runtime:2 | evidence:0 | archive:0 | needs:0 |
+| `ops` | `spine-source` | spine:10 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `orchestration` | `spine-source` | spine:15 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `policy` | `foundation-source` | spine:0 | foundation:1 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `proposals` | `spine-source` | spine:8 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `providers` | `needs-operator-decision` | spine:0 | foundation:6 | runtime:2 | evidence:0 | archive:0 | needs:0 |
+| `rag` | `foundation-source` | spine:0 | foundation:13 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `recovery` | `needs-operator-decision` | spine:0 | foundation:7 | runtime:1 | evidence:0 | archive:0 | needs:0 |
+| `release` | `foundation-source` | spine:0 | foundation:1 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `secrets` | `foundation-source` | spine:0 | foundation:23 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `services` | `foundation-source` | spine:0 | foundation:1 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `session` | `spine-source` | spine:7 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `share` | `foundation-source` | spine:0 | foundation:4 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `slo` | `foundation-source` | spine:0 | foundation:1 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `snapshot` | `foundation-source` | spine:0 | foundation:1 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `ssh` | `foundation-source` | spine:0 | foundation:1 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `surface` | `spine-source` | spine:3 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `surveillance` | `foundation-source` | spine:0 | foundation:3 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `tailscale` | `foundation-source` | spine:0 | foundation:8 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `taxlegal` | `foundation-source` | spine:0 | foundation:8 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `tenant` | `foundation-source` | spine:0 | foundation:5 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `vaultwarden` | `foundation-source` | spine:0 | foundation:14 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `verify` | `needs-operator-decision` | spine:35 | foundation:0 | runtime:9 | evidence:0 | archive:0 | needs:0 |
+| `version` | `spine-source` | spine:1 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `vm` | `foundation-source` | spine:0 | foundation:3 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `work-index` | `spine-source` | spine:1 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:0 |
