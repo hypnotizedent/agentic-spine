@@ -2,8 +2,8 @@
 
 | Bucket | File count |
 |---|---:|
-| `spine-source` | 848 |
-| `foundation-source` | 782 |
+| `spine-source` | 845 |
+| `foundation-source` | 785 |
 | `runtime-only` | 11708 |
 | `evidence-only` | 159558 |
 | `archive-only` | 1619 |
