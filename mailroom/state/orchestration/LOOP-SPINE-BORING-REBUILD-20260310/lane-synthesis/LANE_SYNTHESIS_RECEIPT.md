@@ -17,4 +17,4 @@
 - The repo currently resolves to roughly three dominant classes: evidence (`receipts/**` and many mailroom artifacts), runtime (`mailroom` runtime/state exhaust and `runtime/**`), and a much smaller boring spine core.
 - The smallest stable spine is declarative: entry surfaces, bindings, commands, verify/session/orchestration plugins, canonical docs, and deterministic fixtures.
 - The remaining ambiguity is concentrated in local bootstrap state, duplicate canonical docs, staged source, rogue gate roots, and domain/operator-heavy surfaces.
-
+- Closeout verification for this loop packet is complete in the synthesis worktree, but global `verify.run -- fast` still fails on unrelated packet debt in `LOOP-ARTIE-SUPPLIER-BACKED-MOCKUP-PROMOTION-20260310` (`D331`).
