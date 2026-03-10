@@ -14,8 +14,7 @@
 
 ## Findings
 
-- Canonical docs are still centered in `docs/governance/`, most of `docs/core/`, and active surface files under `surfaces/verify/` and `surfaces/commands/`.
+- Control-plane canonical docs are centered in a subset of `docs/governance/`, most of `docs/core/`, and active surface files under `surfaces/verify/` and `surfaces/commands/`.
 - `docs/archive/`, `docs/legacy/`, and `docs/planning/` are mostly archive or evidence surfaces and should leave the hot path.
-- `docs/product/`, `docs/brain/`, `docs/pillars/`, `docs/runbooks/`, `docs/contracts/`, and `surfaces/claude-ai-skill/` are useful source, but they describe product, operator, or extension concerns rather than the boring spine core.
+- `docs/product/`, `docs/brain/`, `docs/pillars/`, `docs/runbooks/`, `docs/contracts/`, `surfaces/claude-ai-skill/`, and the product/operator-heavy subset of `docs/governance/` are useful source, but they describe product, operator, or extension concerns rather than the boring spine core.
 - `docs/CANONICAL/**` and `docs/core/SPINE.md` are explicit duplicate-truth seams and remain operator decisions.
-
