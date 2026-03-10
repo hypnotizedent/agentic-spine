@@ -41,7 +41,7 @@ Repo top-level items and their primary bucket. Mixed folders are marked `needs-o
 | `STUB-auto-apply-enable-blocked.md` | `needs-operator-decision` | spine:0 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:1 |
 | `STUB-mainline-branch-protection.md` | `needs-operator-decision` | spine:0 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:1 |
 | `bin` | `needs-operator-decision` | spine:13 | foundation:2 | runtime:1 | evidence:0 | archive:2 | needs:0 |
-| `docs` | `needs-operator-decision` | spine:46 | foundation:94 | runtime:0 | evidence:6 | archive:263 | needs:8 |
+| `docs` | `needs-operator-decision` | spine:43 | foundation:97 | runtime:0 | evidence:6 | archive:263 | needs:8 |
 | `fixtures` | `needs-operator-decision` | spine:17 | foundation:1 | runtime:0 | evidence:0 | archive:0 | needs:0 |
 | `gates` | `needs-operator-decision` | spine:0 | foundation:0 | runtime:0 | evidence:0 | archive:1 | needs:1 |
 | `mailroom` | `needs-operator-decision` | spine:44 | foundation:3 | runtime:11621 | evidence:406 | archive:308 | needs:21 |

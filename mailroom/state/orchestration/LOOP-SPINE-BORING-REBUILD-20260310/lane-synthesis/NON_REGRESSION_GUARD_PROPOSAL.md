@@ -22,7 +22,7 @@ Explicitly flag `docs/CANONICAL/**`, extra `SPINE.md` copies, and gate scripts o
 ## Guard 5: Foundation Leak Block
 
 Flag new runtime/plugin/product/operator source landing in spine hot paths when it belongs in the extracted foundation:
-`ops/runtime/**`, `ops/engine/**`, non-core `ops/plugins/**`, `docs/product/**`, `docs/runbooks/**`, `docs/brain/**`, `ops/staged/**`.
+`ops/runtime/**`, `ops/engine/**`, non-core `ops/plugins/**`, `docs/product/**`, `docs/runbooks/**`, `docs/brain/**`, `ops/staged/**`, and governance-path product plans or operator checklists.
 
 ## Guard 6: Local Surface Block
 
@@ -32,4 +32,3 @@ Fail tracked changes to local/private files unless an operator decision explicit
 ## Guard 7: Qualification Baseline
 
 Check the generated lane manifests and compare changed paths against their last accepted bucket. Any bucket change requires a linked loop/proposal and explicit justification.
-
