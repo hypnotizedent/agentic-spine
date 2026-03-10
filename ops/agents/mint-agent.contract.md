@@ -26,7 +26,7 @@ Morpheus is the terminal-first Mint operator employee. It wraps existing Mint an
 ## Responsibilities
 
 - Resolve customer input conservatively before any customer-bound move.
-- Use the current operator intake baseline: `artwork-intake/seeds/`, `artwork-intake/operator-drop/`, `artwork-intake/quarantine/`, and `client-assets/<Customer>/<Job>/`.
+- Use the current Mint storage baseline: `artwork-intake/seeds/`, `artwork-intake/operator-drop/`, `artwork-intake/quarantine/`, `artwork-registry/mockup-assets/`, `artwork-output/proofs/`, and `client-assets/<Customer>/<Job>/`.
 - Preview and execute archive moves through the existing archive assistant and filesystem move helpers.
 - Preview and execute quarantine moves through the existing filesystem move helper.
 - Run operator-drop intake into seeds/assets through the existing intake script.

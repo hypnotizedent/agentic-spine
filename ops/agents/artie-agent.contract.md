@@ -44,6 +44,8 @@ Artie must never own:
 |---------|-----------|
 | Product proof wrapper | `~/code/mint-modules/bin/mintctl proofs` |
 | Proof runtime | `~/code/mint-modules/digital-proofs/` |
+| Reusable mockup assets | `~/code/agentic-spine/ops/bindings/artie.mockup.assets.yaml` + `~/MinIO/artwork-registry/mockup-assets/` |
+| Generated proof outputs | `~/MinIO/artwork-output/proofs/<proof_scope_ref>/<run_id>/` |
 | Mint topology ownership | `ops/bindings/agents.registry.yaml` |
 
 ## Primary Commands
