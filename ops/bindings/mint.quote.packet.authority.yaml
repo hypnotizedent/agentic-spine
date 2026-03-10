@@ -16,15 +16,15 @@ purpose: >
   unit that agents use to prepare, price, render, and send a quote.
 
   This authority defines the first real Mint agent business loop: intake →
-  prepare (REAL customer resolution + service checks) → render (quote draft)
-  → BLOCKED at payment until the governed promotion/payment bridge is
-  implemented.
+  prepare (REAL customer resolution + service checks) → price (REAL pricing
+  snapshot) → render (review draft) → BLOCKED at payment until the governed
+  promotion/payment bridge is implemented.
 
   IMPLEMENTATION STATUS (2026-03-09):
     - Customer resolution: REAL (mint-modules customers service)
     - Stock check: readiness detection REAL; execution blocked until suppliers bulk stock endpoint exists
-    - Pricing: REAL when normalized inputs + PRICING_API_KEY exist; otherwise blocked honestly
-    - Quote draft: stub (inline summary, Printavo integration pending)
+    - Pricing: REAL packet-driven execution when canonical pricing-ready inputs + PRICING_API_KEY exist; otherwise blocked honestly
+    - Quote draft: REAL review boundary from governed packet state (inline draft, Printavo integration pending)
     - Payment link: BLOCKED pending quote_packet promotion to canonical order/revision/quote
     - Receipt tracking: REAL (appends SPINE_CAP_RUN_KEY receipts)
     - Packet index: REAL (runtime/domain-state/mint/quote-packets-index.yaml)
@@ -142,12 +142,15 @@ quote_packet_schema:
       description: Pricing calculation results
       structure:
         - snapshot_timestamp
-        - pricing_snapshot_id (uuid, from pricing module)
+        - pricing_snapshot_id (uuid, packet-level pricing run identifier)
+        - pricing_state (completed|blocked_insufficient_inputs|api_key_unavailable|service_unavailable|api_call_failed)
         - line_item_prices (array)
         - decoration_prices (array)
         - calculated_totals (object: subtotal, tax, shipping, total)
         - pricing_receipt_refs (array)
         - confidence_level (high|medium|low)
+        - blocking_reasons (array, optional)
+        - pricing_authority_path (optional)
     open_gaps:
       type: array
       description: Explicit gaps and warnings affecting packet readiness
@@ -702,6 +705,21 @@ capability_surface:
     outputs:
       - full quote_packet structure
     safety: read-only
+  price:
+    name: mint.quote.packet.price
+    description: Persist a real pricing_snapshot directly from governed quote_packet line_items
+    implementation_status: REAL (packet-driven call path to the live pricing estimator)
+    inputs:
+      - quote_packet_id (required)
+    outputs:
+      - pricing_snapshot (completed or blocked with explicit reasons)
+      - updated line_items with pricing_snapshot_id linkage
+      - updated state (drafting when pricing completes cleanly; needs_input when blockers remain)
+      - receipts (SPINE_CAP_RUN_KEY appended)
+    safety: mutating
+    blockers:
+      - quantity, decoration, supplier, shipping, proof, or clarification blockers must resolve before estimator execution
+      - pricing service access still depends on canonical PRICING_API_KEY availability
   render:
     name: mint.quote.render
     description: Generate review-ready customer-facing draft artifacts directly from quote_packet state

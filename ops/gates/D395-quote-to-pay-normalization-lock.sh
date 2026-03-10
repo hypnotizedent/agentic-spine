@@ -18,6 +18,8 @@ CAPABILITIES="ops/capabilities.yaml"
 CAPABILITY_MAP="ops/bindings/capability_map.yaml"
 QUOTE_PREPARE_BIN="ops/plugins/mint/bin/quote-prepare"
 QUOTE_PACKET_NORMALIZER="ops/plugins/mint/lib/quote_packet_normalize.py"
+QUOTE_PRICE_BIN="ops/plugins/mint/bin/quote-price"
+QUOTE_PACKET_PRICER="ops/plugins/mint/lib/quote_packet_price.py"
 QUOTE_RENDER_BIN="ops/plugins/mint/bin/quote-render"
 QUOTE_PACKET_RENDERER="ops/plugins/mint/lib/quote_packet_render.py"
 
@@ -90,6 +92,8 @@ require_file "$CAPABILITIES"
 require_file "$CAPABILITY_MAP"
 require_file "$QUOTE_PREPARE_BIN"
 require_file "$QUOTE_PACKET_NORMALIZER"
+require_file "$QUOTE_PRICE_BIN"
+require_file "$QUOTE_PACKET_PRICER"
 require_file "$QUOTE_RENDER_BIN"
 require_file "$QUOTE_PACKET_RENDERER"
 
@@ -111,6 +115,16 @@ require_yq_item '.completeness_classes.creation_minimum.required_fields[]' 'prod
 forbid_yq_item '.completeness_classes.creation_minimum.required_fields[]' 'quantity' "$NORMALIZATION_CONTRACT" "creation_minimum must not require quantity"
 require_yq_item '.completeness_classes.stock_lookup_ready.required_fields[]' 'quantity' "$NORMALIZATION_CONTRACT" "stock_lookup_ready must require quantity"
 require_yq_item '.completeness_classes.pricing_ready.required_fields[]' 'quantity' "$NORMALIZATION_CONTRACT" "pricing_ready must require quantity"
+require_yq_item '.pricing_inputs[]' 'method_variant' "$NORMALIZATION_CONTRACT" "pricing_inputs must include method_variant"
+require_yq_item '.pricing_inputs[]' 'underbase_needed' "$NORMALIZATION_CONTRACT" "pricing_inputs must include underbase_needed"
+require_yq_item '.pricing_inputs[]' 'stitch_count' "$NORMALIZATION_CONTRACT" "pricing_inputs must include stitch_count"
+require_yq_item '.pricing_inputs[]' 'puff_mode' "$NORMALIZATION_CONTRACT" "pricing_inputs must include puff_mode"
+require_yq_item '.pricing_inputs[]' 'thread_type' "$NORMALIZATION_CONTRACT" "pricing_inputs must include thread_type"
+require_yq_item '.pricing_inputs[]' 'hoop_class' "$NORMALIZATION_CONTRACT" "pricing_inputs must include hoop_class"
+require_yq_item '.pricing_inputs[]' 'material_class' "$NORMALIZATION_CONTRACT" "pricing_inputs must include material_class"
+require_yq_item '.pricing_inputs[]' 'transfer_type' "$NORMALIZATION_CONTRACT" "pricing_inputs must include transfer_type"
+require_yq_item '.pricing_inputs[]' 'artwork_fingerprint_sha256' "$NORMALIZATION_CONTRACT" "pricing_inputs must include artwork_fingerprint_sha256"
+require_yq_item '.pricing_inputs[]' 'garment_family' "$NORMALIZATION_CONTRACT" "pricing_inputs must include garment_family"
 
 # Module mappings and payment bridge guardrails must remain present.
 require_fixed "module_field_mapping:" "$NORMALIZATION_CONTRACT" "Missing module_field_mapping"
@@ -133,6 +147,8 @@ require_fixed "shipping_ambiguity" "$QUOTE_PACKET_AUTHORITY" "Quote packet autho
 require_fixed "clarification_required" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must govern clarification_required gaps"
 require_fixed "proof_routing_blocked" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must govern proof_routing_blocked gaps"
 require_fixed "implementation_status: REAL (review boundary operational; payment remains downstream of promotion)" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must keep mint.quote.render as a real review boundary"
+require_fixed "name: mint.quote.packet.price" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must define mint.quote.packet.price"
+require_fixed "packet-driven call path to the live pricing estimator" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must describe real packet-driven pricing"
 require_fixed "updated state (ready_for_review when packet meets authority conditions; approved_to_send preserved if already approved)" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must allow ready_for_review before payment generation"
 if grep -Fq "updated state (needs_input if payment blocked, NOT ready_for_review)" "$QUOTE_PACKET_AUTHORITY"; then
   fail "Quote packet authority must not force render back to needs_input just because payment is downstream"
@@ -141,11 +157,14 @@ CHECKS=$((CHECKS + 1))
 
 # Runtime surface must stay pinned to the governed quote_packet normalizer.
 require_fixed "quote_packet_normalize.py" "$QUOTE_PREPARE_BIN" "quote-prepare must delegate to the governed quote_packet normalizer"
+require_fixed "quote_packet_price.py" "$QUOTE_PRICE_BIN" "quote-price must delegate to the governed quote_packet pricer"
 require_fixed "quote_packet_render.py" "$QUOTE_RENDER_BIN" "quote-render must delegate to the governed quote_packet renderer"
 require_fixed "mint.quote.packet.normalize:" "$CAPABILITIES" "Capabilities must register mint.quote.packet.normalize"
 require_fixed "mint.quote.packet.show:" "$CAPABILITIES" "Capabilities must register mint.quote.packet.show"
+require_fixed "mint.quote.packet.price:" "$CAPABILITIES" "Capabilities must register mint.quote.packet.price"
 require_fixed "mint.quote.packet.normalize:" "$CAPABILITY_MAP" "Capability map must register mint.quote.packet.normalize"
 require_fixed "mint.quote.packet.show:" "$CAPABILITY_MAP" "Capability map must register mint.quote.packet.show"
+require_fixed "mint.quote.packet.price:" "$CAPABILITY_MAP" "Capability map must register mint.quote.packet.price"
 
 # Morpheus contract must stay aligned with the normalization and routing rules.
 require_fixed "mint.quote.packet.authority.yaml" "$MINT_AGENT_CONTRACT" "Mint agent must reference quote packet authority"
@@ -153,7 +172,9 @@ require_fixed "mint.quote.line_item.normalization.contract.yaml" "$MINT_AGENT_CO
 require_fixed "mint.quote.payment_bridge.authority.yaml" "$MINT_AGENT_CONTRACT" "Mint agent must reference payment bridge"
 require_fixed '| `mint.quote.packet.normalize` | mutating |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.packet.normalize as mutating"
 require_fixed '| `mint.quote.packet.show` | read-only |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.packet.show as read-only"
+require_fixed '| `mint.quote.packet.price` | mutating |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.packet.price as mutating"
 require_fixed '| `mint.quote.render` | mutating |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.render as mutating"
+require_fixed 'Consumes only the persisted `quote_packet` state and canonical `line_items`' "$MINT_AGENT_CONTRACT" "Mint agent must document packet-only pricing input"
 require_fixed 'Sets `ready_for_review` when the packet meets authority rules, even though payment remains downstream' "$MINT_AGENT_CONTRACT" "Mint agent must document render readiness before payment generation"
 require_fixed "Do not invent quantity, decoration method, or supplier truth" "$MINT_AGENT_CONTRACT" "Mint agent must forbid invented quote facts"
 require_fixed "**Artie Routing Guidance:**" "$MINT_AGENT_CONTRACT" "Mint agent must document Artie routing guidance"

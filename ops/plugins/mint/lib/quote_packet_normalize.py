@@ -30,6 +30,18 @@ CANONICAL_LINE_FIELDS = {
     "blanks_cost_cents",
     "supplier_source",
     "lead_time_days",
+    "method_variant",
+    "underbase_needed",
+    "stitch_count",
+    "puff_mode",
+    "thread_type",
+    "hoop_class",
+    "garment_material",
+    "curved_panel_cap",
+    "material_class",
+    "transfer_type",
+    "artwork_fingerprint_sha256",
+    "garment_family",
     "graphic_size_inches",
     "size_tier_label",
     "setup_mode",
@@ -58,6 +70,83 @@ LINE_RUNTIME_HINT_FIELDS = {
     "artwork_required_for_pricing",
     "requires_shipping",
 }
+
+PRICING_REQUIRED_FIELDS = (
+    "line_item_id",
+    "product_type",
+    "quantity",
+    "decoration_method",
+    "color_count",
+    "print_locations",
+    "blanks_cost_cents",
+    "supplier_source",
+    "lead_time_days",
+)
+METHODS_REQUIRING_GRAPHIC_SIZE = {"screen_print", "engraving", "transfers"}
+EMBROIDERY_GRAPHIC_SIZE_HOOPS = {"sleeve_hoop", "oversized_back_hoop"}
+
+
+def has_canonical_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value != ""
+    if isinstance(value, (list, dict, tuple, set)):
+        return bool(value)
+    return True
+
+
+def pricing_missing_fields(item: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for field in PRICING_REQUIRED_FIELDS:
+        if not has_canonical_value(item.get(field)):
+            missing.append(field)
+
+    method = item.get("decoration_method")
+    if not has_canonical_value(method):
+        return missing
+
+    if method == "screen_print":
+        for field in ("method_variant", "underbase_needed", "graphic_size_inches", "size_tier_label", "setup_mode"):
+            if not has_canonical_value(item.get(field)):
+                missing.append(field)
+    elif method == "embroidery":
+        for field in ("stitch_count", "puff_mode", "thread_type", "hoop_class"):
+            if not has_canonical_value(item.get(field)):
+                missing.append(field)
+        if item.get("puff_mode") == "puff" and not has_canonical_value(item.get("garment_material")):
+            missing.append("garment_material")
+        if item.get("hoop_class") == "cap_hoop" and item.get("curved_panel_cap") is not True:
+            missing.append("curved_panel_cap")
+        if item.get("hoop_class") in EMBROIDERY_GRAPHIC_SIZE_HOOPS and not has_canonical_value(item.get("graphic_size_inches")):
+            missing.append("graphic_size_inches")
+    elif method == "engraving":
+        for field in ("graphic_size_inches", "size_tier_label", "setup_mode", "material_class"):
+            if not has_canonical_value(item.get(field)):
+                missing.append(field)
+    elif method == "transfers":
+        for field in (
+            "graphic_size_inches",
+            "size_tier_label",
+            "setup_mode",
+            "transfer_type",
+            "artwork_fingerprint_sha256",
+            "garment_family",
+        ):
+            if not has_canonical_value(item.get(field)):
+                missing.append(field)
+
+    if method in {"engraving", "transfers"} and item.get("setup_mode") == "re_setup":
+        missing.append("prior_job_match")
+
+    deduped: list[str] = []
+    seen = set()
+    for field in missing:
+        if field in seen:
+            continue
+        seen.add(field)
+        deduped.append(field)
+    return deduped
 
 
 def now_utc() -> str:
@@ -354,20 +443,9 @@ def build_artwork_bindings(
 def line_item_completeness(item: dict[str, Any]) -> str:
     if not item.get("product_type"):
         return "incomplete"
+    if not pricing_missing_fields(item):
+        return "pricing_ready"
     if item.get("quantity") and item.get("supplier_code") and item.get("supplier_sku"):
-        if (
-            item.get("decoration_method")
-            and item.get("color_count") is not None
-            and item.get("print_locations")
-            and item.get("blanks_cost_cents") is not None
-            and item.get("supplier_source")
-            and item.get("lead_time_days") is not None
-        ):
-            needs_graphic = item.get("decoration_method") in {"screen_print", "engraving", "transfers"}
-            if not needs_graphic:
-                return "pricing_ready"
-            if item.get("graphic_size_inches") and item.get("size_tier_label") and item.get("setup_mode"):
-                return "pricing_ready"
         return "stock_lookup_ready"
     return "creation_minimum"
 

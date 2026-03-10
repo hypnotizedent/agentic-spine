@@ -148,6 +148,7 @@ When Morpheus runs a tool, its closeout must report the underlying receipt/ledge
 | `mint.quote.prepare` | mutating | Create or update quote_packet for operator-driven quote workflows |
 | `mint.quote.packet.show` | read-only | Read governed `quote_packet` state without rerunning normalization |
 | `mint.quote.show` | read-only | Read quote_packet by ID for resumability and status |
+| `mint.quote.packet.price` | mutating | Persist a real `pricing_snapshot` from governed `quote_packet` line items |
 | `mint.quote.render` | mutating | Generate review-ready quote draft/message from governed `quote_packet` state |
 
 ## Minimum V1 Command Surface
@@ -166,7 +167,7 @@ The alias `mintctl operator ...` must resolve to the same command surface.
 
 ## Quote-to-Pay Lane (Operator-Driven)
 
-**Status:** Partial — intake + pricing integrations real, payment link blocked on promotion
+**Status:** Partial — normalization + packet pricing + review draft are real, payment link blocked on promotion
 
 **Authority:**
 - `ops/bindings/mint.quote.packet.authority.yaml` (quote_packet work object)
@@ -182,7 +183,7 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
   - `mint.quote.prepare` remains a compatibility alias to the same governed runtime
 
 - **`mint.quote.prepare --customer "NAME"`** — Create or update quote_packet work object
-  - Orchestrates intake → pricing → suppliers readiness checks
+  - Compatibility alias to the governed quote-packet normalizer
   - Resumable: run multiple times as gaps are resolved
   - Gaps tracked in `quote_packet.open_gaps[]`
   - Work objects stored at `runtime/domain-state/mint/quote-packets/<PACKET_ID>.yaml`
@@ -198,6 +199,13 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
   - Shows resolved customer, intake seed, pricing details, open gaps
   - Use `mint.quote.show --list` to see all packets
 
+- **`mint.quote.packet.price <PACKET_ID>`** — Persist a real pricing snapshot from governed packet truth
+  - Consumes only the persisted `quote_packet` state and canonical `line_items`
+  - Calls the live pricing estimator only when the packet is pricing-ready enough to be truthful
+  - Writes `pricing_snapshot`, per-line estimate evidence, and `pricing_snapshot_id` linkage back to the packet
+  - Blocks honestly when quantity, decoration, source, shipping, proof, or clarification truth is insufficient
+  - Leaves the packet in `drafting` or `needs_input`; render remains the review boundary
+
 - **`mint.quote.render <PACKET_ID>`** — Generate review-ready quote draft artifacts
   - Consumes only governed `quote_packet` state
   - Produces `quote_draft_ref` plus a customer-facing `customer_message_draft`
@@ -212,9 +220,9 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
 
 **What Works:**
 - Customer resolution + intake seed creation via order-intake
-- Pricing calculations via pricing module when normalized inputs + secrets exist
+- Packet-driven pricing snapshots via pricing module when canonical inputs + secrets exist
 - Gap-driven resumable workflow
-- Draft quote text generation (without payment link)
+- Draft quote text generation from packet state (without payment link)
 - Honest intake normalization for incomplete/VIP shorthand requests via `quote_packet` gaps + confidence
 
 **What Does NOT Work Yet:**
