@@ -22,6 +22,7 @@
 - `runtime/**`
 - `ops/runtime/**`, `ops/engine/**`
 - Domain-heavy plugins and product/operator extensions
+- Product plans and operator checklists, even when they currently live under `docs/governance/`
 - `docs/archive/**`, `docs/legacy/**`, `docs/planning/**`
 - Local/private surfaces:
   `.environment.yaml`, `.identity.yaml`, `.mcp.json`, `.claude/settings.json`, `.spine/**`
@@ -41,4 +42,3 @@ Keep private:
 - Internal domain docs and domain plugins tied to Ronny's live infrastructure
 - Runtime/evidence stores
 - Environment identity and tenant-specific bootstrap state
-

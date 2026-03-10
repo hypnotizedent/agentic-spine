@@ -13,7 +13,6 @@
 
 ## Findings
 
-- The extracted foundation should own runtime implementation, product/package docs, operator surfaces, staged service source, and most extension plugins.
-- The public GitHub starter should shrink to the control-plane core: bindings, commands, verify/session/orchestration plugins, canonical docs, and fixtures.
+- The extracted foundation should own runtime implementation, product/package docs, governance-path product/operator surfaces, staged service source, and most extension plugins.
+- The public GitHub starter should shrink to the control-plane core: bindings, commands, verify/session/orchestration/lifecycle plugins, canonical control-plane docs, and fixtures.
 - Private local surfaces and live runtime/evidence stores should not ship as part of the starter.
-
