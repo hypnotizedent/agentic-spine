@@ -210,6 +210,23 @@ capability_roadmap:
       persisted payment_ref, writes communications receipts back to the packet,
       and marks packet/quote sent only after execute returns a real sent status.
 
+  mint.quote.reconcile_payment:
+    capability_state: runtime_active_in_spine
+    purpose: Reconcile payment module truth back into canonical order/quote/packet state
+    implementation_status: implemented_in_spine_runtime
+    blockers:
+      - Quote must already be sent (or accepted on idempotent reruns) with canonical quote/order refs and generated payment_ref
+      - Payment module checkout-session truth and order payment history must both be readable for the canonical order_id
+      - Provider-paid status alone is not enough; canonical paid state waits for payment record status=succeeded
+      - Refund projection remains downstream; this runtime is for paid/partial-paid projection only
+    current_capability_entry: >
+      mint.quote.reconcile_payment reads GET /api/v1/payments/checkout-session/:sessionId
+      plus GET /api/orders/:orderId/payments, mirrors reconciliation fields into
+      quote.payment_ref and quote_packet.payment_ref, advances order.lifecycle
+      from quoted -> approved on successful customer payment, marks
+      quote.quote_state accepted, and only marks quote_packet paid when the
+      resulting order payment_state is fully paid.
+
 honest_implementation_status:
   current_reality:
     - quote_packet work object: IMPLEMENTED (prepare, show, source, price, render)
@@ -222,6 +239,7 @@ honest_implementation_status:
     - canonical pricing_snapshot persistence: IMPLEMENTED in Spine runtime storage
     - payment link generation: IMPLEMENTED (canonical quote/order truth now bridges into the Stripe checkout-session endpoint)
     - quote send: IMPLEMENTED (governed communications preview/execute through Resend email)
+    - payment reconciliation: IMPLEMENTED (payment module truth now projects canonical paid/partial-paid state back into order/quote/packet)
     - promotion boundary: IMPLEMENTED for first promotion in Spine runtime
 
   what_is_unblocked_in_design:
@@ -230,10 +248,10 @@ honest_implementation_status:
     - Agents know not to invent order_id in payment layer
     - Agents know quote_packet is a work object, not the quote entity
     - Agents know the endpoint (POST /api/v1/payments/checkout-session)
-    - Agents know the capability names (mint.quote.promote, mint.quote.generate_payment_link, mint.quote.send)
+    - Agents know the capability names (mint.quote.promote, mint.quote.generate_payment_link, mint.quote.send, mint.quote.reconcile_payment)
 
   what_remains_blocked_in_implementation:
-    - Payment webhook projection back into canonical order/quote/packet state
+    - Refund/reversal projection back into canonical order/quote/packet state is not implemented yet
     - Later revision promotion (new order_revision / quote supersession) is not implemented yet
     - Order/quote schema deployment in mint-modules database remains future handoff work
 
@@ -259,12 +277,15 @@ agent_guidance:
     step is promotion. If quote_id exists but payment_ref is missing, the next
     step is payment-link generation, not a second promotion. If payment_ref is
     generated and quote_packet.state is still approved_to_send, the next step is
-    mint.quote.send.
+    mint.quote.send. If quote has been sent and payment truth needs projection
+    back into canonical state, the next step is mint.quote.reconcile_payment.
 
 conclusion: >
   Quote-to-Pay now has a governed runtime promotion boundary:
   quote_packet → mint.quote.promote → order/revision/quote entities →
   mint.quote.generate_payment_link → POST /api/v1/payments/checkout-session →
   mint.quote.send → governed communications.send.preview/execute → Resend
-  customer email. The payment module endpoint now consumes canonical order_id
-  from promoted quote truth. No fake order_id shortcuts are permitted.
+  customer email → mint.quote.reconcile_payment → canonical
+  order.payment_state/quote.quote_state/quote_packet.state projection. The
+  payment module endpoint now consumes canonical order_id from promoted quote
+  truth. No fake order_id shortcuts are permitted.

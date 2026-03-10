@@ -20,7 +20,8 @@ purpose: >
   blank + garment-cost enrichment) → price (REAL pricing snapshot) → render
   (review draft) → promote (REAL canonical order/revision/quote persistence) →
   generate payment link (REAL canonical Stripe checkout bridge) → send
-  (REAL governed communications execution through Resend email; SMS remains deferred).
+  (REAL governed communications execution through Resend email; SMS remains deferred) →
+  reconcile payment (REAL canonical paid/partial-paid projection from payment module truth).
 
   IMPLEMENTATION STATUS (2026-03-10):
     - Customer resolution: REAL (mint-modules customers service)
@@ -31,6 +32,7 @@ purpose: >
     - Promotion: REAL for first-promotion runtime persistence into canonical order/revision/quote records under runtime/domain-state/mint/
     - Payment link: REAL from canonical quote/order truth through the payment module checkout-session endpoint
     - Customer send: REAL packet-driven bridge to communications.send.preview -> communications.send.execute with Resend as the only automated Mint customer email route
+    - Payment reconciliation: REAL packet/quote/order projection from payment module session + payment-record truth
     - Receipt tracking: REAL (appends SPINE_CAP_RUN_KEY receipts)
     - Packet index: REAL (runtime/domain-state/mint/quote-packets-index.yaml)
 
@@ -193,7 +195,7 @@ quote_packet_schema:
         - payment_link_id (Stripe checkout_session_id alias)
         - checkout_session_id
         - payment_link_url
-        - payment_link_state (generated)
+        - payment_link_state (generated|processing|paid|failed|expired|cancelled)
         - payment_amount (decimal)
         - payment_amount_cents
         - payment_currency (USD)
@@ -201,6 +203,13 @@ quote_packet_schema:
         - quote_id
         - order_id
         - generated_at (timestamp)
+        - provider_checkout_status (optional: open|complete|expired)
+        - provider_payment_status (optional: paid|unpaid|no_payment_required)
+        - payment_record_id (optional: payment module record id)
+        - payment_record_status (optional: pending|processing|succeeded|failed|refunded|cancelled)
+        - stripe_payment_intent_id (optional)
+        - payment_record_updated_at (optional timestamp from payment module)
+        - reconciled_at (optional timestamp)
     customer_message_draft:
       type: string
       description: Draft customer-facing clarification or quote-send message
@@ -823,6 +832,26 @@ capability_surface:
       - canonical quote/order refs, generated payment_ref, and resolved customer email must exist
       - communications preview must allow email send and resolve provider=resend
       - Microsoft mailbox send is manual-only and forbidden for automated Mint quote send; Twilio SMS remains deferred
+  reconcile_payment:
+    name: mint.quote.reconcile_payment
+    description: Project payment module truth back into canonical order, quote, and quote_packet state
+    implementation_status: REAL (reads payment session + order payment history, then projects paid or partial-paid truth without inventing completion)
+    authority_ref: ops/bindings/mint.quote.payment_bridge.authority.yaml
+    inputs:
+      - quote_id (required, canonical quote entity)
+    outputs:
+      - order payment_state updated from payment module truth
+      - order lifecycle_state advanced to approved when customer payment confirms acceptance
+      - quote quote_state updated to accepted when payment succeeds
+      - quote_packet state updated to paid only when the resulting order payment_state is paid
+      - quote and quote_packet payment_ref mirrored with provider + payment-record reconciliation fields
+    safety: mutating
+    approval_requirement: auto
+    blockers:
+      - quote must already be sent (or accepted on idempotent reruns), with canonical order refs and generated payment_ref
+      - payment module must expose both checkout-session truth and order payment history for the canonical order_id
+      - provider-paid status alone is not enough; if payment record status has not reached succeeded, canonical paid state must remain blocked
+      - deposit/partial payment links may advance order payment_state to partially_paid while leaving quote_packet.state = sent
 
 agent_guidance:
   default_read_path: ops/bindings/mint.quote.packet.authority.yaml

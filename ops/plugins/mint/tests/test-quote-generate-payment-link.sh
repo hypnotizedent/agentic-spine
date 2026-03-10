@@ -11,7 +11,6 @@ spine_paths_init
 
 QUOTE_PROMOTE="$SPINE_ROOT/ops/plugins/mint/bin/quote-promote"
 QUOTE_PAYMENT_LINK="$SPINE_ROOT/ops/plugins/mint/bin/quote-generate-payment-link"
-QUOTE_SEND="$SPINE_ROOT/ops/plugins/mint/bin/quote-send"
 FIXTURES_DIR="$SPINE_ROOT/ops/plugins/mint/tests/fixtures/quote-promote"
 TMP_ROOT="$(mktemp -d)"
 PACKETS_DIR="$TMP_ROOT/quote-packets"
@@ -150,19 +149,12 @@ rerun_output="$(run_payment_link "$payment_base" "$quote_id")"
 grep -Fq "payment_link_state: existing" <<<"$rerun_output" || fail "rerun output must report existing payment link"
 pass "mint.quote.generate_payment_link reuses the existing checkout session on rerun"
 
-section "quote-send stays blocked and preserves canonical ids until communications is wired"
-set +e
-send_output="$(
-  MINT_QUOTE_PACKETS_DIR="$PACKETS_DIR" \
-  "$QUOTE_SEND" promote-approved 2>&1
-)"
-send_rc=$?
-set -e
-[[ "$send_rc" -ne 0 ]] || fail "quote-send must stay blocked until communications execution exists"
-grep -Fq "governed communications send is not implemented yet" <<<"$send_output" || fail "quote-send must explain the communications blocker"
-[[ "$(yq '.state' "$approved_packet")" == "approved_to_send" ]] || fail "blocked quote-send must not mutate packet state"
-[[ "$(yq '.quote_id' "$approved_packet")" == "$quote_id" ]] || fail "blocked quote-send must preserve canonical quote_id"
-pass "quote-send no longer invents quote ids or mutates packet state while send is blocked"
+section "Payment-link generation does not send or mark the packet paid"
+[[ "$(yq '.state' "$approved_packet")" == "approved_to_send" ]] || fail "payment-link generation must preserve approved_to_send state"
+[[ "$(yq '.sent_at' "$approved_packet")" == "null" ]] || fail "payment-link generation must not stamp sent_at"
+[[ "$(yq '.paid_at' "$approved_packet")" == "null" ]] || fail "payment-link generation must not stamp paid_at"
+[[ "$(yq '.quote_state' "$quote_file")" == "draft" ]] || fail "payment-link generation must not mutate the canonical quote state"
+pass "payment-link generation remains a separate step from governed send and payment reconciliation"
 
 section "Payment-link generation blocks honestly when customer email is missing"
 cp "$FIXTURES_DIR/approved.packet.yaml" "$PACKETS_DIR/quote_packet_payment-link-missing-email.yaml"
