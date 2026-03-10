@@ -143,6 +143,8 @@ def find_matching_payment_record(payments: list[dict[str, Any]], session_id: str
 
 
 def derive_payment_link_state(session_status: str, provider_payment_status: str, payment_record_status: str) -> str:
+    if payment_record_status == "refunded":
+        return "refunded"
     if payment_record_status == "succeeded" and provider_payment_status == "paid":
         return "paid"
     if payment_record_status == "processing":
@@ -201,6 +203,18 @@ def synced_payment_ref(
         if payment_record_updated_at:
             synced["payment_record_updated_at"] = payment_record_updated_at
 
+        # Mirror refund metadata when payment record shows refunded status
+        if str(payment_record.get("status") or "") == "refunded":
+            record_metadata = payment_record.get("metadata") or {}
+            if isinstance(record_metadata, dict):
+                refund_reason = str(record_metadata.get("refund_reason") or "").strip()
+                if refund_reason:
+                    synced["refund_reason"] = refund_reason
+            synced["refunded_at"] = payment_record_updated_at or timestamp
+            # Refund amount is the original payment amount (full refund assumed for v1)
+            if synced.get("payment_amount_cents"):
+                synced["refund_amount_cents"] = synced["payment_amount_cents"]
+
     return synced
 
 
@@ -221,6 +235,7 @@ def print_summary(
     print(f"packet_state: {packet.get('state') or ''}")
     print(f"quote_state: {quote.get('quote_state') or ''}")
     print(f"order_payment_state: {order.get('payment_state') or ''}")
+    print(f"order_lifecycle_state: {order.get('lifecycle_state') or ''}")
     print(f"payment_link_state: {payment_ref.get('payment_link_state') or ''}")
     print(f"provider_checkout_status: {payment_ref.get('provider_checkout_status') or ''}")
     print(f"provider_payment_status: {payment_ref.get('provider_payment_status') or ''}")
@@ -229,6 +244,15 @@ def print_summary(
         print(f"stripe_payment_intent_id: {payment_ref['stripe_payment_intent_id']}")
     if packet.get("paid_at"):
         print(f"paid_at: {packet['paid_at']}")
+    if payment_ref.get("refunded_at"):
+        print(f"refunded_at: {payment_ref['refunded_at']}")
+    if payment_ref.get("refund_amount_cents"):
+        print(f"refund_amount_cents: {payment_ref['refund_amount_cents']}")
+    if payment_ref.get("refund_reason"):
+        print(f"refund_reason: {payment_ref['refund_reason']}")
+    if payment_ref.get("operator_review_required"):
+        print(f"operator_review_required: {payment_ref['operator_review_required']}")
+        print(f"operator_review_reason: {payment_ref.get('operator_review_reason') or ''}")
     print(f"packet_file: {packet_file}")
     print(f"quote_file: {quote_file}")
     print(f"order_file: {order_file}")
@@ -343,7 +367,40 @@ def main(argv: list[str]) -> int:
     elif payment_record_status in FAILED_RECORD_STATES:
         reconciliation_state = "expired" if payment_link_state == "expired" else payment_record_status
     elif payment_record_status == "refunded":
-        fail("refund projection into quote/order/packet state is not implemented yet")
+        # Refund projection: mirror refund truth into canonical order/quote/packet WITHOUT automatic lifecycle rollback
+        current_lifecycle = str(order.get("lifecycle_state") or "")
+        already_refunded = str(order.get("payment_state") or "") == "refunded"
+
+        # Project order.payment_state = refunded (preserves lifecycle_state)
+        order["payment_state"] = "refunded"
+        order["updated_at"] = timestamp
+
+        # Add operator review flag if order is in production/fulfilled (manual business decision required)
+        if current_lifecycle in {"production", "fulfilled"}:
+            synced_ref["operator_review_required"] = True
+            synced_ref["operator_review_reason"] = f"refund detected on {current_lifecycle} order"
+
+        # Do NOT mutate: order.lifecycle_state, quote.quote_state, quote_packet.state
+        # Refund does not mean quote was rejected or production should cancel
+
+        reconciliation_state = "existing_refunded" if already_refunded else "refunded"
+
+        update_entity_index(
+            orders_index_file,
+            "orders",
+            "order_id",
+            {
+                "order_id": order_id,
+                "current_revision_id": order.get("current_revision_id"),
+                "active_quote_id": order.get("active_quote_id"),
+                "customer_id": order.get("customer_id"),
+                "lifecycle_state": order.get("lifecycle_state"),
+                "payment_state": order.get("payment_state"),
+                "source_quote_packet_id": order.get("source_quote_packet_id"),
+                "created_at": order.get("created_at"),
+                "updated_at": timestamp,
+            },
+        )
     elif payment_record_status in PAID_RECORD_STATES:
         if provider_payment_status != "paid":
             reconciliation_state = "pending_reconciliation"
