@@ -197,17 +197,18 @@ capability_roadmap:
       - Packet state remains approved_to_send (or sent on later reruns); payment-link generation does not promote, send, or mark the order paid
 
   mint.quote.send:
-    capability_state: specified_but_blocked
+    capability_state: runtime_active_in_spine
     purpose: Send quote to customer via email with payment link
-    implementation_status: specified_in_capabilities_yaml
+    implementation_status: implemented_in_spine_runtime
     blockers:
-      - Cannot send quote without payment link
-      - Email send mechanism (comms stack) not yet wired
+      - Packet must already be approved_to_send (or already sent for idempotent reruns)
+      - Generated payment_ref, canonical quote/order refs, resolved customer email, and consent-compatible communications preview are required
+      - Mint customer email must route through resend; Microsoft remains manual-only and SMS remains deferred
     current_capability_entry: >
-      mint.quote.send exists in ops/capabilities.yaml but remains blocked on
-      communications execution wiring. The payment-link prerequisite is now
-      implemented; the next send wave must consume the persisted payment_ref
-      instead of inventing quote/order ids.
+      mint.quote.send now bridges promoted quote_packet truth into
+      communications.send.preview -> communications.send.execute, reuses the
+      persisted payment_ref, writes communications receipts back to the packet,
+      and marks packet/quote sent only after execute returns a real sent status.
 
 honest_implementation_status:
   current_reality:
@@ -220,7 +221,7 @@ honest_implementation_status:
     - canonical quote entity creation: IMPLEMENTED in Spine runtime storage
     - canonical pricing_snapshot persistence: IMPLEMENTED in Spine runtime storage
     - payment link generation: IMPLEMENTED (canonical quote/order truth now bridges into the Stripe checkout-session endpoint)
-    - quote send: BLOCKED (requires communications execution wiring)
+    - quote send: IMPLEMENTED (governed communications preview/execute through Resend email)
     - promotion boundary: IMPLEMENTED for first promotion in Spine runtime
 
   what_is_unblocked_in_design:
@@ -229,10 +230,9 @@ honest_implementation_status:
     - Agents know not to invent order_id in payment layer
     - Agents know quote_packet is a work object, not the quote entity
     - Agents know the endpoint (POST /api/v1/payments/checkout-session)
-    - Agents know the capability names (mint.quote.promote, mint.quote.generate_payment_link)
+    - Agents know the capability names (mint.quote.promote, mint.quote.generate_payment_link, mint.quote.send)
 
   what_remains_blocked_in_implementation:
-    - Governed quote send through communications preview/execute path
     - Payment webhook projection back into canonical order/quote/packet state
     - Later revision promotion (new order_revision / quote supersession) is not implemented yet
     - Order/quote schema deployment in mint-modules database remains future handoff work
@@ -257,11 +257,14 @@ agent_guidance:
     Agents preparing quotes can resume work by reading mint.quote.show. If
     quote_packet.state shows approved_to_send but quote_id is missing, the next
     step is promotion. If quote_id exists but payment_ref is missing, the next
-    step is payment-link generation, not a second promotion.
+    step is payment-link generation, not a second promotion. If payment_ref is
+    generated and quote_packet.state is still approved_to_send, the next step is
+    mint.quote.send.
 
 conclusion: >
   Quote-to-Pay now has a governed runtime promotion boundary:
   quote_packet → mint.quote.promote → order/revision/quote entities →
   mint.quote.generate_payment_link → POST /api/v1/payments/checkout-session →
-  mint.quote.send. The payment module endpoint now consumes canonical order_id
+  mint.quote.send → governed communications.send.preview/execute → Resend
+  customer email. The payment module endpoint now consumes canonical order_id
   from promoted quote truth. No fake order_id shortcuts are permitted.

@@ -20,7 +20,7 @@ purpose: >
   blank + garment-cost enrichment) → price (REAL pricing snapshot) → render
   (review draft) → promote (REAL canonical order/revision/quote persistence) →
   generate payment link (REAL canonical Stripe checkout bridge) → send
-  (still blocked on governed communications execution).
+  (REAL governed communications execution through Resend email; SMS remains deferred).
 
   IMPLEMENTATION STATUS (2026-03-10):
     - Customer resolution: REAL (mint-modules customers service)
@@ -30,6 +30,7 @@ purpose: >
     - Quote draft: REAL review boundary from governed packet state (inline draft, Printavo integration pending)
     - Promotion: REAL for first-promotion runtime persistence into canonical order/revision/quote records under runtime/domain-state/mint/
     - Payment link: REAL from canonical quote/order truth through the payment module checkout-session endpoint
+    - Customer send: REAL packet-driven bridge to communications.send.preview -> communications.send.execute with Resend as the only automated Mint customer email route
     - Receipt tracking: REAL (appends SPINE_CAP_RUN_KEY receipts)
     - Packet index: REAL (runtime/domain-state/mint/quote-packets-index.yaml)
 
@@ -801,21 +802,27 @@ capability_surface:
       - payment module access still depends on canonical PAYMENT_API_KEY availability
   send:
     name: mint.quote.send
-    description: Send quote to customer (approval-gated)
-    implementation_status: BLOCKED (payment link is real; governed communications execution is still pending)
+    description: Send approved quote_packet truth through governed communications preview/execute
+    implementation_status: REAL (packet-driven bridge to communications.send.preview -> communications.send.execute; canonical Mint customer email routes only through Resend)
     authority_ref: ops/bindings/mint.quote.payment_bridge.authority.yaml
     inputs:
       - quote_packet_id (required)
-      - operator_approval (required, explicit)
+      - consent_state override (optional, explicit)
+      - preview_only (optional, inspection-only; no state mutation)
     outputs:
       - quote_id (canonical quote entity)
+      - preview_receipt path
+      - communications delivery record
       - sent_at timestamp
-      - updated state (sent)
+      - updated state (sent only after execute returns sent)
+      - customer_message_draft updated to final payment-needed body
     safety: mutating
     approval_requirement: manual
     blockers:
-      - cannot send quote without payment link
-      - communications preview/execute wiring is still required for governed send
+      - quote_packet must already be approved_to_send (or already sent for idempotent reruns)
+      - canonical quote/order refs, generated payment_ref, and resolved customer email must exist
+      - communications preview must allow email send and resolve provider=resend
+      - Microsoft mailbox send is manual-only and forbidden for automated Mint quote send; Twilio SMS remains deferred
 
 agent_guidance:
   default_read_path: ops/bindings/mint.quote.packet.authority.yaml

@@ -153,6 +153,7 @@ When Morpheus runs a tool, its closeout must report the underlying receipt/ledge
 | `mint.quote.render` | mutating | Generate review-ready quote draft/message from governed `quote_packet` state |
 | `mint.quote.promote` | mutating | Promote an approved `quote_packet` into canonical order/revision/quote runtime records |
 | `mint.quote.generate_payment_link` | mutating | Generate a Stripe checkout session from promoted canonical quote truth and persist `payment_ref` |
+| `mint.quote.send` | mutating | Send a promoted Mint quote through governed communications preview/execute |
 
 ## Minimum V1 Command Surface
 
@@ -236,9 +237,15 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
   - Reuses an existing generated checkout session on rerun instead of creating duplicates
   - Blocks honestly when the quote is unpromoted, already paid, missing resolved email, or payment service access is unavailable
 
+- **`mint.quote.send <PACKET_ID>`** — Send the approved quote through the governed communications path
+  - Requires `quote_packet.state = approved_to_send`, canonical quote/order refs, generated `payment_ref`, and resolved customer email
+  - Routes customer email only through governed `communications.send.preview` -> `communications.send.execute` and rejects non-Resend routes
+  - Treats consent as a real gate and supports an explicit `--consent-state` override when the packet lacks consent projection
+  - Updates packet and canonical quote to `sent` only after communications execute returns a real sent status
+  - Appends communications preview/execute receipts to the packet and supports `--preview-only` without mutating send state
+
 **Blockers:**
 - Bulk/pack-level supplier stock execution is still not implemented; sourcing runs per line item
-- Governed quote send is still blocked on communications integration
 - Payment webhook projection back into canonical order/quote/packet state is not implemented yet
 - Later order_revision supersession after first promotion is not implemented yet
 
@@ -250,21 +257,21 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
 - Draft quote text generation from packet state (without payment link)
 - First-promotion persistence of canonical order/revision/quote truth from approved packets
 - Governed Stripe checkout-session generation from promoted quote truth with idempotent `payment_ref` persistence
+- Governed customer send through communications preview/execute with Resend as the automated Mint email route
 - Honest intake normalization for incomplete/VIP shorthand requests via `quote_packet` gaps + confidence
 
 **What Does NOT Work Yet:**
 - Automatic supplier resolution from vague/generic product descriptions with no trustworthy style/SKU cues
 - Bulk supplier stock execution across many packet lines in one call
-- Quote send to customer (`mint.quote.send` — blocked on communications integration)
 - Payment webhook projection back into canonical order/quote/packet state
 - Later revision promotion / quote supersession after first canonical promotion
-- End-to-end quote → payment flow after checkout creation (stops before governed send + webhook reconciliation)
+- End-to-end quote → payment flow still stops after send until webhook reconciliation is wired
 
 **No Fake Order IDs:**
 Morpheus must NEVER generate payment links with invented `order_id` values. Payment module's POST `/v2/checkout` generates timestamp-based order_id, but this violates order truth authority. The governed path is: promotion → canonical order_id → payment link. See payment bridge authority for why timestamp-based order_id is rejected.
 
 **Resumability Guidance:**
-If `quote_packet.state = approved_to_send` but `quote_id` is missing, the next step is `mint.quote.promote`. If `quote_id` exists and `payment_ref` is still missing, the next step is `mint.quote.generate_payment_link` rather than another promotion.
+If `quote_packet.state = approved_to_send` but `quote_id` is missing, the next step is `mint.quote.promote`. If `quote_id` exists and `payment_ref` is still missing, the next step is `mint.quote.generate_payment_link` rather than another promotion. If `payment_ref` exists and the packet is still `approved_to_send`, the next step is `mint.quote.send`.
 
 **Artie Routing Guidance:**
 Route to Artie only when proof work is actually needed, artwork is at least proof-adequate, and the target line items are specific enough to support a truthful mockup. Do not route artwork-missing, product-ambiguous, or spec-ambiguous packets to Artie just to "figure it out."

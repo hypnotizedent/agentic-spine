@@ -28,6 +28,8 @@ QUOTE_PROMOTE_BIN="ops/plugins/mint/bin/quote-promote"
 QUOTE_PACKET_PROMOTER="ops/plugins/mint/lib/quote_packet_promote.py"
 QUOTE_PAYMENT_LINK_BIN="ops/plugins/mint/bin/quote-generate-payment-link"
 QUOTE_PACKET_PAYMENT_LINKER="ops/plugins/mint/lib/quote_packet_payment_link.py"
+QUOTE_SEND_BIN="ops/plugins/mint/bin/quote-send"
+QUOTE_PACKET_SENDER="ops/plugins/mint/lib/quote_packet_send.py"
 
 fail() {
   echo "FAIL D395: $*" >&2
@@ -148,6 +150,8 @@ require_fixed "no_fake_order_id:" "$PAYMENT_BRIDGE" "Payment bridge must forbid 
 require_fixed "capability_state: runtime_active_in_spine" "$PAYMENT_BRIDGE" "Payment bridge must mark mint.quote.generate_payment_link as runtime active"
 require_fixed "implementation_status: implemented_in_spine_runtime" "$PAYMENT_BRIDGE" "Payment bridge must mark mint.quote.generate_payment_link as implemented"
 require_fixed "Reruns are idempotent" "$PAYMENT_BRIDGE" "Payment bridge must govern idempotent payment-link reruns"
+require_fixed "mint.quote.send:" "$PAYMENT_BRIDGE" "Payment bridge must define mint.quote.send"
+require_fixed "communications.send.preview -> communications.send.execute" "$PAYMENT_BRIDGE" "Payment bridge must document governed communications send"
 
 # Quote packet authority must carry the Morpheus intake normalization surface.
 require_yq_value '.quote_packet_schema.optional_fields.operator_notes.type' "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must define operator_notes"
@@ -170,6 +174,8 @@ require_fixed "name: mint.quote.promote" "$QUOTE_PACKET_AUTHORITY" "Quote packet
 require_fixed "implementation_status: REAL (first-promotion Spine runtime persists canonical order/revision/quote + pricing_snapshot records; later revision supersession remains downstream)" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must treat mint.quote.promote as a real first-promotion runtime"
 require_fixed "name: mint.quote.generate_payment_link" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must define mint.quote.generate_payment_link"
 require_fixed "implementation_status: REAL (runtime_active_in_spine; idempotent checkout bridge from canonical quote/order truth into payment_ref)" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must treat mint.quote.generate_payment_link as real"
+require_fixed "name: mint.quote.send" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must define mint.quote.send"
+require_fixed "implementation_status: REAL (packet-driven bridge to communications.send.preview -> communications.send.execute; canonical Mint customer email routes only through Resend)" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must treat mint.quote.send as a real governed communications runtime"
 require_fixed "name: mint.quote.packet.source" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must define mint.quote.packet.source"
 require_fixed "packet-driven call path to suppliers search + stock" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must describe real packet-driven supplier sourcing"
 require_fixed "name: mint.quote.packet.price" "$QUOTE_PACKET_AUTHORITY" "Quote packet authority must define mint.quote.packet.price"
@@ -187,18 +193,21 @@ require_fixed "quote_packet_price.py" "$QUOTE_PRICE_BIN" "quote-price must deleg
 require_fixed "quote_packet_render.py" "$QUOTE_RENDER_BIN" "quote-render must delegate to the governed quote_packet renderer"
 require_fixed "quote_packet_promote.py" "$QUOTE_PROMOTE_BIN" "quote-promote must delegate to the governed quote_packet promoter"
 require_fixed "quote_packet_payment_link.py" "$QUOTE_PAYMENT_LINK_BIN" "quote-generate-payment-link must delegate to the governed quote payment-link runtime"
+require_fixed "quote_packet_send.py" "$QUOTE_SEND_BIN" "quote-send must delegate to the governed quote send runtime"
 require_fixed "mint.quote.packet.normalize:" "$CAPABILITIES" "Capabilities must register mint.quote.packet.normalize"
 require_fixed "mint.quote.packet.show:" "$CAPABILITIES" "Capabilities must register mint.quote.packet.show"
 require_fixed "mint.quote.packet.source:" "$CAPABILITIES" "Capabilities must register mint.quote.packet.source"
 require_fixed "mint.quote.packet.price:" "$CAPABILITIES" "Capabilities must register mint.quote.packet.price"
 require_fixed "mint.quote.promote:" "$CAPABILITIES" "Capabilities must register mint.quote.promote"
 require_fixed "mint.quote.generate_payment_link:" "$CAPABILITIES" "Capabilities must register mint.quote.generate_payment_link"
+require_fixed "mint.quote.send:" "$CAPABILITIES" "Capabilities must register mint.quote.send"
 require_fixed "mint.quote.packet.normalize:" "$CAPABILITY_MAP" "Capability map must register mint.quote.packet.normalize"
 require_fixed "mint.quote.packet.show:" "$CAPABILITY_MAP" "Capability map must register mint.quote.packet.show"
 require_fixed "mint.quote.packet.source:" "$CAPABILITY_MAP" "Capability map must register mint.quote.packet.source"
 require_fixed "mint.quote.packet.price:" "$CAPABILITY_MAP" "Capability map must register mint.quote.packet.price"
 require_fixed "mint.quote.promote:" "$CAPABILITY_MAP" "Capability map must register mint.quote.promote"
 require_fixed "mint.quote.generate_payment_link:" "$CAPABILITY_MAP" "Capability map must register mint.quote.generate_payment_link"
+require_fixed "mint.quote.send:" "$CAPABILITY_MAP" "Capability map must register mint.quote.send"
 
 # Morpheus contract must stay aligned with the normalization and routing rules.
 require_fixed "mint.quote.packet.authority.yaml" "$MINT_AGENT_CONTRACT" "Mint agent must reference quote packet authority"
@@ -212,11 +221,14 @@ require_fixed 'Calls suppliers search to choose a canonical blank candidate' "$M
 require_fixed '| `mint.quote.render` | mutating |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.render as mutating"
 require_fixed '| `mint.quote.promote` | mutating |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.promote as mutating"
 require_fixed '| `mint.quote.generate_payment_link` | mutating |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.generate_payment_link as mutating"
+require_fixed '| `mint.quote.send` | mutating |' "$MINT_AGENT_CONTRACT" "Mint agent must describe mint.quote.send as mutating"
 require_fixed 'Consumes only the persisted `quote_packet` state and canonical `line_items`' "$MINT_AGENT_CONTRACT" "Mint agent must document packet-only pricing input"
 require_fixed 'Sets `ready_for_review` when the packet meets authority rules, even though payment remains downstream' "$MINT_AGENT_CONTRACT" "Mint agent must document render readiness before payment generation"
 require_fixed 'Reuses `quote_packet.line_items[].line_item_id` as canonical `order_line_id` on first promotion' "$MINT_AGENT_CONTRACT" "Mint agent must document first-promotion line identity reuse"
 require_fixed 'Calls payment module `POST /api/v1/payments/checkout-session` with canonical order truth' "$MINT_AGENT_CONTRACT" "Mint agent must document governed payment-link generation"
 require_fixed 'Reuses an existing generated checkout session on rerun instead of creating duplicates' "$MINT_AGENT_CONTRACT" "Mint agent must document payment-link idempotency"
+require_fixed 'Routes customer email only through governed `communications.send.preview` -> `communications.send.execute` and rejects non-Resend routes' "$MINT_AGENT_CONTRACT" "Mint agent must document governed Resend-only quote send"
+require_fixed 'Updates packet and canonical quote to `sent` only after communications execute returns a real sent status' "$MINT_AGENT_CONTRACT" "Mint agent must document sent-state mutation only after real communications execution"
 require_fixed "Do not invent quantity, decoration method, or supplier truth" "$MINT_AGENT_CONTRACT" "Mint agent must forbid invented quote facts"
 require_fixed "**Artie Routing Guidance:**" "$MINT_AGENT_CONTRACT" "Mint agent must document Artie routing guidance"
 

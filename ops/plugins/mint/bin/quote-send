@@ -1,143 +1,20 @@
 #!/usr/bin/env bash
-# quote-send - Send quote to customer (approval-gated)
-#
-# Usage:
-#   quote-send <quote_packet_id>
-#
-# Currently blocked. Payment links are real, but governed communications
-# execution is still pending. This command now validates readiness and prints a
-# preview without mutating canonical packet refs.
+# quote-send - Governed quote send bridge
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
-PACKETS_DIR="${MINT_QUOTE_PACKETS_DIR:-$SPINE_ROOT/runtime/domain-state/mint/quote-packets}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+RUNTIME="$SCRIPT_DIR/../lib/quote_packet_send.py"
 
-stop(){ echo "STOP (2): $*" >&2; exit 2; }
-fail(){ echo "FAIL (1): $*" >&2; exit 1; }
-
-command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
-
-# Parse arguments
-PACKET_ID=""
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -h|--help)
-      cat <<'EOF'
-Usage:
-  quote-send <quote_packet_id>
-
-Preview governed quote send readiness. Actual send remains blocked until the
-communications execution wave is implemented.
-
-Preconditions:
-  - state must be 'approved_to_send' or 'ready_for_review'
-  - no blocking gaps
-  - customer_ref.identity_state = resolved
-  - quote_draft_ref must exist
-  - payment_ref must exist and be generated
-  - customer_message_draft must exist
-
-Example:
-  quote-send 550e8400-e29b-41d4-a716-446655440000
-EOF
-      exit 0
-      ;;
-    --)
-      shift
-      break
-      ;;
-    *)
-      if [[ -z "$PACKET_ID" ]]; then
-        PACKET_ID="$1"
-      else
-        fail "unexpected argument: $1"
-      fi
-      shift
-      ;;
-  esac
-done
-
-if [[ -z "$PACKET_ID" ]]; then
-  fail "quote_packet_id required"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "STOP (2): missing dependency: $PYTHON_BIN" >&2
+  exit 2
 fi
 
-PACKET_FILE="$PACKETS_DIR/quote_packet_${PACKET_ID}.yaml"
-[[ -f "$PACKET_FILE" ]] || fail "packet not found: $PACKET_ID"
-
-# Validate preconditions
-STATE=$(yq '.state' "$PACKET_FILE")
-BLOCKING_GAPS=$(yq '.open_gaps | map(select(.severity == "blocking")) | length' "$PACKET_FILE")
-
-if [[ "$STATE" != "ready_for_review" ]] && [[ "$STATE" != "approved_to_send" ]]; then
-  fail "cannot send: packet state is '$STATE' (must be 'ready_for_review' or 'approved_to_send')"
+if [[ ! -f "$RUNTIME" ]]; then
+  echo "STOP (2): runtime not found: $RUNTIME" >&2
+  exit 2
 fi
 
-if [[ "$BLOCKING_GAPS" -gt 0 ]]; then
-  fail "cannot send: packet has $BLOCKING_GAPS blocking gaps"
-fi
-
-CUSTOMER_STATE=$(yq '.customer_ref.identity_state' "$PACKET_FILE")
-if [[ "$CUSTOMER_STATE" != "resolved" ]]; then
-  fail "cannot send: customer identity not resolved"
-fi
-
-DRAFT_EXISTS=$(yq '.quote_draft_ref' "$PACKET_FILE")
-if [[ "$DRAFT_EXISTS" == "null" ]] || [[ -z "$DRAFT_EXISTS" ]]; then
-  fail "cannot send: quote_draft_ref missing (run quote-render first)"
-fi
-
-QUOTE_ID=$(yq '.quote_id' "$PACKET_FILE")
-if [[ "$QUOTE_ID" == "null" ]] || [[ -z "$QUOTE_ID" ]]; then
-  fail "cannot send: canonical quote_id missing (run quote-promote first)"
-fi
-
-ORDER_ID=$(yq '.order_id' "$PACKET_FILE")
-if [[ "$ORDER_ID" == "null" ]] || [[ -z "$ORDER_ID" ]]; then
-  fail "cannot send: canonical order_id missing (run quote-promote first)"
-fi
-
-PAYMENT_EXISTS=$(yq '.payment_ref' "$PACKET_FILE")
-if [[ "$PAYMENT_EXISTS" == "null" ]] || [[ -z "$PAYMENT_EXISTS" ]]; then
-  fail "cannot send: payment_ref missing (run mint.quote.generate_payment_link first)"
-fi
-
-PAYMENT_STATE=$(yq '.payment_ref.payment_link_state' "$PACKET_FILE")
-if [[ "$PAYMENT_STATE" != "generated" ]]; then
-  fail "cannot send: payment_ref state is '$PAYMENT_STATE' (must be 'generated')"
-fi
-
-MESSAGE_EXISTS=$(yq '.customer_message_draft' "$PACKET_FILE")
-if [[ "$MESSAGE_EXISTS" == "null" ]] || [[ -z "$MESSAGE_EXISTS" ]]; then
-  fail "cannot send: customer_message_draft missing (run quote-render first)"
-fi
-
-echo "Sending quote_packet: $PACKET_ID"
-echo ""
-
-# Show customer message for approval context
-echo "Customer Message Preview:"
-echo "---"
-yq -r '.customer_message_draft' "$PACKET_FILE"
-echo "---"
-echo ""
-
-# Governed communications send is intentionally still blocked.
-echo "Send action: BLOCKED (governed communications execution not implemented yet)"
-echo "  Customer: $(yq '.customer_ref.customer_query // .customer_ref.customer_id' "$PACKET_FILE")"
-echo "  Payment link: $(yq '.payment_ref.payment_link_url' "$PACKET_FILE")"
-echo "  Total: \$$(yq '.pricing_snapshot.calculated_totals.total' "$PACKET_FILE")"
-echo "  Quote ID (canonical): $QUOTE_ID"
-echo "  Order ID (canonical): $ORDER_ID"
-
-echo ""
-echo "quote_packet_id: $PACKET_ID"
-echo "quote_id: $QUOTE_ID"
-echo "state: $STATE (unchanged)"
-echo "send_status: blocked_pending_communications_execution"
-echo "next_step: implement governed communications preview/execute using the persisted payment_ref"
-echo "packet_file: $PACKET_FILE"
-echo ""
-stop "governed communications send is not implemented yet; payment link is ready but communications execution is still pending"
+exec "$PYTHON_BIN" "$RUNTIME" "$@"
