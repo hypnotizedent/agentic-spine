@@ -1,0 +1,110 @@
+# Mint Production Readiness Authority
+# Status: authoritative
+# Last verified: 2026-03-10
+# Scope: mint-production-readiness-gate
+
+version: 1
+updated_at: "2026-03-10"
+owner: "@ronny"
+status: authoritative
+scope: mint-production-readiness-gate
+
+purpose: >
+  Define the minimal governed production-readiness gate between canonical paid
+  order truth and the future production handoff/runtime package stages. This
+  authority keeps agents on canonical order/revision/artwork/payment truth
+  instead of letting production readiness drift back into folders, emails, or
+  machine GUIs.
+
+non_goals:
+  - defining the production handoff packet schema
+  - scheduling presses, machines, or shop-floor work
+  - direct RIP/machine queue automation
+  - replacing canonical order, order_revision, quote, or artwork_binding truth
+  - inventing a new production CRM or parallel artwork model
+
+contracts:
+  order_truth_authority: ops/bindings/mint.order.truth.authority.yaml
+  line_item_normalization_contract: ops/bindings/mint.quote.line_item.normalization.contract.yaml
+  module_lifecycle_authority: ops/bindings/mint.module.lifecycle.authority.yaml
+
+readiness_check:
+  canonical_input: order_id
+  read_surfaces:
+    - canonical order entity
+    - order.current_revision_id
+    - canonical order_revision entity
+    - canonical artwork_binding entities
+  readiness_states:
+    - ready
+    - blocked
+  allowed_order_lifecycle_states:
+    - approved
+    - production
+  required_payment_state: paid
+  required_line_truth:
+    - at least one canonical order line must exist on the current order_revision
+    - each line must still satisfy the governed production-spec fields implied by mint.quote.line_item.normalization.contract.yaml
+  artwork_rules:
+    methods_requiring_approved_artwork:
+      - screen_print
+      - embroidery
+      - engraving
+      - transfers
+    binding_selection_state_required: approved
+  production_asset_rules:
+    screen_print:
+      accepted_extensions: [eps, pdf, ai, svg]
+      inferred_target_class: screen_print_press
+    engraving:
+      accepted_extensions: [eps, pdf, ai, svg]
+      inferred_target_class: engraving
+    transfers:
+      accepted_extensions: [gtpl, eps, pdf, ai, svg, png]
+      target_inference:
+        gtpl: gtx
+        eps: screenpro
+        pdf: transfer_rip
+        png: transfer_rip
+    embroidery:
+      accepted_extensions: [dst, u00]
+      near_ready_extensions: [emb, pxf, edr]
+      inferred_target_class: barudan
+  forbidden_shortcuts:
+    - treating paid quote_packet state as sufficient production readiness
+    - treating customer proof approval alone as production readiness
+    - routing straight from quote_packet truth to machine execution
+    - assuming folders or filenames are canonical business truth
+
+runtime_surface:
+  check:
+    name: mint.production.readiness.check
+    description: Evaluate whether canonical order truth is ready for governed production handoff
+    implementation_status: REAL (read-only readiness gate over canonical order/revision/artwork/payment truth)
+    inputs:
+      - order_id (required)
+    outputs:
+      - production_readiness_state
+      - order lifecycle/payment summary
+      - per-line readiness verdicts and blockers
+      - inferred target classes
+      - recommended_next_step
+    safety: read-only
+    blockers:
+      - order payment_state must be paid
+      - order lifecycle_state must be approved or production
+      - artwork-requiring methods need approved artwork bindings with method-compatible production assets
+      - handoff packet creation, blank-receipt truth, and machine dispatch remain downstream
+
+agent_guidance:
+  default_read_path: ops/bindings/mint.production.readiness.authority.yaml
+  check_then_handoff: >
+    Run mint.production.readiness.check before any future production handoff or
+    machine-package stage. If the result is blocked, resolve the blockers in
+    canonical order/artwork truth rather than inventing side notes or manual
+    exception state.
+  conservative_rule: >
+    When the current canonical surfaces cannot prove paid state, approved
+    artwork, or method-compatible production assets, readiness stays blocked.
+    Do not "assume the shop knows" and do not let a RIP/project file become the
+    first source of truth.

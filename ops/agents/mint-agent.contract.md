@@ -60,6 +60,7 @@ Those belong to Fin, Artie, Flying Dutchman, or the underlying Mint modules. Act
 | Mint runtime authority | `~/code/mint-modules/docs/CANONICAL/ACTIVE_AUTHORITY.md` |
 | Mint runtime status read | `ops/bindings/mint.module.status.projected.yaml` via `./bin/ops cap run mint.module.status.show` |
 | Mint order business truth | `ops/bindings/mint.order.truth.authority.yaml` |
+| Mint production readiness gate | `ops/bindings/mint.production.readiness.authority.yaml` |
 | Mint storage/operator baseline | `~/code/mint-modules/docs/CANONICAL/MINT_STORAGE_RUNTIME_CONTRACT.yaml` |
 | Customer resolve | `~/code/mint-modules/customers/scripts/customer-resolve.ts` |
 | Archive preview/move | `~/code/mint-modules/artwork/scripts/archive-assistant.ts` |
@@ -155,6 +156,7 @@ When Morpheus runs a tool, its closeout must report the underlying receipt/ledge
 | `mint.quote.generate_payment_link` | mutating | Generate a Stripe checkout session from promoted canonical quote truth and persist `payment_ref` |
 | `mint.quote.send` | mutating | Send a promoted Mint quote through governed communications preview/execute |
 | `mint.quote.reconcile_payment` | mutating | Reconcile payment module truth back into canonical order, quote, and `quote_packet` state |
+| `mint.production.readiness.check` | read-only | Evaluate whether canonical order truth is ready for governed production handoff |
 
 ## Minimum V1 Command Surface
 
@@ -284,3 +286,19 @@ If `quote_packet.state = approved_to_send` but `quote_id` is missing, the next s
 
 **Artie Routing Guidance:**
 Route to Artie only when proof work is actually needed, artwork is at least proof-adequate, and the target line items are specific enough to support a truthful mockup. Do not route artwork-missing, product-ambiguous, or spec-ambiguous packets to Artie just to "figure it out."
+
+## Production Boundary (Early)
+
+**Status:** Early but real — canonical production readiness evaluation is live; production handoff packet creation and machine-package staging remain downstream
+
+**Authority:**
+- `ops/bindings/mint.production.readiness.authority.yaml` (governed paid/approved/art-ready production gate)
+- `ops/bindings/mint.order.truth.authority.yaml` (canonical order/order_revision/artwork_binding truth)
+- `ops/bindings/mint.quote.line_item.normalization.contract.yaml` (production-spec field requirements reused by the readiness gate)
+
+- **`mint.production.readiness.check <ORDER_ID>`** — Read-only governed production readiness gate
+  - Consumes only canonical `order`, `order.current_revision_id`, `order_revision`, and `artwork_binding` truth
+  - Requires `order.payment_state = paid` plus `order.lifecycle_state in [approved, production]`
+  - Reuses the governed line-item contract to block lines that still lack production-spec inputs
+  - Requires approved artwork bindings plus method-compatible production assets for artwork-requiring methods
+  - Emits per-line readiness/blockers, inferred target classes, and the next governed step without mutating business truth
