@@ -16,13 +16,15 @@ purpose: >
   unit that agents use to prepare, price, render, and send a quote.
 
   This authority defines the first real Mint agent business loop: intake →
-  prepare (REAL customer resolution + service checks) → price (REAL pricing
-  snapshot) → render (review draft) → BLOCKED at payment until the governed
-  promotion/payment bridge is implemented.
+  prepare (REAL customer resolution + service checks) → source (REAL supplier
+  blank + garment-cost enrichment) → price (REAL pricing snapshot) → render
+  (review draft) → BLOCKED at payment until the governed promotion/payment
+  bridge is implemented.
 
   IMPLEMENTATION STATUS (2026-03-09):
     - Customer resolution: REAL (mint-modules customers service)
-    - Stock check: readiness detection REAL; execution blocked until suppliers bulk stock endpoint exists
+    - Supplier sourcing: REAL when the packet carries canonical style/SKU truth; resolves blank source + garment cost from suppliers search
+    - Stock check: REAL per-line when supplier_code + supplier_sku + quantity exist; bulk pack execution still deferred
     - Pricing: REAL packet-driven execution when canonical pricing-ready inputs + PRICING_API_KEY exist; otherwise blocked honestly
     - Quote draft: REAL review boundary from governed packet state (inline draft, Printavo integration pending)
     - Payment link: BLOCKED pending quote_packet promotion to canonical order/revision/quote
@@ -133,6 +135,7 @@ quote_packet_schema:
       description: Supplier stock check results
       structure:
         - snapshot_timestamp
+        - stock_check_state
         - supplier_results (array)
         - stock_available (boolean per line item)
         - stock_warnings (array)
@@ -705,6 +708,21 @@ capability_surface:
     outputs:
       - full quote_packet structure
     safety: read-only
+  source:
+    name: mint.quote.packet.source
+    description: Resolve supplier blank truth, garment cost, and per-line stock evidence into the packet
+    implementation_status: REAL (packet-driven call path to suppliers search + stock)
+    inputs:
+      - quote_packet_id (required)
+    outputs:
+      - updated line_items with supplier_code, supplier_sku, supplier_source, blanks_cost_cents, and supplier metadata
+      - inventory_snapshot (supplier selection + stock evidence when quantity is known)
+      - updated state (drafting when sourcing succeeds cleanly; needs_input when supplier or stock blockers remain)
+      - receipts (SPINE_CAP_RUN_KEY appended)
+    safety: mutating
+    blockers:
+      - sourcing requires canonical style/SKU cues; generic product descriptions remain blocked honestly
+      - stock execution requires supplier_code + supplier_sku + quantity; otherwise inventory_snapshot stays sourcing-only
   price:
     name: mint.quote.packet.price
     description: Persist a real pricing_snapshot directly from governed quote_packet line_items

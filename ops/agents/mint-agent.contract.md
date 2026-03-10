@@ -148,6 +148,7 @@ When Morpheus runs a tool, its closeout must report the underlying receipt/ledge
 | `mint.quote.prepare` | mutating | Create or update quote_packet for operator-driven quote workflows |
 | `mint.quote.packet.show` | read-only | Read governed `quote_packet` state without rerunning normalization |
 | `mint.quote.show` | read-only | Read quote_packet by ID for resumability and status |
+| `mint.quote.packet.source` | mutating | Resolve supplier blank truth, garment cost, and stock evidence into a governed `quote_packet` |
 | `mint.quote.packet.price` | mutating | Persist a real `pricing_snapshot` from governed `quote_packet` line items |
 | `mint.quote.render` | mutating | Generate review-ready quote draft/message from governed `quote_packet` state |
 
@@ -167,7 +168,7 @@ The alias `mintctl operator ...` must resolve to the same command surface.
 
 ## Quote-to-Pay Lane (Operator-Driven)
 
-**Status:** Partial — normalization + packet pricing + review draft are real, payment link blocked on promotion
+**Status:** Partial — normalization + supplier sourcing + packet pricing + review draft are real, payment link blocked on promotion
 
 **Authority:**
 - `ops/bindings/mint.quote.packet.authority.yaml` (quote_packet work object)
@@ -199,6 +200,13 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
   - Shows resolved customer, intake seed, pricing details, open gaps
   - Use `mint.quote.show --list` to see all packets
 
+- **`mint.quote.packet.source <PACKET_ID>`** — Resolve supplier blank truth and garment cost into the packet
+  - Consumes only the persisted `quote_packet` state and canonical line-item fields like `style_code`, `brand`, `color`, and `size_breakdown`
+  - Calls suppliers search to choose a canonical blank candidate when the packet carries enough style/SKU truth
+  - Persists `supplier_code`, `supplier_sku`, `supplier_source`, `blanks_cost_cents`, and `inventory_snapshot`
+  - Blocks honestly when the request is too ambiguous to choose a trustworthy supplier blank
+  - Clears stale pricing/render artifacts when supplier truth changes so the packet can be re-priced cleanly
+
 - **`mint.quote.packet.price <PACKET_ID>`** — Persist a real pricing snapshot from governed packet truth
   - Consumes only the persisted `quote_packet` state and canonical `line_items`
   - Calls the live pricing estimator only when the packet is pricing-ready enough to be truthful
@@ -213,20 +221,22 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
   - Blocks honestly when proof, shipping, pricing, or clarification gaps remain
 
 **Blockers:**
-- Suppliers stock execution not yet active (bulk stock endpoint missing)
+- Bulk/pack-level supplier stock execution is still not implemented; sourcing runs per line item
 - **Payment requires promotion**: `mint.quote.promote` is design-only, not yet implemented
 - Cannot generate payment links until quote_packet promotes to canonical quote entity
 - Order entity, order revision, and quote entity creation not yet implemented
 
 **What Works:**
 - Customer resolution + intake seed creation via order-intake
+- Packet-driven supplier blank resolution and garment-cost enrichment via suppliers search when canonical style cues exist
 - Packet-driven pricing snapshots via pricing module when canonical inputs + secrets exist
 - Gap-driven resumable workflow
 - Draft quote text generation from packet state (without payment link)
 - Honest intake normalization for incomplete/VIP shorthand requests via `quote_packet` gaps + confidence
 
 **What Does NOT Work Yet:**
-- Suppliers stock execution (blocked on missing bulk endpoint)
+- Automatic supplier resolution from vague/generic product descriptions with no trustworthy style/SKU cues
+- Bulk supplier stock execution across many packet lines in one call
 - Quote_packet promotion to canonical order/revision/quote (`mint.quote.promote` — design-only)
 - Payment link generation (`mint.quote.generate_payment_link` — design-only)
 - Quote send to customer (`mint.quote.send` — blocked on payment link)
