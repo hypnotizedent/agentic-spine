@@ -5,6 +5,11 @@ SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 SPINE_OPERATOR_TZ="${SPINE_OPERATOR_TZ:-America/New_York}"
 export SPINE_OPERATOR_TZ
 export TZ="${SPINE_OPERATOR_TZ}"
+if [[ -f "${SPINE_ROOT}/ops/lib/runtime-paths.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${SPINE_ROOT}/ops/lib/runtime-paths.sh"
+  spine_runtime_resolve_paths
+fi
 
 if [[ -f "${SPINE_ROOT}/ops/lib/spine-log.sh" ]]; then
   # shellcheck source=/dev/null
@@ -21,9 +26,9 @@ export SPINE_RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-worker}"
 # indefinitely. Auto-approve capabilities that require manual consent.
 export OPS_CAP_AUTO_APPROVE="${OPS_CAP_AUTO_APPROVE:-yes}"
 
-RUNTIME_JOB_LOG="${SPINE_RUNTIME_JOB_LOG:-$SPINE_ROOT/mailroom/logs/runtime-jobs.ndjson}"
+RUNTIME_JOB_LOG="${SPINE_RUNTIME_JOB_LOG:-${SPINE_LOGS:-$SPINE_ROOT/mailroom/logs}/runtime-jobs.ndjson}"
 RUNTIME_JOB_LOG_KEEP_DAYS="${SPINE_RUNTIME_JOB_LOG_KEEP_DAYS:-14}"
-EMAIL_INTENT_DIR="${SPINE_ROOT}/mailroom/outbox/alerts/email-intents"
+EMAIL_INTENT_DIR="${SPINE_OUTBOX:-$SPINE_ROOT/mailroom/outbox}/alerts/email-intents"
 
 spine_enqueue_email_intent() {
   local domain_id="$1"

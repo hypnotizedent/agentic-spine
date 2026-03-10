@@ -16,9 +16,11 @@
 set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+source "$SPINE_REPO/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 MODE="${1:-}"
 
-exec python3 - "$SPINE_REPO" "$MODE" <<'PYTHON'
+exec python3 - "$SPINE_REPO" "$MODE" "$SPINE_STATE" "$SPINE_INBOX" "$SPINE_OUTBOX" <<'PYTHON'
 import json
 import os
 import re
@@ -29,14 +31,22 @@ from pathlib import Path
 
 spine = Path(sys.argv[1])
 mode = sys.argv[2] if len(sys.argv) > 2 else ""
+state_root = Path(sys.argv[3])
+inbox_dir = Path(sys.argv[4])
+outbox_dir = Path(sys.argv[5])
 
-scopes_dir = spine / "mailroom" / "state" / "loop-scopes"
-orch_dir = spine / "mailroom" / "state" / "orchestration"
+scopes_dir = state_root / "loop-scopes"
+orch_dir = state_root / "orchestration"
 gaps_file = spine / "ops" / "bindings" / "operational.gaps.yaml"
-inbox_dir = spine / "mailroom" / "inbox"
-loop_heartbeat_dir = spine / "mailroom" / "state" / "loop-heartbeats"
+loop_heartbeat_dir = state_root / "loop-heartbeats"
 
 FM_RE = re.compile(r"^---\s*$")
+
+def display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(spine))
+    except ValueError:
+        return str(path)
 
 # ── Parse scope files ─────────────────────────────────────────────────────
 
@@ -101,7 +111,7 @@ if scopes_dir.is_dir():
             "horizon": fm.get("horizon", "now"),
             "execution_readiness": fm.get("execution_readiness", "runnable"),
             "title": fm.get("_title", f.stem),
-            "file": str(f.relative_to(spine)),
+            "file": display_path(f),
         }
         all_scopes.append(entry)
         if status == "planned":
@@ -152,7 +162,7 @@ if orch_dir.is_dir():
             "heartbeat_ttl_minutes": "",
             "heartbeat_source": "",
             "title": loop_id,
-            "file": str(manifest_path.relative_to(spine)),
+            "file": display_path(manifest_path),
             "source": "orchestration",
         }
 
@@ -268,7 +278,7 @@ inbox_total = sum(inbox_lanes.values())
 
 # ── Parse proposals queue ─────────────────────────────────────────────────
 
-proposals_dir = spine / "mailroom" / "outbox" / "proposals"
+proposals_dir = outbox_dir / "proposals"
 proposal_counts = Counter()
 
 if proposals_dir.is_dir():

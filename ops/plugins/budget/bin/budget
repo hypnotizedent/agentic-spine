@@ -2,18 +2,20 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-STATE="${ROOT}/.spine"
-RECEIPTS="${ROOT}/receipts/sessions"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+RECEIPTS="${SPINE_RECEIPTS}"
 
 # Defaults: start cheap + safe
 CAP_TOTAL="${SPINE_BUDGET_MAX_TOTAL_TOKENS:-300}"
 
 run_id="${1:-}"
 if [[ -z "${run_id}" ]]; then
-  if [[ -f "${STATE}/latest_run_id" ]]; then
-    run_id="$(cat "${STATE}/latest_run_id")"
+  latest_receipt="$(find "${RECEIPTS}" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort | tail -n 1)"
+  if [[ -n "${latest_receipt}" ]]; then
+    run_id="$(basename "${latest_receipt}")"
   else
-    echo "FAIL: no RUN_ID provided and no .spine/latest_run_id found" >&2
+    echo "FAIL: no RUN_ID provided and no receipts found under ${RECEIPTS}" >&2
     exit 1
   fi
 fi

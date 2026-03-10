@@ -19,11 +19,11 @@ source "$_SP_LIB_DIR/../lib/yaml.sh"
 source "$_SP_LIB_DIR/../lib/runtime-paths.sh"
 source "$_SP_LIB_DIR/../lib/spine-log.sh"
 spine_runtime_resolve_paths
-export SPINE_INBOX SPINE_OUTBOX SPINE_STATE SPINE_LOGS
+export SPINE_INBOX SPINE_OUTBOX SPINE_STATE SPINE_LOCKS SPINE_LOGS SPINE_RECEIPTS SPINE_VERIFY_ROOT SPINE_DOMAIN_STATE
 
 STATE_DIR="$SPINE_STATE"
 CAP_FILE="$SPINE_CODE/ops/capabilities.yaml"
-RECEIPTS="$SPINE_REPO/receipts/sessions"
+RECEIPTS="$SPINE_RECEIPTS"
 LEDGER="$STATE_DIR/ledger.csv"
 LEDGER_HEADER="run_id,created_at,started_at,finished_at,status,prompt_file,result_file,error,context_used"
 
@@ -51,20 +51,27 @@ ensure_state_dir() {
 
 # Bootstrap runtime directories/files that may be absent in fresh worktrees.
 ensure_runtime_scaffold() {
-    local proposals_dir="$SPINE_CODE/mailroom/outbox/proposals"
-    local loop_scopes_dir="$SPINE_CODE/mailroom/state/loop-scopes"
-    local calendar_dir="$SPINE_CODE/mailroom/outbox/calendar"
+    local proposals_dir="$SPINE_OUTBOX/proposals"
+    local loop_scopes_dir="$SPINE_STATE/loop-scopes"
+    local sessions_dir="$SPINE_STATE/sessions"
+    local orchestration_dir="$SPINE_STATE/orchestration"
+    local calendar_dir="$SPINE_OUTBOX/calendar"
     local calendar_external_dir="$calendar_dir/external"
-    local evidence_state_dir="$SPINE_CODE/ops/plugins/evidence/state"
-    local receipt_index="$evidence_state_dir/receipt-index.yaml"
+    local evidence_index_dir="$SPINE_VERIFY_ROOT/indexes"
+    local receipt_index="$evidence_index_dir/receipt-index.yaml"
 
     mkdir -p \
         "$RECEIPTS" \
         "$proposals_dir" \
         "$loop_scopes_dir" \
+        "$sessions_dir" \
+        "$orchestration_dir" \
         "$calendar_dir" \
         "$calendar_external_dir" \
-        "$evidence_state_dir"
+        "$evidence_index_dir" \
+        "$SPINE_LOCKS" \
+        "$SPINE_LOGS" \
+        "$SPINE_TMP"
 
     if [[ ! -f "$receipt_index" ]]; then
         cat > "$receipt_index" <<EOF
@@ -400,35 +407,22 @@ run_cap() {
 
     count_active_sessions() {
       local sessions_dir="$SPINE_STATE/sessions"
-      local repo_sessions_dir="$SPINE_REPO/mailroom/state/sessions"
       local count=0
-      local scanned=()
+      [[ -d "$sessions_dir" ]] || {
+        echo 0
+        return 0
+      }
 
-      for dir in "$sessions_dir" "$repo_sessions_dir"; do
-        [[ -n "$dir" ]] || continue
-        [[ -d "$dir" ]] || continue
-
-        local seen=0
-        for existing in "${scanned[@]:-}"; do
-          if [[ "$existing" == "$dir" ]]; then
-            seen=1
-            break
-          fi
-        done
-        [[ "$seen" -eq 1 ]] && continue
-        scanned+=("$dir")
-
-        for session_dir in "$dir"/SES-*; do
-          [[ -d "$session_dir" ]] || continue
-          local manifest="$session_dir/session.yaml"
-          [[ -f "$manifest" ]] || continue
-          local pid
-          pid="$(sed -n 's/^pid:[[:space:]]*//p' "$manifest" | head -1)"
-          [[ -n "${pid:-}" ]] || continue
-          if kill -0 "$pid" 2>/dev/null; then
-            count=$((count + 1))
-          fi
-        done
+      for session_dir in "$sessions_dir"/SES-*; do
+        [[ -d "$session_dir" ]] || continue
+        local manifest="$session_dir/session.yaml"
+        [[ -f "$manifest" ]] || continue
+        local pid
+        pid="$(sed -n 's/^pid:[[:space:]]*//p' "$manifest" | head -1)"
+        [[ -n "${pid:-}" ]] || continue
+        if kill -0 "$pid" 2>/dev/null; then
+          count=$((count + 1))
+        fi
       done
 
       echo "$count"
@@ -786,7 +780,7 @@ run_cap() {
       esac
 
       if [[ -n "$orchestrator_loop_id" ]]; then
-        orchestrator_scope_file="$SPINE_CODE/mailroom/state/loop-scopes/${orchestrator_loop_id}.scope.md"
+        orchestrator_scope_file="$SPINE_STATE/loop-scopes/${orchestrator_loop_id}.scope.md"
         if [[ ! -f "$orchestrator_scope_file" ]]; then
           echo "BLOCKED: orchestrator mutation guard"
           echo "Capability: $name"
@@ -847,7 +841,7 @@ run_cap() {
             else
               caller_worktree="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
               caller_branch="$(git -C "$PWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-              orchestrator_lock_dir="$SPINE_CODE/mailroom/state/orchestration/${orchestrator_loop_id}/locks"
+              orchestrator_lock_dir="$SPINE_STATE/orchestration/${orchestrator_loop_id}/locks"
               orchestrator_lock_match=""
 
               if [[ -n "$caller_worktree" && -n "$caller_branch" && -d "$orchestrator_lock_dir" ]]; then

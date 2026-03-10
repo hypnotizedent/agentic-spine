@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import plistlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -45,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--calendar-markdown",
         nargs="?",
-        const="mailroom/outbox/operations/launchd-schedule-calendar.md",
+        const="",
         help="Write schedule calendar markdown (optional output path relative to repo)",
     )
     return parser.parse_args()
@@ -198,7 +199,8 @@ def classify_status(now: datetime, evidence: JobEvidence, cadence_seconds: int) 
 def build_payload(root: Path) -> dict[str, Any]:
     registry_path = root / "ops/bindings/launchd.scheduler.registry.yaml"
     contract_path = root / "ops/bindings/launchd.runtime.contract.yaml"
-    runtime_jobs_path = root / "mailroom/logs/runtime-jobs.ndjson"
+    logs_root = Path(os.environ.get("SPINE_LOGS") or str(root / "mailroom" / "logs"))
+    runtime_jobs_path = logs_root / "runtime-jobs.ndjson"
 
     registry = load_yaml(registry_path)
     contract = load_yaml(contract_path)
@@ -346,7 +348,12 @@ def main() -> int:
 
     calendar_path: Path | None = None
     if args.calendar_markdown is not None:
-        calendar_path = write_calendar_markdown(root, payload, args.calendar_markdown)
+        output_rel = args.calendar_markdown or os.path.join(
+            os.environ.get("SPINE_OUTBOX", str(root / "mailroom" / "outbox")),
+            "operations",
+            "launchd-schedule-calendar.md",
+        )
+        calendar_path = write_calendar_markdown(root, payload, output_rel)
 
     if args.json:
         if calendar_path:

@@ -3,8 +3,10 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 PACKET_CONTRACT="$ROOT/ops/bindings/orchestration.packet.contract.yaml"
-ORCH_DIR="$ROOT/mailroom/state/orchestration"
+ORCH_DIR="$SPINE_STATE/orchestration"
 CAPS="$ROOT/ops/capabilities.yaml"
 MAP="$ROOT/ops/bindings/capability_map.yaml"
 DISPATCH="$ROOT/ops/bindings/routing.dispatch.yaml"
@@ -113,7 +115,9 @@ if collision.get("enforce") is not True:
 artifact = contract.get("artifact", {}) if isinstance(contract.get("artifact"), dict) else {}
 template_path = str(artifact.get("template", "")).strip()
 if template_path:
-    template_abs = os.path.join(root, template_path)
+    template_abs = os.path.expandvars(template_path)
+    if not os.path.isabs(template_abs):
+        template_abs = os.path.join(root, template_abs)
     if not os.path.exists(template_abs):
         fail(f"packet template missing: {template_path}")
 

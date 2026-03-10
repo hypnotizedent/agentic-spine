@@ -16,11 +16,14 @@
 set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-STATE_DIR="$SPINE_REPO/mailroom/state"
+source "$SPINE_REPO/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+STATE_DIR="$SPINE_STATE"
 SCOPES_DIR="$STATE_DIR/loop-scopes"
 source "$SPINE_REPO/ops/lib/git-lock.sh"
 
-RECEIPTS_DIR="$SPINE_REPO/receipts/sessions"
+RECEIPTS_DIR="$SPINE_RECEIPTS"
 LEDGER="$STATE_DIR/ledger.csv"
 
 usage() {
@@ -36,7 +39,7 @@ Usage:
 Deprecated:
   ops loops collect                         Legacy receipt scanner (writes JSONL)
 
-Canonical source: mailroom/state/loop-scopes/*.scope.md
+Canonical source: .runtime/spine/state/loop-scopes/*.scope.md
 EOF
 }
 
@@ -77,7 +80,7 @@ _is_open_status() {
 #   line N: CP-... ids (one per line)
 _pending_proposals_for_loop() {
     local loop_id="$1"
-    local proposals_dir="$SPINE_REPO/mailroom/outbox/proposals"
+    local proposals_dir="$SPINE_OUTBOX/proposals"
     local proposal_dir manifest status cp_loop_id
     local count=0
     local matches=""
@@ -405,7 +408,7 @@ collect_loops() {
     echo "=== ops loops collect — DEPRECATED ==="
     echo ""
     echo "Loop state moved from open_loops.jsonl to scope files."
-    echo "Canonical tracking: mailroom/state/loop-scopes/*.scope.md"
+    echo "Canonical tracking: $SCOPES_DIR/*.scope.md"
     echo ""
     echo "To see open work:  ops status"
     echo "To list loops:     ops loops list --open"

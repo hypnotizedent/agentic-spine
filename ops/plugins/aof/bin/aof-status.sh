@@ -3,6 +3,8 @@
 set -euo pipefail
 
 SP="${SPINE_ROOT:-${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}}"
+source "$SP/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 SCHEMA_VERSION="1.1.0"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 JSON_MODE=0
@@ -26,8 +28,7 @@ if [[ -f "$ENV_CONTRACT" ]]; then
   contract_present=true
   tier="$(yq -r '.environment.tier // "unknown"' "$ENV_CONTRACT" 2>/dev/null || echo unknown)"
   name="$(yq -r '.environment.name // "unknown"' "$ENV_CONTRACT" 2>/dev/null || echo unknown)"
-  today="$(date +%Y%m%d)"
-  if [[ -f "$SP/.contract_read_$today" ]]; then
+  if [[ -f "$(spine_contract_ack_file)" ]]; then
     ack_state="current"
   else
     ack_state="stale"

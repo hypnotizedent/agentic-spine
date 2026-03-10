@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+_SPINE_LOG_LIB_DIR="${BASH_SOURCE%/*}"
+[[ "$_SPINE_LOG_LIB_DIR" == "${BASH_SOURCE}" ]] && _SPINE_LOG_LIB_DIR="$(pwd)"
+source "$_SPINE_LOG_LIB_DIR/runtime-paths.sh"
+
 # Structured JSONL telemetry helper.
 # Envelope:
 # {timestamp_utc, event_type, domain, gate_id, status, message, run_key, source, meta}
@@ -34,8 +38,8 @@ spine_log_event() {
     shift || true
   done
 
-  local root="${SPINE_ROOT:-${SPINE_REPO:-$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || pwd)}}"
-  local default_logs="${SPINE_LOGS:-$root/mailroom/logs}"
+  spine_runtime_resolve_paths
+  local default_logs="${SPINE_LOGS:-$HOME/code/.runtime/spine/logs}"
   local log_file="${SPINE_STRUCTURED_LOG:-$default_logs/spine-events.jsonl}"
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

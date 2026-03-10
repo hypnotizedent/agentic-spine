@@ -2,6 +2,10 @@
 # contract-read-check — Enforce/inspect environment contract acknowledgement.
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
 CONTRACT_FILE="${CONTRACT_FILE:-.environment.yaml}"
 STATUS_ONLY=0
 ACK=0
@@ -28,7 +32,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-MARKER_FILE=".contract_read_$(date +%Y%m%d)"
+MARKER_FILE="$(spine_contract_ack_file)"
 
 mtime() {
   local f="$1"
@@ -38,6 +42,7 @@ mtime() {
 [[ -f "$CONTRACT_FILE" ]] || { echo "ERROR: contract not found: $CONTRACT_FILE" >&2; exit 1; }
 
 if [[ "$ACK" -eq 1 ]]; then
+  mkdir -p "$(dirname "$MARKER_FILE")"
   touch "$MARKER_FILE"
   echo "ACKNOWLEDGED: $MARKER_FILE"
   exit 0

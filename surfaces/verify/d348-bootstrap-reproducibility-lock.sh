@@ -3,11 +3,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 INIT_SCRIPT="$ROOT/ops/plugins/session/bin/spine-init"
 DOCTOR_SCRIPT="$ROOT/ops/plugins/session/bin/spine-doctor"
 ENV_FILE="$ROOT/.environment.yaml"
 IDENTITY_FILE="$ROOT/.identity.yaml"
-ACK_FILE="$ROOT/.contract_read_$(date +%Y%m%d)"
+ACK_FILE="$(spine_contract_ack_file)"
 
 fail() { echo "D348 FAIL: $*" >&2; exit 1; }
 

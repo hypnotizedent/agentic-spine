@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
 
 MODE="report"
@@ -39,8 +41,8 @@ UNOWNED_LOCAL_GRACE_HOURS="168"
 FAIL_ON_DETACHED="true"
 FAIL_ON_DIRTY_CLOSED="true"
 WARN_ON_DIRTY_ACTIVE="true"
-WAVES_DIR="$HOME/code/.runtime/spine-mailroom/waves"
-LOOPS_SCOPE_DIR="mailroom/state/loop-scopes"
+WAVES_DIR="$SPINE_STATE/waves"
+LOOPS_SCOPE_DIR="$SPINE_STATE/loop-scopes"
 
 if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo main)"
@@ -50,8 +52,10 @@ if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   FAIL_ON_DETACHED="$(yq e -r '.policy.fail_on_detached_head // true' "$CONTRACT" 2>/dev/null || echo true)"
   FAIL_ON_DIRTY_CLOSED="$(yq e -r '.policy.fail_on_dirty_when_owner_closed // true' "$CONTRACT" 2>/dev/null || echo true)"
   WARN_ON_DIRTY_ACTIVE="$(yq e -r '.policy.warn_on_dirty_when_owner_active // true' "$CONTRACT" 2>/dev/null || echo true)"
-  WAVES_DIR="$(yq e -r '.runtime.waves_state_dir // "~/code/.runtime/spine-mailroom/waves"' "$CONTRACT" 2>/dev/null || echo "$WAVES_DIR")"
-  LOOPS_SCOPE_DIR="$(yq e -r '.runtime.loops_scope_dir // "mailroom/state/loop-scopes"' "$CONTRACT" 2>/dev/null || echo "$LOOPS_SCOPE_DIR")"
+  WAVES_DIR="$(yq e -r '.runtime.waves_state_dir // ""' "$CONTRACT" 2>/dev/null || echo "$WAVES_DIR")"
+  [[ -n "$WAVES_DIR" && "$WAVES_DIR" != "null" ]] || WAVES_DIR="$SPINE_STATE/waves"
+  LOOPS_SCOPE_DIR="$(yq e -r '.runtime.loops_scope_dir // ""' "$CONTRACT" 2>/dev/null || echo "$LOOPS_SCOPE_DIR")"
+  [[ -n "$LOOPS_SCOPE_DIR" && "$LOOPS_SCOPE_DIR" != "null" ]] || LOOPS_SCOPE_DIR="$SPINE_STATE/loop-scopes"
 
   prefix_accum=""
   while IFS= read -r prefix; do

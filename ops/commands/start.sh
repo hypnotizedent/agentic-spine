@@ -3,6 +3,8 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$SCRIPT_DIR/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 source "$SCRIPT_DIR/lib/git-lock.sh"
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
@@ -45,7 +47,7 @@ if (( is_loop == 1 )) && [[ -z "$LOOP_ID" ]]; then
   exit 1
 fi
 
-WORKTREE_BASE="$REPO_ROOT/.worktrees"
+WORKTREE_BASE="${OPS_WORKTREE_ROOT:-$SPINE_TMP/worktrees/agentic-spine}"
 
 sanitize_loop_slug() {
   # Turn a loop id into a stable, short-ish worktree basename.
@@ -74,7 +76,7 @@ else
 
   # Ensure a loop scope file exists for agents to anchor receipts/decisions.
   # Scope files are the canonical work tracker (see LOOP-MAILROOM-CONSOLIDATION-20260210).
-  LOOP_SCOPE_DIR="$REPO_ROOT/mailroom/state/loop-scopes"
+  LOOP_SCOPE_DIR="$SPINE_STATE/loop-scopes"
   LOOP_SCOPE_FILE="$LOOP_SCOPE_DIR/${LOOP_ID}.scope.md"
   mkdir -p "$LOOP_SCOPE_DIR"
   if [[ ! -f "$LOOP_SCOPE_FILE" ]]; then
@@ -162,13 +164,13 @@ loop_id: ${LOOP_ID}
 started_utc: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 worktree: ${WORKTREE_DIR}
 branch: ${BRANCH_NAME}
-scope_doc: mailroom/state/loop-scopes/${LOOP_ID}.scope.md
+scope_doc: ${LOOP_SCOPE_FILE}
 ---
 
 # Session Log - Loop ${LOOP_ID}
 
 ## Scope
-- Scope doc: mailroom/state/loop-scopes/${LOOP_ID}.scope.md
+- Scope doc: ${LOOP_SCOPE_FILE}
 
 ## Intent
 

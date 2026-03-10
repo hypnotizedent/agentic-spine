@@ -63,9 +63,9 @@ SPINE_CODE="${SPINE_CODE:-$SPINE_REPO}"
 source "$SPINE_REPO/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 
-INBOX="${SPINE_INBOX:-$SPINE_REPO/mailroom/inbox}"
-OUTBOX="${SPINE_OUTBOX:-$SPINE_REPO/mailroom/outbox}"
-RECEIPTS="$SPINE_REPO/receipts/sessions"
+INBOX="${SPINE_INBOX}"
+OUTBOX="${SPINE_OUTBOX}"
+RECEIPTS="${SPINE_RECEIPTS}"
 
 QUEUED="$INBOX/queued"
 mkdir -p "$QUEUED" "$OUTBOX" "$RECEIPTS"

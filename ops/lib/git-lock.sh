@@ -11,8 +11,11 @@
 #
 set -euo pipefail
 
-SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-LOCKS_DIR="${SPINE_REPO}/mailroom/state/locks"
+ROOT="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+LOCKS_DIR="${SPINE_LOCKS:-$HOME/code/.runtime/spine/locks}"
 GIT_LOCK_TTL="${GIT_LOCK_TTL:-300}"
 
 _GIT_LOCK_DIR=""
@@ -33,7 +36,6 @@ acquire_git_lock() {
     return 0
   fi
 
-  # Lock exists — check staleness.
   local old_pid=""
   old_pid="$(cat "$pid_file" 2>/dev/null || true)"
   local created_epoch=""
@@ -51,9 +53,6 @@ acquire_git_lock() {
   fi
 
   local stale=0
-  # Reclaim only when owner is not live:
-  # 1) pid is known and dead, OR
-  # 2) pid is missing and lock age exceeds TTL.
   if (( owner_alive == 0 )); then
     if [[ -n "$old_pid" ]]; then
       stale=1

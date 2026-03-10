@@ -16,7 +16,10 @@
 set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine-mailroom}"
+source "$SPINE_REPO/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+RUNTIME_STATE_ROOT="${SPINE_STATE}"
+OUTBOX_ROOT="${SPINE_OUTBOX}"
 MODE="${1:-}"
 
 # ── Live mode: loop with clear ──
@@ -25,7 +28,7 @@ if [[ "$MODE" == "--live" ]]; then
   trap 'echo; echo "Board stopped."; exit 0' INT TERM
   while true; do
     clear 2>/dev/null || printf '\033[2J\033[H'
-    python3 - "$SPINE_REPO" "$RUNTIME_ROOT" "" <<'PYTHON_LIVE'
+    python3 - "$SPINE_REPO" "$RUNTIME_STATE_ROOT" "$OUTBOX_ROOT" "" <<'PYTHON_LIVE'
 import json
 import os
 import sys
@@ -33,13 +36,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 spine = Path(sys.argv[1])
-runtime = Path(sys.argv[2])
+runtime_state = Path(sys.argv[2])
+outbox_root = Path(sys.argv[3])
 
-waves_dir = runtime / "waves"
-lanes_state = runtime / "lanes" / "state.json"
-proposals_dir = runtime / "outbox" / "proposals"
-if not proposals_dir.exists():
-    proposals_dir = spine / "mailroom" / "outbox" / "proposals"
+waves_dir = runtime_state / "waves"
+lanes_state = runtime_state / "lanes" / "state.json"
+proposals_dir = outbox_root / "proposals"
 
 # Load data
 lanes = {}
@@ -211,7 +213,7 @@ PYTHON_LIVE
   exit 0
 fi
 
-exec python3 - "$SPINE_REPO" "$RUNTIME_ROOT" "$MODE" <<'PYTHON'
+exec python3 - "$SPINE_REPO" "$RUNTIME_STATE_ROOT" "$OUTBOX_ROOT" "$MODE" <<'PYTHON'
 import json
 import os
 import re
@@ -220,17 +222,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 spine = Path(sys.argv[1])
-runtime = Path(sys.argv[2])
-mode = sys.argv[3] if len(sys.argv) > 3 else ""
+runtime_state = Path(sys.argv[2])
+outbox_root = Path(sys.argv[3])
+mode = sys.argv[4] if len(sys.argv) > 4 else ""
 
-waves_dir = runtime / "waves"
-lanes_state = runtime / "lanes" / "state.json"
-proposals_dir = runtime / "outbox" / "proposals"
+waves_dir = runtime_state / "waves"
+lanes_state = runtime_state / "lanes" / "state.json"
+proposals_dir = outbox_root / "proposals"
 gaps_file = spine / "ops" / "bindings" / "operational.gaps.yaml"
-
-# Also check in-repo proposals if runtime ones don't exist
-if not proposals_dir.exists():
-    proposals_dir = spine / "mailroom" / "outbox" / "proposals"
 
 # ── Load lanes ──────────────────────────────────────────────────────────
 
