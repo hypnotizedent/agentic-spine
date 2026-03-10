@@ -13,7 +13,7 @@ Immediate children under `docs/`.
 | `brain` | `foundation-source` | spine:0 | foundation:10 | runtime:0 | evidence:0 | archive:0 | needs:0 |
 | `contracts` | `foundation-source` | spine:0 | foundation:1 | runtime:0 | evidence:0 | archive:0 | needs:0 |
 | `core` | `needs-operator-decision` | spine:24 | foundation:0 | runtime:0 | evidence:0 | archive:0 | needs:1 |
-| `governance` | `needs-operator-decision` | spine:19 | foundation:38 | runtime:0 | evidence:0 | archive:0 | needs:0 |
+| `governance` | `needs-operator-decision` | spine:16 | foundation:41 | runtime:0 | evidence:0 | archive:0 | needs:0 |
 | `jd` | `foundation-source` | spine:0 | foundation:4 | runtime:0 | evidence:0 | archive:0 | needs:0 |
 | `legacy` | `archive-only` | spine:0 | foundation:0 | runtime:0 | evidence:0 | archive:3 | needs:0 |
 | `pillars` | `foundation-source` | spine:0 | foundation:3 | runtime:0 | evidence:0 | archive:0 | needs:0 |
