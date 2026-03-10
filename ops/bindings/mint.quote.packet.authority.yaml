@@ -18,16 +18,18 @@ purpose: >
   This authority defines the first real Mint agent business loop: intake →
   prepare (REAL customer resolution + service checks) → source (REAL supplier
   blank + garment-cost enrichment) → price (REAL pricing snapshot) → render
-  (review draft) → BLOCKED at payment until the governed promotion/payment
-  bridge is implemented.
+  (review draft) → promote (REAL canonical order/revision/quote persistence) →
+  BLOCKED at payment link generation until the governed Stripe bridge is
+  implemented.
 
-  IMPLEMENTATION STATUS (2026-03-09):
+  IMPLEMENTATION STATUS (2026-03-10):
     - Customer resolution: REAL (mint-modules customers service)
     - Supplier sourcing: REAL when the packet carries canonical style/SKU truth; resolves blank source + garment cost from suppliers search
     - Stock check: REAL per-line when supplier_code + supplier_sku + quantity exist; bulk pack execution still deferred
     - Pricing: REAL packet-driven execution when canonical pricing-ready inputs + PRICING_API_KEY exist; otherwise blocked honestly
     - Quote draft: REAL review boundary from governed packet state (inline draft, Printavo integration pending)
-    - Payment link: BLOCKED pending quote_packet promotion to canonical order/revision/quote
+    - Promotion: REAL for first-promotion runtime persistence into canonical order/revision/quote records under runtime/domain-state/mint/
+    - Payment link: BLOCKED pending mint.quote.generate_payment_link
     - Receipt tracking: REAL (appends SPINE_CAP_RUN_KEY receipts)
     - Packet index: REAL (runtime/domain-state/mint/quote-packets-index.yaml)
 
@@ -50,7 +52,7 @@ relationship_to_order_truth:
   quote_packet_vs_quote: >
     A quote_packet is an agent-owned work object that may eventually produce
     a canonical quote entity. The packet contains all the evidence, gaps,
-    and draft artifacts needed to prepare a quote. Once sent, the packet
+    and draft artifacts needed to prepare a quote. Once promoted, the packet
     references a canonical quote_id from the order truth model.
   quote_packet_vs_order: >
     A quote_packet may reference intake seed evidence and may trigger order
@@ -203,7 +205,7 @@ quote_packet_schema:
         and other governed context that does not belong in customer-facing copy
     quote_id:
       type: uuid
-      description: Canonical quote_id once quote is sent (references order truth quote entity)
+      description: Canonical quote_id once quote promotion has occurred (references order truth quote entity)
     order_id:
       type: uuid
       description: Canonical order_id if order promotion has occurred
@@ -756,8 +758,8 @@ capability_surface:
       - payment link generation remains downstream of quote_packet promotion to canonical order/revision/quote
   promote:
     name: mint.quote.promote
-    description: Promote quote_packet to canonical order/revision/quote entities (design-only)
-    implementation_status: DESIGN_ONLY (not yet implemented)
+    description: Promote approved quote_packet state into canonical order/revision/quote runtime records
+    implementation_status: REAL (first-promotion Spine runtime persists canonical order/revision/quote + pricing_snapshot records; later revision supersession remains downstream)
     authority_ref: ops/bindings/mint.quote.payment_bridge.authority.yaml
     inputs:
       - quote_packet_id (required)
@@ -771,10 +773,9 @@ capability_surface:
     safety: mutating
     approval_requirement: manual
     blockers:
-      - order entity creation not yet implemented
-      - order revision creation not yet implemented
-      - quote entity creation not yet implemented
-      - requires cross-module orchestration
+      - quote_packet must already be approved_to_send
+      - packet must carry intake seed lineage, quote_ready line items, and completed pricing_snapshot truth
+      - later order_revision supersession is not implemented yet
   generate_payment_link:
     name: mint.quote.generate_payment_link
     description: Generate Stripe checkout URL for a promoted quote (design-only)
@@ -806,7 +807,7 @@ capability_surface:
     approval_requirement: manual
     blockers:
       - cannot send quote without payment link
-      - payment link blocked on mint.quote.promote and mint.quote.generate_payment_link implementation
+      - payment link blocked on mint.quote.generate_payment_link implementation
 
 agent_guidance:
   default_read_path: ops/bindings/mint.quote.packet.authority.yaml
