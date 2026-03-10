@@ -193,28 +193,23 @@ def recommended_next_step(summary: dict[str, Any]) -> str:
     return "resolve canonical production blockers and rerun mint.production.readiness.check"
 
 
-def main(argv: list[str]) -> int:
-    args = parse_args(argv)
-
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
-
-    orders_dir = Path(os.environ.get("MINT_ORDER_RUNTIME_DIR") or (mint_root / "orders"))
-    order_revisions_dir = Path(os.environ.get("MINT_ORDER_REVISIONS_DIR") or (mint_root / "order-revisions"))
-    artwork_bindings_dir = Path(os.environ.get("MINT_ARTWORK_BINDINGS_DIR") or (mint_root / "artwork-bindings"))
-
-    order_file = entity_file(orders_dir, "order", args.order_id)
+def build_readiness_summary(
+    order_id: str,
+    orders_dir: Path,
+    order_revisions_dir: Path,
+    artwork_bindings_dir: Path,
+) -> dict[str, Any]:
+    order_file = entity_file(orders_dir, "order", order_id)
     if not order_file.exists():
-        fail(f"canonical order not found: {args.order_id}")
+        fail(f"canonical order not found: {order_id}")
 
     order = load_structured_file(order_file) or {}
     if not isinstance(order, dict):
-        fail(f"order is not a valid object: {args.order_id}")
+        fail(f"order is not a valid object: {order_id}")
 
     order_revision_id = str(order.get("current_revision_id") or "").strip()
     if not order_revision_id:
-        fail(f"order is missing current_revision_id: {args.order_id}")
+        fail(f"order is missing current_revision_id: {order_id}")
 
     order_revision_file = entity_file(order_revisions_dir, "order_revision", order_revision_id)
     if not order_revision_file.exists():
@@ -273,7 +268,7 @@ def main(argv: list[str]) -> int:
 
     summary = {
         "checked_at": now_utc(),
-        "order_id": args.order_id,
+        "order_id": order_id,
         "order_revision_id": order_revision_id,
         "production_readiness_state": "ready" if not blockers else "blocked",
         "order_state": {
@@ -287,6 +282,21 @@ def main(argv: list[str]) -> int:
         "lines": evaluated_lines,
     }
     summary["recommended_next_step"] = recommended_next_step(summary)
+    return summary
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+
+    script_dir = Path(__file__).resolve().parent
+    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
+    mint_root = spine_root / "runtime/domain-state/mint"
+
+    orders_dir = Path(os.environ.get("MINT_ORDER_RUNTIME_DIR") or (mint_root / "orders"))
+    order_revisions_dir = Path(os.environ.get("MINT_ORDER_REVISIONS_DIR") or (mint_root / "order-revisions"))
+    artwork_bindings_dir = Path(os.environ.get("MINT_ARTWORK_BINDINGS_DIR") or (mint_root / "artwork-bindings"))
+
+    summary = build_readiness_summary(args.order_id, orders_dir, order_revisions_dir, artwork_bindings_dir)
 
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=False))

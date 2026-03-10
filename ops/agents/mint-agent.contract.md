@@ -157,6 +157,7 @@ When Morpheus runs a tool, its closeout must report the underlying receipt/ledge
 | `mint.quote.send` | mutating | Send a promoted Mint quote through governed communications preview/execute |
 | `mint.quote.reconcile_payment` | mutating | Reconcile payment module truth back into canonical order, quote, and `quote_packet` state |
 | `mint.production.readiness.check` | read-only | Evaluate whether canonical order truth is ready for governed production handoff |
+| `mint.production.handoff.create` | mutating | Persist an immutable production handoff snapshot from canonical ready order truth |
 
 ## Minimum V1 Command Surface
 
@@ -289,10 +290,11 @@ Route to Artie only when proof work is actually needed, artwork is at least proo
 
 ## Production Boundary (Early)
 
-**Status:** Early but real — canonical production readiness evaluation is live; production handoff packet creation and machine-package staging remain downstream
+**Status:** Early but real — canonical production readiness evaluation plus immutable handoff creation are live; machine-package staging remains downstream
 
 **Authority:**
 - `ops/bindings/mint.production.readiness.authority.yaml` (governed paid/approved/art-ready production gate)
+- `ops/bindings/mint.production.handoff.authority.yaml` (immutable production handoff snapshot derived from canonical order truth)
 - `ops/bindings/mint.order.truth.authority.yaml` (canonical order/order_revision/artwork_binding truth)
 - `ops/bindings/mint.quote.line_item.normalization.contract.yaml` (production-spec field requirements reused by the readiness gate)
 
@@ -302,3 +304,10 @@ Route to Artie only when proof work is actually needed, artwork is at least proo
   - Reuses the governed line-item contract to block lines that still lack production-spec inputs
   - Requires approved artwork bindings plus method-compatible production assets for artwork-requiring methods
   - Emits per-line readiness/blockers, inferred target classes, and the next governed step without mutating business truth
+
+- **`mint.production.handoff.create <ORDER_ID>`** — Persist the immutable production handoff snapshot
+  - Requires `mint.production.readiness.check` to pass on the current canonical order revision
+  - Persists one immutable handoff record per `order_id + order_revision_id` under `runtime/domain-state/mint/production-handoffs/`
+  - Reuses canonical `order`, `order_revision`, `quote`, and approved production asset truth instead of copying from job folders
+  - Captures per-line target classes, artwork bindings, and production asset refs for downstream staging
+  - Reuses the existing handoff on rerun instead of minting duplicates for the same revision
