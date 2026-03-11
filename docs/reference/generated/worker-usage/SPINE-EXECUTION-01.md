@@ -17,7 +17,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 
 ## Write Scope
 - `mailroom/`
-- `receipts/`
+- `evidence/sessions/`
 
 ## Capabilities (4)
 - `spine.control.cycle`

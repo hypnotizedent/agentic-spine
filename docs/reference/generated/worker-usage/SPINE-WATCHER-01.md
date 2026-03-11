@@ -17,7 +17,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 
 ## Write Scope
 - `mailroom/state/`
-- `receipts/`
+- `evidence/sessions/`
 
 ## Capabilities (2)
 - `spine.watcher.restart`

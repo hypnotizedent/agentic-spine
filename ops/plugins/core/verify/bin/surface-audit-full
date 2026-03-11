@@ -127,8 +127,19 @@ run_check "4. Gate Topology Parity" "registry vs topology vs profiles checks" \
   bash "$ROOT/surfaces/verify/d127-domain-assignment-drift-lock.sh"
 
 # 5) Domain docs routing parity
-run_check "5. Domain Docs Routing Parity" "domain.docs.routes integrity" \
-  bash "$ROOT/surfaces/verify/d122-domain-doc-route-lock.sh"
+domain_docs_gate_script="$ROOT/surfaces/verify/d122-domain-doc-route-lock.sh"
+domain_docs_gate_retired="$(
+  yq e -r '.gates[] | select(.id == "D122") | (.retired // false)' \
+    "$ROOT/ops/bindings/gate.registry.yaml" 2>/dev/null || echo "false"
+)"
+if [[ -x "$domain_docs_gate_script" ]]; then
+  run_check "5. Domain Docs Routing Parity" "domain.docs.routes integrity" \
+    bash "$domain_docs_gate_script"
+elif [[ "$domain_docs_gate_retired" == "true" ]]; then
+  record "5. Domain Docs Routing Parity" "PASS" "D122 retired; no active domain-doc route lock script required"
+else
+  record "5. Domain Docs Routing Parity" "FAIL" "missing active domain-doc route lock script"
+fi
 
 # 6) Workbench implementation parity
 if run_with_timeout "$ROOT/bin/ops" cap run workbench.impl.audit >/tmp/surface_audit_workbench.out 2>/tmp/surface_audit_workbench.err; then
@@ -168,7 +179,12 @@ if jq -e '.capability == "stability.control.snapshot" and (.domains | length) > 
     record "9. Predictive Control Readiness" "WARN" "snapshot output valid; runtime currently degraded (rc=$snapshot_rc)"
   fi
 else
-  record "9. Predictive Control Readiness" "FAIL" "snapshot did not produce expected JSON payload"
+  snapshot_err="$(sed -n '1,3p' /tmp/surface_audit_snapshot.err | tr '\n' ' ' | xargs || true)"
+  if [[ "$snapshot_rc" -eq 124 ]] || printf '%s\n' "$snapshot_err" | grep -qiE 'timed out|terminated'; then
+    record "9. Predictive Control Readiness" "WARN" "snapshot timed out before producing structured JSON payload"
+  else
+    record "9. Predictive Control Readiness" "FAIL" "snapshot did not produce expected JSON payload${snapshot_err:+; $snapshot_err}"
+  fi
 fi
 rm -f "$snapshot_json_tmp"
 

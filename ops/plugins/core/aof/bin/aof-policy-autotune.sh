@@ -12,6 +12,8 @@ SP="${SPINE_ROOT:-${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../..
 SCHEMA_VERSION="1.0.0"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 JSON_MODE=0
+source "$SP/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 
 if [[ "${1:-}" == "--json" ]]; then
   JSON_MODE=1
@@ -49,7 +51,7 @@ if [[ -f "$GAP_FILE" ]]; then
 fi
 
 # ── Recent verify receipts analysis ──
-RECEIPT_DIR="$SP/receipts/sessions"
+RECEIPT_DIR="$SPINE_RECEIPTS"
 recent_verify_pass=0
 recent_verify_fail=0
 recent_verify_total=0

@@ -270,7 +270,7 @@ Defined per-VM in `vm.lifecycle.yaml`:
 
 | Evidence | Location |
 |----------|----------|
-| Decommission receipt | `receipts/sessions/` from spine.verify |
+| Decommission receipt | `~/code/.evidence/spine/sessions/` from spine.verify |
 | Migration receipts | Referenced from loop scope (if services were migrated) |
 | Backup artifact | vzdump file on backup storage (if required by policy) |
 | Ripple check output | Zero live references to decommissioned hostname |

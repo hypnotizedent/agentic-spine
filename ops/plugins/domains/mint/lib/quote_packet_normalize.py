@@ -1047,7 +1047,7 @@ def append_receipt(existing_receipts: list[dict[str, Any]], capability_name: str
         return receipts
     receipts.append(
         {
-            "receipt_path": f"receipts/sessions/R{run_key}/receipt.md",
+            "receipt_path": f"evidence/sessions/R{run_key}/receipt.md",
             "capability_name": capability_name,
             "run_key": run_key,
             "executed_at": timestamp,

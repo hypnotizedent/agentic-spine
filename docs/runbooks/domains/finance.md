@@ -10,7 +10,7 @@ Primary recovery flow for domain `finance`.
 2. `./bin/ops cap run verify.run -- domain finance`
 
 ## Diagnose
-1. Review latest failing run key receipt in `receipts/sessions/`.
+1. Review latest failing run key receipt in `~/code/.evidence/spine/sessions/`.
 2. Review domain contract and plugin scripts for the failing surface.
 3. Confirm runtime path usage resolves through `ops/lib/spine-paths.sh`.
 

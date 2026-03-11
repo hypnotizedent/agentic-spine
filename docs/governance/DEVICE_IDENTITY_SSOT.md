@@ -464,8 +464,8 @@ Use the loop ledger instead:
 
 | Capability | Receipt | Status |
 |------------|---------|--------|
-| nodes.status | `receipts/sessions/RCAP-20260205-155125__nodes.status__Rzvvh72648/receipt.md` | FAIL (historical, pre-decommission split not complete) |
-| services.health.status | `receipts/sessions/RCAP-20260205-155156__services.health.status__R5omv73468/receipt.md` | 5/5 OK |
+| nodes.status | `~/code/.evidence/spine/sessions/RCAP-20260205-155125__nodes.status__Rzvvh72648/receipt.md` | FAIL (historical, pre-decommission split not complete) |
+| services.health.status | `~/code/.evidence/spine/sessions/RCAP-20260205-155156__services.health.status__R5omv73468/receipt.md` | 5/5 OK |
 
 **Verification Commands Run:**
 - `tailscale ip -4` → 100.85.186.7 (macbook)

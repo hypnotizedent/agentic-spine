@@ -10,7 +10,7 @@ BEGIN SPINE
 Authority: agentic-spine only. No ronny-ops runtime. No HOME drift roots.
 Baseline: main / tag v0.1.24-spine-canon.
 Front door: ./bin/ops (capabilities + mailroom + receipts).
-Admissible proof: RCAP receipts under agentic-spine/receipts/sessions/.
+Admissible proof: RCAP receipts under ~/code/.evidence/spine/sessions/.
 Drift gates: D1–D84 (84 active) ALL PASS (surfaces/verify/drift-gate.sh v2.7).
 
 Root Structure (D17 locked):

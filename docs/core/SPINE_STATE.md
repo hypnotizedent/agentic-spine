@@ -28,7 +28,7 @@ The spine's authority chain and contract surface:
 
 ## Receipt Lifecycle
 
-Every capability invocation produces a receipt under `receipts/sessions/`.
+Every capability invocation produces a receipt under `~/code/.evidence/spine/sessions/`.
 
 | Asset | Path |
 |-------|------|
@@ -79,4 +79,4 @@ verification gates, historical audits, and extraction tracking contexts.
 ./bin/ops cap run spine.replay
 ```
 
-Each command produces a receipt under `receipts/sessions/`.
+Each command produces a receipt under `~/code/.evidence/spine/sessions/`.

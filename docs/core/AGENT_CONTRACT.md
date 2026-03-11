@@ -8,7 +8,7 @@ No legacy paths. No ronny-ops runtime references. No "how we used to do it."
 
 ## Authority
 - Repo + gates are truth.
-- Receipts under receipts/sessions are admissible proof.
+- Receipts under evidence/sessions are admissible proof.
 - Chat is non-authoritative.
 
 ## Required protocol

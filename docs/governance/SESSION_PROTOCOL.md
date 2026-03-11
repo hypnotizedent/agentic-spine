@@ -67,7 +67,7 @@ Full spine access. Follow all sections below in order.
    - Before guessing remote paths, consult `ops/bindings/docker.compose.targets.yaml` and `ops/bindings/ssh.targets.yaml` first.
    - **Before any shop network change:** run `./bin/ops cap run network.shop.audit.status` (D54 enforces).
 4. **Operate through the spine**
-   - Every mutating command must go through `./bin/ops cap run <capability>` so receipts land in `receipts/sessions/`.
+   - Every mutating command must go through `./bin/ops cap run <capability>` so receipts land in `~/code/.evidence/spine/sessions/`.
    - **Spine is the runtime environment.** Workbench file edits are allowed when a spine loop requires it.
    - **Worktrees are optional.** Committing directly to main is fine for single-agent sessions.
    - **Git authority:** Gitea (`origin`) is canonical; GitHub is mirror-only.
@@ -101,7 +101,7 @@ Network gates (infra health, backup checks, media stack) have Tailscale guards �
 
 - Store any learnings in `docs/reference/brain/memory.md` if that system is enabled.
 - Close open loops with `./bin/ops loops close <loop_id>` before wrapping up.
-- Always produce receipts for the commands you executed. Receipts live under `receipts/sessions/R*/receipt.md` and prove what you did.
+- Always produce receipts for the commands you executed. Receipts live under `~/code/.evidence/spine/sessions/R*/receipt.md` and prove what you did.
 
 ---
 
@@ -275,7 +275,7 @@ All loop scope files in `mailroom/state/loop-scopes/` MUST use one of these thre
 
 - **Entry governance:** `AGENTS.md` + this `SESSION_PROTOCOL.md` define the canonical workflow: start in the spine repo, list open loops, do work via `./bin/ops cap run ...` / `./bin/ops run ...`, and close loops with receipts.
 - **Loop engine:** `./bin/ops loops ...` + `mailroom/state/loop-scopes/*.scope.md` are the shared coordination surface other agents can see.
-- **Receipts + ledger:** `receipts/sessions/**/receipt.md` are the primary proof trail. The runtime ledger at `~/code/.runtime/spine/state/ledger.csv` is the canonical run-history index (externalized per `mailroom.runtime.contract.yaml`). The in-repo `mailroom/state/ledger.csv` is a stale migration ghost — do not use it.
+- **Receipts + ledger:** `~/code/.evidence/spine/sessions/**/receipt.md` are the primary proof trail. The runtime ledger at `~/code/.runtime/spine/state/ledger.csv` is the canonical run-history index (externalized per `mailroom.runtime.contract.yaml`). The in-repo `mailroom/state/ledger.csv` is a stale migration ghost — do not use it.
 - **Drift gates (enforced by `spine.verify`):**
   - D42 code-path case lock (keeps `~/code/...` canonical, blocks drift like `~/Code/...`).
   - D48 codex worktree hygiene (prevents orphaned/stale codex worktrees/branches).

@@ -35,7 +35,7 @@ Run from `~/code/agentic-spine`:
 ```
 
 Artifacts are written to:
-- `receipts/audits/infra/vaultwarden-hygiene-<timestamp>/`
+- `evidence/verify/infra/vaultwarden-hygiene-<timestamp>/`
   - `uri-audit.json`
   - `uri-healthcheck.json`
   - `reconcile-report.json`

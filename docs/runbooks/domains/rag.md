@@ -28,8 +28,8 @@ DONE
 ════════════════════════════════════════
 Run Key:  CAP-20260305-161407__spine.log.query__Rgutb11147
 Status:   done
-Receipt:  /Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260305-161407__spine.log.query__Rgutb11147/receipt.md
-Output:   /Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260305-161407__spine.log.query__Rgutb11147/output.txt
+Receipt:  /Users/ronnyworks/code/.evidence/spine/sessions/RCAP-20260305-161407__spine.log.query__Rgutb11147/receipt.md
+Output:   /Users/ronnyworks/code/.evidence/spine/sessions/RCAP-20260305-161407__spine.log.query__Rgutb11147/output.txt
 2. \════════════════════════════════════════
 CAPABILITY: verify.run
 ════════════════════════════════════════
@@ -59,8 +59,8 @@ DONE
 ════════════════════════════════════════
 Run Key:  CAP-20260305-161408__verify.run__Rf17d13054
 Status:   done
-Receipt:  /Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260305-161408__verify.run__Rf17d13054/receipt.md
-Output:   /Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260305-161408__verify.run__Rf17d13054/output.txt
+Receipt:  /Users/ronnyworks/code/.evidence/spine/sessions/RCAP-20260305-161408__verify.run__Rf17d13054/receipt.md
+Output:   /Users/ronnyworks/code/.evidence/spine/sessions/RCAP-20260305-161408__verify.run__Rf17d13054/output.txt
 
 ## Diagnose
 1. Review latest failing run key receipt in \.

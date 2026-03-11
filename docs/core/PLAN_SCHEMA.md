@@ -54,7 +54,7 @@ steps:
     input_paths:
       - surfaces/verify/contracts-gate.sh
     expected_outputs:
-      - receipts/sessions/*/receipt.md
+      - ~/code/.evidence/spine/sessions/*/receipt.md
     on_fail: stop
     timeout_sec: 60
 ```

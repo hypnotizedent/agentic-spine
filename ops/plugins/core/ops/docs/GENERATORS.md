@@ -86,7 +86,7 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
 
 ### 6) Receipt Index Builder (Index Artifact)
 - Input:
-  - `receipts/sessions/**/receipt.md`
+  - `evidence/sessions/**/receipt.md`
   - `runtime/state/ledger.csv`
 - Output:
   - `evidence/verify/indexes/receipt-index.yaml`

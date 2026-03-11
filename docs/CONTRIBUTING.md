@@ -94,4 +94,4 @@ After any doc change, run:
 ./bin/ops cap run docs.status
 ```
 
-Each produces a receipt under `receipts/sessions/`.
+Each produces a receipt under `evidence/sessions/`.

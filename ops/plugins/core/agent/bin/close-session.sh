@@ -9,7 +9,7 @@
 #
 # Produces:
 #   - Closeout packet to stdout
-#   - Writes to receipts/sessions/SESSION_CLOSEOUT_<timestamp>.md
+#   - Writes to external session evidence
 #   - Optionally appends learnings to docs/reference/brain/memory.md
 #
 # Auto-captures:
@@ -32,7 +32,6 @@ fi
 set -eo pipefail
 
 REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-RECEIPTS_DIR="$REPO/receipts/sessions"
 MEMORY_FILE="$REPO/docs/reference/brain/memory.md"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 DATE=$(date +%Y-%m-%d)
@@ -40,6 +39,7 @@ TIME=$(date +%H:%M:%S)
 
 source "$REPO/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
+RECEIPTS_DIR="${SPINE_RECEIPTS}"
 INBOX="${SPINE_INBOX}"
 FRICTION_INGEST="$REPO/ops/plugins/core/lifecycle/bin/friction-ingest"
 FRICTION_STATUS="$REPO/ops/plugins/core/lifecycle/bin/friction-queue-status"
@@ -269,11 +269,8 @@ echo "| ${DATE} | \`${SESSION_ID}\` | [closeout](SESSION_CLOSEOUT_${TIMESTAMP}.m
 # Stage common session artifacts so the next agent starts with a clean tree.
 # Keep governance override minimal: single var only, no ref/reason ceremony.
 SESSION_ARTIFACT_PATHS=(
-  "mailroom/state/loop-scopes/"
-  "mailroom/state/sessions/"
   "ops/bindings/"
   "docs/governance/"
-  "receipts/sessions/"
   "docs/reference/brain/memory.md"
 )
 

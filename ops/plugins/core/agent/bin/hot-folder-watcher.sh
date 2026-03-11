@@ -363,7 +363,7 @@ write_receipt() {
     local context_used="$7"
     local error="${8:-}"
 
-    local receipt_dir="${SPINE}/receipts/sessions/R${run_key}"
+    local receipt_dir="${SPINE_RECEIPTS}/R${run_key}"
     mkdir -p "$receipt_dir"
 
     local now

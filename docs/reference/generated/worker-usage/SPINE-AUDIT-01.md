@@ -16,8 +16,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Verify Command: `./bin/ops cap run verify.core.run`
 
 ## Write Scope
-- `receipts/`
-- `docs/governance/_audits/`
+- `evidence/verify/governance/`
 
 ## Capabilities (5)
 - `spine.verify`

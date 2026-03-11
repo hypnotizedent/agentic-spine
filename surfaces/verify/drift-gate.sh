@@ -18,6 +18,9 @@ set -euo pipefail
 SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 RT="${SPINE_REPO:-$SP}"
 cd "$SP"
+source "$SP/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+RECEIPTS_ROOT="${SPINE_RECEIPTS:-$HOME/code/.evidence/spine/sessions}"
 
 # Resolve active policy preset (balanced defaults if unset)
 source "$SP/ops/lib/resolve-policy.sh"
@@ -134,16 +137,16 @@ gate_script() {
 
 echo "=== DRIFT GATE (v3.0) ==="
 
-# D1: Top-level directory policy (10 allowed)
-# TRIAGE: Only bin/ docs/ fixtures/ infra/ mailroom/ ops/ receipts/ surfaces/ allowed at top level. Remove or move extra directories.
+# D1: Top-level directory policy
+# TRIAGE: Only bin/ docs/ fixtures/ ops/ surfaces/ allowed at top level. Remove or move extra directories.
 echo -n "D1 top-level dirs... "
-EXTRA="$(ls -1d */ 2>/dev/null | rg -v '^(bin|docs|fixtures|infra|mailroom|ops|receipts|surfaces)/$' || true)"
-if [[ -z "$EXTRA" ]]; then pass; else scoped_fail D1 "extra dirs: $(echo "$EXTRA" | tr '\n' ' ')"; echo "  TRIAGE: Only bin/ docs/ fixtures/ infra/ mailroom/ ops/ receipts/ surfaces/ allowed at top level."; fi
+EXTRA="$(ls -1d */ 2>/dev/null | rg -v '^(bin|docs|fixtures|ops|surfaces)/$' || true)"
+if [[ -z "$EXTRA" ]]; then pass; else scoped_fail D1 "extra dirs: $(echo "$EXTRA" | tr '\n' ' ')"; echo "  TRIAGE: Only bin/ docs/ fixtures/ ops/ surfaces/ allowed at top level."; fi
 
 # D2: No runs/ trace
-# TRIAGE: Remove runs/ directory. Execution traces belong in receipts/sessions/.
+# TRIAGE: Remove runs/ directory. Execution traces belong in ~/code/.evidence/spine/sessions/.
 echo -n "D2 one trace (no runs/)... "
-if [[ ! -d runs ]]; then pass; else scoped_fail D2 "runs/ exists"; echo "  TRIAGE: Remove runs/ directory. Traces belong in receipts/sessions/."; fi
+if [[ ! -d runs ]]; then pass; else scoped_fail D2 "runs/ exists"; echo "  TRIAGE: Remove runs/ directory. Traces belong in ~/code/.evidence/spine/sessions/."; fi
 
 # D3: Entrypoint smoke
 # TRIAGE: bin/ops preflight must succeed. Check bin/ops exists and is executable.
@@ -202,19 +205,19 @@ if [[ -z "$COUPLE" ]]; then pass; else fail "legacy coupling found"; echo "  TRI
 echo -n "D6 receipts exist... "
 MISSING=0
 COUNT=0
-for s in $(ls -1t "$RT/receipts/sessions" 2>/dev/null); do
-  [[ -f "$RT/receipts/sessions/$s/receipt.md" ]] || MISSING=$((MISSING+1))
+for s in $(ls -1t "$RECEIPTS_ROOT" 2>/dev/null); do
+  [[ -f "$RECEIPTS_ROOT/$s/receipt.md" ]] || MISSING=$((MISSING+1))
   COUNT=$((COUNT+1))
   [[ "$COUNT" -ge 5 ]] && break
 done
-if [[ "$MISSING" -eq 0 ]]; then pass; else scoped_fail D6 "$MISSING missing receipt.md"; echo "  TRIAGE: Check receipts/sessions/ for dirs missing receipt.md. Re-run capability to regenerate."; fi
+if [[ "$MISSING" -eq 0 ]]; then pass; else scoped_fail D6 "$MISSING missing receipt.md"; echo "  TRIAGE: Check ~/code/.evidence/spine/sessions/ for dirs missing receipt.md. Re-run capability to regenerate."; fi
 
 # D7: Executables only in four zones
 # TRIAGE: Shell scripts only allowed in bin/, ops/, surfaces/verify/. Move or remove out-of-bounds .sh files.
 echo -n "D7 executables bounded... "
 BAD="$(find . -type f -name "*.sh" \
   | rg -v '^\./(bin/|ops/|surfaces/verify/)' \
-  | rg -v '^\./(_imports/|docs/|receipts/|mailroom/|\.git/|\.spine/|\.archive/|\.worktrees/)' || true)"
+  | rg -v '^\./(_imports/|docs/|mailroom/|\.git/|\.spine/|\.archive/|\.worktrees/)' || true)"
 if [[ -z "$BAD" ]]; then pass; else scoped_fail D7 "out-of-bounds: $(echo "$BAD" | wc -l | tr -d ' ')"; echo "  TRIAGE: .sh files only in bin/, ops/, surfaces/verify/. Move out-of-bounds scripts."; fi
 
 # D8: No backup clutter
@@ -263,12 +266,12 @@ if [[ -f "$SP/docs/core/CORE_LOCK.md" ]]; then pass; else scoped_fail D12 "docs/
 # TRIAGE: Latest receipt missing required fields. Check ops/cap.sh receipt template for correct format.
 echo -n "D9 receipt stamps... "
 LATEST=""
-for s in $(ls -1t "$RT/receipts/sessions" 2>/dev/null); do
+for s in $(ls -1t "$RECEIPTS_ROOT" 2>/dev/null); do
   LATEST="$s"
   break
 done
-if [[ -n "$LATEST" ]] && [[ -f "$RT/receipts/sessions/$LATEST/receipt.md" ]]; then
-  STAMP_FILE="$RT/receipts/sessions/$LATEST/receipt.md"
+if [[ -n "$LATEST" ]] && [[ -f "$RECEIPTS_ROOT/$LATEST/receipt.md" ]]; then
+  STAMP_FILE="$RECEIPTS_ROOT/$LATEST/receipt.md"
 
   # Check for required fields (core-v1.0 contract)
   HAS_RUN_ID=$(rg -q "Run ID" "$STAMP_FILE" 2>/dev/null && echo 1 || echo 0)

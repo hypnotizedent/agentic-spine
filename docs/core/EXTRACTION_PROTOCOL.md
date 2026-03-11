@@ -72,7 +72,7 @@ Before marking any extraction complete, run the trace gate:
      -g'!receipts/**' -g'!mailroom/outbox/**'
    ```
    - **Allowed:** direct `~/code/workbench` references in extraction tracking and archived audit surfaces
-   - **Historical:** docs/reference/legacy/**, docs/governance/_audits/**
+   - **Historical:** docs/reference/legacy/**, docs/reference/audits/**
    - **Conflict:** any other location (must resolve)
 
 2. **Lint verification:**

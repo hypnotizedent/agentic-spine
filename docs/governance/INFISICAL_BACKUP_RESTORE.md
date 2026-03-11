@@ -128,7 +128,7 @@ If Infisical is completely unavailable and you need secrets to bootstrap:
 1. Check `~/.config/infisical/credentials` on the MacBook for cached universal auth tokens.
 2. Check `~/.cache/infisical/` for any cached secret values from previous runs.
 3. The spine's `secrets.exec` wrapper caches injected env vars — recent receipt outputs in
-   `receipts/sessions/` may contain non-secret metadata that helps identify which secrets are needed.
+   `~/code/.evidence/spine/sessions/` may contain non-secret metadata that helps identify which secrets are needed.
 4. Critical bootstrap secrets (DB passwords, API tokens) should also exist in the Vaultwarden
    vault at `https://vault.ronny.works` as a secondary source.
 

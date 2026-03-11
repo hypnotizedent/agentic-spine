@@ -61,7 +61,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 mkdir -p "$TARGET_DIR"
-mkdir -p "$TARGET_DIR/mailroom/inbox/queued" "$TARGET_DIR/mailroom/outbox" "$TARGET_DIR/mailroom/state" "$TARGET_DIR/receipts/sessions"
+mkdir -p "$TARGET_DIR/mailroom/inbox/queued" "$TARGET_DIR/mailroom/outbox" "$TARGET_DIR/mailroom/state" "$TARGET_DIR/evidence/sessions"
 
 if [[ -f "$ENV_FILE" && "$FORCE" -ne 1 ]]; then
   echo "ERROR: $ENV_FILE exists (use --force to overwrite)" >&2

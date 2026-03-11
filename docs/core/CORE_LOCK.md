@@ -36,7 +36,7 @@ Capability format: `CAP-<timestamp>__<capability>__R<id>`
 
 This key is used everywhere:
 - Outbox result: `<run_key>__RESULT.md`
-- Receipt folder: `receipts/sessions/R<run_key>/`
+- Receipt folder: `~/code/.evidence/spine/sessions/R<run_key>/`
 - Ledger row: `run_id` column (latest row per run_id is authoritative state)
 
 ## Entry Points

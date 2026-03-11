@@ -25,7 +25,7 @@ bootstrap or disaster recovery). Do not merge these two documents.
 
 ## Proof rules
 - Proof must be watcher+ops produced
-- Admissible receipts live under receipts/sessions
+- Admissible receipts live under evidence/sessions
 
 <!-- SPINE_RULE_API_PRECONDITIONS -->
 ## API capability preconditions (locked rule)
