@@ -590,7 +590,7 @@ set +e
 echo "$?" > "$ARTIFACT_DIR/loops_status.rc"
 "$ROOT/ops/plugins/core/loops/bin/gaps-status" > "$ARTIFACT_DIR/gaps_status.log" 2>&1
 echo "$?" > "$ARTIFACT_DIR/gaps_status.rc"
-"$ROOT/ops/plugins/ops/bin/worktree-lifecycle-reconcile" --json > "$ARTIFACT_DIR/worktree_lifecycle.log" 2>&1
+"$ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-reconcile" --json > "$ARTIFACT_DIR/worktree_lifecycle.log" 2>&1
 echo "$?" > "$ARTIFACT_DIR/worktree_lifecycle.rc"
 set -e
 
@@ -602,7 +602,7 @@ fi
 
 LOOPS_RUN_KEY="direct:ops/plugins/core/loops/bin/loops-status"
 GAPS_RUN_KEY="direct:ops/plugins/core/loops/bin/gaps-status"
-WORKTREE_RECONCILE_RUN_KEY="direct:ops/plugins/ops/bin/worktree-lifecycle-reconcile --json"
+WORKTREE_RECONCILE_RUN_KEY="direct:ops/plugins/core/ops/bin/worktree-lifecycle-reconcile --json"
 
 LOOPS_OPEN="$(awk '/By Status:/{f=1;next} f&&$1=="Open:"{print $2; exit}' "$ARTIFACT_DIR/loops_status.log" 2>/dev/null || true)"
 GAPS_OPEN="$(sed -nE 's/^Gaps:[^|]*\|[[:space:]]*([0-9]+)[[:space:]]+open.*/\1/p' "$ARTIFACT_DIR/gaps_status.log" | head -1)"

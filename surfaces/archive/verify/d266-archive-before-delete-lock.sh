@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
-CLEANUP_CMD="$ROOT/ops/plugins/ops/bin/worktree-lifecycle-cleanup"
+CLEANUP_CMD="$ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-cleanup"
 
 fail() { echo "D266 FAIL: $*" >&2; exit 1; }
 

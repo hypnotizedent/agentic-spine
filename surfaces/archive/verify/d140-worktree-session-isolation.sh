@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-STATUS_SCRIPT="$ROOT/ops/plugins/ops/bin/worktree-session-status"
+STATUS_SCRIPT="$ROOT/ops/plugins/core/ops/bin/worktree-session-status"
 CONTRACT="$ROOT/ops/bindings/worktree.session.isolation.yaml"
 
 if [[ ! -f "$CONTRACT" ]]; then
