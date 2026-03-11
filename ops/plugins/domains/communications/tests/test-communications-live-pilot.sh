@@ -34,6 +34,7 @@ pilot:
     cap_exec: "fake"
     live_probe_query: "*"
     search_default_top: 5
+    default_mailbox: team@mintprints.com
   vm_target:
     hostname: communications-stack
     vm_id: "214"
@@ -48,6 +49,10 @@ pilot:
       - mintprints.com
       - communications.local
   mailboxes:
+    - id: team
+      address: team@mintprints.com
+      role: customer-service
+      status: active
     - id: ops
       address: ronny@mintprints.com
       role: operations
@@ -61,6 +66,10 @@ set -euo pipefail
 action="${1:-}"
 shift || true
 if [[ "$action" == "mail_search" ]]; then
+  [[ " $* " == *" --mailbox team@mintprints.com "* ]] || {
+    echo "expected --mailbox team@mintprints.com" >&2
+    exit 2
+  }
   cat <<'OUT'
 === secrets.exec ===
 provider: infisical
@@ -94,6 +103,7 @@ pass "communications-stack-status live probe"
 # live mail search should parse messages from mixed output
 search_out="$("$MAIL_SEARCH" --query "*" --top 2)"
 echo "$search_out" | grep "matches: 2" >/dev/null || fail "mail search should show two parsed messages"
+echo "$search_out" | grep "mailbox: team@mintprints.com" >/dev/null || fail "mail search should show team mailbox"
 echo "$search_out" | grep "Alpha" >/dev/null || fail "mail search should include parsed subject"
 pass "communications-mail-search live parsing"
 

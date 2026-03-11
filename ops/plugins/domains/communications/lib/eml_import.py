@@ -66,9 +66,14 @@ def parse_eml(path):
 
     folder = msg.get("X-Folder", "") or msg.get("X-Gmail-Labels", "") or ""
 
-    is_outgoing = False
-    if from_addr and "ronny@mintprints.com" in from_addr.lower():
-        is_outgoing = True
+    outgoing_senders = (
+        "ronny@mintprints.com",
+        "team@mintprints.com",
+        "info@mintprints.com",
+        "noreply@mintprints.com",
+        "no-reply@mintprints.com",
+    )
+    is_outgoing = bool(from_addr and any(sender in from_addr.lower() for sender in outgoing_senders))
 
     content = "{}{}{}{}".format(message_id, subject, from_addr, sent_date or "")
     content_hash = hashlib.sha256(content.encode()).hexdigest()[:64]

@@ -6,6 +6,7 @@ CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/communications.sta
 MICROSOFT_EXEC="${COMMUNICATIONS_MICROSOFT_EXEC:-${COMMUNICATIONS_MICROSOFT_EXEC_LEGACY:-$ROOT/ops/plugins/providers/microsoft/bin/microsoft-cap-exec}}"
 QUERY=""
 TOP=""
+MAILBOX=""
 JSON=0
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing dependency: $1" >&2; exit 1; }; }
@@ -46,10 +47,12 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --query) QUERY="${2:-}"; shift 2 ;;
     --top) TOP="${2:-}"; shift 2 ;;
+    --mailbox) MAILBOX="${2:-}"; shift 2 ;;
     --json) JSON=1; shift ;;
     -h|--help)
       cat <<'USAGE'
 Usage: communications-mail-search [--query <text>] [--top <n>] [--json]
+       communications-mail-search [--mailbox <id|address>] [--query <text>] [--top <n>] [--json]
 
 Simulation mode: searches contract mailbox catalog.
 Live mode: runs Microsoft mailbox search via Microsoft executor.
@@ -72,8 +75,17 @@ mode="$(yq e -r '.pilot.send_test.mode // "simulation-only"' "$CONTRACT")"
 stage="$(yq e -r '.pilot.stage // ""' "$CONTRACT")"
 backend="$(yq e -r '.pilot.execution_backend // "none"' "$CONTRACT")"
 default_top="$(yq e -r '.pilot.microsoft.search_default_top // 10' "$CONTRACT")"
+default_mailbox="$(yq e -r '.pilot.microsoft.default_mailbox // ""' "$CONTRACT")"
 query_effective="${QUERY:-*}"
 top_effective="${TOP:-$default_top}"
+mailbox_effective="${MAILBOX:-$default_mailbox}"
+
+if [[ -n "$mailbox_effective" ]]; then
+  resolved_mailbox="$(yq e -r ".pilot.mailboxes[] | select(.id == \"$mailbox_effective\" or .address == \"$mailbox_effective\") | .address" "$CONTRACT" | head -n 1)"
+  if [[ -n "$resolved_mailbox" && "$resolved_mailbox" != "null" ]]; then
+    mailbox_effective="$resolved_mailbox"
+  fi
+fi
 
 if [[ "$mode" == "simulation-only" ]]; then
   rows="$(yq e -r '.pilot.mailboxes[] | [.id, .address, .role, .status] | @tsv' "$CONTRACT")"
@@ -83,6 +95,9 @@ if [[ "$mode" == "simulation-only" ]]; then
   echo "[]" >"$matches_json"
   while IFS=$'\t' read -r id address role status; do
     line="$id $address $role $status"
+    if [[ -n "$mailbox_effective" && "$id" != "$mailbox_effective" && "$address" != "$mailbox_effective" ]]; then
+      continue
+    fi
     if [[ -z "$QUERY" ]] || echo "$line" | grep -qi -- "$QUERY"; then
       count=$((count + 1))
       jq --arg id "$id" --arg address "$address" --arg role "$role" --arg status "$status" \
@@ -101,14 +116,16 @@ if [[ "$mode" == "simulation-only" ]]; then
       --arg stage "$stage" \
       --arg backend "$backend" \
       --arg query "$QUERY" \
+      --arg mailbox "$mailbox_effective" \
       --argjson matches "$(cat "$matches_json")" \
-      '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:{mode:$mode,stage:$stage,backend:$backend,query:$query,matches:($matches|length),messages:$matches}}'
+      '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:{mode:$mode,stage:$stage,backend:$backend,query:$query,mailbox:$mailbox,matches:($matches|length),messages:$matches}}'
     exit 0
   fi
 
   echo "communications.mail.search"
   echo "mode: $mode"
   echo "stage: $stage"
+  [[ -n "$mailbox_effective" ]] && echo "mailbox: $mailbox_effective"
   [[ -n "$QUERY" ]] && echo "query: $QUERY"
   printf "%-12s %-34s %-14s %-10s\n" "id" "address" "role" "status"
   printf "%-12s %-34s %-14s %-10s\n" "------------" "----------------------------------" "--------------" "----------"
@@ -124,7 +141,11 @@ result_json_tmp="$(mktemp)"
 result_raw_tmp="$(mktemp)"
 result_err_tmp="$(mktemp)"
 trap 'rm -f "$result_raw_tmp" "$result_json_tmp" "$result_err_tmp"' EXIT
-if ! "$MICROSOFT_EXEC" mail_search --query "$query_effective" --top "$top_effective" >"$result_raw_tmp" 2>"$result_err_tmp"; then
+cmd=("$MICROSOFT_EXEC" mail_search --query "$query_effective" --top "$top_effective")
+if [[ -n "$mailbox_effective" ]]; then
+  cmd+=(--mailbox "$mailbox_effective")
+fi
+if ! "${cmd[@]}" >"$result_raw_tmp" 2>"$result_err_tmp"; then
   echo "ERROR: microsoft mail search failed" >&2
   cat "$result_err_tmp" >&2 || true
   exit 1
@@ -148,9 +169,10 @@ if [[ "$JSON" -eq 1 ]]; then
     --arg stage "$stage" \
     --arg backend "$backend" \
     --arg query "$query_effective" \
+    --arg mailbox "$mailbox_effective" \
     --argjson top "$top_effective" \
     --argjson microsoft "$(cat "$result_json_tmp")" \
-    '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:{mode:$mode,stage:$stage,backend:$backend,query:$query,top:$top,microsoft:$microsoft}}'
+    '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:{mode:$mode,stage:$stage,backend:$backend,query:$query,mailbox:$mailbox,top:$top,microsoft:$microsoft}}'
   exit 0
 fi
 
@@ -158,6 +180,7 @@ echo "communications.mail.search"
 echo "mode: $mode"
 echo "stage: $stage"
 echo "backend: $backend"
+[[ -n "$mailbox_effective" ]] && echo "mailbox: $mailbox_effective"
 echo "query: $query_effective"
 echo "top: $top_effective"
 echo "matches: $message_count"

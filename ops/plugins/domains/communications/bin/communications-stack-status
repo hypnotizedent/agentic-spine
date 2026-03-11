@@ -65,6 +65,7 @@ backend="$(yq e -r '.pilot.execution_backend // "none"' "$CONTRACT")"
 transactional_mode="$(yq e -r '.transactional.mode // "simulation-only"' "$CONTRACT")"
 transactional_cutover_phase="$(yq e -r '.transactional.cutover_phase // "phase0-simulation"' "$PROVIDERS_CONTRACT")"
 live_probe_query="$(yq e -r '.pilot.microsoft.live_probe_query // "*"' "$CONTRACT")"
+live_probe_mailbox="$(yq e -r '.pilot.microsoft.default_mailbox // ""' "$CONTRACT")"
 mailbox_count="$(yq e '.pilot.mailboxes | length' "$CONTRACT")"
 cap_count="$(yq e '.capabilities | keys | map(select(test("^communications\\."))) | length' "$CAPS")"
 mailbox_active_count="$(yq e '.pilot.mailboxes[] | select(.status == "active") | .id' "$CONTRACT" | sed '/^$/d' | wc -l | tr -d ' ')"
@@ -97,7 +98,11 @@ if [[ "$mode" != "simulation-only" ]]; then
   probe_raw_tmp="$(mktemp)"
   probe_err_tmp="$(mktemp)"
   trap 'rm -f "$probe_raw_tmp" "$probe_json_tmp" "$probe_err_tmp"' EXIT
-  if "$MICROSOFT_EXEC" mail_search --query "$live_probe_query" --top 1 >"$probe_raw_tmp" 2>"$probe_err_tmp"; then
+  probe_cmd=("$MICROSOFT_EXEC" mail_search --query "$live_probe_query" --top 1)
+  if [[ -n "$live_probe_mailbox" ]]; then
+    probe_cmd+=(--mailbox "$live_probe_mailbox")
+  fi
+  if "${probe_cmd[@]}" >"$probe_raw_tmp" 2>"$probe_err_tmp"; then
     if ! extract_first_json "$probe_raw_tmp" "$probe_json_tmp"; then
       live_probe_status="invalid_json"
       status="FAIL"
@@ -123,6 +128,7 @@ echo "transactional_cutover_phase: $transactional_cutover_phase"
 echo "vm_target: $vm_host (vm_id=$vm_id, profile=$profile, proxmox_host=$proxmox)"
 echo "mailboxes: $mailbox_count"
 echo "mailboxes_active: $mailbox_active_count"
+[[ -n "$live_probe_mailbox" ]] && echo "live_probe_mailbox: $live_probe_mailbox"
 echo "communications_capabilities_registered: $cap_count"
 echo "manifest_vm_target_match: $([[ "$manifest_vm_id" == "$vm_id" ]] && echo yes || echo no)"
 echo "placement_policy_host_registered: $([[ -n "$policy_host_site" ]] && echo yes || echo no)"
