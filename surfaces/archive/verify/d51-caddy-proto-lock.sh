@@ -11,7 +11,7 @@ set -euo pipefail
 
 SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 FOUNDATION_ROOT="${SPINE_FOUNDATION_ROOT:-$HOME/code/agentic-foundation}"
-CADDYFILE="$FOUNDATION_ROOT/ops/staged/caddy-auth/Caddyfile"
+CADDYFILE="$FOUNDATION_ROOT/ops/infra/caddy-auth/Caddyfile"
 
 if [[ ! -f "$CADDYFILE" ]]; then
   echo "D51 FAIL: staged Caddyfile not found at $CADDYFILE" >&2

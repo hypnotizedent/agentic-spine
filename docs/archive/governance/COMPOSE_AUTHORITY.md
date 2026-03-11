@@ -22,17 +22,17 @@ Purpose: prevent "compose guessing" by defining where authoritative compose live
 
 | Stack | Canonical Compose (Spine) |
 |------|----------------------------|
-| cloudflared | `ops/staged/cloudflared/docker-compose.yml` |
-| caddy-auth (Caddy + Authentik) | `ops/staged/caddy-auth/docker-compose.yml` |
-| pihole | `ops/staged/pihole/docker-compose.yml` |
-| vaultwarden | `ops/staged/vaultwarden/docker-compose.yml` |
-| secrets (Infisical) | `ops/staged/secrets/docker-compose.yml` |
+| cloudflared | `ops/infra/cloudflared/docker-compose.yml` |
+| caddy-auth (Caddy + Authentik) | `ops/infra/caddy-auth/docker-compose.yml` |
+| pihole | `ops/infra/pihole/docker-compose.yml` |
+| vaultwarden | `ops/infra/vaultwarden/docker-compose.yml` |
+| secrets (Infisical) | `ops/infra/secrets/docker-compose.yml` |
 | dev-tools (gitea) | `ops/staged/dev-tools/gitea/docker-compose.yml` |
-| observability (prometheus) | `ops/staged/observability/prometheus/docker-compose.yml` |
-| observability (grafana) | `ops/staged/observability/grafana/docker-compose.yml` |
-| observability (loki) | `ops/staged/observability/loki/docker-compose.yml` |
-| observability (uptime-kuma) | `ops/staged/observability/uptime-kuma/docker-compose.yml` |
-| observability (node-exporter) | `ops/staged/observability/node-exporter/docker-compose.yml` |
+| observability (prometheus) | `ops/infra/observability/prometheus/docker-compose.yml` |
+| observability (grafana) | `ops/infra/observability/grafana/docker-compose.yml` |
+| observability (loki) | `ops/infra/observability/loki/docker-compose.yml` |
+| observability (uptime-kuma) | `ops/infra/observability/uptime-kuma/docker-compose.yml` |
+| observability (node-exporter) | `ops/infra/observability/node-exporter/docker-compose.yml` |
 | download-stack | `ops/staged/download-stack/docker-compose.yml` |
 | streaming-stack | `ops/staged/streaming-stack/docker-compose.yml` |
 

@@ -15,8 +15,8 @@ Purpose: document the routing layer between DNS and services (Cloudflare Tunnel,
 |------|-------------------|-------------|
 | DNS | Cloudflare Dashboard | `ops/bindings/domain.routing.registry.yaml` (docs-only SSOT) |
 | Tunnel ingress (hostname -> service) | Cloudflare Zero Trust Dashboard | Export via `cloudflare.tunnel.ingress.status`; diff via `cloudflare.domain_routing.diff` |
-| Tunnel connector container (cloudflared) | `infra-core` host runtime | Canonical compose: `ops/staged/cloudflared/docker-compose.yml` |
-| Reverse proxy on infra-core (Caddy) | `infra-core` host runtime | Canonical compose: `ops/staged/caddy-auth/docker-compose.yml` |
+| Tunnel connector container (cloudflared) | `infra-core` host runtime | Canonical compose: `ops/infra/cloudflared/docker-compose.yml` |
+| Reverse proxy on infra-core (Caddy) | `infra-core` host runtime | Canonical compose: `ops/infra/caddy-auth/docker-compose.yml` |
 | Live host stack paths | `ops/bindings/docker.compose.targets.yaml` | Binding SSOT (never guess `/opt/stacks` vs `~/stacks`) |
 | Health probes | `ops/bindings/services.health.yaml` | Binding SSOT (read-only HTTP probes) |
 

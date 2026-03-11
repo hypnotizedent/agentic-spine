@@ -166,7 +166,7 @@ echo "yes" | ./bin/ops cap run infra.relocation.state.transition \
 ## Step 6: Deploy observability stacks
 
 Config files should already be staged at `/opt/stacks/` on observability.
-See `ops/staged/observability/` for pre-built configs.
+See `ops/infra/observability/` for pre-built configs.
 
 ### 6a: Create stack directories
 
@@ -177,10 +177,10 @@ ssh ubuntu@observability 'sudo mkdir -p /opt/stacks/{prometheus,grafana,loki,upt
 ### 6b: Transfer staged configs
 
 ```bash
-scp -r ops/staged/observability/prometheus/* ubuntu@observability:/opt/stacks/prometheus/
-scp -r ops/staged/observability/grafana/* ubuntu@observability:/opt/stacks/grafana/
-scp -r ops/staged/observability/loki/* ubuntu@observability:/opt/stacks/loki/
-scp -r ops/staged/observability/uptime-kuma/* ubuntu@observability:/opt/stacks/uptime-kuma/
+scp -r ops/infra/observability/prometheus/* ubuntu@observability:/opt/stacks/prometheus/
+scp -r ops/infra/observability/grafana/* ubuntu@observability:/opt/stacks/grafana/
+scp -r ops/infra/observability/loki/* ubuntu@observability:/opt/stacks/loki/
+scp -r ops/infra/observability/uptime-kuma/* ubuntu@observability:/opt/stacks/uptime-kuma/
 ```
 
 ### 6c: Start stacks (one at a time, verify each)

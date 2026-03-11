@@ -58,13 +58,13 @@ This root contains sanitized, repo-tracked compose/config for VM-infra stacks.
 
 ## Current VM-Infra Active Stacks (Inventory)
 
-- cloudflared: `ops/staged/cloudflared/`
-- caddy-auth: `ops/staged/caddy-auth/`
-- secrets (Infisical): `ops/staged/secrets/`
-- vaultwarden: `ops/staged/vaultwarden/`
-- pihole: `ops/staged/pihole/`
+- cloudflared: `ops/infra/cloudflared/`
+- caddy-auth: `ops/infra/caddy-auth/`
+- secrets (Infisical): `ops/infra/secrets/`
+- vaultwarden: `ops/infra/vaultwarden/`
+- pihole: `ops/infra/pihole/`
 - dev-tools/gitea: `ops/staged/dev-tools/gitea/`
-- observability: `ops/staged/observability/*`
+- observability: `ops/infra/observability/*`
 - download-stack: `ops/staged/download-stack/`
 - streaming-stack: `ops/staged/streaming-stack/`
 

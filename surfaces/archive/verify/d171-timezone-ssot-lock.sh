@@ -61,7 +61,7 @@ fi
 
 # ── Foundation staged pihole compose ──
 
-f="$FOUNDATION_ROOT/ops/staged/pihole/docker-compose.yml"
+f="$FOUNDATION_ROOT/ops/infra/pihole/docker-compose.yml"
 if [[ -f "$f" ]]; then
   val="$(grep 'TZ=' "$f" | head -1 | sed 's/.*TZ=//' | tr -d ' "'"'"'' || echo "")"
   check "$f" "TZ env" "$val"
