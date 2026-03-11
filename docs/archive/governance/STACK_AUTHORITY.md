@@ -30,7 +30,7 @@ A stack is **active** if it meets all of the following:
 
 Authoritative compose comes from one of these sources:
 
-1. **Spine VM-infra SSOT:** `ops/staged/**` (canonical, sanitized)
+1. **Foundation typed VM-infra SSOT:** `agentic-foundation/ops/{infra,domains}/**` (canonical, sanitized)
 2. **Workbench supporting compose:** `/Users/ronnyworks/code/workbench/infra/compose/**` (supporting/reference for non-VM-infra stacks)
 
 ### Live runtime compose directory
@@ -50,11 +50,13 @@ These paths are never authoritative:
 - `ops/legacy/**`
 - `docs/legacy/**`
 
-## Spine VM-Infra Stack Root
+## Foundation Typed Stack Roots
 
-- `ops/staged/**`
+- `agentic-foundation/ops/infra/**`
+- `agentic-foundation/ops/domains/**`
+- `agentic-foundation/ops/staged/**` (interim residue only)
 
-This root contains sanitized, repo-tracked compose/config for VM-infra stacks.
+These roots contain sanitized compose/config for typed implementation source plus interim residue that has not been safely typed yet.
 
 ## Current VM-Infra Active Stacks (Inventory)
 
@@ -74,4 +76,3 @@ This root contains sanitized, repo-tracked compose/config for VM-infra stacks.
 - Domain routing SSOT: `ops/bindings/domain.routing.registry.yaml`
 - Ingress authority: `docs/governance/INGRESS_AUTHORITY.md`
 - Live compose paths binding: `ops/bindings/docker.compose.targets.yaml`
-

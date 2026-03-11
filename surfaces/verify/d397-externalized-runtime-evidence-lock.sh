@@ -41,6 +41,9 @@ required_external_dirs=(
   "$SPINE_FOUNDATION_ROOT"
   "$SPINE_FOUNDATION_ROOT/mailroom/templates"
   "$SPINE_FOUNDATION_ROOT/docs/product"
+  "$SPINE_FOUNDATION_ROOT/ops/archive"
+  "$SPINE_FOUNDATION_ROOT/ops/domains"
+  "$SPINE_FOUNDATION_ROOT/ops/infra"
   "$SPINE_FOUNDATION_ROOT/ops/staged"
 )
 
@@ -48,4 +51,4 @@ for path in "${required_external_dirs[@]}"; do
   [[ -d "$path" ]] || fail "required externalized path missing: $path"
 done
 
-echo "D397 PASS: runtime/evidence and extracted source families stay externalized"
+echo "D397 PASS: runtime/evidence and typed foundation source families stay externalized"

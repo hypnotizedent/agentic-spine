@@ -16,7 +16,7 @@ When you need to know **what is deployed** and **where it lives**:
 - Live stack directories are declared in `ops/bindings/docker.compose.targets.yaml`
 - SSH reachability/user/ports are declared in `ops/bindings/ssh.targets.yaml`
 - Health probes are declared in `ops/bindings/services.health.yaml`
-- VM-infra compose SSOT (sanitized) lives under `ops/staged/**` (see `docs/governance/COMPOSE_AUTHORITY.md`)
+- Typed foundation compose SSOT (sanitized) lives under `agentic-foundation/ops/{infra,domains}/**`; `agentic-foundation/ops/staged/` is interim only (see `docs/archive/governance/COMPOSE_AUTHORITY.md`)
 - Workbench compose is supporting/reference only (never a runtime dependency). Query `~/code/workbench` directly when an external reference is required.
 
 ## Allowed Operations (Receipt-Producing)
@@ -40,7 +40,7 @@ Secrets-bearing deploys:
 ## Change Flow (End-to-End)
 
 1. **Edit canonical SSOT** (spine-owned):
-   - Compose: `ops/staged/**`
+   - Compose: `agentic-foundation/ops/{infra,domains}/**`
    - Bindings: `ops/bindings/**`
 2. **Apply to the live host** (receipted):
    - Preferred: `docker.compose.*` capabilities for normal stack lifecycle operations.

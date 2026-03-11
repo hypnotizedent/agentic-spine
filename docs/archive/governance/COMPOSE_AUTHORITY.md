@@ -13,7 +13,8 @@ Purpose: prevent "compose guessing" by defining where authoritative compose live
 
 - **Never guess live paths** like `/opt/stacks` vs `~/stacks`.
   - Live paths are declared in `ops/bindings/docker.compose.targets.yaml` (SSOT).
-- **VM-infra compose SSOT (sanitized)** lives in this repo under `ops/staged/**`.
+- **Typed VM-infra compose SSOT (sanitized)** lives under `agentic-foundation/ops/{infra,domains}/**`.
+- **`agentic-foundation/ops/staged/` is interim only** for untyped transition material and decision residue.
 - **Workbench compose** (`/Users/ronnyworks/code/workbench/infra/compose/**`) is a *supporting/reference surface* for non-VM-infra stacks.
 - **Legacy ronny-ops compose is non-authoritative** and must not be used for deployment.
   - Example stale runtime copy: `$LEGACY_ROOT/infrastructure/cloudflare/tunnel/docker-compose.yml`
