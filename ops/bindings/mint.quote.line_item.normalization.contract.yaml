@@ -123,14 +123,24 @@ canonical_field_set:
     source_module: pricing
     api_field: item_type
 
+  pricing_scope:
+    type: enum
+    required_for: []
+    optional_for: [pricing_ready, quote_ready]
+    allowed_values: [full_quote, imprint_only]
+    description: Whether pricing should include full quote inputs or decoration/imprint only
+    source_module: pricing
+    api_field: pricing_scope
+
   color_count:
     type: integer
-    required_for: [pricing_ready, quote_ready]
-    optional_for: []
-    description: Number of print colors (affects pricing surcharges)
+    required_for: []
+    optional_for: [pricing_ready, quote_ready]
+    description: Number of print colors when the selected decoration method actually prices by color
     validation: ">= 0"
     source_module: pricing
     api_field: colors (or color_count as alias)
+    required_for_methods: [screen_print]
 
   print_locations:
     type: array[string]
@@ -143,8 +153,8 @@ canonical_field_set:
 
   blanks_cost_cents:
     type: integer
-    required_for: [pricing_ready, quote_ready]
-    optional_for: []
+    required_for: [quote_ready]
+    optional_for: [pricing_ready]
     description: Blanks cost in cents (from supplier or fallback)
     validation: ">= 0"
     source_module: pricing
@@ -152,16 +162,16 @@ canonical_field_set:
 
   supplier_source:
     type: string
-    required_for: [pricing_ready, quote_ready]
-    optional_for: []
+    required_for: [quote_ready]
+    optional_for: [pricing_ready]
     description: Supplier source for blanks (canonical code)
     source_module: pricing
     api_field: supplier_source
 
   lead_time_days:
     type: integer
-    required_for: [pricing_ready, quote_ready]
-    optional_for: []
+    required_for: [quote_ready]
+    optional_for: [pricing_ready]
     description: Expected lead time in days
     validation: ">= 0"
     source_module: pricing
@@ -383,12 +393,18 @@ completeness_classes:
       - product_type
       - quantity
       - decoration_method
-      - color_count
       - print_locations
-      - blanks_cost_cents
-      - supplier_source
-      - lead_time_days
     conditional_required:
+      - field: color_count
+        when: decoration_method = screen_print
+      - field: color_count
+        when: decoration_method = embroidery and puff_mode = puff
+      - field: blanks_cost_cents
+        when: pricing_scope != imprint_only
+      - field: supplier_source
+        when: pricing_scope != imprint_only
+      - field: lead_time_days
+        when: pricing_scope != imprint_only
       # These fields are required for certain decoration methods
       - field: method_variant
         when: decoration_method = screen_print
@@ -566,11 +582,12 @@ gap_emission_rules:
     severity: blocking
     description: Cannot calculate pricing without complete job estimate inputs
     resolution_path: >
-      Prompt operator for decoration_method, color_count, print_locations,
-      or derive from intake seed/artwork evidence.
+      Prompt operator for pricing_scope plus method-specific pricing drivers,
+      or derive them from intake seed/artwork evidence. Do not request
+      blank/supplier/timeline fields when pricing_scope = imprint_only.
     emitted_when:
       - completeness_class: pricing_ready
-      - missing_fields: [decoration_method, color_count, print_locations, blanks_cost_cents]
+      - missing_fields: [decoration_method, print_locations]
 
   missing_quote_readiness:
     gap_id: GAP-MINT-LINE-ITEM-QUOTE-NOT-READY
@@ -620,7 +637,8 @@ validation_rules:
   conditional_embroidery_inputs: >
     If decoration_method = embroidery, then stitch_count, puff_mode,
     thread_type, and hoop_class are required. garment_material is required
-    when puff_mode = puff; curved_panel_cap is required when hoop_class = cap_hoop.
+    when puff_mode = puff; color_count is required when puff_mode = puff;
+    curved_panel_cap is required when hoop_class = cap_hoop.
   conditional_engraving_material: >
     If decoration_method = engraving, then material_class is required.
   conditional_transfers_inputs: >
@@ -648,6 +666,7 @@ examples:
     product_type: "t-shirt"
     quantity: 50
     decoration_method: "screen_print"
+    pricing_scope: "full_quote"
     color_count: 2
     print_locations: ["front", "back"]
     blanks_cost_cents: 350
@@ -666,6 +685,7 @@ examples:
     product_type: "t-shirt"
     quantity: 50
     decoration_method: "screen_print"
+    pricing_scope: "full_quote"
     color_count: 2
     print_locations: ["front", "back"]
     blanks_cost_cents: 350
@@ -722,8 +742,9 @@ supplier_lookup_fields:
 
 pricing_inputs:
   - decoration_method
-  - color_count
+  - pricing_scope
   - print_locations
+  - color_count
   - blanks_cost_cents
   - supplier_source
   - lead_time_days
