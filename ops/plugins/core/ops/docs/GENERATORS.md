@@ -144,7 +144,7 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
 - Input:
   - `ops/bindings/terminal.worker.catalog.yaml`
 - Output:
-  - `docs/governance/generated/worker-usage/*.md`
+  - `docs/reference/generated/worker-usage/*.md`
 - Command:
   - `./ops/plugins/core/ops/bin/gen-worker-usage-docs.sh`
 - Validate:

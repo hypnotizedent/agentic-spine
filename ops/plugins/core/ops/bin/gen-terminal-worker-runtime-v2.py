@@ -5,7 +5,7 @@ Outputs:
 - ops/bindings/terminal.worker.catalog.yaml
 - ops/bindings/routing.dispatch.yaml
 - ops/bindings/terminal.launcher.view.yaml
-- docs/governance/generated/worker-usage/*.md
+- docs/reference/generated/worker-usage/*.md
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ CAPABILITIES_REGISTRY = ROOT / "ops/capabilities.yaml"
 WORKER_CATALOG_OUT = ROOT / "ops/bindings/terminal.worker.catalog.yaml"
 ROUTING_DISPATCH_OUT = ROOT / "ops/bindings/routing.dispatch.yaml"
 LAUNCHER_VIEW_OUT = ROOT / "ops/bindings/terminal.launcher.view.yaml"
-WORKER_USAGE_DIR = ROOT / "docs/governance/generated/worker-usage"
+WORKER_USAGE_DIR = ROOT / "docs/reference/generated/worker-usage"
 
 GENERATOR_ID = "ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py"
 
@@ -420,7 +420,7 @@ def _build_worker_catalog(
             "open_work_scope": {
                 "domain_filter": open_work_domain_filter,
             },
-            "usage_surface": f"docs/governance/generated/worker-usage/{terminal_id}.md",
+            "usage_surface": f"docs/reference/generated/worker-usage/{terminal_id}.md",
             "launcher_ref": {
                 "hotkey": terminal_binding.get("hotkey"),
                 "picker_group": role.get("picker_group"),

@@ -14,8 +14,8 @@
 #   ops lane close [profile]       Close a lane (or current lane)
 #
 # Profiles:
-#   control    - Writer for docs/planning/*, governance surfaces
-#   execution  - Writer for domain repos (e.g. mint-modules), no roadmap
+#   control    - Writer for canonical docs surfaces and governance
+#   execution  - Writer for domain repos (e.g. mint-modules), no canonical-doc edits
 #   audit      - Read-only evidence collection
 #   watcher    - Read-only long-running checks only
 #
@@ -61,8 +61,8 @@ Usage:
   ops lane check <path>          Check if a path is writable in current lane
 
 Profiles:
-  control    Writer for docs/planning/*, governance surfaces, can merge
-  execution  Writer for domain repos (plugins, surfaces), no roadmap edits
+  control    Writer for canonical docs surfaces and governance, can merge
+  execution  Writer for domain repos (plugins, surfaces), no canonical-doc edits
   audit      Read-only evidence collection
   watcher    Read-only long-running checks only
 EOF
@@ -95,8 +95,8 @@ if os.path.exists(contract_file):
 # Fallback if YAML not loaded
 if not profiles:
     profiles = {
-        "control":   {"desc": "Writer for planning docs + governance. Can merge.", "write": "docs/planning/*, docs/governance/*, mailroom/state/*", "mode": "read-write", "merge": "Y"},
-        "execution": {"desc": "Writer for domain repos (plugins, surfaces). No roadmap.", "write": "ops/plugins/*, surfaces/*", "mode": "read-write", "merge": "N"},
+        "control":   {"desc": "Writer for canonical docs + governance. Can merge.", "write": "docs/core/*, docs/contracts/*, docs/governance/*, docs/reference/*, docs/runbooks/*, mailroom/state/*", "mode": "read-write", "merge": "Y"},
+        "execution": {"desc": "Writer for domain repos (plugins, surfaces). No canonical-doc edits.", "write": "ops/plugins/*, surfaces/*", "mode": "read-write", "merge": "N"},
         "audit":     {"desc": "Read-only evidence collection.", "write": "(none)", "mode": "read-only", "merge": "N"},
         "watcher":   {"desc": "Read-only background checks.", "write": "(none)", "mode": "read-only", "merge": "N"},
     }
@@ -181,7 +181,7 @@ try:
 
     # Check for conflicting lanes (control + execution can coexist, but warn)
     if profile == "execution" and "control" in lanes:
-        print("NOTE: control lane is already open. execution lane will be deny-scoped from docs/planning/*")
+        print("NOTE: control lane is already open. execution lane will be deny-scoped from canonical docs surfaces")
     elif profile == "control" and "execution" in lanes:
         print("NOTE: execution lane is already open. control lane can merge handoffs from it.")
 
@@ -369,8 +369,8 @@ if os.path.exists(contract_file):
 
 if not profiles:
     profiles = {
-        "control":   {"write_scope": ["docs/planning/*", "docs/governance/*", "mailroom/state/*"], "deny_scope": []},
-        "execution": {"write_scope": ["ops/plugins/*", "surfaces/*"], "deny_scope": ["docs/planning/*", "docs/governance/*"]},
+        "control":   {"write_scope": ["docs/core/*", "docs/contracts/*", "docs/governance/*", "docs/reference/*", "docs/runbooks/*", "mailroom/state/*"], "deny_scope": []},
+        "execution": {"write_scope": ["ops/plugins/*", "surfaces/*"], "deny_scope": ["docs/core/*", "docs/contracts/*", "docs/governance/*", "docs/reference/*", "docs/runbooks/*"]},
         "audit":     {"write_scope": [], "deny_scope": ["*"]},
         "watcher":   {"write_scope": [], "deny_scope": ["*"]},
     }

@@ -111,7 +111,7 @@ PROTECTED_LOOPS=("LOOP-MAIL-ARCHIVER-MICROSOFT-DEEP-IMPORT-20260226")
 PROTECTED_GAPS=("GAP-OP-973")
 PROTECTED_RUNTIME_LANES=("ews-import" "md1400-rsync")
 PROTECTED_BRANCH_REGEXES=("^main$" "^codex/cleanup-night-snapshot-.*$")
-PROTECTED_WORKTREE_GLOBS=("mailroom/state/loop-scopes/LOOP-MAIL-ARCHIVER-MICROSOFT-DEEP-IMPORT-20260226.scope.md" "docs/planning/MD1400_*")
+PROTECTED_WORKTREE_GLOBS=("mailroom/state/loop-scopes/LOOP-MAIL-ARCHIVER-MICROSOFT-DEEP-IMPORT-20260226.scope.md" "docs/reference/audits/MD1400_*")
 SNAPSHOT_ROOT="${HOME}/.local/state/agentic-spine/closeout_backups"
 
 if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then

@@ -49,7 +49,7 @@ If all preconditions pass and Ronny test stamp exists -> `READY_FOR_RONNY_STAMP`
 ## Execution Snapshot (2026-02-26)
 
 Source evidence pack:
-1. `/Users/ronnyworks/code/agentic-spine/docs/planning/MINT_RUNTIME_PROBE_CONSISTENCY_20260226.md`
+1. `/Users/ronnyworks/code/agentic-spine/docs/reference/audits/MINT_RUNTIME_PROBE_CONSISTENCY_20260226.md`
 2. `CAP-20260226-023620__mint.modules.health__Rj6b460582`
 3. `CAP-20260226-023620__mint.deploy.status__Rsfpf60583`
 4. `CAP-20260226-023620__mint.runtime.proof__Rhfbl60584`

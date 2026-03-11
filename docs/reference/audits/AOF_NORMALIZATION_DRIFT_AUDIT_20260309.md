@@ -75,8 +75,8 @@ Result:
 ### 5. Stale doctrine teaching split semantics
 
 Fixed:
-- `docs/planning/MINT_RUNTIME_PROBE_CONSISTENCY_20260226.md` is now superseded
-- `docs/planning/MINT_RUNTIME_GAPS_AUDIT_20260309.md` was already superseded by resolver normalization work
+- `docs/reference/audits/MINT_RUNTIME_PROBE_CONSISTENCY_20260226.md` is now superseded
+- `docs/reference/audits/MINT_RUNTIME_GAPS_AUDIT_20260309.md` was already superseded by resolver normalization work
 - this document now records the completed boring model instead of an in-progress recommendation set
 
 ## Canonical Boring Model

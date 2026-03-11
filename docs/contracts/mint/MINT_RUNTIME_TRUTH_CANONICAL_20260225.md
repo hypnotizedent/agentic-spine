@@ -44,4 +44,4 @@ The following docs must reference this canonical runtime truth:
 1. `mint-modules/docs/ARCHITECTURE/MINT_TRANSITION_STATE.md`
 2. `mint-modules/docs/PLANNING/MINT_ORDER_AGENT_ROADMAP_SSOT.md`
 3. `mint-modules/docs/PLANNING/MINT_MODULE_EXECUTION_QUEUE.md`
-4. `agentic-spine/docs/planning/MINT_CLEANUP_EXECUTION_MAP_20260225.md`
+4. `agentic-spine/docs/contracts/mint/MINT_RUNTIME_TRUTH_CANONICAL_20260225.md`

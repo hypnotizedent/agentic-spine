@@ -32,7 +32,7 @@ if [[ "$CHECK_MODE" -eq 0 ]]; then
   fi
 
   spine_tx_init
-  spine_tx_track "$ROOT/docs/governance/generated/worker-usage"
+  spine_tx_track "$ROOT/docs/reference/generated/worker-usage"
 fi
 
 if ! python3 "$ROOT/ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py" --target usage "$@"; then

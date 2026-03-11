@@ -97,7 +97,7 @@
    Filing evidence: `CAP-20260227-005651__gaps.file__Rpo3e29530`.
 
 5. H4 governance closeout packaging completed with residual blockers retained in `GAP-OP-1036` (no closure attempted).  
-   Evidence: `docs/planning/HARDWARE_PLANE_WAVE_EXECUTION_RECEIPT_20260227.md`; replacement proposal envelope `mailroom/outbox/proposals/CP-20260227-014245__hardware-plane-governance-wave-closeout-fullscope-replacement-20260227/` (replaces narrowed apply record `CP-20260227-011200__hardware-plane-governance-wave-closeout-20260227`); wave close `CAP-20260227-011244__orchestration.wave.close__Rae8q54239` (`READY_FOR_ADOPTION=false` due to preflight status anomalies).
+   Evidence: `/Users/ronnyworks/code/.evidence/spine/reports/verify/legacy/HARDWARE_PLANE_WAVE_EXECUTION_RECEIPT_20260227.md`; replacement proposal envelope `mailroom/outbox/proposals/CP-20260227-014245__hardware-plane-governance-wave-closeout-fullscope-replacement-20260227/` (replaces narrowed apply record `CP-20260227-011200__hardware-plane-governance-wave-closeout-20260227`); wave close `CAP-20260227-011244__orchestration.wave.close__Rae8q54239` (`READY_FOR_ADOPTION=false` due to preflight status anomalies).
 
 ## 2026-02-27 Live Closure Evidence Update
 - evidence bundle: `mailroom/outbox/reports/hardware-plane-audit/2026-02-27/closure-evidence-20260227T065051Z/`
@@ -134,7 +134,7 @@ Requires Attestation before non-read-only follow-on:
 ## Artifact Drafts
 - `mailroom/outbox/reports/hardware-plane-audit/2026-02-27/hardware.capacity.audit.json`
 - `mailroom/outbox/reports/hardware-plane-audit/2026-02-27/draft.hardware.drift.gates.yaml`
-- `docs/planning/HARDWARE_PLANE_WAVE_EXECUTION_RECEIPT_20260227.md`
+- `/Users/ronnyworks/code/.evidence/spine/reports/verify/legacy/HARDWARE_PLANE_WAVE_EXECUTION_RECEIPT_20260227.md`
 - `mailroom/outbox/proposals/CP-20260227-014245__hardware-plane-governance-wave-closeout-fullscope-replacement-20260227/`
 - Historical narrow apply record: `mailroom/outbox/proposals/CP-20260227-011200__hardware-plane-governance-wave-closeout-20260227/`
 - Raw evidence bundle:

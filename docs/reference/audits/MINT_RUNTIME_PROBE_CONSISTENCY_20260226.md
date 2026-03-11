@@ -9,7 +9,7 @@ authority: LOOP-MINT-RUNTIME-PROBE-CONSISTENCY-20260225
 > Superseded on 2026-03-09 by the AOF normalization work.
 > Canonical Mint HTTP health truth now lives in `ops/bindings/services.health.yaml`.
 > `ops/bindings/mint.probe.targets.yaml` is reduced to Mint-only non-HTTP metadata.
-> Use `docs/planning/AOF_NORMALIZATION_DRIFT_AUDIT_20260309.md` for the normalized model.
+> Use `docs/reference/audits/AOF_NORMALIZATION_DRIFT_AUDIT_20260309.md` for the normalized model.
 
 # MINT Runtime Probe Consistency (2026-02-26)
 

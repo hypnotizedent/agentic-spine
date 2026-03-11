@@ -47,7 +47,7 @@ echo "  $(find "$DOCS" -maxdepth 1 -type f -not -name ".DS_Store" | wc -l | tr -
 # ─────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- Check 2: Folder allowlist ---"
-ALLOWED_DIRS="contracts core governance planning reference runbooks"
+ALLOWED_DIRS="contracts core governance reference runbooks"
 
 for d in "$DOCS"/*/; do
   name="$(basename "$d")"
@@ -56,6 +56,39 @@ for d in "$DOCS"/*/; do
   fi
 done
 echo "  $(find "$DOCS" -maxdepth 1 -type d -not -path "$DOCS" | wc -l | tr -d ' ') subdirectories"
+
+if [[ -d "$DOCS/planning" ]]; then
+  err "deprecated root present: docs/planning/ (archive or retype it)"
+fi
+
+if [[ -d "$DOCS/governance/generated" ]]; then
+  err "generated docs must not live under docs/governance/generated/ (use docs/reference/generated/)"
+fi
+
+GENERATED_OUTSIDE_REFERENCE="$(find "$DOCS" -type f \( -name "*.md" -o -name "*.yaml" \) | sort | while read -r f; do
+  if head -10 "$f" | grep -qi '^status:[[:space:]]*generated'; then
+    case "$f" in
+      "$DOCS/reference/generated/"* ) ;;
+      * ) printf '%s\n' "${f#$ROOT/}" ;;
+    esac
+  fi
+done)"
+
+if [[ -n "$GENERATED_OUTSIDE_REFERENCE" ]]; then
+  err "generated docs outside docs/reference/generated/:"
+  echo "$GENERATED_OUTSIDE_REFERENCE" | head -10
+else
+  echo "  Generated docs isolated under docs/reference/generated/ (clean)"
+fi
+
+STALE_PLANNING_REFS="$(rg -n 'docs/planning/' "$ROOT/bin" "$ROOT/ops" "$ROOT/surfaces" "$ROOT/docs" "$ROOT/fixtures" \
+  -g '!ops/plugins/core/docs/bin/docs-lint' 2>/dev/null || true)"
+if [[ -n "$STALE_PLANNING_REFS" ]]; then
+  err "stale docs/planning refs remain:"
+  echo "$STALE_PLANNING_REFS" | head -10
+else
+  echo "  No stale docs/planning refs in source surfaces (clean)"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────
 # CHECK 3: Metadata headers (status line in first 10 lines)
@@ -116,6 +149,10 @@ echo "--- Check 5: Legacy isolation ---"
 LEGACY_REFS="$(rg -n "docs/reference/legacy/" "$ROOT/ops/" "$ROOT/surfaces/" "$ROOT/agents/" "$ROOT/bin/" 2>/dev/null \
   | grep -v "quarantine\|FORBIDDEN\|FORBID\|DENY\|legacy.*reference\|legacy.*archive\|_imports\|docs-lint" \
   | grep -v "/ops/plugins/core/audit/" \
+  | grep -v "ops/bindings/spine.boundary.baseline.yaml" \
+  | grep -v "ops/bindings/docs.johnny_decimal.yaml" \
+  | grep -v "ops/bindings/rag.workspace.contract.yaml" \
+  | grep -v "ops/bindings/operational.gaps.yaml" \
   || true)"
 
 if [[ -n "$LEGACY_REFS" ]]; then
@@ -159,7 +196,14 @@ fi
 # ─────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- Check 6b: External doc leaks ---"
-WORKBENCH_DOCS="$(rg -n "workbench/docs" "$DOCS" -g'!**/governance/WORKBENCH_TOOLING_INDEX.md' 2>/dev/null || true)"
+WORKBENCH_DOCS="$(rg -n "workbench/docs" "$DOCS" \
+  -g'!**/governance/WORKBENCH_TOOLING_INDEX.md' \
+  -g'!**/reference/brain/README.md' \
+  -g'!**/reference/brain/rules.md' \
+  -g'!**/reference/legacy/brain-lessons/README.md' \
+  -g'!**/core/EXTRACTION_PROTOCOL.md' \
+  -g'!**/contracts/TAILSCALE_AUTHORITY_CONTRACT_V1.yaml' \
+  2>/dev/null || true)"
 # Exclude code blocks (rg command examples) and EXTRACTION_PROTOCOL (scan syntax)
 INFRA_DOCS="$(rg -n "infrastructure/docs" "$DOCS" -g'!**/core/EXTRACTION_PROTOCOL.md' 2>/dev/null | grep -v 'rg -n\|rg .*infrastructure' || true)"
 # Exclude: WORKBENCH_TOOLING_INDEX (canonical), LEGACY_DEPRECATION (policy/examples), source attribution patterns

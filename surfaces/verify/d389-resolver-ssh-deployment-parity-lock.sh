@@ -12,7 +12,7 @@
 # Check: Grep deploy/mutation scripts for ssh_resolve_host_with_fallback usage
 # where they also perform SSH operations (deploy, docker remote, backup via SSH).
 #
-# See: docs/planning/AOF_NORMALIZATION_DRIFT_AUDIT_20260309.md
+# See: docs/reference/audits/AOF_NORMALIZATION_DRIFT_AUDIT_20260309.md
 
 set -euo pipefail
 
@@ -71,7 +71,7 @@ if [[ ${#violations[@]} -gt 0 ]]; then
   echo "Fix: Replace ssh_resolve_host_with_fallback with ssh_resolve_ssh_host_with_fallback"
   echo "     for all SSH/deploy operations."
   echo ""
-  echo "See: docs/planning/AOF_NORMALIZATION_DRIFT_AUDIT_20260309.md"
+  echo "See: docs/reference/audits/AOF_NORMALIZATION_DRIFT_AUDIT_20260309.md"
   exit 1
 fi
 

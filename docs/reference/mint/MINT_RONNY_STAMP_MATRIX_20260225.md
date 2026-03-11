@@ -12,7 +12,7 @@ authority: LOOP-MINT-RONNY-APPROVAL-STAMP-LANE-20260225
 ## Source Evidence
 
 1. Probe consistency source:
-   `/Users/ronnyworks/code/agentic-spine/docs/planning/MINT_RUNTIME_PROBE_CONSISTENCY_20260226.md`
+   `/Users/ronnyworks/code/agentic-spine/docs/reference/audits/MINT_RUNTIME_PROBE_CONSISTENCY_20260226.md`
 2. Runtime evidence pack (single pack used for this matrix update):
    - `CAP-20260226-023620__mint.modules.health__Rj6b460582`
    - `CAP-20260226-023620__mint.deploy.status__Rsfpf60583`
@@ -22,7 +22,7 @@ authority: LOOP-MINT-RONNY-APPROVAL-STAMP-LANE-20260225
    - `CAP-20260226-031621__secrets.exec__Rhkqa63035` (payment schema verify PASS)
    - `CAP-20260226-031402__secrets.exec__Ruh1m4088` (checkout + webhook smoke PASS)
 3. Canonical policy reference:
-   `/Users/ronnyworks/code/agentic-spine/docs/planning/MINT_RUNTIME_TRUTH_CANONICAL_20260225.md`
+   `/Users/ronnyworks/code/agentic-spine/docs/contracts/mint/MINT_RUNTIME_TRUTH_CANONICAL_20260225.md`
 
 ## Claim Policy (Strict)
 

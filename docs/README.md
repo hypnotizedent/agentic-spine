@@ -45,8 +45,10 @@ Keep additions there instead of creating new governance roots.
 - `docs/governance/` - live governance and SSOTs
 - `docs/governance/domains/` - one canonical doc per domain
 - `docs/reference/` - non-authoritative support material
+- `docs/reference/generated/` - generated projections and legacy-generated notes that remain machine-useful but non-authoritative
 - `docs/reference/brain/` - agent context helpers
-- `docs/reference/pillars/` - externalized domain pointer stubs
+- `docs/reference/mint/` - retained Mint reference packets and audits
+- `docs/reference/media/` - retained media migration reference packets
+- `docs/reference/pillars/` - retained domain extraction packets that are still useful as reference
 - `docs/reference/legacy/` - quarantined historical reference
-- `docs/planning/` - scoped plans and execution notes
 - `docs/runbooks/` - operational runbooks

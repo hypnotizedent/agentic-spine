@@ -1,6 +1,6 @@
 # W60 Fix-to-Lock Mapping
 
-Source: docs/planning/W60_FINDING_TRUTH_MATRIX.md
+Source: docs/reference/audits/W60_FINDING_TRUTH_MATRIX.md
 Generated: 2026-02-28
 
 | finding_id | root_cause | regression_lock_id | owner | expiry_check | lock_evidence |

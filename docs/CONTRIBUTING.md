@@ -21,9 +21,10 @@ scope: docs-contributing-rules
 | `docs/governance/` | Canonical governance, SSOTs, and narrow infra summaries | `SPINE.md`, `SESSION_PROTOCOL.md`, `STACK_REGISTRY.yaml` |
 | `docs/governance/domains/` | One canonical doc per domain | `finance.md`, `loop_gap.md`, `media.md` |
 | `docs/reference/brain/` | Agent memory, context injection, imported commands | `README.md`, `rules.md` |
+| `docs/reference/mint/` | Mint reference packets that are useful but not authoritative | `MINT_TABLE_OWNERSHIP_MAP.md` |
+| `docs/reference/media/` | Media migration packets and checkpoints | `MEDIA-MIGRATION-LINEAGE-CHECKPOINT.md` |
 | `docs/reference/pillars/` | Domain pillar docs and domain-level operating references | `finance/` |
 | `docs/reference/` | Low-authority indexes, audits, validation notes | `jd/`, `audits/`, `validation/` |
-| `docs/planning/` | Planning, roadmaps, and scoped execution plans | `README.md`, `ROADMAP.md` |
 | `docs/reference/legacy/` | Archived imports + retired planning/extraction docs (reference only) | `_imports/` |
 | `docs/` (root) | Index + cheat sheet only | `README.md`, `OPERATOR_CHEAT_SHEET.md`, `CONTRIBUTING.md` |
 

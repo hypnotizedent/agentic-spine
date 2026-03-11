@@ -1564,7 +1564,7 @@ print(f"  Status: dispatched")
 if from_role or to_role:
     print(f"  Role transition: {from_role or '?'} -> {to_role or '?'} (gate={transition_gate or 'none'})")
 if lane == "execution":
-    print(f"  NOTE: execution lane is deny-scoped from docs/planning/*")
+    print(f"  NOTE: execution lane is deny-scoped from canonical docs surfaces")
 elif lane == "audit":
     print(f"  NOTE: audit lane is read-only")
 PYDISP

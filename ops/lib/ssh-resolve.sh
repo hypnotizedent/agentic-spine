@@ -16,7 +16,7 @@
 #   - For SSH/deploy/docker operations: Use ssh_resolve_ssh_host_with_fallback (TCP/22 test)
 #   - For HTTP-only health probes: Use ssh_resolve_host_with_fallback (ICMP ping)
 #   - NEVER use ping-based resolver for deploy/mutation operations
-#   - See: docs/planning/AOF_NORMALIZATION_DRIFT_AUDIT_20260309.md
+#   - See: docs/reference/audits/AOF_NORMALIZATION_DRIFT_AUDIT_20260309.md
 #
 # ═══════════════════════════════════════════════════════════════
 
