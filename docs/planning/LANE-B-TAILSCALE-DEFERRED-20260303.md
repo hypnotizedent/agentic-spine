@@ -37,14 +37,14 @@ infrastructure that cannot be resolved by spec work alone.
   full deployment checklist.
 
 ### 3. Webhook Receiver Capability Stub
-- **File**: `ops/capabilities/tailscale-webhook-receiver.yaml`
+- **File**: `docs/planning/capability-stubs/tailscale-webhook-receiver.yaml`
 - **Lifecycle**: planned
 - **Capability ID**: `tailscale.webhook.receiver.status`
 - **Purpose**: Health check for deployed webhook receiver endpoint
 - **Activation**: Manual, after receiver deployment and subscription creation
 
 ### 4. Audit Log Collection Capability Stub
-- **File**: `ops/capabilities/tailscale-audit-log-collect.yaml`
+- **File**: `docs/planning/capability-stubs/tailscale-audit-log-collect.yaml`
 - **Lifecycle**: planned
 - **Capability IDs**: `tailscale.audit.log.freshness` (primary), `tailscale.audit.log.query` (sibling)
 - **Purpose**: Freshness monitoring for audit log stream via Loki queries
