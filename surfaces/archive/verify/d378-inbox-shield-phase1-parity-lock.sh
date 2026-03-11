@@ -38,7 +38,7 @@ check "contracts-landed" \
 
 # 4. Status script exists
 check "status-script-exists" \
-  "[[ -x '$ROOT/ops/plugins/inbox-shield/bin/inbox-shield-status' ]]" \
+  "[[ -x '$ROOT/ops/plugins/domains/inbox-shield/bin/inbox-shield-status' ]]" \
   "inbox-shield-status script not found or not executable"
 
 # 5. Service onboarding entry exists
