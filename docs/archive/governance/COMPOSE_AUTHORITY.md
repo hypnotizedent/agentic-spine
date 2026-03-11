@@ -27,14 +27,14 @@ Purpose: prevent "compose guessing" by defining where authoritative compose live
 | pihole | `ops/infra/pihole/docker-compose.yml` |
 | vaultwarden | `ops/infra/vaultwarden/docker-compose.yml` |
 | secrets (Infisical) | `ops/infra/secrets/docker-compose.yml` |
-| dev-tools (gitea) | `ops/staged/dev-tools/gitea/docker-compose.yml` |
+| dev-tools (gitea) | `ops/domains/dev-tools/gitea/docker-compose.yml` |
 | observability (prometheus) | `ops/infra/observability/prometheus/docker-compose.yml` |
 | observability (grafana) | `ops/infra/observability/grafana/docker-compose.yml` |
 | observability (loki) | `ops/infra/observability/loki/docker-compose.yml` |
 | observability (uptime-kuma) | `ops/infra/observability/uptime-kuma/docker-compose.yml` |
 | observability (node-exporter) | `ops/infra/observability/node-exporter/docker-compose.yml` |
-| download-stack | `ops/staged/download-stack/docker-compose.yml` |
-| streaming-stack | `ops/staged/streaming-stack/docker-compose.yml` |
+| download-stack | `ops/domains/download-stack/docker-compose.yml` |
+| streaming-stack | `ops/domains/streaming-stack/docker-compose.yml` |
 
 ## Workbench Compose (Supporting / Reference)
 

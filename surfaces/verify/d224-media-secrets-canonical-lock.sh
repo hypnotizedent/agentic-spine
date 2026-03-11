@@ -9,8 +9,8 @@ source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 POLICY="$ROOT/ops/bindings/secrets.namespace.policy.yaml"
 RUNWAY="$ROOT/ops/bindings/secrets.runway.contract.yaml"
-DL_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/staged/download-stack/docker-compose.yml"
-ST_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/staged/streaming-stack/docker-compose.yml"
+DL_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/domains/download-stack/docker-compose.yml"
+ST_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/domains/streaming-stack/docker-compose.yml"
 SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
 
 ERRORS=0
@@ -64,7 +64,7 @@ check_compose_keys() {
 check_compose_keys "$DL_COMPOSE" "download-stack"
 check_compose_keys "$ST_COMPOSE" "streaming-stack"
 
-# Ensure staged download-stack keeps canonical autopulse/crosswatch wiring.
+# Ensure canonical download-stack keeps autopulse/crosswatch wiring.
 for required in \
   'AUTOPULSE__TARGETS__JELLYFIN__TOKEN=${JELLYFIN_API_TOKEN}' \
   'AUTOPULSE__TARGETS__JELLYFIN__URL=' \

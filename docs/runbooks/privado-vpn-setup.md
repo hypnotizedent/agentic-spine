@@ -48,7 +48,7 @@ This includes `D223` (media VPN routing lock).
 
 ## Change Privado Region
 
-1. Edit `ops/staged/download-stack/docker-compose.yml`:
+1. Edit `ops/domains/download-stack/docker-compose.yml`:
    - `SERVER_COUNTRIES=${VPN_SERVER_COUNTRIES:-<Country>}`
 2. Redeploy on VM 209:
 

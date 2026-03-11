@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Ensure staged media compose files match deployed compose files on media VMs.
+# TRIAGE: Ensure canonical media compose files match deployed compose files on media VMs.
 set -euo pipefail
 
 source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
@@ -63,9 +63,9 @@ COMPARED=0
 SKIPPED=0
 
 for stack in download-stack streaming-stack; do
-  local_compose="$FOUNDATION_ROOT/ops/staged/${stack}/docker-compose.yml"
+  local_compose="$FOUNDATION_ROOT/ops/domains/${stack}/docker-compose.yml"
   if [[ ! -f "$local_compose" ]]; then
-    err "${stack}: missing staged compose file: $local_compose"
+    err "${stack}: missing canonical compose file: $local_compose"
     continue
   fi
 
@@ -117,7 +117,7 @@ REMOTE
 
   COMPARED=$((COMPARED + 1))
   if [[ "$local_sha" != "$remote_sha" ]]; then
-    err "${stack}: compose SHA drift (staged=${local_sha} remote=${remote_sha})"
+    err "${stack}: compose SHA drift (canonical=${local_sha} remote=${remote_sha})"
   else
     ok "${stack}: compose SHA parity OK (${local_sha})"
   fi

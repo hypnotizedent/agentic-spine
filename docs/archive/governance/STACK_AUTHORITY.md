@@ -63,10 +63,10 @@ This root contains sanitized, repo-tracked compose/config for VM-infra stacks.
 - secrets (Infisical): `ops/infra/secrets/`
 - vaultwarden: `ops/infra/vaultwarden/`
 - pihole: `ops/infra/pihole/`
-- dev-tools/gitea: `ops/staged/dev-tools/gitea/`
+- dev-tools/gitea: `ops/domains/dev-tools/gitea/`
 - observability: `ops/infra/observability/*`
-- download-stack: `ops/staged/download-stack/`
-- streaming-stack: `ops/staged/streaming-stack/`
+- download-stack: `ops/domains/download-stack/`
+- streaming-stack: `ops/domains/streaming-stack/`
 
 ## Governance Links
 
