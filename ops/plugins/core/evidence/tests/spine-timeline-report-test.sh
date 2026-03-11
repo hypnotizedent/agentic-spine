@@ -32,11 +32,11 @@ make_repo() {
   mkdir -p "$repo/ops/lib"
   mkdir -p "$repo/ops/bindings"
   mkdir -p "$repo/ops/plugins/core/evidence/bin"
-  mkdir -p "$repo/ops/plugins/core/evidence/state"
-  mkdir -p "$repo/receipts/sessions"
-  mkdir -p "$repo/mailroom/state/loop-scopes"
-  mkdir -p "$repo/mailroom/outbox/audits"
-  mkdir -p "$repo/mailroom/state"
+  mkdir -p "$repo/.evidence/spine/verify/indexes"
+  mkdir -p "$repo/.evidence/spine/sessions"
+  mkdir -p "$repo/.runtime/spine/state/loop-scopes"
+  mkdir -p "$repo/.runtime/spine/mailroom/outbox/audits"
+  mkdir -p "$repo/.runtime/spine/state"
 
   cp "$SP/ops/lib/runtime-paths.sh" "$repo/ops/lib/runtime-paths.sh"
   cp "$SP/ops/plugins/core/evidence/bin/spine-timeline-query" "$repo/ops/plugins/core/evidence/bin/spine-timeline-query"
@@ -48,7 +48,7 @@ make_repo() {
 gaps: []
 YAML
 
-  cat > "$repo/ops/plugins/core/evidence/state/receipt-index.yaml" <<'YAML'
+  cat > "$repo/.evidence/spine/verify/indexes/receipt-index.yaml" <<'YAML'
 version: 1
 generated_at_utc: "2026-02-18T00:00:00Z"
 entries: []
@@ -68,14 +68,21 @@ last_verified: 2026-02-18
 scope: runtime-test
 version: 1
 updated_at: 2026-02-18
+workspace_root: "$repo"
 runtime_root: "$runtime_root"
+mailroom_root: "$runtime_root/mailroom"
+state_root: "$runtime_root/state"
+logs_root: "$runtime_root/logs"
+evidence_root: "$repo/.evidence/spine"
+receipts_root: "$repo/.evidence/spine/sessions"
+verify_root: "$repo/.evidence/spine/verify"
 active: $active
 YAML
 }
 
 seed_index_cross_midnight() {
   local repo="$1"
-  cat > "$repo/ops/plugins/core/evidence/state/receipt-index.yaml" <<'YAML'
+  cat > "$repo/.evidence/spine/verify/indexes/receipt-index.yaml" <<'YAML'
 version: 1
 generated_at_utc: "2026-02-18T08:30:00Z"
 entries:
@@ -117,7 +124,7 @@ run_report() {
 test_runtime_fallback_inactive() {
   local repo runtime_root out expected
   repo="$(make_repo)"
-  runtime_root="$repo/.runtime/spine-mailroom"
+  runtime_root="$repo/.runtime/spine"
   write_runtime_contract "$repo" false "$runtime_root"
 
   out="$(
@@ -127,18 +134,18 @@ test_runtime_fallback_inactive() {
       --until 2026-02-18T12:00:00Z
   )"
 
-  expected="$repo/mailroom/outbox/audits/active-false.md"
+  expected="$runtime_root/mailroom/outbox/audits/active-false.md"
   if [[ -f "$expected" ]] && echo "$out" | grep -q "$expected"; then
-    pass "runtime fallback uses repo outbox when contract active=false"
+    pass "timeline report uses contract runtime outbox when contract exists"
   else
-    fail "active=false should write report to repo outbox audits"
+    fail "timeline report should write to contract runtime outbox"
   fi
 }
 
 test_runtime_fallback_active() {
   local repo runtime_root out expected
   repo="$(make_repo)"
-  runtime_root="$repo/.runtime/spine-mailroom"
+  runtime_root="$repo/.runtime/spine"
   write_runtime_contract "$repo" true "$runtime_root"
 
   out="$(
@@ -159,7 +166,7 @@ test_runtime_fallback_active() {
 test_empty_state_handling() {
   local repo out report_path
   repo="$(make_repo)"
-  write_runtime_contract "$repo" false "$repo/.runtime/spine-mailroom"
+  write_runtime_contract "$repo" false "$repo/.runtime/spine"
 
   out="$(
     run_query "$repo" \
@@ -177,7 +184,7 @@ test_empty_state_handling() {
     --report-id empty-state \
     --since 2026-02-18T00:00:00Z \
     --until 2026-02-18T12:00:00Z >/dev/null
-  report_path="$repo/mailroom/outbox/audits/empty-state.md"
+  report_path="$repo/.runtime/spine/mailroom/outbox/audits/empty-state.md"
   if [[ -f "$report_path" ]] && grep -q "No events in selected window." "$report_path"; then
     pass "timeline report writes empty-state output cleanly"
   else
@@ -188,7 +195,7 @@ test_empty_state_handling() {
 test_timezone_cross_midnight() {
   local repo out
   repo="$(make_repo)"
-  write_runtime_contract "$repo" false "$repo/.runtime/spine-mailroom"
+  write_runtime_contract "$repo" false "$repo/.runtime/spine"
   seed_index_cross_midnight "$repo"
 
   out="$(
@@ -209,10 +216,10 @@ test_timezone_cross_midnight() {
 test_concurrent_report_determinism() {
   local repo report_path run1 run2 rc1 rc2 sum1 sum2
   repo="$(make_repo)"
-  write_runtime_contract "$repo" false "$repo/.runtime/spine-mailroom"
+  write_runtime_contract "$repo" false "$repo/.runtime/spine"
   seed_index_cross_midnight "$repo"
 
-  report_path="$repo/mailroom/outbox/audits/concurrent.md"
+  report_path="$repo/.runtime/spine/mailroom/outbox/audits/concurrent.md"
   run1="$repo/run1.out"
   run2="$repo/run2.out"
 

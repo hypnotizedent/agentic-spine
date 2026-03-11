@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
 VERIFY_TOPOLOGY="$ROOT/ops/plugins/core/verify/bin/verify-topology"
 VERIFY_PACK="$ROOT/ops/plugins/core/verify/bin/verify-pack"
 REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
@@ -9,9 +12,9 @@ TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
 DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
 PROFILE_CONTRACT="$ROOT/ops/bindings/verify.run.profile.contract.yaml"
 CLASS_CONTRACT="$ROOT/ops/bindings/verify.failure.classification.contract.yaml"
-HISTORY_DIR="$ROOT/ops/plugins/core/verify/state"
-HISTORY_FILE="$HISTORY_DIR/verify-failure-class-history.ndjson"
-PASS_STREAK_FILE="$HISTORY_DIR/gate-pass-streak.json"
+HISTORY_DIR="${SPINE_VERIFY_HISTORY_DIR:-$SPINE_VERIFY_ROOT/history}"
+HISTORY_FILE="${VERIFY_FAILURE_HISTORY_FILE:-${SPINE_VERIFY_FAILURE_HISTORY_FILE:-$HISTORY_DIR/verify-failure-class-history.ndjson}}"
+PASS_STREAK_FILE="${VERIFY_PASS_STREAK_FILE:-${SPINE_VERIFY_PASS_STREAK_FILE:-$SPINE_STATE/verify/gate-pass-streak.json}}"
 MAPFILE_COMPAT="$ROOT/ops/plugins/core/verify/bin/bash-mapfile-compat.sh"
 
 # shellcheck disable=SC1090
@@ -289,7 +292,7 @@ append_history() {
   local run_result_json="$2"
   local class_json="$3"
 
-  mkdir -p "$HISTORY_DIR"
+  mkdir -p "$(dirname "$HISTORY_FILE")"
 
   jq -cn \
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -311,7 +314,7 @@ update_gate_pass_streak() {
   local -a split=()
   local gid
 
-  mkdir -p "$HISTORY_DIR"
+  mkdir -p "$(dirname "$PASS_STREAK_FILE")"
   now_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   if [[ -f "$PASS_STREAK_FILE" ]] && jq -e . >/dev/null 2>&1 <"$PASS_STREAK_FILE"; then

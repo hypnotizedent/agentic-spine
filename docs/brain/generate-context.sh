@@ -6,13 +6,17 @@ set -euo pipefail
 # ═══════════════════════════════════════════════════════════════
 #
 # Called by hotkeys (Ctrl+0/2/3) before launching an agent.
-# Produces docs/brain/context.md with rules, open loops,
+# Produces runtime/context/agent-context.md with rules, open loops,
 # available CLI tools, and last handoff.
 #
 # ═══════════════════════════════════════════════════════════════
 
 SP="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-OUT="$SP/docs/brain/context.md"
+source "$SP/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+OUT="${SPINE_AGENT_CONTEXT_FILE:-$SPINE_RUNTIME_ROOT/context/agent-context.md}"
+mkdir -p "$(dirname "$OUT")"
 
 {
   echo "# Agent Context (auto-generated)"
@@ -90,7 +94,7 @@ OUT="$SP/docs/brain/context.md"
     echo ""
 
     echo "### Top Used (last 200 done capability runs)"
-    LEDGER="$SP/mailroom/state/ledger.csv"
+    LEDGER="$SPINE_STATE/ledger.csv"
     if [[ -f "$LEDGER" ]] && command -v python3 >/dev/null 2>&1; then
       python3 - "$LEDGER" <<'PY'
 import csv

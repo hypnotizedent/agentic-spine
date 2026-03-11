@@ -59,6 +59,11 @@ ensure_runtime_scaffold() {
     local calendar_external_dir="$calendar_dir/external"
     local evidence_index_dir="$SPINE_VERIFY_ROOT/indexes"
     local receipt_index="$evidence_index_dir/receipt-index.yaml"
+    local verify_history_dir="$SPINE_VERIFY_HISTORY_DIR"
+    local verify_history_file="$SPINE_VERIFY_FAILURE_HISTORY_FILE"
+    local verify_state_dir="$SPINE_VERIFY_STATE_ROOT"
+    local verify_pass_streak_file="$SPINE_VERIFY_PASS_STREAK_FILE"
+    local context_dir="$SPINE_AGENT_CONTEXT_ROOT"
 
     mkdir -p \
         "$RECEIPTS" \
@@ -69,6 +74,9 @@ ensure_runtime_scaffold() {
         "$calendar_dir" \
         "$calendar_external_dir" \
         "$evidence_index_dir" \
+        "$verify_history_dir" \
+        "$verify_state_dir" \
+        "$context_dir" \
         "$SPINE_LOCKS" \
         "$SPINE_LOGS" \
         "$SPINE_TMP"
@@ -79,6 +87,14 @@ updated_at_utc: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 source_root: "$RECEIPTS"
 entries: []
 EOF
+    fi
+
+    if [[ ! -f "$verify_history_file" ]]; then
+        : > "$verify_history_file"
+    fi
+
+    if [[ ! -f "$verify_pass_streak_file" ]]; then
+        echo '{}' > "$verify_pass_streak_file"
     fi
 }
 

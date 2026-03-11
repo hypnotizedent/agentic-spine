@@ -14,7 +14,7 @@ Reference surface for session context generation and operating rules.
 
 - `docs/brain` supports context loading and operator ergonomics.
 - Canonical governance authority remains `docs/core/**` + `docs/governance/**`.
-- `context.md` is generated runtime output and should remain uncommitted.
+- `runtime/context/agent-context.md` is generated runtime output and should remain outside the repo.
 
 ## Files
 
@@ -22,8 +22,8 @@ Reference surface for session context generation and operating rules.
 |------|---------|
 | `rules.md` | Session rule summary used by context loaders |
 | `memory.md` | Session handoff notes (append-only; optional) |
-| `generate-context.sh` | Builds `context.md` from current spine state |
-| `context.md` | Generated session context (runtime output; uncommitted) |
+| `generate-context.sh` | Builds `runtime/context/agent-context.md` from current spine state |
+| `runtime/context/agent-context.md` | Generated session context (runtime output; uncommitted) |
 | `lessons/` | Moved to `~/code/workbench/docs/brain-lessons/` (reference only) |
 | `_imported/` | Imported command context (reference only) |
 

@@ -275,7 +275,7 @@ All loop scope files in `mailroom/state/loop-scopes/` MUST use one of these thre
 
 - **Entry governance:** `AGENTS.md` + this `SESSION_PROTOCOL.md` define the canonical workflow: start in the spine repo, list open loops, do work via `./bin/ops cap run ...` / `./bin/ops run ...`, and close loops with receipts.
 - **Loop engine:** `./bin/ops loops ...` + `mailroom/state/loop-scopes/*.scope.md` are the shared coordination surface other agents can see.
-- **Receipts + ledger:** `receipts/sessions/**/receipt.md` are the primary proof trail. The runtime ledger at `~/code/.runtime/spine-mailroom/state/ledger.csv` (25K+ entries) is the canonical run-history index (externalized per `mailroom.runtime.contract.yaml`). The in-repo `mailroom/state/ledger.csv` is a stale migration ghost — do not use it.
+- **Receipts + ledger:** `receipts/sessions/**/receipt.md` are the primary proof trail. The runtime ledger at `~/code/.runtime/spine/state/ledger.csv` is the canonical run-history index (externalized per `mailroom.runtime.contract.yaml`). The in-repo `mailroom/state/ledger.csv` is a stale migration ghost — do not use it.
 - **Drift gates (enforced by `spine.verify`):**
   - D42 code-path case lock (keeps `~/code/...` canonical, blocks drift like `~/Code/...`).
   - D48 codex worktree hygiene (prevents orphaned/stale codex worktrees/branches).

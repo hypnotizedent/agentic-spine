@@ -15,9 +15,13 @@
 
 set -eo pipefail
 
-REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
 BRAIN="$REPO/docs/brain"
 AGENT="${1:-claude}"
+
+source "$REPO/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+CONTEXT_FILE="${SPINE_AGENT_CONTEXT_FILE:-$SPINE_RUNTIME_ROOT/context/agent-context.md}"
 
 # Validate agent
 case "$AGENT" in
@@ -57,8 +61,8 @@ echo "║  CONTEXT LOADED                                           ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo ""
 
-if [[ -f "$BRAIN/context.md" ]]; then
-  cat "$BRAIN/context.md"
+if [[ -f "$CONTEXT_FILE" ]]; then
+  cat "$CONTEXT_FILE"
 else
   # Fallback: just print rules
   cat "$BRAIN/rules.md" 2>/dev/null || echo "No context found. Run docs/brain/generate-context.sh"

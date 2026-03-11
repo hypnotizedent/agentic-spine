@@ -402,7 +402,7 @@ write_receipt() {
 
 ## Ledger
 
-Entry appended to: \`mailroom/state/ledger.csv\`
+Entry appended to: \`runtime/state/ledger.csv\`
 
 ## Error
 

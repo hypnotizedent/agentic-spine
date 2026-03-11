@@ -19,7 +19,7 @@ CWD:         /Users/ronnyworks/code/agentic-spine
 Executing...
 ────────────────────────────────────────
 spine.log.query
-log_file: /Users/ronnyworks/code/.runtime/spine-mailroom/logs/spine-events.jsonl
+log_file: /Users/ronnyworks/code/.runtime/spine/logs/spine-events.jsonl
 count: 0
 ────────────────────────────────────────
 
@@ -51,7 +51,7 @@ wrapper: total=14 pass=13 fail=0 warn=1
 blocking_fail_gate_ids: none
 warning_gate_ids: D127
 failure_class: deterministic=0 freshness=0 gate_bug=0
-history_file: /Users/ronnyworks/code/agentic-spine/ops/plugins/core/verify/state/verify-failure-class-history.ndjson
+history_file: /Users/ronnyworks/code/.evidence/spine/verify/history/verify-failure-class-history.ndjson
 ────────────────────────────────────────
 
 ════════════════════════════════════════
@@ -76,4 +76,3 @@ Output:   /Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260305-1
 - Domain verify has zero blocking failures.
 - Fast verify has zero blocking failures.
 - Failure cause and remediation are reflected in commit and receipt evidence.
-

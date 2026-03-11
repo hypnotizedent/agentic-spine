@@ -20,8 +20,15 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine-mailroom}"
+SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+RUNTIME_PATHS_LIB="$SPINE_REPO/ops/lib/runtime-paths.sh"
+if [[ -f "$RUNTIME_PATHS_LIB" ]]; then
+  source "$RUNTIME_PATHS_LIB"
+  spine_runtime_resolve_paths
+fi
+RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine}"
+SPINE_STATE="${SPINE_STATE:-$RUNTIME_ROOT/state}"
+SPINE_OUTBOX="${SPINE_OUTBOX:-$RUNTIME_ROOT/mailroom/outbox}"
 WAVES_DIR="$RUNTIME_ROOT/waves"
 LANES_STATE="$RUNTIME_ROOT/lanes/state.json"
 ROLE_RUNTIME_CONTRACT="$SPINE_REPO/ops/bindings/role.runtime.control.contract.yaml"
@@ -44,6 +51,14 @@ _repo_abs_path() {
     echo ""
     return
   fi
+  case "$p" in
+    runtime/*|mailroom/*|receipts/*|evidence/*)
+      if declare -F spine_resolve_mailroom_path >/dev/null 2>&1; then
+        spine_resolve_mailroom_path "$p"
+        return
+      fi
+      ;;
+  esac
   if [[ "$p" = /* ]]; then
     echo "$p"
   else
@@ -68,8 +83,8 @@ load_runtime_role_control() {
   [[ "$PATH_CLAIMS_TTL_MINUTES" =~ ^[0-9]+$ ]] || PATH_CLAIMS_TTL_MINUTES="180"
   PATH_CLAIMS_FILE="$(_repo_abs_path "$path_claims_rel")"
   TRAFFIC_INDEX_FILE="$(_repo_abs_path "$traffic_index_rel")"
-  [[ -n "$PATH_CLAIMS_FILE" ]] || PATH_CLAIMS_FILE="$SPINE_REPO/mailroom/state/path.claims.yaml"
-  [[ -n "$TRAFFIC_INDEX_FILE" ]] || TRAFFIC_INDEX_FILE="$SPINE_REPO/mailroom/state/traffic.index.yaml"
+  [[ -n "$PATH_CLAIMS_FILE" ]] || PATH_CLAIMS_FILE="$SPINE_STATE/path.claims.yaml"
+  [[ -n "$TRAFFIC_INDEX_FILE" ]] || TRAFFIC_INDEX_FILE="$SPINE_STATE/traffic.index.yaml"
   RUNTIME_ROLE_CONTROL_LOADED=1
 }
 

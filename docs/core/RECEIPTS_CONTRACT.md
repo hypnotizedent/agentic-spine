@@ -49,7 +49,7 @@ find receipts/sessions -path '*__<capability>__*' -name receipt.md
 # (full script in docs/governance/MAILROOM_RUNBOOK.md § Reconciling Ledger with Receipts)
 ```
 
-The ledger (`mailroom/state/ledger.csv`) maps `run_id` to status and timestamps, but is
+The ledger (`runtime/state/ledger.csv`) maps `run_id` to status and timestamps, but is
 a transaction log — not a receipt index. To resolve a `run_id` to its receipt:
 `receipts/sessions/R<run_id>/receipt.md`.
 

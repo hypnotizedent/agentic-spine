@@ -94,11 +94,19 @@ spine_runtime_resolve_paths() {
   local evidence_root="${SPINE_EVIDENCE_ROOT:-}"
   local receipts="${SPINE_RECEIPTS:-}"
   local verify_root="${SPINE_VERIFY_ROOT:-}"
+  local verify_indexes_dir="${SPINE_VERIFY_INDEXES_DIR:-}"
+  local receipt_index_file="${SPINE_RECEIPT_INDEX_FILE:-}"
+  local verify_history_dir="${SPINE_VERIFY_HISTORY_DIR:-}"
+  local verify_failure_history_file="${SPINE_VERIFY_FAILURE_HISTORY_FILE:-}"
+  local verify_state_root="${SPINE_VERIFY_STATE_ROOT:-}"
+  local verify_pass_streak_file="${SPINE_VERIFY_PASS_STREAK_FILE:-}"
   local cap_runs="${SPINE_CAP_RUNS_ROOT:-}"
   local data_root="${SPINE_DATA_ROOT:-}"
   local backups_root="${SPINE_BACKUPS_ROOT:-}"
   local domain_state="${SPINE_DOMAIN_STATE:-}"
   local foundation_root="${SPINE_FOUNDATION_ROOT:-}"
+  local agent_context_root="${SPINE_AGENT_CONTEXT_ROOT:-}"
+  local agent_context_file="${SPINE_AGENT_CONTEXT_FILE:-}"
 
   if [[ -z "$workspace_root" ]]; then
     workspace_root="$(_spine_runtime_contract_value "$contract_file" '.workspace_root' '')"
@@ -172,6 +180,24 @@ spine_runtime_resolve_paths() {
   [[ -n "$verify_root" ]] || verify_root="$evidence_root/verify"
   verify_root="$(_spine_expand_home_token "$verify_root")"
 
+  [[ -n "$verify_indexes_dir" ]] || verify_indexes_dir="$verify_root/indexes"
+  verify_indexes_dir="$(_spine_expand_home_token "$verify_indexes_dir")"
+
+  [[ -n "$receipt_index_file" ]] || receipt_index_file="$verify_indexes_dir/receipt-index.yaml"
+  receipt_index_file="$(_spine_expand_home_token "$receipt_index_file")"
+
+  [[ -n "$verify_history_dir" ]] || verify_history_dir="$verify_root/history"
+  verify_history_dir="$(_spine_expand_home_token "$verify_history_dir")"
+
+  [[ -n "$verify_failure_history_file" ]] || verify_failure_history_file="$verify_history_dir/verify-failure-class-history.ndjson"
+  verify_failure_history_file="$(_spine_expand_home_token "$verify_failure_history_file")"
+
+  [[ -n "$verify_state_root" ]] || verify_state_root="$state/verify"
+  verify_state_root="$(_spine_expand_home_token "$verify_state_root")"
+
+  [[ -n "$verify_pass_streak_file" ]] || verify_pass_streak_file="$verify_state_root/gate-pass-streak.json"
+  verify_pass_streak_file="$(_spine_expand_home_token "$verify_pass_streak_file")"
+
   if [[ -z "$cap_runs" ]]; then
     cap_runs="$(_spine_runtime_contract_value "$contract_file" '.cap_runs_root' '')"
   fi
@@ -199,6 +225,12 @@ spine_runtime_resolve_paths() {
   [[ -n "$domain_state" ]] || domain_state="$data_root"
   domain_state="$(_spine_expand_home_token "$domain_state")"
 
+  [[ -n "$agent_context_root" ]] || agent_context_root="$runtime_root/context"
+  agent_context_root="$(_spine_expand_home_token "$agent_context_root")"
+
+  [[ -n "$agent_context_file" ]] || agent_context_file="$agent_context_root/agent-context.md"
+  agent_context_file="$(_spine_expand_home_token "$agent_context_file")"
+
   export \
     SPINE_REPO \
     SPINE_CODE \
@@ -214,11 +246,19 @@ spine_runtime_resolve_paths() {
     SPINE_EVIDENCE_ROOT="$evidence_root" \
     SPINE_RECEIPTS="$receipts" \
     SPINE_VERIFY_ROOT="$verify_root" \
+    SPINE_VERIFY_INDEXES_DIR="$verify_indexes_dir" \
+    SPINE_RECEIPT_INDEX_FILE="$receipt_index_file" \
+    SPINE_VERIFY_HISTORY_DIR="$verify_history_dir" \
+    SPINE_VERIFY_FAILURE_HISTORY_FILE="$verify_failure_history_file" \
+    SPINE_VERIFY_STATE_ROOT="$verify_state_root" \
+    SPINE_VERIFY_PASS_STREAK_FILE="$verify_pass_streak_file" \
     SPINE_CAP_RUNS_ROOT="$cap_runs" \
     SPINE_DATA_ROOT="$data_root" \
     SPINE_BACKUPS_ROOT="$backups_root" \
     SPINE_FOUNDATION_ROOT="$foundation_root" \
-    SPINE_DOMAIN_STATE="$domain_state"
+    SPINE_DOMAIN_STATE="$domain_state" \
+    SPINE_AGENT_CONTEXT_ROOT="$agent_context_root" \
+    SPINE_AGENT_CONTEXT_FILE="$agent_context_file"
 }
 
 spine_resolve_mailroom_path() {
@@ -230,6 +270,8 @@ spine_resolve_mailroom_path() {
   local logs="${SPINE_LOGS:-$HOME/code/.runtime/spine/logs}"
   local receipts="${SPINE_RECEIPTS:-$HOME/code/.evidence/spine/sessions}"
   local verify_root="${SPINE_VERIFY_ROOT:-$HOME/code/.evidence/spine/verify}"
+  local verify_state_root="${SPINE_VERIFY_STATE_ROOT:-$HOME/code/.runtime/spine/state/verify}"
+  local agent_context_root="${SPINE_AGENT_CONTEXT_ROOT:-$HOME/code/.runtime/spine/context}"
   local domain_state="${SPINE_DOMAIN_STATE:-$HOME/code/.data}"
 
   case "$path" in
@@ -253,6 +295,15 @@ spine_resolve_mailroom_path() {
       ;;
     receipts/audits/*)
       printf '%s\n' "$verify_root/${path#receipts/audits/}"
+      ;;
+    evidence/verify/*)
+      printf '%s\n' "$verify_root/${path#evidence/verify/}"
+      ;;
+    runtime/verify/*)
+      printf '%s\n' "$verify_state_root/${path#runtime/verify/}"
+      ;;
+    runtime/context/*)
+      printf '%s\n' "$agent_context_root/${path#runtime/context/}"
       ;;
     runtime/domain-state/*)
       printf '%s\n' "$domain_state/${path#runtime/domain-state/}"
