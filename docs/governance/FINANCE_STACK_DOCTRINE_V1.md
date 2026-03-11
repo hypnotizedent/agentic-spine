@@ -154,7 +154,7 @@ For every critical finance service, Spine must be able to answer:
 
 ### Restore Domain
 - `docs/governance/{SERVICE}_BACKUP_RESTORE.md`: Per-service restore runbook
-- Quarterly restore drill receipts in `receipts/` or `mailroom/state/`
+- Quarterly restore drill receipts in `evidence/sessions/` or `mailroom/state/`
 - `backup.inventory.yaml` restore classes: `tier1-small-state-dry-run-quarterly`, etc.
 
 ### Runtime Domain

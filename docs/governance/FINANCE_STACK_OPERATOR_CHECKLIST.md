@@ -63,7 +63,7 @@ ssh finance-stack 'sudo /usr/local/bin/finance-stack-backup.sh'
   - Paperless export: > 100MB (if documents exist)
   - Ghostfolio DB: > 10KB
 - [ ] **Backup Status**: Re-run `./bin/ops cap run backup.status` — verify freshness updated
-- [ ] **Receipt**: Document backup completion in loop scope or create receipt in `receipts/`
+- [ ] **Receipt**: Document backup completion in loop scope or create receipt in `evidence/sessions/`
 
 ---
 
@@ -91,7 +91,7 @@ Follow exact commands in `docs/governance/FINANCE_STACK_BACKUP_RESTORE.md`:
 
 - [ ] **Service Health**: Run `./bin/ops cap run finance.stack.status` — all services healthy
 - [ ] **Data Verification**: Spot-check transactions, documents, account balances
-- [ ] **Restore Receipt**: Document restore outcome in `receipts/` or loop scope
+- [ ] **Restore Receipt**: Document restore outcome in `evidence/sessions/` or loop scope
 - [ ] **Update Posture**: If production restore, update `backup.posture.snapshot.yaml` with restore drill timestamp
 
 ---
@@ -229,7 +229,7 @@ Services requiring quarterly restore drill:
 - [ ] **Backup Current**: Run manual backup before drill
 - [ ] **Restore to Test**: Restore latest backup to test environment (NOT production)
 - [ ] **Verify Restoration**: Query row counts, spot-check data
-- [ ] **Document**: Create receipt in `receipts/` with drill timestamp and outcome
+- [ ] **Document**: Create receipt in `evidence/sessions/` with drill timestamp and outcome
 - [ ] **Update Posture**: Mark drill completion in `backup.posture.snapshot.yaml`
 
 ---

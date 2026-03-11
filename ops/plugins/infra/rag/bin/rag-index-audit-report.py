@@ -51,7 +51,7 @@ skip_patterns = [
     "_audits",
     "_archived",
     "_imported",
-    "receipts/",
+    "evidence/",
     "mailroom/state/",
     "fixtures/",
     ".git/",

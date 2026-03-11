@@ -21,7 +21,7 @@ Goal: Extract capabilities from legacy repos without importing runtime smells.
 
 ## Move A — Doc-only Snapshot
 
-**Use when:** The legacy implementation is tangled (state/, receipts/, launchd, caches, multiple entrypoints).
+**Use when:** The legacy implementation is tangled (state/, evidence/, launchd, caches, multiple entrypoints).
 
 **Deliverable:**
 - `docs/core/<CAPABILITY>_LEGACY_SNAPSHOT.md`
@@ -69,7 +69,7 @@ Before marking any extraction complete, run the trace gate:
 1. **Path scan** — verify no conflicting path references:
    ```bash
    rg -n "(ronny-ops|~/code/workbench|workbench|infrastructure/docs)" docs ops surfaces bin \
-     -g'!receipts/**' -g'!mailroom/outbox/**'
+     -g'!evidence/**' -g'!mailroom/outbox/**'
    ```
    - **Allowed:** direct `~/code/workbench` references in extraction tracking and archived audit surfaces
    - **Historical:** docs/reference/legacy/**, docs/reference/audits/**

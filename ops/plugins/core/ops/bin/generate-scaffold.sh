@@ -111,7 +111,7 @@ cat <<'SCAFFOLD_EOF'
 # 0) AUTHORITY ORDER (NON-NEGOTIABLE)
 # ────────────────────────────────────────────────────────────────
 # 1) agentic-spine repo + gates  = TRUTH
-# 2) receipts/ (RCAP-*/RS*)      = PROOF
+# 2) evidence/ (sessions/ + verify/) = PROOF
 # 3) chat output                  = IDEAS ONLY (never authoritative)
 #
 # If chat conflicts with repo contracts/gates: repo wins, chat is discarded.
@@ -325,7 +325,7 @@ cat <<'SCAFFOLD_EOF'
 # │   ├── plugins/      Surface plugins (cloudflare, github, secrets, ...)
 # │   ├── runtime/      Inbox processor, watcher
 # │   └── tools/        Canonical agent scripts
-# ├── receipts/         Audit trail (sessions/, audits/, contract)
+# ├── evidence/         External proof surfaces (sessions/, verify/, contract)
 # └── surfaces/         Drift gates + verification scripts
 #     └── verify/       drift-gate.sh v2.5 + per-surface gates (D1-D57)
 #
@@ -336,7 +336,7 @@ cat <<'SCAFFOLD_EOF'
 # - Add/modify capabilities only via ops cap allowlist
 # - Define fixtures + expected outputs
 # - Improve gates to prevent regression
-# - Interpret receipts/outbox/ledger to derive next actions
+# - Interpret evidence/outbox/ledger to derive next actions
 # - Run any read-only capability without approval
 # - Run mutating capabilities only with operator approval
 #
@@ -344,10 +344,10 @@ cat <<'SCAFFOLD_EOF'
 # 10) WHAT THE MODEL MUST NOT DO
 # ────────────────────────────────────────────────────────────────
 # - No second runtime, queue, or receipt system (ever)
-# - No renaming core dirs (mailroom/, receipts/, surfaces/verify/)
+# - No renaming core dirs (mailroom/, evidence/, surfaces/verify/)
 # - No "manual receipts" as proof (proof = watcher+ops produced only)
 # - No promoting legacy repos to runtime
-# - No writing secrets into chat, git, receipts, or logs
+# - No writing secrets into chat, git, evidence, or logs
 # - No "one-off" shell commands that change infra outside capabilities
 # - No alternate runtimes, mailrooms, receipts, or HOME drift roots
 #

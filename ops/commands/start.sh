@@ -74,7 +74,7 @@ else
   BRANCH_NAME="codex/${LOOP_ID}"
   SESSION_DIR="$WORKTREE_DIR/docs/sessions/$(date +%Y-%m-%d)-${LOOP_ID}"
 
-  # Ensure a loop scope file exists for agents to anchor receipts/decisions.
+  # Ensure a loop scope file exists for agents to anchor evidence/decisions.
   # Scope files are the canonical work tracker (see LOOP-MAILROOM-CONSOLIDATION-20260210).
   LOOP_SCOPE_DIR="$SPINE_STATE/loop-scopes"
   LOOP_SCOPE_FILE="$LOOP_SCOPE_DIR/${LOOP_ID}.scope.md"

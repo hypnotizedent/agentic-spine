@@ -23,7 +23,7 @@ Verify → Plan → Execute → Receipts → Closeout
 - No second runtime / queue / receipts system
 - No renaming core directories
 - No manual receipts as proof
-- No secrets in chat/git/receipts/logs
+- No secrets in chat/git/evidence/logs
 
 ## Session start checklist
 - ./bin/ops cap run spine.verify

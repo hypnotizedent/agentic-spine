@@ -6,7 +6,7 @@ ACTIVE_CODE_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)
 
 if [[ -n "$ACTIVE_CODE_ROOT" && -f "$ACTIVE_CODE_ROOT/ops/capabilities.yaml" ]]; then
     SPINE_CODE="$ACTIVE_CODE_ROOT"
-    # Prefer active checkout/worktree for runtime artifacts (receipts/mailroom state).
+    # Prefer active checkout/worktree for runtime artifacts (evidence/mailroom state).
     SPINE_REPO="$ACTIVE_CODE_ROOT"
 else
     SPINE_CODE="${SPINE_CODE:-$SCRIPT_CODE_ROOT}"

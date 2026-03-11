@@ -52,9 +52,9 @@ Domain runtime data must live in domain runtime roots/services, not in `mailroom
 <!-- ENTRY_SURFACE_GATE_METADATA_START -->
 # ENTRY SURFACE GATE METADATA (generated)
 source_registry: ops/bindings/gate.registry.yaml
-registry_updated: 2026-03-05
-gate_count_total: 377
-gate_count_active: 73
-gate_count_retired: 304
-max_gate_id: D381
+registry_updated: 2026-03-11
+gate_count_total: 394
+gate_count_active: 89
+gate_count_retired: 305
+max_gate_id: D398
 <!-- ENTRY_SURFACE_GATE_METADATA_END -->

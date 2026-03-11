@@ -21,7 +21,7 @@ Root Structure (D17 locked):
   docs/reference/brain/    → Agent context + lessons
   docs/governance/ → SSOTs, policies, runbooks
   mailroom/      → Runtime lanes (inbox/outbox/state)
-  receipts/      → RCAP audit trail
+  evidence/      → external session proof
   fixtures/      → Replay baseline
   FORBIDDEN: agents/, _imports/, runs/
 

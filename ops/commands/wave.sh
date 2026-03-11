@@ -15,7 +15,7 @@
 #   ops wave preflight <domain>
 #   ops wave receipt-validate <path>
 #
-# Receipt artifacts: $RUNTIME_ROOT/waves/<WAVE_ID>/receipts/<task_id>.json
+# Receipt artifacts: $RUNTIME_ROOT/waves/<WAVE_ID>/evidence/<task_id>.json
 # State: $RUNTIME_ROOT/waves/<WAVE_ID>/state.json (runtime-only)
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -52,7 +52,7 @@ _repo_abs_path() {
     return
   fi
   case "$p" in
-    runtime/*|mailroom/*|receipts/*|evidence/*)
+    runtime/*|mailroom/*|evidence/*)
       if declare -F spine_resolve_mailroom_path >/dev/null 2>&1; then
         spine_resolve_mailroom_path "$p"
         return
@@ -380,7 +380,7 @@ Usage:
 Wave IDs: use WAVE-YYYYMMDD-NN format (e.g. WAVE-20260222-01)
 
 EXEC_RECEIPT Artifacts:
-  Workers emit JSON receipts to $RUNTIME_ROOT/waves/<WAVE_ID>/receipts/.
+  Workers emit JSON receipts to $RUNTIME_ROOT/waves/<WAVE_ID>/evidence/.
   Use receipt-validate to check schema compliance before collect.
 
 Background Watcher:
@@ -3153,7 +3153,7 @@ cmd_collect_v2() {
   sf="$(wave_state_file "$wave_id")"
   local sd
   sd="$(wave_state_dir "$wave_id")"
-  local receipts_dir="$sd/receipts"
+  local receipts_dir="$sd/evidence"
   local schema_path="$SPINE_REPO/ops/bindings/orchestration.exec_receipt.schema.json"
 
   python3 - "$sf" "$sd" "$receipts_dir" "$schema_path" "$sync_roadmap" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" <<'PYCOLLECT2'
@@ -3935,7 +3935,7 @@ try:
                 invalid_receipts.append(f"{fn}: invalid JSON ({e})")
 
     if invalid_receipts:
-        infra_violations.append(f"{len(invalid_receipts)} invalid receipt(s) in receipts/")
+        infra_violations.append(f"{len(invalid_receipts)} invalid receipt(s) in wave evidence/")
 
     # 6. Verify/preflight checks present
     done_checks = [c for c in checks if c["status"] == "done"]

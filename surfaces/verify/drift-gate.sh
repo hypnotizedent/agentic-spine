@@ -1225,6 +1225,13 @@ else
   warn "terminal role capability parity gate not present"
 fi
 
+echo -n "D398 Repo-local evidence write target lock... "
+if [[ -x "$SP/surfaces/verify/d398-repo-local-evidence-write-target-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d398-repo-local-evidence-write-target-lock.sh" "D398"
+else
+  warn "repo-local evidence write target lock gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1
