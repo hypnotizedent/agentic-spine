@@ -13,7 +13,7 @@ Purpose: document the routing layer between DNS and services (Cloudflare Tunnel,
 
 | Layer | Runtime Authority | Docs / SSOT |
 |------|-------------------|-------------|
-| DNS | Cloudflare Dashboard | `docs/governance/DOMAIN_ROUTING_REGISTRY.yaml` (docs-only SSOT) |
+| DNS | Cloudflare Dashboard | `ops/bindings/domain.routing.registry.yaml` (docs-only SSOT) |
 | Tunnel ingress (hostname -> service) | Cloudflare Zero Trust Dashboard | Export via `cloudflare.tunnel.ingress.status`; diff via `cloudflare.domain_routing.diff` |
 | Tunnel connector container (cloudflared) | `infra-core` host runtime | Canonical compose: `ops/staged/cloudflared/docker-compose.yml` |
 | Reverse proxy on infra-core (Caddy) | `infra-core` host runtime | Canonical compose: `ops/staged/caddy-auth/docker-compose.yml` |
@@ -71,13 +71,13 @@ This is audit/gate-friendly (exits non-zero on diffs):
 
 When tunnel ingress changes in the dashboard:
 
-1. Update `docs/governance/DOMAIN_ROUTING_REGISTRY.yaml` (set `routing_layer: cloudflare_tunnel` for active hostnames).
+1. Update `ops/bindings/domain.routing.registry.yaml` (set `routing_layer: cloudflare_tunnel` for active hostnames).
 2. Keep `authority_source` accurate (`cloudflare_dashboard` for ingress edits).
 3. Re-run `cloudflare.domain_routing.diff` until it reports no diffs.
 
 ## Related SSOTs
 
-- Domain routing: `docs/governance/DOMAIN_ROUTING_REGISTRY.yaml`
+- Domain routing: `ops/bindings/domain.routing.registry.yaml`
 - SSH host inventory: `ops/bindings/ssh.targets.yaml`
 - Live compose directories: `ops/bindings/docker.compose.targets.yaml`
 - Health probes: `ops/bindings/services.health.yaml`

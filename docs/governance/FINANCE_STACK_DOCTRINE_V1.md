@@ -34,7 +34,7 @@ Every finance service must have exactly one canonical source of truth for each o
 - **Backup Authority**: `ops/bindings/backup.inventory.yaml` and the corresponding runtime script (`/usr/local/bin/{service}-backup.sh`). Never parallel backup surfaces.
 - **Ingress Authority**: Cloudflare Tunnel configuration or direct port binding documented in `ops/bindings/service.registry.yaml`. Never undocumented ingress paths.
 - **Runtime Authority**: Docker Compose stack at `/opt/stacks/{stack-name}` with state root at `/mnt/data/{stack-name}` for stateful services. Never scattered state.
-- **Restore Authority**: `docs/archive/governance/{SERVICE}_BACKUP_RESTORE.md` with explicit restore commands and verification steps.
+- **Restore Authority**: `docs/governance/{SERVICE}_BACKUP_RESTORE.md` with explicit restore commands and verification steps.
 
 ### 2. Backup Success Means Offsite Verified
 
@@ -59,7 +59,7 @@ A finance service is NOT considered production-safe unless it has:
 
 - **Named Restore Point**: Exact artifact location on the canonical recovery plane with timestamp
 - **Restore Proof Class**: Defined in `backup.inventory.yaml` (e.g., `tier1-small-state-dry-run-quarterly`)
-- **Restore Runbook**: Documented in `docs/archive/governance/` with exact commands
+- **Restore Runbook**: Documented in `docs/governance/` with exact commands
 - **Restore Drill Receipt**: Evidence of successful restore within the drill cadence window (quarterly for tier1-critical)
 
 **Services without current restore proof are in `critical_risk` state and require immediate remediation.**
@@ -153,7 +153,7 @@ For every critical finance service, Spine must be able to answer:
 - `finance.backup.status` capability: Finance-specific backup health
 
 ### Restore Domain
-- `docs/archive/governance/{SERVICE}_BACKUP_RESTORE.md`: Per-service restore runbook
+- `docs/governance/{SERVICE}_BACKUP_RESTORE.md`: Per-service restore runbook
 - Quarterly restore drill receipts in `receipts/` or `mailroom/state/`
 - `backup.inventory.yaml` restore classes: `tier1-small-state-dry-run-quarterly`, etc.
 

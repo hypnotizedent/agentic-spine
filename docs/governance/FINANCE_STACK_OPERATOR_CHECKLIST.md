@@ -71,7 +71,7 @@ ssh finance-stack 'sudo /usr/local/bin/finance-stack-backup.sh'
 
 ### Before Restore Drill
 
-- [ ] **Restore Authority**: Confirm restore runbook exists at `docs/archive/governance/FINANCE_STACK_BACKUP_RESTORE.md`
+- [ ] **Restore Authority**: Confirm restore runbook exists at `docs/governance/FINANCE_STACK_BACKUP_RESTORE.md`
 - [ ] **Restore Point**: Identify exact backup artifact to restore (timestamp, 730XD path)
 - [ ] **Target Environment**: Confirm restore target (production VM 211 or test environment)
 - [ ] **Approval**: Get explicit operator approval for production restore
@@ -79,7 +79,7 @@ ssh finance-stack 'sudo /usr/local/bin/finance-stack-backup.sh'
 
 ### Restore Execution
 
-Follow exact commands in `docs/archive/governance/FINANCE_STACK_BACKUP_RESTORE.md`:
+Follow exact commands in `docs/governance/FINANCE_STACK_BACKUP_RESTORE.md`:
 
 1. **Stop services**: `ssh finance-stack 'cd /opt/stacks/finance && docker-compose stop {service}'`
 2. **Copy artifacts**: `scp pve:/md1400/backup-cold/apps/finance/{service}/{artifact} /tmp/`
@@ -307,7 +307,7 @@ STATEFUL_BREAK_GLASS_ACK_20260308=1 ./bin/ops cap run docker.compose.down -- fin
 ## Emergency Contacts
 
 - **Doctrine**: `docs/governance/FINANCE_STACK_DOCTRINE_V1.md`
-- **Backup Runbook**: `docs/archive/governance/FINANCE_STACK_BACKUP_RESTORE.md`
+- **Backup Runbook**: `docs/governance/FINANCE_STACK_BACKUP_RESTORE.md`
 - **Incident Receipt**: `mailroom/state/paperless-backup-incident/root-cause-receipt-20260308.md`
 - **Stateful Service Matrix**: `mailroom/state/paperless-backup-incident/stateful-service-matrix-20260308.yaml`
 - **Gap Filing**: `./bin/ops skill gaps.file -- --parent-loop LOOP-{CURRENT}`

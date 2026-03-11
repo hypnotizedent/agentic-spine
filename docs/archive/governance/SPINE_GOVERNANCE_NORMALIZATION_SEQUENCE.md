@@ -22,7 +22,7 @@ Machine contract:
 | VM identity/lifecycle | `ops/bindings/vm.lifecycle.yaml` |
 | Stack inventory + compose authority | `docs/governance/STACK_REGISTRY.yaml`, `ops/bindings/docker.compose.targets.yaml` |
 | Service runtime inventory | `docs/governance/SERVICE_REGISTRY.yaml` |
-| Ingress/routing authority | `docs/governance/DOMAIN_ROUTING_REGISTRY.yaml`, `docs/governance/INGRESS_AUTHORITY.md` |
+| Ingress/routing authority | `ops/bindings/domain.routing.registry.yaml`, `docs/governance/INGRESS_AUTHORITY.md` |
 | Service probe authority | `ops/bindings/services.health.yaml` |
 | Communications alert queue SLO/dispatcher/retry | `ops/bindings/communications.alerts.queue.contract.yaml` |
 | Escalation contract | `ops/bindings/communications.alerts.escalation.contract.yaml` |

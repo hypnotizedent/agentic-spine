@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 AUTHORITY="$ROOT/docs/CANONICAL/TAILSCALE_AUTHORITY_CONTRACT_V1.yaml"
 CF_INVENTORY="$ROOT/ops/bindings/cloudflare.inventory.yaml"
-ROUTING_REG="$ROOT/docs/governance/DOMAIN_ROUTING_REGISTRY.yaml"
+ROUTING_REG="$ROOT/ops/bindings/domain.routing.registry.yaml"
 
 fail=0
 err() { echo "D314 FAIL: $*" >&2; fail=1; }

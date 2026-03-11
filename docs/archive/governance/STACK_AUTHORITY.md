@@ -71,7 +71,7 @@ This root contains sanitized, repo-tracked compose/config for VM-infra stacks.
 ## Governance Links
 
 - Compose locations: `docs/governance/COMPOSE_AUTHORITY.md`
-- Domain routing SSOT: `docs/governance/DOMAIN_ROUTING_REGISTRY.yaml`
+- Domain routing SSOT: `ops/bindings/domain.routing.registry.yaml`
 - Ingress authority: `docs/governance/INGRESS_AUTHORITY.md`
 - Live compose paths binding: `ops/bindings/docker.compose.targets.yaml`
 

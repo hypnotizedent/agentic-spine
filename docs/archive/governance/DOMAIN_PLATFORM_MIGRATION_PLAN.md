@@ -211,7 +211,7 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 |----------|------|
 | Canonical Roots | `ops/bindings/domain.canonical.roots.yaml` |
 | Domain Portfolio | `ops/bindings/domain.portfolio.registry.yaml` |
-| Domain Routing | `docs/governance/DOMAIN_ROUTING_REGISTRY.yaml` |
+| Domain Routing | `ops/bindings/domain.routing.registry.yaml` |
 | Cloudflare Inventory | `ops/bindings/cloudflare.inventory.yaml` |
 | Service Registry | `docs/governance/SERVICE_REGISTRY.yaml` |
 | Communications Stack | `ops/bindings/communications.stack.contract.yaml` |

@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 SERVICE_CONTRACT="$ROOT/ops/bindings/service.onboarding.contract.yaml"
-ROUTING_REGISTRY="$ROOT/docs/governance/DOMAIN_ROUTING_REGISTRY.yaml"
+ROUTING_REGISTRY="$ROOT/ops/bindings/domain.routing.registry.yaml"
 
 fail() {
   echo "D317 FAIL: $*" >&2
