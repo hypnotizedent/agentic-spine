@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-STATUS_SCRIPT="$ROOT/ops/plugins/mcp/bin/mcp-runtime-status"
+STATUS_SCRIPT="$ROOT/ops/plugins/infra/mcp/bin/mcp-runtime-status"
 
 fail() {
   echo "D354 FAIL: $*" >&2

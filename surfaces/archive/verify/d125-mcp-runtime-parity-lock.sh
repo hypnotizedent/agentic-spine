@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-SCRIPT="$ROOT/ops/plugins/mcp/bin/mcp-runtime-status"
+SCRIPT="$ROOT/ops/plugins/infra/mcp/bin/mcp-runtime-status"
 
 if [[ ! -x "$SCRIPT" ]]; then
   echo "D125 FAIL: missing executable runtime status script: $SCRIPT" >&2

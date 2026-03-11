@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-GENERATOR="$ROOT/ops/plugins/mcp/bin/mcp-config-generate"
+GENERATOR="$ROOT/ops/plugins/infra/mcp/bin/mcp-config-generate"
 
 fail() {
   echo "D353 FAIL: $*" >&2
