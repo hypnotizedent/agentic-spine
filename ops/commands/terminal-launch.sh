@@ -1,36 +1,39 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# ops terminal-launch - Lane-aware terminal app launcher
+# ops terminal-launch - Spine-owned terminal launcher
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# Unified launcher that combines lane profiles + loops for terminal sessions.
-# Used by Raycast/Hammerspoon to provide a picker UI.
+# Spine-owned launcher that combines terminal character defaults, orchestration
+# policy, session bootstrap, and terminal app opening for operator entry.
+# Workbench wrappers should call this public surface rather than embedding
+# launcher policy of their own.
 #
 # Usage:
 #   ops terminal-launch list-lanes              List available lane profiles (JSON)
 #   ops terminal-launch list-loops              List open loops (JSON)
 #   ops terminal-launch list-roles              List terminal roles (JSON, from generated view)
 #   ops terminal-launch --check-source          Validate launcher view source (no launch)
-#   ops terminal-launch launch <options>        Launch a terminal
+#   ops terminal-launch launch <options>        Open a terminal window through the governed launcher
+#   ops terminal-launch exec <options>          Resolve and exec the governed launcher in the current shell
 #
 # Launch options:
-#   --lane <profile>        Lane profile (control|execution|audit|watcher)
+#   --lane <id>             Lane profile (control|execution|audit|watcher) or worker lane (D|E|F|G)
 #   --loop <loop_id>        Optional loop to attach
 #   --tool <tool>           Tool to run (claude|codex|opencode|verify)
 #   --terminal <name>       Terminal name (e.g. SPINE-CONTROL-01)
 #   --role <mode>           Launch role mode (solo|control|lane-worker)
+#   --dry-run               Print the governed launch command without opening iTerm
 #
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
 LANE_PROFILES_YAML="$SPINE_REPO/ops/bindings/lane.profiles.yaml"
 SCOPES_DIR="$SPINE_REPO/mailroom/state/loop-scopes"
-LAUNCHER_SCRIPT="$WORKBENCH_ROOT/scripts/root/spine_terminal_entry.sh"
 LAUNCHER_VIEW_YAML="$SPINE_REPO/ops/bindings/terminal.launcher.view.yaml"
 TERMINAL_ROLE_CONTRACT="$SPINE_REPO/ops/bindings/terminal.role.contract.yaml"
 ROLE_RUNTIME_CONTRACT="$SPINE_REPO/ops/bindings/role.runtime.control.contract.yaml"
+SESSION_EXEC="$SPINE_REPO/ops/plugins/core/session/bin/terminal-launch-exec"
 
 # ── Output helpers ─────────────────────────────────────────────────────────
 
@@ -50,8 +53,25 @@ warn() {
     echo "WARNING: $*" >&2
 }
 
+fail() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
 shell_quote() {
     printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+join_shell_quoted_args() {
+    local first=1
+    local arg
+    for arg in "$@"; do
+        if [[ "$first" -eq 0 ]]; then
+            printf ' '
+        fi
+        shell_quote "$arg"
+        first=0
+    done
 }
 
 resolve_terminal_label() {
@@ -256,14 +276,16 @@ Usage:
   ops terminal-launch list-roles              List terminal roles (JSON, from generated view)
   ops terminal-launch --check-source          Validate launcher view source (no launch)
   ops terminal-launch list-tools              List available tools (JSON)
-  ops terminal-launch launch <options>        Launch a terminal
+  ops terminal-launch launch <options>        Open a terminal window through the governed launcher
+  ops terminal-launch exec <options>          Resolve and exec the governed launcher in the current shell
 
 Launch options:
-  --lane <profile>        Lane profile (control|execution|audit|watcher)
+  --lane <id>             Lane profile (control|execution|audit|watcher) or worker lane (D|E|F|G)
   --loop <loop_id>        Optional loop to attach (required for worker role)
   --tool <tool>           Tool to run (claude|codex|opencode|verify)
   --terminal <name>       Terminal name (e.g. SPINE-CONTROL-01)
   --role <mode>           Launch role mode (solo|control|lane-worker)
+  --dry-run               Print the governed launch command without opening iTerm
 
 Compatibility aliases:
   orchestrator -> control
@@ -272,6 +294,7 @@ Compatibility aliases:
 Examples:
   ops terminal-launch launch --lane control --tool codex --terminal SPINE-CONTROL-01
   ops terminal-launch launch --lane execution --loop LOOP-MINT-AUTH-20260222 --tool opencode
+  ops terminal-launch exec --role solo --tool codex --terminal SPINE-CONTROL-01 --dry-run
 EOF
 }
 
@@ -451,14 +474,21 @@ cmd_launch() {
     local tool_explicit=0
     local terminal_explicit=0
     local terminal_binding=""
+    local dry_run=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --lane) lane="${2:-}"; lane_explicit=1; shift 2 ;;
+            --lane=*) lane="${1#--lane=}"; lane_explicit=1; shift ;;
             --loop) loop_id="${2:-}"; shift 2 ;;
+            --loop=*) loop_id="${1#--loop=}"; shift ;;
             --tool) tool="${2:-}"; tool_explicit=1; shift 2 ;;
+            --tool=*) tool="${1#--tool=}"; tool_explicit=1; shift ;;
             --terminal) terminal_name="${2:-}"; terminal_explicit=1; shift 2 ;;
+            --terminal=*) terminal_name="${1#--terminal=}"; terminal_explicit=1; shift ;;
             --role) role_input="${2:-}"; shift 2 ;;
+            --role=*) role_input="${1#--role=}"; shift ;;
+            --dry-run) dry_run=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) echo "Unknown option: $1" >&2; exit 1 ;;
         esac
@@ -485,27 +515,17 @@ cmd_launch() {
         fi
     fi
 
-    # Apply hardcoded default only if still empty after view lookup
     [[ -z "$tool" ]] && tool="opencode"
 
-    # Validate lane
-    if [[ -z "$lane" ]]; then
-        echo "ERROR: --lane is required" >&2
-        exit 1
-    fi
-    
-    # Validate tool
     case "$tool" in
         opencode|codex|claude|verify) ;;
         *) echo "ERROR: invalid tool: $tool" >&2; exit 1 ;;
     esac
-    
-    # Derive launch role from lane + loop
+
     if [[ -n "$loop_id" ]]; then
         role="orchestrator"
     fi
 
-    # Explicit role override (canonical launch modes + legacy compatibility aliases)
     if [[ -n "$role_input" ]]; then
         local normalized
         if ! normalized="$(normalize_launch_role "$role_input")"; then
@@ -516,16 +536,34 @@ cmd_launch() {
         role_alias_warning="${normalized#*|}"
     fi
     
-    # Derive terminal name if not provided
+    if [[ "$role" == "worker" ]]; then
+        case "$lane" in
+            [dDeEfFgG]) lane="${lane^^}" ;;
+            control|execution|audit|watcher|"")
+                if [[ $lane_explicit -eq 0 ]]; then
+                    lane=""
+                fi
+                ;;
+        esac
+        [[ -n "$lane" ]] || fail "--lane must be one of D/E/F/G for role=lane-worker"
+    fi
+
     if [[ -z "$terminal_name" ]]; then
         case "$lane" in
             control)   terminal_name="SPINE-CONTROL-01" ;;
             execution) terminal_name="SPINE-EXECUTION-01" ;;
             audit)     terminal_name="SPINE-AUDIT-01" ;;
             watcher)   terminal_name="SPINE-WATCHER-01" ;;
-            *)         terminal_name="SPINE-${lane^^}-01" ;;
+            D|E|F|G)   terminal_name="SPINE-EXECUTION-01" ;;
+            "")
+                if [[ "$role" == "solo" || "$role" == "orchestrator" ]]; then
+                    terminal_name="SPINE-CONTROL-01"
+                fi
+                ;;
+            *) terminal_name="SPINE-${lane^^}-01" ;;
         esac
     fi
+    [[ -n "$terminal_name" ]] || fail "unable to derive terminal name"
 
     local terminal_label runtime_role terminal_title
     terminal_label="$(resolve_terminal_label "$terminal_name")"
@@ -538,40 +576,42 @@ cmd_launch() {
         warn "legacy launch alias '--role worker' used; canonical launch mode is '--role lane-worker'"
     fi
 
-    # Check launcher script exists
-    if [[ ! -x "$LAUNCHER_SCRIPT" ]]; then
-        echo "ERROR: Launcher script not found: $LAUNCHER_SCRIPT" >&2
-        echo "Falling back to direct iTerm launch..." >&2
-        cmd_launch_direct "$lane" "$loop_id" "$tool" "$terminal_name" "$role"
-        return
-    fi
-    
-    # Build command
-    local cmd_args=(
+    [[ -x "$SESSION_EXEC" ]] || fail "missing launcher exec surface: $SESSION_EXEC"
+
+    local exec_args=(
+        "terminal" "exec"
         "--role" "$role"
         "--tool" "$tool"
-        "--terminal-name" "$terminal_name"
+        "--terminal" "$terminal_name"
     )
-    
+
     if [[ -n "$loop_id" ]]; then
-        cmd_args+=("--loop-id" "$loop_id")
+        exec_args+=("--loop-id" "$loop_id")
     fi
-    
-    # Launch via iTerm AppleScript
-    local full_cmd
+    if [[ -n "$lane" ]]; then
+        exec_args+=("--lane" "$lane")
+    fi
+    if [[ "$dry_run" -eq 1 ]]; then
+        exec_args+=("--dry-run")
+    fi
+
+    local quoted_args full_cmd
+    quoted_args="$(join_shell_quoted_args "${exec_args[@]}")"
     full_cmd="$(
-        printf 'SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 SPINE_TERMINAL_NAME=%s OPS_TERMINAL_ROLE=%s SPINE_TERMINAL_LABEL=%s SPINE_RUNTIME_ROLE=%s SPINE_TERMINAL_TITLE=%s %s %s' \
+        printf 'cd %s && SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 SPINE_TERMINAL_NAME=%s OPS_TERMINAL_ROLE=%s SPINE_TERMINAL_LABEL=%s SPINE_RUNTIME_ROLE=%s SPINE_TERMINAL_TITLE=%s %s %s' \
+            "$(shell_quote "$SPINE_REPO")" \
             "$(shell_quote "$terminal_name")" \
             "$(shell_quote "$terminal_name")" \
             "$(shell_quote "$terminal_label")" \
             "$(shell_quote "$runtime_role")" \
             "$(shell_quote "$terminal_title")" \
-            "$(shell_quote "$LAUNCHER_SCRIPT")" \
-            "${cmd_args[*]}"
+            "$(shell_quote "$SPINE_REPO/bin/ops")" \
+            "$quoted_args"
     )"
 
-    if [[ "${TERMINAL_LAUNCH_DRY_RUN:-0}" == "1" ]]; then
+    if [[ "$dry_run" -eq 1 || "${TERMINAL_LAUNCH_DRY_RUN:-0}" == "1" ]]; then
         echo "DRY_RUN: lane=$lane tool=$tool terminal=$terminal_name label=$terminal_label runtime_role=$runtime_role loop=${loop_id:-none} role=$role"
+        echo "command=$full_cmd"
         return
     fi
 
@@ -586,50 +626,9 @@ cmd_launch() {
     echo "Launched: lane=$lane tool=$tool terminal=$terminal_name label=$terminal_label title=${terminal_title} loop=${loop_id:-none}"
 }
 
-cmd_launch_direct() {
-    # Fallback direct launch without spine_terminal_entry.sh
-    local lane="$1"
-    local loop_id="$2"
-    local tool="$3"
-    local terminal_name="$4"
-    local role="$5"
-    
-    local cd_cmd="cd $SPINE_REPO"
-    local lane_cmd="export SPINE_LANE=$lane SPINE_TERMINAL_NAME=$terminal_name"
-    local ops_cmd="./bin/ops lane open $lane"
-    
-    local tool_cmd=""
-    case "$tool" in
-        opencode)
-            tool_cmd="source ~/.config/infisical/credentials 2>/dev/null || true; opencode -m openai/glm-5 ."
-            ;;
-        codex)
-            tool_cmd="codex -C . --add-dir $WORKBENCH_ROOT --dangerously-bypass-approvals-and-sandbox"
-            ;;
-        claude)
-            tool_cmd="claude --dangerously-skip-permissions --add-dir $WORKBENCH_ROOT"
-            ;;
-        verify)
-            tool_cmd="./bin/ops cap run verify.core.run"
-            ;;
-    esac
-    
-    local full_cmd="$cd_cmd && $lane_cmd && $ops_cmd && $tool_cmd"
-
-    if [[ "${TERMINAL_LAUNCH_DRY_RUN:-0}" == "1" ]]; then
-        echo "DRY_RUN: lane=$lane tool=$tool terminal=$terminal_name loop=${loop_id:-none} role=$role"
-        return
-    fi
-
-    osascript -e "tell application \"iTerm\"
-        activate
-        set newWindow to (create window with default profile)
-        tell current session of newWindow
-            write text \"$full_cmd\"
-        end tell
-    end tell" 2>/dev/null
-
-    echo "Launched (direct): lane=$lane tool=$tool terminal=$terminal_name"
+cmd_exec() {
+    [[ -x "$SESSION_EXEC" ]] || fail "missing launcher exec surface: $SESSION_EXEC"
+    exec "$SESSION_EXEC" "$@"
 }
 
 # ── JSON combined output for Raycast ────────────────────────────────────────
@@ -722,6 +721,7 @@ case "${1:-}" in
     list-tools)   cmd_list_tools ;;
     status)       cmd_status_json ;;
     launch)       shift; cmd_launch "$@" ;;
+    exec)         shift; cmd_exec "$@" ;;
     -h|--help)    usage ;;
     "")           usage ;;
     *)            echo "Unknown subcommand: $1" >&2; usage; exit 1 ;;

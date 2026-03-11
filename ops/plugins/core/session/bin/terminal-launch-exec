@@ -1,0 +1,555 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+
+ROLE="solo"
+LOOP_ID=""
+LANE=""
+TOOL=""
+TERMINAL_NAME=""
+FORCE=0
+DRY_RUN=0
+ORCH_MODE="${SPINE_HOTKEY_ORCH_MODE:-capability}"
+ALLOW_FALLBACK="${SPINE_HOTKEY_ALLOW_FALLBACK:-0}"
+
+HOME_DIR="${HOME}"
+CODE_ROOT_DEFAULT="$(cd "$ROOT/.." && pwd)"
+CODE_ROOT="${CODE_ROOT:-$CODE_ROOT_DEFAULT}"
+if [[ ! -d "$CODE_ROOT" ]]; then
+  CODE_ROOT="${HOME_DIR}/code"
+fi
+SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
+WORKBENCH_ROOT="${WORKBENCH_ROOT:-$CODE_ROOT/workbench}"
+SESSION_START="$SPINE_ROOT/ops/plugins/core/session/bin/session-start"
+OPS_BIN="$SPINE_ROOT/bin/ops"
+
+TMP_FILES=()
+
+cleanup() {
+  if [[ "${#TMP_FILES[@]}" -gt 0 ]]; then
+    rm -f "${TMP_FILES[@]}"
+  fi
+}
+
+trap cleanup EXIT
+
+usage() {
+  cat <<'USAGE'
+terminal-launch-exec - Spine-native role-aware terminal entry
+
+Usage:
+  terminal-launch-exec --role <solo|orchestrator|worker|researcher|qc|close|librarian> --tool <claude|codex|opencode|verify> [options]
+
+Options:
+  --loop-id <id>           Required for --role orchestrator/worker
+  --lane <D|E|F|G>         Required for --role worker
+  --terminal-name <name>   Canonical terminal name (for example SPINE-CONTROL-01)
+  --terminal <name>        Alias for --terminal-name
+  --force                  Override an existing launcher lock claim for the same lane
+  --dry-run                Resolve session, env, cwd, and command without exec
+  --print-launch-plan      Alias for --dry-run
+  -h, --help               Show help
+
+Environment:
+  SPINE_TERMINAL_NAME=<name>         (override for --terminal-name)
+  SPINE_HOTKEY_ORCH_MODE=capability  (fallback mode is retired)
+USAGE
+}
+
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+make_tmp() {
+  local file
+  file="$(mktemp)"
+  TMP_FILES+=("$file")
+  printf '%s\n' "$file"
+}
+
+capture_cmd() {
+  local out_var="$1"
+  shift
+
+  local out rc
+  set +e
+  out="$("$@" 2>&1)"
+  rc=$?
+  set -e
+
+  if [[ -n "$out" ]]; then
+    printf '%s\n' "$out" >&2
+  fi
+  printf -v "$out_var" '%s' "$out"
+  return "$rc"
+}
+
+print_quoted_args() {
+  local first=1
+  local arg
+  for arg in "$@"; do
+    if [[ "$first" -eq 0 ]]; then
+      printf ' '
+    fi
+    printf '%q' "$arg"
+    first=0
+  done
+  printf '\n'
+}
+
+emit_launch_plan() {
+  local cwd="$1"
+  shift
+
+  echo "LAUNCH_PLAN"
+  echo "role=$ROLE"
+  echo "tool=$TOOL"
+  echo "loop_id=${LOOP_ID:-none}"
+  echo "lane=${LANE:-none}"
+  echo "terminal_name=${TERMINAL_NAME:-unset}"
+  echo "terminal_role=${OPS_TERMINAL_ROLE:-unset}"
+  echo "runtime_role=${SPINE_RUNTIME_ROLE:-unset}"
+  echo "orch_mode=$ORCH_MODE"
+  echo "session_lane=${SESSION_LANE:-unset}"
+  echo "session_start=$SESSION_START"
+  echo "spine_root=$SPINE_ROOT"
+  echo "spine_target_repo=${SPINE_TARGET_REPO:-$SPINE_ROOT}"
+  echo "spine_worktree=${SPINE_WORKTREE:-$SPINE_ROOT}"
+  echo "spine_worktree_exists=$( [[ -d "${SPINE_WORKTREE:-}" ]] && echo yes || echo no )"
+  echo "launch_cwd=$cwd"
+  echo "provider_selected=${SPINE_PROVIDER_SELECTED:-unset}"
+  echo "provider_backend=${SPINE_PROVIDER_BACKEND:-unset}"
+  echo "provider_model=${SPINE_PROVIDER_MODEL:-unset}"
+  echo "opencode_model=${SPINE_OPENCODE_MODEL:-unset}"
+  echo "morph_api_key_present=$( [[ -n "${MORPH_API_KEY:-}" ]] && echo yes || echo no )"
+  printf 'command='
+  print_quoted_args "$@"
+}
+
+launch_or_print() {
+  local cwd="$1"
+  shift
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    emit_launch_plan "$cwd" "$@"
+    exit 0
+  fi
+
+  cd "$cwd"
+  exec "$@"
+}
+
+launcher_value() {
+  local key="$1"
+  local file="$2"
+  sed -n "s/^${key}=//p" "$file" | head -1
+}
+
+launcher_plan_into_file() {
+  local out_file="$1"
+  local role="$2"
+  local plan_bin="$SPINE_ROOT/ops/plugins/core/orchestration/bin/orchestration-launcher-plan"
+  [[ -x "$plan_bin" ]] || fail "missing launcher plan helper: $plan_bin"
+
+  local -a cmd=("$plan_bin" --role "$role")
+  if [[ -n "${LOOP_ID:-}" ]]; then
+    cmd+=(--loop-id "$LOOP_ID")
+  fi
+  if [[ -n "${LANE:-}" ]]; then
+    cmd+=(--lane "$LANE")
+  fi
+  "${cmd[@]}" >"$out_file"
+}
+
+emit_active_locks_from_plan() {
+  local file="$1"
+  local record
+  while IFS= read -r line; do
+    [[ "$line" == lock=* ]] || continue
+    record="${line#lock=}"
+    IFS=$'\t' read -r lock_loop lock_lane lock_status lock_stale lock_owner lock_pid lock_mode _lock_worktree lock_branch lock_path <<<"$record"
+    [[ "$lock_status" == "active" && "$lock_stale" == "false" ]] || continue
+    echo "WARN lock: loop=${lock_loop:-unknown} lane=${lock_lane:-unknown} owner=${lock_owner:-unknown} pid=${lock_pid:-unknown} mode=${lock_mode:-unknown} branch=${lock_branch:-unknown} path=${lock_path:-unknown}" >&2
+  done <"$file"
+}
+
+resolve_orch_context_from_plan() {
+  local file="$1"
+  SPINE_TARGET_REPO="$(launcher_value repo "$file")"
+  SPINE_WORKTREE="$(launcher_value worktree "$file")"
+  SPINE_ORCH_ROLE="$(launcher_value role "$file")"
+  SPINE_ORCH_LANE="$(launcher_value lane "$file")"
+  SPINE_ORCH_BRANCH="$(launcher_value branch "$file")"
+  export SPINE_TARGET_REPO SPINE_WORKTREE SPINE_ORCH_ROLE SPINE_ORCH_LANE SPINE_ORCH_BRANCH
+  [[ -n "${SPINE_WORKTREE:-}" ]] || fail "launcher plan did not return SPINE_WORKTREE"
+}
+
+claim_orch_context() {
+  local role="$1"
+  local session_id="$2"
+  local -a cmd=("$OPS_BIN" cap run orchestration.launcher.claim -- --role "$role" --loop-id "$LOOP_ID" --session-id "$session_id")
+  if [[ "$role" == "worker" ]]; then
+    cmd+=(--lane "$LANE")
+  fi
+  if [[ "$FORCE" -eq 1 ]]; then
+    cmd+=(--force)
+  fi
+
+  local claim_out exports
+  capture_cmd claim_out "${cmd[@]}" || fail "launcher claim failed for role=$role loop=$LOOP_ID lane=${LANE:-C}"
+  exports="$(printf '%s\n' "$claim_out" | grep -E '^export (SPINE_ORCH_|SPINE_WORKTREE|SPINE_TARGET_REPO)=' || true)"
+  [[ -n "$exports" ]] || fail "launcher claim did not return exports for role=$role loop=$LOOP_ID lane=${LANE:-C}"
+  eval "$exports"
+  export SPINE_ORCH_ROLE SPINE_ORCH_LANE SPINE_ORCH_BRANCH SPINE_ORCH_LOCK_FILE SPINE_ORCH_WORKTREE_RESOLUTION_MODE SPINE_TARGET_REPO SPINE_WORKTREE
+  [[ -n "${SPINE_WORKTREE:-}" ]] || fail "launcher claim did not return SPINE_WORKTREE"
+  [[ -d "$SPINE_WORKTREE" ]] || fail "resolved SPINE_WORKTREE does not exist: $SPINE_WORKTREE"
+}
+
+startup_contract_check() {
+  local status_rc=0
+  "$OPS_BIN" status >/dev/null 2>&1 || status_rc=$?
+  if [[ "$status_rc" -ne 0 && "$status_rc" -ne 1 ]]; then
+    fail "startup contract failed: ./bin/ops status (rc=$status_rc)"
+  fi
+  "$OPS_BIN" cap list >/dev/null 2>&1 || fail "startup contract failed: ./bin/ops cap list"
+  "$OPS_BIN" cap show verify.pack.run >/dev/null 2>&1 || fail "startup contract failed: verify.pack.run capability unavailable"
+}
+
+provider_request_for_tool() {
+  local tool="$1"
+  case "$tool" in
+    claude) printf '%s' "${SPINE_PROVIDER_CLAUDE:-${SPINE_PROVIDER_REQUESTED:-}}" ;;
+    codex) printf '%s' "${SPINE_PROVIDER_CODEX:-${SPINE_PROVIDER_REQUESTED:-}}" ;;
+    opencode) printf '%s' "${SPINE_PROVIDER_OPENCODE:-${SPINE_PROVIDER_REQUESTED:-}}" ;;
+    *) printf '%s' "${SPINE_PROVIDER_REQUESTED:-}" ;;
+  esac
+}
+
+legacy_opencode_env() {
+  if [[ -z "${ZAI_API_KEY:-}" && -n "${Z_AI_API_KEY:-}" ]]; then
+    export ZAI_API_KEY="$Z_AI_API_KEY"
+  fi
+
+  if [[ -z "${ZAI_API_KEY:-}" ]]; then
+    local creds_file="${HOME_DIR}/.config/infisical/credentials"
+    if [[ -f "$creds_file" ]]; then
+      # shellcheck disable=SC1090
+      source "$creds_file" >/dev/null 2>&1 || true
+    fi
+    if [[ -z "${ZAI_API_KEY:-}" && -n "${Z_AI_API_KEY:-}" ]]; then
+      export ZAI_API_KEY="$Z_AI_API_KEY"
+    fi
+  fi
+
+  if [[ -z "${ZAI_API_KEY:-}" ]]; then
+    local inf_agent="$SPINE_ROOT/ops/plugins/providers/bin/infisical-agent.sh"
+    if [[ -x "$inf_agent" ]]; then
+      local zai_key
+      zai_key="$("$inf_agent" get-cached infrastructure prod Z_AI_API_KEY 2>/dev/null || true)"
+      [[ -z "$zai_key" ]] && zai_key="$("$inf_agent" get-cached infrastructure prod ZAI_API_KEY 2>/dev/null || true)"
+      [[ -n "$zai_key" ]] && export ZAI_API_KEY="$zai_key"
+    fi
+  fi
+
+  [[ -n "${ZAI_API_KEY:-}" ]] || fail "missing ZAI API key (expected ZAI_API_KEY or Z_AI_API_KEY)"
+  if [[ -z "${Z_AI_API_KEY:-}" ]]; then
+    export Z_AI_API_KEY="$ZAI_API_KEY"
+  fi
+  export OPENAI_API_KEY="$ZAI_API_KEY"
+  export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.z.ai/api/paas/v4}"
+  export SPINE_PROVIDER_SELECTED="zai"
+  export SPINE_PROVIDER_MODEL="glm-5"
+  export SPINE_OPENCODE_MODEL="openai/glm-5"
+}
+
+legacy_provider_env() {
+  local tool="$1"
+  case "$tool" in
+    claude)
+      export SPINE_PROVIDER_SELECTED="claude_native"
+      export SPINE_PROVIDER_MODEL="${SPINE_CLAUDE_MODEL:-claude-sonnet-4-5-20250929}"
+      export SPINE_CLAUDE_MODEL="${SPINE_PROVIDER_MODEL}"
+      export SPINE_PROVIDER_BACKEND="native_account"
+      export CLAUDE_NATIVE_AUTH="1"
+      ;;
+    codex)
+      export SPINE_PROVIDER_SELECTED="codex_native"
+      export SPINE_PROVIDER_MODEL="gpt-5.4"
+      export SPINE_PROVIDER_BACKEND="native_account"
+      export CODEX_NATIVE_AUTH="1"
+      ;;
+    opencode)
+      legacy_opencode_env
+      ;;
+  esac
+}
+
+load_provider_env() {
+  local tool="$1"
+  local provider_bin="$SPINE_ROOT/ops/plugins/providers/bin/providers-launch-env"
+  if [[ ! -x "$provider_bin" ]]; then
+    legacy_provider_env "$tool"
+    return 0
+  fi
+
+  unset SPINE_PROVIDER_SELECTED SPINE_PROVIDER_MODEL SPINE_PROVIDER_SURFACE
+  unset SPINE_PROVIDER_BACKEND SPINE_PROVIDER_BASE_URL SPINE_PROVIDER_CHAT_PATH
+  unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
+  unset OPENAI_API_KEY OPENAI_BASE_URL
+  unset CLAUDE_NATIVE_AUTH
+  unset CODEX_MODEL_PROVIDER CODEX_NATIVE_AUTH CODEX_USE_OSS CODEX_LOCAL_PROVIDER
+
+  local requested
+  requested="$(provider_request_for_tool "$tool")"
+
+  local -a cmd=("$provider_bin" --tool "$tool")
+  if [[ -n "$requested" ]]; then
+    cmd+=(--provider "$requested")
+  fi
+
+  local exports
+  exports="$("${cmd[@]}")" || fail "provider orchestration failed for tool=$tool"
+  eval "$exports"
+}
+
+sync_provider_configs() {
+  local tool="$1"
+  local sync_bin="$SPINE_ROOT/ops/plugins/providers/bin/providers-sync-managed-configs"
+  [[ -x "$sync_bin" ]] || return 0
+
+  case "$tool" in
+    codex)
+      WORKBENCH_REPO="$WORKBENCH_ROOT" "$sync_bin" --tool codex >/dev/null
+      ;;
+    opencode)
+      local -a cmd=("$sync_bin" --tool opencode)
+      if [[ -n "${SPINE_PROVIDER_SELECTED:-}" ]]; then
+        cmd+=(--provider "$SPINE_PROVIDER_SELECTED")
+      fi
+      WORKBENCH_REPO="$WORKBENCH_ROOT" "${cmd[@]}" >/dev/null
+      ;;
+  esac
+}
+
+load_morph_api_key() {
+  if [[ -n "${MORPH_API_KEY:-}" ]]; then
+    return 0
+  fi
+  local inf_agent="$SPINE_ROOT/ops/plugins/providers/bin/infisical-agent.sh"
+  if [[ -x "$inf_agent" ]]; then
+    local morph_key
+    morph_key="$("$inf_agent" get-cached infrastructure prod MORPH_API_KEY 2>/dev/null || true)"
+    [[ -n "$morph_key" ]] && export MORPH_API_KEY="$morph_key"
+  fi
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --role) ROLE="${2:-}"; shift 2 ;;
+    --role=*) ROLE="${1#--role=}"; shift ;;
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --loop-id=*) LOOP_ID="${1#--loop-id=}"; shift ;;
+    --lane) LANE="${2:-}"; shift 2 ;;
+    --lane=*) LANE="${1#--lane=}"; shift ;;
+    --tool) TOOL="${2:-}"; shift 2 ;;
+    --tool=*) TOOL="${1#--tool=}"; shift ;;
+    --terminal-name|--terminal) TERMINAL_NAME="${2:-}"; shift 2 ;;
+    --terminal-name=*|--terminal=*) TERMINAL_NAME="${1#*=}"; shift ;;
+    --force) FORCE=1; shift ;;
+    --dry-run|--print-launch-plan) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -d "$SPINE_ROOT" ]] || fail "spine repo not found: $SPINE_ROOT"
+[[ -d "$WORKBENCH_ROOT" ]] || fail "workbench repo not found: $WORKBENCH_ROOT"
+[[ -x "$SESSION_START" ]] || fail "session-start missing/executable: $SESSION_START"
+[[ -x "$OPS_BIN" ]] || fail "missing ops entrypoint: $OPS_BIN"
+
+ROLE_INPUT="$ROLE"
+ROLE="$(printf '%s' "$ROLE" | tr '[:upper:]' '[:lower:]')"
+ROLE_ALIAS_NOTE=""
+case "$ROLE" in
+  solo|orchestrator|worker) ;;
+  researcher|qc|close|librarian)
+    ROLE_ALIAS_NOTE="canonical runtime role '$ROLE' mapped to entry role 'solo'"
+    ROLE="solo"
+    ;;
+  *)
+    fail "--role must be solo|orchestrator|worker or canonical aliases researcher|qc|close|librarian (got: $ROLE_INPUT)"
+    ;;
+esac
+
+if [[ -n "$ROLE_ALIAS_NOTE" ]]; then
+  echo "WARN: $ROLE_ALIAS_NOTE" >&2
+fi
+
+case "$TOOL" in
+  claude|codex|opencode|verify) ;;
+  *) fail "--tool must be claude|codex|opencode|verify (got: $TOOL)" ;;
+esac
+
+if [[ "$ROLE" == "orchestrator" || "$ROLE" == "worker" ]]; then
+  [[ -n "$LOOP_ID" ]] || fail "--loop-id required for role=$ROLE"
+fi
+
+if [[ "$ROLE" == "worker" ]]; then
+  LANE="$(echo "${LANE:-}" | tr '[:lower:]' '[:upper:]')"
+  [[ "$LANE" =~ ^[DEFG]$ ]] || fail "--lane must be one of D/E/F/G (got: $LANE)"
+fi
+
+CANONICAL_FINANCE="$WORKBENCH_ROOT/agents/finance"
+LEGACY_FINANCE="$WORKBENCH_ROOT/agents/finance-agent"
+if [[ -d "$LEGACY_FINANCE" ]]; then
+  echo "NOTICE: legacy finance path exists: $LEGACY_FINANCE" >&2
+  echo "NOTICE: canonical finance agent path is: $CANONICAL_FINANCE" >&2
+fi
+
+need_cmd git
+need_cmd grep
+need_cmd yq
+
+if [[ -z "$TERMINAL_NAME" ]]; then
+  TERMINAL_NAME="${SPINE_TERMINAL_NAME:-${OPS_TERMINAL_ROLE:-}}"
+fi
+if [[ -n "$TERMINAL_NAME" ]]; then
+  export SPINE_TERMINAL_NAME="$TERMINAL_NAME"
+  export OPS_TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-$TERMINAL_NAME}"
+fi
+
+if [[ "$ROLE" == "solo" ]]; then
+  SOLO_BLOCK_ACTIVE_ORCH="${SPINE_SOLO_BLOCK_ACTIVE_ORCH:-1}"
+  solo_plan_file="$(make_tmp)"
+  launcher_plan_into_file "$solo_plan_file" solo
+  active_lock_count="$(launcher_value active_lock_count "$solo_plan_file")"
+  if [[ "${active_lock_count:-0}" != "0" ]]; then
+    if [[ "$SOLO_BLOCK_ACTIVE_ORCH" == "1" ]]; then
+      fail "active orchestration locks detected; use Ctrl+Shift+P after closing them (or set SPINE_SOLO_BLOCK_ACTIVE_ORCH=0 to override)"
+    else
+      echo "WARN: active orchestration locks detected, continuing due SPINE_SOLO_BLOCK_ACTIVE_ORCH=0" >&2
+      emit_active_locks_from_plan "$solo_plan_file"
+    fi
+  fi
+fi
+
+cd "$SPINE_ROOT"
+
+SESSION_LANE="scan"
+if [[ "$ROLE" == "orchestrator" ]]; then
+  SESSION_LANE="coordinator"
+fi
+
+local_session_out=""
+capture_cmd local_session_out "$SESSION_START" "$SESSION_LANE" || fail "session-start failed for lane=$SESSION_LANE"
+env_file="$(printf '%s\n' "$local_session_out" | sed -n 's/^  source \(.*env\.sh\)$/\1/p' | tail -1)"
+if [[ -n "$env_file" && -f "$env_file" ]]; then
+  # shellcheck disable=SC1090
+  source "$env_file"
+else
+  echo "WARN: session env file not auto-detected; continuing without SPINE_SESSION_ID export" >&2
+fi
+
+SPINE_TARGET_REPO="$SPINE_ROOT"
+SPINE_WORKTREE="$SPINE_ROOT"
+
+if [[ "$ROLE" == "orchestrator" || "$ROLE" == "worker" ]]; then
+  if [[ "$ORCH_MODE" != "capability" ]]; then
+    if [[ "$ALLOW_FALLBACK" == "1" ]]; then
+      fail "fallback mode is retired; use canonical orchestration.launcher.* capabilities instead"
+    fi
+    fail "SPINE_HOTKEY_ORCH_MODE must be capability (got: $ORCH_MODE)"
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    dry_plan_file="$(make_tmp)"
+    launcher_plan_into_file "$dry_plan_file" "$ROLE"
+    resolve_orch_context_from_plan "$dry_plan_file"
+  else
+    claim_orch_context "$ROLE" "${SPINE_SESSION_ID:-unknown}"
+  fi
+fi
+
+LAUNCH_CWD="$SPINE_WORKTREE"
+
+TERMINAL_ROLE_CONTRACT="$SPINE_ROOT/ops/bindings/terminal.role.contract.yaml"
+ROLE_RUNTIME_CONTRACT="$SPINE_ROOT/ops/bindings/role.runtime.control.contract.yaml"
+RESOLVED_TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-}}}"
+if [[ -n "$RESOLVED_TERMINAL_ROLE" ]]; then
+  export OPS_TERMINAL_ROLE="$RESOLVED_TERMINAL_ROLE"
+fi
+
+RESOLVED_RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-}"
+if [[ -z "$RESOLVED_RUNTIME_ROLE" && -n "$RESOLVED_TERMINAL_ROLE" ]] && [[ -f "$TERMINAL_ROLE_CONTRACT" ]]; then
+  RESOLVED_RUNTIME_ROLE="$(yq e -r ".runtime_role_defaults.by_terminal_id.\"${RESOLVED_TERMINAL_ROLE}\" // \"\"" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null || true)"
+  if [[ -z "$RESOLVED_RUNTIME_ROLE" || "$RESOLVED_RUNTIME_ROLE" == "null" ]]; then
+    role_from_terminal="$(yq e -r ".roles[]? | select(.id == \"${RESOLVED_TERMINAL_ROLE}\") | .type" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null | head -n1 || true)"
+    if [[ -n "$role_from_terminal" && "$role_from_terminal" != "null" ]]; then
+      RESOLVED_RUNTIME_ROLE="$(yq e -r ".runtime_role_defaults.by_terminal_type.\"$role_from_terminal\" // \"\"" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null || true)"
+    fi
+  fi
+fi
+if [[ -z "$RESOLVED_RUNTIME_ROLE" || "$RESOLVED_RUNTIME_ROLE" == "null" ]] && [[ -f "$ROLE_RUNTIME_CONTRACT" ]]; then
+  RESOLVED_RUNTIME_ROLE="$(yq e -r '.runtime_roles.default_role // ""' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || true)"
+fi
+[[ -n "$RESOLVED_RUNTIME_ROLE" && "$RESOLVED_RUNTIME_ROLE" != "null" ]] || RESOLVED_RUNTIME_ROLE="researcher"
+export SPINE_RUNTIME_ROLE="$RESOLVED_RUNTIME_ROLE"
+
+echo "ENTRY READY: role=$ROLE tool=$TOOL terminal=${TERMINAL_NAME:-unset} terminal_role=${OPS_TERMINAL_ROLE:-unset} runtime_role=${SPINE_RUNTIME_ROLE:-unset} loop=${LOOP_ID:-none} lane=${LANE:-none} repo=${SPINE_TARGET_REPO:-$SPINE_ROOT} worktree=$LAUNCH_CWD" >&2
+
+if [[ "${SPINE_STARTUP_STRICT:-0}" == "1" ]]; then
+  startup_contract_check
+fi
+
+case "$TOOL" in
+  claude)
+    load_provider_env claude
+    if [[ "${CLAUDE_NATIVE_AUTH:-0}" == "1" || "${SPINE_PROVIDER_BACKEND:-}" == "native_account" ]]; then
+      [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${ANTHROPIC_BASE_URL:-}" ]] || fail "native Claude auth path must not export Anthropic API env"
+      launch_or_print "$LAUNCH_CWD" claude --model "${SPINE_CLAUDE_MODEL:-${SPINE_PROVIDER_MODEL}}" --dangerously-skip-permissions --add-dir "$WORKBENCH_ROOT"
+    fi
+    if [[ "${SPINE_PROVIDER_BACKEND:-}" == "anthropic" ]]; then
+      launch_or_print "$LAUNCH_CWD" claude --model "${SPINE_CLAUDE_MODEL:-${SPINE_PROVIDER_MODEL}}" --dangerously-skip-permissions --add-dir "$WORKBENCH_ROOT"
+    fi
+    if [[ "${SPINE_PROVIDER_SELECTED:-claude_native}" != "claude_native" ]]; then
+      command -v ccr >/dev/null 2>&1 || fail "provider ${SPINE_PROVIDER_SELECTED} requires claude-code-router (ccr)"
+      ccr start >/dev/null 2>&1 || true
+      eval "$(ccr activate)"
+      launch_or_print "$LAUNCH_CWD" claude --model "${SPINE_PROVIDER_MODEL}" --dangerously-skip-permissions --add-dir "$WORKBENCH_ROOT"
+    fi
+    fail "unsupported claude backend: ${SPINE_PROVIDER_BACKEND:-unknown}"
+    ;;
+  codex)
+    load_provider_env codex
+    if [[ "$DRY_RUN" -ne 1 ]]; then
+      sync_provider_configs codex
+    fi
+    if [[ "${CODEX_USE_OSS:-0}" == "1" ]]; then
+      launch_or_print "$LAUNCH_CWD" codex -C "$LAUNCH_CWD" --add-dir "$WORKBENCH_ROOT" --dangerously-bypass-approvals-and-sandbox --oss --local-provider "${CODEX_LOCAL_PROVIDER:-lmstudio}" --model "${SPINE_PROVIDER_MODEL}"
+    fi
+    if [[ "${CODEX_NATIVE_AUTH:-0}" == "1" || "${SPINE_PROVIDER_BACKEND:-}" == "native_account" ]]; then
+      launch_or_print "$LAUNCH_CWD" codex -C "$LAUNCH_CWD" --add-dir "$WORKBENCH_ROOT" --dangerously-bypass-approvals-and-sandbox --model "${SPINE_PROVIDER_MODEL}"
+    fi
+    fail "unsupported codex backend: ${SPINE_PROVIDER_BACKEND:-unknown}"
+    ;;
+  opencode)
+    load_provider_env opencode
+    if [[ "$DRY_RUN" -ne 1 ]]; then
+      sync_provider_configs opencode
+    fi
+    load_morph_api_key
+    launch_or_print "$LAUNCH_CWD" opencode -m "${SPINE_OPENCODE_MODEL:-openai/${SPINE_PROVIDER_MODEL}}" .
+    ;;
+  verify)
+    if [[ "${SPINE_VERIFY_FULL:-0}" == "1" ]]; then
+      launch_or_print "$LAUNCH_CWD" "$OPS_BIN" cap run verify.release.run
+    fi
+    launch_or_print "$LAUNCH_CWD" "$OPS_BIN" cap run verify.core.run
+    ;;
+esac

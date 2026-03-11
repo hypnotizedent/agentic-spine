@@ -44,8 +44,9 @@ trap 'rm -rf "$TMPDIR_BASE"' EXIT
 FAKE_SPINE="$TMPDIR_BASE/spine"
 FAKE_WORKBENCH="$TMPDIR_BASE/workbench"
 mkdir -p "$FAKE_SPINE/ops/bindings"
+mkdir -p "$FAKE_SPINE/ops/plugins/core/session/bin"
 mkdir -p "$FAKE_SPINE/mailroom/state/loop-scopes"
-mkdir -p "$FAKE_WORKBENCH/scripts/root"
+mkdir -p "$FAKE_WORKBENCH"
 
 # Fixture: terminal.launcher.view.yaml (3 terminals with distinct defaults)
 cat > "$FAKE_SPINE/ops/bindings/terminal.launcher.view.yaml" <<'FIXTURE_VIEW'
@@ -92,12 +93,12 @@ profiles:
     can_merge: false
 FIXTURE_LANES
 
-# Fixture: fake launcher script (executable, does nothing)
-cat > "$FAKE_WORKBENCH/scripts/root/spine_terminal_entry.sh" <<'STUB'
+# Fixture: fake spine-native launcher exec (executable, does nothing)
+cat > "$FAKE_SPINE/ops/plugins/core/session/bin/terminal-launch-exec" <<'STUB'
 #!/usr/bin/env bash
 exit 0
 STUB
-chmod +x "$FAKE_WORKBENCH/scripts/root/spine_terminal_entry.sh"
+chmod +x "$FAKE_SPINE/ops/plugins/core/session/bin/terminal-launch-exec"
 
 # Common env for all test runs
 export SPINE_REPO="$FAKE_SPINE"
