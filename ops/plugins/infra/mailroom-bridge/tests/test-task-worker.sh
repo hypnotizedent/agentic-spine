@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
-BIN="$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-task-worker"
-ENQUEUE_BIN="$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-task-enqueue"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+BIN="$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-task-worker"
+ENQUEUE_BIN="$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-task-enqueue"
 
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }

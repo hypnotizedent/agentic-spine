@@ -7,7 +7,7 @@
 # - All json_contract.caps emit stable JSON envelope with required keys
 set -euo pipefail
 
-SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 
 REGISTRY="$SP/ops/bindings/mailroom.bridge.consumers.yaml"
 BRIDGE_BINDING="$SP/ops/bindings/mailroom.bridge.yaml"

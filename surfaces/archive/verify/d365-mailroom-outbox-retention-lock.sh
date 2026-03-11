@@ -18,7 +18,7 @@ resolve_root() {
 }
 
 ROOT="$(resolve_root)"
-CHECK_BIN="${ROOT}/ops/plugins/mailroom-bridge/bin/mailroom-outbox-retention"
+CHECK_BIN="${ROOT}/ops/plugins/infra/mailroom-bridge/bin/mailroom-outbox-retention"
 
 if [[ ! -x "$CHECK_BIN" ]]; then
   echo "D365 FAIL: missing retention binary: $CHECK_BIN" >&2

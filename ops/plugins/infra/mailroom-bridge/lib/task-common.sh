@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MAILROOM_TASK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+MAILROOM_TASK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$MAILROOM_TASK_ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 

@@ -13,8 +13,8 @@ set -euo pipefail
 #   T7: _cap_rpc_role_allows grants full access to CF-auth requests
 #   T8: Endpoints binding lists CF Access headers
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-BRIDGE="$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-bridge-serve"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+BRIDGE="$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-serve"
 BINDING="$ROOT/ops/bindings/mailroom.bridge.yaml"
 ENDPOINTS="$ROOT/ops/bindings/mailroom.bridge.endpoints.yaml"
 

@@ -12,8 +12,8 @@ set -euo pipefail
 #   T6: /rag/ask response includes mode field
 #   T7: MAILROOM_BRIDGE.md documents /rag/ask output contract
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-BRIDGE="$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-bridge-serve"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+BRIDGE="$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-serve"
 RAG_CLI="$ROOT/ops/plugins/rag/bin/rag"
 DOC="$ROOT/docs/governance/MAILROOM_BRIDGE.md"
 

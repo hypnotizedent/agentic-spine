@@ -17,8 +17,8 @@ set -euo pipefail
 #   T11: Confirm payload type enforcement exists (boolean only)
 #   T12: /cap/run response includes approval/confirm fields
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-BRIDGE="$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-bridge-serve"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+BRIDGE="$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-serve"
 
 PASS=0
 FAIL=0

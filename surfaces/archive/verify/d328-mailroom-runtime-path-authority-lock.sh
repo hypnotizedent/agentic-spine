@@ -65,9 +65,9 @@ check_script_runtime_paths() {
   fi
 }
 
-check_script_runtime_paths "$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-bridge-start" "mailroom-bridge-start"
-check_script_runtime_paths "$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-bridge-status" "mailroom-bridge-status"
-check_script_runtime_paths "$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-bridge-stop" "mailroom-bridge-stop"
+check_script_runtime_paths "$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-start" "mailroom-bridge-start"
+check_script_runtime_paths "$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-status" "mailroom-bridge-status"
+check_script_runtime_paths "$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-stop" "mailroom-bridge-stop"
 check_script_runtime_paths "$ROOT/ops/runtime/inbox/agent-enqueue.sh" "agent-enqueue.sh"
 check_script_runtime_paths "$ROOT/ops/runtime/inbox/agent-status.sh" "agent-status.sh"
 check_script_runtime_paths "$ROOT/ops/runtime/inbox/hot-folder-watcher.sh" "hot-folder-watcher.sh"
@@ -78,8 +78,8 @@ check_script_runtime_paths "$ROOT/ops/runtime/inbox/agent-summary.sh" "agent-sum
 check_script_runtime_paths "$ROOT/ops/runtime/inbox/agent-watchdog.sh" "agent-watchdog.sh"
 check_script_runtime_paths "$ROOT/ops/runtime/inbox/close-session.sh" "close-session.sh"
 
-if grep -q 'env\["SPINE_INBOX"\]' "$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-bridge-serve" \
-   && grep -q 'env\["SPINE_STATE"\]' "$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-bridge-serve"; then
+if grep -q 'env\["SPINE_INBOX"\]' "$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-serve" \
+   && grep -q 'env\["SPINE_STATE"\]' "$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-serve"; then
   check "mailroom-bridge-serve passes explicit SPINE path env to subprocesses" "PASS"
 else
   check "mailroom-bridge-serve passes explicit SPINE path env to subprocesses" "FAIL"

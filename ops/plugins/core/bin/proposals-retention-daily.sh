@@ -3,7 +3,7 @@ set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 ARCHIVER="${SPINE_ROOT}/ops/plugins/core/proposals/bin/proposals-archive"
-OUTBOX_RETENTION="${SPINE_ROOT}/ops/plugins/mailroom-bridge/bin/mailroom-outbox-retention"
+OUTBOX_RETENTION="${SPINE_ROOT}/ops/plugins/infra/mailroom-bridge/bin/mailroom-outbox-retention"
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
 
 if [[ ! -x "$ARCHIVER" ]]; then
