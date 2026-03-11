@@ -50,7 +50,7 @@ Convert the 3-lane audit findings into governed remediation batches that can be 
 - D72: MacBook hotkey SSOT drift (`sync_laptop_hotkeys_docs.sh --write-spine` alignment path).
 - D73: Hammerspoon `Ctrl+Shift+O` routing contract.
 - D79: register `scripts/root/aof/workbench-aof-check.sh` or move to sanctioned surface.
-- D80: remove active-surface `docs/legacy/` reference in strict authority trace.
+- D80: remove active-surface `docs/reference/legacy/` reference in strict authority trace.
 
 2. Runtime alignment and naming parity backlog
 - Resolve `pve-shop` / `proxmox-shop` / `pve-home` alias drift in workbench inventories to canonical `pve` / `proxmox-home`.
@@ -58,7 +58,7 @@ Convert the 3-lane audit findings into governed remediation batches that can be 
 
 ### Batch C (P2 and deferred)
 1. Keep transitional exceptions in allowlist only
-- `docs/legacy` remains warn-only through `2026-12-31` per contract.
+- `docs/reference/legacy` remains warn-only through `2026-12-31` per contract.
 
 2. Defer non-blocking archival and historical doc harmonization
 - Execute after P0/P1 cut.

@@ -18,7 +18,7 @@ Root Structure (D17 locked):
   ops/           → Capabilities, plugins, bindings, runtime
   surfaces/      → Verify gates (D1–D84)
   docs/core/     → Canonical docs (D16)
-  docs/brain/    → Agent context + lessons
+  docs/reference/brain/    → Agent context + lessons
   docs/governance/ → SSOTs, policies, runbooks
   mailroom/      → Runtime lanes (inbox/outbox/state)
   receipts/      → RCAP audit trail

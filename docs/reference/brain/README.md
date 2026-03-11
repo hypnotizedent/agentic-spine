@@ -1,4 +1,4 @@
-# docs/brain
+# docs/reference/brain
 
 > **Status:** reference
 > **Last verified:** 2026-02-07
@@ -7,12 +7,12 @@ Reference surface for session context generation and operating rules.
 
 ## Routing
 
-- Governance entrypoint: [`../governance/SESSION_PROTOCOL.md`](../governance/SESSION_PROTOCOL.md)
-- Canonical governance contract: [`../governance/SPINE.md`](../governance/SPINE.md)
+- Governance entrypoint: [`../../governance/SESSION_PROTOCOL.md`](../../governance/SESSION_PROTOCOL.md)
+- Canonical governance contract: [`../../governance/SPINE.md`](../../governance/SPINE.md)
 
 ## Runtime Contract
 
-- `docs/brain` supports context loading and operator ergonomics.
+- `docs/reference/brain` supports context loading and operator ergonomics.
 - Canonical governance authority remains `docs/core/**` + `docs/governance/**`.
 - `runtime/context/agent-context.md` is generated runtime output and should remain outside the repo.
 
@@ -48,5 +48,5 @@ Brain lessons follow a governed lifecycle:
 
 ```bash
 cd ~/code/agentic-spine
-docs/brain/generate-context.sh
+docs/reference/brain/generate-context.sh
 ```

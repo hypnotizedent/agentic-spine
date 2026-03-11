@@ -6,7 +6,7 @@
 # Usage: launch-agent.sh claude|opencode|codex
 #
 # What it does:
-# 1. Generates fresh context from docs/brain/
+# 1. Generates fresh context from docs/reference/brain/
 # 2. Prints context to terminal
 # 3. Launches agent
 #
@@ -16,7 +16,7 @@
 set -eo pipefail
 
 REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
-BRAIN="$REPO/docs/brain"
+BRAIN="$REPO/docs/reference/brain"
 AGENT="${1:-claude}"
 
 source "$REPO/ops/lib/runtime-paths.sh"
@@ -65,7 +65,7 @@ if [[ -f "$CONTEXT_FILE" ]]; then
   cat "$CONTEXT_FILE"
 else
   # Fallback: just print rules
-  cat "$BRAIN/rules.md" 2>/dev/null || echo "No context found. Run docs/brain/generate-context.sh"
+  cat "$BRAIN/rules.md" 2>/dev/null || echo "No context found. Run docs/reference/brain/generate-context.sh"
 fi
 
 echo ""

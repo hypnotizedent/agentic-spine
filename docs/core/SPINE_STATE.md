@@ -56,7 +56,7 @@ or any hard-coded absolute path outside `$SPINE_REPO`.
 
 This is enforced by:
 - **D5** (SPINE_REPO rooting) — all paths use `$SPINE_REPO` variables
-- **D16** (legacy isolation) — `docs/legacy/` is quarantined, never referenced by runtime code
+- **D16** (legacy isolation) — `docs/reference/legacy/` is quarantined, never referenced by runtime code
 - **D28** (archive runway lock) — blocks active legacy absolute-path coupling to `ronny-ops` outside quarantine zones
 - **D29** (active entrypoint lock) — blocks loaded launchd/cron entrypoints sourced from `/Code` that still execute from `ronny-ops`
 - **docs-lint CHECK 6** — forbidden pattern scan outside quarantine zones

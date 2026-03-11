@@ -10,7 +10,7 @@ if [[ -z "$REPO_ROOT" ]]; then
 fi
 
 # Best-effort: refresh the generated context snapshot so agents don't load stale rules.
-BRAIN_DIR="$REPO_ROOT/docs/brain"
+BRAIN_DIR="$REPO_ROOT/docs/reference/brain"
 if [[ -x "$BRAIN_DIR/generate-context.sh" ]]; then
   "$BRAIN_DIR/generate-context.sh" >/dev/null 2>&1 || true
 fi

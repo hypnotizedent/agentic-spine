@@ -22,7 +22,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `docs/governance/`
 - `docs/core/`
 - `docs/product/`
-- `docs/brain/`
+- `docs/reference/brain/`
 - `mailroom/`
 - `CLAUDE.md`
 - `AGENTS.md`

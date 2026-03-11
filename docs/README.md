@@ -30,7 +30,7 @@ Keep additions there instead of creating new governance roots.
 
 ## Supporting Surfaces
 
-- [brain/README.md](brain/README.md) - context-loading and memory rules
+- [reference/brain/README.md](reference/brain/README.md) - context-loading and memory rules
 - [contracts/](contracts/) - stable contract/policy docs that are still human-read
 - [reference/README.md](reference/README.md) - low-authority indexes, audits, and validation notes
 - [core/AGENTIC_GAP_MAP.md](core/AGENTIC_GAP_MAP.md) - extraction and boundary tracking
@@ -44,7 +44,9 @@ Keep additions there instead of creating new governance roots.
 - `docs/contracts/` - stable human-read contracts referenced by bindings/plugins
 - `docs/governance/` - live governance and SSOTs
 - `docs/governance/domains/` - one canonical doc per domain
-- `docs/brain/` - agent context helpers
-- `docs/reference/` - auxiliary reference material (JD, audits, validation)
+- `docs/reference/` - non-authoritative support material
+- `docs/reference/brain/` - agent context helpers
+- `docs/reference/pillars/` - externalized domain pointer stubs
+- `docs/reference/legacy/` - quarantined historical reference
 - `docs/planning/` - scoped plans and execution notes
 - `docs/runbooks/` - operational runbooks

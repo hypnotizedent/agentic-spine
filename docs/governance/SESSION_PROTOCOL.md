@@ -99,7 +99,7 @@ Network gates (infra health, backup checks, media stack) have Tailscale guards â
 
 ### After the session (Desktop)
 
-- Store any learnings in `docs/brain/memory.md` if that system is enabled.
+- Store any learnings in `docs/reference/brain/memory.md` if that system is enabled.
 - Close open loops with `./bin/ops loops close <loop_id>` before wrapping up.
 - Always produce receipts for the commands you executed. Receipts live under `receipts/sessions/R*/receipt.md` and prove what you did.
 

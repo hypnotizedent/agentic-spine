@@ -47,7 +47,7 @@ for d in docs:
 # Build eligible set
 eligible = set()
 skip_patterns = [
-    "docs/legacy",
+    "docs/reference/legacy",
     "_audits",
     "_archived",
     "_imported",

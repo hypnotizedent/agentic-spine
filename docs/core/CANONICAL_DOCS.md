@@ -6,7 +6,7 @@
 This repository has a single canonical documentation surface:
 
 - **CANONICAL**: docs/core/**, docs/governance/**, docs/contracts/**
-- **NON-AUTHORITATIVE** (reference only): docs/reference/**, docs/legacy/**, docs/brain/**, .archive/**
+- **NON-AUTHORITATIVE** (reference only): docs/reference/**, docs/reference/legacy/**, docs/reference/brain/**, .archive/**
 
 ## Conflict Rule
 

@@ -40,7 +40,7 @@ scope: agent-governance-brief
 
 - **D30:** No legacy repo references. `~/code/` is the only source tree.
 - **D42:** No uppercase `Code` in paths — must be lowercase `code`.
-- **D46:** `~/.claude/CLAUDE.md` is a redirect shim only. Governance lives in `docs/brain/`, not `.brain/` (D47).
+- **D46:** `~/.claude/CLAUDE.md` is a redirect shim only. Governance lives in `docs/reference/brain/`, not `.brain/` (D47).
 - **D31:** No log/output files in home root (`~/*.log`, `~/*.out`). Use project paths.
 - **D54/D59:** SSOT bindings must match live infrastructure. Adding VMs/hosts requires updates in multiple SSOTs simultaneously.
 - **D58:** SSOTs with stale `last_reviewed` dates (>2 weeks) fail verify.

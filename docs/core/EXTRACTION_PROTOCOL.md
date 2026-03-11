@@ -72,7 +72,7 @@ Before marking any extraction complete, run the trace gate:
      -g'!receipts/**' -g'!mailroom/outbox/**'
    ```
    - **Allowed:** direct `~/code/workbench` references in extraction tracking and archived audit surfaces
-   - **Historical:** docs/legacy/**, docs/governance/_audits/**
+   - **Historical:** docs/reference/legacy/**, docs/governance/_audits/**
    - **Conflict:** any other location (must resolve)
 
 2. **Lint verification:**
@@ -161,9 +161,9 @@ Q3: How much documentation needed?
 
 **Creates:**
 - All stack requirements
-- `docs/pillars/<pillar>/README.md` — overview
-- `docs/pillars/<pillar>/ARCHITECTURE.md` — technical design
-- `docs/pillars/<pillar>/EXTRACTION_STATUS.md` — progress tracking
+- `docs/reference/pillars/<pillar>/README.md` — overview
+- `docs/reference/pillars/<pillar>/ARCHITECTURE.md` — technical design
+- `docs/reference/pillars/<pillar>/EXTRACTION_STATUS.md` — progress tracking
 - Multiple loops for phased extraction
 
 **Consider:**
@@ -200,7 +200,7 @@ Before marking extraction complete:
 
 Before marking extraction complete:
 
-- [ ] Dedicated folder: `docs/pillars/<pillar>/`
+- [ ] Dedicated folder: `docs/reference/pillars/<pillar>/`
 - [ ] README.md with overview
 - [ ] ARCHITECTURE.md with technical design
 - [ ] EXTRACTION_STATUS.md tracking progress

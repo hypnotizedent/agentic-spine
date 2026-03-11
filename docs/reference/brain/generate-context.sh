@@ -27,8 +27,8 @@ mkdir -p "$(dirname "$OUT")"
   # ── Section 1: Rules ──
   echo "## Rules"
   echo ""
-  if [[ -f "$SP/docs/brain/rules.md" ]]; then
-    cat "$SP/docs/brain/rules.md"
+  if [[ -f "$SP/docs/reference/brain/rules.md" ]]; then
+    cat "$SP/docs/reference/brain/rules.md"
   else
     echo "(rules.md not found)"
   fi
@@ -200,10 +200,10 @@ PY
   echo ""
 
   # ── Section 8: Last Handoff ──
-  if [[ -f "$SP/docs/brain/memory.md" ]]; then
+  if [[ -f "$SP/docs/reference/brain/memory.md" ]]; then
     echo "## Last Handoff"
     echo ""
-    tail -20 "$SP/docs/brain/memory.md"
+    tail -20 "$SP/docs/reference/brain/memory.md"
     echo ""
   fi
 

@@ -10,7 +10,7 @@
 # Produces:
 #   - Closeout packet to stdout
 #   - Writes to receipts/sessions/SESSION_CLOSEOUT_<timestamp>.md
-#   - Optionally appends learnings to docs/brain/memory.md
+#   - Optionally appends learnings to docs/reference/brain/memory.md
 #
 # Auto-captures:
 #   - SESSION_ID
@@ -33,7 +33,7 @@ set -eo pipefail
 
 REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 RECEIPTS_DIR="$REPO/receipts/sessions"
-MEMORY_FILE="$REPO/docs/brain/memory.md"
+MEMORY_FILE="$REPO/docs/reference/brain/memory.md"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 DATE=$(date +%Y-%m-%d)
 TIME=$(date +%H:%M:%S)
@@ -274,7 +274,7 @@ SESSION_ARTIFACT_PATHS=(
   "ops/bindings/"
   "docs/governance/"
   "receipts/sessions/"
-  "docs/brain/memory.md"
+  "docs/reference/brain/memory.md"
 )
 
 _staged_count=0

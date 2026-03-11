@@ -59,7 +59,7 @@ PARKED="${INBOX}/parked"
 
 # Repo paths
 REPO="${SPINE_REPO}"
-BRAIN_RULES="${REPO}/docs/brain/rules.md"
+BRAIN_RULES="${REPO}/docs/reference/brain/rules.md"
 
 # Model/provider config
 WATCHER_PROVIDER="${SPINE_WATCHER_PROVIDER:-local}"  # local | zai | anthropic

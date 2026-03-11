@@ -22,9 +22,9 @@ Johnny Decimal is a system for organizing files and folders using a numeric ID s
 |------|------|------|
 | 10-19 | Core Contracts | docs/core/ |
 | 20-29 | Governance | docs/governance/ |
-| 30-39 | Brain | docs/brain/ |
-| 40-49 | Legacy | docs/legacy/ |
-| 50-59 | Pillars | docs/pillars/ |
+| 30-39 | Brain | docs/reference/brain/ |
+| 40-49 | Legacy | docs/reference/legacy/ |
+| 50-59 | Pillars | docs/reference/pillars/ |
 | 60-69 | Product | docs/product/ |
 | 70-79 | Planning | docs/planning/ |
 | 90-99 | Root/Meta | ./ |

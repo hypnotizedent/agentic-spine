@@ -109,7 +109,7 @@ layers:
       authority: "external"
       source_contracts:
         - type: "doc"
-          ref: "docs/brain/memory.md"
+          ref: "docs/reference/brain/memory.md"
       events:
         - id: "life-anchor"
           summary: "Life Anchor"
