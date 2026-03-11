@@ -5,7 +5,7 @@ SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 WB="$HOME/code/workbench"
 
 TRACKED="$WB/infra/streamdeck/config.json"
-RUNTIME="$WB/runtime/streamdeck/config.json"
+RUNTIME="$HOME/code/.runtime/workbench/streamdeck/config.json"
 
 # Check tracked copy exists
 [[ -f "$TRACKED" ]] || { echo "D103 FAIL: no tracked config at $TRACKED"; exit 1; }
