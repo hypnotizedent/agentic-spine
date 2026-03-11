@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""calendar-operator-view - pretty-print operator calendar surfaces for workbench wrappers."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
+
+
+def resolve_root() -> Path:
+    env_root = os.environ.get("SPINE_ROOT") or os.environ.get("SPINE_CODE")
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+    return Path(__file__).resolve().parents[5]
+
+
+def load_json(path: Path):
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def age_minutes(path: Path):
+    if not path.exists():
+        return None
+    now = datetime.now(timezone.utc).timestamp()
+    return int((now - path.stat().st_mtime) / 60)
+
+
+def parse_iso_local(value: str):
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def tz_from_name(name: str):
+    if not name or ZoneInfo is None:
+        return timezone.utc
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return timezone.utc
+
+
+def parse_dtstart_local(raw: str, tzinfo):
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if len(text) < 13:
+        return None
+    try:
+        dt = datetime.strptime(text[:13], "%Y%m%dT%H%M")
+        return dt.replace(tzinfo=tzinfo)
+    except Exception:
+        return None
+
+
+def next_weekly_occurrence(event: dict, now_local: datetime):
+    byday = event.get("byday")
+    if isinstance(byday, list) and byday:
+        day_codes = [str(x).upper() for x in byday]
+    else:
+        base = parse_dtstart_local(event.get("dtstart_local", ""), now_local.tzinfo)
+        if base is None:
+            return None
+        weekday_codes = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+        day_codes = [weekday_codes[base.weekday()]]
+
+    hour = int(event.get("byhour", 9) or 9)
+    minute = int(event.get("byminute", 0) or 0)
+    best = None
+    for delta in range(0, 15):
+        candidate_date = (now_local + timedelta(days=delta)).date()
+        code = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"][candidate_date.weekday()]
+        if code not in day_codes:
+            continue
+        candidate = datetime(
+            year=candidate_date.year,
+            month=candidate_date.month,
+            day=candidate_date.day,
+            hour=max(0, min(23, hour)),
+            minute=max(0, min(59, minute)),
+            tzinfo=now_local.tzinfo,
+        )
+        if candidate >= now_local and (best is None or candidate < best):
+            best = candidate
+    return best
+
+
+def print_fallback():
+    print("Spine calendar artifacts are missing or unreadable.")
+    print("")
+    print("Run:")
+    print("  cd ~/code/agentic-spine")
+    print("  ./bin/ops cap run calendar.generate")
+    print("  ./bin/ops cap run calendar.operator.surface")
+
+
+def main() -> int:
+    root = resolve_root()
+    parser = argparse.ArgumentParser(description="Pretty-print operator calendar surfaces")
+    parser.add_argument(
+        "--out-dir",
+        default=str(root / "mailroom/outbox/calendar"),
+        help="Calendar output directory",
+    )
+    args = parser.parse_args()
+
+    cal_dir = Path(args.out_dir).expanduser().resolve()
+    today_path = cal_dir / "calendar-today.json"
+    operator_path = cal_dir / "calendar-operator.index.json"
+
+    today = load_json(today_path)
+    operator = load_json(operator_path)
+    if today is None:
+        print_fallback()
+        return 0
+
+    timezone_name = str(today.get("timezone", "UTC"))
+    tzinfo = tz_from_name(timezone_name)
+    now_local = datetime.now(tzinfo)
+
+    print("WORKBENCH OPERATOR CALENDAR")
+    print(f"now: {now_local.isoformat()}")
+    print(f"source: {today_path}")
+    print("")
+
+    if operator is None:
+        print("status: WARN (missing calendar-operator.index.json)")
+    else:
+        freshness = int(operator.get("freshness_window_minutes", 720) or 720)
+        missing = int(operator.get("summary", {}).get("missing_outputs", 0) or 0)
+        stale = int(operator.get("summary", {}).get("stale_outputs", 0) or 0)
+        status = str(operator.get("status", "warn")).upper()
+        age_today = age_minutes(today_path)
+        age_operator = age_minutes(operator_path)
+        if (age_today is not None and age_today > freshness) or (age_operator is not None and age_operator > freshness):
+            status = "WARN"
+        print(
+            f"status: {status} (missing_outputs={missing}, stale_outputs={stale}, freshness_window_minutes={freshness})"
+        )
+
+    print("")
+    print("Today")
+    print("-----")
+    events = today.get("events", [])
+    if not isinstance(events, list) or not events:
+        print("No events for today.")
+    else:
+        for event in events:
+            start = parse_iso_local(str(event.get("start_local", "")))
+            when = start.strftime("%H:%M") if start else "--:--"
+            status = str(event.get("status", "unknown"))
+            layer = str(event.get("layer", "unknown"))
+            summary = str(event.get("summary", "(no summary)"))
+            print(f"{when} [{status}] ({layer}) {summary}")
+
+    print("")
+    print("Upcoming Weekly Hygiene / Scheduled Waves")
+    print("-----------------------------------------")
+    index_path = Path(str(today.get("source_index", today_path.parent / "calendar-index.json")))
+    index_obj = load_json(index_path)
+    if index_obj is None:
+        print("No calendar-index source available for weekly forecast.")
+        return 0
+
+    raw_events = index_obj.get("events", [])
+    weekly = []
+    for event in raw_events if isinstance(raw_events, list) else []:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("freq", "")).upper() != "WEEKLY":
+            continue
+        token = f"{event.get('id', '')} {event.get('summary', '')}".lower()
+        if ("hygiene" not in token) and ("wave" not in token) and ("weekly" not in token):
+            continue
+        nxt = next_weekly_occurrence(event, now_local)
+        if nxt is None:
+            continue
+        weekly.append((nxt, event))
+
+    if not weekly:
+        print("No matching weekly hygiene/scheduled wave events found.")
+        return 0
+
+    weekly.sort(key=lambda item: item[0])
+    for nxt, event in weekly[:8]:
+        summary = str(event.get("summary", "(no summary)"))
+        ident = str(event.get("id", ""))
+        print(f"{nxt.strftime('%a %Y-%m-%d %H:%M')} - {summary} ({ident})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

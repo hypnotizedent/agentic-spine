@@ -27,7 +27,7 @@ This document establishes:
 1. **Naming Rules** - How hosts, VMs, and services MUST be named
 2. **Device Registry** - Canonical list of all devices with roles, IPs, verification
 3. **Verification Commands** - How to prove each device is healthy
-4. **Stream Deck Integration** - Physical buttons mapped to infrastructure actions
+4. **Retired Surface Notes** - Which historical operator surfaces are no longer governed authority
 
 **Related Documents:**
 - `docs/governance/SERVICE_REGISTRY.yaml` - Service-level endpoints and health checks
@@ -378,34 +378,10 @@ ssh proxmox-home "qm list"
 
 ## Stream Deck as Workflow Entrypoint
 
-### Current State
-
-Stream Deck is configured for Home Assistant control only (see the Home Assistant repo docs). This section extends it to infrastructure operations.
-
-### MVP Button Layout (Infrastructure)
-
-| Key | Label | Action | Verification |
-|-----|-------|--------|--------------|
-| 0 | HEALTH | Run `scripts/verify-identity.sh` | Shows pass/fail on deck |
-| 1 | INFRA | `ssh infra-core docker ps` | Container count |
-| 2 | PVE | `ssh pve qm list` | VM status |
-| 3 | N8N | Open `https://n8n.ronny.works` | Browser |
-| 4 | GRAFANA | Open `https://grafana.ronny.works` | Browser |
-
-### Integration Points
-
-| Tool | Config Location | How Stream Deck Connects |
-|------|-----------------|-------------------------|
-| Python Controller | `home-assistant/scripts/streamdeck/` | Direct HA API calls |
-| Raycast | `~/.config/raycast/` | URL schemes |
-| Hammerspoon | `~/.hammerspoon/` | hotkey → script |
-
-### Adding Infrastructure Buttons
-
-1. Edit `home-assistant/scripts/streamdeck/config.json`
-2. Add button with `type: "url"` pointing to service dashboards
-3. Or add `type: "text"` to paste SSH commands
-4. Restart: `launchctl kickstart -k gui/$(id -u)/com.ronny.streamdeck.ha`
+Legacy Stream Deck automation was retired on March 11, 2026. Spine no longer treats
+`com.ronny.streamdeck.ha` or any workbench Stream Deck runtime as governed active
+authority. If Stream Deck returns, reintroduce it as a fresh governed surface rather
+than reviving the retired runtime.
 
 ---
 

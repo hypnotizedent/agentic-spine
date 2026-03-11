@@ -1025,14 +1025,6 @@ else
   warn "HA device map gate not present"
 fi
 
-# D103: Stream Deck config lock
-echo -n "D103 Stream Deck config lock... "
-if [[ -x "$SP/surfaces/verify/d103-streamdeck-config-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d103-streamdeck-config-lock.sh"
-else
-  warn "Stream Deck config gate not present"
-fi
-
 # D104: Home DHCP audit freshness
 echo -n "D104 Home DHCP audit freshness... "
 if [[ -x "$SP/surfaces/verify/d104-home-dhcp-audit-freshness.sh" ]]; then

@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
+
+ROLE=""
+LOOP_ID=""
+LANE=""
+SESSION_ID=""
+FORCE=0
+
+usage() {
+  cat <<'USAGE'
+orchestration-launcher-claim - Claim launcher lock context for workbench operator entry surfaces
+
+Usage:
+  orchestration-launcher-claim --role <orchestrator|worker> --loop-id <id> [options]
+
+Options:
+  --lane <id>         Required for worker role
+  --session-id <id>   Optional session identifier recorded in lock files
+  --force             Replace an existing stale or active same-path lock
+USAGE
+}
+
+stop() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || stop "missing dependency: $1"
+}
+
+kv_value() {
+  local key="$1"
+  local file="$2"
+  sed -n "s/^${key}=//p" "$file" | head -1
+}
+
+lock_pid() {
+  local file="$1"
+  sed -n 's/^pid:[[:space:]]*//p' "$file" | head -1
+}
+
+lock_is_stale() {
+  local file="$1"
+  local pid
+  pid="$(lock_pid "$file")"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  kill -0 "$pid" 2>/dev/null && return 1
+  return 0
+}
+
+clear_stale_lock() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  if lock_is_stale "$file"; then
+    rm -f "$file"
+  fi
+}
+
+ensure_local_branch() {
+  local repo="$1"
+  local branch="$2"
+  if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+    return 0
+  fi
+  if git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    git -C "$repo" branch --track "$branch" "origin/$branch" >/dev/null 2>&1 || true
+  fi
+  git -C "$repo" show-ref --verify --quiet "refs/heads/$branch" \
+    || stop "branch not found in repo: $branch"
+}
+
+find_branch_worktree() {
+  local repo="$1"
+  local branch="$2"
+  local current_wt=""
+  local current_branch=""
+
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        current_wt="${line#worktree }"
+        ;;
+      branch\ refs/heads/*)
+        current_branch="${line#branch refs/heads/}"
+        if [[ "$current_branch" == "$branch" ]]; then
+          printf '%s\n' "$current_wt"
+          return 0
+        fi
+        ;;
+    esac
+  done < <(git -C "$repo" worktree list --porcelain 2>/dev/null)
+  return 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --role) ROLE="${2:-}"; shift 2 ;;
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --lane) LANE="${2:-}"; shift 2 ;;
+    --session-id) SESSION_ID="${2:-}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
+
+ROLE="$(printf '%s' "$ROLE" | tr '[:upper:]' '[:lower:]')"
+case "$ROLE" in
+  orchestrator|worker) ;;
+  *) stop "--role must be orchestrator|worker" ;;
+esac
+
+[[ -n "$LOOP_ID" ]] || stop "--loop-id is required"
+orchestration_assert_id "$LOOP_ID" "loop id"
+if [[ "$ROLE" == "worker" ]]; then
+  LANE="$(printf '%s' "$LANE" | tr '[:lower:]' '[:upper:]')"
+  [[ "$LANE" =~ ^[A-Z0-9._-]+$ ]] || stop "--lane is required for role=worker"
+else
+  LANE="C"
+fi
+
+need_cmd git
+
+ROOT="$(orchestration_root)"
+STATE_ROOT="$(orchestration_state_root)"
+PLAN_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/orchestration-launcher-plan"
+[[ -x "$PLAN_SCRIPT" ]] || stop "missing executable plan helper: $PLAN_SCRIPT"
+
+plan_file="$(mktemp)"
+trap 'rm -f "$plan_file"' EXIT
+"$PLAN_SCRIPT" --role "$ROLE" --loop-id "$LOOP_ID" --lane "$LANE" >"$plan_file"
+
+REPO="$(kv_value repo "$plan_file")"
+BRANCH="$(kv_value branch "$plan_file")"
+WORKTREE="$(kv_value worktree "$plan_file")"
+RESOLUTION_MODE="$(kv_value resolution_mode "$plan_file")"
+[[ -n "$REPO" ]] || stop "launcher plan did not return repo"
+[[ -n "$BRANCH" ]] || stop "launcher plan did not return branch"
+[[ -n "$WORKTREE" ]] || stop "launcher plan did not return worktree"
+
+if [[ "$ROLE" == "orchestrator" ]]; then
+  while IFS= read -r line; do
+    [[ "$line" == lock=* ]] || continue
+    record="${line#lock=}"
+    IFS=$'\t' read -r lock_loop lock_lane lock_status lock_stale _rest <<< "$record"
+    [[ "$lock_status" == "active" && "$lock_stale" == "false" && "$lock_lane" == "C" ]] || continue
+    [[ "$lock_loop" == "$LOOP_ID" ]] && continue
+    stop "another active orchestrator control lock exists for loop=$lock_loop"
+  done <"$plan_file"
+fi
+
+ensure_local_branch "$REPO" "$BRANCH"
+git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+
+if [[ -d "$WORKTREE" ]]; then
+  if git -C "$WORKTREE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    wt_branch="$(git -C "$WORKTREE" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    [[ "$wt_branch" == "$BRANCH" ]] || stop "existing worktree branch mismatch: expected $BRANCH got ${wt_branch:-unknown}"
+  else
+    stop "worktree path exists but is not a git checkout: $WORKTREE"
+  fi
+else
+  occupied_wt="$(find_branch_worktree "$REPO" "$BRANCH" || true)"
+  if [[ -n "$occupied_wt" && "$occupied_wt" != "$WORKTREE" ]]; then
+    WORKTREE="$occupied_wt"
+    RESOLUTION_MODE="existing_branch_worktree"
+  else
+    mkdir -p "$(dirname "$WORKTREE")"
+    if [[ "$FORCE" -eq 1 ]]; then
+      git -C "$REPO" worktree add --force "$WORKTREE" "$BRANCH" >/dev/null
+    else
+      git -C "$REPO" worktree add "$WORKTREE" "$BRANCH" >/dev/null
+    fi
+  fi
+fi
+
+LOCKS_DIR="$STATE_ROOT/$LOOP_ID/locks"
+LOCK_FILE="$LOCKS_DIR/$LANE.lock"
+mkdir -p "$LOCKS_DIR"
+clear_stale_lock "$LOCK_FILE"
+if [[ -f "$LOCK_FILE" && "$FORCE" -ne 1 ]]; then
+  owner="$(sed -n 's/^owner:[[:space:]]*//p' "$LOCK_FILE" | head -1)"
+  pid="$(lock_pid "$LOCK_FILE")"
+  stop "lock already held: $LOCK_FILE owner=${owner:-unknown} pid=${pid:-unknown}"
+fi
+
+if [[ -f "$LOCK_FILE" && "$FORCE" -eq 1 ]]; then
+  rm -f "$LOCK_FILE"
+fi
+
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+{
+  echo "loop_id: $LOOP_ID"
+  echo "role: $ROLE"
+  echo "lane: $LANE"
+  echo "owner: ${USER:-unknown}"
+  echo "pid: $$"
+  echo "session_id: ${SESSION_ID:-unknown}"
+  echo "worktree: $WORKTREE"
+  echo "branch: $BRANCH"
+  echo "mode: capability"
+  echo "status: active"
+  echo "created_at: $NOW"
+} >"$LOCK_FILE"
+
+echo "orchestration.launcher.claim"
+printf 'export %s=%q\n' SPINE_ORCH_LOOP_ID "$LOOP_ID"
+printf 'export %s=%q\n' SPINE_ORCH_ROLE "$ROLE"
+printf 'export %s=%q\n' SPINE_ORCH_LANE "$LANE"
+printf 'export %s=%q\n' SPINE_TARGET_REPO "$REPO"
+printf 'export %s=%q\n' SPINE_WORKTREE "$WORKTREE"
+printf 'export %s=%q\n' SPINE_ORCH_BRANCH "$BRANCH"
+printf 'export %s=%q\n' SPINE_ORCH_WORKTREE_RESOLUTION_MODE "$RESOLUTION_MODE"
+printf 'export %s=%q\n' SPINE_ORCH_LOCK_FILE "$LOCK_FILE"
