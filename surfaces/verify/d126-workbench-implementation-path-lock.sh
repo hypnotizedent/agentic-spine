@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-AUDIT="$ROOT/ops/plugins/verify/bin/workbench-impl-audit"
+AUDIT="$ROOT/ops/plugins/core/verify/bin/workbench-impl-audit"
 
 fail() {
   echo "D126 FAIL: $*" >&2

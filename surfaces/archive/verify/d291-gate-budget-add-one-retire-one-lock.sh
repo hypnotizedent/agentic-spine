@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-REPORT_SCRIPT="$ROOT/ops/plugins/verify/bin/gate-budget-add-one-retire-one-report"
+REPORT_SCRIPT="$ROOT/ops/plugins/core/verify/bin/gate-budget-add-one-retire-one-report"
 BUDGET_CONTRACT="$ROOT/ops/bindings/gate.budget.add_one_retire_one.contract.yaml"
 ENFORCEMENT_POLICY="$ROOT/ops/bindings/gate.enforcement.policy.yaml"
 

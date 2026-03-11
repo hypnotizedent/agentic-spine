@@ -14,7 +14,7 @@ D128 fix path:
      - gate.topology.assign / gate.topology.validate
      - domain.onboard.new
   2. Emit required trailers:
-     ./ops/plugins/verify/bin/gate-mutation-trailers --capability <capability> --run-key <CAP-...>
+     ./ops/plugins/core/verify/bin/gate-mutation-trailers --capability <capability> --run-key <CAP-...>
   3. Include the emitted lines in the commit message for commits touching:
      - ops/bindings/gate.registry.yaml
      - ops/bindings/gate.execution.topology.yaml

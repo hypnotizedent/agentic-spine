@@ -22,7 +22,7 @@ Canonical conventions contract:
 
 - Gate: `D129` (`spine-schema-conventions-lock`)
 - Script: `/Users/ronnyworks/code/agentic-spine/surfaces/verify/d129-spine-schema-conventions-lock.sh`
-- Validator: `/Users/ronnyworks/code/agentic-spine/ops/plugins/verify/bin/schema-conventions-audit`
+- Validator: `/Users/ronnyworks/code/agentic-spine/ops/plugins/core/verify/bin/schema-conventions-audit`
 
 The lock uses **touch-and-fix** policy:
 

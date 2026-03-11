@@ -45,7 +45,7 @@ HITS="$(
     --glob '!**/ops/bindings/legacy.entrypoint.exceptions.yaml' \
     --glob '!**/ops/bindings/host.audit.allowlist.yaml' \
     --glob '!**/ops/plugins/infra/host/bin/host-drift-audit' \
-    --glob '!**/ops/plugins/docs/bin/docs-lint' \
+    --glob '!**/ops/plugins/core/docs/bin/docs-lint' \
     --glob '!**/ops/tools/legacy-freeze.sh' \
     --glob '!**/ops/tools/legacy-thaw.sh' \
     --glob '!**/ops/bindings/operational.gaps.yaml' \

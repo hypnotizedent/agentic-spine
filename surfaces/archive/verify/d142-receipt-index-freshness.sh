@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-INDEX_FILE="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
+INDEX_FILE="$ROOT/ops/plugins/core/evidence/state/receipt-index.yaml"
 POLICY_FILE="$ROOT/ops/bindings/evidence.retention.policy.yaml"
 RECEIPTS_DIR="$ROOT/receipts/sessions"
 
@@ -16,7 +16,7 @@ command -v yq >/dev/null 2>&1 || fail "required tool missing: yq"
 command -v python3 >/dev/null 2>&1 || fail "required tool missing: python3"
 
 if [[ ! -f "$INDEX_FILE" ]]; then
-  "$ROOT/ops/plugins/evidence/bin/receipts-index-build" --index "$INDEX_FILE" --quiet || fail "unable to build missing index"
+  "$ROOT/ops/plugins/core/evidence/bin/receipts-index-build" --index "$INDEX_FILE" --quiet || fail "unable to build missing index"
 fi
 
 [[ -f "$INDEX_FILE" ]] || fail "receipt index missing: $INDEX_FILE"

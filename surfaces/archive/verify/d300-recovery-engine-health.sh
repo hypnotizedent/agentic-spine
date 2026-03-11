@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 BINDING_FILE="$ROOT/ops/bindings/recovery.actions.yaml"
-STATE_ROOT="$ROOT/ops/plugins/recovery/state"
+STATE_ROOT="$ROOT/ops/plugins/core/recovery/state"
 COOLDOWN_DIR="$STATE_ROOT/cooldown"
 ATTEMPTS_DIR="$STATE_ROOT/attempts"
 AUDIT_LOG="$ROOT/mailroom/logs/recovery-dispatch.ndjson"

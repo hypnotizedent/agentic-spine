@@ -5,7 +5,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/weekly.execution.telemetry.contract.yaml"
-CHECKER="$ROOT/ops/plugins/evidence/bin/weekly-execution-telemetry"
+CHECKER="$ROOT/ops/plugins/core/evidence/bin/weekly-execution-telemetry"
 INDEX_PATH="$ROOT/docs/governance/_index.yaml"
 DASHBOARD_PATH="$ROOT/docs/governance/generated/telemetry/WEEKLY_EXECUTION_DASHBOARD.md"
 

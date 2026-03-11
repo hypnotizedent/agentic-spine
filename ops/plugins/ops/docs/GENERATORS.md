@@ -89,7 +89,7 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
   - `receipts/sessions/**/receipt.md`
   - `mailroom/state/ledger.csv`
 - Output:
-  - `ops/plugins/evidence/state/receipt-index.yaml`
+  - `ops/plugins/core/evidence/state/receipt-index.yaml`
 - Validate:
   - schema parity with `ops/bindings/receipts.index.schema.yaml`
   - freshness (`D142`)

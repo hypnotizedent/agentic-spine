@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-info — Query a single agent entry from agents.registry.yaml.
+# Usage:
+#   agent-info <agent-id-or-alias> [--json]
+
+SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"
+REGISTRY="$SPINE_CODE/ops/bindings/agents.registry.yaml"
+
+usage() {
+  cat <<'EOF'
+Usage: agent-info <agent-id-or-alias> [--json]
+
+Return full machine-queryable registry entry for one agent.
+If the input is not a direct agent ID, routing_rules aliases are checked.
+EOF
+}
+
+[[ -f "$REGISTRY" ]] || { echo "ERROR: registry not found: $REGISTRY" >&2; exit 1; }
+command -v yq >/dev/null 2>&1 || { echo "ERROR: yq is required" >&2; exit 1; }
+
+if [[ $# -lt 1 ]]; then
+  usage >&2
+  exit 1
+fi
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+AGENT_QUERY="$1"
+shift || true
+OUTPUT_FORMAT="yaml"
+
+for arg in "$@"; do
+  case "$arg" in
+    --json) OUTPUT_FORMAT="json" ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown option: $arg" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ ! "$AGENT_QUERY" =~ ^[A-Za-z0-9-]+$ ]]; then
+  echo "ERROR: invalid agent id or alias: $AGENT_QUERY" >&2
+  exit 1
+fi
+
+AGENT_ID="$(yq e -r ".agents[] | select(.id == \"$AGENT_QUERY\") | .id" "$REGISTRY" 2>/dev/null || true)"
+if [[ -z "$AGENT_ID" ]]; then
+  AGENT_ID="$(INPUT="$AGENT_QUERY" yq e -r '
+    .routing_rules[]
+    | select((.domains[]? == strenv(INPUT)) or (.keywords[]? == strenv(INPUT)))
+    | .agent
+  ' "$REGISTRY" 2>/dev/null | head -n 1 || true)"
+fi
+
+if [[ -z "$AGENT_ID" ]]; then
+  echo "ERROR: agent not found: $AGENT_QUERY" >&2
+  exit 1
+fi
+
+if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+  yq e -o=json ".agents[] | select(.id == \"$AGENT_ID\")" "$REGISTRY"
+else
+  yq e ".agents[] | select(.id == \"$AGENT_ID\")" "$REGISTRY"
+fi

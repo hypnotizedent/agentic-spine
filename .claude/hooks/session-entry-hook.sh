@@ -202,7 +202,7 @@ touch "$MARKER"
 # --- Dynamic context gathering (via spine.context capability) ---
 
 # Use spine.context for governance brief delivery (Move 3: dynamic context)
-CONTEXT_SCRIPT="$SPINE_ROOT/ops/plugins/context/bin/spine-context"
+CONTEXT_SCRIPT="$SPINE_ROOT/ops/plugins/core/context/bin/spine-context"
 
 # Spine status (loops + gaps + inbox + proposals)
 LOOPS="(none)"

@@ -58,7 +58,7 @@ Default policy mode is non-destructive.
 ## Coverage and Freshness Thresholds
 
 Coverage checks compare `receipts/sessions/` against
-`ops/plugins/evidence/state/receipt-index.yaml`.
+`ops/plugins/core/evidence/state/receipt-index.yaml`.
 
 - Coverage warn threshold: below 75.0%
 - Coverage fail threshold: below 50.0%

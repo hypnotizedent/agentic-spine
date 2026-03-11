@@ -8,7 +8,7 @@ POLICY_BINDING="$ROOT/ops/bindings/receipts.archival.policy.yaml"
 POLICY_DOC="$ROOT/docs/governance/RECEIPTS_ARCHIVAL_POLICY_V1.md"
 DOCS_INDEX="$ROOT/docs/governance/_index.yaml"
 GOV_DOCS_ROOT="$ROOT/docs/governance"
-COVERAGE_CHECKER="$ROOT/ops/plugins/evidence/bin/receipts-index-coverage"
+COVERAGE_CHECKER="$ROOT/ops/plugins/core/evidence/bin/receipts-index-coverage"
 
 fail() {
   echo "D156 FAIL: $*" >&2

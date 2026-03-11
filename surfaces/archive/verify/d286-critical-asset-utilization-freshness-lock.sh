@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/critical.asset.utilization.contract.yaml"
-INDEX="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
+INDEX="$ROOT/ops/plugins/core/evidence/state/receipt-index.yaml"
 
 fail() {
   echo "D286 FAIL: $*" >&2

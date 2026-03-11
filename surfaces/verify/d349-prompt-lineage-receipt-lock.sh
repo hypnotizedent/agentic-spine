@@ -8,8 +8,8 @@ CAP_FILE="$ROOT/ops/capabilities.yaml"
 MAP_FILE="$ROOT/ops/bindings/capability_map.yaml"
 DISPATCH_FILE="$ROOT/ops/bindings/routing.dispatch.yaml"
 MANIFEST_FILE="$ROOT/ops/plugins/MANIFEST.yaml"
-EMITTER="$ROOT/ops/plugins/evidence/bin/receipts-exec-emit"
-PROMPT_STATUS="$ROOT/ops/plugins/evidence/bin/prompt-registry-status"
+EMITTER="$ROOT/ops/plugins/core/evidence/bin/receipts-exec-emit"
+PROMPT_STATUS="$ROOT/ops/plugins/core/evidence/bin/prompt-registry-status"
 SCHEMA="$ROOT/ops/bindings/orchestration.exec_receipt.schema.json"
 
 fail() {

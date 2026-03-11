@@ -586,9 +586,9 @@ else
 fi
 
 set +e
-"$ROOT/ops/plugins/loops/bin/loops-status" > "$ARTIFACT_DIR/loops_status.log" 2>&1
+"$ROOT/ops/plugins/core/loops/bin/loops-status" > "$ARTIFACT_DIR/loops_status.log" 2>&1
 echo "$?" > "$ARTIFACT_DIR/loops_status.rc"
-"$ROOT/ops/plugins/loops/bin/gaps-status" > "$ARTIFACT_DIR/gaps_status.log" 2>&1
+"$ROOT/ops/plugins/core/loops/bin/gaps-status" > "$ARTIFACT_DIR/gaps_status.log" 2>&1
 echo "$?" > "$ARTIFACT_DIR/gaps_status.rc"
 "$ROOT/ops/plugins/ops/bin/worktree-lifecycle-reconcile" --json > "$ARTIFACT_DIR/worktree_lifecycle.log" 2>&1
 echo "$?" > "$ARTIFACT_DIR/worktree_lifecycle.rc"
@@ -600,8 +600,8 @@ if [[ "$JSON_MODE" -eq 0 ]]; then
   cat "$ARTIFACT_DIR/worktree_lifecycle.log"
 fi
 
-LOOPS_RUN_KEY="direct:ops/plugins/loops/bin/loops-status"
-GAPS_RUN_KEY="direct:ops/plugins/loops/bin/gaps-status"
+LOOPS_RUN_KEY="direct:ops/plugins/core/loops/bin/loops-status"
+GAPS_RUN_KEY="direct:ops/plugins/core/loops/bin/gaps-status"
 WORKTREE_RECONCILE_RUN_KEY="direct:ops/plugins/ops/bin/worktree-lifecycle-reconcile --json"
 
 LOOPS_OPEN="$(awk '/By Status:/{f=1;next} f&&$1=="Open:"{print $2; exit}' "$ARTIFACT_DIR/loops_status.log" 2>/dev/null || true)"

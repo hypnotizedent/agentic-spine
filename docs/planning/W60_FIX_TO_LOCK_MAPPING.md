@@ -17,5 +17,5 @@ Generated: 2026-02-28
 | W60-F012 | Gap linkage lacked automated cross-surface integrity check. | `D284` | `@ronny` | `2026-03-31` | `surfaces/verify/d284-gap-reference-integrity-lock.sh` |
 | W60-F013 | Scheduled freshness path did not require runtime probe evidence in lock form. | `D277` | `@ronny` | `2026-03-31` | `surfaces/verify/d277-runtime-freshness-reconcile-automation-lock.sh` |
 | W60-F014 | Snapshot freshness noise and deterministic breakages were conflated in operator loops. | `D287` | `@ronny` | `2026-03-31` | `surfaces/verify/d287-verify-failure-snapshot-fatigue-lock.sh` |
-| W60-F015 | Retention flow relied on manual hygiene cadence with no parity prerequisite lock. | `D288` | `@ronny` | `2026-03-31` | `surfaces/verify/d288-receipts-subtraction-automation-lock.sh`; `ops/plugins/evidence/bin/receipts-checksum-parity-report` |
+| W60-F015 | Retention flow relied on manual hygiene cadence with no parity prerequisite lock. | `D288` | `@ronny` | `2026-03-31` | `surfaces/verify/d288-receipts-subtraction-automation-lock.sh`; `ops/plugins/core/evidence/bin/receipts-checksum-parity-report` |
 | W60-F016 | Closure discipline was narrative-only and not machine-checked. | `D276` | `@ronny` | `2026-03-31` | `surfaces/verify/d276-fix-to-lock-closure-lock.sh` |

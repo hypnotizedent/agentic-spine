@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-RECONCILE_BIN="$ROOT/ops/plugins/lifecycle/bin/planning-plans-reconcile"
+RECONCILE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-reconcile"
 
 fail() {
   echo "D345 FAIL: $*" >&2

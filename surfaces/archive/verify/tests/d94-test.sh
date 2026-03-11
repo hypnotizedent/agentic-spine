@@ -17,7 +17,7 @@ setup_mock() {
   mkdir -p "$tmp/surfaces/verify"
   mkdir -p "$tmp/ops/commands"
   mkdir -p "$tmp/ops/lib"
-  mkdir -p "$tmp/ops/plugins/policy/bin"
+  mkdir -p "$tmp/ops/plugins/core/policy/bin"
 
   # Contract binding
   cat > "$tmp/ops/bindings/policy.runtime.contract.yaml" <<'EOF'
@@ -130,7 +130,7 @@ EOF
   echo "# resolve policy" > "$tmp/ops/lib/resolve-policy.sh"
 
   # Machine-readable audit script (required by D94)
-  cat > "$tmp/ops/plugins/policy/bin/policy-runtime-audit" <<'EOF'
+  cat > "$tmp/ops/plugins/core/policy/bin/policy-runtime-audit" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" != "--json" ]]; then
@@ -168,7 +168,7 @@ cat <<'JSON'
 }
 JSON
 EOF
-  chmod +x "$tmp/ops/plugins/policy/bin/policy-runtime-audit"
+  chmod +x "$tmp/ops/plugins/core/policy/bin/policy-runtime-audit"
 
   # Wired source files
   echo "# drift-gate" > "$tmp/surfaces/verify/drift-gate.sh"
@@ -243,7 +243,7 @@ test_missing_doc() {
 test_missing_policy_audit_script() {
   local mock
   mock="$(setup_mock)"
-  rm "$mock/ops/plugins/policy/bin/policy-runtime-audit"
+  rm "$mock/ops/plugins/core/policy/bin/policy-runtime-audit"
   if SPINE_ROOT="$mock" bash "$GATE" >/dev/null 2>&1; then
     fail "missing policy.runtime.audit script should fail D94"
   else

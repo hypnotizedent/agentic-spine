@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SPINE="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-A="$SPINE/ops/plugins/agent/bin"
+A="$SPINE/ops/plugins/core/agent/bin"
 
 sub="${1:-help}"
 shift || true

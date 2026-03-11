@@ -8,7 +8,7 @@ CAP_FILE="$ROOT/ops/capabilities.yaml"
 MAP_FILE="$ROOT/ops/bindings/capability_map.yaml"
 DISPATCH_FILE="$ROOT/ops/bindings/routing.dispatch.yaml"
 MANIFEST_FILE="$ROOT/ops/plugins/MANIFEST.yaml"
-SCRIPT="$ROOT/ops/plugins/evidence/bin/spine-experiment-compare"
+SCRIPT="$ROOT/ops/plugins/core/evidence/bin/spine-experiment-compare"
 RECOVERY_ACTIONS="$ROOT/ops/bindings/recovery.actions.yaml"
 
 fail() {
@@ -24,7 +24,7 @@ command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
 command -v jq >/dev/null 2>&1 || fail "missing dependency: jq"
 
 yq -e '.authority.capability == "spine.experiment.compare"' "$CONTRACT" >/dev/null 2>&1 || fail "contract authority.capability mismatch"
-yq -e '.authority.script == "ops/plugins/evidence/bin/spine-experiment-compare"' "$CONTRACT" >/dev/null 2>&1 || fail "contract authority.script mismatch"
+yq -e '.authority.script == "ops/plugins/core/evidence/bin/spine-experiment-compare"' "$CONTRACT" >/dev/null 2>&1 || fail "contract authority.script mismatch"
 
 yq -e '.capabilities."spine.experiment.compare"' "$CAP_FILE" >/dev/null 2>&1 || fail "capabilities.yaml missing spine.experiment.compare"
 yq -e '.capabilities."spine.experiment.compare"' "$MAP_FILE" >/dev/null 2>&1 || fail "capability_map.yaml missing spine.experiment.compare"

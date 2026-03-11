@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
-STREAK_FILE="$ROOT/ops/plugins/verify/state/gate-pass-streak.json"
+STREAK_FILE="$ROOT/ops/plugins/core/verify/state/gate-pass-streak.json"
 
 fail() {
   echo "D297 FAIL: $*" >&2

@@ -349,7 +349,7 @@ Required top-level keys:
 ./bin/ops cap run aof.verify --json | jq .
 ```
 
-Regression coverage: `ops/plugins/aof/tests/aof-json-contract-test.sh`
+Regression coverage: `ops/plugins/core/aof/tests/aof-json-contract-test.sh`
 
 ---
 

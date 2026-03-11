@@ -30,7 +30,7 @@ if [[ -z "$recipient" || "$recipient" == "null" ]]; then
   exit 1
 fi
 
-briefing_json="$("${SPINE_ROOT}/ops/plugins/briefing/bin/spine-briefing" --json)"
+briefing_json="$("${SPINE_ROOT}/ops/plugins/core/briefing/bin/spine-briefing" --json)"
 overall="$(echo "$briefing_json" | jq -r '.overall_status // "unknown"')"
 generated="$(echo "$briefing_json" | jq -r '.generated_at_utc // ""')"
 sections="$(

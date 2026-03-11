@@ -90,7 +90,7 @@ maybe_rotate_receipts() {
     local rotate_every="${SPINE_RECEIPTS_ROTATE_EVERY:-100}"
     local retention_days="${SPINE_RECEIPTS_ROTATE_DAYS:-30}"
     local counter_file="$STATE_DIR/cap-run-counter"
-    local rotate_bin="$SPINE_CODE/ops/plugins/evidence/bin/receipts-rotate"
+    local rotate_bin="$SPINE_CODE/ops/plugins/core/evidence/bin/receipts-rotate"
     local counter=0
 
     [[ "$rotate_every" =~ ^[0-9]+$ ]] || rotate_every=100
@@ -402,7 +402,7 @@ run_cap() {
     fi
     local effective_multi_agent_writes="${RESOLVED_MULTI_AGENT_WRITES:-direct}"
     local active_session_count=0
-    local friction_ingest_script="$SPINE_CODE/ops/plugins/lifecycle/bin/friction-ingest"
+    local friction_ingest_script="$SPINE_CODE/ops/plugins/core/lifecycle/bin/friction-ingest"
     local friction_autocapture="${OPS_CAP_FRICTION_AUTOCAPTURE:-1}"
 
     count_active_sessions() {
@@ -1042,16 +1042,16 @@ PY
       if [[ -f "$env_contract" ]]; then
         local ack_check
         set +e
-        ack_check="$(CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/aof/bin/contract-read-check.sh" 2>&1)"
+        ack_check="$(CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/core/aof/bin/contract-read-check.sh" 2>&1)"
         local ack_rc=$?
         set -e
         if [[ "$ack_rc" -eq 2 ]]; then
           # Auto-acknowledge when a governed role override is active.
           if [[ "$governed_override_active" -eq 1 ]]; then
-            CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
+            CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/core/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
             echo "AOF auto-acknowledged via OPS_GOVERNED_MAIN_OVERRIDE=1"
           elif [[ -n "$role_policy_override_ref" && -n "$role_policy_override_reason" ]]; then
-            CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
+            CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/core/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
             echo "AOF auto-acknowledged (governed role override active: ref=$role_policy_override_ref)"
           else
             echo "BLOCKED: AOF contract acknowledgment required"
@@ -1288,8 +1288,8 @@ EOF
       *) lane_id="execution" ;;
     esac
 
-    if [[ -x "$SPINE_CODE/ops/plugins/evidence/bin/receipts-exec-emit" ]]; then
-      "$SPINE_CODE/ops/plugins/evidence/bin/receipts-exec-emit" \
+    if [[ -x "$SPINE_CODE/ops/plugins/core/evidence/bin/receipts-exec-emit" ]]; then
+      "$SPINE_CODE/ops/plugins/core/evidence/bin/receipts-exec-emit" \
         --task-id "$name" \
         --terminal-id "$terminal_id" \
         --lane "$lane_id" \

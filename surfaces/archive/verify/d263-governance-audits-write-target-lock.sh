@@ -35,11 +35,11 @@ FILES=(
   "ops/bindings/spine.schema.conventions.yaml"
   "ops/bindings/spine.boundary.baseline.yaml"
   "ops/bindings/mailroom.runtime.contract.yaml"
-  "ops/plugins/verify/bin/schema-conventions-audit"
-  "ops/plugins/verify/bin/calendar-surface-audit"
-  "ops/plugins/verify/bin/surface-audit-full"
-  "ops/plugins/surface/bin/surface-boundary-reconcile-plan"
-  "ops/plugins/slo/bin/slo-evidence-daily"
+  "ops/plugins/core/verify/bin/schema-conventions-audit"
+  "ops/plugins/core/verify/bin/calendar-surface-audit"
+  "ops/plugins/core/verify/bin/surface-audit-full"
+  "ops/plugins/core/surface/bin/surface-boundary-reconcile-plan"
+  "ops/plugins/core/slo/bin/slo-evidence-daily"
   "surfaces/verify/d150-code-root-hygiene-lock.sh"
 )
 

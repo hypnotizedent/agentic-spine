@@ -7,7 +7,7 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 CONTRACT="$ROOT/ops/bindings/nightly.closeout.contract.yaml"
 CMD="$ROOT/ops/commands/nightly-closeout.sh"
 DAILY="$ROOT/ops/runtime/nightly-closeout-daily.sh"
-CLOSEOUT_FINALIZE="$ROOT/ops/plugins/loops/bin/loop-closeout-finalize"
+CLOSEOUT_FINALIZE="$ROOT/ops/plugins/core/loops/bin/loop-closeout-finalize"
 
 failures=0
 

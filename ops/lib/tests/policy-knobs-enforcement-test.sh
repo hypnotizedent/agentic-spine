@@ -56,17 +56,17 @@ echo ""
 echo "T2: gap_auto_claim=true triggers auto-claim in gaps-file"
 (
   # Verify gaps-file sources resolve-policy.sh
-  grep -q 'resolve-policy.sh' "$ROOT/ops/plugins/loops/bin/gaps-file" || {
+  grep -q 'resolve-policy.sh' "$ROOT/ops/plugins/core/loops/bin/gaps-file" || {
     echo "  FAIL: gaps-file does not source resolve-policy.sh" >&2
     exit 1
   }
   # Verify gaps-file checks RESOLVED_GAP_AUTO_CLAIM
-  grep -q 'RESOLVED_GAP_AUTO_CLAIM' "$ROOT/ops/plugins/loops/bin/gaps-file" || {
+  grep -q 'RESOLVED_GAP_AUTO_CLAIM' "$ROOT/ops/plugins/core/loops/bin/gaps-file" || {
     echo "  FAIL: gaps-file does not check RESOLVED_GAP_AUTO_CLAIM" >&2
     exit 1
   }
   # Verify auto-claim call is present
-  grep -q 'claim_gap.*auto-claimed' "$ROOT/ops/plugins/loops/bin/gaps-file" || {
+  grep -q 'claim_gap.*auto-claimed' "$ROOT/ops/plugins/core/loops/bin/gaps-file" || {
     echo "  FAIL: gaps-file does not call claim_gap on auto-claim" >&2
     exit 1
   }
@@ -77,7 +77,7 @@ echo ""
 echo "T3: gap_auto_claim=false skips auto-claim"
 (
   # The conditional should only fire when == "true"
-  grep -q '"${RESOLVED_GAP_AUTO_CLAIM:-false}" == "true"' "$ROOT/ops/plugins/loops/bin/gaps-file" || {
+  grep -q '"${RESOLVED_GAP_AUTO_CLAIM:-false}" == "true"' "$ROOT/ops/plugins/core/loops/bin/gaps-file" || {
     echo "  FAIL: gaps-file auto-claim conditional not properly guarded" >&2
     exit 1
   }
@@ -142,11 +142,11 @@ echo "T6: multi_agent_writes=proposal-only blocks in cap.sh"
 echo ""
 echo "T7: receipt_retention_days wires to evidence.export.plan"
 (
-  grep -q 'RESOLVED_RECEIPT_RETENTION_DAYS' "$ROOT/ops/plugins/evidence/bin/evidence-export-plan" || {
+  grep -q 'RESOLVED_RECEIPT_RETENTION_DAYS' "$ROOT/ops/plugins/core/evidence/bin/evidence-export-plan" || {
     echo "  FAIL: evidence-export-plan does not read RESOLVED_RECEIPT_RETENTION_DAYS" >&2
     exit 1
   }
-  grep -q 'policy override' "$ROOT/ops/plugins/evidence/bin/evidence-export-plan" || {
+  grep -q 'policy override' "$ROOT/ops/plugins/core/evidence/bin/evidence-export-plan" || {
     echo "  FAIL: evidence-export-plan does not indicate policy override" >&2
     exit 1
   }

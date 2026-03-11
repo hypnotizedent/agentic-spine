@@ -16,15 +16,15 @@ setup_mock() {
   mkdir -p \
     "$tmp/surfaces/verify" \
     "$tmp/ops/bindings" \
-    "$tmp/ops/plugins/session/bin"
+    "$tmp/ops/plugins/core/session/bin"
   cp "$GATE" "$tmp/surfaces/verify/d347-bootstrap-hardcoded-path-admission-lock.sh"
   cp "$SP/ops/bindings/runtime.bootstrap.contract.yaml" "$tmp/ops/bindings/runtime.bootstrap.contract.yaml"
-  cp "$SP/ops/plugins/session/bin/spine-init" "$tmp/ops/plugins/session/bin/spine-init"
-  cp "$SP/ops/plugins/session/bin/spine-doctor" "$tmp/ops/plugins/session/bin/spine-doctor"
+  cp "$SP/ops/plugins/core/session/bin/spine-init" "$tmp/ops/plugins/core/session/bin/spine-init"
+  cp "$SP/ops/plugins/core/session/bin/spine-doctor" "$tmp/ops/plugins/core/session/bin/spine-doctor"
   chmod +x \
     "$tmp/surfaces/verify/d347-bootstrap-hardcoded-path-admission-lock.sh" \
-    "$tmp/ops/plugins/session/bin/spine-init" \
-    "$tmp/ops/plugins/session/bin/spine-doctor"
+    "$tmp/ops/plugins/core/session/bin/spine-init" \
+    "$tmp/ops/plugins/core/session/bin/spine-doctor"
   echo "$tmp"
 }
 
@@ -42,7 +42,7 @@ fi
 echo "--- Test 2: injected absolute path FAIL ---"
 MOCK="$(setup_mock)"
 trap 'cleanup_mock "$MOCK"' EXIT
-echo '# injected violation /Users/ronnyworks/code/agentic-spine' >> "$MOCK/ops/plugins/session/bin/spine-init"
+echo '# injected violation /Users/ronnyworks/code/agentic-spine' >> "$MOCK/ops/plugins/core/session/bin/spine-init"
 output=$(bash "$MOCK/surfaces/verify/d347-bootstrap-hardcoded-path-admission-lock.sh" 2>&1) && rc=$? || rc=$?
 if [[ "$rc" -ne 0 ]]; then
   pass "D347 correctly fails on prohibited literal (rc=$rc)"

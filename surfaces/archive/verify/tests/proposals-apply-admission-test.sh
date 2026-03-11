@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SCRIPT="$ROOT/ops/plugins/proposals/bin/proposals-apply"
+SCRIPT="$ROOT/ops/plugins/core/proposals/bin/proposals-apply"
 CONTRACT="$ROOT/ops/bindings/proposals.lifecycle.yaml"
 
 pass() { echo "PASS: $*"; }
@@ -15,17 +15,17 @@ require_cmd() {
 
 setup_fixture() {
   local d="$1"
-  mkdir -p "$d/ops/plugins/proposals/bin"
-  mkdir -p "$d/ops/plugins/verify/bin"
+  mkdir -p "$d/ops/plugins/core/proposals/bin"
+  mkdir -p "$d/ops/plugins/core/verify/bin"
   mkdir -p "$d/ops/bindings"
   mkdir -p "$d/mailroom/state/loop-scopes"
   mkdir -p "$d/mailroom/outbox/proposals"
   mkdir -p "$d/code/workbench/scripts/root/aof"
 
-  cp "$SCRIPT" "$d/ops/plugins/proposals/bin/proposals-apply"
-  chmod +x "$d/ops/plugins/proposals/bin/proposals-apply"
+  cp "$SCRIPT" "$d/ops/plugins/core/proposals/bin/proposals-apply"
+  chmod +x "$d/ops/plugins/core/proposals/bin/proposals-apply"
 
-  cat > "$d/ops/plugins/verify/bin/verify-topology" <<'SH'
+  cat > "$d/ops/plugins/core/verify/bin/verify-topology" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 cmd="${1:-}"
@@ -56,7 +56,7 @@ case "$cmd" in
     ;;
 esac
 SH
-  chmod +x "$d/ops/plugins/verify/bin/verify-topology"
+  chmod +x "$d/ops/plugins/core/verify/bin/verify-topology"
 
   cat > "$d/code/workbench/scripts/root/aof/workbench-aof-check.sh" <<'SH'
 #!/usr/bin/env bash
@@ -243,7 +243,7 @@ run_with_env() {
     export SPINE_CODE="$d"
     export WORKBENCH_ROOT="$d/code/workbench"
     # Invoke directly so test coverage matches shebang runtime (/bin/bash on macOS).
-    "$@" "$d/ops/plugins/proposals/bin/proposals-apply" --dry-run "$cp"
+    "$@" "$d/ops/plugins/core/proposals/bin/proposals-apply" --dry-run "$cp"
   ) >"$out" 2>&1
 }
 

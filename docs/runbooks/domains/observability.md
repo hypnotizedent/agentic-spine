@@ -13,7 +13,7 @@ Approval:    auto
 Arg Protocol:passthrough
 Run Key:     CAP-20260305-161350__spine.log.query__R7vh785462
 Policy:      balanced (approval_default=auto, multi_agent_writes=direct, active_sessions=0)
-Command:     ./ops/plugins/evidence/bin/spine-log-query --since-hours 24 --domain observability --status failed
+Command:     ./ops/plugins/core/evidence/bin/spine-log-query --since-hours 24 --domain observability --status failed
 CWD:         /Users/ronnyworks/code/agentic-spine
 
 Executing...
@@ -39,7 +39,7 @@ Approval:    auto
 Arg Protocol:passthrough
 Run Key:     CAP-20260305-161351__verify.run__Rzbv387155
 Policy:      balanced (approval_default=auto, multi_agent_writes=direct, active_sessions=0)
-Command:     ./ops/plugins/verify/bin/verify-run domain observability
+Command:     ./ops/plugins/core/verify/bin/verify-run domain observability
 CWD:         /Users/ronnyworks/code/agentic-spine
 
 Executing...
@@ -51,7 +51,7 @@ wrapper: total=18 pass=15 fail=0 warn=1
 blocking_fail_gate_ids: none
 warning_gate_ids: D127
 failure_class: deterministic=0 freshness=0 gate_bug=0
-history_file: /Users/ronnyworks/code/agentic-spine/ops/plugins/verify/state/verify-failure-class-history.ndjson
+history_file: /Users/ronnyworks/code/agentic-spine/ops/plugins/core/verify/state/verify-failure-class-history.ndjson
 ────────────────────────────────────────
 
 ════════════════════════════════════════

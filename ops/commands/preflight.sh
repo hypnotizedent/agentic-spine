@@ -41,7 +41,7 @@ domain_source="default(core)"
 if [[ -n "${OPS_GATE_DOMAIN:-}" ]]; then
   domain_source="OPS_GATE_DOMAIN"
 fi
-DRIFT_CERTIFIER="$REPO_ROOT/ops/plugins/verify/bin/drift-gates-certify"
+DRIFT_CERTIFIER="$REPO_ROOT/ops/plugins/core/verify/bin/drift-gates-certify"
 
 if [[ "$REPO_GIT_OK" -eq 1 ]]; then
   # Remote parity (origin/main == github/main). This is the primary anti split-brain stop signal.

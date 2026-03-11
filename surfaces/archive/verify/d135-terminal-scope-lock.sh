@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/stabilization.mode.yaml"
-SCOPE_STATUS="$ROOT/ops/plugins/session/bin/terminal-scope-status"
+SCOPE_STATUS="$ROOT/ops/plugins/core/session/bin/terminal-scope-status"
 
 fail() {
   echo "D135 FAIL: $*" >&2

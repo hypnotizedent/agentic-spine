@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
-VERIFY="$ROOT/ops/plugins/verify/bin/verify-topology"
+VERIFY="$ROOT/ops/plugins/core/verify/bin/verify-topology"
 
 fail() {
   echo "D282 FAIL: $*" >&2

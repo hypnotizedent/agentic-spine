@@ -2,9 +2,9 @@
 
 ## Changed Files
 - `ops/bindings/verify.ring.policy.yaml`
-- `ops/plugins/verify/bin/verify-pack`
-- `ops/plugins/verify/bin/verify-topology`
-- `ops/plugins/verify/bin/workbench-budget-regression-lock` (new)
+- `ops/plugins/core/verify/bin/verify-pack`
+- `ops/plugins/core/verify/bin/verify-topology`
+- `ops/plugins/core/verify/bin/workbench-budget-regression-lock` (new)
 
 ## Patch Summary
 1. Added `pack_budget_overrides_seconds.workbench: 76` while preserving global `budgets_seconds.standard: 60`.

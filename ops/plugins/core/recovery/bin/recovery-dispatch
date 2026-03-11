@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+BINDING_FILE="${RECOVERY_ACTIONS_FILE:-$SPINE_ROOT/ops/bindings/recovery.actions.yaml}"
+LIB_FILE="$SPINE_ROOT/ops/plugins/core/recovery/lib/recovery-safety.sh"
+
+usage() {
+  cat <<'USAGE'
+recovery-dispatch
+
+Usage:
+  recovery-dispatch --gate-id <D###> --failure-class <deterministic|freshness> [--dry-run] [--json]
+USAGE
+}
+
+stop() {
+  echo "recovery.dispatch FAIL: $*" >&2
+  exit 1
+}
+
+[[ -f "$LIB_FILE" ]] || stop "missing library: $LIB_FILE"
+# shellcheck disable=SC1090
+source "$LIB_FILE"
+
+GATE_ID=""
+FAILURE_CLASS=""
+DRY_RUN=0
+JSON_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --gate-id) GATE_ID="${2:-}"; shift 2 ;;
+    --failure-class) FAILURE_CLASS="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$GATE_ID" ]] || stop "--gate-id is required"
+case "$FAILURE_CLASS" in
+  deterministic|freshness) ;;
+  *) stop "--failure-class must be deterministic|freshness" ;;
+esac
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v jq >/dev/null 2>&1 || stop "missing dependency: jq"
+[[ -f "$BINDING_FILE" ]] || stop "missing binding: $BINDING_FILE"
+
+validate_action_types() {
+  local recovery_type
+  local -a invalid_types=()
+
+  while IFS= read -r recovery_type; do
+    [[ -n "$recovery_type" && "$recovery_type" != "null" ]] || continue
+    case "$recovery_type" in
+      docker_compose_restart|launchd_restart|capability_retry|capability_commit|alert_only) ;;
+      *) invalid_types+=("$recovery_type") ;;
+    esac
+  done < <(yq e -r '.actions[].recovery.type // ""' "$BINDING_FILE" 2>/dev/null || true)
+
+  if [[ "${#invalid_types[@]}" -gt 0 ]]; then
+    local unique_invalid
+    unique_invalid="$(printf '%s\n' "${invalid_types[@]}" | sort -u | paste -sd',' -)"
+    stop "unsupported recovery type(s) in binding: $unique_invalid"
+  fi
+}
+
+validate_action_types
+
+recovery_init_state
+
+mapfile -t match_indices < <(
+  GATE_ID="$GATE_ID" FAILURE_CLASS="$FAILURE_CLASS" yq e -r '
+    .actions
+    | to_entries
+    | map(
+        select(
+          ((.value.trigger.failure_class // "deterministic") == strenv(FAILURE_CLASS)) and
+          (
+            ((.value.trigger.gate_ids // []) | length == 0) or
+            ((.value.trigger.gate_ids // []) | contains([strenv(GATE_ID)]))
+          )
+        )
+      )
+    | .[].key
+  ' "$BINDING_FILE" 2>/dev/null || true
+)
+
+emit_result() {
+  local matched="$1"
+  local action_id="$2"
+  local recovered="$3"
+  local escalate="$4"
+  local suppressed="$5"
+  local attempt="$6"
+  local action_type="$7"
+  local message="$8"
+  local actions_json="${9:-[]}"
+
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -cn \
+      --arg gate_id "$GATE_ID" \
+      --arg failure_class "$FAILURE_CLASS" \
+      --argjson matched "$( [[ "$matched" == "true" ]] && echo true || echo false )" \
+      --arg action_id "$action_id" \
+      --arg action_type "$action_type" \
+      --argjson recovered "$( [[ "$recovered" == "true" ]] && echo true || echo false )" \
+      --argjson escalate "$( [[ "$escalate" == "true" ]] && echo true || echo false )" \
+      --argjson suppressed "$( [[ "$suppressed" == "true" ]] && echo true || echo false )" \
+      --argjson attempt "${attempt:-0}" \
+      --arg message "$message" \
+      --argjson actions "$actions_json" \
+      '{gate_id:$gate_id,failure_class:$failure_class,matched:$matched,action_id:$action_id,action_type:$action_type,recovered:$recovered,escalate:$escalate,suppressed:$suppressed,attempt:$attempt,message:$message,actions:$actions}'
+  else
+    local actions_count
+    actions_count="$(jq -r 'length' <<<"$actions_json" 2>/dev/null || echo 0)"
+    echo "recovery.dispatch"
+    echo "gate_id: $GATE_ID"
+    echo "failure_class: $FAILURE_CLASS"
+    echo "matched: $matched"
+    echo "action_id: $action_id"
+    echo "action_type: $action_type"
+    echo "attempt: ${attempt:-0}"
+    echo "recovered: $recovered"
+    echo "escalate: $escalate"
+    echo "suppressed: $suppressed"
+    echo "message: $message"
+    echo "actions_count: $actions_count"
+  fi
+}
+
+run_action() {
+  local match_index="$1"
+  local action_id action_type max_attempts cooldown_seconds escalate_after
+  local attempt_now target stack probe_url label capability retry_max backoff_csv
+  local alert_capability cmd_rc message escalate result_state
+
+  action_id="$(yq e -r ".actions[$match_index].id // \"action-$match_index\"" "$BINDING_FILE")"
+  action_type="$(yq e -r ".actions[$match_index].recovery.type // \"\"" "$BINDING_FILE")"
+  [[ -n "$action_type" && "$action_type" != "null" ]] || stop "action '$action_id' missing recovery.type"
+
+  max_attempts="$(yq e -r ".actions[$match_index].safety.max_attempts // .actions[$match_index].recovery.max_attempts // .defaults.max_attempts // 2" "$BINDING_FILE")"
+  cooldown_seconds="$(yq e -r ".actions[$match_index].safety.cooldown_seconds // .defaults.cooldown_seconds // 0" "$BINDING_FILE")"
+  escalate_after="$(yq e -r ".actions[$match_index].safety.escalate_after_failures // .defaults.escalate_after_failures // .actions[$match_index].safety.max_attempts // .defaults.max_attempts // 1" "$BINDING_FILE")"
+
+  [[ "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts=2
+  [[ "$cooldown_seconds" =~ ^[0-9]+$ ]] || cooldown_seconds=0
+  [[ "$escalate_after" =~ ^[0-9]+$ ]] || escalate_after=1
+
+  if recovery_check_cooldown "$action_id" "$cooldown_seconds"; then
+    recovery_log_attempt "$GATE_ID" "$FAILURE_CLASS" "$action_id" 0 "suppressed" "false" "cooldown active" "true"
+    jq -cn \
+      --arg action_id "$action_id" \
+      --arg action_type "$action_type" \
+      '{action_id:$action_id,action_type:$action_type,recovered:false,escalate:false,suppressed:true,attempt:0,message:"cooldown active"}'
+    return 0
+  fi
+
+  if recovery_check_exhausted "$action_id" "$max_attempts"; then
+    attempt_now="$(recovery_get_attempt "$action_id")"
+    recovery_log_attempt "$GATE_ID" "$FAILURE_CLASS" "$action_id" "$attempt_now" "exhausted" "true" "max attempts reached" "false"
+    jq -cn \
+      --arg action_id "$action_id" \
+      --arg action_type "$action_type" \
+      --argjson attempt "${attempt_now:-0}" \
+      '{action_id:$action_id,action_type:$action_type,recovered:false,escalate:true,suppressed:false,attempt:$attempt,message:"max attempts reached"}'
+    return 0
+  fi
+
+  attempt_now="$(recovery_increment_attempt "$action_id")"
+  recovery_touch_cooldown "$action_id"
+  cmd_rc=0
+  message=""
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    if [[ "$action_type" == "alert_only" ]]; then
+      message="alert_only dry-run"
+      recovery_log_attempt "$GATE_ID" "$FAILURE_CLASS" "$action_id" "$attempt_now" "dry-run" "true" "$message" "false"
+      jq -cn \
+        --arg action_id "$action_id" \
+        --arg action_type "$action_type" \
+        --argjson attempt "${attempt_now:-0}" \
+        --arg message "$message" \
+        '{action_id:$action_id,action_type:$action_type,recovered:false,escalate:true,suppressed:false,attempt:$attempt,message:$message}'
+      return 0
+    fi
+    message="dry-run"
+    recovery_clear_state "$action_id"
+    recovery_log_attempt "$GATE_ID" "$FAILURE_CLASS" "$action_id" "$attempt_now" "success" "false" "$message" "false"
+    jq -cn \
+      --arg action_id "$action_id" \
+      --arg action_type "$action_type" \
+      --argjson attempt "${attempt_now:-0}" \
+      --arg message "$message" \
+      '{action_id:$action_id,action_type:$action_type,recovered:true,escalate:false,suppressed:false,attempt:$attempt,message:$message}'
+    return 0
+  fi
+
+  case "$action_type" in
+    docker_compose_restart)
+      target="$(yq e -r ".actions[$match_index].recovery.target // \"\"" "$BINDING_FILE")"
+      stack="$(yq e -r ".actions[$match_index].recovery.stack // \"\"" "$BINDING_FILE")"
+      probe_url="$(yq e -r ".actions[$match_index].recovery.probe_url // \"\"" "$BINDING_FILE")"
+      declare -a services=()
+      mapfile -t services < <(yq e -r ".actions[$match_index].recovery.services[]?" "$BINDING_FILE" 2>/dev/null || true)
+
+      [[ -n "$target" ]] || stop "action '$action_id' missing recovery.target"
+      [[ -n "$stack" ]] || stop "action '$action_id' missing recovery.stack"
+
+      cmd=("$SPINE_ROOT/ops/plugins/core/recovery/bin/recovery-docker-restart" --target "$target" --stack "$stack")
+      for svc in "${services[@]}"; do
+        [[ -n "$svc" ]] && cmd+=(--service "$svc")
+      done
+      if [[ -n "$probe_url" && "$probe_url" != "null" ]]; then
+        cmd+=(--probe-url "$probe_url")
+      fi
+      set +e
+      "${cmd[@]}" >/dev/null 2>&1
+      cmd_rc=$?
+      set -e
+      message="docker_compose_restart rc=$cmd_rc"
+      ;;
+
+    launchd_restart)
+      label="$(yq e -r ".actions[$match_index].recovery.label // \"\"" "$BINDING_FILE")"
+      [[ -n "$label" ]] || stop "action '$action_id' missing recovery.label"
+      set +e
+      "$SPINE_ROOT/ops/plugins/core/recovery/bin/recovery-launchd-restart" --label "$label" >/dev/null 2>&1
+      cmd_rc=$?
+      set -e
+      message="launchd_restart rc=$cmd_rc"
+      ;;
+
+    capability_retry)
+      capability="$(yq e -r ".actions[$match_index].recovery.capability // \"\"" "$BINDING_FILE")"
+      retry_max="$(yq e -r ".actions[$match_index].recovery.max_attempts // 3" "$BINDING_FILE")"
+      backoff_csv="$(yq e -r ".actions[$match_index].recovery.backoff_seconds // [] | join(\",\")" "$BINDING_FILE")"
+      [[ -n "$capability" ]] || stop "action '$action_id' missing recovery.capability"
+      [[ "$retry_max" =~ ^[0-9]+$ ]] || retry_max=3
+      [[ -n "$backoff_csv" ]] || backoff_csv="60,300,900"
+
+      set +e
+      "$SPINE_ROOT/ops/plugins/core/recovery/bin/recovery-capability-retry" \
+        --capability "$capability" \
+        --max-attempts "$retry_max" \
+        --backoff-seconds "$backoff_csv" \
+        >/dev/null 2>&1
+      cmd_rc=$?
+      set -e
+      message="capability_retry rc=$cmd_rc"
+      ;;
+
+    capability_commit)
+      capability="$(yq e -r ".actions[$match_index].recovery.capability // \"\"" "$BINDING_FILE")"
+      local allowlist_file
+      allowlist_file="$(yq e -r ".actions[$match_index].recovery.allowlist_file // \"\"" "$BINDING_FILE")"
+      local commit_msg
+      commit_msg="$(yq e -r ".actions[$match_index].recovery.commit_message // \"chore: auto-recovery commit\"" "$BINDING_FILE")"
+      local trailer_cap
+      trailer_cap="$(yq e -r ".actions[$match_index].recovery.trailer_capability // \"\"" "$BINDING_FILE")"
+      [[ -n "$capability" ]] || stop "action '$action_id' missing recovery.capability"
+      [[ -n "$allowlist_file" ]] || stop "action '$action_id' missing recovery.allowlist_file"
+
+      local commit_cmd=("$SPINE_ROOT/ops/plugins/core/recovery/bin/recovery-capability-commit"
+        --capability "$capability"
+        --allowlist-file "$allowlist_file"
+        --commit-message "$commit_msg")
+      if [[ -n "$trailer_cap" && "$trailer_cap" != "null" ]]; then
+        commit_cmd+=(--trailer-capability "$trailer_cap")
+      fi
+      set +e
+      "${commit_cmd[@]}" >/dev/null 2>&1
+      cmd_rc=$?
+      set -e
+      message="capability_commit rc=$cmd_rc"
+      ;;
+
+    alert_only)
+      alert_capability="$(yq e -r ".actions[$match_index].recovery.capability // \"\"" "$BINDING_FILE")"
+      if [[ -n "$alert_capability" && "$alert_capability" != "null" ]]; then
+        set +e
+        "$SPINE_ROOT/bin/ops" cap run "$alert_capability" >/dev/null 2>&1
+        cmd_rc=$?
+        set -e
+        message="alert_only capability=$alert_capability rc=$cmd_rc"
+      else
+        cmd_rc=0
+        message="alert_only no capability configured"
+      fi
+
+      result_state="alerted"
+      if [[ "$cmd_rc" -ne 0 ]]; then
+        result_state="failed"
+      fi
+      recovery_log_attempt "$GATE_ID" "$FAILURE_CLASS" "$action_id" "$attempt_now" "$result_state" "true" "$message" "false"
+      jq -cn \
+        --arg action_id "$action_id" \
+        --arg action_type "$action_type" \
+        --argjson attempt "${attempt_now:-0}" \
+        --arg message "$message" \
+        '{action_id:$action_id,action_type:$action_type,recovered:false,escalate:true,suppressed:false,attempt:$attempt,message:$message}'
+      return 0
+      ;;
+
+    *)
+      stop "unsupported recovery type '$action_type'"
+      ;;
+  esac
+
+  if [[ "$cmd_rc" -eq 0 ]]; then
+    recovery_clear_state "$action_id"
+    recovery_log_attempt "$GATE_ID" "$FAILURE_CLASS" "$action_id" "$attempt_now" "success" "false" "$message" "false"
+    jq -cn \
+      --arg action_id "$action_id" \
+      --arg action_type "$action_type" \
+      --argjson attempt "${attempt_now:-0}" \
+      --arg message "$message" \
+      '{action_id:$action_id,action_type:$action_type,recovered:true,escalate:false,suppressed:false,attempt:$attempt,message:$message}'
+    return 0
+  fi
+
+  escalate="false"
+  if (( attempt_now >= escalate_after )) || (( max_attempts > 0 && attempt_now >= max_attempts )); then
+    escalate="true"
+  fi
+
+  recovery_log_attempt "$GATE_ID" "$FAILURE_CLASS" "$action_id" "$attempt_now" "failed" "$escalate" "$message" "false"
+  jq -cn \
+    --arg action_id "$action_id" \
+    --arg action_type "$action_type" \
+    --argjson attempt "${attempt_now:-0}" \
+    --argjson escalate "$( [[ "$escalate" == "true" ]] && echo true || echo false )" \
+    --arg message "$message" \
+    '{action_id:$action_id,action_type:$action_type,recovered:false,escalate:$escalate,suppressed:false,attempt:$attempt,message:$message}'
+}
+
+if [[ "${#match_indices[@]}" -eq 0 ]]; then
+  emit_result "false" "" "false" "false" "false" 0 "" "no matching recovery action" "[]"
+  exit 0
+fi
+
+actions_json='[]'
+for idx in "${match_indices[@]}"; do
+  [[ -n "$idx" ]] || continue
+  action_result="$(run_action "$idx")"
+  actions_json="$(jq -cn --argjson items "$actions_json" --argjson item "$action_result" '$items + [$item]')"
+done
+
+agg_recovered="$(jq -r 'if length == 0 then "false" else (all(.[]; .recovered == true) | tostring) end' <<<"$actions_json")"
+agg_any_recovered="$(jq -r 'if length == 0 then "false" else (any(.[]; .recovered == true) | tostring) end' <<<"$actions_json")"
+agg_escalate="$(jq -r 'if length == 0 then "false" else (any(.[]; .escalate == true) | tostring) end' <<<"$actions_json")"
+agg_suppressed="$(jq -r 'if length == 0 then "false" else (all(.[]; .suppressed == true) | tostring) end' <<<"$actions_json")"
+agg_attempt="$(jq -r '([.[].attempt] | max // 0)' <<<"$actions_json")"
+agg_action_ids="$(jq -r '[.[].action_id] | join(",")' <<<"$actions_json")"
+agg_action_types="$(jq -r '[.[].action_type] | unique | join(",")' <<<"$actions_json")"
+
+if [[ "$agg_recovered" == "true" ]]; then
+  agg_message="all recovery actions succeeded"
+elif [[ "$agg_any_recovered" == "true" ]]; then
+  agg_message="partial recovery"
+elif [[ "$agg_suppressed" == "true" ]]; then
+  agg_message="recovery actions suppressed by cooldown"
+else
+  agg_message="recovery action(s) did not recover"
+fi
+
+emit_result "true" "$agg_action_ids" "$agg_recovered" "$agg_escalate" "$agg_suppressed" "$agg_attempt" "$agg_action_types" "$agg_message" "$actions_json"
+exit 0

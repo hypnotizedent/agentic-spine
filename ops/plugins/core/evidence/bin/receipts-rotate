@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+RECEIPTS_DIR="$ROOT/receipts/sessions"
+RETENTION_DAYS=""
+EXECUTE=0
+JSON_MODE=0
+DELETED=0
+
+usage() {
+  cat <<'USAGE'
+receipts-rotate
+
+Usage:
+  receipts-rotate [--days <n>] [--execute] [--json]
+
+Deletes receipt session directories older than retention window.
+Default mode is dry-run.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --days)
+      RETENTION_DAYS="${2:-}"
+      shift 2
+      ;;
+    --execute)
+      EXECUTE=1
+      shift
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$RETENTION_DAYS" ]]; then
+  RETENTION_DAYS="$(yq -r '.retention_classes.session_receipts.retention_days // 30' "$ROOT/ops/bindings/evidence.retention.policy.yaml" 2>/dev/null || echo 30)"
+fi
+
+[[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || { echo "FAIL: retention days must be numeric" >&2; exit 2; }
+
+mapfile -t targets < <(find "$RECEIPTS_DIR" -maxdepth 1 -mindepth 1 -type d -mtime +"$RETENTION_DAYS" 2>/dev/null | sort)
+count="${#targets[@]}"
+
+if [[ "$EXECUTE" -eq 1 ]]; then
+  for dir in "${targets[@]}"; do
+    rm -rf "$dir"
+    DELETED=$((DELETED + 1))
+  done
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n \
+    --arg capability "receipts.rotate" \
+    --argjson execute "$EXECUTE" \
+    --argjson retention_days "$RETENTION_DAYS" \
+    --argjson candidates "$count" \
+    --argjson deleted "$DELETED" \
+    '{capability:$capability,execute:($execute==1),retention_days:$retention_days,candidates:$candidates,deleted:$deleted}'
+  exit 0
+fi
+
+echo "receipts.rotate"
+echo "execute: $EXECUTE"
+echo "retention_days: $RETENTION_DAYS"
+echo "candidates: $count"
+echo "deleted: $DELETED"
+
+if [[ "$EXECUTE" -eq 0 && "$count" -gt 0 ]]; then
+  echo "sample_candidates:"
+  printf '%s\n' "${targets[@]:0:10}"
+fi

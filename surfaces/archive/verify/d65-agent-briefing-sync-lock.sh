@@ -16,7 +16,7 @@ cd "$ROOT"
 fail() { echo "D65 FAIL: $*" >&2; exit 1; }
 
 BRIEF_FILE="docs/governance/AGENT_GOVERNANCE_BRIEF.md"
-CONTEXT_SCRIPT="ops/plugins/context/bin/spine-context"
+CONTEXT_SCRIPT="ops/plugins/core/context/bin/spine-context"
 SESSION_HOOK="ops/hooks/session-entry-hook.sh"
 
 # 1) Canonical brief must exist and remain non-empty.

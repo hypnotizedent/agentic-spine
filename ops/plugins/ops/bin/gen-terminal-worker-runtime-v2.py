@@ -190,7 +190,7 @@ def _extract_command_target(command: str) -> dict[str, Any]:
             "command": command,
         }
 
-    inbox_match = re.search(r"\./ops/plugins/agent/bin/([^\s]+)", command)
+    inbox_match = re.search(r"\./ops/plugins/core/agent/bin/([^\s]+)", command)
     if inbox_match:
         script = inbox_match.group(1)
         remainder = command[inbox_match.end() :].strip()
@@ -545,7 +545,7 @@ def _build_routing_dispatch(
             target_payload["command"] = target.get("command")
         elif execution_target == "agent":
             target_payload = {
-                "router": "ops/plugins/agent/bin/agent-route",
+                "router": "ops/plugins/core/agent/bin/agent-route",
                 "command": target.get("command"),
             }
         else:

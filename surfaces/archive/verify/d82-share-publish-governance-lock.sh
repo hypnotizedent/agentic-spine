@@ -41,9 +41,9 @@ done
 
 # 4. Plugin scripts exist and executable
 for script in \
-  "ops/plugins/share/bin/share-publish-preflight" \
-  "ops/plugins/share/bin/share-publish-preview" \
-  "ops/plugins/share/bin/share-publish-apply"; do
+  "ops/plugins/core/share/bin/share-publish-preflight" \
+  "ops/plugins/core/share/bin/share-publish-preview" \
+  "ops/plugins/core/share/bin/share-publish-apply"; do
   if [[ ! -f "$SP/$script" ]]; then
     err "$script missing"
   elif [[ ! -x "$SP/$script" ]]; then
@@ -73,7 +73,7 @@ if [[ -f "$REMOTE_BINDING" ]]; then
 fi
 
 # 7. Semantic: preflight must invoke drift-gate.sh (not just claim it)
-PREFLIGHT="$SP/ops/plugins/share/bin/share-publish-preflight"
+PREFLIGHT="$SP/ops/plugins/core/share/bin/share-publish-preflight"
 if [[ -f "$PREFLIGHT" ]]; then
   if ! grep -q 'drift-gate\.sh' "$PREFLIGHT" 2>/dev/null; then
     err "preflight does not invoke drift-gate.sh (verify enforcement missing)"
@@ -81,7 +81,7 @@ if [[ -f "$PREFLIGHT" ]]; then
 fi
 
 # 8. Semantic: preview must scan all 5 denylist sections
-PREVIEW="$SP/ops/plugins/share/bin/share-publish-preview"
+PREVIEW="$SP/ops/plugins/core/share/bin/share-publish-preview"
 if [[ -f "$PREVIEW" ]]; then
   for section in secret_patterns credential_patterns identity_patterns infrastructure_patterns runtime_patterns; do
     if ! grep -q "$section" "$PREVIEW" 2>/dev/null; then
@@ -91,7 +91,7 @@ if [[ -f "$PREVIEW" ]]; then
 fi
 
 # 9. Semantic: apply must read remote from binding, not hardcode
-APPLY="$SP/ops/plugins/share/bin/share-publish-apply"
+APPLY="$SP/ops/plugins/core/share/bin/share-publish-apply"
 if [[ -f "$APPLY" ]]; then
   # Must reference remote binding file
   if ! grep -q 'share\.publish\.remote\.yaml' "$APPLY" 2>/dev/null; then

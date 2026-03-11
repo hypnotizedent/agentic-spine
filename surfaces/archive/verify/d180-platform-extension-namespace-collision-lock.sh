@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/platform.extension.naming.contract.yaml"
-LINT_SCRIPT="$ROOT/ops/plugins/authority/bin/platform-extension-lint"
+LINT_SCRIPT="$ROOT/ops/plugins/core/authority/bin/platform-extension-lint"
 
 fail() {
   echo "D180 FAIL: $*" >&2

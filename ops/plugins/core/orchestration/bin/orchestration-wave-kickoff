@@ -1,0 +1,399 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
+source "$(orchestration_root)/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+usage() {
+  cat <<'USAGE'
+orchestration-wave-kickoff - Bootstrap orchestrator_subagents loop execution
+
+Usage:
+  orchestration-wave-kickoff \
+    --loop-id <LOOP_ID> \
+    --lanes <A,B,C> \
+    [--repo <path>] \
+    [--owner-terminal <terminal-id>] \
+    [--base-branch <branch>] \
+    [--session-id <session-id>] \
+    [--force]
+
+Creates/validates:
+- orchestration manifest + lane tickets
+- deterministic per-lane branches/worktrees
+- lock claims (orchestration.terminal.entry contract)
+- orchestrator packet artifact
+- canonical worker prompts with env/branch/worktree preamble
+USAGE
+}
+
+ROOT="$(orchestration_root)"
+ENFORCED_PREFIX="/Users/ronnyworks/code/.wt/agentic-spine/"
+LOOP_ID=""
+LANES_CSV=""
+REPO_PATH="$ROOT"
+OWNER_TERMINAL="${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}"
+BASE_BRANCH="main"
+SESSION_ID=""
+FORCE=0
+
+kickoff_path_block() {
+  local detail="${1:-unknown path policy violation}"
+  cat >&2 <<EOF
+ERROR: WORKTREE PATH POLICY BLOCK: $detail
+Allowed kickoff repo path: ${ENFORCED_PREFIX}<WAVE_ID>
+Remediation:
+  ./bin/ops wave start <WAVE_ID> --objective "<objective>" --repo /Users/ronnyworks/code/agentic-spine
+  ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo /Users/ronnyworks/code/agentic-spine
+EOF
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --lanes) LANES_CSV="${2:-}"; shift 2 ;;
+    --repo) REPO_PATH="${2:-}"; shift 2 ;;
+    --owner-terminal) OWNER_TERMINAL="${2:-}"; shift 2 ;;
+    --base-branch) BASE_BRANCH="${2:-}"; shift 2 ;;
+    --session-id) SESSION_ID="${2:-}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) orchestration_fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$LOOP_ID" ]] || orchestration_fail "--loop-id is required"
+[[ -n "$LANES_CSV" ]] || orchestration_fail "--lanes is required (e.g. --lanes A,B or --lanes CHAIN,HA)"
+orchestration_assert_id "$LOOP_ID" "loop id"
+[[ "$LOOP_ID" =~ ^LOOP- ]] || orchestration_fail "loop id must start with LOOP-"
+
+if [[ "$REPO_PATH" != /* ]]; then
+  REPO_PATH="$ROOT/$REPO_PATH"
+fi
+[[ -n "$SESSION_ID" ]] || SESSION_ID="kickoff-$(date -u +%Y%m%dT%H%M%SZ)"
+
+orchestration_need yq
+orchestration_need git
+orchestration_assert_git_repo "$REPO_PATH"
+repo_real="$(cd "$REPO_PATH" && pwd -P)"
+primary_checkout="$(git -C "$REPO_PATH" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+[[ "$repo_real" != *"/.worktrees/"* ]] || kickoff_path_block "legacy .worktrees path denied: $repo_real"
+if [[ -n "$primary_checkout" ]]; then
+  primary_checkout="$(cd "$primary_checkout" && pwd -P)"
+  [[ "$repo_real" != "$primary_checkout" ]] || kickoff_path_block "main checkout path denied: $repo_real"
+fi
+[[ "$repo_real" == "${ENFORCED_PREFIX}"* ]] || kickoff_path_block "repo path '$repo_real' is outside enforced prefix '$ENFORCED_PREFIX'"
+wave_leaf="$(basename "$repo_real")"
+[[ "$wave_leaf" =~ ^WAVE-[A-Z0-9._-]+$ ]] || kickoff_path_block "repo path leaf '$wave_leaf' must be explicit WAVE_ID (WAVE-...)"
+
+scope_file="$SPINE_STATE/loop-scopes/${LOOP_ID}.scope.md"
+[[ -f "$scope_file" ]] || orchestration_fail "loop scope missing: $scope_file"
+scope_mode="$(sed -n '/^---$/,/^---$/p' "$scope_file" | sed -n 's/^execution_mode:[[:space:]]*//p' | head -1 | tr -d '[:space:]')"
+[[ "$scope_mode" == "orchestrator_subagents" ]] || orchestration_fail "loop execution_mode must be orchestrator_subagents (found '${scope_mode:-missing}')"
+
+mapfile -t lanes < <(printf '%s' "$LANES_CSV" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' | tr '[:lower:]' '[:upper:]')
+((${#lanes[@]} > 0)) || orchestration_fail "--lanes must include at least one lane"
+
+declare -A lane_seen=()
+for lane in "${lanes[@]}"; do
+  orchestration_assert_id "$lane" "lane"
+  if [[ -n "${lane_seen[$lane]:-}" ]]; then
+    orchestration_fail "duplicate lane in --lanes: $lane"
+  fi
+  lane_seen["$lane"]=1
+done
+
+manifest="$(orchestration_manifest_path "$ROOT" "$LOOP_ID")"
+loop_dir="$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
+mkdir -p "$loop_dir"
+
+sequence_csv="$(IFS=,; echo "${lanes[*]}")"
+if [[ -f "$manifest" && "$FORCE" -ne 1 ]]; then
+  existing_loop_id="$(yq e -r '.loop_id // ""' "$manifest")"
+  [[ "$existing_loop_id" == "$LOOP_ID" ]] || orchestration_fail "manifest loop_id mismatch at $manifest"
+else
+  open_args=(
+    --loop-id "$LOOP_ID"
+    --apply-owner "$OWNER_TERMINAL"
+    --repo "$REPO_PATH"
+    --lanes "$sequence_csv"
+    --sequence "$sequence_csv"
+    --sequence-mode strict
+  )
+  if [[ "$FORCE" -eq 1 ]]; then
+    open_args+=(--force)
+  fi
+  "$ROOT/ops/plugins/core/orchestration/bin/orchestration-loop-open" "${open_args[@]}" >/dev/null
+fi
+
+if ! git -C "$REPO_PATH" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
+  if git -C "$REPO_PATH" show-ref --verify --quiet "refs/remotes/origin/$BASE_BRANCH"; then
+    git -C "$REPO_PATH" branch --track "$BASE_BRANCH" "origin/$BASE_BRANCH" >/dev/null 2>&1 || true
+  fi
+fi
+git -C "$REPO_PATH" show-ref --verify --quiet "refs/heads/$BASE_BRANCH" || orchestration_fail "base branch not found: $BASE_BRANCH"
+
+created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+declare -a lane_agents=()
+declare -a lane_branches=()
+declare -a lane_worktrees=()
+
+for lane in "${lanes[@]}"; do
+  lane_lower="$(printf '%s' "$lane" | tr '[:upper:]' '[:lower:]')"
+  branch="$LOOP_ID/$lane_lower"
+  lane_agent="lane-$lane_lower"
+  worktree="${ENFORCED_PREFIX}${wave_leaf}-${lane}"
+
+  if ! git -C "$REPO_PATH" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$REPO_PATH" branch "$branch" "$BASE_BRANCH"
+  fi
+
+  "$ROOT/ops/plugins/core/orchestration/bin/orchestration-ticket-issue" \
+    --loop-id "$LOOP_ID" \
+    --lane "$lane" \
+    --branch "$branch" \
+    --worker "$OWNER_TERMINAL" \
+    --note "kickoff-generated" >/dev/null
+
+  terminal_entry_args=(
+    --loop-id "$LOOP_ID"
+    --role worker
+    --lane "$lane"
+    --session-id "$SESSION_ID-$lane"
+    --worktree "$REPO_PATH"
+    --branch "$branch"
+  )
+  if [[ "$FORCE" -eq 1 ]]; then
+    terminal_entry_args+=(--force)
+  fi
+  "$ROOT/ops/plugins/core/orchestration/bin/orchestration-terminal-entry" "${terminal_entry_args[@]}" >/dev/null
+
+  lane_agents+=("$lane_agent")
+  lane_branches+=("$branch")
+  lane_worktrees+=("$worktree")
+done
+
+# Coordinator lock claim (main branch owner) for orchestration control-plane operations.
+coordinator_args=(
+  --loop-id "$LOOP_ID"
+  --role C
+  --session-id "$SESSION_ID-C"
+  --worktree "$REPO_PATH"
+  --branch "$BASE_BRANCH"
+  --force
+)
+"$ROOT/ops/plugins/core/orchestration/bin/orchestration-terminal-entry" "${coordinator_args[@]}" >/dev/null
+
+packet_file="$loop_dir/packet.yaml"
+prompts_dir="$loop_dir/prompts"
+mkdir -p "$prompts_dir"
+
+cat > "$packet_file" <<YAML
+loop_id: "$LOOP_ID"
+execution_mode: orchestrator_subagents
+owner_terminal: "$OWNER_TERMINAL"
+created_at_utc: "$created_at"
+
+wave_plan:
+YAML
+
+for i in "${!lanes[@]}"; do
+  lane="${lanes[$i]}"
+  lane_agent="${lane_agents[$i]}"
+  cat >> "$packet_file" <<YAML
+  - wave_id: "W1-$lane"
+    objective: "Execute lane $lane deliverable for $LOOP_ID"
+    subagents: ["$lane_agent"]
+    depends_on: []
+YAML
+done
+
+cat >> "$packet_file" <<'YAML'
+
+subagent_allocation:
+YAML
+
+for i in "${!lanes[@]}"; do
+  lane_agent="${lane_agents[$i]}"
+  branch="${lane_branches[$i]}"
+  cat >> "$packet_file" <<YAML
+  - agent_id: "$lane_agent"
+    role: "$lane_agent"
+    assigned_gaps: []
+    worktree_branch: "$branch"
+YAML
+done
+
+cat >> "$packet_file" <<'YAML'
+
+worktree_mapping:
+YAML
+
+for i in "${!lanes[@]}"; do
+  lane_agent="${lane_agents[$i]}"
+  branch="${lane_branches[$i]}"
+  worktree="${lane_worktrees[$i]}"
+  cat >> "$packet_file" <<YAML
+  - agent_id: "$lane_agent"
+    worktree_path: "$worktree"
+    branch_name: "$branch"
+YAML
+done
+
+cat >> "$packet_file" <<'YAML'
+
+integration_order:
+YAML
+
+for i in "${!lanes[@]}"; do
+  step=$((i + 1))
+  branch="${lane_branches[$i]}"
+  cat >> "$packet_file" <<YAML
+  - step: $step
+    source_branch: "$branch"
+    target_branch: main
+    merge_strategy: rebase
+YAML
+done
+
+cat >> "$packet_file" <<YAML
+
+verification_sequence:
+  - step: 1
+    verify_command: "./bin/ops cap run verify.run -- fast"
+    expected_result: PASS
+    run_key: "PENDING_CLOSEOUT"
+
+cross_repo_pushability_gate:
+  status: PENDING
+  checked_at_utc: "PENDING_CLOSEOUT"
+  repo: "$REPO_PATH"
+  branch: "$BASE_BRANCH"
+  remote: origin
+  failure: ""
+
+lane_outcomes:
+YAML
+
+for i in "${!lanes[@]}"; do
+  lane="${lanes[$i]}"
+  cat >> "$packet_file" <<YAML
+  - lane_id: "$lane"
+    owner_terminal: "$OWNER_TERMINAL"
+    lane_status: DISPATCHED
+    stub_evidence_ref: ""
+    updated_at_utc: "$created_at"
+YAML
+done
+
+cat >> "$packet_file" <<'YAML'
+
+stub_matrix: []
+
+plan_transition:
+  status: pending
+  updated_at_utc: "PENDING_CLOSEOUT"
+  run_key: "PENDING_CLOSEOUT"
+  evidence_ref: ""
+
+reconciliation_summary:
+  subagents_completed: 0
+  subagents_failed: 0
+  merge_conflicts: 0
+  total_files_changed: 0
+
+receipt_refs: []
+verify_matrix: []
+finalized_at_utc: "PENDING_CLOSEOUT"
+YAML
+
+# Canonical worker prompts with branch/worktree/env preamble.
+for i in "${!lanes[@]}"; do
+  lane="${lanes[$i]}"
+  lane_agent="${lane_agents[$i]}"
+  branch="${lane_branches[$i]}"
+  worktree="${lane_worktrees[$i]}"
+  prompt_file="$prompts_dir/${lane}.prompt.md"
+
+  cat > "$prompt_file" <<PROMPT
+# Worker Kickoff Prompt ($lane)
+
+## Environment Preamble (run exactly)
+
+\`\`\`bash
+export SPINE_LOOP_ID="$LOOP_ID"
+export SPINE_ORCH_LOOP_ID="$LOOP_ID"
+export SPINE_ORCH_ROLE="worker"
+export SPINE_ORCH_LANE="$lane"
+export SPINE_ORCH_SESSION_ID="$SESSION_ID-$lane"
+cd "$worktree"
+git checkout "$branch"
+git status --short --branch
+\`\`\`
+
+## Worker Contract
+
+- lane: $lane
+- agent_id: $lane_agent
+- branch: $branch
+- worktree: $worktree
+- packet: $packet_file
+- lock_claim: $loop_dir/locks/$lane.lock
+
+Execute only within this lane worktree/branch. Report receipt run keys and changed file list for integration sequencing.
+PROMPT
+done
+
+packet_contract="$ROOT/ops/bindings/orchestration.packet.contract.yaml"
+while IFS= read -r required_field; do
+  [[ -n "$required_field" ]] || continue
+  field_val="$(yq e ".$required_field" "$packet_file" 2>/dev/null || echo null)"
+  if [[ "$field_val" == "null" || -z "$field_val" ]]; then
+    orchestration_fail "packet validation failed: missing field '$required_field' in $packet_file"
+  fi
+done < <(yq e -r '.required_fields[]?, .closeout_fields[]?' "$packet_contract")
+
+# Auto-materialize wave runtime state for each lane so that
+# orchestration.wave.dispatch can target them without a separate manual
+# wave.start step (GAP-OP-1485).
+wave_script="$ROOT/ops/commands/wave.sh"
+_runtime_root="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine-mailroom}"
+if [[ -x "$wave_script" ]]; then
+  for i in "${!lanes[@]}"; do
+    lane="${lanes[$i]}"
+    _wave_id="W1-$lane"
+    _wave_state="$_runtime_root/waves/$_wave_id/state.json"
+    # Only create if not already materialized.
+    if [[ ! -f "$_wave_state" ]]; then
+      SPINE_REPO="$ROOT" \
+      SPINE_RUNTIME_ROOT="$_runtime_root" \
+      SPINE_LOOP_ID="$LOOP_ID" \
+      OPS_TERMINAL_ROLE="$OWNER_TERMINAL" \
+        "$wave_script" start "$_wave_id" \
+          --objective "Lane $lane execution for $LOOP_ID" \
+          --loop-id "$LOOP_ID" \
+          --worktree off \
+          --current-role researcher \
+          --next-role worker \
+        >/dev/null 2>&1 || echo "WARN: failed to auto-materialize wave $_wave_id (non-fatal)" >&2
+    fi
+  done
+fi
+
+echo "orchestration.wave.kickoff"
+echo "loop_id: $LOOP_ID"
+echo "repo: $REPO_PATH"
+echo "execution_mode: orchestrator_subagents"
+echo "packet: $packet_file"
+echo "manifest: $manifest"
+echo "locks_dir: $loop_dir/locks"
+echo "prompts_dir: $prompts_dir"
+for i in "${!lanes[@]}"; do
+  echo "lane.${lanes[$i]}.branch: ${lane_branches[$i]}"
+  echo "lane.${lanes[$i]}.worktree: ${lane_worktrees[$i]}"
+  echo "lane.${lanes[$i]}.prompt: $prompts_dir/${lanes[$i]}.prompt.md"
+done
+
+echo "status: READY"

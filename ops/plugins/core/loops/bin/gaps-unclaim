@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# gaps.unclaim — Release a gap claim
+#
+# Usage: gaps-unclaim --id <GAP_ID>
+#
+# Removes the claim file. Only the owning process (or stale-recovery)
+# can release a claim.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/plugins/core/loops/lib/gap-claims.sh"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: gaps-unclaim --id <GAP_ID>"
+  exit 0
+fi
+
+GAP_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --id) GAP_ID="${2:?--id requires a value}"; shift 2 ;;
+    *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$GAP_ID" ]] || { echo "FAIL: --id required" >&2; exit 2; }
+
+unclaim_gap "$GAP_ID" || exit 1
+
+echo "UNCLAIMED: $GAP_ID"

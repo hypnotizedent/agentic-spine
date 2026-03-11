@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-DOCS_LINT="$SPINE_ROOT/ops/plugins/docs/bin/docs-lint"
+DOCS_LINT="$SPINE_ROOT/ops/plugins/core/docs/bin/docs-lint"
 
 if [[ ! -x "$DOCS_LINT" ]]; then
   echo "FAIL: missing docs lint surface: $DOCS_LINT" >&2

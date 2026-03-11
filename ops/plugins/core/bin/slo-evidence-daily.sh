@@ -46,7 +46,7 @@ spine_job_run "slo-evidence-daily:docs.freshness.audit" run_with_retry "docs.fre
 spine_job_run "slo-evidence-daily:slo.evidence.daily" run_with_retry "slo.evidence.daily" \
   "$CAP_RUNNER" cap run slo.evidence.daily
 spine_job_run "slo-evidence-daily:verify-failure-classify.core" run_with_retry "verify-failure-classify core" \
-  "$SPINE_ROOT/ops/plugins/verify/bin/verify-failure-classify" core
+  "$SPINE_ROOT/ops/plugins/core/verify/bin/verify-failure-classify" core
 
 latest_slo_report="$(ls -1t "${SPINE_ROOT}/receipts/audits/governance"/slo-evidence-*.md 2>/dev/null | head -n1 || true)"
 if [[ -n "$latest_slo_report" ]]; then

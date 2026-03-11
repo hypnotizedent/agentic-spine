@@ -20,7 +20,7 @@ fi
 echo "--- Test 2: missing prompt registry FAIL ---"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$TMP/surfaces/verify" "$TMP/ops/bindings" "$TMP/ops/plugins/evidence/bin" "$TMP/ops/plugins"
+mkdir -p "$TMP/surfaces/verify" "$TMP/ops/bindings" "$TMP/ops/plugins/core/evidence/bin" "$TMP/ops/plugins"
 cp "$GATE" "$TMP/surfaces/verify/d349-prompt-lineage-receipt-lock.sh"
 chmod +x "$TMP/surfaces/verify/d349-prompt-lineage-receipt-lock.sh"
 
@@ -47,15 +47,15 @@ EOF
 cat > "$TMP/ops/bindings/orchestration.exec_receipt.schema.json" <<'EOF'
 {"type":"object","properties":{}}
 EOF
-cat > "$TMP/ops/plugins/evidence/bin/receipts-exec-emit" <<'EOF'
+cat > "$TMP/ops/plugins/core/evidence/bin/receipts-exec-emit" <<'EOF'
 #!/usr/bin/env bash
 echo "{}" > "${@: -1}"
 EOF
-cat > "$TMP/ops/plugins/evidence/bin/prompt-registry-status" <<'EOF'
+cat > "$TMP/ops/plugins/core/evidence/bin/prompt-registry-status" <<'EOF'
 #!/usr/bin/env bash
 echo '{"summary":{"status":"ok"},"prompt_lineage":{"prompt_set_id":"x","version":"x","source_hash":"none"}}'
 EOF
-chmod +x "$TMP/ops/plugins/evidence/bin/receipts-exec-emit" "$TMP/ops/plugins/evidence/bin/prompt-registry-status"
+chmod +x "$TMP/ops/plugins/core/evidence/bin/receipts-exec-emit" "$TMP/ops/plugins/core/evidence/bin/prompt-registry-status"
 
 output="$(SPINE_ROOT="$TMP" bash "$TMP/surfaces/verify/d349-prompt-lineage-receipt-lock.sh" 2>&1)" && rc=$? || rc=$?
 if [[ "$rc" -ne 0 ]]; then

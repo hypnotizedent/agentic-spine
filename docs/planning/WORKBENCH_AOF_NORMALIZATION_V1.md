@@ -27,7 +27,7 @@ Audit synthesis source:
 
 - Workbench contract: `/Users/ronnyworks/code/workbench/infra/contracts/workbench.aof.contract.yaml`
 - Workbench checker: `/Users/ronnyworks/code/workbench/scripts/root/aof/workbench-aof-check.sh`
-- Proposal preflight integration: `/Users/ronnyworks/code/agentic-spine/ops/plugins/proposals/bin/proposals-apply`
+- Proposal preflight integration: `/Users/ronnyworks/code/agentic-spine/ops/plugins/core/proposals/bin/proposals-apply`
 - Baseline guide: `/Users/ronnyworks/code/workbench/docs/infrastructure/WORKBENCH_AOF_BASELINE.md`
 
 ## Policy

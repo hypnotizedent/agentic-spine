@@ -28,7 +28,7 @@ scope_field="$(yq e '.scope_fields.execution_mode.type' "$CONTRACT" 2>/dev/null 
 [[ "$scope_field" != "null" ]] || fail "contract scope_fields missing execution_mode definition"
 
 # Verify loop scope template includes execution_mode
-TEMPLATE="$ROOT/ops/plugins/lifecycle/templates/loop-scope.template.md"
+TEMPLATE="$ROOT/ops/plugins/core/lifecycle/templates/loop-scope.template.md"
 if [[ -f "$TEMPLATE" ]]; then
   grep -q 'execution_mode:' "$TEMPLATE" || fail "loop scope template missing execution_mode field"
 fi

@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# projection-reconcile
+#
+# Unified reconciliation of tracked projections:
+#   1. gen-gate-registry-header.sh — gate_count + description in gate.registry.yaml
+#   2. docs-projection-sync         — entry-surface metadata in AGENTS.md, CLAUDE.md, generated/
+#   3. platform-control-surface-reconcile — git transport alias parity against ssh.targets
+#   4. docs-projection-verify       — deterministic verification of docs projections
+#
+# Default: no-commit (projection.reconcile only writes; commit is recovery's job).
+# Supports --dry-run to show what would change without writing.
+#
+# Usage:
+#   projection-reconcile             # reconcile all projections
+#   projection-reconcile --dry-run   # check for drift without writing
+
+ROOT="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+DRY_RUN=0
+LOCK_HELD=0
+
+source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/lib/governed-write-transaction.sh"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help)
+      echo "Usage: projection-reconcile [--dry-run]"
+      exit 0
+      ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+fail() { echo "projection.reconcile FAIL: $*" >&2; exit 1; }
+
+cleanup() {
+  if [[ "$LOCK_HELD" -eq 1 ]]; then
+    release_git_lock || true
+  fi
+  spine_tx_cleanup
+  return 0
+}
+
+trap cleanup EXIT INT TERM
+
+GEN_HEADER="$ROOT/ops/plugins/ops/bin/gen-gate-registry-header.sh"
+SYNC="$ROOT/ops/plugins/core/docs/bin/docs-projection-sync"
+CONTROL_SYNC="$ROOT/ops/plugins/core/authority/bin/platform-control-surface-reconcile"
+VERIFY="$ROOT/ops/plugins/core/docs/bin/docs-projection-verify"
+CONTROL_BINDING="$ROOT/ops/bindings/platform.control.surfaces.yaml"
+
+[[ -x "$GEN_HEADER" ]] || fail "missing: $GEN_HEADER"
+[[ -x "$SYNC" ]]       || fail "missing: $SYNC"
+[[ -x "$CONTROL_SYNC" ]] || fail "missing: $CONTROL_SYNC"
+[[ -x "$VERIFY" ]]     || fail "missing: $VERIFY"
+[[ -f "$CONTROL_BINDING" ]] || fail "missing: $CONTROL_BINDING"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "[projection.reconcile] dry-run: checking for drift..."
+
+  header_rc=0
+  "$GEN_HEADER" --check >/dev/null 2>&1 || header_rc=$?
+
+  control_rc=0
+  "$CONTROL_SYNC" --check >/dev/null 2>&1 || control_rc=$?
+
+  verify_rc=0
+  "$VERIFY" >/dev/null 2>&1 || verify_rc=$?
+
+  if [[ "$header_rc" -eq 0 && "$control_rc" -eq 0 && "$verify_rc" -eq 0 ]]; then
+    echo "projection.reconcile"
+    echo "status: OK"
+    echo "drift: none"
+    exit 0
+  fi
+
+  echo "projection.reconcile"
+  echo "status: DRIFT_DETECTED"
+  [[ "$header_rc" -ne 0 ]] && echo "  header: stale"
+  [[ "$control_rc" -ne 0 ]] && echo "  platform_control: stale"
+  [[ "$verify_rc" -ne 0 ]] && echo "  surfaces: stale"
+  exit 0
+fi
+
+if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
+  acquire_git_lock projection_reconcile || exit 1
+  LOCK_HELD=1
+  export SPINE_GIT_LOCK_HELD=1
+fi
+
+spine_tx_init
+spine_tx_track "$ROOT/ops/bindings/gate.registry.yaml"
+spine_tx_track "$ROOT/AGENTS.md"
+spine_tx_track "$ROOT/CLAUDE.md"
+spine_tx_track "$ROOT/docs/governance/generated/ENTRY_SURFACE_GATE_METADATA.md"
+spine_tx_track "$ROOT/docs/governance/generated/BOOT_ENTRY_SURFACE.md"
+spine_tx_track "$CONTROL_BINDING"
+
+# ── Step 1: reconcile gate registry header ──
+if ! {
+  echo "[projection.reconcile] reconciling gate registry header..."
+  "$GEN_HEADER"
+
+  echo "[projection.reconcile] syncing entry-surface projections..."
+  "$SYNC"
+
+  echo "[projection.reconcile] reconciling platform-control surfaces..."
+  "$CONTROL_SYNC" --write
+
+  echo "[projection.reconcile] verifying projections..."
+  "$VERIFY"
+}; then
+  spine_tx_rollback
+  fail "write transaction rolled back"
+fi
+
+echo "projection.reconcile"
+echo "status: OK"

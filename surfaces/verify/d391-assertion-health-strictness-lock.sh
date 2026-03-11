@@ -11,7 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-LANE_SCRIPT="$ROOT/ops/plugins/lifecycle/bin/lane-standard-run"
+LANE_SCRIPT="$ROOT/ops/plugins/core/lifecycle/bin/lane-standard-run"
 MINT_LOOP="$ROOT/ops/plugins/domains/mint/bin/loop-daily"
 SERVICES_STATUS="$ROOT/ops/plugins/infra/services/bin/services-health-status"
 MINT_STATUS="$ROOT/ops/plugins/domains/mint/bin/modules-health"

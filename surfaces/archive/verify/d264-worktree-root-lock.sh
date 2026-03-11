@@ -10,9 +10,9 @@ WAVE_CMD="$ROOT/ops/commands/wave.sh"
 CAP_CMD="$ROOT/ops/commands/cap.sh"
 SESSION_HOOK="$ROOT/ops/hooks/session-entry-hook.sh"
 SESSION_STATUS_CMD="$ROOT/ops/plugins/ops/bin/worktree-session-status"
-KICKOFF_CMD="$ROOT/ops/plugins/orchestration/bin/orchestration-wave-kickoff"
+KICKOFF_CMD="$ROOT/ops/plugins/core/orchestration/bin/orchestration-wave-kickoff"
 REHYDRATE_CMD="$ROOT/ops/plugins/ops/bin/worktree-lifecycle-rehydrate"
-ENTRY_CMD="$ROOT/ops/plugins/orchestration/bin/orchestration-terminal-entry"
+ENTRY_CMD="$ROOT/ops/plugins/core/orchestration/bin/orchestration-terminal-entry"
 
 fail() { echo "D264 FAIL: $*" >&2; exit 1; }
 

@@ -22,7 +22,7 @@ else
 fi
 
 # ── Check 2: docs.projection.verify succeeds ──
-VERIFY="$ROOT/ops/plugins/docs/bin/docs-projection-verify"
+VERIFY="$ROOT/ops/plugins/core/docs/bin/docs-projection-verify"
 if [[ ! -x "$VERIFY" ]]; then
   echo "D309 HIT: missing verifier: $VERIFY" >&2
   errors=$((errors + 1))

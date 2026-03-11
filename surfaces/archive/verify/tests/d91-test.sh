@@ -75,15 +75,15 @@ CAPSEOF
 MAPEOF
 
   # Create tenant scripts
-  mkdir -p "$tmp/ops/plugins/tenant/bin"
-  echo '#!/bin/bash' > "$tmp/ops/plugins/tenant/bin/tenant-profile-validate"
-  echo '#!/bin/bash' > "$tmp/ops/plugins/tenant/bin/tenant-provision-dry-run"
-  chmod +x "$tmp/ops/plugins/tenant/bin/tenant-profile-validate"
-  chmod +x "$tmp/ops/plugins/tenant/bin/tenant-provision-dry-run"
+  mkdir -p "$tmp/ops/plugins/core/tenant/bin"
+  echo '#!/bin/bash' > "$tmp/ops/plugins/core/tenant/bin/tenant-profile-validate"
+  echo '#!/bin/bash' > "$tmp/ops/plugins/core/tenant/bin/tenant-provision-dry-run"
+  chmod +x "$tmp/ops/plugins/core/tenant/bin/tenant-profile-validate"
+  chmod +x "$tmp/ops/plugins/core/tenant/bin/tenant-provision-dry-run"
 
   # Create AOF validate script
-  mkdir -p "$tmp/ops/plugins/aof/bin"
-  cat > "$tmp/ops/plugins/aof/bin/validate-environment.sh" <<'AOFEOF'
+  mkdir -p "$tmp/ops/plugins/core/aof/bin"
+  cat > "$tmp/ops/plugins/core/aof/bin/validate-environment.sh" <<'AOFEOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -104,7 +104,7 @@ done
 [[ -f "$IDENTITY_FILE" ]] || exit 1
 exit 0
 AOFEOF
-  chmod +x "$tmp/ops/plugins/aof/bin/validate-environment.sh"
+  chmod +x "$tmp/ops/plugins/core/aof/bin/validate-environment.sh"
 
   # Create root AOF contracts
   cat > "$tmp/.environment.yaml" <<'ENVEOF'
@@ -128,7 +128,7 @@ IDEOF
   cat > "$tmp/ops/plugins/MANIFEST.yaml" <<'MANEOF'
 plugins:
   - name: tenant
-    path: ops/plugins/tenant
+    path: ops/plugins/core/tenant
 MANEOF
 
   # Create docs README with product reference
@@ -213,7 +213,7 @@ test_missing_preset() {
 test_non_executable_script() {
   local mock
   mock="$(setup_mock)"
-  chmod -x "$mock/ops/plugins/tenant/bin/tenant-profile-validate"
+  chmod -x "$mock/ops/plugins/core/tenant/bin/tenant-profile-validate"
   if SPINE_ROOT="$mock" bash "$GATE" >/dev/null 2>&1; then
     fail "non-executable script should fail D91"
   else

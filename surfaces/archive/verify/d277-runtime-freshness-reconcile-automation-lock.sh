@@ -7,7 +7,7 @@ LAUNCHD_CONTRACT="$ROOT/ops/bindings/launchd.runtime.contract.yaml"
 PLIST="$ROOT/ops/runtime/launchd/com.ronny.slo-evidence-daily.plist"
 RUNTIME_SCRIPT="$ROOT/ops/runtime/slo-evidence-daily.sh"
 CAPS="$ROOT/ops/capabilities.yaml"
-SLO_SCRIPT="$ROOT/ops/plugins/slo/bin/slo-evidence-daily"
+SLO_SCRIPT="$ROOT/ops/plugins/core/slo/bin/slo-evidence-daily"
 
 fail() {
   echo "D277 FAIL: $*" >&2
@@ -47,7 +47,7 @@ if ! rg -n 'cap run services\.health\.status' "$RUNTIME_SCRIPT" >/dev/null 2>&1;
 fi
 
 cap_cmd="$(yq e -r '.capabilities."slo.evidence.daily".command // ""' "$CAPS" 2>/dev/null || true)"
-if ! printf '%s\n' "$cap_cmd" | grep -Fxq './ops/plugins/slo/bin/slo-evidence-daily'; then
+if ! printf '%s\n' "$cap_cmd" | grep -Fxq './ops/plugins/core/slo/bin/slo-evidence-daily'; then
   err "capability mapping mismatch for slo.evidence.daily"
 fi
 

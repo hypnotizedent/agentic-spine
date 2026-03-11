@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-AUDIT_BIN="$ROOT/ops/plugins/verify/bin/schema-conventions-audit"
+AUDIT_BIN="$ROOT/ops/plugins/core/verify/bin/schema-conventions-audit"
 # D129_STRICT=1 to fail on any changed file (staged or unstaged). Default: staged-only.
 STRICT="${D129_STRICT:-0}"
 

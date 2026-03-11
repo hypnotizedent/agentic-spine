@@ -29,8 +29,8 @@ This contract defines a single coherent model: **one registration input, generat
 - `ops/bindings/agents.registry.yaml`
 - `ops/capabilities.yaml`
 - `ops/commands/terminal-launch.sh`
-- `ops/plugins/verify/bin/verify-topology`
-- proposal model (`ops/bindings/proposals.lifecycle.yaml`, `ops/plugins/proposals/bin/*`)
+- `ops/plugins/core/verify/bin/verify-topology`
+- proposal model (`ops/bindings/proposals.lifecycle.yaml`, `ops/plugins/core/proposals/bin/*`)
 
 ## 4) Canonical v2 Model
 

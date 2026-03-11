@@ -18,13 +18,13 @@ setup_mock() {
 
   mkdir -p \
     "$tmp/surfaces/verify" \
-    "$tmp/ops/plugins/session/bin"
+    "$tmp/ops/plugins/core/session/bin"
   cp "$GATE" "$tmp/surfaces/verify/d348-bootstrap-reproducibility-lock.sh"
   chmod +x "$tmp/surfaces/verify/d348-bootstrap-reproducibility-lock.sh"
 
   case "$init_payload" in
     deterministic)
-      cat > "$tmp/ops/plugins/session/bin/spine-init" <<'EOF'
+      cat > "$tmp/ops/plugins/core/session/bin/spine-init" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 cat <<'JSON'
@@ -33,14 +33,14 @@ JSON
 EOF
       ;;
     nondeterministic)
-      cat > "$tmp/ops/plugins/session/bin/spine-init" <<'EOF'
+      cat > "$tmp/ops/plugins/core/session/bin/spine-init" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '{"capability":"spine.init","status":"ok","nonce":"%s"}\n' "$(date +%s%N)"
 EOF
       ;;
     mutating)
-      cat > "$tmp/ops/plugins/session/bin/spine-init" <<'EOF'
+      cat > "$tmp/ops/plugins/core/session/bin/spine-init" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "changed" >> .environment.yaml
@@ -57,7 +57,7 @@ EOF
 
   case "$doctor_payload" in
     deterministic)
-      cat > "$tmp/ops/plugins/session/bin/spine-doctor" <<'EOF'
+      cat > "$tmp/ops/plugins/core/session/bin/spine-doctor" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 cat <<'JSON'
@@ -71,7 +71,7 @@ EOF
       ;;
   esac
 
-  chmod +x "$tmp/ops/plugins/session/bin/spine-init" "$tmp/ops/plugins/session/bin/spine-doctor"
+  chmod +x "$tmp/ops/plugins/core/session/bin/spine-init" "$tmp/ops/plugins/core/session/bin/spine-doctor"
   cat > "$tmp/.environment.yaml" <<'EOF'
 version: "1.0"
 environment:

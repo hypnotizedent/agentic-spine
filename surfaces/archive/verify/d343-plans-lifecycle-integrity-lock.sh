@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-RECONCILE_BIN="$ROOT/ops/plugins/lifecycle/bin/planning-plans-reconcile"
+RECONCILE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-reconcile"
 CONTRACT="$ROOT/ops/bindings/plans.lifecycle.yaml"
 
 fail() {
@@ -18,10 +18,10 @@ command -v jq >/dev/null 2>&1 || fail "missing dependency: jq"
 
 # Verify plan mutators are lock-guarded.
 MUTATORS=(
-  "$ROOT/ops/plugins/lifecycle/bin/planning-plans-create"
-  "$ROOT/ops/plugins/lifecycle/bin/planning-plans-promote"
-  "$ROOT/ops/plugins/lifecycle/bin/planning-plans-retire"
-  "$ROOT/ops/plugins/lifecycle/bin/planning-plans-cancel"
+  "$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-create"
+  "$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-promote"
+  "$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-retire"
+  "$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-cancel"
 )
 
 for script in "${MUTATORS[@]}"; do

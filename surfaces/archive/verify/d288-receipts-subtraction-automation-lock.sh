@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 RUNTIME_SCRIPT="$ROOT/ops/runtime/receipts-archive-reconcile-daily.sh"
 PLIST="$ROOT/ops/runtime/launchd/com.ronny.receipts-archive-reconcile-daily.plist"
-CHECKSUM_SCRIPT="$ROOT/ops/plugins/evidence/bin/receipts-checksum-parity-report"
+CHECKSUM_SCRIPT="$ROOT/ops/plugins/core/evidence/bin/receipts-checksum-parity-report"
 
 fail() {
   echo "D288 FAIL: $*" >&2

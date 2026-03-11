@@ -142,7 +142,7 @@ These files contain partial or historical proposal information. This reference i
 
 - `docs/core/PROPOSAL_FORMAT.md` -- directory structure and manifest format
 - `docs/governance/PROPOSAL_FLOW_QUICKSTART.md` -- CLI quickstart
-- `ops/plugins/proposals/QUICK_START.md` -- agent/operator quickstart
+- `ops/plugins/core/proposals/QUICK_START.md` -- agent/operator quickstart
 - `ops/bindings/proposals.lifecycle.yaml` -- machine-readable state machine and SLA
 - `docs/governance/AGENT_GOVERNANCE_BRIEF.md` -- when to use proposals
 - `docs/governance/SESSION_PROTOCOL.md` -- queue hygiene rules

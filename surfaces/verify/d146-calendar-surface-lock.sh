@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-AUDIT_BIN="$ROOT/ops/plugins/verify/bin/calendar-surface-audit"
+AUDIT_BIN="$ROOT/ops/plugins/core/verify/bin/calendar-surface-audit"
 
 fail() {
   echo "D146 FAIL: $*" >&2

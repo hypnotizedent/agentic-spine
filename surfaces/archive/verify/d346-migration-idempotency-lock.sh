@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-RECONCILE_BIN="$ROOT/ops/plugins/lifecycle/bin/planning-plans-reconcile"
+RECONCILE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-reconcile"
 
 fail() {
   echo "D346 FAIL: $*" >&2

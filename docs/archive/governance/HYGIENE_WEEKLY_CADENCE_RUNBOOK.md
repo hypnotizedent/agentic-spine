@@ -16,7 +16,7 @@ Run in repo root:
 ./bin/ops cap run calendar.generate
 ./bin/ops cap run calendar.status
 ./bin/ops cap run calendar.sync.plan
-./ops/plugins/proposals/bin/proposals-reconcile --check-linkage
+./ops/plugins/core/proposals/bin/proposals-reconcile --check-linkage
 ./bin/ops cap run proposals.status
 bash surfaces/verify/d84-docs-index-registration-lock.sh
 bash surfaces/verify/d155-audits-migration-plan-lock.sh

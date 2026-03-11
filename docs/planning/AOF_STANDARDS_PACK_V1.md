@@ -123,17 +123,17 @@ yq e '.rules.runtime_only[0].destination' ops/bindings/spine.boundary.baseline.y
 **Acceptance Tests:**
 ```bash
 # AT-003.1: Audit includes tracked exceptions validation
-./ops/plugins/surface/bin/surface-boundary-audit --check-tracked-exceptions 2>&1 \
+./ops/plugins/core/surface/bin/surface-boundary-audit --check-tracked-exceptions 2>&1 \
   | grep -q "tracked_exceptions:"
 
 # AT-003.2: Missing exception file produces warning
 rm -f mailroom/inbox/.keep 2>/dev/null || true
-./ops/plugins/surface/bin/surface-boundary-audit --check-tracked-exceptions --no-fail 2>&1 \
+./ops/plugins/core/surface/bin/surface-boundary-audit --check-tracked-exceptions --no-fail 2>&1 \
   | grep -q "WARN.*mailroom/inbox/.keep"
 touch mailroom/inbox/.keep  # restore
 
 # AT-003.3: All valid exceptions pass
-./ops/plugins/surface/bin/surface-boundary-audit --check-tracked-exceptions
+./ops/plugins/core/surface/bin/surface-boundary-audit --check-tracked-exceptions
 ```
 
 **Rollout:** P1 (Week 1-2)

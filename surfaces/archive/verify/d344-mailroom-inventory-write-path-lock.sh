@@ -5,7 +5,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/mailroom.inventory.contract.yaml"
-SCAN_BIN="$ROOT/ops/plugins/lifecycle/bin/mailroom-scan"
+SCAN_BIN="$ROOT/ops/plugins/core/lifecycle/bin/mailroom-scan"
 
 fail() {
   echo "D344 FAIL: $*" >&2
@@ -45,10 +45,10 @@ done
 
 # Direct projection writes are forbidden in mutators.
 mutators=(
-  "$ROOT/ops/plugins/lifecycle/bin/planning-plans-create"
-  "$ROOT/ops/plugins/lifecycle/bin/planning-plans-promote"
-  "$ROOT/ops/plugins/lifecycle/bin/planning-plans-retire"
-  "$ROOT/ops/plugins/lifecycle/bin/planning-plans-cancel"
+  "$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-create"
+  "$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-promote"
+  "$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-retire"
+  "$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-cancel"
 )
 
 for script in "${mutators[@]}"; do

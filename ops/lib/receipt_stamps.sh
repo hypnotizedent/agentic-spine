@@ -151,7 +151,7 @@ receipt_append_section() {
 
 # ─────────────────────────────────────────────────────────────────
 # receipt_exec_emit - Emit EXEC_RECEIPT JSON/markdown via canonical tool
-# Args: passthrough to ops/plugins/evidence/bin/receipts-exec-emit
+# Args: passthrough to ops/plugins/core/evidence/bin/receipts-exec-emit
 # ─────────────────────────────────────────────────────────────────
 receipt_exec_emit() {
   local emit_bin="$SCRIPT_DIR/../plugins/evidence/bin/receipts-exec-emit"

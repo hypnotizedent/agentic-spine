@@ -3,7 +3,7 @@ set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
-ROTATE_SCRIPT="${SPINE_ROOT}/ops/plugins/lifecycle/bin/launchd-log-rotate"
+ROTATE_SCRIPT="${SPINE_ROOT}/ops/plugins/core/lifecycle/bin/launchd-log-rotate"
 LOG_DIR="${SPINE_LOGS:-${SPINE_ROOT}/mailroom/logs}"
 
 run_log_rotation() {

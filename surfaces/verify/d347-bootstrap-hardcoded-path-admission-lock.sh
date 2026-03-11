@@ -4,8 +4,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONTRACT="$ROOT/ops/bindings/runtime.bootstrap.contract.yaml"
-INIT_SCRIPT="$ROOT/ops/plugins/session/bin/spine-init"
-DOCTOR_SCRIPT="$ROOT/ops/plugins/session/bin/spine-doctor"
+INIT_SCRIPT="$ROOT/ops/plugins/core/session/bin/spine-init"
+DOCTOR_SCRIPT="$ROOT/ops/plugins/core/session/bin/spine-doctor"
 
 fail() { echo "D347 FAIL: $*" >&2; exit 1; }
 

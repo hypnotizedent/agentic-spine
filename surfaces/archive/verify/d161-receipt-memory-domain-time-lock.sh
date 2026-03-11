@@ -4,13 +4,13 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-INDEX_FILE="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
+INDEX_FILE="$ROOT/ops/plugins/core/evidence/state/receipt-index.yaml"
 RECEIPTS_DIR="$ROOT/receipts/sessions"
-SESSION_START_SCRIPT="$ROOT/ops/plugins/session/bin/session-start"
-RECEIPTS_SEARCH_BIN="$ROOT/ops/plugins/evidence/bin/receipts-search"
-RECEIPTS_SUMMARY_BIN="$ROOT/ops/plugins/evidence/bin/receipts-summary"
-RECEIPTS_TRENDS_BIN="$ROOT/ops/plugins/evidence/bin/receipts-trends"
-RECEIPTS_INDEX_BUILD_BIN="$ROOT/ops/plugins/evidence/bin/receipts-index-build"
+SESSION_START_SCRIPT="$ROOT/ops/plugins/core/session/bin/session-start"
+RECEIPTS_SEARCH_BIN="$ROOT/ops/plugins/core/evidence/bin/receipts-search"
+RECEIPTS_SUMMARY_BIN="$ROOT/ops/plugins/core/evidence/bin/receipts-summary"
+RECEIPTS_TRENDS_BIN="$ROOT/ops/plugins/core/evidence/bin/receipts-trends"
+RECEIPTS_INDEX_BUILD_BIN="$ROOT/ops/plugins/core/evidence/bin/receipts-index-build"
 
 fail() {
   echo "D161 FAIL: $*" >&2

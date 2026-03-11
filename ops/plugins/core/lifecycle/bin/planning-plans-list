@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# planning.plans.list — Read deferred-intent plans index via SQLite authority.
+#
+# Usage:
+#   planning-plans-list [--json] [--horizon now|later|future] [--owner @id] [--status deferred|promoted|retired|canceled]
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+MODE="table"
+FILTER_HORIZON=""
+FILTER_OWNER=""
+FILTER_STATUS=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --json) MODE="json"; shift ;;
+    --horizon) FILTER_HORIZON="${2:-}"; shift 2 ;;
+    --owner) FILTER_OWNER="${2:-}"; shift 2 ;;
+    --status) FILTER_STATUS="${2:-}"; shift 2 ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: planning-plans-list [--json] [--horizon now|later|future] [--owner @id] [--status deferred|promoted|retired|canceled]
+EOF
+      exit 0
+      ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+python3 - "$ROOT" "$MODE" "$FILTER_HORIZON" "$FILTER_OWNER" "$FILTER_STATUS" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+mode = sys.argv[2]
+filter_horizon = (sys.argv[3] or "").strip()
+filter_owner = (sys.argv[4] or "").strip()
+filter_status = (sys.argv[5] or "").strip()
+
+sys.path.insert(0, str(root / "ops/plugins/core/lifecycle/lib"))
+from plans_sql_authority import (  # type: ignore
+    bootstrap_from_index_if_needed,
+    canonical_status_sets,
+    connect,
+    ensure_schema,
+    fetch_plans,
+    load_lifecycle_contract,
+    resolve_paths,
+)
+
+contract = load_lifecycle_contract(root)
+valid_statuses, _aliases, _legacy = canonical_status_sets(contract)
+
+if filter_status and filter_status not in valid_statuses:
+    raise SystemExit(
+        f"FAIL: --status must be one of {', '.join(sorted(valid_statuses))} (got '{filter_status}')"
+    )
+
+_db_path, index_path, _plans_dir = resolve_paths(root)
+conn = connect(_db_path)
+ensure_schema(conn)
+bootstrap_from_index_if_needed(conn, index_path)
+
+rows = []
+for plan in fetch_plans(conn):
+    status = str(plan.get("status") or "deferred").strip() or "deferred"
+    row = {
+        "plan_id": str(plan.get("plan_id") or "").strip(),
+        "source_loop_id": str(plan.get("source_loop_id") or "").strip(),
+        "target_loop_id": str(plan.get("target_loop_id") or "").strip(),
+        "owner": str(plan.get("owner") or "").strip(),
+        "horizon": str(plan.get("horizon") or "").strip(),
+        "status": status,
+        "review_date": str(plan.get("review_date") or "").strip(),
+        "activation_trigger": str(plan.get("activation_trigger") or "").strip(),
+        "depends_on_loop": str(plan.get("depends_on_loop") or "").strip(),
+    }
+    if filter_horizon and row["horizon"] != filter_horizon:
+        continue
+    if filter_owner and row["owner"] != filter_owner:
+        continue
+    if filter_status and row["status"] != filter_status:
+        continue
+    rows.append(row)
+
+rows.sort(key=lambda r: r["plan_id"])
+
+if mode == "json":
+    print(
+        json.dumps(
+            {
+                "capability": "planning.plans.list",
+                "authority": str(_db_path),
+                "projection": str(index_path),
+                "count": len(rows),
+                "plans": rows,
+            },
+            indent=2,
+        )
+    )
+    raise SystemExit(0)
+
+print("planning.plans.list")
+print(f"authority: {_db_path}")
+print(f"projection_index: {index_path}")
+print(f"count: {len(rows)}")
+for row in rows:
+    dep = f" depends_on={row['depends_on_loop']}" if row["depends_on_loop"] else ""
+    tgt = f" target={row['target_loop_id']}" if row["target_loop_id"] else ""
+    print(
+        f"- {row['plan_id']} owner={row['owner']} horizon={row['horizon']} "
+        f"status={row['status']} source={row['source_loop_id']}{tgt}{dep}"
+    )
+PY

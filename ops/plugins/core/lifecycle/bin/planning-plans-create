@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# planning.plans.create — Create deferred-intent plan in SQLite authority.
+#
+# Usage:
+#   planning-plans-create \
+#     --plan-id PLAN-ID \
+#     --loop-id LOOP-ID \
+#     --owner @owner \
+#     --horizon later|future \
+#     --review-date YYYY-MM-DD \
+#     --description "..." \
+#     [--source-loop-id LOOP-ID] \
+#     [--target-loop-id LOOP-ID] \
+#     [--activation-trigger manual|date|dependency] \
+#     [--depends-on-loop LOOP-ID] \
+#     [--linked-gaps GAP-1,GAP-2]
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/git-lock.sh"
+
+PLAN_ID=""
+SOURCE_LOOP_ID=""
+TARGET_LOOP_ID=""
+OWNER=""
+HORIZON=""
+REVIEW_DATE=""
+DESCRIPTION=""
+ACTIVATION_TRIGGER="manual"
+DEPENDS_ON_LOOP=""
+LINKED_GAPS=""
+USED_SOURCE_LOOP_ALIAS=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --plan-id) PLAN_ID="${2:-}"; shift 2 ;;
+    --loop-id) SOURCE_LOOP_ID="${2:-}"; shift 2 ;;
+    --source-loop-id)
+      SOURCE_LOOP_ID="${2:-}"
+      USED_SOURCE_LOOP_ALIAS=1
+      shift 2
+      ;;
+    --source-loop-id=*)
+      SOURCE_LOOP_ID="${1#*=}"
+      USED_SOURCE_LOOP_ALIAS=1
+      shift
+      ;;
+    --loop-id=*) SOURCE_LOOP_ID="${1#*=}"; shift ;;
+    --target-loop-id) TARGET_LOOP_ID="${2:-}"; shift 2 ;;
+    --owner) OWNER="${2:-}"; shift 2 ;;
+    --horizon) HORIZON="${2:-}"; shift 2 ;;
+    --review-date) REVIEW_DATE="${2:-}"; shift 2 ;;
+    --description) DESCRIPTION="${2:-}"; shift 2 ;;
+    --activation-trigger) ACTIVATION_TRIGGER="${2:-}"; shift 2 ;;
+    --depends-on-loop) DEPENDS_ON_LOOP="${2:-}"; shift 2 ;;
+    --linked-gaps) LINKED_GAPS="${2:-}"; shift 2 ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: planning-plans-create --plan-id PLAN-ID --loop-id LOOP-ID --owner @owner --horizon later|future --review-date YYYY-MM-DD --description "..." [options]
+
+Canonical loop-binding flag:
+  --loop-id LOOP-ID
+
+Compatibility aliases (supported, but non-canonical):
+  --source-loop-id LOOP-ID
+EOF
+      exit 0
+      ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$PLAN_ID" ]] || { echo "FAIL: --plan-id required" >&2; exit 2; }
+[[ -n "$SOURCE_LOOP_ID" ]] || { echo "FAIL: --loop-id required (or --source-loop-id alias)" >&2; exit 2; }
+[[ -n "$OWNER" ]] || { echo "FAIL: --owner required" >&2; exit 2; }
+[[ -n "$HORIZON" ]] || { echo "FAIL: --horizon required" >&2; exit 2; }
+[[ -n "$REVIEW_DATE" ]] || { echo "FAIL: --review-date required" >&2; exit 2; }
+[[ -n "$DESCRIPTION" ]] || { echo "FAIL: --description required" >&2; exit 2; }
+
+if [[ "$USED_SOURCE_LOOP_ALIAS" -eq 1 ]]; then
+  echo "WARN: --source-loop-id is a compatibility alias; prefer canonical --loop-id." >&2
+fi
+
+case "$HORIZON" in
+  later|future) ;;
+  *) echo "FAIL: --horizon must be later or future for plan creation (got '$HORIZON')" >&2; exit 2 ;;
+esac
+
+case "$ACTIVATION_TRIGGER" in
+  manual|date|dependency) ;;
+  *) echo "FAIL: --activation-trigger must be manual|date|dependency" >&2; exit 2 ;;
+esac
+
+if [[ "$ACTIVATION_TRIGGER" == "dependency" && -z "$DEPENDS_ON_LOOP" ]]; then
+  echo "FAIL: --depends-on-loop required when --activation-trigger=dependency" >&2
+  exit 2
+fi
+
+acquire_git_lock plans || exit 1
+trap 'release_git_lock' EXIT INT TERM
+
+python3 - "$ROOT" "$PLAN_ID" "$SOURCE_LOOP_ID" "$TARGET_LOOP_ID" "$OWNER" "$HORIZON" "$REVIEW_DATE" "$DESCRIPTION" "$ACTIVATION_TRIGGER" "$DEPENDS_ON_LOOP" "$LINKED_GAPS" <<'PY'
+from datetime import timezone
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+plan_id = sys.argv[2].strip()
+source_loop_id = sys.argv[3].strip()
+target_loop_id = sys.argv[4].strip()
+owner = sys.argv[5].strip()
+horizon = sys.argv[6].strip()
+review_date = sys.argv[7].strip()
+description = sys.argv[8].strip()
+activation_trigger = sys.argv[9].strip()
+depends_on_loop = sys.argv[10].strip()
+linked_gaps_raw = (sys.argv[11] or "").strip()
+
+sys.path.insert(0, str(root / "ops/plugins/core/lifecycle/lib"))
+from plans_sql_authority import (  # type: ignore
+    bootstrap_from_index_if_needed,
+    connect,
+    ensure_schema,
+    get_plan,
+    insert_event,
+    project_to_surfaces,
+    resolve_paths,
+    upsert_plan,
+    utc_now_text,
+)
+
+if not re.fullmatch(r"PLAN-[A-Z0-9-]+", plan_id):
+    raise SystemExit(f"FAIL: plan_id must match PLAN-[A-Z0-9-]+ (got '{plan_id}')")
+if not re.fullmatch(r"LOOP-[A-Z0-9-]+", source_loop_id):
+    raise SystemExit(f"FAIL: source_loop_id must match LOOP-* (got '{source_loop_id}')")
+if target_loop_id and not re.fullmatch(r"LOOP-[A-Z0-9-]+", target_loop_id):
+    raise SystemExit(f"FAIL: target_loop_id must match LOOP-* (got '{target_loop_id}')")
+if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", review_date):
+    raise SystemExit(f"FAIL: review_date must be YYYY-MM-DD (got '{review_date}')")
+
+linked_gaps: list[str] = []
+if linked_gaps_raw:
+    for part in linked_gaps_raw.split(","):
+        gap = part.strip()
+        if not gap:
+            continue
+        if not re.fullmatch(r"GAP-[A-Z0-9-]+", gap):
+            raise SystemExit(f"FAIL: linked gap must match GAP-* (got '{gap}')")
+        linked_gaps.append(gap)
+
+_db_path, index_path, plans_dir = resolve_paths(root)
+conn = connect(_db_path)
+ensure_schema(conn)
+bootstrap_from_index_if_needed(conn, index_path)
+
+if get_plan(conn, plan_id) is not None:
+    raise SystemExit(f"FAIL: plan_id already exists: {plan_id}")
+
+now = utc_now_text()
+plan = {
+    "plan_id": plan_id,
+    "source_loop_id": source_loop_id,
+    "owner": owner,
+    "horizon": horizon,
+    "activation_trigger": activation_trigger,
+    "review_date": review_date,
+    "description": description,
+    "linked_gaps": linked_gaps,
+    "migrated_at_utc": now,
+    "status": "deferred",
+}
+if target_loop_id:
+    plan["target_loop_id"] = target_loop_id
+if depends_on_loop:
+    plan["depends_on_loop"] = depends_on_loop
+
+upsert_plan(conn, plan)
+insert_event(
+    conn,
+    plan_id=plan_id,
+    event_type="created",
+    from_status=None,
+    to_status="deferred",
+    reason="planning.plans.create",
+    actor="planning.plans.create",
+    payload={"source_loop_id": source_loop_id, "owner": owner},
+)
+project_to_surfaces(
+    conn,
+    index_path=index_path,
+    plans_dir=plans_dir,
+    create_placeholders=True,
+    archive_orphans=False,
+)
+conn.commit()
+
+print("planning.plans.create")
+print(f"authority: {_db_path}")
+print(f"index: {index_path}")
+print(f"plan_id: {plan_id}")
+print(f"source_loop_id: {source_loop_id}")
+print(f"horizon: {horizon}")
+print("status: deferred")
+PY

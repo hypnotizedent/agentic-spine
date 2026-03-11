@@ -1,0 +1,482 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# gaps.file — Create a new gap entry (atomic, git-locked)
+#
+# Usage: gaps-file --id GAP-OP-NNN|auto --type <type> --severity <sev> \
+#                  --description "desc" --discovered-by "source" \
+#                  [--doc "path"] --loop-id "LOOP-ID" \
+#                  [--parent-loop "LOOP-ID"] [--loop "LOOP-ID"] \
+#                  [--description-file path] [--no-commit|--commit]
+#
+# Batch usage:
+#   gaps-file --batch /path/to/gaps.yaml --loop-id LOOP-ID [--no-commit]
+#
+# Acquires git-lock, appends to operational.gaps.yaml, commits, releases lock.
+# Validates all required fields and rejects duplicates.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/plugins/core/loops/lib/gap-claims.sh"
+source "$ROOT/ops/lib/resolve-policy.sh"
+source "$ROOT/ops/plugins/core/lifecycle/lib/next-gap-id.sh"
+resolve_policy_knobs
+
+yaml_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+infer_parent_loop() {
+  local discovered_by="$1"
+  if [[ "$discovered_by" =~ ^LOOP-[A-Z0-9-]+$ ]]; then
+    printf '%s' "$discovered_by"
+  fi
+}
+
+derive_gap_title() {
+  local description="$1"
+  local fallback_id="$2"
+  local first_line second_line capability_line actual_line sentence
+
+  first_line="$(printf '%s\n' "$description" | sed -n '/[^[:space:]]/{s/^[[:space:]]*//;p;q;}')"
+  [[ -n "$first_line" ]] || first_line="$fallback_id open gap"
+
+  # Friction descriptions often start with a generic header; derive a
+  # meaningful title from structured lines to avoid false duplicate collapse.
+  if [[ "$first_line" == "Agent friction intake item:" ]]; then
+    second_line="$(printf '%s\n' "$description" | awk 'NF{c++; if(c==2){sub(/^[[:space:]]+/,""); print; exit}}')"
+    capability_line="$(printf '%s\n' "$description" | sed -n 's/^[[:space:]]*capability:[[:space:]]*//p' | head -n1)"
+    actual_line="$(printf '%s\n' "$description" | sed -n 's/^[[:space:]]*actual:[[:space:]]*//p' | head -n1)"
+    if [[ -n "$capability_line" && -n "$actual_line" ]]; then
+      first_line="$capability_line — $actual_line"
+    elif [[ -n "$capability_line" ]]; then
+      first_line="$capability_line friction item"
+    elif [[ -n "$second_line" ]]; then
+      first_line="$second_line"
+    fi
+  fi
+
+  # Truncate to 110 chars, appending "..." if longer than 110.
+  # Uses two separate sed invocations for BSD/GNU portability (BSD sed
+  # does not support "; t; s/" multi-command chaining after branch).
+  if [[ "${#first_line}" -le 110 ]]; then
+    sentence="$first_line"
+  else
+    sentence="$(printf '%s' "$first_line" | cut -c1-107)..."
+  fi
+  [[ -n "$sentence" ]] || sentence="$fallback_id open gap"
+  printf '%s' "$sentence"
+}
+
+validate_parent_loop() {
+  local value="$1"
+  [[ "$value" =~ ^LOOP-[A-Z0-9-]+$ ]] || {
+    echo "FAIL: invalid loop binding '$value' (expected LOOP-...)" >&2
+    exit 2
+  }
+}
+
+require_parent_loop() {
+  local value="$1"
+  local context="$2"
+  if [[ -z "$value" ]]; then
+    echo "FAIL: $context missing parent_loop. Policy requires --loop-id (no-new-unlinked-gap)." >&2
+    exit 2
+  fi
+  validate_parent_loop "$value"
+}
+
+acquire_git_lock_with_retry() {
+  local wait_seconds="$1"
+  local started_at now
+  started_at="$(date +%s)"
+  while true; do
+    if acquire_git_lock gaps; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started_at >= wait_seconds )); then
+      echo "FAIL: unable to acquire git.gaps.lock within ${wait_seconds}s" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+validate_type() {
+  local value="$1"
+  case "$value" in
+    stale-ssot|missing-entry|agent-behavior|unclear-doc|duplicate-truth|runtime-bug) ;;
+    *)
+      echo "FAIL: invalid --type '$value' (valid: stale-ssot, missing-entry, agent-behavior, unclear-doc, duplicate-truth, runtime-bug)" >&2
+      exit 2
+      ;;
+  esac
+}
+
+validate_severity() {
+  local value="$1"
+  case "$value" in
+    low|medium|high|critical) ;;
+    *)
+      echo "FAIL: invalid --severity '$value' (valid: low, medium, high, critical)" >&2
+      exit 2
+      ;;
+  esac
+}
+
+load_description() {
+  local inline_desc="$1"
+  local desc_file="$2"
+  if [[ -n "$inline_desc" && -n "$desc_file" ]]; then
+    echo "FAIL: cannot specify both --description and --description-file" >&2
+    exit 2
+  fi
+  if [[ -n "$desc_file" ]]; then
+    [[ -f "$desc_file" ]] || { echo "FAIL: --description-file not found: $desc_file" >&2; exit 2; }
+    cat "$desc_file"
+    return 0
+  fi
+  printf '%s' "$inline_desc"
+}
+
+# Check if an entry with a semantically equivalent title already exists (open status).
+# This catches the retry-after-commit-failure case where YAML was written but commit
+# was rejected, and gaps.file is re-invoked with the same description.
+# Returns 0 if a duplicate is found, 1 otherwise. Prints the existing gap ID on match.
+gap_title_exists_open() {
+  local candidate_title="$1"
+  local existing_id
+  existing_id="$(yq e -r ".gaps[] | select(.status == \"open\") | select(.title == \"$candidate_title\") | .id" "$GAPS_FILE" 2>/dev/null | head -n1)"
+  if [[ -n "$existing_id" && "$existing_id" != "null" ]]; then
+    printf '%s' "$existing_id"
+    return 0
+  fi
+  return 1
+}
+
+append_gap_entry() {
+  local gap_id="$1"
+  local type="$2"
+  local severity="$3"
+  local description="$4"
+  local discovered_by="$5"
+  local parent_loop="$6"
+  local doc="$7"
+  local today="$8"
+  local timestamp="$9"
+  local title classification
+
+  [[ -n "$gap_id" ]]        || { echo "FAIL: gap id required" >&2; exit 2; }
+  [[ -n "$type" ]]          || { echo "FAIL: type required for $gap_id" >&2; exit 2; }
+  [[ -n "$severity" ]]      || { echo "FAIL: severity required for $gap_id" >&2; exit 2; }
+  [[ -n "$description" ]]   || { echo "FAIL: description required for $gap_id" >&2; exit 2; }
+  [[ -n "$discovered_by" ]] || { echo "FAIL: discovered_by required for $gap_id" >&2; exit 2; }
+
+  validate_type "$type"
+  validate_severity "$severity"
+  gap_exists "$gap_id" && { echo "FAIL: $gap_id already exists in gap registry" >&2; exit 1; }
+
+  # Idempotency guard: check if an open gap with the same derived title already
+  # exists. This catches the retry-after-commit-failure scenario where the YAML
+  # write persisted but the commit was rejected (e.g. by pre-commit hooks).
+  local _pre_title _existing_dup
+  _pre_title="$(derive_gap_title "$description" "$gap_id")"
+  if _existing_dup="$(gap_title_exists_open "$_pre_title")"; then
+    echo "INFO_ALREADY_FILED: skipping $gap_id — semantically equivalent open gap exists as $_existing_dup" >&2
+    # Return the existing ID so callers can reference it
+    IDEMPOTENT_SKIP_IDS+=("$_existing_dup")
+    return 0
+  fi
+
+  title="$(derive_gap_title "$description" "$gap_id")"
+  classification="$type"
+
+  local tmpfile
+  tmpfile="$(mktemp)"
+  {
+    echo "id: \"$(yaml_escape "$gap_id")\""
+    echo "title: \"$(yaml_escape "$title")\""
+    echo "discovered_by: \"$(yaml_escape "$discovered_by")\""
+    echo "discovered_at: \"$today\""
+    echo "type: $type"
+    echo "classification: $classification"
+    if [[ -n "$doc" ]]; then
+      echo "doc: \"$(yaml_escape "$doc")\""
+    else
+      echo "doc: null"
+    fi
+    echo "description: |"
+    printf '%s\n' "$description" | sed 's/^/  /'
+    echo "severity: $severity"
+    echo "status: open"
+    echo "notes: \"Filed via gaps.file at $(yaml_escape "$timestamp")\""
+    if [[ -n "$parent_loop" ]]; then
+      echo "parent_loop: \"$(yaml_escape "$parent_loop")\""
+    fi
+  } > "$tmpfile"
+
+  yq e -i ".gaps += [load(\"$tmpfile\")]" "$GAPS_FILE" || {
+    rm -f "$tmpfile"
+    echo "FAIL: yq append failed for $gap_id" >&2
+    exit 1
+  }
+  rm -f "$tmpfile"
+}
+
+# Parse arguments
+GAP_ID="" TYPE="" SEVERITY="" DESCRIPTION="" DESCRIPTION_FILE="" DISCOVERED_BY="" PARENT_LOOP="" DOC=""
+BATCH_FILE=""
+USED_PARENT_LOOP_ALIAS=0
+USED_LOOP_ALIAS=0
+LANE_SAFE=0
+LANE_SAFE_LOOP_ID="${SPINE_LOOP_ID:-}"
+NO_COMMIT_DEFAULT_RAW="${GAPS_FILE_NO_COMMIT_DEFAULT:-0}"
+case "$NO_COMMIT_DEFAULT_RAW" in
+  1|true|TRUE|yes|YES|on|ON) NO_COMMIT=1 ;;
+  *) NO_COMMIT=0 ;;
+esac
+WAIT_SECONDS="${GAPS_FILE_LOCK_WAIT_SECONDS:-15}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --batch)         BATCH_FILE="${2:?--batch requires a value}"; shift 2 ;;
+    --lane-safe)     LANE_SAFE=1; shift ;;
+    --lane-safe-loop-id) LANE_SAFE_LOOP_ID="${2:?--lane-safe-loop-id requires a value}"; shift 2 ;;
+    --no-commit)     NO_COMMIT=1; shift ;;
+    --commit)        NO_COMMIT=0; shift ;;
+    --wait-seconds)  WAIT_SECONDS="${2:?--wait-seconds requires a value}"; shift 2 ;;
+    --id)            GAP_ID="${2:?--id requires a value}"; shift 2 ;;
+    --type)          TYPE="${2:?--type requires a value}"; shift 2 ;;
+    --severity)      SEVERITY="${2:?--severity requires a value}"; shift 2 ;;
+    --description)   DESCRIPTION="${2:?--description requires a value}"; shift 2 ;;
+    --description-file) DESCRIPTION_FILE="${2:?--description-file requires a value}"; shift 2 ;;
+    --discovered-by) DISCOVERED_BY="${2:?--discovered-by requires a value}"; shift 2 ;;
+    --loop-id)       PARENT_LOOP="${2:?--loop-id requires a value}"; shift 2 ;;
+    --loop-id=*)     PARENT_LOOP="${1#*=}"; shift ;;
+    --parent-loop)
+      PARENT_LOOP="${2:?--parent-loop requires a value}"
+      USED_PARENT_LOOP_ALIAS=1
+      shift 2
+      ;;
+    --loop)
+      PARENT_LOOP="${2:?--loop requires a value}"
+      USED_LOOP_ALIAS=1
+      shift 2
+      ;;
+    --doc)           DOC="${2:?--doc requires a value}"; shift 2 ;;
+    -h|--help)
+      echo "Usage: gaps-file --id GAP-OP-NNN|auto --type <type> --severity <sev> \\"
+      echo "                 --description \"desc\" --discovered-by \"source\" \\"
+      echo "                 [--doc \"path\"] --loop-id \"LOOP-ID\" [--parent-loop \"LOOP-ID\"] [--loop \"LOOP-ID\"] \\"
+      echo "                 [--description-file path] [--no-commit|--commit] [--lane-safe [--lane-safe-loop-id LOOP-ID]]"
+      echo ""
+      echo "Batch: gaps-file --batch /path/to/gaps.yaml --loop-id LOOP-ID [--no-commit|--commit]"
+      echo ""
+      echo "Policy: parent_loop is required (canonical flag: --loop-id)."
+      echo "Compatibility aliases: --parent-loop, --loop."
+      echo "Env knob: GAPS_FILE_NO_COMMIT_DEFAULT=1 defaults to staging-only mode."
+      echo "Ergonomics: auto-retry lock acquisition up to --wait-seconds (default: 15)."
+      echo ""
+      echo "Types: stale-ssot | missing-entry | agent-behavior | unclear-doc | duplicate-truth | runtime-bug"
+      echo "Severities: low | medium | high | critical"
+      exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [[ "$USED_PARENT_LOOP_ALIAS" -eq 1 ]]; then
+  echo "WARN: --parent-loop is a compatibility alias; prefer canonical --loop-id." >&2
+fi
+if [[ "$USED_LOOP_ALIAS" -eq 1 ]]; then
+  echo "WARN: --loop is a compatibility alias; prefer canonical --loop-id." >&2
+fi
+
+if [[ "$LANE_SAFE" -eq 1 ]]; then
+  request_loop_id="${LANE_SAFE_LOOP_ID:-${SPINE_LOOP_ID:-${PARENT_LOOP:-}}}"
+  require_parent_loop "$request_loop_id" "--lane-safe"
+  request_dir="$SPINE_STATE/orchestration/${request_loop_id}/shared-authority-mutations"
+  mkdir -p "$request_dir"
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  request_subject="${GAP_ID:-batch}"
+  request_file="$request_dir/${ts}-gaps-file-${request_subject}.yaml"
+  cat > "$request_file" <<YAML
+kind: shared-authority-mutation
+status: queued
+queued_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+queued_by: "${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-unknown}}"
+loop_id: "$request_loop_id"
+mutation:
+  capability: gaps.file
+  id: "$GAP_ID"
+  batch_file: "$BATCH_FILE"
+  type: "$TYPE"
+  severity: "$SEVERITY"
+  discovered_by: "$DISCOVERED_BY"
+  parent_loop: "$PARENT_LOOP"
+  doc: "$DOC"
+  description: "$DESCRIPTION"
+  description_file: "$DESCRIPTION_FILE"
+  no_commit: "$NO_COMMIT"
+YAML
+  echo "gaps.file LANE_SAFE_QUEUED: $request_file"
+  exit 0
+fi
+
+[[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] || { echo "FAIL: --wait-seconds must be an integer >= 0" >&2; exit 2; }
+
+# Acquire git lock (retry for batch/sequential ergonomics)
+acquire_git_lock_with_retry "$WAIT_SECONDS" || exit 1
+
+trap 'release_git_lock' EXIT INT TERM
+
+TODAY=$(date -u +%Y-%m-%d)
+TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+declare -a FILED_GAP_IDS=()
+declare -a IDEMPOTENT_SKIP_IDS=()
+
+if [[ -n "$BATCH_FILE" ]]; then
+  [[ -f "$BATCH_FILE" ]] || { echo "FAIL: --batch file not found: $BATCH_FILE" >&2; exit 2; }
+  [[ -z "$GAP_ID$TYPE$SEVERITY$DESCRIPTION$DESCRIPTION_FILE$DOC" ]] || {
+    echo "FAIL: --batch cannot be combined with single-gap fields (--id/--type/--severity/--description/--description-file/--doc)" >&2
+    exit 2
+  }
+
+  batch_root_expr=""
+  batch_type="$(yq e -r 'type' "$BATCH_FILE" 2>/dev/null || true)"
+  if [[ "$batch_type" == "!!seq" ]]; then
+    batch_root_expr="."
+  elif [[ "$batch_type" == "!!map" ]]; then
+    has_gaps="$(yq e -r 'has("gaps")' "$BATCH_FILE" 2>/dev/null || true)"
+    if [[ "$has_gaps" == "true" ]]; then
+      batch_root_expr=".gaps"
+    fi
+  fi
+  [[ -n "$batch_root_expr" ]] || { echo "FAIL: --batch must be a YAML list or object with .gaps list" >&2; exit 2; }
+  batch_count="$(yq e -r "($batch_root_expr | length) // 0" "$BATCH_FILE" 2>/dev/null || echo 0)"
+  [[ "$batch_count" =~ ^[0-9]+$ ]] || { echo "FAIL: invalid batch length in $BATCH_FILE" >&2; exit 2; }
+  (( batch_count > 0 )) || { echo "FAIL: --batch contains no gap entries" >&2; exit 2; }
+
+  batch_dir="$(cd "$(dirname "$BATCH_FILE")" && pwd)"
+  for ((i=0; i<batch_count; i++)); do
+    item_expr="$batch_root_expr[$i]"
+    item_gap_id="$(yq e -r "$item_expr.id // \"auto\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_type="$(yq e -r "$item_expr.type // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_severity="$(yq e -r "$item_expr.severity // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_doc="$(yq e -r "$item_expr.doc // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_discovered_by="$(yq e -r "$item_expr.discovered_by // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_parent_loop="$(yq e -r "$item_expr.parent_loop // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_description="$(yq e -r "$item_expr.description // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_description_file="$(yq e -r "$item_expr.description_file // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+
+    [[ "$item_doc" == "null" ]] && item_doc=""
+    [[ "$item_discovered_by" == "null" ]] && item_discovered_by=""
+    [[ "$item_parent_loop" == "null" ]] && item_parent_loop=""
+    [[ "$item_description_file" == "null" ]] && item_description_file=""
+
+    if [[ -n "$item_description_file" ]]; then
+      if [[ "$item_description_file" != /* ]]; then
+        item_description_file="$batch_dir/$item_description_file"
+      fi
+    fi
+
+    [[ -n "$item_discovered_by" ]] || item_discovered_by="$DISCOVERED_BY"
+    [[ -n "$item_parent_loop" ]] || item_parent_loop="$PARENT_LOOP"
+    if [[ -z "$item_parent_loop" ]]; then
+      item_parent_loop="$(infer_parent_loop "$item_discovered_by")"
+    fi
+    require_parent_loop "$item_parent_loop" "batch entry $i"
+    item_description="$(load_description "$item_description" "$item_description_file")"
+
+    [[ -n "$item_gap_id" ]] || item_gap_id="auto"
+    if [[ "$item_gap_id" == "auto" ]]; then
+      item_gap_id="$(next_gap_id)"
+    fi
+    [[ "$item_gap_id" =~ ^GAP-OP-[0-9]+$ ]] || { echo "FAIL: invalid gap id in batch entry $i: '$item_gap_id'" >&2; exit 2; }
+
+    _skip_count_before=${#IDEMPOTENT_SKIP_IDS[@]}
+    append_gap_entry "$item_gap_id" "$item_type" "$item_severity" "$item_description" "$item_discovered_by" "$item_parent_loop" "$item_doc" "$TODAY" "$TIMESTAMP"
+    # Only add to FILED list if append_gap_entry did not idempotently skip
+    if [[ ${#IDEMPOTENT_SKIP_IDS[@]} -eq $_skip_count_before ]]; then
+      FILED_GAP_IDS+=("$item_gap_id")
+    fi
+  done
+else
+  [[ -n "$GAP_ID" ]]        || { echo "FAIL: --id required (--id auto supported)" >&2; exit 2; }
+  [[ -n "$TYPE" ]]          || { echo "FAIL: --type required" >&2; exit 2; }
+  [[ -n "$SEVERITY" ]]      || { echo "FAIL: --severity required" >&2; exit 2; }
+  [[ -n "$DISCOVERED_BY" ]] || { echo "FAIL: --discovered-by required" >&2; exit 2; }
+  if [[ -z "$PARENT_LOOP" ]]; then
+    PARENT_LOOP="$(infer_parent_loop "$DISCOVERED_BY")"
+  fi
+  require_parent_loop "$PARENT_LOOP" "single gap request"
+
+  DESCRIPTION="$(load_description "$DESCRIPTION" "$DESCRIPTION_FILE")"
+  [[ -n "$DESCRIPTION" ]] || { echo "FAIL: --description or --description-file required" >&2; exit 2; }
+
+  if [[ "$GAP_ID" == "auto" ]]; then
+    GAP_ID="$(next_gap_id)"
+  fi
+  [[ "$GAP_ID" =~ ^GAP-OP-[0-9]+$ ]] || { echo "FAIL: invalid --id '$GAP_ID' (expected GAP-OP-NNN or auto)" >&2; exit 2; }
+
+  _skip_count_before=${#IDEMPOTENT_SKIP_IDS[@]}
+  append_gap_entry "$GAP_ID" "$TYPE" "$SEVERITY" "$DESCRIPTION" "$DISCOVERED_BY" "$PARENT_LOOP" "$DOC" "$TODAY" "$TIMESTAMP"
+  # Only add to FILED list if append_gap_entry did not idempotently skip
+  if [[ ${#IDEMPOTENT_SKIP_IDS[@]} -eq $_skip_count_before ]]; then
+    FILED_GAP_IDS+=("$GAP_ID")
+  fi
+fi
+
+# If all entries were idempotently skipped, no YAML mutation occurred — skip commit
+if [[ ${#FILED_GAP_IDS[@]} -eq 0 ]]; then
+  echo "INFO: all entries already filed — nothing to commit"
+  for skip_id in "${IDEMPOTENT_SKIP_IDS[@]}"; do
+    echo "SKIPPED_DUPLICATE: $skip_id"
+  done
+  exit 0
+fi
+
+# Update timestamp once per run
+yq e -i ".updated = \"$TIMESTAMP\"" "$GAPS_FILE"
+
+git -C "$ROOT" add "$GAPS_FILE"
+if [[ "$NO_COMMIT" -eq 0 ]]; then
+  if (( ${#FILED_GAP_IDS[@]} == 1 )); then
+    COMMIT_SUBJECT="gov(${FILED_GAP_IDS[0]}): register gap via gaps.file"
+  else
+    COMMIT_SUBJECT="gov(gaps.batch): register ${#FILED_GAP_IDS[@]} gaps via gaps.file"
+  fi
+  FILED_IDS_CSV="$(IFS=,; echo "${FILED_GAP_IDS[*]}")"
+  git -C "$ROOT" commit -m "$(cat <<EOF
+$COMMIT_SUBJECT
+
+Filed IDs: $FILED_IDS_CSV
+Filed via atomic gaps.file capability.
+
+Gap-Mutation: capability
+Gap-Capability: gaps.file
+Gap-Run-Key: ${SPINE_CAP_RUN_KEY:-manual}
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+EOF
+)"
+else
+  echo "STAGED (no commit): ${FILED_GAP_IDS[*]}"
+fi
+
+for filed_id in "${FILED_GAP_IDS[@]}"; do
+  echo "FILED: $filed_id"
+done
+
+for skip_id in "${IDEMPOTENT_SKIP_IDS[@]}"; do
+  echo "SKIPPED_DUPLICATE: $skip_id"
+done
+
+# Auto-claim if policy knob says so
+if [[ "${RESOLVED_GAP_AUTO_CLAIM:-false}" == "true" ]]; then
+  for filed_id in "${FILED_GAP_IDS[@]}"; do
+    claim_gap "$filed_id" "auto-claimed by policy (gap_auto_claim=true)" && \
+      echo "AUTO-CLAIMED: $filed_id by PID $$" || \
+      echo "WARN: auto-claim failed for $filed_id (may already be claimed)" >&2
+  done
+fi

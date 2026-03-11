@@ -24,7 +24,7 @@ fail() {
   exit 1
 }
 
-PROMOTER_PATH="ops/plugins/snapshot/bin/snapshot-projection-apply"
+PROMOTER_PATH="ops/plugins/core/snapshot/bin/snapshot-projection-apply"
 
 # The 5 tracked snapshot capabilities that write to ops/bindings/
 TRACKED_CAPS=(

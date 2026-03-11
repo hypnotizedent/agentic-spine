@@ -29,7 +29,7 @@ case "$MODE" in
     echo "mode: core_only"
     echo "release/nightly full verify remains available via: ./bin/ops cap run verify.release.run"
     echo
-    exec "$SP/ops/plugins/verify/bin/verify-topology" core "$@"
+    exec "$SP/ops/plugins/core/verify/bin/verify-topology" core "$@"
     ;;
   *)
     echo "FAIL: invalid spine.verify mode in $RUNTIME_BINDING: $MODE" >&2

@@ -10,19 +10,19 @@ fail() {
 }
 
 GOVERNED_SCRIPTS=(
-  "ops/plugins/orchestration/bin/orchestration-loop-open"
-  "ops/plugins/orchestration/bin/orchestration-handoff-validate"
-  "ops/plugins/orchestration/bin/orchestration-ticket-issue"
-  "ops/plugins/orchestration/bin/orchestration-terminal-entry"
-  "ops/plugins/orchestration/bin/orchestration-integrate"
-  "ops/plugins/orchestration/bin/orchestration-loop-close"
+  "ops/plugins/core/orchestration/bin/orchestration-loop-open"
+  "ops/plugins/core/orchestration/bin/orchestration-handoff-validate"
+  "ops/plugins/core/orchestration/bin/orchestration-ticket-issue"
+  "ops/plugins/core/orchestration/bin/orchestration-terminal-entry"
+  "ops/plugins/core/orchestration/bin/orchestration-integrate"
+  "ops/plugins/core/orchestration/bin/orchestration-loop-close"
   "ops/plugins/infra/bin/infra-relocation-service-transition"
   "ops/plugins/infra/bin/infra-relocation-state-transition"
-  "ops/plugins/proposals/bin/proposals-supersede"
-  "ops/plugins/lifecycle/bin/planning-plans-create"
-  "ops/plugins/lifecycle/bin/planning-plans-promote"
-  "ops/plugins/lifecycle/bin/planning-plans-retire"
-  "ops/plugins/lifecycle/bin/planning-plans-cancel"
+  "ops/plugins/core/proposals/bin/proposals-supersede"
+  "ops/plugins/core/lifecycle/bin/planning-plans-create"
+  "ops/plugins/core/lifecycle/bin/planning-plans-promote"
+  "ops/plugins/core/lifecycle/bin/planning-plans-retire"
+  "ops/plugins/core/lifecycle/bin/planning-plans-cancel"
 )
 
 errors=()

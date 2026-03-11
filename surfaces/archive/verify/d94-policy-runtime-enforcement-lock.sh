@@ -12,7 +12,7 @@ ok() { [[ "${DRIFT_VERBOSE:-0}" == "1" ]] && echo "  OK: $*" || true; }
 
 CONTRACT="$ROOT/ops/bindings/policy.runtime.contract.yaml"
 PRESETS="$ROOT/ops/bindings/policy.presets.yaml"
-AUDIT_SCRIPT="$ROOT/ops/plugins/policy/bin/policy-runtime-audit"
+AUDIT_SCRIPT="$ROOT/ops/plugins/core/policy/bin/policy-runtime-audit"
 
 command -v jq >/dev/null 2>&1 || { err "jq is required for D94 policy audit parsing"; echo "D94 FAIL: $ERRORS check(s) failed"; exit 1; }
 
@@ -159,7 +159,7 @@ if [[ -x "$AUDIT_SCRIPT" ]]; then
     err "policy.runtime.audit --json failed"
   fi
 else
-  err "ops/plugins/policy/bin/policy-runtime-audit is not executable or missing"
+  err "ops/plugins/core/policy/bin/policy-runtime-audit is not executable or missing"
 fi
 
 # ── Result ──

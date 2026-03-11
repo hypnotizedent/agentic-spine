@@ -40,7 +40,7 @@ Runtime-authoritative:
 ## Query Flow
 
 `spine.timeline.query` is index-first for scale:
-1. Reads `ops/plugins/evidence/state/receipt-index.yaml`.
+1. Reads `ops/plugins/core/evidence/state/receipt-index.yaml`.
 2. Reads repo/runtime state surfaces.
 3. Scans raw receipts only when `--scan-receipts` is requested.
 

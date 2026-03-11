@@ -16,7 +16,7 @@ Keep v1 normalization stable over time by hardening contracts, checker behavior,
 
 1. Contract exists: `/Users/ronnyworks/code/workbench/infra/contracts/workbench.aof.contract.yaml`
 2. Checker exists and is clean: `/Users/ronnyworks/code/workbench/scripts/root/aof/workbench-aof-check.sh` (`P0=0 P1=0 P2=0`)
-3. Proposal preflight hook exists: `/Users/ronnyworks/code/agentic-spine/ops/plugins/proposals/bin/proposals-apply`
+3. Proposal preflight hook exists: `/Users/ronnyworks/code/agentic-spine/ops/plugins/core/proposals/bin/proposals-apply`
 4. V1 cert exists: `/Users/ronnyworks/code/agentic-spine/docs/governance/_audits/WORKBENCH_AOF_NORMALIZATION_CERT_20260217.md`
 
 ## Non-Goals
@@ -39,8 +39,8 @@ Keep v1 normalization stable over time by hardening contracts, checker behavior,
 
 | Task | Files | Action | Verify | Done |
 |---|---|---|---|---|
-| V2-T4 | `/Users/ronnyworks/code/agentic-spine/ops/plugins/proposals/bin/proposals-apply` | Fail fast if proposal references workbench but workbench root is unreachable; include remediation text. | Dry-run proposal with workbench path and missing root returns actionable error. | No ambiguous preflight failures. |
-| V2-T5 | `/Users/ronnyworks/code/agentic-spine/ops/plugins/proposals/bin/proposals-apply` | Record checker preflight summary in apply output for audit readability. | Apply output includes `P0/P1/P2` summary line when workbench paths touched. | Proposal receipts show policy decision context. |
+| V2-T4 | `/Users/ronnyworks/code/agentic-spine/ops/plugins/core/proposals/bin/proposals-apply` | Fail fast if proposal references workbench but workbench root is unreachable; include remediation text. | Dry-run proposal with workbench path and missing root returns actionable error. | No ambiguous preflight failures. |
+| V2-T5 | `/Users/ronnyworks/code/agentic-spine/ops/plugins/core/proposals/bin/proposals-apply` | Record checker preflight summary in apply output for audit readability. | Apply output includes `P0/P1/P2` summary line when workbench paths touched. | Proposal receipts show policy decision context. |
 | V2-T6 | `/Users/ronnyworks/code/agentic-spine/docs/governance/PROPOSAL_FLOW_QUICKSTART.md` | Add one section: “Workbench preflight behavior” with fail/repair examples. | Manual read confirms section exists and commands match actual behavior. | Operators know exactly why an apply blocked. |
 
 ### WS3 — Contract Evolution and Ratchets

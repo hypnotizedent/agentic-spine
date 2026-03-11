@@ -182,7 +182,7 @@ fi
 # D5: No executable ~/agent coupling
 # TRIAGE: Replace ~/agent or $HOME/agent references with mailroom/ paths. Legacy coupling is forbidden.
 echo -n "D5 no legacy coupling... "
-COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/plugins/agent/bin surfaces/verify 2>/dev/null \
+COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/plugins/core/agent/bin surfaces/verify 2>/dev/null \
   | rg -v '^[[:space:]]*#' \
   | rg -v 'foundation-gate.sh' \
   | rg -v 'drift-gate.sh' \

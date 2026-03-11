@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-SCRIPT="$ROOT/ops/plugins/verify/bin/verify-failure-classify"
+SCRIPT="$ROOT/ops/plugins/core/verify/bin/verify-failure-classify"
 CONTRACT="$ROOT/ops/bindings/verify.failure.classification.contract.yaml"
 RUNTIME="$ROOT/ops/runtime/slo-evidence-daily.sh"
 

@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/outcome.slo.contract.yaml"
-SCRIPT="$ROOT/ops/plugins/verify/bin/outcome-slo-report"
+SCRIPT="$ROOT/ops/plugins/core/verify/bin/outcome-slo-report"
 CAPS="$ROOT/ops/capabilities.yaml"
 MAP="$ROOT/ops/bindings/capability_map.yaml"
 DISPATCH="$ROOT/ops/bindings/routing.dispatch.yaml"
