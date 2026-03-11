@@ -108,7 +108,7 @@ fi
 # Gate 3: Index health (parity + inflation)
 echo -n "  Checking index health... "
 WORKSPACE="$(yq -r '.sync.workspace_slug // "agentic-spine"' "$RUNNER_BINDING")"
-docs_indexed_json="$(ssh "${SSH_ARGS[@]}" "$TARGET" "cd /home/ubuntu/code/agentic-spine && source ~/.config/infisical/credentials 2>/dev/null && infisical run --env=prod -- ./ops/plugins/rag/bin/rag status --workspace '$WORKSPACE' 2>/dev/null" || echo "")"
+docs_indexed_json="$(ssh "${SSH_ARGS[@]}" "$TARGET" "cd /home/ubuntu/code/agentic-spine && source ~/.config/infisical/credentials 2>/dev/null && infisical run --env=prod -- ./ops/plugins/infra/rag/bin/rag status --workspace '$WORKSPACE' 2>/dev/null" || echo "")"
 docs_indexed="$(echo "$docs_indexed_json" | grep "^docs_indexed:" | awk '{print $2}' || echo "0")"
 docs_eligible="$(echo "$docs_indexed_json" | grep "^docs_eligible:" | awk '{print $2}' || echo "0")"
 

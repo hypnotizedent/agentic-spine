@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-RAG_SCRIPT="$SP/ops/plugins/rag/bin/rag"
+RAG_SCRIPT="$SP/ops/plugins/infra/rag/bin/rag"
 
 if [[ ! -f "$RAG_SCRIPT" ]]; then
   echo "D68 FAIL: RAG script missing at $RAG_SCRIPT"

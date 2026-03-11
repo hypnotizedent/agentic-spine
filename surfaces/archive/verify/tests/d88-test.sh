@@ -14,7 +14,7 @@ setup_mock() {
   tmp="$(mktemp -d)"
   mkdir -p \
     "$tmp/ops/bindings" \
-    "$tmp/ops/plugins/rag/bin" \
+    "$tmp/ops/plugins/infra/rag/bin" \
     "$tmp/ops/plugins" \
     "$tmp/surfaces/verify"
   cp "$SP/ops/bindings/rag.remote.runner.yaml" "$tmp/ops/bindings/rag.remote.runner.yaml"
@@ -22,11 +22,11 @@ setup_mock() {
   cp "$SP/ops/capabilities.yaml" "$tmp/ops/capabilities.yaml"
   cp "$SP/ops/bindings/capability_map.yaml" "$tmp/ops/bindings/capability_map.yaml"
   cp "$SP/ops/plugins/MANIFEST.yaml" "$tmp/ops/plugins/MANIFEST.yaml"
-  cp "$SP/ops/plugins/rag/bin/rag" "$tmp/ops/plugins/rag/bin/rag"
-  cp "$SP/ops/plugins/rag/bin/rag-reindex-remote-start" "$tmp/ops/plugins/rag/bin/rag-reindex-remote-start"
-  cp "$SP/ops/plugins/rag/bin/rag-reindex-remote-status" "$tmp/ops/plugins/rag/bin/rag-reindex-remote-status"
-  cp "$SP/ops/plugins/rag/bin/rag-reindex-remote-stop" "$tmp/ops/plugins/rag/bin/rag-reindex-remote-stop"
-  chmod +x "$tmp/ops/plugins/rag/bin/"*
+  cp "$SP/ops/plugins/infra/rag/bin/rag" "$tmp/ops/plugins/infra/rag/bin/rag"
+  cp "$SP/ops/plugins/infra/rag/bin/rag-reindex-remote-start" "$tmp/ops/plugins/infra/rag/bin/rag-reindex-remote-start"
+  cp "$SP/ops/plugins/infra/rag/bin/rag-reindex-remote-status" "$tmp/ops/plugins/infra/rag/bin/rag-reindex-remote-status"
+  cp "$SP/ops/plugins/infra/rag/bin/rag-reindex-remote-stop" "$tmp/ops/plugins/infra/rag/bin/rag-reindex-remote-stop"
+  chmod +x "$tmp/ops/plugins/infra/rag/bin/"*
   echo "$tmp"
 }
 
@@ -59,7 +59,7 @@ cleanup_mock "$MOCK"
 echo "--- Test 3: capability command mismatch ---"
 MOCK="$(setup_mock)"
 trap 'cleanup_mock "$MOCK"' EXIT
-yq -i '.capabilities."rag.reindex.remote.status".command = "./ops/plugins/rag/bin/wrong-script"' "$MOCK/ops/capabilities.yaml"
+yq -i '.capabilities."rag.reindex.remote.status".command = "./ops/plugins/infra/rag/bin/wrong-script"' "$MOCK/ops/capabilities.yaml"
 output=$(SPINE_ROOT="$MOCK" bash "$GATE" 2>&1) && rc=$? || rc=$?
 if [[ "$rc" -ne 0 ]]; then
   pass "D88 correctly detects capability command mismatch (rc=$rc)"
@@ -72,7 +72,7 @@ cleanup_mock "$MOCK"
 echo "--- Test 4: raw bearer header pattern ---"
 MOCK="$(setup_mock)"
 trap 'cleanup_mock "$MOCK"' EXIT
-printf '\n# test mutation\ncurl -H "Authorization: Bearer ${ANYTHINGLLM_API_KEY}" https://example.invalid\n' >> "$MOCK/ops/plugins/rag/bin/rag"
+printf '\n# test mutation\ncurl -H "Authorization: Bearer ${ANYTHINGLLM_API_KEY}" https://example.invalid\n' >> "$MOCK/ops/plugins/infra/rag/bin/rag"
 output=$(SPINE_ROOT="$MOCK" bash "$GATE" 2>&1) && rc=$? || rc=$?
 if [[ "$rc" -ne 0 ]]; then
   pass "D88 correctly detects raw bearer header pattern (rc=$rc)"

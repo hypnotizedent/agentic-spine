@@ -5,7 +5,7 @@ set -euo pipefail
 SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 GATE="$SP/surfaces/verify/d87-rag-workspace-contract-lock.sh"
 REAL_CONTRACT="$SP/ops/bindings/rag.workspace.contract.yaml"
-REAL_RAG="$SP/ops/plugins/rag/bin/rag"
+REAL_RAG="$SP/ops/plugins/infra/rag/bin/rag"
 
 PASS=0; FAIL_COUNT=0
 pass() { PASS=$((PASS+1)); echo "PASS: $1"; }
@@ -15,9 +15,9 @@ fail() { FAIL_COUNT=$((FAIL_COUNT+1)); echo "FAIL: $1" >&2; }
 setup_mock() {
   local tmp
   tmp="$(mktemp -d)"
-  mkdir -p "$tmp/ops/bindings" "$tmp/ops/plugins/rag/bin"
+  mkdir -p "$tmp/ops/bindings" "$tmp/ops/plugins/infra/rag/bin"
   cp "$REAL_CONTRACT" "$tmp/ops/bindings/rag.workspace.contract.yaml"
-  cp "$REAL_RAG" "$tmp/ops/plugins/rag/bin/rag"
+  cp "$REAL_RAG" "$tmp/ops/plugins/infra/rag/bin/rag"
   echo "$tmp"
 }
 

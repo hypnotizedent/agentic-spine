@@ -7,7 +7,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/rag.workspace.contract.yaml"
-RAG_SCRIPT="$ROOT/ops/plugins/rag/bin/rag"
+RAG_SCRIPT="$ROOT/ops/plugins/infra/rag/bin/rag"
 
 fail() { echo "D87 FAIL: $*" >&2; exit 1; }
 

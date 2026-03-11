@@ -57,11 +57,11 @@ done
 
 # 3) Verify scripts exist and are executable
 for script in rag-reindex-remote-verify rag-remote-dependency-probe; do
-  script_path="$ROOT/ops/plugins/rag/bin/$script"
+  script_path="$ROOT/ops/plugins/infra/rag/bin/$script"
   if [[ ! -f "$script_path" ]]; then
-    err "script missing: ops/plugins/rag/bin/$script"
+    err "script missing: ops/plugins/infra/rag/bin/$script"
   elif [[ ! -x "$script_path" ]]; then
-    err "script not executable: ops/plugins/rag/bin/$script"
+    err "script not executable: ops/plugins/infra/rag/bin/$script"
   fi
 done
 

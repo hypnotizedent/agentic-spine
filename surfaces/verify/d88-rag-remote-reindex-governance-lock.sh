@@ -16,10 +16,10 @@ SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
 CAP_MAP="$ROOT/ops/bindings/capability_map.yaml"
 MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
-RAG_CLI="$ROOT/ops/plugins/rag/bin/rag"
-START_SCRIPT="$ROOT/ops/plugins/rag/bin/rag-reindex-remote-start"
-STATUS_SCRIPT="$ROOT/ops/plugins/rag/bin/rag-reindex-remote-status"
-STOP_SCRIPT="$ROOT/ops/plugins/rag/bin/rag-reindex-remote-stop"
+RAG_CLI="$ROOT/ops/plugins/infra/rag/bin/rag"
+START_SCRIPT="$ROOT/ops/plugins/infra/rag/bin/rag-reindex-remote-start"
+STATUS_SCRIPT="$ROOT/ops/plugins/infra/rag/bin/rag-reindex-remote-status"
+STOP_SCRIPT="$ROOT/ops/plugins/infra/rag/bin/rag-reindex-remote-stop"
 
 fail() { echo "D88 FAIL: $*" >&2; exit 1; }
 
@@ -90,9 +90,9 @@ done
 start_cmd="$(yq -r '.capabilities."rag.reindex.remote.start".command // ""' "$CAPS")"
 status_cmd="$(yq -r '.capabilities."rag.reindex.remote.status".command // ""' "$CAPS")"
 stop_cmd="$(yq -r '.capabilities."rag.reindex.remote.stop".command // ""' "$CAPS")"
-[[ "$start_cmd" == "./ops/plugins/rag/bin/rag-reindex-remote-start" ]] || err "rag.reindex.remote.start command mismatch"
-[[ "$status_cmd" == "./ops/plugins/rag/bin/rag-reindex-remote-status" ]] || err "rag.reindex.remote.status command mismatch"
-[[ "$stop_cmd" == "./ops/plugins/rag/bin/rag-reindex-remote-stop" ]] || err "rag.reindex.remote.stop command mismatch"
+[[ "$start_cmd" == "./ops/plugins/infra/rag/bin/rag-reindex-remote-start" ]] || err "rag.reindex.remote.start command mismatch"
+[[ "$status_cmd" == "./ops/plugins/infra/rag/bin/rag-reindex-remote-status" ]] || err "rag.reindex.remote.status command mismatch"
+[[ "$stop_cmd" == "./ops/plugins/infra/rag/bin/rag-reindex-remote-stop" ]] || err "rag.reindex.remote.stop command mismatch"
 
 if ! yq -e '.plugins[] | select(.name=="rag")' "$MANIFEST" >/dev/null 2>&1; then
   err "rag plugin missing from MANIFEST.yaml"

@@ -2,9 +2,9 @@
 # Tests for RAG load-shaping knob resolution and enforcement.
 set -euo pipefail
 
-SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 BINDING="$SP/ops/bindings/rag.workspace.contract.yaml"
-RAG_CLI="$SP/ops/plugins/rag/bin/rag"
+RAG_CLI="$SP/ops/plugins/infra/rag/bin/rag"
 
 pass=0
 fail_count=0
