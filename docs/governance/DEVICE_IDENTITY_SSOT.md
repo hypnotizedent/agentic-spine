@@ -478,7 +478,7 @@ Use the loop ledger instead:
 
 ### Latest Audit
 
-- `docs/audits/BACKUP_AUDIT_2026-01-25.md` - Current backup status + gaps
+- `docs/reference/audits/BACKUP_AUDIT_2026-01-25.md` - Current backup status + gaps
 
 ---
 

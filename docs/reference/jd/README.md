@@ -31,7 +31,7 @@ Johnny Decimal is a system for organizing files and folders using a numeric ID s
 
 ## How to Use
 
-1. **Find a doc by ID**: Check `docs/jd/00.00-index.md` or `ops/bindings/docs.johnny_decimal.yaml`
+1. **Find a doc by ID**: Check `docs/reference/jd/00.00-index.md` or `ops/bindings/docs.johnny_decimal.yaml`
 2. **Add a new doc**: 
    - Assign the next available ID in the appropriate area
    - Update both the binding file and index

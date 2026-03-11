@@ -31,7 +31,7 @@ else
 fi
 
 # Test 3: Index files exist
-if [[ -f "$SPINE_ROOT/docs/jd/00.00-index.md" ]]; then
+if [[ -f "$SPINE_ROOT/docs/reference/jd/00.00-index.md" ]]; then
   echo "PASS: JD index exists"
 else
   echo "FAIL: JD index missing"

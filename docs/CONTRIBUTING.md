@@ -17,10 +17,12 @@ scope: docs-contributing-rules
 | Folder | What Goes Here | Examples |
 |--------|---------------|---------|
 | `docs/core/` | Spine invariants — contracts, bindings, locks, gap map | `AGENT_CONTRACT.md`, `CORE_LOCK.md`, `RECEIPTS_CONTRACT.md` |
+| `docs/contracts/` | Stable human-read contracts referenced by bindings/plugins | `TAILSCALE_AUTHORITY_CONTRACT_V1.yaml`, `MEDIA_CAPACITY_GUARD_CONTRACT_V1.yaml` |
 | `docs/governance/` | Canonical governance, SSOTs, and narrow infra summaries | `SPINE.md`, `SESSION_PROTOCOL.md`, `STACK_REGISTRY.yaml` |
 | `docs/governance/domains/` | One canonical doc per domain | `finance.md`, `loop_gap.md`, `media.md` |
 | `docs/brain/` | Agent memory, context injection, imported commands | `README.md`, `rules.md` |
 | `docs/pillars/` | Domain pillar docs and domain-level operating references | `finance/` |
+| `docs/reference/` | Low-authority indexes, audits, validation notes | `jd/`, `audits/`, `validation/` |
 | `docs/planning/` | Planning, roadmaps, and scoped execution plans | `README.md`, `ROADMAP.md` |
 | `docs/legacy/` | Archived imports + retired planning/extraction docs (reference only) | `_imports/` |
 | `docs/` (root) | Index + cheat sheet only | `README.md`, `OPERATOR_CHEAT_SHEET.md`, `CONTRIBUTING.md` |
@@ -61,6 +63,8 @@ Do not add a new doc if an existing canonical surface can absorb the content.
 
 - Daily governance belongs in `docs/governance/SPINE.md` or a domain doc.
 - Domain guidance belongs in exactly one file under `docs/governance/domains/`.
+- Stable reference contracts belong in `docs/contracts/`.
+- Low-authority indexes and audits belong in `docs/reference/`.
 - Only root-level entry surfaces belong in `docs/README.md`.
 
 ---

@@ -88,7 +88,7 @@ pattern with governed, receipt-producing capabilities.
 | 3 | locations | `docs/locations/` | workbench infra locations (docs tree, quarantined) | 2 | EXTRACTED |
 | 4 | hardware | `docs/hardware/` | workbench infra hardware (docs tree, quarantined) | 2 | EXTRACTED |
 | 5 | architecture | `docs/architecture/` | workbench infra architecture (docs tree, quarantined) | 4 | EXTRACTED |
-| 6 | audits | `audits/` + `docs/audits/` | workbench infra audits (docs tree, quarantined) | 5 | EXTRACTED |
+| 6 | audits | `audits/` + `docs/reference/audits/` | workbench infra audits (docs tree, quarantined) | 5 | EXTRACTED |
 | 7 | cloudflare-docs | `cloudflare/` + `docs/cloudflare/` | workbench infra cloudflare docs (docs tree, quarantined) | 3 | EXTRACTED |
 | 8 | domains | `domains/` | workbench infra domains (docs tree, quarantined) | 2 | EXTRACTED |
 | 9 | guides | `docs/guides/` | workbench infra guides (docs tree, quarantined) | 6 | EXTRACTED |

@@ -31,6 +31,8 @@ Keep additions there instead of creating new governance roots.
 ## Supporting Surfaces
 
 - [brain/README.md](brain/README.md) - context-loading and memory rules
+- [contracts/](contracts/) - stable contract/policy docs that are still human-read
+- [reference/README.md](reference/README.md) - low-authority indexes, audits, and validation notes
 - [core/AGENTIC_GAP_MAP.md](core/AGENTIC_GAP_MAP.md) - extraction and boundary tracking
 - [core/STACK_ALIGNMENT.md](core/STACK_ALIGNMENT.md) - stack inventory alignment notes
 - [CONTRIBUTING.md](CONTRIBUTING.md) - doc placement and minimality rules
@@ -39,8 +41,10 @@ Keep additions there instead of creating new governance roots.
 ## Directory Map
 
 - `docs/core/` - core contracts and state summaries
+- `docs/contracts/` - stable human-read contracts referenced by bindings/plugins
 - `docs/governance/` - live governance and SSOTs
 - `docs/governance/domains/` - one canonical doc per domain
 - `docs/brain/` - agent context helpers
+- `docs/reference/` - auxiliary reference material (JD, audits, validation)
 - `docs/planning/` - scoped plans and execution notes
 - `docs/runbooks/` - operational runbooks
