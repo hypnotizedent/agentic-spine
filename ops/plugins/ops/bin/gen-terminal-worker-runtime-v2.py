@@ -160,16 +160,18 @@ def _first_endpoint_url(agent: dict[str, Any] | None) -> str | None:
 def _extract_command_target(command: str) -> dict[str, Any]:
     command = str(command or "").strip()
 
-    plugin_matches = list(re.finditer(r"\./ops/plugins/([^\s/]+)/bin/([^\s]+)", command))
+    plugin_matches = list(re.finditer(r"\./ops/plugins/([^\s]+?)/bin/([^\s]+)", command))
     if plugin_matches:
         match = plugin_matches[-1]
-        plugin = match.group(1)
+        plugin_path = match.group(1)
+        plugin = plugin_path.split("/")[-1]
         script = match.group(2)
         remainder = command[match.end() :].strip()
         subcommand = remainder.split()[0] if remainder else None
         return {
             "type": "plugin",
             "plugin": plugin,
+            "plugin_path": plugin_path,
             "script": script,
             "subcommand": subcommand,
             "command": command,
@@ -535,6 +537,7 @@ def _build_routing_dispatch(
         if execution_target == "plugin":
             target_payload = {
                 "plugin": target.get("plugin"),
+                "plugin_path": target.get("plugin_path"),
                 "script": target.get("script"),
             }
             if target.get("subcommand"):

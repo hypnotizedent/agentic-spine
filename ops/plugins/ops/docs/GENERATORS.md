@@ -46,7 +46,7 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
   - active VM set parity
   - required derived fields present
 - Wire:
-  - Existing tool path: `ops/plugins/vm/bin/vm-lifecycle-derived-check`
+  - Existing tool path: `ops/plugins/infra/vm/bin/vm-lifecycle-derived-check`
 
 ### 4) HA Snapshot Generators
 - Input:

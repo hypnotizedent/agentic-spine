@@ -23,8 +23,8 @@ ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 SEARCH_PATHS=(
   "$ROOT/ops/plugins/mint/bin/*deploy*"
   "$ROOT/ops/plugins/mint/bin/*sync*"
-  "$ROOT/ops/plugins/docker/bin/*"
-  "$ROOT/ops/plugins/backup/bin/*"
+  "$ROOT/ops/plugins/infra/docker/bin/*"
+  "$ROOT/ops/plugins/infra/backup/bin/*"
   "$ROOT/ops/plugins/infra/bin/*docker*"
 )
 

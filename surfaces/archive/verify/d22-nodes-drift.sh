@@ -21,7 +21,7 @@ fail() { echo "D22 FAIL: $*" >&2; exit 1; }
 
 # Scope: SSH plugin surface + binding
 FILES=(
-  ops/plugins/ssh/bin/ssh-*
+  ops/plugins/infra/ssh/bin/ssh-*
   ops/bindings/ssh*.yaml
 )
 

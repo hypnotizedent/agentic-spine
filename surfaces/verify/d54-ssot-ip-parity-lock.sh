@@ -9,7 +9,7 @@ set -euo pipefail
 
 SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-AUDIT="$SP/ops/plugins/network/bin/network-shop-audit-status"
+AUDIT="$SP/ops/plugins/infra/network/bin/network-shop-audit-status"
 
 if [[ ! -x "$AUDIT" ]]; then
   echo "missing audit script: $AUDIT"

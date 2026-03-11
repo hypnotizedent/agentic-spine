@@ -28,8 +28,8 @@ files=(
   "$ROOT/docs/governance/SECRETS_POLICY.md"
   "$ROOT/docs/governance/INFRASTRUCTURE_MAP.md"
   "$ROOT/docs/product/AOF_V1_1_SURFACE_UNIFICATION.md"
-  "$ROOT/ops/plugins/observability/bin/finance-ronny-action-queue"
-  "$ROOT/ops/plugins/observability/bin/finance-stack-status"
+  "$ROOT/ops/plugins/infra/observability/bin/finance-ronny-action-queue"
+  "$ROOT/ops/plugins/infra/observability/bin/finance-stack-status"
 )
 
 for alias in "${aliases[@]}"; do

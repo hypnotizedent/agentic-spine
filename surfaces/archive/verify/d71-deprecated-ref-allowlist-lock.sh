@@ -17,7 +17,7 @@ ALLOWLIST="$ROOT/ops/bindings/deprecated-project-allowlist.yaml"
 CODE_ROOT="${HOME}/code"
 SCAN_TARGETS=(
   "${CODE_ROOT}/agentic-spine/ops/tools"
-  "${CODE_ROOT}/agentic-spine/ops/plugins/secrets"
+  "${CODE_ROOT}/agentic-spine/ops/plugins/infra/secrets"
   "${CODE_ROOT}/agentic-spine/docs/governance/SERVICE_REGISTRY.yaml"
   "${CODE_ROOT}/agentic-spine/ops/bindings/secrets.runway.contract.yaml"
   "${CODE_ROOT}/workbench/scripts"

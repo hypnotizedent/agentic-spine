@@ -5,8 +5,8 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/infra.maintenance.transaction.contract.yaml"
 WINDOW_SCRIPT="$ROOT/ops/plugins/infra/bin/infra-maintenance-window"
-DOCKER_STATUS_SCRIPT="$ROOT/ops/plugins/docker/bin/docker-compose-status"
-SERVICES_STATUS_SCRIPT="$ROOT/ops/plugins/services/bin/services-health-status"
+DOCKER_STATUS_SCRIPT="$ROOT/ops/plugins/infra/docker/bin/docker-compose-status"
+SERVICES_STATUS_SCRIPT="$ROOT/ops/plugins/infra/services/bin/services-health-status"
 
 fail() {
   echo "D182 FAIL: $*" >&2

@@ -96,8 +96,8 @@ Prereqs:
 - Confirm the destructive guard contract before any compose mutation:
 
 ```bash
-./ops/plugins/docker/bin/docker-compose-up finance-stack finance
-./ops/plugins/docker/bin/docker-compose-down finance-stack finance
+./ops/plugins/infra/docker/bin/docker-compose-up finance-stack finance
+./ops/plugins/infra/docker/bin/docker-compose-down finance-stack finance
 ```
 
 Both commands should block protected empty-state/destructive actions unless

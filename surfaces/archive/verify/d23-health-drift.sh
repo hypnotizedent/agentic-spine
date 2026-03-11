@@ -21,7 +21,7 @@ fail() { echo "D23 FAIL: $*" >&2; exit 1; }
 
 # Scope: services plugin surface + binding
 FILES=(
-  ops/plugins/services/bin/services-*
+  ops/plugins/infra/services/bin/services-*
   ops/bindings/services*.yaml
 )
 

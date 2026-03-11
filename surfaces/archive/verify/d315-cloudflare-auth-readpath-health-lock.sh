@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
 CF_LIB="$ROOT/ops/plugins/providers/cloudflare/lib/cloudflare-api.sh"
 ZONE_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-zone-list"
 INGRESS_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-tunnel-ingress-status"

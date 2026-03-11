@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CAP_SCRIPT="$ROOT/ops/plugins/docker/bin/docker-compose-status"
+CAP_SCRIPT="$ROOT/ops/plugins/infra/docker/bin/docker-compose-status"
 
 fail(){ echo "D18 FAIL: $*" >&2; exit 1; }
 

@@ -18,7 +18,7 @@ resolve_root() {
 }
 
 ROOT="$(resolve_root)"
-TEMPLATE="$ROOT/ops/plugins/host/launchd/com.ronny.mailroom-bridge.plist"
+TEMPLATE="$ROOT/ops/plugins/infra/host/launchd/com.ronny.mailroom-bridge.plist"
 MATERIALIZED="$HOME/Library/LaunchAgents/com.ronny.mailroom-bridge.plist"
 
 fail() {

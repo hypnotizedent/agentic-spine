@@ -39,7 +39,7 @@ for fn in infisical_set_secret infisical_delete_secret infisical_sync_from_env; 
 done
 
 # Verify secrets-set-interactive rejects deprecated projects.
-INTERACTIVE="$ROOT/ops/plugins/secrets/bin/secrets-set-interactive"
+INTERACTIVE="$ROOT/ops/plugins/infra/secrets/bin/secrets-set-interactive"
 if [[ -f "$INTERACTIVE" ]]; then
   grep -q 'ACTIVE_PROJECTS' "$INTERACTIVE" || fail "secrets-set-interactive missing ACTIVE_PROJECTS guard"
 fi

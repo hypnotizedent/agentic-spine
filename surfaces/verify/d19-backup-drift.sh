@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CAP_SCRIPT="$ROOT/ops/plugins/backup/bin/backup-status"
+CAP_SCRIPT="$ROOT/ops/plugins/infra/backup/bin/backup-status"
 BINDING_FILE="$ROOT/ops/bindings/backup.inventory.yaml"
 POSTURE_FILE="$ROOT/ops/bindings/backup.posture.snapshot.yaml"
 

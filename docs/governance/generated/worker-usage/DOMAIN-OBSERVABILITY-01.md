@@ -16,7 +16,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Verify Command: `./bin/ops cap run verify.pack.run observability`
 
 ## Write Scope
-- `ops/plugins/observability/`
+- `ops/plugins/infra/observability/`
 
 ## Capabilities (12)
 - `alerting.dispatch`

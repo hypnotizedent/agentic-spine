@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 LANE_SCRIPT="$ROOT/ops/plugins/lifecycle/bin/lane-standard-run"
 MINT_LOOP="$ROOT/ops/plugins/mint/bin/loop-daily"
-SERVICES_STATUS="$ROOT/ops/plugins/services/bin/services-health-status"
+SERVICES_STATUS="$ROOT/ops/plugins/infra/services/bin/services-health-status"
 MINT_STATUS="$ROOT/ops/plugins/mint/bin/modules-health"
 
 fail() {

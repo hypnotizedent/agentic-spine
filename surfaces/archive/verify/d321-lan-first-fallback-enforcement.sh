@@ -35,7 +35,7 @@ fi
 
 # ── 2. ssh-target-status must have fallback logic for lan_first ──────────
 if grep -q 'access_policy.*lan_first\|tailscale_ip\|path_used\|effective_host' \
-  "$SPINE_ROOT/ops/plugins/ssh/bin/ssh-target-status" 2>/dev/null; then
+  "$SPINE_ROOT/ops/plugins/infra/ssh/bin/ssh-target-status" 2>/dev/null; then
   check "ssh-target-status has lan_first fallback logic" "PASS"
 else
   check "ssh-target-status has lan_first fallback logic" "FAIL"
@@ -43,11 +43,11 @@ fi
 
 # ── 3. Scoped scripts must NOT hardcode shop LAN target selection ────────
 SCOPED_SCRIPTS=(
-  "$SPINE_ROOT/ops/plugins/observability/bin/finance-stack-status"
-  "$SPINE_ROOT/ops/plugins/observability/bin/observability-stack-status"
+  "$SPINE_ROOT/ops/plugins/infra/observability/bin/finance-stack-status"
+  "$SPINE_ROOT/ops/plugins/infra/observability/bin/observability-stack-status"
   "$SPINE_ROOT/ops/plugins/infra/bin/infra-docker-host-status"
-  "$SPINE_ROOT/ops/plugins/docker/bin/docker-compose-status"
-  "$SPINE_ROOT/ops/plugins/services/bin/services-health-status"
+  "$SPINE_ROOT/ops/plugins/infra/docker/bin/docker-compose-status"
+  "$SPINE_ROOT/ops/plugins/infra/services/bin/services-health-status"
   "$WORKBENCH_ROOT/agents/media/tools/src/spine-plugin-media/bin/media-status"
 )
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 REGISTRY="${SPINE_ROOT}/ops/bindings/launchd.scheduler.registry.yaml"
-SCHEDULER_STATUS_SCRIPT="${SPINE_ROOT}/ops/plugins/host/bin/launchd-scheduler-health-status"
+SCHEDULER_STATUS_SCRIPT="${SPINE_ROOT}/ops/plugins/infra/host/bin/launchd-scheduler-health-status"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 AUTO_RESTART=0
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"

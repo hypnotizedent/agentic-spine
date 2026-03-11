@@ -10,7 +10,7 @@ require_tailscale_for "docker-host"
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 SERVICE_REGISTRY="$SPINE_ROOT/docs/governance/SERVICE_REGISTRY.yaml"
-SERVICES_HEALTH="$SPINE_ROOT/ops/plugins/services/bin/services-health-status"
+SERVICES_HEALTH="$SPINE_ROOT/ops/plugins/infra/services/bin/services-health-status"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

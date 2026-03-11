@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
 DIFF_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-domain-routing-diff"
 
 fail() {

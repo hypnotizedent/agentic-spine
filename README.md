@@ -110,7 +110,7 @@ Domain capability catalogs:
 ## Secrets: the gating layer
 
 The spine treats secrets as a core invariant. Every API-facing capability is gated
-by the Infisical surface under `ops/plugins/secrets/bin`, and receipts record the
+by the Infisical surface under `ops/plugins/infra/secrets/bin`, and receipts record the
 status of those gates before any mutating work runs. Follow this flow before you
 run something that touches secrets or external APIs:
 

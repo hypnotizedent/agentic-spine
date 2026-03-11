@@ -24,12 +24,12 @@ fail() { echo "D20 FAIL: $*" >&2; exit 1; }
 # Scope: read-only secrets surface + bindings.
 # Guarded migration/cleanup tools are governed by D43 and excluded here.
 FILES=(
-  ops/plugins/secrets/bin/secrets-*
+  ops/plugins/infra/secrets/bin/secrets-*
   ops/bindings/secrets*.yaml
 )
 EXCLUDED_FILES=(
-  ops/plugins/secrets/bin/secrets-p1-root-cleanup
-  ops/plugins/secrets/bin/secrets-cohort-copy-first
+  ops/plugins/infra/secrets/bin/secrets-p1-root-cleanup
+  ops/plugins/infra/secrets/bin/secrets-cohort-copy-first
 )
 
 # Expand globs safely

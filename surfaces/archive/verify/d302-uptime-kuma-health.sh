@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 SERVICES_FILE="$ROOT/ops/bindings/services.health.yaml"
-DOCKER_STATUS="$ROOT/ops/plugins/docker/bin/docker-compose-status"
+DOCKER_STATUS="$ROOT/ops/plugins/infra/docker/bin/docker-compose-status"
 
 fail() {
   echo "D298 FAIL: $*" >&2

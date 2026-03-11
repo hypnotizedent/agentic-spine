@@ -7,9 +7,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 POLICY="$ROOT/ops/bindings/secrets.namespace.policy.yaml"
 ENFORCEMENT_CONTRACT="$ROOT/ops/bindings/secrets.enforcement.contract.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
-PLUGIN="$ROOT/ops/plugins/secrets/bin/secrets-namespace-status"
-ENFORCEMENT_PLUGIN="$ROOT/ops/plugins/secrets/bin/secrets-enforcement-status"
-COPY_PLUGIN="$ROOT/ops/plugins/secrets/bin/secrets-cohort-copy-first"
+PLUGIN="$ROOT/ops/plugins/infra/secrets/bin/secrets-namespace-status"
+ENFORCEMENT_PLUGIN="$ROOT/ops/plugins/infra/secrets/bin/secrets-enforcement-status"
+COPY_PLUGIN="$ROOT/ops/plugins/infra/secrets/bin/secrets-cohort-copy-first"
 
 fail() { echo "D43 FAIL: $*" >&2; exit 1; }
 
@@ -47,9 +47,9 @@ forbid_count="$(yq e '.rules.forbidden_root_keys | length' "$POLICY" 2>/dev/null
 [[ "$forbid_count" =~ ^[0-9]+$ ]] || fail "policy forbidden_root_keys length is invalid"
 (( forbid_count >= 1 )) || fail "policy forbidden_root_keys is empty"
 
-[[ -x "$PLUGIN" ]] || fail "missing executable plugin: ops/plugins/secrets/bin/secrets-namespace-status"
-[[ -x "$ENFORCEMENT_PLUGIN" ]] || fail "missing executable plugin: ops/plugins/secrets/bin/secrets-enforcement-status"
-[[ -x "$COPY_PLUGIN" ]] || fail "missing executable plugin: ops/plugins/secrets/bin/secrets-cohort-copy-first"
+[[ -x "$PLUGIN" ]] || fail "missing executable plugin: ops/plugins/infra/secrets/bin/secrets-namespace-status"
+[[ -x "$ENFORCEMENT_PLUGIN" ]] || fail "missing executable plugin: ops/plugins/infra/secrets/bin/secrets-enforcement-status"
+[[ -x "$COPY_PLUGIN" ]] || fail "missing executable plugin: ops/plugins/infra/secrets/bin/secrets-cohort-copy-first"
 
 rg -n '^\s*secrets\.namespace\.status:' "$CAPS" >/dev/null 2>&1 \
   || fail "capability missing: secrets.namespace.status"

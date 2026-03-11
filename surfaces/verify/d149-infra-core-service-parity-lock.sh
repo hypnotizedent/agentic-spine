@@ -99,7 +99,7 @@ if ! printf '%s\n' "$recovery_list" | grep -Fxq './bin/ops cap run infra.core.sl
 fi
 
 cap_command="$(yq -r '.capabilities."infra.core.slo.status".command // ""' "$CAPABILITIES")"
-if [[ "$cap_command" != "./ops/plugins/observability/bin/infra-core-slo-status" ]]; then
+if [[ "$cap_command" != "./ops/plugins/infra/observability/bin/infra-core-slo-status" ]]; then
   err "ops/capabilities.yaml infra.core.slo.status command mismatch"
 fi
 

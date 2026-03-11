@@ -11,7 +11,7 @@ require_tailscale_for "docker-host"
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 BINDING="${INVENTORY_PATH:-$SPINE_ROOT/ops/bindings/services.health.yaml}"
 CHECK_HEALTH="${CHECK_HEALTH:-false}"
-HEALTH_TOOL="$SPINE_ROOT/ops/plugins/services/bin/services-health-status"
+HEALTH_TOOL="$SPINE_ROOT/ops/plugins/infra/services/bin/services-health-status"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

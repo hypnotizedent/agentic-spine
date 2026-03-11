@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
 
 # Re-exec under secrets injection
 if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then

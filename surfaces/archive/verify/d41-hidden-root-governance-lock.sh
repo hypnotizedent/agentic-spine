@@ -7,7 +7,7 @@ set -euo pipefail
 # Fails on forbidden or unmanaged hidden entries at home root.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TOOL="$ROOT/ops/plugins/host/bin/host-hidden-root-inventory"
+TOOL="$ROOT/ops/plugins/infra/host/bin/host-hidden-root-inventory"
 
 [[ -x "$TOOL" ]] || { echo "D41 FAIL: inventory tool missing: $TOOL" >&2; exit 1; }
 

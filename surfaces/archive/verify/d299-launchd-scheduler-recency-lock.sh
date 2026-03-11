@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-STATUS_SCRIPT="$ROOT/ops/plugins/host/bin/launchd-scheduler-health-status"
+STATUS_SCRIPT="$ROOT/ops/plugins/infra/host/bin/launchd-scheduler-health-status"
 
 fail() {
   echo "D299 FAIL: $*" >&2

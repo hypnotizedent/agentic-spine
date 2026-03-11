@@ -3,11 +3,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PLUGIN="$ROOT/ops/plugins/secrets/bin/secrets-namespace-status"
+PLUGIN="$ROOT/ops/plugins/infra/secrets/bin/secrets-namespace-status"
 
 fail() { echo "D212 FAIL: $*" >&2; exit 1; }
 
-[[ -x "$PLUGIN" ]] || fail "missing plugin: ops/plugins/secrets/bin/secrets-namespace-status"
+[[ -x "$PLUGIN" ]] || fail "missing plugin: ops/plugins/infra/secrets/bin/secrets-namespace-status"
 
 TMP="$(mktemp)"
 set +e

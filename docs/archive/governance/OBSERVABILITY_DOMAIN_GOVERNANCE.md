@@ -19,14 +19,14 @@ scope: observability-domain-governance
 | `observability` | Domain ID | Gate domain profiles, capability domain catalog, verify packs |
 
 **Rules:**
-- No dedicated agent yet. Capabilities are owned by `ops/plugins/observability/`.
+- No dedicated agent yet. Capabilities are owned by `ops/plugins/infra/observability/`.
 - Stability/alerting capabilities are observability-domain even though they probe cross-domain services.
 
 ## 2. Authority Map
 
 | File | Purpose | SSOT For |
 |------|---------|----------|
-| `ops/plugins/observability/` | All capability scripts | Runtime implementation |
+| `ops/plugins/infra/observability/` | All capability scripts | Runtime implementation |
 | `ops/bindings/capability.domain.catalog.yaml` | Domain catalog | Canonical capability list |
 | `ops/bindings/terminal.role.contract.yaml` | Terminal role | DOMAIN-OBSERVABILITY-01 scope |
 | `ops/bindings/terminal.launcher.view.yaml` | Launcher view | UI metadata |
