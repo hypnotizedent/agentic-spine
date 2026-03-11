@@ -47,13 +47,21 @@ run_check "1. Entry Surface Parity" "startup block parity across AGENTS/CLAUDE/O
 # 2) Launcher/entry script parity
 launcher_command="${ROOT}/ops/commands/terminal-launch.sh"
 launcher_exec="${ROOT}/ops/plugins/core/session/bin/terminal-launch-exec"
-workbench_shim="${WORKBENCH_ROOT}/scripts/root/spine_terminal_entry.sh"
-if [[ -x "$launcher_command" ]] && [[ -x "$launcher_exec" ]] && [[ -f "$workbench_shim" ]] \
-  && rg -q "bin/ops[[:space:]]+terminal[[:space:]]+exec" "$workbench_shim" \
-  && rg -q "cmd_exec" "$launcher_command"; then
-  record "2. Launcher/Entry Parity" "PASS" "spine-owned launcher + exec surfaces present; workbench shim delegates to bin/ops terminal exec"
+if [[ -x "$launcher_command" ]] && [[ -x "$launcher_exec" ]] \
+  && rg -q "cmd_exec" "$launcher_command" \
+  && ! rg -n 'spine_terminal_entry\.sh|ops/commands/terminal-launch\.sh' \
+      "$WORKBENCH_ROOT/AGENTS.md" \
+      "$WORKBENCH_ROOT/dotfiles" \
+      "$WORKBENCH_ROOT/scripts" \
+      "$WORKBENCH_ROOT/docs/governance/WORKBENCH_ACTIVE_SURFACE_OWNERSHIP_REGISTRY.md" \
+      >/tmp/surface_audit_launcher_refs.out 2>/tmp/surface_audit_launcher_refs.err; then
+  record "2. Launcher/Entry Parity" "PASS" "spine-owned launcher + exec surfaces present; active workbench source has no retired shim or raw launcher-path references"
 else
-  record "2. Launcher/Entry Parity" "FAIL" "missing spine launcher surface or non-thin workbench compatibility shim"
+  launcher_err=""
+  if [[ -s /tmp/surface_audit_launcher_refs.out ]]; then
+    launcher_err="$(sed -n '1,4p' /tmp/surface_audit_launcher_refs.out | tr '\n' ' ' | xargs || true)"
+  fi
+  record "2. Launcher/Entry Parity" "FAIL" "missing spine launcher surface or active workbench source still references retired launcher compatibility paths${launcher_err:+; $launcher_err}"
 fi
 
 # 3) Capability triad parity
