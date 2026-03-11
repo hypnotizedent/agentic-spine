@@ -23,6 +23,15 @@ fail() {
   exit 1
 }
 
+display_path() {
+  local path="$1"
+  if [[ "$path" == "$ROOT/"* ]]; then
+    printf '%s\n' "${path#$ROOT/}"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
 usage() {
   cat <<'USAGE'
 calendar-surface-audit
@@ -204,14 +213,14 @@ do
 done
 
 # 5) Runtime artifact and planner checks
-if "$ROOT/ops/plugins/domains/calendar/bin/calendar-generate" >/tmp/calendar_surface_generate.out 2>/tmp/calendar_surface_generate.err; then
+if SPINE_REPO="$SPINE_RUNTIME_ROOT" "$ROOT/ops/plugins/domains/calendar/bin/calendar-generate" >/tmp/calendar_surface_generate.out 2>/tmp/calendar_surface_generate.err; then
   record_pass "calendar.generate execution pass"
 else
   detail="$(sed -n '1,3p' /tmp/calendar_surface_generate.err | tr '\n' ' ' | xargs || true)"
   record_fail "calendar.generate failed (${detail:-unknown error})"
 fi
 
-if "$ROOT/ops/plugins/infra/backup/bin/backup-calendar-generate" >/tmp/calendar_surface_backup_generate.out 2>/tmp/calendar_surface_backup_generate.err; then
+if SPINE_REPO="$SPINE_RUNTIME_ROOT" "$ROOT/ops/plugins/infra/backup/bin/backup-calendar-generate" >/tmp/calendar_surface_backup_generate.out 2>/tmp/calendar_surface_backup_generate.err; then
   record_pass "backup.calendar.generate execution pass"
 else
   detail="$(sed -n '1,3p' /tmp/calendar_surface_backup_generate.err | tr '\n' ' ' | xargs || true)"
@@ -219,7 +228,7 @@ else
 fi
 
 calendar_status_json="$(mktemp)"
-if "$ROOT/ops/plugins/domains/calendar/bin/calendar-status" --json --max-age-minutes "$MAX_AGE_MINUTES" >"$calendar_status_json" 2>/tmp/calendar_surface_status.err; then
+if SPINE_REPO="$SPINE_RUNTIME_ROOT" "$ROOT/ops/plugins/domains/calendar/bin/calendar-status" --json --max-age-minutes "$MAX_AGE_MINUTES" >"$calendar_status_json" 2>/tmp/calendar_surface_status.err; then
   cal_status="$(jq -r '.status // ""' "$calendar_status_json" 2>/dev/null || true)"
   if [[ "$cal_status" == "ok" ]]; then
     record_pass "calendar.status reports OK"
@@ -267,7 +276,7 @@ if [[ -f "$CAL_OUT_DIR/calendar-index.json" ]]; then
     record_fail "calendar index missing expected layers"
   fi
 else
-  record_fail "missing calendar index artifact: mailroom/outbox/calendar/calendar-index.json"
+  record_fail "missing calendar index artifact: $(display_path "$CAL_OUT_DIR/calendar-index.json")"
 fi
 
 for artifact in \
@@ -281,9 +290,9 @@ for artifact in \
   "$BACKUP_OUT_DIR/backup-calendar.ics"
 do
   if [[ -f "$artifact" ]]; then
-    record_pass "artifact present: ${artifact#$ROOT/}"
+    record_pass "artifact present: $(display_path "$artifact")"
   else
-    record_fail "artifact missing: ${artifact#$ROOT/}"
+    record_fail "artifact missing: $(display_path "$artifact")"
   fi
 done
 
@@ -335,7 +344,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --arg schema_version "1.0" \
     --arg status "$status" \
     --arg generated_at "$generated_at" \
-    --arg report_path "$([[ "$CHECK_ONLY" -eq 0 ]] && echo "$REPORT_FILE" || echo "")" \
+    --arg report_path "$([[ "$CHECK_ONLY" -eq 0 ]] && display_path "$REPORT_FILE" || echo "")" \
     --argjson check_only "$([[ "$CHECK_ONLY" -eq 1 ]] && echo true || echo false)" \
     --argjson checks_passed "${#passes[@]}" \
     --argjson checks_failed "${#failures[@]}" \
@@ -348,7 +357,7 @@ else
   echo "checks_passed: ${#passes[@]}"
   echo "checks_failed: ${#failures[@]}"
   if [[ "$CHECK_ONLY" -eq 0 ]]; then
-    echo "report: $REPORT_FILE"
+    echo "report: $(display_path "$REPORT_FILE")"
   fi
   if (( ${#failures[@]} > 0 )); then
     echo ""

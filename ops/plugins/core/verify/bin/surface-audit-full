@@ -9,6 +9,7 @@ spine_runtime_resolve_paths
 OUT_DIR="$(spine_resolve_mailroom_path 'evidence/verify/governance')"
 STAMP="$(date +%Y%m%d)"
 OUT_FILE="$OUT_DIR/SURFACE_AUDIT_${STAMP}.md"
+CHECK_TIMEOUT_SECONDS="${SURFACE_AUDIT_CHECK_TIMEOUT_SECONDS:-120}"
 
 mkdir -p "$OUT_DIR"
 
@@ -29,11 +30,19 @@ record() {
   fi
 }
 
+run_with_timeout() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$CHECK_TIMEOUT_SECONDS" "$@"
+  else
+    "$@"
+  fi
+}
+
 run_check() {
   local section="$1"
   local detail="$2"
   shift 2
-  if "$@" >/tmp/surface_audit_check.out 2>/tmp/surface_audit_check.err; then
+  if run_with_timeout "$@" >/tmp/surface_audit_check.out 2>/tmp/surface_audit_check.err; then
     record "$section" "PASS" "$detail"
   else
     local err
@@ -122,14 +131,14 @@ run_check "5. Domain Docs Routing Parity" "domain.docs.routes integrity" \
   bash "$ROOT/surfaces/verify/d122-domain-doc-route-lock.sh"
 
 # 6) Workbench implementation parity
-if "$ROOT/bin/ops" cap run workbench.impl.audit >/tmp/surface_audit_workbench.out 2>/tmp/surface_audit_workbench.err; then
+if run_with_timeout "$ROOT/bin/ops" cap run workbench.impl.audit >/tmp/surface_audit_workbench.out 2>/tmp/surface_audit_workbench.err; then
   record "6. Workbench Implementation Parity" "PASS" "workbench.impl.audit passed"
 else
   record "6. Workbench Implementation Parity" "FAIL" "workbench.impl.audit failed"
 fi
 
 # 7) MCP runtime parity
-if "$ROOT/bin/ops" cap run mcp.runtime.status >/tmp/surface_audit_mcp.out 2>/tmp/surface_audit_mcp.err; then
+if run_with_timeout "$ROOT/bin/ops" cap run mcp.runtime.status >/tmp/surface_audit_mcp.out 2>/tmp/surface_audit_mcp.err; then
   record "7. MCP Runtime Parity" "PASS" "mcp.runtime.status passed"
 else
   record "7. MCP Runtime Parity" "FAIL" "mcp.runtime.status failed"
@@ -137,7 +146,7 @@ fi
 
 # 8) VM authority consistency
 if [[ -f "$ROOT/ops/bindings/vm.lifecycle.yaml" && -f "$ROOT/ops/bindings/vm.lifecycle.contract.yaml" && -f "$ROOT/ops/bindings/ssh.targets.yaml" ]]; then
-  if "$ROOT/bin/ops" cap run vm.governance.audit >/tmp/surface_audit_vm.out 2>/tmp/surface_audit_vm.err; then
+  if run_with_timeout "$ROOT/bin/ops" cap run vm.governance.audit >/tmp/surface_audit_vm.out 2>/tmp/surface_audit_vm.err; then
     record "8. VM Authority Consistency" "PASS" "vm.lifecycle + vm contract + ssh targets aligned"
   else
     record "8. VM Authority Consistency" "WARN" "vm authority files exist but vm.governance.audit returned non-zero"
@@ -149,7 +158,7 @@ fi
 # 9) Predictive control readiness
 snapshot_json_tmp="$(mktemp)"
 set +e
-"$ROOT/ops/plugins/infra/observability/bin/stability-control-snapshot" --json >"$snapshot_json_tmp" 2>/tmp/surface_audit_snapshot.err
+run_with_timeout "$ROOT/ops/plugins/infra/observability/bin/stability-control-snapshot" --json >"$snapshot_json_tmp" 2>/tmp/surface_audit_snapshot.err
 snapshot_rc=$?
 set -e
 if jq -e '.capability == "stability.control.snapshot" and (.domains | length) > 0' "$snapshot_json_tmp" >/dev/null 2>&1; then
@@ -164,7 +173,7 @@ fi
 rm -f "$snapshot_json_tmp"
 
 # 10) Domain onboarding integrity
-if "$ROOT/ops/plugins/core/verify/bin/gate-topology-validate" >/tmp/surface_audit_topoval.out 2>/tmp/surface_audit_topoval.err; then
+if run_with_timeout "$ROOT/ops/plugins/core/verify/bin/gate-topology-validate" >/tmp/surface_audit_topoval.out 2>/tmp/surface_audit_topoval.err; then
   if yq e -r '.capabilities."domain.onboard.new".command // ""' "$ROOT/ops/capabilities.yaml" | grep -q .; then
     record "10. Domain Onboarding Integrity" "PASS" "domain.onboard.new + topology validation available"
   else

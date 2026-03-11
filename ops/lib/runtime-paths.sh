@@ -292,6 +292,7 @@ spine_resolve_mailroom_path() {
   local outbox="${SPINE_OUTBOX:-$HOME/code/.runtime/spine/mailroom/outbox}"
   local state="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
   local logs="${SPINE_LOGS:-$HOME/code/.runtime/spine/logs}"
+  local evidence_root="${SPINE_EVIDENCE_ROOT:-$HOME/code/.evidence/spine}"
   local receipts="${SPINE_RECEIPTS:-$HOME/code/.evidence/spine/sessions}"
   local verify_root="${SPINE_VERIFY_ROOT:-$HOME/code/.evidence/spine/verify}"
   local verify_reports_root="${SPINE_VERIFY_REPORTS_ROOT:-$HOME/code/.evidence/spine/reports/verify}"
@@ -301,45 +302,102 @@ spine_resolve_mailroom_path() {
   local agent_context_root="${SPINE_AGENT_CONTEXT_ROOT:-$HOME/code/.runtime/spine/context}"
   local domain_state="${SPINE_DOMAIN_STATE:-$HOME/code/.data}"
 
+  path="${path//\$SPINE_REPO/$repo}"
+  path="${path//\$SPINE_INBOX/$inbox}"
+  path="${path//\$SPINE_OUTBOX/$outbox}"
+  path="${path//\$SPINE_STATE/$state}"
+  path="${path//\$SPINE_LOGS/$logs}"
+  path="${path//\$SPINE_EVIDENCE_ROOT/$evidence_root}"
+  path="${path//\$SPINE_RECEIPTS/$receipts}"
+  path="${path//\$SPINE_VERIFY_ROOT/$verify_root}"
+  path="${path//\$SPINE_VERIFY_REPORTS_ROOT/$verify_reports_root}"
+  path="${path//\$SPINE_AGENT_CONTEXT_ROOT/$agent_context_root}"
+  path="${path//\$SPINE_DOMAIN_STATE/$domain_state}"
+
   case "$path" in
     /*)
       printf '%s\n' "$path"
       ;;
+    mailroom/inbox)
+      printf '%s\n' "$inbox"
+      ;;
     mailroom/inbox/*)
       printf '%s\n' "$inbox/${path#mailroom/inbox/}"
+      ;;
+    mailroom/state)
+      printf '%s\n' "$state"
       ;;
     mailroom/state/*)
       printf '%s\n' "$state/${path#mailroom/state/}"
       ;;
+    mailroom/outbox)
+      printf '%s\n' "$outbox"
+      ;;
     mailroom/outbox/*)
       printf '%s\n' "$outbox/${path#mailroom/outbox/}"
+      ;;
+    mailroom/logs)
+      printf '%s\n' "$logs"
       ;;
     mailroom/logs/*)
       printf '%s\n' "$logs/${path#mailroom/logs/}"
       ;;
+    receipts/sessions)
+      printf '%s\n' "$receipts"
+      ;;
     receipts/sessions/*)
       printf '%s\n' "$receipts/${path#receipts/sessions/}"
+      ;;
+    evidence/sessions)
+      printf '%s\n' "$receipts"
+      ;;
+    evidence/sessions/*)
+      printf '%s\n' "$receipts/${path#evidence/sessions/}"
+      ;;
+    receipts/audits)
+      printf '%s\n' "$verify_root"
       ;;
     receipts/audits/*)
       printf '%s\n' "$verify_root/${path#receipts/audits/}"
       ;;
+    evidence/verify)
+      printf '%s\n' "$verify_root"
+      ;;
     evidence/verify/*)
       printf '%s\n' "$verify_root/${path#evidence/verify/}"
+      ;;
+    evidence/reports)
+      printf '%s\n' "$verify_reports_root"
       ;;
     evidence/reports/*)
       printf '%s\n' "$verify_reports_root/${path#evidence/reports/}"
       ;;
+    evidence/loop-closeouts)
+      printf '%s\n' "$loop_closeouts_root"
+      ;;
     evidence/loop-closeouts/*)
       printf '%s\n' "$loop_closeouts_root/${path#evidence/loop-closeouts/}"
+      ;;
+    evidence/census)
+      printf '%s\n' "$census_root"
       ;;
     evidence/census/*)
       printf '%s\n' "$census_root/${path#evidence/census/}"
       ;;
+    runtime/verify)
+      printf '%s\n' "$verify_state_root"
+      ;;
     runtime/verify/*)
       printf '%s\n' "$verify_state_root/${path#runtime/verify/}"
       ;;
+    runtime/context)
+      printf '%s\n' "$agent_context_root"
+      ;;
     runtime/context/*)
       printf '%s\n' "$agent_context_root/${path#runtime/context/}"
+      ;;
+    runtime/domain-state)
+      printf '%s\n' "$domain_state"
       ;;
     runtime/domain-state/*)
       printf '%s\n' "$domain_state/${path#runtime/domain-state/}"
