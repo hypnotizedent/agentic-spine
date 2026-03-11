@@ -17,6 +17,8 @@ CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
 ALIAS_CONTRACT="$ROOT/ops/bindings/mail.archiver.alias.boundary.contract.yaml"
 LINKAGE="$ROOT/ops/bindings/mail.archiver.account.linkage.contract.yaml"
+# shellcheck source=ops/lib/ssh-resolve.sh
+source "$ROOT/ops/lib/ssh-resolve.sh"
 
 TARGET_ID=""
 JSON=0
@@ -73,7 +75,13 @@ TARGET_PORT="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port /
 [[ -n "$TARGET_HOST" && "$TARGET_HOST" != "null" ]] || fail "ssh target '$TARGET_ID' missing host"
 
 SSH_OPTS="-p $TARGET_PORT -o ConnectTimeout=${DEF_TO} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-SSH_REF="${TARGET_USER}@${TARGET_HOST}"
+TARGET_RESOLUTION="$(ssh_resolve_ssh_host_with_fallback "$TARGET_ID" "$DEF_TO" || true)"
+TARGET_EFFECTIVE_HOST="$(echo "$TARGET_RESOLUTION" | awk '{print $1}')"
+TARGET_EFFECTIVE_PATH="$(echo "$TARGET_RESOLUTION" | awk '{print $2}')"
+[[ -n "$TARGET_EFFECTIVE_HOST" && "$TARGET_EFFECTIVE_PATH" != "unreachable" ]] || \
+  fail "ssh target '$TARGET_ID' unreachable"
+
+SSH_REF="${TARGET_USER}@${TARGET_EFFECTIVE_HOST}"
 
 DB_CONTAINER="mail-archiver-db"
 DB_USER="mailuser"
@@ -85,7 +93,7 @@ ssh_psql() {
 }
 
 echo "=== Mail-Archiver Overlap Classification ==="
-echo "target: $TARGET_ID ($SSH_REF)"
+echo "target: $TARGET_ID ($SSH_REF path=$TARGET_EFFECTIVE_PATH)"
 echo "generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo ""
 

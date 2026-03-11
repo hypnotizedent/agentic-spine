@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
 CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/communications.stack.contract.yaml}"
 SSH_BINDING="${SSH_TARGETS_FILE:-$ROOT/ops/bindings/ssh.targets.yaml}"
+# shellcheck source=ops/lib/ssh-resolve.sh
+source "$ROOT/ops/lib/ssh-resolve.sh"
 
 TARGET_ID=""
 TAIL_LINES=800
@@ -95,7 +97,13 @@ if [[ -n "$TARGET_EXTRA_OPTS" && "$TARGET_EXTRA_OPTS" != "null" ]]; then
   SSH_OPTS+=("${EXTRA_OPTS[@]}")
 fi
 
-SSH_TARGET="${TARGET_USER}@${TARGET_HOST}"
+TARGET_RESOLUTION="$(ssh_resolve_ssh_host_with_fallback "$TARGET_ID" "$TARGET_TO" || true)"
+TARGET_EFFECTIVE_HOST="$(echo "$TARGET_RESOLUTION" | awk '{print $1}')"
+TARGET_EFFECTIVE_PATH="$(echo "$TARGET_RESOLUTION" | awk '{print $2}')"
+[[ -n "$TARGET_EFFECTIVE_HOST" && "$TARGET_EFFECTIVE_PATH" != "unreachable" ]] || \
+  fail "ssh target '$TARGET_ID' unreachable"
+
+SSH_TARGET="${TARGET_USER}@${TARGET_EFFECTIVE_HOST}"
 
 read_remote_meta() {
   ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "bash -s -- \"$NONBOOT_ROOT\" \"$APP_CONTAINER\" \"$DB_CONTAINER\" \"$STALWART_CONTAINER\"" <<'EOS'
