@@ -4,14 +4,14 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
-CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
-ZONE_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-zone-list"
-INGRESS_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-tunnel-ingress-status"
-INVENTORY_SYNC_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-inventory-sync"
-PORTFOLIO_STATUS_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-domains-portfolio-status"
-SERVICE_PUBLISH_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-service-publish"
-REGISTRAR_STATUS_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-registrar-status"
-TOKEN_HEALTH_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-token-health"
+CF_LIB="$ROOT/ops/plugins/providers/cloudflare/lib/cloudflare-api.sh"
+ZONE_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-zone-list"
+INGRESS_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-tunnel-ingress-status"
+INVENTORY_SYNC_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-inventory-sync"
+PORTFOLIO_STATUS_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-domains-portfolio-status"
+SERVICE_PUBLISH_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-service-publish"
+REGISTRAR_STATUS_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-registrar-status"
+TOKEN_HEALTH_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-token-health"
 
 fail() {
   echo "D315 FAIL: $*" >&2

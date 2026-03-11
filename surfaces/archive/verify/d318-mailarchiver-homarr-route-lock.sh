@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
 ROUTING_REGISTRY="$ROOT/docs/governance/DOMAIN_ROUTING_REGISTRY.yaml"
-INGRESS_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-tunnel-ingress-status"
+INGRESS_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-tunnel-ingress-status"
 
 MAIL_HOST="mail-archive.ronny.works"
 MAIL_SERVICE="http://mail-archiver:5100"

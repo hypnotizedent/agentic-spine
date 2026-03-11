@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-GA_SCRIPT="$ROOT/ops/plugins/github/bin/github-actions-status"
+GA_SCRIPT="$ROOT/ops/plugins/providers/github/bin/github-actions-status"
 
 # 1) check if script exists (warn if not - capability may not be merged yet)
 if [ ! -f "$GA_SCRIPT" ]; then
@@ -15,7 +15,7 @@ fi
 DENY_RE='(ronny-ops|/ronny-ops|~/ronny-ops|LaunchAgents|\.plist\b|cron\b|~/agent\b|state/|receipts/|~/logs\b|/logs/)'
 
 TARGETS=(
-  "$ROOT/ops/plugins/github"
+  "$ROOT/ops/plugins/providers/github"
 )
 
 HITS="$(grep -RInE --binary-files=without-match "$DENY_RE" "${TARGETS[@]}" 2>/dev/null || true)"

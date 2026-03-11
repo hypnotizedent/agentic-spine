@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+CF_LIB="$ROOT/ops/plugins/providers/cloudflare/lib/cloudflare-api.sh"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+source "$CF_LIB"
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+cf_require_auth || exit $?
+
+ZONES="$(cf_api_get "${CF_API}/zones?per_page=50")" || {
+  echo "STOP: failed to fetch zones" >&2
+  exit 2
+}
+
+TMP_ZONES="$(mktemp)"
+trap 'rm -f "$TMP_ZONES" 2>/dev/null || true' EXIT
+printf '%s\n' "$ZONES" > "$TMP_ZONES"
+
+zones_tsv="$(python3 - "$TMP_ZONES" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data = json.load(f)
+if not data.get("success", False):
+    raise SystemExit(2)
+for z in data.get("result", []):
+    print(f"{z.get('id','')}\t{z.get('name','')}")
+PY
+)"
+
+echo "cloudflare.dns.status"
+echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
+echo "zones: $(printf '%s\n' "$zones_tsv" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+while IFS=$'\t' read -r zid name; do
+  [[ -n "$zid" ]] || continue
+  dns_json="$(cf_api_get "${CF_API}/zones/${zid}/dns_records?per_page=1" || true)"
+  if [[ -z "$dns_json" ]]; then
+    echo "- ${name}: STOP (dns_records request failed)"
+    continue
+  fi
+  total="$(printf '%s\n' "$dns_json" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+if not data.get("success", False):
+    print("")
+else:
+    print((data.get("result_info") or {}).get("total_count", 0))
+')"
+  if [[ -z "$total" ]]; then
+    echo "- ${name}: STOP (dns_records success=false)"
+  else
+    echo "- ${name}: dns_records=${total}"
+  fi
+done <<< "$zones_tsv"

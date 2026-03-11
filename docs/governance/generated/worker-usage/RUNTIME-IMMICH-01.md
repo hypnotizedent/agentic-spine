@@ -16,7 +16,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Verify Command: `./bin/ops cap run verify.pack.run immich`
 
 ## Write Scope
-- `ops/plugins/immich/`
+- `ops/plugins/domains/immich/`
 - `../agentic-foundation/docs/agents/immich-agent.contract.md`
 
 ## Capabilities (7)

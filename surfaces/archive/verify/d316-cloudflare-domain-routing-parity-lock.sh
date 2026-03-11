@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
-DIFF_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-domain-routing-diff"
+DIFF_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-domain-routing-diff"
 
 fail() {
   echo "D316 FAIL: $*" >&2

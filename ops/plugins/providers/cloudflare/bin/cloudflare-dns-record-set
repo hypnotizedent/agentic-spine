@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# cloudflare-dns-record-set — create or update a DNS record in a Cloudflare zone
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+CF_LIB="$ROOT/ops/plugins/providers/cloudflare/lib/cloudflare-api.sh"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+source "$CF_LIB"
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+cf_require_auth || exit $?
+
+usage() {
+  cat <<'EOF'
+Usage: cloudflare-dns-record-set (--zone-id ZONE_ID | --zone ZONE_NAME) --type TYPE --name NAME --content CONTENT [OPTIONS]
+
+Required:
+  --zone-id   ID    Cloudflare zone ID
+  --zone      NAME  Cloudflare zone name (auto-resolves to zone ID)
+  --type      TYPE  Record type (A, AAAA, CNAME, MX, TXT, SRV, etc.)
+  --name      NAME  Record name (FQDN or @ for root)
+  --content   VAL   Record value/content
+
+Optional:
+  --ttl       SEC   TTL in seconds (default: 1 = auto)
+  --proxied         Enable Cloudflare proxy (orange cloud)
+  --no-proxy        Disable Cloudflare proxy (DNS-only)
+  --priority  NUM   MX/SRV priority
+  --comment   TEXT  Record comment
+  --json            Emit JSON output
+  --dry-run         Show what would be done without making changes
+
+Creates the record if it does not exist. Updates if a matching record
+(same type + name) already exists. For record types that allow multiple
+records (MX, TXT), use --content to match the specific record to update.
+EOF
+  exit 0
+}
+
+# Defaults
+ZONE_ID="" ZONE_NAME="" TYPE="" NAME="" CONTENT=""
+TTL=1 PROXIED="" PRIORITY="" COMMENT="" JSON_OUT=0 DRY_RUN=0
+
+while (( $# > 0 )); do
+  case "$1" in
+    --zone-id)   ZONE_ID="$2"; shift 2 ;;
+    --zone)      ZONE_NAME="$2"; shift 2 ;;
+    --type)      TYPE="$2"; shift 2 ;;
+    --name)      NAME="$2"; shift 2 ;;
+    --content)   CONTENT="$2"; shift 2 ;;
+    --ttl)       TTL="$2"; shift 2 ;;
+    --proxied)   PROXIED="true"; shift ;;
+    --no-proxy)  PROXIED="false"; shift ;;
+    --priority)  PRIORITY="$2"; shift 2 ;;
+    --comment)   COMMENT="$2"; shift 2 ;;
+    --json)      JSON_OUT=1; shift ;;
+    --dry-run)   DRY_RUN=1; shift ;;
+    -h|--help)   usage ;;
+    --)          shift ;;
+    *)           echo "Unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+# Validate required args
+if [[ -z "$ZONE_ID" && -z "$ZONE_NAME" ]]; then
+  echo "STOP: --zone-id or --zone required" >&2
+  exit 1
+fi
+[[ -z "$TYPE" ]]    && { echo "STOP: --type required" >&2; exit 1; }
+[[ -z "$NAME" ]]    && { echo "STOP: --name required" >&2; exit 1; }
+[[ -z "$CONTENT" ]] && { echo "STOP: --content required" >&2; exit 1; }
+
+TYPE="$(echo "$TYPE" | tr '[:lower:]' '[:upper:]')"
+
+if [[ -z "$ZONE_ID" ]]; then
+  ZONE_ID="$(cf_zone_id_resolve "$CF_API" "$BINDING_FILE" "" "$ZONE_NAME" || true)"
+fi
+[[ -n "$ZONE_ID" ]] || { echo "STOP: unable to resolve zone id (zone=${ZONE_NAME:-unset})" >&2; exit 2; }
+
+# Build JSON payload
+PAYLOAD=$(python3 -c "
+import json, sys
+p = {'type': '$TYPE', 'name': '$NAME', 'content': '''$CONTENT''', 'ttl': $TTL}
+proxied = '$PROXIED'
+priority = '$PRIORITY'
+comment = '$COMMENT'
+if proxied: p['proxied'] = proxied == 'true'
+if priority: p['priority'] = int(priority)
+if comment: p['comment'] = comment
+print(json.dumps(p))
+")
+
+# Search for existing record (same type + name)
+EXISTING="$(cf_api_get "${CF_API}/zones/${ZONE_ID}/dns_records?type=${TYPE}&name=${NAME}&per_page=100")" || {
+  echo "STOP: failed to query existing records" >&2
+  exit 3
+}
+
+RECORD_ID=$(echo "$EXISTING" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+results = data.get('result', [])
+content_match = '''$CONTENT'''
+# For multi-value types (MX, TXT), match on content too
+multi_types = {'MX', 'TXT', 'SRV'}
+record_type = '$TYPE'
+for r in results:
+    if record_type in multi_types:
+        if r.get('content') == content_match:
+            print(r['id']); sys.exit(0)
+    else:
+        print(r['id']); sys.exit(0)
+print('')
+" 2>/dev/null || echo "")
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ -n "$RECORD_ID" ]]; then
+    ACTION="update"
+  else
+    ACTION="create"
+  fi
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    echo "{\"dry_run\": true, \"action\": \"$ACTION\", \"zone_id\": \"$ZONE_ID\", \"type\": \"$TYPE\", \"name\": \"$NAME\", \"record_id\": \"${RECORD_ID:-null}\"}"
+  else
+    echo "cloudflare.dns.record.set (dry-run)"
+    echo "action: $ACTION"
+    echo "zone_id: $ZONE_ID"
+    echo "type: $TYPE"
+    echo "name: $NAME"
+    echo "content: $CONTENT"
+    [[ -n "$RECORD_ID" ]] && echo "record_id: $RECORD_ID"
+    echo "status: DRY-RUN"
+  fi
+  exit 0
+fi
+
+if [[ -n "$RECORD_ID" ]]; then
+  # Update existing record
+  RESULT="$(cf_api_put "${CF_API}/zones/${ZONE_ID}/dns_records/${RECORD_ID}" "$PAYLOAD")" || {
+    echo "STOP: failed to update record $RECORD_ID" >&2
+    exit 4
+  }
+  ACTION="updated"
+else
+  # Create new record
+  RESULT="$(cf_api_post "${CF_API}/zones/${ZONE_ID}/dns_records" "$PAYLOAD")" || {
+    echo "STOP: failed to create record" >&2
+    exit 5
+  }
+  ACTION="created"
+fi
+
+# Extract result fields
+RESULT_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('result',{}).get('id',''))" 2>/dev/null || echo "")
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  echo "$RESULT" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+r = data.get('result', {})
+out = {
+    'capability': 'cloudflare.dns.record.set',
+    'status': 'ok',
+    'action': '$ACTION',
+    'record': {
+        'id': r.get('id'),
+        'type': r.get('type'),
+        'name': r.get('name'),
+        'content': r.get('content'),
+        'proxied': r.get('proxied'),
+        'ttl': r.get('ttl'),
+    }
+}
+print(json.dumps(out, indent=2))
+"
+else
+  echo "cloudflare.dns.record.set"
+  echo "action: $ACTION"
+  echo "zone_id: $ZONE_ID"
+  echo "type: $TYPE"
+  echo "name: $NAME"
+  echo "content: $CONTENT"
+  echo "record_id: $RESULT_ID"
+  [[ -n "$PROXIED" ]] && echo "proxied: $PROXIED"
+  echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
+  echo "status: OK"
+fi

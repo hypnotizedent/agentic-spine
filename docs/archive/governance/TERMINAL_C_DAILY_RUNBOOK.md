@@ -20,7 +20,7 @@ Canonical operating model for parallel terminal work without collisions.
 |------|------|-------|
 | SPINE-CONTROL-01 | control-plane | bin/, ops/, surfaces/, docs/governance/, docs/core/, docs/product/, docs/brain/, mailroom/ |
 | SPINE-AUDIT-01 | observation | receipts/, docs/governance/_audits/ |
-| RUNTIME-IMMICH-01 | domain-runtime | ops/plugins/immich/, ops/bindings/immich.* |
+| RUNTIME-IMMICH-01 | domain-runtime | ops/plugins/domains/immich/, ops/bindings/immich.* |
 | DOMAIN-HA-01 | domain-runtime | ops/plugins/ha/, ops/bindings/ha.*, z2m.*, home.* |
 | DEPLOY-MINT-01 | domain-runtime | ops/plugins/mint/, docs/governance/MINT_* |
 

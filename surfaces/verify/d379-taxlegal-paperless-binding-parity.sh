@@ -53,19 +53,19 @@ else
 fi
 
 # ── Check 6: Ingest script exists and is executable ──────────────────────
-INGEST_SCRIPT="$ROOT/ops/plugins/taxlegal/bin/taxlegal-source-ingest"
+INGEST_SCRIPT="$ROOT/ops/plugins/domains/taxlegal/bin/taxlegal-source-ingest"
 if [[ -x "$INGEST_SCRIPT" ]]; then
   pass
 else
-  err "ingest script missing or not executable: ops/plugins/taxlegal/bin/taxlegal-source-ingest"
+  err "ingest script missing or not executable: ops/plugins/domains/taxlegal/bin/taxlegal-source-ingest"
 fi
 
 # ── Check 7: Recall script exists and is executable ──────────────────────
-RECALL_SCRIPT="$ROOT/ops/plugins/taxlegal/bin/taxlegal-source-recall"
+RECALL_SCRIPT="$ROOT/ops/plugins/domains/taxlegal/bin/taxlegal-source-recall"
 if [[ -x "$RECALL_SCRIPT" ]]; then
   pass
 else
-  err "recall script missing or not executable: ops/plugins/taxlegal/bin/taxlegal-source-recall"
+  err "recall script missing or not executable: ops/plugins/domains/taxlegal/bin/taxlegal-source-recall"
 fi
 
 # ── Check 8: Source lock entries have required fields ────────────────────

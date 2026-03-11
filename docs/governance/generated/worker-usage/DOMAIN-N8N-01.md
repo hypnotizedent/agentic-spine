@@ -16,7 +16,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Verify Command: `./bin/ops cap run verify.pack.run n8n`
 
 ## Write Scope
-- `ops/plugins/n8n/`
+- `ops/plugins/domains/n8n/`
 - `../agentic-foundation/docs/agents/n8n-agent.contract.md`
 
 ## Capabilities (11)

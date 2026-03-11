@@ -22,7 +22,7 @@ fail() { echo "D24 FAIL: $*" >&2; exit 1; }
 [[ -f "$ROOT/.github/labels.yml" ]] || fail ".github/labels.yml not found"
 
 # 2) Verify github-labels-status script exists
-GL_SCRIPT="$ROOT/ops/plugins/github/bin/github-labels-status"
+GL_SCRIPT="$ROOT/ops/plugins/providers/github/bin/github-labels-status"
 [[ -f "$GL_SCRIPT" ]] || fail "github-labels-status script not found"
 
 # Scope: labels script + github plugin surface

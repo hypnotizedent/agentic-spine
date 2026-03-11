@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CF_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-status"
+CF_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-status"
 
 # 1) must exist
 if [ ! -f "$CF_SCRIPT" ]; then
@@ -16,7 +16,7 @@ DENY_RE='(ronny-ops|/ronny-ops|~/ronny-ops|LaunchAgents|\.plist\b|cron\b|~/agent
 
 # Search in cloudflare plugin surface + capability registry only
 TARGETS=(
-  "$ROOT/ops/plugins/cloudflare"
+  "$ROOT/ops/plugins/providers/cloudflare"
 )
 
 HITS="$(grep -RInE --binary-files=without-match "$DENY_RE" "${TARGETS[@]}" 2>/dev/null || true)"

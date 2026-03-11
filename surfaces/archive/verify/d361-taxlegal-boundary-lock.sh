@@ -18,7 +18,7 @@ if command -v yq >/dev/null 2>&1 && [[ -f "$CASE_CONTRACT" ]]; then
     CASE_BASE="$ROOT/$case_root"
   fi
 fi
-BIN_DIR="$ROOT/ops/plugins/taxlegal/bin"
+BIN_DIR="$ROOT/ops/plugins/domains/taxlegal/bin"
 
 # If no case directories exist, nothing to scan
 if [[ ! -d "$CASE_BASE" ]]; then

@@ -22,7 +22,7 @@ fail_v() {
 # Scan n8n workflow files for direct Resend API calls
 N8N_DIRS=()
 [[ -d "$WORKBENCH_ROOT/infra/compose/n8n/workflows" ]] && N8N_DIRS+=("$WORKBENCH_ROOT/infra/compose/n8n/workflows")
-[[ -d "$ROOT/ops/plugins/n8n" ]] && N8N_DIRS+=("$ROOT/ops/plugins/n8n")
+[[ -d "$ROOT/ops/plugins/domains/n8n" ]] && N8N_DIRS+=("$ROOT/ops/plugins/domains/n8n")
 
 if [[ ${#N8N_DIRS[@]} -eq 0 ]]; then
   echo "D272 PASS: n8n-resend-direct-bypass-lock valid (no n8n workflow directories found)"

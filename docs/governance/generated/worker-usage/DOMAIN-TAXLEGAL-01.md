@@ -16,7 +16,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Verify Command: `./bin/ops cap run verify.core.run`
 
 ## Write Scope
-- `ops/plugins/taxlegal/`
+- `ops/plugins/domains/taxlegal/`
 - `../agentic-foundation/docs/agents/tax-legal-agent.contract.md`
 - `runtime/domain-state/taxlegal/cases/`
 
