@@ -4,7 +4,7 @@
 # Enforces quote-created alerts to stay on Resend and blocks Microsoft/Stalwart drift.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 PROVIDERS="$ROOT/ops/bindings/communications.providers.contract.yaml"
 MINT_MODULES_ROOT="${MINT_MODULES_ROOT:-$HOME/code/mint-modules}"
 QUOTE_CONFIG="$MINT_MODULES_ROOT/quote-page/src/config.ts"
@@ -33,7 +33,6 @@ quote_config_path = Path(sys.argv[2]).expanduser().resolve()
 
 violations: list[str] = []
 
-# Contract checks.
 providers_doc = yaml.safe_load(providers_path.read_text(encoding="utf-8")) or {}
 transactional = providers_doc.get("transactional", {})
 if transactional.get("customer_notifications_canonical_provider") != "resend":
@@ -64,7 +63,6 @@ else:
             f"routing.message_types.quote_created.email_provider must be resend (actual={quote_created.get('email_provider')!r})"
         )
 
-# Quote-page default webhook path must be stable and workflow-id agnostic.
 quote_config_text = quote_config_path.read_text(encoding="utf-8")
 if "/webhook/quote.created" not in quote_config_text:
     violations.append(

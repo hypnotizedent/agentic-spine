@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
-# Compatibility shim: active preflight/check callers still resolve D48 here.
+# TRIAGE: classify lifecycle ownership with worktree.lifecycle.reconcile, then close
+# explicitly. D48 is non-destructive and lifecycle-aware.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-exec "$ROOT/surfaces/archive/verify/d48-codex-worktree-hygiene.sh" "$@"
+SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+SPINE_REPO="${SPINE_REPO:-$(git -C "$SPINE_CODE" rev-parse --show-toplevel 2>/dev/null || echo "$SPINE_CODE")}"
+SCRIPT="$SPINE_REPO/ops/plugins/core/ops/bin/worktree-lifecycle-reconcile"
+
+if [[ ! -x "$SCRIPT" ]]; then
+  echo "D48 FAIL: missing lifecycle reconcile script: $SCRIPT" >&2
+  exit 1
+fi
+
+exec "$SCRIPT" --gate
