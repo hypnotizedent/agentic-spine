@@ -6,6 +6,7 @@ source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-gu
 require_tailscale_for "download-stack"
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+FOUNDATION_ROOT="${SPINE_FOUNDATION_ROOT:-$HOME/code/agentic-foundation}"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 
 fail() {
@@ -62,7 +63,7 @@ COMPARED=0
 SKIPPED=0
 
 for stack in download-stack streaming-stack; do
-  local_compose="$ROOT/ops/staged/${stack}/docker-compose.yml"
+  local_compose="$FOUNDATION_ROOT/ops/staged/${stack}/docker-compose.yml"
   if [[ ! -f "$local_compose" ]]; then
     err "${stack}: missing staged compose file: $local_compose"
     continue

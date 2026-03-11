@@ -5,6 +5,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 WORKBENCH="${SPINE_WORKBENCH:-$HOME/code/workbench}"
+FOUNDATION_ROOT="${SPINE_FOUNDATION_ROOT:-$HOME/code/agentic-foundation}"
 PROFILE="$ROOT/ops/bindings/tenant.profile.yaml"
 LAUNCHD_CONTRACT="$ROOT/ops/bindings/launchd.runtime.contract.yaml"
 LAUNCHD_REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
@@ -58,9 +59,9 @@ if [[ -f "$f" ]]; then
   check "$f" "schedule.timezone" "$val"
 fi
 
-# ── Spine staged pihole compose ──
+# ── Foundation staged pihole compose ──
 
-f="$ROOT/ops/staged/pihole/docker-compose.yml"
+f="$FOUNDATION_ROOT/ops/staged/pihole/docker-compose.yml"
 if [[ -f "$f" ]]; then
   val="$(grep 'TZ=' "$f" | head -1 | sed 's/.*TZ=//' | tr -d ' "'"'"'' || echo "")"
   check "$f" "TZ env" "$val"

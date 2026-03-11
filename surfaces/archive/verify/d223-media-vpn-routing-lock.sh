@@ -9,10 +9,11 @@ source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-gu
 require_tailscale_for "download-stack"
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+FOUNDATION_ROOT="${SPINE_FOUNDATION_ROOT:-$HOME/code/agentic-foundation}"
 VPN_BINDING="$ROOT/ops/bindings/vpn.provider.yaml"
 MEDIA_BINDING="$ROOT/ops/bindings/media.services.yaml"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
-COMPOSE="$ROOT/ops/staged/download-stack/docker-compose.yml"
+COMPOSE="$FOUNDATION_ROOT/ops/staged/download-stack/docker-compose.yml"
 
 ERRORS=0
 err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }
