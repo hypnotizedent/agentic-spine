@@ -44,7 +44,6 @@ required_external_dirs=(
   "$SPINE_FOUNDATION_ROOT/ops/archive"
   "$SPINE_FOUNDATION_ROOT/ops/domains"
   "$SPINE_FOUNDATION_ROOT/ops/infra"
-  "$SPINE_FOUNDATION_ROOT/ops/staged"
 )
 
 for path in "${required_external_dirs[@]}"; do

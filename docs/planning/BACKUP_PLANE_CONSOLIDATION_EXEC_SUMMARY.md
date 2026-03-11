@@ -107,12 +107,12 @@ Need to update `destination_lane` in `ops/bindings/backup.inventory.yaml`:
 
 ### 📝 Backup Scripts Need Updates
 
-**Created but not deployed** (in `ops/staged/`):
-- `finance-stack-backup-730xd.sh`
-- `mint-postgres-backup-730xd.sh`
-- `stalwart-backup-730xd.sh`
-- `mail-archiver-backup-730xd.sh`
-- `infisical-backup.sh`
+**Created but not deployed** (in `agentic-foundation/ops/{domains,infra}/`):
+- `agentic-foundation/ops/domains/finance-stack/finance-stack-backup.sh`
+- `agentic-foundation/ops/domains/mint-data/mint-postgres-backup.sh`
+- `agentic-foundation/ops/domains/communications-stack/stalwart-backup.sh`
+- `agentic-foundation/ops/domains/communications-stack/mail-archiver-backup.sh`
+- `agentic-foundation/ops/infra/infra-core/infisical-backup.sh`
 
 **Action Required**:
 1. Review and test each script
