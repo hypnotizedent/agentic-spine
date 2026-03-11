@@ -94,12 +94,15 @@ spine_runtime_resolve_paths() {
   local evidence_root="${SPINE_EVIDENCE_ROOT:-}"
   local receipts="${SPINE_RECEIPTS:-}"
   local verify_root="${SPINE_VERIFY_ROOT:-}"
+  local verify_reports_root="${SPINE_VERIFY_REPORTS_ROOT:-}"
   local verify_indexes_dir="${SPINE_VERIFY_INDEXES_DIR:-}"
   local receipt_index_file="${SPINE_RECEIPT_INDEX_FILE:-}"
   local verify_history_dir="${SPINE_VERIFY_HISTORY_DIR:-}"
   local verify_failure_history_file="${SPINE_VERIFY_FAILURE_HISTORY_FILE:-}"
   local verify_state_root="${SPINE_VERIFY_STATE_ROOT:-}"
   local verify_pass_streak_file="${SPINE_VERIFY_PASS_STREAK_FILE:-}"
+  local loop_closeouts_root="${SPINE_LOOP_CLOSEOUTS_ROOT:-}"
+  local census_root="${SPINE_CENSUS_ROOT:-}"
   local cap_runs="${SPINE_CAP_RUNS_ROOT:-}"
   local data_root="${SPINE_DATA_ROOT:-}"
   local backups_root="${SPINE_BACKUPS_ROOT:-}"
@@ -180,6 +183,12 @@ spine_runtime_resolve_paths() {
   [[ -n "$verify_root" ]] || verify_root="$evidence_root/verify"
   verify_root="$(_spine_expand_home_token "$verify_root")"
 
+  if [[ -z "$verify_reports_root" ]]; then
+    verify_reports_root="$(_spine_runtime_contract_value "$contract_file" '.verify_reports_root' '')"
+  fi
+  [[ -n "$verify_reports_root" ]] || verify_reports_root="$evidence_root/reports/verify"
+  verify_reports_root="$(_spine_expand_home_token "$verify_reports_root")"
+
   [[ -n "$verify_indexes_dir" ]] || verify_indexes_dir="$verify_root/indexes"
   verify_indexes_dir="$(_spine_expand_home_token "$verify_indexes_dir")"
 
@@ -197,6 +206,18 @@ spine_runtime_resolve_paths() {
 
   [[ -n "$verify_pass_streak_file" ]] || verify_pass_streak_file="$verify_state_root/gate-pass-streak.json"
   verify_pass_streak_file="$(_spine_expand_home_token "$verify_pass_streak_file")"
+
+  if [[ -z "$loop_closeouts_root" ]]; then
+    loop_closeouts_root="$(_spine_runtime_contract_value "$contract_file" '.loop_closeouts_root' '')"
+  fi
+  [[ -n "$loop_closeouts_root" ]] || loop_closeouts_root="$evidence_root/loop-closeouts"
+  loop_closeouts_root="$(_spine_expand_home_token "$loop_closeouts_root")"
+
+  if [[ -z "$census_root" ]]; then
+    census_root="$(_spine_runtime_contract_value "$contract_file" '.census_root' '')"
+  fi
+  [[ -n "$census_root" ]] || census_root="$evidence_root/census"
+  census_root="$(_spine_expand_home_token "$census_root")"
 
   if [[ -z "$cap_runs" ]]; then
     cap_runs="$(_spine_runtime_contract_value "$contract_file" '.cap_runs_root' '')"
@@ -246,12 +267,15 @@ spine_runtime_resolve_paths() {
     SPINE_EVIDENCE_ROOT="$evidence_root" \
     SPINE_RECEIPTS="$receipts" \
     SPINE_VERIFY_ROOT="$verify_root" \
+    SPINE_VERIFY_REPORTS_ROOT="$verify_reports_root" \
     SPINE_VERIFY_INDEXES_DIR="$verify_indexes_dir" \
     SPINE_RECEIPT_INDEX_FILE="$receipt_index_file" \
     SPINE_VERIFY_HISTORY_DIR="$verify_history_dir" \
     SPINE_VERIFY_FAILURE_HISTORY_FILE="$verify_failure_history_file" \
     SPINE_VERIFY_STATE_ROOT="$verify_state_root" \
     SPINE_VERIFY_PASS_STREAK_FILE="$verify_pass_streak_file" \
+    SPINE_LOOP_CLOSEOUTS_ROOT="$loop_closeouts_root" \
+    SPINE_CENSUS_ROOT="$census_root" \
     SPINE_CAP_RUNS_ROOT="$cap_runs" \
     SPINE_DATA_ROOT="$data_root" \
     SPINE_BACKUPS_ROOT="$backups_root" \
@@ -270,7 +294,10 @@ spine_resolve_mailroom_path() {
   local logs="${SPINE_LOGS:-$HOME/code/.runtime/spine/logs}"
   local receipts="${SPINE_RECEIPTS:-$HOME/code/.evidence/spine/sessions}"
   local verify_root="${SPINE_VERIFY_ROOT:-$HOME/code/.evidence/spine/verify}"
+  local verify_reports_root="${SPINE_VERIFY_REPORTS_ROOT:-$HOME/code/.evidence/spine/reports/verify}"
   local verify_state_root="${SPINE_VERIFY_STATE_ROOT:-$HOME/code/.runtime/spine/state/verify}"
+  local loop_closeouts_root="${SPINE_LOOP_CLOSEOUTS_ROOT:-$HOME/code/.evidence/spine/loop-closeouts}"
+  local census_root="${SPINE_CENSUS_ROOT:-$HOME/code/.evidence/spine/census}"
   local agent_context_root="${SPINE_AGENT_CONTEXT_ROOT:-$HOME/code/.runtime/spine/context}"
   local domain_state="${SPINE_DOMAIN_STATE:-$HOME/code/.data}"
 
@@ -298,6 +325,15 @@ spine_resolve_mailroom_path() {
       ;;
     evidence/verify/*)
       printf '%s\n' "$verify_root/${path#evidence/verify/}"
+      ;;
+    evidence/reports/*)
+      printf '%s\n' "$verify_reports_root/${path#evidence/reports/}"
+      ;;
+    evidence/loop-closeouts/*)
+      printf '%s\n' "$loop_closeouts_root/${path#evidence/loop-closeouts/}"
+      ;;
+    evidence/census/*)
+      printf '%s\n' "$census_root/${path#evidence/census/}"
       ;;
     runtime/verify/*)
       printf '%s\n' "$verify_state_root/${path#runtime/verify/}"

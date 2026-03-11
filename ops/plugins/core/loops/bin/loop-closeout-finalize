@@ -6,6 +6,8 @@ CONTRACT="$ROOT/ops/bindings/loop.closeout.contract.yaml"
 SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
 GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
 
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 source "$ROOT/ops/lib/git-lock.sh"
 
 usage() {
@@ -134,7 +136,8 @@ fi
 
 RUN_KEY_REGEX="$(yq e -r '.validation.run_key_regex // "^(CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"' "$CONTRACT")"
 MIN_RUN_KEYS="$(yq e -r '.validation.min_required_run_keys // 1' "$CONTRACT")"
-RECEIPT_DIR_REL="$(yq e -r '.closeout_receipts.directory // "docs/planning/loop-closeouts"' "$CONTRACT")"
+RECEIPT_DIR_REL="$(yq e -r '.closeout_receipts.directory // ""' "$CONTRACT")"
+[[ -n "$RECEIPT_DIR_REL" && "$RECEIPT_DIR_REL" != "null" ]] || RECEIPT_DIR_REL="${SPINE_LOOP_CLOSEOUTS_ROOT:-$HOME/code/.evidence/spine/loop-closeouts}"
 REQUIRE_MATRIX_PASS="$(yq e -r '.validation.require_acceptance_pass // true' "$CONTRACT")"
 
 mapfile -t PROTECTED_LOOPS < <(yq e -r '.protected_lanes.loops[]? // ""' "$CONTRACT" | sed '/^$/d')
@@ -383,7 +386,11 @@ fi
 mv "$tmp_file" "$SCOPE_FILE"
 
 if [[ -z "$RECEIPT_PATH" ]]; then
-  RECEIPT_PATH="$ROOT/$RECEIPT_DIR_REL/${LOOP_ID}.closeout.md"
+  if [[ "$RECEIPT_DIR_REL" == /* ]]; then
+    RECEIPT_PATH="$RECEIPT_DIR_REL/${LOOP_ID}.closeout.md"
+  else
+    RECEIPT_PATH="$ROOT/$RECEIPT_DIR_REL/${LOOP_ID}.closeout.md"
+  fi
 elif [[ "$RECEIPT_PATH" != /* ]]; then
   RECEIPT_PATH="$ROOT/$RECEIPT_PATH"
 fi
