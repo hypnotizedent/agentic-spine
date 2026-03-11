@@ -25,7 +25,7 @@ authority.
 Canonical current sources:
 
 - `ops/bindings/backup.inventory.yaml`
-- `ops/archive/bindings/backup.schedule.yaml`
+- `ops/bindings/backup.schedule.yaml`
 - `docs/contracts/BACKUP_730XD_CANONICAL_PATH_MAPPING.md`
 - `mailroom/outbox/reports/MINT_STATEFUL_SAFETY_BACKUP_POSTURE_20260308.md`
 - `mailroom/outbox/reports/MINT_CANONICAL_GREEN_SWEEP_20260308.md`

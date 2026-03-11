@@ -149,7 +149,7 @@ STATEFUL_BREAK_GLASS_ACK_20260308=1 ./bin/ops cap run docker.compose.down -- fin
 - [ ] **Namespace Authority**: Confirm secret belongs to `/spine/services/{service-name}` in Infisical
 - [ ] **Test vs Live**: Verify production secrets go to `/spine/services/{service-name}`, test secrets to `/spine/services/{service-name}-test`
 - [ ] **Namespace Policy**: Check `ops/bindings/secrets.namespace.policy.yaml` for key name standards
-- [ ] **Bundle Contract**: If adding new secret, update `ops/archive/bindings/secrets.bundle.contract.yaml`
+- [ ] **Bundle Contract**: If adding new secret, update `ops/bindings/secrets.bundle.contract.yaml`
 
 ### Secret Rotation
 

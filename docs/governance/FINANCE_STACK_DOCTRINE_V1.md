@@ -164,7 +164,7 @@ For every critical finance service, Spine must be able to answer:
 
 ### Secret Domain
 - `ops/bindings/secrets.namespace.policy.yaml`: Namespace definitions and key overrides
-- `ops/archive/bindings/secrets.bundle.contract.yaml`: Secret bundle health contracts
+- `ops/bindings/secrets.bundle.contract.yaml`: Secret bundle health contracts
 - Infisical `/spine/services/{service-name}`: Production runtime secrets
 - Infisical `/spine/services/{service-name}-test`: Test-mode secrets (where applicable)
 
