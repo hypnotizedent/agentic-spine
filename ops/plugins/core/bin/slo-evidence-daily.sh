@@ -9,6 +9,8 @@ SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 MAX_ATTEMPTS="${SLO_EVIDENCE_MAX_ATTEMPTS:-3}"
 BASE_BACKOFF_SECONDS="${SLO_EVIDENCE_BACKOFF_SECONDS:-20}"
+source "${SPINE_ROOT}/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
 
 echo "[slo-evidence-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -48,7 +50,8 @@ spine_job_run "slo-evidence-daily:slo.evidence.daily" run_with_retry "slo.eviden
 spine_job_run "slo-evidence-daily:verify-failure-classify.core" run_with_retry "verify-failure-classify core" \
   "$SPINE_ROOT/ops/plugins/core/verify/bin/verify-failure-classify" core
 
-latest_slo_report="$(ls -1t "${SPINE_ROOT}/receipts/audits/governance"/slo-evidence-*.md 2>/dev/null | head -n1 || true)"
+slo_evidence_dir="$(spine_resolve_mailroom_path 'evidence/verify/governance')"
+latest_slo_report="$(ls -1t "${slo_evidence_dir}"/slo-evidence-*.md 2>/dev/null | head -n1 || true)"
 if [[ -n "$latest_slo_report" ]]; then
   slo_state="$(awk -F': *' '/^slo_pass:/{print $2; exit}' "$latest_slo_report" | tr -d '"' | tr -d "'" || true)"
   if [[ "$slo_state" == "FAIL" ]]; then

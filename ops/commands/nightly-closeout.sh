@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 CONTRACT="$ROOT/ops/bindings/nightly.closeout.contract.yaml"
 MODE=""
 JSON_MODE=0
@@ -41,7 +43,8 @@ esac
 
 RUN_UTC="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_ID="NIGHTLY-CLOSEOUT-${RUN_UTC}-${$}"
-ARTIFACT_DIR="$ROOT/receipts/nightly-closeout/$RUN_ID"
+ARTIFACT_ROOT="$(spine_resolve_mailroom_path 'evidence/loop-closeouts/nightly-closeout')"
+ARTIFACT_DIR="$ARTIFACT_ROOT/$RUN_ID"
 mkdir -p "$ARTIFACT_DIR"
 
 # ── Remote prune before classification ──
@@ -94,15 +97,15 @@ fi
 
 if [[ "$MODE" == "apply" && "$REQUIRE_DRY_RUN_BEFORE_APPLY" == "true" ]]; then
   found_dry_run=0
-  if [[ -d "$ROOT/receipts/nightly-closeout" ]]; then
+  if [[ -d "$ARTIFACT_ROOT" ]]; then
     while IFS= read -r env_file; do
       if grep -q '^mode=dry-run$' "$env_file" 2>/dev/null; then
         found_dry_run=1
       fi
-    done < <(find "$ROOT/receipts/nightly-closeout" -type f -name summary.env 2>/dev/null | sort)
+    done < <(find "$ARTIFACT_ROOT" -type f -name summary.env 2>/dev/null | sort)
   fi
   if [[ "$found_dry_run" -ne 1 ]]; then
-    echo "FAIL: apply mode requires a prior dry-run receipt (none found under receipts/nightly-closeout)" >&2
+    echo "FAIL: apply mode requires a prior dry-run receipt (none found under evidence/loop-closeouts/nightly-closeout)" >&2
     exit 1
   fi
 fi

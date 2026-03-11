@@ -2,14 +2,16 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 CAPS_FILE="$ROOT/ops/capabilities.yaml"
 GLOBAL_BINDING="$ROOT/ops/bindings/calendar.global.yaml"
 GLOBAL_SCHEMA="$ROOT/ops/bindings/calendar.global.schema.yaml"
 SYNC_CONTRACT="$ROOT/ops/bindings/calendar.sync.contract.yaml"
 BACKUP_BINDING="$ROOT/ops/bindings/backup.calendar.yaml"
-CAL_OUT_DIR="$ROOT/mailroom/outbox/calendar"
-BACKUP_OUT_DIR="$ROOT/mailroom/outbox/backup-calendar"
-REPORT_DIR="$ROOT/receipts/audits/governance"
+CAL_OUT_DIR="$(spine_resolve_mailroom_path 'mailroom/outbox/calendar')"
+BACKUP_OUT_DIR="$(spine_resolve_mailroom_path 'mailroom/outbox/backup-calendar')"
+REPORT_DIR="$(spine_resolve_mailroom_path 'evidence/verify/governance')"
 REPORT_FILE="$REPORT_DIR/CALENDAR_SURFACE_AUDIT_$(date +%Y%m%d).md"
 
 JSON_MODE=0
@@ -333,7 +335,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --arg schema_version "1.0" \
     --arg status "$status" \
     --arg generated_at "$generated_at" \
-    --arg report_path "$([[ "$CHECK_ONLY" -eq 0 ]] && echo "${REPORT_FILE#$ROOT/}" || echo "")" \
+    --arg report_path "$([[ "$CHECK_ONLY" -eq 0 ]] && echo "$REPORT_FILE" || echo "")" \
     --argjson check_only "$([[ "$CHECK_ONLY" -eq 1 ]] && echo true || echo false)" \
     --argjson checks_passed "${#passes[@]}" \
     --argjson checks_failed "${#failures[@]}" \
@@ -346,7 +348,7 @@ else
   echo "checks_passed: ${#passes[@]}"
   echo "checks_failed: ${#failures[@]}"
   if [[ "$CHECK_ONLY" -eq 0 ]]; then
-    echo "report: ${REPORT_FILE#$ROOT/}"
+    echo "report: $REPORT_FILE"
   fi
   if (( ${#failures[@]} > 0 )); then
     echo ""

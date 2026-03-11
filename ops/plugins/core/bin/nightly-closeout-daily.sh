@@ -7,7 +7,9 @@ set -euo pipefail
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CLOSEOUT_CMD="${SPINE_ROOT}/ops/commands/nightly-closeout.sh"
 CONTRACT="${SPINE_ROOT}/ops/bindings/nightly.closeout.contract.yaml"
-RECEIPT_ROOT="${SPINE_ROOT}/receipts/nightly-closeout"
+source "${SPINE_ROOT}/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+RECEIPT_ROOT="$(spine_resolve_mailroom_path 'evidence/loop-closeouts/nightly-closeout')"
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
 
 to_int_or_neg1() {
@@ -137,4 +139,3 @@ run_nightly_closeout_dry_run() {
 echo "[nightly-closeout-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 spine_job_run "nightly-closeout-daily:nightly.closeout.dry-run" run_nightly_closeout_dry_run
 echo "[nightly-closeout-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
