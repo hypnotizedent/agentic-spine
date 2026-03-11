@@ -107,7 +107,7 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
 - Output:
   - `ops/bindings/terminal.worker.catalog.yaml`
 - Command:
-  - `./ops/plugins/ops/bin/gen-worker-catalog.sh`
+  - `./ops/plugins/core/ops/bin/gen-worker-catalog.sh`
 - Validate:
   - every terminal role is represented exactly once
   - domain-runtime workers resolve scoped capabilities and gate packs
@@ -121,7 +121,7 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
 - Output:
   - `ops/bindings/routing.dispatch.yaml`
 - Command:
-  - `./ops/plugins/ops/bin/gen-routing-dispatch.sh`
+  - `./ops/plugins/core/ops/bin/gen-routing-dispatch.sh`
 - Validate:
   - every capability has exactly one runtime dispatch target (`plugin`, `agent`, or `builtin`)
   - safety/approval metadata parity with `ops/capabilities.yaml`
@@ -134,7 +134,7 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
 - Output:
   - `ops/bindings/terminal.launcher.view.yaml`
 - Command:
-  - `./ops/plugins/ops/bin/gen-launcher-view.sh`
+  - `./ops/plugins/core/ops/bin/gen-launcher-view.sh`
 - Validate:
   - picker ordering is deterministic
   - capability/gate counts match worker catalog
@@ -146,7 +146,7 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
 - Output:
   - `docs/governance/generated/worker-usage/*.md`
 - Command:
-  - `./ops/plugins/ops/bin/gen-worker-usage-docs.sh`
+  - `./ops/plugins/core/ops/bin/gen-worker-usage-docs.sh`
 - Validate:
   - one usage surface doc per terminal
   - stale generated docs are removed
@@ -154,7 +154,7 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
 
 ### 11) Unified Runtime v2 Generator
 - Command:
-  - `./ops/plugins/ops/bin/gen-terminal-worker-runtime-v2.py`
+  - `./ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py`
 - Notes:
   - Generates all v2 runtime surfaces in one pass.
   - Supports `--check` for drift-only validation.

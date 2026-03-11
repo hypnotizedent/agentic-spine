@@ -14,8 +14,8 @@ Materialize project attach bindings from ops/bindings/agents.registry.yaml
 into /Users/ronnyworks/code/*/.spine-link.yaml.
 
 Usage:
-  ./ops/plugins/ops/bin/gen-project-attach.sh
-  ./ops/plugins/ops/bin/gen-project-attach.sh --check
+  ./ops/plugins/core/ops/bin/gen-project-attach.sh
+  ./ops/plugins/core/ops/bin/gen-project-attach.sh --check
 EOF
 }
 
@@ -59,7 +59,7 @@ POLICY = Path(sys.argv[3]).resolve()
 ROOT = REGISTRY.parents[2]
 ROOT_STR = str(ROOT)
 REGISTRY_REL = "ops/bindings/agents.registry.yaml"
-MANAGED_BY = "ops/plugins/ops/bin/gen-project-attach.sh"
+MANAGED_BY = "ops/plugins/core/ops/bin/gen-project-attach.sh"
 
 REQUIRED_FIELDS = [
     "repo_path",

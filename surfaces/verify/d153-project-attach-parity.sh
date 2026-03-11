@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Regenerate project attach bindings via ./ops/plugins/ops/bin/gen-project-attach.sh and ensure .spine-link.yaml parity.
+# TRIAGE: Regenerate project attach bindings via ./ops/plugins/core/ops/bin/gen-project-attach.sh and ensure .spine-link.yaml parity.
 # D153: project attach parity lock
 # Fast-path check only: file existence + required field parity.
 set -euo pipefail

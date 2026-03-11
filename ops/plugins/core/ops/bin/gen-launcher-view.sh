@@ -35,7 +35,7 @@ if [[ "$CHECK_MODE" -eq 0 ]]; then
   spine_tx_track "$ROOT/ops/bindings/terminal.launcher.view.yaml"
 fi
 
-if ! python3 "$ROOT/ops/plugins/ops/bin/gen-terminal-worker-runtime-v2.py" --target launcher "$@"; then
+if ! python3 "$ROOT/ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py" --target launcher "$@"; then
   if [[ "$CHECK_MODE" -eq 0 ]]; then
     spine_tx_rollback
   fi
