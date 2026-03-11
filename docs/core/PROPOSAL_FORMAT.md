@@ -30,7 +30,7 @@ created: 2026-02-10T22:00:00Z
 loop_id: LOOP-EXAMPLE (optional)
 changes:
   - action: create
-    path: ops/plugins/ops/bin/generate-scaffold.sh
+    path: ops/plugins/core/ops/bin/generate-scaffold.sh
     reason: "Auto-generation script for SPINE_SCAFFOLD.md"
   - action: modify
     path: ops/capabilities.yaml
