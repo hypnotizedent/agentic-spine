@@ -9,23 +9,23 @@
 
 ## Core SSOT Paths
 
-| Surface | Canonical Path | Env Override |
-|---------|---------------|--------------|
-| Mailroom | `$SPINE_REPO/mailroom/` | - |
-| Inbox | `$SPINE_REPO/mailroom/inbox/` | `SPINE_INBOX` |
-| Outbox | `$SPINE_REPO/mailroom/outbox/` | `SPINE_OUTBOX` |
-| State | `$SPINE_REPO/mailroom/state/` | `SPINE_STATE` |
-| Logs | `$SPINE_REPO/mailroom/logs/` | `SPINE_LOGS` |
-| Receipts | `$SPINE_REPO/receipts/sessions/` | - |
+| Surface | Canonical Path | Notes |
+|---------|---------------|-------|
+| Repo source | `bin/`, `ops/`, `surfaces/`, `docs/`, `fixtures/` | Authored control-plane only |
+| Runtime | `~/code/.runtime/spine/` | Mutable execution state, loop scopes, logs, agent context |
+| Evidence | `~/code/.evidence/spine/` | Receipts, verify history/indexes, cap-run evidence |
+| Data | `~/code/.data/` | Externalized domain/runtime truth |
+| Backups | `~/code/.backups/` | Historical/tombstoned artifacts |
+| Foundation | `~/code/agentic-foundation/` | Extracted implementation source |
 
 ## Runtime Model
 
-**Single runtime: Mailroom**
+**Single boring split**
 
-All work (terminal and daemon) flows through mailroom:
-- Terminal commands enqueue to `mailroom/inbox/queued/`
-- Watcher processes through lanes: `queued/ → running/ → done/ | failed/`
-- Every run produces: outbox result + receipt + ledger entry
+- `agentic-spine` contains authored control-plane source only.
+- `.runtime/spine` carries mutable execution state and workflow machinery.
+- `.evidence/spine` carries receipts, verify outputs, and cap-run evidence.
+- `origin` on Gitea is canonical; GitHub is mirror-only and must not block normal work.
 
 ## Identity System
 
@@ -43,11 +43,11 @@ This key is used everywhere:
 
 | Entry | Path | Purpose |
 |-------|------|---------|
-| CLI | `bin/ops` | Human entrypoint (enqueues to mailroom) |
-| Watcher | `ops/runtime/inbox/hot-folder-watcher.sh` | Daemon runtime |
-| LaunchAgent | `com.ronny.agent-inbox` | **Canonical** persistent watcher |
-
-**Launchd is the only canonical watcher runtime.** Do not manually run `hot-folder-watcher.sh` in production; use launchd via `ops cap run spine.watcher.restart` for restarts. Manual runs are for debugging only.
+| CLI | `bin/ops` | Canonical operator and agent entrypoint |
+| Session start | `./bin/ops cap run session.start` | Fast startup baseline |
+| Verify | `./bin/ops cap run verify.run -- fast` | Canonical drift gate entrypoint |
+| Worktree lifecycle | `ops/plugins/core/ops/bin/worktree-lifecycle-*` | Workspace/worktree control surfaces |
+| Repo bootstrap | `ops/plugins/core/authority/bin/project-governance-bootstrap` | API-first Gitea repo ensure + remote alignment |
 
 ## Drift Gates
 
@@ -107,7 +107,7 @@ All must PASS for core to be healthy.
 | D59 | Cross-registry completeness lock (bidirectional host coverage) |
 | D60 | Deprecation sweeper (known deprecated terms blocked from governance docs) |
 | D61 | Session-loop traceability lock (agent.session.closeout freshness + loop TTL) |
-| D62 | Git remote parity lock (origin/main must equal github/main) |
+| D62 | Git remote authority lock (origin canonical; github mirror drift warns) |
 | D63 | Capabilities metadata lock (registry completeness + dependency typos + executable checks) |
 | D64 | Git remote authority WARN (GitHub merges/PRs) |
 | D65 | Agent briefing sync lock (AGENTS.md + CLAUDE.md match canonical governance brief) |

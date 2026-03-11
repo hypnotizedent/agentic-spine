@@ -266,7 +266,7 @@ cat <<'SCAFFOLD_EOF'
 # D55 Secrets runtime readiness       D56 Agent entry surface lock
 # D57 Infra identity cohesion lock    D58 SSOT freshness lock
 # D59 Cross-registry completeness     D60 Deprecation sweeper
-# D61 Session loop traceability       D62 Git remote parity lock
+# D61 Session loop traceability       D62 Git remote authority lock
 # D63 Capabilities metadata lock      D64 Git remote authority warn
 # D65 Agent briefing sync lock
 #

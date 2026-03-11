@@ -11,7 +11,7 @@ Usage: ops ready
 Run all pre-flight readiness checks for this terminal session.
 
 Checks performed:
-  1. ops preflight      - Split-brain detection (remote parity + worktree hygiene)
+  1. ops preflight      - Remote authority + worktree hygiene
   2. agent.session.closeout - Loop/receipt truth coherence (D61 freshness)
   3. spine.verify       - Constitutional drift gate (50+ gates)
   4. spine.replay       - Receipt replay verification
@@ -44,7 +44,7 @@ echo "========================================"
 echo "SPINE READY CHECK (operator convenience)"
 echo "========================================"
 
-# Preflight is the fastest split-brain detector (remote parity + worktree hygiene).
+# Preflight is the fastest remote-authority and worktree-hygiene detector.
 echo
 echo "────────────────────────────────────────"
 echo "READY CHECK: ops preflight"

@@ -697,12 +697,12 @@ else
   warn "session-loop traceability lock gate not present"
 fi
 
-# D62: Git remote parity lock (origin/main == github/main)
-echo -n "D62 git remote parity lock... "
+# D62: Git remote authority lock (origin canonical, GitHub mirror warn-only)
+echo -n "D62 git remote authority lock... "
 if [[ -x "$SP/surfaces/verify/d62-git-remote-parity-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d62-git-remote-parity-lock.sh"
 else
-  warn "git remote parity lock gate not present"
+  warn "git remote authority lock gate not present"
 fi
 
 # D63: Capabilities metadata lock (registry integrity)

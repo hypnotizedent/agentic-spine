@@ -44,7 +44,7 @@ fi
 DRIFT_CERTIFIER="$REPO_ROOT/ops/plugins/core/verify/bin/drift-gates-certify"
 
 if [[ "$REPO_GIT_OK" -eq 1 ]]; then
-  # Remote parity (origin/main == github/main). This is the primary anti split-brain stop signal.
+  # Remote authority: origin on Gitea must resolve; GitHub mirror drift is warn-only.
   D62="$REPO_ROOT/surfaces/verify/d62-git-remote-parity-lock.sh"
   if [[ -x "$D62" ]]; then
     if out="$("$D62" 2>&1)"; then
@@ -125,7 +125,7 @@ if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/d
     if [[ "$current_branch" == "main" ]]; then
       echo "  note: mutating capabilities are blocked on main (set OPS_ALLOW_MAIN_MUTATION=1 to override)."
     fi
-    echo "  remote parity (D62): $parity_status"
+    echo "  remote authority (D62): $parity_status"
     if [[ -n "${parity_detail:-}" ]]; then
       echo "    ${parity_detail}" | sed 's/^/    /'
     fi

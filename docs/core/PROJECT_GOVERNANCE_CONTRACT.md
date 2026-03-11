@@ -28,6 +28,7 @@ Purpose: define the mandatory baseline for any new product repository under
 
 - If a canonical Gitea repo does not exist, it must be created via Gitea API token
   (`GITEA_API_TOKEN`) using governed tooling.
+- Canonical bootstrap path: `authority.project.bootstrap --ensure-gitea-repo --execute`.
 - Do not use ad-hoc basic-auth/password fallbacks.
 - Do not rely on SSH push-to-create behavior.
 

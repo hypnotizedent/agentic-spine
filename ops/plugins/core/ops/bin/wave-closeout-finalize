@@ -16,13 +16,13 @@ wave-closeout-finalize
 
 Usage:
   wave-closeout-finalize --receipt <path> [--receipt <path> ...] [--run-key <CAP-...> ...]
-                         [--message "<commit message>"] [--remote origin,github,share] [--no-push]
+                         [--message "<commit message>"] [--remote origin[,github|share]] [--no-push]
 
 Behavior:
   - Validates run key presence in each receipt.
   - Stages expected receipts only.
   - Enforces D274 receipt crumb lock before commit.
-  - Commits and pushes with remote parity checks.
+  - Commits and pushes to canonical origin by default; additional remotes are explicit.
 USAGE
 }
 
@@ -78,7 +78,7 @@ MIN_RUN_KEYS_PER_RECEIPT=1
 REQUIRE_RUN_KEYS="true"
 REQUIRE_CLEAN_INDEX="true"
 GATE_SCRIPT="$ROOT/surfaces/verify/d274-receipt-closeout-completeness-lock.sh"
-DEFAULT_REMOTES=(origin github share)
+DEFAULT_REMOTES=(origin)
 
 if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
   RUN_KEY_REGEX="$(yq e -r '.closeout.run_key_regex // "'"$RUN_KEY_REGEX"'"' "$CONTRACT" 2>/dev/null || echo "$RUN_KEY_REGEX")"
@@ -93,7 +93,7 @@ fi
 if [[ "${#REMOTES[@]}" -eq 0 ]]; then
   REMOTES=("${DEFAULT_REMOTES[@]}")
 fi
-[[ "${#REMOTES[@]}" -gt 0 ]] || REMOTES=(origin github share)
+[[ "${#REMOTES[@]}" -gt 0 ]] || REMOTES=(origin)
 
 if [[ "$REQUIRE_CLEAN_INDEX" == "true" ]] && ! git -C "$ROOT" diff --cached --quiet; then
   echo "wave.closeout.finalize FAIL: staged index is not clean; commit staged changes first" >&2
@@ -167,9 +167,9 @@ if [[ "$NO_PUSH" -eq 0 ]]; then
       exit 1
     fi
     if [[ "$remote_sha" != "$HEAD_SHA" ]]; then
-      echo "wave.closeout.finalize FAIL: parity mismatch on $remote ($remote_sha != $HEAD_SHA)" >&2
+      echo "wave.closeout.finalize FAIL: remote mismatch on $remote ($remote_sha != $HEAD_SHA)" >&2
       exit 1
     fi
-    echo "parity.$remote=$remote_sha"
+    echo "remote.$remote=$remote_sha"
   done
 fi
