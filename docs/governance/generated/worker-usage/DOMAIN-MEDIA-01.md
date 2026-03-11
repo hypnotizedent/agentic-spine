@@ -16,7 +16,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Verify Command: `./bin/ops cap run verify.pack.run media`
 
 ## Write Scope
-- `ops/plugins/media/`
+- `ops/plugins/domains/media/`
 - `../agentic-foundation/docs/agents/media-agent.contract.md`
 
 ## Capabilities (7)

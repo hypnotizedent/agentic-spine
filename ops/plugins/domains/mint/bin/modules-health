@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# modules-health - HTTP health probe for mint module endpoints (fresh-slate)
+#
+# Checks all app modules on mint-apps (VM 213) plus data plane on mint-data (VM 212):
+#   files-api, quote-page, order-intake, finance-adapter, auth, pricing, suppliers, shipping, payment
+#   minio, postgres, redis
+#
+# Read-only. No mutations.
+# STOP=2 on preconditions.
+#
+# Usage:
+#   modules-health              # check all mint endpoints
+#   modules-health <component>  # check specific component
+#   modules-health --strict-exit
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+SERVICES_BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
+PROBE_BINDING="$SPINE_ROOT/ops/bindings/mint.probe.targets.yaml"
+MINT_HEALTH_SURFACE="$SPINE_ROOT/ops/lib/mint-health-surface.sh"
+# shellcheck source=/dev/null
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+# shellcheck source=/dev/null
+source "$MINT_HEALTH_SURFACE"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+[[ -f "$SERVICES_BINDING" ]] || stop "missing binding: $SERVICES_BINDING"
+[[ -f "$PROBE_BINDING" ]] || stop "missing binding: $PROBE_BINDING"
+[[ -f "$MINT_HEALTH_SURFACE" ]] || stop "missing helper: $MINT_HEALTH_SURFACE"
+
+FILTER=""
+STRICT_EXIT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --strict-exit)
+      STRICT_EXIT=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage:
+  modules-health
+  modules-health <component>
+  modules-health --strict-exit
+
+Flags:
+  --strict-exit  Exit non-zero when any checked component is not OK.
+EOF
+      exit 0
+      ;;
+    *)
+      if [[ -n "$FILTER" ]]; then
+        stop "unknown argument: $1"
+      fi
+      FILTER="$1"
+      shift
+      ;;
+  esac
+done
+
+APP_TARGET_ID="$(mint_probe_target_id app_plane)"
+DATA_TARGET_ID="$(mint_probe_target_id data_plane)"
+[[ -n "$APP_TARGET_ID" && "$APP_TARGET_ID" != "null" ]] || stop "missing app plane target in $PROBE_BINDING"
+[[ -n "$DATA_TARGET_ID" && "$DATA_TARGET_ID" != "null" ]] || stop "missing data plane target in $PROBE_BINDING"
+
+MINT_APPS_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$APP_TARGET_ID\") | .host" "$SSH_BINDING" | head -n1)"
+MINT_DATA_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$DATA_TARGET_ID\") | .host" "$SSH_BINDING" | head -n1)"
+MINT_APPS_USER="$(ssh_resolve_user "$APP_TARGET_ID" "ubuntu")"
+MINT_DATA_USER="$(ssh_resolve_user "$DATA_TARGET_ID" "ubuntu")"
+
+[[ -n "$MINT_APPS_HOST" && "$MINT_APPS_HOST" != "null" ]] || stop "$APP_TARGET_ID not found in ssh.targets"
+[[ -n "$MINT_DATA_HOST" && "$MINT_DATA_HOST" != "null" ]] || stop "$DATA_TARGET_ID not found in ssh.targets"
+
+IFS=' ' read -r MINT_APPS_PROBE_HOST MINT_APPS_PROBE_PATH <<< "$(ssh_resolve_probe_host "$APP_TARGET_ID" || true)"
+IFS=' ' read -r MINT_DATA_PROBE_HOST MINT_DATA_PROBE_PATH <<< "$(ssh_resolve_probe_host "$DATA_TARGET_ID" || true)"
+IFS=' ' read -r MINT_DATA_SSH_HOST MINT_DATA_SSH_PATH <<< "$(ssh_resolve_ssh_host_with_fallback "$DATA_TARGET_ID" || true)"
+
+echo "mint.modules.health"
+echo "services.binding: $SERVICES_BINDING"
+echo "probe.binding: $PROBE_BINDING"
+echo "$APP_TARGET_ID: ${MINT_APPS_USER}@${MINT_APPS_HOST} (VM $(yq -r '.targets.app_plane.vm_id // "?"' "$PROBE_BINDING")) http=${MINT_APPS_PROBE_HOST:-unreachable} via=${MINT_APPS_PROBE_PATH:-unreachable}"
+echo "$DATA_TARGET_ID: ${MINT_DATA_USER}@${MINT_DATA_HOST} (VM $(yq -r '.targets.data_plane.vm_id // "?"' "$PROBE_BINDING")) http=${MINT_DATA_PROBE_HOST:-unreachable} via=${MINT_DATA_PROBE_PATH:-unreachable} ssh=${MINT_DATA_SSH_HOST:-unreachable}/${MINT_DATA_SSH_PATH:-unreachable}"
+echo
+
+declare -a HTTP_ROWS=()
+while IFS=$'\t' read -r name plane; do
+  [[ -z "$name" ]] && continue
+  [[ "$(mint_service_enabled "$name")" == "true" ]] || continue
+  resolve_result="$(mint_service_resolved_url "$name" 5 || true)"
+  url="$(printf '%s\n' "$resolve_result" | awk '{print $1}')"
+  resolved_path="$(printf '%s\n' "$resolve_result" | awk '{print $2}')"
+  [[ -n "$url" ]] || stop "missing canonical url for $name in $SERVICES_BINDING"
+  case "$plane" in
+    app_plane)
+      HTTP_ROWS+=("$name|$APP_TARGET_ID|${resolved_path:-$MINT_APPS_PROBE_PATH}|$url")
+      ;;
+    data_plane)
+      HTTP_ROWS+=("$name|$DATA_TARGET_ID|${resolved_path:-$MINT_DATA_PROBE_PATH}|$url")
+      ;;
+    *)
+      stop "unknown mint http plane in helper: $plane"
+      ;;
+  esac
+done < <(mint_http_rows_tsv)
+
+SSH_OPTS=(-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
+
+printf "%-16s %-10s %-10s %s\n" "COMPONENT" "STATUS" "TIME" "NOTE"
+
+fail=0
+checked=0
+
+curl_health_with_retry() {
+  local url="$1"
+  local max_attempts=3
+  local attempt=1
+  local backoff=1
+  local http_code curl_exit
+
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    set +e
+    http_code="$(curl -fsS -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$url" 2>/dev/null)"
+    curl_exit=$?
+    set -e
+
+    if [[ "$curl_exit" -eq 0 || ( "$curl_exit" -ne 28 && "$curl_exit" -ne 7 ) || "$attempt" -eq "$max_attempts" ]]; then
+      printf '%s %s\n' "$http_code" "$curl_exit"
+      return 0
+    fi
+
+    sleep "$backoff"
+    backoff=$((backoff * 2))
+    attempt=$((attempt + 1))
+  done
+}
+
+check_http() {
+  local name="$1" target_id="$2" path_used="$3" url="$4"
+  if [[ -n "$FILTER" && "$name" != "$FILTER" ]]; then return; fi
+  checked=$((checked + 1))
+  if [[ -z "$url" ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "UNREACHABLE" "-" "target=$target_id"
+    fail=1
+    return
+  fi
+  local start_ms end_ms dur_ms http_code curl_exit
+  start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  read -r http_code curl_exit <<< "$(curl_health_with_retry "$url")"
+  end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  dur_ms=$((end_ms - start_ms))
+  if [[ "$curl_exit" -eq 0 && "$http_code" == "200" ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "OK" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}"
+  elif [[ "$curl_exit" -eq 0 ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "DEGRADED" "${dur_ms}ms" "target=$target_id via=${path_used:-direct} http=$http_code"
+    fail=1
+  elif [[ "$curl_exit" -eq 28 ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "TIMEOUT" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}"
+    fail=1
+  elif [[ "$curl_exit" -eq 7 ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "REFUSED" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}"
+    fail=1
+  else
+    printf "%-16s %-10s %-10s %s\n" "$name" "FAIL" "${dur_ms}ms" "target=$target_id via=${path_used:-direct} curl=$curl_exit"
+    fail=1
+  fi
+}
+
+check_ssh_service() {
+  local name="$1" target_id="$2" host="$3" path_used="$4" user="$5" cmd="$6"
+  if [[ -n "$FILTER" && "$name" != "$FILTER" ]]; then return; fi
+  checked=$((checked + 1))
+  if [[ -z "$host" ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "UNREACHABLE" "-" "target=$target_id"
+    fail=1
+    return
+  fi
+  local start_ms end_ms dur_ms
+  start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  set +e
+  local out
+  out="$(ssh "${SSH_OPTS[@]}" "${user}@${host}" "$cmd" 2>&1)"
+  local rc=$?
+  set -e
+  end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  dur_ms=$((end_ms - start_ms))
+  if [[ "$rc" -eq 0 ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "OK" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}"
+  else
+    printf "%-16s %-10s %-10s %s\n" "$name" "FAIL" "${dur_ms}ms" "target=$target_id via=${path_used:-direct} rc=$rc"
+    fail=1
+  fi
+}
+
+# HTTP checks
+for row in "${HTTP_ROWS[@]}"; do
+  IFS='|' read -r name target_id path_used url <<< "$row"
+  check_http "$name" "$target_id" "$path_used" "$url"
+done
+
+while IFS=$'\t' read -r name cmd; do
+  [[ -z "$name" ]] && continue
+  check_ssh_service "$name" "$DATA_TARGET_ID" "$MINT_DATA_SSH_HOST" "$MINT_DATA_SSH_PATH" "$MINT_DATA_USER" "$cmd"
+done < <(yq -r '.targets.data_plane.ssh_checks[] | [.id, .command] | @tsv' "$PROBE_BINDING")
+
+echo
+
+if [[ "$checked" -eq 0 && -n "$FILTER" ]]; then
+  echo "STOP (2): component '$FILTER' not found"
+  exit 2
+fi
+
+if [[ "$fail" -eq 1 ]]; then
+  echo "status: FAIL (some components unhealthy)"
+else
+  echo "status: OK (all components healthy)"
+fi
+
+if [[ "$STRICT_EXIT" -eq 1 && "$fail" -eq 1 ]]; then
+  exit 1
+fi
+exit 0

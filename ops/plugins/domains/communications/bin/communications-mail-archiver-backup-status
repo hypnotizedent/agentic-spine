@@ -1,0 +1,372 @@
+#!/usr/bin/env bash
+# communications-mail-archiver-backup-status — governed backup verification
+# Domain: communications
+# Safety: read-only
+# Approval: auto
+#
+# Usage:
+#   communications-mail-archiver-backup-status [--target <ssh-target>] [--json]
+#
+# Verifies mail-archiver PostgreSQL backup job state on communications-stack:
+# - Checks if pg_dump cron job is installed
+# - Validates latest backup artifact exists and is recent
+# - Reports backup directory contents and retention compliance
+# - Cross-references with backup.schedule.yaml and backup.inventory.yaml
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+BACKUP_CONTRACT="$ROOT/ops/bindings/mail.archiver.backup.contract.yaml"
+BACKUP_SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
+BACKUP_INVENTORY="$ROOT/ops/bindings/backup.inventory.yaml"
+CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+
+TARGET_ID=""
+JSON=0
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+need yq
+need jq
+need ssh
+[[ -f "$BACKUP_CONTRACT" ]] || fail "missing backup contract: $BACKUP_CONTRACT"
+[[ -f "$BACKUP_SCHEDULE" ]] || fail "missing backup schedule: $BACKUP_SCHEDULE"
+[[ -f "$CONTRACT" ]] || fail "missing comms contract: $CONTRACT"
+[[ -f "$SSH_BINDING" ]] || fail "missing ssh binding: $SSH_BINDING"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --target|--ssh-id) TARGET_ID="${2:?--target requires a value}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: communications-mail-archiver-backup-status [--target <ssh-target>] [--json]
+
+Read-only backup verification for mail-archiver PostgreSQL on communications-stack.
+Checks:
+  - pg_dump cron job installed and schedule matches contract
+  - Latest backup artifact exists and age within retention window
+  - Backup directory contents and sizes
+  - Contract parity with backup.schedule.yaml and backup.inventory.yaml
+USAGE
+      exit 0
+      ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+if [[ -z "$TARGET_ID" ]]; then
+  TARGET_ID="$(yq e -r '.mail_archiver.monitoring.machine_status_target.ssh_target // ""' "$CONTRACT")"
+  if [[ -z "$TARGET_ID" || "$TARGET_ID" == "null" ]]; then
+    TARGET_ID="$(yq e -r '.pilot.vm_target.hostname // ""' "$CONTRACT")"
+  fi
+fi
+[[ -n "$TARGET_ID" && "$TARGET_ID" != "null" ]] || fail "target id not found"
+
+DEF_USER="$(yq e -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
+DEF_PORT="$(yq e -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
+DEF_TO="$(yq e -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+
+TARGET_HOST="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_BINDING")"
+TARGET_USER="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"$DEF_USER\"" "$SSH_BINDING")"
+TARGET_PORT="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port // $DEF_PORT" "$SSH_BINDING")"
+TARGET_TAILSCALE="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .tailscale_ip // \"\"" "$SSH_BINDING")"
+
+[[ -n "$TARGET_HOST" && "$TARGET_HOST" != "null" ]] || fail "ssh target '$TARGET_ID' missing host"
+
+SSH_OPTS="-p $TARGET_PORT -o ConnectTimeout=${DEF_TO} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+PVE_TARGET_ID="$(yq e -r '.model.destination_lanes."r730xd-communications-backups".host // "pve"' "$BACKUP_INVENTORY")"
+PVE_TARGET_HOST="$(yq e -r ".ssh.targets[] | select(.id == \"$PVE_TARGET_ID\") | .host // \"\"" "$SSH_BINDING")"
+PVE_TARGET_USER="$(yq e -r ".ssh.targets[] | select(.id == \"$PVE_TARGET_ID\") | .user // \"$DEF_USER\"" "$SSH_BINDING")"
+PVE_TARGET_PORT="$(yq e -r ".ssh.targets[] | select(.id == \"$PVE_TARGET_ID\") | .port // $DEF_PORT" "$SSH_BINDING")"
+PVE_TARGET_TAILSCALE="$(yq e -r ".ssh.targets[] | select(.id == \"$PVE_TARGET_ID\") | .tailscale_ip // \"\"" "$SSH_BINDING")"
+[[ -n "$PVE_TARGET_HOST" && "$PVE_TARGET_HOST" != "null" ]] || fail "ssh target '$PVE_TARGET_ID' missing host"
+PVE_SSH_OPTS="-p $PVE_TARGET_PORT -o ConnectTimeout=${DEF_TO} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+OFFSITE_BASE="$(yq e -r '.model.destination_lanes."r730xd-communications-backups".base_path // ""' "$BACKUP_INVENTORY")/mail-archiver"
+
+ERRORS=0
+WARNINGS=0
+err() { echo "  FAIL: $*"; ERRORS=$((ERRORS + 1)); }
+warn() { echo "  WARN: $*"; WARNINGS=$((WARNINGS + 1)); }
+ok_msg() { echo "  OK: $*"; }
+
+required_manifest_keys=(
+  manifest_version
+  timestamp
+  db_dump_bytes
+  uploads_archive_bytes
+  schema_public_table_count
+  schema_mail_archiver_table_count
+  public_ef_migrations_history_rows
+  mail_archiver_archived_emails_rows
+  mail_archiver_mail_accounts_rows
+  mail_archiver_users_rows
+  uploads_file_count
+)
+
+validate_manifest_content() {
+  local label="$1"
+  local content="$2"
+  local key
+
+  if [[ -z "$content" ]]; then
+    err "$label manifest is empty or unreadable"
+    return
+  fi
+
+  if ! grep -Eq '^manifest_version=2$' <<<"$content"; then
+    err "$label manifest is missing manifest_version=2"
+  else
+    ok_msg "$label manifest_version=2"
+  fi
+
+  for key in "${required_manifest_keys[@]}"; do
+    if ! grep -Eq "^${key}=" <<<"$content"; then
+      err "$label manifest missing required key: $key"
+    fi
+  done
+}
+
+resolve_ssh_ref() {
+  local id="$1"
+  local user="$2"
+  local host="$3"
+  local tailscale="$4"
+  local opts="$5"
+  local -a candidates=("${id}" "${user}@${host}")
+  if [[ -n "$tailscale" && "$tailscale" != "null" && "$tailscale" != "$host" ]]; then
+    candidates+=("${user}@${tailscale}")
+  fi
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if ssh $opts "$candidate" "true" >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  echo "${user}@${host}"
+}
+
+SSH_REF="$(resolve_ssh_ref "$TARGET_ID" "$TARGET_USER" "$TARGET_HOST" "$TARGET_TAILSCALE" "$SSH_OPTS")"
+PVE_SSH_REF="$(resolve_ssh_ref "$PVE_TARGET_ID" "$PVE_TARGET_USER" "$PVE_TARGET_HOST" "$PVE_TARGET_TAILSCALE" "$PVE_SSH_OPTS")"
+
+comm_ssh() { ssh $SSH_OPTS "$SSH_REF" "$@"; }
+pve_ssh() { ssh $PVE_SSH_OPTS "$PVE_SSH_REF" "$@"; }
+
+echo "=== Mail-Archiver Backup Status ==="
+echo "target: $TARGET_ID ($SSH_REF)"
+echo "offsite_target: $PVE_TARGET_ID ($PVE_SSH_REF)"
+echo "generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo ""
+
+# ── 1. Contract parity ──
+echo "=== Contract Parity ==="
+
+PGDUMP_JOB="$(yq e '.jobs[] | select(.id == "mail-archiver-db-pgdump-daily") | .enabled' "$BACKUP_SCHEDULE" 2>/dev/null || echo "missing")"
+if [[ "$PGDUMP_JOB" == "true" ]]; then
+  ok_msg "backup.schedule.yaml: mail-archiver-db-pgdump-daily enabled"
+else
+  err "backup.schedule.yaml: mail-archiver-db-pgdump-daily not enabled ($PGDUMP_JOB)"
+fi
+
+PGDUMP_CRON="$(yq e '.jobs[] | select(.id == "mail-archiver-db-pgdump-daily") | .schedule_cron' "$BACKUP_SCHEDULE" 2>/dev/null || echo "missing")"
+echo "  schedule_cron: $PGDUMP_CRON"
+
+RETENTION_DAYS="$(yq e '.jobs[] | select(.id == "mail-archiver-db-pgdump-daily") | .retention_days' "$BACKUP_SCHEDULE" 2>/dev/null || echo "missing")"
+echo "  retention_days: $RETENTION_DAYS"
+
+UPLOADS_JOB="$(yq e '.jobs[] | select(.id == "mail-archiver-uploads-snapshot-daily") | .enabled' "$BACKUP_SCHEDULE" 2>/dev/null || echo "missing")"
+if [[ "$UPLOADS_JOB" == "true" ]]; then
+  ok_msg "backup.schedule.yaml: mail-archiver-uploads-snapshot-daily enabled"
+else
+  err "backup.schedule.yaml: mail-archiver-uploads-snapshot-daily not enabled ($UPLOADS_JOB)"
+fi
+
+# ── 2. Remote backup artifacts ──
+echo ""
+echo "=== Remote Backup Artifacts ==="
+
+BACKUP_BASE="/srv/mail-archiver/backups"
+LOCAL_SET=""
+for candidate_dir in "$BACKUP_BASE/last-good" "$BACKUP_BASE/staging"; do
+  while IFS= read -r candidate_db; do
+    [[ -n "$candidate_db" ]] || continue
+    candidate_base="$(basename "$candidate_db")"
+    candidate_ts="${candidate_base#mail-archiver-db-}"
+    candidate_ts="${candidate_ts%.sql.gz}"
+    candidate_uploads="$candidate_dir/mail-archiver-uploads-${candidate_ts}.tar.gz"
+    candidate_manifest="$candidate_dir/mail-archiver-manifest-${candidate_ts}.txt"
+    if comm_ssh "test -f '$candidate_uploads' && test -f '$candidate_manifest'" >/dev/null 2>&1; then
+      LOCAL_SET="$candidate_dir|$candidate_ts|$candidate_db|$candidate_uploads|$candidate_manifest"
+      break 2
+    fi
+  done < <(comm_ssh "find '$candidate_dir' -maxdepth 1 -type f -name 'mail-archiver-db-*.sql.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-")
+done
+
+LATEST_LOCAL_DB=""
+LATEST_LOCAL_UPLOADS=""
+LATEST_LOCAL_MANIFEST=""
+LOCAL_SET_DIR=""
+LOCAL_SET_TIMESTAMP=""
+if [[ -n "$LOCAL_SET" ]]; then
+  IFS='|' read -r LOCAL_SET_DIR LOCAL_SET_TIMESTAMP LATEST_LOCAL_DB LATEST_LOCAL_UPLOADS LATEST_LOCAL_MANIFEST <<<"$LOCAL_SET"
+fi
+REMOTE_NOW_SEC="$(comm_ssh "date +%s" 2>/dev/null || echo "0")"
+
+if [[ -n "$LATEST_LOCAL_DB" ]]; then
+  ok_msg "local mail-archiver DB artifact present"
+  echo "  local_set_dir: $LOCAL_SET_DIR"
+  echo "  local_set_timestamp: $LOCAL_SET_TIMESTAMP"
+  echo "  latest_local_db: $LATEST_LOCAL_DB"
+  LOCAL_DB_BASENAME="$(basename "$LATEST_LOCAL_DB")"
+  LOCAL_DB_SIZE="$(comm_ssh "stat -c '%s' '$LATEST_LOCAL_DB' 2>/dev/null || echo 0" 2>/dev/null || echo "0")"
+  echo "  latest_local_db_bytes: $LOCAL_DB_SIZE"
+  LATEST_AGE_SEC="$(comm_ssh "stat -c '%Y' '$LATEST_LOCAL_DB' 2>/dev/null || echo 0" 2>/dev/null || echo "0")"
+  if [[ "$LATEST_AGE_SEC" -gt 0 && "$REMOTE_NOW_SEC" -gt 0 ]]; then
+    AGE_HOURS=$(( (REMOTE_NOW_SEC - LATEST_AGE_SEC) / 3600 ))
+    echo "  latest_local_db_age_hours: $AGE_HOURS"
+    if [[ "$AGE_HOURS" -gt 48 ]]; then
+      warn "latest local postgres backup is ${AGE_HOURS}h old (>48h)"
+    else
+      ok_msg "latest local postgres backup age within 48h window"
+    fi
+  fi
+else
+  err "no local postgres backup artifacts found in $BACKUP_BASE or $BACKUP_BASE/last-good"
+fi
+
+if [[ -n "$LATEST_LOCAL_UPLOADS" ]]; then
+  ok_msg "local uploads artifact present"
+  echo "  latest_local_uploads: $LATEST_LOCAL_UPLOADS"
+  LOCAL_UPLOADS_BASENAME="$(basename "$LATEST_LOCAL_UPLOADS")"
+else
+  warn "no local uploads artifact found in $BACKUP_BASE or $BACKUP_BASE/last-good"
+fi
+
+if [[ -n "$LATEST_LOCAL_MANIFEST" ]]; then
+  ok_msg "local manifest present"
+  echo "  latest_local_manifest: $LATEST_LOCAL_MANIFEST"
+  LOCAL_MANIFEST_BASENAME="$(basename "$LATEST_LOCAL_MANIFEST")"
+  LOCAL_MANIFEST_CONTENT="$(comm_ssh "cat '$LATEST_LOCAL_MANIFEST'" 2>/dev/null || true)"
+  validate_manifest_content "local" "$LOCAL_MANIFEST_CONTENT"
+else
+  warn "no local manifest found in $BACKUP_BASE or $BACKUP_BASE/last-good"
+fi
+
+PVE_NOW_SEC="$(pve_ssh "date +%s" 2>/dev/null || echo "0")"
+LATEST_OFFSITE_DB=""
+LATEST_OFFSITE_UPLOADS=""
+LATEST_OFFSITE_MANIFEST=""
+if [[ -n "${LOCAL_DB_BASENAME:-}" ]]; then
+  candidate="$OFFSITE_BASE/$LOCAL_DB_BASENAME"
+  if pve_ssh "test -f '$candidate'" 2>/dev/null; then
+    LATEST_OFFSITE_DB="$candidate"
+  fi
+fi
+if [[ -n "$LATEST_OFFSITE_DB" ]]; then
+  ok_msg "730XD offsite DB artifact present"
+  echo "  latest_offsite_db: $LATEST_OFFSITE_DB"
+  OFFSITE_DB_BASENAME="$(basename "$LATEST_OFFSITE_DB")"
+  OFFSITE_DB_SIZE="$(pve_ssh "stat -c '%s' '$LATEST_OFFSITE_DB' 2>/dev/null || echo 0" 2>/dev/null || echo "0")"
+  echo "  latest_offsite_db_bytes: $OFFSITE_DB_SIZE"
+  OFFSITE_AGE_SEC="$(pve_ssh "stat -c '%Y' '$LATEST_OFFSITE_DB' 2>/dev/null || echo 0" 2>/dev/null || echo "0")"
+  if [[ "$OFFSITE_AGE_SEC" -gt 0 && "$PVE_NOW_SEC" -gt 0 ]]; then
+    OFFSITE_AGE_HOURS=$(( (PVE_NOW_SEC - OFFSITE_AGE_SEC) / 3600 ))
+    echo "  latest_offsite_db_age_hours: $OFFSITE_AGE_HOURS"
+    if [[ "$OFFSITE_AGE_HOURS" -gt 48 ]]; then
+      warn "latest 730XD postgres backup is ${OFFSITE_AGE_HOURS}h old (>48h)"
+  else
+      ok_msg "latest 730XD postgres backup age within 48h window"
+    fi
+  fi
+  ok_msg "matching offsite DB matches latest local DB name"
+  if [[ -n "${LOCAL_DB_SIZE:-}" && "$LOCAL_DB_SIZE" != "0" && "$OFFSITE_DB_SIZE" != "$LOCAL_DB_SIZE" ]]; then
+    err "latest offsite DB size does not match local DB size ($OFFSITE_DB_SIZE != $LOCAL_DB_SIZE)"
+  else
+    ok_msg "latest offsite DB size matches local DB size"
+  fi
+else
+  err "no 730XD offsite postgres artifact found for latest local DB ($OFFSITE_BASE/${LOCAL_DB_BASENAME:-mail-archiver-db-*.sql.gz})"
+fi
+
+if [[ -n "${LOCAL_UPLOADS_BASENAME:-}" ]]; then
+  candidate="$OFFSITE_BASE/$LOCAL_UPLOADS_BASENAME"
+  if pve_ssh "test -f '$candidate'" 2>/dev/null; then
+    LATEST_OFFSITE_UPLOADS="$candidate"
+  fi
+fi
+if [[ -n "$LATEST_OFFSITE_UPLOADS" ]]; then
+  ok_msg "730XD offsite uploads artifact present"
+  echo "  latest_offsite_uploads: $LATEST_OFFSITE_UPLOADS"
+  ok_msg "matching offsite uploads artifact present for latest local uploads"
+else
+  err "no 730XD offsite uploads artifact found for latest local uploads ($OFFSITE_BASE/${LOCAL_UPLOADS_BASENAME:-mail-archiver-uploads-*.tar.gz})"
+fi
+
+if [[ -n "${LOCAL_MANIFEST_BASENAME:-}" ]]; then
+  candidate="$OFFSITE_BASE/$LOCAL_MANIFEST_BASENAME"
+  if pve_ssh "test -f '$candidate'" 2>/dev/null; then
+    LATEST_OFFSITE_MANIFEST="$candidate"
+  fi
+fi
+if [[ -n "$LATEST_OFFSITE_MANIFEST" ]]; then
+  ok_msg "730XD offsite manifest present"
+  echo "  latest_offsite_manifest: $LATEST_OFFSITE_MANIFEST"
+  ok_msg "matching offsite manifest present for latest local manifest"
+  OFFSITE_MANIFEST_CONTENT="$(pve_ssh "cat '$LATEST_OFFSITE_MANIFEST'" 2>/dev/null || true)"
+  validate_manifest_content "730XD offsite" "$OFFSITE_MANIFEST_CONTENT"
+else
+  err "no 730XD offsite manifest found for latest local manifest ($OFFSITE_BASE/${LOCAL_MANIFEST_BASENAME:-mail-archiver-manifest-*.txt})"
+fi
+
+# ── 3. Cron job check ──
+echo ""
+echo "=== Cron Job Check ==="
+EXPECTED_CRON_LINE="$PGDUMP_CRON root /usr/local/bin/mail-archiver-backup.sh >> /var/log/mail-archiver-backup.log 2>&1"
+CRON_FILE_CONTENT="$(comm_ssh "sudo -n cat /etc/cron.d/communications-backups 2>/dev/null || true" 2>/dev/null || true)"
+if [[ -n "$CRON_FILE_CONTENT" ]]; then
+  ok_msg "cron file present: /etc/cron.d/communications-backups"
+  echo "$CRON_FILE_CONTENT" | while read -r line; do echo "    $line"; done
+else
+  err "missing /etc/cron.d/communications-backups"
+fi
+
+if echo "$CRON_FILE_CONTENT" | grep -Fq "$EXPECTED_CRON_LINE"; then
+  ok_msg "cron line matches schedule contract"
+else
+  err "cron line does not match schedule contract: $EXPECTED_CRON_LINE"
+fi
+
+USER_CRON_RESIDUE="$(comm_ssh "crontab -l 2>/dev/null | grep -E 'mail-archiver-backup.sh|stalwart-backup.sh' || true" 2>/dev/null || true)"
+if [[ -n "$USER_CRON_RESIDUE" ]]; then
+  warn "ubuntu user crontab still contains communications backup entries"
+  echo "$USER_CRON_RESIDUE" | while read -r line; do echo "    $line"; done
+else
+  ok_msg "ubuntu user crontab is clean for communications backups"
+fi
+
+# ── 4. DB size ──
+echo ""
+echo "=== Database Size ==="
+DB_SIZE="$(comm_ssh "echo \"SELECT pg_size_pretty(pg_database_size('MailArchiver'));\" | sudo -n docker exec -i mail-archiver-db psql -U mailuser -d MailArchiver -t -A" 2>/dev/null | tr -d '[:space:]' || echo "unknown")"
+echo "  db_size: $DB_SIZE"
+
+# ── Result ──
+echo ""
+STATUS="OK"
+if [[ "$ERRORS" -gt 0 ]]; then
+  STATUS="FAIL"
+elif [[ "$WARNINGS" -gt 0 ]]; then
+  STATUS="WARN"
+fi
+
+echo "backup_contract_ref: ops/bindings/mail.archiver.backup.contract.yaml"
+echo "backup_schedule_ref: ops/bindings/backup.schedule.yaml"
+echo "errors: $ERRORS"
+echo "warnings: $WARNINGS"
+echo "status: $STATUS"
+
+[[ "$ERRORS" -gt 0 ]] && exit 1 || exit 0

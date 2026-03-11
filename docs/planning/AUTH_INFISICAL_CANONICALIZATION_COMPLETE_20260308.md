@@ -21,7 +21,7 @@ Auth and files-api on `mint-apps` now have **durable Infisical-backed deployment
 ### Wave 1 (2026-03-08 morning): Proof-of-Concept
 - **Goal:** Prove Infisical injection works
 - **Approach:** SSH session exports + docker compose
-- **Helper:** `ops/plugins/mint/bin/auth-deploy-infisical` (now superseded)
+- **Helper:** `ops/plugins/domains/mint/bin/auth-deploy-infisical` (now superseded)
 - **Result:** ✅ Worked, but NOT durable (only during script execution)
 - **Problem:** Removed AUTH_* from .env without durable replacement
 - **Impact:** Both auth and files-api became restart-fragile

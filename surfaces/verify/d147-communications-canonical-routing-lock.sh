@@ -5,7 +5,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
-ALLOWED_SPINE_PREFIX="$ROOT/ops/plugins/communications/"
+ALLOWED_SPINE_PREFIX="$ROOT/ops/plugins/domains/communications/"
 
 fail() {
   echo "D147 FAIL: $*" >&2

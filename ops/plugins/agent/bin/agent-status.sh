@@ -123,7 +123,7 @@ fi
 
 echo
 echo "== COMMS QUEUE =="
-COMMS_STATUS_BIN="$SPINE/ops/plugins/communications/bin/communications-alerts-runtime-status"
+COMMS_STATUS_BIN="$SPINE/ops/plugins/domains/communications/bin/communications-alerts-runtime-status"
 if [[ -x "$COMMS_STATUS_BIN" ]]; then
   run_comms_json() {
     if command -v timeout >/dev/null 2>&1; then

@@ -48,11 +48,11 @@ PROBE_IDS=(
 )
 
 PROBE_SCRIPTS=(
-  "$ROOT/ops/plugins/ha/bin/ha-inventory-snapshot-build"
+  "$ROOT/ops/plugins/domains/ha/bin/ha-inventory-snapshot-build"
   "$ROOT/ops/plugins/infra/network/bin/network-home-dhcp-audit"
-  "$ROOT/ops/plugins/media/bin/media-content-snapshot-refresh"
+  "$ROOT/ops/plugins/domains/media/bin/media-content-snapshot-refresh"
   "$ROOT/ops/plugins/infra/network/bin/network-inventory-snapshot-build"
-  "$ROOT/ops/plugins/ha/bin/ha-z2m-devices-snapshot"
+  "$ROOT/ops/plugins/domains/ha/bin/ha-z2m-devices-snapshot"
 )
 
 for probe in "${PROBE_SCRIPTS[@]}"; do

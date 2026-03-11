@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 POLICY="$ROOT/ops/bindings/mint.legacy.ice.policy.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
-MINT_PLUGIN_DIR="$ROOT/ops/plugins/mint/bin"
+MINT_PLUGIN_DIR="$ROOT/ops/plugins/domains/mint/bin"
 
 MODE=""
 while [[ $# -gt 0 ]]; do
@@ -61,7 +61,7 @@ while IFS=$'\t' read -r cap_id cap_cmd; do
   if echo "$cap_cmd" | rg -qi 'mint-os'; then
     finding "MEDIUM" "$cap_id command references mint-os term: '$cap_cmd'"
   fi
-  if [[ "$cap_cmd" != ./ops/plugins/mint/bin/* ]]; then
+  if [[ "$cap_cmd" != ./ops/plugins/domains/mint/bin/* ]]; then
     finding "MEDIUM" "$cap_id command outside mint plugin surface: '$cap_cmd'"
   fi
 done < <(yq -r '.capabilities | to_entries[] | select(.key | test("^mint\\.")) | [.key, (.value.command // "")] | @tsv' "$CAPS")

@@ -37,8 +37,8 @@ else
 fi
 
 # ── 2. Overlap cleanup capability scripts exist ──
-OVERLAP_PLAN="$ROOT/ops/plugins/communications/bin/communications-mail-archiver-overlap-plan"
-IMPORT_REMOTE="$ROOT/ops/plugins/communications/bin/communications-mail-archiver-import-eml-remote"
+OVERLAP_PLAN="$ROOT/ops/plugins/domains/communications/bin/communications-mail-archiver-overlap-plan"
+IMPORT_REMOTE="$ROOT/ops/plugins/domains/communications/bin/communications-mail-archiver-import-eml-remote"
 
 if [[ -f "$OVERLAP_PLAN" ]]; then
   ok "overlap plan capability script exists"

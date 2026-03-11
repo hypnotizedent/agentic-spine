@@ -21,8 +21,8 @@ Canonical operating model for parallel terminal work without collisions.
 | SPINE-CONTROL-01 | control-plane | bin/, ops/, surfaces/, docs/governance/, docs/core/, docs/product/, docs/brain/, mailroom/ |
 | SPINE-AUDIT-01 | observation | receipts/, docs/governance/_audits/ |
 | RUNTIME-IMMICH-01 | domain-runtime | ops/plugins/domains/immich/, ops/bindings/immich.* |
-| DOMAIN-HA-01 | domain-runtime | ops/plugins/ha/, ops/bindings/ha.*, z2m.*, home.* |
-| DEPLOY-MINT-01 | domain-runtime | ops/plugins/mint/, docs/governance/MINT_* |
+| DOMAIN-HA-01 | domain-runtime | ops/plugins/domains/ha/, ops/bindings/ha.*, z2m.*, home.* |
+| DEPLOY-MINT-01 | domain-runtime | ops/plugins/domains/mint/, docs/governance/MINT_* |
 
 Formal contract: `ops/bindings/terminal.role.contract.yaml`
 

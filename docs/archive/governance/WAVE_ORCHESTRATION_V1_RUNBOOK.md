@@ -54,7 +54,7 @@ mkdir -p "$RECEIPTS_DIR"
   --terminal-id DEPLOY-MINT-01 \
   --lane execution \
   --status done \
-  --files-changed ops/plugins/mint/config.yaml \
+  --files-changed ops/plugins/domains/mint/config.yaml \
   --run-keys CAP-20260222-120000__verify.core.run__Rabc12345 \
   --ready-for-verify true \
   --json-out "$RECEIPTS_DIR/D1.json" \

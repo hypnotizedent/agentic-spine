@@ -66,8 +66,8 @@ actual_data_vmid="$(yq -r '.targets.data_plane.vm_id // ""' "$PROBE_BINDING" 2>/
 while IFS=$'\t' read -r cap_id cap_cmd; do
   [[ -z "$cap_id" ]] && continue
 
-  if [[ "$cap_cmd" != ./ops/plugins/mint/bin/* ]]; then
-    finding "HIGH" "$cap_id command must remain under ./ops/plugins/mint/bin/ (got '$cap_cmd')"
+  if [[ "$cap_cmd" != ./ops/plugins/domains/mint/bin/* ]]; then
+    finding "HIGH" "$cap_id command must remain under ./ops/plugins/domains/mint/bin/ (got '$cap_cmd')"
   fi
 
   if echo "$cap_cmd" | rg -qi 'docker-host|ronny-ops|mint-os'; then

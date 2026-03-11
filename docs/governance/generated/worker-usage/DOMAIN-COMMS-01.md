@@ -16,7 +16,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Verify Command: `./bin/ops cap run verify.pack.run communications`
 
 ## Write Scope
-- `ops/plugins/communications/`
+- `ops/plugins/domains/communications/`
 - `../agentic-foundation/docs/agents/communications-agent.contract.md`
 
 ## Capabilities (14)

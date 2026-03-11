@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# quote-edge-protection-reconcile - Reconcile narrow Cloudflare rate limits for the Mint quote form.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+SECRETS_EXEC="$SPINE_ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
+CONTRACT="$SPINE_ROOT/ops/bindings/mint.public.ingress.contract.yaml"
+CF_BINDING="$SPINE_ROOT/ops/bindings/cloudflare.inventory.yaml"
+CF_LIB="$SPINE_ROOT/ops/plugins/providers/cloudflare/lib/cloudflare-api.sh"
+
+stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || stop "missing dependency: $1"
+}
+
+require_cmd jq
+require_cmd python3
+
+[[ -f "$CONTRACT" ]] || stop "missing contract: $CONTRACT"
+[[ -f "$CF_BINDING" ]] || stop "missing binding: $CF_BINDING"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+DRY_RUN=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
+
+# shellcheck source=/dev/null
+source "$CF_LIB"
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+cf_require_auth || exit $?
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mint-quote-edge.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+python3 - "$CONTRACT" > "$TMP_DIR/edge.json" <<'PY'
+import json, sys, yaml
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = yaml.safe_load(handle) or {}
+quote_hosts = []
+for row in data.get("hosts", []) or []:
+    if str(row.get("runtime_owner_service", "")).strip() != "quote-page":
+        continue
+    hostname = str(row.get("hostname", "")).strip()
+    if hostname:
+        quote_hosts.append(hostname)
+quote_hosts = sorted(dict.fromkeys(quote_hosts))
+edge = ((data.get("quote_form_protection") or {}).get("edge_rate_limits") or {})
+rules = edge.get("rules") or []
+print(json.dumps({
+    "zone": edge.get("zone", "mintprints.com"),
+    "hosts": quote_hosts,
+    "rules": rules,
+}, separators=(",", ":")))
+PY
+
+ZONE_NAME="$(jq -r '.zone' "$TMP_DIR/edge.json")"
+ZONE_ID="$(cf_zone_id_resolve "$CF_API" "$CF_BINDING" "" "$ZONE_NAME" || true)"
+[[ -n "$ZONE_ID" ]] || stop "unable to resolve Cloudflare zone id for $ZONE_NAME"
+
+RULESET_JSON=""
+if cf_api_get_with_retry_into_var RULESET_JSON "${CF_API}/zones/${ZONE_ID}/rulesets/phases/http_ratelimit/entrypoint"; then
+  :
+else
+  if [[ "${CF_LAST_HTTP_STATUS:-}" != "404" ]]; then
+    stop "failed to read http_ratelimit entrypoint (status=${CF_LAST_HTTP_STATUS:-unknown})"
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "mint.quote.edge.reconcile"
+    echo "dry_run: true"
+    echo "would_create_phase_entrypoint: zone=${ZONE_NAME}"
+    echo "status: OK"
+    exit 0
+  fi
+
+  create_payload="$(jq -nc --arg zone "$ZONE_NAME" '{name:($zone + " quote edge protection"), kind:"zone", phase:"http_ratelimit"}')"
+  RULESET_JSON="$(cf_api_post "${CF_API}/zones/${ZONE_ID}/rulesets" "$create_payload")" \
+    || stop "failed to create http_ratelimit ruleset"
+fi
+
+RULESET_ID="$(jq -r '.result.id // empty' <<< "$RULESET_JSON")"
+[[ -n "$RULESET_ID" ]] || stop "rate limit ruleset id missing"
+
+python3 - "$TMP_DIR/edge.json" > "$TMP_DIR/descriptions.txt" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+for row in data.get("rules", []):
+    desc = str(row.get("description", "")).strip()
+    if desc:
+        print(desc)
+PY
+
+while IFS= read -r description; do
+  [[ -n "$description" ]] || continue
+  existing_rule_ids="$(jq -r --arg description "$description" '.result.rules[]? | select(.description == $description) | .id' <<< "$RULESET_JSON")"
+  while IFS= read -r rule_id; do
+    [[ -n "$rule_id" ]] || continue
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "would_delete_rule: $description ($rule_id)"
+    else
+      cf_api_delete "${CF_API}/zones/${ZONE_ID}/rulesets/${RULESET_ID}/rules/${rule_id}" >/dev/null \
+        || stop "failed to delete existing rate-limit rule $description"
+    fi
+  done <<< "$existing_rule_ids"
+done < "$TMP_DIR/descriptions.txt"
+
+python3 - "$TMP_DIR/edge.json" > "$TMP_DIR/rules.ndjson" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+hosts = data.get("hosts", [])
+host_expr = "{" + " ".join(f'"{host}"' for host in hosts) + "}"
+for row in data.get("rules", []):
+    paths = row.get("exact_paths") or []
+    path_expr = " or ".join(f'(http.request.uri.path eq "{path}")' for path in paths)
+    method = str(row.get("method", "POST")).upper()
+    expression = f'(http.host in {host_expr} and http.request.method eq "{method}" and ({path_expr}))'
+    payload = {
+        "description": row.get("description"),
+        "expression": expression,
+        "action": "block",
+        "ratelimit": {
+            "characteristics": ["cf.colo.id", "ip.src"],
+            "period": int(row.get("period", 60)),
+            "requests_per_period": int(row.get("requests_per_period", 1)),
+            "mitigation_timeout": int(row.get("mitigation_timeout", 10)),
+            "requests_to_origin": True,
+        },
+        "action_parameters": {
+            "response": {
+                "status_code": int(((row.get("response") or {}).get("status_code", 429))),
+                "content_type": ((row.get("response") or {}).get("content_type", "application/json")),
+                "content": ((row.get("response") or {}).get("content", '{"error":"Request blocked."}')),
+            }
+        },
+    }
+    print(json.dumps(payload, separators=(",", ":")))
+PY
+
+echo "mint.quote.edge.reconcile"
+echo "zone: $ZONE_NAME"
+echo "ruleset_id: $RULESET_ID"
+
+while IFS= read -r payload; do
+  [[ -n "$payload" ]] || continue
+  description="$(jq -r '.description' <<< "$payload")"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "would_add_rule: $description"
+    continue
+  fi
+  cf_api_post "${CF_API}/zones/${ZONE_ID}/rulesets/${RULESET_ID}/rules" "$payload" >/dev/null \
+    || stop "failed to create rate-limit rule $description"
+  echo "applied_rule: $description"
+done < "$TMP_DIR/rules.ndjson"
+
+echo "status: OK"

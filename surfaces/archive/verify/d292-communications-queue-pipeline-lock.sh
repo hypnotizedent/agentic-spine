@@ -126,16 +126,16 @@ fi
 
 # ─── Check 5: Implementation scripts exist and are executable ────────────
 cap_scripts=(
-  "$ROOT/ops/plugins/communications/bin/communications-alerts-dispatcher-start"
-  "$ROOT/ops/plugins/communications/bin/communications-alerts-dispatcher-status"
-  "$ROOT/ops/plugins/communications/bin/communications-alerts-dispatcher-stop"
-  "$ROOT/ops/plugins/communications/bin/communications-alerts-deadletter-replay"
-  "$ROOT/ops/plugins/communications/bin/communications-alerts-queue-status"
-  "$ROOT/ops/plugins/communications/bin/communications-alerts-queue-slo-status"
-  "$ROOT/ops/plugins/communications/bin/communications-alerts-runtime-status"
-  "$ROOT/ops/plugins/communications/bin/communications-alerts-queue-escalate"
-  "$ROOT/ops/plugins/communications/bin/communications-alerts-flush"
-  "$ROOT/ops/plugins/communications/bin/communications-alerts-incident-bundle-create"
+  "$ROOT/ops/plugins/domains/communications/bin/communications-alerts-dispatcher-start"
+  "$ROOT/ops/plugins/domains/communications/bin/communications-alerts-dispatcher-status"
+  "$ROOT/ops/plugins/domains/communications/bin/communications-alerts-dispatcher-stop"
+  "$ROOT/ops/plugins/domains/communications/bin/communications-alerts-deadletter-replay"
+  "$ROOT/ops/plugins/domains/communications/bin/communications-alerts-queue-status"
+  "$ROOT/ops/plugins/domains/communications/bin/communications-alerts-queue-slo-status"
+  "$ROOT/ops/plugins/domains/communications/bin/communications-alerts-runtime-status"
+  "$ROOT/ops/plugins/domains/communications/bin/communications-alerts-queue-escalate"
+  "$ROOT/ops/plugins/domains/communications/bin/communications-alerts-flush"
+  "$ROOT/ops/plugins/domains/communications/bin/communications-alerts-incident-bundle-create"
 )
 
 for script in "${cap_scripts[@]}"; do

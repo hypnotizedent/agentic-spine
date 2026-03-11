@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PLUGIN_DIR="$ROOT/ops/plugins/maker/bin"
+PLUGIN_DIR="$ROOT/ops/plugins/domains/maker/bin"
 BINDING_FILE="$ROOT/ops/bindings/maker.tools.inventory.yaml"
 
 fail(){ echo "D40 FAIL: $*" >&2; exit 1; }

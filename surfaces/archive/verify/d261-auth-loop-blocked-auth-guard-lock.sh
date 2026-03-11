@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LIFECYCLE_CONTRACT="$ROOT/ops/bindings/tailscale.ssh.lifecycle.contract.yaml"
 STACK_CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
-MONITOR_BIN="$ROOT/ops/plugins/communications/bin/communications-mail-archiver-import-monitor"
+MONITOR_BIN="$ROOT/ops/plugins/domains/communications/bin/communications-mail-archiver-import-monitor"
 
 fail=0
 err() { echo "D261 FAIL: $*" >&2; fail=1; }

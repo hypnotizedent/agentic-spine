@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# deploy-sync-from-main - Sync committed mint-modules source to mint-apps VM 213 and deploy a single module.
+#
+# Mutating command intended as the canonical deploy path to prevent stale runtime drift.
+# Enforces single-module targeting — multi-module CSV is rejected.
+# Builds only the targeted service on-host and avoids dependency restarts.
+#
+# Default:
+#   - sync from ref origin/main
+#   - deploy module: artwork (single module required)
+#   - run post-deploy proofs: mint.deploy.status, mint.modules.health, mint.runtime.proof
+#
+# Usage:
+#   deploy-sync-from-main --modules artwork
+#   deploy-sync-from-main --ref main --modules shipping
+#   deploy-sync-from-main --modules pricing --skip-proof
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+MINT_REPO="${MINT_REPO:-/Users/ronnyworks/code/mint-modules}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v git >/dev/null 2>&1 || stop "missing dependency: git"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+[[ -d "$MINT_REPO/.git" ]] || stop "mint-modules repo not found at $MINT_REPO"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+
+REF="origin/main"
+MODULES_CSV="artwork"
+RUN_PROOF=1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --ref)
+      REF="${2:-}"
+      shift 2
+      ;;
+    --modules)
+      MODULES_CSV="${2:-}"
+      shift 2
+      ;;
+    --skip-proof)
+      RUN_PROOF=0
+      shift
+      ;;
+    *)
+      stop "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$REF" ]] || stop "--ref cannot be empty"
+[[ -n "$MODULES_CSV" ]] || stop "--modules cannot be empty"
+
+# Single-module gate: reject multi-module CSV
+if [[ "$MODULES_CSV" == *","* ]]; then
+  stop "multi-module deploy rejected. Deploy one module at a time: --modules <single-module>. See docs/SOPs/MINT_MODULE_BUILD_SOP_V1.md Rule 5."
+fi
+
+MODULE="$(echo "$MODULES_CSV" | xargs)"
+[[ -n "$MODULE" ]] || stop "--modules cannot be empty"
+
+MINT_APPS_USER="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | .user // "ubuntu"' "$SSH_BINDING" | head -n1)"
+read -r MINT_APPS_HOST MINT_APPS_PATH <<<"$(ssh_resolve_ssh_host_with_fallback "mint-apps" 3 || true)"
+[[ -n "$MINT_APPS_HOST" && "$MINT_APPS_HOST" != "null" ]] || stop "mint-apps ssh target missing"
+[[ "$MINT_APPS_PATH" != "unreachable" ]] || stop "mint-apps ssh unreachable via lan or tailscale"
+REMOTE_STACK_ROOT="/opt/stacks/mint-apps"
+REMOTE_ENV_FILE="${REMOTE_STACK_ROOT}/.env"
+
+SSH_OPTS=(-o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
+
+echo "mint.deploy.sync"
+echo "mint_repo: $MINT_REPO"
+echo "ref: $REF"
+echo "module: $MODULE"
+echo "target: ${MINT_APPS_USER}@${MINT_APPS_HOST}:${REMOTE_STACK_ROOT} (${MINT_APPS_PATH})"
+echo
+
+# Ensure ref is available and valid.
+git -C "$MINT_REPO" fetch origin --prune >/dev/null 2>&1 || true
+git -C "$MINT_REPO" rev-parse --verify "$REF" >/dev/null 2>&1 || stop "git ref not found: $REF"
+resolved_ref="$(git -C "$MINT_REPO" rev-parse --short "$REF")"
+echo "resolved_ref: $resolved_ref"
+
+echo "[0/3] Remote env preflight..."
+ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "test -f '${REMOTE_ENV_FILE}'" \
+  || stop "missing remote env file: ${REMOTE_ENV_FILE}"
+
+missing_env=()
+module_requires() {
+  local mod="$1"
+  case "$mod" in
+    artwork)
+      echo "FILES_API_KEY MINIO_ACCESS_KEY MINIO_SECRET_KEY DATABASE_URL"
+      ;;
+    pricing)
+      echo "PRICING_API_KEY PRICING_DATABASE_URL"
+      ;;
+    suppliers)
+      echo "SUPPLIERS_API_KEY SUPPLIERS_DATABASE_URL"
+      ;;
+    shipping)
+      echo "SHIPPING_API_KEY SHIPPING_DATABASE_URL SHIPPING_EASYPOST_API_KEY SHIPPING_EASYPOST_WEBHOOK_SECRET"
+      ;;
+    payment)
+      echo "PAYMENT_API_KEY PAYMENT_DATABASE_URL PAYMENT_STRIPE_SECRET_KEY PAYMENT_STRIPE_WEBHOOK_SECRET PAYMENT_JWT_SECRET PAYMENT_FINANCE_ADAPTER_URL PAYMENT_FINANCE_ADAPTER_API_KEY"
+      ;;
+    finance-adapter)
+      echo "DATABASE_URL FINANCE_ADAPTER_API_KEY FIREFLY_API_URL FIREFLY_PAT PAPERLESS_BASE_URL PAPERLESS_API_TOKEN"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+reqs="$(module_requires "$MODULE")"
+if [[ -n "$reqs" ]]; then
+  for key in $reqs; do
+    if ! ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "awk -F= -v k='${key}' '\$1==k && \$2!=\"\"{found=1} END{exit found?0:1}' '${REMOTE_ENV_FILE}'"; then
+      missing_env+=("${MODULE}:${key}")
+    fi
+  done
+fi
+if [[ "${#missing_env[@]}" -gt 0 ]]; then
+  printf "missing env keys for deploy:\n" >&2
+  printf "  - %s\n" "${missing_env[@]}" >&2
+  stop "env preflight failed"
+fi
+
+echo "[1/3] Sync tracked files to mint-apps host..."
+git -C "$MINT_REPO" archive --format=tar "$REF" \
+  | ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "cd '${REMOTE_STACK_ROOT}' && tar -xf -" \
+  || stop "archive sync failed"
+
+echo "[2/3] Deploy module service (single-service build)..."
+
+case "$MODULE" in
+  artwork)
+    echo "  - deploy files-api (root mint-apps compose, --no-deps --build)"
+    ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+      "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build files-api" \
+      || stop "deploy failed for artwork/files-api"
+    ;;
+  quote-page|order-intake|finance-adapter)
+    echo "  - deploy $MODULE (root mint-apps compose, --no-deps --build)"
+    ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+      "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build $MODULE" \
+      || stop "deploy failed for $MODULE"
+    ;;
+  pricing|suppliers|shipping|payment)
+    echo "  - deploy $MODULE (sub-stack compose, --no-deps --build)"
+    ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+      "cd '${REMOTE_STACK_ROOT}/$MODULE' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build $MODULE" \
+      || stop "deploy failed for $MODULE"
+    ;;
+  *)
+    stop "unsupported module name: $MODULE"
+    ;;
+esac
+
+echo "[3/3] Post-deploy status checks..."
+"$SPINE_ROOT/ops/plugins/domains/mint/bin/deploy-status" || true
+"$SPINE_ROOT/ops/plugins/domains/mint/bin/modules-health" || true
+if [[ "$RUN_PROOF" -eq 1 ]]; then
+  "$SPINE_ROOT/ops/plugins/domains/mint/bin/runtime-proof"
+fi
+
+echo
+echo "status: OK"
+echo "note: deployed_ref=$resolved_ref module=$MODULE"
+exit 0

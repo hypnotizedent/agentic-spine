@@ -69,7 +69,7 @@ grep -q "name: surveillance" "$MANIFEST" || err "surveillance plugin not registe
 
 # ── Check 4: Capability scripts exist and are executable ──
 for script in surveillance-stack-status surveillance-event-query ha-surveillance-status; do
-  script_path="$ROOT/ops/plugins/surveillance/bin/$script"
+  script_path="$ROOT/ops/plugins/domains/surveillance/bin/$script"
   [[ -f "$script_path" ]] || { err "missing script: $script_path"; continue; }
   [[ -x "$script_path" ]] || err "script not executable: $script_path"
 done

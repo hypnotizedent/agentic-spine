@@ -52,7 +52,7 @@ done < <(mint_http_rows_tsv)
 while IFS= read -r script; do
   [[ -n "$script" ]] || continue
   violations+=("stale_http_checks_consumer:$(basename "$script")")
-done < <(rg -l 'http_checks' "$ROOT/ops/plugins/mint/bin" || true)
+done < <(rg -l 'http_checks' "$ROOT/ops/plugins/domains/mint/bin" || true)
 
 if [[ ${#violations[@]} -gt 0 ]]; then
   printf 'D390 FAIL: Mint probe projection drift detected\n\n' >&2

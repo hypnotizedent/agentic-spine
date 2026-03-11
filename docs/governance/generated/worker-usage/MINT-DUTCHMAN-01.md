@@ -16,7 +16,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Verify Command: `./bin/ops cap run verify.pack.run mint`
 
 ## Write Scope
-- `ops/plugins/mint/`
+- `ops/plugins/domains/mint/`
 - `../agentic-foundation/docs/agents/flying-dutchman.contract.md`
 
 ## Capabilities (7)

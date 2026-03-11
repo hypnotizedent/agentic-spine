@@ -52,7 +52,7 @@ cap_map_script="$(yq -r ".capabilities.\"$expected_capability\".script // \"\"" 
 [[ "$cap_map_script" == "communications-mail-archiver-restore-drill" ]] || err "capability_map missing communications-mail-archiver-restore-drill mapping"
 
 routing_command="$(yq -r ".dispatch.\"$expected_capability\".target.command // \"\"" "$ROUTING")"
-[[ "$routing_command" == "./ops/plugins/communications/bin/communications-mail-archiver-restore-drill" ]] || err "routing.dispatch missing communications restore drill route"
+[[ "$routing_command" == "./ops/plugins/domains/communications/bin/communications-mail-archiver-restore-drill" ]] || err "routing.dispatch missing communications restore drill route"
 
 manifest_has_cap="$(yq -r '.plugins[] | select(.name == "communications") | .capabilities[]' "$PLUGIN_MANIFEST" | grep -Fx "$expected_capability" || true)"
 [[ -n "$manifest_has_cap" ]] || err "plugin manifest missing $expected_capability"

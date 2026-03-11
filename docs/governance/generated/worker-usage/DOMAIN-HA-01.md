@@ -16,7 +16,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Verify Command: `./bin/ops cap run verify.pack.run home`
 
 ## Write Scope
-- `ops/plugins/ha/`
+- `ops/plugins/domains/ha/`
 - `../agentic-foundation/docs/agents/home-assistant-agent.contract.md`
 
 ## Capabilities (13)

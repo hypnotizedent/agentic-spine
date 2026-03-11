@@ -1,0 +1,433 @@
+#!/usr/bin/env bash
+# runtime-proof - Deep runtime behavior proof for mint modules on VM 213.
+#
+# Read-only checks proving module behavior is not a stale stub.
+# Fails (exit 1) if any proof check fails.
+# STOP=2 for precondition/input errors.
+#
+# Checks:
+#   - pricing health
+#   - shipping live API semantics (shop-address not placeholder)
+#   - suppliers search + stock parity
+#   - artwork upload/prepare parity
+#   - payment health
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+SERVICES_BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
+PROBE_BINDING="$SPINE_ROOT/ops/bindings/mint.probe.targets.yaml"
+MINT_HEALTH_SURFACE="$SPINE_ROOT/ops/lib/mint-health-surface.sh"
+# shellcheck source=/dev/null
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+# shellcheck source=/dev/null
+source "$MINT_HEALTH_SURFACE"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+command -v jq >/dev/null 2>&1 || stop "missing dependency: jq"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+[[ -f "$SERVICES_BINDING" ]] || stop "missing binding: $SERVICES_BINDING"
+[[ -f "$PROBE_BINDING" ]] || stop "missing binding: $PROBE_BINDING"
+[[ -f "$MINT_HEALTH_SURFACE" ]] || stop "missing helper: $MINT_HEALTH_SURFACE"
+
+APP_TARGET_ID="$(mint_probe_target_id app_plane)"
+DATA_TARGET_ID="$(mint_probe_target_id data_plane)"
+[[ -n "$APP_TARGET_ID" && "$APP_TARGET_ID" != "null" ]] || stop "missing app plane target in $PROBE_BINDING"
+[[ -n "$DATA_TARGET_ID" && "$DATA_TARGET_ID" != "null" ]] || stop "missing data plane target in $PROBE_BINDING"
+
+MINT_APPS_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$APP_TARGET_ID\") | .host" "$SSH_BINDING" | head -n1)"
+MINT_APPS_USER="$(yq -r ".ssh.targets[] | select(.id == \"$APP_TARGET_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" | head -n1)"
+MINT_DATA_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$DATA_TARGET_ID\") | .host" "$SSH_BINDING" | head -n1)"
+MINT_DATA_USER="$(yq -r ".ssh.targets[] | select(.id == \"$DATA_TARGET_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" | head -n1)"
+[[ -n "$MINT_APPS_HOST" && "$MINT_APPS_HOST" != "null" ]] || stop "$APP_TARGET_ID not found in ssh.targets"
+[[ -n "$MINT_DATA_HOST" && "$MINT_DATA_HOST" != "null" ]] || stop "$DATA_TARGET_ID not found in ssh.targets"
+
+IFS=' ' read -r MINT_APPS_PROBE_HOST MINT_APPS_PROBE_PATH <<< "$(ssh_resolve_probe_host "$APP_TARGET_ID" || true)"
+IFS=' ' read -r MINT_DATA_PROBE_HOST MINT_DATA_PROBE_PATH <<< "$(ssh_resolve_probe_host "$DATA_TARGET_ID" || true)"
+IFS=' ' read -r MINT_APPS_SSH_HOST MINT_APPS_SSH_PATH <<< "$(ssh_resolve_ssh_host_with_fallback "$APP_TARGET_ID" || true)"
+IFS=' ' read -r MINT_DATA_SSH_HOST MINT_DATA_SSH_PATH <<< "$(ssh_resolve_ssh_host_with_fallback "$DATA_TARGET_ID" || true)"
+
+service_url() {
+  local resolve_result
+  resolve_result="$(mint_service_resolved_url "$1" 5 || true)"
+  printf '%s\n' "$resolve_result" | awk '{print $1}'
+}
+
+service_port() {
+  mint_service_port "$1"
+}
+
+service_base_url() {
+  mint_service_resolved_base_url "$1" 5
+}
+
+proof_route() {
+  local key="$1"
+  yq -r ".proof_routes.$key // \"\"" "$PROBE_BINDING" | head -n1
+}
+
+require_value() {
+  local value="$1" label="$2"
+  [[ -n "$value" && "$value" != "null" ]] || stop "missing $label in $PROBE_BINDING"
+}
+
+PRICING_HEALTH_URL="$(service_url pricing)"
+PAYMENT_HEALTH_URL="$(service_url payment)"
+SHIPPING_BASE="$(service_base_url shipping)"
+SUPPLIERS_BASE="$(service_base_url suppliers)"
+FILES_BASE="$(service_base_url files-api)"
+PAYMENT_BASE="$(service_base_url payment)"
+SHIPPING_PORT="$(service_port shipping)"
+SUPPLIERS_PORT="$(service_port suppliers)"
+FILES_PORT="$(service_port files-api)"
+PAYMENT_PORT="$(service_port payment)"
+SHIPPING_SHOP_PATH="$(proof_route shipping_shop_address_path)"
+SUPPLIERS_SEARCH_PATH="$(proof_route suppliers_search_path)"
+SUPPLIERS_STOCK_TEMPLATE="$(proof_route suppliers_stock_path_template)"
+ARTWORK_PREPARE_PATH="$(proof_route artwork_upload_prepare_path)"
+
+require_value "$PRICING_HEALTH_URL" "pricing health url"
+require_value "$PAYMENT_HEALTH_URL" "payment health url"
+require_value "$SHIPPING_BASE" "shipping base url"
+require_value "$SUPPLIERS_BASE" "suppliers base url"
+require_value "$FILES_BASE" "files-api base url"
+require_value "$PAYMENT_BASE" "payment base url"
+require_value "$SHIPPING_SHOP_PATH" "shipping_shop_address_path"
+require_value "$SUPPLIERS_SEARCH_PATH" "suppliers_search_path"
+require_value "$SUPPLIERS_STOCK_TEMPLATE" "suppliers_stock_path_template"
+require_value "$ARTWORK_PREPARE_PATH" "artwork_upload_prepare_path"
+
+SSH_OPTS=(-o ConnectTimeout=6 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
+
+fail=0
+
+emit_row() {
+  local check="$1" state="$2" note="$3"
+  printf "%-28s %-8s %s\n" "$check" "$state" "$note"
+}
+
+curl_with_retry() {
+  local max_attempts=3 attempt=1 backoff=2
+  local tmp="$1"; shift
+  local http rc
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    set +e
+    http="$(curl -sS "$@" -o "$tmp" -w "%{http_code}")"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 && "$http" != "429" ]]; then
+      echo "$http"
+      return 0
+    fi
+    if [[ "$http" == "429" && "$attempt" -lt "$max_attempts" ]]; then
+      sleep "$backoff"
+      backoff=$((backoff * 2))
+    fi
+    attempt=$((attempt + 1))
+  done
+  echo "$http"
+  return "$rc"
+}
+
+json_request_check() {
+  local name="$1" method="$2" url="$3" body="$4" jq_expr="$5" pass_note="$6"
+  shift 6
+  local tmp http rc
+  tmp="$(mktemp)"
+  http="$(curl_with_retry "$tmp" -m 10 -X "$method" "$@" -H "content-type: application/json" -d "$body" "$url")"
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    emit_row "$name" "FAIL" "curl_rc=$rc url=$url"
+    fail=1
+    rm -f "$tmp"
+    return
+  fi
+  if ! jq -e "$jq_expr" "$tmp" >/dev/null 2>&1; then
+    local details
+    details="$(head -c 160 "$tmp" | tr '\n' ' ')"
+    emit_row "$name" "FAIL" "http=$http json_assert_failed body=$details"
+    fail=1
+    rm -f "$tmp"
+    return
+  fi
+  emit_row "$name" "PASS" "$pass_note (http=$http)"
+  rm -f "$tmp"
+}
+
+http_json_check() {
+  local name="$1" url="$2" jq_expr="$3" pass_note="$4"
+  local tmp http rc
+  tmp="$(mktemp)"
+  http="$(curl_with_retry "$tmp" -m 10 "$url")"
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    emit_row "$name" "FAIL" "curl_rc=$rc url=$url"
+    fail=1
+    rm -f "$tmp"
+    return
+  fi
+  if [[ "$http" != "200" ]]; then
+    emit_row "$name" "FAIL" "http=$http url=$url"
+    fail=1
+    rm -f "$tmp"
+    return
+  fi
+  if ! jq -e "$jq_expr" "$tmp" >/dev/null 2>&1; then
+    emit_row "$name" "FAIL" "http=200 json_assert_failed"
+    fail=1
+    rm -f "$tmp"
+    return
+  fi
+  emit_row "$name" "PASS" "$pass_note"
+  rm -f "$tmp"
+}
+
+get_container_key() {
+  local container="$1"
+  [[ -n "$MINT_APPS_SSH_HOST" ]] || return 1
+  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_SSH_HOST}" \
+    "docker inspect $container --format '{{range .Config.Env}}{{println .}}{{end}}' | awk -F= '/^API_KEY=/{sub(/^API_KEY=/,\"\" ); print; exit}'"
+}
+
+container_env_present() {
+  local container="$1" key="$2"
+  [[ -n "$MINT_APPS_SSH_HOST" ]] || return 1
+  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_SSH_HOST}" \
+    "docker inspect $container --format '{{range .Config.Env}}{{println .}}{{end}}' | awk -F= -v K='$key' '\$1==K && \$2!=\"\"{found=1} END{exit found?0:1}'"
+}
+
+mint_db_query() {
+  local sql="$1"
+  [[ -n "$MINT_DATA_SSH_HOST" ]] || return 1
+  ssh "${SSH_OPTS[@]}" "${MINT_DATA_USER}@${MINT_DATA_SSH_HOST}" \
+    "docker exec -i mint-modules-postgres sh -lc 'PGPASSWORD=\"\${POSTGRES_PASSWORD:-}\" psql -At -v ON_ERROR_STOP=1 -U \"\${POSTGRES_USER:-mint}\" -d \"\${POSTGRES_DB:-mint_modules}\"'" <<< "$sql"
+}
+
+echo "mint.runtime.proof"
+echo "services.binding: $SERVICES_BINDING"
+echo "probe.binding: $PROBE_BINDING"
+echo "$APP_TARGET_ID: ${MINT_APPS_USER}@${MINT_APPS_HOST} http=${MINT_APPS_PROBE_HOST:-unreachable} via=${MINT_APPS_PROBE_PATH:-unreachable} ssh=${MINT_APPS_SSH_HOST:-unreachable}/${MINT_APPS_SSH_PATH:-unreachable}"
+echo "$DATA_TARGET_ID: ${MINT_DATA_USER}@${MINT_DATA_HOST} http=${MINT_DATA_PROBE_HOST:-unreachable} via=${MINT_DATA_PROBE_PATH:-unreachable} ssh=${MINT_DATA_SSH_HOST:-unreachable}/${MINT_DATA_SSH_PATH:-unreachable}"
+echo
+printf "%-28s %-8s %s\n" "CHECK" "STATE" "DETAIL"
+
+# 1) Pricing health
+if [[ -z "$PRICING_HEALTH_URL" ]]; then
+  emit_row "pricing.health" "FAIL" "target=$APP_TARGET_ID unreachable"
+  fail=1
+else
+  http_json_check \
+    "pricing.health" \
+    "$PRICING_HEALTH_URL" \
+    '.status == "ok" and ((.service // .name // "") | test("pricing"; "i"))' \
+    "pricing health json ok via=${MINT_APPS_PROBE_PATH:-direct}"
+fi
+
+# 2) Shipping must not be placeholder stub
+shipping_key="$(get_container_key shipping || true)"
+missing_shipping_env=()
+if [[ -z "$MINT_APPS_PROBE_HOST" ]]; then
+  emit_row "shipping.env" "FAIL" "target=$APP_TARGET_ID unreachable"
+  emit_row "shipping.shop_address" "FAIL" "target=$APP_TARGET_ID unreachable"
+  fail=1
+elif [[ -z "$shipping_key" ]]; then
+  emit_row "shipping.api_key" "FAIL" "missing API_KEY from shipping container"
+  fail=1
+else
+  for req_key in API_KEY DATABASE_URL EASYPOST_API_KEY EASYPOST_WEBHOOK_SECRET; do
+    if ! container_env_present shipping "$req_key"; then
+      missing_shipping_env+=("$req_key")
+    fi
+  done
+  if [[ "${#missing_shipping_env[@]}" -gt 0 ]]; then
+    emit_row "shipping.env" "FAIL" "missing ${missing_shipping_env[*]}"
+    fail=1
+  else
+    emit_row "shipping.env" "PASS" "required env present"
+  fi
+  tmp_ship="$(mktemp)"
+  ship_http="$(curl_with_retry "$tmp_ship" -m 10 -H "x-api-key: $shipping_key" "${SHIPPING_BASE}${SHIPPING_SHOP_PATH}")"
+  ship_rc=$?
+  if [[ "$ship_rc" -ne 0 || "$ship_http" != "200" ]]; then
+    emit_row "shipping.shop_address" "FAIL" "curl_rc=$ship_rc http=$ship_http"
+    fail=1
+  elif jq -e '.address.street1 | test("Print Shop Lane"; "i")' "$tmp_ship" >/dev/null 2>&1; then
+    emit_row "shipping.shop_address" "FAIL" "placeholder address detected"
+    fail=1
+  else
+    emit_row "shipping.shop_address" "PASS" "non-placeholder address"
+  fi
+  rm -f "$tmp_ship"
+
+  tmp_history="$(mktemp)"
+  hist_http="$(curl_with_retry "$tmp_history" -m 10 -H "x-api-key: $shipping_key" "${SHIPPING_BASE}/api/v1/shipping/history?page=1&limit=1")"
+  hist_rc=$?
+  if [[ "$hist_rc" -ne 0 || "$hist_http" != "200" ]]; then
+    details="$(head -c 160 "$tmp_history" | tr '\n' ' ')"
+    emit_row "shipping.history" "FAIL" "curl_rc=$hist_rc http=$hist_http body=$details"
+    fail=1
+  elif ! jq -e '(.labels | type == "array") and (.total | type == "number") and (.page | type == "number") and (.limit | type == "number")' "$tmp_history" >/dev/null 2>&1; then
+    emit_row "shipping.history" "FAIL" "history payload shape invalid"
+    fail=1
+  else
+    emit_row "shipping.history" "PASS" "history endpoint returns paginated json"
+  fi
+  rm -f "$tmp_history"
+
+  json_request_check \
+    "shipping.labels.invalid" \
+    "POST" \
+    "${SHIPPING_BASE}/api/v1/shipping/labels" \
+    '{}' \
+    '.error != null' \
+    "invalid label request rejected" \
+    -H "x-api-key: $shipping_key"
+
+  json_request_check \
+    "shipping.easypost.invalid" \
+    "POST" \
+    "${SHIPPING_BASE}/api/v1/shipping/webhooks/easypost" \
+    '{}' \
+    '.error != null and .success == false' \
+    "invalid easypost signature rejected" \
+    -H "x-easypost-signature: invalid"
+fi
+
+# 3) Suppliers search + stock parity (behavioral; do not require seeded catalog rows)
+suppliers_key="$(get_container_key suppliers || true)"
+if [[ -z "$MINT_APPS_PROBE_HOST" ]]; then
+  emit_row "suppliers.search" "FAIL" "target=$APP_TARGET_ID unreachable"
+  emit_row "suppliers.stock" "FAIL" "target=$APP_TARGET_ID unreachable"
+  fail=1
+elif [[ -z "$suppliers_key" ]]; then
+  emit_row "suppliers.api_key" "FAIL" "missing API_KEY from suppliers container"
+  fail=1
+else
+  tmp_search="$(mktemp)"
+  search_http="$(curl_with_retry "$tmp_search" -m 10 -H "x-api-key: $suppliers_key" "${SUPPLIERS_BASE}${SUPPLIERS_SEARCH_PATH}?q=PC61&limit=1")"
+  search_rc=$?
+  if [[ "$search_rc" -ne 0 || "$search_http" != "200" ]]; then
+    emit_row "suppliers.search" "FAIL" "curl_rc=$search_rc http=$search_http"
+    fail=1
+  elif ! jq -e '.query != null and (.results | type == "array") and (.total | type == "number")' "$tmp_search" >/dev/null 2>&1; then
+    emit_row "suppliers.search" "FAIL" "search payload shape invalid"
+    fail=1
+  elif jq -e '(.results | length) == 0' "$tmp_search" >/dev/null 2>&1; then
+    emit_row "suppliers.search" "PASS" "search endpoint healthy (no seeded catalog rows)"
+    emit_row "suppliers.stock" "PASS" "skipped (no sku from search result)"
+  else
+    emit_row "suppliers.search" "PASS" "search returned sku"
+    sku="$(jq -r '.results[0].supplier_sku' "$tmp_search")"
+    code="$(jq -r '.results[0].supplier_code // "sanmar"' "$tmp_search")"
+    stock_path="${SUPPLIERS_STOCK_TEMPLATE/\{code\}/$code}"
+    stock_path="${stock_path/\{sku\}/$sku}"
+    tmp_stock="$(mktemp)"
+    stock_http="$(curl_with_retry "$tmp_stock" -m 10 -H "x-api-key: $suppliers_key" "${SUPPLIERS_BASE}${stock_path}")"
+    stock_rc=$?
+    if [[ "$stock_rc" -ne 0 || "$stock_http" != "200" ]]; then
+      emit_row "suppliers.stock" "FAIL" "curl_rc=$stock_rc http=$stock_http code=$code sku=$sku"
+      fail=1
+    elif ! jq -e '(.variants | length) > 0 and (.total_available // 0) >= 0' "$tmp_stock" >/dev/null 2>&1; then
+      emit_row "suppliers.stock" "FAIL" "missing variants"
+      fail=1
+    else
+      emit_row "suppliers.stock" "PASS" "stock variants returned"
+    fi
+    rm -f "$tmp_stock"
+  fi
+  rm -f "$tmp_search"
+fi
+
+# 4) Artwork upload prepare parity (legacy alias + fresh behavior)
+files_key="$(get_container_key files-api || true)"
+if [[ -z "$MINT_APPS_PROBE_HOST" ]]; then
+  emit_row "artwork.upload_prepare" "FAIL" "target=$APP_TARGET_ID unreachable"
+  fail=1
+elif [[ -z "$files_key" ]]; then
+  emit_row "artwork.api_key" "FAIL" "missing API_KEY from files-api container"
+  fail=1
+else
+  tmp_art="$(mktemp)"
+  art_http="$(curl_with_retry "$tmp_art" -m 10 \
+    -H "x-api-key: $files_key" \
+    -H "content-type: application/json" \
+    -d '{"visual_id":"30100","kind":"original","filename":"proof.png","content_type":"image/png","size_bytes":1024}' \
+    "${FILES_BASE}${ARTWORK_PREPARE_PATH}")"
+  art_rc=$?
+  if [[ "$art_rc" -ne 0 || "$art_http" != "200" ]]; then
+    details="$(head -c 120 "$tmp_art" | tr '\n' ' ')"
+    emit_row "artwork.upload_prepare" "FAIL" "curl_rc=$art_rc http=$art_http body=$details"
+    fail=1
+  elif ! jq -e '(.upload_id // "") != "" and (.presigned_url // "") != ""' "$tmp_art" >/dev/null 2>&1; then
+    emit_row "artwork.upload_prepare" "FAIL" "missing upload_id/presigned_url"
+    fail=1
+  else
+    emit_row "artwork.upload_prepare" "PASS" "prepare returns presigned payload"
+  fi
+  rm -f "$tmp_art"
+fi
+
+# 5) Payment health
+missing_payment_env=()
+if [[ -z "$MINT_APPS_PROBE_HOST" ]]; then
+  emit_row "payment.env" "FAIL" "target=$APP_TARGET_ID unreachable"
+  emit_row "payment.health" "FAIL" "target=$APP_TARGET_ID unreachable"
+  fail=1
+else
+  payment_key="$(get_container_key payment || true)"
+  for req_key in API_KEY DATABASE_URL STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET JWT_SECRET; do
+    if ! container_env_present payment "$req_key"; then
+      missing_payment_env+=("$req_key")
+    fi
+  done
+  if [[ "${#missing_payment_env[@]}" -gt 0 ]]; then
+    emit_row "payment.env" "FAIL" "missing ${missing_payment_env[*]}"
+    fail=1
+  else
+    emit_row "payment.env" "PASS" "required env present"
+  fi
+
+  http_json_check \
+    "payment.health" \
+    "$PAYMENT_HEALTH_URL" \
+    '.status == "ok" and ((.service // "") | test("payment"; "i"))' \
+    "payment health json ok via=${MINT_APPS_PROBE_PATH:-direct}"
+
+  if [[ -z "$payment_key" ]]; then
+    emit_row "payment.api_key" "FAIL" "missing API_KEY from payment container"
+    fail=1
+  else
+    json_request_check \
+      "payment.checkout.invalid" \
+      "POST" \
+      "${PAYMENT_BASE}/api/v1/payments/checkout-session" \
+      '{}' \
+      '.error != null' \
+      "invalid checkout request rejected" \
+      -H "x-api-key: $payment_key"
+
+    json_request_check \
+      "payment.stripe.invalid" \
+      "POST" \
+      "${PAYMENT_BASE}/api/v1/payments/webhooks/stripe" \
+      '{}' \
+      '.error != null' \
+      "invalid stripe webhook rejected" \
+      -H "x-api-key: $payment_key" \
+      -H "stripe-signature: invalid"
+  fi
+fi
+
+echo
+if [[ "$fail" -eq 1 ]]; then
+  echo "status: FAIL (runtime proof blockers present)"
+  exit 1
+fi
+echo "status: OK (runtime proof checks passed)"
+exit 0

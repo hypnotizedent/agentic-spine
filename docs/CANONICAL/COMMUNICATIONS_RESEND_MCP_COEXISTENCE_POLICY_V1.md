@@ -90,7 +90,7 @@ Claude Desktop / Claude Code
 
 1. **D268** (resend-mcp-transactional-send-authority-lock): Validates no direct Resend MCP `send_email` or `batch_send_emails` calls exist in governed paths.
 2. **D273** (communications-resend-expansion-contract-parity-lock): Validates this policy document and the expansion contract are present and consistent.
-3. **D147** (existing): Validates no direct `api.resend.com` calls outside `ops/plugins/communications/`.
+3. **D147** (existing): Validates no direct `api.resend.com` calls outside `ops/plugins/domains/communications/`.
 
 ## Installation Guidance
 

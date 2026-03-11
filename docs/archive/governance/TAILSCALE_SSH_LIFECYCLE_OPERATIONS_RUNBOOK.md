@@ -22,7 +22,7 @@ Trigger symptoms:
 
 Procedure:
 1. Run monitor in JSON mode:
-   `./ops/plugins/communications/bin/communications-mail-archiver-import-monitor --json`
+   `./ops/plugins/domains/communications/bin/communications-mail-archiver-import-monitor --json`
 2. If `lane_state=BLOCKED_AUTH`, stop automated retries immediately.
 3. Confirm state artifact:
    `runtime/domain-state/communications/mail-archiver-import-monitor.state.yaml`
@@ -30,7 +30,7 @@ Procedure:
    - inspect node auth state in Tailscale admin console
    - resolve auth challenge manually
 5. Re-run monitor once:
-   `./ops/plugins/communications/bin/communications-mail-archiver-import-monitor --json`
+   `./ops/plugins/domains/communications/bin/communications-mail-archiver-import-monitor --json`
 6. If recovered (`HEALTHY`/`DEGRADED`), resume normal schedule.
 7. If still blocked, file/update gap and attach state artifact.
 
@@ -65,7 +65,7 @@ Machine monitors must:
 - stop retries on blocked-auth
 
 Canonical monitor:
-- `ops/plugins/communications/bin/communications-mail-archiver-import-monitor`
+- `ops/plugins/domains/communications/bin/communications-mail-archiver-import-monitor`
 
 State and lock artifacts:
 - state: `runtime/domain-state/communications/mail-archiver-import-monitor.state.yaml`

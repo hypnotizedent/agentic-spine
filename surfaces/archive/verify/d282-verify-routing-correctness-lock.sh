@@ -37,7 +37,7 @@ check_domain "D284" "loop_gap"
 check_domain "D288" "core"
 
 # Route recommendation sanity: communications path must recommend communications.
-rec_json="$($VERIFY recommend --path ops/plugins/communications/bin/communications-stack-status --json 2>/dev/null || true)"
+rec_json="$($VERIFY recommend --path ops/plugins/domains/communications/bin/communications-stack-status --json 2>/dev/null || true)"
 if [[ -z "$rec_json" ]]; then
   err "verify-topology recommend returned empty output"
 else

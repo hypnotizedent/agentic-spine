@@ -13,9 +13,9 @@ SERVICES_HEALTH="$ROOT/ops/bindings/services.health.yaml"
 BACKUP_RESTORE_DOC="$ROOT/docs/archive/governance/VAULTWARDEN_BACKUP_RESTORE.md"
 HYGIENE_DOC="$ROOT/docs/archive/governance/VAULTWARDEN_CANONICAL_HYGIENE.md"
 INFISICAL_CONTRACT="$ROOT/docs/archive/governance/VAULTWARDEN_INFISICAL_CONTRACT.md"
-CLI_BOOTSTRAP="$ROOT/ops/plugins/vaultwarden/bin/vaultwarden-cli-auth-bootstrap"
-CLI_STATUS="$ROOT/ops/plugins/vaultwarden/bin/vaultwarden-cli-auth-status"
-CLI_PROXY_LIB="$ROOT/ops/plugins/vaultwarden/lib/proxy-session.sh"
+CLI_BOOTSTRAP="$ROOT/ops/plugins/domains/vaultwarden/bin/vaultwarden-cli-auth-bootstrap"
+CLI_STATUS="$ROOT/ops/plugins/domains/vaultwarden/bin/vaultwarden-cli-auth-status"
+CLI_PROXY_LIB="$ROOT/ops/plugins/domains/vaultwarden/lib/proxy-session.sh"
 
 ERRORS=0
 err() {

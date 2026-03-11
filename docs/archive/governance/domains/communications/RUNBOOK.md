@@ -128,7 +128,7 @@ cd /Users/ronnyworks/code/agentic-spine
 ./bin/ops cap run communications.stack.status
 ./bin/ops cap run communications.mailboxes.list
 ./bin/ops cap run communications.mail.search --query "*" --top 5
-./ops/plugins/communications/bin/communications-mail-archiver-import-monitor --json
+./ops/plugins/domains/communications/bin/communications-mail-archiver-import-monitor --json
 echo "yes" | ./bin/ops cap run communications.mail.send.test --to ronny@mintprints.com --subject "pilot test" --body "hello" --execute
 ./bin/ops cap run communications.provider.status
 ./bin/ops cap run communications.policy.status

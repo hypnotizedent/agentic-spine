@@ -21,8 +21,8 @@ ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
 # Focus on deploy/mutation scripts likely to do SSH
 SEARCH_PATHS=(
-  "$ROOT/ops/plugins/mint/bin/*deploy*"
-  "$ROOT/ops/plugins/mint/bin/*sync*"
+  "$ROOT/ops/plugins/domains/mint/bin/*deploy*"
+  "$ROOT/ops/plugins/domains/mint/bin/*sync*"
   "$ROOT/ops/plugins/infra/docker/bin/*"
   "$ROOT/ops/plugins/infra/backup/bin/*"
   "$ROOT/ops/plugins/infra/bin/*docker*"

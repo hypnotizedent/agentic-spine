@@ -48,7 +48,7 @@ body+=$'Artifact: '"${SPINE_OUTBOX}/briefing/briefing-latest.md"
 vars_json="$(jq -cn --arg subject "$subject" --arg body_text "$body" '{subject:$subject, body_text:$body_text}')"
 
 preview_json="$(
-  "${SPINE_ROOT}/ops/plugins/communications/bin/communications-send-preview" \
+  "${SPINE_ROOT}/ops/plugins/domains/communications/bin/communications-send-preview" \
     --channel email \
     --message-type custom \
     --to "$recipient" \

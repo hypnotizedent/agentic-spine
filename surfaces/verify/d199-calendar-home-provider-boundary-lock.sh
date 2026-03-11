@@ -83,9 +83,9 @@ if not isinstance(calendar_home_create, dict):
     violations.append("capabilities missing calendar.home.event.create")
 else:
     command = str(calendar_home_create.get("command", "")).strip()
-    if command != "./ops/plugins/calendar/bin/calendar-home-event-create":
+    if command != "./ops/plugins/domains/calendar/bin/calendar-home-event-create":
         violations.append(
-            f"calendar.home.event.create command mismatch: expected ./ops/plugins/calendar/bin/calendar-home-event-create actual={command!r}"
+            f"calendar.home.event.create command mismatch: expected ./ops/plugins/domains/calendar/bin/calendar-home-event-create actual={command!r}"
         )
     if "microsoft" in command or "graph" in command:
         violations.append("calendar.home.event.create command must not target microsoft/graph")
