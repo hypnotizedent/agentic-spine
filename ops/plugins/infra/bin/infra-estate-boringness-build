@@ -1,0 +1,1054 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+from pathlib import Path
+import re
+import sys
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+
+BACKUP_PATH = ROOT / "ops/bindings/backup.inventory.yaml"
+DOMAIN_ROUTING_PATH = ROOT / "ops/bindings/domain.routing.registry.yaml"
+ESTATE_AUTHORITY_PATH = ROOT / "ops/bindings/estate.boringness.authority.yaml"
+HOME_AUTHORITY_PATH = ROOT / "ops/bindings/home.authority.contract.yaml"
+HOME_HARDWARE_PATH = ROOT / "ops/bindings/home.hardware.inventory.yaml"
+HOME_PROXMOX_PATH = ROOT / "ops/bindings/home.proxmox.inventory.yaml"
+HOME_UNIFI_PATH = ROOT / "ops/bindings/home.unifi.network.inventory.yaml"
+NETWORK_DNS_LOCAL_PATH = ROOT / "ops/bindings/network.dns.local.registry.yaml"
+SERVICE_REGISTRY_PATH = ROOT / "docs/governance/SERVICE_REGISTRY.yaml"
+SHOP_STORAGE_MAP_PATH = ROOT / "ops/bindings/shop.storage.map.yaml"
+SSH_TARGETS_PATH = ROOT / "ops/bindings/ssh.targets.yaml"
+SYNOLOGY_STORAGE_PATH = ROOT / "ops/bindings/synology918.storage.manifest.yaml"
+VM_LIFECYCLE_PATH = ROOT / "ops/bindings/vm.lifecycle.yaml"
+
+HOME_STORAGE_MAP_PATH = ROOT / "ops/bindings/home.storage.map.yaml"
+SHOP_INGRESS_MAP_PATH = ROOT / "ops/bindings/shop.ingress.map.yaml"
+HOME_INGRESS_MAP_PATH = ROOT / "ops/bindings/home.ingress.map.yaml"
+ESTATE_SURFACE_REGISTER_PATH = ROOT / "ops/bindings/estate.surface.register.yaml"
+HOME_SCORECARD_PATH = ROOT / "docs/reference/generated/HOME_RACK_SCORECARD.md"
+ESTATE_SCORECARD_PATH = ROOT / "docs/reference/generated/ESTATE_BORINGNESS_SCORECARD.md"
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"infra.estate.boringness.build FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_utc_iso() -> str:
+    return now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today_utc() -> str:
+    return now_utc().strftime("%Y-%m-%d")
+
+
+def rel(path: Path) -> str:
+    return str(path.resolve().relative_to(ROOT))
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def yaml_dump(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=False)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="infra-estate-boringness-build")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Validate generated outputs without writing files.",
+    )
+    return parser.parse_args()
+
+
+def render_table(headers: list[str], rows: list[list[str]]) -> str:
+    out = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
+    for row in rows:
+        out.append("| " + " | ".join(row) + " |")
+    return "\n".join(out)
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def extract_first_int(value: str) -> int:
+    match = re.search(r"(\d+)", value or "")
+    return int(match.group(1)) if match else 0
+
+
+def classify_route(route: dict[str, Any]) -> str:
+    service = str(route.get("service") or "").strip()
+    note = f"{route.get('note') or ''} {route.get('target_hint') or ''}".lower()
+    if "dns-only record" in note or "email-only" in note or "dns policy record" in note or "dkim record" in note:
+        return "dns_only"
+    if "no live tunnel ingress published" in note or "experimental work alias" in note or "service not deployed" in note:
+        return "ghost"
+    if service in {"", "none (parked)"}:
+        if "legacy compatibility" in note or "not canonical for work surfaces" in note:
+            return "compatibility_hold"
+        return "parked"
+    if "legacy" in note or "compatibility" in note or "temporary routing" in note or "intentional hold" in note or "alias retained" in note:
+        return "compatibility_hold"
+    return "live"
+
+
+def infer_target_site(target: dict[str, Any]) -> str:
+    target_id = str(target.get("id") or "")
+    host = str(target.get("host") or "")
+    tags = {str(tag) for tag in ensure_list(target.get("tags"))}
+    if target_id in {"proxmox-home", "nas", "pihole-home", "ha", "udr-home"}:
+        return "home"
+    if target_id in {"pve", "docker-host"}:
+        return "shop"
+    if host.startswith("10.0.0."):
+        return "home"
+    if host.startswith("192.168.1."):
+        return "shop"
+    if "home" in tags:
+        return "home"
+    if "shop" in tags:
+        return "shop"
+    if target_id.startswith("gw-home") or target_id.startswith("pve-home"):
+        return "home"
+    if target_id.startswith("gw-shop") or target_id.startswith("pve-shop"):
+        return "shop"
+    if host.startswith("100."):
+        if target_id in {"proxmox-home", "nas", "pihole-home", "ha"}:
+            return "home"
+        return "shop"
+    return "unknown"
+
+
+def build_target_maps(ssh_targets: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    target_by_id: dict[str, dict[str, Any]] = {}
+    ip_to_site: dict[str, str] = {}
+    for target in ensure_list(ensure_dict(ssh_targets.get("ssh")).get("targets")):
+        if not isinstance(target, dict):
+            continue
+        target_id = str(target.get("id") or "")
+        if not target_id:
+            continue
+        site = infer_target_site(target)
+        row = dict(target)
+        row["site"] = site
+        target_by_id[target_id] = row
+        for key in ("host", "tailscale_ip"):
+            ip = str(target.get(key) or "").strip()
+            if ip:
+                ip_to_site[ip] = site
+    return target_by_id, ip_to_site
+
+
+def build_service_host_map(service_registry: dict[str, Any]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    services = ensure_dict(service_registry.get("services"))
+    for service_name, row in services.items():
+        if not isinstance(row, dict):
+            continue
+        host = str(row.get("host") or "").strip()
+        if host:
+            out[str(service_name)] = host
+    return out
+
+
+def flatten_routes(routing: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for zone in ensure_list(routing.get("zones")):
+        if not isinstance(zone, dict):
+            continue
+        zone_name = str(zone.get("zone") or "")
+        for route in ensure_list(zone.get("hostnames")):
+            if not isinstance(route, dict):
+                continue
+            row = dict(route)
+            row["zone"] = zone_name
+            rows.append(row)
+    return rows
+
+
+def infer_route_site(
+    route: dict[str, Any],
+    service_host_map: dict[str, str],
+    target_by_id: dict[str, dict[str, Any]],
+    ip_to_site: dict[str, str],
+) -> str:
+    service = str(route.get("service") or "").strip()
+    stack = str(route.get("stack") or "").strip()
+    target_hint = str(route.get("target_hint") or "")
+    zone = str(route.get("zone") or "").strip()
+
+    if service == "home-assistant":
+        return "home"
+    if zone in {"mintprints.com", "mintprints.co"}:
+        return "shop"
+    if zone == "ronny.works" and service in {"none (parked)", "icloud-email", "outlook-autodiscover", "dmarc", "dkim"}:
+        return "external"
+    if stack.startswith("external:") or service in {"icloud-email", "outlook-autodiscover", "dmarc", "dkim"}:
+        return "external"
+    if service == "spine-mailroom-bridge":
+        return "external"
+    if stack in target_by_id:
+        return str(target_by_id[stack].get("site") or "unknown")
+
+    host = service_host_map.get(service)
+    if host and host in target_by_id:
+        return str(target_by_id[host].get("site") or "unknown")
+
+    for known_ip, site in ip_to_site.items():
+        if known_ip and known_ip in target_hint:
+            return site
+
+    shop_stack_tokens = {
+        "automation-stack",
+        "communications-stack",
+        "docker-host",
+        "finance",
+        "immich",
+        "infra-core",
+        "mint-apps",
+        "mint-data",
+        "observability",
+        "streaming-stack",
+    }
+    if stack in shop_stack_tokens:
+        return "shop"
+    if zone == "ronny.works":
+        return "shop"
+    if stack == "TBD":
+        return "unknown"
+    return "unknown"
+
+
+def flatten_local_dns_entries(dns_registry: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    entries_root = ensure_dict(dns_registry.get(key))
+    rows: list[dict[str, Any]] = []
+    for group_name, entries in entries_root.items():
+        for entry in ensure_list(entries):
+            if not isinstance(entry, dict):
+                continue
+            row = dict(entry)
+            row["group"] = group_name
+            rows.append(row)
+    return rows
+
+
+def build_ingress_map(
+    *,
+    site: str,
+    routes: list[dict[str, Any]],
+    local_dns_entries: list[dict[str, Any]],
+    target_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    public_routes: list[dict[str, Any]] = []
+    unknown_routes: list[dict[str, Any]] = []
+    for route in routes:
+        route_site = str(route.get("resolved_site") or "unknown")
+        if route_site == "external":
+            continue
+        if route_site == "unknown":
+            if site == "shop":
+                unknown_routes.append(
+                    {
+                        "hostname": str(route.get("hostname") or ""),
+                        "zone": str(route.get("zone") or ""),
+                        "service": str(route.get("service") or ""),
+                        "note": str(route.get("note") or ""),
+                    }
+                )
+            continue
+        if route_site != site:
+            continue
+        route_state = str(route.get("lifecycle_class") or "live")
+        if route_state in {"dns_only", "parked"}:
+            continue
+        public_routes.append(
+            {
+                "hostname": str(route.get("hostname") or ""),
+                "zone": str(route.get("zone") or ""),
+                "service": str(route.get("service") or ""),
+                "stack": str(route.get("stack") or ""),
+                "routing_layer": str(route.get("routing_layer") or ""),
+                "authority_source": str(route.get("authority_source") or ""),
+                "lifecycle_class": route_state,
+                "target_hint": str(route.get("target_hint") or ""),
+                "note": str(route.get("note") or ""),
+            }
+        )
+
+    private_targets: list[dict[str, Any]] = []
+    for target in target_by_id.values():
+        if str(target.get("site") or "") != site:
+            continue
+        private_targets.append(
+            {
+                "id": str(target.get("id") or ""),
+                "host": str(target.get("host") or ""),
+                "tailscale_ip": str(target.get("tailscale_ip") or ""),
+                "access_policy": str(target.get("access_policy") or ""),
+                "description": str(target.get("description") or ""),
+            }
+        )
+    private_targets.sort(key=lambda row: row["id"])
+
+    return {
+        "version": 1,
+        "generated_at_utc": now_utc_iso(),
+        "site": site,
+        "generated_by": {
+            "capability": "infra.estate.boringness.build",
+            "script": rel(Path(__file__)),
+        },
+        "source_surfaces": [
+            rel(DOMAIN_ROUTING_PATH),
+            rel(NETWORK_DNS_LOCAL_PATH),
+            rel(SSH_TARGETS_PATH),
+            rel(SERVICE_REGISTRY_PATH),
+            rel(ESTATE_AUTHORITY_PATH),
+        ],
+        "public_routes": sorted(public_routes, key=lambda row: row["hostname"]),
+        "private_access_targets": private_targets,
+        "local_dns_entries": sorted(local_dns_entries, key=lambda row: row["hostname"]),
+        "summary": {
+            "public_live_count": sum(1 for row in public_routes if row["lifecycle_class"] == "live"),
+            "compatibility_hold_count": sum(1 for row in public_routes if row["lifecycle_class"] == "compatibility_hold"),
+            "ghost_count": sum(1 for row in public_routes if row["lifecycle_class"] == "ghost"),
+            "local_dns_count": len(local_dns_entries),
+            "private_target_count": len(private_targets),
+        },
+        "unknown_routes": sorted(unknown_routes, key=lambda row: row["hostname"]),
+    }
+
+
+def storage_objects_summary(storage_objects: list[dict[str, Any]]) -> str:
+    values = [f"{row.get('object')}" for row in storage_objects if row.get("object")]
+    return ", ".join(values) if values else "none"
+
+
+def backup_target_rows(
+    unit: dict[str, Any],
+    lanes: dict[str, Any],
+    target_map: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    generation_lanes: list[dict[str, Any]] = []
+    restore_targets: list[dict[str, Any]] = []
+    lane_id = str(unit.get("destination_lane") or "")
+    if lane_id and lane_id in lanes:
+        lane = ensure_dict(lanes[lane_id])
+        generation_lanes.append(
+            {
+                "lane_id": lane_id,
+                "host": str(lane.get("host") or "proxmox-home"),
+                "base_path": str(lane.get("base_path") or ""),
+            }
+        )
+    for target_name in ensure_list(unit.get("inventory_targets")):
+        target = target_map.get(str(target_name))
+        if not target:
+            continue
+        restore_targets.append(
+            {
+                "name": str(target.get("name") or target_name),
+                "enabled": bool(target.get("enabled", True)),
+                "host": str(target.get("host") or ""),
+                "base_path": str(target.get("base_path") or ""),
+                "glob": str(target.get("glob") or ""),
+                "classification": str(target.get("classification") or ""),
+            }
+        )
+    return generation_lanes, restore_targets
+
+
+def build_home_storage_map(
+    *,
+    backup: dict[str, Any],
+    estate_authority: dict[str, Any],
+    home_hardware: dict[str, Any],
+    home_proxmox: dict[str, Any],
+    synology: dict[str, Any],
+) -> dict[str, Any]:
+    target_map = {
+        str(target.get("name")): target
+        for target in ensure_list(backup.get("targets"))
+        if isinstance(target, dict) and str(target.get("name") or "")
+    }
+    lanes = ensure_dict(ensure_dict(backup.get("model")).get("destination_lanes"))
+    runtime_units = {
+        str(unit.get("hostname")): unit
+        for unit in ensure_list(backup.get("runtime_units"))
+        if isinstance(unit, dict)
+    }
+
+    node = ensure_list(home_proxmox.get("nodes"))[0]
+    proof = ensure_dict(ensure_dict(estate_authority.get("live_proof")).get("home")).get("proxmox")
+    proof_configs = {
+        int(cfg.get("vm_id")): cfg
+        for cfg in ensure_list(ensure_dict(proof).get("runtime_configs"))
+        if isinstance(cfg, dict) and str(cfg.get("vm_id") or "").isdigit()
+    }
+
+    runtime_storage: list[dict[str, Any]] = []
+    for service in ensure_list(node.get("services")):
+        if not isinstance(service, dict):
+            continue
+        if str(service.get("status") or "") != "running":
+            continue
+        vm_id = int(service.get("vm_id"))
+        hostname = str(service.get("name") or "")
+        backup_unit = runtime_units.get(hostname)
+        generation_lanes, restore_targets = backup_target_rows(backup_unit or {}, lanes, target_map)
+        storage_objects: list[dict[str, Any]] = []
+        proof_cfg = ensure_dict(proof_configs.get(vm_id))
+        if hostname == "homeassistant":
+            storage_objects.append(
+                {
+                    "kind": "lvmthin_volume",
+                    "object": str(proof_cfg.get("boot_ref") or "local-lvm:vm-100-disk-1"),
+                    "purpose": "Primary Home Assistant runtime disk",
+                    "durability_role": "runtime_primary",
+                    "pool": "local-lvm",
+                }
+            )
+            storage_objects.append(
+                {
+                    "kind": "lvmthin_volume",
+                    "object": str(proof_cfg.get("efi_ref") or "local-lvm:vm-100-disk-0"),
+                    "purpose": "Home Assistant EFI vars disk",
+                    "durability_role": "boot_metadata",
+                    "pool": "local-lvm",
+                }
+            )
+            active_services = ["home-assistant"]
+            storage_tier = "home-local-lvm"
+        else:
+            storage_objects.append(
+                {
+                    "kind": "lvmthin_volume",
+                    "object": str(proof_cfg.get("rootfs_ref") or "local-lvm:vm-105-disk-0"),
+                    "purpose": "Primary Pi-hole LXC rootfs",
+                    "durability_role": "runtime_primary",
+                    "pool": "local-lvm",
+                }
+            )
+            active_services = ["pihole-home"]
+            storage_tier = "home-local-lvm"
+
+        runtime_storage.append(
+            {
+                "vm_id": vm_id,
+                "hostname": hostname,
+                "kind": str(service.get("type") or ""),
+                "role": str(service.get("purpose") or ""),
+                "status": "active",
+                "startup_policy": str(proof_cfg.get("startup_policy") or "auto"),
+                "storage_tier": storage_tier,
+                "owner": "@ronny",
+                "purpose": str(service.get("purpose") or ""),
+                "active_services": active_services,
+                "storage_objects": storage_objects,
+                "backup_generation_lanes": generation_lanes,
+                "restore_targets": restore_targets,
+                "primary_backup_unit": ensure_list((backup_unit or {}).get("inventory_targets"))[0] if backup_unit else "",
+            }
+        )
+
+    decommissioned_units: list[dict[str, Any]] = []
+    for service in ensure_list(node.get("services")):
+        if not isinstance(service, dict):
+            continue
+        if str(service.get("status") or "") == "running":
+            continue
+        decommissioned_units.append(
+            {
+                "id": str(service.get("id") or ""),
+                "vm_id": int(service.get("vm_id")),
+                "name": str(service.get("name") or ""),
+                "kind": str(service.get("type") or ""),
+                "status": str(service.get("status") or ""),
+                "classification": "tombstone",
+                "note": str(service.get("purpose") or ""),
+                "decommissioned_on": str(service.get("decommissioned_on") or ""),
+            }
+        )
+    for service in ensure_list(node.get("decommissioned_services")):
+        if not isinstance(service, dict):
+            continue
+        decommissioned_units.append(
+            {
+                "id": f"home-{service.get('id')}",
+                "vm_id": extract_first_int(str(service.get("id") or "")),
+                "name": str(service.get("id") or ""),
+                "kind": "unknown",
+                "status": str(service.get("status") or ""),
+                "classification": "tombstone",
+                "note": "Historical home guest retained only as decommissioned inventory.",
+                "decommissioned_on": "",
+            }
+        )
+
+    nas_device = next(
+        (device for device in ensure_list(home_hardware.get("devices")) if str(device.get("id") or "") == "nas"),
+        {},
+    )
+    proxmox_device = next(
+        (device for device in ensure_list(home_hardware.get("devices")) if str(device.get("id") or "") == "proxmox-home"),
+        {},
+    )
+    home_personal_data = ensure_list(synology.get("home_personal_data"))
+
+    blockers = ensure_list(ensure_dict(ensure_dict(estate_authority.get("sites")).get("home")).get("blockers"))
+
+    return {
+        "version": 1,
+        "generated_at_utc": now_utc_iso(),
+        "site": "home",
+        "generated_by": {
+            "capability": "infra.estate.boringness.build",
+            "script": rel(Path(__file__)),
+        },
+        "source_surfaces": [
+            rel(HOME_AUTHORITY_PATH),
+            rel(HOME_HARDWARE_PATH),
+            rel(HOME_PROXMOX_PATH),
+            rel(SYNOLOGY_STORAGE_PATH),
+            rel(BACKUP_PATH),
+            rel(ESTATE_AUTHORITY_PATH),
+        ],
+        "tier_model": [
+            {
+                "tier_id": "home-local-lvm",
+                "plane": "hot_runtime",
+                "purpose": "Primary local-lvm runtime backing for proxmox-home guest boot/root disks.",
+                "host": "proxmox-home",
+                "layout": "single-host NVMe + lvmthin",
+            },
+            {
+                "tier_id": "synology-home-backup",
+                "plane": "warm_backup",
+                "purpose": "Canonical home backup lane for proxmox-home VM/LXC artifacts.",
+                "host": "synology918",
+                "layout": "Synology volume1 share exported to proxmox-home as synology-backups",
+            },
+            {
+                "tier_id": "synology-home-data",
+                "plane": "warm_payload",
+                "purpose": "Canonical home personal data and media lane.",
+                "host": "synology918",
+                "layout": "Synology volume1",
+            },
+        ],
+        "storage_planes": [
+            {
+                "object_id": "proxmox-home/local-lvm",
+                "kind": "lvmthin",
+                "owner": "proxmox-home",
+                "purpose": "Home VM/LXC runtime boot/root disks.",
+                "durability_class": "runtime_primary",
+            },
+            {
+                "object_id": "proxmox-home/local",
+                "kind": "dir",
+                "owner": "proxmox-home",
+                "purpose": "Hypervisor local filesystem and metadata.",
+                "durability_class": "host_boot",
+            },
+            {
+                "object_id": "synology/volume1/backups/proxmox_backups/dump",
+                "kind": "path_family",
+                "owner": "synology918",
+                "purpose": "Canonical home VM/LXC backup lane.",
+                "durability_class": "home_backup_primary",
+            },
+            {
+                "object_id": "synology/volume1",
+                "kind": "path_family",
+                "owner": "synology918",
+                "purpose": "Canonical home personal data lane.",
+                "durability_class": "payload_primary",
+            },
+            {
+                "object_id": "synology/volume1/backups/proxmox_backups/mint-os",
+                "kind": "path_family",
+                "owner": "synology918",
+                "purpose": "Legacy mint-os historical residue only; not canonical.",
+                "durability_class": "compatibility_hold",
+            },
+        ],
+        "machine_summary": {
+            "hypervisor": {
+                "machine_id": str(proxmox_device.get("id") or "proxmox-home"),
+                "model": str(proxmox_device.get("model") or "Beelink SER7"),
+                "lan_ip": str(proxmox_device.get("lan_ip") or ""),
+                "tailscale_ip": str(proxmox_device.get("tailscale_ip") or ""),
+                "role": str(proxmox_device.get("role") or ""),
+            },
+            "nas": {
+                "machine_id": str(nas_device.get("id") or "nas"),
+                "model": str(nas_device.get("model") or "Synology DS918+"),
+                "lan_ip": str(nas_device.get("lan_ip") or ""),
+                "tailscale_ip": str(nas_device.get("tailscale_ip") or ""),
+                "role": str(nas_device.get("role") or ""),
+            },
+        },
+        "runtime_storage": sorted(runtime_storage, key=lambda row: row["vm_id"]),
+        "decommissioned_units": sorted(decommissioned_units, key=lambda row: (row["vm_id"], row["name"])),
+        "canonical_personal_data": home_personal_data,
+        "current_risks": blockers,
+    }
+
+
+def build_tombstones(vm_lifecycle: dict[str, Any], home_proxmox: dict[str, Any]) -> list[dict[str, Any]]:
+    tombstones: list[dict[str, Any]] = []
+    for vm in ensure_list(vm_lifecycle.get("vms")):
+        if not isinstance(vm, dict):
+            continue
+        if str(vm.get("status") or "") != "decommissioned":
+            continue
+        if int(vm.get("id") or 0) != 200:
+            continue
+        tombstone = ensure_dict(vm.get("tombstone"))
+        tombstones.append(
+            {
+                "id": "vm-200-docker-host",
+                "environment": "shop",
+                "kind": "vm",
+                "name": str(vm.get("hostname") or ""),
+                "status": "decommissioned",
+                "hot_footprint": str(tombstone.get("live_runtime_disk_ref") or ""),
+                "restore_artifact": str(tombstone.get("retained_restore_artifact") or ""),
+                "restore_storage": str(tombstone.get("retained_restore_storage") or ""),
+                "review_date": str(tombstone.get("restore_review_by") or ""),
+                "note": str(vm.get("description") or ""),
+            }
+        )
+
+    node = ensure_list(home_proxmox.get("nodes"))[0]
+    for service in ensure_list(node.get("services")):
+        if not isinstance(service, dict):
+            continue
+        if str(service.get("status") or "") == "running":
+            continue
+        tombstones.append(
+            {
+                "id": str(service.get("id") or ""),
+                "environment": "home",
+                "kind": str(service.get("type") or ""),
+                "name": str(service.get("name") or ""),
+                "status": "decommissioned",
+                "hot_footprint": "none",
+                "restore_artifact": "historical backup residue only",
+                "restore_storage": "synology /volume1/backups/proxmox_backups/dump",
+                "review_date": str(service.get("decommissioned_on") or ""),
+                "note": str(service.get("purpose") or ""),
+            }
+        )
+    for service in ensure_list(node.get("decommissioned_services")):
+        if not isinstance(service, dict):
+            continue
+        tombstones.append(
+            {
+                "id": str(service.get("id") or ""),
+                "environment": "home",
+                "kind": "guest",
+                "name": str(service.get("id") or ""),
+                "status": "decommissioned",
+                "hot_footprint": "none",
+                "restore_artifact": "none declared",
+                "restore_storage": "none declared",
+                "review_date": "",
+                "note": "Historical stopped guest recorded in home.proxmox.inventory.yaml.",
+            }
+        )
+    return sorted(tombstones, key=lambda row: (row["environment"], row["id"]))
+
+
+def build_estate_surface_register(
+    *,
+    estate_authority: dict[str, Any],
+    home_ingress_map: dict[str, Any],
+    home_proxmox: dict[str, Any],
+    shop_ingress_map: dict[str, Any],
+    vm_lifecycle: dict[str, Any],
+) -> dict[str, Any]:
+    manual = ensure_dict(estate_authority.get("manual_surface_register"))
+    compatibility_holds = ensure_list(manual.get("compatibility_holds"))
+    ghosts = ensure_list(manual.get("ghosts"))
+
+    for ingress in (shop_ingress_map, home_ingress_map):
+        for route in ensure_list(ingress.get("public_routes")):
+            if not isinstance(route, dict):
+                continue
+            state = str(route.get("lifecycle_class") or "")
+            if state == "ghost":
+                ghosts.append(
+                    {
+                        "id": str(route.get("hostname") or ""),
+                        "environment": str(ingress.get("site") or ""),
+                        "kind": "public_route",
+                        "note": str(route.get("note") or ""),
+                    }
+                )
+            elif state == "compatibility_hold":
+                compatibility_holds.append(
+                    {
+                        "id": str(route.get("hostname") or ""),
+                        "environment": str(ingress.get("site") or ""),
+                        "kind": "public_route",
+                        "note": str(route.get("note") or ""),
+                    }
+                )
+
+    unknowns = list(ensure_list(manual.get("unknowns")))
+    for ingress in (shop_ingress_map, home_ingress_map):
+        for route in ensure_list(ingress.get("unknown_routes")):
+            if not isinstance(route, dict):
+                continue
+            unknowns.append(
+                {
+                    "id": str(route.get("hostname") or ""),
+                    "environment": str(ingress.get("site") or ""),
+                    "kind": "route_site_inference",
+                    "note": f"Route site could not be inferred from current authority surfaces ({route.get('service') or 'unknown service'}).",
+                }
+            )
+
+    return {
+        "version": 1,
+        "generated_at_utc": now_utc_iso(),
+        "generated_by": {
+            "capability": "infra.estate.boringness.build",
+            "script": rel(Path(__file__)),
+        },
+        "source_surfaces": [
+            rel(ESTATE_AUTHORITY_PATH),
+            rel(VM_LIFECYCLE_PATH),
+            rel(HOME_PROXMOX_PATH),
+            rel(SHOP_INGRESS_MAP_PATH),
+            rel(HOME_INGRESS_MAP_PATH),
+        ],
+        "repo_surfaces": ensure_list(estate_authority.get("repo_surfaces")),
+        "sites": ensure_dict(estate_authority.get("sites")),
+        "ghosts": sorted(ghosts, key=lambda row: row["id"]),
+        "compatibility_holds": sorted(compatibility_holds, key=lambda row: row["id"]),
+        "tombstones": build_tombstones(vm_lifecycle, home_proxmox),
+        "unknowns": sorted(unknowns, key=lambda row: row["id"]),
+        "decisions": ensure_list(estate_authority.get("decisions")),
+    }
+
+
+def build_home_scorecard(home_storage_map: dict[str, Any], home_ingress_map: dict[str, Any]) -> str:
+    runtime_rows = []
+    public_routes_by_host = {"homeassistant": ["ha.ronny.works"], "pihole-home": []}
+    for runtime in ensure_list(home_storage_map.get("runtime_storage")):
+        if not isinstance(runtime, dict):
+            continue
+        runtime_rows.append(
+            [
+                str(runtime.get("vm_id") or ""),
+                str(runtime.get("hostname") or ""),
+                str(runtime.get("kind") or ""),
+                str(runtime.get("startup_policy") or ""),
+                str(runtime.get("storage_tier") or ""),
+                storage_objects_summary(ensure_list(runtime.get("storage_objects"))),
+                ", ".join(row.get("lane_id", "") for row in ensure_list(runtime.get("backup_generation_lanes")) if isinstance(row, dict)) or "none",
+                ", ".join(public_routes_by_host.get(str(runtime.get("hostname") or ""), [])) or "private-only",
+            ]
+        )
+
+    tombstone_rows = []
+    for unit in ensure_list(home_storage_map.get("decommissioned_units")):
+        if not isinstance(unit, dict):
+            continue
+        tombstone_rows.append(
+            [
+                str(unit.get("vm_id") or ""),
+                str(unit.get("name") or ""),
+                str(unit.get("status") or ""),
+                str(unit.get("note") or ""),
+            ]
+        )
+
+    tier_rows = [
+        [
+            str(row.get("tier_id") or ""),
+            str(row.get("plane") or ""),
+            str(row.get("purpose") or ""),
+            str(row.get("layout") or ""),
+        ]
+        for row in ensure_list(home_storage_map.get("tier_model"))
+        if isinstance(row, dict)
+    ]
+
+    risks = "\n".join(f"- {risk}" for risk in ensure_list(home_storage_map.get("current_risks")))
+    if not risks:
+        risks = "- none"
+
+    return (
+        "---\n"
+        "status: generated\n"
+        'owner: "@ronny"\n'
+        f"last_verified: {today_utc()}\n"
+        "scope: home-rack-scorecard\n"
+        f"source_binding: {rel(HOME_STORAGE_MAP_PATH)}\n"
+        "---\n\n"
+        "# Home Rack Scorecard\n\n"
+        f"- Generated: `{home_storage_map.get('generated_at_utc')}`\n"
+        "- Rebuild: `./bin/ops cap run infra.estate.boringness.build`\n"
+        f"- Active runtimes: `{len(ensure_list(home_storage_map.get('runtime_storage')))}`\n"
+        f"- Tombstones: `{len(ensure_list(home_storage_map.get('decommissioned_units')))}`\n"
+        f"- Public routes: `{len(ensure_list(home_ingress_map.get('public_routes')))}`\n\n"
+        "## Substrate\n\n"
+        + render_table(
+            ["Plane", "Canonical surface", "Current truth"],
+            [
+                ["Hypervisor", "`ops/bindings/home.proxmox.inventory.yaml`", "`proxmox-home` is the only home hypervisor."],
+                ["Storage map", "`ops/bindings/home.storage.map.yaml`", "Runtime, backup, and personal-data storage truth are projected from authoritative bindings plus live proof."],
+                ["Ingress", "`ops/bindings/home.ingress.map.yaml`", "Public, local-DNS, and Tailscale ingress lanes are explicit."],
+            ],
+        )
+        + "\n\n## Storage Tiers\n\n"
+        + render_table(["Tier", "Plane", "Purpose", "Layout"], tier_rows)
+        + "\n\n## Active Runtime Units\n\n"
+        + render_table(
+            ["VMID", "Runtime", "Kind", "Startup", "Tier", "Durable State", "Backup Lane", "Ingress"],
+            runtime_rows or [["none", "none", "none", "none", "none", "none", "none", "none"]],
+        )
+        + "\n\n## Tombstones\n\n"
+        + render_table(
+            ["VMID", "Runtime", "Status", "Note"],
+            tombstone_rows or [["none", "none", "none", "none"]],
+        )
+        + "\n\n## Current Risks\n\n"
+        + risks
+        + "\n"
+    )
+
+
+def build_estate_scorecard(surface_register: dict[str, Any]) -> str:
+    repo_rows = []
+    for repo in ensure_list(surface_register.get("repo_surfaces")):
+        if not isinstance(repo, dict):
+            continue
+        blockers = "; ".join(ensure_list(repo.get("blocker_summary"))) or "none"
+        repo_rows.append(
+            [
+                str(repo.get("repo_id") or ""),
+                "yes" if bool(repo.get("boring_enough_now")) else "no",
+                str(repo.get("purpose") or ""),
+                blockers,
+            ]
+        )
+
+    site_rows = []
+    for site_name, site in ensure_dict(surface_register.get("sites")).items():
+        if not isinstance(site, dict):
+            continue
+        blockers = "; ".join(ensure_list(site.get("blockers"))) or "none"
+        site_rows.append(
+            [
+                site_name,
+                "yes" if bool(site.get("boring_enough_now")) else "no",
+                ", ".join(f"{k}={v}" for k, v in ensure_dict(site.get("storage_tiers")).items()) or "none",
+                blockers,
+            ]
+        )
+
+    def rows_for(key: str) -> list[list[str]]:
+        rows = []
+        for item in ensure_list(surface_register.get(key)):
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                [
+                    str(item.get("id") or ""),
+                    str(item.get("environment") or ""),
+                    str(item.get("kind") or ""),
+                    str(item.get("note") or ""),
+                ]
+            )
+        return rows or [["none", "none", "none", "none"]]
+
+    decision_rows = []
+    for decision in ensure_list(surface_register.get("decisions")):
+        if not isinstance(decision, dict):
+            continue
+        decision_rows.append(
+            [
+                str(decision.get("decision_type") or ""),
+                str(decision.get("subject") or ""),
+                str(decision.get("status") or ""),
+                str(decision.get("rationale") or ""),
+            ]
+        )
+
+    return (
+        "---\n"
+        "status: generated\n"
+        'owner: "@ronny"\n'
+        f"last_verified: {today_utc()}\n"
+        "scope: estate-boringness-scorecard\n"
+        f"source_binding: {rel(ESTATE_SURFACE_REGISTER_PATH)}\n"
+        "---\n\n"
+        "# Estate Boringness Scorecard\n\n"
+        f"- Generated: `{surface_register.get('generated_at_utc')}`\n"
+        "- Rebuild: `./bin/ops cap run infra.estate.boringness.build`\n"
+        f"- Repo surfaces tracked: `{len(ensure_list(surface_register.get('repo_surfaces')))}`\n"
+        f"- Ghosts: `{len(ensure_list(surface_register.get('ghosts')))}`\n"
+        f"- Compatibility holds: `{len(ensure_list(surface_register.get('compatibility_holds')))}`\n"
+        f"- Tombstones: `{len(ensure_list(surface_register.get('tombstones')))}`\n"
+        f"- Unknowns: `{len(ensure_list(surface_register.get('unknowns')))}`\n\n"
+        "## Repo Closure\n\n"
+        + render_table(["Repo", "Boring Enough", "Purpose", "Exact Blocker"], repo_rows)
+        + "\n\n## Environment Closure\n\n"
+        + render_table(["Environment", "Boring Enough", "Storage Story", "Exact Blocker"], site_rows)
+        + "\n\n## Ghosts\n\n"
+        + render_table(["Surface", "Environment", "Kind", "Note"], rows_for("ghosts"))
+        + "\n\n## Compatibility Holds\n\n"
+        + render_table(["Surface", "Environment", "Kind", "Note"], rows_for("compatibility_holds"))
+        + "\n\n## Tombstones\n\n"
+        + render_table(["Surface", "Environment", "Kind", "Note"], rows_for("tombstones"))
+        + "\n\n## Unknowns\n\n"
+        + render_table(["Surface", "Environment", "Kind", "Note"], rows_for("unknowns"))
+        + "\n\n## Final Decision Table\n\n"
+        + render_table(["Decision", "Subject", "Status", "Rationale"], decision_rows or [["none", "none", "none", "none"]])
+        + "\n"
+    )
+
+
+def build_generated_yaml_with_header(title: str, data: dict[str, Any]) -> str:
+    return (
+        f"# {title}\n"
+        "# Non-secret. Spine-native.\n"
+        "# Status: generated\n"
+        "# Do not edit manually — rebuild with: ./bin/ops cap run infra.estate.boringness.build\n"
+        + yaml_dump(data)
+    )
+
+
+def normalize_generated_content(content: str) -> str:
+    normalized = re.sub(
+        r"(generated_at_utc:\s*)(?:'[^']+'|\"[^\"]+\"|\S+)",
+        r"\1<generated_at_utc>",
+        content,
+    )
+    normalized = re.sub(r"(- Generated: `)[^`]+(`)", r"\1<generated_at_utc>\2", normalized)
+    return normalized
+
+
+def emit_output(path: Path, content: str, *, check: bool) -> None:
+    current = path.read_text(encoding="utf-8") if path.exists() else None
+    if check:
+        if current is None:
+            fail(f"stale generated output: {rel(path)}")
+        if normalize_generated_content(current) != normalize_generated_content(content):
+            fail(f"stale generated output: {rel(path)}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if current != content:
+        path.write_text(content, encoding="utf-8")
+
+
+def main() -> int:
+    args = parse_args()
+
+    backup = load_yaml(BACKUP_PATH)
+    domain_routing = load_yaml(DOMAIN_ROUTING_PATH)
+    estate_authority = load_yaml(ESTATE_AUTHORITY_PATH)
+    home_hardware = load_yaml(HOME_HARDWARE_PATH)
+    home_proxmox = load_yaml(HOME_PROXMOX_PATH)
+    home_unifi = load_yaml(HOME_UNIFI_PATH)
+    network_dns_local = load_yaml(NETWORK_DNS_LOCAL_PATH)
+    service_registry = load_yaml(SERVICE_REGISTRY_PATH)
+    shop_storage_map = load_yaml(SHOP_STORAGE_MAP_PATH)
+    ssh_targets = load_yaml(SSH_TARGETS_PATH)
+    synology = load_yaml(SYNOLOGY_STORAGE_PATH)
+    vm_lifecycle = load_yaml(VM_LIFECYCLE_PATH)
+
+    target_by_id, ip_to_site = build_target_maps(ssh_targets)
+    service_host_map = build_service_host_map(service_registry)
+    routes = flatten_routes(domain_routing)
+    for route in routes:
+        route["lifecycle_class"] = classify_route(route)
+        route["resolved_site"] = infer_route_site(route, service_host_map, target_by_id, ip_to_site)
+
+    shop_ingress_map = build_ingress_map(
+        site="shop",
+        routes=routes,
+        local_dns_entries=flatten_local_dns_entries(network_dns_local, "shop_entries"),
+        target_by_id=target_by_id,
+    )
+    home_ingress_map = build_ingress_map(
+        site="home",
+        routes=routes,
+        local_dns_entries=flatten_local_dns_entries(network_dns_local, "home_entries"),
+        target_by_id=target_by_id,
+    )
+    home_storage_map = build_home_storage_map(
+        backup=backup,
+        estate_authority=estate_authority,
+        home_hardware=home_hardware,
+        home_proxmox=home_proxmox,
+        synology=synology,
+    )
+    estate_surface_register = build_estate_surface_register(
+        estate_authority=estate_authority,
+        home_ingress_map=home_ingress_map,
+        home_proxmox=home_proxmox,
+        shop_ingress_map=shop_ingress_map,
+        vm_lifecycle=vm_lifecycle,
+    )
+
+    home_scorecard = build_home_scorecard(home_storage_map, home_ingress_map)
+    estate_scorecard = build_estate_scorecard(estate_surface_register)
+
+    outputs = {
+        HOME_STORAGE_MAP_PATH: build_generated_yaml_with_header("Home Storage Authority Projection", home_storage_map),
+        SHOP_INGRESS_MAP_PATH: build_generated_yaml_with_header("Shop Ingress Authority Projection", shop_ingress_map),
+        HOME_INGRESS_MAP_PATH: build_generated_yaml_with_header("Home Ingress Authority Projection", home_ingress_map),
+        ESTATE_SURFACE_REGISTER_PATH: build_generated_yaml_with_header("Estate Surface Register", estate_surface_register),
+        HOME_SCORECARD_PATH: home_scorecard,
+        ESTATE_SCORECARD_PATH: estate_scorecard,
+    }
+
+    for path, content in outputs.items():
+        emit_output(path, content, check=args.check)
+
+    print("infra.estate.boringness.build")
+    print(f"status: {'OK' if not args.check else 'CHECK_OK'}")
+    for path in outputs:
+        print(f"output: {rel(path)}")
+    print(f"shop_public_routes: {len(ensure_list(shop_ingress_map.get('public_routes')))}")
+    print(f"home_public_routes: {len(ensure_list(home_ingress_map.get('public_routes')))}")
+    print(f"estate_unknowns: {len(ensure_list(estate_surface_register.get('unknowns')))}")
+    print(f"shop_storage_planes: {len(ensure_list(shop_storage_map.get('storage_planes')))}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

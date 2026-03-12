@@ -1,0 +1,196 @@
+version: 1
+status: authoritative
+owner: "@ronny"
+updated_at: "2026-03-12"
+scope: universal-boringness-closure
+
+purpose: >
+  Cross-environment authority register for the remaining boringness closure work.
+  This file records repo-level closure status, site-level closure status, manual
+  non-route holds, explicit unknowns, and change-safety decisions. Generated
+  scorecards and surface registers consume this binding plus runtime-backed
+  inventory surfaces.
+
+evidence:
+  repo_sources:
+    - /Users/ronnyworks/code/mint-modules/README.md
+    - /Users/ronnyworks/code/mint-modules/docs/CANONICAL/ACTIVE_AUTHORITY.md
+    - /Users/ronnyworks/code/mint-modules/docs/ARCHITECTURE/MINT_TRANSITION_STATE.md
+    - /Users/ronnyworks/code/ronny-products/README.md
+    - /Users/ronnyworks/code/ronny-products/EXECUTION_BOARD.md
+    - /Users/ronnyworks/code/ronny-products/cc-benefits-tracker/app.contract.yaml
+    - /Users/ronnyworks/code/ronny-products/inbox-shield/app.contract.yaml
+    - /Users/ronnyworks/code/ronny-products/vouchervault/app.contract.yaml
+  live_reads:
+    - environment: shop
+      host: pve
+      observed_at_utc: "2026-03-12T03:02:00Z"
+      proof:
+        - "zpool list -o name,size,alloc,free,health"
+        - "zfs list -o name,used,avail,mountpoint tank media md1400"
+        - "ls -lh /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst"
+        - "sed -n '1,200p' /etc/pve/qemu-server/200.conf"
+        - "lvs --noheadings -o lv_name,vg_name,lv_size | grep vm-200-disk-0"
+    - environment: home
+      host: proxmox-home
+      observed_at_utc: "2026-03-12T03:02:00Z"
+      proof:
+        - "qm list"
+        - "pct list"
+        - "pvesm status"
+        - "df -h / /mnt/pve/synology-backups"
+        - "sed -n '1,160p' /etc/pve/qemu-server/100.conf"
+        - "sed -n '1,160p' /etc/pve/lxc/105.conf"
+        - "sed -n '1,160p' /etc/pve/jobs.cfg"
+    - environment: home
+      host: synology918
+      observed_at_utc: "2026-03-12T03:02:00Z"
+      proof:
+        - "df -h /volume1"
+        - "ls -lh /volume1/backups/proxmox_backups/dump"
+        - "du -sh /volume1/backups/proxmox_backups/mint-os"
+
+live_proof:
+  shop:
+    vm200:
+      observed_at_utc: "2026-03-12T03:02:00Z"
+      cold_capsule_path: /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst
+      cold_capsule_size_bytes: 196820427012
+      qemu_config_path: /etc/pve/qemu-server/200.conf
+      hot_lv_name: vm-200-disk-0
+      hot_lv_vg: pve
+      hot_lv_size_gb: 300
+      hot_lv_present: true
+      jobs_cfg_entry_present: false
+  home:
+    proxmox:
+      observed_at_utc: "2026-03-12T03:02:00Z"
+      node: proxmox-home
+      storage_status:
+        - storage_id: local
+          type: dir
+          active: true
+        - storage_id: local-lvm
+          type: lvmthin
+          active: true
+        - storage_id: synology-backups
+          type: nfs
+          active: true
+      runtime_configs:
+        - vm_id: 100
+          hostname: homeassistant
+          startup_policy: auto
+          efi_ref: local-lvm:vm-100-disk-0
+          boot_ref: local-lvm:vm-100-disk-1
+          boot_disk_gb: 32
+        - vm_id: 105
+          hostname: pihole-home
+          startup_policy: auto
+          rootfs_ref: local-lvm:vm-105-disk-0
+          rootfs_gb: 4
+      backup_jobs:
+        - job_id: backup-home-p0-daily
+          schedule: 03:00 daily
+          storage: synology-backups
+          vm_id: "100"
+        - job_id: backup-home-p2-weekly
+          schedule: "04:00 Sunday"
+          storage: synology-backups
+          vm_id: "105"
+    synology:
+      observed_at_utc: "2026-03-12T03:02:00Z"
+      volume1_used_tb: 7.4
+      volume1_free_tb: 12
+      mint_os_legacy_residue_gb: 110
+
+repo_surfaces:
+  - repo_id: mint-modules
+    path: /Users/ronnyworks/code/mint-modules
+    audit_path: docs/reference/audits/MINT_MODULES_BORINGNESS_AUDIT_20260312.md
+    purpose: Mint Prints implementation repo for active modules plus future, blocked, deferred, and contract-only module roots.
+    boring_enough_now: true
+    blocker_summary: []
+  - repo_id: ronny-products
+    path: /Users/ronnyworks/code/ronny-products
+    audit_path: docs/reference/audits/RONNY_PRODUCTS_BORINGNESS_AUDIT_20260312.md
+    purpose: Parked product-orchestration repo with one live integration surface and two intentionally non-deployed product lanes.
+    boring_enough_now: true
+    blocker_summary: []
+
+sites:
+  shop:
+    boring_enough_now: false
+    summary: Shop rack is structurally legible and inventory-backed, but physical closure is not complete.
+    storage_tiers:
+      hot: tank
+      warm: media
+      cold: md1400
+    blockers:
+      - VM200 is contractually tombstoned but still physically present as local-lvm:vm-200-disk-0 on pve.
+      - surveillance-stack guest-side data mount/path is still not captured in infra.storage.placement.policy.yaml.
+      - media has only 176G free and remains a pressured warm lane.
+  home:
+    boring_enough_now: false
+    summary: Home infra now has authoritative inventory and backup truth, but one-box durability assumptions are still too informal for drive-change confidence.
+    storage_tiers:
+      hot: proxmox-home local-lvm
+      warm_backup: synology /volume1/backups/proxmox_backups/dump
+      warm_data: synology /volume1
+      cold_offsite: none_declared
+    blockers:
+      - No declared second-environment cold/offsite restore plane exists for home personal data on Synology.
+      - Home switch ports 3/4/6 still rely on inferred endpoint identity instead of traced physical truth.
+      - Synology mint-os residue remains as non-canonical historical hold.
+
+manual_surface_register:
+  compatibility_holds:
+    - id: synology-mint-os-legacy-review
+      environment: home
+      kind: storage_residue
+      note: Legacy mint-os residue remains on Synology at /volume1/backups/proxmox_backups/mint-os. Reviewed and non-canonical.
+    - id: mint-modules-deploy-wrapper
+      environment: code
+      kind: repo_support_surface
+      note: mint-modules/deploy remains an operator wrapper and compatibility surface, not the canonical runtime definition lane.
+  ghosts: []
+  unknowns:
+    - id: surveillance-stack-data-path
+      environment: shop
+      kind: storage_path_gap
+      note: surveillance-stack guest-side durable mount/path is not yet captured in infra.storage.placement.policy.yaml.
+    - id: home-switch-port-identity
+      environment: home
+      kind: physical_network_gap
+      note: Home switch ports 3, 4, and 6 still have inferred endpoint identity only.
+
+decisions:
+  - decision_type: safe_to_delete
+    subject: vm-200-disk-0 on pve local-lvm
+    environment: shop
+    status: blocked
+    rationale: Cold capsule, config path, and LV presence are proven, but the destructive delete has not been executed and receipted.
+  - decision_type: safe_to_delete
+    subject: Synology mint-os legacy residue
+    environment: home
+    status: candidate
+    rationale: Residue is reviewed and non-canonical, but it still functions as a historical hold and should be deleted only in a deliberate cleanup wave.
+  - decision_type: safe_to_migrate
+    subject: mint-modules future, blocked, and deferred roots
+    environment: code
+    status: ready
+    rationale: Spine lifecycle authority already declares these roots non-runtime; moving them behind explicit lifecycle boundaries will not change live runtime behavior.
+  - decision_type: safe_to_migrate
+    subject: ronny-products parked app contracts
+    environment: code
+    status: done
+    rationale: "app.contract runtime status now matches the execution board: parked products are no longer marked active."
+  - decision_type: safe_to_change_drives
+    subject: shop rack hot/warm/cold storage
+    environment: shop
+    status: blocked
+    rationale: VM200 hot LV still exists and the media lane remains under pressure.
+  - decision_type: safe_to_change_drives
+    subject: proxmox-home and Synology drives
+    environment: home
+    status: blocked
+    rationale: Runtime backups exist on Synology, but the same enclosure remains canonical for home personal data and there is no declared second cold plane.

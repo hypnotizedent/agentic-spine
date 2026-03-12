@@ -1,0 +1,183 @@
+# Home Storage Authority Projection
+# Non-secret. Spine-native.
+# Status: generated
+# Do not edit manually — rebuild with: ./bin/ops cap run infra.estate.boringness.build
+version: 1
+generated_at_utc: '2026-03-12T04:03:46Z'
+site: home
+generated_by:
+  capability: infra.estate.boringness.build
+  script: ops/plugins/infra/bin/infra-estate-boringness-build
+source_surfaces:
+- ops/bindings/home.authority.contract.yaml
+- ops/bindings/home.hardware.inventory.yaml
+- ops/bindings/home.proxmox.inventory.yaml
+- ops/bindings/synology918.storage.manifest.yaml
+- ops/bindings/backup.inventory.yaml
+- ops/bindings/estate.boringness.authority.yaml
+tier_model:
+- tier_id: home-local-lvm
+  plane: hot_runtime
+  purpose: Primary local-lvm runtime backing for proxmox-home guest boot/root disks.
+  host: proxmox-home
+  layout: single-host NVMe + lvmthin
+- tier_id: synology-home-backup
+  plane: warm_backup
+  purpose: Canonical home backup lane for proxmox-home VM/LXC artifacts.
+  host: synology918
+  layout: Synology volume1 share exported to proxmox-home as synology-backups
+- tier_id: synology-home-data
+  plane: warm_payload
+  purpose: Canonical home personal data and media lane.
+  host: synology918
+  layout: Synology volume1
+storage_planes:
+- object_id: proxmox-home/local-lvm
+  kind: lvmthin
+  owner: proxmox-home
+  purpose: Home VM/LXC runtime boot/root disks.
+  durability_class: runtime_primary
+- object_id: proxmox-home/local
+  kind: dir
+  owner: proxmox-home
+  purpose: Hypervisor local filesystem and metadata.
+  durability_class: host_boot
+- object_id: synology/volume1/backups/proxmox_backups/dump
+  kind: path_family
+  owner: synology918
+  purpose: Canonical home VM/LXC backup lane.
+  durability_class: home_backup_primary
+- object_id: synology/volume1
+  kind: path_family
+  owner: synology918
+  purpose: Canonical home personal data lane.
+  durability_class: payload_primary
+- object_id: synology/volume1/backups/proxmox_backups/mint-os
+  kind: path_family
+  owner: synology918
+  purpose: Legacy mint-os historical residue only; not canonical.
+  durability_class: compatibility_hold
+machine_summary:
+  hypervisor:
+    machine_id: proxmox-home
+    model: SER7
+    lan_ip: 10.0.0.179
+    tailscale_ip: 100.103.99.62
+    role: Proxmox VE host
+  nas:
+    machine_id: nas
+    model: DS918+
+    lan_ip: 10.0.0.150
+    tailscale_ip: 100.102.199.111
+    role: NAS / backup target
+runtime_storage:
+- vm_id: 100
+  hostname: homeassistant
+  kind: vm
+  role: Home Assistant OS runtime
+  status: active
+  startup_policy: auto
+  storage_tier: home-local-lvm
+  owner: '@ronny'
+  purpose: Home Assistant OS runtime
+  active_services:
+  - home-assistant
+  storage_objects:
+  - kind: lvmthin_volume
+    object: local-lvm:vm-100-disk-1
+    purpose: Primary Home Assistant runtime disk
+    durability_role: runtime_primary
+    pool: local-lvm
+  - kind: lvmthin_volume
+    object: local-lvm:vm-100-disk-0
+    purpose: Home Assistant EFI vars disk
+    durability_role: boot_metadata
+    pool: local-lvm
+  backup_generation_lanes:
+  - lane_id: nas-home-local-exception
+    host: nas
+    base_path: /volume1/backups/proxmox_backups/dump
+  restore_targets:
+  - name: home-vm-100-ha-primary
+    enabled: true
+    host: nas
+    base_path: /volume1/backups/proxmox_backups/dump
+    glob: vzdump-qemu-100-*.vma.zst
+    classification: critical
+  primary_backup_unit: home-vm-100-ha-primary
+- vm_id: 105
+  hostname: pihole-home
+  kind: lxc
+  role: Home DNS filtering
+  status: active
+  startup_policy: auto
+  storage_tier: home-local-lvm
+  owner: '@ronny'
+  purpose: Home DNS filtering
+  active_services:
+  - pihole-home
+  storage_objects:
+  - kind: lvmthin_volume
+    object: local-lvm:vm-105-disk-0
+    purpose: Primary Pi-hole LXC rootfs
+    durability_role: runtime_primary
+    pool: local-lvm
+  backup_generation_lanes:
+  - lane_id: nas-home-local-exception
+    host: nas
+    base_path: /volume1/backups/proxmox_backups/dump
+  restore_targets:
+  - name: home-lxc-105-pihole-primary
+    enabled: true
+    host: nas
+    base_path: /volume1/backups/proxmox_backups/dump
+    glob: vzdump-lxc-105-*.tar.zst
+    classification: rebuildable
+  primary_backup_unit: home-lxc-105-pihole-primary
+decommissioned_units:
+- id: home-vm-101-immich-home
+  vm_id: 101
+  name: vm-101-immich-home
+  kind: unknown
+  status: stopped
+  classification: tombstone
+  note: Historical home guest retained only as decommissioned inventory.
+  decommissioned_on: ''
+- id: vm-102-vaultwarden
+  vm_id: 102
+  name: vaultwarden
+  kind: vm
+  status: stopped
+  classification: tombstone
+  note: Legacy Vaultwarden (superseded by infra-core)
+  decommissioned_on: '2026-02-16'
+- id: home-lxc-103-download-home
+  vm_id: 103
+  name: lxc-103-download-home
+  kind: unknown
+  status: stopped
+  classification: tombstone
+  note: Historical home guest retained only as decommissioned inventory.
+  decommissioned_on: ''
+canonical_personal_data:
+- path: /volume1/im2ch/
+  size: 2.3T
+  role: immich_photo_library
+- path: /volume1/photo-keepers/
+  size: 1.9T
+  role: personal_photo_archive
+- path: /volume1/media-staging/
+  size: 602G
+  role: media_staging
+- path: /volume1/documents/
+  size: 81G
+  role: documents_archive
+- path: /volume1/homelab/
+  size: 71G
+  role: homelab_assets
+current_risks:
+- No declared second-environment cold/offsite restore plane exists for home personal
+  data on Synology.
+- Home switch ports 3/4/6 still rely on inferred endpoint identity instead of traced
+  physical truth.
+- Synology mint-os residue remains as non-canonical historical hold.

@@ -10,7 +10,7 @@ MINT_ROOT="${MINT_MODULES_ROOT:-$HOME/code/mint-modules}"
 TRANSITION_DOC="$MINT_ROOT/docs/ARCHITECTURE/MINT_TRANSITION_STATE.md"
 ROADMAP_DOC="$MINT_ROOT/docs/PLANNING/MINT_ORDER_AGENT_ROADMAP_SSOT.md"
 QUEUE_DOC="$MINT_ROOT/docs/PLANNING/MINT_MODULE_EXECUTION_QUEUE.md"
-LIFECYCLE_REGISTRY="$MINT_ROOT/docs/contracts/MINT_MODULE_LIFECYCLE_REGISTRY_V1.yaml"
+LIFECYCLE_REGISTRY="$ROOT/ops/bindings/mint.module.lifecycle.authority.yaml"
 
 fail() {
   echo "D226 FAIL: $*" >&2
@@ -37,11 +37,11 @@ for file in "$TRANSITION_DOC" "$ROADMAP_DOC"; do
 done
 
 # Cross-repo lifecycle parity:
-# If lifecycle registry declares module deployable, transition-state coverage
-# must not keep it in CONTRACT_ONLY placeholder classification.
+# If Spine lifecycle authority declares a module runtime_active, transition-state
+# coverage must not keep it in CONTRACT_ONLY placeholder classification.
 for module in digital-proofs shopify-module; do
-  if rg -q "^  ${module}:\\s*$" "$LIFECYCLE_REGISTRY" \
-    && rg -A1 "^  ${module}:\\s*$" "$LIFECYCLE_REGISTRY" | rg -q 'lifecycle:\\s*deployed'; then
+  lifecycle_state="$(yq e -r ".modules[] | select(.id == \"$module\") | .lifecycle_state // \"\"" "$LIFECYCLE_REGISTRY")"
+  if [[ "$lifecycle_state" == "runtime_active" ]]; then
     rg -q "| ${module} | CONTRACT_ONLY |" "$TRANSITION_DOC" \
       && fail "transition state still marks ${module} CONTRACT_ONLY while lifecycle registry declares deployed"
   fi

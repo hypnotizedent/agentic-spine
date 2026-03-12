@@ -47,7 +47,7 @@ Authority boundary:
 | Storage | `ops/bindings/shop.storage.map.yaml` + `ops/bindings/hardware.inventory.yaml` + `ops/bindings/backup.inventory.yaml` | `tank` = hot runtime/app state, `media` = media payload only or phased-out pressure lane, `md1400` = cold backup/archive/staging only. |
 | Runtime | `ops/bindings/vm.lifecycle.yaml` + `docs/governance/STACK_REGISTRY.yaml` | Every kept workload is a named VM/LXC or a container stack inside one; tombstones are not runtime. |
 | Network | `docs/governance/DEVICE_IDENTITY_SSOT.md` + `ops/bindings/ssh.targets.yaml` | One LAN identity truth and one Tailscale truth per kept node. |
-| Ingress | `ops/bindings/domain.routing.registry.yaml` + `ops/bindings/cloudflare.inventory.yaml` | Public services are either intentionally published via Cloudflare or explicitly private-only. |
+| Ingress | `ops/bindings/shop.ingress.map.yaml` + `ops/bindings/domain.routing.registry.yaml` | Public services are either intentionally published via Cloudflare or explicitly private-only, and compatibility/ghost routes are explicit. |
 | Backup | `ops/bindings/backup.inventory.yaml` + `docs/governance/domains/backup.md` | One backup matrix per runtime unit: VM artifact, app/state supplement, offsite exception, and restore class. |
 | Monitoring | `docs/governance/SERVICE_REGISTRY.yaml` + `ops/bindings/services.health.yaml` | Every kept VM gets a baseline of host reachability, critical service health, and capacity visibility. |
 | Tombstones | `ops/bindings/docker-host.deprecation.contract.yaml` + `ops/bindings/vm.lifecycle.yaml` | Dead systems carry explicit tombstone status, one restore story, and an expiry/review date. |
@@ -55,8 +55,12 @@ Authority boundary:
 ## Generated Projections
 
 - Storage authority projection: `ops/bindings/shop.storage.map.yaml`
+- Ingress authority projection: `ops/bindings/shop.ingress.map.yaml`
 - Rack scorecard: `docs/reference/generated/SHOP_RACK_SCORECARD.md`
-- Rebuild command: `./bin/ops cap run infra.shop.storage.authority.build`
+- Estate closure scorecard: `docs/reference/generated/ESTATE_BORINGNESS_SCORECARD.md`
+- Rebuild commands:
+  - `./bin/ops cap run infra.shop.storage.authority.build`
+  - `./bin/ops cap run infra.estate.boringness.build`
 
 ## Current Tombstones
 

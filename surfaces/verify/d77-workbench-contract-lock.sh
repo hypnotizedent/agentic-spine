@@ -64,8 +64,12 @@ record_hit_lines "raw terminal-launch path reference" \
 
 # 4) No bare tool exec in active shell/lua surfaces.
 record_hit_lines "bare tool exec" \
-  rg -n -P '^\s*(?!#)(?!.*terminal (launch|exec))(?!.*--tool\b).*(^|[;&()]|\|\||&&|\bexec\b)\s*(claude|codex|opencode)\b' \
-    "$WORKBENCH_ROOT/scripts" "$WORKBENCH_ROOT/dotfiles/raycast" "$WORKBENCH_ROOT/dotfiles/hammerspoon/.hammerspoon/init.lua"
+  rg -n -P '^\s*(?!#)(?!(claude|codex|opencode)\s*\))(?!.*terminal (launch|exec))(?!.*--tool\b).*(^|[;&()]|\|\||&&|\bexec\b)\s*(claude|codex|opencode)(?=\s|$|[;&|])' \
+    "$WORKBENCH_ROOT/scripts" "$WORKBENCH_ROOT/dotfiles/raycast"
+
+record_hit_lines "bare tool exec" \
+  rg -n -P '(hs\.execute|itermNew|itermTab)[^\\n]*(claude|codex|opencode)\b' \
+    "$WORKBENCH_ROOT/dotfiles/hammerspoon/.hammerspoon/init.lua"
 
 if [[ "${#violations[@]}" -gt 0 ]]; then
   fail "$(printf '%s\n' "${violations[@]}")"
