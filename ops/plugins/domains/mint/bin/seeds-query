@@ -19,17 +19,35 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+SSH_RESOLVE_LIB="$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+TARGET_ID="mint-data"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
 command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
 [[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+[[ -f "$SSH_RESOLVE_LIB" ]] || stop "missing ssh resolver: $SSH_RESOLVE_LIB"
 
-# Resolve mint-data SSH target
-HOST="$(yq -r '.ssh.targets[] | select(.id == "mint-data") | .host' "$SSH_BINDING" | head -n1)"
-USER="$(yq -r '.ssh.targets[] | select(.id == "mint-data") | .user // "ubuntu"' "$SSH_BINDING" | head -n1)"
-[[ -n "$HOST" && "$HOST" != "null" ]] || stop "mint-data not found in ssh.targets"
+# shellcheck source=../../../../lib/ssh-resolve.sh
+source "$SSH_RESOLVE_LIB"
+
+# Resolve mint-data SSH target through the shared SSH fallback policy.
+DECLARED_HOST="$(ssh_resolve_host "$TARGET_ID")"
+USER="$(ssh_resolve_user "$TARGET_ID" "ubuntu")"
+CONNECT_TIMEOUT="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .connect_timeout_sec // .ssh.defaults.connect_timeout_sec // 5" "$SSH_BINDING" | head -n1)"
+[[ -n "$DECLARED_HOST" && "$DECLARED_HOST" != "null" ]] || stop "mint-data not found in ssh.targets"
+[[ "$CONNECT_TIMEOUT" =~ ^[0-9]+$ ]] || CONNECT_TIMEOUT=5
+
+RESOLVE_RESULT="$(ssh_resolve_ssh_host_with_fallback "$TARGET_ID" "$CONNECT_TIMEOUT" || true)"
+HOST="$(awk '{print $1}' <<<"$RESOLVE_RESULT")"
+PATH_USED="$(awk '{print $2}' <<<"$RESOLVE_RESULT")"
+[[ -n "$HOST" && "$HOST" != "null" && "$PATH_USED" != "unreachable" ]] || {
+  echo "ERROR: mint-data is unreachable over SSH"
+  echo "target: ${TARGET_ID}"
+  echo "declared_host: ${DECLARED_HOST}"
+  exit 1
+}
 
 # Parse args
 STATUS="" SOURCE="" EMAIL="" SEED_ID="" LIMIT=20 COUNT_ONLY=false JSON_MODE=false
@@ -71,11 +89,14 @@ if [[ ${#WHERE_PARTS[@]} -gt 0 ]]; then
   WHERE="WHERE $(IFS=" AND "; echo "${WHERE_PARTS[*]}")"
 fi
 
-SSH_OPTS=(-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
+SSH_OPTS=(-o "ConnectTimeout=${CONNECT_TIMEOUT}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
 
 if [[ "$JSON_MODE" != "true" ]]; then
   echo "mint.seeds.query"
-  echo "host: ${USER}@${HOST} (mint-data VM 212)"
+  echo "host: ${USER}@${HOST} (mint-data VM 212, path=${PATH_USED})"
+  if [[ "$HOST" != "$DECLARED_HOST" ]]; then
+    echo "declared_host: ${DECLARED_HOST}"
+  fi
   [[ -n "$STATUS" ]] && echo "filter.status: $STATUS"
   [[ -n "$SOURCE" ]] && echo "filter.source: $SOURCE"
   [[ -n "$EMAIL" ]]  && echo "filter.email: $EMAIL"
@@ -147,19 +168,21 @@ fi
 if [[ "$JSON_MODE" == "true" ]]; then
   RESULT_FILE="$(mktemp)"
   printf '%s' "$RESULT" >"$RESULT_FILE"
-  python3 - "$RESULT_FILE" "${USER}@${HOST}" "$STATUS" "$SOURCE" "$EMAIL" "$SEED_ID" "$LIMIT" "$COUNT_ONLY" <<'PY'
+  python3 - "$RESULT_FILE" "${USER}@${HOST}" "$STATUS" "$SOURCE" "$EMAIL" "$SEED_ID" "$LIMIT" "$COUNT_ONLY" "$DECLARED_HOST" "$PATH_USED" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 result_path = Path(sys.argv[1])
-host = sys.argv[2]
+host_ref = sys.argv[2]
 status = sys.argv[3]
 source = sys.argv[4]
 email = sys.argv[5]
 seed_id = sys.argv[6]
 limit = int(sys.argv[7])
 count_only = sys.argv[8].lower() == "true"
+declared_host = sys.argv[9]
+path_used = sys.argv[10]
 
 raw = result_path.read_text(encoding="utf-8", errors="replace").strip()
 payload = json.loads(raw) if raw else ({"total": 0} if count_only else [])
@@ -171,7 +194,9 @@ print(
         {
             "capability": "mint.seeds.query",
             "status": "ok",
-            "host": host,
+            "host": host_ref,
+            "declared_host": declared_host,
+            "path_used": path_used,
             "filters": {
                 "status": status or None,
                 "source": source or None,
