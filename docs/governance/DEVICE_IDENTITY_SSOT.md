@@ -110,7 +110,7 @@ ping -c1 nas pihole-home ha
 | iDRAC | `idrac-shop` — 192.168.1.250 (LAN-only) |
 | Proxmox Host | `pve` (Dell R730XD) |
 | Production VMs | infra-core, observability, dev-tools, ai-consolidation, automation-stack (core); finance-stack, mint-data, mint-apps (Mint); download-stack, streaming-stack (media split); immich-1 (deferred) |
-| Legacy hold VM | `docker-host` retained for forensic/rollback evidence only; not canonical for fresh-slate Mint |
+| Legacy tombstone VM | `docker-host` historical identity only; not canonical runtime and not expected to stay as a live guest |
 | NVR | `nvr-shop` — 192.168.1.216 (LAN-only) |
 | WiFi AP | `ap-shop` — 192.168.1.185 (LAN-only) |
 
@@ -146,7 +146,7 @@ Deep, mutable infra detail lives in the surviving live summaries:
 |------|-------------|----------|------|
 | macbook | 100.85.186.7 | Mobile | Workstation + Spine CLI (RAG deferred) |
 | pve | 100.96.211.33 | Shop | Proxmox VE (shop hypervisor) |
-| docker-host | 100.92.156.118 | Shop | Legacy hold / forensic-only Mint OS VM (non-canonical) |
+| docker-host | 100.92.156.118 | Shop | Tombstone restore identity only for legacy Mint OS history (non-canonical) |
 | infra-core | 100.92.91.128 | Shop | Core infra (Cloudflared, Pi-hole, Infisical, Vaultwarden, Authentik) |
 | observability | 100.120.163.70 | Shop | Observability (Prometheus, Grafana, Loki) |
 | dev-tools | 100.90.167.39 | Shop | Dev tools (Gitea, runner, postgres) |
@@ -183,7 +183,7 @@ Notes (Shop LAN-only endpoints):
 | VM | Canonical Name | LAN IP | VMID | MAC | Notes |
 |----|----------------|--------|------|-----|-------|
 | pve (hypervisor) | `pve` | 192.168.1.184 | — | 44:a8:42:22:2c:a6 | Proxmox host; NFS server |
-| docker-host (legacy hold) | `docker-host` | 192.168.1.200 | 200 | bc:24:11:bb:d0:b6 | Static IP (netplan). Preserved for forensic/rollback evidence only; not canonical Mint authority. |
+| docker-host (tombstone) | `docker-host` | 192.168.1.200 | 200 | bc:24:11:bb:d0:b6 | Historical identity only. Do not reuse as production hostname/routes if restored; use isolated sandbox identity instead. |
 | automation-stack | `automation-stack` | 192.168.1.110 | 202 | bc:24:11:31:bc:5a | Automation (n8n, Ollama, Open WebUI). DHCP lease at .110 (no VMID parity). |
 | immich (shop) | `immich` | 192.168.1.203 | 203 | bc:24:11:b8:e7:40 | Shop photos (Tailscale: `immich-1`). |
 | infra-core | `infra-core` | 192.168.1.204 | 204 | bc:24:11:19:84:3c | Static IP; Pi-hole DNS |

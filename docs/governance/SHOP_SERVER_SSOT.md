@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-11
+last_verified: 2026-03-12
 verification_method: device-identity parity + shop routing audit
 scope: shop-control-plane-summary
 ---
@@ -25,7 +25,7 @@ Authority boundary:
 | Camera NVR | `nvr-shop` | `192.168.1.216` | LAN-only | Hikvision recorder |
 | WiFi AP | `ap-shop` | `192.168.1.185` | LAN-only | TP-Link EAP225 |
 | Hypervisor SSH | `pve` | `100.96.211.33` | Tailscale | Canonical operator SSH target |
-| Legacy hold VM | `docker-host` | `192.168.1.200` | LAN | Forensic/rollback hold only |
+| Tombstone VM | `docker-host` | `192.168.1.200` | Historical identity | Cold restore capsule only; not runtime |
 | Automation VM | `automation-stack` | `192.168.1.110` | LAN | n8n / automation workloads |
 | Photos VM | `immich` | `192.168.1.203` | LAN | Shop photos VM |
 | Core infra VM | `infra-core` | `192.168.1.204` | LAN | DNS/auth/secrets core |
@@ -39,6 +39,38 @@ Authority boundary:
 | Mint apps VM | `mint-apps` | `192.168.1.213` | LAN | Mint app plane |
 | Communications VM | `communications-stack` | `192.168.1.26` | LAN | Stalwart + mail archiver |
 
+## Canonical Rack Target Model
+
+| Plane | Canonical surface | Boring target |
+|-------|-------------------|---------------|
+| Substrate | `ops/bindings/hardware.inventory.yaml` | `pve` is the only shop hypervisor. |
+| Storage | `ops/bindings/hardware.inventory.yaml` + `ops/bindings/backup.inventory.yaml` | `tank` = hot runtime/app state, `media` = media payload only or phased-out pressure lane, `md1400` = cold backup/archive/staging only. |
+| Runtime | `ops/bindings/vm.lifecycle.yaml` + `docs/governance/STACK_REGISTRY.yaml` | Every kept workload is a named VM/LXC or a container stack inside one; tombstones are not runtime. |
+| Network | `docs/governance/DEVICE_IDENTITY_SSOT.md` + `ops/bindings/ssh.targets.yaml` | One LAN identity truth and one Tailscale truth per kept node. |
+| Ingress | `ops/bindings/domain.routing.registry.yaml` + `ops/bindings/cloudflare.inventory.yaml` | Public services are either intentionally published via Cloudflare or explicitly private-only. |
+| Backup | `ops/bindings/backup.inventory.yaml` + `docs/governance/domains/backup.md` | One backup matrix per runtime unit: VM artifact, app/state supplement, offsite exception, and restore class. |
+| Monitoring | `docs/governance/SERVICE_REGISTRY.yaml` + `ops/bindings/services.health.yaml` | Every kept VM gets a baseline of host reachability, critical service health, and capacity visibility. |
+| Tombstones | `ops/bindings/docker-host.deprecation.contract.yaml` + `ops/bindings/vm.lifecycle.yaml` | Dead systems carry explicit tombstone status, one restore story, and an expiry/review date. |
+
+## Shop Scorecard
+
+| Question | Canonical answer surface |
+|----------|--------------------------|
+| What hardware exists? | `ops/bindings/hardware.inventory.yaml` |
+| What each disk and pool is for? | `ops/bindings/hardware.inventory.yaml` |
+| What each VM/LXC is for? | `ops/bindings/vm.lifecycle.yaml` |
+| How each service is reached? | `docs/governance/SERVICE_REGISTRY.yaml` + `ops/bindings/domain.routing.registry.yaml` |
+| Where durable service state lives? | `ops/bindings/backup.inventory.yaml` plus the owning stack/domain contract |
+| How each thing is backed up? | `ops/bindings/backup.inventory.yaml` |
+| How each thing is restored? | `docs/governance/domains/backup.md` plus service/domain restore docs |
+| What is canonical vs compatibility-hold vs dead? | `ops/bindings/vm.lifecycle.yaml` + `ops/bindings/docker-host.deprecation.contract.yaml` + `docs/governance/STACK_REGISTRY.yaml` |
+
+## Current Tombstones
+
+| Tombstone | Runtime posture | Cold restore posture | Review date | Notes |
+|-----------|-----------------|----------------------|-------------|-------|
+| `docker-host` / VM200 | Not runtime. Remove `vm-200-disk-0` from hot storage instead of keeping a powered-off guest. | Keep exactly one cold restore capsule at `pve:/md1400/backup-cold/vzdump/pve` via `vm-200-docker-host-primary`. Restore only as isolated temporary sandbox identity. | `2026-09-06` | Historical Mint/docker-host duties are now split across `mint-apps`, `mint-data`, `finance-stack`, `observability`, and `communications-stack`. |
+
 ## Verification
 
 ```bash
@@ -46,4 +78,3 @@ Authority boundary:
 ./bin/ops cap run spine.ripple.check -- switch-shop
 ./bin/ops cap run spine.ripple.check -- communications-stack
 ```
-

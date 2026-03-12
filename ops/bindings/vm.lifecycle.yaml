@@ -13,7 +13,7 @@
 # Decommission policies: requires_migration_first | requires_final_backup | allow_immediate_destroy
 
 version: 1
-updated: "2026-02-28"
+updated: "2026-03-12"
 owner: "@ronny"
 
 defaults:
@@ -51,11 +51,25 @@ vms:
     backup_target: vm-200-docker-host-primary
     health_probe_policy: none
     decommission_policy: requires_final_backup
+    tombstone:
+      class: cold_restore_capsule
+      live_runtime_disk: vm-200-disk-0
+      live_runtime_disk_gb: 300
+      live_runtime_disposition: remove_from_hot_storage
+      retained_restore_artifact: vm-200-docker-host-primary
+      retained_restore_storage: /md1400/backup-cold/vzdump/pve
+      retained_restore_count: 1
+      restore_review_by: "2026-09-06"
+      restore_name_prefix: vm200-restore-
+      restore_requires_isolation: true
+      restore_reuse_legacy_identity: false
     description: >
       TOMBSTONED 2026-03-06 after Mint data/control-plane retirement.
-      Powered down and retained on pve for forensic recovery only until explicit destroy.
+      Do not retain as a powered-off runtime guest on pve; remove the live 300G VM disk
+      from hot storage and keep exactly one cold restore capsule on md1400.
       Historically hosted mint-os, artwork-module, quote-page, minio, files-api,
-      mint-os-postgres, and mint-os-redis on pre-spine Linux Mint.
+      mint-os-postgres, and mint-os-redis on pre-spine Linux Mint. If recovery is needed,
+      restore only into an isolated temporary sandbox identity with no legacy DNS/routes.
 
   - id: 202
     hostname: automation-stack
@@ -219,7 +233,7 @@ vms:
       - gitea
       - gitea-runner
       - gitea-postgres
-    backup_target: vm-206-primary
+    backup_target: vm-206-dev-tools-primary
     health_probe_policy: full
     decommission_policy: requires_migration_first
     description: "Git forge. Authentik SSO. CF tunnel for git.ronny.works."
@@ -247,7 +261,7 @@ vms:
     services:
       - qdrant
       - anythingllm
-    backup_target: vm-207-primary
+    backup_target: vm-207-ai-consolidation-primary
     health_probe_policy: full
     decommission_policy: requires_migration_first
     description: "AI workloads. DHCP (no static LAN IP). Migrated from MacBook."
@@ -298,7 +312,7 @@ vms:
       - gluetun
       - watchtower
       - node-exporter
-    backup_target: vm-209-primary
+    backup_target: vm-209-download-stack-primary
     health_probe_policy: selective  # tdarr/slskd intentionally stopped
     decommission_policy: requires_migration_first
     description: "Download services. Split from media-stack (VM 201). NFS mounts from pve."
@@ -334,7 +348,7 @@ vms:
       - subgen
       - watchtower
       - node-exporter
-    backup_target: vm-210-primary
+    backup_target: vm-210-streaming-stack-primary
     health_probe_policy: full
     decommission_policy: requires_migration_first
     description: "Streaming services. Split from media-stack (VM 201). NFS mounts from pve."
@@ -371,7 +385,7 @@ vms:
       - vouchervault
       - mail-archiver-vm211  # migration_source — canonical home now VM 214
       - mail-archiver-db-vm211  # migration_source — canonical home now VM 214
-    backup_target: vm-211-primary
+    backup_target: vm-211-finance-stack-primary
     health_probe_policy: full
     decommission_policy: requires_final_backup
     description: "Finance stack. Migrated from docker-host (LOOP-FINANCE-VM-SEPARATION-20260211). Mail-archiver is migration_source — canonical runtime now on communications-stack VM 214."
@@ -513,7 +527,7 @@ vms:
     profile: spine-ready-v1
     lan_ip: 192.168.1.217
     tailscale_ip: null
-    ssh_target: null
+    ssh_target: archive-smb
     ssh_user: root
     os: ubuntu
     resources:

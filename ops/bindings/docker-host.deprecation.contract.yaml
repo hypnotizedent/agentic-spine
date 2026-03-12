@@ -1,20 +1,57 @@
 # Status: authoritative
-# Last verified: 2026-02-26
+# Last verified: 2026-03-12
 
 version: 1
-updated_at: "2026-02-26"
+updated_at: "2026-03-12"
 owner: "@ronny"
 scope: docker-host-safe-deprecation
 loop: LOOP-SPINE-GOVERNANCE-NORMALIZATION-SEQUENCE-20260226-20260226
 
 host:
-  vmid: "200"
+  vm_id: "200"
   hostname: docker-host
   role: legacy-production
   policy_mode: docs-first
   objective: >
-    Eliminate non-authoritative docker-host fragments that create agent confusion
-    while deferring Mint-OS runtime decommission work to the Mint lane.
+    Keep docker-host as an explicit tombstone with one cold restore capsule,
+    remove the live runtime footprint from hot storage, and prevent production
+    identity resurrection.
+
+tombstone_record:
+  state: tombstone
+  runtime_plane_status: dead_not_authoritative
+  live_runtime_footprint:
+    proxmox_host: pve
+    storage_tier: tank-docker
+    artifact: vm-200-disk-0
+    size_gb: 300
+    disposition: delete_from_hot_storage
+  cold_restore_capsule:
+    retained_artifact: vm-200-docker-host-primary
+    retained_count: 1
+    location: pve:/md1400/backup-cold/vzdump/pve
+    review_by: "2026-09-06"
+    expiry_action: delete_if_unneeded_after_review
+  historical_duties:
+    - Mint monolith runtime host
+    - artwork-module / quote-page / files-api legacy compose host
+    - mint-os postgres / redis / minio legacy state host
+  replaced_by:
+    - mint-apps (VM 213) for Mint application runtime
+    - mint-data (VM 212) for Mint state services
+    - finance-stack (VM 211) for finance workloads that used to share the host
+    - observability (VM 205) for Dashy/observability duties
+    - communications-stack (VM 214) for mail-archiver runtime authority
+  extract_once_assets:
+    - compose files
+    - environment templates
+    - config directories
+    - service inventory notes
+  restore_guardrails:
+    - restore only into isolated temporary sandbox identity such as vm200-restore-2026-06
+    - never restore into production hostname docker-host
+    - never republish legacy DNS, Tailscale, or Cloudflare routes on restore
+    - use restore for investigation/extraction only, not runtime reinstatement
 
 authorities:
   vm_lifecycle: ops/bindings/vm.lifecycle.yaml
@@ -97,14 +134,14 @@ agent_guardrails:
   - "If authority is ambiguous, classify as verify_first and do not delete."
 
 canonical_commands:
-  status:
+  status_commands:
     - ./bin/ops cap run infra.docker_host.status
     - ./bin/ops cap run services.health.run
     - ./bin/ops cap run communications.alerts.queue.status
-  verify:
+  verify_commands:
     - ./bin/ops cap run verify.route.recommend
     - ./bin/ops cap run verify.pack.run infra
-  break_glass:
+  break_glass_commands:
     - echo "yes" | ./bin/ops cap run communications.alerts.flush --limit 10
 
 evidence_requirements:
