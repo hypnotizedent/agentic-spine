@@ -39,9 +39,11 @@ required_external_dirs=(
   "$SPINE_DATA_ROOT"
   "$SPINE_BACKUPS_ROOT"
   "$SPINE_FOUNDATION_ROOT"
-  "$SPINE_FOUNDATION_ROOT/mailroom/templates"
+  "$SPINE_FOUNDATION_ROOT/docs"
+  "$SPINE_FOUNDATION_ROOT/docs/agents"
+  "$SPINE_FOUNDATION_ROOT/docs/archive"
   "$SPINE_FOUNDATION_ROOT/docs/product"
-  "$SPINE_FOUNDATION_ROOT/ops/archive"
+  "$SPINE_FOUNDATION_ROOT/docs/reference"
   "$SPINE_FOUNDATION_ROOT/ops/domains"
   "$SPINE_FOUNDATION_ROOT/ops/infra"
 )
