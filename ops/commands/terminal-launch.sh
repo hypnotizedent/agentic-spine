@@ -188,6 +188,13 @@ _check_source_impl() {
             fi
         done
 
+        local allowed_tools_count
+        allowed_tools_count="$(yq e ".terminals.\"${id}\".allowed_tools | length" "$LAUNCHER_VIEW_YAML" 2>/dev/null || echo "0")"
+        if ! [[ "$allowed_tools_count" =~ ^[0-9]+$ ]] || [[ "$allowed_tools_count" -lt 1 ]]; then
+            echo "launcher view schema error: terminals.$id.allowed_tools must be a non-empty array" >&2
+            return 1
+        fi
+
         sort_value="$(yq e ".terminals.\"${id}\".sort_order // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
         if ! [[ "$sort_value" =~ ^[0-9]+$ ]]; then
             echo "launcher view schema error: terminals.$id.sort_order must be numeric" >&2
@@ -227,11 +234,12 @@ _resolve_from_view() {
     entry="$(yq e ".terminals.\"${terminal_id}\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
     [[ "$entry" != "null" && -n "$entry" ]] || return 1
 
-    local mapped_terminal_id label description default_tool status picker_group sort_order lane_profile
+    local mapped_terminal_id label description default_tool allowed_tools status picker_group sort_order lane_profile
     mapped_terminal_id="$(yq e ".terminals.\"${terminal_id}\".terminal_id // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
     label="$(yq e ".terminals.\"${terminal_id}\".label // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
     description="$(yq e ".terminals.\"${terminal_id}\".description // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
     default_tool="$(yq e ".terminals.\"${terminal_id}\".default_tool // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+    allowed_tools="$(yq e -r ".terminals.\"${terminal_id}\".allowed_tools[]?" "$LAUNCHER_VIEW_YAML" 2>/dev/null | paste -sd, -)"
     status="$(yq e ".terminals.\"${terminal_id}\".status // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
     picker_group="$(yq e ".terminals.\"${terminal_id}\".picker_group // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
     sort_order="$(yq e ".terminals.\"${terminal_id}\".sort_order // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
@@ -243,7 +251,7 @@ _resolve_from_view() {
     if [[ -z "$label" && -z "$description" ]]; then
         return 2
     fi
-    if [[ -z "$default_tool" || -z "$status" || -z "$picker_group" || -z "$sort_order" || -z "$lane_profile" ]]; then
+    if [[ -z "$default_tool" || -z "$allowed_tools" || -z "$status" || -z "$picker_group" || -z "$sort_order" || -z "$lane_profile" ]]; then
         return 2
     fi
     if ! [[ "$sort_order" =~ ^[0-9]+$ ]]; then
@@ -257,6 +265,7 @@ terminal_role_binding=$mapped_terminal_id
 label=$label
 description=$description
 default_tool=$default_tool
+allowed_tools=$allowed_tools
 status=$status
 picker_group=$picker_group
 sort_order=$sort_order
@@ -443,6 +452,7 @@ cmd_list_roles() {
         "description": .value.description,
         "status": .value.status,
         "default_tool": .value.default_tool,
+        "allowed_tools": .value.allowed_tools,
         "picker_group": .value.picker_group,
         "sort_order": .value.sort_order,
         "domain": .value.domain,
@@ -474,6 +484,7 @@ cmd_launch() {
     local tool_explicit=0
     local terminal_explicit=0
     local terminal_binding=""
+    local allowed_tools_csv=""
     local dry_run=0
 
     while [[ $# -gt 0 ]]; do
@@ -503,6 +514,7 @@ cmd_launch() {
                     terminal_role_binding) terminal_binding="$_val" ;;
                     lane_profile)  [[ $lane_explicit -eq 0 && -n "$_val" ]] && lane="$_val" ;;
                     default_tool)  [[ $tool_explicit -eq 0 && -n "$_val" ]] && tool="$_val" ;;
+                    allowed_tools) allowed_tools_csv="$_val" ;;
                 esac
             done <<< "$_view_output"
             [[ -n "$terminal_binding" ]] && terminal_name="$terminal_binding"
@@ -565,6 +577,15 @@ cmd_launch() {
     fi
     [[ -n "$terminal_name" ]] || fail "unable to derive terminal name"
 
+    if [[ -n "$allowed_tools_csv" && "$tool" != "verify" ]]; then
+        local allowed_match=0 allowed_tool
+        IFS=',' read -r -a _allowed_tools <<< "$allowed_tools_csv"
+        for allowed_tool in "${_allowed_tools[@]}"; do
+            [[ "$allowed_tool" == "$tool" ]] && allowed_match=1
+        done
+        [[ "$allowed_match" -eq 1 ]] || fail "tool '$tool' is not allowed for terminal '$terminal_name' (allowed: $allowed_tools_csv)"
+    fi
+
     local terminal_label runtime_role terminal_title
     terminal_label="$(resolve_terminal_label "$terminal_name")"
     runtime_role="$(resolve_runtime_role_for_terminal "$terminal_name")"
@@ -611,6 +632,7 @@ cmd_launch() {
 
     if [[ "$dry_run" -eq 1 || "${TERMINAL_LAUNCH_DRY_RUN:-0}" == "1" ]]; then
         echo "DRY_RUN: lane=$lane tool=$tool terminal=$terminal_name label=$terminal_label runtime_role=$runtime_role loop=${loop_id:-none} role=$role"
+        [[ -n "$allowed_tools_csv" ]] && echo "allowed_tools=$allowed_tools_csv"
         echo "command=$full_cmd"
         return
     fi

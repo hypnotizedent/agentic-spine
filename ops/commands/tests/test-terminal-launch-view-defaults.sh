@@ -58,6 +58,9 @@ terminals:
     picker_group: core
     sort_order: 100
     default_tool: codex
+    allowed_tools:
+      - codex
+      - claude
     domain: core
     lane_profile: control
   BETA-DOMAIN-01:
@@ -67,6 +70,9 @@ terminals:
     picker_group: domain-runtime
     sort_order: 300
     default_tool: claude
+    allowed_tools:
+      - claude
+      - opencode
     domain: home-automation
     lane_profile: execution
   GAMMA-WATCH-01:
@@ -76,6 +82,8 @@ terminals:
     picker_group: observation
     sort_order: 200
     default_tool: opencode
+    allowed_tools:
+      - opencode
     domain: core
     lane_profile: watcher
 FIXTURE_VIEW
@@ -137,6 +145,7 @@ echo "── T3: view defaults apply ──"
 t3_out=$(bash "$SCRIPT" launch --terminal BETA-DOMAIN-01 2>&1)
 assert_contains "$t3_out" "lane=execution" "view default lane=execution"
 assert_contains "$t3_out" "tool=claude" "view default tool=claude"
+assert_contains "$t3_out" "allowed_tools=claude,opencode" "allowed_tools exported in dry run"
 assert_contains "$t3_out" "terminal=BETA-DOMAIN-01" "terminal passed through"
 
 # ── T4: explicit --lane --tool wins over view ────────────────────────────
@@ -155,10 +164,21 @@ t5_out=$(bash "$SCRIPT" launch --terminal BETA-DOMAIN-01 --tool opencode 2>&1)
 assert_contains "$t5_out" "tool=opencode" "explicit --tool opencode wins over view claude"
 assert_contains "$t5_out" "lane=execution" "lane still filled from view"
 
-# ── T6: missing view file → list-roles returns [], launch fallback ───────
+# ── T6: unsupported tool rejected by allowed_tools ───────────────────────
 
 echo ""
-echo "── T6: missing view file fallback ──"
+echo "── T6: allowed_tools enforced ──"
+set +e
+t6_out=$(bash "$SCRIPT" launch --terminal BETA-DOMAIN-01 --tool codex 2>&1)
+t6_status=$?
+set -e
+assert_eq "$t6_status" "1" "unsupported tool exits non-zero"
+assert_contains "$t6_out" "not allowed for terminal 'BETA-DOMAIN-01'" "unsupported tool reports allowed_tools failure"
+
+# ── T7: missing view file → list-roles returns [], launch fallback ───────
+
+echo ""
+echo "── T7: missing view file fallback ──"
 saved_view="$FAKE_SPINE/ops/bindings/terminal.launcher.view.yaml"
 mv "$saved_view" "${saved_view}.bak"
 
@@ -166,16 +186,16 @@ no_view_roles=$(bash "$SCRIPT" list-roles 2>&1)
 assert_eq "$no_view_roles" "[]" "list-roles returns [] when view missing"
 
 # Launch with --lane (no view to resolve from)
-t6_out=$(bash "$SCRIPT" launch --lane control --tool codex 2>&1)
-assert_contains "$t6_out" "lane=control" "fallback launch works with --lane"
-assert_contains "$t6_out" "tool=codex" "fallback launch uses explicit tool"
+t7_out=$(bash "$SCRIPT" launch --lane control --tool codex 2>&1)
+assert_contains "$t7_out" "lane=control" "fallback launch works with --lane"
+assert_contains "$t7_out" "tool=codex" "fallback launch uses explicit tool"
 
 mv "${saved_view}.bak" "$saved_view"
 
-# ── T7: --help includes list-roles ───────────────────────────────────────
+# ── T8: --help includes list-roles ───────────────────────────────────────
 
 echo ""
-echo "── T7: --help includes list-roles ──"
+echo "── T8: --help includes list-roles ──"
 help_out=$(bash "$SCRIPT" --help 2>&1)
 assert_contains "$help_out" "list-roles" "--help mentions list-roles"
 

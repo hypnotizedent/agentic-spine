@@ -48,7 +48,7 @@ Direct ad hoc launcher hotkeys are retired.
 <!-- BEGIN AUTO HOTKEYS -->
 | Hotkey | Action | Source |
 |--------|--------|--------|
-| **Ctrl+Shift+P** | Canonical Ronny launcher picker (choose terminal character) | `~/.hammerspoon/` |
+| **Ctrl+Shift+P** | Canonical Ronny launcher picker (choose terminal character, then tool) | `~/.hammerspoon/` |
 | **Ctrl+Shift+T** | Enqueue a mailroom task (optional prompt) + show watcher status | `~/.hammerspoon/` |
 | **Ctrl+Shift+E** | Run governed session closeout (includes structured friction intake) | `~/.hammerspoon/` |
 | **Ctrl+Shift+R** | Manual friction.reconcile trigger for current loop | `~/.hammerspoon/` |
@@ -71,8 +71,7 @@ source of launcher policy.
 | **Raycast** | `Spine Comms Flush` | `cd /Users/ronnyworks/code/workbench && ./scripts/root/operator/communications-ops.sh retry --limit 10` |
 | **Raycast** | `Spine Control` | `"/Users/ronnyworks/code/agentic-spine/bin/ops" terminal launch --lane control --tool opencode --terminal SPINE-CONTROL-01` |
 | **Raycast** | `Spine Execution` | `"/Users/ronnyworks/code/agentic-spine/bin/ops" terminal launch --lane execution --tool opencode --terminal SPINE-EXECUTION-01` |
-| **Raycast** | `Spine Launcher` | `"$OPS_BIN" terminal launch --role solo --tool "$default_tool" --terminal "$terminal_id"` |
+| **Raycast** | `Spine Launcher` | `"$OPS_BIN" terminal launch --role solo --tool "$selected_tool" --terminal "$terminal_id"` |
 | **Raycast** | `Spine Start Routine` | `"/Users/ronnyworks/code/agentic-spine/bin/ops" terminal launch --role solo --tool verify` |
 | **Raycast** | `Spine Watcher` | `"/Users/ronnyworks/code/agentic-spine/bin/ops" terminal launch --lane watcher --tool verify --terminal SPINE-WATCHER-01` |
 <!-- END AUTO RAYCAST -->
-

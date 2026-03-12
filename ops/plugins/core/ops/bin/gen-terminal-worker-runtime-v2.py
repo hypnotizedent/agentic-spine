@@ -429,6 +429,7 @@ def _build_worker_catalog(
                 "verify_domain": terminal_binding.get("verify_domain") or verify_domain,
             },
             "default_tool": role.get("default_tool"),
+            "allowed_tools": role.get("allowed_tools") or ([role.get("default_tool")] if role.get("default_tool") else []),
         }
 
         if unknown_capabilities:
@@ -614,6 +615,10 @@ def _build_launcher_view(workers: dict[str, Any], generated_at: str) -> dict[str
             "sort_order": launcher_ref.get("sort_order"),
             "hotkey": launcher_ref.get("hotkey"),
             "default_tool": worker.get("default_tool"),
+            "allowed_tools": worker.get("allowed_tools")
+            or [worker.get("default_tool")]
+            if worker.get("default_tool")
+            else [],
             "domain": worker.get("domain"),
             "agent_id": worker.get("agent_id"),
             "lane_profile": launcher_ref.get("lane_profile"),
