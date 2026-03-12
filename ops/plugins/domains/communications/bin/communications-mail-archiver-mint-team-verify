@@ -1,0 +1,559 @@
+#!/usr/bin/env python3
+"""communications-mail-archiver-mint-team-verify
+
+Lane-focused verifier for the canonical Mint direct-comms mail archive path.
+It consumes communications.mailarchiver.sync.status and proves account 5 /
+microsoft-team is still boring enough for operators:
+
+- recent successful sync job completion within the governed window
+- archive row presence plus freshness signal
+- no hard account issues for the team lane
+- no queue starvation condition that would block future team syncs
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+from typing import Any, NoReturn
+
+
+CAPABILITY = "communications.mailarchiver.mint.team.verify"
+SCHEMA_VERSION = "1.0"
+DEFAULT_ACCOUNT_CONTRACT_ID = "microsoft-team"
+DEFAULT_ARCHIVE_WINDOW_HOURS = 24
+ADVISORY_ACCOUNT_ISSUES = {
+    "lastsync_missing_or_unparseable",
+    "lastsync_noncanonical",
+    "lastsync_stale",
+}
+
+
+def stop(message: str, code: int = 2) -> NoReturn:
+    print(f"{CAPABILITY} FAIL: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Verify the canonical Mint team mail-archive lane using the governed "
+            "communications.mailarchiver.sync.status read-model."
+        )
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON envelope output.",
+    )
+    parser.add_argument(
+        "--input-json",
+        default="",
+        help="Use a saved communications.mailarchiver.sync.status JSON document instead of executing the capability.",
+    )
+    parser.add_argument(
+        "--account-contract-id",
+        default=DEFAULT_ACCOUNT_CONTRACT_ID,
+        help=f"Account contract id to verify (default: {DEFAULT_ACCOUNT_CONTRACT_ID}).",
+    )
+    parser.add_argument(
+        "--job-window-hours",
+        type=int,
+        default=None,
+        help="Override the recent successful sync job window in hours.",
+    )
+    parser.add_argument(
+        "--archive-window-hours",
+        type=int,
+        default=None,
+        help="Override the archive activity freshness window in hours.",
+    )
+    return parser.parse_args()
+
+
+def repo_root() -> pathlib.Path:
+    script_dir = pathlib.Path(__file__).resolve().parent
+    return pathlib.Path(os.environ.get("SPINE_ROOT", script_dir.parents[4]))
+
+
+def run_json_command(command: list[str], failure_message: str) -> dict[str, Any]:
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        if detail:
+            failure_message = f"{failure_message}: {detail}"
+        stop(failure_message)
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        stop(f"{failure_message}: invalid json ({exc})")
+
+
+def load_contract(contract_path: pathlib.Path) -> dict[str, Any]:
+    if not contract_path.exists():
+        stop(f"missing linkage contract: {contract_path}")
+    return run_json_command(
+        ["yq", "-o=json", ".", str(contract_path)],
+        f"failed to read linkage contract {contract_path}",
+    )
+
+
+def load_sync_status(sync_status_bin: pathlib.Path, input_json: str) -> dict[str, Any]:
+    if input_json:
+        if input_json == "-":
+            raw = sys.stdin.read()
+        else:
+            input_path = pathlib.Path(input_json)
+            if not input_path.exists():
+                stop(f"--input-json file not found: {input_path}")
+            raw = input_path.read_text(encoding="utf-8")
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            stop(f"invalid --input-json payload ({exc})")
+
+    if not sync_status_bin.exists():
+        stop(f"missing dependency runtime: {sync_status_bin}")
+    return run_json_command(
+        [str(sync_status_bin), "--json"],
+        "communications.mailarchiver.sync.status execution failed",
+    )
+
+
+def parse_ts(raw: str | None) -> dt.datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    if " " in text and "T" not in text:
+        text = text.replace(" ", "T")
+    if "+" not in text and "Z" not in text:
+        text = text + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def iso_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def age_minutes(now: dt.datetime, when: dt.datetime | None) -> int | None:
+    if when is None:
+        return None
+    return max(int((now - when).total_seconds() // 60), 0)
+
+
+def normalize_name(value: str | None) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def build_result(
+    linkage: dict[str, Any],
+    sync_status: dict[str, Any],
+    account_contract_id: str,
+    job_window_hours_override: int | None,
+    archive_window_hours_override: int | None,
+) -> dict[str, Any]:
+    evidence_now = parse_ts(sync_status.get("generated_at"))
+    now = evidence_now or dt.datetime.now(dt.timezone.utc)
+    status = "OK"
+    checks: list[dict[str, Any]] = []
+
+    def add_check(check_id: str, check_status: str, detail: str, **extra: Any) -> None:
+        nonlocal status
+        entry = {"id": check_id, "status": check_status, "detail": detail}
+        entry.update(extra)
+        checks.append(entry)
+        if check_status == "fail":
+            status = "FAIL"
+        elif check_status == "warn" and status != "FAIL":
+            status = "WARN"
+
+    linkage_accounts = linkage.get("accounts") or []
+    linkage_account = next(
+        (row for row in linkage_accounts if isinstance(row, dict) and str(row.get("id") or "") == account_contract_id),
+        None,
+    )
+    if not linkage_account:
+        stop(f"account contract id not found in linkage contract: {account_contract_id}")
+
+    live_sync_window = int(
+        ((((linkage.get("freshness_semantics") or {}).get("live-sync") or {}).get("stale_after_hours")) or 1)
+    )
+    verifier_cfg = ((linkage_account.get("sync") or {}).get("verifier") or {})
+
+    job_window_hours = job_window_hours_override or int(
+        verifier_cfg.get("recent_successful_job_within_hours") or live_sync_window
+    )
+    archive_window_hours = archive_window_hours_override or int(
+        verifier_cfg.get("archive_activity_within_hours") or max(job_window_hours, DEFAULT_ARCHIVE_WINDOW_HOURS)
+    )
+
+    db_account_id = str(linkage_account.get("db_account_id") or "")
+    mailbox = str(linkage_account.get("mailbox") or "")
+    verifier_note = str(verifier_cfg.get("note") or "")
+
+    generated_at = str(sync_status.get("generated_at") or "")
+    data = sync_status.get("data") or {}
+    runtime = data.get("runtime") or {}
+    sync_data = data.get("sync") or {}
+
+    if not isinstance(sync_data, dict) or not sync_data:
+        add_check("sync_surface", "fail", "sync-status payload missing data.sync block")
+    app_status = str(runtime.get("app_status") or "")
+    db_status = str(runtime.get("db_status") or "")
+    if app_status == "running" and db_status == "running":
+        add_check("runtime", "pass", "mail-archiver app and db containers are running", app_status=app_status, db_status=db_status)
+    else:
+        add_check("runtime", "fail", "mail-archiver runtime containers not healthy", app_status=app_status, db_status=db_status)
+
+    queue_classification = str(sync_data.get("job_runtime_classification") or "unknown")
+    if queue_classification == "healthy":
+        add_check("queue", "pass", "queue classification healthy", classification=queue_classification)
+    elif queue_classification == "healthy_but_slow":
+        add_check("queue", "warn", "queue healthy but slow; team lane still evaluated separately", classification=queue_classification)
+    elif queue_classification == "starved_by_long_running_job":
+        add_check("queue", "fail", "queue starved by long-running job", classification=queue_classification)
+    else:
+        add_check("queue", "fail", "queue classification unknown or unhealthy", classification=queue_classification)
+
+    accounts = sync_data.get("accounts") or []
+    account = next(
+        (
+            row
+            for row in accounts
+            if isinstance(row, dict)
+            and (
+                str(row.get("account_contract_id") or "") == account_contract_id
+                or (db_account_id and str(row.get("db_account_id") or "") == db_account_id)
+            )
+        ),
+        None,
+    )
+
+    if not account:
+        add_check(
+            "account_presence",
+            "fail",
+            "team lane missing from sync-status account report",
+            account_contract_id=account_contract_id,
+            db_account_id=db_account_id,
+        )
+        account = {}
+    else:
+        add_check(
+            "account_presence",
+            "pass",
+            "team lane present in sync-status account report",
+            account_contract_id=str(account.get("account_contract_id") or ""),
+            db_account_id=str(account.get("db_account_id") or ""),
+            mailbox_contract=str(account.get("mailbox_contract") or ""),
+        )
+
+    account_issues = [str(item) for item in (account.get("issues") or []) if str(item)]
+    advisory_issues = [issue for issue in account_issues if issue in ADVISORY_ACCOUNT_ISSUES]
+    hard_issues = [issue for issue in account_issues if issue not in ADVISORY_ACCOUNT_ISSUES]
+    if hard_issues:
+        add_check("account_issues", "fail", "team lane has hard account issues", issues=hard_issues)
+    elif advisory_issues:
+        add_check("account_issues", "warn", "team lane has advisory LastSync-only issues", issues=advisory_issues)
+    else:
+        add_check("account_issues", "pass", "team lane has no account-level issues")
+
+    latest_job = account.get("latest_job") or {}
+    latest_job_status = str(latest_job.get("status") or "")
+    if latest_job_status == "failed":
+        add_check("latest_job_state", "fail", "latest team sync job failed", latest_job=latest_job)
+    elif latest_job_status == "running":
+        add_check("latest_job_state", "warn", "latest team sync job still running", latest_job=latest_job)
+    elif latest_job_status == "completed":
+        add_check("latest_job_state", "pass", "latest team sync job completed", latest_job=latest_job)
+    elif latest_job:
+        add_check("latest_job_state", "warn", "latest team sync job has non-standard state", latest_job=latest_job)
+    else:
+        add_check("latest_job_state", "warn", "latest team sync job missing from account row")
+
+    recent_jobs = sync_data.get("recent_jobs") or []
+    target_name = normalize_name(account.get("account_name_db") or latest_job.get("account_name") or "")
+    candidate_jobs = []
+    seen_job_ids: set[str] = set()
+    for job in recent_jobs:
+        if not isinstance(job, dict):
+            continue
+        matches = False
+        if db_account_id and str(job.get("db_account_id") or "") == db_account_id:
+            matches = True
+        elif target_name and normalize_name(job.get("account_name")) == target_name:
+            matches = True
+        if not matches:
+            continue
+        job_id = str(job.get("job_id") or "")
+        if job_id in seen_job_ids:
+            continue
+        seen_job_ids.add(job_id)
+        candidate_jobs.append(job)
+
+    if latest_job and isinstance(latest_job, dict):
+        latest_job_id = str(latest_job.get("job_id") or "")
+        if latest_job_id and latest_job_id not in seen_job_ids:
+            merged_job = dict(latest_job)
+            merged_job.setdefault("db_account_id", db_account_id)
+            candidate_jobs.append(merged_job)
+
+    def job_sort_key(job: dict[str, Any]) -> dt.datetime:
+        completed = parse_ts(job.get("completed_at"))
+        started = parse_ts(job.get("started_at"))
+        return completed or started or dt.datetime.fromtimestamp(0, tz=dt.timezone.utc)
+
+    candidate_jobs.sort(key=job_sort_key, reverse=True)
+    successful_jobs = [job for job in candidate_jobs if str(job.get("status") or "") == "completed"]
+    latest_successful_job = successful_jobs[0] if successful_jobs else None
+    latest_successful_completed_at = parse_ts((latest_successful_job or {}).get("completed_at"))
+    latest_successful_age_minutes = age_minutes(now, latest_successful_completed_at)
+    if latest_successful_job and latest_successful_completed_at is not None:
+        if latest_successful_completed_at >= now - dt.timedelta(hours=job_window_hours):
+            add_check(
+                "recent_successful_job",
+                "pass",
+                "recent successful team sync job is within window",
+                job_id=str(latest_successful_job.get("job_id") or ""),
+                completed_at=(latest_successful_completed_at.isoformat().replace("+00:00", "Z")),
+                age_minutes=latest_successful_age_minutes,
+                window_hours=job_window_hours,
+            )
+        else:
+            add_check(
+                "recent_successful_job",
+                "fail",
+                "most recent successful team sync job is stale",
+                job_id=str(latest_successful_job.get("job_id") or ""),
+                completed_at=(latest_successful_completed_at.isoformat().replace("+00:00", "Z")),
+                age_minutes=latest_successful_age_minutes,
+                window_hours=job_window_hours,
+            )
+    else:
+        add_check(
+            "recent_successful_job",
+            "fail",
+            "no successful team sync job found in recent sync-status evidence",
+            window_hours=job_window_hours,
+        )
+
+    latest_archived_received_at_raw = str(account.get("latest_archived_received_at") or "")
+    latest_archived_received_at = parse_ts(latest_archived_received_at_raw)
+    latest_archived_row_id = account.get("latest_archived_row_id")
+    archived_count = int(account.get("archived_count") or 0)
+    latest_archived_age_minutes = age_minutes(now, latest_archived_received_at)
+
+    if latest_archived_received_at is None or latest_archived_row_id in (None, "") or archived_count <= 0:
+        add_check(
+            "archive_presence",
+            "fail",
+            "team lane has no archived row proof",
+            archived_count=archived_count,
+            latest_archived_row_id=latest_archived_row_id,
+            latest_archived_received_at=latest_archived_received_at_raw,
+        )
+    else:
+        add_check(
+            "archive_presence",
+            "pass",
+            "team lane has archived row proof",
+            archived_count=archived_count,
+            latest_archived_row_id=int(latest_archived_row_id),
+            latest_archived_received_at=latest_archived_received_at.isoformat().replace("+00:00", "Z"),
+        )
+
+    archive_summary = (((latest_successful_job or {}).get("summary") or {}) if latest_successful_job else {}) or {}
+    latest_successful_new = int(archive_summary.get("new") or 0)
+    if latest_archived_received_at is not None:
+        if latest_archived_received_at >= now - dt.timedelta(hours=archive_window_hours):
+            add_check(
+                "archive_freshness",
+                "pass",
+                "archived row freshness is within window",
+                latest_archived_received_at=latest_archived_received_at.isoformat().replace("+00:00", "Z"),
+                age_minutes=latest_archived_age_minutes,
+                window_hours=archive_window_hours,
+            )
+        elif latest_successful_new > 0:
+            add_check(
+                "archive_freshness",
+                "fail",
+                "latest successful team sync reported new mail but archive freshness is stale",
+                latest_archived_received_at=latest_archived_received_at.isoformat().replace("+00:00", "Z"),
+                age_minutes=latest_archived_age_minutes,
+                window_hours=archive_window_hours,
+                latest_successful_job_new=latest_successful_new,
+            )
+        else:
+            add_check(
+                "archive_freshness",
+                "warn",
+                "archive freshness window exceeded, but latest successful team sync imported no new mail",
+                latest_archived_received_at=latest_archived_received_at.isoformat().replace("+00:00", "Z"),
+                age_minutes=latest_archived_age_minutes,
+                window_hours=archive_window_hours,
+                latest_successful_job_new=latest_successful_new,
+            )
+
+    if latest_successful_job:
+        failed_count = int((((latest_successful_job.get("summary") or {}) or {}).get("failed")) or 0)
+        if failed_count > 0:
+            add_check(
+                "latest_successful_job_failures",
+                "warn",
+                "latest successful team sync reported per-message failures",
+                failed_count=failed_count,
+                job_id=str(latest_successful_job.get("job_id") or ""),
+            )
+
+    if not bool(account.get("lastsync_canonical", True)):
+        add_check(
+            "lastsync_canonicality",
+            "warn",
+            "MailAccounts.LastSync is non-canonical for this lane; governed verifier remains authoritative",
+        )
+
+    failure_count = len([check for check in checks if check["status"] == "fail"])
+    warning_count = len([check for check in checks if check["status"] == "warn"])
+    signal_summary = {
+        "gating_signal": "recent_successful_sync_job_plus_archive_activity",
+        "sync_status_generated_at": generated_at,
+        "account_contract_id": account_contract_id,
+        "db_account_id": db_account_id,
+        "mailbox": mailbox,
+        "job_window_hours": job_window_hours,
+        "archive_window_hours": archive_window_hours,
+        "queue_classification": queue_classification,
+        "latest_job_status": latest_job_status or "",
+        "latest_successful_job": latest_successful_job or None,
+        "latest_successful_job_age_minutes": latest_successful_age_minutes,
+        "latest_archived_received_at": latest_archived_received_at.isoformat().replace("+00:00", "Z")
+        if latest_archived_received_at
+        else latest_archived_received_at_raw,
+        "latest_archived_age_minutes": latest_archived_age_minutes,
+        "latest_archived_row_id": int(latest_archived_row_id) if latest_archived_row_id not in (None, "") else None,
+        "archived_count": archived_count,
+        "lastsync_canonical": bool(account.get("lastsync_canonical", True)),
+        "account_issues": account_issues,
+        "note": verifier_note,
+    }
+
+    return {
+        "capability": CAPABILITY,
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": iso_now(),
+        "status": status,
+        "data": {
+            "summary": signal_summary,
+            "checks": checks,
+            "totals": {
+                "checks": len(checks),
+                "warnings": warning_count,
+                "failures": failure_count,
+            },
+        },
+    }
+
+
+def print_text(result: dict[str, Any]) -> None:
+    summary = ((result.get("data") or {}).get("summary") or {})
+    totals = ((result.get("data") or {}).get("totals") or {})
+    checks = ((result.get("data") or {}).get("checks") or [])
+
+    print(CAPABILITY)
+    print(f"status: {result.get('status')}")
+    print(
+        "account: "
+        f"{summary.get('account_contract_id')} "
+        f"db={summary.get('db_account_id')} "
+        f"mailbox={summary.get('mailbox')}"
+    )
+    print(
+        "signal: "
+        f"{summary.get('gating_signal')} "
+        f"job_window_hours={summary.get('job_window_hours')} "
+        f"archive_window_hours={summary.get('archive_window_hours')}"
+    )
+    print(
+        "latest_successful_job: "
+        f"id={((summary.get('latest_successful_job') or {}).get('job_id') or 'none')} "
+        f"age_minutes={summary.get('latest_successful_job_age_minutes')} "
+        f"status={((summary.get('latest_successful_job') or {}).get('status') or 'none')}"
+    )
+    print(
+        "latest_archived_row: "
+        f"id={summary.get('latest_archived_row_id')} "
+        f"age_minutes={summary.get('latest_archived_age_minutes')} "
+        f"received_at={summary.get('latest_archived_received_at')}"
+    )
+    print(
+        "queue: "
+        f"classification={summary.get('queue_classification')} "
+        f"lastsync_canonical={summary.get('lastsync_canonical')}"
+    )
+    print(
+        "checks: "
+        f"{totals.get('checks', 0)} total | "
+        f"{totals.get('warnings', 0)} warnings | "
+        f"{totals.get('failures', 0)} failures"
+    )
+    for check in checks:
+        if check.get("status") == "pass":
+            continue
+        print(f"- [{check.get('status')}] {check.get('id')}: {check.get('detail')}")
+
+
+def main() -> int:
+    args = parse_args()
+    root = repo_root()
+    linkage_contract = pathlib.Path(
+        os.environ.get(
+            "MAIL_ARCHIVER_LINKAGE_CONTRACT",
+            root / "ops/bindings/mail.archiver.account.linkage.contract.yaml",
+        )
+    )
+    sync_status_bin = pathlib.Path(
+        os.environ.get(
+            "COMMUNICATIONS_MAIL_ARCHIVER_SYNC_STATUS_BIN",
+            root / "ops/plugins/domains/communications/bin/communications-mail-archiver-sync-status",
+        )
+    )
+
+    for dep in ("yq",):
+        if not shutil.which(dep):
+            stop(f"missing dependency: {dep}")
+
+    linkage = load_contract(linkage_contract)
+    sync_status = load_sync_status(sync_status_bin, args.input_json)
+    result = build_result(
+        linkage,
+        sync_status,
+        args.account_contract_id,
+        args.job_window_hours,
+        args.archive_window_hours,
+    )
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print_text(result)
+
+    return 1 if result.get("status") == "FAIL" else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
