@@ -32,7 +32,9 @@ Those belong in `/Users/ronnyworks/code/workbench`.
 
 - Contract and governance remain in spine.
 - Live runtime artifacts are externalized by contract in:
-  `/Users/ronnyworks/code/.runtime/spine-mailroom`
+  `/Users/ronnyworks/code/.runtime/spine`
+- Mailroom runtime subpaths live under:
+  `/Users/ronnyworks/code/.runtime/spine/mailroom`
 - Contract: `/Users/ronnyworks/code/agentic-spine/ops/bindings/mailroom.runtime.contract.yaml`
 
 ## Quickstart
