@@ -44,7 +44,7 @@ Authority boundary:
 | Plane | Canonical surface | Boring target |
 |-------|-------------------|---------------|
 | Substrate | `ops/bindings/hardware.inventory.yaml` | `pve` is the only shop hypervisor. |
-| Storage | `ops/bindings/hardware.inventory.yaml` + `ops/bindings/backup.inventory.yaml` | `tank` = hot runtime/app state, `media` = media payload only or phased-out pressure lane, `md1400` = cold backup/archive/staging only. |
+| Storage | `ops/bindings/shop.storage.map.yaml` + `ops/bindings/hardware.inventory.yaml` + `ops/bindings/backup.inventory.yaml` | `tank` = hot runtime/app state, `media` = media payload only or phased-out pressure lane, `md1400` = cold backup/archive/staging only. |
 | Runtime | `ops/bindings/vm.lifecycle.yaml` + `docs/governance/STACK_REGISTRY.yaml` | Every kept workload is a named VM/LXC or a container stack inside one; tombstones are not runtime. |
 | Network | `docs/governance/DEVICE_IDENTITY_SSOT.md` + `ops/bindings/ssh.targets.yaml` | One LAN identity truth and one Tailscale truth per kept node. |
 | Ingress | `ops/bindings/domain.routing.registry.yaml` + `ops/bindings/cloudflare.inventory.yaml` | Public services are either intentionally published via Cloudflare or explicitly private-only. |
@@ -52,24 +52,17 @@ Authority boundary:
 | Monitoring | `docs/governance/SERVICE_REGISTRY.yaml` + `ops/bindings/services.health.yaml` | Every kept VM gets a baseline of host reachability, critical service health, and capacity visibility. |
 | Tombstones | `ops/bindings/docker-host.deprecation.contract.yaml` + `ops/bindings/vm.lifecycle.yaml` | Dead systems carry explicit tombstone status, one restore story, and an expiry/review date. |
 
-## Shop Scorecard
+## Generated Projections
 
-| Question | Canonical answer surface |
-|----------|--------------------------|
-| What hardware exists? | `ops/bindings/hardware.inventory.yaml` |
-| What each disk and pool is for? | `ops/bindings/hardware.inventory.yaml` |
-| What each VM/LXC is for? | `ops/bindings/vm.lifecycle.yaml` |
-| How each service is reached? | `docs/governance/SERVICE_REGISTRY.yaml` + `ops/bindings/domain.routing.registry.yaml` |
-| Where durable service state lives? | `ops/bindings/backup.inventory.yaml` plus the owning stack/domain contract |
-| How each thing is backed up? | `ops/bindings/backup.inventory.yaml` |
-| How each thing is restored? | `docs/governance/domains/backup.md` plus service/domain restore docs |
-| What is canonical vs compatibility-hold vs dead? | `ops/bindings/vm.lifecycle.yaml` + `ops/bindings/docker-host.deprecation.contract.yaml` + `docs/governance/STACK_REGISTRY.yaml` |
+- Storage authority projection: `ops/bindings/shop.storage.map.yaml`
+- Rack scorecard: `docs/reference/generated/SHOP_RACK_SCORECARD.md`
+- Rebuild command: `./bin/ops cap run infra.shop.storage.authority.build`
 
 ## Current Tombstones
 
 | Tombstone | Runtime posture | Cold restore posture | Review date | Notes |
 |-----------|-----------------|----------------------|-------------|-------|
-| `docker-host` / VM200 | Not runtime. Remove `vm-200-disk-0` from hot storage instead of keeping a powered-off guest. | Keep exactly one cold restore capsule at `pve:/md1400/backup-cold/vzdump/pve` via `vm-200-docker-host-primary`. Restore only as isolated temporary sandbox identity. | `2026-09-06` | Historical Mint/docker-host duties are now split across `mint-apps`, `mint-data`, `finance-stack`, `observability`, and `communications-stack`. |
+| `docker-host` / VM200 | Not runtime. Remove `local-lvm:vm-200-disk-0` from hot storage instead of keeping a powered-off guest. | Keep exactly one cold restore capsule at `pve:/md1400/backup-cold/vzdump/pve` via `vm-200-docker-host-primary`. Restore only as isolated temporary sandbox identity. | `2026-09-06` | Historical Mint/docker-host duties are now split across `mint-apps`, `mint-data`, `finance-stack`, `observability`, and `communications-stack`. |
 
 ## Verification
 

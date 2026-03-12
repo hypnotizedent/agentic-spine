@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$SPINE_WORKSPACE_ROOT}"
+WORKSPACE_CLOSEOUT_ROOT="${WORKSPACE_CLOSEOUT_ROOT:-$WORKSPACE_ROOT/.evidence/workspace/boring-code-closeout}"
+WORKSPACE_CLOSEOUT_BUNDLE_DIR="${WORKSPACE_CLOSEOUT_BUNDLE_DIR:-}"
+ARTIFACT_ROOT="${WORKSPACE_CLOSEOUT_VERIFY_ARTIFACT_ROOT:-$(spine_resolve_mailroom_path 'evidence/verify/workspace-closeout')}"
+PLIST_PATH="${WORKSPACE_AGENT_INBOX_PLIST:-$HOME/Library/LaunchAgents/com.ronny.agent-inbox.plist}"
+AGENT_LABEL="${WORKSPACE_AGENT_INBOX_LABEL:-com.ronny.agent-inbox}"
+
+JSON_MODE=0
+STRICT=0
+
+usage() {
+  cat <<'USAGE'
+workspace-closeout-verify
+
+Usage:
+  workspace-closeout-verify [--json] [--strict] [--bundle-dir PATH]
+
+Checks:
+  - /Users/ronnyworks/code top-level roots match the canonical workspace model
+  - closed boring repos (agentic-spine, workbench, agentic-foundation) are on main,
+    clean, and not ahead/behind origin/main
+  - com.ronny.agent-inbox is running from canonical spine-owned paths
+  - .runtime/spine-mailroom has not reappeared
+  - latest workspace closeout exception file is present and empty
+
+Proof:
+  Emits a bounded evidence bundle under .evidence/spine/verify/workspace-closeout.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    --strict)
+      STRICT=1
+      shift
+      ;;
+    --bundle-dir)
+      WORKSPACE_CLOSEOUT_BUNDLE_DIR="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "workspace.closeout.verify FAIL: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+failures=0
+warnings=0
+declare -a check_rows=()
+
+touch_file() {
+  local path="$1"
+  mkdir -p "$(dirname "$path")"
+  : > "$path"
+}
+
+record_check() {
+  local name="$1"
+  local status="$2"
+  local detail="$3"
+  check_rows+=("$name|$status|$detail")
+  case "$status" in
+    FAIL) failures=$((failures + 1)) ;;
+    WARN) warnings=$((warnings + 1)) ;;
+  esac
+}
+
+contains() {
+  local needle="$1"
+  shift || true
+  local item
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+count_recursive_files() {
+  local target="$1"
+  if [[ -f "$target" ]]; then
+    echo 1
+    return 0
+  fi
+  if [[ ! -d "$target" ]]; then
+    echo 0
+    return 0
+  fi
+  find "$target" \
+    \( -path '*/.git' -o -path '*/.git/*' \) -prune \
+    -o -type f -print 2>/dev/null | wc -l | tr -d ' '
+}
+
+latest_closeout_bundle_dir() {
+  if [[ -n "$WORKSPACE_CLOSEOUT_BUNDLE_DIR" ]]; then
+    printf '%s\n' "$WORKSPACE_CLOSEOUT_BUNDLE_DIR"
+    return 0
+  fi
+  find "$WORKSPACE_CLOSEOUT_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1
+}
+
+RUN_ID="WORKSPACE-CLOSEOUT-VERIFY-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+RUN_DIR="$ARTIFACT_ROOT/$RUN_ID"
+CHECKS_TSV="$RUN_DIR/CHECKS.tsv"
+TOP_LEVEL_TSV="$RUN_DIR/TOP_LEVEL_SCORECARD.tsv"
+REPOS_TSV="$RUN_DIR/CLOSED_REPO_STATUS.tsv"
+SUMMARY_MD="$RUN_DIR/SUMMARY.md"
+SUMMARY_JSON="$RUN_DIR/SUMMARY.json"
+touch_file "$CHECKS_TSV"
+touch_file "$TOP_LEVEL_TSV"
+touch_file "$REPOS_TSV"
+touch_file "$SUMMARY_MD"
+touch_file "$SUMMARY_JSON"
+
+SNAPSHOT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+BUNDLE_DIR="$(latest_closeout_bundle_dir)"
+EXCEPTIONS_FILE=""
+[[ -n "$BUNDLE_DIR" ]] && EXCEPTIONS_FILE="$BUNDLE_DIR/ROOT_BOUNDARY_EXCEPTIONS.tsv"
+
+expected_dirs=(
+  ".backups"
+  ".data"
+  ".evidence"
+  ".runtime"
+  ".wt"
+  "agentic-foundation"
+  "agentic-spine"
+  "mint-modules"
+  "ronny-products"
+  "workbench"
+)
+expected_files=("README.md")
+closed_repos=("agentic-spine" "workbench" "agentic-foundation")
+
+printf 'name\tkind\tfile_count\n' > "$TOP_LEVEL_TSV"
+mapfile -t top_level_paths < <(find "$WORKSPACE_ROOT" -maxdepth 1 -mindepth 1 -print | sort)
+actual_names=()
+unexpected_items=()
+type_mismatches=()
+
+for path in "${top_level_paths[@]}"; do
+  name="$(basename "$path")"
+  actual_names+=("$name")
+  if [[ -d "$path" ]]; then
+    kind="dir"
+    count="$(count_recursive_files "$path")"
+    contains "$name" "${expected_dirs[@]}" || unexpected_items+=("$name")
+  else
+    kind="file"
+    count=1
+    contains "$name" "${expected_files[@]}" || unexpected_items+=("$name")
+  fi
+  if contains "$name" "${expected_dirs[@]}" && [[ ! -d "$path" ]]; then
+    type_mismatches+=("$name expected_dir")
+  fi
+  if contains "$name" "${expected_files[@]}" && [[ ! -f "$path" ]]; then
+    type_mismatches+=("$name expected_file")
+  fi
+  printf '%s\t%s\t%s\n' "$name" "$kind" "$count" >> "$TOP_LEVEL_TSV"
+done
+
+missing_items=()
+for name in "${expected_dirs[@]}" "${expected_files[@]}"; do
+  contains "$name" "${actual_names[@]}" || missing_items+=("$name")
+done
+
+if [[ "${#missing_items[@]}" -eq 0 && "${#unexpected_items[@]}" -eq 0 && "${#type_mismatches[@]}" -eq 0 ]]; then
+  record_check "workspace.top_level_model" "PASS" "workspace root matches canonical boring model"
+else
+  detail="missing=${missing_items[*]:-none}; unexpected=${unexpected_items[*]:-none}; type_mismatches=${type_mismatches[*]:-none}"
+  record_check "workspace.top_level_model" "FAIL" "$detail"
+fi
+
+printf 'repo\tbranch\tahead\tbehind\tdirty_files\tstatus\n' > "$REPOS_TSV"
+for repo_name in "${closed_repos[@]}"; do
+  repo_path="$WORKSPACE_ROOT/$repo_name"
+  branch=""
+  ahead=""
+  behind=""
+  dirty_count=""
+  repo_status="FAIL"
+  repo_detail=""
+
+  if ! git -C "$repo_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    repo_detail="not a git worktree"
+  else
+    branch="$(git -C "$repo_path" branch --show-current 2>/dev/null || echo detached)"
+    dirty_count="$(git -C "$repo_path" status --porcelain --untracked-files=all | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+    if git -C "$repo_path" show-ref --verify --quiet refs/remotes/origin/main; then
+      read -r behind ahead < <(git -C "$repo_path" rev-list --left-right --count origin/main...HEAD)
+    else
+      behind="missing"
+      ahead="missing"
+    fi
+
+    repo_detail_parts=()
+    [[ "$branch" == "main" ]] || repo_detail_parts+=("branch=$branch")
+    [[ "$dirty_count" == "0" ]] || repo_detail_parts+=("dirty=$dirty_count")
+    [[ "$ahead" == "0" ]] || repo_detail_parts+=("ahead=$ahead")
+    [[ "$behind" == "0" ]] || repo_detail_parts+=("behind=$behind")
+
+    if [[ "${#repo_detail_parts[@]}" -eq 0 ]]; then
+      repo_status="PASS"
+      repo_detail="clean main with origin/main parity"
+    else
+      repo_detail="${repo_detail_parts[*]}"
+    fi
+  fi
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$repo_name" \
+    "${branch:-unknown}" \
+    "${ahead:-unknown}" \
+    "${behind:-unknown}" \
+    "${dirty_count:-unknown}" \
+    "$repo_status" >> "$REPOS_TSV"
+  record_check "repo.${repo_name}.main_clean" "$repo_status" "$repo_detail"
+done
+
+if [[ -n "$BUNDLE_DIR" && -f "$EXCEPTIONS_FILE" ]]; then
+  exception_rows="$(tail -n +2 "$EXCEPTIONS_FILE" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+  if [[ "$exception_rows" == "0" ]]; then
+    record_check "workspace.closeout_exceptions" "PASS" "latest exception file is empty ($EXCEPTIONS_FILE)"
+  else
+    record_check "workspace.closeout_exceptions" "FAIL" "latest exception file has $exception_rows row(s): $EXCEPTIONS_FILE"
+  fi
+else
+  record_check "workspace.closeout_exceptions" "FAIL" "workspace closeout exception file missing under $WORKSPACE_CLOSEOUT_ROOT"
+fi
+
+if [[ -e "$WORKSPACE_ROOT/.runtime/spine-mailroom" ]]; then
+  record_check "workspace.no_legacy_spine_mailroom" "FAIL" "legacy runtime path exists: $WORKSPACE_ROOT/.runtime/spine-mailroom"
+else
+  record_check "workspace.no_legacy_spine_mailroom" "PASS" "legacy runtime path is absent"
+fi
+
+WATCHER_PATH="$ROOT/ops/plugins/core/agent/bin/hot-folder-watcher.sh"
+EXPECTED_STDOUT="$SPINE_LOGS/agent-inbox.out"
+EXPECTED_STDERR="$SPINE_LOGS/agent-inbox.err"
+launch_dump="$(launchctl print "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true)"
+
+if [[ -n "$launch_dump" ]]; then
+  launch_state="$(printf '%s\n' "$launch_dump" | awk -F' = ' '/state =/{print $2; exit}')"
+  launch_pid="$(printf '%s\n' "$launch_dump" | awk '/pid =/{print $3; exit}')"
+  runtime_detail_parts=()
+  [[ "$launch_state" == "running" ]] || runtime_detail_parts+=("state=$launch_state")
+  [[ -n "${launch_pid:-}" ]] || runtime_detail_parts+=("pid=missing")
+  printf '%s\n' "$launch_dump" | grep -Fq "$WATCHER_PATH" || runtime_detail_parts+=("watcher_path_not_loaded")
+  printf '%s\n' "$launch_dump" | grep -Fq "stdout path = $EXPECTED_STDOUT" || runtime_detail_parts+=("stdout_path_drift")
+  printf '%s\n' "$launch_dump" | grep -Fq "stderr path = $EXPECTED_STDERR" || runtime_detail_parts+=("stderr_path_drift")
+  printf '%s\n' "$launch_dump" | grep -Fq "working directory = $ROOT" || runtime_detail_parts+=("working_directory_drift")
+  printf '%s\n' "$launch_dump" | grep -Fq "SPINE_REPO => $ROOT" || runtime_detail_parts+=("env_spine_repo_drift")
+  printf '%s\n' "$launch_dump" | grep -Fq "SPINE_INBOX => $SPINE_INBOX" || runtime_detail_parts+=("env_spine_inbox_drift")
+  printf '%s\n' "$launch_dump" | grep -Fq "SPINE_OUTBOX => $SPINE_OUTBOX" || runtime_detail_parts+=("env_spine_outbox_drift")
+  printf '%s\n' "$launch_dump" | grep -Fq "SPINE_STATE => $SPINE_STATE" || runtime_detail_parts+=("env_spine_state_drift")
+  printf '%s\n' "$launch_dump" | grep -Fq "SPINE_LOGS => $SPINE_LOGS" || runtime_detail_parts+=("env_spine_logs_drift")
+  if [[ "${#runtime_detail_parts[@]}" -eq 0 ]]; then
+    record_check "agent_inbox.runtime" "PASS" "launchd job running on canonical spine paths (pid=$launch_pid)"
+  else
+    record_check "agent_inbox.runtime" "FAIL" "${runtime_detail_parts[*]}"
+  fi
+else
+  record_check "agent_inbox.runtime" "FAIL" "launchctl print failed for $AGENT_LABEL"
+fi
+
+if [[ -f "$PLIST_PATH" ]]; then
+  plist_json="$(plutil -convert json -o - "$PLIST_PATH" 2>/dev/null || true)"
+  if [[ -n "$plist_json" ]]; then
+    plist_program="$(jq -r '.ProgramArguments[1] // ""' <<<"$plist_json")"
+    plist_cwd="$(jq -r '.WorkingDirectory // ""' <<<"$plist_json")"
+    plist_stdout="$(jq -r '.StandardOutPath // ""' <<<"$plist_json")"
+    plist_stderr="$(jq -r '.StandardErrorPath // ""' <<<"$plist_json")"
+    plist_repo="$(jq -r '.EnvironmentVariables.SPINE_REPO // ""' <<<"$plist_json")"
+    plist_inbox="$(jq -r '.EnvironmentVariables.SPINE_INBOX // ""' <<<"$plist_json")"
+    plist_outbox="$(jq -r '.EnvironmentVariables.SPINE_OUTBOX // ""' <<<"$plist_json")"
+    plist_state="$(jq -r '.EnvironmentVariables.SPINE_STATE // ""' <<<"$plist_json")"
+    plist_logs="$(jq -r '.EnvironmentVariables.SPINE_LOGS // ""' <<<"$plist_json")"
+    plist_detail_parts=()
+    [[ "$plist_program" == "$WATCHER_PATH" ]] || plist_detail_parts+=("program=$plist_program")
+    [[ "$plist_cwd" == "$ROOT" ]] || plist_detail_parts+=("working_directory=$plist_cwd")
+    [[ "$plist_stdout" == "$EXPECTED_STDOUT" ]] || plist_detail_parts+=("stdout=$plist_stdout")
+    [[ "$plist_stderr" == "$EXPECTED_STDERR" ]] || plist_detail_parts+=("stderr=$plist_stderr")
+    [[ "$plist_repo" == "$ROOT" ]] || plist_detail_parts+=("env_spine_repo=$plist_repo")
+    [[ "$plist_inbox" == "$SPINE_INBOX" ]] || plist_detail_parts+=("env_spine_inbox=$plist_inbox")
+    [[ "$plist_outbox" == "$SPINE_OUTBOX" ]] || plist_detail_parts+=("env_spine_outbox=$plist_outbox")
+    [[ "$plist_state" == "$SPINE_STATE" ]] || plist_detail_parts+=("env_spine_state=$plist_state")
+    [[ "$plist_logs" == "$SPINE_LOGS" ]] || plist_detail_parts+=("env_spine_logs=$plist_logs")
+    if [[ "${#plist_detail_parts[@]}" -eq 0 ]]; then
+      record_check "agent_inbox.plist" "PASS" "plist points at canonical watcher + runtime paths"
+    else
+      record_check "agent_inbox.plist" "FAIL" "${plist_detail_parts[*]}"
+    fi
+  else
+    record_check "agent_inbox.plist" "FAIL" "unable to parse plist: $PLIST_PATH"
+  fi
+else
+  record_check "agent_inbox.plist" "FAIL" "missing plist: $PLIST_PATH"
+fi
+
+printf 'name\tstatus\tdetail\n' > "$CHECKS_TSV"
+checks_jsonl="$(mktemp)"
+repos_jsonl="$(mktemp)"
+trap 'rm -f "$checks_jsonl" "$repos_jsonl"' EXIT
+
+for row in "${check_rows[@]}"; do
+  IFS='|' read -r name status detail <<< "$row"
+  printf '%s\t%s\t%s\n' "$name" "$status" "$detail" >> "$CHECKS_TSV"
+  jq -nc --arg name "$name" --arg status "$status" --arg detail "$detail" \
+    '{name:$name,status:$status,detail:$detail}' >> "$checks_jsonl"
+done
+
+tail -n +2 "$REPOS_TSV" | while IFS=$'\t' read -r repo branch ahead behind dirty status; do
+  jq -nc \
+    --arg repo "$repo" \
+    --arg branch "$branch" \
+    --arg ahead "$ahead" \
+    --arg behind "$behind" \
+    --arg dirty_files "$dirty" \
+    --arg status "$status" \
+    '{repo:$repo,branch:$branch,ahead:$ahead,behind:$behind,dirty_files:$dirty_files,status:$status}' >> "$repos_jsonl"
+done
+
+summary_status="pass"
+if [[ "$failures" -gt 0 ]]; then
+  summary_status="fail"
+elif [[ "$warnings" -gt 0 ]]; then
+  summary_status="warn"
+fi
+
+cat > "$SUMMARY_MD" <<EOF
+# Workspace Closeout Verify
+
+- Generated: $SNAPSHOT_AT
+- Capability: workspace.closeout.verify
+- Workspace root: $WORKSPACE_ROOT
+- Closeout bundle: ${BUNDLE_DIR:-missing}
+- Exception file: ${EXCEPTIONS_FILE:-missing}
+- Artifact dir: $RUN_DIR
+- Summary: status=$summary_status fail=$failures warn=$warnings
+
+| Check | Status | Detail |
+|---|---|---|
+EOF
+
+for row in "${check_rows[@]}"; do
+  IFS='|' read -r name status detail <<< "$row"
+  printf '| %s | %s | %s |\n' "$name" "$status" "$detail" >> "$SUMMARY_MD"
+done
+
+jq -n \
+  --arg capability "workspace.closeout.verify" \
+  --arg workspace_root "$WORKSPACE_ROOT" \
+  --arg bundle_dir "${BUNDLE_DIR:-}" \
+  --arg exceptions_file "${EXCEPTIONS_FILE:-}" \
+  --arg artifact_dir "$RUN_DIR" \
+  --arg summary_md "$SUMMARY_MD" \
+  --arg checks_tsv "$CHECKS_TSV" \
+  --arg top_level_scorecard "$TOP_LEVEL_TSV" \
+  --arg closed_repo_status "$REPOS_TSV" \
+  --arg snapshot_at "$SNAPSHOT_AT" \
+  --argjson failures "$failures" \
+  --argjson warnings "$warnings" \
+  --slurpfile checks "$checks_jsonl" \
+  --slurpfile closed_repos "$repos_jsonl" \
+  '{
+    capability: $capability,
+    workspace_root: $workspace_root,
+    bundle_dir: $bundle_dir,
+    exceptions_file: $exceptions_file,
+    artifact_dir: $artifact_dir,
+    files: {
+      summary_md: $summary_md,
+      checks_tsv: $checks_tsv,
+      top_level_scorecard: $top_level_scorecard,
+      closed_repo_status: $closed_repo_status
+    },
+    snapshot_at: $snapshot_at,
+    checks: $checks,
+    closed_repos: $closed_repos,
+    summary: {
+      status: (if $failures > 0 then "fail" elif $warnings > 0 then "warn" else "pass" end),
+      failures: $failures,
+      warnings: $warnings
+    }
+  }' > "$SUMMARY_JSON"
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  cat "$SUMMARY_JSON"
+else
+  cat "$SUMMARY_MD"
+fi
+
+if [[ "$failures" -gt 0 ]]; then
+  exit 1
+fi
+if [[ "$STRICT" -eq 1 && "$warnings" -gt 0 ]]; then
+  exit 1
+fi
+exit 0

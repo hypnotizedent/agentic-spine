@@ -1,0 +1,1332 @@
+# Shop Storage Authority Projection
+# Non-secret. Spine-native.
+# Status: generated
+# authority_state: projection
+# authority_concern: shop_storage_truth
+# Do not edit manually — rebuild with: ./bin/ops cap run infra.shop.storage.authority.build
+version: 1
+generated_at_utc: '2026-03-12T01:56:04Z'
+site: shop
+generated_by:
+  capability: infra.shop.storage.authority.build
+  script: ops/plugins/infra/bin/infra-shop-storage-authority-build
+source_surfaces:
+- ops/bindings/hardware.inventory.yaml
+- ops/bindings/vm.lifecycle.yaml
+- ops/bindings/vm.operating.profile.yaml
+- ops/bindings/infra.storage.placement.policy.yaml
+- ops/bindings/backup.inventory.yaml
+- docs/governance/SERVICE_REGISTRY.yaml
+- ops/bindings/services.health.yaml
+- ops/bindings/domain.routing.registry.yaml
+tier_model:
+- tier_id: tank
+  plane: hot_runtime
+  purpose: Primary hot VM/app/runtime pool on pve.
+  host: pve
+  layout: RAIDZ2
+  drives: sda-sdh
+- tier_id: media
+  plane: warm_payload
+  purpose: Media payload only or phased-out pressure lane.
+  host: pve
+  layout: RAIDZ1
+  drives: sdi-sdl
+- tier_id: md1400
+  plane: cold_backup_archive_stage
+  purpose: Cold backup/archive/staging shelf for the shop environment.
+  host: pve
+  layout: RAIDZ2 (12 drives)
+  drives: 12 physical drives
+storage_planes:
+- object_id: tank
+  kind: zpool
+  pool: tank
+  owner: pve
+  purpose: Hot runtime/app data on the internal R730XD pool.
+  durability_class: runtime_primary
+- object_id: media
+  kind: zpool
+  pool: media
+  owner: pve
+  purpose: Media payload lane; not the canonical cold backup plane.
+  durability_class: payload_primary
+- object_id: md1400
+  kind: zpool
+  pool: md1400
+  owner: pve
+  purpose: Shop cold backup/archive/staging pool on the external shelf.
+  durability_class: cold_restore_primary
+- object_id: tank/backups/vzdump/dump
+  kind: path_family
+  pool: tank
+  owner: pve
+  purpose: Local vzdump generation lane before promotion into md1400 cold storage.
+  durability_class: staging_generation
+  backed_by_lane: pve-vzdump-primary
+- object_id: md1400/backup-cold/vzdump/pve
+  kind: path_family
+  pool: md1400
+  owner: pve
+  purpose: Canonical cold restore plane for shop VM/LXC artifacts.
+  durability_class: cold_restore_primary
+- object_id: md1400/backup-cold/apps
+  kind: path_family
+  pool: md1400
+  owner: pve
+  purpose: Canonical app-level cold backup plane for shop services.
+  durability_class: cold_restore_primary
+- object_id: md1400/backup-cold/archive-smb/snapshots
+  kind: path_family
+  pool: md1400
+  owner: pve
+  purpose: Snapshot manifest lane for archive-smb live-share datasets.
+  durability_class: snapshot_manifest
+machine_summary:
+  machine_id: pve
+  hostname: pve
+  model: Dell PowerEdge R730XD
+  boot_drives: 2x Seagate ST9500620SS 500GB SAS 2.5 inch (rear flex bays, sdm/sdn)
+  internal_pools:
+  - pool: tank
+    type: RAIDZ2
+    count: 8
+    model: Seagate ST4000NM0063
+    capacity: 4TB SAS
+    devices: sda-sdh
+  - pool: media
+    type: RAIDZ1
+    count: 4
+    model: Seagate ST8000AS0002
+    capacity: 8TB SATA (Archive/SMR)
+    devices: sdi-sdl
+  external_shelves:
+  - shelf_id: md1400
+    model: Dell MD1400
+    service_tag: HRW2F42
+    rack_position: U14-16
+    sas_cable: Dell DP/N 0GYK61 (Mini-SAS HD SFF-8644)
+    connected_to: SAS9300-8e (82:00.0)
+    drive_count: 12
+    drive_model: Seagate ST4000NM0063
+    drive_capacity: 4TB SAS (Constellation ES.3)
+    block_device_count: 24
+    block_device_range: sdo-sdal
+    dual_path: true
+    multipath_configured: false
+    zfs_pool: md1400
+    zfs_layout: RAIDZ2 (12 drives)
+    zfs_capacity: 43.7T
+    zfs_health: ONLINE
+    zfs_created: '2026-02-26T23:13:58-05:00'
+    status: active
+    discovery_delta:
+      block_devices_before: 14
+      block_devices_after: 38
+      discovered: 24
+      drive_family: Seagate ST4000NM0063 (Constellation ES.3)
+    last_verified: '2026-03-01'
+runtime_storage:
+- vmid: 202
+  hostname: automation-stack
+  kind: vm
+  role: automation
+  status: active
+  startup_policy: auto
+  health_probe_policy: full
+  storage_tier: tank-vms
+  placement_status: partial
+  placement_notes: Boot disk is ZFS-backed zvol (not local-lvm). Docker volumes still
+    on boot filesystem. Consider data disk for n8n/postgres.
+  owner: '@ronny'
+  purpose: Workflow automation + MCP gateway.
+  active_services:
+  - automation-postgres
+  - automation-redis
+  - mcpjungle
+  - n8n
+  - ollama
+  - open-webui
+  health_probe_ids:
+  - mcpjungle
+  - n8n
+  - ollama
+  - open-webui
+  public_routes:
+  - hostname: chat.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  - hostname: n8n.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  public_route_count: 2
+  backup_profiles:
+  - app-aware
+  - vm-primary
+  durability_classes:
+  - small_state
+  restore_classes:
+  - app-dry-run-monthly
+  storage_objects:
+  - kind: zfs_zvol
+    object: tank/vms/vm-202-disk-0
+    purpose: Primary runtime disk on tank/vms
+    durability_role: runtime_primary
+    pool: tank
+  - kind: path
+    object: /home/automation/backups/n8n-workflows
+    purpose: Guest-level durable path
+    durability_role: supplemental_runtime
+  - kind: path
+    object: /home/automation/stacks
+    purpose: Guest-level durable path
+    durability_role: supplemental_runtime
+  backup_generation_lanes:
+  - lane_id: pve-vzdump-primary
+    host: pve
+    base_path: /tank/backups/vzdump/dump
+  - lane_id: r730xd-infra-core-backups
+    host: pve
+    base_path: /md1400/backup-cold/apps/infra-core
+  restore_targets:
+  - name: app-n8n-workflows
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/infra-core/n8n
+    glob: n8n-workflows-*.tar.gz
+    classification: important
+  - name: vm-202-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-qemu-202-*.vma.zst
+    classification: critical
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: vm-202-automation-stack
+- vmid: 203
+  hostname: immich
+  kind: vm
+  role: photo-management
+  status: active
+  startup_policy: auto
+  health_probe_policy: full
+  storage_tier: tank-docker
+  placement_status: compliant
+  placement_notes: Photo library on tank/immich ZFS dataset. Boot disk on local-lvm
+    but data is properly separated.
+  owner: '@ronny'
+  purpose: 135K+ assets, 3TB library. 8 CPU cores (host passthrough), 100GB boot.
+    LAN IP 192.168.1.203 (static). Not in docker.compose.targets.yaml (known exemption).
+  active_services:
+  - immich-ml
+  - immich-postgres
+  - immich-redis
+  - immich-server
+  health_probe_ids:
+  - immich
+  - immich-server
+  public_routes: []
+  public_route_count: 0
+  backup_profiles:
+  - vm-covered
+  - vm-primary
+  durability_classes:
+  - large_state
+  restore_classes:
+  - vm-dry-run-quarterly
+  storage_objects:
+  - kind: zfs_dataset
+    object: tank/immich
+    purpose: Primary runtime dataset on tank
+    durability_role: runtime_primary
+    pool: tank
+  backup_generation_lanes:
+  - lane_id: pve-vzdump-primary
+    host: pve
+    base_path: /tank/backups/vzdump/dump
+  restore_targets:
+  - name: vm-203-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-qemu-203-*.vma.zst
+    classification: important
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: vm-203-immich
+- vmid: 204
+  hostname: infra-core
+  kind: vm
+  role: core-infrastructure
+  status: active
+  startup_policy: auto
+  health_probe_policy: full
+  storage_tier: boot-only
+  placement_status: accepted-risk
+  placement_notes: 22% boot usage (11GB/48GB). Volumes only 250MB. Data on boot but
+    lightweight (Infisical/Authentik/VW/PiHole). Log rotation added. Re-evaluate if
+    usage exceeds 60%.
+  owner: '@ronny'
+  purpose: Core infrastructure VM. Hosts reverse proxy, SSO, DNS, secrets, tunnel.
+    Critical path.
+  active_services:
+  - authentik
+  - caddy
+  - cloudflared
+  - infisical
+  - pihole
+  - vaultwarden
+  health_probe_ids:
+  - authentik
+  - caddy
+  - cloudflared
+  - infisical
+  - pihole
+  - vaultwarden
+  public_routes:
+  - hostname: auth.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  - hostname: pihole.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  - hostname: vault.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  public_route_count: 3
+  backup_profiles:
+  - tier1-small-state
+  - vm-tier1
+  durability_classes:
+  - tier1_critical
+  restore_classes:
+  - tier1-small-state-dry-run-quarterly
+  storage_objects:
+  - kind: guest_boot_disk
+    object: infra-core boot disk (50G)
+    purpose: OS + colocated lightweight durable state
+    durability_role: runtime_primary
+    pool: boot-disk
+    note: Guest boot disk backend is not explicitly declared in current authority
+      surfaces.
+  - kind: path
+    object: /opt/stacks
+    purpose: Guest-level durable path
+    durability_role: supplemental_runtime
+    pool: boot-disk
+  backup_generation_lanes:
+  - lane_id: pve-vzdump-primary
+    host: pve
+    base_path: /tank/backups/vzdump/dump
+  - lane_id: r730xd-infra-core-backups
+    host: pve
+    base_path: /md1400/backup-cold/apps/infra-core
+  restore_targets:
+  - name: app-infisical
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/infra-core/infisical
+    glob: infisical-db-*.sql.gz
+    classification: critical
+  - name: app-vaultwarden
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/infra-core/vaultwarden
+    glob: vaultwarden-data-*.tar.gz
+    classification: critical
+  - name: vm-204-infra-core-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-qemu-204-*.vma.zst
+    classification: critical
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: vm-204-infra-core
+- vmid: 205
+  hostname: observability
+  kind: vm
+  role: monitoring
+  status: active
+  startup_policy: auto
+  health_probe_policy: full
+  storage_tier: boot-only
+  placement_status: accepted-risk
+  placement_notes: 20% boot usage (9.4GB/48GB). Volumes 1GB. Loki/Prometheus data
+    small at current retention. Log rotation added. Re-evaluate if usage exceeds 60%.
+  owner: '@ronny'
+  purpose: Observability stack. Loki compactor needs >=720s start_period.
+  active_services:
+  - dashy
+  - grafana
+  - loki
+  - node-exporter
+  - prometheus
+  - uptime-kuma
+  health_probe_ids:
+  - dashy
+  - grafana
+  - loki
+  - node-exporter
+  - prometheus
+  - uptime-kuma
+  public_routes:
+  - hostname: dash.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  - hostname: grafana.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  public_route_count: 2
+  backup_profiles:
+  - vm-covered
+  - vm-primary
+  durability_classes:
+  - small_state
+  restore_classes:
+  - vm-dry-run-quarterly
+  storage_objects:
+  - kind: guest_boot_disk
+    object: observability boot disk (50G)
+    purpose: OS + colocated lightweight durable state
+    durability_role: runtime_primary
+    pool: boot-disk
+    note: Guest boot disk backend is not explicitly declared in current authority
+      surfaces.
+  - kind: path
+    object: /opt/stacks
+    purpose: Guest-level durable path
+    durability_role: supplemental_runtime
+    pool: boot-disk
+  backup_generation_lanes:
+  - lane_id: pve-vzdump-primary
+    host: pve
+    base_path: /tank/backups/vzdump/dump
+  restore_targets:
+  - name: vm-205-observability-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-qemu-205-*.vma.zst
+    classification: important
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: vm-205-observability
+- vmid: 206
+  hostname: dev-tools
+  kind: vm
+  role: development
+  status: active
+  startup_policy: auto
+  health_probe_policy: full
+  storage_tier: boot-only
+  placement_status: accepted-risk
+  placement_notes: 14% boot usage (6.3GB/48GB). Volumes 183MB. Gitea repos + PostgreSQL
+    small at current scale. Log rotation added. Re-evaluate if usage exceeds 60%.
+  owner: '@ronny'
+  purpose: Git forge. Authentik SSO. CF tunnel for git.ronny.works.
+  active_services:
+  - gitea
+  - gitea-postgres
+  - gitea-runner
+  health_probe_ids:
+  - gitea
+  public_routes:
+  - hostname: git.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  public_route_count: 1
+  backup_profiles:
+  - app-aware
+  - vm-primary
+  durability_classes:
+  - small_state
+  restore_classes:
+  - app-dry-run-monthly
+  storage_objects:
+  - kind: guest_boot_disk
+    object: dev-tools boot disk (50G)
+    purpose: OS + colocated lightweight durable state
+    durability_role: runtime_primary
+    pool: boot-disk
+    note: Guest boot disk backend is not explicitly declared in current authority
+      surfaces.
+  - kind: path
+    object: /opt/stacks/gitea
+    purpose: Guest-level durable path
+    durability_role: supplemental_runtime
+    pool: boot-disk
+  backup_generation_lanes:
+  - lane_id: pve-vzdump-primary
+    host: pve
+    base_path: /tank/backups/vzdump/dump
+  - lane_id: r730xd-dev-tools-backups
+    host: pve
+    base_path: /md1400/backup-cold/apps/dev-tools
+  restore_targets:
+  - name: app-gitea
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/dev-tools/gitea
+    glob: gitea-db-*.sql.gz
+    classification: critical
+  - name: vm-206-dev-tools-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-qemu-206-*.vma.zst
+    classification: important
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: vm-206-dev-tools
+- vmid: 207
+  hostname: ai-consolidation
+  kind: vm
+  role: ai-services
+  status: active
+  startup_policy: auto
+  health_probe_policy: full
+  storage_tier: boot-only
+  placement_status: accepted-risk
+  placement_notes: 5% boot usage (8.1GB/193GB). 200GB boot has massive headroom. Qdrant
+    vectors + AnythingLLM small. Log rotation added. Re-evaluate if usage exceeds
+    40%.
+  owner: '@ronny'
+  purpose: AI workloads. DHCP (no static LAN IP). Migrated from MacBook.
+  active_services:
+  - anythingllm
+  - qdrant
+  health_probe_ids:
+  - anythingllm
+  - qdrant
+  public_routes: []
+  public_route_count: 0
+  backup_profiles:
+  - vm-covered
+  - vm-primary
+  durability_classes:
+  - large_state
+  restore_classes:
+  - vm-dry-run-quarterly
+  storage_objects:
+  - kind: guest_boot_disk
+    object: ai-consolidation boot disk (200G)
+    purpose: OS + colocated lightweight durable state
+    durability_role: runtime_primary
+    pool: boot-disk
+    note: Guest boot disk backend is not explicitly declared in current authority
+      surfaces.
+  - kind: path
+    object: /opt/stacks/ai-consolidation
+    purpose: Guest-level durable path
+    durability_role: supplemental_runtime
+    pool: boot-disk
+  backup_generation_lanes:
+  - lane_id: pve-vzdump-primary
+    host: pve
+    base_path: /tank/backups/vzdump/dump
+  restore_targets:
+  - name: vm-207-ai-consolidation-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-qemu-207-*.vma.zst
+    classification: critical
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: vm-207-ai-consolidation
+- vmid: 209
+  hostname: download-stack
+  kind: vm
+  role: media-download
+  status: active
+  startup_policy: auto
+  health_probe_policy: selective
+  storage_tier: tank-docker
+  placement_status: compliant
+  placement_notes: Configs on NFS. /opt/appdata for SQLite (intentional). Media on
+    NFS.
+  owner: '@ronny'
+  purpose: Download services. Split from media-stack (VM 201). NFS mounts from pve.
+  active_services:
+  - autopulse
+  - crosswatch
+  - crowdsec
+  - decypharr
+  - download-node-exporter
+  - flaresolverr
+  - gluetun
+  - lidarr
+  - posterizarr
+  - prowlarr
+  - qbittorrent
+  - radarr
+  - recyclarr
+  - sabnzbd
+  - slskd
+  - sonarr
+  - soularr
+  - swaparr-lidarr
+  - swaparr-radarr
+  - swaparr-sonarr
+  - trailarr
+  - unpackerr
+  - watchtower-download
+  health_probe_ids:
+  - download-node-exporter
+  - flaresolverr
+  - lidarr
+  - prowlarr
+  - radarr
+  - sabnzbd
+  - sonarr
+  public_routes: []
+  public_route_count: 0
+  backup_profiles:
+  - media-config-lean
+  - media-lean
+  durability_classes:
+  - small_state
+  restore_classes:
+  - media-config-dry-run-monthly
+  storage_objects:
+  - kind: zfs_dataset_nfs_export
+    object: tank/docker/download-stack
+    purpose: Primary runtime dataset on tank
+    durability_role: runtime_primary
+    pool: tank
+    mount_path: /mnt/docker
+  - kind: nfs_mount
+    object: tank/docker/download-stack
+    purpose: Config/data export from tank/docker
+    durability_role: supplemental_runtime
+    pool: tank
+    mount_path: /mnt/docker
+    note: mode=rw
+  - kind: nfs_mount
+    object: media
+    purpose: Media payload mount
+    durability_role: supplemental_runtime
+    pool: media
+    mount_path: /mnt/media
+    note: mode=rw
+  - kind: path
+    object: /mnt/docker/volumes
+    purpose: Config-state path declared in backup inventory
+    durability_role: runtime_primary
+    pool: tank
+  - kind: path
+    object: /opt/appdata
+    purpose: Config-state path declared in backup inventory
+    durability_role: runtime_primary
+    pool: tank
+  backup_generation_lanes:
+  - lane_id: r730xd-media-config-backups
+    host: pve
+    base_path: /md1400/backup-cold/apps/media-config
+  restore_targets:
+  - name: app-media-config-download-stack
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/media-config/download-stack
+    glob: download-stack-config-*.tar.gz
+    classification: critical
+  - name: vm-209-download-stack-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-qemu-209-*.vma.zst
+    classification: important
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: vm-209-download-stack
+- vmid: 210
+  hostname: streaming-stack
+  kind: vm
+  role: media-streaming
+  status: active
+  startup_policy: auto
+  health_probe_policy: full
+  storage_tier: tank-docker
+  placement_status: compliant
+  placement_notes: "Configs on NFS (RW), media on NFS (RO). Pruned images + truncated\
+    \ 2.9GB log, 54%\u219244%. Log rotation added."
+  owner: '@ronny'
+  purpose: Streaming services. Split from media-stack (VM 201). NFS mounts from pve.
+  active_services:
+  - bazarr
+  - homarr
+  - jellyfin
+  - jellyseerr
+  - navidrome
+  - spotisub
+  - streaming-node-exporter
+  - subgen
+  - watchtower-streaming
+  - wizarr
+  health_probe_ids:
+  - bazarr
+  - homarr
+  - jellyfin
+  - jellyseerr
+  - navidrome
+  - spotisub
+  - streaming-node-exporter
+  - wizarr
+  public_routes:
+  - hostname: homarr.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  - hostname: jellyfin.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  - hostname: music.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  - hostname: requests.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  - hostname: spotisub.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  public_route_count: 5
+  backup_profiles:
+  - media-config-lean
+  - media-lean
+  durability_classes:
+  - small_state
+  restore_classes:
+  - media-config-dry-run-monthly
+  storage_objects:
+  - kind: zfs_dataset_nfs_export
+    object: tank/docker/streaming-stack
+    purpose: Primary runtime dataset on tank
+    durability_role: runtime_primary
+    pool: tank
+    mount_path: /mnt/docker
+  - kind: nfs_mount
+    object: tank/docker/streaming-stack
+    purpose: Config/data export from tank/docker
+    durability_role: supplemental_runtime
+    pool: tank
+    mount_path: /mnt/docker
+    note: mode=rw
+  - kind: nfs_mount
+    object: media
+    purpose: Media payload mount
+    durability_role: supplemental_runtime
+    pool: media
+    mount_path: /mnt/media
+    note: mode=ro
+  - kind: path
+    object: /mnt/docker/volumes
+    purpose: Config-state path declared in backup inventory
+    durability_role: runtime_primary
+    pool: tank
+  - kind: path
+    object: /opt/appdata
+    purpose: Config-state path declared in backup inventory
+    durability_role: runtime_primary
+    pool: tank
+  backup_generation_lanes:
+  - lane_id: r730xd-media-config-backups
+    host: pve
+    base_path: /md1400/backup-cold/apps/media-config
+  restore_targets:
+  - name: app-media-config-streaming-stack
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/media-config/streaming-stack
+    glob: streaming-stack-config-*.tar.gz
+    classification: critical
+  - name: vm-210-streaming-stack-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-qemu-210-*.vma.zst
+    classification: important
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: vm-210-streaming-stack
+- vmid: 211
+  hostname: finance-stack
+  kind: vm
+  role: finance
+  status: active
+  startup_policy: auto
+  health_probe_policy: full
+  storage_tier: boot-only
+  placement_status: accepted-risk
+  placement_notes: "12% boot usage (11GB/92GB) after truncating 59GB firefly-cron\
+    \ crash log. Actual data only 531MB. Fixed cron binary (crond\u2192cron). Log\
+    \ rotation added. Re-evaluate if usage exceeds 60%."
+  owner: '@ronny'
+  purpose: "Finance stack. Migrated from docker-host (LOOP-FINANCE-VM-SEPARATION-20260211).\
+    \ Mail-archiver is migration_source \u2014 canonical runtime now on communications-stack\
+    \ VM 214."
+  active_services:
+  - finance-postgres-vm211
+  - finance-redis-vm211
+  - firefly-cron-vm211
+  - firefly-iii-vm211
+  - firefly-importer-vm211
+  - ghostfolio-vm211
+  - paperless-ngx-vm211
+  - vouchervault
+  health_probe_ids:
+  - firefly-iii-vm211
+  - ghostfolio-vm211
+  - paperless-ngx-vm211
+  - vouchervault-health
+  public_routes:
+  - hostname: docs.mintprints.com
+    routing_layer: cloudflare_tunnel
+    zone: mintprints.com
+  - hostname: docs.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  - hostname: finances.mintprints.com
+    routing_layer: cloudflare_tunnel
+    zone: mintprints.com
+  - hostname: finances.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  - hostname: firefly.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  - hostname: investments.mintprints.com
+    routing_layer: cloudflare_tunnel
+    zone: mintprints.com
+  - hostname: investments.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  public_route_count: 7
+  backup_profiles:
+  - tier1-small-state
+  - vm-tier1
+  durability_classes:
+  - tier1_critical
+  restore_classes:
+  - tier1-small-state-dry-run-quarterly
+  storage_objects:
+  - kind: guest_boot_disk
+    object: finance-stack boot disk (96G)
+    purpose: OS + colocated lightweight durable state
+    durability_role: runtime_primary
+    pool: boot-disk
+    note: Guest boot disk backend is not explicitly declared in current authority
+      surfaces.
+  - kind: path
+    object: /opt/stacks/finance
+    purpose: Guest-level durable path
+    durability_role: supplemental_runtime
+    pool: boot-disk
+  backup_generation_lanes:
+  - lane_id: pve-vzdump-primary
+    host: pve
+    base_path: /tank/backups/vzdump/dump
+  - lane_id: r730xd-finance-backups
+    host: pve
+    base_path: /md1400/backup-cold/apps/finance
+  restore_targets:
+  - name: app-finance-sanity-manifest
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/finance
+    glob: finance-backup-manifest-*.txt
+    classification: critical
+  - name: app-firefly
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/finance/firefly
+    glob: firefly-db-*.sql.gz
+    classification: critical
+  - name: app-ghostfolio
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/finance/ghostfolio
+    glob: ghostfolio-db-*.sql.gz
+    classification: important
+  - name: app-paperless-db
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/finance/paperless
+    glob: paperless-db-*.sql.gz
+    classification: critical
+  - name: app-paperless-export
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/finance/paperless
+    glob: paperless-export-*.zip
+    classification: critical
+  - name: vm-211-finance-stack-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-qemu-211-*.vma.zst
+    classification: critical
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: vm-211-finance-stack
+- vmid: 212
+  hostname: mint-data
+  kind: vm
+  role: mint-data-plane
+  status: active
+  startup_policy: auto
+  health_probe_policy: full
+  storage_tier: boot-only
+  placement_status: compliant
+  placement_notes: 'Rebased to non-boot persistence: postgres/minio/redis bind mounts
+    under /mnt/data/mint-data/* with Redis appendonly=yes. Root usage now 8% (48G
+    boot), data disk 61% (118G).'
+  owner: '@ronny'
+  purpose: Mint fresh-slate data plane. PostgreSQL 16 + MinIO + Redis.
+  active_services:
+  - mint-modules-minio
+  - mint-modules-postgres
+  - mint-modules-redis
+  health_probe_ids:
+  - mint-modules-minio
+  public_routes: []
+  public_route_count: 0
+  backup_profiles:
+  - tier1-small-state
+  - vm-tier1
+  durability_classes:
+  - tier1_critical
+  restore_classes:
+  - tier1-small-state-dry-run-quarterly
+  - vm-dry-run-quarterly
+  storage_objects:
+  - kind: declared_path
+    object: /dev/vda ext4 secondary disk mounted at /mnt/data; DockerRootDir=/mnt/data/docker
+    purpose: Declared storage path from placement policy
+    durability_role: runtime_primary
+    pool: tank-vms
+    mount_path: /mnt/data
+  - kind: path
+    object: /opt/stacks/mint-data
+    purpose: Guest-level durable path
+    durability_role: supplemental_runtime
+    pool: boot-disk
+  backup_generation_lanes:
+  - lane_id: pve-vzdump-primary
+    host: pve
+    base_path: /tank/backups/vzdump/dump
+  - lane_id: r730xd-mint-backups
+    host: pve
+    base_path: /md1400/backup-cold/apps/mint-data
+  restore_targets:
+  - name: app-mint-postgres
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/mint-data/postgres
+    glob: '*.sql.gz'
+    classification: critical
+  - name: app-mint-postgres-manifest
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/mint-data/postgres
+    glob: mint-postgres-manifest-*.txt
+    classification: critical
+  - name: vm-212-mint-data-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-qemu-212-*.vma.zst
+    classification: critical
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: vm-212-mint-data
+- vmid: 213
+  hostname: mint-apps
+  kind: vm
+  role: mint-app-plane
+  status: active
+  startup_policy: auto
+  health_probe_policy: full
+  storage_tier: boot-only
+  placement_status: compliant
+  placement_notes: 'Stateless containers. W8D hygiene applied: quote-page upload path
+    bind-mounted to /opt/stacks/mint-apps/runtime/quote-page-uploads, build cache/image
+    prune performed, weekly root-cron prune schedule installed.'
+  owner: '@ronny'
+  purpose: Mint fresh-slate app plane. Artwork, quote-page, order-intake, and modular
+    app services.
+  active_services:
+  - files-api
+  - finance-adapter
+  - order-intake
+  - payment
+  - pricing
+  - quote-page
+  - shipping
+  - shopify-module
+  - suppliers
+  health_probe_ids:
+  - auth-v1
+  - files-api-v2
+  - finance-adapter
+  - order-intake-v2
+  - payment-v2
+  - pricing-v2
+  - quote-page-v2
+  - shipping-v2
+  - suppliers-v2
+  public_routes:
+  - hostname: suppliers.mintprints.co
+    routing_layer: cloudflare_pages
+    zone: mintprints.co
+  - hostname: customer.mintprints.co
+    routing_layer: cloudflare_tunnel
+    zone: mintprints.co
+  - hostname: customer.mintprints.com
+    routing_layer: cloudflare_tunnel
+    zone: mintprints.com
+  - hostname: estimator.mintprints.co
+    routing_layer: cloudflare_tunnel
+    zone: mintprints.co
+  - hostname: mintprints-app.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  - hostname: mintprints.com
+    routing_layer: cloudflare_tunnel
+    zone: mintprints.com
+  - hostname: pricing.mintprints.co
+    routing_layer: cloudflare_tunnel
+    zone: mintprints.co
+  - hostname: pricing.mintprints.com
+    routing_layer: cloudflare_tunnel
+    zone: mintprints.com
+  - hostname: shipping.mintprints.co
+    routing_layer: cloudflare_tunnel
+    zone: mintprints.co
+  - hostname: shipping.mintprints.com
+    routing_layer: cloudflare_tunnel
+    zone: mintprints.com
+  - hostname: www.mintprints.com
+    routing_layer: cloudflare_tunnel
+    zone: mintprints.com
+  public_route_count: 11
+  backup_profiles:
+  - vm-covered
+  - vm-primary
+  durability_classes:
+  - small_state
+  restore_classes:
+  - vm-dry-run-quarterly
+  storage_objects:
+  - kind: guest_boot_disk
+    object: mint-apps boot disk (50G)
+    purpose: OS + colocated lightweight durable state
+    durability_role: runtime_primary
+    pool: boot-disk
+    note: Guest boot disk backend is not explicitly declared in current authority
+      surfaces.
+  - kind: path
+    object: /opt/stacks/mint-apps
+    purpose: Guest-level durable path
+    durability_role: supplemental_runtime
+    pool: boot-disk
+  backup_generation_lanes:
+  - lane_id: pve-vzdump-primary
+    host: pve
+    base_path: /tank/backups/vzdump/dump
+  restore_targets:
+  - name: vm-213-mint-apps-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-qemu-213-*.vma.zst
+    classification: important
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: vm-213-mint-apps
+- vmid: 214
+  hostname: communications-stack
+  kind: vm
+  role: communications
+  status: active
+  startup_policy: auto
+  health_probe_policy: full
+  storage_tier: tank-vms
+  placement_status: partial
+  placement_notes: Boot is ZFS zvol (not local-lvm). Stalwart on named volume. Mail-archiver
+    needs /srv/mail-archiver non-boot path.
+  owner: '@ronny'
+  purpose: Stalwart self-hosted mail + mail-archiver. Spine communications stack (GAP-OP-820).
+    Mail-archiver canonical runtime (LOOP-MAIL-ARCHIVER-COMMS-MIGRATION-20260225).
+  active_services:
+  - mail-archiver-db-vm214
+  - mail-archiver-vm214
+  - stalwart-mail
+  health_probe_ids:
+  - mail-archiver-vm214
+  - stalwart-mail
+  public_routes:
+  - hostname: mail-archive.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  public_route_count: 1
+  backup_profiles:
+  - tier1-small-state
+  - vm-tier1
+  durability_classes:
+  - tier1_critical
+  restore_classes:
+  - app-dry-run-monthly
+  - tier1-small-state-dry-run-quarterly
+  storage_objects:
+  - kind: zfs_zvol
+    object: tank/vms/vm-214-disk-0
+    purpose: Primary runtime disk on tank/vms
+    durability_role: runtime_primary
+    pool: tank
+  - kind: path
+    object: /opt/stacks/communications-stack
+    purpose: Guest-level durable path
+    durability_role: supplemental_runtime
+  - kind: path
+    object: /srv/mail-archiver/backups
+    purpose: Guest-level durable path
+    durability_role: supplemental_runtime
+  backup_generation_lanes:
+  - lane_id: pve-vzdump-primary
+    host: pve
+    base_path: /tank/backups/vzdump/dump
+  - lane_id: r730xd-communications-backups
+    host: pve
+    base_path: /md1400/backup-cold/apps/communications
+  restore_targets:
+  - name: app-mail-archiver
+    enabled: true
+    host: communications-stack
+    base_path: /srv/mail-archiver/backups/last-good
+    glob: mail-archiver-*
+    classification: important
+  - name: app-mail-archiver-offsite
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/communications/mail-archiver
+    glob: mail-archiver-db-*.sql.gz
+    classification: important
+  - name: app-stalwart-offsite
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/apps/communications/stalwart
+    glob: stalwart-*.tar.gz
+    classification: important
+  - name: vm-214-communications-stack-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-qemu-214-*.vma.zst
+    classification: important
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: vm-214-communications-stack
+- vmid: 215
+  hostname: surveillance-stack
+  kind: vm
+  role: surveillance
+  status: active
+  startup_policy: auto
+  health_probe_policy: full
+  storage_tier: tank-vms
+  placement_status: partial
+  placement_notes: Frigate/go2rtc surveillance VM. Runtime storage tier is correct,
+    but the guest-side data mount/path needs to be written into this policy before
+    the storage plane is fully boring.
+  owner: '@ronny'
+  purpose: Frigate/go2rtc surveillance platform for shop NVR (12 channels, CPU-first).
+    Integrates with home HA. LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302.
+  active_services:
+  - frigate
+  - go2rtc
+  health_probe_ids:
+  - frigate-vm215
+  - go2rtc-vm215
+  public_routes: []
+  public_route_count: 0
+  backup_profiles:
+  - vm-primary
+  durability_classes:
+  - large_state
+  restore_classes:
+  - vm-dry-run-quarterly
+  storage_objects:
+  - kind: guest_data_disk
+    object: surveillance-stack dedicated data disk (100G declared)
+    purpose: Dedicated guest data disk on tank-vms tier
+    durability_role: runtime_primary
+    pool: tank
+    note: Runtime mount path still needs capture in the placement policy.
+  backup_generation_lanes:
+  - lane_id: pve-vzdump-primary
+    host: pve
+    base_path: /tank/backups/vzdump/dump
+  restore_targets:
+  - name: vm-215-surveillance-stack-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-qemu-215-*.vma.zst
+    classification: important
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: vm-215-surveillance-stack
+- vmid: 220
+  hostname: archive-smb
+  kind: lxc
+  role: file-plane
+  status: active
+  startup_policy: auto
+  health_probe_policy: full
+  storage_tier: md1400
+  placement_status: compliant
+  placement_notes: LXC 220 serves md1400-backed archive/live-share data over Samba.
+    Dataset contents restore from md1400 snapshot manifests; runtime rootfs restores
+    from lxc vzdump.
+  owner: '@ronny'
+  purpose: Archive SMB LXC serving the authoritative md1400 live-share datasets `/md1400/ronny-projects`
+    and `/md1400/mint-legacy` via Samba. Rootfs is rebuildable from LXC backup; dataset
+    contents require md1400 snapshot protection.
+  active_services: []
+  health_probe_ids: []
+  public_routes: []
+  public_route_count: 0
+  backup_profiles:
+  - vm-primary
+  durability_classes:
+  - tier1_critical
+  restore_classes:
+  - tier1-small-state-dry-run-quarterly
+  storage_objects:
+  - kind: md1400_live_share
+    object: md1400 live-share datasets
+    purpose: Authoritative archive/live-share payload
+    durability_role: runtime_primary
+    pool: md1400
+    mount_path: /md1400
+  - kind: path
+    object: /md1400/mint-legacy
+    purpose: Authoritative live path declared in backup inventory
+    durability_role: runtime_primary
+    pool: md1400
+  - kind: path
+    object: /md1400/ronny-projects
+    purpose: Authoritative live path declared in backup inventory
+    durability_role: runtime_primary
+    pool: md1400
+  backup_generation_lanes:
+  - lane_id: r730xd-archive-smb-snapshots
+    host: pve
+    base_path: /md1400/backup-cold/archive-smb/snapshots
+  restore_targets:
+  - name: app-archive-smb-snapshot-manifest
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/archive-smb/snapshots
+    glob: archive-smb-snapshot-*.txt
+    classification: critical
+  - name: lxc-220-archive-smb-primary
+    enabled: true
+    host: pve
+    base_path: /md1400/backup-cold/vzdump/pve
+    glob: vzdump-lxc-220-*.tar.zst
+    classification: critical
+  backup_admission_states:
+  - production_ready
+  primary_backup_unit: lxc-220-archive-smb
+tombstones:
+- vmid: 200
+  hostname: docker-host
+  tombstone_class: cold_restore_capsule
+  hot_runtime_disk: vm-200-disk-0
+  hot_runtime_disk_ref: local-lvm:vm-200-disk-0
+  hot_runtime_disk_gb: 300
+  hot_runtime_disposition: remove_from_hot_storage
+  cold_restore_target: vm-200-docker-host-primary
+  cold_restore_host: pve
+  cold_restore_base_path: /md1400/backup-cold/vzdump/pve
+  cold_restore_glob: vzdump-qemu-200-*.vma.zst
+  cold_restore_enabled: false
+  review_by: '2026-09-06'
+  restore_name_prefix: vm200-restore-
+  restore_requires_isolation: true
+  restore_reuse_legacy_identity: false
+  required_closeout_proof:
+  - cold capsule exists on md1400
+  - PVE config captured
+  - artifact size or checksum recorded
+  description: TOMBSTONED 2026-03-06 after Mint data/control-plane retirement. Do
+    not retain as a powered-off runtime guest on pve; remove the live 300G VM disk
+    from hot storage and keep exactly one cold restore capsule on md1400. Historically
+    hosted mint-os, artwork-module, quote-page, minio, files-api, mint-os-postgres,
+    and mint-os-redis on pre-spine Linux Mint. If recovery is needed, restore only
+    into an isolated temporary sandbox identity with no legacy DNS/routes.
+current_risks:
+- risk_id: storage-automation-stack
+  severity: medium
+  runtime: automation-stack
+  source: ops/bindings/infra.storage.placement.policy.yaml
+  detail: Boot disk is ZFS-backed zvol (not local-lvm). Docker volumes still on boot
+    filesystem. Consider data disk for n8n/postgres.
+- risk_id: storage-infra-core
+  severity: accepted-risk
+  runtime: infra-core
+  source: ops/bindings/infra.storage.placement.policy.yaml
+  detail: 22% boot usage (11GB/48GB). Volumes only 250MB. Data on boot but lightweight
+    (Infisical/Authentik/VW/PiHole). Log rotation added. Re-evaluate if usage exceeds
+    60%.
+- risk_id: storage-observability
+  severity: accepted-risk
+  runtime: observability
+  source: ops/bindings/infra.storage.placement.policy.yaml
+  detail: 20% boot usage (9.4GB/48GB). Volumes 1GB. Loki/Prometheus data small at
+    current retention. Log rotation added. Re-evaluate if usage exceeds 60%.
+- risk_id: storage-dev-tools
+  severity: accepted-risk
+  runtime: dev-tools
+  source: ops/bindings/infra.storage.placement.policy.yaml
+  detail: 14% boot usage (6.3GB/48GB). Volumes 183MB. Gitea repos + PostgreSQL small
+    at current scale. Log rotation added. Re-evaluate if usage exceeds 60%.
+- risk_id: storage-ai-consolidation
+  severity: accepted-risk
+  runtime: ai-consolidation
+  source: ops/bindings/infra.storage.placement.policy.yaml
+  detail: 5% boot usage (8.1GB/193GB). 200GB boot has massive headroom. Qdrant vectors
+    + AnythingLLM small. Log rotation added. Re-evaluate if usage exceeds 40%.
+- risk_id: storage-finance-stack
+  severity: accepted-risk
+  runtime: finance-stack
+  source: ops/bindings/infra.storage.placement.policy.yaml
+  detail: "12% boot usage (11GB/92GB) after truncating 59GB firefly-cron crash log.\
+    \ Actual data only 531MB. Fixed cron binary (crond\u2192cron). Log rotation added.\
+    \ Re-evaluate if usage exceeds 60%."
+- risk_id: storage-communications-stack
+  severity: medium
+  runtime: communications-stack
+  source: ops/bindings/infra.storage.placement.policy.yaml
+  detail: Boot is ZFS zvol (not local-lvm). Stalwart on named volume. Mail-archiver
+    needs /srv/mail-archiver non-boot path.
+- risk_id: storage-surveillance-stack
+  severity: medium
+  runtime: surveillance-stack
+  source: ops/bindings/infra.storage.placement.policy.yaml
+  detail: Frigate/go2rtc surveillance VM. Runtime storage tier is correct, but the
+    guest-side data mount/path needs to be written into this policy before the storage
+    plane is fully boring.
+- risk_id: vm200-physical-closeout
+  severity: medium
+  runtime: docker-host
+  source: ops/bindings/vm.lifecycle.yaml
+  detail: Delete vm-200-disk-0 only after proving the md1400 cold capsule, capturing
+    qm config, and recording artifact size or checksum.
+summary:
+  active_runtime_count: 14
+  tombstone_count: 1
+  public_runtime_count: 8
+  private_only_runtime_count: 6

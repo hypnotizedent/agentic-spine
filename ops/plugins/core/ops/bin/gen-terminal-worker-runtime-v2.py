@@ -19,7 +19,7 @@ from typing import Any
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[5]
 
 AGENTS_REGISTRY = ROOT / "ops/bindings/agents.registry.yaml"
 TERMINAL_ROLE_CONTRACT = ROOT / "ops/bindings/terminal.role.contract.yaml"

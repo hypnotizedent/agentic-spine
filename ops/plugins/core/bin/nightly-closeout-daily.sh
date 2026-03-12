@@ -6,6 +6,7 @@ set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CLOSEOUT_CMD="${SPINE_ROOT}/ops/commands/nightly-closeout.sh"
+WORKSPACE_VERIFY_CMD="${SPINE_ROOT}/ops/plugins/core/verify/bin/workspace-closeout-verify"
 CONTRACT="${SPINE_ROOT}/ops/bindings/nightly.closeout.contract.yaml"
 source "${SPINE_ROOT}/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
@@ -136,6 +137,47 @@ run_nightly_closeout_dry_run() {
   return 0
 }
 
+run_workspace_closeout_verify() {
+  local verify_json status artifact_dir failing_checks
+
+  [[ -x "$WORKSPACE_VERIFY_CMD" ]] || {
+    echo "[nightly-closeout-daily] missing workspace verifier: $WORKSPACE_VERIFY_CMD" >&2
+    return 2
+  }
+
+  set +e
+  verify_json="$("$WORKSPACE_VERIFY_CMD" --json 2>/dev/null)"
+  local verify_rc=$?
+  set -e
+
+  if [[ -z "$verify_json" ]] || ! jq -e . >/dev/null 2>&1 <<<"$verify_json"; then
+    echo "[nightly-closeout-daily] workspace verifier did not emit valid JSON" >&2
+    return 1
+  fi
+
+  status="$(jq -r '.summary.status // "fail"' <<<"$verify_json")"
+  artifact_dir="$(jq -r '.artifact_dir // ""' <<<"$verify_json")"
+  failing_checks="$(jq -r '[.checks[] | select(.status == "FAIL") | .name] | join(",")' <<<"$verify_json")"
+
+  if [[ "$verify_rc" -ne 0 || "$status" == "fail" ]]; then
+    spine_enqueue_email_intent \
+      "workspace-closeout-verify" \
+      "error" \
+      "workspace closeout verify failed" \
+      "status=${status:-fail} failing_checks=${failing_checks:-unknown} artifact_dir=${artifact_dir:-unknown}" \
+      "nightly-closeout-daily"
+    return 1
+  fi
+
+  echo "[nightly-closeout-daily] workspace closeout verify passed artifact_dir=${artifact_dir:-unknown}"
+  return 0
+}
+
+run_nightly_closeout_and_workspace_verify() {
+  run_nightly_closeout_dry_run
+  run_workspace_closeout_verify
+}
+
 echo "[nightly-closeout-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-spine_job_run "nightly-closeout-daily:nightly.closeout.dry-run" run_nightly_closeout_dry_run
+spine_job_run "nightly-closeout-daily:nightly.closeout+workspace.verify" run_nightly_closeout_and_workspace_verify
 echo "[nightly-closeout-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

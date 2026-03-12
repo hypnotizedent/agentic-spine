@@ -1,0 +1,929 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+import re
+import sys
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+HARDWARE_PATH = ROOT / "ops/bindings/hardware.inventory.yaml"
+VM_LIFECYCLE_PATH = ROOT / "ops/bindings/vm.lifecycle.yaml"
+VM_PROFILE_PATH = ROOT / "ops/bindings/vm.operating.profile.yaml"
+PLACEMENT_PATH = ROOT / "ops/bindings/infra.storage.placement.policy.yaml"
+BACKUP_PATH = ROOT / "ops/bindings/backup.inventory.yaml"
+SERVICE_REGISTRY_PATH = ROOT / "docs/governance/SERVICE_REGISTRY.yaml"
+SERVICES_HEALTH_PATH = ROOT / "ops/bindings/services.health.yaml"
+ROUTING_PATH = ROOT / "ops/bindings/domain.routing.registry.yaml"
+OUTPUT_BINDING_PATH = ROOT / "ops/bindings/shop.storage.map.yaml"
+OUTPUT_SCORECARD_PATH = ROOT / "docs/reference/generated/SHOP_RACK_SCORECARD.md"
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"infra.shop.storage.authority.build FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_utc_iso() -> str:
+    return now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today_utc() -> str:
+    return now_utc().strftime("%Y-%m-%d")
+
+
+def rel(path: Path) -> str:
+    return str(path.resolve().relative_to(ROOT))
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def yaml_dump(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=False)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="infra-shop-storage-authority-build")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Validate generated outputs without writing files.",
+    )
+    return parser.parse_args()
+
+
+def format_list(values: list[str]) -> str:
+    filtered = [value for value in values if value]
+    return ", ".join(filtered) if filtered else "none"
+
+
+def runtime_kind(vm: dict[str, Any]) -> str:
+    return str(vm.get("vm_type") or "vm")
+
+
+def runtime_status_is_live(vm: dict[str, Any]) -> bool:
+    return str(vm.get("status") or "") == "active"
+
+
+def runtime_is_shop(vm: dict[str, Any]) -> bool:
+    return str(vm.get("proxmox_host") or "") == "pve"
+
+
+def service_status_is_active(row: dict[str, Any]) -> bool:
+    status = str(row.get("status") or "active").strip().lower()
+    return status not in {"deprecated", "retired", "parked", "stopped"}
+
+
+def route_is_live(route: dict[str, Any]) -> bool:
+    service_name = str(route.get("service") or "").strip()
+    return bool(service_name) and service_name != "none (parked)"
+
+
+def normalize_service_name(name: str) -> str:
+    return re.sub(r"-vm\d+$", "", (name or "").strip())
+
+
+def parse_pool_from_source(source: str) -> str | None:
+    if "/md1400/" in source or source.startswith("md1400"):
+        return "md1400"
+    if "/media" in source or source.endswith(":/media") or source == "media":
+        return "media"
+    if "tank/" in source or source.startswith("tank"):
+        return "tank"
+    if "boot" in source.lower():
+        return "boot-disk"
+    return None
+
+
+def dedupe_storage_objects(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for row in rows:
+        key = (
+            row.get("kind"),
+            row.get("pool"),
+            row.get("object"),
+            row.get("mount_path"),
+            row.get("purpose"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
+def build_storage_objects(vm: dict[str, Any], placement: dict[str, Any] | None, backup_units: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    objects: list[dict[str, Any]] = []
+    gaps: list[str] = []
+    hostname = str(vm.get("hostname") or "")
+    tier = str(vm.get("storage_tier") or "")
+    resources = vm.get("resources") or {}
+    boot_disk_gb = resources.get("boot_disk_gb")
+    data_disk_gb = resources.get("data_disk_gb")
+
+    def add_object(
+        *,
+        kind: str,
+        pool: str | None,
+        obj: str,
+        purpose: str,
+        durability_role: str,
+        mount_path: str | None = None,
+        note: str | None = None,
+    ) -> None:
+        row: dict[str, Any] = {
+            "kind": kind,
+            "object": obj,
+            "purpose": purpose,
+            "durability_role": durability_role,
+        }
+        if pool:
+            row["pool"] = pool
+        if mount_path:
+            row["mount_path"] = mount_path
+        if note:
+            row["note"] = note
+        objects.append(row)
+
+    if placement:
+        source = str(placement.get("data_source") or "")
+        current_tier = str(placement.get("current_storage_tier") or tier)
+        target_tier = str(placement.get("target_storage_tier") or current_tier)
+        if current_tier == "boot-only":
+            add_object(
+                kind="guest_boot_disk",
+                pool="boot-disk",
+                obj=f"{hostname} boot disk ({boot_disk_gb}G)",
+                purpose="OS + colocated lightweight durable state",
+                durability_role="runtime_primary",
+                note="Guest boot disk backend is not explicitly declared in current authority surfaces.",
+            )
+        elif "tank/vms/" in source:
+            match = re.search(r"pve:(tank/vms/[^ )]+)", source)
+            object_name = match.group(1) if match else source
+            add_object(
+                kind="zfs_zvol",
+                pool="tank",
+                obj=object_name,
+                purpose="Primary runtime disk on tank/vms",
+                durability_role="runtime_primary",
+                mount_path=str(placement.get("data_mount") or "") or None,
+            )
+        elif "tank/docker/" in source or "tank/immich" in source:
+            match = re.search(r"pve:(tank/[^ )]+)", source)
+            object_name = match.group(1) if match else source
+            kind = "zfs_dataset_nfs_export" if "NFS" in source or placement.get("nfs_mounts") else "zfs_dataset"
+            add_object(
+                kind=kind,
+                pool="tank",
+                obj=object_name,
+                purpose="Primary runtime dataset on tank",
+                durability_role="runtime_primary",
+                mount_path=str(placement.get("data_mount") or "") or None,
+            )
+        elif current_tier == "tank-vms" and data_disk_gb:
+            add_object(
+                kind="guest_data_disk",
+                pool="tank",
+                obj=f"{hostname} dedicated data disk ({data_disk_gb}G declared)",
+                purpose="Dedicated guest data disk on tank-vms tier",
+                durability_role="runtime_primary",
+                mount_path=str(placement.get("data_mount") or "") or None,
+                note="Runtime mount path still needs capture in the placement policy.",
+            )
+        elif current_tier == "md1400":
+            add_object(
+                kind="md1400_live_share",
+                pool="md1400",
+                obj="md1400 live-share datasets",
+                purpose="Authoritative archive/live-share payload",
+                durability_role="runtime_primary",
+                mount_path=str(placement.get("data_mount") or "") or None,
+            )
+        elif source:
+            pool = parse_pool_from_source(source) or target_tier or None
+            add_object(
+                kind="declared_path",
+                pool=pool,
+                obj=source,
+                purpose="Declared storage path from placement policy",
+                durability_role="runtime_primary",
+                mount_path=str(placement.get("data_mount") or "") or None,
+            )
+
+        for mount in placement.get("nfs_mounts") or []:
+            if not isinstance(mount, dict):
+                continue
+            source_path = str(mount.get("source") or "")
+            source_suffix = source_path.split(":", 1)[1] if ":" in source_path else source_path
+            pool = parse_pool_from_source(source_path)
+            purpose = "Supplemental NFS export"
+            if source_suffix == "/media":
+                purpose = "Media payload mount"
+            elif source_suffix.startswith("/tank/docker/"):
+                purpose = "Config/data export from tank/docker"
+            add_object(
+                kind="nfs_mount",
+                pool=pool,
+                obj=source_suffix.lstrip("/") or source_path,
+                purpose=purpose,
+                durability_role="supplemental_runtime",
+                mount_path=str(mount.get("path") or "") or None,
+                note=f"mode={str(mount.get('mode') or 'unknown')}",
+            )
+
+    else:
+        gaps.append(f"{hostname}: missing placement row in infra.storage.placement.policy.yaml")
+        if tier == "boot-only":
+            add_object(
+                kind="guest_boot_disk",
+                pool="boot-disk",
+                obj=f"{hostname} boot disk ({boot_disk_gb}G)",
+                purpose="OS + colocated durable state",
+                durability_role="runtime_primary",
+                note="Placement row missing; backend/persistent path needs capture.",
+            )
+        elif tier == "tank-vms":
+            object_name = f"{hostname} runtime on tank-vms"
+            if data_disk_gb:
+                object_name = f"{hostname} runtime on tank-vms ({data_disk_gb}G data disk declared)"
+            add_object(
+                kind="tank_vms_declared_runtime",
+                pool="tank",
+                obj=object_name,
+                purpose="Runtime storage declared in vm.lifecycle",
+                durability_role="runtime_primary",
+                note="Placement row missing; exact zvol/mount path needs capture.",
+            )
+        elif tier == "md1400":
+            add_object(
+                kind="md1400_live_share",
+                pool="md1400",
+                obj="md1400 live-share datasets",
+                purpose="Runtime storage declared in vm.lifecycle",
+                durability_role="runtime_primary",
+                note="Placement row missing; map authoritative live-share paths from backup inventory.",
+            )
+
+    include_paths: list[str] = []
+    for unit in backup_units:
+        for raw_path in unit.get("include_paths") or []:
+            path = str(raw_path or "").strip()
+            if not path or path in {"vm-disk", "rootfs"}:
+                continue
+            include_paths.append(path)
+
+    for include_path in sorted(set(include_paths)):
+        if include_path.startswith("/md1400/backup-cold/"):
+            continue
+        if include_path.startswith("/md1400/"):
+            add_object(
+                kind="path",
+                pool="md1400",
+                obj=include_path,
+                purpose="Authoritative live path declared in backup inventory",
+                durability_role="runtime_primary" if hostname == "archive-smb" else "supplemental_runtime",
+            )
+        elif include_path.startswith("/mnt/media"):
+            add_object(
+                kind="path",
+                pool="media",
+                obj=include_path,
+                purpose="Media payload path",
+                durability_role="payload_regenerable",
+            )
+        elif include_path.startswith("/mnt/docker") or include_path.startswith("/opt/appdata"):
+            add_object(
+                kind="path",
+                pool="tank",
+                obj=include_path,
+                purpose="Config-state path declared in backup inventory",
+                durability_role="runtime_primary",
+            )
+        elif include_path.startswith("/home/") or include_path.startswith("/opt/stacks") or include_path.startswith("/srv/"):
+            add_object(
+                kind="path",
+                pool="boot-disk" if tier == "boot-only" else None,
+                obj=include_path,
+                purpose="Guest-level durable path",
+                durability_role="supplemental_runtime",
+            )
+
+    return dedupe_storage_objects(objects), gaps
+
+
+def load_existing_generated_at() -> str | None:
+    if not OUTPUT_BINDING_PATH.exists():
+        return None
+    try:
+        with OUTPUT_BINDING_PATH.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = str(data.get("generated_at_utc") or "").strip()
+    return value or None
+
+
+def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
+    hardware = load_yaml(HARDWARE_PATH)
+    vm_lifecycle = load_yaml(VM_LIFECYCLE_PATH)
+    vm_profiles = load_yaml(VM_PROFILE_PATH)
+    placement = load_yaml(PLACEMENT_PATH)
+    backup = load_yaml(BACKUP_PATH)
+    services = load_yaml(SERVICE_REGISTRY_PATH)
+    health = load_yaml(SERVICES_HEALTH_PATH)
+    routing = load_yaml(ROUTING_PATH)
+
+    source_surfaces = [
+        rel(HARDWARE_PATH),
+        rel(VM_LIFECYCLE_PATH),
+        rel(VM_PROFILE_PATH),
+        rel(PLACEMENT_PATH),
+        rel(BACKUP_PATH),
+        rel(SERVICE_REGISTRY_PATH),
+        rel(SERVICES_HEALTH_PATH),
+        rel(ROUTING_PATH),
+    ]
+
+    machines = {str(row.get("machine_id") or ""): row for row in hardware.get("machines") or [] if isinstance(row, dict)}
+    pve_machine = machines.get("pve")
+    if not pve_machine:
+        fail("hardware.inventory.yaml missing machine_id=pve")
+
+    profiles_by_id = {
+        int(row.get("id")): row
+        for row in vm_profiles.get("profiles") or []
+        if isinstance(row, dict) and str(row.get("id") or "").strip()
+    }
+    placement_by_host = {
+        str(hostname): row
+        for hostname, row in (placement.get("vm_storage") or {}).items()
+        if isinstance(row, dict)
+    }
+
+    runtime_units_by_host: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in backup.get("runtime_units") or []:
+        if not isinstance(row, dict):
+            continue
+        hostname = str(row.get("hostname") or "").strip()
+        if hostname:
+            runtime_units_by_host[hostname].append(row)
+
+    targets_by_name = {
+        str(row.get("name") or ""): row
+        for row in backup.get("targets") or []
+        if isinstance(row, dict) and str(row.get("name") or "").strip()
+    }
+    lanes_by_name = {
+        str(name): row
+        for name, row in (backup.get("model") or {}).get("destination_lanes", {}).items()
+        if isinstance(row, dict)
+    }
+
+    active_services_by_host: dict[str, list[str]] = defaultdict(list)
+    for service_name, row in (services.get("services") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        if not service_status_is_active(row):
+            continue
+        host = str(row.get("host") or "").strip()
+        if host:
+            active_services_by_host[host].append(str(service_name))
+
+    probes_by_host: dict[str, list[str]] = defaultdict(list)
+    for row in health.get("endpoints") or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("enabled", True) is False:
+            continue
+        host = str(row.get("host") or "").strip()
+        endpoint_id = str(row.get("id") or "").strip()
+        if host and endpoint_id:
+            probes_by_host[host].append(endpoint_id)
+
+    route_rows_by_host: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    service_host_lookup: dict[str, str] = {}
+    for service_name, row in (services.get("services") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        host = str(row.get("host") or "")
+        service_host_lookup[str(service_name)] = host
+        normalized_name = normalize_service_name(str(service_name))
+        if normalized_name and normalized_name not in service_host_lookup:
+            service_host_lookup[normalized_name] = host
+        container_name = str(row.get("container") or "").strip()
+        if container_name and container_name not in service_host_lookup:
+            service_host_lookup[container_name] = host
+
+    for zone in routing.get("zones") or []:
+        if not isinstance(zone, dict):
+            continue
+        zone_name = str(zone.get("zone") or "")
+        for route in zone.get("hostnames") or []:
+            if not isinstance(route, dict) or not route_is_live(route):
+                continue
+            service_name = str(route.get("service") or "")
+            host = service_host_lookup.get(service_name, "") or service_host_lookup.get(normalize_service_name(service_name), "")
+            if not host:
+                continue
+            route_rows_by_host[host].append(
+                {
+                    "hostname": str(route.get("hostname") or ""),
+                    "routing_layer": str(route.get("routing_layer") or ""),
+                    "zone": zone_name,
+                }
+            )
+
+    shop_vms = [
+        row
+        for row in vm_lifecycle.get("vms") or []
+        if isinstance(row, dict) and runtime_is_shop(row)
+    ]
+    active_shop_vms = [row for row in shop_vms if runtime_status_is_live(row)]
+    tombstone_rows = [row for row in shop_vms if str(row.get("status") or "") == "decommissioned" and isinstance(row.get("tombstone"), dict)]
+
+    internal_pools = pve_machine.get("internal_drives") or []
+    external_shelves = pve_machine.get("external_shelves") or []
+    storage_tiers = [
+        {
+            "tier_id": "tank",
+            "plane": "hot_runtime",
+            "purpose": "Primary hot VM/app/runtime pool on pve.",
+            "host": "pve",
+            "layout": str(internal_pools[0].get("type") or "unknown") if len(internal_pools) > 0 else "unknown",
+            "drives": str(internal_pools[0].get("devices") or "unknown") if len(internal_pools) > 0 else "unknown",
+        },
+        {
+            "tier_id": "media",
+            "plane": "warm_payload",
+            "purpose": "Media payload only or phased-out pressure lane.",
+            "host": "pve",
+            "layout": str(internal_pools[1].get("type") or "unknown") if len(internal_pools) > 1 else "unknown",
+            "drives": str(internal_pools[1].get("devices") or "unknown") if len(internal_pools) > 1 else "unknown",
+        },
+        {
+            "tier_id": "md1400",
+            "plane": "cold_backup_archive_stage",
+            "purpose": "Cold backup/archive/staging shelf for the shop environment.",
+            "host": "pve",
+            "layout": str(external_shelves[0].get("zfs_layout") or "unknown") if len(external_shelves) > 0 else "unknown",
+            "drives": f"{str(external_shelves[0].get('drive_count') or 'unknown')} physical drives" if len(external_shelves) > 0 else "unknown",
+        },
+    ]
+
+    storage_planes = [
+        {
+            "object_id": "tank",
+            "kind": "zpool",
+            "pool": "tank",
+            "owner": "pve",
+            "purpose": "Hot runtime/app data on the internal R730XD pool.",
+            "durability_class": "runtime_primary",
+        },
+        {
+            "object_id": "media",
+            "kind": "zpool",
+            "pool": "media",
+            "owner": "pve",
+            "purpose": "Media payload lane; not the canonical cold backup plane.",
+            "durability_class": "payload_primary",
+        },
+        {
+            "object_id": "md1400",
+            "kind": "zpool",
+            "pool": "md1400",
+            "owner": "pve",
+            "purpose": "Shop cold backup/archive/staging pool on the external shelf.",
+            "durability_class": "cold_restore_primary",
+        },
+        {
+            "object_id": "tank/backups/vzdump/dump",
+            "kind": "path_family",
+            "pool": "tank",
+            "owner": "pve",
+            "purpose": "Local vzdump generation lane before promotion into md1400 cold storage.",
+            "durability_class": "staging_generation",
+            "backed_by_lane": "pve-vzdump-primary",
+        },
+        {
+            "object_id": "md1400/backup-cold/vzdump/pve",
+            "kind": "path_family",
+            "pool": "md1400",
+            "owner": "pve",
+            "purpose": "Canonical cold restore plane for shop VM/LXC artifacts.",
+            "durability_class": "cold_restore_primary",
+        },
+        {
+            "object_id": "md1400/backup-cold/apps",
+            "kind": "path_family",
+            "pool": "md1400",
+            "owner": "pve",
+            "purpose": "Canonical app-level cold backup plane for shop services.",
+            "durability_class": "cold_restore_primary",
+        },
+        {
+            "object_id": "md1400/backup-cold/archive-smb/snapshots",
+            "kind": "path_family",
+            "pool": "md1400",
+            "owner": "pve",
+            "purpose": "Snapshot manifest lane for archive-smb live-share datasets.",
+            "durability_class": "snapshot_manifest",
+        },
+    ]
+
+    runtime_rows: list[dict[str, Any]] = []
+    risk_rows: list[dict[str, Any]] = []
+
+    for vm in sorted(active_shop_vms, key=lambda row: int(row.get("id") or 0)):
+        vmid = int(vm.get("id") or 0)
+        hostname = str(vm.get("hostname") or "")
+        profile = profiles_by_id.get(vmid, {})
+        placement_row = placement_by_host.get(hostname)
+        backup_units = runtime_units_by_host.get(hostname, [])
+        primary_backup_unit = next((row for row in backup_units if str(row.get("kind") or "") in {"vm", "lxc"}), None)
+        storage_objects, placement_gaps = build_storage_objects(vm, placement_row, backup_units)
+
+        backup_lanes: list[dict[str, Any]] = []
+        lane_ids = sorted({str(row.get("destination_lane") or "") for row in backup_units if str(row.get("destination_lane") or "")})
+        for lane_id in lane_ids:
+            lane = lanes_by_name.get(lane_id, {})
+            lane_row = {"lane_id": lane_id}
+            if lane:
+                if "host" in lane:
+                    lane_row["host"] = lane.get("host")
+                if "host_group" in lane:
+                    lane_row["host_group"] = lane.get("host_group")
+                if "base_path" in lane:
+                    lane_row["base_path"] = lane.get("base_path")
+            backup_lanes.append(lane_row)
+
+        backup_targets: list[dict[str, Any]] = []
+        target_names = sorted(
+            {
+                str(name)
+                for row in backup_units
+                for name in (row.get("inventory_targets") or [])
+                if str(name).strip()
+            }
+        )
+        for target_name in target_names:
+            target = targets_by_name.get(target_name, {})
+            target_row = {"name": target_name}
+            if target:
+                target_row.update(
+                    {
+                        "enabled": bool(target.get("enabled", False)),
+                        "host": target.get("host"),
+                        "base_path": target.get("base_path"),
+                        "glob": target.get("glob"),
+                        "classification": target.get("classification"),
+                    }
+                )
+            backup_targets.append(target_row)
+
+        public_routes = sorted(
+            route_rows_by_host.get(hostname, []),
+            key=lambda row: (row.get("routing_layer") or "", row.get("hostname") or ""),
+        )
+        probe_ids = sorted(set(probes_by_host.get(hostname, [])))
+        active_services = sorted(set(active_services_by_host.get(hostname, [])))
+
+        placement_status = str(placement_row.get("status") or "missing") if placement_row else "missing"
+        if placement_status != "compliant":
+            notes = str(placement_row.get("notes") or "").strip() if placement_row else "No placement row exists for this active runtime."
+            severity = "medium" if placement_status in {"partial", "missing"} else "accepted-risk"
+            risk_rows.append(
+                {
+                    "risk_id": f"storage-{hostname}",
+                    "severity": severity,
+                    "runtime": hostname,
+                    "source": rel(PLACEMENT_PATH),
+                    "detail": notes,
+                }
+            )
+        for gap in placement_gaps:
+            risk_rows.append(
+                {
+                    "risk_id": f"storage-gap-{hostname}",
+                    "severity": "medium",
+                    "runtime": hostname,
+                    "source": rel(PLACEMENT_PATH),
+                    "detail": gap,
+                }
+            )
+
+        runtime_rows.append(
+            {
+                "vmid": vmid,
+                "hostname": hostname,
+                "kind": runtime_kind(vm),
+                "role": vm.get("role"),
+                "status": vm.get("status"),
+                "startup_policy": profile.get("startup_policy"),
+                "health_probe_policy": profile.get("health_probe_policy") or vm.get("health_probe_policy"),
+                "storage_tier": vm.get("storage_tier"),
+                "placement_status": placement_status,
+                "placement_notes": str(placement_row.get("notes") or "").strip() if placement_row else "Placement row missing.",
+                "owner": vm.get("owner"),
+                "purpose": str(vm.get("description") or "").strip(),
+                "active_services": active_services,
+                "health_probe_ids": probe_ids,
+                "public_routes": public_routes,
+                "public_route_count": len(public_routes),
+                "backup_profiles": sorted({str(row.get("backup_profile") or "") for row in backup_units if str(row.get("backup_profile") or "")}),
+                "durability_classes": sorted({str(row.get("data_class") or "") for row in backup_units if str(row.get("data_class") or "")}),
+                "restore_classes": sorted({str(row.get("restore_class") or "") for row in backup_units if str(row.get("restore_class") or "")}),
+                "storage_objects": storage_objects,
+                "backup_generation_lanes": backup_lanes,
+                "restore_targets": backup_targets,
+                "backup_admission_states": sorted({str(row.get("backup_admission_state") or "") for row in backup_units if str(row.get("backup_admission_state") or "")}),
+                "primary_backup_unit": str(primary_backup_unit.get("unit_id") or "") if primary_backup_unit else "",
+            }
+        )
+
+    tombstones: list[dict[str, Any]] = []
+    for row in sorted(tombstone_rows, key=lambda item: int(item.get("id") or 0)):
+        tombstone = row.get("tombstone") or {}
+        target_name = str(tombstone.get("retained_restore_artifact") or "")
+        target = targets_by_name.get(target_name, {})
+        tombstones.append(
+            {
+                "vmid": int(row.get("id") or 0),
+                "hostname": row.get("hostname"),
+                "tombstone_class": tombstone.get("class"),
+                "hot_runtime_disk": tombstone.get("live_runtime_disk"),
+                "hot_runtime_disk_ref": tombstone.get("live_runtime_disk_ref"),
+                "hot_runtime_disk_gb": tombstone.get("live_runtime_disk_gb"),
+                "hot_runtime_disposition": tombstone.get("live_runtime_disposition"),
+                "cold_restore_target": target_name,
+                "cold_restore_host": target.get("host"),
+                "cold_restore_base_path": target.get("base_path"),
+                "cold_restore_glob": target.get("glob"),
+                "cold_restore_enabled": bool(target.get("enabled", False)) if target else False,
+                "review_by": tombstone.get("restore_review_by"),
+                "restore_name_prefix": tombstone.get("restore_name_prefix"),
+                "restore_requires_isolation": tombstone.get("restore_requires_isolation"),
+                "restore_reuse_legacy_identity": tombstone.get("restore_reuse_legacy_identity"),
+                "required_closeout_proof": [
+                    "cold capsule exists on md1400",
+                    "PVE config captured",
+                    "artifact size or checksum recorded",
+                ],
+                "description": str(row.get("description") or "").strip(),
+            }
+        )
+        risk_rows.append(
+            {
+                "risk_id": "vm200-physical-closeout",
+                "severity": "medium",
+                "runtime": row.get("hostname"),
+                "source": rel(VM_LIFECYCLE_PATH),
+                "detail": "Delete vm-200-disk-0 only after proving the md1400 cold capsule, capturing qm config, and recording artifact size or checksum.",
+            }
+        )
+
+    risk_rows_unique: list[dict[str, Any]] = []
+    seen_risks: set[tuple[str, str]] = set()
+    for row in risk_rows:
+        key = (str(row.get("risk_id") or ""), str(row.get("detail") or ""))
+        if key in seen_risks:
+            continue
+        seen_risks.add(key)
+        risk_rows_unique.append(row)
+
+    storage_map: dict[str, Any] = {
+        "version": 1,
+        "generated_at_utc": generated_at_utc,
+        "site": "shop",
+        "generated_by": {
+            "capability": "infra.shop.storage.authority.build",
+            "script": rel(Path(__file__)),
+        },
+        "source_surfaces": source_surfaces,
+        "tier_model": storage_tiers,
+        "storage_planes": storage_planes,
+        "machine_summary": {
+            "machine_id": "pve",
+            "hostname": pve_machine.get("hostname"),
+            "model": pve_machine.get("model"),
+            "boot_drives": pve_machine.get("boot_drives"),
+            "internal_pools": pve_machine.get("internal_drives"),
+            "external_shelves": pve_machine.get("external_shelves"),
+        },
+        "runtime_storage": runtime_rows,
+        "tombstones": tombstones,
+        "current_risks": risk_rows_unique,
+        "summary": {
+            "active_runtime_count": len(runtime_rows),
+            "tombstone_count": len(tombstones),
+            "public_runtime_count": len([row for row in runtime_rows if row.get("public_route_count", 0) > 0]),
+            "private_only_runtime_count": len([row for row in runtime_rows if row.get("public_route_count", 0) == 0]),
+        },
+    }
+    return storage_map
+
+
+def render_binding(storage_map: dict[str, Any]) -> str:
+    header = "\n".join(
+        [
+            "# Shop Storage Authority Projection",
+            "# Non-secret. Spine-native.",
+            "# Status: generated",
+            "# authority_state: projection",
+            "# authority_concern: shop_storage_truth",
+            "# Do not edit manually — rebuild with: ./bin/ops cap run infra.shop.storage.authority.build",
+            "",
+        ]
+    )
+    return f"{header}{yaml_dump(storage_map)}"
+
+
+def scorecard_row(storage_row: dict[str, Any]) -> list[str]:
+    storage_objects = storage_row.get("storage_objects") or []
+    storage_summary = []
+    for row in storage_objects[:3]:
+        obj = str(row.get("object") or "")
+        pool = str(row.get("pool") or "")
+        if pool:
+            storage_summary.append(f"{pool}:{obj}")
+        else:
+            storage_summary.append(obj)
+    storage_summary = list(dict.fromkeys(storage_summary))
+    if len(storage_objects) > 3:
+        storage_summary.append(f"+{len(storage_objects) - 3} more")
+    monitoring = f"{len(storage_row.get('health_probe_ids') or [])} probes"
+    if "node-exporter" in " ".join(storage_row.get("active_services") or []):
+        monitoring += ", node-exporter"
+    ingress = format_list([str(row.get("hostname") or "") for row in storage_row.get("public_routes") or []])
+    if not ingress or ingress == "none":
+        ingress = "private-only"
+    return [
+        str(storage_row.get("vmid") or ""),
+        str(storage_row.get("hostname") or ""),
+        str(storage_row.get("kind") or ""),
+        str(storage_row.get("startup_policy") or "unknown"),
+        str(storage_row.get("storage_tier") or "unknown"),
+        format_list(storage_summary),
+        format_list([str(row.get("lane_id") or "") for row in storage_row.get("backup_generation_lanes") or []]),
+        ingress,
+        monitoring,
+    ]
+
+
+def markdown_table(headers: list[str], rows: list[list[str]]) -> str:
+    header_line = "| " + " | ".join(headers) + " |"
+    divider_line = "| " + " | ".join(["---"] * len(headers)) + " |"
+    body = ["| " + " | ".join(row) + " |" for row in rows]
+    return "\n".join([header_line, divider_line, *body])
+
+
+def render_scorecard(storage_map: dict[str, Any]) -> str:
+    generated_at = str(storage_map.get("generated_at_utc") or "")
+    summary = storage_map.get("summary") or {}
+    tier_rows = [
+        [
+            str(row.get("tier_id") or ""),
+            str(row.get("plane") or ""),
+            str(row.get("purpose") or ""),
+            str(row.get("layout") or ""),
+            str(row.get("drives") or ""),
+        ]
+        for row in storage_map.get("tier_model") or []
+    ]
+    runtime_rows = [scorecard_row(row) for row in storage_map.get("runtime_storage") or []]
+    tombstone_rows = [
+        [
+            str(row.get("vmid") or ""),
+            str(row.get("hostname") or ""),
+            str(row.get("hot_runtime_disk_ref") or row.get("hot_runtime_disk") or ""),
+            str(row.get("cold_restore_base_path") or ""),
+            str(row.get("review_by") or ""),
+            "isolated sandbox only" if row.get("restore_requires_isolation") else "unspecified",
+        ]
+        for row in storage_map.get("tombstones") or []
+    ]
+    risk_lines = [
+        f"- `{row.get('runtime')}`: {row.get('detail')} ({row.get('source')})"
+        for row in storage_map.get("current_risks") or []
+    ]
+    if not risk_lines:
+        risk_lines = ["- none"]
+
+    return "\n".join(
+        [
+            "---",
+            "status: generated",
+            'owner: "@ronny"',
+            f"last_verified: {today_utc()}",
+            "scope: shop-rack-scorecard",
+            f"source_binding: {rel(OUTPUT_BINDING_PATH)}",
+            "---",
+            "",
+            "# Shop Rack Scorecard",
+            "",
+            f"- Generated: `{generated_at}`",
+            f"- Rebuild: `./bin/ops cap run infra.shop.storage.authority.build`",
+            f"- Active runtimes: `{summary.get('active_runtime_count', 0)}`",
+            f"- Tombstones: `{summary.get('tombstone_count', 0)}`",
+            f"- Public runtimes: `{summary.get('public_runtime_count', 0)}`",
+            "",
+            "## Substrate",
+            "",
+            "| Plane | Canonical surface | Current truth |",
+            "| --- | --- | --- |",
+            "| Hypervisor | `ops/bindings/hardware.inventory.yaml` | `pve` is the only shop hypervisor. |",
+            f"| Storage map | `{rel(OUTPUT_BINDING_PATH)}` | Runtime, backup, and tombstone storage truth are projected from authoritative bindings. |",
+            "| Ingress | `docs/governance/SERVICE_REGISTRY.yaml` + `ops/bindings/domain.routing.registry.yaml` | Public reachability is derived from live service and route registry surfaces. |",
+            "",
+            "## Storage Tiers",
+            "",
+            markdown_table(
+                ["Tier", "Plane", "Purpose", "Layout", "Backing"],
+                tier_rows,
+            ),
+            "",
+            "## Active Runtime Units",
+            "",
+            markdown_table(
+                ["VMID", "Runtime", "Kind", "Startup", "Tier", "Durable State", "Backup Lane", "Ingress", "Monitoring"],
+                runtime_rows,
+            ),
+            "",
+            "## Tombstones",
+            "",
+            markdown_table(
+                ["VMID", "Runtime", "Hot Footprint", "Cold Capsule", "Review", "Restore Rule"],
+                tombstone_rows,
+            ),
+            "",
+            "## Current Risks",
+            "",
+            *risk_lines,
+            "",
+        ]
+    )
+
+
+def write_or_check(path: Path, content: str, *, check: bool) -> None:
+    existing = path.read_text(encoding="utf-8") if path.exists() else None
+    if check:
+        if existing != content:
+            fail(f"drift detected: {rel(path)}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def main() -> None:
+    args = parse_args()
+    generated_at_utc = now_utc_iso()
+    if args.check:
+        generated_at_utc = load_existing_generated_at() or generated_at_utc
+    storage_map = build_authority_model(generated_at_utc=generated_at_utc)
+    binding_text = render_binding(storage_map)
+    scorecard_text = render_scorecard(storage_map)
+
+    write_or_check(OUTPUT_BINDING_PATH, binding_text, check=args.check)
+    write_or_check(OUTPUT_SCORECARD_PATH, scorecard_text, check=args.check)
+
+    if args.check:
+        print("infra.shop.storage.authority.build")
+        print("status: ok")
+        print(f"binding: {rel(OUTPUT_BINDING_PATH)}")
+        print(f"scorecard: {rel(OUTPUT_SCORECARD_PATH)}")
+        return
+
+    print("infra.shop.storage.authority.build")
+    print(f"generated_at_utc: {storage_map['generated_at_utc']}")
+    print(f"binding: {rel(OUTPUT_BINDING_PATH)}")
+    print(f"scorecard: {rel(OUTPUT_SCORECARD_PATH)}")
+    print(f"active_runtime_count: {storage_map['summary']['active_runtime_count']}")
+    print(f"tombstone_count: {storage_map['summary']['tombstone_count']}")
+
+
+if __name__ == "__main__":
+    main()
