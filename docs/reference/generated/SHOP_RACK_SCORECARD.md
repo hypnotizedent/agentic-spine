@@ -8,7 +8,7 @@ source_binding: ops/bindings/shop.storage.map.yaml
 
 # Shop Rack Scorecard
 
-- Generated: `2026-03-12T04:37:18Z`
+- Generated: `2026-03-12T05:13:36Z`
 - Rebuild: `./bin/ops cap run infra.shop.storage.authority.build`
 - Active runtimes: `14`
 - Tombstones: `1`
@@ -29,6 +29,34 @@ source_binding: ops/bindings/shop.storage.map.yaml
 | tank | hot_runtime | Primary hot VM/app/runtime pool on pve. | RAIDZ2 | sda-sdh |
 | media | warm_payload | Media payload only or phased-out pressure lane. | RAIDZ1 | sdi-sdl |
 | md1400 | cold_backup_archive_stage | Cold backup/archive/staging shelf for the shop environment. | RAIDZ2 (12 drives) | 12 physical drives |
+
+## Media Pressure
+
+- Observed: `2026-03-12T05:08:17Z`
+- media: `28.9T used`, `176G free`, `99%`
+- md1400: `7.30T used`, `36.3T free`, `16%`
+- Canonical payload: `15.9TiB`
+- Regenerable runtime pressure: `2.61TiB`
+- View truth: The client-visible /media export is authoritative for payload accounting. The host-local paths /media/movies, /media/tv, and /media/music are empty child datasets, and /media/movies-archive is currently masked by md1400/media-cold/movies-archive. NFS consumers still observe live parent payload at those paths, so host-local du/zfs output alone is not storage truth.
+
+
+| Path | Surface Class | Reclaim Class | Usage | Purpose |
+| --- | --- | --- | --- | --- |
+| /mnt/media/movies | runtime | payload | 9.6T | Canonical movie library served to streaming-stack and maintained from download-stack. |
+| /mnt/media/tv | runtime | payload | 5.5T | Canonical TV library served to streaming-stack and maintained from download-stack. |
+| /mnt/media/downloads | runtime | regenerable | 2.7T | Active import/download lane for SABnzbd, qBittorrent, and related media tooling. |
+| /mnt/media/music | runtime | payload | 666G | Canonical music library served to streaming-stack and maintained from download-stack. |
+| /mnt/media/movies-archive | archive | archive | 205G | Radarr archive root reachable over the canonical /media export. |
+| /mnt/media/backups | compatibility-hold | archive | 6.7M | Legacy warm-lane media-stack tarballs being drained to md1400; not canonical backup truth. |
+
+| Lane | Status | Target | Current Size | Rationale |
+| --- | --- | --- | --- | --- |
+| media-stack-legacy-backups-drain | done | /media/backups | 0 | Canonical media config backups already live under /md1400/backup-cold/apps/media-config. These warm-lane tarballs are legacy archive residue and now live on md1400, not on media.
+ |
+| media-forensic-snapshot-hold | blocked | media@forensic-20260226-2325 | 278G | Retained forensic snapshot from the copy-first utilization upgrade. Deleting it in this wave would discard restore evidence; keeping it means deleted media blocks are not reclaimed immediately.
+ |
+| media-downloads-reclaim | candidate | /mnt/media/downloads | 2.7T | Downloads are the largest regenerable consumer on the warm lane. Reclaim should be selective and tool-aware, not a blind delete, but this is the highest-value live cleanup path once active imports are reviewed.
+ |
 
 ## Active Runtime Units
 
@@ -65,3 +93,4 @@ source_binding: ops/bindings/shop.storage.map.yaml
 - `finance-stack`: 12% boot usage (11GB/92GB) after truncating 59GB firefly-cron crash log. Actual data only 531MB. Fixed cron binary (crond→cron). Log rotation added. Re-evaluate if usage exceeds 60%. (ops/bindings/infra.storage.placement.policy.yaml)
 - `communications-stack`: Boot is ZFS zvol (not local-lvm). Stalwart on named volume. Mail-archiver needs /srv/mail-archiver non-boot path. (ops/bindings/infra.storage.placement.policy.yaml)
 - `surveillance-stack`: Exact durable path is now captured: /mnt/data/frigate/recordings (76G), /mnt/data/frigate/clips (5.1G), and /mnt/data/frigate/snapshots on the 100G secondary tank-vms disk. /home/ubuntu/surveillance/config remains on the 50G boot disk (~484M), so the lane is no longer unknown but still not fully non-boot. (ops/bindings/infra.storage.placement.policy.yaml)
+- `media`: media is at 99% usage. NFS-visible canonical payload already accounts for about 15.9TiB (movies/tv/music plus movies-archive), downloads adds about 2.61TiB of regenerable pressure, the legacy warm-lane media-stack tarballs are now offloaded to md1400, and the retained forensic snapshot has grown to 278G, so the migration does not reclaim space immediately. (ops/bindings/shop.media.pressure.authority.yaml)

@@ -21,6 +21,7 @@ BACKUP_PATH = ROOT / "ops/bindings/backup.inventory.yaml"
 SERVICE_REGISTRY_PATH = ROOT / "docs/governance/SERVICE_REGISTRY.yaml"
 SERVICES_HEALTH_PATH = ROOT / "ops/bindings/services.health.yaml"
 ROUTING_PATH = ROOT / "ops/bindings/domain.routing.registry.yaml"
+MEDIA_PRESSURE_PATH = ROOT / "ops/bindings/shop.media.pressure.authority.yaml"
 OUTPUT_BINDING_PATH = ROOT / "ops/bindings/shop.storage.map.yaml"
 OUTPUT_SCORECARD_PATH = ROOT / "docs/reference/generated/SHOP_RACK_SCORECARD.md"
 
@@ -360,6 +361,7 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
     services = load_yaml(SERVICE_REGISTRY_PATH)
     health = load_yaml(SERVICES_HEALTH_PATH)
     routing = load_yaml(ROUTING_PATH)
+    media_pressure = load_yaml(MEDIA_PRESSURE_PATH)
 
     source_surfaces = [
         rel(HARDWARE_PATH),
@@ -370,6 +372,7 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
         rel(SERVICE_REGISTRY_PATH),
         rel(SERVICES_HEALTH_PATH),
         rel(ROUTING_PATH),
+        rel(MEDIA_PRESSURE_PATH),
     ]
 
     machines = {str(row.get("machine_id") or ""): row for row in hardware.get("machines") or [] if isinstance(row, dict)}
@@ -560,6 +563,7 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
 
     runtime_rows: list[dict[str, Any]] = []
     risk_rows: list[dict[str, Any]] = []
+    media_pressure_summary = media_pressure.get("summary") or {}
 
     for vm in sorted(active_shop_vms, key=lambda row: int(row.get("id") or 0)):
         vm_id = int(vm.get("id") or 0)
@@ -719,6 +723,25 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
                 }
             )
 
+    media_pressure_view = {
+        "pool_state": media_pressure.get("pool_state") or {},
+        "nfs_export_truth": media_pressure.get("nfs_export_truth") or {},
+        "payload_by_path": media_pressure.get("payload_by_path") or [],
+        "reclaim_lanes": media_pressure.get("reclaim_lanes") or [],
+        "summary": media_pressure_summary,
+    }
+    blocking_summary = str(media_pressure_summary.get("blocking_summary") or "").strip()
+    if blocking_summary:
+        risk_rows.append(
+            {
+                "risk_id": "shop-media-pressure",
+                "severity": "high",
+                "runtime": "media",
+                "source": rel(MEDIA_PRESSURE_PATH),
+                "detail": blocking_summary,
+            }
+        )
+
     risk_rows_unique: list[dict[str, Any]] = []
     seen_risks: set[tuple[str, str]] = set()
     for row in risk_rows:
@@ -747,6 +770,7 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
             "internal_pools": pve_machine.get("internal_drives"),
             "external_shelves": pve_machine.get("external_shelves"),
         },
+        "media_pressure": media_pressure_view,
         "runtime_storage": runtime_rows,
         "tombstones": tombstones,
         "current_risks": risk_rows_unique,
@@ -817,6 +841,11 @@ def markdown_table(headers: list[str], rows: list[list[str]]) -> str:
 def render_scorecard(storage_map: dict[str, Any]) -> str:
     generated_at = str(storage_map.get("generated_at_utc") or "")
     summary = storage_map.get("summary") or {}
+    media_pressure = storage_map.get("media_pressure") or {}
+    pool_state = media_pressure.get("pool_state") or {}
+    media_pool = pool_state.get("media") or {}
+    md_pool = pool_state.get("md1400") or {}
+    pressure_summary = media_pressure.get("summary") or {}
     tier_rows = [
         [
             str(row.get("tier_id") or ""),
@@ -828,6 +857,37 @@ def render_scorecard(storage_map: dict[str, Any]) -> str:
         for row in storage_map.get("tier_model") or []
     ]
     runtime_rows = [scorecard_row(row) for row in storage_map.get("runtime_storage") or []]
+    payload_rows = [
+        [
+            str(row.get("path") or ""),
+            str(row.get("surface_class") or ""),
+            str(row.get("reclaim_class") or ""),
+            str(row.get("used_display") or ""),
+            str(row.get("purpose") or ""),
+        ]
+        for row in media_pressure.get("payload_by_path") or []
+    ]
+    reclaim_rows = [
+        [
+            str(row.get("lane_id") or ""),
+            str(row.get("status") or ""),
+            str(
+                row.get("source_path")
+                or row.get("path")
+                or row.get("snapshot")
+                or row.get("destination_path")
+                or ""
+            ),
+            str(
+                row.get("source_remaining_display")
+                or row.get("used_display")
+                or row.get("destination_present_display")
+                or ""
+            ),
+            str(row.get("rationale") or ""),
+        ]
+        for row in media_pressure.get("reclaim_lanes") or []
+    ]
     tombstone_rows = [
         [
             str(row.get("vm_id") or ""),
@@ -877,6 +937,25 @@ def render_scorecard(storage_map: dict[str, Any]) -> str:
             markdown_table(
                 ["Tier", "Plane", "Purpose", "Layout", "Backing"],
                 tier_rows,
+            ),
+            "",
+            "## Media Pressure",
+            "",
+            f"- Observed: `{pool_state.get('observed_at_utc', 'unknown')}`",
+            f"- media: `{media_pool.get('used_display', 'unknown')} used`, `{media_pool.get('free_display', 'unknown')} free`, `{media_pool.get('usage_pct', 'unknown')}%`",
+            f"- md1400: `{md_pool.get('used_display', 'unknown')} used`, `{md_pool.get('free_display', 'unknown')} free`, `{md_pool.get('usage_pct', 'unknown')}%`",
+            f"- Canonical payload: `{pressure_summary.get('canonical_payload_display', 'unknown')}`",
+            f"- Regenerable runtime pressure: `{pressure_summary.get('regenerable_runtime_display', 'unknown')}`",
+            f"- View truth: {str((media_pressure.get('nfs_export_truth') or {}).get('local_view_drift', {}).get('summary') or 'none')}",
+            "",
+            markdown_table(
+                ["Path", "Surface Class", "Reclaim Class", "Usage", "Purpose"],
+                payload_rows,
+            ),
+            "",
+            markdown_table(
+                ["Lane", "Status", "Target", "Current Size", "Rationale"],
+                reclaim_rows,
             ),
             "",
             "## Active Runtime Units",

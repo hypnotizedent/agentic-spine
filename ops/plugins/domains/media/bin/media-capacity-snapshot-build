@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../../../../" && pwd)"
 POLICY_FILE="$ROOT/ops/bindings/infra.capacity.guard.policy.yaml"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+PRESSURE_AUTHORITY="$ROOT/ops/bindings/shop.media.pressure.authority.yaml"
 
 DRY_RUN=0
 JSON_MODE=0
@@ -91,7 +92,7 @@ ssh "${SSH_OPTS[@]}" "$REF" "zfs list -Hp -o name,used -r '$POOL_NAME' 2>/dev/nu
 ts_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 mkdir -p "$(dirname "$SNAPSHOT_PATH")" "$(dirname "$HISTORY_PATH")"
 
-python3 - "$ROOT" "$POLICY_FILE" "$SNAPSHOT_PATH" "$HISTORY_PATH" "$dataset_tmp" "$ts_utc" "$pool_line" "$POOL_NAME" "$STORAGE_HOST_ID" "$WARN_PCT" "$FAIL_PCT" "$RUNWAY_MIN_DAYS" "$WINDOW_DAYS" "$TTL_HOURS" "$TOP_LIMIT" "$NO_WAN_RULE" "$DRY_RUN" "$JSON_MODE" <<'PY'
+python3 - "$ROOT" "$POLICY_FILE" "$SNAPSHOT_PATH" "$HISTORY_PATH" "$dataset_tmp" "$ts_utc" "$pool_line" "$POOL_NAME" "$STORAGE_HOST_ID" "$WARN_PCT" "$FAIL_PCT" "$RUNWAY_MIN_DAYS" "$WINDOW_DAYS" "$TTL_HOURS" "$TOP_LIMIT" "$NO_WAN_RULE" "$DRY_RUN" "$JSON_MODE" "$PRESSURE_AUTHORITY" <<'PY'
 import datetime as dt
 import json
 import math
@@ -120,13 +121,15 @@ import yaml
     no_wan_rule,
     dry_run,
     json_mode,
-) = sys.argv[1:19]
+    pressure_authority_path,
+) = sys.argv[1:20]
 
 root_path = pathlib.Path(root)
 policy_path = pathlib.Path(policy_path)
 snapshot_path = pathlib.Path(snapshot_path)
 history_path = pathlib.Path(history_path)
 dataset_path = pathlib.Path(dataset_path)
+pressure_authority_path = pathlib.Path(pressure_authority_path)
 
 dry = dry_run == "1"
 json_out = json_mode == "1"
@@ -261,7 +264,42 @@ else:
     compliance_reason = "runway status not healthy (warn/critical) against runway_min_days target"
 
 contributors = []
-if dataset_path.exists():
+visibility_source = "zfs list -r media"
+visibility_note = ""
+pressure_authority = {}
+if pressure_authority_path.exists():
+    try:
+        pressure_authority = yaml.safe_load(pressure_authority_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        pressure_authority = {}
+
+pressure_rows = pressure_authority.get("payload_by_path") or []
+if pressure_rows:
+    for row in pressure_rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            used = int(float(row.get("used_bytes", 0) or 0))
+        except Exception:
+            continue
+        if used <= 0:
+            continue
+        contributors.append({
+            "dataset": str(row.get("path") or ""),
+            "used_bytes": used,
+            "used_gib": round(used / (1024 ** 3), 2),
+            "class": str(row.get("reclaim_class") or row.get("surface_class") or "unknown"),
+        })
+    contributors.sort(key=lambda row: row["used_bytes"], reverse=True)
+    contributors = contributors[:top_limit_i]
+    try:
+        visibility_source = str(pressure_authority_path.relative_to(root_path))
+    except Exception:
+        visibility_source = str(pressure_authority_path)
+    visibility_note = str(
+        ((pressure_authority.get("nfs_export_truth") or {}).get("local_view_drift") or {}).get("summary") or ""
+    ).strip()
+elif dataset_path.exists():
     for line in dataset_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -338,6 +376,10 @@ snapshot = {
         },
         "runway_min_days": runway_min_days_i,
         "no_bulk_wan_transfer_rule": no_wan_rule,
+    },
+    "visibility_truth": {
+        "source": visibility_source,
+        "note": visibility_note,
     },
 }
 

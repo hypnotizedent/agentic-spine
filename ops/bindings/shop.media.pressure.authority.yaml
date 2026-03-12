@@ -1,0 +1,174 @@
+version: 1
+status: authoritative
+owner: "@ronny"
+updated_at: "2026-03-12"
+scope: shop-media-pressure
+
+purpose: >
+  Live-backed authority for shop warm-lane pressure on the media pool.
+  Records client-visible /media payload truth, local mount overlay drift,
+  reclaim candidates, and blocked holds so scorecards do not confuse the
+  host-local ZFS mount view with the runtime-visible NFS export.
+
+evidence:
+  docs:
+    - ops/bindings/media.path.authority.contract.yaml
+    - ops/bindings/backup.inventory.yaml
+    - docs/reference/audits/MD1400_CAPACITY_NORMALIZATION_EXECUTION_20260227.md
+  live_reads:
+    - host: pve
+      observed_at_utc: "2026-03-12T05:08:17Z"
+      proof:
+        - "zpool list -Hp -o name,size,alloc,free,capacity media md1400"
+        - "zfs list -o name,used,refer,mountpoint media media/movies media/music media/tv md1400/media-cold md1400/media-cold/movies-archive"
+        - "zfs list -t snapshot -o name,used,creation -s used -r media"
+        - "zfs get -H -o property,value used,referenced,clones media@forensic-20260226-2325"
+        - "exportfs -v | grep -A2 '^/media '"
+        - "find /media/backups -maxdepth 1 -type f -name 'media-stack-2026-*.tar.gz' | wc -l"
+        - "du -sx --block-size=1 /media/backups"
+        - "find /md1400/media-cold/legacy-media-stack-backups -maxdepth 1 -type f -name 'media-stack-2026-*.tar.gz' | wc -l"
+        - "du -sx --block-size=1 /md1400/media-cold/legacy-media-stack-backups"
+    - host: streaming-stack
+      observed_at_utc: "2026-03-12T05:08:17Z"
+      proof:
+        - "mount | grep '/mnt/media '"
+        - "du -xhd1 /mnt/media | sort -h"
+        - "du -sx --block-size=1 /mnt/media/backups /mnt/media/downloads /mnt/media/movies /mnt/media/movies-archive /mnt/media/music /mnt/media/tv | sort -nr"
+
+pool_state:
+  observed_at_utc: "2026-03-12T05:08:17Z"
+  media:
+    total_bytes: 32006096289792
+    used_bytes: 31816960622592
+    free_bytes: 189135667200
+    usage_pct: 99
+    total_display: "29.1T"
+    used_display: "28.9T"
+    free_display: "176G"
+  md1400:
+    total_bytes: 48000554500096
+    used_bytes: 8030321017344
+    free_bytes: 39970233482752
+    usage_pct: 16
+    total_display: "43.7T"
+    used_display: "7.30T"
+    free_display: "36.3T"
+
+nfs_export_truth:
+  export_host: pve
+  export_path: /media
+  consumers:
+    - host: download-stack
+      mount_path: /mnt/media
+      mode: rw
+    - host: streaming-stack
+      mount_path: /mnt/media
+      mode: ro
+  local_view_drift:
+    status: accepted
+    summary: >
+      The client-visible /media export is authoritative for payload accounting.
+      The host-local paths /media/movies, /media/tv, and /media/music are empty
+      child datasets, and /media/movies-archive is currently masked by
+      md1400/media-cold/movies-archive. NFS consumers still observe live parent
+      payload at those paths, so host-local du/zfs output alone is not storage truth.
+    affected_paths:
+      - /media/movies
+      - /media/tv
+      - /media/music
+      - /media/movies-archive
+
+payload_by_path:
+  - path: /mnt/media/movies
+    surface_class: runtime
+    reclaim_class: payload
+    owner: streaming-stack
+    purpose: Canonical movie library served to streaming-stack and maintained from download-stack.
+    used_bytes: 10534383010816
+    used_display: "9.6T"
+  - path: /mnt/media/tv
+    surface_class: runtime
+    reclaim_class: payload
+    owner: streaming-stack
+    purpose: Canonical TV library served to streaming-stack and maintained from download-stack.
+    used_bytes: 5998179902464
+    used_display: "5.5T"
+  - path: /mnt/media/downloads
+    surface_class: runtime
+    reclaim_class: regenerable
+    owner: download-stack
+    purpose: Active import/download lane for SABnzbd, qBittorrent, and related media tooling.
+    used_bytes: 2873736959488
+    used_display: "2.7T"
+  - path: /mnt/media/music
+    surface_class: runtime
+    reclaim_class: payload
+    owner: streaming-stack
+    purpose: Canonical music library served to streaming-stack and maintained from download-stack.
+    used_bytes: 714370220032
+    used_display: "666G"
+  - path: /mnt/media/movies-archive
+    surface_class: archive
+    reclaim_class: archive
+    owner: download-stack
+    purpose: Radarr archive root reachable over the canonical /media export.
+    used_bytes: 219933550080
+    used_display: "205G"
+  - path: /mnt/media/backups
+    surface_class: compatibility-hold
+    reclaim_class: archive
+    owner: pve
+    purpose: Legacy warm-lane media-stack tarballs being drained to md1400; not canonical backup truth.
+    used_bytes: 6971392
+    used_display: "6.7M"
+
+reclaim_lanes:
+  - lane_id: media-stack-legacy-backups-drain
+    surface_class: compatibility-hold
+    reclaim_class: archive
+    status: done
+    source_path: /media/backups
+    source_glob: media-stack-2026-*.tar.gz
+    source_remaining_count: 0
+    source_remaining_bytes: 0
+    source_remaining_display: "0"
+    destination_path: /md1400/media-cold/legacy-media-stack-backups
+    destination_present_count: 25
+    destination_present_bytes: 182284270592
+    destination_present_display: "169.8G"
+    rationale: >
+      Canonical media config backups already live under /md1400/backup-cold/apps/media-config.
+      These warm-lane tarballs are legacy archive residue and now live on md1400, not on media.
+  - lane_id: media-forensic-snapshot-hold
+    surface_class: archive
+    reclaim_class: blocked
+    status: blocked
+    snapshot: media@forensic-20260226-2325
+    used_bytes: 298500227072
+    used_display: "278G"
+    referenced_display: "14.9T"
+    rationale: >
+      Retained forensic snapshot from the copy-first utilization upgrade. Deleting it in this
+      wave would discard restore evidence; keeping it means deleted media blocks are not reclaimed immediately.
+  - lane_id: media-downloads-reclaim
+    surface_class: runtime
+    reclaim_class: regenerable
+    status: candidate
+    path: /mnt/media/downloads
+    used_bytes: 2873736959488
+    used_display: "2.7T"
+    rationale: >
+      Downloads are the largest regenerable consumer on the warm lane. Reclaim should be selective and
+      tool-aware, not a blind delete, but this is the highest-value live cleanup path once active imports are reviewed.
+
+summary:
+  canonical_payload_bytes: 17466866683392
+  canonical_payload_display: "15.9TiB"
+  regenerable_runtime_bytes: 2873736959488
+  regenerable_runtime_display: "2.61TiB"
+  blocking_summary: >
+    media is at 99% usage. NFS-visible canonical payload already accounts for about 15.9TiB
+    (movies/tv/music plus movies-archive), downloads adds about 2.61TiB of regenerable pressure,
+    the legacy warm-lane media-stack tarballs are now offloaded to md1400, and the retained forensic
+    snapshot has grown to 278G, so the migration does not reclaim space immediately.
+  safe_to_change_drives: blocked

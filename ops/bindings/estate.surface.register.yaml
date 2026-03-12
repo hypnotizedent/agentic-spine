@@ -3,7 +3,7 @@
 # Status: generated
 # Do not edit manually — rebuild with: ./bin/ops cap run infra.estate.boringness.build
 version: 1
-generated_at_utc: '2026-03-12T04:34:50Z'
+generated_at_utc: '2026-03-12T05:09:25Z'
 generated_by:
   capability: infra.estate.boringness.build
   script: ops/plugins/infra/bin/infra-estate-boringness-build
@@ -32,13 +32,19 @@ sites:
   shop:
     boring_enough_now: false
     summary: Shop rack is structurally legible and inventory-backed; VM200 hot footprint
-      is gone and the remaining blocker is warm-lane pressure on media.
+      is gone and the remaining blocker is warm-lane pressure on media plus a retained
+      forensic snapshot hold.
     storage_tiers:
       hot: tank
       warm: media
       cold: md1400
     blockers:
-    - media has only 176G free and remains a pressured warm lane.
+    - media is at 99% usage and only has about 189G free.
+    - Client-visible /media payload already accounts for about 15.9TiB of canonical
+      movie/TV/music/archive content, so the remaining easy reclaim is mostly downloads.
+    - media@forensic-20260226-2325 is still retained as a forensic hold and has grown
+      to 278G, so the completed backup drain still does not immediately reclaim matching
+      space.
   home:
     boring_enough_now: false
     summary: Home infra now has authoritative inventory and backup truth, but one-box
@@ -155,6 +161,16 @@ compatibility_holds:
   kind: public_route
   note: Legacy or deprecated MCP surface retained on .co by design. Keep on .co to
     avoid implying a current canonical Mint runtime.
+- id: media-export-overlay-drift
+  environment: shop
+  kind: storage_mount_overlay
+  note: Client-visible /media payload truth comes from the NFS export, not the host-local
+    child dataset mount view at /media/movies, /media/tv, /media/music, and /media/movies-archive.
+- id: media-forensic-20260226-2325
+  environment: shop
+  kind: storage_snapshot_hold
+  note: Retained forensic snapshot on media preserves deleted blocks and blocks immediate
+    reclaim during the copy-first normalization wave.
 - id: minio.mintprints.co
   environment: shop
   kind: public_route
@@ -260,6 +276,19 @@ decisions:
   status: done
   rationale: Cold capsule path/size/SHA-256 and qemu config were captured before delete,
     then qm disk unlink removed scsi0 and the backing LV on 2026-03-12T04:30:02Z.
+- decision_type: safe_to_migrate
+  subject: legacy media-stack tarballs from /media/backups to /md1400/media-cold/legacy-media-stack-backups
+  environment: shop
+  status: done
+  rationale: Canonical media config backups already live under /md1400/backup-cold/apps/media-config.
+    The historical warm-lane tarballs are now fully parked on md1400 and no longer
+    live on media.
+- decision_type: safe_to_delete
+  subject: media@forensic-20260226-2325
+  environment: shop
+  status: blocked
+  rationale: Snapshot still acts as a forensic restore hold for the copy-first utilization
+    wave. Deleting it would change the restore story, not just free space.
 - decision_type: safe_to_delete
   subject: Synology mint-os legacy residue
   environment: home
@@ -282,8 +311,9 @@ decisions:
   subject: shop rack hot/warm/cold storage
   environment: shop
   status: blocked
-  rationale: VM200 hot LV is gone, but media remains at 28.9T used / 176G free and
-    still blocks confident drive-change work on the warm lane.
+  rationale: VM200 hot LV is gone, but media remains at 99% usage, downloads still
+    contribute about 2.61TiB of regenerable pressure, and the retained forensic snapshot
+    prevents warm-lane deletions from reclaiming space immediately.
 - decision_type: safe_to_change_drives
   subject: proxmox-home and Synology drives
   environment: home

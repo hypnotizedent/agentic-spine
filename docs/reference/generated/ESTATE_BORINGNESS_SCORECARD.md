@@ -8,11 +8,11 @@ source_binding: ops/bindings/estate.surface.register.yaml
 
 # Estate Boringness Scorecard
 
-- Generated: `2026-03-12T04:34:50Z`
+- Generated: `2026-03-12T05:09:25Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
 - Repo surfaces tracked: `2`
 - Ghosts: `10`
-- Compatibility holds: `18`
+- Compatibility holds: `20`
 - Tombstones: `4`
 - Unknowns: `1`
 
@@ -27,7 +27,7 @@ source_binding: ops/bindings/estate.surface.register.yaml
 
 | Environment | Boring Enough | Storage Story | Exact Blocker |
 | --- | --- | --- | --- |
-| shop | no | hot=tank, warm=media, cold=md1400 | media has only 176G free and remains a pressured warm lane. |
+| shop | no | hot=tank, warm=media, cold=md1400 | media is at 99% usage and only has about 189G free.; Client-visible /media payload already accounts for about 15.9TiB of canonical movie/TV/music/archive content, so the remaining easy reclaim is mostly downloads.; media@forensic-20260226-2325 is still retained as a forensic hold and has grown to 278G, so the completed backup drain still does not immediately reclaim matching space. |
 | home | no | hot=proxmox-home local-lvm, warm_backup=synology /volume1/backups/proxmox_backups/dump, warm_data=synology /volume1, cold_offsite=none_declared | No declared second-environment cold/offsite restore plane exists for home personal data on Synology.; Home switch ports 3/4/6 still rely on inferred endpoint identity instead of traced physical truth.; Synology mint-os residue remains as non-canonical historical hold. |
 
 ## Ghosts
@@ -58,6 +58,8 @@ source_binding: ops/bindings/estate.surface.register.yaml
 | firefly.ronny.works | shop | public_route | Legacy finance alias retained for compatibility. Canonical public dashboard URL is finances.mintprints.com. |
 | investments.ronny.works | shop | public_route | Legacy finance alias retained for compatibility. Canonical public investment URL is investments.mintprints.com. |
 | mcp.mintprints.co | shop | public_route | Legacy or deprecated MCP surface retained on .co by design. Keep on .co to avoid implying a current canonical Mint runtime. |
+| media-export-overlay-drift | shop | storage_mount_overlay | Client-visible /media payload truth comes from the NFS export, not the host-local child dataset mount view at /media/movies, /media/tv, /media/music, and /media/movies-archive. |
+| media-forensic-20260226-2325 | shop | storage_snapshot_hold | Retained forensic snapshot on media preserves deleted blocks and blocks immediate reclaim during the copy-first normalization wave. |
 | minio.mintprints.co | shop | public_route | Legacy MinIO console alias retained during mintprints.com cutover. Canonical public URL is minio.mintprints.com. |
 | mint-modules-deploy-wrapper | code | repo_support_surface | mint-modules/deploy remains an operator wrapper and compatibility surface, not the canonical runtime definition lane. |
 | mintprints-app.ronny.works | shop | public_route | Cutover 2026-02-21 (LOOP-MINT-NEW-VM-SERVICES-E2E-20260221). Was docker-host. Legacy work alias; customer.mintprints.com is the canonical public URL. |
@@ -89,8 +91,10 @@ source_binding: ops/bindings/estate.surface.register.yaml
 | Decision | Subject | Status | Rationale |
 | --- | --- | --- | --- |
 | safe_to_delete | vm-200-disk-0 on pve local-lvm | done | Cold capsule path/size/SHA-256 and qemu config were captured before delete, then qm disk unlink removed scsi0 and the backing LV on 2026-03-12T04:30:02Z. |
+| safe_to_migrate | legacy media-stack tarballs from /media/backups to /md1400/media-cold/legacy-media-stack-backups | done | Canonical media config backups already live under /md1400/backup-cold/apps/media-config. The historical warm-lane tarballs are now fully parked on md1400 and no longer live on media. |
+| safe_to_delete | media@forensic-20260226-2325 | blocked | Snapshot still acts as a forensic restore hold for the copy-first utilization wave. Deleting it would change the restore story, not just free space. |
 | safe_to_delete | Synology mint-os legacy residue | candidate | Residue is reviewed and non-canonical, but it still functions as a historical hold and should be deleted only in a deliberate cleanup wave. |
 | safe_to_migrate | mint-modules future, blocked, and deferred roots | ready | Spine lifecycle authority already declares these roots non-runtime; moving them behind explicit lifecycle boundaries will not change live runtime behavior. |
 | safe_to_migrate | ronny-products parked app contracts | done | app.contract runtime status now matches the execution board: parked products are no longer marked active. |
-| safe_to_change_drives | shop rack hot/warm/cold storage | blocked | VM200 hot LV is gone, but media remains at 28.9T used / 176G free and still blocks confident drive-change work on the warm lane. |
+| safe_to_change_drives | shop rack hot/warm/cold storage | blocked | VM200 hot LV is gone, but media remains at 99% usage, downloads still contribute about 2.61TiB of regenerable pressure, and the retained forensic snapshot prevents warm-lane deletions from reclaiming space immediately. |
 | safe_to_change_drives | proxmox-home and Synology drives | blocked | Runtime backups exist on Synology, but the same enclosure remains canonical for home personal data and there is no declared second cold plane. |
