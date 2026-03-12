@@ -9,8 +9,10 @@
 #   seeds-query --status pending       # filter by status
 #   seeds-query --source quote_form    # filter by source
 #   seeds-query --email foo@bar.com    # filter by email
+#   seeds-query --seed-id <uuid>       # filter by exact seed id
 #   seeds-query --limit 50             # change result limit
 #   seeds-query --count                # count only
+#   seeds-query --json                 # structured JSON output
 
 set -euo pipefail
 
@@ -30,14 +32,16 @@ USER="$(yq -r '.ssh.targets[] | select(.id == "mint-data") | .user // "ubuntu"' 
 [[ -n "$HOST" && "$HOST" != "null" ]] || stop "mint-data not found in ssh.targets"
 
 # Parse args
-STATUS="" SOURCE="" EMAIL="" LIMIT=20 COUNT_ONLY=false
+STATUS="" SOURCE="" EMAIL="" SEED_ID="" LIMIT=20 COUNT_ONLY=false JSON_MODE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --status)  STATUS="$2"; shift 2 ;;
     --source)  SOURCE="$2"; shift 2 ;;
     --email)   EMAIL="$2"; shift 2 ;;
+    --seed-id) SEED_ID="$2"; shift 2 ;;
     --limit)   LIMIT="$2"; shift 2 ;;
     --count)   COUNT_ONLY=true; shift ;;
+    --json)    JSON_MODE=true; shift ;;
     *) stop "unknown arg: $1" ;;
   esac
 done
@@ -52,6 +56,7 @@ validate_input() {
 [[ -n "$STATUS" ]] && validate_input "$STATUS" "status"
 [[ -n "$SOURCE" ]] && validate_input "$SOURCE" "source"
 [[ -n "$EMAIL" ]]  && validate_input "$EMAIL" "email"
+[[ -n "$SEED_ID" ]] && validate_input "$SEED_ID" "seed-id"
 [[ "$LIMIT" =~ ^[0-9]+$ ]] || stop "invalid limit: $LIMIT"
 
 # Build WHERE clause
@@ -59,6 +64,7 @@ WHERE_PARTS=()
 [[ -n "$STATUS" ]] && WHERE_PARTS+=("s.status = '$STATUS'")
 [[ -n "$SOURCE" ]] && WHERE_PARTS+=("s.source = '$SOURCE'")
 [[ -n "$EMAIL" ]]  && WHERE_PARTS+=("COALESCE(c.email, s.from_email) = '$EMAIL'")
+[[ -n "$SEED_ID" ]] && WHERE_PARTS+=("CAST(s.id AS text) = '$SEED_ID'")
 
 WHERE=""
 if [[ ${#WHERE_PARTS[@]} -gt 0 ]]; then
@@ -67,20 +73,50 @@ fi
 
 SSH_OPTS=(-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
 
-echo "mint.seeds.query"
-echo "host: ${USER}@${HOST} (mint-data VM 212)"
-[[ -n "$STATUS" ]] && echo "filter.status: $STATUS"
-[[ -n "$SOURCE" ]] && echo "filter.source: $SOURCE"
-[[ -n "$EMAIL" ]]  && echo "filter.email: $EMAIL"
-echo
+if [[ "$JSON_MODE" != "true" ]]; then
+  echo "mint.seeds.query"
+  echo "host: ${USER}@${HOST} (mint-data VM 212)"
+  [[ -n "$STATUS" ]] && echo "filter.status: $STATUS"
+  [[ -n "$SOURCE" ]] && echo "filter.source: $SOURCE"
+  [[ -n "$EMAIL" ]]  && echo "filter.email: $EMAIL"
+  [[ -n "$SEED_ID" ]] && echo "filter.seed_id: $SEED_ID"
+  echo
+fi
 
 if [[ "$COUNT_ONLY" == "true" ]]; then
-  QUERY="SELECT count(*) AS total
+  if [[ "$JSON_MODE" == "true" ]]; then
+    QUERY="SELECT json_build_object('total', count(*)) AS payload
 FROM artwork_seeds s
 LEFT JOIN artwork_contacts c ON c.id = s.contact_id
 $WHERE;"
+  else
+    QUERY="SELECT count(*) AS total
+FROM artwork_seeds s
+LEFT JOIN artwork_contacts c ON c.id = s.contact_id
+$WHERE;"
+  fi
 else
-  QUERY="SELECT s.id, COALESCE(c.email, s.from_email) AS customer_email, s.source, s.status, COALESCE(CAST(j.job_number AS text), '-') AS job_number, s.created_at
+  if [[ "$JSON_MODE" == "true" ]]; then
+    QUERY="SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) AS payload
+FROM (
+  SELECT
+    CAST(s.id AS text) AS seed_id,
+    COALESCE(c.email, s.from_email) AS customer_email,
+    s.source,
+    s.status,
+    CAST(j.id AS text) AS job_id,
+    CAST(j.job_number AS text) AS job_number,
+    s.created_at
+  FROM artwork_seeds s
+  LEFT JOIN artwork_contacts c ON c.id = s.contact_id
+  LEFT JOIN artwork_job_seed_links jsl ON jsl.seed_id = s.id AND jsl.relation = 'attached'
+  LEFT JOIN artwork_jobs j ON j.id = jsl.job_id
+  $WHERE
+  ORDER BY s.created_at DESC
+  LIMIT $LIMIT
+) t;"
+  else
+    QUERY="SELECT s.id, COALESCE(c.email, s.from_email) AS customer_email, s.source, s.status, COALESCE(CAST(j.job_number AS text), '-') AS job_number, s.created_at
 FROM artwork_seeds s
 LEFT JOIN artwork_contacts c ON c.id = s.contact_id
 LEFT JOIN artwork_job_seed_links jsl ON jsl.seed_id = s.id AND jsl.relation = 'attached'
@@ -88,11 +124,17 @@ LEFT JOIN artwork_jobs j ON j.id = jsl.job_id
 $WHERE
 ORDER BY s.created_at DESC
 LIMIT $LIMIT;"
+  fi
 fi
 
 set +e
+REMOTE_PSQL="PGPASSWORD=\"\${POSTGRES_PASSWORD:-}\" psql -v ON_ERROR_STOP=1"
+if [[ "$JSON_MODE" == "true" ]]; then
+  REMOTE_PSQL="$REMOTE_PSQL -t -A"
+fi
+REMOTE_PSQL="$REMOTE_PSQL -U \"\${POSTGRES_USER:-mint}\" -d \"\${POSTGRES_DB:-mint_modules}\""
 RESULT="$(ssh "${SSH_OPTS[@]}" "${USER}@${HOST}" \
-  "docker exec -i mint-modules-postgres sh -lc 'PGPASSWORD=\"\${POSTGRES_PASSWORD:-}\" psql -v ON_ERROR_STOP=1 -U \"\${POSTGRES_USER:-mint}\" -d \"\${POSTGRES_DB:-mint_modules}\"'" <<< "$QUERY" 2>&1)"
+  "docker exec -i mint-modules-postgres sh -lc '$REMOTE_PSQL'" <<< "$QUERY" 2>&1)"
 rc=$?
 set -e
 
@@ -100,6 +142,54 @@ if [[ "$rc" -ne 0 ]]; then
   echo "ERROR: query failed (rc=$rc)"
   echo "$RESULT"
   exit 1
+fi
+
+if [[ "$JSON_MODE" == "true" ]]; then
+  RESULT_FILE="$(mktemp)"
+  printf '%s' "$RESULT" >"$RESULT_FILE"
+  python3 - "$RESULT_FILE" "${USER}@${HOST}" "$STATUS" "$SOURCE" "$EMAIL" "$SEED_ID" "$LIMIT" "$COUNT_ONLY" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+result_path = Path(sys.argv[1])
+host = sys.argv[2]
+status = sys.argv[3]
+source = sys.argv[4]
+email = sys.argv[5]
+seed_id = sys.argv[6]
+limit = int(sys.argv[7])
+count_only = sys.argv[8].lower() == "true"
+
+raw = result_path.read_text(encoding="utf-8", errors="replace").strip()
+payload = json.loads(raw) if raw else ({"total": 0} if count_only else [])
+rows = [] if count_only else (payload if isinstance(payload, list) else [])
+total = int(payload.get("total", 0)) if count_only else len(rows)
+
+print(
+    json.dumps(
+        {
+            "capability": "mint.seeds.query",
+            "status": "ok",
+            "host": host,
+            "filters": {
+                "status": status or None,
+                "source": source or None,
+                "email": email or None,
+                "seed_id": seed_id or None,
+                "limit": limit,
+            },
+            "count_only": count_only,
+            "total": total,
+            "rows": rows,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+)
+PY
+  rm -f "$RESULT_FILE"
+  exit 0
 fi
 
 echo "$RESULT"
