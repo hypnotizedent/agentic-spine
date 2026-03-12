@@ -148,6 +148,15 @@ expected_dirs=(
 expected_files=("README.md")
 closed_repos=("agentic-spine" "workbench" "agentic-foundation")
 
+repo_local_allowed_status_paths() {
+  local repo_name="$1"
+  case "$repo_name" in
+    workbench)
+      printf '%s\n' "dotfiles/codex/config.toml"
+      ;;
+  esac
+}
+
 printf 'name\tkind\tfile_count\n' > "$TOP_LEVEL_TSV"
 mapfile -t top_level_paths < <(find "$WORKSPACE_ROOT" -maxdepth 1 -mindepth 1 -print | sort)
 actual_names=()
@@ -201,7 +210,19 @@ for repo_name in "${closed_repos[@]}"; do
     repo_detail="not a git worktree"
   else
     branch="$(git -C "$repo_path" branch --show-current 2>/dev/null || echo detached)"
-    dirty_count="$(git -C "$repo_path" status --porcelain --untracked-files=all | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+    mapfile -t raw_status_rows < <(git -C "$repo_path" status --porcelain --untracked-files=all | sed '/^[[:space:]]*$/d')
+    mapfile -t allowed_status_paths < <(repo_local_allowed_status_paths "$repo_name")
+    filtered_status_rows=()
+    ignored_local_count=0
+    for row in "${raw_status_rows[@]}"; do
+      path="${row:3}"
+      if contains "$path" "${allowed_status_paths[@]}"; then
+        ignored_local_count=$((ignored_local_count + 1))
+        continue
+      fi
+      filtered_status_rows+=("$row")
+    done
+    dirty_count="${#filtered_status_rows[@]}"
     if git -C "$repo_path" show-ref --verify --quiet refs/remotes/origin/main; then
       read -r behind ahead < <(git -C "$repo_path" rev-list --left-right --count origin/main...HEAD)
     else
@@ -218,8 +239,10 @@ for repo_name in "${closed_repos[@]}"; do
     if [[ "${#repo_detail_parts[@]}" -eq 0 ]]; then
       repo_status="PASS"
       repo_detail="clean main with origin/main parity"
+      [[ "$ignored_local_count" == "0" ]] || repo_detail+=" (ignored_local=$ignored_local_count)"
     else
       repo_detail="${repo_detail_parts[*]}"
+      [[ "$ignored_local_count" == "0" ]] || repo_detail+=" ignored_local=$ignored_local_count"
     fi
   fi
 
