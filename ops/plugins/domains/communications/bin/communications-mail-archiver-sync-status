@@ -42,10 +42,11 @@ Usage: communications-mail-archiver-sync-status [--target <ssh-target-id>] [--ta
 One-call sync read-model for mail-archiver live sync health:
   - transport contract (LAN/Tailscale/ProxyJump fallback state)
   - container runtime status
-  - MailAccounts.LastSync + ArchivedEmails counts by account
+  - active/recent sync job truth from runtime logs
+  - MailAccounts.LastSync + ArchivedEmails counts/latest rows by account
   - Gmail LastSync epoch anomaly detection
   - M365 baseline coverage drift against linkage import history
-  - log-derived slow-label signal hints (best-effort)
+  - LastSync canonicality drift when archive activity proves newer ingest
 USAGE
       exit 0
       ;;
@@ -193,6 +194,7 @@ SELECT COALESCE(json_agg(row_to_json(t))::text, '[]')
 FROM (
   SELECT
     "Id"::text AS account_id,
+    COALESCE(to_jsonb(ma)->>'Name', '') AS name,
     COALESCE(to_jsonb(ma)->>'ProviderType', to_jsonb(ma)->>'Provider', '') AS provider_type,
     COALESCE(to_jsonb(ma)->>'Email', to_jsonb(ma)->>'EmailAddress', '') AS email,
     COALESCE(to_jsonb(ma)->>'LastSync', '') AS last_sync
@@ -206,6 +208,7 @@ SELECT COALESCE(json_agg(row_to_json(t))::text, '[]')
 FROM (
   SELECT
     "Id"::text AS account_id,
+    COALESCE(to_jsonb(ma)->>'Name', '') AS name,
     COALESCE(to_jsonb(ma)->>'ProviderType', to_jsonb(ma)->>'Provider', '') AS provider_type,
     COALESCE(to_jsonb(ma)->>'Email', to_jsonb(ma)->>'EmailAddress', '') AS email,
     COALESCE(to_jsonb(ma)->>'LastSync', '') AS last_sync
@@ -232,6 +235,30 @@ FROM (
 ) t;
 SQL
 )"
+QUERY_LATEST_MAIL_ARCHIVER="$(cat <<'SQL'
+SELECT COALESCE(json_agg(row_to_json(t))::text, '[]')
+FROM (
+  SELECT
+    "MailAccountId"::text AS account_id,
+    max("ReceivedDate")::text AS latest_received_at,
+    max("Id")::bigint AS latest_row_id
+  FROM mail_archiver."ArchivedEmails"
+  GROUP BY 1
+) t;
+SQL
+)"
+QUERY_LATEST_PUBLIC="$(cat <<'SQL'
+SELECT COALESCE(json_agg(row_to_json(t))::text, '[]')
+FROM (
+  SELECT
+    "MailAccountId"::text AS account_id,
+    max("ReceivedDate")::text AS latest_received_at,
+    max("Id")::bigint AS latest_row_id
+  FROM public."ArchivedEmails"
+  GROUP BY 1
+) t;
+SQL
+)"
 QUERY_TOTAL_MAIL_ARCHIVER='SELECT count(*)::text FROM mail_archiver."ArchivedEmails";'
 QUERY_TOTAL_PUBLIC='SELECT count(*)::text FROM public."ArchivedEmails";'
 
@@ -247,6 +274,12 @@ if [[ -z "$COUNTS_JSON" ]]; then
 fi
 [[ -n "$COUNTS_JSON" ]] || COUNTS_JSON='{}'
 
+LATEST_JSON="$(sql_json "$QUERY_LATEST_MAIL_ARCHIVER")"
+if [[ -z "$LATEST_JSON" ]]; then
+  LATEST_JSON="$(sql_json "$QUERY_LATEST_PUBLIC")"
+fi
+[[ -n "$LATEST_JSON" ]] || LATEST_JSON='[]'
+
 TOTAL_COUNT="$(sql_json "$QUERY_TOTAL_MAIL_ARCHIVER")"
 if [[ -z "$TOTAL_COUNT" ]]; then
   TOTAL_COUNT="$(sql_json "$QUERY_TOTAL_PUBLIC")"
@@ -258,6 +291,7 @@ echo "db_state=$DB_STATE"
 echo "total_count=$TOTAL_COUNT"
 echo "accounts_json_b64=$(printf '%s' "$ACCOUNTS_JSON" | base64 | tr -d '\n')"
 echo "counts_json_b64=$(printf '%s' "$COUNTS_JSON" | base64 | tr -d '\n')"
+echo "latest_json_b64=$(printf '%s' "$LATEST_JSON" | base64 | tr -d '\n')"
 EOS
 )"; then
   fail "remote metadata probe failed for target '$TARGET_ID'"
@@ -279,7 +313,28 @@ fi
 if [[ "${#DOCKER[@]}" -eq 0 ]]; then
   exit 0
 fi
-"${DOCKER[@]}" logs "$APP_CONTAINER" --tail "$TAIL_LINES" 2>&1 || true
+"${DOCKER[@]}" logs "$APP_CONTAINER" --timestamps --tail "$TAIL_LINES" 2>&1 || true
+EOS
+)" || true
+
+JOB_LOG_TEXT=""
+JOB_LOG_TEXT="$(run_remote "bash -s -- '$APP_CONTAINER'" <<'EOS'
+set -euo pipefail
+APP_CONTAINER="${1:-mail-archiver}"
+DOCKER=(docker)
+if ! docker info >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+    DOCKER=(sudo -n docker)
+  else
+    DOCKER=()
+  fi
+fi
+if [[ "${#DOCKER[@]}" -eq 0 ]]; then
+  exit 0
+fi
+"${DOCKER[@]}" logs "$APP_CONTAINER" --timestamps --since 6h 2>&1 \
+  | grep -E 'Started sync job|Completed sync job|Cancelled sync job|has been cancelled|Starting (Graph API|IMAP) sync for account|Using (Microsoft Graph API|IMAP)|Graph API sync completed for account|Mail sync completed for account|Found [0-9]+ folders for (M365 account|account)|Found [0-9]+ messages to process in folder .* for account|Processing page [0-9]+ with [0-9]+ messages in folder .* for account' \
+  | tail -n 400 || true
 EOS
 )" || true
 
@@ -288,9 +343,11 @@ DB_STATE="$(printf '%s\n' "$META_RAW" | sed -n 's/^db_state=//p' | head -1)"
 TOTAL_COUNT="$(printf '%s\n' "$META_RAW" | sed -n 's/^total_count=//p' | head -1)"
 ACCOUNTS_B64="$(printf '%s\n' "$META_RAW" | sed -n 's/^accounts_json_b64=//p' | head -1)"
 COUNTS_B64="$(printf '%s\n' "$META_RAW" | sed -n 's/^counts_json_b64=//p' | head -1)"
+LATEST_B64="$(printf '%s\n' "$META_RAW" | sed -n 's/^latest_json_b64=//p' | head -1)"
 
 [[ -n "$ACCOUNTS_B64" ]] || ACCOUNTS_B64="W10="
 [[ -n "$COUNTS_B64" ]] || COUNTS_B64="e30="
+[[ -n "$LATEST_B64" ]] || LATEST_B64="W10="
 
 decode_b64() {
   local value="$1"
@@ -301,16 +358,20 @@ decode_b64() {
 
 ACCOUNTS_JSON="$(decode_b64 "$ACCOUNTS_B64")"
 COUNTS_JSON="$(decode_b64 "$COUNTS_B64")"
+LATEST_JSON="$(decode_b64 "$LATEST_B64")"
 [[ -n "$ACCOUNTS_JSON" ]] || ACCOUNTS_JSON='[]'
 [[ -n "$COUNTS_JSON" ]] || COUNTS_JSON='{}'
+[[ -n "$LATEST_JSON" ]] || LATEST_JSON='[]'
 [[ -n "$TOTAL_COUNT" ]] || TOTAL_COUNT="0"
 
 LINKAGE_JSON="$(yq -o=json '.' "$LINKAGE_CONTRACT")"
 LOG_TMP="$(mktemp)"
-trap 'rm -f "$LOG_TMP"' EXIT INT TERM
+JOB_LOG_TMP="$(mktemp)"
+trap 'rm -f "$LOG_TMP" "$JOB_LOG_TMP"' EXIT INT TERM
 printf '%s\n' "$LOG_TEXT" > "$LOG_TMP"
+printf '%s\n' "$JOB_LOG_TEXT" > "$JOB_LOG_TMP"
 
-ANALYSIS_JSON="$(python3 - "$LINKAGE_JSON" "$ACCOUNTS_JSON" "$COUNTS_JSON" "$TOTAL_COUNT" "$LOG_TMP" <<'PY'
+ANALYSIS_JSON="$(python3 - "$LINKAGE_JSON" "$ACCOUNTS_JSON" "$COUNTS_JSON" "$LATEST_JSON" "$TOTAL_COUNT" "$LOG_TMP" "$JOB_LOG_TMP" <<'PY'
 import json
 import re
 import sys
@@ -320,15 +381,20 @@ from pathlib import Path
 linkage = json.loads(sys.argv[1])
 accounts = json.loads(sys.argv[2] or "[]")
 counts = json.loads(sys.argv[3] or "{}")
-total_count_raw = sys.argv[4] or "0"
-logs_text = Path(sys.argv[5]).read_text(encoding="utf-8", errors="replace")
+latest_rows = json.loads(sys.argv[4] or "[]")
+total_count_raw = sys.argv[5] or "0"
+logs_text = Path(sys.argv[6]).read_text(encoding="utf-8", errors="replace")
+job_logs_text = Path(sys.argv[7]).read_text(encoding="utf-8", errors="replace")
 
 if not isinstance(accounts, list):
     accounts = []
 if not isinstance(counts, dict):
     counts = {}
+if not isinstance(latest_rows, list):
+    latest_rows = []
 
 accounts_by_id = {str((row or {}).get("account_id") or ""): (row or {}) for row in accounts}
+latest_by_id = {str((row or {}).get("account_id") or ""): (row or {}) for row in latest_rows}
 count_by_id = {}
 for k, v in counts.items():
     key = str(k or "")
@@ -343,9 +409,132 @@ try:
 except Exception:
     live_sync_stale_hours = 1
 
+now = datetime.now(timezone.utc)
+
+def parse_ts(raw: str):
+    raw = str(raw or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    if " " in raw and "+" not in raw and "T" not in raw:
+        raw = raw.replace(" ", "T") + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+def normalize_name(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+account_id_by_name = {}
+for row in accounts:
+    account_name = normalize_name((row or {}).get("name") or "")
+    account_id = str((row or {}).get("account_id") or "")
+    if account_name and account_id:
+        account_id_by_name[account_name] = account_id
+
+jobs = {}
+jobs_by_account = {}
+
+job_start_re = re.compile(r"^(?P<ts>\S+)\s+.*Started sync job (?P<job_id>[0-9a-fA-F-]{36}) for account (?P<account>.+?)(?: with cancellation token)?$")
+job_complete_re = re.compile(r"^(?P<ts>\S+)\s+.*Completed sync job (?P<job_id>[0-9a-fA-F-]{36}) with status (?P<status>\w+)$")
+job_cancel_re = re.compile(r"^(?P<ts>\S+)\s+.*Cancelled sync job (?P<job_id>[0-9a-fA-F-]{36}) for account (?P<account>.+)$")
+graph_summary_re = re.compile(r"^(?P<ts>\S+)\s+.*Graph API sync completed for account: (?P<account>.+?)\. New: (?P<new>\d+), Failed: (?P<failed>\d+), Deleted: (?P<deleted>\d+)$")
+
+for raw_line in job_logs_text.splitlines():
+    line = raw_line.strip()
+    if not line:
+        continue
+
+    m = job_start_re.match(line)
+    if m:
+        job_id = m.group("job_id")
+        account_name = m.group("account").strip()
+        job = jobs.setdefault(job_id, {})
+        job.update({
+            "job_id": job_id,
+            "account_name": account_name,
+            "account_id": account_id_by_name.get(normalize_name(account_name), ""),
+            "started_at": m.group("ts"),
+            "status": "running",
+        })
+        jobs_by_account.setdefault(normalize_name(account_name), []).append(job_id)
+        continue
+
+    m = job_complete_re.match(line)
+    if m:
+        job_id = m.group("job_id")
+        job = jobs.setdefault(job_id, {"job_id": job_id})
+        status = m.group("status").strip().lower()
+        job["completed_at"] = m.group("ts")
+        job["status"] = status
+        continue
+
+    m = job_cancel_re.match(line)
+    if m:
+        job_id = m.group("job_id")
+        account_name = m.group("account").strip()
+        job = jobs.setdefault(job_id, {})
+        job.update({
+            "job_id": job_id,
+            "account_name": account_name,
+            "account_id": account_id_by_name.get(normalize_name(account_name), ""),
+            "cancel_requested_at": m.group("ts"),
+        })
+        continue
+
+    m = graph_summary_re.match(line)
+    if m:
+        account_name = m.group("account").strip()
+        normalized = normalize_name(account_name)
+        for job_id in reversed(jobs_by_account.get(normalized, [])):
+            job = jobs.get(job_id) or {}
+            summary = {
+                "new": int(m.group("new")),
+                "failed": int(m.group("failed")),
+                "deleted": int(m.group("deleted")),
+            }
+            job["summary"] = summary
+            job.setdefault("status", "completed")
+            job.setdefault("completed_at", m.group("ts"))
+            break
+
+recent_jobs = []
+for job in jobs.values():
+    started_at = parse_ts(job.get("started_at") or "")
+    completed_at = parse_ts(job.get("completed_at") or "")
+    duration_seconds = None
+    if started_at is not None:
+        end_time = completed_at or now
+        duration_seconds = int(max((end_time - started_at).total_seconds(), 0))
+    recent_jobs.append({
+        "job_id": job.get("job_id") or "",
+        "account_name": job.get("account_name") or "",
+        "db_account_id": job.get("account_id") or "",
+        "status": job.get("status") or "unknown",
+        "started_at": job.get("started_at") or "",
+        "completed_at": job.get("completed_at") or "",
+        "cancel_requested_at": job.get("cancel_requested_at") or "",
+        "duration_seconds": duration_seconds,
+        "summary": job.get("summary") or None,
+    })
+
+recent_jobs.sort(key=lambda item: item.get("started_at") or "", reverse=True)
+active_jobs = [job for job in recent_jobs if job.get("status") == "running"]
+job_runtime_classification = "healthy"
+if active_jobs:
+    oldest_running = max((job.get("duration_seconds") or 0) for job in active_jobs)
+    if oldest_running >= 3600:
+        job_runtime_classification = "starved_by_long_running_job"
+    else:
+        job_runtime_classification = "healthy_but_slow"
+
 issues = []
 account_report = []
-now = datetime.now(timezone.utc)
 
 for entry in (linkage.get("accounts") or []):
     if not isinstance(entry, dict):
@@ -357,27 +546,33 @@ for entry in (linkage.get("accounts") or []):
     lane_type = str(entry.get("lane_type") or "")
 
     db_row = accounts_by_id.get(account_id, {})
+    latest_row = latest_by_id.get(account_id, {})
     db_provider = str(db_row.get("provider_type") or "")
     db_email = str(db_row.get("email") or "")
+    db_name = str(db_row.get("name") or "")
     last_sync = str(db_row.get("last_sync") or "")
     archived_count = int(count_by_id.get(account_id, 0))
+    latest_received = str(latest_row.get("latest_received_at") or "")
+    latest_row_id = latest_row.get("latest_row_id")
+    parsed_latest_received = parse_ts(latest_received)
 
     parsed_last_sync = None
     if last_sync:
-        raw = last_sync
-        if raw.endswith("Z"):
-            raw = raw[:-1] + "+00:00"
-        try:
-            parsed_last_sync = datetime.fromisoformat(raw)
-            if parsed_last_sync.tzinfo is None:
-                parsed_last_sync = parsed_last_sync.replace(tzinfo=timezone.utc)
-            parsed_last_sync = parsed_last_sync.astimezone(timezone.utc)
-        except Exception:
-            parsed_last_sync = None
+        parsed_last_sync = parse_ts(last_sync)
 
     stale = False
     if lane_type == "live-sync" and parsed_last_sync is not None:
         stale = parsed_last_sync < (now - timedelta(hours=live_sync_stale_hours))
+
+    lastsync_canonical = True
+    if parsed_last_sync is not None and parsed_latest_received is not None:
+        if parsed_latest_received > (parsed_last_sync + timedelta(minutes=1)):
+            lastsync_canonical = False
+
+    latest_job = None
+    candidate_job_ids = jobs_by_account.get(normalize_name(db_name), [])
+    if candidate_job_ids:
+        latest_job = jobs.get(candidate_job_ids[-1])
 
     local_issues = []
     if not db_row:
@@ -428,6 +623,15 @@ for entry in (linkage.get("accounts") or []):
                 "db_account_id": account_id,
                 "detail": f"Live-sync account {contract_id} has missing/unparseable LastSync ({last_sync})",
             })
+        elif not lastsync_canonical:
+            local_issues.append("lastsync_noncanonical")
+            issues.append({
+                "code": "lastsync_noncanonical",
+                "severity": "low",
+                "account_contract_id": contract_id,
+                "db_account_id": account_id,
+                "detail": f"Live-sync account {contract_id} archived mail is newer than MailAccounts.LastSync ({latest_received} > {last_sync}); use job/runtime proof instead",
+            })
         elif stale:
             local_issues.append("lastsync_stale")
             issues.append({
@@ -445,10 +649,21 @@ for entry in (linkage.get("accounts") or []):
         "provider_db": db_provider,
         "mailbox_contract": mailbox,
         "mailbox_db": db_email,
+        "account_name_db": db_name,
         "lane_type": lane_type,
         "last_sync": last_sync,
+        "lastsync_canonical": lastsync_canonical,
         "last_sync_stale": stale,
         "archived_count": archived_count,
+        "latest_archived_received_at": latest_received,
+        "latest_archived_row_id": int(latest_row_id) if latest_row_id not in (None, "") else None,
+        "latest_job": {
+            "job_id": latest_job.get("job_id") or "",
+            "status": latest_job.get("status") or "",
+            "started_at": latest_job.get("started_at") or "",
+            "completed_at": latest_job.get("completed_at") or "",
+            "summary": latest_job.get("summary") or None,
+        } if latest_job else None,
         "issues": local_issues,
     })
 
@@ -484,6 +699,9 @@ if issues:
 result = {
     "status": status,
     "live_sync_stale_after_hours": live_sync_stale_hours,
+    "job_runtime_classification": job_runtime_classification,
+    "active_jobs": active_jobs,
+    "recent_jobs": recent_jobs[:10],
     "accounts": account_report,
     "issues": issues,
     "total_archived_emails": int(total_count_raw) if str(total_count_raw).isdigit() else 0,

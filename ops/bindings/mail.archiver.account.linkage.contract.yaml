@@ -1,8 +1,8 @@
 # Status: authoritative
-# Last verified: 2026-03-01
+# Last verified: 2026-03-12
 
-version: 4
-updated_at: "2026-03-11"
+version: 5
+updated_at: "2026-03-12"
 owner: "@ronny"
 scope: mail-archiver-account-linkage
 
@@ -25,9 +25,10 @@ linkage_policy:
 
 freshness_semantics:
   live-sync:
-    indicator: last_sync_timestamp
-    source: "MailAccounts.LastSync column"
+    indicator: sync_job_completion_plus_archive_activity
+    source: "communications.mailarchiver.sync.status read-model (recent_jobs + per-account latest_archived_received_at/latest_archived_row_id)"
     stale_after_hours: 1
+    note: "MailAccounts.LastSync is advisory only. Some providers can ingest successfully while LastSync is stale or epoch-like, so operator truth must come from the governed sync-status read-model."
   import-only:
     indicator: latest_import_artifact_timestamp
     source: "runtime/domain-state/communications/mail-archiver-import-completion-*.yaml"
@@ -159,7 +160,7 @@ onboarding:
     - "2. Provision credentials in Infisical at /spine/services/mail-archiver/."
     - "3. Add account entry to this contract with all required_fields."
     - "4. Configure account in mail-archiver web UI (http://100.115.16.37:5100/)."
-    - "5. For live-sync: set cadence_cron + verify first sync via MailAccounts.LastSync."
+    - "5. For live-sync: set cadence_cron + verify first sync via ./bin/ops cap run communications.mailarchiver.sync.status."
     - "6. For import-only: run import, then write completion artifact to runtime/domain-state/communications/."
     - "7. Commit contract update with governed evidence."
     - "8. Run: ./bin/ops cap run verify.pack.run communications"
