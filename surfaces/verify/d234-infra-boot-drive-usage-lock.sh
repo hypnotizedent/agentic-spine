@@ -131,8 +131,8 @@ while IFS=$'\t' read -r hostname ssh_target vmid; do
 done <<< "$ACTIVE_VMS"
 
 # Check that storage policy has no undocumented violations
-VIOLATION_COUNT=$(yq -r '[.vm_storage | to_entries[] | select(.value.status == "violation")] | length' "$STORAGE_POLICY" 2>/dev/null || echo 0)
-VIOLATION_WITH_GAP=$(yq -r '[.vm_storage | to_entries[] | select(.value.status == "violation" and .value.gap != null)] | length' "$STORAGE_POLICY" 2>/dev/null || echo 0)
+VIOLATION_COUNT=$(yq -r '[.vm_storage | to_entries[] | select(.value.placement_status == "violation")] | length' "$STORAGE_POLICY" 2>/dev/null || echo 0)
+VIOLATION_WITH_GAP=$(yq -r '[.vm_storage | to_entries[] | select(.value.placement_status == "violation" and .value.gap != null)] | length' "$STORAGE_POLICY" 2>/dev/null || echo 0)
 
 if [[ "$VIOLATION_COUNT" -ne "$VIOLATION_WITH_GAP" ]]; then
   err "storage placement policy has $VIOLATION_COUNT violations but only $VIOLATION_WITH_GAP have gap entries"

@@ -66,7 +66,7 @@ Authority boundary:
 
 | Tombstone | Runtime posture | Cold restore posture | Review date | Notes |
 |-----------|-----------------|----------------------|-------------|-------|
-| `docker-host` / VM200 | Not runtime. Remove `local-lvm:vm-200-disk-0` from hot storage instead of keeping a powered-off guest. | Keep exactly one cold restore capsule at `pve:/md1400/backup-cold/vzdump/pve` via `vm-200-docker-host-primary`. Restore only as isolated temporary sandbox identity. | `2026-09-06` | Historical Mint/docker-host duties are now split across `mint-apps`, `mint-data`, `finance-stack`, `observability`, and `communications-stack`. |
+| `docker-host` / VM200 | Not runtime. `local-lvm:vm-200-disk-0` was removed from hot storage on `2026-03-12`; do not return this guest to the runtime plane. | Keep exactly one cold restore capsule at `pve:/md1400/backup-cold/vzdump/pve` via `vm-200-docker-host-primary`. Restore only as isolated temporary sandbox identity. | `2026-09-06` | Historical Mint/docker-host duties are now split across `mint-apps`, `mint-data`, `finance-stack`, `observability`, and `communications-stack`. |
 
 ## Verification
 

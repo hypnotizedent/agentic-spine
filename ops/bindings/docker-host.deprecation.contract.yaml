@@ -14,7 +14,7 @@ host:
   policy_mode: docs-first
   objective: >
     Keep docker-host as an explicit tombstone with one cold restore capsule,
-    remove the live runtime footprint from hot storage, and prevent production
+    keep the live runtime footprint out of hot storage, and prevent production
     identity resurrection.
 
 tombstone_record:
@@ -23,14 +23,26 @@ tombstone_record:
   live_runtime_footprint:
     proxmox_host: pve
     storage_tier: tank-docker
-    artifact: vm-200-disk-0
-    artifact_ref: local-lvm:vm-200-disk-0
-    size_gb: 300
-    disposition: delete_from_hot_storage
+    artifact: none
+    artifact_ref: none
+    size_gb: 0
+    disposition: removed_from_hot_storage
+    removed_artifact: vm-200-disk-0
+    removed_artifact_ref: local-lvm:vm-200-disk-0
+    removed_size_gb: 300
+    removed_at_utc: "2026-03-12T04:30:02Z"
   cold_restore_capsule:
     retained_artifact: vm-200-docker-host-primary
     retained_count: 1
     location: pve:/md1400/backup-cold/vzdump/pve
+    artifact_path: /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst
+    artifact_size_bytes: 196820427012
+    artifact_mtime_utc: "2026-03-07T08:24:01Z"
+    artifact_sha256: ee8b3844cb58fc7c7cb72433f95fc12df4957171afdfba6d01427551eb1182d4
+    verified_at_utc: "2026-03-12T04:30:02Z"
+    qemu_config_path: /etc/pve/qemu-server/200.conf
+    qemu_config_sha256_before_delete: 3fcc25b6b697139205de70a4f5d93c613f0d2a6ba2d49912c0d0fa703738f095
+    qemu_config_sha256_after_delete: 2329aa1b90c440783bac6484a75ab5f83c73d4d3399c58a27b89c2cf84b007d5
     review_by: "2026-09-06"
     expiry_action: delete_if_unneeded_after_review
   historical_duties:
@@ -53,6 +65,9 @@ tombstone_record:
     - never restore into production hostname docker-host
     - never republish legacy DNS, Tailscale, or Cloudflare routes on restore
     - use restore for investigation/extraction only, not runtime reinstatement
+  restore_commands:
+    - qmrestore /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst 9200 --storage local-lvm --unique 1
+    - qm set 9200 --name vm200-restore-2026-03-12
 
 authorities:
   vm_lifecycle: ops/bindings/vm.lifecycle.yaml
@@ -60,6 +75,7 @@ authorities:
   service_registry: docs/governance/SERVICE_REGISTRY.yaml
   legacy_policy: docs/governance/LEGACY_DEPRECATION.md
   sequence_contract: ops/bindings/spine.governance.sequence.contract.yaml
+  closeout_receipt: docs/reference/audits/VM200_PHYSICAL_CLOSEOUT_20260312.md
 
 action_classes:
   safe_cleanup_now:

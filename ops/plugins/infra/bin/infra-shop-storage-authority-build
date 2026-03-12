@@ -204,14 +204,17 @@ def build_storage_objects(vm: dict[str, Any], placement: dict[str, Any] | None, 
                 mount_path=str(placement.get("data_mount") or "") or None,
             )
         elif current_tier == "tank-vms" and data_disk_gb:
+            mount_path = str(placement.get("data_mount") or "").strip() or None
+            data_object = source or f"{hostname} dedicated data disk ({data_disk_gb}G declared)"
+            note = None if mount_path else "Runtime mount path still needs capture in the placement policy."
             add_object(
                 kind="guest_data_disk",
                 pool="tank",
-                obj=f"{hostname} dedicated data disk ({data_disk_gb}G declared)",
+                obj=data_object,
                 purpose="Dedicated guest data disk on tank-vms tier",
                 durability_role="runtime_primary",
-                mount_path=str(placement.get("data_mount") or "") or None,
-                note="Runtime mount path still needs capture in the placement policy.",
+                mount_path=mount_path,
+                note=note,
             )
         elif current_tier == "md1400":
             add_object(
@@ -559,9 +562,9 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
     risk_rows: list[dict[str, Any]] = []
 
     for vm in sorted(active_shop_vms, key=lambda row: int(row.get("id") or 0)):
-        vmid = int(vm.get("id") or 0)
+        vm_id = int(vm.get("id") or 0)
         hostname = str(vm.get("hostname") or "")
-        profile = profiles_by_id.get(vmid, {})
+        profile = profiles_by_id.get(vm_id, {})
         placement_row = placement_by_host.get(hostname)
         backup_units = runtime_units_by_host.get(hostname, [])
         primary_backup_unit = next((row for row in backup_units if str(row.get("kind") or "") in {"vm", "lxc"}), None)
@@ -612,9 +615,13 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
         probe_ids = sorted(set(probes_by_host.get(hostname, [])))
         active_services = sorted(set(active_services_by_host.get(hostname, [])))
 
-        placement_status = str(placement_row.get("status") or "missing") if placement_row else "missing"
+        placement_status = str(
+            placement_row.get("placement_status") or placement_row.get("status") or "missing"
+        ) if placement_row else "missing"
         if placement_status != "compliant":
-            notes = str(placement_row.get("notes") or "").strip() if placement_row else "No placement row exists for this active runtime."
+            notes = str(
+                placement_row.get("description") or placement_row.get("notes") or ""
+            ).strip() if placement_row else "No placement row exists for this active runtime."
             severity = "medium" if placement_status in {"partial", "missing"} else "accepted-risk"
             risk_rows.append(
                 {
@@ -638,7 +645,7 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
 
         runtime_rows.append(
             {
-                "vmid": vmid,
+                "vm_id": vm_id,
                 "hostname": hostname,
                 "kind": runtime_kind(vm),
                 "role": vm.get("role"),
@@ -647,7 +654,9 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
                 "health_probe_policy": profile.get("health_probe_policy") or vm.get("health_probe_policy"),
                 "storage_tier": vm.get("storage_tier"),
                 "placement_status": placement_status,
-                "placement_notes": str(placement_row.get("notes") or "").strip() if placement_row else "Placement row missing.",
+                "placement_notes": str(
+                    placement_row.get("description") or placement_row.get("notes") or ""
+                ).strip() if placement_row else "Placement row missing.",
                 "owner": vm.get("owner"),
                 "purpose": str(vm.get("description") or "").strip(),
                 "active_services": active_services,
@@ -670,13 +679,16 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
         tombstone = row.get("tombstone") or {}
         target_name = str(tombstone.get("retained_restore_artifact") or "")
         target = targets_by_name.get(target_name, {})
+        hot_runtime_disk = tombstone.get("live_runtime_disk")
+        hot_runtime_disk_ref = tombstone.get("live_runtime_disk_ref")
+        hot_runtime_present = str(hot_runtime_disk_ref or hot_runtime_disk or "").strip().lower() not in {"", "none"}
         tombstones.append(
             {
-                "vmid": int(row.get("id") or 0),
+                "vm_id": int(row.get("id") or 0),
                 "hostname": row.get("hostname"),
                 "tombstone_class": tombstone.get("class"),
-                "hot_runtime_disk": tombstone.get("live_runtime_disk"),
-                "hot_runtime_disk_ref": tombstone.get("live_runtime_disk_ref"),
+                "hot_runtime_disk": hot_runtime_disk,
+                "hot_runtime_disk_ref": hot_runtime_disk_ref,
                 "hot_runtime_disk_gb": tombstone.get("live_runtime_disk_gb"),
                 "hot_runtime_disposition": tombstone.get("live_runtime_disposition"),
                 "cold_restore_target": target_name,
@@ -696,15 +708,16 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
                 "description": str(row.get("description") or "").strip(),
             }
         )
-        risk_rows.append(
-            {
-                "risk_id": "vm200-physical-closeout",
-                "severity": "medium",
-                "runtime": row.get("hostname"),
-                "source": rel(VM_LIFECYCLE_PATH),
-                "detail": "Delete vm-200-disk-0 only after proving the md1400 cold capsule, capturing qm config, and recording artifact size or checksum.",
-            }
-        )
+        if hot_runtime_present:
+            risk_rows.append(
+                {
+                    "risk_id": "vm200-physical-closeout",
+                    "severity": "medium",
+                    "runtime": row.get("hostname"),
+                    "source": rel(VM_LIFECYCLE_PATH),
+                    "detail": "Delete vm-200-disk-0 only after proving the md1400 cold capsule, capturing qm config, and recording artifact size or checksum.",
+                }
+            )
 
     risk_rows_unique: list[dict[str, Any]] = []
     seen_risks: set[tuple[str, str]] = set()
@@ -782,7 +795,7 @@ def scorecard_row(storage_row: dict[str, Any]) -> list[str]:
     if not ingress or ingress == "none":
         ingress = "private-only"
     return [
-        str(storage_row.get("vmid") or ""),
+        str(storage_row.get("vm_id") or ""),
         str(storage_row.get("hostname") or ""),
         str(storage_row.get("kind") or ""),
         str(storage_row.get("startup_policy") or "unknown"),
@@ -817,7 +830,7 @@ def render_scorecard(storage_map: dict[str, Any]) -> str:
     runtime_rows = [scorecard_row(row) for row in storage_map.get("runtime_storage") or []]
     tombstone_rows = [
         [
-            str(row.get("vmid") or ""),
+            str(row.get("vm_id") or ""),
             str(row.get("hostname") or ""),
             str(row.get("hot_runtime_disk_ref") or row.get("hot_runtime_disk") or ""),
             str(row.get("cold_restore_base_path") or ""),

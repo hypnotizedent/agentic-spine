@@ -21,16 +21,21 @@ evidence:
     - /Users/ronnyworks/code/ronny-products/cc-benefits-tracker/app.contract.yaml
     - /Users/ronnyworks/code/ronny-products/inbox-shield/app.contract.yaml
     - /Users/ronnyworks/code/ronny-products/vouchervault/app.contract.yaml
+    - /Users/ronnyworks/code/agentic-spine/docs/reference/audits/VM200_PHYSICAL_CLOSEOUT_20260312.md
   live_reads:
     - environment: shop
       host: pve
-      observed_at_utc: "2026-03-12T03:02:00Z"
+      observed_at_utc: "2026-03-12T04:30:02Z"
       proof:
         - "zpool list -o name,size,alloc,free,health"
         - "zfs list -o name,used,avail,mountpoint tank media md1400"
         - "ls -lh /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst"
         - "sed -n '1,200p' /etc/pve/qemu-server/200.conf"
-        - "lvs --noheadings -o lv_name,vg_name,lv_size | grep vm-200-disk-0"
+        - "sha256sum /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst"
+        - "sha256sum /etc/pve/qemu-server/200.conf"
+        - "qm disk unlink 200 --idlist scsi0 --force 1"
+        - "grep -n '^scsi0:' /etc/pve/qemu-server/200.conf || true"
+        - "lvs --noheadings -o lv_name,vg_name,lv_size | grep vm-200-disk-0 || true"
     - environment: home
       host: proxmox-home
       observed_at_utc: "2026-03-12T03:02:00Z"
@@ -53,15 +58,23 @@ evidence:
 live_proof:
   shop:
     vm200:
-      observed_at_utc: "2026-03-12T03:02:00Z"
+      observed_at_utc: "2026-03-12T04:30:02Z"
       cold_capsule_path: /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst
       cold_capsule_size_bytes: 196820427012
+      cold_capsule_mtime_utc: "2026-03-07T08:24:01Z"
+      cold_capsule_sha256: ee8b3844cb58fc7c7cb72433f95fc12df4957171afdfba6d01427551eb1182d4
       qemu_config_path: /etc/pve/qemu-server/200.conf
+      qemu_config_sha256_before_delete: 3fcc25b6b697139205de70a4f5d93c613f0d2a6ba2d49912c0d0fa703738f095
+      qemu_config_sha256_after_delete: 2329aa1b90c440783bac6484a75ab5f83c73d4d3399c58a27b89c2cf84b007d5
       hot_lv_name: vm-200-disk-0
       hot_lv_vg: pve
       hot_lv_size_gb: 300
-      hot_lv_present: true
+      hot_lv_present: false
+      hot_lv_removed_at_utc: "2026-03-12T04:30:02Z"
+      hot_lv_delete_command: qm disk unlink 200 --idlist scsi0 --force 1
+      post_delete_scsi0_present: false
       jobs_cfg_entry_present: false
+      restore_command_example: qmrestore /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst 9200 --storage local-lvm --unique 1
   home:
     proxmox:
       observed_at_utc: "2026-03-12T03:02:00Z"
@@ -120,14 +133,12 @@ repo_surfaces:
 sites:
   shop:
     boring_enough_now: false
-    summary: Shop rack is structurally legible and inventory-backed, but physical closure is not complete.
+    summary: Shop rack is structurally legible and inventory-backed; VM200 hot footprint is gone and the remaining blocker is warm-lane pressure on media.
     storage_tiers:
       hot: tank
       warm: media
       cold: md1400
     blockers:
-      - VM200 is contractually tombstoned but still physically present as local-lvm:vm-200-disk-0 on pve.
-      - surveillance-stack guest-side data mount/path is still not captured in infra.storage.placement.policy.yaml.
       - media has only 176G free and remains a pressured warm lane.
   home:
     boring_enough_now: false
@@ -154,10 +165,6 @@ manual_surface_register:
       note: mint-modules/deploy remains an operator wrapper and compatibility surface, not the canonical runtime definition lane.
   ghosts: []
   unknowns:
-    - id: surveillance-stack-data-path
-      environment: shop
-      kind: storage_path_gap
-      note: surveillance-stack guest-side durable mount/path is not yet captured in infra.storage.placement.policy.yaml.
     - id: home-switch-port-identity
       environment: home
       kind: physical_network_gap
@@ -167,8 +174,8 @@ decisions:
   - decision_type: safe_to_delete
     subject: vm-200-disk-0 on pve local-lvm
     environment: shop
-    status: blocked
-    rationale: Cold capsule, config path, and LV presence are proven, but the destructive delete has not been executed and receipted.
+    status: done
+    rationale: Cold capsule path/size/SHA-256 and qemu config were captured before delete, then qm disk unlink removed scsi0 and the backing LV on 2026-03-12T04:30:02Z.
   - decision_type: safe_to_delete
     subject: Synology mint-os legacy residue
     environment: home
@@ -188,7 +195,7 @@ decisions:
     subject: shop rack hot/warm/cold storage
     environment: shop
     status: blocked
-    rationale: VM200 hot LV still exists and the media lane remains under pressure.
+    rationale: VM200 hot LV is gone, but media remains at 28.9T used / 176G free and still blocks confident drive-change work on the warm lane.
   - decision_type: safe_to_change_drives
     subject: proxmox-home and Synology drives
     environment: home

@@ -8,7 +8,7 @@ source_binding: ops/bindings/shop.storage.map.yaml
 
 # Shop Rack Scorecard
 
-- Generated: `2026-03-12T01:56:04Z`
+- Generated: `2026-03-12T04:37:18Z`
 - Rebuild: `./bin/ops cap run infra.shop.storage.authority.build`
 - Active runtimes: `14`
 - Tombstones: `1`
@@ -46,14 +46,14 @@ source_binding: ops/bindings/shop.storage.map.yaml
 | 212 | mint-data | vm | auto | boot-only | tank-vms:/dev/vda ext4 secondary disk mounted at /mnt/data; DockerRootDir=/mnt/data/docker, boot-disk:/opt/stacks/mint-data | pve-vzdump-primary, r730xd-mint-backups | private-only | 1 probes |
 | 213 | mint-apps | vm | auto | boot-only | boot-disk:mint-apps boot disk (50G), boot-disk:/opt/stacks/mint-apps | pve-vzdump-primary | suppliers.mintprints.co, customer.mintprints.co, customer.mintprints.com, estimator.mintprints.co, mintprints-app.ronny.works, mintprints.com, pricing.mintprints.co, pricing.mintprints.com, shipping.mintprints.co, shipping.mintprints.com, www.mintprints.com | 9 probes |
 | 214 | communications-stack | vm | auto | tank-vms | tank:tank/vms/vm-214-disk-0, /opt/stacks/communications-stack, /srv/mail-archiver/backups | pve-vzdump-primary, r730xd-communications-backups | mail-archive.ronny.works | 2 probes |
-| 215 | surveillance-stack | vm | auto | tank-vms | tank:surveillance-stack dedicated data disk (100G declared) | pve-vzdump-primary | private-only | 2 probes |
+| 215 | surveillance-stack | vm | auto | tank-vms | tank:/dev/vda ext4 secondary disk mounted at /mnt/data; Frigate durable paths bind-mounted under /mnt/data/frigate/{recordings,clips,snapshots}. | pve-vzdump-primary | private-only | 2 probes |
 | 220 | archive-smb | lxc | auto | md1400 | md1400:md1400 live-share datasets, md1400:/md1400/mint-legacy, md1400:/md1400/ronny-projects | r730xd-archive-smb-snapshots | private-only | 0 probes |
 
 ## Tombstones
 
 | VMID | Runtime | Hot Footprint | Cold Capsule | Review | Restore Rule |
 | --- | --- | --- | --- | --- | --- |
-| 200 | docker-host | local-lvm:vm-200-disk-0 | /md1400/backup-cold/vzdump/pve | 2026-09-06 | isolated sandbox only |
+| 200 | docker-host | none | /md1400/backup-cold/vzdump/pve | 2026-09-06 | isolated sandbox only |
 
 ## Current Risks
 
@@ -64,5 +64,4 @@ source_binding: ops/bindings/shop.storage.map.yaml
 - `ai-consolidation`: 5% boot usage (8.1GB/193GB). 200GB boot has massive headroom. Qdrant vectors + AnythingLLM small. Log rotation added. Re-evaluate if usage exceeds 40%. (ops/bindings/infra.storage.placement.policy.yaml)
 - `finance-stack`: 12% boot usage (11GB/92GB) after truncating 59GB firefly-cron crash log. Actual data only 531MB. Fixed cron binary (crond→cron). Log rotation added. Re-evaluate if usage exceeds 60%. (ops/bindings/infra.storage.placement.policy.yaml)
 - `communications-stack`: Boot is ZFS zvol (not local-lvm). Stalwart on named volume. Mail-archiver needs /srv/mail-archiver non-boot path. (ops/bindings/infra.storage.placement.policy.yaml)
-- `surveillance-stack`: Frigate/go2rtc surveillance VM. Runtime storage tier is correct, but the guest-side data mount/path needs to be written into this policy before the storage plane is fully boring. (ops/bindings/infra.storage.placement.policy.yaml)
-- `docker-host`: Delete vm-200-disk-0 only after proving the md1400 cold capsule, capturing qm config, and recording artifact size or checksum. (ops/bindings/vm.lifecycle.yaml)
+- `surveillance-stack`: Exact durable path is now captured: /mnt/data/frigate/recordings (76G), /mnt/data/frigate/clips (5.1G), and /mnt/data/frigate/snapshots on the 100G secondary tank-vms disk. /home/ubuntu/surveillance/config remains on the 50G boot disk (~484M), so the lane is no longer unknown but still not fully non-boot. (ops/bindings/infra.storage.placement.policy.yaml)

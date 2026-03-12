@@ -8,13 +8,13 @@ source_binding: ops/bindings/estate.surface.register.yaml
 
 # Estate Boringness Scorecard
 
-- Generated: `2026-03-12T04:03:46Z`
+- Generated: `2026-03-12T04:34:50Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
 - Repo surfaces tracked: `2`
 - Ghosts: `10`
 - Compatibility holds: `18`
 - Tombstones: `4`
-- Unknowns: `2`
+- Unknowns: `1`
 
 ## Repo Closure
 
@@ -27,7 +27,7 @@ source_binding: ops/bindings/estate.surface.register.yaml
 
 | Environment | Boring Enough | Storage Story | Exact Blocker |
 | --- | --- | --- | --- |
-| shop | no | hot=tank, warm=media, cold=md1400 | VM200 is contractually tombstoned but still physically present as local-lvm:vm-200-disk-0 on pve.; surveillance-stack guest-side data mount/path is still not captured in infra.storage.placement.policy.yaml.; media has only 176G free and remains a pressured warm lane. |
+| shop | no | hot=tank, warm=media, cold=md1400 | media has only 176G free and remains a pressured warm lane. |
 | home | no | hot=proxmox-home local-lvm, warm_backup=synology /volume1/backups/proxmox_backups/dump, warm_data=synology /volume1, cold_offsite=none_declared | No declared second-environment cold/offsite restore plane exists for home personal data on Synology.; Home switch ports 3/4/6 still rely on inferred endpoint identity instead of traced physical truth.; Synology mint-os residue remains as non-canonical historical hold. |
 
 ## Ghosts
@@ -75,7 +75,7 @@ source_binding: ops/bindings/estate.surface.register.yaml
 | lxc-103-download-home | home | guest | Historical stopped guest recorded in home.proxmox.inventory.yaml. |
 | vm-101-immich-home | home | guest | Historical stopped guest recorded in home.proxmox.inventory.yaml. |
 | vm-102-vaultwarden | home | vm | Legacy Vaultwarden (superseded by infra-core) |
-| vm-200-docker-host | shop | vm | TOMBSTONED 2026-03-06 after Mint data/control-plane retirement. Do not retain as a powered-off runtime guest on pve; remove the live 300G VM disk from hot storage and keep exactly one cold restore capsule on md1400. Historically hosted mint-os, artwork-module, quote-page, minio, files-api, mint-os-postgres, and mint-os-redis on pre-spine Linux Mint. If recovery is needed, restore only into an isolated temporary sandbox identity with no legacy DNS/routes.
+| vm-200-docker-host | shop | vm | TOMBSTONED 2026-03-06 after Mint data/control-plane retirement. Live 300G VM disk removed from hot storage on 2026-03-12; keep exactly one cold restore capsule on md1400 and do not return this guest to the runtime plane. Historically hosted mint-os, artwork-module, quote-page, minio, files-api, mint-os-postgres, and mint-os-redis on pre-spine Linux Mint. If recovery is needed, restore only into an isolated temporary sandbox identity with no legacy DNS/routes.
  |
 
 ## Unknowns
@@ -83,15 +83,14 @@ source_binding: ops/bindings/estate.surface.register.yaml
 | Surface | Environment | Kind | Note |
 | --- | --- | --- | --- |
 | home-switch-port-identity | home | physical_network_gap | Home switch ports 3, 4, and 6 still have inferred endpoint identity only. |
-| surveillance-stack-data-path | shop | storage_path_gap | surveillance-stack guest-side durable mount/path is not yet captured in infra.storage.placement.policy.yaml. |
 
 ## Final Decision Table
 
 | Decision | Subject | Status | Rationale |
 | --- | --- | --- | --- |
-| safe_to_delete | vm-200-disk-0 on pve local-lvm | blocked | Cold capsule, config path, and LV presence are proven, but the destructive delete has not been executed and receipted. |
+| safe_to_delete | vm-200-disk-0 on pve local-lvm | done | Cold capsule path/size/SHA-256 and qemu config were captured before delete, then qm disk unlink removed scsi0 and the backing LV on 2026-03-12T04:30:02Z. |
 | safe_to_delete | Synology mint-os legacy residue | candidate | Residue is reviewed and non-canonical, but it still functions as a historical hold and should be deleted only in a deliberate cleanup wave. |
 | safe_to_migrate | mint-modules future, blocked, and deferred roots | ready | Spine lifecycle authority already declares these roots non-runtime; moving them behind explicit lifecycle boundaries will not change live runtime behavior. |
 | safe_to_migrate | ronny-products parked app contracts | done | app.contract runtime status now matches the execution board: parked products are no longer marked active. |
-| safe_to_change_drives | shop rack hot/warm/cold storage | blocked | VM200 hot LV still exists and the media lane remains under pressure. |
+| safe_to_change_drives | shop rack hot/warm/cold storage | blocked | VM200 hot LV is gone, but media remains at 28.9T used / 176G free and still blocks confident drive-change work on the warm lane. |
 | safe_to_change_drives | proxmox-home and Synology drives | blocked | Runtime backups exist on Synology, but the same enclosure remains canonical for home personal data and there is no declared second cold plane. |
