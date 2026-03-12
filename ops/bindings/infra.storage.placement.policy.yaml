@@ -14,11 +14,12 @@
 #   tank-vms       — ZFS zvol on pve:tank/vms (passed through as virtio disk)
 #   nfs-media      — NFS mount from pve media pool (read-only or read-write)
 #   local-ext4     — /opt/appdata on boot disk for SQLite (NFS-incompatible; intentional)
+#   md1400         — md1400-backed live-share/archive datasets served directly
 #
 # Boot drive threshold: 80% usage triggers alert. >90% is critical.
 
 version: 1
-updated: "2026-02-26"
+updated: "2026-03-12"
 owner: "@ronny"
 
 # What MUST be on boot drives (acceptable):
@@ -204,6 +205,26 @@ vm_storage:
     status: partial
     notes: "Boot is ZFS zvol (not local-lvm). Stalwart on named volume. Mail-archiver needs /srv/mail-archiver non-boot path."
     gap: GAP-OP-940
+
+  surveillance-stack:
+    vmid: 215
+    boot_disk_gb: 50
+    current_storage_tier: tank-vms
+    target_storage_tier: tank-vms
+    data_mount: null
+    data_source: "Secondary guest data disk declared in vm.lifecycle (100GB, tank-vms tier); exact guest mount path still needs capture."
+    status: partial
+    notes: "Frigate/go2rtc surveillance VM. Runtime storage tier is correct, but the guest-side data mount/path needs to be written into this policy before the storage plane is fully boring."
+
+  archive-smb:
+    vmid: 220
+    boot_disk_gb: 8
+    current_storage_tier: md1400
+    target_storage_tier: md1400
+    data_mount: /md1400
+    data_source: "Authoritative md1400 live-share datasets /md1400/ronny-projects and /md1400/mint-legacy; rootfs protection via lxc vzdump."
+    status: compliant
+    notes: "LXC 220 serves md1400-backed archive/live-share data over Samba. Dataset contents restore from md1400 snapshot manifests; runtime rootfs restores from lxc vzdump."
 
 # Remediation priority (by VM, ordered by urgency):
 # VMs 204/205/206/207/210/211 resolved 2026-02-26: log rotation added, actual data small, accepted-risk.
