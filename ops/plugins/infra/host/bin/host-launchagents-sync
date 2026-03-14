@@ -134,6 +134,19 @@ for label in "${LABELS[@]}"; do
   src_plist="$SOURCE_DIR/$label.plist"
   dst_plist="$DEST_DIR/$label.plist"
 
+  # Delegated labels: managed by their own start script, not static plist copy.
+  # Copying the static plist would stomp dynamically-injected tokens and env vars.
+  if [[ "$label" == "com.ronny.mailroom-bridge" ]]; then
+    BRIDGE_START="${ROOT}/ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-start"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "WOULD DELEGATE: $label -> mailroom-bridge-start"
+    else
+      echo "DELEGATING: $label -> mailroom-bridge-start"
+      OPS_ALLOW_MAIN_MUTATION=1 SPINE_REPO="$ROOT" SPINE_CODE="$ROOT" "$BRIDGE_START" && reloaded=$((reloaded + 1)) || errors=$((errors + 1))
+    fi
+    continue
+  fi
+
   if [[ ! -f "$src_plist" ]]; then
     echo "FAIL: missing source plist for $label: $src_plist" >&2
     errors=$((errors + 1))
