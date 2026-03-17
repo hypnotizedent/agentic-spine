@@ -1,0 +1,374 @@
+#!/usr/bin/env pwsh
+param(
+    [string]$Organization = "mintprints.com",
+    [string]$TeamMailbox = "team@mintprints.com",
+    [string]$InfoMailbox = "info@mintprints.com",
+    [string]$RonnyMailbox = "ronny@mintprints.com",
+    [string]$AdminUpn = "",
+    [int]$DaysBack = 7,
+    [string[]]$InternetMessageId = @(),
+    [string[]]$NetworkMessageId = @(),
+    [switch]$Device
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+function Fail($Message) {
+    Write-Error $Message
+    exit 1
+}
+
+function Ensure-Module {
+    if (-not (Get-Module ExchangeOnlineManagement -ListAvailable)) {
+        Fail "ExchangeOnlineManagement is not installed. Install-Module ExchangeOnlineManagement"
+    }
+    Import-Module ExchangeOnlineManagement -ErrorAction Stop | Out-Null
+}
+
+function New-OutputRoot {
+    $runtimeRoot = if ($env:SPINE_RUNTIME_ROOT) {
+        $env:SPINE_RUNTIME_ROOT
+    } elseif ($env:SPINE_WORKSPACE_ROOT) {
+        Join-Path $env:SPINE_WORKSPACE_ROOT ".runtime/spine"
+    } else {
+        Join-Path (Join-Path $HOME "code") ".runtime/spine"
+    }
+    $stateRoot = Join-Path $runtimeRoot "state/microsoft/exchange-canonical-audits"
+    $stamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
+    $runRoot = Join-Path $stateRoot "EXO-AUDIT-$stamp"
+    New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $runRoot "raw") | Out-Null
+    return $runRoot
+}
+
+function Save-Json {
+    param(
+        [string]$Path,
+        $Value
+    )
+    $Value | ConvertTo-Json -Depth 12 | Set-Content -Path $Path -Encoding utf8
+}
+
+function Normalize-RuleTargets {
+    param($Value)
+    $targets = @()
+    foreach ($entry in @($Value)) {
+        if ($null -eq $entry) {
+            continue
+        }
+        if ($entry -is [string]) {
+            if ($entry -match 'SMTP:([^]\"]+)') {
+                $targets += $matches[1]
+            } else {
+                $targets += $entry
+            }
+            continue
+        }
+        if ($entry.PSObject.Properties.Name -contains 'AddressString' -and $entry.AddressString) {
+            $targets += $entry.AddressString
+            continue
+        }
+        $targets += $entry.ToString()
+    }
+    return @($targets | Where-Object { $_ } | Select-Object -Unique)
+}
+
+function Summarize-InboxRules {
+    param([object[]]$Rules)
+    $hits = @()
+    foreach ($rule in $Rules) {
+        $redirectTo = @(Normalize-RuleTargets -Value $rule.RedirectTo)
+        $forwardTo = @(Normalize-RuleTargets -Value $rule.ForwardTo)
+        $forwardAttach = @(Normalize-RuleTargets -Value $rule.ForwardAsAttachmentTo)
+        if ($redirectTo.Count -gt 0 -or $forwardTo.Count -gt 0 -or $forwardAttach.Count -gt 0) {
+            $hits += [pscustomobject]@{
+                Name              = $rule.Name
+                Enabled           = $rule.Enabled
+                Priority          = $rule.Priority
+                StopProcessing    = $rule.StopProcessingRules
+                RedirectTo        = $redirectTo
+                ForwardTo         = $forwardTo
+                ForwardAsAttachTo = $forwardAttach
+                DeleteMessage     = $rule.DeleteMessage
+                MoveToFolder      = $rule.MoveToFolder
+            }
+        }
+    }
+    return $hits
+}
+
+function Get-Canonical-MailboxSnapshot {
+    param([string]$Mailbox)
+    $mailboxObj = Get-Mailbox -Identity $Mailbox -ErrorAction Stop
+    $permissions = @(Get-MailboxPermission -Identity $Mailbox -ErrorAction SilentlyContinue |
+        Where-Object { -not $_.IsInherited -and $_.User.ToString() -notlike "NT AUTHORITY*" } |
+        Select-Object User, AccessRights, IsInherited, Deny)
+    $recipientPermissions = @(Get-RecipientPermission -Identity $Mailbox -ErrorAction SilentlyContinue |
+        Where-Object { $_.Trustee -and $_.Trustee -notlike "NT AUTHORITY*" } |
+        Select-Object Trustee, AccessRights, IsInherited)
+    $inboxRules = @(Get-InboxRule -Mailbox $Mailbox -ErrorAction SilentlyContinue |
+        Select-Object Name, Enabled, Priority, StopProcessingRules, RedirectTo, ForwardTo, ForwardAsAttachmentTo, DeleteMessage, MoveToFolder)
+    $redirectRules = @(Summarize-InboxRules -Rules $inboxRules)
+
+    return [pscustomobject]@{
+        Mailbox = $Mailbox
+        RecipientTypeDetails = $mailboxObj.RecipientTypeDetails
+        UserPrincipalName = $mailboxObj.UserPrincipalName
+        PrimarySmtpAddress = $mailboxObj.PrimarySmtpAddress.ToString()
+        ForwardingAddress = if ($mailboxObj.ForwardingAddress) { $mailboxObj.ForwardingAddress.ToString() } else { $null }
+        ForwardingSmtpAddress = if ($mailboxObj.ForwardingSmtpAddress) { $mailboxObj.ForwardingSmtpAddress.ToString() } else { $null }
+        DeliverToMailboxAndForward = $mailboxObj.DeliverToMailboxAndForward
+        HiddenFromAddressListsEnabled = $mailboxObj.HiddenFromAddressListsEnabled
+        MessageCopyForSentAsEnabled = $mailboxObj.MessageCopyForSentAsEnabled
+        MessageCopyForSendOnBehalfEnabled = $mailboxObj.MessageCopyForSendOnBehalfEnabled
+        GrantSendOnBehalfTo = @($mailboxObj.GrantSendOnBehalfTo | ForEach-Object { $_.ToString() })
+        InboxRules = $inboxRules
+        RedirectRules = $redirectRules
+        MailboxPermissions = $permissions
+        RecipientPermissions = $recipientPermissions
+    }
+}
+
+function Get-RulePathStats {
+    param([object]$Snapshot)
+
+    $rules = @($Snapshot.InboxRules)
+    $redirectRules = @($Snapshot.RedirectRules)
+    $firstRedirectPriority = $null
+    if ($redirectRules.Count -gt 0) {
+        $firstRedirectPriority = ($redirectRules | Measure-Object -Property Priority -Minimum).Minimum
+    }
+
+    $rulesBeforeRedirect = @()
+    if ($null -ne $firstRedirectPriority) {
+        $rulesBeforeRedirect = @($rules | Where-Object {
+            $_.Priority -is [int] -and $_.Priority -lt $firstRedirectPriority
+        })
+    }
+
+    return [pscustomobject]@{
+        TotalRules = $rules.Count
+        RedirectRuleCount = $redirectRules.Count
+        FirstRedirectPriority = $firstRedirectPriority
+        RulesBeforeRedirect = $rulesBeforeRedirect.Count
+        StopProcessingBeforeRedirect = @($rulesBeforeRedirect | Where-Object { $_.StopProcessingRules }).Count
+        DeleteBeforeRedirect = @($rulesBeforeRedirect | Where-Object { $_.DeleteMessage }).Count
+        MoveBeforeRedirect = @($rulesBeforeRedirect | Where-Object { $null -ne $_.MoveToFolder }).Count
+    }
+}
+
+function Rule-MentionsMailbox {
+    param(
+        $Rule,
+        [string[]]$Mailboxes
+    )
+    $json = $Rule | ConvertTo-Json -Depth 8 -Compress
+    foreach ($mailbox in $Mailboxes) {
+        if ($json -match [regex]::Escape($mailbox)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-TransportRuleSnapshot {
+    param([string[]]$Mailboxes)
+    $rules = @(Get-TransportRule -ErrorAction SilentlyContinue)
+    return @($rules | Where-Object { Rule-MentionsMailbox -Rule $_ -Mailboxes $Mailboxes } |
+        Select-Object Name, State, Mode, Priority, Comments, SenderAddressLocation, RedirectMessageTo, BlindCopyTo, CopyTo, AddToRecipients, ExceptIfSentTo, SentTo, From, ExceptIfFrom)
+}
+
+function Get-TraceSnapshot {
+    param(
+        [DateTime]$StartDate,
+        [DateTime]$EndDate,
+        [string[]]$InternetMessageIds,
+        [string[]]$NetworkMessageIds
+    )
+
+    $traceSummary = [ordered]@{
+        InternetMessageId = @()
+        NetworkMessageId = @()
+    }
+
+    $hasV2 = [bool](Get-Command Get-MessageTraceV2 -ErrorAction SilentlyContinue)
+    $hasV2Detail = [bool](Get-Command Get-MessageTraceDetailV2 -ErrorAction SilentlyContinue)
+    $hasV1 = [bool](Get-Command Get-MessageTrace -ErrorAction SilentlyContinue)
+
+    foreach ($messageId in $InternetMessageIds) {
+        if ($hasV2) {
+            $rows = @(Get-MessageTraceV2 -StartDate $StartDate -EndDate $EndDate -MessageId $messageId -ResultSize 100 -ErrorAction SilentlyContinue)
+            $details = @()
+            if ($hasV2Detail) {
+                foreach ($row in $rows) {
+                    if ($row.MessageTraceId) {
+                        $details += @(Get-MessageTraceDetailV2 -MessageTraceId $row.MessageTraceId -RecipientAddress $row.RecipientAddress -StartDate $StartDate -EndDate $EndDate -ErrorAction SilentlyContinue)
+                    }
+                }
+            }
+            $traceSummary.InternetMessageId += [pscustomobject]@{
+                MessageId = $messageId
+                Version = "V2"
+                Rows = $rows
+                Details = $details
+            }
+        } elseif ($hasV1) {
+            $rows = @(Get-MessageTrace -StartDate $StartDate -EndDate $EndDate -MessageId $messageId -PageSize 100 -ErrorAction SilentlyContinue)
+            $traceSummary.InternetMessageId += [pscustomobject]@{
+                MessageId = $messageId
+                Version = "V1"
+                Rows = $rows
+                Details = @()
+            }
+        }
+    }
+
+    foreach ($networkId in $NetworkMessageIds) {
+        if (-not $hasV2) {
+            $traceSummary.NetworkMessageId += [pscustomobject]@{
+                MessageTraceId = $networkId
+                Version = "Unavailable"
+                Rows = @()
+                Details = @()
+            }
+            continue
+        }
+        $rows = @(Get-MessageTraceV2 -StartDate $StartDate -EndDate $EndDate -MessageTraceId $networkId -ResultSize 100 -ErrorAction SilentlyContinue)
+        $details = @()
+        if ($hasV2Detail) {
+            foreach ($row in $rows) {
+                if ($row.MessageTraceId) {
+                    $details += @(Get-MessageTraceDetailV2 -MessageTraceId $row.MessageTraceId -RecipientAddress $row.RecipientAddress -StartDate $StartDate -EndDate $EndDate -ErrorAction SilentlyContinue)
+                }
+            }
+        }
+        $traceSummary.NetworkMessageId += [pscustomobject]@{
+            MessageTraceId = $networkId
+            Version = "V2"
+            Rows = $rows
+            Details = $details
+        }
+    }
+
+    return [pscustomobject]$traceSummary
+}
+
+function Render-Report {
+    param(
+        [string]$Path,
+        [string]$OrganizationName,
+        [object[]]$MailboxSnapshots,
+        [object[]]$TransportRules,
+        [object]$TraceSummary,
+        [DateTime]$StartDate,
+        [DateTime]$EndDate
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("# Exchange Canonical Mailbox Audit")
+    $lines.Add("")
+    $lines.Add("- Organization: $OrganizationName")
+    $lines.Add("- Window: $($StartDate.ToString("u")) to $($EndDate.ToString("u"))")
+    $lines.Add("")
+    $lines.Add("## Mailboxes")
+    foreach ($snapshot in $MailboxSnapshots) {
+        $redirectRules = @($snapshot.RedirectRules)
+        $ruleStats = Get-RulePathStats -Snapshot $snapshot
+        $fullAccessUsers = @($snapshot.MailboxPermissions | ForEach-Object { $_.User })
+        $sendAsUsers = @($snapshot.RecipientPermissions | ForEach-Object { $_.Trustee })
+        $lines.Add("")
+        $lines.Add("### $($snapshot.Mailbox)")
+        $lines.Add("- RecipientTypeDetails: $($snapshot.RecipientTypeDetails)")
+        $lines.Add("- ForwardingAddress: $($snapshot.ForwardingAddress)")
+        $lines.Add("- ForwardingSmtpAddress: $($snapshot.ForwardingSmtpAddress)")
+        $lines.Add("- DeliverToMailboxAndForward: $($snapshot.DeliverToMailboxAndForward)")
+        $lines.Add("- HiddenFromAddressListsEnabled: $($snapshot.HiddenFromAddressListsEnabled)")
+        $lines.Add("- MessageCopyForSentAsEnabled: $($snapshot.MessageCopyForSentAsEnabled)")
+        $lines.Add("- MessageCopyForSendOnBehalfEnabled: $($snapshot.MessageCopyForSendOnBehalfEnabled)")
+        $lines.Add("- GrantSendOnBehalfTo: $(if ($snapshot.GrantSendOnBehalfTo.Count) { $snapshot.GrantSendOnBehalfTo -join ', ' } else { 'none' })")
+        $lines.Add("- FullAccess principals: $(if ($fullAccessUsers.Count) { $fullAccessUsers -join ', ' } else { 'none' })")
+        $lines.Add("- SendAs principals: $(if ($sendAsUsers.Count) { $sendAsUsers -join ', ' } else { 'none' })")
+        $lines.Add("- Total inbox rules: $($ruleStats.TotalRules)")
+        $lines.Add("- Redirect/forward inbox rules: $($redirectRules.Count)")
+        if ($ruleStats.RedirectRuleCount -gt 0) {
+            $lines.Add("- Rules before first redirect: $($ruleStats.RulesBeforeRedirect)")
+            $lines.Add("- Stop-processing rules before first redirect: $($ruleStats.StopProcessingBeforeRedirect)")
+            $lines.Add("- Delete rules before first redirect: $($ruleStats.DeleteBeforeRedirect)")
+            $lines.Add("- Move rules before first redirect: $($ruleStats.MoveBeforeRedirect)")
+        }
+        foreach ($rule in $redirectRules) {
+            $targets = @($rule.RedirectTo + $rule.ForwardTo + $rule.ForwardAsAttachTo) | Where-Object { $_ }
+            $lines.Add("  - [$($rule.Priority)] $($rule.Name) -> $($targets -join ', ')")
+        }
+    }
+
+    $lines.Add("")
+    $lines.Add("## Transport Rules")
+    if (@($TransportRules).Count -eq 0) {
+        $lines.Add("- No matching transport rules found.")
+    } else {
+        foreach ($rule in @($TransportRules)) {
+            $lines.Add("- [$($rule.Priority)] $($rule.Name) | State=$($rule.State) | Mode=$($rule.Mode)")
+        }
+    }
+
+    $lines.Add("")
+    $lines.Add("## Message Trace")
+    if (@($TraceSummary.InternetMessageId).Count -eq 0 -and @($TraceSummary.NetworkMessageId).Count -eq 0) {
+        $lines.Add("- No message trace queries requested.")
+    } else {
+        foreach ($entry in @($TraceSummary.InternetMessageId)) {
+            $lines.Add("- InternetMessageId $($entry.MessageId): $(@($entry.Rows).Count) rows")
+        }
+        foreach ($entry in @($TraceSummary.NetworkMessageId)) {
+            $lines.Add("- NetworkMessageId $($entry.MessageTraceId): $(@($entry.Rows).Count) rows")
+        }
+    }
+
+    Set-Content -Path $Path -Value $lines -Encoding utf8
+}
+
+Ensure-Module
+$outputRoot = New-OutputRoot
+$rawRoot = Join-Path $outputRoot "raw"
+$startDate = (Get-Date).ToUniversalTime().AddDays(-1 * [Math]::Abs($DaysBack))
+$endDate = (Get-Date).ToUniversalTime()
+
+$connectParams = @{
+    ShowBanner = $false
+    ErrorAction = "Stop"
+}
+if ($AdminUpn) {
+    $connectParams["UserPrincipalName"] = $AdminUpn
+}
+if ($Device.IsPresent) {
+    $connectParams["Device"] = $true
+}
+if ($Organization) {
+    $connectParams["Organization"] = $Organization
+}
+
+try {
+    Connect-ExchangeOnline @connectParams | Out-Null
+
+    $mailboxSnapshots = @(
+        Get-Canonical-MailboxSnapshot -Mailbox $TeamMailbox
+        Get-Canonical-MailboxSnapshot -Mailbox $InfoMailbox
+        Get-Canonical-MailboxSnapshot -Mailbox $RonnyMailbox
+    )
+    $transportRules = @(Get-TransportRuleSnapshot -Mailboxes @($TeamMailbox, $InfoMailbox, $RonnyMailbox))
+    $traceSummary = Get-TraceSnapshot -StartDate $startDate -EndDate $endDate -InternetMessageIds $InternetMessageId -NetworkMessageIds $NetworkMessageId
+
+    Save-Json -Path (Join-Path $rawRoot "mailboxes.json") -Value $mailboxSnapshots
+    Save-Json -Path (Join-Path $rawRoot "transport-rules.json") -Value $transportRules
+    Save-Json -Path (Join-Path $rawRoot "message-trace.json") -Value $traceSummary
+    Render-Report -Path (Join-Path $outputRoot "report.md") -OrganizationName $Organization -MailboxSnapshots $mailboxSnapshots -TransportRules $transportRules -TraceSummary $traceSummary -StartDate $startDate -EndDate $endDate
+
+    Write-Output "Exchange canonical audit complete."
+    Write-Output "Report: $outputRoot/report.md"
+    Write-Output "Raw:    $rawRoot"
+}
+finally {
+    Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+}

@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""Audit or apply local Outlook compose-default canonicalization for Mint."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import plistlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[5]
+PROVIDERS_CONTRACT = ROOT / "ops/bindings/communications.providers.contract.yaml"
+RUNTIME_CONTRACT = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
+PROFILE_PREFS = Path(
+    "~/Library/Group Containers/UBF8T346G9.Office/Outlook/Outlook 15 Profiles/Main Profile/ProfilePreferences.plist"
+).expanduser()
+APP_PREFS = Path(
+    "~/Library/Containers/com.microsoft.Outlook/Data/Library/Preferences/com.microsoft.Outlook.plist"
+).expanduser()
+OUTLOOK_APP = "Microsoft Outlook"
+ACCOUNT_SUFFIX = "_ActiveSyncExchange_HxS"
+
+
+class ToolError(RuntimeError):
+    pass
+
+
+def run_text(*args: str) -> str:
+    completed = subprocess.run(
+        args,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def yq_value(path: Path, expr: str) -> str:
+    completed = subprocess.run(
+        ["yq", "e", "-r", f"{expr} // \"\"", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def resolve_team_account_identifier() -> str:
+    mailbox = yq_value(PROVIDERS_CONTRACT, ".write_authority.mint_customer_service_mailbox")
+    if not mailbox:
+        raise ToolError("communications.providers.contract missing write_authority.mint_customer_service_mailbox")
+    return f"{mailbox}{ACCOUNT_SUFFIX}"
+
+
+def resolve_evidence_root() -> Path:
+    env_root = os.environ.get("SPINE_EVIDENCE_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).expanduser()
+    if shutil.which("yq") and RUNTIME_CONTRACT.exists():
+        configured = yq_value(RUNTIME_CONTRACT, ".evidence_root")
+        if configured:
+            return Path(configured).expanduser()
+    return Path.home() / "code/.evidence/spine"
+
+
+def load_plist(path: Path) -> dict:
+    if not path.exists():
+        raise ToolError(f"missing required plist: {path}")
+    with path.open("rb") as handle:
+        data = plistlib.load(handle)
+    if not isinstance(data, dict):
+        raise ToolError(f"expected plist dict root: {path}")
+    return data
+
+
+def write_plist(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+        tmp_path = Path(handle.name)
+    try:
+        with tmp_path.open("wb") as handle:
+            plistlib.dump(payload, handle, sort_keys=False)
+        tmp_path.replace(path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
+def is_outlook_running() -> bool:
+    completed = subprocess.run(
+        ["pgrep", "-x", OUTLOOK_APP],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return completed.returncode == 0
+
+
+def quit_outlook() -> None:
+    subprocess.run(
+        ["osascript", "-e", f'tell application "{OUTLOOK_APP}" to quit'],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for _ in range(40):
+        if not is_outlook_running():
+            return
+        time.sleep(0.5)
+    raise ToolError("Outlook did not exit after graceful quit request")
+
+
+def reopen_outlook() -> None:
+    subprocess.run(["open", "-a", OUTLOOK_APP], check=True)
+
+
+def sidebar_mail_items(app_prefs: dict) -> list[str]:
+    items = app_prefs.get("NSOutlineView Items SidebarMail_AllAccounts")
+    if not isinstance(items, list):
+        return []
+    return [str(item) for item in items]
+
+
+def audit_state(team_account_identifier: str) -> dict:
+    profile_prefs = load_plist(PROFILE_PREFS)
+    app_prefs = load_plist(APP_PREFS)
+
+    sorted_accounts = [str(item) for item in profile_prefs.get("SortedAccounts") or []]
+    sidebar_items = sidebar_mail_items(app_prefs)
+    activation_email = (
+        ((app_prefs.get("LastSessionLicensingStatus") or {}).get("ActivationEmail")) or ""
+    )
+
+    return {
+        "outlook_running": is_outlook_running(),
+        "desired_default_account_identifier": team_account_identifier,
+        "profile_preferences": {
+            "path": str(PROFILE_PREFS),
+            "default_account_identifier": str(profile_prefs.get("DefaultAccountIdentifier") or ""),
+            "sorted_accounts": sorted_accounts,
+            "default_matches": str(profile_prefs.get("DefaultAccountIdentifier") or "") == team_account_identifier,
+            "team_first": bool(sorted_accounts) and sorted_accounts[0] == team_account_identifier,
+            "team_present": team_account_identifier in sorted_accounts,
+        },
+        "app_preferences": {
+            "path": str(APP_PREFS),
+            "activation_email": str(activation_email),
+            "sidebar_mail_all_accounts": sidebar_items,
+            "sidebar_team_first": bool(sidebar_items) and sidebar_items[0] == team_account_identifier,
+            "sidebar_noncanonical_entries": [
+                item
+                for item in sidebar_items
+                if item.casefold().startswith("info@mintprints.com")
+                or item.casefold().startswith("ronny@mintprints.com")
+            ],
+        },
+        "notes": [
+            "ActivationEmail stays on Ronny for licensing; this tool only canonicalizes local compose default and account order.",
+            "Outlook conversation rollups across Inbox and Sent Items are not authoritative duplicate evidence; team@ Inbox is the customer-service queue of record."
+        ],
+    }
+
+
+def create_backup_dir() -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_dir = resolve_evidence_root() / "verify" / "infra" / f"outlook-local-canonicalize-{stamp}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    return backup_dir
+
+
+def apply_changes(team_account_identifier: str, *, graceful_quit: bool, reopen: bool) -> dict:
+    before = audit_state(team_account_identifier)
+    was_running = before["outlook_running"]
+
+    if was_running and not graceful_quit:
+        raise ToolError("Outlook is running; rerun with --graceful-quit or close Outlook first")
+
+    if was_running and graceful_quit:
+        quit_outlook()
+
+    backup_dir = create_backup_dir()
+    shutil.copy2(PROFILE_PREFS, backup_dir / PROFILE_PREFS.name)
+    shutil.copy2(APP_PREFS, backup_dir / APP_PREFS.name)
+    (backup_dir / "before.json").write_text(json.dumps(before, indent=2) + "\n", encoding="utf-8")
+
+    profile_prefs = load_plist(PROFILE_PREFS)
+    sorted_accounts = [str(item) for item in profile_prefs.get("SortedAccounts") or []]
+    if team_account_identifier not in sorted_accounts:
+        raise ToolError(f"{team_account_identifier} is not present in local Outlook SortedAccounts; cannot promote it")
+
+    reordered_accounts = [team_account_identifier] + [item for item in sorted_accounts if item != team_account_identifier]
+    profile_prefs["DefaultAccountIdentifier"] = team_account_identifier
+    profile_prefs["SortedAccounts"] = reordered_accounts
+    write_plist(PROFILE_PREFS, profile_prefs)
+
+    after = audit_state(team_account_identifier)
+    (backup_dir / "after.json").write_text(json.dumps(after, indent=2) + "\n", encoding="utf-8")
+
+    if reopen and was_running:
+        reopen_outlook()
+
+    return {
+        "backup_dir": str(backup_dir),
+        "before": before,
+        "after": after,
+        "changed": before["profile_preferences"]["default_account_identifier"] != after["profile_preferences"]["default_account_identifier"]
+        or before["profile_preferences"]["sorted_accounts"] != after["profile_preferences"]["sorted_accounts"],
+        "reopened": bool(reopen and was_running),
+    }
+
+
+def print_result(payload: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, indent=2))
+        return
+
+    if "backup_dir" in payload:
+        print("microsoft.outlook.local.canonicalize")
+        print("mode: apply")
+        print(f"backup_dir: {payload['backup_dir']}")
+        print(f"changed: {str(payload['changed']).lower()}")
+        print(f"reopened: {str(payload['reopened']).lower()}")
+        after = payload["after"]
+        print(
+            "default_account_identifier: "
+            f"{after['profile_preferences']['default_account_identifier']}"
+        )
+        print(
+            "sorted_accounts: "
+            + ", ".join(after["profile_preferences"]["sorted_accounts"])
+        )
+        print(
+            "sidebar_mail_all_accounts: "
+            + ", ".join(after["app_preferences"]["sidebar_mail_all_accounts"])
+        )
+        print("note: ActivationEmail remains on Ronny by design; compose default is now biased to team@.")
+        print("note: Outlook conversation rollups can show one send plus one delivery; use team@ Inbox for queue truth.")
+        return
+
+    print("microsoft.outlook.local.canonicalize")
+    print("mode: audit")
+    print(f"outlook_running: {str(payload['outlook_running']).lower()}")
+    print(
+        "default_account_identifier: "
+        f"{payload['profile_preferences']['default_account_identifier']}"
+    )
+    print(f"default_matches: {str(payload['profile_preferences']['default_matches']).lower()}")
+    print(f"team_first: {str(payload['profile_preferences']['team_first']).lower()}")
+    print(
+        "sorted_accounts: "
+        + ", ".join(payload["profile_preferences"]["sorted_accounts"])
+    )
+    print(
+        "sidebar_mail_all_accounts: "
+        + ", ".join(payload["app_preferences"]["sidebar_mail_all_accounts"])
+    )
+    print("note: Outlook conversation rollups can show one send plus one delivery; use team@ Inbox for queue truth.")
+    print(f"activation_email: {payload['app_preferences']['activation_email']}")
+    print("note: ActivationEmail remains on Ronny by design; only the compose default should move to team@.")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Audit or apply local Outlook compose-default canonicalization for Mint"
+    )
+    parser.add_argument("--apply", action="store_true", help="apply the local compose-default/account-order fix")
+    parser.add_argument(
+        "--graceful-quit",
+        action="store_true",
+        help="gracefully quit Outlook first when --apply is used",
+    )
+    parser.add_argument(
+        "--reopen",
+        action="store_true",
+        help="reopen Outlook after a successful apply when Outlook was running",
+    )
+    parser.add_argument("--json", action="store_true", help="emit JSON instead of plain text")
+    args = parser.parse_args()
+
+    if not shutil.which("yq"):
+        raise ToolError("missing required tool: yq")
+
+    team_account_identifier = resolve_team_account_identifier()
+
+    if args.apply:
+        result = apply_changes(
+            team_account_identifier,
+            graceful_quit=args.graceful_quit,
+            reopen=args.reopen,
+        )
+        print_result(result, args.json)
+        return 0
+
+    result = audit_state(team_account_identifier)
+    print_result(result, args.json)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ToolError as exc:
+        print(f"microsoft.outlook.local.canonicalize FAIL: {exc}", file=sys.stderr)
+        raise SystemExit(1)

@@ -65,7 +65,7 @@ version: 1
 transactional:
   mode: live
   cutover_phase: phase1-resend-live
-  default_sender_email: "noreply@mintprints.com"
+  default_sender_email: "no-reply@mintprints.com"
   default_sender_name: "Mint Prints"
   default_sms_from: "+15619335513"
   phase_matrix:

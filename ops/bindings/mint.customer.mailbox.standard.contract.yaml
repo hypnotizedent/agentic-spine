@@ -1,0 +1,108 @@
+# Status: authoritative
+# Last verified: 2026-03-16
+
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-16
+scope: mint-customer-mailbox-standard-procedure
+
+version: "1.0"
+updated_at: "2026-03-16"
+
+purpose: |
+  Define the boring operating procedure for Mint customer email so Morpheus,
+  Artie, Fin, Flying Dutchman, and human operators all read the same mailbox
+  truth and do not treat Outlook conversation rollups as transport duplication.
+
+authority:
+  canonical_mailbox: team@mintprints.com
+  ingress_aliases:
+    - info@mintprints.com
+  executive_safety_copy_mailboxes:
+    - ronny@mintprints.com
+  parked_legacy_mailboxes:
+    - info-legacy@mintprints.onmicrosoft.com
+  system_sender_mailboxes:
+    - no-reply@mintprints.com
+
+standard_procedure:
+  work_queue_truth:
+    authoritative_folder: "team@mintprints.com / Inbox"
+    rule: "Customer-service work starts from team@ Inbox only."
+    non_authoritative_views:
+      - "Outlook conversation rollups across folders"
+      - "All Accounts merged views"
+      - "Sent Items counts"
+  reply_identity:
+    required_mailbox: team@mintprints.com
+    rule: "Customer replies go out from team@ only unless Ronny is intentionally handling an executive-only thread."
+  ingress_handling:
+    info_alias_rule: "info@mintprints.com is ingress-only and must land in the team@ lane."
+    ronny_rule: "ronny@mintprints.com is executive-only and not part of the normal customer-service queue."
+  system_sender_handling:
+    no_reply_rule: "no-reply@mintprints.com is a hidden transactional sender only and must not receive shadow copies of human customer mail."
+  duplicate_interpretation:
+    authoritative_test: "Compare folder placement plus internetMessageId before calling something a duplicate."
+    expected_non_bug_patterns:
+      - "One sent copy in ronny@ Sent Items plus one delivered copy in team@ Inbox"
+      - "One sent copy in ronny@ Sent Items plus one delivered copy in ronny@ Inbox"
+    bug_definition: "A real duplicate bug is two or more items in the same authoritative folder with the same internetMessageId."
+
+agent_rules:
+  morpheus:
+    mailbox: team@mintprints.com
+    start_surface: mint.customer.inbox.triage
+    rule: "Do not triage customer work from ronny@ or from Outlook merged conversation views."
+  artie:
+    mailbox: team@mintprints.com
+    rule: "Use the team@ thread as the customer-facing handoff anchor."
+  fin:
+    mailbox: team@mintprints.com
+    archive_account_contract_id: microsoft-team
+    rule: "Treat account 5 / microsoft-team as the canonical direct-comms history lane."
+  flying_dutchman:
+    rule: "Close loops only when D399 is green and the team archive lane is healthy."
+
+outlook_local_interpretation:
+  compose_default_mailbox: team@mintprints.com
+  ui_warning: |
+    Outlook can show one send plus one delivery as multiple visible rows when
+    conversations span Sent Items and Inbox across Ronny plus shared mailbox
+    surfaces. That view is not authoritative for duplicate diagnosis.
+  operator_check_order:
+    - "Check team@ Inbox first."
+    - "Check ronny@ Inbox only for executive-direct mail."
+    - "Treat Sent Items as expected send trace, not queue truth."
+    - "If still unclear, compare internetMessageId and folder placement with governed Microsoft reads."
+
+boring_invariants:
+  required:
+    - "team@mintprints.com remains the only canonical customer-service mailbox"
+    - "info@mintprints.com remains alias-only ingress"
+    - "ronny@mintprints.com remains executive/safety-copy only"
+    - "Customer-path duplicates are measured only within team@ Inbox"
+    - "All agent customer triage starts from governed team@ surfaces"
+  forbidden:
+    - "Standalone info@ shared mailbox returning as a live customer mailbox surface"
+    - "Inbox redirect rules from info@ or ronny@ into team@"
+    - "Agents treating Outlook conversation rollups as proof of transport duplication"
+    - "Hidden BCC or shadow-copy drift that sends human customer mail into no-reply@ or any other non-canonical mailbox"
+
+verification:
+  gates:
+    - surfaces/verify/d399-microsoft-mint-customer-mailbox-canonical-lock.sh
+  runtime_checks:
+    - ./bin/ops cap run communications.mailarchiver.mint.team.verify
+    - ./bin/ops cap run mint.customer.inbox.triage
+  operator_incident_checklist:
+    - "Capture exact subject and mailbox."
+    - "Check team@ Inbox count for the exact subject."
+    - "Compare internetMessageId for every visible copy."
+    - "Separate Sent Items copies from Inbox copies."
+    - "Only escalate as duplication if the same internetMessageId appears twice in team@ Inbox."
+
+references:
+  - ops/bindings/communications.providers.contract.yaml
+  - ops/bindings/mail.archiver.account.linkage.contract.yaml
+  - ops/bindings/mail.archiver.alias.boundary.contract.yaml
+  - docs/governance/domains/microsoft.md
