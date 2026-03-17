@@ -35,18 +35,35 @@ fi
 tenant_env="$(yq e -r '.application.secrets.tenant_id.env // "AZURE_TENANT_ID"' "$CONTRACT")"
 client_id_env="$(yq e -r '.application.secrets.client_id.env // "AZURE_ENTRA_ADMIN_CLIENT_ID"' "$CONTRACT")"
 client_secret_env="$(yq e -r '.application.secrets.client_secret.env // "AZURE_ENTRA_ADMIN_CLIENT_SECRET"' "$CONTRACT")"
+client_id_fallback_env="$(yq e -r '.application.secrets.client_id.fallback_env // "AZURE_CLIENT_ID"' "$CONTRACT")"
+client_secret_fallback_env="$(yq e -r '.application.secrets.client_secret.fallback_env // "AZURE_CLIENT_SECRET"' "$CONTRACT")"
 token_scope="$(yq e -r '.application.token.scope // "https://graph.microsoft.com/.default"' "$CONTRACT")"
+mapfile -t required_roles < <(yq e -r '.graph_permissions.application[].name' "$CONTRACT" 2>/dev/null)
 
 tenant_id="${!tenant_env:-}"
 client_id="${!client_id_env:-}"
 client_secret="${!client_secret_env:-}"
+credential_source="dedicated"
+
+if [[ -z "$client_id" && -n "${!client_id_fallback_env:-}" ]]; then
+  client_id="${!client_id_fallback_env:-}"
+  credential_source="fallback"
+fi
+
+if [[ -z "$client_secret" && -n "${!client_secret_fallback_env:-}" ]]; then
+  client_secret="${!client_secret_fallback_env:-}"
+  credential_source="fallback"
+fi
 
 if [[ -z "$tenant_id" || -z "$client_id" || -z "$client_secret" ]]; then
   echo "FAIL: missing Entra admin app credentials. Expected env vars:" >&2
   echo "  $tenant_env" >&2
   echo "  $client_id_env" >&2
   echo "  $client_secret_env" >&2
-  echo "Hint: create/admin-consent the tenant-owned app and write its secrets to Infisical /spine/platform/security." >&2
+  echo "Fallback env vars also accepted when the existing Microsoft app already has the required roles:" >&2
+  echo "  $client_id_fallback_env" >&2
+  echo "  $client_secret_fallback_env" >&2
+  echo "Hint: either reuse the existing Microsoft app or create/admin-consent a dedicated admin app." >&2
   exit 1
 fi
 
@@ -65,6 +82,40 @@ if [[ -z "$access_token" ]]; then
   exit 1
 fi
 
+required_roles_csv="$(printf '%s\n' "${required_roles[@]}" | awk 'NF' | paste -sd, -)"
+missing_roles="$(
+  ACCESS_TOKEN="$access_token" REQUIRED_ROLES="$required_roles_csv" python3 - <<'PY'
+import base64
+import json
+import os
+
+token = os.environ["ACCESS_TOKEN"]
+required = [value.strip() for value in os.environ.get("REQUIRED_ROLES", "").split(",") if value.strip()]
+parts = token.split(".")
+if len(parts) < 2:
+    print("__TOKEN_PARSE_ERROR__")
+    raise SystemExit(0)
+payload = parts[1]
+payload += "=" * (-len(payload) % 4)
+claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+roles = set(claims.get("roles") or [])
+missing = [role for role in required if role and role not in roles]
+print(",".join(missing))
+PY
+)"
+
+if [[ "$missing_roles" == "__TOKEN_PARSE_ERROR__" ]]; then
+  echo "FAIL: unable to parse Graph access token roles claim" >&2
+  exit 1
+fi
+
+if [[ -n "$missing_roles" ]]; then
+  echo "FAIL: Entra admin token is missing required Graph application roles: $missing_roles" >&2
+  echo "credential_source: $credential_source" >&2
+  exit 1
+fi
+
 export MICROSOFT_ACCESS_TOKEN="$access_token"
 export MICROSOFT_ENTRA_ADMIN_ACCESS_TOKEN="$access_token"
+export MICROSOFT_ENTRA_ADMIN_CREDENTIAL_SOURCE="$credential_source"
 exec "$@"

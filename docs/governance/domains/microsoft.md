@@ -37,6 +37,7 @@ Directory cleanup should be boring too.
 - The tenant-owned automation app contract lives at `ops/bindings/microsoft.entra.admin.app.contract.yaml`.
 - Its governed token wrapper is `./ops/plugins/providers/microsoft/bin/microsoft-entra-admin-token-exec`.
 - The one deprecation command is `./ops/plugins/providers/microsoft/bin/microsoft-tenant-boring-deprecate`.
+- By default, the Entra lane may reuse `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` if that live app token already carries the required Graph application permissions.
 - `./ops/plugins/providers/microsoft/bin/microsoft-tenant-boring-deprecate --contract-check` validates the contract allowlist and archive gating without needing live secrets.
 - `./ops/plugins/providers/microsoft/bin/microsoft-tenant-boring-deprecate --apply` is the intended boring path after the Entra app exists and has admin-consented Graph application permissions.
 

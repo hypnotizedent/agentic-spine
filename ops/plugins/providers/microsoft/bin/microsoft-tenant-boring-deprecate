@@ -113,6 +113,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -251,6 +252,7 @@ payload = {
     "archiver_contract": archiver_contract_display,
     "admin_app_contract": app_contract_display,
     "admin_app_display_name": str((((app_contract.get("application") or {}).get("display_name")) or "")),
+    "credential_source": os.environ.get("MICROSOFT_ENTRA_ADMIN_CREDENTIAL_SOURCE", ""),
     "approved_target_count": len(approved_targets),
     "identity_filter_count": len(identity_filters),
     "runtime_receipt_path": str(receipt_path),
@@ -290,8 +292,10 @@ for target in approved_targets:
         payload["targets"].append(result)
         continue
 
+    already_disabled = not bool(before.get("accountEnabled"))
+    already_delicensed = len(before.get("assignedLicenses") or []) == 0
     if not apply_mode:
-        result["status"] = "ready_for_apply"
+        result["status"] = "already_boring" if already_disabled and already_delicensed else "ready_for_apply"
         payload["targets"].append(result)
         continue
 
@@ -316,6 +320,12 @@ for target in approved_targets:
     actions.append({"action": "disable_account", "status": code, "response": body})
 
     after_status, after = get_user(target["identity"])
+    if after_status == 200 and bool((after or {}).get("accountEnabled")):
+        for _ in range(4):
+            time.sleep(3)
+            after_status, after = get_user(target["identity"])
+            if after_status == 200 and not bool((after or {}).get("accountEnabled")):
+                break
     result["actions"] = actions
     result["postcheck_status"] = after_status
     result["after"] = summarize_user(after) if after_status == 200 else after

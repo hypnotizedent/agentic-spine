@@ -12,22 +12,30 @@ purpose: |
   device-code admin sessions for repeatable tenant cleanup work.
 
 application:
-  display_name: spine-entra-admin
+  display_name: mint-microsoft-admin
   tenant: mintprints.com
   auth_model: client-credentials
   secrets:
     provider: infisical
     project: infrastructure
     path: /spine/platform/security
+    resolution_rule: |
+      Prefer AZURE_ENTRA_ADMIN_CLIENT_ID / AZURE_ENTRA_ADMIN_CLIENT_SECRET when
+      present. Otherwise reuse AZURE_CLIENT_ID / AZURE_CLIENT_SECRET if the live
+      token already carries the required Graph application roles.
     tenant_id:
       env: AZURE_TENANT_ID
       secret_ref: infisical://spine/platform/security/AZURE_TENANT_ID
     client_id:
       env: AZURE_ENTRA_ADMIN_CLIENT_ID
       secret_ref: infisical://spine/platform/security/AZURE_ENTRA_ADMIN_CLIENT_ID
+      fallback_env: AZURE_CLIENT_ID
+      fallback_secret_ref: infisical://spine/platform/security/AZURE_CLIENT_ID
     client_secret:
       env: AZURE_ENTRA_ADMIN_CLIENT_SECRET
       secret_ref: infisical://spine/platform/security/AZURE_ENTRA_ADMIN_CLIENT_SECRET
+      fallback_env: AZURE_CLIENT_SECRET
+      fallback_secret_ref: infisical://spine/platform/security/AZURE_CLIENT_SECRET
   token:
     scope: https://graph.microsoft.com/.default
 
@@ -60,8 +68,8 @@ safety_controls:
   - "The command must support a non-mutating preview before apply."
 
 setup_checklist:
-  - "Create an Entra app registration named spine-entra-admin in the Mint tenant."
-  - "Create a client secret or certificate for that app."
+  - "First choice: reuse the existing AZURE_CLIENT_ID / AZURE_CLIENT_SECRET app if its live token carries the listed Graph application permissions."
+  - "If the shared Microsoft app should stay least-privilege, create a separate Entra app registration and client secret instead."
   - "Grant the listed Microsoft Graph application permissions and admin-consent them once."
-  - "Write AZURE_ENTRA_ADMIN_CLIENT_ID and AZURE_ENTRA_ADMIN_CLIENT_SECRET into Infisical at /spine/platform/security."
+  - "Only write AZURE_ENTRA_ADMIN_CLIENT_ID and AZURE_ENTRA_ADMIN_CLIENT_SECRET if you want a dedicated admin app instead of reusing the existing Microsoft app."
   - "Verify the contract-check and preview path before first --apply."
