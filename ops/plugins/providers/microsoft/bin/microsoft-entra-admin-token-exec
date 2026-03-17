@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# microsoft-entra-admin-token-exec — acquire Graph app token for tenant-owned Entra admin app
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+CONTRACT="${MICROSOFT_ENTRA_ADMIN_APP_CONTRACT:-$ROOT/ops/bindings/microsoft.entra.admin.app.contract.yaml}"
+
+usage() {
+  cat <<'EOF'
+Usage: microsoft-entra-admin-token-exec <command...>
+
+Acquire a Microsoft Graph app-only bearer token for the tenant-owned Entra
+admin application described in microsoft.entra.admin.app.contract.yaml, then
+run the given command with MICROSOFT_ACCESS_TOKEN in env.
+EOF
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "FAIL: missing dependency: $1" >&2
+    exit 1
+  }
+}
+
+need curl
+need python3
+need yq
+[[ -f "$CONTRACT" ]] || { echo "FAIL: missing contract: $CONTRACT" >&2; exit 1; }
+
+if [[ "$#" -lt 1 ]]; then
+  usage >&2
+  exit 1
+fi
+
+tenant_env="$(yq e -r '.application.secrets.tenant_id.env // "AZURE_TENANT_ID"' "$CONTRACT")"
+client_id_env="$(yq e -r '.application.secrets.client_id.env // "AZURE_ENTRA_ADMIN_CLIENT_ID"' "$CONTRACT")"
+client_secret_env="$(yq e -r '.application.secrets.client_secret.env // "AZURE_ENTRA_ADMIN_CLIENT_SECRET"' "$CONTRACT")"
+token_scope="$(yq e -r '.application.token.scope // "https://graph.microsoft.com/.default"' "$CONTRACT")"
+
+tenant_id="${!tenant_env:-}"
+client_id="${!client_id_env:-}"
+client_secret="${!client_secret_env:-}"
+
+if [[ -z "$tenant_id" || -z "$client_id" || -z "$client_secret" ]]; then
+  echo "FAIL: missing Entra admin app credentials. Expected env vars:" >&2
+  echo "  $tenant_env" >&2
+  echo "  $client_id_env" >&2
+  echo "  $client_secret_env" >&2
+  echo "Hint: create/admin-consent the tenant-owned app and write its secrets to Infisical /spine/platform/security." >&2
+  exit 1
+fi
+
+token_url="https://login.microsoftonline.com/${tenant_id}/oauth2/v2.0/token"
+response="$(curl -sS -X POST "$token_url" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=${client_id}" \
+  -d "client_secret=${client_secret}" \
+  --data-urlencode "scope=${token_scope}")"
+
+access_token="$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))')"
+if [[ -z "$access_token" ]]; then
+  error_text="$(printf '%s' "$response" | python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("error_description", data.get("error","unknown")))' 2>/dev/null || echo "unknown")"
+  echo "FAIL: Entra admin token acquisition failed: $error_text" >&2
+  exit 1
+fi
+
+export MICROSOFT_ACCESS_TOKEN="$access_token"
+export MICROSOFT_ENTRA_ADMIN_ACCESS_TOKEN="$access_token"
+exec "$@"

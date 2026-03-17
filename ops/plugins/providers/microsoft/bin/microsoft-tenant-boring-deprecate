@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+# microsoft-tenant-boring-deprecate — governed Entra cleanup for approved boringness targets
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
+TOKEN_EXEC="$ROOT/ops/plugins/providers/microsoft/bin/microsoft-entra-admin-token-exec"
+TENANT_CONTRACT="${MICROSOFT_TENANT_BORING_CONTRACT:-$ROOT/ops/bindings/microsoft.tenant.boring.contract.yaml}"
+ARCHIVER_CONTRACT="${MAIL_ARCHIVER_ACCOUNT_LINKAGE_CONTRACT:-$ROOT/ops/bindings/mail.archiver.account.linkage.contract.yaml}"
+APP_CONTRACT="${MICROSOFT_ENTRA_ADMIN_APP_CONTRACT:-$ROOT/ops/bindings/microsoft.entra.admin.app.contract.yaml}"
+APPLY=0
+JSON=0
+CONTRACT_CHECK=0
+IDENTITIES=()
+ORIG_ARGS=("$@")
+
+usage() {
+  cat <<'EOF'
+Usage: microsoft-tenant-boring-deprecate [options]
+
+Plan or apply Entra directory cleanup for the identities explicitly approved in
+ microsoft.tenant.boring.contract.yaml.
+
+Options:
+  --apply                Execute directory mutations.
+  --contract-check       Read contracts only; do not require live auth.
+  --identity <mailbox>   Restrict to one approved identity. Repeatable.
+  --json                 Emit JSON summary instead of plain text.
+  -h, --help             Show this help.
+
+Default mode is a live preview: fetch current Graph state with the tenant-owned
+Entra admin app but do not mutate anything.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --apply)
+      APPLY=1
+      shift
+      ;;
+    --contract-check)
+      CONTRACT_CHECK=1
+      shift
+      ;;
+    --identity)
+      [[ $# -ge 2 ]] || { echo "ERROR: --identity requires a mailbox" >&2; exit 2; }
+      IDENTITIES+=("$2")
+      shift 2
+      ;;
+    --json)
+      JSON=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "$CONTRACT_CHECK" -eq 1 && "$APPLY" -eq 1 ]]; then
+  echo "ERROR: --contract-check and --apply cannot be used together" >&2
+  exit 2
+fi
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "ERROR: missing dependency: $1" >&2
+    exit 1
+  }
+}
+
+need python3
+need yq
+[[ -f "$TENANT_CONTRACT" ]] || { echo "ERROR: missing contract: $TENANT_CONTRACT" >&2; exit 1; }
+[[ -f "$ARCHIVER_CONTRACT" ]] || { echo "ERROR: missing contract: $ARCHIVER_CONTRACT" >&2; exit 1; }
+[[ -f "$APP_CONTRACT" ]] || { echo "ERROR: missing contract: $APP_CONTRACT" >&2; exit 1; }
+
+if [[ "$CONTRACT_CHECK" -eq 0 && "${MICROSOFT_ENTRA_ADMIN_BOOTSTRAPPED:-0}" != "1" ]]; then
+  [[ -x "$SECRETS_EXEC" ]] || { echo "ERROR: missing executable: $SECRETS_EXEC" >&2; exit 1; }
+  [[ -x "$TOKEN_EXEC" ]] || { echo "ERROR: missing executable: $TOKEN_EXEC" >&2; exit 1; }
+  export MICROSOFT_ENTRA_ADMIN_BOOTSTRAPPED=1
+  exec "$SECRETS_EXEC" -- "$TOKEN_EXEC" "$0" "${ORIG_ARGS[@]}"
+fi
+
+tenant_json="$(mktemp)"
+archiver_json="$(mktemp)"
+app_json="$(mktemp)"
+identity_json="$(mktemp)"
+trap 'rm -f "$tenant_json" "$archiver_json" "$app_json" "$identity_json"' EXIT
+yq e -o=json "$TENANT_CONTRACT" >"$tenant_json"
+yq e -o=json "$ARCHIVER_CONTRACT" >"$archiver_json"
+yq e -o=json "$APP_CONTRACT" >"$app_json"
+python3 - "$identity_json" "${IDENTITIES[@]}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+values = sys.argv[2:]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(values, handle)
+PY
+
+python3 - "$tenant_json" "$archiver_json" "$app_json" "$identity_json" "$ROOT" "$APPLY" "$JSON" "$CONTRACT_CHECK" "$TENANT_CONTRACT" "$ARCHIVER_CONTRACT" "$APP_CONTRACT" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+tenant_contract_path = Path(sys.argv[1])
+archiver_contract_path = Path(sys.argv[2])
+app_contract_path = Path(sys.argv[3])
+identity_filter_path = Path(sys.argv[4])
+root = Path(sys.argv[5])
+apply_mode = sys.argv[6] == "1"
+json_mode = sys.argv[7] == "1"
+contract_check = sys.argv[8] == "1"
+tenant_contract_display = sys.argv[9]
+archiver_contract_display = sys.argv[10]
+app_contract_display = sys.argv[11]
+
+tenant_contract = json.loads(tenant_contract_path.read_text(encoding="utf-8"))
+archiver_contract = json.loads(archiver_contract_path.read_text(encoding="utf-8"))
+app_contract = json.loads(app_contract_path.read_text(encoding="utf-8"))
+identity_filters = {
+    str(value or "").strip().casefold()
+    for value in json.loads(identity_filter_path.read_text(encoding="utf-8"))
+    if str(value or "").strip()
+}
+
+token = os.environ.get("MICROSOFT_ACCESS_TOKEN", "")
+api_root = "https://graph.microsoft.com/v1.0"
+timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+runtime_dir = root / ".runtime" / "spine" / "state" / "microsoft" / "tenant-boring-audits" / timestamp
+runtime_dir.mkdir(parents=True, exist_ok=True)
+receipt_name = "entra_directory_deprecation_apply.json" if apply_mode else "entra_directory_deprecation_plan.json"
+receipt_path = runtime_dir / receipt_name
+
+
+class GraphError(RuntimeError):
+    pass
+
+
+def normalize(value: str | None) -> str:
+    return (value or "").strip().casefold()
+
+
+def archiver_coverage(contract: dict) -> dict[str, dict]:
+    covered: dict[str, dict] = {}
+    for account in contract.get("accounts", []):
+        mailbox = normalize(account.get("mailbox"))
+        if not mailbox:
+            continue
+        lane_type = str(account.get("lane_type") or "").strip()
+        total_imported = int((((account.get("sync") or {}).get("import_history") or {}).get("total_imported") or 0))
+        is_covered = lane_type == "live-sync" or total_imported > 0
+        covered[mailbox] = {
+            "contract_id": str(account.get("id") or ""),
+            "lane_type": lane_type,
+            "total_imported": total_imported,
+            "covered": is_covered,
+        }
+    return covered
+
+
+def request_json(method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
+    if not token:
+        raise GraphError("MICROSOFT_ACCESS_TOKEN is missing")
+    url = path if path.startswith("https://") else f"{api_root}{path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    body = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            return response.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        try:
+            payload = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            payload = {"raw": raw}
+        return exc.code, payload
+
+
+def get_user(identity: str) -> tuple[int, dict]:
+    quoted = urllib.parse.quote(identity)
+    return request_json(
+        "GET",
+        f"/users/{quoted}?$select=id,displayName,mail,userPrincipalName,accountEnabled,userType,assignedLicenses,proxyAddresses",
+    )
+
+
+def summarize_user(data: dict) -> dict:
+    return {
+        "id": data.get("id"),
+        "display_name": data.get("displayName"),
+        "mail": data.get("mail"),
+        "user_principal_name": data.get("userPrincipalName"),
+        "account_enabled": data.get("accountEnabled"),
+        "user_type": data.get("userType"),
+        "license_count": len(data.get("assignedLicenses") or []),
+    }
+
+
+coverage = archiver_coverage(archiver_contract)
+approved_targets = []
+for item in tenant_contract.get("deprecation_program", {}).get("approved_targets", []):
+    identity = normalize(item.get("identity"))
+    if not identity:
+        continue
+    if identity_filters and identity not in identity_filters:
+        continue
+    archive_requirement = str(item.get("archive_requirement") or "required").strip().casefold()
+    archive_entry = coverage.get(identity)
+    archive_ok = archive_requirement in {"none", "waived"} or bool((archive_entry or {}).get("covered"))
+    approved_targets.append(
+        {
+            "identity": identity,
+            "category": str(item.get("category") or ""),
+            "archive_requirement": archive_requirement,
+            "archive_ok": archive_ok,
+            "archive_entry": archive_entry,
+            "rationale": str(item.get("rationale") or ""),
+        }
+    )
+
+payload = {
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "mode": "contract-check" if contract_check else ("apply" if apply_mode else "preview"),
+    "tenant_contract": tenant_contract_display,
+    "archiver_contract": archiver_contract_display,
+    "admin_app_contract": app_contract_display,
+    "admin_app_display_name": str((((app_contract.get("application") or {}).get("display_name")) or "")),
+    "approved_target_count": len(approved_targets),
+    "identity_filter_count": len(identity_filters),
+    "runtime_receipt_path": str(receipt_path),
+    "targets": [],
+}
+
+for target in approved_targets:
+    result = {
+        "identity": target["identity"],
+        "category": target["category"],
+        "archive_requirement": target["archive_requirement"],
+        "archive_ok": target["archive_ok"],
+        "archive_entry": target["archive_entry"],
+        "rationale": target["rationale"],
+        "mutation_allowed": target["archive_ok"],
+    }
+    if contract_check:
+        result["status"] = "approved" if target["archive_ok"] else "blocked_missing_archive"
+        payload["targets"].append(result)
+        continue
+
+    status_code, before = get_user(target["identity"])
+    result["lookup_status"] = status_code
+    if status_code == 404:
+        result["status"] = "directory_absent"
+        payload["targets"].append(result)
+        continue
+    if status_code != 200:
+        result["status"] = "lookup_failed"
+        result["error"] = before
+        payload["targets"].append(result)
+        continue
+
+    result["before"] = summarize_user(before)
+    if not target["archive_ok"]:
+        result["status"] = "blocked_missing_archive"
+        payload["targets"].append(result)
+        continue
+
+    if not apply_mode:
+        result["status"] = "ready_for_apply"
+        payload["targets"].append(result)
+        continue
+
+    user_id = str(before.get("id") or "")
+    assigned = before.get("assignedLicenses") or []
+    remove_skus = [item.get("skuId") for item in assigned if item.get("skuId")]
+    actions = []
+    if remove_skus:
+        code, body = request_json(
+            "POST",
+            f"/users/{urllib.parse.quote(user_id)}/assignLicense",
+            {"addLicenses": [], "removeLicenses": remove_skus},
+        )
+        actions.append({"action": "remove_licenses", "status": code, "removed_count": len(remove_skus), "response": body})
+    else:
+        actions.append({"action": "remove_licenses", "status": "skipped", "removed_count": 0})
+
+    code, body = request_json("POST", f"/users/{urllib.parse.quote(user_id)}/revokeSignInSessions", {})
+    actions.append({"action": "revoke_sessions", "status": code, "response": body})
+
+    code, body = request_json("PATCH", f"/users/{urllib.parse.quote(user_id)}", {"accountEnabled": False})
+    actions.append({"action": "disable_account", "status": code, "response": body})
+
+    after_status, after = get_user(target["identity"])
+    result["actions"] = actions
+    result["postcheck_status"] = after_status
+    result["after"] = summarize_user(after) if after_status == 200 else after
+    result["status"] = "applied" if after_status == 200 and not bool((after or {}).get("accountEnabled")) else "postcheck_failed"
+    payload["targets"].append(result)
+
+payload["summary"] = {
+    "approved": sum(1 for item in payload["targets"] if item["status"] in {"approved", "ready_for_apply", "applied", "directory_absent"}),
+    "blocked_missing_archive": sum(1 for item in payload["targets"] if item["status"] == "blocked_missing_archive"),
+    "lookup_failed": sum(1 for item in payload["targets"] if item["status"] == "lookup_failed"),
+    "directory_absent": sum(1 for item in payload["targets"] if item["status"] == "directory_absent"),
+    "postcheck_failed": sum(1 for item in payload["targets"] if item["status"] == "postcheck_failed"),
+}
+
+receipt_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+if json_mode:
+    print(json.dumps(payload, indent=2))
+    raise SystemExit(0)
+
+print(f"generated_at_utc: {payload['generated_at_utc']}")
+print(f"mode: {payload['mode']}")
+print(f"approved_target_count: {payload['approved_target_count']}")
+print(f"runtime_receipt_path: {payload['runtime_receipt_path']}")
+for item in payload["targets"]:
+    line = f"- {item['identity']}: {item['status']}"
+    if item.get("archive_requirement"):
+        line += f" (archive_requirement={item['archive_requirement']}"
+        line += f", archive_ok={'yes' if item['archive_ok'] else 'no'})"
+    print(line)
+PY

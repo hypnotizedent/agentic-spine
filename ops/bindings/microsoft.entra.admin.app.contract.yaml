@@ -1,0 +1,67 @@
+# Status: authoritative
+# Last verified: 2026-03-17
+
+version: 1
+updated_at: "2026-03-17"
+owner: "@ronny"
+scope: microsoft-entra-admin-app
+
+purpose: |
+  Define the tenant-owned Entra automation application used by Spine for
+  boring, non-interactive Microsoft directory mutations. This replaces ad hoc
+  device-code admin sessions for repeatable tenant cleanup work.
+
+application:
+  display_name: spine-entra-admin
+  tenant: mintprints.com
+  auth_model: client-credentials
+  secrets:
+    provider: infisical
+    project: infrastructure
+    path: /spine/platform/security
+    tenant_id:
+      env: AZURE_TENANT_ID
+      secret_ref: infisical://spine/platform/security/AZURE_TENANT_ID
+    client_id:
+      env: AZURE_ENTRA_ADMIN_CLIENT_ID
+      secret_ref: infisical://spine/platform/security/AZURE_ENTRA_ADMIN_CLIENT_ID
+    client_secret:
+      env: AZURE_ENTRA_ADMIN_CLIENT_SECRET
+      secret_ref: infisical://spine/platform/security/AZURE_ENTRA_ADMIN_CLIENT_SECRET
+  token:
+    scope: https://graph.microsoft.com/.default
+
+graph_permissions:
+  application:
+    - name: User.Read.All
+      reason: "Read user objects before and after deprecation."
+    - name: User.ReadWrite.All
+      reason: "Patch user accountEnabled state during deprecation."
+    - name: Directory.ReadWrite.All
+      reason: "Support governed directory mutations and post-state verification."
+    - name: User.EnableDisableAccount.All
+      reason: "Block sign-in at the Entra directory layer."
+    - name: User.RevokeSessions.All
+      reason: "Revoke active sessions after offboarding."
+    - name: LicenseAssignment.ReadWrite.All
+      reason: "Remove leftover licenses from deprecated identities."
+
+governed_usage:
+  token_exec: ops/plugins/providers/microsoft/bin/microsoft-entra-admin-token-exec
+  mutation_command: ops/plugins/providers/microsoft/bin/microsoft-tenant-boring-deprecate
+  default_mode: preview
+  apply_flag: --apply
+  contract_check_flag: --contract-check
+
+safety_controls:
+  - "Only identities explicitly approved in microsoft.tenant.boring.contract.yaml may be mutated."
+  - "Former employee identities require archive proof unless the contract explicitly waives that requirement."
+  - "Every run writes a runtime JSON receipt under .runtime/spine/state/microsoft/tenant-boring-audits/."
+  - "The command must support a non-mutating preview before apply."
+
+setup_checklist:
+  - "Create an Entra app registration named spine-entra-admin in the Mint tenant."
+  - "Create a client secret or certificate for that app."
+  - "Grant the listed Microsoft Graph application permissions and admin-consent them once."
+  - "Write AZURE_ENTRA_ADMIN_CLIENT_ID and AZURE_ENTRA_ADMIN_CLIENT_SECRET into Infisical at /spine/platform/security."
+  - "Verify the contract-check and preview path before first --apply."
