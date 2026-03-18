@@ -71,6 +71,7 @@ max_gate="$(yq e -r '.gates[].id' "$REGISTRY" | sed 's/^D//' | sort -n | tail -1
 TMP_BLOCK="$(mktemp)"
 cat > "$TMP_BLOCK" <<EOF_BLOCK
 # ENTRY SURFACE GATE METADATA (generated)
+entry_surface_gate_metadata: projection
 source_registry: $REGISTRY_REL
 registry_updated: $updated
 gate_count_total: $total

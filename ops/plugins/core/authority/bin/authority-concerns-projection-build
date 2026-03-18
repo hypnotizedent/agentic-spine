@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/authority.concerns.yaml"
+PROJECTION="$ROOT/ops/bindings/single.authority.contract.yaml"
+MODE="write"
+VERIFY=0
+LOCK_HELD=0
+TMP_CONTRACT_JSON=""
+TMP_PROJECTION_JSON=""
+TMP_PROJECTION_YAML=""
+
+source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/lib/governed-write-transaction.sh"
+source "$ROOT/ops/lib/runtime-paths.sh"
+
+usage() {
+  cat <<'USAGE'
+authority-concerns-projection-build
+
+Usage:
+  authority-concerns-projection-build [--check] [--verify]
+
+Options:
+  --check    Fail if the generated compatibility projection drifts from disk.
+  --verify   Verify concern entries, source resolution, and required markers.
+USAGE
+}
+
+fail() {
+  echo "authority.concerns.projection.build FAIL: $*" >&2
+  exit 1
+}
+
+cleanup() {
+  if [[ "$LOCK_HELD" -eq 1 ]]; then
+    release_git_lock || true
+  fi
+  spine_tx_cleanup
+  rm -f "${TMP_CONTRACT_JSON:-}" "${TMP_PROJECTION_JSON:-}" "${TMP_PROJECTION_YAML:-}"
+  return 0
+}
+
+trap cleanup EXIT INT TERM
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --check) MODE="check"; shift ;;
+    --verify) VERIFY=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown arg: $1" ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
+command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+
+spine_runtime_resolve_paths
+WORKSPACE_ROOT="${SPINE_WORKSPACE_ROOT:-$(cd "$ROOT/.." && pwd)}"
+
+TMP_CONTRACT_JSON="$(mktemp)"
+TMP_PROJECTION_JSON="$(mktemp)"
+TMP_PROJECTION_YAML="$(mktemp)"
+
+yq -o=json '.' "$CONTRACT" > "$TMP_CONTRACT_JSON"
+
+python3 - "$TMP_CONTRACT_JSON" "$ROOT" "$WORKSPACE_ROOT" <<'PY' > "$TMP_PROJECTION_JSON"
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+contract_path = Path(sys.argv[1])
+data = json.loads(contract_path.read_text(encoding="utf-8"))
+
+source_bytes = contract_path.read_bytes()
+
+projection = {
+    "version": "1.2",
+    "updated": data.get("updated"),
+    "owner": data.get("owner"),
+    "scope": "single-authority-per-concern-lock",
+    "superseded_by": "ops/bindings/authority.concerns.yaml",
+    "do_not_use_for_runtime": True,
+    "projection_of": "ops/bindings/authority.concerns.yaml",
+    "generated_from": {
+        "contract": "ops/bindings/authority.concerns.yaml",
+        "generator": "ops/plugins/core/authority/bin/authority-concerns-projection-build",
+        "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+    },
+    "resolution": data.get("resolution") or {},
+    "policy": data.get("policy") or {},
+    "concerns": data.get("concerns") or {},
+}
+
+json.dump(projection, sys.stdout, indent=2)
+sys.stdout.write("\n")
+PY
+
+yq -P '.' "$TMP_PROJECTION_JSON" > "$TMP_PROJECTION_YAML"
+
+if [[ "$MODE" == "check" ]]; then
+  [[ -f "$PROJECTION" ]] || fail "missing projection: $PROJECTION"
+  if ! diff -u "$PROJECTION" "$TMP_PROJECTION_YAML" >/dev/null 2>&1; then
+    fail "projection drift: ops/bindings/single.authority.contract.yaml (run authority.concerns.projection.build)"
+  fi
+fi
+
+if [[ "$VERIFY" -eq 1 ]]; then
+  python3 - "$TMP_CONTRACT_JSON" "$ROOT" "$WORKSPACE_ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+contract_path = Path(sys.argv[1])
+root = Path(sys.argv[2]).resolve()
+workspace_root = Path(sys.argv[3]).resolve()
+data = json.loads(contract_path.read_text(encoding="utf-8"))
+
+errors = []
+concerns = (data.get("concerns") or {})
+policy = (data.get("policy") or {})
+resolution = (data.get("resolution") or {})
+allowed_states = {"authoritative"}
+allowed_states.update(policy.get("required_non_authoritative_states") or [])
+
+if resolution.get("path_base") != "workspace_root":
+    errors.append("resolution.path_base must be workspace_root")
+
+if not concerns:
+    errors.append("concerns map is empty")
+
+for concern_id, payload in sorted(concerns.items()):
+    sources = payload.get("sources") or []
+    authoritative = 0
+    seen_paths = set()
+    if not sources:
+        errors.append(f"{concern_id}: no sources declared")
+        continue
+    for idx, source in enumerate(sources, start=1):
+        rel_path = str(source.get("path") or "").strip()
+        state = str(source.get("state") or "").strip()
+        marker = str(source.get("required_marker") or "").strip()
+        if not rel_path:
+            errors.append(f"{concern_id}: source {idx} missing path")
+            continue
+        if rel_path.startswith("/"):
+            errors.append(f"{concern_id}: source {idx} path must be workspace-relative, got absolute path {rel_path}")
+        if rel_path in seen_paths:
+            errors.append(f"{concern_id}: duplicate source path {rel_path}")
+        seen_paths.add(rel_path)
+        if state not in allowed_states:
+            errors.append(f"{concern_id}: source {rel_path} has invalid state {state}")
+        if state == "authoritative":
+            authoritative += 1
+        if not marker:
+            errors.append(f"{concern_id}: source {rel_path} missing required_marker")
+        resolved = workspace_root / rel_path
+        if not resolved.exists():
+            errors.append(f"{concern_id}: missing source {rel_path}")
+            continue
+        text = resolved.read_text(encoding="utf-8", errors="replace")
+        if marker and marker not in text:
+            errors.append(f"{concern_id}: required marker not found in {rel_path}: {marker}")
+    if authoritative != 1:
+        errors.append(f"{concern_id}: expected exactly one authoritative source, found {authoritative}")
+
+if errors:
+    for err in errors:
+        print(f"authority.concerns.projection.build VERIFY FAIL: {err}", file=sys.stderr)
+    raise SystemExit(1)
+
+print(f"authority.concerns.projection.build VERIFY PASS: concerns={len(concerns)} workspace_root={workspace_root}")
+PY
+fi
+
+if [[ "$MODE" != "check" ]]; then
+  if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
+    acquire_git_lock authority_concerns_projection || exit 1
+    LOCK_HELD=1
+    export SPINE_GIT_LOCK_HELD=1
+  fi
+
+  spine_tx_init
+  spine_tx_track "$PROJECTION"
+
+  if ! cp "$TMP_PROJECTION_YAML" "$PROJECTION"; then
+    spine_tx_rollback
+    fail "write transaction rolled back"
+  fi
+fi
+
+echo "authority.concerns.projection.build PASS: ops/bindings/single.authority.contract.yaml"
