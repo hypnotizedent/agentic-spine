@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ops start <issue> | ops start loop <loop_id> - create a per-scope worktree + session folder
-set -eo pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SCRIPT_DIR/lib/runtime-paths.sh"

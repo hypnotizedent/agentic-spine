@@ -2,6 +2,7 @@
 # ═══════════════════════════════════════════════════════════════
 # ops ai - Bundle governance docs for AI agents
 # ═══════════════════════════════════════════════════════════════
+set -euo pipefail
 #
 # Usage:
 #   ops ai                        List what's in the manifest

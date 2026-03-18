@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ops preflight - print governance banner + registry hints
-set -eo pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIB_DIR="$(cd "$SCRIPT_DIR/lib" && pwd)"
@@ -100,7 +100,7 @@ cat <<BANNER
 ╚═══════════════════════════════════════════════════════════╝
 BANNER
 
-if [[ -n "$CURRENT_ISSUE" ]]; then
+if [[ -n "${CURRENT_ISSUE:-}" ]]; then
   echo "📌 Active Issue: #${CURRENT_ISSUE}"
   echo "📁 Worktree: ${CURRENT_WORKTREE:-main}"
 fi

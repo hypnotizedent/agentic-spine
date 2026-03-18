@@ -4,7 +4,7 @@
 # Usage:
 #   ops close loop <LOOP_ID>              — tear down codex worktree + branch + stashes
 #   ops close <issue-number> --forge github — close GitHub issue after PR merge
-set -eo pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"

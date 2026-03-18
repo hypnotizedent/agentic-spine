@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ops pr - stage, commit, push, and open PR for the current issue
-set -eo pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SCRIPT_DIR/lib/git-lock.sh"
