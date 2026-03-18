@@ -293,18 +293,20 @@ qm stop 213 && qm destroy 213 --purge
 
 ### 5.1 Binding Impact Matrix
 
-Every file below MUST be updated before running spine.verify. Order matters to minimize drift.
+Every file below MUST be updated before running spine.verify. Do not hand-edit
+`ops/bindings/docker.compose.targets.yaml` or `ops/bindings/services.health.yaml`;
+both are generated from `docs/governance/SERVICE_REGISTRY.yaml`.
 
 | # | File | Action | What to Add/Change |
 |---|------|--------|-------------------|
 | 1 | `ops/bindings/vm.lifecycle.yaml` | modify | Update both entries: `status: registered`, set `tailscale_ip` |
 | 2 | `ops/bindings/ssh.targets.yaml` | modify | Add two targets: `mint-data` and `mint-apps` |
-| 3 | `ops/bindings/docker.compose.targets.yaml` | modify | Add two targets with stack paths |
+| 3 | `docs/governance/SERVICE_REGISTRY.yaml` | modify | Add host `compose_target` metadata for `mint-data` and `mint-apps` |
 | 4 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | modify | Add two device rows |
 | 5 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | modify | Add two VM identity rows |
 | 6 | `docs/governance/SERVICE_REGISTRY.yaml` | modify | Add section with 6 service entries (3 data + 3 app) |
 | 7 | `docs/governance/STACK_REGISTRY.yaml` | modify | Add two stack entries (mint-data, mint-apps) |
-| 8 | `ops/bindings/services.health.yaml` | modify | Add 5 health probes (postgres excluded — TCP-only) |
+| 8 | `./bin/ops cap run service.registry.projection.build` | execute | Rebuild generated `docker.compose.targets.yaml` + `services.health.yaml` |
 | 9 | `ops/bindings/backup.inventory.yaml` | modify | Add two backup targets |
 | 10 | `ops/bindings/secrets.namespace.policy.yaml` | modify | Add shared-infra namespace path |
 
@@ -325,27 +327,31 @@ Every file below MUST be updated before running spine.verify. Order matters to m
   tags: [mint, apps, docker, shop]
 ```
 
-### 5.3 Docker Compose Targets
+### 5.3 SERVICE_REGISTRY Host / Compose Projection Inputs
 
 ```yaml
-# In docker.compose.targets.yaml — add:
+# In SERVICE_REGISTRY.yaml — under hosts add:
 mint-data:
-  ssh_target: mint-data
-  connect_timeout_sec: 5
-  enabled: true
-  notes: "Mint data plane VM 212 (fresh-slate). PostgreSQL 16 + MinIO + Redis."
-  stacks:
-    - name: mint-data
-      path: /opt/stacks/mint-data
+  lan_ip: 192.168.1.212
+  tailscale_ip: "PLACEHOLDER:MINT_DATA_TS_IP"
+  healthcheck_address: lan_ip
+  ssh: mint-data
+  compose_target:
+    description: "Mint data plane VM 212 (fresh-slate). PostgreSQL 16 + MinIO + Redis."
+    stacks:
+      - name: mint-data
+        path: /opt/stacks/mint-data
 
 mint-apps:
-  ssh_target: mint-apps
-  connect_timeout_sec: 5
-  enabled: true
-  notes: "Mint app plane VM 213 (fresh-slate). Artwork + quote-page + order-intake."
-  stacks:
-    - name: mint-apps
-      path: /opt/stacks/mint-apps
+  lan_ip: 192.168.1.213
+  tailscale_ip: "PLACEHOLDER:MINT_APPS_TS_IP"
+  healthcheck_address: lan_ip
+  ssh: mint-apps
+  compose_target:
+    description: "Mint app plane VM 213 (fresh-slate). Artwork + quote-page + order-intake."
+    stacks:
+      - name: mint-apps
+        path: /opt/stacks/mint-apps
 ```
 
 ### 5.4 Service Registry Entries
@@ -367,6 +373,8 @@ mint-modules-minio:
   host: mint-data
   port: 9000
   health: /minio/health/live
+  healthcheck:
+    address_source: tailscale_ip
   compose: /opt/stacks/mint-data/docker-compose.yml
   container: mint-modules-minio
   status: active
@@ -382,23 +390,24 @@ mint-modules-redis:
   notes: "Redis for mint-modules session/cache. Fresh-slate."
 
 # ─── Mint Fresh-Slate: App Plane (VM 213) ───────────────────────────
-# Note: files-api, quote-page entries already exist under docker-host.
-# After cutover validation, UPDATE existing entries to point to mint-apps.
-# Until then, both sets can coexist (old=disabled, new=active).
-files-api-v2:
+files-api:
   host: mint-apps
   port: 3500
   health: /health
+  healthcheck:
+    endpoint_id: files-api-v2
   source: mint-modules/artwork
   compose: /opt/stacks/mint-apps/docker-compose.yml
   container: files-api
   status: active
   notes: "Artwork API on fresh-slate mint-apps VM 213 (ADR-001)."
 
-quote-page-v2:
+quote-page:
   host: mint-apps
   port: 3341
   health: /health
+  healthcheck:
+    endpoint_id: quote-page-v2
   source: mint-modules/quote-page
   compose: /opt/stacks/mint-apps/docker-compose.yml
   container: quote-page
@@ -406,10 +415,12 @@ quote-page-v2:
   public_url: https://customer.mintprints.co
   notes: "Quote intake on fresh-slate mint-apps VM 213 (ADR-001)."
 
-order-intake-v2:
+order-intake:
   host: mint-apps
   port: 3400
   health: /health
+  healthcheck:
+    endpoint_id: order-intake-v2
   source: mint-modules/order-intake
   compose: /opt/stacks/mint-apps/docker-compose.yml
   container: order-intake
@@ -417,41 +428,15 @@ order-intake-v2:
   notes: "Order intake API on fresh-slate mint-apps VM 213 (ADR-001)."
 ```
 
-### 5.5 Health Probes
+### 5.5 Rebuild Generated Projections
 
-```yaml
-# In services.health.yaml — add:
-
-# ─── Mint Fresh-Slate: Data Plane (VM 212) ────────────────────────────
-- id: mint-modules-minio
-  host: mint-data
-  url: "http://PLACEHOLDER:MINT_DATA_TS_IP:9000/minio/health/live"
-  expect: 200
-  enabled: true
-  notes: "MinIO on mint-data VM 212 (fresh-slate)"
-
-# ─── Mint Fresh-Slate: App Plane (VM 213) ─────────────────────────────
-- id: files-api-v2
-  host: mint-apps
-  url: "http://PLACEHOLDER:MINT_APPS_TS_IP:3500/health"
-  expect: 200
-  enabled: true
-  notes: "Artwork files-api on mint-apps VM 213 (fresh-slate)"
-
-- id: quote-page-v2
-  host: mint-apps
-  url: "http://PLACEHOLDER:MINT_APPS_TS_IP:3341/health"
-  expect: 200
-  enabled: true
-  notes: "Quote page on mint-apps VM 213 (fresh-slate)"
-
-- id: order-intake-v2
-  host: mint-apps
-  url: "http://PLACEHOLDER:MINT_APPS_TS_IP:3400/health"
-  expect: 200
-  enabled: true
-  notes: "Order intake on mint-apps VM 213 (fresh-slate)"
+```bash
+./bin/ops cap run service.registry.projection.build
+./bin/ops cap run docs.projection.verify
 ```
+
+`services.health.yaml` and `docker.compose.targets.yaml` should now reflect the
+SERVICE_REGISTRY authority edits above.
 
 ### 5.6 Backup Inventory
 
@@ -819,21 +804,24 @@ Restart cloudflared: `docker compose restart cloudflared`
 
 ### 8.2 Disable Legacy Probes
 
-In `services.health.yaml`, disable the old docker-host entries:
+In `SERVICE_REGISTRY.yaml`, mark the docker-host hold entries so the generated
+health projection disables or removes them, then rebuild projections:
 
-```yaml
-# Set enabled: false for:
-- id: files-api       # docker-host version
-- id: quote-page      # docker-host version
+```bash
+./bin/ops cap run service.registry.projection.build
 ```
 
 ### 8.3 Remove from docker-host compose targets
 
-In `docker.compose.targets.yaml`, remove artwork-module and quote-page from docker-host stacks list.
+In `SERVICE_REGISTRY.yaml`, remove or update the docker-host `compose_target`
+metadata for legacy module stacks, then rebuild projections.
 
 ### 8.4 Update SERVICE_REGISTRY
 
-Rename `files-api-v2` → `files-api`, `quote-page-v2` → `quote-page`, `order-intake-v2` → `order-intake`. Remove old docker-host entries.
+Keep canonical service ids in `SERVICE_REGISTRY.yaml` (`files-api`, `quote-page`,
+`order-intake`) and use `healthcheck.endpoint_id` only for compatibility ids in
+the generated health projection. Remove old docker-host entries, then rerun
+`./bin/ops cap run service.registry.projection.build`.
 
 ---
 

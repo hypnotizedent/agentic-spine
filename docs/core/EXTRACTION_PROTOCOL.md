@@ -133,7 +133,7 @@ Q3: How much documentation needed?
 **Creates:**
 - Entry in `docs/governance/SERVICE_REGISTRY.yaml`
 - Entry in `docs/governance/STACK_REGISTRY.yaml` (compose location)
-- Entry in `ops/bindings/services.health.yaml` (health check)
+- Health probe metadata in `docs/governance/SERVICE_REGISTRY.yaml` plus `./bin/ops cap run service.registry.projection.build`
 - Entry in `ops/bindings/backup.inventory.yaml` (if stateful)
 
 **Does NOT create:**
@@ -179,7 +179,7 @@ Before marking extraction complete:
 
 - [ ] Entry in SERVICE_REGISTRY.yaml
 - [ ] Entry in STACK_REGISTRY.yaml (compose location)
-- [ ] Health check defined
+- [ ] Health check declared in `SERVICE_REGISTRY.yaml` and projections rebuilt
 - [ ] Backup target defined (if stateful)
 - [ ] No dedicated folder created
 - [ ] `./bin/ops cap run spine.verify` passes
@@ -188,7 +188,8 @@ Before marking extraction complete:
 
 Before marking extraction complete:
 
-- [ ] All services in SERVICE_REGISTRY.yaml
+- [ ] All services/stack-health projection inputs in SERVICE_REGISTRY.yaml
+- [ ] `./bin/ops cap run service.registry.projection.build` run after authority edits
 - [ ] Compose files in STACK_REGISTRY.yaml
 - [ ] Binding file: `ops/bindings/<stack>.binding.yaml`
 - [ ] Lessons file: `/Users/ronnyworks/code/workbench/docs/brain-lessons/<STACK>_LESSONS.md`

@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+from pathlib import Path
+import sys
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+AUTHORITY_PATH = ROOT / "docs/governance" / "SERVICE_REGISTRY.yaml"
+SERVICES_HEALTH_PATH = ROOT / "ops" / "bindings" / "services.health.yaml"
+DOCKER_TARGETS_PATH = ROOT / "ops" / "bindings" / "docker.compose.targets.yaml"
+SSH_TARGETS_PATH = ROOT / "ops" / "bindings" / "ssh.targets.yaml"
+
+HEALTH_DEFAULTS = {
+    "connect_timeout_sec": 5,
+    "max_time_sec": 10,
+}
+COMPOSE_CONNECT_TIMEOUT_DEFAULT = 5
+SKIP_HEALTH_STATUSES = {"deprecated", "parked", "retired", "stopped"}
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"service.registry.projection.build FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def yaml_dump(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=False)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="service-registry-projection-build")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Fail if generated projections drift from disk.",
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Verify authority completeness and projected host/target integrity.",
+    )
+    return parser.parse_args()
+
+
+def rel(path: Path) -> str:
+    return str(path.resolve().relative_to(ROOT))
+
+
+def bool_from_value(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "1"}:
+            return True
+        if lowered in {"false", "no", "0"}:
+            return False
+    fail(f"invalid boolean value: {value!r}")
+
+
+def ensure_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def normalized_health_path(value: Any) -> str:
+    path = str(value or "").strip()
+    if not path:
+        return ""
+    if path.startswith("http://") or path.startswith("https://"):
+        fail(f"health path must be path-like, not full URL: {path}")
+    return path if path.startswith("/") else f"/{path}"
+
+
+def service_status(service: dict[str, Any]) -> str:
+    return str(service.get("status") or "active").strip().lower()
+
+
+def health_emit(service: dict[str, Any], health_meta: dict[str, Any]) -> bool:
+    if "emit" in health_meta:
+        return bool_from_value(health_meta.get("emit"), False)
+    if not service.get("health") and not health_meta.get("path"):
+        return False
+    return service_status(service) not in SKIP_HEALTH_STATUSES
+
+
+def resolve_health_address(host_id: str, host: dict[str, Any], health_meta: dict[str, Any]) -> str:
+    source = str(
+        health_meta.get("address_source")
+        or host.get("healthcheck_address")
+        or ("lan_ip" if host.get("lan_ip") else "tailscale_ip")
+    ).strip()
+    if not source:
+        fail(f"host '{host_id}' missing health address source")
+    address = str(host.get(source) or "").strip()
+    if not address:
+        fail(f"host '{host_id}' missing address field '{source}' required for health projection")
+    return address
+
+
+def resolve_health_port(service_name: str, service: dict[str, Any], health_meta: dict[str, Any]) -> int:
+    value = health_meta.get("port", service.get("port"))
+    if value is None:
+        fail(f"service '{service_name}' missing health port")
+    try:
+        port = int(value)
+    except Exception:
+        fail(f"service '{service_name}' has invalid health port: {value!r}")
+    if port <= 0:
+        fail(f"service '{service_name}' has non-positive health port: {port}")
+    return port
+
+
+def build_endpoint(
+    endpoint_id: str,
+    service_name: str,
+    service: dict[str, Any],
+    host: dict[str, Any],
+    override: dict[str, Any],
+) -> dict[str, Any]:
+    path = normalized_health_path(override.get("path", service.get("health")))
+    if not path:
+        fail(f"service '{service_name}' missing health path for endpoint '{endpoint_id}'")
+    port = resolve_health_port(service_name, service, override)
+    address = resolve_health_address(str(service.get("host") or ""), host, override)
+    expect = override.get("expect", 200)
+    enabled = bool_from_value(override.get("enabled"), True)
+    description = str(override.get("description") or service.get("notes") or "").strip()
+
+    endpoint: dict[str, Any] = {
+        "id": endpoint_id,
+        "host": str(service.get("host") or ""),
+        "url": f"http://{address}:{port}{path}",
+        "expect": expect,
+        "enabled": enabled,
+    }
+    if description:
+        endpoint["description"] = description
+    return endpoint
+
+
+def build_services_health(authority: dict[str, Any], source_sha: str) -> tuple[str, list[dict[str, Any]]]:
+    services = ensure_mapping(authority.get("services"))
+    hosts = ensure_mapping(authority.get("hosts"))
+    endpoints: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    for service_name, raw_service in services.items():
+        service = ensure_mapping(raw_service)
+        host_id = str(service.get("host") or "").strip()
+        if not host_id:
+            continue
+        host = ensure_mapping(hosts.get(host_id))
+        if not host:
+            fail(f"service '{service_name}' references missing host '{host_id}'")
+
+        health_meta = ensure_mapping(service.get("healthcheck"))
+        if not health_emit(service, health_meta):
+            continue
+
+        if not service.get("health") and not health_meta.get("path"):
+            fail(f"service '{service_name}' emits health projection but has no health path")
+
+        endpoint_id = str(health_meta.get("endpoint_id") or service_name).strip()
+        if not endpoint_id:
+            fail(f"service '{service_name}' resolved empty endpoint id")
+        if endpoint_id in seen_ids:
+            fail(f"duplicate projected endpoint id: {endpoint_id}")
+        seen_ids.add(endpoint_id)
+        endpoints.append(build_endpoint(endpoint_id, str(service_name), service, host, health_meta))
+
+        for alias in ensure_list(health_meta.get("aliases")):
+            alias_meta = ensure_mapping(alias)
+            alias_id = str(alias_meta.get("endpoint_id") or alias_meta.get("id") or "").strip()
+            if not alias_id:
+                fail(f"service '{service_name}' has alias without endpoint_id")
+            if alias_id in seen_ids:
+                fail(f"duplicate projected endpoint id: {alias_id}")
+            merged = dict(health_meta)
+            merged.update(alias_meta)
+            seen_ids.add(alias_id)
+            endpoints.append(build_endpoint(alias_id, str(service_name), service, host, merged))
+
+    payload = {
+        "version": 1,
+        "defaults": dict(HEALTH_DEFAULTS),
+        "endpoints": endpoints,
+    }
+
+    header = "\n".join(
+        [
+            "# Services Health Binding",
+            "# Non-secret. Spine-native. Read-only HTTP probes.",
+            "# Status: projection",
+            "# authority_state: projection",
+            "# authority_concern: service_registry_surfaces",
+            "# projection_of: docs/governance/SERVICE_REGISTRY.yaml",
+            "# generated_by: service.registry.projection.build",
+            f"# source_sha256: {source_sha}",
+            "# Do NOT edit manually. Rebuild with: ./bin/ops cap run service.registry.projection.build",
+            "",
+        ]
+    )
+    return header + yaml_dump(payload), endpoints
+
+
+def build_docker_targets(authority: dict[str, Any], source_sha: str) -> tuple[str, dict[str, Any]]:
+    hosts = ensure_mapping(authority.get("hosts"))
+    targets: dict[str, Any] = {}
+
+    for host_id, raw_host in hosts.items():
+        host = ensure_mapping(raw_host)
+        compose_meta = ensure_mapping(host.get("compose_target"))
+        if not compose_meta:
+            continue
+
+        stacks = []
+        seen_stack_names: set[str] = set()
+        for raw_stack in ensure_list(compose_meta.get("stacks")):
+            stack = ensure_mapping(raw_stack)
+            name = str(stack.get("name") or "").strip()
+            path = str(stack.get("path") or "").strip()
+            if not name or not path:
+                fail(f"host '{host_id}' has compose_target stack missing name/path")
+            if name in seen_stack_names:
+                fail(f"host '{host_id}' has duplicate compose stack '{name}'")
+            seen_stack_names.add(name)
+            rendered_stack: dict[str, Any] = {"name": name, "path": path}
+            for extra_key in ("legacy_only", "authoritative_runtime"):
+                if extra_key in stack:
+                    rendered_stack[extra_key] = stack[extra_key]
+            stacks.append(rendered_stack)
+
+        if not stacks:
+            fail(f"host '{host_id}' compose_target must declare at least one stack")
+
+        target: dict[str, Any] = {
+            "ssh_target": str(compose_meta.get("ssh_target") or host.get("ssh") or host_id),
+            "connect_timeout_sec": int(compose_meta.get("connect_timeout_sec", COMPOSE_CONNECT_TIMEOUT_DEFAULT)),
+            "enabled": bool_from_value(compose_meta.get("enabled"), True),
+        }
+        description = str(compose_meta.get("description") or "").strip()
+        if description:
+            target["description"] = description
+        target["stacks"] = stacks
+        targets[str(host_id)] = target
+
+    payload = {
+        "version": 1,
+        "targets": targets,
+    }
+
+    header = "\n".join(
+        [
+            "# Docker Compose Targets Binding",
+            "# Non-secret. Spine-native. No monolith runtime dependency.",
+            "# Status: projection",
+            "# authority_state: projection",
+            "# authority_concern: service_registry_surfaces",
+            "# projection_of: docs/governance/SERVICE_REGISTRY.yaml",
+            "# generated_by: service.registry.projection.build",
+            f"# source_sha256: {source_sha}",
+            "# Do NOT edit manually. Rebuild with: ./bin/ops cap run service.registry.projection.build",
+            "",
+        ]
+    )
+    return header + yaml_dump(payload), targets
+
+
+def load_ssh_target_ids() -> set[str]:
+    data = load_yaml(SSH_TARGETS_PATH)
+    ssh_root = ensure_mapping(data.get("ssh"))
+    targets = ensure_list(ssh_root.get("targets"))
+    ids: set[str] = set()
+    for row in targets:
+        target = ensure_mapping(row)
+        target_id = str(target.get("id") or "").strip()
+        if target_id:
+            ids.add(target_id)
+    return ids
+
+
+def verify(authority: dict[str, Any], endpoints: list[dict[str, Any]], compose_targets: dict[str, Any]) -> None:
+    hosts = ensure_mapping(authority.get("hosts"))
+    services = ensure_mapping(authority.get("services"))
+    ssh_target_ids = load_ssh_target_ids()
+    errors: list[str] = []
+
+    if not services:
+        errors.append("authority services map is empty")
+    if not hosts:
+        errors.append("authority hosts map is empty")
+
+    for service_name, raw_service in services.items():
+        service = ensure_mapping(raw_service)
+        host_id = str(service.get("host") or "").strip()
+        if host_id and host_id not in hosts:
+            errors.append(f"service '{service_name}' references missing host '{host_id}'")
+
+    for endpoint in endpoints:
+        host_id = str(endpoint.get("host") or "").strip()
+        if host_id not in hosts:
+            errors.append(f"projected endpoint '{endpoint.get('id')}' references missing registry host '{host_id}'")
+
+    for target_id, target in compose_targets.items():
+        if target_id not in hosts:
+            errors.append(f"projected compose target '{target_id}' missing backing host in authority")
+        ssh_target = str(target.get("ssh_target") or "").strip()
+        if not ssh_target:
+            errors.append(f"projected compose target '{target_id}' resolved empty ssh_target")
+        elif ssh_target not in ssh_target_ids:
+            errors.append(f"projected compose target '{target_id}' references missing ssh target '{ssh_target}'")
+
+    if errors:
+        for error in errors:
+            print(f"service.registry.projection.build VERIFY FAIL: {error}", file=sys.stderr)
+        raise SystemExit(1)
+
+    print(
+        "service.registry.projection.build VERIFY PASS: "
+        f"services={len(services)} endpoints={len(endpoints)} compose_targets={len(compose_targets)}"
+    )
+
+
+def write_text(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+
+
+def check_matches(path: Path, expected: str) -> None:
+    if not path.is_file():
+        fail(f"missing projection: {rel(path)}")
+    actual = path.read_text(encoding="utf-8")
+    if actual != expected:
+        fail(f"projection drift: {rel(path)} (run service.registry.projection.build)")
+
+
+def main() -> None:
+    args = parse_args()
+    authority = load_yaml(AUTHORITY_PATH)
+    source_sha = hashlib.sha256(AUTHORITY_PATH.read_bytes()).hexdigest()
+
+    services_health_text, endpoints = build_services_health(authority, source_sha)
+    docker_targets_text, compose_targets = build_docker_targets(authority, source_sha)
+
+    if args.verify:
+        verify(authority, endpoints, compose_targets)
+
+    if args.check:
+        check_matches(SERVICES_HEALTH_PATH, services_health_text)
+        check_matches(DOCKER_TARGETS_PATH, docker_targets_text)
+    else:
+        write_text(SERVICES_HEALTH_PATH, services_health_text)
+        write_text(DOCKER_TARGETS_PATH, docker_targets_text)
+
+    print("service.registry.projection.build")
+    print(f"status: OK")
+    print(f"authority: {rel(AUTHORITY_PATH)}")
+    print(f"projected: {rel(SERVICES_HEALTH_PATH)}, {rel(DOCKER_TARGETS_PATH)}")
+
+
+if __name__ == "__main__":
+    main()

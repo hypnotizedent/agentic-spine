@@ -13,9 +13,9 @@ Purpose: define how stacks are discovered, operated, and verified without "compo
 
 When you need to know **what is deployed** and **where it lives**:
 
-- Live stack directories are declared in `ops/bindings/docker.compose.targets.yaml`
+- Live stack directories are authored in `docs/governance/SERVICE_REGISTRY.yaml` and projected to `ops/bindings/docker.compose.targets.yaml`
 - SSH reachability/user/ports are declared in `ops/bindings/ssh.targets.yaml`
-- Health probes are declared in `ops/bindings/services.health.yaml`
+- Health probes are authored in `docs/governance/SERVICE_REGISTRY.yaml` and projected to `ops/bindings/services.health.yaml`
 - Typed foundation compose SSOT (sanitized) lives under `agentic-foundation/ops/{infra,domains}/**`; archived transition material lives under `agentic-foundation/docs/archive/ops-staged/`
 - Workbench compose is supporting/reference only (never a runtime dependency). Query `~/code/workbench` directly when an external reference is required.
 
@@ -41,14 +41,17 @@ Secrets-bearing deploys:
 
 1. **Edit canonical SSOT** (spine-owned):
    - Compose: `agentic-foundation/ops/{infra,domains}/**`
+   - Service/host/stack projection authority: `docs/governance/SERVICE_REGISTRY.yaml`
    - Bindings: `ops/bindings/**`
-2. **Apply to the live host** (receipted):
+2. **Rebuild generated service projections**:
+   - `./bin/ops cap run service.registry.projection.build`
+3. **Apply to the live host** (receipted):
    - Preferred: `docker.compose.*` capabilities for normal stack lifecycle operations.
    - If secrets injection is required: `secrets.exec -- <ssh ... docker compose ...>`
-3. **Verify health**:
+4. **Verify health**:
    - `docker.compose.status` (containers running)
    - `services.health.status` (HTTP probes)
-4. **Close loops / update gaps**:
+5. **Close loops / update gaps**:
    - If anything fails: it becomes an open loop. Fix, verify, close with receipts.
-5. **Sync supporting surfaces (optional)**:
+6. **Sync supporting surfaces (optional)**:
    - If a change impacts workbench reference inventories, update those next (spine remains authoritative per `ops/bindings/cross-repo.authority.yaml`).

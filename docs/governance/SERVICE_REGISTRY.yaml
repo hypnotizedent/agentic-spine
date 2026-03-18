@@ -5,8 +5,12 @@
 # Last verified: 2026-03-08
 # Updated: 2026-03-08
 #
-# Host IPs: Canonical source is DEVICE_IDENTITY_SSOT.md
-#           This registry defines WHAT services exist and WHERE they run.
+# This registry defines WHAT services exist, WHERE they run, and the canonical
+# stack/health inputs that generate:
+#   - ops/bindings/services.health.yaml
+#   - ops/bindings/docker.compose.targets.yaml
+# Host identity remains cross-checked against DEVICE_IDENTITY_SSOT.md and
+# ssh.targets.yaml, but projection-driving service/host/stack truth lives here.
 # Legacy service inventories under $LEGACY_ROOT are historical
 # reference only and are non-authoritative for runtime operations.
 #
@@ -15,9 +19,11 @@
 #              Legacy docker-host entries are preserved only as deprecated hold
 #              surfaces and are not authoritative for fresh-slate Mint runtime,
 #              retained docs, or active operator routing.
-#   OUT OF SCOPE: Home-site services (proxmox-home, pihole-home, download-home,
-#              hass). These are secondary/personal, Tailscale-only, no SLA.
-#              Tracked in ssh.targets.yaml for connectivity checks only.
+#   OUT OF SCOPE: Most home-site services (proxmox-home, download-home, etc.).
+#   EXCEPTIONS: A small set of monitoring/decommission compatibility surfaces
+#              (home-assistant, pihole-home, vaultwarden-home) are declared here
+#              because services.health/docker.compose.targets are generated from
+#              this file and drift must fail.
 #   Decision: LOOP-HOME-SERVICE-REGISTRY-SCOPE-DECISION-20260210 (2026-02-10).
 #
 # External ownership:
@@ -134,6 +140,8 @@ services:
     port: 9000
     console_port: 9001
     health: /minio/health/live
+    healthcheck:
+      address_source: tailscale_ip
     container: mint-modules-minio
     compose: /opt/stacks/mint-data/docker-compose.yml
     status: active
@@ -149,6 +157,9 @@ services:
 
   cloudflared:
     host: infra-core
+    health: /metrics
+    healthcheck:
+      port: 60123
     compose: /opt/stacks/cloudflared/docker-compose.yml
     container: homelab-cloudflared
     notes: "Cloudflare tunnel connector (homelab-tunnel)"
@@ -157,7 +168,9 @@ services:
     host: infra-core
     port: 8053
     dns_port: 53
-    health: /admin
+    health: /admin/
+    healthcheck:
+      expect: 302
     compose: /opt/stacks/pihole/docker-compose.yml
     container: pihole
     notes: "Network-wide DNS ad-blocking. Web UI moved to 8053 (Caddy owns 80)."
@@ -182,6 +195,7 @@ services:
   caddy:
     host: infra-core
     port: 80
+    health: /
     container: caddy
     compose: /opt/stacks/caddy-auth/docker-compose.yml
     notes: "Reverse proxy (HTTP only — CF tunnel handles public TLS)"
@@ -212,6 +226,8 @@ services:
     host: mint-apps
     port: 3500
     health: /health
+    healthcheck:
+      endpoint_id: files-api-v2
     source: mint-modules/artwork
     compose: /opt/stacks/mint-apps/docker-compose.yml
     container: files-api
@@ -223,6 +239,8 @@ services:
     host: mint-apps
     port: 3341
     health: /health
+    healthcheck:
+      endpoint_id: quote-page-v2
     source: mint-modules/quote-page
     compose: /opt/stacks/mint-apps/docker-compose.yml
     container: quote-page
@@ -235,6 +253,8 @@ services:
     host: mint-apps
     port: 3400
     health: /health
+    healthcheck:
+      endpoint_id: order-intake-v2
     source: mint-modules/order-intake
     compose: /opt/stacks/mint-apps/docker-compose.yml
     container: order-intake
@@ -253,10 +273,25 @@ services:
     status: active
     notes: "Finance adapter API hosted on mint-apps runtime."
 
+  auth:
+    host: mint-apps
+    port: 4300
+    health: /health
+    healthcheck:
+      endpoint_id: auth-v1
+    source: mint-modules/auth
+    compose: /opt/stacks/mint-apps/docker-compose.yml
+    container: auth
+    networks: [mint-modules]
+    status: active
+    notes: "Auth module runtime on mint-apps. Internal API used by the fresh-slate Mint lane."
+
   pricing:
     host: mint-apps
     port: 3700
     health: /health
+    healthcheck:
+      endpoint_id: pricing-v2
     source: mint-modules/pricing
     compose: /opt/stacks/mint-apps/docker-compose.yml
     container: pricing
@@ -269,6 +304,8 @@ services:
     host: mint-apps
     port: 3800
     health: /health
+    healthcheck:
+      endpoint_id: suppliers-v2
     source: mint-modules/suppliers
     compose: /opt/stacks/mint-apps/docker-compose.yml
     container: suppliers
@@ -280,6 +317,8 @@ services:
     host: mint-apps
     port: 3900
     health: /health
+    healthcheck:
+      endpoint_id: shipping-v2
     source: mint-modules/shipping
     compose: /opt/stacks/mint-apps/docker-compose.yml
     container: shipping
@@ -291,6 +330,8 @@ services:
     host: mint-apps
     port: 4000
     health: /health
+    healthcheck:
+      endpoint_id: payment-v2
     source: mint-modules/payment
     compose: /opt/stacks/mint-apps/docker-compose.yml
     container: payment
@@ -302,6 +343,8 @@ services:
     host: mint-apps
     port: 4100
     health: /health
+    healthcheck:
+      emit: false
     source: mint-modules/shopify-module
     compose: /opt/stacks/mint-apps/docker-compose.yml
     container: shopify-module
@@ -341,6 +384,7 @@ services:
   ollama:
     host: automation-stack
     port: 11434
+    health: /api/tags
     compose: /home/automation/stacks/automation/docker-compose.yml
     container: ollama
     notes: "Local model runtime (VM 202)."
@@ -363,6 +407,9 @@ services:
     host: automation-stack
     port: 8090
     health: /health
+    healthcheck:
+      port: 8080
+      address_source: tailscale_ip
     compose: ~/stacks/mcpjungle/docker-compose.yml
     container: mcpjungle
     notes: "MCP gateway/runtime (migrated off docker-host to automation-stack tooling plane)."
@@ -371,6 +418,8 @@ services:
     host: surveillance-stack
     port: 5000
     health: /api/version
+    healthcheck:
+      endpoint_id: frigate-vm215
     compose: /opt/stacks/surveillance/docker-compose.yml
     container: frigate
     status: active
@@ -380,6 +429,8 @@ services:
     host: surveillance-stack
     port: 5000
     health: /api/go2rtc/api/streams
+    healthcheck:
+      endpoint_id: go2rtc-vm215
     compose: /opt/stacks/surveillance/docker-compose.yml
     container: frigate
     status: active
@@ -413,6 +464,8 @@ services:
     host: observability
     port: 3001
     health: /
+    healthcheck:
+      expect: 302
     compose: /opt/stacks/uptime-kuma/docker-compose.yml
     container: uptime-kuma
     notes: "Uptime monitoring"
@@ -497,6 +550,9 @@ services:
     compose: /opt/stacks/download-stack/docker-compose.yml
     container: tdarr
     status: parked
+    healthcheck:
+      emit: true
+      enabled: false
     notes: "Transcode automation. Intentionally stopped during soak period. Health probe disabled."
 
   trailarr:
@@ -545,6 +601,8 @@ services:
     port: 5030
     p2p_port: 50300
     health: /metrics
+    healthcheck:
+      enabled: false
     compose: /opt/stacks/download-stack/docker-compose.yml
     container: slskd
     status: active
@@ -591,12 +649,20 @@ services:
 
   autopulse:
     host: download-stack
+    port: 2875
+    health: /
+    healthcheck:
+      enabled: false
     compose: /opt/stacks/download-stack/docker-compose.yml
     container: autopulse
     notes: "Library refresh trigger for Jellyfin (migrated from media-stack, cross-VM to VM 210)"
 
   crosswatch:
     host: download-stack
+    port: 8787
+    health: /
+    healthcheck:
+      enabled: false
     compose: /opt/stacks/download-stack/docker-compose.yml
     container: crosswatch
     notes: "Cross-service watch sync (migrated from media-stack)"
@@ -643,6 +709,9 @@ services:
   jellyseerr:
     host: streaming-stack
     port: 5055
+    health: /
+    healthcheck:
+      expect: 307
     compose: /opt/stacks/streaming-stack/docker-compose.yml
     container: jellyseerr
     notes: "Seerr v3.0.1 (migrated from Jellyseerr 2026-02-24)"
@@ -659,6 +728,8 @@ services:
     host: streaming-stack
     port: 7575
     health: /
+    healthcheck:
+      expect: 307
     compose: /opt/stacks/streaming-stack/docker-compose.yml
     container: homarr
     notes: "Dashboard (migrated from media-stack)"
@@ -666,6 +737,9 @@ services:
   wizarr:
     host: streaming-stack
     port: 5690
+    health: /
+    healthcheck:
+      expect: 302
     compose: /opt/stacks/streaming-stack/docker-compose.yml
     container: wizarr
     notes: "Media server invitation management (migrated from media-stack)"
@@ -673,6 +747,9 @@ services:
   spotisub:
     host: streaming-stack
     port: 8766
+    health: /
+    healthcheck:
+      expect: 302
     compose: /opt/stacks/streaming-stack/docker-compose.yml
     container: spotisub
     notes: "Spotify-to-Navidrome sync (migrated from media-stack)"
@@ -704,6 +781,9 @@ services:
     host: immich
     port: 2283
     health: /api/server/ping
+    healthcheck:
+      aliases:
+        - endpoint_id: immich
     compose: ~/immich/docker-compose.yml
     container: immich_server
     secrets_project: immich
@@ -733,6 +813,9 @@ services:
     host: finance-stack
     port: 8080
     health: /api/v1/about
+    healthcheck:
+      port: 8090
+      expect: 302
     compose: /opt/stacks/finance/docker-compose.yml
     container: firefly-iii
     status: active
@@ -774,6 +857,8 @@ services:
     host: finance-stack
     port: 8000
     health: /api/
+    healthcheck:
+      expect: 302
     compose: /opt/stacks/finance/docker-compose.yml
     container: paperless-ngx
     status: active
@@ -783,6 +868,9 @@ services:
   ghostfolio-vm211:
     host: finance-stack
     port: 3340
+    health: /
+    healthcheck:
+      expect: 301
     compose: /opt/stacks/finance/docker-compose.yml
     container: ghostfolio
     status: active
@@ -793,6 +881,10 @@ services:
     host: finance-stack
     port: 8092
     health: /en/ping/
+    healthcheck:
+      endpoint_id: vouchervault-health
+      address_source: tailscale_ip
+      expect: 204
     compose: /opt/stacks/vouchervault/docker-compose.yml
     container: vouchervault
     status: active
@@ -802,6 +894,8 @@ services:
     host: communications-stack
     port: 5100
     health: /
+    healthcheck:
+      expect: 302
     compose: /opt/stacks/communications-stack/docker-compose.yml
     container: mail-archiver
     status: active
@@ -825,6 +919,35 @@ services:
     status: active
     notes: "Stalwart mail server on VM 214. IMAPS 993, SMTPS 465, STARTTLS 587, admin HTTPS 8443. TLS via Let's Encrypt DNS-01 (Cloudflare)."
 
+  # ─── Home Monitoring / Compatibility Exceptions ─────────────────────
+  home-assistant:
+    host: ha
+    port: 8123
+    health: /api/
+    healthcheck:
+      expect: "401,403"
+    status: active
+    notes: "Home Assistant (home VM 100). Monitoring exception retained so services.health can be generated from this authority."
+
+  vaultwarden-home:
+    host: vaultwarden-home
+    port: 8080
+    health: /
+    healthcheck:
+      emit: true
+      enabled: false
+    status: deprecated
+    notes: "DECOMMISSIONED. Vaultwarden (home VM 102). Superseded by infra-core."
+
+  pihole-home:
+    host: pihole-home
+    port: 80
+    health: /admin/
+    healthcheck:
+      expect: 302
+    status: active
+    notes: "Pi-hole DNS (home LXC 105). Home monitoring exception retained for generated health probes."
+
   # ─── Other ──────────────────────────────────────────────────────────
   anythingllm:
     host: ai-consolidation
@@ -844,24 +967,57 @@ services:
 
 hosts:
   docker-host:
+    lan_ip: 192.168.1.200
     tailscale_ip: 100.92.156.118
+    healthcheck_address: lan_ip
     ssh: docker-host
     os: linux-mint
+    compose_target:
+      description: "Mint OS frontends (customer/admin/production/kanban) are active. Dashy migrated to observability VM 205. Finance migrated to finance-stack VM 211; mail-archiver canonicalized to communications-stack VM 214. API is deprecated. Legacy standalone storage stack retired; MinIO runs under mint-os compose."
+      stacks:
+        - name: mint-os
+          path: /home/docker-host/stacks/mint-os
+        - name: mint-modules-prod
+          path: /home/docker-host/mint-modules-prod
+          legacy_only: true
+          authoritative_runtime: false
     notes: "Legacy hold VM 200 only. Not authoritative for fresh-slate Mint runtime, finance, or retained-doc workflows."
 
   automation-stack:
+    lan_ip: 192.168.1.110
     tailscale_ip: 100.98.70.70
+    healthcheck_address: lan_ip
     ssh: automation-stack
     os: ubuntu-24.04
     vmid: 202
     proxmox_host: pve
+    compose_target:
+      stacks:
+        - name: automation
+          path: /home/automation/stacks/automation
+        - name: mcpjungle
+          path: /home/automation/stacks/mcpjungle
 
   infra-core:
+    lan_ip: 192.168.1.204
     tailscale_ip: 100.92.91.128
+    healthcheck_address: lan_ip
     ssh: infra-core
     os: ubuntu-24.04
     vmid: 204
     proxmox_host: pve
+    compose_target:
+      stacks:
+        - name: cloudflared
+          path: /opt/stacks/cloudflared
+        - name: pihole
+          path: /opt/stacks/pihole
+        - name: secrets
+          path: /opt/stacks/secrets
+        - name: vaultwarden
+          path: /opt/stacks/vaultwarden
+        - name: caddy-auth
+          path: /opt/stacks/caddy-auth
 
   proxmox-home:
     tailscale_ip: 100.103.99.62
@@ -870,90 +1026,209 @@ hosts:
     notes: "Beelink Mini - home hypervisor"
 
   observability:
+    lan_ip: 192.168.1.205
     tailscale_ip: 100.120.163.70
+    healthcheck_address: lan_ip
     ssh: observability
     os: ubuntu-24.04
     vmid: 205
     proxmox_host: pve
+    compose_target:
+      stacks:
+        - name: prometheus
+          path: /opt/stacks/prometheus
+        - name: grafana
+          path: /opt/stacks/grafana
+        - name: loki
+          path: /opt/stacks/loki
+        - name: uptime-kuma
+          path: /opt/stacks/uptime-kuma
+        - name: node-exporter
+          path: /opt/stacks/node-exporter
+        - name: dashy
+          path: /opt/stacks/dashy
 
   dev-tools:
+    lan_ip: 192.168.1.206
     tailscale_ip: 100.90.167.39
+    healthcheck_address: lan_ip
     ssh: dev-tools
     os: ubuntu-24.04
     vmid: 206
     proxmox_host: pve
+    compose_target:
+      stacks:
+        - name: gitea
+          path: /opt/stacks/gitea
 
   immich:
+    lan_ip: 192.168.1.203
     tailscale_ip: 100.114.101.50
+    healthcheck_address: lan_ip
     ssh: immich
     ssh_user: ubuntu
     os: ubuntu-24.04
     vmid: 203
     proxmox_host: pve
+    compose_target:
+      description: "Immich photo management VM 203 (user=ronny). 4 containers: server, ML, postgres, redis."
+      stacks:
+        - name: immich
+          path: ~/immich
     notes: "Photo management VM. Ubuntu SSH user standardized for agent access. GAP-OP-094 network fixed."
 
   ai-consolidation:
+    lan_ip: 192.168.1.8
     tailscale_ip: 100.71.17.29
+    healthcheck_address: lan_ip
     ssh: ai-consolidation
     os: ubuntu-24.04
     vmid: 207
     proxmox_host: pve
+    compose_target:
+      stacks:
+        - name: ai-consolidation
+          path: /opt/stacks/ai-consolidation
 
   download-stack:
+    lan_ip: 192.168.1.209
     tailscale_ip: 100.107.36.76
+    healthcheck_address: lan_ip
     ssh: download-stack
     os: ubuntu-24.04
     vmid: 209
     proxmox_host: pve
+    compose_target:
+      stacks:
+        - name: download-stack
+          path: /opt/stacks/download-stack
 
   streaming-stack:
+    lan_ip: 192.168.1.210
     tailscale_ip: 100.123.207.64
+    healthcheck_address: lan_ip
     ssh: streaming-stack
     os: ubuntu-24.04
     vmid: 210
     proxmox_host: pve
+    compose_target:
+      stacks:
+        - name: streaming-stack
+          path: /opt/stacks/streaming-stack
 
   finance-stack:
+    lan_ip: 192.168.1.211
     tailscale_ip: 100.76.153.100
+    healthcheck_address: lan_ip
     ssh: finance-stack
     os: ubuntu-24.04
     vmid: 211
     proxmox_host: pve
+    compose_target:
+      description: "Finance stack VM 211 (Firefly III, Ghostfolio, Paperless-ngx, VoucherVault). Mail-archiver is migration_source — canonical runtime now on communications-stack VM 214."
+      stacks:
+        - name: finance
+          path: /opt/stacks/finance
+        - name: vouchervault
+          path: /opt/stacks/vouchervault
     notes: "Finance VM (Firefly III, Paperless-ngx, Ghostfolio, Mail Archiver). Live — post cutover (LOOP-FINANCE-VM-SEPARATION-20260211)."
 
   mint-data:
+    lan_ip: 192.168.1.212
     tailscale_ip: 100.106.72.25
+    healthcheck_address: lan_ip
     ssh: mint-data
     os: ubuntu-24.04
     vmid: 212
     proxmox_host: pve
+    compose_target:
+      description: "Mint data plane VM 212 (fresh-slate). PostgreSQL 16 + MinIO + Redis."
+      stacks:
+        - name: mint-data
+          path: /opt/stacks/mint-data
     notes: "Mint fresh-slate data plane (PostgreSQL 16 + MinIO + Redis). LOOP-MINT-FRESH-SLATE-INFRA-BOOTSTRAP-20260212."
 
   mint-apps:
+    lan_ip: 192.168.1.213
     tailscale_ip: 100.79.183.14
+    healthcheck_address: lan_ip
     ssh: mint-apps
     os: ubuntu-24.04
     vmid: 213
     proxmox_host: pve
+    compose_target:
+      description: "Mint app plane VM 213 (fresh-slate). Service stacks: files-api, quote-page, order-intake, finance-adapter, pricing, suppliers, shipping, payment."
+      stacks:
+        - name: mint-apps
+          path: /opt/stacks/mint-apps
+        - name: payment
+          path: /opt/stacks/mint-apps/payment
+        - name: pricing
+          path: /opt/stacks/mint-apps/pricing
+        - name: suppliers
+          path: /opt/stacks/mint-apps/suppliers
+        - name: shipping
+          path: /opt/stacks/mint-apps/shipping
     notes: "Mint fresh-slate app plane (artwork, quote-page, order-intake). LOOP-MINT-FRESH-SLATE-INFRA-BOOTSTRAP-20260212."
 
   communications-stack:
     # IP source: DEVICE_IDENTITY_SSOT.md (canonical for host/IPs)
+    lan_ip: 192.168.1.26
     tailscale_ip: 100.115.16.37
+    healthcheck_address: lan_ip
     ssh: communications-stack
     os: ubuntu-24.04
     vmid: 214
     proxmox_host: pve
+    compose_target:
+      description: "Communications stack VM 214 (Stalwart self-hosted mail + mail-archiver). Canonical mail-archiver runtime (LOOP-MAIL-ARCHIVER-COMMS-MIGRATION-20260225)."
+      stacks:
+        - name: communications-stack
+          path: /opt/stacks/communications-stack
+        - name: mail-archiver
+          path: /opt/stacks/communications-stack
     notes: "Communications stack (Stalwart mail server). IMAPS 993, SMTPS 465, STARTTLS 587, HTTPS admin 8443. TLS via Let's Encrypt DNS-01 (Cloudflare). Canonical LAN IP 192.168.1.26 is now static."
 
   surveillance-stack:
     # IP source: DEVICE_IDENTITY_SSOT.md (canonical for host/IPs)
+    lan_ip: 192.168.1.215
     tailscale_ip: 100.89.1.111
+    healthcheck_address: lan_ip
     ssh: surveillance-stack
     os: ubuntu-24.04
     vmid: 215
     proxmox_host: pve
+    compose_target:
+      description: "Surveillance stack VM 215 (Frigate + bundled go2rtc). Internal-only by design."
+      stacks:
+        - name: surveillance
+          path: /opt/stacks/surveillance
     notes: "Surveillance stack (Frigate + bundled go2rtc). Internal-only by design. CPU-first baseline launched 2026-03-05 on VM 215. HA integration is direct over Tailscale with no proxy relay."
+
+  ha:
+    tailscale_ip: 100.67.120.1
+    ssh: ha
+    os: home-assistant-os
+    notes: "Home Assistant home VM 100. Monitoring exception retained for generated services.health coverage."
+
+  pihole-home:
+    tailscale_ip: 100.105.148.96
+    ssh: pihole-home
+    notes: "Pi-hole DNS (home LXC 105). Monitoring exception retained for generated services.health coverage."
+
+  vaultwarden-home:
+    tailscale_ip: 100.93.142.63
+    ssh: infra-core
+    os: ubuntu-24.04
+    compose_target:
+      ssh_target: infra-core
+      connect_timeout_sec: 10
+      enabled: false
+      description: "DECOMMISSIONED. Vaultwarden (home VM 102). Superseded by infra-core. ssh_target normalized to existing canonical target for lifecycle parity."
+      stacks:
+        - name: vaultwarden
+          path: /home/ron/vaultwarden
+    notes: "DECOMMISSIONED. Vaultwarden (home VM 102). Superseded by infra-core."
 
   macbook:
     # IP source: DEVICE_IDENTITY_SSOT.md (canonical for host/IPs)

@@ -7,7 +7,8 @@ set -euo pipefail
 #   1. gen-gate-registry-header.sh — gate_count + description in gate.registry.yaml
 #   2. docs-projection-sync         — entry-surface metadata in AGENTS.md, CLAUDE.md, generated/
 #   3. platform-control-surface-reconcile — git transport alias parity against ssh.targets
-#   4. docs-projection-verify       — deterministic verification of docs projections
+#   4. service.registry.projection.build — registry-backed service/compose projections
+#   5. docs-projection-verify       — deterministic verification of docs projections
 #
 # Default: no-commit (projection.reconcile only writes; commit is recovery's job).
 # Supports --dry-run to show what would change without writing.
@@ -53,12 +54,14 @@ CONTROL_SYNC="$ROOT/ops/plugins/core/authority/bin/platform-control-surface-reco
 VERIFY="$ROOT/ops/plugins/core/docs/bin/docs-projection-verify"
 CONTROL_BINDING="$ROOT/ops/bindings/platform.control.surfaces.yaml"
 AUTHORITY_SYNC="$ROOT/ops/plugins/core/authority/bin/authority-concerns-projection-build"
+SERVICE_REGISTRY_SYNC="$ROOT/ops/plugins/core/authority/bin/service-registry-projection-build"
 
 [[ -x "$GEN_HEADER" ]] || fail "missing: $GEN_HEADER"
 [[ -x "$SYNC" ]]       || fail "missing: $SYNC"
 [[ -x "$CONTROL_SYNC" ]] || fail "missing: $CONTROL_SYNC"
 [[ -x "$VERIFY" ]]     || fail "missing: $VERIFY"
 [[ -x "$AUTHORITY_SYNC" ]] || fail "missing: $AUTHORITY_SYNC"
+[[ -f "$SERVICE_REGISTRY_SYNC" ]] || fail "missing: $SERVICE_REGISTRY_SYNC"
 [[ -f "$CONTROL_BINDING" ]] || fail "missing: $CONTROL_BINDING"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -102,6 +105,8 @@ spine_tx_track "$ROOT/docs/reference/generated/ENTRY_SURFACE_GATE_METADATA.md"
 spine_tx_track "$ROOT/docs/reference/generated/BOOT_ENTRY_SURFACE.md"
 spine_tx_track "$CONTROL_BINDING"
 spine_tx_track "$ROOT/ops/bindings/single.authority.contract.yaml"
+spine_tx_track "$ROOT/ops/bindings/services.health.yaml"
+spine_tx_track "$ROOT/ops/bindings/docker.compose.targets.yaml"
 
 # ── Step 1: reconcile gate registry header ──
 if ! {
@@ -116,6 +121,9 @@ if ! {
 
   echo "[projection.reconcile] reconciling authority concern projections..."
   bash "$AUTHORITY_SYNC"
+
+  echo "[projection.reconcile] reconciling service registry projections..."
+  python3 "$SERVICE_REGISTRY_SYNC"
 
   echo "[projection.reconcile] verifying projections..."
   "$VERIFY"

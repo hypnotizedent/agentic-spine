@@ -282,9 +282,9 @@ cat <<'SCAFFOLD_EOF'
 # secrets.binding.yaml         Infisical connection
 # secrets.inventory.yaml       Infisical projects catalog
 # cloudflare.inventory.yaml    Zones + tunnel
-# docker.compose.targets.yaml  Hosts + stacks
+# docker.compose.targets.yaml  Generated projection (SERVICE_REGISTRY host + stack authority)
 # ssh.targets.yaml             SSH targets (shop + home)
-# services.health.yaml         HTTP health endpoints
+# services.health.yaml         Generated projection (SERVICE_REGISTRY service health authority)
 # backup.inventory.yaml        VM backup targets
 # extraction.mode.yaml         Extraction pause/active state
 # operational.gaps.yaml        Tracked operational gaps

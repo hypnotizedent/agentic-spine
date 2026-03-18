@@ -68,8 +68,8 @@ The following files WILL need updates by the end of REGISTER phase:
 | `docs/governance/SERVICE_REGISTRY.yaml` | Service entries for hosted services |
 | `docs/governance/STACK_REGISTRY.yaml` | Stack entry |
 | `ops/bindings/ssh.targets.yaml` | SSH target entry |
-| `ops/bindings/docker.compose.targets.yaml` | Compose target entry |
-| `ops/bindings/services.health.yaml` | Health probe endpoints |
+| `docs/governance/SERVICE_REGISTRY.yaml` | Host `compose_target` metadata that generates compose targets |
+| `docs/governance/SERVICE_REGISTRY.yaml` | Service `health` / `healthcheck` metadata that generates health probes |
 | `ops/bindings/backup.inventory.yaml` | Backup target entry |
 | `ops/bindings/infra.storage.placement.policy.yaml` | Storage tier declaration for this VM |
 | `ops/bindings/secrets.namespace.policy.yaml` | Secret paths (if services need secrets) |
@@ -149,18 +149,20 @@ Update `vm.lifecycle.yaml` status back to `planning` or `abandoned`.
 
 ### Required SSOT Updates
 
-Each update MUST be committed. The order below minimizes drift window:
+Each update MUST be committed. Do not hand-edit `ops/bindings/docker.compose.targets.yaml`
+or `ops/bindings/services.health.yaml`; rebuild them from `SERVICE_REGISTRY.yaml`.
+The order below minimizes drift window:
 
 | # | File | What to Add | Commit Scope |
 |---|------|-------------|--------------|
 | 1 | `ops/bindings/vm.lifecycle.yaml` | Update status to `registered`, add Tailscale IP | lifecycle |
 | 2 | `ops/bindings/ssh.targets.yaml` | SSH target entry (id, host, user, tags) | connectivity |
-| 3 | `ops/bindings/docker.compose.targets.yaml` | Compose target with stack paths | stack discovery |
+| 3 | `docs/governance/SERVICE_REGISTRY.yaml` | Host `compose_target` metadata with stack paths | stack discovery authority |
 | 4 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device row (hostname, LAN IP, TS IP, VMID) | identity |
 | 5 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device identity row | host identity |
 | 6 | `docs/governance/SERVICE_REGISTRY.yaml` | Service entries (host, port, health, container) | service truth |
 | 7 | `docs/governance/STACK_REGISTRY.yaml` | Stack entry (stack_id, path, deploy_method) | stack truth |
-| 8 | `ops/bindings/services.health.yaml` | Health probe endpoints for each service | monitoring |
+| 8 | `./bin/ops cap run service.registry.projection.build` | Rebuild `docker.compose.targets.yaml` + `services.health.yaml` from SERVICE_REGISTRY | generated projections |
 | 9 | `ops/bindings/backup.inventory.yaml` | Backup target entry for vzdump artifacts | backup coverage |
 | 10 | `ops/bindings/secrets.namespace.policy.yaml` | Secret key paths (if services need Infisical) | secrets |
 | 11 | `ops/bindings/tailscale.tailnet.snapshot.yaml` | Tailnet device entry (IPs, access_policy, FQDN) | tailscale |
@@ -169,6 +171,7 @@ Each update MUST be committed. The order below minimizes drift window:
 
 After all updates:
 ```
+./bin/ops cap run service.registry.projection.build
 ./bin/ops cap run spine.verify
 ```
 All drift gates (D34, D35, D37, D54, D59) must pass. If they don't, the registration is incomplete.
@@ -223,8 +226,8 @@ Update `vm.lifecycle.yaml` status to `active`.
 
 ### Change Management During Operate
 
-- **Adding services:** Follow REGISTER phase updates (SERVICE_REGISTRY, health binding, etc.)
-- **Removing services:** Update all SSOTs, disable health probes, run `spine.verify`
+- **Adding services:** Update `SERVICE_REGISTRY.yaml`, rebuild `service.registry.projection.build`, then run `spine.verify`
+- **Removing services:** Update `SERVICE_REGISTRY.yaml`, rebuild projections, then run `spine.verify`
 - **Resizing VM:** Update `vm.lifecycle.yaml` resources + SHOP_SERVER_SSOT VM inventory
 - **Relocating services:** Follow INFRA_RELOCATION_PROTOCOL.md
 

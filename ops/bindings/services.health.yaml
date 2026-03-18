@@ -4,435 +4,401 @@
 # authority_state: projection
 # authority_concern: service_registry_surfaces
 # projection_of: docs/governance/SERVICE_REGISTRY.yaml
-# Last verified: 2026-03-05
-#
-# Source SSOT: docs/governance/SERVICE_REGISTRY.yaml
-# Each endpoint is a known service health URL (no auth required).
-#
-# Coverage policy:
-#   Services with HTTP endpoints get probes here. Internal-only containers
-#   (no published ports), portless sidecars, and TCP-only services (postgres,
-#   redis) rely on Docker HEALTHCHECK + vzdump VM-level coverage. These are
-#   not accidental omissions — they are policy exclusions.
-
+# generated_by: service.registry.projection.build
+# source_sha256: 4db75cbdfb8077e17821e247b33b7729c45a378758aefb9fff96fadf3a9233b3
+# Do NOT edit manually. Rebuild with: ./bin/ops cap run service.registry.projection.build
 version: 1
-
 defaults:
   connect_timeout_sec: 5
   max_time_sec: 10
-
 endpoints:
-  # Legacy docker-host probes were retired from the active health surface on 2026-03-06.
-  # Keep docker-host access via SSH targets only for forensic reads.
-
-  - id: dashy
-    host: observability
-    url: "http://192.168.1.205:4000/"
-    expect: 200
-    enabled: true
-    description: "Dashy homelab dashboard on observability VM 205. Migrated from docker-host (LOOP-OBSERVABILITY-DOMAIN-ENRICHMENT-20260226)."
-
-  - id: payment-v2
-    host: mint-apps
-    url: "http://192.168.1.213:4000/health"
-    expect: 200
-    enabled: true
-    description: "Mint payment module on VM 213 (fresh-slate extraction target)."
-
-  # Finance probes on docker-host REMOVED — services migrated to finance-stack VM 211.
-  # Live probes: firefly-iii-vm211, paperless-ngx-vm211, ghostfolio-vm211 (below).
-  # mail-archiver health probe now at mail-archiver-vm214 (communications-stack).
-
-  - id: caddy
-    host: infra-core
-    url: "http://192.168.1.204:80/"
-    expect: 200
-    enabled: true
-    description: "Caddy reverse proxy. SPOF for all infra-core traffic. Returns 200 when healthy."
-
-  - id: cloudflared
-    host: infra-core
-    url: "http://192.168.1.204:60123/metrics"
-    expect: 200
-    enabled: true
-    description: "Cloudflared metrics endpoint for ingress connector liveness (network_mode: host, --metrics=0.0.0.0:60123)."
-
-  - id: infisical
-    host: infra-core
-    url: "http://192.168.1.204:8088/api/status"
-    expect: 200
-    description: "Infisical internal health (no auth)"
-
-  - id: vaultwarden
-    host: infra-core
-    url: "http://192.168.1.204:8081/alive"
-    expect: 200
-    description: "Vaultwarden liveness"
-
-  - id: authentik
-    host: infra-core
-    url: "http://192.168.1.204:9000/if/flow/initial-setup/"
-    expect: 200
-    description: "Authentik initial setup / health-like endpoint"
-
-  - id: pihole
-    host: infra-core
-    url: "http://192.168.1.204:8053/admin/"
-    expect: 302
-    description: "Pi-hole admin UI (no auth required for login page)"
-
-  - id: n8n
-    host: automation-stack
-    url: "http://192.168.1.110:5678/healthz"
-    expect: 200
-    description: "n8n workflow automation"
-
-  - id: open-webui
-    host: automation-stack
-    url: "http://192.168.1.110:3000/"
-    expect: 200
-    description: "Open WebUI chat interface (automation-stack)"
-
-  - id: ollama
-    host: automation-stack
-    url: "http://192.168.1.110:11434/api/tags"
-    expect: 200
-    description: "Ollama API (automation-stack)"
-
-  - id: mcpjungle
-    host: automation-stack
-    url: "http://100.98.70.70:8080/health"
-    expect: 200
-    description: "MCPJungle gateway/runtime. Tailscale-bound listener on port 8080."
-
-  - id: prometheus
-    host: observability
-    url: "http://192.168.1.205:9090/-/healthy"
-    expect: 200
-    description: "Prometheus metrics"
-
-  - id: grafana
-    host: observability
-    url: "http://192.168.1.205:3000/api/health"
-    expect: 200
-    description: "Grafana dashboards"
-
-  - id: loki
-    host: observability
-    url: "http://192.168.1.205:3100/ready"
-    expect: 200
-    description: "Loki log aggregation"
-
-  - id: uptime-kuma
-    host: observability
-    url: "http://192.168.1.205:3001"
-    expect: 302
-    description: "Uptime Kuma monitoring"
-
-  - id: node-exporter
-    host: observability
-    url: "http://192.168.1.205:9100/metrics"
-    expect: 200
-    description: "Node exporter host metrics"
-
-  - id: gitea
-    host: dev-tools
-    url: "http://192.168.1.206:3000/api/healthz"
-    expect: 200
-    description: "Gitea Git forge"
-
-  - id: qdrant
-    host: ai-consolidation
-    url: "http://192.168.1.8:6333/healthz"
-    expect: 200
-    description: "Qdrant vector DB (VM 207)"
-
-  - id: anythingllm
-    host: ai-consolidation
-    url: "http://192.168.1.8:3002/api/ping"
-    expect: 200
-    description: "AnythingLLM RAG interface (VM 207)"
-
-  # ─── Immich (VM 203) ─────────────────────────────────────────────────
-  - id: immich-server
-    host: immich
-    url: "http://192.168.1.203:2283/api/server/ping"
-    expect: 200
-    enabled: true
-    description: "Alias endpoint for SERVICE_REGISTRY parity (immich-server canonical service id)."
-
-  - id: immich
-    host: immich
-    url: "http://192.168.1.203:2283/api/server/ping"
-    expect: 200
-    enabled: true
-    description: "Immich photo management (VM 203). Re-enabled 2026-02-11 after GAP-OP-094 fix."
-
-  # ─── Download Stack (VM 209) ───────────────────────────────────────
-  - id: radarr
-    host: download-stack
-    url: "http://192.168.1.209:7878/ping"
-    expect: 200
-    description: "Radarr movie management"
-
-  - id: sonarr
-    host: download-stack
-    url: "http://192.168.1.209:8989/ping"
-    expect: 200
-    description: "Sonarr TV management"
-
-  - id: prowlarr
-    host: download-stack
-    url: "http://192.168.1.209:9696/ping"
-    expect: 200
-    description: "Prowlarr indexer manager"
-
-  - id: lidarr
-    host: download-stack
-    url: "http://192.168.1.209:8686/ping"
-    expect: 200
-    description: "Lidarr music management"
-
-  - id: sabnzbd
-    host: download-stack
-    url: "http://192.168.1.209:8080/api?mode=version&output=json"
-    expect: 200
-    description: "SABnzbd Usenet downloader API (lightweight version endpoint; web UI root takes ~9s, exceeds probe timeout)"
-
-  - id: tdarr
-    host: download-stack
-    url: "http://192.168.1.209:8265/"
-    expect: 200
-    enabled: false
-    description: "Tdarr transcode automation web UI (intentionally stopped during soak; disable probe until re-enabled)"
-
-  - id: flaresolverr
-    host: download-stack
-    url: "http://192.168.1.209:8191/health"
-    expect: 200
-    description: "FlareSolverr challenge solver"
-
-  - id: crosswatch
-    host: download-stack
-    url: "http://192.168.1.209:8787/"
-    expect: 200
-    enabled: false
-    description: "Crosswatch cross-VM media event bridge"
-
-  - id: autopulse
-    host: download-stack
-    url: "http://192.168.1.209:2875/"
-    expect: 200
-    enabled: false
-    description: "Autopulse event trigger bridge for Jellyfin library refresh"
-
-  - id: slskd
-    host: download-stack
-    url: "http://192.168.1.209:5030/metrics"
-    expect: 200
-    enabled: false
-    description: "Localhost-bound by design; Docker health is authoritative signal. Disable external probe until probe_via:ssh feature exists."
-
-  - id: download-node-exporter
-    host: download-stack
-    url: "http://192.168.1.209:9100/metrics"
-    expect: 200
-    description: "Node exporter on download-stack"
-
-  # ─── Streaming Stack (VM 210) ────────────────────────────────────
-  - id: jellyfin
-    host: streaming-stack
-    url: "http://192.168.1.210:8096/health"
-    expect: 200
-    description: "Jellyfin video streaming"
-
-  - id: navidrome
-    host: streaming-stack
-    url: "http://192.168.1.210:4533/ping"
-    expect: 200
-    description: "Navidrome music streaming"
-
-  - id: jellyseerr
-    host: streaming-stack
-    url: "http://192.168.1.210:5055"
-    expect: 307
-    description: "Jellyseerr request management (307 redirect to login is healthy)"
-
-  - id: bazarr
-    host: streaming-stack
-    url: "http://192.168.1.210:6767/ping"
-    expect: 200
-    description: "Bazarr subtitle management"
-
-  - id: homarr
-    host: streaming-stack
-    url: "http://192.168.1.210:7575/"
-    expect: 307
-    description: "Homarr dashboard (307 redirect to login is healthy)"
-
-  - id: wizarr
-    host: streaming-stack
-    url: "http://192.168.1.210:5690/"
-    expect: 302
-    description: "Wizarr onboarding and invite workflow (302 redirect to login is healthy)"
-
-  - id: spotisub
-    host: streaming-stack
-    url: "http://192.168.1.210:8766/"
-    expect: 302
-    description: "Spotisub Spotify-to-Subsonic sync (302 redirect to login is healthy)"
-
-  - id: streaming-node-exporter
-    host: streaming-stack
-    url: "http://192.168.1.210:9100/metrics"
-    expect: 200
-    description: "Node exporter on streaming-stack"
-
-  # ─── Finance Stack (VM 211 — LIVE, cutover P4 complete) ─────────────────
-  - id: firefly-iii-vm211
-    host: finance-stack
-    url: "http://192.168.1.211:8090/api/v1/about"
-    expect: 302
-    enabled: true
-    description: "Firefly III on finance-stack VM 211. Live — cutover P4 (LOOP-FINANCE-VM-SEPARATION-20260211)."
-
-  - id: paperless-ngx-vm211
-    host: finance-stack
-    url: "http://192.168.1.211:8000/api/"
-    expect: 302
-    enabled: true
-    description: "Paperless-ngx on finance-stack VM 211. Live — cutover P4 (LOOP-FINANCE-VM-SEPARATION-20260211)."
-
-  - id: ghostfolio-vm211
-    host: finance-stack
-    url: "http://192.168.1.211:3340/"
-    expect: 301
-    enabled: true
-    description: "Ghostfolio on finance-stack VM 211. Live — cutover P4 (LOOP-FINANCE-VM-SEPARATION-20260211)."
-
-  - id: vouchervault-health
-    host: finance-stack
-    url: "http://100.76.153.100:8092/en/ping/"
-    expect: 204
-    enabled: true
-    description: "VoucherVault on finance-stack VM 211. Private Tailscale runtime on port 8092 (LOOP-RONNY-PRODUCTS-VOUCHERVAULT-EXECUTION-20260305)."
-
-  - id: mail-archiver-vm214
-    host: communications-stack
-    url: "http://192.168.1.26:5100/"
-    expect: 302
-    enabled: true
-    description: "Mail Archiver on communications-stack VM 214. Migrated from VM 211 (LOOP-MAIL-ARCHIVER-COMMS-MIGRATION-20260225)."
-
-  # ─── Mint Fresh-Slate: Data Plane (VM 212) ────────────────────────────
-  - id: mint-modules-minio
-    host: mint-data
-    url: "http://100.106.72.25:9000/minio/health/live"
-    expect: 200
-    enabled: true
-    description: "MinIO on mint-data VM 212 (fresh-slate). Tailscale-bound listener on port 9000."
-
-  # ─── Mint Fresh-Slate: App Plane (VM 213) ─────────────────────────────
-  - id: files-api-v2
-    host: mint-apps
-    url: "http://192.168.1.213:3500/health"
-    expect: 200
-    enabled: true
-    description: "Artwork files-api on mint-apps VM 213 (fresh-slate)"
-
-  - id: quote-page-v2
-    host: mint-apps
-    url: "http://192.168.1.213:3341/health"
-    expect: 200
-    enabled: true
-    description: "Quote page on mint-apps VM 213 (fresh-slate)"
-
-  - id: order-intake-v2
-    host: mint-apps
-    url: "http://192.168.1.213:3400/health"
-    expect: 200
-    enabled: true
-    description: "Order intake on mint-apps VM 213 (fresh-slate)"
-
-  - id: finance-adapter
-    host: mint-apps
-    url: "http://192.168.1.213:3600/health"
-    expect: 200
-    enabled: true
-    description: "Finance adapter on mint-apps VM 213 (fresh-slate)"
-
-  - id: auth-v1
-    host: mint-apps
-    url: "http://192.168.1.213:4300/health"
-    expect: 200
-    enabled: true
-    description: "Auth module on mint-apps VM 213 (fresh-slate internal API)"
-
-  - id: pricing-v2
-    host: mint-apps
-    url: "http://192.168.1.213:3700/health"
-    expect: 200
-    enabled: true
-    description: "Pricing module on mint-apps VM 213 (fresh-slate)"
-
-  - id: suppliers-v2
-    host: mint-apps
-    url: "http://192.168.1.213:3800/health"
-    expect: 200
-    enabled: true
-    description: "Suppliers module on mint-apps VM 213 (fresh-slate)"
-
-  - id: shipping-v2
-    host: mint-apps
-    url: "http://192.168.1.213:3900/health"
-    expect: 200
-    enabled: true
-    description: "Shipping module on mint-apps VM 213 (fresh-slate)"
-
-  # ─── Communications Stack (VM 214) ──────────────────────────────────────
-  - id: stalwart-mail
-    host: communications-stack
-    url: "http://192.168.1.26:8080/"
-    expect: 200
-    enabled: true
-    description: "Stalwart mail server management API (VM 214). IMAPS 993, SMTPS 465, STARTTLS 587. TLS via Let's Encrypt DNS-01 (Cloudflare)."
-
-  # ─── Surveillance Stack (VM 215) ───────────────────────────────────────
-  - id: frigate-vm215
-    host: surveillance-stack
-    url: "http://192.168.1.215:5000/api/version"
-    expect: 200
-    enabled: true
-    description: "Frigate surveillance API on surveillance-stack VM 215. Internal-only by design."
-
-  - id: go2rtc-vm215
-    host: surveillance-stack
-    url: "http://192.168.1.215:5000/api/go2rtc/api/streams"
-    expect: 200
-    enabled: true
-    description: "Bundled go2rtc API exposed through Frigate on surveillance-stack VM 215. Internal-only by design."
-
-  # ─── Home Site (proxmox-home — Beelink SER7) ───────────────────────────
-  - id: home-assistant
-    host: ha
-    url: "http://100.67.120.1:8123/api/"
-    expect: "401,403"
-    enabled: true
-    description: "Home Assistant (home VM 100). Canonical remote probe path is direct Tailscale; unauthenticated API response can be 401 or 403 depending route/context."
-
-  - id: vaultwarden-home
-    host: vaultwarden-home
-    url: "http://100.93.142.63:8080/"
-    expect: 200
-    enabled: false  # decommissioned 2026-02-16
-    description: "DECOMMISSIONED. Vaultwarden (home VM 102). Superseded by infra-core."
-
-  - id: pihole-home
-    host: pihole-home
-    url: "http://100.105.148.96/admin/"
-    expect: 302
-    enabled: true
-    description: "Pi-hole DNS (home LXC 105). Reactivated 2026-02-21 for home-local DNS filtering."
-
-  # VM 101 (immich-home): stopped — no probe until started.
-  # LXC 103 (download-home): stopped — no probe until started.
+- id: mint-modules-minio
+  host: mint-data
+  url: http://100.106.72.25:9000/minio/health/live
+  expect: 200
+  enabled: true
+  description: Mint data plane MinIO on VM 212 (fresh-slate). Canonical active Mint
+    usage is artwork-only; retained invoices belong in Paperless.
+- id: cloudflared
+  host: infra-core
+  url: http://192.168.1.204:60123/metrics
+  expect: 200
+  enabled: true
+  description: Cloudflare tunnel connector (homelab-tunnel)
+- id: pihole
+  host: infra-core
+  url: http://192.168.1.204:8053/admin/
+  expect: 302
+  enabled: true
+  description: Network-wide DNS ad-blocking. Web UI moved to 8053 (Caddy owns 80).
+- id: infisical
+  host: infra-core
+  url: http://192.168.1.204:8088/api/status
+  expect: 200
+  enabled: true
+  description: Secrets manager (relocated from docker-host)
+- id: vaultwarden
+  host: infra-core
+  url: http://192.168.1.204:8081/alive
+  expect: 200
+  enabled: true
+  description: Password manager (relocated from proxmox-home VM 102, soak)
+- id: caddy
+  host: infra-core
+  url: http://192.168.1.204:80/
+  expect: 200
+  enabled: true
+  description: "Reverse proxy (HTTP only \u2014 CF tunnel handles public TLS)"
+- id: authentik
+  host: infra-core
+  url: http://192.168.1.204:9000/if/flow/initial-setup/
+  expect: 200
+  enabled: true
+  description: SSO/Authentication. Initial setup required at first login.
+- id: dashy
+  host: observability
+  url: http://192.168.1.205:4000/
+  expect: 200
+  enabled: true
+  description: Visual runtime map of all spine-managed services. Lissy93/dashy, CF
+    tunnel routed. Migrated from docker-host (LOOP-OBSERVABILITY-DOMAIN-ENRICHMENT-20260226).
+- id: files-api-v2
+  host: mint-apps
+  url: http://192.168.1.213:3500/health
+  expect: 200
+  enabled: true
+  description: Artwork module API on mint-apps app plane. Data dependencies route
+    to mint-data VM.
+- id: quote-page-v2
+  host: mint-apps
+  url: http://192.168.1.213:3341/health
+  expect: 200
+  enabled: true
+  description: Quote intake service routed to mint-apps runtime at the canonical public
+    quote path.
+- id: order-intake-v2
+  host: mint-apps
+  url: http://192.168.1.213:3400/health
+  expect: 200
+  enabled: true
+  description: Order intake API hosted on mint-apps runtime.
+- id: finance-adapter
+  host: mint-apps
+  url: http://192.168.1.213:3600/health
+  expect: 200
+  enabled: true
+  description: Finance adapter API hosted on mint-apps runtime.
+- id: auth-v1
+  host: mint-apps
+  url: http://192.168.1.213:4300/health
+  expect: 200
+  enabled: true
+  description: Auth module runtime on mint-apps. Internal API used by the fresh-slate
+    Mint lane.
+- id: pricing-v2
+  host: mint-apps
+  url: http://192.168.1.213:3700/health
+  expect: 200
+  enabled: true
+  description: Pricing module runtime on mint-apps. Canonical public work URL moved
+    to mintprints.com.
+- id: suppliers-v2
+  host: mint-apps
+  url: http://192.168.1.213:3800/health
+  expect: 200
+  enabled: true
+  description: Supplier provider orchestration module runtime on mint-apps.
+- id: shipping-v2
+  host: mint-apps
+  url: http://192.168.1.213:3900/health
+  expect: 200
+  enabled: true
+  description: Shipping module runtime on mint-apps.
+- id: payment-v2
+  host: mint-apps
+  url: http://192.168.1.213:4000/health
+  expect: 200
+  enabled: true
+  description: Payment module runtime on mint-apps.
+- id: n8n
+  host: automation-stack
+  url: http://192.168.1.110:5678/healthz
+  expect: 200
+  enabled: true
+  description: Workflow automation (VM 202).
+- id: open-webui
+  host: automation-stack
+  url: http://192.168.1.110:3000/
+  expect: 200
+  enabled: true
+  description: Web UI for Ollama (VM 202). Host port 3000 -> container 8080.
+- id: ollama
+  host: automation-stack
+  url: http://192.168.1.110:11434/api/tags
+  expect: 200
+  enabled: true
+  description: Local model runtime (VM 202).
+- id: mcpjungle
+  host: automation-stack
+  url: http://100.98.70.70:8080/health
+  expect: 200
+  enabled: true
+  description: MCP gateway/runtime (migrated off docker-host to automation-stack tooling
+    plane).
+- id: frigate-vm215
+  host: surveillance-stack
+  url: http://192.168.1.215:5000/api/version
+  expect: 200
+  enabled: true
+  description: Shop surveillance runtime on VM 215. CPU-first Frigate baseline with
+    8 live cameras. Home Assistant uses direct Tailscale URL http://100.89.1.111:5000
+    and MQTT at 100.67.120.1:1883.
+- id: go2rtc-vm215
+  host: surveillance-stack
+  url: http://192.168.1.215:5000/api/go2rtc/api/streams
+  expect: 200
+  enabled: true
+  description: Low-latency RTSP/WebRTC proxy bundled inside Frigate on surveillance-stack
+    VM 215 and exposed through the Frigate API path. No standalone go2rtc container
+    or socat relay is canonical.
+- id: prometheus
+  host: observability
+  url: http://192.168.1.205:9090/-/healthy
+  expect: 200
+  enabled: true
+  description: Metrics collection and alerting
+- id: grafana
+  host: observability
+  url: http://192.168.1.205:3000/api/health
+  expect: 200
+  enabled: true
+  description: Monitoring dashboards and visualization
+- id: loki
+  host: observability
+  url: http://192.168.1.205:3100/ready
+  expect: 200
+  enabled: true
+  description: Log aggregation
+- id: uptime-kuma
+  host: observability
+  url: http://192.168.1.205:3001/
+  expect: 302
+  enabled: true
+  description: Uptime monitoring
+- id: node-exporter
+  host: observability
+  url: http://192.168.1.205:9100/metrics
+  expect: 200
+  enabled: true
+  description: Host metrics exporter for Prometheus
+- id: gitea
+  host: dev-tools
+  url: http://192.168.1.206:3000/api/healthz
+  expect: 200
+  enabled: true
+  description: Git forge (dev-tools VM 206), Authentik SSO
+- id: radarr
+  host: download-stack
+  url: http://192.168.1.209:7878/ping
+  expect: 200
+  enabled: true
+  description: Movie management (migrated from media-stack)
+- id: sonarr
+  host: download-stack
+  url: http://192.168.1.209:8989/ping
+  expect: 200
+  enabled: true
+  description: TV management (migrated from media-stack)
+- id: lidarr
+  host: download-stack
+  url: http://192.168.1.209:8686/ping
+  expect: 200
+  enabled: true
+  description: Music management (migrated from media-stack)
+- id: prowlarr
+  host: download-stack
+  url: http://192.168.1.209:9696/ping
+  expect: 200
+  enabled: true
+  description: Indexer manager (migrated from media-stack)
+- id: sabnzbd
+  host: download-stack
+  url: http://192.168.1.209:8080/api?mode=version&output=json
+  expect: 200
+  enabled: true
+  description: Usenet downloader (migrated from media-stack). Health uses API version
+    endpoint (web UI root too slow for probes).
+- id: tdarr
+  host: download-stack
+  url: http://192.168.1.209:8265/
+  expect: 200
+  enabled: false
+  description: Transcode automation. Intentionally stopped during soak period. Health
+    probe disabled.
+- id: flaresolverr
+  host: download-stack
+  url: http://192.168.1.209:8191/health
+  expect: 200
+  enabled: true
+  description: Cloudflare challenge solver for indexers (migrated from media-stack)
+- id: slskd
+  host: download-stack
+  url: http://192.168.1.209:5030/metrics
+  expect: 200
+  enabled: false
+  description: Soulseek client routed through gluetun (Privado VPN). HTTP probe remains
+    disabled in services.health; Docker health + D223 are authoritative.
+- id: autopulse
+  host: download-stack
+  url: http://192.168.1.209:2875/
+  expect: 200
+  enabled: false
+  description: Library refresh trigger for Jellyfin (migrated from media-stack, cross-VM
+    to VM 210)
+- id: crosswatch
+  host: download-stack
+  url: http://192.168.1.209:8787/
+  expect: 200
+  enabled: false
+  description: Cross-service watch sync (migrated from media-stack)
+- id: download-node-exporter
+  host: download-stack
+  url: http://192.168.1.209:9100/metrics
+  expect: 200
+  enabled: true
+  description: Host metrics exporter for Prometheus on download-stack.
+- id: jellyfin
+  host: streaming-stack
+  url: http://192.168.1.210:8096/health
+  expect: 200
+  enabled: true
+  description: Video streaming (migrated from media-stack)
+- id: navidrome
+  host: streaming-stack
+  url: http://192.168.1.210:4533/ping
+  expect: 200
+  enabled: true
+  description: Music streaming (migrated from media-stack)
+- id: jellyseerr
+  host: streaming-stack
+  url: http://192.168.1.210:5055/
+  expect: 307
+  enabled: true
+  description: Seerr v3.0.1 (migrated from Jellyseerr 2026-02-24)
+- id: bazarr
+  host: streaming-stack
+  url: http://192.168.1.210:6767/ping
+  expect: 200
+  enabled: true
+  description: Subtitle management (migrated from media-stack)
+- id: homarr
+  host: streaming-stack
+  url: http://192.168.1.210:7575/
+  expect: 307
+  enabled: true
+  description: Dashboard (migrated from media-stack)
+- id: wizarr
+  host: streaming-stack
+  url: http://192.168.1.210:5690/
+  expect: 302
+  enabled: true
+  description: Media server invitation management (migrated from media-stack)
+- id: spotisub
+  host: streaming-stack
+  url: http://192.168.1.210:8766/
+  expect: 302
+  enabled: true
+  description: Spotify-to-Navidrome sync (migrated from media-stack)
+- id: streaming-node-exporter
+  host: streaming-stack
+  url: http://192.168.1.210:9100/metrics
+  expect: 200
+  enabled: true
+  description: Host metrics exporter for Prometheus on streaming-stack.
+- id: immich-server
+  host: immich
+  url: http://192.168.1.203:2283/api/server/ping
+  expect: 200
+  enabled: true
+  description: Photo management server (VM 203). 135K+ assets, 4 users, 3TB library.
+- id: immich
+  host: immich
+  url: http://192.168.1.203:2283/api/server/ping
+  expect: 200
+  enabled: true
+  description: Photo management server (VM 203). 135K+ assets, 4 users, 3TB library.
+- id: firefly-iii-vm211
+  host: finance-stack
+  url: http://192.168.1.211:8090/api/v1/about
+  expect: 302
+  enabled: true
+  description: "Firefly III on finance-stack VM 211. Live \u2014 migrated from docker-host\
+    \ (LOOP-FINANCE-VM-SEPARATION-20260211). Canonical public finance URL moved under\
+    \ mintprints.com."
+- id: paperless-ngx-vm211
+  host: finance-stack
+  url: http://192.168.1.211:8000/api/
+  expect: 302
+  enabled: true
+  description: "Paperless-ngx document management on finance-stack VM 211. Live \u2014\
+    \ migrated from docker-host. Canonical public finance URL moved under mintprints.com."
+- id: ghostfolio-vm211
+  host: finance-stack
+  url: http://192.168.1.211:3340/
+  expect: 301
+  enabled: true
+  description: "Ghostfolio investment tracking on finance-stack VM 211. Live \u2014\
+    \ migrated from docker-host. Canonical public finance URL moved under mintprints.com."
+- id: vouchervault-health
+  host: finance-stack
+  url: http://100.76.153.100:8092/en/ping/
+  expect: 204
+  enabled: true
+  description: VoucherVault gift card manager on finance-stack VM 211. Private Tailscale-only
+    runtime.
+- id: mail-archiver-vm214
+  host: communications-stack
+  url: http://192.168.1.26:5100/
+  expect: 302
+  enabled: true
+  description: Mail Archiver on communications-stack VM 214. Migrated from finance-stack
+    VM 211 with isolated Postgres 17 DB (mail-archiver-db).
+- id: stalwart-mail
+  host: communications-stack
+  url: http://192.168.1.26:8080/
+  expect: 200
+  enabled: true
+  description: Stalwart mail server on VM 214. IMAPS 993, SMTPS 465, STARTTLS 587,
+    admin HTTPS 8443. TLS via Let's Encrypt DNS-01 (Cloudflare).
+- id: home-assistant
+  host: ha
+  url: http://100.67.120.1:8123/api/
+  expect: 401,403
+  enabled: true
+  description: Home Assistant (home VM 100). Monitoring exception retained so services.health
+    can be generated from this authority.
+- id: vaultwarden-home
+  host: vaultwarden-home
+  url: http://100.93.142.63:8080/
+  expect: 200
+  enabled: false
+  description: DECOMMISSIONED. Vaultwarden (home VM 102). Superseded by infra-core.
+- id: pihole-home
+  host: pihole-home
+  url: http://100.105.148.96:80/admin/
+  expect: 302
+  enabled: true
+  description: Pi-hole DNS (home LXC 105). Home monitoring exception retained for
+    generated health probes.
+- id: anythingllm
+  host: ai-consolidation
+  url: http://192.168.1.8:3002/api/ping
+  expect: 200
+  enabled: true
+  description: Migrated from macbook (LOOP-AI-CONSOLIDATION-20260208)
+- id: qdrant
+  host: ai-consolidation
+  url: http://192.168.1.8:6333/healthz
+  expect: 200
+  enabled: true
+  description: Migrated from macbook (LOOP-AI-CONSOLIDATION-20260208)
