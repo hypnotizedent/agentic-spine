@@ -252,7 +252,7 @@ def get_mailbox_settings(mailbox: str) -> dict | None:
         raise
 
 
-def paged_collection(path: str) -> list[dict]:
+def paged_collection(path: str, *, limit: int | None = None) -> list[dict]:
     results: list[dict] = []
     next_url = f"{API_ROOT}{path}"
     while next_url:
@@ -270,13 +270,15 @@ def paged_collection(path: str) -> list[dict]:
             body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
             raise GraphError(f"HTTP {exc.code} {next_url}: {body}") from exc
         results.extend(payload.get("value", []))
+        if limit is not None and len(results) >= limit:
+            return results[:limit]
         next_url = payload.get("@odata.nextLink", "")
     return results
 
 
 def get_inbox_rules(mailbox: str) -> list[dict]:
     quoted = urllib.parse.quote(mailbox)
-    return paged_collection(f"/users/{quoted}/mailFolders/inbox/messageRules?$top=200")
+    return paged_collection(f"/users/{quoted}/mailFolders/inbox/messageRules?$top=200", limit=200)
 
 
 def find_redirect_rules(rules: list[dict], target_mailbox: str) -> list[str]:
@@ -319,10 +321,7 @@ def get_recent_inbox_messages(mailbox: str, limit: int) -> list[dict]:
         }
     )
     path = f"/users/{quoted}/mailFolders/inbox/messages?{params}"
-    messages = paged_collection(path)
-    if len(messages) > limit:
-        messages = messages[:limit]
-    return messages
+    return paged_collection(path, limit=limit)
 
 
 def normalize_address(address: str) -> str:
@@ -358,6 +357,20 @@ def mailbox_address_set(user: dict) -> set[str]:
         if value:
             addresses.add(value)
     return addresses
+
+
+def resolve_mailbox_user(mailbox: str, *, fallback_mailbox: str | None = None) -> dict | None:
+    user = get_user(mailbox)
+    if user:
+        return user
+    if not fallback_mailbox:
+        return None
+    fallback_user = get_user(fallback_mailbox)
+    if not fallback_user:
+        return None
+    if normalize_address(mailbox) in mailbox_address_set(fallback_user):
+        return fallback_user
+    return None
 
 
 def duplicate_groups(messages: list[dict]) -> list[dict]:
@@ -429,7 +442,7 @@ def extract_network_message_id(mailbox: str, message_id: str) -> str:
 
 violations: list[str] = []
 
-team_user = get_user(TEAM_MAILBOX)
+team_user = resolve_mailbox_user(TEAM_MAILBOX)
 team_settings = get_mailbox_settings(TEAM_MAILBOX)
 if not team_user:
     violations.append(f"{TEAM_MAILBOX} is missing")
@@ -443,7 +456,8 @@ else:
             f"{TEAM_MAILBOX} must remain a shared mailbox (actual userPurpose={team_settings.get('userPurpose')!r})"
         )
 
-info_user = get_user(INFO_MAILBOX)
+info_legacy_user = resolve_mailbox_user(INFO_LEGACY_MAILBOX)
+info_user = resolve_mailbox_user(INFO_MAILBOX, fallback_mailbox=INFO_LEGACY_MAILBOX)
 info_settings = get_mailbox_settings(INFO_MAILBOX) if info_user else None
 if not info_user:
     violations.append(f"{INFO_MAILBOX} is missing")
@@ -460,7 +474,6 @@ else:
     if team_user and str(info_user.get("id") or "").strip() == str(team_user.get("id") or "").strip():
         violations.append(f"{INFO_MAILBOX} and {TEAM_MAILBOX} now resolve to the same directory object")
 
-info_legacy_user = get_user(INFO_LEGACY_MAILBOX)
 if not info_legacy_user:
     violations.append(f"{INFO_LEGACY_MAILBOX} is missing")
 elif info_user and str(info_legacy_user.get("id") or "").strip() != str(info_user.get("id") or "").strip():
