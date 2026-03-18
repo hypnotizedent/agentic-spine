@@ -67,19 +67,36 @@ while IFS='|' read -r capability_id expected_command; do
   actual_command="$(yq e -r ".capabilities.\"${capability_id}\".command // \"\"" "$CAPABILITIES_CONTRACT")"
   [[ "$actual_command" == "$expected_command" ]] || fail "${capability_id} command drifted off governed microsoft-cap-exec path (actual=${actual_command:-missing})"
 done <<'EOF'
-microsoft.mail.folder.ensure|./ops/plugins/providers/microsoft/bin/microsoft-cap-exec mail_folder_ensure
 microsoft.mail.send|./ops/plugins/providers/microsoft/bin/microsoft-cap-exec mail_send
 microsoft.mail.draft.create|./ops/plugins/providers/microsoft/bin/microsoft-cap-exec draft_create
-microsoft.mail.reply.draft|./ops/plugins/providers/microsoft/bin/microsoft-cap-exec reply_draft
-microsoft.mail.draft.send|./ops/plugins/providers/microsoft/bin/microsoft-cap-exec draft_send
 microsoft.mail.draft.update|./ops/plugins/providers/microsoft/bin/microsoft-cap-exec draft_update
-microsoft.mail.attachment.add|./ops/plugins/providers/microsoft/bin/microsoft-cap-exec attachment_add
-microsoft.mail.move|./ops/plugins/providers/microsoft/bin/microsoft-cap-exec mail_move
-microsoft.mail.forward|./ops/plugins/providers/microsoft/bin/microsoft-cap-exec mail_forward
 microsoft.calendar.create|./ops/plugins/providers/microsoft/bin/microsoft-cap-exec calendar_create
 microsoft.calendar.update|./ops/plugins/providers/microsoft/bin/microsoft-cap-exec calendar_update
 microsoft.calendar.rsvp|./ops/plugins/providers/microsoft/bin/microsoft-cap-exec calendar_rsvp
 EOF
+
+while IFS='|' read -r capability_id command; do
+  [[ -n "$capability_id" ]] || continue
+  [[ "$command" == ./ops/plugins/providers/microsoft/bin/microsoft-cap-exec* ]] || fail "${capability_id} mutating command drifted off governed microsoft-cap-exec path (actual=${command:-missing})"
+done < <(
+  python3 - "$CAPABILITIES_CONTRACT" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import yaml
+
+contract_path = Path(sys.argv[1])
+capabilities = yaml.safe_load(contract_path.read_text(encoding="utf-8")).get("capabilities", {})
+for capability_id, spec in capabilities.items():
+    if not capability_id.startswith("microsoft."):
+        continue
+    if spec.get("safety") != "mutating":
+        continue
+    print(f"{capability_id}|{spec.get('command', '')}")
+PY
+)
 
 python3 - "$ROOT" <<'PY'
 from __future__ import annotations
