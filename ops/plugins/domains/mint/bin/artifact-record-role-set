@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import os
+import sys
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from artifact_record_common import (  # noqa: E402
+    ARTIFACT_ROLES,
+    ARTIFACT_STATUSES,
+    append_role_history,
+    artifact_index_entry,
+    load_artifact,
+    resolve_spine_root,
+    runtime_paths,
+    update_entity_index,
+)
+from quote_packet_normalize import dump_yaml, fail, now_utc  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.artifact.record.role.set"
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_ARTIFACT_RECORD_CAPABILITY_NAME") or CAPABILITY_NAME
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="artifact-record-role-set",
+        description="Override a canonical Mint artifact role/status once so all agents reuse the corrected truth.",
+    )
+    parser.add_argument("--artifact-id", required=True, help="Canonical artifact_id to update")
+    parser.add_argument("--artifact-role", required=True, choices=ARTIFACT_ROLES, help="New canonical artifact role")
+    parser.add_argument("--artifact-status", choices=ARTIFACT_STATUSES, default="", help="Optional explicit artifact status")
+    parser.add_argument("--operator", required=True, help="Operator identity applying the override")
+    parser.add_argument("--note", default="", help="Optional operator note")
+    parser.add_argument("--confidence", choices=["low", "medium", "high"], default="high", help="Override confidence")
+    parser.add_argument("--superseded-by", default="", help="Replacement artifact_id when retiring this artifact")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def print_text(payload: dict[str, object]) -> None:
+    print(f"capability: {payload['capability']}")
+    print(f"artifact_id: {payload['artifact_id']}")
+    print(f"artifact_role: {payload['artifact_role']}")
+    print(f"artifact_status: {payload['artifact_status']}")
+    print(f"record_file: {payload['record_file']}")
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    paths = runtime_paths(resolve_spine_root())
+    artifact_file, artifact = load_artifact(paths, args.artifact_id)
+    record = copy.deepcopy(artifact)
+
+    artifact_role = str(args.artifact_role or "").strip()
+    artifact_status = str(args.artifact_status or ("superseded" if artifact_role == "superseded" else "active")).strip()
+    if artifact_status not in ARTIFACT_STATUSES:
+        fail(f"invalid artifact_status: {artifact_status}")
+
+    if artifact_role == "superseded" and str(args.superseded_by or "").strip():
+        record["superseded_by"] = str(args.superseded_by).strip()
+    elif artifact_status != "superseded":
+        record["superseded_by"] = None
+
+    prior_role = str(record.get("artifact_role") or "").strip()
+    if prior_role and prior_role != artifact_role and artifact_role == "superseded":
+        record["superseded_from_role"] = prior_role
+
+    record["artifact_role"] = artifact_role
+    record["artifact_status"] = artifact_status
+    record["confidence"] = str(args.confidence or "high")
+    record["updated_at"] = now_utc()
+    provenance = dict(record.get("provenance") or {})
+    provenance["role_assignment"] = {
+        "assignment_mode": "operator_override",
+        "assigned_by": str(args.operator or "").strip(),
+        "confidence": str(args.confidence or "high"),
+        "basis": ["operator_override"],
+        "context": str(args.note or "").strip() or None,
+    }
+    record["provenance"] = provenance
+    append_role_history(
+        record,
+        role=artifact_role,
+        status=artifact_status,
+        assignment_mode="operator_override",
+        assigned_by=str(args.operator or "").strip(),
+        confidence=str(args.confidence or "high"),
+        basis=["operator_override"],
+        note=str(args.note or "").strip(),
+    )
+    dump_yaml(artifact_file, record)
+    update_entity_index(paths["artifacts_index_file"], "artifacts", "artifact_id", artifact_index_entry(record))
+
+    payload = {
+        "capability": capability_name(),
+        "artifact_id": args.artifact_id,
+        "artifact_role": artifact_role,
+        "artifact_status": artifact_status,
+        "superseded_by": record.get("superseded_by"),
+        "record_file": str(artifact_file),
+        "index_file": str(paths["artifacts_index_file"]),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print_text(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
+

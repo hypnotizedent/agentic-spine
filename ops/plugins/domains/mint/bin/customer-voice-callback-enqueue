@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Create governed callback queue item from voice interaction."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+from customer_interaction_record_common import (
+    callback_exists,
+    generate_callback_id,
+    normalize_callback_queue_item,
+    write_callback_queue_item,
+)
+
+
+CAPABILITY_NAME = "mint.customer.voice.callback.enqueue"
+SCHEMA_VERSION = "1.0"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Enqueue voice callback request")
+    parser.add_argument("--interaction-id", required=True, help="Source interaction ID")
+    parser.add_argument("--caller-number", required=True, help="Caller phone number")
+    parser.add_argument("--reason", required=True, help="Callback reason")
+    parser.add_argument("--urgency", required=True, choices=["low", "medium", "high", "critical"], help="Urgency level")
+    parser.add_argument("--preferred-followup-channel", required=True, choices=["sms", "email", "phone"], help="Preferred followup channel")
+    parser.add_argument("--summary", required=True, help="Callback summary")
+    parser.add_argument("--caller-name", default="", help="Caller name")
+    parser.add_argument("--company", default="", help="Company name")
+    parser.add_argument("--email", default="", help="Email address")
+    parser.add_argument("--order-or-quote-ref", default="", help="Order or quote reference")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate without writing")
+    parser.add_argument("--json", action="store_true", help="Output JSON envelope")
+
+    args = parser.parse_args()
+
+    try:
+        # Check for existing callback with same interaction ID (idempotency)
+        if callback_exists(args.interaction_id):
+            if args.json:
+                envelope = {
+                    "capability": CAPABILITY_NAME,
+                    "schema_version": SCHEMA_VERSION,
+                    "status": "ok",
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "data": {
+                        "interaction_id": args.interaction_id,
+                        "existing": True,
+                        "created": False,
+                        "dry_run": args.dry_run,
+                        "message": "Callback already exists for this interaction",
+                    },
+                }
+                print(json.dumps(envelope, indent=2))
+            else:
+                print(f"✓ Callback already exists for interaction: {args.interaction_id}")
+            return 0
+
+        # Generate callback ID
+        callback_item_id = generate_callback_id()
+
+        # Normalize callback queue item
+        item = normalize_callback_queue_item(
+            callback_item_id=callback_item_id,
+            interaction_id=args.interaction_id,
+            caller_number=args.caller_number,
+            caller_name=args.caller_name,
+            company=args.company,
+            email=args.email,
+            reason=args.reason,
+            urgency=args.urgency,
+            preferred_followup_channel=args.preferred_followup_channel,
+            order_or_quote_ref=args.order_or_quote_ref,
+            summary=args.summary,
+            status="pending",
+        )
+
+        # Write callback queue item
+        item_path = write_callback_queue_item(item, dry_run=args.dry_run)
+
+        # Output
+        if args.json:
+            envelope = {
+                "capability": CAPABILITY_NAME,
+                "schema_version": SCHEMA_VERSION,
+                "status": "ok",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "data": {
+                    "callback_item_id": callback_item_id,
+                    "interaction_id": args.interaction_id,
+                    "item_path": str(item_path),
+                    "existing": False,
+                    "created": not args.dry_run,
+                    "dry_run": args.dry_run,
+                    "urgency": args.urgency,
+                    "preferred_followup_channel": args.preferred_followup_channel,
+                },
+            }
+            print(json.dumps(envelope, indent=2))
+        else:
+            print(f"✓ Enqueued callback: {callback_item_id}")
+            if args.dry_run:
+                print(f"  [DRY RUN] Would write to: {item_path}")
+            else:
+                print(f"  Item: {item_path}")
+                print(f"  Urgency: {args.urgency}")
+                print(f"  Followup: {args.preferred_followup_channel}")
+
+        return 0
+
+    except Exception as e:
+        if args.json:
+            envelope = {
+                "capability": CAPABILITY_NAME,
+                "schema_version": SCHEMA_VERSION,
+                "status": "error",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "error": str(e),
+            }
+            print(json.dumps(envelope, indent=2))
+        else:
+            print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

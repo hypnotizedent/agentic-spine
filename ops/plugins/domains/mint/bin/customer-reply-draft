@@ -1,0 +1,4322 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import html
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_identity_common import (  # noqa: E402
+    customer_facing_name,
+    introduction_name,
+    normalize_space,
+    resolve_customer_personalization,
+    resolve_message_customer_contact,
+)
+from customer_mail_identity_common import (  # noqa: E402
+    first_name_token,
+    project_mail_identity,
+    projection_mode,
+    salutation_text,
+    validate_mail_identity_projection,
+)
+from customer_contact_graph_common import (  # noqa: E402
+    apply_contact_identity,
+    extract_email_domain,
+    load_contact_graph_policy,
+    resolve_contact_graph,
+    select_thread_contact_relationship,
+)
+from customer_inbox_disposition_common import resolve_message_disposition  # noqa: E402
+from customer_inbox_machine_common import (  # noqa: E402
+    load_inbox_item_by_message_id,
+    load_machine_contract,
+    parse_promote_metadata,
+    transition_inbox_item,
+)
+from customer_operator_policy_common import (  # noqa: E402
+    blocked_phone_suggestion_hits,
+    build_async_first_reply_lines,
+    evaluate_operator_policy,
+    load_operator_policy,
+)
+from customer_quote_context_common import apply_house_terminology, load_quote_policy  # noqa: E402
+from customer_repair_common import record_customer_repair_item  # noqa: E402
+from operator_mail_common import latest_customer_message_text, message_body_text, strip_html  # noqa: E402
+
+SCHEMA_VERSION = "1.0"
+CAPABILITY_FALLBACK = "mint.customer.reply.draft"
+DEFAULT_MAILBOX = "team@mintprints.com"
+POLICY_CONTRACT_FALLBACK = "ops/bindings/mint.customer.reply.draft.policy.contract.yaml"
+SEARCH_CAPABILITY = "communications.mail.search"
+GENERIC_FILLER_PHRASES = (
+    "i hope this email finds you well",
+    "hope you're well",
+    "please let me know if you have any questions",
+    "if you have any questions please let me know",
+    "as an ai",
+)
+REORDER_THREAD_PHRASES = (
+    "same as last time",
+    "same as my last order",
+    "same shirts as last time",
+    "same shirts as my last order",
+    "same shirts",
+    "reorder",
+    "last order",
+)
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_CUSTOMER_REPLY_DRAFT_CAPABILITY_NAME") or CAPABILITY_FALLBACK
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def compact_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-reply-draft",
+        description="Create a governed Morpheus reply draft with canonical identity, thread continuity, and provenance.",
+    )
+    parser.add_argument("message_id", nargs="?", help="Source mailbox message id to reply to")
+    parser.add_argument("--message-id", dest="message_id_flag", default="", help="Source mailbox message id to reply to")
+    parser.add_argument("--body", default="", help="Operator reply body content without signature")
+    parser.add_argument(
+        "--body-file",
+        default="",
+        help="Read multi-line operator reply body from a file so paragraph breaks survive shell invocation.",
+    )
+    parser.add_argument("--subject", default="", help="Optional governed subject override")
+    parser.add_argument("--to", default="", help="Optional comma-separated To override")
+    parser.add_argument("--cc", default="", help="Optional comma-separated CC list")
+    parser.add_argument("--content-type", default="", help="Operator body content type (defaults from governed policy)")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox to draft from (default: {DEFAULT_MAILBOX})")
+    parser.add_argument(
+        "--author-mode",
+        default="morpheus",
+        choices=["morpheus", "ronny"],
+        help="Default is Morpheus identity. Use ronny only as an explicit operator override.",
+    )
+    parser.add_argument("--customer", default="", help="Optional customer association for provenance")
+    parser.add_argument("--job", default="", help="Optional job/order association for provenance")
+    parser.add_argument("--job-number", default="", help="Governed job number for subject enforcement")
+    parser.add_argument("--job-nickname", default="", help="Governed job nickname for subject enforcement")
+    parser.add_argument("--quote-subject", default="", help="Canonical quote/order subject binding")
+    parser.add_argument("--quote-url", default="", help="Canonical quote URL for governed hyperlink rendering")
+    parser.add_argument("--packet-file", default="", help="Canonical quote-packet file binding")
+    parser.add_argument("--quote-packet-id", default="", help="Canonical quote_packet_id binding")
+    parser.add_argument(
+        "--reply-mode",
+        default="general",
+        choices=[
+            "general",
+            "delay",
+            "art_revision",
+            "in_progress",
+            "clarification_only",
+            "guided_estimate",
+            "formal_quote_ready",
+            "not_a_fit",
+        ],
+        help="Governed house-voice mode for the outbound draft.",
+    )
+    parser.add_argument("--current-action", default="", help="Short current-action line for delay, art revision, or in-progress replies")
+    parser.add_argument(
+        "--blocker-question",
+        action="append",
+        default=[],
+        help="Real blocker question to ask the customer (repeatable).",
+    )
+    parser.add_argument(
+        "--reference-link",
+        action="append",
+        default=[],
+        help="Customer-safe reference link in label=url form (repeatable).",
+    )
+    parser.add_argument(
+        "--reference-visual",
+        action="append",
+        default=[],
+        help="Customer-safe visual reference in label=url form (repeatable).",
+    )
+    parser.add_argument(
+        "--attach",
+        action="append",
+        default=[],
+        help="Attach an existing canonical MinIO file to the reply draft (repeatable)",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    resolved_message_id = args.message_id_flag.strip() or str(args.message_id or "").strip()
+    if not resolved_message_id:
+        fail("message_id required")
+    if str(args.body).strip() and str(args.body_file).strip():
+        fail("provide only one of --body or --body-file")
+    args.message_id = resolved_message_id
+    return args
+
+
+def resolve_spine_root() -> Path:
+    override = os.environ.get("SPINE_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(__file__).resolve().parents[5]
+
+
+def resolve_spine_state(spine_root: Path) -> Path:
+    override = os.environ.get("SPINE_STATE", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return (spine_root.parent / ".runtime" / "spine" / "state").resolve()
+
+
+def resolve_minio_root() -> Path:
+    override = os.environ.get("MINIO_MOUNT_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / "MinIO").resolve()
+
+
+def resolve_policy_contract(spine_root: Path) -> Path:
+    override = os.environ.get("MINT_CUSTOMER_REPLY_DRAFT_POLICY_CONTRACT", "").strip()
+    if override:
+        path = Path(override).expanduser().resolve()
+    else:
+        path = (spine_root / POLICY_CONTRACT_FALLBACK).resolve()
+    if not path.is_file():
+        fail(f"reply policy contract not found: {path}")
+    return path
+
+
+def load_policy(contract_path: Path) -> dict[str, Any]:
+    try:
+        raw = yaml.safe_load(contract_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        fail(f"invalid reply policy contract: {contract_path}")
+        raise exc
+    routing = dict(raw.get("routing") or {})
+    content = dict(raw.get("content") or {})
+    subject = dict(raw.get("subject") or {})
+    identity = dict(raw.get("identity") or {})
+    style = dict(raw.get("style") or {})
+    draft_state = dict(raw.get("draft_state") or {})
+    canonicalization = dict(raw.get("canonicalization") or {})
+    participant_resolution = dict(raw.get("participant_resolution") or {})
+    footer_lines: list[str] = []
+    for item in (identity.get("visible_footer_lines") or []):
+        if item is None:
+            continue
+        footer_lines.append(str(item).strip())
+    canonical_regex = str(subject.get("canonical_regex") or "").strip()
+    prefix_regex = str(subject.get("strip_prefix_regex") or "").strip()
+    format_template = str(subject.get("format_template") or "").strip()
+    unresolved_blocker = str(subject.get("unresolved_blocker") or "").strip()
+    default_mailbox = str(routing.get("default_mailbox") or DEFAULT_MAILBOX).strip() or DEFAULT_MAILBOX
+    default_mode = str(content.get("default_mode") or "").strip()
+    if (
+        not canonical_regex
+        or not prefix_regex
+        or not format_template
+        or not unresolved_blocker
+        or not footer_lines
+        or not any(line for line in footer_lines)
+        or not default_mode
+    ):
+        fail(f"reply policy contract missing required fields: {contract_path}")
+    reference_labels = dict(style.get("reference_labels") or {})
+    draft_detection = dict(draft_state.get("detection") or {})
+    draft_mode_lines = dict(draft_state.get("mode_lines") or {})
+    canonical_reply_chain = dict(canonicalization.get("reply_chain") or {})
+    canonical_recipients = dict(canonicalization.get("recipients") or {})
+    canonical_legacy = dict(canonicalization.get("legacy_cleanup") or {})
+    participant_vendor_markers = dict(participant_resolution.get("vendor_markers") or {})
+    customer_safe_replacements: list[dict[str, str]] = []
+    for item in (style.get("customer_safe_replacements") or []):
+        entry = dict(item or {})
+        find = normalize_space(entry.get("find") or "")
+        replace = normalize_space(entry.get("replace") or "")
+        if find and replace:
+            customer_safe_replacements.append({"find": find, "replace": replace})
+    deadline_rewrites: list[dict[str, str]] = []
+    for item in (style.get("deadline_rewrites") or []):
+        entry = dict(item or {})
+        match_regex = str(entry.get("match_regex") or "").strip()
+        replace = normalize_space(entry.get("replace") or "")
+        if match_regex and replace:
+            deadline_rewrites.append({"match_regex": match_regex, "replace": replace})
+    return {
+        "path": str(contract_path),
+        "default_mailbox": default_mailbox,
+        "default_content_type": default_mode,
+        "subject_required_format": str(subject.get("required_format") or "").strip(),
+        "subject_format_template": format_template,
+        "subject_prefix_regex": prefix_regex,
+        "subject_canonical_regex": canonical_regex,
+        "subject_unresolved_blocker": unresolved_blocker,
+        "subject_fallback_mode": str(subject.get("fallback_mode") or "").strip(),
+        "footer_lines": footer_lines,
+        "generic_filler_blocklist": tuple(
+            str(item).strip().lower()
+            for item in (style.get("generic_filler_blocklist") or GENERIC_FILLER_PHRASES)
+            if str(item).strip()
+        ),
+        "blocker_prompt": str(style.get("blocker_prompt") or "Only thing we still need from you:").strip(),
+        "customer_safe_replacements": customer_safe_replacements,
+        "deadline_rewrites": deadline_rewrites,
+        "reference_links_label": str(reference_labels.get("links") or "Reference links").strip(),
+        "reference_visuals_label": str(reference_labels.get("visuals") or "Visual references").strip(),
+        "reply_mode_intros": {
+            key: str(value).strip()
+            for key, value in dict(style.get("reply_mode_intros") or {}).items()
+            if str(value).strip()
+        },
+        "draft_state": {
+            "mode_lines": {
+                "confirming": str(draft_mode_lines.get("confirming") or "I have your quote linked here.").strip(),
+                "in_progress": str(draft_mode_lines.get("in_progress") or "Payment is in and this is in progress now.").strip(),
+            },
+            "detection": {
+                key: [
+                    str(item).strip().lower()
+                    for item in (draft_detection.get(key) or [])
+                    if str(item).strip()
+                ]
+                for key in (
+                    "quote_link_markers",
+                    "payment_confirmed_markers",
+                    "payment_request_markers",
+                    "artwork_request_markers",
+                    "quote_preparing_markers",
+                )
+            },
+        },
+        "canonicalization": {
+            "external_search_top": int(canonical_reply_chain.get("external_search_top") or 25),
+            "internal_domains": [
+                str(item).strip().lower()
+                for item in (canonical_reply_chain.get("internal_domains") or ["mintprints.com"])
+                if str(item).strip()
+            ],
+            "html_chain_markers": [
+                str(item).strip()
+                for item in (
+                    canonical_reply_chain.get("html_chain_markers")
+                    or [
+                        "Quoted thread",
+                        "id=\"divRplyFwdMsg\"",
+                        "id=\"x_divRplyFwdMsg\"",
+                        "<blockquote",
+                        "<hr",
+                        "<div>From:",
+                        "<b>From:</b>",
+                        "-----Original Message-----",
+                    ]
+                )
+                if str(item).strip()
+            ],
+            "text_chain_markers": [
+                str(item).strip()
+                for item in (
+                    canonical_reply_chain.get("text_chain_markers")
+                    or [
+                        "Quoted thread",
+                        "-----Original Message-----",
+                        "From:",
+                        "On ",
+                    ]
+                )
+                if str(item).strip()
+            ],
+            "manual_signature_markers": [
+                str(item).strip().lower()
+                for item in (
+                    canonical_legacy.get("manual_signature_markers")
+                    or [
+                        "thanks,",
+                        "best,",
+                        "ronny",
+                        "sent from my iphone",
+                        "sent from my ipad",
+                    ]
+                )
+                if str(item).strip()
+            ],
+            "preserve_external_participants": bool(canonical_recipients.get("preserve_external_participants", True)),
+        },
+        "participant_resolution": {
+            "minimum_customer_confidence": str(participant_resolution.get("minimum_customer_confidence") or "medium").strip().lower() or "medium",
+            "blocked_customer_target_message": str(
+                participant_resolution.get("blocked_customer_target_message")
+                or "Need the real customer thread before I can draft customer-facing mail."
+            ).strip(),
+            "search_query_limit": int(participant_resolution.get("search_query_limit") or 4),
+            "vendor_markers": {
+                "exact_emails": [
+                    str(item).strip().lower()
+                    for item in (participant_vendor_markers.get("exact_emails") or [])
+                    if str(item).strip()
+                ],
+                "name_markers": [
+                    str(item).strip().lower()
+                    for item in (participant_vendor_markers.get("name_markers") or [])
+                    if str(item).strip()
+                ],
+                "subject_markers": [
+                    str(item).strip().lower()
+                    for item in (participant_vendor_markers.get("subject_markers") or [])
+                    if str(item).strip()
+                ],
+                "body_markers": [
+                    str(item).strip().lower()
+                    for item in (participant_vendor_markers.get("body_markers") or [])
+                    if str(item).strip()
+                ],
+            },
+        },
+    }
+
+
+def first_json_object(text: str) -> dict[str, Any]:
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    decoder = json.JSONDecoder()
+    for idx, ch in enumerate(clean):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(clean[idx:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    raise ValueError("capability returned no JSON object")
+
+
+def receipt_from_output(text: str) -> str:
+    matches = re.findall(r"^Receipt:\s+(.+)$", text, flags=re.MULTILINE)
+    return matches[-1] if matches else ""
+
+
+def run_cap_capture(
+    spine_root: Path,
+    capability: str,
+    args: list[str],
+    *,
+    failure_guidance: str = "",
+) -> tuple[dict[str, Any], str]:
+    cmd = [str(spine_root / "bin" / "ops"), "cap", "run", capability]
+    if args:
+        cmd.extend(["--", *args])
+    result = subprocess.run(cmd, cwd=spine_root, capture_output=True, text=True, check=False)
+    combined = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    if result.returncode != 0:
+        message = combined.strip()
+        if failure_guidance:
+            message = f"{message}\n{failure_guidance}".strip()
+        fail(f"{capability} failed: {message}")
+    try:
+        payload = first_json_object(result.stdout or "")
+    except ValueError as exc:
+        fail(f"{capability} returned non-JSON output")
+        raise exc
+    return payload, receipt_from_output(result.stdout or "")
+
+
+def try_cap_capture(
+    spine_root: Path,
+    capability: str,
+    args: list[str],
+) -> tuple[dict[str, Any] | None, str, str]:
+    cmd = [str(spine_root / "bin" / "ops"), "cap", "run", capability]
+    if args:
+        cmd.extend(["--", *args])
+    result = subprocess.run(cmd, cwd=spine_root, capture_output=True, text=True, check=False)
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    combined = stdout + ("\n" + stderr if stderr else "")
+    receipt = receipt_from_output(stdout)
+    if result.returncode != 0:
+        return None, receipt, combined.strip()
+    try:
+        payload = first_json_object(stdout)
+    except ValueError:
+        return None, receipt, combined.strip() or "capability returned non-JSON output"
+    return payload, receipt, ""
+
+
+def load_json_file(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def load_yaml_file(path: Path) -> dict[str, Any]:
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+
+
+def iter_index_records(index_file: Path) -> list[dict[str, Any]]:
+    if not index_file.is_file():
+        return []
+    records: list[dict[str, Any]] = []
+    for raw in index_file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
+
+
+def latest_quote_intake_record(state_root: Path, message_id: str) -> dict[str, Any]:
+    index_file = state_root / "mint" / "customer-quote-intakes" / "index.ndjson"
+    for entry in reversed(iter_index_records(index_file)):
+        if str(entry.get("message_id") or "").strip() != message_id:
+            continue
+        record_path = Path(str(entry.get("record_file") or "")).expanduser()
+        if record_path.is_file():
+            loaded = load_json_file(record_path)
+            if loaded:
+                return loaded
+    return {}
+
+
+def parse_iso_utc(value: str) -> datetime | None:
+    raw = normalize_space(value)
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def record_is_fresh(record: dict[str, Any], *, max_age_hours: int = 6) -> bool:
+    stored_at = parse_iso_utc(str(record.get("stored_at_utc") or ""))
+    if stored_at is None:
+        return True
+    return utc_now() - stored_at <= timedelta(hours=max_age_hours)
+
+
+def latest_reorder_record(state_root: Path, message_id: str) -> dict[str, Any]:
+    index_file = state_root / "mint" / "customer-reorder-drafts" / "index.ndjson"
+    for entry in reversed(iter_index_records(index_file)):
+        source_message_id = str(entry.get("source_message_id") or "").strip()
+        effective_message_id = str(entry.get("effective_message_id") or "").strip()
+        if message_id not in {source_message_id, effective_message_id}:
+            continue
+        record_path = Path(str(entry.get("record_file") or "")).expanduser()
+        if record_path.is_file():
+            loaded = load_json_file(record_path)
+            if loaded:
+                return loaded
+    return {}
+
+
+def latest_lifecycle_record(state_root: Path, message_id: str) -> dict[str, Any]:
+    index_file = state_root / "mint" / "customer-lifecycle-resolutions" / "index.ndjson"
+    for entry in reversed(iter_index_records(index_file)):
+        if str(entry.get("message_id") or "").strip() != message_id:
+            continue
+        record_path = Path(str(entry.get("record_file") or "")).expanduser()
+        if record_path.is_file():
+            loaded = load_json_file(record_path)
+            if loaded:
+                return loaded
+    return {}
+
+
+def unwrap_search_results(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    microsoft = dict(((payload.get("data") or {}).get("microsoft")) or {})
+    if microsoft:
+        return list(microsoft.get("value") or [])
+    if isinstance(payload.get("value"), list):
+        return list(payload.get("value") or [])
+    return []
+
+
+def mailbox_search(spine_root: Path, mailbox: str, query: str, top: int) -> tuple[list[dict[str, Any]], str]:
+    payload, receipt = run_cap_capture(
+        spine_root,
+        SEARCH_CAPABILITY,
+        ["--json", "--query", query, "--top", str(top), "--mailbox", mailbox],
+    )
+    return unwrap_search_results(payload), receipt
+
+
+def message_sender(message: dict[str, Any]) -> str:
+    return str((((message.get("from") or {}).get("emailAddress") or {}).get("address")) or "").strip()
+
+
+def message_subject(message: dict[str, Any]) -> str:
+    return str(message.get("subject") or "").strip()
+
+
+def message_reorder_signal_text(message: dict[str, Any]) -> str:
+    parts = [
+        message_subject(message),
+        str(message.get("bodyPreview") or ""),
+        message_body_text(message),
+    ]
+    return normalize_space(" ".join(part for part in parts if normalize_space(part))).lower()
+
+
+def is_reorder_like_message(message: dict[str, Any]) -> bool:
+    text = message_reorder_signal_text(message)
+    return any(phrase in text for phrase in REORDER_THREAD_PHRASES)
+
+
+def auto_quote_context_gate(
+    args: argparse.Namespace,
+    state_root: Path,
+    source_message: dict[str, Any],
+) -> tuple[bool, str]:
+    if args.author_mode != "morpheus":
+        return True, ""
+    if args.reply_mode != "general":
+        return True, ""
+    if latest_reorder_record(state_root, args.message_id or "") or is_reorder_like_message(source_message):
+        return (
+            False,
+            "reorder/live-quote thread detected; provide an explicit body or use the governed reorder/live-quote path instead of generic quote-intake auto-generation",
+        )
+    return True, ""
+
+
+def normalized_subject(subject: str) -> str:
+    cleaned = normalize_space(subject)
+    while True:
+        updated = re.sub(r"^(?:(?:re|fw|fwd)\s*:\s*)+", "", cleaned, flags=re.IGNORECASE).strip()
+        if updated == cleaned:
+            return updated
+        cleaned = updated
+
+
+def extract_forwarded_external_emails(message: dict[str, Any], internal_domains: list[str]) -> list[str]:
+    text = " ".join(
+        part for part in (message_body_text(message), strip_html(str(message.get("bodyPreview") or ""))) if part
+    )
+    candidates: list[str] = []
+    for address in re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, flags=re.IGNORECASE):
+        lowered = address.lower()
+        if any(lowered.endswith(f"@{domain}") for domain in internal_domains):
+            continue
+        if lowered not in candidates:
+            candidates.append(lowered)
+    return candidates
+
+
+def description_title_parts(description: str) -> tuple[str, str]:
+    cleaned = normalize_space(description)
+    if not cleaned:
+        return "", ""
+    for separator in (" – ", " - "):
+        if separator in cleaned:
+            head, tail = cleaned.split(separator, 1)
+            return normalize_space(head), normalize_space(tail)
+    return cleaned, ""
+
+
+def dedupe_preserve(items: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        cleaned = normalize_space(item)
+        key = cleaned.lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        out.append(cleaned)
+    return out
+
+
+def format_money(value: Any) -> str:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return ""
+    return f"${numeric:0.2f}"
+
+
+def supplier_link_from_result(result: dict[str, Any]) -> str:
+    for key in ("product_url", "style_url", "url", "link"):
+        value = str(result.get(key) or "").strip()
+        if re.match(r"^https?://", value, flags=re.IGNORECASE):
+            return value
+    return ""
+
+
+def availability_signal(result: dict[str, Any], quantity: Any) -> str:
+    if not result:
+        return "availability still needs review"
+    if not result.get("stock_available"):
+        return "availability still needs review"
+    try:
+        requested = int(quantity)
+    except (TypeError, ValueError):
+        requested = 0
+    try:
+        available = int(result.get("total_available") or 0)
+    except (TypeError, ValueError):
+        available = 0
+    if requested and available >= requested:
+        return "current availability looks good"
+    if available > 0:
+        return "current availability is partially confirmed"
+    return "availability still needs review"
+
+
+def render_style_label(item: dict[str, Any]) -> str:
+    brand = normalize_space(item.get("brand") or "")
+    style_code = normalize_space(item.get("style_code") or "")
+    label = " ".join(part for part in (brand, style_code) if part)
+    return label or normalize_space(item.get("description") or "")
+
+
+def supplier_color_options(result: dict[str, Any]) -> list[str]:
+    options: list[str] = []
+    explicit_color = normalize_space(result.get("color") or "")
+    if explicit_color:
+        options.append(explicit_color)
+    for variant in (result.get("variants") or []):
+        if not isinstance(variant, dict):
+            continue
+        color = normalize_space(variant.get("color_name") or variant.get("color") or "")
+        if color:
+            options.append(color)
+    return dedupe_preserve(options)
+
+
+def estimate_assumption_lines(line_items: list[dict[str, Any]]) -> list[str]:
+    assumptions: list[str] = []
+    if not line_items:
+        return assumptions
+    methods = dedupe_preserve(
+        [
+            normalize_space(item.get("recommended_method") or "")
+            for item in line_items
+            if normalize_space(item.get("recommended_method") or "")
+        ]
+    )
+    if methods:
+        label = ", ".join(method.replace("_", " ") for method in methods)
+        assumptions.append(f"Recommended decoration method: {label}.")
+    size_profiles = dedupe_preserve(
+        [
+            normalize_space(((item.get("estimated_decoration_profile") or {}).get("size_tier_label")) or "")
+            for item in line_items
+            if normalize_space(((item.get("estimated_decoration_profile") or {}).get("size_tier_label")) or "")
+        ]
+    )
+    if size_profiles:
+        assumptions.append("Estimate assumes standard print sizing unless you want a different placement or scale.")
+    if any(bool((item.get("estimated_decoration_profile") or {}).get("underbase_needed")) for item in line_items):
+        assumptions.append("Dark-garment items are carrying a standard underbase assumption in the estimate lane.")
+    if any(normalize_space(((item.get("estimated_decoration_profile") or {}).get("setup_mode")) or "") == "new_setup" for item in line_items):
+        assumptions.append("Pricing assumes a new setup unless we confirm this is a direct reuse.")
+    return assumptions
+
+
+def summarize_supported_items(line_items: list[dict[str, Any]]) -> str:
+    labels = dedupe_preserve([normalize_space(item.get("title") or item.get("description") or "") for item in line_items])
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    return ", ".join(labels[:-1]) + f", and {labels[-1]}"
+
+
+def artwork_analysis_customer_line(quote_context: dict[str, Any]) -> str:
+    analysis = dict(quote_context.get("artwork_analysis") or {})
+    summary = normalize_space(analysis.get("customer_summary") or analysis.get("summary") or "")
+    if summary:
+        return f"I looked at the artwork you attached, and {summary[0].lower() + summary[1:] if len(summary) > 1 else summary.lower()}"
+    method = normalize_space(analysis.get("recommended_print_method") or "")
+    if method:
+        return f"I looked at the artwork you attached, and {method.replace('_', ' ')} looks like the cleaner print lane from the file."
+    return ""
+
+
+def build_quote_context(record: dict[str, Any], packet: dict[str, Any], intake_receipt: str) -> dict[str, Any]:
+    handoff = dict(record.get("handoff") or {})
+    intake_quality = dict(record.get("intake_quality") or {})
+    customer_reply_guidance = dict(record.get("customer_reply_guidance") or {})
+    estimate_surface = dict(record.get("estimate_surface") or {})
+    artwork_surface = dict(record.get("artwork_surface") or {})
+    customer = dict(record.get("customer") or {})
+    customer_ref = dict(packet.get("customer_ref") or {})
+    inventory_snapshot = dict(packet.get("inventory_snapshot") or {})
+    estimate_snapshot = dict(packet.get("estimate_snapshot") or {})
+    surface_artwork_analysis = dict(
+        artwork_surface.get("artwork_preflight")
+        or artwork_surface.get("attachment_intelligence")
+        or {}
+    )
+    artwork_analysis = dict(packet.get("artwork_analysis") or {})
+    if not artwork_analysis:
+        artwork_analysis = dict(surface_artwork_analysis)
+    else:
+        for key in ("owner", "source", "record_file", "record_files", "preflight_record_files"):
+            if not artwork_analysis.get(key) and surface_artwork_analysis.get(key):
+                artwork_analysis[key] = surface_artwork_analysis.get(key)
+    line_items = list(packet.get("line_items") or [])
+    supplier_results = {
+        str(entry.get("line_item_id") or ""): entry
+        for entry in (inventory_snapshot.get("supplier_results") or [])
+        if str(entry.get("line_item_id") or "").strip()
+    }
+    estimate_entries = list(estimate_snapshot.get("line_item_estimates") or estimate_surface.get("line_item_estimates") or [])
+    estimate_results = {
+        str(entry.get("line_item_id") or ""): entry
+        for entry in estimate_entries
+        if str(entry.get("line_item_id") or "").strip()
+    }
+    if not line_items and estimate_entries:
+        line_items = [{"line_item_id": entry.get("line_item_id"), "description": entry.get("description") or ""} for entry in estimate_entries]
+    rendered_items: list[dict[str, Any]] = []
+    reference_links: list[dict[str, str]] = []
+    for line in line_items:
+        line_item_id = str(line.get("line_item_id") or "").strip()
+        estimate_entry = dict(estimate_results.get(line_item_id) or {})
+        inventory_entry = dict(supplier_results.get(line_item_id) or {})
+        description = normalize_space(line.get("description") or estimate_entry.get("description") or "")
+        title, requested_variant = description_title_parts(description)
+        style_label = render_style_label(
+            {
+                "brand": line.get("brand") or inventory_entry.get("brand"),
+                "style_code": line.get("style_code") or inventory_entry.get("style_code"),
+                "description": description,
+            }
+        )
+        product_url = supplier_link_from_result(inventory_entry)
+        if product_url and style_label:
+            reference_links.append({"label": style_label, "url": product_url})
+        rendered_items.append(
+            {
+                "line_item_id": line_item_id,
+                "description": description,
+                "title": title or description,
+                "requested_variant": requested_variant,
+                "brand": normalize_space(line.get("brand") or inventory_entry.get("brand") or ""),
+                "style_code": normalize_space(line.get("style_code") or inventory_entry.get("style_code") or ""),
+                "product_label": style_label,
+                "availability_signal": availability_signal(inventory_entry, estimate_entry.get("quantity") or line.get("quantity")),
+                "stock_available": bool(inventory_entry.get("stock_available")),
+                "recommended_method": normalize_space(estimate_entry.get("recommended_method") or line.get("decoration_method") or ""),
+                "estimated_unit_price": estimate_entry.get("estimated_unit_price"),
+                "estimated_decoration_profile": dict(estimate_entry.get("estimated_decoration_profile") or {}),
+                "missing_clarifications": [
+                    clean_sentence(item).replace(".?", "?")
+                    for item in (estimate_entry.get("missing_clarifications") or [])
+                    if normalize_space(item)
+                ],
+                "quote_safe_now": bool(estimate_entry.get("quote_safe_now")),
+                "confidence_level": normalize_space(estimate_entry.get("confidence_level") or ""),
+                "assumptions": [normalize_space(item) for item in (estimate_entry.get("assumptions") or []) if normalize_space(item)],
+                "supplier_backed_colors": supplier_color_options(inventory_entry),
+            }
+        )
+
+    quote_safe_items = [item for item in rendered_items if item.get("quote_safe_now")]
+    blocker_questions = dedupe_preserve(
+        [
+            question
+            for question in (
+                customer_safe_blocker_question(item)
+                for item in (
+                    list(customer_reply_guidance.get("blockers") or [])
+                    + [
+                        item
+                        for row in rendered_items
+                        for item in (row.get("missing_clarifications") or [])
+                        if normalize_space(item)
+                    ]
+                )
+            )
+            if question
+        ]
+    )
+    price_values = [float(item["estimated_unit_price"]) for item in quote_safe_items if item.get("estimated_unit_price") not in (None, "")]
+    price_lane = ""
+    if price_values:
+        low = min(price_values)
+        high = max(price_values)
+        price_lane = format_money(low) if abs(low - high) < 0.005 else f"{format_money(low)}-{format_money(high)}"
+
+    return {
+        "available": bool(record and (packet or estimate_entries)),
+        "intake_id": str(record.get("intake_id") or "").strip(),
+        "record_file": str(record.get("record_file") or "").strip(),
+        "packet_id": str(handoff.get("packet_id") or packet.get("quote_packet_id") or "").strip(),
+        "packet_file": str(handoff.get("packet_file") or "").strip(),
+        "source_state": str(handoff.get("source_state") or "").strip(),
+        "estimate_state": str(handoff.get("estimate_state") or "").strip(),
+        "pricing_state": str(handoff.get("pricing_state") or "").strip(),
+        "intake_quality": str(intake_quality.get("classification") or "").strip(),
+        "qualification_status": str(record.get("qualification_status") or "").strip(),
+        "customer_email": normalize_space(customer.get("email") or customer_ref.get("resolved_email") or ""),
+        "customer_name": normalize_space(customer.get("name") or customer_ref.get("resolved_name") or ""),
+        "product_scope": dict(record.get("product_scope") or {}),
+        "customer_reply_guidance_mode": str(customer_reply_guidance.get("mode") or "").strip(),
+        "customer_reply_guidance_summary": str(customer_reply_guidance.get("summary") or "").strip(),
+        "quote_safe_line_item_count": int(
+            estimate_surface.get("quote_safe_line_item_count")
+            or estimate_snapshot.get("quote_safe_line_item_count")
+            or len(quote_safe_items)
+        ),
+        "clarification_needed_count": int(
+            estimate_surface.get("clarification_needed_count")
+            or estimate_snapshot.get("clarification_needed_count")
+            or len(blocker_questions)
+        ),
+        "line_items": rendered_items,
+        "quote_safe_items": quote_safe_items,
+        "blocker_questions": blocker_questions,
+        "price_lane": price_lane,
+        "assumption_lines": estimate_assumption_lines(quote_safe_items),
+        "artwork_analysis": artwork_analysis,
+        "artwork_analysis_summary": normalize_space(artwork_analysis.get("summary") or "") or None,
+        "reference_links": dedupe_preserve([json.dumps(item, sort_keys=True) for item in reference_links]),
+        "provider_receipts": {
+            "quote_intake_receipt": intake_receipt or None,
+        },
+    }
+
+
+def normalize_reference_link_entries(entries: list[str]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for raw in dedupe_preserve(entries):
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        label = normalize_space(item.get("label") or "")
+        url = str(item.get("url") or "").strip()
+        if label and re.match(r"^https?://", url, flags=re.IGNORECASE):
+            out.append({"label": label, "url": url})
+    return out
+
+
+def resolve_quote_context(spine_root: Path, state_root: Path, mailbox: str, message_id: str) -> dict[str, Any]:
+    record = latest_quote_intake_record(state_root, message_id)
+    intake_receipt = ""
+    if record and not record_is_fresh(record):
+        record = {}
+    if not record:
+        payload, intake_receipt, _error = try_cap_capture(
+            spine_root,
+            "mint.customer.quote.intake",
+            ["--mailbox", mailbox, "--message-id", message_id, "--json"],
+        )
+        if payload:
+            data = dict(payload.get("data") or {})
+            record_path = Path(str(data.get("record_file") or "")).expanduser()
+            record = load_json_file(record_path) if record_path.is_file() else data
+    if not record:
+        return {}
+    packet_file = Path(str(((record.get("handoff") or {}).get("packet_file")) or "")).expanduser()
+    packet = load_yaml_file(packet_file) if packet_file.is_file() else {}
+    estimate_surface = dict(record.get("estimate_surface") or {})
+    if not packet and not (estimate_surface.get("line_item_estimates") or estimate_surface.get("quote_safe_line_item_count")):
+        return {}
+    return build_quote_context(record, packet, intake_receipt)
+
+
+def normalize_reference_link_objects(entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    return normalize_reference_link_entries(
+        [json.dumps(item, sort_keys=True) for item in entries if isinstance(item, dict)]
+    )
+
+
+def resolve_lifecycle_context(spine_root: Path, state_root: Path, mailbox: str, message_id: str) -> dict[str, Any]:
+    record = latest_lifecycle_record(state_root, message_id)
+    if record and not record_is_fresh(record):
+        record = {}
+    if record:
+        provider_receipts = dict(record.get("provider_receipts") or {})
+        provider_receipts["freshness_state"] = "fresh"
+        record["provider_receipts"] = provider_receipts
+        return record
+    payload, receipt, _error = try_cap_capture(
+        spine_root,
+        "mint.customer.lifecycle.resolve",
+        ["--mailbox", mailbox, "--message-id", message_id, "--json"],
+    )
+    if not payload:
+        return {}
+    data = dict(payload.get("data") or payload)
+    provider_receipts = dict(data.get("provider_receipts") or {})
+    if receipt and not provider_receipts.get("lifecycle_resolve_receipt"):
+        provider_receipts["lifecycle_resolve_receipt"] = receipt
+    data["provider_receipts"] = provider_receipts
+    return data
+
+
+def merge_quote_binding_from_lifecycle(binding: dict[str, Any], lifecycle_context: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(binding)
+    patch = dict(lifecycle_context.get("quote_binding_patch") or {})
+    for key in (
+        "packet_id",
+        "packet_file",
+        "quote_subject",
+        "quote_url",
+        "customer_email",
+        "customer_name",
+        "job_number",
+        "job_nickname",
+    ):
+        if not normalize_space(merged.get(key) or "") and normalize_space(patch.get(key) or ""):
+            merged[key] = normalize_space(patch.get(key) or "")
+    return merged
+
+
+def clear_structured_quote_binding(binding: dict[str, Any]) -> dict[str, Any]:
+    cleared = dict(binding)
+    for key in ("packet_id", "packet_file", "quote_subject", "quote_url", "job_number", "job_nickname", "customer_email", "customer_name"):
+        cleared[key] = ""
+    return cleared
+
+
+def quote_binding_conflict_reason(
+    quote_binding: dict[str, Any],
+    quote_context: dict[str, Any],
+    source_message: dict[str, Any],
+    internal_domains: list[str],
+) -> str:
+    binding_packet = normalize_space(quote_binding.get("packet_id") or "")
+    context_packet = normalize_space(quote_context.get("packet_id") or "")
+    if binding_packet and context_packet and binding_packet != context_packet:
+        return "quote binding packet does not match the current quote context packet"
+    source_email = normalize_space(message_sender(source_message)).lower()
+    binding_customer = normalize_space(quote_binding.get("customer_email") or "").lower()
+    context_customer = normalize_space(quote_context.get("customer_email") or "").lower()
+    if source_email and not is_internal_email(source_email, internal_domains):
+        if binding_customer and binding_customer != source_email:
+            return "quote binding customer does not match the current source message customer"
+        if context_customer and context_customer != source_email:
+            return "quote context customer does not match the current source message customer"
+    if binding_customer and context_customer and binding_customer != context_customer:
+        return "quote binding customer does not match the current quote context customer"
+    return ""
+
+
+def lifecycle_conflict_reason(
+    lifecycle_context: dict[str, Any],
+    quote_context: dict[str, Any],
+    source_message: dict[str, Any],
+    internal_domains: list[str],
+) -> str:
+    if not lifecycle_context:
+        return ""
+    lifecycle_patch = dict(lifecycle_context.get("quote_binding_patch") or {})
+    lifecycle_quote_context = dict(lifecycle_context.get("quote_context") or {})
+
+    expected_packets = {normalize_space(quote_context.get("packet_id") or "")}
+    expected_packets.discard("")
+    observed_packets = {
+        normalize_space(lifecycle_patch.get("packet_id") or ""),
+        normalize_space(lifecycle_quote_context.get("packet_id") or ""),
+    }
+    observed_packets.discard("")
+    if expected_packets and observed_packets and not expected_packets.intersection(observed_packets):
+        return "lifecycle packet binding does not match the current quote context packet"
+
+    expected_emails: set[str] = set()
+    quote_customer_email = normalize_space(quote_context.get("customer_email") or "").lower()
+    if quote_customer_email:
+        expected_emails.add(quote_customer_email)
+    source_sender = normalize_space(message_sender(source_message)).lower()
+    if source_sender and not is_internal_email(source_sender, internal_domains):
+        expected_emails.add(source_sender)
+
+    observed_emails = {
+        normalize_space(lifecycle_context.get("customer_email") or "").lower(),
+        normalize_space(lifecycle_patch.get("customer_email") or "").lower(),
+    }
+    observed_emails.discard("")
+    if expected_emails and observed_emails and not expected_emails.intersection(observed_emails):
+        return "lifecycle customer binding does not match the current message customer"
+    return ""
+
+
+def sanitized_lifecycle_context(lifecycle_context: dict[str, Any], reason: str) -> dict[str, Any]:
+    provider_receipts = dict(lifecycle_context.get("provider_receipts") or {})
+    return {
+        "lifecycle_id": lifecycle_context.get("lifecycle_id"),
+        "lifecycle_state": lifecycle_context.get("lifecycle_state"),
+        "confidence": lifecycle_context.get("confidence"),
+        "draft_allowed": lifecycle_context.get("draft_allowed"),
+        "provider_receipts": provider_receipts,
+        "conflict_discarded": True,
+        "conflict_reason": reason,
+        "reply_mode": "",
+        "customer_safe_next_step": "",
+        "operator_next_action": "",
+        "current_action": "",
+        "blockers": [],
+        "generated_body": "",
+        "reference_links": [],
+        "quote_binding_patch": {},
+    }
+
+
+def lifecycle_state_basis(lifecycle_context: dict[str, Any]) -> list[str]:
+    return [normalize_space(item) for item in (lifecycle_context.get("state_basis") or []) if normalize_space(item)]
+
+
+def lifecycle_hold_is_stale_anchor_conflict(lifecycle_context: dict[str, Any]) -> bool:
+    if lifecycle_context.get("draft_allowed") is not False:
+        return False
+    if any(item.startswith("anchor_conflict:") for item in lifecycle_state_basis(lifecycle_context)):
+        return True
+    repair_item = dict(lifecycle_context.get("repair_item") or {})
+    return normalize_space(repair_item.get("issue_type") or "") == "lifecycle_anchor_mismatch"
+
+
+def explicit_formal_quote_binding_requested(args: argparse.Namespace) -> bool:
+    has_quote_url = bool(normalize_space(args.quote_url or ""))
+    has_governed_subject = bool(
+        normalize_space(args.quote_subject or "")
+        or (
+            normalize_space(args.job_number or "")
+            and normalize_space(args.job_nickname or "")
+        )
+    )
+    return has_quote_url and has_governed_subject
+
+
+def resolve_lifecycle_draft_gate_resolution(
+    *,
+    args: argparse.Namespace,
+    disposition_name: str,
+    reply_mode: str,
+    target_message: dict[str, Any],
+    quote_context: dict[str, Any],
+    quote_binding: dict[str, Any],
+    lifecycle_context: dict[str, Any],
+) -> dict[str, Any]:
+    resolution = {
+        "mode": "pass",
+        "reason": "",
+    }
+    if lifecycle_context.get("draft_allowed") is not False:
+        return resolution
+
+    resolution = {
+        "mode": "blocked_hold",
+        "reason": "lifecycle draft gate is hold",
+    }
+    if disposition_name != "customer_actionable" or reply_mode != "formal_quote_ready":
+        return resolution
+    if not lifecycle_hold_is_stale_anchor_conflict(lifecycle_context):
+        return resolution
+    if not explicit_formal_quote_binding_requested(args):
+        return resolution
+
+    contact = resolve_message_customer_contact(target_message)
+    observed_email = normalize_space(contact.get("email") or reply_to_address(target_message) or "").lower()
+    expected_email = normalize_space(
+        quote_binding.get("customer_email") or quote_context.get("customer_email") or ""
+    ).lower()
+    quote_packet_id = normalize_space(quote_context.get("packet_id") or "")
+    binding_packet_id = normalize_space(quote_binding.get("packet_id") or "")
+    packet_anchor = binding_packet_id or quote_packet_id
+
+    if expected_email and observed_email and expected_email != observed_email:
+        return resolution
+    if not packet_anchor:
+        return resolution
+    if quote_packet_id and binding_packet_id and quote_packet_id != binding_packet_id:
+        return resolution
+
+    return {
+        "mode": "override_stale_anchor",
+        "reason": "explicit formal quote binding superseded stale lifecycle anchor hold",
+    }
+
+
+def reply_mode_from_lifecycle(requested_reply_mode: str, resolved_reply_mode: str, lifecycle_context: dict[str, Any]) -> str:
+    explicit_modes = {"delay", "art_revision", "in_progress", "guided_estimate", "clarification_only", "formal_quote_ready", "not_a_fit"}
+    if requested_reply_mode in explicit_modes:
+        return resolved_reply_mode
+    lifecycle_mode = normalize_space(lifecycle_context.get("reply_mode") or "")
+    return lifecycle_mode or resolved_reply_mode
+
+
+def lifecycle_should_override_generated_body(reply_mode: str, lifecycle_context: dict[str, Any]) -> bool:
+    lifecycle_mode = normalize_space(lifecycle_context.get("reply_mode") or "")
+    if not lifecycle_mode or lifecycle_mode != reply_mode:
+        return False
+    return reply_mode in {"formal_quote_ready", "art_revision", "in_progress"}
+
+
+def resolve_packet_binding_from_file(packet_file_text: str) -> dict[str, Any]:
+    packet_file = Path(packet_file_text).expanduser().resolve()
+    if not packet_file.is_file():
+        fail(f"packet file not found: {packet_file_text}")
+    packet = load_yaml_file(packet_file)
+    packet_id = normalize_space(packet.get("quote_packet_id") or "")
+    customer_ref = dict(packet.get("customer_ref") or {})
+    return {
+        "packet_id": packet_id,
+        "packet_file": str(packet_file),
+        "customer_email": normalize_space(customer_ref.get("resolved_email") or ""),
+        "customer_name": normalize_space(customer_ref.get("resolved_name") or ""),
+    }
+
+
+def resolve_quote_binding(args: argparse.Namespace, quote_context: dict[str, Any]) -> dict[str, Any]:
+    binding: dict[str, Any] = {
+        "packet_id": normalize_space(args.quote_packet_id or quote_context.get("packet_id") or ""),
+        "packet_file": normalize_space(quote_context.get("packet_file") or ""),
+        "quote_subject": normalize_space(args.quote_subject or ""),
+        "quote_url": normalize_space(args.quote_url or ""),
+        "customer_email": normalize_space(quote_context.get("customer_email") or ""),
+        "customer_name": normalize_space(quote_context.get("customer_name") or ""),
+    }
+    if args.packet_file:
+        packet_binding = resolve_packet_binding_from_file(args.packet_file)
+        for key, value in packet_binding.items():
+            if value:
+                binding[key] = value
+        if packet_binding.get("packet_file"):
+            binding["packet_file"] = packet_binding["packet_file"]
+    parsed_subject = parse_subject_parts(
+        binding.get("quote_subject") or "",
+        canonical_regex=r"^(?P<job_number>[0-9]{4,})\s+(?P<job_nickname>.+\S)$",
+        prefix_regex=r"^(?:(?:re|fw|fwd)\s*:\s*)+",
+    )
+    binding["job_number"] = normalize_space(parsed_subject.get("job_number") or args.job_number or quote_context.get("job_number") or "")
+    binding["job_nickname"] = normalize_space(parsed_subject.get("job_nickname") or args.job_nickname or quote_context.get("job_nickname") or "")
+    return binding
+
+
+def quote_binding_has_structured_context(quote_binding: dict[str, Any]) -> bool:
+    return any(
+        normalize_space(quote_binding.get(key) or "")
+        for key in ("packet_id", "packet_file", "quote_subject", "quote_url", "job_number", "job_nickname")
+    )
+
+
+def is_internal_email(address: str, internal_domains: list[str]) -> bool:
+    lowered = normalize_space(address).lower()
+    if "@" not in lowered:
+        return False
+    return any(lowered.endswith(f"@{domain}") for domain in internal_domains)
+
+
+def addresses_from_message(message: dict[str, Any], key: str) -> list[str]:
+    out: list[str] = []
+    for entry in (message.get(key) or []):
+        address = str((((entry or {}).get("emailAddress") or {}).get("address")) or "").strip()
+        if address:
+            out.append(address)
+    return out
+
+
+def dedupe_email_list(items: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        cleaned = normalize_space(item).lower()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        out.append(cleaned)
+    return out
+
+
+def normalize_lookup_key(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", normalize_space(text).lower()))
+
+
+def message_sender_name(message: dict[str, Any]) -> str:
+    return str((((message.get("from") or {}).get("emailAddress") or {}).get("name")) or "").strip()
+
+
+def confidence_rank(value: str) -> int:
+    return {"low": 1, "medium": 2, "high": 3}.get(normalize_space(value).lower(), 0)
+
+
+def confidence_from_score(score: int) -> str:
+    if score >= 15:
+        return "high"
+    if score >= 8:
+        return "medium"
+    if score > 0:
+        return "low"
+    return "low"
+
+
+def confidence_meets(actual: str, minimum: str) -> bool:
+    return confidence_rank(actual) >= confidence_rank(minimum)
+
+
+def add_weighted_hint(store: dict[str, dict[str, Any]], value: str, weight: int, reason: str) -> None:
+    cleaned = normalize_space(value)
+    if not cleaned:
+        return
+    key = cleaned.lower()
+    entry = store.setdefault(key, {"value": cleaned, "weight": 0, "reasons": []})
+    entry["weight"] = int(entry.get("weight") or 0) + int(weight)
+    if reason and reason not in entry["reasons"]:
+        entry["reasons"].append(reason)
+
+
+def top_hint_values(store: dict[str, dict[str, Any]], *, limit: int = 3) -> list[str]:
+    ranked = sorted(
+        store.values(),
+        key=lambda item: (int(item.get("weight") or 0), normalize_space(item.get("value") or "").lower()),
+        reverse=True,
+    )
+    return [normalize_space(item.get("value") or "") for item in ranked[:limit] if normalize_space(item.get("value") or "")]
+
+
+def hint_exact_score(store: dict[str, dict[str, Any]], value: str, reason_prefix: str) -> tuple[int, list[str]]:
+    cleaned = normalize_space(value).lower()
+    if not cleaned:
+        return 0, []
+    entry = store.get(cleaned)
+    if not entry:
+        return 0, []
+    return int(entry.get("weight") or 0), [f"{reason_prefix}:{reason}" for reason in (entry.get("reasons") or [])]
+
+
+def hint_domain_score(store: dict[str, dict[str, Any]], email_or_domain: str, reason_prefix: str) -> tuple[int, list[str]]:
+    token = extract_email_domain(email_or_domain) if "@" in normalize_space(email_or_domain) else normalize_space(email_or_domain).lower()
+    if not token:
+        return 0, []
+    entry = store.get(token)
+    if not entry:
+        return 0, []
+    return int(entry.get("weight") or 0), [f"{reason_prefix}:{reason}" for reason in (entry.get("reasons") or [])]
+
+
+def hint_text_score(store: dict[str, dict[str, Any]], text: str, reason_prefix: str) -> tuple[int, list[str]]:
+    haystack = normalize_lookup_key(text)
+    if not haystack:
+        return 0, []
+    score = 0
+    reasons: list[str] = []
+    for entry in store.values():
+        value = normalize_space(entry.get("value") or "")
+        key = normalize_lookup_key(value)
+        if not key or key not in haystack:
+            continue
+        score += int(entry.get("weight") or 0)
+        reasons.extend([f"{reason_prefix}:{reason}" for reason in (entry.get("reasons") or [])])
+    return score, dedupe_preserve(reasons)
+
+
+def seed_record_file_for_index_entry(state_root: Path, entry: dict[str, Any]) -> Path | None:
+    ensure_id = normalize_space(entry.get("ensure_id") or "")
+    stored_at = normalize_space(entry.get("stored_at_utc") or "")
+    if not ensure_id or not stored_at:
+        return None
+    try:
+        dt = datetime.strptime(stored_at, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+    path = (
+        state_root
+        / "mint"
+        / "customer-seed-ensures"
+        / "records"
+        / dt.strftime("%Y")
+        / dt.strftime("%m")
+        / dt.strftime("%d")
+        / f"{ensure_id}.json"
+    )
+    return path if path.is_file() else None
+
+
+def participant_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    return dict(policy.get("participant_resolution") or {})
+
+
+def vendor_policy_markers(policy: dict[str, Any]) -> dict[str, list[str]]:
+    return dict(participant_policy(policy).get("vendor_markers") or {})
+
+
+def email_looks_vendor(email: str, policy: dict[str, Any], vendor_email_hints: dict[str, dict[str, Any]], vendor_domain_hints: dict[str, dict[str, Any]]) -> bool:
+    cleaned = normalize_space(email).lower()
+    if not cleaned:
+        return False
+    exact_markers = set(vendor_policy_markers(policy).get("exact_emails") or [])
+    if cleaned in exact_markers or cleaned in vendor_email_hints:
+        return True
+    domain = extract_email_domain(cleaned)
+    return bool(domain and domain in vendor_domain_hints)
+
+
+def message_participant_emails(message: dict[str, Any]) -> list[str]:
+    return dedupe_email_list(
+        [
+            message_sender(message),
+            *addresses_from_message(message, "toRecipients"),
+            *addresses_from_message(message, "ccRecipients"),
+        ]
+    )
+
+
+def summarize_thread_message(message: dict[str, Any], *, role: str = "", confidence: str = "", score: int = 0, reasons: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "message_id": str(message.get("id") or "").strip() or None,
+        "conversation_id": str(message.get("conversationId") or "").strip() or None,
+        "internet_message_id": str(message.get("internetMessageId") or "").strip() or None,
+        "subject": message_subject(message) or None,
+        "from": message_sender(message) or None,
+        "from_name": message_sender_name(message) or None,
+        "received_at": str(message.get("receivedDateTime") or "").strip() or None,
+        "role": role or None,
+        "confidence": confidence or None,
+        "score": score or None,
+        "basis": reasons or [],
+    }
+
+
+def try_mailbox_search(spine_root: Path, mailbox: str, query: str, top: int) -> tuple[list[dict[str, Any]], str, str]:
+    cmd = [str(spine_root / "bin" / "ops"), "cap", "run", SEARCH_CAPABILITY, "--", "--json", "--query", query, "--top", str(top), "--mailbox", mailbox]
+    try:
+        result = subprocess.run(cmd, cwd=spine_root, capture_output=True, text=True, check=False, timeout=20)
+    except subprocess.TimeoutExpired:
+        return [], "", f"{SEARCH_CAPABILITY} timed out after 20s for query={query}"
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    combined = stdout + ("\n" + stderr if stderr else "")
+    receipt = receipt_from_output(stdout)
+    if result.returncode != 0:
+        return [], receipt, combined.strip()
+    try:
+        payload = first_json_object(stdout)
+    except ValueError:
+        return [], receipt, combined.strip() or "search returned non-JSON output"
+    return unwrap_search_results(payload), receipt, ""
+
+
+def merge_message_candidates(existing: list[dict[str, Any]], additions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    ordered: list[dict[str, Any]] = []
+    for message in existing + additions:
+        message_id = normalize_space(message.get("id") or "")
+        if not message_id:
+            continue
+        if message_id not in by_id:
+            by_id[message_id] = dict(message)
+            ordered.append(by_id[message_id])
+            continue
+        merged = dict(by_id[message_id])
+        merged.update({key: value for key, value in dict(message).items() if value not in (None, "", [], {})})
+        by_id[message_id] = merged
+        ordered = [merged if normalize_space(item.get("id") or "") == message_id else item for item in ordered]
+    return ordered
+
+
+def prior_reply_history_context(state_root: Path, source_message_id: str, job_number: str) -> dict[str, Any]:
+    index_file = state_root / "mint" / "customer-reply-drafts" / "index.ndjson"
+    customer_names: dict[str, dict[str, Any]] = {}
+    job_values: dict[str, dict[str, Any]] = {}
+    matched_records: list[dict[str, Any]] = []
+    for entry in reversed(iter_index_records(index_file)):
+        same_source = normalize_space(entry.get("source_message_id") or "") == source_message_id
+        same_job = bool(job_number) and job_number in normalize_space(entry.get("job") or "")
+        if not same_source and not same_job:
+            continue
+        matched_records.append(entry)
+        add_weighted_hint(customer_names, normalize_space(entry.get("customer") or ""), 7 if same_source else 5, "prior_reply_customer")
+        add_weighted_hint(job_values, normalize_space(entry.get("job") or ""), 5, "prior_reply_job")
+        if len(matched_records) >= 10:
+            break
+    return {
+        "customer_names": customer_names,
+        "job_values": job_values,
+        "matched_count": len(matched_records),
+    }
+
+
+def vendor_runtime_context(state_root: Path, job_number: str, customer_name_hints: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    customer_names: dict[str, dict[str, Any]] = {}
+    vendor_names: dict[str, dict[str, Any]] = {}
+    matched_records: list[str] = []
+    indexes = [
+        state_root / "mint" / "sheik-revision-handoffs" / "index.ndjson",
+        state_root / "mint" / "artie-revision-reviews" / "index.ndjson",
+        state_root / "mint" / "artie-revision-handoffs" / "index.ndjson",
+    ]
+    customer_keys = set(customer_name_hints.keys())
+    for index_file in indexes:
+        for entry in reversed(iter_index_records(index_file)):
+            customer_identity = normalize_space(entry.get("customer_identity") or "")
+            job_identity = normalize_space(entry.get("job_identity") or "")
+            customer_match = normalize_lookup_key(customer_identity) in customer_keys if customer_keys else False
+            if not ((job_number and job_identity == job_number) or customer_match):
+                continue
+            add_weighted_hint(customer_names, customer_identity, 8, f"{index_file.stem}_customer_identity")
+            add_weighted_hint(vendor_names, normalize_space(entry.get("vendor_identity") or ""), 8, f"{index_file.stem}_vendor_identity")
+            matched_records.append(str(entry.get("record_file") or ""))
+            if len(matched_records) >= 12:
+                break
+    return {
+        "customer_names": customer_names,
+        "vendor_names": vendor_names,
+        "matched_records": matched_records,
+    }
+
+
+def seed_history_context(
+    state_root: Path,
+    *,
+    source_message: dict[str, Any],
+    source_message_id: str,
+    customer_name_hints: dict[str, dict[str, Any]],
+    vendor_email_hints: dict[str, dict[str, Any]],
+    vendor_domain_hints: dict[str, dict[str, Any]],
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    customer_emails: dict[str, dict[str, Any]] = {}
+    customer_domains: dict[str, dict[str, Any]] = {}
+    customer_names: dict[str, dict[str, Any]] = {}
+    candidate_message_ids: list[str] = []
+    matched_records: list[str] = []
+    source_subject_key = normalize_lookup_key(normalized_subject(message_subject(source_message)))
+    customer_keys = set(customer_name_hints.keys())
+    index_file = state_root / "mint" / "customer-seed-ensures" / "index.ndjson"
+    examined = 0
+    for entry in reversed(iter_index_records(index_file)):
+        record_path = seed_record_file_for_index_entry(state_root, entry)
+        if not record_path:
+            continue
+        record = load_json_file(record_path)
+        if not record:
+            continue
+        examined += 1
+        record_email = normalize_space(record.get("customer_email") or entry.get("customer_email") or "").lower()
+        record_name = normalize_space(record.get("customer_display_name") or "")
+        record_subject_key = normalize_lookup_key(normalized_subject(record.get("source_subject") or ""))
+        record_summary_key = normalize_lookup_key(record.get("summary") or "")
+        work_type = normalize_space(record.get("work_type") or entry.get("work_type") or "")
+        name_match = bool(customer_keys and normalize_lookup_key(record_name) in customer_keys)
+        summary_match = bool(customer_keys and any(key and key in record_summary_key for key in customer_keys))
+        subject_match = bool(source_subject_key and record_subject_key and source_subject_key == record_subject_key)
+        if not (name_match or summary_match or subject_match):
+            if examined >= 250:
+                break
+            continue
+        if email_looks_vendor(record_email, policy, vendor_email_hints, vendor_domain_hints):
+            if examined >= 250:
+                break
+            continue
+        if work_type in {"vendor_revision", "ambiguous"} and not name_match:
+            if examined >= 250:
+                break
+            continue
+        weight = 8 if name_match else 6
+        add_weighted_hint(customer_names, record_name, weight, f"seed_history_name:{work_type or 'unknown'}")
+        add_weighted_hint(customer_emails, record_email, weight + 1, f"seed_history_email:{work_type or 'unknown'}")
+        add_weighted_hint(customer_domains, extract_email_domain(record_email), weight, f"seed_history_domain:{work_type or 'unknown'}")
+        candidate_message_id = normalize_space(record.get("source_message_id") or "")
+        if candidate_message_id and candidate_message_id != source_message_id and candidate_message_id not in candidate_message_ids:
+            candidate_message_ids.append(candidate_message_id)
+        matched_records.append(str(record_path))
+        if len(candidate_message_ids) >= 6 or len(matched_records) >= 12 or examined >= 250:
+            break
+    return {
+        "customer_names": customer_names,
+        "customer_emails": customer_emails,
+        "customer_domains": customer_domains,
+        "candidate_message_ids": candidate_message_ids,
+        "matched_records": matched_records,
+    }
+
+
+def build_participant_context(
+    *,
+    state_root: Path,
+    source_message: dict[str, Any],
+    source_message_id: str,
+    quote_binding: dict[str, Any],
+    policy: dict[str, Any],
+    customer_arg: str,
+    job_arg: str,
+    job_number: str,
+    job_nickname: str,
+    internal_domains: list[str],
+) -> dict[str, Any]:
+    customer_emails: dict[str, dict[str, Any]] = {}
+    customer_domains: dict[str, dict[str, Any]] = {}
+    customer_names: dict[str, dict[str, Any]] = {}
+    vendor_emails: dict[str, dict[str, Any]] = {}
+    vendor_domains: dict[str, dict[str, Any]] = {}
+    vendor_names: dict[str, dict[str, Any]] = {}
+    evidence_records: dict[str, list[str]] = {
+        "prior_reply": [],
+        "vendor_runtime": [],
+        "seed_history": [],
+    }
+
+    vendor_markers = vendor_policy_markers(policy)
+    for email in (vendor_markers.get("exact_emails") or []):
+        add_weighted_hint(vendor_emails, email, 9, "policy_vendor_email")
+    for name in (vendor_markers.get("name_markers") or []):
+        add_weighted_hint(vendor_names, name, 7, "policy_vendor_name")
+
+    for email in extract_forwarded_external_emails(source_message, internal_domains):
+        add_weighted_hint(vendor_emails, email, 2, "forwarded_external_email")
+
+    source_sender = normalize_space(message_sender(source_message)).lower()
+    source_sender_text = normalize_space("\n".join(part for part in (message_sender_name(source_message), message_subject(source_message), message_body_text(source_message)) if normalize_space(part))).lower()
+    source_sender_vendor_marked = any(marker in source_sender_text for marker in ((vendor_markers.get("name_markers") or []) + (vendor_markers.get("subject_markers") or [])))
+    if source_sender and not is_internal_email(source_sender, internal_domains) and not email_looks_vendor(source_sender, policy, vendor_emails, vendor_domains) and not source_sender_vendor_marked:
+        add_weighted_hint(customer_emails, source_sender, 8, "direct_external_sender")
+        add_weighted_hint(customer_domains, extract_email_domain(source_sender), 7, "direct_external_sender")
+        add_weighted_hint(customer_names, message_sender_name(source_message), 6, "direct_external_sender")
+
+    add_weighted_hint(customer_names, customer_arg, 3, "operator_customer_arg")
+    add_weighted_hint(customer_names, normalize_space(quote_binding.get("customer_name") or ""), 4, "quote_binding_customer_name")
+    add_weighted_hint(customer_emails, normalize_space(quote_binding.get("customer_email") or "").lower(), 5, "quote_binding_customer_email")
+    add_weighted_hint(customer_domains, extract_email_domain(quote_binding.get("customer_email") or ""), 4, "quote_binding_customer_domain")
+
+    prior_history = prior_reply_history_context(state_root, source_message_id, job_number)
+    for entry in prior_history["customer_names"].values():
+        add_weighted_hint(customer_names, entry["value"], int(entry.get("weight") or 0), "prior_reply_customer")
+    evidence_records["prior_reply"] = [normalize_space(item.get("value") or "") for item in prior_history["job_values"].values()]
+
+    vendor_history = vendor_runtime_context(state_root, job_number, customer_names)
+    for entry in vendor_history["customer_names"].values():
+        add_weighted_hint(customer_names, entry["value"], int(entry.get("weight") or 0), "vendor_runtime_customer")
+    for entry in vendor_history["vendor_names"].values():
+        add_weighted_hint(vendor_names, entry["value"], int(entry.get("weight") or 0), "vendor_runtime_vendor")
+    evidence_records["vendor_runtime"] = list(vendor_history.get("matched_records") or [])
+
+    seed_history = seed_history_context(
+        state_root,
+        source_message=source_message,
+        source_message_id=source_message_id,
+        customer_name_hints=customer_names,
+        vendor_email_hints=vendor_emails,
+        vendor_domain_hints=vendor_domains,
+        policy=policy,
+    )
+    for entry in seed_history["customer_names"].values():
+        add_weighted_hint(customer_names, entry["value"], int(entry.get("weight") or 0), "seed_history_name")
+    for entry in seed_history["customer_emails"].values():
+        add_weighted_hint(customer_emails, entry["value"], int(entry.get("weight") or 0), "seed_history_email")
+        add_weighted_hint(customer_domains, extract_email_domain(entry["value"]), max(int(entry.get("weight") or 0) - 1, 1), "seed_history_domain")
+    evidence_records["seed_history"] = list(seed_history.get("matched_records") or [])
+
+    contact_graph_match = resolve_contact_graph(
+        state_root,
+        email=top_hint_values(customer_emails, limit=1)[0] if top_hint_values(customer_emails, limit=1) else "",
+        company=top_hint_values(customer_names, limit=1)[0] if top_hint_values(customer_names, limit=1) else "",
+        domains=top_hint_values(customer_domains, limit=3),
+        participant_emails=top_hint_values(customer_emails, limit=5),
+    )
+    if contact_graph_match.get("matched"):
+        for contact in [dict(item) for item in (contact_graph_match.get("contacts") or []) if isinstance(item, dict)]:
+            for email in (contact.get("emails") or []):
+                add_weighted_hint(customer_emails, email, 8, "contact_graph_email")
+                add_weighted_hint(customer_domains, extract_email_domain(email), 6, "contact_graph_domain")
+            add_weighted_hint(customer_names, contact.get("greeting_name") or "", 6, "contact_graph_name")
+            add_weighted_hint(customer_names, contact.get("preferred_name") or "", 6, "contact_graph_name")
+            add_weighted_hint(customer_names, contact.get("legal_name") or "", 5, "contact_graph_name")
+        account = dict(contact_graph_match.get("account") or {})
+        add_weighted_hint(customer_names, account.get("company_name") or "", 6, "contact_graph_company")
+        for alias in (account.get("company_aliases") or []):
+            add_weighted_hint(customer_names, alias, 5, "contact_graph_company_alias")
+
+    query_candidates = dedupe_preserve(
+        [
+            normalized_subject(message_subject(source_message)),
+            *top_hint_values(customer_emails, limit=2),
+            *top_hint_values(customer_names, limit=2),
+            normalize_space(job_nickname),
+            normalize_space(job_arg),
+        ]
+    )
+
+    return {
+        "customer_emails": customer_emails,
+        "customer_domains": customer_domains,
+        "customer_names": customer_names,
+        "vendor_emails": vendor_emails,
+        "vendor_domains": vendor_domains,
+        "vendor_names": vendor_names,
+        "seed_candidate_message_ids": list(seed_history.get("candidate_message_ids") or []),
+        "search_queries": query_candidates[: int(participant_policy(policy).get("search_query_limit") or 4)],
+        "minimum_customer_confidence": str(participant_policy(policy).get("minimum_customer_confidence") or "medium"),
+        "blocked_customer_target_message": str(
+            participant_policy(policy).get("blocked_customer_target_message")
+            or "Need the real customer thread before I can draft customer-facing mail."
+        ),
+        "contact_graph_match": contact_graph_match,
+        "job_number": job_number,
+        "job_nickname": job_nickname,
+        "evidence_records": evidence_records,
+    }
+
+
+def classify_participant_role(
+    message: dict[str, Any],
+    *,
+    context: dict[str, Any],
+    policy: dict[str, Any],
+    internal_domains: list[str],
+) -> dict[str, Any]:
+    sender = normalize_space(message_sender(message)).lower()
+    display_name = normalize_space(message_sender_name(message))
+    subject = normalized_subject(message_subject(message))
+    message_id = normalize_space(message.get("id") or "")
+    received_at = normalize_space(message.get("receivedDateTime") or "")
+    if sender and is_internal_email(sender, internal_domains):
+        return {
+            "message": message,
+            "message_id": message_id,
+            "role": "internal",
+            "confidence": "high",
+            "score": 30,
+            "received_at": received_at,
+            "reasons": ["sender_internal_domain"],
+        }
+
+    combined_text = normalize_space(
+        "\n".join(
+            part
+            for part in (
+                display_name,
+                subject,
+                str(message.get("bodyPreview") or ""),
+                message_body_text(message),
+            )
+            if normalize_space(part)
+        )
+    )
+    participant_emails = message_participant_emails(message)
+
+    customer_score = 0
+    customer_reasons: list[str] = []
+    vendor_score = 0
+    vendor_reasons: list[str] = []
+
+    score, reasons = hint_exact_score(context["customer_emails"], sender, "customer_email")
+    customer_score += score
+    customer_reasons.extend(reasons)
+    score, reasons = hint_domain_score(context["customer_domains"], sender, "customer_domain")
+    customer_score += score
+    customer_reasons.extend(reasons)
+    score, reasons = hint_text_score(context["customer_names"], combined_text, "customer_name")
+    customer_score += score
+    customer_reasons.extend(reasons)
+
+    score, reasons = hint_exact_score(context["vendor_emails"], sender, "vendor_email")
+    vendor_score += score
+    vendor_reasons.extend(reasons)
+    score, reasons = hint_domain_score(context["vendor_domains"], sender, "vendor_domain")
+    vendor_score += score
+    vendor_reasons.extend(reasons)
+    score, reasons = hint_text_score(context["vendor_names"], combined_text, "vendor_name")
+    vendor_score += score
+    vendor_reasons.extend(reasons)
+
+    vendor_markers = vendor_policy_markers(policy)
+    subject_lower = subject.lower()
+    body_lower = combined_text.lower()
+    if any(marker in subject_lower for marker in (vendor_markers.get("subject_markers") or [])):
+        vendor_score += 4
+        vendor_reasons.append("vendor_subject_marker")
+    if any(marker in body_lower for marker in (vendor_markers.get("body_markers") or [])):
+        vendor_score += 4
+        vendor_reasons.append("vendor_body_marker")
+
+    for participant_email in participant_emails:
+        score, reasons = hint_exact_score(context["customer_emails"], participant_email, "thread_customer_email")
+        customer_score += max(score - 1, 0)
+        customer_reasons.extend(reasons)
+        score, reasons = hint_exact_score(context["vendor_emails"], participant_email, "thread_vendor_email")
+        vendor_score += max(score - 1, 0)
+        vendor_reasons.extend(reasons)
+
+    customer_reasons = dedupe_preserve(customer_reasons)
+    vendor_reasons = dedupe_preserve(vendor_reasons)
+    if customer_score <= 0 and vendor_score <= 0:
+        return {
+            "message": message,
+            "message_id": message_id,
+            "role": "unknown_external",
+            "confidence": "low",
+            "score": 1,
+            "received_at": received_at,
+            "reasons": ["no_customer_or_vendor_match"],
+        }
+    if vendor_score > customer_score:
+        return {
+            "message": message,
+            "message_id": message_id,
+            "role": "vendor",
+            "confidence": confidence_from_score(vendor_score),
+            "score": vendor_score,
+            "received_at": received_at,
+            "reasons": vendor_reasons or ["vendor_score_win"],
+        }
+    if customer_score > vendor_score:
+        return {
+            "message": message,
+            "message_id": message_id,
+            "role": "customer",
+            "confidence": confidence_from_score(customer_score),
+            "score": customer_score,
+            "received_at": received_at,
+            "reasons": customer_reasons or ["customer_score_win"],
+        }
+    return {
+        "message": message,
+        "message_id": message_id,
+        "role": "unknown_external",
+        "confidence": "low",
+        "score": max(customer_score, vendor_score),
+        "received_at": received_at,
+        "reasons": dedupe_preserve([*customer_reasons, *vendor_reasons, "role_score_tie"]),
+    }
+
+
+def pick_best_role_candidate(classifications: list[dict[str, Any]], role: str) -> dict[str, Any]:
+    matches = [item for item in classifications if item.get("role") == role]
+    if not matches:
+        return {}
+    matches.sort(
+        key=lambda item: (
+            confidence_rank(str(item.get("confidence") or "")),
+            int(item.get("score") or 0),
+            str(item.get("received_at") or ""),
+        ),
+        reverse=True,
+    )
+    return matches[0]
+
+
+def resolve_participant_roles(
+    messages: list[dict[str, Any]],
+    *,
+    context: dict[str, Any],
+    policy: dict[str, Any],
+    internal_domains: list[str],
+) -> dict[str, Any]:
+    classified = [
+        classify_participant_role(message, context=context, policy=policy, internal_domains=internal_domains)
+        for message in merge_message_candidates([], messages)
+    ]
+    best_customer = pick_best_role_candidate(classified, "customer")
+    best_vendor = pick_best_role_candidate(classified, "vendor")
+    best_unknown = pick_best_role_candidate(classified, "unknown_external")
+    minimum_customer_confidence = str(context.get("minimum_customer_confidence") or "medium")
+    reply_target_role = "customer" if best_customer and confidence_meets(str(best_customer.get("confidence") or ""), minimum_customer_confidence) else ""
+    if not reply_target_role:
+        if best_vendor:
+            reply_target_role = "vendor"
+        elif best_unknown:
+            reply_target_role = "unknown_external"
+        else:
+            reply_target_role = "internal"
+    confidence = (
+        str(best_customer.get("confidence") or "")
+        if reply_target_role == "customer"
+        else str((best_vendor or best_unknown or {}).get("confidence") or "low")
+    )
+    participant_roles = [
+        summarize_thread_message(
+            item["message"],
+            role=str(item.get("role") or ""),
+            confidence=str(item.get("confidence") or ""),
+            score=int(item.get("score") or 0),
+            reasons=list(item.get("reasons") or []),
+        )
+        for item in classified
+    ]
+    participant_roles.sort(
+        key=lambda item: (
+            confidence_rank(str(item.get("confidence") or "")),
+            int(item.get("score") or 0) if item.get("score") is not None else 0,
+            str(item.get("received_at") or ""),
+        ),
+        reverse=True,
+    )
+    return {
+        "canonical_customer_thread": summarize_thread_message(
+            best_customer.get("message") or {},
+            role="customer",
+            confidence=str(best_customer.get("confidence") or ""),
+            score=int(best_customer.get("score") or 0),
+            reasons=list(best_customer.get("reasons") or []),
+        )
+        if best_customer
+        else None,
+        "canonical_vendor_thread": summarize_thread_message(
+            best_vendor.get("message") or {},
+            role="vendor",
+            confidence=str(best_vendor.get("confidence") or ""),
+            score=int(best_vendor.get("score") or 0),
+            reasons=list(best_vendor.get("reasons") or []),
+        )
+        if best_vendor
+        else None,
+        "participant_roles": participant_roles,
+        "reply_target_role": reply_target_role,
+        "confidence": confidence or "low",
+        "minimum_customer_confidence": minimum_customer_confidence,
+        "selection_mode": "participant_role_resolver",
+    }
+
+
+def resolve_external_customer_message(
+    spine_root: Path,
+    state_root: Path,
+    mailbox: str,
+    source_message: dict[str, Any],
+    source_message_id: str,
+    quote_binding: dict[str, Any],
+    policy: dict[str, Any],
+    *,
+    customer_arg: str,
+    job_arg: str,
+    job_number: str,
+    job_nickname: str,
+) -> tuple[dict[str, Any], dict[str, Any], str, str]:
+    internal_domains = list(((policy.get("canonicalization") or {}).get("internal_domains")) or ["mintprints.com"])
+    context = build_participant_context(
+        state_root=state_root,
+        source_message=source_message,
+        source_message_id=source_message_id,
+        quote_binding=quote_binding,
+        policy=policy,
+        customer_arg=customer_arg,
+        job_arg=job_arg,
+        job_number=job_number,
+        job_nickname=job_nickname,
+        internal_domains=internal_domains,
+    )
+    candidate_messages = [source_message]
+    seed_get_receipts: list[str] = []
+    for candidate_id in (context.get("seed_candidate_message_ids") or []):
+        payload, receipt, _error = try_cap_capture(
+            spine_root,
+            "microsoft.mail.get",
+            ["--message-id", candidate_id, "--mailbox", mailbox],
+        )
+        if payload:
+            candidate_messages = merge_message_candidates(candidate_messages, [payload])
+            if receipt:
+                seed_get_receipts.append(receipt)
+    resolution = resolve_participant_roles(candidate_messages, context=context, policy=policy, internal_domains=internal_domains)
+    search_receipts: list[str] = []
+    search_errors: list[str] = []
+    search_queries_attempted: list[str] = []
+    queries = list(context.get("search_queries") or [])
+    should_search = bool(is_internal_email(message_sender(source_message), internal_domains))
+    if should_search and queries:
+        for idx, query in enumerate(queries):
+            if not normalize_space(query):
+                continue
+            search_queries_attempted.append(query)
+            results, receipt, error = try_mailbox_search(
+                spine_root,
+                mailbox,
+                query,
+                int(((policy.get("canonicalization") or {}).get("external_search_top")) or 25),
+            )
+            if receipt:
+                search_receipts.append(receipt)
+            if error:
+                search_errors.append(error)
+            if results:
+                candidate_messages = merge_message_candidates(candidate_messages, results)
+                resolution = resolve_participant_roles(candidate_messages, context=context, policy=policy, internal_domains=internal_domains)
+            if resolution.get("reply_target_role") == "customer" and confidence_meets(
+                str(resolution.get("confidence") or ""),
+                str(context.get("minimum_customer_confidence") or "medium"),
+            ):
+                if resolution.get("canonical_vendor_thread") or idx == 0:
+                    break
+    blocked_message = ""
+    if resolution.get("reply_target_role") != "customer":
+        best_known = resolution.get("canonical_vendor_thread") or (resolution.get("participant_roles") or [{}])[0]
+        best_role = normalize_space((best_known or {}).get("role") or "unknown_external")
+        best_sender = normalize_space((best_known or {}).get("from") or "")
+        blocked_message = context["blocked_customer_target_message"]
+        if best_role:
+            blocked_message = f"{blocked_message} Best known thread role: {best_role}"
+            if best_sender:
+                blocked_message += f" ({best_sender})"
+            blocked_message += "."
+    resolution.update(
+        {
+            "search_queries_attempted": search_queries_attempted,
+            "search_receipts": search_receipts,
+            "search_errors": search_errors,
+            "seed_get_receipts": seed_get_receipts,
+            "context_summary": {
+                "customer_emails": top_hint_values(context["customer_emails"], limit=5),
+                "customer_names": top_hint_values(context["customer_names"], limit=5),
+                "vendor_emails": top_hint_values(context["vendor_emails"], limit=5),
+                "vendor_names": top_hint_values(context["vendor_names"], limit=5),
+                "seed_candidate_message_ids": list(context.get("seed_candidate_message_ids") or []),
+                "contact_graph_match_mode": ((context.get("contact_graph_match") or {}).get("match_mode")),
+                "evidence_records": context.get("evidence_records") or {},
+            },
+            "blocked_message": blocked_message or None,
+        }
+    )
+    chosen = dict((resolution.get("canonical_customer_thread") or {}))
+    if resolution.get("reply_target_role") == "customer" and normalize_space(chosen.get("message_id") or ""):
+        for message in candidate_messages:
+            if normalize_space(message.get("id") or "") == normalize_space(chosen.get("message_id") or ""):
+                return message, resolution, (search_receipts[0] if search_receipts else ""), blocked_message
+    return source_message, resolution, (search_receipts[0] if search_receipts else ""), blocked_message
+
+
+def canonical_reply_recipients(
+    source_message: dict[str, Any],
+    *,
+    mailbox: str,
+    internal_domains: list[str],
+    to_override: str,
+    cc_override: str,
+) -> tuple[str, str, dict[str, Any]]:
+    sender = message_sender(source_message)
+    base_to = [sender]
+    base_to.extend(addresses_from_message(source_message, "toRecipients"))
+    canonical_to = [
+        item
+        for item in dedupe_email_list(base_to)
+        if item and item != mailbox.lower() and not is_internal_email(item, internal_domains)
+    ]
+    canonical_cc = [
+        item
+        for item in dedupe_email_list(addresses_from_message(source_message, "ccRecipients"))
+        if item and item not in canonical_to and item != mailbox.lower() and not is_internal_email(item, internal_domains)
+    ]
+    if to_override.strip():
+        canonical_to = dedupe_email_list([item for item in to_override.split(",") if normalize_space(item)])
+    if cc_override.strip():
+        canonical_cc = dedupe_email_list(canonical_cc + [item for item in cc_override.split(",") if normalize_space(item)])
+    return (
+        ",".join(canonical_to),
+        ",".join(canonical_cc),
+        {
+            "to": canonical_to,
+            "cc": canonical_cc,
+            "mailbox": mailbox,
+        },
+    )
+
+
+def canonical_fresh_outbound_recipients(
+    customer_contact: dict[str, Any],
+    *,
+    mailbox: str,
+    to_override: str,
+    cc_override: str,
+) -> tuple[str, str, dict[str, Any]]:
+    primary_email = normalize_space(customer_contact.get("email") or "").lower()
+    if to_override.strip():
+        canonical_to = dedupe_email_list([item for item in to_override.split(",") if normalize_space(item)])
+    elif primary_email:
+        canonical_to = [primary_email]
+    else:
+        canonical_to = []
+    canonical_cc = dedupe_email_list([item for item in cc_override.split(",") if normalize_space(item)])
+    return (
+        ",".join(canonical_to),
+        ",".join(canonical_cc),
+        {
+            "to": canonical_to,
+            "cc": canonical_cc,
+            "mailbox": mailbox,
+        },
+    )
+
+
+def reply_to_address(message: dict[str, Any]) -> str:
+    return str((((message.get("from") or {}).get("emailAddress") or {}).get("address")) or "").strip()
+
+
+def recipient_csv(message: dict[str, Any], key: str) -> str:
+    recipients = message.get(key) or []
+    out: list[str] = []
+    for entry in recipients:
+        address = str((((entry or {}).get("emailAddress") or {}).get("address")) or "").strip()
+        if address:
+            out.append(address)
+    return ",".join(out)
+
+
+def normalized_recipient_list(message: dict[str, Any], key: str) -> list[str]:
+    return dedupe_email_list(addresses_from_message(message, key))
+
+
+def recipient_lists_match(expected: list[str], observed: list[str]) -> bool:
+    return len(expected) == len(observed) and set(expected) == set(observed)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def normalize_content_type(value: str) -> str:
+    return "HTML" if str(value or "").strip().upper() == "HTML" else "Text"
+
+
+def resolve_requested_content_type(value: str, default_value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        raw = str(default_value or "").strip()
+    normalized = raw.upper()
+    if normalized not in {"HTML", "TEXT"}:
+        fail("content-type must be Text or HTML")
+    return "HTML" if normalized == "HTML" else "Text"
+
+
+def resolve_body_text(args: argparse.Namespace) -> tuple[str, str]:
+    inline_body = str(args.body or "")
+    if inline_body.strip():
+        return inline_body, "inline"
+    body_file_text = str(args.body_file or "").strip()
+    if body_file_text:
+        body_file = Path(body_file_text).expanduser().resolve()
+        if not body_file.is_file():
+            fail(f"body file not found: {args.body_file}")
+        return body_file.read_text(encoding="utf-8"), "file"
+    return "", "auto"
+
+
+def bodyless_structured_reply_allowed(
+    *,
+    author_mode: str,
+    reply_mode: str,
+    quote_binding: dict[str, Any],
+    current_action: str,
+    blocker_questions: list[str],
+) -> bool:
+    if author_mode != "morpheus":
+        return False
+    if reply_mode == "formal_quote_ready":
+        return quote_binding_has_structured_context(quote_binding)
+    if reply_mode == "not_a_fit":
+        return True
+    if reply_mode in {"delay", "art_revision", "in_progress"}:
+        return bool(normalize_space(current_action))
+    if reply_mode == "clarification_only":
+        return any(normalize_space(item) for item in blocker_questions)
+    return False
+
+
+def customer_lane_draft_gate_blockers(
+    *,
+    disposition_name: str,
+    reply_mode: str,
+    manual_break_glass_general: bool,
+    subject_source: str,
+    target_message: dict[str, Any],
+    quote_context: dict[str, Any],
+    quote_binding: dict[str, Any],
+    lifecycle_context: dict[str, Any],
+    lifecycle_gate_resolution: dict[str, Any],
+) -> list[str]:
+    blockers: list[str] = []
+    if subject_source not in {"reply_chain_subject", "quote_binding_subject"}:
+        blockers.append("subject source must come from the canonical reply chain or governed quote binding")
+
+    lifecycle_draft_allowed = lifecycle_context.get("draft_allowed")
+    lifecycle_gate_mode = normalize_space((lifecycle_gate_resolution or {}).get("mode") or "")
+    if lifecycle_draft_allowed is False and lifecycle_gate_mode != "override_stale_anchor":
+        blockers.append("lifecycle draft gate is hold")
+
+    if disposition_name == "unsupported_scope":
+        if reply_mode != "not_a_fit":
+            blockers.append("unsupported_scope must use the governed not_a_fit reply mode")
+        return dedupe_preserve(blockers)
+
+    if disposition_name == "waiting_on_customer":
+        if reply_mode != "clarification_only" and not manual_break_glass_general:
+            blockers.append("waiting_on_customer must use the governed clarification_only reply mode")
+        return dedupe_preserve(blockers)
+
+    if disposition_name == "customer_actionable":
+        contact = resolve_message_customer_contact(target_message)
+        observed_email = normalize_space(contact.get("email") or reply_to_address(target_message) or "").lower()
+        expected_email = normalize_space(
+            quote_context.get("customer_email") or quote_binding.get("customer_email") or ""
+        ).lower()
+        quote_packet_id = normalize_space(quote_context.get("packet_id") or "")
+        binding_packet_id = normalize_space(quote_binding.get("packet_id") or "")
+        lifecycle_patch = dict(lifecycle_context.get("quote_binding_patch") or {})
+        lifecycle_packet_id = normalize_space(lifecycle_patch.get("packet_id") or "")
+
+        if expected_email and observed_email and expected_email != observed_email:
+            blockers.append("customer email does not match the governed quote context")
+        if not quote_packet_id and not binding_packet_id:
+            blockers.append("governed packet id is missing")
+        if quote_packet_id and binding_packet_id and quote_packet_id != binding_packet_id:
+            blockers.append("packet id does not match governed quote binding")
+        if quote_packet_id and lifecycle_packet_id and quote_packet_id != lifecycle_packet_id and lifecycle_gate_mode != "override_stale_anchor":
+            blockers.append("packet id does not match lifecycle binding")
+
+    return dedupe_preserve(blockers)
+
+
+def reply_chain_mailbox_guidance(mailbox: str) -> str:
+    normalized_mailbox = mailbox.strip() or DEFAULT_MAILBOX
+    return (
+        f"Use the message id from {normalized_mailbox}. For forwarded internal chains, this helper replies only "
+        f"inside the same mailbox thread, so pass the forwarded {normalized_mailbox} message id instead of the "
+        "original customer-mailbox message id."
+    )
+
+
+def clean_sentence(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if not cleaned:
+        return ""
+    if cleaned[-1] not in ".!?":
+        cleaned += "."
+    return cleaned
+
+
+def normalize_blocker_question(text: str) -> str:
+    cleaned = normalize_space(text)
+    if not cleaned:
+        return ""
+    cleaned = cleaned.rstrip(".!").strip()
+    if not cleaned:
+        return ""
+    if cleaned.endswith("?"):
+        normalized = cleaned
+    elif re.match(r"(?i)^(how|what|which|when|where|who|why|can|could|would|will|is|are|do|does|did|should|have|has|am)\b", cleaned):
+        normalized = cleaned + "?"
+    else:
+        lowered = re.sub(r"(?i)\bconfirmation\b", "", cleaned).strip(" ,;:-")
+        if not lowered:
+            return ""
+        lowered = lowered[0].lower() + lowered[1:] if len(lowered) > 1 else lowered.lower()
+        prefix = "Can you confirm " if re.match(r"(?i)^(the|your|this|these|that|those)\b", lowered) else "Can you confirm the "
+        normalized = f"{prefix}{lowered}?"
+    return normalized[0].upper() + normalized[1:] if len(normalized) > 1 else normalized.upper()
+
+
+def customer_safe_blocker_question(text: str) -> str:
+    cleaned = normalize_space(text)
+    if not cleaned:
+        return ""
+    if "?" in cleaned:
+        return normalize_blocker_question(cleaned)
+    lowered = re.sub(r"(?i)\bconfirmation\b", "", cleaned).strip(" .,:;!-").lower()
+    if not lowered:
+        return ""
+    direct_map = {
+        "quantity": "Can you confirm the quantity?",
+        "final quantity": "Can you confirm the final quantity?",
+        "size breakdown": "Can you send the size breakdown?",
+        "print location": "Can you confirm the print location?",
+        "print locations": "Can you confirm the print locations?",
+        "blank": "Can you confirm the blank/style?",
+        "blank/style": "Can you confirm the blank/style?",
+        "style": "Can you confirm the blank/style?",
+        "style code": "Can you confirm the blank/style?",
+        "garment color": "Can you confirm the garment color?",
+        "final garment color": "Can you confirm the final garment color?",
+        "timeline": "Can you confirm the timeline?",
+        "due date": "Can you confirm the due date?",
+        "turn time": "Can you confirm the timeline?",
+    }
+    if lowered in direct_map:
+        return direct_map[lowered]
+    if re.search(r"\bquantity\b", lowered):
+        return "Can you confirm the quantity?"
+    if re.search(r"\bsize breakdown\b", lowered):
+        return "Can you send the size breakdown?"
+    if re.search(r"\bprint locations?\b", lowered):
+        return "Can you confirm the print locations?"
+    if re.search(r"\b(blank|style|style code)\b", lowered):
+        return "Can you confirm the blank/style?"
+    if re.search(r"\b(color|garment color)\b", lowered):
+        return "Can you confirm the garment color?"
+    if re.search(r"\b(timeline|due date|turn time|deadline)\b", lowered):
+        return "Can you confirm the timeline?"
+    return ""
+
+
+def first_name_greeting_fallback(display_name: str) -> str:
+    cleaned = normalize_space(display_name)
+    if not cleaned or "@" in cleaned:
+        return ""
+    if re.search(r"\b(team|support|sales|info|office|operations|billing|admin|studio)\b", cleaned, flags=re.IGNORECASE):
+        return ""
+    words = re.findall(r"[A-Za-zÀ-ÿ']+", cleaned)
+    if not words:
+        return ""
+    if len(words) == 1:
+        return words[0]
+    if 2 <= len(words) <= 4:
+        return words[0]
+    return ""
+
+
+def greeting_name_from_packet_evidence(
+    *,
+    quote_context: dict[str, Any],
+    quote_binding: dict[str, Any],
+    lifecycle_context: dict[str, Any],
+) -> str:
+    candidate_files = dedupe_preserve(
+        [
+            normalize_space(quote_binding.get("packet_file") or ""),
+            normalize_space(quote_context.get("packet_file") or ""),
+            normalize_space(((lifecycle_context.get("quote_binding_patch") or {}).get("packet_file")) or ""),
+            normalize_space(((lifecycle_context.get("quote_context") or {}).get("packet_file")) or ""),
+        ]
+    )
+    for packet_file_text in candidate_files:
+        packet_file = Path(packet_file_text).expanduser()
+        if not packet_file.is_file():
+            continue
+        packet = load_yaml_file(packet_file)
+        customer_ref = dict(packet.get("customer_ref") or {})
+        structured_greeting = normalize_space(customer_ref.get("greeting_name") or "")
+        if structured_greeting:
+            return structured_greeting
+        source_refs = list(packet.get("source_refs") or [])
+        evidence_texts = [normalize_space((item or {}).get("summary") or "") for item in source_refs if isinstance(item, dict)]
+        evidence_texts.append(normalize_space(packet.get("customer_message_draft") or ""))
+        for text in evidence_texts:
+            candidate = normalize_space(introduction_name(text, line_limit=0, allow_embedded=True))
+            if candidate:
+                return first_name_greeting_fallback(candidate) or candidate
+    return ""
+
+
+def packet_customer_ref_from_context(
+    *,
+    quote_context: dict[str, Any],
+    quote_binding: dict[str, Any],
+    lifecycle_context: dict[str, Any],
+) -> dict[str, Any]:
+    candidate_files = dedupe_preserve(
+        [
+            normalize_space(quote_binding.get("packet_file") or ""),
+            normalize_space(quote_context.get("packet_file") or ""),
+            normalize_space(((lifecycle_context.get("quote_binding_patch") or {}).get("packet_file")) or ""),
+            normalize_space(((lifecycle_context.get("quote_context") or {}).get("packet_file")) or ""),
+        ]
+    )
+    for packet_file_text in candidate_files:
+        packet_file = Path(packet_file_text).expanduser()
+        if not packet_file.is_file():
+            continue
+        packet = load_yaml_file(packet_file)
+        return dict(packet.get("customer_ref") or {})
+    return {}
+
+
+def contact_name_from_packet_evidence(
+    *,
+    quote_context: dict[str, Any],
+    quote_binding: dict[str, Any],
+    lifecycle_context: dict[str, Any],
+) -> str:
+    candidate_files = dedupe_preserve(
+        [
+            normalize_space(quote_binding.get("packet_file") or ""),
+            normalize_space(quote_context.get("packet_file") or ""),
+            normalize_space(((lifecycle_context.get("quote_binding_patch") or {}).get("packet_file")) or ""),
+            normalize_space(((lifecycle_context.get("quote_context") or {}).get("packet_file")) or ""),
+        ]
+    )
+    for packet_file_text in candidate_files:
+        packet_file = Path(packet_file_text).expanduser()
+        if not packet_file.is_file():
+            continue
+        packet = load_yaml_file(packet_file)
+        customer_ref = dict(packet.get("customer_ref") or {})
+        structured_contact = normalize_space(customer_ref.get("contact_name") or "")
+        if structured_contact:
+            return structured_contact
+        source_refs = list(packet.get("source_refs") or [])
+        evidence_texts = [normalize_space((item or {}).get("summary") or "") for item in source_refs if isinstance(item, dict)]
+        evidence_texts.append(normalize_space(packet.get("customer_message_draft") or ""))
+        for text in evidence_texts:
+            candidate = normalize_space(introduction_name(text, line_limit=0, allow_embedded=True))
+            if candidate:
+                return candidate
+    return ""
+
+
+def plain_text_for_fact_scan(text: str, content_type: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    if normalize_content_type(content_type) == "HTML" or contains_html_markup(raw):
+        return normalize_space(strip_html(raw))
+    return normalize_space(raw)
+
+
+def extract_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    for raw in re.findall(r"https?://[^\s<>\"]+", text or "", flags=re.IGNORECASE):
+        cleaned = raw.rstrip(").,;]>")
+        if cleaned and cleaned not in urls:
+            urls.append(cleaned)
+    return urls
+
+
+def derive_draft_state(
+    *,
+    source_message: dict[str, Any],
+    body_text: str,
+    requested_content_type: str,
+    reply_mode: str,
+    blocker_questions: list[str],
+    attachments: list[dict[str, Any]],
+    reference_links: list[dict[str, str]],
+    reference_visuals: list[dict[str, str]],
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    detection = dict((policy.get("draft_state") or {}).get("detection") or {})
+    source_text = plain_text_for_fact_scan(
+        "\n".join(
+            part
+            for part in (
+                str(source_message.get("subject") or ""),
+                latest_customer_message_text(source_message),
+            )
+            if normalize_space(part)
+        ),
+        "Text",
+    ).lower()
+    operator_text = plain_text_for_fact_scan(body_text, requested_content_type).lower()
+    body_urls = [url.lower() for url in extract_urls(body_text)]
+
+    quote_link_present = any(marker in operator_text for marker in (detection.get("quote_link_markers") or [])) or bool(reference_links)
+    if not quote_link_present:
+        quote_link_present = any(
+            any(marker in url for marker in (detection.get("quote_link_markers") or []))
+            for url in body_urls
+        )
+
+    payment_status = "unknown"
+    if reply_mode == "in_progress" or any(marker in source_text or marker in operator_text for marker in (detection.get("payment_confirmed_markers") or [])):
+        payment_status = "confirmed"
+    elif any(marker in operator_text for marker in (detection.get("payment_request_markers") or [])):
+        payment_status = "requested"
+
+    artwork_present = bool(attachments or reference_visuals)
+
+    draft_mode = "ready"
+    if payment_status == "confirmed":
+        draft_mode = "in_progress"
+    elif quote_link_present:
+        draft_mode = "confirming"
+    elif blocker_questions:
+        draft_mode = "preparing"
+
+    return {
+        "quote_link_present": quote_link_present,
+        "payment_status": payment_status,
+        "artwork_present": artwork_present,
+        "draft_mode": draft_mode,
+        "blocker_count": len([item for item in blocker_questions if normalize_space(item)]),
+        "source_payment_confirmed": any(marker in source_text for marker in (detection.get("payment_confirmed_markers") or [])),
+    }
+
+
+def draft_state_intro_lines(draft_state: dict[str, Any], body_text: str, requested_content_type: str, policy: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    mode_lines = dict((policy.get("draft_state") or {}).get("mode_lines") or {})
+    mode = str(draft_state.get("draft_mode") or "").strip()
+    line = ""
+    if mode == "confirming" and draft_state.get("quote_link_present"):
+        line = str(mode_lines.get("confirming") or "").strip()
+    elif mode == "in_progress" and draft_state.get("payment_status") == "confirmed":
+        line = str(mode_lines.get("in_progress") or "").strip()
+    if not line:
+        return lines
+    normalized_body = plain_text_for_fact_scan(body_text, requested_content_type).lower()
+    if normalize_space(line).lower() not in normalized_body:
+        lines.append(line)
+    return lines
+
+
+def collect_draft_contradictions(fragment: str, content_type: str, draft_state: dict[str, Any], policy: dict[str, Any]) -> list[str]:
+    detection = dict((policy.get("draft_state") or {}).get("detection") or {})
+    lowered = plain_text_for_fact_scan(fragment, content_type).lower()
+    contradictions: list[str] = []
+    if draft_state.get("quote_link_present"):
+        for marker in (detection.get("quote_preparing_markers") or []):
+            if marker in lowered:
+                contradictions.append(f"quote_link_present conflicts with quote-preparing wording: {marker}")
+                break
+    if str(draft_state.get("payment_status") or "") == "confirmed":
+        for marker in (detection.get("payment_request_markers") or []):
+            if marker in lowered:
+                contradictions.append(f"payment confirmed conflicts with payment-request wording: {marker}")
+                break
+    if draft_state.get("artwork_present"):
+        for marker in (detection.get("artwork_request_markers") or []):
+            if marker in lowered:
+                contradictions.append(f"artwork present conflicts with artwork-request wording: {marker}")
+                break
+    return contradictions
+
+
+def short_event_suffix(message_id: str, stamp: str) -> str:
+    seed = f"{message_id}|{stamp}".encode("utf-8")
+    return hashlib.sha256(seed).hexdigest()[:6]
+
+
+def parse_reference_entries(entries: list[str], kind: str) -> list[dict[str, str]]:
+    parsed: list[dict[str, str]] = []
+    for raw in entries:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if "=" not in text:
+            fail(f"{kind} entries must use label=url format: {text}")
+        label, url = text.split("=", 1)
+        label = re.sub(r"\s+", " ", label).strip()
+        url = url.strip()
+        if not label or not url:
+            fail(f"{kind} entries must include both label and url: {text}")
+        if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+            fail(f"{kind} url must start with http:// or https://: {url}")
+        parsed.append({"label": label, "url": url})
+    return parsed
+
+
+def strip_subject_prefixes(subject: str, prefix_regex: str) -> str:
+    cleaned = normalize_space(subject)
+    if not cleaned:
+        return ""
+    pattern = re.compile(prefix_regex, flags=re.IGNORECASE)
+    while True:
+        updated = normalize_space(pattern.sub("", cleaned))
+        if updated == cleaned:
+            return cleaned
+        cleaned = updated
+
+
+def parse_subject_parts(subject: str, *, canonical_regex: str, prefix_regex: str) -> dict[str, str]:
+    cleaned = strip_subject_prefixes(subject, prefix_regex)
+    if not cleaned:
+        return {}
+    match = re.match(canonical_regex, cleaned)
+    if not match:
+        return {}
+    job_number = normalize_space(match.group("job_number"))
+    job_nickname = normalize_space(match.group("job_nickname"))
+    if not job_number or not job_nickname:
+        return {}
+    return {
+        "job_number": job_number,
+        "job_nickname": job_nickname,
+        "subject": f"{job_number} {job_nickname}",
+    }
+
+
+def parse_job_hint(job_value: str) -> dict[str, str]:
+    cleaned = normalize_space(job_value)
+    if not cleaned:
+        return {}
+    match = re.match(r"^(?P<job_number>[0-9]{4,})(?:\s+(?P<job_nickname>.+\S))?$", cleaned)
+    if not match:
+        return {}
+    job_number = normalize_space(match.group("job_number"))
+    job_nickname = normalize_space(match.group("job_nickname") or "")
+    out = {"job_number": job_number}
+    if job_nickname:
+        out["job_nickname"] = job_nickname
+    return out
+
+
+def format_governed_subject(job_number: str, job_nickname: str, template: str) -> str:
+    return template.format(job_number=normalize_space(job_number), job_nickname=normalize_space(job_nickname))
+
+
+def reply_subject(message: dict[str, Any], subject_override: str) -> str:
+    if subject_override.strip():
+        return subject_override.strip()
+    subject = str(message.get("subject") or "").strip()
+    if subject.lower().startswith("re:"):
+        return subject
+    return f"Re: {subject}"
+
+
+def resolve_governed_subject(
+    args: argparse.Namespace,
+    source_message: dict[str, Any],
+    reply_message: dict[str, Any],
+    policy: dict[str, Any],
+    quote_binding: dict[str, Any] | None = None,
+) -> tuple[str, str, str, str]:
+    if args.author_mode != "morpheus":
+        return reply_subject(source_message, args.subject), "", "", "operator_override"
+
+    explicit_subject = args.subject.strip()
+    if explicit_subject:
+        parsed = parse_subject_parts(
+            explicit_subject,
+            canonical_regex=policy["subject_canonical_regex"],
+            prefix_regex=policy["subject_prefix_regex"],
+        )
+        if not parsed:
+            fail(f"subject must match governed format {policy['subject_required_format']}")
+        return parsed["subject"], parsed["job_number"], parsed["job_nickname"], "subject_override"
+
+    candidates = [
+        {
+            "job_number": normalize_space(((quote_binding or {}).get("job_number")) or ""),
+            "job_nickname": normalize_space(((quote_binding or {}).get("job_nickname")) or ""),
+            "source": "quote_binding_subject",
+        },
+        {"job_number": normalize_space(args.job_number), "job_nickname": normalize_space(args.job_nickname), "source": "job_flags"},
+        {**parse_job_hint(args.job), "source": "job_arg"},
+        {
+            **parse_subject_parts(
+                str((quote_binding or {}).get("quote_subject") or ""),
+                canonical_regex=policy["subject_canonical_regex"],
+                prefix_regex=policy["subject_prefix_regex"],
+            ),
+            "source": "quote_binding_subject",
+        },
+        {**parse_subject_parts(str(source_message.get("subject") or ""), canonical_regex=policy["subject_canonical_regex"], prefix_regex=policy["subject_prefix_regex"]), "source": "source_subject"},
+        {**parse_subject_parts(str(reply_message.get("subject") or ""), canonical_regex=policy["subject_canonical_regex"], prefix_regex=policy["subject_prefix_regex"]), "source": "reply_subject"},
+    ]
+
+    resolved_number = ""
+    resolved_nickname = ""
+    resolved_source = "policy"
+    for candidate in candidates:
+        if not resolved_number and candidate.get("job_number"):
+            resolved_number = normalize_space(candidate["job_number"])
+            resolved_source = str(candidate.get("source") or resolved_source)
+        if not resolved_nickname and candidate.get("job_nickname"):
+            resolved_nickname = normalize_space(candidate["job_nickname"])
+            if candidate.get("source"):
+                resolved_source = str(candidate["source"])
+    if not resolved_number or not resolved_nickname:
+        if args.reply_mode == "formal_quote_ready":
+            fail(policy["subject_unresolved_blocker"])
+        fallback_mode = str(policy.get("subject_fallback_mode") or "").strip().lower()
+        reply_chain_subject = normalize_space(reply_message.get("subject") or "")
+        if not reply_chain_subject.lower().startswith("re:"):
+            reply_chain_subject = ""
+        thread_subject = reply_subject(source_message, reply_chain_subject)
+        if fallback_mode == "reply_chain_subject" and normalize_space(thread_subject):
+            return normalize_space(thread_subject), "", "", "reply_chain_subject"
+        fail(policy["subject_unresolved_blocker"])
+    return (
+        format_governed_subject(resolved_number, resolved_nickname, policy["subject_format_template"]),
+        resolved_number,
+        resolved_nickname,
+        resolved_source,
+    )
+
+
+def enforce_house_voice(
+    body: str,
+    reply_mode: str,
+    current_action: str,
+    blocker_questions: list[str],
+    author_mode: str,
+    policy: dict[str, Any],
+) -> None:
+    if author_mode != "morpheus":
+        return
+    lowered = re.sub(r"\s+", " ", body or "").strip().lower()
+    for phrase in policy.get("generic_filler_blocklist") or GENERIC_FILLER_PHRASES:
+        if phrase in lowered:
+            fail(f"house voice blocks generic filler phrase: {phrase}")
+    if reply_mode in {"delay", "art_revision", "in_progress"} and not current_action.strip():
+        fail(f"{reply_mode} replies require --current-action")
+    if reply_mode == "clarification_only" and not any(normalize_space(item) for item in blocker_questions):
+        fail("clarification_only replies require at least one explicit blocker question")
+    for question in blocker_questions:
+        cleaned = question.strip()
+        if not cleaned:
+            fail("blocker questions must be non-empty")
+        if "?" not in cleaned:
+            fail("blocker questions must end as real customer questions")
+
+
+def enforce_operator_policy(
+    body: str,
+    *,
+    author_mode: str,
+    operator_policy: dict[str, Any],
+    operator_policy_match: dict[str, Any],
+) -> None:
+    if author_mode != "morpheus" or not operator_policy_match.get("matched"):
+        return
+    hits = blocked_phone_suggestion_hits(body, operator_policy)
+    if hits:
+        fail(f"operator policy blocks phone/live coordination wording in Morpheus draft: {hits[0]}")
+
+
+def house_voice_intro(reply_mode: str, current_action: str, policy: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    intro = str((policy.get("reply_mode_intros") or {}).get(reply_mode) or "").strip()
+    if intro:
+        lines.append(intro)
+    current = clean_sentence(current_action)
+    if current:
+        lines.append(f"Current action: {current}")
+    return lines
+
+
+def render_reference_block(entries: list[dict[str, str]], heading: str, target_content_type: str) -> str:
+    if not entries:
+        return ""
+    if target_content_type.upper() == "HTML":
+        items = "; ".join(
+            f"<a href=\"{html.escape(item['url'])}\">{html.escape(item['label'])}</a>"
+            for item in entries
+        )
+        return f"<p><strong>{html.escape(heading)}:</strong> {items}</p>"
+    items = "; ".join(f"{item['label']}: {item['url']}" for item in entries)
+    return f"{heading}: {items}"
+
+
+def render_blocker_block(blocker_questions: list[str], target_content_type: str, prompt: str) -> str:
+    cleaned = [normalize_blocker_question(item) for item in blocker_questions if normalize_blocker_question(item)]
+    if not cleaned:
+        return ""
+    if target_content_type.upper() == "HTML":
+        joined = " ".join(html.escape(item) for item in cleaned)
+        return f"<p><strong>{html.escape(prompt)}</strong> {joined}</p>"
+    return f"{prompt} {' '.join(cleaned)}"
+
+
+def quote_mode_from_context(requested_reply_mode: str, quote_context: dict[str, Any]) -> str:
+    explicit_modes = {"delay", "art_revision", "in_progress", "guided_estimate", "clarification_only", "formal_quote_ready", "not_a_fit"}
+    if requested_reply_mode in explicit_modes:
+        return requested_reply_mode
+    if not quote_context:
+        return requested_reply_mode
+    if quote_context.get("customer_reply_guidance_mode") == "not_a_fit":
+        return "not_a_fit"
+    if quote_context.get("qualification_status") in {"out_of_scope_not_supported", "mixed_scope_requires_split"}:
+        return "not_a_fit"
+    product_scope = dict(quote_context.get("product_scope") or {})
+    if product_scope.get("classification") in {"out_of_scope", "mixed_scope"}:
+        return "not_a_fit"
+    if quote_context.get("intake_quality") == "headache":
+        return "not_a_fit"
+    if quote_context.get("source_state") == "completed" and quote_context.get("estimate_state") == "completed" and int(quote_context.get("quote_safe_line_item_count") or 0) > 0:
+        return "guided_estimate"
+    if int(quote_context.get("clarification_needed_count") or 0) > 0 or quote_context.get("qualification_status") in {"clarification_needed", "not_ready"}:
+        return "clarification_only"
+    return requested_reply_mode
+
+
+def render_guided_estimate_lines(quote_context: dict[str, Any]) -> tuple[list[str], list[str]]:
+    quote_safe_items = list(quote_context.get("quote_safe_items") or [])
+    lines: list[str] = []
+    price_lane = normalize_space(quote_context.get("price_lane") or "")
+    artwork_analysis_line = artwork_analysis_customer_line(quote_context)
+    if price_lane:
+        lines.append(f"Roughly {price_lane} per shirt based on the blanks below.")
+    if artwork_analysis_line:
+        lines.append(artwork_analysis_line)
+    lines.append("Here is the lane I would recommend:")
+    for item in quote_safe_items:
+        style_label = normalize_space(item.get("product_label") or item.get("title") or "")
+        method = normalize_space(item.get("recommended_method") or "").replace("_", " ")
+        price_text = format_money(item.get("estimated_unit_price"))
+        availability = normalize_space(item.get("availability_signal") or "")
+        description = normalize_space(item.get("description") or item.get("title") or "")
+        segments = [f"- {description}:"]
+        if style_label:
+            segments.append(style_label)
+        detail_parts: list[str] = []
+        if method:
+            detail_parts.append(method)
+        if price_text:
+            detail_parts.append(f"about {price_text} each")
+        detail_text = ", ".join(detail_parts)
+        item_line = " ".join(segments)
+        if detail_text:
+            item_line = f"{item_line} {detail_text}."
+        else:
+            item_line = item_line + "."
+        lines.append(item_line)
+        if availability:
+            availability_line = availability[0].upper() + availability[1:] if len(availability) > 1 else availability.upper()
+            lines.append(availability_line + ".")
+        colors = list(item.get("supplier_backed_colors") or [])
+        if colors:
+            lines.append(f"Supplier-backed colors in sync: {', '.join(colors[:5])}.")
+    lines.extend(quote_context.get("assumption_lines") or [])
+    lines.append("If this lane looks right, reply with the styles and color you want and I will turn it into the formal quote.")
+    return lines, []
+
+
+def render_clarification_only_lines(quote_context: dict[str, Any]) -> tuple[list[str], list[str]]:
+    blockers = [normalize_blocker_question(item) for item in (quote_context.get("blocker_questions") or []) if normalize_blocker_question(item)]
+    return [], blockers[:1]
+
+
+def render_formal_quote_ready_lines(quote_context: dict[str, Any]) -> tuple[list[str], list[str]]:
+    price_lane = normalize_space(quote_context.get("price_lane") or "")
+    lines: list[str] = []
+    if price_lane:
+        lines.append(f"The current working price lane is about {price_lane} per shirt across the requested styles.")
+    return lines, []
+
+
+def render_not_a_fit_lines(quote_context: dict[str, Any]) -> tuple[list[str], list[str]]:
+    lines = ["I went through the request and I do not want to point you into a messy lane that we cannot support cleanly."]
+    summary = normalize_space(quote_context.get("customer_reply_guidance_summary") or "")
+    if summary:
+        lines.append(summary)
+    lines.append("If you want to simplify the scope through email, I can tell you the cleanest version we can actually take on.")
+    return lines, []
+
+
+def render_quote_context_reply(reply_mode: str, quote_context: dict[str, Any]) -> tuple[str, list[str], list[dict[str, str]]]:
+    if not quote_context:
+        return "", [], []
+    lines: list[str] = []
+    blockers: list[str] = []
+    if reply_mode == "guided_estimate":
+        lines, blockers = render_guided_estimate_lines(quote_context)
+    elif reply_mode == "clarification_only":
+        lines, blockers = render_clarification_only_lines(quote_context)
+    elif reply_mode == "formal_quote_ready":
+        lines, blockers = render_formal_quote_ready_lines(quote_context)
+    elif reply_mode == "not_a_fit":
+        lines, blockers = render_not_a_fit_lines(quote_context)
+    reference_links = normalize_reference_link_entries(list(quote_context.get("reference_links") or []))
+    return "\n\n".join(item for item in lines if normalize_space(item)), blockers, reference_links
+
+
+def render_html_text_with_links(text: str) -> str:
+    segments: list[str] = []
+    last = 0
+    for match in re.finditer(r"https?://[^\s<>\"]+", text or "", flags=re.IGNORECASE):
+        start, end = match.span()
+        url = match.group(0).rstrip(").,;]>")
+        trailing = match.group(0)[len(url) :]
+        if start > last:
+            segments.append(html.escape(text[last:start]))
+        segments.append(f"<a href=\"{html.escape(url)}\">{html.escape(url)}</a>")
+        if trailing:
+            segments.append(html.escape(trailing))
+        last = end
+    if last < len(text or ""):
+        segments.append(html.escape((text or "")[last:]))
+    return "".join(segments)
+
+
+def contains_html_markup(text: str) -> bool:
+    return bool(re.search(r"<[A-Za-z][^>]*>", text or ""))
+
+
+def render_html_paragraphs(text: str) -> str:
+    paragraphs: list[str] = []
+    for block in re.split(r"\n\s*\n", (text or "").replace("\r\n", "\n").strip()):
+        trimmed = block.strip()
+        if not trimmed:
+            continue
+        lines = [render_html_text_with_links(line.strip()) for line in trimmed.split("\n") if line.strip()]
+        if not lines:
+            continue
+        paragraphs.append(f"<p>{'<br>'.join(lines)}</p>")
+    return "".join(paragraphs)
+
+
+def strip_manual_signature_lines(text: str, policy: dict[str, Any]) -> str:
+    lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    markers = list(((policy.get("canonicalization") or {}).get("manual_signature_markers")) or [])
+    out = list(lines)
+    for idx in range(len(lines) - 1, -1, -1):
+        lowered = normalize_space(lines[idx]).lower()
+        if lowered in markers:
+            out = lines[:idx]
+            break
+    cleaned = "\n".join(out).strip()
+    return cleaned or text
+
+
+def apply_customer_safe_rewrites(text: str, policy: dict[str, Any]) -> tuple[str, list[str]]:
+    updated = str(text or "")
+    replacements: list[str] = []
+    for item in (policy.get("customer_safe_replacements") or []):
+        find = normalize_space(item.get("find") or "")
+        replace = normalize_space(item.get("replace") or "")
+        if not find or not replace:
+            continue
+        pattern = re.compile(re.escape(find), flags=re.IGNORECASE)
+        if not pattern.search(updated):
+            continue
+        updated = pattern.sub(replace, updated)
+        replacements.append(f"{find}->{replace}")
+    for item in (policy.get("deadline_rewrites") or []):
+        match_regex = str(item.get("match_regex") or "").strip()
+        replace = normalize_space(item.get("replace") or "")
+        if not match_regex or not replace:
+            continue
+        pattern = re.compile(match_regex)
+        if not pattern.search(updated):
+            continue
+        updated = pattern.sub(replace, updated)
+        replacements.append(f"{match_regex}->{replace}")
+    return updated, replacements
+
+
+def apply_customer_greeting(body: str, content_type: str, salutation: str) -> str:
+    salutation = normalize_space(salutation)
+    if not salutation:
+        return body
+    trimmed = str(body or "").strip()
+    if not trimmed:
+        return salutation
+    if normalize_content_type(content_type) == "HTML":
+        if contains_html_markup(trimmed):
+            greeting_pattern = re.compile(r"^\s*<p>\s*(Hi|Hello|Greetings|Dear)\s+([^,<]+),\s*", flags=re.IGNORECASE)
+            if greeting_pattern.search(trimmed):
+                return greeting_pattern.sub(f"<p>{html.escape(salutation)} ", trimmed, count=1)
+            text_salutation = re.compile(r"^\s*(Hi|Hello|Greetings|Dear)\s+([^,<]+),\s*", flags=re.IGNORECASE)
+            if text_salutation.search(trimmed):
+                return text_salutation.sub(f"<p>{html.escape(salutation)} ", trimmed, count=1)
+            return f"<p>{html.escape(salutation)}</p>{trimmed}"
+        greeting_pattern = re.compile(r"^\s*(Hi|Hello|Greetings|Dear)\s+([^,\n]+),\s*", flags=re.IGNORECASE)
+        if greeting_pattern.search(trimmed):
+            return greeting_pattern.sub(salutation + "\n\n", trimmed, count=1)
+        return f"{salutation}\n\n{trimmed}"
+    greeting_pattern = re.compile(r"^\s*(Hi|Hello|Greetings|Dear)\s+([^,\n]+),\s*", flags=re.IGNORECASE)
+    if greeting_pattern.search(trimmed):
+        return greeting_pattern.sub(salutation + "\n\n", trimmed, count=1)
+    return f"{salutation}\n\n{trimmed}"
+
+
+def render_operator_body_fragment(body: str, content_type: str, target_content_type: str) -> str:
+    content_type = normalize_content_type(content_type)
+    target_content_type = normalize_content_type(target_content_type)
+    trimmed = body.strip()
+    if target_content_type.upper() == "HTML":
+        if content_type == "HTML" and contains_html_markup(trimmed):
+            return trimmed
+        return render_html_paragraphs(trimmed)
+
+    if content_type == "HTML":
+        text = re.sub(r"(?is)<(script|style).*?>.*?</\\1>", "", trimmed)
+        text = re.sub(r"(?i)<br\\s*/?>", "\n", text)
+        text = re.sub(r"(?i)</p>", "\n\n", text)
+        text = re.sub(r"(?i)</div>", "\n", text)
+        text = re.sub(r"(?s)<[^>]+>", "", text)
+        fragment = html.unescape(text).strip()
+    else:
+        fragment = trimmed
+    return fragment
+
+
+def split_leading_greeting(fragment: str, content_type: str) -> tuple[str, str]:
+    text = str(fragment or "").strip()
+    if not text:
+        return "", ""
+    if normalize_content_type(content_type) == "HTML":
+        match = re.match(r"^\s*(<p>\s*(?:Hi|Hello|Greetings|Dear)\s+.*?</p>)", text, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            return "", text
+        greeting = match.group(1).strip()
+        rest = text[match.end() :].lstrip()
+        return greeting, rest
+    match = re.match(r"^\s*((?:Hi|Hello|Greetings|Dear)\s+[^,\n]+,\s*)(?:\n\s*\n)?", text, flags=re.IGNORECASE)
+    if not match:
+        return "", text
+    greeting = match.group(1).strip()
+    rest = text[match.end() :].lstrip()
+    return greeting, rest
+
+
+def first_marker_index(content: str, markers: list[str], *, lower: bool = False) -> int:
+    haystack = content.lower() if lower else content
+    indexes = []
+    for marker in markers:
+        needle = marker.lower() if lower else marker
+        idx = haystack.find(needle)
+        if idx >= 0:
+            indexes.append(idx)
+    return min(indexes) if indexes else -1
+
+
+def extract_reply_chain_fragment(content: str, content_type: str, policy: dict[str, Any]) -> str:
+    if not content:
+        return ""
+    canonicalization = dict(policy.get("canonicalization") or {})
+    if normalize_content_type(content_type) == "HTML":
+        index = first_marker_index(content, list(canonicalization.get("html_chain_markers") or []))
+        if index >= 0:
+            return content[index:].strip()
+        return content.strip()
+    index = first_marker_index(content, list(canonicalization.get("text_chain_markers") or []), lower=True)
+    if index >= 0:
+        return content[index:].strip()
+    return content.strip()
+
+
+def draft_template_from_message(message: dict[str, Any], policy: dict[str, Any]) -> dict[str, str]:
+    body = dict(message.get("body") or {})
+    content_type = normalize_content_type(str(body.get("contentType") or "HTML"))
+    content = str(body.get("content") or "").strip()
+    quoted_fragment = extract_reply_chain_fragment(content, content_type, policy)
+    return {
+        "content_type": content_type,
+        "quoted_fragment": quoted_fragment or content,
+    }
+
+
+def render_operator_fragment(
+    body: str,
+    content_type: str,
+    author_mode: str,
+    mailbox: str,
+    target_content_type: str,
+    policy: dict[str, Any],
+    *,
+    outbound_receipt_id: str,
+    reply_mode: str,
+    current_action: str,
+    blocker_questions: list[str],
+    reference_links: list[dict[str, str]],
+    reference_visuals: list[dict[str, str]],
+    draft_state_lines: list[str],
+    operator_policy_lines: list[str],
+    suppress_auto_intro_lines: bool,
+) -> tuple[str, str]:
+    body_fragment = render_operator_body_fragment(body, content_type, target_content_type)
+    if author_mode == "ronny":
+        return body_fragment, "operator_override_ronny"
+
+    greeting_fragment, remaining_body_fragment = split_leading_greeting(body_fragment, target_content_type)
+    intro_lines = [] if suppress_auto_intro_lines else (draft_state_lines + operator_policy_lines + house_voice_intro(reply_mode, current_action, policy))
+    blocker_block = render_blocker_block(blocker_questions, target_content_type, policy["blocker_prompt"])
+    link_block = render_reference_block(reference_links, policy["reference_links_label"], target_content_type)
+    visual_block = render_reference_block(reference_visuals, policy["reference_visuals_label"], target_content_type)
+    footer_lines = [
+        line.format(mailbox=mailbox, outbound_receipt_id=outbound_receipt_id)
+        for line in policy["footer_lines"]
+    ]
+
+    if target_content_type.upper() == "HTML":
+        sections: list[str] = []
+        if greeting_fragment:
+            sections.append(greeting_fragment)
+        if intro_lines:
+            sections.append(render_html_paragraphs("\n".join(intro_lines)))
+        if remaining_body_fragment:
+            sections.append(remaining_body_fragment)
+        if blocker_block:
+            sections.append(blocker_block)
+        if link_block:
+            sections.append(link_block)
+        if visual_block:
+            sections.append(visual_block)
+        footer = "<p>" + "<br>".join(
+            (
+                f"<a href=\"mailto:{html.escape(line)}\">{html.escape(line)}</a>"
+                if line == mailbox
+                else html.escape(line)
+            )
+            for line in footer_lines
+        ) + "</p>"
+        sections.append(footer)
+        return "".join(section for section in sections if section.strip()), "canonical_morpheus_signature_with_receipt"
+
+    sections = []
+    if greeting_fragment:
+        sections.append(greeting_fragment)
+    if intro_lines:
+        sections.append("\n".join(intro_lines))
+    if remaining_body_fragment:
+        sections.append(remaining_body_fragment)
+    if blocker_block:
+        sections.append(blocker_block)
+    if link_block:
+        sections.append(link_block)
+    if visual_block:
+        sections.append(visual_block)
+    footer = "\n".join(footer_lines)
+    sections.append(footer)
+    return "\n\n".join(section for section in sections if section.strip()), "canonical_morpheus_signature_with_receipt"
+
+
+def merge_reply_body(
+    body: str,
+    content_type: str,
+    author_mode: str,
+    mailbox: str,
+    reply_template: dict[str, str],
+    policy: dict[str, Any],
+    *,
+    outbound_receipt_id: str,
+    reply_mode: str,
+    current_action: str,
+    blocker_questions: list[str],
+    reference_links: list[dict[str, str]],
+    reference_visuals: list[dict[str, str]],
+    draft_state_lines: list[str],
+    operator_policy_lines: list[str],
+    suppress_auto_intro_lines: bool,
+) -> tuple[str, str, str, str]:
+    existing_content_type = normalize_content_type(str(content_type or reply_template.get("content_type") or "Text"))
+    existing_content = str(reply_template.get("quoted_fragment") or "").strip()
+    operator_fragment, signature_mode = render_operator_fragment(
+        body,
+        content_type,
+        author_mode,
+        mailbox,
+        existing_content_type,
+        policy,
+        outbound_receipt_id=outbound_receipt_id,
+        reply_mode=reply_mode,
+        current_action=current_action,
+        blocker_questions=blocker_questions,
+        reference_links=reference_links,
+        reference_visuals=reference_visuals,
+        draft_state_lines=draft_state_lines,
+        operator_policy_lines=operator_policy_lines,
+        suppress_auto_intro_lines=suppress_auto_intro_lines,
+    )
+    if not existing_content:
+        return operator_fragment, existing_content_type, signature_mode, operator_fragment
+    if existing_content_type.upper() == "HTML":
+        return f"{operator_fragment}<br><br>{existing_content}", existing_content_type, signature_mode, operator_fragment
+    return f"{operator_fragment}\n\n{existing_content}", existing_content_type, signature_mode, operator_fragment
+
+
+def ensure_team_mailbox(author_mode: str, mailbox: str, expected_mailbox: str) -> None:
+    if author_mode != "morpheus":
+        return
+    if mailbox.strip().lower() != expected_mailbox.strip().lower():
+        fail(f"Morpheus outbound mail must use {expected_mailbox}; refusing mailbox {mailbox}")
+
+
+def resolve_attachment(path_text: str, minio_root: Path) -> dict[str, Any]:
+    candidate = Path(path_text).expanduser().resolve()
+    if not candidate.exists() or not candidate.is_file():
+        fail(f"attachment file not found: {path_text}")
+    try:
+        relative_key = candidate.relative_to(minio_root).as_posix()
+    except ValueError as exc:
+        fail(f"attachment must be a canonical MinIO file under {minio_root}: {path_text}")
+        raise exc
+    return {
+        "path": candidate,
+        "relative_key": relative_key,
+        "name": candidate.name,
+        "size_bytes": candidate.stat().st_size,
+        "sha256": file_sha256(candidate),
+    }
+
+
+def append_index_line(index_file: Path, lock_file: Path, payload: dict[str, Any]) -> None:
+    line = json.dumps(payload, sort_keys=True)
+    index_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with lock_file.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            with index_file.open("a", encoding="utf-8") as index_handle:
+                index_handle.write(line)
+                index_handle.write("\n")
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def write_record(state_root: Path, reply_draft_id: str, record: dict[str, Any], now: datetime) -> tuple[Path, Path]:
+    records_dir = state_root / "mint" / "customer-reply-drafts" / "records" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{reply_draft_id}.json"
+    index_file = state_root / "mint" / "customer-reply-drafts" / "index.ndjson"
+    lock_file = state_root / "mint" / "customer-reply-drafts" / ".index.lock"
+    records_dir.mkdir(parents=True, exist_ok=True)
+    record_file.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    append_index_line(
+        index_file,
+        lock_file,
+        {
+            "reply_draft_id": reply_draft_id,
+            "author_mode": record.get("author_mode"),
+            "mailbox": record.get("mailbox"),
+            "inbox_item_id": record.get("inbox_item_id"),
+            "source_message_id": record.get("source_message_id"),
+            "source_conversation_id": record.get("source_conversation_id"),
+            "draft_id": record.get("draft_id"),
+            "thread_mode": record.get("thread_mode"),
+            "attachment_count": len(record.get("attachments") or []),
+            "customer": record.get("customer"),
+            "job": record.get("job"),
+            "stored_at_utc": record.get("stored_at_utc"),
+            "record_file": str(record_file),
+        },
+    )
+    return record_file, index_file
+
+
+def outbound_binding_identity(quote_binding: dict[str, Any], draft_subject: str) -> str:
+    for key in ("packet_id", "quote_subject"):
+        value = normalize_space(quote_binding.get(key) or "")
+        if value:
+            return value
+    job_number = normalize_space(quote_binding.get("job_number") or "")
+    job_nickname = normalize_space(quote_binding.get("job_nickname") or "")
+    if job_number and job_nickname:
+        return f"{job_number} {job_nickname}"
+    return normalize_space(draft_subject)
+
+
+def outbound_binding_key(mailbox: str, external_message: dict[str, Any], quote_binding: dict[str, Any], draft_subject: str) -> str:
+    stable = "|".join(
+        [
+            mailbox.strip().lower(),
+            normalize_space(str(external_message.get("conversationId") or "")),
+            normalize_space(message_sender(external_message)).lower(),
+            outbound_binding_identity(quote_binding, draft_subject).lower(),
+        ]
+    )
+    return hashlib.sha256(stable.encode("utf-8")).hexdigest()[:20]
+
+
+def binding_dirs(state_root: Path) -> tuple[Path, Path, Path]:
+    root = state_root / "mint" / "customer-outbound-bindings"
+    return root / "records", root / "index.ndjson", root / ".index.lock"
+
+
+def load_binding_by_key(state_root: Path, binding_key: str) -> tuple[dict[str, Any], Path | None]:
+    records_dir, index_file, _lock_file = binding_dirs(state_root)
+    for entry in reversed(iter_index_records(index_file)):
+        if str(entry.get("binding_key") or "").strip() != binding_key:
+            continue
+        record_path = Path(str(entry.get("record_file") or "")).expanduser()
+        if not record_path.is_file():
+            candidate = records_dir / f"{entry.get('binding_id')}.json"
+            record_path = candidate if candidate.is_file() else record_path
+        if record_path.is_file():
+            return load_json_file(record_path), record_path
+    return {}, None
+
+
+def legacy_record_file_for_index_entry(state_root: Path, entry: dict[str, Any]) -> Path | None:
+    reply_draft_id = normalize_space(entry.get("reply_draft_id") or "")
+    stored_at = normalize_space(entry.get("stored_at_utc") or "")
+    if not reply_draft_id or not stored_at:
+        return None
+    try:
+        dt = datetime.strptime(stored_at, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+    path = (
+        state_root
+        / "mint"
+        / "customer-reply-drafts"
+        / "records"
+        / dt.strftime("%Y")
+        / dt.strftime("%m")
+        / dt.strftime("%d")
+        / f"{reply_draft_id}.json"
+    )
+    return path if path.is_file() else None
+
+
+def legacy_binding_matches(record: dict[str, Any], external_message: dict[str, Any], quote_binding: dict[str, Any], mailbox: str) -> bool:
+    if normalize_space(record.get("mailbox") or "").lower() != mailbox.strip().lower():
+        return False
+    if normalize_space(record.get("source_conversation_id") or "") != normalize_space(external_message.get("conversationId") or ""):
+        return False
+    packet_id = normalize_space(quote_binding.get("packet_id") or "")
+    if packet_id:
+        return normalize_space(((record.get("quote_context") or {}).get("packet_id")) or "") == packet_id
+    quote_subject = normalize_space(quote_binding.get("quote_subject") or "")
+    if quote_subject:
+        return normalize_space(record.get("draft_subject") or "") == quote_subject
+    job_number = normalize_space(quote_binding.get("job_number") or "")
+    return not job_number or normalize_space(record.get("job_number") or "") == job_number
+
+
+def bootstrap_legacy_binding(state_root: Path, external_message: dict[str, Any], quote_binding: dict[str, Any], mailbox: str) -> tuple[dict[str, Any], Path | None]:
+    index_file = state_root / "mint" / "customer-reply-drafts" / "index.ndjson"
+    for entry in reversed(iter_index_records(index_file)):
+        record_path = legacy_record_file_for_index_entry(state_root, entry)
+        if not record_path:
+            continue
+        record = load_json_file(record_path)
+        if not record or not legacy_binding_matches(record, external_message, quote_binding, mailbox):
+            continue
+        return record, record_path
+    return {}, None
+
+
+def write_binding_record(state_root: Path, binding_id: str, record: dict[str, Any]) -> tuple[Path, Path]:
+    records_dir, index_file, lock_file = binding_dirs(state_root)
+    record_file = records_dir / f"{binding_id}.json"
+    records_dir.mkdir(parents=True, exist_ok=True)
+    record_file.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    append_index_line(
+        index_file,
+        lock_file,
+        {
+            "binding_id": binding_id,
+            "binding_key": record.get("binding_key"),
+            "mailbox": record.get("mailbox"),
+            "external_message_id": record.get("external_message_id"),
+            "external_conversation_id": record.get("external_conversation_id"),
+            "draft_id": record.get("draft_id"),
+            "packet_id": ((record.get("quote_binding") or {}).get("packet_id")),
+            "quote_subject": ((record.get("quote_binding") or {}).get("quote_subject")),
+            "record_file": str(record_file),
+            "updated_at_utc": record.get("updated_at_utc"),
+        },
+    )
+    return record_file, index_file
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    body_text, body_input_mode = resolve_body_text(args)
+    now = utc_now()
+    stamp = compact_utc(now)
+    short_id = short_event_suffix(args.message_id, stamp)
+    reply_draft_id = f"MRD-{stamp}-{short_id}"
+    outbound_receipt_id = f"MOR-OUT-{stamp}-{short_id}"
+
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    minio_root = resolve_minio_root()
+    policy_contract = resolve_policy_contract(spine_root)
+    policy = load_policy(policy_contract)
+    quote_policy = load_quote_policy(spine_root)
+    operator_policy = load_operator_policy(spine_root)
+    contact_graph_policy = load_contact_graph_policy(spine_root)
+    inbox_machine_contract = load_machine_contract(spine_root)
+    internal_domains = list(((policy.get("canonicalization") or {}).get("internal_domains")) or ["mintprints.com"])
+    requested_content_type = resolve_requested_content_type(args.content_type, policy["default_content_type"])
+    ensure_team_mailbox(args.author_mode, args.mailbox, policy["default_mailbox"])
+    requested_reply_mode = args.reply_mode
+    source_message, source_receipt = run_cap_capture(
+        spine_root,
+        "microsoft.mail.get",
+        ["--message-id", args.message_id, "--mailbox", args.mailbox],
+        failure_guidance=reply_chain_mailbox_guidance(args.mailbox),
+    )
+    source_disposition = resolve_message_disposition(spine_root, source_message) if args.author_mode == "morpheus" else {}
+    allow_unsafe_override = str(os.environ.get("MORPHEUS_ALLOW_UNSAFE_REPLY_OVERRIDE") or "").strip() == "1"
+    manual_break_glass_general = (
+        args.author_mode == "morpheus"
+        and allow_unsafe_override
+        and body_input_mode in {"inline", "file"}
+        and requested_reply_mode == "general"
+    )
+    auto_quote_context_allowed, auto_quote_context_reason = auto_quote_context_gate(args, state_root, source_message)
+    source_disposition_name = normalize_space(source_disposition.get("disposition") or "")
+    if (
+        args.author_mode == "morpheus"
+        and body_input_mode in {"inline", "file"}
+        and bool(source_disposition.get("reply_allowed"))
+        and not allow_unsafe_override
+    ):
+        fail(
+            "Morpheus customer-lane drafting blocks freeform --body/--body-file; use the governed draft gate or set "
+            "MORPHEUS_ALLOW_UNSAFE_REPLY_OVERRIDE=1 for deliberate break-glass use"
+        )
+    structured_truth_allowed = source_disposition_name not in {"unsupported_scope", "supplier_marketing", "risky_junk"}
+    quote_context = (
+        resolve_quote_context(spine_root, state_root, args.mailbox, args.message_id)
+        if auto_quote_context_allowed and args.author_mode == "morpheus" and structured_truth_allowed
+        else {}
+    )
+    lifecycle_context = (
+        resolve_lifecycle_context(spine_root, state_root, args.mailbox, args.message_id)
+        if args.author_mode == "morpheus" and structured_truth_allowed
+        else {}
+    )
+    if args.author_mode == "morpheus":
+        lifecycle_reason = lifecycle_conflict_reason(lifecycle_context, quote_context, source_message, internal_domains)
+        if lifecycle_reason:
+            lifecycle_context = sanitized_lifecycle_context(lifecycle_context, lifecycle_reason)
+    quote_binding = resolve_quote_binding(args, quote_context) if args.author_mode == "morpheus" else {}
+    if args.author_mode == "morpheus":
+        quote_binding = merge_quote_binding_from_lifecycle(quote_binding, lifecycle_context)
+        if not normalize_space(args.current_action) and normalize_space(lifecycle_context.get("current_action") or ""):
+            args.current_action = normalize_space(lifecycle_context.get("current_action") or "")
+    effective_reply_mode = quote_mode_from_context(requested_reply_mode, quote_context)
+    effective_reply_mode = reply_mode_from_lifecycle(requested_reply_mode, effective_reply_mode, lifecycle_context)
+    if args.author_mode == "morpheus":
+        if source_disposition_name in {"supplier_marketing", "risky_junk", "vendor_revision"}:
+            fail(f"customer-facing drafting is blocked for disposition {source_disposition_name}")
+        if source_disposition_name == "unsupported_scope":
+            if requested_reply_mode not in {"general", "not_a_fit"}:
+                fail("unsupported_scope customer threads must use the governed not_a_fit reply mode")
+            effective_reply_mode = "not_a_fit"
+            quote_context = {}
+            lifecycle_context = {}
+            quote_binding = clear_structured_quote_binding(quote_binding)
+        elif (
+            source_disposition_name == "waiting_on_customer"
+            and requested_reply_mode == "general"
+            and not manual_break_glass_general
+        ):
+            effective_reply_mode = "clarification_only"
+    generated_quote_body = ""
+    generated_blockers: list[str] = []
+    generated_reference_links: list[dict[str, str]] = []
+    if args.author_mode == "morpheus":
+        generated_quote_body, generated_blockers, generated_reference_links = render_quote_context_reply(effective_reply_mode, quote_context)
+    generated_lifecycle_body = normalize_space(lifecycle_context.get("generated_body") or "")
+    generated_lifecycle_blockers = [
+        clean_sentence(item).replace(".?", "?")
+        for item in (lifecycle_context.get("blockers") or [])
+        if normalize_space(item)
+    ]
+    generated_lifecycle_reference_links = normalize_reference_link_objects(list(lifecycle_context.get("reference_links") or []))
+    if generated_lifecycle_body and (
+        lifecycle_should_override_generated_body(effective_reply_mode, lifecycle_context) or not generated_quote_body
+    ):
+        generated_quote_body = generated_lifecycle_body
+        generated_blockers = generated_lifecycle_blockers
+        generated_reference_links = normalize_reference_link_objects(
+            generated_reference_links + generated_lifecycle_reference_links
+        )
+    if generated_quote_body and body_input_mode == "auto" and (
+        requested_reply_mode == "general"
+        or effective_reply_mode in {"guided_estimate", "clarification_only", "formal_quote_ready", "art_revision", "in_progress", "not_a_fit"}
+    ):
+        body_text = generated_quote_body
+        body_input_mode = "auto_generated_lifecycle_context" if generated_lifecycle_body and generated_quote_body == generated_lifecycle_body else "auto_generated_quote_context"
+    if not body_text.strip():
+        if bodyless_structured_reply_allowed(
+            author_mode=args.author_mode,
+            reply_mode=effective_reply_mode,
+            quote_binding=quote_binding,
+            current_action=args.current_action,
+            blocker_questions=dedupe_preserve([*args.blocker_question, *generated_blockers]),
+        ):
+            body_input_mode = f"structured_{effective_reply_mode}"
+        elif args.author_mode == "morpheus" and not auto_quote_context_allowed:
+            fail(auto_quote_context_reason)
+        else:
+            fail("provide --body/--body-file or use a message with governed quote/state context that can auto-render the reply body")
+    args.reply_mode = effective_reply_mode
+    reference_links = parse_reference_entries(args.reference_link, "reference_link")
+    if generated_reference_links and not manual_break_glass_general:
+        reference_links = dedupe_preserve(
+            [json.dumps(item, sort_keys=True) for item in (reference_links + generated_reference_links)]
+        )
+        reference_links = normalize_reference_link_entries(reference_links)
+    if normalize_space(quote_binding.get("quote_url") or ""):
+        quote_label = normalize_space(quote_binding.get("quote_subject") or "") or "View quote"
+        reference_links = normalize_reference_link_entries(
+            dedupe_preserve(
+                [
+                    json.dumps(item, sort_keys=True)
+                    for item in (
+                        reference_links
+                        + [{"label": quote_label, "url": normalize_space(quote_binding.get("quote_url") or "")}]
+                    )
+                ]
+            )
+        )
+    reference_visuals = parse_reference_entries(args.reference_visual, "reference_visual")
+    attachments = [resolve_attachment(path_text, minio_root) for path_text in args.attach]
+
+    target_message = source_message
+    external_thread_resolution = {
+        "selection_mode": "source_message",
+        "participant_roles": [summarize_thread_message(source_message, role="internal", confidence="high", score=30, reasons=["direct_message"])],
+        "reply_target_role": "customer" if not is_internal_email(message_sender(source_message), list(((policy.get("canonicalization") or {}).get("internal_domains")) or ["mintprints.com"])) else "internal",
+        "confidence": "high",
+    }
+    external_thread_receipt = ""
+    external_thread_get_receipt = ""
+    participant_blocker = ""
+    source_promote_metadata = parse_promote_metadata(source_message, inbox_machine_contract) if args.author_mode == "morpheus" else {}
+    if args.author_mode == "morpheus":
+        target_message, external_thread_resolution, external_thread_receipt, participant_blocker = resolve_external_customer_message(
+            spine_root,
+            state_root,
+            args.mailbox,
+            source_message,
+            args.message_id,
+            quote_binding,
+            policy,
+            customer_arg=args.customer,
+            job_arg=args.job,
+            job_number=normalize_space(quote_binding.get("job_number") or args.job_number or parse_job_hint(args.job).get("job_number") or ""),
+            job_nickname=normalize_space(quote_binding.get("job_nickname") or args.job_nickname or parse_job_hint(args.job).get("job_nickname") or ""),
+        )
+        if external_thread_resolution.get("reply_target_role") != "customer" and not source_promote_metadata:
+            fail(participant_blocker or "Need the real customer thread before I can draft customer-facing mail.")
+    if (
+        args.author_mode == "morpheus"
+        and normalize_space(str(target_message.get("id") or ""))
+        and normalize_space(str(target_message.get("id") or "")) != args.message_id
+        and not addresses_from_message(target_message, "toRecipients")
+        and not addresses_from_message(target_message, "ccRecipients")
+    ):
+        target_message, external_thread_get_receipt = run_cap_capture(
+            spine_root,
+            "microsoft.mail.get",
+            ["--message-id", str(target_message.get("id") or ""), "--mailbox", args.mailbox],
+            failure_guidance=reply_chain_mailbox_guidance(args.mailbox),
+        )
+    target_promote_metadata = parse_promote_metadata(target_message, inbox_machine_contract) if args.author_mode == "morpheus" else {}
+    fresh_outbound_mode = bool(target_promote_metadata)
+    if not reply_to_address(target_message) and not fresh_outbound_mode:
+        fail("could not resolve reply recipient from source message")
+    target_disposition = resolve_message_disposition(spine_root, target_message) if args.author_mode == "morpheus" else {}
+    target_disposition_name = normalize_space(target_disposition.get("disposition") or "")
+    repair_items: list[dict[str, Any]] = []
+    lifecycle_gate_resolution = {
+        "mode": "pass",
+        "reason": "",
+    }
+    if args.author_mode == "morpheus":
+        if not bool(target_disposition.get("reply_allowed")):
+            fail(f"customer-facing drafting is blocked for disposition {target_disposition_name or 'unknown'}")
+        if target_disposition_name == "unsupported_scope":
+            effective_reply_mode = "not_a_fit"
+            if quote_binding_has_structured_context(quote_binding) or lifecycle_context:
+                repair_items.append(
+                    record_customer_repair_item(
+                        state_root,
+                        issue_type="unsupported_scope_foreign_quote_binding",
+                        mailbox=args.mailbox,
+                        message_id=args.message_id,
+                        source_subject=message_subject(target_message),
+                        source_from=message_sender(target_message),
+                        capability=capability_name(),
+                        note="unsupported_scope thread carried structured quote/lifecycle context; cleared before drafting",
+                        expected={
+                            "disposition": target_disposition_name,
+                            "reply_mode": "not_a_fit",
+                        },
+                        observed={
+                            "quote_binding": quote_binding,
+                            "lifecycle_context": lifecycle_context,
+                        },
+                    )
+                )
+            quote_binding = clear_structured_quote_binding(quote_binding)
+            quote_context = {}
+            lifecycle_context = {}
+        elif (
+            target_disposition_name == "waiting_on_customer"
+            and requested_reply_mode == "general"
+            and not manual_break_glass_general
+        ):
+            quote_binding = clear_structured_quote_binding(quote_binding)
+            quote_context = {}
+            lifecycle_context = {}
+            effective_reply_mode = "clarification_only"
+        elif target_disposition_name == "customer_actionable":
+            binding_conflict = quote_binding_conflict_reason(quote_binding, quote_context, target_message, internal_domains)
+            if binding_conflict:
+                repair = record_customer_repair_item(
+                    state_root,
+                    issue_type="reply_draft_anchor_mismatch",
+                    mailbox=args.mailbox,
+                    message_id=args.message_id,
+                    source_subject=message_subject(target_message),
+                    source_from=message_sender(target_message),
+                    capability=capability_name(),
+                    note=binding_conflict,
+                    expected={
+                        "source_from": message_sender(target_message),
+                        "quote_context_customer_email": quote_context.get("customer_email"),
+                        "quote_context_packet_id": quote_context.get("packet_id"),
+                    },
+                    observed={
+                        "quote_binding_customer_email": quote_binding.get("customer_email"),
+                        "quote_binding_packet_id": quote_binding.get("packet_id"),
+                        "quote_binding_quote_subject": quote_binding.get("quote_subject"),
+                    },
+                )
+                fail(f"{binding_conflict}; repair item recorded at {repair['record_file']}")
+        lifecycle_gate_resolution = resolve_lifecycle_draft_gate_resolution(
+            args=args,
+            disposition_name=target_disposition_name,
+            reply_mode=args.reply_mode,
+            target_message=target_message,
+            quote_context=quote_context,
+            quote_binding=quote_binding,
+            lifecycle_context=lifecycle_context,
+        )
+    if (
+        args.author_mode == "morpheus"
+        and body_input_mode in {"inline", "file"}
+        and target_disposition_name in {"customer_actionable", "waiting_on_customer", "unsupported_scope"}
+        and not allow_unsafe_override
+    ):
+        fail(
+            "Morpheus customer-lane drafting blocks freeform --body/--body-file; use the governed draft gate or set "
+            "MORPHEUS_ALLOW_UNSAFE_REPLY_OVERRIDE=1 for deliberate break-glass use"
+        )
+    args.reply_mode = effective_reply_mode
+    customer_contact = resolve_message_customer_contact(target_message)
+    personalization = resolve_customer_personalization(
+        spine_root,
+        email=customer_contact.get("email") or "",
+        display_name=customer_contact.get("display_name") or "",
+    )
+    customer_row = dict(personalization.get("customer") or {})
+    customer_quote_intelligence = dict(personalization.get("quote_intelligence") or {})
+    customer_company = normalize_space(
+        customer_row.get("company")
+        or (((customer_quote_intelligence.get("customer_context_match") or {}).get("selector") or {}).get("company") or "")
+    )
+    thread_participant_emails = [
+        item
+        for item in [
+            reply_to_address(target_message),
+            *addresses_from_message(target_message, "toRecipients"),
+            *addresses_from_message(target_message, "ccRecipients"),
+        ]
+        if normalize_space(item)
+    ]
+    thread_domains = [
+        item
+        for item in [extract_email_domain(customer_contact.get("email") or ""), *[extract_email_domain(value) for value in thread_participant_emails]]
+        if normalize_space(item)
+    ]
+    contact_graph_match = resolve_contact_graph(
+        state_root,
+        email=customer_contact.get("email") or "",
+        company=customer_company,
+        domains=thread_domains,
+        participant_emails=thread_participant_emails,
+    )
+    operator_policy_text = "\n".join(
+        part
+        for part in (
+            str(source_message.get("subject") or ""),
+            latest_customer_message_text(source_message),
+        )
+        if normalize_space(part)
+    )
+    operator_policy_match = evaluate_operator_policy(operator_policy_text, operator_policy)
+    greeting_selection = select_thread_contact_relationship(
+        contact_graph_match,
+        target_message,
+        mailbox=args.mailbox,
+        internal_domains=internal_domains,
+        policy=contact_graph_policy,
+    )
+    effective_identity = dict(personalization.get("identity") or {})
+    if isinstance(greeting_selection.get("primary_contact"), dict) and greeting_selection.get("primary_contact"):
+        effective_identity = apply_contact_identity(effective_identity, greeting_selection["primary_contact"])
+    packet_customer_ref = packet_customer_ref_from_context(
+        quote_context=quote_context,
+        quote_binding=quote_binding,
+        lifecycle_context=lifecycle_context,
+    )
+    packet_contact_name = contact_name_from_packet_evidence(
+        quote_context=quote_context,
+        quote_binding=quote_binding,
+        lifecycle_context=lifecycle_context,
+    )
+    packet_evidence_name = greeting_name_from_packet_evidence(
+        quote_context=quote_context,
+        quote_binding=quote_binding,
+        lifecycle_context=lifecycle_context,
+    )
+    resolved_name_candidate = (
+        normalize_space(quote_binding.get("customer_name") or "")
+        or normalize_space(packet_customer_ref.get("resolved_name") or "")
+        or normalize_space(customer_contact.get("display_name") or "")
+    )
+    display_contact_candidate = normalize_space(customer_contact.get("display_name") or "")
+    if display_contact_candidate and display_contact_candidate == resolved_name_candidate:
+        display_contact_candidate = ""
+    legal_name_greeting_candidate = first_name_greeting_fallback(normalize_space(effective_identity.get("legal_name") or ""))
+    reply_contact_name = (
+        normalize_space(effective_identity.get("legal_name") or "")
+        or packet_contact_name
+        or display_contact_candidate
+    )
+    reply_greeting_name = (
+        normalize_space(greeting_selection.get("greeting_label") or "")
+        or customer_facing_name(effective_identity)
+        or legal_name_greeting_candidate
+        or first_name_greeting_fallback(packet_evidence_name)
+        or first_name_token(packet_contact_name)
+        or first_name_greeting_fallback(display_contact_candidate)
+    )
+    mail_identity_projection = project_mail_identity(
+        customer_ref=packet_customer_ref,
+        resolved_name=resolved_name_candidate,
+        resolved_email=normalize_space(customer_contact.get("email") or ""),
+        contact_name=reply_contact_name,
+        greeting_name=reply_greeting_name,
+        customer_identity=effective_identity,
+        mail_salutation_mode=normalize_space(packet_customer_ref.get("mail_salutation_mode") or "") or projection_mode(reply_contact_name, reply_greeting_name),
+    )
+    mail_identity_validation = validate_mail_identity_projection(mail_identity_projection)
+    if mail_identity_validation:
+        fail("customer mail identity invalid: " + "; ".join(mail_identity_validation))
+    if args.author_mode == "morpheus" and mail_identity_projection.get("mail_salutation_mode") == "neutral":
+        repair_items.append(
+            record_customer_repair_item(
+                state_root,
+                issue_type="customer_mail_identity_neutral_fallback",
+                mailbox=args.mailbox,
+                message_id=args.message_id,
+                source_subject=message_subject(target_message),
+                source_from=message_sender(target_message),
+                capability=capability_name(),
+                note="No governed human greeting name was available, so customer-facing mail rendered with a neutral salutation.",
+                expected={
+                    "mail_salutation_mode": "named",
+                    "contact_name": "governed human contact name",
+                    "greeting_name": "governed greeting token",
+                },
+                observed=mail_identity_projection,
+            )
+        )
+    salutation = salutation_text(
+        mail_identity_projection,
+        named_prefix="Greetings",
+        neutral_text=str((policy.get("identity") or {}).get("neutral_salutation_text") or "Hello,"),
+    )
+    quote_body = strip_manual_signature_lines(body_text, policy)
+    terminology_replacements: list[str] = []
+    if args.author_mode == "morpheus":
+        quote_body, terminology_replacements = apply_house_terminology(quote_body, quote_policy)
+        quote_body, customer_safe_replacements = apply_customer_safe_rewrites(quote_body, policy)
+        terminology_replacements.extend(customer_safe_replacements)
+    blocker_questions = [normalize_blocker_question(item) for item in args.blocker_question if normalize_blocker_question(item)]
+    if generated_blockers and not blocker_questions and not manual_break_glass_general:
+        blocker_questions = [normalize_blocker_question(item) for item in generated_blockers if normalize_blocker_question(item)]
+    draft_state = derive_draft_state(
+        source_message=target_message,
+        body_text=quote_body,
+        requested_content_type=requested_content_type,
+        reply_mode=args.reply_mode,
+        blocker_questions=blocker_questions,
+        attachments=attachments,
+        reference_links=reference_links,
+        reference_visuals=reference_visuals,
+        policy=policy,
+    )
+    resolved_body = apply_customer_greeting(quote_body, requested_content_type, salutation) if args.author_mode == "morpheus" else quote_body
+    enforce_house_voice(resolved_body, args.reply_mode, args.current_action, blocker_questions, args.author_mode, policy)
+    enforce_operator_policy(
+        resolved_body,
+        author_mode=args.author_mode,
+        operator_policy=operator_policy,
+        operator_policy_match=operator_policy_match,
+    )
+    draft_state_lines = draft_state_intro_lines(draft_state, resolved_body, requested_content_type, policy)
+    operator_policy_lines = build_async_first_reply_lines(operator_policy, operator_policy_match)
+    subject_probe_message = source_message
+    if target_message is not source_message:
+        subject_probe_message = target_message
+    draft_subject, resolved_job_number, resolved_job_nickname, subject_source = resolve_governed_subject(
+        args,
+        target_message,
+        subject_probe_message,
+        policy,
+        quote_binding=quote_binding,
+    )
+    if args.author_mode == "morpheus":
+        draft_gate_blockers = customer_lane_draft_gate_blockers(
+            disposition_name=target_disposition_name,
+            reply_mode=args.reply_mode,
+            manual_break_glass_general=manual_break_glass_general,
+            subject_source=subject_source,
+            target_message=target_message,
+            quote_context=quote_context,
+            quote_binding=quote_binding,
+            lifecycle_context=lifecycle_context,
+            lifecycle_gate_resolution=lifecycle_gate_resolution,
+        )
+        if draft_gate_blockers:
+            fail(f"draft gate blocked: {draft_gate_blockers[0]}")
+    if fresh_outbound_mode:
+        canonical_to, canonical_cc, canonical_recipient_binding = canonical_fresh_outbound_recipients(
+            customer_contact,
+            mailbox=args.mailbox,
+            to_override=args.to,
+            cc_override=args.cc,
+        )
+    else:
+        canonical_to, canonical_cc, canonical_recipient_binding = canonical_reply_recipients(
+            target_message,
+            mailbox=args.mailbox,
+            internal_domains=internal_domains,
+            to_override=args.to,
+            cc_override=args.cc,
+        )
+    if not canonical_to:
+        fail("could not resolve canonical external recipients for outbound draft")
+    persist_outbound_binding = args.author_mode != "morpheus" or target_disposition_name == "customer_actionable"
+    binding_target_message = target_message
+    if fresh_outbound_mode:
+        binding_target_message = {
+            "id": normalize_space(target_promote_metadata.get("source_message_id") or target_message.get("id") or args.message_id),
+            "conversationId": "",
+            "internetMessageId": normalize_space(target_message.get("internetMessageId") or ""),
+            "subject": normalize_space(target_promote_metadata.get("source_subject") or target_message.get("subject") or ""),
+            "from": {
+                "emailAddress": {
+                    "address": normalize_space(customer_contact.get("email") or target_promote_metadata.get("source_customer_email") or ""),
+                    "name": normalize_space(customer_contact.get("display_name") or ""),
+                }
+            },
+        }
+    binding_key = outbound_binding_key(args.mailbox, binding_target_message, quote_binding, draft_subject) if persist_outbound_binding else ""
+    binding_id = f"MOB-{binding_key[:12]}" if binding_key else ""
+    existing_binding, existing_binding_file = (load_binding_by_key(state_root, binding_key) if binding_key else ({}, None))
+    legacy_binding_record: dict[str, Any] = {}
+    legacy_binding_file: Path | None = None
+    if persist_outbound_binding and not existing_binding:
+        legacy_binding_record, legacy_binding_file = bootstrap_legacy_binding(state_root, binding_target_message, quote_binding, args.mailbox)
+
+    reply_receipt = ""
+    draft_seed_receipt = ""
+    draft_seed_error = ""
+    reply_message: dict[str, Any] = {}
+    draft_message: dict[str, Any] = {}
+    reply_template: dict[str, str] = {}
+    binding_update_mode = "create_new_binding_draft" if persist_outbound_binding else f"skipped_{target_disposition_name or 'non_actionable_disposition'}"
+    draft_id = ""
+    if existing_binding:
+        draft_id = normalize_space(existing_binding.get("draft_id") or "")
+        reply_template = dict(existing_binding.get("draft_template") or {})
+        binding_update_mode = "update_existing_binding"
+    elif legacy_binding_record:
+        draft_id = normalize_space(legacy_binding_record.get("draft_id") or "")
+        binding_update_mode = "bootstrap_legacy_draft"
+    if draft_id:
+        seed_payload, draft_seed_receipt, draft_seed_error = try_cap_capture(
+            spine_root,
+            "microsoft.mail.get",
+            ["--message-id", draft_id, "--mailbox", args.mailbox],
+        )
+        if seed_payload:
+            reply_message = seed_payload
+            live_reply_template = draft_template_from_message(reply_message, policy)
+            if live_reply_template:
+                reply_template = live_reply_template
+        else:
+            draft_id = ""
+            reply_template = {}
+            if binding_update_mode in {"update_existing_binding", "bootstrap_legacy_draft"}:
+                binding_update_mode = "recreate_missing_binding_draft"
+    if not draft_id and not fresh_outbound_mode:
+        reply_message, reply_receipt = run_cap_capture(
+            spine_root,
+            "microsoft.mail.reply.draft",
+            ["--message-id", str(target_message.get("id") or ""), "--mailbox", args.mailbox],
+            failure_guidance=reply_chain_mailbox_guidance(args.mailbox),
+        )
+        draft_id = str(reply_message.get("id") or "").strip()
+        if not draft_id:
+            fail("reply draft creation did not return a draft id")
+        reply_template = draft_template_from_message(reply_message, policy)
+
+    draft_body, draft_content_type, signature_mode, operator_fragment = merge_reply_body(
+        resolved_body,
+        requested_content_type,
+        args.author_mode,
+        args.mailbox,
+        reply_template,
+        policy,
+        outbound_receipt_id=outbound_receipt_id,
+        reply_mode=args.reply_mode,
+        current_action=args.current_action,
+        blocker_questions=blocker_questions,
+        reference_links=reference_links,
+        reference_visuals=reference_visuals,
+        draft_state_lines=draft_state_lines,
+        operator_policy_lines=operator_policy_lines,
+        suppress_auto_intro_lines=manual_break_glass_general,
+    )
+    contradictions = collect_draft_contradictions(operator_fragment, draft_content_type, draft_state, policy)
+    if contradictions:
+        fail(f"draft coherence check failed: {contradictions[0]}")
+
+    if not draft_id and fresh_outbound_mode:
+        create_args = [
+            "--mailbox",
+            args.mailbox,
+            "--to",
+            canonical_to,
+            "--subject",
+            draft_subject,
+            "--body",
+            draft_body,
+            "--content-type",
+            draft_content_type,
+        ]
+        if canonical_cc:
+            create_args.extend(["--cc", canonical_cc])
+        draft_message, draft_update_receipt = run_cap_capture(spine_root, "microsoft.mail.draft.create", create_args)
+        draft_id = str(draft_message.get("id") or "").strip()
+        if not draft_id:
+            fail("fresh outbound draft creation did not return a draft id")
+        if binding_update_mode == "create_new_binding_draft":
+            binding_update_mode = "create_new_fresh_outbound_draft"
+    else:
+        update_args = [
+            "--message-id",
+            draft_id,
+            "--body",
+            draft_body,
+            "--content-type",
+            draft_content_type,
+            "--mailbox",
+            args.mailbox,
+            "--subject",
+            draft_subject,
+        ]
+        update_args.extend(["--to", canonical_to])
+        if canonical_cc:
+            update_args.extend(["--cc", canonical_cc])
+        draft_message, draft_update_receipt = run_cap_capture(spine_root, "microsoft.mail.draft.update", update_args)
+
+    attachment_results: list[dict[str, Any]] = []
+    attachment_receipts: list[str] = []
+    for attachment in attachments:
+        result, receipt = run_cap_capture(
+            spine_root,
+            "microsoft.mail.attachment.add",
+            [
+                "--message-id",
+                draft_id,
+                "--file",
+                str(attachment["path"]),
+                "--mailbox",
+                args.mailbox,
+            ],
+        )
+        attachment_results.append(
+            {
+                "id": result.get("id"),
+                "name": result.get("name") or attachment["name"],
+                "size": result.get("size") or attachment["size_bytes"],
+                "content_type": result.get("contentType"),
+                "relative_key": attachment["relative_key"],
+                "local_file": str(attachment["path"]),
+                "sha256": attachment["sha256"],
+            }
+        )
+        if receipt:
+            attachment_receipts.append(receipt)
+
+    verified_draft_message, draft_readback_receipt = run_cap_capture(
+        spine_root,
+        "microsoft.mail.get",
+        ["--message-id", draft_id, "--mailbox", args.mailbox],
+    )
+    verified_draft_id = str(verified_draft_message.get("id") or "").strip()
+    if verified_draft_id != draft_id:
+        fail(f"draft readback did not confirm draft id {draft_id}")
+
+    verified_to_list = normalized_recipient_list(verified_draft_message, "toRecipients")
+    verified_cc_list = normalized_recipient_list(verified_draft_message, "ccRecipients")
+    expected_to_list = list(canonical_recipient_binding.get("to") or [])
+    expected_cc_list = list(canonical_recipient_binding.get("cc") or [])
+    if args.author_mode == "morpheus" and (
+        not recipient_lists_match(expected_to_list, verified_to_list)
+        or not recipient_lists_match(expected_cc_list, verified_cc_list)
+    ):
+        repair = record_customer_repair_item(
+            state_root,
+            issue_type="reply_draft_recipient_mismatch",
+            mailbox=args.mailbox,
+            message_id=args.message_id,
+            source_subject=message_subject(target_message),
+            source_from=message_sender(target_message),
+            capability=capability_name(),
+            note="draft readback recipients did not preserve the canonical external reply-all set",
+            expected={
+                "canonical_to": expected_to_list,
+                "canonical_cc": expected_cc_list,
+                "draft_id": draft_id,
+            },
+            observed={
+                "verified_to": verified_to_list,
+                "verified_cc": verified_cc_list,
+            },
+        )
+        fail(
+            "draft readback recipients do not match the canonical external reply-all set; "
+            f"repair item recorded at {repair['record_file']}"
+        )
+
+    draft_to = (
+        recipient_csv(verified_draft_message, "toRecipients")
+        or recipient_csv(draft_message, "toRecipients")
+        or recipient_csv(reply_message, "toRecipients")
+        or canonical_to
+    )
+    draft_cc = recipient_csv(verified_draft_message, "ccRecipients") or recipient_csv(draft_message, "ccRecipients") or canonical_cc
+    binding_created_at = normalize_space(existing_binding.get("created_at_utc") or "") or iso_utc(now)
+    thread_mode_value = "fresh_outbound" if fresh_outbound_mode else "reply_chain"
+    binding_record = {
+        "binding_id": binding_id,
+        "binding_key": binding_key,
+        "mailbox": args.mailbox,
+        "created_at_utc": binding_created_at,
+        "updated_at_utc": iso_utc(now),
+        "update_mode": binding_update_mode,
+        "external_message_id": str(binding_target_message.get("id") or args.message_id),
+        "external_conversation_id": binding_target_message.get("conversationId"),
+        "external_internet_message_id": binding_target_message.get("internetMessageId"),
+        "external_subject": binding_target_message.get("subject"),
+        "external_sender": normalize_space(
+            customer_contact.get("email") if fresh_outbound_mode else reply_to_address(target_message)
+        ),
+        "selected_from_source_message_id": args.message_id,
+        "selection": external_thread_resolution,
+        "participant_resolution": external_thread_resolution,
+        "canonical_recipients": canonical_recipient_binding,
+        "quote_binding": {
+            "packet_id": quote_binding.get("packet_id"),
+            "packet_file": quote_binding.get("packet_file"),
+            "quote_subject": quote_binding.get("quote_subject") or draft_subject,
+            "quote_url": quote_binding.get("quote_url"),
+            "job_number": resolved_job_number,
+            "job_nickname": resolved_job_nickname,
+        },
+        "draft_id": draft_id,
+        "draft_subject": verified_draft_message.get("subject") or draft_message.get("subject") or draft_subject,
+        "draft_template": {
+            "content_type": draft_content_type,
+            "quoted_fragment": extract_reply_chain_fragment(
+                str((verified_draft_message.get("body") or {}).get("content") or ""),
+                str((verified_draft_message.get("body") or {}).get("contentType") or draft_content_type),
+                policy,
+            ),
+        },
+        "legacy_bootstrap_record_file": str(legacy_binding_file) if legacy_binding_file else None,
+        "source_message_history": dedupe_preserve(
+            [
+                str(existing_binding.get("selected_from_source_message_id") or ""),
+                str(args.message_id),
+            ]
+        ),
+    }
+    if persist_outbound_binding:
+        binding_record_file, binding_index_file = write_binding_record(state_root, binding_id, binding_record)
+    else:
+        binding_record["binding_id"] = None
+        binding_record["binding_key"] = None
+        binding_record["update_mode"] = f"skipped_{target_disposition_name or 'non_actionable_disposition'}"
+        binding_record["quote_binding"] = {
+            "packet_id": "",
+            "packet_file": "",
+            "quote_subject": "",
+            "quote_url": "",
+            "job_number": "",
+            "job_nickname": "",
+        }
+        binding_record_file = None
+        binding_index_file = None
+
+    inbox_item_record = load_inbox_item_by_message_id(state_root, args.message_id)
+
+    record = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "reply_draft_id": reply_draft_id,
+        "outbound_receipt_id": outbound_receipt_id,
+        "stored_at_utc": iso_utc(now),
+        "author_mode": args.author_mode,
+        "reply_mode": args.reply_mode,
+        "requested_reply_mode": requested_reply_mode,
+        "draft_mode": draft_state.get("draft_mode"),
+        "signature_mode": signature_mode,
+        "thread_mode": thread_mode_value,
+        "draft_verified": True,
+        "coherence_passed": True,
+        "agent_identity": {
+            "name": "Morpheus" if args.author_mode == "morpheus" else None,
+            "presentation": (
+                str(((policy.get("identity") or {}).get("morpheus_presentation")) or "MORPHEUS (Mint Prints operational intelligence)")
+                if args.author_mode == "morpheus"
+                else "Ronny override"
+            ),
+            "machine_authored": args.author_mode == "morpheus",
+        },
+        "mailbox": args.mailbox,
+        "inbox_item_id": normalize_space(inbox_item_record.get("inbox_item_id") or ""),
+        "source_message_id": args.message_id,
+        "source_conversation_id": source_message.get("conversationId"),
+        "source_internet_message_id": source_message.get("internetMessageId"),
+        "source_subject": source_message.get("subject"),
+        "source_from": reply_to_address(source_message),
+        "canonical_thread": {
+            "message_id": binding_record.get("external_message_id"),
+            "conversation_id": binding_record.get("external_conversation_id"),
+            "internet_message_id": binding_record.get("external_internet_message_id"),
+            "subject": binding_record.get("external_subject"),
+            "from": binding_record.get("external_sender"),
+            "selection_mode": external_thread_resolution.get("selection_mode"),
+            "selection_basis": (
+                ((external_thread_resolution.get("canonical_customer_thread") or {}).get("basis"))
+                or []
+            ),
+            "reply_target_role": external_thread_resolution.get("reply_target_role"),
+            "confidence": external_thread_resolution.get("confidence"),
+        },
+        "draft_id": draft_id,
+        "draft_subject": verified_draft_message.get("subject") or draft_message.get("subject") or draft_subject,
+        "requested_content_type": requested_content_type,
+        "draft_content_type": draft_content_type,
+        "body_input_mode": body_input_mode,
+        "policy_contract": policy["path"],
+        "quote_policy_contract": quote_policy["path"],
+        "operator_policy_contract": operator_policy["path"],
+        "subject_contract": policy["subject_required_format"],
+        "job_number": resolved_job_number,
+        "job_nickname": resolved_job_nickname,
+        "subject_source": subject_source,
+        "draft_to": draft_to,
+        "draft_cc": draft_cc,
+        "canonical_recipients": canonical_recipient_binding,
+        "outbound_binding": {
+            "binding_id": binding_id or None,
+            "binding_key": binding_key or None,
+            "update_mode": binding_update_mode,
+            "record_file": str(binding_record_file) if binding_record_file else None,
+            "index_file": str(binding_index_file) if binding_index_file else None,
+            "legacy_bootstrap_record_file": str(legacy_binding_file) if legacy_binding_file else None,
+        },
+        "participant_resolution": external_thread_resolution,
+        "quote_binding": binding_record.get("quote_binding"),
+        "customer": args.customer or None,
+        "customer_contact_email": customer_contact.get("email") or None,
+        "customer_contact_name": customer_contact.get("display_name") or None,
+        "customer_identity_lookup_mode": personalization.get("lookup_mode") or None,
+        "customer_identity": effective_identity or None,
+        "mail_identity_projection": mail_identity_projection,
+        "mail_identity_validation": mail_identity_validation,
+        "customer_quote_intelligence": customer_quote_intelligence or None,
+        "customer_contact_graph": contact_graph_match,
+        "greeting_selection": greeting_selection,
+        "lifecycle_context": {
+            "lifecycle_id": lifecycle_context.get("lifecycle_id"),
+            "lifecycle_state": lifecycle_context.get("lifecycle_state"),
+            "confidence": lifecycle_context.get("confidence"),
+            "reply_mode": lifecycle_context.get("reply_mode"),
+            "draft_allowed": lifecycle_context.get("draft_allowed"),
+            "state_basis": lifecycle_state_basis(lifecycle_context),
+            "conflict_discarded": lifecycle_context.get("conflict_discarded") or False,
+            "conflict_reason": lifecycle_context.get("conflict_reason"),
+            "customer_safe_next_step": lifecycle_context.get("customer_safe_next_step"),
+            "operator_next_action": lifecycle_context.get("operator_next_action"),
+            "current_action": lifecycle_context.get("current_action"),
+            "blockers": lifecycle_context.get("blockers") or [],
+            "repair_item": lifecycle_context.get("repair_item") or None,
+        },
+        "lifecycle_gate_resolution": lifecycle_gate_resolution,
+        "source_disposition": source_disposition or None,
+        "target_disposition": target_disposition or None,
+        "repair_items": repair_items,
+        "draft_state": draft_state,
+        "operator_policy_match": operator_policy_match,
+        "job": args.job or None,
+        "current_action": clean_sentence(args.current_action) or None,
+        "blocker_questions": blocker_questions,
+        "body_preview": body_text.strip()[:280],
+        "body_generation_mode": body_input_mode,
+        "body_sha256": hashlib.sha256(draft_body.encode("utf-8")).hexdigest(),
+        "terminology_replacements": terminology_replacements,
+        "reference_links": reference_links,
+        "reference_visuals": reference_visuals,
+        "attachments": attachment_results,
+        "quote_context": {
+            "intake_id": quote_context.get("intake_id"),
+            "packet_id": quote_context.get("packet_id"),
+            "packet_file": quote_context.get("packet_file"),
+            "source_state": quote_context.get("source_state"),
+            "estimate_state": quote_context.get("estimate_state"),
+            "pricing_state": quote_context.get("pricing_state"),
+            "intake_quality": quote_context.get("intake_quality"),
+            "qualification_status": quote_context.get("qualification_status"),
+            "quote_safe_line_item_count": quote_context.get("quote_safe_line_item_count"),
+            "clarification_needed_count": quote_context.get("clarification_needed_count"),
+            "price_lane": quote_context.get("price_lane"),
+            "artwork_analysis_summary": quote_context.get("artwork_analysis_summary"),
+            "artwork_analysis": quote_context.get("artwork_analysis") or {},
+        },
+        "provider_receipts": {
+            "source_get_receipt": source_receipt or None,
+            "lifecycle_resolve_receipt": ((lifecycle_context.get("provider_receipts") or {}).get("lifecycle_resolve_receipt")) or None,
+            "external_thread_search_receipt": external_thread_receipt or None,
+            "external_thread_search_receipts": list(external_thread_resolution.get("search_receipts") or []),
+            "external_thread_get_receipt": external_thread_get_receipt or None,
+            "external_thread_seed_get_receipts": list(external_thread_resolution.get("seed_get_receipts") or []),
+            "reply_draft_receipt": reply_receipt or None,
+            "draft_seed_receipt": draft_seed_receipt or None,
+            "draft_seed_error": draft_seed_error or None,
+            "draft_update_receipt": draft_update_receipt or None,
+            "draft_readback_receipt": draft_readback_receipt or None,
+            "attachment_add_receipts": attachment_receipts,
+            "quote_intake_receipt": ((quote_context.get("provider_receipts") or {}).get("quote_intake_receipt")) or None,
+        },
+    }
+    record_file, index_file = write_record(state_root, reply_draft_id, record, now)
+    if args.author_mode == "morpheus":
+        try:
+            transition_inbox_item(
+                state_root,
+                contract=inbox_machine_contract,
+                message_id=args.message_id,
+                new_state="drafted",
+                note="governed customer draft created",
+                actor=capability_name(),
+            )
+        except SystemExit:
+            pass
+
+    payload = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "generated_at": iso_utc(now),
+        "data": {
+            "reply_draft_id": reply_draft_id,
+            "outbound_receipt_id": outbound_receipt_id,
+            "author_mode": args.author_mode,
+            "reply_mode": args.reply_mode,
+            "requested_reply_mode": requested_reply_mode,
+            "draft_mode": draft_state.get("draft_mode"),
+            "signature_mode": signature_mode,
+            "mailbox": args.mailbox,
+            "source_message_id": args.message_id,
+            "source_conversation_id": source_message.get("conversationId"),
+            "draft_id": draft_id,
+            "draft_subject": verified_draft_message.get("subject") or draft_message.get("subject") or draft_subject,
+            "requested_content_type": requested_content_type,
+            "draft_content_type": draft_content_type,
+            "body_input_mode": body_input_mode,
+            "policy_contract": policy["path"],
+            "quote_policy_contract": quote_policy["path"],
+            "operator_policy_contract": operator_policy["path"],
+            "subject_contract": policy["subject_required_format"],
+            "job_number": resolved_job_number,
+            "job_nickname": resolved_job_nickname,
+            "subject_source": subject_source,
+            "draft_to": draft_to,
+            "draft_cc": draft_cc,
+            "canonical_thread": record["canonical_thread"],
+            "canonical_recipients": canonical_recipient_binding,
+            "outbound_binding": record["outbound_binding"],
+            "source_disposition": source_disposition or None,
+            "target_disposition": target_disposition or None,
+            "repair_items": repair_items,
+            "participant_resolution": external_thread_resolution,
+            "quote_binding": record["quote_binding"],
+            "thread_mode": thread_mode_value,
+            "draft_verified": True,
+            "coherence_passed": True,
+            "customer": args.customer or None,
+            "customer_contact_email": customer_contact.get("email") or None,
+            "customer_contact_name": customer_contact.get("display_name") or None,
+            "customer_identity_lookup_mode": personalization.get("lookup_mode") or None,
+            "customer_identity": effective_identity or None,
+            "mail_identity_projection": mail_identity_projection,
+            "mail_identity_validation": mail_identity_validation,
+            "customer_quote_intelligence": customer_quote_intelligence or None,
+            "customer_contact_graph": contact_graph_match,
+            "greeting_selection": greeting_selection,
+            "lifecycle_context": record["lifecycle_context"],
+            "lifecycle_gate_resolution": lifecycle_gate_resolution,
+            "draft_state": draft_state,
+            "operator_policy_match": operator_policy_match,
+            "job": args.job or None,
+            "blocker_questions": blocker_questions,
+            "attachment_count": len(attachment_results),
+            "body_generation_mode": body_input_mode,
+            "terminology_replacements": terminology_replacements,
+            "reference_links": reference_links,
+            "reference_visuals": reference_visuals,
+            "attachments": attachment_results,
+            "quote_context": record["quote_context"],
+            "record_file": str(record_file),
+            "index_file": str(index_file),
+            "provider_receipts": record["provider_receipts"],
+        },
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(capability_name())
+    print(f"reply_draft_id: {reply_draft_id}")
+    print(f"outbound_receipt_id: {outbound_receipt_id}")
+    print(f"author_mode: {args.author_mode}")
+    print(f"reply_mode: {args.reply_mode}")
+    print(f"requested_reply_mode: {requested_reply_mode}")
+    print(f"lifecycle_state: {(record.get('lifecycle_context') or {}).get('lifecycle_state') or ''}")
+    print(f"lifecycle_gate_resolution: {(record.get('lifecycle_gate_resolution') or {}).get('mode') or ''}")
+    print(f"signature_mode: {signature_mode}")
+    print(f"mailbox: {args.mailbox}")
+    print(f"thread_mode: {thread_mode_value}")
+    print(f"draft_id: {draft_id}")
+    print(f"draft_verified: true")
+    print(f"draft_subject: {verified_draft_message.get('subject') or draft_message.get('subject') or draft_subject}")
+    print(f"draft_to: {draft_to}")
+    print(f"draft_cc: {draft_cc}")
+    print(f"draft_content_type: {draft_content_type}")
+    print(f"subject_contract: {policy['subject_required_format']}")
+    print(f"attachment_count: {len(attachment_results)}")
+    print(f"record_file: {record_file}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

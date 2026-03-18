@@ -1,0 +1,185 @@
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-13
+scope: mint-customer-reply-draft-policy
+
+version: "1.2"
+updated_at: "2026-03-17"
+capability: mint.customer.reply.draft
+
+migration:
+  supersedes_memory_artifact: /Users/ronnyworks/.claude/projects/-Users-ronnyworks-code-agentic-spine/memory/morpheus-email-style.md
+  memory_artifact_role: transitional_evidence_only
+
+routing:
+  default_mailbox: team@mintprints.com
+  morpheus_mailbox_enforced: true
+  customer_lane_freeform_body_blocked: true
+
+content:
+  default_mode: HTML
+  supported_modes:
+    - HTML
+    - Text
+  html_plaintext_wrapping: paragraph
+
+subject:
+  required_format: "[job number] [job nickname]"
+  format_template: "{job_number} {job_nickname}"
+  strip_prefix_regex: "^(?:(?:re|fw|fwd)\\s*:\\s*)+"
+  canonical_regex: "^(?P<job_number>[0-9]{4,})\\s+(?P<job_nickname>.+\\S)$"
+  fallback_mode: reply_chain_subject
+  unresolved_blocker: "Need governed job context or an existing reply-chain subject."
+
+draft_gate:
+  allowed_dispositions:
+    - customer_actionable
+    - waiting_on_customer
+    - unsupported_scope
+  allowed_subject_sources:
+    - quote_binding_subject
+    - reply_chain_subject
+  morpheus_freeform_body_policy: blocked_unless_break_glass
+
+identity:
+  fleet_identity_contract: ops/bindings/mint.fleet.identity.contract.yaml
+  mail_identity_contract: ops/bindings/mint.customer.mail.identity.contract.yaml
+  customer_safe_identity_ref: customer_safe_explanation_variants.per_agent.morpheus
+  why_agent_instead_of_ronny_ref: customer_safe_explanation_variants.why_agent_instead_of_ronny
+  auto_explanation_injection: none
+  default_author_mode: morpheus
+  morpheus_name: Morpheus
+  morpheus_presentation: MORPHEUS (Mint Prints operational intelligence)
+  fail_closed_mail_identity: true
+  neutral_salutation_text: "Hello,"
+  visible_footer_lines:
+    - ""
+    - MORPHEUS (Mint Prints operational intelligence)
+    - "Receipt: {outbound_receipt_id}"
+
+style:
+  generic_filler_blocklist:
+    - i hope this email finds you well
+    - hope you're well
+    - please let me know if you have any questions
+    - if you have any questions please let me know
+    - as an ai
+  blocker_prompt: "Only thing we still need from you:"
+  reference_labels:
+    links: Reference links
+    visuals: Visual references
+  reply_mode_intros:
+    delay: "Sorry for the slow follow-up here."
+    art_revision: "We are on the next art revision now."
+    in_progress: "This is in progress now."
+    clarification_only: "I went through the request and I only need one last detail to lock the quote in cleanly."
+    guided_estimate: "I pulled together a rough lane for this so you can see the recommendation before I turn it into the formal quote."
+    formal_quote_ready: "I have the quote lane cleaned up and ready to finalize."
+    not_a_fit: "I want to be straight with you about the cleanest lane we can actually support."
+  customer_safe_replacements:
+    - find: Sheik
+      replace: art dept
+  deadline_rewrites:
+    - match_regex: "(?i)\\band we can hit your april 18(?:th)? deadline\\.?\\b"
+      replace: "we need this to be green light by the end of March for a smooth April 18th completion"
+
+quote_reply_modes:
+  clarification_only:
+    intent: "Use the parsed request to ask only the smallest blocker question still preventing a quote. Do not include artwork analysis, print-method reasoning, pricing rationale, or restated scope."
+  guided_estimate:
+    intent: "Use supplier-backed blanks and estimate-safe pricing truth to give the customer a useful first-base lane."
+  formal_quote_ready:
+    intent: "Confirm the governed quote lane is ready for formal quote delivery without extra restatement or explanatory filler."
+  not_a_fit:
+    intent: "Keep the response helpful while clearly steering away from operator-heavy or unsupported scope."
+
+draft_state:
+  mode_lines:
+    confirming: "I have your quote linked here."
+    in_progress: "Payment is in and this is in progress now."
+  detection:
+    quote_link_markers:
+      - quote linked
+      - printavo.com/invoice/
+      - /quote/
+      - quote for you here
+    payment_confirmed_markers:
+      - payment received
+      - payment sent
+      - payment is in
+      - payment confirmed
+      - paid invoice
+    payment_request_markers:
+      - send payment
+      - once payment is made
+      - after payment
+      - payment link
+      - submit payment
+      - complete payment
+    artwork_request_markers:
+      - send the logo
+      - send the artwork
+      - print-ready artwork
+      - send the file
+      - attach the logo
+    quote_preparing_markers:
+      - prepare the quote
+      - preparing the quote
+      - get the quote ready
+      - getting the quote together
+      - once i have the quote
+      - send the quote once it is ready
+
+canonicalization:
+  reply_chain:
+    external_search_top: 25
+    internal_domains:
+      - mintprints.com
+    html_chain_markers:
+      - Quoted thread
+      - id="divRplyFwdMsg"
+      - id="x_divRplyFwdMsg"
+      - <blockquote
+      - <hr
+      - <div>From:
+      - <b>From:</b>
+      - -----Original Message-----
+    text_chain_markers:
+      - Quoted thread
+      - -----Original Message-----
+      - "From:"
+      - "On "
+  recipients:
+    preserve_external_participants: true
+  legacy_cleanup:
+    manual_signature_markers:
+      - thanks,
+      - best,
+      - ronny
+      - sent from my iphone
+      - sent from my ipad
+
+participant_resolution:
+  minimum_customer_confidence: medium
+  blocked_customer_target_message: "Need the real customer thread before I can draft customer-facing mail."
+  search_query_limit: 4
+  vendor_markers:
+    exact_emails:
+      - digitrace54@gmail.com
+    name_markers:
+      - sheik
+      - sheikh
+      - digitrace
+      - manny
+    subject_markers:
+      - proof
+      - revision
+      - vector
+      - correction pass
+      - updated art
+      - latest art
+    body_markers:
+      - here you go sir
+      - here you go brother
+      - let me know if this looks good
+      - correction pass

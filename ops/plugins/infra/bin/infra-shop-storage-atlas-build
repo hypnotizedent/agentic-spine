@@ -1,0 +1,1038 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+SSH_BINDING_PATH = ROOT / "ops/bindings/ssh.targets.yaml"
+PLACEMENT_PATH = ROOT / "ops/bindings/infra.storage.placement.policy.yaml"
+SCAFFOLD_PATH = ROOT / "ops/bindings/shop.storage.scaffold.contract.yaml"
+SHOP_STORAGE_MAP_PATH = ROOT / "ops/bindings/shop.storage.map.yaml"
+OUTPUT_BINDING_PATH = ROOT / "ops/bindings/shop.storage.atlas.yaml"
+OUTPUT_REPORT_PATH = ROOT / "docs/reference/generated/SHOP_STORAGE_ATLAS_DRIFT.md"
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"infra.shop.storage.atlas.build FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_utc_iso() -> str:
+    return now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today_utc() -> str:
+    return now_utc().strftime("%Y-%m-%d")
+
+
+def rel(path: Path) -> str:
+    return str(path.resolve().relative_to(ROOT))
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def yaml_dump(data: dict[str, Any]) -> str:
+    class NoAliasDumper(yaml.SafeDumper):
+        def ignore_aliases(self, _data: Any) -> bool:
+            return True
+
+    return yaml.dump(data, Dumper=NoAliasDumper, sort_keys=False, allow_unicode=False)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="infra-shop-storage-atlas-build")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Validate generated outputs without writing files.",
+    )
+    return parser.parse_args()
+
+
+def parse_size_token_to_bytes(token: str) -> int | None:
+    token = (token or "").strip()
+    if not token or token.lower() in {"-", "none", "null"}:
+        return None
+    match = re.fullmatch(r"(?i)(\d+(?:\.\d+)?)([kmgtpe]?)(i?b?)", token)
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).upper()
+    multipliers = {
+        "": 1,
+        "K": 1024**1,
+        "M": 1024**2,
+        "G": 1024**3,
+        "T": 1024**4,
+        "P": 1024**5,
+        "E": 1024**6,
+    }
+    return int(value * multipliers[unit])
+
+
+def bytes_to_human(num: int | None) -> str:
+    if num is None:
+        return "unknown"
+    value = float(num)
+    for unit in ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]:
+        if value < 1024.0 or unit == "PiB":
+            if unit == "B":
+                return f"{int(value)}B"
+            return f"{value:.2f}{unit}"
+        value /= 1024.0
+    return f"{num}B"
+
+
+def resolve_ssh_target(target_id: str) -> dict[str, Any]:
+    binding = load_yaml(SSH_BINDING_PATH)
+    ssh_root = binding.get("ssh") or {}
+    defaults = ssh_root.get("defaults") or {}
+    for entry in ssh_root.get("targets") or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("id") or "") != target_id:
+            continue
+        host = str(entry.get("host") or "")
+        user = str(entry.get("user") or defaults.get("user") or "root")
+        port = int(entry.get("port") or defaults.get("port") or 22)
+        connect_timeout = int(entry.get("connect_timeout_sec") or defaults.get("connect_timeout_sec") or 5)
+        strict = str(entry.get("strict_host_key_checking") or defaults.get("strict_host_key_checking") or "no")
+        known_hosts = str(entry.get("user_known_hosts_file") or defaults.get("user_known_hosts_file") or "/dev/null")
+        if not host:
+            fail(f"ssh target '{target_id}' is missing host")
+        return {
+            "id": target_id,
+            "host": host,
+            "user": user,
+            "port": port,
+            "connect_timeout_sec": connect_timeout,
+            "strict_host_key_checking": strict,
+            "user_known_hosts_file": known_hosts,
+            "access_policy": str(entry.get("access_policy") or ""),
+            "tailscale_ip": str(entry.get("tailscale_ip") or ""),
+        }
+    fail(f"ssh target '{target_id}' not found in {SSH_BINDING_PATH}")
+
+
+def ssh_command(target: dict[str, Any], remote_command: str, *, timeout_sec: int = 30) -> str:
+    ssh_ref = f"{target['user']}@{target['host']}"
+    cmd = [
+        "ssh",
+        "-o",
+        f"ConnectTimeout={target['connect_timeout_sec']}",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"StrictHostKeyChecking={target['strict_host_key_checking']}",
+        "-o",
+        f"UserKnownHostsFile={target['user_known_hosts_file']}",
+        "-p",
+        str(target["port"]),
+        ssh_ref,
+        remote_command,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired:
+        fail(f"ssh command timed out after {timeout_sec}s: {remote_command}")
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip()
+        fail(f"ssh command failed ({remote_command}): {stderr or f'rc={proc.returncode}'}")
+    return proc.stdout
+
+
+def parse_table_line_map(lines: list[str]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for raw in lines:
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        if line.lstrip().startswith("VMID"):
+            continue
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        vmid = parts[0]
+        status = parts[-4] if len(parts) >= 6 else parts[-1]
+        pid = parts[-1] if len(parts) >= 6 else ""
+        bootdisk = parts[-2] if len(parts) >= 6 else ""
+        memory = parts[-3] if len(parts) >= 6 else ""
+        name = " ".join(parts[1:-4]) if len(parts) >= 6 else " ".join(parts[1:-1])
+        rows.append(
+            {
+                "vm_id": vmid,
+                "name": name.strip(),
+                "status": status.strip(),
+                "memory_mb": memory.strip(),
+                "bootdisk_gb": bootdisk.strip(),
+                "pid": pid.strip(),
+            }
+        )
+    return rows
+
+
+def parse_pct_table(text: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        if line.lstrip().startswith("VMID"):
+            continue
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        lock = "" if len(parts) == 3 else parts[2]
+        name = parts[2] if len(parts) == 3 else parts[-1]
+        rows.append(
+            {
+                "vm_id": parts[0],
+                "status": parts[1],
+                "lock": lock,
+                "name": name,
+            }
+        )
+    return rows
+
+
+def parse_zpool_list(text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        rows.append(
+            {
+                "name": parts[0],
+                "bytes_total": int(parts[1]),
+                "bytes_used": int(parts[2]),
+                "bytes_free": int(parts[3]),
+                "usage_pct": int(parts[4]),
+                "health": parts[5],
+                "fragmentation_pct": int(parts[6]),
+            }
+        )
+    return rows
+
+
+def parse_zfs_list(text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 6:
+            continue
+        rows.append(
+            {
+                "name": parts[0],
+                "type": parts[1],
+                "used_bytes": int(parts[2]),
+                "avail_bytes": int(parts[3]),
+                "refer_bytes": int(parts[4]),
+                "mountpoint": parts[5],
+            }
+        )
+    return rows
+
+
+def parse_findmnt(text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line:
+            continue
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        rows.append(
+            {
+                "target": parts[0],
+                "source": parts[1],
+                "fstype": parts[2],
+                "options": parts[3].split(","),
+            }
+        )
+    return rows
+
+
+def parse_exports(text: str, ssh_binding: dict[str, Any]) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    for entry in (ssh_binding.get("ssh") or {}).get("targets") or []:
+        if isinstance(entry, dict):
+            targets.append(entry)
+
+    def lookup_consumer(client: str) -> list[str]:
+        if "/" in client:
+            return []
+        matches = []
+        for entry in targets:
+            host = str(entry.get("host") or "")
+            if host == client:
+                matches.append(str(entry.get("id") or ""))
+        return sorted([m for m in matches if m])
+
+    rows: list[dict[str, Any]] = []
+    comment_buffer: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            comment_buffer.append(line.lstrip("# ").strip())
+            continue
+        match = re.match(r"^(\S+)\s+(\S+)\(([^)]*)\)$", line)
+        if not match:
+            comment_buffer.clear()
+            continue
+        path, client, opts = match.groups()
+        options = [opt.strip() for opt in opts.split(",") if opt.strip()]
+        rows.append(
+            {
+                "path": path,
+                "client": client,
+                "options": options,
+                "consumer_ids": lookup_consumer(client),
+                "note": "; ".join(comment_buffer) if comment_buffer else "",
+            }
+        )
+        comment_buffer.clear()
+    return rows
+
+
+def parse_pvesm_status(text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("Name"):
+            continue
+        parts = line.split()
+        if len(parts) < 7:
+            continue
+        rows.append(
+            {
+                "name": parts[0],
+                "type": parts[1],
+                "status": parts[2],
+                "total_kib": int(parts[3]),
+                "used_kib": int(parts[4]),
+                "available_kib": int(parts[5]),
+                "usage_pct": float(parts[6].rstrip("%")),
+            }
+        )
+    return rows
+
+
+def parse_snapshot_rows(text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        used_bytes = int(parts[1])
+        name = parts[0]
+        if used_bytes == 0 and "forensic" not in name:
+            continue
+        creation_epoch = int(parts[2])
+        creation_utc = datetime.fromtimestamp(creation_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows.append(
+            {
+                "name": name,
+                "used_bytes": used_bytes,
+                "creation_epoch": creation_epoch,
+                "creation_utc": creation_utc,
+            }
+        )
+    rows.sort(key=lambda row: (-row["used_bytes"], row["name"]))
+    return rows
+
+
+def parse_du_inventory(text: str, root: str) -> dict[str, Any]:
+    children: list[dict[str, Any]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        size_text, path = parts
+        try:
+            bytes_used = int(size_text)
+        except ValueError:
+            continue
+        name = Path(path).name
+        children.append(
+            {
+                "name": name,
+                "path": path,
+                "bytes_used": bytes_used,
+            }
+        )
+    children.sort(key=lambda row: (-row["bytes_used"], row["name"]))
+    return {"root": root, "children": children}
+
+
+def parse_qm_config(text: str) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for raw in text.splitlines():
+        if ":" not in raw:
+            continue
+        key, value = raw.split(":", 1)
+        data[key.strip()] = value.strip()
+    name = str(data.get("name") or "")
+    disks: list[dict[str, Any]] = []
+    for key, value in data.items():
+        if not re.match(r"^(?:scsi|sata|virtio|ide|unused)\d+$", key):
+            continue
+        entry = normalize_disk_entry(key, value)
+        if entry:
+            disks.append(entry)
+    return {
+        "name": name,
+        "raw": data,
+        "disks": disks,
+    }
+
+
+def parse_pct_config(text: str) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for raw in text.splitlines():
+        if ":" not in raw:
+            continue
+        key, value = raw.split(":", 1)
+        data[key.strip()] = value.strip()
+    mounts: list[dict[str, Any]] = []
+    for key, value in data.items():
+        if key == "rootfs" or re.match(r"^mp\d+$", key):
+            entry = normalize_lxc_mount_entry(key, value)
+            if entry:
+                mounts.append(entry)
+    return {
+        "name": str(data.get("hostname") or data.get("name") or ""),
+        "raw": data,
+        "mounts": mounts,
+    }
+
+
+def parse_backend_volume(value: str) -> tuple[str | None, str | None, list[str]]:
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    if not parts:
+        return None, None, []
+    first = parts[0]
+    if ":" not in first:
+        return None, first, parts[1:]
+    backend, volume = first.split(":", 1)
+    return backend, volume, parts[1:]
+
+
+def plane_guess_from_backend(backend: str | None, volume: str | None) -> str:
+    backend = backend or ""
+    volume = volume or ""
+    if backend == "tank-vms":
+        return "tank/vms"
+    if backend == "tank-docker":
+        return "tank/docker"
+    if backend == "local-lvm":
+        return "local-lvm"
+    if backend == "media-storage":
+        return "media"
+    if backend == "local":
+        return "local"
+    if backend == "none":
+        return "none"
+    if volume.startswith("/md1400/"):
+        return "md1400"
+    if volume.startswith("/media/"):
+        return "media"
+    if volume.startswith("/tank/"):
+        return "tank"
+    return backend or "unknown"
+
+
+def normalize_disk_entry(key: str, value: str) -> dict[str, Any] | None:
+    backend, volume, options = parse_backend_volume(value)
+    entry: dict[str, Any] = {
+        "key": key,
+        "raw": value,
+    }
+    if backend:
+        entry["backend"] = backend
+    if volume:
+        entry["volume"] = volume
+    if options:
+        entry["options"] = options
+    entry["plane_guess"] = plane_guess_from_backend(backend, volume)
+    if "cloudinit" in (volume or "") or "media=cdrom" in value:
+        entry["role"] = "cloudinit_or_cdrom"
+    elif key.startswith("unused"):
+        entry["role"] = "unused"
+    else:
+        entry["role"] = "runtime_disk"
+    size_match = re.search(r"(?:^|,)size=([^,]+)", value)
+    if size_match:
+        entry["declared_size"] = size_match.group(1)
+        size_bytes = parse_size_token_to_bytes(size_match.group(1))
+        if size_bytes is not None:
+            entry["declared_size_bytes"] = size_bytes
+    return entry
+
+
+def normalize_lxc_mount_entry(key: str, value: str) -> dict[str, Any] | None:
+    if key == "rootfs":
+        backend, volume, options = parse_backend_volume(value)
+        entry: dict[str, Any] = {
+            "key": key,
+            "raw": value,
+            "role": "rootfs",
+        }
+        if backend:
+            entry["backend"] = backend
+        if volume:
+            entry["volume"] = volume
+        if options:
+            entry["options"] = options
+        entry["plane_guess"] = plane_guess_from_backend(backend, volume)
+        return entry
+    match = re.match(r"^([^,]+),mp=(.+)$", value)
+    if not match:
+        return {
+            "key": key,
+            "raw": value,
+            "role": "mountpoint",
+            "plane_guess": plane_guess_from_backend(None, value),
+        }
+    source, mountpoint = match.groups()
+    return {
+        "key": key,
+        "raw": value,
+        "role": "mountpoint",
+        "source": source,
+        "mountpoint": mountpoint,
+        "plane_guess": plane_guess_from_backend(None, source),
+    }
+
+
+def inventory_map(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    return {row["root"]: row["children"] for row in rows}
+
+
+def identify_drift(
+    atlas: dict[str, Any],
+    scaffold: dict[str, Any],
+    placement_policy: dict[str, Any],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    zfs_rows = atlas.get("zfs_objects") or []
+    mounts = atlas.get("mounts") or []
+    inventories = inventory_map(atlas.get("path_inventory") or [])
+    vm_rows = atlas.get("guests", {}).get("vms") or []
+
+    allowed_md1400_roots = {"backup-cold", "archive", "stage", "tombstones"}
+    observed_md1400_roots = []
+    for row in zfs_rows:
+        name = str(row.get("name") or "")
+        if not name.startswith("md1400/"):
+            continue
+        rel_name = name.split("/", 1)[1]
+        if "/" in rel_name:
+            continue
+        observed_md1400_roots.append(rel_name)
+    extra_md1400_roots = sorted(root for root in observed_md1400_roots if root not in allowed_md1400_roots)
+    if extra_md1400_roots:
+        findings.append(
+            {
+                "id": "md1400-loose-top-level-roots",
+                "severity": "high",
+                "class": "normalization_required",
+                "summary": "md1400 still exposes non-boring top-level roots outside the lifecycle scaffold.",
+                "evidence": {
+                    "observed_roots": observed_md1400_roots,
+                    "extra_roots": extra_md1400_roots,
+                },
+            }
+        )
+
+    backup_cold_children = inventories.get("/md1400/backup-cold", [])
+    loose_backup_cold = [row for row in backup_cold_children if row["name"] not in {"vzdump", "apps", "archive-smb"}]
+    if loose_backup_cold:
+        findings.append(
+            {
+                "id": "backup-cold-loose-children",
+                "severity": "high",
+                "class": "normalization_required",
+                "summary": "/md1400/backup-cold contains children outside the governed cold sublanes.",
+                "evidence": {
+                    "loose_children": loose_backup_cold,
+                },
+            }
+        )
+
+    tank_backups_children = inventories.get("/tank/backups", [])
+    loose_tank_backups = [row for row in tank_backups_children if row["name"] != "vzdump"]
+    if loose_tank_backups:
+        findings.append(
+            {
+                "id": "tank-backups-loose-children",
+                "severity": "high",
+                "class": "normalization_required",
+                "summary": "/tank/backups still contains non-vzdump children, which blurs staging and backup authority.",
+                "evidence": {
+                    "loose_children": loose_tank_backups,
+                },
+            }
+        )
+
+    media_children = inventories.get("/media", [])
+    allowed_media = {"movies", "tv", "music", "downloads", "movies-archive"}
+    loose_media = [row for row in media_children if row["name"] not in allowed_media]
+    if loose_media:
+        findings.append(
+            {
+                "id": "media-loose-children",
+                "severity": "medium",
+                "class": "normalization_required",
+                "summary": "/media has extra top-level directories outside the boring live-media lane.",
+                "evidence": {
+                    "loose_children": loose_media,
+                },
+            }
+        )
+
+    stage_children = inventories.get("/md1400/stage", [])
+    if stage_children:
+        findings.append(
+            {
+                "id": "md1400-stage-not-empty",
+                "severity": "medium",
+                "class": "wave_in_progress_or_residue",
+                "summary": "/md1400/stage is not empty between waves.",
+                "evidence": {
+                    "children": stage_children,
+                },
+            }
+        )
+
+    archive_children = inventories.get("/md1400/archive", [])
+    allowed_archive = {"live-share", "media-holds", "backup-holds"}
+    loose_archive = [row for row in archive_children if row["name"] not in allowed_archive]
+    if loose_archive:
+        findings.append(
+            {
+                "id": "archive-loose-children",
+                "severity": "medium",
+                "class": "normalization_required",
+                "summary": "/md1400/archive has children outside the governed archive sublanes.",
+                "evidence": {
+                    "loose_children": loose_archive,
+                },
+            }
+        )
+
+    overlay_mount = None
+    for mount in mounts:
+        if str(mount.get("target") or "") == "/media/movies-archive":
+            overlay_mount = mount
+            break
+    if overlay_mount and str(overlay_mount.get("source") or "").startswith("md1400/"):
+        findings.append(
+            {
+                "id": "movies-archive-overlay-drift",
+                "severity": "critical",
+                "class": "normalization_required",
+                "summary": "/media/movies-archive is still being served from md1400 instead of the live media lane.",
+                "evidence": {
+                    "mount": overlay_mount,
+                },
+            }
+        )
+
+    placement_map = (placement_policy.get("vm_storage") or {}) if isinstance(placement_policy, dict) else {}
+    local_lvm_runtime_vms = []
+    for vm in vm_rows:
+        vm_id = str(vm.get("vm_id") or "")
+        if not vm.get("active"):
+            continue
+        runtime_disks = [disk for disk in (vm.get("disks") or []) if disk.get("role") == "runtime_disk"]
+        if not any(disk.get("plane_guess") == "local-lvm" for disk in runtime_disks):
+            continue
+        hostname = str(vm.get("name") or "")
+        policy = placement_map.get(hostname) or {}
+        local_lvm_runtime_vms.append(
+            {
+                "vm_id": vm_id,
+                "hostname": hostname,
+                "placement_status": str(policy.get("placement_status") or ""),
+                "target_storage_tier": str(policy.get("target_storage_tier") or ""),
+            }
+        )
+    if local_lvm_runtime_vms:
+        findings.append(
+            {
+                "id": "local-lvm-active-runtime-exceptions",
+                "severity": "low",
+                "class": "transition_exception",
+                "summary": "Several active guests still have runtime disks on local-lvm; these are current exceptions, not target-state boringness.",
+                "evidence": {
+                    "guests": local_lvm_runtime_vms,
+                },
+            }
+        )
+
+    pools = atlas.get("pools") or []
+    pressure = next((pool for pool in pools if pool.get("name") == "media"), None)
+    if pressure and int(pressure.get("usage_pct") or 0) >= 95:
+        findings.append(
+            {
+                "id": "media-capacity-pressure",
+                "severity": "critical",
+                "class": "capacity_guard",
+                "summary": "The live media pool remains effectively full.",
+                "evidence": {
+                    "pool": pressure,
+                },
+            }
+        )
+
+    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    findings.sort(key=lambda row: (severity_rank.get(str(row.get("severity") or "low"), 9), str(row.get("id") or "")))
+    return findings
+
+
+def build_report(atlas: dict[str, Any], drift: list[dict[str, Any]], scaffold: dict[str, Any]) -> str:
+    pools = {row["name"]: row for row in atlas.get("pools") or []}
+    lines: list[str] = []
+    lines.append("# Shop Storage Atlas Drift")
+    lines.append("")
+    lines.append(f"- Generated at: `{atlas['generated_at_utc']}`")
+    lines.append(f"- Observed host: `{atlas['observed_host']['id']}` (`{atlas['observed_host']['host']}`)")
+    lines.append(f"- Remote observed at: `{atlas['remote_observed_at_utc']}`")
+    lines.append("")
+    lines.append("## Pool Snapshot")
+    lines.append("")
+    for pool_name in ["media", "tank", "md1400"]:
+        pool = pools.get(pool_name)
+        if not pool:
+            continue
+        lines.append(
+            f"- `{pool_name}`: {pool['usage_pct']}% used, {bytes_to_human(pool['bytes_used'])} used, {bytes_to_human(pool['bytes_free'])} free, health `{pool['health']}`"
+        )
+    lines.append("")
+    lines.append("## Findings")
+    lines.append("")
+    if not drift:
+        lines.append("- No scaffold drift detected from the live atlas.")
+    else:
+        for finding in drift:
+            lines.append(f"- `{finding['severity'].upper()}` `{finding['id']}`: {finding['summary']}")
+            evidence = finding.get("evidence") or {}
+            if finding["id"] == "movies-archive-overlay-drift":
+                mount = evidence.get("mount") or {}
+                lines.append(f"  target `{mount.get('target')}` is sourced from `{mount.get('source')}`")
+            elif finding["id"] == "md1400-loose-top-level-roots":
+                lines.append(f"  extra roots: {', '.join(evidence.get('extra_roots') or [])}")
+            elif finding["id"] in {"backup-cold-loose-children", "tank-backups-loose-children", "media-loose-children", "md1400-stage-not-empty", "archive-loose-children"}:
+                items = evidence.get("loose_children") or evidence.get("children") or []
+                rendered = ", ".join(f"{row['name']}={bytes_to_human(row['bytes_used'])}" for row in items[:8])
+                if rendered:
+                    lines.append(f"  observed: {rendered}")
+            elif finding["id"] == "local-lvm-active-runtime-exceptions":
+                guests = evidence.get("guests") or []
+                rendered = ", ".join(
+                    f"{row['hostname']}({row['vm_id']}, status={row['placement_status'] or 'unknown'})"
+                    for row in guests
+                )
+                if rendered:
+                    lines.append(f"  guests: {rendered}")
+            elif finding["id"] == "media-capacity-pressure":
+                pool = evidence.get("pool") or {}
+                lines.append(
+                    f"  live usage: {pool.get('usage_pct')}% with {bytes_to_human(pool.get('bytes_free'))} free"
+                )
+    lines.append("")
+    lines.append("## Highest-Leverage Normalization Work")
+    lines.append("")
+    wave = scaffold.get("next_normalization_wave") or {}
+    objective = str(wave.get("objective") or "").strip()
+    if objective:
+        lines.append(f"- Objective: {objective}")
+    required_outcomes = wave.get("required_outcomes") or []
+    for item in required_outcomes:
+        if isinstance(item, str) and item.strip():
+            lines.append(f"- {item.strip()}")
+    lines.append("")
+    lines.append(f"- Rebuild atlas: `./bin/ops cap run infra.shop.storage.atlas.build`")
+    return "\n".join(lines) + "\n"
+
+
+def build_atlas() -> tuple[dict[str, Any], str]:
+    ssh_target = resolve_ssh_target("pve")
+    ssh_binding = load_yaml(SSH_BINDING_PATH)
+    placement_policy = load_yaml(PLACEMENT_PATH)
+    scaffold = load_yaml(SCAFFOLD_PATH)
+    storage_map = load_yaml(SHOP_STORAGE_MAP_PATH)
+
+    remote_now = ssh_command(ssh_target, "date -u +%Y-%m-%dT%H:%M:%SZ", timeout_sec=10).strip()
+    zpool_text = ssh_command(
+        ssh_target,
+        "zpool list -Hp -o name,size,allocated,free,capacity,health,fragmentation media tank md1400",
+        timeout_sec=20,
+    )
+    zfs_text = ssh_command(
+        ssh_target,
+        "zfs list -H -p -o name,type,used,avail,refer,mountpoint -r tank media md1400",
+        timeout_sec=30,
+    )
+    findmnt_text = ssh_command(
+        ssh_target,
+        "findmnt -rn -o TARGET,SOURCE,FSTYPE,OPTIONS | egrep '^/(md1400|media|tank)' || true",
+        timeout_sec=20,
+    )
+    exports_text = ssh_command(
+        ssh_target,
+        "sed -n '1,220p' /etc/exports 2>/dev/null",
+        timeout_sec=10,
+    )
+    pvesm_text = ssh_command(
+        ssh_target,
+        "pvesm status 2>/dev/null",
+        timeout_sec=20,
+    )
+    qm_list_text = ssh_command(
+        ssh_target,
+        "qm list",
+        timeout_sec=20,
+    )
+    pct_list_text = ssh_command(
+        ssh_target,
+        "pct list",
+        timeout_sec=20,
+    )
+    snapshots_text = ssh_command(
+        ssh_target,
+        "zfs list -H -p -t snapshot -o name,used,creation -r media md1400 tank",
+        timeout_sec=60,
+    )
+
+    path_inventory_roots = [
+        "/md1400/backup-cold",
+        "/md1400/archive",
+        "/md1400/stage",
+        "/md1400/tombstones",
+        "/media",
+        "/tank/backups",
+        "/tank/docker",
+    ]
+    path_inventory: list[dict[str, Any]] = []
+    for root in path_inventory_roots:
+        quoted = shlex.quote(root)
+        du_text = ssh_command(
+            ssh_target,
+            f"if [ -d {quoted} ]; then du -sx -B1 {quoted}/* 2>/dev/null | sort -nr; fi",
+            timeout_sec=45,
+        )
+        path_inventory.append(parse_du_inventory(du_text, root))
+
+    qm_rows = parse_table_line_map(qm_list_text.splitlines())
+    pct_rows = parse_pct_table(pct_list_text)
+
+    vm_configs: dict[str, dict[str, Any]] = {}
+    for row in qm_rows:
+        vm_id = str(row.get("vm_id") or "")
+        if not vm_id.isdigit():
+            continue
+        if int(vm_id) >= 9000:
+            continue
+        config = parse_qm_config(ssh_command(ssh_target, f"qm config {vm_id}", timeout_sec=20))
+        vm_configs[vm_id] = config
+
+    lxc_configs: dict[str, dict[str, Any]] = {}
+    for row in pct_rows:
+        vm_id = str(row.get("vm_id") or "")
+        if not vm_id.isdigit():
+            continue
+        config = parse_pct_config(ssh_command(ssh_target, f"pct config {vm_id}", timeout_sec=20))
+        lxc_configs[vm_id] = config
+
+    guests = {
+        "vms": [
+            {
+                "vm_id": str(row["vm_id"]),
+                "kind": "vm",
+                "name": row["name"],
+                "status": row["status"],
+                "active": row["status"] == "running",
+                "memory_mb": int(float(row["memory_mb"])) if row["memory_mb"] else None,
+                "bootdisk_gb": float(row["bootdisk_gb"]) if row["bootdisk_gb"] else None,
+                "disks": vm_configs.get(str(row["vm_id"]), {}).get("disks", []),
+            }
+            for row in qm_rows
+            if str(row.get("vm_id") or "").isdigit() and int(str(row["vm_id"])) < 9000
+        ],
+        "lxcs": [
+            {
+                "vm_id": str(row["vm_id"]),
+                "kind": "lxc",
+                "name": row["name"],
+                "status": row["status"],
+                "active": row["status"] == "running",
+                "mounts": lxc_configs.get(str(row["vm_id"]), {}).get("mounts", []),
+            }
+            for row in pct_rows
+            if str(row.get("vm_id") or "").isdigit()
+        ],
+    }
+
+    atlas: dict[str, Any] = {
+        "status": "generated",
+        "owner": "@ronny",
+        "generated_at_utc": now_utc_iso(),
+        "last_verified": today_utc(),
+        "scope": "shop-storage-atlas",
+        "intent": (
+            "Read-only observed storage atlas for the shop hypervisor. This surface captures "
+            "live pool, dataset, mount, export, storage backend, and guest-disk facts so "
+            "agents can compare observed reality against the boring scaffold."
+        ),
+        "builder": {
+            "capability": "infra.shop.storage.atlas.build",
+            "source_host_id": "pve",
+            "inputs": [
+                rel(SSH_BINDING_PATH),
+                rel(PLACEMENT_PATH),
+                rel(SCAFFOLD_PATH),
+                rel(SHOP_STORAGE_MAP_PATH),
+            ],
+            "outputs": [
+                rel(OUTPUT_BINDING_PATH),
+                rel(OUTPUT_REPORT_PATH),
+            ],
+        },
+        "observed_host": {
+            "id": ssh_target["id"],
+            "host": ssh_target["host"],
+            "user": ssh_target["user"],
+            "access_policy": ssh_target["access_policy"],
+        },
+        "remote_observed_at_utc": remote_now,
+        "pools": parse_zpool_list(zpool_text),
+        "zfs_objects": parse_zfs_list(zfs_text),
+        "mounts": parse_findmnt(findmnt_text),
+        "nfs_exports": parse_exports(exports_text, ssh_binding),
+        "proxmox_storages": parse_pvesm_status(pvesm_text),
+        "guests": guests,
+        "path_inventory": path_inventory,
+        "snapshot_holds": parse_snapshot_rows(snapshots_text),
+        "authority_context": {
+            "scaffold_contract": rel(SCAFFOLD_PATH),
+            "storage_authority_projection": rel(SHOP_STORAGE_MAP_PATH),
+            "placement_policy": rel(PLACEMENT_PATH),
+            "known_capacity_snapshot_age_source": str(storage_map.get("generated_at_utc") or ""),
+        },
+    }
+    drift = identify_drift(atlas, scaffold, placement_policy)
+    atlas["contract_drift"] = drift
+    report = build_report(atlas, drift, scaffold)
+    return atlas, report
+
+
+def main() -> None:
+    args = parse_args()
+    atlas, report = build_atlas()
+    atlas_text = yaml_dump(atlas)
+
+    if args.check:
+        if not OUTPUT_BINDING_PATH.exists():
+            fail(f"missing atlas binding: {OUTPUT_BINDING_PATH}", exit_code=2)
+        if not OUTPUT_REPORT_PATH.exists():
+            fail(f"missing atlas drift report: {OUTPUT_REPORT_PATH}", exit_code=2)
+        current_atlas = load_yaml(OUTPUT_BINDING_PATH)
+        required_keys = {
+            "status",
+            "generated_at_utc",
+            "observed_host",
+            "pools",
+            "zfs_objects",
+            "mounts",
+            "nfs_exports",
+            "proxmox_storages",
+            "guests",
+            "path_inventory",
+            "contract_drift",
+        }
+        missing_keys = sorted(required_keys - set(current_atlas.keys()))
+        if missing_keys:
+            fail(f"atlas binding missing required keys: {', '.join(missing_keys)}", exit_code=2)
+        current_report = OUTPUT_REPORT_PATH.read_text(encoding="utf-8")
+        if not current_report.startswith("# Shop Storage Atlas Drift\n"):
+            fail(f"atlas drift report has unexpected header: {OUTPUT_REPORT_PATH}", exit_code=2)
+        print("infra.shop.storage.atlas.build")
+        print(f"mode: check")
+        print("status: valid")
+        print(f"live_probe_remote_observed_at_utc: {atlas['remote_observed_at_utc']}")
+        print(f"atlas_path: {rel(OUTPUT_BINDING_PATH)}")
+        print(f"report_path: {rel(OUTPUT_REPORT_PATH)}")
+        return
+
+    OUTPUT_BINDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_BINDING_PATH.write_text(atlas_text, encoding="utf-8")
+    OUTPUT_REPORT_PATH.write_text(report, encoding="utf-8")
+
+    pools = {row["name"]: row for row in atlas.get("pools") or []}
+    print("infra.shop.storage.atlas.build")
+    print(f"generated_at_utc: {atlas['generated_at_utc']}")
+    print(f"remote_observed_at_utc: {atlas['remote_observed_at_utc']}")
+    for pool_name in ["media", "tank", "md1400"]:
+        pool = pools.get(pool_name)
+        if not pool:
+            continue
+        print(
+            f"pool.{pool_name}: usage={pool['usage_pct']}% used={bytes_to_human(pool['bytes_used'])} free={bytes_to_human(pool['bytes_free'])} health={pool['health']}"
+        )
+    print(f"drift_findings: {len(atlas.get('contract_drift') or [])}")
+    print(f"atlas_path: {rel(OUTPUT_BINDING_PATH)}")
+    print(f"report_path: {rel(OUTPUT_REPORT_PATH)}")
+
+
+if __name__ == "__main__":
+    main()

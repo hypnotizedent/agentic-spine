@@ -1,0 +1,678 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+RUNTIME_CONTRACT = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
+HANDOFF_CONFIG = Path(os.environ.get("HANDOFF_TASK_RECONCILE_CONFIG", str(ROOT / "ops/bindings/handoff.config.yaml")))
+TASK_BRIDGE_BIN = Path(
+    os.environ.get("HANDOFF_TASK_RECONCILE_TASK_BRIDGE_BIN", str(ROOT / "ops/plugins/core/handoff/bin/session-handoff-task-bridge"))
+)
+
+
+def load_yaml(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle)
+    return default if data is None else data
+
+
+def write_yaml(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(payload, handle, sort_keys=False)
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_timestamp(value: str | None) -> dt.datetime | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def resolve_runtime_paths() -> dict[str, Path]:
+    contract = load_yaml(RUNTIME_CONTRACT, {})
+    runtime_root = Path(os.environ.get("SPINE_RUNTIME_ROOT") or contract.get("runtime_root") or (ROOT / ".runtime/spine"))
+    state_root = Path(os.environ.get("SPINE_STATE") or contract.get("state_root") or (runtime_root / "state"))
+    logs_root = Path(os.environ.get("SPINE_LOGS") or contract.get("logs_root") or (runtime_root / "logs"))
+    mailroom_root = Path(os.environ.get("SPINE_MAILROOM_ROOT") or contract.get("mailroom_root") or (runtime_root / "mailroom"))
+    inbox_root = Path(os.environ.get("SPINE_INBOX") or (mailroom_root / "inbox"))
+    outbox_root = Path(os.environ.get("SPINE_OUTBOX") or (mailroom_root / "outbox"))
+    return {
+        "root": runtime_root,
+        "state": state_root,
+        "logs": logs_root,
+        "mailroom": mailroom_root,
+        "inbox": inbox_root,
+        "outbox": outbox_root,
+    }
+
+
+def expand_runtime_path(raw: str, runtime_paths: dict[str, Path]) -> Path:
+    mapping = {
+        "SPINE_RUNTIME_ROOT": str(runtime_paths["root"]),
+        "SPINE_STATE": str(runtime_paths["state"]),
+        "SPINE_LOGS": str(runtime_paths["logs"]),
+        "SPINE_MAILROOM_ROOT": str(runtime_paths["mailroom"]),
+        "SPINE_INBOX": str(runtime_paths["inbox"]),
+        "SPINE_OUTBOX": str(runtime_paths["outbox"]),
+        "SPINE_REPO": str(ROOT),
+        "HOME": str(Path.home()),
+    }
+    expanded = raw
+    for key, value in mapping.items():
+        expanded = expanded.replace(f"${{{key}}}", value).replace(f"${key}", value)
+    expanded = os.path.expandvars(os.path.expanduser(expanded))
+    if expanded.startswith("mailroom/state/"):
+        return runtime_paths["state"] / expanded[len("mailroom/state/") :]
+    if expanded == "mailroom/state":
+        return runtime_paths["state"]
+    if expanded.startswith("mailroom/inbox/"):
+        return runtime_paths["inbox"] / expanded[len("mailroom/inbox/") :]
+    if expanded == "mailroom/inbox":
+        return runtime_paths["inbox"]
+    if expanded.startswith("mailroom/outbox/"):
+        return runtime_paths["outbox"] / expanded[len("mailroom/outbox/") :]
+    if expanded == "mailroom/outbox":
+        return runtime_paths["outbox"]
+    path = Path(expanded)
+    return path if path.is_absolute() else (ROOT / path)
+
+
+def run_command(argv: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+
+
+def parse_task_payload(task: dict[str, Any]) -> dict[str, Any]:
+    payload = task.get("payload")
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str) and payload.strip():
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+def task_age_seconds(task: dict[str, Any], path: Path, now: dt.datetime) -> int:
+    for key in ("heartbeat_at", "claimed_at", "updated_at", "created_at"):
+        parsed = parse_timestamp(str(task.get(key, "")))
+        if parsed is not None:
+            return max(0, int((now - parsed).total_seconds()))
+    return max(0, int((now - dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)).total_seconds()))
+
+
+def safe_reason(text: str, limit: int = 220) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def task_dirs(runtime_paths: dict[str, Path]) -> dict[str, Path]:
+    root = runtime_paths["state"] / "agent-tasks"
+    return {
+        "root": root,
+        "queued": root / "queued",
+        "running": root / "running",
+        "done": root / "done",
+        "failed": root / "failed",
+    }
+
+
+def find_task_file(task_id: str, dirs: dict[str, Path]) -> tuple[Path | None, str | None]:
+    for state in ("queued", "running", "done", "failed"):
+        candidate = dirs[state] / f"{task_id}.yaml"
+        if candidate.exists():
+            return candidate, state
+    return None, None
+
+
+def bridge_enabled_for_handoff(handoff: dict[str, Any], config: dict[str, Any]) -> bool:
+    task_bridge = config.get("task_bridge", {}) if isinstance(config.get("task_bridge"), dict) else {}
+    enabled = bool(task_bridge.get("enabled", False))
+    if not enabled:
+        return False
+    role = str(handoff.get("to_role") or "").strip()
+    bridge_roles = {str(item).strip() for item in task_bridge.get("bridge_roles", []) if str(item).strip()}
+    if role in bridge_roles:
+        return True
+    bridge_meta = handoff.get("task_bridge") if isinstance(handoff.get("task_bridge"), dict) else {}
+    return bool(bridge_meta.get("enabled"))
+
+
+def expected_task_id(handoff: dict[str, Any], config: dict[str, Any]) -> str | None:
+    bridge_meta = handoff.get("task_bridge") if isinstance(handoff.get("task_bridge"), dict) else {}
+    bridged_task_id = str(bridge_meta.get("task_id") or "").strip()
+    if bridged_task_id:
+        return bridged_task_id
+    if not bridge_enabled_for_handoff(handoff, config):
+        return None
+    prefix = str(config.get("task_bridge", {}).get("task_id_prefix", "TASK-HANDOFF-")).strip() or "TASK-HANDOFF-"
+    handoff_id = str(handoff.get("id") or "").strip()
+    if not handoff_id.startswith("HO-"):
+        return None
+    return f"{prefix}{handoff_id[3:]}"
+
+
+def required_agents_for_handoff(handoff: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    bridge_meta = handoff.get("task_bridge") if isinstance(handoff.get("task_bridge"), dict) else {}
+    existing = bridge_meta.get("required_agents")
+    if isinstance(existing, list) and existing:
+        return [str(item).strip() for item in existing if str(item).strip()]
+    by_role = config.get("task_bridge", {}).get("required_agents_by_role", {})
+    if isinstance(by_role, dict):
+        role = str(handoff.get("to_role") or "").strip()
+        raw = by_role.get(role, [])
+        if isinstance(raw, list):
+            return [str(item).strip() for item in raw if str(item).strip()]
+    return []
+
+
+def update_handoff_bridge(
+    handoff_file: Path,
+    handoff: dict[str, Any],
+    *,
+    task_id: str,
+    task_state: str,
+    task_file: Path,
+    route_target: str | None,
+    required_agents: list[str],
+    dry_run: bool,
+    timestamp: str,
+) -> bool:
+    bridge_meta = handoff.get("task_bridge") if isinstance(handoff.get("task_bridge"), dict) else {}
+    current = {
+        "enabled": bool(bridge_meta.get("enabled")),
+        "task_id": str(bridge_meta.get("task_id") or ""),
+        "task_state": str(bridge_meta.get("task_state") or ""),
+        "task_file": str(bridge_meta.get("task_file") or ""),
+        "route_target": str(bridge_meta.get("route_target") or ""),
+        "required_agents": [str(item) for item in bridge_meta.get("required_agents", [])] if isinstance(bridge_meta.get("required_agents"), list) else [],
+    }
+    target = {
+        "enabled": True,
+        "task_id": task_id,
+        "task_state": task_state,
+        "task_file": str(task_file),
+        "route_target": route_target or current["route_target"],
+        "required_agents": required_agents,
+    }
+    changed = any(current[key] != target[key] for key in target)
+    if not changed:
+        return False
+    bridge_meta = dict(bridge_meta)
+    bridge_meta.update(target)
+    bridge_meta["reconciled_at_utc"] = timestamp
+    handoff["task_bridge"] = bridge_meta
+    if not dry_run:
+        write_yaml(handoff_file, handoff)
+    return True
+
+
+def move_task(
+    task_path: Path,
+    task: dict[str, Any],
+    *,
+    to_state: str,
+    dirs: dict[str, Path],
+    dry_run: bool,
+    now_text: str,
+    result: str | None = None,
+    reason: str | None = None,
+) -> Path:
+    dest = dirs[to_state] / task_path.name
+    updated = dict(task)
+    updated["status"] = to_state
+    updated["updated_at"] = now_text
+    if to_state == "done":
+        updated["result"] = result or "completed"
+        updated["completed_at"] = now_text
+        updated.pop("failure_reason", None)
+        updated.pop("failed_at", None)
+    elif to_state == "failed":
+        updated["failure_reason"] = reason or "failed"
+        updated["failed_at"] = now_text
+        updated.pop("result", None)
+        updated.pop("completed_at", None)
+    elif to_state == "queued":
+        updated["requeue_reason"] = reason or "requeued"
+        updated["reconciled_at"] = now_text
+        updated["reconciled_from"] = "running"
+        updated["reconciled_reason"] = safe_reason(reason or "requeued")
+        for key in ("claimed_by", "claimed_at", "heartbeat_at", "health_preflight", "progress"):
+            updated.pop(key, None)
+    if not dry_run:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if task_path.resolve() != dest.resolve():
+            shutil.move(str(task_path), str(dest))
+        write_yaml(dest, updated)
+    return dest
+
+
+def handoff_outcome(handoff: dict[str, Any]) -> tuple[str, str]:
+    state = str(handoff.get("state") or "").strip()
+    handoff_id = str(handoff.get("id") or "").strip()
+    if state == "expired":
+        return "failed", f"handoff_expired:{handoff_id}"
+    return "done", f"handoff_closed:{handoff_id}"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Reconcile bridged handoff/task drift and stale running task state")
+    parser.add_argument("--id", help="Reconcile one handoff id instead of scanning global runtime state")
+    parser.add_argument("--json", action="store_true", help="Emit JSON payload")
+    parser.add_argument("--dry-run", action="store_true", help="Report actions without mutating handoff/task files")
+    parser.add_argument("--running-stale-seconds", type=int, default=300, help="Age threshold for stale running tasks")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    runtime_paths = resolve_runtime_paths()
+    dirs = task_dirs(runtime_paths)
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+
+    config = load_yaml(HANDOFF_CONFIG, {})
+    handoff_dir_raw = str(config.get("storage", {}).get("directory", "mailroom/state/handoffs"))
+    handoff_dir = expand_runtime_path(handoff_dir_raw, runtime_paths)
+    handoff_dir.mkdir(parents=True, exist_ok=True)
+
+    now_dt = dt.datetime.now(dt.timezone.utc)
+    now_text = now_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    handoffs: dict[str, dict[str, Any]] = {}
+    handoff_files: dict[str, Path] = {}
+    for handoff_file in sorted(handoff_dir.glob("HO-*.yaml")):
+        handoff = load_yaml(handoff_file, {})
+        if not isinstance(handoff, dict):
+            continue
+        handoff_id = str(handoff.get("id") or handoff_file.stem).strip()
+        handoffs[handoff_id] = handoff
+        handoff_files[handoff_id] = handoff_file
+
+    errors: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
+    counts = {
+        "completed": 0,
+        "failed": 0,
+        "recreated": 0,
+        "orphan_failed": 0,
+        "stale_requeued": 0,
+        "stale_failed": 0,
+        "metadata_synced": 0,
+    }
+    handled_open_task_ids: set[str] = set()
+
+    target_handoffs: list[str]
+    if args.id:
+        if args.id not in handoffs:
+            print(f"FAIL: handoff not found: {args.id}", file=sys.stderr)
+            return 1
+        target_handoffs = [args.id]
+    else:
+        target_handoffs = sorted(handoffs)
+
+    open_handoff_tasks: dict[str, list[tuple[str, Path, str, dict[str, Any], dict[str, Any]]]] = {}
+
+    if not args.id:
+        for state in ("queued", "running"):
+            for task_path in sorted(dirs[state].glob("*.yaml")):
+                task = load_yaml(task_path, {})
+                if not isinstance(task, dict):
+                    continue
+                task_id = str(task.get("task_id") or task_path.stem).strip()
+                payload = parse_task_payload(task)
+                handoff_id = str(payload.get("handoff_id") or "").strip()
+                route_target = str(task.get("route_target") or "").strip()
+                if route_target != "handoff" or payload.get("kind") != "session_handoff":
+                    continue
+                if not handoff_id or handoff_id not in handoffs:
+                    reason = f"handoff_missing_orphan:{handoff_id or 'unknown'}"
+                    dest = move_task(
+                        task_path,
+                        task,
+                        to_state="failed",
+                        dirs=dirs,
+                        dry_run=args.dry_run,
+                        now_text=now_text,
+                        reason=reason,
+                    )
+                    actions.append(
+                        {
+                            "kind": "orphan_task_fail",
+                            "task_id": task_id,
+                            "from_state": state,
+                            "to_state": "failed",
+                            "handoff_id": handoff_id or None,
+                            "dest_file": str(dest),
+                        }
+                    )
+                    counts["failed"] += 1
+                    counts["orphan_failed"] += 1
+                    handled_open_task_ids.add(task_id)
+                    continue
+                handoff = handoffs[handoff_id]
+                handoff_state = str(handoff.get("state") or "").strip()
+                if handoff_state in {"closed", "expired"}:
+                    to_state, outcome = handoff_outcome(handoff)
+                    dest = move_task(
+                        task_path,
+                        task,
+                        to_state=to_state,
+                        dirs=dirs,
+                        dry_run=args.dry_run,
+                        now_text=now_text,
+                        result=outcome if to_state == "done" else None,
+                        reason=outcome if to_state == "failed" else None,
+                    )
+                    update_handoff_bridge(
+                        handoff_files[handoff_id],
+                        handoff,
+                        task_id=task_id,
+                        task_state=to_state,
+                        task_file=dest,
+                        route_target=route_target,
+                        required_agents=[str(item).strip() for item in task.get("required_agents", []) if str(item).strip()]
+                        if isinstance(task.get("required_agents"), list)
+                        else required_agents_for_handoff(handoff, config),
+                        dry_run=args.dry_run,
+                        timestamp=now_text,
+                    )
+                    actions.append(
+                        {
+                            "kind": "closed_handoff_complete_task" if to_state == "done" else "expired_handoff_fail_task",
+                            "handoff_id": handoff_id,
+                            "task_id": task_id,
+                            "from_state": state,
+                            "to_state": to_state,
+                            "dest_file": str(dest),
+                        }
+                    )
+                    counts["completed" if to_state == "done" else "failed"] += 1
+                    handled_open_task_ids.add(task_id)
+                    continue
+                open_handoff_tasks.setdefault(handoff_id, []).append((task_id, task_path, state, task, payload))
+
+    for handoff_id in target_handoffs:
+        handoff = handoffs[handoff_id]
+        handoff_file = handoff_files[handoff_id]
+        handoff_state = str(handoff.get("state") or "").strip()
+        route_target = str(handoff.get("task_bridge", {}).get("route_target") or config.get("task_bridge", {}).get("route_target", "handoff")).strip()
+        required_agents = required_agents_for_handoff(handoff, config)
+
+        candidate_task_id = expected_task_id(handoff, config)
+        candidate_path: Path | None = None
+        candidate_state: str | None = None
+        candidate_task: dict[str, Any] | None = None
+
+        if not args.id:
+            open_candidates = open_handoff_tasks.get(handoff_id, [])
+            if open_candidates:
+                task_id, task_path, task_state, task_payload_task, _payload = open_candidates[0]
+                candidate_task_id = task_id
+                candidate_path = task_path
+                candidate_state = task_state
+                candidate_task = task_payload_task
+
+        if candidate_path is None and candidate_task_id:
+            candidate_path, candidate_state = find_task_file(candidate_task_id, dirs)
+            if candidate_path is not None:
+                candidate_task = load_yaml(candidate_path, {})
+                if not isinstance(candidate_task, dict):
+                    candidate_task = {}
+
+        if not args.id and candidate_task_id and candidate_task_id in handled_open_task_ids and candidate_state in {"queued", "running"}:
+            continue
+
+        if handoff_state == "active":
+            if candidate_path is None and bridge_enabled_for_handoff(handoff, config):
+                if not TASK_BRIDGE_BIN.exists():
+                    errors.append({"handoff_id": handoff_id, "reason": f"task_bridge_missing:{TASK_BRIDGE_BIN}"})
+                    continue
+                before_task_id = candidate_task_id or expected_task_id(handoff, config)
+                argv = [str(TASK_BRIDGE_BIN), "--id", handoff_id, "--json"]
+                if args.dry_run:
+                    argv.append("--dry-run")
+                proc = run_command(argv, timeout=60)
+                if proc.returncode != 0:
+                    errors.append(
+                        {
+                            "handoff_id": handoff_id,
+                            "reason": "task_bridge_failed",
+                            "stdout": proc.stdout.strip(),
+                            "stderr": proc.stderr.strip(),
+                        }
+                    )
+                    continue
+                try:
+                    payload = json.loads(proc.stdout)
+                except json.JSONDecodeError:
+                    errors.append({"handoff_id": handoff_id, "reason": "task_bridge_invalid_json", "stdout": proc.stdout.strip()})
+                    continue
+                data = payload.get("data", {}) if isinstance(payload, dict) else {}
+                recreated_task_id = str(data.get("task_id") or before_task_id or "")
+                recreated_task_file = Path(str(data.get("task_file") or (dirs["queued"] / f"{recreated_task_id}.yaml")))
+                recreated_task_state = str(data.get("task_state") or "queued")
+                actions.append(
+                    {
+                        "kind": "active_handoff_recreate_task",
+                        "handoff_id": handoff_id,
+                        "task_id": recreated_task_id,
+                        "to_state": recreated_task_state,
+                        "task_file": str(recreated_task_file),
+                    }
+                )
+                counts["recreated"] += 1
+                continue
+
+            if candidate_path is not None and candidate_state is not None and candidate_task_id:
+                changed = update_handoff_bridge(
+                    handoff_file,
+                    handoff,
+                    task_id=candidate_task_id,
+                    task_state=candidate_state,
+                    task_file=candidate_path,
+                    route_target=str(candidate_task.get("route_target") or route_target) if isinstance(candidate_task, dict) else route_target,
+                    required_agents=[str(item).strip() for item in candidate_task.get("required_agents", []) if str(item).strip()]
+                    if isinstance(candidate_task, dict) and isinstance(candidate_task.get("required_agents"), list)
+                    else required_agents,
+                    dry_run=args.dry_run,
+                    timestamp=now_text,
+                )
+                if changed:
+                    actions.append(
+                        {
+                            "kind": "handoff_metadata_sync",
+                            "handoff_id": handoff_id,
+                            "task_id": candidate_task_id,
+                            "task_state": candidate_state,
+                            "task_file": str(candidate_path),
+                        }
+                    )
+                    counts["metadata_synced"] += 1
+            continue
+
+        if handoff_state in {"closed", "expired"} and candidate_path is not None and candidate_state is not None and candidate_task_id:
+            if candidate_state in {"queued", "running"}:
+                to_state, outcome = handoff_outcome(handoff)
+                dest = move_task(
+                    candidate_path,
+                    candidate_task or {},
+                    to_state=to_state,
+                    dirs=dirs,
+                    dry_run=args.dry_run,
+                    now_text=now_text,
+                    result=outcome if to_state == "done" else None,
+                    reason=outcome if to_state == "failed" else None,
+                )
+                update_handoff_bridge(
+                    handoff_file,
+                    handoff,
+                    task_id=candidate_task_id,
+                    task_state=to_state,
+                    task_file=dest,
+                    route_target=str((candidate_task or {}).get("route_target") or route_target),
+                    required_agents=[str(item).strip() for item in (candidate_task or {}).get("required_agents", []) if str(item).strip()]
+                    if isinstance((candidate_task or {}).get("required_agents"), list)
+                    else required_agents,
+                    dry_run=args.dry_run,
+                    timestamp=now_text,
+                )
+                actions.append(
+                    {
+                        "kind": "closed_handoff_complete_task" if to_state == "done" else "expired_handoff_fail_task",
+                        "handoff_id": handoff_id,
+                        "task_id": candidate_task_id,
+                        "from_state": candidate_state,
+                        "to_state": to_state,
+                        "dest_file": str(dest),
+                    }
+                )
+                counts["completed" if to_state == "done" else "failed"] += 1
+            elif candidate_state in {"done", "failed"}:
+                changed = update_handoff_bridge(
+                    handoff_file,
+                    handoff,
+                    task_id=candidate_task_id,
+                    task_state=candidate_state,
+                    task_file=candidate_path,
+                    route_target=str((candidate_task or {}).get("route_target") or route_target),
+                    required_agents=[str(item).strip() for item in (candidate_task or {}).get("required_agents", []) if str(item).strip()]
+                    if isinstance((candidate_task or {}).get("required_agents"), list)
+                    else required_agents,
+                    dry_run=args.dry_run,
+                    timestamp=now_text,
+                )
+                if changed:
+                    actions.append(
+                        {
+                            "kind": "handoff_metadata_sync",
+                            "handoff_id": handoff_id,
+                            "task_id": candidate_task_id,
+                            "task_state": candidate_state,
+                            "task_file": str(candidate_path),
+                        }
+                    )
+                    counts["metadata_synced"] += 1
+
+    if not args.id:
+        for task_path in sorted(dirs["running"].glob("*.yaml")):
+            task = load_yaml(task_path, {})
+            if not isinstance(task, dict):
+                continue
+            task_id = str(task.get("task_id") or task_path.stem).strip()
+            payload = parse_task_payload(task)
+            if payload.get("kind") == "session_handoff":
+                handoff_id = str(payload.get("handoff_id") or "").strip()
+                if handoff_id in handoffs:
+                    handoff_state = str(handoffs[handoff_id].get("state") or "").strip()
+                    if handoff_state in {"closed", "expired"}:
+                        continue
+            age_seconds = task_age_seconds(task, task_path, now_dt)
+            if age_seconds < max(1, args.running_stale_seconds):
+                continue
+            claimed_by = str(task.get("claimed_by") or "").strip()
+            if claimed_by:
+                reason = f"stale_running_reconciled:claimed_by={claimed_by} age_seconds={age_seconds}"
+                dest = move_task(task_path, task, to_state="failed", dirs=dirs, dry_run=args.dry_run, now_text=now_text, reason=reason)
+                actions.append(
+                    {
+                        "kind": "stale_running_fail",
+                        "task_id": task_id,
+                        "from_state": "running",
+                        "to_state": "failed",
+                        "claimed_by": claimed_by,
+                        "age_seconds": age_seconds,
+                        "dest_file": str(dest),
+                    }
+                )
+                counts["failed"] += 1
+                counts["stale_failed"] += 1
+            else:
+                reason = f"stale_running_reconciled:unclaimed age_seconds={age_seconds}"
+                dest = move_task(task_path, task, to_state="queued", dirs=dirs, dry_run=args.dry_run, now_text=now_text, reason=reason)
+                actions.append(
+                    {
+                        "kind": "stale_running_requeue",
+                        "task_id": task_id,
+                        "from_state": "running",
+                        "to_state": "queued",
+                        "age_seconds": age_seconds,
+                        "dest_file": str(dest),
+                    }
+                )
+                counts["stale_requeued"] += 1
+
+    status = "blocked" if errors else ("dry-run" if args.dry_run else "ok")
+    payload = {
+        "capability": "session.handoff.task_reconcile",
+        "schema_version": "1.0",
+        "generated_at": now_text,
+        "status": status,
+        "data": {
+            "handoff_dir": str(handoff_dir),
+            "task_dirs": {key: str(value) for key, value in dirs.items() if key != "root"},
+            "running_stale_seconds": max(1, args.running_stale_seconds),
+            "target_handoff_id": args.id,
+            "completed": counts["completed"],
+            "failed": counts["failed"],
+            "recreated": counts["recreated"],
+            "orphan_failed": counts["orphan_failed"],
+            "stale_requeued": counts["stale_requeued"],
+            "stale_failed": counts["stale_failed"],
+            "metadata_synced": counts["metadata_synced"],
+            "actions": actions,
+            "errors": errors,
+        },
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("session.handoff.task_reconcile")
+        print(f"status: {status}")
+        if args.id:
+            print(f"target_handoff_id: {args.id}")
+        print(f"completed: {counts['completed']}")
+        print(f"failed: {counts['failed']}")
+        print(f"recreated: {counts['recreated']}")
+        print(f"orphan_failed: {counts['orphan_failed']}")
+        print(f"stale_requeued: {counts['stale_requeued']}")
+        print(f"stale_failed: {counts['stale_failed']}")
+        print(f"metadata_synced: {counts['metadata_synced']}")
+        if errors:
+            print(f"errors: {len(errors)}")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

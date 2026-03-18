@@ -1,0 +1,55 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-12
+scope: mint-customer-reorder-resolve
+version: 1
+
+surface:
+  capability: mint.customer.reorder.resolve
+  operator_terminal: MINT-MORPHEUS-01
+  description: Resolve an existing-customer reorder email into governed customer memory, structured delta, a draft work object, and a reply draft.
+
+storage:
+  records_root: "$SPINE_STATE/mint/customer-reorder-drafts/records"
+  index_file: "$SPINE_STATE/mint/customer-reorder-drafts/index.ndjson"
+  lock_file: "$SPINE_STATE/locks/mint-customer-reorder-drafts.lock"
+
+workflow:
+  source_get_capability: microsoft.mail.get
+  thread_search_capability: communications.mail.search
+  reply_draft_capability: mint.customer.reply.draft
+  work_type_enum:
+    - new_quote
+    - reorder
+    - art_revision
+    - proof
+    - vendor
+    - spam
+    - ambiguous
+
+truth_sources:
+  priority_order:
+    - governed_mailbox_history
+    - printavo_customer_export
+    - printavo_order_export
+    - client_assets_archive
+  customers_export_glob: "$HOME/ronny-ops/mint-os/data/imports/**/*ExportsCustomersJob_export*.csv"
+  orders_export_glob: "$HOME/ronny-ops/mint-os/data/imports/**/*ExportsOrdersJob_export*.csv"
+  client_assets_root: "$HOME/Library/CloudStorage/OneDrive-MintPrints/Client Assets"
+
+required_output_fields:
+  - customer
+  - work_type
+  - matched_prior_job
+  - reused
+  - changed
+  - missing
+  - next_step
+
+notes:
+  - Do not create a real order row as the first move.
+  - Persist one governed draft work object per reorder resolution run.
+  - Draft the customer reply from the governed object instead of freeform guessing.
+  - Keep reorder replies transactional: confirm the reorder, ask only the real blocker if one exists, and avoid restating prior-job nicknames or design names unless disambiguation requires it.
+  - Do not ask for a due date by default unless timing is the actual blocker preventing the reorder lane from moving.

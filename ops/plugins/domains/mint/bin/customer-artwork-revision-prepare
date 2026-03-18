@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import yaml
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    iso_utc,
+    message_body_text,
+    message_sender,
+    message_subject,
+    resolve_spine_root,
+    resolve_spine_state,
+    run_cap_capture,
+    strip_html,
+    tokenize,
+    utc_now,
+    write_json,
+)
+from artwork_preflight_surface_common import run_preflight_command, surface_artwork_preflight  # noqa: E402
+
+
+SCHEMA_VERSION = "1.0"
+CAPABILITY_FALLBACK = "mint.customer.artwork.revision.prepare"
+CONTRACT_FALLBACK = "ops/bindings/mint.customer.artwork.revision.prepare.contract.yaml"
+DEFAULT_MAILBOX = "team@mintprints.com"
+GET_CAPABILITY = "microsoft.mail.get"
+RESOLVE_CAPABILITY = "mint.customer.forwarded.attachment.resolve"
+REVIEW_CAPABILITY = "mint.artie.revision.review"
+ARTWORK_PREFLIGHT_CAPABILITY = "mint.artwork.preflight"
+ARTWORK_PREFLIGHT_COMMAND_FALLBACK = "ops/plugins/domains/mint/bin/artwork-preflight"
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_CUSTOMER_ARTWORK_REVISION_PREPARE_CAPABILITY_NAME") or CAPABILITY_FALLBACK
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def normalize_space(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+def resolve_contract_path(spine_root: Path) -> Path:
+    override = normalize_space(os.environ.get("MINT_CUSTOMER_ARTWORK_REVISION_PREPARE_CONTRACT") or "")
+    if override:
+        path = Path(override).expanduser().resolve()
+    else:
+        path = (spine_root / CONTRACT_FALLBACK).resolve()
+    if not path.is_file():
+        fallback = (Path(__file__).resolve().parents[5] / CONTRACT_FALLBACK).resolve()
+        if fallback.is_file():
+            path = fallback
+    if not path.is_file():
+        fail(f"customer artwork revision prepare contract not found: {path}")
+    return path
+
+
+def load_contract(path: Path) -> dict[str, Any]:
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        fail(f"invalid customer artwork revision prepare contract: {path}")
+    return payload
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-artwork-revision-prepare",
+        description=(
+            "Continue the customer artwork-revision lane by resolving the current intended attachment, "
+            "placing it canonically, and creating a bounded Artie handoff."
+        ),
+    )
+    parser.add_argument("message_id", nargs="?", help="Forwarded source mailbox message id")
+    parser.add_argument("--message-id", dest="message_id_flag", default="", help="Forwarded source mailbox message id")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox to read from (default: {DEFAULT_MAILBOX})")
+    parser.add_argument("--context", default="", help="Freeform customer/job context used for related search and placement")
+    parser.add_argument("--customer", default="", help="Optional customer identity for the Artie handoff")
+    parser.add_argument("--job", default="", help="Optional job/order identity for the Artie handoff")
+    parser.add_argument("--related-query", default="", help="Optional explicit query for related mailbox search")
+    parser.add_argument("--revision-request", default="", help="Optional explicit revision request to hand to Artie")
+    parser.add_argument("--operator-context", default="", help="Optional operator context note captured above the forwarded message")
+    parser.add_argument(
+        "--quote-status",
+        default="auto",
+        choices=["auto", "sufficient", "clarification_needed", "unknown"],
+        help="Quote readiness for this thread; default auto infers a boring next-step state from the message text.",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    resolved_message_id = args.message_id_flag.strip() or str(args.message_id or "").strip()
+    if not resolved_message_id:
+        fail("message_id required")
+    args.message_id = resolved_message_id
+    return args
+
+
+def infer_quote_status(source_message: dict[str, Any], operator_context: str) -> tuple[str, str]:
+    text = " ".join(
+        part for part in [message_subject(source_message), message_body_text(source_message), operator_context] if part
+    ).lower()
+    if any(phrase in text for phrase in ("not enough info", "need more info", "cannot quote", "can't quote", "before we quote")):
+        return "clarification_needed", "message_text_explicitly_says_quote_needs_more_info"
+    has_quantity = any(token.isdigit() for token in tokenize(text)) or any(term in text for term in ("qty", "quantity", "sizes", "size"))
+    has_product = any(term in text for term in ("shirt", "shirts", "tee", "tees", "hoodie", "hat", "caps", "garment", "print"))
+    if not has_quantity or not has_product:
+        return "clarification_needed", "message_text_lacks_basic_quote_inputs"
+    return "sufficient", "message_text_contains_basic_quote_inputs"
+
+
+def derive_revision_request(source_message: dict[str, Any], explicit_request: str, operator_context: str) -> str:
+    if explicit_request.strip():
+        return explicit_request.strip()
+    for candidate in (operator_context, strip_html(str(source_message.get("bodyPreview") or "")), message_body_text(source_message)):
+        text = " ".join(candidate.split())
+        if text:
+            return text[:280]
+    return "Use the selected artwork file for the next correction pass and return the updated revision handoff."
+
+
+def text_output(summary: dict[str, Any]) -> str:
+    lines = [
+        capability_name(),
+        f"status: {summary['status']}",
+        f"mailbox: {summary['mailbox']}",
+        f"source_message_id: {summary['source_message_id']}",
+        f"quote_status: {summary['quote_status']}",
+        f"handoff_state: {summary['handoff_state']}",
+        f"handoff_file: {summary['record_file']}",
+    ]
+    selected = summary.get("selected_artwork_ref") or {}
+    if selected:
+        lines.extend(
+            [
+                f"selected_attachment: {selected.get('original_filename', '')}",
+                f"artifact_id: {selected.get('artifact_id', '')}",
+                f"resolved_file_path: {selected.get('resolved_file_path', '')}",
+            ]
+        )
+    if summary.get("operator_question"):
+        lines.append(f"operator_question: {summary['operator_question']}")
+    artwork_preflight = dict(summary.get("selected_artwork_preflight") or {})
+    if artwork_preflight:
+        lines.append(f"selected_artwork_preflight: {artwork_preflight.get('summary') or ''}")
+    lines.append(f"index_file: {summary['index_file']}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    contract = load_contract(resolve_contract_path(spine_root))
+    workflow = dict(contract.get("workflow") or {})
+    artwork_preflight_command = str(
+        workflow.get("artwork_preflight_command") or os.environ.get("MINT_ARTWORK_PREFLIGHT_COMMAND") or ARTWORK_PREFLIGHT_COMMAND_FALLBACK
+    )
+    now = utc_now()
+    handoff_id = f"MARP-{now.strftime('%Y%m%dT%H%M%SZ')}-{os.urandom(2).hex()}"
+
+    source_message, source_get_receipt = run_cap_capture(
+        spine_root,
+        GET_CAPABILITY,
+        ["--message-id", args.message_id, "--mailbox", args.mailbox],
+    )
+    if args.quote_status == "auto":
+        quote_status, quote_basis = infer_quote_status(source_message, args.operator_context)
+    else:
+        quote_status = args.quote_status
+        quote_basis = "operator_override"
+
+    resolve_args = ["--message-id", args.message_id, "--mailbox", args.mailbox, "--json"]
+    if args.context.strip():
+        resolve_args.extend(["--context", args.context.strip()])
+    if args.job.strip():
+        resolve_args.extend(["--job-ref", args.job.strip()])
+    if args.related_query.strip():
+        resolve_args.extend(["--related-query", args.related_query.strip()])
+    resolve_payload, resolve_receipt = run_cap_capture(spine_root, RESOLVE_CAPABILITY, resolve_args)
+
+    resolve_status = str(resolve_payload.get("status") or "")
+    resolve_selected = dict(resolve_payload.get("selected_attachment") or {})
+    resolve_artifact = dict(resolve_payload.get("artifact") or {})
+    placement = dict(resolve_payload.get("placement") or {})
+    operator_question = str(resolve_payload.get("operator_question") or "").strip()
+
+    revision_request = derive_revision_request(source_message, args.revision_request, args.operator_context)
+    handoff_state = "ready_for_artie"
+    status = "ok"
+    next_expected_action = (
+        "Artie should use the selected artwork reference for the next correction pass and review the returned proof "
+        f"through {REVIEW_CAPABILITY} before Morpheus coordinates the next customer step."
+    )
+    if resolve_status not in {"selected", "existing_artifact"} or not (resolve_selected or resolve_artifact):
+        handoff_state = "needs_operator_choice"
+        status = "needs_operator_choice"
+        next_expected_action = "Resolve the artwork version question before Artie starts the next correction pass."
+
+    selected_artwork_ref = None
+    if resolve_artifact or resolve_selected:
+        selected_artwork_ref = {
+            "artifact_id": resolve_artifact.get("artifact_id"),
+            "artifact_role": resolve_artifact.get("artifact_role"),
+            "artifact_status": resolve_artifact.get("artifact_status"),
+            "original_filename": resolve_artifact.get("original_filename") or resolve_selected.get("attachment_name"),
+            "downloaded_file": resolve_selected.get("downloaded_file"),
+            "resolved_file_path": resolve_artifact.get("canonical_object_path")
+            or placement.get("resolved_file_path")
+            or resolve_selected.get("downloaded_file"),
+            "resolved_target_key": resolve_artifact.get("canonical_object_key") or placement.get("resolved_target_key"),
+            "canonical_object_key": resolve_artifact.get("canonical_object_key"),
+            "sha256": resolve_artifact.get("sha256") or resolve_selected.get("sha256"),
+        }
+
+    selected_artwork_preflight: dict[str, Any] | None = None
+    if selected_artwork_ref:
+        preflight_args: list[str] = []
+        artifact_id = normalize_space(selected_artwork_ref.get("artifact_id") or "")
+        resolved_file_path = Path(
+            normalize_space(selected_artwork_ref.get("resolved_file_path") or selected_artwork_ref.get("downloaded_file") or "")
+        ).expanduser()
+        if resolved_file_path.is_file():
+            preflight_args = [str(resolved_file_path), "--attachment-name", normalize_space(selected_artwork_ref.get("original_filename") or "")]
+        elif artifact_id:
+            preflight_args = [
+                "--artifact-id",
+                artifact_id,
+                "--attachment-name",
+                normalize_space(selected_artwork_ref.get("original_filename") or ""),
+            ]
+        if preflight_args:
+            if args.customer.strip():
+                preflight_args.extend(["--customer-name", args.customer.strip()])
+            if args.job.strip():
+                preflight_args.extend(["--job-ref", args.job.strip()])
+            try:
+                preflight_payload = run_preflight_command(artwork_preflight_command, preflight_args, cwd=spine_root)
+                selected_artwork_preflight = surface_artwork_preflight(preflight_payload)
+                selected_artwork_ref["artwork_preflight_record_file"] = selected_artwork_preflight.get("record_file")
+            except RuntimeError as exc:
+                selected_artwork_preflight = {
+                    "owner": "Artie",
+                    "source": ARTWORK_PREFLIGHT_CAPABILITY,
+                    "state": "analysis_failed",
+                    "summary": f"Artie preflight could not analyze the selected artwork cleanly: {normalize_space(exc)}",
+                }
+
+    summary = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "generated_at": iso_utc(now),
+        "handoff_id": handoff_id,
+        "handoff_state": handoff_state,
+        "mailbox": args.mailbox,
+        "source_message_id": args.message_id,
+        "source_subject": message_subject(source_message),
+        "source_from": message_sender(source_message),
+        "customer_identity": args.customer.strip() or None,
+        "job_identity": args.job.strip() or None,
+        "quote_status": quote_status,
+        "quote_status_basis": quote_basis,
+        "revision_request": revision_request,
+        "operator_context": args.operator_context.strip() or None,
+        "next_expected_action": next_expected_action,
+        "downstream_owner": "Artie",
+        "downstream_review_capability": REVIEW_CAPABILITY,
+        "operator_question": operator_question or None,
+        "selected_artwork_ref": selected_artwork_ref,
+        "selected_artwork_preflight": selected_artwork_preflight,
+        "resolve_record_file": resolve_payload.get("record_file"),
+        "receipts": {
+            "source_get_receipt": source_get_receipt or None,
+            "resolve_receipt": resolve_receipt or None,
+        },
+    }
+
+    records_dir = state_root / "mint" / "artie-revision-handoffs" / "records" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{handoff_id}.json"
+    index_file = state_root / "mint" / "artie-revision-handoffs" / "index.ndjson"
+    lock_file = state_root / "locks" / "mint-artie-revision-handoffs.lock"
+    write_json(record_file, summary)
+    append_ndjson(
+        index_file,
+        lock_file,
+        {
+            "handoff_id": handoff_id,
+            "handoff_state": handoff_state,
+            "source_message_id": args.message_id,
+            "customer_identity": summary.get("customer_identity"),
+            "job_identity": summary.get("job_identity"),
+            "quote_status": quote_status,
+            "record_file": str(record_file),
+        },
+    )
+
+    summary["record_file"] = str(record_file)
+    summary["index_file"] = str(index_file)
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+
+    print(text_output(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

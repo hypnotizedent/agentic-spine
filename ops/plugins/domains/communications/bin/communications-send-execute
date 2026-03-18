@@ -22,8 +22,32 @@ PREVIEW_ID=""
 PREVIEW_RECEIPT=""
 EXECUTE=0
 JSON=0
+AGENT_EMAIL_SEND_ALLOW="${AGENT_EMAIL_SEND_ALLOW:-0}"
 HTTP_CONNECT_TIMEOUT_SECONDS="${COMMUNICATIONS_HTTP_CONNECT_TIMEOUT_SECONDS:-10}"
 HTTP_MAX_TIME_SECONDS="${COMMUNICATIONS_HTTP_MAX_TIME_SECONDS:-30}"
+
+emit_agent_email_policy_block() {
+  local blocked_at="$1"
+  if [[ "$JSON" -eq 1 ]]; then
+    jq -n \
+      --arg capability "communications.send.execute" \
+      --arg schema_version "1.0" \
+      --arg status "blocked" \
+      --arg generated_at "$blocked_at" \
+      --arg message "agent outbound email sending is disabled by policy; drafts/previews only" \
+      '{
+        capability: $capability,
+        schema_version: $schema_version,
+        status: $status,
+        generated_at: $generated_at,
+        error: {message: $message}
+      }'
+  else
+    echo "communications.send.execute"
+    echo "status: blocked"
+    echo "error: agent outbound email sending is disabled by policy; drafts/previews only"
+  fi
+}
 
 resolve_secret() {
   local key="$1"
@@ -181,6 +205,11 @@ echo "$VARS_JSON" | jq -e 'type == "object"' >/dev/null 2>&1 || {
   echo "ERROR: --vars-json must be a JSON object" >&2
   exit 2
 }
+
+if [[ "$EXECUTE" -eq 1 && "$CHANNEL" == "email" ]]; then
+  emit_agent_email_policy_block "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  exit 2
+fi
 
 preview_cmd=(
   "$PREVIEW_BIN"

@@ -7,14 +7,20 @@ import argparse
 import copy
 import json
 import os
+import socket
 import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib import parse as urlparse
 
 import yaml
+
+from customer_identity_common import introduction_name
+from customer_mail_identity_common import first_name_token, projection_mode, salutation_text, validate_mail_identity_projection
+from mint_runtime_paths import resolve_mint_data_root, resolve_spine_root
 
 
 CANONICAL_LINE_FIELDS = {
@@ -84,6 +90,8 @@ PRICING_REQUIRED_FIELDS = (
 )
 METHODS_REQUIRING_GRAPHIC_SIZE = {"screen_print", "engraving", "transfers"}
 EMBROIDERY_GRAPHIC_SIZE_HOOPS = {"sleeve_hoop", "oversized_back_hoop"}
+QUOTE_READY_TERMINAL_STATES = {"sent", "paid", "closed"}
+QUOTE_REVIEW_READY_PACKET_STATES = {"ready_for_review", "approved_to_send"}
 
 
 def has_canonical_value(value: Any) -> bool:
@@ -179,6 +187,91 @@ def load_structured_file(path: Path) -> Any:
     return yaml.safe_load(text)
 
 
+def tcp_port_open(host: str | None, port: int, timeout_seconds: int | float = 3) -> bool:
+    if not host:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=float(timeout_seconds)):
+            return True
+    except OSError:
+        return False
+
+
+def resolve_service_base_url_with_fallback(
+    spine_root: Path,
+    endpoint_id: str,
+    fallback_url: str,
+    timeout_seconds: int | float = 3,
+) -> str:
+    services_file = spine_root / "ops/bindings/services.health.yaml"
+    ssh_file = spine_root / "ops/bindings/ssh.targets.yaml"
+    if not services_file.exists():
+        return fallback_url.rstrip("/")
+
+    services = load_structured_file(services_file) or {}
+    endpoints = services.get("endpoints") or []
+    endpoint = next(
+        (item for item in endpoints if isinstance(item, dict) and item.get("id") == endpoint_id),
+        None,
+    )
+    if not endpoint:
+        return fallback_url.rstrip("/")
+
+    raw_url = str(endpoint.get("url") or "").strip()
+    if not raw_url:
+        return fallback_url.rstrip("/")
+
+    parsed = urlparse.urlparse(raw_url)
+    if not parsed.scheme or not parsed.netloc or not parsed.hostname:
+        return fallback_url.rstrip("/")
+
+    if not ssh_file.exists():
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    ssh_targets = load_structured_file(ssh_file) or {}
+    targets = ((ssh_targets.get("ssh") or {}).get("targets") or [])
+    target_id = str(endpoint.get("host") or "").strip()
+    target = next(
+        (item for item in targets if isinstance(item, dict) and item.get("id") == target_id),
+        None,
+    )
+    if not target:
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    lan_host = str(target.get("host") or parsed.hostname or "").strip()
+    tailscale_host = str(target.get("tailscale_ip") or "").strip()
+    policy = str(target.get("access_policy") or "lan_first").strip() or "lan_first"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    candidates: list[tuple[str, str]] = []
+    if policy == "tailscale_required":
+        if tailscale_host:
+            candidates.append((tailscale_host, "tailscale"))
+    elif policy == "lan_only":
+        if lan_host:
+            candidates.append((lan_host, "lan"))
+    elif policy == "lan_first":
+        if lan_host:
+            candidates.append((lan_host, "lan"))
+        if tailscale_host and tailscale_host != lan_host:
+            candidates.append((tailscale_host, "tailscale"))
+    else:
+        if lan_host:
+            candidates.append((lan_host, "direct"))
+
+    resolved_host = parsed.hostname
+    for candidate_host, _path in candidates:
+        if tcp_port_open(candidate_host, port, timeout_seconds):
+            resolved_host = candidate_host
+            break
+
+    resolved_netloc = parsed.netloc
+    if parsed.hostname and resolved_host and resolved_host != parsed.hostname:
+        resolved_netloc = parsed.netloc.replace(parsed.hostname, resolved_host, 1)
+
+    return f"{parsed.scheme}://{resolved_netloc}".rstrip("/")
+
+
 def deep_merge(base: Any, overlay: Any) -> Any:
     if isinstance(base, dict) and isinstance(overlay, dict):
         merged = dict(base)
@@ -207,13 +300,7 @@ def source_key(ref: dict[str, Any]) -> tuple[str, str, str, str]:
 def line_key(item: dict[str, Any]) -> tuple[str, str]:
     return (
         str(item.get("line_item_id") or ""),
-        "|".join(
-            [
-                str(item.get("product_type") or ""),
-                str(item.get("description") or ""),
-                json.dumps(item.get("size_breakdown") or {}, sort_keys=True),
-            ]
-        ),
+        line_signature(item),
     )
 
 
@@ -223,6 +310,12 @@ def line_signature(raw: dict[str, Any]) -> str:
             str(raw.get("product_type") or ""),
             str(raw.get("description") or ""),
             json.dumps(raw.get("size_breakdown") or {}, sort_keys=True),
+            str(raw.get("decoration_method") or ""),
+            str(raw.get("placement") or ""),
+            json.dumps(raw.get("print_locations") or [], sort_keys=True),
+            str(raw.get("style_code") or ""),
+            str(raw.get("supplier_sku") or ""),
+            str(raw.get("color") or ""),
         ]
     )
 
@@ -259,6 +352,7 @@ def extract_payload_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         "line_items",
         "artwork_bindings",
         "inventory_snapshot",
+        "estimate_snapshot",
         "pricing_snapshot",
         "quote_draft_ref",
         "customer_message_draft",
@@ -358,6 +452,7 @@ def normalize_line_items(payload: dict[str, Any]) -> tuple[list[dict[str, Any]],
     merged_items: dict[str, dict[str, Any]] = {}
     merged_hints: dict[str, dict[str, Any]] = {}
     ordered_keys: list[str] = []
+    signature_to_key: dict[str, str] = {}
     for raw in payload.get("line_items") or []:
         if not isinstance(raw, dict):
             continue
@@ -367,14 +462,22 @@ def normalize_line_items(payload: dict[str, Any]) -> tuple[list[dict[str, Any]],
                 item[key] = copy.deepcopy(value)
         if not item.get("product_type"):
             continue
-        item_key = str(item.get("line_item_id") or line_signature(raw))
+        raw_line_id = str(item.get("line_item_id") or "").strip()
+        signature = line_signature(raw)
+        item_key = raw_line_id or signature
+        if signature and signature in signature_to_key:
+            item_key = signature_to_key[signature]
+        elif raw_line_id and raw_line_id in merged_items:
+            item_key = raw_line_id
         merged_item = deep_merge(merged_items.get(item_key, {}), item)
-        merged_item["line_item_id"] = merged_item.get("line_item_id") or item.get("line_item_id") or str(uuid.uuid4())
+        merged_item["line_item_id"] = merged_item.get("line_item_id") or raw_line_id or str(uuid.uuid4())
         merged_items[item_key] = merged_item
         merged_hints[item_key] = deep_merge(
             merged_hints.get(item_key, {}),
             {key: raw.get(key) for key in LINE_RUNTIME_HINT_FIELDS if key in raw},
         )
+        if signature:
+            signature_to_key[signature] = item_key
         if item_key not in ordered_keys:
             ordered_keys.append(item_key)
     normalized = [merged_items[key] for key in ordered_keys]
@@ -511,10 +614,16 @@ def maybe_resolve_customer(
     state = payload_json.get("state") or "error"
     if state in {"exact_match", "normalized_match"}:
         resolved = payload_json.get("resolved_customer") or {}
+        carried_contact_name = customer_ref.get("contact_name")
+        carried_greeting_name = customer_ref.get("greeting_name")
+        carried_salutation_mode = customer_ref.get("mail_salutation_mode")
         customer_ref = {
             "identity_state": "resolved",
             "customer_id": resolved.get("id"),
             "customer_query": query,
+            "contact_name": carried_contact_name,
+            "greeting_name": carried_greeting_name,
+            "mail_salutation_mode": carried_salutation_mode,
         }
         if resolved.get("name"):
             customer_ref["resolved_name"] = resolved["name"]
@@ -599,6 +708,27 @@ def build_pricing_snapshot(
         "pricing_receipt_refs": [],
         "confidence_level": confidence,
     }
+
+
+def build_estimate_snapshot(payload: dict[str, Any], timestamp: str) -> dict[str, Any] | None:
+    existing = copy.deepcopy(payload.get("estimate_snapshot") or {})
+    if not existing:
+        return None
+    existing.setdefault("snapshot_timestamp", timestamp)
+    existing.setdefault("estimate_snapshot_id", str(uuid.uuid4()))
+    existing.setdefault("estimate_state", existing.get("estimate_state") or "provided")
+    existing.setdefault("line_item_estimates", [])
+    existing.setdefault("calculated_totals", {"subtotal": 0, "tax": 0, "shipping": 0, "total": 0})
+    existing.setdefault("estimate_receipt_refs", [])
+    existing.setdefault("confidence_level", "medium")
+    existing.setdefault("blocking_reasons", [])
+    existing.setdefault("quote_safe_line_item_count", len([row for row in existing.get("line_item_estimates") or [] if row.get("quote_safe_now")]))
+    existing.setdefault(
+        "clarification_needed_count",
+        len([row for row in existing.get("line_item_estimates") or [] if row.get("estimate_status") == "clarification_needed"]),
+    )
+    existing.setdefault("estimate_authority_path", "mint.quote.packet.estimate")
+    return existing
 
 
 def add_gap(
@@ -842,6 +972,344 @@ def overall_confidence(customer: str, artwork: str, stock: str, pricing: str, ga
     return "medium"
 
 
+def packet_blocking_gaps(packet: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        gap
+        for gap in (packet.get("open_gaps") or [])
+        if isinstance(gap, dict) and str(gap.get("severity") or "") == "blocking"
+    ]
+
+
+def quote_line_item_count(packet: dict[str, Any]) -> int:
+    return len([item for item in (packet.get("line_items") or []) if isinstance(item, dict)])
+
+
+def estimate_state(packet: dict[str, Any]) -> str:
+    return str(((packet.get("estimate_snapshot") or {}).get("estimate_state")) or "")
+
+
+def pricing_state(packet: dict[str, Any]) -> str:
+    return str(((packet.get("pricing_snapshot") or {}).get("pricing_state")) or "")
+
+
+def pricing_completed(packet: dict[str, Any]) -> bool:
+    snapshot = packet.get("pricing_snapshot") or {}
+    if not isinstance(snapshot, dict):
+        return False
+    if str(snapshot.get("pricing_state") or "") not in {"completed", "provided"}:
+        return False
+    return str(snapshot.get("confidence_level") or "none") in {"medium", "high"}
+
+
+def estimate_covers_all_line_items(packet: dict[str, Any]) -> bool:
+    snapshot = packet.get("estimate_snapshot") or {}
+    if not isinstance(snapshot, dict):
+        return False
+    if str(snapshot.get("estimate_state") or "") not in {"completed", "partial", "provided"}:
+        return False
+    total = quote_line_item_count(packet)
+    if total <= 0:
+        return False
+    quote_safe_count = int(snapshot.get("quote_safe_line_item_count") or 0)
+    return quote_safe_count >= total
+
+
+def build_basis(packet: dict[str, Any]) -> str:
+    if pricing_completed(packet):
+        return "exact_pricing_ready"
+    if estimate_covers_all_line_items(packet):
+        return "estimate_safe"
+    return "not_ready"
+
+
+def completed_internal_work(packet: dict[str, Any]) -> bool:
+    inventory_snapshot = packet.get("inventory_snapshot") or {}
+    if isinstance(inventory_snapshot, dict) and str(inventory_snapshot.get("stock_check_state") or "") in {
+        "completed",
+        "partial",
+        "sourced_without_stock",
+    }:
+        return True
+    estimate_snapshot = packet.get("estimate_snapshot") or {}
+    if isinstance(estimate_snapshot, dict) and (
+        int(estimate_snapshot.get("quote_safe_line_item_count") or 0) > 0
+        or str(estimate_snapshot.get("estimate_state") or "") in {"completed", "partial", "provided"}
+    ):
+        return True
+    pricing_snapshot = packet.get("pricing_snapshot") or {}
+    if isinstance(pricing_snapshot, dict) and (
+        str(pricing_snapshot.get("pricing_state") or "") in {"completed", "provided"}
+        or bool(pricing_snapshot.get("line_item_prices"))
+    ):
+        return True
+    return bool(packet.get("quote_draft_ref") or packet.get("customer_message_draft"))
+
+
+def grouped_blocking_gaps(packet: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for gap in packet_blocking_gaps(packet):
+        gap_type = str(gap.get("gap_type") or "")
+        grouped.setdefault(gap_type, []).append(gap)
+    return grouped
+
+
+def gap_summary(grouped: dict[str, list[dict[str, Any]]], gap_type: str, fallback: str) -> str:
+    entries = grouped.get(gap_type) or []
+    if not entries:
+        return fallback
+    description = str(entries[0].get("description") or "").strip()
+    if description:
+        return description
+    return fallback
+
+
+def append_readiness_missing(
+    missing: list[dict[str, str]],
+    code: str,
+    summary: str,
+    source: str,
+) -> None:
+    if any(str(entry.get("code") or "") == code for entry in missing):
+        return
+    missing.append(
+        {
+            "code": code,
+            "summary": summary,
+            "source": source,
+        }
+    )
+
+
+def build_missing_requirements(packet: dict[str, Any]) -> list[dict[str, str]]:
+    missing: list[dict[str, str]] = []
+    grouped = grouped_blocking_gaps(packet)
+    basis = build_basis(packet)
+
+    if quote_line_item_count(packet) == 0:
+        append_readiness_missing(
+            missing,
+            "line_items",
+            "No governed line items exist yet for this quote packet.",
+            "intake",
+        )
+
+    if grouped.get("clarification_required"):
+        append_readiness_missing(
+            missing,
+            "clarification",
+            gap_summary(grouped, "clarification_required", "Customer clarification is still required before quoting cleanly."),
+            "customer",
+        )
+    if grouped.get("product_unresolved"):
+        append_readiness_missing(
+            missing,
+            "product_scope",
+            gap_summary(grouped, "product_unresolved", "The exact product or grouping is still unresolved."),
+            "customer",
+        )
+    if grouped.get("quantity_unresolved"):
+        append_readiness_missing(
+            missing,
+            "quantity",
+            gap_summary(grouped, "quantity_unresolved", "Exact quantities are still missing."),
+            "customer",
+        )
+    if grouped.get("decoration_unresolved") and basis == "not_ready":
+        append_readiness_missing(
+            missing,
+            "decoration_scope",
+            gap_summary(grouped, "decoration_unresolved", "Decoration method, locations, or pricing inputs are still unresolved."),
+            "customer",
+        )
+    if grouped.get("supplier_unresolved") and basis == "not_ready":
+        append_readiness_missing(
+            missing,
+            "blank_source",
+            gap_summary(grouped, "supplier_unresolved", "Blank sourcing truth is still unresolved."),
+            "supplier",
+        )
+    if (grouped.get("artwork_missing") or grouped.get("artwork_inadequate")) and basis == "not_ready":
+        gap_type = "artwork_missing" if grouped.get("artwork_missing") else "artwork_inadequate"
+        append_readiness_missing(
+            missing,
+            "artwork_scope",
+            gap_summary(grouped, gap_type, "Artwork evidence is still too weak to quote safely."),
+            "artwork",
+        )
+
+    return missing
+
+
+def send_missing_requirements(packet: dict[str, Any], build_missing: list[dict[str, str]]) -> list[dict[str, str]]:
+    packet_state = str(packet.get("state") or "")
+    if packet_state in QUOTE_READY_TERMINAL_STATES:
+        return []
+
+    missing = copy.deepcopy(build_missing)
+    customer_ref = packet.get("customer_ref") or {}
+    grouped = grouped_blocking_gaps(packet)
+    if str(customer_ref.get("identity_state") or "") != "resolved":
+        append_readiness_missing(
+            missing,
+            "customer_identity",
+            "Customer identity is not resolved to a governed customer record yet.",
+            "customer",
+        )
+    if grouped.get("shipping_ambiguity"):
+        append_readiness_missing(
+            missing,
+            "shipping_scope",
+            gap_summary(grouped, "shipping_ambiguity", "Shipping posture is still ambiguous."),
+            "customer",
+        )
+    if grouped.get("pricing_policy_review"):
+        append_readiness_missing(
+            missing,
+            "pricing_review",
+            gap_summary(grouped, "pricing_policy_review", "Pricing policy review is still required before send."),
+            "operator",
+        )
+
+    if not pricing_completed(packet):
+        snapshot = packet.get("pricing_snapshot") or {}
+        summary = "Exact pricing snapshot is not complete yet."
+        if isinstance(snapshot, dict):
+            current_state = str(snapshot.get("pricing_state") or "").strip()
+            if current_state:
+                summary = f"Exact pricing snapshot is not complete yet ({current_state})."
+            blocking_reasons = snapshot.get("blocking_reasons") or []
+            if isinstance(blocking_reasons, list) and blocking_reasons:
+                summary = str(blocking_reasons[0])
+        append_readiness_missing(
+            missing,
+            "exact_pricing",
+            summary,
+            "pricing",
+        )
+
+    if not packet.get("quote_draft_ref"):
+        append_readiness_missing(
+            missing,
+            "quote_draft",
+            "A governed quote draft has not been rendered yet.",
+            "quote_packet",
+        )
+    if not str(packet.get("customer_message_draft") or "").strip():
+        append_readiness_missing(
+            missing,
+            "customer_message",
+            "A governed customer-facing message draft has not been rendered yet.",
+            "quote_packet",
+        )
+
+    non_approval_missing = [entry for entry in missing if str(entry.get("code") or "") != "operator_approval"]
+    review_ready = not non_approval_missing
+    if review_ready and packet_state != "approved_to_send":
+        append_readiness_missing(
+            missing,
+            "operator_approval",
+            "Operator review and approval are still required before send.",
+            "operator",
+        )
+
+    return missing
+
+
+def quote_readiness_state(
+    packet: dict[str, Any],
+    build_missing: list[dict[str, str]],
+    send_missing: list[dict[str, str]],
+) -> str:
+    packet_state = str(packet.get("state") or "")
+    if packet_state in QUOTE_READY_TERMINAL_STATES:
+        return "quote_sent"
+    if not build_missing and not completed_internal_work(packet):
+        return "ready_for_quote_build"
+    review_blockers = [entry for entry in send_missing if str(entry.get("code") or "") != "operator_approval"]
+    if packet_state == "approved_to_send" and not send_missing:
+        return "ready_for_operator_send"
+    if packet_state in QUOTE_REVIEW_READY_PACKET_STATES and not review_blockers:
+        return "ready_for_operator_review"
+    if build_missing:
+        return "needs_customer_input"
+    return "quote_packet_in_progress"
+
+
+def quote_readiness_next_step(
+    packet: dict[str, Any],
+    build_missing: list[dict[str, str]],
+    send_missing: list[dict[str, str]],
+) -> str:
+    packet_state = str(packet.get("state") or "")
+    if packet_state == "paid":
+        return "handoff_to_production"
+    if packet_state in {"sent", "closed"}:
+        return "await_customer_response"
+
+    if build_missing:
+        code = str(build_missing[0].get("code") or "")
+        if code == "blank_source":
+            return "run_quote_source"
+        if code == "artwork_scope":
+            return "clarify_artwork_scope"
+        if code == "line_items":
+            return "normalize_line_items"
+        return "ask_customer_blocker"
+
+    if not pricing_completed(packet):
+        if build_basis(packet) == "estimate_safe":
+            return "run_quote_price"
+        inventory_snapshot = packet.get("inventory_snapshot") or {}
+        if isinstance(inventory_snapshot, dict) and str(inventory_snapshot.get("stock_check_state") or "") in {
+            "",
+            "not_requested",
+            "not_run",
+            "blocked_supplier_unresolved",
+            "api_key_unavailable",
+        }:
+            return "run_quote_source"
+        if not estimate_covers_all_line_items(packet):
+            return "run_quote_estimate"
+        return "run_quote_price"
+
+    if not packet.get("quote_draft_ref") or not str(packet.get("customer_message_draft") or "").strip():
+        return "render_quote_review"
+
+    review_blockers = [entry for entry in send_missing if str(entry.get("code") or "") != "operator_approval"]
+    if packet_state == "approved_to_send" and not send_missing:
+        return "send_quote"
+    if not review_blockers:
+        return "operator_review"
+    return "resolve_quote_send_blocker"
+
+
+def compute_quote_readiness(packet: dict[str, Any]) -> dict[str, Any]:
+    build_missing = build_missing_requirements(packet)
+    send_missing = send_missing_requirements(packet, build_missing)
+    review_ready = not [entry for entry in send_missing if str(entry.get("code") or "") != "operator_approval"]
+    send_ready = str(packet.get("state") or "") == "approved_to_send" and not send_missing
+    readiness_state = quote_readiness_state(packet, build_missing, send_missing)
+
+    return {
+        "state": readiness_state,
+        "packet_state": str(packet.get("state") or ""),
+        "build_basis": build_basis(packet),
+        "build_ready": not build_missing,
+        "review_ready": review_ready,
+        "send_ready": send_ready,
+        "estimate_state": estimate_state(packet) or "not_requested",
+        "pricing_state": pricing_state(packet) or "not_requested",
+        "missing_for_build": build_missing,
+        "missing_for_send": send_missing,
+        "next_step": quote_readiness_next_step(packet, build_missing, send_missing),
+    }
+
+
+def sync_quote_readiness(packet: dict[str, Any]) -> dict[str, Any]:
+    packet["quote_readiness"] = compute_quote_readiness(packet)
+    return packet["quote_readiness"]
+
+
 def build_customer_message_draft(
     payload: dict[str, Any], customer_ref: dict[str, Any], gaps: list[dict[str, Any]]
 ) -> str:
@@ -872,10 +1340,12 @@ def build_customer_message_draft(
     if not questions:
         return ""
 
-    name = (
-        customer_ref.get("resolved_name")
-        or customer_ref.get("customer_query")
-        or "there"
+    salutation = salutation_text(
+        {
+            "greeting_name": customer_ref.get("greeting_name"),
+            "mail_salutation_mode": customer_ref.get("mail_salutation_mode"),
+        },
+        named_prefix="Hi",
     )
     deduped_questions = []
     seen = set()
@@ -887,12 +1357,44 @@ def build_customer_message_draft(
 
     bullets = "\n".join(f"- {question}" for question in deduped_questions)
     return (
-        f"Hi {name},\n\n"
+        f"{salutation}\n\n"
         "I can keep moving on your quote, but I still need a few details in writing:\n"
         f"{bullets}\n\n"
         "Once I have that, I can update the packet and keep the quote moving.\n\n"
         "Thanks,\nRonny"
     )
+
+
+def contact_name_from_source_evidence(payload: dict[str, Any], source_refs: list[dict[str, Any]]) -> str:
+    customer_ref = payload.get("customer_ref") or {}
+    explicit = str(customer_ref.get("contact_name") or "").strip()
+    if explicit:
+        return explicit
+
+    evidence_texts: list[str] = []
+    for ref in source_refs:
+        if not isinstance(ref, dict):
+            continue
+        summary = str(ref.get("summary") or "").strip()
+        if summary:
+            evidence_texts.append(summary)
+    draft_text = str(payload.get("customer_message_draft") or "").strip()
+    if draft_text:
+        evidence_texts.append(draft_text)
+
+    for text in evidence_texts:
+        candidate = introduction_name(text, line_limit=0, allow_embedded=True)
+        if candidate:
+            return candidate
+    return ""
+
+
+def greeting_name_from_source_evidence(payload: dict[str, Any], source_refs: list[dict[str, Any]], contact_name: str = "") -> str:
+    customer_ref = payload.get("customer_ref") or {}
+    explicit = str(customer_ref.get("greeting_name") or "").strip()
+    if explicit:
+        return explicit
+    return first_name_token(contact_name)
 
 
 def build_packet(
@@ -913,9 +1415,32 @@ def build_packet(
         payload, skip_customer_resolve, spine_root, mint_modules_root
     )
     source_refs = normalize_source_refs(payload, timestamp, source_channel)
+    contact_name = contact_name_from_source_evidence(payload, source_refs)
+    greeting_name = greeting_name_from_source_evidence(payload, source_refs, contact_name)
+    if contact_name and not str(customer_ref.get("contact_name") or "").strip():
+        customer_ref["contact_name"] = contact_name
+    if greeting_name and not str(customer_ref.get("greeting_name") or "").strip():
+        customer_ref["greeting_name"] = greeting_name
+    customer_ref["mail_salutation_mode"] = projection_mode(
+        str(customer_ref.get("contact_name") or ""),
+        str(customer_ref.get("greeting_name") or ""),
+        str(customer_ref.get("mail_salutation_mode") or ""),
+    )
+    identity_validation = validate_mail_identity_projection(
+        {
+            "resolved_name": customer_ref.get("resolved_name"),
+            "resolved_email": customer_ref.get("resolved_email"),
+            "contact_name": customer_ref.get("contact_name"),
+            "greeting_name": customer_ref.get("greeting_name"),
+            "mail_salutation_mode": customer_ref.get("mail_salutation_mode"),
+        }
+    )
+    if identity_validation:
+        customer_ref["mail_identity_validation"] = identity_validation
     line_items, line_hints = normalize_line_items(payload)
     artwork_bindings, artwork_states, artwork_adequacy = build_artwork_bindings(payload, line_items, timestamp)
     inventory_snapshot = build_inventory_snapshot(payload, line_items, skip_stock, timestamp)
+    estimate_snapshot = build_estimate_snapshot(payload, timestamp)
     pricing_snapshot = build_pricing_snapshot(payload, line_items, skip_pricing, timestamp)
     gaps, decisions = derive_gaps_and_decisions(
         payload,
@@ -947,6 +1472,7 @@ def build_packet(
     confidence = {
         "overall": overall_conf,
         "artwork_confidence": art_conf,
+        "estimate_confidence": str((estimate_snapshot or {}).get("confidence_level") or "none"),
         "pricing_confidence": price_conf,
         "stock_confidence": stock_conf,
         "customer_confidence": customer_conf,
@@ -996,14 +1522,19 @@ def build_packet(
         packet["artwork_bindings"] = artwork_bindings
     if inventory_snapshot:
         packet["inventory_snapshot"] = inventory_snapshot
+    if estimate_snapshot:
+        packet["estimate_snapshot"] = estimate_snapshot
     if pricing_snapshot:
         packet["pricing_snapshot"] = pricing_snapshot
+    if isinstance(payload.get("artwork_analysis"), dict) and payload.get("artwork_analysis"):
+        packet["artwork_analysis"] = copy.deepcopy(payload["artwork_analysis"])
     if payload.get("quote_draft_ref"):
         packet["quote_draft_ref"] = copy.deepcopy(payload["quote_draft_ref"])
     if customer_message_draft:
         packet["customer_message_draft"] = customer_message_draft
     if operator_notes:
         packet["operator_notes"] = operator_notes
+    sync_quote_readiness(packet)
 
     return packet, decisions
 
@@ -1122,11 +1653,11 @@ def build_payload_from_args(args: argparse.Namespace, existing_packet: dict[str,
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
+    spine_root = resolve_spine_root(__file__)
+    mint_root = resolve_mint_data_root(spine_root=spine_root, current_file=__file__)
     mint_modules_root = Path(os.environ.get("MINT_MODULES_ROOT") or "/Users/ronnyworks/code/mint-modules")
-    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (spine_root / "runtime/domain-state/mint/quote-packets"))
-    index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (spine_root / "runtime/domain-state/mint/quote-packets-index.yaml"))
+    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (mint_root / "quote-packets"))
+    index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (mint_root / "quote-packets-index.yaml"))
 
     ensure_dir(packets_dir)
 
@@ -1166,8 +1697,11 @@ def main(argv: list[str]) -> int:
     update_index(index_file, packet, timestamp)
 
     blocking_gaps = [gap for gap in packet.get("open_gaps", []) if gap.get("severity") == "blocking"]
+    readiness = dict(packet.get("quote_readiness") or {})
     print(f"quote_packet_id: {packet_id}")
     print(f"state: {packet['state']}")
+    print(f"quote_readiness_state: {readiness.get('state') or ''}")
+    print(f"quote_next_step: {readiness.get('next_step') or ''}")
     print("confidence:")
     for key, value in packet.get("confidence", {}).items():
         print(f"  {key}: {value}")

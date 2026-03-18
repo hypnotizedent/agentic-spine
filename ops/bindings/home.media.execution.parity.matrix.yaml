@@ -1,0 +1,956 @@
+version: 1
+status: authoritative
+owner: "@ronny"
+updated_at: "2026-03-17"
+scope: home-media-execution-parity
+
+purpose: >
+  Execution-grade parity matrix for collapsing the current split shop media
+  estate into the unified home `media-home` runtime. This is the service-by-
+  service cutover reference for config paths, data paths, ports, secret
+  namespace routing, health probes, and cutover order.
+
+authority:
+  parent_contracts:
+    - ops/bindings/home.media.target.contract.yaml
+    - ops/bindings/media.path.authority.contract.yaml
+  supporting_bindings:
+    - ops/bindings/media.services.yaml
+    - ops/bindings/services.health.yaml
+    - ops/bindings/secrets.namespace.policy.yaml
+  live_compose_evidence:
+    - ssh download-stack 'sed -n "1,520p" /opt/stacks/download-stack/docker-compose.yml'
+    - ssh streaming-stack 'sed -n "1,320p" /opt/stacks/streaming-stack/docker-compose.yml'
+  last_runtime_verification: "2026-03-17"
+
+target_runtime:
+  hostname: media-home
+  vm_id: 106
+  preferred_lan_ip: 10.0.0.106
+  compose_root: /srv/appdata/compose/media-stack
+  appdata_root: /srv/appdata
+  payload_root: /srv/media
+  unified_secret_namespace: /spine/vm-infra/media-stack/home
+
+normalization_rules:
+  - "All kept media app state lives on local VM storage under /srv/appdata."
+  - "Downloaders and ARR-style automation normalize on /data backed by /srv/media."
+  - "Playback consumers normalize on /media or /music backed by /srv/media."
+  - "The split /spine/vm-infra/media-stack/download and /streaming namespaces converge to /spine/vm-infra/media-stack/home."
+  - "Exactly one watchtower instance and one node-exporter instance exist on media-home."
+  - "The legacy /opt/appdata local-db exception disappears on media-home because app state is already local."
+
+cutover_waves:
+  - id: W1-foundation
+    order_range: "10-40"
+    goal: "Bring up infra and network dependencies before application cutover."
+  - id: W2-download-clients
+    order_range: "50-60"
+    goal: "Restore downloader availability and ingest paths."
+  - id: W3-arr-core
+    order_range: "65-100"
+    goal: "Restore indexing and core library automation."
+  - id: W4-automation-support
+    order_range: "110-130"
+    goal: "Restore helper automation behind the core ARR lane."
+  - id: W5-playback-and-requests
+    order_range: "140-170"
+    goal: "Restore media consumption and request surfaces."
+  - id: W6-user-experience
+    order_range: "180-210"
+    goal: "Restore kept user-facing adjunct services."
+  - id: W7-kept-helpers
+    order_range: "220-260"
+    goal: "Restore explicitly kept helper and bridge services."
+  - id: W8-observability-and-updates
+    order_range: "270-280"
+    goal: "Restore update automation after app stability is confirmed."
+  - id: PARKED
+    order_range: "900+"
+    goal: "Do not cut over by default; keep only as rollback or explicit reactivation."
+
+service_matrix:
+  crowdsec:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/crowdsec/config:/etc/crowdsec
+    current_data_paths:
+      - /mnt/docker/volumes/crowdsec/data:/var/lib/crowdsec/data
+      - /var/log:/var/log:ro
+    target_config_paths:
+      - /srv/appdata/crowdsec/config:/etc/crowdsec
+    target_data_paths:
+      - /srv/appdata/crowdsec/data:/var/lib/crowdsec/data
+      - /var/log:/var/log:ro
+    port_bindings: []
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: container_running
+      expect: running
+    cutover_wave: W1-foundation
+    cutover_order: 10
+    notes: "Bring up early so security telemetry exists before app cutover."
+
+  node-exporter:
+    classification: kept_helper
+    current_vm: download-stack+streaming-stack
+    current_config_paths: []
+    current_data_paths:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    target_config_paths: []
+    target_data_paths:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    port_bindings:
+      - 9100->9100/tcp
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: http
+      port: 9100
+      path: /metrics
+      expect: 200
+    cutover_wave: W1-foundation
+    cutover_order: 20
+    notes: "Collapse download/streaming split exporters into one instance on media-home."
+
+  gluetun:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/gluetun:/gluetun
+    current_data_paths: []
+    target_config_paths:
+      - /srv/appdata/gluetun:/gluetun
+    target_data_paths: []
+    port_bindings:
+      - 5030->5030/tcp
+      - 50300->50300/tcp
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/download
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - PRIVADO_VPN_USER
+      - PRIVADO_VPN_PASS
+    health_probe:
+      type: docker_health
+      expect: healthy
+    cutover_wave: W1-foundation
+    cutover_order: 30
+    notes: "Required before slskd because slskd shares gluetun network mode."
+
+  slskd:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/slskd:/app
+      - /opt/slskd/data:/app/data
+    current_data_paths:
+      - /mnt/media/downloads/slskd:/downloads
+      - /mnt/media/music:/music
+    target_config_paths:
+      - /srv/appdata/slskd/app:/app
+      - /srv/appdata/slskd/data:/app/data
+    target_data_paths:
+      - /srv/media/downloads/slskd:/downloads
+      - /srv/media/music:/music
+    port_bindings:
+      - 5030->5030/tcp via gluetun
+      - 50300->50300/tcp via gluetun
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: docker_health
+      expect: healthy
+    cutover_wave: W1-foundation
+    cutover_order: 40
+    notes: "Keep Docker-health-authoritative because service remains tunneled behind gluetun."
+
+  sabnzbd:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/sabnzbd/config:/config
+    current_data_paths:
+      - /mnt/media/downloads:/downloads
+      - /opt/appdata:/opt/appdata
+    target_config_paths:
+      - /srv/appdata/sabnzbd:/config
+    target_data_paths:
+      - /srv/media:/data
+    port_bindings:
+      - 8080->8080/tcp
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/download
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - SABNZBD_API_KEY
+    health_probe:
+      type: http
+      port: 8080
+      path: /api?mode=version&output=json
+      expect: 200
+    cutover_wave: W2-download-clients
+    cutover_order: 50
+    notes: "Normalize from /downloads to /data so downloader and ARR paths share one root."
+
+  qbittorrent:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/qbittorrent/config:/config
+    current_data_paths:
+      - /mnt/media/downloads:/downloads
+      - /opt/appdata:/opt/appdata
+    target_config_paths:
+      - /srv/appdata/qbittorrent:/config
+    target_data_paths:
+      - /srv/media:/data
+    port_bindings:
+      - 8081->8081/tcp
+      - 6881->6881/tcp
+      - 6881->6881/udp
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/download
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - QBITTORRENT_USERNAME
+      - QBITTORRENT_PASSWORD
+    health_probe:
+      type: http
+      port: 8081
+      path: /
+      expect: 200
+    cutover_wave: W2-download-clients
+    cutover_order: 60
+    notes: "Retain direct route mode; do not tunnel qBittorrent unless policy changes."
+
+  flaresolverr:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/flaresolverr/config:/config
+    current_data_paths: []
+    target_config_paths:
+      - /srv/appdata/flaresolverr:/config
+    target_data_paths: []
+    port_bindings:
+      - 8191->8191/tcp
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: http
+      port: 8191
+      path: /health
+      expect: 200
+    cutover_wave: W3-arr-core
+    cutover_order: 65
+    notes: "Bring up before prowlarr to preserve indexer challenge handling."
+
+  prowlarr:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/prowlarr/config:/config
+    current_data_paths:
+      - /opt/appdata:/opt/appdata
+    target_config_paths:
+      - /srv/appdata/prowlarr:/config
+    target_data_paths: []
+    port_bindings:
+      - 9696->9696/tcp
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/download
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - PROWLARR_API_KEY
+    health_probe:
+      type: http
+      port: 9696
+      path: /ping
+      expect: 200
+    cutover_wave: W3-arr-core
+    cutover_order: 70
+    notes: "Indexer manager should be healthy before ARR imports are resumed."
+
+  radarr:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/radarr/config:/config
+    current_data_paths:
+      - /mnt/media:/media
+      - /mnt/media/movies:/movies
+      - /mnt/media/downloads:/downloads
+      - /opt/appdata:/opt/appdata
+    target_config_paths:
+      - /srv/appdata/radarr:/config
+    target_data_paths:
+      - /srv/media:/data
+    port_bindings:
+      - 7878->7878/tcp
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/download
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - RADARR_API_KEY
+    health_probe:
+      type: http
+      port: 7878
+      path: /ping
+      expect: 200
+    cutover_wave: W3-arr-core
+    cutover_order: 80
+    notes: "Set root folder to /data/movies and remote import source to /data/downloads/complete/movies."
+
+  sonarr:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/sonarr/config:/config
+    current_data_paths:
+      - /mnt/media:/media
+      - /mnt/media/tv:/tv
+      - /mnt/media/downloads:/downloads
+      - /opt/appdata:/opt/appdata
+    target_config_paths:
+      - /srv/appdata/sonarr:/config
+    target_data_paths:
+      - /srv/media:/data
+    port_bindings:
+      - 8989->8989/tcp
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/download
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - SONARR_API_KEY
+    health_probe:
+      type: http
+      port: 8989
+      path: /ping
+      expect: 200
+    cutover_wave: W3-arr-core
+    cutover_order: 90
+    notes: "Set root folder to /data/tv and import source to /data/downloads/complete/tv."
+
+  lidarr:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/lidarr/config:/config
+    current_data_paths:
+      - /mnt/media:/media
+      - /mnt/media/music:/music
+      - /mnt/media/downloads:/downloads
+      - /opt/appdata:/opt/appdata
+    target_config_paths:
+      - /srv/appdata/lidarr:/config
+    target_data_paths:
+      - /srv/media:/data
+    port_bindings:
+      - 8686->8686/tcp
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/download
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - LIDARR_API_KEY
+    health_probe:
+      type: http
+      port: 8686
+      path: /ping
+      expect: 200
+    cutover_wave: W3-arr-core
+    cutover_order: 100
+    notes: "Set root folder to /data/music and preserve slskd remote-path mapping against /data/downloads/slskd."
+
+  soularr:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/soularr/data:/data
+    current_data_paths:
+      - /mnt/media/downloads/slskd:/downloads/soulseek
+    target_config_paths:
+      - /srv/appdata/soularr/data:/data
+    target_data_paths:
+      - /srv/media/downloads/slskd:/downloads/soulseek
+    port_bindings: []
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: container_running
+      expect: running
+    cutover_wave: W4-automation-support
+    cutover_order: 110
+    notes: "Bring up after lidarr and slskd."
+
+  recyclarr:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/recyclarr/config:/config
+    current_data_paths: []
+    target_config_paths:
+      - /srv/appdata/recyclarr:/config
+    target_data_paths: []
+    port_bindings: []
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: container_running
+      expect: running
+    cutover_wave: W4-automation-support
+    cutover_order: 115
+    notes: "Config may still reference ARR API keys, but no governed runtime env injection exists today."
+
+  unpackerr:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/unpackerr/config:/config
+    current_data_paths:
+      - /mnt/media/downloads:/downloads
+    target_config_paths:
+      - /srv/appdata/unpackerr:/config
+    target_data_paths:
+      - /srv/media/downloads:/downloads
+    port_bindings: []
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: container_running
+      expect: running
+    cutover_wave: W4-automation-support
+    cutover_order: 120
+    notes: "Keep download-only mount; no need to expose full media tree."
+
+  arr-native-search:
+    classification: must_carry
+    current_vm: download-stack
+    current_config_paths: []
+    current_data_paths: []
+    target_config_paths: []
+    target_data_paths: []
+    port_bindings: []
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/download
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - RADARR_API_KEY
+      - SONARR_API_KEY
+      - LIDARR_API_KEY
+    health_probe:
+      type: container_running
+      expect: running
+    cutover_wave: W4-automation-support
+    cutover_order: 130
+    notes: "Replace the split-era huntarr/swaparr search behavior with one kept scheduler."
+
+  jellyfin:
+    classification: must_carry
+    current_vm: streaming-stack
+    current_config_paths:
+      - /mnt/docker/volumes/jellyfin/config:/config
+      - /mnt/docker/volumes/jellyfin/cache:/cache
+    current_data_paths:
+      - /mnt/media:/media:ro
+      - /opt/appdata:/opt/appdata
+    target_config_paths:
+      - /srv/appdata/jellyfin/config:/config
+      - /srv/appdata/jellyfin/cache:/cache
+    target_data_paths:
+      - /srv/media:/media:ro
+    port_bindings:
+      - 8096->8096/tcp
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/streaming
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - JELLYFIN_API_KEY
+      - JELLYFIN_API_TOKEN
+      - JELLYFIN_USER_ID
+    health_probe:
+      type: http
+      port: 8096
+      path: /health
+      expect: 200
+    cutover_wave: W5-playback-and-requests
+    cutover_order: 140
+    notes: "Primary playback surface; keep library roots on /media/*."
+
+  navidrome:
+    classification: must_carry
+    current_vm: streaming-stack
+    current_config_paths:
+      - /mnt/docker/volumes/navidrome/data:/data
+    current_data_paths:
+      - /mnt/media/music:/music:ro
+      - /opt/appdata:/opt/appdata
+    target_config_paths:
+      - /srv/appdata/navidrome/data:/data
+    target_data_paths:
+      - /srv/media/music:/music:ro
+    port_bindings:
+      - 4533->4533/tcp
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/streaming
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - NAVIDROME_USERNAME
+      - NAVIDROME_PASSWORD
+    health_probe:
+      type: http
+      port: 4533
+      path: /ping
+      expect: 200
+    cutover_wave: W5-playback-and-requests
+    cutover_order: 150
+    notes: "Music playback plane; keep direct read-only music mount."
+
+  jellyseerr:
+    classification: must_carry
+    current_vm: streaming-stack
+    current_config_paths:
+      - /mnt/docker/volumes/jellyseerr/config:/app/config
+    current_data_paths:
+      - /opt/appdata:/opt/appdata
+    target_config_paths:
+      - /srv/appdata/jellyseerr/config:/app/config
+    target_data_paths: []
+    port_bindings:
+      - 5055->5055/tcp
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/streaming
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - JELLYSEERR_API_KEY
+    health_probe:
+      type: http
+      port: 5055
+      path: /api/v1/status
+      expect: 200
+    cutover_wave: W5-playback-and-requests
+    cutover_order: 160
+    notes: "One request surface only; do not reintroduce duplicate Overseerr/Jellyseerr surfaces."
+
+  bazarr:
+    classification: must_carry
+    current_vm: streaming-stack
+    current_config_paths:
+      - /mnt/docker/volumes/bazarr/config:/config
+    current_data_paths:
+      - /mnt/media:/media:ro
+      - /opt/appdata:/opt/appdata
+    target_config_paths:
+      - /srv/appdata/bazarr:/config
+    target_data_paths:
+      - /srv/media:/data
+    port_bindings:
+      - 6767->6767/tcp
+    current_secret_namespaces: []
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - BAZARR_API_KEY
+    health_probe:
+      type: http
+      port: 6767
+      path: /ping
+      expect: 200
+    cutover_wave: W5-playback-and-requests
+    cutover_order: 170
+    notes: "Promote BAZARR_API_KEY into governed home namespace if MCPJungle or automation keeps Bazarr API access."
+
+  homarr:
+    classification: kept_end_user
+    current_vm: streaming-stack
+    current_config_paths:
+      - /mnt/docker/volumes/homarr/configs:/app/data/configs
+      - /mnt/docker/volumes/homarr/icons:/app/public/icons
+      - /mnt/docker/volumes/homarr/data:/data
+    current_data_paths:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    target_config_paths:
+      - /srv/appdata/homarr/configs:/app/data/configs
+      - /srv/appdata/homarr/icons:/app/public/icons
+      - /srv/appdata/homarr/data:/data
+    target_data_paths:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    port_bindings:
+      - 7575->7575/tcp
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: http
+      port: 7575
+      path: /
+      expect: 307
+    cutover_wave: W6-user-experience
+    cutover_order: 180
+    notes: "Keep private-authenticated; do not expose publicly by default."
+
+  wizarr:
+    classification: kept_end_user
+    current_vm: streaming-stack
+    current_config_paths:
+      - /mnt/docker/volumes/wizarr/data:/data/database
+    current_data_paths: []
+    target_config_paths:
+      - /srv/appdata/wizarr/data:/data/database
+    target_data_paths: []
+    port_bindings:
+      - 5690->5690/tcp
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: http
+      port: 5690
+      path: /
+      expect: 302
+    cutover_wave: W6-user-experience
+    cutover_order: 190
+    notes: "Keep private-authenticated."
+
+  spotisub:
+    classification: kept_end_user
+    current_vm: streaming-stack
+    current_config_paths:
+      - /mnt/docker/volumes/spotisub/config:/config
+    current_data_paths: []
+    target_config_paths:
+      - /srv/appdata/spotisub/config:/config
+    target_data_paths: []
+    port_bindings:
+      - 8766->5183/tcp
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/streaming
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - SPOTIFY_CLIENT_ID
+      - SPOTIFY_CLIENT_SECRET
+      - NAVIDROME_USERNAME
+      - NAVIDROME_PASSWORD
+      - LASTFM_API_KEY
+      - LASTFM_SECRET
+    health_probe:
+      type: http
+      port: 8766
+      path: /api/v1/utils/healthcheck
+      expect: 200
+    cutover_wave: W6-user-experience
+    cutover_order: 200
+    notes: "Keep after Navidrome because it depends on Navidrome credentials and API reachability."
+
+  subgen:
+    classification: kept_end_user
+    current_vm: streaming-stack
+    current_config_paths:
+      - /mnt/docker/volumes/subgen/config:/config
+    current_data_paths:
+      - /mnt/media:/media:ro
+    target_config_paths:
+      - /srv/appdata/subgen/config:/config
+    target_data_paths:
+      - /srv/media:/media:ro
+    port_bindings: []
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: container_running
+      expect: running
+    cutover_wave: W6-user-experience
+    cutover_order: 210
+    notes: "Keep after Jellyfin because subtitle generation serves the playback plane."
+
+  trailarr:
+    classification: kept_helper
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/trailarr/config:/config
+    current_data_paths:
+      - /mnt/media:/media
+      - /opt/appdata:/opt/appdata
+    target_config_paths:
+      - /srv/appdata/trailarr:/config
+    target_data_paths:
+      - /srv/media:/media
+    port_bindings:
+      - 7667->7889/tcp
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: docker_health
+      expect: healthy
+    cutover_wave: W7-kept-helpers
+    cutover_order: 220
+    notes: "Prefer Docker-health probe because HTTP root is auth-gated."
+
+  posterizarr:
+    classification: kept_helper
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/posterizarr:/config
+    current_data_paths:
+      - /mnt/media:/media:ro
+      - /opt/appdata:/opt/appdata:ro
+    target_config_paths:
+      - /srv/appdata/posterizarr:/config
+    target_data_paths:
+      - /srv/media:/media:ro
+    port_bindings: []
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: container_running
+      expect: running
+    cutover_wave: W7-kept-helpers
+    cutover_order: 230
+    notes: "Preserve read-only media mount and revisit current permissions gap during cutover."
+
+  decypharr:
+    classification: kept_helper
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/decypharr/config:/config
+      - /mnt/docker/volumes/decypharr/app:/app
+    current_data_paths:
+      - /mnt/media/downloads:/downloads
+    target_config_paths:
+      - /srv/appdata/decypharr/config:/config
+      - /srv/appdata/decypharr/app:/app
+    target_data_paths:
+      - /srv/media/downloads:/downloads
+    port_bindings: []
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/download
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - REAL_DEBRID_API_KEY
+    health_probe:
+      type: container_running
+      expect: running
+    cutover_wave: W7-kept-helpers
+    cutover_order: 240
+    notes: "Keep download-only mount; does not need full library access."
+
+  autopulse:
+    classification: kept_helper
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/autopulse:/data
+    current_data_paths: []
+    target_config_paths:
+      - /srv/appdata/autopulse:/data
+    target_data_paths: []
+    port_bindings:
+      - 127.0.0.1:2875->2875/tcp
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/download
+      - /spine/vm-infra/media-stack/streaming
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - AUTOPULSE_PASSWORD
+      - JELLYFIN_API_TOKEN
+    health_probe:
+      type: http_loopback
+      port: 2875
+      path: /
+      expect: 200
+    cutover_wave: W7-kept-helpers
+    cutover_order: 250
+    notes: "Rewrite rules must move from split-era /movies|/tv|/music sources to unified /data/* producers and /media/* consumer paths."
+
+  crosswatch:
+    classification: kept_helper
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/crosswatch/config:/config
+    current_data_paths: []
+    target_config_paths:
+      - /srv/appdata/crosswatch:/config
+    target_data_paths: []
+    port_bindings:
+      - 127.0.0.1:8787->8787/tcp
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: http_loopback
+      port: 8787
+      path: /
+      expect: 200
+    cutover_wave: W7-kept-helpers
+    cutover_order: 260
+    notes: "Keep private-only; do not expose publicly."
+
+  watchtower:
+    classification: kept_helper
+    current_vm: download-stack+streaming-stack
+    current_config_paths: []
+    current_data_paths:
+      - /var/run/docker.sock:/var/run/docker.sock
+    target_config_paths: []
+    target_data_paths:
+      - /var/run/docker.sock:/var/run/docker.sock
+    port_bindings: []
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: container_running
+      expect: running
+    cutover_wave: W8-observability-and-updates
+    cutover_order: 270
+    notes: "Bring up last so image churn does not interfere with cutover stabilization."
+
+  tdarr:
+    classification: parked
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/tdarr/server:/app/server
+      - /mnt/docker/volumes/tdarr/configs:/app/configs
+      - /mnt/docker/volumes/tdarr/logs:/app/logs
+    current_data_paths:
+      - /mnt/media:/media
+      - /tmp/tdarr_transcode:/temp
+    target_config_paths:
+      - /srv/appdata/tdarr/server:/app/server
+      - /srv/appdata/tdarr/configs:/app/configs
+      - /srv/appdata/tdarr/logs:/app/logs
+    target_data_paths:
+      - /srv/media:/media
+      - /tmp/tdarr_transcode:/temp
+    port_bindings:
+      - 8265->8265/tcp
+      - 8266->8266/tcp
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: parked
+      expect: not_started_by_default
+    cutover_wave: PARKED
+    cutover_order: 900
+    notes: "Keep definition only for explicit reactivation after core media-home stabilization."
+
+  huntarr:
+    classification: parked
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/huntarr/config:/config
+    current_data_paths: []
+    target_config_paths:
+      - /srv/appdata/huntarr:/config
+    target_data_paths: []
+    port_bindings:
+      - 9705->9705/tcp
+    current_secret_namespaces: []
+    target_secret_namespace: none
+    required_secret_keys: []
+    health_probe:
+      type: parked
+      expect: not_started_by_default
+    cutover_wave: PARKED
+    cutover_order: 910
+    notes: "Deprecated rollback-only surface; do not recreate unless explicitly revived."
+
+  swaparr-radarr:
+    classification: parked
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/swaparr-radarr/config:/config
+    current_data_paths: []
+    target_config_paths:
+      - /srv/appdata/swaparr-radarr:/config
+    target_data_paths: []
+    port_bindings: []
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/download
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - RADARR_API_KEY
+    health_probe:
+      type: parked
+      expect: not_started_by_default
+    cutover_wave: PARKED
+    cutover_order: 920
+    notes: "Replaced by arr-native-search; keep only as rollback surface."
+
+  swaparr-sonarr:
+    classification: parked
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/swaparr-sonarr/config:/config
+    current_data_paths: []
+    target_config_paths:
+      - /srv/appdata/swaparr-sonarr:/config
+    target_data_paths: []
+    port_bindings: []
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/download
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - SONARR_API_KEY
+    health_probe:
+      type: parked
+      expect: not_started_by_default
+    cutover_wave: PARKED
+    cutover_order: 930
+    notes: "Replaced by arr-native-search; keep only as rollback surface."
+
+  swaparr-lidarr:
+    classification: parked
+    current_vm: download-stack
+    current_config_paths:
+      - /mnt/docker/volumes/swaparr-lidarr/config:/config
+    current_data_paths: []
+    target_config_paths:
+      - /srv/appdata/swaparr-lidarr:/config
+    target_data_paths: []
+    port_bindings: []
+    current_secret_namespaces:
+      - /spine/vm-infra/media-stack/download
+    target_secret_namespace: /spine/vm-infra/media-stack/home
+    required_secret_keys:
+      - LIDARR_API_KEY
+    health_probe:
+      type: parked
+      expect: not_started_by_default
+    cutover_wave: PARKED
+    cutover_order: 940
+    notes: "Replaced by arr-native-search; keep only as rollback surface."
+
+control_plane_followons:
+  media-agent:
+    cutover_order: 950
+    source_of_truth: ops/bindings/agents.registry.yaml
+    requirement: "Rewrite media-agent endpoints to media-home only after W5 services are green."
+  mcpjungle:
+    cutover_order: 960
+    source_of_truth: /Users/ronnyworks/code/workbench/infra/compose/mcpjungle/servers/media-stack.json
+    requirement: "Rewrite split download/streaming URLs and converge media-stack secrets to the home namespace."
+  bindings:
+    cutover_order: 970
+    must_update:
+      - ops/bindings/media.services.yaml
+      - ops/bindings/services.health.yaml
+      - ops/bindings/secrets.namespace.policy.yaml
+      - ops/bindings/media.path.authority.contract.yaml
+      - ops/bindings/docker.compose.targets.yaml
+      - ops/bindings/agents.registry.yaml

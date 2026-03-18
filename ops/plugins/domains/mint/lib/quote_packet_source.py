@@ -16,6 +16,7 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
+from mint_runtime_paths import resolve_mint_data_root, resolve_spine_root
 from quote_packet_normalize import (
     add_gap,
     append_receipt,
@@ -25,6 +26,8 @@ from quote_packet_normalize import (
     load_structured_file,
     now_utc,
     overall_confidence,
+    resolve_service_base_url_with_fallback,
+    sync_quote_readiness,
     update_index,
 )
 
@@ -68,20 +71,11 @@ def canonical_suppliers_base_url(spine_root: Path) -> str:
     if override:
         return override.rstrip("/")
 
-    services_file = spine_root / "ops/bindings/services.health.yaml"
-    if services_file.exists():
-        services = load_structured_file(services_file) or {}
-        for endpoint in services.get("endpoints") or []:
-            if not isinstance(endpoint, dict) or endpoint.get("id") != "suppliers-v2":
-                continue
-            raw_url = str(endpoint.get("url") or "").strip()
-            if not raw_url:
-                continue
-            parsed = urlparse.urlparse(raw_url)
-            if parsed.scheme and parsed.netloc:
-                return f"{parsed.scheme}://{parsed.netloc}"
-
-    return "http://192.168.1.213:3800"
+    return resolve_service_base_url_with_fallback(
+        spine_root,
+        "suppliers-v2",
+        "http://100.79.183.14:3800",
+    )
 
 
 def resolve_suppliers_api_key(spine_root: Path) -> str:
@@ -329,6 +323,7 @@ def sync_state(packet: dict[str, Any]) -> None:
 def clear_stale_downstream_artifacts(packet: dict[str, Any], sourced_changed: bool) -> None:
     if not sourced_changed:
         return
+    packet.pop("estimate_snapshot", None)
     packet.pop("pricing_snapshot", None)
     packet.pop("quote_draft_ref", None)
     packet.pop("payment_ref", None)
@@ -349,10 +344,10 @@ def print_blocking_reasons(packet: dict[str, Any]) -> None:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (spine_root / "runtime/domain-state/mint/quote-packets"))
-    index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (spine_root / "runtime/domain-state/mint/quote-packets-index.yaml"))
+    spine_root = resolve_spine_root(__file__)
+    mint_root = resolve_mint_data_root(spine_root=spine_root, current_file=__file__)
+    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (mint_root / "quote-packets"))
+    index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (mint_root / "quote-packets-index.yaml"))
 
     packet_file = packet_file_for_id(packets_dir, args.packet_id)
     if not packet_file.exists():
@@ -393,11 +388,14 @@ def main(argv: list[str]) -> int:
         packet["receipts"] = append_receipt(packet.get("receipts") or [], capability_name, timestamp)
         sync_confidence(packet, inventory_snapshot)
         sync_state(packet)
+        readiness = sync_quote_readiness(packet)
         dump_yaml(packet_file, packet)
         update_index(index_file, packet, timestamp)
         print(f"quote_packet_id: {packet['quote_packet_id']}")
         print(f"state: {packet['state']}")
         print("source_state: api_key_unavailable")
+        print(f"quote_readiness_state: {readiness['state']}")
+        print(f"quote_next_step: {readiness['next_step']}")
         print("sourced_line_item_count: 0")
         print(f"blocking_gap_count: {len([gap for gap in packet['open_gaps'] if gap.get('severity') == 'blocking'])}")
         print_blocking_reasons(packet)
@@ -429,10 +427,12 @@ def main(argv: list[str]) -> int:
         selected_candidate: dict[str, Any] | None = None
         selected_reason = ""
         selected_query = ""
+        search_failed = False
         for query, reason in queries:
             try:
                 response = search_suppliers(base_url, api_key, query, args.search_limit, args.timeout_seconds)
             except urlerror.HTTPError as exc:
+                search_failed = True
                 add_gap(
                     gaps,
                     "supplier_unresolved",
@@ -444,6 +444,7 @@ def main(argv: list[str]) -> int:
                 stock_warnings.append(f"{label}: supplier search HTTP {exc.code}")
                 break
             except urlerror.URLError as exc:
+                search_failed = True
                 add_gap(
                     gaps,
                     "supplier_unresolved",
@@ -463,6 +464,9 @@ def main(argv: list[str]) -> int:
             selected_reason = reason
             selected_query = query
             break
+
+        if search_failed:
+            continue
 
         if not selected_candidate:
             add_gap(
@@ -573,6 +577,7 @@ def main(argv: list[str]) -> int:
     sync_state(packet)
     if packet.get("state") == "drafting" and sourced_changed:
         packet.pop("customer_message_draft", None)
+    readiness = sync_quote_readiness(packet)
 
     dump_yaml(packet_file, packet)
     update_index(index_file, packet, timestamp)
@@ -580,6 +585,8 @@ def main(argv: list[str]) -> int:
     print(f"quote_packet_id: {packet['quote_packet_id']}")
     print(f"state: {packet['state']}")
     print(f"source_state: {inventory_snapshot['stock_check_state']}")
+    print(f"quote_readiness_state: {readiness['state']}")
+    print(f"quote_next_step: {readiness['next_step']}")
     print(f"sourced_line_item_count: {sourced_line_item_count}")
     print(f"blocking_gap_count: {len([gap for gap in packet['open_gaps'] if gap.get('severity') == 'blocking'])}")
     print_blocking_reasons(packet)

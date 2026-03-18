@@ -1,0 +1,792 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import contextlib
+import difflib
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from argparse import ArgumentParser, Namespace
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    compact_utc,
+    fail,
+    file_sha256,
+    iso_utc,
+    resolve_spine_root,
+    resolve_spine_state,
+    run_cap_capture,
+    utc_now,
+    write_json,
+)
+from artwork_preflight_surface_common import run_preflight_command, surface_artwork_preflight  # noqa: E402
+
+
+SCHEMA_VERSION = "1.0"
+CAPABILITY_FALLBACK = "mint.artie.revision.review"
+CONTRACT_FALLBACK = "ops/bindings/mint.artie.revision.review.contract.yaml"
+PLACE_CAPABILITY = "mint.artwork.place"
+ARTWORK_PREFLIGHT_CAPABILITY = "mint.artwork.preflight"
+ARTWORK_PREFLIGHT_COMMAND_FALLBACK = "ops/plugins/domains/mint/bin/artwork-preflight"
+DEFAULT_MAILBOX = "team@mintprints.com"
+DEFAULT_VENDOR = "Sheik"
+IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"}
+STOP_WORDS = {"a", "an", "and", "at", "by", "for", "in", "of", "on", "or", "our", "the", "to", "with", "your"}
+LOCATION_HINT_TOKENS = {"beach", "blvd", "city", "fort", "harbor", "lighthouse", "point", "rd", "road", "street"}
+STATE_CODES = {
+    "al",
+    "ak",
+    "az",
+    "ar",
+    "ca",
+    "co",
+    "ct",
+    "dc",
+    "de",
+    "fl",
+    "ga",
+    "hi",
+    "ia",
+    "id",
+    "il",
+    "in",
+    "ks",
+    "ky",
+    "la",
+    "ma",
+    "md",
+    "me",
+    "mi",
+    "mn",
+    "mo",
+    "ms",
+    "mt",
+    "nc",
+    "nd",
+    "ne",
+    "nh",
+    "nj",
+    "nm",
+    "nv",
+    "ny",
+    "oh",
+    "ok",
+    "or",
+    "pa",
+    "ri",
+    "sc",
+    "sd",
+    "tn",
+    "tx",
+    "ut",
+    "va",
+    "vt",
+    "wa",
+    "wi",
+    "wv",
+    "wy",
+}
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_ARTIE_REVISION_REVIEW_CAPABILITY_NAME") or CAPABILITY_FALLBACK
+
+
+def normalize_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def normalize_space(value: Any) -> str:
+    return re.sub(r"\s+", " ", normalize_text(value)).strip()
+
+
+def normalize_lower(value: Any) -> str:
+    return normalize_space(value).lower()
+
+
+def normalize_tokens(value: str, *, drop_stopwords: bool) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for token in re.findall(r"[A-Za-z0-9]+", value.lower()):
+        if len(token) < 2 and not token.isdigit():
+            continue
+        if drop_stopwords and token in STOP_WORDS:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def command_exists(name: str) -> bool:
+    return shutil.which(name) is not None
+
+
+def resolve_contract_path(spine_root: Path) -> Path:
+    override = normalize_text(os.environ.get("MINT_ARTIE_REVISION_REVIEW_CONTRACT"))
+    if override:
+        path = Path(override).expanduser().resolve()
+    else:
+        path = (spine_root / CONTRACT_FALLBACK).resolve()
+    if not path.is_file():
+        fail(f"artie revision review contract not found: {path}")
+    return path
+
+
+def load_contract(path: Path) -> dict[str, Any]:
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        fail(f"invalid artie revision review contract: {path}")
+    return payload
+
+
+def resolve_state_path(raw: str, *, spine_root: Path, state_root: Path) -> Path:
+    value = normalize_text(raw).replace("$SPINE_ROOT", str(spine_root)).replace("$SPINE_STATE", str(state_root))
+    return Path(value).expanduser().resolve()
+
+
+def runtime_paths(*, spine_root: Path, state_root: Path) -> dict[str, Path]:
+    contract_path = resolve_contract_path(spine_root)
+    contract = load_contract(contract_path)
+    storage = dict(contract.get("storage") or {})
+    return {
+        "reviews_records_root": resolve_state_path(
+            str(storage.get("reviews_records_root") or ""),
+            spine_root=spine_root,
+            state_root=state_root,
+        ),
+        "reviews_index_file": resolve_state_path(
+            str(storage.get("reviews_index_file") or ""),
+            spine_root=spine_root,
+            state_root=state_root,
+        ),
+        "reviews_lock_file": resolve_state_path(
+            str(storage.get("reviews_lock_file") or ""),
+            spine_root=spine_root,
+            state_root=state_root,
+        ),
+        "sheik_records_root": resolve_state_path(
+            str(storage.get("sheik_records_root") or ""),
+            spine_root=spine_root,
+            state_root=state_root,
+        ),
+        "sheik_index_file": resolve_state_path(
+            str(storage.get("sheik_index_file") or ""),
+            spine_root=spine_root,
+            state_root=state_root,
+        ),
+        "sheik_lock_file": resolve_state_path(
+            str(storage.get("sheik_lock_file") or ""),
+            spine_root=spine_root,
+            state_root=state_root,
+        ),
+        "evidence_root": resolve_state_path(
+            str(storage.get("evidence_root") or ""),
+            spine_root=spine_root,
+            state_root=state_root,
+        ),
+    }
+
+
+def workflow_settings(spine_root: Path) -> dict[str, Any]:
+    contract = load_contract(resolve_contract_path(spine_root))
+    workflow = dict(contract.get("workflow") or {})
+    return {
+        "artwork_preflight_capability": normalize_space(workflow.get("artwork_preflight_capability") or ARTWORK_PREFLIGHT_CAPABILITY)
+        or ARTWORK_PREFLIGHT_CAPABILITY,
+        "artwork_preflight_command": normalize_space(
+            workflow.get("artwork_preflight_command") or os.environ.get("MINT_ARTWORK_PREFLIGHT_COMMAND") or ARTWORK_PREFLIGHT_COMMAND_FALLBACK
+        )
+        or ARTWORK_PREFLIGHT_COMMAND_FALLBACK,
+    }
+
+
+def parse_args(argv: list[str]) -> Namespace:
+    parser = ArgumentParser(
+        prog="artie-revision-review",
+        description=(
+            "Review a revised proof/revision file against the requested change set, "
+            "persist governed review truth, and create the next Sheik revision handoff when needed."
+        ),
+    )
+    parser.add_argument("source_file", help="Revised proof or artwork file to review")
+    parser.add_argument(
+        "--requested-change",
+        action="append",
+        default=[],
+        help="Requested change text to verify against the reviewed file (repeatable)",
+    )
+    parser.add_argument("--customer", default="", help="Customer or job identity")
+    parser.add_argument("--job", default="", help="Job number / nickname identity")
+    parser.add_argument("--context", default="", help="Freeform context used for canonical placement")
+    parser.add_argument("--operator-context", default="", help="Optional operator note for review provenance")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox context for downstream Morpheus work (default: {DEFAULT_MAILBOX})")
+    parser.add_argument("--source-message-id", default="", help="Optional source message id for Morpheus/customer coordination")
+    parser.add_argument("--vendor", default=DEFAULT_VENDOR, help=f"Vendor receiving the next revision handoff on failure (default: {DEFAULT_VENDOR})")
+    parser.add_argument("--upstream-handoff-file", default="", help="Optional prior Morpheus->Artie handoff record to carry forward context")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    requested = [normalize_space(item) for item in args.requested_change if normalize_space(item)]
+    if not requested:
+        fail("at least one --requested-change is required")
+    args.requested_change = requested
+    return args
+
+
+def load_json_object(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        fail(f"expected JSON object at {path}")
+    return payload
+
+
+def readable_text_fallback(path: Path) -> str:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if "\x00" in raw:
+        return ""
+    cleaned = normalize_space(raw)
+    if len(re.findall(r"[A-Za-z]{3,}", cleaned)) < 3:
+        return ""
+    return cleaned
+
+
+def extract_pdf_text(path: Path) -> str:
+    try:
+        from pypdf import PdfReader  # noqa: PLC0415
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            reader = PdfReader(str(path))
+        pages = [(page.extract_text() or "").strip() for page in reader.pages]
+    except Exception:
+        return ""
+    return "\n\n".join(part for part in pages if part).strip()
+
+
+def render_pdf_to_png(source_file: Path, out_file: Path) -> bool:
+    if not command_exists("sips"):
+        return False
+    result = subprocess.run(
+        ["sips", "-s", "format", "png", str(source_file), "--out", str(out_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and out_file.exists()
+
+
+def preprocess_image(input_file: Path, output_file: Path) -> Path:
+    if command_exists("magick"):
+        result = subprocess.run(
+            [
+                "magick",
+                str(input_file),
+                "-colorspace",
+                "Gray",
+                "-resize",
+                "400%",
+                "-sharpen",
+                "0x1",
+                str(output_file),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and output_file.exists():
+            return output_file
+    shutil.copyfile(input_file, output_file)
+    return output_file
+
+
+def tesseract_text(image_file: Path, *, psm: str) -> str:
+    if not command_exists("tesseract"):
+        return ""
+    result = subprocess.run(
+        ["tesseract", str(image_file), "stdout", "--psm", psm],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    return normalize_space(result.stdout)
+
+
+def dedupe_sections(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = normalize_space(value)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
+
+
+def extract_review_text(source_file: Path, evidence_dir: Path) -> dict[str, Any]:
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    suffix = source_file.suffix.lower()
+    extracted_sections: list[str] = []
+    extraction_mode = "none"
+    evidence_files: list[str] = []
+
+    if suffix == ".pdf":
+        pdf_text = extract_pdf_text(source_file)
+        if normalize_space(pdf_text):
+            extracted_sections.append(pdf_text)
+            extraction_mode = "pdf_text"
+
+    fallback_text = readable_text_fallback(source_file)
+    if fallback_text:
+        extracted_sections.append(fallback_text)
+        if extraction_mode == "none":
+            extraction_mode = "plain_text"
+
+    if (not extracted_sections or len(" ".join(extracted_sections)) < 30) and (suffix == ".pdf" or suffix.lstrip(".") in IMAGE_EXTENSIONS):
+        rendered_image = evidence_dir / f"{source_file.stem}.page.png"
+        image_for_ocr: Path | None = source_file if suffix.lstrip(".") in IMAGE_EXTENSIONS else None
+        if suffix == ".pdf":
+            if render_pdf_to_png(source_file, rendered_image):
+                image_for_ocr = rendered_image
+                evidence_files.append(str(rendered_image))
+            else:
+                image_for_ocr = None
+        if image_for_ocr is not None and image_for_ocr.exists():
+            preprocessed = preprocess_image(image_for_ocr, evidence_dir / f"{source_file.stem}.page.prep.png")
+            if preprocessed.exists():
+                evidence_files.append(str(preprocessed))
+            for image_path in {image_for_ocr, preprocessed}:
+                if not image_path.exists():
+                    continue
+                for psm in ("6", "11"):
+                    ocr_text = tesseract_text(image_path, psm=psm)
+                    if ocr_text:
+                        extracted_sections.append(ocr_text)
+                        extraction_mode = "ocr" if extraction_mode == "none" else f"{extraction_mode}+ocr"
+
+    extracted_sections = dedupe_sections(extracted_sections)
+    extracted_text = "\n\n".join(extracted_sections).strip()
+    text_file = evidence_dir / f"{source_file.name}.review.txt"
+    text_file.write_text(extracted_text + ("\n" if extracted_text else ""), encoding="utf-8")
+    return {
+        "mode": extraction_mode,
+        "text": extracted_text,
+        "text_file": str(text_file),
+        "evidence_files": evidence_files,
+    }
+
+
+def clause_chunks(change: str) -> list[str]:
+    chunks: list[str] = []
+    for segment in [normalize_space(item) for item in re.split(r"[\n;]+", change) if normalize_space(item)]:
+        comma_parts = [normalize_space(item) for item in segment.split(",") if normalize_space(item)]
+        for part in comma_parts:
+            part_tokens = [token.lower() for token in re.findall(r"[A-Za-z0-9]+", part)]
+            prev_tokens = [token.lower() for token in re.findall(r"[A-Za-z0-9]+", chunks[-1])] if chunks else []
+            if chunks and len(part_tokens) <= 2 and any(token in STATE_CODES for token in part_tokens) and len(prev_tokens) <= 3:
+                chunks[-1] = f"{chunks[-1]}, {part}"
+            else:
+                chunks.append(part)
+    return chunks or [normalize_space(change)]
+
+
+def clause_is_location_like(clause: str, significant_tokens: list[str]) -> bool:
+    if "," in clause and any(token in STATE_CODES for token in significant_tokens):
+        return True
+    if any(token in LOCATION_HINT_TOKENS or token in STATE_CODES for token in significant_tokens):
+        return True
+    return bool(re.search(r"\b[A-Z]{2}\b", clause))
+
+
+def token_matches(token: str, extracted_tokens: list[str]) -> bool:
+    if token in extracted_tokens:
+        return True
+    if len(token) < 4:
+        return False
+    for candidate in extracted_tokens:
+        if abs(len(candidate) - len(token)) > 2:
+            continue
+        if difflib.SequenceMatcher(None, token, candidate).ratio() >= 0.88:
+            return True
+    return False
+
+
+def clause_checks(requested_changes: list[str], extracted_text: str) -> list[dict[str, Any]]:
+    extracted_tokens = normalize_tokens(extracted_text, drop_stopwords=False)
+    extracted_lower = normalize_lower(extracted_text)
+    checks: list[dict[str, Any]] = []
+    for requested in requested_changes:
+        for clause in clause_chunks(requested):
+            significant_tokens = normalize_tokens(clause, drop_stopwords=True)
+            matched_tokens = [token for token in significant_tokens if token_matches(token, extracted_tokens)]
+            coverage = 0.0 if not significant_tokens else round(len(matched_tokens) / len(significant_tokens), 3)
+            checks.append(
+                {
+                    "requested_change": requested,
+                    "clause": clause,
+                    "exact_present": normalize_lower(clause) in extracted_lower,
+                    "location_like": clause_is_location_like(clause, significant_tokens),
+                    "significant_tokens": significant_tokens,
+                    "matched_tokens": matched_tokens,
+                    "missing_tokens": [token for token in significant_tokens if token not in matched_tokens],
+                    "coverage": coverage,
+                    "token_count": len(significant_tokens),
+                }
+            )
+    return checks
+
+
+def review_outcome(checks: list[dict[str, Any]], extracted_text: str) -> tuple[str, str]:
+    if not normalize_space(extracted_text):
+        return "ambiguous", "no_review_text_extracted"
+    scored = [item for item in checks if int(item.get("token_count") or 0) > 0]
+    if not scored:
+        return "ambiguous", "no_significant_requested_tokens"
+    any_positive = any(float(item.get("coverage") or 0) > 0 for item in scored)
+    for item in scored:
+        if item.get("location_like") and float(item.get("coverage") or 0) == 0.0 and any_positive:
+            return "fail", "missing_location_clause"
+    if all(item.get("exact_present") or float(item.get("coverage") or 0) >= 0.75 for item in scored):
+        return "pass", "all_requested_clauses_present"
+    if any_positive:
+        return "fail", "partial_requested_change_match"
+    return "ambiguous", "requested_change_not_detected"
+
+
+def exact_miss(checks: list[dict[str, Any]], outcome: str) -> str:
+    if outcome != "fail":
+        return ""
+    for item in checks:
+        if item.get("location_like") and float(item.get("coverage") or 0) == 0.0:
+            return str(item.get("clause") or "")
+    for item in checks:
+        if float(item.get("coverage") or 0) == 0.0:
+            return str(item.get("clause") or "")
+    for item in checks:
+        if item.get("missing_tokens"):
+            return str(item.get("clause") or "")
+    return ""
+
+
+def review_confidence(extraction_mode: str, extracted_text: str, checks: list[dict[str, Any]], outcome: str) -> str:
+    if outcome == "pass" and extraction_mode.startswith("pdf_text"):
+        return "high"
+    if outcome == "fail" and any(float(item.get("coverage") or 0) > 0 for item in checks):
+        return "medium"
+    if len(normalize_space(extracted_text)) >= 120:
+        return "medium"
+    return "low"
+
+
+def morpheus_reply_guidance(outcome: str, requested_changes: list[str], exact_miss_value: str) -> str:
+    requested = requested_changes[0] if requested_changes else ""
+    if outcome == "pass":
+        return (
+            "Artie marked the revised proof as passed. Morpheus should coordinate the next customer update from "
+            "this governed review result and avoid visually re-reviewing the proof."
+        )
+    if outcome == "fail":
+        miss = exact_miss_value or requested or "the requested revision"
+        return (
+            f'Artie marked the revised proof as failed. Morpheus should coordinate from that result and explain that '
+            f'another revision is required because the proof still misses "{miss}".'
+        )
+    return (
+        "Artie could not determine a confident pass/fail result from the available proof evidence. Morpheus should "
+        "treat this as a governed artwork-review blocker instead of reasoning visually."
+    )
+
+
+def next_revision_instruction(outcome: str, requested_changes: list[str], exact_miss_value: str) -> str:
+    requested = requested_changes[0] if requested_changes else ""
+    if outcome == "fail":
+        miss = exact_miss_value or requested or "the requested change"
+        return (
+            f'Please revise the proof so the requested text reads exactly "{requested}". '
+            f'The current proof is still missing "{miss}". Return one updated proof PDF through the same governed lane.'
+        )
+    if outcome == "pass":
+        return "Revision passed. Artie should prepare the customer-facing mockup/proof asset package from the governed proof file."
+    return "Review is ambiguous. Capture a higher-signal proof export or a clearer proof image before asking Morpheus to coordinate the next step."
+
+
+def text_output(summary: dict[str, Any]) -> str:
+    lines = [
+        capability_name(),
+        f"review_outcome: {summary['review_outcome']}",
+        f"review_confidence: {summary['review_confidence']}",
+        f"customer_identity: {summary.get('customer_identity') or ''}",
+        f"job_identity: {summary.get('job_identity') or ''}",
+        f"file_reviewed: {summary['file_reviewed']['source_file']}",
+        f"canonical_review_file: {summary['file_reviewed'].get('canonical_file_path') or ''}",
+        f"exact_miss: {summary.get('exact_miss') or ''}",
+        f"next_revision_instruction: {summary.get('next_revision_instruction') or ''}",
+        f"review_record: {summary['record_file']}",
+    ]
+    artwork_preflight = dict(summary.get("artwork_preflight") or {})
+    if artwork_preflight:
+        lines.append(f"artwork_preflight: {artwork_preflight.get('summary') or ''}")
+    if summary.get("sheik_handoff"):
+        lines.append(f"sheik_handoff_file: {summary['sheik_handoff'].get('record_file') or ''}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    paths = runtime_paths(spine_root=spine_root, state_root=state_root)
+    workflow = workflow_settings(spine_root)
+    now = utc_now()
+    review_id = f"MARR-{compact_utc(now)}-{os.urandom(2).hex()}"
+    source_file = Path(args.source_file).expanduser().resolve()
+    if not source_file.is_file():
+        fail(f"source_file not found: {source_file}")
+
+    upstream_handoff: dict[str, Any] = {}
+    upstream_handoff_file = normalize_text(args.upstream_handoff_file)
+    if upstream_handoff_file:
+        upstream_path = Path(upstream_handoff_file).expanduser().resolve()
+        if not upstream_path.is_file():
+            fail(f"upstream handoff file not found: {upstream_path}")
+        upstream_handoff = load_json_object(upstream_path)
+
+    customer_identity = normalize_space(args.customer) or normalize_space(upstream_handoff.get("customer_identity"))
+    job_identity = normalize_space(args.job) or normalize_space(upstream_handoff.get("job_identity"))
+    context = normalize_space(
+        args.context
+        or " ".join(
+            part
+            for part in (
+                customer_identity,
+                job_identity,
+                normalize_space(((upstream_handoff.get("selected_artwork_ref") or {}).get("original_filename") or "")),
+                source_file.stem,
+            )
+            if part
+        )
+    )
+
+    placement_payload, placement_receipt = run_cap_capture(
+        spine_root,
+        PLACE_CAPABILITY,
+        [str(source_file), "--context", context or source_file.stem, "--artifact-role", "proof", "--json"],
+    )
+    placement_data = dict(placement_payload.get("data") or placement_payload)
+    if normalize_text(placement_data.get("operator_question")):
+        fail(str(placement_data.get("operator_question")))
+
+    preflight_file = Path(
+        normalize_space(placement_data.get("resolved_file_path") or "") or str(source_file)
+    ).expanduser().resolve()
+    artwork_preflight: dict[str, Any] | None = None
+    preflight_args = [str(preflight_file), "--attachment-name", source_file.name]
+    if customer_identity:
+        preflight_args.extend(["--customer-name", customer_identity])
+    if job_identity:
+        preflight_args.extend(["--job-ref", job_identity])
+    try:
+        preflight_payload = run_preflight_command(
+            workflow["artwork_preflight_command"],
+            preflight_args,
+            cwd=spine_root,
+        )
+        artwork_preflight = surface_artwork_preflight(preflight_payload)
+    except RuntimeError as exc:
+        artwork_preflight = {
+            "owner": "Artie",
+            "source": workflow["artwork_preflight_capability"],
+            "state": "analysis_failed",
+            "summary": f"Artie preflight could not analyze the reviewed proof cleanly: {normalize_space(exc)}",
+        }
+
+    evidence_dir = paths["evidence_root"] / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d") / review_id
+    extraction = extract_review_text(source_file, evidence_dir)
+    checks = clause_checks(args.requested_change, str(extraction.get("text") or ""))
+    outcome, outcome_basis = review_outcome(checks, str(extraction.get("text") or ""))
+    exact_miss_value = exact_miss(checks, outcome)
+    confidence = review_confidence(str(extraction.get("mode") or ""), str(extraction.get("text") or ""), checks, outcome)
+    next_instruction = next_revision_instruction(outcome, args.requested_change, exact_miss_value)
+    proof_readiness_state = {
+        "pass": "ready_for_mockup_prep",
+        "fail": "revision_required",
+        "ambiguous": "review_blocked",
+    }[outcome]
+
+    upstream_selected = dict(upstream_handoff.get("selected_artwork_ref") or {})
+    upstream_selected_preflight = dict(upstream_handoff.get("selected_artwork_preflight") or {})
+    canonical_file_refs = [
+        {
+            "role": "reviewed_proof",
+            "source_file": str(source_file),
+            "canonical_file_path": placement_data.get("resolved_file_path"),
+            "canonical_object_key": placement_data.get("canonical_object_key"),
+            "placement_id": placement_data.get("placement_id"),
+            "artwork_preflight_record_file": (artwork_preflight or {}).get("record_file"),
+        }
+    ]
+    if upstream_selected:
+        canonical_file_refs.append(
+            {
+                "role": "upstream_selected_artwork",
+                "source_file": upstream_selected.get("downloaded_file"),
+                "canonical_file_path": upstream_selected.get("resolved_file_path"),
+                "canonical_object_key": upstream_selected.get("canonical_object_key") or upstream_selected.get("resolved_target_key"),
+                "artwork_preflight_record_file": upstream_selected_preflight.get("record_file"),
+            }
+        )
+
+    sheik_summary: dict[str, Any] | None = None
+    if outcome == "fail":
+        sheik_id = f"MSRH-{compact_utc(now)}-{os.urandom(2).hex()}"
+        sheik_record = {
+            "capability": capability_name(),
+            "schema_version": SCHEMA_VERSION,
+            "handoff_id": sheik_id,
+            "created_at": iso_utc(now),
+            "handoff_state": "ready_for_sheik_revision",
+            "vendor_identity": normalize_space(args.vendor) or DEFAULT_VENDOR,
+            "review_id": review_id,
+            "review_outcome": outcome,
+            "customer_identity": customer_identity or None,
+            "job_identity": job_identity or None,
+            "requested_change_set": args.requested_change,
+            "exact_miss": exact_miss_value or None,
+            "next_revision_instruction": next_instruction,
+            "canonical_file_refs": canonical_file_refs,
+            "artwork_preflight": artwork_preflight,
+            "upstream_selected_artwork_preflight": upstream_selected_preflight or None,
+            "upstream_handoff_file": str(Path(upstream_handoff_file).expanduser().resolve()) if upstream_handoff_file else None,
+        }
+        sheik_record_file = paths["sheik_records_root"] / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d") / f"{sheik_id}.json"
+        write_json(sheik_record_file, sheik_record)
+        append_ndjson(
+            paths["sheik_index_file"],
+            paths["sheik_lock_file"],
+            {
+                "handoff_id": sheik_id,
+                "review_id": review_id,
+                "handoff_state": "ready_for_sheik_revision",
+                "vendor_identity": sheik_record["vendor_identity"],
+                "customer_identity": customer_identity or None,
+                "job_identity": job_identity or None,
+                "exact_miss": exact_miss_value or None,
+                "record_file": str(sheik_record_file),
+            },
+        )
+        sheik_summary = {
+            "handoff_id": sheik_id,
+            "handoff_state": "ready_for_sheik_revision",
+            "vendor_identity": sheik_record["vendor_identity"],
+            "record_file": str(sheik_record_file),
+        }
+
+    reply_guidance = morpheus_reply_guidance(outcome, args.requested_change, exact_miss_value)
+    summary = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "generated_at": iso_utc(now),
+        "review_id": review_id,
+        "review_outcome": outcome,
+        "review_basis": outcome_basis,
+        "review_confidence": confidence,
+        "customer_identity": customer_identity or None,
+        "job_identity": job_identity or None,
+        "vendor_identity": normalize_space(args.vendor) or DEFAULT_VENDOR,
+        "requested_change_set": args.requested_change,
+        "exact_miss": exact_miss_value or None,
+        "next_revision_instruction": next_instruction,
+        "file_reviewed": {
+            "source_file": str(source_file),
+            "source_sha256": file_sha256(source_file),
+            "canonical_file_path": placement_data.get("resolved_file_path"),
+            "canonical_object_key": placement_data.get("canonical_object_key"),
+            "placement_id": placement_data.get("placement_id"),
+            "artwork_preflight_record_file": (artwork_preflight or {}).get("record_file"),
+        },
+        "artwork_preflight": artwork_preflight,
+        "canonical_file_refs": canonical_file_refs,
+        "upstream_handoff_file": str(Path(upstream_handoff_file).expanduser().resolve()) if upstream_handoff_file else None,
+        "upstream_selected_artwork_ref": upstream_selected or None,
+        "upstream_selected_artwork_preflight": upstream_selected_preflight or None,
+        "review_checks": checks,
+        "extraction": {
+            "mode": extraction.get("mode"),
+            "text_file": extraction.get("text_file"),
+            "evidence_files": extraction.get("evidence_files"),
+            "text_excerpt": normalize_space(str(extraction.get("text") or ""))[:280] or None,
+        },
+        "proof_readiness": {
+            "state": proof_readiness_state,
+            "next_action": next_instruction,
+            "artwork_preflight_state": (artwork_preflight or {}).get("state"),
+        },
+        "sheik_handoff": sheik_summary,
+        "morpheus_reply_guidance": reply_guidance,
+        "morpheus_consumption": {
+            "visual_truth_owner": "Artie",
+            "customer_coordination_owner": "Morpheus",
+            "should_reason_visually": False,
+            "reply_guidance": reply_guidance,
+            "mailbox": args.mailbox,
+            "source_message_id": normalize_text(args.source_message_id) or None,
+            "artwork_preflight": artwork_preflight,
+        },
+        "receipts": {
+            "artwork_place_receipt": placement_receipt or None,
+        },
+    }
+
+    record_file = paths["reviews_records_root"] / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d") / f"{review_id}.json"
+    summary["record_file"] = str(record_file)
+    summary["index_file"] = str(paths["reviews_index_file"])
+    write_json(record_file, summary)
+    append_ndjson(
+        paths["reviews_index_file"],
+        paths["reviews_lock_file"],
+        {
+            "review_id": review_id,
+            "review_outcome": outcome,
+            "review_confidence": confidence,
+            "customer_identity": customer_identity or None,
+            "job_identity": job_identity or None,
+            "exact_miss": exact_miss_value or None,
+            "proof_readiness_state": proof_readiness_state,
+            "sheik_handoff_id": (sheik_summary or {}).get("handoff_id"),
+            "record_file": str(record_file),
+        },
+    )
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+
+    print(text_output(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

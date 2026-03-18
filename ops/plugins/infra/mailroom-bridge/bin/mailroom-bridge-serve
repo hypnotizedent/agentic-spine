@@ -153,6 +153,54 @@ def _is_output_delim(line: str) -> bool:
     return all(ch in {"─", "-"} for ch in s)
 
 
+def _extract_cap_run_output(stdout: str) -> str:
+    """
+    Extract the top-level capability payload from `ops cap run` wrapper output.
+
+    Wrapper stdout can contain nested `ops cap run` blocks from preconditions and
+    post-actions. We want the primary capability block:
+    - after the last `== PRECONDITIONS OK ==` marker when preconditions ran
+    - otherwise the first top-level `Executing...` block
+    """
+
+    lines = stdout.splitlines()
+    if not lines:
+        return ""
+
+    pre_ok_idx = -1
+    for i, raw in enumerate(lines):
+        if raw.strip() == "== PRECONDITIONS OK ==":
+            pre_ok_idx = i
+
+    executing_idx = -1
+    for i, raw in enumerate(lines):
+        if pre_ok_idx >= 0 and i <= pre_ok_idx:
+            continue
+        if raw.strip().lower() == "executing...":
+            executing_idx = i
+            break
+
+    if executing_idx < 0:
+        return stdout.strip()
+
+    start_idx = -1
+    for i in range(executing_idx + 1, len(lines)):
+        if _is_output_delim(lines[i]):
+            start_idx = i + 1
+            break
+
+    if start_idx < 0:
+        return stdout.strip()
+
+    end_idx = len(lines)
+    for i in range(start_idx, len(lines)):
+        if _is_output_delim(lines[i]):
+            end_idx = i
+            break
+
+    return "\n".join(lines[start_idx:end_idx]).strip()
+
+
 def _reduce_open_loops_from_scopes(scopes_dir: Path) -> list[dict[str, Any]]:
     """
     Reduce open loops from scope files (mailroom/state/loop-scopes/*.scope.md).
@@ -1045,27 +1093,7 @@ class Handler(BaseHTTPRequestHandler):
             elif s.startswith("Run Key:") and not run_key:
                 run_key = s.split("Run Key:", 1)[1].strip()
 
-        # Extract capability output between delimiter lines
-        lines = stdout.splitlines()
-        start_idx = None
-        for i, raw in enumerate(lines):
-            if raw.strip().lower() == "executing...":
-                # Find the delimiter after "Executing..."
-                for j in range(i + 1, len(lines)):
-                    if _is_output_delim(lines[j]):
-                        start_idx = j + 1
-                        break
-                break
-
-        end_idx = len(lines)
-        if start_idx is not None:
-            for i in range(start_idx, len(lines)):
-                if _is_output_delim(lines[i]):
-                    end_idx = i
-                    break
-            output = "\n".join(lines[start_idx:end_idx]).strip()
-        else:
-            output = stdout.strip()
+        output = _extract_cap_run_output(stdout)
 
         # Truncate output
         max_output = int(self.config.get("max_read_bytes") or 262144)

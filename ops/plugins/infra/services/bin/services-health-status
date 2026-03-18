@@ -89,6 +89,85 @@ printf "%-16s %-16s %-8s %-10s %-10s %s\n" "ID" "HOST" "STATUS" "TIME" "PATH" "N
 
 fail=0
 checked=0
+declare -A HOST_PREFERRED_PATH
+
+http_probe_with_candidates() {
+  local url="$1"
+  local host="$2"
+  local connect_timeout="$3"
+  local max_time="$4"
+  local mapped=0
+  local resolved_url="$url"
+  local path_used="unmapped"
+  local http_code="000"
+  local curl_exit=1
+  local candidate_url candidate_path candidate
+  local -a candidates=()
+  local preferred_path=""
+
+  if [[ -n "$host" && "$host" != "null" ]] && \
+     yq -e ".ssh.targets[] | select(.id == \"$host\")" "$SSH_BINDING" >/dev/null 2>&1; then
+    mapped=1
+    preferred_path="${HOST_PREFERRED_PATH[$host]:-}"
+    if [[ -z "$preferred_path" ]]; then
+      local ssh_hint ssh_hint_path
+      ssh_hint="$(ssh_resolve_ssh_host_with_fallback "$host" "$connect_timeout" || true)"
+      ssh_hint_path="$(printf '%s' "$ssh_hint" | awk '{print $2}')"
+      case "$ssh_hint_path" in
+        lan|tailscale|direct)
+          preferred_path="$ssh_hint_path"
+          HOST_PREFERRED_PATH["$host"]="$ssh_hint_path"
+          ;;
+      esac
+    fi
+    while IFS=$'\t' read -r candidate_url candidate_path; do
+      [[ -n "$candidate_url" ]] || continue
+      candidates+=("${candidate_url}|${candidate_path}")
+    done < <(ssh_resolve_url_candidates "$url" "$host")
+  fi
+
+  if [[ -n "$preferred_path" && "${#candidates[@]}" -gt 1 ]]; then
+    local -a preferred_candidates=()
+    local -a remaining_candidates=()
+    for candidate in "${candidates[@]}"; do
+      IFS='|' read -r candidate_url candidate_path <<<"$candidate"
+      if [[ "$candidate_path" == "$preferred_path" ]]; then
+        preferred_candidates+=("$candidate")
+      else
+        remaining_candidates+=("$candidate")
+      fi
+    done
+    candidates=("${preferred_candidates[@]}" "${remaining_candidates[@]}")
+  fi
+
+  if [[ "${#candidates[@]}" -eq 0 ]]; then
+    if [[ "$mapped" -eq 1 ]]; then
+      candidates+=("${url}|unreachable")
+    else
+      candidates+=("${url}|unmapped")
+    fi
+  fi
+
+  for idx in "${!candidates[@]}"; do
+    IFS='|' read -r candidate_url candidate_path <<<"${candidates[$idx]}"
+    set +e
+    http_code="$(curl -sS -o /dev/null -w "%{http_code}" \
+      --connect-timeout "$connect_timeout" \
+      --max-time "$max_time" \
+      "$candidate_url" 2>/dev/null)"
+    curl_exit=$?
+    set -e
+
+    resolved_url="$candidate_url"
+    path_used="$candidate_path"
+
+    if [[ "$curl_exit" -eq 0 || "$idx" -eq $((${#candidates[@]} - 1)) ]]; then
+      break
+    fi
+  done
+
+  printf '%s\t%s\t%s\t%s\n' "$resolved_url" "$path_used" "$http_code" "$curl_exit"
+}
 
 for i in $(seq 0 $((COUNT-1))); do
   id="$(yq -r ".endpoints[$i].id" "$BINDING")"
@@ -113,33 +192,17 @@ for i in $(seq 0 $((COUNT-1))); do
     continue
   fi
 
-  # Resolve URL through LAN→Tailscale fallback if host maps to an SSH target
-  resolved_url="$url"
-  path_used="-"
-  if [[ -n "$host" && "$host" != "null" ]] && \
-     yq -e ".ssh.targets[] | select(.id == \"$host\")" "$SSH_BINDING" >/dev/null 2>&1; then
-    resolve_result="$(ssh_resolve_url_with_fallback "$url" "$host" "$DEF_CONNECT")" || true
-    if [[ -n "$resolve_result" ]]; then
-      resolved_url="$(echo "$resolve_result" | awk '{print $1}')"
-      path_used="$(echo "$resolve_result" | awk '{print $2}')"
-    fi
-  else
-    path_used="unmapped"
-  fi
-
   # Time the request (ms)
   start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
-
-  set +e
-  http_code="$(curl -sS -o /dev/null -w "%{http_code}" \
-    --connect-timeout "$DEF_CONNECT" \
-    --max-time "$DEF_MAX" \
-    "$resolved_url" 2>/dev/null)"
-  curl_exit=$?
-  set -e
+  IFS=$'\t' read -r resolved_url path_used http_code curl_exit <<<"$(http_probe_with_candidates "$url" "$host" "$DEF_CONNECT" "$DEF_MAX")"
 
   end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
   dur_ms=$((end_ms - start_ms))
+
+  if [[ "$curl_exit" -eq 0 && -n "$host" && "$path_used" != "unmapped" && "$path_used" != "unreachable" ]]; then
+    HOST_PREFERRED_PATH["$host"]="$path_used"
+    ssh_route_hint_write "$host" "$path_used"
+  fi
 
   # Accept either a single expected code (e.g. 200) or comma-separated set
   # (e.g. "401,403") for endpoints that legitimately vary by route/context.

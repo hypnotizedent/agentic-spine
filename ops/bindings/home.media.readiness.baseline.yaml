@@ -2,8 +2,12 @@ inventory: HOME_MEDIA_READINESS_BASELINE_V1
 version: "1.0"
 status: authoritative
 created: "2026-03-04"
+updated_at: "2026-03-18"
 authority: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
 purpose: "Machine-checkable home-target preflight bundle for shop-to-home media relocation."
+target_contracts:
+  topology: ops/bindings/home.media.target.contract.yaml
+  doctrine: docs/governance/MEDIA_STACK_BORING_TARGET.md
 
 evidence:
   run_keys:
@@ -64,12 +68,16 @@ checks:
     source: "ssh root@100.103.99.62 mount + path check"
     observed:
       required_path: "/mnt/media"
-      path_exists: false
-      mount_present: false
-      mode: "unknown"
+      path_exists: true
+      mount_present: true
+      host_source: "10.0.0.150:/volume1/media-staging"
+      guest_vm_id: 106
+      guest_hostname: media-home
+      guest_mount_path: "/srv/media"
+      guest_mount_present: true
+      mode: "rw"
     threshold: "/mnt/media exists and is mounted rw to home media target"
-    pass: false
-    blocker_code: HOME_MEDIA_MOUNT_MISSING
+    pass: true
 
   - id: HOME_WAN_THROUGHPUT_SAMPLE
     class: network
@@ -94,12 +102,19 @@ checks:
     pass: true
 
 overall:
-  readiness_state: blocked
-  blocking_checks:
-    - HOME_MEDIA_MOUNT_SEMANTICS
+  readiness_state: jellyfin_only_recovery
+  blocking_checks: []
   non_blocking_findings:
     - "Legacy/decommissioned workloads have stale backups (vm102/lxc103)."
+    - "Home media runtime is in jellyfin-only recovery on media-home rather than full thin-slice service mode."
+    - "VM 106 media-home now has a canonical Synology restore artifact from 2026-03-17 and is backed by the home Proxmox restore lane."
+    - "The unified `/srv/appdata/compose/media-stack` project remains the canonical compose root on media-home."
+    - "Synology /volume1/media-staging remains the live payload substrate for `/srv/media`."
+    - "The write/helper lanes and legacy shop split VMs remain intentionally stopped or rollback-only during the boring reset."
+    - "Home Jellyfin remains the only live playback surface during recovery."
+    - "media.data.readiness.verify is the canonical restart gate for inbox/library/cold-shop lifecycle decisions."
   next_actions:
-    - "Provision canonical home media mount path (/mnt/media) on proxmox-home and verify rw semantics."
-    - "Declare home media target storage tier in infra.storage.placement.policy.yaml once mount target is finalized."
-    - "Re-run home media readiness baseline after mount provisioning."
+    - "Keep shop media VMs provisioned as rollback until the recovery window closes."
+    - "Validate that only the intended Jellyfin recovery surface is live on media-home."
+    - "Run media.data.readiness.verify and keep automation blocked until its write-lane gates are green."
+    - "Normalize inherited Jellyfin collection metadata cleanup residue before re-enabling non-Jellyfin playback/request surfaces."

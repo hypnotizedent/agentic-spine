@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+# microsoft-tenant-boring-audit — read-only tenant reduction drift audit
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
+TOKEN_EXEC="$ROOT/ops/plugins/providers/microsoft/bin/microsoft-token-exec"
+TENANT_CONTRACT="${MICROSOFT_TENANT_BORING_CONTRACT:-$ROOT/ops/bindings/microsoft.tenant.boring.contract.yaml}"
+ARCHIVER_CONTRACT="${MAIL_ARCHIVER_ACCOUNT_LINKAGE_CONTRACT:-$ROOT/ops/bindings/mail.archiver.account.linkage.contract.yaml}"
+JSON=0
+
+usage() {
+  cat <<'EOF'
+Usage: microsoft-tenant-boring-audit [--json]
+
+Read-only Microsoft tenant audit against the boringness contract:
+- active human identities expected to stay live
+- nonhuman mailboxes expected to have sign-in blocked
+- enabled Mint member identities outside the allowlist
+- former-mailbox archive-gap candidates not modeled in mail-archiver
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)
+      JSON=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "ERROR: missing dependency: $1" >&2
+    exit 1
+  }
+}
+
+need python3
+need yq
+[[ -f "$TENANT_CONTRACT" ]] || { echo "ERROR: missing contract: $TENANT_CONTRACT" >&2; exit 1; }
+[[ -f "$ARCHIVER_CONTRACT" ]] || { echo "ERROR: missing contract: $ARCHIVER_CONTRACT" >&2; exit 1; }
+[[ -x "$SECRETS_EXEC" ]] || { echo "ERROR: missing executable: $SECRETS_EXEC" >&2; exit 1; }
+[[ -x "$TOKEN_EXEC" ]] || { echo "ERROR: missing executable: $TOKEN_EXEC" >&2; exit 1; }
+
+tenant_json="$(mktemp)"
+archiver_json="$(mktemp)"
+trap 'rm -f "$tenant_json" "$archiver_json"' EXIT
+yq e -o=json "$TENANT_CONTRACT" >"$tenant_json"
+yq e -o=json "$ARCHIVER_CONTRACT" >"$archiver_json"
+
+exec "$SECRETS_EXEC" -- "$TOKEN_EXEC" python3 - "$tenant_json" "$archiver_json" "$JSON" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
+
+tenant_contract_path = sys.argv[1]
+archiver_contract_path = sys.argv[2]
+json_mode = sys.argv[3] == "1"
+
+tenant_contract = json.load(open(tenant_contract_path, encoding="utf-8"))
+archiver_contract = json.load(open(archiver_contract_path, encoding="utf-8"))
+
+token = os.environ["MICROSOFT_ACCESS_TOKEN"]
+api_root = "https://graph.microsoft.com/v1.0"
+
+
+class GraphError(RuntimeError):
+    pass
+
+
+def normalize(address: str | None) -> str:
+    return (address or "").strip().casefold()
+
+
+def request_json(url_or_path: str) -> dict:
+    url = url_or_path if url_or_path.startswith("https://") else f"{api_root}{url_or_path}"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        raise GraphError(f"HTTP {exc.code} {url}: {body}") from exc
+
+
+def paged_collection(path: str) -> list[dict]:
+    results: list[dict] = []
+    next_url = f"{api_root}{path}"
+    while next_url:
+        payload = request_json(next_url)
+        results.extend(payload.get("value", []))
+        next_url = payload.get("@odata.nextLink", "")
+    return results
+
+
+def get_user_by_mailbox(mailbox: str) -> dict | None:
+    quoted = urllib.parse.quote(mailbox)
+    try:
+        return request_json(
+            f"/users/{quoted}?$select=id,displayName,mail,userPrincipalName,accountEnabled,userType,proxyAddresses,assignedLicenses"
+        )
+    except GraphError as exc:
+        if "HTTP 404" in str(exc):
+            return None
+        raise
+
+
+def get_mailbox_settings(mailbox: str) -> dict | None:
+    quoted = urllib.parse.quote(mailbox)
+    try:
+        return request_json(f"/users/{quoted}/mailboxSettings")
+    except GraphError as exc:
+        if "HTTP 404" in str(exc):
+            return None
+        raise
+
+
+def get_inbox_summary(mailbox: str) -> dict | None:
+    quoted = urllib.parse.quote(mailbox)
+    try:
+        return request_json(
+            f"/users/{quoted}/mailFolders/inbox?$select=id,displayName,totalItemCount,unreadItemCount"
+        )
+    except GraphError as exc:
+        if "HTTP 404" in str(exc):
+            return None
+        raise
+
+
+def get_license_skus(mailbox: str) -> list[str]:
+    quoted = urllib.parse.quote(mailbox)
+    try:
+        payload = request_json(f"/users/{quoted}/licenseDetails")
+    except GraphError:
+        return []
+    return sorted(
+        {
+            str(item.get("skuPartNumber") or "").strip()
+            for item in payload.get("value", [])
+            if str(item.get("skuPartNumber") or "").strip()
+        }
+    )
+
+
+def user_addresses(user: dict) -> set[str]:
+    values: set[str] = set()
+    for key in ("mail", "userPrincipalName"):
+        value = normalize(str(user.get(key) or ""))
+        if value:
+            values.add(value)
+    for raw in user.get("proxyAddresses") or []:
+        text = str(raw or "")
+        if ":" in text:
+            text = text.split(":", 1)[1]
+        value = normalize(text)
+        if value:
+            values.add(value)
+    return values
+
+
+def relevant_tenant_user(user: dict) -> bool:
+    addresses = user_addresses(user)
+    return any(
+        address.endswith("@mintprints.com")
+        or address.endswith("@mintprints.onmicrosoft.com")
+        or address.endswith("#ext#@mintprints.onmicrosoft.com")
+        for address in addresses
+    )
+
+
+active_humans = {
+    normalize(item)
+    for item in tenant_contract["authority"].get("active_human_users", [])
+    if normalize(item)
+}
+nonhuman_mailboxes = {
+    normalize(item)
+    for key in (
+        "shared_customer_mailboxes",
+        "parked_legacy_mailboxes",
+        "transactional_system_mailboxes",
+    )
+    for item in tenant_contract["authority"].get(key, [])
+    if normalize(item)
+}
+archive_entries_by_mailbox: dict[str, dict] = {}
+archive_modeled_mailboxes: set[str] = set()
+archive_covered_mailboxes: set[str] = set()
+for account in archiver_contract.get("accounts", []):
+    mailbox = normalize(account.get("mailbox"))
+    if not mailbox:
+        continue
+    lane_type = str(account.get("lane_type") or "").strip()
+    total_imported = int((((account.get("sync") or {}).get("import_history") or {}).get("total_imported") or 0))
+    entry = {
+        "contract_id": str(account.get("id") or ""),
+        "lane_type": lane_type,
+        "total_imported": total_imported,
+    }
+    archive_entries_by_mailbox[mailbox] = entry
+    archive_modeled_mailboxes.add(mailbox)
+    if lane_type == "live-sync" or total_imported > 0:
+        archive_covered_mailboxes.add(mailbox)
+
+all_users = paged_collection(
+    "/users?$select=id,displayName,mail,userPrincipalName,accountEnabled,userType,proxyAddresses,assignedLicenses&$top=200"
+)
+tenant_users = [user for user in all_users if relevant_tenant_user(user)]
+
+
+def classify_user(user: dict) -> str:
+    addresses = user_addresses(user)
+    if addresses & active_humans:
+        return "active_human"
+    if addresses & nonhuman_mailboxes:
+        return "allowlisted_nonhuman"
+    if str(user.get("userType") or "") == "Guest":
+        return "guest"
+    return "drift_member"
+
+
+def summarize_user(user: dict, include_mailbox: bool = False, include_license_skus: bool = False) -> dict:
+    summary = {
+        "display_name": user.get("displayName"),
+        "mail": user.get("mail"),
+        "user_principal_name": user.get("userPrincipalName"),
+        "account_enabled": user.get("accountEnabled"),
+        "user_type": user.get("userType"),
+        "license_count": len(user.get("assignedLicenses") or []),
+    }
+    if include_license_skus:
+        summary["license_skus"] = get_license_skus(str(user.get("userPrincipalName") or user.get("mail") or ""))
+    if include_mailbox:
+        mailbox = str(user.get("mail") or user.get("userPrincipalName") or "")
+        mailbox_settings = get_mailbox_settings(mailbox) if mailbox else None
+        inbox = get_inbox_summary(mailbox) if mailbox else None
+        summary["mailbox_readable"] = bool(mailbox_settings)
+        summary["user_purpose"] = (mailbox_settings or {}).get("userPurpose")
+        if inbox:
+            summary["inbox_total_items"] = inbox.get("totalItemCount")
+            summary["inbox_unread_items"] = inbox.get("unreadItemCount")
+    return summary
+
+
+active_human_rows: list[dict] = []
+allowlisted_nonhuman_rows: list[dict] = []
+enabled_member_drift: list[dict] = []
+disabled_member_residue: list[dict] = []
+archive_gap_candidates: list[dict] = []
+guest_users: list[dict] = []
+
+for user in sorted(tenant_users, key=lambda row: (str(row.get("displayName") or ""), str(row.get("userPrincipalName") or ""))):
+    category = classify_user(user)
+    if category == "active_human":
+        active_human_rows.append(summarize_user(user, include_mailbox=True, include_license_skus=True))
+        continue
+    if category == "allowlisted_nonhuman":
+        allowlisted_nonhuman_rows.append(summarize_user(user, include_mailbox=True))
+        continue
+    if category == "guest":
+        guest_users.append(summarize_user(user, include_mailbox=False))
+        continue
+
+    row = summarize_user(user, include_mailbox=True, include_license_skus=len(user.get("assignedLicenses") or []) > 0)
+    if bool(user.get("accountEnabled")):
+        enabled_member_drift.append(row)
+        mailbox = normalize(str(user.get("mail") or user.get("userPrincipalName") or ""))
+        archive_entry = archive_entries_by_mailbox.get(mailbox)
+        if row.get("mailbox_readable") and mailbox not in archive_covered_mailboxes:
+            if archive_entry:
+                row["archive_contract_id"] = archive_entry["contract_id"]
+                row["archive_contract_lane_type"] = archive_entry["lane_type"]
+                row["archive_contract_total_imported"] = archive_entry["total_imported"]
+            archive_gap_candidates.append(row)
+    else:
+        disabled_member_residue.append(row)
+
+nonhuman_signin_drift = [
+    row for row in allowlisted_nonhuman_rows if bool(row.get("account_enabled"))
+]
+
+payload = {
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "contract": os.path.basename(tenant_contract_path),
+    "active_humans": active_human_rows,
+    "allowlisted_nonhuman": allowlisted_nonhuman_rows,
+    "nonhuman_signin_drift": nonhuman_signin_drift,
+    "enabled_member_drift": enabled_member_drift,
+    "archive_gap_candidates": archive_gap_candidates,
+    "disabled_member_residue": disabled_member_residue,
+    "guest_users": guest_users,
+    "archive_modeled_mailboxes": sorted(archive_modeled_mailboxes),
+    "archive_covered_mailboxes": sorted(archive_covered_mailboxes),
+}
+
+if json_mode:
+    print(json.dumps(payload, indent=2))
+    raise SystemExit(0)
+
+print("microsoft-tenant-boring-audit")
+print(f"generated_at_utc: {payload['generated_at_utc']}")
+print(
+    "summary: "
+    f"active_humans={len(active_human_rows)} "
+    f"allowlisted_nonhuman={len(allowlisted_nonhuman_rows)} "
+    f"nonhuman_signin_drift={len(nonhuman_signin_drift)} "
+    f"enabled_member_drift={len(enabled_member_drift)} "
+    f"archive_gap_candidates={len(archive_gap_candidates)} "
+    f"guests={len(guest_users)}"
+)
+print("active_humans:")
+for row in active_human_rows:
+    skus = ",".join(row.get("license_skus") or []) or "none"
+    print(
+        f"  - {row['mail'] or row['user_principal_name']}: "
+        f"enabled={row['account_enabled']} license_count={row['license_count']} "
+        f"license_skus={skus} user_purpose={row.get('user_purpose') or 'unknown'}"
+    )
+if nonhuman_signin_drift:
+    print("nonhuman_signin_drift:")
+    for row in nonhuman_signin_drift:
+        print(
+            f"  - {row['mail'] or row['user_principal_name']}: "
+            f"enabled={row['account_enabled']} user_purpose={row.get('user_purpose') or 'unknown'}"
+        )
+if enabled_member_drift:
+    print("enabled_member_drift:")
+    for row in enabled_member_drift:
+        mailbox = row["mail"] or row["user_principal_name"]
+        skus = ",".join(row.get("license_skus") or []) or "none"
+        print(
+            f"  - {mailbox}: enabled={row['account_enabled']} "
+            f"license_count={row['license_count']} license_skus={skus} "
+            f"user_purpose={row.get('user_purpose') or 'unknown'} "
+            f"inbox_total={row.get('inbox_total_items', 'unknown')}"
+        )
+if archive_gap_candidates:
+    print("archive_gap_candidates:")
+    for row in archive_gap_candidates:
+        mailbox = row["mail"] or row["user_principal_name"]
+        print(
+            f"  - {mailbox}: mailbox_readable={row.get('mailbox_readable')} "
+            f"user_purpose={row.get('user_purpose') or 'unknown'} "
+            f"inbox_total={row.get('inbox_total_items', 'unknown')} "
+            f"archive_contract_id={row.get('archive_contract_id', 'none')} "
+            f"archive_lane_type={row.get('archive_contract_lane_type', 'none')} "
+            f"archive_total_imported={row.get('archive_contract_total_imported', 0)}"
+        )
+PY

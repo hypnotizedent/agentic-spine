@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Read-only order/quote/seed status lookup for the voice front desk."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+CAPABILITY_NAME = "mint.customer.order.status.lookup"
+SCHEMA_VERSION = "1.0"
+DEFAULT_SPINE_ROOT = Path(__file__).resolve().parents[4]
+
+
+def resolve_spine_root() -> Path:
+    return Path(os.environ.get("SPINE_ROOT", DEFAULT_SPINE_ROOT)).expanduser().resolve()
+
+
+def fail(message: str) -> None:
+    raise RuntimeError(message)
+
+
+def run_cap_json(spine_root: Path, capability: str, args: list[str]) -> tuple[dict, str]:
+    cmd = [str(spine_root / "bin" / "ops"), "cap", "run", capability]
+    if args:
+        cmd.extend(["--", *args])
+    result = subprocess.run(cmd, cwd=spine_root, capture_output=True, text=True, check=False)
+    combined = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    if result.returncode != 0:
+        fail(f"{capability} failed: {combined.strip()}")
+    receipt = ""
+    for line in (result.stdout or "").splitlines():
+        if line.startswith("Receipt:"):
+            receipt = line.split(":", 1)[1].strip()
+    text = (result.stdout or "").strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        fail(f"{capability} returned non-JSON output")
+    return json.loads(text[start : end + 1]), receipt
+
+
+def status_note_from_printavo_state(state: str) -> str:
+    notes = {
+        "quote_live": "A live quote exists in the governed Printavo visibility surface.",
+        "paid": "The order shows as paid in the governed Printavo visibility surface.",
+        "approved": "The order shows as approved in the governed Printavo visibility surface.",
+        "in_production": "The order is in production in the governed Printavo visibility surface.",
+        "ready_for_pickup": "The order is marked ready for pickup in the governed Printavo visibility surface.",
+        "shipped": "The order is marked shipped in the governed Printavo visibility surface.",
+    }
+    return notes.get(state, "A governed status record was found.")
+
+
+def build_resolved_printavo_result(payload: dict, *, receipt: str = "", source: str = "mint.printavo.bridge.snapshot", customer_snapshot: dict | None = None) -> dict:
+    latest = dict(payload.get("latest") or {})
+    summary = dict(latest.get("printavo_summary") or {})
+    identity = dict(((customer_snapshot or {}).get("fresh_slate") or {}).get("identity") or {})
+    customer = dict(((customer_snapshot or {}).get("fresh_slate") or {}).get("customer") or {})
+    state = str(payload.get("state") or latest.get("printavo_state") or summary.get("printavo_state") or "")
+    return {
+        "resolved": True,
+        "source": source,
+        "state": state,
+        "order_id": latest.get("order_id"),
+        "quote_id": latest.get("quote_id"),
+        "seed_id": latest.get("seed_id"),
+        "customer_id": latest.get("customer_id") or customer.get("record_id"),
+        "customer_email": latest.get("customer_email") or identity.get("email") or customer.get("email"),
+        "customer_name": latest.get("customer_name") or identity.get("display_name") or customer.get("name"),
+        "printavo_state": latest.get("printavo_state") or summary.get("printavo_state"),
+        "printavo_visual_id": summary.get("printavo_visual_id"),
+        "status_note": status_note_from_printavo_state(state),
+        "receipts": {
+            "source_receipt": receipt or None,
+        },
+    }
+
+
+def lookup_by_identifier(
+    *,
+    order_id: str = "",
+    quote_id: str = "",
+    seed_id: str = "",
+    customer_id: str = "",
+    email: str = "",
+) -> dict:
+    """Lookup status from governed snapshot capabilities."""
+    spine_root = resolve_spine_root()
+
+    if order_id:
+        payload, receipt = run_cap_json(spine_root, "mint.printavo.bridge.snapshot", ["--json", "--order-id", order_id])
+        latest = payload.get("latest") or {}
+        if latest:
+            return build_resolved_printavo_result(payload, receipt=receipt)
+        return {
+            "resolved": False,
+            "source": "mint.printavo.bridge.snapshot",
+            "state": payload.get("state") or "no_record_found",
+            "message": "No reliable order status was found for that order ID.",
+            "receipts": {"source_receipt": receipt or None},
+        }
+
+    if quote_id:
+        payload, receipt = run_cap_json(spine_root, "mint.printavo.bridge.snapshot", ["--json", "--quote-id", quote_id])
+        latest = payload.get("latest") or {}
+        if latest:
+            return build_resolved_printavo_result(payload, receipt=receipt)
+        return {
+            "resolved": False,
+            "source": "mint.printavo.bridge.snapshot",
+            "state": payload.get("state") or "no_record_found",
+            "message": "No reliable order status was found for that quote ID.",
+            "receipts": {"source_receipt": receipt or None},
+        }
+
+    if seed_id:
+        payload, receipt = run_cap_json(spine_root, "mint.printavo.bridge.snapshot", ["--json", "--seed-id", seed_id])
+        latest = payload.get("latest") or {}
+        if latest:
+            return build_resolved_printavo_result(payload, receipt=receipt)
+        return {
+            "resolved": False,
+            "source": "mint.printavo.bridge.snapshot",
+            "state": payload.get("state") or "no_record_found",
+            "message": "No reliable order status was found for that seed ID.",
+            "receipts": {"source_receipt": receipt or None},
+        }
+
+    if customer_id or email:
+        args = ["--json"]
+        if customer_id:
+            args.extend(["--record-id", customer_id])
+        else:
+            args.extend(["--email", email.lower()])
+        customer_payload, customer_receipt = run_cap_json(spine_root, "mint.customer.record.snapshot", args)
+        printavo_payload = dict(customer_payload.get("printavo_visibility") or {})
+        latest = dict(printavo_payload.get("latest") or {})
+        if latest:
+            result = build_resolved_printavo_result(
+                printavo_payload,
+                receipt=(customer_payload.get("receipts") or {}).get("printavo_snapshot_receipt") or customer_receipt,
+                source="mint.customer.record.snapshot",
+                customer_snapshot=customer_payload,
+            )
+            result["receipts"]["customer_snapshot_receipt"] = customer_receipt or None
+            return result
+
+        identity = dict((customer_payload.get("fresh_slate") or {}).get("identity") or {})
+        customer = dict((customer_payload.get("fresh_slate") or {}).get("customer") or {})
+        return {
+            "resolved": False,
+            "source": "mint.customer.record.snapshot",
+            "state": (printavo_payload.get("state") or "no_record_found"),
+            "customer_id": customer.get("record_id"),
+            "customer_email": identity.get("email") or customer.get("email"),
+            "customer_name": identity.get("display_name") or customer.get("name"),
+            "message": "A customer record may exist, but no reliable order or quote status is available.",
+            "receipts": {
+                "customer_snapshot_receipt": customer_receipt or None,
+                "printavo_snapshot_receipt": (customer_payload.get("receipts") or {}).get("printavo_snapshot_receipt") or None,
+            },
+        }
+
+    return {"resolved": False, "message": "No identifier provided"}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Lookup order/quote status for voice agent")
+    parser.add_argument("--order-id", default="", help="Order ID")
+    parser.add_argument("--quote-id", default="", help="Quote ID")
+    parser.add_argument("--seed-id", default="", help="Seed ID")
+    parser.add_argument("--customer-id", default="", help="Customer ID")
+    parser.add_argument("--email", default="", help="Customer email")
+    parser.add_argument("--json", action="store_true", help="Output JSON envelope")
+
+    args = parser.parse_args()
+
+    # Require at least one identifier
+    if not any([args.order_id, args.quote_id, args.seed_id, args.customer_id, args.email]):
+        print("ERROR: At least one identifier required (--order-id, --quote-id, --seed-id, --customer-id, or --email)", file=sys.stderr)
+        return 1
+
+    try:
+        result = lookup_by_identifier(
+            order_id=args.order_id,
+            quote_id=args.quote_id,
+            seed_id=args.seed_id,
+            customer_id=args.customer_id,
+            email=args.email,
+        )
+
+        if args.json:
+            envelope = {
+                "capability": CAPABILITY_NAME,
+                "schema_version": SCHEMA_VERSION,
+                "status": "ok",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "data": result,
+            }
+            print(json.dumps(envelope, indent=2))
+        else:
+            if result["resolved"]:
+                print(f"✓ Found status:")
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"✗ Not found: {result['message']}")
+
+        return 0
+
+    except Exception as e:
+        if args.json:
+            envelope = {
+                "capability": CAPABILITY_NAME,
+                "schema_version": SCHEMA_VERSION,
+                "status": "error",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "error": str(e),
+            }
+            print(json.dumps(envelope, indent=2))
+        else:
+            print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

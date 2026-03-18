@@ -1,0 +1,618 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+from pathlib import Path
+from typing import Any
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_identity_common import resolve_message_customer_contact  # noqa: E402
+from customer_inbox_runtime_common import (  # noqa: E402
+    active_claim_for_claimant,
+    active_claim_for_message,
+    claim_context,
+    claim_message,
+    connect_queue_db,
+    load_startup_contract,
+    normalize_space,
+    queue_db_path,
+    release_claim_for_claimant,
+    release_stale_claims,
+)
+from customer_inbox_machine_common import (  # noqa: E402
+    default_workflow_state,
+    load_inbox_item_by_message_id,
+    load_machine_contract,
+    transition_inbox_item,
+)
+from customer_mailbox_history_common import history_message_mailbox, search_governed_mail_history  # noqa: E402
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    compact_utc,
+    iso_utc,
+    latest_customer_message_text,
+    message_body_text,
+    message_subject,
+    resolve_spine_root,
+    resolve_spine_state,
+    run_cap_capture,
+    utc_now,
+    write_json,
+)
+
+
+CAPABILITY_NAME = "mint.customer.inbox.first_email"
+DEFAULT_MAILBOX = "team@mintprints.com"
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-inbox-first-email",
+        description="Claim the oldest eligible customer inbox thread and return the compact Morpheus operator briefing.",
+    )
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox to read from (default: {DEFAULT_MAILBOX})")
+    parser.add_argument("--top", type=int, default=25, help="Maximum inbox threads to inspect")
+    parser.add_argument("--advance", action="store_true", help="Release this session's current queue claim before selecting the next oldest eligible email")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def load_reorder_module() -> Any:
+    path = SCRIPT_DIR / "customer-reorder-resolve"
+    loader = SourceFileLoader("mint_customer_reorder_resolve_first_email_mod", str(path))
+    spec = spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise SystemExit(f"could not load helper module: {path}")
+    module = module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def unwrap_message(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("id") and ("subject" in payload or "body" in payload):
+        return payload
+    data = payload.get("data")
+    if isinstance(data, dict) and data.get("id") and ("subject" in data or "body" in data):
+        return data
+    return payload
+
+
+def eligible_work_item(item: dict[str, Any], contract: dict[str, Any]) -> bool:
+    first_email = dict(contract.get("first_email") or {})
+    disposition = str(item.get("disposition") or "")
+    if not bool(item.get("primary_queue_visible")):
+        return False
+    excluded_dispositions = {str(value) for value in (first_email.get("excluded_dispositions") or [])}
+    if disposition and disposition in excluded_dispositions:
+        return False
+    eligible_dispositions = {str(value) for value in (first_email.get("eligible_dispositions") or []) if str(value)}
+    if eligible_dispositions:
+        return disposition in eligible_dispositions
+    work_type = str(item.get("work_type") or "")
+    if work_type in set(first_email.get("excluded_work_types") or []):
+        return False
+    if first_email.get("eligible_work_types"):
+        return work_type in set(first_email.get("eligible_work_types") or [])
+    return True
+
+
+def choose_selected_item(
+    work_items: list[dict[str, Any]],
+    contract: dict[str, Any],
+    active_claim: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if active_claim is not None:
+        for item in work_items:
+            if str(item.get("effective_message_id") or "") == str(active_claim.get("message_id") or ""):
+                return item
+    for item in work_items:
+        if eligible_work_item(item, contract):
+            return item
+    return None
+
+
+def extract_quantity(text: str, reorder_mod: Any) -> int | None:
+    breakdown = reorder_mod.extract_size_breakdown(text)
+    total = reorder_mod.size_breakdown_total(breakdown)
+    if total is not None:
+        return total
+    match = re.search(r"\b(\d{1,4})\b", text)
+    if match:
+        value = int(match.group(1))
+        if value > 1:
+            return value
+    return None
+
+
+def humanize_work_type(work_type: str) -> str:
+    return work_type.replace("_", " ").strip() or "unknown"
+
+
+def humanize_customer_state(snapshot: dict[str, Any], selected_item: dict[str, Any]) -> str:
+    agent_state = dict(snapshot.get("agent_state") or {})
+    state = str(agent_state.get("state") or "").strip()
+    if state.startswith("existing_customer_"):
+        return state.replace("existing_customer_", "existing customer / ").replace("_", " ")
+    if state == "seed_present_customer_unresolved":
+        return "seed present / customer unresolved"
+    if state == "no_record_found":
+        return "new customer / no governed record found yet"
+    customer_status = str(selected_item.get("customer_status") or "")
+    if customer_status == "existing":
+        return "existing customer"
+    if customer_status == "new":
+        return "new customer"
+    return customer_status.replace("_", " ") or "unknown"
+
+
+def humanize_next_step(step: str) -> str:
+    mapping = {
+        "hide_recoverable": "Hide recoverable spam/promotional mail.",
+        "route_supplier_marketing": "Move supplier marketing into the recoverable supplier-marketing folder.",
+        "route_art_intake": "Route artwork intake from the governed seed/artifact lane.",
+        "review_proof": "Review proof feedback and confirm the required change or approval.",
+        "route_vendor_revision": "Route vendor/internal revision follow-up outside the customer-first lane.",
+        "decline_unsupported_scope": "Reply with the governed unsupported-scope lane; do not create quote/customer truth.",
+        "wait_for_customer": "Do not create new governed customer truth until the customer sends the missing business detail.",
+        "human_review": "Review manually before any customer-facing action.",
+        "resolve_customer": "Resolve customer identity from governed records first.",
+        "trace_history": "Trace governed customer/job history before replying.",
+        "gather_supplier_inputs": "Collect product/style details before pricing or drafting.",
+        "gather_pricing_inputs": "Collect quantity/price inputs before quoting.",
+        "customer_clarification": "Ask the customer for the missing business inputs before drafting.",
+        "packetize_quote": "Packetize the request only after the intake is quote-ready.",
+    }
+    return mapping.get(step, step.replace("_", " ").capitalize())
+
+
+def build_missing(
+    *,
+    work_type: str,
+    text: str,
+    selected_item: dict[str, Any],
+    reorder_mod: Any,
+    message: dict[str, Any],
+) -> list[str]:
+    missing: list[str] = []
+    quantity = extract_quantity(text, reorder_mod)
+    due_date_present = reorder_mod.has_due_date(text)
+    style_code = normalize_space(reorder_mod.detect_style_code(text) or "")
+    product_family = normalize_space(reorder_mod.detect_product_family(text) or "")
+    asset_history_status = str(selected_item.get("asset_history_status") or "")
+
+    if work_type in {"quote_request", "reorder"}:
+        if not style_code and not product_family:
+            missing.append("product/style confirmation")
+        if quantity is None:
+            missing.append("final quantity")
+        if not due_date_present:
+            missing.append("due date")
+        if asset_history_status != "found":
+            if work_type == "reorder":
+                missing.append("prior job or seed-linked artwork reference")
+            else:
+                missing.append("print-ready artwork or prior approved artwork reference")
+    elif work_type == "art_delivery":
+        has_attachments = bool(message.get("hasAttachments"))
+        if not has_attachments and asset_history_status != "found":
+            missing.append("artwork attachment or governed artwork reference")
+    elif work_type == "proof_review":
+        lowered = text.lower()
+        if not any(token in lowered for token in ("approve", "approved", "looks good", "good to go", "change", "move", "adjust")):
+            missing.append("explicit proof approval or requested change")
+    elif work_type == "ambiguous":
+        missing.append("customer intent clarification")
+
+    if not missing and str(selected_item.get("next_business_step") or "") == "customer_clarification":
+        missing.append("one business clarification")
+    return missing
+
+
+def customer_label(snapshot: dict[str, Any], seed_payload: dict[str, Any] | None, selected_item: dict[str, Any], customer_email: str) -> str:
+    fresh = dict(snapshot.get("fresh_slate") or {})
+    identity = dict(fresh.get("identity") or {})
+    customer = dict(fresh.get("customer") or {})
+    parts = [
+        normalize_space(identity.get("display_name") or ""),
+        normalize_space(customer.get("company") or ""),
+    ]
+    if seed_payload:
+        parts.insert(0, normalize_space(seed_payload.get("customer_display_name") or ""))
+    clean = [part for part in parts if part]
+    if clean:
+        deduped: list[str] = []
+        for item in clean:
+            if item not in deduped:
+                deduped.append(item)
+        return " / ".join(deduped)
+    if normalize_space(selected_item.get("customer_summary") or ""):
+        return normalize_space(selected_item.get("customer_summary") or "")
+    return customer_email
+
+
+def seed_status_line(snapshot: dict[str, Any], seed_payload: dict[str, Any] | None) -> str:
+    latest_seed = dict(((snapshot.get("fresh_slate") or {}).get("latest_seed")) or {})
+    if seed_payload:
+        seed = dict(seed_payload.get("seed") or {})
+        action = normalize_space(seed_payload.get("action") or "")
+        return f"{action or 'ensured'} {seed.get('id') or ''}".strip()
+    if latest_seed:
+        return f"existing {latest_seed.get('seed_id') or latest_seed.get('id') or ''}".strip()
+    return "missing"
+
+
+def dedupe_ordered(values: list[str]) -> list[str]:
+    out: list[str] = []
+    for item in values:
+        cleaned = normalize_space(item)
+        if cleaned and cleaned not in out:
+            out.append(cleaned)
+    return out
+
+
+def summarize_history(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    mailboxes = dedupe_ordered([history_message_mailbox(item) for item in messages])
+    recent_messages: list[dict[str, Any]] = []
+    for item in messages[:3]:
+        recent_messages.append(
+            {
+                "message_id": normalize_space(item.get("id") or ""),
+                "source_mailbox": history_message_mailbox(item),
+                "history_lane": normalize_space(item.get("history_lane") or ""),
+                "received_utc": normalize_space(item.get("receivedDateTime") or ""),
+                "subject": normalize_space(item.get("subject") or ""),
+                "from": normalize_space((((item.get("from") or {}).get("emailAddress") or {}).get("address")) or ""),
+            }
+        )
+    return {
+        "count": len(messages),
+        "source_mailboxes": mailboxes,
+        "recent_messages": recent_messages,
+    }
+
+
+def build_operator_report(
+    *,
+    selected_item: dict[str, Any],
+    snapshot: dict[str, Any],
+    customer_email: str,
+    missing: list[str],
+    next_business_step: str,
+    history_summary: dict[str, Any],
+) -> dict[str, Any]:
+    agent_state = dict(snapshot.get("agent_state") or {})
+    fresh = dict(snapshot.get("fresh_slate") or {})
+    identity = dict(fresh.get("identity") or {})
+    customer = dict(fresh.get("customer") or {})
+    latest_seed = dict(fresh.get("latest_seed") or {})
+    selected_report = dict(selected_item.get("operator_report") or {})
+    linked_records = dict(selected_report.get("linked_records") or {})
+    linked_records["customer_snapshot"] = {
+        "agent_state": normalize_space(agent_state.get("state") or "") or None,
+        "latest_seed_id": normalize_space(latest_seed.get("seed_id") or latest_seed.get("id") or "") or None,
+        "customer_record_id": normalize_space(customer.get("record_id") or "") or None,
+    }
+    module_truth = dict(selected_report.get("module_truth") or {})
+    module_truth["record_lookup"] = {
+        "agent_state": normalize_space(agent_state.get("state") or "") or "unknown",
+        "customer_record_present": bool(customer),
+        "latest_seed_present": bool(latest_seed),
+    }
+    customer_identity = dict(selected_report.get("customer_identity") or {})
+    customer_identity.update(
+        {
+            "email": customer_email or customer_identity.get("email"),
+            "display_name": normalize_space(identity.get("display_name") or customer_identity.get("display_name") or ""),
+            "company": normalize_space(customer.get("company") or customer_identity.get("company") or ""),
+            "record_state": normalize_space(agent_state.get("state") or "") or "unknown",
+        }
+    )
+    return {
+        "disposition": normalize_space(selected_item.get("disposition") or ""),
+        "gate_status": normalize_space(selected_item.get("gate_status") or "hold"),
+        "confidence": normalize_space(selected_item.get("confidence") or "low"),
+        "message_anchor": selected_item.get("message_anchor") or {},
+        "customer_identity": customer_identity,
+        "linked_records": linked_records,
+        "invoked_modules": ["mint.customer.record.snapshot"],
+        "module_truth": module_truth,
+        "mailbox_history": history_summary,
+        "blockers": missing,
+        "recommended_next_action": next_business_step,
+        "draft_eligible": False,
+    }
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    now = utc_now()
+    first_email_id = f"MCIF-{compact_utc(now)}"
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    contract = load_startup_contract(spine_root)
+    machine_contract = load_machine_contract(spine_root)
+    context = claim_context()
+    reorder_mod = load_reorder_module()
+    first_email_cfg = dict(contract.get("first_email") or {})
+
+    work_items_args = ["--mailbox", args.mailbox, "--top", str(args.top), "--json"]
+    if str(first_email_cfg.get("work_items_mode") or "").strip() == "preview_only":
+        work_items_args.append("--preview-only")
+    work_items_payload, work_items_receipt = run_cap_capture(
+        spine_root,
+        str(first_email_cfg.get("work_items_capability") or ""),
+        work_items_args,
+    )
+    work_items = list(work_items_payload.get("work_items") or [])
+
+    queue_conn = connect_queue_db(queue_db_path(state_root, contract))
+    release_stale_claims(queue_conn, state_root)
+    current_claim = active_claim_for_claimant(
+        queue_conn,
+        session_id=context.get("session_id"),
+        claimant_id=str(context.get("claimant_id") or ""),
+    )
+    released_claim = None
+    if args.advance:
+        released_claim = release_claim_for_claimant(
+            queue_conn,
+            session_id=context.get("session_id"),
+            claimant_id=str(context.get("claimant_id") or ""),
+        )
+        current_claim = None
+        if released_claim is not None:
+            released_record = load_inbox_item_by_message_id(state_root, str(released_claim.get("message_id") or ""))
+            if released_record:
+                try:
+                    transition_inbox_item(
+                        state_root,
+                        contract=machine_contract,
+                        message_id=str(released_claim.get("message_id") or ""),
+                        new_state=default_workflow_state(str(released_record.get("disposition") or ""), machine_contract),
+                        note="queue claim advanced to next eligible item",
+                        actor=str(context.get("claimant_id") or CAPABILITY_NAME),
+                        queue_claim={},
+                    )
+                except SystemExit:
+                    pass
+
+    selected_item = choose_selected_item(work_items, contract, current_claim)
+    claim_status = "reused_existing_claim" if current_claim is not None else ("advanced_claim" if released_claim is not None else "claimed")
+    if selected_item is None:
+        raise SystemExit("no eligible customer/business inbox item available")
+
+    if current_claim is None:
+        claimed = claim_message(
+            queue_conn,
+            message_id=str(selected_item.get("effective_message_id") or ""),
+            thread_id=str(selected_item.get("thread_id") or ""),
+            work_type=str(selected_item.get("work_type") or ""),
+            customer_email=str(selected_item.get("from") or ""),
+            session_id=context.get("session_id"),
+            claimant_id=str(context.get("claimant_id") or ""),
+            terminal_role=context.get("terminal_role"),
+            owner_pid=int(context.get("owner_pid") or 0),
+        )
+        if not claimed:
+            for candidate in work_items:
+                if not eligible_work_item(candidate, contract):
+                    continue
+                if active_claim_for_message(queue_conn, str(candidate.get("effective_message_id") or "")) is not None:
+                    continue
+                claimed = claim_message(
+                    queue_conn,
+                    message_id=str(candidate.get("effective_message_id") or ""),
+                    thread_id=str(candidate.get("thread_id") or ""),
+                    work_type=str(candidate.get("work_type") or ""),
+                    customer_email=str(candidate.get("from") or ""),
+                    session_id=context.get("session_id"),
+                    claimant_id=str(context.get("claimant_id") or ""),
+                    terminal_role=context.get("terminal_role"),
+                    owner_pid=int(context.get("owner_pid") or 0),
+                )
+                if claimed:
+                    selected_item = candidate
+                    break
+        if not claimed:
+            raise SystemExit("all eligible inbox items are already claimed by other Morpheus sessions")
+    queue_claim_state = {
+        "message_id": str(selected_item.get("effective_message_id") or ""),
+        "thread_id": str(selected_item.get("thread_id") or ""),
+        "session_id": context.get("session_id"),
+        "claimant_id": str(context.get("claimant_id") or ""),
+        "terminal_role": context.get("terminal_role"),
+    }
+    try:
+        transition_inbox_item(
+            state_root,
+            contract=machine_contract,
+            message_id=str(selected_item.get("effective_message_id") or ""),
+            new_state="claimed",
+            note="claimed by first-email operator action",
+            actor=str(context.get("claimant_id") or CAPABILITY_NAME),
+            queue_claim=queue_claim_state,
+        )
+    except SystemExit:
+        pass
+
+    message_payload, message_receipt = run_cap_capture(
+        spine_root,
+        str(first_email_cfg.get("mailbox_get_capability") or ""),
+        ["--message-id", str(selected_item.get("effective_message_id") or ""), "--mailbox", args.mailbox],
+    )
+    message = unwrap_message(message_payload)
+    contact = resolve_message_customer_contact(message)
+    customer_email = normalize_space(contact.get("email") or selected_item.get("from") or "").lower()
+
+    snapshot_payload, snapshot_receipt = run_cap_capture(
+        spine_root,
+        str(first_email_cfg.get("record_lookup_capability") or ""),
+        ["--email", customer_email, "--json"],
+    )
+    snapshot = dict(snapshot_payload.get("data") or snapshot_payload)
+    latest_seed = dict(((snapshot.get("fresh_slate") or {}).get("latest_seed")) or {})
+
+    history_messages: list[dict[str, Any]] = []
+    history_receipts: list[str] = []
+    history_errors: list[str] = []
+    if customer_email:
+        history_messages, history_receipts, history_errors = search_governed_mail_history(
+            spine_root,
+            query=customer_email,
+            preferred_mailbox=args.mailbox,
+            top=int(first_email_cfg.get("history_query_top") or 5),
+            exclude_message_ids=[str(selected_item.get("effective_message_id") or "")],
+            exclude_internet_message_ids=[normalize_space(message.get("internetMessageId") or "")],
+        )
+    history_summary = summarize_history(history_messages)
+
+    seed_payload: dict[str, Any] | None = None
+    seed_receipt = ""
+    truth_allowed = bool(selected_item.get("customer_truth_allowed"))
+
+    ask = normalize_space(latest_customer_message_text(message) or selected_item.get("subject") or "")
+    text = "\n".join(part for part in (message_subject(message), message_body_text(message)) if normalize_space(part))
+    work_type = str(selected_item.get("work_type") or "")
+    missing = build_missing(
+        work_type=work_type,
+        text=text,
+        selected_item=selected_item,
+        reorder_mod=reorder_mod,
+        message=message,
+    )
+
+    confirmed_parts = [
+        f"disposition={str(selected_item.get('disposition') or '')}",
+        f"email type={humanize_work_type(work_type)}",
+        f"customer state={humanize_customer_state(snapshot, selected_item)}",
+        f"record lookup={normalize_space(((snapshot.get('agent_state') or {}).get('state')) or 'unknown')}",
+    ]
+    if not truth_allowed:
+        confirmed_parts.append("customer truth blocked for this disposition")
+    if normalize_space(selected_item.get("matched_prior_job") or ""):
+        confirmed_parts.append(f"prior job={normalize_space(selected_item.get('matched_prior_job') or '')}")
+    if int(history_summary.get("count") or 0) > 0:
+        mailbox_label = ", ".join(history_summary.get("source_mailboxes") or [])
+        confirmed_parts.append(
+            f"prior history={int(history_summary.get('count') or 0)} across {mailbox_label}"
+        )
+
+    seed_status = seed_status_line(snapshot, seed_payload)
+    if not truth_allowed and not latest_seed:
+        seed_status = f"blocked ({str(selected_item.get('disposition') or 'non_actionable')})"
+
+    operator_briefing = {
+        "Customer": customer_label(snapshot, seed_payload, selected_item, customer_email),
+        "Seed status": seed_status,
+        "Ask": ask,
+        "Confirmed": "; ".join(confirmed_parts),
+        "Missing": ", ".join(missing) if missing else "none",
+        "Next business step": humanize_next_step(str(selected_item.get("next_business_step") or "")),
+        "Draft now, or add more info first?": "Add more info first." if missing else "Draft now if a reply is needed; drafting remains explicit.",
+    }
+    operator_report = build_operator_report(
+        selected_item=selected_item,
+        snapshot=snapshot,
+        customer_email=customer_email,
+        missing=missing,
+        next_business_step=humanize_next_step(str(selected_item.get("next_business_step") or "")),
+        history_summary=history_summary,
+    )
+
+    record = {
+        "capability": CAPABILITY_NAME,
+        "generated_at": iso_utc(now),
+        "first_email_id": first_email_id,
+        "mailbox": args.mailbox,
+        "selection_order": str((contract.get("launch") or {}).get("selection_order") or ""),
+        "claim_status": claim_status,
+        "queue_claim": {
+            "session_id": context.get("session_id"),
+            "claimant_id": context.get("claimant_id"),
+            "message_id": str(selected_item.get("effective_message_id") or ""),
+            "thread_id": str(selected_item.get("thread_id") or ""),
+        },
+        "released_claim": released_claim,
+        "selected_item": selected_item,
+        "customer_email": customer_email,
+        "operator_report": operator_report,
+        "operator_briefing": operator_briefing,
+        "mailbox_history": history_summary,
+        "history_receipts": history_receipts,
+        "history_search_errors": history_errors,
+        "record_snapshot": {
+            "agent_state": snapshot.get("agent_state"),
+            "fresh_customer": ((snapshot.get("fresh_slate") or {}).get("customer")),
+            "latest_seed": ((snapshot.get("fresh_slate") or {}).get("latest_seed")),
+            "latest_legacy_order": ((snapshot.get("legacy_hold") or {}).get("latest_order")),
+        },
+        "seed_ensure": seed_payload or None,
+        "contract_path": contract["path"],
+        "receipts": {
+            "work_items_receipt": work_items_receipt or None,
+            "message_receipt": message_receipt or None,
+            "snapshot_receipt": snapshot_receipt or None,
+            "seed_ensure_receipt": seed_receipt or None,
+        },
+    }
+
+    records_dir = state_root / "mint" / "customer-inbox-first-email" / "records" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{first_email_id}.json"
+    index_file = state_root / "mint" / "customer-inbox-first-email" / "index.ndjson"
+    lock_file = state_root / "mint" / "customer-inbox-first-email" / ".index.lock"
+    write_json(record_file, record)
+    append_ndjson(
+        index_file,
+        lock_file,
+        {
+            "first_email_id": first_email_id,
+            "mailbox": args.mailbox,
+            "message_id": str(selected_item.get("effective_message_id") or ""),
+            "thread_id": str(selected_item.get("thread_id") or ""),
+            "session_id": context.get("session_id"),
+            "claimant_id": context.get("claimant_id"),
+            "stored_at_utc": iso_utc(now),
+        },
+    )
+
+    payload = {
+        "capability": CAPABILITY_NAME,
+        "generated_at": iso_utc(now),
+        "mailbox": args.mailbox,
+        "selection_order": str((contract.get("launch") or {}).get("selection_order") or ""),
+        "claim_status": claim_status,
+        "queue_claim": record["queue_claim"],
+        "released_claim": released_claim,
+        "operator_report": operator_report,
+        "operator_briefing": operator_briefing,
+        "selected_item": selected_item,
+        "record_file": str(record_file),
+        "index_file": str(index_file),
+        "receipts": record["receipts"],
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    lines = [CAPABILITY_NAME]
+    for label in (contract.get("briefing") or {}).get("fields") or []:
+        lines.append(f"{label}: {operator_briefing.get(label, '')}")
+    lines.append(f"Record: {record_file}")
+    print("\n".join(lines))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

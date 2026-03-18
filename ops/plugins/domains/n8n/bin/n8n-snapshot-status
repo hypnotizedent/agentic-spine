@@ -14,7 +14,7 @@ BACKUP_TARGET_NAME="${N8N_SNAPSHOT_BACKUP_TARGET:-app-n8n-workflows}"
 source "$SPINE_REPO/ops/lib/ssh-resolve.sh"
 
 SSH_USER="$(ssh_resolve_user automation-stack automation)"
-host_result="$(ssh_resolve_host_with_fallback automation-stack 2)" || true
+host_result="$(ssh_resolve_ssh_host_with_fallback automation-stack 2)" || true
 SSH_HOST="$(awk '{print $1}' <<<"$host_result")"
 PATH_USED="$(awk '{print $2}' <<<"$host_result")"
 [[ -n "$SSH_HOST" && "$PATH_USED" != "unreachable" ]] || {
@@ -23,7 +23,10 @@ PATH_USED="$(awk '{print $2}' <<<"$host_result")"
 }
 
 if command -v yq >/dev/null 2>&1 && [[ -f "$BACKUP_INVENTORY_FILE" ]]; then
-  BACKUP_DIR="$(yq -r ".targets[] | select(.name == \"$BACKUP_TARGET_NAME\") | .base_path" "$BACKUP_INVENTORY_FILE" | head -n1)"
+  BACKUP_TARGET_HOST="$(yq -r ".targets[] | select(.name == \"$BACKUP_TARGET_NAME\") | .host // \"\"" "$BACKUP_INVENTORY_FILE" | head -n1)"
+  if [[ "$BACKUP_TARGET_HOST" == "automation-stack" || "$BACKUP_TARGET_HOST" == "automation" || -z "$BACKUP_TARGET_HOST" ]]; then
+    BACKUP_DIR="$(yq -r ".targets[] | select(.name == \"$BACKUP_TARGET_NAME\") | .base_path" "$BACKUP_INVENTORY_FILE" | head -n1)"
+  fi
 fi
 
 if [[ -z "${BACKUP_DIR:-}" || "$BACKUP_DIR" == "null" ]]; then

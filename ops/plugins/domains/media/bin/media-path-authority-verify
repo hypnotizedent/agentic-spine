@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+# media.path.authority.verify — Runtime drift gate for the canonical media-home path tuples
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+CONTRACT="$ROOT/ops/bindings/media.path.authority.contract.yaml"
+VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
+SSH_RESOLVE="$ROOT/ops/lib/ssh-resolve.sh"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# shellcheck source=/dev/null
+source "$SSH_RESOLVE"
+
+usage() {
+  cat <<'USAGE'
+media.path.authority.verify — Runtime drift gate for the canonical media-home path tuples
+
+Args:
+  --service NAME    Limit verification to one service tuple
+  --json            Output JSON format
+
+Examples:
+  ./bin/ops cap run media.path.authority.verify
+  ./bin/ops cap run media.path.authority.verify -- --service radarr
+  ./bin/ops cap run media.path.authority.verify -- --json
+USAGE
+}
+
+SERVICE_FILTER=""
+OUTPUT_JSON=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --service) SERVICE_FILTER="${2:-}"; shift 2 ;;
+    --json) OUTPUT_JSON=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift ;;
+    *) echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "MISSING_DEP: python3" >&2; exit 2; }
+
+[[ -f "$CONTRACT" ]] || { echo "STOP: missing contract: $CONTRACT" >&2; exit 2; }
+
+resolve_ssh_ref() {
+  local vm="media-home"
+  local target user host resolved
+  target="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .hostname // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+  user="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+  [[ -n "$target" && "$target" != "null" ]] || return 1
+
+  host="$target"
+  if declare -F ssh_resolve_ssh_host_with_fallback >/dev/null 2>&1; then
+    resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 2>/dev/null || true)"
+    if [[ -n "$resolved" ]]; then
+      host="$(awk '{print $1}' <<<"$resolved")"
+    fi
+  fi
+
+  if [[ -n "$user" && "$user" != "null" ]]; then
+    printf '%s@%s\n' "$user" "$host"
+  else
+    printf '%s\n' "$host"
+  fi
+}
+
+SSH_REF="$(resolve_ssh_ref)"
+CONTRACT_B64="$(yq -o=json '.' "$CONTRACT" | base64 | tr -d '\n')"
+
+RESULT_JSON="$(
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$SSH_REF" \
+    sudo env EXPECTED_B64="$CONTRACT_B64" SERVICE_FILTER="$SERVICE_FILTER" GENERATED_AT="$GENERATED_AT" python3 - <<'PY'
+import base64
+import json
+import os
+import re
+import subprocess
+import urllib.request
+
+contract = json.loads(base64.b64decode(os.environ["EXPECTED_B64"]).decode("utf-8"))
+service_filter = os.environ.get("SERVICE_FILTER", "").strip()
+path_tuples = contract["path_tuples"]
+if service_filter:
+    path_tuples = {service_filter: path_tuples[service_filter]}
+
+def run(cmd):
+    return subprocess.check_output(cmd, text=True).strip()
+
+def inspect_mounts(container):
+    raw = run(["docker", "inspect", container])
+    data = json.loads(raw)[0]
+    mounts = []
+    for mount in data.get("Mounts", []):
+        mounts.append({
+            "source": mount.get("Source"),
+            "destination": mount.get("Destination"),
+            "rw": bool(mount.get("RW", True)),
+        })
+    return mounts
+
+def parse_expected_mounts(raw):
+    pairs = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        source, dest = [p.strip() for p in part.split("->", 1)]
+        dest = dest.replace(" (ro)", "").replace(" (rw)", "").strip()
+        pairs.append({"source": source, "destination": dest})
+    return pairs
+
+def read_xml_api_key(path_root):
+    for root, _dirs, files in os.walk(path_root):
+        for name in files:
+            if not name.endswith(".xml"):
+                continue
+            try:
+                text = open(os.path.join(root, name), encoding="utf-8", errors="ignore").read()
+            except OSError:
+                continue
+            match = re.search(r"<ApiKey>([^<]+)</ApiKey>", text)
+            if match:
+                return match.group(1)
+    raise RuntimeError(f"api key not found under {path_root}")
+
+def read_env_key(env_path, key):
+    with open(env_path, encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith(f"{key}="):
+                return line.strip().split("=", 1)[1]
+    raise RuntimeError(f"{key} missing from {env_path}")
+
+def api_json(url, headers):
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.load(response)
+
+def mount_topology():
+    try:
+      raw = run(["findmnt", "-no", "SOURCE,FSTYPE,OPTIONS", "/srv/media"])
+    except subprocess.CalledProcessError:
+      return {"pass": False, "detail": "findmnt-failed"}
+    source, fstype, options = (raw.split(" ", 2) + ["", "", ""])[:3]
+    expected = contract["nfs_mount_topology"]["media-home"]["nfs_source"]
+    return {
+        "pass": expected in raw and "rw" in options,
+        "source": source,
+        "fstype": fstype,
+        "options": options,
+        "expected_source": expected,
+    }
+
+def verify_downloads_complete_hygiene():
+    spec = contract.get("downloads_complete_hygiene", {})
+    root = spec.get("root", "/srv/media/downloads/complete")
+    allowed = set(spec.get("allowed_top_level", []))
+    ignored = set(spec.get("ignored_names", []))
+    actual = []
+    unexpected = []
+    for child in sorted(os.listdir(root)):
+        if child in ignored or child.startswith("."):
+            continue
+        actual.append(child)
+        if child not in allowed:
+            unexpected.append(child)
+    return {
+        "pass": len(unexpected) == 0,
+        "root": root,
+        "allowed": sorted(allowed),
+        "actual": actual,
+        "unexpected": unexpected,
+    }
+
+def verify_service(name, tuple_data):
+    mounts = inspect_mounts(tuple_data["container"])
+    actual_pairs = [{"source": item["source"], "destination": item["destination"]} for item in mounts]
+    expected_pairs = parse_expected_mounts(tuple_data["compose_mount"])
+    mount_missing = [pair for pair in expected_pairs if pair not in actual_pairs]
+    details = {
+        "mounts": {
+            "pass": len(mount_missing) == 0,
+            "missing": mount_missing,
+            "actual": actual_pairs,
+        }
+    }
+
+    app_pass = True
+    if name == "radarr":
+        key = read_xml_api_key("/srv/appdata/compose/media-write/volumes/radarr/config")
+        roots = api_json("http://127.0.0.1:7878/api/v3/rootfolder", {"X-Api-Key": key})
+        mappings = api_json("http://127.0.0.1:7878/api/v3/remotepathmapping", {"X-Api-Key": key})
+        actual_roots = [item.get("path", "") for item in roots]
+        actual_maps = [
+            {
+                "host": item.get("host", ""),
+                "remote": item.get("remotePath", ""),
+                "local": item.get("localPath", ""),
+            }
+            for item in mappings
+        ]
+        app_pass = tuple_data["app_root"] in actual_roots and actual_maps == []
+        details["app_paths"] = {
+            "pass": app_pass,
+            "actual_roots": actual_roots,
+            "actual_remote_path_mappings": actual_maps,
+        }
+    elif name == "sonarr":
+        key = read_xml_api_key("/srv/appdata/compose/media-write/volumes/sonarr/config")
+        roots = api_json("http://127.0.0.1:8989/api/v3/rootfolder", {"X-Api-Key": key})
+        mappings = api_json("http://127.0.0.1:8989/api/v3/remotepathmapping", {"X-Api-Key": key})
+        actual_roots = [item.get("path", "") for item in roots]
+        actual_maps = [
+            {
+                "host": item.get("host", ""),
+                "remote": item.get("remotePath", ""),
+                "local": item.get("localPath", ""),
+            }
+            for item in mappings
+        ]
+        app_pass = tuple_data["app_root"] in actual_roots and actual_maps == []
+        details["app_paths"] = {
+            "pass": app_pass,
+            "actual_roots": actual_roots,
+            "actual_remote_path_mappings": actual_maps,
+        }
+    elif name == "jellyfin":
+        token = read_env_key("/srv/appdata/compose/media-playback/.env", "JELLYFIN_API_TOKEN")
+        libraries = api_json("http://127.0.0.1:8096/Library/VirtualFolders", {"X-Emby-Token": token})
+        actual_paths = []
+        for library in libraries:
+            actual_paths.extend(library.get("Locations", []))
+        expected_paths = [item.strip() for item in tuple_data["library_path"].split(",") if item.strip()]
+        excluded_paths = tuple_data.get("excluded_library_paths", [])
+        app_pass = all(path in actual_paths for path in expected_paths) and all(path not in actual_paths for path in excluded_paths)
+        details["library_paths"] = {
+            "pass": app_pass,
+            "actual": actual_paths,
+            "expected": expected_paths,
+            "excluded": excluded_paths,
+        }
+
+    passed = details["mounts"]["pass"] and app_pass
+    return {"pass": passed, "details": details}
+
+services = {name: verify_service(name, data) for name, data in path_tuples.items()}
+topology = mount_topology()
+hygiene = verify_downloads_complete_hygiene()
+overall_pass = topology["pass"] and hygiene["pass"] and all(item["pass"] for item in services.values())
+
+print(json.dumps({
+    "contract": contract["contract"],
+    "generated_at": os.environ.get("GENERATED_AT"),
+    "status": "pass" if overall_pass else "fail",
+    "data": {
+        "canonical_vm": contract["runtime"]["canonical_vm"],
+        "mount_topology": topology,
+        "downloads_complete_hygiene": hygiene,
+        "services": services,
+    }
+}))
+PY
+)"
+
+if $OUTPUT_JSON; then
+  printf '%s\n' "$RESULT_JSON"
+else
+  echo "media.path.authority.verify"
+  echo "==========================="
+  echo "canonical-vm: $(jq -r '.data.canonical_vm' <<<"$RESULT_JSON")"
+  echo "mount-topology: $(jq -r '.data.mount_topology | if .pass then "PASS" else "FAIL" end' <<<"$RESULT_JSON")"
+  echo "downloads-complete-hygiene: $(jq -r '.data.downloads_complete_hygiene | if .pass then "PASS" else "FAIL" end' <<<"$RESULT_JSON")"
+  jq -r '.data.services | to_entries[] | "  " + .key + ": " + (if .value.pass then "PASS" else "FAIL" end)' <<<"$RESULT_JSON"
+fi
+
+if [[ "$(jq -r '.status' <<<"$RESULT_JSON")" != "pass" ]]; then
+  exit 1
+fi
+exit 0

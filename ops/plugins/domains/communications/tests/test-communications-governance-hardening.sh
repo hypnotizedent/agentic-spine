@@ -99,18 +99,18 @@ templates:
     message_type: payment_needed
     channel: email
     subject: "Payment needed for order {{order_number}}"
-    body_text: "Hi {{customer_name}}, balance {{balance_amount}} is due."
+    body_text: "{{customer_salutation}} balance {{balance_amount}} is due."
     required_variables:
-      - customer_name
+      - customer_salutation
       - order_number
       - balance_amount
   - id: payment-needed-sms
     message_type: payment_needed
     channel: sms
     subject: ""
-    body_text: "Hi {{customer_name}}! Balance due {{balance_amount}} for order {{order_number}}."
+    body_text: "{{customer_salutation}} Balance due {{balance_amount}} for order {{order_number}}."
     required_variables:
-      - customer_name
+      - customer_salutation
       - order_number
       - balance_amount
 YAML
@@ -148,7 +148,7 @@ export COMMUNICATIONS_TEMPLATES_CONTRACT="$templates"
 export COMMUNICATIONS_DELIVERY_CONTRACT="$delivery"
 export SPINE_OUTBOX="$tmp/outbox"
 
-vars='{"customer_name":"Test","order_number":"30020","balance_amount":"150.00"}'
+vars='{"customer_name":"Test","customer_salutation":"Hello,","order_number":"30020","balance_amount":"150.00"}'
 
 # Phase matrix: resend should be live in phase1, twilio remains simulation-only.
 email_preview="$($PREVIEW_BIN --channel email --message-type payment_needed --to test@example.com --consent-state opted-in --vars-json "$vars" --json)"

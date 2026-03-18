@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+RUNTIME_CONTRACT = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
+
+
+def load_yaml(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle)
+    return default if data is None else data
+
+
+def write_yaml(path: Path, payload: dict[str, Any]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(payload, handle, sort_keys=False)
+
+
+def resolve_runtime_paths() -> dict[str, Path]:
+    contract = load_yaml(RUNTIME_CONTRACT, {})
+    runtime_root = Path(os.environ.get("SPINE_RUNTIME_ROOT") or contract.get("runtime_root") or (ROOT / ".runtime/spine"))
+    state_root = Path(os.environ.get("SPINE_STATE") or contract.get("state_root") or (runtime_root / "state"))
+    return {
+        "state": state_root,
+        "queued": state_root / "agent-tasks/queued",
+        "running": state_root / "agent-tasks/running",
+        "done": state_root / "agent-tasks/done",
+        "failed": state_root / "agent-tasks/failed",
+    }
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_timestamp(value: str | None) -> dt.datetime | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def safe_reason(text: str, limit: int = 220) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def task_age_seconds(task: dict[str, Any], path: Path, now: dt.datetime) -> int:
+    for key in ("heartbeat_at", "claimed_at", "updated_at", "created_at"):
+        parsed = parse_timestamp(str(task.get(key, "")))
+        if parsed is not None:
+            return max(0, int((now - parsed).total_seconds()))
+    return max(0, int((now - dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)).total_seconds()))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Reconcile stale mailroom running tasks after crash/reboot")
+    parser.add_argument("--json", action="store_true", help="Emit JSON payload")
+    parser.add_argument("--dry-run", action="store_true", help="Report actions without mutating task files")
+    parser.add_argument("--stale-seconds", type=int, default=300, help="Age threshold for stale running tasks")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    runtime = resolve_runtime_paths()
+    for key in ("queued", "running", "done", "failed"):
+        runtime[key].mkdir(parents=True, exist_ok=True)
+
+    now_dt = dt.datetime.now(dt.timezone.utc)
+    now_text = now_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    actions: list[dict[str, Any]] = []
+    healthy = 0
+    requeued = 0
+    failed = 0
+
+    for path in sorted(runtime["running"].glob("*.yaml")):
+        task = load_yaml(path, {})
+        if not isinstance(task, dict):
+            continue
+        task_id = str(task.get("task_id") or path.stem)
+        claimed_by = str(task.get("claimed_by") or "").strip()
+        age_seconds = task_age_seconds(task, path, now_dt)
+        if age_seconds < max(1, args.stale_seconds):
+            healthy += 1
+            continue
+
+        action = {
+            "task_id": task_id,
+            "source_file": str(path),
+            "age_seconds": age_seconds,
+            "claimed_by": claimed_by or None,
+        }
+        if claimed_by:
+            action_type = "fail"
+            dest = runtime["failed"] / path.name
+            task["status"] = "failed"
+            task["failure_reason"] = f"stale_running_reconciled:claimed_by={claimed_by} age_seconds={age_seconds}"
+            task["failed_at"] = now_text
+            failed += 1
+        else:
+            action_type = "requeue"
+            dest = runtime["queued"] / path.name
+            task["status"] = "queued"
+            task["requeue_reason"] = "stale_running_reconciled:unclaimed"
+            requeued += 1
+            for key in ("claimed_by", "claimed_at", "heartbeat_at", "health_preflight", "progress"):
+                task.pop(key, None)
+
+        task["updated_at"] = now_text
+        task["reconciled_at"] = now_text
+        task["reconciled_from"] = "running"
+        task["reconciled_reason"] = safe_reason(f"{action_type}: age_seconds={age_seconds}")
+        action["action"] = action_type
+        action["dest_file"] = str(dest)
+        actions.append(action)
+
+        if not args.dry_run:
+            if dest.exists():
+                dest.unlink()
+            path.replace(dest)
+            write_yaml(dest, task)
+
+    payload = {
+        "capability": "mailroom.task.reconcile",
+        "schema_version": "1.0",
+        "status": "dry-run" if args.dry_run else "ok",
+        "generated_at": utc_now(),
+        "data": {
+            "running_dir": str(runtime["running"]),
+            "queued_dir": str(runtime["queued"]),
+            "failed_dir": str(runtime["failed"]),
+            "stale_seconds": max(1, args.stale_seconds),
+            "healthy": healthy,
+            "requeued": requeued,
+            "failed": failed,
+            "actions": actions,
+        },
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("mailroom.task.reconcile")
+        print(f"running_dir: {runtime['running']}")
+        print(f"stale_seconds: {max(1, args.stale_seconds)}")
+        print(f"healthy: {healthy}")
+        print(f"requeued: {requeued}")
+        print(f"failed: {failed}")
+        for action in actions:
+            print(
+                f"- {action['task_id']}: {action['action']} age_seconds={action['age_seconds']} "
+                f"dest={action['dest_file']}"
+            )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,7 +1,7 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-09
+last_verified: 2026-03-13
 scope: worker-usage-mint-dutchman-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -28,13 +28,17 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `mint.modules.health`
 - `mint.runtime.proof`
 
-## Gates (6)
+## Gates (10)
 - `D148`
 - `D225`
 - `D226`
 - `D235`
 - `D236`
 - `D260`
+- `D390`
+- `D391`
+- `D394`
+- `D395`
 
 ## Boundaries
 - Runtime surface is generated from registration and role contracts.

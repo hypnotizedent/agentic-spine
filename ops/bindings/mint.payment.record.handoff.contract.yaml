@@ -1,0 +1,49 @@
+# Mint Payment Record Handoff Contract
+# Status: authoritative
+# Last verified: 2026-03-12
+# Scope: payment-captured-to-record-visibility
+
+version: 1
+updated_at: "2026-03-12"
+owner: "@ronny"
+status: authoritative
+scope: payment-captured-to-record-visibility
+
+purpose: >
+  Define the boring governed path from payment captured (including manual
+  operator confirmation) into canonical Mint order truth so Fin and Morpheus
+  read the same payment visibility without relying on chat memory.
+
+canonical_path:
+  - payment captured or confirmed
+  - persist immutable payment_capture record (manual operator path) or read canonical payment module record
+  - project visibility into canonical order.payment_state + order.payment_summary
+  - read via mint.payment.record.snapshot
+  - surface customer-lane visibility via mint.customer.record.snapshot
+
+canonical_answers:
+  first_record_written: >
+    Immutable payment_capture record for manual operator capture. This preserves
+    receipts and provenance before mutable order truth is updated.
+  mutable_truth_record: >
+    Canonical order entity remains the first-class mutable read surface through
+    order.payment_state and order.payment_summary.
+  manual_payment_capture_representation: >
+    source_kind=manual_operator_capture, record_kind=payment_capture, with
+    payment_capture_id, amount_cents, currency, captured_at, captured_by,
+    reference, and optional note.
+  finance_read_surface: >
+    Fin reads mint.payment.record.snapshot for fast governed payment visibility.
+  customer_lane_read_surface: >
+    Morpheus and other customer-lane agents consume the same truth through
+    mint.customer.record.snapshot.payment_visibility.
+
+visibility_states:
+  - not_yet_visible
+  - confirmed_in_records
+  - capture_recorded_projection_pending
+
+forbidden_shortcuts:
+  - chat memory as payment truth
+  - unstructured operator notes as the only payment record
+  - separate finance-only payment truth that customer-lane agents cannot read

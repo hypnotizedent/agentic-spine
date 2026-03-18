@@ -1,0 +1,73 @@
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-17
+scope: mint-customer-mail-identity-projection
+
+version: "1.0"
+updated_at: "2026-03-17"
+
+purpose: >
+  Define the canonical customer-facing identity projection for Mint mail so
+  account labels, human contact names, and greeting tokens stay separate and
+  propagate unchanged across intake, packet normalization, reply drafting,
+  quote render, and transactional send.
+
+applies_to:
+  packet_customer_ref:
+    path: quote_packet.customer_ref
+  customer_reply_draft_record:
+    path: mint.customer.reply.draft record payload
+  send_template_vars:
+    path: mint.quote.send -> communications.send.preview vars
+
+schema:
+  required_fields:
+    resolved_name:
+      description: Canonical account/company label or governed record label.
+    resolved_email:
+      description: Canonical customer email for the active thread or send lane.
+    mail_salutation_mode:
+      allowed_values:
+        - named
+        - neutral
+      description: >
+        named = use greeting_name in customer-facing salutations.
+        neutral = render a neutral salutation and do not guess from aliases.
+  optional_fields:
+    contact_name:
+      description: Full human contact name for the active thread when known.
+    greeting_name:
+      description: Salutation token for customer-facing mail when named mode is allowed.
+
+invariants:
+  - resolved_name must never be used as a salutation source.
+  - named mode requires both contact_name and greeting_name.
+  - neutral mode is the only allowed fallback when no governed human greeting exists.
+  - once packetized, resolved_name/contact_name/greeting_name/mail_salutation_mode become carried truth for downstream mail surfaces.
+
+rendering:
+  named_defaults:
+    email_prefix: Hi
+    reply_prefix: Greetings
+  neutral_defaults:
+    email_salutation: "Hello,"
+    sms_salutation: "Hello,"
+  repair_policy:
+    neutral_requires_repair_item: true
+    neutral_issue_type: customer_mail_identity_neutral_fallback
+
+validator:
+  fail_closed: true
+  invalid_reasons:
+    - mail_salutation_mode_missing_or_invalid
+    - resolved_name_missing
+    - resolved_email_missing
+    - named_mode_missing_contact_name
+    - named_mode_missing_greeting_name
+    - resolved_name_used_as_greeting_name
+
+references:
+  - ops/bindings/mint.customer.identity.contract.yaml
+  - ops/bindings/mint.customer.reply.draft.policy.contract.yaml
+  - ops/bindings/mint.quote.packet.authority.yaml
+  - ops/bindings/communications.templates.catalog.yaml

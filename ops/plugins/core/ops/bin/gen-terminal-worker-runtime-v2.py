@@ -11,6 +11,7 @@ Outputs:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -21,16 +22,16 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[5]
 
-AGENTS_REGISTRY = ROOT / "ops/bindings/agents.registry.yaml"
-TERMINAL_ROLE_CONTRACT = ROOT / "ops/bindings/terminal.role.contract.yaml"
-GATE_DOMAIN_PROFILES = ROOT / "ops/bindings/gate.domain.profiles.yaml"
-GATE_AGENT_PROFILES = ROOT / "ops/bindings/gate.agent.profiles.yaml"
-CAPABILITIES_REGISTRY = ROOT / "ops/capabilities.yaml"
+AGENTS_REGISTRY = Path(os.environ.get("SPINE_AGENTS_REGISTRY", ROOT / "ops/bindings/agents.registry.yaml"))
+TERMINAL_ROLE_CONTRACT = Path(os.environ.get("SPINE_TERMINAL_ROLE_CONTRACT", ROOT / "ops/bindings/terminal.role.contract.yaml"))
+GATE_DOMAIN_PROFILES = Path(os.environ.get("SPINE_GATE_DOMAIN_PROFILES", ROOT / "ops/bindings/gate.domain.profiles.yaml"))
+GATE_AGENT_PROFILES = Path(os.environ.get("SPINE_GATE_AGENT_PROFILES", ROOT / "ops/bindings/gate.agent.profiles.yaml"))
+CAPABILITIES_REGISTRY = Path(os.environ.get("SPINE_CAPABILITIES_REGISTRY", ROOT / "ops/capabilities.yaml"))
 
-WORKER_CATALOG_OUT = ROOT / "ops/bindings/terminal.worker.catalog.yaml"
-ROUTING_DISPATCH_OUT = ROOT / "ops/bindings/routing.dispatch.yaml"
-LAUNCHER_VIEW_OUT = ROOT / "ops/bindings/terminal.launcher.view.yaml"
-WORKER_USAGE_DIR = ROOT / "docs/reference/generated/worker-usage"
+WORKER_CATALOG_OUT = Path(os.environ.get("SPINE_WORKER_CATALOG_OUT", ROOT / "ops/bindings/terminal.worker.catalog.yaml"))
+ROUTING_DISPATCH_OUT = Path(os.environ.get("SPINE_ROUTING_DISPATCH_OUT", ROOT / "ops/bindings/routing.dispatch.yaml"))
+LAUNCHER_VIEW_OUT = Path(os.environ.get("SPINE_TERMINAL_LAUNCHER_VIEW_OUT", ROOT / "ops/bindings/terminal.launcher.view.yaml"))
+WORKER_USAGE_DIR = Path(os.environ.get("SPINE_WORKER_USAGE_DIR", ROOT / "docs/reference/generated/worker-usage"))
 
 GENERATOR_ID = "ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py"
 

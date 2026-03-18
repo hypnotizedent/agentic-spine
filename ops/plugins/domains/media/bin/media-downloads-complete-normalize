@@ -1,0 +1,439 @@
+#!/usr/bin/env bash
+# media-downloads-complete-normalize — normalize legacy loose entries under /downloads/complete
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
+HOME_TARGET_BINDING="$ROOT/ops/bindings/home.media.target.contract.yaml"
+SSH_RESOLVE="$ROOT/ops/lib/ssh-resolve.sh"
+INFISICAL_AGENT="$ROOT/ops/plugins/providers/bin/infisical-agent.sh"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# shellcheck source=/dev/null
+source "$SSH_RESOLVE"
+
+usage() {
+  cat <<'USAGE'
+media-downloads-complete-normalize — normalize legacy loose entries under /downloads/complete
+
+Args:
+  --execute        Apply moves on Synology and rescan from media-home
+  --limit N        Limit number of loose entries processed
+  --json           Output JSON
+
+Examples:
+  ./ops/plugins/domains/media/bin/media-downloads-complete-normalize
+  ./ops/plugins/domains/media/bin/media-downloads-complete-normalize --execute
+  ./ops/plugins/domains/media/bin/media-downloads-complete-normalize --execute --limit 25 --json
+USAGE
+}
+
+EXECUTE=false
+OUTPUT_JSON=false
+LIMIT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --execute) EXECUTE=true; shift ;;
+    --limit) LIMIT="${2:-0}"; shift 2 ;;
+    --json) OUTPUT_JSON=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift ;;
+    *) echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo "FAIL: --limit must be numeric" >&2; exit 1; }
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+[[ -x "$INFISICAL_AGENT" ]] || { echo "MISSING_DEP: infisical-agent.sh" >&2; exit 2; }
+
+resolve_media_home_ssh_ref() {
+  local vm="media-home"
+  local target user host resolved
+  target="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .hostname // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+  user="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+  [[ -n "$target" && "$target" != "null" ]] || return 1
+
+  host="$target"
+  if declare -F ssh_resolve_ssh_host_with_fallback >/dev/null 2>&1; then
+    resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 2>/dev/null || true)"
+    if [[ -n "$resolved" ]]; then
+      host="$(awk '{print $1}' <<<"$resolved")"
+    fi
+  fi
+
+  if [[ -n "$user" && "$user" != "null" ]]; then
+    printf '%s@%s\n' "$user" "$host"
+  else
+    printf '%s\n' "$host"
+  fi
+}
+
+resolve_synology_ssh_ref() {
+  local nas_host nas_user
+  nas_host="$(yq -r '.target_topology.nas.hostname // ""' "$HOME_TARGET_BINDING" 2>/dev/null || true)"
+  nas_user="$("$INFISICAL_AGENT" get infrastructure prod SYNOLOGY_SSH_USER 2>/dev/null || true)"
+  [[ -n "$nas_host" && "$nas_host" != "null" ]] || return 1
+  if [[ -n "$nas_user" ]]; then
+    printf '%s@%s\n' "$nas_user" "$nas_host"
+  else
+    printf '%s\n' "$nas_host"
+  fi
+}
+
+execute_synology_move_batch() {
+  local classification_json="$1"
+  local syno_ref syno_pw share_root item_count
+  syno_ref="$(resolve_synology_ssh_ref)"
+  share_root="$(yq -r '.synology_share_layout.runtime_share.synology_path // ""' "$HOME_TARGET_BINDING" 2>/dev/null || true)"
+  syno_pw="$("$INFISICAL_AGENT" get infrastructure prod SYNOLOGY_SSH_PASSWORD)"
+
+  [[ -n "$share_root" && "$share_root" != "null" ]] || {
+    echo "FAIL: missing synology share root in $HOME_TARGET_BINDING" >&2
+    return 1
+  }
+
+  item_count="$(jq '[.data.items[] | select(.classification != "unknown")] | length' <<<"$classification_json")"
+  if [[ "$item_count" == "0" ]]; then
+    return 0
+  fi
+
+  {
+    echo "set -euo pipefail"
+    printf 'mkdir -p %q %q %q\n' \
+      "$share_root/downloads/complete/movies" \
+      "$share_root/downloads/complete/tv" \
+      "$share_root/downloads/complete/music"
+    printf 'chown admin:users %q %q %q\n' \
+      "$share_root/downloads/complete/movies" \
+      "$share_root/downloads/complete/tv" \
+      "$share_root/downloads/complete/music"
+    printf 'chmod 775 %q %q %q\n' \
+      "$share_root/downloads/complete/movies" \
+      "$share_root/downloads/complete/tv" \
+      "$share_root/downloads/complete/music"
+    while IFS= read -r item_b64; do
+      local item_json source_share destination_share
+      item_json="$(printf '%s' "$item_b64" | base64 --decode)"
+      source_share="$(jq -r '.source_share_path' <<<"$item_json")"
+      destination_share="$(jq -r '.destination_share_path' <<<"$item_json")"
+      printf 'if [[ -e %q && ! -e %q ]]; then mv -n %q %q; fi\n' \
+        "$source_share" \
+        "$destination_share" \
+        "$source_share" \
+        "$destination_share"
+    done < <(jq -r '.data.items[] | select(.classification != "unknown") | @base64' <<<"$classification_json")
+  } | {
+    printf '%s\n' "$syno_pw"
+    cat
+  } | ssh -o BatchMode=yes -o ConnectTimeout=10 "$syno_ref" 'sudo -S -p "" bash -s'
+}
+
+collect_scan_json() {
+  local ssh_ref share_root
+  ssh_ref="$(resolve_media_home_ssh_ref)"
+  share_root="$(yq -r '.synology_share_layout.runtime_share.synology_path // ""' "$HOME_TARGET_BINDING" 2>/dev/null || true)"
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" \
+    sudo env LIMIT="$LIMIT" GENERATED_AT="$GENERATED_AT" SHARE_ROOT="$share_root" python3 - <<'PY'
+import json
+import os
+import re
+import socket
+import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+BASE = Path("/srv/media/downloads/complete")
+MEDIA_ROOT = Path("/srv/media")
+SHARE_ROOT = Path(os.environ["SHARE_ROOT"])
+ALLOWED = {"movies", "tv", "music"}
+LIMIT = int(os.environ.get("LIMIT", "0"))
+
+AUDIO_EXTS = {
+    ".aac", ".aif", ".aiff", ".alac", ".ape", ".dsf", ".flac", ".m4a",
+    ".m4b", ".mka", ".mp3", ".ogg", ".opus", ".wav", ".wma",
+}
+VIDEO_EXTS = {
+    ".avi", ".iso", ".m2ts", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg",
+    ".mpg", ".mts", ".ts", ".wmv",
+}
+IGNORED_NAMES = {".DS_Store", "@eaDir"}
+TV_PATTERNS = [
+    re.compile(r"(?i)\bS\d{1,2}E\d{1,2}\b"),
+    re.compile(r"(?i)\b\d{1,2}x\d{1,2}\b"),
+    re.compile(r"(?i)\bSeason[ ._-]?\d+\b"),
+    re.compile(r"(?i)\bEpisode[ ._-]?\d+\b"),
+]
+MOVIEISH_PATTERNS = [
+    re.compile(r"(?i)\b(480p|576p|720p|1080p|2160p|4k)\b"),
+    re.compile(r"(?i)\b(blu[ -]?ray|bdrip|brrip|dvdrip|webrip|web[ ._-]?dl|hdrip|remux)\b"),
+    re.compile(r"(?i)\b(x26[45]|h\.?26[45]|hevc|av1|ddp[257]\.?\d?|aac)\b"),
+    re.compile(r"\b(19|20)\d{2}\b"),
+]
+MUSICISH_PATTERNS = [
+    re.compile(r"(?i)\b(flac|mp3|alac|lossless|vinyl[ ._-]?rip|soundtrack|ost)\b"),
+]
+
+def run(cmd):
+    return subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+def to_share_path(path: Path):
+    return str(SHARE_ROOT / path.relative_to(MEDIA_ROOT))
+
+def read_xml_api_key(path_root: str):
+    for root, _dirs, files in os.walk(path_root):
+        for name in files:
+            if not name.endswith(".xml"):
+                continue
+            try:
+                text = Path(root, name).read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            match = re.search(r"<ApiKey>([^<]+)</ApiKey>", text)
+            if match:
+                return match.group(1)
+    return None
+
+RADARR_KEY = read_xml_api_key("/srv/appdata/compose/media-write/volumes/radarr/config")
+SONARR_KEY = read_xml_api_key("/srv/appdata/compose/media-write/volumes/sonarr/config")
+
+def api_json(url: str, headers: dict):
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.load(resp)
+
+def sonarr_manualimport(container_folder: str):
+    if not SONARR_KEY:
+        return [], "api_key_missing"
+    params = urllib.parse.urlencode({"folder": container_folder})
+    try:
+        return api_json(f"http://127.0.0.1:8989/api/v3/manualimport?{params}", {"X-Api-Key": SONARR_KEY}), None
+    except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+        return [], f"sonarr_manualimport_failed: {exc.__class__.__name__}"
+
+def radarr_manualimport(container_folder: str):
+    if not RADARR_KEY:
+        return [], "api_key_missing"
+    params = urllib.parse.urlencode({"folder": container_folder})
+    try:
+        return api_json(f"http://127.0.0.1:7878/api/v3/manualimport?{params}", {"X-Api-Key": RADARR_KEY}), None
+    except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+        return [], f"radarr_manualimport_failed: {exc.__class__.__name__}"
+
+def file_inventory(path: Path):
+    if path.is_file():
+        files = [path]
+    else:
+        files = [p for p in path.rglob("*") if p.is_file()]
+    audio = 0
+    video = 0
+    sample_names = []
+    tv_hint = False
+    for index, item in enumerate(files):
+        if index < 8:
+            sample_names.append(item.name)
+        lower = item.name.lower()
+        ext = item.suffix.lower()
+        if ext in AUDIO_EXTS:
+            audio += 1
+        elif ext in VIDEO_EXTS:
+            video += 1
+        if any(pattern.search(item.name) for pattern in TV_PATTERNS):
+            tv_hint = True
+        if "/sample/" in lower or lower.endswith("/sample"):
+            tv_hint = tv_hint or False
+    if any(pattern.search(path.name) for pattern in TV_PATTERNS):
+        tv_hint = True
+    return {
+        "audio_files": audio,
+        "video_files": video,
+        "tv_hint": tv_hint,
+        "sample_names": sample_names,
+    }
+
+def summarize_candidates(items, kind):
+    out = []
+    for item in items[:3]:
+        if kind == "tv":
+            series = item.get("series") or {}
+            out.append({
+                "id": series.get("id") or item.get("seriesId"),
+                "title": series.get("title"),
+                "rejections": [r.get("reason") if isinstance(r, dict) else r for r in item.get("rejections", [])],
+            })
+        else:
+            movie = item.get("movie") or {}
+            out.append({
+                "id": movie.get("id") or item.get("movieId"),
+                "title": movie.get("title"),
+                "rejections": [r.get("reason") if isinstance(r, dict) else r for r in item.get("rejections", [])],
+            })
+    return out
+
+def classify(entry: Path):
+    if entry.name in ALLOWED or entry.name in IGNORED_NAMES or entry.name.startswith("."):
+        return None
+
+    inv = file_inventory(entry)
+    container_path = f"/downloads/complete/{entry.name}"
+    normalized_name = re.sub(r"^_(UNPACK|FAILED)_+", "", entry.name, flags=re.IGNORECASE)
+    classification = {
+        "source_name": entry.name,
+        "source_type": "directory" if entry.is_dir() else "file",
+        "source_path": str(entry),
+        "container_source_path": container_path,
+        "audio_files": inv["audio_files"],
+        "video_files": inv["video_files"],
+        "tv_hint": inv["tv_hint"],
+        "sample_names": inv["sample_names"],
+        "classification": "unknown",
+        "reason": "unclassified",
+        "destination_container_path": None,
+        "candidate_summary": {},
+    }
+
+    if inv["audio_files"] > 0 and inv["video_files"] == 0:
+        classification["classification"] = "music"
+        classification["reason"] = "audio-only payload"
+    elif any(pattern.search(normalized_name) for pattern in MUSICISH_PATTERNS):
+        classification["classification"] = "music"
+        classification["reason"] = "music payload heuristic"
+    elif inv["tv_hint"]:
+        classification["classification"] = "tv"
+        classification["reason"] = "tv filename pattern"
+    elif inv["video_files"] > 0 or any(pattern.search(normalized_name) for pattern in MOVIEISH_PATTERNS):
+        classification["classification"] = "movies"
+        classification["reason"] = "movie payload heuristic"
+    elif entry.is_dir():
+        sonarr_items, sonarr_error = sonarr_manualimport(container_path)
+        if sonarr_error:
+            classification["candidate_summary"]["sonarr_error"] = sonarr_error
+        if sonarr_items:
+            classification["candidate_summary"]["sonarr"] = summarize_candidates(sonarr_items, "tv")
+            if any(not item.get("rejections") for item in sonarr_items):
+                classification["classification"] = "tv"
+                classification["reason"] = "sonarr manualimport candidate"
+        if classification["classification"] == "unknown":
+            radarr_items, radarr_error = radarr_manualimport(container_path)
+            if radarr_error:
+                classification["candidate_summary"]["radarr_error"] = radarr_error
+            if radarr_items:
+                classification["candidate_summary"]["radarr"] = summarize_candidates(radarr_items, "movies")
+                if any(not item.get("rejections") for item in radarr_items):
+                    classification["classification"] = "movies"
+                    classification["reason"] = "radarr manualimport candidate"
+
+    if classification["classification"] == "unknown":
+        if entry.is_file() and entry.suffix.lower() in AUDIO_EXTS:
+            classification["classification"] = "music"
+            classification["reason"] = "audio file default"
+
+    if classification["classification"] != "unknown":
+        classification["destination_container_path"] = f"/downloads/complete/{classification['classification']}/{entry.name}"
+        destination_host = BASE / classification["classification"] / classification["source_name"]
+        classification["destination_host_path"] = str(destination_host)
+        classification["source_share_path"] = to_share_path(Path(classification["source_path"]))
+        classification["destination_share_path"] = to_share_path(destination_host)
+        classification["destination_exists_before"] = destination_host.exists()
+    return classification
+
+entries = [p for p in sorted(BASE.iterdir(), key=lambda p: p.name.lower()) if p.name not in ALLOWED]
+if LIMIT > 0:
+    entries = entries[:LIMIT]
+
+classified = []
+for entry in entries:
+    record = classify(entry)
+    if record is None:
+        continue
+    classified.append(record)
+
+remaining_loose = []
+for child in sorted(BASE.iterdir(), key=lambda p: p.name.lower()):
+    if child.name in ALLOWED or child.name in IGNORED_NAMES or child.name.startswith("."):
+        continue
+    remaining_loose.append(child.name)
+
+summary = {
+    "capability": "media.downloads.complete.normalize",
+    "generated_at": os.environ.get("GENERATED_AT"),
+    "status": "pass" if not remaining_loose else "warn",
+    "data": {
+        "execute": False,
+        "base_path": str(BASE),
+        "allowed_top_level": sorted(ALLOWED),
+        "processed": len(classified),
+        "moved": 0,
+        "by_classification": {
+            "movies": sum(1 for item in classified if item["classification"] == "movies"),
+            "tv": sum(1 for item in classified if item["classification"] == "tv"),
+            "music": sum(1 for item in classified if item["classification"] == "music"),
+            "unknown": sum(1 for item in classified if item["classification"] == "unknown"),
+        },
+        "remaining_loose": remaining_loose,
+        "items": classified,
+    },
+}
+
+print(json.dumps(summary))
+PY
+}
+
+RESULT_JSON="$(collect_scan_json)"
+if $EXECUTE; then
+  PRE_EXECUTE_JSON="$RESULT_JSON"
+  execute_synology_move_batch "$PRE_EXECUTE_JSON"
+  RESULT_JSON="$(collect_scan_json)"
+  PRE_PROCESSED="$(jq -r '.data.processed' <<<"$PRE_EXECUTE_JSON")"
+  PRE_REMAINING_COUNT="$(jq -r '.data.remaining_loose | length' <<<"$PRE_EXECUTE_JSON")"
+  PRE_MOVIES="$(jq -r '.data.by_classification.movies' <<<"$PRE_EXECUTE_JSON")"
+  PRE_TV="$(jq -r '.data.by_classification.tv' <<<"$PRE_EXECUTE_JSON")"
+  PRE_MUSIC="$(jq -r '.data.by_classification.music' <<<"$PRE_EXECUTE_JSON")"
+  PRE_UNKNOWN="$(jq -r '.data.by_classification.unknown' <<<"$PRE_EXECUTE_JSON")"
+  RESULT_JSON="$(
+    jq \
+      --argjson pre_processed "$PRE_PROCESSED" \
+      --argjson pre_remaining_count "$PRE_REMAINING_COUNT" \
+      --argjson pre_movies "$PRE_MOVIES" \
+      --argjson pre_tv "$PRE_TV" \
+      --argjson pre_music "$PRE_MUSIC" \
+      --argjson pre_unknown "$PRE_UNKNOWN" \
+      '.data.execute = true
+       | .data.moved = ($pre_remaining_count - (.data.remaining_loose | length))
+       | .data.pre_execute = {
+           processed: $pre_processed,
+           by_classification: {
+             movies: $pre_movies,
+             tv: $pre_tv,
+             music: $pre_music,
+             unknown: $pre_unknown
+           },
+           remaining_loose_count: $pre_remaining_count
+         }' <<<"$RESULT_JSON"
+  )"
+fi
+
+if $OUTPUT_JSON; then
+  printf '%s\n' "$RESULT_JSON"
+else
+  echo "media.downloads.complete.normalize"
+  echo "================================="
+  echo "execute: $(jq -r '.data.execute' <<<"$RESULT_JSON")"
+  echo "processed: $(jq -r '.data.processed' <<<"$RESULT_JSON")"
+  echo "moved: $(jq -r '.data.moved' <<<"$RESULT_JSON")"
+  echo "movies: $(jq -r '.data.by_classification.movies' <<<"$RESULT_JSON")"
+  echo "tv: $(jq -r '.data.by_classification.tv' <<<"$RESULT_JSON")"
+  echo "music: $(jq -r '.data.by_classification.music' <<<"$RESULT_JSON")"
+  echo "unknown: $(jq -r '.data.by_classification.unknown' <<<"$RESULT_JSON")"
+  if [[ "$(jq -r '.data.remaining_loose | length' <<<"$RESULT_JSON")" != "0" ]]; then
+    echo "remaining-loose:"
+    jq -r '.data.remaining_loose[] | "  - " + .' <<<"$RESULT_JSON"
+  fi
+fi
+
+exit 0

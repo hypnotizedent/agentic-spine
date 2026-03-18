@@ -10,6 +10,8 @@ TOOL=""
 TERMINAL_NAME=""
 FORCE=0
 DRY_RUN=0
+HANDOFF_ID="${SPINE_DISPATCH_HANDOFF_ID:-}"
+HANDOFF_FILE="${SPINE_DISPATCH_HANDOFF_FILE:-}"
 ORCH_MODE="${SPINE_HOTKEY_ORCH_MODE:-capability}"
 ALLOW_FALLBACK="${SPINE_HOTKEY_ALLOW_FALLBACK:-0}"
 
@@ -46,6 +48,8 @@ Options:
   --lane <D|E|F|G>         Required for --role worker
   --terminal-name <name>   Canonical terminal name (for example SPINE-CONTROL-01)
   --terminal <name>        Alias for --terminal-name
+  --handoff-id <id>        Optional dispatched handoff identifier to accept before tool launch
+  --handoff-file <path>    Optional dispatched handoff file path to accept before tool launch
   --force                  Override an existing launcher lock claim for the same lane
   --dry-run                Resolve session, env, cwd, and command without exec
   --print-launch-plan      Alias for --dry-run
@@ -123,10 +127,16 @@ emit_launch_plan() {
   echo "spine_worktree=${SPINE_WORKTREE:-$SPINE_ROOT}"
   echo "spine_worktree_exists=$( [[ -d "${SPINE_WORKTREE:-}" ]] && echo yes || echo no )"
   echo "launch_cwd=$cwd"
+  echo "dispatch_handoff_id=${SPINE_DISPATCH_HANDOFF_ID:-unset}"
+  echo "dispatch_handoff_file=${SPINE_DISPATCH_HANDOFF_FILE:-unset}"
   echo "provider_selected=${SPINE_PROVIDER_SELECTED:-unset}"
   echo "provider_backend=${SPINE_PROVIDER_BACKEND:-unset}"
   echo "provider_model=${SPINE_PROVIDER_MODEL:-unset}"
   echo "opencode_model=${SPINE_OPENCODE_MODEL:-unset}"
+  echo "startup_context_file=${SPINE_TERMINAL_STARTUP_CONTEXT_FILE:-unset}"
+  echo "startup_context_mode=${SPINE_TERMINAL_STARTUP_MODE:-unset}"
+  echo "startup_scope_lock=${SPINE_TERMINAL_SCOPE_LOCK:-unset}"
+  echo "startup_append_prompt_present=$( [[ -n "${SPINE_TERMINAL_STARTUP_APPEND_SYSTEM_PROMPT:-}" ]] && echo yes || echo no )"
   echo "morph_api_key_present=$( [[ -n "${MORPH_API_KEY:-}" ]] && echo yes || echo no )"
   printf 'command='
   print_quoted_args "$@"
@@ -143,6 +153,95 @@ launch_or_print() {
 
   cd "$cwd"
   exec "$@"
+}
+
+extract_first_json_to_file() {
+  local raw_text="$1"
+  local out_file="$2"
+  python3 - "$out_file" "$raw_text" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+text = sys.argv[2]
+text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+decoder = json.JSONDecoder()
+for idx, ch in enumerate(text):
+    if ch != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[idx:])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(obj, dict):
+        Path(sys.argv[1]).write_text(json.dumps(obj), encoding="utf-8")
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+json_field_from_file() {
+  local json_file="$1"
+  local path="$2"
+  python3 - "$json_file" "$path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+current = payload
+for part in [item for item in sys.argv[2].split(".") if item]:
+    if isinstance(current, dict):
+        current = current.get(part)
+    else:
+        current = None
+        break
+if current is None:
+    print("")
+elif isinstance(current, bool):
+    print("true" if current else "false")
+else:
+    print(current)
+PY
+}
+
+configure_terminal_startup_context() {
+  local terminal_id="$1"
+  local startup_json_file="$2"
+  local bridge_mode="${SPINE_TERMINAL_CONTEXT_BRIDGE_MODE:-}"
+  [[ -n "$bridge_mode" ]] || return 0
+
+  local record_file
+  record_file="$(json_field_from_file "$startup_json_file" "record_file")"
+  [[ -n "$record_file" ]] || return 0
+
+  local mode selection_order first_action scope_lock backlog_count first_subject hydration_mode
+  mode="$(json_field_from_file "$startup_json_file" "mode")"
+  selection_order="$(json_field_from_file "$startup_json_file" "selection_order")"
+  first_action="$(json_field_from_file "$startup_json_file" "first_action_command")"
+  scope_lock="$(json_field_from_file "$startup_json_file" "scope_lock")"
+  backlog_count="$(json_field_from_file "$startup_json_file" "work_items.backlog_count")"
+  first_subject="$(json_field_from_file "$startup_json_file" "work_items.first_subject")"
+  hydration_mode="$(json_field_from_file "$startup_json_file" "work_items.hydration_mode")"
+
+  export SPINE_TERMINAL_STARTUP_CONTEXT_FILE="$record_file"
+  export SPINE_TERMINAL_STARTUP_MODE="$mode"
+  export SPINE_TERMINAL_STARTUP_BACKLOG_COUNT="$backlog_count"
+  export SPINE_TERMINAL_STARTUP_FIRST_SUBJECT="$first_subject"
+
+  if [[ "$bridge_mode" == "claude_append_system_prompt" && "$terminal_id" == "MINT-MORPHEUS-01" ]]; then
+    export SPINE_TERMINAL_STARTUP_APPEND_SYSTEM_PROMPT="You are Morpheus in the Mint Prints customer-email inbox lane. Default scope is ${scope_lock:-Mint Prints customer email inbox only}. Launch already ran the governed inbox startup. Do not ask what we are working on and do not ask to set scope. Read the startup record at ${record_file} before your first reply and use it as the default inbox context. Treat launch as ${mode:-canonical_inbox_work_items} with ${selection_order:-oldest_first}. The launch summary is ${hydration_mode:-preview_only} and preview-only by design; use ${first_action:-mintctl morpheus inbox first-email} for the explicit deep-work action. Current preview backlog=${backlog_count:-0}; oldest preview subject=${first_subject:-unknown}. Drafting remains explicit."
+  fi
+}
+
+launch_claude() {
+  local model="$1"
+  local -a cmd=(claude --model "$model" --dangerously-skip-permissions --add-dir "$WORKBENCH_ROOT")
+  if [[ -n "${SPINE_TERMINAL_STARTUP_APPEND_SYSTEM_PROMPT:-}" ]]; then
+    cmd+=(--append-system-prompt "$SPINE_TERMINAL_STARTUP_APPEND_SYSTEM_PROMPT")
+  fi
+  launch_or_print "$LAUNCH_CWD" "${cmd[@]}"
 }
 
 launcher_value() {
@@ -219,6 +318,100 @@ startup_contract_check() {
   fi
   "$OPS_BIN" cap list >/dev/null 2>&1 || fail "startup contract failed: ./bin/ops cap list"
   "$OPS_BIN" cap show verify.pack.run >/dev/null 2>&1 || fail "startup contract failed: verify.pack.run capability unavailable"
+}
+
+terminal_startup_contract_value() {
+  local query="$1"
+  local contract="$2"
+  yq e -r "${query} // \"\"" "$contract" 2>/dev/null || true
+}
+
+apply_terminal_startup_contract() {
+  local terminal_id="$1"
+  local contract="$SPINE_ROOT/ops/bindings/mint.customer.inbox.startup.contract.yaml"
+  [[ -n "$terminal_id" ]] || return 0
+  [[ -f "$contract" ]] || return 0
+
+  local contract_terminal
+  contract_terminal="$(terminal_startup_contract_value '.launch.terminal_id' "$contract")"
+  [[ -n "$contract_terminal" && "$terminal_id" == "$contract_terminal" ]] || return 0
+
+  local startup_workspace
+  startup_workspace="$(terminal_startup_contract_value '.launch.startup_workspace' "$contract")"
+  [[ -n "$startup_workspace" ]] || fail "startup contract missing launch.startup_workspace: $contract"
+
+  if [[ "$startup_workspace" == /* ]]; then
+    LAUNCH_CWD="$startup_workspace"
+  else
+    LAUNCH_CWD="$SPINE_ROOT/$startup_workspace"
+  fi
+  [[ -d "$LAUNCH_CWD" ]] || fail "startup workspace not found for terminal=$terminal_id: $LAUNCH_CWD"
+
+  export MINT_CUSTOMER_INBOX_STARTUP_CONTRACT="$contract"
+  export SPINE_TERMINAL_STARTUP_CONTRACT="$contract"
+  export SPINE_TERMINAL_STARTUP_CAPABILITY="$(terminal_startup_contract_value '.launch.startup_capability' "$contract")"
+  export SPINE_TERMINAL_DEFAULT_COMMAND="$(terminal_startup_contract_value '.launch.default_command' "$contract")"
+  export SPINE_TERMINAL_FIRST_ACTION_COMMAND="$(terminal_startup_contract_value '.launch.first_action_command' "$contract")"
+  export SPINE_TERMINAL_SELECTION_ORDER="$(terminal_startup_contract_value '.launch.selection_order' "$contract")"
+  export SPINE_TERMINAL_DRAFTING_MODE="$(terminal_startup_contract_value '.launch.drafting_mode' "$contract")"
+  export SPINE_TERMINAL_SCOPE_LOCK="$(terminal_startup_contract_value '.launch.scope_lock' "$contract")"
+  export SPINE_TERMINAL_CONTEXT_BRIDGE_MODE="$(terminal_startup_contract_value '.launch.context_bridge.mode' "$contract")"
+  export SPINE_TERMINAL_CONTEXT_BRIDGE_READ_RECORD="$(terminal_startup_contract_value '.launch.context_bridge.read_startup_record_before_reply' "$contract")"
+  export MORPHEUS_MINT_MAILBOX="${MORPHEUS_MINT_MAILBOX:-team@mintprints.com}"
+}
+
+run_terminal_startup_bootstrap() {
+  local terminal_id="$1"
+  local contract="${SPINE_TERMINAL_STARTUP_CONTRACT:-}"
+  [[ -n "$terminal_id" && -n "$contract" && -f "$contract" ]] || return 0
+  [[ "${SPINE_SKIP_TERMINAL_BOOTSTRAP:-0}" == "1" ]] && return 0
+
+  local contract_terminal
+  contract_terminal="$(terminal_startup_contract_value '.launch.terminal_id' "$contract")"
+  [[ "$terminal_id" == "$contract_terminal" ]] || return 0
+
+  local startup_capability="${SPINE_TERMINAL_STARTUP_CAPABILITY:-}"
+  [[ -n "$startup_capability" ]] || fail "startup contract missing launch.startup_capability: $contract"
+
+  echo "STARTUP: terminal=$terminal_id mode=canonical_inbox_work_items order=${SPINE_TERMINAL_SELECTION_ORDER:-unset}" >&2
+  local startup_out startup_json_file
+  startup_json_file="$(make_tmp)"
+  capture_cmd startup_out "$OPS_BIN" cap run "$startup_capability" -- --mailbox "${MORPHEUS_MINT_MAILBOX:-team@mintprints.com}" --json || fail "startup bootstrap failed for terminal=$terminal_id capability=$startup_capability"
+  if extract_first_json_to_file "$startup_out" "$startup_json_file"; then
+    configure_terminal_startup_context "$terminal_id" "$startup_json_file"
+  else
+    echo "WARN: startup bootstrap returned no JSON payload; startup context bridge skipped" >&2
+  fi
+  echo "STARTUP READY: default='${SPINE_TERMINAL_DEFAULT_COMMAND:-unset}' first_action='${SPINE_TERMINAL_FIRST_ACTION_COMMAND:-unset}' drafting='${SPINE_TERMINAL_DRAFTING_MODE:-unset}'" >&2
+}
+
+acknowledge_dispatched_handoff() {
+  local handoff_id="$1"
+  local handoff_file="$2"
+  [[ -n "$handoff_id" || -n "$handoff_file" ]] || return 0
+
+  local terminal_id="${TERMINAL_NAME:-${OPS_TERMINAL_ROLE:-}}"
+  [[ -n "$terminal_id" ]] || fail "cannot accept dispatched handoff without terminal identity"
+
+  local -a cmd=("$OPS_BIN" cap run session.handoff.accept -- --terminal-id "$terminal_id" --tool "$TOOL")
+  if [[ -n "$handoff_id" ]]; then
+    cmd+=(--id "$handoff_id")
+  fi
+  if [[ -n "$handoff_file" ]]; then
+    cmd+=(--handoff-file "$handoff_file")
+  fi
+  if [[ -n "${SPINE_SESSION_ID:-}" ]]; then
+    cmd+=(--session-id "$SPINE_SESSION_ID")
+  fi
+  if [[ -n "${SPINE_DISPATCH_TARGET_AGENT_ID:-}" ]]; then
+    cmd+=(--agent-id "${SPINE_DISPATCH_TARGET_AGENT_ID}")
+  fi
+  if [[ -n "${SPINE_DISPATCH_WORKER_ID:-}" ]]; then
+    cmd+=(--worker-id "${SPINE_DISPATCH_WORKER_ID}")
+  fi
+
+  local accept_out=""
+  capture_cmd accept_out "${cmd[@]}" || fail "handoff accept failed for ${handoff_id:-${handoff_file}}"
 }
 
 provider_request_for_tool() {
@@ -361,6 +554,10 @@ while [[ $# -gt 0 ]]; do
     --tool=*) TOOL="${1#--tool=}"; shift ;;
     --terminal-name|--terminal) TERMINAL_NAME="${2:-}"; shift 2 ;;
     --terminal-name=*|--terminal=*) TERMINAL_NAME="${1#*=}"; shift ;;
+    --handoff-id) HANDOFF_ID="${2:-}"; shift 2 ;;
+    --handoff-id=*) HANDOFF_ID="${1#--handoff-id=}"; shift ;;
+    --handoff-file) HANDOFF_FILE="${2:-}"; shift 2 ;;
+    --handoff-file=*) HANDOFF_FILE="${1#--handoff-file=}"; shift ;;
     --force) FORCE=1; shift ;;
     --dry-run|--print-launch-plan) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -414,6 +611,7 @@ fi
 
 need_cmd git
 need_cmd grep
+need_cmd python3
 need_cmd yq
 
 if [[ -z "$TERMINAL_NAME" ]]; then
@@ -421,7 +619,13 @@ if [[ -z "$TERMINAL_NAME" ]]; then
 fi
 if [[ -n "$TERMINAL_NAME" ]]; then
   export SPINE_TERMINAL_NAME="$TERMINAL_NAME"
-  export OPS_TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-$TERMINAL_NAME}"
+  export OPS_TERMINAL_ROLE="$TERMINAL_NAME"
+fi
+if [[ -n "$HANDOFF_ID" ]]; then
+  export SPINE_DISPATCH_HANDOFF_ID="$HANDOFF_ID"
+fi
+if [[ -n "$HANDOFF_FILE" ]]; then
+  export SPINE_DISPATCH_HANDOFF_FILE="$HANDOFF_FILE"
 fi
 
 if [[ "$ROLE" == "solo" ]]; then
@@ -484,6 +688,7 @@ RESOLVED_TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERM
 if [[ -n "$RESOLVED_TERMINAL_ROLE" ]]; then
   export OPS_TERMINAL_ROLE="$RESOLVED_TERMINAL_ROLE"
 fi
+apply_terminal_startup_contract "${RESOLVED_TERMINAL_ROLE:-${TERMINAL_NAME:-}}"
 
 RESOLVED_RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-}"
 if [[ -z "$RESOLVED_RUNTIME_ROLE" && -n "$RESOLVED_TERMINAL_ROLE" ]] && [[ -f "$TERMINAL_ROLE_CONTRACT" ]]; then
@@ -507,21 +712,27 @@ if [[ "${SPINE_STARTUP_STRICT:-0}" == "1" ]]; then
   startup_contract_check
 fi
 
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  run_terminal_startup_bootstrap "${RESOLVED_TERMINAL_ROLE:-${TERMINAL_NAME:-}}"
+fi
+
+acknowledge_dispatched_handoff "${SPINE_DISPATCH_HANDOFF_ID:-}" "${SPINE_DISPATCH_HANDOFF_FILE:-}"
+
 case "$TOOL" in
   claude)
     load_provider_env claude
     if [[ "${CLAUDE_NATIVE_AUTH:-0}" == "1" || "${SPINE_PROVIDER_BACKEND:-}" == "native_account" ]]; then
       [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${ANTHROPIC_BASE_URL:-}" ]] || fail "native Claude auth path must not export Anthropic API env"
-      launch_or_print "$LAUNCH_CWD" claude --model "${SPINE_CLAUDE_MODEL:-${SPINE_PROVIDER_MODEL}}" --dangerously-skip-permissions --add-dir "$WORKBENCH_ROOT"
+      launch_claude "${SPINE_CLAUDE_MODEL:-${SPINE_PROVIDER_MODEL}}"
     fi
     if [[ "${SPINE_PROVIDER_BACKEND:-}" == "anthropic" ]]; then
-      launch_or_print "$LAUNCH_CWD" claude --model "${SPINE_CLAUDE_MODEL:-${SPINE_PROVIDER_MODEL}}" --dangerously-skip-permissions --add-dir "$WORKBENCH_ROOT"
+      launch_claude "${SPINE_CLAUDE_MODEL:-${SPINE_PROVIDER_MODEL}}"
     fi
     if [[ "${SPINE_PROVIDER_SELECTED:-claude_native}" != "claude_native" ]]; then
       command -v ccr >/dev/null 2>&1 || fail "provider ${SPINE_PROVIDER_SELECTED} requires claude-code-router (ccr)"
       ccr start >/dev/null 2>&1 || true
       eval "$(ccr activate)"
-      launch_or_print "$LAUNCH_CWD" claude --model "${SPINE_PROVIDER_MODEL}" --dangerously-skip-permissions --add-dir "$WORKBENCH_ROOT"
+      launch_claude "${SPINE_PROVIDER_MODEL}"
     fi
     fail "unsupported claude backend: ${SPINE_PROVIDER_BACKEND:-unknown}"
     ;;

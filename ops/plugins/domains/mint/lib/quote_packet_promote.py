@@ -13,6 +13,9 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
+from mint_runtime_paths import resolve_mint_data_root, resolve_spine_root
+from payment_record_common import default_payment_summary, order_index_entry
+from printavo_bridge_common import default_printavo_summary
 from quote_packet_normalize import (
     append_receipt,
     dump_yaml,
@@ -20,6 +23,7 @@ from quote_packet_normalize import (
     load_structured_file,
     now_utc,
     pricing_missing_fields,
+    sync_quote_readiness,
     update_index,
 )
 
@@ -40,8 +44,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("packet_id", help="quote_packet_id to promote")
     parser.add_argument(
         "--approved-by",
-        required=True,
-        help="Explicit operator approval identity for this promotion (for example MINT-OPERATOR-01)",
+        help="Explicit operator approval identity for this promotion (defaults to packet operator_approval.approved_by when present)",
     )
     parser.add_argument("--approval-note", help="Optional approval note for audit lineage")
     return parser.parse_args(argv)
@@ -194,6 +197,31 @@ def require_consistent_existing_refs(packet: dict[str, Any], packet_id: str) -> 
         deterministic_uuid(packet_id, "order-revision:1"),
         deterministic_uuid(packet_id, "quote"),
     )
+
+
+def resolve_operator_approval(packet: dict[str, Any], args: argparse.Namespace, timestamp: str) -> tuple[str, str, dict[str, Any]]:
+    existing = copy.deepcopy(packet.get("operator_approval") or {})
+    existing_by = str(existing.get("approved_by") or "").strip()
+    existing_note = str(existing.get("approval_note") or "").strip()
+    existing_at = str(existing.get("approved_at") or "").strip()
+
+    approved_by = str(args.approved_by or existing_by).strip()
+    if not approved_by:
+        fail("operator approval identity missing; run mint.quote.approve or pass --approved-by")
+    if existing_by and args.approved_by and approved_by != existing_by:
+        fail(f"packet operator_approval is already bound to {existing_by}; refusing conflicting --approved-by {args.approved_by}")
+
+    approval_note = str(args.approval_note or existing_note).strip()
+    approved_at = existing_at or timestamp
+    record = {
+        "status": "approved",
+        "approved_by": approved_by,
+        "approved_at": approved_at,
+        "approval_note": approval_note,
+        "approval_source": str(existing.get("approval_source") or "operator_review"),
+        "source_capability": str(existing.get("source_capability") or current_capability_name()),
+    }
+    return approved_by, approval_note, record
 
 
 def delivery_commitment(packet: dict[str, Any], line_items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -383,9 +411,8 @@ def print_existing_summary(
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
+    spine_root = resolve_spine_root(__file__)
+    mint_root = resolve_mint_data_root(spine_root=spine_root, current_file=__file__)
 
     packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (mint_root / "quote-packets"))
     packet_index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (mint_root / "quote-packets-index.yaml"))
@@ -439,6 +466,7 @@ def main(argv: list[str]) -> int:
     customer_ref = copy.deepcopy(packet.get("customer_ref") or {})
     timestamp = now_utc()
     capability_name = current_capability_name()
+    approved_by, approval_note, operator_approval = resolve_operator_approval(packet, args, timestamp)
     line_items = [item for item in packet.get("line_items") or [] if isinstance(item, dict)]
     seed_refs = seed_refs_from_packet(packet)
 
@@ -453,12 +481,17 @@ def main(argv: list[str]) -> int:
         "customer_identity_state": customer_ref.get("identity_state"),
         "customer_id": customer_ref.get("customer_id"),
         "customer_name": customer_ref.get("resolved_name") or customer_ref.get("customer_query"),
+        "customer_contact_name": customer_ref.get("contact_name"),
+        "customer_greeting_name": customer_ref.get("greeting_name"),
+        "mail_salutation_mode": customer_ref.get("mail_salutation_mode"),
         "customer_email": customer_ref.get("resolved_email"),
         "lifecycle_state": "quoted",
         "payment_state": "unpaid",
+        "payment_summary": default_payment_summary("unpaid"),
+        "printavo_summary": default_printavo_summary(),
         "intake_seed_refs": seed_refs,
-        "assignment": args.approved_by,
-        "operator_working_notes": packet.get("operator_notes") or args.approval_note or "",
+        "assignment": approved_by,
+        "operator_working_notes": packet.get("operator_notes") or approval_note or "",
         "source_quote_packet_id": packet.get("quote_packet_id"),
         "created_at": timestamp,
         "updated_at": timestamp,
@@ -487,14 +520,17 @@ def main(argv: list[str]) -> int:
         "issued_at": timestamp,
         "customer_id": customer_ref.get("customer_id"),
         "customer_name": customer_ref.get("resolved_name") or customer_ref.get("customer_query"),
+        "customer_contact_name": customer_ref.get("contact_name"),
+        "customer_greeting_name": customer_ref.get("greeting_name"),
+        "mail_salutation_mode": customer_ref.get("mail_salutation_mode"),
         "customer_email": customer_ref.get("resolved_email"),
         "amount_cents": quote_amount_cents(packet),
         "currency": "usd",
         "quote_draft_ref": copy.deepcopy(packet.get("quote_draft_ref") or {}),
         "approval": {
-            "approved_by": args.approved_by,
-            "approved_at": timestamp,
-            "approval_note": args.approval_note or "",
+            "approved_by": approved_by,
+            "approved_at": str(operator_approval.get("approved_at") or timestamp),
+            "approval_note": approval_note,
         },
         "source_quote_packet_id": packet.get("quote_packet_id"),
         "created_at": timestamp,
@@ -515,6 +551,7 @@ def main(argv: list[str]) -> int:
     packet["order_id"] = order_id
     packet["order_revision_id"] = order_revision_id
     packet["quote_id"] = quote_id
+    packet["operator_approval"] = operator_approval
     packet["updated_at"] = timestamp
     packet["receipts"] = append_receipt(packet.get("receipts") or [], capability_name, timestamp)
     for item in packet.get("line_items") or []:
@@ -523,6 +560,7 @@ def main(argv: list[str]) -> int:
         line_item_id = str(item.get("line_item_id") or "")
         if line_item_id in artwork_binding_map:
             item["artwork_binding_ref"] = artwork_binding_map[line_item_id]
+    readiness = sync_quote_readiness(packet)
 
     dump_yaml(packet_file, packet)
     update_index(packet_index_file, packet, timestamp)
@@ -530,16 +568,7 @@ def main(argv: list[str]) -> int:
         orders_index_file,
         "orders",
         "order_id",
-        {
-            "order_id": order_id,
-            "current_revision_id": order_revision_id,
-            "active_quote_id": quote_id,
-            "customer_id": customer_ref.get("customer_id"),
-            "lifecycle_state": order_record["lifecycle_state"],
-            "source_quote_packet_id": packet.get("quote_packet_id"),
-            "created_at": order_record["created_at"],
-            "updated_at": order_record["updated_at"],
-        },
+        order_index_entry(order_record, order_record["updated_at"]),
     )
     update_entity_index(
         order_revisions_index_file,
@@ -596,7 +625,9 @@ def main(argv: list[str]) -> int:
     print(f"quote_packet_id: {packet['quote_packet_id']}")
     print("promotion_state: promoted")
     print(f"state: {packet['state']}")
-    print(f"approved_by: {args.approved_by}")
+    print(f"quote_readiness_state: {readiness['state']}")
+    print(f"quote_next_step: {readiness['next_step']}")
+    print(f"approved_by: {approved_by}")
     print(f"order_id: {order_id}")
     print(f"order_revision_id: {order_revision_id}")
     print(f"quote_id: {quote_id}")

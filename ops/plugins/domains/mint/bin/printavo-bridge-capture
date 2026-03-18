@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_identity_common import query_customer_rows  # noqa: E402
+from printavo_bridge_common import (  # noqa: E402
+    PRINTAVO_STATES,
+    bridge_id,
+    entity_file,
+    load_yaml_object,
+    merge_unique_strings,
+    printavo_bridge_index_entry,
+    printavo_summary_from_bridge,
+    resolve_order_context,
+    resolve_spine_root,
+    runtime_paths,
+    sync_order_printavo_projection,
+    update_entity_index,
+)
+from quote_packet_normalize import dump_yaml, fail, now_utc  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.printavo.bridge.capture"
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="printavo-bridge-capture",
+        description="Persist a governed manual Mint Printavo bridge record and project it into canonical order truth when available.",
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--order-id", help="Canonical Mint order_id")
+    group.add_argument("--quote-id", help="Canonical Mint quote_id")
+    group.add_argument("--seed-id", help="Canonical Mint seed_id")
+    parser.add_argument("--printavo-state", required=True, choices=sorted(PRINTAVO_STATES))
+    parser.add_argument("--printavo-customer-id", default="", help="Printavo customer id")
+    parser.add_argument("--printavo-invoice-url", default="", help="Printavo internal invoice url")
+    parser.add_argument("--printavo-public-invoice-url", default="", help="Printavo public invoice url")
+    parser.add_argument("--printavo-work-order-url", default="", help="Printavo work order url")
+    parser.add_argument("--printavo-visual-id", default="", help="Printavo visual id or invoice number")
+    parser.add_argument("--customer-id", default="", help="Fresh-slate customer record id (seed-only path)")
+    parser.add_argument("--customer-email", default="", help="Customer email (seed-only path)")
+    parser.add_argument("--customer-name", default="", help="Customer name (seed-only path)")
+    parser.add_argument("--captured-by", required=True, help="Operator identity that confirmed the Printavo state")
+    parser.add_argument("--captured-at", default="", help="UTC timestamp for the observed Printavo state")
+    parser.add_argument("--note", default="", help="Optional operator note")
+    parser.add_argument(
+        "--evidence-ref",
+        action="append",
+        default=[],
+        help="Optional governed evidence reference (repeatable)",
+    )
+    parser.add_argument(
+        "--receipt",
+        action="append",
+        default=[],
+        help="Optional governed receipt reference (repeatable)",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_PRINTAVO_BRIDGE_CAPABILITY_NAME") or CAPABILITY_NAME
+
+
+def resolve_seed_customer(spine_root: Path, args: argparse.Namespace) -> dict[str, object]:
+    if not args.seed_id:
+        return {}
+    selector_customer_id = str(args.customer_id or "").strip()
+    selector_email = str(args.customer_email or "").strip().lower()
+    if selector_customer_id or selector_email:
+        rows = query_customer_rows(spine_root, record_id=selector_customer_id, email=selector_email)
+        if rows:
+            row = dict(rows[0])
+            return {
+                "customer_id": row.get("record_id"),
+                "customer_email": row.get("email"),
+                "customer_name": row.get("name") or row.get("company"),
+                "printavo_customer_id": row.get("printavo_customer_id"),
+            }
+    return {
+        "customer_id": selector_customer_id or None,
+        "customer_email": selector_email or None,
+        "customer_name": str(args.customer_name or "").strip() or None,
+        "printavo_customer_id": str(args.printavo_customer_id or "").strip() or None,
+    }
+
+
+def print_text(payload: dict[str, object]) -> None:
+    print(f"capability: {payload['capability']}")
+    print(f"capture_state: {payload['capture_state']}")
+    print(f"printavo_bridge_id: {payload['printavo_bridge_id']}")
+    print(f"seed_id: {payload.get('seed_id') or ''}")
+    print(f"order_id: {payload.get('order_id') or ''}")
+    print(f"quote_id: {payload.get('quote_id') or ''}")
+    print(f"printavo_state: {payload['printavo_state']}")
+    print(f"record_file: {payload['record_file']}")
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root = resolve_spine_root()
+    paths = runtime_paths(spine_root)
+
+    order_file: Path | None = None
+    order: dict[str, object] | None = None
+    quote: dict[str, object] | None = None
+    seed_id = str(args.seed_id or "").strip()
+    customer_context: dict[str, object]
+    if args.order_id or args.quote_id:
+        try:
+            order_file, order, quote = resolve_order_context(paths, order_id=args.order_id or "", quote_id=args.quote_id or "")
+        except (FileNotFoundError, ValueError) as exc:
+            fail(str(exc))
+        customer_context = {
+            "customer_id": order.get("customer_id"),
+            "customer_email": order.get("customer_email"),
+            "customer_name": order.get("customer_name"),
+            "printavo_customer_id": str(args.printavo_customer_id or "").strip() or None,
+        }
+        if not seed_id:
+            seed_refs = [str(item).strip() for item in (order.get("intake_seed_refs") or []) if str(item).strip()]
+            if seed_refs:
+                seed_id = seed_refs[0]
+    else:
+        customer_context = resolve_seed_customer(spine_root, args)
+        if not seed_id:
+            fail("seed_id is required for seed-only capture")
+
+    captured_by = str(args.captured_by or "").strip()
+    if not captured_by:
+        fail("captured_by is required")
+    recorded_at = str(args.captured_at or now_utc()).strip() or now_utc()
+    evidence_refs = merge_unique_strings(args.evidence_ref)
+    receipts = merge_unique_strings(args.receipt)
+    order_id = str((order or {}).get("order_id") or "").strip()
+    quote_id = str((quote or {}).get("quote_id") or ((order or {}).get("active_quote_id") if order else "") or "").strip()
+    printavo_customer_id = str(args.printavo_customer_id or customer_context.get("printavo_customer_id") or "").strip()
+    printavo_bridge_id = bridge_id(
+        seed_id=seed_id,
+        order_id=order_id,
+        quote_id=quote_id,
+        printavo_customer_id=printavo_customer_id,
+        printavo_invoice_url=str(args.printavo_invoice_url or "").strip(),
+        printavo_public_invoice_url=str(args.printavo_public_invoice_url or "").strip(),
+        printavo_work_order_url=str(args.printavo_work_order_url or "").strip(),
+        printavo_visual_id=str(args.printavo_visual_id or "").strip(),
+        printavo_state=str(args.printavo_state or "").strip(),
+        source_kind="manual_operator_update",
+    )
+    record_file = entity_file(paths["printavo_bridges_dir"], "printavo_bridge", printavo_bridge_id)
+    capture_state = "existing" if record_file.exists() else "recorded"
+
+    record = {
+        "printavo_bridge_id": printavo_bridge_id,
+        "schema_version": "1.0",
+        "source_kind": "manual_operator_update",
+        "seed_id": seed_id or None,
+        "order_id": order_id or None,
+        "quote_id": quote_id or None,
+        "customer_id": customer_context.get("customer_id"),
+        "customer_email": customer_context.get("customer_email"),
+        "customer_name": customer_context.get("customer_name"),
+        "source_quote_packet_id": (order or {}).get("source_quote_packet_id") if order else None,
+        "printavo_customer_id": printavo_customer_id or None,
+        "printavo_invoice_url": str(args.printavo_invoice_url or "").strip() or None,
+        "printavo_public_invoice_url": str(args.printavo_public_invoice_url or "").strip() or None,
+        "printavo_work_order_url": str(args.printavo_work_order_url or "").strip() or None,
+        "printavo_visual_id": str(args.printavo_visual_id or "").strip() or None,
+        "printavo_state": str(args.printavo_state or "").strip(),
+        "last_reconciled_at": recorded_at,
+        "recorded_at": recorded_at,
+        "captured_by": captured_by,
+        "note": str(args.note or "").strip() or None,
+        "evidence_refs": evidence_refs,
+        "provenance": {
+            "source": "manual_operator_update",
+            "basis": ["manual_operator_capture"],
+            "captured_by": captured_by,
+            "evidence_refs": evidence_refs,
+            "receipts": receipts,
+        },
+        "receipts": receipts,
+        "capability": capability_name(),
+    }
+    if capture_state == "recorded":
+        dump_yaml(record_file, record)
+    else:
+        record = load_yaml_object(record_file) or record
+        merged_evidence_refs = merge_unique_strings(record.get("evidence_refs"), evidence_refs)
+        merged_receipts = merge_unique_strings(record.get("receipts"), receipts)
+        provenance = dict(record.get("provenance") or {})
+        provenance["evidence_refs"] = merge_unique_strings(provenance.get("evidence_refs"), evidence_refs)
+        provenance["receipts"] = merge_unique_strings(provenance.get("receipts"), receipts)
+        record["evidence_refs"] = merged_evidence_refs
+        record["receipts"] = merged_receipts
+        record["provenance"] = provenance
+        if str(args.note or "").strip() and not str(record.get("note") or "").strip():
+            record["note"] = str(args.note or "").strip()
+        dump_yaml(record_file, record)
+
+    update_entity_index(
+        paths["printavo_bridges_index_file"],
+        "printavo_bridges",
+        "printavo_bridge_id",
+        printavo_bridge_index_entry(record),
+    )
+
+    if order_file is not None and order is not None:
+        sync_order_printavo_projection(paths, order_file, order, printavo_summary_from_bridge(record))
+
+    payload = {
+        "capability": capability_name(),
+        "capture_state": capture_state,
+        "printavo_bridge_id": printavo_bridge_id,
+        "seed_id": seed_id or None,
+        "order_id": order_id or None,
+        "quote_id": quote_id or None,
+        "printavo_state": record.get("printavo_state"),
+        "record_file": str(record_file),
+        "order_file": str(order_file) if order_file is not None else None,
+        "evidence_refs": record.get("evidence_refs") or [],
+        "receipts": record.get("receipts") or [],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print_text(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

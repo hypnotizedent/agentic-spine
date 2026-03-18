@@ -13,6 +13,7 @@ sources:
   ssh_targets: ops/bindings/ssh.targets.yaml
   automation_latency_slo: ops/bindings/automation.stack.latency.slo.yaml
   infra_core_slo: ops/bindings/infra.core.slo.yaml
+  maintenance_transaction_contract: ops/bindings/infra.maintenance.transaction.contract.yaml
 
 critical_domains:
   - id: automation-stack
@@ -28,8 +29,8 @@ critical_domains:
     vm_hostname: finance-stack
     incident_key: finance_unreachable
     threshold_overrides:
-      api_latency_warn_ms: 7000
-      api_latency_incident_ms: 12000
+      api_latency_warn_ms: 12000
+      api_latency_incident_ms: 18000
 
   - id: z2m-bridge
     description: "HA Zigbee2MQTT bridge availability."
@@ -56,7 +57,7 @@ critical_domains:
     vm_hostname: infra-core
     incident_key: infra_core_unreachable
     threshold_overrides:
-      api_latency_warn_ms: 5000
+      api_latency_warn_ms: 6000
       api_latency_incident_ms: 9000
 
   - id: observability-stack
@@ -72,16 +73,16 @@ critical_domains:
     vm_hostname: dev-tools
     incident_key: gitea_unreachable
     threshold_overrides:
-      api_latency_warn_ms: 3500
-      api_latency_incident_ms: 7000
+      api_latency_warn_ms: 6000
+      api_latency_incident_ms: 9000
 
   - id: mint-stack
     description: "Mint business stack (VM 212 data + VM 213 apps). PostgreSQL, MinIO, Redis, files-api, order-intake, quote-page."
     vm_hostname: mint-data
     incident_key: mint_runtime_degraded
     threshold_overrides:
-      api_latency_warn_ms: 3000
-      api_latency_incident_ms: 6000
+      api_latency_warn_ms: 12000
+      api_latency_incident_ms: 15000
 
 probe_capabilities:
   automation-stack:
@@ -108,6 +109,8 @@ probe_latency_exemptions:
   automation-stack:
     - automation.stack.latency.status
 
+# In maintenance mode, exempted probes remain visible in probe details but do
+# not contribute warn/incident severity for the parent domain.
 probe_warn_exemptions:
   immich-stack:
     - immich.ingest.watch
@@ -130,6 +133,42 @@ predictive_thresholds:
 warn_treatment:
   critical_domains: warn
   non_critical_domains: warn
+
+maintenance_windows:
+  active_max_age_minutes: 240
+
+probe_execution:
+  default_timeout_sec: 45
+  kill_after_sec: 5
+  max_parallel_domains: 8
+  timeout_overrides:
+    automation.stack.latency.status: 25
+    services.health.status --host automation-stack: 15
+    finance.stack.status: 20
+    ha.z2m.health: 15
+    immich.status: 20
+    immich.ingest.watch --json: 20
+    infra.core.slo.status: 30
+    observability.stack.status: 30
+    gitea.status: 15
+    mint.modules.health: 25
+
+stack_dependencies:
+  observability-stack:
+    - infra-core-stack
+  dev-tools-stack:
+    - infra-core-stack
+  mint-stack:
+    - infra-core-stack
+
+dependent_failure_suppression:
+  enabled: true
+  when_dependency_status_in:
+    - incident
+  when_domain_status_in:
+    - incident
+  dependent_status: warn
+  note_prefix: dependent_failure
 
 guided_recovery_commands:
   automation-stack:
@@ -159,12 +198,21 @@ guided_recovery_commands:
 
   infra-core-stack:
     - "ssh root@{{proxmox_host_ip}} \"qm start {{vmid}} && qm status {{vmid}}\""
-    - "./bin/ops cap run docker.compose.up infra-core core"
+    - "./bin/ops cap run docker.compose.up infra-core cloudflared"
+    - "./bin/ops cap run docker.compose.up infra-core pihole"
+    - "./bin/ops cap run docker.compose.up infra-core secrets"
+    - "./bin/ops cap run docker.compose.up infra-core vaultwarden"
+    - "./bin/ops cap run docker.compose.up infra-core caddy-auth"
     - "./bin/ops cap run infra.core.slo.status"
 
   observability-stack:
     - "ssh root@{{proxmox_host_ip}} \"qm start {{vmid}} && qm status {{vmid}}\""
-    - "./bin/ops cap run docker.compose.up observability monitoring"
+    - "./bin/ops cap run docker.compose.up observability prometheus"
+    - "./bin/ops cap run docker.compose.up observability grafana"
+    - "./bin/ops cap run docker.compose.up observability loki"
+    - "./bin/ops cap run docker.compose.up observability uptime-kuma"
+    - "./bin/ops cap run docker.compose.up observability node-exporter"
+    - "./bin/ops cap run docker.compose.up observability dashy"
     - "./bin/ops cap run observability.stack.status"
 
   dev-tools-stack:
@@ -178,6 +226,9 @@ guided_recovery_commands:
     - "./bin/ops cap run docker.compose.up mint-data data"
     - "./bin/ops cap run docker.compose.up mint-apps apps"
     - "./bin/ops cap run mint.modules.health"
+
+governed_recovery_capabilities:
+  infra-core-stack: infra.core.reconcile
 
 report_outputs:
   default_format: markdown

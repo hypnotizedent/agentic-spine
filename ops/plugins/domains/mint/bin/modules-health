@@ -11,6 +11,7 @@
 # Usage:
 #   modules-health              # check all mint endpoints
 #   modules-health <component>  # check specific component
+#   modules-health --parallel 6
 #   modules-health --strict-exit
 
 set -euo pipefail
@@ -38,9 +39,14 @@ command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
 
 FILTER=""
 STRICT_EXIT=0
+PARALLEL="${MINT_MODULES_PARALLEL:-6}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --parallel)
+      PARALLEL="${2:?--parallel requires value}"
+      shift 2
+      ;;
     --strict-exit)
       STRICT_EXIT=1
       shift
@@ -50,9 +56,11 @@ while [[ $# -gt 0 ]]; do
 Usage:
   modules-health
   modules-health <component>
+  modules-health --parallel 6
   modules-health --strict-exit
 
 Flags:
+  --parallel <n>  Run Mint probes concurrently (default: 6).
   --strict-exit  Exit non-zero when any checked component is not OK.
 EOF
       exit 0
@@ -67,6 +75,8 @@ EOF
   esac
 done
 
+[[ "$PARALLEL" =~ ^[1-9][0-9]*$ ]] || stop "--parallel must be integer >= 1"
+
 APP_TARGET_ID="$(mint_probe_target_id app_plane)"
 DATA_TARGET_ID="$(mint_probe_target_id data_plane)"
 [[ -n "$APP_TARGET_ID" && "$APP_TARGET_ID" != "null" ]] || stop "missing app plane target in $PROBE_BINDING"
@@ -80,8 +90,48 @@ MINT_DATA_USER="$(ssh_resolve_user "$DATA_TARGET_ID" "ubuntu")"
 [[ -n "$MINT_APPS_HOST" && "$MINT_APPS_HOST" != "null" ]] || stop "$APP_TARGET_ID not found in ssh.targets"
 [[ -n "$MINT_DATA_HOST" && "$MINT_DATA_HOST" != "null" ]] || stop "$DATA_TARGET_ID not found in ssh.targets"
 
-IFS=' ' read -r MINT_APPS_PROBE_HOST MINT_APPS_PROBE_PATH <<< "$(ssh_resolve_probe_host "$APP_TARGET_ID" || true)"
-IFS=' ' read -r MINT_DATA_PROBE_HOST MINT_DATA_PROBE_PATH <<< "$(ssh_resolve_probe_host "$DATA_TARGET_ID" || true)"
+resolve_http_target() {
+  local target_id="$1"
+  local default_host="$2"
+  local result resolved_host resolved_path
+
+  result="$(ssh_resolve_ssh_host_with_fallback "$target_id" 2 || true)"
+  resolved_host="$(printf '%s\n' "$result" | awk '{print $1}')"
+  resolved_path="$(printf '%s\n' "$result" | awk '{print $2}')"
+
+  if [[ -z "$resolved_host" || "$resolved_path" == "unreachable" ]]; then
+    result="$(ssh_resolve_probe_host "$target_id" 2 || true)"
+    resolved_host="$(printf '%s\n' "$result" | awk '{print $1}')"
+    resolved_path="$(printf '%s\n' "$result" | awk '{print $2}')"
+  fi
+
+  [[ -n "$resolved_host" ]] || resolved_host="$default_host"
+  case "$resolved_path" in
+    lan|tailscale|direct) ;;
+    *) resolved_path="direct" ;;
+  esac
+
+  printf '%s\t%s\n' "$resolved_host" "$resolved_path"
+}
+
+rewrite_url_for_target() {
+  local url="$1"
+  local target_id="$2"
+  local preferred_host="$3"
+  local preferred_path="$4"
+  local canonical_host rewritten_url
+
+  canonical_host="$(ssh_resolve_host "$target_id")"
+  rewritten_url="$url"
+  if [[ -n "$canonical_host" && -n "$preferred_host" && "$preferred_host" != "$canonical_host" ]]; then
+    rewritten_url="${url//$canonical_host/$preferred_host}"
+  fi
+
+  printf '%s\t%s\n' "$rewritten_url" "${preferred_path:-direct}"
+}
+
+IFS=$'\t' read -r MINT_APPS_PROBE_HOST MINT_APPS_PROBE_PATH <<< "$(resolve_http_target "$APP_TARGET_ID" "$MINT_APPS_HOST")"
+IFS=$'\t' read -r MINT_DATA_PROBE_HOST MINT_DATA_PROBE_PATH <<< "$(resolve_http_target "$DATA_TARGET_ID" "$MINT_DATA_HOST")"
 IFS=' ' read -r MINT_DATA_SSH_HOST MINT_DATA_SSH_PATH <<< "$(ssh_resolve_ssh_host_with_fallback "$DATA_TARGET_ID" || true)"
 
 echo "mint.modules.health"
@@ -94,17 +144,20 @@ echo
 declare -a HTTP_ROWS=()
 while IFS=$'\t' read -r name plane; do
   [[ -z "$name" ]] && continue
+  if [[ -n "$FILTER" && "$name" != "$FILTER" ]]; then
+    continue
+  fi
   [[ "$(mint_service_enabled "$name")" == "true" ]] || continue
-  resolve_result="$(mint_service_resolved_url "$name" 5 || true)"
-  url="$(printf '%s\n' "$resolve_result" | awk '{print $1}')"
-  resolved_path="$(printf '%s\n' "$resolve_result" | awk '{print $2}')"
+  url="$(mint_service_url "$name")"
   [[ -n "$url" ]] || stop "missing canonical url for $name in $SERVICES_BINDING"
   case "$plane" in
     app_plane)
-      HTTP_ROWS+=("$name|$APP_TARGET_ID|${resolved_path:-$MINT_APPS_PROBE_PATH}|$url")
+      IFS=$'\t' read -r resolved_url resolved_path <<< "$(rewrite_url_for_target "$url" "$APP_TARGET_ID" "$MINT_APPS_PROBE_HOST" "$MINT_APPS_PROBE_PATH")"
+      HTTP_ROWS+=("$name|$APP_TARGET_ID|${resolved_path:-$MINT_APPS_PROBE_PATH}|$resolved_url")
       ;;
     data_plane)
-      HTTP_ROWS+=("$name|$DATA_TARGET_ID|${resolved_path:-$MINT_DATA_PROBE_PATH}|$url")
+      IFS=$'\t' read -r resolved_url resolved_path <<< "$(rewrite_url_for_target "$url" "$DATA_TARGET_ID" "$MINT_DATA_PROBE_HOST" "$MINT_DATA_PROBE_PATH")"
+      HTTP_ROWS+=("$name|$DATA_TARGET_ID|${resolved_path:-$MINT_DATA_PROBE_PATH}|$resolved_url")
       ;;
     *)
       stop "unknown mint http plane in helper: $plane"
@@ -143,14 +196,11 @@ curl_health_with_retry() {
   done
 }
 
-check_http() {
-  local name="$1" target_id="$2" path_used="$3" url="$4"
-  if [[ -n "$FILTER" && "$name" != "$FILTER" ]]; then return; fi
-  checked=$((checked + 1))
+check_http_result() {
+  local idx="$1" name="$2" target_id="$3" path_used="$4" url="$5"
   if [[ -z "$url" ]]; then
-    printf "%-16s %-10s %-10s %s\n" "$name" "UNREACHABLE" "-" "target=$target_id"
-    fail=1
-    return
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$idx" "$name" "UNREACHABLE" "-" "target=$target_id" "1"
+    return 0
   fi
   local start_ms end_ms dur_ms http_code curl_exit
   start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
@@ -158,30 +208,23 @@ check_http() {
   end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
   dur_ms=$((end_ms - start_ms))
   if [[ "$curl_exit" -eq 0 && "$http_code" == "200" ]]; then
-    printf "%-16s %-10s %-10s %s\n" "$name" "OK" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$idx" "$name" "OK" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}" "0"
   elif [[ "$curl_exit" -eq 0 ]]; then
-    printf "%-16s %-10s %-10s %s\n" "$name" "DEGRADED" "${dur_ms}ms" "target=$target_id via=${path_used:-direct} http=$http_code"
-    fail=1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$idx" "$name" "DEGRADED" "${dur_ms}ms" "target=$target_id via=${path_used:-direct} http=$http_code" "1"
   elif [[ "$curl_exit" -eq 28 ]]; then
-    printf "%-16s %-10s %-10s %s\n" "$name" "TIMEOUT" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}"
-    fail=1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$idx" "$name" "TIMEOUT" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}" "1"
   elif [[ "$curl_exit" -eq 7 ]]; then
-    printf "%-16s %-10s %-10s %s\n" "$name" "REFUSED" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}"
-    fail=1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$idx" "$name" "REFUSED" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}" "1"
   else
-    printf "%-16s %-10s %-10s %s\n" "$name" "FAIL" "${dur_ms}ms" "target=$target_id via=${path_used:-direct} curl=$curl_exit"
-    fail=1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$idx" "$name" "FAIL" "${dur_ms}ms" "target=$target_id via=${path_used:-direct} curl=$curl_exit" "1"
   fi
 }
 
-check_ssh_service() {
-  local name="$1" target_id="$2" host="$3" path_used="$4" user="$5" cmd="$6"
-  if [[ -n "$FILTER" && "$name" != "$FILTER" ]]; then return; fi
-  checked=$((checked + 1))
+check_ssh_service_result() {
+  local idx="$1" name="$2" target_id="$3" host="$4" path_used="$5" user="$6" cmd="$7"
   if [[ -z "$host" ]]; then
-    printf "%-16s %-10s %-10s %s\n" "$name" "UNREACHABLE" "-" "target=$target_id"
-    fail=1
-    return
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$idx" "$name" "UNREACHABLE" "-" "target=$target_id" "1"
+    return 0
   fi
   local start_ms end_ms dur_ms
   start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
@@ -193,23 +236,68 @@ check_ssh_service() {
   end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
   dur_ms=$((end_ms - start_ms))
   if [[ "$rc" -eq 0 ]]; then
-    printf "%-16s %-10s %-10s %s\n" "$name" "OK" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$idx" "$name" "OK" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}" "0"
   else
-    printf "%-16s %-10s %-10s %s\n" "$name" "FAIL" "${dur_ms}ms" "target=$target_id via=${path_used:-direct} rc=$rc"
-    fail=1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$idx" "$name" "FAIL" "${dur_ms}ms" "target=$target_id via=${path_used:-direct} rc=$rc" "1"
   fi
 }
 
-# HTTP checks
+RESULT_ROOT="$(mktemp -d)"
+declare -a RESULT_FILES=()
+active_batch=0
+task_index=0
+
+schedule_result_task() {
+  local result_file="$1"
+  shift
+  RESULT_FILES+=("$result_file")
+  (
+    set +e
+    "$@" >"$result_file"
+    echo "$?" >"${result_file}.rc"
+  ) &
+  active_batch=$((active_batch + 1))
+  if (( active_batch >= PARALLEL )); then
+    set +e
+    wait
+    set -e
+    active_batch=0
+  fi
+}
+
 for row in "${HTTP_ROWS[@]}"; do
   IFS='|' read -r name target_id path_used url <<< "$row"
-  check_http "$name" "$target_id" "$path_used" "$url"
+  task_index=$((task_index + 1))
+  printf -v task_slot '%03d' "$task_index"
+  schedule_result_task "$RESULT_ROOT/${task_slot}-${name}.row" check_http_result "$task_slot" "$name" "$target_id" "$path_used" "$url"
 done
 
 while IFS=$'\t' read -r name cmd; do
   [[ -z "$name" ]] && continue
-  check_ssh_service "$name" "$DATA_TARGET_ID" "$MINT_DATA_SSH_HOST" "$MINT_DATA_SSH_PATH" "$MINT_DATA_USER" "$cmd"
+  task_index=$((task_index + 1))
+  printf -v task_slot '%03d' "$task_index"
+  schedule_result_task "$RESULT_ROOT/${task_slot}-${name}.row" check_ssh_service_result "$task_slot" "$name" "$DATA_TARGET_ID" "$MINT_DATA_SSH_HOST" "$MINT_DATA_SSH_PATH" "$MINT_DATA_USER" "$cmd"
 done < <(yq -r '.targets.data_plane.ssh_checks[] | [.id, .command] | @tsv' "$PROBE_BINDING")
+
+set +e
+wait
+set -e
+
+for result_file in "${RESULT_FILES[@]}"; do
+  rc="$(cat "${result_file}.rc" 2>/dev/null || echo 99)"
+  if [[ "$rc" -ne 0 ]]; then
+    rm -rf "$RESULT_ROOT"
+    stop "worker failure for $(basename "$result_file")"
+  fi
+  IFS=$'\t' read -r _ name status duration note failed_flag <"$result_file"
+  printf "%-16s %-10s %-10s %s\n" "$name" "$status" "$duration" "$note"
+  checked=$((checked + 1))
+  if [[ "$failed_flag" == "1" ]]; then
+    fail=1
+  fi
+done
+
+rm -rf "$RESULT_ROOT"
 
 echo
 

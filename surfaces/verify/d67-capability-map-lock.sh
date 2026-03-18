@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Update ops/bindings/capability_map.yaml to cover all entries in capabilities.yaml.
+# TRIAGE: Reconcile capability triad artifacts from capability authority with ops/plugins/core/ops/bin/capability-triad-reconcile.
 set -euo pipefail
 
 # D67: Capability Map Lock
@@ -11,8 +11,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOURCE="$ROOT/ops/capabilities.yaml"
 MAP="$ROOT/ops/bindings/capability_map.yaml"
+DIAG_SCRIPT="$ROOT/ops/plugins/core/ops/bin/capability-triad-diagnostics"
 
-fail() { echo "D67 FAIL: $*" >&2; exit 1; }
+emit_diagnostics() {
+  [[ -x "$DIAG_SCRIPT" ]] || return 0
+  local diagnostics
+  diagnostics="$("$DIAG_SCRIPT" --compare-live 2>/dev/null || true)"
+  [[ -n "$diagnostics" ]] && echo "D67 DIAGNOSTICS: $diagnostics" >&2
+}
+
+fail() {
+  echo "D67 FAIL: $*" >&2
+  emit_diagnostics
+  exit 1
+}
 
 [[ -f "$SOURCE" ]] || fail "capabilities.yaml missing"
 [[ -f "$MAP" ]] || fail "capability_map.yaml missing"

@@ -82,7 +82,7 @@ agents:
     name: "Media Agent"
     runner_capability: verify.pack.run
     domain: media
-    description: "Media stack application layer: language profiles, quality settings, subtitle prefs, library hygiene, troubleshooting"
+    description: "Unified home media application layer: language profiles, quality settings, subtitle prefs, library hygiene, troubleshooting"
     contract: "../agentic-foundation/docs/agents/media-agent.contract.md"
     implementation: "~/code/workbench/agents/media/"
     implementation_status: active
@@ -95,8 +95,8 @@ agents:
     mcpjungle_mirror: "~/code/workbench/infra/compose/mcpjungle/servers/media-stack/"
     loop: "LOOP-MEDIA-AGENT-WORKBENCH-20260208"
     covers:
-      - download-stack (VM 209)
-      - streaming-stack (VM 210)
+      - media-home (VM 106)
+      - shop split media VMs are rollback-only and non-authoritative
     services:
       - radarr
       - sonarr
@@ -140,31 +140,31 @@ agents:
     endpoints:
       radarr:
         health_id: radarr
-        url: "http://192.168.1.209:7878/ping"
+        url: "http://10.0.0.106:7878/ping"
       sonarr:
         health_id: sonarr
-        url: "http://192.168.1.209:8989/ping"
+        url: "http://10.0.0.106:8989/ping"
       lidarr:
         health_id: lidarr
-        url: "http://192.168.1.209:8686/ping"
+        url: "http://10.0.0.106:8686/ping"
       prowlarr:
         health_id: prowlarr
-        url: "http://192.168.1.209:9696/ping"
+        url: "http://10.0.0.106:9696/ping"
       sabnzbd:
         health_id: sabnzbd
-        url: "http://192.168.1.209:8080/api?mode=version&output=json"
+        url: "http://10.0.0.106:8080/api?mode=version&output=json"
       jellyfin:
         health_id: jellyfin
-        url: "http://192.168.1.210:8096/health"
+        url: "http://10.0.0.106:8096/health"
       navidrome:
         health_id: navidrome
-        url: "http://192.168.1.210:4533/ping"
+        url: "http://10.0.0.106:4533/ping"
       jellyseerr:
         health_id: jellyseerr
-        url: "http://192.168.1.210:5055"
+        url: "http://10.0.0.106:5055"
       bazarr:
         health_id: bazarr
-        url: "http://192.168.1.210:6767/ping"
+        url: "http://10.0.0.106:6767/ping"
 
   - id: n8n-agent
     name: "N8N Agent"
@@ -348,6 +348,9 @@ agents:
       - shipping
       - suppliers
     mcp_tools:
+      - name: mint.customer.thread.delta.capture
+        safety: mutating
+        description: "Capture a real customer-thread hardening delta into governed Mint operator state."
       - name: mint.modules.health
         safety: read-only
         description: "Health probe for mint app/data endpoints."
@@ -357,7 +360,53 @@ agents:
       - name: mint.intake.validate
         safety: read-only
         description: "Validate intake payload contract."
+      - name: mint.customer.inbox.triage
+        safety: read-only
+        description: "Canonical team@mintprints.com inbox triage view via governed Microsoft mailbox path."
+      - name: mint.customer.inbox.junk
+        safety: mutating
+        description: "Move a promotional or risky Mint inbox message to Junk through the governed Microsoft mailbox path."
+      - name: mint.customer.inbox.work_items
+        safety: read-only
+        description: "Convert the Mint inbox backlog into deterministic governed work items before drafting, pricing, or quote actions."
+      - name: mint.customer.quote.brief
+        safety: read-only
+        description: "Generate a governed Morpheus quote briefing and customer-safe reply preview from mailbox context plus prior email history, prior order/artwork truth, governed customer quote context, and forwarded-thread artwork evidence."
+      - name: mint.customer.reply.draft
+        safety: mutating
+        description: "Create a governed Morpheus customer reply draft with default HTML formatting, governed job subjects when job context exists, reply-chain subject fallback for non-job threads, same-mailbox reply-chain enforcement, and provenance."
+      - name: mint.customer.contact.graph.set
+        safety: mutating
+        description: "Persist governed same-company contact relationships, roles, and greeting truth for Morpheus customer-facing work."
+      - name: mint.customer.quote.context.set
+        safety: mutating
+        description: "Persist governed customer segment/type and exception pricing context for future Mint quote work."
+      - name: mint.customer.reorder.resolve
+        safety: mutating
+        description: "Resolve an existing-customer reorder email into customer memory, a matched prior job, a structured delta, a governed draft work object, and a reply draft."
+      - name: mint.customer.forwarded.attachment.resolve
+        safety: mutating
+        description: "Resolve the intended forwarded attachment, apply boring version-selection rules, and place it canonically."
+      - name: mint.customer.artwork.revision.prepare
+        safety: mutating
+        description: "Continue the customer artwork lane by resolving the attachment and creating a bounded Artie handoff."
+      - name: mint.customer.identity.set
+        safety: mutating
+        description: "Set governed customer legal, preferred, greeting, display, and alias identity fields for future customer-facing work."
     capabilities:
+      - mint.customer.thread.delta.capture
+      - mint.customer.inbox.triage
+      - mint.customer.inbox.junk
+      - mint.customer.inbox.work_items
+      - mint.customer.quote.brief
+      - mint.customer.quote.context.set
+      - mint.customer.contact.graph.set
+      - mint.artwork.place
+      - mint.customer.reorder.resolve
+      - mint.customer.reply.draft
+      - mint.customer.forwarded.attachment.resolve
+      - mint.customer.artwork.revision.prepare
+      - mint.customer.identity.set
       - mint.modules.health
       - mint.seeds.query
       - mint.intake.validate
@@ -472,7 +521,12 @@ agents:
     implementation_status: active
     mcp_type: custom
     runtime_binding_exempt_reason: "operator wrapper over product proof surfaces; no standalone MCP server"
-    capabilities: []
+    capabilities:
+      - mint.artie.revision.review
+      - mint.artifact.record.capture
+      - mint.artifact.record.snapshot
+      - mint.artwork.intelligence.analyze
+      - mint.artwork.intelligence.snapshot
     write_scope:
       - ~/code/workbench/agents/artie/
       - ~/code/workbench/scripts/root/operator/artie.sh
@@ -763,7 +817,7 @@ agents:
         description: "Single-flight import monitor with blocked-auth classification."
       - name: communications_mail_send_test
         safety: governed
-        description: "Send test email (manual-approval, requires confirm)."
+        description: "Blocked by policy. Draft-only email governance."
       - name: communications_provider_status
         safety: read-only
         description: "Provider routing status (Microsoft/Resend/Twilio)."
@@ -778,7 +832,7 @@ agents:
         description: "Transactional send planner with preview receipt."
       - name: communications_send_execute
         safety: governed
-        description: "Governed transactional send (manual-approval, requires confirm)."
+        description: "Governed transactional execute; email is blocked and drafts-only."
       - name: communications_delivery_log
         safety: read-only
         description: "Query delivery log artifacts."
@@ -794,7 +848,6 @@ agents:
       - communications.mail.search
       - communications.mailarchiver.import.monitor
       - communications.mailarchiver.import.status
-      - communications.mail.send.test
       - communications.provider.status
       - communications.policy.status
       - communications.templates.list
@@ -842,9 +895,6 @@ agents:
       - name: mail_get
         safety: read-only
         description: "Get Microsoft mail message detail."
-      - name: mail_send
-        safety: mutating
-        description: "Send Microsoft mail."
       - name: draft_create
         safety: mutating
         description: "Create Microsoft mail draft."
@@ -857,26 +907,13 @@ agents:
       - name: calendar_get
         safety: read-only
         description: "Get calendar event detail."
-      - name: calendar_create
-        safety: mutating
-        description: "Create calendar event."
-      - name: calendar_update
-        safety: mutating
-        description: "Update calendar event."
-      - name: calendar_rsvp
-        safety: mutating
-        description: "RSVP calendar event."
     capabilities:
       - microsoft.mail.search
       - microsoft.mail.get
-      - microsoft.mail.send
       - microsoft.mail.draft.create
       - microsoft.mail.draft.update
       - microsoft.calendar.list
       - microsoft.calendar.get
-      - microsoft.calendar.create
-      - microsoft.calendar.update
-      - microsoft.calendar.rsvp
     capabilities_scope:
       include_keys:
         - microsoft.mail.search
@@ -1126,6 +1163,8 @@ routing_rules:
       - mockups
       - artwork prep
       - digital proofs
+      - revision review
+      - sheik handoff
 
   - agent: workbench-agent
     domains:

@@ -3,7 +3,9 @@
 set -euo pipefail
 
 SP="${SPINE_CODE:-.}"
-PROPOSALS_DIR="$SP/mailroom/outbox/proposals"
+source "$SP/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+PROPOSALS_DIR="$SPINE_OUTBOX/proposals"
 LIFECYCLE="$SP/ops/bindings/proposals.lifecycle.yaml"
 
 NOW=$(date +%s)
@@ -127,7 +129,7 @@ for dir in "$PROPOSALS_DIR"/CP-*; do
       link_missing=$((link_missing + 1))
       append_mismatch "$bname has pending status with missing loop_id"
     else
-      scope_file="$SP/mailroom/state/loop-scopes/${cp_loop_id}.scope.md"
+      scope_file="$SPINE_STATE/loop-scopes/${cp_loop_id}.scope.md"
       if [[ ! -f "$scope_file" ]]; then
         link_scope_missing=$((link_scope_missing + 1))
         append_mismatch "$bname targets loop_id=$cp_loop_id but scope file is missing"
@@ -199,8 +201,8 @@ done
 open_loop_count=0
 open_loop_without_pending=0
 open_loop_without_pending_lines=""
-if [[ -d "$SP/mailroom/state/loop-scopes" ]]; then
-  for scope_file in "$SP"/mailroom/state/loop-scopes/*.scope.md; do
+if [[ -d "$SPINE_STATE/loop-scopes" ]]; then
+  for scope_file in "$SPINE_STATE"/loop-scopes/*.scope.md; do
     [[ -f "$scope_file" ]] || continue
     loop_id=$(awk -F': *' '/^loop_id:/{print $2; exit}' "$scope_file" | tr -d '"' | tr -d "'" || true)
     scope_status=$(awk -F': *' '/^status:/{print $2; exit}' "$scope_file" | tr -d '"' | tr -d "'" || true)

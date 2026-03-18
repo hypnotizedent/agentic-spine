@@ -1,18 +1,18 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-12
+last_verified: 2026-03-18
 scope: home-rack-scorecard
 source_binding: ops/bindings/home.storage.map.yaml
 ---
 
 # Home Rack Scorecard
 
-- Generated: `2026-03-12T05:09:25Z`
+- Generated: `2026-03-18T05:10:52Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
 - Active runtimes: `2`
 - Tombstones: `3`
-- Public routes: `1`
+- Public routes: `6`
 
 ## Substrate
 

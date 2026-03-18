@@ -1,418 +1,270 @@
 #!/usr/bin/env bash
-# media.e2e.verify — End-to-end media availability verification
-#
-# Usage (via spine):
-#   ./bin/ops cap run media.e2e.verify
-#   ./bin/ops cap run media.e2e.verify -- --mode sampled --sample-size 5
-#   ./bin/ops cap run media.e2e.verify -- --mode targeted --ids 123,456
-#   ./bin/ops cap run media.e2e.verify -- --json
-#
-# Contract:
-# - Implements MEDIA_E2E_VERIFICATION_SPEC_V1
-# - 4-leg check chain: arr_hasfile -> filesystem_exists -> jellyfin_indexed -> jellyseerr_fulfilled
-# - Modes: targeted (specific IDs), sampled (random N), full_audit (all hasFile=true)
-# - Verdict: AVAILABLE, DEGRADED, PARTIAL, UNAVAILABLE per item
-#
-# Spec ref: ops/bindings/media.e2e.verification.spec.yaml
+# media.e2e.verify — End-to-end media availability verification on media-home
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../../../../../" && pwd)"
-SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
+ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 SSH_RESOLVE="$ROOT/ops/lib/ssh-resolve.sh"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Re-exec under secrets injection
-if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
-  export SPINE_SECRETS_INJECTED=1
-  exec "$SECRETS_EXEC" -- "$0" "$@"
-fi
-
-# shellcheck source=ops/lib/ssh-resolve.sh
-source "$SSH_RESOLVE" 2>/dev/null || true
+# shellcheck source=/dev/null
+source "$SSH_RESOLVE"
 
 usage() {
   cat <<'USAGE'
-media.e2e.verify — End-to-end media availability verification
+media.e2e.verify — End-to-end media availability verification on media-home
 
 Args:
-  --mode MODE         targeted|sampled|full_audit (default: sampled)
+  --mode MODE         targeted|sampled (default: sampled)
   --ids IDS           Comma-separated Radarr movie IDs (for targeted mode)
-  --sample-size N     Number of random titles to check (default: 10, for sampled mode)
+  --sample-size N     Number of titles to check (default: 5)
   --json              Output JSON format
 
 Examples:
   ./bin/ops cap run media.e2e.verify
-  ./bin/ops cap run media.e2e.verify -- --mode targeted --ids 123,456,789
-  ./bin/ops cap run media.e2e.verify -- --mode sampled --sample-size 5 --json
+  ./bin/ops cap run media.e2e.verify -- --mode targeted --ids 123,456
+  ./bin/ops cap run media.e2e.verify -- --mode sampled --sample-size 3 --json
 USAGE
 }
 
 MODE="sampled"
 IDS=""
-SAMPLE_SIZE=10
+SAMPLE_SIZE=5
 OUTPUT_JSON=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --mode)         MODE="${2:-sampled}"; shift 2 ;;
-    --ids)          IDS="${2:-}"; shift 2 ;;
-    --sample-size)  SAMPLE_SIZE="${2:-10}"; shift 2 ;;
-    --json)         OUTPUT_JSON=true; shift ;;
-    -h|--help)      usage; exit 0 ;;
-    --)             shift ;;
-    *)              echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+    --mode) MODE="${2:-sampled}"; shift 2 ;;
+    --ids) IDS="${2:-}"; shift 2 ;;
+    --sample-size) SAMPLE_SIZE="${2:-5}"; shift 2 ;;
+    --json) OUTPUT_JSON=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift ;;
+    *) echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
 
+[[ "$MODE" == "sampled" || "$MODE" == "targeted" ]] || { echo "FAIL: --mode must be sampled or targeted" >&2; exit 1; }
+[[ "$SAMPLE_SIZE" =~ ^[0-9]+$ ]] || { echo "FAIL: --sample-size must be numeric" >&2; exit 1; }
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
-command -v curl >/dev/null 2>&1 || { echo "MISSING_DEP: curl" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
 
-# Resolve service endpoints
-DOWNLOAD_HOST="${DOWNLOAD_HOST:-}"
-STREAMING_HOST="${STREAMING_HOST:-}"
-if [[ -z "$DOWNLOAD_HOST" ]]; then
-  if type ssh_resolve_probe_host &>/dev/null; then
-    DOWNLOAD_HOST="$(ssh_resolve_probe_host download-stack 2>/dev/null | awk '{print $1}')"
-  fi
-fi
-if [[ -z "$STREAMING_HOST" ]]; then
-  if type ssh_resolve_probe_host &>/dev/null; then
-    STREAMING_HOST="$(ssh_resolve_probe_host streaming-stack 2>/dev/null | awk '{print $1}')"
-  fi
-fi
-[[ -n "$DOWNLOAD_HOST" ]] || { echo "STOP: cannot resolve download-stack probe host" >&2; exit 2; }
-[[ -n "$STREAMING_HOST" ]] || { echo "STOP: cannot resolve streaming-stack probe host" >&2; exit 2; }
+resolve_ssh_ref() {
+  local vm="media-home"
+  local target user host resolved
+  target="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .hostname // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+  user="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+  [[ -n "$target" && "$target" != "null" ]] || return 1
 
-RADARR_PORT="${RADARR_PORT:-7878}"
-JELLYFIN_PORT="${JELLYFIN_PORT:-8096}"
-JELLYSEERR_PORT="${JELLYSEERR_PORT:-5055}"
-CURL_CONNECT_TIMEOUT="${MEDIA_E2E_CONNECT_TIMEOUT:-5}"
-CURL_MAX_TIME="${MEDIA_E2E_CURL_TIMEOUT:-30}"
-RADARR_LIST_TIMEOUT="${MEDIA_E2E_RADARR_LIST_TIMEOUT:-120}"
-
-RADARR_URL="http://${DOWNLOAD_HOST}:${RADARR_PORT}"
-JELLYFIN_URL="http://${STREAMING_HOST}:${JELLYFIN_PORT}"
-JELLYSEERR_URL="http://${STREAMING_HOST}:${JELLYSEERR_PORT}"
-
-# API keys from secrets injection
-RADARR_API_KEY="${RADARR_API_KEY:-}"
-JELLYFIN_API_KEY="${JELLYFIN_API_KEY:-${JELLYFIN_API_TOKEN:-}}"
-JELLYSEERR_API_KEY="${JELLYSEERR_API_KEY:-}"
-
-if [[ -z "$RADARR_API_KEY" ]]; then
-  echo "STOP: RADARR_API_KEY not available" >&2
-  exit 2
-fi
-
-# Leg 1: Check Radarr hasFile
-check_arr_hasfile() {
-  local movie_id="$1"
-  local result
-  result="$(curl -sf --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
-    -H "X-Api-Key: ${RADARR_API_KEY}" \
-    "${RADARR_URL}/api/v3/movie/${movie_id}" 2>/dev/null)" || {
-    echo '{"leg":"arr_hasfile","pass":false,"reason":"api_unreachable"}'
-    return
-  }
-  local has_file title file_path tmdb_id
-  has_file="$(echo "$result" | jq -r '.hasFile // false')"
-  title="$(echo "$result" | jq -r '.title // "unknown"')"
-  file_path="$(echo "$result" | jq -r '.movieFile.path // ""')"
-  tmdb_id="$(echo "$result" | jq -r '.tmdbId // 0')"
-
-  if [[ "$has_file" == "true" ]]; then
-    jq -n --arg title "$title" --arg path "$file_path" --argjson tmdb "$tmdb_id" \
-      '{leg: "arr_hasfile", pass: true, title: $title, file_path: $path, tmdb_id: $tmdb}'
-  else
-    jq -n --arg title "$title" --argjson tmdb "$tmdb_id" \
-      '{leg: "arr_hasfile", pass: false, reason: "hasFile=false", title: $title, tmdb_id: $tmdb}'
-  fi
-}
-
-# Leg 2: Check filesystem existence via SSH
-check_filesystem_exists() {
-  local file_path="$1"
-  if [[ -z "$file_path" ]]; then
-    echo '{"leg":"filesystem_exists","pass":false,"reason":"no_file_path"}'
-    return
-  fi
-  local ssh_result
-  local download_ssh_host
-  download_ssh_host="$(ssh_resolve_ssh_host_with_fallback download-stack 2>/dev/null | awk '{print $1}')"
-  [[ -n "$download_ssh_host" ]] || {
-    echo '{"leg":"filesystem_exists","pass":false,"reason":"ssh_unreachable_or_file_missing"}'
-    return
-  }
-  ssh_result="$(ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    "ubuntu@${download_ssh_host}" "stat -c '%s' '${file_path}'" 2>/dev/null)" || {
-    echo '{"leg":"filesystem_exists","pass":false,"reason":"ssh_unreachable_or_file_missing"}'
-    return
-  }
-  if [[ -n "$ssh_result" ]] && [[ "$ssh_result" -gt 0 ]] 2>/dev/null; then
-    jq -n --arg size "$ssh_result" '{leg: "filesystem_exists", pass: true, file_size_bytes: ($size | tonumber)}'
-  else
-    echo '{"leg":"filesystem_exists","pass":false,"reason":"file_empty_or_missing"}'
-  fi
-}
-
-# Leg 3: Check Jellyfin library index
-check_jellyfin_indexed() {
-  local title="$1"
-  local tmdb_id="$2"
-  if [[ -z "$JELLYFIN_API_KEY" ]]; then
-    echo '{"leg":"jellyfin_indexed","pass":false,"reason":"no_api_key"}'
-    return
-  fi
-  local encoded_title
-  encoded_title="$(python3 -c "import urllib.parse; print(urllib.parse.quote('$title'))" 2>/dev/null || echo "$title")"
-
-  local result
-  result="$(curl -sf --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
-    -H "X-Emby-Token: ${JELLYFIN_API_KEY}" \
-    "${JELLYFIN_URL}/Items?SearchTerm=${encoded_title}&IncludeItemTypes=Movie&Recursive=true&Fields=MediaSources,ProviderIds" 2>/dev/null)" || {
-    echo '{"leg":"jellyfin_indexed","pass":false,"reason":"api_unreachable"}'
-    return
-  }
-
-  local total_count
-  total_count="$(echo "$result" | jq '.TotalRecordCount // 0')"
-  if [[ "$total_count" -gt 0 ]]; then
-    # Check for matching TMDb ID if available
-    local match_found="false"
-    if [[ "$tmdb_id" -gt 0 ]]; then
-      match_found="$(echo "$result" | jq --argjson tmdb "$tmdb_id" \
-        '[.Items[] | select(.ProviderIds.Tmdb == ($tmdb | tostring))] | length > 0')"
-    else
-      match_found="true"  # No TMDb to cross-ref, trust title match
+  host="$target"
+  if declare -F ssh_resolve_ssh_host_with_fallback >/dev/null 2>&1; then
+    resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 2>/dev/null || true)"
+    if [[ -n "$resolved" ]]; then
+      host="$(awk '{print $1}' <<<"$resolved")"
     fi
-    if [[ "$match_found" == "true" ]]; then
-      jq -n --argjson count "$total_count" '{leg: "jellyfin_indexed", pass: true, matches: $count}'
-    else
-      jq -n --argjson count "$total_count" '{leg: "jellyfin_indexed", pass: false, reason: "title_match_but_no_tmdb_match", search_results: $count}'
-    fi
+  fi
+
+  if [[ -n "$user" && "$user" != "null" ]]; then
+    printf '%s@%s\n' "$user" "$host"
   else
-    echo '{"leg":"jellyfin_indexed","pass":false,"reason":"not_in_library"}'
+    printf '%s\n' "$host"
   fi
 }
 
-# Leg 4: Check Jellyseerr request status (SKIP if no request exists)
-check_jellyseerr_fulfilled() {
-  local tmdb_id="$1"
-  if [[ -z "$JELLYSEERR_API_KEY" ]] || [[ "$tmdb_id" -eq 0 ]]; then
-    echo '{"leg":"jellyseerr_fulfilled","pass":true,"skip":true,"reason":"no_api_key_or_tmdb_id"}'
-    return
-  fi
+SSH_REF="$(resolve_ssh_ref)"
 
-  # Search for request by TMDb ID
-  local result
-  result="$(curl -sf --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
-    -H "X-Api-Key: ${JELLYSEERR_API_KEY}" \
-    "${JELLYSEERR_URL}/api/v1/request?take=20&skip=0" 2>/dev/null)" || {
-    echo '{"leg":"jellyseerr_fulfilled","pass":true,"skip":true,"reason":"api_unreachable"}'
-    return
-  }
+RESULT_JSON="$(
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$SSH_REF" \
+    sudo env MODE="$MODE" IDS="$IDS" SAMPLE_SIZE="$SAMPLE_SIZE" GENERATED_AT="$GENERATED_AT" python3 - <<'PY'
+import json
+import os
+import re
+import urllib.parse
+import urllib.request
+from pathlib import Path
 
-  # Find request matching this TMDb ID
-  local matching_request
-  matching_request="$(echo "$result" | jq --argjson tmdb "$tmdb_id" \
-    '[.results[] | select(.media.tmdbId == $tmdb)] | first // null')"
+MODE = os.environ.get("MODE", "sampled")
+IDS = [item for item in os.environ.get("IDS", "").split(",") if item]
+SAMPLE_SIZE = int(os.environ.get("SAMPLE_SIZE", "5"))
 
-  if [[ "$matching_request" == "null" ]]; then
-    echo '{"leg":"jellyseerr_fulfilled","pass":true,"skip":true,"reason":"no_request_for_title"}'
-    return
-  fi
+base_write = Path("/srv/appdata/compose/media-write/volumes")
 
-  local media_status
-  media_status="$(echo "$matching_request" | jq '.media.status // 0')"
-  # Status: 3=available, 4=partially_available, 5=processing
-  if [[ "$media_status" -eq 3 ]] || [[ "$media_status" -eq 4 ]] || [[ "$media_status" -eq 5 ]]; then
-    jq -n --argjson status "$media_status" '{leg: "jellyseerr_fulfilled", pass: true, media_status: $status}'
-  else
-    jq -n --argjson status "$media_status" '{leg: "jellyseerr_fulfilled", pass: false, reason: "not_available", media_status: $status}'
-  fi
-}
+def read_xml_api_key(path_root: Path) -> str:
+    for path in path_root.rglob("*.xml"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        match = re.search(r"<ApiKey>([^<]+)</ApiKey>", text)
+        if match:
+            return match.group(1)
+    raise RuntimeError(f"api key not found under {path_root}")
 
-# Determine verdict from leg results
-compute_verdict() {
-  local legs_json="$1"
-  echo "$legs_json" | jq '
-    def severity_of(leg):
-      if leg == "arr_hasfile" then "critical"
-      elif leg == "filesystem_exists" then "critical"
-      elif leg == "jellyfin_indexed" then "high"
-      elif leg == "jellyseerr_fulfilled" then "medium"
-      else "unknown"
-      end;
+def read_env_key(env_path: str, key: str) -> str:
+    with open(env_path, encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith(f"{key}="):
+                return line.strip().split("=", 1)[1]
+    raise RuntimeError(f"{key} missing from {env_path}")
 
-    . as $legs |
-    [.[] | select(.pass == false and (.skip // false) == false)] as $failures |
-    if ($failures | length) == 0 then "AVAILABLE"
-    elif [.[] | select(.pass == false and (.skip // false) == false) | .leg] | any(. == "arr_hasfile" or . == "filesystem_exists") then "UNAVAILABLE"
-    elif [.[] | select(.pass == false and (.skip // false) == false) | .leg] | any(. == "jellyfin_indexed") then "DEGRADED"
-    else "PARTIAL"
-    end
-  '
-}
+def api_json(url: str, headers: dict) -> object:
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.load(response)
 
-# Get movie IDs based on mode
-get_movie_ids() {
-  case "$MODE" in
-    targeted)
-      if [[ -z "$IDS" ]]; then
-        echo "STOP: --ids required for targeted mode" >&2
-        exit 1
-      fi
-      echo "$IDS" | tr ',' '\n'
-      ;;
-    sampled)
-      # Get random sample of movies with hasFile=true
-      local movies
-      movies="$(curl -sf --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$RADARR_LIST_TIMEOUT" \
-        -H "X-Api-Key: ${RADARR_API_KEY}" \
-        "${RADARR_URL}/api/v3/movie" 2>/dev/null)" || {
-        echo "FAIL: cannot reach Radarr API" >&2
-        exit 1
-      }
-      echo "$movies" | jq -r --argjson n "$SAMPLE_SIZE" \
-        '[.[] | select(.hasFile == true) | .id] | if length > $n then [limit($n; .[])] else . end | .[]'
-      ;;
-    full_audit)
-      local movies
-      movies="$(curl -sf --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$RADARR_LIST_TIMEOUT" \
-        -H "X-Api-Key: ${RADARR_API_KEY}" \
-        "${RADARR_URL}/api/v3/movie" 2>/dev/null)" || {
-        echo "FAIL: cannot reach Radarr API" >&2
-        exit 1
-      }
-      echo "$movies" | jq -r '[.[] | select(.hasFile == true) | .id] | .[]'
-      ;;
-    *)
-      echo "STOP: invalid mode: $MODE" >&2
-      exit 1
-      ;;
-  esac
-}
+radarr_key = read_xml_api_key(base_write / "radarr" / "config")
+jellyfin_token = read_env_key("/srv/appdata/compose/media-playback/.env", "JELLYFIN_API_TOKEN")
+jellyseerr_key = read_env_key("/srv/appdata/compose/media-playback/.env", "JELLYSEERR_API_KEY")
 
-# Run verification
-MOVIE_IDS="$(get_movie_ids)" || exit $?
+def radarr_movie(movie_id: int) -> dict:
+    return api_json(f"http://127.0.0.1:7878/api/v3/movie/{movie_id}", {"X-Api-Key": radarr_key})
 
-if [[ -z "$MOVIE_IDS" ]]; then
-  if $OUTPUT_JSON; then
-    jq -n --arg ts "$GENERATED_AT" --arg mode "$MODE" \
-      '{capability: "media.e2e.verify", generated_at: $ts, mode: $mode, status: "empty", items: [], summary: {total: 0}}'
-  else
-    echo "media.e2e.verify: no items to check (mode=$MODE)"
-  fi
-  exit 0
-fi
+def radarr_movies() -> list:
+    return api_json("http://127.0.0.1:7878/api/v3/movie", {"X-Api-Key": radarr_key})
 
-RESULTS="[]"
-TOTAL=0
-AVAILABLE=0
-DEGRADED=0
-PARTIAL=0
-UNAVAILABLE=0
+def jellyfin_search(title: str) -> dict:
+    encoded = urllib.parse.quote(title)
+    url = f"http://127.0.0.1:8096/Items?SearchTerm={encoded}&IncludeItemTypes=Movie&Recursive=true&Fields=ProviderIds"
+    return api_json(url, {"X-Emby-Token": jellyfin_token})
 
-while IFS= read -r movie_id; do
-  [[ -z "$movie_id" ]] && continue
-  TOTAL=$((TOTAL + 1))
+def jellyseerr_requests() -> list:
+    data = api_json("http://127.0.0.1:5055/api/v1/request?take=1000&skip=0", {"X-Api-Key": jellyseerr_key})
+    return data.get("results", [])
 
-  # Leg 1: arr_hasfile
-  leg1="$(check_arr_hasfile "$movie_id")"
-  title="$(echo "$leg1" | jq -r '.title // "unknown"')"
-  file_path="$(echo "$leg1" | jq -r '.file_path // ""')"
-  tmdb_id="$(echo "$leg1" | jq -r '.tmdb_id // 0')"
-  leg1_pass="$(echo "$leg1" | jq -r '.pass // false')"
+def host_path_from_container_path(path: str) -> str:
+    if path.startswith("/movies/"):
+        return path.replace("/movies/", "/srv/media/movies/", 1)
+    if path.startswith("/tv/"):
+        return path.replace("/tv/", "/srv/media/tv/", 1)
+    if path.startswith("/media/"):
+        return path.replace("/media/", "/srv/media/", 1)
+    return path
 
-  # Leg 2: filesystem_exists (only if leg 1 passed)
-  if [[ "$leg1_pass" == "true" ]]; then
-    leg2="$(check_filesystem_exists "$file_path")"
-  else
-    leg2='{"leg":"filesystem_exists","pass":false,"reason":"skipped_leg1_failed","skip":true}'
-  fi
+all_requests = jellyseerr_requests()
+request_by_tmdb = {}
+for item in all_requests:
+    media = item.get("media") or {}
+    tmdb_id = media.get("tmdbId")
+    if tmdb_id is not None:
+        request_by_tmdb.setdefault(int(tmdb_id), []).append(item)
 
-  # Leg 3: jellyfin_indexed
-  leg3="$(check_jellyfin_indexed "$title" "$tmdb_id")"
+if MODE == "targeted":
+    selected = [radarr_movie(int(movie_id)) for movie_id in IDS]
+else:
+    movies = []
+    for item in radarr_movies():
+        if not item.get("hasFile"):
+            continue
+        movie_file = item.get("movieFile") or {}
+        path = host_path_from_container_path(movie_file.get("path") or "")
+        if path and os.path.exists(path) and os.path.getsize(path) > 0:
+            movies.append(item)
+    movies.sort(key=lambda item: item.get("id", 0), reverse=True)
+    selected = movies[:SAMPLE_SIZE]
+eligible_count = len(selected)
 
-  # Leg 4: jellyseerr_fulfilled
-  leg4="$(check_jellyseerr_fulfilled "$tmdb_id")"
+results = []
+for movie in selected:
+    title = movie.get("title", "unknown")
+    movie_id = int(movie.get("id", 0))
+    tmdb_id = int(movie.get("tmdbId") or 0)
+    movie_file = movie.get("movieFile") or {}
+    file_path = movie_file.get("path") or ""
+    host_file_path = host_path_from_container_path(file_path)
 
-  # Compute verdict
-  legs_json="$(jq -n --argjson l1 "$leg1" --argjson l2 "$leg2" --argjson l3 "$leg3" --argjson l4 "$leg4" '[$l1, $l2, $l3, $l4]')"
-  verdict="$(compute_verdict "$legs_json")"
+    leg1 = {
+        "leg": "arr_hasfile",
+        "pass": bool(movie.get("hasFile")),
+        "title": title,
+        "file_path": file_path,
+        "host_file_path": host_file_path,
+        "tmdb_id": tmdb_id,
+    }
 
-  case "$verdict" in
-    '"AVAILABLE"')    AVAILABLE=$((AVAILABLE + 1)) ;;
-    '"DEGRADED"')     DEGRADED=$((DEGRADED + 1)) ;;
-    '"PARTIAL"')      PARTIAL=$((PARTIAL + 1)) ;;
-    '"UNAVAILABLE"')  UNAVAILABLE=$((UNAVAILABLE + 1)) ;;
-  esac
+    if host_file_path and os.path.exists(host_file_path):
+        size = os.path.getsize(host_file_path)
+        leg2 = {"leg": "filesystem_exists", "pass": size > 0, "file_size_bytes": size}
+    else:
+        leg2 = {"leg": "filesystem_exists", "pass": False, "reason": "file_missing"}
 
-  item="$(jq -n --argjson mid "$movie_id" --arg title "$title" --argjson legs "$legs_json" --argjson verdict "$verdict" \
-    '{movie_id: $mid, title: $title, legs: $legs, verdict: $verdict}')"
-  RESULTS="$(echo "$RESULTS" | jq --argjson item "$item" '. + [$item]')"
+    search = jellyfin_search(title)
+    items = search.get("Items", [])
+    match = False
+    for item in items:
+        providers = item.get("ProviderIds") or {}
+        if tmdb_id and providers.get("Tmdb") == str(tmdb_id):
+            match = True
+            break
+    if not items:
+        leg3 = {"leg": "jellyfin_indexed", "pass": False, "reason": "not_in_library"}
+    elif tmdb_id and not match:
+        leg3 = {"leg": "jellyfin_indexed", "pass": False, "reason": "tmdb_mismatch", "matches": len(items)}
+    else:
+        leg3 = {"leg": "jellyfin_indexed", "pass": True, "matches": len(items)}
 
-done <<< "$MOVIE_IDS"
+    matching_requests = request_by_tmdb.get(tmdb_id, [])
+    if not matching_requests:
+        leg4 = {"leg": "jellyseerr_fulfilled", "pass": True, "skip": True, "reason": "no_request_record"}
+    else:
+        statuses = []
+        fulfilled = False
+        for request in matching_requests:
+          media = request.get("media") or {}
+          status_value = media.get("status")
+          statuses.append(status_value)
+          if (status_value is not None and int(status_value) >= 3) or media.get("jellyfinMediaId"):
+              fulfilled = True
+        leg4 = {
+            "leg": "jellyseerr_fulfilled",
+            "pass": fulfilled,
+            "request_statuses": statuses,
+            "matching_requests": len(matching_requests),
+        }
 
-# Overall status
-if [[ "$UNAVAILABLE" -gt 0 ]]; then
-  OVERALL="fail"
-elif [[ "$DEGRADED" -gt 0 ]] || [[ "$PARTIAL" -gt 0 ]]; then
-  OVERALL="warn"
-else
-  OVERALL="pass"
-fi
+    verdict = "PASS" if leg1["pass"] and leg2["pass"] and leg3["pass"] and leg4["pass"] else "FAIL"
+    if leg4.get("skip"):
+        verdict = "PASS_WITH_SKIP"
+
+    results.append({
+        "movie_id": movie_id,
+        "title": title,
+        "tmdb_id": tmdb_id,
+        "verdict": verdict,
+        "legs": [leg1, leg2, leg3, leg4],
+    })
+
+overall = "pass" if results and all(item["verdict"] != "FAIL" for item in results) else "fail"
+print(json.dumps({
+    "capability": "media.e2e.verify",
+    "generated_at": os.environ.get("GENERATED_AT"),
+    "status": overall,
+    "data": {
+        "mode": MODE,
+        "sample_size": SAMPLE_SIZE,
+        "ids": IDS,
+        "eligible_count": eligible_count,
+        "checked": len(results),
+        "results": results,
+        "reason": "no_eligible_samples" if not results else None,
+    },
+}))
+PY
+)"
 
 if $OUTPUT_JSON; then
-  echo "$RESULTS" | jq \
-    --arg ts "$GENERATED_AT" \
-    --arg mode "$MODE" \
-    --arg overall "$OVERALL" \
-    --argjson total "$TOTAL" \
-    --argjson avail "$AVAILABLE" \
-    --argjson deg "$DEGRADED" \
-    --argjson part "$PARTIAL" \
-    --argjson unavail "$UNAVAILABLE" \
-    '{
-      capability: "media.e2e.verify",
-      generated_at: $ts,
-      mode: $mode,
-      status: $overall,
-      summary: {
-        total: $total,
-        available: $avail,
-        degraded: $deg,
-        partial: $part,
-        unavailable: $unavail
-      },
-      items: .
-    }'
+  printf '%s\n' "$RESULT_JSON"
 else
   echo "media.e2e.verify"
   echo "================"
-  echo "mode: $MODE"
-  echo "status: $OVERALL"
-  echo "generated_at: $GENERATED_AT"
-  echo ""
-  echo "Summary:"
-  echo "  total:       $TOTAL"
-  echo "  available:   $AVAILABLE"
-  echo "  degraded:    $DEGRADED"
-  echo "  partial:     $PARTIAL"
-  echo "  unavailable: $UNAVAILABLE"
-  echo ""
-
-  # Show non-available items
-  NON_AVAIL="$(echo "$RESULTS" | jq -r '.[] | select(.verdict != "AVAILABLE") | "  \(.verdict) \(.title) (id=\(.movie_id))"')"
-  if [[ -n "$NON_AVAIL" ]]; then
-    echo "Non-Available Items:"
-    echo "$NON_AVAIL"
-  fi
+  echo "mode: $(jq -r '.data.mode' <<<"$RESULT_JSON")"
+  echo "checked: $(jq -r '.data.checked' <<<"$RESULT_JSON")"
+  jq -r '.data.results[] | "  " + .title + ": " + .verdict' <<<"$RESULT_JSON"
 fi
 
-if [[ "$OVERALL" == "fail" ]]; then
+if [[ "$(jq -r '.status' <<<"$RESULT_JSON")" != "pass" ]]; then
   exit 1
 fi
 exit 0

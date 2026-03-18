@@ -3,7 +3,7 @@
 # Status: generated
 # Do not edit manually — rebuild with: ./bin/ops cap run infra.estate.boringness.build
 version: 1
-generated_at_utc: '2026-03-12T05:09:25Z'
+generated_at_utc: '2026-03-18T05:10:52Z'
 generated_by:
   capability: infra.estate.boringness.build
   script: ops/plugins/infra/bin/infra-estate-boringness-build
@@ -31,20 +31,22 @@ repo_surfaces:
 sites:
   shop:
     boring_enough_now: false
-    summary: Shop rack is structurally legible and inventory-backed; VM200 hot footprint
-      is gone and the remaining blocker is warm-lane pressure on media plus a retained
-      forensic snapshot hold.
+    summary: Shop rack is structurally legible, inventory-backed, and storage-normalized
+      at the namespace layer; the remaining blockers are warm-lane pressure on media
+      and app-level import backlog behavior on download-stack.
     storage_tiers:
       hot: tank
       warm: media
       cold: md1400
     blockers:
-    - media is at 99% usage and only has about 189G free.
+    - media is at 95% usage. The pool has about 1.37T free, but clients only see about
+      798G available over NFS.
     - Client-visible /media payload already accounts for about 15.9TiB of canonical
       movie/TV/music/archive content, so the remaining easy reclaim is mostly downloads.
-    - media@forensic-20260226-2325 is still retained as a forensic hold and has grown
-      to 278G, so the completed backup drain still does not immediately reclaim matching
-      space.
+    - Downloads still contribute about 2.25TiB of regenerable pressure even after
+      the duplicate-drain and snapshot cleanup wave.
+    - download-stack automation still logs FreeSpaceSpecification zero-free-space
+      failures and SQLite lock churn, so import backlog behavior is not yet boring.
   home:
     boring_enough_now: false
     summary: Home infra now has authoritative inventory and backup truth, but one-box
@@ -151,11 +153,21 @@ compatibility_holds:
   kind: public_route
   note: Legacy finance alias retained for compatibility. Canonical public dashboard
     URL is finances.mintprints.com.
+- id: homarr.ronny.works
+  environment: home
+  kind: public_route
+  note: Compatibility hold only. Canonical media control-plane truth is media-home,
+    but Homarr itself is intentionally parked during jellyfin-only recovery.
 - id: investments.ronny.works
   environment: shop
   kind: public_route
   note: Legacy finance alias retained for compatibility. Canonical public investment
     URL is investments.mintprints.com.
+- id: jellyfin.ronny.works
+  environment: home
+  kind: public_route
+  note: Compatibility hold only. Canonical media runtime is media-home; do not treat
+    the old shop stack as live truth.
 - id: mcp.mintprints.co
   environment: shop
   kind: public_route
@@ -165,12 +177,9 @@ compatibility_holds:
   environment: shop
   kind: storage_mount_overlay
   note: Client-visible /media payload truth comes from the NFS export, not the host-local
-    child dataset mount view at /media/movies, /media/tv, /media/music, and /media/movies-archive.
-- id: media-forensic-20260226-2325
-  environment: shop
-  kind: storage_snapshot_hold
-  note: Retained forensic snapshot on media preserves deleted blocks and blocks immediate
-    reclaim during the copy-first normalization wave.
+    child dataset mount view at /media/movies, /media/tv, and /media/music. The old
+    /media/movies-archive cross-pool mask and the Proxmox media-storage compatibility
+    backend were removed on 2026-03-17.
 - id: minio.mintprints.co
   environment: shop
   kind: public_route
@@ -191,16 +200,31 @@ compatibility_holds:
   kind: public_route
   note: Legacy compatibility apex. Not canonical for work surfaces; mintprints.com
     is the primary public work root.
+- id: music.ronny.works
+  environment: home
+  kind: public_route
+  note: Compatibility hold only. Canonical music runtime is media-home, but Navidrome
+    is intentionally parked during jellyfin-only recovery.
 - id: pricing.mintprints.co
   environment: shop
   kind: public_route
   note: Legacy pricing alias retained during mintprints.com cutover. Canonical public
     URL is pricing.mintprints.com.
+- id: requests.ronny.works
+  environment: home
+  kind: public_route
+  note: Compatibility hold only. Canonical request manager is media-home, but Jellyseerr
+    is intentionally parked during jellyfin-only recovery.
 - id: shipping.mintprints.co
   environment: shop
   kind: public_route
   note: Legacy shipping alias retained during mintprints.com cutover. Canonical public
     URL is shipping.mintprints.com.
+- id: spotisub.ronny.works
+  environment: home
+  kind: public_route
+  note: Compatibility hold only. Canonical Spotify sync surface is media-home, but
+    Spotisub is intentionally parked during jellyfin-only recovery.
 - id: suppliers.mintprints.co
   environment: shop
   kind: public_route
@@ -277,7 +301,7 @@ decisions:
   rationale: Cold capsule path/size/SHA-256 and qemu config were captured before delete,
     then qm disk unlink removed scsi0 and the backing LV on 2026-03-12T04:30:02Z.
 - decision_type: safe_to_migrate
-  subject: legacy media-stack tarballs from /media/backups to /md1400/media-cold/legacy-media-stack-backups
+  subject: legacy media-stack tarballs from /media/backups to /md1400/archive/media-holds/legacy-media-stack-backups
   environment: shop
   status: done
   rationale: Canonical media config backups already live under /md1400/backup-cold/apps/media-config.
@@ -286,9 +310,9 @@ decisions:
 - decision_type: safe_to_delete
   subject: media@forensic-20260226-2325
   environment: shop
-  status: blocked
-  rationale: Snapshot still acts as a forensic restore hold for the copy-first utilization
-    wave. Deleting it would change the restore story, not just free space.
+  status: done
+  rationale: Snapshot was destroyed on 2026-03-17 after legacy media-stack backups
+    and the duplicate-download review hold were captured on md1400.
 - decision_type: safe_to_delete
   subject: Synology mint-os legacy residue
   environment: home
@@ -311,9 +335,12 @@ decisions:
   subject: shop rack hot/warm/cold storage
   environment: shop
   status: blocked
-  rationale: VM200 hot LV is gone, but media remains at 99% usage, downloads still
-    contribute about 2.61TiB of regenerable pressure, and the retained forensic snapshot
-    prevents warm-lane deletions from reclaiming space immediately.
+  rationale: The namespace is cleaner, /md1400/stage is back to empty posture, the
+    Proxmox media-storage compatibility backend is gone, and the forensic snapshot
+    was destroyed. Hardware change is still blocked because media remains at 95% usage,
+    downloads still contribute about 2.25TiB of regenerable pressure, GAP-OP-1526
+    is still active, and import automation is still pinned by app-level free-space
+    checks.
 - decision_type: safe_to_change_drives
   subject: proxmox-home and Synology drives
   environment: home

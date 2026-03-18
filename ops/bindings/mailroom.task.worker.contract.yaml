@@ -13,9 +13,14 @@ runtime:
   log_file: "mailroom-task-worker.log"
   status_file: "mailroom-task-worker.status.json"
 
+bootstrap:
+  governed_main_override: true
+  terminal_role: "SPINE-CONTROL-01"
+  runtime_role: "worker"
+
 control_cycle:
   enabled: true
-  timeout_seconds: 45
+  timeout_seconds: 300
   window_hours: 24
   max_actions: 3
   max_priority: P1
@@ -31,9 +36,25 @@ task_execution:
     claim_all: true
     claim_unassigned: true
     allow_unhealthy_claims: false
+  claim_failure_policy:
+    quarantine_after_failures: 5
   execute_route_targets:
     - capability
     - agent_tool
+    - handoff
+  handoff_dispatch:
+    terminal_catalog: ops/bindings/terminal.worker.catalog.yaml
+    launcher_command:
+      - ./bin/ops
+      - terminal
+      - launch
+    target_resolution_timeout_seconds: 120
+    launch_timeout_seconds: 180
+    accept_timeout_seconds: 45
+    accept_poll_interval_seconds: 1
+    launch_role: solo
+    default_tool: codex
+    reconcile_capability: session.handoff.task_reconcile
   # NOTE: This allowlist is intentionally narrower than the bridge RPC allowlist
   # (mailroom.bridge.consumers.yaml). The worker runs autonomously on a timer
   # and should only execute governance/lifecycle caps. Read-only surface caps

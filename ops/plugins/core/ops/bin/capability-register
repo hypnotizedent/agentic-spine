@@ -5,14 +5,17 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)
 CAP_FILE="$ROOT/ops/capabilities.yaml"
 MAP_FILE="$ROOT/ops/bindings/capability_map.yaml"
 MANIFEST_FILE="$ROOT/ops/plugins/MANIFEST.yaml"
-ROUTING_GEN="$ROOT/ops/plugins/core/ops/bin/gen-routing-dispatch.sh"
+TRIAD_RECONCILE="$ROOT/ops/plugins/core/ops/bin/capability-triad-reconcile"
 ROUTING_FILE="$ROOT/ops/bindings/routing.dispatch.yaml"
 source "$ROOT/ops/lib/git-lock.sh"
 source "$ROOT/ops/lib/governed-write-transaction.sh"
 
 LOCK_HELD=0
 tmp_cap_entry=""
-tmp_map_entry=""
+tmp_cap_file=""
+tmp_map_file=""
+tmp_manifest_file=""
+tmp_routing_file=""
 
 CAP_ID=""
 DESCRIPTION=""
@@ -31,6 +34,7 @@ ARG_PROTOCOL=""
 NOTE=""
 DRY_RUN=0
 LANE_SAFE=0
+RECONCILE_EXISTING=0
 LOOP_ID="${SPINE_LOOP_ID:-}"
 
 usage() {
@@ -48,6 +52,7 @@ Options:
   --tags <csv>                      Optional
   --arg-protocol <passthrough|argparse|positional|none>
   --note <text>                     Optional capability_map note
+  --reconcile-existing             Reconcile triad state for an existing capability
   --dry-run
   --lane-safe                       Queue shared-authority mutation instead of mutating files
   --loop-id <LOOP-ID>               Required with --lane-safe when SPINE_LOOP_ID is not set
@@ -64,8 +69,43 @@ cleanup() {
     release_git_lock || true
   fi
   spine_tx_cleanup
-  rm -f "${tmp_cap_entry:-}" "${tmp_map_entry:-}"
+  rm -f "${tmp_cap_entry:-}" "${tmp_cap_file:-}" "${tmp_map_file:-}" "${tmp_manifest_file:-}" "${tmp_routing_file:-}"
   return 0
+}
+
+csv_from_yaml_seq() {
+  local file="$1"
+  local expr="$2"
+  yq e -r "$expr[]?" "$file" 2>/dev/null | paste -sd, - || true
+}
+
+infer_plugin_and_script_from_command() {
+  local command_text="$1"
+  local command_bin plugin_path
+  command_bin="${command_text%% *}"
+  if [[ "$command_bin" =~ ^\./ops/plugins/(.+)/bin/([^/[:space:]]+)$ ]]; then
+    plugin_path="${BASH_REMATCH[1]}"
+    printf '%s\t%s\n' "$(basename "$plugin_path")" "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  return 1
+}
+
+make_sibling_temp() {
+  local target="$1"
+  local dir base
+  dir="$(dirname "$target")"
+  base="$(basename "$target")"
+  mktemp "$dir/.${base}.tmp.XXXXXX"
+}
+
+manifest_script_ref() {
+  local script="$1"
+  if [[ "$script" == bin/* ]]; then
+    printf '%s\n' "$script"
+  else
+    printf 'bin/%s\n' "$script"
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -86,6 +126,7 @@ while [[ $# -gt 0 ]]; do
     --tags) TAGS_CSV="${2:?--tags requires a value}"; shift 2 ;;
     --arg-protocol) ARG_PROTOCOL="${2:?--arg-protocol requires a value}"; shift 2 ;;
     --note) NOTE="${2:?--note requires a value}"; shift 2 ;;
+    --reconcile-existing) RECONCILE_EXISTING=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --lane-safe) LANE_SAFE=1; shift ;;
     --loop-id) LOOP_ID="${2:?--loop-id requires a value}"; shift 2 ;;
@@ -98,36 +139,10 @@ command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
 [[ -f "$CAP_FILE" ]] || fail "missing capabilities registry: $CAP_FILE"
 [[ -f "$MAP_FILE" ]] || fail "missing capability map: $MAP_FILE"
 [[ -f "$MANIFEST_FILE" ]] || fail "missing plugin manifest: $MANIFEST_FILE"
-[[ -x "$ROUTING_GEN" ]] || fail "missing routing generator: $ROUTING_GEN"
+[[ -x "$TRIAD_RECONCILE" ]] || fail "missing triad reconcile runtime: $TRIAD_RECONCILE"
 [[ -f "$ROUTING_FILE" ]] || fail "missing routing dispatch: $ROUTING_FILE"
 
 [[ -n "$CAP_ID" ]] || fail "--id is required"
-[[ -n "$DESCRIPTION" ]] || fail "--description is required"
-[[ -n "$COMMAND" ]] || fail "--command is required"
-[[ -n "$SAFETY" ]] || fail "--safety is required"
-[[ -n "$APPROVAL" ]] || fail "--approval is required"
-[[ -n "$PLUGIN" ]] || fail "--plugin is required"
-[[ -n "$SCRIPT" ]] || fail "--script is required"
-
-case "$SAFETY" in
-  read-only|mutating|destructive) ;;
-  *) fail "invalid --safety '$SAFETY'" ;;
-esac
-case "$APPROVAL" in
-  auto|manual|operator) ;;
-  *) fail "invalid --approval '$APPROVAL'" ;;
-esac
-case "$PLANE" in
-  fabric|domain_external) ;;
-  *) fail "invalid --plane '$PLANE'" ;;
-esac
-if [[ -n "$ARG_PROTOCOL" ]]; then
-  case "$ARG_PROTOCOL" in
-    passthrough|argparse|positional|none) ;;
-    *) fail "invalid --arg-protocol '$ARG_PROTOCOL'" ;;
-  esac
-fi
-
 if [[ "$LANE_SAFE" -eq 1 ]]; then
   [[ -n "$LOOP_ID" ]] || fail "--lane-safe requires --loop-id or SPINE_LOOP_ID context"
   source "$ROOT/ops/lib/runtime-paths.sh"
@@ -164,15 +179,77 @@ YAML
   exit 0
 fi
 
+cap_exists=0
+map_exists=0
 if yq e -e ".capabilities.\"$CAP_ID\"" "$CAP_FILE" >/dev/null 2>&1; then
-  fail "capability already exists: $CAP_ID"
+  cap_exists=1
 fi
+if yq e -e ".capabilities.\"$CAP_ID\"" "$MAP_FILE" >/dev/null 2>&1; then
+  map_exists=1
+fi
+
+if [[ "$cap_exists" -eq 1 ]]; then
+  if [[ "$RECONCILE_EXISTING" -ne 1 ]]; then
+    fail "capability already exists: $CAP_ID"
+  fi
+  [[ -n "$DESCRIPTION" ]] || DESCRIPTION="$(yq e -r ".capabilities.\"$CAP_ID\".description // \"\"" "$CAP_FILE" 2>/dev/null)"
+  [[ -n "$COMMAND" ]] || COMMAND="$(yq e -r ".capabilities.\"$CAP_ID\".command // \"\"" "$CAP_FILE" 2>/dev/null)"
+  [[ -n "$SAFETY" ]] || SAFETY="$(yq e -r ".capabilities.\"$CAP_ID\".safety // \"\"" "$CAP_FILE" 2>/dev/null)"
+  [[ -n "$APPROVAL" ]] || APPROVAL="$(yq e -r ".capabilities.\"$CAP_ID\".approval // \"\"" "$CAP_FILE" 2>/dev/null)"
+  [[ "$DOMAIN" != "none" ]] || DOMAIN="$(yq e -r ".capabilities.\"$CAP_ID\".domain // \"none\"" "$CAP_FILE" 2>/dev/null)"
+  [[ "$PLANE" != "fabric" ]] || PLANE="$(yq e -r ".capabilities.\"$CAP_ID\".plane // \"fabric\"" "$CAP_FILE" 2>/dev/null)"
+  [[ "$CWD" != '"$SPINE_CODE"' ]] || CWD="$(yq e -r ".capabilities.\"$CAP_ID\".cwd // \"\\\"\\$SPINE_CODE\\\"\"" "$CAP_FILE" 2>/dev/null)"
+  [[ "$LIFECYCLE" != "ready" ]] || LIFECYCLE="$(yq e -r ".capabilities.\"$CAP_ID\".lifecycle // \"ready\"" "$CAP_FILE" 2>/dev/null)"
+  [[ -n "$OUTPUTS_CSV" && "$OUTPUTS_CSV" != "stdout" ]] || OUTPUTS_CSV="$(csv_from_yaml_seq "$CAP_FILE" ".capabilities.\"$CAP_ID\".outputs")"
+  [[ -n "$TAGS_CSV" ]] || TAGS_CSV="$(csv_from_yaml_seq "$CAP_FILE" ".capabilities.\"$CAP_ID\".tags")"
+  [[ -n "$ARG_PROTOCOL" ]] || ARG_PROTOCOL="$(yq e -r ".capabilities.\"$CAP_ID\".arg_protocol // \"\"" "$CAP_FILE" 2>/dev/null)"
+
+  if [[ "$map_exists" -eq 1 ]]; then
+    [[ -n "$PLUGIN" ]] || PLUGIN="$(yq e -r ".capabilities.\"$CAP_ID\".plugin // \"\"" "$MAP_FILE" 2>/dev/null)"
+    [[ -n "$SCRIPT" ]] || SCRIPT="$(yq e -r ".capabilities.\"$CAP_ID\".script // \"\"" "$MAP_FILE" 2>/dev/null)"
+    [[ -n "$NOTE" ]] || NOTE="$(yq e -r ".capabilities.\"$CAP_ID\".note // \"\"" "$MAP_FILE" 2>/dev/null)"
+    [[ -n "$ARG_PROTOCOL" ]] || ARG_PROTOCOL="$(yq e -r ".capabilities.\"$CAP_ID\".arg_protocol // \"\"" "$MAP_FILE" 2>/dev/null)"
+  fi
+
+  if [[ -z "$PLUGIN" || -z "$SCRIPT" ]]; then
+    if infer="$(infer_plugin_and_script_from_command "$COMMAND" 2>/dev/null)"; then
+      [[ -n "$PLUGIN" ]] || PLUGIN="$(cut -f1 <<<"$infer")"
+      [[ -n "$SCRIPT" ]] || SCRIPT="$(cut -f2 <<<"$infer")"
+    fi
+  fi
+fi
+
+[[ -n "$DESCRIPTION" ]] || fail "--description is required"
+[[ -n "$COMMAND" ]] || fail "--command is required"
+[[ -n "$SAFETY" ]] || fail "--safety is required"
+[[ -n "$APPROVAL" ]] || fail "--approval is required"
+[[ -n "$PLUGIN" ]] || fail "--plugin is required"
+[[ -n "$SCRIPT" ]] || fail "--script is required"
+
+case "$SAFETY" in
+  read-only|mutating|destructive) ;;
+  *) fail "invalid --safety '$SAFETY'" ;;
+esac
+case "$APPROVAL" in
+  auto|manual|operator) ;;
+  *) fail "invalid --approval '$APPROVAL'" ;;
+esac
+case "$PLANE" in
+  fabric|domain_external) ;;
+  *) fail "invalid --plane '$PLANE'" ;;
+esac
+if [[ -n "$ARG_PROTOCOL" ]]; then
+  case "$ARG_PROTOCOL" in
+    passthrough|argparse|positional|none) ;;
+    *) fail "invalid --arg-protocol '$ARG_PROTOCOL'" ;;
+  esac
+fi
+
 if ! yq e -e ".plugins[] | select(.name == \"$PLUGIN\")" "$MANIFEST_FILE" >/dev/null 2>&1; then
   fail "plugin '$PLUGIN' not found in $MANIFEST_FILE"
 fi
 
 tmp_cap_entry="$(mktemp)"
-tmp_map_entry="$(mktemp)"
 trap cleanup EXIT INT TERM
 
 {
@@ -203,22 +280,15 @@ trap cleanup EXIT INT TERM
   fi
 } > "$tmp_cap_entry"
 
-{
-  echo "plugin: $PLUGIN"
-  echo "script: $SCRIPT"
-  echo "safety: $SAFETY"
-  if [[ -n "$ARG_PROTOCOL" ]]; then
-    echo "arg_protocol: $ARG_PROTOCOL"
-  fi
-  if [[ -n "$NOTE" ]]; then
-    echo "note: \"${NOTE//\"/\\\"}\""
-  fi
-} > "$tmp_map_entry"
-
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "capability.register"
   echo "status: DRY_RUN"
-  echo "would_add: $CAP_ID"
+  if [[ "$RECONCILE_EXISTING" -eq 1 ]]; then
+    echo "would_reconcile: $CAP_ID"
+  else
+    echo "would_add: $CAP_ID"
+  fi
+  echo "generator: ops/plugins/core/ops/bin/capability-triad-reconcile"
   echo "files: ops/capabilities.yaml, ops/bindings/capability_map.yaml, ops/bindings/routing.dispatch.yaml, ops/plugins/MANIFEST.yaml"
   exit 0
 fi
@@ -228,6 +298,28 @@ if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
   LOCK_HELD=1
   export SPINE_GIT_LOCK_HELD=1
 fi
+
+manifest_script="$(manifest_script_ref "$SCRIPT")"
+tmp_cap_file="$(make_sibling_temp "$CAP_FILE")"
+tmp_map_file="$(make_sibling_temp "$MAP_FILE")"
+tmp_manifest_file="$(make_sibling_temp "$MANIFEST_FILE")"
+tmp_routing_file="$(make_sibling_temp "$ROUTING_FILE")"
+declare -a triad_args=(
+  --capabilities-in "$tmp_cap_file"
+  --capability-map-seed "$MAP_FILE"
+  --capability-map-out "$tmp_map_file"
+  --routing-dispatch-out "$tmp_routing_file"
+  --seed-capability "$CAP_ID"
+  --seed-plugin "$PLUGIN"
+  --seed-script "$SCRIPT"
+)
+if [[ -n "$ARG_PROTOCOL" ]]; then
+  triad_args+=(--seed-arg-protocol "$ARG_PROTOCOL")
+fi
+if [[ -n "$NOTE" ]]; then
+  triad_args+=(--seed-note "$NOTE")
+fi
+
 spine_tx_init
 spine_tx_track "$CAP_FILE"
 spine_tx_track "$MAP_FILE"
@@ -235,15 +327,24 @@ spine_tx_track "$MANIFEST_FILE"
 spine_tx_track "$ROUTING_FILE"
 
 if ! {
-  yq e -i ".capabilities.\"$CAP_ID\" = load(\"$tmp_cap_entry\")" "$CAP_FILE"
-  yq e -i ".capabilities.\"$CAP_ID\" = load(\"$tmp_map_entry\")" "$MAP_FILE"
-  yq e -i "(.plugins[] | select(.name == \"$PLUGIN\") | .scripts) |= ((. + [\"bin/$SCRIPT\"]) | unique)" "$MANIFEST_FILE"
-  yq e -i "(.plugins[] | select(.name == \"$PLUGIN\") | .capabilities) |= ((. + [\"$CAP_ID\"]) | unique)" "$MANIFEST_FILE"
-  "$ROUTING_GEN" >/dev/null
-  yq e '.' "$CAP_FILE" >/dev/null
-  yq e '.' "$MAP_FILE" >/dev/null
-  yq e '.' "$MANIFEST_FILE" >/dev/null
-  yq e '.' "$ROUTING_FILE" >/dev/null
+  cp "$CAP_FILE" "$tmp_cap_file"
+  cp "$MANIFEST_FILE" "$tmp_manifest_file"
+  yq e -i ".capabilities.\"$CAP_ID\" = load(\"$tmp_cap_entry\")" "$tmp_cap_file"
+  "$TRIAD_RECONCILE" "${triad_args[@]}"
+  yq e -i "(.plugins[] | select(.name == \"$PLUGIN\") | .scripts) |= ((. + [\"$manifest_script\"]) | unique)" "$tmp_manifest_file"
+  yq e -i "(.plugins[] | select(.name == \"$PLUGIN\") | .capabilities) |= ((. + [\"$CAP_ID\"]) | unique)" "$tmp_manifest_file"
+  yq e '.' "$tmp_cap_file" >/dev/null
+  yq e '.' "$tmp_map_file" >/dev/null
+  yq e '.' "$tmp_manifest_file" >/dev/null
+  yq e '.' "$tmp_routing_file" >/dev/null
+  mv "$tmp_cap_file" "$CAP_FILE"
+  tmp_cap_file=""
+  mv "$tmp_map_file" "$MAP_FILE"
+  tmp_map_file=""
+  mv "$tmp_manifest_file" "$MANIFEST_FILE"
+  tmp_manifest_file=""
+  mv "$tmp_routing_file" "$ROUTING_FILE"
+  tmp_routing_file=""
 }; then
   spine_tx_rollback
   fail "transaction rolled back (capability triad update failed)"
@@ -254,6 +355,11 @@ count_map="$(yq e '.capabilities | length' "$MAP_FILE")"
 
 echo "capability.register"
 echo "status: PASS"
+if [[ "$RECONCILE_EXISTING" -eq 1 ]]; then
+  echo "mode: reconcile_existing"
+else
+  echo "mode: register"
+fi
 echo "capability: $CAP_ID"
 echo "plugin: $PLUGIN"
 echo "counts: capabilities=$count_cap capability_map=$count_map"

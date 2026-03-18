@@ -1,0 +1,77 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-17
+scope: mint-customer-inbox-startup-default-workflow
+
+launch:
+  terminal_id: MINT-MORPHEUS-01
+  default_lane: customer_email_inbox
+  startup_workspace: ops/plugins/domains/mint/morpheus-runtime
+  startup_capability: mint.customer.inbox.startup
+  default_command: mintctl morpheus inbox
+  first_action_command: mintctl morpheus inbox work-next
+  first_action_aliases:
+    - work-next
+    - work
+    - first-email
+  work_items_mode: canonical_inbox_work_items
+  startup_work_items_mode: preview_only
+  preview_top: 10
+  selection_order: oldest_first
+  drafting_mode: explicit_only
+  scope_lock: Mint Prints customer email inbox only
+  context_bridge:
+    mode: claude_append_system_prompt
+    read_startup_record_before_reply: true
+
+health_check:
+  component: files-api
+  capability: mint.modules.health
+
+first_email:
+  capability: mint.customer.inbox.first_email
+  work_items_capability: mint.customer.inbox.work_items
+  work_items_mode: preview_only
+  history_query_top: 5
+  record_lookup_capability: mint.customer.record.snapshot
+  seed_ensure_capability: mint.customer.seed.ensure
+  mailbox_get_capability: microsoft.mail.get
+  eligible_work_types:
+    - quote_request
+    - art_delivery
+    - proof_review
+    - reorder
+    - ambiguous
+  eligible_dispositions:
+    - customer_actionable
+    - waiting_on_customer
+    - unsupported_scope
+  excluded_work_types:
+    - spam_or_promotional
+    - vendor_revision
+  excluded_dispositions:
+    - vendor_revision
+    - supplier_marketing
+    - risky_junk
+  queue_claim:
+    storage: sqlite
+    sqlite_path: mint/customer-inbox-queue/runtime.sqlite3
+    claimant_basis: spine_session_id
+    stale_session_policy: session_manifest_pid_alive
+    same_claimant_behavior: return_existing_claim
+    overlap_policy: skip_claimed_message
+  seed_policy:
+    mode: lookup_only
+    record_first: true
+
+briefing:
+  fields:
+    - disposition
+    - gate_status
+    - customer
+    - message
+    - blockers
+    - recommended_next_action
+    - draft_eligible
+  required_question: recommended_next_action

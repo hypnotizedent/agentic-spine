@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""media.data.readiness.verify — boring gate for media inbox/library/cold-shop lifecycle."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+EXEC_CONTRACT = ROOT / "ops/bindings/media.data.lifecycle.execution.yaml"
+RESIDUE_INVENTORY = ROOT / "ops/bindings/home.media.residue.inventory.yaml"
+READINESS_BASELINE = ROOT / "ops/bindings/home.media.readiness.baseline.yaml"
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise SystemExit(f"FAIL: missing required file: {path}")
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise SystemExit(f"FAIL: expected mapping at YAML root: {path}")
+    return data
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def lane_inventory_map(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows = inventory.get("lanes") or []
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if isinstance(row, dict) and row.get("lane_id"):
+            out[str(row["lane_id"])] = row
+    return out
+
+
+def summarize_lane(lane_id: str, policy: dict[str, Any], observed: dict[str, Any]) -> dict[str, Any]:
+    count = observed.get("entry_count")
+    target = policy.get("steady_state_target_count")
+    ready = True
+    if isinstance(target, int) and isinstance(count, int):
+        ready = count <= target
+    return {
+        "lane_id": lane_id,
+        "lane_role": policy.get("lane_role", "unknown"),
+        "canonical_path": policy.get("canonical_path", ""),
+        "inventory_path": policy.get("inventory_path", observed.get("path", "")),
+        "default_action": policy.get("default_action", "unknown"),
+        "entry_count": count,
+        "steady_state_target_count": target,
+        "ready_for_steady_state": ready,
+        "current_classification": observed.get("current_classification", ""),
+        "failure_mode": observed.get("failure_mode", ""),
+    }
+
+
+def evaluate_services(contract: dict[str, Any], inventory_map: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    flags = contract.get("control_flags") or {}
+    results: dict[str, dict[str, Any]] = {}
+
+    for service_name, spec in (contract.get("service_gates") or {}).items():
+        blockers_out: list[dict[str, Any]] = []
+        for blocker in spec.get("blockers") or []:
+            blocker_type = str(blocker.get("type", "")).strip()
+            message = str(blocker.get("message", "")).strip()
+            if blocker_type == "control_flag_false":
+                flag_name = str(blocker.get("flag", "")).strip()
+                if not bool(flags.get(flag_name, False)):
+                    blockers_out.append(
+                        {
+                            "type": blocker_type,
+                            "flag": flag_name,
+                            "message": message,
+                        }
+                    )
+            elif blocker_type == "lane_nonzero":
+                lane_id = str(blocker.get("lane_id", "")).strip()
+                threshold = int(blocker.get("threshold", 0))
+                lane = inventory_map.get(lane_id, {})
+                count = int(lane.get("entry_count", 0) or 0)
+                if count > threshold:
+                    blockers_out.append(
+                        {
+                            "type": blocker_type,
+                            "lane_id": lane_id,
+                            "entry_count": count,
+                            "threshold": threshold,
+                            "message": message,
+                        }
+                    )
+            elif blocker_type == "service_not_allowed":
+                deps = [str(item) for item in blocker.get("services") or []]
+                blocked = [
+                    dep
+                    for dep in deps
+                    if results.get(dep, {}).get("effective_state") != "allowed"
+                ]
+                if blocked:
+                    blockers_out.append(
+                        {
+                            "type": blocker_type,
+                            "services": blocked,
+                            "message": message,
+                        }
+                    )
+
+        gate_mode = str(spec.get("gate_mode", "blocked_until_clear")).strip()
+        if gate_mode == "always_allowed":
+            effective_state = "allowed" if not blockers_out else "blocked"
+        elif gate_mode == "blocked_until_clear":
+            effective_state = "blocked" if blockers_out else "allowed"
+        else:
+            effective_state = "blocked"
+
+        results[service_name] = {
+            "service": service_name,
+            "gate_mode": gate_mode,
+            "effective_state": effective_state,
+            "rationale": spec.get("rationale", ""),
+            "blockers": blockers_out,
+        }
+
+    return results
+
+
+def build_report() -> dict[str, Any]:
+    contract = load_yaml(EXEC_CONTRACT)
+    inventory = load_yaml(RESIDUE_INVENTORY)
+    baseline = load_yaml(READINESS_BASELINE)
+
+    inventory_map = lane_inventory_map(inventory)
+    lanes: list[dict[str, Any]] = []
+    for lane_id, policy in (contract.get("lane_policies") or {}).items():
+        observed = inventory_map.get(lane_id, {})
+        lanes.append(summarize_lane(lane_id, policy, observed))
+
+    services = evaluate_services(contract, inventory_map)
+
+    automation_services: list[str] = []
+    for group in (contract.get("automation_groups") or {}).values():
+        automation_services.extend(str(item) for item in (group.get("services") or []))
+    automation_services = list(dict.fromkeys(automation_services))
+
+    global_automation_state = "allowed"
+    blocked_automation = [
+        service
+        for service in automation_services
+        if services.get(service, {}).get("effective_state") != "allowed"
+    ]
+    if blocked_automation:
+        global_automation_state = "blocked"
+
+    return {
+        "capability": "media.data.readiness.verify",
+        "generated_at": utc_now(),
+        "execution_posture": contract.get("execution_posture", {}),
+        "baseline_readiness_state": (baseline.get("overall") or {}).get("readiness_state", ""),
+        "control_flags": contract.get("control_flags", {}),
+        "global_automation_state": global_automation_state,
+        "blocked_automation_services": blocked_automation,
+        "lanes": lanes,
+        "services": services,
+        "cleanup_waves": contract.get("cleanup_waves", []),
+        "operator_surfaces": contract.get("operator_surfaces", {}),
+    }
+
+
+def render_text(report: dict[str, Any]) -> str:
+    lines: list[str] = []
+    lines.append("media.data.readiness.verify")
+    lines.append("================================")
+    lines.append(f"generated_at: {report['generated_at']}")
+    lines.append(
+        "execution_state: "
+        f"{report.get('execution_posture', {}).get('current_state', 'unknown')}"
+    )
+    lines.append(f"baseline_readiness_state: {report.get('baseline_readiness_state', 'unknown')}")
+    lines.append(f"global_automation_state: {report.get('global_automation_state', 'unknown')}")
+    lines.append("")
+    lines.append("lanes:")
+    for lane in report.get("lanes", []):
+        count = lane.get("entry_count")
+        count_str = "n/a" if count is None else str(count)
+        ready = "ready" if lane.get("ready_for_steady_state") else "blocked"
+        lines.append(
+            f"  - {lane['lane_id']}: role={lane['lane_role']} action={lane['default_action']} "
+            f"count={count_str} steady_state={ready}"
+        )
+    lines.append("")
+    lines.append("service_gates:")
+    for service, result in report.get("services", {}).items():
+        lines.append(f"  - {service}: {result['effective_state']}")
+        for blocker in result.get("blockers", []):
+            lines.append(f"      blocker: {blocker.get('message', 'blocked')}")
+    lines.append("")
+    lines.append("next_actions:")
+    for item in report.get("cleanup_waves", []):
+        lines.append(f"  - step {item.get('step')}: {item.get('action')}")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Boring gate for media inbox/library/cold-shop lifecycle."
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON output.")
+    args = parser.parse_args()
+
+    report = build_report()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=False))
+    else:
+        print(render_text(report))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

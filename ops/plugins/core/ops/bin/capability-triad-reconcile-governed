@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+CAP_FILE="$ROOT/ops/capabilities.yaml"
+MAP_FILE="$ROOT/ops/bindings/capability_map.yaml"
+ROUTING_FILE="$ROOT/ops/bindings/routing.dispatch.yaml"
+RECONCILER="$ROOT/ops/plugins/core/ops/bin/capability-triad-reconcile"
+
+source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/lib/governed-write-transaction.sh"
+
+LOCK_HELD=0
+
+fail() {
+  echo "capability.triad.reconcile FAIL: $*" >&2
+  exit 1
+}
+
+cleanup() {
+  if [[ "$LOCK_HELD" -eq 1 ]]; then
+    release_git_lock || true
+  fi
+  spine_tx_cleanup
+  return 0
+}
+
+trap cleanup EXIT INT TERM
+
+[[ -x "$RECONCILER" ]] || fail "missing triad reconciler: $RECONCILER"
+[[ -f "$CAP_FILE" ]] || fail "missing capabilities registry: $CAP_FILE"
+[[ -f "$MAP_FILE" ]] || fail "missing capability map: $MAP_FILE"
+[[ -f "$ROUTING_FILE" ]] || fail "missing routing dispatch: $ROUTING_FILE"
+command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
+
+if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
+  acquire_git_lock capability_triad_reconcile || exit 1
+  LOCK_HELD=1
+  export SPINE_GIT_LOCK_HELD=1
+fi
+
+spine_tx_init
+spine_tx_track "$MAP_FILE"
+spine_tx_track "$ROUTING_FILE"
+
+if ! "$RECONCILER" "$@"; then
+  spine_tx_rollback
+  fail "transaction rolled back (triad reconcile failed)"
+fi
+
+yq e '.' "$MAP_FILE" >/dev/null
+yq e '.' "$ROUTING_FILE" >/dev/null
+
+count_cap="$(yq e '.capabilities | length' "$CAP_FILE")"
+count_map="$(yq e '.capabilities | length' "$MAP_FILE")"
+count_dispatch="$(yq e '.dispatch | length' "$ROUTING_FILE")"
+
+echo "capability.triad.reconcile"
+echo "status: PASS"
+echo "counts: capabilities=$count_cap capability_map=$count_map routing_dispatch=$count_dispatch"
+echo "updated: ops/bindings/capability_map.yaml"
+echo "updated: ops/bindings/routing.dispatch.yaml"

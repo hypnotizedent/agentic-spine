@@ -1,0 +1,699 @@
+#!/usr/bin/env python3
+"""Canonical local repair for the Mint shared Outlook mailbox."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import plistlib
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[5]
+RUNTIME_CONTRACT = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
+PROFILE_PREFS = Path(
+    "~/Library/Group Containers/UBF8T346G9.Office/Outlook/Outlook 15 Profiles/Main Profile/ProfilePreferences.plist"
+).expanduser()
+APP_PREFS = Path(
+    "~/Library/Containers/com.microsoft.Outlook/Data/Library/Preferences/com.microsoft.Outlook.plist"
+).expanduser()
+HX_PREFS = Path(
+    "~/Library/Containers/com.microsoft.Outlook/Data/Library/Preferences/com.microsoft.Outlook.Hx.plist"
+).expanduser()
+SQLITE_DB = Path(
+    "~/Library/Group Containers/UBF8T346G9.Office/Outlook/Outlook 15 Profiles/Main Profile/Data/Outlook.sqlite"
+).expanduser()
+SQLITE_WAL = SQLITE_DB.with_name("Outlook.sqlite-wal")
+SQLITE_SHM = SQLITE_DB.with_name("Outlook.sqlite-shm")
+PROFILE_ROOT = PROFILE_PREFS.parent
+RSS_INFO_REP = PROFILE_ROOT / "rss/Info@mintprints.com_ActiveSyncExchange_HxS.rep"
+RSS_TEAM_REP = PROFILE_ROOT / "rss/team@mintprints.com_ActiveSyncExchange_HxS.rep"
+INFO_ACTIONS_DIR = PROFILE_ROOT / "ActionsBackup/Info@mintprints.com_ActiveSyncExchange_HxS"
+TEAM_ACTIONS_DIR = PROFILE_ROOT / "ActionsBackup/team@mintprints.com_ActiveSyncExchange_HxS"
+EXCHANGE_ACCOUNTS_DIR = PROFILE_ROOT / "Data/Exchange Accounts"
+MAIL_ACCOUNTS_DIR = PROFILE_ROOT / "Data/Mail Accounts"
+OUTLOOK_APP = "Microsoft Outlook"
+INFO_MAILBOX = "info@mintprints.com"
+TEAM_MAILBOX = "team@mintprints.com"
+INFO_ACCOUNT_IDENTIFIER = "Info@mintprints.com_ActiveSyncExchange_HxS"
+TEAM_ACCOUNT_IDENTIFIER = "team@mintprints.com_ActiveSyncExchange_HxS"
+RONNY_ACCOUNT_IDENTIFIER = "Ronny@mintprints.com_ActiveSyncExchange_HxS"
+
+
+class ToolError(RuntimeError):
+    pass
+
+
+def resolve_evidence_root() -> Path:
+    env_root = os.environ.get("SPINE_EVIDENCE_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).expanduser()
+    if shutil.which("yq") and RUNTIME_CONTRACT.exists():
+        completed = subprocess.run(
+            ["yq", "e", '-r', '.evidence_root // ""', str(RUNTIME_CONTRACT)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        configured = completed.stdout.strip()
+        if configured:
+            return Path(configured).expanduser()
+    return Path.home() / "code/.evidence/spine"
+
+
+def create_backup_dir() -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_dir = resolve_evidence_root() / "verify" / "infra" / f"outlook-shared-mailbox-repair-{stamp}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    return backup_dir
+
+
+def load_plist(path: Path) -> dict:
+    if not path.exists():
+        raise ToolError(f"missing plist: {path}")
+    with path.open("rb") as handle:
+        payload = plistlib.load(handle)
+    if not isinstance(payload, dict):
+        raise ToolError(f"expected plist dict root: {path}")
+    return payload
+
+
+def write_plist(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+        tmp_path = Path(handle.name)
+    try:
+        with tmp_path.open("wb") as handle:
+            plistlib.dump(payload, handle, sort_keys=False)
+        tmp_path.replace(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def is_outlook_running() -> bool:
+    completed = subprocess.run(
+        ["pgrep", "-x", OUTLOOK_APP],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return completed.returncode == 0
+
+
+def quit_outlook() -> None:
+    subprocess.run(
+        ["osascript", "-e", f'tell application "{OUTLOOK_APP}" to quit'],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for _ in range(60):
+        if not is_outlook_running():
+            return
+        time.sleep(0.5)
+    raise ToolError("Outlook did not exit after graceful quit request")
+
+
+def reopen_outlook() -> None:
+    subprocess.run(["open", "-a", OUTLOOK_APP], check=True)
+
+
+def copy_if_exists(src: Path, dest_dir: Path) -> None:
+    if src.exists():
+        shutil.copy2(src, dest_dir / src.name)
+
+
+def move_if_exists(src: Path, dest_dir: Path) -> None:
+    if src.exists():
+        shutil.move(str(src), str(dest_dir / src.name))
+
+
+def rename_dict_key(payload: dict, old_key: str, new_key: str) -> None:
+    if old_key not in payload:
+        return
+    old_value = payload.pop(old_key)
+    if new_key not in payload:
+        payload[new_key] = old_value
+
+
+def dedupe_keep_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def replace_alias_text(text: str) -> str:
+    return (
+        text.replace(INFO_ACCOUNT_IDENTIFIER, TEAM_ACCOUNT_IDENTIFIER)
+        .replace("info@mintprints.com_ActiveSyncExchange_HxS", TEAM_ACCOUNT_IDENTIFIER)
+        .replace("Info@mintprints.com", TEAM_MAILBOX)
+        .replace("info@mintprints.com", TEAM_MAILBOX)
+    )
+
+
+def merge_existing_value(existing: object, incoming: object) -> object:
+    if isinstance(existing, dict) and isinstance(incoming, dict):
+        merged = dict(existing)
+        for key, value in incoming.items():
+            if key in merged:
+                merged[key] = merge_existing_value(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+    if isinstance(existing, list) and isinstance(incoming, list):
+        return dedupe_keep_order([str(item) for item in existing + incoming])
+    if existing not in ("", None, [], {}):
+        return existing
+    return incoming
+
+
+def deep_replace_aliases(value: object) -> object:
+    if isinstance(value, str):
+        return replace_alias_text(value)
+    if isinstance(value, list):
+        return [deep_replace_aliases(item) for item in value]
+    if isinstance(value, dict):
+        rewritten: dict[object, object] = {}
+        for key, item in value.items():
+            new_key = replace_alias_text(key) if isinstance(key, str) else key
+            new_value = deep_replace_aliases(item)
+            if new_key in rewritten:
+                rewritten[new_key] = merge_existing_value(rewritten[new_key], new_value)
+            else:
+                rewritten[new_key] = new_value
+        return rewritten
+    return value
+
+
+def rewrite_profile_prefs(payload: dict) -> None:
+    rewritten_payload = deep_replace_aliases(payload)
+    payload.clear()
+    payload.update(rewritten_payload)
+    sorted_accounts = [str(item) for item in payload.get("SortedAccounts") or []]
+    rewritten = []
+    for item in sorted_accounts:
+        if item == INFO_ACCOUNT_IDENTIFIER:
+            continue
+        rewritten.append(item)
+    if TEAM_ACCOUNT_IDENTIFIER not in rewritten:
+        if RONNY_ACCOUNT_IDENTIFIER in rewritten:
+            insert_at = rewritten.index(RONNY_ACCOUNT_IDENTIFIER) + 1
+            rewritten.insert(insert_at, TEAM_ACCOUNT_IDENTIFIER)
+        else:
+            rewritten.insert(0, TEAM_ACCOUNT_IDENTIFIER)
+    payload["SortedAccounts"] = dedupe_keep_order(rewritten)
+    if payload.get("DefaultAccountIdentifier") == INFO_ACCOUNT_IDENTIFIER:
+        payload["DefaultAccountIdentifier"] = TEAM_ACCOUNT_IDENTIFIER
+
+    default_signatures = payload.get("DefaultSignatures")
+    if isinstance(default_signatures, dict):
+        rename_dict_key(default_signatures, INFO_ACCOUNT_IDENTIFIER, TEAM_ACCOUNT_IDENTIFIER)
+
+
+def migrate_alias_key_map(payload: dict, old_key: str, new_key: str) -> None:
+    if old_key not in payload:
+        return
+    if new_key not in payload:
+        payload[new_key] = payload[old_key]
+    del payload[old_key]
+
+
+def rewrite_app_prefs(payload: dict) -> None:
+    rewritten_payload = deep_replace_aliases(payload)
+    payload.clear()
+    payload.update(rewritten_payload)
+    payload["UserPreference_WhatsNew_HideSentInConversations"] = 0
+
+    sidebar_items = [str(item) for item in payload.get("NSOutlineView Items SidebarMail_AllAccounts") or []]
+    preserved = [
+        item
+        for item in sidebar_items
+        if item not in {INFO_ACCOUNT_IDENTIFIER, TEAM_ACCOUNT_IDENTIFIER, RONNY_ACCOUNT_IDENTIFIER, "Favorites", "All Accounts"}
+    ]
+    payload["NSOutlineView Items SidebarMail_AllAccounts"] = (
+        ["Favorites", "All Accounts", RONNY_ACCOUNT_IDENTIFIER, TEAM_ACCOUNT_IDENTIFIER]
+        + preserved
+    )
+
+    nav_old = f"{INFO_ACCOUNT_IDENTIFIER}.NavPrefsHaveBeenInitialized"
+    nav_new = f"{TEAM_ACCOUNT_IDENTIFIER}.NavPrefsHaveBeenInitialized"
+    if nav_old in payload:
+        payload[nav_new] = bool(payload.get(nav_new, payload[nav_old]))
+        del payload[nav_old]
+
+    timestamp_map = payload.get("clientConfigsLastUpdatedTime")
+    if isinstance(timestamp_map, dict):
+        existing = timestamp_map.get(INFO_MAILBOX)
+        if existing is not None and TEAM_MAILBOX not in timestamp_map:
+            timestamp_map[TEAM_MAILBOX] = datetime.now(timezone.utc)
+        timestamp_map.pop(INFO_MAILBOX, None)
+
+    for stem in (
+        "firstpartyapps_",
+        "firstpartyappsLastChecked_",
+        "sharepointUrl_",
+        "todoLastChecked_",
+        "todoPermitted_",
+    ):
+        migrate_alias_key_map(payload, f"{stem}{INFO_MAILBOX}", f"{stem}{TEAM_MAILBOX}")
+
+
+def rewrite_hx_prefs(payload: dict, *, shared_email_window: int) -> dict:
+    for key, value in payload.items():
+        if not key.startswith("Hx\\Accounts\\"):
+            continue
+        parts = key.split("\\")
+        if len(parts) != 4:
+            continue
+    accounts_by_id: dict[str, dict[str, object]] = {}
+    for key, value in payload.items():
+        if not key.startswith("Hx\\Accounts\\"):
+            continue
+        parts = key.split("\\")
+        if len(parts) != 4:
+            continue
+        account_id = parts[2]
+        account_key = parts[3]
+        accounts_by_id.setdefault(account_id, {})[account_key] = value
+
+    shared_ids = [
+        account_id
+        for account_id, account in accounts_by_id.items()
+        if str(account.get("PrimarySmtpAddress") or "").casefold() == TEAM_MAILBOX
+        and int(account.get("SharedAccountType") or 0) == 2
+    ]
+    if not shared_ids:
+        raise ToolError("could not locate shared mailbox Hx account for team@mintprints.com")
+
+    chosen_id = sorted(shared_ids, key=lambda value: int(value) if value.isdigit() else 9999)[0]
+    chosen_prefix = f"Hx\\Accounts\\{chosen_id}\\"
+    payload[f"{chosen_prefix}Username"] = TEAM_MAILBOX
+    payload[f"{chosen_prefix}PrimarySmtpAddress"] = TEAM_MAILBOX
+    payload[f"{chosen_prefix}DisplayName"] = "Mint Prints Team"
+    payload[f"{chosen_prefix}UserDisplayName"] = "Mint Team"
+    payload[f"{chosen_prefix}IncomingServerUsername"] = "Mint Team"
+    payload[f"{chosen_prefix}EmailWindow"] = shared_email_window
+
+    removed_ids: list[str] = []
+    chosen_anchor = str(payload.get(f"{chosen_prefix}AnchorMailbox") or "")
+    for account_id in shared_ids:
+        if account_id == chosen_id:
+            continue
+        account_prefix = f"Hx\\Accounts\\{account_id}\\"
+        if str(payload.get(f"{account_prefix}AnchorMailbox") or "") != chosen_anchor:
+            continue
+        removed_ids.append(account_id)
+        for key in [item for item in payload if item.startswith(account_prefix)]:
+            del payload[key]
+    return {"chosen_id": chosen_id, "removed_ids": removed_ids}
+
+
+def replace_bytes_in_file(path: Path, replacements: list[tuple[bytes, bytes]]) -> bool:
+    content = path.read_bytes()
+    updated = content
+    for old, new in replacements:
+        updated = updated.replace(old, new)
+    if updated == content:
+        return False
+    path.write_bytes(updated)
+    return True
+
+
+def rewrite_account_files() -> list[str]:
+    touched: list[str] = []
+    replacements = [
+        (b"info@mintprints.com", b"team@mintprints.com"),
+        (b"Info@mintprints.com", b"team@mintprints.com"),
+    ]
+    for base in (EXCHANGE_ACCOUNTS_DIR, MAIL_ACCOUNTS_DIR):
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("*")):
+            if not path.is_file():
+                continue
+            try:
+                content = path.read_bytes()
+            except OSError:
+                continue
+            if b"info@mintprints.com" not in content and b"Info@mintprints.com" not in content:
+                continue
+            if replace_bytes_in_file(path, replacements):
+                touched.append(str(path))
+    return touched
+
+
+def load_sql_snapshot() -> dict:
+    if not SQLITE_DB.exists():
+        return {}
+    with sqlite3.connect(SQLITE_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        accounts = [dict(row) for row in conn.execute(
+            """
+            select Record_RecordID, Account_AssociatedAccountOfUID, Account_Name, Account_EmailAddress
+            from AccountsExchange
+            order by Record_RecordID
+            """
+        )]
+        folders = [dict(row) for row in conn.execute(
+            """
+            select Record_RecordID, Folder_Name, Record_AccountUID, Folder_SpecialFolderType,
+                   Folder_ContainsPartialDwnldMsgs, Folder_SubFolderSyncMapReset, Folder_SyncMapReset
+            from Folders
+            where Folder_Name in ('Inbox', 'Sent Items')
+            order by Record_RecordID
+            """
+        )]
+        partial_count = conn.execute(
+            "select count(*) from Mail where Message_PartiallyDownloaded = 1"
+        ).fetchone()[0]
+    return {"accounts": accounts, "folders": folders, "partial_message_count": partial_count}
+
+
+def rewrite_sqlite() -> dict:
+    if not SQLITE_DB.exists():
+        raise ToolError(f"missing sqlite store: {SQLITE_DB}")
+    with sqlite3.connect(SQLITE_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        target = conn.execute(
+            """
+            select Record_RecordID, Account_AssociatedAccountOfUID
+            from AccountsExchange
+            where lower(Account_EmailAddress) = lower(?)
+               or lower(Account_Name) = lower(?)
+            limit 1
+            """,
+            (INFO_MAILBOX, INFO_MAILBOX),
+        ).fetchone()
+        if target is None:
+            target = conn.execute(
+                """
+                select Record_RecordID, Account_AssociatedAccountOfUID
+                from AccountsExchange
+                where lower(Account_EmailAddress) = lower(?)
+                   or lower(Account_Name) = lower(?)
+                limit 1
+                """,
+                (TEAM_MAILBOX, TEAM_MAILBOX),
+            ).fetchone()
+        if target is None:
+            raise ToolError("could not locate shared mailbox account row in Outlook.sqlite")
+
+        uid_row = conn.execute(
+            """
+            select Record_AccountUID, count(*) as hit_count
+            from Mail
+            where Record_FolderID in (
+                select Record_RecordID from Folders where Folder_Name = 'Sent Items'
+            )
+              and lower(Message_SenderAddressList) in (lower(?), lower(?))
+            group by Record_AccountUID
+            order by hit_count desc, Record_AccountUID desc
+            limit 1
+            """,
+            (INFO_MAILBOX, TEAM_MAILBOX),
+        ).fetchone()
+        if uid_row is None:
+            uid_row = conn.execute(
+                """
+                select Record_AccountUID
+                from Folders
+                where Folder_Name in ('Inbox', 'Sent Items')
+                group by Record_AccountUID
+                order by Record_AccountUID desc
+                limit 1
+                """
+            ).fetchone()
+        if uid_row is None:
+            raise ToolError("could not determine shared mailbox folder account uid in Outlook.sqlite")
+        shared_account_uid = int(uid_row["Record_AccountUID"])
+
+        conn.execute(
+            """
+            update AccountsExchange
+            set Account_Name = ?, Account_EmailAddress = ?
+            where Record_RecordID = ?
+            """,
+            (TEAM_MAILBOX, TEAM_MAILBOX, target["Record_RecordID"]),
+        )
+        conn.execute(
+            """
+            update Folders
+            set Folder_SubFolderSyncMapReset = 1,
+                Folder_SyncMapReset = 1
+            where Record_AccountUID = ?
+              and Folder_Name in ('Inbox', 'Sent Items')
+            """,
+            (shared_account_uid,),
+        )
+        conn.commit()
+        return {
+            "record_id": int(target["Record_RecordID"]),
+            "account_uid": shared_account_uid,
+        }
+
+
+def audit_state() -> dict:
+    profile = load_plist(PROFILE_PREFS)
+    app = load_plist(APP_PREFS)
+    hx = load_plist(HX_PREFS)
+
+    accounts = {}
+    for key, value in hx.items():
+        if not key.startswith("Hx\\Accounts\\"):
+            continue
+        parts = key.split("\\")
+        if len(parts) != 4:
+            continue
+        account_id = parts[2]
+        field = parts[3]
+        if field in {
+            "DisplayName",
+            "Username",
+            "PrimarySmtpAddress",
+            "AnchorMailbox",
+            "EmailWindow",
+            "SharedAccountType",
+            "UserDisplayName",
+        }:
+            accounts.setdefault(account_id, {})[field] = value
+
+    return {
+        "outlook_running": is_outlook_running(),
+        "profile_preferences": {
+            "default_account_identifier": profile.get("DefaultAccountIdentifier"),
+            "sorted_accounts": list(profile.get("SortedAccounts") or []),
+        },
+        "app_preferences": {
+            "sidebar_mail_all_accounts": list(app.get("NSOutlineView Items SidebarMail_AllAccounts") or []),
+            "hide_sent_in_conversations": app.get("UserPreference_WhatsNew_HideSentInConversations"),
+            "client_configs_last_updated": app.get("clientConfigsLastUpdatedTime"),
+        },
+        "hx_accounts": accounts,
+        "sqlite": load_sql_snapshot(),
+    }
+
+
+def apply_repair(*, graceful_quit: bool, reopen: bool, shared_email_window: int) -> dict:
+    before = audit_state()
+    was_running = before["outlook_running"]
+
+    if was_running and not graceful_quit:
+        raise ToolError("Outlook is running; rerun with --graceful-quit or close Outlook first")
+    if was_running and graceful_quit:
+        quit_outlook()
+
+    backup_dir = create_backup_dir()
+    for path in (
+        PROFILE_PREFS,
+        APP_PREFS,
+        HX_PREFS,
+        SQLITE_DB,
+        SQLITE_WAL,
+        SQLITE_SHM,
+        RSS_INFO_REP,
+        RSS_TEAM_REP,
+    ):
+        copy_if_exists(path, backup_dir)
+    for base in (EXCHANGE_ACCOUNTS_DIR, MAIL_ACCOUNTS_DIR):
+        if base.exists():
+            snapshot_dir = backup_dir / base.name.replace(" ", "_")
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            for path in base.rglob("*"):
+                if path.is_file():
+                    rel = path.relative_to(base)
+                    dest = snapshot_dir / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, dest)
+    (backup_dir / "before.json").write_text(json.dumps(before, indent=2, default=str) + "\n", encoding="utf-8")
+
+    profile = load_plist(PROFILE_PREFS)
+    app = load_plist(APP_PREFS)
+    hx = load_plist(HX_PREFS)
+
+    rewrite_profile_prefs(profile)
+    rewrite_app_prefs(app)
+    hx_summary = rewrite_hx_prefs(hx, shared_email_window=shared_email_window)
+
+    write_plist(PROFILE_PREFS, profile)
+    write_plist(APP_PREFS, app)
+    write_plist(HX_PREFS, hx)
+
+    sql_summary = rewrite_sqlite()
+    account_files = rewrite_account_files()
+
+    stale_cache_dir = backup_dir / "stale_shared_mailbox_cache"
+    stale_cache_dir.mkdir(parents=True, exist_ok=True)
+    move_if_exists(RSS_INFO_REP, stale_cache_dir)
+    move_if_exists(RSS_TEAM_REP, stale_cache_dir)
+    if INFO_ACTIONS_DIR.exists():
+        shutil.rmtree(INFO_ACTIONS_DIR)
+    TEAM_ACTIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+    after = audit_state()
+    (backup_dir / "after.json").write_text(json.dumps(after, indent=2, default=str) + "\n", encoding="utf-8")
+
+    if reopen and was_running:
+        reopen_outlook()
+
+    return {
+        "backup_dir": str(backup_dir),
+        "reopened": bool(reopen and was_running),
+        "hx": hx_summary,
+        "sqlite": sql_summary,
+        "account_files_touched": account_files,
+        "before": before,
+        "after": after,
+    }
+
+
+def print_result(payload: dict, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, indent=2, default=str))
+        return
+
+    if "backup_dir" not in payload:
+        print("microsoft.outlook.local.shared-mailbox-repair")
+        print("mode: audit")
+        print(f"outlook_running: {str(payload['outlook_running']).lower()}")
+        print(
+            "sorted_accounts: "
+            + ", ".join(str(item) for item in payload["profile_preferences"]["sorted_accounts"])
+        )
+        print(
+            "sidebar_mail_all_accounts: "
+            + ", ".join(str(item) for item in payload["app_preferences"]["sidebar_mail_all_accounts"])
+        )
+        print(
+            "shared_hx_accounts: "
+            + ", ".join(
+                f"{account_id}:{details.get('Username')}->{details.get('PrimarySmtpAddress')}"
+                for account_id, details in sorted(payload["hx_accounts"].items())
+                if str(details.get("SharedAccountType") or "") == "2"
+            )
+        )
+        print(
+            "hide_sent_in_conversations: "
+            + str(payload["app_preferences"]["hide_sent_in_conversations"])
+        )
+        print(
+            "partial_message_count: "
+            + str(payload["sqlite"].get("partial_message_count", ""))
+        )
+        return
+
+    print("microsoft.outlook.local.shared-mailbox-repair")
+    print("mode: apply")
+    print(f"backup_dir: {payload['backup_dir']}")
+    print(f"reopened: {str(payload['reopened']).lower()}")
+    print(f"shared_hx_account_id: {payload['hx']['chosen_id']}")
+    print(
+        "removed_duplicate_shared_hx_ids: "
+        + (", ".join(payload["hx"]["removed_ids"]) if payload["hx"]["removed_ids"] else "none")
+    )
+    print(
+        "sqlite_shared_account_record: "
+        f"{payload['sqlite']['record_id']} (uid={payload['sqlite']['account_uid']})"
+    )
+    print(
+        "account_files_touched: "
+        + (", ".join(payload["account_files_touched"]) if payload["account_files_touched"] else "none")
+    )
+    after = payload["after"]
+    print(
+        "sorted_accounts: "
+        + ", ".join(str(item) for item in after["profile_preferences"]["sorted_accounts"])
+    )
+    print(
+        "sidebar_mail_all_accounts: "
+        + ", ".join(str(item) for item in after["app_preferences"]["sidebar_mail_all_accounts"])
+    )
+    print(
+        "shared_hx_accounts: "
+        + ", ".join(
+            f"{account_id}:{details.get('Username')}->{details.get('PrimarySmtpAddress')} window={details.get('EmailWindow')}"
+            for account_id, details in sorted(after["hx_accounts"].items())
+            if str(details.get("SharedAccountType") or "") == "2"
+        )
+    )
+    print(
+        "hide_sent_in_conversations: "
+        + str(after["app_preferences"]["hide_sent_in_conversations"])
+    )
+    print("note: stale shared-mailbox rss cache moved aside so Outlook can rebuild it on next launch.")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Canonical local repair for the Mint shared Outlook mailbox"
+    )
+    parser.add_argument("--apply", action="store_true", help="apply the local shared mailbox repair")
+    parser.add_argument(
+        "--graceful-quit",
+        action="store_true",
+        help="gracefully quit Outlook first when --apply is used",
+    )
+    parser.add_argument(
+        "--reopen",
+        action="store_true",
+        help="reopen Outlook after a successful apply when Outlook was running",
+    )
+    parser.add_argument(
+        "--shared-email-window",
+        type=int,
+        default=3650,
+        help="new shared-mailbox EmailWindow value in days (default: 3650)",
+    )
+    parser.add_argument("--json", action="store_true", help="emit JSON instead of plain text")
+    args = parser.parse_args()
+
+    if args.apply:
+        result = apply_repair(
+            graceful_quit=args.graceful_quit,
+            reopen=args.reopen,
+            shared_email_window=args.shared_email_window,
+        )
+    else:
+        result = audit_state()
+    print_result(result, as_json=args.json)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ToolError as exc:
+        print(f"microsoft.outlook.local.shared-mailbox-repair FAIL: {exc}", file=sys.stderr)
+        raise SystemExit(1)

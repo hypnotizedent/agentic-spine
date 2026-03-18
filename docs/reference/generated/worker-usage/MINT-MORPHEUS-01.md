@@ -1,7 +1,7 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-09
+last_verified: 2026-03-13
 scope: worker-usage-mint-morpheus-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -18,7 +18,21 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ## Write Scope
 - `../agentic-foundation/docs/agents/mint-agent.contract.md`
 
-## Capabilities (3)
+## Capabilities (16)
+- `mint.artwork.place`
+- `mint.customer.artwork.revision.prepare`
+- `mint.customer.contact.graph.set`
+- `mint.customer.forwarded.attachment.resolve`
+- `mint.customer.identity.set`
+- `mint.customer.inbox.junk`
+- `mint.customer.inbox.triage`
+- `mint.customer.inbox.work_items`
+- `mint.customer.quote.brief`
+  Context-first quote workflow: builds prior email history plus prior order/artwork truth before draft or clarification.
+- `mint.customer.quote.context.set`
+- `mint.customer.reorder.resolve`
+- `mint.customer.reply.draft`
+- `mint.customer.thread.delta.capture`
 - `mint.intake.validate`
 - `mint.modules.health`
 - `mint.seeds.query`

@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_inbox_machine_common import load_inbox_item_by_id, load_inbox_item_by_message_id  # noqa: E402
+from operator_mail_common import resolve_spine_root, resolve_spine_state  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.customer.inbox.item.get"
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-inbox-item-get",
+        description="Read the current governed Mint inbox-item record by inbox-item id or team mailbox message id.",
+    )
+    parser.add_argument("identifier", nargs="?", default="", help="Inbox item id or team mailbox message id")
+    parser.add_argument("--inbox-item-id", default="", help="Inbox item id")
+    parser.add_argument("--message-id", default="", help="Team mailbox message id")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    if args.identifier and not args.inbox_item_id and not args.message_id:
+        token = str(args.identifier or "").strip()
+        if token.startswith("MII-"):
+            args.inbox_item_id = token
+        else:
+            args.message_id = token
+    if not str(args.inbox_item_id or args.message_id).strip():
+        raise SystemExit("inbox-item-id or message-id required")
+    return args
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    record = (
+        load_inbox_item_by_id(state_root, args.inbox_item_id)
+        if str(args.inbox_item_id or "").strip()
+        else load_inbox_item_by_message_id(state_root, args.message_id)
+    )
+    if not record:
+        raise SystemExit("inbox item not found")
+    if args.json:
+        print(json.dumps(record, indent=2, sort_keys=True))
+        return 0
+    print(CAPABILITY_NAME)
+    print(f"inbox_item_id: {record.get('inbox_item_id', '')}")
+    print(f"workflow_state: {record.get('workflow_state', '')}")
+    print(f"disposition: {record.get('disposition', '')}")
+    print(f"source_mode: {record.get('source_mode', '')}")
+    print(f"reply_anchor_mode: {record.get('reply_anchor_mode', '')}")
+    print(f"subject: {((record.get('source_message_anchor') or {}).get('subject')) or ''}")
+    print(f"record_file: {record.get('record_file', '')}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

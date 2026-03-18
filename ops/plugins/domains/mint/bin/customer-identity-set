@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import timezone
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_identity_common import (  # noqa: E402
+    customer_identity_from_row,
+    dedupe_preserve,
+    normalize_space,
+    query_customer_rows,
+    row_metadata,
+    update_customer_identity_metadata,
+)
+from operator_mail_common import append_ndjson, compact_utc, fail, iso_utc, resolve_spine_root, resolve_spine_state, utc_now, write_json  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.customer.identity.set"
+CONTRACT_FALLBACK = "ops/bindings/mint.customer.identity.contract.yaml"
+ALLOWED_CONFIDENCE = {"low", "medium", "high"}
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-identity-set",
+        description="Persist governed customer-facing identity fields onto the canonical Mint customer record.",
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--email", help="Customer email selector")
+    group.add_argument("--name", help="Exact customer legal/display name selector")
+    group.add_argument("--record-id", help="Customer record id selector")
+    parser.add_argument("--legal-name", default="", help="Explicit legal/formal name to preserve")
+    parser.add_argument("--preferred-name", default="", help="Customer-facing preferred name")
+    parser.add_argument("--greeting-name", default="", help="Default greeting/salutation name")
+    parser.add_argument("--display-name", default="", help="Customer-facing display name")
+    parser.add_argument("--alias", action="append", default=[], help="Additional governed nickname/alias (repeatable)")
+    parser.add_argument("--source", default="operator_confirmed", help="Provenance source for this identity update")
+    parser.add_argument("--set-by", default=os.environ.get("USER", "unknown"), help="Operator or system setting the identity")
+    parser.add_argument("--confidence", default="high", help="Identity confidence: low|medium|high")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    if args.confidence not in ALLOWED_CONFIDENCE:
+        fail("confidence must be one of: low, medium, high")
+    if not any(
+        normalize_space(value)
+        for value in (args.legal_name, args.preferred_name, args.greeting_name, args.display_name)
+    ) and not any(normalize_space(item) for item in args.alias):
+        fail("at least one identity field must be provided")
+    return args
+
+
+def contract_path(spine_root: Path) -> str:
+    override = os.environ.get("MINT_CUSTOMER_IDENTITY_CONTRACT", "").strip()
+    if override:
+        return str(Path(override).expanduser().resolve())
+    return str((spine_root / CONTRACT_FALLBACK).resolve())
+
+
+def selector_summary(args: argparse.Namespace) -> tuple[str, str]:
+    if args.record_id:
+        return "record_id", normalize_space(args.record_id)
+    if args.email:
+        return "email", normalize_space(args.email).lower()
+    return "name", normalize_space(args.name)
+
+
+def merge_identity(row: dict[str, Any], args: argparse.Namespace, stored_at_utc: str) -> dict[str, Any]:
+    metadata = row_metadata(row)
+    existing = dict((metadata.get("customer_identity") or {}))
+    current = customer_identity_from_row(row)
+    legal_name = normalize_space(args.legal_name) or normalize_space(existing.get("legal_name") or "") or normalize_space(current.get("legal_name") or "")
+    preferred_name = normalize_space(args.preferred_name) or normalize_space(existing.get("preferred_name") or "")
+    greeting_name = normalize_space(args.greeting_name) or normalize_space(existing.get("greeting_name") or "") or preferred_name
+    display_name = (
+        normalize_space(args.display_name)
+        or normalize_space(existing.get("display_name") or "")
+        or greeting_name
+        or preferred_name
+        or legal_name
+    )
+    aliases = dedupe_preserve(
+        [str(item) for item in (existing.get("aliases") or [])] + [str(item) for item in args.alias]
+    )
+    provenance = {
+        "source": normalize_space(args.source) or "operator_confirmed",
+        "set_by": normalize_space(args.set_by) or "unknown",
+        "confidence": args.confidence,
+        "updated_at_utc": stored_at_utc,
+    }
+    metadata["customer_identity"] = {
+        "schema_version": "1.0",
+        "legal_name": legal_name or None,
+        "preferred_name": preferred_name or None,
+        "greeting_name": greeting_name or None,
+        "display_name": display_name or None,
+        "aliases": aliases,
+        "provenance": provenance,
+    }
+    return metadata
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    now = utc_now()
+    stored_at_utc = iso_utc(now)
+    update_id = f"MCI-{compact_utc(now)}"
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    selector_mode, selector_value = selector_summary(args)
+    rows = query_customer_rows(
+        spine_root,
+        email=args.email or "",
+        name=args.name or "",
+        record_id=args.record_id or "",
+    )
+    if not rows:
+        fail(f"no customer record found for {selector_mode}={selector_value}")
+    if len(rows) > 1:
+        fail(f"multiple customer records matched {selector_mode}={selector_value}; use --record-id")
+    row = dict(rows[0])
+    merged_metadata = merge_identity(row, args, stored_at_utc)
+    updated_row = update_customer_identity_metadata(
+        spine_root,
+        record_id=str(row.get("record_id") or ""),
+        metadata=merged_metadata,
+    )
+    identity = customer_identity_from_row(updated_row)
+
+    record = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": "1.0",
+        "update_id": update_id,
+        "stored_at_utc": stored_at_utc,
+        "contract": contract_path(spine_root),
+        "selector_mode": selector_mode,
+        "selector_value": selector_value,
+        "record_id": updated_row.get("record_id"),
+        "email": updated_row.get("email"),
+        "identity": identity,
+    }
+    records_dir = state_root / "mint" / "customer-identity-updates" / "records" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{update_id}.json"
+    index_file = state_root / "mint" / "customer-identity-updates" / "index.ndjson"
+    lock_file = state_root / "mint" / "customer-identity-updates" / ".index.lock"
+    write_json(record_file, record)
+    append_ndjson(
+        index_file,
+        lock_file,
+        {
+            "update_id": update_id,
+            "selector_mode": selector_mode,
+            "selector_value": selector_value,
+            "record_id": updated_row.get("record_id"),
+            "email": updated_row.get("email"),
+            "display_name": identity.get("display_name"),
+            "greeting_name": identity.get("greeting_name"),
+            "stored_at_utc": stored_at_utc,
+        },
+    )
+
+    payload = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": "1.0",
+        "status": "ok",
+        "generated_at": stored_at_utc,
+        "data": {
+            "update_id": update_id,
+            "selector_mode": selector_mode,
+            "selector_value": selector_value,
+            "record_id": updated_row.get("record_id"),
+            "email": updated_row.get("email"),
+            "identity": identity,
+            "record_file": str(record_file),
+            "index_file": str(index_file),
+        },
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(CAPABILITY_NAME)
+    print(f"update_id: {update_id}")
+    print(f"record_id: {updated_row.get('record_id')}")
+    print(f"email: {updated_row.get('email')}")
+    print(f"legal_name: {identity.get('legal_name') or ''}")
+    print(f"preferred_name: {identity.get('preferred_name') or ''}")
+    print(f"greeting_name: {identity.get('greeting_name') or ''}")
+    print(f"display_name: {identity.get('display_name') or ''}")
+    print(f"record_file: {record_file}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

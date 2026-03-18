@@ -1,0 +1,264 @@
+version: 1
+status: authoritative
+owner: "@ronny"
+updated_at: "2026-03-18"
+scope: media-lifecycle
+
+purpose: >
+  Canonical lifecycle contract for the boring media model:
+  request -> hot-home -> decision -> delete or cold-shop.
+  This contract defines which site owns which lifecycle stage, what content is
+  regenerable versus archive-worthy, and which storage lanes are authoritative.
+
+authority:
+  parent_contracts:
+    - ops/bindings/home.media.target.contract.yaml
+    - ops/bindings/shop.storage.scaffold.contract.yaml
+  doctrine:
+    - docs/governance/MEDIA_STACK_BORING_TARGET.md
+    - docs/governance/HOME_SERVER_SSOT.md
+    - docs/governance/SHOP_SERVER_SSOT.md
+  execution_artifacts:
+    - ops/bindings/home.media.execution.parity.matrix.yaml
+    - ops/bindings/media.data.lifecycle.execution.yaml
+
+architectural_model:
+  canonical_runtime_site: home
+  canonical_cold_retention_site: shop
+  principle: "Hot media lives where it is watched; cold retention lives where storage is abundant."
+  one_way_flow: home_to_shop_cold
+  reverse_flow: restore_on_demand_only
+  forbidden_models:
+    - endless_bidirectional_sync
+    - dual_live_truth_across_home_and_shop
+    - archive_presented_as_live_runtime_library
+
+site_roles:
+  home:
+    role: hot_runtime_and_consumption
+    canonical_surfaces:
+      runtime_vm: media-home
+      payload_path: /srv/media
+      backing_share: synology918:/volume1/media
+    governed_subpaths:
+      - /srv/media/downloads/incomplete
+      - /srv/media/downloads/complete/movies
+      - /srv/media/downloads/complete/tv
+      - /srv/media/downloads/complete/music
+      - /srv/media/movies
+      - /srv/media/tv
+      - /srv/media/music
+    rules:
+      - "Home is the only canonical live media library."
+      - "Home is request-driven, not list-hoard-driven."
+      - "Home does not keep a second always-mounted archive library by default."
+  shop:
+    role: cold_retention_and_rollback
+    canonical_surfaces:
+      cold_media_path: /md1400/archive/media-library
+      backup_cold_path: /md1400/backup-cold
+    governed_subpaths:
+      - /md1400/archive/media-library/movies
+      - /md1400/archive/media-library/tv
+      - /md1400/archive/media-library/music
+    rules:
+      - "Shop cold media is append-only retention, not a second live browsing surface."
+      - "Cold retained media is restored to home on demand instead of being mirrored live."
+      - "Shop may also remain the rollback and deep-storage site during transition."
+
+request_policy:
+  preferred_sources:
+    - jellyseerr_explicit_request
+    - manual_operator_add
+    - deliberate_arr_search_or_manual_import
+  discouraged_sources:
+    - unattended_bulk_list_ingest
+    - speculative_grab_everything_workflows
+    - capacity_blind_auto_hoarding
+  governing_rule: >
+    Media should enter the system because there is present watch intent, not
+    because a list exists and storage happened to be available.
+
+lifecycle_states:
+  - id: requested
+    meaning: "An explicit user or operator intent to watch something soon."
+    canonical_site: home
+    next_states:
+      - downloading_hot_home
+      - canceled
+  - id: downloading_hot_home
+    meaning: "The item is being acquired for home playback."
+    canonical_site: home
+    canonical_paths:
+      - /srv/media/downloads/incomplete
+      - /srv/media/downloads/complete/<class>
+    next_states:
+      - imported_hot_home
+      - failed_regenerable
+  - id: imported_hot_home
+    meaning: "The item has been imported into the live home library."
+    canonical_site: home
+    canonical_paths:
+      - /srv/media/movies
+      - /srv/media/tv
+      - /srv/media/music
+    next_states:
+      - actively_watching
+      - decision_required
+  - id: actively_watching
+    meaning: "The item is still in the hot library because active watch intent remains."
+    canonical_site: home
+    next_states:
+      - decision_required
+  - id: decision_required
+    meaning: >
+      The item must be classified after use: delete if regenerable, or promote
+      to cold-shop if intentionally worth keeping.
+    canonical_site: home
+    next_states:
+      - deleted_regenerable
+      - promoted_cold_shop
+  - id: deleted_regenerable
+    meaning: "The item was intentionally removed because it is easy to reacquire and not worth keeping."
+    canonical_site: none
+    next_states:
+      - requested
+  - id: promoted_cold_shop
+    meaning: "The item was intentionally retained and copied into the shop cold media lane."
+    canonical_site: shop
+    canonical_paths:
+      - /md1400/archive/media-library/<class>
+    next_states:
+      - restored_on_demand
+  - id: restored_on_demand
+    meaning: "A cold-retained item was intentionally pulled back into the hot home library for viewing."
+    canonical_site: home
+    next_states:
+      - actively_watching
+      - decision_required
+
+data_classes:
+  regenerable:
+    definition: >
+      Content that is easy to reacquire, still speculative, low-intent, or not
+      worth preserving as a long-term keeper.
+    default_action_after_use: delete
+    must_not_be_treated_as:
+      - backup_truth
+      - archive_by_default
+      - reason_to_expand_storage_without_review
+    examples:
+      - incomplete_downloads
+      - completed_downloads_waiting_for_import
+      - blind_auto_list_grabs
+      - duplicate_quality_versions
+      - failed_or_test_artifacts
+      - mainstream_titles_with_no_intent_to_keep
+  archive_worthy:
+    definition: >
+      Content that has been intentionally watched or intentionally kept and is
+      worth preserving beyond the hot home library.
+    default_action_after_use: promote_to_cold_shop
+    required_signals:
+      - explicit_keep_decision
+      - watched_or_manually_curated
+    qualifying_reasons:
+      - rare_or_hard_to_reacquire
+      - curated_reference_collection
+      - personal_keeper_or_sentimental_value
+      - manual_metadata_or_organization_effort
+      - strong_rewatch_value
+    must_not_be_treated_as:
+      - live_home_library_by_default
+      - reason_for_endless_sync
+
+decision_policy:
+  default_rule: "When in doubt, delete. Cold retention requires affirmative keep intent."
+  review_questions:
+    - "Was this explicitly watched or intentionally curated?"
+    - "Would reacquiring this later be painful, rare, or undesirable?"
+    - "Is this a keeper, or just something that happened to exist on disk?"
+  promotion_requirements:
+    - "Copy from home hot lane to /md1400/archive/media-library/<class> completes successfully."
+    - "Basic integrity parity is verified before home deletion."
+    - "The shop cold copy is not mounted back into the live home library."
+  delete_requirements:
+    - "Deleting regenerable content is normal and does not count as backup loss."
+    - "Downloads and speculative grabs should not linger indefinitely as undecided state."
+  boring_invariant:
+    - "Normal cold promotion starts from the canonical home library, not directly from inbox residue."
+    - "Inbox residue must be imported or deleted before automation is re-enabled."
+
+operator_surfaces:
+  readiness_verify:
+    capability: media.data.readiness.verify
+    command_pattern: ./bin/ops cap run media.data.readiness.verify -- --json
+    verifies:
+      - inbox_lane_state
+      - library_truth_protection
+      - cold_shop_gate_posture
+      - service_restart_gates
+  promote_to_cold_shop:
+    capability: media.cold.promote
+    command_pattern: ./bin/ops cap run media.cold.promote -- --class <movies|tv|music> --relative-path "<path-within-class>"
+    source_root: /srv/media/<class>
+    destination_root: /md1400/archive/media-library/<class>
+    verification: basic_path_manifest_parity
+    default_behavior:
+      - "Copy the selected kept title from home hot storage into shop cold retention."
+      - "Verify file-count, byte-count, and manifest parity before any home deletion."
+      - "Remove the home copy after successful parity unless --keep-home-copy is requested."
+    refusal_conditions:
+      - destination already exists
+      - source missing
+      - invalid class or unsafe relative path
+  restore_on_demand:
+    capability: media.cold.restore
+    command_pattern: ./bin/ops cap run media.cold.restore -- --class <movies|tv|music> --relative-path "<path-within-class>"
+    source_root: /md1400/archive/media-library/<class>
+    destination_root: /srv/media/<class>
+    verification: basic_path_manifest_parity
+    default_behavior:
+      - "Copy the selected cold-retained title from shop back into the home hot library."
+      - "Verify file-count, byte-count, and manifest parity after restore."
+      - "Keep the shop cold copy in place as cold-retention truth."
+    refusal_conditions:
+      - destination already exists
+      - source missing
+      - invalid class or unsafe relative path
+
+storage_lane_contract:
+  hot_home:
+    canonical_path: /srv/media
+    purpose: "Live watch-ready library and download/import working set."
+    answers:
+      - "What is live right now?"
+      - "What can Jellyfin and the ARR pipeline see immediately?"
+    must_not_be_used_as:
+      - cold_archive_truth
+      - second_backup_plane
+  cold_shop:
+    canonical_path: /md1400/archive/media-library
+    purpose: "Intentional cold retention for kept media that leaves the hot library."
+    answers:
+      - "What did we intentionally keep after watching?"
+      - "Where does cold media live once it leaves home?"
+    must_not_be_used_as:
+      - always_mounted_home_library
+      - mirrored_live_runtime
+  review_holds:
+    canonical_paths:
+      - /volume1/media-holds
+      - /md1400/archive/media-holds
+    purpose: "Explicit review buckets for exceptional residue, not steady-state libraries."
+    must_not_be_used_as:
+      - permanent_archive_substitute
+      - overflow_dumping_ground
+
+anti_patterns:
+  - "Downloading large random lists without current watch intent."
+  - "Treating archive as a cleanup excuse instead of making a keep/delete decision."
+  - "Keeping home and shop as simultaneous live truths for the same library."
+  - "Endless sync between home hot media and shop cold media."
+  - "Mounting cold-shop media into the default live home browsing surface."
+  - "Calling regenerable downloads or speculative pulls 'backup'."

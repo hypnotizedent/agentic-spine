@@ -4,23 +4,27 @@ set -euo pipefail
 # agent-health-check-all — Probe configured agent endpoints and report aggregate health.
 #
 # Usage:
-#   agent-health-check-all [--agents "id1,id2"] [--timeout 3] [--strict] [--json]
+#   agent-health-check-all [--agents "id1,id2"] [--timeout 3] [--parallel 8] [--strict] [--json]
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 REGISTRY="$ROOT/ops/bindings/agents.registry.yaml"
+VM_LIFECYCLE="$ROOT/ops/bindings/vm.lifecycle.yaml"
 CAPABILITY="agent.health.check-all"
 
 AGENTS_FILTER=""
 TIMEOUT=3
+PARALLEL=8
 STRICT=0
 JSON=0
+ROUTE_MODE="${AGENT_HEALTH_ROUTE_MODE:-auto}"
+RETRY_ATTEMPTS="${AGENT_HEALTH_RETRY_ATTEMPTS:-2}"
 
 usage() {
   cat <<'USAGE'
 agent-health-check-all
 
 Usage:
-  agent-health-check-all [--agents "id1,id2"] [--timeout 3] [--strict] [--json]
+  agent-health-check-all [--agents "id1,id2"] [--timeout 3] [--parallel 8] [--strict] [--json]
 USAGE
 }
 
@@ -28,6 +32,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --agents) AGENTS_FILTER="${2:?--agents requires value}"; shift 2 ;;
     --timeout) TIMEOUT="${2:?--timeout requires value}"; shift 2 ;;
+    --parallel) PARALLEL="${2:?--parallel requires value}"; shift 2 ;;
     --strict) STRICT=1; shift ;;
     --json) JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -38,16 +43,79 @@ done
 command -v yq >/dev/null 2>&1 || { echo "FAIL: yq required" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "FAIL: jq required" >&2; exit 2; }
 command -v curl >/dev/null 2>&1 || { echo "FAIL: curl required" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 required" >&2; exit 2; }
 [[ -f "$REGISTRY" ]] || { echo "FAIL: missing registry: $REGISTRY" >&2; exit 1; }
+[[ -f "$VM_LIFECYCLE" ]] || { echo "FAIL: missing vm lifecycle: $VM_LIFECYCLE" >&2; exit 1; }
+[[ "$TIMEOUT" =~ ^[0-9]+$ ]] || { echo "FAIL: --timeout must be integer seconds" >&2; exit 2; }
+[[ "$PARALLEL" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL: --parallel must be integer >= 1" >&2; exit 2; }
+[[ "$RETRY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL: AGENT_HEALTH_RETRY_ATTEMPTS must be integer >= 1" >&2; exit 2; }
+case "$ROUTE_MODE" in
+  auto|lan|tailscale) ;;
+  *) echo "FAIL: AGENT_HEALTH_ROUTE_MODE must be auto|lan|tailscale" >&2; exit 2 ;;
+esac
+
+REGISTRY_JSON="$(yq -o=json '.' "$REGISTRY")"
+VM_ROUTE_CATALOG_JSON="$(yq -o=json '.vms // []' "$VM_LIFECYCLE" | jq -c '[.[] | {hostname:(.hostname // ""), lan_ip:(.lan_ip // ""), tailscale_ip:(.tailscale_ip // "")}]')"
+ALIAS_CATALOG_JSON="$(jq -n --argjson registry "$REGISTRY_JSON" '
+  [
+    ($registry.agents // [])[] as $agent
+    | {
+        id: ($agent.id | tostring),
+        aliases: (
+          [
+            ($agent.id | tostring),
+            ($agent.name // "" | tostring),
+            ($agent.human_name // "" | tostring)
+          ] + [
+            ($registry.routing_rules // [])[]?
+            | select((.agent // "" | tostring) == ($agent.id | tostring))
+            | (.keywords // [])[]?
+          ]
+        )
+        | map(tostring | ascii_downcase | gsub("^\\s+|\\s+$"; ""))
+        | map(select(length > 0))
+        | unique
+      }
+  ]
+')"
+AGENT_PROBE_COUNTS_JSON="$(jq -n --argjson registry "$REGISTRY_JSON" '
+  [
+    ($registry.agents // [])[]
+    | {
+        key: (.id | tostring),
+        value: (((.endpoints // {}) | to_entries) | length)
+      }
+  ] | from_entries
+')"
 
 FILTER_JSON='[]'
+RESOLVED_FILTER_JSON='[]'
+UNRESOLVED_FILTER_JSON='[]'
+AGENTS_WITHOUT_PROBES_JSON='[]'
 if [[ -n "$AGENTS_FILTER" ]]; then
   FILTER_JSON="$(printf '%s' "$AGENTS_FILTER" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | sed '/^$/d' | jq -Rsc 'split("\n") | map(select(length>0))')"
+  filter_resolution_json="$(jq -n --argjson filters "$FILTER_JSON" --argjson alias_catalog "$ALIAS_CATALOG_JSON" '
+    [
+      $filters[] as $input
+      | (($input | tostring | ascii_downcase | gsub("^\\s+|\\s+$"; ""))) as $needle
+      | ($alias_catalog | map(select(.aliases | index($needle))) | .[0]) as $match
+      | if $match then
+          {input: $input, canonical: $match.id, matched: true}
+        else
+          {input: $input, canonical: null, matched: false}
+        end
+    ]
+  ')"
+  RESOLVED_FILTER_JSON="$(jq '[.[] | select(.matched) | .canonical] | unique' <<<"$filter_resolution_json")"
+  UNRESOLVED_FILTER_JSON="$(jq '[.[] | select(.matched | not) | .input] | unique' <<<"$filter_resolution_json")"
+  AGENTS_WITHOUT_PROBES_JSON="$(jq -n --argjson matched "$RESOLVED_FILTER_JSON" --argjson counts "$AGENT_PROBE_COUNTS_JSON" '
+    [$matched[] | select(($counts[.] // 0) == 0)]
+  ')"
 fi
 
 in_filter() {
   local agent_id="$1"
-  jq -e --arg id "$agent_id" '. | index($id) != null' <<<"$FILTER_JSON" >/dev/null 2>&1
+  jq -e --arg id "$agent_id" '. | index($id) != null' <<<"$RESOLVED_FILTER_JSON" >/dev/null 2>&1
 }
 
 probes='[]'
@@ -55,12 +123,170 @@ checked=0
 healthy=0
 unhealthy=0
 
-while IFS=$'\t' read -r agent_id endpoint_name endpoint_url expected_codes_json; do
-  [[ -z "$agent_id" || -z "$endpoint_name" || -z "$endpoint_url" ]] && continue
+now_ms() {
+  python3 -c 'import time; print(int(time.time()*1000))'
+}
 
-  if [[ -n "$AGENTS_FILTER" ]] && ! in_filter "$agent_id"; then
-    continue
-  fi
+resolve_route_plan() {
+  local agent_id="$1"
+  local endpoint_url="$2"
+  VM_ROUTE_CATALOG_JSON="$VM_ROUTE_CATALOG_JSON" python3 - "$agent_id" "$endpoint_url" "$ROUTE_MODE" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import sys
+from urllib.parse import urlsplit, urlunsplit
+
+agent_id = sys.argv[1]
+endpoint_url = sys.argv[2]
+route_mode = sys.argv[3]
+catalog = json.loads(os.environ.get("VM_ROUTE_CATALOG_JSON", "[]") or "[]")
+parts = urlsplit(endpoint_url)
+host = parts.hostname or ""
+
+def replace_host(new_host: str) -> str:
+    if not new_host:
+        return ""
+    netloc = ""
+    if parts.username:
+        netloc += parts.username
+        if parts.password:
+            netloc += f":{parts.password}"
+        netloc += "@"
+    netloc += new_host
+    if parts.port:
+        netloc += f":{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+def emit(primary_url: str, fallback_url: str, primary_route: str, fallback_route: str, vm_hostname: str) -> None:
+    print(
+        json.dumps(
+            {
+                "primary_url": primary_url,
+                "fallback_url": fallback_url,
+                "primary_route": primary_route,
+                "fallback_route": fallback_route,
+                "vm_hostname": vm_hostname,
+            }
+        )
+    )
+
+if not host:
+    emit(endpoint_url, "", "direct", "", "")
+    raise SystemExit(0)
+
+match = None
+for item in catalog:
+    lan_ip = str(item.get("lan_ip") or "").strip()
+    tailscale_ip = str(item.get("tailscale_ip") or "").strip()
+    if host == lan_ip or host == tailscale_ip:
+        match = {
+            "hostname": str(item.get("hostname") or "").strip(),
+            "lan_ip": lan_ip,
+            "tailscale_ip": tailscale_ip,
+        }
+        break
+
+if match is None:
+    emit(endpoint_url, "", "direct", "", "")
+    raise SystemExit(0)
+
+if route_mode == "lan":
+    ordered = [("lan", match["lan_ip"]), ("tailscale", match["tailscale_ip"])]
+elif route_mode == "tailscale":
+    ordered = [("tailscale", match["tailscale_ip"]), ("lan", match["lan_ip"])]
+else:
+    if host == match["lan_ip"]:
+        ordered = [("lan", match["lan_ip"]), ("tailscale", match["tailscale_ip"])]
+    elif host == match["tailscale_ip"]:
+        ordered = [("tailscale", match["tailscale_ip"]), ("lan", match["lan_ip"])]
+    else:
+        ordered = [("direct", host), ("tailscale", match["tailscale_ip"]), ("lan", match["lan_ip"])]
+
+resolved: list[tuple[str, str]] = []
+seen_hosts: set[str] = set()
+for route_name, candidate_host in ordered:
+    candidate_host = str(candidate_host or "").strip()
+    if not candidate_host or candidate_host in seen_hosts:
+        continue
+    seen_hosts.add(candidate_host)
+    resolved.append((route_name, candidate_host))
+
+if not resolved:
+    emit(endpoint_url, "", "direct", "", match["hostname"])
+    raise SystemExit(0)
+
+primary_route, primary_host = resolved[0]
+fallback_route = ""
+fallback_host = ""
+if len(resolved) > 1:
+    fallback_route, fallback_host = resolved[1]
+
+emit(replace_host(primary_host), replace_host(fallback_host), primary_route, fallback_route, match["hostname"])
+PY
+}
+
+PROBE_HTTP_CODE="000"
+PROBE_STATE="unhealthy"
+
+probe_url() {
+  local candidate_url="$1"
+  local expected_codes_json="$2"
+  local http_code expected_len curl_exit attempt max_attempts backoff_sec
+
+  PROBE_HTTP_CODE="000"
+  PROBE_STATE="unhealthy"
+  max_attempts="$RETRY_ATTEMPTS"
+  backoff_sec=1
+
+  expected_len="$(jq -r 'length' <<<"$expected_codes_json")"
+  [[ "$expected_len" =~ ^[0-9]+$ ]] || expected_len=0
+
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    set +e
+    http_code="$(curl -sS -L --max-time "$TIMEOUT" -o /dev/null -w '%{http_code}' "$candidate_url" 2>/dev/null)"
+    curl_exit=$?
+    set -e
+
+    if [[ "$http_code" =~ ^[0-9]{3}$ ]]; then
+      if (( expected_len > 0 )); then
+        if jq -e --arg code "$http_code" 'map(tostring) | index($code) != null' <<<"$expected_codes_json" >/dev/null 2>&1; then
+          PROBE_STATE="healthy"
+        fi
+      elif (( http_code >= 200 && http_code < 400 )); then
+        PROBE_STATE="healthy"
+      fi
+    else
+      http_code="000"
+    fi
+
+    if [[ "$PROBE_STATE" == "healthy" ]]; then
+      break
+    fi
+
+    if (( attempt >= max_attempts )) || [[ "$curl_exit" -ne 7 && "$curl_exit" -ne 28 ]]; then
+      break
+    fi
+
+    sleep "$backoff_sec"
+    backoff_sec=$((backoff_sec * 2))
+  done
+
+  PROBE_HTTP_CODE="$http_code"
+}
+
+probe_endpoint() {
+  local index_slot="$1"
+  local index_num="$2"
+  local agent_id="$3"
+  local endpoint_name="$4"
+  local endpoint_url="$5"
+  local expected_codes_json="$6"
+  local result_dir="$7"
+  local start_ts end_ts duration_ms http_code state health_policy expected_len
+  local primary_url fallback_url primary_route fallback_route route_vm
+  local effective_url route_source fallback_attempted attempted_urls_json
 
   if [[ -z "${expected_codes_json:-}" || "$expected_codes_json" == "null" ]]; then
     expected_codes_json='[]'
@@ -69,8 +295,6 @@ while IFS=$'\t' read -r agent_id endpoint_name endpoint_url expected_codes_json;
     expected_codes_json='[]'
   fi
 
-  checked=$((checked + 1))
-  http_code=""
   state="unhealthy"
   health_policy="default_2xx_3xx"
   expected_len="$(jq -r 'length' <<<"$expected_codes_json")"
@@ -79,57 +303,161 @@ while IFS=$'\t' read -r agent_id endpoint_name endpoint_url expected_codes_json;
     health_policy="expected_http_codes"
   fi
 
-  if http_code="$(curl -sS -L --max-time "$TIMEOUT" -o /dev/null -w '%{http_code}' "$endpoint_url" 2>/dev/null || true)"; then
-    :
+  route_plan_json="$(resolve_route_plan "$agent_id" "$endpoint_url")"
+  primary_url="$(jq -r '.primary_url // ""' <<<"$route_plan_json")"
+  fallback_url="$(jq -r '.fallback_url // ""' <<<"$route_plan_json")"
+  primary_route="$(jq -r '.primary_route // "direct"' <<<"$route_plan_json")"
+  fallback_route="$(jq -r '.fallback_route // ""' <<<"$route_plan_json")"
+  route_vm="$(jq -r '.vm_hostname // ""' <<<"$route_plan_json")"
+  [[ -n "$primary_url" ]] || primary_url="$endpoint_url"
+  attempted_urls_json="$(jq -n --arg primary "$primary_url" --arg fallback "$fallback_url" '[$primary, $fallback] | map(select(length > 0)) | unique')"
+  effective_url="$primary_url"
+  route_source="direct"
+  fallback_attempted=false
+  if [[ "$primary_url" != "$endpoint_url" && "$primary_route" != "direct" ]]; then
+    route_source="preferred_${primary_route}"
   fi
 
-  if [[ "$http_code" =~ ^[0-9]{3}$ ]]; then
-    if (( expected_len > 0 )); then
-      if jq -e --arg code "$http_code" 'map(tostring) | index($code) != null' <<<"$expected_codes_json" >/dev/null 2>&1; then
-        state="healthy"
-        healthy=$((healthy + 1))
-      else
-        unhealthy=$((unhealthy + 1))
-      fi
-    elif (( http_code >= 200 && http_code < 400 )); then
-      state="healthy"
-      healthy=$((healthy + 1))
+  start_ts="$(now_ms)"
+  probe_url "$primary_url" "$expected_codes_json"
+  http_code="$PROBE_HTTP_CODE"
+  state="$PROBE_STATE"
+  if [[ "$state" != "healthy" && -n "$fallback_url" && "$fallback_url" != "$primary_url" ]]; then
+    fallback_attempted=true
+    probe_url "$fallback_url" "$expected_codes_json"
+    http_code="$PROBE_HTTP_CODE"
+    if [[ "$PROBE_STATE" == "healthy" ]]; then
+      state="$PROBE_STATE"
+      effective_url="$fallback_url"
+      route_source="fallback_${fallback_route}"
     else
-      unhealthy=$((unhealthy + 1))
+      route_source="fallback_failed_${fallback_route}"
     fi
-  else
-    http_code="000"
-    unhealthy=$((unhealthy + 1))
   fi
+  end_ts="$(now_ms)"
+  duration_ms=$((end_ts - start_ts))
 
-  probe="$(jq -n \
+  jq -n \
+    --argjson index "$index_num" \
     --arg agent_id "$agent_id" \
     --arg endpoint "$endpoint_name" \
     --arg url "$endpoint_url" \
+    --arg effective_url "$effective_url" \
+    --arg route_mode "$ROUTE_MODE" \
+    --arg route_source "$route_source" \
+    --arg route_vm "$route_vm" \
+    --arg fallback_url "$fallback_url" \
+    --argjson attempted_urls "$attempted_urls_json" \
+    --argjson fallback_attempted "$([[ "$fallback_attempted" == "true" ]] && echo true || echo false)" \
     --arg state "$state" \
     --arg http_code "$http_code" \
     --arg health_policy "$health_policy" \
     --argjson expected_http_codes "$expected_codes_json" \
-    '{agent_id:$agent_id,endpoint:$endpoint,url:$url,state:$state,http_code:$http_code,health_policy:$health_policy,expected_http_codes:$expected_http_codes}')"
-  probes="$(jq --argjson p "$probe" '. + [$p]' <<<"$probes")"
+    --argjson duration_ms "$duration_ms" \
+    '{
+      index:$index,
+      agent_id:$agent_id,
+      endpoint:$endpoint,
+      url:$url,
+      effective_url:$effective_url,
+      route_mode:$route_mode,
+      route_source:$route_source,
+      route_vm:(if $route_vm == "" then null else $route_vm end),
+      fallback_url:(if $fallback_url == "" then null else $fallback_url end),
+      attempted_urls:$attempted_urls,
+      fallback_attempted:$fallback_attempted,
+      state:$state,
+      http_code:$http_code,
+      health_policy:$health_policy,
+      expected_http_codes:$expected_http_codes,
+      duration_ms:$duration_ms
+    }' \
+    >"$result_dir/${index_slot}.json"
+}
+
+probe_tasks=()
+while IFS=$'\t' read -r agent_id endpoint_name endpoint_url expected_codes_json; do
+  [[ -z "$agent_id" || -z "$endpoint_name" || -z "$endpoint_url" ]] && continue
+  if [[ -n "$AGENTS_FILTER" ]] && ! in_filter "$agent_id"; then
+    continue
+  fi
+  probe_tasks+=("$agent_id"$'\t'"$endpoint_name"$'\t'"$endpoint_url"$'\t'"$expected_codes_json")
 done < <(yq -r '.agents[] as $a | ($a.endpoints // {}) | to_entries[]? | [$a.id, .key, (.value.url // ""), ((.value.expected_http_codes // []) | @json)] | @tsv' "$REGISTRY")
 
+tmp_dir="$(mktemp -d)"
+current_batch=0
+for idx in "${!probe_tasks[@]}"; do
+  IFS=$'\t' read -r agent_id endpoint_name endpoint_url expected_codes_json <<< "${probe_tasks[$idx]}"
+  printf -v probe_slot '%04d' $((idx + 1))
+  (
+    set +e
+    probe_endpoint "$probe_slot" "$((idx + 1))" "$agent_id" "$endpoint_name" "$endpoint_url" "$expected_codes_json" "$tmp_dir"
+    echo "$?" >"$tmp_dir/${probe_slot}.rc"
+  ) &
+  current_batch=$((current_batch + 1))
+  if (( current_batch >= PARALLEL )); then
+    set +e
+    wait
+    set -e
+    current_batch=0
+  fi
+done
+
+set +e
+wait
+set -e
+
+for result_file in "$tmp_dir"/*.json; do
+  [[ -e "$result_file" ]] || continue
+  rc_file="${result_file%.json}.rc"
+  if [[ -f "$rc_file" ]] && [[ "$(cat "$rc_file")" != "0" ]]; then
+    echo "FAIL: probe worker failed for ${result_file##*/}" >&2
+    rm -rf "$tmp_dir"
+    exit 2
+  fi
+  probe="$(cat "$result_file")"
+  checked=$((checked + 1))
+  if jq -e '.state == "healthy"' >/dev/null 2>&1 <<<"$probe"; then
+    healthy=$((healthy + 1))
+  else
+    unhealthy=$((unhealthy + 1))
+  fi
+  probes="$(jq --argjson p "$probe" '. + [$p]' <<<"$probes")"
+done
+
+rm -rf "$tmp_dir"
+
 status="ok"
-if (( checked == 0 )); then
+requested_count="$(jq -r 'length' <<<"$FILTER_JSON")"
+unresolved_count="$(jq -r 'length' <<<"$UNRESOLVED_FILTER_JSON")"
+strict_should_fail=0
+
+if (( unresolved_count > 0 )); then
+  status="degraded"
+  strict_should_fail=1
+elif (( checked == 0 )); then
   status="no-probes"
 elif (( unhealthy > 0 )); then
   status="degraded"
+  strict_should_fail=1
 fi
 
 data="$(jq -n \
   --arg registry "$REGISTRY" \
+  --arg vm_lifecycle "$VM_LIFECYCLE" \
   --argjson checked "$checked" \
   --argjson healthy "$healthy" \
   --argjson unhealthy "$unhealthy" \
+  --argjson parallel "$PARALLEL" \
+  --argjson timeout_sec "$TIMEOUT" \
+  --arg route_mode "$ROUTE_MODE" \
   --argjson strict "$([[ "$STRICT" -eq 1 ]] && echo true || echo false)" \
   --argjson filters "$FILTER_JSON" \
+  --argjson resolved_agents "$RESOLVED_FILTER_JSON" \
+  --argjson unresolved_agents "$UNRESOLVED_FILTER_JSON" \
+  --argjson agents_without_probes "$AGENTS_WITHOUT_PROBES_JSON" \
   --argjson probes "$probes" \
-  '{registry:$registry,checked:$checked,healthy:$healthy,unhealthy:$unhealthy,strict:$strict,agents_filter:$filters,probes:$probes}')"
+  '{registry:$registry,vm_lifecycle:$vm_lifecycle,checked:$checked,healthy:$healthy,unhealthy:$unhealthy,parallel:$parallel,timeout_sec:$timeout_sec,route_mode:$route_mode,strict:$strict,agents_filter:$filters,resolved_agents:$resolved_agents,unresolved_agents:$unresolved_agents,agents_without_probes:$agents_without_probes,probes:$probes}')"
 
 if [[ "$JSON" -eq 1 ]]; then
   jq -n \
@@ -147,6 +475,10 @@ else
   echo "unhealthy: $unhealthy"
 fi
 
-if [[ "$STRICT" -eq 1 && "$status" != "ok" ]]; then
+if (( checked == 0 && requested_count == 0 )); then
+  strict_should_fail=1
+fi
+
+if [[ "$STRICT" -eq 1 && "$strict_should_fail" -eq 1 ]]; then
   exit 1
 fi

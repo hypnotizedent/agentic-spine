@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_junk_review_common import (  # noqa: E402
+    build_junk_review,
+    encode_json,
+    ensure_destination_folder,
+    load_review_contract,
+    new_artifact_id,
+    persist_record,
+    resolve_runtime,
+    review_defaults,
+)
+from operator_mail_common import iso_utc, run_cap_capture  # noqa: E402
+
+
+SCHEMA_VERSION = "1.0"
+CAPABILITY_NAME = "mint.customer.junk.sweep"
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-junk-sweep",
+        description="Preview or apply the governed boring cleanup actions for Outlook Junk Email.",
+    )
+    parser.add_argument("--mailbox", default="", help="Mailbox to review (default comes from contract)")
+    parser.add_argument("--folder", default="", help="Source folder to review (default comes from contract)")
+    parser.add_argument("--top", type=int, default=0, help="Max messages to review (default comes from contract)")
+    parser.add_argument("--order", choices=["newest_first", "oldest_first"], default="", help="Folder review order")
+    parser.add_argument("--apply", action="store_true", help="Apply the sweep instead of only previewing actions")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def text_output(summary: dict[str, Any]) -> str:
+    lines = [
+        CAPABILITY_NAME,
+        f"status: {summary['status']}",
+        f"mailbox: {summary['mailbox']}",
+        f"folder: {summary['source_folder_display_name']}",
+        f"reviewed_count: {summary['reviewed_count']}",
+        f"moved_to_supplier_marketing: {summary['action_counts'].get('move_to_supplier_marketing', 0)}",
+        f"restored_to_inbox: {summary['action_counts'].get('restore_to_inbox', 0)}",
+        f"left_in_junk: {summary['action_counts'].get('leave_in_junk', 0)}",
+        "",
+    ]
+    for item in summary.get("actions") or []:
+        lines.extend(
+            [
+                f"{item.get('message_id', '')} | {item.get('action', '')} | {item.get('action_status', '')}",
+                f"  subject: {item.get('subject', '')}",
+                f"  destination: {item.get('destination_folder', '')}",
+            ]
+        )
+    lines.append(f"record_file: {summary['record_file']}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root, state_root = resolve_runtime()
+    contract = load_review_contract(spine_root)
+    defaults = review_defaults(contract)
+    workflow = dict(contract.get("workflow") or {})
+
+    mailbox = args.mailbox.strip() or defaults["mailbox"]
+    folder = args.folder.strip() or defaults["folder"]
+    top = args.top if args.top > 0 else int(defaults["top"])
+    order = args.order or defaults["order"]
+
+    review = build_junk_review(
+        spine_root,
+        mailbox=mailbox,
+        folder=folder,
+        top=top,
+        order=order,
+    )
+
+    move_capability = str(workflow.get("move_capability") or "microsoft.mail.move").strip()
+    actions: list[dict[str, Any]] = []
+    action_counts = {
+        "move_to_supplier_marketing": 0,
+        "restore_to_inbox": 0,
+        "leave_in_junk": 0,
+    }
+    for item in review.get("items") or []:
+        action = str(item.get("action") or "")
+        destination_folder = str(item.get("destination_folder") or "")
+        action_counts[action] = action_counts.get(action, 0) + 1
+        action_entry = {
+            "message_id": item.get("message_id"),
+            "subject": item.get("subject"),
+            "review_class": item.get("review_class"),
+            "action": action,
+            "destination_folder": destination_folder,
+            "action_status": "planned",
+            "move_receipt": None,
+            "moved_message_id": "",
+        }
+        if args.apply and action != "leave_in_junk":
+            if action == "move_to_supplier_marketing":
+                ensure_destination_folder(spine_root, mailbox, destination_folder, contract)
+            move_payload, move_receipt = run_cap_capture(
+                spine_root,
+                move_capability,
+                [
+                    "--message-id",
+                    str(item.get("message_id") or ""),
+                    "--destination-folder",
+                    destination_folder,
+                    "--mailbox",
+                    mailbox,
+                ],
+            )
+            action_entry["action_status"] = "moved"
+            action_entry["move_receipt"] = move_receipt or None
+            action_entry["moved_message_id"] = str(move_payload.get("id") or move_payload.get("messageId") or "")
+        elif action == "leave_in_junk":
+            action_entry["action_status"] = "left_in_place"
+        actions.append(action_entry)
+
+    sweep_id, now = new_artifact_id("MJS")
+    summary = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "status": "applied" if args.apply else "preview",
+        "generated_at": iso_utc(now),
+        "sweep_id": sweep_id,
+        **review,
+        "apply": bool(args.apply),
+        "action_counts": action_counts,
+        "actions": actions,
+    }
+    record_file, index_file = persist_record(
+        state_root,
+        category="customer-junk-sweeps",
+        artifact_id=sweep_id,
+        payload=summary,
+        stored_at=now,
+    )
+    summary["record_file"] = str(record_file)
+    summary["index_file"] = str(index_file)
+
+    if args.json:
+        print(encode_json(summary))
+        return 0
+
+    print(text_output(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -96,7 +96,13 @@ echo "T4: json_contract caps emit stable JSON envelope"
       args+=("$arg")
     done < <(yq -r ".json_contract.caps[] | select(.capability == \"$cap\") | .args[]?" "$REGISTRY" 2>/dev/null || true)
 
-    out="$(cd "$SP" && bash "${cmd#./}" --json "${args[@]}")"
+    quoted_args=""
+    for arg in "${args[@]}"; do
+      printf -v q ' %q' "$arg"
+      quoted_args+="$q"
+    done
+
+    out="$(cd "$SP" && bash -lc "${cmd} --json${quoted_args}")"
     echo "$out" | jq -e . >/dev/null 2>&1
 
     # Standard envelope keys (and cap name must match).

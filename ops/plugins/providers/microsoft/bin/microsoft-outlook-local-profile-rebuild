@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""Full local Outlook profile rebuild with governed backups."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[5]
+RUNTIME_CONTRACT = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
+OUTLOOK_APP = "Microsoft Outlook"
+PROFILES_ROOT = Path(
+    "~/Library/Group Containers/UBF8T346G9.Office/Outlook/Outlook 15 Profiles"
+).expanduser()
+MAIN_PROFILE = PROFILES_ROOT / "Main Profile"
+CONTAINER_LIBRARY = Path(
+    "~/Library/Containers/com.microsoft.Outlook/Data/Library"
+).expanduser()
+APP_PREFS = CONTAINER_LIBRARY / "Preferences/com.microsoft.Outlook.plist"
+HX_PREFS = CONTAINER_LIBRARY / "Preferences/com.microsoft.Outlook.Hx.plist"
+OUTLOOK_CACHE_DIR = CONTAINER_LIBRARY / "Caches/com.microsoft.Outlook"
+FAVORITES_DIR = CONTAINER_LIBRARY / "Favorites"
+SAVED_APP_STATE_DIR = CONTAINER_LIBRARY / "Saved Application State"
+
+
+class ToolError(RuntimeError):
+    pass
+
+
+def resolve_evidence_root() -> Path:
+    env_root = os.environ.get("SPINE_EVIDENCE_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).expanduser()
+    if shutil.which("yq") and RUNTIME_CONTRACT.exists():
+        completed = subprocess.run(
+            ["yq", "e", '-r', '.evidence_root // ""', str(RUNTIME_CONTRACT)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        configured = completed.stdout.strip()
+        if configured:
+            return Path(configured).expanduser()
+    return Path.home() / "code/.evidence/spine"
+
+
+def create_backup_dir() -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_dir = resolve_evidence_root() / "verify" / "infra" / f"outlook-profile-rebuild-{stamp}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    return backup_dir
+
+
+def is_outlook_running() -> bool:
+    completed = subprocess.run(
+        ["pgrep", "-x", OUTLOOK_APP],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return completed.returncode == 0
+
+
+def quit_outlook() -> None:
+    subprocess.run(
+        ["osascript", "-e", f'tell application "{OUTLOOK_APP}" to quit'],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for _ in range(60):
+        if not is_outlook_running():
+            return
+        time.sleep(0.5)
+    raise ToolError("Outlook did not exit after graceful quit request")
+
+
+def reopen_outlook() -> None:
+    subprocess.run(["open", "-a", OUTLOOK_APP], check=True)
+
+
+def path_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for item in path.rglob("*"):
+        if item.is_file():
+            total += item.stat().st_size
+    return total
+
+
+def format_bytes(size: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(size)
+    unit = units[0]
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            break
+        value /= 1024.0
+    if unit == "B":
+        return f"{int(value)}{unit}"
+    return f"{value:.1f}{unit}"
+
+
+def move_path(src: Path, dest_dir: Path) -> str | None:
+    if not src.exists():
+        return None
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / src.name
+    shutil.move(str(src), str(dest))
+    return str(dest)
+
+
+def wait_for_rebuild(timeout_seconds: int = 120) -> dict:
+    deadline = time.time() + timeout_seconds
+    profile_created = False
+    app_prefs_created = False
+    hx_prefs_created = False
+    while time.time() < deadline:
+        profile_created = MAIN_PROFILE.exists()
+        app_prefs_created = APP_PREFS.exists()
+        hx_prefs_created = HX_PREFS.exists()
+        if profile_created and app_prefs_created and hx_prefs_created and is_outlook_running():
+            break
+        time.sleep(1)
+    return {
+        "outlook_running": is_outlook_running(),
+        "profile_exists": MAIN_PROFILE.exists(),
+        "app_prefs_exists": APP_PREFS.exists(),
+        "hx_prefs_exists": HX_PREFS.exists(),
+        "profile_size": format_bytes(path_size_bytes(MAIN_PROFILE)),
+    }
+
+
+def audit_state() -> dict:
+    return {
+        "outlook_running": is_outlook_running(),
+        "paths": {
+            "profiles_root": str(PROFILES_ROOT),
+            "main_profile": {
+                "path": str(MAIN_PROFILE),
+                "exists": MAIN_PROFILE.exists(),
+                "size": format_bytes(path_size_bytes(MAIN_PROFILE)),
+            },
+            "app_prefs": {
+                "path": str(APP_PREFS),
+                "exists": APP_PREFS.exists(),
+                "size": format_bytes(path_size_bytes(APP_PREFS)),
+            },
+            "hx_prefs": {
+                "path": str(HX_PREFS),
+                "exists": HX_PREFS.exists(),
+                "size": format_bytes(path_size_bytes(HX_PREFS)),
+            },
+            "cache_dir": {
+                "path": str(OUTLOOK_CACHE_DIR),
+                "exists": OUTLOOK_CACHE_DIR.exists(),
+                "size": format_bytes(path_size_bytes(OUTLOOK_CACHE_DIR)),
+            },
+            "favorites_dir": {
+                "path": str(FAVORITES_DIR),
+                "exists": FAVORITES_DIR.exists(),
+                "size": format_bytes(path_size_bytes(FAVORITES_DIR)),
+            },
+            "saved_app_state_dir": {
+                "path": str(SAVED_APP_STATE_DIR),
+                "exists": SAVED_APP_STATE_DIR.exists(),
+                "size": format_bytes(path_size_bytes(SAVED_APP_STATE_DIR)),
+            },
+        },
+    }
+
+
+def apply_rebuild(*, graceful_quit: bool, reopen: bool) -> dict:
+    before = audit_state()
+    was_running = before["outlook_running"]
+    if was_running and not graceful_quit:
+        raise ToolError("Outlook is running; rerun with --graceful-quit or close Outlook first")
+    if was_running and graceful_quit:
+        quit_outlook()
+
+    backup_dir = create_backup_dir()
+    moved: dict[str, str] = {}
+
+    profile_backup = backup_dir / "group_container_profile"
+    app_backup = backup_dir / "app_container_library"
+
+    moved_path = move_path(MAIN_PROFILE, profile_backup)
+    if moved_path:
+        moved["main_profile"] = moved_path
+    for src, label in (
+        (APP_PREFS, "app_prefs"),
+        (HX_PREFS, "hx_prefs"),
+        (OUTLOOK_CACHE_DIR, "cache_dir"),
+        (FAVORITES_DIR, "favorites_dir"),
+        (SAVED_APP_STATE_DIR, "saved_app_state_dir"),
+    ):
+        moved_path = move_path(src, app_backup)
+        if moved_path:
+            moved[label] = moved_path
+
+    (backup_dir / "before.json").write_text(json.dumps(before, indent=2) + "\n", encoding="utf-8")
+
+    PROFILES_ROOT.mkdir(parents=True, exist_ok=True)
+    (CONTAINER_LIBRARY / "Preferences").mkdir(parents=True, exist_ok=True)
+    (CONTAINER_LIBRARY / "Caches").mkdir(parents=True, exist_ok=True)
+
+    rebuild_state = {
+        "outlook_running": False,
+        "profile_exists": False,
+        "app_prefs_exists": False,
+        "hx_prefs_exists": False,
+        "profile_size": "0B",
+    }
+    if reopen:
+        reopen_outlook()
+        rebuild_state = wait_for_rebuild()
+
+    after = audit_state()
+    (backup_dir / "after.json").write_text(json.dumps(after, indent=2) + "\n", encoding="utf-8")
+    return {
+        "backup_dir": str(backup_dir),
+        "reopened": bool(reopen),
+        "moved": moved,
+        "rebuild_state": rebuild_state,
+        "before": before,
+        "after": after,
+    }
+
+
+def print_result(payload: dict, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, indent=2))
+        return
+
+    if "backup_dir" not in payload:
+        print("microsoft.outlook.local.profile-rebuild")
+        print("mode: audit")
+        print(f"outlook_running: {str(payload['outlook_running']).lower()}")
+        for key, value in payload["paths"].items():
+            print(f"{key}: exists={str(value['exists']).lower()} size={value['size']} path={value['path']}")
+        return
+
+    print("microsoft.outlook.local.profile-rebuild")
+    print("mode: apply")
+    print(f"backup_dir: {payload['backup_dir']}")
+    print(f"reopened: {str(payload['reopened']).lower()}")
+    moved = payload["moved"]
+    print("moved_paths:")
+    for label, dest in moved.items():
+        print(f"  {label}: {dest}")
+    rebuild = payload["rebuild_state"]
+    print(f"outlook_running_after_reopen: {str(rebuild['outlook_running']).lower()}")
+    print(f"profile_exists_after_reopen: {str(rebuild['profile_exists']).lower()}")
+    print(f"app_prefs_exists_after_reopen: {str(rebuild['app_prefs_exists']).lower()}")
+    print(f"hx_prefs_exists_after_reopen: {str(rebuild['hx_prefs_exists']).lower()}")
+    print(f"profile_size_after_reopen: {rebuild['profile_size']}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Full local Outlook profile rebuild with governed backups"
+    )
+    parser.add_argument("--apply", action="store_true", help="apply the full local Outlook profile rebuild")
+    parser.add_argument(
+        "--graceful-quit",
+        action="store_true",
+        help="gracefully quit Outlook first when --apply is used",
+    )
+    parser.add_argument(
+        "--reopen",
+        action="store_true",
+        help="reopen Outlook after rebuilding the local profile",
+    )
+    parser.add_argument("--json", action="store_true", help="emit JSON instead of plain text")
+    args = parser.parse_args()
+
+    if args.apply:
+        result = apply_rebuild(graceful_quit=args.graceful_quit, reopen=args.reopen)
+    else:
+        result = audit_state()
+    print_result(result, as_json=args.json)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ToolError as exc:
+        print(f"microsoft.outlook.local.profile-rebuild FAIL: {exc}", file=sys.stderr)
+        raise SystemExit(1)

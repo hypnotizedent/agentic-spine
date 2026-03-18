@@ -1,0 +1,665 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from email.message import EmailMessage
+from email.parser import BytesHeaderParser, HeaderParser
+from email.utils import format_datetime, formataddr
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    compact_utc,
+    iso_utc,
+    resolve_spine_root,
+    resolve_spine_state,
+    utc_now,
+    write_json,
+)
+
+
+CAPABILITY_NAME = "mint.customer.inbox.history.materialize"
+SCHEMA_VERSION = "1.0"
+CONTRACT_FALLBACK = "ops/bindings/mint.customer.inbox.history.materialize.contract.yaml"
+SECRETS_BINDING_FALLBACK = "ops/bindings/secrets.binding.yaml"
+INFISICAL_AGENT_FALLBACK = "ops/plugins/providers/bin/infisical-agent.sh"
+WORKBENCH_MICROSOFT_TOOLS = "/Users/ronnyworks/code/workbench/agents/microsoft/tools/microsoft_tools.py"
+FIXTURE_ENV = "MINT_CUSTOMER_HISTORY_MATERIALIZE_FIXTURE_JSON"
+FAKE_OUTLOOK_ROOT_ENV = "MINT_CUSTOMER_HISTORY_MATERIALIZE_FAKE_OUTLOOK_ROOT"
+
+
+def normalize_space(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def normalize_email(value: Any) -> str:
+    return normalize_space(value).lower()
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-inbox-history-materialize",
+        description="Materialize archived Mint customer thread history into a recoverable team@ Outlook folder as separate message objects.",
+    )
+    parser.add_argument("--query", required=True, help="Archive search query (usually exact subject or customer email)")
+    parser.add_argument("--mailbox", default="", help="Canonical mailbox to materialize into (default from contract)")
+    parser.add_argument("--top", type=int, default=0, help="Max archived hits to consider (default from contract)")
+    parser.add_argument("--parent-folder", default="", help="Parent Outlook folder for recovered history")
+    parser.add_argument("--folder-label", default="", help="Leaf Outlook folder label (default derived from query)")
+    parser.add_argument("--apply", action="store_true", help="Apply the materialization instead of only previewing")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def load_contract(spine_root: Path) -> dict[str, Any]:
+    override = normalize_space(os.environ.get("MINT_CUSTOMER_INBOX_HISTORY_MATERIALIZE_CONTRACT"))
+    if override:
+        path = Path(override).expanduser().resolve()
+    else:
+        path = (spine_root / CONTRACT_FALLBACK).resolve()
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    raw["_path"] = str(path)
+    return raw
+
+
+def load_binding(path: Path) -> dict[str, Any]:
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def load_microsoft_tools() -> Any:
+    path = Path(WORKBENCH_MICROSOFT_TOOLS)
+    loader = SourceFileLoader("mint_customer_history_materialize_microsoft_tools", str(path))
+    spec = spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise SystemExit(f"could not load Microsoft tools from {path}")
+    module = module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def sanitize_folder_name(value: str) -> str:
+    cleaned = normalize_space(value).replace("/", " - ").replace("\\", " - ")
+    cleaned = re.sub(r"[:*?\"<>|]+", "-", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" .-_")
+    return cleaned or "Recovered Thread"
+
+
+def archive_search_messages(spine_root: Path, contract: dict[str, Any], query: str, mailbox: str, top: int) -> list[dict[str, Any]]:
+    fixture = normalize_space(os.environ.get(FIXTURE_ENV))
+    if fixture:
+        payload = json.loads(Path(fixture).read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            if isinstance(((payload.get("data") or {}).get("messages")), list):
+                messages = [dict(item or {}) for item in ((payload.get("data") or {}).get("messages")) or [] if isinstance(item, dict)]
+            elif isinstance(payload.get("messages"), list):
+                messages = [dict(item or {}) for item in payload.get("messages") or [] if isinstance(item, dict)]
+            else:
+                messages = []
+        elif isinstance(payload, list):
+            messages = [dict(item or {}) for item in payload if isinstance(item, dict)]
+        else:
+            messages = []
+        return messages
+
+    script_ref = normalize_space(((contract.get("surface") or {}).get("archive_search_script")) or "")
+    if not script_ref:
+        raise SystemExit("archive_search_script missing from contract")
+    script_path = (spine_root / script_ref.removeprefix("./")).resolve() if script_ref.startswith("./") else Path(script_ref).expanduser().resolve()
+    cmd = [str(script_path), "--query", query, "--mailbox", mailbox, "--top", str(top), "--include-raw-headers", "--json"]
+    result = subprocess.run(cmd, cwd=spine_root, capture_output=True, text=True, check=False, timeout=60)
+    if result.returncode != 0:
+        stderr = normalize_space(result.stderr or result.stdout)
+        raise SystemExit(stderr or "archive search failed")
+    payload = json.loads(result.stdout or "{}")
+    messages = [dict(item or {}) for item in (((payload.get("data") or {}).get("messages")) or []) if isinstance(item, dict)]
+    return messages
+
+
+def received_sort_key(message: dict[str, Any]) -> tuple[int, str]:
+    raw = normalize_space(message.get("receivedDateTime") or "")
+    if not raw:
+        return (1, "")
+    return (0, raw)
+
+
+def materialization_key(message: dict[str, Any]) -> str:
+    internet_message_id = normalize_space(message.get("internetMessageId") or "").lower().strip("<>")
+    if internet_message_id:
+        return f"msgid:{internet_message_id}"
+    archived_row_id = normalize_space(message.get("archivedRowId") or message.get("id") or "")
+    if archived_row_id:
+        return f"archived:{archived_row_id}"
+    sender = normalize_email((((message.get("from") or {}).get("emailAddress") or {}).get("address")) or "")
+    subject = normalize_space(message.get("subject") or "").lower()
+    received = normalize_space(message.get("receivedDateTime") or "")
+    return f"fallback:{sender}:{subject}:{received}"
+
+
+def normalize_materialization_key(value: Any) -> str:
+    raw = normalize_space(value)
+    if raw.startswith("msgid:"):
+        return f"msgid:{raw[6:].strip().lower().strip('<>')}"
+    return raw
+
+
+def attachment_restore_note(contract: dict[str, Any]) -> str:
+    materialization = dict(contract.get("materialization") or {})
+    return normalize_space(materialization.get("attachment_notice") or "")
+
+
+def strip_html(text: str) -> str:
+    cleaned = re.sub(r"(?is)<(script|style).*?>.*?</\\1>", "", text or "")
+    cleaned = re.sub(r"(?i)<br\\s*/?>", "\n", cleaned)
+    cleaned = re.sub(r"(?i)</p>", "\n\n", cleaned)
+    cleaned = re.sub(r"(?i)</div>", "\n", cleaned)
+    cleaned = re.sub(r"(?s)<[^>]+>", "", cleaned)
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def parse_received_datetime(value: str) -> datetime:
+    raw = normalize_space(value)
+    if not raw:
+        return utc_now()
+    candidate = raw.replace("Z", "+00:00").replace(" ", "T", 1) if "T" not in raw and " " in raw else raw.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(candidate)
+    except ValueError:
+        return utc_now()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def address_entry(entry: dict[str, Any]) -> str:
+    email_address = dict(entry.get("emailAddress") or {})
+    address = normalize_space(email_address.get("address") or "")
+    name = normalize_space(email_address.get("name") or "")
+    if not address:
+        return ""
+    return formataddr((name, address)) if name else address
+
+
+def render_addresses(entries: list[dict[str, Any]]) -> str:
+    rendered = [address_entry(dict(entry or {})) for entry in entries if isinstance(entry, dict)]
+    return ", ".join(item for item in rendered if item)
+
+
+def raw_header_message(raw_headers: Any) -> Any | None:
+    headers_text = str(raw_headers or "").strip()
+    if not headers_text:
+        return None
+    try:
+        return HeaderParser().parsestr(headers_text + ("\n" if not headers_text.endswith("\n") else ""))
+    except Exception:
+        return None
+
+
+def apply_preserved_thread_headers(email_msg: EmailMessage, message: dict[str, Any]) -> None:
+    parsed = raw_header_message(message.get("rawHeaders"))
+    if parsed is None:
+        return
+    for header_name in ("In-Reply-To", "References", "Thread-Topic", "Thread-Index", "Reply-To", "Sender"):
+        value = str(parsed.get(header_name) or "").strip()
+        if value and header_name not in email_msg:
+            email_msg[header_name] = value
+
+
+def build_materialized_mime(message: dict[str, Any], contract: dict[str, Any], *, query: str) -> bytes:
+    body = dict(message.get("body") or {})
+    content_type = normalize_space(body.get("contentType") or "Text")
+    content = str(body.get("content") or "")
+    plain_body = strip_html(content) if content_type.lower() == "html" else content.strip()
+    html_body = content if content_type.lower() == "html" else ""
+    note = attachment_restore_note(contract) if bool(message.get("hasAttachments")) else ""
+    if note:
+        if plain_body:
+            plain_body = f"{note}\n\n{plain_body}"
+        else:
+            plain_body = note
+        if html_body:
+            html_body = f"<div><strong>Attachment note:</strong> {note}</div><hr>{html_body}"
+
+    email_msg = EmailMessage()
+    email_msg["Subject"] = normalize_space(message.get("subject") or "")
+    from_header = address_entry(dict(message.get("from") or {}))
+    if from_header:
+        email_msg["From"] = from_header
+    to_header = render_addresses([dict(item or {}) for item in (message.get("toRecipients") or []) if isinstance(item, dict)])
+    if to_header:
+        email_msg["To"] = to_header
+    cc_header = render_addresses([dict(item or {}) for item in (message.get("ccRecipients") or []) if isinstance(item, dict)])
+    if cc_header:
+        email_msg["Cc"] = cc_header
+    internet_message_id = normalize_space(message.get("internetMessageId") or "")
+    if internet_message_id:
+        if not internet_message_id.startswith("<"):
+            internet_message_id = f"<{internet_message_id}>"
+        email_msg["Message-ID"] = internet_message_id
+    email_msg["Date"] = format_datetime(parse_received_datetime(str(message.get("receivedDateTime") or "")).astimezone(timezone.utc))
+    apply_preserved_thread_headers(email_msg, message)
+    email_msg["X-Mint-History-Materialized"] = "true"
+    email_msg["X-Mint-Archive-Mailbox"] = normalize_space(message.get("archiveMailbox") or "")
+    email_msg["X-Mint-History-Query"] = normalize_space(query)
+
+    if html_body:
+        email_msg.set_content(plain_body or strip_html(html_body) or "")
+        email_msg.add_alternative(html_body, subtype="html")
+    else:
+        email_msg.set_content(plain_body or normalize_space(message.get("bodyPreview") or ""))
+    return email_msg.as_bytes()
+
+
+def fetch_infisical_token(spine_root: Path) -> str:
+    agent = (spine_root / INFISICAL_AGENT_FALLBACK).resolve()
+    result = subprocess.run([str(agent), "auth-token"], cwd=spine_root, capture_output=True, text=True, check=False, timeout=20)
+    token = normalize_space(result.stdout)
+    if result.returncode != 0 or not token:
+        raise SystemExit("Infisical auth-token unavailable")
+    return token
+
+
+def fetch_infisical_secret(token: str, binding: dict[str, Any], key: str, path: str) -> str:
+    infisical = dict(binding.get("infisical") or {})
+    cmd = [
+        "infisical",
+        "--silent",
+        "--log-level",
+        "error",
+        "secrets",
+        "get",
+        key,
+        "--projectId",
+        str(infisical.get("project") or ""),
+        "--env",
+        str(infisical.get("environment") or ""),
+        "--path",
+        path,
+        "--domain",
+        str(infisical.get("internal_api_url") or infisical.get("api_url") or ""),
+        "--plain",
+    ]
+    env = os.environ.copy()
+    env["INFISICAL_TOKEN"] = token
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=20, env=env)
+    value = (result.stdout or "").strip()
+    if result.returncode != 0 or not value:
+        raise SystemExit(f"failed to fetch secret {key}")
+    return value
+
+
+def exchange_access_token(client_id: str, client_secret: str, tenant_id: str, scope: str) -> str:
+    body = urllib.parse.urlencode(
+        {
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": scope,
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    token = normalize_space(payload.get("access_token") or "")
+    if not token:
+        raise SystemExit("Azure token acquisition failed")
+    return token
+
+
+def ews_no_error(root: ET.Element, action: str) -> None:
+    for response_code in root.iter():
+        if response_code.tag.endswith("}ResponseCode"):
+            text = normalize_space(response_code.text or "")
+            if text and text != "NoError":
+                raise SystemExit(f"{action} failed: {text}")
+
+
+def ews_find_child_folder(ews: Any, parent_id: str, display_name: str, *, parent_is_distinguished: bool = False) -> dict[str, Any] | None:
+    target = normalize_space(display_name)
+    for folder in ews.find_folders(parent_id, is_distinguished=parent_is_distinguished):
+        if normalize_space(folder.get("name") or "") == target:
+            return dict(folder)
+    return None
+
+
+def ews_create_folder(ews: Any, parent_id: str, display_name: str, *, parent_is_distinguished: bool = False) -> dict[str, Any]:
+    if parent_is_distinguished:
+        parent_xml = f'<t:DistinguishedFolderId Id="{parent_id}"/>'
+    else:
+        parent_xml = f'<t:FolderId Id="{parent_id}"/>'
+    body = f"""<m:CreateFolder>
+      <m:ParentFolderId>{parent_xml}</m:ParentFolderId>
+      <m:Folders>
+        <t:Folder>
+          <t:DisplayName>{display_name}</t:DisplayName>
+        </t:Folder>
+      </m:Folders>
+    </m:CreateFolder>"""
+    root = ews._soap_request(body, timeout=60)
+    ews_no_error(root, f"create folder {display_name}")
+    for folder_id in root.iter():
+        if folder_id.tag.endswith("}FolderId"):
+            return {
+                "id": folder_id.get("Id", ""),
+                "change_key": folder_id.get("ChangeKey", ""),
+                "name": display_name,
+            }
+    raise SystemExit(f"create folder {display_name} returned no FolderId")
+
+
+def ews_ensure_folder_path(ews: Any, folder_path: str, *, root_id: str = "msgfolderroot") -> dict[str, Any]:
+    current_id = root_id
+    current_is_distinguished = True
+    current: dict[str, Any] = {"id": root_id, "name": root_id}
+    for segment in [sanitize_folder_name(part) for part in folder_path.split("/") if sanitize_folder_name(part)]:
+        existing = ews_find_child_folder(ews, current_id, segment, parent_is_distinguished=current_is_distinguished)
+        if existing is None:
+            existing = ews_create_folder(ews, current_id, segment, parent_is_distinguished=current_is_distinguished)
+        current = existing
+        current_id = str(existing.get("id") or "")
+        current_is_distinguished = False
+    return current
+
+
+def ews_create_message_from_mime(ews: Any, folder_id: str, mime_bytes: bytes, *, mark_read: bool = True) -> dict[str, Any]:
+    mime_b64 = base64.b64encode(mime_bytes).decode("ascii")
+    is_read_xml = "<t:IsRead>true</t:IsRead>" if mark_read else ""
+    body = f"""<m:CreateItem MessageDisposition="SaveOnly">
+      <m:SavedItemFolderId>
+        <t:FolderId Id="{folder_id}"/>
+      </m:SavedItemFolderId>
+      <m:Items>
+        <t:Message>
+          <t:MimeContent CharacterSet="UTF-8">{mime_b64}</t:MimeContent>
+          {is_read_xml}
+        </t:Message>
+      </m:Items>
+    </m:CreateItem>"""
+    root = ews._soap_request(body, timeout=120)
+    ews_no_error(root, "create item from mime")
+    for item_id in root.iter():
+        if item_id.tag.endswith("}ItemId"):
+            return {
+                "id": item_id.get("Id", ""),
+                "change_key": item_id.get("ChangeKey", ""),
+            }
+    raise SystemExit("materialized item returned no ItemId")
+
+
+def ews_existing_materialization_keys(ews: Any, folder_id: str) -> set[str]:
+    keys: set[str] = set()
+    offset = 0
+    while True:
+        items, _, includes_last = ews.find_items(folder_id, offset=offset, page_size=100)
+        if not items:
+            break
+        for item in items:
+            internet_message_id = normalize_space(item.get("internet_message_id") or "")
+            if internet_message_id:
+                keys.add(normalize_materialization_key(f"msgid:{internet_message_id}"))
+        if includes_last:
+            break
+        offset += len(items)
+    return keys
+
+
+def load_existing_materialization_keys(index_file: Path, *, mailbox: str, folder_path: str) -> set[str]:
+    if not index_file.is_file():
+        return set()
+    keys: set[str] = set()
+    for line in index_file.read_text(encoding="utf-8").splitlines():
+        raw = normalize_space(line)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if normalize_email(payload.get("mailbox") or "") != normalize_email(mailbox):
+            continue
+        if normalize_space(payload.get("folder_path") or "") != normalize_space(folder_path):
+            continue
+        key = normalize_materialization_key(payload.get("materialization_key") or "")
+        if key:
+            keys.add(key)
+    return keys
+
+
+def fake_existing_materialization_keys(root_dir: Path, folder_path: str) -> set[str]:
+    target_dir = root_dir / folder_path
+    if not target_dir.is_dir():
+        return set()
+    keys: set[str] = set()
+    for eml_path in sorted(target_dir.glob("*.eml")):
+        try:
+            parsed = BytesHeaderParser().parsebytes(eml_path.read_bytes())
+        except Exception:
+            continue
+        internet_message_id = normalize_space(parsed.get("Message-ID") or "")
+        if internet_message_id:
+            keys.add(normalize_materialization_key(f"msgid:{internet_message_id}"))
+    return keys
+
+
+def fake_materialize(root_dir: Path, folder_path: str, message_key: str, mime_bytes: bytes) -> dict[str, Any]:
+    target_dir = root_dir / folder_path
+    target_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", message_key)[:80].strip("-") or hashlib.sha1(mime_bytes).hexdigest()[:16]
+    file_path = target_dir / f"{safe_name}.eml"
+    file_path.write_bytes(mime_bytes)
+    return {
+        "item_id": f"fake-{safe_name}",
+        "change_key": "",
+        "file_path": str(file_path),
+    }
+
+
+def text_output(summary: dict[str, Any]) -> str:
+    lines = [
+        CAPABILITY_NAME,
+        f"status: {summary['status']}",
+        f"mailbox: {summary['mailbox']}",
+        f"query: {summary['query']}",
+        f"folder_path: {summary['folder_path']}",
+        f"archived_message_count: {summary['archived_message_count']}",
+        f"materialized_count: {summary['materialized_count']}",
+        f"skipped_existing_count: {summary['skipped_existing_count']}",
+        "",
+    ]
+    for item in summary.get("messages") or []:
+        lines.append(
+            f"{item.get('receivedDateTime', '')} | {item.get('action', '')} | {item.get('subject', '')}"
+        )
+    lines.append(f"record_file: {summary['record_file']}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    contract = load_contract(spine_root)
+    surface = dict(contract.get("surface") or {})
+    materialization = dict(contract.get("materialization") or {})
+    runtime = dict(contract.get("runtime") or {})
+
+    mailbox = normalize_space(args.mailbox or surface.get("canonical_mailbox") or "team@mintprints.com")
+    top = args.top if args.top > 0 else int(surface.get("default_top") or 25)
+    parent_folder = sanitize_folder_name(args.parent_folder or surface.get("default_parent_folder") or "Recovered History")
+    folder_label = sanitize_folder_name(args.folder_label or args.query)
+    folder_path = f"{parent_folder}/{folder_label}"
+
+    archived_messages = archive_search_messages(spine_root, contract, args.query, mailbox, top)
+    archived_messages = sorted(archived_messages, key=received_sort_key)
+
+    records_root = Path(str(runtime.get("records_root") or "$SPINE_STATE")).expanduser()
+    if str(records_root).startswith("$SPINE_STATE"):
+        records_root = Path(str(records_root).replace("$SPINE_STATE", str(state_root), 1))
+    index_file = Path(str(runtime.get("index_file") or "$SPINE_STATE/index.ndjson")).expanduser()
+    if str(index_file).startswith("$SPINE_STATE"):
+        index_file = Path(str(index_file).replace("$SPINE_STATE", str(state_root), 1))
+    lock_file = Path(str(runtime.get("lock_file") or "$SPINE_STATE/locks/history.lock")).expanduser()
+    if str(lock_file).startswith("$SPINE_STATE"):
+        lock_file = Path(str(lock_file).replace("$SPINE_STATE", str(state_root), 1))
+
+    existing_keys = load_existing_materialization_keys(index_file, mailbox=mailbox, folder_path=folder_path)
+
+    materialized_count = 0
+    skipped_existing_count = 0
+    import_results: list[dict[str, Any]] = []
+    fake_root = normalize_space(os.environ.get(FAKE_OUTLOOK_ROOT_ENV))
+    fake_root_path = Path(fake_root).expanduser().resolve() if fake_root else None
+
+    ews = None
+    destination_folder: dict[str, Any] = {"id": "", "name": folder_path}
+    if args.apply:
+        if fake_root_path is None:
+            binding_path = (spine_root / SECRETS_BINDING_FALLBACK).resolve()
+            binding = load_binding(binding_path)
+            infisical_token = fetch_infisical_token(spine_root)
+            client_id = fetch_infisical_secret(infisical_token, binding, "AZURE_CLIENT_ID", "/spine/platform/security")
+            client_secret = fetch_infisical_secret(infisical_token, binding, "AZURE_CLIENT_SECRET", "/spine/platform/security")
+            tenant_id = fetch_infisical_secret(infisical_token, binding, "AZURE_TENANT_ID", "/spine/platform/security")
+            ews_token = exchange_access_token(client_id, client_secret, tenant_id, "https://outlook.office365.com/.default")
+            microsoft_tools = load_microsoft_tools()
+            ews = microsoft_tools.EwsClient(ews_token, mailbox)
+            destination_folder = ews_ensure_folder_path(
+                ews,
+                folder_path,
+                root_id=normalize_space(materialization.get("outlook_root_folder") or "msgfolderroot"),
+            )
+            existing_keys = ews_existing_materialization_keys(ews, str(destination_folder.get("id") or ""))
+        else:
+            fake_root_path.mkdir(parents=True, exist_ok=True)
+            existing_keys = fake_existing_materialization_keys(fake_root_path, folder_path)
+
+    prepared: list[dict[str, Any]] = []
+    for message in archived_messages:
+        key = materialization_key(message)
+        prepared.append(
+            {
+                "materialization_key": key,
+                "archivedRowId": normalize_space(message.get("archivedRowId") or ""),
+                "internetMessageId": normalize_space(message.get("internetMessageId") or ""),
+                "receivedDateTime": normalize_space(message.get("receivedDateTime") or ""),
+                "subject": normalize_space(message.get("subject") or ""),
+                "from": normalize_space((((message.get("from") or {}).get("emailAddress") or {}).get("address")) or ""),
+                "archiveMailbox": normalize_space(message.get("archiveMailbox") or ""),
+                "hasAttachments": bool(message.get("hasAttachments")),
+                "action": "skip_existing" if key in existing_keys else ("materialize" if args.apply else "preview"),
+            }
+        )
+
+    if args.apply:
+        for message in archived_messages:
+            key = materialization_key(message)
+            if key in existing_keys:
+                skipped_existing_count += 1
+                continue
+            mime_bytes = build_materialized_mime(message, contract, query=args.query)
+            if fake_root_path is not None:
+                created = fake_materialize(fake_root_path, folder_path, key, mime_bytes)
+            else:
+                assert ews is not None
+                created = ews_create_message_from_mime(
+                    ews,
+                    str(destination_folder.get("id") or ""),
+                    mime_bytes,
+                    mark_read=bool(materialization.get("mark_read", True)),
+                )
+            materialized_count += 1
+            existing_keys.add(key)
+            import_results.append(
+                {
+                    "materialization_key": key,
+                    "archivedRowId": normalize_space(message.get("archivedRowId") or ""),
+                    "internetMessageId": normalize_space(message.get("internetMessageId") or ""),
+                    "subject": normalize_space(message.get("subject") or ""),
+                    "receivedDateTime": normalize_space(message.get("receivedDateTime") or ""),
+                    "item_id": normalize_space(created.get("item_id") or created.get("id") or ""),
+                    "file_path": normalize_space(created.get("file_path") or ""),
+                }
+            )
+
+    materialize_id = f"MHM-{compact_utc(utc_now())}-{os.urandom(2).hex()}"
+    now = utc_now()
+    summary = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "status": "applied" if args.apply else "preview",
+        "generated_at": iso_utc(now),
+        "materialize_id": materialize_id,
+        "query": normalize_space(args.query),
+        "mailbox": mailbox,
+        "folder_path": folder_path,
+        "parent_folder": parent_folder,
+        "folder_label": folder_label,
+        "archived_message_count": len(archived_messages),
+        "materialized_count": materialized_count,
+        "skipped_existing_count": skipped_existing_count,
+        "destination_folder_id": normalize_space(destination_folder.get("id") or ""),
+        "messages": prepared,
+        "imports": import_results,
+        "attachment_restore_mode": normalize_space(materialization.get("attachment_restore_mode") or "metadata_only"),
+        "fake_outlook_root": str(fake_root_path) if fake_root_path else "",
+    }
+
+    record_dir = records_root / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = record_dir / f"{materialize_id}.json"
+    write_json(record_file, summary)
+    for item in import_results:
+        append_ndjson(
+            index_file,
+            lock_file,
+            {
+                "stored_at_utc": iso_utc(now),
+                "materialize_id": materialize_id,
+                "mailbox": mailbox,
+                "folder_path": folder_path,
+                "materialization_key": item.get("materialization_key"),
+                "internetMessageId": item.get("internetMessageId"),
+                "archivedRowId": item.get("archivedRowId"),
+                "item_id": item.get("item_id"),
+                "record_file": str(record_file),
+            },
+        )
+    summary["record_file"] = str(record_file)
+    summary["index_file"] = str(index_file)
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+    print(text_output(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

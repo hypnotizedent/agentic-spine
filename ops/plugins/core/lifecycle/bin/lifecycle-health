@@ -3,140 +3,303 @@ set -euo pipefail
 
 # lifecycle.health — Composite lifecycle dashboard
 #
-# Usage: lifecycle-health
+# Usage:
+#   lifecycle-health [--json]
 #
 # Shows: gap summary counts, aging report, open loop progress, orphan check.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
 GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+JSON_MODE=0
 
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_MODE=1; shift ;;
+    -h|--help)
+      cat <<'EOF'
+lifecycle-health
+
+Usage:
+  lifecycle-health [--json]
+EOF
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 source "$ROOT/ops/plugins/core/lifecycle/lib/lifecycle-rules.sh"
 
-# Frontmatter field extractor (POSIX-compatible)
-_fm_field() {
-  local file="$1" field="$2"
-  awk '/^---$/{n++; next} n==1{print} n>=2{exit}' "$file" \
-    | { grep "^${field}:" || true; } \
-    | sed "s/^${field}: *//" \
-    | tr -d '"' \
-    | head -1
+WARN_DAYS="$(aging_warning_days)"
+CRIT_DAYS="$(aging_critical_days)"
+AGING_ENABLED="$(health_aging_advisory)"
+ORPHAN_ENABLED="$(health_orphan_check)"
+
+payload="$(
+  python3 - "$GAPS_FILE" "$WARN_DAYS" "$CRIT_DAYS" "$AGING_ENABLED" "$ORPHAN_ENABLED" \
+    "$SPINE_STATE/loop-scopes" \
+    "$SPINE_MAILROOM_ROOT/state/loop-scopes" \
+    "$ROOT/mailroom/state/loop-scopes" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+gaps_path = Path(sys.argv[1])
+warn_days = int(sys.argv[2])
+crit_days = int(sys.argv[3])
+aging_enabled = sys.argv[4].lower() == "true"
+orphan_enabled = sys.argv[5].lower() == "true"
+scope_dirs = [Path(p) for p in sys.argv[6:]]
+
+if not gaps_path.exists():
+    raise SystemExit(f"missing gaps file: {gaps_path}")
+
+
+def parse_date(raw: str) -> datetime | None:
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(raw, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def parse_frontmatter(path: Path) -> dict[str, str]:
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+      return {}
+    _, _, rest = text.partition("---\n")
+    frontmatter, _, _ = rest.partition("\n---")
+    data: dict[str, str] = {}
+    for line in frontmatter.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        data[key.strip()] = value.strip().strip('"').strip("'")
+    return data
+
+
+gaps_doc = yaml.safe_load(gaps_path.read_text(encoding="utf-8")) or {}
+gaps = gaps_doc.get("gaps") or []
+gap_counts = Counter(str(g.get("status", "unknown")) for g in gaps)
+
+scope_files: dict[str, Path] = {}
+for scope_dir in scope_dirs:
+    if not scope_dir.is_dir():
+        continue
+    for candidate in scope_dir.glob("*.scope.md"):
+        scope_files[str(candidate.resolve())] = candidate.resolve()
+
+scopes: list[dict[str, str]] = []
+for scope_path in sorted(scope_files.values()):
+    fm = parse_frontmatter(scope_path)
+    if fm:
+        fm["_path"] = str(scope_path)
+        scopes.append(fm)
+
+open_statuses = {"active", "draft", "open"}
+closed_loops = {
+    s.get("loop_id", "").strip()
+    for s in scopes
+    if s.get("status", "").strip() == "closed" and s.get("loop_id", "").strip()
+}
+open_loop_ids = {
+    s.get("loop_id", "").strip()
+    for s in scopes
+    if s.get("status", "").strip() in open_statuses and s.get("loop_id", "").strip()
+}
+open_loops = [
+    {
+        "loop_id": s.get("loop_id", "").strip(),
+        "status": s.get("status", "").strip(),
+        "path": s.get("_path", ""),
+    }
+    for s in scopes
+    if s.get("status", "").strip() in open_statuses and s.get("loop_id", "").strip()
+]
+
+now = datetime.now(timezone.utc)
+aging_warning: list[dict[str, object]] = []
+aging_critical: list[dict[str, object]] = []
+aging_ok = 0
+aging_owned = 0
+
+for gap in gaps:
+    if gap.get("status") != "open":
+        continue
+    if str(gap.get("deferred_to_repo", "")).strip():
+        continue
+    parent_loop = str(gap.get("parent_loop", "")).strip()
+    if parent_loop and parent_loop in open_loop_ids:
+        aging_owned += 1
+        continue
+    discovered_at = parse_date(str(gap.get("discovered_at", "")))
+    if discovered_at is None:
+        continue
+    age_days = max(0, (now - discovered_at).days)
+    entry = {
+        "id": str(gap.get("id", "?")),
+        "severity": str(gap.get("severity", "?")),
+        "age_days": age_days,
+        "description": str(gap.get("description", "")).strip()[:80],
+    }
+    if age_days >= crit_days:
+        aging_critical.append(entry)
+    elif age_days >= warn_days:
+        aging_warning.append(entry)
+    else:
+        aging_ok += 1
+
+aging_critical.sort(key=lambda item: int(item["age_days"]), reverse=True)
+aging_warning.sort(key=lambda item: int(item["age_days"]), reverse=True)
+
+orphans: list[dict[str, str]] = []
+if orphan_enabled:
+    for gap in gaps:
+        if gap.get("status") != "open":
+            continue
+        if str(gap.get("deferred_to_repo", "")).strip():
+            continue
+        parent_loop = str(gap.get("parent_loop", "")).strip()
+        if parent_loop and parent_loop in closed_loops:
+            orphans.append(
+                {
+                    "id": str(gap.get("id", "?")),
+                    "parent_loop": parent_loop,
+                }
+            )
+
+status = "pass"
+if orphans or aging_critical or aging_warning:
+    status = "warn"
+
+payload = {
+    "capability": "lifecycle.health",
+    "schema_version": "1.0",
+    "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "status": status,
+    "data": {
+        "gaps": {
+            "file": str(gaps_path),
+            "total": len(gaps),
+            "by_status": dict(gap_counts),
+        },
+        "aging": {
+            "enabled": aging_enabled,
+            "warning_days": warn_days,
+            "critical_days": crit_days,
+            "open_total": sum(1 for gap in gaps if gap.get("status") == "open"),
+            "owned_active_loop_count": aging_owned,
+            "warning": aging_warning,
+            "critical": aging_critical,
+            "ok_count": aging_ok,
+        },
+        "loops": {
+            "scope_dirs": [str(p) for p in scope_dirs if p.is_dir()],
+            "open_count": len(open_loops),
+            "open": open_loops,
+        },
+        "orphans": {
+            "enabled": orphan_enabled,
+            "count": len(orphans),
+            "items": orphans,
+        },
+    },
 }
 
-echo "=== LIFECYCLE HEALTH DASHBOARD ==="
-echo ""
+print(json.dumps(payload, indent=2))
+PY
+)"
 
-# ── 1. Gap summary counts ──
-echo "--- Gap Summary ---"
-python3 - "$GAPS_FILE" <<'PY'
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  printf '%s\n' "$payload"
+  exit 0
+fi
+
+python3 - <<'PY' <<<"$payload"
+from __future__ import annotations
+
 import json
-import subprocess
 import sys
 
-gaps_file = sys.argv[1]
-try:
-    result = subprocess.run(
-        ["yq", "e", "-o=json", ".", gaps_file],
-        capture_output=True, text=True, check=True
-    )
-    data = json.loads(result.stdout)
-except Exception as e:
-    print(f"ERROR: {e}", file=sys.stderr)
-    sys.exit(1)
+payload = json.load(sys.stdin)
+data = payload["data"]
+gaps = data["gaps"]
+aging = data["aging"]
+loops = data["loops"]
+orphans = data["orphans"]
 
-gaps = data.get("gaps", [])
-total = len(gaps)
-by_status = {}
-for g in gaps:
-    s = g.get("status", "unknown")
-    by_status[s] = by_status.get(s, 0) + 1
+print("=== LIFECYCLE HEALTH DASHBOARD ===")
+print()
 
-print(f"Total gaps: {total}")
+print("--- Gap Summary ---")
+print(f"Total gaps: {gaps['total']}")
 for status in ("open", "fixed", "closed"):
-    print(f"  {status:10s} {by_status.get(status, 0)}")
+    print(f"  {status:10s} {gaps['by_status'].get(status, 0)}")
+print()
+
+if aging["enabled"]:
+    print("--- Aging Advisory ---")
+    print("=== GAP AGING REPORT ===")
+    print(f"Warning threshold: {aging['warning_days']} days")
+    print(f"Critical threshold: {aging['critical_days']} days")
+    print()
+    if aging["critical"]:
+        print(f"CRITICAL ({len(aging['critical'])} gaps, >{aging['critical_days']} days):")
+        for entry in aging["critical"]:
+            print(
+                f"  {entry['id']:15s} [{entry['severity']:8s}] "
+                f"{int(entry['age_days']):3d}d  {entry['description']}"
+            )
+        print()
+    if aging["warning"]:
+        print(f"WARNING ({len(aging['warning'])} gaps, >{aging['warning_days']} days):")
+        for entry in aging["warning"]:
+            print(
+                f"  {entry['id']:15s} [{entry['severity']:8s}] "
+                f"{int(entry['age_days']):3d}d  {entry['description']}"
+            )
+        print()
+    if not aging["critical"] and not aging["warning"]:
+        print("No aging gaps found.")
+    else:
+        print(
+            f"Summary: {len(aging['critical'])} critical, "
+            f"{len(aging['warning'])} warning, {aging['ok_count']} ok "
+            f"({aging['open_total']} total open)"
+        )
+    print()
+
+print("--- Open Loops ---")
+print(f"Open loops: {loops['open_count']}")
+print()
+
+if orphans["enabled"]:
+    print("--- Orphan Check ---")
+    if orphans["count"] > 0:
+        print(f"WARN: {orphans['count']} orphaned gaps (open gap linked to closed loop):")
+        for entry in orphans["items"]:
+            print(f"  {entry['id']} -> {entry['parent_loop']}")
+    else:
+        print("No orphaned gaps found.")
+    print()
+
+print("=== END LIFECYCLE HEALTH ===")
 PY
-echo ""
-
-# ── 2. Aging advisory ──
-if [[ "$(health_aging_advisory)" == "true" ]]; then
-  echo "--- Aging Advisory ---"
-  "$ROOT/ops/plugins/core/lifecycle/bin/gaps-aging" 2>/dev/null || echo "  (aging check unavailable)"
-  echo ""
-fi
-
-# ── 3. Open loop progress ──
-echo "--- Open Loops ---"
-open_loops=0
-for scope_file in "$SCOPES_DIR"/*.scope.md; do
-  [[ -f "$scope_file" ]] || continue
-  local_status="$(_fm_field "$scope_file" "status")"
-  case "$local_status" in
-    active|draft|open) ;;
-    *) continue ;;
-  esac
-  loop_id="$(_fm_field "$scope_file" "loop_id")"
-  [[ -z "$loop_id" ]] && continue
-  open_loops=$((open_loops + 1))
-done
-echo "Open loops: $open_loops"
-echo ""
-
-# ── 4. Orphan check ──
-if [[ "$(health_orphan_check)" == "true" ]]; then
-  echo "--- Orphan Check ---"
-
-  # Build set of closed loop IDs
-  CLOSED_LOOPS=""
-  for scope_file in "$SCOPES_DIR"/*.scope.md; do
-    [[ -f "$scope_file" ]] || continue
-    local_status="$(_fm_field "$scope_file" "status")"
-    if [[ "$local_status" == "closed" ]]; then
-      lid="$(_fm_field "$scope_file" "loop_id")"
-      [[ -n "$lid" ]] && CLOSED_LOOPS="${CLOSED_LOOPS}${lid}\n"
-    fi
-  done
-
-  # Find open gaps whose parent_loop is in a closed scope
-  orphan_count=0
-  python3 - "$GAPS_FILE" "$CLOSED_LOOPS" <<'PY'
-import json
-import subprocess
-import sys
-
-gaps_file = sys.argv[1]
-closed_raw = sys.argv[2] if len(sys.argv) > 2 else ""
-closed_loops = set(l.strip() for l in closed_raw.split("\\n") if l.strip())
-
-try:
-    result = subprocess.run(
-        ["yq", "e", "-o=json", ".", gaps_file],
-        capture_output=True, text=True, check=True
-    )
-    data = json.loads(result.stdout)
-except Exception as e:
-    print(f"ERROR: {e}", file=sys.stderr)
-    sys.exit(1)
-
-gaps = data.get("gaps", [])
-orphans = []
-for g in gaps:
-    if g.get("status") != "open":
-        continue
-    # Cross-repo deferred gaps are intentionally open while the source repo closes them.
-    if str(g.get("deferred_to_repo", "")).strip():
-        continue
-    pl = g.get("parent_loop", "")
-    if pl and pl in closed_loops:
-        orphans.append(g)
-
-if orphans:
-    print(f"WARN: {len(orphans)} orphaned gaps (open gap linked to closed loop):")
-    for g in orphans:
-        print(f"  {g['id']} -> {g.get('parent_loop', '?')}")
-else:
-    print("No orphaned gaps found.")
-PY
-fi
-
-echo ""
-echo "=== END LIFECYCLE HEALTH ==="

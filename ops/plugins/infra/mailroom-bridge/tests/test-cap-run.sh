@@ -16,6 +16,7 @@ set -euo pipefail
 #   T10: Manual approval with confirm forwards yes to subprocess stdin
 #   T11: Confirm payload type enforcement exists (boolean only)
 #   T12: /cap/run response includes approval/confirm fields
+#   T13: Output extraction ignores nested precondition/post-action blocks
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 BRIDGE="$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-serve"
@@ -181,6 +182,68 @@ assert '\"approval\"' in code, 'approval field missing from cap-run response'
 assert '\"confirm\"' in code, 'confirm field missing from cap-run response'
 " || exit 1
 ) && pass "approval/confirm response fields present" || fail "approval/confirm response fields present"
+
+# ── T13: output extraction ignores nested wrappers ──
+echo ""
+echo "T13: output extraction ignores nested precondition/post-action blocks"
+(
+  python3 - "$BRIDGE" <<'PY'
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+loader = importlib.machinery.SourceFileLoader("mailroom_bridge_serve", str(path))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+with_preconditions = """════════════════════════════════════════
+CAPABILITY: communications.send.execute
+════════════════════════════════════════
+
+== PRECONDITION: secrets.binding ==
+Executing...
+────────────────────────────────────────
+=== secrets.binding ===
+STATUS: OK (binding complete)
+────────────────────────────────────────
+
+== PRECONDITIONS OK ==
+
+Executing...
+────────────────────────────────────────
+{\"capability\":\"communications.send.execute\",\"status\":\"blocked\",\"data\":{\"preview_id\":\"preview-1\"}}
+────────────────────────────────────────
+
+== POST-ACTION: receipts.touch ==
+────────────────────────────────────────
+Executing...
+────────────────────────────────────────
+{\"capability\":\"receipts.touch\",\"status\":\"ok\"}
+────────────────────────────────────────
+"""
+
+without_preconditions = """════════════════════════════════════════
+CAPABILITY: demo.cap
+════════════════════════════════════════
+Executing...
+────────────────────────────────────────
+{\"capability\":\"demo.cap\",\"status\":\"ok\"}
+────────────────────────────────────────
+== POST-ACTION: demo.post ==
+────────────────────────────────────────
+Executing...
+────────────────────────────────────────
+{\"capability\":\"demo.post\",\"status\":\"ok\"}
+────────────────────────────────────────
+"""
+
+assert module._extract_cap_run_output(with_preconditions) == "{\"capability\":\"communications.send.execute\",\"status\":\"blocked\",\"data\":{\"preview_id\":\"preview-1\"}}"
+assert module._extract_cap_run_output(without_preconditions) == "{\"capability\":\"demo.cap\",\"status\":\"ok\"}"
+PY
+) && pass "nested wrapper output extraction" || fail "nested wrapper output extraction"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

@@ -4,10 +4,12 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
 CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/communications.stack.contract.yaml}"
 MICROSOFT_EXEC="${COMMUNICATIONS_MICROSOFT_EXEC:-${COMMUNICATIONS_MICROSOFT_EXEC_LEGACY:-$ROOT/ops/plugins/providers/microsoft/bin/microsoft-cap-exec}}"
+CAPABILITY_NAME="${COMMUNICATIONS_MAIL_SEARCH_CAPABILITY_NAME:-communications.mail.search}"
 QUERY=""
 TOP=""
 MAILBOX=""
 JSON=0
+TRIAGE=0
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing dependency: $1" >&2; exit 1; }; }
 extract_first_json() {
@@ -38,6 +40,49 @@ sys.exit(1)
 PY
 }
 
+build_triage_json() {
+  local json_file="$1"
+  COMMUNICATIONS_TRIAGE_LIB_DIR="$ROOT/ops/plugins/domains/communications/lib" python3 - "$json_file" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.environ["COMMUNICATIONS_TRIAGE_LIB_DIR"])
+
+from mail_triage_classifier import classify_message, clean
+
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+messages = []
+for message in payload.get("value") or []:
+    triage_class, recommended_action, classification_basis = classify_message(
+        str((((message.get("from") or {}).get("emailAddress") or {}).get("address")) or ""),
+        str(message.get("subject") or ""),
+        str(message.get("bodyPreview") or ""),
+    )
+    preview = clean(str(message.get("bodyPreview") or ""))
+    if len(preview) > 160:
+        preview = preview[:157] + "..."
+    messages.append(
+        {
+            "message_id": str(message.get("id") or ""),
+            "received_utc": str(message.get("receivedDateTime") or ""),
+            "from": str((((message.get("from") or {}).get("emailAddress") or {}).get("address")) or ""),
+            "subject": clean(str(message.get("subject") or "")),
+            "read_state": "read" if bool(message.get("isRead")) else "unread",
+            "triage_class": triage_class,
+            "recommended_action": recommended_action,
+            "classification_basis": classification_basis,
+            "link_policy": "do_not_open_body_links",
+            "preview": preview,
+        }
+    )
+messages.sort(key=lambda item: item.get("received_utc") or "", reverse=True)
+print(json.dumps(messages))
+PY
+}
+
 need yq
 need jq
 [[ -f "$CONTRACT" ]] || { echo "ERROR: missing contract: $CONTRACT" >&2; exit 1; }
@@ -48,14 +93,17 @@ while [[ $# -gt 0 ]]; do
     --query) QUERY="${2:-}"; shift 2 ;;
     --top) TOP="${2:-}"; shift 2 ;;
     --mailbox) MAILBOX="${2:-}"; shift 2 ;;
+    --triage) TRIAGE=1; shift ;;
     --json) JSON=1; shift ;;
     -h|--help)
       cat <<'USAGE'
 Usage: communications-mail-search [--query <text>] [--top <n>] [--json]
        communications-mail-search [--mailbox <id|address>] [--query <text>] [--top <n>] [--json]
+       communications-mail-search --triage [--mailbox <id|address>] [--top <n>] [--json]
 
 Simulation mode: searches contract mailbox catalog.
 Live mode: runs Microsoft mailbox search via Microsoft executor.
+Triage mode: flattens live mailbox messages into a one-pass operator view.
 USAGE
       exit 0
       ;;
@@ -88,6 +136,35 @@ if [[ -n "$mailbox_effective" ]]; then
 fi
 
 if [[ "$mode" == "simulation-only" ]]; then
+  if [[ "$TRIAGE" -eq 1 ]]; then
+    if [[ "$JSON" -eq 1 ]]; then
+      jq -n \
+        --arg capability "$CAPABILITY_NAME" \
+        --arg schema_version "1.0" \
+        --arg status "ok" \
+        --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg mode "$mode" \
+        --arg stage "$stage" \
+        --arg backend "$backend" \
+        --arg query "$query_effective" \
+        --arg mailbox "$mailbox_effective" \
+        --argjson top "$top_effective" \
+        --arg note "triage view requires live Microsoft mailbox mode" \
+        '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:{mode:$mode,stage:$stage,backend:$backend,query:$query,mailbox:$mailbox,top:$top,note:$note,messages:[]}}'
+      exit 0
+    fi
+
+    echo "$CAPABILITY_NAME"
+    echo "mode: $mode"
+    echo "stage: $stage"
+    [[ -n "$mailbox_effective" ]] && echo "mailbox: $mailbox_effective"
+    echo "query: $query_effective"
+    echo "top: $top_effective"
+    echo "matches: 0"
+    echo "note: triage view requires live Microsoft mailbox mode"
+    exit 0
+  fi
+
   rows="$(yq e -r '.pilot.mailboxes[] | [.id, .address, .role, .status] | @tsv' "$CONTRACT")"
   count=0
   matches_json="$(mktemp)"
@@ -108,7 +185,7 @@ if [[ "$mode" == "simulation-only" ]]; then
 
   if [[ "$JSON" -eq 1 ]]; then
     jq -n \
-      --arg capability "communications.mail.search" \
+      --arg capability "$CAPABILITY_NAME" \
       --arg schema_version "1.0" \
       --arg status "ok" \
       --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -122,7 +199,7 @@ if [[ "$mode" == "simulation-only" ]]; then
     exit 0
   fi
 
-  echo "communications.mail.search"
+  echo "$CAPABILITY_NAME"
   echo "mode: $mode"
   echo "stage: $stage"
   [[ -n "$mailbox_effective" ]] && echo "mailbox: $mailbox_effective"
@@ -158,25 +235,46 @@ if ! extract_first_json "$result_raw_tmp" "$result_json_tmp"; then
 fi
 
 message_count="$(jq -r '.value | length' "$result_json_tmp" 2>/dev/null || echo 0)"
+triage_messages_json=""
+if [[ "$TRIAGE" -eq 1 ]]; then
+  triage_messages_json="$(build_triage_json "$result_json_tmp")"
+  message_count="$(echo "$triage_messages_json" | jq -r 'length')"
+fi
 
 if [[ "$JSON" -eq 1 ]]; then
-  jq -n \
-    --arg capability "communications.mail.search" \
-    --arg schema_version "1.0" \
-    --arg status "ok" \
-    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --arg mode "$mode" \
-    --arg stage "$stage" \
-    --arg backend "$backend" \
-    --arg query "$query_effective" \
-    --arg mailbox "$mailbox_effective" \
-    --argjson top "$top_effective" \
-    --argjson microsoft "$(cat "$result_json_tmp")" \
-    '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:{mode:$mode,stage:$stage,backend:$backend,query:$query,mailbox:$mailbox,top:$top,microsoft:$microsoft}}'
+  if [[ "$TRIAGE" -eq 1 ]]; then
+    jq -n \
+      --arg capability "$CAPABILITY_NAME" \
+      --arg schema_version "1.0" \
+      --arg status "ok" \
+      --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg mode "$mode" \
+      --arg stage "$stage" \
+      --arg backend "$backend" \
+      --arg query "$query_effective" \
+      --arg mailbox "$mailbox_effective" \
+      --argjson top "$top_effective" \
+      --argjson messages "$triage_messages_json" \
+      '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:{mode:$mode,stage:$stage,backend:$backend,query:$query,mailbox:$mailbox,top:$top,matches:($messages|length),messages:$messages}}'
+  else
+    jq -n \
+      --arg capability "$CAPABILITY_NAME" \
+      --arg schema_version "1.0" \
+      --arg status "ok" \
+      --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg mode "$mode" \
+      --arg stage "$stage" \
+      --arg backend "$backend" \
+      --arg query "$query_effective" \
+      --arg mailbox "$mailbox_effective" \
+      --argjson top "$top_effective" \
+      --argjson microsoft "$(cat "$result_json_tmp")" \
+      '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:{mode:$mode,stage:$stage,backend:$backend,query:$query,mailbox:$mailbox,top:$top,microsoft:$microsoft}}'
+  fi
   exit 0
 fi
 
-echo "communications.mail.search"
+echo "$CAPABILITY_NAME"
 echo "mode: $mode"
 echo "stage: $stage"
 echo "backend: $backend"
@@ -184,6 +282,14 @@ echo "backend: $backend"
 echo "query: $query_effective"
 echo "top: $top_effective"
 echo "matches: $message_count"
+if [[ "$TRIAGE" -eq 1 ]]; then
+  if [[ "$message_count" -gt 0 ]]; then
+    echo
+    jq -r '.[]? | "message_id: \(.message_id)\nreceived_utc: \(.received_utc)\nfrom: \(.from)\nsubject: \(.subject)\nread_state: \(.read_state)\ntriage_class: \(.triage_class)\nrecommended_action: \(.recommended_action)\nclassification_basis: \(.classification_basis)\nlink_policy: \(.link_policy)\npreview: \(.preview)\n---"' <<<"$triage_messages_json"
+  fi
+  exit 0
+fi
+
 printf "%-26s %-30s %-42s\n" "received_utc" "from" "subject"
 printf "%-26s %-30s %-42s\n" "--------------------------" "------------------------------" "------------------------------------------"
 jq -r '.value[]? | [(.receivedDateTime // ""), (.from.emailAddress.address // ""), (.subject // "")] | @tsv' "$result_json_tmp" | while IFS=$'\t' read -r received from subject; do

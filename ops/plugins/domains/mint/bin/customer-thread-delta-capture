@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+CAPABILITY="${MINT_CUSTOMER_THREAD_DELTA_CAPABILITY_NAME:-mint.customer.thread.delta.capture}"
+CONTRACT="${MINT_CUSTOMER_THREAD_DELTA_CONTRACT:-$ROOT/ops/bindings/mint.customer.thread.delta.contract.yaml}"
+THREAD_ID=""
+CUSTOMER_ASK=""
+MORPHEUS_PRODUCED=""
+RONNY_DID=""
+RONNY_DISLIKED=""
+CLASSIFICATION_INPUT=""
+SEVERITY=""
+CONFIDENCE=""
+NEXT_ACTION=""
+JSON=0
+declare -a EVIDENCE_REFS=()
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "ERROR: missing dependency: $1" >&2
+    exit 2
+  }
+}
+
+fail() {
+  echo "ERROR: $*" >&2
+  exit 2
+}
+
+resolve_state_path() {
+  local raw="${1:-}"
+  raw="${raw//\$SPINE_STATE/$SPINE_STATE}"
+  raw="${raw//\$SPINE_ROOT/$ROOT}"
+  printf '%s\n' "$raw"
+}
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  customer-thread-delta-capture \
+    --thread-id <thread/customer id> \
+    --customer-ask <summary> \
+    --morpheus-produced <summary> \
+    --ronny-did <summary> \
+    --ronny-disliked <summary> \
+    --classification <template|form|capability> \
+    --severity <low|medium|high|critical> \
+    --confidence <low|medium|high> \
+    --next-action <summary> \
+    [--evidence-ref <path-or-url>]... \
+    [--json]
+
+Example:
+  ./bin/ops cap run mint.customer.thread.delta.capture -- \
+    --thread-id "team@mintprints.com::TowMaxx Towing shirts::2026-03-11" \
+    --customer-ask "Customer wants a black reorder using the prior shirt design with updated size counts." \
+    --morpheus-produced "Inbox triage summary plus prior-thread context." \
+    --ronny-did "Stayed in Printavo and manually reconstructed the reorder from the historical order." \
+    --ronny-disliked "No structured reorder capture for prior-order reference plus changed quantities/color." \
+    --classification form \
+    --severity medium \
+    --confidence high \
+    --next-action "Add a governed reorder delta form keyed by prior order reference for repeat jobs."
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --thread-id) THREAD_ID="${2:-}"; shift 2 ;;
+    --customer-ask) CUSTOMER_ASK="${2:-}"; shift 2 ;;
+    --morpheus-produced) MORPHEUS_PRODUCED="${2:-}"; shift 2 ;;
+    --ronny-did) RONNY_DID="${2:-}"; shift 2 ;;
+    --ronny-disliked) RONNY_DISLIKED="${2:-}"; shift 2 ;;
+    --classification) CLASSIFICATION_INPUT="${2:-}"; shift 2 ;;
+    --severity) SEVERITY="${2:-}"; shift 2 ;;
+    --confidence) CONFIDENCE="${2:-}"; shift 2 ;;
+    --next-action) NEXT_ACTION="${2:-}"; shift 2 ;;
+    --evidence-ref) EVIDENCE_REFS+=("${2:-}"); shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+need jq
+need yq
+need python3
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+
+[[ -n "$THREAD_ID" ]] || fail "--thread-id required"
+[[ -n "$CUSTOMER_ASK" ]] || fail "--customer-ask required"
+[[ -n "$MORPHEUS_PRODUCED" ]] || fail "--morpheus-produced required"
+[[ -n "$RONNY_DID" ]] || fail "--ronny-did required"
+[[ -n "$RONNY_DISLIKED" ]] || fail "--ronny-disliked required"
+[[ -n "$CLASSIFICATION_INPUT" ]] || fail "--classification required"
+[[ -n "$SEVERITY" ]] || fail "--severity required"
+[[ -n "$CONFIDENCE" ]] || fail "--confidence required"
+[[ -n "$NEXT_ACTION" ]] || fail "--next-action required"
+
+classification_key=""
+classification_label=""
+classification_operator_input=""
+case "${CLASSIFICATION_INPUT,,}" in
+  template|template_gap|template-gap)
+    classification_key="template_gap"
+    classification_label="template gap"
+    classification_operator_input="template"
+    ;;
+  form|form_gap|form-gap)
+    classification_key="form_gap"
+    classification_label="form gap"
+    classification_operator_input="form"
+    ;;
+  capability|capability_gap|capability-gap)
+    classification_key="capability_gap"
+    classification_label="capability gap"
+    classification_operator_input="capability"
+    ;;
+  *)
+    fail "--classification must be one of: template, form, capability"
+    ;;
+esac
+
+case "${SEVERITY,,}" in
+  low|medium|high|critical) SEVERITY="${SEVERITY,,}" ;;
+  *) fail "--severity must be one of: low, medium, high, critical" ;;
+esac
+
+case "${CONFIDENCE,,}" in
+  low|medium|high) CONFIDENCE="${CONFIDENCE,,}" ;;
+  *) fail "--confidence must be one of: low, medium, high" ;;
+esac
+
+records_root="$(resolve_state_path "$(yq e -r '.storage.records_root // ""' "$CONTRACT")")"
+index_file="$(resolve_state_path "$(yq e -r '.storage.index_file // ""' "$CONTRACT")")"
+lock_file="$(resolve_state_path "$(yq e -r '.storage.lock_file // ""' "$CONTRACT")")"
+[[ -n "$records_root" ]] || fail "contract storage.records_root is empty"
+[[ -n "$index_file" ]] || fail "contract storage.index_file is empty"
+[[ -n "$lock_file" ]] || fail "contract storage.lock_file is empty"
+
+ts_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+ts_compact="$(date -u +%Y%m%dT%H%M%SZ)"
+year="$(date -u +%Y)"
+month="$(date -u +%m)"
+day="$(date -u +%d)"
+rand_suffix="$(printf '%04x' "$((RANDOM % 65536))")"
+delta_id="MTD-${ts_compact}-${rand_suffix}"
+record_dir="$records_root/$year/$month/$day"
+record_file="$record_dir/${delta_id}.yaml"
+
+mkdir -p "$record_dir" "$(dirname "$index_file")" "$(dirname "$lock_file")"
+
+captured_by="${MINT_CUSTOMER_THREAD_DELTA_CAPTURED_BY:-${USER:-unknown}}"
+captured_from_terminal="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-unknown}}"
+
+if [[ "${#EVIDENCE_REFS[@]}" -eq 0 ]]; then
+  evidence_refs_json='[]'
+else
+  evidence_refs_json="$(printf '%s\n' "${EVIDENCE_REFS[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')"
+fi
+
+record_json="$(jq -n \
+  --arg capability "$CAPABILITY" \
+  --arg schema_version "1.0" \
+  --arg delta_id "$delta_id" \
+  --arg captured_at_utc "$ts_utc" \
+  --arg captured_by "$captured_by" \
+  --arg captured_from_terminal "$captured_from_terminal" \
+  --arg thread_id "$THREAD_ID" \
+  --arg customer_ask "$CUSTOMER_ASK" \
+  --arg morpheus_produced "$MORPHEUS_PRODUCED" \
+  --arg ronny_did "$RONNY_DID" \
+  --arg ronny_disliked "$RONNY_DISLIKED" \
+  --arg classification "$classification_key" \
+  --arg classification_label "$classification_label" \
+  --arg classification_operator_input "$classification_operator_input" \
+  --arg severity "$SEVERITY" \
+  --arg confidence "$CONFIDENCE" \
+  --arg next_action "$NEXT_ACTION" \
+  --argjson evidence_refs "$evidence_refs_json" \
+  '{
+    capability: $capability,
+    schema_version: $schema_version,
+    delta_id: $delta_id,
+    captured_at_utc: $captured_at_utc,
+    captured_by: $captured_by,
+    captured_from_terminal: $captured_from_terminal,
+    thread_customer_identifier: $thread_id,
+    customer_ask_summary: $customer_ask,
+    morpheus_produced: $morpheus_produced,
+    ronny_actual_action: $ronny_did,
+    ronny_disliked: $ronny_disliked,
+    classification: $classification,
+    classification_label: $classification_label,
+    classification_operator_input: $classification_operator_input,
+    severity: $severity,
+    confidence: $confidence,
+    next_recommended_hardening_action: $next_action,
+    evidence_refs: $evidence_refs
+  }')"
+
+printf '%s\n' "$record_json" | yq -P - >"$record_file"
+
+index_entry_json="$(jq -c \
+  --arg record_file "$record_file" \
+  --arg index_file "$index_file" \
+  '. + {record_file:$record_file,index_file:$index_file}' <<<"$record_json")"
+
+INDEX_ENTRY_JSON="$index_entry_json" python3 - "$index_file" "$lock_file" <<'PY'
+import fcntl
+import os
+import sys
+from pathlib import Path
+
+index_file = Path(sys.argv[1])
+lock_file = Path(sys.argv[2])
+line = os.environ["INDEX_ENTRY_JSON"]
+
+lock_file.parent.mkdir(parents=True, exist_ok=True)
+index_file.parent.mkdir(parents=True, exist_ok=True)
+
+with lock_file.open("a+", encoding="utf-8") as lock_handle:
+    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    try:
+        with index_file.open("a", encoding="utf-8") as index_handle:
+            index_handle.write(line)
+            index_handle.write("\n")
+    finally:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+PY
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "$CAPABILITY" \
+    --arg schema_version "1.0" \
+    --arg status "ok" \
+    --arg generated_at "$ts_utc" \
+    --arg delta_id "$delta_id" \
+    --arg record_file "$record_file" \
+    --arg index_file "$index_file" \
+    --arg classification "$classification_key" \
+    --arg classification_label "$classification_label" \
+    --arg severity "$SEVERITY" \
+    --arg confidence "$CONFIDENCE" \
+    --arg thread_id "$THREAD_ID" \
+    '{
+      capability: $capability,
+      schema_version: $schema_version,
+      status: $status,
+      generated_at: $generated_at,
+      data: {
+        delta_id: $delta_id,
+        thread_customer_identifier: $thread_id,
+        classification: $classification,
+        classification_label: $classification_label,
+        severity: $severity,
+        confidence: $confidence,
+        record_file: $record_file,
+        index_file: $index_file
+      }
+    }'
+  exit 0
+fi
+
+echo "$CAPABILITY"
+echo "status: ok"
+echo "delta_id: $delta_id"
+echo "thread_customer_identifier: $THREAD_ID"
+echo "classification: $classification_key"
+echo "classification_label: $classification_label"
+echo "severity: $SEVERITY"
+echo "confidence: $CONFIDENCE"
+echo "record_file: $record_file"
+echo "index_file: $index_file"

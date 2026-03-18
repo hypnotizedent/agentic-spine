@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from artifact_record_common import load_artifact, runtime_paths as artifact_runtime_paths  # noqa: E402
+from artwork_preflight_common import (  # noqa: E402
+    analyze_artwork_file,
+    compact_truth,
+    dump_yaml,
+    entity_file,
+    normalize_space,
+    packet_safe_artwork_preflight,
+    preflight_id_for,
+    preflight_index_entry,
+    resolve_mint_root,
+    resolve_spine_root,
+    runtime_paths,
+    update_entity_index,
+)
+from quote_packet_normalize import fail, now_utc  # noqa: E402
+
+
+CAPABILITY_FALLBACK = "mint.artwork.preflight"
+CONTRACT_FALLBACK = "ops/bindings/mint.artwork.preflight.contract.yaml"
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_ARTWORK_PREFLIGHT_CAPABILITY_NAME") or CAPABILITY_FALLBACK
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="artwork-preflight",
+        description="Run Artie-owned artwork preflight on a local file or canonical artifact record and persist governed prepress truth.",
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("source_file", nargs="?", help="Local file to preflight")
+    group.add_argument("--artifact-id", default="", help="Canonical artifact_id to preflight from governed artifact truth")
+    parser.add_argument("--attachment-name", default="", help="Operator/customer-visible attachment name")
+    parser.add_argument("--content-type", default="", help="Explicit content type override if known")
+    parser.add_argument("--piece-quantity", type=int, default=0, help="Requested piece quantity for print-method recommendation")
+    parser.add_argument("--requested-width-in", type=float, default=0.0, help="Requested print width in inches if known")
+    parser.add_argument("--requested-height-in", type=float, default=0.0, help="Requested print height in inches if known")
+    parser.add_argument("--seed-id", default="", help="Canonical seed_id if known")
+    parser.add_argument("--customer-id", default="", help="Canonical customer record id if known")
+    parser.add_argument("--customer-email", default="", help="Customer email if known")
+    parser.add_argument("--customer-name", default="", help="Customer display/legal name if known")
+    parser.add_argument("--job-ref", default="", help="Canonical job reference if known")
+    parser.add_argument("--order-id", default="", help="Canonical order_id if known")
+    parser.add_argument("--source-message-id", default="", help="Mailbox source message id if known")
+    parser.add_argument("--source-conversation-id", default="", help="Mailbox conversation/thread id if known")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    if not str(args.source_file or "").strip() and not str(args.artifact_id or "").strip():
+        fail("source_file or --artifact-id is required")
+    return args
+
+
+def resolve_contract_path(spine_root: Path) -> Path:
+    override = normalize_space(os.environ.get("MINT_ARTWORK_PREFLIGHT_CONTRACT"))
+    if override:
+        path = Path(override).expanduser().resolve()
+    else:
+        candidate = (spine_root / CONTRACT_FALLBACK).resolve()
+        path = candidate if candidate.is_file() else (Path(__file__).resolve().parents[5] / CONTRACT_FALLBACK).resolve()
+    if not path.is_file():
+        fail(f"artwork preflight contract not found: {path}")
+    return path
+
+
+def load_contract(spine_root: Path) -> tuple[Path, dict[str, Any]]:
+    path = resolve_contract_path(spine_root)
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        fail(f"invalid artwork preflight contract: {path}")
+    return path, payload
+
+
+def resolve_contract_storage_value(raw: str, *, default: Path, spine_root: Path, mint_root: Path) -> Path:
+    value = normalize_space(raw)
+    if not value:
+        return default
+    resolved = value.replace("$SPINE_ROOT", str(spine_root)).replace("$MINT_DATA_ROOT", str(mint_root))
+    return Path(resolved).expanduser().resolve()
+
+
+def resolve_source_file(args: argparse.Namespace, spine_root: Path) -> tuple[Path, dict[str, Any], str]:
+    artifact_record: dict[str, Any] = {}
+    artifact_file = ""
+    if normalize_space(args.artifact_id):
+        paths = artifact_runtime_paths(spine_root)
+        artifact_path, artifact_record = load_artifact(paths, normalize_space(args.artifact_id))
+        artifact_file = str(artifact_path)
+        source_path = (
+            normalize_space(artifact_record.get("canonical_object_path") or "")
+            or normalize_space(artifact_record.get("local_file_path") or "")
+        )
+        if not source_path:
+            fail(f"artifact {args.artifact_id} has no canonical_object_path to preflight")
+        file_path = Path(source_path).expanduser().resolve()
+        if not file_path.is_file():
+            fail(f"artifact canonical file not found: {file_path}")
+        return file_path, artifact_record, artifact_file
+    file_path = Path(str(args.source_file or "")).expanduser().resolve()
+    if not file_path.is_file():
+        fail(f"source_file not found: {file_path}")
+    return file_path, {}, artifact_file
+
+
+def text_output(payload: dict[str, Any]) -> str:
+    data = dict(payload.get("data") or {})
+    analysis = dict(data.get("analysis") or {})
+    lines = [
+        capability_name(),
+        f"capture_state: {payload.get('capture_state') or ''}",
+        f"preflight_id: {payload.get('preflight_id') or ''}",
+        f"file_kind: {analysis.get('file_kind') or ''}",
+        f"readiness_state: {analysis.get('readiness_state') or ''}",
+        f"recommended_print_method: {analysis.get('recommended_print_method') or ''}",
+        f"review_required: {str(bool(analysis.get('review_required'))).lower()}",
+        f"record_file: {payload.get('record_file') or ''}",
+    ]
+    if normalize_space(analysis.get("summary") or ""):
+        lines.append(f"summary: {analysis.get('summary')}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root = resolve_spine_root()
+    mint_root = resolve_mint_root(spine_root)
+    contract_path, contract = load_contract(spine_root)
+    default_paths = runtime_paths(spine_root)
+    storage = dict(contract.get("storage") or {})
+    analysis_model = dict(contract.get("analysis_model") or {})
+
+    records_root = resolve_contract_storage_value(
+        str(storage.get("records_root") or ""),
+        default=default_paths["records_root"],
+        spine_root=spine_root,
+        mint_root=mint_root,
+    )
+    index_file = resolve_contract_storage_value(
+        str(storage.get("index_file") or ""),
+        default=default_paths["index_file"],
+        spine_root=spine_root,
+        mint_root=mint_root,
+    )
+
+    file_path, artifact_record, artifact_file = resolve_source_file(args, spine_root)
+    piece_quantity = args.piece_quantity if int(args.piece_quantity or 0) > 0 else None
+    requested_size = compact_truth(
+        {
+            "width_in": float(args.requested_width_in) if float(args.requested_width_in or 0.0) > 0 else None,
+            "height_in": float(args.requested_height_in) if float(args.requested_height_in or 0.0) > 0 else None,
+        }
+    )
+
+    customer_binding = compact_truth(
+        {
+            "customer_id": normalize_space(args.customer_id or ((artifact_record.get("customer_binding") or {}).get("customer_id")) or "") or None,
+            "customer_email": normalize_space(args.customer_email or ((artifact_record.get("customer_binding") or {}).get("customer_email")) or "").lower() or None,
+            "customer_name": normalize_space(args.customer_name or ((artifact_record.get("customer_binding") or {}).get("customer_name")) or "") or None,
+        }
+    )
+    job_binding = compact_truth(
+        {
+            "job_ref": normalize_space(args.job_ref or ((artifact_record.get("job_binding") or {}).get("job_ref")) or "") or None,
+            "order_id": normalize_space(args.order_id or ((artifact_record.get("job_binding") or {}).get("order_id")) or "") or None,
+        }
+    )
+    source_ref = compact_truth(
+        {
+            "artifact_id": normalize_space(args.artifact_id),
+            "artifact_record_file": artifact_file or None,
+            "seed_id": normalize_space(args.seed_id or artifact_record.get("seed_id") or "") or None,
+            "source_message_id": normalize_space(args.source_message_id or ((artifact_record.get("source_refs") or {}).get("source_message_id")) or "") or None,
+            "source_conversation_id": normalize_space(args.source_conversation_id or ((artifact_record.get("source_refs") or {}).get("source_conversation_id")) or "") or None,
+            "attachment_name": normalize_space(args.attachment_name or artifact_record.get("original_filename") or file_path.name) or file_path.name,
+        }
+    )
+
+    try:
+        analysis = analyze_artwork_file(
+            file_path,
+            piece_quantity=piece_quantity,
+            requested_size=requested_size,
+            attachment_name=str(source_ref.get("attachment_name") or file_path.name),
+            content_type=args.content_type or artifact_record.get("content_type") or "",
+            model_config=analysis_model,
+        )
+    except Exception as exc:
+        analysis = {
+            "owner": "Artie",
+            "name": str(source_ref.get("attachment_name") or file_path.name),
+            "content_type": normalize_space(args.content_type or artifact_record.get("content_type") or "") or None,
+            "file_kind": "unsupported",
+            "file_path": str(file_path),
+            "sha256": "",
+            "file_size_bytes": file_path.stat().st_size,
+            "piece_quantity": piece_quantity,
+            "requested_size": requested_size,
+            "state": "analysis_failed",
+            "summary": None,
+            "customer_summary": None,
+            "recommended_print_method": None,
+            "recommendation_confidence": "low",
+            "recommendation_basis": [],
+            "review_required": True,
+            "readiness_state": "analysis_failed",
+            "print_ready_candidate": False,
+            "estimated_color_count": None,
+            "has_gradients": None,
+            "dimensions": {},
+            "prepress_signals": {},
+            "checks": [
+                {
+                    "check_id": "analysis_failed",
+                    "state": "fail",
+                    "severity": "warn",
+                    "summary": f"Artie preflight could not parse the file cleanly: {normalize_space(exc)}",
+                }
+            ],
+        }
+
+    sha256 = str(analysis.get("sha256") or "")
+    preflight_id = preflight_id_for(
+        sha256=sha256,
+        piece_quantity=piece_quantity,
+        requested_width_in=requested_size.get("width_in"),
+        requested_height_in=requested_size.get("height_in"),
+        artifact_id=str(source_ref.get("artifact_id") or ""),
+        attachment_name=str(source_ref.get("attachment_name") or ""),
+    )
+    record_file = entity_file(records_root, "artwork_preflight", preflight_id)
+    capture_state = "existing" if record_file.exists() else "recorded"
+    timestamp = now_utc()
+
+    record = {
+        "preflight_id": preflight_id,
+        "schema_version": "1.0",
+        "capability": capability_name(),
+        "contract_file": str(contract_path),
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "source_ref": source_ref,
+        "customer_binding": customer_binding,
+        "job_binding": job_binding,
+        "file_identity": {
+            "original_filename": str(source_ref.get("attachment_name") or file_path.name),
+            "content_type": analysis.get("content_type"),
+            "sha256": sha256,
+            "file_size_bytes": analysis.get("file_size_bytes"),
+            "extension": file_path.suffix.lower().lstrip("."),
+        },
+        "analysis": packet_safe_artwork_preflight(analysis),
+    }
+
+    dump_yaml(record_file, record)
+    update_entity_index(index_file, "artwork_preflights", "preflight_id", preflight_index_entry(record))
+
+    payload = {
+        "capability": capability_name(),
+        "capture_state": capture_state,
+        "preflight_id": preflight_id,
+        "record_file": str(record_file),
+        "index_file": str(index_file),
+        "data": record,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(text_output(payload))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

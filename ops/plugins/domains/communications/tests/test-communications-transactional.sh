@@ -84,13 +84,23 @@ YAML
 cat >"$templates" <<'YAML'
 version: 1
 templates:
+  - id: payment-needed-email
+    message_type: payment_needed
+    channel: email
+    subject: "Payment needed for order {{order_number}}"
+    body_text: "{{customer_salutation}} balance {{balance_amount}} is due. Pay: {{payment_link}}"
+    required_variables:
+      - customer_salutation
+      - order_number
+      - balance_amount
+      - payment_link
   - id: payment-needed-sms
     message_type: payment_needed
     channel: sms
     subject: ""
-    body_text: "Hi {{customer_name}}! Balance due {{balance_amount}} for order {{order_number}}. Pay: {{payment_link}}"
+    body_text: "{{customer_salutation}} Balance due {{balance_amount}} for order {{order_number}}. Pay: {{payment_link}}"
     required_variables:
-      - customer_name
+      - customer_salutation
       - order_number
       - balance_amount
       - payment_link
@@ -121,7 +131,7 @@ templates_out="$("$TEMPLATES_LIST" --message-type payment_needed --channel sms -
 echo "$templates_out" | jq -e '.data.count == 1' >/dev/null || fail "templates list filter failed"
 pass "templates list"
 
-vars='{"customer_name":"Test","order_number":"30020","balance_amount":"150.00","payment_link":"https://example.com/pay"}'
+vars='{"customer_name":"Test","customer_salutation":"Hello,","order_number":"30020","balance_amount":"150.00","payment_link":"https://example.com/pay"}'
 preview_out="$("$SEND_PREVIEW" --channel sms --message-type payment_needed --to +15551234567 --consent-state opted-in --vars-json "$vars" --json)"
 echo "$preview_out" | jq -e '.data.provider == "twilio"' >/dev/null || fail "preview should route to twilio"
 echo "$preview_out" | jq -e '.data.body | contains("Reply STOP to opt out.")' >/dev/null || fail "preview should append stop footer"
@@ -130,6 +140,18 @@ preview_receipt="$(echo "$preview_out" | jq -r '.data.preview_receipt // ""')"
 [[ -n "$preview_id" ]] || fail "preview should return preview_id"
 [[ -n "$preview_receipt" && -f "$preview_receipt" ]] || fail "preview should write receipt artifact"
 pass "send preview"
+
+email_preview_out="$("$SEND_PREVIEW" --channel email --message-type payment_needed --to test@example.com --consent-state opted-in --vars-json "$vars" --json)"
+email_preview_id="$(echo "$email_preview_out" | jq -r '.data.preview_id // ""')"
+[[ -n "$email_preview_id" ]] || fail "email preview should return preview_id"
+set +e
+email_exec_out="$("$SEND_EXECUTE" --preview-id "$email_preview_id" --execute --json 2>&1)"
+email_exec_rc=$?
+set -e
+[[ "$email_exec_rc" -ne 0 ]] || fail "email execute should be blocked by agent email send policy"
+echo "$email_exec_out" | jq -e '.status == "blocked"' >/dev/null || fail "email execute should return blocked status"
+echo "$email_exec_out" | jq -e '.error.message | contains("email sending is disabled by policy")' >/dev/null || fail "email execute should explain the policy block"
+pass "email execute policy block"
 
 dry_out="$("$SEND_EXECUTE" --channel sms --message-type payment_needed --to +15551234567 --consent-state opted-in --vars-json "$vars" --json)"
 echo "$dry_out" | jq -e '.status == "dry-run"' >/dev/null || fail "send execute dry-run status mismatch"

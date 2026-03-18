@@ -1,0 +1,569 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+import json
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from json import JSONDecodeError, JSONDecoder
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+CONTRACT_DEFAULT = ROOT / "ops/bindings/health.all.contract.yaml"
+CAP_RUNNER = ROOT / "bin/ops"
+
+
+@dataclass
+class RunResult:
+    argv: list[str]
+    exit_code: int
+    stdout: str
+    duration_ms: int
+    timed_out: bool
+
+
+@dataclass
+class ComponentOutcome:
+    impact: str
+    row: dict[str, Any]
+    blockers: list[dict[str, str]]
+    stacks: list[dict[str, Any]]
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise SystemExit(f"invalid YAML document: {path}")
+    return data
+
+
+def extract_json_blob(text: str) -> dict[str, Any] | list[Any] | None:
+    decoder = JSONDecoder()
+    for idx, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text[idx:])
+        except JSONDecodeError:
+            continue
+        if isinstance(obj, (dict, list)):
+            return obj
+    return None
+
+
+def parse_wrapper_metadata(text: str) -> tuple[str | None, str | None]:
+    run_key = None
+    receipt = None
+    for line in text.splitlines():
+        if line.startswith("Run Key:"):
+            run_key = line.split(":", 1)[1].strip() or None
+        elif line.startswith("Receipt:"):
+            receipt = line.split(":", 1)[1].strip() or None
+    return run_key, receipt
+
+
+def run_with_timeout(argv: list[str], timeout_sec: int) -> RunResult:
+    start = time.monotonic()
+    proc = subprocess.Popen(
+        argv,
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    timed_out = False
+    try:
+        stdout, _ = proc.communicate(timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, _ = proc.communicate()
+        stdout = f"{stdout}\nTIMEOUT: command exceeded {timeout_sec}s budget\n"
+        rc = 124
+    else:
+        rc = proc.returncode
+    duration_ms = int((time.monotonic() - start) * 1000)
+    return RunResult(argv=argv, exit_code=rc, stdout=stdout, duration_ms=duration_ms, timed_out=timed_out)
+
+
+def normalize_status(value: str) -> str:
+    value = (value or "").strip().lower()
+    if value in {"pass", "healthy", "ok"}:
+        return "pass"
+    if value in {"warn", "warning", "degraded"}:
+        return "warn"
+    if value in {"fail", "failed", "incident", "error", "timeout"}:
+        return "fail"
+    return "warn"
+
+
+def better_status(current: str, incoming: str) -> str:
+    order = {"pass": 0, "warn": 1, "fail": 2}
+    return incoming if order[incoming] > order[current] else current
+
+
+def stack_label_from_domain(domain_id: str) -> str:
+    mapping = {
+        "automation-stack": "automation",
+        "finance-stack": "finance",
+        "z2m-bridge": "z2m",
+        "immich-stack": "immich",
+        "infra-core-stack": "infra-core",
+        "observability-stack": "observability",
+        "dev-tools-stack": "dev-tools",
+        "mint-stack": "mint",
+    }
+    return mapping.get(domain_id, domain_id.removesuffix("-stack"))
+
+
+def summarize_verify(payload: dict[str, Any], result: RunResult) -> tuple[str, dict[str, Any], list[dict[str, str]]]:
+    fail_count = int(payload.get("fail", 0))
+    warn_count = int(payload.get("warn", 0))
+    failing_ids = [str(item) for item in payload.get("failing_ids") or []]
+    warning_ids = [str(item) for item in payload.get("warning_ids") or []]
+    if result.timed_out:
+        status = "fail"
+        blockers = [{"source": "verify_core", "id": "verify.core.run", "status": "fail", "summary": f"timed out after {result.duration_ms}ms"}]
+    elif fail_count > 0 or result.exit_code not in (0,):
+        status = "fail"
+        blockers = [{
+            "source": "verify_core",
+            "id": "verify.core.run",
+            "status": "fail",
+            "summary": f"failing gates: {','.join(failing_ids[:6]) or 'unknown'}",
+        }]
+    elif warn_count > 0:
+        status = "warn"
+        blockers = [{
+            "source": "verify_core",
+            "id": "verify.core.run",
+            "status": "warn",
+            "summary": f"warning gates: {','.join(warning_ids[:6])}",
+        }]
+    else:
+        status = "pass"
+        blockers = []
+    summary = {
+        "total": int(payload.get("total", 0)),
+        "pass": int(payload.get("pass", 0)),
+        "fail": fail_count,
+        "warn": warn_count,
+        "failing_ids": failing_ids,
+        "warning_ids": warning_ids,
+    }
+    return status, summary, blockers
+
+
+def summarize_lifecycle(payload: dict[str, Any], result: RunResult) -> tuple[str, dict[str, Any], list[dict[str, str]]]:
+    data = payload.get("data") or {}
+    aging = data.get("aging") or {}
+    orphans = data.get("orphans") or {}
+    status = normalize_status(str(payload.get("status", "pass")))
+    if result.timed_out:
+        status = "warn"
+    summary = {
+        "open_gaps": int((data.get("gaps") or {}).get("by_status", {}).get("open", 0)),
+        "aging_warning": len(aging.get("warning") or []),
+        "aging_critical": len(aging.get("critical") or []),
+        "open_loops": int((data.get("loops") or {}).get("open_count", 0)),
+        "orphans": int(orphans.get("count", 0)),
+    }
+    blockers: list[dict[str, str]] = []
+    if result.timed_out:
+        blockers.append({"source": "lifecycle", "id": "lifecycle.health", "status": "warn", "summary": "timed out"})
+    elif summary["aging_critical"] > 0:
+        blockers.append({"source": "lifecycle", "id": "aging", "status": "warn", "summary": f"{summary['aging_critical']} critical aging gaps"})
+    elif summary["aging_warning"] > 0:
+        blockers.append({"source": "lifecycle", "id": "aging", "status": "warn", "summary": f"{summary['aging_warning']} warning aging gaps"})
+    if summary["orphans"] > 0:
+        blockers.append({"source": "lifecycle", "id": "orphans", "status": "warn", "summary": f"{summary['orphans']} orphaned gaps"})
+    return status, summary, blockers
+
+
+def summarize_agent_health(
+    payload: dict[str, Any],
+    result: RunResult,
+    aliases: dict[str, str],
+) -> tuple[str, dict[str, Any], list[dict[str, str]], list[dict[str, Any]]]:
+    data = payload.get("data") or {}
+    probes = data.get("probes") or []
+    by_agent: dict[str, dict[str, Any]] = {}
+    for probe in probes:
+        agent_id = str(probe.get("agent_id", "")).strip()
+        if not agent_id:
+            continue
+        row = by_agent.setdefault(agent_id, {"healthy": 0, "unhealthy": 0, "endpoints": []})
+        if str(probe.get("state", "")).strip() == "healthy":
+            row["healthy"] += 1
+        else:
+            row["unhealthy"] += 1
+        row["endpoints"].append(str(probe.get("endpoint", "")))
+
+    stacks: list[dict[str, Any]] = []
+    blockers: list[dict[str, str]] = []
+    component_status = "pass"
+    for agent_id in sorted(by_agent):
+        row = by_agent[agent_id]
+        total = int(row["healthy"]) + int(row["unhealthy"])
+        stack_id = aliases.get(agent_id, agent_id.removesuffix("-agent"))
+        if row["unhealthy"] <= 0:
+            status = "pass"
+            summary = f"{row['healthy']}/{total} probes healthy"
+        elif row["healthy"] <= 0:
+            status = "fail"
+            summary = f"{row['unhealthy']}/{total} probes unhealthy"
+        else:
+            status = "warn"
+            summary = f"{row['unhealthy']}/{total} probes unhealthy"
+        component_status = better_status(component_status, status)
+        stacks.append(
+            {
+                "id": stack_id,
+                "source": "agent.health.check-all",
+                "status": status,
+                "summary": summary,
+                "agent_id": agent_id,
+                "healthy": int(row["healthy"]),
+                "unhealthy": int(row["unhealthy"]),
+            }
+        )
+        if status != "pass":
+            blockers.append({"source": "agent_health", "id": stack_id, "status": status, "summary": summary})
+
+    if result.timed_out:
+        component_status = "warn"
+        blockers.insert(0, {"source": "agent_health", "id": "agent.health.check-all", "status": "warn", "summary": "timed out"})
+    summary = {
+        "checked": int(data.get("checked", 0)),
+        "healthy": int(data.get("healthy", 0)),
+        "unhealthy": int(data.get("unhealthy", 0)),
+        "stack_count": len(stacks),
+    }
+    return component_status, summary, blockers, stacks
+
+
+def summarize_stability(payload: dict[str, Any], result: RunResult) -> tuple[str, dict[str, Any], list[dict[str, str]], list[dict[str, Any]]]:
+    domains = payload.get("domains") or []
+    component_status = "pass"
+    blockers: list[dict[str, str]] = []
+    stacks: list[dict[str, Any]] = []
+    maintenance_advisories = 0
+
+    for domain in domains:
+        domain_id = str(domain.get("id", "")).strip()
+        if not domain_id:
+            continue
+        stack_id = stack_label_from_domain(domain_id)
+        raw_status = normalize_status(str(domain.get("status", "pass")))
+        operating_mode = str(domain.get("operating_mode") or "").strip().lower()
+        maintenance_exempt = operating_mode == "maintenance" and raw_status != "pass"
+        status = "pass" if maintenance_exempt else raw_status
+        summary = str(domain.get("policy_note") or domain.get("description") or domain_id)
+        if maintenance_exempt:
+            maintenance_advisories += 1
+        stacks.append(
+            {
+                "id": stack_id,
+                "source": "stability.control.snapshot",
+                "status": status,
+                "raw_status": raw_status,
+                "summary": summary,
+                "domain_id": domain_id,
+                "operating_mode": domain.get("operating_mode"),
+                "operating_mode_source": domain.get("operating_mode_source"),
+                "maintenance_window_id": domain.get("maintenance_window_id"),
+                "maintenance_advisory": maintenance_exempt,
+            }
+        )
+        component_status = better_status(component_status, status)
+        if status != "pass":
+            blockers.append({"source": "stability", "id": stack_id, "status": status, "summary": summary})
+
+    if result.timed_out:
+        component_status = "fail"
+        blockers.insert(0, {"source": "stability", "id": "stability.control.snapshot", "status": "fail", "summary": "timed out"})
+    elif payload.get("status") == "incident":
+        component_status = "fail"
+    elif payload.get("status") == "warn" and component_status == "pass" and maintenance_advisories == 0:
+        component_status = "warn"
+
+    summary = {
+        "status": str(payload.get("status", "unknown")),
+        "incident_count": int(payload.get("incident_count", 0)),
+        "warn_count": int(payload.get("warn_count", 0)),
+        "domain_count": len(domains),
+        "maintenance_advisories": maintenance_advisories,
+    }
+    return component_status, summary, blockers, stacks
+
+
+def merge_stacks(
+    primary: list[dict[str, Any]],
+    secondary: list[dict[str, Any]],
+    stack_order: list[str],
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {entry["id"]: dict(entry) for entry in primary}
+    for entry in secondary:
+        existing = merged.get(entry["id"])
+        if existing is None:
+            merged[entry["id"]] = dict(entry)
+            continue
+        incoming_status = str(entry["status"])
+        if better_status(str(existing["status"]), incoming_status) == incoming_status:
+            merged[entry["id"]] = {**existing, **entry}
+        elif incoming_status != "pass":
+            extra = str(entry.get("summary", "")).strip()
+            if extra:
+                summary = str(existing.get("summary", "")).strip()
+                if extra not in summary:
+                    merged[entry["id"]]["summary"] = f"{summary}; {extra}" if summary else extra
+
+    order_index = {name: idx for idx, name in enumerate(stack_order)}
+    status_rank = {"fail": 0, "warn": 1, "pass": 2}
+    return sorted(
+        merged.values(),
+        key=lambda entry: (
+            status_rank.get(str(entry.get("status", "warn")), 3),
+            order_index.get(str(entry.get("id", "")), 999),
+            str(entry.get("id", "")),
+        ),
+    )
+
+
+def build_component_argv(capability: str, args: list[str]) -> list[str]:
+    argv = [str(CAP_RUNNER), "cap", "run", capability]
+    if args:
+        argv.append("--")
+        argv.extend(args)
+    return argv
+
+
+def evaluate_component(component: dict[str, Any], aliases: dict[str, str]) -> ComponentOutcome:
+    component_id = str(component.get("id", "")).strip()
+    capability = str(component.get("capability", "")).strip()
+    timeout_sec = int(component.get("timeout_sec", 30))
+    impact = str(component.get("impact", "advisory")).strip()
+    cmd_args = [str(item) for item in (component.get("args") or [])]
+    argv = build_component_argv(capability, cmd_args)
+
+    try:
+        run = run_with_timeout(argv, timeout_sec)
+        payload = extract_json_blob(run.stdout)
+        run_key, receipt = parse_wrapper_metadata(run.stdout)
+
+        status = "warn"
+        summary: dict[str, Any] = {}
+        blockers: list[dict[str, str]] = []
+        stacks: list[dict[str, Any]] = []
+
+        if isinstance(payload, dict):
+            if component_id == "verify_core":
+                status, summary, blockers = summarize_verify(payload, run)
+            elif component_id == "lifecycle":
+                status, summary, blockers = summarize_lifecycle(payload, run)
+            elif component_id == "agent_health":
+                status, summary, blockers, stacks = summarize_agent_health(payload, run, aliases)
+            elif component_id == "stability":
+                status, summary, blockers, stacks = summarize_stability(payload, run)
+            else:
+                status = "fail" if run.exit_code != 0 else "pass"
+        else:
+            status = "fail" if impact == "blocker" else "warn"
+            summary = {"error": "json_payload_missing"}
+            blockers = [
+                {
+                    "source": component_id,
+                    "id": capability,
+                    "status": status,
+                    "summary": "machine-readable payload missing",
+                }
+            ]
+
+        if run.timed_out and status == "pass":
+            status = "fail" if impact == "blocker" else "warn"
+
+        row = {
+            "id": component_id,
+            "capability": capability,
+            "impact": impact,
+            "status": status,
+            "timeout_sec": timeout_sec,
+            "duration_ms": run.duration_ms,
+            "exit_code": run.exit_code,
+            "timed_out": run.timed_out,
+            "run_key": run_key,
+            "receipt": receipt,
+            "summary": summary,
+            "command": " ".join(shlex.quote(part) for part in run.argv),
+        }
+        return ComponentOutcome(impact=impact, row=row, blockers=blockers, stacks=stacks)
+    except Exception as exc:
+        status = "fail" if impact == "blocker" else "warn"
+        row = {
+            "id": component_id,
+            "capability": capability,
+            "impact": impact,
+            "status": status,
+            "timeout_sec": timeout_sec,
+            "duration_ms": 0,
+            "exit_code": 70,
+            "timed_out": False,
+            "run_key": None,
+            "receipt": None,
+            "summary": {
+                "error": "component_runner_exception",
+                "detail": str(exc) or exc.__class__.__name__,
+            },
+            "command": " ".join(shlex.quote(part) for part in argv),
+        }
+        blockers = [
+            {
+                "source": component_id,
+                "id": capability or component_id,
+                "status": status,
+                "summary": "health-all component wrapper exception",
+            }
+        ]
+        return ComponentOutcome(impact=impact, row=row, blockers=blockers, stacks=[])
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run the canonical bounded health envelope.")
+    parser.add_argument("--contract", default=str(CONTRACT_DEFAULT))
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    contract = load_yaml(Path(args.contract))
+    components_cfg = contract.get("components") or []
+    execution = contract.get("execution") or {}
+    reporting = contract.get("reporting") or {}
+    aliases = {str(k): str(v) for k, v in (contract.get("agent_stack_aliases") or {}).items()}
+    stack_order = [str(item) for item in reporting.get("stack_order") or []]
+    max_blockers = int(reporting.get("max_blockers", 8))
+    max_parallel_components = int(execution.get("max_parallel_components", max(1, len(components_cfg))))
+    if max_parallel_components < 1:
+        raise SystemExit("invalid health.all execution.max_parallel_components: expected integer >= 1")
+
+    component_rows: list[dict[str, Any]] = []
+    all_blockers: list[dict[str, str]] = []
+    stability_stacks: list[dict[str, Any]] = []
+    agent_stacks: list[dict[str, Any]] = []
+    overall_status = "pass"
+    runnable_components = [
+        component
+        for component in components_cfg
+        if str(component.get("id", "")).strip() and str(component.get("capability", "")).strip()
+    ]
+
+    outcomes: list[ComponentOutcome] = []
+    if runnable_components:
+        max_workers = min(max_parallel_components, len(runnable_components))
+        if max_workers <= 1:
+            outcomes = [evaluate_component(component, aliases) for component in runnable_components]
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(evaluate_component, component, aliases) for component in runnable_components]
+                outcomes = [future.result() for future in futures]
+
+    for outcome in outcomes:
+        row = outcome.row
+        if row["id"] == "agent_health":
+            agent_stacks = outcome.stacks
+        elif row["id"] == "stability":
+            stability_stacks = outcome.stacks
+
+        status = str(row["status"])
+        impact = outcome.impact
+        if impact == "blocker":
+            overall_status = better_status(overall_status, status)
+        elif status != "pass" and overall_status == "pass":
+            overall_status = "warn"
+
+        component_rows.append(row)
+        all_blockers.extend(outcome.blockers)
+
+    stacks = merge_stacks(stability_stacks, agent_stacks, stack_order)
+    for stack in stacks:
+        if stack["status"] == "fail" and overall_status == "pass":
+            overall_status = "warn"
+
+    blockers = sorted(
+        all_blockers,
+        key=lambda item: {"fail": 0, "warn": 1, "pass": 2}.get(item["status"], 3),
+    )[:max_blockers]
+
+    payload = {
+        "capability": "health.all",
+        "schema_version": "1.0",
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "status": overall_status,
+        "blocker_count": len(blockers),
+        "blockers": blockers,
+        "components": component_rows,
+        "stacks": stacks,
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print("health.all")
+        print(f"status: {overall_status}")
+        print("components:")
+        for row in component_rows:
+            summary = row["summary"]
+            if row["id"] == "verify_core":
+                summary_text = f"fail={summary.get('fail', 0)} warn={summary.get('warn', 0)}"
+            elif row["id"] == "lifecycle":
+                summary_text = (
+                    f"open_gaps={summary.get('open_gaps', 0)} "
+                    f"aging_warn={summary.get('aging_warning', 0)} "
+                    f"orphans={summary.get('orphans', 0)}"
+                )
+            elif row["id"] == "agent_health":
+                summary_text = f"healthy={summary.get('healthy', 0)} unhealthy={summary.get('unhealthy', 0)}"
+            elif row["id"] == "stability":
+                summary_text = (
+                    f"incident={summary.get('incident_count', 0)} "
+                    f"warn={summary.get('warn_count', 0)}"
+                )
+            else:
+                summary_text = str(summary)
+            print(f"  {row['id']}: {row['status']} ({summary_text})")
+        print("stacks:")
+        for stack in stacks:
+            print(f"  {stack['id']}: {stack['status']} ({stack['summary']})")
+        print("blockers:")
+        if blockers:
+            for blocker in blockers:
+                print(f"  - {blocker['id']}: {blocker['summary']}")
+        else:
+            print("  - none")
+
+    return 1 if overall_status == "fail" else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

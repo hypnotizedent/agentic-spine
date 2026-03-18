@@ -1,0 +1,713 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    compact_utc,
+    iso_utc,
+    message_body_text,
+    message_sender,
+    message_subject,
+    normalized_subject,
+    resolve_spine_root,
+    resolve_spine_state,
+    run_cap_capture,
+    tokenize,
+    utc_now,
+    write_json,
+)
+from customer_lane_pipeline_common import disposition_gate_status, ensure_intake_record  # noqa: E402
+from customer_inbox_disposition_common import resolve_message_disposition  # noqa: E402
+from customer_inbox_machine_common import load_machine_contract, normalize_space, source_context_for_message, sync_inbox_item  # noqa: E402
+
+SCHEMA_VERSION = "1.1"
+CAPABILITY_FALLBACK = "mint.customer.inbox.work_items"
+DEFAULT_MAILBOX = "team@mintprints.com"
+SEARCH_CAPABILITY = "communications.mail.search"
+FOLDER_MESSAGES_CAPABILITY = "microsoft.mail.folder.messages"
+FOLDERS_CAPABILITY = "microsoft.mail.folders"
+GET_CAPABILITY = "microsoft.mail.get"
+HISTORY_RESTORE_INDEX_REL = "mint/customer-history-restores/index.ndjson"
+PROMOTIONAL_MARKERS = (
+    "unsubscribe",
+    "manage preferences",
+    "view in browser",
+    "special offer",
+    "limited time",
+    "newsletter",
+    "sale",
+    "promo",
+)
+RISKY_MARKERS = (
+    "verify account",
+    "confirm account",
+    "click here",
+    "urgent action required",
+    "reset password",
+    "gift card",
+)
+QUOTE_MARKERS = ("quote", "pricing", "price", "estimate", "how much")
+PROOF_MARKERS = ("proof", "mockup", "approve", "approval")
+REORDER_MARKERS = ("same as last time", "same as before", "reorder", "last order", "same shirts")
+ART_DELIVERY_MARKERS = ("attached logo", "art attached", "see attached", "logo attached", "sending art")
+VENDOR_REVISION_MARKERS = ("revision", "vector", "updated art", "latest art", "correction pass", "vendor")
+PRODUCT_HINT_MARKERS = ("shirt", "shirts", "tee", "tees", "hoodie", "hoodies", "hat", "hats", "polo", "polos")
+ART_FILE_MARKERS = (".pdf", ".png", ".jpg", ".jpeg", ".ai", ".eps", ".svg", ".dst", ".emb")
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_CUSTOMER_INBOX_WORK_ITEMS_CAPABILITY_NAME") or CAPABILITY_FALLBACK
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-inbox-work-items",
+        description="Convert the Mint inbox backlog into deterministic governed work items before drafting or quote actions.",
+    )
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox to read from (default: {DEFAULT_MAILBOX})")
+    parser.add_argument("--top", type=int, default=25, help="Maximum raw messages to inspect from the inbox search surface")
+    parser.add_argument(
+        "--order",
+        default="oldest-first",
+        choices=("oldest-first", "newest-first"),
+        help="Thread ordering for the generated backlog view (default: oldest-first)",
+    )
+    parser.add_argument(
+        "--preview-only",
+        action="store_true",
+        help="Use inbox preview data only and skip per-thread microsoft.mail.get hydration.",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def load_reorder_module() -> Any:
+    path = SCRIPT_DIR / "customer-reorder-resolve"
+    loader = SourceFileLoader("mint_customer_reorder_resolve_mod", str(path))
+    spec = spec_from_loader(loader.name, loader)
+    if spec is None:
+        fail(f"could not load helper module: {path}")
+    module = module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def unwrap_search_results(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    microsoft = dict(((payload.get("data") or {}).get("microsoft")) or {})
+    if microsoft:
+        return list(microsoft.get("value") or [])
+    if isinstance(payload.get("value"), list):
+        return list(payload.get("value") or [])
+    return []
+
+
+def unwrap_folder_results(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if isinstance(payload.get("folders"), list):
+        return list(payload.get("folders") or [])
+    if isinstance(payload.get("value"), list):
+        return list(payload.get("value") or [])
+    return []
+
+
+def resolve_inbox_folder_id(spine_root: Path, mailbox: str) -> tuple[str, str]:
+    payload, receipt = run_cap_capture(
+        spine_root,
+        FOLDERS_CAPABILITY,
+        ["--mailbox", mailbox],
+    )
+    for folder in unwrap_folder_results(payload):
+        if normalize_space(str(folder.get("displayName") or "")).lower() == "inbox":
+            folder_id = normalize_space(str(folder.get("id") or ""))
+            if folder_id:
+                return folder_id, receipt
+    return "", receipt
+
+
+def filter_messages_to_inbox(messages: list[dict[str, Any]], inbox_folder_id: str) -> list[dict[str, Any]]:
+    if not inbox_folder_id:
+        return messages
+    filtered: list[dict[str, Any]] = []
+    for message in messages:
+        parent_folder_id = normalize_space(str(message.get("parentFolderId") or ""))
+        if not parent_folder_id or parent_folder_id == inbox_folder_id:
+            filtered.append(message)
+    return filtered
+
+
+def normalize_message_id(value: Any) -> str:
+    return normalize_space(value).lower().strip("<>")
+
+
+def load_history_restore_message_ids(state_root: Path) -> set[str]:
+    path = state_root / HISTORY_RESTORE_INDEX_REL
+    if not path.is_file():
+        return set()
+    message_ids: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        raw = normalize_space(line)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        message_id = normalize_message_id(payload.get("internetMessageId") or payload.get("internet_message_id") or "")
+        if message_id:
+            message_ids.add(message_id)
+    return message_ids
+
+
+def filter_restored_history_messages(messages: list[dict[str, Any]], restored_message_ids: set[str]) -> list[dict[str, Any]]:
+    if not restored_message_ids:
+        return messages
+    filtered: list[dict[str, Any]] = []
+    for message in messages:
+        internet_message_id = normalize_message_id(message.get("internetMessageId") or "")
+        if internet_message_id and internet_message_id in restored_message_ids:
+            continue
+        filtered.append(message)
+    return filtered
+
+
+def search_mailbox(spine_root: Path, mailbox: str, top: int, order: str) -> tuple[list[dict[str, Any]], str]:
+    folder_order = "newest_first" if order == "newest-first" else "oldest_first"
+    try:
+        payload, receipt = run_cap_capture(
+            spine_root,
+            FOLDER_MESSAGES_CAPABILITY,
+            ["--mailbox", mailbox, "--folder", "Inbox", "--top", str(top), "--order", folder_order],
+        )
+        return unwrap_search_results(payload), receipt
+    except SystemExit:
+        payload, receipt = run_cap_capture(
+            spine_root,
+            SEARCH_CAPABILITY,
+            ["--json", "--query", "*", "--top", str(top), "--mailbox", mailbox],
+        )
+        messages = unwrap_search_results(payload)
+        try:
+            inbox_folder_id, _ = resolve_inbox_folder_id(spine_root, mailbox)
+        except SystemExit:
+            inbox_folder_id = ""
+        return filter_messages_to_inbox(messages, inbox_folder_id), receipt
+
+
+def get_message(spine_root: Path, mailbox: str, message_id: str) -> tuple[dict[str, Any], str]:
+    return run_cap_capture(spine_root, GET_CAPABILITY, ["--message-id", message_id, "--mailbox", mailbox])
+
+
+def clean_text(*parts: str) -> str:
+    return re.sub(r"\s+", " ", " ".join(part for part in parts if part)).strip()
+
+
+def thread_key(message: dict[str, Any]) -> str:
+    conversation = str(message.get("conversationId") or "").strip()
+    if conversation:
+        return conversation
+    sender = message_sender(message).lower()
+    subject = normalized_subject(message_subject(message)).lower()
+    return f"{sender}::{subject}"
+
+
+def first_external_email(message: dict[str, Any]) -> str:
+    sender = message_sender(message).lower()
+    if sender and not sender.endswith("@mintprints.com"):
+        return sender
+    text = clean_text(message_body_text(message), str(message.get("bodyPreview") or ""))
+    for address in re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, flags=re.IGNORECASE):
+        lower = address.lower()
+        if not lower.endswith("@mintprints.com"):
+            return lower
+    return ""
+
+
+def select_effective_message(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    ordered = sorted(messages, key=lambda item: str(item.get("receivedDateTime") or ""), reverse=True)
+    external = [item for item in ordered if first_external_email(item)]
+    return external[0] if external else ordered[0]
+
+
+def business_signal(text: str) -> bool:
+    lowered = text.lower()
+    if any(marker in lowered for marker in QUOTE_MARKERS + PROOF_MARKERS + REORDER_MARKERS + ART_DELIVERY_MARKERS + VENDOR_REVISION_MARKERS):
+        return True
+    if any(marker in lowered for marker in PRODUCT_HINT_MARKERS) and re.search(r"\b\d+\b", lowered):
+        return True
+    return False
+
+
+def classify_work_type(message: dict[str, Any]) -> tuple[str, str, list[str]]:
+    sender = message_sender(message).lower()
+    subject = message_subject(message)
+    body = message_body_text(message)
+    preview = str(message.get("bodyPreview") or "")
+    text = clean_text(sender, normalized_subject(subject), preview, body).lower()
+    reasons: list[str] = []
+    attachment_hint = (
+        bool(message.get("hasAttachments"))
+        or any(marker in text for marker in ART_FILE_MARKERS)
+        or any(marker in text for marker in ART_DELIVERY_MARKERS)
+    )
+    internal_sender = sender.endswith("@mintprints.com")
+    vendor_hint = any(token in text for token in ("sheik", "vendor", "supplier"))
+    promotional_hits = [marker for marker in PROMOTIONAL_MARKERS if marker in text]
+    risky_hits = [marker for marker in RISKY_MARKERS if marker in text]
+
+    if (promotional_hits or risky_hits or sender.startswith("noreply@") or sender.startswith("no-reply@")) and not business_signal(text):
+        reasons.extend(risky_hits[:2] or promotional_hits[:2] or ["noreply_sender"])
+        return "spam_or_promotional", "high", reasons
+    if any(marker in text for marker in REORDER_MARKERS):
+        reasons.append("reorder_marker")
+        return "reorder", "high", reasons
+    if any(marker in text for marker in PROOF_MARKERS):
+        reasons.append("proof_marker")
+        return "proof_review", "high", reasons
+    if attachment_hint and (any(marker in text for marker in ART_DELIVERY_MARKERS) or not internal_sender):
+        reasons.append("art_delivery_attachment_signal")
+        return "art_delivery", "high", reasons
+    if any(marker in text for marker in VENDOR_REVISION_MARKERS) and (vendor_hint or internal_sender):
+        reasons.append("vendor_revision_marker")
+        return "vendor_revision", "medium", reasons
+    if any(marker in text for marker in QUOTE_MARKERS) or (any(marker in text for marker in PRODUCT_HINT_MARKERS) and re.search(r"\b\d+\b", text)):
+        reasons.append("quote_marker")
+        return "quote_request", "medium", reasons
+    reasons.append("no_strong_marker")
+    return "ambiguous", "low", reasons
+
+
+def customer_status_for(customer: dict[str, Any] | None, work_type: str, disposition: str) -> str:
+    if disposition in {"supplier_marketing", "risky_junk", "vendor_revision"}:
+        return "unknown"
+    if customer is not None:
+        return "existing"
+    if work_type in {"quote_request", "art_delivery", "proof_review", "reorder", "vendor_revision"}:
+        return "new"
+    return "unknown"
+
+
+def asset_history_status_for(
+    customer: dict[str, Any] | None,
+    customer_folder: dict[str, Any] | None,
+    prior_job: dict[str, Any] | None,
+    customer_candidates: list[dict[str, Any]],
+    prior_job_candidates: list[dict[str, Any]],
+) -> str:
+    if prior_job is not None or customer_folder is not None:
+        return "found"
+    if customer is None and customer_candidates:
+        return "ambiguous"
+    if customer is not None and prior_job is None and prior_job_candidates:
+        return "ambiguous"
+    return "not_found"
+
+
+def extract_quantity(text: str, reorder_mod: Any) -> int | None:
+    breakdown = reorder_mod.extract_size_breakdown(text)
+    total = reorder_mod.size_breakdown_total(breakdown)
+    if total is not None:
+        return total
+    match = re.search(r"\b(\d{1,4})\b", text)
+    if match:
+        value = int(match.group(1))
+        if value > 1:
+            return value
+    return None
+
+
+def compute_readiness(
+    *,
+    work_type: str,
+    text: str,
+    prior_job: dict[str, Any] | None,
+    asset_history_status: str,
+    reorder_mod: Any,
+) -> tuple[bool, bool, bool]:
+    style_code = reorder_mod.detect_style_code(text)
+    product_family = reorder_mod.detect_product_family(text)
+    quantity = extract_quantity(text, reorder_mod)
+    due_date_present = reorder_mod.has_due_date(text)
+
+    if work_type == "reorder":
+        supplier_ready = prior_job is not None or bool(style_code or product_family)
+        pricing_ready = supplier_ready and bool(quantity or str((prior_job or {}).get("total_quantity") or "").strip())
+        quote_ready = pricing_ready and asset_history_status == "found" and due_date_present
+        return supplier_ready, pricing_ready, quote_ready
+
+    if work_type == "quote_request":
+        supplier_ready = bool(style_code or product_family)
+        pricing_ready = supplier_ready and quantity is not None
+        quote_ready = pricing_ready and asset_history_status == "found" and due_date_present
+        return supplier_ready, pricing_ready, quote_ready
+
+    if work_type == "vendor_revision":
+        supplier_ready = bool(style_code or product_family or prior_job is not None)
+        return supplier_ready, False, False
+
+    return False, False, False
+
+
+def next_business_step(
+    *,
+    disposition: str,
+    work_type: str,
+    confidence: str,
+    customer_status: str,
+    asset_history_status: str,
+    supplier_ready: bool,
+    pricing_ready: bool,
+    quote_ready: bool,
+) -> str:
+    if disposition == "risky_junk":
+        return "hide_recoverable"
+    if disposition == "supplier_marketing":
+        return "route_supplier_marketing"
+    if disposition == "vendor_revision":
+        return "route_vendor_revision"
+    if disposition == "unsupported_scope":
+        return "decline_unsupported_scope"
+    if disposition == "waiting_on_customer":
+        return "wait_for_customer"
+    if work_type == "art_delivery":
+        return "route_art_intake"
+    if work_type == "proof_review":
+        return "review_proof"
+    if work_type == "ambiguous":
+        return "human_review"
+    if customer_status == "unknown":
+        return "resolve_customer"
+    if work_type == "reorder" and asset_history_status != "found":
+        return "trace_history"
+    if not supplier_ready:
+        return "gather_supplier_inputs"
+    if not pricing_ready:
+        return "gather_pricing_inputs"
+    if not quote_ready:
+        return "customer_clarification"
+    return "packetize_quote"
+
+
+def summarize_message_ids(messages: list[dict[str, Any]]) -> list[str]:
+    return [str(item.get("id") or "").strip() for item in messages if str(item.get("id") or "").strip()]
+
+
+def build_work_item(
+    *,
+    spine_root: Path,
+    state_root: Path,
+    mailbox: str,
+    thread_messages: list[dict[str, Any]],
+    effective_message: dict[str, Any],
+    effective_receipt: str,
+    customers_rows: list[dict[str, str]],
+    order_rows: list[dict[str, str]],
+    client_assets_root: Path | None,
+    reorder_mod: Any,
+    machine_contract: dict[str, Any],
+) -> dict[str, Any]:
+    effective_sender = first_external_email(effective_message) or message_sender(effective_message).lower()
+    sender_name = str((((effective_message.get("from") or {}).get("emailAddress") or {}).get("name")) or "").strip()
+    text = clean_text(message_subject(effective_message), message_body_text(effective_message), str(effective_message.get("bodyPreview") or ""))
+    company_hint = " ".join(tokenize(text)[:6])
+
+    customer, customer_candidates = reorder_mod.resolve_customer(
+        customers_rows,
+        email=effective_sender,
+        name_hint=sender_name,
+        company_hint=company_hint,
+    )
+    customer_folder = reorder_mod.resolve_customer_folder(client_assets_root, customer)
+    prior_job = None
+    prior_job_candidates: list[dict[str, Any]] = []
+    if customer is not None:
+        prior_job, prior_job_candidates = reorder_mod.resolve_prior_job(
+            order_rows,
+            customer=customer,
+            message_text=text,
+            customer_folder_path=(customer_folder or {}).get("path"),
+        )
+
+    disposition = resolve_message_disposition(spine_root=spine_root, message=effective_message)
+    disposition_name = str(disposition.get("disposition") or "")
+    work_type = str(disposition.get("work_type") or "")
+    confidence = str(disposition.get("confidence") or "low")
+    reason_codes = list(disposition.get("reason_codes") or [])
+    customer_status = customer_status_for(customer, work_type, str(disposition.get("disposition") or ""))
+    asset_history_status = asset_history_status_for(customer, customer_folder, prior_job, customer_candidates, prior_job_candidates)
+    supplier_ready, pricing_ready, quote_ready = compute_readiness(
+        work_type=work_type,
+        text=text,
+        prior_job=prior_job,
+        asset_history_status=asset_history_status,
+        reorder_mod=reorder_mod,
+    )
+    next_step = next_business_step(
+        disposition=str(disposition.get("disposition") or ""),
+        work_type=work_type,
+        confidence=confidence,
+        customer_status=customer_status,
+        asset_history_status=asset_history_status,
+        supplier_ready=supplier_ready,
+        pricing_ready=pricing_ready,
+        quote_ready=quote_ready,
+    )
+    customer_contact = dict(disposition.get("customer_contact") or {})
+    customer_email = str(customer_contact.get("email") or disposition.get("first_external_email") or effective_sender).strip().lower()
+    repair_reasons: list[str] = []
+    if disposition_name in {"customer_actionable", "waiting_on_customer", "unsupported_scope"} and not customer_email:
+        repair_reasons.append("identity_conflict")
+    gate_status = disposition_gate_status(disposition_name, repair_reasons)
+    intake_record = ensure_intake_record(
+        state_root,
+        mailbox,
+        effective_message,
+    )
+    source_context = source_context_for_message(
+        contract=machine_contract,
+        mailbox=mailbox,
+        message=effective_message,
+        latest_text=str(((intake_record.get("message_anchor") or {}).get("normalized_latest_customer_text")) or ""),
+    )
+    source_anchor = dict(source_context.get("source_message_anchor") or {})
+    blockers = []
+    if disposition_name == "unsupported_scope":
+        summary = str(((disposition.get("product_scope") or {}).get("customer_summary")) or "").strip()
+        if summary:
+            blockers.append(summary)
+    if repair_reasons:
+        blockers.extend(repair_reasons)
+
+    if customer_folder is not None:
+        reason_codes.append("customer_folder_found")
+    if prior_job is not None:
+        reason_codes.append("prior_job_found")
+    if supplier_ready:
+        reason_codes.append("supplier_ready")
+    if pricing_ready:
+        reason_codes.append("pricing_ready")
+    if quote_ready:
+        reason_codes.append("quote_ready")
+
+    operator_report = {
+        "disposition": disposition_name,
+        "gate_status": gate_status,
+        "confidence": confidence,
+        "message_anchor": source_anchor or intake_record["message_anchor"],
+        "team_message_anchor": intake_record["message_anchor"],
+        "customer_identity": {
+            "email": customer_email or None,
+            "display_name": str(customer_contact.get("display_name") or sender_name or "").strip() or None,
+            "company": (customer or {}).get("summary") or None,
+            "resolution_mode": str(customer_contact.get("mode") or disposition.get("sender_mode") or "").strip() or None,
+        },
+        "linked_records": {
+            "intake_record": {
+                "intake_id": intake_record["intake_id"],
+                "record_file": intake_record["record_file"],
+            },
+            "customer_summary": (customer or {}).get("summary"),
+            "matched_prior_job": (prior_job or {}).get("summary"),
+        },
+        "invoked_modules": [],
+        "module_truth": {
+            "stage": "intake_and_disposition",
+            "reason_codes": sorted(dict.fromkeys(reason_codes)),
+            "product_scope": disposition.get("product_scope") or {},
+            "customer_status": customer_status,
+            "asset_history_status": asset_history_status,
+        },
+        "blockers": blockers,
+        "recommended_next_action": next_step,
+        "draft_eligible": False,
+    }
+
+    return {
+        "thread_id": thread_key(thread_messages[0]),
+        "source_message_ids": summarize_message_ids(thread_messages),
+        "effective_message_id": str(effective_message.get("id") or ""),
+        "received_utc": str(effective_message.get("receivedDateTime") or ""),
+        "from": normalize_space(source_anchor.get("from") or message_sender(effective_message)),
+        "subject": normalize_space(source_anchor.get("subject") or message_subject(effective_message)),
+        "disposition": disposition_name,
+        "gate_status": gate_status,
+        "customer_truth_allowed": bool(disposition.get("customer_truth_allowed")),
+        "primary_queue_visible": bool(disposition.get("primary_queue_visible")),
+        "reply_allowed": bool(disposition.get("reply_allowed")),
+        "recoverable_folder": disposition.get("recoverable_folder") or None,
+        "message_anchor": source_anchor or intake_record["message_anchor"],
+        "team_message_anchor": intake_record["message_anchor"],
+        "source_mode": source_context.get("source_mode") or "team_direct",
+        "reply_anchor_mode": source_context.get("reply_anchor_mode") or "reply_chain",
+        "promote_metadata": source_context.get("promote_metadata") or {},
+        "intake_record": {
+            "intake_id": intake_record["intake_id"],
+            "record_file": intake_record["record_file"],
+        },
+        "product_scope": disposition.get("product_scope") or {},
+        "work_type": work_type,
+        "customer_status": customer_status,
+        "asset_history_status": asset_history_status,
+        "next_business_step": next_step,
+        "confidence": confidence,
+        "reason_codes": sorted(dict.fromkeys(reason_codes)),
+        "repair_reasons": repair_reasons,
+        "customer_summary": (customer or {}).get("summary"),
+        "matched_prior_job": (prior_job or {}).get("summary"),
+        "operator_report": operator_report,
+        "evidence_refs": {
+            "effective_get_receipt": effective_receipt or None,
+            "customer_folder": (customer_folder or {}).get("path"),
+        },
+    }
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    now = utc_now()
+    stamp = compact_utc(now)
+    short_id = os.urandom(2).hex()
+    work_items_id = f"MIW-{stamp}-{short_id}"
+
+    reorder_mod = load_reorder_module()
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    machine_contract = load_machine_contract(spine_root)
+    customers_rows = reorder_mod.load_csv_rows(reorder_mod.resolve_customers_export())
+    order_rows = reorder_mod.load_csv_rows(reorder_mod.resolve_orders_export())
+    client_assets_root = reorder_mod.resolve_client_assets_root()
+
+    inbox_messages, search_receipt = search_mailbox(spine_root, args.mailbox, args.top, args.order)
+    restored_message_ids = load_history_restore_message_ids(state_root)
+    inbox_messages = filter_restored_history_messages(inbox_messages, restored_message_ids)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for message in inbox_messages:
+        grouped.setdefault(thread_key(message), []).append(message)
+
+    work_items: list[dict[str, Any]] = []
+    newest_first = args.order == "newest-first"
+    ordered_threads = sorted(
+        grouped.items(),
+        key=lambda item: max(str(msg.get("receivedDateTime") or "") for msg in item[1]),
+        reverse=newest_first,
+    )
+    for _, thread_messages in ordered_threads:
+        thread_messages = sorted(thread_messages, key=lambda item: str(item.get("receivedDateTime") or ""), reverse=True)
+        effective_summary = select_effective_message(thread_messages)
+        if args.preview_only:
+            effective_message = effective_summary
+            effective_receipt = ""
+        else:
+            effective_message, effective_receipt = get_message(
+                spine_root,
+                args.mailbox,
+                str(effective_summary.get("id") or ""),
+            )
+        work_items.append(
+            build_work_item(
+                spine_root=spine_root,
+                state_root=state_root,
+                mailbox=args.mailbox,
+                thread_messages=thread_messages,
+                effective_message=effective_message,
+                effective_receipt=effective_receipt,
+                customers_rows=customers_rows,
+                order_rows=order_rows,
+                client_assets_root=client_assets_root,
+                reorder_mod=reorder_mod,
+                machine_contract=machine_contract,
+            )
+        )
+        queue_item = sync_inbox_item(
+            state_root,
+            contract=machine_contract,
+            mailbox=args.mailbox,
+            effective_message=effective_message,
+            work_item=work_items[-1],
+        )
+        work_items[-1]["queue_item"] = {
+            "inbox_item_id": queue_item.get("inbox_item_id"),
+            "workflow_state": queue_item.get("workflow_state"),
+            "source_mode": queue_item.get("source_mode"),
+            "reply_anchor_mode": queue_item.get("reply_anchor_mode"),
+            "record_file": queue_item.get("record_file"),
+        }
+
+    summary = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "generated_at": iso_utc(now),
+        "mailbox": args.mailbox,
+        "backlog_count": len(work_items),
+        "primary_queue_count": sum(1 for item in work_items if bool(item.get("primary_queue_visible"))),
+        "hydration_mode": "preview_only" if args.preview_only else "full_message",
+        "selection_order": "newest_first" if newest_first else "oldest_first",
+        "work_items": work_items,
+        "receipts": {
+            "inbox_search_receipt": search_receipt or None,
+        },
+    }
+
+    records_dir = state_root / "mint" / "customer-inbox-work-items" / "records" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{work_items_id}.json"
+    index_file = state_root / "mint" / "customer-inbox-work-items" / "index.ndjson"
+    lock_file = state_root / "locks" / "mint-customer-inbox-work-items.lock"
+    write_json(record_file, summary)
+    append_ndjson(
+        index_file,
+        lock_file,
+        {
+            "work_items_id": work_items_id,
+            "mailbox": args.mailbox,
+            "backlog_count": len(work_items),
+            "record_file": str(record_file),
+            "stored_at_utc": iso_utc(now),
+        },
+    )
+    summary["record_file"] = str(record_file)
+    summary["index_file"] = str(index_file)
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+
+    print(capability_name())
+    print(f"mailbox: {args.mailbox}")
+    print(f"backlog_count: {len(work_items)}")
+    print(f"hydration_mode: {summary['hydration_mode']}")
+    print(f"selection_order: {summary['selection_order']}")
+    print(f"record_file: {record_file}")
+    for item in work_items:
+        print("---")
+        print(f"thread_id: {item['thread_id']}")
+        print(f"subject: {item['subject']}")
+        print(f"disposition: {item['disposition']}")
+        print(f"gate_status: {item['gate_status']}")
+        print(f"work_type: {item['work_type']}")
+        print(f"customer_status: {item['customer_status']}")
+        print(f"asset_history_status: {item['asset_history_status']}")
+        print(f"next_business_step: {item['next_business_step']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

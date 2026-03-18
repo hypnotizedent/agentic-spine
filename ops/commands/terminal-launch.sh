@@ -22,14 +22,18 @@
 #   --tool <tool>           Tool to run (claude|codex|opencode|verify)
 #   --terminal <name>       Terminal name (e.g. SPINE-CONTROL-01)
 #   --role <mode>           Launch role mode (solo|control|lane-worker)
+#   --handoff-id <id>       Optional dispatched handoff identifier for target-session acceptance
+#   --handoff-file <path>   Optional dispatched handoff file path for target-session acceptance
 #   --dry-run               Print the governed launch command without opening iTerm
 #
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+source "$SPINE_REPO/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 LANE_PROFILES_YAML="$SPINE_REPO/ops/bindings/lane.profiles.yaml"
-SCOPES_DIR="$SPINE_REPO/mailroom/state/loop-scopes"
+SCOPES_DIR="$SPINE_STATE/loop-scopes"
 LAUNCHER_VIEW_YAML="$SPINE_REPO/ops/bindings/terminal.launcher.view.yaml"
 TERMINAL_ROLE_CONTRACT="$SPINE_REPO/ops/bindings/terminal.role.contract.yaml"
 ROLE_RUNTIME_CONTRACT="$SPINE_REPO/ops/bindings/role.runtime.control.contract.yaml"
@@ -294,6 +298,8 @@ Launch options:
   --tool <tool>           Tool to run (claude|codex|opencode|verify)
   --terminal <name>       Terminal name (e.g. SPINE-CONTROL-01)
   --role <mode>           Launch role mode (solo|control|lane-worker)
+  --handoff-id <id>       Optional dispatched handoff identifier
+  --handoff-file <path>   Optional dispatched handoff file path
   --dry-run               Print the governed launch command without opening iTerm
 
 Compatibility aliases:
@@ -485,6 +491,8 @@ cmd_launch() {
     local terminal_explicit=0
     local terminal_binding=""
     local allowed_tools_csv=""
+    local handoff_id=""
+    local handoff_file=""
     local dry_run=0
 
     while [[ $# -gt 0 ]]; do
@@ -499,6 +507,10 @@ cmd_launch() {
             --terminal=*) terminal_name="${1#--terminal=}"; terminal_explicit=1; shift ;;
             --role) role_input="${2:-}"; shift 2 ;;
             --role=*) role_input="${1#--role=}"; shift ;;
+            --handoff-id) handoff_id="${2:-}"; shift 2 ;;
+            --handoff-id=*) handoff_id="${1#--handoff-id=}"; shift ;;
+            --handoff-file) handoff_file="${2:-}"; shift 2 ;;
+            --handoff-file=*) handoff_file="${1#--handoff-file=}"; shift ;;
             --dry-run) dry_run=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -612,6 +624,12 @@ cmd_launch() {
     if [[ -n "$lane" ]]; then
         exec_args+=("--lane" "$lane")
     fi
+    if [[ -n "$handoff_id" ]]; then
+        exec_args+=("--handoff-id" "$handoff_id")
+    fi
+    if [[ -n "$handoff_file" ]]; then
+        exec_args+=("--handoff-file" "$handoff_file")
+    fi
     if [[ "$dry_run" -eq 1 ]]; then
         exec_args+=("--dry-run")
     fi
@@ -632,6 +650,8 @@ cmd_launch() {
 
     if [[ "$dry_run" -eq 1 || "${TERMINAL_LAUNCH_DRY_RUN:-0}" == "1" ]]; then
         echo "DRY_RUN: lane=$lane tool=$tool terminal=$terminal_name label=$terminal_label runtime_role=$runtime_role loop=${loop_id:-none} role=$role"
+        [[ -n "$handoff_id" ]] && echo "handoff_id=$handoff_id"
+        [[ -n "$handoff_file" ]] && echo "handoff_file=$handoff_file"
         [[ -n "$allowed_tools_csv" ]] && echo "allowed_tools=$allowed_tools_csv"
         echo "command=$full_cmd"
         return

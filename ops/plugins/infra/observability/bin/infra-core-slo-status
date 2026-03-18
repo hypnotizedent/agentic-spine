@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 CONTRACT_DEFAULT="$ROOT/ops/bindings/infra.core.slo.yaml"
 CONTRACT="$CONTRACT_DEFAULT"
+source "$ROOT/ops/lib/ssh-resolve.sh"
 
 usage() {
   cat <<'EOF'
@@ -84,6 +85,7 @@ SERVICE_REGISTRY="$ROOT/$SERVICE_REGISTRY_REL"
 
 need_file "$SERVICES_HEALTH"
 need_file "$SERVICE_REGISTRY"
+need_file "$ROOT/ops/bindings/ssh.targets.yaml"
 
 TARGET_HOST="$(yq -r '.target.host // "infra-core"' "$CONTRACT")"
 CONNECT_TIMEOUT_SEC="$(yq -r '.timeouts.connect_timeout_sec // 3' "$CONTRACT")"
@@ -125,6 +127,8 @@ if [[ "${#REQUIRED_IDS[@]}" -eq 0 ]]; then
   exit 2
 fi
 
+ssh_resolve_ssh_host_with_fallback "$TARGET_HOST" "$CONNECT_TIMEOUT_SEC" >/dev/null 2>&1 || true
+
 required_total="${#REQUIRED_IDS[@]}"
 optional_total="${#OPTIONAL_IDS[@]}"
 required_ok=0
@@ -137,6 +141,37 @@ optional_warn=0
 probe_state=""
 probe_note=""
 probe_latency_ms=0
+probe_path_used=""
+
+resolve_probe_url() {
+  local endpoint_url="$1"
+  local endpoint_host="$2"
+  local timeout="$3"
+  local resolved
+  local resolved_url=""
+  local path_used=""
+
+  if [[ -z "$endpoint_host" || "$endpoint_host" == "null" ]]; then
+    printf '%s\t%s\n' "$endpoint_url" "unmapped"
+    return
+  fi
+
+  if ! yq -e ".ssh.targets[] | select(.id == \"$endpoint_host\")" "$ROOT/ops/bindings/ssh.targets.yaml" >/dev/null 2>&1; then
+    printf '%s\t%s\n' "$endpoint_url" "unmapped"
+    return
+  fi
+
+  resolved="$(ssh_resolve_url_with_fallback "$endpoint_url" "$endpoint_host" "$timeout" || true)"
+  resolved_url="$(printf '%s' "$resolved" | awk '{print $1}')"
+  path_used="$(printf '%s' "$resolved" | awk '{print $2}')"
+  if [[ -z "$resolved_url" ]]; then
+    resolved_url="$endpoint_url"
+  fi
+  if [[ -z "$path_used" ]]; then
+    path_used="unknown"
+  fi
+  printf '%s\t%s\n' "$resolved_url" "$path_used"
+}
 
 probe_endpoint() {
   local url="$1"
@@ -146,6 +181,7 @@ probe_endpoint() {
   local expect="$(printf '%s' "$expect_raw" | tr -d '[:space:]')"
   local start_ms end_ms curl_out curl_rc http_code time_total
   local ok=0
+  probe_path_used=""
 
   start_ms="$(now_ms)"
   set +e
@@ -229,8 +265,13 @@ for service_id in "${REQUIRED_IDS[@]}"; do
     fi
 
     if [[ "$svc_status" != "FAIL" ]]; then
-      probe_endpoint "$endpoint_url" "$endpoint_expect" "$CONNECT_TIMEOUT_SEC" "$MAX_TIME_SEC"
+      IFS=$'\t' read -r resolved_url resolved_path <<< "$(resolve_probe_url "$endpoint_url" "$endpoint_host" "$CONNECT_TIMEOUT_SEC")"
+      probe_path_used="$resolved_path"
+      probe_endpoint "$resolved_url" "$endpoint_expect" "$CONNECT_TIMEOUT_SEC" "$MAX_TIME_SEC"
       svc_latency="${probe_latency_ms}ms"
+      if [[ -n "$resolved_path" && "$resolved_path" != "unmapped" ]]; then
+        svc_note="${svc_note:+$svc_note; }path=$resolved_path"
+      fi
       if [[ "$probe_state" != "OK" ]]; then
         svc_status="FAIL"
         svc_note="${svc_note:+$svc_note; }$probe_note"
@@ -295,8 +336,13 @@ for service_id in "${OPTIONAL_IDS[@]}"; do
     fi
 
     if [[ "$can_probe" -eq 1 ]]; then
-      probe_endpoint "$endpoint_url" "$endpoint_expect" "$OPTIONAL_CONNECT_TIMEOUT_SEC" "$OPTIONAL_MAX_TIME_SEC"
+      IFS=$'\t' read -r resolved_url resolved_path <<< "$(resolve_probe_url "$endpoint_url" "$endpoint_host" "$OPTIONAL_CONNECT_TIMEOUT_SEC")"
+      probe_path_used="$resolved_path"
+      probe_endpoint "$resolved_url" "$endpoint_expect" "$OPTIONAL_CONNECT_TIMEOUT_SEC" "$OPTIONAL_MAX_TIME_SEC"
       svc_latency="${probe_latency_ms}ms"
+      if [[ -n "$resolved_path" && "$resolved_path" != "unmapped" ]]; then
+        svc_note="${svc_note:+$svc_note; }path=$resolved_path"
+      fi
       if [[ "$probe_state" != "OK" ]]; then
         svc_status="WARN"
         svc_note="${svc_note:+$svc_note; }$probe_note"

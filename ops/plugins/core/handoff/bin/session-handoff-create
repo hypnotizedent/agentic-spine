@@ -8,6 +8,7 @@ source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 
 CONFIG="$ROOT/ops/bindings/handoff.config.yaml"
+TASK_BRIDGE_BIN="$ROOT/ops/plugins/core/handoff/bin/session-handoff-task-bridge"
 SUMMARY=""
 LOOPS_RAW=""
 ACTIONS_RAW=""
@@ -88,6 +89,8 @@ ttl_hours="$(yq -r '.defaults.ttl_hours // 72' "$CONFIG")"
 max_active="$(yq -r '.defaults.max_active // 20' "$CONFIG")"
 role_io_enabled="$(yq -r '.role_io.enabled // false' "$CONFIG" 2>/dev/null || echo false)"
 role_io_policy_contract="$(yq -r '.role_io.policy_contract // ""' "$CONFIG" 2>/dev/null || true)"
+task_bridge_enabled="$(yq -r '.task_bridge.enabled // false' "$CONFIG" 2>/dev/null || echo false)"
+task_bridge_roles_json="$(yq -o=json '.task_bridge.bridge_roles // ["worker"]' "$CONFIG" 2>/dev/null || echo '["worker"]')"
 
 [[ "$ttl_hours" =~ ^[0-9]+$ ]] || ttl_hours=72
 [[ "$max_active" =~ ^[0-9]+$ ]] || max_active=20
@@ -240,8 +243,31 @@ jq -n \
   '{version:"1.1", id:$id, state:"active", owner:$owner, summary:$summary, created_at_utc:$created_at, expires_at_utc:$expires_at, loops:$loops, actions:$actions, from_role:$from_role, to_role:$to_role, transition_gate:$transition_gate, input_refs:$input_refs, output_refs:$output_refs, notes:[]}' \
   | yq -P '.' >"$file"
 
+bridge_output='{}'
+bridge_needed="false"
+if [[ "$task_bridge_enabled" == "true" ]]; then
+  bridge_needed="$(jq -r --arg role "$TO_ROLE" 'any(.[]?; . == $role)' <<<"$task_bridge_roles_json" 2>/dev/null || echo false)"
+fi
+
+if [[ "$bridge_needed" == "true" ]]; then
+  if ! bridge_output="$("$TASK_BRIDGE_BIN" --id "$id" --json)"; then
+    echo "FAIL: task bridge failed for handoff $id" >&2
+    exit 1
+  fi
+fi
+
 if [[ "$JSON_MODE" -eq 1 ]]; then
-  jq -n --arg capability "session.handoff.create" --arg id "$id" --arg file "$file" --arg created_at_utc "$created_at" --arg expires_at_utc "$expires_at" --arg from_role "$FROM_ROLE" --arg to_role "$TO_ROLE" --arg transition_gate "$TRANSITION_GATE" '{capability:$capability,id:$id,file:$file,created_at_utc:$created_at_utc,expires_at_utc:$expires_at_utc,from_role:$from_role,to_role:$to_role,transition_gate:$transition_gate}'
+  jq -n \
+    --arg capability "session.handoff.create" \
+    --arg id "$id" \
+    --arg file "$file" \
+    --arg created_at_utc "$created_at" \
+    --arg expires_at_utc "$expires_at" \
+    --arg from_role "$FROM_ROLE" \
+    --arg to_role "$TO_ROLE" \
+    --arg transition_gate "$TRANSITION_GATE" \
+    --argjson task_bridge "$bridge_output" \
+    '{capability:$capability,id:$id,file:$file,created_at_utc:$created_at_utc,expires_at_utc:$expires_at_utc,from_role:$from_role,to_role:$to_role,transition_gate:$transition_gate,task_bridge:($task_bridge.data // null)}'
   exit 0
 fi
 
@@ -254,4 +280,8 @@ if [[ -n "$FROM_ROLE" || -n "$TO_ROLE" ]]; then
   echo "from_role: ${FROM_ROLE:-}"
   echo "to_role: ${TO_ROLE:-}"
   echo "transition_gate: ${TRANSITION_GATE:-}"
+fi
+if [[ "$bridge_needed" == "true" ]]; then
+  echo "task_id: $(jq -r '.data.task_id // ""' <<<"$bridge_output")"
+  echo "task_file: $(jq -r '.data.task_file // ""' <<<"$bridge_output")"
 fi

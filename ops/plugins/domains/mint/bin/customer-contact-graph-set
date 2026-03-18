@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_contact_graph_common import (  # noqa: E402
+    contact_graph_contract_path,
+    dedupe_emails,
+    dedupe_preserve,
+    dedupe_roles,
+    normalize_email,
+    normalize_relationship_status,
+    normalize_space,
+    selector_summary,
+    slugify,
+    store_paths,
+)
+from operator_mail_common import append_ndjson, compact_utc, fail, iso_utc, resolve_spine_root, resolve_spine_state, utc_now, write_json  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.customer.contact.graph.set"
+SCHEMA_VERSION = "1.0"
+ALLOWED_CONFIDENCE = {"low", "medium", "high"}
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-contact-graph-set",
+        description=(
+            "Persist governed company/contact relationship truth so Morpheus can resolve the right humans, "
+            "roles, and greeting behavior for customer-facing drafts."
+        ),
+    )
+    parser.add_argument("--company", required=True, help="Canonical company/account name")
+    parser.add_argument("--company-alias", action="append", default=[], help="Additional company/account alias")
+    parser.add_argument("--domain", action="append", default=[], help="Company email/web domain (repeatable)")
+    parser.add_argument("--contact", action="append", default=[], help="Contact spec: email=...,name=...,greeting_name=...,role=...,status=...")
+    parser.add_argument("--relationship-note", default="", help="Operator note about this company/account relationship")
+    parser.add_argument("--source", default="operator_confirmed", help="Provenance source")
+    parser.add_argument("--set-by", default=os.environ.get("USER", "unknown"), help="Operator or system setting the graph")
+    parser.add_argument("--confidence", default="high", help="Default confidence for contacts without an explicit value")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+
+    if args.confidence not in ALLOWED_CONFIDENCE:
+        fail("confidence must be one of: low, medium, high")
+    if not args.contact:
+        fail("provide at least one --contact")
+    return args
+
+
+def parse_contact_spec(text: str, *, company: str, default_confidence: str) -> dict[str, Any]:
+    raw: dict[str, Any] = {
+        "emails": [],
+        "roles": [],
+        "aliases": [],
+    }
+    for part in str(text or "").split(","):
+        item = normalize_space(part)
+        if not item:
+            continue
+        if "=" not in item:
+            fail(f"contact entries must use key=value segments: {text}")
+        key, value = item.split("=", 1)
+        key = normalize_space(key).lower().replace("-", "_")
+        value = normalize_space(value)
+        if not value:
+            continue
+        if key in {"email", "alias_email"}:
+            raw["emails"].append(normalize_email(value))
+        elif key == "role":
+            raw["roles"].append(value)
+        elif key == "alias":
+            raw["aliases"].append(value)
+        elif key in {"name", "legal_name"}:
+            raw["legal_name"] = value
+        elif key in {"preferred_name", "greeting_name", "display_name", "status", "confidence", "note"}:
+            raw[key] = value
+        else:
+            fail(f"unsupported contact field: {key}")
+
+    emails = dedupe_emails(raw.get("emails") or [])
+    if not emails:
+        fail(f"contact must include at least one email: {text}")
+    legal_name = normalize_space(raw.get("legal_name") or "")
+    if not legal_name:
+        fail(f"contact must include name=... or legal_name=...: {text}")
+    confidence = normalize_space(raw.get("confidence") or default_confidence).lower()
+    if confidence not in ALLOWED_CONFIDENCE:
+        fail(f"contact confidence must be one of: low, medium, high ({text})")
+
+    roles = dedupe_roles(raw.get("roles") or [])
+    if not roles:
+        fail(f"contact must include at least one role=...: {text}")
+    return {
+        "contact_id": f"MCC-{slugify(company)}-{slugify(emails[0])}",
+        "legal_name": legal_name,
+        "preferred_name": normalize_space(raw.get("preferred_name") or "") or None,
+        "greeting_name": normalize_space(raw.get("greeting_name") or "") or None,
+        "display_name": normalize_space(raw.get("display_name") or "") or None,
+        "aliases": dedupe_preserve(raw.get("aliases") or []),
+        "emails": emails,
+        "roles": roles,
+        "relationship_status": normalize_relationship_status(raw.get("status") or "active"),
+        "confidence": confidence,
+        "operator_note": normalize_space(raw.get("note") or "") or None,
+    }
+
+
+def build_account(args: argparse.Namespace, contacts: list[dict[str, Any]]) -> dict[str, Any]:
+    domains = dedupe_preserve([normalize_space(item).lower() for item in (args.domain or []) if normalize_space(item)])
+    if not domains:
+        domains = dedupe_preserve([email.rsplit("@", 1)[-1] for contact in contacts for email in (contact.get("emails") or []) if "@" in email])
+    return {
+        "company_name": normalize_space(args.company),
+        "company_aliases": dedupe_preserve(args.company_alias or []),
+        "domains": domains,
+        "operator_note": normalize_space(args.relationship_note) or None,
+    }
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    now = utc_now()
+    stored_at_utc = iso_utc(now)
+    graph_id = f"MCG-{compact_utc(now)}"
+    contacts = [parse_contact_spec(item, company=args.company, default_confidence=args.confidence) for item in args.contact]
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    contract = contact_graph_contract_path(spine_root)
+    paths = store_paths(state_root)
+    account = build_account(args, contacts)
+    selector = selector_summary(
+        company=account["company_name"],
+        company_aliases=account["company_aliases"],
+        domains=account["domains"],
+        contact_emails=[email for contact in contacts for email in (contact.get("emails") or [])],
+    )
+
+    record = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "graph_id": graph_id,
+        "stored_at_utc": stored_at_utc,
+        "contract": str(contract),
+        "selector": selector,
+        "account": account,
+        "contacts": contacts,
+        "provenance": {
+            "source": normalize_space(args.source) or "operator_confirmed",
+            "set_by": normalize_space(args.set_by) or "unknown",
+            "confidence": args.confidence,
+            "updated_at_utc": stored_at_utc,
+        },
+    }
+    records_dir = paths["records_root"] / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{graph_id}.json"
+    write_json(record_file, record)
+    append_ndjson(
+        paths["index_file"],
+        paths["lock_file"],
+        {
+            "graph_id": graph_id,
+            "stored_at_utc": stored_at_utc,
+            "selector": selector,
+            "company": account["company_name"],
+            "domains": account["domains"],
+            "contact_emails": selector["contact_emails"],
+            "contact_roles": sorted({role for contact in contacts for role in (contact.get("roles") or [])}),
+            "record_file": str(record_file),
+        },
+    )
+
+    payload = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "generated_at": stored_at_utc,
+        "data": {
+            "graph_id": graph_id,
+            "contract": str(contract),
+            "record_file": str(record_file),
+            "index_file": str(paths["index_file"]),
+            "account": account,
+            "contacts": contacts,
+            "selector": selector,
+        },
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(CAPABILITY_NAME)
+    print(f"graph_id: {graph_id}")
+    print(f"company: {account['company_name']}")
+    print(f"record_file: {record_file}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -55,7 +55,7 @@ request_log = sys.argv[2]
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        if self.path != "/api/v1/pricing/estimate":
+        if self.path != "/api/v1/pricing/lane-matrix":
             self.send_response(404)
             self.end_headers()
             return
@@ -66,75 +66,55 @@ class Handler(BaseHTTPRequestHandler):
         with open(request_log, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, sort_keys=True) + "\n")
 
-        qty = int(payload.get("qty", 0))
-        total_amount = qty * 1694
+        qty = int((payload.get("qty_options") or [0])[0])
         response = {
-            "estimate_id": f"estimate-{qty}",
-            "requested_at_utc": payload.get("request_timestamp_utc"),
-            "pricing_version": "mock-pricing-v1",
-            "pricing_authority_path": "job_estimator",
-            "pricing_source": "contract_table",
-            "normalized_request": payload,
-            "line_items": [
-                {
-                    "code": "blank",
-                    "description": "Blank garment",
-                    "unit_amount": 925,
-                    "quantity": qty,
-                    "total_amount": qty * 925,
-                    "source": "contract_table",
-                },
-                {
-                    "code": "decoration",
-                    "description": "Decoration charge",
-                    "unit_amount": 769,
-                    "quantity": qty,
-                    "total_amount": qty * 769,
-                    "source": "contract_table",
-                },
+            "questions": [],
+            "recommendations": [
+                {"lane_id": "li-price-1__front__1", "recommended_screen_print_size_key": "A4"},
+                {"lane_id": "li-price-1__back__2", "recommended_screen_print_size_key": "A4"},
             ],
-            "pricing_trace": [
+            "garment_markup_multiplier": 1.3,
+            "scenarios": [
                 {
-                    "code": "blank",
-                    "description": "Blank garment",
-                    "formula": "qty * base_blank",
-                    "direction": "increase",
-                    "unit_delta_cents": 925,
-                    "quantity": qty,
-                    "total_delta_cents": qty * 925,
-                    "source": "contract_table",
+                    "scenario_id": f"qty-{qty}__setup-new_setup",
+                    "qty": qty,
+                    "setup_mode": "new_setup",
+                    "blank_customer_unit_amount": 5.53,
+                    "customer_unit_amount": 16.94,
+                    "lanes": [
+                        {
+                            "lane_id": "li-price-1__front__1",
+                            "placement_label": "front",
+                            "customer_unit_amount": 7.41,
+                            "production_unit_amount": 6.8,
+                            "setup_total_amount": 25.0,
+                            "underbase_total_amount": 0.0,
+                            "receipt_id": f"receipt-{qty}-front",
+                            "pricing_key_type": "screen_print_workbook_size",
+                            "pricing_key": "A4",
+                            "screen_print_size_key": "A4",
+                            "requested_method_variant": "standard",
+                            "workbook_base_variant": "standard",
+                            "variant_pricing_mode": "workbook_exact",
+                        },
+                        {
+                            "lane_id": "li-price-1__back__2",
+                            "placement_label": "back",
+                            "customer_unit_amount": 4.0,
+                            "production_unit_amount": 3.55,
+                            "setup_total_amount": 0.0,
+                            "underbase_total_amount": 0.0,
+                            "receipt_id": f"receipt-{qty}-back",
+                            "pricing_key_type": "screen_print_workbook_size",
+                            "pricing_key": "A4",
+                            "screen_print_size_key": "A4",
+                            "requested_method_variant": "standard",
+                            "workbook_base_variant": "standard",
+                            "variant_pricing_mode": "workbook_exact",
+                        },
+                    ],
                 }
             ],
-            "customer_explanation": {
-                "size_tier_label": payload.get("size_tier_label", "standard_print"),
-                "size_bounds_inches": {"min_max_side_in": 0, "max_max_side_in": 12},
-                "setup_mode": payload.get("setup_mode", "new_setup"),
-                "rationale": ["mock pricing response"],
-            },
-            "margin": {"percent": 42},
-            "taxes": {"total_amount": 0},
-            "receipt": {
-                "receipt_id": f"receipt-{qty}",
-                "receipt_generated_at_utc": payload.get("request_timestamp_utc"),
-                "normalized_input_fingerprint": "mock-input",
-                "output_fingerprint": "mock-output",
-                "total_amount": total_amount,
-                "version_snapshot": {
-                    "pricing_authority_version": "mock-v1",
-                    "rate_table_version": "mock-v1",
-                    "screen_print_variant_table_version": "mock-v1",
-                    "method_decision_table_version": "mock-v1",
-                    "screen_print_rate_table_version": "mock-v1",
-                    "embroidery_rate_table_version": "mock-v1",
-                    "laser_etching_rate_table_version": "mock-v1",
-                    "transfers_rate_table_version": "mock-v1",
-                    "extras_rate_table_version": "mock-v1",
-                },
-            },
-            "turnaround_window": {"min_days": 7, "max_days": 9},
-            "confidence": {"level": "high", "score": 0.98},
-            "integration_handoff": {},
-            "burn_in_readiness": {"ready": True},
         }
 
         encoded = json.dumps(response).encode("utf-8")
@@ -175,11 +155,51 @@ ready_packet="$PACKETS_DIR/quote_packet_price-ready-warning.yaml"
 [[ "$(yq '.pricing_snapshot.pricing_state' "$ready_packet")" == "completed" ]] || fail "pricing state must be completed"
 [[ "$(yq '.pricing_snapshot.line_item_prices | length' "$ready_packet")" == "1" ]] || fail "completed pricing must persist one line_item_prices entry"
 [[ "$(yq '.pricing_snapshot.calculated_totals.total' "$ready_packet")" == "1219.68" ]] || fail "mock total must persist in calculated_totals"
+[[ "$(yq '.pricing_snapshot.line_item_prices[0].pricing_breakdown.wholesale_blank_unit' "$ready_packet")" == "4.25" ]] || fail "pricing breakdown must expose wholesale blank"
+[[ "$(yq '.pricing_snapshot.line_item_prices[0].pricing_breakdown.garment_markup_unit' "$ready_packet")" == "1.28" ]] || fail "pricing breakdown must expose garment markup"
+[[ "$(yq '.pricing_snapshot.line_item_prices[0].pricing_breakdown.imprint_unit' "$ready_packet")" == "11.41" ]] || fail "pricing breakdown must expose imprint unit"
+[[ "$(yq '.pricing_snapshot.line_item_prices[0].unit_price' "$ready_packet")" == "16.94" ]] || fail "customer unit price must reflect markup plus imprint"
+[[ "$(yq '.pricing_snapshot.decoration_prices[0].lane_prices | length' "$ready_packet")" == "2" ]] || fail "lane-matrix pricing must persist separate lane proofs"
+[[ "$(yq '.pricing_snapshot.decoration_prices[0].lane_prices[0].receipt_id' "$ready_packet")" == "receipt-72-front" ]] || fail "lane proof must persist the front receipt id"
 [[ "$(yq '.quote_draft_ref' "$ready_packet")" == "null" ]] || fail "stale quote_draft_ref must be cleared after pricing"
 [[ "$(yq '.customer_message_draft' "$ready_packet")" == "null" ]] || fail "review draft message must be cleared so render can regenerate it"
+[[ "$(yq '.quote_readiness.state' "$ready_packet")" == "quote_packet_in_progress" ]] || fail "priced packet should report in-progress send readiness before render"
+[[ "$(yq '.quote_readiness.build_basis' "$ready_packet")" == "exact_pricing_ready" ]] || fail "completed pricing must upgrade build basis to exact_pricing_ready"
+[[ "$(yq '.quote_readiness.next_step' "$ready_packet")" == "render_quote_review" ]] || fail "priced packet should point the next step at render"
 [[ "$(request_count)" == "1" ]] || fail "pricing service should be called exactly once for the ready packet"
+[[ "$(jq -r '.lanes | length' < "$REQUEST_LOG")" == "2" ]] || fail "lane-matrix request should split multi-location pricing into two lanes"
 grep -Fq "pricing_state: completed" <<<"$price_output" || fail "pricing output must report completion"
-pass "quote-price persists real pricing_snapshot evidence and invalidates stale drafts"
+pass "quote-price persists real lane-based pricing proof and invalidates stale drafts"
+
+section "Price honors services.health plus ssh fallback when PRICING_BASE_URL is unset"
+FALLBACK_SPINE="$TMP_ROOT/fallback-spine"
+mkdir -p "$FALLBACK_SPINE/ops/bindings"
+cat > "$FALLBACK_SPINE/ops/bindings/services.health.yaml" <<EOF
+endpoints:
+  - id: pricing-v2
+    host: mint-apps
+    url: http://192.0.2.10:${PORT}/health
+EOF
+cat > "$FALLBACK_SPINE/ops/bindings/ssh.targets.yaml" <<'EOF'
+ssh:
+  targets:
+    - id: mint-apps
+      host: 192.0.2.10
+      tailscale_ip: 127.0.0.1
+      access_policy: lan_first
+EOF
+cp "$FIXTURES_DIR/ready-warning-shipping.packet.yaml" "$PACKETS_DIR/quote_packet_price-ready-warning-fallback.yaml"
+fallback_price_output="$(
+  SPINE_ROOT="$FALLBACK_SPINE" \
+  PRICING_API_KEY="test-pricing-key" \
+  MINT_QUOTE_PACKETS_DIR="$PACKETS_DIR" \
+  MINT_QUOTE_PACKET_INDEX_FILE="$INDEX_FILE" \
+  "$QUOTE_PRICE" price-ready-warning-fallback
+)"
+fallback_packet="$PACKETS_DIR/quote_packet_price-ready-warning-fallback.yaml"
+[[ "$(yq '.pricing_snapshot.pricing_state' "$fallback_packet")" == "completed" ]] || fail "pricing fallback packet must complete through the resolved host"
+grep -Fq "pricing_state: completed" <<<"$fallback_price_output" || fail "pricing fallback output must report completion"
+pass "quote-price resolves the pricing service through the canonical services.health + ssh fallback path"
 
 section "Render can now promote the priced packet to ready_for_review"
 render_output="$(
@@ -188,6 +208,8 @@ render_output="$(
 )"
 [[ "$(yq '.state' "$ready_packet")" == "ready_for_review" ]] || fail "priced packet must become ready_for_review after render"
 [[ "$(yq '.quote_draft_ref.draft_type' "$ready_packet")" == "inline" ]] || fail "render must rebuild quote_draft_ref"
+[[ "$(yq '.quote_readiness.state' "$ready_packet")" == "ready_for_operator_review" ]] || fail "rendered packet should be ready for operator review"
+[[ "$(yq '.quote_readiness.next_step' "$ready_packet")" == "operator_review" ]] || fail "rendered packet should wait on operator review"
 grep -Fq -- "-> ready_for_review" <<<"$render_output" || fail "render output must report the transition to ready_for_review"
 pass "quote-render consumes the persisted pricing snapshot and moves the packet to review"
 

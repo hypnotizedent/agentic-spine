@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -24,7 +26,7 @@ from typing import Any
 import yaml
 
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(__file__).resolve().parents[5]
 RUNTIME_CONTRACT = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
 WORKER_CONTRACT = Path(
     os.environ.get("MAILROOM_TASK_WORKER_CONTRACT", str(ROOT / "ops/bindings/mailroom.task.worker.contract.yaml"))
@@ -61,21 +63,28 @@ def load_yaml(path: Path, default: Any) -> Any:
     return default if data is None else data
 
 
+def write_yaml(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+
 def resolve_runtime_paths() -> dict[str, Path]:
     contract = load_yaml(RUNTIME_CONTRACT, {})
-    runtime_active = bool(contract.get("active"))
-    runtime_root = str(contract.get("runtime_root", "")).strip()
+    mailroom_root = str(contract.get("mailroom_root", "")).strip()
+    state_root = str(contract.get("state_root", "")).strip()
+    logs_root = str(contract.get("logs_root", "")).strip()
 
     inbox = os.environ.get("SPINE_INBOX")
     outbox = os.environ.get("SPINE_OUTBOX")
     state = os.environ.get("SPINE_STATE")
     logs = os.environ.get("SPINE_LOGS")
 
-    if runtime_active and runtime_root:
-        inbox = inbox or f"{runtime_root}/inbox"
-        outbox = outbox or f"{runtime_root}/outbox"
-        state = state or f"{runtime_root}/state"
-        logs = logs or f"{runtime_root}/logs"
+    if mailroom_root:
+        inbox = inbox or f"{mailroom_root}/inbox"
+        outbox = outbox or f"{mailroom_root}/outbox"
+    if state_root:
+        state = state or state_root
+    if logs_root:
+        logs = logs or logs_root
 
     inbox = inbox or str(ROOT / "mailroom/inbox")
     outbox = outbox or str(ROOT / "mailroom/outbox")
@@ -123,8 +132,15 @@ def is_delimiter(line: str) -> bool:
 
 def extract_cap_output(stdout: str) -> str:
     lines = stdout.splitlines()
+    pre_ok_idx = -1
+    for i, raw in enumerate(lines):
+        if raw.strip() == "== PRECONDITIONS OK ==":
+            pre_ok_idx = i
+
     executing_idx = -1
     for i, raw in enumerate(lines):
+        if pre_ok_idx >= 0 and i <= pre_ok_idx:
+            continue
         if raw.strip().lower() == "executing...":
             executing_idx = i
             break
@@ -184,26 +200,71 @@ def extract_receipt_path(text: str) -> str:
     return ""
 
 
+def _ensure_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, bytearray):
+        return bytes(value).decode("utf-8", errors="replace")
+    return str(value or "")
+
+
+def _run_captured_command(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    input_text: str | None = None,
+    timeout: int = 900,
+) -> dict[str, Any]:
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd or ROOT),
+        env=env,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    timed_out = False
+    try:
+        stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = proc.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = proc.communicate()
+    return {
+        "ok": proc.returncode == 0 and not timed_out,
+        "exit_code": 124 if timed_out else proc.returncode,
+        "stdout": _ensure_text(stdout),
+        "stderr": _ensure_text(stderr),
+        "command": cmd,
+        "timed_out": timed_out,
+    }
+
+
 def run_ops_cap(capability: str, args: list[str], *, confirm: bool = False, timeout: int = 900) -> dict[str, Any]:
     cmd = [str(ROOT / "bin/ops"), "cap", "run", capability] + args
     stdin_text = "yes\n" if confirm else None
-    proc = subprocess.run(
-        cmd,
-        cwd=str(ROOT),
-        input=stdin_text,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=timeout,
-    )
-    stdout = proc.stdout or ""
-    stderr = proc.stderr or ""
+    result = _run_captured_command(cmd, cwd=ROOT, input_text=stdin_text, timeout=timeout)
+    stdout = result["stdout"]
+    stderr = result["stderr"]
     combined = f"{stdout}\n{stderr}".strip()
     out_block = extract_cap_output(stdout)
     payload = parse_first_json(out_block) if out_block else None
     return {
-        "ok": proc.returncode == 0,
-        "exit_code": proc.returncode,
+        "ok": result["ok"],
+        "exit_code": result["exit_code"],
         "stdout": stdout,
         "stderr": stderr,
         "output": out_block,
@@ -211,7 +272,18 @@ def run_ops_cap(capability: str, args: list[str], *, confirm: bool = False, time
         "run_key": extract_run_key(combined),
         "receipt": extract_receipt_path(combined),
         "command": cmd,
+        "timed_out": result["timed_out"],
     }
+
+
+def run_command(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    timeout: int = 900,
+) -> dict[str, Any]:
+    return _run_captured_command(cmd, cwd=cwd, env=env, timeout=timeout)
 
 
 def safe_reason(text: str, limit: int = 220) -> str:
@@ -219,6 +291,25 @@ def safe_reason(text: str, limit: int = 220) -> str:
     if len(clean) <= limit:
         return clean
     return clean[: limit - 3] + "..."
+
+
+def extract_blocker_reason(text: str) -> str:
+    clean = re.sub(r"\s+", " ", (text or "").strip())
+    if not clean:
+        return ""
+    patterns = (
+        r"(main_branch_mutation_block:[^\s]+)",
+        r"(role_policy_block:[^\s]+)",
+        r"(route_not_matched:[^\s]+)",
+        r"(unsupported_route_target:[^\s]+)",
+        r"(agent_health_preflight_failed)",
+        r"(strict agent health preflight failed)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, clean)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def parse_payload(raw: Any) -> dict[str, Any]:
@@ -303,9 +394,12 @@ class TaskWorker:
         self.contract = load_yaml(WORKER_CONTRACT, {})
         self.role_runtime_contract = load_yaml(ROLE_RUNTIME_CONTRACT, {})
         self.runtime_cfg = self.contract.get("runtime", {}) if isinstance(self.contract, dict) else {}
+        self.bootstrap_cfg = self.contract.get("bootstrap", {}) if isinstance(self.contract, dict) else {}
         self.cycle_cfg = self.contract.get("control_cycle", {}) if isinstance(self.contract, dict) else {}
         self.task_cfg = self.contract.get("task_execution", {}) if isinstance(self.contract, dict) else {}
         self.claim_cfg = self.task_cfg.get("claim_policy", {}) if isinstance(self.task_cfg, dict) else {}
+        self.claim_failure_cfg = self.task_cfg.get("claim_failure_policy", {}) if isinstance(self.task_cfg, dict) else {}
+        self.handoff_cfg = self.task_cfg.get("handoff_dispatch", {}) if isinstance(self.task_cfg, dict) else {}
 
         state_root = self.runtime_paths["state"]
         logs_root = self.runtime_paths["logs"]
@@ -326,6 +420,10 @@ class TaskWorker:
         self.claim_all = bool(self.claim_cfg.get("claim_all", True))
         self.claim_unassigned = bool(self.claim_cfg.get("claim_unassigned", True))
         self.allow_unhealthy_claims = bool(self.claim_cfg.get("allow_unhealthy_claims", False))
+        self.claim_failure_quarantine_after = max(
+            1,
+            int(self.claim_failure_cfg.get("quarantine_after_failures", 5)),
+        )
         self.execute_route_targets = {
             str(x).strip()
             for x in (self.task_cfg.get("execute_route_targets", []) if isinstance(self.task_cfg, dict) else [])
@@ -336,6 +434,35 @@ class TaskWorker:
             for x in (self.task_cfg.get("capability_allowlist", []) if isinstance(self.task_cfg, dict) else [])
             if str(x).strip()
         }
+        self.handoff_terminal_catalog = resolve_path(
+            ROOT,
+            str(self.handoff_cfg.get("terminal_catalog", "ops/bindings/terminal.worker.catalog.yaml")),
+        )
+        self.handoff_launch_role = str(self.handoff_cfg.get("launch_role", "solo")).strip() or "solo"
+        self.handoff_default_tool = str(self.handoff_cfg.get("default_tool", "codex")).strip() or "codex"
+        self.handoff_reconcile_capability = (
+            str(self.handoff_cfg.get("reconcile_capability", "session.handoff.task_reconcile")).strip()
+            or "session.handoff.task_reconcile"
+        )
+        self.handoff_launcher_command = self._normalize_command(
+            self.handoff_cfg.get("launcher_command", [str(ROOT / "bin/ops"), "terminal", "launch"])
+        )
+        self.handoff_target_resolution_timeout_seconds = max(
+            1,
+            int(self.handoff_cfg.get("target_resolution_timeout_seconds", 120)),
+        )
+        self.handoff_launch_timeout_seconds = max(
+            1,
+            int(self.handoff_cfg.get("launch_timeout_seconds", 180)),
+        )
+        self.handoff_accept_timeout_seconds = max(
+            1,
+            int(self.handoff_cfg.get("accept_timeout_seconds", 45)),
+        )
+        self.handoff_accept_poll_interval_seconds = max(
+            1,
+            int(self.handoff_cfg.get("accept_poll_interval_seconds", 1)),
+        )
         self.manual_caps_require_confirm = bool(self.task_cfg.get("manual_caps_require_confirm", True))
         auto_claim_cfg = (
             self.role_runtime_contract.get("horizon_auto_claim", {})
@@ -353,9 +480,47 @@ class TaskWorker:
         self.horizon_override_reason_field = str(
             auto_claim_cfg.get("override_reason_field", "horizon_override_reason")
         )
-        self.loop_scopes_dir = ROOT / "mailroom/state/loop-scopes"
+        self.loop_scopes_dir = state_root / "loop-scopes"
+        self.bootstrap_state = self._apply_bootstrap_env()
+        self.last_blocker_reason = ""
+        self.last_claim_failure_reason = ""
+        self.last_claim_failure_task_id = ""
 
         self._ensure_dirs()
+
+    def _bootstrap_entry(self, env_name: str, default: str, *, enabled: bool = True) -> dict[str, Any]:
+        existing = str(os.environ.get(env_name, "")).strip()
+        if existing:
+            return {"env": env_name, "value": existing, "source": "env"}
+        if enabled and default:
+            os.environ[env_name] = default
+            return {"env": env_name, "value": default, "source": "contract_default"}
+        return {"env": env_name, "value": "", "source": "unset"}
+
+    def _apply_bootstrap_env(self) -> dict[str, Any]:
+        governed_main_override = bool(self.bootstrap_cfg.get("governed_main_override", True))
+        terminal_role = str(self.bootstrap_cfg.get("terminal_role", "SPINE-CONTROL-01")).strip() or "SPINE-CONTROL-01"
+        runtime_role = str(self.bootstrap_cfg.get("runtime_role", "worker")).strip() or "worker"
+
+        data = {
+            "governed_main_override": self._bootstrap_entry(
+                "OPS_GOVERNED_MAIN_OVERRIDE",
+                "1",
+                enabled=governed_main_override,
+            ),
+            "terminal_role": self._bootstrap_entry("OPS_TERMINAL_ROLE", terminal_role),
+            "terminal_name": self._bootstrap_entry("SPINE_TERMINAL_NAME", terminal_role),
+            "runtime_role": self._bootstrap_entry("SPINE_RUNTIME_ROLE", runtime_role),
+        }
+        data["ready"] = all(
+            str(entry.get("value", "")).strip()
+            for entry in (
+                data["governed_main_override"],
+                data["terminal_role"],
+                data["runtime_role"],
+            )
+        )
+        return data
 
     def _ensure_dirs(self) -> None:
         self.pid_file.parent.mkdir(parents=True, exist_ok=True)
@@ -365,6 +530,23 @@ class TaskWorker:
         self.running_dir.mkdir(parents=True, exist_ok=True)
         self.done_dir.mkdir(parents=True, exist_ok=True)
         self.failed_dir.mkdir(parents=True, exist_ok=True)
+
+    def _normalize_command(self, raw: Any) -> list[str]:
+        items: list[str]
+        if isinstance(raw, list):
+            items = [str(item).strip() for item in raw if str(item).strip()]
+        elif isinstance(raw, str):
+            items = [part for part in shlex.split(raw) if part]
+        else:
+            items = []
+
+        if not items:
+            items = [str(ROOT / "bin/ops"), "terminal", "launch"]
+
+        first = items[0]
+        if "/" in first and not Path(first).is_absolute():
+            items[0] = str((ROOT / first).resolve())
+        return items
 
     def log(self, msg: str) -> None:
         line = f"[{utc_now()}] {msg}"
@@ -409,14 +591,17 @@ class TaskWorker:
         if cycle_timeout < 15:
             cycle_timeout = 15
         result = run_ops_cap("spine.control.cycle", args, confirm=True, timeout=cycle_timeout)
-        cycle_status = "ok" if result["ok"] else "failed"
+        blocker_reason = extract_blocker_reason(result.get("stderr") or "") or extract_blocker_reason(result.get("output") or "")
+        cycle_status = "ok" if result["ok"] else ("blocked" if blocker_reason else "failed")
         if result["ok"]:
+            self.last_blocker_reason = ""
             self.log(
                 "cycle: ok"
                 + (f" run_key={result['run_key']}" if result.get("run_key") else "")
                 + (f" receipt={result['receipt']}" if result.get("receipt") else "")
             )
         else:
+            self.last_blocker_reason = blocker_reason or safe_reason(result.get("stderr") or result.get("output") or "")
             self.log(f"cycle: failed rc={result['exit_code']} reason={safe_reason(result.get('stderr') or result.get('output') or '')}")
 
         return {
@@ -425,6 +610,55 @@ class TaskWorker:
             "run_key": result.get("run_key", ""),
             "receipt": result.get("receipt", ""),
             "exit_code": result.get("exit_code", 1),
+            "blocker_reason": blocker_reason or None,
+        }
+
+    def _record_claim_failure(self, task_id: str, path: Path, raw_reason: str) -> dict[str, Any]:
+        task = load_yaml(path, {})
+        if not isinstance(task, dict):
+            task = {"task_id": task_id}
+        now = utc_now()
+        reason = extract_blocker_reason(raw_reason) or safe_reason(raw_reason)
+        signature = hashlib.sha1(reason.encode("utf-8")).hexdigest()[:12]
+        previous_signature = str(task.get("claim_failure_signature", "")).strip()
+        previous_count = int(task.get("claim_failure_count", 0) or 0)
+        failure_count = previous_count + 1 if previous_signature == signature else 1
+
+        task["status"] = "queued"
+        task["claim_failure_count"] = failure_count
+        task["claim_failure_signature"] = signature
+        task["last_claim_failure_reason"] = reason
+        task["last_claim_failure_at"] = now
+        task["updated_at"] = now
+
+        self.last_claim_failure_reason = reason
+        self.last_claim_failure_task_id = task_id
+        blocker_reason = extract_blocker_reason(reason)
+        if blocker_reason:
+            self.last_blocker_reason = blocker_reason
+
+        if failure_count >= self.claim_failure_quarantine_after:
+            failed_path = self.failed_dir / path.name
+            task["status"] = "failed"
+            task["failure_reason"] = f"claim_quarantine:{reason}"
+            task["failed_at"] = now
+            if failed_path.exists():
+                failed_path.unlink()
+            path.replace(failed_path)
+            write_yaml(failed_path, task)
+            return {
+                "reason": reason,
+                "count": failure_count,
+                "quarantined": True,
+                "file": str(failed_path),
+            }
+
+        write_yaml(path, task)
+        return {
+            "reason": reason,
+            "count": failure_count,
+            "quarantined": False,
+            "file": str(path),
         }
 
     def _task_required_agents(self, task: dict[str, Any]) -> list[str]:
@@ -564,6 +798,188 @@ class TaskWorker:
             route_input = str(route_resolution.get("data", {}).get("input", "")).strip()
         return tool, route_input, route_resolution
 
+    def _extract_handoff_request(self, task: dict[str, Any]) -> dict[str, str]:
+        payload = parse_payload(task.get("payload"))
+        dispatch = payload.get("dispatch") if isinstance(payload.get("dispatch"), dict) else {}
+        payload_required_agents = payload.get("required_agents") if isinstance(payload.get("required_agents"), list) else []
+        task_required_agents = self._task_required_agents(task)
+        target_agent_id = _first_non_empty(
+            dispatch.get("target_agent_id"),
+            payload.get("target_agent_id"),
+            payload_required_agents[0] if payload_required_agents else "",
+            task_required_agents[0] if task_required_agents else "",
+        )
+        return {
+            "handoff_id": str(payload.get("handoff_id", "")).strip(),
+            "handoff_file": str(payload.get("handoff_file", "")).strip(),
+            "target_agent_id": target_agent_id,
+            "target_terminal_id": _first_non_empty(dispatch.get("target_terminal_id"), payload.get("target_terminal_id")),
+            "target_tool": _first_non_empty(dispatch.get("target_tool"), payload.get("target_tool")),
+        }
+
+    def _canonicalize_agent_id(self, raw_agent_id: str, active_workers: dict[str, dict[str, Any]]) -> str:
+        candidate = str(raw_agent_id).strip()
+        if not candidate:
+            return ""
+
+        exact_matches = {str(body.get("agent_id", "")).strip() for body in active_workers.values() if isinstance(body, dict)}
+        if candidate in exact_matches:
+            return candidate
+
+        lower_matches = {
+            str(body.get("agent_id", "")).strip().lower(): str(body.get("agent_id", "")).strip()
+            for body in active_workers.values()
+            if isinstance(body, dict) and str(body.get("agent_id", "")).strip()
+        }
+        if candidate.lower() in lower_matches:
+            return lower_matches[candidate.lower()]
+
+        route_script = ROOT / "ops/plugins/core/agent/bin/agent-route"
+        if not route_script.exists():
+            return ""
+
+        result = run_command(
+            [str(route_script), "--json", candidate],
+            cwd=ROOT,
+            timeout=self.handoff_target_resolution_timeout_seconds,
+        )
+        if not result["ok"]:
+            return ""
+        payload = parse_first_json(result.get("stdout", ""))
+        if not isinstance(payload, dict) or str(payload.get("status", "")).strip() != "matched":
+            return ""
+        return str(payload.get("data", {}).get("agent", {}).get("id", "")).strip()
+
+    def _resolve_handoff_target(self, request: dict[str, str]) -> tuple[bool, dict[str, str]]:
+        catalog = load_yaml(self.handoff_terminal_catalog, {})
+        workers = catalog.get("workers", {}) if isinstance(catalog, dict) else {}
+        active_workers = {
+            terminal_id: body
+            for terminal_id, body in workers.items()
+            if isinstance(body, dict) and str(body.get("status", "")).strip() == "active"
+        }
+
+        target_terminal_id = request.get("target_terminal_id", "").strip()
+        target_agent_hint = request.get("target_agent_id", "").strip()
+
+        if target_terminal_id:
+            terminal = active_workers.get(target_terminal_id)
+            if not isinstance(terminal, dict):
+                return False, {"reason": f"handoff_target_terminal_not_found:{target_terminal_id}"}
+            target_agent_id = str(terminal.get("agent_id", "")).strip()
+            canonical_hint = self._canonicalize_agent_id(target_agent_hint, active_workers) if target_agent_hint else ""
+            if canonical_hint and target_agent_id and canonical_hint != target_agent_id:
+                return False, {
+                    "reason": (
+                        f"handoff_target_mismatch:terminal={target_terminal_id} "
+                        f"agent_id={target_agent_id} expected={canonical_hint}"
+                    )
+                }
+        else:
+            canonical_agent_id = self._canonicalize_agent_id(target_agent_hint, active_workers)
+            if not canonical_agent_id:
+                return False, {"reason": f"handoff_target_agent_not_resolved:{target_agent_hint or 'missing'}"}
+            matches = [
+                (terminal_id, body)
+                for terminal_id, body in active_workers.items()
+                if str(body.get("agent_id", "")).strip() == canonical_agent_id
+            ]
+            if not matches:
+                return False, {"reason": f"handoff_target_terminal_not_found_for_agent:{canonical_agent_id}"}
+            if len(matches) > 1:
+                terminals = ",".join(sorted(terminal_id for terminal_id, _body in matches))
+                return False, {"reason": f"handoff_target_terminal_ambiguous:{canonical_agent_id}:{terminals}"}
+            target_terminal_id, terminal = matches[0]
+            target_agent_id = canonical_agent_id
+
+        target_tool = request.get("target_tool", "").strip() or str(terminal.get("default_tool", "")).strip() or self.handoff_default_tool
+        allowed_tools = [
+            str(item).strip()
+            for item in (terminal.get("allowed_tools", []) if isinstance(terminal.get("allowed_tools"), list) else [])
+            if str(item).strip()
+        ]
+        if allowed_tools and target_tool not in allowed_tools:
+            return False, {
+                "reason": (
+                    f"handoff_target_tool_not_allowed:terminal={target_terminal_id} "
+                    f"tool={target_tool} allowed={','.join(allowed_tools)}"
+                )
+            }
+
+        return True, {
+            "agent_id": target_agent_id,
+            "terminal_id": target_terminal_id,
+            "tool": target_tool,
+        }
+
+    def _handoff_file_path(self, request: dict[str, str]) -> Path | None:
+        raw = request.get("handoff_file", "").strip()
+        if not raw:
+            return None
+        path = Path(raw)
+        if not path.is_absolute():
+            path = ROOT / path
+        return path
+
+    def _load_handoff(self, request: dict[str, str]) -> tuple[Path | None, dict[str, Any] | None]:
+        handoff_file = self._handoff_file_path(request)
+        if handoff_file is None or not handoff_file.exists():
+            return handoff_file, None
+        handoff = load_yaml(handoff_file, {})
+        if not isinstance(handoff, dict):
+            return handoff_file, None
+        return handoff_file, handoff
+
+    def _update_handoff_dispatch(self, request: dict[str, str], *, status: str, detail: str, target: dict[str, str]) -> None:
+        handoff_file, handoff = self._load_handoff(request)
+        if handoff_file is None or handoff is None:
+            return
+
+        dispatch = handoff.get("dispatch")
+        if not isinstance(dispatch, dict):
+            dispatch = {}
+
+        now = utc_now()
+        prior_status = str(dispatch.get("status", "")).strip()
+        dispatch["worker_id"] = self.worker_id
+        dispatch["last_attempt_at_utc"] = now
+        if target.get("agent_id"):
+            dispatch["target_agent_id"] = target["agent_id"]
+        if target.get("terminal_id"):
+            dispatch["target_terminal_id"] = target["terminal_id"]
+        if target.get("tool"):
+            dispatch["target_tool"] = target["tool"]
+        if status == "launched":
+            if prior_status == "accepted":
+                dispatch["status"] = "accepted"
+            else:
+                dispatch["status"] = "launched"
+            dispatch.setdefault("dispatched_at_utc", now)
+            dispatch.pop("failed_at_utc", None)
+            dispatch.pop("last_error", None)
+        elif status == "accepted":
+            dispatch["status"] = "accepted"
+            dispatch["accepted_at_utc"] = now
+            dispatch.setdefault("dispatched_at_utc", now)
+            dispatch.pop("failed_at_utc", None)
+            dispatch.pop("last_error", None)
+        else:
+            dispatch["status"] = status
+            dispatch["failed_at_utc"] = now
+            dispatch["last_error"] = safe_reason(detail, limit=400)
+
+        handoff["dispatch"] = dispatch
+        write_yaml(handoff_file, handoff)
+
+    def _reconcile_handoff(self, handoff_id: str) -> tuple[bool, str]:
+        if not handoff_id:
+            return False, "missing_handoff_id"
+        run = run_ops_cap(self.handoff_reconcile_capability, ["--id", handoff_id, "--json"], confirm=False, timeout=180)
+        if run["ok"]:
+            return True, ""
+        detail = run.get("stderr") or run.get("output") or f"handoff_reconcile_failed rc={run.get('exit_code', 1)}"
+        return False, safe_reason(detail, limit=400)
+
     def _heartbeat(self, task_id: str, progress: str) -> None:
         run_ops_cap("mailroom.task.heartbeat", ["--task-id", task_id, "--progress", progress, "--json"], confirm=False, timeout=180)
 
@@ -572,6 +988,71 @@ class TaskWorker:
 
     def _fail(self, task_id: str, reason: str) -> None:
         run_ops_cap("mailroom.task.fail", ["--task-id", task_id, "--reason", safe_reason(reason), "--json"], confirm=False, timeout=180)
+
+    def _wait_for_handoff_accept(
+        self,
+        task_id: str,
+        request: dict[str, str],
+        target: dict[str, str],
+    ) -> tuple[bool, str]:
+        handoff_id = request.get("handoff_id", "").strip()
+        deadline = time.monotonic() + max(1, self.handoff_accept_timeout_seconds)
+        last_status = "missing"
+        last_error = ""
+        heartbeat_deadline = 0.0
+        target_terminal_id = target.get("terminal_id", "").strip()
+        while time.monotonic() <= deadline:
+            _handoff_path, handoff = self._load_handoff(request)
+            if handoff is None:
+                last_status = "handoff_file_missing"
+            else:
+                handoff_state = str(handoff.get("state", "")).strip()
+                dispatch = handoff.get("dispatch") if isinstance(handoff.get("dispatch"), dict) else {}
+                status = str(dispatch.get("status", "")).strip()
+                if status:
+                    last_status = status
+                last_error = safe_reason(str(dispatch.get("last_error", "")).strip(), limit=400)
+                if status == "accepted":
+                    accepted_terminal_id = str(dispatch.get("accepted_by_terminal_id", "")).strip()
+                    if accepted_terminal_id and target_terminal_id and accepted_terminal_id != target_terminal_id:
+                        return (
+                            False,
+                            (
+                                "handoff_accept_terminal_mismatch:"
+                                f"expected={target_terminal_id} actual={accepted_terminal_id}"
+                            ),
+                        )
+                    parts = [
+                        f"handoff_id={handoff_id}",
+                        f"target_agent_id={target['agent_id']}",
+                        f"target_terminal_id={target_terminal_id}",
+                        f"tool={target['tool']}",
+                        f"accepted_status={status}",
+                    ]
+                    accepted_session_id = str(dispatch.get("accepted_by_session_id", "")).strip()
+                    accepted_at = str(dispatch.get("accepted_at_utc", "")).strip()
+                    if accepted_session_id:
+                        parts.append(f"accepted_by_session_id={accepted_session_id}")
+                    if accepted_at:
+                        parts.append(f"accepted_at_utc={accepted_at}")
+                    return True, " ".join(parts)
+                if status == "failed":
+                    detail = last_error or "handoff_dispatch_failed"
+                    return False, f"handoff_dispatch_failed:{detail}"
+                if handoff_state in {"closed", "expired"}:
+                    return False, f"handoff_not_accepted_before_{handoff_state}"
+            now_monotonic = time.monotonic()
+            if now_monotonic >= deadline:
+                break
+            if now_monotonic >= heartbeat_deadline:
+                self._heartbeat(task_id, f"waiting for handoff_accept handoff={handoff_id} terminal={target_terminal_id}")
+                heartbeat_deadline = now_monotonic + 5.0
+            time.sleep(self.handoff_accept_poll_interval_seconds)
+        detail = f"handoff_accept_timeout:status={last_status}"
+        if last_error:
+            detail += f" error={last_error}"
+        detail += f" waited={self.handoff_accept_timeout_seconds}s"
+        return False, detail
 
     def _execute_capability_task(self, task_id: str, task: dict[str, Any]) -> tuple[bool, str]:
         capability, cap_args, payload_confirm = self._extract_capability_request(task)
@@ -638,6 +1119,64 @@ class TaskWorker:
             parts.append(f"receipt={receipt}")
         return True, " ".join(parts)
 
+    def _execute_handoff_task(self, task_id: str, task: dict[str, Any]) -> tuple[bool, str]:
+        request = self._extract_handoff_request(task)
+        handoff_id = request.get("handoff_id", "")
+        if not handoff_id:
+            return False, "handoff_id_missing"
+
+        ok_target, target = self._resolve_handoff_target(request)
+        if not ok_target:
+            reason = target.get("reason", "handoff_target_resolution_failed")
+            self._update_handoff_dispatch(request, status="failed", detail=reason, target={})
+            return False, reason
+
+        self._heartbeat(
+            task_id,
+            f"dispatching handoff={handoff_id} terminal={target['terminal_id']} agent={target['agent_id']}",
+        )
+        env = os.environ.copy()
+        env.update(
+            {
+                "SPINE_DISPATCH_HANDOFF_ID": handoff_id,
+                "SPINE_DISPATCH_HANDOFF_FILE": request.get("handoff_file", ""),
+                "SPINE_DISPATCH_TARGET_AGENT_ID": target["agent_id"],
+                "SPINE_DISPATCH_TARGET_TERMINAL_ID": target["terminal_id"],
+                "SPINE_DISPATCH_TARGET_TOOL": target["tool"],
+                "SPINE_DISPATCH_WORKER_ID": self.worker_id,
+            }
+        )
+        cmd = self.handoff_launcher_command + [
+            "--role",
+            self.handoff_launch_role,
+            "--tool",
+            target["tool"],
+            "--terminal",
+            target["terminal_id"],
+            "--handoff-id",
+            handoff_id,
+            "--handoff-file",
+            request.get("handoff_file", ""),
+        ]
+        launch = run_command(cmd, cwd=ROOT, env=env, timeout=self.handoff_launch_timeout_seconds)
+        if not launch["ok"]:
+            if launch.get("timed_out"):
+                detail = f"handoff_launch_timeout:{self.handoff_launch_timeout_seconds}s"
+            else:
+                detail = safe_reason(
+                    launch.get("stderr") or launch.get("stdout") or "handoff_launch_failed",
+                    limit=400,
+                )
+            self._update_handoff_dispatch(request, status="failed", detail=detail, target=target)
+            return False, f"handoff_launch_failed:{detail}"
+
+        self._update_handoff_dispatch(request, status="launched", detail=launch.get("stdout", ""), target=target)
+        accepted, detail = self._wait_for_handoff_accept(task_id, request, target)
+        if not accepted:
+            self._update_handoff_dispatch(request, status="failed", detail=detail, target=target)
+            return False, detail
+        return True, detail
+
     def consume_tasks_once(self) -> dict[str, Any]:
         if not bool(self.task_cfg.get("enabled", True)):
             return {"enabled": False, "claimed": 0, "completed": 0, "failed": 0, "skipped": 0}
@@ -651,6 +1190,7 @@ class TaskWorker:
         completed = 0
         failed = 0
         skipped = 0
+        quarantined = 0
 
         for path in files:
             if claimed >= max(1, self.max_claims_per_tick):
@@ -672,31 +1212,65 @@ class TaskWorker:
             claim = run_ops_cap("mailroom.task.claim", claim_args, confirm=False, timeout=240)
             if not claim["ok"]:
                 failed += 1
-                self.log(
-                    f"task {task_id}: claim failed reason={safe_reason(claim.get('stderr') or claim.get('output') or '')}"
-                )
+                claim_state = self._record_claim_failure(task_id, path, claim.get("stderr") or claim.get("output") or "")
+                if claim_state["quarantined"]:
+                    quarantined += 1
+                    self.log(
+                        f"task {task_id}: claim quarantined after {claim_state['count']} repeated failures "
+                        f"reason={safe_reason(claim_state['reason'])}"
+                    )
+                else:
+                    self.log(
+                        f"task {task_id}: claim failed count={claim_state['count']} "
+                        f"reason={safe_reason(claim_state['reason'])}"
+                    )
                 continue
 
             claimed += 1
             self._heartbeat(task_id, f"claimed by {self.worker_id}")
             route_target = str(task.get("route_target", "")).strip() or "capability"
 
-            if route_target == "capability":
-                ok_exec, detail = self._execute_capability_task(task_id, task)
-            elif route_target == "agent_tool":
-                ok_exec, detail = self._execute_agent_tool_task(task_id, task)
-            else:
-                self._fail(task_id, f"unsupported_route_target:{route_target}")
-                failed += 1
-                self.log(f"task {task_id}: failed unsupported route_target={route_target}")
-                continue
+            try:
+                if route_target == "capability":
+                    ok_exec, detail = self._execute_capability_task(task_id, task)
+                elif route_target == "agent_tool":
+                    ok_exec, detail = self._execute_agent_tool_task(task_id, task)
+                elif route_target == "handoff":
+                    ok_exec, detail = self._execute_handoff_task(task_id, task)
+                else:
+                    self._fail(task_id, f"unsupported_route_target:{route_target}")
+                    failed += 1
+                    self.log(f"task {task_id}: failed unsupported route_target={route_target}")
+                    continue
+            except Exception as exc:
+                detail = f"task_execution_exception:{safe_reason(str(exc), limit=400)}"
+                if route_target == "handoff":
+                    request = self._extract_handoff_request(task)
+                    self._update_handoff_dispatch(request, status="failed", detail=detail, target={})
+                ok_exec = False
 
             if ok_exec:
                 self._complete(task_id, detail)
+                if route_target == "handoff":
+                    handoff_id = self._extract_handoff_request(task).get("handoff_id", "")
+                    reconciled, reconcile_detail = self._reconcile_handoff(handoff_id)
+                    if not reconciled:
+                        self.log(
+                            f"task {task_id}: handoff reconcile warning "
+                            f"handoff_id={handoff_id or 'missing'} reason={safe_reason(reconcile_detail)}"
+                        )
                 completed += 1
                 self.log(f"task {task_id}: completed {detail}")
             else:
                 self._fail(task_id, detail)
+                if route_target == "handoff":
+                    handoff_id = self._extract_handoff_request(task).get("handoff_id", "")
+                    reconciled, reconcile_detail = self._reconcile_handoff(handoff_id)
+                    if not reconciled:
+                        self.log(
+                            f"task {task_id}: handoff reconcile warning "
+                            f"handoff_id={handoff_id or 'missing'} reason={safe_reason(reconcile_detail)}"
+                        )
                 failed += 1
                 self.log(f"task {task_id}: failed {safe_reason(detail)}")
 
@@ -706,12 +1280,34 @@ class TaskWorker:
             "completed": completed,
             "failed": failed,
             "skipped": skipped,
+            "quarantined": quarantined,
+            "claim_failure_quarantine_after": self.claim_failure_quarantine_after,
+            "last_claim_failure_reason": self.last_claim_failure_reason or None,
+            "last_claim_failure_task_id": self.last_claim_failure_task_id or None,
             "max_claims_per_tick": self.max_claims_per_tick,
         }
 
     def run_once(self) -> dict[str, Any]:
         # Keep task-lifecycle responsiveness even when control-cycle calls are slow.
-        tasks = self.consume_tasks_once()
+        try:
+            tasks = self.consume_tasks_once()
+        except Exception as exc:
+            detail = safe_reason(str(exc), limit=400)
+            self.log(f"tasks: failed {detail}")
+            tasks = {
+                "enabled": bool(self.task_cfg.get("enabled", True)),
+                "status": "failed",
+                "error": detail,
+                "claimed": 0,
+                "completed": 0,
+                "failed": 1,
+                "skipped": 0,
+                "quarantined": 0,
+                "claim_failure_quarantine_after": self.claim_failure_quarantine_after,
+                "last_claim_failure_reason": self.last_claim_failure_reason or None,
+                "last_claim_failure_task_id": self.last_claim_failure_task_id or None,
+                "max_claims_per_tick": self.max_claims_per_tick,
+            }
         try:
             cycle = self.run_cycle_once()
         except Exception as exc:
@@ -727,6 +1323,7 @@ class TaskWorker:
         payload = {
             "worker_id": self.worker_id,
             "poll_seconds": self.poll_seconds,
+            "bootstrap": self.bootstrap_state,
             "cycle": cycle,
             "tasks": tasks,
             "paths": {
@@ -738,6 +1335,7 @@ class TaskWorker:
                 "log_file": str(self.log_file),
                 "status_file": str(self.status_file),
             },
+            "last_blocker_reason": self.last_blocker_reason or None,
         }
         self.write_status(payload)
         return payload
@@ -798,24 +1396,44 @@ class TaskWorker:
         print(f"  log_file: {self.log_file}")
         print(f"  status_file: {self.status_file}")
         print(f"  queued_dir: {self.queued_dir}")
+        bootstrap = self.bootstrap_state
         if self.status_file.exists():
             try:
                 status_payload = json.loads(self.status_file.read_text(encoding="utf-8"))
                 generated_at = status_payload.get("generated_at", "")
                 data = status_payload.get("data", {})
+                bootstrap = data.get("bootstrap", {}) or bootstrap
                 tasks = data.get("tasks", {})
                 cycle = data.get("cycle", {})
                 print(f"  last_tick: {generated_at}")
                 print(f"  last_cycle_status: {cycle.get('status', '-')}")
+                if cycle.get("blocker_reason"):
+                    print(f"  last_cycle_blocker_reason: {cycle.get('blocker_reason')}")
                 print(
                     "  last_tasks: "
                     f"claimed={tasks.get('claimed', 0)} "
                     f"completed={tasks.get('completed', 0)} "
                     f"failed={tasks.get('failed', 0)} "
-                    f"skipped={tasks.get('skipped', 0)}"
+                    f"skipped={tasks.get('skipped', 0)} "
+                    f"quarantined={tasks.get('quarantined', 0)}"
                 )
+                if tasks.get("last_claim_failure_reason"):
+                    print(
+                        "  last_claim_failure: "
+                        f"{tasks.get('last_claim_failure_task_id', '-')} "
+                        f"{tasks.get('last_claim_failure_reason')}"
+                    )
             except Exception:
                 print("  last_tick: unreadable")
+        print(
+            "  bootstrap: "
+            f"override={bootstrap.get('governed_main_override', {}).get('value', '-')}"
+            f"[{bootstrap.get('governed_main_override', {}).get('source', '-')}] "
+            f"terminal={bootstrap.get('terminal_role', {}).get('value', '-')}"
+            f"[{bootstrap.get('terminal_role', {}).get('source', '-')}] "
+            f"runtime={bootstrap.get('runtime_role', {}).get('value', '-')}"
+            f"[{bootstrap.get('runtime_role', {}).get('source', '-')}]"
+        )
         return 0
 
     def stop(self) -> int:
@@ -906,11 +1524,21 @@ def main() -> int:
         subprocess.Popen(
             cmd,
             cwd=str(ROOT),
+            env=os.environ.copy(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        time.sleep(0.5)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if worker.pid_file.exists():
+                try:
+                    pid = int(worker.pid_file.read_text(encoding="utf-8").strip())
+                except Exception:
+                    pid = 0
+                if pid > 0 and pid_running(pid):
+                    break
+            time.sleep(0.1)
         return worker.status()
 
     # default path

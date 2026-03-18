@@ -1,0 +1,1278 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_identity_common import resolve_message_customer_contact  # noqa: E402
+from customer_mail_identity_common import first_name_token, projection_mode  # noqa: E402
+from customer_lane_pipeline_common import ensure_intake_record  # noqa: E402
+from customer_inbox_disposition_common import resolve_message_disposition  # noqa: E402
+from attachment_intelligence_common import (  # noqa: E402
+    normalize_space,
+    packet_safe_attachment_intelligence,
+    summarize_attachment_intelligence,
+)
+from inline_image_context_common import summarize_inline_image_context  # noqa: E402
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    compact_utc,
+    fail,
+    iso_utc,
+    message_body_text,
+    normalized_subject,
+    resolve_spine_root,
+    resolve_spine_state,
+    run_cap_capture,
+    write_json,
+    utc_now,
+)
+from quote_packet_normalize import compute_quote_readiness  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.customer.quote.intake"
+SCHEMA_VERSION = "1.3"
+DEFAULT_MAILBOX = "team@mintprints.com"
+CONTRACT_FALLBACK = "ops/bindings/mint.customer.quote.intake.contract.yaml"
+STYLE_CODE_TOKEN_RE = re.compile(r"\b[A-Z0-9-]{4,}\b")
+SECTION_SEPARATOR_RE = re.compile(r"\n\s*⸻\s*\n")
+SIZE_LINE_RE = re.compile(r"^(XS|S|M|L|XL|XXL|XXXL|2XL|3XL|4XL|5XL)\s*[–-]\s*(\d+)\s*$", flags=re.IGNORECASE)
+
+
+def resolve_code_root() -> Path:
+    return Path(__file__).resolve().parents[5]
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-quote-intake",
+        description=(
+            "Packetize a real Mint customer quote-request email into governed intake quality, "
+            "artwork readiness, supplier sourcing, and pricing-state truth."
+        ),
+    )
+    parser.add_argument("message_id", nargs="?", help="Mailbox message id")
+    parser.add_argument("--message-id", dest="message_id_flag", default="", help="Mailbox message id")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox to read from (default: {DEFAULT_MAILBOX})")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    args.message_id = str(args.message_id_flag or args.message_id or "").strip()
+    if not args.message_id:
+        fail("message_id required")
+    return args
+
+
+def resolve_contract(spine_root: Path) -> Path:
+    override = str(os.environ.get("MINT_CUSTOMER_QUOTE_INTAKE_CONTRACT") or "").strip()
+    if override:
+        path = Path(override).expanduser().resolve()
+    else:
+        path = (spine_root / CONTRACT_FALLBACK).resolve()
+    if not path.is_file():
+        fail(f"quote intake contract not found: {path}")
+    return path
+
+
+def load_contract(spine_root: Path) -> dict[str, Any]:
+    path = resolve_contract(spine_root)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    dependencies = dict(raw.get("dependencies") or {})
+    storage = dict(raw.get("storage") or {})
+    artwork = dict(raw.get("artwork_readiness_model") or {})
+    quality = dict(raw.get("intake_quality_model") or {})
+    product_scope = dict(raw.get("product_scope_model") or {})
+    readiness = dict(raw.get("quote_readiness_model") or {})
+    inline_image_context = dict(raw.get("inline_image_context_model") or {})
+    attachment_intelligence = dict(raw.get("attachment_intelligence_model") or {})
+    if not dependencies or not storage:
+        fail(f"quote intake contract missing dependencies/storage: {path}")
+    return {
+        "path": str(path),
+        "dependencies": dependencies,
+        "storage": storage,
+        "root_causes": dict(raw.get("root_causes") or {}),
+        "handoff_path": list(raw.get("handoff_path") or []),
+        "artwork_model": artwork,
+        "intake_quality_model": quality,
+        "product_scope_model": product_scope,
+        "quote_readiness_model": readiness,
+        "inline_image_context_model": inline_image_context,
+        "attachment_intelligence_model": attachment_intelligence,
+    }
+
+
+def unwrap_message(payload: dict[str, Any]) -> dict[str, Any]:
+    data = payload.get("data")
+    if isinstance(data, dict) and data.get("id"):
+        return data
+    return payload
+
+
+def run_cap_json(spine_root: Path, capability: str, args: list[str]) -> tuple[dict[str, Any], str]:
+    return run_cap_capture(spine_root, capability, args)
+
+
+def run_command_capture(spine_root: Path, command_path: str, args: list[str]) -> tuple[str, str]:
+    cmd = [str((resolve_code_root() / command_path).resolve()), *args]
+    result = subprocess.run(cmd, cwd=spine_root, capture_output=True, text=True, check=False)
+    combined = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    if result.returncode != 0:
+        fail(f"{Path(command_path).name} failed: {combined.strip()}")
+    return result.stdout or "", ""
+
+
+def output_value(text: str, label: str) -> str:
+    match = re.search(rf"^{re.escape(label)}:\s*(.+)$", text, flags=re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def packet_id_for_message(message_id: str) -> str:
+    digest = hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:12]
+    return f"mqi-{digest}"
+
+
+def extract_active_customer_block(body_text: str) -> str:
+    text = str(body_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    header_match = re.search(r"(?is)^\s*From:\s.*?\bSubject:\s.*?(?:\n|$)\s*", text)
+    candidate = text[header_match.end() :].strip() if header_match else text
+    for pattern in (
+        r"(?i)\bFrom:\s+Mint Prints Team\b",
+        r"(?im)^\s*On .+ wrote:\s*$",
+        r"(?im)-{2,}\s*Original Message\s*-{2,}",
+        r"(?i)\bSent:\s+",
+    ):
+        match = re.search(pattern, candidate)
+        if match:
+            candidate = candidate[: match.start()].strip()
+            break
+    return re.sub(r"\n{3,}", "\n\n", candidate).strip()
+
+
+def normalize_size_token(size: str) -> str:
+    token = str(size or "").strip().upper()
+    mapping = {"XXL": "2XL", "XXXL": "3XL"}
+    return mapping.get(token, token)
+
+
+def maybe_style_code(text: str) -> str:
+    for token in STYLE_CODE_TOKEN_RE.findall(str(text or "").upper()):
+        if not re.search(r"[A-Z]", token):
+            continue
+        if not re.search(r"\d", token):
+            continue
+        if token in {"2XL", "3XL", "4XL", "5XL"}:
+            continue
+        return token
+    return ""
+
+
+def product_family(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    direct = {
+        "business card": "business_card",
+        "business cards": "business_card",
+        "magnet": "magnet",
+        "magnets": "magnet",
+        "sticker": "sticker",
+        "stickers": "sticker",
+        "label": "label",
+        "labels": "label",
+        "banner": "banner",
+        "banners": "banner",
+        "signage": "signage",
+        "vinyl": "vinyl_signage",
+        "decal": "decal",
+        "decals": "decal",
+        "shirt": "t-shirt",
+        "shirts": "t-shirt",
+        "tee": "t-shirt",
+        "t-shirt": "t-shirt",
+        "t": "t-shirt",
+        "v-neck": "t-shirt",
+        "v neck": "t-shirt",
+        "long sleeve": "long-sleeve",
+        "long-sleeve": "long-sleeve",
+        "spf": "long-sleeve",
+        "polo": "polo",
+        "hat": "hat",
+    }
+    for needle, canonical in direct.items():
+        if needle in text:
+            return canonical
+    return "t-shirt"
+
+
+def normalize_scope_text(value: str) -> str:
+    text = str(value or "").strip().lower().replace("_", " ")
+    return re.sub(r"\s+", " ", text)
+
+
+def marker_hits(text: str, markers: list[str]) -> list[str]:
+    normalized = normalize_scope_text(text)
+    hits: list[str] = []
+    for marker in markers:
+        needle = normalize_scope_text(marker)
+        if not needle:
+            continue
+        pattern = rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])"
+        if re.search(pattern, normalized):
+            hits.append(needle)
+    return sorted(dict.fromkeys(hits))
+
+
+def classify_product_scope(
+    *,
+    body_text: str,
+    line_items: list[dict[str, Any]],
+    contract: dict[str, Any],
+) -> dict[str, Any]:
+    model = dict(contract.get("product_scope_model") or {})
+    scope_parts = [body_text]
+    for item in line_items:
+        for key in ("product_type", "description", "brand", "operator_notes"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                scope_parts.append(value)
+    scope_text = "\n".join(scope_parts)
+    in_scope_hits = marker_hits(scope_text, list(model.get("in_scope_markers") or []))
+
+    out_of_scope_categories = dict(model.get("out_of_scope_categories") or {})
+    best_category = ""
+    best_hits: list[str] = []
+    best_summary = ""
+    for category, raw_config in out_of_scope_categories.items():
+        config = dict(raw_config or {})
+        hits = marker_hits(scope_text, list(config.get("markers") or []))
+        if len(hits) > len(best_hits):
+            best_category = str(category).strip()
+            best_hits = hits
+            best_summary = str(config.get("customer_summary") or "").strip()
+
+    if best_hits and in_scope_hits:
+        mixed_summary = str(model.get("mixed_scope_customer_summary") or "").strip()
+        return {
+            "classification": "mixed_scope",
+            "category": best_category,
+            "basis": [f"out_of_scope_markers:{', '.join(best_hits)}", f"in_scope_markers:{', '.join(in_scope_hits)}"],
+            "matched_in_scope_markers": in_scope_hits,
+            "matched_out_of_scope_markers": best_hits,
+            "customer_summary": mixed_summary,
+        }
+    if best_hits:
+        return {
+            "classification": "out_of_scope",
+            "category": best_category,
+            "basis": [f"out_of_scope_markers:{', '.join(best_hits)}"],
+            "matched_in_scope_markers": [],
+            "matched_out_of_scope_markers": best_hits,
+            "customer_summary": best_summary,
+        }
+    if line_items or in_scope_hits:
+        return {
+            "classification": "in_scope",
+            "category": "",
+            "basis": [f"in_scope_markers:{', '.join(in_scope_hits)}"] if in_scope_hits else ["parsed_in_scope_line_items"],
+            "matched_in_scope_markers": in_scope_hits,
+            "matched_out_of_scope_markers": [],
+            "customer_summary": "",
+        }
+    return {
+        "classification": "unknown",
+        "category": "",
+        "basis": ["no_scope_markers_detected"],
+        "matched_in_scope_markers": [],
+        "matched_out_of_scope_markers": [],
+        "customer_summary": "",
+    }
+
+
+def canonical_location(value: str) -> str:
+    lowered = str(value or "").strip().lower()
+    if "full back" in lowered or lowered == "back":
+        return "back"
+    if "front chest" in lowered or "left chest" in lowered or lowered == "front":
+        return "front"
+    if "sleeve" in lowered:
+        return "sleeve"
+    return lowered.replace(" ", "-")
+
+
+def parse_list_section(block: str, header: str, stop_headers: tuple[str, ...]) -> list[str]:
+    lines = [line.strip() for line in block.splitlines()]
+    values: list[str] = []
+    capture = False
+    for line in lines:
+        if not line:
+            continue
+        lowered = line.lower()
+        if lowered.startswith(f"{header.lower()}:"):
+            capture = True
+            continue
+        if capture and any(lowered.startswith(f"{stop.lower()}:") for stop in stop_headers):
+            break
+        if capture and (line.startswith("•") or line.startswith("-")):
+            values.append(line.lstrip("•- ").strip())
+    return values
+
+
+def parse_size_breakdown(block: str) -> dict[str, int]:
+    lines = [line.strip() for line in block.splitlines()]
+    values: dict[str, int] = {}
+    capture = False
+    for line in lines:
+        lowered = line.lower()
+        if lowered.startswith("size breakdown:"):
+            capture = True
+            continue
+        if capture and re.match(r"^(blank|color|design|print locations|quantity):", lowered):
+            break
+        if not capture:
+            continue
+        match = SIZE_LINE_RE.match(line)
+        if not match:
+            continue
+        values[normalize_size_token(match.group(1))] = int(match.group(2))
+    return values
+
+
+def parse_field(block: str, label: str) -> str:
+    match = re.search(rf"(?im)^{re.escape(label)}:\s*(.+)$", block)
+    return match.group(1).strip() if match else ""
+
+
+def parse_line_item_block(block: str) -> dict[str, Any] | None:
+    text = str(block or "").strip()
+    if not text or "blank:" not in text.lower():
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    blank = parse_field(text, "Blank")
+    blank_index = next((idx for idx, line in enumerate(lines) if line.lower().startswith("blank:")), -1)
+    title = lines[blank_index - 1] if blank_index > 0 else lines[0]
+    color = parse_field(text, "Color")
+    quantity_text = parse_field(text, "Quantity")
+    quantity = int(quantity_text) if quantity_text.isdigit() else None
+    size_breakdown = parse_size_breakdown(text)
+    if quantity is None and size_breakdown:
+        quantity = sum(size_breakdown.values())
+    print_locations = [canonical_location(item) for item in parse_list_section(text, "Print Locations", ("Quantity", "Size Breakdown"))]
+    design_notes = parse_list_section(text, "Design", ("Print Locations", "Quantity", "Size Breakdown"))
+    product_text = f"{title} {blank}"
+    line_item: dict[str, Any] = {
+        "product_type": product_family(product_text),
+        "description": title,
+        "style_code": maybe_style_code(blank),
+        "brand": blank.split(maybe_style_code(blank))[0].strip(" -()") if maybe_style_code(blank) and maybe_style_code(blank) in blank else blank,
+        "color": color,
+        "quantity": quantity,
+        "size_breakdown": size_breakdown,
+        "decoration_method": "screen_print" if print_locations else "",
+        "print_locations": print_locations,
+    }
+    notes: list[str] = []
+    if blank:
+        notes.append(f"Blank: {blank}")
+    if design_notes:
+        notes.append("Design: " + " | ".join(design_notes))
+    if notes:
+        line_item["operator_notes"] = " ".join(notes)
+    cleaned = {key: value for key, value in line_item.items() if value not in ("", None, {}, [])}
+    return cleaned if cleaned.get("product_type") else None
+
+
+def parse_line_items(body_text: str) -> list[dict[str, Any]]:
+    blocks = [block.strip() for block in SECTION_SEPARATOR_RE.split(body_text) if block.strip()]
+    items: list[dict[str, Any]] = []
+    for block in blocks:
+        item = parse_line_item_block(block)
+        if item:
+            items.append(item)
+    if items:
+        return items
+    fallback = parse_line_item_block(body_text)
+    return [fallback] if fallback else []
+
+
+def attachment_extension(name: str) -> str:
+    return Path(str(name or "")).suffix.lower().lstrip(".")
+
+
+def classify_artwork_readiness(
+    attachments: list[dict[str, Any]],
+    body_text: str,
+    contract: dict[str, Any],
+    line_item_count: int,
+) -> dict[str, Any]:
+    artwork_model = contract["artwork_model"]
+    print_ready_exts = {str(item).lower() for item in (artwork_model.get("print_ready_extensions") or [])}
+    mockup_exts = {str(item).lower() for item in (artwork_model.get("mockup_extensions") or [])}
+    inline_count = 0
+    print_ready_count = 0
+    mockup_count = 0
+    classified: list[dict[str, Any]] = []
+
+    for row in attachments:
+        name = str(row.get("name") or "").strip()
+        ext = attachment_extension(name)
+        is_inline = bool(row.get("isInline"))
+        classification = "insufficient_low_confidence"
+        if is_inline:
+            classification = "mockup_reference"
+            inline_count += 1
+        elif ext in print_ready_exts:
+            classification = "print_ready_artwork"
+            print_ready_count += 1
+        elif ext in mockup_exts:
+            classification = "mockup_reference"
+            mockup_count += 1
+        classified.append(
+            {
+                "name": name,
+                "content_type": row.get("contentType"),
+                "size": row.get("size"),
+                "is_inline": is_inline,
+                "classification": classification,
+            }
+        )
+
+    if print_ready_count:
+        label = "print_ready_artwork"
+        basis = [f"{print_ready_count} production-usable attachment(s) found"]
+        confidence = "high"
+    elif classified:
+        label = "mockup_reference"
+        basis = [f"{len(classified)} attachment(s) found but all are inline or preview-style imagery"]
+        confidence = "medium"
+    elif "attached" in body_text.lower() or "mockup" in body_text.lower():
+        label = "insufficient_low_confidence"
+        basis = ["message references attachments, but no concrete governed artwork attachment metadata was available"]
+        confidence = "low"
+    else:
+        label = "insufficient_low_confidence"
+        basis = ["no concrete attachment evidence was available"]
+        confidence = "low"
+
+    refs: list[dict[str, Any]] = []
+    for index in range(max(line_item_count, 1)):
+        if label == "print_ready_artwork":
+            refs.append(
+                {
+                    "line_item_id": None,
+                    "artifact_state": "received",
+                    "binding_state": "mapped",
+                    "summary": "Production-usable attachment evidence detected in customer email.",
+                    "vector_ready": True,
+                }
+            )
+        elif label == "mockup_reference":
+            refs.append(
+                {
+                    "line_item_id": None,
+                    "artifact_state": "low_quality",
+                    "binding_state": "mapped",
+                    "summary": "Inline/mockup imagery is available, but governed print-ready artwork is not explicit yet.",
+                    "proof_adequate": False,
+                }
+            )
+        else:
+            refs.append(
+                {
+                    "line_item_id": None,
+                    "artifact_state": "missing",
+                    "binding_state": "unmapped",
+                    "summary": "No governed artwork attachment evidence is available yet.",
+                    "proof_adequate": False,
+                }
+            )
+
+    return {
+        "classification": label,
+        "confidence": confidence,
+        "basis": basis,
+        "attachment_counts": {
+            "total": len(classified),
+            "inline": inline_count,
+            "print_ready": print_ready_count,
+            "mockup_reference": mockup_count or inline_count,
+        },
+        "attachments": classified,
+        "artwork_refs": refs,
+    }
+
+
+def classify_intake_quality(
+    *,
+    line_items: list[dict[str, Any]],
+    artwork_readiness: dict[str, Any],
+    snapshot_data: dict[str, Any],
+    contract: dict[str, Any],
+) -> dict[str, Any]:
+    required = set(contract["intake_quality_model"].get("required_signals_for_ideal") or [])
+    total = len(line_items)
+    style_complete = total > 0 and all(str(item.get("style_code") or "").strip() for item in line_items)
+    quantity_complete = total > 0 and all(int(item.get("quantity") or 0) > 0 for item in line_items)
+    size_complete = total > 0 and all(bool(item.get("size_breakdown")) for item in line_items)
+    locations_complete = total > 0 and all(bool(item.get("print_locations")) for item in line_items)
+    signals = {
+        "parsed_line_items": total > 0,
+        "style_codes_complete": style_complete,
+        "quantities_complete": quantity_complete,
+        "size_breakdowns_complete": size_complete,
+        "print_locations_complete": locations_complete,
+        "artwork_evidence_present": artwork_readiness["classification"] != "insufficient_low_confidence",
+        "existing_customer": bool(((snapshot_data.get("fresh_slate") or {}).get("customer")) or ((snapshot_data.get("legacy_hold") or {}).get("orders"))),
+    }
+    matched_required = sorted(signal for signal in required if signals.get(signal))
+    missing_required = sorted(signal for signal in required if not signals.get(signal))
+    if not signals["parsed_line_items"] or len(missing_required) >= 4:
+        label = "headache"
+    elif not missing_required:
+        label = "ideal"
+    else:
+        label = "workable"
+    classes = dict((contract["intake_quality_model"].get("classes") or {}))
+    selected = dict(classes.get(label) or {})
+    basis = matched_required or ["structured line-item parse incomplete"]
+    if missing_required:
+        basis.append("missing: " + ", ".join(missing_required))
+    return {
+        "classification": label,
+        "basis": basis,
+        "operator_behavior": selected.get("operator_behavior") or "",
+        "customer_reply_mode": selected.get("customer_reply_mode") or "",
+        "signals": signals,
+    }
+
+
+def customer_ref_from_snapshot(
+    snapshot_data: dict[str, Any],
+    customer_email: str,
+    customer_name: str,
+    company: str,
+    *,
+    contact_name: str = "",
+    greeting_name: str = "",
+) -> dict[str, Any]:
+    customer = dict(((snapshot_data.get("fresh_slate") or {}).get("customer")) or {})
+    identity = dict(((snapshot_data.get("fresh_slate") or {}).get("identity")) or {})
+    record_id = str(customer.get("record_id") or "").strip()
+    resolved_name = str(customer.get("company") or company or customer_name or customer.get("name") or "").strip()
+    projected_contact_name = str(contact_name or identity.get("legal_name") or customer.get("name") or "").strip()
+    projected_greeting_name = str(greeting_name or identity.get("greeting_name") or identity.get("preferred_name") or "").strip()
+    salutation_mode = projection_mode(projected_contact_name, projected_greeting_name)
+    if record_id:
+        return {
+            "identity_state": "resolved",
+            "customer_id": record_id,
+            "customer_query": " / ".join(part for part in (customer_name, company, customer_email) if part),
+            "resolved_name": resolved_name,
+            "resolved_email": customer_email or customer.get("email") or "",
+            "contact_name": projected_contact_name or None,
+            "greeting_name": projected_greeting_name or None,
+            "mail_salutation_mode": salutation_mode,
+        }
+    return {
+        "identity_state": "provisional",
+        "customer_query": " / ".join(part for part in (customer_name, company, customer_email) if part),
+        "resolved_name": resolved_name or customer_name,
+        "resolved_email": customer_email,
+        "contact_name": projected_contact_name or None,
+        "greeting_name": projected_greeting_name or None,
+        "mail_salutation_mode": salutation_mode,
+    }
+
+
+def source_refs_for_message(message: dict[str, Any], seed_id: str, latest_order: dict[str, Any]) -> list[dict[str, Any]]:
+    refs = [
+        {
+            "seed_id": seed_id,
+            "intake_channel": "email",
+            "source_timestamp": str(message.get("receivedDateTime") or ""),
+            "ref_type": "email",
+            "source_locator": f"message:{message.get('id')}",
+            "summary": normalized_subject(str(message.get("subject") or "")),
+            "artifact_state": "received",
+        }
+    ]
+    invoice = str(latest_order.get("invoice_number") or "").strip()
+    nickname = str(latest_order.get("nickname") or "").strip()
+    if invoice:
+        refs.append(
+            {
+                "intake_channel": "history",
+                "source_timestamp": str(latest_order.get("created_at") or ""),
+                "ref_type": "historical_quote",
+                "source_locator": f"legacy_order:{invoice}",
+                "summary": f"Latest governed history anchor: order {invoice} {nickname}".strip(),
+                "artifact_state": "derived",
+            }
+        )
+    return refs
+
+
+def build_evidence_payload(
+    *,
+    message: dict[str, Any],
+    seed_id: str,
+    snapshot_data: dict[str, Any],
+    customer_email: str,
+    customer_name: str,
+    company: str,
+    contact_name: str,
+    greeting_name: str,
+    line_items: list[dict[str, Any]],
+    artwork_readiness: dict[str, Any],
+    attachment_intelligence: dict[str, Any],
+) -> dict[str, Any]:
+    latest_order = dict(((snapshot_data.get("legacy_hold") or {}).get("latest_order")) or {})
+    qualification_hold = "approval pending" in message_body_text(message).lower()
+    operator_notes = [
+        "Customer-lane ideal-order intake created from governed mailbox message.",
+        f"Artwork readiness: {artwork_readiness['classification']}.",
+    ]
+    if normalize_space(attachment_intelligence.get("summary") or ""):
+        operator_notes.append(f"Artie preflight: {attachment_intelligence['summary']}")
+    if qualification_hold:
+        operator_notes.append("Customer noted some designs are still awaiting final approval; keep quote work mutable.")
+    return {
+        "source_channel": "email",
+        "seed_id": seed_id,
+        "customer_ref": customer_ref_from_snapshot(
+            snapshot_data,
+            customer_email,
+            customer_name,
+            company,
+            contact_name=contact_name,
+            greeting_name=greeting_name,
+        ),
+        "raw_summary": message_body_text(message),
+        "source_refs": source_refs_for_message(message, seed_id, latest_order),
+        "historical_refs": source_refs_for_message(message, seed_id, latest_order)[1:],
+        "line_items": line_items,
+        "artwork_refs": artwork_readiness["artwork_refs"],
+        "artwork_summary": "; ".join(artwork_readiness["basis"]),
+        "artwork_analysis": packet_safe_attachment_intelligence(attachment_intelligence),
+        "operator_notes": " ".join(operator_notes),
+    }
+
+
+def combine_module_states(*states: str) -> str:
+    ordered = [str(item or "").strip() for item in states if str(item or "").strip()]
+    if not ordered:
+        return "not_attempted"
+    for candidate in ("captured", "completed", "analysis_failed", "download_failed", "skipped_all_too_large", "skipped_no_supported_attachments", "skipped_no_inline_images", "disabled"):
+        if candidate in ordered:
+            return candidate
+    return ordered[0]
+
+
+def qualification_status(line_items: list[dict[str, Any]], intake_quality: dict[str, Any], product_scope: dict[str, Any]) -> str:
+    scope_classification = str(product_scope.get("classification") or "").strip()
+    if scope_classification == "out_of_scope":
+        return "out_of_scope_not_supported"
+    if scope_classification == "mixed_scope":
+        return "mixed_scope_requires_split"
+    if intake_quality["classification"] == "headache":
+        return "headache_operator_burden"
+    customer_blockers = []
+    for item in line_items:
+        if not str(item.get("style_code") or "").strip():
+            customer_blockers.append("style_code")
+        if not int(item.get("quantity") or 0):
+            customer_blockers.append("quantity")
+        if not item.get("size_breakdown"):
+            customer_blockers.append("size_breakdown")
+        if not item.get("print_locations"):
+            customer_blockers.append("print_locations")
+    return "qualified_enough_to_quote" if not customer_blockers else "needs_clarification"
+
+
+def customer_safe_blockers(
+    *,
+    line_items: list[dict[str, Any]],
+    estimate_snapshot: dict[str, Any],
+) -> list[str]:
+    blockers: list[str] = []
+    for entry in (estimate_snapshot.get("line_item_estimates") or []):
+        for item in (entry.get("missing_clarifications") or []):
+            cleaned = normalize_space(item)
+            if not cleaned or "?" not in cleaned:
+                continue
+            if cleaned not in blockers:
+                blockers.append(cleaned)
+    if blockers:
+        return blockers
+
+    if any(not str(item.get("style_code") or "").strip() for item in line_items):
+        blockers.append("Can you confirm the blank/style?")
+    if any(not int(item.get("quantity") or 0) for item in line_items):
+        blockers.append("Can you confirm the quantity?")
+    if any(not item.get("size_breakdown") for item in line_items):
+        blockers.append("Can you send the size breakdown?")
+    if any(not item.get("print_locations") for item in line_items):
+        blockers.append("Can you confirm the print locations?")
+    return blockers
+
+
+def customer_reply_guidance(
+    *,
+    customer_name: str,
+    intake_quality: dict[str, Any],
+    artwork_readiness: dict[str, Any],
+    product_scope: dict[str, Any],
+    blockers: list[str],
+) -> dict[str, Any]:
+    salutation = customer_name or "there"
+    scope_classification = str(product_scope.get("classification") or "").strip()
+    scope_summary = str(product_scope.get("customer_summary") or "").strip()
+    if scope_classification in {"out_of_scope", "mixed_scope"}:
+        lines = [
+            f"Hi {salutation},",
+            "",
+            "I want to be straight with you about the cleanest lane we can actually support.",
+        ]
+        if scope_summary:
+            lines.extend(["", scope_summary[0].upper() + scope_summary[1:] + ("" if scope_summary.endswith(".") else ".")])
+        lines.extend(
+            [
+                "",
+                "We specialize in apparel printing, so I do not want to point you into a production lane we are not set up to handle cleanly.",
+                "",
+                "If you want to simplify this into an apparel job, send the garment, quantity, and artwork scope and I can tell you the cleanest version we can actually support.",
+            ]
+        )
+        return {
+            "mode": "not_a_fit",
+            "summary": scope_summary or "This request sits outside Mint's apparel lane.",
+            "blockers": [],
+            "body_preview": "\n".join(lines),
+        }
+    if intake_quality["classification"] == "ideal":
+        if artwork_readiness["classification"] == "mockup_reference":
+            body = (
+                f"Hi {salutation},\n\n"
+                "I have enough to start the quote from what you sent over. I’ve got the garment specs, quantities, size runs, and placement notes, and I’m running the blank sourcing and pricing pass now.\n\n"
+                "I can see the mockups/reference images in the thread, so I do not need you to re-send the order details. If we hit one real artwork blocker before proof or production, I’ll call out that exact file need.\n\n"
+                "I’ll follow up with the quote or the single blocker."
+            )
+            return {
+                "mode": "acknowledge_and_process",
+                "summary": "Acknowledge the organized order, keep it moving internally, and avoid generic artwork re-asks.",
+                "blockers": [],
+                "body_preview": body,
+            }
+        body = (
+            f"Hi {salutation},\n\n"
+            "I have enough to start the quote from what you sent over, and I’m moving through the blank sourcing and pricing pass now.\n\n"
+            "I’ll follow up with the quote or the single blocker if anything real still needs confirmation."
+        )
+        return {
+            "mode": "acknowledge_and_process",
+            "summary": "Acknowledge the organized order and keep the quote moving internally.",
+            "blockers": [],
+            "body_preview": body,
+        }
+    if intake_quality["classification"] == "workable":
+        preview_lines = [
+            f"Hi {salutation},",
+            "",
+            "I only need one last detail to lock the quote in cleanly.",
+        ]
+        if blockers:
+            preview_lines.extend(["", blockers[0]])
+        return {
+            "mode": "ask_targeted_blocker_only",
+            "summary": "Ask only for the smallest missing structured blocker.",
+            "blockers": blockers,
+            "body_preview": "\n".join(preview_lines).strip(),
+        }
+    body = (
+        f"Hi {salutation},\n\n"
+        "I need the core product, quantity, and artwork scope in writing before I can start the quote cleanly.\n\n"
+        "Once I have that, I can build the packet and keep it moving."
+    )
+    return {
+        "mode": "request_core_scope_first",
+        "summary": "Keep the request out of the deeper quote lane until the core scope exists.",
+        "blockers": [],
+        "body_preview": body,
+    }
+
+
+def packet_root(spine_root: Path, contract: dict[str, Any]) -> Path:
+    return (spine_root / contract["storage"]["packet_root"]).resolve()
+
+
+def packet_index_file(spine_root: Path, contract: dict[str, Any]) -> Path:
+    return (spine_root / contract["storage"]["packet_index_file"]).resolve()
+
+
+def read_packet(packet_file: str) -> dict[str, Any]:
+    path = Path(packet_file)
+    if not path.is_file():
+        fail(f"packet file missing: {path}")
+    if path.suffix.lower() == ".json":
+        return json.loads(path.read_text(encoding="utf-8"))
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def format_money(value: Any) -> str:
+    try:
+        return f"${float(value):.2f}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def build_pricing_surface(packet: dict[str, Any], estimate_surface: dict[str, Any], pricing_state: str) -> dict[str, Any]:
+    pricing_snapshot = dict(packet.get("pricing_snapshot") or {})
+    estimate_snapshot = dict(packet.get("estimate_snapshot") or {})
+    exact_prices = list(pricing_snapshot.get("line_item_prices") or [])
+    estimate_entries = list(estimate_surface.get("line_item_estimates") or estimate_snapshot.get("line_item_estimates") or [])
+    decoration_prices = list(pricing_snapshot.get("decoration_prices") or [])
+    exact_values = [float(item["unit_price"]) for item in exact_prices if item.get("unit_price") not in (None, "")]
+    estimated_values = [
+        float(item["estimated_unit_price"])
+        for item in estimate_entries
+        if item.get("estimated_unit_price") not in (None, "")
+    ]
+    price_lane = ""
+    if exact_values:
+        low = min(exact_values)
+        high = max(exact_values)
+        price_lane = format_money(low) if abs(low - high) < 0.005 else f"{format_money(low)}-{format_money(high)}"
+    elif estimated_values:
+        low = min(estimated_values)
+        high = max(estimated_values)
+        price_lane = format_money(low) if abs(low - high) < 0.005 else f"{format_money(low)}-{format_money(high)}"
+
+    next_pricing_tier = ""
+    pricing_basis: list[str] = []
+    if exact_prices:
+        truth_state = "exact_pricing"
+        for item in exact_prices[:3]:
+            authority = str(item.get("pricing_source") or item.get("pricing_authority_path") or "pricing_module").strip()
+            breakdown = dict(item.get("pricing_breakdown") or {})
+            if breakdown:
+                lane_breakdowns = [lane for lane in (breakdown.get("lane_breakdowns") or []) if isinstance(lane, dict)]
+                lane_suffix = ""
+                if lane_breakdowns:
+                    lane_bits = [
+                        f"{str(lane.get('placement_label') or lane.get('lane_id') or 'lane')}: {format_money(lane.get('customer_unit'))}"
+                        + (f" ({str(lane.get('pricing_key') or '').strip()})" if str(lane.get('pricing_key') or '').strip() else "")
+                        for lane in lane_breakdowns
+                    ]
+                    lane_suffix = f" [lanes: {'; '.join(bit for bit in lane_bits if bit)}]"
+                entry = (
+                    f"{format_money(breakdown.get('customer_unit'))} each "
+                    f"(blank {format_money(breakdown.get('wholesale_blank_unit'))} + "
+                    f"markup {format_money(breakdown.get('garment_markup_unit'))} + "
+                    f"imprint {format_money(breakdown.get('imprint_unit'))}) via {authority}"
+                    f"{lane_suffix}"
+                )
+            else:
+                entry = f"{format_money(item.get('unit_price'))} each via {authority}"
+            if entry.strip():
+                pricing_basis.append(entry)
+        explanation = dict((decoration_prices[0] or {}).get("customer_explanation") or {}) if decoration_prices else {}
+        next_pricing_tier = str(explanation.get("size_tier_label") or "").strip()
+    elif estimated_values:
+        truth_state = "estimate_safe_pricing"
+        for item in estimate_entries[:3]:
+            unit_price = format_money(item.get("estimated_unit_price"))
+            method = str(item.get("recommended_method") or "").strip()
+            tier = str(((item.get("estimated_decoration_profile") or {}).get("size_tier_label")) or "").strip()
+            bits = [unit_price, "estimate-safe"]
+            if method:
+                bits.append(method)
+            if tier:
+                bits.append(tier)
+            pricing_basis.append(" ".join(bit for bit in bits if bit))
+            if not next_pricing_tier and tier:
+                next_pricing_tier = tier
+    else:
+        truth_state = "pricing_blocked"
+        pricing_basis.extend(str(item) for item in (pricing_snapshot.get("blocking_reasons") or []) if str(item).strip())
+
+    return {
+        "truth_state": truth_state,
+        "pricing_state": pricing_state or str(pricing_snapshot.get("pricing_state") or "").strip() or "not_attempted",
+        "price_lane": price_lane,
+        "next_pricing_tier": next_pricing_tier or None,
+        "pricing_basis": pricing_basis,
+        "pricing_authority_path": str(pricing_snapshot.get("pricing_authority_path") or "").strip() or None,
+        "pricing_total": (pricing_snapshot.get("calculated_totals") or {}).get("total"),
+        "line_item_prices": exact_prices,
+    }
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    now = utc_now()
+    stored_at_utc = iso_utc(now)
+    intake_id = f"MCQI-{compact_utc(now)}-{args.message_id[-4:]}"
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    contract = load_contract(spine_root)
+    deps = contract["dependencies"]
+
+    message_payload, message_receipt = run_cap_json(
+        spine_root,
+        deps["source_get_capability"],
+        ["--message-id", args.message_id, "--mailbox", args.mailbox],
+    )
+    message = unwrap_message(message_payload)
+    intake_record = ensure_intake_record(state_root, args.mailbox, message)
+    disposition = resolve_message_disposition(spine_root, message)
+    if not bool(disposition.get("customer_truth_allowed")):
+        fail(
+            "customer-quote-intake only allows customer_actionable mail; "
+            f"message disposition is {str(disposition.get('disposition') or 'unknown')}"
+        )
+    sender = resolve_message_customer_contact(message)
+    body_text = message_body_text(message)
+    if str(sender.get("mode") or "") == "forwarded_body":
+        active = extract_active_customer_block(body_text)
+        if active:
+            body_text = active
+
+    attachments_payload, attachments_receipt = run_cap_json(
+        spine_root,
+        deps["source_attachments_capability"],
+        ["--message-id", args.message_id, "--mailbox", args.mailbox],
+    )
+    attachments = list(attachments_payload.get("value") or attachments_payload.get("data") or [])
+
+    customer_email = str(sender.get("email") or "").strip().lower()
+    snapshot_payload, snapshot_receipt = run_cap_json(
+        spine_root,
+        deps["customer_snapshot_capability"],
+        ["--email", customer_email, "--json"],
+    )
+    snapshot_data = dict(snapshot_payload.get("data") or snapshot_payload)
+
+    seed_payload, seed_receipt = run_cap_json(
+        spine_root,
+        deps["seed_ensure_capability"],
+        ["--message-id", args.message_id, "--mailbox", args.mailbox, "--json"],
+    )
+    seed_data = dict(seed_payload.get("data") or seed_payload)
+    seed_id = str(((seed_data.get("seed") or {}).get("id")) or seed_data.get("seed_id") or "").strip()
+
+    fresh_customer = dict(((snapshot_data.get("fresh_slate") or {}).get("customer")) or {})
+    snapshot_identity = dict(((snapshot_data.get("fresh_slate") or {}).get("identity")) or {})
+    raw_sender_name = str((((message.get("from") or {}).get("emailAddress") or {}).get("name")) or "").strip()
+    contact_name = str(
+        snapshot_identity.get("legal_name")
+        or fresh_customer.get("name")
+        or (sender.get("display_name") if str(sender.get("display_name") or "").strip() and str(sender.get("display_name") or "").strip() != raw_sender_name else "")
+        or ""
+    ).strip()
+    greeting_name = str(snapshot_identity.get("greeting_name") or snapshot_identity.get("preferred_name") or first_name_token(contact_name)).strip()
+    customer_name = str(snapshot_identity.get("display_name") or contact_name or raw_sender_name or "").strip()
+    company = str(fresh_customer.get("company") or "").strip() or raw_sender_name or customer_name
+
+    line_items = parse_line_items(body_text)
+    artwork_readiness = classify_artwork_readiness(attachments, body_text, contract, len(line_items))
+    inline_image_context = summarize_inline_image_context(
+        spine_root=spine_root,
+        state_root=state_root,
+        mailbox=args.mailbox,
+        message_id=args.message_id,
+        subject=str(message.get("subject") or ""),
+        latest_customer_text=body_text,
+        attachments=attachments,
+        download_capability=str(deps.get("source_attachment_download_capability") or "microsoft.mail.attachment.download"),
+        model_config=dict(contract.get("inline_image_context_model") or {}),
+    )
+    artwork_readiness["inline_image_context"] = copy.deepcopy(inline_image_context)
+    attachment_intelligence = summarize_attachment_intelligence(
+        spine_root=spine_root,
+        state_root=state_root,
+        mailbox=args.mailbox,
+        message_id=args.message_id,
+        thread_id=str(message.get("conversationId") or ""),
+        customer_email=customer_email,
+        customer_name=customer_name,
+        attachments=attachments,
+        download_capability=str(deps.get("source_attachment_download_capability") or "microsoft.mail.attachment.download"),
+        preflight_command_path=str(deps.get("artwork_preflight_command") or "ops/plugins/domains/mint/bin/artwork-preflight"),
+        line_items=line_items,
+        model_config=dict(contract.get("attachment_intelligence_model") or {}),
+    )
+    artwork_readiness["attachment_intelligence"] = packet_safe_attachment_intelligence(attachment_intelligence)
+    artwork_readiness["artwork_preflight"] = packet_safe_attachment_intelligence(attachment_intelligence)
+    product_scope = classify_product_scope(
+        body_text=body_text,
+        line_items=line_items,
+        contract=contract,
+    )
+    intake_quality = classify_intake_quality(
+        line_items=line_items,
+        artwork_readiness=artwork_readiness,
+        snapshot_data=snapshot_data,
+        contract=contract,
+    )
+    qualification = qualification_status(line_items, intake_quality, product_scope)
+
+    evidence_payload = build_evidence_payload(
+        message=message,
+        seed_id=seed_id,
+        snapshot_data=snapshot_data,
+        customer_email=customer_email,
+        customer_name=customer_name,
+        company=company,
+        contact_name=contact_name,
+        greeting_name=greeting_name,
+        line_items=line_items,
+        artwork_readiness=artwork_readiness,
+        attachment_intelligence=attachment_intelligence,
+    )
+
+    requested_packet_id = packet_id_for_message(args.message_id)
+    evidence_file = state_root / "mint" / "customer-quote-intakes" / "tmp" / f"{requested_packet_id}.json"
+    write_json(evidence_file, evidence_payload)
+
+    normalize_args = ["--evidence-file", str(evidence_file)]
+    candidate_packet_file = packet_root(spine_root, contract) / f"quote_packet_{requested_packet_id}.yaml"
+    if candidate_packet_file.is_file():
+        normalize_args = ["--packet-id", requested_packet_id, *normalize_args]
+    normalize_stdout, _ = run_command_capture(
+        spine_root,
+        deps["packet_normalize_command"],
+        normalize_args,
+    )
+    packet_id = output_value(normalize_stdout, "quote_packet_id") or requested_packet_id
+    normalize_packet_file = output_value(normalize_stdout, "packet_file")
+    packet = read_packet(normalize_packet_file)
+
+    source_state = "not_attempted"
+    quote_lane_allowed = qualification not in {"out_of_scope_not_supported", "mixed_scope_requires_split"}
+    if quote_lane_allowed and intake_quality["classification"] != "headache" and any(str(item.get("style_code") or "").strip() for item in line_items):
+        source_stdout, _ = run_command_capture(
+            spine_root,
+            deps["packet_source_command"],
+            [packet_id],
+        )
+        source_state = output_value(source_stdout, "source_state") or "completed"
+        packet_file = output_value(source_stdout, "packet_file") or normalize_packet_file
+        packet = read_packet(packet_file)
+
+    estimate_state = "not_attempted"
+    if quote_lane_allowed and intake_quality["classification"] != "headache" and line_items:
+        estimate_stdout, _ = run_command_capture(
+            spine_root,
+            deps["packet_estimate_command"],
+            [packet_id],
+        )
+        estimate_state = output_value(estimate_stdout, "estimate_state") or "blocked_insufficient_inputs"
+        packet_file = output_value(estimate_stdout, "packet_file") or normalize_packet_file
+        packet = read_packet(packet_file)
+
+    pricing_state = "not_attempted"
+    if quote_lane_allowed and intake_quality["classification"] != "headache" and line_items:
+        price_stdout, _ = run_command_capture(
+            spine_root,
+            deps["packet_price_command"],
+            [packet_id],
+        )
+        pricing_state = output_value(price_stdout, "pricing_state") or "blocked_insufficient_inputs"
+        packet_file = output_value(price_stdout, "packet_file") or normalize_packet_file
+        packet = read_packet(packet_file)
+
+    blocking_gaps = [gap for gap in (packet.get("open_gaps") or []) if isinstance(gap, dict) and gap.get("severity") == "blocking"]
+    inventory_snapshot = dict(packet.get("inventory_snapshot") or {})
+    estimate_snapshot = dict(packet.get("estimate_snapshot") or {})
+    pricing_snapshot = dict(packet.get("pricing_snapshot") or {})
+    quote_readiness = copy.deepcopy(packet.get("quote_readiness") or compute_quote_readiness(packet))
+    printavo_visibility = copy.deepcopy(snapshot_data.get("printavo_visibility") or {})
+    reply_guidance = customer_reply_guidance(
+        customer_name=customer_name,
+        intake_quality=intake_quality,
+        artwork_readiness=artwork_readiness,
+        product_scope=product_scope,
+        blockers=customer_safe_blockers(line_items=line_items, estimate_snapshot=estimate_snapshot),
+    )
+    pricing_surface = build_pricing_surface(
+        packet,
+        {
+            "line_item_estimates": copy.deepcopy(estimate_snapshot.get("line_item_estimates") or []),
+        },
+        pricing_state or str(pricing_snapshot.get("pricing_state") or ""),
+    )
+    invoked_modules = [
+        {"module": deps["customer_snapshot_capability"], "state": "completed"},
+        {"module": deps["seed_ensure_capability"], "state": "completed" if seed_id else "missing"},
+        {
+            "module": str(deps.get("source_attachment_download_capability") or "microsoft.mail.attachment.download"),
+            "state": combine_module_states(
+                str(inline_image_context.get("state") or ""),
+                str(attachment_intelligence.get("state") or ""),
+            ),
+        },
+        {
+            "module": str(deps.get("artwork_preflight_capability") or "mint.artwork.preflight"),
+            "state": combine_module_states(
+                str(attachment_intelligence.get("state") or ""),
+            ),
+        },
+        {"module": deps["packet_normalize_command"], "state": "completed"},
+        {"module": deps["packet_source_command"], "state": source_state or "not_attempted"},
+        {"module": deps["packet_estimate_command"], "state": estimate_state or "not_attempted"},
+        {"module": deps["packet_price_command"], "state": pricing_state or "not_attempted"},
+    ]
+
+    record = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "intake_id": intake_id,
+        "stored_at_utc": stored_at_utc,
+        "mailbox": args.mailbox,
+        "message_id": args.message_id,
+        "message_anchor": intake_record["message_anchor"],
+        "inbox_intake_record": {
+            "intake_id": intake_record["intake_id"],
+            "record_file": intake_record["record_file"],
+        },
+        "customer": {
+            "email": customer_email,
+            "name": customer_name or None,
+            "company": company or None,
+        },
+        "root_cause": {
+            "supplier_reachability": contract["root_causes"].get("supplier_reachability"),
+            "artwork_reachability": contract["root_causes"].get("artwork_reachability"),
+        },
+        "intake_quality": intake_quality,
+        "product_scope": product_scope,
+        "artwork_readiness": artwork_readiness,
+        "qualification_status": qualification,
+        "quote_readiness": quote_readiness,
+        "customer_reply_guidance": reply_guidance,
+        "handoff": {
+            "path": contract["handoff_path"],
+            "packet_id": packet_id,
+            "packet_file": normalize_packet_file,
+            "packet_state": packet.get("state"),
+            "next_step": quote_readiness.get("next_step") or "",
+            "source_state": source_state or inventory_snapshot.get("stock_check_state") or "not_attempted",
+            "estimate_state": estimate_state or estimate_snapshot.get("estimate_state") or "not_attempted",
+            "pricing_state": pricing_state or pricing_snapshot.get("pricing_state") or "not_attempted",
+        },
+        "supplier_surface": {
+            "existing_surfaces": ["mint.quote.packet.source", "suppliers-v2"],
+            "reachable_now": source_state != "not_attempted",
+            "inventory_state": inventory_snapshot.get("stock_check_state") or "not_requested",
+        },
+        "estimate_surface": {
+            "existing_surfaces": ["mint.quote.packet.estimate", "job_estimator"],
+            "estimate_state": estimate_snapshot.get("estimate_state") or "not_requested",
+            "quote_safe_line_item_count": int(estimate_snapshot.get("quote_safe_line_item_count") or 0),
+            "clarification_needed_count": int(estimate_snapshot.get("clarification_needed_count") or 0),
+            "line_item_estimates": copy.deepcopy(estimate_snapshot.get("line_item_estimates") or []),
+        },
+        "pricing_surface": pricing_surface,
+        "artwork_surface": {
+            "read_capability": deps["source_attachments_capability"],
+            "classification": artwork_readiness["classification"],
+            "inline_image_context": inline_image_context,
+            "attachment_intelligence": packet_safe_attachment_intelligence(attachment_intelligence),
+            "artwork_preflight": packet_safe_attachment_intelligence(attachment_intelligence),
+        },
+        "invoked_modules": invoked_modules,
+        "packet_summary": {
+            "line_item_count": len(packet.get("line_items") or []),
+            "blocking_gap_count": len(blocking_gaps),
+            "blocking_gap_types": [str(gap.get("gap_type") or "") for gap in blocking_gaps],
+            "quote_readiness_state": quote_readiness.get("state") or "",
+            "build_ready": bool(quote_readiness.get("build_ready")),
+            "send_ready": bool(quote_readiness.get("send_ready")),
+        },
+        "external_context": {
+            "printavo_visibility": printavo_visibility,
+        },
+        "provider_receipts": {
+            "message_get_receipt": message_receipt or None,
+            "attachments_list_receipt": attachments_receipt or None,
+            "inline_image_download_receipts": inline_image_context.get("download_receipts") or None,
+            "attachment_intelligence_download_receipts": attachment_intelligence.get("download_receipts") or None,
+            "artwork_preflight_record_files": attachment_intelligence.get("preflight_record_files") or None,
+            "snapshot_receipt": snapshot_receipt or None,
+            "seed_ensure_receipt": seed_receipt or None,
+        },
+        "contract_file": contract["path"],
+    }
+
+    records_dir = state_root / "mint" / "customer-quote-intakes" / "records" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{intake_id}.json"
+    index_file = state_root / "mint" / "customer-quote-intakes" / "index.ndjson"
+    lock_file = state_root / "mint" / "customer-quote-intakes" / ".index.lock"
+    write_json(record_file, record)
+    append_ndjson(
+        index_file,
+        lock_file,
+        {
+            "intake_id": intake_id,
+            "stored_at_utc": stored_at_utc,
+            "message_id": args.message_id,
+            "customer_email": customer_email,
+            "intake_quality": intake_quality["classification"],
+            "product_scope": product_scope["classification"],
+            "artwork_readiness": artwork_readiness["classification"],
+            "qualification_status": qualification,
+            "record_file": str(record_file),
+        },
+    )
+
+    payload = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "generated_at": stored_at_utc,
+        "data": {
+            **record,
+            "record_file": str(record_file),
+            "index_file": str(index_file),
+        },
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(CAPABILITY_NAME)
+    print(f"message_id: {args.message_id}")
+    print(f"customer: {customer_name} / {company}".strip(" /"))
+    print(f"intake_quality: {intake_quality['classification']}")
+    print(f"artwork_readiness: {artwork_readiness['classification']}")
+    print(f"qualification_status: {qualification}")
+    print(f"packet_id: {packet_id}")
+    print(f"packet_state: {packet.get('state')}")
+    print(f"quote_readiness_state: {quote_readiness.get('state')}")
+    print(f"quote_next_step: {quote_readiness.get('next_step')}")
+    print(f"source_state: {source_state}")
+    print(f"estimate_state: {estimate_state}")
+    print(f"pricing_state: {pricing_state}")
+    print(f"record_file: {record_file}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

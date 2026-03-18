@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_junk_review_common import (  # noqa: E402
+    build_junk_review,
+    encode_json,
+    new_artifact_id,
+    persist_record,
+    resolve_runtime,
+    review_defaults,
+    load_review_contract,
+)
+from operator_mail_common import iso_utc  # noqa: E402
+
+
+SCHEMA_VERSION = "1.0"
+CAPABILITY_NAME = "mint.customer.junk.review"
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-junk-review",
+        description="Review the governed Outlook Junk Email lane using real folder-backed message contents.",
+    )
+    parser.add_argument("--mailbox", default="", help="Mailbox to review (default comes from contract)")
+    parser.add_argument("--folder", default="", help="Source folder to review (default comes from contract)")
+    parser.add_argument("--top", type=int, default=0, help="Max messages to review (default comes from contract)")
+    parser.add_argument("--order", choices=["newest_first", "oldest_first"], default="", help="Folder review order")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def text_output(summary: dict[str, Any]) -> str:
+    lines = [
+        CAPABILITY_NAME,
+        f"status: {summary['status']}",
+        f"mailbox: {summary['mailbox']}",
+        f"folder: {summary['source_folder_display_name']}",
+        f"reviewed_count: {summary['reviewed_count']}",
+        f"supplier_marketing: {summary['counts'].get('supplier_marketing', 0)}",
+        f"risky_junk: {summary['counts'].get('risky_junk', 0)}",
+        f"real_customer_false_positive: {summary['counts'].get('real_customer_false_positive', 0)}",
+        "",
+    ]
+    for item in summary.get("items") or []:
+        lines.extend(
+            [
+                f"{item.get('received_utc', '')} | {item.get('review_class', '')} | {item.get('action', '')}",
+                f"  from: {item.get('sender', '')}",
+                f"  subject: {item.get('subject', '')}",
+                f"  destination: {item.get('destination_folder', '')}",
+            ]
+        )
+        hydration_error = str(item.get("hydration_error") or "")
+        if hydration_error:
+            lines.append(f"  hydration_error: {hydration_error}")
+    lines.append(f"record_file: {summary['record_file']}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root, state_root = resolve_runtime()
+    contract = load_review_contract(spine_root)
+    defaults = review_defaults(contract)
+
+    mailbox = args.mailbox.strip() or defaults["mailbox"]
+    folder = args.folder.strip() or defaults["folder"]
+    top = args.top if args.top > 0 else int(defaults["top"])
+    order = args.order or defaults["order"]
+
+    review = build_junk_review(
+        spine_root,
+        mailbox=mailbox,
+        folder=folder,
+        top=top,
+        order=order,
+    )
+    review_id, now = new_artifact_id("MJR")
+    summary = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "generated_at": iso_utc(now),
+        "review_id": review_id,
+        **review,
+    }
+    record_file, index_file = persist_record(
+        state_root,
+        category="customer-junk-reviews",
+        artifact_id=review_id,
+        payload=summary,
+        stored_at=now,
+    )
+    summary["record_file"] = str(record_file)
+    summary["index_file"] = str(index_file)
+
+    if args.json:
+        print(encode_json(summary))
+        return 0
+
+    print(text_output(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

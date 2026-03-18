@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import os
+import sys
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from artifact_record_common import (  # noqa: E402
+    ARTIFACT_ROLES,
+    ARTIFACT_STATUSES,
+    append_role_history,
+    artifact_id,
+    artifact_index_entry,
+    artifacts_sort_key,
+    canonical_object_key_from_path,
+    compact_filename_stem,
+    entity_file,
+    file_sha256,
+    infer_artifact_role,
+    is_superseded,
+    load_artifact,
+    load_index,
+    load_yaml_object,
+    resolve_spine_root,
+    runtime_paths,
+    sanitize_mapping,
+    update_entity_index,
+)
+from quote_packet_normalize import dump_yaml, fail, now_utc  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.artifact.record.capture"
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_ARTIFACT_RECORD_CAPABILITY_NAME") or CAPABILITY_NAME
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="artifact-record-capture",
+        description="Persist a canonical governed Mint artifact record tied to a seed and canonical object placement.",
+    )
+    parser.add_argument("source_file", help="Local file that was imported into canonical Mint artifact placement")
+    parser.add_argument("--seed-id", required=True, help="Canonical seed_id anchoring the imported artifact")
+    parser.add_argument("--canonical-object-key", default="", help="Canonical MinIO object key for the placed file")
+    parser.add_argument("--canonical-object-path", default="", help="Absolute mounted MinIO path for the placed file")
+    parser.add_argument("--original-filename", default="", help="Original source filename (defaults to source file basename)")
+    parser.add_argument("--content-type", default="", help="Source content type if known")
+    parser.add_argument("--artifact-role", choices=ARTIFACT_ROLES, default="", help="Explicit artifact role override")
+    parser.add_argument("--artifact-status", choices=ARTIFACT_STATUSES, default="", help="Explicit artifact status")
+    parser.add_argument("--context", default="", help="Context text used for role inference provenance")
+    parser.add_argument("--confidence", default="", choices=["low", "medium", "high"], help="Override confidence")
+    parser.add_argument("--customer-id", default="", help="Canonical customer record id if known")
+    parser.add_argument("--customer-email", default="", help="Customer email binding if known")
+    parser.add_argument("--customer-name", default="", help="Customer display/legal name if known")
+    parser.add_argument("--job-ref", default="", help="Job or job-number binding if known")
+    parser.add_argument("--order-id", default="", help="Canonical order_id if known")
+    parser.add_argument("--source-message-id", default="", help="Mailbox source message id")
+    parser.add_argument("--source-conversation-id", default="", help="Mailbox source conversation/thread id")
+    parser.add_argument("--source-internet-message-id", default="", help="Mailbox internet message id")
+    parser.add_argument("--provenance-source", default="mail_attachment_import", help="Canonical provenance source_kind")
+    parser.add_argument("--assigned-by", default="", help="Identity assigning the artifact role (defaults to capability)")
+    parser.add_argument(
+        "--receipts-json",
+        default="{}",
+        help="JSON mapping of receipt refs to persist onto the artifact record",
+    )
+    parser.add_argument(
+        "--evidence-refs-json",
+        default="{}",
+        help="JSON mapping of evidence refs to persist onto the artifact record",
+    )
+    parser.add_argument(
+        "--supersedes",
+        action="append",
+        default=[],
+        help="Artifact ids explicitly superseded by this import (repeatable or comma-separated)",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def normalize_supersedes(values: list[str]) -> list[str]:
+    supersedes: list[str] = []
+    for raw in values:
+        for item in str(raw or "").split(","):
+            token = item.strip()
+            if token and token not in supersedes:
+                supersedes.append(token)
+    return supersedes
+
+
+def load_mutable_artifact(paths: dict[str, Path], artifact_id_value: str) -> tuple[Path, dict[str, object]]:
+    file_path, payload = load_artifact(paths, artifact_id_value)
+    return file_path, copy.deepcopy(payload)
+
+
+def update_superseded_record(
+    *,
+    paths: dict[str, Path],
+    artifact_id_value: str,
+    replacement_artifact_id: str,
+    assigned_by: str,
+    note: str,
+) -> None:
+    artifact_file, artifact_record = load_mutable_artifact(paths, artifact_id_value)
+    prior_role = str(artifact_record.get("artifact_role") or "")
+    if is_superseded(artifact_record) and str(artifact_record.get("superseded_by") or "") == replacement_artifact_id:
+        return
+    artifact_record["artifact_status"] = "superseded"
+    artifact_record["artifact_role"] = "superseded"
+    artifact_record["superseded_by"] = replacement_artifact_id
+    artifact_record["updated_at"] = now_utc()
+    if prior_role and prior_role != "superseded":
+        artifact_record["superseded_from_role"] = prior_role
+    append_role_history(
+        artifact_record,
+        role="superseded",
+        status="superseded",
+        assignment_mode="auto_superseded",
+        assigned_by=assigned_by,
+        confidence="high",
+        basis=["same_seed_same_family_new_sha256"],
+        note=note,
+    )
+    dump_yaml(artifact_file, artifact_record)
+    update_entity_index(paths["artifacts_index_file"], "artifacts", "artifact_id", artifact_index_entry(artifact_record))
+
+
+def print_text(payload: dict[str, object]) -> None:
+    print(f"capability: {payload['capability']}")
+    print(f"capture_state: {payload['capture_state']}")
+    print(f"artifact_id: {payload['artifact_id']}")
+    print(f"seed_id: {payload['seed_id']}")
+    print(f"artifact_role: {payload['artifact_role']}")
+    print(f"artifact_status: {payload['artifact_status']}")
+    print(f"canonical_object_key: {payload['canonical_object_key']}")
+    print(f"record_file: {payload['record_file']}")
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    paths = runtime_paths(resolve_spine_root())
+    source_file = Path(args.source_file).expanduser().resolve()
+    if not source_file.exists() or not source_file.is_file():
+        fail(f"source_file not found: {source_file}")
+    seed_id = str(args.seed_id or "").strip()
+    if not seed_id:
+        fail("seed_id is required")
+
+    original_filename = str(args.original_filename or source_file.name).strip() or source_file.name
+    sha256 = file_sha256(source_file)
+    inferred_role, inferred_confidence, inference_basis = infer_artifact_role(
+        filename=original_filename,
+        content_type=args.content_type,
+        context_text=args.context,
+        explicit_role=args.artifact_role,
+    )
+    artifact_role = inferred_role
+    confidence = str(args.confidence or inferred_confidence).strip() or "medium"
+    artifact_status = str(args.artifact_status or ("superseded" if artifact_role == "superseded" else "active")).strip()
+    if artifact_status not in ARTIFACT_STATUSES:
+        fail(f"invalid artifact_status: {artifact_status}")
+
+    canonical_object_path = str(args.canonical_object_path or "").strip()
+    canonical_object_key = str(args.canonical_object_key or "").strip()
+    if canonical_object_path and not canonical_object_key:
+        canonical_object_key = canonical_object_key_from_path(canonical_object_path)
+    if not canonical_object_key:
+        fail("canonical_object_key or canonical_object_path is required")
+
+    artifact_id_value = artifact_id(seed_id, sha256)
+    timestamp = now_utc()
+    artifact_file = entity_file(paths["artifacts_dir"], "artifact", artifact_id_value)
+    capture_state = "existing" if artifact_file.exists() else "recorded"
+    receipts = sanitize_mapping(json.loads(args.receipts_json or "{}"))
+    evidence_refs = sanitize_mapping(json.loads(args.evidence_refs_json or "{}"))
+    assigned_by = str(args.assigned_by or capability_name()).strip()
+    artifact_family_key = compact_filename_stem(original_filename)
+
+    record = load_yaml_object(artifact_file) if artifact_file.exists() else {}
+    if not record:
+        record = {
+            "artifact_id": artifact_id_value,
+            "schema_version": "1.0",
+            "seed_id": seed_id,
+            "customer_binding": {
+                "customer_id": str(args.customer_id or "").strip() or None,
+                "customer_email": str(args.customer_email or "").strip().lower() or None,
+                "customer_name": str(args.customer_name or "").strip() or None,
+            },
+            "job_binding": {
+                "job_ref": str(args.job_ref or "").strip() or None,
+                "order_id": str(args.order_id or "").strip() or None,
+            },
+            "source_refs": {
+                "source_message_id": str(args.source_message_id or "").strip() or None,
+                "source_conversation_id": str(args.source_conversation_id or "").strip() or None,
+                "source_internet_message_id": str(args.source_internet_message_id or "").strip() or None,
+            },
+            "original_filename": original_filename,
+            "content_type": str(args.content_type or "").strip() or None,
+            "artifact_family_key": artifact_family_key,
+            "canonical_object_key": canonical_object_key,
+            "canonical_object_path": canonical_object_path or None,
+            "sha256": sha256,
+            "artifact_role": artifact_role,
+            "artifact_status": artifact_status,
+            "confidence": confidence,
+            "provenance": {
+                "source_kind": str(args.provenance_source or "mail_attachment_import").strip() or "mail_attachment_import",
+                "role_assignment": {
+                    "assignment_mode": "explicit" if args.artifact_role else "inferred",
+                    "assigned_by": assigned_by,
+                    "confidence": confidence,
+                    "basis": inference_basis,
+                    "context": str(args.context or "").strip() or None,
+                },
+            },
+            "supersedes": [],
+            "superseded_by": None,
+            "receipts": receipts,
+            "evidence_refs": evidence_refs,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        append_role_history(
+            record,
+            role=artifact_role,
+            status=artifact_status,
+            assignment_mode="explicit" if args.artifact_role else "inferred",
+            assigned_by=assigned_by,
+            confidence=confidence,
+            basis=inference_basis,
+            note="artifact captured into canonical truth",
+        )
+    else:
+        capture_state = "existing"
+        record["customer_binding"] = {
+            **dict(record.get("customer_binding") or {}),
+            **{key: value for key, value in {
+                "customer_id": str(args.customer_id or "").strip() or None,
+                "customer_email": str(args.customer_email or "").strip().lower() or None,
+                "customer_name": str(args.customer_name or "").strip() or None,
+            }.items() if value is not None},
+        }
+        record["job_binding"] = {
+            **dict(record.get("job_binding") or {}),
+            **{key: value for key, value in {
+                "job_ref": str(args.job_ref or "").strip() or None,
+                "order_id": str(args.order_id or "").strip() or None,
+            }.items() if value is not None},
+        }
+        record["source_refs"] = {
+            **dict(record.get("source_refs") or {}),
+            **{key: value for key, value in {
+                "source_message_id": str(args.source_message_id or "").strip() or None,
+                "source_conversation_id": str(args.source_conversation_id or "").strip() or None,
+                "source_internet_message_id": str(args.source_internet_message_id or "").strip() or None,
+            }.items() if value is not None},
+        }
+        record["original_filename"] = original_filename
+        record["content_type"] = str(args.content_type or "").strip() or record.get("content_type")
+        record["artifact_family_key"] = artifact_family_key
+        record["canonical_object_key"] = canonical_object_key
+        record["canonical_object_path"] = canonical_object_path or record.get("canonical_object_path")
+        record["sha256"] = sha256
+        record["artifact_role"] = artifact_role
+        record["artifact_status"] = artifact_status
+        record["confidence"] = confidence
+        record["updated_at"] = timestamp
+        record["receipts"] = {**dict(record.get("receipts") or {}), **receipts}
+        record["evidence_refs"] = {**dict(record.get("evidence_refs") or {}), **evidence_refs}
+        provenance = dict(record.get("provenance") or {})
+        provenance["source_kind"] = str(args.provenance_source or provenance.get("source_kind") or "mail_attachment_import").strip()
+        provenance["role_assignment"] = {
+            "assignment_mode": "explicit" if args.artifact_role else "inferred",
+            "assigned_by": assigned_by,
+            "confidence": confidence,
+            "basis": inference_basis,
+            "context": str(args.context or "").strip() or None,
+        }
+        record["provenance"] = provenance
+
+    explicit_supersedes = normalize_supersedes(args.supersedes)
+    auto_supersedes: list[str] = []
+    if artifact_role != "superseded":
+        for entry in load_index(paths["artifacts_index_file"], "artifacts"):
+            existing_id = str(entry.get("artifact_id") or "").strip()
+            if not existing_id or existing_id == artifact_id_value:
+                continue
+            if str(entry.get("seed_id") or "").strip() != seed_id:
+                continue
+            if str(entry.get("artifact_family_key") or "").strip() != artifact_family_key:
+                continue
+            if str(entry.get("sha256") or "").strip() == sha256:
+                continue
+            if str(entry.get("artifact_status") or "").strip() == "superseded":
+                continue
+            if str(entry.get("artifact_role") or "").strip() != artifact_role:
+                continue
+            auto_supersedes.append(existing_id)
+
+    supersedes = []
+    for artifact_ref in explicit_supersedes + auto_supersedes:
+        if artifact_ref and artifact_ref not in supersedes:
+            supersedes.append(artifact_ref)
+    record["supersedes"] = supersedes
+    if artifact_status != "superseded":
+        record["superseded_by"] = None
+    if artifact_status == "superseded" and not record.get("superseded_from_role"):
+        record["superseded_from_role"] = "original" if artifact_role == "superseded" else artifact_role
+
+    paths["artifacts_dir"].mkdir(parents=True, exist_ok=True)
+    dump_yaml(artifact_file, record)
+    update_entity_index(paths["artifacts_index_file"], "artifacts", "artifact_id", artifact_index_entry(record))
+
+    for superseded_id in supersedes:
+        update_superseded_record(
+            paths=paths,
+            artifact_id_value=superseded_id,
+            replacement_artifact_id=artifact_id_value,
+            assigned_by=assigned_by,
+            note=f"replaced by {artifact_id_value}",
+        )
+
+    payload = {
+        "capability": capability_name(),
+        "capture_state": capture_state,
+        "artifact_id": artifact_id_value,
+        "seed_id": seed_id,
+        "artifact_role": artifact_role,
+        "artifact_status": artifact_status,
+        "confidence": confidence,
+        "canonical_object_key": canonical_object_key,
+        "canonical_object_path": canonical_object_path or None,
+        "original_filename": original_filename,
+        "sha256": sha256,
+        "supersedes": supersedes,
+        "record_file": str(artifact_file),
+        "index_file": str(paths["artifacts_index_file"]),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print_text(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

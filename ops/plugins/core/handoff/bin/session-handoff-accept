@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+RUNTIME_CONTRACT = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
+HANDOFF_CONFIG = Path(os.environ.get("HANDOFF_ACCEPT_CONFIG", str(ROOT / "ops/bindings/handoff.config.yaml")))
+
+
+def load_yaml(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle)
+    return default if data is None else data
+
+
+def write_yaml(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(payload, handle, sort_keys=False)
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def resolve_runtime_paths() -> dict[str, Path]:
+    contract = load_yaml(RUNTIME_CONTRACT, {})
+    runtime_root = Path(os.environ.get("SPINE_RUNTIME_ROOT") or contract.get("runtime_root") or (ROOT / ".runtime/spine"))
+    state_root = Path(os.environ.get("SPINE_STATE") or contract.get("state_root") or (runtime_root / "state"))
+    logs_root = Path(os.environ.get("SPINE_LOGS") or contract.get("logs_root") or (runtime_root / "logs"))
+    mailroom_root = Path(os.environ.get("SPINE_MAILROOM_ROOT") or contract.get("mailroom_root") or (runtime_root / "mailroom"))
+    inbox_root = Path(os.environ.get("SPINE_INBOX") or (mailroom_root / "inbox"))
+    outbox_root = Path(os.environ.get("SPINE_OUTBOX") or (mailroom_root / "outbox"))
+    return {
+        "root": runtime_root,
+        "state": state_root,
+        "logs": logs_root,
+        "mailroom": mailroom_root,
+        "inbox": inbox_root,
+        "outbox": outbox_root,
+    }
+
+
+def expand_runtime_path(raw: str, runtime_paths: dict[str, Path]) -> Path:
+    mapping = {
+        "SPINE_RUNTIME_ROOT": str(runtime_paths["root"]),
+        "SPINE_STATE": str(runtime_paths["state"]),
+        "SPINE_LOGS": str(runtime_paths["logs"]),
+        "SPINE_MAILROOM_ROOT": str(runtime_paths["mailroom"]),
+        "SPINE_INBOX": str(runtime_paths["inbox"]),
+        "SPINE_OUTBOX": str(runtime_paths["outbox"]),
+        "SPINE_REPO": str(ROOT),
+        "HOME": str(Path.home()),
+    }
+    expanded = raw
+    for key, value in mapping.items():
+        expanded = expanded.replace(f"${{{key}}}", value).replace(f"${key}", value)
+    expanded = os.path.expandvars(os.path.expanduser(expanded))
+    if expanded.startswith("mailroom/state/"):
+        return runtime_paths["state"] / expanded[len("mailroom/state/") :]
+    if expanded == "mailroom/state":
+        return runtime_paths["state"]
+    if expanded.startswith("mailroom/inbox/"):
+        return runtime_paths["inbox"] / expanded[len("mailroom/inbox/") :]
+    if expanded == "mailroom/inbox":
+        return runtime_paths["inbox"]
+    if expanded.startswith("mailroom/outbox/"):
+        return runtime_paths["outbox"] / expanded[len("mailroom/outbox/") :]
+    if expanded == "mailroom/outbox":
+        return runtime_paths["outbox"]
+    path = Path(expanded)
+    return path if path.is_absolute() else (ROOT / path)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Accept a dispatched session handoff from the target terminal session.")
+    parser.add_argument("--id", default="", help="Handoff identifier (HO-YYYYMMDD-HHMMSS).")
+    parser.add_argument("--handoff-file", default="", help="Explicit handoff file path.")
+    parser.add_argument("--terminal-id", default=os.environ.get("OPS_TERMINAL_ROLE") or os.environ.get("SPINE_TERMINAL_NAME") or "")
+    parser.add_argument("--tool", default="")
+    parser.add_argument("--session-id", default=os.environ.get("SPINE_SESSION_ID", ""))
+    parser.add_argument("--agent-id", default=os.environ.get("SPINE_DISPATCH_TARGET_AGENT_ID", ""))
+    parser.add_argument("--worker-id", default=os.environ.get("SPINE_DISPATCH_WORKER_ID", ""))
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    if not args.id and not args.handoff_file:
+        parser.error("one of --id or --handoff-file is required")
+    return args
+
+
+def fail(message: str) -> int:
+    print(f"FAIL: {message}", file=os.sys.stderr)
+    return 1
+
+
+def resolve_handoff_file(args: argparse.Namespace, runtime_paths: dict[str, Path], config: dict[str, Any]) -> Path:
+    if args.handoff_file:
+        return expand_runtime_path(str(args.handoff_file), runtime_paths)
+    handoff_dir_raw = str(config.get("storage", {}).get("directory", "mailroom/state/handoffs"))
+    handoff_dir = expand_runtime_path(handoff_dir_raw, runtime_paths)
+    return handoff_dir / f"{args.id}.yaml"
+
+
+def emit(args: argparse.Namespace, payload: dict[str, Any]) -> None:
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    print("session.handoff.accept")
+    print(f"status: {payload['status']}")
+    print(f"id: {payload['data']['id']}")
+    print(f"file: {payload['data']['file']}")
+    print(f"terminal_id: {payload['data']['terminal_id']}")
+    if payload["data"].get("session_id"):
+        print(f"session_id: {payload['data']['session_id']}")
+    if payload["data"].get("tool"):
+        print(f"tool: {payload['data']['tool']}")
+    if payload["data"].get("worker_id"):
+        print(f"worker_id: {payload['data']['worker_id']}")
+    if payload["data"].get("accepted_at_utc"):
+        print(f"accepted_at_utc: {payload['data']['accepted_at_utc']}")
+
+
+def main() -> int:
+    args = parse_args()
+    runtime_paths = resolve_runtime_paths()
+    config = load_yaml(HANDOFF_CONFIG, {})
+    handoff_file = resolve_handoff_file(args, runtime_paths, config)
+    if not handoff_file.exists():
+        return fail(f"handoff not found: {args.id or handoff_file}")
+
+    handoff = load_yaml(handoff_file, {})
+    if not isinstance(handoff, dict):
+        return fail(f"handoff file is invalid: {handoff_file}")
+
+    handoff_id = str(args.id or handoff.get("id") or "").strip()
+    if not handoff_id:
+        return fail(f"handoff id missing in file: {handoff_file}")
+    if str(handoff.get("id") or "").strip() and str(handoff.get("id") or "").strip() != handoff_id:
+        return fail(f"handoff id mismatch: expected={handoff_id} actual={handoff.get('id')}")
+
+    if str(handoff.get("state") or "").strip() != "active":
+        return fail(f"handoff must be active before accept (id={handoff_id} state={handoff.get('state')})")
+
+    dispatch = handoff.get("dispatch")
+    if not isinstance(dispatch, dict):
+        dispatch = {}
+
+    terminal_id = str(args.terminal_id or dispatch.get("target_terminal_id") or "").strip()
+    if not terminal_id:
+        return fail("terminal identity is required to accept a handoff")
+
+    target_terminal_id = str(dispatch.get("target_terminal_id") or "").strip()
+    if target_terminal_id and target_terminal_id != terminal_id:
+        return fail(f"handoff target terminal mismatch: expected={target_terminal_id} actual={terminal_id}")
+
+    status = str(dispatch.get("status") or "").strip()
+    if status == "failed":
+        detail = str(dispatch.get("last_error") or "handoff_dispatch_failed").strip()
+        return fail(f"handoff dispatch already failed: {detail}")
+
+    session_id = str(args.session_id or dispatch.get("accepted_by_session_id") or "").strip()
+    tool = str(args.tool or dispatch.get("target_tool") or "").strip()
+    agent_id = str(args.agent_id or dispatch.get("target_agent_id") or "").strip()
+    worker_id = str(args.worker_id or dispatch.get("worker_id") or "").strip()
+
+    accepted_terminal_id = str(dispatch.get("accepted_by_terminal_id") or "").strip()
+    accepted_session_id = str(dispatch.get("accepted_by_session_id") or "").strip()
+    accepted_at = str(dispatch.get("accepted_at_utc") or "").strip()
+    changed = False
+
+    if status == "accepted":
+        if accepted_terminal_id and accepted_terminal_id != terminal_id:
+            return fail(
+                "handoff already accepted by another terminal: "
+                f"expected={terminal_id} actual={accepted_terminal_id}"
+            )
+        if session_id and accepted_session_id and accepted_session_id != session_id:
+            return fail(
+                "handoff already accepted by another session: "
+                f"expected={session_id} actual={accepted_session_id}"
+            )
+    else:
+        changed = True
+        accepted_at = utc_now()
+        dispatch["status"] = "accepted"
+        dispatch["accepted_at_utc"] = accepted_at
+        dispatch["accepted_by_terminal_id"] = terminal_id
+        dispatch["last_attempt_at_utc"] = accepted_at
+        dispatch.pop("failed_at_utc", None)
+        dispatch.pop("last_error", None)
+        if session_id:
+            dispatch["accepted_by_session_id"] = session_id
+        if tool:
+            dispatch["accepted_by_tool"] = tool
+        if agent_id:
+            dispatch["accepted_by_agent_id"] = agent_id
+        if worker_id:
+            dispatch["accepted_by_worker_id"] = worker_id
+        if not target_terminal_id:
+            dispatch["target_terminal_id"] = terminal_id
+        if tool and not str(dispatch.get("target_tool") or "").strip():
+            dispatch["target_tool"] = tool
+        if agent_id and not str(dispatch.get("target_agent_id") or "").strip():
+            dispatch["target_agent_id"] = agent_id
+        handoff["dispatch"] = dispatch
+        write_yaml(handoff_file, handoff)
+
+    payload = {
+        "capability": "session.handoff.accept",
+        "status": "accepted" if changed else "already-accepted",
+        "data": {
+            "id": handoff_id,
+            "file": str(handoff_file),
+            "terminal_id": terminal_id,
+            "session_id": session_id,
+            "tool": tool,
+            "agent_id": agent_id,
+            "worker_id": worker_id,
+            "accepted_at_utc": accepted_at,
+        },
+    }
+    emit(args, payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -14,7 +14,9 @@
 # Usage: source this file, then call functions.
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-CLAIMS_DIR="${SPINE_REPO}/mailroom/state/gaps"
+source "${SPINE_REPO}/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+CLAIMS_DIR="${SPINE_STATE}/gaps"
 GAPS_FILE="${SPINE_REPO}/ops/bindings/operational.gaps.yaml"
 
 command -v yq >/dev/null 2>&1 || { echo "ERROR: yq required" >&2; exit 1; }

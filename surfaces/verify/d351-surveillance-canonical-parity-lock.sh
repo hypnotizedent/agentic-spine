@@ -4,6 +4,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 CONTRACT="$ROOT/ops/bindings/surveillance.topology.contract.yaml"
 SSOT="$ROOT/docs/core/SURVEILLANCE_PLATFORM_SSOT.md"
 ROLES="$ROOT/docs/governance/SURVEILLANCE_ROLES.md"
@@ -11,7 +13,7 @@ CAPABILITIES="$ROOT/ops/capabilities.yaml"
 CAP_MAP="$ROOT/ops/bindings/capability_map.yaml"
 DISPATCH="$ROOT/ops/bindings/routing.dispatch.yaml"
 MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
-LOOP_SCOPE="$ROOT/mailroom/state/loop-scopes/LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302.scope.md"
+LOOP_SCOPE="$SPINE_STATE/loop-scopes/LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302.scope.md"
 
 ERRORS=0
 err() {

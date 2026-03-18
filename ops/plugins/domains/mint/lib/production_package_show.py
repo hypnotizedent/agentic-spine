@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from mint_runtime_paths import resolve_mint_data_root, resolve_spine_root
 from quote_packet_normalize import fail, load_structured_file
 
 
@@ -29,9 +30,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
+    spine_root = resolve_spine_root(__file__)
+    mint_root = resolve_mint_data_root(spine_root=spine_root, current_file=__file__)
 
     packages_dir = Path(os.environ.get("MINT_PRODUCTION_PACKAGES_DIR") or (mint_root / "production-packages"))
     exports_dir = Path(os.environ.get("MINT_PRODUCTION_EXPORTS_DIR") or (mint_root / "production-package-exports"))

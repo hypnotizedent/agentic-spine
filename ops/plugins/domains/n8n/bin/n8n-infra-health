@@ -5,6 +5,8 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)
 CONTRACT="$ROOT/ops/bindings/n8n.infra.reliability.contract.yaml"
 SERVICES="$ROOT/ops/bindings/services.health.yaml"
 BACKUP="$ROOT/ops/bindings/backup.inventory.yaml"
+# shellcheck source=../../../lib/ssh-resolve.sh
+source "$ROOT/ops/lib/ssh-resolve.sh"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -26,9 +28,57 @@ need_file "$CONTRACT"
 need_file "$SERVICES"
 need_file "$BACKUP"
 
+probe_service_url() {
+  local service_url="$1"
+  local service_host="$2"
+  local connect_timeout="${3:-5}"
+  local max_time="${4:-10}"
+  local resolved_url="$service_url"
+  local path_used="unmapped"
+  local http_code="000"
+  local curl_exit=1
+  local candidate_url candidate_path
+  local -a candidates=()
+
+  if [[ -n "$service_host" && "$service_host" != "null" ]] && \
+     yq -e ".ssh.targets[] | select(.id == \"$service_host\")" "$ROOT/ops/bindings/ssh.targets.yaml" >/dev/null 2>&1; then
+    ssh_resolve_ssh_host_with_fallback "$service_host" "$connect_timeout" >/dev/null 2>&1 || true
+    while IFS=$'\t' read -r candidate_url candidate_path; do
+      [[ -n "$candidate_url" ]] || continue
+      candidates+=("${candidate_url}|${candidate_path}")
+    done < <(ssh_resolve_url_candidates "$service_url" "$service_host")
+  fi
+
+  if [[ "${#candidates[@]}" -eq 0 ]]; then
+    candidates+=("${service_url}|unmapped")
+  fi
+
+  for idx in "${!candidates[@]}"; do
+    IFS='|' read -r candidate_url candidate_path <<<"${candidates[$idx]}"
+    set +e
+    http_code="$(curl -s -o /dev/null -w "%{http_code}" \
+      --connect-timeout "$connect_timeout" --max-time "$max_time" \
+      "$candidate_url")"
+    curl_exit=$?
+    set -e
+    resolved_url="$candidate_url"
+    path_used="$candidate_path"
+    if [[ "$curl_exit" -eq 0 || "$idx" -eq $((${#candidates[@]} - 1)) ]]; then
+      break
+    fi
+  done
+
+  if [[ "$curl_exit" -eq 0 && "$path_used" != "unmapped" && "$path_used" != "unreachable" ]]; then
+    ssh_route_hint_write "$service_host" "$path_used"
+  fi
+
+  printf '%s\t%s\t%s\t%s\n' "$resolved_url" "$path_used" "$http_code" "$curl_exit"
+}
+
 ENDPOINT_ID="$(yq -r '.checks.service_health.endpoint_id' "$CONTRACT")"
 EXPECT_HTTP="$(yq -r '.checks.service_health.expected_http // 200' "$CONTRACT")"
 SERVICE_URL="$(yq -r ".endpoints[] | select(.id == \"$ENDPOINT_ID\") | .url" "$SERVICES" | head -n1)"
+SERVICE_HOST="$(yq -r ".endpoints[] | select(.id == \"$ENDPOINT_ID\") | .host" "$SERVICES" | head -n1)"
 
 API_DEFAULT_URL="$(yq -r '.checks.api_auth.default_api_url' "$CONTRACT")"
 API_PATH="$(yq -r '.checks.api_auth.probe_path' "$CONTRACT")"
@@ -59,11 +109,11 @@ if [[ -z "$SERVICE_URL" || "$SERVICE_URL" == "null" ]]; then
   echo "service_health: FAIL (missing endpoint '$ENDPOINT_ID' in $SERVICES)"
   FAILS=$((FAILS + 1))
 else
-  svc_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$SERVICE_URL" || echo 000)"
+  IFS=$'\t' read -r resolved_service_url resolved_service_path svc_code svc_curl_exit <<<"$(probe_service_url "$SERVICE_URL" "$SERVICE_HOST" 5 10)"
   if [[ "$svc_code" == "$EXPECT_HTTP" ]]; then
-    echo "service_health: PASS ($SERVICE_URL -> HTTP $svc_code)"
+    echo "service_health: PASS ($resolved_service_url via=${resolved_service_path} -> HTTP $svc_code)"
   else
-    echo "service_health: FAIL ($SERVICE_URL -> HTTP $svc_code, expected $EXPECT_HTTP)"
+    echo "service_health: FAIL ($resolved_service_url via=${resolved_service_path} -> HTTP $svc_code, expected $EXPECT_HTTP, curl_exit=${svc_curl_exit})"
     FAILS=$((FAILS + 1))
   fi
 fi

@@ -5,6 +5,10 @@ Canonical domain policy for `mint`.
 - Authority: `docs/governance/SPINE.md`
 - Runtime contracts: `ops/bindings/domains/mint.bundle.yaml`
 - Public ingress contract: `ops/bindings/mint.public.ingress.contract.yaml`
+- Fleet identity contract: `ops/bindings/mint.fleet.identity.contract.yaml`
+- Agents 2.0 execution model: `docs/reference/mint/MINT_AGENTS_2_0_EXECUTION_MODEL_20260313.md`
+- Morpheus outbound reply policy: `ops/bindings/mint.customer.reply.draft.policy.contract.yaml`
+- Customer identity contract: `ops/bindings/mint.customer.identity.contract.yaml`
 - **Status authority**: `ops/bindings/mint.module.status.projected.yaml` (read via `mint.module.status.show`)
 - **Order business truth authority**: `ops/bindings/mint.order.truth.authority.yaml`
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain mint`
@@ -39,6 +43,13 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 
 | Capability |
 |---|
+| `mint.customer.inbox.triage` |
+| `mint.customer.forwarded.attachment.resolve` |
+| `mint.customer.artwork.revision.prepare` |
+| `mint.customer.identity.set` |
+| `mint.customer.reply.draft` |
+| `mint.customer.thread.delta.capture` |
+| `mint.artwork.place` |
 | `mint.deploy.status` |
 | `mint.deploy.sync` |
 | `mint.intake.validate` |

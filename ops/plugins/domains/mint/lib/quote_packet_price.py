@@ -13,9 +13,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 from urllib import error as urlerror
-from urllib import parse as urlparse
 from urllib import request as urlrequest
 
+from mint_runtime_paths import resolve_mint_data_root, resolve_spine_root
 from quote_packet_normalize import (
     METHODS_REQUIRING_GRAPHIC_SIZE,
     add_gap,
@@ -27,6 +27,8 @@ from quote_packet_normalize import (
     now_utc,
     overall_confidence,
     pricing_missing_fields,
+    resolve_service_base_url_with_fallback,
+    sync_quote_readiness,
     update_index,
 )
 
@@ -48,6 +50,8 @@ PRICE_BLOCKING_GAP_TYPES = {
     "proof_routing_blocked",
 }
 CONFIDENCE_ORDER = {"none": 0, "low": 1, "medium": 2, "high": 3}
+GARMENT_MARKUP_RATE = 0.30
+BLANK_LINE_CODES = {"blank", "blanks"}
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -86,20 +90,11 @@ def canonical_pricing_base_url(spine_root: Path) -> str:
     if override:
         return override.rstrip("/")
 
-    services_file = spine_root / "ops/bindings/services.health.yaml"
-    if services_file.exists():
-        services = load_structured_file(services_file) or {}
-        for endpoint in services.get("endpoints") or []:
-            if not isinstance(endpoint, dict) or endpoint.get("id") != "pricing-v2":
-                continue
-            raw_url = str(endpoint.get("url") or "").strip()
-            if not raw_url:
-                continue
-            parsed = urlparse.urlparse(raw_url)
-            if parsed.scheme and parsed.netloc:
-                return f"{parsed.scheme}://{parsed.netloc}"
-
-    return "http://192.168.1.213:3700"
+    return resolve_service_base_url_with_fallback(
+        spine_root,
+        "pricing-v2",
+        "http://100.79.183.14:3700",
+    )
 
 
 def resolve_pricing_api_key(spine_root: Path) -> str:
@@ -349,8 +344,306 @@ def post_pricing_request(base_url: str, api_key: str, payload: dict[str, Any], t
     return json.loads(raw or "{}")
 
 
+def post_lane_matrix_request(base_url: str, api_key: str, payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    request = urlrequest.Request(
+        f"{base_url.rstrip('/')}/api/v1/pricing/lane-matrix",
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-API-Key": api_key,
+        },
+    )
+    with urlrequest.urlopen(request, timeout=timeout_seconds) as response:
+        raw = response.read().decode("utf-8")
+    return json.loads(raw or "{}")
+
+
 def money_from_cents(total_cents: int) -> float:
     return round(total_cents / 100, 2)
+
+
+def money_to_cents(value: Any) -> int:
+    try:
+        return round(float(value) * 100)
+    except (TypeError, ValueError):
+        return 0
+
+
+def response_line_total_cents(entry: dict[str, Any]) -> int:
+    total_amount = entry.get("total_amount")
+    if total_amount not in (None, ""):
+        return money_to_cents(total_amount)
+
+    unit_amount = entry.get("unit_amount")
+    quantity = entry.get("quantity")
+    try:
+        quantity_int = int(quantity)
+    except Exception:
+        quantity_int = 0
+    if unit_amount not in (None, "") and quantity_int > 0:
+        return money_to_cents(unit_amount) * quantity_int
+    return 0
+
+
+def response_tax_cents(response: dict[str, Any]) -> int:
+    taxes = response.get("taxes")
+    if isinstance(taxes, dict):
+        return money_to_cents(taxes.get("total_amount"))
+    return money_to_cents(taxes)
+
+
+def slug_token(value: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
+    collapsed = "-".join(bit for bit in cleaned.split("-") if bit)
+    return collapsed or "lane"
+
+
+def preferred_screen_print_size_key(location: str, line_item: dict[str, Any]) -> str | None:
+    existing = str(line_item.get("screen_print_size_key") or "").strip().upper()
+    if existing in {"A6", "A5", "A4", "A3"}:
+        return existing
+
+    normalized_location = location.strip().lower()
+    if any(token in normalized_location for token in ("left chest", "left-chest", "right chest", "right-chest", "sleeve", "pocket", "cap", "hat", "nape")):
+        return "A6"
+    if any(token in normalized_location for token in ("oversize", "oversized", "full front", "full back", "jumbo")):
+        return "A3"
+    if normalized_location:
+        return "A4"
+    return None
+
+
+def lane_payload_for_item(packet: dict[str, Any], line_item: dict[str, Any], timestamp: str) -> dict[str, Any]:
+    method = str(line_item["decoration_method"])
+    locations = [str(value).strip() for value in (line_item.get("print_locations") or []) if str(value).strip()]
+    if not locations:
+        placement = str(line_item.get("placement") or "").strip()
+        if placement:
+            locations = [placement]
+    if not locations:
+        locations = ["front"]
+
+    lanes: list[dict[str, Any]] = []
+    shared_graphic = copy.deepcopy(line_item.get("graphic_size_inches"))
+    shared_size_tier = line_item.get("size_tier_label")
+    single_location = len(locations) == 1
+
+    for index, location in enumerate(locations, start=1):
+        lane: dict[str, Any] = {
+            "lane_id": f"{line_item['line_item_id']}__{slug_token(location)}__{index}",
+            "item_type": method,
+            "placement_label": location,
+            "locations": [location],
+            "colors": int(line_item.get("color_count") or 0),
+            "color_count": int(line_item.get("color_count") or 0),
+            "artwork_fingerprint_sha256": line_item.get("artwork_fingerprint_sha256"),
+        }
+
+        if method == "screen_print":
+            lane["method_variant"] = line_item.get("method_variant")
+            lane["underbase_needed"] = bool(line_item.get("underbase_needed"))
+            preferred_key = preferred_screen_print_size_key(location, line_item)
+            if preferred_key:
+                lane["screen_print_size_key"] = preferred_key
+            if single_location and shared_graphic:
+                lane["graphic_size_inches"] = copy.deepcopy(shared_graphic)
+            if single_location and shared_size_tier:
+                lane["size_tier_label"] = shared_size_tier
+        elif method == "embroidery":
+            lane["stitch_count"] = int(line_item.get("stitch_count") or 0)
+            lane["puff_mode"] = line_item.get("puff_mode")
+            lane["thread_type"] = line_item.get("thread_type")
+            lane["hoop_class"] = line_item.get("hoop_class")
+            if line_item.get("garment_material"):
+                lane["garment_material"] = line_item.get("garment_material")
+            if line_item.get("curved_panel_cap") is not None:
+                lane["curved_panel_cap"] = bool(line_item.get("curved_panel_cap"))
+            if shared_graphic:
+                lane["graphic_size_inches"] = copy.deepcopy(shared_graphic)
+        elif method == "engraving":
+            lane["material_class"] = line_item.get("material_class")
+            if shared_graphic:
+                lane["graphic_size_inches"] = copy.deepcopy(shared_graphic)
+            if shared_size_tier:
+                lane["size_tier_label"] = shared_size_tier
+        elif method == "transfers":
+            lane["transfer_type"] = line_item.get("transfer_type")
+            lane["garment_family"] = line_item.get("garment_family")
+            if shared_graphic:
+                lane["graphic_size_inches"] = copy.deepcopy(shared_graphic)
+            if shared_size_tier:
+                lane["size_tier_label"] = shared_size_tier
+        lanes.append(lane)
+
+    payload: dict[str, Any] = {
+        "correlation_id": f"{packet['quote_packet_id']}:{line_item['line_item_id']}",
+        "request_timestamp_utc": timestamp,
+        "customer_ref": customer_ref_string(packet) or str(packet.get("quote_packet_id") or "quote-packet"),
+        "supplier_source": str(line_item["supplier_source"]),
+        "blanks_cost": round(float(line_item["blanks_cost_cents"]) / 100, 2),
+        "qty_options": [int(line_item["quantity"])],
+        "setup_mode_options": [str(line_item.get("setup_mode") or "none")],
+        "lanes": lanes,
+    }
+
+    garment_family = str(line_item.get("garment_family") or "").strip()
+    if garment_family:
+        payload["garment_family"] = garment_family
+    garment_material = str(line_item.get("garment_material") or "").strip()
+    if garment_material:
+        payload["garment_material"] = garment_material
+    return payload
+
+
+def scenario_for_item(line_item: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+    scenarios = [entry for entry in (response.get("scenarios") or []) if isinstance(entry, dict)]
+    quantity = int(line_item.get("quantity") or 0)
+    setup_mode = str(line_item.get("setup_mode") or "none")
+    for scenario in scenarios:
+        if int(scenario.get("qty") or 0) == quantity and str(scenario.get("setup_mode") or "") == setup_mode:
+            return scenario
+    if len(scenarios) == 1:
+        return scenarios[0]
+    return {}
+
+
+def lane_breakdowns_for(item: dict[str, Any], response: dict[str, Any], quantity: int) -> list[dict[str, Any]]:
+    scenario = scenario_for_item(item, response)
+    lane_entries = [entry for entry in (scenario.get("lanes") or []) if isinstance(entry, dict)]
+    results: list[dict[str, Any]] = []
+    for lane in lane_entries:
+        unit_amount = money_to_cents(lane.get("customer_unit_amount"))
+        setup_total_cents = money_to_cents(lane.get("setup_total_amount"))
+        production_unit_cents = money_to_cents(lane.get("production_unit_amount"))
+        underbase_total_cents = money_to_cents(lane.get("underbase_total_amount"))
+        total_cents = unit_amount * quantity
+        results.append(
+            {
+                "lane_id": lane.get("lane_id"),
+                "placement_label": lane.get("placement_label"),
+                "pricing_key_type": lane.get("pricing_key_type"),
+                "pricing_key": lane.get("pricing_key"),
+                "screen_print_size_key": lane.get("screen_print_size_key"),
+                "requested_method_variant": lane.get("requested_method_variant"),
+                "workbook_base_variant": lane.get("workbook_base_variant"),
+                "variant_pricing_mode": lane.get("variant_pricing_mode"),
+                "customer_unit_cents": unit_amount,
+                "customer_unit": money_from_cents(unit_amount),
+                "customer_total_cents": total_cents,
+                "customer_total": money_from_cents(total_cents),
+                "production_unit_cents": production_unit_cents,
+                "production_unit": money_from_cents(production_unit_cents),
+                "setup_total_cents": setup_total_cents,
+                "setup_total": money_from_cents(setup_total_cents),
+                "underbase_total_cents": underbase_total_cents,
+                "underbase_total": money_from_cents(underbase_total_cents),
+                "receipt_id": lane.get("receipt_id"),
+            }
+        )
+    return results
+
+
+def pricing_breakdown_for_lane_matrix(item: dict[str, Any], response: dict[str, Any], quantity: int) -> dict[str, Any]:
+    scenario = scenario_for_item(item, response)
+    wholesale_blank_unit_cents = int(item.get("blanks_cost_cents") or 0)
+    garment_markup_unit_cents = round(wholesale_blank_unit_cents * GARMENT_MARKUP_RATE)
+    customer_garment_unit_cents = wholesale_blank_unit_cents + garment_markup_unit_cents
+    customer_garment_total_cents = customer_garment_unit_cents * quantity
+
+    lane_breakdowns = lane_breakdowns_for(item, response, quantity)
+    imprint_total_cents = sum(int(entry.get("customer_total_cents") or 0) for entry in lane_breakdowns)
+    imprint_unit_cents = round(imprint_total_cents / quantity) if quantity > 0 else 0
+    customer_unit_cents = money_to_cents(scenario.get("customer_unit_amount"))
+    if customer_unit_cents <= 0:
+        customer_unit_cents = customer_garment_unit_cents + imprint_unit_cents
+    customer_subtotal_cents = customer_unit_cents * quantity
+    garment_markup_total_cents = garment_markup_unit_cents * quantity
+    wholesale_blank_total_cents = wholesale_blank_unit_cents * quantity
+
+    return {
+        "wholesale_blank_unit_cents": wholesale_blank_unit_cents,
+        "wholesale_blank_unit": money_from_cents(wholesale_blank_unit_cents),
+        "wholesale_blank_total_cents": wholesale_blank_total_cents,
+        "wholesale_blank_total": money_from_cents(wholesale_blank_total_cents),
+        "garment_markup_unit_cents": garment_markup_unit_cents,
+        "garment_markup_unit": money_from_cents(garment_markup_unit_cents),
+        "garment_markup_total_cents": garment_markup_total_cents,
+        "garment_markup_total": money_from_cents(garment_markup_total_cents),
+        "imprint_unit_cents": imprint_unit_cents,
+        "imprint_unit": money_from_cents(imprint_unit_cents),
+        "imprint_total_cents": imprint_total_cents,
+        "imprint_total": money_from_cents(imprint_total_cents),
+        "customer_unit_cents": customer_unit_cents,
+        "customer_unit": money_from_cents(customer_unit_cents),
+        "customer_total_cents": customer_subtotal_cents,
+        "customer_total": money_from_cents(customer_subtotal_cents),
+        "tax_cents": 0,
+        "tax": 0,
+        "total_with_tax_cents": customer_subtotal_cents,
+        "total_with_tax": money_from_cents(customer_subtotal_cents),
+        "lane_breakdowns": lane_breakdowns,
+    }
+
+
+def pricing_breakdown_for(item: dict[str, Any], response: dict[str, Any], quantity: int) -> dict[str, Any]:
+    response_subtotal_cents = 0
+    response_blank_total_cents = 0
+    imprint_total_cents = 0
+    for entry in response.get("line_items") or []:
+        if not isinstance(entry, dict):
+            continue
+        total_cents = response_line_total_cents(entry)
+        response_subtotal_cents += total_cents
+        code = str(entry.get("code") or "").strip().lower()
+        if code in BLANK_LINE_CODES:
+            response_blank_total_cents += total_cents
+        else:
+            imprint_total_cents += total_cents
+
+    wholesale_blank_unit_cents = int(item.get("blanks_cost_cents") or 0)
+    if wholesale_blank_unit_cents <= 0 and quantity > 0 and response_blank_total_cents > 0:
+        wholesale_blank_unit_cents = round(response_blank_total_cents / quantity)
+
+    garment_markup_unit_cents = round(wholesale_blank_unit_cents * GARMENT_MARKUP_RATE)
+    customer_garment_unit_cents = wholesale_blank_unit_cents + garment_markup_unit_cents
+    customer_garment_total_cents = customer_garment_unit_cents * quantity
+    customer_subtotal_cents = customer_garment_total_cents + imprint_total_cents
+
+    raw_tax_cents = response_tax_cents(response)
+    effective_tax_rate = (raw_tax_cents / response_subtotal_cents) if response_subtotal_cents > 0 else 0
+    customer_tax_cents = round(customer_subtotal_cents * effective_tax_rate)
+    customer_total_cents = customer_subtotal_cents + customer_tax_cents
+
+    imprint_unit_cents = round(imprint_total_cents / quantity) if quantity > 0 else 0
+    customer_unit_cents = round(customer_subtotal_cents / quantity) if quantity > 0 else 0
+    garment_markup_total_cents = garment_markup_unit_cents * quantity
+    wholesale_blank_total_cents = wholesale_blank_unit_cents * quantity
+
+    return {
+        "wholesale_blank_unit_cents": wholesale_blank_unit_cents,
+        "wholesale_blank_unit": money_from_cents(wholesale_blank_unit_cents),
+        "wholesale_blank_total_cents": wholesale_blank_total_cents,
+        "wholesale_blank_total": money_from_cents(wholesale_blank_total_cents),
+        "garment_markup_unit_cents": garment_markup_unit_cents,
+        "garment_markup_unit": money_from_cents(garment_markup_unit_cents),
+        "garment_markup_total_cents": garment_markup_total_cents,
+        "garment_markup_total": money_from_cents(garment_markup_total_cents),
+        "imprint_unit_cents": imprint_unit_cents,
+        "imprint_unit": money_from_cents(imprint_unit_cents),
+        "imprint_total_cents": imprint_total_cents,
+        "imprint_total": money_from_cents(imprint_total_cents),
+        "customer_unit_cents": customer_unit_cents,
+        "customer_unit": money_from_cents(customer_unit_cents),
+        "customer_total_cents": customer_subtotal_cents,
+        "customer_total": money_from_cents(customer_subtotal_cents),
+        "tax_cents": customer_tax_cents,
+        "tax": money_from_cents(customer_tax_cents),
+        "total_with_tax_cents": customer_total_cents,
+        "total_with_tax": money_from_cents(customer_total_cents),
+    }
 
 
 def snapshot_from_successes(
@@ -366,6 +659,7 @@ def snapshot_from_successes(
     decoration_prices: list[dict[str, Any]] = []
     pricing_receipt_refs: list[dict[str, Any]] = []
     subtotal_cents = 0
+    tax_cents = 0
 
     response_map = {str(entry["line_item_id"]): entry for entry in responses}
     for item in line_items:
@@ -373,51 +667,93 @@ def snapshot_from_successes(
         if not response_entry:
             continue
         response = response_entry["response"]
-        receipt = response.get("receipt") or {}
-        total_cents = int(receipt.get("total_amount") or 0)
         quantity = int(item.get("quantity") or 0) or 1
-        subtotal_cents += total_cents
+        response_mode = str(response_entry.get("response_mode") or "estimate")
+        if response_mode == "lane_matrix":
+            scenario = scenario_for_item(item, response)
+            lane_breakdowns = lane_breakdowns_for(item, response, quantity)
+            breakdown = pricing_breakdown_for_lane_matrix(item, response, quantity)
+            receipt_id = None
+            estimate_id = None
+            pricing_source = "mint.pricing.lane_matrix"
+            pricing_authority_path = "mint.pricing.lane_matrix"
+            confidence_level_entry = "high"
+            customer_explanation = {
+                "lane_pricing_mode": "lane_matrix",
+                "scenario_id": scenario.get("scenario_id"),
+                "lane_count": len(lane_breakdowns),
+                "size_tier_label": item.get("size_tier_label"),
+            }
+            line_items_payload = []
+            pricing_trace = []
+            requested_at_utc = timestamp
+        else:
+            receipt = response.get("receipt") or {}
+            lane_breakdowns = []
+            breakdown = pricing_breakdown_for(item, response, quantity)
+            receipt_id = receipt.get("receipt_id")
+            estimate_id = response.get("estimate_id")
+            pricing_source = response.get("pricing_source")
+            pricing_authority_path = response.get("pricing_authority_path")
+            confidence_level_entry = ((response.get("confidence") or {}).get("level") or "low")
+            customer_explanation = copy.deepcopy(response.get("customer_explanation") or {})
+            line_items_payload = copy.deepcopy(response.get("line_items") or [])
+            pricing_trace = copy.deepcopy(response.get("pricing_trace") or [])
+            requested_at_utc = response.get("requested_at_utc") or timestamp
+        subtotal_cents += int(breakdown["customer_total_cents"])
+        tax_cents += int(breakdown["tax_cents"])
 
         line_item_prices.append(
             {
                 "line_item_id": item["line_item_id"],
-                "estimate_id": response.get("estimate_id"),
-                "receipt_id": receipt.get("receipt_id"),
+                "estimate_id": estimate_id,
+                "receipt_id": receipt_id,
                 "quantity": quantity,
-                "unit_price_cents": round(total_cents / quantity),
-                "line_total_cents": total_cents,
-                "unit_price": money_from_cents(round(total_cents / quantity)),
-                "line_total": money_from_cents(total_cents),
-                "confidence_level": ((response.get("confidence") or {}).get("level") or "low"),
-                "pricing_authority_path": response.get("pricing_authority_path"),
-                "pricing_source": response.get("pricing_source"),
+                "unit_price_cents": breakdown["customer_unit_cents"],
+                "line_total_cents": breakdown["customer_total_cents"],
+                "unit_price": breakdown["customer_unit"],
+                "line_total": breakdown["customer_total"],
+                "pricing_breakdown": breakdown,
+                "confidence_level": confidence_level_entry,
+                "pricing_authority_path": pricing_authority_path,
+                "pricing_source": pricing_source,
             }
         )
         decoration_prices.append(
             {
                 "line_item_id": item["line_item_id"],
-                "estimate_id": response.get("estimate_id"),
-                "receipt_id": receipt.get("receipt_id"),
-                "line_items": copy.deepcopy(response.get("line_items") or []),
-                "pricing_trace": copy.deepcopy(response.get("pricing_trace") or []),
-                "customer_explanation": copy.deepcopy(response.get("customer_explanation") or {}),
+                "estimate_id": estimate_id,
+                "receipt_id": receipt_id,
+                "pricing_breakdown": breakdown,
+                "line_items": line_items_payload,
+                "pricing_trace": pricing_trace,
+                "customer_explanation": customer_explanation,
+                "lane_prices": lane_breakdowns,
             }
         )
         pricing_receipt_refs.append(
             {
                 "line_item_id": item["line_item_id"],
-                "estimate_id": response.get("estimate_id"),
-                "receipt_id": receipt.get("receipt_id"),
-                "pricing_authority_path": response.get("pricing_authority_path"),
-                "requested_at_utc": response.get("requested_at_utc") or timestamp,
+                "estimate_id": estimate_id,
+                "receipt_id": receipt_id,
+                "pricing_authority_path": pricing_authority_path,
+                "requested_at_utc": requested_at_utc,
+                "lane_receipt_refs": [
+                    {
+                        "lane_id": lane.get("lane_id"),
+                        "receipt_id": lane.get("receipt_id"),
+                        "pricing_key": lane.get("pricing_key"),
+                    }
+                    for lane in lane_breakdowns
+                ],
             }
         )
 
     totals = {
         "subtotal": money_from_cents(subtotal_cents),
-        "tax": 0,
+        "tax": money_from_cents(tax_cents),
         "shipping": 0,
-        "total": money_from_cents(subtotal_cents),
+        "total": money_from_cents(subtotal_cents + tax_cents),
     }
 
     return {
@@ -430,7 +766,7 @@ def snapshot_from_successes(
         "pricing_receipt_refs": pricing_receipt_refs,
         "confidence_level": confidence_level,
         "blocking_reasons": blocking_reasons,
-        "pricing_authority_path": "mint.quote.packet.price",
+        "pricing_authority_path": "mint.pricing.lane_matrix",
     }
 
 
@@ -507,10 +843,10 @@ def apply_validation_gap(gaps: list[dict[str, Any]], line_item: dict[str, Any], 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (spine_root / "runtime/domain-state/mint/quote-packets"))
-    index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (spine_root / "runtime/domain-state/mint/quote-packets-index.yaml"))
+    spine_root = resolve_spine_root(__file__)
+    mint_root = resolve_mint_data_root(spine_root=spine_root, current_file=__file__)
+    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (mint_root / "quote-packets"))
+    index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (mint_root / "quote-packets-index.yaml"))
 
     packet_file = packet_file_for_id(packets_dir, args.packet_id)
     if not packet_file.exists():
@@ -563,9 +899,15 @@ def main(argv: list[str]) -> int:
             base_url = canonical_pricing_base_url(spine_root)
             try:
                 for item in line_items:
-                    payload = pricing_request_payload(packet, item, timestamp)
-                    response = post_pricing_request(base_url, api_key, payload, args.timeout_seconds)
-                    responses.append({"line_item_id": item["line_item_id"], "response": response})
+                    payload = lane_payload_for_item(packet, item, timestamp)
+                    response = post_lane_matrix_request(base_url, api_key, payload, args.timeout_seconds)
+                    responses.append(
+                        {
+                            "line_item_id": item["line_item_id"],
+                            "response_mode": "lane_matrix",
+                            "response": response,
+                        }
+                    )
             except urlerror.HTTPError as exc:
                 payload = exc.read().decode("utf-8") if exc.fp else ""
                 try:
@@ -612,7 +954,13 @@ def main(argv: list[str]) -> int:
                 )
             else:
                 pricing_state = "completed"
-                line_confidences = [str((entry["response"].get("confidence") or {}).get("level") or "low") for entry in responses]
+                line_confidences = []
+                for entry in responses:
+                    response_mode = str(entry.get("response_mode") or "estimate")
+                    if response_mode == "lane_matrix":
+                        line_confidences.append("high")
+                    else:
+                        line_confidences.append(str((entry["response"].get("confidence") or {}).get("level") or "low"))
                 confidence_level = confidence_floor(line_confidences, pricing_warning_cap(gaps))
                 pricing_snapshot = snapshot_from_successes(
                     packet=packet,
@@ -638,6 +986,7 @@ def main(argv: list[str]) -> int:
     sync_state(packet, pricing_snapshot)
     if pricing_state == "completed" and packet.get("state") == "drafting":
         packet.pop("customer_message_draft", None)
+    readiness = sync_quote_readiness(packet)
 
     dump_yaml(packet_file, packet)
     update_index(index_file, packet, timestamp)
@@ -645,9 +994,35 @@ def main(argv: list[str]) -> int:
     print(f"quote_packet_id: {packet['quote_packet_id']}")
     print(f"state: {packet['state']}")
     print(f"pricing_state: {pricing_snapshot['pricing_state']}")
+    print(f"quote_readiness_state: {readiness['state']}")
+    print(f"quote_next_step: {readiness['next_step']}")
     print(f"pricing_snapshot_id: {pricing_snapshot['pricing_snapshot_id']}")
     print(f"priced_line_item_count: {len(pricing_snapshot.get('line_item_prices') or [])}")
     print(f"blocking_gap_count: {len([gap for gap in packet.get('open_gaps', []) if gap.get('severity') == 'blocking'])}")
+    for price_entry in (pricing_snapshot.get("line_item_prices") or [])[:3]:
+        breakdown = price_entry.get("pricing_breakdown") or {}
+        line_item_id = price_entry.get("line_item_id") or "unknown"
+        print(
+            "line_item_price:"
+            f" {line_item_id}"
+            f" wholesale_blank={breakdown.get('wholesale_blank_unit')}"
+            f" garment_markup={breakdown.get('garment_markup_unit')}"
+            f" imprint={breakdown.get('imprint_unit')}"
+            f" customer_unit={price_entry.get('unit_price')}"
+            f" customer_total={price_entry.get('line_total')}"
+        )
+        for lane in (breakdown.get("lane_breakdowns") or [])[:8]:
+            if not isinstance(lane, dict):
+                continue
+            print(
+                "lane_price:"
+                f" {line_item_id}"
+                f" lane_id={lane.get('lane_id') or ''}"
+                f" placement={lane.get('placement_label') or ''}"
+                f" pricing_key={lane.get('pricing_key') or ''}"
+                f" customer_unit={lane.get('customer_unit')}"
+                f" receipt_id={lane.get('receipt_id') or ''}"
+            )
     if pricing_snapshot.get("blocking_reasons"):
         print("blocking_reasons:")
         for reason in pricing_snapshot["blocking_reasons"]:

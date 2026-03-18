@@ -1,0 +1,487 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(os.environ.get("SPINE_ROOT") or Path(__file__).resolve().parents[5])
+CONTRACT_DEFAULT = ROOT / "ops/bindings/stability.control.contract.yaml"
+CAPABILITY_ID = "infra.core.reconcile"
+DOMAIN_ID = "infra-core-stack"
+STATUS_CAPABILITY = "infra.core.slo.status"
+
+RUN_KEY_RE = re.compile(r"^Run Key:\s*(\S+)", re.MULTILINE)
+STATUS_RE = re.compile(r"^status:\s*([A-Z]+)", re.MULTILINE)
+SUMMARY_RE = re.compile(r"^summary:\s*(.+)", re.MULTILINE)
+
+
+def stop(message: str) -> None:
+    print(f"STOP: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def load_yaml(path: Path) -> Any:
+    try:
+        proc = subprocess.run(
+            ["yq", "-o=json", ".", str(path)],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("missing dependency: yq") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip() or f"exit_code={exc.returncode}"
+        raise RuntimeError(f"failed to load {path}: {detail}") from exc
+    try:
+        return json.loads(proc.stdout or "null")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid YAML/JSON payload in {path}") from exc
+
+
+def sanitize_detail(text: str) -> str:
+    return " | ".join(line.strip() for line in text.splitlines() if line.strip())
+
+
+def extract_run_key(output: str) -> str | None:
+    matches = RUN_KEY_RE.findall(output)
+    return matches[-1] if matches else None
+
+
+def extract_detail(output: str) -> str:
+    summaries = SUMMARY_RE.findall(output)
+    if summaries:
+        return f"summary: {summaries[-1]}"
+    statuses = STATUS_RE.findall(output)
+    if statuses:
+        return f"status: {statuses[-1]}"
+    for line in output.splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        upper = candidate.upper()
+        if any(marker in upper for marker in ("FAIL", "INCIDENT", "WARN", "TIMEOUT", "STOP")):
+            return candidate
+    for line in output.splitlines():
+        candidate = line.strip()
+        if candidate:
+            return candidate
+    return "no_output"
+
+
+def normalize_service_status(raw_status: str) -> str:
+    if raw_status == "OK":
+        return "pass"
+    if raw_status == "WARN":
+        return "warn"
+    return "fail"
+
+
+def parse_service_status(output: str) -> tuple[str, str]:
+    statuses = STATUS_RE.findall(output)
+    summaries = SUMMARY_RE.findall(output)
+    raw_status = statuses[-1] if statuses else "UNKNOWN"
+    summary = f"summary: {summaries[-1]}" if summaries else extract_detail(output)
+    return raw_status, summary
+
+
+def render_template(template: str, replacements: dict[str, str]) -> str:
+    rendered = template
+    for key, value in replacements.items():
+        rendered = rendered.replace(f"{{{{{key}}}}}", value)
+    return rendered
+
+
+def parse_cap_run_command(command_text: str) -> tuple[str, list[str]] | None:
+    try:
+        tokens = shlex.split(command_text)
+    except ValueError:
+        return None
+    if len(tokens) < 4:
+        return None
+    if tokens[0] != "./bin/ops" or tokens[1] != "cap" or tokens[2] != "run":
+        return None
+    return tokens[3], tokens[4:]
+
+
+def run_command(command: list[str], timeout_sec: int) -> dict[str, Any]:
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+        output = f"{proc.stdout or ''}{proc.stderr or ''}"
+        rc = proc.returncode
+    except subprocess.TimeoutExpired as exc:
+        output = f"{exc.stdout or ''}{exc.stderr or ''}\nTIMEOUT: command exceeded {timeout_sec}s budget\n"
+        rc = 124
+    duration_ms = int((time.monotonic() - start) * 1000)
+    return {
+        "command": shlex.join(command),
+        "rc": rc,
+        "duration_ms": duration_ms,
+        "run_key": extract_run_key(output),
+        "detail": extract_detail(output),
+        "output": output,
+    }
+
+
+def capability_step(step_id: str, capability_id: str, args: list[str], timeout_sec: int, planned_command: str | None = None) -> dict[str, Any]:
+    command = ["./bin/ops", "cap", "run", capability_id, *args]
+    result = run_command(command, timeout_sec)
+    step = {
+        "id": step_id,
+        "kind": "capability",
+        "capability": capability_id,
+        "status": "pass" if result["rc"] == 0 else "fail",
+        "rc": result["rc"],
+        "duration_ms": result["duration_ms"],
+        "detail": result["detail"],
+        "run_key": result["run_key"],
+        "command": result["command"],
+    }
+    if planned_command:
+        step["planned_command"] = planned_command
+    return step
+
+
+def capability_step_from_rendered_command(step_id: str, command_text: str, timeout_sec: int) -> dict[str, Any]:
+    parsed = parse_cap_run_command(command_text)
+    if parsed is None:
+        return {
+            "id": step_id,
+            "kind": "capability",
+            "capability": None,
+            "status": "fail",
+            "rc": 2,
+            "duration_ms": 0,
+            "detail": "invalid_cap_run_command_in_contract",
+            "run_key": None,
+            "command": command_text,
+            "planned_command": command_text,
+        }
+    capability_id, args = parsed
+    return capability_step(step_id, capability_id, args, timeout_sec, planned_command=command_text)
+
+
+def status_step(step_id: str, timeout_sec: int, planned_command: str | None = None) -> dict[str, Any]:
+    result = run_command(["./bin/ops", "cap", "run", STATUS_CAPABILITY], timeout_sec)
+    raw_status, summary = parse_service_status(result["output"])
+    step = {
+        "id": step_id,
+        "kind": "capability",
+        "capability": STATUS_CAPABILITY,
+        "status": normalize_service_status(raw_status),
+        "service_status": raw_status,
+        "rc": result["rc"],
+        "duration_ms": result["duration_ms"],
+        "detail": summary,
+        "run_key": result["run_key"],
+        "command": result["command"],
+    }
+    if planned_command:
+        step["planned_command"] = planned_command
+    return step
+
+
+def shell_step(step_id: str, command: list[str], timeout_sec: int, planned_command: str | None = None) -> dict[str, Any]:
+    result = run_command(command, timeout_sec)
+    step = {
+        "id": step_id,
+        "kind": "shell",
+        "status": "pass" if result["rc"] == 0 else "fail",
+        "rc": result["rc"],
+        "duration_ms": result["duration_ms"],
+        "detail": result["detail"],
+        "run_key": result["run_key"],
+        "command": result["command"],
+    }
+    if planned_command:
+        step["planned_command"] = planned_command
+    return step
+
+
+def skipped_step(step_id: str, reason: str, planned_command: str | None = None) -> dict[str, Any]:
+    step = {
+        "id": step_id,
+        "kind": "skipped",
+        "status": "skipped",
+        "rc": None,
+        "duration_ms": 0,
+        "detail": reason,
+        "run_key": None,
+    }
+    if planned_command:
+        step["planned_command"] = planned_command
+    return step
+
+
+def build_vm_start_command(host: str, user: str, port: int, connect_timeout: int, strict_host_key_checking: str, known_hosts_file: str, vmid: str) -> list[str]:
+    remote_cmd = (
+        "set -euo pipefail\n"
+        f"current=\"$(qm status {vmid} 2>/dev/null | awk '{{print $2}}')\"\n"
+        "if [ \"$current\" != \"running\" ]; then\n"
+        f"  qm start {vmid} >/dev/null\n"
+        "fi\n"
+        f"qm status {vmid}\n"
+    )
+    return [
+        "ssh",
+        "-o",
+        f"ConnectTimeout={connect_timeout}",
+        "-o",
+        f"StrictHostKeyChecking={strict_host_key_checking}",
+        "-o",
+        f"UserKnownHostsFile={known_hosts_file}",
+        "-o",
+        "BatchMode=yes",
+        "-p",
+        str(port),
+        f"{user}@{host}",
+        remote_cmd,
+    ]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Execute the bounded infra-core recovery path.")
+    parser.add_argument("--contract", default=str(CONTRACT_DEFAULT), help="Path to the stability control contract.")
+    parser.add_argument("--execute", action="store_true", help="Execute the bounded recovery steps. Dry-run by default.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON output.")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    contract_path = Path(args.contract).resolve()
+    if not contract_path.is_file():
+        stop(f"missing contract: {contract_path}")
+
+    try:
+        contract = load_yaml(contract_path)
+    except RuntimeError as exc:
+        stop(str(exc))
+
+    sources = contract.get("sources") or {}
+    vm_lifecycle_rel = str(sources.get("vm_lifecycle") or "ops/bindings/vm.lifecycle.yaml")
+    ssh_targets_rel = str(sources.get("ssh_targets") or "ops/bindings/ssh.targets.yaml")
+    vm_lifecycle_path = ROOT / vm_lifecycle_rel
+    ssh_targets_path = ROOT / ssh_targets_rel
+    if not vm_lifecycle_path.is_file():
+        stop(f"missing vm lifecycle: {vm_lifecycle_path}")
+    if not ssh_targets_path.is_file():
+        stop(f"missing ssh targets: {ssh_targets_path}")
+
+    try:
+        vm_lifecycle = load_yaml(vm_lifecycle_path)
+        ssh_targets_doc = load_yaml(ssh_targets_path)
+    except RuntimeError as exc:
+        stop(str(exc))
+
+    domain_cfg = next((item for item in (contract.get("critical_domains") or []) if str(item.get("id")) == DOMAIN_ID), None)
+    if domain_cfg is None:
+        stop(f"missing critical domain definition for {DOMAIN_ID}")
+
+    vm_hostname = str(domain_cfg.get("vm_hostname") or "").strip()
+    vm_record = next(
+        (
+            item
+            for item in (vm_lifecycle.get("vms") or [])
+            if str(item.get("hostname") or "").strip() == vm_hostname and str(item.get("status") or "").strip() != "decommissioned"
+        ),
+        None,
+    )
+    if vm_record is None:
+        stop(f"missing vm lifecycle entry for {vm_hostname}")
+
+    vmid = str(vm_record.get("id") or vm_record.get("vmid") or "").strip()
+    proxmox_host = str(vm_record.get("proxmox_host") or "").strip()
+    vm_state = str(vm_record.get("status") or "unknown").strip()
+    if not vmid:
+        stop(f"missing vmid for {vm_hostname}")
+    if not proxmox_host:
+        stop(f"missing proxmox_host for {vm_hostname}")
+
+    ssh_defaults = (ssh_targets_doc.get("ssh") or {}).get("defaults") or {}
+    ssh_targets = (ssh_targets_doc.get("ssh") or {}).get("targets") or []
+    proxmox_target = next((item for item in ssh_targets if str(item.get("id") or "").strip() == proxmox_host), None)
+    if proxmox_target is None:
+        stop(f"missing ssh target for {proxmox_host}")
+
+    proxmox_host_ip = str(proxmox_target.get("host") or "").strip()
+    proxmox_user = str(proxmox_target.get("user") or ssh_defaults.get("user") or "root").strip()
+    proxmox_port = int(proxmox_target.get("port") or ssh_defaults.get("port") or 22)
+    proxmox_connect_timeout = int(proxmox_target.get("connect_timeout_sec") or ssh_defaults.get("connect_timeout_sec") or 6)
+    strict_host_key_checking = str(ssh_defaults.get("strict_host_key_checking") or "no").strip()
+    known_hosts_file = str(ssh_defaults.get("user_known_hosts_file") or "/dev/null").strip()
+    if not proxmox_host_ip:
+        stop(f"missing proxmox host IP for {proxmox_host}")
+
+    rendered_commands = [
+        render_template(
+            template,
+            {
+                "vmid": vmid,
+                "vm_hostname": vm_hostname,
+                "proxmox_host": proxmox_host,
+                "proxmox_host_ip": proxmox_host_ip,
+                "z2m_addon_slug": str(domain_cfg.get("z2m_addon_slug") or ""),
+            },
+        )
+        for template in (contract.get("guided_recovery_commands") or {}).get(DOMAIN_ID, [])
+    ]
+    governed_recovery_capability = str((contract.get("governed_recovery_capabilities") or {}).get(DOMAIN_ID) or "").strip() or CAPABILITY_ID
+    vm_plan = next((cmd for cmd in rendered_commands if cmd.startswith("ssh ")), None)
+    compose_plans = [
+        cmd for cmd in rendered_commands
+        if (parse_cap_run_command(cmd) or ("", []))[0] == "docker.compose.up"
+    ]
+    postcheck_plan = next(
+        (cmd for cmd in reversed(rendered_commands) if (parse_cap_run_command(cmd) or ("", []))[0] == STATUS_CAPABILITY),
+        None,
+    )
+
+    steps: list[dict[str, Any]] = []
+    precheck = status_step("precheck", 45)
+    steps.append(precheck)
+    recovery_needed = precheck.get("service_status") != "OK"
+
+    if args.execute and recovery_needed:
+        ensure_vm = shell_step(
+            "vm.ensure_running",
+            build_vm_start_command(
+                proxmox_host_ip,
+                proxmox_user,
+                proxmox_port,
+                proxmox_connect_timeout,
+                strict_host_key_checking,
+                known_hosts_file,
+                vmid,
+            ),
+            45,
+            planned_command=vm_plan,
+        )
+        steps.append(ensure_vm)
+
+        if compose_plans:
+            for index, compose_plan in enumerate(compose_plans, start=1):
+                parsed_compose = parse_cap_run_command(compose_plan)
+                stack_name = f"step{index}"
+                if parsed_compose is not None and len(parsed_compose[1]) >= 2:
+                    stack_name = parsed_compose[1][1]
+                step_id = f"compose.up.{stack_name}"
+                if ensure_vm["status"] == "pass":
+                    compose_step = capability_step_from_rendered_command(step_id, compose_plan, 180)
+                else:
+                    compose_step = skipped_step(step_id, "skipped_due_to_vm.ensure_running_failure", planned_command=compose_plan)
+                steps.append(compose_step)
+
+        postcheck = status_step("postcheck", 45, planned_command=postcheck_plan)
+        steps.append(postcheck)
+    else:
+        if recovery_needed:
+            postcheck = None
+        else:
+            postcheck = precheck
+
+    if not args.execute:
+        if recovery_needed:
+            overall_status = "plan"
+            message = "Recovery plan prepared; rerun with --execute to apply the bounded infra-core path."
+        else:
+            overall_status = "pass"
+            message = "Infra-core is already healthy; no recovery action is required."
+    else:
+        if not recovery_needed:
+            overall_status = "pass"
+            message = "Infra-core is already healthy; bounded recovery skipped."
+        else:
+            postcheck_step = steps[-1]
+            step_failures = any(step["status"] == "fail" for step in steps[1:])
+            if postcheck_step.get("service_status") == "OK" and not step_failures:
+                overall_status = "pass"
+                message = "Infra-core recovery completed and the postcheck is OK."
+            else:
+                overall_status = "fail"
+                message = "Infra-core recovery ran, but the postcheck did not return OK."
+
+    result = {
+        "capability": CAPABILITY_ID,
+        "governed_recovery_capability": governed_recovery_capability,
+        "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "status": overall_status,
+        "mode": "execute" if args.execute else "dry-run",
+        "execute": args.execute,
+        "contract": str(contract_path),
+        "authority": {
+            "vm_lifecycle": vm_lifecycle_rel,
+            "ssh_targets": ssh_targets_rel,
+        },
+        "domain": {
+            "id": DOMAIN_ID,
+            "description": str(domain_cfg.get("description") or ""),
+        },
+        "vm": {
+            "hostname": vm_hostname,
+            "vmid": vmid,
+            "state": vm_state,
+            "proxmox_host": proxmox_host,
+            "proxmox_host_ip": proxmox_host_ip,
+            "ssh_user": proxmox_user,
+            "ssh_port": proxmox_port,
+        },
+        "recovery_needed": recovery_needed,
+        "current_status": {
+            "service_status": precheck.get("service_status"),
+            "detail": precheck.get("detail"),
+            "run_key": precheck.get("run_key"),
+        },
+        "guided_recovery_commands": rendered_commands,
+        "steps": steps,
+        "message": message,
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(CAPABILITY_ID)
+        print(f"mode: {result['mode']}")
+        print(f"status: {overall_status}")
+        print(f"recovery_needed: {str(recovery_needed).lower()}")
+        print(f"current_status: {precheck.get('service_status')}")
+        print(f"current_detail: {sanitize_detail(str(precheck.get('detail') or ''))}")
+        print(f"vm_hostname: {vm_hostname}")
+        print(f"vmid: {vmid}")
+        print(f"proxmox_host: {proxmox_host}")
+        print(f"proxmox_host_ip: {proxmox_host_ip}")
+        print("guided_recovery_commands:")
+        if rendered_commands:
+            for idx, command in enumerate(rendered_commands, start=1):
+                print(f"  {idx}. {command}")
+        else:
+            print("  (none configured)")
+        print("steps:")
+        for step in steps:
+            run_key = step.get("run_key") or "-"
+            print(f"  - {step['id']}: {step['status']} rc={step.get('rc', '-') if step.get('rc') is not None else '-'} run_key={run_key} detail={sanitize_detail(str(step.get('detail') or ''))}")
+        print(f"message: {message}")
+
+    return 0 if overall_status in {"pass", "plan"} else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

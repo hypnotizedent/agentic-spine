@@ -10,7 +10,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from quote_packet_normalize import append_receipt, dump_yaml, fail, load_structured_file, now_utc
+from customer_mail_identity_common import project_mail_identity, salutation_text, validate_mail_identity_projection
+from mint_runtime_paths import resolve_mint_data_root, resolve_spine_root
+from quote_packet_normalize import append_receipt, dump_yaml, fail, load_structured_file, now_utc, sync_quote_readiness
 
 
 BLOCKED_PRICING_STATES = {
@@ -170,6 +172,9 @@ def review_ready(packet: dict[str, Any]) -> tuple[bool, list[str]]:
     customer_ref = packet.get("customer_ref") or {}
     if customer_ref.get("identity_state") != "resolved":
         reasons.append("customer identity is not resolved")
+    else:
+        identity_reasons = validate_mail_identity_projection(project_mail_identity(customer_ref=customer_ref))
+        reasons.extend(f"customer mail identity invalid: {reason}" for reason in identity_reasons)
 
     blocking_gaps = [gap for gap in packet.get("open_gaps") or [] if gap.get("severity") == "blocking"]
     if blocking_gaps:
@@ -193,18 +198,21 @@ def draft_payload(packet: dict[str, Any], timestamp: str) -> dict[str, Any]:
     pricing_snapshot = packet.get("pricing_snapshot") or {}
     totals = copy.deepcopy(pricing_snapshot.get("calculated_totals") or {"subtotal": 0, "tax": 0, "shipping": 0, "total": 0})
     customer_ref = packet.get("customer_ref") or {}
+    projection = project_mail_identity(customer_ref=customer_ref)
     customer_display_name = (
         customer_ref.get("resolved_name")
         or customer_ref.get("customer_query")
         or customer_ref.get("customer_id")
         or "Customer"
     )
+    customer_salutation = salutation_text(projection, named_prefix="Hi")
     shipping = shipping_posture(packet)
 
     return {
         "quote_packet_id": packet.get("quote_packet_id"),
         "title": f"Quote Draft for {customer_display_name}",
         "customer_display_name": customer_display_name,
+        "customer_salutation": customer_salutation,
         "generated_at": timestamp,
         "line_items": line_entries(packet),
         "totals": totals,
@@ -231,10 +239,10 @@ def message_draft(payload: dict[str, Any]) -> str:
     totals = payload.get("totals") or {}
     warnings = payload.get("warning_notes") or []
     shipping = payload.get("shipping_posture") or {}
-    customer_display_name = payload.get("customer_display_name") or "there"
+    customer_salutation = payload.get("customer_salutation") or "Hello,"
 
     body = [
-        f"Hi {customer_display_name},",
+        customer_salutation,
         "",
         "I put together your quote draft for review:",
         *lines,
@@ -285,9 +293,9 @@ def clear_stale_payment_ref(packet: dict[str, Any]) -> bool:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (spine_root / "runtime/domain-state/mint/quote-packets"))
+    spine_root = resolve_spine_root(__file__)
+    mint_root = resolve_mint_data_root(spine_root=spine_root, current_file=__file__)
+    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (mint_root / "quote-packets"))
     packet_file = packets_dir / f"quote_packet_{args.packet_id}.yaml"
     if not packet_file.exists():
         fail(f"packet not found: {args.packet_id}")
@@ -313,11 +321,14 @@ def main(argv: list[str]) -> int:
 
     current_state = str(packet.get("state") or "")
     packet["state"] = current_state if current_state == "approved_to_send" else "ready_for_review"
+    readiness = sync_quote_readiness(packet)
 
     dump_yaml(packet_file, packet)
 
     print(f"quote_packet_id: {args.packet_id}")
     print(f"state: {current_state} -> {packet['state']}")
+    print(f"quote_readiness_state: {readiness['state']}")
+    print(f"quote_next_step: {readiness['next_step']}")
     print("render_status: success")
     print("quote_draft: generated")
     print("customer_message: generated")

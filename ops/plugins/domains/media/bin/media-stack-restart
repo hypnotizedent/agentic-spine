@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# media.stack.restart — Restart docker compose stacks on media VMs
+# media.stack.restart — Restart the canonical media-home docker compose stack
 #
 # Usage:
 #   ./bin/ops cap run media.stack.restart
-#   ./bin/ops cap run media.stack.restart --vm download-stack
-#   ./bin/ops cap run media.stack.restart --vm streaming-stack
+#   ./bin/ops cap run media.stack.restart --vm media-home
 #   ./bin/ops cap run media.stack.restart --dry-run
 #
 # Contract:
-# - Reads VM targets from ops/bindings/docker.compose.targets.yaml
+# - Reads VM target from ops/bindings/docker.compose.targets.yaml
 # - Executes: docker compose down && docker compose up -d
-# - Requires SSH access to target VMs
+# - Requires SSH access to media-home
 # - Generates receipt with before/after container states
 
 set -euo pipefail
@@ -21,15 +20,15 @@ VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 
 usage() {
   cat <<'USAGE'
-media.stack.restart — Restart docker compose stacks on media VMs
+media.stack.restart — Restart the canonical media-home docker compose stack
 
 Args:
-  --vm HOST         Restart only this VM (download-stack|streaming-stack)
+  --vm HOST         Restart only this VM (media-home)
   --dry-run         Show what would be done without executing
   --timeout SEC     SSH connection timeout (default: 30)
 
 Examples:
-  ./bin/ops cap run media.stack.restart --vm download-stack
+  ./bin/ops cap run media.stack.restart --vm media-home
   ./bin/ops cap run media.stack.restart --dry-run
 USAGE
 }
@@ -53,11 +52,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$VM_FILTER" && "$VM_FILTER" != "media-home" ]]; then
+  echo "FAIL: media.stack.restart only supports media-home" >&2
+  exit 1
+fi
+
+VM_FILTER="${VM_FILTER:-media-home}"
+
 command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
 command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
 
-# Media VMs only
-MEDIA_VMS=("download-stack" "streaming-stack")
+# Canonical media runtime only
+MEDIA_VMS=("media-home")
 
 get_vm_ssh_ref() {
   local vm="$1"
@@ -91,6 +97,11 @@ restart_vm_stack() {
   compose_path=$(get_compose_path "$vm")
   if [[ -z "$compose_path" ]]; then
     echo "FAIL: no compose path found for $vm"
+    return 1
+  fi
+
+  if [[ "$compose_path" != */media-stack ]]; then
+    echo "FAIL: $vm does not resolve to the canonical media-stack compose root"
     return 1
   fi
 

@@ -1,0 +1,781 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_identity_common import (  # noqa: E402
+    customer_facing_name,
+    resolve_customer_personalization,
+    resolve_message_customer_contact,
+)
+from customer_inbox_disposition_common import resolve_message_disposition  # noqa: E402
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    compact_utc,
+    fail,
+    iso_utc,
+    message_body_text,
+    message_subject,
+    normalized_subject,
+    resolve_spine_root,
+    resolve_spine_state,
+    run_cap_capture,
+    strip_html,
+    utc_now,
+    write_json,
+)
+
+
+SCHEMA_VERSION = "1.0"
+CAPABILITY_FALLBACK = "mint.customer.seed.ensure"
+DEFAULT_MAILBOX = "team@mintprints.com"
+MAIL_GET_CAPABILITY = "microsoft.mail.get"
+SNAPSHOT_CAPABILITY = "mint.customer.record.snapshot"
+DEFAULT_FILES_API_TIMEOUT_SEC = 20
+MAX_EVENT_HISTORY = 25
+WORK_TYPES = (
+    "quote_request",
+    "art_delivery",
+    "proof_review",
+    "reorder",
+    "vendor_revision",
+    "spam_or_promotional",
+    "ambiguous",
+)
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_CUSTOMER_SEED_ENSURE_CAPABILITY_NAME") or CAPABILITY_FALLBACK
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-seed-ensure",
+        description=(
+            "Ensure an inbox-driven Mint seed record exists for a mailbox message. "
+            "Reads the message, resolves customer record truth, and creates or updates "
+            "the canonical email seed through files-api."
+        ),
+    )
+    parser.add_argument("message_id", nargs="?", help="Mailbox message id to anchor")
+    parser.add_argument("--message-id", dest="message_id_flag", default="", help="Mailbox message id to anchor")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox to read from (default: {DEFAULT_MAILBOX})")
+    parser.add_argument("--customer-email", default="", help="Override customer email if mailbox sender is internal/forwarded")
+    parser.add_argument("--work-type", default="", help=f"Override inferred work type ({', '.join(WORK_TYPES)})")
+    parser.add_argument("--summary", default="", help="Override derived ask summary")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    resolved_message_id = args.message_id_flag.strip() or str(args.message_id or "").strip()
+    if not resolved_message_id:
+        fail("message_id required")
+    args.message_id = resolved_message_id
+    if args.work_type and args.work_type not in WORK_TYPES:
+        fail(f"invalid --work-type: {args.work_type}")
+    return args
+
+
+def shell_text(command: str, *, cwd: Path) -> str:
+    result = subprocess.run(
+        ["bash", "-lc", command],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        combined = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+        fail(combined.strip() or f"shell command failed: {command}")
+    return (result.stdout or "").strip()
+
+
+def resolve_files_api_base_url(spine_root: Path) -> str:
+    override = os.environ.get("MINT_CUSTOMER_SEED_ENSURE_FILES_API_URL", "").strip()
+    if override:
+        return override.rstrip("/")
+    cmd = (
+        f"source {shlex.quote(str(spine_root / 'ops/lib/ssh-resolve.sh'))}; "
+        f"source {shlex.quote(str(spine_root / 'ops/lib/mint-health-surface.sh'))}; "
+        "mint_service_resolved_base_url files-api 5 || true"
+    )
+    value = shell_text(cmd, cwd=spine_root).strip()
+    if not value:
+        fail("could not resolve files-api base url")
+    return value.rstrip("/")
+
+
+def resolve_mint_apps_ssh(spine_root: Path) -> tuple[str, str, str]:
+    ssh_binding = spine_root / "ops/bindings/ssh.targets.yaml"
+    timeout = shell_text(
+        f"yq -r '.ssh.targets[] | select(.id == \"mint-apps\") | .connect_timeout_sec // .ssh.defaults.connect_timeout_sec // 5' "
+        f"{shlex.quote(str(ssh_binding))} | head -n1",
+        cwd=spine_root,
+    )
+    user = shell_text(
+        f"yq -r '.ssh.targets[] | select(.id == \"mint-apps\") | .user // \"ubuntu\"' "
+        f"{shlex.quote(str(ssh_binding))} | head -n1",
+        cwd=spine_root,
+    )
+    cmd = (
+        f"source {shlex.quote(str(spine_root / 'ops/lib/ssh-resolve.sh'))}; "
+        f"ssh_resolve_ssh_host_with_fallback mint-apps {shlex.quote(timeout or '5')} || true"
+    )
+    resolved = shell_text(cmd, cwd=spine_root).strip().split()
+    if len(resolved) < 2 or resolved[1] == "unreachable":
+        fail("mint-apps is unreachable over SSH")
+    return user or "ubuntu", resolved[0], resolved[1]
+
+
+def resolve_files_api_key(spine_root: Path) -> tuple[str, dict[str, Any]]:
+    if "MINT_CUSTOMER_SEED_ENSURE_FILES_API_KEY" in os.environ:
+        return os.environ.get("MINT_CUSTOMER_SEED_ENSURE_FILES_API_KEY", ""), {"source": "env_override"}
+    if os.environ.get("MINT_CUSTOMER_SEED_ENSURE_FILES_API_URL", "").strip():
+        return "", {"source": "local_override_no_auth"}
+    user, host, path_used = resolve_mint_apps_ssh(spine_root)
+    ssh_cmd = [
+        "ssh",
+        "-o",
+        "ConnectTimeout=6",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "LogLevel=ERROR",
+        f"{user}@{host}",
+        "docker inspect files-api --format '{{json .Config.Env}}'",
+    ]
+    result = subprocess.run(ssh_cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        fail(f"failed to inspect files-api env on mint-apps: {(result.stderr or result.stdout).strip()}")
+    try:
+        env_list = json.loads((result.stdout or "").strip())
+    except json.JSONDecodeError as exc:
+        fail("could not parse files-api env output")
+        raise exc
+    api_key = ""
+    for item in env_list:
+        if str(item).startswith("API_KEY="):
+            api_key = str(item).split("=", 1)[1]
+            break
+    if not api_key:
+        fail("files-api API_KEY not found on mint-apps")
+    return api_key, {"source": "mint-apps-container-env", "host": host, "path_used": path_used}
+
+
+def http_json(
+    *,
+    base_url: str,
+    path: str,
+    method: str = "GET",
+    api_key: str = "",
+    query: dict[str, str] | None = None,
+    payload: dict[str, Any] | None = None,
+    timeout_sec: int = DEFAULT_FILES_API_TIMEOUT_SEC,
+) -> tuple[int, dict[str, Any]]:
+    url = f"{base_url.rstrip('/')}{path}"
+    if query:
+        url = f"{url}?{urllib.parse.urlencode(query)}"
+    body: bytes | None = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        body = json.dumps(payload, sort_keys=True).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    if api_key:
+        headers["X-API-Key"] = api_key
+    request = urllib.request.Request(url, data=body, method=method.upper(), headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            return response.getcode(), json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            parsed = {"error": raw.strip() or f"HTTP {exc.code}"}
+        return exc.code, parsed
+    except urllib.error.URLError as exc:
+        fail(f"files-api unreachable: {exc}")
+    except TimeoutError:
+        fail("files-api request timed out")
+    return 0, {}
+
+
+def unwrap_mail_get_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("id") and ("subject" in payload or "body" in payload):
+        return payload
+    data = payload.get("data")
+    if isinstance(data, dict) and data.get("id") and ("subject" in data or "body" in data):
+        return data
+    return payload
+
+
+def infer_work_type(subject: str, body: str) -> str:
+    text = f"{subject}\n{body}".lower()
+    if any(token in text for token in ("unsubscribe", "manage preferences", "view in browser", "special offer")):
+        return "spam_or_promotional"
+    if any(token in text for token in ("same as last time", "same as last order", "reorder", "instead of")):
+        return "reorder"
+    if any(token in text for token in ("proof", "approve", "approval", "mockup")):
+        return "proof_review"
+    if any(token in text for token in ("revise", "revision", "update the logo", "change the art", "tagline")):
+        return "vendor_revision"
+    if any(token in text for token in ("attached file", "see attached", "art attached", "graphics attached")):
+        return "art_delivery"
+    if any(token in text for token in ("quote", "pricing", "price", "estimate", "how much")):
+        return "quote_request"
+    return "ambiguous"
+
+
+def summarize_message(subject: str, body: str, override: str) -> str:
+    if override.strip():
+        return override.strip()
+    text = re.sub(r"\s+", " ", body or "").strip()
+    if not text:
+        text = normalized_subject(subject) or subject.strip()
+    if len(text) > 280:
+        text = text[:277].rstrip() + "..."
+    return text
+
+
+def coerce_iso(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return raw
+
+
+def thread_key(customer_email: str, subject: str, conversation_id: str) -> str:
+    if conversation_id.strip():
+        return f"conversation:{conversation_id.strip()}"
+    return f"{customer_email.lower()}::{normalized_subject(subject).lower()}"
+
+
+def dedupe_preserve(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        token = str(value or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def latest_legacy_anchor(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    legacy_hold = dict(snapshot.get("legacy_hold") or {})
+    rows = list(legacy_hold.get("orders") or [])
+    latest = dict(legacy_hold.get("latest_order") or {})
+    if rows:
+        latest = dict(rows[0])
+    if not latest:
+        return None
+    return {
+        "order_number": latest.get("order_number") or latest.get("invoice_number"),
+        "nickname": latest.get("nickname"),
+        "status": latest.get("status"),
+        "due_date": latest.get("due_date"),
+    }
+
+
+def fresh_customer_anchor(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    fresh_slate = dict(snapshot.get("fresh_slate") or {})
+    rows = list(fresh_slate.get("customers") or [])
+    row = dict(fresh_slate.get("customer") or {})
+    if rows:
+        row = dict(rows[0])
+    if not row:
+        return None
+    return {
+        "record_id": row.get("record_id"),
+        "legacy_customer_id": row.get("legacy_customer_id"),
+        "printavo_customer_id": row.get("printavo_customer_id") or ((row.get("metadata") or {}).get("legacy_row") or {}).get("printavo_id"),
+    }
+
+
+def list_seeds_for_email(base_url: str, api_key: str, email: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    status, payload = http_json(
+        base_url=base_url,
+        path="/api/v1/seeds",
+        method="GET",
+        api_key=api_key,
+        query={"from_email": email},
+    )
+    if status != 200:
+        fail(f"files-api seed list failed: HTTP {status}: {payload}")
+    rows = list(payload.get("seeds") or [])
+    rows.sort(key=lambda row: (str(row.get("updated_at") or ""), str(row.get("created_at") or "")), reverse=True)
+    return rows, {"status": status, "count": len(rows), "query": {"from_email": email}}
+
+
+def seed_spine_context(seed: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(seed.get("metadata") or {})
+    context = metadata.get("spine_context")
+    return dict(context) if isinstance(context, dict) else {}
+
+
+def find_matching_seed(
+    seeds: list[dict[str, Any]],
+    *,
+    message_id: str,
+    internet_message_id: str,
+    conversation_id: str,
+    computed_thread_key: str,
+) -> tuple[dict[str, Any] | None, str]:
+    conversation_candidate: dict[str, Any] | None = None
+    thread_candidate: dict[str, Any] | None = None
+    for seed in seeds:
+        context = seed_spine_context(seed)
+        thread = dict(context.get("thread") or {})
+        message_ids = set(str(item) for item in (thread.get("message_ids") or []))
+        internet_ids = set(str(item) for item in (thread.get("internet_message_ids") or []))
+        conversation_ids = set(str(item) for item in (thread.get("conversation_ids") or []))
+        seed_thread_key = str(thread.get("thread_key") or "")
+        if message_id and message_id in message_ids:
+            return seed, "exact_message_id"
+        if internet_message_id and internet_message_id in internet_ids:
+            return seed, "exact_internet_message_id"
+        if conversation_id and conversation_id in conversation_ids and conversation_candidate is None:
+            conversation_candidate = seed
+        if computed_thread_key and seed_thread_key == computed_thread_key and thread_candidate is None:
+            thread_candidate = seed
+    if conversation_candidate is not None:
+        return conversation_candidate, "conversation_id"
+    if thread_candidate is not None:
+        return thread_candidate, "thread_key"
+    return None, "new_seed"
+
+
+def metadata_changed(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return json.dumps(left, sort_keys=True, default=str) != json.dumps(right, sort_keys=True, default=str)
+
+
+def build_metadata(
+    *,
+    existing_metadata: dict[str, Any],
+    mailbox: str,
+    customer_email: str,
+    customer_display_name: str,
+    customer_mode: str,
+    subject: str,
+    normalized_subject_text: str,
+    summary_text: str,
+    work_type: str,
+    message_id: str,
+    internet_message_id: str,
+    conversation_id: str,
+    received_utc: str,
+    computed_thread_key: str,
+    snapshot: dict[str, Any],
+    mail_get_receipt: str,
+    snapshot_receipt: str,
+    personalization: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = dict(existing_metadata or {})
+    prior_context = seed_spine_context({"metadata": metadata})
+    prior_thread = dict(prior_context.get("thread") or {})
+    prior_events = list(prior_context.get("events") or [])
+
+    event = {
+        "message_id": message_id,
+        "internet_message_id": internet_message_id or None,
+        "conversation_id": conversation_id or None,
+        "received_utc": received_utc or None,
+        "subject": subject or None,
+        "work_type": work_type,
+        "summary": summary_text,
+        "mailbox": mailbox,
+    }
+    event_key = message_id or internet_message_id or computed_thread_key
+    merged_events = [item for item in prior_events if (item.get("message_id") or item.get("internet_message_id") or item.get("thread_key")) != event_key]
+    merged_events.append(event)
+    if len(merged_events) > MAX_EVENT_HISTORY:
+        merged_events = merged_events[-MAX_EVENT_HISTORY:]
+
+    latest_seed = dict(((snapshot.get("fresh_slate") or {}).get("latest_seed")) or {})
+    anchor = fresh_customer_anchor(snapshot)
+    thread = {
+        "thread_key": computed_thread_key,
+        "subject": subject or None,
+        "normalized_subject": normalized_subject_text or None,
+        "message_ids": dedupe_preserve(list(prior_thread.get("message_ids") or []) + ([message_id] if message_id else [])),
+        "internet_message_ids": dedupe_preserve(list(prior_thread.get("internet_message_ids") or []) + ([internet_message_id] if internet_message_id else [])),
+        "conversation_ids": dedupe_preserve(list(prior_thread.get("conversation_ids") or []) + ([conversation_id] if conversation_id else [])),
+        "latest_message_received_utc": received_utc or prior_thread.get("latest_message_received_utc"),
+        "event_count": len(merged_events),
+    }
+    metadata["spine_context"] = {
+        "schema_version": SCHEMA_VERSION,
+        "record_mode": "inbox_seed",
+        "ensured_by_capability": capability_name(),
+        "mailbox": {
+            "address": mailbox,
+            "provider": "microsoft_graph",
+        },
+        "customer": {
+            "email": customer_email,
+            "display_name": customer_display_name or None,
+            "resolution_mode": customer_mode,
+            "identity_lookup_mode": personalization.get("lookup_mode") or None,
+            "identity": personalization.get("identity") or None,
+            "quote_intelligence": personalization.get("quote_intelligence") or None,
+        },
+        "work": {
+            "type": work_type,
+            "summary": summary_text,
+        },
+        "thread": thread,
+        "events": merged_events,
+        "fresh_anchor": {
+            "customer_record": anchor,
+        },
+        "legacy_anchor": latest_legacy_anchor(snapshot),
+    }
+    metadata["customer_email"] = customer_email
+    metadata["work_type"] = work_type
+    metadata["thread_key"] = computed_thread_key
+    return metadata
+
+
+def text_output(summary: dict[str, Any]) -> str:
+    lines = [
+        capability_name(),
+        f"status: {summary['status']}",
+        f"action: {summary['action']}",
+        f"match_reason: {summary['match_reason']}",
+        f"mailbox: {summary['mailbox']}",
+        f"message_id: {summary['source_message_id']}",
+        f"customer_email: {summary['customer_email']}",
+        f"work_type: {summary['work_type']}",
+        f"seed_id: {summary['seed']['id']}",
+        f"seed_status: {summary['seed'].get('status', '')}",
+        f"record_file: {summary['record_file']}",
+        f"index_file: {summary['index_file']}",
+    ]
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    now = utc_now()
+    ensured_at_utc = iso_utc(now)
+    ensure_id = f"MSE-{compact_utc(now)}-{args.message_id[-4:]}"
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+
+    message_payload, mail_get_receipt = run_cap_capture(
+        spine_root,
+        MAIL_GET_CAPABILITY,
+        ["--message-id", args.message_id, "--mailbox", args.mailbox],
+    )
+    source_message = unwrap_mail_get_payload(message_payload)
+    subject = message_subject(source_message)
+    body_text = message_body_text(source_message)
+    preview_text = strip_html(str(source_message.get("bodyPreview") or "")).strip()
+    disposition = resolve_message_disposition(spine_root, source_message)
+    if not bool(disposition.get("customer_truth_allowed")):
+        fail(
+            "customer-seed-ensure only allows customer_actionable mail; "
+            f"message disposition is {str(disposition.get('disposition') or 'unknown')}"
+        )
+    customer = resolve_message_customer_contact(source_message, args.customer_email)
+    summary_text = summarize_message(subject, body_text or preview_text, args.summary)
+    work_type = args.work_type or str(disposition.get("work_type") or infer_work_type(subject, f"{body_text}\n{preview_text}"))
+    received_utc = coerce_iso(str(source_message.get("receivedDateTime") or ""))
+    conversation_id = str(source_message.get("conversationId") or "").strip()
+    internet_message_id = str(source_message.get("internetMessageId") or "").strip()
+    normalized_subject_text = normalized_subject(subject)
+    computed_thread_key = thread_key(customer["email"], subject, conversation_id)
+
+    personalization = resolve_customer_personalization(
+        spine_root,
+        email=customer["email"],
+        display_name=customer.get("display_name") or "",
+    )
+    snapshot = personalization.get("snapshot") or {}
+    snapshot_receipt = ",".join(str(item) for item in (personalization.get("receipts") or []) if str(item).strip())
+    customer_facing = customer_facing_name(dict(personalization.get("identity") or {}))
+    if customer_facing:
+        customer["display_name"] = customer_facing
+
+    files_api_base_url = resolve_files_api_base_url(spine_root)
+    files_api_key, files_api_key_source = resolve_files_api_key(spine_root)
+    seeds, list_op = list_seeds_for_email(files_api_base_url, files_api_key, customer["email"])
+    matched_seed, match_reason = find_matching_seed(
+        seeds,
+        message_id=args.message_id,
+        internet_message_id=internet_message_id,
+        conversation_id=conversation_id,
+        computed_thread_key=computed_thread_key,
+    )
+
+    http_operations: list[dict[str, Any]] = [
+        {
+            "op": "list_seeds",
+            **list_op,
+        }
+    ]
+
+    action = "created"
+    seed_row: dict[str, Any]
+    create_payload: dict[str, Any] | None = None
+    final_seed_payload: dict[str, Any] | None = None
+
+    if matched_seed is None:
+        initial_metadata = build_metadata(
+            existing_metadata={},
+            mailbox=args.mailbox,
+            customer_email=customer["email"],
+            customer_display_name=customer["display_name"],
+            customer_mode=customer["mode"],
+            subject=subject,
+            normalized_subject_text=normalized_subject_text,
+            summary_text=summary_text,
+            work_type=work_type,
+            message_id=args.message_id,
+            internet_message_id=internet_message_id,
+            conversation_id=conversation_id,
+            received_utc=received_utc,
+            computed_thread_key=computed_thread_key,
+            snapshot=snapshot,
+            mail_get_receipt=mail_get_receipt,
+            snapshot_receipt=snapshot_receipt,
+            personalization=personalization,
+        )
+        status_code, create_payload = http_json(
+            base_url=files_api_base_url,
+            path="/api/v1/seeds",
+            method="POST",
+            api_key=files_api_key,
+            payload={
+                "source": "email",
+                "from_email": customer["email"],
+                "contact_email": customer["email"],
+                "subject": subject or None,
+                "request_text": summary_text or None,
+                "metadata": initial_metadata,
+            },
+        )
+        http_operations.append(
+            {
+                "op": "create_seed",
+                "status": status_code,
+                "response_id": create_payload.get("id") if isinstance(create_payload, dict) else None,
+                "merged": bool((create_payload or {}).get("merged")),
+            }
+        )
+        if status_code not in (200, 201):
+            fail(f"files-api seed create failed: HTTP {status_code}: {create_payload}")
+        seed_row = {
+            "id": create_payload.get("id"),
+            "status": create_payload.get("status"),
+            "source": "email",
+            "from_email": customer["email"],
+            "request_text": summary_text,
+            "subject": subject,
+            "metadata": dict(create_payload.get("metadata") or initial_metadata),
+            "created_at": create_payload.get("created_at"),
+            "updated_at": create_payload.get("updated_at"),
+            "has_line_item": create_payload.get("has_line_item"),
+        }
+        if bool(create_payload.get("merged")):
+            action = "merged_append"
+            match_reason = "sender_window_append"
+        else:
+            action = "created"
+    else:
+        seed_row = dict(matched_seed)
+        action = "updated"
+
+    merged_metadata = build_metadata(
+        existing_metadata=dict(seed_row.get("metadata") or {}),
+        mailbox=args.mailbox,
+        customer_email=customer["email"],
+        customer_display_name=customer["display_name"],
+        customer_mode=customer["mode"],
+        subject=subject,
+        normalized_subject_text=normalized_subject_text,
+        summary_text=summary_text,
+        work_type=work_type,
+        message_id=args.message_id,
+        internet_message_id=internet_message_id,
+        conversation_id=conversation_id,
+        received_utc=received_utc,
+        computed_thread_key=computed_thread_key,
+        snapshot=snapshot,
+        mail_get_receipt=mail_get_receipt,
+        snapshot_receipt=snapshot_receipt,
+        personalization=personalization,
+    )
+
+    if matched_seed is not None and not metadata_changed(dict(seed_row.get("metadata") or {}), merged_metadata):
+        action = "idempotent"
+        final_seed_payload = seed_row
+    else:
+        seed_id = str(seed_row.get("id") or "")
+        if not seed_id:
+            fail("seed id missing after ensure")
+        status_code, update_payload = http_json(
+            base_url=files_api_base_url,
+            path=f"/api/v1/seeds/{seed_id}/metadata",
+            method="POST",
+            api_key=files_api_key,
+            payload=merged_metadata,
+        )
+        http_operations.append(
+            {
+                "op": "set_seed_metadata",
+                "status": status_code,
+                "seed_id": seed_id,
+                "has_line_item": (update_payload or {}).get("has_line_item"),
+            }
+        )
+        if status_code != 200:
+            fail(f"files-api seed metadata update failed: HTTP {status_code}: {update_payload}")
+        status_code, final_seed_payload = http_json(
+            base_url=files_api_base_url,
+            path=f"/api/v1/seeds/{seed_id}",
+            method="GET",
+            api_key=files_api_key,
+        )
+        http_operations.append(
+            {
+                "op": "get_seed",
+                "status": status_code,
+                "seed_id": seed_id,
+            }
+        )
+        if status_code != 200:
+            fail(f"files-api seed get failed: HTTP {status_code}: {final_seed_payload}")
+        if action not in {"created", "merged_append"}:
+            action = "updated"
+
+    final_seed = dict(final_seed_payload or seed_row)
+
+    record = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "ensure_id": ensure_id,
+        "stored_at_utc": ensured_at_utc,
+        "mailbox": args.mailbox,
+        "source_message_id": args.message_id,
+        "source_conversation_id": conversation_id or None,
+        "source_internet_message_id": internet_message_id or None,
+        "source_subject": subject or None,
+        "source_received_utc": received_utc or None,
+        "customer_email": customer["email"],
+        "customer_display_name": customer["display_name"] or None,
+        "customer_identity": personalization.get("identity") or None,
+        "customer_quote_intelligence": personalization.get("quote_intelligence") or None,
+        "customer_resolution_mode": customer["mode"],
+        "work_type": work_type,
+        "summary": summary_text,
+        "action": action,
+        "match_reason": match_reason,
+        "agent_state": (snapshot.get("agent_state") or {}),
+        "seed": {
+            "id": final_seed.get("id"),
+            "source": final_seed.get("source"),
+            "status": final_seed.get("status"),
+            "from_email": final_seed.get("from_email"),
+            "subject": final_seed.get("subject"),
+            "has_line_item": final_seed.get("has_line_item"),
+            "created_at": final_seed.get("created_at"),
+            "updated_at": final_seed.get("updated_at"),
+        },
+        "files_api": {
+            "base_url": files_api_base_url,
+            "api_key_source": files_api_key_source,
+            "operations": http_operations,
+        },
+        "receipts": {
+            "mail_get_receipt": mail_get_receipt or None,
+            "customer_snapshot_receipt": snapshot_receipt or None,
+        },
+    }
+
+    records_dir = state_root / "mint" / "customer-seed-ensures" / "records" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{ensure_id}.json"
+    index_file = state_root / "mint" / "customer-seed-ensures" / "index.ndjson"
+    lock_file = state_root / "mint" / "customer-seed-ensures" / ".index.lock"
+    write_json(record_file, record)
+    append_ndjson(
+        index_file,
+        lock_file,
+        {
+            "ensure_id": ensure_id,
+            "action": action,
+            "match_reason": match_reason,
+            "mailbox": args.mailbox,
+            "source_message_id": args.message_id,
+            "source_conversation_id": conversation_id or None,
+            "customer_email": customer["email"],
+            "work_type": work_type,
+            "seed_id": final_seed.get("id"),
+            "stored_at_utc": ensured_at_utc,
+        },
+    )
+
+    payload = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "generated_at": ensured_at_utc,
+        "action": action,
+        "match_reason": match_reason,
+        "mailbox": args.mailbox,
+        "source_message_id": args.message_id,
+        "source_conversation_id": conversation_id or None,
+        "source_internet_message_id": internet_message_id or None,
+        "customer_email": customer["email"],
+        "customer_display_name": customer["display_name"] or None,
+        "customer_quote_intelligence": personalization.get("quote_intelligence") or None,
+        "customer_state": ((snapshot.get("agent_state") or {}).get("state")),
+        "work_type": work_type,
+        "summary": summary_text,
+        "seed": {
+            "id": final_seed.get("id"),
+            "source": final_seed.get("source"),
+            "status": final_seed.get("status"),
+            "has_line_item": final_seed.get("has_line_item"),
+            "created_at": final_seed.get("created_at"),
+            "updated_at": final_seed.get("updated_at"),
+        },
+        "record_file": str(record_file),
+        "index_file": str(index_file),
+        "receipts": record["receipts"],
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(text_output(payload))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

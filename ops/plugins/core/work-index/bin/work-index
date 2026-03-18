@@ -63,6 +63,19 @@ def infer_domain(*values: Any) -> str:
     return "unknown"
 
 
+def resolve_state_root(root: Path) -> Path:
+    env_state = str(__import__("os").environ.get("SPINE_STATE", "")).strip()
+    if env_state:
+        return Path(env_state)
+
+    contract = load_yaml(root / "ops/bindings/mailroom.runtime.contract.yaml")
+    contract_state = str(contract.get("state_root") or "").strip()
+    if contract_state:
+        return Path(contract_state)
+
+    return root.parent / ".runtime/spine/state"
+
+
 def read_frontmatter(path: Path) -> dict[str, Any]:
     try:
         content = path.read_text(encoding="utf-8")
@@ -84,8 +97,8 @@ def read_frontmatter(path: Path) -> dict[str, Any]:
         return {}
 
 
-def parse_loops(root: Path) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    scopes_dir = root / "mailroom/state/loop-scopes"
+def parse_loops(root: Path, state_root: Path) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    scopes_dir = state_root / "loop-scopes"
     items: list[dict[str, Any]] = []
     loop_domain_map: dict[str, str] = {}
 
@@ -230,8 +243,9 @@ def main() -> int:
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[5]
+    state_root = resolve_state_root(root)
 
-    loop_items, loop_domain_map = parse_loops(root)
+    loop_items, loop_domain_map = parse_loops(root, state_root)
     gap_items = parse_gaps(root, loop_domain_map)
     proposal_items = parse_proposals(root, loop_domain_map)
 

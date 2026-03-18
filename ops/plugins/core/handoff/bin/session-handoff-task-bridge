@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+SPINE_REPO="${SPINE_REPO:-$ROOT}"
+SPINE_CODE="${SPINE_CODE:-$ROOT}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+source "$ROOT/ops/plugins/infra/mailroom-bridge/lib/task-common.sh"
+
+CONFIG="$ROOT/ops/bindings/handoff.config.yaml"
+TASK_ENQUEUE_BIN="$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-task-enqueue"
+ID=""
+JSON_MODE=0
+DRY_RUN=0
+
+usage() {
+  cat <<'USAGE'
+session-handoff-task-bridge
+
+Usage:
+  session-handoff-task-bridge --id HO-YYYYMMDD-HHMMSS [--json] [--dry-run]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --id)
+      ID="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+mailroom_task_require jq
+mailroom_task_require yq
+[[ -n "$ID" ]] || { echo "FAIL: --id is required" >&2; exit 2; }
+[[ -x "$TASK_ENQUEUE_BIN" ]] || { echo "FAIL: enqueue helper missing: $TASK_ENQUEUE_BIN" >&2; exit 1; }
+
+handoff_dir_rel="$(yq -r '.storage.directory // "mailroom/state/handoffs"' "$CONFIG")"
+handoff_file="$(spine_resolve_mailroom_path "$handoff_dir_rel")/$ID.yaml"
+[[ -f "$handoff_file" ]] || { echo "FAIL: handoff not found: $ID" >&2; exit 1; }
+handoff_json="$(yq -o=json '.' "$handoff_file" 2>/dev/null)" || {
+  echo "FAIL: invalid handoff file: $handoff_file" >&2
+  exit 1
+}
+
+bridge_enabled="$(yq -r '.task_bridge.enabled // false' "$CONFIG" 2>/dev/null || echo false)"
+to_role="$(jq -r '.to_role // ""' <<<"$handoff_json")"
+route_target="$(yq -r '.task_bridge.route_target // "handoff"' "$CONFIG" 2>/dev/null || echo handoff)"
+task_id_prefix="$(yq -r '.task_bridge.task_id_prefix // "TASK-HANDOFF-"' "$CONFIG" 2>/dev/null || echo TASK-HANDOFF-)"
+bridge_roles_json="$(yq -o=json '.task_bridge.bridge_roles // ["worker"]' "$CONFIG" 2>/dev/null || echo '["worker"]')"
+
+should_bridge="false"
+if [[ "$bridge_enabled" == "true" ]]; then
+  should_bridge="$(jq -r --arg role "$to_role" 'any(.[]?; . == $role)' <<<"$bridge_roles_json" 2>/dev/null || echo false)"
+fi
+
+task_id="${task_id_prefix}${ID#HO-}"
+
+existing_file="$(mailroom_task_existing_file "$task_id" 2>/dev/null || true)"
+if [[ -n "$existing_file" ]]; then
+  existing_state="$(yq -r '.status // "unknown"' "$existing_file" 2>/dev/null || echo unknown)"
+  existing_route_target="$(yq -r '.route_target // ""' "$existing_file" 2>/dev/null || echo "")"
+  existing_required_agents_json="$(yq -o=json '.required_agents // []' "$existing_file" 2>/dev/null || echo '[]')"
+
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    BRIDGED_AT_ENV="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    TASK_ID_ENV="$task_id" \
+    TASK_FILE_ENV="$existing_file" \
+    TASK_STATE_ENV="$existing_state" \
+    ROUTE_TARGET_ENV="${existing_route_target:-$route_target}" \
+    REQUIRED_AGENTS_JSON_ENV="$existing_required_agents_json" \
+    yq e -i '
+      .task_bridge.enabled = true |
+      .task_bridge.task_id = strenv(TASK_ID_ENV) |
+      .task_bridge.task_file = strenv(TASK_FILE_ENV) |
+      .task_bridge.task_state = strenv(TASK_STATE_ENV) |
+      .task_bridge.route_target = strenv(ROUTE_TARGET_ENV) |
+      .task_bridge.required_agents = (strenv(REQUIRED_AGENTS_JSON_ENV) | fromjson) |
+      .task_bridge.bridged_at_utc = strenv(BRIDGED_AT_ENV)
+    ' "$handoff_file"
+  fi
+
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n \
+      --arg capability "session.handoff.task_bridge" \
+      --arg status "$( [[ "$DRY_RUN" -eq 1 ]] && echo dry-run || echo existing )" \
+      --arg handoff_id "$ID" \
+      --arg handoff_file "$handoff_file" \
+      --arg task_id "$task_id" \
+      --arg task_file "$existing_file" \
+      --arg task_state "$existing_state" \
+      --arg route_target "${existing_route_target:-$route_target}" \
+      --argjson required_agents "$existing_required_agents_json" \
+      '{capability:$capability,status:$status,data:{handoff_id:$handoff_id,handoff_file:$handoff_file,task_id:$task_id,task_file:$task_file,task_state:$task_state,route_target:$route_target,required_agents:$required_agents}}'
+  else
+    echo "session.handoff.task_bridge"
+    echo "status: existing"
+    echo "handoff_id: $ID"
+    echo "task_id: $task_id"
+    echo "task_file: $existing_file"
+    echo "task_state: $existing_state"
+  fi
+  exit 0
+fi
+
+if [[ "$should_bridge" != "true" ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n \
+      --arg capability "session.handoff.task_bridge" \
+      --arg status "skipped" \
+      --arg handoff_id "$ID" \
+      --arg handoff_file "$handoff_file" \
+      --arg to_role "$to_role" \
+      --arg enabled "$bridge_enabled" \
+      '{capability:$capability,status:$status,data:{handoff_id:$handoff_id,handoff_file:$handoff_file,to_role:$to_role,bridge_enabled:($enabled=="true")}}'
+  else
+    echo "session.handoff.task_bridge"
+    echo "status: skipped"
+    echo "handoff_id: $ID"
+    echo "to_role: ${to_role:-}"
+  fi
+  exit 0
+fi
+
+required_agents_json="$(TO_ROLE_ENV="$to_role" yq -o=json '.task_bridge.required_agents_by_role[strenv(TO_ROLE_ENV)] // []' "$CONFIG" 2>/dev/null || echo '[]')"
+required_agents_csv="$(jq -r 'if type == "array" then join(",") elif type == "string" then . else "" end' <<<"$required_agents_json" 2>/dev/null || true)"
+summary="$(jq -r '.summary // ""' <<<"$handoff_json")"
+payload_json="$(jq -c --arg handoff_file "$handoff_file" --argjson required_agents "$required_agents_json" '
+      ($required_agents[0] // "") as $fallback_agent |
+      {
+        kind: "session_handoff",
+        handoff_id: (.id // ""),
+        handoff_file: $handoff_file,
+        handoff_state: (.state // ""),
+        owner: (.owner // ""),
+        summary: (.summary // ""),
+        created_at_utc: (.created_at_utc // ""),
+        expires_at_utc: (.expires_at_utc // ""),
+        from_role: (.from_role // ""),
+        to_role: (.to_role // ""),
+        transition_gate: (.transition_gate // ""),
+        loops: (.loops // []),
+        actions: (.actions // []),
+        input_refs: (.input_refs // {}),
+        output_refs: (.output_refs // {}),
+        required_agents: $required_agents,
+        dispatch: {
+          target_agent_id: ((.dispatch.target_agent_id // .dispatch.agent_id // $fallback_agent // "") | tostring),
+          target_terminal_id: ((.dispatch.target_terminal_id // .dispatch.terminal_id // "") | tostring),
+          target_tool: ((.dispatch.target_tool // .dispatch.tool // "") | tostring)
+        }
+      }
+    ' <<<"$handoff_json")"
+
+enqueue_cmd=(
+  "$TASK_ENQUEUE_BIN"
+  --task-id "$task_id"
+  --summary "$summary"
+  --route-target "$route_target"
+  --payload "$payload_json"
+  --json
+)
+if [[ -n "$required_agents_csv" ]]; then
+  enqueue_cmd+=(--required-agents "$required_agents_csv")
+fi
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  enqueue_cmd+=(--dry-run)
+fi
+
+enqueue_output="$("${enqueue_cmd[@]}")"
+task_file="$(jq -r '.data.file // ""' <<<"$enqueue_output" 2>/dev/null || true)"
+task_state="$(jq -r '.data.state // "queued"' <<<"$enqueue_output" 2>/dev/null || echo queued)"
+
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  BRIDGED_AT_ENV="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  TASK_ID_ENV="$task_id" \
+  TASK_FILE_ENV="$task_file" \
+  TASK_STATE_ENV="$task_state" \
+  ROUTE_TARGET_ENV="$route_target" \
+  REQUIRED_AGENTS_JSON_ENV="$required_agents_json" \
+  yq e -i '
+    .task_bridge.enabled = true |
+    .task_bridge.task_id = strenv(TASK_ID_ENV) |
+    .task_bridge.task_file = strenv(TASK_FILE_ENV) |
+    .task_bridge.task_state = strenv(TASK_STATE_ENV) |
+    .task_bridge.route_target = strenv(ROUTE_TARGET_ENV) |
+    .task_bridge.required_agents = (strenv(REQUIRED_AGENTS_JSON_ENV) | fromjson) |
+    .task_bridge.bridged_at_utc = strenv(BRIDGED_AT_ENV)
+  ' "$handoff_file"
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n \
+    --arg capability "session.handoff.task_bridge" \
+    --arg status "$( [[ "$DRY_RUN" -eq 1 ]] && echo dry-run || echo queued )" \
+    --arg handoff_id "$ID" \
+    --arg handoff_file "$handoff_file" \
+    --arg task_id "$task_id" \
+    --arg task_file "$task_file" \
+    --arg task_state "$task_state" \
+    --arg route_target "$route_target" \
+    --argjson required_agents "$required_agents_json" \
+    '{capability:$capability,status:$status,data:{handoff_id:$handoff_id,handoff_file:$handoff_file,task_id:$task_id,task_file:$task_file,task_state:$task_state,route_target:$route_target,required_agents:$required_agents}}'
+else
+  echo "session.handoff.task_bridge"
+  echo "status: queued"
+  echo "handoff_id: $ID"
+  echo "task_id: $task_id"
+  echo "task_file: $task_file"
+  echo "task_state: $task_state"
+fi

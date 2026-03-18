@@ -132,6 +132,19 @@ EOF
 )
 fi
 
+# Allow governed main-branch mutation overrides to flow through hosted bridge callers
+# when the operator explicitly opts into them for this runtime.
+for passthrough_env in OPS_GOVERNED_MAIN_OVERRIDE OPS_MAIN_MUTATION_OVERRIDE_REF OPS_MAIN_MUTATION_OVERRIDE_REASON; do
+  passthrough_val="${!passthrough_env:-}"
+  [[ -n "$passthrough_val" ]] || continue
+  extra_env+=$(cat <<EOF
+
+      <key>${passthrough_env}</key>
+      <string>${passthrough_val}</string>
+EOF
+)
+done
+
 # Inject RBAC role tokens into plist EnvironmentVariables
 if command -v yq >/dev/null 2>&1; then
   role_envs="$(yq -r '.cap_rpc.roles[].token_env' "$BINDING" 2>/dev/null || true)"

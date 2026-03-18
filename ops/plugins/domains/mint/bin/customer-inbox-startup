@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_inbox_runtime_common import (  # noqa: E402
+    active_claim_for_claimant,
+    claim_context,
+    connect_queue_db,
+    load_startup_contract,
+    queue_db_path,
+    release_stale_claims,
+)
+from operator_mail_common import compact_utc, iso_utc, resolve_spine_root, resolve_spine_state, run_cap_capture, utc_now, write_json  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.customer.inbox.startup"
+DEFAULT_MAILBOX = "team@mintprints.com"
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-inbox-startup",
+        description="Compose Morpheus launch-time inbox defaults: health check, canonical work-items mode, and oldest-first selection policy.",
+    )
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox to read from (default: {DEFAULT_MAILBOX})")
+    parser.add_argument("--top", type=int, default=None, help="Maximum inbox threads to summarize")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def receipt_from_text(text: str) -> str:
+    matches = re.findall(r"^Receipt:\s+(.+)$", text or "", flags=re.MULTILINE)
+    return matches[-1] if matches else ""
+
+
+def run_cap_text(spine_root: Path, capability: str, args: list[str]) -> tuple[int, str, str]:
+    cmd = [str(spine_root / "bin" / "ops"), "cap", "run", capability]
+    if args:
+        cmd.extend(["--", *args])
+    result = subprocess.run(cmd, cwd=spine_root, capture_output=True, text=True, check=False)
+    combined = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    return result.returncode, combined, receipt_from_text(combined)
+
+
+def summarize_health(text: str, component: str, returncode: int) -> dict[str, Any]:
+    status = "unknown"
+    note = ""
+    for line in text.splitlines():
+        if not line.startswith(component):
+            continue
+        parts = re.split(r"\s{2,}", line.strip(), maxsplit=3)
+        if len(parts) >= 2:
+            status = parts[1].strip()
+        if len(parts) >= 4:
+            note = parts[3].strip()
+        break
+    overall = "ok" if returncode == 0 and status == "OK" else "degraded"
+    return {
+        "component": component,
+        "status": status,
+        "state": overall,
+        "note": note or None,
+    }
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    now = utc_now()
+    startup_id = f"MCIS-{compact_utc(now)}"
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    contract = load_startup_contract(spine_root)
+    context = claim_context()
+    launch_cfg = dict(contract.get("launch") or {})
+
+    health_cfg = dict(contract.get("health_check") or {})
+    health_rc, health_text, health_receipt = run_cap_text(
+        spine_root,
+        str(health_cfg.get("capability") or ""),
+        [str(health_cfg.get("component") or "")],
+    )
+    health_summary = summarize_health(health_text, str(health_cfg.get("component") or ""), health_rc)
+
+    preview_top = int(launch_cfg.get("preview_top") or 10)
+    top = args.top if args.top is not None else preview_top
+    work_items_args = ["--mailbox", args.mailbox, "--top", str(top), "--json"]
+    if str(launch_cfg.get("startup_work_items_mode") or "").strip() == "preview_only":
+        work_items_args.append("--preview-only")
+    work_items_payload, work_items_receipt = run_cap_capture(
+        spine_root,
+        str((contract.get("first_email") or {}).get("work_items_capability") or ""),
+        work_items_args,
+    )
+
+    queue_conn = connect_queue_db(queue_db_path(state_root, contract))
+    release_stale_claims(queue_conn, state_root)
+    current_claim = active_claim_for_claimant(
+        queue_conn,
+        session_id=context.get("session_id"),
+        claimant_id=str(context.get("claimant_id") or ""),
+    )
+
+    summary = {
+        "capability": CAPABILITY_NAME,
+        "generated_at": iso_utc(now),
+        "startup_id": startup_id,
+        "mode": str(launch_cfg.get("work_items_mode") or ""),
+        "mailbox": args.mailbox,
+        "selection_order": str(launch_cfg.get("selection_order") or ""),
+        "default_command": str(launch_cfg.get("default_command") or ""),
+        "first_action_command": str(launch_cfg.get("first_action_command") or ""),
+        "drafting_mode": str(launch_cfg.get("drafting_mode") or ""),
+        "scope_lock": str(launch_cfg.get("scope_lock") or ""),
+        "health_check": health_summary,
+        "work_items": {
+            "backlog_count": int(work_items_payload.get("backlog_count") or 0),
+            "hydration_mode": str(work_items_payload.get("hydration_mode") or ""),
+            "record_file": str(work_items_payload.get("record_file") or ""),
+            "first_thread_id": str(((work_items_payload.get("work_items") or [{}])[0]).get("thread_id") or ""),
+            "first_subject": str(((work_items_payload.get("work_items") or [{}])[0]).get("subject") or ""),
+        },
+        "queue_cursor": {
+            "session_id": context.get("session_id"),
+            "claimant_id": context.get("claimant_id"),
+            "current_claim_message_id": str((current_claim or {}).get("message_id") or ""),
+            "current_claim_thread_id": str((current_claim or {}).get("thread_id") or ""),
+        },
+        "contract_path": contract["path"],
+        "receipts": {
+            "health_receipt": health_receipt or None,
+            "work_items_receipt": work_items_receipt or None,
+        },
+    }
+
+    records_dir = state_root / "mint" / "customer-inbox-startups" / "records" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{startup_id}.json"
+    write_json(record_file, summary)
+    summary["record_file"] = str(record_file)
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+
+    lines = [
+        CAPABILITY_NAME,
+        f"Mode: {summary['mode']}",
+        f"Mailbox: {summary['mailbox']}",
+        f"Health: {health_summary['component']} {health_summary['status']}",
+        f"Backlog threads: {summary['work_items']['backlog_count']}",
+        f"Default order: {summary['selection_order']}",
+        f"First action: {summary['first_action_command']}",
+        f"Record: {record_file}",
+    ]
+    print("\n".join(lines))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

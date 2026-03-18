@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from email.utils import getaddresses, parseaddr
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+CAPABILITY = "communications.mailarchiver.search"
+SCHEMA_VERSION = "1.0"
+ROOT = Path(__file__).resolve().parents[5]
+CONTRACT = Path(os.environ.get("COMMUNICATIONS_STACK_CONTRACT", ROOT / "ops/bindings/communications.stack.contract.yaml"))
+SSH_BINDING = Path(os.environ.get("SSH_TARGETS_FILE", ROOT / "ops/bindings/ssh.targets.yaml"))
+LINKAGE_CONTRACT = Path(os.environ.get("MAIL_ARCHIVER_LINKAGE_CONTRACT", ROOT / "ops/bindings/mail.archiver.account.linkage.contract.yaml"))
+SSH_STATUS_BIN = Path(
+    os.environ.get(
+        "COMMUNICATIONS_SSH_TARGET_STATUS_BIN",
+        ROOT / "ops/plugins/infra/ssh/bin/ssh-target-status",
+    )
+)
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def normalize_space(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def normalize_email(value: Any) -> str:
+    return normalize_space(value).lower()
+
+
+def strip_html(text: str) -> str:
+    cleaned = re.sub(r"(?is)<(script|style).*?>.*?</\\1>", "", text or "")
+    cleaned = re.sub(r"(?i)<br\\s*/?>", "\n", cleaned)
+    cleaned = re.sub(r"(?i)</p>", "\n\n", cleaned)
+    cleaned = re.sub(r"(?i)</div>", "\n", cleaned)
+    cleaned = re.sub(r"(?s)<[^>]+>", "", cleaned)
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def body_preview(text: str) -> str:
+    preview = normalize_space(strip_html(text))
+    if len(preview) > 220:
+        return preview[:217] + "..."
+    return preview
+
+
+def parse_address_list(raw: str) -> list[dict[str, Any]]:
+    recipients: list[dict[str, Any]] = []
+    for name, address in getaddresses([raw or ""]):
+        cleaned = normalize_email(address)
+        if not cleaned:
+            continue
+        entry: dict[str, Any] = {"emailAddress": {"address": cleaned}}
+        if normalize_space(name):
+            entry["emailAddress"]["name"] = normalize_space(name)
+        recipients.append(entry)
+    return recipients
+
+
+def parse_from_field(raw: str) -> dict[str, Any]:
+    name, address = parseaddr(raw or "")
+    cleaned = normalize_email(address)
+    return {
+        "emailAddress": {
+            "address": cleaned or normalize_space(raw),
+            **({"name": normalize_space(name)} if normalize_space(name) else {}),
+        }
+    }
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="communications-mail-archiver-search",
+        description="Read-only search across governed mail-archiver accounts for Mint mailbox history carry-forward.",
+    )
+    parser.add_argument("--query", required=True, help="Case-insensitive search text")
+    parser.add_argument("--mailbox", action="append", default=[], help="Mailbox to search. Repeatable.")
+    parser.add_argument("--top", type=int, default=10, help="Max results to return")
+    parser.add_argument("--target", default="", help="Optional ssh target override")
+    parser.add_argument(
+        "--include-raw-headers",
+        action="store_true",
+        help="Include archived RawHeaders in JSON output for governed thread reconstruction surfaces.",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    if args.top < 1:
+        fail("--top must be >= 1")
+    args.mailbox = [normalize_space(item) for item in args.mailbox if normalize_space(item)]
+    return args
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing contract: {path}")
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        fail(f"invalid yaml: {path}")
+        raise exc
+
+
+def dedupe_preserve(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in values:
+        key = normalize_email(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(normalize_space(item))
+    return out
+
+
+def resolve_target_id(contract: dict[str, Any], override: str) -> str:
+    if normalize_space(override):
+        return normalize_space(override)
+    monitoring = dict(((contract.get("mail_archiver") or {}).get("monitoring") or {}).get("machine_status_target") or {})
+    configured = normalize_space(monitoring.get("ssh_target") or "")
+    if configured:
+        return configured
+    return normalize_space((((contract.get("pilot") or {}).get("vm_target") or {}).get("hostname")) or "")
+
+
+def resolve_transport(target_id: str) -> dict[str, Any]:
+    cmd = [str(SSH_STATUS_BIN), "--json", "--id", target_id, "--attempts", "2"]
+    result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        fail(f"ssh target contract probe failed for '{target_id}'")
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        fail(f"ssh target contract probe returned non-JSON for '{target_id}'")
+        raise exc
+    targets = list(payload.get("targets") or [])
+    if not targets:
+        fail(f"ssh target contract probe returned no targets for '{target_id}'")
+    target = dict(targets[0] or {})
+    if normalize_space(payload.get("status") or "fail").lower() == "fail":
+        fail(normalize_space(target.get("reason") or "transport unavailable"))
+    effective_host = normalize_space(target.get("effective_host") or "")
+    if not effective_host:
+        fail(f"ssh target '{target_id}' has no effective host")
+    return target
+
+
+def resolve_jump_spec(ssh_binding: dict[str, Any], probe_via: str) -> str:
+    if not normalize_space(probe_via):
+        return ""
+    defaults = dict((ssh_binding.get("ssh") or {}).get("defaults") or {})
+    default_user = normalize_space(defaults.get("user") or "root")
+    default_port = int(defaults.get("port") or 22)
+    for entry in ((ssh_binding.get("ssh") or {}).get("targets") or []):
+        item = dict(entry or {})
+        if normalize_space(item.get("id") or "") != normalize_space(probe_via):
+            continue
+        host = normalize_space(item.get("host") or "")
+        if not host:
+            return ""
+        user = normalize_space(item.get("user") or default_user)
+        port = int(item.get("port") or default_port)
+        return f"{user}@{host}:{port}"
+    return ""
+
+
+def build_ssh_cmd(ssh_binding: dict[str, Any], target_id: str, transport: dict[str, Any]) -> list[str]:
+    defaults = dict((ssh_binding.get("ssh") or {}).get("defaults") or {})
+    default_user = normalize_space(defaults.get("user") or "root")
+    default_port = int(defaults.get("port") or 22)
+    default_timeout = int(defaults.get("connect_timeout_sec") or 5)
+    default_batch = str(defaults.get("batch_mode") or "true").lower()
+    default_strict = normalize_space(defaults.get("strict_host_key_checking") or "no")
+    default_known_hosts = normalize_space(defaults.get("user_known_hosts_file") or "/dev/null")
+    target_entry: dict[str, Any] = {}
+    for entry in ((ssh_binding.get("ssh") or {}).get("targets") or []):
+        item = dict(entry or {})
+        if normalize_space(item.get("id") or "") == normalize_space(target_id):
+            target_entry = item
+            break
+    user = normalize_space(target_entry.get("user") or default_user)
+    port = int(target_entry.get("port") or default_port)
+    timeout = int(target_entry.get("connect_timeout_sec") or default_timeout)
+    extra_opts = normalize_space(target_entry.get("ssh_extra_opts") or "")
+    effective_host = normalize_space(transport.get("effective_host") or "")
+    ssh_cmd = [
+        "ssh",
+        "-p",
+        str(port),
+        "-o",
+        f"ConnectTimeout={timeout}",
+        "-o",
+        f"BatchMode={default_batch}",
+        "-o",
+        f"StrictHostKeyChecking={default_strict}",
+        "-o",
+        f"UserKnownHostsFile={default_known_hosts}",
+    ]
+    if extra_opts:
+        ssh_cmd.extend(shlex.split(extra_opts))
+    if normalize_space(transport.get("path_used") or "") == "proxyjump":
+        jump = resolve_jump_spec(ssh_binding, normalize_space(target_entry.get("probe_via") or ""))
+        if jump:
+            ssh_cmd.extend(["-J", jump])
+    ssh_cmd.append(f"{user}@{effective_host}")
+    return ssh_cmd
+
+
+def query_remote_rows(ssh_cmd: list[str], *, db_container: str, db_name: str, sql: str) -> list[dict[str, Any]]:
+    marker = "__SPINE_MAIL_ARCHIVER_SQL__"
+    while marker in sql:
+        marker += "_X"
+    remote_script = (
+        "set -euo pipefail\n"
+        'DB_CONTAINER="$1"\n'
+        'DB_NAME="$2"\n'
+        f"QUERY=$(cat <<'{marker}'\n{sql}\n{marker}\n)\n"
+        "DOCKER=(docker)\n"
+        "if ! docker info >/dev/null 2>&1; then\n"
+        "  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then\n"
+        "    DOCKER=(sudo -n docker)\n"
+        "  else\n"
+        '    echo "docker unavailable" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        "fi\n"
+        'SCHEMA="mail_archiver"\n'
+        "if ! \"${DOCKER[@]}\" exec \"$DB_CONTAINER\" psql -U mailuser -d \"$DB_NAME\" -At -c 'SELECT 1 FROM mail_archiver.\"ArchivedEmails\" LIMIT 1;' >/dev/null 2>&1; then\n"
+        '  SCHEMA="public"\n'
+        "fi\n"
+        'QUERY="${QUERY//__SCHEMA__/$SCHEMA}"\n'
+        "\"${DOCKER[@]}\" exec \"$DB_CONTAINER\" psql -U mailuser -d \"$DB_NAME\" -F $'\\t' -At -c \"$QUERY\"\n"
+    )
+    cmd = [*ssh_cmd, "bash", "-s", "--", db_container, db_name]
+    result = subprocess.run(cmd, input=remote_script, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        fail(result.stderr.strip() or result.stdout.strip() or "remote mail-archiver query failed")
+    rows: list[dict[str, Any]] = []
+    for line in (result.stdout or "").splitlines():
+        cleaned = normalize_space(line)
+        if not cleaned:
+            continue
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def linkage_mailbox_map(linkage: dict[str, Any]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for entry in (linkage.get("accounts") or []):
+        item = dict(entry or {})
+        mailbox = normalize_email(item.get("mailbox") or "")
+        account_id = int(item.get("db_account_id") or 0)
+        if mailbox and account_id > 0:
+            out[mailbox] = account_id
+    return out
+
+
+def build_search_sql(query: str, account_ids: list[int], top: int, *, include_raw_headers: bool = False) -> str:
+    escaped_query = query.lower().replace("'", "''")
+    account_list = ",".join(str(item) for item in account_ids)
+    pattern = f"%{escaped_query}%"
+    raw_headers_sql = ', COALESCE(ae."RawHeaders", \'\') AS raw_headers' if include_raw_headers else ""
+    return f"""
+SELECT row_to_json(t)::text
+FROM (
+  SELECT
+    ae."Id"::text AS row_id,
+    COALESCE(to_jsonb(ma)->>'Email', to_jsonb(ma)->>'EmailAddress', '') AS mailbox,
+    COALESCE(ae."MessageId", '') AS internet_message_id,
+    COALESCE(ae."Subject", '') AS subject,
+    COALESCE(ae."Body", '') AS body_text,
+    COALESCE(ae."HtmlBody", '') AS body_html,
+    COALESCE(ae."From", '') AS from_raw,
+    COALESCE(ae."To", '') AS to_raw,
+    COALESCE(ae."Cc", '') AS cc_raw,
+    COALESCE(ae."ReceivedDate"::text, '') AS received_utc,
+    COALESCE(ae."HasAttachments", false)::text AS has_attachments
+    {raw_headers_sql}
+  FROM __SCHEMA__."ArchivedEmails" ae
+  JOIN __SCHEMA__."MailAccounts" ma ON ma."Id" = ae."MailAccountId"
+  WHERE ae."MailAccountId" IN ({account_list})
+    AND (
+      lower(COALESCE(ae."Subject", '')) LIKE '{pattern}'
+      OR lower(COALESCE(ae."From", '')) LIKE '{pattern}'
+      OR lower(COALESCE(ae."To", '')) LIKE '{pattern}'
+      OR lower(COALESCE(ae."Cc", '')) LIKE '{pattern}'
+      OR lower(COALESCE(ae."Bcc", '')) LIKE '{pattern}'
+      OR lower(COALESCE(ae."MessageId", '')) LIKE '{pattern}'
+    )
+  ORDER BY ae."ReceivedDate" DESC NULLS LAST, ae."Id" DESC
+  LIMIT {int(top)}
+) t;
+"""
+
+
+def normalize_fixture_messages(payload: Any, query: str, mailboxes: list[str], top: int) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        if isinstance(payload.get("messages"), list):
+            messages = [dict(item or {}) for item in payload.get("messages") or [] if isinstance(item, dict)]
+        elif isinstance(((payload.get("data") or {}).get("messages")), list):
+            messages = [dict(item or {}) for item in ((payload.get("data") or {}).get("messages")) or [] if isinstance(item, dict)]
+        else:
+            messages = []
+    elif isinstance(payload, list):
+        messages = [dict(item or {}) for item in payload if isinstance(item, dict)]
+    else:
+        messages = []
+    wanted_mailboxes = {normalize_email(item) for item in mailboxes}
+    filtered: list[dict[str, Any]] = []
+    needle = normalize_email(query)
+    for message in messages:
+        mailbox = normalize_email(message.get("archiveMailbox") or message.get("source_mailbox") or message.get("mailbox") or "")
+        if wanted_mailboxes and mailbox and mailbox not in wanted_mailboxes:
+            continue
+        haystack = " ".join(
+            [
+                normalize_space(message.get("subject") or ""),
+                normalize_space((((message.get("from") or {}).get("emailAddress") or {}).get("address")) or ""),
+                normalize_space(message.get("bodyPreview") or ""),
+                normalize_space(((message.get("body") or {}).get("content")) or ""),
+            ]
+        ).lower()
+        if needle and needle not in haystack:
+            continue
+        filtered.append(message)
+    filtered.sort(key=lambda item: normalize_space(item.get("receivedDateTime") or ""), reverse=True)
+    return filtered[:top]
+
+
+def fixture_messages(args: argparse.Namespace) -> list[dict[str, Any]]:
+    fixture_path = normalize_space(os.environ.get("COMMUNICATIONS_MAIL_ARCHIVER_SEARCH_FIXTURE_JSON"))
+    if not fixture_path:
+        return []
+    payload = json.loads(Path(fixture_path).read_text(encoding="utf-8"))
+    return normalize_fixture_messages(payload, args.query, args.mailbox, args.top)
+
+
+def build_message(row: dict[str, Any], *, include_raw_headers: bool = False) -> dict[str, Any]:
+    body_html = normalize_space(row.get("body_html") or "")
+    body_text = normalize_space(row.get("body_text") or "")
+    content = body_html or body_text
+    content_type = "HTML" if body_html else "Text"
+    mailbox = normalize_space(row.get("mailbox") or "")
+    row_id = normalize_space(row.get("row_id") or "")
+    internet_message_id = normalize_space(row.get("internet_message_id") or "")
+    message = {
+        "id": f"mailarchiver:{row_id}",
+        "archivedRowId": row_id,
+        "archiveMailbox": mailbox,
+        "history_lane": "mail_archiver",
+        "internetMessageId": internet_message_id,
+        "conversationId": internet_message_id or f"mailarchiver:{mailbox}:{row_id}",
+        "subject": normalize_space(row.get("subject") or ""),
+        "receivedDateTime": normalize_space(row.get("received_utc") or ""),
+        "from": parse_from_field(normalize_space(row.get("from_raw") or "")),
+        "toRecipients": parse_address_list(normalize_space(row.get("to_raw") or "")),
+        "ccRecipients": parse_address_list(normalize_space(row.get("cc_raw") or "")),
+        "bodyPreview": body_preview(content),
+        "body": {
+            "contentType": content_type,
+            "content": content,
+        },
+        "hasAttachments": normalize_space(row.get("has_attachments") or "").lower() == "true",
+    }
+    if include_raw_headers:
+        message["rawHeaders"] = str(row.get("raw_headers") or "")
+    return message
+
+
+def render(args: argparse.Namespace, messages: list[dict[str, Any]], receipts: list[str]) -> None:
+    payload = {
+        "capability": CAPABILITY,
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "data": {
+            "query": normalize_space(args.query),
+            "mailboxes": args.mailbox,
+            "messages": messages,
+            "receipt_chain": receipts,
+        },
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return
+    print(CAPABILITY)
+    print(f"query: {normalize_space(args.query)}")
+    print(f"mailboxes: {', '.join(args.mailbox)}")
+    print(f"matches: {len(messages)}")
+    for message in messages:
+        print("---")
+        print(f"id: {message['id']}")
+        print(f"archive_mailbox: {message.get('archiveMailbox')}")
+        print(f"received_utc: {message.get('receivedDateTime')}")
+        print(f"from: {(((message.get('from') or {}).get('emailAddress') or {}).get('address')) or ''}")
+        print(f"subject: {message.get('subject')}")
+        print(f"preview: {message.get('bodyPreview')}")
+    for receipt in receipts:
+        print(f"Receipt: {receipt}")
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    messages = fixture_messages(args)
+    receipts: list[str] = []
+    if not messages:
+        contract = load_yaml(CONTRACT)
+        linkage = load_yaml(LINKAGE_CONTRACT)
+        ssh_binding = load_yaml(SSH_BINDING)
+        mailbox_map = linkage_mailbox_map(linkage)
+        if not args.mailbox:
+            fail("at least one --mailbox is required")
+        account_ids: list[int] = []
+        resolved_mailboxes: list[str] = []
+        for mailbox in dedupe_preserve(args.mailbox):
+            account_id = mailbox_map.get(normalize_email(mailbox))
+            if not account_id:
+                fail(f"mail-archiver linkage contract does not cover mailbox {mailbox}")
+            account_ids.append(account_id)
+            resolved_mailboxes.append(mailbox)
+        args.mailbox = resolved_mailboxes
+        target_id = resolve_target_id(contract, args.target)
+        if not target_id:
+            fail("could not resolve communications-stack ssh target")
+        transport = resolve_transport(target_id)
+        ssh_cmd = build_ssh_cmd(ssh_binding, target_id, transport)
+        db_cfg = dict(((contract.get("mail_archiver") or {}).get("database") or {}))
+        rows = query_remote_rows(
+            ssh_cmd,
+            db_container=normalize_space(db_cfg.get("container") or "mail-archiver-db"),
+            db_name=normalize_space(db_cfg.get("db_name") or "MailArchiver"),
+            sql=build_search_sql(args.query, account_ids, args.top, include_raw_headers=args.include_raw_headers),
+        )
+        messages = [build_message(row, include_raw_headers=args.include_raw_headers) for row in rows]
+        receipts.append(f"ssh-target:{target_id}")
+    render(args, messages, receipts)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

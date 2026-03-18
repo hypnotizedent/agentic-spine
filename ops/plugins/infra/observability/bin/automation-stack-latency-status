@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
 CONTRACT_DEFAULT="$ROOT/ops/bindings/automation.stack.latency.slo.yaml"
+# shellcheck source=../../../lib/ssh-resolve.sh
+source "$ROOT/ops/lib/ssh-resolve.sh"
 
 CONTRACT="$CONTRACT_DEFAULT"
 JSON_MODE=0
@@ -97,6 +99,92 @@ SERVICES_HEALTH_REL="$(yq -r '.source_bindings.services_health // "ops/bindings/
 SERVICES_HEALTH="$ROOT/$SERVICES_HEALTH_REL"
 need_file "$SERVICES_HEALTH"
 
+build_http_candidates() {
+  local endpoint_host="$1"
+  local endpoint_url="$2"
+  local mapped=0
+  local candidate_url candidate_path
+  local -a candidates=()
+
+  if [[ -n "$endpoint_host" && "$endpoint_host" != "null" ]] && \
+     yq -e ".ssh.targets[] | select(.id == \"$endpoint_host\")" "$ROOT/ops/bindings/ssh.targets.yaml" >/dev/null 2>&1; then
+    mapped=1
+    while IFS=$'\t' read -r candidate_url candidate_path; do
+      [[ -n "$candidate_url" ]] || continue
+      candidates+=("${candidate_url}|${candidate_path}")
+    done < <(ssh_resolve_url_candidates "$endpoint_url" "$endpoint_host")
+  fi
+
+  if [[ "${#candidates[@]}" -eq 0 ]]; then
+    if [[ "$mapped" -eq 1 ]]; then
+      candidates+=("${endpoint_url}|unreachable")
+    else
+      candidates+=("${endpoint_url}|unmapped")
+    fi
+  fi
+
+  printf '%s\n' "${candidates[@]}"
+}
+
+probe_endpoint_once() {
+  local endpoint_url="$1"
+  local candidates_blob="$2"
+  local preferred_path="${3:-}"
+  local resolved_url="$endpoint_url"
+  local path_used="direct"
+  local http_code="000"
+  local time_total="0"
+  local curl_rc=1
+  local candidate_url candidate_path candidate curl_raw=""
+  local -a candidates=()
+  local -a preferred_candidates=()
+  local -a remaining_candidates=()
+
+  mapfile -t candidates < <(printf '%s\n' "$candidates_blob" | sed '/^$/d')
+  if [[ "${#candidates[@]}" -eq 0 ]]; then
+    candidates+=("${endpoint_url}|unmapped")
+  fi
+
+  if [[ -n "$preferred_path" && "${#candidates[@]}" -gt 1 ]]; then
+    for candidate in "${candidates[@]}"; do
+      IFS='|' read -r candidate_url candidate_path <<<"$candidate"
+      if [[ "$candidate_path" == "$preferred_path" ]]; then
+        preferred_candidates+=("$candidate")
+      else
+        remaining_candidates+=("$candidate")
+      fi
+    done
+    candidates=("${preferred_candidates[@]}" "${remaining_candidates[@]}")
+  fi
+
+  for idx in "${!candidates[@]}"; do
+    IFS='|' read -r candidate_url candidate_path <<<"${candidates[$idx]}"
+    set +e
+    curl_raw="$(curl -sS -o /dev/null -w "%{http_code}\t%{time_total}" \
+      --connect-timeout "$CONNECT_TIMEOUT_SEC" \
+      --max-time "$MAX_TIME_SEC" \
+      "$candidate_url" 2>/dev/null)"
+    curl_rc=$?
+    set -e
+
+    resolved_url="$candidate_url"
+    path_used="$candidate_path"
+    if [[ "$curl_rc" -eq 0 ]]; then
+      http_code="$(printf '%s' "$curl_raw" | cut -f1)"
+      time_total="$(printf '%s' "$curl_raw" | cut -f2)"
+    else
+      http_code="000"
+      time_total="0"
+    fi
+
+    if [[ "$curl_rc" -eq 0 || "$idx" -eq $((${#candidates[@]} - 1)) ]]; then
+      break
+    fi
+  done
+
+  printf '%s\t%s\t%s\t%s\t%s\n' "$resolved_url" "$path_used" "$http_code" "$time_total" "$curl_rc"
+}
+
 TARGET_HOST="$(yq -r '.target.host // "automation-stack"' "$CONTRACT")"
 SAMPLE_COUNT="$(yq -r '.sampling.sample_count // 5' "$CONTRACT")"
 INTERVAL_MS="$(yq -r '.sampling.interval_ms // 200' "$CONTRACT")"
@@ -150,7 +238,11 @@ endpoint_selected() {
 }
 
 declare -A ENDPOINT_URL
+declare -A ENDPOINT_HOST
 declare -A ENDPOINT_EXPECT
+declare -A ENDPOINT_CANDIDATES
+declare -A ENDPOINT_EFFECTIVE_URL
+declare -A ENDPOINT_ROUTE_PATH
 declare -A ENDPOINT_TOTAL
 declare -A ENDPOINT_SUCCESS
 declare -A ENDPOINT_FAILURE
@@ -159,19 +251,23 @@ declare -A ENDPOINT_MAX
 declare -A ENDPOINT_MIN
 declare -a ENDPOINT_IDS
 
-while IFS=$'\t' read -r endpoint_id endpoint_url endpoint_expect; do
+while IFS=$'\t' read -r endpoint_id endpoint_host endpoint_url endpoint_expect; do
   [[ -n "$endpoint_id" && -n "$endpoint_url" ]] || continue
   if ! endpoint_selected "$endpoint_id"; then
     continue
   fi
   ENDPOINT_IDS+=("$endpoint_id")
+  ENDPOINT_HOST["$endpoint_id"]="$endpoint_host"
   ENDPOINT_URL["$endpoint_id"]="$endpoint_url"
   ENDPOINT_EXPECT["$endpoint_id"]="$endpoint_expect"
+  ENDPOINT_CANDIDATES["$endpoint_id"]="$(build_http_candidates "$endpoint_host" "$endpoint_url")"
+  ENDPOINT_EFFECTIVE_URL["$endpoint_id"]="$endpoint_url"
+  ENDPOINT_ROUTE_PATH["$endpoint_id"]="direct"
   ENDPOINT_TOTAL["$endpoint_id"]=0
   ENDPOINT_SUCCESS["$endpoint_id"]=0
   ENDPOINT_FAILURE["$endpoint_id"]=0
 done < <(
-  yq -r ".endpoints[] | select(.host == \"$TARGET_HOST\" and ((.enabled // true) == true)) | [(.id // \"\"), (.url // \"\"), ((.expect // 200)|tostring)] | @tsv" "$SERVICES_HEALTH"
+  yq -r ".endpoints[] | select(.host == \"$TARGET_HOST\" and ((.enabled // true) == true)) | [(.id // \"\"), (.host // \"\"), (.url // \"\"), ((.expect // 200)|tostring)] | @tsv" "$SERVICES_HEALTH"
 )
 
 if [[ "${#ENDPOINT_IDS[@]}" -eq 0 ]]; then
@@ -190,16 +286,14 @@ for ((sample_idx=1; sample_idx<=SAMPLE_COUNT; sample_idx++)); do
   for endpoint_id in "${ENDPOINT_IDS[@]}"; do
     url="${ENDPOINT_URL[$endpoint_id]}"
     expect="${ENDPOINT_EXPECT[$endpoint_id]}"
+    candidates_blob="${ENDPOINT_CANDIDATES[$endpoint_id]}"
+    preferred_path="${ENDPOINT_ROUTE_PATH[$endpoint_id]}"
     ENDPOINT_TOTAL["$endpoint_id"]=$((ENDPOINT_TOTAL["$endpoint_id"] + 1))
     total_samples=$((total_samples + 1))
 
-    set +e
-    curl_raw="$(curl -sS -o /dev/null -w "%{http_code}\t%{time_total}" \
-      --connect-timeout "$CONNECT_TIMEOUT_SEC" \
-      --max-time "$MAX_TIME_SEC" \
-      "$url" 2>/dev/null)"
-    curl_rc=$?
-    set -e
+    IFS=$'\t' read -r resolved_url route_path http_code time_total curl_rc <<<"$(probe_endpoint_once "$url" "$candidates_blob" "$preferred_path")"
+    ENDPOINT_EFFECTIVE_URL["$endpoint_id"]="$resolved_url"
+    ENDPOINT_ROUTE_PATH["$endpoint_id"]="$route_path"
 
     if [[ "$curl_rc" -ne 0 ]]; then
       ENDPOINT_FAILURE["$endpoint_id"]=$((ENDPOINT_FAILURE["$endpoint_id"] + 1))
@@ -207,8 +301,6 @@ for ((sample_idx=1; sample_idx<=SAMPLE_COUNT; sample_idx++)); do
       continue
     fi
 
-    http_code="$(printf '%s' "$curl_raw" | cut -f1)"
-    time_total="$(printf '%s' "$curl_raw" | cut -f2)"
     duration_ms="$(awk -v t="$time_total" 'BEGIN{printf "%d", (t*1000)+0.5}')"
 
     expect_ok=0
@@ -274,7 +366,7 @@ n8n_summary="$(grep -E 'summary:' "$n8n_tmp" | tail -n1 | sed 's/[[:space:]]\+/ 
 if [[ "$n8n_rc" -ne 0 ]] || grep -qiE 'status:[[:space:]]*FAIL|summary:[[:space:]]*INCIDENT|UNREACHABLE|ERROR' "$n8n_tmp"; then
   n8n_status="incident"
 elif [[ "$n8n_duration_ms" -ge "$N8N_INCIDENT_MS" ]]; then
-  n8n_status="incident"
+  n8n_status="warn"
 elif [[ "$n8n_duration_ms" -ge "$N8N_WARN_MS" ]]; then
   n8n_status="warn"
 fi
@@ -317,6 +409,9 @@ fi
 endpoint_json='[]'
 for endpoint_id in "${ENDPOINT_IDS[@]}"; do
   endpoint_url="${ENDPOINT_URL[$endpoint_id]}"
+  endpoint_host="${ENDPOINT_HOST[$endpoint_id]}"
+  endpoint_effective_url="${ENDPOINT_EFFECTIVE_URL[$endpoint_id]}"
+  endpoint_route_path="${ENDPOINT_ROUTE_PATH[$endpoint_id]}"
   endpoint_expect="${ENDPOINT_EXPECT[$endpoint_id]}"
   endpoint_total="${ENDPOINT_TOTAL[$endpoint_id]}"
   endpoint_success="${ENDPOINT_SUCCESS[$endpoint_id]}"
@@ -335,7 +430,10 @@ for endpoint_id in "${ENDPOINT_IDS[@]}"; do
   fi
   endpoint_obj="$(jq -n \
     --arg id "$endpoint_id" \
+    --arg host "$endpoint_host" \
     --arg url "$endpoint_url" \
+    --arg effective_url "$endpoint_effective_url" \
+    --arg route_path "$endpoint_route_path" \
     --arg expect "$endpoint_expect" \
     --argjson samples "$endpoint_total" \
     --argjson success "$endpoint_success" \
@@ -346,7 +444,10 @@ for endpoint_id in "${ENDPOINT_IDS[@]}"; do
     --argjson max_ms "$endpoint_max" \
     '{
       id: $id,
+      host: $host,
       url: $url,
+      effective_url: $effective_url,
+      route_path: $route_path,
       expect: $expect,
       samples: $samples,
       success: $success,

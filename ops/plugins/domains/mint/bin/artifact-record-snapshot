@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from artifact_record_common import (  # noqa: E402
+    ARTIFACT_ROLES,
+    artifacts_sort_key,
+    is_superseded,
+    load_artifact,
+    load_index,
+    resolve_spine_root,
+    runtime_paths,
+)
+from quote_packet_normalize import fail  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.artifact.record.snapshot"
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_ARTIFACT_RECORD_CAPABILITY_NAME") or CAPABILITY_NAME
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="artifact-record-snapshot",
+        description="Read governed Mint artifact records by seed, customer, job, or message/thread binding.",
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--artifact-id", help="Canonical artifact_id")
+    group.add_argument("--seed-id", help="Canonical seed_id")
+    group.add_argument("--customer-id", help="Canonical customer record id")
+    group.add_argument("--email", help="Customer email address")
+    group.add_argument("--job-ref", help="Job binding or job number")
+    group.add_argument("--order-id", help="Canonical order_id")
+    group.add_argument("--source-message-id", help="Source mailbox message id")
+    group.add_argument("--thread-id", help="Source mailbox conversation/thread id")
+    parser.add_argument("--role", choices=ARTIFACT_ROLES, help="Optional role filter")
+    parser.add_argument("--include-superseded", action="store_true", help="Include superseded artifacts in results")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def query_mode(args: argparse.Namespace) -> tuple[str, str]:
+    if args.artifact_id:
+        return "artifact_id", str(args.artifact_id).strip()
+    if args.seed_id:
+        return "seed_id", str(args.seed_id).strip()
+    if args.customer_id:
+        return "customer_id", str(args.customer_id).strip()
+    if args.email:
+        return "email", str(args.email).strip().lower()
+    if args.job_ref:
+        return "job_ref", str(args.job_ref).strip()
+    if args.order_id:
+        return "order_id", str(args.order_id).strip()
+    if args.source_message_id:
+        return "source_message_id", str(args.source_message_id).strip()
+    return "thread_id", str(args.thread_id or "").strip()
+
+
+def entry_matches(entry: dict[str, object], mode: str, value: str) -> bool:
+    if mode == "artifact_id":
+        return str(entry.get("artifact_id") or "").strip() == value
+    if mode == "seed_id":
+        return str(entry.get("seed_id") or "").strip() == value
+    if mode == "customer_id":
+        return str(entry.get("customer_id") or "").strip() == value
+    if mode == "email":
+        return str(entry.get("customer_email") or "").strip().lower() == value
+    if mode == "job_ref":
+        return str(entry.get("job_ref") or "").strip() == value
+    if mode == "order_id":
+        return str(entry.get("order_id") or "").strip() == value
+    if mode == "source_message_id":
+        return str(entry.get("source_message_id") or "").strip() == value
+    return str(entry.get("source_conversation_id") or "").strip() == value
+
+
+def overall_state(artifacts: list[dict[str, object]]) -> str:
+    if not artifacts:
+        return "no_artifact_found"
+    if any(not is_superseded(item) and str(item.get("artifact_status") or "") == "active" for item in artifacts):
+        return "active_artifacts_present"
+    if any(str(item.get("artifact_status") or "") == "needs_review" for item in artifacts):
+        return "review_required"
+    return "superseded_only"
+
+
+def print_text(payload: dict[str, object]) -> None:
+    latest = payload.get("latest") or {}
+    print(f"capability: {payload['capability']}")
+    print(f"query_mode: {payload['query_mode']}")
+    print(f"query_value: {payload['query_value']}")
+    print(f"state: {payload['state']}")
+    print(f"match_count: {payload['match_count']}")
+    print(f"active_count: {payload['active_count']}")
+    print(f"latest_artifact_id: {latest.get('artifact_id') or ''}")
+    print(f"latest_role: {latest.get('artifact_role') or ''}")
+    print(f"latest_object_key: {latest.get('canonical_object_key') or ''}")
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    paths = runtime_paths(resolve_spine_root())
+    mode, value = query_mode(args)
+    if not value:
+        fail("query value is required")
+
+    artifacts: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+    for entry in load_index(paths["artifacts_index_file"], "artifacts"):
+        if not entry_matches(entry, mode, value):
+            continue
+        artifact_id_value = str(entry.get("artifact_id") or "").strip()
+        if not artifact_id_value or artifact_id_value in seen_ids:
+            continue
+        try:
+            _artifact_file, artifact = load_artifact(paths, artifact_id_value)
+        except (FileNotFoundError, ValueError):
+            continue
+        if args.role and str(artifact.get("artifact_role") or "").strip() != args.role:
+            continue
+        if not args.include_superseded and is_superseded(artifact):
+            continue
+        seen_ids.add(artifact_id_value)
+        artifacts.append(artifact)
+
+    artifacts.sort(key=artifacts_sort_key, reverse=True)
+    role_counts: dict[str, int] = {}
+    for artifact in artifacts:
+        role = str(artifact.get("artifact_role") or "unknown")
+        role_counts[role] = role_counts.get(role, 0) + 1
+
+    payload = {
+        "capability": capability_name(),
+        "query_mode": mode,
+        "query_value": value,
+        "state": overall_state(artifacts),
+        "match_count": len(artifacts),
+        "active_count": len([item for item in artifacts if str(item.get("artifact_status") or "") == "active" and not is_superseded(item)]),
+        "role_counts": role_counts,
+        "latest": artifacts[0] if artifacts else None,
+        "artifacts": artifacts,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print_text(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
+

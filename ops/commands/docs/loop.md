@@ -25,7 +25,7 @@ Manage multi-step work through the Open Loop Engine.
 ```
 
 ### Create a new loop:
-1. Create scope file: `mailroom/state/loop-scopes/LOOP-<NAME>-<DATE>.scope.md`
+1. Create scope file in the canonical runtime scope directory: `${SPINE_STATE}/loop-scopes/LOOP-<NAME>-<DATE>.scope.md` (typically `.runtime/spine/state/loop-scopes/...`)
 2. Include frontmatter:
    ```yaml
    ---

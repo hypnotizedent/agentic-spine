@@ -58,7 +58,26 @@ kennedy_packet_file="$(packet_file_from_output "$kennedy_output")"
 [[ "$(yq '.open_gaps | map(select(.gap_type == "supplier_unresolved")) | length' "$kennedy_packet_file")" == "1" ]] || fail "Kennedy must carry supplier_unresolved"
 [[ "$(yq '.open_gaps | map(select(.gap_type == "artwork_inadequate")) | length' "$kennedy_packet_file")" == "1" ]] || fail "Kennedy must carry artwork_inadequate"
 [[ "$(yq '.open_gaps | map(select(.gap_type == "clarification_required" and .severity == "warning")) | length' "$kennedy_packet_file")" == "1" ]] || fail "Kennedy clarification gap must be warning severity"
+[[ "$(yq '.quote_readiness.state' "$kennedy_packet_file")" == "needs_customer_input" ]] || fail "Kennedy must surface quote readiness directly on the packet"
+[[ "$(yq '.quote_readiness.missing_for_build[] | select(.code == "blank_source") | .code' "$kennedy_packet_file")" == "blank_source" ]] || fail "Kennedy build blockers should include blank_source"
+[[ "$(yq '.quote_readiness.missing_for_send[] | select(.code == "customer_identity") | .code' "$kennedy_packet_file")" == "customer_identity" ]] || fail "Kennedy send blockers should include unresolved customer identity"
 pass "Kennedy fixture normalizes into a governed packet with honest blockers"
+
+section "Kennedy idempotent update"
+kennedy_line_item_id_before="$(yq -r '.line_items[0].line_item_id' "$kennedy_packet_file")"
+kennedy_rerun_output="$(
+  MINT_QUOTE_PACKETS_DIR="$PACKETS_DIR" \
+  MINT_QUOTE_PACKET_INDEX_FILE="$INDEX_FILE" \
+  MINT_QUOTE_PACKET_CAPABILITY_NAME="mint.quote.packet.normalize" \
+  "$QUOTE_PREPARE" \
+    --packet-id "$kennedy_packet_id" \
+    --evidence-file "$FIXTURES_DIR/kennedy.evidence.yaml" \
+    --skip-customer-resolve
+)"
+[[ "$(packet_id_from_output "$kennedy_rerun_output")" == "$kennedy_packet_id" ]] || fail "Kennedy rerun must reuse the packet id"
+[[ "$(yq '.line_items | length' "$kennedy_packet_file")" == "1" ]] || fail "Kennedy rerun must not duplicate line items"
+[[ "$(yq -r '.line_items[0].line_item_id' "$kennedy_packet_file")" == "$kennedy_line_item_id_before" ]] || fail "Kennedy rerun must preserve the existing line_item_id"
+pass "quote-prepare merges repeated evidence into the existing line item instead of duplicating packet work"
 
 section "Lisa Peirce fixture"
 lisa_output="$(run_fixture "lisa-peirce.evidence.yaml")"
@@ -84,6 +103,15 @@ moe_packet_file="$(packet_file_from_output "$moe_output")"
 [[ "$(yq '.open_gaps | map(select(.gap_type == "pricing_policy_review" and .severity == "warning")) | length' "$moe_packet_file")" == "1" ]] || fail "Moe must carry warning-level pricing_policy_review"
 [[ "$(yq '.open_gaps | map(select(.gap_type == "decoration_unresolved")) | length' "$moe_packet_file")" == "0" ]] || fail "Moe should not invent a decoration blocker when translation is still pre-pricing"
 pass "Moe fixture preserves VIP shorthand as low-confidence packet truth"
+
+section "Phuse greeting fixture"
+phuse_output="$(run_fixture "phuse-cream.evidence.yaml")"
+phuse_packet_file="$(packet_file_from_output "$phuse_output")"
+[[ -f "$phuse_packet_file" ]] || fail "Phuse packet file missing"
+[[ "$(yq '.customer_ref.resolved_name' "$phuse_packet_file")" == "Phuse Cream" ]] || fail "Phuse packet should preserve the company alias as resolved_name"
+[[ "$(yq '.customer_ref.greeting_name' "$phuse_packet_file")" == "Catherine" ]] || fail "Phuse packet should carry the human greeting name separately from the company alias"
+grep -Fq "Hi Catherine," "$phuse_packet_file" || fail "customer_message_draft should greet the human contact, not the company alias"
+pass "Phuse fixture preserves a stable human greeting name from quoted-thread evidence"
 
 section "Read surface"
 show_output="$(

@@ -1,0 +1,289 @@
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-17
+scope: mint-customer-quote-intake
+
+version: "1.0"
+updated_at: "2026-03-13"
+
+surface:
+  capability: mint.customer.quote.intake
+  operator_terminal: MINT-MORPHEUS-01
+  description: >
+    Convert a real customer quote-request email into a governed quote-packet
+    handoff, explicit artwork-readiness classification, intake-quality
+    classification, and downstream supplier/pricing attempts.
+
+storage:
+  records_root: "$SPINE_STATE/mint/customer-quote-intakes/records"
+  index_file: "$SPINE_STATE/mint/customer-quote-intakes/index.ndjson"
+  lock_file: "$SPINE_STATE/mint/customer-quote-intakes/.index.lock"
+  packet_root: "runtime/domain-state/mint/quote-packets"
+  packet_index_file: "runtime/domain-state/mint/quote-packets-index.yaml"
+
+dependencies:
+  source_get_capability: microsoft.mail.get
+  source_attachments_capability: microsoft.mail.attachments.list
+  source_attachment_download_capability: microsoft.mail.attachment.download
+  artwork_preflight_capability: mint.artwork.preflight
+  artwork_preflight_command: ops/plugins/domains/mint/bin/artwork-preflight
+  customer_snapshot_capability: mint.customer.record.snapshot
+  seed_ensure_capability: mint.customer.seed.ensure
+  packet_normalize_command: ops/plugins/domains/mint/bin/quote-prepare
+  packet_source_command: ops/plugins/domains/mint/bin/quote-source
+  packet_estimate_command: ops/plugins/domains/mint/bin/quote-estimate
+  packet_price_command: ops/plugins/domains/mint/bin/quote-price
+
+root_causes:
+  supplier_reachability: >
+    Existing supplier/inventory runtime already lived behind
+    mint.quote.packet.source -> suppliers-v2, but the Morpheus customer lane
+    stopped at briefing and never created the governed quote_packet handoff that
+    supplier sourcing requires.
+  artwork_reachability: >
+    Microsoft attachment metadata was reachable, but customer-lane logic had no
+    canonical artwork-readiness classifier and treated inline imagery as
+    ignorable noise instead of mockup/reference evidence, which collapsed real
+    attachment truth into generic missing-artwork behavior.
+
+intake_quality_model:
+  classes:
+    ideal:
+      description: >
+        Existing-customer or clearly scoped quote request with structured line
+        items, blank/style truth, quantities, size runs, print locations, and
+        some artwork evidence.
+      operator_behavior: packetize_source_price_and_acknowledge
+      customer_reply_mode: acknowledge_and_process
+    workable:
+      description: >
+        Real quote request with enough truth to packetize, but still missing one
+        or more structured order fields that require a concise clarification.
+      operator_behavior: packetize_then_targeted_clarification
+      customer_reply_mode: ask_targeted_blocker_only
+    headache:
+      description: >
+        Low-signal or operator-heavy request lacking stable product, quantity,
+        or artwork structure. Keep it out of the deeper quote lane until the
+        core fields are clarified.
+      operator_behavior: stop_at_operator_review
+      customer_reply_mode: request_core_scope_first
+  required_signals_for_ideal:
+    - parsed_line_items
+    - style_codes_complete
+    - quantities_complete
+    - size_breakdowns_complete
+    - print_locations_complete
+    - artwork_evidence_present
+
+product_scope_model:
+  in_scope_markers:
+    - apparel
+    - t-shirt
+    - tee
+    - shirt
+    - hoodie
+    - sweatshirt
+    - crewneck
+    - polo
+    - hat
+    - cap
+    - beanie
+    - tank
+    - jersey
+    - long sleeve
+    - quarter zip
+    - zip-up
+    - embroidery
+    - screen print
+    - dtg
+  mixed_scope_customer_summary: This request mixes apparel with items outside our apparel lane.
+  out_of_scope_categories:
+    vinyl_signage:
+      markers:
+        - vinyl
+        - signage
+        - floor decal
+        - floor decals
+        - banner
+        - banners
+        - yard sign
+        - yard signs
+        - window cling
+        - window clings
+      customer_summary: This request is for vinyl/signage work rather than apparel printing.
+    paper_collateral:
+      markers:
+        - business card
+        - business cards
+        - flyer
+        - flyers
+        - brochure
+        - brochures
+        - postcard
+        - postcards
+      customer_summary: This request is for paper collateral rather than apparel printing.
+    stickers_labels:
+      markers:
+        - sticker
+        - stickers
+        - label
+        - labels
+        - decal
+        - decals
+      customer_summary: This request is for stickers/labels rather than apparel printing.
+    promo_hardgoods:
+      markers:
+        - magnet
+        - magnets
+        - mug
+        - mugs
+        - tumbler
+        - tumblers
+        - koozie
+        - koozies
+        - keychain
+        - keychains
+        - pen
+        - pens
+        - promotional item
+        - promotional items
+      customer_summary: This request is for promotional hardgoods rather than apparel printing.
+
+artwork_readiness_model:
+  classes:
+    print_ready_artwork:
+      description: >
+        Non-inline governed artwork evidence exists in a production-usable file
+        type such as PDF, AI, EPS, SVG, DST, or EMB.
+    mockup_reference:
+      description: >
+        Artwork evidence exists, but it is inline imagery, generic PNG/JPG
+        previews, or explicitly mockup/reference material rather than governed
+        production-ready artwork.
+    insufficient_low_confidence:
+      description: >
+        No concrete artwork evidence exists or the available evidence is too
+        weak to distinguish the intended production artwork from narrative only.
+  print_ready_extensions:
+    - ai
+    - eps
+    - svg
+    - pdf
+    - dst
+    - emb
+  mockup_extensions:
+    - png
+    - jpg
+    - jpeg
+    - webp
+  inline_attachment_defaults_to: mockup_reference
+
+inline_image_context_model:
+  enabled: true
+  max_images: 3
+  max_bytes_per_image: 6291456
+  summary_max_chars: 240
+  allowed_content_types:
+    - image/png
+    - image/jpeg
+    - image/webp
+  operator_prompt: >
+    Describe only operator-relevant apparel truth from these inline customer
+    images. Name visible garment or item types, whether they look like a
+    coordinated set, visible logo placement, likely decoration method cues
+    such as puff or embroidery, and what the customer probably means when
+    pointing at "these". Do not invent brand names, style codes, quantities,
+    pricing, or unsupported certainty.
+
+attachment_intelligence_model:
+  enabled: true
+  analyze_non_inline: true
+  max_attachments: 5
+  max_bytes_per_attachment: 10485760
+  max_sample_side: 160
+  allowed_content_types:
+    - image/png
+    - image/jpeg
+    - image/webp
+    - application/pdf
+    - image/svg+xml
+    - application/postscript
+  allowed_extensions:
+    - png
+    - jpg
+    - jpeg
+    - webp
+    - pdf
+    - svg
+    - ai
+    - eps
+  gradient_detection:
+    min_exact_unique_colors: 96
+    continuous_tone_ratio: 4.0
+  print_method_recommendation:
+    enabled: true
+    factors:
+      - color_count
+      - has_gradients
+      - piece_quantity
+    dtg_threshold:
+      min_colors: 5
+      or_has_gradients: true
+      piece_range: [50, 1000]
+    screen_print_threshold:
+      max_colors: 4
+      min_pieces: 24
+
+handoff_path:
+  - message_read
+  - seed_ensure
+  - customer_snapshot
+  - intake_parse
+  - artwork_readiness_classify
+  - intake_quality_classify
+  - quote_packet_normalize
+  - quote_packet_source
+  - quote_packet_estimate
+  - quote_packet_price
+
+quote_readiness_model:
+  states:
+    needs_customer_input:
+      description: >
+        Customer-facing or intake-scope blockers still prevent a clean quote
+        build from fresh-slate truth.
+    ready_for_quote_build:
+      description: >
+        Fresh-slate truth is sufficient to start the quote lane, but sourcing,
+        estimate, pricing, or render work has not yet advanced.
+    quote_packet_in_progress:
+      description: >
+        Internal quote-lane work is underway from fresh-slate truth, but the
+        quote is not yet reviewable or sendable.
+    ready_for_operator_review:
+      description: >
+        The quote packet carries the governed pricing and draft surfaces needed
+        for operator review, with Printavo remaining advisory only.
+    ready_for_operator_send:
+      description: >
+        Operator approval is complete and the fresh-slate packet is ready to
+        send without consulting legacy state.
+    quote_sent:
+      description: >
+        The customer quote has already been sent or the packet is otherwise
+        beyond the send stage.
+  build_basis:
+    exact_pricing_ready:
+      description: Exact governed pricing truth exists for all line items.
+    estimate_safe:
+      description: Quote-safe estimate truth exists even if exact pricing is not complete yet.
+    not_ready:
+      description: Fresh-slate truth is still missing before the quote can be built safely.
+  external_context:
+    printavo_visibility:
+      role: advisory_only
+      gating: false
+      description: >
+        Printavo refs may be attached for operator context, but they must not
+        control fresh-slate quote readiness.

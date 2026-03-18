@@ -1,7 +1,7 @@
 version: 1
 status: authoritative
 owner: "@ronny"
-updated_at: "2026-03-12"
+updated_at: "2026-03-17"
 scope: universal-boringness-closure
 
 purpose: >
@@ -39,24 +39,24 @@ evidence:
         - "lvs --noheadings -o lv_name,vg_name,lv_size | grep vm-200-disk-0 || true"
     - environment: shop
       host: pve
-      observed_at_utc: "2026-03-12T05:08:17Z"
+      observed_at_utc: "2026-03-17T07:01:08Z"
       proof:
         - "zpool list -Hp -o name,size,alloc,free,capacity media md1400"
-        - "zfs list -o name,used,refer,mountpoint media media/movies media/music media/tv md1400/media-cold md1400/media-cold/movies-archive"
+        - "zfs list -o name,used,refer,mountpoint media media/movies media/music media/tv md1400/archive"
         - "zfs list -t snapshot -o name,used,creation -s used -r media"
-        - "zfs get -H -o property,value used,referenced,clones media@forensic-20260226-2325"
         - "exportfs -v | grep -A2 '^/media '"
-        - "find /media/backups -maxdepth 1 -type f -name 'media-stack-2026-*.tar.gz' | wc -l"
-        - "du -sx --block-size=1 /media/backups"
-        - "find /md1400/media-cold/legacy-media-stack-backups -maxdepth 1 -type f -name 'media-stack-2026-*.tar.gz' | wc -l"
-        - "du -sx --block-size=1 /md1400/media-cold/legacy-media-stack-backups"
+        - "stat -c '%u %g %a %n' /media/movies-archive"
+        - "pvesm status"
+        - "find /media -mindepth 1 -maxdepth 1 -printf '%y %f\\n' | sort"
+        - "du -sx --block-size=1 /media/downloads /media/movies-archive | sort -nr"
+        - "du -sx --block-size=1 /md1400/archive/media-holds/downloads-cleanup-20260317/exact-duplicates /md1400/archive/media-holds/legacy-media-stack-backups | sort -nr"
     - environment: shop
-      host: streaming-stack
-      observed_at_utc: "2026-03-12T05:08:17Z"
+      host: download-stack
+      observed_at_utc: "2026-03-17T07:03:52Z"
       proof:
         - "mount | grep '/mnt/media '"
-        - "du -xhd1 /mnt/media | sort -h"
-        - "du -sx --block-size=1 /mnt/media/backups /mnt/media/downloads /mnt/media/movies /mnt/media/movies-archive /mnt/media/music /mnt/media/tv | sort -nr"
+        - "df -h /mnt/media /mnt/media/downloads /mnt/media/movies /mnt/media/tv /mnt/media/music"
+        - "du -sx --block-size=1 /mnt/media/downloads /mnt/media/movies /mnt/media/movies-archive /mnt/media/music /mnt/media/tv | sort -nr"
     - environment: home
       host: proxmox-home
       observed_at_utc: "2026-03-12T03:02:00Z"
@@ -97,19 +97,21 @@ live_proof:
       jobs_cfg_entry_present: false
       restore_command_example: qmrestore /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst 9200 --storage local-lvm --unique 1
     media_pressure:
-      observed_at_utc: "2026-03-12T05:08:17Z"
-      media_pool_usage_pct: 99
-      media_pool_free_bytes: 189135667200
+      observed_at_utc: "2026-03-17T07:03:52Z"
+      media_pool_usage_pct: 95
+      media_pool_free_bytes: 1368225144832
       canonical_payload_bytes: 17466866683392
-      downloads_regenerable_bytes: 2873736959488
+      downloads_regenerable_bytes: 2471411541504
       legacy_backups_remaining_bytes: 0
-      forensic_snapshot_used_bytes: 298500227072
-      overlay_drift_status: classified
+      forensic_snapshot_used_bytes: 0
+      duplicate_download_hold_bytes: 163228102656
+      overlay_drift_status: reduced
       blocking_summary: >
-        media is at 99% usage. Client-visible payload over /media already accounts for about 15.9TiB
-        of canonical library/archive content, downloads adds about 2.61TiB of regenerable pressure,
-        the legacy backup drain is complete on md1400, and the retained forensic snapshot still prevents
-        the reclaimed blocks from returning to the warm lane immediately.
+        media is at 95% usage. Client-visible payload over /media already accounts for about 15.9TiB
+        of canonical library/archive content, downloads still adds about 2.25TiB of regenerable pressure,
+        the old /media/movies-archive cross-pool mask and the /media media-storage compatibility backend
+        are gone, and the forensic snapshot was destroyed. The remaining live blocker is app-level import
+        flow: download-stack still sees about 798G available over NFS while Sonarr continues logging zero-free-space imports.
   home:
     proxmox:
       observed_at_utc: "2026-03-12T03:02:00Z"
@@ -168,15 +170,16 @@ repo_surfaces:
 sites:
   shop:
     boring_enough_now: false
-    summary: Shop rack is structurally legible and inventory-backed; VM200 hot footprint is gone and the remaining blocker is warm-lane pressure on media plus a retained forensic snapshot hold.
+    summary: Shop rack is structurally legible, inventory-backed, and storage-normalized at the namespace layer; the remaining blockers are warm-lane pressure on media and app-level import backlog behavior on download-stack.
     storage_tiers:
       hot: tank
       warm: media
       cold: md1400
     blockers:
-      - media is at 99% usage and only has about 189G free.
+      - media is at 95% usage. The pool has about 1.37T free, but clients only see about 798G available over NFS.
       - Client-visible /media payload already accounts for about 15.9TiB of canonical movie/TV/music/archive content, so the remaining easy reclaim is mostly downloads.
-      - media@forensic-20260226-2325 is still retained as a forensic hold and has grown to 278G, so the completed backup drain still does not immediately reclaim matching space.
+      - Downloads still contribute about 2.25TiB of regenerable pressure even after the duplicate-drain and snapshot cleanup wave.
+      - download-stack automation still logs FreeSpaceSpecification zero-free-space failures and SQLite lock churn, so import backlog behavior is not yet boring.
   home:
     boring_enough_now: false
     summary: Home infra now has authoritative inventory and backup truth, but one-box durability assumptions are still too informal for drive-change confidence.
@@ -199,11 +202,7 @@ manual_surface_register:
     - id: media-export-overlay-drift
       environment: shop
       kind: storage_mount_overlay
-      note: Client-visible /media payload truth comes from the NFS export, not the host-local child dataset mount view at /media/movies, /media/tv, /media/music, and /media/movies-archive.
-    - id: media-forensic-20260226-2325
-      environment: shop
-      kind: storage_snapshot_hold
-      note: Retained forensic snapshot on media preserves deleted blocks and blocks immediate reclaim during the copy-first normalization wave.
+      note: Client-visible /media payload truth comes from the NFS export, not the host-local child dataset mount view at /media/movies, /media/tv, and /media/music. The old /media/movies-archive cross-pool mask and the Proxmox media-storage compatibility backend were removed on 2026-03-17.
     - id: mint-modules-deploy-wrapper
       environment: code
       kind: repo_support_surface
@@ -222,15 +221,15 @@ decisions:
     status: done
     rationale: Cold capsule path/size/SHA-256 and qemu config were captured before delete, then qm disk unlink removed scsi0 and the backing LV on 2026-03-12T04:30:02Z.
   - decision_type: safe_to_migrate
-    subject: legacy media-stack tarballs from /media/backups to /md1400/media-cold/legacy-media-stack-backups
+    subject: legacy media-stack tarballs from /media/backups to /md1400/archive/media-holds/legacy-media-stack-backups
     environment: shop
     status: done
     rationale: Canonical media config backups already live under /md1400/backup-cold/apps/media-config. The historical warm-lane tarballs are now fully parked on md1400 and no longer live on media.
   - decision_type: safe_to_delete
     subject: media@forensic-20260226-2325
     environment: shop
-    status: blocked
-    rationale: Snapshot still acts as a forensic restore hold for the copy-first utilization wave. Deleting it would change the restore story, not just free space.
+    status: done
+    rationale: Snapshot was destroyed on 2026-03-17 after legacy media-stack backups and the duplicate-download review hold were captured on md1400.
   - decision_type: safe_to_delete
     subject: Synology mint-os legacy residue
     environment: home
@@ -250,7 +249,7 @@ decisions:
     subject: shop rack hot/warm/cold storage
     environment: shop
     status: blocked
-    rationale: VM200 hot LV is gone, but media remains at 99% usage, downloads still contribute about 2.61TiB of regenerable pressure, and the retained forensic snapshot prevents warm-lane deletions from reclaiming space immediately.
+    rationale: The namespace is cleaner, /md1400/stage is back to empty posture, the Proxmox media-storage compatibility backend is gone, and the forensic snapshot was destroyed. Hardware change is still blocked because media remains at 95% usage, downloads still contribute about 2.25TiB of regenerable pressure, GAP-OP-1526 is still active, and import automation is still pinned by app-level free-space checks.
   - decision_type: safe_to_change_drives
     subject: proxmox-home and Synology drives
     environment: home

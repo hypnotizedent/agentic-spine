@@ -49,6 +49,7 @@ contracts:
   payment_bridge_authority: ops/bindings/mint.quote.payment_bridge.authority.yaml
   module_lifecycle_authority: ops/bindings/mint.module.lifecycle.authority.yaml
   module_status_authority: ops/bindings/mint.module.status.authority.contract.yaml
+  mail_identity_contract: ops/bindings/mint.customer.mail.identity.contract.yaml
   mint_domain_doc: docs/governance/domains/mint.md
 
 relationship_to_order_truth:
@@ -89,6 +90,17 @@ quote_packet_schema:
       required_subfields:
         - identity_state (provisional|resolved)
         - customer_query or customer_id
+        - resolved_name
+        - resolved_email
+        - mail_salutation_mode
+      optional_subfields:
+        - contact_name
+        - greeting_name
+      semantics:
+        resolved_name: Account/company label or governed record label. Never use as greeting fallback.
+        contact_name: Full human contact name when known.
+        greeting_name: Salutation token for named greetings only.
+        mail_salutation_mode: named or neutral; neutral is required when no governed human greeting exists.
     source_refs:
       type: array
       description: References to intake seed evidence, inbound artifacts, or reused historical evidence
@@ -145,6 +157,21 @@ quote_packet_schema:
         - stock_available (boolean per line item)
         - stock_warnings (array)
         - supplier_receipt_refs (array)
+    estimate_snapshot:
+      type: object
+      description: Quote-time recommendation and estimate results prior to production-final pricing truth
+      structure:
+        - snapshot_timestamp
+        - estimate_snapshot_id (uuid, packet-level estimate run identifier)
+        - estimate_state (completed|partial|blocked_insufficient_inputs|api_key_unavailable|service_unavailable|api_call_failed)
+        - line_item_estimates (array)
+        - calculated_totals (object: subtotal, tax, shipping, total)
+        - estimate_receipt_refs (array)
+        - confidence_level (high|medium|low|none)
+        - blocking_reasons (array, optional)
+        - quote_safe_line_item_count (integer)
+        - clarification_needed_count (integer)
+        - estimate_authority_path (optional)
     pricing_snapshot:
       type: object
       description: Pricing calculation results
@@ -152,8 +179,8 @@ quote_packet_schema:
         - snapshot_timestamp
         - pricing_snapshot_id (uuid, packet-level pricing run identifier)
         - pricing_state (completed|blocked_insufficient_inputs|api_key_unavailable|service_unavailable|api_call_failed)
-        - line_item_prices (array)
-        - decoration_prices (array)
+        - line_item_prices (array with customer-facing unit/line totals plus pricing_breakdown: wholesale_blank, garment_markup, imprint)
+        - decoration_prices (array with raw module line_items/pricing_trace evidence plus pricing_breakdown copy)
         - calculated_totals (object: subtotal, tax, shipping, total)
         - pricing_receipt_refs (array)
         - confidence_level (high|medium|low)
@@ -175,6 +202,7 @@ quote_packet_schema:
       structure:
         - overall (high|medium|low)
         - artwork_confidence (high|medium|low|none)
+        - estimate_confidence (high|medium|low|none)
         - pricing_confidence (high|medium|low|none)
         - stock_confidence (high|medium|low|none)
         - customer_confidence (high|medium|low|none)
@@ -746,6 +774,19 @@ capability_surface:
     blockers:
       - sourcing requires canonical style/SKU cues; generic product descriptions remain blocked honestly
       - stock execution requires supplier_code + supplier_sku + quantity; otherwise inventory_snapshot stays sourcing-only
+  estimate:
+    name: mint.quote.packet.estimate
+    description: Persist quote-time recommendation and estimated unit pricing from sourced packet truth plus governed assumptions
+    implementation_status: REAL (packet-driven recommendation layer before exact pricing)
+    inputs:
+      - quote_packet_id (required)
+    outputs:
+      - estimate_snapshot (recommended method, bounded assumptions, per-line estimated price, confidence, quote-safe status)
+      - receipts (SPINE_CAP_RUN_KEY appended)
+    safety: mutating
+    blockers:
+      - blank source and quantity must be grounded before estimate-safe pricing can be communicated
+      - unsupported recommendation methods may remain clarification-blocked until estimate policy or pricing support exists
   price:
     name: mint.quote.packet.price
     description: Persist a real pricing_snapshot directly from governed quote_packet line_items
@@ -759,7 +800,7 @@ capability_surface:
       - receipts (SPINE_CAP_RUN_KEY appended)
     safety: mutating
     blockers:
-      - quantity, decoration, supplier, shipping, proof, or clarification blockers must resolve before estimator execution
+      - exact production pricing still requires complete decoration, supplier, shipping, proof, and clarification truth even when estimate_snapshot exists
       - pricing service access still depends on canonical PRICING_API_KEY availability
   render:
     name: mint.quote.render
@@ -777,6 +818,23 @@ capability_surface:
       - blocking gaps for proof, shipping, pricing, or clarification must be resolved before render succeeds
       - pricing_snapshot confidence must be medium or high
       - payment link generation remains downstream of quote_packet promotion to canonical order/revision/quote
+  approve:
+    name: mint.quote.approve
+    description: Record operator approval and advance review-ready quote_packet state to approved_to_send
+    implementation_status: REAL (legacy-style review transition restored for governed packet flow)
+    inputs:
+      - quote_packet_id (required)
+      - approved_by (required, explicit)
+      - approval_note (optional)
+    outputs:
+      - operator_approval (approved_by, approved_at, approval_note, approval_source)
+      - updated state (approved_to_send)
+      - receipts (SPINE_CAP_RUN_KEY appended)
+    safety: mutating
+    approval_requirement: manual
+    blockers:
+      - quote_packet must already be ready_for_review (or already approved_to_send for idempotent reruns)
+      - quote_packet must have no unresolved send blockers except operator approval itself
   promote:
     name: mint.quote.promote
     description: Promote approved quote_packet state into canonical order/revision/quote runtime records

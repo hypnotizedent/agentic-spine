@@ -1,0 +1,922 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import os
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from artwork_intelligence_common import (  # noqa: E402
+    COLOR_CONTINUITY_STATES,
+    RELATIONSHIP_CLASSES,
+    analysis_index_entry,
+    canonical_location,
+    customer_scope_key,
+    default_family_record,
+    entity_file,
+    family_index_entry,
+    family_key_from_text,
+    garment_family_from_text,
+    load_index,
+    load_yaml_object,
+    merge_unique_strings,
+    normalize_color_truth,
+    normalize_lower,
+    normalize_text,
+    pretty_label_from_key,
+    resolve_spine_root,
+    runtime_paths,
+    size_matches,
+    size_signature,
+    slug_tokens,
+    update_entity_index,
+    variant_key_from_text,
+    artwork_analysis_id,
+)
+from artwork_preflight_surface_common import run_preflight_command, surface_artwork_preflight  # noqa: E402
+from quote_packet_normalize import dump_yaml, fail, now_utc  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.artwork.intelligence.analyze"
+CUSTOMER_SNAPSHOT_CAPABILITY = "mint.customer.record.snapshot"
+ARTIFACT_SNAPSHOT_CAPABILITY = "mint.artifact.record.snapshot"
+ARTWORK_PREFLIGHT_COMMAND_FALLBACK = "ops/plugins/domains/mint/bin/artwork-preflight"
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="artwork-intelligence-analyze",
+        description=(
+            "Analyze a current Mint request against governed artwork-family, artifact, "
+            "and historical imprint truth for reuse, sizing, and color continuity."
+        ),
+    )
+    parser.add_argument("--request-file", required=True, help="JSON or YAML file describing the current request")
+    parser.add_argument("--email", default="", help="Customer email if not present in the request payload")
+    parser.add_argument("--customer-id", default="", help="Canonical customer id if known")
+    parser.add_argument("--seed-id", default="", help="Seed id for the current request")
+    parser.add_argument("--thread-id", default="", help="Source conversation/thread id")
+    parser.add_argument("--source-message-id", default="", help="Source mailbox message id")
+    parser.add_argument("--order-id", default="", help="Canonical order id if already known")
+    parser.add_argument("--job-ref", default="", help="Canonical job reference if already known")
+    parser.add_argument("--case-label", default="", help="Optional proving-case label stored with the analysis")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_ARTWORK_INTELLIGENCE_CAPABILITY_NAME") or CAPABILITY_NAME
+
+
+def load_request_file(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"request file not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        payload = json.loads(text)
+    else:
+        payload = yaml.safe_load(text) or {}
+    if not isinstance(payload, dict):
+        fail(f"request file must resolve to an object: {path}")
+    return payload
+
+
+def run_cap_json(spine_root: Path, capability: str, args: list[str]) -> tuple[dict[str, Any], str]:
+    cmd = [str(spine_root / "bin" / "ops"), "cap", "run", capability]
+    if args:
+        cmd.extend(["--", *args])
+    result = subprocess.run(cmd, cwd=spine_root, capture_output=True, text=True, check=False)
+    combined = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    if result.returncode != 0:
+        fail(f"{capability} failed: {combined.strip()}")
+    receipt = ""
+    for line in (result.stdout or "").splitlines():
+        if line.startswith("Receipt:"):
+            receipt = line.split(":", 1)[1].strip()
+    text = (result.stdout or "").strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        fail(f"{capability} returned non-JSON output")
+    return json.loads(text[start : end + 1]), receipt
+
+
+def choose_customer_binding(request: dict[str, Any], args: argparse.Namespace, customer_snapshot: dict[str, Any]) -> dict[str, Any]:
+    request_binding = dict(request.get("customer_binding") or {})
+    snapshot_customer = dict(((customer_snapshot.get("fresh_slate") or {}).get("customer")) or {})
+    return {
+        "customer_id": normalize_text(args.customer_id or request_binding.get("customer_id") or snapshot_customer.get("record_id"))
+        or None,
+        "customer_email": normalize_lower(
+            args.email or request_binding.get("customer_email") or snapshot_customer.get("email") or request.get("customer_email")
+        )
+        or None,
+        "customer_name": normalize_text(
+            request_binding.get("customer_name")
+            or snapshot_customer.get("name")
+            or request.get("customer_name")
+            or request.get("company")
+        )
+        or None,
+    }
+
+
+def analysis_query_receipts(spine_root: Path, request: dict[str, Any], args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
+    email = normalize_lower(args.email or request.get("customer_email") or ((request.get("customer_binding") or {}).get("customer_email")))
+    customer_id = normalize_text(args.customer_id or ((request.get("customer_binding") or {}).get("customer_id")))
+    seed_id = normalize_text(args.seed_id or request.get("seed_id"))
+
+    customer_snapshot = {
+        "fresh_slate": {},
+        "legacy_hold": {},
+    }
+    customer_receipt = ""
+    if email:
+        customer_snapshot, customer_receipt = run_cap_json(spine_root, CUSTOMER_SNAPSHOT_CAPABILITY, ["--email", email, "--json"])
+    elif customer_id:
+        customer_snapshot, customer_receipt = run_cap_json(
+            spine_root, CUSTOMER_SNAPSHOT_CAPABILITY, ["--record-id", customer_id, "--json"]
+        )
+
+    artifact_snapshot = {
+        "state": "no_artifact_found",
+        "match_count": 0,
+        "active_count": 0,
+        "artifacts": [],
+    }
+    artifact_receipt = ""
+    if seed_id:
+        artifact_snapshot, artifact_receipt = run_cap_json(
+            spine_root, ARTIFACT_SNAPSHOT_CAPABILITY, ["--seed-id", seed_id, "--json"]
+        )
+    elif email:
+        artifact_snapshot, artifact_receipt = run_cap_json(
+            spine_root, ARTIFACT_SNAPSHOT_CAPABILITY, ["--email", email, "--json"]
+        )
+
+    return (
+        customer_snapshot,
+        {
+            "customer_snapshot_receipt": customer_receipt or None,
+            "artifact_snapshot_receipt": artifact_receipt or None,
+        },
+        artifact_snapshot,
+    )
+
+
+def command_path() -> str:
+    return normalize_text(os.environ.get("MINT_ARTWORK_PREFLIGHT_COMMAND") or ARTWORK_PREFLIGHT_COMMAND_FALLBACK) or ARTWORK_PREFLIGHT_COMMAND_FALLBACK
+
+
+def preflight_artifacts(
+    spine_root: Path,
+    *,
+    artifacts: list[dict[str, Any]],
+    customer_binding: dict[str, Any],
+    job_ref: str,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    records: dict[str, dict[str, Any]] = {}
+    record_files: list[str] = []
+    for artifact in artifacts:
+        artifact_id = normalize_text(artifact.get("artifact_id"))
+        if not artifact_id:
+            continue
+        file_path = normalize_text(artifact.get("canonical_object_path"))
+        if not file_path:
+            continue
+        path = Path(file_path).expanduser()
+        if not path.is_file():
+            continue
+        args = [str(path), "--attachment-name", normalize_text(artifact.get("original_filename") or path.name)]
+        if normalize_text(customer_binding.get("customer_name")):
+            args.extend(["--customer-name", normalize_text(customer_binding.get("customer_name"))])
+        if normalize_text(customer_binding.get("customer_email")):
+            args.extend(["--customer-email", normalize_text(customer_binding.get("customer_email"))])
+        if job_ref:
+            args.extend(["--job-ref", job_ref])
+        try:
+            payload = run_preflight_command(command_path(), args, cwd=spine_root)
+        except RuntimeError:
+            continue
+        surface = surface_artwork_preflight(payload)
+        records[artifact_id] = surface
+        record_file = normalize_text(surface.get("record_file") or "")
+        if record_file and record_file not in record_files:
+            record_files.append(record_file)
+    return records, record_files
+
+
+def matching_family_records(paths: dict[str, Path], customer_binding: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    customer_key = customer_scope_key(customer_binding)
+    families: dict[str, dict[str, Any]] = {}
+    for entry in load_index(paths["families_index_file"], "artwork_families"):
+        entry_binding = {
+            "customer_id": entry.get("customer_id"),
+            "customer_email": entry.get("customer_email"),
+            "customer_name": entry.get("customer_name"),
+        }
+        if customer_scope_key(entry_binding) != customer_key:
+            continue
+        family_id = normalize_text(entry.get("family_id"))
+        if not family_id:
+            continue
+        record = load_yaml_object(entity_file(paths["families_dir"], "artwork_family", family_id))
+        if record:
+            families[family_id] = record
+    if families:
+        return families
+    for path in sorted(paths["families_dir"].glob("artwork_family_*.yaml")):
+        record = load_yaml_object(path)
+        if not record:
+            continue
+        if customer_scope_key(record.get("customer_binding") or {}) != customer_key:
+            continue
+        family_id = normalize_text(record.get("family_id"))
+        if not family_id:
+            continue
+        families[family_id] = record
+    return families
+
+
+def ensure_variant(record: dict[str, Any], *, variant_key: str, variant_label: str, artifact: dict[str, Any] | None = None) -> None:
+    variants = record.setdefault("variants", [])
+    variant = next((item for item in variants if normalize_text(item.get("variant_key")) == variant_key), None)
+    if variant is None:
+        variant = {
+            "variant_key": variant_key,
+            "variant_label": variant_label or pretty_label_from_key(variant_key),
+            "variant_status": "active",
+            "artifact_ids": [],
+            "artifact_refs": [],
+            "provenance": [],
+        }
+        variants.append(variant)
+    if artifact:
+        artifact_id = normalize_text(artifact.get("artifact_id"))
+        if artifact_id and artifact_id not in variant["artifact_ids"]:
+            variant["artifact_ids"].append(artifact_id)
+        artifact_key = normalize_text(artifact.get("canonical_object_key") or artifact.get("canonical_object_path"))
+        if artifact_key and artifact_key not in variant["artifact_refs"]:
+            variant["artifact_refs"].append(artifact_key)
+        variant["provenance"] = merge_unique_strings(
+            list(variant.get("provenance") or []),
+            [normalize_text(artifact.get("artifact_role")), normalize_text(artifact.get("artifact_status"))],
+        )
+
+
+def merge_artifacts_into_families(
+    families: dict[str, dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+    customer_binding: dict[str, Any],
+    seed_id: str,
+) -> None:
+    for artifact in artifacts:
+        family_key = family_key_from_text(artifact.get("artifact_family_key") or artifact.get("original_filename"))
+        variant_key = variant_key_from_text(artifact.get("artifact_family_key") or artifact.get("original_filename"))
+        family_id = default_family_record(customer_binding, family_key)["family_id"]
+        record = families.get(family_id)
+        if record is None:
+            record = default_family_record(customer_binding, family_key, pretty_label_from_key(family_key))
+            families[family_id] = record
+        ensure_variant(
+            record,
+            variant_key=variant_key,
+            variant_label=pretty_label_from_key(variant_key),
+            artifact=artifact,
+        )
+        if seed_id:
+            record["seed_refs"] = merge_unique_strings(list(record.get("seed_refs") or []), [seed_id])
+        record["updated_at"] = now_utc()
+
+
+def build_legacy_truth_entries(customer_snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    latest_order = dict(((customer_snapshot.get("legacy_hold") or {}).get("latest_order")) or {})
+    order_ref = normalize_text(latest_order.get("invoice_number"))
+    entries: list[dict[str, Any]] = []
+    for imprint in (customer_snapshot.get("legacy_hold") or {}).get("latest_order_imprints") or []:
+        if not isinstance(imprint, dict):
+            continue
+        width = normalize_text(imprint.get("width"))
+        height = normalize_text(imprint.get("height"))
+        size_payload: dict[str, Any] = {}
+        if width:
+            try:
+                size_payload["width_in"] = float(width)
+            except ValueError:
+                pass
+        if height:
+            try:
+                size_payload["height_in"] = float(height)
+            except ValueError:
+                pass
+        entries.append(
+            {
+                "family_key": family_key_from_text(imprint.get("description") or imprint.get("location")),
+                "variant_key": variant_key_from_text(imprint.get("description") or imprint.get("location")),
+                "location": canonical_location(imprint.get("location") or imprint.get("cob_location")),
+                "decoration_method": normalize_text(imprint.get("decoration_type")),
+                "size": size_payload or None,
+                "order_ref": order_ref or None,
+                "source_kind": "legacy_order_snapshot",
+                "description": normalize_text(imprint.get("description")),
+                "color_truth": {
+                    "ink_colors": [],
+                    "thread_colors": [],
+                    "pms_refs": [],
+                    "thread_refs": [],
+                    "garment_color": "",
+                    "mockup_color_note": "",
+                    "mockup_implies_change": False,
+                    "confirmation_required": False,
+                    "source_kind": "legacy_order_snapshot",
+                },
+                "confidence": "medium",
+            }
+        )
+    return entries
+
+
+def binding_rows_for_line(line: dict[str, Any]) -> list[dict[str, Any]]:
+    explicit = [copy.deepcopy(item) for item in (line.get("requested_bindings") or []) if isinstance(item, dict)]
+    if explicit:
+        return explicit
+    bindings: list[dict[str, Any]] = []
+    locations = [item for item in (line.get("print_locations") or []) if normalize_text(item)]
+    placement = normalize_text(line.get("placement"))
+    if placement and placement not in locations:
+        locations.append(placement)
+    if not locations:
+        locations = ["unscoped"]
+    for location in locations:
+        bindings.append(
+            {
+                "location": location,
+                "requested_size": copy.deepcopy(line.get("graphic_size_inches") or {}),
+                "design_description": normalize_text(line.get("operator_notes") or line.get("description")),
+                "decoration_method": normalize_text(line.get("decoration_method")),
+                "current_color_truth": {
+                    "garment_color": normalize_text(line.get("color")),
+                },
+            }
+        )
+    return bindings
+
+
+def family_candidate_score(
+    family: dict[str, Any],
+    *,
+    binding_family_key: str,
+    binding_variant_key: str,
+    binding_tokens: set[str],
+    artifact_id: str,
+) -> tuple[int, bool]:
+    score = 0
+    variant_exact = False
+    family_key = normalize_text(family.get("family_key"))
+    if binding_family_key and family_key == binding_family_key:
+        score += 6
+    if binding_tokens:
+        overlap = len(binding_tokens & set(slug_tokens(family.get("family_label") or family_key)))
+        score += overlap
+    for variant in family.get("variants") or []:
+        variant_key = normalize_text((variant or {}).get("variant_key"))
+        if binding_variant_key and variant_key == binding_variant_key:
+            score += 6
+            variant_exact = True
+        if artifact_id and artifact_id in ((variant or {}).get("artifact_ids") or []):
+            score += 8
+            variant_exact = True
+        score += len(binding_tokens & set(slug_tokens((variant or {}).get("variant_label") or variant_key)))
+    return score, variant_exact
+
+
+def select_family(
+    families: dict[str, dict[str, Any]],
+    *,
+    binding_family_key: str,
+    binding_variant_key: str,
+    binding_tokens: set[str],
+    artifact_id: str,
+) -> tuple[dict[str, Any] | None, bool, bool]:
+    ranked: list[tuple[int, bool, dict[str, Any]]] = []
+    for family in families.values():
+        score, variant_exact = family_candidate_score(
+            family,
+            binding_family_key=binding_family_key,
+            binding_variant_key=binding_variant_key,
+            binding_tokens=binding_tokens,
+            artifact_id=artifact_id,
+        )
+        if score <= 0:
+            continue
+        ranked.append((score, variant_exact, family))
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    if not ranked:
+        return None, False, False
+    best_score, best_variant_exact, best_family = ranked[0]
+    ambiguous = len(ranked) > 1 and ranked[1][0] >= best_score - 1
+    if best_score < 4:
+        return None, False, False
+    return best_family, best_variant_exact, ambiguous
+
+
+def historical_candidates(
+    family: dict[str, Any] | None,
+    legacy_entries: list[dict[str, Any]],
+    *,
+    location: str,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    if family:
+        family_key = normalize_text(family.get("family_key"))
+        for entry in family.get("historical_imprint_truth") or []:
+            if not isinstance(entry, dict):
+                continue
+            if location and canonical_location(entry.get("location")) != location:
+                continue
+            if family_key and normalize_text(entry.get("family_key") or family_key) != family_key:
+                continue
+            candidates.append(copy.deepcopy(entry))
+    if not candidates and family:
+        family_key = normalize_text(family.get("family_key"))
+        for entry in legacy_entries:
+            if normalize_text(entry.get("family_key")) != family_key:
+                continue
+            if location and canonical_location(entry.get("location")) != location:
+                continue
+            candidates.append(copy.deepcopy(entry))
+    return candidates
+
+
+def choose_historical_entry(
+    entries: list[dict[str, Any]],
+    *,
+    binding_variant_key: str,
+    decoration_method: str,
+) -> dict[str, Any] | None:
+    ranked: list[tuple[int, dict[str, Any]]] = []
+    for entry in entries:
+        score = 0
+        if binding_variant_key and normalize_text(entry.get("variant_key")) == binding_variant_key:
+            score += 4
+        if decoration_method and normalize_text(entry.get("decoration_method")) == decoration_method:
+            score += 2
+        if normalize_text(entry.get("order_ref")):
+            score += 1
+        ranked.append((score, entry))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return copy.deepcopy(ranked[0][1]) if ranked else None
+
+
+def compare_color_continuity(
+    prior: dict[str, Any] | None,
+    current: dict[str, Any],
+    *,
+    current_garment_color: str,
+) -> tuple[str, dict[str, Any], bool]:
+    prior_truth = normalize_color_truth((prior or {}).get("color_truth"))
+    current_truth = normalize_color_truth(current)
+    prior_colors = {
+        "ink_colors": prior_truth["ink_colors"],
+        "thread_colors": prior_truth["thread_colors"],
+        "pms_refs": prior_truth["pms_refs"],
+        "thread_refs": prior_truth["thread_refs"],
+    }
+    current_colors = {
+        "ink_colors": current_truth["ink_colors"],
+        "thread_colors": current_truth["thread_colors"],
+        "pms_refs": current_truth["pms_refs"],
+        "thread_refs": current_truth["thread_refs"],
+    }
+    any_prior = any(prior_colors.values())
+    any_current = any(current_colors.values())
+    garment_changed = bool(prior_truth["garment_color"] and current_garment_color and prior_truth["garment_color"] != current_garment_color)
+    mockup_implies_change = bool(current_truth["mockup_implies_change"] or current_truth["mockup_color_note"])
+
+    if any_prior and any_current and current_colors == prior_colors and not garment_changed:
+        state = "exact_match"
+    elif any_prior and any_current and current_colors != prior_colors:
+        state = "changed_from_prior"
+    elif mockup_implies_change:
+        state = "ambiguous_mockup_only"
+    elif any_prior and garment_changed:
+        state = "likely_match_needs_confirmation"
+    elif any_prior and not any_current and not garment_changed:
+        state = "exact_match"
+    else:
+        state = "unknown"
+
+    confirmation_required = state in {"likely_match_needs_confirmation", "changed_from_prior", "ambiguous_mockup_only"}
+    merged = {
+        "prior_ink_colors": prior_truth["ink_colors"],
+        "prior_thread_colors": prior_truth["thread_colors"],
+        "prior_pms_refs": prior_truth["pms_refs"],
+        "prior_thread_refs": prior_truth["thread_refs"],
+        "prior_garment_color": prior_truth["garment_color"] or None,
+        "current_ink_colors": current_truth["ink_colors"],
+        "current_thread_colors": current_truth["thread_colors"],
+        "current_pms_refs": current_truth["pms_refs"],
+        "current_thread_refs": current_truth["thread_refs"],
+        "current_garment_color": current_garment_color or current_truth["garment_color"] or None,
+        "mockup_color_note": current_truth["mockup_color_note"] or None,
+        "garment_changed": garment_changed,
+        "continuity_basis": [
+            basis
+            for basis in [
+                "explicit_color_match" if state == "exact_match" and any_prior else "",
+                "explicit_color_changed" if state == "changed_from_prior" else "",
+                "mockup_visual_difference" if state == "ambiguous_mockup_only" else "",
+                "garment_color_changed" if garment_changed else "",
+                "no_explicit_color_truth" if state == "unknown" else "",
+            ]
+            if basis
+        ],
+    }
+    return state, merged, confirmation_required
+
+
+def relationship_classification(
+    *,
+    family: dict[str, Any] | None,
+    family_ambiguous: bool,
+    variant_exact: bool,
+    historical_entry: dict[str, Any] | None,
+    current_size: dict[str, Any] | None,
+    current_blank_style: str,
+    current_garment_family: str,
+) -> tuple[str, bool, bool, bool]:
+    if family_ambiguous:
+        return "ambiguous_needs_operator_review", False, True, True
+    if family is None:
+        if current_size or current_blank_style:
+            return "new_graphic", False, True, True
+        return "ambiguous_needs_operator_review", False, True, True
+
+    if not variant_exact:
+        return "prior_art_variant_existing_asset", False, True, True
+
+    prior_size = dict((historical_entry or {}).get("size") or {})
+    size_match = size_matches(current_size, prior_size)
+    prior_blank_style = normalize_text((historical_entry or {}).get("blank_style_code"))
+    prior_garment_family = normalize_text((historical_entry or {}).get("garment_family"))
+    blank_changed = bool(
+        (current_blank_style and prior_blank_style and current_blank_style != prior_blank_style)
+        or (current_garment_family and prior_garment_family and current_garment_family != prior_garment_family)
+    )
+    if size_match is False:
+        return "prior_art_reuse_with_size_change", False, True, True
+    if blank_changed:
+        return "prior_art_reuse_with_blank_change", True, False, False
+    return "exact_reuse", True, False, False
+
+
+def next_action_for(relationship: str, color_state: str, review_required: bool) -> str:
+    if relationship == "exact_reuse" and color_state == "exact_match":
+        return "reuse_prior_production_truth"
+    if relationship == "prior_art_reuse_with_blank_change":
+        return "reuse_art_with_blank_review"
+    if relationship == "prior_art_reuse_with_size_change":
+        return "route_artie_for_sizing_review"
+    if relationship == "prior_art_variant_existing_asset":
+        return "route_artie_for_variant_proof"
+    if relationship == "new_graphic":
+        return "route_artie_for_new_artwork"
+    if review_required:
+        return "operator_review_required"
+    return "operator_review_required"
+
+
+def persist_family_records(
+    paths: dict[str, Path],
+    families: dict[str, dict[str, Any]],
+    *,
+    analysis_id: str,
+    seed_id: str,
+    order_id: str,
+    job_ref: str,
+    receipts: dict[str, Any],
+) -> list[str]:
+    paths["families_dir"].mkdir(parents=True, exist_ok=True)
+    record_files: list[str] = []
+    for record in families.values():
+        record["analysis_refs"] = merge_unique_strings(list(record.get("analysis_refs") or []), [analysis_id])
+        if seed_id:
+            record["seed_refs"] = merge_unique_strings(list(record.get("seed_refs") or []), [seed_id])
+        if order_id:
+            record["order_refs"] = merge_unique_strings(list(record.get("order_refs") or []), [order_id])
+        if job_ref:
+            record["job_refs"] = merge_unique_strings(list(record.get("job_refs") or []), [job_ref])
+        record["receipts"] = {**dict(record.get("receipts") or {}), **receipts}
+        record["updated_at"] = now_utc()
+        family_id = normalize_text(record.get("family_id"))
+        path = entity_file(paths["families_dir"], "artwork_family", family_id)
+        dump_yaml(path, record)
+        update_entity_index(paths["families_index_file"], "artwork_families", "family_id", family_index_entry(record))
+        record_files.append(str(path))
+    return sorted(record_files)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root = resolve_spine_root()
+    paths = runtime_paths(spine_root)
+    request_path = Path(args.request_file).expanduser().resolve()
+    request = load_request_file(request_path)
+
+    customer_snapshot, receipts, artifact_snapshot = analysis_query_receipts(spine_root, request, args)
+    customer_binding = choose_customer_binding(request, args, customer_snapshot)
+    seed_id = normalize_text(args.seed_id or request.get("seed_id"))
+    source_refs = {
+        "thread_id": normalize_text(args.thread_id or request.get("thread_id")),
+        "source_message_id": normalize_text(args.source_message_id or request.get("source_message_id")),
+        "order_id": normalize_text(args.order_id or request.get("order_id")),
+        "job_ref": normalize_text(args.job_ref or request.get("job_ref")),
+        "quote_packet_id": normalize_text(request.get("quote_packet_id")),
+    }
+
+    families = matching_family_records(paths, customer_binding)
+    artifacts = [item for item in (artifact_snapshot.get("artifacts") or []) if isinstance(item, dict)]
+    merge_artifacts_into_families(families, artifacts, customer_binding, seed_id)
+    legacy_entries = build_legacy_truth_entries(customer_snapshot)
+    artifact_preflights, artifact_preflight_record_files = preflight_artifacts(
+        spine_root,
+        artifacts=artifacts,
+        customer_binding=customer_binding,
+        job_ref=source_refs["job_ref"],
+    )
+
+    line_results: list[dict[str, Any]] = []
+    relationship_counts: Counter[str] = Counter()
+    color_counts: Counter[str] = Counter()
+    review_required_count = 0
+    reusable_count = 0
+
+    line_items = [item for item in (request.get("line_items") or []) if isinstance(item, dict)]
+    for line_index, line in enumerate(line_items, start=1):
+        line_item_id = normalize_text(line.get("line_item_id")) or f"line-{line_index}"
+        line_description = normalize_text(line.get("description") or line.get("product_type") or line_item_id)
+        current_blank_style = normalize_text(line.get("style_code"))
+        current_garment_color = normalize_text(line.get("color") or line.get("garment_color"))
+        current_garment_family = normalize_text(
+            line.get("garment_family") or garment_family_from_text(line.get("product_type"), line_description, current_blank_style)
+        )
+        line_bindings: list[dict[str, Any]] = []
+
+        for binding_index, binding in enumerate(binding_rows_for_line(line), start=1):
+            location = canonical_location(binding.get("location")) or f"location_{binding_index}"
+            design_text = " ".join(
+                part
+                for part in [
+                    binding.get("design_description"),
+                    binding.get("family_hint"),
+                    binding.get("variant_hint"),
+                    binding.get("artifact_family_key"),
+                    binding.get("original_filename"),
+                    line.get("operator_notes"),
+                    line_description,
+                ]
+                if normalize_text(part)
+            )
+            family_source = (
+                binding.get("family_key")
+                or binding.get("family_hint")
+                or binding.get("artifact_family_key")
+                or design_text
+            )
+            binding_family_key = normalize_text(binding.get("family_key")) or family_key_from_text(family_source)
+            binding_variant_key = normalize_text(binding.get("variant_key")) or variant_key_from_text(
+                binding.get("variant_hint") or binding.get("artifact_family_key") or binding.get("original_filename") or design_text
+            )
+            binding_artifact_id = normalize_text(binding.get("artifact_id"))
+            binding_tokens = set(slug_tokens(design_text))
+
+            family, variant_exact, family_ambiguous = select_family(
+                families,
+                binding_family_key=binding_family_key,
+                binding_variant_key=binding_variant_key,
+                binding_tokens=binding_tokens,
+                artifact_id=binding_artifact_id,
+            )
+            resolved_binding_artifact_id = binding_artifact_id
+            if not resolved_binding_artifact_id and family is not None:
+                for variant in family.get("variants") or []:
+                    if normalize_text((variant or {}).get("variant_key")) != binding_variant_key:
+                        continue
+                    artifact_ids = [normalize_text(item) for item in ((variant or {}).get("artifact_ids") or []) if normalize_text(item)]
+                    if artifact_ids:
+                        resolved_binding_artifact_id = artifact_ids[0]
+                        break
+            binding_preflight = copy.deepcopy(artifact_preflights.get(resolved_binding_artifact_id) or {})
+
+            historical_entry = choose_historical_entry(
+                historical_candidates(family, legacy_entries, location=location),
+                binding_variant_key=binding_variant_key,
+                decoration_method=normalize_text(binding.get("decoration_method") or line.get("decoration_method")),
+            )
+            current_size = dict(binding.get("requested_size") or line.get("graphic_size_inches") or {})
+            relationship, reuse_safe, sizing_review_required, review_required = relationship_classification(
+                family=family,
+                family_ambiguous=family_ambiguous,
+                variant_exact=variant_exact,
+                historical_entry=historical_entry,
+                current_size=current_size,
+                current_blank_style=current_blank_style,
+                current_garment_family=current_garment_family,
+            )
+            if family is None and relationship != "ambiguous_needs_operator_review" and binding_family_key != "unclassifiedart":
+                record = default_family_record(customer_binding, binding_family_key, pretty_label_from_key(binding_family_key))
+                ensure_variant(
+                    record,
+                    variant_key=binding_variant_key,
+                    variant_label=pretty_label_from_key(binding_variant_key),
+                    artifact=None,
+                )
+                families[record["family_id"]] = record
+                family = record
+            color_state, color_payload, color_confirmation_required = compare_color_continuity(
+                historical_entry,
+                dict(binding.get("current_color_truth") or {}),
+                current_garment_color=current_garment_color,
+            )
+
+            previous_sizes = []
+            for candidate in historical_candidates(family, legacy_entries, location=location):
+                width, height = size_signature(candidate.get("size"))
+                if width is None or height is None:
+                    continue
+                label = f"{width:g}x{height:g}"
+                if label not in previous_sizes:
+                    previous_sizes.append(label)
+            prior_size = dict((historical_entry or {}).get("size") or {})
+            size_match_state = "unknown"
+            exact_size = size_matches(current_size, prior_size)
+            if exact_size is True:
+                size_match_state = "exact_match"
+            elif exact_size is False:
+                size_match_state = "changed_from_prior"
+
+            needs_new_proof = relationship in {
+                "prior_art_reuse_with_size_change",
+                "prior_art_variant_existing_asset",
+                "new_graphic",
+                "ambiguous_needs_operator_review",
+            }
+            customer_confirmation_required = bool(color_confirmation_required or binding.get("customer_confirmation_required"))
+            prepress_review_required = bool(binding_preflight.get("review_required"))
+            if relationship == "prior_art_reuse_with_blank_change" and color_state != "exact_match":
+                customer_confirmation_required = True
+            review_required = bool(review_required or customer_confirmation_required or prepress_review_required)
+
+            if review_required:
+                review_required_count += 1
+            if reuse_safe and not review_required:
+                reusable_count += 1
+
+            relationship_counts[relationship] += 1
+            color_counts[color_state] += 1
+            next_action = next_action_for(relationship, color_state, review_required)
+            if prepress_review_required and next_action in {"reuse_prior_production_truth", "reuse_art_with_blank_review"}:
+                next_action = "operator_review_required"
+
+            line_bindings.append(
+                {
+                    "binding_id": f"{line_item_id}:{location}",
+                    "location": location,
+                    "decoration_method": normalize_text(binding.get("decoration_method") or line.get("decoration_method")) or None,
+                    "family_id": normalize_text((family or {}).get("family_id")) or None,
+                    "family_key": normalize_text((family or {}).get("family_key") or binding_family_key) or None,
+                    "family_label": normalize_text((family or {}).get("family_label")) or None,
+                    "variant_key": binding_variant_key or None,
+                    "artifact_id": resolved_binding_artifact_id or None,
+                    "relationship_classification": relationship,
+                    "relationship_confidence": "medium" if relationship != "ambiguous_needs_operator_review" else "low",
+                    "previously_used_sizes": previous_sizes,
+                    "current_requested_size": current_size or None,
+                    "prior_size_match_state": size_match_state,
+                    "historical_match": historical_entry or None,
+                    "reuse_safe": reuse_safe,
+                    "new_proof_required": needs_new_proof,
+                    "sizing_review_required": sizing_review_required,
+                    "prepress_review_required": prepress_review_required,
+                    "customer_confirmation_required": customer_confirmation_required,
+                    "review_required": review_required,
+                    "color_continuity_state": color_state,
+                    "color_truth": color_payload,
+                    "next_action": next_action,
+                    "artwork_preflight": binding_preflight or None,
+                }
+            )
+
+            if family is not None:
+                ensure_variant(
+                    family,
+                    variant_key=binding_variant_key,
+                    variant_label=pretty_label_from_key(binding_variant_key),
+                    artifact=next((item for item in artifacts if normalize_text(item.get("artifact_id")) == binding_artifact_id), None),
+                )
+
+        line_results.append(
+            {
+                "line_item_id": line_item_id,
+                "description": line_description,
+                "style_code": current_blank_style or None,
+                "garment_family": current_garment_family or None,
+                "garment_color": current_garment_color or None,
+                "requested_bindings": line_bindings,
+            }
+        )
+
+    signature = {
+        "customer_scope": customer_scope_key(customer_binding),
+        "seed_id": seed_id,
+        "thread_id": source_refs["thread_id"],
+        "source_message_id": source_refs["source_message_id"],
+        "request_file": str(request_path),
+        "line_items": [
+            {
+                "line_item_id": item.get("line_item_id"),
+                "description": item.get("description"),
+                "requested_bindings": [binding.get("binding_id") for binding in item.get("requested_bindings") or []],
+            }
+            for item in line_results
+        ],
+    }
+    analysis_id = artwork_analysis_id(signature)
+    created_at = now_utc()
+
+    record = {
+        "analysis_id": analysis_id,
+        "schema_version": "1.0",
+        "capability": capability_name(),
+        "case_label": normalize_text(args.case_label or request.get("case_label")) or None,
+        "seed_id": seed_id or None,
+        "customer_binding": customer_binding,
+        "source_refs": source_refs,
+        "line_items": line_results,
+        "summary": {
+            "relationship_counts": dict(relationship_counts),
+            "color_continuity_counts": dict(color_counts),
+            "review_required_count": review_required_count,
+            "reusable_without_review_count": reusable_count,
+            "family_count": len(families),
+        },
+        "artwork_preflight_refs": list(artifact_preflights.values()) or None,
+        "receipts": {
+            **receipts,
+            "artwork_preflight_record_files": artifact_preflight_record_files or None,
+        },
+        "request_file": str(request_path),
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+
+    paths["analyses_dir"].mkdir(parents=True, exist_ok=True)
+    analysis_file = entity_file(paths["analyses_dir"], "artwork_intelligence", analysis_id)
+    capture_state = "existing" if analysis_file.exists() else "recorded"
+    dump_yaml(analysis_file, record)
+    update_entity_index(paths["analyses_index_file"], "artwork_intelligence", "analysis_id", analysis_index_entry(record))
+    family_files = persist_family_records(
+        paths,
+        families,
+        analysis_id=analysis_id,
+        seed_id=seed_id,
+        order_id=source_refs["order_id"],
+        job_ref=source_refs["job_ref"],
+        receipts=receipts,
+    )
+
+    payload = {
+        "capability": capability_name(),
+        "capture_state": capture_state,
+        "analysis_id": analysis_id,
+        "record_file": str(analysis_file),
+        "family_record_files": family_files,
+        "data": record,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(f"capability: {payload['capability']}")
+    print(f"capture_state: {payload['capture_state']}")
+    print(f"analysis_id: {payload['analysis_id']}")
+    print(f"relationship_counts: {json.dumps(record['summary']['relationship_counts'], sort_keys=True)}")
+    print(f"color_counts: {json.dumps(record['summary']['color_continuity_counts'], sort_keys=True)}")
+    print(f"record_file: {payload['record_file']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

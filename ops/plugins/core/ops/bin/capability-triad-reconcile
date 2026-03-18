@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Generate capability_map.yaml and routing.dispatch.yaml from capability authority."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[5]
+ROUTING_GENERATOR = ROOT / "ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py"
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"missing required input: {path}")
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def _dump_yaml(document: dict[str, Any]) -> str:
+    return yaml.safe_dump(document, sort_keys=False, allow_unicode=True, width=10**6)
+
+
+def _extract_plugin_script(command: str) -> tuple[bool, str | None, str | None]:
+    text = str(command or "").strip()
+    tokens = text.split()
+    if not tokens:
+        return False, None, None
+
+    executable = tokens[0]
+    normalized = executable[2:] if executable.startswith("./") else executable
+
+    if normalized.startswith("agentic-spine/"):
+        normalized = normalized.split("agentic-spine/", 1)[1]
+
+    if normalized.startswith("ops/plugins/") and "/bin/" in normalized:
+        plugin_path, script = normalized.split("/bin/", 1)
+        plugin = plugin_path.split("/")[-1]
+        if plugin_path == "ops/plugins/core/agent":
+            plugin = "inbox"
+        return True, plugin, script
+
+    if normalized.startswith("surfaces/verify/"):
+        return True, "verify", normalized.split("surfaces/verify/", 1)[1]
+
+    if normalized.startswith("ops/commands/"):
+        return True, "ops", normalized.split("ops/commands/", 1)[1]
+
+    return False, None, None
+
+
+def _build_map_entry(
+    capability_id: str,
+    capability: dict[str, Any],
+    seeded_entry: dict[str, Any],
+) -> dict[str, Any]:
+    command = capability.get("command", "")
+    _, inferred_plugin, inferred_script = _extract_plugin_script(str(command))
+
+    entry: dict[str, Any] = dict(seeded_entry)
+    entry["plugin"] = seeded_entry.get("plugin") if "plugin" in seeded_entry else inferred_plugin
+    entry["script"] = seeded_entry.get("script") if "script" in seeded_entry else inferred_script
+    entry["safety"] = capability.get("safety")
+
+    if "arg_protocol" in seeded_entry and seeded_entry.get("arg_protocol") in ("", None):
+        entry.pop("arg_protocol", None)
+    if "note" in seeded_entry and seeded_entry.get("note") in ("", None):
+        entry.pop("note", None)
+
+    return entry
+
+
+def _generate_capability_map(
+    capabilities: dict[str, Any],
+    seeded_map: dict[str, Any],
+) -> dict[str, Any]:
+    generated: dict[str, Any] = {"capabilities": {}}
+    ordered_ids: list[str] = []
+    for capability_id in seeded_map.keys():
+        if capability_id in capabilities:
+            ordered_ids.append(capability_id)
+    for capability_id in capabilities.keys():
+        if capability_id not in seeded_map:
+            ordered_ids.append(capability_id)
+
+    for capability_id in ordered_ids:
+        capability = capabilities.get(capability_id) or {}
+        seeded_entry = seeded_map.get(capability_id) or {}
+        generated["capabilities"][capability_id] = _build_map_entry(
+            capability_id,
+            capability or {},
+            seeded_entry if isinstance(seeded_entry, dict) else {},
+        )
+    return generated
+
+
+def _write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.tmp.",
+        delete=False,
+    ) as handle:
+        handle.write(content)
+        tmp_path = Path(handle.name)
+    os.replace(tmp_path, path)
+
+
+def _run_routing_generator(capabilities_in: Path, routing_out: Path) -> None:
+    routing_out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=routing_out.parent,
+        prefix=f".{routing_out.name}.tmp.",
+        delete=False,
+    ) as handle:
+        tmp_routing_path = Path(handle.name)
+    env = os.environ.copy()
+    env["SPINE_CAPABILITIES_REGISTRY"] = str(capabilities_in)
+    env["SPINE_ROUTING_DISPATCH_OUT"] = str(tmp_routing_path)
+    try:
+        subprocess.run(
+            [sys.executable, str(ROUTING_GENERATOR), "--target", "dispatch"],
+            check=True,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os.replace(tmp_routing_path, routing_out)
+    finally:
+        tmp_routing_path.unlink(missing_ok=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Reconcile capability triad artifacts from capability authority.")
+    parser.add_argument("--capabilities-in", default=str(ROOT / "ops/capabilities.yaml"))
+    parser.add_argument("--capability-map-seed", default=str(ROOT / "ops/bindings/capability_map.yaml"))
+    parser.add_argument("--capability-map-out", default=str(ROOT / "ops/bindings/capability_map.yaml"))
+    parser.add_argument("--routing-dispatch-out", default=str(ROOT / "ops/bindings/routing.dispatch.yaml"))
+    parser.add_argument("--seed-capability")
+    parser.add_argument("--seed-plugin")
+    parser.add_argument("--seed-script")
+    parser.add_argument("--seed-note")
+    parser.add_argument("--seed-arg-protocol")
+    args = parser.parse_args()
+
+    capabilities_in = Path(args.capabilities_in)
+    seed_map_in = Path(args.capability_map_seed)
+    capability_map_out = Path(args.capability_map_out)
+    routing_dispatch_out = Path(args.routing_dispatch_out)
+
+    capabilities_doc = _load_yaml(capabilities_in)
+    capabilities = capabilities_doc.get("capabilities") or {}
+    if not isinstance(capabilities, dict) or not capabilities:
+        raise SystemExit(f"capability-triad-reconcile FAIL: no capabilities found in {capabilities_in}")
+
+    seeded_doc = _load_yaml(seed_map_in) if seed_map_in.exists() else {}
+    seeded_map = seeded_doc.get("capabilities") or {}
+    if not isinstance(seeded_map, dict):
+        seeded_map = {}
+
+    if args.seed_capability:
+        override_entry = dict(seeded_map.get(args.seed_capability) or {})
+        if args.seed_plugin is not None:
+            override_entry["plugin"] = args.seed_plugin
+        if args.seed_script is not None:
+            override_entry["script"] = args.seed_script
+        if args.seed_note is not None:
+            override_entry["note"] = args.seed_note
+        if args.seed_arg_protocol is not None:
+            override_entry["arg_protocol"] = args.seed_arg_protocol
+        seeded_map[args.seed_capability] = override_entry
+
+    generated_map = _generate_capability_map(capabilities, seeded_map)
+    _write_text(capability_map_out, _dump_yaml(generated_map))
+
+    try:
+        _run_routing_generator(capabilities_in, routing_dispatch_out)
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(f"capability-triad-reconcile FAIL: routing generator failed with exit {exc.returncode}") from exc
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

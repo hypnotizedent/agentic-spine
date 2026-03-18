@@ -1,0 +1,811 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from artifact_record_common import ARTIFACT_ROLES, infer_artifact_role  # noqa: E402
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    compact_utc,
+    fail,
+    iso_utc,
+    message_body_text,
+    message_sender,
+    message_subject,
+    normalized_subject,
+    resolve_spine_root,
+    resolve_spine_state,
+    run_cap_capture,
+    safe_filename,
+    strip_html,
+    tokenize,
+    utc_now,
+    write_json,
+)
+
+
+SCHEMA_VERSION = "1.0"
+CAPABILITY_FALLBACK = "mint.customer.forwarded.attachment.resolve"
+DEFAULT_MAILBOX = "team@mintprints.com"
+ATTACHMENTS_LIST_CAPABILITY = "microsoft.mail.attachments.list"
+ATTACHMENT_DOWNLOAD_CAPABILITY = "microsoft.mail.attachment.download"
+GET_CAPABILITY = "microsoft.mail.get"
+SEARCH_CAPABILITY = "microsoft.mail.search"
+PLACE_CAPABILITY = "mint.artwork.place"
+SEED_ENSURE_CAPABILITY = "mint.customer.seed.ensure"
+ARTIFACT_SNAPSHOT_CAPABILITY = "mint.artifact.record.snapshot"
+ARTIFACT_CAPTURE_CAPABILITY = "mint.artifact.record.capture"
+
+EXTENSION_WEIGHTS = {
+    "pdf": 10,
+    "ai": 10,
+    "eps": 10,
+    "svg": 9,
+    "cdr": 8,
+    "png": 5,
+    "jpg": 4,
+    "jpeg": 4,
+}
+
+POSITIVE_VERSION_TOKENS = {
+    "approved": 7,
+    "corrected": 7,
+    "current": 6,
+    "final": 8,
+    "latest": 8,
+    "new": 2,
+    "rev": 4,
+    "revision": 5,
+    "updated": 6,
+    "use": 2,
+}
+
+NEGATIVE_VERSION_TOKENS = {
+    "bad": -12,
+    "broken": -10,
+    "draft": -7,
+    "old": -9,
+    "older": -9,
+    "previous": -7,
+    "prev": -7,
+    "proof": -4,
+    "sample": -4,
+    "superseded": -12,
+    "wrong": -12,
+}
+
+SOURCE_MESSAGE_BONUS = 18
+SOURCE_ATTACHMENT_INTENT_BONUS = 8
+RELATED_MESSAGE_RECENCY_BONUS = 4
+AMBIGUITY_MARGIN = 4
+MIN_CONFIDENT_SCORE = 14
+
+
+@dataclass
+class AttachmentOccurrence:
+    message_id: str
+    message_subject: str
+    message_received_utc: str
+    message_from: str
+    origin: str
+    related_rank: int
+    attachment_id: str
+    attachment_name: str
+    content_type: str
+    extension: str
+    size_bytes: int
+    last_modified_utc: str
+    is_inline: bool
+    score: int
+    reasons: list[str]
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_CUSTOMER_FORWARDED_ATTACHMENT_RESOLVE_CAPABILITY_NAME") or CAPABILITY_FALLBACK
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-forwarded-attachment-resolve",
+        description=(
+            "Resolve a forwarded customer/vendor message attachment through the governed Microsoft path, "
+            "select the likely current intended artwork, and optionally place it canonically."
+        ),
+    )
+    parser.add_argument("message_id", nargs="?", help="Forwarded source mailbox message id")
+    parser.add_argument("--message-id", dest="message_id_flag", default="", help="Forwarded source mailbox message id")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox to read from (default: {DEFAULT_MAILBOX})")
+    parser.add_argument("--context", default="", help="Freeform customer/job context used for attachment scoring and placement")
+    parser.add_argument("--job-ref", default="", help="Optional job binding persisted onto the artifact record")
+    parser.add_argument("--order-id", default="", help="Optional canonical order_id binding persisted onto the artifact record")
+    parser.add_argument("--related-query", default="", help="Optional explicit mailbox search query for related thread messages")
+    parser.add_argument("--artifact-role", default="", choices=ARTIFACT_ROLES, help="Optional explicit artifact role override")
+    parser.add_argument("--top-related", type=int, default=5, help="Max related messages to inspect for prior versions")
+    parser.add_argument("--no-place", action="store_true", help="Download and select attachment without calling mint.artwork.place")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    resolved_message_id = args.message_id_flag.strip() or str(args.message_id or "").strip()
+    if not resolved_message_id:
+        fail("message_id required")
+    args.message_id = resolved_message_id
+    if args.top_related < 1:
+        fail("--top-related must be >= 1")
+    return args
+
+
+def strip_preview_text(message: dict[str, Any]) -> str:
+    return strip_html(str(message.get("bodyPreview") or ""))
+
+
+def derive_related_query(source_message: dict[str, Any], operator_context: str, explicit_query: str) -> str:
+    if explicit_query.strip():
+        return explicit_query.strip()
+    subject_tokens = tokenize(normalized_subject(message_subject(source_message)))
+    context_tokens = tokenize(operator_context)
+    body_tokens = tokenize(message_body_text(source_message))[:6]
+    candidates = [token for token in context_tokens + subject_tokens + body_tokens if not token.isdigit()]
+    if candidates:
+        return max(candidates, key=len)
+    subject = normalized_subject(message_subject(source_message))
+    if subject:
+        return subject
+    return "*"
+
+
+def occurrence_score(
+    occurrence: AttachmentOccurrence,
+    *,
+    context_tokens: list[str],
+    source_preview: str,
+    source_body: str,
+) -> AttachmentOccurrence:
+    score = 0
+    reasons: list[str] = []
+    name_lower = occurrence.attachment_name.lower()
+    subject_lower = occurrence.message_subject.lower()
+    source_preview_lower = source_preview.lower()
+    source_body_lower = source_body.lower()
+
+    if occurrence.origin == "source_message":
+        score += SOURCE_MESSAGE_BONUS
+        reasons.append("attached_on_forwarded_source_message")
+        if "use the attached" in source_preview_lower or "use the attached" in source_body_lower:
+            score += SOURCE_ATTACHMENT_INTENT_BONUS
+            reasons.append("source_message_explicitly_references_attached_revision")
+    else:
+        bonus = max(0, RELATED_MESSAGE_RECENCY_BONUS - occurrence.related_rank)
+        if bonus:
+            score += bonus
+            reasons.append(f"related_message_recency_rank:{occurrence.related_rank + 1}")
+
+    ext_weight = EXTENSION_WEIGHTS.get(occurrence.extension, 0)
+    if ext_weight:
+        score += ext_weight
+        reasons.append(f"preferred_extension:{occurrence.extension}")
+
+    for token in context_tokens:
+        if token in name_lower:
+            score += 3
+            reasons.append(f"context_token:{token}")
+        elif token in subject_lower:
+            score += 1
+            reasons.append(f"message_subject_token:{token}")
+
+    for token, weight in POSITIVE_VERSION_TOKENS.items():
+        if token in name_lower:
+            score += weight
+            reasons.append(f"positive_version_token:{token}")
+
+    for token, weight in NEGATIVE_VERSION_TOKENS.items():
+        if token in name_lower:
+            score += weight
+            reasons.append(f"negative_version_token:{token}")
+
+    stem = Path(occurrence.attachment_name).stem.lower()
+    if stem and stem in source_preview_lower:
+        score += 4
+        reasons.append("attachment_name_visible_in_source_preview")
+    if stem and stem in source_body_lower:
+        score += 2
+        reasons.append("attachment_name_visible_in_source_body")
+
+    if occurrence.content_type.startswith("image/"):
+        score -= 2
+        reasons.append("image_attachment_penalty")
+
+    occurrence.score = score
+    occurrence.reasons = reasons
+    return occurrence
+
+
+def collapse_occurrences(occurrences: list[AttachmentOccurrence]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for occurrence in occurrences:
+        key = f"{occurrence.attachment_name.lower()}|{occurrence.size_bytes}"
+        existing = grouped.get(key)
+        occurrence_view = {
+            "message_id": occurrence.message_id,
+            "message_subject": occurrence.message_subject,
+            "message_received_utc": occurrence.message_received_utc,
+            "message_from": occurrence.message_from,
+            "origin": occurrence.origin,
+            "attachment_id": occurrence.attachment_id,
+            "last_modified_utc": occurrence.last_modified_utc,
+            "score": occurrence.score,
+            "reasons": list(occurrence.reasons),
+        }
+        if existing is None:
+            grouped[key] = {
+                "dedupe_key": key,
+                "attachment_name": occurrence.attachment_name,
+                "content_type": occurrence.content_type,
+                "extension": occurrence.extension,
+                "size_bytes": occurrence.size_bytes,
+                "score": occurrence.score,
+                "reasons": list(occurrence.reasons),
+                "occurrences": [occurrence_view],
+                "best_occurrence": occurrence_view,
+            }
+            continue
+        existing["occurrences"].append(occurrence_view)
+        if occurrence.score > existing["score"]:
+            existing["score"] = occurrence.score
+            existing["reasons"] = list(occurrence.reasons)
+            existing["best_occurrence"] = occurrence_view
+        if len(existing["occurrences"]) > 1:
+            duplicate_bonus = min(len(existing["occurrences"]) - 1, 3)
+            existing["score"] = max(existing["score"], occurrence.score) + duplicate_bonus
+            if "seen_in_multiple_thread_messages" not in existing["reasons"]:
+                existing["reasons"].append("seen_in_multiple_thread_messages")
+    return sorted(grouped.values(), key=lambda item: (-int(item["score"]), item["attachment_name"]))
+
+
+def concise_question(candidates: list[dict[str, Any]]) -> str:
+    options: list[str] = []
+    for candidate in candidates[:2]:
+        first = candidate["occurrences"][0]
+        options.append(f"{candidate['attachment_name']} from {first['message_subject'] or first['message_id']}")
+    joined = " or ".join(options) if options else "the listed attachments"
+    return f"Which artwork version should Morpheus use: {joined}?"
+
+
+def concise_artifact_question(candidates: list[dict[str, Any]]) -> str:
+    options: list[str] = []
+    for candidate in candidates[:2]:
+        options.append(
+            f"{candidate.get('original_filename') or candidate.get('artifact_id')} ({candidate.get('artifact_role') or 'unknown'})"
+        )
+    joined = " or ".join(options) if options else "the listed artifact records"
+    return f"Which governed artifact record should Morpheus use: {joined}?"
+
+
+def summarize_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    summary = {
+        "attachment_name": candidate["attachment_name"],
+        "content_type": candidate["content_type"],
+        "extension": candidate["extension"],
+        "size_bytes": candidate["size_bytes"],
+        "score": candidate["score"],
+        "reasons": candidate["reasons"],
+        "occurrences": candidate["occurrences"],
+        "best_occurrence": candidate.get("best_occurrence"),
+    }
+    if candidate.get("sha256"):
+        summary["sha256"] = candidate["sha256"]
+    if candidate.get("downloaded_file"):
+        summary["downloaded_file"] = candidate["downloaded_file"]
+    return summary
+
+
+def summarize_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "artifact_id": artifact.get("artifact_id"),
+        "seed_id": artifact.get("seed_id"),
+        "original_filename": artifact.get("original_filename"),
+        "canonical_object_key": artifact.get("canonical_object_key"),
+        "canonical_object_path": artifact.get("canonical_object_path"),
+        "sha256": artifact.get("sha256"),
+        "artifact_role": artifact.get("artifact_role"),
+        "artifact_status": artifact.get("artifact_status"),
+        "confidence": artifact.get("confidence"),
+        "source_refs": artifact.get("source_refs"),
+        "job_binding": artifact.get("job_binding"),
+    }
+
+
+def list_message_attachments(
+    spine_root: Path,
+    *,
+    message_id: str,
+    mailbox: str,
+    top: int,
+) -> tuple[list[dict[str, Any]], str]:
+    payload, receipt = run_cap_capture(
+        spine_root,
+        ATTACHMENTS_LIST_CAPABILITY,
+        ["--mailbox", mailbox, "--message-id", message_id, "--top", str(top)],
+    )
+    return list(payload.get("value") or []), receipt
+
+
+def download_attachment(
+    spine_root: Path,
+    *,
+    message_id: str,
+    attachment_id: str,
+    mailbox: str,
+    output_dir: Path,
+) -> tuple[dict[str, Any], str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload, receipt = run_cap_capture(
+        spine_root,
+        ATTACHMENT_DOWNLOAD_CAPABILITY,
+        [
+            "--mailbox",
+            mailbox,
+            "--message-id",
+            message_id,
+            "--attachment-id",
+            attachment_id,
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+    return payload, receipt
+
+
+def text_output(summary: dict[str, Any]) -> str:
+    lines = [
+        capability_name(),
+        f"status: {summary['status']}",
+        f"mailbox: {summary['mailbox']}",
+        f"source_message_id: {summary['source_message_id']}",
+        f"seed_id: {((summary.get('seed') or {}).get('id') or '')}",
+        f"source_subject: {summary['source_subject']}",
+        f"related_query: {summary['related_query']}",
+        f"candidate_count: {summary['candidate_count']}",
+    ]
+    if summary.get("operator_question"):
+        lines.append(f"operator_question: {summary['operator_question']}")
+    selected_artifact = summary.get("artifact") or {}
+    if selected_artifact:
+        lines.extend(
+            [
+                f"artifact_id: {selected_artifact.get('artifact_id', '')}",
+                f"artifact_role: {selected_artifact.get('artifact_role', '')}",
+                f"artifact_status: {selected_artifact.get('artifact_status', '')}",
+            ]
+        )
+    selected = summary.get("selected_attachment") or {}
+    if selected:
+        lines.extend(
+            [
+                f"selected_attachment: {selected.get('attachment_name', '')}",
+                f"selection_score: {selected.get('score', '')}",
+                f"downloaded_file: {selected.get('downloaded_file', '')}",
+            ]
+        )
+    placement = summary.get("placement") or {}
+    if placement:
+        lines.extend(
+            [
+                f"placement_state: {placement.get('placement_state', '')}",
+                f"resolved_target_key: {placement.get('resolved_target_key', '')}",
+                f"resolved_file_path: {placement.get('resolved_file_path', '')}",
+            ]
+        )
+    lines.extend(
+        [
+            f"record_file: {summary['record_file']}",
+            f"index_file: {summary['index_file']}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    now = utc_now()
+    resolve_id = f"MFAR-{compact_utc(now)}-{os.urandom(2).hex()}"
+
+    source_message, source_get_receipt = run_cap_capture(
+        spine_root,
+        GET_CAPABILITY,
+        ["--message-id", args.message_id, "--mailbox", args.mailbox],
+    )
+    source_subject = message_subject(source_message)
+    source_preview = strip_preview_text(source_message)
+    source_body = message_body_text(source_message)
+    source_conversation_id = str(source_message.get("conversationId") or "").strip()
+    source_internet_message_id = str(source_message.get("internetMessageId") or "").strip()
+    seed_payload, seed_receipt = run_cap_capture(
+        spine_root,
+        SEED_ENSURE_CAPABILITY,
+        ["--message-id", args.message_id, "--mailbox", args.mailbox, "--json"],
+    )
+    seed = dict(seed_payload.get("seed") or {})
+    artifact_snapshot_payload: dict[str, Any] = {}
+    artifact_snapshot_receipt = ""
+    existing_artifacts: list[dict[str, Any]] = []
+    if str(seed.get("id") or "").strip():
+        artifact_snapshot_payload, artifact_snapshot_receipt = run_cap_capture(
+            spine_root,
+            ARTIFACT_SNAPSHOT_CAPABILITY,
+            ["--seed-id", str(seed.get("id")), "--include-superseded", "--json"],
+        )
+        existing_artifacts = [dict(item) for item in (artifact_snapshot_payload.get("artifacts") or []) if isinstance(item, dict)]
+    related_query = derive_related_query(source_message, args.context, args.related_query)
+    status = "blocked_no_attachment"
+    operator_question = ""
+    selected_candidate: dict[str, Any] | None = None
+    selected_artifact: dict[str, Any] | None = None
+    related_results: list[dict[str, Any]] = []
+    related_search_receipt = ""
+    candidate_messages: list[dict[str, Any]] = []
+    context_tokens = tokenize(f"{args.context} {source_subject}")
+    deduped_candidates: list[dict[str, Any]] = []
+    attachment_list_receipts: dict[str, str] = {}
+    attachment_scan_counts: dict[str, int] = {}
+
+    active_existing_artifacts = [
+        artifact
+        for artifact in existing_artifacts
+        if str(artifact.get("artifact_status") or "") != "superseded" and str(artifact.get("artifact_role") or "") != "superseded"
+    ]
+    preferred_existing_artifacts = [
+        artifact
+        for artifact in active_existing_artifacts
+        if str(((artifact.get("source_refs") or {}).get("source_message_id") or "")).strip() == args.message_id
+    ]
+    if not preferred_existing_artifacts and source_conversation_id:
+        preferred_existing_artifacts = [
+            artifact
+            for artifact in active_existing_artifacts
+            if str(((artifact.get("source_refs") or {}).get("source_conversation_id") or "")).strip() == source_conversation_id
+        ]
+
+    artifact_candidates = preferred_existing_artifacts or active_existing_artifacts
+    if len(artifact_candidates) == 1:
+        status = "existing_artifact"
+        selected_artifact = artifact_candidates[0]
+    elif len(artifact_candidates) > 1:
+        status = "needs_operator_choice"
+        operator_question = concise_artifact_question(artifact_candidates)
+    else:
+        if related_query != "*":
+            search_payload, related_search_receipt = run_cap_capture(
+                spine_root,
+                SEARCH_CAPABILITY,
+                ["--mailbox", args.mailbox, "--query", related_query, "--top", str(args.top_related)],
+            )
+            related_results = list(search_payload.get("value") or [])
+
+        candidate_messages = [
+            {
+                "id": args.message_id,
+                "subject": source_subject,
+                "receivedDateTime": str(source_message.get("receivedDateTime") or ""),
+                "from": {"emailAddress": {"address": message_sender(source_message)}},
+                "origin": "source_message",
+                "related_rank": 0,
+            }
+        ]
+
+        seen_message_ids = {args.message_id}
+        for rank, message in enumerate(related_results, start=1):
+            message_id = str(message.get("id") or "").strip()
+            if not message_id or message_id in seen_message_ids:
+                continue
+            seen_message_ids.add(message_id)
+            candidate_messages.append(
+                {
+                    "id": message_id,
+                    "subject": str(message.get("subject") or ""),
+                    "receivedDateTime": str(message.get("receivedDateTime") or ""),
+                    "from": message.get("from") or {},
+                    "origin": "related_message",
+                    "related_rank": rank,
+                }
+            )
+
+        occurrences: list[AttachmentOccurrence] = []
+        for message in candidate_messages:
+            message_id = str(message["id"])
+            attachments, attachment_list_receipt = list_message_attachments(
+                spine_root,
+                message_id=message_id,
+                mailbox=args.mailbox,
+                top=25,
+            )
+            if attachment_list_receipt:
+                attachment_list_receipts[message_id] = attachment_list_receipt
+            attachment_scan_counts[message_id] = len(attachments)
+            for attachment in attachments:
+                attachment_id = str(attachment.get("id") or "").strip()
+                attachment_name = safe_filename(str(attachment.get("name") or ""))
+                if not attachment_id or not attachment_name:
+                    continue
+                if bool(attachment.get("isInline")):
+                    continue
+                occurrence = AttachmentOccurrence(
+                    message_id=message_id,
+                    message_subject=str(message.get("subject") or ""),
+                    message_received_utc=str(message.get("receivedDateTime") or ""),
+                    message_from=str((((message.get("from") or {}).get("emailAddress") or {}).get("address")) or ""),
+                    origin=str(message.get("origin") or "related_message"),
+                    related_rank=int(message.get("related_rank") or 0),
+                    attachment_id=attachment_id,
+                    attachment_name=attachment_name,
+                    content_type=str(attachment.get("contentType") or "application/octet-stream"),
+                    extension=Path(attachment_name).suffix.lower().lstrip("."),
+                    size_bytes=int(attachment.get("size") or 0),
+                    last_modified_utc=str(attachment.get("lastModifiedDateTime") or ""),
+                    is_inline=bool(attachment.get("isInline")),
+                    score=0,
+                    reasons=[],
+                )
+                occurrences.append(
+                    occurrence_score(
+                        occurrence,
+                        context_tokens=context_tokens,
+                        source_preview=source_preview,
+                        source_body=source_body,
+                    )
+                )
+
+        deduped_candidates = collapse_occurrences(occurrences)
+        if deduped_candidates:
+            top_candidate = deduped_candidates[0]
+            second_candidate = deduped_candidates[1] if len(deduped_candidates) > 1 else None
+            top_score = int(top_candidate["score"])
+            second_score = int(second_candidate["score"]) if second_candidate else -999
+            if top_score < MIN_CONFIDENT_SCORE:
+                status = "needs_operator_choice"
+                operator_question = concise_question(deduped_candidates)
+            elif second_candidate and top_score - second_score < AMBIGUITY_MARGIN:
+                status = "needs_operator_choice"
+                operator_question = concise_question(deduped_candidates)
+            else:
+                status = "selected"
+                selected_candidate = top_candidate
+
+    downloaded_file = ""
+    placement_summary: dict[str, Any] | None = None
+    placement_receipt = ""
+    attachment_download_receipt = ""
+    artifact_summary: dict[str, Any] | None = summarize_artifact(selected_artifact) if selected_artifact else None
+    artifact_capture_receipt = ""
+    selected_artifact_role = ""
+    if selected_artifact is not None:
+        placement_summary = {
+            "placement_state": "existing_artifact",
+            "resolved_target_key": selected_artifact.get("canonical_object_key"),
+            "resolved_file_path": selected_artifact.get("canonical_object_path"),
+            "canonical_object_key": selected_artifact.get("canonical_object_key"),
+            "artifact_role": selected_artifact.get("artifact_role"),
+        }
+    if selected_candidate is not None:
+        download_dir = state_root / "mint" / "forwarded-attachments" / "downloads" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d") / resolve_id
+        best_occurrence = dict(selected_candidate.get("best_occurrence") or {})
+        downloaded_payload, attachment_download_receipt = download_attachment(
+            spine_root,
+            message_id=str(best_occurrence.get("message_id") or ""),
+            attachment_id=str(best_occurrence.get("attachment_id") or ""),
+            mailbox=args.mailbox,
+            output_dir=download_dir,
+        )
+        downloaded_file = str(downloaded_payload.get("filePath") or "")
+        selected_candidate["sha256"] = str(downloaded_payload.get("sha256") or "")
+        selected_candidate["downloaded_file"] = downloaded_file
+        selected_artifact_role, _confidence, _basis = infer_artifact_role(
+            filename=str(selected_candidate.get("attachment_name") or ""),
+            content_type=str(selected_candidate.get("content_type") or ""),
+            context_text=" ".join(
+                value
+                for value in (
+                    args.context,
+                    source_subject,
+                    source_preview,
+                    source_body,
+                    best_occurrence.get("message_subject"),
+                )
+                if value
+            ),
+            explicit_role=args.artifact_role,
+        )
+        if not args.no_place:
+            placement_payload, placement_receipt = run_cap_capture(
+                spine_root,
+                PLACE_CAPABILITY,
+                [
+                    downloaded_file,
+                    "--context",
+                    args.context or source_subject or related_query,
+                    "--artifact-role",
+                    selected_artifact_role,
+                    "--json",
+                ],
+            )
+            placement_summary = dict(placement_payload.get("data") or {})
+            if str(seed.get("id") or "").strip():
+                receipts = {
+                    "source_get_receipt": source_get_receipt or None,
+                    "seed_ensure_receipt": seed_receipt or None,
+                    "related_search_receipt": related_search_receipt or None,
+                    "attachment_download_receipt": attachment_download_receipt or None,
+                    "artwork_place_receipt": placement_receipt or None,
+                }
+                evidence_refs = {
+                    "seed_record_file": seed_payload.get("record_file"),
+                    "placement_record_file": placement_summary.get("record_file"),
+                }
+                artifact_capture_args = [
+                    downloaded_file,
+                    "--seed-id",
+                    str(seed.get("id")),
+                    "--canonical-object-key",
+                    str(placement_summary.get("canonical_object_key") or ""),
+                    "--canonical-object-path",
+                    str(placement_summary.get("resolved_file_path") or ""),
+                    "--original-filename",
+                    str(selected_candidate.get("attachment_name") or Path(downloaded_file).name),
+                    "--content-type",
+                    str(selected_candidate.get("content_type") or ""),
+                    "--context",
+                    " ".join(part for part in (args.context, source_subject, source_body) if part),
+                    "--customer-email",
+                    str(seed_payload.get("customer_email") or "").strip().lower(),
+                    "--customer-name",
+                    str(seed_payload.get("customer_display_name") or "").strip(),
+                    "--source-message-id",
+                    args.message_id,
+                    "--source-conversation-id",
+                    source_conversation_id,
+                    "--source-internet-message-id",
+                    source_internet_message_id,
+                    "--provenance-source",
+                    "mail_attachment_import",
+                    "--receipts-json",
+                    json.dumps(receipts, sort_keys=True),
+                    "--evidence-refs-json",
+                    json.dumps(evidence_refs, sort_keys=True),
+                    "--json",
+                ]
+                if args.job_ref.strip():
+                    artifact_capture_args.extend(["--job-ref", args.job_ref.strip()])
+                if args.order_id.strip():
+                    artifact_capture_args.extend(["--order-id", args.order_id.strip()])
+                if args.artifact_role:
+                    artifact_capture_args.extend(["--artifact-role", args.artifact_role])
+                artifact_payload, artifact_capture_receipt = run_cap_capture(
+                    spine_root,
+                    ARTIFACT_CAPTURE_CAPABILITY,
+                    artifact_capture_args,
+                )
+                artifact_summary = {
+                    "artifact_id": artifact_payload.get("artifact_id"),
+                    "seed_id": artifact_payload.get("seed_id"),
+                    "original_filename": artifact_payload.get("original_filename"),
+                    "canonical_object_key": artifact_payload.get("canonical_object_key"),
+                    "canonical_object_path": artifact_payload.get("canonical_object_path"),
+                    "sha256": artifact_payload.get("sha256"),
+                    "artifact_role": artifact_payload.get("artifact_role"),
+                    "artifact_status": artifact_payload.get("artifact_status"),
+                    "confidence": artifact_payload.get("confidence"),
+                    "supersedes": artifact_payload.get("supersedes") or [],
+                    "capture_state": artifact_payload.get("capture_state"),
+                    "source_refs": {
+                        "source_message_id": args.message_id,
+                        "source_conversation_id": source_conversation_id or None,
+                        "source_internet_message_id": source_internet_message_id or None,
+                    },
+                    "job_binding": {
+                        "job_ref": args.job_ref.strip() or None,
+                        "order_id": args.order_id.strip() or None,
+                    },
+                }
+
+    summary = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "mailbox": args.mailbox,
+        "resolve_id": resolve_id,
+        "generated_at": iso_utc(now),
+        "source_message_id": args.message_id,
+        "source_conversation_id": source_conversation_id or None,
+        "source_internet_message_id": source_internet_message_id or None,
+        "source_subject": source_subject,
+        "source_from": message_sender(source_message),
+        "related_query": related_query,
+        "candidate_count": len(existing_artifacts) if selected_artifact is not None else len(deduped_candidates),
+        "operator_question": operator_question or None,
+        "version_selection_rule": (
+            "Ask what governed artifact records already exist for the seed/thread first. Reuse an exact governed "
+            "artifact match or ask one concise question on multiple active records before scanning loose attachments. "
+            "Only if no artifact truth exists, prefer attachments visible on the forwarded source message first, "
+            "then prefer vector/PDF files matching customer/job context, then downgrade names marked old/bad/"
+            "superseded. Ask one concise question when the top candidates stay within the ambiguity margin."
+        ),
+        "seed": seed or None,
+        "artifact": artifact_summary,
+        "existing_artifacts": [summarize_artifact(item) for item in existing_artifacts],
+        "selected_attachment": None,
+        "placement": placement_summary,
+        "receipts": {
+            "source_get_receipt": source_get_receipt or None,
+            "seed_ensure_receipt": seed_receipt or None,
+            "artifact_snapshot_receipt": artifact_snapshot_receipt or None,
+            "related_search_receipt": related_search_receipt or None,
+            "attachment_list_receipts": attachment_list_receipts,
+            "attachment_download_receipt": attachment_download_receipt or None,
+            "artwork_place_receipt": placement_receipt or None,
+            "artifact_capture_receipt": artifact_capture_receipt or None,
+        },
+        "attachment_scan_counts": attachment_scan_counts,
+    }
+
+    if selected_candidate is not None:
+        summary["selected_attachment"] = summarize_candidate(selected_candidate)
+
+    records_dir = state_root / "mint" / "forwarded-attachments" / "records" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{resolve_id}.json"
+    index_file = state_root / "mint" / "forwarded-attachments" / "index.ndjson"
+    lock_file = state_root / "locks" / "mint-forwarded-attachments.lock"
+    full_record = {
+        **summary,
+        "source_message": {
+            "id": args.message_id,
+            "subject": source_subject,
+            "from": message_sender(source_message),
+            "received_utc": str(source_message.get("receivedDateTime") or ""),
+            "body_preview": source_preview,
+        },
+        "candidate_attachments": [summarize_candidate(candidate) for candidate in deduped_candidates],
+        "artifact_snapshot": artifact_snapshot_payload or None,
+        "place_requested": not args.no_place,
+    }
+    write_json(record_file, full_record)
+    append_ndjson(
+        index_file,
+        lock_file,
+        {
+            "resolve_id": resolve_id,
+            "status": status,
+            "source_message_id": args.message_id,
+            "seed_id": (seed or {}).get("id"),
+            "artifact_id": (artifact_summary or {}).get("artifact_id"),
+            "related_query": related_query,
+            "selected_attachment_name": (summary.get("selected_attachment") or {}).get("attachment_name"),
+            "placement_state": (placement_summary or {}).get("placement_state"),
+            "record_file": str(record_file),
+        },
+    )
+
+    summary["record_file"] = str(record_file)
+    summary["index_file"] = str(index_file)
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+
+    print(text_output(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

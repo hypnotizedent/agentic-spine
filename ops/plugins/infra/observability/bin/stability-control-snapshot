@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
 CONTRACT_DEFAULT="$ROOT/ops/bindings/stability.control.contract.yaml"
+source "$ROOT/ops/lib/runtime-paths.sh"
+source "$ROOT/ops/lib/ssh-resolve.sh"
+spine_runtime_resolve_paths
 
 CONTRACT="$CONTRACT_DEFAULT"
 JSON_MODE=0
@@ -67,6 +70,64 @@ sanitize_detail() {
   input="${input//$'\t'/ }"
   input="${input//$'\n'/ | }"
   printf '%s' "$input"
+}
+
+apply_dependency_suppression() {
+  local contract_path="$1"
+  local raw_domains_json="$2"
+  python3 - "$contract_path" "$raw_domains_json" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+contract_path = Path(sys.argv[1])
+domains = json.loads(sys.argv[2])
+contract = yaml.safe_load(contract_path.read_text(encoding="utf-8")) or {}
+dependency_map = contract.get("stack_dependencies") or {}
+policy = contract.get("dependent_failure_suppression") or {}
+
+enabled = bool(policy.get("enabled", False))
+trigger_statuses = [
+    str(value).strip()
+    for value in (policy.get("when_dependency_status_in") or ["incident"])
+    if str(value).strip()
+]
+apply_statuses = [
+    str(value).strip()
+    for value in (policy.get("when_domain_status_in") or ["incident"])
+    if str(value).strip()
+]
+dependent_status = str(policy.get("dependent_status", "warn")).strip() or "warn"
+note_prefix = str(policy.get("note_prefix", "dependent_failure")).strip() or "dependent_failure"
+
+raw_status_by_id = {
+    str(item.get("id", "")).strip(): str(item.get("raw_status", item.get("status", ""))).strip()
+    for item in domains
+}
+
+for item in domains:
+    domain_id = str(item.get("id", "")).strip()
+    dependencies = [
+        str(value).strip()
+        for value in (dependency_map.get(domain_id) or [])
+        if str(value).strip()
+    ]
+    blockers = [dep for dep in dependencies if raw_status_by_id.get(dep) in trigger_statuses]
+    item["dependencies"] = dependencies
+    item["blocked_by_dependencies"] = blockers
+    if enabled and blockers and str(item.get("status", "")).strip() in apply_statuses:
+        dep_note = f"{note_prefix}({','.join(blockers)})"
+        existing_note = str(item.get("policy_note", "") or "").strip()
+        if dep_note not in existing_note:
+            item["policy_note"] = f"{existing_note}; {dep_note}" if existing_note else dep_note
+        item["status"] = dependent_status
+
+print(json.dumps(domains))
+PY
 }
 
 promote_severity() {
@@ -150,6 +211,178 @@ PROBE_DETAIL=""
 PROBE_DURATION_MS=0
 PROBE_OUTPUT=""
 PROBE_INVOCATION=""
+PROBE_TIMEOUT_SEC=0
+
+resolve_runtime_relative_path() {
+  local rel="$1"
+  case "$rel" in
+    mailroom/*) printf '%s\n' "$SPINE_MAILROOM_ROOT/${rel#mailroom/}" ;;
+    state/*) printf '%s\n' "$SPINE_STATE/${rel#state/}" ;;
+    logs/*) printf '%s\n' "$SPINE_LOGS/${rel#logs/}" ;;
+    tmp/*) printf '%s\n' "$SPINE_TMP/${rel#tmp/}" ;;
+    *) printf '%s\n' "$ROOT/$rel" ;;
+  esac
+}
+
+run_command_with_timeout_to_file() {
+  local timeout_sec="$1"
+  local kill_after_sec="$2"
+  local output_file="$3"
+  shift 3
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k "${kill_after_sec}s" "${timeout_sec}s" "$@" >"$output_file" 2>&1
+    return $?
+  fi
+
+  python3 - "$timeout_sec" "$kill_after_sec" "$output_file" "$@" <<'PY'
+from __future__ import annotations
+
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+timeout_sec = int(sys.argv[1])
+kill_after_sec = int(sys.argv[2])
+output_path = Path(sys.argv[3])
+cmd = sys.argv[4:]
+
+with output_path.open("w", encoding="utf-8") as handle:
+    proc = subprocess.Popen(
+        cmd,
+        stdout=handle,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        raise SystemExit(proc.wait(timeout=timeout_sec))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=max(1, kill_after_sec))
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+        handle.write(f"\nTIMEOUT: command exceeded {timeout_sec}s budget\n")
+        raise SystemExit(124)
+PY
+}
+
+resolve_probe_timeout_sec() {
+  local probe_spec="$1"
+  local probe_base="${probe_spec%% *}"
+  local resolved=""
+  resolved="$(PROBE_SPEC="$probe_spec" PROBE_BASE="$probe_base" yq -r '.probe_execution.timeout_overrides[strenv(PROBE_SPEC)] // .probe_execution.timeout_overrides[strenv(PROBE_BASE)] // ""' "$CONTRACT" 2>/dev/null || true)"
+  if [[ -n "$resolved" && "$resolved" != "null" ]]; then
+    printf '%s\n' "$resolved"
+  else
+    printf '%s\n' "$PROBE_TIMEOUT_DEFAULT_SEC"
+  fi
+}
+
+active_maintenance_window_for_host() {
+  local host_id="$1"
+  [[ -n "$host_id" && "$host_id" != "n/a" ]] || return 0
+  [[ -f "$MAINTENANCE_CONTRACT" ]] || return 0
+  [[ -d "$MAINTENANCE_WINDOW_DIR" ]] || return 0
+
+  python3 - "$MAINTENANCE_WINDOW_DIR" "$MAINTENANCE_CONTRACT" "$host_id" "$ACTIVE_MAINTENANCE_MAX_AGE_MINUTES" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import sys
+
+import yaml
+
+window_dir = Path(sys.argv[1])
+contract_path = Path(sys.argv[2])
+host_id = sys.argv[3]
+max_age_minutes = int(sys.argv[4])
+
+contract = yaml.safe_load(contract_path.read_text(encoding="utf-8")) or {}
+sites = {
+    str(site.get("host_id", "")).strip(): str(site.get("id", "")).strip()
+    for site in contract.get("sites") or []
+    if str(site.get("host_id", "")).strip()
+}
+site_id = sites.get(host_id)
+if not site_id:
+    raise SystemExit(0)
+
+now = datetime.now(timezone.utc)
+fresh_cutoff = now - timedelta(minutes=max_age_minutes)
+best_window: tuple[datetime, str] | None = None
+
+def parse_dt(raw: str | None) -> datetime | None:
+    value = (raw or "").strip()
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(value, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+for checkpoint in sorted(window_dir.glob("*.yaml")):
+    try:
+        payload = yaml.safe_load(checkpoint.read_text(encoding="utf-8")) or {}
+    except Exception:
+        continue
+    if str(payload.get("site", "")).strip() != site_id:
+        continue
+
+    updated_at = parse_dt(str(payload.get("updated_at", "")))
+    if updated_at is None or updated_at < fresh_cutoff:
+        continue
+
+    phases = payload.get("phases") or {}
+    current_phase = str(payload.get("current_phase", "")).strip()
+    shutdown_status = str((phases.get("shutdown") or {}).get("status", "")).strip()
+    startup_status = str((phases.get("startup") or {}).get("status", "")).strip()
+    recovery_status = str((phases.get("recovery") or {}).get("status", "")).strip()
+    verify_status = str((phases.get("verify") or {}).get("status", "")).strip()
+
+    active = False
+    if current_phase in {"shutdown", "startup", "recovery", "verify"}:
+        active = True
+    if any(
+        str((phases.get(name) or {}).get("status", "")).strip() == "running"
+        for name in ("shutdown", "startup", "recovery", "verify")
+    ):
+        active = True
+    if shutdown_status in {"completed", "running"} and verify_status != "completed":
+        active = True
+    if startup_status in {"completed", "running"} and verify_status != "completed":
+        active = True
+    if recovery_status in {"completed", "running"} and verify_status != "completed":
+        active = True
+
+    if not active:
+        continue
+
+    window_id = str(payload.get("window_id", checkpoint.stem)).strip() or checkpoint.stem
+    if best_window is None or updated_at > best_window[0]:
+        best_window = (updated_at, window_id)
+
+if best_window is not None:
+    print(best_window[1])
+PY
+}
 
 run_probe() {
   local probe_spec="$1"
@@ -170,10 +403,11 @@ run_probe() {
     return
   fi
   PROBE_INVOCATION="$probe_spec"
+  PROBE_TIMEOUT_SEC="$(resolve_probe_timeout_sec "$probe_spec")"
 
   start_ms="$(now_ms)"
   set +e
-  "$ROOT/bin/ops" cap run "${cap_args[@]}" >"$tmp_file" 2>&1
+  run_command_with_timeout_to_file "$PROBE_TIMEOUT_SEC" "$PROBE_TIMEOUT_KILL_AFTER_SEC" "$tmp_file" "$ROOT/bin/ops" cap run "${cap_args[@]}"
   PROBE_RC=$?
   set -e
   end_ms="$(now_ms)"
@@ -183,6 +417,9 @@ run_probe() {
   PROBE_DETAIL="$(grep -E 'status:[[:space:]]*FAIL|STATUS:[[:space:]]*FAIL|summary:[[:space:]]*INCIDENT|DEGRADED|UNREACHABLE|disconnected|not connected|precondition failed|ERROR|timeout' "$tmp_file" | head -n1 || true)"
   if [[ -z "$PROBE_DETAIL" ]]; then
     PROBE_DETAIL="$(grep -E 'summary:|status:' "$tmp_file" | tail -n1 || true)"
+  fi
+  if [[ "$PROBE_RC" -eq 124 && -z "$PROBE_DETAIL" ]]; then
+    PROBE_DETAIL="timeout after ${PROBE_TIMEOUT_SEC}s"
   fi
   if [[ -z "$PROBE_DETAIL" ]]; then
     PROBE_DETAIL="exit_code=$PROBE_RC"
@@ -198,7 +435,7 @@ VM_PROBE_DETAIL="ok"
 run_vm_predictive_probe() {
   local vm_hostname="$1"
   local vm_state ssh_target expected_user vm_os
-  local ssh_host ssh_user ssh_port ssh_timeout
+  local ssh_host ssh_host_raw ssh_path_used ssh_user ssh_port ssh_timeout
   local local_status="pass"
   local detail_notes=""
 
@@ -233,9 +470,9 @@ run_vm_predictive_probe() {
     VM_PROBE_DETAIL="missing_ssh_binding_for_target=$ssh_target"
     return
   fi
-  IFS=$'\t' read -r ssh_host ssh_user ssh_port ssh_timeout <<< "$ssh_row"
+  IFS=$'\t' read -r ssh_host_raw ssh_user ssh_port ssh_timeout <<< "$ssh_row"
 
-  [[ -n "$ssh_host" && "$ssh_host" != "null" ]] || {
+  [[ -n "$ssh_host_raw" && "$ssh_host_raw" != "null" ]] || {
     VM_PROBE_STATUS="incident"
     VM_PROBE_DETAIL="ssh_binding_missing_host_for_target=$ssh_target"
     return
@@ -243,10 +480,28 @@ run_vm_predictive_probe() {
   [[ -n "$ssh_user" && "$ssh_user" != "null" ]] || ssh_user="$SSH_DEF_USER"
   [[ -n "$ssh_port" && "$ssh_port" != "null" ]] || ssh_port="$SSH_DEF_PORT"
   [[ -n "$ssh_timeout" && "$ssh_timeout" != "null" ]] || ssh_timeout="$SSH_DEF_TIMEOUT"
+  ssh_host="$ssh_host_raw"
+  ssh_path_used="binding"
+
+  local resolved_ssh
+  resolved_ssh="$(ssh_resolve_ssh_host_with_fallback "$ssh_target" "$ssh_timeout" || true)"
+  if [[ -n "$resolved_ssh" ]]; then
+    ssh_host="$(printf '%s' "$resolved_ssh" | awk '{print $1}')"
+    ssh_path_used="$(printf '%s' "$resolved_ssh" | awk '{print $2}')"
+    [[ -n "$ssh_host" ]] || ssh_host="$ssh_host_raw"
+    [[ -n "$ssh_path_used" ]] || ssh_path_used="binding"
+  fi
 
   if [[ -n "$expected_user" && "$expected_user" != "null" && "$ssh_user" != "$expected_user" ]]; then
     local_status="$(promote_severity "$local_status" "warn")"
     detail_notes="ssh_user_mismatch(expected=$expected_user,binding=$ssh_user)"
+  fi
+  if [[ "$ssh_path_used" != "binding" && "$ssh_path_used" != "direct" && "$ssh_path_used" != "lan" ]]; then
+    if [[ -z "$detail_notes" ]]; then
+      detail_notes="ssh_path=$ssh_path_used"
+    else
+      detail_notes="$detail_notes; ssh_path=$ssh_path_used"
+    fi
   fi
 
   local out_file err_file
@@ -333,7 +588,7 @@ EOF
     local reason
     reason="$(classify_ssh_error "$ssh_err")"
     VM_PROBE_STATUS="incident"
-    VM_PROBE_DETAIL="vm_predictive_probe_ssh_failure(reason=$reason,target=$ssh_target,host=$ssh_host)"
+    VM_PROBE_DETAIL="vm_predictive_probe_ssh_failure(reason=$reason,target=$ssh_target,host=$ssh_host,path=$ssh_path_used)"
     rm -f "$out_file" "$err_file"
     return
   fi
@@ -407,6 +662,7 @@ EOF
 
 need_cmd yq
 need_cmd jq
+need_cmd python3
 need_cmd ssh
 need_cmd awk
 need_cmd date
@@ -415,14 +671,17 @@ need_file "$CONTRACT"
 VM_LIFECYCLE_REL="$(yq -r '.sources.vm_lifecycle // "ops/bindings/vm.lifecycle.yaml"' "$CONTRACT")"
 VM_CONTRACT_REL="$(yq -r '.sources.vm_lifecycle_contract // "ops/bindings/vm.lifecycle.contract.yaml"' "$CONTRACT")"
 SSH_TARGETS_REL="$(yq -r '.sources.ssh_targets // "ops/bindings/ssh.targets.yaml"' "$CONTRACT")"
+MAINTENANCE_CONTRACT_REL="$(yq -r '.sources.maintenance_transaction_contract // "ops/bindings/infra.maintenance.transaction.contract.yaml"' "$CONTRACT")"
 
 VM_LIFECYCLE="$ROOT/$VM_LIFECYCLE_REL"
 VM_CONTRACT="$ROOT/$VM_CONTRACT_REL"
 SSH_TARGETS="$ROOT/$SSH_TARGETS_REL"
+MAINTENANCE_CONTRACT="$ROOT/$MAINTENANCE_CONTRACT_REL"
 
 need_file "$VM_LIFECYCLE"
 need_file "$VM_CONTRACT"
 need_file "$SSH_TARGETS"
+need_file "$MAINTENANCE_CONTRACT"
 
 SSH_DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$SSH_TARGETS")"
 SSH_DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_TARGETS")"
@@ -442,6 +701,29 @@ HEARTBEAT_WARN_MINUTES="$(yq -r '.predictive_thresholds.heartbeat_stale_warn_min
 PID_FILE_MISSING_IS_INCIDENT="$(yq -r '.predictive_thresholds.pid_file_missing_is_incident // true' "$CONTRACT")"
 WARN_TREATMENT_CRITICAL="$(yq -r '.warn_treatment.critical_domains // "incident"' "$CONTRACT")"
 WARN_TREATMENT_NON_CRITICAL="$(yq -r '.warn_treatment.non_critical_domains // "warn"' "$CONTRACT")"
+PROBE_TIMEOUT_DEFAULT_SEC="$(yq -r '.probe_execution.default_timeout_sec // 45' "$CONTRACT")"
+PROBE_TIMEOUT_KILL_AFTER_SEC="$(yq -r '.probe_execution.kill_after_sec // 5' "$CONTRACT")"
+ACTIVE_MAINTENANCE_MAX_AGE_MINUTES="$(yq -r '.maintenance_windows.active_max_age_minutes // 240' "$CONTRACT")"
+PARALLEL_DOMAIN_JOBS="$(yq -r '.probe_execution.max_parallel_domains // 4' "$CONTRACT")"
+CHECKPOINT_TEMPLATE="$(yq -r '.checkpoint_path // "mailroom/state/maintenance-windows/<window_id>.yaml"' "$MAINTENANCE_CONTRACT")"
+CHECKPOINT_SCAN_REL="$(dirname "${CHECKPOINT_TEMPLATE//<window_id>/window}")"
+MAINTENANCE_WINDOW_DIR="$(resolve_runtime_relative_path "$CHECKPOINT_SCAN_REL")"
+
+for value in \
+  "$STALE_HEARTBEAT_INCIDENT_MINUTES" "$DISK_MIN_GB" "$DISK_MIN_PCT" "$MEM_MIN_PCT" \
+  "$API_LAT_WARN_MS" "$API_LAT_INCIDENT_MS" "$HEARTBEAT_WARN_MINUTES" \
+  "$PROBE_TIMEOUT_DEFAULT_SEC" "$PROBE_TIMEOUT_KILL_AFTER_SEC" "$ACTIVE_MAINTENANCE_MAX_AGE_MINUTES" \
+  "$PARALLEL_DOMAIN_JOBS"; do
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    echo "STOP: contract expects integer predictive/timeout settings" >&2
+    exit 2
+  }
+done
+
+[[ "$PARALLEL_DOMAIN_JOBS" -ge 1 ]] || {
+  echo "STOP: probe_execution.max_parallel_domains must be >= 1" >&2
+  exit 2
+}
 
 mapfile -t DOMAINS < <(yq -r '.critical_domains[].id' "$CONTRACT")
 if [[ "${#DOMAINS[@]}" -eq 0 ]]; then
@@ -456,11 +738,27 @@ warn_count=0
 declare -a DOMAIN_ROWS
 declare -a PROBE_ROWS
 
-for domain in "${DOMAINS[@]}"; do
+process_domain() {
+  local domain="$1"
+  local result_dir="$2"
+  local description vm_hostname domain_mode domain_mode_source
+  local vmid proxmox_host vm_status proxmox_host_ip
+  local maintenance_window_id maintenance_window_active
+  local _domain_lat_warn _domain_lat_incident _domain_hb_warn _domain_hb_incident
+  local domain_severity domain_note domain_probe_incidents domain_vm_incident
+  local _saved_disk_min_gb _domain_disk_gb
+  local domain_status domain_row hb_age
+  local cap cap_base apply_duration_budget apply_warn_marker maintenance_severity_exempt probe_status probe_detail mode_display
+  local -a probes=()
+  local -a latency_exemptions=()
+  local -a warn_exemptions=()
+  local -a domain_probe_rows=()
+
   description="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .description // \"\"" "$CONTRACT" | head -n1)"
   vm_hostname="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .vm_hostname // \"\"" "$CONTRACT" | head -n1)"
   domain_mode="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .operating_mode // \"normal\"" "$CONTRACT" | head -n1)"
   [[ -n "$domain_mode" ]] || domain_mode="normal"
+  domain_mode_source="contract"
 
   vmid="$(yq -r ".vms[] | select(.hostname == \"$vm_hostname\" and .status != \"decommissioned\") | (.id // .vmid) // \"\"" "$VM_LIFECYCLE" | head -n1)"
   proxmox_host="$(yq -r ".vms[] | select(.hostname == \"$vm_hostname\" and .status != \"decommissioned\") | .proxmox_host // \"\"" "$VM_LIFECYCLE" | head -n1)"
@@ -472,7 +770,21 @@ for domain in "${DOMAINS[@]}"; do
   [[ -n "$proxmox_host_ip" ]] || proxmox_host_ip="n/a"
   [[ -n "$vm_status" ]] || vm_status="unknown"
 
-  # Resolve per-domain latency threshold override (falls back to global).
+  maintenance_window_id=""
+  maintenance_window_active=0
+  if [[ "$proxmox_host" != "n/a" ]]; then
+    maintenance_window_id="$(active_maintenance_window_for_host "$proxmox_host")"
+  fi
+  if [[ -n "$maintenance_window_id" ]]; then
+    maintenance_window_active=1
+    if [[ "$domain_mode" != "maintenance" ]]; then
+      domain_mode="maintenance"
+      domain_mode_source="maintenance_window"
+    else
+      domain_mode_source="contract+maintenance_window"
+    fi
+  fi
+
   _domain_lat_warn="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .threshold_overrides.api_latency_warn_ms // \"\"" "$CONTRACT" | head -n1)"
   if [[ -z "$_domain_lat_warn" || "$_domain_lat_warn" == "null" ]]; then
     _domain_lat_warn="$API_LAT_WARN_MS"
@@ -501,22 +813,28 @@ for domain in "${DOMAINS[@]}"; do
   if [[ "${#probes[@]}" -eq 0 ]]; then
     domain_severity="incident"
     domain_note="contract missing probe_capabilities entry"
-    PROBE_ROWS+=("$domain"$'\t'"-"$'\t'"incident"$'\t'"-"$'\t'"$domain_note")
+    domain_probe_rows+=("$domain"$'\t'"-"$'\t'"incident"$'\t'"-"$'\t'"$domain_note")
   fi
 
   for cap in "${probes[@]}"; do
+    cap_base="${cap%% *}"
     apply_duration_budget="true"
     apply_warn_marker="true"
+    maintenance_severity_exempt="false"
+    if [[ "$domain_mode" == "maintenance" ]]; then
+      apply_duration_budget="false"
+    fi
     for exemption in "${latency_exemptions[@]}"; do
-      if [[ "$cap" == "$exemption" ]]; then
+      if [[ "$cap" == "$exemption" || "$cap_base" == "$exemption" ]]; then
         apply_duration_budget="false"
         break
       fi
     done
     if [[ "$domain_mode" == "maintenance" ]]; then
       for exemption in "${warn_exemptions[@]}"; do
-        if [[ "$cap" == "$exemption" ]]; then
+        if [[ "$cap" == "$exemption" || "$cap_base" == "$exemption" ]]; then
           apply_warn_marker="false"
+          maintenance_severity_exempt="true"
           break
         fi
       done
@@ -532,8 +850,6 @@ for domain in "${DOMAINS[@]}"; do
 
     if [[ "$apply_duration_budget" == "true" ]]; then
       if [[ "$PROBE_DURATION_MS" -ge "$_domain_lat_incident" ]]; then
-        # Latency alone should not create an outage incident when probe semantics pass.
-        # Reserve incident for semantic failures; keep high latency as warn signal.
         if [[ "$probe_status" != "incident" ]]; then
           probe_status="warn"
         fi
@@ -570,38 +886,47 @@ for domain in "${DOMAINS[@]}"; do
       fi
     fi
 
+    # Maintenance-mode exempt probes are advisory-only. Keep their evidence,
+    # but do not let them raise the domain to warn/incident.
+    if [[ "$maintenance_severity_exempt" == "true" && "$probe_status" != "pass" ]]; then
+      probe_detail="$probe_detail; maintenance_severity_exempt=true"
+      probe_status="pass"
+    fi
+
     if [[ "$probe_status" == "incident" ]]; then
       domain_probe_incidents=$((domain_probe_incidents + 1))
     fi
 
     domain_severity="$(promote_severity "$domain_severity" "$probe_status")"
-    PROBE_ROWS+=("$domain"$'\t'"$cap"$'\t'"$probe_status"$'\t'"$PROBE_RUN_KEY"$'\t'"$(sanitize_detail "$probe_detail")")
+    domain_probe_rows+=("$domain"$'\t'"$cap"$'\t'"$probe_status"$'\t'"$PROBE_RUN_KEY"$'\t'"$(sanitize_detail "$probe_detail")")
   done
 
-  # Apply per-domain threshold overrides if configured.
   _saved_disk_min_gb="$DISK_MIN_GB"
   _domain_disk_gb="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .threshold_overrides.vm_disk_headroom_min_gb // \"\"" "$CONTRACT" | head -n1)"
   if [[ -n "$_domain_disk_gb" && "$_domain_disk_gb" != "null" ]]; then
     DISK_MIN_GB="$_domain_disk_gb"
   fi
 
-  run_vm_predictive_probe "$vm_hostname"
+  if [[ "$domain_probe_incidents" -gt 0 && "$maintenance_window_active" -eq 0 ]]; then
+    VM_PROBE_STATUS="warn"
+    VM_PROBE_DETAIL="skipped_due_to_probe_incident"
+  else
+    run_vm_predictive_probe "$vm_hostname"
+  fi
 
-  # Restore global threshold.
   DISK_MIN_GB="$_saved_disk_min_gb"
 
   domain_severity="$(promote_severity "$domain_severity" "$VM_PROBE_STATUS")"
   if [[ "$VM_PROBE_STATUS" == "incident" ]]; then
     domain_vm_incident=1
   fi
-  PROBE_ROWS+=("$domain"$'\t'"vm.predictive.headroom"$'\t'"$VM_PROBE_STATUS"$'\t'"-"$'\t'"$(sanitize_detail "$VM_PROBE_DETAIL")")
+  domain_probe_rows+=("$domain"$'\t'"vm.predictive.headroom"$'\t'"$VM_PROBE_STATUS"$'\t'"-"$'\t'"$(sanitize_detail "$VM_PROBE_DETAIL")")
 
   domain_status="healthy"
   if [[ "$domain_severity" == "incident" ]]; then
     domain_status="incident"
   elif [[ "$domain_severity" == "warn" ]]; then
     domain_status="warn"
-    # Every entry in critical_domains is treated as critical.
     if [[ "$WARN_TREATMENT_CRITICAL" == "incident" && "$domain_mode" != "maintenance" ]]; then
       domain_status="incident"
       if [[ -z "$domain_note" ]]; then
@@ -612,8 +937,6 @@ for domain in "${DOMAINS[@]}"; do
     fi
   fi
 
-  # Maintenance-mode domains may be intentionally degraded during controlled work.
-  # Downgrade service-layer incidents to warn when VM predictive headroom is not incident.
   if [[ "$domain_mode" == "maintenance" && "$domain_status" == "incident" && "$domain_probe_incidents" -gt 0 && "$domain_vm_incident" -eq 0 ]]; then
     domain_status="warn"
     if [[ -z "$domain_note" ]]; then
@@ -623,18 +946,139 @@ for domain in "${DOMAINS[@]}"; do
     fi
   fi
 
-  if [[ "$domain_status" == "incident" ]]; then
-    incident_count=$((incident_count + 1))
-  elif [[ "$domain_status" == "warn" ]]; then
-    warn_count=$((warn_count + 1))
+  if [[ "$maintenance_window_active" -eq 1 && "$domain_status" == "incident" ]]; then
+    domain_status="warn"
+    if [[ -z "$domain_note" ]]; then
+      domain_note="incident_downgraded_for_active_maintenance_window(window_id=$maintenance_window_id)"
+    else
+      domain_note="$domain_note; incident_downgraded_for_active_maintenance_window(window_id=$maintenance_window_id)"
+    fi
+  fi
+
+  if [[ "$maintenance_window_active" -eq 1 ]]; then
+    if [[ -z "$domain_note" ]]; then
+      domain_note="maintenance_window_id=$maintenance_window_id"
+    else
+      domain_note="$domain_note; maintenance_window_id=$maintenance_window_id"
+    fi
   fi
 
   if [[ -n "$domain_note" ]]; then
-    DOMAIN_ROWS+=("$domain"$'\t'"$domain_status"$'\t'"$vm_hostname"$'\t'"$vmid"$'\t'"$proxmox_host"$'\t'"$proxmox_host_ip"$'\t'"$vm_status"$'\t'"$(sanitize_detail "$description")"$'\t'"$(sanitize_detail "$domain_note")")
+    domain_row="$domain"$'\t'"$domain_status"$'\t'"$domain_mode"$'\t'"$domain_mode_source"$'\t'"$maintenance_window_id"$'\t'"$vm_hostname"$'\t'"$vmid"$'\t'"$proxmox_host"$'\t'"$proxmox_host_ip"$'\t'"$vm_status"$'\t'"$(sanitize_detail "$description")"$'\t'"$(sanitize_detail "$domain_note")"
   else
-    DOMAIN_ROWS+=("$domain"$'\t'"$domain_status"$'\t'"$vm_hostname"$'\t'"$vmid"$'\t'"$proxmox_host"$'\t'"$proxmox_host_ip"$'\t'"$vm_status"$'\t'"$(sanitize_detail "$description")"$'\t'"")
+    domain_row="$domain"$'\t'"$domain_status"$'\t'"$domain_mode"$'\t'"$domain_mode_source"$'\t'"$maintenance_window_id"$'\t'"$vm_hostname"$'\t'"$vmid"$'\t'"$proxmox_host"$'\t'"$proxmox_host_ip"$'\t'"$vm_status"$'\t'"$(sanitize_detail "$description")"$'\t'""
+  fi
+
+  printf '%s\n' "$domain_row" >"$result_dir/domain.row"
+  if [[ "${#domain_probe_rows[@]}" -gt 0 ]]; then
+    printf '%s\n' "${domain_probe_rows[@]}" >"$result_dir/probes.rows"
+  else
+    : >"$result_dir/probes.rows"
+  fi
+}
+
+RESULT_ROOT="$(mktemp -d)"
+declare -a DOMAIN_RESULT_DIRS
+current_batch=0
+for idx in "${!DOMAINS[@]}"; do
+  domain="${DOMAINS[$idx]}"
+  printf -v domain_slot '%03d' $((idx + 1))
+  result_dir="$RESULT_ROOT/${domain_slot}-${domain}"
+  mkdir -p "$result_dir"
+  DOMAIN_RESULT_DIRS+=("$result_dir")
+  (
+    set +e
+    process_domain "$domain" "$result_dir" >"$result_dir/stdout" 2>"$result_dir/stderr"
+    echo "$?" >"$result_dir/rc"
+  ) &
+  current_batch=$((current_batch + 1))
+  if (( current_batch >= PARALLEL_DOMAIN_JOBS )); then
+    set +e
+    wait
+    set -e
+    current_batch=0
   fi
 done
+
+set +e
+wait
+set -e
+
+for result_dir in "${DOMAIN_RESULT_DIRS[@]}"; do
+  rc="$(cat "$result_dir/rc" 2>/dev/null || echo 99)"
+  if [[ "$rc" -ne 0 ]]; then
+    echo "STOP: domain worker failed: $(basename "$result_dir")" >&2
+    sed -n '1,80p' "$result_dir/stderr" >&2 || true
+    rm -rf "$RESULT_ROOT"
+    exit 2
+  fi
+
+  if [[ -f "$result_dir/domain.row" ]]; then
+    row="$(cat "$result_dir/domain.row")"
+    DOMAIN_ROWS+=("$row")
+  fi
+
+  if [[ -f "$result_dir/probes.rows" ]]; then
+    while IFS= read -r row; do
+      [[ -n "$row" ]] || continue
+      PROBE_ROWS+=("$row")
+    done <"$result_dir/probes.rows"
+  fi
+done
+
+rm -rf "$RESULT_ROOT"
+
+if [[ "${#DOMAIN_ROWS[@]}" -gt 0 ]]; then
+  domains_json_raw="$(
+    printf '%s\n' "${DOMAIN_ROWS[@]}" | jq -R -s '
+      split("\n")
+      | map(select(length > 0))
+      | map(split("\t"))
+      | map({
+          id: .[0],
+          raw_status: .[1],
+          status: .[1],
+          operating_mode: .[2],
+          operating_mode_source: .[3],
+          maintenance_window_id: (if .[4] == "" then null else .[4] end),
+          vm_hostname: .[5],
+          vmid: .[6],
+          proxmox_host: .[7],
+          proxmox_host_ip: .[8],
+          vm_status: .[9],
+          description: .[10],
+          policy_note: (if .[11] == "" then null else .[11] end)
+        })
+    '
+  )"
+else
+  domains_json_raw='[]'
+fi
+
+domains_json="$(apply_dependency_suppression "$CONTRACT" "$domains_json_raw")"
+DEPENDENCY_POLICY_JSON="$(yq -o=json '.dependent_failure_suppression // {}' "$CONTRACT")"
+incident_count="$(jq '[.[] | select(.status == "incident")] | length' <<<"$domains_json")"
+warn_count="$(jq '[.[] | select(.status == "warn")] | length' <<<"$domains_json")"
+mapfile -t DOMAIN_ROWS < <(
+  jq -r '
+    .[]
+    | [
+        .id,
+        .status,
+        .operating_mode,
+        .operating_mode_source,
+        (.maintenance_window_id // ""),
+        .vm_hostname,
+        .vmid,
+        .proxmox_host,
+        .proxmox_host_ip,
+        .vm_status,
+        .description,
+        (.policy_note // "")
+      ]
+    | @tsv
+  ' <<<"$domains_json"
+)
 
 overall_status="healthy"
 if [[ "$incident_count" -gt 0 ]]; then
@@ -644,25 +1088,6 @@ elif [[ "$warn_count" -gt 0 ]]; then
 fi
 
 if [[ "$JSON_MODE" -eq 1 ]]; then
-  domains_json="$(
-    printf '%s\n' "${DOMAIN_ROWS[@]}" | jq -R -s '
-      split("\n")
-      | map(select(length > 0))
-      | map(split("\t"))
-      | map({
-          id: .[0],
-          status: .[1],
-          vm_hostname: .[2],
-          vmid: .[3],
-          proxmox_host: .[4],
-          proxmox_host_ip: .[5],
-          vm_status: .[6],
-          description: .[7],
-          policy_note: .[8]
-        })
-    '
-  )"
-
   probes_json="$(
     printf '%s\n' "${PROBE_ROWS[@]}" | jq -R -s '
       split("\n")
@@ -686,6 +1111,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --arg ssh_targets "$SSH_TARGETS_REL" \
     --arg warn_treatment_critical "$WARN_TREATMENT_CRITICAL" \
     --arg warn_treatment_non_critical "$WARN_TREATMENT_NON_CRITICAL" \
+    --argjson dependency_policy "$DEPENDENCY_POLICY_JSON" \
     --argjson incident_count "$incident_count" \
     --argjson warn_count "$warn_count" \
     --arg status "$overall_status" \
@@ -725,6 +1151,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
         critical_domains: $warn_treatment_critical,
         non_critical_domains: $warn_treatment_non_critical
       },
+      dependency_policy: $dependency_policy,
       predictive_thresholds: $thresholds,
       incident_count: $incident_count,
       warn_count: $warn_count,
@@ -754,12 +1181,16 @@ else
   echo "warn_treatment.non_critical_domains: $WARN_TREATMENT_NON_CRITICAL"
   echo
 
-  printf "%-18s %-10s %-16s %-6s %-12s %-15s %-10s %-34s %s\n" "domain" "status" "vm_hostname" "vmid" "proxmox" "proxmox_ip" "vm_state" "description" "policy_note"
-  printf "%-18s %-10s %-16s %-6s %-12s %-15s %-10s %-34s %s\n" "------------------" "----------" "----------------" "------" "------------" "---------------" "----------" "----------------------------------" "------------------------------"
+  printf "%-18s %-10s %-12s %-16s %-6s %-12s %-15s %-10s %-28s %s\n" "domain" "status" "mode" "vm_hostname" "vmid" "proxmox" "proxmox_ip" "vm_state" "description" "policy_note"
+  printf "%-18s %-10s %-12s %-16s %-6s %-12s %-15s %-10s %-28s %s\n" "------------------" "----------" "------------" "----------------" "------" "------------" "---------------" "----------" "----------------------------" "------------------------------"
   for row in "${DOMAIN_ROWS[@]}"; do
-    IFS=$'\t' read -r domain status vm_host row_vmid row_proxmox row_pve_ip row_vm_state row_desc row_note <<< "$row"
-    printf "%-18s %-10s %-16s %-6s %-12s %-15s %-10s %-34s %s\n" \
-      "$domain" "$status" "$vm_host" "$row_vmid" "$row_proxmox" "$row_pve_ip" "$row_vm_state" "${row_desc:0:34}" "$row_note"
+    IFS=$'\t' read -r domain status domain_mode domain_mode_source maintenance_window_id vm_host row_vmid row_proxmox row_pve_ip row_vm_state row_desc row_note <<< "$row"
+    mode_display="$domain_mode"
+    if [[ -n "$maintenance_window_id" ]]; then
+      mode_display="${domain_mode}*"
+    fi
+    printf "%-18s %-10s %-12s %-16s %-6s %-12s %-15s %-10s %-28s %s\n" \
+      "$domain" "$status" "$mode_display" "$vm_host" "$row_vmid" "$row_proxmox" "$row_pve_ip" "$row_vm_state" "${row_desc:0:28}" "$row_note"
   done
 
   echo

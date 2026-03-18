@@ -1,0 +1,1672 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+import yaml
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_identity_common import resolve_message_customer_contact  # noqa: E402
+from customer_inbox_disposition_common import resolve_message_disposition  # noqa: E402
+from customer_mailbox_history_common import search_governed_mail_history  # noqa: E402
+from customer_lane_pipeline_common import build_message_anchor  # noqa: E402
+from customer_operator_policy_common import (  # noqa: E402
+    build_async_first_reply_lines,
+    evaluate_operator_policy,
+    load_operator_policy,
+)
+from customer_quote_context_common import (  # noqa: E402
+    apply_house_terminology,
+    load_quote_policy,
+    normalize_email,
+    normalize_space,
+)
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    compact_utc,
+    fail,
+    iso_utc,
+    latest_customer_message_text,
+    message_body_text,
+    message_sender,
+    message_subject,
+    resolve_spine_root,
+    resolve_spine_state,
+    run_cap_capture,
+    write_json,
+    utc_now,
+)
+
+
+CAPABILITY_NAME = "mint.customer.quote.brief"
+SCHEMA_VERSION = "1.2"
+DEFAULT_MAILBOX = "team@mintprints.com"
+MAIL_GET_CAPABILITY = "microsoft.mail.get"
+SNAPSHOT_CAPABILITY = "mint.customer.record.snapshot"
+QUOTE_BRIEF_CONTRACT_FALLBACK = "ops/bindings/mint.customer.quote.brief.contract.yaml"
+COLOR_WORDS = (
+    "black",
+    "navy",
+    "blue",
+    "red",
+    "white",
+    "grey",
+    "gray",
+    "green",
+    "gold",
+    "yellow",
+    "orange",
+    "purple",
+    "pink",
+    "brown",
+    "maroon",
+    "tan",
+    "khaki",
+    "charcoal",
+    "heather",
+    "sand",
+    "mint",
+)
+PRODUCT_FAMILY_MARKERS = (
+    ("hoodie", "hoodie"),
+    ("hoodies", "hoodie"),
+    ("polo", "polo"),
+    ("polos", "polo"),
+    ("shirt", "shirt"),
+    ("shirts", "shirt"),
+    ("tee", "shirt"),
+    ("tees", "shirt"),
+    ("t-shirt", "shirt"),
+    ("t-shirts", "shirt"),
+    ("hat", "hat"),
+    ("hats", "hat"),
+    ("cap", "hat"),
+    ("caps", "hat"),
+    ("jacket", "jacket"),
+    ("jackets", "jacket"),
+)
+CARRYFORWARD_MARKERS = (
+    "same as last time",
+    "same as before",
+    "same as my last order",
+    "same as last order",
+    "same setup",
+    "same thing",
+    "same shirts",
+    "same polos",
+    "same hoodie",
+    "same hoodies",
+    "same design",
+    "same logo",
+    "last order",
+    "again",
+    "reorder",
+)
+NEW_ARTWORK_MARKERS = (
+    "new logo",
+    "new art",
+    "new artwork",
+    "updated logo",
+    "updated art",
+    "different logo",
+    "different artwork",
+    "new design",
+)
+DATE_MARKERS = (
+    "tomorrow",
+    "next week",
+    "next month",
+    "rush",
+    "asap",
+)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-quote-brief",
+        description=(
+            "Generate a governed Morpheus quote briefing from mailbox context plus governed shop policy "
+            "and customer-specific quote context."
+        ),
+    )
+    parser.add_argument("message_id", nargs="?", help="Mailbox message id")
+    parser.add_argument("--message-id", dest="message_id_flag", default="", help="Mailbox message id")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox to read from (default: {DEFAULT_MAILBOX})")
+    parser.add_argument("--include-draft-preview", action="store_true", help="Include customer-facing draft preview even when draft_eligible is false")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    args.message_id = normalize_space(args.message_id_flag or args.message_id)
+    if not args.message_id:
+        fail("message_id required")
+    return args
+
+
+def unwrap_message(payload: dict[str, Any]) -> dict[str, Any]:
+    data = payload.get("data")
+    if isinstance(data, dict) and data.get("id"):
+        return data
+    return payload
+
+
+def resolve_quote_brief_contract(spine_root: Path) -> Path:
+    override = normalize_space(os.environ.get("MINT_CUSTOMER_QUOTE_BRIEF_CONTRACT"))
+    if override:
+        path = Path(override).expanduser().resolve()
+    else:
+        path = (spine_root / QUOTE_BRIEF_CONTRACT_FALLBACK).resolve()
+    if not path.is_file():
+        fail(f"quote brief contract not found: {path}")
+    return path
+
+
+def load_quote_brief_contract(spine_root: Path) -> dict[str, Any]:
+    path = resolve_quote_brief_contract(spine_root)
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        fail(f"invalid quote brief contract: {path}")
+        raise exc
+    dependencies = dict(raw.get("dependencies") or {})
+    reasoning = dict(raw.get("reasoning_policy") or {})
+    embroidery_defaults = dict(reasoning.get("embroidery_defaults") or {})
+    attachments_capability = normalize_space(dependencies.get("source_attachments_capability"))
+    history_capability = normalize_space(dependencies.get("source_history_capability"))
+    module_invocation_capability = normalize_space(dependencies.get("module_invocation_capability") or "mint.customer.quote.intake")
+    lifecycle_capability = normalize_space(dependencies.get("lifecycle_capability") or "mint.customer.lifecycle.resolve")
+    confirmation_phrase = normalize_space(embroidery_defaults.get("confirmation_phrase"))
+    if not attachments_capability or not confirmation_phrase:
+        fail(f"quote brief contract missing required fields: {path}")
+    return {
+        "path": str(path),
+        "source_attachments_capability": attachments_capability,
+        "source_history_capability": history_capability,
+        "module_invocation_capability": module_invocation_capability,
+        "lifecycle_capability": lifecycle_capability,
+        "evidence_first": bool(reasoning.get("evidence_first", True)),
+        "context_first_default": bool(reasoning.get("context_first_default", True)),
+        "recommend_then_confirm": bool(reasoning.get("recommend_then_confirm", True)),
+        "high_confidence_confirmation_question_limit": int(reasoning.get("high_confidence_confirmation_question_limit") or 1),
+        "history_query_top": int(reasoning.get("history_query_top") or 12),
+        "artwork_link_domains": [
+            normalize_space(item).lower()
+            for item in (reasoning.get("artwork_link_domains") or [])
+            if normalize_space(item)
+        ],
+        "embroidery_defaults": {
+            "left_chest_width_inches": int(embroidery_defaults.get("left_chest_width_inches") or 4),
+            "minimum_pieces": int(embroidery_defaults.get("minimum_pieces") or 12),
+            "confirmation_phrase": confirmation_phrase,
+        },
+    }
+
+
+def optional_run_cap_json(spine_root: Path, capability: str, args: list[str]) -> tuple[dict[str, Any], str]:
+    cmd = [str(spine_root / "bin" / "ops"), "cap", "run", capability]
+    if args:
+        cmd.extend(["--", *args])
+    result = subprocess.run(cmd, cwd=spine_root, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return {}, ""
+    text = (result.stdout or "").strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return {}, ""
+    try:
+        payload = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return {}, ""
+    receipt = ""
+    for line in text.splitlines():
+        if line.startswith("Receipt:"):
+            receipt = line.split(":", 1)[1].strip()
+    return dict(payload or {}), receipt
+
+
+def unwrap_search_results(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    microsoft = dict(((payload.get("data") or {}).get("microsoft")) or {})
+    if microsoft:
+        return list(microsoft.get("value") or [])
+    if isinstance(payload.get("value"), list):
+        return list(payload.get("value") or [])
+    return []
+
+
+def list_source_attachments(
+    spine_root: Path,
+    *,
+    capability: str,
+    message_id: str,
+    mailbox: str,
+) -> tuple[list[dict[str, Any]], str]:
+    payload, receipt = optional_run_cap_json(
+        spine_root,
+        capability,
+        ["--mailbox", mailbox, "--message-id", message_id, "--top", "25"],
+    )
+    rows = list(payload.get("value") or payload.get("data") or [])
+    attachments = []
+    for row in rows:
+        item = dict(row or {})
+        if not item or bool(item.get("isInline")):
+            continue
+        attachments.append(item)
+    return attachments, receipt
+
+
+def search_mail_history(
+    spine_root: Path,
+    *,
+    mailbox: str,
+    query: str,
+    top: int,
+    current_message_id: str = "",
+    current_internet_message_id: str = "",
+) -> tuple[list[dict[str, Any]], str]:
+    messages, receipts, _errors = search_governed_mail_history(
+        spine_root,
+        query=query,
+        preferred_mailbox=mailbox,
+        top=top,
+        exclude_message_ids=[current_message_id],
+        exclude_internet_message_ids=[current_internet_message_id],
+    )
+    return messages, ", ".join(item for item in receipts if item)
+
+
+def extract_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for raw in re.findall(r"https?://[^\s<>\"]+", text or "", flags=re.IGNORECASE):
+        cleaned = raw.rstrip(").,;]>")
+        key = cleaned.lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        urls.append(cleaned)
+    return urls
+
+
+def extract_artwork_links(text: str, brief_contract: dict[str, Any]) -> list[dict[str, str]]:
+    domains = [item.lower() for item in (brief_contract.get("artwork_link_domains") or []) if item]
+    if not domains:
+        return []
+    links: list[dict[str, str]] = []
+    for url in extract_urls(text):
+        host = (urlparse(url).netloc or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if not host:
+            continue
+        if not any(host == domain or host.endswith(f".{domain}") for domain in domains):
+            continue
+        links.append(
+            {
+                "url": url,
+                "provider": host,
+                "label": host,
+            }
+        )
+    return links
+
+
+def extract_signature_fields(body_text: str) -> tuple[str, str]:
+    lines = [normalize_space(line).strip(":-") for line in body_text.replace("\r", "\n").split("\n") if normalize_space(line)]
+    for idx, line in enumerate(lines):
+        if not re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", line, flags=re.IGNORECASE):
+            continue
+        name = ""
+        for offset in range(1, 4):
+            pos = idx - offset
+            if pos < 0:
+                break
+            candidate = lines[pos]
+            if "@" in candidate:
+                continue
+            if re.search(r"\b(best regards|regards|thanks|office|operations|manager|phone|https?://|www\.)\b", candidate, flags=re.IGNORECASE):
+                continue
+            if len(re.findall(r"[A-Za-zÀ-ÿ']+", candidate)) < 2:
+                continue
+            name = candidate
+            break
+        return name, ""
+    return "", ""
+
+
+def infer_job_type(text: str, policy: dict[str, Any]) -> tuple[str, list[str]]:
+    lowered = normalize_space(text).lower()
+    best_type = "generic"
+    best_hits: list[str] = []
+    for key, profile in dict(policy.get("job_type_profiles") or {}).items():
+        hits = [marker for marker in (profile.get("markers") or []) if marker and marker in lowered]
+        if len(hits) > len(best_hits):
+            best_type = key
+            best_hits = hits
+    return best_type, best_hits
+
+
+def quantity_summary(text: str) -> dict[str, Any]:
+    lowered = normalize_space(text).lower()
+    range_match = re.search(r"\b(\d{1,4})\s*[-/]\s*(\d{1,4})\b", lowered)
+    if range_match:
+        low = int(range_match.group(1))
+        high = int(range_match.group(2))
+        return {"mode": "range", "min": low, "max": high, "display": f"{low}-{high}"}
+    total_match = re.search(r"\b(\d{1,4})\s*(?:pc|pcs|pieces|shirts|tees|polos|hoodies|hats|units)\b", lowered)
+    if total_match:
+        value = int(total_match.group(1))
+        if value > 1:
+            return {"mode": "exact", "value": value, "display": str(value)}
+    values = [int(match) for match in re.findall(r"\b(\d{1,4})\b", lowered)]
+    filtered = [value for value in values if value > 1]
+    if filtered:
+        return {"mode": "exact", "value": filtered[0], "display": str(filtered[0])}
+    return {"mode": "missing", "display": ""}
+
+
+def ask_summary(body_text: str) -> str:
+    clean = normalize_space(body_text)
+    if not clean:
+        return ""
+    if len(clean) <= 220:
+        return clean
+    return clean[:217].rstrip() + "..."
+
+
+def extract_active_customer_block(body_text: str) -> str:
+    text = str(body_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    header_match = re.search(
+        r"(?is)^\s*From:\s.*?\bSubject:\s.*?(?:\n|$)\s*",
+        text,
+    )
+    candidate = text[header_match.end() :].strip() if header_match else text
+    for pattern in (
+        r"(?i)\bFrom:\s+Mint Prints Team\b",
+        r"(?im)^\s*On .+ wrote:\s*$",
+        r"(?im)-{2,}\s*Original Message\s*-{2,}",
+        r"(?i)\bSent:\s+",
+    ):
+        match = re.search(pattern, candidate)
+        if match:
+            candidate = candidate[: match.start()].strip()
+            break
+    return normalize_space(candidate)
+
+
+def extract_order_reference(text: str, fallback_invoice: str = "") -> str:
+    for pattern in (
+        r"\border\s*#\s*(\d{4,})\b",
+        r"\b#\s*(\d{4,})\b",
+        r"\border\s+(\d{4,})\b",
+    ):
+        match = re.search(pattern, text or "", flags=re.IGNORECASE)
+        if match:
+            return normalize_space(match.group(1))
+    return normalize_space(fallback_invoice)
+
+
+def normalize_location_label(text: str) -> str:
+    lowered = normalize_space(text).lower()
+    location_map = (
+        ("left chest", "left chest"),
+        ("right chest", "right chest"),
+        ("full back", "full back"),
+        ("back", "back"),
+        ("left sleeve", "left sleeve"),
+        ("right sleeve", "right sleeve"),
+    )
+    for marker, label in location_map:
+        if marker in lowered:
+            return label
+    return ""
+
+
+def carryforward_subject_phrase(location: str, evidence_subject: str) -> str:
+    location_label = normalize_space(location)
+    subject_label = normalize_space(evidence_subject or "artwork")
+    if not location_label:
+        return subject_label
+    if subject_label.startswith(location_label):
+        return subject_label
+    return f"{location_label} {subject_label}"
+
+
+def snapshot_has_customer_truth(snapshot_data: dict[str, Any]) -> bool:
+    legacy_hold = dict(snapshot_data.get("legacy_hold") or {})
+    fresh_slate = dict(snapshot_data.get("fresh_slate") or {})
+    latest_order = dict(legacy_hold.get("latest_order") or {})
+    customer = dict(fresh_slate.get("customer") or {})
+    return bool(customer or latest_order or legacy_hold.get("orders"))
+
+
+def unique_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        cleaned = normalize_space(value)
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(cleaned)
+    return out
+
+
+def extract_style_codes(text: str) -> list[str]:
+    return unique_preserve_order(re.findall(r"\b[A-Z]{1,4}\d{2,5}[A-Z]?\b", normalize_space(text).upper()))
+
+
+def detect_product_family(text: str) -> str:
+    lowered = normalize_space(text).lower()
+    for marker, label in PRODUCT_FAMILY_MARKERS:
+        if re.search(rf"\b{re.escape(marker)}\b", lowered):
+            return label
+    return ""
+
+
+def extract_color_mentions(text: str) -> list[str]:
+    lowered = normalize_space(text).lower()
+    matches = [color.title() for color in COLOR_WORDS if re.search(rf"\b{re.escape(color)}\b", lowered)]
+    return unique_preserve_order(matches)
+
+
+def has_due_date(text: str) -> bool:
+    lowered = normalize_space(text).lower()
+    if any(marker in lowered for marker in DATE_MARKERS):
+        return True
+    patterns = (
+        r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2}\b",
+        r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b",
+        r"\b(?:by|need|needed|due)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    )
+    return any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def prior_order_summary(latest_order: dict[str, Any], latest_order_line_items: list[dict[str, Any]], latest_order_imprints: list[dict[str, Any]]) -> dict[str, Any]:
+    style_codes = unique_preserve_order([str(item.get("style_number") or "") for item in latest_order_line_items])
+    descriptions = unique_preserve_order([str(item.get("style_description") or "") for item in latest_order_line_items])
+    colors = unique_preserve_order([str(item.get("color") or "") for item in latest_order_line_items])
+    locations = unique_preserve_order(
+        [
+            normalize_location_label(item.get("location") or "")
+            or normalize_space(item.get("location") or item.get("cob_location") or item.get("personalization_location") or "")
+            for item in latest_order_imprints
+        ]
+    )
+    decoration_methods = unique_preserve_order([str(item.get("decoration_type") or "") for item in latest_order_imprints])
+    total_quantity = 0
+    for item in latest_order_line_items:
+        try:
+            total_quantity += int(item.get("total_quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+    if total_quantity <= 0:
+        try:
+            total_quantity = int(latest_order.get("total_quantity") or 0)
+        except (TypeError, ValueError):
+            total_quantity = 0
+    product_family = detect_product_family(" ".join(descriptions + [str(latest_order.get("nickname") or "")]))
+    summary = " ".join(
+        part for part in (str(latest_order.get("invoice_number") or ""), str(latest_order.get("nickname") or "")) if normalize_space(part)
+    )
+    return {
+        "exists": bool(summary or style_codes or colors or locations),
+        "invoice_number": normalize_space(latest_order.get("invoice_number") or ""),
+        "nickname": normalize_space(latest_order.get("nickname") or ""),
+        "summary": summary or None,
+        "style_codes": style_codes,
+        "style_descriptions": descriptions,
+        "product_family": product_family or None,
+        "colors": colors,
+        "locations": locations,
+        "decoration_methods": decoration_methods,
+        "total_quantity": total_quantity or None,
+    }
+
+
+def artwork_truth_summary(snapshot_data: dict[str, Any]) -> dict[str, Any]:
+    artifact_visibility = dict(snapshot_data.get("artifact_visibility") or {})
+    artwork_intelligence_visibility = dict(snapshot_data.get("artwork_intelligence_visibility") or {})
+    latest_artifact = dict(artifact_visibility.get("latest") or {})
+    latest_analysis = dict(artwork_intelligence_visibility.get("latest") or {})
+    active_count = int(artifact_visibility.get("active_count") or 0)
+    state = str(artwork_intelligence_visibility.get("state") or "")
+    reusable = state == "analysis_present_reusable"
+    available = active_count > 0 or reusable or bool(latest_artifact)
+    return {
+        "available": available,
+        "artifact_state": str(artifact_visibility.get("state") or ""),
+        "active_count": active_count,
+        "latest_role": normalize_space(latest_artifact.get("artifact_role") or ""),
+        "latest_object_key": normalize_space(latest_artifact.get("canonical_object_key") or ""),
+        "analysis_state": state,
+        "analysis_reusable": reusable,
+        "latest_analysis_id": normalize_space(latest_analysis.get("analysis_id") or ""),
+    }
+
+
+def current_request_features(text: str, artwork_evidence: list[dict[str, Any]]) -> dict[str, Any]:
+    lowered = normalize_space(text).lower()
+    carryforward_markers = [marker for marker in CARRYFORWARD_MARKERS if marker in lowered]
+    if "same as" in lowered and "last" in lowered and "time" in lowered and "same as last time" not in carryforward_markers:
+        carryforward_markers.append("same as last time")
+    new_artwork_markers = [marker for marker in NEW_ARTWORK_MARKERS if marker in lowered]
+    quantity = quantity_summary(text)
+    return {
+        "quantity": quantity,
+        "style_codes": extract_style_codes(text),
+        "product_family": detect_product_family(text),
+        "colors": extract_color_mentions(text),
+        "due_date_present": has_due_date(text),
+        "artwork_present": bool(artwork_evidence),
+        "carryforward_markers": carryforward_markers,
+        "new_artwork_markers": new_artwork_markers,
+        "order_reference": extract_order_reference(text),
+    }
+
+
+def summarize_history_messages(messages: list[dict[str, Any]], current_message_id: str, current_internet_message_id: str) -> list[dict[str, Any]]:
+    summarized: list[dict[str, Any]] = []
+    for message in messages:
+        message_id = normalize_space(message.get("id") or "")
+        internet_message_id = normalize_space(message.get("internetMessageId") or "")
+        if message_id == current_message_id:
+            continue
+        if current_internet_message_id and internet_message_id and internet_message_id == current_internet_message_id:
+            continue
+        summarized.append(
+            {
+                "id": message_id,
+                "received_utc": normalize_space(message.get("receivedDateTime") or ""),
+                "from": message_sender(message),
+                "subject": message_subject(message),
+                "source_mailbox": normalize_space(message.get("source_mailbox") or message.get("archiveMailbox") or ""),
+                "history_lane": normalize_space(message.get("history_lane") or ""),
+            }
+        )
+    return summarized[:5]
+
+
+def build_context_analysis(
+    *,
+    source_text: str,
+    current_message_id: str,
+    current_internet_message_id: str,
+    current_features: dict[str, Any],
+    history_messages: list[dict[str, Any]],
+    prior_order: dict[str, Any],
+    artwork_truth: dict[str, Any],
+    policy: dict[str, Any],
+    evidence_recommendation: dict[str, Any],
+    snapshot_data: dict[str, Any],
+) -> dict[str, Any]:
+    printavo_visibility = dict(snapshot_data.get("printavo_visibility") or {})
+    contact_graph = dict(snapshot_data.get("company_contact_graph") or {})
+    contact_graph_summary = dict(contact_graph.get("summary") or {})
+    prior_context: list[dict[str, Any]] = []
+    reused: list[dict[str, Any]] = []
+    changed: list[dict[str, Any]] = []
+    missing: list[str] = []
+
+    prior_messages = summarize_history_messages(history_messages, current_message_id, current_internet_message_id)
+    if prior_messages:
+        prior_context.append(
+            {
+                "kind": "mail_history",
+                "count": len(prior_messages),
+                "summary": f"{len(prior_messages)} prior mailbox hit(s)",
+                "recent_subjects": [item["subject"] for item in prior_messages if normalize_space(item.get("subject") or "")],
+            }
+        )
+    if prior_order.get("exists"):
+        prior_context.append(
+            {
+                "kind": "prior_order",
+                "summary": f"latest order #{prior_order.get('invoice_number') or ''} {prior_order.get('nickname') or ''}".strip(),
+                "invoice_number": prior_order.get("invoice_number"),
+                "style_codes": prior_order.get("style_codes"),
+                "colors": prior_order.get("colors"),
+                "locations": prior_order.get("locations"),
+            }
+        )
+    if artwork_truth.get("available"):
+        summary_bits = []
+        if int(artwork_truth.get("active_count") or 0) > 0:
+            summary_bits.append(f"{int(artwork_truth.get('active_count') or 0)} active artifact(s)")
+        if normalize_space(artwork_truth.get("latest_role") or ""):
+            summary_bits.append(f"latest role {artwork_truth.get('latest_role')}")
+        if artwork_truth.get("analysis_reusable"):
+            summary_bits.append("artwork analysis reusable")
+        prior_context.append(
+            {
+                "kind": "artwork_truth",
+                "summary": ", ".join(summary_bits) or "governed artwork truth present",
+                "active_count": int(artwork_truth.get("active_count") or 0),
+                "latest_object_key": artwork_truth.get("latest_object_key"),
+            }
+        )
+    if normalize_space(contact_graph.get("match_mode") or ""):
+        prior_context.append(
+            {
+                "kind": "contact_graph",
+                "summary": f"contact graph {contact_graph.get('match_mode')}",
+                "contacts": list(contact_graph_summary.get("contact_names") or []),
+            }
+        )
+    latest_printavo = dict(printavo_visibility.get("latest") or {})
+    if normalize_space(printavo_visibility.get("state") or ""):
+        prior_context.append(
+            {
+                "kind": "printavo_bridge",
+                "summary": normalize_space(latest_printavo.get("external_order_number") or latest_printavo.get("printavo_state") or printavo_visibility.get("state") or ""),
+            }
+        )
+
+    carryforward_requested = bool(current_features.get("carryforward_markers"))
+    prior_history_strong = bool(prior_messages) and bool(prior_order.get("exists")) and bool(artwork_truth.get("available"))
+    reuse_confidence = "low"
+    if carryforward_requested or normalize_space(current_features.get("order_reference") or ""):
+        reuse_confidence = "high"
+    elif prior_history_strong and not current_features.get("new_artwork_markers"):
+        reuse_confidence = "medium"
+
+    if prior_order.get("exists"):
+        reused.append(
+            {
+                "field": "matched_prior_order",
+                "value": prior_order.get("summary"),
+                "basis": "legacy_order_history",
+            }
+        )
+    if prior_messages:
+        reused.append(
+            {
+                "field": "prior_mail_history",
+                "value": f"{len(prior_messages)} related message(s)",
+                "basis": "governed_mailbox_history",
+            }
+        )
+    if reuse_confidence in {"high", "medium"} and prior_order.get("style_codes") and not current_features.get("style_codes"):
+        reused.append(
+            {
+                "field": "style_code",
+                "value": prior_order["style_codes"][0],
+                "basis": "latest_order_line_items",
+            }
+        )
+    if reuse_confidence in {"high", "medium"} and prior_order.get("product_family") and not current_features.get("product_family"):
+        reused.append(
+            {
+                "field": "product_family",
+                "value": prior_order["product_family"],
+                "basis": "latest_order_line_items",
+            }
+        )
+    if reuse_confidence in {"high", "medium"} and artwork_truth.get("available") and not current_features.get("artwork_present") and not evidence_recommendation.get("matched"):
+        reused.append(
+            {
+                "field": "artwork_reference",
+                "value": artwork_truth.get("latest_object_key") or "governed artwork truth",
+                "basis": "artifact_runtime",
+            }
+        )
+    if reuse_confidence in {"high", "medium"} and prior_order.get("locations") and not evidence_recommendation.get("matched"):
+        reused.append(
+            {
+                "field": "print_locations",
+                "value": ", ".join(prior_order.get("locations") or []),
+                "basis": "latest_order_imprints",
+            }
+        )
+
+    current_quantity = dict(current_features.get("quantity") or {})
+    prior_quantity = prior_order.get("total_quantity")
+    if current_quantity.get("mode") == "exact" and prior_quantity and int(current_quantity.get("value") or 0) != int(prior_quantity):
+        changed.append(
+            {
+                "field": "requested_total_quantity",
+                "current": int(current_quantity.get("value") or 0),
+                "prior": int(prior_quantity),
+                "basis": "current_message_vs_latest_order",
+            }
+        )
+    if current_features.get("colors") and prior_order.get("colors"):
+        current_color = str((current_features.get("colors") or [""])[0])
+        prior_color = str((prior_order.get("colors") or [""])[0])
+        if current_color and prior_color and current_color.lower() != prior_color.lower():
+            changed.append(
+                {
+                    "field": "requested_color",
+                    "current": current_color,
+                    "prior": prior_color,
+                    "basis": "current_message_vs_latest_order",
+                }
+            )
+    current_style = str((current_features.get("style_codes") or [""])[0])
+    prior_style = str((prior_order.get("style_codes") or [""])[0])
+    if current_style and prior_style and current_style.lower() != prior_style.lower():
+        changed.append(
+            {
+                "field": "requested_style_code",
+                "current": current_style,
+                "prior": prior_style,
+                "basis": "current_message_vs_latest_order",
+            }
+        )
+    current_product_family = normalize_space(current_features.get("product_family") or "")
+    prior_product_family = normalize_space(prior_order.get("product_family") or "")
+    if current_product_family and prior_product_family and current_product_family != prior_product_family:
+        changed.append(
+            {
+                "field": "requested_product_family",
+                "current": current_product_family,
+                "prior": prior_product_family,
+                "basis": "current_message_vs_latest_order",
+            }
+        )
+
+    if current_quantity.get("mode") != "exact":
+        missing.append("final quantity confirmation")
+    if not current_features.get("due_date_present"):
+        missing.append("due date")
+    if not current_style and not current_product_family and reuse_confidence == "low" and not prior_order.get("exists"):
+        missing.append("product/style confirmation")
+    artwork_can_be_reused = artwork_truth.get("available") and reuse_confidence in {"high", "medium"}
+    if not current_features.get("artwork_present") and not evidence_recommendation.get("matched") and not artwork_can_be_reused:
+        missing.append(policy["terminology"]["replacement_phrase"])
+    if current_quantity.get("mode") == "exact" and int(current_quantity.get("value") or 0) < int(policy["minimum_pieces"]):
+        missing.append(f"below house minimum ({policy['minimum_pieces']} pcs)")
+    if current_quantity.get("mode") == "range" and int(current_quantity.get("max") or 0) < int(policy["minimum_pieces"]):
+        missing.append(f"below house minimum ({policy['minimum_pieces']} pcs)")
+
+    question_missing = [item for item in missing if not item.startswith("below house minimum")]
+
+    if evidence_recommendation.get("matched"):
+        next_step_reason = "Attachment/thread evidence already supports a one-question embroidery carry-forward recommendation."
+    elif not question_missing:
+        next_step_reason = "Prior customer, order, and artwork context are strong enough to move directly into quoting without another generic clarification pass."
+    elif len(question_missing) == 1:
+        next_step_reason = f"History resolved the rest of the job context, so only {question_missing[0]} remains unresolved."
+    else:
+        next_step_reason = f"History reduced the clarification set; remaining blockers are {', '.join(question_missing)}."
+
+    if evidence_recommendation.get("matched"):
+        next_step = "state the inferred embroidery carry-forward recommendation from attachment + prior-order evidence and ask one confirmation question"
+    elif not question_missing:
+        next_step = "build the quote from governed prior customer/order/artwork context without a generic clarification email"
+    elif len(question_missing) == 1:
+        next_step = f"ask one concise clarification for {question_missing[0]} after stating the reused prior context"
+    else:
+        next_step = f"ask only for the remaining blockers after stating the reused prior context: {', '.join(question_missing)}"
+
+    return {
+        "workflow_mode": "context_first",
+        "reuse_confidence": reuse_confidence,
+        "carryforward_requested": carryforward_requested,
+        "prior_context": prior_context,
+        "reused": reused,
+        "changed": changed,
+        "missing": missing,
+        "question_missing": question_missing,
+        "next_step": next_step,
+        "next_step_reason": next_step_reason,
+        "should_use_context_reply": not evidence_recommendation.get("matched") and (reuse_confidence in {"high", "medium"} or bool(prior_context)),
+    }
+
+
+def infer_evidence_recommendation(
+    *,
+    source_text: str,
+    full_thread_text: str,
+    artwork_evidence: list[dict[str, Any]],
+    latest_order: dict[str, Any],
+    latest_order_imprints: list[dict[str, Any]],
+    brief_contract: dict[str, Any],
+) -> dict[str, Any]:
+    lowered = normalize_space(source_text).lower()
+    if "embroider" not in lowered:
+        return {"matched": False}
+    carryforward_markers = [
+        marker
+        for marker in (
+            "same as last time",
+            "same as before",
+            "do the same",
+            "same logo",
+            "same left chest",
+            "same for the embroidery",
+            "for the embroidery too",
+        )
+        if marker in lowered
+    ]
+    if "same" in lowered and normalize_location_label(source_text):
+        carryforward_markers.append("same+explicit_location")
+    if not artwork_evidence and not carryforward_markers and "left chest" not in lowered:
+        return {"matched": False}
+
+    evidence_labels = [
+        normalize_space(item.get("name") or item.get("url") or item.get("provider") or "")
+        for item in artwork_evidence
+        if normalize_space(item.get("name") or item.get("url") or item.get("provider") or "")
+    ]
+    evidence_phrase = "attached"
+    evidence_subject = "logo"
+    if artwork_evidence:
+        if not any(str(item.get("kind") or "") == "attachment" for item in artwork_evidence):
+            evidence_phrase = "shared"
+    else:
+        evidence_phrase = "described in your message"
+        evidence_subject = "artwork"
+    if "phone number" in lowered or "telephone number" in lowered:
+        evidence_subject = "left chest artwork"
+    order_number = extract_order_reference(full_thread_text, str(latest_order.get("invoice_number") or ""))
+    prior_locations = [normalize_location_label(item.get("location") or "") for item in latest_order_imprints if normalize_location_label(item.get("location") or "")]
+    prior_locations = [item for item in prior_locations if item]
+    recommended_location = normalize_location_label(source_text) or ""
+    if not recommended_location and "left chest" in prior_locations:
+        recommended_location = "left chest"
+    if not recommended_location:
+        recommended_location = normalize_location_label(full_thread_text) or "left chest"
+
+    recommended_width = brief_contract["embroidery_defaults"]["left_chest_width_inches"] if recommended_location == "left chest" else 0
+    width_match = re.search(r"\b(\d{1,2})(?:\"|”|\s*(?:inch|inches|in))\b", full_thread_text, flags=re.IGNORECASE)
+    if width_match:
+        recommended_width = int(width_match.group(1))
+
+    carryforward_prints = ""
+    if len(prior_locations) >= 2:
+        carryforward_prints = f"keep the same {len(prior_locations)} print locations as the last order"
+    elif "4 locations" in normalize_space(full_thread_text).lower():
+        carryforward_prints = "keep the same 4 print locations as the last order"
+    elif all(marker in normalize_space(full_thread_text).lower() for marker in ("left chest", "full back", "left sleeve", "right sleeve")):
+        carryforward_prints = "keep the same 4 print locations as the last order"
+
+    evidence: list[str] = []
+    if evidence_labels:
+        evidence.append(f"source_artwork:{evidence_labels[0]}")
+    for marker in carryforward_markers:
+        evidence.append(f"message_carryforward:{marker}")
+    if order_number:
+        evidence.append(f"prior_order:{order_number}")
+    if recommended_location:
+        evidence.append(f"prior_location:{recommended_location}")
+    if recommended_width:
+        evidence.append(f"recommended_embroidery_width_inches:{recommended_width}")
+
+    subject_phrase = carryforward_subject_phrase(recommended_location, evidence_subject)
+    if artwork_evidence:
+        opening = f"I see the {evidence_subject} you {evidence_phrase}, and I am treating it as the same {subject_phrase}"
+    else:
+        opening = f"Based on your note to do the same for the embroidery, I am treating it as the same {subject_phrase}"
+    if order_number:
+        opening += f" from order #{order_number}"
+    confirmation_question = opening + ". " + (
+        f"I recommend {recommended_width}\" wide embroidery on the {recommended_location}."
+        if recommended_width
+        else f"I recommend embroidery on the {recommended_location}."
+    ) + " Is that what you were envisioning?"
+
+    return {
+        "matched": True,
+        "mode": "evidence_first_assume_and_confirm",
+        "artwork_evidence": artwork_evidence,
+        "evidence_labels": evidence_labels,
+        "evidence_phrase": evidence_phrase,
+        "evidence_subject": evidence_subject,
+        "order_number": order_number or None,
+        "recommended_location": recommended_location,
+        "recommended_width_inches": recommended_width or None,
+        "carryforward_prints": carryforward_prints or None,
+        "evidence": evidence,
+        "confirmation_question": confirmation_question,
+    }
+
+
+def build_evidence_first_reply_preview(
+    *,
+    customer_name: str,
+    recommendation: dict[str, Any],
+    quantity: dict[str, Any],
+    brief_contract: dict[str, Any],
+) -> str:
+    salutation = customer_name or "there"
+    minimum_pieces = int(brief_contract["embroidery_defaults"]["minimum_pieces"])
+    location = str(recommendation.get("recommended_location") or "left chest").strip()
+    width = recommendation.get("recommended_width_inches")
+    order_number = normalize_space(recommendation.get("order_number") or "")
+    carryforward_prints = normalize_space(recommendation.get("carryforward_prints") or "")
+    lines = [f"Hey {salutation},", ""]
+    evidence_phrase = normalize_space(recommendation.get("evidence_phrase") or "attached")
+    evidence_subject = normalize_space(recommendation.get("evidence_subject") or "logo")
+    subject_phrase = carryforward_subject_phrase(location, evidence_subject)
+    if evidence_phrase == "described in your message":
+        opening = f"Based on your note to do the same for the embroidery, I am treating it as the same {subject_phrase}"
+    else:
+        opening = f"I see the {evidence_subject} you {evidence_phrase}, and I am treating it as the same {subject_phrase}"
+    if order_number:
+        opening += f" from order #{order_number}"
+    lines.append(opening + ".")
+    recommendation_line = (
+        f"I recommend {width}\" wide embroidery on the {location}"
+        if width
+        else f"I recommend embroidery on the {location}"
+    )
+    if carryforward_prints:
+        recommendation_line += f", and {carryforward_prints}"
+    lines.append(recommendation_line + " unless you want it different.")
+    lines.append("")
+    lines.append(f"Embroidery minimum is {minimum_pieces} pieces.")
+    lines.append("")
+    if quantity.get("mode") != "exact":
+        lines.append("If that matches what you had in mind, just tell me how many pieces need embroidery.")
+    else:
+        lines.append(str(recommendation.get("confirmation_question") or "").strip())
+    return "\n".join(line for line in lines if line is not None).strip()
+
+
+def build_reply_preview(
+    *,
+    customer_name: str,
+    policy: dict[str, Any],
+    matched_rule: dict[str, Any] | None,
+    quantity: dict[str, Any],
+    operator_policy: dict[str, Any],
+    operator_policy_match: dict[str, Any],
+) -> str:
+    salutation = customer_name or "there"
+    terminology = dict(policy.get("terminology") or {})
+    artwork_phrase = terminology.get("replacement_phrase") or terminology.get("preferred_artwork_phrase") or "print-ready artwork"
+    lines = [f"Hi {salutation},", ""]
+    async_lines = build_async_first_reply_lines(operator_policy, operator_policy_match)
+    if async_lines:
+        intro = async_lines[0]
+        if intro:
+            lines.append(intro)
+        policy_lines = [line for line in async_lines[1:] if line]
+        if policy_lines:
+            lines.append(" ".join(policy_lines))
+        lines.append("")
+    pricing = dict((matched_rule or {}).get("pricing_override") or {})
+    if pricing.get("mode") == "flat_rate_each" and pricing.get("unit_price_usd") is not None:
+        lines.append(f"We can handle this memorial-shirt request at a flat rate of ${float(pricing['unit_price_usd']):.2f} each.")
+    else:
+        lines.append("We can help on this request.")
+    lines.append("")
+    requests: list[str] = []
+    if quantity.get("mode") != "exact":
+        requests.append("your final piece count")
+    requests.append(artwork_phrase)
+    if requests:
+        if len(requests) == 1:
+            lines.append(f"Please send {requests[0]} and we can keep it moving.")
+        else:
+            lines.append(f"Please send {requests[0]} and {requests[1]}, and we can keep it moving.")
+    return "\n".join(lines).strip()
+
+
+def build_context_first_reply_preview(
+    *,
+    customer_name: str,
+    context_analysis: dict[str, Any],
+    prior_order: dict[str, Any],
+    operator_policy: dict[str, Any],
+    operator_policy_match: dict[str, Any],
+) -> str:
+    salutation = customer_name or "there"
+    lines = [f"Hi {salutation},", ""]
+    async_lines = build_async_first_reply_lines(operator_policy, operator_policy_match)
+    if async_lines:
+        intro = async_lines[0]
+        if intro:
+            lines.append(intro)
+        policy_lines = [line for line in async_lines[1:] if line]
+        if policy_lines:
+            lines.append(" ".join(policy_lines))
+        lines.append("")
+    if prior_order.get("exists"):
+        lines.append(
+            f"I pulled your prior Mint Prints history and found order #{prior_order.get('invoice_number') or ''}"
+            + (f" ({prior_order.get('nickname')})" if normalize_space(prior_order.get("nickname") or "") else "")
+            + "."
+        )
+    reused = list(context_analysis.get("reused") or [])
+    changed = list(context_analysis.get("changed") or [])
+    missing = list(context_analysis.get("missing") or [])
+    question_missing = list(context_analysis.get("question_missing") or [])
+    policy_notes = [item for item in missing if item not in question_missing]
+    style_value = next((item.get("value") for item in reused if item.get("field") == "style_code"), "")
+    artwork_value = next((item.get("value") for item in reused if item.get("field") == "artwork_reference"), "")
+    if style_value:
+        lines.append(f"I can reuse the prior {style_value} setup from that history.")
+    if artwork_value:
+        lines.append("I can also reuse the existing artwork we already have on file.")
+    if changed:
+        change_lines: list[str] = []
+        for item in changed[:3]:
+            field = str(item.get("field") or "")
+            current = normalize_space(item.get("current") or "")
+            prior = normalize_space(item.get("prior") or "")
+            if field == "requested_color":
+                change_lines.append(f"the garment color changing from {prior} to {current}")
+            elif field == "requested_total_quantity":
+                change_lines.append(f"the piece count changing from {prior} to {current}")
+            elif field == "requested_style_code":
+                change_lines.append(f"the style changing from {prior} to {current}")
+            elif field == "requested_product_family":
+                change_lines.append(f"the garment type changing from {prior} to {current}")
+        if change_lines:
+            lines.append("I noted " + "; ".join(change_lines) + ".")
+    lines.append("")
+    if policy_notes:
+        lines.append("One note before I finalize this: " + "; ".join(policy_notes) + ".")
+    if not question_missing:
+        lines.append("If everything else should stay the same as that prior setup, I can keep the quote moving from here.")
+    elif len(question_missing) == 1:
+        lines.append(f"The only thing I still need before I finish the quote is {question_missing[0]}.")
+    else:
+        lines.append(f"I still need {', '.join(question_missing[:-1])}, and {question_missing[-1]} before I finish the quote.")
+    return "\n".join(line for line in lines if line is not None).strip()
+
+
+def format_operator_brief(brief: dict[str, Any]) -> str:
+    parts = [
+        f"Customer: {brief['customer_summary']}",
+        f"Ask: {brief['ask_summary']}",
+        f"Work type: {brief['job_type']}",
+    ]
+    segments = brief.get("customer_segments") or []
+    if segments:
+        parts.append(f"Segments: {', '.join(segments)}")
+    meanings = brief.get("segment_guidance") or []
+    if meanings:
+        parts.append(f"Segment context: {' '.join(meanings)}")
+    parts.append(
+        f"House floor: minimum {brief['house_policy']['minimum_pieces']} pcs; preferred order floor above ${brief['house_policy']['preferred_order_floor_usd']:.0f}"
+    )
+    if brief.get("standard_posture"):
+        parts.append(f"Standard posture: {brief['standard_posture']}")
+    if brief.get("exception_summary"):
+        parts.append(f"Exception: {brief['exception_summary']}")
+    if brief.get("workflow_mode"):
+        parts.append(f"Workflow: {brief['workflow_mode']}")
+    prior_context = list(brief.get("prior_context") or [])
+    if prior_context:
+        parts.append(
+            "Prior context: "
+            + "; ".join(normalize_space(item.get("summary") or "") for item in prior_context if normalize_space(item.get("summary") or ""))
+        )
+    reused = list(brief.get("reused") or [])
+    if reused:
+        parts.append(
+            "Reused: "
+            + "; ".join(
+                f"{item.get('field')}: {item.get('value')}"
+                for item in reused
+                if normalize_space(item.get("field") or "") and normalize_space(item.get("value") or "")
+            )
+        )
+    changed = list(brief.get("changed") or [])
+    if changed:
+        parts.append(
+            "Changed: "
+            + "; ".join(
+                f"{item.get('field')}: {item.get('prior')} -> {item.get('current')}"
+                for item in changed
+                if normalize_space(item.get("field") or "")
+            )
+        )
+    operator_policy_match = dict(brief.get("operator_policy_match") or {})
+    if operator_policy_match.get("matched"):
+        parts.append(f"Channel policy: {brief.get('channel_policy')}")
+    if brief.get("missing"):
+        parts.append(f"Missing: {', '.join(brief['missing'])}")
+    if brief.get("next_step_reason"):
+        parts.append(f"Why: {brief['next_step_reason']}")
+    parts.append(f"Next step: {brief['next_step']}")
+    return "\n".join(parts)
+
+
+def format_operator_report(report: dict[str, Any]) -> str:
+    lines = [
+        f"Disposition: {report.get('disposition') or ''}",
+        f"Gate status: {report.get('gate_status') or ''}",
+        f"Confidence: {report.get('confidence') or ''}",
+    ]
+    customer_identity = dict(report.get("customer_identity") or {})
+    customer_summary = " / ".join(
+        part
+        for part in (
+            normalize_space(customer_identity.get("display_name") or ""),
+            normalize_space(customer_identity.get("company") or ""),
+            normalize_space(customer_identity.get("email") or ""),
+        )
+        if part
+    )
+    if customer_summary:
+        lines.append(f"Customer: {customer_summary}")
+    message_anchor = dict(report.get("message_anchor") or {})
+    if normalize_space(message_anchor.get("subject") or ""):
+        lines.append(f"Message: {message_anchor.get('subject')}")
+    module_truth = dict(report.get("module_truth") or {})
+    artwork_truth = dict(module_truth.get("artwork_truth") or {})
+    inline_image_context = dict(artwork_truth.get("inline_image_context") or {})
+    artwork_preflight = dict(artwork_truth.get("artwork_preflight") or artwork_truth.get("attachment_intelligence") or {})
+    attachment_intelligence = dict(artwork_truth.get("attachment_intelligence") or artwork_preflight)
+    if normalize_space(inline_image_context.get("summary") or ""):
+        lines.append(f"Visual context: {inline_image_context.get('summary')}")
+    if normalize_space(artwork_preflight.get("summary") or ""):
+        lines.append(f"Artwork analysis: {artwork_preflight.get('summary')}")
+    pricing_truth = dict(module_truth.get("pricing_truth") or {})
+    if normalize_space(pricing_truth.get("price_lane") or ""):
+        lines.append(f"Pricing lane: {pricing_truth.get('price_lane')}")
+    pricing_basis = [normalize_space(item) for item in (pricing_truth.get("pricing_basis") or []) if normalize_space(item)]
+    if pricing_basis:
+        lines.append(f"Pricing basis: {'; '.join(pricing_basis)}")
+    blockers = [normalize_space(item) for item in (report.get("blockers") or []) if normalize_space(item)]
+    if blockers:
+        lines.append(f"Blockers: {', '.join(blockers)}")
+    lines.append(f"Recommended next action: {report.get('recommended_next_action') or ''}")
+    lines.append(f"Draft eligible: {str(bool(report.get('draft_eligible'))).lower()}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    now = utc_now()
+    stored_at_utc = iso_utc(now)
+    brief_id = f"MCQB-{compact_utc(now)}-{args.message_id[-4:]}"
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    policy = load_quote_policy(spine_root)
+    operator_policy = load_operator_policy(spine_root)
+    brief_contract = load_quote_brief_contract(spine_root)
+
+    message_payload, message_receipt = run_cap_capture(
+        spine_root,
+        MAIL_GET_CAPABILITY,
+        ["--message-id", args.message_id, "--mailbox", args.mailbox],
+    )
+    message = unwrap_message(message_payload)
+    body_text = message_body_text(message)
+    sender = resolve_message_customer_contact(message)
+    active_customer_text = extract_active_customer_block(body_text) if normalize_space(sender.get("mode") or "") == "forwarded_body" else ""
+    latest_message_text = active_customer_text or latest_customer_message_text(message)
+    signature_name, signature_company = extract_signature_fields(body_text)
+    source_attachments, attachments_receipt = list_source_attachments(
+        spine_root,
+        capability=brief_contract["source_attachments_capability"],
+        message_id=args.message_id,
+        mailbox=args.mailbox,
+    )
+    source_artwork_links = extract_artwork_links(body_text, brief_contract)
+    artwork_evidence: list[dict[str, Any]] = [
+        {
+            "kind": "attachment",
+            "name": normalize_space(item.get("name") or ""),
+            "content_type": normalize_space(item.get("contentType") or ""),
+            "size": item.get("size"),
+        }
+        for item in source_attachments
+        if normalize_space(item.get("name") or "")
+    ]
+    artwork_evidence.extend(
+        {
+            "kind": "link",
+            "url": link["url"],
+            "provider": link["provider"],
+            "label": link["label"],
+        }
+        for link in source_artwork_links
+    )
+
+    snapshot_candidates = []
+    for email in [normalize_email(sender.get("email") or "")] + [
+        normalize_email(item)
+        for item in (sender.get("candidate_emails") or [])
+        if normalize_email(item)
+    ]:
+        if email and email not in snapshot_candidates:
+            snapshot_candidates.append(email)
+
+    snapshot_payload: dict[str, Any] = {}
+    snapshot_receipt = ""
+    snapshot_data: dict[str, Any] = {}
+    for candidate_email in snapshot_candidates:
+        candidate_payload, candidate_receipt = run_cap_capture(
+            spine_root,
+            SNAPSHOT_CAPABILITY,
+            ["--email", candidate_email, "--json"],
+        )
+        candidate_data = dict(candidate_payload.get("data") or candidate_payload)
+        if not snapshot_payload:
+            snapshot_payload = candidate_payload
+            snapshot_receipt = candidate_receipt
+            snapshot_data = candidate_data
+        if snapshot_has_customer_truth(candidate_data):
+            sender["email"] = candidate_email
+            if not normalize_space(sender.get("display_name") or ""):
+                sender["display_name"] = candidate_email
+            snapshot_payload = candidate_payload
+            snapshot_receipt = candidate_receipt
+            snapshot_data = candidate_data
+            break
+
+    quote_intelligence = dict(snapshot_data.get("quote_intelligence") or {})
+    context_match = dict(quote_intelligence.get("customer_context_match") or {})
+    customer_context = dict(quote_intelligence.get("customer_context") or {})
+    matched_rule = dict(customer_context.get("exception_rule") or {})
+    snapshot_customer = dict(((snapshot_data.get("fresh_slate") or {}).get("customer")) or {})
+    snapshot_identity = dict(((snapshot_data.get("fresh_slate") or {}).get("identity")) or {})
+    latest_order = dict(((snapshot_data.get("legacy_hold") or {}).get("latest_order")) or {})
+    latest_order_line_items = list(((snapshot_data.get("legacy_hold") or {}).get("latest_order_line_items")) or [])
+    latest_order_imprints = list(((snapshot_data.get("legacy_hold") or {}).get("latest_order_imprints")) or [])
+
+    customer_name = (
+        normalize_space((context_match.get("selector") or {}).get("customer_name") or "")
+        or normalize_space(snapshot_identity.get("display_name") or "")
+        or normalize_space(snapshot_identity.get("legal_name") or "")
+        or signature_name
+        or normalize_space(sender.get("display_name") or "")
+    )
+    company = (
+        normalize_space((context_match.get("selector") or {}).get("company") or "")
+        or normalize_space(snapshot_customer.get("company") or "")
+        or signature_company
+        or normalize_space((((message.get("from") or {}).get("emailAddress") or {}).get("name")) or "")
+    )
+
+    source_text = "\n".join(
+        part
+        for part in (
+            str(message.get("subject") or ""),
+            latest_message_text,
+        )
+        if normalize_space(part)
+    )
+    full_thread_text = "\n".join(
+        part
+        for part in (
+            str(message.get("subject") or ""),
+            body_text,
+        )
+        if normalize_space(part)
+    )
+    operator_policy_match = evaluate_operator_policy(source_text, operator_policy)
+    disposition = resolve_message_disposition(spine_root, message)
+    disposition_name = normalize_space(disposition.get("disposition") or "")
+    intake_payload: dict[str, Any] = {}
+    intake_receipt = ""
+    lifecycle_payload: dict[str, Any] = {}
+    lifecycle_receipt = ""
+    intake_data: dict[str, Any] = {}
+    lifecycle_data: dict[str, Any] = {}
+    if disposition_name == "customer_actionable" and normalize_space(brief_contract.get("module_invocation_capability") or ""):
+        intake_payload, intake_receipt = optional_run_cap_json(
+            spine_root,
+            brief_contract["module_invocation_capability"],
+            ["--message-id", args.message_id, "--mailbox", args.mailbox, "--json"],
+        )
+        intake_data = dict(intake_payload.get("data") or intake_payload)
+        if intake_data and normalize_space(brief_contract.get("lifecycle_capability") or ""):
+            lifecycle_payload, lifecycle_receipt = optional_run_cap_json(
+                spine_root,
+                brief_contract["lifecycle_capability"],
+                ["--message-id", args.message_id, "--mailbox", args.mailbox, "--json"],
+            )
+            lifecycle_data = dict(lifecycle_payload.get("data") or lifecycle_payload)
+    job_type, job_type_hits = infer_job_type(source_text, policy)
+    quantity = quantity_summary(source_text)
+    evidence_recommendation = infer_evidence_recommendation(
+        source_text=source_text,
+        full_thread_text=full_thread_text,
+        artwork_evidence=artwork_evidence,
+        latest_order=latest_order,
+        latest_order_imprints=latest_order_imprints,
+        brief_contract=brief_contract,
+    )
+    segments = [str(item.get("label") or "") for item in (customer_context.get("segments") or []) if str(item.get("label") or "").strip()]
+    segment_guidance = [
+        str(((policy.get("segment_profiles") or {}).get(str(item.get("key") or "")) or {}).get("operator_meaning") or "").strip()
+        for item in (customer_context.get("segments") or [])
+    ]
+    segment_guidance = [item for item in segment_guidance if item]
+    history_query = normalize_email(sender.get("email") or "")
+    history_messages, history_receipt = search_mail_history(
+        spine_root,
+        mailbox=args.mailbox,
+        query=history_query,
+        top=int(brief_contract["history_query_top"]),
+        current_message_id=args.message_id,
+        current_internet_message_id=normalize_space(message.get("internetMessageId") or ""),
+    )
+    prior_order = prior_order_summary(latest_order, latest_order_line_items, latest_order_imprints)
+    artwork_truth = artwork_truth_summary(snapshot_data)
+    current_features = current_request_features(source_text, artwork_evidence)
+    context_analysis = build_context_analysis(
+        source_text=source_text,
+        current_message_id=args.message_id,
+        current_internet_message_id=normalize_space(message.get("internetMessageId") or ""),
+        current_features=current_features,
+        history_messages=history_messages,
+        prior_order=prior_order,
+        artwork_truth=artwork_truth,
+        policy=policy,
+        evidence_recommendation=evidence_recommendation,
+        snapshot_data=snapshot_data,
+    )
+    missing = list(context_analysis.get("missing") or [])
+
+    standard_posture = str(((policy.get("job_type_profiles") or {}).get(job_type) or {}).get("operator_posture") or "").strip()
+    exception_summary = ""
+    if matched_rule and normalize_space(matched_rule.get("job_type") or "") == job_type:
+        pricing = dict(matched_rule.get("pricing_override") or {})
+        if pricing.get("mode") == "flat_rate_each" and pricing.get("unit_price_usd") is not None:
+            exception_summary = f"Goodwill memorial exception at ${float(pricing['unit_price_usd']):.2f} each."
+        else:
+            exception_summary = normalize_space(matched_rule.get("operator_note") or "") or "Customer-specific exception applies."
+
+    next_step = str(context_analysis.get("next_step") or "")
+    if not next_step:
+        next_step = "reply with governed memorial exception guidance and ask for final quantity + print-ready artwork"
+        if not exception_summary:
+            next_step = "review policy posture before quoting and ask for exact quantity + print-ready artwork"
+        if evidence_recommendation.get("matched"):
+            next_step = "state the inferred embroidery carry-forward recommendation from attachment + prior-order evidence and ask one confirmation question"
+    if operator_policy_match.get("matched"):
+        next_step = str(operator_policy_match.get("next_step") or next_step)
+
+    if evidence_recommendation.get("matched"):
+        reply_preview = build_evidence_first_reply_preview(
+            customer_name=customer_name or company,
+            recommendation=evidence_recommendation,
+            quantity=quantity,
+            brief_contract=brief_contract,
+        )
+    elif context_analysis.get("should_use_context_reply"):
+        reply_preview = build_context_first_reply_preview(
+            customer_name=customer_name or company,
+            context_analysis=context_analysis,
+            prior_order=prior_order,
+            operator_policy=operator_policy,
+            operator_policy_match=operator_policy_match,
+        )
+    else:
+        reply_preview = build_reply_preview(
+            customer_name=customer_name or company,
+            policy=policy,
+            matched_rule=matched_rule if exception_summary else None,
+            quantity=quantity,
+            operator_policy=operator_policy,
+            operator_policy_match=operator_policy_match,
+        )
+    reply_preview, terminology_replacements = apply_house_terminology(reply_preview, policy)
+    inline_image_context = dict(((intake_data.get("artwork_surface") or {}).get("inline_image_context")) or ((intake_data.get("artwork_readiness") or {}).get("inline_image_context")) or {})
+    artwork_preflight = dict(
+        ((intake_data.get("artwork_surface") or {}).get("artwork_preflight"))
+        or ((intake_data.get("artwork_readiness") or {}).get("artwork_preflight"))
+        or ((intake_data.get("artwork_surface") or {}).get("attachment_intelligence"))
+        or ((intake_data.get("artwork_readiness") or {}).get("attachment_intelligence"))
+        or {}
+    )
+    attachment_intelligence = dict(((intake_data.get("artwork_surface") or {}).get("attachment_intelligence")) or artwork_preflight)
+
+    operator_brief = {
+        "customer_summary": " / ".join(part for part in (customer_name, company) if part) or normalize_email(sender.get("email") or ""),
+        "ask_summary": ask_summary(latest_message_text),
+        "job_type": job_type,
+        "job_type_basis": job_type_hits,
+        "customer_segments": segments,
+        "segment_guidance": segment_guidance,
+        "house_policy": {
+            "minimum_pieces": policy["minimum_pieces"],
+            "preferred_order_floor_usd": policy["preferred_order_floor_usd"],
+        },
+        "source_attachments": [normalize_space(item.get("name") or "") for item in source_attachments if normalize_space(item.get("name") or "")],
+        "source_artwork_links": [link["url"] for link in source_artwork_links],
+        "inline_image_context_summary": normalize_space(inline_image_context.get("summary") or "") or None,
+        "inline_image_context": inline_image_context or None,
+        "artwork_preflight_summary": normalize_space(artwork_preflight.get("summary") or "") or None,
+        "artwork_preflight": artwork_preflight or None,
+        "attachment_intelligence_summary": normalize_space(attachment_intelligence.get("summary") or "") or None,
+        "attachment_intelligence": attachment_intelligence or None,
+        "workflow_mode": context_analysis.get("workflow_mode"),
+        "reuse_confidence": context_analysis.get("reuse_confidence"),
+        "prior_context": context_analysis.get("prior_context"),
+        "reused": context_analysis.get("reused"),
+        "changed": context_analysis.get("changed"),
+        "evidence_recommendation": evidence_recommendation if evidence_recommendation.get("matched") else None,
+        "channel_policy": (
+            f"{operator_policy['default_customer_channel']} | no phone coordination by default | protect operator energy"
+            if operator_policy_match.get("matched")
+            else None
+        ),
+        "operator_policy_match": operator_policy_match,
+        "standard_posture": standard_posture or None,
+        "exception_summary": exception_summary or None,
+        "missing": missing,
+        "next_step_reason": context_analysis.get("next_step_reason"),
+        "next_step": next_step,
+    }
+
+    message_anchor = intake_data.get("message_anchor") or build_message_anchor(args.mailbox, message, latest_text=latest_message_text)
+    linked_records = {
+        "customer_context_record": normalize_space((context_match.get("record_file") or "")) or None,
+        "quote_intake_record": normalize_space(intake_data.get("record_file") or "") or None,
+        "lifecycle_record": normalize_space(lifecycle_data.get("record_file") or "") or None,
+        "history_messages": len(history_messages),
+    }
+    invoked_modules = [
+        "microsoft.mail.get",
+        "microsoft.mail.attachments.list",
+        "mint.customer.record.snapshot",
+    ]
+    for item in list(intake_data.get("invoked_modules") or []):
+        module_name = normalize_space((item or {}).get("module") or "")
+        if module_name:
+            invoked_modules.append(module_name)
+    if lifecycle_data:
+        invoked_modules.append("mint.customer.lifecycle.resolve")
+    pricing_truth = dict(intake_data.get("pricing_surface") or {})
+    supplier_truth = dict(intake_data.get("supplier_surface") or {})
+    estimate_truth = dict(intake_data.get("estimate_surface") or {})
+    lifecycle_truth = {
+        "lifecycle_state": normalize_space(lifecycle_data.get("lifecycle_state") or ""),
+        "reply_mode": normalize_space(lifecycle_data.get("reply_mode") or ""),
+        "draft_allowed": lifecycle_data.get("draft_allowed"),
+        "quote_binding_patch": dict(lifecycle_data.get("quote_binding_patch") or {}),
+    }
+    blockers = [
+        normalize_space(item)
+        for item in (
+            list(operator_brief.get("missing") or [])
+            + list(intake_data.get("customer_reply_guidance", {}).get("blockers") or [])
+            + list(lifecycle_data.get("blockers") or [])
+        )
+        if normalize_space(item)
+    ]
+    if disposition_name == "unsupported_scope" and normalize_space(((disposition.get("product_scope") or {}).get("customer_summary")) or ""):
+        blockers.append(normalize_space(((disposition.get("product_scope") or {}).get("customer_summary")) or ""))
+    blockers = unique_preserve_order(blockers)
+    repair_reasons: list[str] = []
+    if lifecycle_data.get("repair_item"):
+        repair_reasons.append("lifecycle_repair")
+    if disposition_name == "customer_actionable":
+        draft_eligible = bool(lifecycle_data.get("draft_allowed")) and pricing_truth.get("truth_state") in {"estimate_safe_pricing", "exact_pricing"}
+    elif disposition_name in {"waiting_on_customer", "unsupported_scope"}:
+        draft_eligible = bool(normalize_space(message_subject(message)))
+    else:
+        draft_eligible = False
+    if repair_reasons:
+        gate_status = "repair"
+    elif disposition_name == "customer_actionable" and not draft_eligible:
+        gate_status = "hold"
+    elif disposition_name in {"waiting_on_customer", "unsupported_scope"} and draft_eligible:
+        gate_status = "go"
+    elif disposition_name == "customer_actionable" and draft_eligible:
+        gate_status = "go"
+    else:
+        gate_status = "hold"
+    operator_report = {
+        "disposition": disposition_name,
+        "gate_status": gate_status,
+        "confidence": normalize_space(disposition.get("confidence") or context_analysis.get("reuse_confidence") or "low"),
+        "message_anchor": message_anchor,
+        "customer_identity": {
+            "email": normalize_email(sender.get("email") or ""),
+            "display_name": customer_name or None,
+            "company": company or None,
+            "record_state": normalize_space(((snapshot_data.get("agent_state") or {}).get("state")) or "") or None,
+        },
+        "linked_records": linked_records,
+        "invoked_modules": unique_preserve_order(invoked_modules),
+        "module_truth": {
+            "disposition_reason_codes": list(disposition.get("reason_codes") or []),
+            "product_scope": disposition.get("product_scope") or {},
+            "artwork_truth": {
+                "classification": normalize_space((intake_data.get("artwork_readiness") or {}).get("classification") or ""),
+                "basis": list((intake_data.get("artwork_readiness") or {}).get("basis") or []),
+                "inline_image_context": inline_image_context,
+                "artwork_preflight": artwork_preflight,
+                "attachment_intelligence": attachment_intelligence,
+            },
+            "supplier_truth": supplier_truth,
+            "estimate_truth": estimate_truth,
+            "pricing_truth": pricing_truth,
+            "lifecycle_truth": lifecycle_truth,
+            "policy_context": {
+                "job_type": job_type,
+                "customer_segments": segments,
+                "exception_summary": exception_summary or None,
+            },
+        },
+        "blockers": blockers,
+        "recommended_next_action": normalize_space(lifecycle_data.get("operator_next_action") or "") or next_step,
+        "draft_eligible": draft_eligible,
+    }
+
+    record = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "brief_id": brief_id,
+        "stored_at_utc": stored_at_utc,
+        "mailbox": args.mailbox,
+        "message_id": args.message_id,
+        "customer": {
+            "email": normalize_email(sender.get("email") or ""),
+            "name": customer_name or None,
+            "company": company or None,
+        },
+        "operator_report": operator_report,
+        "operator_brief": operator_brief,
+        "reply_preview": {
+            "body_text": reply_preview,
+            "terminology_replacements": terminology_replacements,
+            "suppressed": not bool(args.include_draft_preview or draft_eligible),
+            "suppression_reason": None if (args.include_draft_preview or draft_eligible) else "draft_not_eligible",
+        },
+        "policy_contract": policy["path"],
+        "quote_brief_contract": brief_contract["path"],
+        "operator_policy_contract": operator_policy["path"],
+        "operator_policy_match": operator_policy_match,
+        "source_attachments": [dict(item) for item in source_attachments],
+        "source_artwork_links": source_artwork_links,
+        "context_analysis": context_analysis,
+        "prior_order_context": prior_order,
+        "artwork_truth": artwork_truth,
+            "history_messages": summarize_history_messages(
+                history_messages,
+                args.message_id,
+                normalize_space(message.get("internetMessageId") or ""),
+            ),
+        "evidence_recommendation": evidence_recommendation if evidence_recommendation.get("matched") else None,
+        "snapshot_quote_intelligence": quote_intelligence,
+        "provider_receipts": {
+            "message_get_receipt": message_receipt or None,
+            "snapshot_receipt": snapshot_receipt or None,
+            "attachments_list_receipt": attachments_receipt or None,
+            "history_search_receipt": history_receipt or None,
+            "quote_intake_receipt": intake_receipt or None,
+            "lifecycle_receipt": lifecycle_receipt or None,
+        },
+    }
+
+    records_dir = state_root / "mint" / "customer-quote-briefs" / "records" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{brief_id}.json"
+    index_file = state_root / "mint" / "customer-quote-briefs" / "index.ndjson"
+    lock_file = state_root / "mint" / "customer-quote-briefs" / ".index.lock"
+    write_json(record_file, record)
+    append_ndjson(
+        index_file,
+        lock_file,
+        {
+            "brief_id": brief_id,
+            "stored_at_utc": stored_at_utc,
+            "message_id": args.message_id,
+            "customer_email": normalize_email(sender.get("email") or ""),
+            "job_type": job_type,
+            "record_file": str(record_file),
+        },
+    )
+
+    payload = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "generated_at": stored_at_utc,
+        "data": {
+            "brief_id": brief_id,
+            "mailbox": args.mailbox,
+            "message_id": args.message_id,
+            "customer": record["customer"],
+            "operator_report": operator_report,
+            "operator_brief": operator_brief,
+            "reply_preview": record["reply_preview"],
+            "policy_contract": policy["path"],
+            "quote_brief_contract": brief_contract["path"],
+            "operator_policy_contract": operator_policy["path"],
+            "operator_policy_match": operator_policy_match,
+            "source_attachments": record["source_attachments"],
+            "source_artwork_links": record["source_artwork_links"],
+            "context_analysis": record["context_analysis"],
+            "prior_order_context": record["prior_order_context"],
+            "artwork_truth": record["artwork_truth"],
+            "history_messages": record["history_messages"],
+            "evidence_recommendation": record["evidence_recommendation"],
+            "record_file": str(record_file),
+            "index_file": str(index_file),
+            "provider_receipts": record["provider_receipts"],
+        },
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(CAPABILITY_NAME)
+    print(f"brief_id: {brief_id}")
+    print(format_operator_report(operator_report))
+    if args.include_draft_preview or draft_eligible:
+        print("")
+        print("Reply preview:")
+        print(reply_preview)
+    print(f"record_file: {record_file}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

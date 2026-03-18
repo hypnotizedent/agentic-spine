@@ -1,0 +1,847 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+import json
+import os
+import re
+import shutil
+import sys
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    fail,
+    file_sha256,
+    iso_utc,
+    message_body_text,
+    message_sender,
+    message_subject,
+    resolve_spine_root,
+    resolve_spine_state,
+    run_cap_capture,
+    safe_filename,
+    strip_html,
+    utc_now,
+    write_json,
+)
+from vendor_cogs_common import (  # noqa: E402
+    dated_record_path,
+    deterministic_id,
+    finance_evidence_index_entry,
+    load_json,
+    normalize_text,
+    runtime_paths,
+    vendor_receipt_index_entry,
+)
+
+
+SCHEMA_VERSION = "1.0"
+CAPABILITY_FALLBACK = "mint.finance.vendor.receipt.capture"
+DEFAULT_MAILBOX = "team@mintprints.com"
+GET_CAPABILITY = "microsoft.mail.get"
+ATTACHMENTS_LIST_CAPABILITY = "microsoft.mail.attachments.list"
+ATTACHMENT_DOWNLOAD_CAPABILITY = "microsoft.mail.attachment.download"
+SEARCH_CAPABILITY = "communications.mail.search"
+SEED_ENSURE_CAPABILITY = "mint.customer.seed.ensure"
+CUSTOMER_SNAPSHOT_CAPABILITY = "mint.customer.record.snapshot"
+PRINTAVO_SNAPSHOT_CAPABILITY = "mint.printavo.bridge.snapshot"
+PRINTAVO_CAPTURE_CAPABILITY = "mint.printavo.bridge.capture"
+SUPPORTED_VENDOR_DOMAINS = {"sanmar": {"sanmar.com"}}
+PRINTAVO_STATE_RANK = {
+    "needs_more_info_before_printavo": 0,
+    "drafted_in_printavo": 1,
+    "quote_live": 2,
+    "approved": 3,
+    "paid": 4,
+    "converted_to_work_order": 5,
+}
+SIZE_TOKENS = {
+    "XS",
+    "S",
+    "M",
+    "L",
+    "XL",
+    "2XL",
+    "3XL",
+    "4XL",
+    "5XL",
+    "6XL",
+    "OSFA",
+    "OSFM",
+    "ONE SIZE",
+    "LT",
+    "XLT",
+    "2XLT",
+    "3XLT",
+}
+MONEY_LABELS = {
+    "Subtotal": "subtotal_cents",
+    "Freight": "freight_cents",
+    "Estimated Sales Tax": "estimated_sales_tax_cents",
+    "Total": "total_cents",
+    "Freight Savings": "freight_savings_cents",
+}
+
+
+@dataclass
+class AttachmentEvidence:
+    attachment_id: str
+    name: str
+    content_type: str
+    size_bytes: int
+    last_modified_utc: str
+    sha256: str
+    evidence_file: str
+    extracted_text_file: str | None
+    extracted_text: str
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_FINANCE_VENDOR_RECEIPT_CAPABILITY_NAME") or CAPABILITY_FALLBACK
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="finance-vendor-receipt-capture",
+        description=(
+            "Capture a governed vendor receipt email plus normalized finance/COGS evidence "
+            "and bridge it to Printavo-backed order context when fresh-slate order truth is incomplete."
+        ),
+    )
+    parser.add_argument("message_id", nargs="?", help="Vendor mailbox message id")
+    parser.add_argument("--message-id", dest="message_id_flag", default="", help="Vendor mailbox message id")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox to read from (default: {DEFAULT_MAILBOX})")
+    parser.add_argument("--customer-message-id", default="", help="Optional explicit related customer-thread message id")
+    parser.add_argument("--external-order-number", default="", help="Optional Printavo/PO order number override")
+    parser.add_argument("--vendor-order-number", default="", help="Optional vendor order number override")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    resolved_message_id = normalize_text(args.message_id_flag) or normalize_text(args.message_id)
+    if not resolved_message_id:
+        fail("message_id required")
+    args.message_id = resolved_message_id
+    return args
+
+
+def domain_from_email(address: str) -> str:
+    text = normalize_text(address).lower()
+    if "@" not in text:
+        return ""
+    return text.rsplit("@", 1)[1]
+
+
+def vendor_id_from_sender(address: str) -> str:
+    domain = domain_from_email(address)
+    for vendor_id, domains in SUPPORTED_VENDOR_DOMAINS.items():
+        if domain in domains:
+            return vendor_id
+    return domain or "unknown_vendor"
+
+
+def is_internal_sender(address: str) -> bool:
+    domain = domain_from_email(address)
+    return domain.endswith("mintprints.com") or address.startswith("/O=")
+
+
+def is_printavo_sender(address: str) -> bool:
+    domain = domain_from_email(address)
+    return domain.endswith("printavo.com") or "printavo" in normalize_text(address).lower()
+
+
+def is_vendor_sender(address: str, vendor_id: str) -> bool:
+    domain = domain_from_email(address)
+    return domain in SUPPORTED_VENDOR_DOMAINS.get(vendor_id, set())
+
+
+def unwrap_search_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    data = payload.get("data")
+    if isinstance(data, dict):
+        microsoft = data.get("microsoft")
+        if isinstance(microsoft, dict):
+            value = microsoft.get("value")
+            if isinstance(value, list):
+                return [dict(item) for item in value if isinstance(item, dict)]
+    value = payload.get("value")
+    if isinstance(value, list):
+        return [dict(item) for item in value if isinstance(item, dict)]
+    return []
+
+
+def coerce_iso(value: str) -> str:
+    raw = normalize_text(value)
+    if not raw:
+        return ""
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            from datetime import datetime, timezone
+
+            parsed = datetime.strptime(raw, fmt)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            continue
+    return raw
+
+
+def parse_money_cents(value: str) -> int | None:
+    text = normalize_text(value).replace("$", "").replace(",", "")
+    if not text:
+        return None
+    try:
+        amount = Decimal(text)
+    except InvalidOperation:
+        return None
+    return int(amount * 100)
+
+
+def parse_float(value: str) -> float | None:
+    text = normalize_text(value)
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def parse_int(value: str) -> int | None:
+    text = normalize_text(value)
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def attachment_text(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        try:
+            from pypdf import PdfReader  # noqa: PLC0415
+
+            with contextlib.redirect_stderr(io.StringIO()):
+                reader = PdfReader(str(path))
+            pages = [(page.extract_text() or "") for page in reader.pages]
+            text = "\n\n".join(part.strip() for part in pages if part.strip()).strip()
+            if text:
+                return text
+        except Exception:
+            pass
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def event_kinds_from_text(subject: str, body_text: str, attachment_texts: list[str]) -> list[str]:
+    combined = " ".join([subject, body_text, *attachment_texts]).lower()
+    shipment_only = " ".join([subject, body_text]).lower()
+    out: list[str] = []
+    if "order confirmation" in combined or "we have received your order" in combined:
+        out.append("order_acknowledgment")
+    if any(
+        token in shipment_only
+        for token in (
+            "shipping acknowledgement",
+            "tracking",
+            "shipment is sent",
+            "shipped",
+            "shipping notice",
+        )
+    ):
+        out.append("shipping_notice")
+    if "packing slip" in combined:
+        out.append("packing_slip")
+    if re.search(r"\binvoice\b", combined):
+        out.append("invoice")
+    if any(token in combined for token in ("subtotal", "total :", "total:", "unit price", "amount", "order totals")):
+        out.append("cost_evidence")
+    if not out:
+        out.append("vendor_message_unclassified")
+    return out
+
+
+def primary_event_kind(event_kinds: list[str]) -> str:
+    for preferred in ("invoice", "shipping_notice", "packing_slip", "order_acknowledgment", "cost_evidence"):
+        if preferred in event_kinds:
+            return preferred
+    return event_kinds[0] if event_kinds else "vendor_message_unclassified"
+
+
+def parse_label_value(text: str, label: str) -> str:
+    pattern = re.compile(rf"{re.escape(label)}\s*:?\s*(.+?)(?:\n[A-Z][^\n]*:|\n\n|$)", re.IGNORECASE | re.DOTALL)
+    match = pattern.search(text)
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", match.group(1)).strip()
+
+
+def parse_external_order_label(subject: str, page1_text: str) -> str:
+    match = re.search(r"PO#?\s*([0-9]+)\s+([^\n\r]+)", subject, re.IGNORECASE)
+    if match:
+        return re.sub(r"\s+", " ", match.group(2)).strip()
+    match = re.search(r"PO Number:\s*([0-9]+)\s+([^\n\r]+)", page1_text, re.IGNORECASE)
+    if match:
+        return re.sub(r"\s+", " ", match.group(2)).strip()
+    match = re.search(r"Purchase Order\s+([0-9]+)\s+([^\n\r]+)", page1_text, re.IGNORECASE)
+    if match:
+        return re.sub(r"\s+", " ", match.group(2)).strip()
+    return ""
+
+
+def parse_tracking_numbers(text: str) -> list[str]:
+    seen: list[str] = []
+    patterns = [
+        r"\b1Z[0-9A-Z]{16}\b",
+        r"\b[0-9]{12,22}\b",
+    ]
+    for pattern in patterns:
+        for match in re.findall(pattern, text):
+            if match not in seen:
+                seen.append(match)
+    return seen
+
+
+def clean_page_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def parse_line_items(page2_text: str) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+    lines = clean_page_lines(page2_text)
+    if "DC" not in lines:
+        return [], [], {}
+    index = lines.index("DC")
+    items: list[dict[str, Any]] = []
+    ship_nodes: list[str] = []
+    while index < len(lines):
+        if lines[index] == "Order Totals":
+            break
+        if index + 7 >= len(lines):
+            break
+        ship_node = lines[index]
+        style = lines[index + 1]
+        index += 2
+        details: list[str] = []
+        while index < len(lines) and lines[index] not in SIZE_TOKENS:
+            if lines[index] == "Order Totals":
+                break
+            details.append(lines[index])
+            index += 1
+        if index + 5 >= len(lines) or lines[index] == "Order Totals":
+            break
+        size = lines[index]
+        quantity = parse_int(lines[index + 1])
+        unit_price = parse_money_cents(lines[index + 3])
+        amount = parse_money_cents(lines[index + 5])
+        color = " ".join(details[:-1]).strip() if len(details) > 1 else (details[0] if details else "")
+        description = details[-1] if details else ""
+        items.append(
+            {
+                "ship_node": ship_node,
+                "style": style,
+                "color": color,
+                "description": description,
+                "size": size,
+                "quantity": quantity,
+                "unit_price_cents": unit_price,
+                "amount_cents": amount,
+            }
+        )
+        if ship_node and ship_node not in ship_nodes:
+            ship_nodes.append(ship_node)
+        index += 6
+
+    totals: dict[str, Any] = {}
+    raw_totals_text = page2_text.split("Order Totals", 1)[1] if "Order Totals" in page2_text else page2_text
+    for label, target_key in MONEY_LABELS.items():
+        match = re.search(rf"{re.escape(label)}\s*:?\s*\$?\s*([0-9]+\.[0-9]{{2}})", raw_totals_text, re.IGNORECASE)
+        totals[target_key] = parse_money_cents(match.group(1)) if match else None
+    return items, ship_nodes, totals
+
+
+def parse_extracted_fields(subject: str, body_text: str, attachment_texts: list[str]) -> dict[str, Any]:
+    combined_text = "\n\n".join(part for part in attachment_texts if part).strip() or body_text
+    pages = re.split(r"\n{2,}(?=From\s*:|Line Item Information)", combined_text)
+    page1_text = pages[0] if pages else combined_text
+    page2_text = next((part for part in pages if "Line Item Information" in part), combined_text)
+    page1_flat = re.sub(r"\s+", " ", page1_text).strip()
+    vendor_order_number = normalize_text(re.search(r"(SO-[0-9]+)", subject + "\n" + combined_text).group(1) if re.search(r"(SO-[0-9]+)", subject + "\n" + combined_text) else "")
+    po_match = re.search(r"(?:PO#?|PO Number:|Purchase Order)\s*([0-9]{3,})", subject + "\n" + combined_text, re.IGNORECASE)
+    external_order_number = po_match.group(1) if po_match else ""
+    items, ship_nodes, totals = parse_line_items(page2_text)
+    total_pieces_match = re.search(r"Total Pieces\s*:?\s*([0-9]+)", page1_flat, re.IGNORECASE)
+    total_weight_match = re.search(r"Total Weight\s*:?\s*([0-9.]+)", page1_flat, re.IGNORECASE)
+    terms_match = re.search(r"Terms\s*:?\s*([A-Za-z0-9]+)", page1_flat, re.IGNORECASE)
+    billing_name_match = re.search(r"Billing Information\s+(.+?)\s+\d", page1_flat, re.IGNORECASE)
+    shipping_name_match = re.search(r"Shipping Information\s+(.+?)\s+Attn to:", page1_flat, re.IGNORECASE)
+    return {
+        "vendor_order_number": vendor_order_number or None,
+        "external_order_number": external_order_number or None,
+        "external_order_label": parse_external_order_label(subject, page1_text) or None,
+        "total_pieces": parse_int(total_pieces_match.group(1) if total_pieces_match else "") or sum(item.get("quantity") or 0 for item in items) or None,
+        "total_weight_lbs": parse_float(total_weight_match.group(1) if total_weight_match else ""),
+        "terms": normalize_text(terms_match.group(1) if terms_match else "") or None,
+        "billing_name": normalize_text(billing_name_match.group(1) if billing_name_match else "") or None,
+        "shipping_name": normalize_text(shipping_name_match.group(1) if shipping_name_match else "") or None,
+        "ship_nodes": ship_nodes,
+        "tracking_numbers": parse_tracking_numbers(combined_text),
+        "line_items": items,
+        "totals": totals,
+        "raw_attachment_text_excerpt": combined_text[:4000] if combined_text else "",
+    }
+
+
+def find_related_messages(spine_root: Path, *, mailbox: str, query: str) -> tuple[list[dict[str, Any]], str]:
+    payload, receipt = run_cap_capture(
+        spine_root,
+        SEARCH_CAPABILITY,
+        ["--mailbox", mailbox, "--query", query, "--top", "25", "--json"],
+    )
+    return unwrap_search_messages(payload), receipt
+
+
+def select_anchor_customer_message(
+    messages: list[dict[str, Any]],
+    *,
+    source_message_id: str,
+    vendor_id: str,
+    explicit_customer_message_id: str,
+) -> dict[str, Any] | None:
+    if explicit_customer_message_id:
+        for message in messages:
+            if normalize_text(message.get("id")) == explicit_customer_message_id:
+                return message
+    for message in messages:
+        message_id = normalize_text(message.get("id"))
+        sender = normalize_text((((message.get("from") or {}).get("emailAddress") or {}).get("address")))
+        if not message_id or message_id == source_message_id:
+            continue
+        if is_internal_sender(sender) or is_printavo_sender(sender) or is_vendor_sender(sender, vendor_id):
+            continue
+        if "@" in sender:
+            return message
+    return None
+
+
+def infer_printavo_state(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    related: list[dict[str, Any]] = []
+    state = "needs_more_info_before_printavo"
+    for message in messages:
+        sender = normalize_text((((message.get("from") or {}).get("emailAddress") or {}).get("address"))).lower()
+        subject = normalize_text(message.get("subject")).lower()
+        if not is_printavo_sender(sender):
+            continue
+        related.append(
+            {
+                "message_id": normalize_text(message.get("id")),
+                "subject": normalize_text(message.get("subject")),
+                "from": sender,
+                "received_at_utc": coerce_iso(normalize_text(message.get("receivedDateTime"))),
+            }
+        )
+        if "successful payment" in subject:
+            state = "paid"
+        elif state != "paid" and "quote approved" in subject:
+            state = "approved"
+        elif state not in {"paid", "approved"} and "invoice #" in subject:
+            state = "quote_live"
+    return state, related
+
+
+def bridge_needs_capture(snapshot_payload: dict[str, Any], inferred_state: str, visual_id: str, printavo_customer_id: str) -> bool:
+    latest = dict(snapshot_payload.get("latest") or {})
+    summary = dict(latest.get("printavo_summary") or {})
+    existing_state = normalize_text(summary.get("printavo_state")) or "needs_more_info_before_printavo"
+    if not normalize_text(summary.get("record_id")):
+        return True
+    if visual_id and normalize_text(summary.get("printavo_visual_id")) != visual_id:
+        return True
+    if printavo_customer_id and normalize_text(summary.get("printavo_customer_id")) != printavo_customer_id:
+        return True
+    return PRINTAVO_STATE_RANK.get(inferred_state, 0) > PRINTAVO_STATE_RANK.get(existing_state, 0)
+
+
+def text_output(payload: dict[str, Any]) -> str:
+    latest = payload.get("finance_evidence") or {}
+    external_order_ref = dict(latest.get("external_order_ref") or {})
+    totals = dict((latest.get("normalized_extract") or {}).get("totals") or {})
+    lines = [
+        f"capability: {payload['capability']}",
+        f"status: {payload['status']}",
+        f"vendor_receipt_id: {payload['vendor_receipt']['vendor_receipt_id']}",
+        f"finance_evidence_id: {latest.get('finance_evidence_id', '')}",
+        f"vendor: {payload['vendor_receipt']['vendor_id']}",
+        f"event_primary: {payload['vendor_receipt']['event_primary']}",
+        f"external_order_number: {external_order_ref.get('external_order_number', '')}",
+        f"vendor_order_number: {(latest.get('normalized_extract') or {}).get('vendor_order_number', '')}",
+        f"seed_id: {external_order_ref.get('seed_id', '')}",
+        f"customer_email: {external_order_ref.get('customer_email', '')}",
+        f"printavo_bridge_id: {external_order_ref.get('printavo_bridge_id', '')}",
+        f"cogs_visibility_state: {latest.get('cogs_visibility_state', '')}",
+        f"total_cents: {totals.get('total_cents', '')}",
+        f"vendor_receipt_record_file: {payload['vendor_receipt']['record_file']}",
+        f"finance_record_file: {latest.get('record_file', '')}",
+    ]
+    return "\n".join(lines)
+
+
+def merged_receipts(existing: dict[str, Any] | None, incoming: dict[str, Any]) -> dict[str, Any]:
+    existing_map = dict(existing or {})
+    merged = dict(existing_map)
+    for key, value in incoming.items():
+        if isinstance(value, dict):
+            prior = dict(existing_map.get(key) or {})
+            prior.update({inner_key: inner_value for inner_key, inner_value in value.items() if inner_value is not None})
+            merged[key] = prior
+            continue
+        if value is not None:
+            merged[key] = value
+        else:
+            merged.setdefault(key, existing_map.get(key))
+    return merged
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    paths = runtime_paths(spine_root=spine_root, state_root=state_root)
+
+    source_message, source_get_receipt = run_cap_capture(
+        spine_root,
+        GET_CAPABILITY,
+        ["--mailbox", args.mailbox, "--message-id", args.message_id],
+    )
+    sender = message_sender(source_message)
+    vendor_id = vendor_id_from_sender(sender)
+    subject = message_subject(source_message)
+    body_text = message_body_text(source_message)
+    received_at_utc = coerce_iso(normalize_text(source_message.get("receivedDateTime"))) or iso_utc(utc_now())
+
+    attachments_payload, attachment_list_receipt = run_cap_capture(
+        spine_root,
+        ATTACHMENTS_LIST_CAPABILITY,
+        ["--mailbox", args.mailbox, "--message-id", args.message_id],
+    )
+    attachments = [dict(item) for item in (attachments_payload.get("value") or []) if isinstance(item, dict) and not bool(item.get("isInline"))]
+    if not attachments:
+        fail("vendor email has no governed attachments to capture")
+
+    vendor_receipt_id = deterministic_id("MVR", args.mailbox.lower(), args.message_id)
+    finance_evidence_id = deterministic_id("MFC", vendor_receipt_id, args.mailbox.lower())
+    evidence_dir = paths["evidence_root"] / received_at_utc[:4] / received_at_utc[5:7] / received_at_utc[8:10] / vendor_receipt_id
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+
+    attachment_download_receipts: dict[str, str] = {}
+    attachment_evidence: list[AttachmentEvidence] = []
+    attachment_texts: list[str] = []
+    for attachment in attachments:
+        attachment_id = normalize_text(attachment.get("id"))
+        download_payload, download_receipt = run_cap_capture(
+            spine_root,
+            ATTACHMENT_DOWNLOAD_CAPABILITY,
+            [
+                "--mailbox",
+                args.mailbox,
+                "--message-id",
+                args.message_id,
+                "--attachment-id",
+                attachment_id,
+                "--output-dir",
+                str(evidence_dir / "downloads"),
+            ],
+        )
+        downloaded_path = Path(normalize_text(download_payload.get("filePath"))).expanduser().resolve()
+        if not downloaded_path.is_file():
+            fail(f"downloaded attachment missing: {downloaded_path}")
+        target_path = evidence_dir / safe_filename(downloaded_path.name)
+        shutil.copy2(downloaded_path, target_path)
+        sha256 = normalize_text(download_payload.get("sha256")) or file_sha256(target_path)
+        text = attachment_text(target_path)
+        extracted_text_file: Path | None = None
+        if text:
+            extracted_text_file = target_path.with_suffix(target_path.suffix + ".txt")
+            extracted_text_file.write_text(text + "\n", encoding="utf-8")
+            attachment_texts.append(text)
+        attachment_evidence.append(
+            AttachmentEvidence(
+                attachment_id=attachment_id,
+                name=safe_filename(normalize_text(attachment.get("name")) or target_path.name),
+                content_type=normalize_text(attachment.get("contentType")) or normalize_text(download_payload.get("contentType")),
+                size_bytes=int(attachment.get("size") or download_payload.get("size") or target_path.stat().st_size),
+                last_modified_utc=coerce_iso(normalize_text(attachment.get("lastModifiedDateTime")) or normalize_text(download_payload.get("lastModifiedDateTime"))),
+                sha256=sha256,
+                evidence_file=str(target_path),
+                extracted_text_file=str(extracted_text_file) if extracted_text_file is not None else None,
+                extracted_text=text,
+            )
+        )
+        attachment_download_receipts[attachment_id] = download_receipt
+
+    event_kinds = event_kinds_from_text(subject, body_text, attachment_texts)
+    extracted_fields = parse_extracted_fields(subject, body_text, attachment_texts)
+    if normalize_text(args.vendor_order_number):
+        extracted_fields["vendor_order_number"] = normalize_text(args.vendor_order_number)
+    if normalize_text(args.external_order_number):
+        extracted_fields["external_order_number"] = normalize_text(args.external_order_number)
+    if not normalize_text(extracted_fields.get("external_order_number")):
+        fail("could not resolve external_order_number/PO from vendor email; pass --external-order-number")
+
+    search_query = normalize_text(extracted_fields.get("external_order_number"))
+    related_messages, related_search_receipt = find_related_messages(
+        spine_root,
+        mailbox=args.mailbox,
+        query=search_query,
+    )
+    anchor_message = select_anchor_customer_message(
+        related_messages,
+        source_message_id=args.message_id,
+        vendor_id=vendor_id,
+        explicit_customer_message_id=normalize_text(args.customer_message_id),
+    )
+
+    seed_payload: dict[str, Any] = {}
+    seed_receipt = ""
+    customer_snapshot_payload: dict[str, Any] = {}
+    customer_snapshot_receipt = ""
+    customer_email = ""
+    customer_name = ""
+    customer_id = ""
+    printavo_customer_id = ""
+    seed_id = ""
+    anchor_message_ref: dict[str, Any] | None = None
+    if anchor_message is not None:
+        anchor_message_id = normalize_text(anchor_message.get("id"))
+        seed_payload, seed_receipt = run_cap_capture(
+            spine_root,
+            SEED_ENSURE_CAPABILITY,
+            ["--mailbox", args.mailbox, "--message-id", anchor_message_id, "--json"],
+        )
+        seed = dict(seed_payload.get("seed") or {})
+        seed_id = normalize_text(seed.get("id"))
+        customer_email = normalize_text(seed_payload.get("customer_email")).lower()
+        customer_name = normalize_text(seed_payload.get("customer_display_name"))
+        anchor_message_ref = {
+            "message_id": anchor_message_id,
+            "from": normalize_text((((anchor_message.get("from") or {}).get("emailAddress") or {}).get("address"))),
+            "subject": normalize_text(anchor_message.get("subject")),
+            "received_at_utc": coerce_iso(normalize_text(anchor_message.get("receivedDateTime"))),
+        }
+        if customer_email:
+            customer_snapshot_payload, customer_snapshot_receipt = run_cap_capture(
+                spine_root,
+                CUSTOMER_SNAPSHOT_CAPABILITY,
+                ["--email", customer_email, "--json"],
+            )
+            fresh_customer = dict((customer_snapshot_payload.get("fresh_slate") or {}).get("customer") or {})
+            customer_id = normalize_text(fresh_customer.get("record_id"))
+            customer_name = customer_name or normalize_text(fresh_customer.get("name"))
+            printavo_customer_id = normalize_text(fresh_customer.get("printavo_customer_id"))
+
+    inferred_printavo_state, related_printavo_messages = infer_printavo_state(related_messages)
+    printavo_snapshot_payload: dict[str, Any] = {}
+    printavo_snapshot_receipt = ""
+    printavo_capture_payload: dict[str, Any] = {}
+    printavo_capture_receipt = ""
+    printavo_bridge_id = ""
+    if seed_id:
+        printavo_snapshot_payload, printavo_snapshot_receipt = run_cap_capture(
+            spine_root,
+            PRINTAVO_SNAPSHOT_CAPABILITY,
+            ["--seed-id", seed_id, "--json"],
+        )
+        if bridge_needs_capture(
+            printavo_snapshot_payload,
+            inferred_state=inferred_printavo_state,
+            visual_id=normalize_text(extracted_fields.get("external_order_number")),
+            printavo_customer_id=printavo_customer_id,
+        ):
+            capture_args = [
+                "--seed-id",
+                seed_id,
+                "--printavo-state",
+                inferred_printavo_state,
+                "--printavo-visual-id",
+                normalize_text(extracted_fields.get("external_order_number")),
+                "--captured-by",
+                capability_name(),
+                "--captured-at",
+                received_at_utc,
+                "--note",
+                f"Linked from {vendor_id} vendor receipt email {args.message_id}",
+            ]
+            if customer_id:
+                capture_args.extend(["--customer-id", customer_id])
+            if customer_email:
+                capture_args.extend(["--customer-email", customer_email])
+            if customer_name:
+                capture_args.extend(["--customer-name", customer_name])
+            if printavo_customer_id:
+                capture_args.extend(["--printavo-customer-id", printavo_customer_id])
+            printavo_capture_payload, printavo_capture_receipt = run_cap_capture(
+                spine_root,
+                PRINTAVO_CAPTURE_CAPABILITY,
+                capture_args + ["--json"],
+            )
+            printavo_bridge_id = normalize_text(printavo_capture_payload.get("printavo_bridge_id"))
+        else:
+            latest_summary = dict((printavo_snapshot_payload.get("latest") or {}).get("printavo_summary") or {})
+            printavo_bridge_id = normalize_text(latest_summary.get("record_id"))
+
+    external_order_ref = {
+        "external_system": "printavo",
+        "external_order_number": normalize_text(extracted_fields.get("external_order_number")) or None,
+        "external_order_label": normalize_text(extracted_fields.get("external_order_label")) or None,
+        "seed_id": seed_id or None,
+        "customer_id": customer_id or None,
+        "customer_email": customer_email or None,
+        "customer_name": customer_name or None,
+        "printavo_customer_id": printavo_customer_id or None,
+        "printavo_state": inferred_printavo_state,
+        "printavo_bridge_id": printavo_bridge_id or None,
+    }
+
+    captured_at_utc = iso_utc(utc_now())
+    vendor_receipt_record_file = dated_record_path(paths["vendor_receipts_records_root"], received_at_utc, vendor_receipt_id)
+    finance_record_file = dated_record_path(paths["finance_cogs_records_root"], received_at_utc, finance_evidence_id)
+    existing_vendor_receipt = load_json(vendor_receipt_record_file) if vendor_receipt_record_file.exists() else {}
+    existing_finance_record = load_json(finance_record_file) if finance_record_file.exists() else {}
+
+    receipt_payload = merged_receipts(
+        existing_vendor_receipt.get("receipts") if isinstance(existing_vendor_receipt, dict) else {},
+        {
+            "source_get_receipt": source_get_receipt,
+            "attachments_list_receipt": attachment_list_receipt,
+            "attachment_download_receipts": attachment_download_receipts,
+            "related_search_receipt": related_search_receipt,
+            "seed_ensure_receipt": seed_receipt or None,
+            "customer_snapshot_receipt": customer_snapshot_receipt or None,
+            "printavo_snapshot_receipt": printavo_snapshot_receipt or None,
+            "printavo_capture_receipt": printavo_capture_receipt or None,
+        },
+    )
+
+    vendor_receipt_record: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "capability": capability_name(),
+        "vendor_receipt_id": vendor_receipt_id,
+        "record_kind": "vendor_receipt_email",
+        "mailbox": args.mailbox,
+        "vendor_id": vendor_id,
+        "source_message_id": args.message_id,
+        "source_internet_message_id": normalize_text(source_message.get("internetMessageId")) or None,
+        "source_conversation_id": normalize_text(source_message.get("conversationId")) or None,
+        "sender": sender,
+        "subject": subject,
+        "body_preview": strip_html(normalize_text(source_message.get("bodyPreview"))),
+        "received_at_utc": received_at_utc,
+        "captured_at_utc": normalize_text(existing_vendor_receipt.get("captured_at_utc")) or captured_at_utc,
+        "updated_at_utc": captured_at_utc,
+        "event_kinds": event_kinds,
+        "event_primary": primary_event_kind(event_kinds),
+        "attachments": [
+            {
+                "attachment_id": item.attachment_id,
+                "name": item.name,
+                "content_type": item.content_type,
+                "size_bytes": item.size_bytes,
+                "last_modified_utc": item.last_modified_utc,
+                "sha256": item.sha256,
+                "evidence_file": item.evidence_file,
+                "extracted_text_file": item.extracted_text_file,
+            }
+            for item in attachment_evidence
+        ],
+        "extracted_fields": extracted_fields,
+        "external_order_ref": external_order_ref,
+        "anchor_customer_message": anchor_message_ref,
+        "related_printavo_messages": related_printavo_messages,
+        "receipts": receipt_payload,
+        "record_file": str(vendor_receipt_record_file),
+    }
+
+    totals = dict(extracted_fields.get("totals") or {})
+    cogs_visibility_state = "vendor_cost_visible" if totals.get("total_cents") is not None else "vendor_receipt_logged_without_cost"
+    if primary_event_kind(event_kinds) == "shipping_notice" and totals.get("total_cents") is None:
+        cogs_visibility_state = "logistics_only"
+    cost_basis_status = "invoice_confirmed" if "invoice" in event_kinds else "provisional_vendor_acknowledgment"
+    if primary_event_kind(event_kinds) == "shipping_notice" and totals.get("total_cents") is None:
+        cost_basis_status = "shipping_notice_only"
+
+    finance_record: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "capability": capability_name(),
+        "finance_evidence_id": finance_evidence_id,
+        "record_kind": "finance_cogs_evidence",
+        "vendor_receipt_id": vendor_receipt_id,
+        "vendor_id": vendor_id,
+        "event_primary": primary_event_kind(event_kinds),
+        "event_kinds": event_kinds,
+        "received_at_utc": received_at_utc,
+        "recorded_at_utc": normalize_text(existing_finance_record.get("recorded_at_utc")) or captured_at_utc,
+        "updated_at_utc": captured_at_utc,
+        "cogs_visibility_state": cogs_visibility_state,
+        "cost_basis_status": cost_basis_status,
+        "external_order_ref": external_order_ref,
+        "normalized_extract": {
+            "vendor_order_number": extracted_fields.get("vendor_order_number"),
+            "external_order_number": extracted_fields.get("external_order_number"),
+            "external_order_label": extracted_fields.get("external_order_label"),
+            "total_pieces": extracted_fields.get("total_pieces"),
+            "total_weight_lbs": extracted_fields.get("total_weight_lbs"),
+            "terms": extracted_fields.get("terms"),
+            "ship_nodes": extracted_fields.get("ship_nodes"),
+            "tracking_numbers": extracted_fields.get("tracking_numbers"),
+            "line_items": extracted_fields.get("line_items"),
+            "totals": totals,
+        },
+        "provenance": {
+            "source_message_id": args.message_id,
+            "source_internet_message_id": normalize_text(source_message.get("internetMessageId")) or None,
+            "source_conversation_id": normalize_text(source_message.get("conversationId")) or None,
+            "attachment_hashes": [item.sha256 for item in attachment_evidence],
+            "anchor_customer_message_id": (anchor_message_ref or {}).get("message_id"),
+        },
+        "receipts": merged_receipts(existing_finance_record.get("receipts") if isinstance(existing_finance_record, dict) else {}, dict(vendor_receipt_record["receipts"])),
+        "record_file": str(finance_record_file),
+    }
+
+    write_json(vendor_receipt_record_file, vendor_receipt_record)
+    write_json(finance_record_file, finance_record)
+    append_ndjson(paths["vendor_receipts_index_file"], paths["vendor_receipts_lock_file"], vendor_receipt_index_entry(vendor_receipt_record))
+    append_ndjson(paths["finance_cogs_index_file"], paths["finance_cogs_lock_file"], finance_evidence_index_entry(finance_record))
+
+    payload = {
+        "capability": capability_name(),
+        "status": "ok",
+        "vendor_receipt": vendor_receipt_record,
+        "finance_evidence": finance_record,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(text_output(payload))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -13,7 +13,7 @@
 # Decommission policies: requires_migration_first | requires_final_backup | allow_immediate_destroy
 
 version: 1
-updated: "2026-03-12"
+updated: "2026-03-18"
 owner: "@ronny"
 
 defaults:
@@ -329,7 +329,7 @@ vms:
     backup_target: vm-209-download-stack-primary
     health_probe_policy: selective  # tdarr/slskd intentionally stopped
     decommission_policy: requires_migration_first
-    description: "Download services. Split from media-stack (VM 201). NFS mounts from pve."
+    description: "Rollback-only legacy shop download VM. No longer canonical live media truth; retained for recovery until the shop rollback window closes."
 
   - id: 210
     hostname: streaming-stack
@@ -365,7 +365,7 @@ vms:
     backup_target: vm-210-streaming-stack-primary
     health_probe_policy: full
     decommission_policy: requires_migration_first
-    description: "Streaming services. Split from media-stack (VM 201). NFS mounts from pve."
+    description: "Rollback-only legacy shop streaming VM. No longer canonical live media truth; retained for recovery until the shop rollback window closes."
 
   - id: 211
     hostname: finance-stack
@@ -701,7 +701,7 @@ vms:
     description: >
       DESTROYED 2026-02-20 (pct destroy 103 --purge). LVM volume removed.
       Final NAS backup: vzdump-lxc-103-2026_02_20-03_15_03.tar.zst (485MB).
-      Shop download-stack (VM 209) is canonical.
+      Home media-home (VM 106) is canonical.
       Daily vzdump disabled 2026-02-20 (backup-home-p1-daily enabled=0). Has bind
       mount /mnt/staging (excluded from backup).
 
@@ -731,6 +731,42 @@ vms:
     description: >
       Reactivated 2026-02-21 for home-local DNS filtering. Active LXC on proxmox-home
       and home DHCP DNS target. Weekly P2 backup target retained.
+
+  - id: 106
+    hostname: media-home
+    proxmox_host: proxmox-home
+    role: media-home
+    owner: "@ronny"
+    status: active
+    created_at: "2026-03-17"
+    profile: home-media-unified-v1
+    lan_ip: 10.0.0.106
+    tailscale_ip: 100.113.72.41
+    ssh_target: media-home
+    ssh_user: ubuntu
+    os: ubuntu-24.04
+    resources:
+      cpu_cores: 8
+      memory_mb: 12288
+      boot_disk_gb: 64
+      appdata_disk_gb: 256
+    storage_tier: home-local-lvm + synology-home-data
+    stacks:
+      - media-stack
+    services:
+      - jellyfin
+    backup_target: home-vm-106-media-home-primary
+    health_probe_policy: selective
+    decommission_policy: requires_migration_first
+    description: >
+      Unified home media VM on proxmox-home. Current posture is jellyfin-only
+      recovery on the canonical compose root /srv/appdata/compose/media-stack;
+      acquisition, helper, and write-lane services remain intentionally stopped
+      during the boring reset. Local appdata lives on /srv/appdata and live
+      payload mounts from synology918:/volume1/media-staging at /srv/media.
+      Tailscale is active at 100.113.72.41. Canonical Synology restore truth is
+      the home backup lane artifact home-vm-106-media-home-primary
+      (vzdump-qemu-106-2026_03_17-15_09_24.vma.zst).
 
 # ─────────────────────────────────────────────────────────────
 # Template VMs (not lifecycle-governed)

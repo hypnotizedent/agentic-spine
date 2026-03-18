@@ -1,7 +1,7 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-09
+last_verified: 2026-03-13
 scope: worker-usage-mint-artie-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -18,16 +18,24 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ## Write Scope
 - `../agentic-foundation/docs/agents/artie-agent.contract.md`
 
-## Capabilities (0)
-- (none)
+## Capabilities (5)
+- `mint.artie.revision.review`
+- `mint.artifact.record.capture`
+- `mint.artifact.record.snapshot`
+- `mint.artwork.intelligence.analyze`
+- `mint.artwork.intelligence.snapshot`
 
-## Gates (6)
+## Gates (10)
 - `D148`
 - `D225`
 - `D226`
 - `D235`
 - `D236`
 - `D260`
+- `D390`
+- `D391`
+- `D394`
+- `D395`
 
 ## Boundaries
 - Runtime surface is generated from registration and role contracts.

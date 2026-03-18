@@ -1,0 +1,535 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from artifact_record_common import ARTIFACT_ROLES, canonical_role_folder  # noqa: E402
+
+SCHEMA_VERSION = "1.0"
+CAPABILITY_FALLBACK = "mint.artwork.place"
+ROOT_JOBS = "jobs"
+ROOT_OPERATOR_DROP = "operator-drop"
+STAGING_FOLDER = "_staging"
+STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "art",
+    "artwork",
+    "bar",
+    "customer",
+    "design",
+    "file",
+    "for",
+    "from",
+    "job",
+    "logo",
+    "new",
+    "of",
+    "on",
+    "order",
+    "our",
+    "pdf",
+    "raw",
+    "shirt",
+    "the",
+    "to",
+    "with",
+}
+
+
+@dataclass
+class Candidate:
+    path: Path
+    relative_key: str
+    root_type: str
+    name_tokens: set[str]
+    child_tokens: set[str]
+    score: int = 0
+    reasons: list[str] = field(default_factory=list)
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_ARTWORK_PLACE_CAPABILITY_NAME") or CAPABILITY_FALLBACK
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def compact_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def tokenize(text: str) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in re.findall(r"[a-z0-9]+", text.lower()):
+        if token in STOP_WORDS:
+            continue
+        if len(token) < 2 and not token.isdigit():
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    return tokens
+
+
+def tokenize_unfiltered(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def normalize_for_match(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="artwork-place",
+        description=(
+            "Resolve canonical Mint artwork placement before any write. "
+            "Prefers existing artwork-intake/jobs or artwork-intake/operator-drop targets, "
+            "falls back to a fixed staging prefix when no target exists."
+        ),
+    )
+    parser.add_argument("source_file", help="Local file to place into the canonical artwork intake lane")
+    parser.add_argument(
+        "--context",
+        default="",
+        help="Freeform customer/job context used for canonical target resolution (e.g. 'Troy PapaPalooza')",
+    )
+    parser.add_argument(
+        "--target",
+        default="",
+        help="Optional explicit target under artwork-intake (relative path like operator-drop/13823 PapaPalooza)",
+    )
+    parser.add_argument(
+        "--artifact-role",
+        default="original",
+        choices=ARTIFACT_ROLES,
+        help="Governed artifact role used to pick the canonical destination folder",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Resolve placement without copying the file")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def resolve_spine_root() -> Path:
+    override = os.environ.get("SPINE_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(__file__).resolve().parents[5]
+
+
+def resolve_spine_state(spine_root: Path) -> Path:
+    override = os.environ.get("SPINE_STATE", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return (spine_root.parent / ".runtime" / "spine" / "state").resolve()
+
+
+def resolve_minio_root() -> Path:
+    override = os.environ.get("MINIO_MOUNT_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / "MinIO").resolve()
+
+
+def ensure_within(root: Path, target: Path, label: str) -> Path:
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        fail(f"{label} must stay inside {root}")
+        raise exc
+    return target
+
+
+def discover_candidates(intake_root: Path) -> list[Candidate]:
+    candidates: list[Candidate] = []
+    roots = [
+        (ROOT_JOBS, intake_root / ROOT_JOBS),
+        (ROOT_OPERATOR_DROP, intake_root / ROOT_OPERATOR_DROP),
+    ]
+    for root_type, base in roots:
+        if not base.exists() or not base.is_dir():
+            continue
+        for child in sorted(base.iterdir(), key=lambda entry: entry.name.lower()):
+            if not child.is_dir():
+                continue
+            if root_type == ROOT_OPERATOR_DROP and child.name.startswith(STAGING_FOLDER):
+                continue
+            relative_key = child.relative_to(intake_root).as_posix()
+            name_tokens = tokenize_unfiltered(relative_key)
+            child_tokens: set[str] = set()
+            for nested in sorted(child.iterdir(), key=lambda entry: entry.name.lower())[:12]:
+                child_tokens.update(tokenize_unfiltered(nested.name))
+            candidates.append(
+                Candidate(
+                    path=child,
+                    relative_key=relative_key,
+                    root_type=root_type,
+                    name_tokens=name_tokens,
+                    child_tokens=child_tokens,
+                )
+            )
+    return candidates
+
+
+def score_candidate(candidate: Candidate, query_tokens: list[str], source_stem: str) -> Candidate:
+    score = 0
+    reasons: list[str] = []
+
+    name_norm = normalize_for_match(candidate.path.name)
+    source_norm = normalize_for_match(source_stem)
+    if source_norm and source_norm in name_norm:
+        score += 12
+        reasons.append("folder_name_matches_source_stem")
+
+    for token in query_tokens:
+        if token.isdigit() and token in candidate.name_tokens:
+            score += 8
+            reasons.append(f"job_token:{token}")
+            continue
+        if token in candidate.name_tokens:
+            score += 5
+            reasons.append(f"folder_token:{token}")
+            continue
+        if token in candidate.child_tokens:
+            score += 2
+            reasons.append(f"child_token:{token}")
+
+    if candidate.root_type == ROOT_JOBS:
+        score += 6
+        reasons.append("jobs_root_preferred")
+
+    candidate.score = score
+    candidate.reasons = reasons
+    return candidate
+
+
+def resolve_explicit_target(raw_target: str, intake_root: Path) -> Candidate:
+    target = Path(raw_target).expanduser()
+    if not target.is_absolute():
+        target = intake_root / target
+    target = target.resolve()
+    ensure_within(intake_root, target, "--target")
+    if not target.exists() or not target.is_dir():
+        fail(f"explicit target must be an existing directory under {intake_root}")
+    relative_key = target.relative_to(intake_root).as_posix()
+    parts = relative_key.split("/", 1)
+    root_type = parts[0]
+    if root_type not in {ROOT_JOBS, ROOT_OPERATOR_DROP}:
+        fail(f"explicit target must be under {ROOT_JOBS}/ or {ROOT_OPERATOR_DROP}/")
+    child_tokens: set[str] = set()
+    for nested in sorted(target.iterdir(), key=lambda entry: entry.name.lower())[:12]:
+        child_tokens.update(tokenize_unfiltered(nested.name))
+    return Candidate(
+        path=target,
+        relative_key=relative_key,
+        root_type=root_type,
+        name_tokens=tokenize_unfiltered(relative_key),
+        child_tokens=child_tokens,
+        score=999,
+        reasons=["operator_target_override"],
+    )
+
+
+def target_candidates_summary(candidates: list[Candidate]) -> list[dict[str, Any]]:
+    return [
+        {
+            "relative_key": candidate.relative_key,
+            "absolute_path": str(candidate.path),
+            "root_type": candidate.root_type,
+            "score": candidate.score,
+            "reasons": candidate.reasons,
+        }
+        for candidate in candidates
+    ]
+
+
+def choose_candidate(scored: list[Candidate]) -> tuple[Candidate | None, list[Candidate]]:
+    plausible = [candidate for candidate in scored if candidate.score >= 8]
+    if not plausible:
+        return None, []
+    if len(plausible) == 1:
+        return plausible[0], []
+
+    top = plausible[0]
+    second = plausible[1]
+    if top.score >= second.score + 3:
+        return top, []
+
+    ambiguous = [candidate for candidate in plausible if candidate.score >= top.score - 2][:3]
+    return None, ambiguous
+
+
+def destination_for_candidate(candidate: Candidate, artifact_role: str) -> tuple[Path, str]:
+    role_folder = canonical_role_folder(artifact_role)
+    if candidate.root_type == ROOT_JOBS:
+        return candidate.path / role_folder, "existing_job_folder"
+    return candidate.path / role_folder, "existing_operator_drop_folder"
+
+
+def staging_destination(
+    operator_drop_root: Path,
+    query_tokens: list[str],
+    source_stem: str,
+    now: datetime,
+    placement_id: str,
+    artifact_role: str,
+) -> tuple[Path, str]:
+    slug_tokens = [token for token in query_tokens if not token.isdigit()][:3]
+    slug_base = "-".join(slug_tokens) or "-".join(tokenize(source_stem)) or "artwork-placement"
+    slug = re.sub(r"[^a-z0-9-]+", "-", slug_base.lower()).strip("-") or "artwork-placement"
+    bucket_dir = (
+        operator_drop_root
+        / STAGING_FOLDER
+        / now.strftime("%Y")
+        / now.strftime("%m")
+        / now.strftime("%d")
+        / f"{slug}--{placement_id[-6:].lower()}"
+    )
+    return bucket_dir / canonical_role_folder(artifact_role), "canonical_staging_prefix"
+
+
+def collision_safe_target(destination_dir: Path, source_path: Path, source_sha256: str, placement_id: str) -> tuple[Path, str]:
+    target = destination_dir / source_path.name
+    if not target.exists():
+        return target, "new"
+    existing_sha = file_sha256(target)
+    if existing_sha == source_sha256:
+        return target, "existing_same_content"
+    suffix = f"__placed-{placement_id[-6:].lower()}"
+    return target.with_name(f"{target.stem}{suffix}{target.suffix}"), "versioned_collision"
+
+
+def append_index_line(index_file: Path, lock_file: Path, payload: dict[str, Any]) -> None:
+    line = json.dumps(payload, sort_keys=True)
+    index_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with lock_file.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            with index_file.open("a", encoding="utf-8") as index_handle:
+                index_handle.write(line)
+                index_handle.write("\n")
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def write_record(state_root: Path, placement_id: str, record: dict[str, Any], now: datetime) -> tuple[Path, Path]:
+    records_dir = state_root / "mint" / "artwork-placement" / "records" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{placement_id}.json"
+    index_file = state_root / "mint" / "artwork-placement" / "index.ndjson"
+    lock_file = state_root / "mint" / "artwork-placement" / ".index.lock"
+    records_dir.mkdir(parents=True, exist_ok=True)
+    record_file.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    append_index_line(
+        index_file,
+        lock_file,
+        {
+            "placement_id": placement_id,
+            "placement_state": record.get("placement_state"),
+            "resolved_target_key": record.get("resolved_target_key"),
+            "resolved_file_path": record.get("resolved_file_path"),
+            "source_file": record.get("source_file"),
+            "stored_at_utc": record.get("stored_at_utc"),
+        },
+    )
+    return record_file, index_file
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+
+    now = utc_now()
+    source_path = Path(args.source_file).expanduser().resolve()
+    if not source_path.exists() or not source_path.is_file():
+        fail(f"source file not found: {source_path}")
+
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    minio_root = resolve_minio_root()
+    intake_root = minio_root / "artwork-intake"
+    operator_drop_root = intake_root / ROOT_OPERATOR_DROP
+    if not intake_root.exists():
+        fail(f"artwork-intake root not found: {intake_root}")
+    if not operator_drop_root.exists():
+        fail(f"operator-drop root not found: {operator_drop_root}")
+
+    source_sha256 = file_sha256(source_path)
+    source_size_bytes = source_path.stat().st_size
+    source_stem = source_path.stem
+    query_tokens = tokenize(f"{source_stem} {args.context}")
+    placement_id = f"MAP-{compact_utc(now)}-{hashlib.sha256(str(source_path).encode('utf-8')).hexdigest()[:4]}"
+
+    resolution_mode = ""
+    candidate_summaries: list[dict[str, Any]] = []
+    operator_question: str | None = None
+    chosen_candidate: Candidate | None = None
+
+    if args.target:
+        chosen_candidate = resolve_explicit_target(args.target, intake_root)
+        resolution_mode = "operator_target_override"
+        candidate_summaries = target_candidates_summary([chosen_candidate])
+    else:
+        candidates = [score_candidate(candidate, query_tokens, source_stem) for candidate in discover_candidates(intake_root)]
+        candidates.sort(key=lambda candidate: (-candidate.score, candidate.relative_key.lower()))
+        chosen_candidate, ambiguous = choose_candidate(candidates)
+        candidate_summaries = target_candidates_summary(candidates[:5])
+        if ambiguous:
+            resolution_mode = "needs_operator_choice"
+            choices = " or ".join(candidate.relative_key for candidate in ambiguous)
+            operator_question = f"Which canonical target should receive {source_path.name}: {choices}?"
+        elif chosen_candidate:
+            resolution_mode = "resolved_existing_target"
+        else:
+            resolution_mode = "use_canonical_staging"
+
+    placement_state = "needs_operator_choice" if operator_question else "preview" if args.dry_run else "placed"
+    target_dir: Path | None = None
+    target_file: Path | None = None
+    placement_rule = (
+        "Resolve an existing canonical artwork-intake/jobs or artwork-intake/operator-drop target before any write. "
+        "Place into a governed role folder under that target instead of dumping into a loose operator folder. "
+        "If no plausible target exists, stage under artwork-intake/operator-drop/_staging/YYYY/MM/DD/<slug>--<id>/<role-folder>/. "
+        "If multiple plausible targets remain, ask one concise question instead of guessing."
+    )
+    write_mode = "no_write"
+
+    if not operator_question:
+        if chosen_candidate:
+            target_dir, write_mode = destination_for_candidate(chosen_candidate, args.artifact_role)
+        else:
+            target_dir, write_mode = staging_destination(
+                operator_drop_root,
+                query_tokens,
+                source_stem,
+                now,
+                placement_id,
+                args.artifact_role,
+            )
+
+        ensure_within(intake_root, target_dir.resolve(strict=False), "resolved target")
+        target_file, collision_state = collision_safe_target(target_dir, source_path, source_sha256, placement_id)
+        write_mode = f"{write_mode}:{collision_state}"
+
+        if not args.dry_run and collision_state != "existing_same_content":
+            target_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, target_file)
+        elif not args.dry_run and collision_state == "existing_same_content":
+            placement_state = "existing"
+
+        if args.dry_run:
+            placement_state = "preview"
+
+    record = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "placement_id": placement_id,
+        "stored_at_utc": iso_utc(now),
+        "placement_state": placement_state,
+        "resolution_mode": resolution_mode,
+        "placement_rule": placement_rule,
+        "source_file": str(source_path),
+        "source_filename": source_path.name,
+        "source_sha256": source_sha256,
+        "source_size_bytes": source_size_bytes,
+        "context": args.context or None,
+        "query_tokens": query_tokens,
+        "artifact_role": args.artifact_role,
+        "dry_run": args.dry_run,
+        "resolved_target_key": chosen_candidate.relative_key if chosen_candidate else None,
+        "resolved_target_path": str(chosen_candidate.path) if chosen_candidate else None,
+        "resolved_file_path": str(target_file) if target_file else None,
+        "canonical_object_key": target_file.relative_to(minio_root).as_posix() if target_file else None,
+        "write_mode": write_mode,
+        "operator_question": operator_question,
+        "target_candidates": candidate_summaries,
+    }
+    record_file, index_file = write_record(state_root, placement_id, record, now)
+
+    payload = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "generated_at": iso_utc(now),
+        "data": {
+            "placement_id": placement_id,
+            "placement_state": placement_state,
+            "source_file": str(source_path),
+            "resolved_target_key": chosen_candidate.relative_key if chosen_candidate else None,
+            "resolved_target_path": str(chosen_candidate.path) if chosen_candidate else None,
+            "resolved_file_path": str(target_file) if target_file else None,
+            "canonical_object_key": target_file.relative_to(minio_root).as_posix() if target_file else None,
+            "artifact_role": args.artifact_role,
+            "placement_rule": placement_rule,
+            "resolution_mode": resolution_mode,
+            "write_mode": write_mode,
+            "operator_question": operator_question,
+            "target_candidates": candidate_summaries,
+            "record_file": str(record_file),
+            "index_file": str(index_file),
+        },
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(capability_name())
+    print(f"placement_id: {placement_id}")
+    print(f"placement_state: {placement_state}")
+    print(f"source_file: {source_path}")
+    print(f"artifact_role: {args.artifact_role}")
+    if chosen_candidate:
+        print(f"resolved_target_key: {chosen_candidate.relative_key}")
+        print(f"resolved_target_path: {chosen_candidate.path}")
+    if target_file:
+        print(f"resolved_file_path: {target_file}")
+    print(f"placement_rule: {placement_rule}")
+    print(f"record_file: {record_file}")
+    if operator_question:
+        print(f"question: {operator_question}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

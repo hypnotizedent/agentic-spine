@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Emit capability triad diagnostics for D67 and verify.run failures."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[5]
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return yaml.safe_load(handle) or {}
+    except Exception:
+        return {}
+
+
+def _sha256(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _mtime_utc(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _file_state(label: str, path: Path) -> dict[str, Any]:
+    exists = path.exists()
+    stat = path.stat() if exists else None
+    return {
+        "label": label,
+        "path": str(path),
+        "exists": exists,
+        "size_bytes": stat.st_size if stat else None,
+        "mtime_epoch": int(stat.st_mtime) if stat else None,
+        "mtime_utc": _mtime_utc(path),
+        "sha256": _sha256(path),
+    }
+
+
+def _capability_keys(path: Path) -> list[str]:
+    document = _load_yaml(path)
+    capabilities = document.get("capabilities") or {}
+    if not isinstance(capabilities, dict):
+        return []
+    return [str(key) for key in capabilities.keys()]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Emit capability triad diagnostics as JSON.")
+    parser.add_argument("--source", default=str(ROOT / "ops/capabilities.yaml"))
+    parser.add_argument("--map", dest="capability_map", default=str(ROOT / "ops/bindings/capability_map.yaml"))
+    parser.add_argument("--routing", default=str(ROOT / "ops/bindings/routing.dispatch.yaml"))
+    parser.add_argument("--manifest", default=str(ROOT / "ops/plugins/MANIFEST.yaml"))
+    parser.add_argument(
+        "--compare-live",
+        action="store_true",
+        help="Compare capability ids in source vs capability map and include drift details.",
+    )
+    args = parser.parse_args()
+
+    source = Path(args.source)
+    capability_map = Path(args.capability_map)
+    routing = Path(args.routing)
+    manifest = Path(args.manifest)
+
+    payload: dict[str, Any] = {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "files": {
+            "capabilities": _file_state("capabilities", source),
+            "capability_map": _file_state("capability_map", capability_map),
+            "routing_dispatch": _file_state("routing_dispatch", routing),
+            "plugin_manifest": _file_state("plugin_manifest", manifest),
+        },
+    }
+
+    if args.compare_live:
+        source_caps = sorted(set(_capability_keys(source)))
+        map_caps = sorted(set(_capability_keys(capability_map)))
+        missing = sorted(set(source_caps) - set(map_caps))
+        phantom = sorted(set(map_caps) - set(source_caps))
+        payload["compare"] = {
+            "source_count": len(source_caps),
+            "map_count": len(map_caps),
+            "missing_count": len(missing),
+            "phantom_count": len(phantom),
+            "missing": missing,
+            "phantom": phantom,
+        }
+
+    print(json.dumps(payload, sort_keys=False, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

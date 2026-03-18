@@ -15,6 +15,7 @@ import datetime as dt
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from collections import Counter
@@ -34,16 +35,52 @@ def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def run_cmd(cmd: list[str], *, cwd: Path | None = None, input_text: str | None = None) -> tuple[int, str, str]:
-    proc = subprocess.run(
+def resolve_state_root() -> Path:
+    env_state = str(os.environ.get("SPINE_STATE", "")).strip()
+    if env_state:
+        return Path(env_state)
+
+    contract = load_yaml(ROOT / "ops/bindings/mailroom.runtime.contract.yaml", {})
+    contract_state = str(contract.get("state_root") or "").strip()
+    if contract_state:
+        return Path(contract_state)
+
+    return ROOT.parent / ".runtime/spine/state"
+
+
+def run_cmd(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    input_text: str | None = None,
+    timeout: int | None = None,
+) -> tuple[int, str, str]:
+    proc = subprocess.Popen(
         cmd,
         cwd=str(cwd or ROOT),
-        input=input_text,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        capture_output=True,
-        check=False,
+        start_new_session=True,
     )
-    return proc.returncode, proc.stdout, proc.stderr
+    try:
+        stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
+        return proc.returncode, stdout, stderr
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = proc.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = proc.communicate()
+        return 124, stdout or "", stderr or ""
 
 
 def parse_frontmatter(path: Path) -> dict[str, str]:
@@ -121,7 +158,7 @@ def collect_open_loops() -> list[dict[str, Any]]:
         if m:
             open_ids.append(m.group(1))
 
-    loop_dir = ROOT / "mailroom/state/loop-scopes"
+    loop_dir = resolve_state_root() / "loop-scopes"
     rows: list[dict[str, Any]] = []
     for loop_id in open_ids:
         path = loop_dir / f"{loop_id}.scope.md"
@@ -210,8 +247,8 @@ def parse_proposals_summary() -> dict[str, int]:
     return summary
 
 
-def parse_json_output(script: Path, args: list[str]) -> tuple[int, dict[str, Any]]:
-    rc, out, err = run_cmd([str(script)] + args, cwd=ROOT)
+def parse_json_output(script: Path, args: list[str], *, timeout: int | None = None) -> tuple[int, dict[str, Any]]:
+    rc, out, err = run_cmd([str(script)] + args, cwd=ROOT, timeout=timeout)
     text = out.strip() or err.strip()
     if not text:
         return rc, {}
@@ -226,7 +263,7 @@ def collect_calendar_status() -> dict[str, Any]:
     script = ROOT / "ops/plugins/domains/calendar/bin/calendar-status"
     if not script.exists():
         return {"status": "error", "error": {"message": "calendar-status script not found"}}
-    _, payload = parse_json_output(script, ["--json"])
+    _, payload = parse_json_output(script, ["--json"], timeout=20)
     if not payload:
         return {"status": "error", "error": {"message": "calendar-status returned no payload"}}
     data = payload.get("data", {})
@@ -251,7 +288,7 @@ def collect_alert_status() -> dict[str, Any]:
             "total_alerts": 0,
             "active_domains": [],
         }
-    _, payload = parse_json_output(script, ["--json"])
+    _, payload = parse_json_output(script, ["--json"], timeout=20)
     domains = payload.get("domains", []) if isinstance(payload, dict) else []
     active = []
     total_alerts = 0
@@ -291,7 +328,7 @@ def collect_handoff_status() -> dict[str, Any]:
     script = ROOT / "ops/plugins/core/handoff/bin/session-handoff-status"
     if not script.exists():
         return {"active": 0, "closed": 0, "expired": 0}
-    _, payload = parse_json_output(script, ["--json"])
+    _, payload = parse_json_output(script, ["--json"], timeout=10)
     return {
         "active": int(payload.get("active", 0) or 0),
         "closed": int(payload.get("closed", 0) or 0),
@@ -368,7 +405,7 @@ def collect_timeline(window_hours: int) -> dict[str, Any]:
             "core_verify_needs_attention": False,
             "recent_failures": [],
         }
-    rc, payload = parse_json_output(script, ["--since", f"{window_hours}h", "--limit", "200", "--format", "json"])
+    rc, payload = parse_json_output(script, ["--since", f"{window_hours}h", "--limit", "200", "--format", "json"], timeout=20)
     if rc != 0 and "events" not in payload:
         return {
             "event_count": 0,
@@ -422,7 +459,7 @@ def collect_graph_summary() -> dict[str, Any]:
     if not script.exists():
         return {"status": "error", "view_id": "", "node_count": 0, "edge_count": 0}
 
-    rc, payload = parse_json_output(script, ["--format", "json"])
+    rc, payload = parse_json_output(script, ["--format", "json"], timeout=20)
     if rc != 0 and not payload:
         return {"status": "error", "view_id": "", "node_count": 0, "edge_count": 0}
 
@@ -448,7 +485,7 @@ def collect_comms_queue_status() -> dict[str, Any]:
             "pending_escalation_task_count": 0,
             "oneliner": "",
         }
-    _, payload = parse_json_output(script, ["--json"])
+    _, payload = parse_json_output(script, ["--json"], timeout=20)
     if not payload:
         return {
             "slo_status": "unknown",
@@ -482,7 +519,7 @@ def collect_launchd_scheduler_status() -> dict[str, Any]:
             "unknown_labels": [],
             "error": {"message": f"missing script: {script}"},
         }
-    _, payload = parse_json_output(script, ["--json"])
+    _, payload = parse_json_output(script, ["--json"], timeout=15)
     if not payload:
         return {
             "status": "error",
@@ -518,7 +555,7 @@ def collect_friction_queue_status() -> dict[str, Any]:
             "summary": {"total": 0, "queued": 0, "stale": 0, "filed": 0, "matched": 0, "invalid_time": 0, "dedupe_rate": 0.0},
         }
 
-    _, payload = parse_json_output(script, ["--json"])
+    _, payload = parse_json_output(script, ["--json"], timeout=15)
     summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
     stale = int(summary.get("stale", 0) or 0)
     queued = int(summary.get("queued", 0) or 0)

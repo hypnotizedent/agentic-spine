@@ -73,7 +73,7 @@ if [[ "$action" == "mail_search" ]]; then
   cat <<'OUT'
 === secrets.exec ===
 provider: infisical
-{"value":[{"receivedDateTime":"2026-02-21T04:00:00Z","from":{"emailAddress":{"address":"a@example.com"}},"subject":"Alpha"},{"receivedDateTime":"2026-02-21T04:01:00Z","from":{"emailAddress":{"address":"b@example.com"}},"subject":"Beta"}]}
+{"value":[{"id":"msg-1","receivedDateTime":"2026-02-21T04:00:00Z","from":{"emailAddress":{"address":"noreply@promo.example"}},"subject":"Limited time sale","isRead":false,"bodyPreview":"Manage preferences or unsubscribe for this special offer"},{"id":"msg-2","receivedDateTime":"2026-02-21T04:02:00Z","from":{"emailAddress":{"address":"ronny@mintprints.com"}},"subject":"FW: papapalooza","isRead":true,"bodyPreview":"Use the attached papapalooza.pdf for Troy."},{"id":"msg-3","receivedDateTime":"2026-02-21T04:01:00Z","from":{"emailAddress":{"address":"customer@example.com"}},"subject":"Need quote","isRead":false,"bodyPreview":"Need 24 shirts for the event."},{"id":"msg-4","receivedDateTime":"2026-02-21T04:03:00Z","from":{"emailAddress":{"address":"jackson.simmons@boardsi.com"}},"subject":"Advisors Needed","isRead":false,"bodyPreview":"Your profile is a good fit for current companies we are helping fill open board and advisory opportunities. Free for a quick conversation to learn more? See our calendar below: https://calendly.com/boardsi/board-opportunities"}]}
 OUT
   exit 0
 fi
@@ -101,25 +101,41 @@ echo "$stack_out" | grep "live_probe_status: ok" >/dev/null || fail "stack live 
 pass "communications-stack-status live probe"
 
 # live mail search should parse messages from mixed output
-search_out="$("$MAIL_SEARCH" --query "*" --top 2)"
-echo "$search_out" | grep "matches: 2" >/dev/null || fail "mail search should show two parsed messages"
+search_out="$("$MAIL_SEARCH" --query "*" --top 4)"
+echo "$search_out" | grep "matches: 4" >/dev/null || fail "mail search should show four parsed messages"
 echo "$search_out" | grep "mailbox: team@mintprints.com" >/dev/null || fail "mail search should show team mailbox"
-echo "$search_out" | grep "Alpha" >/dev/null || fail "mail search should include parsed subject"
+echo "$search_out" | grep "FW: papapalooza" >/dev/null || fail "mail search should include parsed subject"
 pass "communications-mail-search live parsing"
 
-# live send test execute should use contract default recipient and write record under SPINE_OUTBOX
-send_out="$("$MAIL_SEND" --subject "test subject" --body "test body" --execute)"
-echo "$send_out" | grep "to: ronny@mintprints.com" >/dev/null || fail "mail send should use contract default recipient"
-echo "$send_out" | grep "status: sent" >/dev/null || fail "mail send live mode should report sent"
-record_path="$(echo "$send_out" | awk -F': ' '/^record:/ {print $2}')"
-[[ -n "$record_path" && -f "$record_path" ]] || fail "mail send should write record file"
-pass "communications-mail-send-test live execute"
+triage_out="$(COMMUNICATIONS_MAIL_SEARCH_CAPABILITY_NAME=mint.customer.inbox.triage "$MAIL_SEARCH" --triage --top 4)"
+echo "$triage_out" | grep "^mint.customer.inbox.triage$" >/dev/null || fail "triage should emit capability override label"
+echo "$triage_out" | grep "message_id: msg-2" >/dev/null || fail "triage should list message ids"
+echo "$triage_out" | grep "read_state: read" >/dev/null || fail "triage should surface read state"
+echo "$triage_out" | grep "triage_class: internal_forwarded" >/dev/null || fail "triage should classify internal forwarded mail"
+echo "$triage_out" | grep "recommended_action: review_in_customer_lane" >/dev/null || fail "triage should surface customer-lane recommendation"
+echo "$triage_out" | grep "triage_class: promotional" >/dev/null || fail "triage should classify promotional mail without opening it"
+echo "$triage_out" | grep "recommended_action: hide_from_primary_lane_keep_recoverable" >/dev/null || fail "triage should keep promotional mail recoverable"
+echo "$triage_out" | grep "message_id: msg-4" >/dev/null || fail "triage should include outreach proving-case message"
+echo "$triage_out" | grep "from: jackson.simmons@boardsi.com" >/dev/null || fail "triage should surface Boardsi sender"
+echo "$triage_out" | grep "subject: Advisors Needed" >/dev/null || fail "triage should surface Boardsi subject"
+echo "$triage_out" | grep "classification_basis: known_outreach_sender, advisors needed, advisory opportunities" >/dev/null || fail "triage should classify recruiter outreach by sender plus advisory markers"
+echo "$triage_out" | grep "link_policy: do_not_open_body_links" >/dev/null || fail "triage should surface the no-link-opening policy"
+echo "$triage_out" | grep "preview: Use the attached papapalooza.pdf for Troy." >/dev/null || fail "triage should surface preview text"
+pass "communications-mail-search triage rendering"
 
-# simulation fallback still works
-yq e -i '.pilot.send_test.mode = "simulation-only"' "$contract"
-sim_out="$("$MAIL_SEND" --subject "sim subject" --body "sim body" --execute)"
-echo "$sim_out" | grep "to: ronny@mintprints.com" >/dev/null || fail "mail send simulation should use contract default recipient"
-echo "$sim_out" | grep "status: simulated" >/dev/null || fail "mail send simulation mode should report simulated"
-pass "communications-mail-send-test simulation execute"
+# execute is now blocked for email even in live-pilot mode
+set +e
+send_out="$("$MAIL_SEND" --subject "test subject" --body "test body" --execute 2>&1)"
+send_rc=$?
+set -e
+[[ "$send_rc" -ne 0 ]] || fail "mail send execute should be blocked"
+echo "$send_out" | grep "Drafts only" >/dev/null || fail "mail send execute block should explain drafts-only policy"
+pass "communications-mail-send-test execute block"
+
+# dry-run preview still works
+dry_out="$("$MAIL_SEND" --subject "sim subject" --body "sim body")"
+echo "$dry_out" | grep "to: ronny@mintprints.com" >/dev/null || fail "mail send dry-run should use contract default recipient"
+echo "$dry_out" | grep "DRY-RUN" >/dev/null || fail "mail send dry-run should remain available"
+pass "communications-mail-send-test dry-run"
 
 echo "communications live pilot tests"

@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from payment_record_common import (  # noqa: E402
+    entity_file,
+    load_yaml_object,
+    manual_capture_id,
+    payment_capture_index_entry,
+    payment_summary_from_manual_capture,
+    resolve_order_context,
+    resolve_spine_root,
+    runtime_paths,
+    sync_order_payment_projection,
+    update_entity_index,
+)
+from quote_packet_normalize import dump_yaml, fail, now_utc  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.payment.record.capture"
+PAYMENT_STATES = {"paid", "partially_paid", "refunded"}
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="payment-record-capture",
+        description="Persist a governed manual payment capture and project it into canonical Mint order truth.",
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--order-id", help="Canonical Mint order_id")
+    group.add_argument("--quote-id", help="Canonical Mint quote_id")
+    parser.add_argument("--payment-state", required=True, choices=sorted(PAYMENT_STATES))
+    parser.add_argument("--amount-cents", type=int, help="Captured payment amount in cents")
+    parser.add_argument("--currency", default="", help='Currency code (defaults to quote currency or "USD")')
+    parser.add_argument("--captured-by", required=True, help="Operator or system identity that confirmed payment")
+    parser.add_argument("--captured-at", help="When the payment was captured or confirmed (UTC ISO timestamp)")
+    parser.add_argument("--reference", help="External reference such as invoice note, transfer id, or payment note")
+    parser.add_argument("--note", help="Optional operator note")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_PAYMENT_RECORD_CAPABILITY_NAME") or CAPABILITY_NAME
+
+
+def normalize_currency(raw: str, quote: dict[str, object] | None) -> str:
+    explicit = str(raw or "").strip().upper()
+    if explicit:
+        return explicit
+    inferred = str((quote or {}).get("currency") or "").strip().upper()
+    return inferred or "USD"
+
+
+def resolve_amount_cents(args: argparse.Namespace, quote: dict[str, object] | None) -> int | None:
+    if args.amount_cents is not None:
+        if args.amount_cents < 0:
+            fail("amount_cents must be zero or greater")
+        return args.amount_cents
+    if args.payment_state == "paid":
+        inferred = (quote or {}).get("amount_cents")
+        if inferred not in (None, ""):
+            return int(inferred)
+    fail(f"amount_cents is required when payment_state={args.payment_state}")
+    return None
+
+
+def print_text(payload: dict[str, object]) -> None:
+    print(f"capability: {payload['capability']}")
+    print(f"capture_state: {payload['capture_state']}")
+    print(f"payment_capture_id: {payload['payment_capture_id']}")
+    print(f"order_id: {payload['order_id']}")
+    print(f"quote_id: {payload.get('quote_id') or ''}")
+    print(f"payment_state: {payload['payment_state']}")
+    print(f"visibility_state: {payload['payment_summary']['visibility_state']}")
+    print(f"captured_by: {payload['captured_by']}")
+    print(f"record_file: {payload['record_file']}")
+    print(f"order_file: {payload['order_file']}")
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    paths = runtime_paths(resolve_spine_root())
+    try:
+        order_file, order, quote = resolve_order_context(paths, order_id=args.order_id or "", quote_id=args.quote_id or "")
+    except (FileNotFoundError, ValueError) as exc:
+        fail(str(exc))
+
+    payment_state = str(args.payment_state or "").strip()
+    amount_cents = resolve_amount_cents(args, quote)
+    currency = normalize_currency(args.currency, quote)
+    captured_at = str(args.captured_at or now_utc()).strip()
+    reference = str(args.reference or "").strip()
+    note = str(args.note or "").strip()
+    captured_by = str(args.captured_by or "").strip()
+    if not captured_by:
+        fail("captured_by is required")
+
+    order_id = str(order.get("order_id") or "").strip()
+    quote_id = str((quote or {}).get("quote_id") or order.get("active_quote_id") or "").strip()
+    timestamp = now_utc()
+    capture_id = manual_capture_id(
+        order_id=order_id,
+        quote_id=quote_id,
+        payment_state=payment_state,
+        amount_cents=amount_cents,
+        currency=currency,
+        captured_at=captured_at,
+        captured_by=captured_by,
+        reference=reference,
+        note=note,
+    )
+    record_file = entity_file(paths["payment_captures_dir"], "payment_capture", capture_id)
+    capture_state = "existing" if record_file.exists() else "recorded"
+
+    record = {
+        "payment_capture_id": capture_id,
+        "schema_version": "1.0",
+        "source_kind": "manual_operator_capture",
+        "order_id": order_id,
+        "quote_id": quote_id or None,
+        "customer_id": order.get("customer_id"),
+        "customer_email": order.get("customer_email"),
+        "customer_name": order.get("customer_name"),
+        "source_quote_packet_id": order.get("source_quote_packet_id"),
+        "payment_state": payment_state,
+        "amount_cents": amount_cents,
+        "currency": currency,
+        "captured_at": captured_at,
+        "recorded_at": timestamp,
+        "captured_by": captured_by,
+        "reference": reference or None,
+        "note": note or None,
+        "capability": capability_name(),
+    }
+    if capture_state == "recorded":
+        dump_yaml(record_file, record)
+    else:
+        record = load_yaml_object(record_file) or record
+
+    update_entity_index(
+        paths["payment_captures_index_file"],
+        "payment_captures",
+        "payment_capture_id",
+        payment_capture_index_entry(record),
+    )
+
+    projection_timestamp = str(record.get("recorded_at") or timestamp)
+    summary = payment_summary_from_manual_capture(record, projection_timestamp)
+    lifecycle_override = "approved" if payment_state in {"paid", "partially_paid"} and str(order.get("lifecycle_state") or "") == "quoted" else None
+    sync_order_payment_projection(paths, order_file, order, summary, lifecycle_override=lifecycle_override)
+
+    payload = {
+        "capability": capability_name(),
+        "capture_state": capture_state,
+        "payment_capture_id": capture_id,
+        "order_id": order_id,
+        "quote_id": quote_id or None,
+        "payment_state": payment_state,
+        "amount_cents": amount_cents,
+        "currency": currency,
+        "captured_by": captured_by,
+        "captured_at": captured_at,
+        "reference": reference or None,
+        "note": note or None,
+        "payment_summary": summary,
+        "record_file": str(record_file),
+        "order_file": str(order_file),
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print_text(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

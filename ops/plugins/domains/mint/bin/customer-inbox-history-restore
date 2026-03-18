@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import xml.sax.saxutils as saxutils
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    compact_utc,
+    iso_utc,
+    resolve_spine_root,
+    resolve_spine_state,
+    utc_now,
+    write_json,
+)
+
+
+CAPABILITY_NAME = "mint.customer.inbox.history.restore"
+SCHEMA_VERSION = "1.0"
+CONTRACT_FALLBACK = "ops/bindings/mint.customer.inbox.history.restore.contract.yaml"
+MATERIALIZE_SCRIPT = SCRIPT_DIR / "customer-inbox-history-materialize"
+
+
+def normalize_space(value: Any) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def load_materialize_module() -> Any:
+    loader = SourceFileLoader("mint_customer_history_materialize_restore_mod", str(MATERIALIZE_SCRIPT))
+    spec = spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise SystemExit(f"could not load helper module: {MATERIALIZE_SCRIPT}")
+    module = module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-inbox-history-restore",
+        description="Restore archived legacy Mint customer thread history into the live team@ Inbox so Outlook can rebuild the native conversation scaffold.",
+    )
+    parser.add_argument("--query", required=True, help="Archive search query (usually exact subject or customer email)")
+    parser.add_argument("--mailbox", default="", help="Canonical mailbox to restore into (default from contract)")
+    parser.add_argument("--top", type=int, default=0, help="Max archived hits to consider (default from contract)")
+    parser.add_argument("--apply", action="store_true", help="Apply the Inbox restore instead of only previewing")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def load_contract(spine_root: Path) -> dict[str, Any]:
+    override = normalize_space(os.environ.get("MINT_CUSTOMER_INBOX_HISTORY_RESTORE_CONTRACT"))
+    if override:
+        path = Path(override).expanduser().resolve()
+    else:
+        path = (spine_root / CONTRACT_FALLBACK).resolve()
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    raw["_path"] = str(path)
+    return raw
+
+
+def ews_resolve_inbox_folder(ews: Any) -> dict[str, Any]:
+    for folder in ews.find_folders("msgfolderroot", is_distinguished=True):
+        if normalize_space(folder.get("name") or "").lower() == "inbox":
+            return dict(folder)
+    raise SystemExit("could not resolve team@ Inbox folder")
+
+
+def ews_item_exists_by_internet_message_id(ews: Any, folder_id: str, internet_message_id: str) -> bool:
+    candidate = normalize_space(internet_message_id)
+    if not candidate:
+        return False
+    if not candidate.startswith("<"):
+        candidate = f"<{candidate}>"
+    escaped_value = saxutils.escape(candidate, {'"': "&quot;"})
+    body = f"""<m:FindItem Traversal="Shallow">
+      <m:ItemShape>
+        <t:BaseShape>IdOnly</t:BaseShape>
+      </m:ItemShape>
+      <m:Restriction>
+        <t:IsEqualTo>
+          <t:FieldURI FieldURI="message:InternetMessageId"/>
+          <t:FieldURIOrConstant>
+            <t:Constant Value="{escaped_value}"/>
+          </t:FieldURIOrConstant>
+        </t:IsEqualTo>
+      </m:Restriction>
+      <m:ParentFolderIds>
+        <t:FolderId Id="{folder_id}"/>
+      </m:ParentFolderIds>
+    </m:FindItem>"""
+    root = ews._soap_request(body, timeout=60, max_retries=2)
+    for response_code in root.iter():
+        if response_code.tag.endswith("}ResponseCode"):
+            text = normalize_space(response_code.text or "")
+            if text and text != "NoError":
+                raise SystemExit(f"inbox restore lookup failed: {text}")
+    return any(item_id.tag.endswith("}ItemId") for item_id in root.iter())
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    now = utc_now()
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    contract = load_contract(spine_root)
+    surface = dict(contract.get("surface") or {})
+    restore = dict(contract.get("restore") or {})
+    runtime = dict(contract.get("runtime") or {})
+    histmat = load_materialize_module()
+
+    mailbox = normalize_space(args.mailbox or surface.get("canonical_mailbox") or "team@mintprints.com")
+    top = args.top if args.top > 0 else int(surface.get("default_top") or 25)
+    destination_folder_name = normalize_space(surface.get("destination_folder") or "Inbox")
+
+    archived_messages = histmat.archive_search_messages(spine_root, contract, args.query, mailbox, top)
+    archived_messages = sorted(archived_messages, key=histmat.received_sort_key)
+
+    records_root = Path(str(runtime.get("records_root") or "$SPINE_STATE")).expanduser()
+    if str(records_root).startswith("$SPINE_STATE"):
+        records_root = Path(str(records_root).replace("$SPINE_STATE", str(state_root), 1))
+    index_file = Path(str(runtime.get("index_file") or "$SPINE_STATE/index.ndjson")).expanduser()
+    if str(index_file).startswith("$SPINE_STATE"):
+        index_file = Path(str(index_file).replace("$SPINE_STATE", str(state_root), 1))
+    lock_file = Path(str(runtime.get("lock_file") or "$SPINE_STATE/locks/history.lock")).expanduser()
+    if str(lock_file).startswith("$SPINE_STATE"):
+        lock_file = Path(str(lock_file).replace("$SPINE_STATE", str(state_root), 1))
+
+    materialized_count = 0
+    skipped_existing_count = 0
+    live_existing_count = 0
+    import_results: list[dict[str, Any]] = []
+    fake_root = normalize_space(os.environ.get(histmat.FAKE_OUTLOOK_ROOT_ENV))
+    fake_root_path = Path(fake_root).expanduser().resolve() if fake_root else None
+    existing_keys: set[str] = set()
+
+    ews = None
+    destination_folder: dict[str, Any] = {"id": "", "name": destination_folder_name}
+    if args.apply:
+        if fake_root_path is None:
+            binding_path = (spine_root / histmat.SECRETS_BINDING_FALLBACK).resolve()
+            binding = histmat.load_binding(binding_path)
+            infisical_token = histmat.fetch_infisical_token(spine_root)
+            client_id = histmat.fetch_infisical_secret(infisical_token, binding, "AZURE_CLIENT_ID", "/spine/platform/security")
+            client_secret = histmat.fetch_infisical_secret(infisical_token, binding, "AZURE_CLIENT_SECRET", "/spine/platform/security")
+            tenant_id = histmat.fetch_infisical_secret(infisical_token, binding, "AZURE_TENANT_ID", "/spine/platform/security")
+            ews_token = histmat.exchange_access_token(client_id, client_secret, tenant_id, "https://outlook.office365.com/.default")
+            microsoft_tools = histmat.load_microsoft_tools()
+            ews = microsoft_tools.EwsClient(ews_token, mailbox)
+            destination_folder = ews_resolve_inbox_folder(ews)
+        else:
+            fake_root_path.mkdir(parents=True, exist_ok=True)
+            existing_keys = histmat.fake_existing_materialization_keys(fake_root_path, destination_folder_name)
+
+    prepared: list[dict[str, Any]] = []
+    for message in archived_messages:
+        key = histmat.materialization_key(message)
+        internet_message_id = normalize_space(message.get("internetMessageId") or "")
+        action = "preview"
+        exists_live = False
+        if args.apply:
+            if key in existing_keys:
+                action = "skip_existing"
+                exists_live = True
+            elif fake_root_path is None and ews is not None and internet_message_id and ews_item_exists_by_internet_message_id(
+                ews,
+                str(destination_folder.get("id") or ""),
+                internet_message_id,
+            ):
+                action = "skip_existing"
+                exists_live = True
+                existing_keys.add(key)
+        prepared.append(
+            {
+                "materialization_key": key,
+                "archivedRowId": normalize_space(message.get("archivedRowId") or ""),
+                "internetMessageId": internet_message_id,
+                "receivedDateTime": normalize_space(message.get("receivedDateTime") or ""),
+                "subject": normalize_space(message.get("subject") or ""),
+                "from": normalize_space((((message.get("from") or {}).get("emailAddress") or {}).get("address")) or ""),
+                "archiveMailbox": normalize_space(message.get("archiveMailbox") or ""),
+                "hasAttachments": bool(message.get("hasAttachments")),
+                "action": action if args.apply else "preview",
+                "live_exists": exists_live,
+            }
+        )
+        if not args.apply:
+            continue
+        if action == "skip_existing":
+            skipped_existing_count += 1
+            if exists_live:
+                live_existing_count += 1
+            continue
+        mime_bytes = histmat.build_materialized_mime(message, contract, query=args.query)
+        if fake_root_path is not None:
+            created = histmat.fake_materialize(fake_root_path, destination_folder_name, key, mime_bytes)
+        else:
+            assert ews is not None
+            created = histmat.ews_create_message_from_mime(
+                ews,
+                str(destination_folder.get("id") or ""),
+                mime_bytes,
+                mark_read=bool(restore.get("mark_read", True)),
+            )
+        materialized_count += 1
+        existing_keys.add(key)
+        import_results.append(
+            {
+                "materialization_key": key,
+                "archivedRowId": normalize_space(message.get("archivedRowId") or ""),
+                "internetMessageId": internet_message_id,
+                "subject": normalize_space(message.get("subject") or ""),
+                "receivedDateTime": normalize_space(message.get("receivedDateTime") or ""),
+                "item_id": normalize_space(created.get("item_id") or created.get("id") or ""),
+                "file_path": normalize_space(created.get("file_path") or ""),
+            }
+        )
+
+    restore_id = f"MHR-{compact_utc(now)}-{os.urandom(2).hex()}"
+    summary = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "status": "applied" if args.apply else "preview",
+        "generated_at": iso_utc(now),
+        "restore_id": restore_id,
+        "query": normalize_space(args.query),
+        "mailbox": mailbox,
+        "destination_folder": destination_folder_name,
+        "destination_folder_id": normalize_space(destination_folder.get("id") or ""),
+        "archived_message_count": len(archived_messages),
+        "restored_count": materialized_count,
+        "skipped_existing_count": skipped_existing_count,
+        "live_existing_count": live_existing_count,
+        "messages": prepared,
+        "imports": import_results,
+        "attachment_restore_mode": normalize_space(restore.get("attachment_restore_mode") or "metadata_only"),
+        "queue_shield": bool(restore.get("queue_shield", True)),
+        "fake_outlook_root": str(fake_root_path) if fake_root_path else "",
+    }
+
+    record_dir = records_root / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = record_dir / f"{restore_id}.json"
+    write_json(record_file, summary)
+    for item in import_results:
+        append_ndjson(
+            index_file,
+            lock_file,
+            {
+                "stored_at_utc": iso_utc(now),
+                "restore_id": restore_id,
+                "mailbox": mailbox,
+                "destination_folder": destination_folder_name,
+                "materialization_key": item.get("materialization_key"),
+                "internetMessageId": item.get("internetMessageId"),
+                "archivedRowId": item.get("archivedRowId"),
+                "item_id": item.get("item_id"),
+                "record_file": str(record_file),
+            },
+        )
+    summary["record_file"] = str(record_file)
+    summary["index_file"] = str(index_file)
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+    print(CAPABILITY_NAME)
+    print(f"status: {summary['status']}")
+    print(f"mailbox: {summary['mailbox']}")
+    print(f"destination_folder: {destination_folder_name}")
+    print(f"archived_message_count: {summary['archived_message_count']}")
+    print(f"restored_count: {summary['restored_count']}")
+    print(f"skipped_existing_count: {summary['skipped_existing_count']}")
+    print(f"record_file: {record_file}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

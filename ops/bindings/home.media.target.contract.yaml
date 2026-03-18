@@ -1,0 +1,575 @@
+version: 1
+status: authoritative
+owner: "@ronny"
+updated_at: "2026-03-18"
+scope: home-media-target
+
+purpose: >
+  Exact target contract for the future single-VM home media runtime on
+  proxmox-home backed by Synology payload storage.
+
+authority:
+  parent_contracts:
+    - ops/bindings/home.authority.contract.yaml
+    - ops/bindings/home.media.readiness.baseline.yaml
+  planning_artifacts:
+    - docs/reference/media/MEDIA-SHOP-HOME-MIGRATION-TRANSACTION-PACKET.md
+    - docs/reference/media/MEDIA-MIGRATION-LINEAGE-CHECKPOINT.md
+    - docs/governance/MEDIA_STACK_BORING_TARGET.md
+  execution_artifacts:
+    - ops/bindings/home.media.execution.parity.matrix.yaml
+  lifecycle_contracts:
+    - ops/bindings/media.lifecycle.contract.yaml
+
+contract_state:
+  topology_finalized: true
+  execution_state: jellyfin_only_recovery
+  rollback_policy: keep_shop_media_vms_until_post_cutover_verification_passes
+  blockers:
+    - GAP-OP-1404
+    - GAP-OP-1405
+    - GAP-OP-1387
+    - GAP-OP-1388
+    - GAP-OP-1389
+    - GAP-OP-1390
+    - GAP-OP-1391
+    - GAP-OP-1392
+    - GAP-OP-1393
+
+target_topology:
+  site: home
+  hypervisor:
+    node: proxmox-home
+    machine_model: Beelink SER7
+    storage_tier: home-local-lvm
+  nas:
+    hostname: synology918
+    payload_authority: synology
+    canonical_backup_lane: /volume1/backups/proxmox_backups/dump
+
+source_platform_inventory:
+  verification_date: "2026-03-17"
+  evidence:
+    - ops/bindings/media.topology.history.yaml
+    - ops/bindings/media.services.yaml
+    - ops/bindings/media.path.authority.contract.yaml
+  current_split_estate:
+    vms:
+      - name: download-stack
+        vm_id: 209
+        compose_declared_service_instances: 22
+        currently_running_service_instances: 20
+        currently_not_running_but_defined:
+          - slskd
+          - tdarr
+        services:
+          - arr-native-search
+          - autopulse
+          - crowdsec
+          - crosswatch
+          - decypharr
+          - flaresolverr
+          - gluetun
+          - lidarr
+          - node-exporter
+          - posterizarr
+          - prowlarr
+          - qbittorrent
+          - radarr
+          - recyclarr
+          - sabnzbd
+          - slskd
+          - sonarr
+          - soularr
+          - tdarr
+          - trailarr
+          - unpackerr
+          - watchtower
+      - name: streaming-stack
+        vm_id: 210
+        compose_declared_service_instances: 10
+        currently_running_service_instances: 10
+        services:
+          - bazarr
+          - homarr
+          - jellyfin
+          - jellyseerr
+          - navidrome
+          - node-exporter
+          - spotisub
+          - subgen
+          - watchtower
+          - wizarr
+    totals:
+      compose_declared_service_instances: 32
+      currently_running_service_instances: 30
+  external_control_plane:
+    active_agent_surfaces:
+      - media-agent
+      - DOMAIN-MEDIA-01
+    mcpjungle_server: media-stack
+    split_runtime_bindings_that_must_be_rewired:
+      - ops/bindings/agents.registry.yaml
+      - ops/bindings/media.services.yaml
+      - ops/bindings/services.health.yaml
+      - ops/bindings/media.path.authority.contract.yaml
+      - ops/bindings/media.e2e.verification.spec.yaml
+      - ops/bindings/docker.compose.targets.yaml
+      - ops/bindings/backup.inventory.yaml
+      - ops/bindings/secrets.namespace.policy.yaml
+
+synology_share_layout:
+  runtime_share:
+    share_name: media-staging
+    synology_path: /volume1/media-staging
+    semantic_role: home_live_media
+    export_protocol: nfs
+    exported_to:
+      - proxmox-home:/mnt/media
+      - media-home:/srv/media
+    required_tree:
+      - /downloads/incomplete
+      - /downloads/complete/movies
+      - /downloads/complete/tv
+      - /downloads/complete/music
+      - /movies
+      - /tv
+      - /music
+    rules:
+      - live media payload only
+      - hot-home library only
+      - no app state
+      - no sqlite databases
+      - no generic archive residue
+      - cold retained keepers belong on shop, not as a second live home library
+  hold_share:
+    share_name: media-holds
+    synology_path: /volume1/media-holds
+    export_protocol: nfs
+    exported_to: []
+    required_tree:
+      - /manual-import-review
+      - /duplicate-review
+      - /forensic-holds
+    rules:
+      - non-runtime only
+      - mount on-demand, not by default
+      - retained cleanup residue belongs here, not in /volume1/media
+  transitional_paths:
+    - path: /volume1/media
+      status: aspirational_label_only
+      note: Preferred future Synology share label. Live runtime is currently backed by /volume1/media-staging.
+
+proxmox_home_mount_contract:
+  path: /mnt/media
+  source: 10.0.0.150:/volume1/media-staging
+  source_host: synology918
+  protocol: nfs
+  mode: rw
+  required: true
+  purpose:
+    - readiness probe anchor
+    - operator-visible verification surface
+    - migration staging surface
+  not_for:
+    - media app sqlite/config state
+    - direct container runtime bind mounts
+    - backup truth
+  parity_requirement:
+    host_mount_path: /mnt/media
+    guest_mount_path: /srv/media
+    container_payload_path_arr: /data
+    container_payload_path_jellyfin: /media
+
+home_media_vm_spec:
+  vm_id: 106
+  hostname: media-home
+  proxmox_host: proxmox-home
+  role: unified-home-media-runtime
+  status: active
+  network:
+    addressing: reserved_static
+    preferred_lan_ip: 10.0.0.106
+    tailscale_required: true
+  resources:
+    cpu_cores: 8
+    memory_mb: 12288
+    balloon_floor_mb: 8192
+    boot_disk_gb: 64
+    appdata_disk_gb: 256
+  storage:
+    boot_storage: local-lvm
+    appdata_storage: local-lvm
+    appdata_mount: /srv/appdata
+    docker_root: /srv/appdata/docker
+    compose_root: /srv/appdata/compose/media-stack
+    payload_mount: /srv/media
+    payload_source: synology918:/volume1/media-staging
+  service_instances_expected_day1_min: 29
+  must_carry_to_avoid_function_loss:
+    - arr-native-search
+    - bazarr
+    - crowdsec
+    - flaresolverr
+    - gluetun
+    - jellyfin
+    - jellyseerr
+    - lidarr
+    - navidrome
+    - prowlarr
+    - qbittorrent
+    - radarr
+    - recyclarr
+    - sabnzbd
+    - slskd
+    - sonarr
+    - soularr
+    - unpackerr
+  retained_end_user_experience_surfaces:
+    - homarr
+    - spotisub
+    - subgen
+    - wizarr
+  kept_platform_helpers:
+    - autopulse
+    - crosswatch
+    - decypharr
+    - node-exporter
+    - posterizarr
+    - trailarr
+    - watchtower
+  parked_or_excluded_by_default:
+    - tdarr
+    - huntarr
+    - swaparr-radarr
+    - swaparr-sonarr
+    - swaparr-lidarr
+  public_surfaces_default:
+    - jellyfin
+    - jellyseerr
+  authenticated_private_remote_surfaces:
+    - homarr
+    - navidrome
+    - spotisub
+    - wizarr
+  operator_private_only:
+    - arr-native-search
+    - autopulse
+    - bazarr
+    - crowdsec
+    - crosswatch
+    - decypharr
+    - flaresolverr
+    - gluetun
+    - lidarr
+    - posterizarr
+    - prowlarr
+    - qbittorrent
+    - radarr
+    - recyclarr
+    - sabnzbd
+    - slskd
+    - sonarr
+    - soularr
+    - subgen
+    - trailarr
+    - unpackerr
+    - node-exporter
+    - watchtower
+  local_only_paths:
+    - /srv/appdata
+    - /srv/appdata/docker
+    - /srv/appdata/jellyfin-cache
+  remote_payload_paths:
+    - /srv/media/downloads
+    - /srv/media/movies
+    - /srv/media/tv
+    - /srv/media/music
+  anti_patterns:
+    - app sqlite databases on NFS
+    - duplicate jellyseerr surfaces
+    - separate download and streaming VMs on home
+    - alternate live media mount roots
+    - keeping a permanent live archive lane on home when shop owns cold retention
+
+current_cutover_state:
+  observed_at: "2026-03-17"
+  home_substrate_live: true
+  proxmox_home_mount:
+    path: /mnt/media
+    source: 10.0.0.150:/volume1/media-staging
+    mode: rw
+  guest_mount:
+    vm_id: 106
+    hostname: media-home
+    path: /srv/media
+    source: 10.0.0.150:/volume1/media-staging
+    mode: rw
+    tailscale_ip: 100.113.72.41
+  write_lane_thin_slice:
+    compose_root: /srv/appdata/compose/media-stack
+    local_state_root: /srv/appdata/opt-appdata
+    migrated_services:
+      - sabnzbd
+      - qbittorrent
+      - prowlarr
+      - radarr
+      - sonarr
+    source_shop_services_stopped:
+      - sabnzbd
+      - qbittorrent
+      - prowlarr
+      - radarr
+      - sonarr
+    current_mode: parked_for_recovery
+    health:
+      sabnzbd: parked_by_operator
+      qbittorrent: parked_by_operator
+      prowlarr: parked_by_operator
+      radarr: parked_by_operator
+      sonarr: parked_by_operator
+    residual_drift:
+      - "Write-lane automation remains intentionally parked until inbox/library lifecycle rules are re-enabled behind explicit gates."
+  helper_music_lane:
+    compose_root: /srv/appdata/compose/media-stack
+    local_state_root: /srv/appdata/opt-appdata
+    migrated_services:
+      - lidarr
+      - unpackerr
+      - recyclarr
+      - flaresolverr
+      - gluetun
+      - slskd
+      - soularr
+      - arr-native-search
+      - trailarr
+      - posterizarr
+      - decypharr
+      - autopulse
+      - crosswatch
+      - crowdsec
+    source_shop_services_stopped:
+      - lidarr
+      - unpackerr
+      - recyclarr
+      - flaresolverr
+      - gluetun
+      - slskd
+      - soularr
+      - arr-native-search
+      - trailarr
+      - posterizarr
+      - decypharr
+      - autopulse
+      - crosswatch
+      - crowdsec
+    current_mode: parked_for_recovery
+    health:
+      lidarr: parked_by_operator
+      flaresolverr: parked_by_operator
+      gluetun: parked_by_operator
+      slskd: parked_by_operator
+      trailarr: parked_by_operator
+      autopulse: parked_by_operator
+      crosswatch: parked_by_operator
+      decypharr: parked_by_operator
+      posterizarr: parked_by_operator
+      unpackerr: parked_by_operator
+      recyclarr: parked_by_operator
+      soularr: parked_by_operator
+      arr-native-search: parked_by_operator
+      crowdsec: parked_by_operator
+    migration_notes:
+      - "The initial helper migration had to be trimmed to skip regenerable bulk (`MediaCover`, `Backups`, `downloads`, `incomplete`, and `search.db`) so control-plane state moved without payload bloat."
+      - "The first helper `.env` export was blank; live values for gluetun, autopulse, and decypharr were re-derived from the stopped shop runtime and active home configs."
+      - "`slskd` required the canonical home path `/srv/media/downloads/slskd/incomplete` to exist on the Synology-backed mount."
+      - "`lidarr` required `/opt/appdata/lidarr` to be migrated because `/config/lidarr.db` is a symlink target, not the actual database file."
+      - "Logical write/helper/playback lanes now share one physical compose root at `/srv/appdata/compose/media-stack`."
+    residual_drift: []
+  playback_request_lane:
+    compose_root: /srv/appdata/compose/media-stack
+    local_state_root: /srv/appdata/opt-appdata
+    migrated_services:
+      - bazarr
+      - homarr
+      - jellyfin
+      - jellyseerr
+      - navidrome
+      - node-exporter
+      - spotisub
+      - subgen
+      - watchtower
+      - wizarr
+    source_shop_services_stopped:
+      - bazarr
+      - homarr
+      - jellyfin
+      - jellyseerr
+      - navidrome
+      - node-exporter
+      - spotisub
+      - subgen
+      - watchtower
+      - wizarr
+    current_mode: jellyfin_only_recovery
+    health:
+      bazarr: parked_by_operator
+      homarr: parked_by_operator
+      jellyfin: healthy
+      jellyseerr: parked_by_operator
+      navidrome: parked_by_operator
+      node-exporter: parked_by_operator
+      spotisub: parked_by_operator
+      subgen: parked_by_operator
+      watchtower: parked_by_operator
+      wizarr: parked_by_operator
+    residual_drift:
+      - Jellyfin still emits inherited collection metadata cleanup warnings from legacy boxset state.
+      - Non-Jellyfin playback and request surfaces remain intentionally parked during recovery.
+
+target_compose_layout:
+  project_name: media-stack
+  root: /srv/appdata/compose/media-stack
+  strategy: single_project_with_profiles
+  profiles:
+    core_download:
+      - sabnzbd
+      - qbittorrent
+      - prowlarr
+      - radarr
+      - sonarr
+      - lidarr
+      - unpackerr
+      - recyclarr
+      - arr-native-search
+    music_lane:
+      - gluetun
+      - slskd
+      - soularr
+      - navidrome
+      - spotisub
+    streaming_request:
+      - jellyfin
+      - jellyseerr
+      - bazarr
+      - subgen
+      - wizarr
+      - homarr
+    support_infra:
+      - crowdsec
+      - flaresolverr
+      - node-exporter
+      - watchtower
+    kept_helpers:
+      - autopulse
+      - crosswatch
+      - decypharr
+      - posterizarr
+      - trailarr
+    parked_or_excluded_by_default:
+      - tdarr
+      - huntarr
+      - swaparr-radarr
+      - swaparr-sonarr
+      - swaparr-lidarr
+  normalization_notes:
+    - exactly one watchtower instance
+    - exactly one node-exporter instance
+    - no split hostnames or split-VM URLs inside compose environment
+    - no service may depend on cross-VM mounts or cross-VM sqlite access
+
+control_plane_dependencies:
+  media_agent:
+    required_for_agent_friendly_operations: true
+    agent_id: media-agent
+    terminal_id: DOMAIN-MEDIA-01
+    registry_binding: ops/bindings/agents.registry.yaml
+    generated_followons:
+      - ops/bindings/terminal.worker.catalog.yaml
+      - ops/bindings/routing.dispatch.yaml
+    cutover_rule: >
+      No cutover is complete until media-agent and DOMAIN-MEDIA-01 resolve only
+      the unified media-home endpoint set and the split shop endpoints are no
+      longer presented as active runtime truth.
+  mcpjungle:
+    required: true
+    mirror_path: ~/code/workbench/infra/compose/mcpjungle/servers/media-stack/
+    current_shape: split-download-plus-streaming-endpoints
+    required_updates:
+      - replace download-stack URLs with media-home URLs
+      - replace streaming-stack URLs with media-home URLs
+      - retain SABnzbd, Jellyfin, Jellyseerr, Bazarr, Navidrome, Prowlarr, Radarr, Sonarr, and Lidarr tools if those services remain in scope
+  secrets:
+    current_split_namespaces:
+      - /spine/vm-infra/media-stack/download
+      - /spine/vm-infra/media-stack/streaming
+    preferred_target_namespace: /spine/vm-infra/media-stack/home
+    migration_rule: >
+      Split namespaces may stay readable during staged cutover, but the final
+      boring home runtime must not require both split namespaces for active
+      day-to-day operation.
+  inventory_and_health_bindings:
+    must_update:
+      - ops/bindings/agents.registry.yaml
+      - ops/bindings/media.services.yaml
+      - ops/bindings/services.health.yaml
+      - ops/bindings/media.path.authority.contract.yaml
+      - ops/bindings/media.e2e.verification.spec.yaml
+      - ops/bindings/docker.compose.targets.yaml
+      - ops/bindings/backup.inventory.yaml
+      - ops/bindings/secrets.namespace.policy.yaml
+      - docs/governance/SERVICE_REGISTRY.yaml
+      - docs/governance/STACK_REGISTRY.yaml
+      - docs/governance/DEVICE_IDENTITY_SSOT.md
+
+path_contract:
+  qbittorrent:
+    incomplete_path: /data/downloads/incomplete
+    complete_paths:
+      movies: /data/downloads/complete/movies
+      tv: /data/downloads/complete/tv
+      music: /data/downloads/complete/music
+  radarr:
+    root_folder: /data/movies
+    download_import_source: /data/downloads/complete/movies
+  sonarr:
+    root_folder: /data/tv
+    download_import_source: /data/downloads/complete/tv
+  lidarr:
+    root_folder: /data/music
+    download_import_source: /data/downloads/complete/music
+  jellyfin:
+    libraries:
+      movies: /media/movies
+      tv: /media/tv
+      music: /media/music
+
+backup_contract:
+  vm_backup_destination_lane: nas-home-local-exception
+  vm_backup_path: /mnt/pve/synology-backups/dump
+  vm_restore_glob: vzdump-qemu-106-*.vma.zst
+  activation_state: restorable
+  first_artifact:
+    file: vzdump-qemu-106-2026_03_17-15_09_24.vma.zst
+    observed_at: "2026-03-17T15:12:28-04:00"
+    size_bytes: 12972696440
+  payload_note: /volume1/media-staging is current primary storage, not backup.
+  app_state_export_policy: optional_only
+  app_state_export_note: >
+    App-state exports may be kept as convenience evidence, but canonical
+    restore truth for the VM is the Proxmox artifact on the home backup lane.
+
+migration_rules:
+  keep_shop_units_until_verified:
+    - vm-209-download-stack
+    - vm-210-streaming-stack
+  cutover_success_requires:
+    - every current service instance is classified as must-carry, kept, or parked
+    - all must-carry services exist on media-home with path parity satisfied
+    - all explicitly kept user-surface and helper services exist on media-home
+    - path parity contract satisfied end-to-end
+    - media.status healthy
+    - media.e2e.verify passes
+    - media-agent and mcpjungle endpoints rewired to media-home
+    - inventory, health, and secret bindings reflect the unified home runtime
+    - queue reconciliation complete

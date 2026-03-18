@@ -13,6 +13,8 @@ from typing import Any
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
+from mint_runtime_paths import resolve_mint_data_root, resolve_spine_root
+from payment_record_common import order_index_entry, payment_summary_from_payment_module
 from quote_packet_normalize import append_receipt, dump_yaml, fail, load_structured_file, now_utc, update_index
 from quote_packet_payment_link import canonical_payment_base_url, resolve_payment_api_key
 
@@ -262,9 +264,8 @@ def print_summary(
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
+    spine_root = resolve_spine_root(__file__)
+    mint_root = resolve_mint_data_root(spine_root=spine_root, current_file=__file__)
 
     packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (mint_root / "quote-packets"))
     packet_index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (mint_root / "quote-packets-index.yaml"))
@@ -373,6 +374,7 @@ def main(argv: list[str]) -> int:
 
         # Project order.payment_state = refunded (preserves lifecycle_state)
         order["payment_state"] = "refunded"
+        order["payment_summary"] = payment_summary_from_payment_module("refunded", synced_ref, payment_record, timestamp)
         order["updated_at"] = timestamp
 
         # Add operator review flag if order is in production/fulfilled (manual business decision required)
@@ -392,17 +394,7 @@ def main(argv: list[str]) -> int:
             orders_index_file,
             "orders",
             "order_id",
-            {
-                "order_id": order_id,
-                "current_revision_id": order.get("current_revision_id"),
-                "active_quote_id": order.get("active_quote_id"),
-                "customer_id": order.get("customer_id"),
-                "lifecycle_state": order.get("lifecycle_state"),
-                "payment_state": order.get("payment_state"),
-                "source_quote_packet_id": order.get("source_quote_packet_id"),
-                "created_at": order.get("created_at"),
-                "updated_at": timestamp,
-            },
+            order_index_entry(order, timestamp),
         )
     elif payment_record_status in PAID_RECORD_STATES:
         if provider_payment_status != "paid":
@@ -420,6 +412,12 @@ def main(argv: list[str]) -> int:
             )
 
             order["payment_state"] = derived_order_payment_state
+            order["payment_summary"] = payment_summary_from_payment_module(
+                derived_order_payment_state,
+                synced_ref,
+                payment_record,
+                timestamp,
+            )
             if str(order.get("lifecycle_state") or "") == "quoted":
                 order["lifecycle_state"] = "approved"
             order["updated_at"] = timestamp
@@ -439,17 +437,7 @@ def main(argv: list[str]) -> int:
                 orders_index_file,
                 "orders",
                 "order_id",
-                {
-                    "order_id": order_id,
-                    "current_revision_id": order.get("current_revision_id"),
-                    "active_quote_id": order.get("active_quote_id"),
-                    "customer_id": order.get("customer_id"),
-                    "lifecycle_state": order.get("lifecycle_state"),
-                    "payment_state": order.get("payment_state"),
-                    "source_quote_packet_id": order.get("source_quote_packet_id"),
-                    "created_at": order.get("created_at"),
-                    "updated_at": timestamp,
-                },
+                order_index_entry(order, timestamp),
             )
             update_entity_index(
                 quotes_index_file,

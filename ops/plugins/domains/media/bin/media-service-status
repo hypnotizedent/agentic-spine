@@ -1,37 +1,29 @@
 #!/usr/bin/env bash
-# media.service.status — Get container status for media services
-#
-# Usage:
-#   ./bin/ops cap run media.service.status
-#   ./bin/ops cap run media.service.status --vm download-stack
-#   ./bin/ops cap run media.service.status --service radarr
-#   ./bin/ops cap run media.service.status --json
-#
-# Contract:
-# - Queries docker ps on media VMs
-# - Maps container names to service names from media.services.yaml
-# - Reports status: running|exited|missing
+# media.service.status — Container status for the canonical media-home runtime
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
-SERVICE_BINDING="$ROOT/ops/bindings/media.services.yaml"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
-SCHEMA_VERSION="1.0.0"
+SSH_RESOLVE="$ROOT/ops/lib/ssh-resolve.sh"
+SCHEMA_VERSION="2.0.0"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# shellcheck source=/dev/null
+source "$SSH_RESOLVE"
 
 usage() {
   cat <<'USAGE'
-media.service.status — Get container status for media services
+media.service.status — Container status for the canonical media-home runtime
 
 Args:
-  --vm HOST         Check only this VM (download-stack|streaming-stack)
-  --service NAME    Check only this service
+  --vm HOST         Only supported value: media-home
+  --service NAME    Limit output to one container/service name
   --json            Output JSON format
 
 Examples:
-  ./bin/ops cap run media.service.status --vm download-stack
-  ./bin/ops cap run media.service.status --service radarr --json
+  ./bin/ops cap run media.service.status
+  ./bin/ops cap run media.service.status -- --service radarr --json
 USAGE
 }
 
@@ -41,151 +33,134 @@ OUTPUT_JSON=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --vm)
-      VM_FILTER="${2:-}"; shift 2 ;;
-    --service)
-      SERVICE_FILTER="${2:-}"; shift 2 ;;
-    --json)
-      OUTPUT_JSON=true; shift ;;
-    -h|--help)
-      usage; exit 0 ;;
-    *)
-      echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+    --vm) VM_FILTER="${2:-}"; shift 2 ;;
+    --service) SERVICE_FILTER="${2:-}"; shift 2 ;;
+    --json) OUTPUT_JSON=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift ;;
+    *) echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
 
 command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
 command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
-if $OUTPUT_JSON; then
-  command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+
+if [[ -n "$VM_FILTER" && "$VM_FILTER" != "media-home" ]]; then
+  echo "FAIL: media.service.status now treats media-home as the only canonical media runtime; requested vm '$VM_FILTER' is legacy/non-authoritative" >&2
+  exit 1
 fi
 
-MEDIA_VMS=("download-stack" "streaming-stack")
+resolve_ssh_ref() {
+  local vm="media-home"
+  local target user host resolved
+  target="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .hostname // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+  user="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+  [[ -n "$target" && "$target" != "null" ]] || return 1
 
-get_vm_ssh_ref() {
-  local vm="$1"
-  local target user
-
-  target=$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .hostname // \"\"" "$VM_BINDING" 2>/dev/null || echo "")
-  user=$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || echo "")
-
-  if [[ -z "$target" || "$target" == "null" ]]; then
-    echo ""
-    return 1
+  host="$target"
+  if declare -F ssh_resolve_ssh_host_with_fallback >/dev/null 2>&1; then
+    resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 2>/dev/null || true)"
+    if [[ -n "$resolved" ]]; then
+      host="$(awk '{print $1}' <<<"$resolved")"
+    fi
   fi
 
   if [[ -n "$user" && "$user" != "null" ]]; then
-    echo "${user}@${target}"
+    printf '%s@%s\n' "$user" "$host"
   else
-    echo "$target"
+    printf '%s\n' "$host"
   fi
 }
 
-get_vm_containers() {
-  local vm="$1"
-  local ssh_ref
-  local docker_cmd
-  local out
-  ssh_ref=$(get_vm_ssh_ref "$vm" 2>/dev/null || true)
-  [[ -z "$ssh_ref" ]] && return 0
+SSH_REF="$(resolve_ssh_ref)"
 
-  docker_cmd="docker ps -a --format '{{.Names}}\t{{.Status}}'"
-  out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" "$docker_cmd" 2>&1 || true)
-  if echo "$out" | grep -qi "permission denied while trying to connect to the docker api"; then
-    out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" "sudo -n $docker_cmd" 2>&1 || true)
-  fi
+ACTIVE_SERVICES=(
+  sabnzbd
+  qbittorrent
+  prowlarr
+  radarr
+  sonarr
+  jellyfin
+  navidrome
+  jellyseerr
+  bazarr
+  homarr
+  wizarr
+  spotisub
+  subgen
+  watchtower
+  node-exporter
+)
 
-  # If sudo fallback also fails, return empty list and let caller report missing containers.
-  if echo "$out" | grep -qi "^sudo: "; then
-    echo ""
-    return 0
-  fi
-
-  printf '%s\n' "$out"
-}
-
-get_service_container() {
-  local service="$1"
-  yq -r ".services[\"$service\"].container // \"$service\"" "$SERVICE_BINDING" 2>/dev/null || echo "$service"
-}
-
-get_service_vm() {
-  local service="$1"
-  yq -r ".services[\"$service\"].vm // \"\"" "$SERVICE_BINDING" 2>/dev/null || echo ""
-}
+declare -A CONTAINERS
+while IFS=$'\t' read -r name status; do
+  [[ -n "$name" ]] || continue
+  CONTAINERS["$name"]="$status"
+done < <(
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$SSH_REF" \
+    "sudo docker ps -a --format '{{.Names}}\t{{.Status}}'" 2>/dev/null || true
+)
 
 parse_status() {
-  local container_status="$1"
-  if [[ "$container_status" =~ ^Up ]]; then
-    echo "running"
-  elif [[ "$container_status" =~ ^Exited ]]; then
-    echo "exited"
-  elif [[ "$container_status" =~ ^Created ]]; then
-    echo "created"
+  local raw="$1"
+  if [[ "$raw" =~ ^Up ]]; then
+    printf 'running\n'
+  elif [[ "$raw" =~ ^Exited ]]; then
+    printf 'exited\n'
+  elif [[ "$raw" =~ ^Created ]]; then
+    printf 'created\n'
   else
-    echo "unknown"
+    printf 'missing\n'
   fi
 }
 
-declare -A ALL_RESULTS
+RESULTS=()
+RUNNING=0
+EXITED=0
+CREATED=0
+MISSING=0
 
-for vm in "${MEDIA_VMS[@]}"; do
-  if [[ -n "$VM_FILTER" && "$vm" != "$VM_FILTER" ]]; then
-    continue
+SERVICES_TO_CHECK=("${ACTIVE_SERVICES[@]}")
+if [[ -n "$SERVICE_FILTER" ]]; then
+  SERVICES_TO_CHECK=("$SERVICE_FILTER")
+fi
+
+for service in "${SERVICES_TO_CHECK[@]}"; do
+  raw="${CONTAINERS[$service]:-}"
+  if [[ -z "$raw" ]]; then
+    status="missing"
+    detail="container-not-found"
+  else
+    status="$(parse_status "$raw")"
+    detail="$raw"
   fi
-
-  # Get all containers on this VM
-  declare -A VM_CONTAINERS
-  while IFS=$'\t' read -r name status; do
-    [[ -z "$name" ]] && continue
-    VM_CONTAINERS["$name"]="$status"
-  done < <(get_vm_containers "$vm")
-
-  # Get services for this VM
-  services=$(yq -r ".services | to_entries[] | select(.value.vm == \"$vm\") | .key" "$SERVICE_BINDING" 2>/dev/null)
-
-  for service in $services; do
-    if [[ -n "$SERVICE_FILTER" && "$service" != "$SERVICE_FILTER" ]]; then
-      continue
-    fi
-
-    container=$(get_service_container "$service")
-
-    if [[ -n "${VM_CONTAINERS[$container]:-}" ]]; then
-      status=$(parse_status "${VM_CONTAINERS[$container]}")
-      ALL_RESULTS["$service"]="$vm:$status:${VM_CONTAINERS[$container]}"
-    else
-      ALL_RESULTS["$service"]="$vm:missing:container-not-found"
-    fi
-  done
-
-  unset VM_CONTAINERS
+  RESULTS+=("$service"$'\t'"media-home"$'\t'"$status"$'\t'"$detail")
+  case "$status" in
+    running) RUNNING=$((RUNNING + 1)) ;;
+    exited) EXITED=$((EXITED + 1)) ;;
+    created) CREATED=$((CREATED + 1)) ;;
+    missing) MISSING=$((MISSING + 1)) ;;
+  esac
 done
 
-# Output
+TOTAL=$((RUNNING + EXITED + CREATED + MISSING))
+OVERALL="ok"
+if [[ $EXITED -gt 0 || $CREATED -gt 0 || $MISSING -gt 0 ]]; then
+  OVERALL="warn"
+fi
+
 if $OUTPUT_JSON; then
-  services_json="$(
-    for service in $(printf '%s\n' "${!ALL_RESULTS[@]}" | sort); do
-      IFS=':' read -r vm status detail <<< "${ALL_RESULTS[$service]}"
-      printf '%s\t%s\t%s\t%s\n' "$service" "$vm" "$status" "$detail"
-    done | jq -R -s '
-      split("\n")
-      | map(select(length > 0))
-      | map(split("\t") | {service: .[0], vm: .[1], status: .[2], detail: .[3]})
-    '
-  )"
-
-  overall_status="ok"
-  if jq -e 'any(.[]; .status != "running")' >/dev/null 2>&1 <<<"$services_json"; then
-    overall_status="warn"
-  fi
-
+  services_json="$(printf '%s\n' "${RESULTS[@]}" | jq -R -s '
+    split("\n")
+    | map(select(length > 0))
+    | map(split("\t") | {service: .[0], vm: .[1], status: .[2], detail: .[3]})
+  ')"
   jq -n \
     --arg capability "media.service.status" \
     --arg schema_version "$SCHEMA_VERSION" \
     --arg generated_at "$GENERATED_AT" \
-    --arg status "$overall_status" \
-    --arg vm_filter "$VM_FILTER" \
+    --arg status "$OVERALL" \
     --arg service_filter "$SERVICE_FILTER" \
     --argjson services "$services_json" \
     '{
@@ -194,15 +169,14 @@ if $OUTPUT_JSON; then
       generated_at: $generated_at,
       status: $status,
       data: {
-        vm_filter: (if $vm_filter == "" then null else $vm_filter end),
+        vm_filter: "media-home",
         service_filter: (if $service_filter == "" then null else $service_filter end),
         counts: {
           total: ($services | length),
           running: ($services | map(select(.status == "running")) | length),
           exited: ($services | map(select(.status == "exited")) | length),
-          missing: ($services | map(select(.status == "missing")) | length),
           created: ($services | map(select(.status == "created")) | length),
-          unknown: ($services | map(select(.status == "unknown")) | length)
+          missing: ($services | map(select(.status == "missing")) | length)
         },
         services: $services
       }
@@ -210,17 +184,12 @@ if $OUTPUT_JSON; then
 else
   echo "media.service.status"
   echo "===================="
-  printf "%-25s %-20s %-12s %s\n" "SERVICE" "VM" "STATUS" "DETAIL"
-  printf "%-25s %-20s %-12s %s\n" "-------" "--" "------" "------"
-
-  # Sort by VM then service
-  for vm in "${MEDIA_VMS[@]}"; do
-    for service in $(echo "${!ALL_RESULTS[@]}" | tr ' ' '\n' | sort); do
-      result="${ALL_RESULTS[$service]}"
-      if [[ "$result" == "$vm:"* ]]; then
-        IFS=':' read -r svm status detail <<< "$result"
-        printf "%-25s %-20s %-12s %s\n" "$service" "$svm" "$status" "$detail"
-      fi
-    done
+  printf "%-18s %-12s %s\n" "SERVICE" "STATUS" "DETAIL"
+  printf "%-18s %-12s %s\n" "-------" "------" "------"
+  for row in "${RESULTS[@]}"; do
+    IFS=$'\t' read -r service _vm status detail <<< "$row"
+    printf "%-18s %-12s %s\n" "$service" "$status" "$detail"
   done
 fi
+
+exit 0

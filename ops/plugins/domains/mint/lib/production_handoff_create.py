@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from mint_runtime_paths import resolve_mint_data_root, resolve_spine_root
 from production_readiness_check import build_readiness_summary, entity_file
 from quote_packet_normalize import dump_yaml, fail, load_structured_file, now_utc, stop
 
@@ -173,9 +174,8 @@ def build_summary(record: dict[str, Any], handoff_file: Path, create_state: str)
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
+    spine_root = resolve_spine_root(__file__)
+    mint_root = resolve_mint_data_root(spine_root=spine_root, current_file=__file__)
 
     orders_dir = Path(os.environ.get("MINT_ORDER_RUNTIME_DIR") or (mint_root / "orders"))
     order_revisions_dir = Path(os.environ.get("MINT_ORDER_REVISIONS_DIR") or (mint_root / "order-revisions"))

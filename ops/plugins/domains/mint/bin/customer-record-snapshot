@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+from typing import Any
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_identity_common import (  # noqa: E402
+    apply_quote_context_customer_identity,
+    customer_identity_from_row,
+    db_json_query,
+    normalize_space,
+    query_customer_rows,
+    sql_escape,
+)
+from customer_contact_graph_common import resolve_contact_graph  # noqa: E402
+from customer_quote_context_common import load_quote_policy, resolve_quote_context  # noqa: E402
+from operator_mail_common import fail, resolve_spine_root, resolve_spine_state  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.customer.record.snapshot"
+DEFAULT_SEED_LIMIT = 10
+DEFAULT_LEGACY_ORDER_LIMIT = 10
+DEFAULT_FRESH_ORDER_LIMIT = 10
+
+
+def is_uuid_like(value: Any) -> bool:
+    text = normalize_space(value or "")
+    if not text:
+        return False
+    try:
+        uuid.UUID(text)
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return True
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-record-snapshot",
+        description=(
+            "Read-only Mint customer record surface across fresh-slate customer truth, "
+            "fresh-slate seed/order truth, and legacy-hold order/line-item history."
+        ),
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--email", help="Customer email address")
+    group.add_argument("--name", help="Exact legal/display customer name")
+    group.add_argument("--record-id", help="Customer record id")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def run_cap_json(spine_root: Path, capability: str, args: list[str]) -> tuple[dict[str, Any], str]:
+    cmd = [str(spine_root / "bin" / "ops"), "cap", "run", capability]
+    if args:
+        cmd.extend(["--", *args])
+    result = subprocess.run(cmd, cwd=spine_root, capture_output=True, text=True, check=False)
+    combined = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    if result.returncode != 0:
+        fail(f"{capability} failed: {combined.strip()}")
+    receipt = ""
+    for line in (result.stdout or "").splitlines():
+        if line.startswith("Receipt:"):
+            receipt = line.split(":", 1)[1].strip()
+    text = (result.stdout or "").strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        fail(f"{capability} returned non-JSON output")
+    return json.loads(text[start : end + 1]), receipt
+
+
+def query_fresh_orders(spine_root: Path, customer_record_id: str) -> list[dict[str, Any]]:
+    sql = f"""
+select coalesce(json_agg(row_to_json(t)), '[]'::json)
+from (
+  select
+    id::text as order_id,
+    customer_id::text as customer_id,
+    coalesce(created_at::text, '') as created_at
+  from public.orders
+  where customer_id = '{sql_escape(customer_record_id)}'::uuid
+  order by created_at desc
+  limit {DEFAULT_FRESH_ORDER_LIMIT}
+) t;
+"""
+    return db_json_query(spine_root, "mint_modules", sql)
+
+
+def query_legacy_orders(spine_root: Path, legacy_customer_id: int) -> list[dict[str, Any]]:
+    sql = f"""
+select coalesce(json_agg(row_to_json(t)), '[]'::json)
+from (
+  select
+    o.id::text as legacy_order_row_id,
+    coalesce(o.visual_id, o.order_number, o.id::text) as invoice_number,
+    coalesce(o.order_nickname, '') as nickname,
+    coalesce(o.status, '') as status,
+    o.customer_id::text as legacy_customer_id,
+    coalesce(o.due_date::text, '') as due_date,
+    coalesce(o.production_due_date::text, '') as production_due_date,
+    coalesce(o.created_at::text, '') as created_at,
+    coalesce(o.printavo_url, '') as printavo_url,
+    coalesce(li.total_quantity, 0) as total_quantity
+  from legacy_mint_os.orders o
+  left join (
+    select order_id, sum(coalesce(total_quantity, 0)) as total_quantity
+    from legacy_mint_os.line_items
+    group by order_id
+  ) li on li.order_id = o.id
+  where o.customer_id = {legacy_customer_id}
+  order by o.created_at desc nulls last, o.id desc
+  limit {DEFAULT_LEGACY_ORDER_LIMIT}
+) t;
+"""
+    return db_json_query(spine_root, "mint_legacy", sql)
+
+
+def query_legacy_line_items(spine_root: Path, legacy_order_row_id: str) -> list[dict[str, Any]]:
+    sql = f"""
+select coalesce(json_agg(row_to_json(t)), '[]'::json)
+from (
+  select
+    li.id::text as line_item_id,
+    coalesce(li.order_visual_id, '') as order_visual_id,
+    coalesce(li.style_number, '') as style_number,
+    coalesce(li.style_description, '') as style_description,
+    coalesce(li.color, '') as color,
+    coalesce(li.total_quantity, 0) as total_quantity,
+    json_strip_nulls(
+      json_build_object(
+        'XS', nullif(li.size_xs, 0),
+        'S', nullif(li.size_s, 0),
+        'M', nullif(li.size_m, 0),
+        'L', nullif(li.size_l, 0),
+        'XL', nullif(li.size_xl, 0),
+        'XXL', nullif(li.size_2_xl, 0),
+        'XXXL', nullif(li.size_3_xl, 0),
+        '4XL', nullif(li.size_4_xl, 0),
+        '5XL', nullif(li.size_5_xl, 0)
+      )
+    ) as size_breakdown
+  from legacy_mint_os.line_items li
+  where li.order_id = {int(legacy_order_row_id)}
+  order by li.id
+) t;
+"""
+    return db_json_query(spine_root, "mint_legacy", sql)
+
+
+def query_legacy_imprints(spine_root: Path, legacy_order_row_id: str) -> list[dict[str, Any]]:
+    sql = f"""
+select coalesce(json_agg(row_to_json(t)), '[]'::json)
+from (
+  select
+    i.id::text as imprint_id,
+    coalesce(i.location, '') as location,
+    coalesce(i.cob_location, '') as cob_location,
+    coalesce(i.personalization_location, '') as personalization_location,
+    coalesce(i.width::text, '') as width,
+    coalesce(i.height::text, '') as height,
+    coalesce(i.decoration_type, '') as decoration_type,
+    coalesce(i.description, '') as description,
+    coalesce(i.notes, '') as notes,
+    coalesce(i.colors_count, 0) as colors_count,
+    array_remove(array_agg(distinct lil.line_item_id::text), null) as line_item_ids
+  from legacy_mint_os.imprints i
+  left join legacy_mint_os.imprints_line_item_lnk lil on lil.imprint_id = i.id
+  where i.order_id = {int(legacy_order_row_id)}
+  group by i.id
+  order by i.id
+) t;
+"""
+    return db_json_query(spine_root, "mint_legacy", sql)
+
+
+def query_seed_rows(spine_root: Path, email: str) -> tuple[dict[str, Any], str]:
+    return run_cap_json(spine_root, "mint.seeds.query", ["--json", "--email", email.lower(), "--limit", str(DEFAULT_SEED_LIMIT)])
+
+
+def query_payment_visibility(spine_root: Path, *, email: str, customer_record_id: str) -> tuple[dict[str, Any], str]:
+    args = ["--json"]
+    if normalize_space(email):
+        args.extend(["--email", email.lower()])
+    elif is_uuid_like(customer_record_id):
+        args.extend(["--customer-id", customer_record_id])
+    else:
+        return (
+            {
+                "capability": "mint.payment.record.snapshot",
+                "state": "no_record_found",
+                "match_count": 0,
+                "latest": None,
+                "matches": [],
+            },
+            "",
+        )
+    return run_cap_json(spine_root, "mint.payment.record.snapshot", args)
+
+
+def query_artifact_visibility(spine_root: Path, *, email: str, latest_seed_id: str) -> tuple[dict[str, Any], str]:
+    args = ["--json"]
+    if normalize_space(latest_seed_id):
+        args.extend(["--seed-id", latest_seed_id])
+    elif normalize_space(email):
+        args.extend(["--email", email.lower()])
+    else:
+        return (
+            {
+                "capability": "mint.artifact.record.snapshot",
+                "state": "no_artifact_found",
+                "match_count": 0,
+                "active_count": 0,
+                "latest": None,
+                "artifacts": [],
+            },
+            "",
+        )
+    return run_cap_json(spine_root, "mint.artifact.record.snapshot", args)
+
+
+def query_artwork_intelligence_visibility(
+    spine_root: Path,
+    *,
+    email: str,
+    customer_record_id: str,
+    latest_seed_id: str,
+) -> tuple[dict[str, Any], str]:
+    args = ["--json"]
+    if normalize_space(latest_seed_id):
+        args.extend(["--seed-id", latest_seed_id])
+    elif normalize_space(email):
+        args.extend(["--email", email.lower()])
+    elif is_uuid_like(customer_record_id):
+        args.extend(["--customer-id", customer_record_id])
+    else:
+        return (
+            {
+                "capability": "mint.artwork.intelligence.snapshot",
+                "state": "no_analysis_found",
+                "match_count": 0,
+                "latest": None,
+                "matches": [],
+            },
+            "",
+        )
+    return run_cap_json(spine_root, "mint.artwork.intelligence.snapshot", args)
+
+
+def query_printavo_visibility(
+    spine_root: Path,
+    *,
+    email: str,
+    customer_record_id: str,
+    latest_seed_id: str,
+) -> tuple[dict[str, Any], str]:
+    args = ["--json"]
+    if normalize_space(latest_seed_id):
+        args.extend(["--seed-id", latest_seed_id])
+    elif is_uuid_like(customer_record_id):
+        args.extend(["--customer-id", customer_record_id])
+    elif normalize_space(email):
+        args.extend(["--email", email.lower()])
+    else:
+        return (
+            {
+                "capability": "mint.printavo.bridge.snapshot",
+                "state": "no_record_found",
+                "match_count": 0,
+                "latest": None,
+                "matches": [],
+            },
+            "",
+        )
+    return run_cap_json(spine_root, "mint.printavo.bridge.snapshot", args)
+
+
+def derive_agent_state(customer_rows: list[dict[str, Any]], seed_rows: list[dict[str, Any]], fresh_orders: list[dict[str, Any]], legacy_orders: list[dict[str, Any]]) -> dict[str, Any]:
+    customer_exists = bool(customer_rows)
+    seed_exists = bool(seed_rows)
+    fresh_order_exists = bool(fresh_orders)
+    legacy_order_exists = bool(legacy_orders)
+    if customer_exists and seed_exists and fresh_order_exists:
+        state = "existing_customer_fresh_truth_present"
+    elif customer_exists and seed_exists:
+        state = "existing_customer_seed_truth_present"
+    elif customer_exists and legacy_order_exists and not seed_exists:
+        state = "existing_customer_legacy_history_only"
+    elif customer_exists and not legacy_order_exists and not seed_exists:
+        state = "existing_customer_no_job_history"
+    elif seed_exists and not customer_exists:
+        state = "seed_present_customer_unresolved"
+    else:
+        state = "no_record_found"
+
+    next_step = (
+        "use fresh-slate seed/order truth as primary agent anchor"
+        if fresh_order_exists or seed_exists
+        else (
+            "create a fresh-slate seed/work object and anchor it to the latest legacy order history"
+            if customer_exists and legacy_order_exists
+            else (
+                "resolve customer identity before creating fresh-slate seed truth"
+                if customer_exists
+                else "treat as new customer and create first seed record"
+            )
+        )
+    )
+    return {
+        "state": state,
+        "customer_exists": customer_exists,
+        "seed_exists": seed_exists,
+        "fresh_order_exists": fresh_order_exists,
+        "legacy_order_exists": legacy_order_exists,
+        "next_step": next_step,
+    }
+
+
+def text_output(summary: dict[str, Any]) -> str:
+    customer = dict(summary.get("fresh_slate", {}).get("customer") or {})
+    identity = dict(summary.get("fresh_slate", {}).get("identity") or {})
+    latest_legacy_order = dict(summary.get("legacy_hold", {}).get("latest_order") or {})
+    latest_seed = dict(summary.get("fresh_slate", {}).get("latest_seed") or {})
+    agent_state = dict(summary.get("agent_state") or {})
+    quote_intelligence = dict(summary.get("quote_intelligence") or {})
+    payment_visibility = dict(summary.get("payment_visibility") or {})
+    latest_payment = dict(payment_visibility.get("latest") or {})
+    artifact_visibility = dict(summary.get("artifact_visibility") or {})
+    artwork_intelligence_visibility = dict(summary.get("artwork_intelligence_visibility") or {})
+    printavo_visibility = dict(summary.get("printavo_visibility") or {})
+    latest_printavo = dict(printavo_visibility.get("latest") or {})
+    context_summary = dict((quote_intelligence.get("customer_context_match") or {}).get("summary") or {})
+    contact_graph = dict(summary.get("company_contact_graph") or {})
+    contact_graph_summary = dict(contact_graph.get("summary") or {})
+    lines = [
+        CAPABILITY_NAME,
+        f"query_value: {summary.get('query_value', '')}",
+        f"agent_state: {agent_state.get('state', '')}",
+        f"customer: {identity.get('display_name') or customer.get('name') or customer.get('company') or ''}",
+        f"fresh_customer_record_id: {customer.get('record_id', '')}",
+        f"legacy_customer_id: {customer.get('legacy_customer_id', '')}",
+        f"customer_facing_name: {identity.get('greeting_name') or identity.get('preferred_name') or ''}",
+        f"quote_context_match: {(quote_intelligence.get('customer_context_match') or {}).get('match_mode', '')}",
+        f"contact_graph_match: {contact_graph.get('match_mode') or ''}",
+        f"contact_graph_contacts: {', '.join(contact_graph_summary.get('contact_names') or [])}",
+        f"quote_segments: {', '.join(context_summary.get('segments') or [])}",
+        f"quote_exception: {context_summary.get('exception') or ''}",
+        f"artifact_visibility: {artifact_visibility.get('state') or ''}",
+        f"active_artifact_count: {artifact_visibility.get('active_count') or 0}",
+        f"artwork_intelligence: {artwork_intelligence_visibility.get('state') or ''}",
+        f"printavo_visibility: {printavo_visibility.get('state') or ''}",
+        f"latest_printavo_state: {latest_printavo.get('printavo_state') or ''}",
+        f"payment_visibility: {payment_visibility.get('state') or ''}",
+        f"latest_payment_state: {latest_payment.get('payment_state') or ''}",
+        f"latest_seed_id: {latest_seed.get('seed_id', '')}",
+        f"latest_legacy_order: {latest_legacy_order.get('invoice_number', '')} {latest_legacy_order.get('nickname', '')}".strip(),
+        f"next_step: {agent_state.get('next_step', '')}",
+    ]
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    query_value = normalize_space(args.email or args.name or args.record_id or "")
+    email = normalize_space(args.email or "").lower()
+    customer_rows = query_customer_rows(
+        spine_root,
+        email=email,
+        name=args.name or "",
+        record_id=args.record_id or "",
+    )
+    customer = dict(customer_rows[0]) if customer_rows else {}
+    identity = customer_identity_from_row(customer) if customer else {}
+    resolved_email = normalize_space(email or customer.get("email") or "").lower()
+
+    seed_payload: dict[str, Any] = {"rows": []}
+    seed_receipt = ""
+    seed_rows: list[dict[str, Any]] = []
+    if resolved_email:
+        seed_payload, seed_receipt = query_seed_rows(spine_root, resolved_email)
+        seed_rows = list(seed_payload.get("rows") or [])
+
+    payment_payload, payment_receipt = query_payment_visibility(
+        spine_root,
+        email=resolved_email,
+        customer_record_id=str(customer.get("record_id") or ""),
+    )
+
+    fresh_orders: list[dict[str, Any]] = []
+    legacy_orders: list[dict[str, Any]] = []
+    latest_legacy_line_items: list[dict[str, Any]] = []
+    latest_legacy_imprints: list[dict[str, Any]] = []
+
+    if is_uuid_like(customer.get("record_id")):
+        fresh_orders = query_fresh_orders(spine_root, str(customer["record_id"]))
+    if customer.get("legacy_customer_id"):
+        legacy_orders = query_legacy_orders(spine_root, int(customer["legacy_customer_id"]))
+    if legacy_orders:
+        latest_legacy_line_items = query_legacy_line_items(spine_root, str(legacy_orders[0]["legacy_order_row_id"]))
+        latest_legacy_imprints = query_legacy_imprints(spine_root, str(legacy_orders[0]["legacy_order_row_id"]))
+
+    latest_seed = dict(seed_rows[0]) if seed_rows else {}
+    artifact_payload, artifact_receipt = query_artifact_visibility(
+        spine_root,
+        email=resolved_email,
+        latest_seed_id=str(latest_seed.get("seed_id") or ""),
+    )
+    artwork_intelligence_payload, artwork_intelligence_receipt = query_artwork_intelligence_visibility(
+        spine_root,
+        email=resolved_email,
+        customer_record_id=str(customer.get("record_id") or ""),
+        latest_seed_id=str(latest_seed.get("seed_id") or ""),
+    )
+    printavo_payload, printavo_receipt = query_printavo_visibility(
+        spine_root,
+        email=resolved_email,
+        customer_record_id=str(customer.get("record_id") or ""),
+        latest_seed_id=str(latest_seed.get("seed_id") or ""),
+    )
+    latest_legacy_order = dict(legacy_orders[0]) if legacy_orders else {}
+    quote_policy = load_quote_policy(spine_root)
+    customer_name = identity.get("legal_name") or customer.get("name") or args.name or ""
+    company = customer.get("company") or ""
+    company_contact_graph = resolve_contact_graph(
+        state_root,
+        email=email or customer.get("email") or "",
+        company=company,
+        domains=[resolved_email.rsplit("@", 1)[-1]] if "@" in resolved_email else [],
+        participant_emails=[resolved_email] if resolved_email else [],
+    )
+    quote_context_match = resolve_quote_context(
+        state_root,
+        email=email or customer.get("email") or "",
+        customer_name=customer_name,
+        company=company,
+    )
+    quote_intelligence = {
+        "policy_contract": quote_policy["path"],
+        "house_policy": {
+            "minimum_pieces": quote_policy["minimum_pieces"],
+            "preferred_order_floor_usd": quote_policy["preferred_order_floor_usd"],
+        },
+        "terminology": quote_policy["terminology"],
+        "customer_context_match": quote_context_match,
+        "customer_context": quote_context_match.get("context"),
+    }
+    identity = apply_quote_context_customer_identity(identity, quote_intelligence)
+    summary = {
+        "capability": CAPABILITY_NAME,
+        "query_value": query_value,
+        "query_mode": "email" if args.email else ("name" if args.name else "record_id"),
+        "email": resolved_email,
+        "fresh_slate": {
+            "customer": customer or None,
+            "customers": customer_rows,
+            "identity": identity or None,
+            "customer_match_count": len(customer_rows),
+            "seed_count": len(seed_rows),
+            "latest_seed": latest_seed or None,
+            "fresh_order_count": len(fresh_orders),
+            "fresh_orders": fresh_orders,
+        },
+        "legacy_hold": {
+            "legacy_order_count": len(legacy_orders),
+            "latest_order": latest_legacy_order or None,
+            "orders": legacy_orders,
+            "latest_order_line_items": latest_legacy_line_items,
+            "latest_order_imprints": latest_legacy_imprints,
+        },
+        "agent_state": derive_agent_state(customer_rows, seed_rows, fresh_orders, legacy_orders),
+        "artifact_visibility": artifact_payload,
+        "artwork_intelligence_visibility": artwork_intelligence_payload,
+        "printavo_visibility": printavo_payload,
+        "payment_visibility": payment_payload,
+        "company_contact_graph": company_contact_graph,
+        "source_boundaries": {
+            "fresh_customer_table": "mint_modules.public.customers",
+            "fresh_seed_lane": "mint_modules.public.artwork_seeds via mint.seeds.query",
+            "canonical_artifact_runtime": ".data/mint/artifacts via mint.artifact.record.snapshot",
+            "canonical_artwork_intelligence_runtime": ".data/mint/artwork-intelligence via mint.artwork.intelligence.snapshot",
+            "canonical_printavo_runtime": ".data/mint/printavo-bridges + orders via mint.printavo.bridge.snapshot",
+            "fresh_order_table": "mint_modules.public.orders",
+            "canonical_payment_runtime": ".data/mint/orders + payment-captures via mint.payment.record.snapshot",
+            "legacy_order_table": "mint_legacy.legacy_mint_os.orders",
+            "legacy_line_item_table": "mint_legacy.legacy_mint_os.line_items",
+        },
+        "quote_intelligence": quote_intelligence,
+        "receipts": {
+            "seed_query_receipt": seed_receipt or None,
+            "artifact_snapshot_receipt": artifact_receipt or None,
+            "artwork_intelligence_snapshot_receipt": artwork_intelligence_receipt or None,
+            "printavo_snapshot_receipt": printavo_receipt or None,
+            "payment_snapshot_receipt": payment_receipt or None,
+        },
+    }
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+
+    print(text_output(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

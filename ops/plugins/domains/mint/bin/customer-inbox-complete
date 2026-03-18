@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_identity_common import normalize_space  # noqa: E402
+from customer_inbox_machine_common import (  # noqa: E402
+    load_inbox_item_by_id,
+    load_inbox_item_by_message_id,
+    load_machine_contract,
+    transition_inbox_item,
+)
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    compact_utc,
+    iso_utc,
+    message_body_text,
+    resolve_spine_root,
+    resolve_spine_state,
+    run_cap_capture,
+    utc_now,
+    write_json,
+)
+
+
+CAPABILITY_NAME = "mint.customer.inbox.complete"
+SCHEMA_VERSION = "1.0"
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-inbox-complete",
+        description="Canonical governed Mint inbox completion path: review or park a drafted inbox item. Agent send is blocked.",
+    )
+    parser.add_argument("--action", required=True, choices=("review", "send", "park"))
+    parser.add_argument("--inbox-item-id", default="", help="Governed inbox item id")
+    parser.add_argument("--message-id", default="", help="Canonical team mailbox source message id")
+    parser.add_argument("--mailbox", default="team@mintprints.com", help="Canonical team mailbox (default: team@mintprints.com)")
+    parser.add_argument("--note", default="", help="Optional operator note to persist on send or park")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    if not normalize_space(args.inbox_item_id) and not normalize_space(args.message_id):
+        fail("provide --inbox-item-id or --message-id")
+    return args
+
+
+def load_json_file(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def iter_index_records(index_file: Path) -> list[dict[str, Any]]:
+    if not index_file.is_file():
+        return []
+    records: list[dict[str, Any]] = []
+    for raw in index_file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
+
+
+def legacy_record_file_for_index_entry(state_root: Path, entry: dict[str, Any]) -> Path | None:
+    reply_draft_id = normalize_space(entry.get("reply_draft_id") or "")
+    stored_at = normalize_space(entry.get("stored_at_utc") or "")
+    if not reply_draft_id or not stored_at:
+        return None
+    try:
+        from datetime import datetime
+
+        dt = datetime.strptime(stored_at, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+    path = (
+        state_root
+        / "mint"
+        / "customer-reply-drafts"
+        / "records"
+        / dt.strftime("%Y")
+        / dt.strftime("%m")
+        / dt.strftime("%d")
+        / f"{reply_draft_id}.json"
+    )
+    return path if path.is_file() else None
+
+
+def locate_reply_draft_record(state_root: Path, *, mailbox: str, source_message_id: str, inbox_item_id: str) -> tuple[dict[str, Any], Path]:
+    index_file = state_root / "mint" / "customer-reply-drafts" / "index.ndjson"
+    for entry in reversed(iter_index_records(index_file)):
+        entry_mailbox = normalize_space(entry.get("mailbox") or "").lower()
+        entry_source_message_id = normalize_space(entry.get("source_message_id") or "")
+        entry_inbox_item_id = normalize_space(entry.get("inbox_item_id") or "")
+        if entry_mailbox and entry_mailbox != mailbox.lower():
+            continue
+        if entry_source_message_id != source_message_id:
+            continue
+        if entry_inbox_item_id and entry_inbox_item_id != inbox_item_id:
+            continue
+        record_path = Path(str(entry.get("record_file") or "")).expanduser()
+        if not record_path.is_file():
+            legacy = legacy_record_file_for_index_entry(state_root, entry)
+            record_path = legacy if legacy is not None else record_path
+        if not record_path.is_file():
+            continue
+        record = load_json_file(record_path)
+        if not record:
+            continue
+        if normalize_space(record.get("source_message_id") or "") != source_message_id:
+            continue
+        if normalize_space(record.get("author_mode") or "") != "morpheus":
+            continue
+        if normalize_space(record.get("draft_id") or ""):
+            return record, record_path
+    raise SystemExit("no governed Morpheus draft found for this inbox item")
+
+
+def unwrap_message(payload: dict[str, Any]) -> dict[str, Any]:
+    data = payload.get("data")
+    if isinstance(data, dict) and data.get("id"):
+        return data
+    return payload
+
+
+def format_recipients(message: dict[str, Any], key: str) -> str:
+    recipients = []
+    for entry in list(message.get(key) or []):
+        email = normalize_space((((entry or {}).get("emailAddress") or {}).get("address")) or "")
+        if email:
+            recipients.append(email)
+    return ", ".join(recipients)
+
+
+def load_draft_message(spine_root: Path, *, mailbox: str, draft_id: str) -> tuple[dict[str, Any], str]:
+    payload, receipt = run_cap_capture(spine_root, "microsoft.mail.get", ["--message-id", draft_id, "--mailbox", mailbox])
+    return unwrap_message(payload), receipt
+
+
+def write_completion_record(state_root: Path, record: dict[str, Any]) -> tuple[Path, Path]:
+    from datetime import datetime, timezone
+
+    stored_at = normalize_space(record.get("stored_at_utc") or "")
+    try:
+        dt = datetime.fromisoformat(stored_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        dt = utc_now()
+    records_dir = state_root / "mint" / "customer-inbox-completions" / "records" / dt.strftime("%Y") / dt.strftime("%m") / dt.strftime("%d")
+    record_file = records_dir / f"{record['completion_id']}.json"
+    index_file = state_root / "mint" / "customer-inbox-completions" / "index.ndjson"
+    lock_file = state_root / "mint" / "customer-inbox-completions" / ".index.lock"
+    write_json(record_file, record)
+    append_ndjson(
+        index_file,
+        lock_file,
+        {
+            "stored_at_utc": record.get("stored_at_utc"),
+            "completion_id": record.get("completion_id"),
+            "action": record.get("action"),
+            "inbox_item_id": record.get("inbox_item_id"),
+            "message_id": record.get("source_message_id"),
+            "workflow_state_before": record.get("workflow_state_before"),
+            "workflow_state_after": record.get("workflow_state_after"),
+            "record_file": str(record_file),
+        },
+    )
+    return record_file, index_file
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    now = utc_now()
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    contract = load_machine_contract(spine_root)
+
+    inbox_item = load_inbox_item_by_id(state_root, args.inbox_item_id) if normalize_space(args.inbox_item_id) else {}
+    if not inbox_item and normalize_space(args.message_id):
+        inbox_item = load_inbox_item_by_message_id(state_root, args.message_id)
+    if not inbox_item:
+        fail("inbox item not found")
+
+    inbox_item_id = normalize_space(inbox_item.get("inbox_item_id") or "")
+    source_message_id = normalize_space((((inbox_item.get("team_message_anchor") or {}).get("message_id")) or args.message_id or ""))
+    mailbox = normalize_space(args.mailbox or inbox_item.get("mailbox") or "team@mintprints.com")
+    workflow_state_before = normalize_space(inbox_item.get("workflow_state") or "")
+    if not source_message_id:
+        fail("inbox item is missing team message anchor")
+
+    draft_record, draft_record_path = locate_reply_draft_record(
+        state_root,
+        mailbox=mailbox,
+        source_message_id=source_message_id,
+        inbox_item_id=inbox_item_id,
+    )
+    draft_id = normalize_space(draft_record.get("draft_id") or "")
+    if not draft_id:
+        fail("draft record is missing draft_id")
+
+    draft_message, draft_read_receipt = load_draft_message(spine_root, mailbox=mailbox, draft_id=draft_id)
+    workflow_state_after = workflow_state_before
+    completion_note = normalize_space(args.note)
+    send_payload: dict[str, Any] | None = None
+    send_receipt = ""
+
+    if args.action == "send":
+        fail("agent outbound email sending is disabled by policy; review or park the governed draft instead")
+
+    if args.action in {"send", "park"} and workflow_state_before != "drafted":
+        fail(f"inbox item must be in drafted state before {args.action}; current state is {workflow_state_before or 'unknown'}")
+
+    if args.action == "park":
+        closed_note = completion_note or "parked after governed draft review"
+        updated_item = transition_inbox_item(
+            state_root,
+            contract=contract,
+            message_id=source_message_id,
+            new_state="closed",
+            note=closed_note,
+            actor=CAPABILITY_NAME,
+            queue_claim={},
+        )
+        workflow_state_after = normalize_space(updated_item.get("workflow_state") or "closed")
+
+    completion_id = f"MIC-{compact_utc(now)}-{args.action}-{inbox_item_id[-6:].lower()}"
+    draft_subject = normalize_space(draft_message.get("subject") or draft_record.get("draft_subject") or "")
+    draft_to = format_recipients(draft_message, "toRecipients") or normalize_space(draft_record.get("draft_to") or "")
+    draft_cc = format_recipients(draft_message, "ccRecipients") or normalize_space(draft_record.get("draft_cc") or "")
+    draft_content_type = normalize_space(((draft_message.get("body") or {}).get("contentType")) or draft_record.get("draft_content_type") or "")
+    draft_body_preview = normalize_space(message_body_text(draft_message) or draft_record.get("body_preview") or "")[:280]
+
+    record = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "completion_id": completion_id,
+        "stored_at_utc": iso_utc(now),
+        "action": args.action,
+        "mailbox": mailbox,
+        "inbox_item_id": inbox_item_id,
+        "source_message_id": source_message_id,
+        "workflow_state_before": workflow_state_before,
+        "workflow_state_after": workflow_state_after,
+        "draft": {
+            "reply_draft_id": normalize_space(draft_record.get("reply_draft_id") or ""),
+            "draft_id": draft_id,
+            "record_file": str(draft_record_path),
+            "subject": draft_subject,
+            "to": draft_to,
+            "cc": draft_cc,
+            "content_type": draft_content_type,
+            "body_preview": draft_body_preview,
+            "attachment_count": len(draft_record.get("attachments") or []),
+            "thread_mode": normalize_space(draft_record.get("thread_mode") or ""),
+        },
+        "provider_receipts": {
+            "draft_read_receipt": draft_read_receipt or None,
+            "draft_send_receipt": send_receipt or None,
+        },
+        "provider_results": {
+            "draft_send": send_payload or None,
+        },
+        "note": completion_note or None,
+    }
+    record_file, index_file = write_completion_record(state_root, record)
+    record["record_file"] = str(record_file)
+    record["index_file"] = str(index_file)
+
+    payload = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "generated_at": iso_utc(now),
+        "data": {
+            "completion_id": completion_id,
+            "action": args.action,
+            "mailbox": mailbox,
+            "inbox_item_id": inbox_item_id,
+            "source_message_id": source_message_id,
+            "workflow_state_before": workflow_state_before,
+            "workflow_state_after": workflow_state_after,
+            "draft_id": draft_id,
+            "reply_draft_id": normalize_space(draft_record.get("reply_draft_id") or ""),
+            "draft_subject": draft_subject,
+            "draft_to": draft_to,
+            "draft_cc": draft_cc,
+            "draft_content_type": draft_content_type,
+            "draft_body_preview": draft_body_preview,
+            "draft_attachment_count": len(draft_record.get("attachments") or []),
+            "record_file": str(record_file),
+            "index_file": str(index_file),
+            "provider_receipts": record["provider_receipts"],
+        },
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(CAPABILITY_NAME)
+    print(f"action: {args.action}")
+    print(f"inbox_item_id: {inbox_item_id}")
+    print(f"workflow_state_before: {workflow_state_before}")
+    print(f"workflow_state_after: {workflow_state_after}")
+    print(f"draft_id: {draft_id}")
+    print(f"reply_draft_id: {normalize_space(draft_record.get('reply_draft_id') or '')}")
+    print(f"draft_subject: {draft_subject}")
+    print(f"draft_to: {draft_to}")
+    print(f"record_file: {record_file}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

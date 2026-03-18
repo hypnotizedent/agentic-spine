@@ -6,6 +6,7 @@ REGISTRY="${SPINE_ROOT}/ops/bindings/launchd.scheduler.registry.yaml"
 SCHEDULER_STATUS_SCRIPT="${SPINE_ROOT}/ops/plugins/infra/host/bin/launchd-scheduler-health-status"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 AUTO_RESTART=0
+SELF_LABEL="com.ronny.launchd-health-check"
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
 
 while [[ $# -gt 0 ]]; do
@@ -91,13 +92,18 @@ check_launchd_health() {
   local scheduler_payload scheduler_status scheduler_stale scheduler_failed scheduler_unknown scheduler_total
   local scheduler_stale_labels scheduler_failed_labels
   scheduler_payload="$("$SCHEDULER_STATUS_SCRIPT" --json 2>/dev/null || true)"
-  scheduler_status="$(jq -r '.status // "unknown"' <<<"$scheduler_payload" 2>/dev/null || echo "unknown")"
-  scheduler_stale="$(jq -r '.data.summary.stale // 0' <<<"$scheduler_payload" 2>/dev/null || echo "0")"
-  scheduler_failed="$(jq -r '.data.summary.failed // 0' <<<"$scheduler_payload" 2>/dev/null || echo "0")"
-  scheduler_unknown="$(jq -r '.data.summary.unknown // 0' <<<"$scheduler_payload" 2>/dev/null || echo "0")"
   scheduler_total="$(jq -r '.data.summary.total // 0' <<<"$scheduler_payload" 2>/dev/null || echo "0")"
-  scheduler_stale_labels="$(jq -r '.data.stale_labels // [] | join(", ")' <<<"$scheduler_payload" 2>/dev/null || true)"
-  scheduler_failed_labels="$(jq -r '.data.failed_labels // [] | join(", ")' <<<"$scheduler_payload" 2>/dev/null || true)"
+  scheduler_stale_labels="$(jq -r --arg self_label "$SELF_LABEL" '.data.stale_labels // [] | map(select(. != $self_label)) | join(", ")' <<<"$scheduler_payload" 2>/dev/null || true)"
+  scheduler_failed_labels="$(jq -r --arg self_label "$SELF_LABEL" '.data.failed_labels // [] | map(select(. != $self_label)) | join(", ")' <<<"$scheduler_payload" 2>/dev/null || true)"
+  scheduler_stale="$(jq -r --arg self_label "$SELF_LABEL" '.data.stale_labels // [] | map(select(. != $self_label)) | length' <<<"$scheduler_payload" 2>/dev/null || echo "0")"
+  scheduler_failed="$(jq -r --arg self_label "$SELF_LABEL" '.data.failed_labels // [] | map(select(. != $self_label)) | length' <<<"$scheduler_payload" 2>/dev/null || echo "0")"
+  scheduler_unknown="$(jq -r --arg self_label "$SELF_LABEL" '.data.unknown_labels // [] | map(select(. != $self_label)) | length' <<<"$scheduler_payload" 2>/dev/null || echo "0")"
+  scheduler_status="ok"
+  if [[ "$scheduler_failed" -gt 0 ]]; then
+    scheduler_status="error"
+  elif [[ "$scheduler_stale" -gt 0 || "$scheduler_unknown" -gt 0 ]]; then
+    scheduler_status="warn"
+  fi
 
   if [[ "$scheduler_status" == "warn" || "$scheduler_status" == "error" ]]; then
     spine_enqueue_email_intent \

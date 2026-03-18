@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_quote_context_common import (  # noqa: E402
+    canonical_job_type,
+    context_contract_path,
+    dedupe_segments,
+    normalize_email,
+    normalize_space,
+    selector_summary,
+    store_paths,
+    to_money,
+)
+from operator_mail_common import append_ndjson, compact_utc, fail, iso_utc, resolve_spine_root, resolve_spine_state, utc_now, write_json  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.customer.quote.context.set"
+SCHEMA_VERSION = "1.0"
+ALLOWED_CONFIDENCE = {"low", "medium", "high"}
+ALLOWED_VOLUME_EXPECTATION = {"standard", "expected_volume"}
+ALLOWED_DEFAULT_POSTURE = {"standard", "discouraged", "allowed_as_exception", "decline_default"}
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-quote-context-set",
+        description=(
+            "Persist governed customer quote context so Morpheus can use segment-aware shop policy, "
+            "customer-specific exception rules, and house quoting posture without prompt-only memory."
+        ),
+    )
+    parser.add_argument("--email", default="", help="Canonical customer email key")
+    parser.add_argument("--customer-name", default="", help="Customer/operator-facing human name")
+    parser.add_argument("--company", default="", help="Customer company/account label")
+    parser.add_argument("--segment", action="append", default=[], help="Customer segment/type label (repeatable)")
+    parser.add_argument(
+        "--volume-expectation",
+        default="standard",
+        help="Relationship volume expectation: standard|expected_volume",
+    )
+    parser.add_argument("--relationship-note", default="", help="Operator note about how this customer is handled")
+    parser.add_argument("--job-type", default="", help="Optional quote exception job type, e.g. memorial")
+    parser.add_argument(
+        "--default-posture",
+        default="standard",
+        help="Default posture for the job type: standard|discouraged|allowed_as_exception|decline_default",
+    )
+    parser.add_argument(
+        "--allow-goodwill-exception",
+        action="store_true",
+        help="Mark that this customer can receive a goodwill exception for the job type",
+    )
+    parser.add_argument("--flat-rate-each-usd", default="", help="Optional flat-rate per-piece override in USD")
+    parser.add_argument("--exception-note", default="", help="Operator note explaining the exception rule")
+    parser.add_argument("--source", default="operator_confirmed", help="Provenance source")
+    parser.add_argument("--set-by", default=os.environ.get("USER", "unknown"), help="Operator or system setting the record")
+    parser.add_argument("--confidence", default="high", help="Confidence: low|medium|high")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+
+    if not any(normalize_space(value) for value in (args.email, args.customer_name, args.company)):
+        fail("provide at least one selector: --email, --customer-name, or --company")
+    if args.confidence not in ALLOWED_CONFIDENCE:
+        fail("confidence must be one of: low, medium, high")
+    if args.volume_expectation not in ALLOWED_VOLUME_EXPECTATION:
+        fail("volume-expectation must be one of: standard, expected_volume")
+    if args.default_posture not in ALLOWED_DEFAULT_POSTURE:
+        fail("default-posture must be one of: standard, discouraged, allowed_as_exception, decline_default")
+    has_exception = any(
+        normalize_space(value)
+        for value in (args.job_type, args.flat_rate_each_usd, args.exception_note)
+    ) or args.allow_goodwill_exception
+    if has_exception and not normalize_space(args.job_type):
+        fail("job-type is required when setting an exception rule")
+    if not args.segment and not normalize_space(args.relationship_note) and not has_exception:
+        fail("provide at least one segment, relationship note, or exception rule")
+    if normalize_space(args.flat_rate_each_usd) and to_money(args.flat_rate_each_usd) is None:
+        fail("flat-rate-each-usd must be numeric")
+    return args
+
+
+def build_quote_context(args: argparse.Namespace, stored_at_utc: str) -> dict[str, Any]:
+    exception_rule: dict[str, Any] | None = None
+    if any(
+        normalize_space(value)
+        for value in (args.job_type, args.flat_rate_each_usd, args.exception_note)
+    ) or args.allow_goodwill_exception:
+        pricing_override: dict[str, Any] = {}
+        unit_price = to_money(args.flat_rate_each_usd)
+        if unit_price is not None:
+            pricing_override = {
+                "mode": "flat_rate_each",
+                "unit_price_usd": unit_price,
+                "currency": "USD",
+            }
+        exception_rule = {
+            "job_type": canonical_job_type(args.job_type),
+            "default_posture": args.default_posture,
+            "goodwill_exception_allowed": bool(args.allow_goodwill_exception),
+            "pricing_override": pricing_override or None,
+            "operator_note": normalize_space(args.exception_note) or None,
+        }
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "segments": dedupe_segments(args.segment),
+        "relationship": {
+            "volume_expectation": args.volume_expectation,
+            "operator_note": normalize_space(args.relationship_note) or None,
+        },
+        "exception_rule": exception_rule,
+        "provenance": {
+            "source": normalize_space(args.source) or "operator_confirmed",
+            "set_by": normalize_space(args.set_by) or "unknown",
+            "confidence": args.confidence,
+            "updated_at_utc": stored_at_utc,
+        },
+    }
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    now = utc_now()
+    stored_at_utc = iso_utc(now)
+    context_id = f"MCQ-{compact_utc(now)}"
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    paths = store_paths(state_root)
+    contract = context_contract_path(spine_root)
+
+    selector = selector_summary(email=args.email, customer_name=args.customer_name, company=args.company)
+    record = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "context_id": context_id,
+        "stored_at_utc": stored_at_utc,
+        "contract": str(contract),
+        "selector": selector,
+        "quote_context": build_quote_context(args, stored_at_utc),
+    }
+    records_dir = paths["records_root"] / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{context_id}.json"
+    write_json(record_file, record)
+    append_ndjson(
+        paths["index_file"],
+        paths["lock_file"],
+        {
+            "context_id": context_id,
+            "stored_at_utc": stored_at_utc,
+            "selector": selector,
+            "segment_labels": [item["label"] for item in (record["quote_context"].get("segments") or [])],
+            "job_type": ((record["quote_context"].get("exception_rule") or {}) or {}).get("job_type"),
+            "record_file": str(record_file),
+        },
+    )
+
+    payload = {
+        "capability": CAPABILITY_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "generated_at": stored_at_utc,
+        "data": {
+            "context_id": context_id,
+            "selector": selector,
+            "quote_context": record["quote_context"],
+            "record_file": str(record_file),
+            "index_file": str(paths["index_file"]),
+            "contract": str(contract),
+        },
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(CAPABILITY_NAME)
+    print(f"context_id: {context_id}")
+    print(f"selector_email: {normalize_email(args.email)}")
+    print(f"customer_name: {normalize_space(args.customer_name)}")
+    print(f"company: {normalize_space(args.company)}")
+    print(f"record_file: {record_file}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

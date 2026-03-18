@@ -1,0 +1,66 @@
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-12
+scope: mint-customer-quote-brief
+
+version: "1.0"
+updated_at: "2026-03-17"
+
+surface:
+  capability: mint.customer.quote.brief
+  operator_terminal: MINT-MORPHEUS-01
+  description: Generate the canonical Mint customer-lane operator report from mailbox context, disposition, module invocation truth, and governed quote/lifecycle state. Customer draft preview is optional and suppressed by default.
+
+storage:
+  records_root: "$SPINE_STATE/mint/customer-quote-briefs/records"
+  index_file: "$SPINE_STATE/mint/customer-quote-briefs/index.ndjson"
+  lock_file: "$SPINE_STATE/mint/customer-quote-briefs/.index.lock"
+
+dependencies:
+  source_get_capability: microsoft.mail.get
+  source_attachments_capability: microsoft.mail.attachments.list
+  source_history_capability: communications.mail.search
+  customer_snapshot_capability: mint.customer.record.snapshot
+  module_invocation_capability: mint.customer.quote.intake
+  lifecycle_capability: mint.customer.lifecycle.resolve
+  policy_contract: ops/bindings/mint.quote.intelligence.policy.contract.yaml
+  customer_context_contract: ops/bindings/mint.customer.quote.context.contract.yaml
+  fleet_identity_contract: ops/bindings/mint.fleet.identity.contract.yaml
+
+explanation_policy:
+  operator_identity_ref: internal_operator_explanation_variants.per_agent.morpheus
+  customer_identity_ref: customer_safe_explanation_variants.per_agent.morpheus
+  why_agent_instead_of_ronny_ref: customer_safe_explanation_variants.why_agent_instead_of_ronny
+  auto_append_to_reply_preview: false
+
+reasoning_policy:
+  evidence_first: true
+  context_first_default: true
+  recommend_then_confirm: true
+  high_confidence_confirmation_question_limit: 1
+  history_query_top: 12
+  artwork_link_domains:
+    - drive.google.com
+    - docs.google.com
+    - dropbox.com
+    - onedrive.live.com
+    - 1drv.ms
+    - sharepoint.com
+  carry_forward_rules:
+    - "Build mailbox history, prior order truth, and prior artwork truth before drafting or clarification in the normal customer quote flow."
+    - "Classify the current ask into reused, changed, and missing against historical truth so Morpheus asks only for the minimum unresolved blocker."
+    - "When a repeat-customer message adds embroidery and includes a source attachment, treat the attachment as intended logo evidence before asking which logo."
+    - "When a forwarded customer chain includes a governed cloud-storage artwork link, treat that link as artwork evidence before flagging missing artwork."
+    - "When prior-order location evidence exists, recommend the same placement first and ask for confirmation instead of re-asking the full technical spec set."
+    - "Ask only for the truly blocking delta after the recommendation, not every technical input the customer is unlikely to know."
+  embroidery_defaults:
+    left_chest_width_inches: 4
+    minimum_pieces: 12
+    confirmation_phrase: "I see the logo you attached and I am treating it as the same left-chest logo unless you want it handled differently."
+
+required_output_fields:
+  - customer
+  - operator_report
+  - operator_brief
+  - context_analysis
+  - reply_preview

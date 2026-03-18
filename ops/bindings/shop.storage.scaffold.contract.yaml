@@ -1,0 +1,373 @@
+status: authoritative
+owner: "@ronny"
+last_verified: "2026-03-17"
+scope: shop-storage-scaffold
+
+intent: >
+  Provide a boring, agent-readable storage scaffold for the shop rack.
+  This contract separates current baseline from target naming/layout so
+  agents do not infer storage meaning from stale workbench prose, mixed
+  md1400 top-level roots, or incidental cross-pool mount overlays.
+
+precedence:
+  concern: shop-storage-layout-and-lane-meaning
+  order:
+    - ops/bindings/shop.storage.map.yaml
+    - ops/bindings/shop.media.pressure.authority.yaml
+    - ops/bindings/backup.inventory.yaml
+    - ops/bindings/infra.storage.placement.policy.yaml
+    - docs/governance/SHOP_SERVER_SSOT.md
+    - /Users/ronnyworks/code/workbench/docs/infrastructure/domains/shop/SHOP_SERVER_SSOT.md
+  rule: >
+    If generated spine bindings/projections conflict with older workbench shop
+    prose, the spine bindings/projections win.
+
+live_observation_precedence:
+  concern: live-observed-shop-storage-state
+  order:
+    - ops/bindings/shop.storage.atlas.yaml
+    - ops/bindings/shop.media.pressure.authority.yaml
+    - ops/bindings/shop.storage.map.yaml
+    - docs/governance/SHOP_SERVER_SSOT.md
+  rule: >
+    Use the storage atlas for observed host reality and the scaffold/map for target
+    lane meaning. Observed state does not redefine target boringness by itself.
+
+current_boring_baseline:
+  tank:
+    role: hot_runtime
+    rules:
+      - "tank/vms is the primary runtime disk lane for kept shop guests."
+      - "tank/docker is the primary runtime app-state lane for NFS-backed service stacks."
+      - "tank/immich is the primary runtime photo-library lane."
+      - "tank/backups/vzdump/dump is source-generation staging only, not the canonical cold restore plane."
+      - "tank/backups answers 'did the backup job run?' not 'what do we restore from?'."
+  media:
+    role: warm_payload
+    rules:
+      - "/media is the client-visible payload truth for the media stack."
+      - "media is not a backup plane."
+      - "downloads are regenerable pressure, not backup authority."
+  md1400:
+    role: cold_plane
+    rules:
+      - "md1400/backup-cold is the canonical cold backup and restore plane for the shop environment."
+      - "md1400/backup-cold answers 'what do we restore from?' for shop cold recovery."
+      - "md1400/archive is the explicit archive plane for live-share, cold-media, media-hold, and backup-hold content."
+      - "md1400/archive/live-share is the authoritative archive/live-share payload lane."
+      - "md1400/archive/media-library is the authoritative cold-retention lane for intentionally kept media promoted out of the hot-home library."
+      - "md1400/archive/media-holds and md1400/archive/backup-holds are explicit non-runtime hold lanes."
+      - "md1400/stage is temporary migration/staging space only."
+      - "Any additional md1400 top-level root must be classified as backup-cold, archive, stage, or tombstone before agents treat it as legitimate."
+
+current_md1400_top_level_map:
+  - root: /md1400/backup-cold
+    class: cold_restore_primary
+    posture: keep
+    rationale: canonical shop cold recovery plane
+  - root: /md1400/stage
+    class: ephemeral_stage
+    posture: keep_with_ttl
+    rationale: copy-first and migration landing zone
+  - root: /md1400/archive
+    class: explicit_archive_namespace
+    posture: keep
+    rationale: governed archive namespace for live-share, media-hold, and backup-hold content
+
+known_confusion_sources:
+  - id: tank-backups-vs-md1400-backups
+    summary: "tank/backups is generation staging; md1400/backup-cold is canonical cold restore."
+  - id: vm-disk-vs-guest-state
+    summary: "Agents can confuse guest boot disks, tank/vms zvols, tank/docker NFS state, and local-lvm exceptions as if they answered the same question."
+  - id: big-data-surface-mixing
+    summary: "Immich library, live media payload, cold retained media, and archive/live-share data are different big-data classes with different truth lanes."
+  - id: media-view-drift
+    summary: "Client-visible /media payload truth still outranks host-local child dataset views, even after the /media/movies-archive cross-pool mask was removed."
+  - id: stale-workbench-detail
+    summary: "Older workbench shop docs contain February snapshots and must not outrank March spine projections."
+
+backup_truth_model:
+  premise: "A backup artifact that has been generated is not automatically the canonical restore truth."
+  operator_questions:
+    - question: "Where do fresh Proxmox VM/LXC backup jobs land first?"
+      answer: /tank/backups/vzdump/dump
+      lane: generation_staging
+    - question: "Where is the canonical cold restore copy for shop VM/LXC recovery?"
+      answer: /md1400/backup-cold/vzdump/pve
+      lane: canonical_cold_restore
+    - question: "Where is the canonical app/domain backup truth for the shop rack?"
+      answer: /md1400/backup-cold/apps/<domain>
+      lane: canonical_cold_restore
+    - question: "Where do archive-smb dataset protection manifests live?"
+      answer: /md1400/backup-cold/archive-smb/snapshots
+      lane: canonical_cold_restore
+  lane_contract:
+    generation_staging:
+      canonical_path: /tank/backups/vzdump/dump
+      purpose: "Local job output and short-horizon holding lane before promotion."
+      answers:
+        - "Did the scheduled backup run?"
+        - "What fresh artifact is available for promotion or verification?"
+      must_not_be_used_as:
+        - cold_restore_truth
+        - long_term_backup_authority
+    canonical_cold_restore:
+      canonical_path: /md1400/backup-cold
+      purpose: "Authoritative cold restore plane for the shop rack."
+      answers:
+        - "What artifact do we restore from?"
+        - "What copy remains authoritative after staging cleanup or churn?"
+      governed_sublanes:
+        - /md1400/backup-cold/vzdump/pve
+        - /md1400/backup-cold/apps/<domain>
+        - /md1400/backup-cold/archive-smb/snapshots
+  rules:
+    - "If the same runtime unit exists in both tank/backups and md1400/backup-cold, md1400/backup-cold wins as restore truth."
+    - "Pruning tank/backups after successful promotion is normal and does not change restore authority."
+    - "Do not park archive content, media payload, or migration scratch data under md1400/backup-cold."
+    - "Every md1400/backup-cold subtree must map to a governed backup lane, not a generic catch-all folder."
+
+vm_storage_truth_model:
+  premise: "VM storage truth is about primary runtime guest disks, not every place a guest may also mount or cache data."
+  operator_questions:
+    - question: "Where do primary runtime disks for kept shop VMs/LXCs belong by default?"
+      answer: /tank/vms
+      lane: runtime_guest_primary
+    - question: "Where do NFS-backed app VMs keep their primary config/state surfaces?"
+      answer: /tank/docker/<stack>
+      lane: runtime_app_state
+    - question: "What is local-lvm in the boring model?"
+      answer: "pve system/boot pool and temporary accepted-risk guest boot exceptions, not the default answer for durable shop guest state"
+      lane: system_or_exception_only
+    - question: "Does archive-smb LXC own the authoritative archive payload?"
+      answer: "No. The LXC rootfs is a service wrapper; the archive payload truth belongs to md1400."
+      lane: archive_payload_runtime
+  lane_contract:
+    runtime_guest_primary:
+      canonical_path: /tank/vms
+      purpose: "Primary runtime block-storage lane for kept guests that need durable VM/LXC disks."
+      answers:
+        - "Where is the guest's primary runtime disk?"
+        - "What storage plane should new durable VM/LXC disks target by default?"
+      approved_shapes:
+        - /tank/vms/vm-<id>-disk-<n>
+        - /tank/vms/subvol-<id>-disk-<n>
+        - guest data disks backed by tank zvols
+    runtime_app_state:
+      canonical_path: /tank/docker
+      purpose: "Primary runtime config/state lane for NFS-backed application stacks exposed into guests."
+      answers:
+        - "Where does a service stack's durable config/state live when exported over NFS?"
+        - "What is the truth lane for download-stack and streaming-stack config/state?"
+      examples:
+        - /tank/docker/download-stack
+        - /tank/docker/streaming-stack
+    system_or_exception_only:
+      canonical_surface: pve/local-lvm
+      purpose: "Hypervisor OS/supporting thinpool plus explicitly accepted guest boot-only exceptions."
+      answers:
+        - "Where is the Proxmox system surface?"
+        - "Where do temporary or accepted-risk guest boot exceptions still exist?"
+      must_not_be_used_as:
+        - default_vm_runtime_truth
+        - growing_guest_data_home
+    archive_payload_runtime:
+      canonical_path: /md1400/archive/live-share
+      purpose: "Authoritative archive/live-share payload served by archive-smb."
+      answers:
+        - "Where does archive/live-share data actually live?"
+        - "What remains authoritative if the archive-smb rootfs is rebuilt?"
+  current_transition_exceptions:
+    - "immich VM boot disk remains on local-lvm, but the photo library runtime truth is tank/immich."
+    - "infra-core, observability, dev-tools, ai-consolidation, finance-stack, and mint-apps still carry accepted boot-only posture because their durable state is small."
+    - "archive-smb rootfs restores from vzdump, but archive payload truth remains md1400 dataset state."
+  rules:
+    - "For kept guests with durable block storage, /tank/vms wins as the default runtime disk truth."
+    - "Do not treat local-lvm as the boring long-term home for growing guest data."
+    - "/tank/docker/<stack> is runtime app-state truth, not media payload truth and not backup truth."
+    - "If a guest serves md1400 data, the md1400 dataset remains authoritative for payload; the guest rootfs is only the serving wrapper."
+
+big_data_truth_model:
+  premise: "Big data requires one truth per lifecycle class: photo library, live media payload, cold retained media, and archive/live-share."
+  operator_questions:
+    - question: "Where is the runtime truth for the photo library?"
+      answer: /tank/immich
+      lane: photo_library_runtime
+    - question: "Where is the runtime-visible truth for media payload?"
+      answer: /media
+      lane: live_media_payload
+    - question: "Where do intentionally kept watched titles belong once they leave the hot home library?"
+      answer: /md1400/archive/media-library
+      lane: cold_retained_media
+    - question: "Where is the runtime truth for archive/live-share data?"
+      answer: /md1400/archive/live-share
+      lane: archive_live_share
+    - question: "What is md1400/archive/media-holds in the boring model?"
+      answer: "An explicit archive-hold bucket for residual media holds that are not runtime truth."
+      lane: legacy_hold_noncanonical
+  lane_contract:
+    photo_library_runtime:
+      canonical_path: /tank/immich
+      purpose: "Authoritative runtime dataset for Immich photos and related large library state."
+      answers:
+        - "Where does the Immich library live?"
+        - "What dataset grows when photo volume grows?"
+    live_media_payload:
+      canonical_path: /media
+      purpose: "Authoritative runtime-visible media payload lane."
+      answers:
+        - "Where do clients and media VMs read live media from?"
+        - "Where do movies, tv, music, downloads, and movies-archive belong in steady state?"
+      governed_subpaths:
+        - /media/movies
+        - /media/tv
+        - /media/music
+        - /media/downloads
+        - /media/movies-archive
+    cold_retained_media:
+      canonical_path: /md1400/archive/media-library
+      purpose: "Authoritative cold-retention lane for intentionally kept media that leaves the hot-home library."
+      answers:
+        - "Where does intentionally kept watched media live after promotion off home?"
+        - "What is the cold-shop truth lane for media keepers?"
+      governed_subpaths:
+        - /md1400/archive/media-library/movies
+        - /md1400/archive/media-library/tv
+        - /md1400/archive/media-library/music
+    archive_live_share:
+      canonical_path: /md1400/archive/live-share
+      purpose: "Authoritative archive/share payload lane for slower-moving live-share datasets."
+      answers:
+        - "Where do archive/live-share datasets belong?"
+        - "What remains authoritative if archive-smb is rebuilt?"
+      governed_subpaths:
+        - /md1400/archive/live-share/mint-legacy
+        - /md1400/archive/live-share/ronny-projects
+    legacy_hold_noncanonical:
+      canonical_path: /md1400/archive/media-holds
+      purpose: "Explicit archive-hold bucket for residual media holds that are not runtime truth."
+      answers:
+        - "Where should legacy media hold content live after normalization?"
+  current_transition_exceptions:
+    - "/md1400/archive/media-holds is an explicit hold lane, not runtime truth."
+    - "/md1400/archive/backup-holds/tank-backups preserves historical non-canonical backup residue outside the cold restore plane."
+  rules:
+    - "Immich runtime growth belongs to tank/immich, not to the VM boot disk and not to md1400."
+    - "Live media payload belongs to /media and remains distinct from backup and archive planes."
+    - "Cold retained media promoted out of home belongs to /md1400/archive/media-library and is not runtime-visible by default."
+    - "movies-archive is part of the live media lane, not an archive lane."
+    - "Archive/live-share data belongs to md1400/archive/live-share, not to loose top-level md1400 roots."
+    - "Any cold copy of big data belongs under md1400 backup/archive lanes without reusing the live runtime path."
+
+accepted_decisions:
+  - id: movies-archive-lane
+    accepted_at: "2026-03-17"
+    status: accepted
+    decision: "movies-archive is a warm runtime-visible media surface"
+    implications:
+      - "/media/movies-archive remains part of the runtime-visible media lane."
+      - "md1400 must not remain the long-term mounted backing for /media/movies-archive."
+      - "Any cold copy or hold for movies-archive must be represented as archive/backup, not as the live runtime path."
+
+ideal_boring_target:
+  top_level_rules:
+    - "Every top-level md1400 root must be a lifecycle class, not a business/project name."
+    - "No pool may hide another pool's runtime path via incidental mount overlay."
+    - "Backup, archive, stage, and tombstone lanes must be visually distinct."
+    - "local-lvm is a system or explicit exception surface, not the default guest growth plane."
+    - "Hardware refresh does not authorize namespace drift."
+  canonical_tree: |
+    /tank
+      /vms
+      /docker
+      /immich
+      /backups
+        /vzdump
+          /dump
+
+    /media
+      /movies
+      /tv
+      /music
+      /downloads
+      /movies-archive
+
+    /md1400
+      /backup-cold
+        /vzdump
+          /pve
+        /apps
+          /communications
+          /dev-tools
+          /finance
+          /infra-core
+          /media-config
+          /mint-data
+        /archive-smb
+          /snapshots
+      /archive
+        /backup-holds
+          /tank-backups
+            /<lane>
+        /live-share
+          /mint-legacy
+          /ronny-projects
+        /media-library
+          /movies
+          /tv
+          /music
+        /media-holds
+          /legacy-media-stack-backups
+          /immich-vhs-imports
+      /stage
+        /<wave-or-purpose>
+      /tombstones
+        /<unit-id>
+
+normalization_rules:
+  - "movies-archive is accepted as part of the live /media export and belongs to the media lane."
+  - "Keep /media/movies-archive on the media lane instead of remounting md1400 over it."
+  - "If a cold copy of movies-archive is needed, express it as archive/backup state under md1400 without reusing the live runtime mountpoint."
+  - "Cold retained media promoted out of the home hot library belongs under /md1400/archive/media-library."
+  - "Do not remount /md1400/archive/media-library into the default live /media export."
+  - "The live /media export should not also be registered as a Proxmox dir-storage backend."
+  - "New durable guest disks should default to /tank/vms unless a governed exception exists."
+  - "Growing app-state exposed over NFS should default to /tank/docker/<stack> rather than guest boot disks."
+  - "Immich runtime growth should stay on tank/immich."
+  - "Archive/live-share payload should stay under /md1400/archive/live-share."
+  - "stage must be empty between waves or contain only owner+date scoped subpaths."
+  - "tombstones must be review-bound and restorable, never silent leftovers."
+  - "archive live-share data must live under one archive namespace, not as loose top-level roots."
+  - "The canonical shop backup truth remains md1400/backup-cold; tank/backups remains source-generation only."
+
+next_normalization_wave:
+  objective: "Reduce remaining warm-lane pressure from /media/downloads and restore boring import flow without reintroducing namespace drift."
+  required_outcomes:
+    - "/media remains single-lane and carries only the canonical media roots."
+    - "/md1400/stage stays empty between waves."
+    - "download-stack import automation stops reporting false zero-free-space conditions."
+    - "media runway recovers below the guard threshold so hardware changes are not forced under capacity pressure."
+  non_goals:
+    - "Do not introduce new top-level roots during the wave."
+    - "Do not treat drive replacement as the same change as namespace normalization."
+
+hardware_refresh_policy:
+  rule: >
+    New disks change physical backing only. They do not justify new top-level path
+    names, mixed backup/archive roots, or opportunistic data reshuffles before the
+    scaffold is accepted.
+  applies_to:
+    - media-lane drive replacement
+    - boot/root mirror replacement
+
+drive_change_gate:
+  current_state: blocked
+  reasons:
+    - "media remains above the capacity guard threshold"
+    - "download-stack imports are still pinned by an app-level zero-free-space gate"
+    - "GAP-OP-1526 remains active"
+  unblock_when:
+    - "This scaffold remains accepted as the naming contract."
+    - "/md1400/stage stays empty between waves."
+    - "download-stack import automation resumes normal import flow."
+    - "media runway recovers below the guard threshold and GAP-OP-1526 is no longer active."

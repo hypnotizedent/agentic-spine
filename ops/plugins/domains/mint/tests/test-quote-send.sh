@@ -114,12 +114,12 @@ templates:
     channel: email
     subject: "Payment needed for order {{order_number}}"
     body_text: |
-      Hi {{customer_name}},
+      {{customer_salutation}}
 
       Your order {{order_number}} has a balance due of {{balance_amount}}.
       Pay now: {{payment_link}}
     required_variables:
-      - customer_name
+      - customer_salutation
       - order_number
       - balance_amount
       - payment_link

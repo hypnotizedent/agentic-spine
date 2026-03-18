@@ -13,7 +13,9 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
-from quote_packet_normalize import append_receipt, dump_yaml, fail, load_structured_file, now_utc, update_index
+from customer_mail_identity_common import project_mail_identity, salutation_text, validate_mail_identity_projection
+from mint_runtime_paths import resolve_mint_data_root, resolve_spine_root
+from quote_packet_normalize import append_receipt, dump_yaml, fail, load_structured_file, now_utc, sync_quote_readiness, update_index
 
 
 TERMINAL_PACKET_STATES = {"paid", "closed"}
@@ -139,8 +141,18 @@ def derived_email_consent(packet: dict[str, Any], explicit: str | None) -> str:
 
 def customer_display_name(packet: dict[str, Any], quote: dict[str, Any]) -> str:
     customer_ref = packet.get("customer_ref") or {}
+    projection = project_mail_identity(
+        customer_ref=customer_ref,
+        resolved_name=str(quote.get("customer_name") or ""),
+        resolved_email=str(quote.get("customer_email") or ""),
+        contact_name=str(quote.get("customer_contact_name") or ""),
+        greeting_name=str(quote.get("customer_greeting_name") or ""),
+        mail_salutation_mode=str(quote.get("mail_salutation_mode") or ""),
+    )
     return str(
-        customer_ref.get("resolved_name")
+        projection.get("greeting_name")
+        or projection.get("contact_name")
+        or customer_ref.get("resolved_name")
         or quote.get("customer_name")
         or customer_ref.get("customer_query")
         or customer_ref.get("customer_id")
@@ -170,6 +182,15 @@ def quote_send_blocking_reasons(packet: dict[str, Any], quote: dict[str, Any]) -
         reasons.append("customer identity is not resolved")
     if not str(customer_ref.get("resolved_email") or "").strip():
         reasons.append("resolved customer email is required before quote send")
+    projection = project_mail_identity(
+        customer_ref=customer_ref,
+        resolved_name=str(quote.get("customer_name") or ""),
+        resolved_email=str(quote.get("customer_email") or ""),
+        contact_name=str(quote.get("customer_contact_name") or ""),
+        greeting_name=str(quote.get("customer_greeting_name") or ""),
+        mail_salutation_mode=str(quote.get("mail_salutation_mode") or ""),
+    )
+    reasons.extend(f"customer mail identity invalid: {reason}" for reason in validate_mail_identity_projection(projection))
 
     if not isinstance(packet.get("quote_draft_ref"), dict):
         reasons.append("quote_draft_ref is missing")
@@ -257,8 +278,17 @@ def run_json_command(command: list[str], label: str) -> dict[str, Any]:
 
 def send_template_vars(packet: dict[str, Any], quote: dict[str, Any]) -> dict[str, Any]:
     payment = payment_ref(packet)
+    projection = project_mail_identity(
+        customer_ref=packet.get("customer_ref") or {},
+        resolved_name=str(quote.get("customer_name") or ""),
+        resolved_email=str(quote.get("customer_email") or ""),
+        contact_name=str(quote.get("customer_contact_name") or ""),
+        greeting_name=str(quote.get("customer_greeting_name") or ""),
+        mail_salutation_mode=str(quote.get("mail_salutation_mode") or ""),
+    )
     return {
         "customer_name": customer_display_name(packet, quote),
+        "customer_salutation": salutation_text(projection, named_prefix="Hi"),
         "order_number": str(packet.get("order_id") or quote.get("order_id") or ""),
         "balance_amount": format_money(payment.get("payment_amount") or ((packet.get("pricing_snapshot") or {}).get("calculated_totals") or {}).get("total")),
         "payment_link": str(payment.get("payment_link_url") or ""),
@@ -294,9 +324,8 @@ def print_existing_summary(packet: dict[str, Any], quote: dict[str, Any], quote_
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
+    spine_root = resolve_spine_root(__file__)
+    mint_root = resolve_mint_data_root(spine_root=spine_root, current_file=__file__)
 
     packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (mint_root / "quote-packets"))
     packet_index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (mint_root / "quote-packets-index.yaml"))
@@ -428,6 +457,7 @@ def main(argv: list[str]) -> int:
     quote["quote_state"] = "sent"
     quote["sent_at"] = timestamp
     quote["updated_at"] = timestamp
+    readiness = sync_quote_readiness(packet)
 
     dump_yaml(packet_file, packet)
     dump_yaml(quote_file, quote)
@@ -453,6 +483,8 @@ def main(argv: list[str]) -> int:
     print("send_status: success")
     print("message_type: payment_needed")
     print("provider: resend")
+    print(f"quote_readiness_state: {readiness['state']}")
+    print(f"quote_next_step: {readiness['next_step']}")
     print(f"consent_state: {consent_state}")
     print(f"preview_id: {preview_id}")
     print(f"preview_receipt: {preview_receipt}")

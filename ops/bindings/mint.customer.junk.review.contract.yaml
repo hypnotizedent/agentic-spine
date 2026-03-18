@@ -1,0 +1,56 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-17
+scope: mint-customer-junk-review
+version: 1
+
+surface:
+  review_capability: mint.customer.junk.review
+  sweep_capability: mint.customer.junk.sweep
+  drain_capability: mint.customer.junk.drain
+  clear_capability: mint.customer.junk.clear
+  operator_terminal: MINT-MORPHEUS-01
+  description: Review and boringly clean the Outlook Junk Email lane without letting junk-folder contents create customer truth.
+  default_mailbox: team@mintprints.com
+  source_folder: Junk Email
+  restore_folder: Inbox
+  drain_folder: Deleted Items
+  review_top: 50
+  review_order: newest_first
+
+storage:
+  review_records_root: "$SPINE_STATE/mint/customer-junk-reviews/records"
+  review_index_file: "$SPINE_STATE/mint/customer-junk-reviews/index.ndjson"
+  review_lock_file: "$SPINE_STATE/locks/mint-customer-junk-reviews.lock"
+  sweep_records_root: "$SPINE_STATE/mint/customer-junk-sweeps/records"
+  sweep_index_file: "$SPINE_STATE/mint/customer-junk-sweeps/index.ndjson"
+  sweep_lock_file: "$SPINE_STATE/locks/mint-customer-junk-sweeps.lock"
+
+workflow:
+  folder_messages_capability: microsoft.mail.folder.messages
+  folder_ensure_capability: microsoft.mail.folder.ensure
+  source_get_capability: microsoft.mail.get
+  move_capability: microsoft.mail.move
+  hydrate_full_message_for_review_classes:
+    - real_customer_false_positive
+  drain_dispositions:
+    - risky_junk
+  classification_actions:
+    supplier_marketing:
+      review_class: supplier_marketing
+      action: move_to_supplier_marketing
+      destination_folder: Supplier Marketing
+    risky_junk:
+      review_class: risky_junk
+      action: leave_in_junk
+      destination_folder: Junk Email
+    restore_default:
+      review_class: real_customer_false_positive
+      action: restore_to_inbox
+      destination_folder: Inbox
+
+notes:
+  - Junk Mail is a quarantine lane, not a customer work queue.
+  - Review should classify from real Outlook contents when available; hydrate with microsoft.mail.get before deciding sweep actions.
+  - Only three boring outcomes are legal in this lane: leave risky junk in place, route supplier marketing to Supplier Marketing, or restore false positives to Inbox.

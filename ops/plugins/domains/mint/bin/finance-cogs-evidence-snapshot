@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from operator_mail_common import fail, resolve_spine_root, resolve_spine_state  # noqa: E402
+from vendor_cogs_common import (  # noqa: E402
+    load_json,
+    normalize_text,
+    read_ndjson,
+    record_sort_timestamp,
+    runtime_paths,
+)
+
+
+CAPABILITY_FALLBACK = "mint.finance.cogs.evidence.snapshot"
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_FINANCE_COGS_EVIDENCE_CAPABILITY_NAME") or CAPABILITY_FALLBACK
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="finance-cogs-evidence-snapshot",
+        description="Read governed Mint finance/COGS evidence captured from vendor receipt emails.",
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--finance-evidence-id", default="", help="Canonical finance_evidence_id")
+    group.add_argument("--vendor-receipt-id", default="", help="Canonical vendor_receipt_id")
+    group.add_argument("--message-id", default="", help="Vendor mailbox message id")
+    group.add_argument("--external-order-number", default="", help="Printavo/PO order number")
+    group.add_argument("--vendor-order-number", default="", help="Vendor order number such as SO-159108817")
+    group.add_argument("--seed-id", default="", help="Canonical seed_id")
+    group.add_argument("--customer-id", default="", help="Canonical customer record id")
+    group.add_argument("--email", default="", help="Customer email address")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    return parser.parse_args(argv)
+
+
+def query_mode(args: argparse.Namespace) -> tuple[str, str]:
+    for field in (
+        "finance_evidence_id",
+        "vendor_receipt_id",
+        "message_id",
+        "external_order_number",
+        "vendor_order_number",
+        "seed_id",
+        "customer_id",
+        "email",
+    ):
+        value = normalize_text(getattr(args, field))
+        if value:
+            return field, value.lower() if field == "email" else value
+    return "", ""
+
+
+def entry_matches(entry: dict[str, Any], mode: str, value: str) -> bool:
+    if mode == "finance_evidence_id":
+        return normalize_text(entry.get("finance_evidence_id")) == value
+    if mode == "vendor_receipt_id":
+        return normalize_text(entry.get("vendor_receipt_id")) == value
+    if mode == "message_id":
+        return normalize_text(entry.get("source_message_id")) == value
+    if mode == "external_order_number":
+        return normalize_text(entry.get("external_order_number")) == value
+    if mode == "vendor_order_number":
+        return normalize_text(entry.get("vendor_order_number")) == value
+    if mode == "seed_id":
+        return normalize_text(entry.get("seed_id")) == value
+    if mode == "customer_id":
+        return normalize_text(entry.get("customer_id")) == value
+    return normalize_text(entry.get("customer_email")).lower() == value
+
+
+def overall_state(matches: list[dict[str, Any]]) -> str:
+    if not matches:
+        return "no_record_found"
+    return normalize_text(matches[0].get("cogs_visibility_state")) or "vendor_receipt_logged_without_cost"
+
+
+def text_output(payload: dict[str, Any]) -> str:
+    latest = payload.get("latest") or {}
+    external_order_ref = dict(latest.get("external_order_ref") or {})
+    totals = dict((latest.get("normalized_extract") or {}).get("totals") or {})
+    lines = [
+        f"capability: {payload['capability']}",
+        f"query_mode: {payload['query_mode']}",
+        f"query_value: {payload['query_value']}",
+        f"state: {payload['state']}",
+        f"match_count: {payload['match_count']}",
+        f"latest_finance_evidence_id: {latest.get('finance_evidence_id', '')}",
+        f"latest_vendor_receipt_id: {latest.get('vendor_receipt_id', '')}",
+        f"external_order_number: {external_order_ref.get('external_order_number', '')}",
+        f"vendor_order_number: {(latest.get('normalized_extract') or {}).get('vendor_order_number', '')}",
+        f"customer_email: {external_order_ref.get('customer_email', '')}",
+        f"cogs_visibility_state: {latest.get('cogs_visibility_state', '')}",
+        f"total_cents: {totals.get('total_cents', '')}",
+    ]
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    mode, value = query_mode(args)
+    if not value:
+        fail("query value is required")
+
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    paths = runtime_paths(spine_root=spine_root, state_root=state_root)
+    index_entries = read_ndjson(paths["finance_cogs_index_file"])
+
+    matches: list[dict[str, Any]] = []
+    seen_record_files: set[str] = set()
+    for entry in index_entries:
+        if not entry_matches(entry, mode, value):
+            continue
+        record_file = normalize_text(entry.get("record_file"))
+        if not record_file or record_file in seen_record_files:
+            continue
+        path = Path(record_file)
+        if not path.is_file():
+            continue
+        seen_record_files.add(record_file)
+        payload = load_json(path)
+        if payload:
+            matches.append(payload)
+
+    matches.sort(key=record_sort_timestamp, reverse=True)
+    payload = {
+        "capability": capability_name(),
+        "query_mode": mode,
+        "query_value": value,
+        "state": overall_state(matches),
+        "match_count": len(matches),
+        "latest": matches[0] if matches else None,
+        "matches": matches,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(text_output(payload))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

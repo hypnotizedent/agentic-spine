@@ -22,6 +22,56 @@
 
 _SSH_RESOLVE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 _SSH_RESOLVE_BINDING="${_SSH_RESOLVE_ROOT}/ops/bindings/ssh.targets.yaml"
+_SSH_ROUTE_HINT_DIR=""
+
+_ssh_route_hint_dir() {
+  if [[ -n "$_SSH_ROUTE_HINT_DIR" ]]; then
+    printf '%s\n' "$_SSH_ROUTE_HINT_DIR"
+    return 0
+  fi
+
+  local runtime_paths_lib="${_SSH_RESOLVE_ROOT}/ops/lib/runtime-paths.sh"
+  if [[ -f "$runtime_paths_lib" ]]; then
+    # shellcheck source=/dev/null
+    source "$runtime_paths_lib"
+    spine_runtime_resolve_paths >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "${SPINE_RUNTIME_ROOT:-}" ]]; then
+    _SSH_ROUTE_HINT_DIR="${SPINE_RUNTIME_ROOT}/network/route-hints"
+  else
+    _SSH_ROUTE_HINT_DIR="${HOME}/code/.runtime/spine/network/route-hints"
+  fi
+
+  printf '%s\n' "$_SSH_ROUTE_HINT_DIR"
+}
+
+ssh_route_hint_read() {
+  local target_id="$1"
+  local dir file hint
+  dir="$(_ssh_route_hint_dir)"
+  file="${dir}/${target_id}.path"
+  [[ -f "$file" ]] || return 1
+  hint="$(tr -d '[:space:]' <"$file" 2>/dev/null || true)"
+  case "$hint" in
+    lan|tailscale|direct) printf '%s\n' "$hint" ;;
+    *) return 1 ;;
+  esac
+}
+
+ssh_route_hint_write() {
+  local target_id="$1"
+  local path_used="$2"
+  local dir file
+  case "$path_used" in
+    lan|tailscale|direct) ;;
+    *) return 0 ;;
+  esac
+  dir="$(_ssh_route_hint_dir)"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  file="${dir}/${target_id}.path"
+  printf '%s\n' "$path_used" >"$file" 2>/dev/null || true
+}
 
 ssh_resolve_host() {
   local target_id="$1"
@@ -94,17 +144,20 @@ PY
 ssh_resolve_host_with_fallback() {
   local target_id="$1"
   local timeout="${2:-3}"
-  local host ts_ip policy
+  local host ts_ip policy hint
   host="$(ssh_resolve_host "$target_id")"
   ts_ip="$(ssh_resolve_tailscale_ip "$target_id")"
   policy="$(ssh_resolve_access_policy "$target_id")"
+  hint="$(ssh_route_hint_read "$target_id" 2>/dev/null || true)"
 
   case "$policy" in
     tailscale_required)
       if [[ -n "$ts_ip" && "$ts_ip" != "null" ]]; then
         if [[ "$ts_ip" != "$host" ]]; then
+          ssh_route_hint_write "$target_id" "tailscale"
           printf '%s tailscale\n' "$ts_ip"
         else
+          ssh_route_hint_write "$target_id" "direct"
           printf '%s direct\n' "$ts_ip"
         fi
         return 0
@@ -132,13 +185,27 @@ ssh_resolve_host_with_fallback() {
       ;;
   esac
 
+  if [[ "$hint" == "lan" ]] && [[ -n "$host" ]] && ping -c 1 -W "$timeout" "$host" >/dev/null 2>&1; then
+    ssh_route_hint_write "$target_id" "lan"
+    printf '%s lan\n' "$host"
+    return 0
+  fi
+
+  if [[ "$hint" == "tailscale" ]] && [[ -n "$ts_ip" && "$ts_ip" != "$host" ]] && ping -c 1 -W "$timeout" "$ts_ip" >/dev/null 2>&1; then
+    ssh_route_hint_write "$target_id" "tailscale"
+    printf '%s tailscale\n' "$ts_ip"
+    return 0
+  fi
+
   # LAN-first: try LAN, fall back to Tailscale
   if [[ -n "$host" ]] && ping -c 1 -W "$timeout" "$host" >/dev/null 2>&1; then
+    ssh_route_hint_write "$target_id" "lan"
     printf '%s lan\n' "$host"
     return 0
   fi
 
   if [[ -n "$ts_ip" && "$ts_ip" != "$host" ]] && ping -c 1 -W "$timeout" "$ts_ip" >/dev/null 2>&1; then
+    ssh_route_hint_write "$target_id" "tailscale"
     printf '%s tailscale\n' "$ts_ip"
     return 0
   fi
@@ -167,17 +234,20 @@ ssh_resolve_probe_host() {
 ssh_resolve_ssh_host_with_fallback() {
   local target_id="$1"
   local timeout="${2:-3}"
-  local host ts_ip policy
+  local host ts_ip policy hint
   host="$(ssh_resolve_host "$target_id")"
   ts_ip="$(ssh_resolve_tailscale_ip "$target_id")"
   policy="$(ssh_resolve_access_policy "$target_id")"
+  hint="$(ssh_route_hint_read "$target_id" 2>/dev/null || true)"
 
   case "$policy" in
     tailscale_required)
       if [[ -n "$ts_ip" && "$ts_ip" != "null" ]] && ssh_tcp_port_open "$ts_ip" 22 "$timeout"; then
         if [[ "$ts_ip" != "$host" ]]; then
+          ssh_route_hint_write "$target_id" "tailscale"
           printf '%s tailscale\n' "$ts_ip"
         else
+          ssh_route_hint_write "$target_id" "direct"
           printf '%s direct\n' "$ts_ip"
         fi
         return 0
@@ -187,6 +257,7 @@ ssh_resolve_ssh_host_with_fallback() {
       ;;
     lan_only)
       if [[ -n "$host" && "$host" != "null" ]] && ssh_tcp_port_open "$host" 22 "$timeout"; then
+        ssh_route_hint_write "$target_id" "lan"
         printf '%s lan\n' "$host"
         return 0
       fi
@@ -194,11 +265,23 @@ ssh_resolve_ssh_host_with_fallback() {
       return 1
       ;;
     lan_first|"")
+      if [[ "$hint" == "lan" ]] && [[ -n "$host" && "$host" != "null" ]] && ssh_tcp_port_open "$host" 22 "$timeout"; then
+        ssh_route_hint_write "$target_id" "lan"
+        printf '%s lan\n' "$host"
+        return 0
+      fi
+      if [[ "$hint" == "tailscale" ]] && [[ -n "$ts_ip" && "$ts_ip" != "$host" ]] && ssh_tcp_port_open "$ts_ip" 22 "$timeout"; then
+        ssh_route_hint_write "$target_id" "tailscale"
+        printf '%s tailscale\n' "$ts_ip"
+        return 0
+      fi
       if [[ -n "$host" && "$host" != "null" ]] && ssh_tcp_port_open "$host" 22 "$timeout"; then
+        ssh_route_hint_write "$target_id" "lan"
         printf '%s lan\n' "$host"
         return 0
       fi
       if [[ -n "$ts_ip" && "$ts_ip" != "$host" ]] && ssh_tcp_port_open "$ts_ip" 22 "$timeout"; then
+        ssh_route_hint_write "$target_id" "tailscale"
         printf '%s tailscale\n' "$ts_ip"
         return 0
       fi
@@ -207,6 +290,7 @@ ssh_resolve_ssh_host_with_fallback() {
       ;;
     *)
       if [[ -n "$host" && "$host" != "null" ]] && ssh_tcp_port_open "$host" 22 "$timeout"; then
+        ssh_route_hint_write "$target_id" "direct"
         printf '%s direct\n' "$host"
         return 0
       fi
@@ -239,6 +323,73 @@ ssh_resolve_url_with_fallback() {
   local resolved_url="${url//$lan_ip/$resolved_ip}"
   printf '%s %s\n' "$resolved_url" "$path_used"
   return 0
+}
+
+# Resolve ordered HTTP URL candidates for a target without pre-judging
+# reachability from ICMP. HTTP probe surfaces should try these candidates in
+# order and let real curl results determine whether fallback is needed.
+# Returns TSV rows: "<candidate_url>\t<path_used>"
+ssh_resolve_url_candidates() {
+  local url="$1"
+  local target_id="$2"
+  local host ts_ip policy url_host hint
+  host="$(ssh_resolve_host "$target_id")"
+  ts_ip="$(ssh_resolve_tailscale_ip "$target_id")"
+  policy="$(ssh_resolve_access_policy "$target_id")"
+  url_host="$(printf '%s\n' "$url" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://([^/:]+).*#\1#')"
+  hint="$(ssh_route_hint_read "$target_id" 2>/dev/null || true)"
+
+  _ssh_emit_url_candidate() {
+    local candidate_host="$1"
+    local candidate_path="$2"
+    local candidate_url="$url"
+    [[ -n "$candidate_host" && "$candidate_host" != "null" ]] || return 0
+    if [[ -n "$host" && "$host" != "null" && "$candidate_host" != "$host" ]]; then
+      candidate_url="${url//$host/$candidate_host}"
+    fi
+    printf '%s\t%s\n' "$candidate_url" "$candidate_path"
+  }
+
+  case "$policy" in
+    tailscale_required)
+      if [[ -n "$ts_ip" && "$ts_ip" != "null" ]]; then
+        if [[ "$ts_ip" != "$host" ]]; then
+          _ssh_emit_url_candidate "$ts_ip" "tailscale"
+        else
+          _ssh_emit_url_candidate "$ts_ip" "direct"
+        fi
+      else
+        _ssh_emit_url_candidate "$host" "unreachable"
+      fi
+      ;;
+    lan_only)
+      _ssh_emit_url_candidate "$host" "lan"
+      ;;
+    lan_first|"")
+      if [[ "$hint" == "tailscale" ]]; then
+        if [[ -n "$ts_ip" && "$ts_ip" != "null" && "$ts_ip" != "$host" ]]; then
+          _ssh_emit_url_candidate "$ts_ip" "tailscale"
+        fi
+        _ssh_emit_url_candidate "$host" "lan"
+      elif [[ "$hint" == "lan" ]]; then
+        _ssh_emit_url_candidate "$host" "lan"
+        if [[ -n "$ts_ip" && "$ts_ip" != "null" && "$ts_ip" != "$host" ]]; then
+          _ssh_emit_url_candidate "$ts_ip" "tailscale"
+        fi
+      elif [[ -n "$ts_ip" && "$ts_ip" != "null" && "$ts_ip" != "$host" && "$url_host" == "$ts_ip" ]]; then
+        _ssh_emit_url_candidate "$ts_ip" "tailscale"
+        _ssh_emit_url_candidate "$host" "lan"
+      else
+        _ssh_emit_url_candidate "$host" "lan"
+        if [[ -n "$ts_ip" && "$ts_ip" != "null" && "$ts_ip" != "$host" ]]; then
+          _ssh_emit_url_candidate "$ts_ip" "tailscale"
+        fi
+      fi
+      ;;
+    *)
+      _ssh_emit_url_candidate "$host" "direct"
+      ;;
+  esac
 }
 
 # Resolve SSH extra opts for a target (e.g. legacy key algorithms)

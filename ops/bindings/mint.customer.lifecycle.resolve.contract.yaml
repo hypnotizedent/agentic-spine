@@ -1,0 +1,86 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-14
+scope: mint-customer-lifecycle-resolve
+
+version: "1.0"
+updated_at: "2026-03-14"
+capability: mint.customer.lifecycle.resolve
+
+surface:
+  description: Resolve governed Mint customer job lifecycle from mailbox thread, quote intake, outbound binding, Printavo bridge, payment visibility, and art-review truth.
+  default_mailbox: team@mintprints.com
+
+dependencies:
+  message_get: microsoft.mail.get
+  quote_intake: mint.customer.quote.intake
+  printavo_snapshot: mint.printavo.bridge.snapshot
+  payment_snapshot: mint.payment.record.snapshot
+
+storage:
+  records_root: "$SPINE_STATE/mint/customer-lifecycle-resolutions/records"
+  index_file: "$SPINE_STATE/mint/customer-lifecycle-resolutions/index.ndjson"
+  lock_file: "$SPINE_STATE/locks/mint-customer-lifecycle-resolutions.lock"
+
+lifecycle_states:
+  clarification_needed_before_quote:
+    reply_mode: clarification_only
+    customer_safe_next_step: "Reply with the last missing detail so I can finish the quote cleanly."
+    operator_next_action: "Capture the blocker answer and rerun the quote lane."
+    current_action: ""
+    draft_allowed: true
+  estimate_ready_pending_quote_creation:
+    reply_mode: guided_estimate
+    customer_safe_next_step: "Confirm the recommended lane so I can turn it into the formal quote."
+    operator_next_action: "Create the live quote from the estimate-safe packet."
+    current_action: ""
+    draft_allowed: true
+  quote_live_pending_customer_response:
+    reply_mode: formal_quote_ready
+    customer_safe_next_step: "Review the live quote and let me know if you want us to move forward."
+    operator_next_action: "Track approval or requested edits on the live quote."
+    current_action: ""
+    draft_allowed: true
+  approved_payment_pending:
+    reply_mode: formal_quote_ready
+    customer_safe_next_step: "Submit payment so I can release this into production."
+    operator_next_action: "Confirm the payment lane and wait for payment capture."
+    current_action: ""
+    draft_allowed: true
+  art_revision_required:
+    reply_mode: art_revision
+    customer_safe_next_step: "I’ll send the updated proof as soon as the next revision is ready."
+    operator_next_action: "Keep the art revision loop moving until the proof passes."
+    current_action: "We are on the next art revision now."
+    draft_allowed: true
+  paid_art_revision_required:
+    reply_mode: art_revision
+    customer_safe_next_step: "I’ll send the updated proof as soon as the next revision is ready."
+    operator_next_action: "Keep the paid art revision loop moving until the proof passes."
+    current_action: "We are on the next art revision now."
+    draft_allowed: true
+  paid_in_production:
+    reply_mode: in_progress
+    customer_safe_next_step: "We have what we need and the job is moving through production."
+    operator_next_action: "Monitor production milestones and only reach out if a real blocker appears."
+    current_action: "This is moving through production now."
+    draft_allowed: true
+  headache_operator_review:
+    reply_mode: not_a_fit
+    customer_safe_next_step: "If you want to simplify the scope by email, I can point you into the cleanest lane we can support."
+    operator_next_action: "Keep this out of the deeper quote lane until the scope is simplified."
+    current_action: ""
+    draft_allowed: true
+  needs_manual_resolution:
+    reply_mode: ""
+    customer_safe_next_step: ""
+    operator_next_action: "Resolve the missing governed thread/order/payment/art linkage before drafting."
+    current_action: ""
+    draft_allowed: false
+
+guards:
+  blocked_customer_target_message: "Need the real customer thread before I can confirm the customer-facing next step."
+  unresolved_lifecycle_message: "Need governed lifecycle resolution before I can pick the next customer-safe step."
+  internal_domains:
+    - mintprints.com

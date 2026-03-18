@@ -1,0 +1,210 @@
+inventory: HOME_MEDIA_RESIDUE_INVENTORY_V1
+version: "1.0"
+status: authoritative
+created: "2026-03-18"
+updated_at: "2026-03-18"
+authority: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
+purpose: "Read-only reset baseline for home media residue after service cutover and before boring cleanup."
+
+observation:
+  observed_at_local: "2026-03-18T00:17:23"
+  collector_host: proxmox-home
+  collector_mount_path: /mnt/media
+  collector_mount_source: 10.0.0.150:/volume1/media-staging
+  runtime_vm:
+    vm_id: 106
+    hostname: media-home
+    compose_project: /srv/appdata/compose/media-stack
+    running_containers: 0
+    runtime_state: intentionally_paused
+  evidence_commands:
+    - "ssh proxmox-home 'findmnt -T /mnt/media -o TARGET,SOURCE,FSTYPE,OPTIONS -n'"
+    - "ssh proxmox-home 'df -B1 /mnt/media | tail -n 1'"
+    - "ssh proxmox-home 'python3 inventory scan over /mnt/media/downloads/* and /mnt/media/{movies,tv,music}'"
+    - "ssh proxmox-home 'qm guest exec 106 -- /bin/sh -lc \"docker ps -q | wc -l\"'"
+
+share_capacity:
+  path: /mnt/media
+  bytes_total: 21090007515136
+  bytes_used: 9497174343680
+  bytes_available: 11592833171456
+  used_pct: 46
+
+root_cause_summary:
+  - "Service cutover completed before historical download residue was triaged."
+  - "`downloads/complete/*` survived the move as retained payload instead of being drained as transit."
+  - "Automation resumed against a sparse live library, which made the system behave like a fresh ingest plane."
+  - "The result is lane confusion: transit paths look like storage, while the actual library remains small."
+
+library_truth_snapshot:
+  movies:
+    count: 1
+    titles:
+      - "10,000 BC (2008)"
+  tv:
+    count: 7
+    series:
+      - "Cheers"
+      - "Narcos"
+      - "Prison Break"
+      - "Severance"
+      - "Superstore"
+      - "The Big Bang Theory"
+      - "The Twilight Zone (1985)"
+  music:
+    count: 34
+    sample_artists:
+      - "Akon"
+      - "Alice in Chains"
+      - "Alison Krauss & Union Station"
+      - "Andy Williams"
+      - "Armin van Buuren"
+      - "Ashanti"
+      - "Backstreet Boys"
+      - "Billie Holiday"
+      - "Blackstreet"
+      - "Charlie Parker"
+
+lanes:
+  - lane_id: downloads.incomplete
+    path: /mnt/media/downloads/incomplete
+    boring_role: transit_only
+    entry_count: 291
+    current_classification: mixed_active_and_stale_residue
+    top_dates:
+      "2026-01-02": 224
+      "2026-03-17": 30
+      "2026-03-18": 28
+      "2026-01-01": 7
+      "2026-01-03": 2
+    newest_sample:
+      - "Two.and.a.Half.Men.S01E24.Can.You.Feel.My.Finger.1080p.BluRay.FLAC2.0.H.264-BTN"
+      - "Two.and.a.Half.Men.S01E23.Just.Like.Buffalo.1080p.BluRay.FLAC2.0.H.264-BTN"
+      - "Narcos.S01E06.Explosivos.1080p.BluRay.10Bit.Dts-HDMa5.1.HEVC-d3g"
+    oldest_sample:
+      - "ATB-Contact-2CD-FLAC-2014-LiTF"
+      - "David Guetta-Guetta Blaster-CD-FLAC-2004-PERFECT"
+      - "Justice.League.Crisis.on.Infinite.Earths.Part.One.2024.1080p.WEBRip.x264.Dual.YG"
+    failure_mode: "Active 2026-03-17/18 TV downloads are mixed into a much older unresolved residue pile."
+    boring_decision:
+      default_action: purge
+      explicit_keep_rule: "Only explicitly wanted active-now titles may remain here long enough to finish and import into the canonical library."
+      restart_gate: "Do not restart automation until this lane is split into active-now items vs stale residue and the stale set is removed."
+
+  - lane_id: downloads.complete.tv
+    path: /mnt/media/downloads/complete/tv
+    boring_role: transit_only
+    entry_count: 148
+    current_classification: recent_tv_backlog
+    top_dates:
+      "2026-03-17": 142
+      "2024-10-23": 3
+      "2026-03-18": 3
+    newest_sample:
+      - "_UNPACK_Narcos.S01E06.Explosivos.1080p.BluRay.10Bit.Dts-HDMa5.1.HEVC-d3g"
+      - "Narcos.S01E05.There.Will.Be.A.Future.1080p.BluRay.10Bit.Dts-HDMa5.1.HEVC-d3g"
+      - "Superstore.S06E01.Notwendigkeit.GERMAN.5.1.DUBBED.DL.AC3.1080p.WEB-DL.h264-TvR"
+    oldest_sample:
+      - "Will.&amp;.Grace.1998.S06.1080p.WEBRip.10bit.EAC3.2.0.x265-iVy"
+      - "Will.&amp;.Grace.1998.S07.1080p.WEBRip.10bit.EAC3.2.0.x265-iVy"
+      - "Will.&amp;.Grace.1998.S08.1080p.WEBRip.10bit.EAC3.2.0.x265-iVy"
+    failure_mode: "Recent auto-grabs and older outliers share the same transit lane."
+    boring_decision:
+      default_action: import_or_delete
+      explicit_keep_rule: "Import only titles belonging to the explicitly kept TV library; delete the rest."
+      restart_gate: "Before Sonarr restarts, reduce watched scope to an explicit show allowlist and empty this lane back to near-zero."
+
+  - lane_id: downloads.complete.movies
+    path: /mnt/media/downloads/complete/movies
+    boring_role: transit_only
+    entry_count: 514
+    current_classification: historical_movie_residue
+    top_dates:
+      "2026-01-03": 178
+      "2026-01-04": 104
+      "2026-01-05": 40
+      "2026-01-06": 40
+      "2026-01-07": 30
+      "2026-01-02": 26
+      "2026-01-08": 10
+      "2026-01-01": 6
+    newest_sample:
+      - "Back.Roads.2019.1080p.AMZN.WEB-DL.DDP.2.0.H.264-ONLYWEB"
+      - "Warcraft.2016.BluRay.1080p.DDP.Atmos.5.1.x264-hallowed"
+      - "The.Lincoln.Lawyer.2011.1080p.BluRay.DD+7.1.x264-playHD"
+    oldest_sample:
+      - "The.Thinning.2016.1080p.WEBRip.x264-WEBTiFUL.1"
+      - "Hubble.3D.2010.IMAX.1080p.BluRay.3D.Full-SBS.DTS.5.1.x264"
+      - "The Matrix Resurrections 2021 Proper 1080p BluRay DD+7.1 x264-HiDt"
+    failure_mode: "Movie transit has become long-term storage residue. Radarr library truth no longer points to this pile."
+    boring_decision:
+      default_action: delete
+      explicit_keep_rule: "Only explicit keeper titles may be imported into the home movie library first; cold promotion uses the library-to-cold operator path."
+      restart_gate: "Keep Radarr unmonitored until this lane is triaged down to zero or an explicit keeper subset."
+
+  - lane_id: downloads.complete.music
+    path: /mnt/media/downloads/complete/music
+    boring_role: transit_only
+    entry_count: 445
+    current_classification: historical_music_residue
+    top_dates:
+      "2026-01-03": 292
+      "2026-01-01": 36
+      "2026-01-02": 21
+      "2026-01-04": 17
+      "2022-09-06": 6
+    newest_sample:
+      - "Eminem-The.Marshall.Mathers.LP-REPACK-CD-FLAC-2000-PERFECT"
+      - "Miles Davis-Miles At The Fillmore 1970 The Bootleg Series Vol. 3-4CD-FLAC-2014-BOCKSCAR.1"
+      - "Louis Armstrong-Satchmo-2CD-FLAC-2008-WRE.1"
+    oldest_sample:
+      - "Way Out West-Intensify-DISNCD74-CDM-FLAC-2001-dL"
+      - "Tricky--False Idols-K7308CD-WEB-2013-OMA.1"
+      - "Ginuwine-Pony-CDM-FLAC-1996-NBFLAC"
+    failure_mode: "Music transit is also acting as retained storage, with duplicate-suffixed residue and very old payload."
+    boring_decision:
+      default_action: delete
+      explicit_keep_rule: "Only explicitly wanted artists or albums may be imported into the live music library; cold promotion starts from library truth, not transit."
+      restart_gate: "Do not restart the music helper lane until a keep/delete rule is accepted for this backlog."
+
+  - lane_id: library.movies
+    path: /mnt/media/movies
+    boring_role: live_library_truth
+    entry_count: 1
+    current_classification: sparse_but_canonical
+    boring_decision:
+      default_action: protect
+      explicit_keep_rule: "Only imported live-library titles belong here."
+      restart_gate: "No changes required; this is the canonical home movie library root."
+
+  - lane_id: library.tv
+    path: /mnt/media/tv
+    boring_role: live_library_truth
+    entry_count: 7
+    current_classification: sparse_but_canonical
+    boring_decision:
+      default_action: protect
+      explicit_keep_rule: "Only imported live-library series belong here."
+      restart_gate: "Use this root as the TV truth before any Sonarr restart."
+
+  - lane_id: library.music
+    path: /mnt/media/music
+    boring_role: live_library_truth
+    entry_count: 34
+    current_classification: canonical_music_root_with_partial_imports
+    boring_decision:
+      default_action: protect
+      explicit_keep_rule: "Only imported live-library artists or albums belong here."
+      restart_gate: "Decide whether the music stack remains active before resuming imports."
+
+boring_reset_sequence:
+  - step: 1
+    action: "Keep media-home paused until residue lanes are intentionally triaged."
+  - step: 2
+    action: "Treat `/downloads/complete/movies` as delete-by-default residue, not library."
+  - step: 3
+    action: "Trim `/downloads/complete/tv` to an explicit active show set before Sonarr is allowed to run again."
+  - step: 4
+    action: "Decide whether music is an active library or legacy residue; until then, keep `/downloads/complete/music` frozen."
+  - step: 5
+    action: "Restart only the minimum services needed after the transit lanes are near-zero and the keep set is explicit."

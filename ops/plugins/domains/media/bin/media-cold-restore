@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# media-cold-restore — restore one kept title from shop cold retention back to home
+
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"
+LIFECYCLE_CONTRACT="$ROOT/ops/bindings/media.lifecycle.contract.yaml"
+HOME_TARGET_CONTRACT="$ROOT/ops/bindings/home.media.target.contract.yaml"
+SHOP_STORAGE_CONTRACT="$ROOT/ops/bindings/shop.storage.scaffold.contract.yaml"
+SSH_RESOLVE="$ROOT/ops/lib/ssh-resolve.sh"
+INFISICAL_AGENT="$ROOT/ops/plugins/providers/bin/infisical-agent.sh"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# shellcheck source=/dev/null
+source "$SSH_RESOLVE"
+
+usage() {
+  cat <<'USAGE'
+media-cold-restore — restore one kept title from shop cold retention back to home
+
+Args:
+  --class CLASS          Required: movies|tv|music
+  --relative-path PATH   Required: exact path relative to the class root
+  --dry-run              Show the plan and current inventories without mutation
+
+Examples:
+  ./bin/ops cap run media.cold.restore -- --class movies --relative-path '10,000 BC (2008)'
+  ./bin/ops cap run media.cold.restore -- --class tv --relative-path 'Severance'
+USAGE
+}
+
+stop() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+CLASS=""
+RELATIVE_PATH=""
+DRY_RUN=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --class) CLASS="${2:-}"; shift 2 ;;
+    --relative-path) RELATIVE_PATH="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v jq >/dev/null 2>&1 || stop "missing dependency: jq"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+[[ -x "$INFISICAL_AGENT" ]] || stop "missing dependency: $INFISICAL_AGENT"
+
+[[ -f "$LIFECYCLE_CONTRACT" ]] || stop "missing lifecycle contract: $LIFECYCLE_CONTRACT"
+[[ -f "$HOME_TARGET_CONTRACT" ]] || stop "missing home target contract: $HOME_TARGET_CONTRACT"
+[[ -f "$SHOP_STORAGE_CONTRACT" ]] || stop "missing shop storage contract: $SHOP_STORAGE_CONTRACT"
+
+case "$CLASS" in
+  movies|tv|music) ;;
+  *) stop "--class must be one of: movies, tv, music" ;;
+esac
+
+RELATIVE_PATH="${RELATIVE_PATH#./}"
+[[ -n "$RELATIVE_PATH" ]] || stop "--relative-path is required"
+[[ "$RELATIVE_PATH" != /* ]] || stop "--relative-path must be relative"
+[[ "$RELATIVE_PATH" != "." ]] || stop "--relative-path must not be '.'"
+[[ "$RELATIVE_PATH" != *".."* ]] || stop "--relative-path must not contain '..'"
+[[ "$RELATIVE_PATH" != *$'\n'* ]] || stop "--relative-path must be single-line"
+
+home_logical_root="$(yq -r '.site_roles.home.canonical_surfaces.payload_path // ""' "$LIFECYCLE_CONTRACT" 2>/dev/null || true)"
+home_physical_root="$(yq -r '.synology_share_layout.runtime_share.synology_path // ""' "$HOME_TARGET_CONTRACT" 2>/dev/null || true)"
+shop_cold_root="$(yq -r '.big_data_truth_model.lane_contract.cold_retained_media.canonical_path // ""' "$SHOP_STORAGE_CONTRACT" 2>/dev/null || true)"
+
+[[ -n "$home_logical_root" && "$home_logical_root" != "null" ]] || stop "missing home logical root in lifecycle contract"
+[[ -n "$home_physical_root" && "$home_physical_root" != "null" ]] || stop "missing home physical root in home target contract"
+[[ -n "$shop_cold_root" && "$shop_cold_root" != "null" ]] || stop "missing shop cold root in shop storage contract"
+
+home_logical_class_root="${home_logical_root}/${CLASS}"
+home_physical_class_root="${home_physical_root}/${CLASS}"
+shop_class_root="${shop_cold_root}/${CLASS}"
+home_logical_path="${home_logical_class_root}/${RELATIVE_PATH}"
+home_physical_path="${home_physical_class_root}/${RELATIVE_PATH}"
+shop_path="${shop_class_root}/${RELATIVE_PATH}"
+
+resolve_ssh_ref() {
+  local target_id="$1"
+  local resolved host user
+  resolved="$(ssh_resolve_ssh_host_with_fallback "$target_id" 5 2>/dev/null || true)"
+  host="$(awk '{print $1}' <<<"$resolved")"
+  user="$(ssh_resolve_user "$target_id" "root")"
+  [[ -n "$host" && "$host" != "unreachable" ]] || return 1
+  printf '%s@%s\n' "$user" "$host"
+}
+
+ssh_privileged_bash_lc() {
+  local ssh_ref="$1"
+  local command_str="$2"
+  local command_q
+  printf -v command_q '%q' "$command_str"
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" \
+    "if command -v sudo >/dev/null 2>&1; then sudo bash -lc $command_q; else bash -lc $command_q; fi"
+}
+
+resolve_synology_ref() {
+  local resolved host user
+  resolved="$(ssh_resolve_ssh_host_with_fallback "nas" 5 2>/dev/null || true)"
+  host="$(awk '{print $1}' <<<"$resolved")"
+  user="$("$INFISICAL_AGENT" get infrastructure prod SYNOLOGY_SSH_USER 2>/dev/null || true)"
+  [[ -n "$user" ]] || user="$(ssh_resolve_user "nas" "ronadmin")"
+  [[ -n "$host" && "$host" != "unreachable" ]] || return 1
+  printf '%s@%s\n' "$user" "$host"
+}
+
+remote_inventory() {
+  local ssh_ref="$1"
+  local target_path="$2"
+  local target_q
+  printf -v target_q '%q' "$target_path"
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" \
+    "if command -v sudo >/dev/null 2>&1; then sudo env TARGET_PATH=$target_q python3 -; else env TARGET_PATH=$target_q python3 -; fi" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["TARGET_PATH"])
+payload = {
+    "path": str(path),
+    "exists": path.exists(),
+    "kind": None,
+    "file_count": 0,
+    "dir_count": 0,
+    "total_bytes": 0,
+    "manifest_sha256": None,
+    "sample": [],
+}
+
+if not path.exists():
+    print(json.dumps(payload, sort_keys=True))
+    raise SystemExit(0)
+
+entries = []
+if path.is_file():
+    payload["kind"] = "file"
+    size = path.stat().st_size
+    payload["file_count"] = 1
+    payload["total_bytes"] = size
+    entries.append((path.name, size))
+else:
+    payload["kind"] = "directory"
+    for root, dirs, files in os.walk(path):
+        dirs.sort()
+        files.sort()
+        rel_root = os.path.relpath(root, path)
+        if rel_root == ".":
+            rel_root = ""
+        payload["dir_count"] += len(dirs)
+        for name in files:
+            full = Path(root) / name
+            rel = str(Path(rel_root) / name) if rel_root else name
+            try:
+                size = full.stat().st_size
+            except OSError:
+                size = 0
+            payload["file_count"] += 1
+            payload["total_bytes"] += size
+            entries.append((rel, size))
+
+digest = hashlib.sha256()
+for rel, size in sorted(entries):
+    digest.update(rel.encode("utf-8"))
+    digest.update(b"\t")
+    digest.update(str(size).encode("utf-8"))
+    digest.update(b"\n")
+
+payload["manifest_sha256"] = digest.hexdigest()
+payload["sample"] = [
+    {"path": rel, "size": size}
+    for rel, size in sorted(entries)[:10]
+]
+
+print(json.dumps(payload, sort_keys=True))
+PY
+}
+
+inventory_summary() {
+  jq -r '"kind=\(.kind // "missing") files=\(.file_count) dirs=\(.dir_count) bytes=\(.total_bytes) digest=\(.manifest_sha256 // "-")"' <<<"$1"
+}
+
+inventories_match() {
+  jq -e -n \
+    --argjson source "$1" \
+    --argjson dest "$2" \
+    '
+      $source.exists == true and
+      $dest.exists == true and
+      $source.kind == $dest.kind and
+      $source.file_count == $dest.file_count and
+      $source.total_bytes == $dest.total_bytes and
+      $source.manifest_sha256 == $dest.manifest_sha256
+    ' >/dev/null
+}
+
+prime_synology_sudo() {
+  local syno_ref="$1"
+  local syno_password="$2"
+  printf '%s\n' "$syno_password" \
+    | ssh -o BatchMode=yes -o ConnectTimeout=10 "$syno_ref" "sudo -S -v -p ''" >/dev/null
+}
+
+HOME_REF="$(resolve_ssh_ref "media-home" 2>/dev/null || true)"
+PVE_REF="$(resolve_ssh_ref "pve" 2>/dev/null || true)"
+SYNO_REF="$(resolve_synology_ref 2>/dev/null || true)"
+SYNO_PASSWORD="$("$INFISICAL_AGENT" get infrastructure prod SYNOLOGY_SSH_PASSWORD 2>/dev/null || true)"
+
+[[ -n "$HOME_REF" ]] || stop "unable to resolve SSH target for media-home"
+[[ -n "$PVE_REF" ]] || stop "unable to resolve SSH target for pve"
+[[ -n "$SYNO_REF" ]] || stop "unable to resolve SSH target for Synology"
+[[ -n "$SYNO_PASSWORD" ]] || stop "unable to resolve Synology sudo password from Infisical"
+
+SOURCE_INV="$(remote_inventory "$PVE_REF" "$shop_path")"
+DEST_INV_BEFORE="$(remote_inventory "$HOME_REF" "$home_logical_path")"
+
+jq -e '.exists == true' <<<"$SOURCE_INV" >/dev/null || stop "shop cold path does not exist: $shop_path"
+jq -e '.exists == false' <<<"$DEST_INV_BEFORE" >/dev/null || stop "home path already exists: $home_logical_path"
+
+echo "media.cold.restore"
+echo "=================="
+echo "generated_at: $GENERATED_AT"
+echo "class: $CLASS"
+echo "relative_path: $RELATIVE_PATH"
+echo "shop_cold_path: $shop_path"
+echo "home_logical_path: $home_logical_path"
+echo "home_physical_path: $home_physical_path"
+echo "dry_run: $DRY_RUN"
+echo "source_inventory: $(inventory_summary "$SOURCE_INV")"
+echo "destination_before: $(inventory_summary "$DEST_INV_BEFORE")"
+
+if $DRY_RUN; then
+  echo "plan: copy from shop cold lane back into the home hot lane, verify parity, and keep the shop cold copy intact"
+  exit 0
+fi
+
+prime_synology_sudo "$SYNO_REF" "$SYNO_PASSWORD"
+
+printf -v dest_cmd '%q' "mkdir -p \"$home_physical_class_root\" && cd \"$home_physical_class_root\" && tar -xf - && if [[ -e \"$home_physical_path\" ]]; then owner_group=\"\$(ls -nd \"$home_physical_class_root\" | awk '{print \$3 \":\" \$4}')\"; if [[ -n \"\$owner_group\" ]]; then chown -R \"\$owner_group\" \"$home_physical_path\"; fi; find \"$home_physical_path\" -type d -exec chmod 775 {} +; find \"$home_physical_path\" -type f -exec chmod 664 {} +; fi"
+
+ssh_privileged_bash_lc "$PVE_REF" "cd \"$shop_class_root\" && tar -cf - \"$RELATIVE_PATH\"" \
+  | ssh -o BatchMode=yes -o ConnectTimeout=10 "$SYNO_REF" "sudo -n bash -lc $dest_cmd"
+
+DEST_INV_AFTER="$(remote_inventory "$HOME_REF" "$home_logical_path")"
+if ! inventories_match "$SOURCE_INV" "$DEST_INV_AFTER"; then
+  echo "source_after_copy: $(inventory_summary "$SOURCE_INV")"
+  echo "destination_after_copy: $(inventory_summary "$DEST_INV_AFTER")"
+  stop "restore parity check failed; shop cold copy preserved"
+fi
+
+echo "destination_after_copy: $(inventory_summary "$DEST_INV_AFTER")"
+echo "shop_cold_copy: preserved"
+echo "status: PASS"

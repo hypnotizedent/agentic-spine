@@ -1,0 +1,790 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_identity_common import db_json_query, query_customer_rows, sql_escape  # noqa: E402
+from printavo_bridge_common import (  # noqa: E402
+    bridge_id,
+    classify_printavo_state,
+    entity_file,
+    extract_invoice_number,
+    load_index,
+    load_orders_export_rows,
+    load_yaml_object,
+    merge_unique_strings,
+    normalize_text,
+    normalize_url,
+    parse_timestamp,
+    printavo_bridge_index_entry,
+    printavo_summary_from_bridge,
+    recover_from_extract,
+    recover_urls_from_text,
+    resolve_order_context,
+    resolve_spine_root,
+    runtime_paths,
+    sync_order_printavo_projection,
+    update_entity_index,
+)
+from operator_mail_common import resolve_spine_state  # noqa: E402
+from payment_record_common import load_index as load_payment_index  # noqa: E402
+from payment_record_common import runtime_paths as payment_runtime_paths  # noqa: E402
+from quote_packet_normalize import dump_yaml, fail, now_utc  # noqa: E402
+from vendor_cogs_common import read_ndjson  # noqa: E402
+from vendor_cogs_common import runtime_paths as vendor_runtime_paths  # noqa: E402
+
+
+CAPABILITY_NAME = "mint.printavo.bridge.reconcile"
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="printavo-bridge-reconcile",
+        description="Backfill or reconcile governed Mint Printavo bridge truth from legacy-first sources.",
+    )
+    group = parser.add_mutually_exclusive_group(required=False)
+    group.add_argument("--order-id", help="Canonical Mint order_id")
+    group.add_argument("--quote-id", help="Canonical Mint quote_id")
+    group.add_argument("--seed-id", help="Canonical Mint seed_id")
+    group.add_argument("--customer-id", help="Fresh-slate customer record id")
+    group.add_argument("--email", help="Customer email address")
+    parser.add_argument("--audit", action="store_true", help="Read-only audit for missing Printavo linkage")
+    parser.add_argument("--invoice-number", default="", help="Preferred Printavo visual id / invoice number")
+    parser.add_argument("--printavo-customer-id", default="", help="Printavo customer id override")
+    parser.add_argument("--recovery-text-file", default="", help="Optional text file with recoverable Printavo URLs")
+    parser.add_argument("--recovery-text", default="", help="Optional raw text with recoverable Printavo URLs")
+    parser.add_argument("--captured-by", default="legacy_reconcile", help="Identity performing the reconcile")
+    parser.add_argument("--note", default="", help="Optional operator note")
+    parser.add_argument("--evidence-ref", action="append", default=[], help="Optional governed evidence reference (repeatable)")
+    parser.add_argument("--receipt", action="append", default=[], help="Optional governed receipt reference (repeatable)")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    if not args.audit and not any(
+        [
+            args.order_id,
+            args.quote_id,
+            args.seed_id,
+            args.customer_id,
+            args.email,
+        ]
+    ):
+        parser.error("one selector is required unless --audit is used")
+    return args
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_PRINTAVO_BRIDGE_CAPABILITY_NAME") or CAPABILITY_NAME
+
+
+def query_mode(args: argparse.Namespace) -> tuple[str, str]:
+    if args.order_id:
+        return "order_id", normalize_text(args.order_id)
+    if args.quote_id:
+        return "quote_id", normalize_text(args.quote_id)
+    if args.seed_id:
+        return "seed_id", normalize_text(args.seed_id)
+    if args.customer_id:
+        return "customer_id", normalize_text(args.customer_id)
+    if args.email:
+        return "email", normalize_text(args.email).lower()
+    return "all", ""
+
+
+def run_cap_json(spine_root: Path, capability: str, args: list[str]) -> dict[str, Any]:
+    cmd = [str(spine_root / "bin" / "ops"), "cap", "run", capability]
+    if args:
+        cmd.extend(["--", *args])
+    result = subprocess.run(cmd, cwd=spine_root, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        combined = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+        fail(f"{capability} failed: {combined.strip()}")
+    text = (result.stdout or "").strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        fail(f"{capability} returned non-JSON output")
+    return json.loads(text[start : end + 1])
+
+
+def seed_exists(spine_root: Path, seed_id: str) -> bool:
+    if not seed_id:
+        return False
+    payload = run_cap_json(spine_root, "mint.seeds.query", ["--json", "--seed-id", seed_id, "--limit", "1"])
+    return bool(payload.get("rows"))
+
+
+def latest_seed_by_email(spine_root: Path, email: str) -> dict[str, Any]:
+    if not email:
+        return {}
+    payload = run_cap_json(spine_root, "mint.seeds.query", ["--json", "--email", email, "--limit", "1"])
+    rows = list(payload.get("rows") or [])
+    return dict(rows[0]) if rows else {}
+
+
+def query_legacy_orders(spine_root: Path, legacy_customer_id: int) -> list[dict[str, Any]]:
+    ssh_binding = spine_root / "ops" / "bindings" / "ssh.targets.yaml"
+    if not ssh_binding.is_file():
+        return []
+    sql = f"""
+select coalesce(json_agg(row_to_json(t)), '[]'::json)
+from (
+  select
+    o.id::text as legacy_order_row_id,
+    coalesce(o.visual_id, o.order_number, o.id::text) as invoice_number,
+    coalesce(o.order_nickname, '') as nickname,
+    coalesce(o.status, '') as status,
+    coalesce(o.created_at::text, '') as created_at,
+    coalesce(o.printavo_url, '') as printavo_url
+  from legacy_mint_os.orders o
+  where o.customer_id = {legacy_customer_id}
+  order by o.created_at desc nulls last, o.id desc
+) t;
+"""
+    try:
+        return db_json_query(spine_root, "mint_legacy", sql)
+    except BaseException:
+        return []
+
+
+def resolve_customer_context(
+    spine_root: Path,
+    *,
+    order: dict[str, Any] | None,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    if order is not None:
+        selector_customer_id = normalize_text(order.get("customer_id"))
+        selector_email = normalize_text(order.get("customer_email")).lower()
+    else:
+        selector_customer_id = normalize_text(args.customer_id)
+        selector_email = normalize_text(args.email).lower()
+    rows: list[dict[str, Any]] = []
+    if selector_customer_id or selector_email:
+        rows = query_customer_rows(spine_root, record_id=selector_customer_id, email=selector_email)
+    row = dict(rows[0]) if rows else {}
+    return {
+        "record_id": row.get("record_id") or selector_customer_id or None,
+        "email": row.get("email") or selector_email or None,
+        "name": row.get("name") or row.get("company") or None,
+        "legacy_customer_id": row.get("legacy_customer_id"),
+        "printavo_customer_id": normalize_text(args.printavo_customer_id or row.get("printavo_customer_id")) or None,
+    }
+
+
+def select_export_row(rows: list[dict[str, str]], *, invoice_number: str, printavo_customer_id: str, email: str) -> dict[str, str]:
+    normalized_invoice_number = normalize_text(invoice_number)
+    normalized_customer_id = normalize_text(printavo_customer_id)
+    normalized_email = normalize_text(email).lower()
+    matches: list[dict[str, str]] = []
+    for row in rows:
+        row_invoice = normalize_text(row.get("Invoice #"))
+        row_customer_id = normalize_text(row.get("Customer Id"))
+        row_email = normalize_text(row.get("Customer Email")).lower()
+        if normalized_invoice_number and row_invoice == normalized_invoice_number:
+            matches.append(row)
+            continue
+        if normalized_customer_id and row_customer_id == normalized_customer_id:
+            matches.append(row)
+            continue
+        if normalized_email and row_email == normalized_email:
+            matches.append(row)
+    matches.sort(key=lambda item: parse_timestamp(item.get("Created Date")), reverse=True)
+    return dict(matches[0]) if matches else {}
+
+
+def select_legacy_order(rows: list[dict[str, Any]], *, invoice_number: str) -> dict[str, Any]:
+    normalized_invoice_number = normalize_text(invoice_number)
+    if normalized_invoice_number:
+        for row in rows:
+            if normalize_text(row.get("invoice_number")) == normalized_invoice_number:
+                return dict(row)
+    return dict(rows[0]) if rows else {}
+
+
+def recovery_text(args: argparse.Namespace) -> str:
+    pieces = [str(args.recovery_text or "").strip()]
+    recovery_path = normalize_text(args.recovery_text_file)
+    if recovery_path:
+        try:
+            pieces.append(Path(recovery_path).expanduser().resolve().read_text(encoding="utf-8"))
+        except OSError as exc:
+            fail(f"could not read recovery text file: {exc}")
+    return "\n".join(part for part in pieces if part)
+
+
+def bridge_timestamp(record: dict[str, Any]) -> str:
+    return normalize_text(record.get("recorded_at") or record.get("last_reconciled_at"))
+
+
+def order_seed_refs(order: dict[str, Any]) -> list[str]:
+    return [normalize_text(item) for item in (order.get("intake_seed_refs") or []) if normalize_text(item)]
+
+
+def bridge_matches(record: dict[str, Any], mode: str, value: str) -> bool:
+    if mode == "order_id":
+        return normalize_text(record.get("order_id")) == value
+    if mode == "quote_id":
+        return normalize_text(record.get("quote_id")) == value
+    if mode == "seed_id":
+        return normalize_text(record.get("seed_id")) == value
+    if mode == "customer_id":
+        return normalize_text(record.get("customer_id")) == value
+    if mode == "email":
+        return normalize_text(record.get("customer_email")).lower() == value
+    return True
+
+
+def collect_order_ids(paths: dict[str, Path], mode: str, value: str) -> list[str]:
+    if mode == "all":
+        return sorted(path.stem.removeprefix("order_") for path in paths["orders_dir"].glob("order_*.yaml"))
+    if mode == "order_id":
+        return [value] if value else []
+    if mode == "quote_id":
+        try:
+            _order_file, order, _quote = resolve_order_context(paths, quote_id=value)
+        except (FileNotFoundError, ValueError):
+            return []
+        order_id = normalize_text(order.get("order_id"))
+        return [order_id] if order_id else []
+
+    order_ids: list[str] = []
+    for path in sorted(paths["orders_dir"].glob("order_*.yaml")):
+        order_id = path.stem.removeprefix("order_")
+        try:
+            _order_file, order, _quote = resolve_order_context(paths, order_id=order_id)
+        except (FileNotFoundError, ValueError):
+            continue
+        if mode == "customer_id" and normalize_text(order.get("customer_id")) == value:
+            order_ids.append(order_id)
+        elif mode == "email" and normalize_text(order.get("customer_email")).lower() == value:
+            order_ids.append(order_id)
+        elif mode == "seed_id" and value in order_seed_refs(order):
+            order_ids.append(order_id)
+    return order_ids
+
+
+def latest_records_by_key(records: list[dict[str, Any]], key: str) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    sorted_records = sorted(records, key=bridge_timestamp, reverse=True)
+    for record in sorted_records:
+        token = normalize_text(record.get(key))
+        if token and token not in latest:
+            latest[token] = dict(record)
+    return latest
+
+
+def append_issue(
+    issues: list[dict[str, Any]],
+    seen: set[tuple[str, str, str, str]],
+    *,
+    issue_type: str,
+    order_id: str = "",
+    seed_id: str = "",
+    printavo_bridge_id: str = "",
+    customer_email: str = "",
+    message: str,
+    suggested_action: str,
+    severity: str = "medium",
+    **extra: Any,
+) -> None:
+    signature = (
+        issue_type,
+        normalize_text(order_id),
+        normalize_text(seed_id),
+        normalize_text(printavo_bridge_id),
+    )
+    if signature in seen:
+        return
+    seen.add(signature)
+    issue = {
+        "issue_type": issue_type,
+        "severity": severity,
+        "order_id": normalize_text(order_id) or None,
+        "seed_id": normalize_text(seed_id) or None,
+        "printavo_bridge_id": normalize_text(printavo_bridge_id) or None,
+        "customer_email": normalize_text(customer_email).lower() or None,
+        "message": message,
+        "suggested_action": suggested_action,
+    }
+    for key, value in extra.items():
+        if value in (None, "", [], {}):
+            continue
+        issue[key] = value
+    issues.append(issue)
+
+
+def print_text(payload: dict[str, object]) -> None:
+    if payload.get("audit_mode"):
+        print(f"capability: {payload['capability']}")
+        print(f"audit_mode: true")
+        print(f"query_mode: {payload['query_mode']}")
+        print(f"query_value: {payload.get('query_value') or ''}")
+        print(f"state: {payload['state']}")
+        print(f"issue_count: {payload['issue_count']}")
+        return
+    print(f"capability: {payload['capability']}")
+    print(f"reconcile_state: {payload['reconcile_state']}")
+    print(f"printavo_bridge_id: {payload['printavo_bridge_id']}")
+    print(f"printavo_state: {payload['printavo_state']}")
+    print(f"order_id: {payload.get('order_id') or ''}")
+    print(f"seed_id: {payload.get('seed_id') or ''}")
+    print(f"record_file: {payload['record_file']}")
+
+
+def audit_payload(spine_root: Path, paths: dict[str, Path], args: argparse.Namespace) -> dict[str, Any]:
+    mode, value = query_mode(args)
+    bridge_index = load_index(paths["printavo_bridges_index_file"], "printavo_bridges")
+    latest_bridge_by_order = latest_records_by_key(bridge_index, "order_id")
+    latest_bridge_by_seed = latest_records_by_key(bridge_index, "seed_id")
+    known_bridge_ids = {normalize_text(record.get("printavo_bridge_id")) for record in bridge_index if normalize_text(record.get("printavo_bridge_id"))}
+
+    order_ids = collect_order_ids(paths, mode, value)
+    orders: list[dict[str, Any]] = []
+    for order_id in order_ids:
+        if not order_id:
+            continue
+        try:
+            _order_file, order, _quote = resolve_order_context(paths, order_id=order_id)
+        except (FileNotFoundError, ValueError):
+            continue
+        orders.append(order)
+
+    payment_paths = payment_runtime_paths(spine_root)
+    payment_captures = load_payment_index(payment_paths["payment_captures_index_file"], "payment_captures")
+
+    state_root = resolve_spine_state(spine_root)
+    finance_paths = vendor_runtime_paths(spine_root=spine_root, state_root=state_root)
+    finance_evidence = read_ndjson(finance_paths["finance_cogs_index_file"])
+
+    issues: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    relevant_seed_ids: set[str] = set()
+    relevant_customer_emails: set[str] = set()
+
+    for order in orders:
+        order_id = normalize_text(order.get("order_id"))
+        seed_refs = order_seed_refs(order)
+        order_bridge = latest_bridge_by_order.get(order_id)
+        customer_email = normalize_text(order.get("customer_email")).lower()
+        relevant_customer_emails.add(customer_email)
+        relevant_seed_ids.update(seed_refs)
+
+        if order_bridge is None:
+            if seed_refs:
+                append_issue(
+                    issues,
+                    seen,
+                    issue_type="seed_exists_but_no_printavo_bridge",
+                    order_id=order_id,
+                    seed_id=seed_refs[0],
+                    customer_email=customer_email,
+                    message="Canonical order exists with intake seed refs but no governed Printavo bridge.",
+                    suggested_action="Run mint.printavo.bridge.capture after the manual Printavo step or mint.printavo.bridge.reconcile for legacy backfill.",
+                )
+            else:
+                append_issue(
+                    issues,
+                    seen,
+                    issue_type="order_exists_but_no_printavo_bridge",
+                    order_id=order_id,
+                    customer_email=customer_email,
+                    message="Canonical order exists without any governed Printavo bridge.",
+                    suggested_action="Capture the manual Printavo state for this order or confirm it still needs more information before Printavo.",
+                )
+
+        matching_payments = [record for record in payment_captures if normalize_text(record.get("order_id")) == order_id]
+        if matching_payments and order_bridge is None:
+            append_issue(
+                issues,
+                seen,
+                issue_type="payment_visible_without_printavo_bridge",
+                order_id=order_id,
+                seed_id=seed_refs[0] if seed_refs else "",
+                customer_email=customer_email,
+                message="Payment evidence exists for the order but no governed Printavo bridge is linked.",
+                suggested_action="Capture or reconcile the Printavo bridge so payment, quote, and downstream state share one canonical anchor.",
+                payment_capture_ids=[normalize_text(record.get("payment_capture_id")) for record in matching_payments if normalize_text(record.get("payment_capture_id"))],
+            )
+
+    if mode == "seed_id" and value:
+        relevant_seed_ids.add(value)
+    elif mode == "email" and value:
+        relevant_customer_emails.add(value)
+    elif mode == "customer_id" and value:
+        rows = query_customer_rows(spine_root, record_id=value)
+        if rows:
+            email = normalize_text(rows[0].get("email")).lower()
+            if email:
+                relevant_customer_emails.add(email)
+
+    for seed_id in sorted(seed for seed in relevant_seed_ids if seed):
+        if latest_bridge_by_seed.get(seed_id) or any(seed_id in order_seed_refs(order) for order in orders):
+            continue
+        if seed_exists(spine_root, seed_id):
+            append_issue(
+                issues,
+                seen,
+                issue_type="seed_exists_but_no_printavo_bridge",
+                seed_id=seed_id,
+                message="A governed seed exists but no Printavo bridge has been captured for it yet.",
+                suggested_action="If Ronny created the Printavo quote manually, run mint.printavo.bridge.capture against this seed. Otherwise leave it in needs_more_info_before_printavo.",
+            )
+
+    relevant_bridges = bridge_index if mode == "all" else [record for record in bridge_index if bridge_matches(record, mode, value)]
+    for bridge in relevant_bridges:
+        bridge_id = normalize_text(bridge.get("printavo_bridge_id"))
+        order_id = normalize_text(bridge.get("order_id"))
+        seed_id = normalize_text(bridge.get("seed_id"))
+        customer_email = normalize_text(bridge.get("customer_email")).lower()
+        if not order_id:
+            append_issue(
+                issues,
+                seen,
+                issue_type="printavo_bridge_missing_order_link",
+                seed_id=seed_id,
+                printavo_bridge_id=bridge_id,
+                customer_email=customer_email,
+                message="Printavo bridge exists but is still seed-only and has not been linked to a canonical order.",
+                suggested_action="Promote or link the corresponding order so downstream payment, vendor, and customer surfaces share the same canonical job anchor.",
+                printavo_state=normalize_text(bridge.get("printavo_state")) or None,
+            )
+            continue
+        order_path = entity_file(paths["orders_dir"], "order", order_id)
+        if not order_path.exists():
+            append_issue(
+                issues,
+                seen,
+                issue_type="printavo_bridge_missing_order_link",
+                order_id=order_id,
+                seed_id=seed_id,
+                printavo_bridge_id=bridge_id,
+                customer_email=customer_email,
+                message="Printavo bridge points at an order_id that does not exist in canonical order runtime.",
+                suggested_action="Repair the order link or re-promote the canonical order so the Printavo bridge has a durable governed target.",
+            )
+
+    relevant_payment_captures = payment_captures
+    if mode != "all":
+        relevant_payment_captures = [
+            record
+            for record in payment_captures
+            if (
+                (mode == "order_id" and normalize_text(record.get("order_id")) == value)
+                or (mode == "quote_id" and normalize_text(record.get("quote_id")) == value)
+                or (mode == "seed_id" and normalize_text(record.get("seed_id")) == value)
+                or (mode == "customer_id" and normalize_text(record.get("customer_id")) == value)
+                or (mode == "email" and normalize_text(record.get("customer_email")).lower() == value)
+            )
+        ]
+    for record in relevant_payment_captures:
+        order_id = normalize_text(record.get("order_id"))
+        if not order_id:
+            append_issue(
+                issues,
+                seen,
+                issue_type="payment_capture_missing_order_link",
+                seed_id=normalize_text(record.get("seed_id")),
+                customer_email=normalize_text(record.get("customer_email")).lower(),
+                message="Governed payment capture exists without a linked canonical order.",
+                suggested_action="Link or promote the corresponding order before relying on this payment capture downstream.",
+                payment_capture_id=normalize_text(record.get("payment_capture_id")) or None,
+            )
+
+    relevant_finance = finance_evidence
+    if mode != "all":
+        relevant_finance = [
+            record
+            for record in finance_evidence
+            if (
+                (mode == "seed_id" and normalize_text(record.get("seed_id")) == value)
+                or (mode == "customer_id" and normalize_text(record.get("customer_id")) == value)
+                or (mode == "email" and normalize_text(record.get("customer_email")).lower() == value)
+                or (mode == "order_id" and normalize_text(record.get("external_order_number")) == value)
+            )
+        ]
+    for record in relevant_finance:
+        bridge_id = normalize_text(record.get("printavo_bridge_id"))
+        if bridge_id and bridge_id in known_bridge_ids:
+            continue
+        append_issue(
+            issues,
+            seen,
+            issue_type="vendor_evidence_without_printavo_link",
+            seed_id=normalize_text(record.get("seed_id")),
+            customer_email=normalize_text(record.get("customer_email")).lower(),
+            printavo_bridge_id=bridge_id,
+            message="Vendor finance evidence exists without a valid linked Printavo bridge.",
+            suggested_action="Run bridge capture or reconcile first so vendor cost evidence attaches to the same governed external order ref.",
+            finance_evidence_id=normalize_text(record.get("finance_evidence_id")) or None,
+        )
+
+    if mode in {"customer_id", "email"}:
+        customer_email = value if mode == "email" else ""
+        customer_row: dict[str, Any] = {}
+        if mode == "customer_id":
+            rows = query_customer_rows(spine_root, record_id=value)
+            customer_row = dict(rows[0]) if rows else {}
+            customer_email = normalize_text(customer_row.get("email")).lower()
+        elif mode == "email":
+            rows = query_customer_rows(spine_root, email=value)
+            customer_row = dict(rows[0]) if rows else {}
+        legacy_customer_id = customer_row.get("legacy_customer_id")
+        if legacy_customer_id not in (None, "", "null"):
+            export_path, export_rows = load_orders_export_rows()
+            export_row = select_export_row(
+                export_rows,
+                invoice_number="",
+                printavo_customer_id=normalize_text(customer_row.get("printavo_customer_id")),
+                email=customer_email,
+            )
+            legacy_row: dict[str, Any] = {}
+            try:
+                legacy_row = select_legacy_order(query_legacy_orders(spine_root, int(legacy_customer_id)), invoice_number="")
+            except BaseException:
+                legacy_row = {}
+            if (export_path or legacy_row) and not any(
+                normalize_text(record.get("customer_email")).lower() == customer_email or normalize_text(record.get("customer_id")) == normalize_text(customer_row.get("record_id"))
+                for record in bridge_index
+            ):
+                append_issue(
+                    issues,
+                    seen,
+                    issue_type="legacy_history_unpromoted",
+                    customer_email=customer_email,
+                    message="Legacy/export Printavo history exists for this customer but no governed Printavo bridge has been promoted yet.",
+                    suggested_action="Run mint.printavo.bridge.reconcile for the customer or a specific order to promote legacy Printavo refs into canonical bridge records.",
+                    orders_export_file=str(export_path) if export_path else None,
+                    legacy_customer_id=legacy_customer_id,
+                )
+
+    return {
+        "capability": capability_name(),
+        "audit_mode": True,
+        "query_mode": mode,
+        "query_value": value or None,
+        "state": "needs_attention" if issues else "aligned",
+        "issue_count": len(issues),
+        "summary": {
+            "order_count": len(orders),
+            "bridge_count": len(relevant_bridges),
+            "payment_capture_count": len(relevant_payment_captures),
+            "finance_evidence_count": len(relevant_finance),
+            "seed_count": len([seed for seed in relevant_seed_ids if seed]),
+        },
+        "issues": issues,
+    }
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root = resolve_spine_root()
+    paths = runtime_paths(spine_root)
+
+    if args.audit:
+        payload = audit_payload(spine_root, paths, args)
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0
+        print_text(payload)
+        return 0
+
+    order_file: Path | None = None
+    order: dict[str, Any] | None = None
+    quote: dict[str, Any] | None = None
+    seed_id = normalize_text(args.seed_id)
+    if args.order_id or args.quote_id:
+        try:
+            order_file, order, quote = resolve_order_context(paths, order_id=args.order_id or "", quote_id=args.quote_id or "")
+        except (FileNotFoundError, ValueError) as exc:
+            fail(str(exc))
+        if not seed_id:
+            seed_refs = [normalize_text(item) for item in (order.get("intake_seed_refs") or []) if normalize_text(item)]
+            if seed_refs:
+                seed_id = seed_refs[0]
+
+    customer = resolve_customer_context(spine_root, order=order, args=args)
+    invoice_number = normalize_text(args.invoice_number)
+    export_path, export_rows = load_orders_export_rows()
+    export_row = select_export_row(
+        export_rows,
+        invoice_number=invoice_number,
+        printavo_customer_id=normalize_text(customer.get("printavo_customer_id")),
+        email=normalize_text(customer.get("email")),
+    )
+    if not invoice_number:
+        invoice_number = normalize_text(export_row.get("Invoice #"))
+
+    legacy_row: dict[str, Any] = {}
+    legacy_customer_id = customer.get("legacy_customer_id")
+    if legacy_customer_id not in (None, "", "null"):
+        try:
+            legacy_row = select_legacy_order(query_legacy_orders(spine_root, int(legacy_customer_id)), invoice_number=invoice_number)
+        except BaseException:
+            legacy_row = {}
+
+    recovered_urls = recover_urls_from_text(recovery_text(args))
+    extract_payload, extract_file = recover_from_extract(
+        visual_id=invoice_number,
+        invoice_url=export_row.get("Invoice URL") or legacy_row.get("printavo_url") or recovered_urls.get("printavo_invoice_url") or "",
+        public_invoice_url=export_row.get("Public Invoice View URL") or recovered_urls.get("printavo_public_invoice_url") or "",
+    )
+    invoice_url = (
+        normalize_url(export_row.get("Invoice URL"))
+        or normalize_url(legacy_row.get("printavo_url"))
+        or normalize_url(extract_payload.get("url"))
+        or normalize_url(recovered_urls.get("printavo_invoice_url"))
+    )
+    public_invoice_url = (
+        normalize_url(export_row.get("Public Invoice View URL"))
+        or normalize_url(extract_payload.get("publicUrl"))
+        or normalize_url(recovered_urls.get("printavo_public_invoice_url"))
+    )
+    work_order_url = normalize_url(extract_payload.get("workorderUrl")) or normalize_url(recovered_urls.get("printavo_work_order_url"))
+    paid = str(export_row.get("Paid?") or "").strip().lower() in {"1", "true", "yes"}
+    printavo_state = classify_printavo_state(
+        invoice_url=invoice_url,
+        public_invoice_url=public_invoice_url,
+        work_order_url=work_order_url,
+        invoice_status=str(export_row.get("Invoice Status") or legacy_row.get("status") or ""),
+        paid=paid,
+        extract_type=str(extract_payload.get("type") or ""),
+        extract_paid=bool(extract_payload.get("paidInFull")),
+    )
+    printavo_customer_id = (
+        normalize_text(args.printavo_customer_id)
+        or normalize_text(customer.get("printavo_customer_id"))
+        or normalize_text(export_row.get("Customer Id"))
+        or normalize_text(((extract_payload.get("contact") or {}).get("customer") or {}).get("id"))
+    )
+    visual_id = (
+        normalize_text(invoice_number)
+        or normalize_text(export_row.get("Invoice #"))
+        or normalize_text(legacy_row.get("invoice_number"))
+        or normalize_text(extract_payload.get("visualId"))
+        or extract_invoice_number(invoice_url)
+    )
+    order_id = normalize_text((order or {}).get("order_id"))
+    quote_id = normalize_text((quote or {}).get("quote_id") or ((order or {}).get("active_quote_id") if order else ""))
+    recorded_at = now_utc()
+    evidence_refs = merge_unique_strings(args.evidence_ref)
+    receipts = merge_unique_strings(args.receipt)
+    printavo_bridge_id = bridge_id(
+        seed_id=seed_id,
+        order_id=order_id,
+        quote_id=quote_id,
+        printavo_customer_id=printavo_customer_id,
+        printavo_invoice_url=invoice_url,
+        printavo_public_invoice_url=public_invoice_url,
+        printavo_work_order_url=work_order_url,
+        printavo_visual_id=visual_id,
+        printavo_state=printavo_state,
+        source_kind="legacy_backfill",
+    )
+    record_file = entity_file(paths["printavo_bridges_dir"], "printavo_bridge", printavo_bridge_id)
+    reconcile_state = "existing" if record_file.exists() else "recorded"
+
+    provenance_basis: list[str] = []
+    if customer.get("printavo_customer_id"):
+        provenance_basis.append("fresh_customer_printavo_id")
+    if export_row:
+        provenance_basis.append("legacy_orders_export")
+    if legacy_row:
+        provenance_basis.append("legacy_hold_orders_table")
+    if extract_payload:
+        provenance_basis.append("printavo_extraction_recovery")
+    if any(recovered_urls.values()):
+        provenance_basis.append("recovery_text")
+
+    record = {
+        "printavo_bridge_id": printavo_bridge_id,
+        "schema_version": "1.0",
+        "source_kind": "legacy_backfill",
+        "seed_id": seed_id or None,
+        "order_id": order_id or None,
+        "quote_id": quote_id or None,
+        "customer_id": customer.get("record_id"),
+        "customer_email": customer.get("email"),
+        "customer_name": customer.get("name"),
+        "source_quote_packet_id": (order or {}).get("source_quote_packet_id") if order else None,
+        "printavo_customer_id": printavo_customer_id or None,
+        "printavo_invoice_url": invoice_url or None,
+        "printavo_public_invoice_url": public_invoice_url or None,
+        "printavo_work_order_url": work_order_url or None,
+        "printavo_visual_id": visual_id or None,
+        "printavo_state": printavo_state,
+        "last_reconciled_at": recorded_at,
+        "recorded_at": recorded_at,
+        "captured_by": str(args.captured_by or "").strip() or "legacy_reconcile",
+        "note": normalize_text(args.note) or None,
+        "evidence_refs": evidence_refs,
+        "provenance": {
+            "source": "legacy_backfill",
+            "basis": provenance_basis,
+            "orders_export_file": str(export_path) if export_path else None,
+            "printavo_extract_file": extract_file or None,
+            "legacy_order_row_id": legacy_row.get("legacy_order_row_id") if legacy_row else None,
+            "evidence_refs": evidence_refs,
+            "receipts": receipts,
+        },
+        "receipts": receipts,
+        "capability": capability_name(),
+    }
+    if reconcile_state == "recorded":
+        dump_yaml(record_file, record)
+    else:
+        record = load_yaml_object(record_file) or record
+        merged_evidence_refs = merge_unique_strings(record.get("evidence_refs"), evidence_refs)
+        merged_receipts = merge_unique_strings(record.get("receipts"), receipts)
+        provenance = dict(record.get("provenance") or {})
+        provenance["evidence_refs"] = merge_unique_strings(provenance.get("evidence_refs"), evidence_refs)
+        provenance["receipts"] = merge_unique_strings(provenance.get("receipts"), receipts)
+        record["evidence_refs"] = merged_evidence_refs
+        record["receipts"] = merged_receipts
+        record["provenance"] = provenance
+        if normalize_text(args.note) and not normalize_text(record.get("note")):
+            record["note"] = normalize_text(args.note)
+        dump_yaml(record_file, record)
+
+    update_entity_index(
+        paths["printavo_bridges_index_file"],
+        "printavo_bridges",
+        "printavo_bridge_id",
+        printavo_bridge_index_entry(record),
+    )
+    if order_file is not None and order is not None:
+        sync_order_printavo_projection(paths, order_file, order, printavo_summary_from_bridge(record))
+
+    payload = {
+        "capability": capability_name(),
+        "reconcile_state": reconcile_state,
+        "printavo_bridge_id": printavo_bridge_id,
+        "seed_id": seed_id or None,
+        "order_id": order_id or None,
+        "quote_id": quote_id or None,
+        "printavo_state": printavo_state,
+        "record_file": str(record_file),
+        "order_file": str(order_file) if order_file is not None else None,
+        "evidence_refs": record.get("evidence_refs") or [],
+        "receipts": record.get("receipts") or [],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print_text(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

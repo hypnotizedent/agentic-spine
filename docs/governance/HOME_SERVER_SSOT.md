@@ -1,8 +1,8 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-12
-verification_method: home inventory parity + live proxmox/synology read-only checks
+last_verified: 2026-03-18
+verification_method: home inventory parity + live proxmox/synology/media-home checks
 scope: home-control-plane-summary
 ---
 
@@ -13,6 +13,7 @@ This is the spine-facing summary for the home rack and home-managed endpoints.
 Authority boundary:
 - Canonical home domain contract lives in `ops/bindings/home.authority.contract.yaml`.
 - Detailed device/runtime/network/storage inventories live in the `ops/bindings/home.*` bindings plus `ops/bindings/synology918.storage.manifest.yaml`.
+- Planned home media destination topology lives in `ops/bindings/home.media.target.contract.yaml`.
 - This doc keeps the boring target model, generated projections, and current closure blockers in one governed surface.
 
 ## Managed Home Endpoints
@@ -45,10 +46,28 @@ Authority boundary:
 ## Generated Projections
 
 - Storage authority projection: `ops/bindings/home.storage.map.yaml`
+- Home media target contract: `ops/bindings/home.media.target.contract.yaml`
+- Home media execution parity matrix: `ops/bindings/home.media.execution.parity.matrix.yaml`
+- Media lifecycle contract: `ops/bindings/media.lifecycle.contract.yaml`
 - Ingress authority projection: `ops/bindings/home.ingress.map.yaml`
 - Rack scorecard: `docs/reference/generated/HOME_RACK_SCORECARD.md`
 - Estate closure scorecard: `docs/reference/generated/ESTATE_BORINGNESS_SCORECARD.md`
 - Rebuild command: `./bin/ops cap run infra.estate.boringness.build`
+
+## Current Media Relocation State
+
+- `proxmox-home:/mnt/media` is live and mounts `synology918:/volume1/media-staging` read-write.
+- `media-home` / VM `106` is provisioned on `proxmox-home` with local appdata at `/srv/appdata` and guest payload mounted at `/srv/media`.
+- `2026-03-18` jellyfin-only recovery: `media-home` is intentionally running only `jellyfin` while acquisition, helper, and write-lane services remain stopped during the boring reset; see `ops/bindings/home.media.residue.inventory.yaml`, `docs/reference/generated/HOME_MEDIA_RESIDUE_DECISION_TABLE.md`, and `ops/bindings/media.data.lifecycle.execution.yaml`.
+- When running, all media services resolve from the single compose root `/srv/appdata/compose/media-stack` on `media-home`.
+- When running, the write lane on that unified root carries `sabnzbd`, `qbittorrent`, `prowlarr`, `radarr`, and `sonarr`.
+- When running, the helper/music lane on that unified root carries `lidarr`, `unpackerr`, `recyclarr`, `flaresolverr`, `gluetun`, `slskd`, `soularr`, `arr-native-search`, `trailarr`, `posterizarr`, `decypharr`, `autopulse`, `crosswatch`, and `crowdsec`; the corresponding shop `download-stack` helper services are stopped.
+- When running, the playback/request lane on that unified root carries `bazarr`, `homarr`, `jellyfin`, `jellyseerr`, `navidrome`, `node-exporter`, `spotisub`, `subgen`, `watchtower`, and `wizarr`; shop `streaming-stack` services are stopped.
+- `media-home` is reachable over Tailscale at `100.113.72.41`, and VM `106` now has a canonical Synology restore artifact: `vzdump-qemu-106-2026_03_17-15_09_24.vma.zst`.
+- `Movies Archive` is no longer part of the home Jellyfin library set.
+- The media path/e2e verifiers are defined against the unified runtime, but the current live posture is jellyfin-only recovery rather than full-lane service mode.
+- `/srv/media/downloads/complete` is now normalized and governed: only `movies`, `tv`, and `music` are allowed at the top level, and `media.path.authority.verify` enforces that hygiene.
+- Remaining media drift is no longer just metadata cleanup; the paused-stack residue baseline is captured in `ops/bindings/home.media.residue.inventory.yaml`, `docs/reference/generated/HOME_MEDIA_RESIDUE_DECISION_TABLE.md`, and the restart gate lives in `ops/bindings/media.data.lifecycle.execution.yaml` via `./bin/ops cap run media.data.readiness.verify`.
 
 ## Current Tombstones
 
@@ -64,4 +83,5 @@ Authority boundary:
 ./bin/ops cap run infra.estate.boringness.build -- --check
 ./bin/ops cap run home.vm.status
 ./bin/ops cap run home.backup.status
+./bin/ops cap run media.data.readiness.verify
 ```

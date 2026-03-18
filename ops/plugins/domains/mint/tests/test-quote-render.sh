@@ -23,6 +23,7 @@ trap cleanup EXIT
 mkdir -p "$PACKETS_DIR"
 cp "$FIXTURES_DIR/ready-warning-shipping.packet.yaml" "$PACKETS_DIR/quote_packet_render-ready-warning.yaml"
 cp "$FIXTURES_DIR/blocked-clarification.packet.yaml" "$PACKETS_DIR/quote_packet_render-blocked-clarification.yaml"
+cp "$FIXTURES_DIR/blocked-mail-identity.packet.yaml" "$PACKETS_DIR/quote_packet_render-blocked-mail-identity.yaml"
 
 section "Render review-ready packet with warning-level shipping posture"
 render_output="$(
@@ -52,6 +53,18 @@ set -e
 grep -Fq "cannot render: packet has 1 blocking gaps" <<<"$blocked_output" || fail "blocked render must report the blocking gap"
 [[ "$(yq '.quote_draft_ref' "$blocked_packet")" == "null" ]] || fail "blocked render must not create quote_draft_ref"
 pass "quote-render refuses packets with unresolved clarification/proof/shipping blockers"
+
+section "Render blocks honestly when customer mail identity is ambiguous"
+set +e
+bad_identity_output="$(
+  MINT_QUOTE_PACKETS_DIR="$PACKETS_DIR" \
+  "$QUOTE_RENDER" render-blocked-mail-identity 2>&1
+)"
+bad_identity_rc=$?
+set -e
+[[ "$bad_identity_rc" -ne 0 ]] || fail "mail-identity-blocked packet should not render successfully"
+grep -Fq "customer mail identity invalid: mail_salutation_mode_missing_or_invalid" <<<"$bad_identity_output" || fail "blocked render must explain the mail identity contract failure"
+pass "quote-render fails closed when customer salutation identity is not explicitly governed"
 
 section "Summary"
 echo "Quote render checks passed"

@@ -149,7 +149,9 @@ class Handler(BaseHTTPRequestHandler):
           fh.write(json.dumps(payload, sort_keys=True) + "\n")
 
         qty = int(payload.get("qty", 0))
-        total_amount = qty * 1694
+        wholesale_blank = 4.25
+        imprint_unit = 11.41
+        raw_subtotal = round(qty * (wholesale_blank + imprint_unit), 2)
         body = {
             "estimate_id": f"estimate-{qty}",
             "requested_at_utc": payload.get("request_timestamp_utc"),
@@ -158,19 +160,19 @@ class Handler(BaseHTTPRequestHandler):
             "normalized_request": payload,
             "line_items": [
                 {
-                    "code": "blank",
+                    "code": "blanks",
                     "description": "Blank garment",
-                    "unit_amount": 425,
+                    "unit_amount": wholesale_blank,
                     "quantity": qty,
-                    "total_amount": qty * 425,
+                    "total_amount": round(qty * wholesale_blank, 2),
                     "source": "contract_table",
                 },
                 {
                     "code": "screenprint",
                     "description": "Screen print",
-                    "unit_amount": 1269,
+                    "unit_amount": imprint_unit,
                     "quantity": qty,
-                    "total_amount": qty * 1269,
+                    "total_amount": round(qty * imprint_unit, 2),
                     "source": "contract_table",
                 },
             ],
@@ -186,7 +188,7 @@ class Handler(BaseHTTPRequestHandler):
                 "receipt_generated_at_utc": payload.get("request_timestamp_utc"),
                 "normalized_input_fingerprint": "mock-input",
                 "output_fingerprint": "mock-output",
-                "total_amount": total_amount,
+                "total_amount": raw_subtotal,
                 "version_snapshot": {
                     "pricing_authority_version": "mock-v1",
                     "rate_table_version": "mock-v1",
@@ -253,6 +255,69 @@ source_output="$(
 grep -Fq "source_state: completed" <<<"$source_output" || fail "source output must report completed sourcing"
 pass "quote-source resolves supplier identity, garment price, and stock evidence into the packet"
 
+section "Source honors services.health plus ssh fallback when SUPPLIERS_BASE_URL is unset"
+FALLBACK_SPINE="$TMP_ROOT/fallback-spine"
+mkdir -p "$FALLBACK_SPINE/ops/bindings"
+cat > "$FALLBACK_SPINE/ops/bindings/services.health.yaml" <<EOF
+endpoints:
+  - id: suppliers-v2
+    host: mint-apps
+    url: http://192.0.2.10:${PORT}/health
+EOF
+cat > "$FALLBACK_SPINE/ops/bindings/ssh.targets.yaml" <<'EOF'
+ssh:
+  targets:
+    - id: mint-apps
+      host: 192.0.2.10
+      tailscale_ip: 127.0.0.1
+      access_policy: lan_first
+EOF
+fallback_normalize_output="$(
+  MINT_QUOTE_PACKETS_DIR="$PACKETS_DIR" \
+  MINT_QUOTE_PACKET_INDEX_FILE="$INDEX_FILE" \
+  "$QUOTE_PREPARE" \
+    --evidence-file "$FLOW_FIXTURES/acme-screenprint.evidence.yaml" \
+    --skip-customer-resolve
+)"
+fallback_packet_id="$(packet_id_from_output "$fallback_normalize_output")"
+fallback_packet_file="$PACKETS_DIR/quote_packet_${fallback_packet_id}.yaml"
+fallback_source_output="$(
+  SPINE_ROOT="$FALLBACK_SPINE" \
+  SUPPLIERS_API_KEY="test-suppliers-key" \
+  MINT_QUOTE_PACKETS_DIR="$PACKETS_DIR" \
+  MINT_QUOTE_PACKET_INDEX_FILE="$INDEX_FILE" \
+  "$QUOTE_SOURCE" "$fallback_packet_id"
+)"
+[[ "$(yq '.inventory_snapshot.stock_check_state' "$fallback_packet_file")" == "completed" ]] || fail "source fallback packet must still complete stock lookup"
+[[ "$(yq '.open_gaps | map(select(.gap_type == "supplier_unresolved")) | length' "$fallback_packet_file")" == "0" ]] || fail "supplier_unresolved gap must clear when services.health fallback resolves the reachable host"
+grep -Fq "source_state: completed" <<<"$fallback_source_output" || fail "source fallback output must report completed sourcing"
+pass "quote-source resolves supplier service reachability through the canonical services.health + ssh fallback path"
+
+section "Source reports connectivity failures honestly without inventing a no-match blocker"
+unavailable_normalize_output="$(
+  MINT_QUOTE_PACKETS_DIR="$PACKETS_DIR" \
+  MINT_QUOTE_PACKET_INDEX_FILE="$INDEX_FILE" \
+  "$QUOTE_PREPARE" \
+    --evidence-file "$FLOW_FIXTURES/acme-screenprint.evidence.yaml" \
+    --skip-customer-resolve
+)"
+unavailable_packet_id="$(packet_id_from_output "$unavailable_normalize_output")"
+unavailable_packet_file="$PACKETS_DIR/quote_packet_${unavailable_packet_id}.yaml"
+unavailable_source_output="$(
+  SUPPLIERS_BASE_URL="http://127.0.0.1:1" \
+  SUPPLIERS_API_KEY="test-suppliers-key" \
+  MINT_QUOTE_PACKETS_DIR="$PACKETS_DIR" \
+  MINT_QUOTE_PACKET_INDEX_FILE="$INDEX_FILE" \
+  "$QUOTE_SOURCE" "$unavailable_packet_id"
+)"
+[[ "$(yq '.open_gaps | map(select(.gap_type == "supplier_unresolved")) | length' "$unavailable_packet_file")" == "1" ]] || fail "connectivity failure must emit exactly one supplier_unresolved gap"
+grep -Fq "supplier search unavailable" "$unavailable_packet_file" || fail "connectivity failure gap must explain supplier search unavailability"
+if grep -Fq "no trustworthy supplier candidate matched the packet truth" "$unavailable_packet_file"; then
+  fail "connectivity failure must not invent a no-candidate-match blocker"
+fi
+grep -Fq "supplier search unavailable" <<<"$unavailable_source_output" || fail "source output must surface the connectivity failure"
+pass "quote-source distinguishes unreachable supplier infrastructure from genuine no-match sourcing failures"
+
 section "Price packet using sourced garment cost"
 price_output="$(
   PRICING_BASE_URL="http://127.0.0.1:${PORT}" \
@@ -263,6 +328,7 @@ price_output="$(
 )"
 [[ "$(yq '.pricing_snapshot.pricing_state' "$packet_file")" == "completed" ]] || fail "pricing snapshot must complete after sourcing"
 [[ "$(yq '.pricing_snapshot.calculated_totals.total' "$packet_file")" == "1219.68" ]] || fail "pricing total must persist after sourced pricing"
+[[ "$(yq '.pricing_snapshot.line_item_prices[0].pricing_breakdown.garment_markup_total' "$packet_file")" == "92.16" ]] || fail "pricing breakdown must persist garment markup total"
 grep -Fq '"blanks_cost": 4.25' "$PRICING_REQUEST_LOG" || fail "pricing request must include the supplier garment price"
 grep -Fq "pricing_state: completed" <<<"$price_output" || fail "price output must report completion"
 pass "quote-price consumes the sourced blank cost instead of a hand-entered garment price"

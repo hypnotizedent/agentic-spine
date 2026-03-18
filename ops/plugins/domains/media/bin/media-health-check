@@ -1,208 +1,177 @@
 #!/usr/bin/env bash
-# media.health.check — Aggregate health check across media-stack VMs
-#
-# Usage:
-#   ./bin/ops cap run media.health.check
-#   ./bin/ops cap run media.health.check --vm download-stack
-#   ./bin/ops cap run media.health.check --vm streaming-stack
-#   ./bin/ops cap run media.health.check --json
-#
-# Contract:
-# - Reads services from ops/bindings/media.services.yaml
-# - Skips services with status: parked|stopped or health: null
-# - Returns aggregate status and per-service results
-# - Exit 0 if all healthy, exit 1 if any unhealthy, exit 2 on config error
+# media.health.check — Aggregate health check across the canonical media-home runtime
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
-BINDING="$ROOT/ops/bindings/media.services.yaml"
-SCHEMA_VERSION="1.0.0"
+BINDING="$ROOT/ops/bindings/services.health.yaml"
+SSH_RESOLVE="$ROOT/ops/lib/ssh-resolve.sh"
+SCHEMA_VERSION="2.0.0"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# shellcheck source=/dev/null
+source "$SSH_RESOLVE"
 
 usage() {
   cat <<'USAGE'
-media.health.check — Aggregate health check across media-stack VMs
+media.health.check — Aggregate health check across the canonical media-home runtime
 
 Args:
-  --vm HOST         Check only this VM (download-stack|streaming-stack)
+  --vm HOST         Only supported value: media-home
+  --service NAME    Limit probe to one service id from services.health.yaml
   --json            Output JSON format
   --timeout SEC     Per-service health timeout (default: 10)
 
 Examples:
   ./bin/ops cap run media.health.check
-  ./bin/ops cap run media.health.check --vm download-stack --json
+  ./bin/ops cap run media.health.check -- --service jellyfin --json
 USAGE
 }
 
 VM_FILTER=""
+SERVICE_FILTER=""
 OUTPUT_JSON=false
 TIMEOUT_SEC=10
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --vm)
-      VM_FILTER="${2:-}"; shift 2 ;;
-    --json)
-      OUTPUT_JSON=true; shift ;;
-    --timeout)
-      TIMEOUT_SEC="${2:-}"; shift 2 ;;
-    -h|--help)
-      usage; exit 0 ;;
-    *)
-      echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+    --vm) VM_FILTER="${2:-}"; shift 2 ;;
+    --service) SERVICE_FILTER="${2:-}"; shift 2 ;;
+    --json) OUTPUT_JSON=true; shift ;;
+    --timeout) TIMEOUT_SEC="${2:-10}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift ;;
+    *) echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
 
 command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
 command -v curl >/dev/null 2>&1 || { echo "MISSING_DEP: curl" >&2; exit 2; }
-if $OUTPUT_JSON; then
-  command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+
+[[ -f "$BINDING" ]] || { echo "STOP: binding not found: $BINDING" >&2; exit 2; }
+
+if [[ -n "$VM_FILTER" && "$VM_FILTER" != "media-home" ]]; then
+  echo "FAIL: media.health.check now treats media-home as the only canonical media runtime; requested vm '$VM_FILTER' is legacy/non-authoritative" >&2
+  exit 1
 fi
 
-if [[ ! -f "$BINDING" ]]; then
-  echo "STOP: binding not found: $BINDING" >&2
-  exit 2
-fi
+ACTIVE_MEDIA_SERVICE_IDS=(
+  radarr
+  sonarr
+  prowlarr
+  sabnzbd
+  jellyfin
+  navidrome
+  jellyseerr
+  bazarr
+  homarr
+  wizarr
+  spotisub
+  media-node-exporter
+)
 
-# Load VM IPs from vm.lifecycle.yaml
-VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
-IP_MODE="${MEDIA_HEALTH_IP_MODE:-auto}"  # auto|lan|tailscale
-
-get_vm_ip() {
-  local vm="$1"
-  local lan_ip tailscale_ip
-  lan_ip="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .lan_ip // \"\"" "$VM_BINDING" 2>/dev/null || true)"
-  tailscale_ip="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .tailscale_ip // \"\"" "$VM_BINDING" 2>/dev/null || true)"
-
-  case "$IP_MODE" in
-    lan)
-      [[ -n "$lan_ip" ]] && { echo "$lan_ip"; return 0; }
-      [[ -n "$tailscale_ip" ]] && { echo "$tailscale_ip"; return 0; }
-      ;;
-    tailscale)
-      [[ -n "$tailscale_ip" ]] && { echo "$tailscale_ip"; return 0; }
-      [[ -n "$lan_ip" ]] && { echo "$lan_ip"; return 0; }
-      ;;
-    auto|*)
-      if [[ -n "$lan_ip" ]] && ping -c 1 -W 1000 "$lan_ip" >/dev/null 2>&1; then
-        echo "$lan_ip"
-        return 0
-      fi
-      if [[ -n "$tailscale_ip" ]] && ping -c 1 -W 1000 "$tailscale_ip" >/dev/null 2>&1; then
-        echo "$tailscale_ip"
-        return 0
-      fi
-      [[ -n "$lan_ip" ]] && { echo "$lan_ip"; return 0; }
-      [[ -n "$tailscale_ip" ]] && { echo "$tailscale_ip"; return 0; }
-      ;;
-  esac
-
-  echo ""
+get_field() {
+  local id="$1"
+  local field="$2"
+  yq -r ".endpoints[] | select(.id == \"$id\") | .$field // \"\"" "$BINDING" 2>/dev/null
 }
 
-# Health check for a single service
-check_service() {
-  local vm="$1"
-  local name="$2"
-  local port="$3"
-  local health_path="$4"
-  local status="$5"
+get_enabled() {
+  local id="$1"
+  yq -r ".endpoints[] | select(.id == \"$id\") | if has(\"enabled\") then (.enabled | tostring) else \"true\" end" "$BINDING" 2>/dev/null
+}
 
-  # Skip parked/stopped services
-  if [[ "$status" == "parked" || "$status" == "stopped" ]]; then
-    printf 'SKIP\t%s\t%s\t%s\n' "$name" "$vm" "$status"
+probe_service() {
+  local id="$1"
+  local host url expect enabled
+  host="$(get_field "$id" host)"
+  url="$(get_field "$id" url)"
+  expect="$(get_field "$id" expect)"
+  enabled="$(get_enabled "$id")"
+
+  if [[ -z "$url" ]]; then
+    printf 'MISSING\t%s\t%s\t%s\n' "$id" "${host:-unbound}" "missing-services-health-entry"
     return 0
   fi
 
-  # Skip services without health endpoint
-  if [[ "$health_path" == "null" || -z "$health_path" ]]; then
-    printf 'NO_PROBE\t%s\t%s\t%s\n' "$name" "$vm" "no-health-endpoint"
+  if [[ "$enabled" == "false" ]]; then
+    printf 'SKIP\t%s\t%s\t%s\n' "$id" "${host:-unbound}" "disabled"
     return 0
   fi
 
-  local vm_ip
-  vm_ip=$(get_vm_ip "$vm")
-  if [[ -z "$vm_ip" ]]; then
-    printf 'FAIL\t%s\t%s\t%s\n' "$name" "$vm" "no-ip-found"
-    return 1
+  local candidate_rows=()
+  if declare -F ssh_resolve_url_candidates >/dev/null 2>&1 && [[ -n "$host" ]]; then
+    while IFS=$'\t' read -r candidate_url path_used; do
+      [[ -n "$candidate_url" ]] || continue
+      candidate_rows+=("${candidate_url}|${path_used}")
+    done < <(ssh_resolve_url_candidates "$url" "$host")
+  fi
+  if [[ "${#candidate_rows[@]}" -eq 0 ]]; then
+    candidate_rows+=("${url}|direct")
   fi
 
-  local url="http://${vm_ip}:${port}${health_path}"
+  local row candidate_url path_used http_code
+  for row in "${candidate_rows[@]}"; do
+    candidate_url="${row%%|*}"
+    path_used="${row##*|}"
+    http_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time "$TIMEOUT_SEC" "$candidate_url" 2>/dev/null || true)"
+    if [[ "$http_code" == "$expect" ]]; then
+      printf 'OK\t%s\t%s\t%s (%s)\n' "$id" "${host:-unbound}" "$candidate_url" "$path_used"
+      return 0
+    fi
+  done
 
-  if curl -fsS --max-time "$TIMEOUT_SEC" "$url" >/dev/null 2>&1; then
-    printf 'OK\t%s\t%s\t%s\n' "$name" "$vm" "${port}${health_path}"
-    return 0
-  else
-    printf 'FAIL\t%s\t%s\t%s\n' "$name" "$vm" "$url"
-    return 1
-  fi
+  printf 'FAIL\t%s\t%s\t%s expected=%s got=%s\n' "$id" "${host:-unbound}" "$url" "$expect" "${http_code:-curl-failed}"
+  return 0
 }
 
-# Collect services from binding
-collect_services() {
-  local filter='.services | to_entries[]'
-  if [[ -n "$VM_FILTER" ]]; then
-    filter=".services | to_entries[] | select(.value.vm == \"$VM_FILTER\")"
-  fi
-
-  yq -r "$filter | [.key, .value.vm, .value.port // \"null\", .value.health // \"null\", .value.status // \"active\"] | @tsv" "$BINDING" 2>/dev/null
-}
-
-# Main
 RESULTS=()
-HEALTHY=0
-UNHEALTHY=0
-SKIPPED=0
-NO_PROBE=0
-FAILED_SERVICES=()
+OK_COUNT=0
+FAIL_COUNT=0
+SKIP_COUNT=0
+MISSING_COUNT=0
 
-while IFS=$'\t' read -r name vm port health status; do
-  [[ -z "$name" ]] && continue
+IDS_TO_CHECK=("${ACTIVE_MEDIA_SERVICE_IDS[@]}")
+if [[ -n "$SERVICE_FILTER" ]]; then
+  IDS_TO_CHECK=("$SERVICE_FILTER")
+fi
 
-  # Preserve full aggregation even when one probe fails.
-  if result=$(check_service "$vm" "$name" "$port" "$health" "$status"); then
-    :
-  else
-    :
-  fi
+for id in "${IDS_TO_CHECK[@]}"; do
+  result="$(probe_service "$id")"
   RESULTS+=("$result")
-
-  code="${result%%$'\t'*}"
-  case "$code" in
-    OK)       HEALTHY=$((HEALTHY + 1)) ;;
-    FAIL)     UNHEALTHY=$((UNHEALTHY + 1)); FAILED_SERVICES+=("$result") ;;
-    SKIP)     SKIPPED=$((SKIPPED + 1)) ;;
-    NO_PROBE) NO_PROBE=$((NO_PROBE + 1)) ;;
+  case "${result%%$'\t'*}" in
+    OK) OK_COUNT=$((OK_COUNT + 1)) ;;
+    FAIL) FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+    SKIP) SKIP_COUNT=$((SKIP_COUNT + 1)) ;;
+    MISSING) MISSING_COUNT=$((MISSING_COUNT + 1)) ;;
   esac
-done < <(collect_services)
+done
 
-TOTAL=$((HEALTHY + UNHEALTHY + SKIPPED + NO_PROBE))
+TOTAL=$((OK_COUNT + FAIL_COUNT + SKIP_COUNT + MISSING_COUNT))
+STATUS="ok"
+if [[ $FAIL_COUNT -gt 0 || $MISSING_COUNT -gt 0 ]]; then
+  STATUS="fail"
+fi
 
 if $OUTPUT_JSON; then
-  overall_status="ok"
-  if [[ $UNHEALTHY -gt 0 ]]; then
-    overall_status="fail"
-  fi
-
   results_json="$(printf '%s\n' "${RESULTS[@]}" | jq -R -s '
     split("\n")
     | map(select(length > 0))
-    | map(split("\t") | {code: .[0], service: .[1], vm: .[2], detail: .[3]})
+    | map(split("\t") | {code: .[0], service: .[1], host: .[2], detail: .[3]})
   ')"
-
   jq -n \
     --arg capability "media.health.check" \
     --arg schema_version "$SCHEMA_VERSION" \
     --arg generated_at "$GENERATED_AT" \
-    --arg status "$overall_status" \
-    --arg vm_filter "$VM_FILTER" \
-    --argjson timeout_sec "$TIMEOUT_SEC" \
+    --arg status "$STATUS" \
+    --arg vm_filter "${VM_FILTER:-media-home}" \
+    --arg service_filter "$SERVICE_FILTER" \
     --argjson total "$TOTAL" \
-    --argjson healthy "$HEALTHY" \
-    --argjson unhealthy "$UNHEALTHY" \
-    --argjson skipped "$SKIPPED" \
-    --argjson no_probe "$NO_PROBE" \
+    --argjson ok "$OK_COUNT" \
+    --argjson fail "$FAIL_COUNT" \
+    --argjson skip "$SKIP_COUNT" \
+    --argjson missing "$MISSING_COUNT" \
     --argjson results "$results_json" \
     '{
       capability: $capability,
@@ -210,39 +179,30 @@ if $OUTPUT_JSON; then
       generated_at: $generated_at,
       status: $status,
       data: {
-        vm_filter: (if $vm_filter == "" then null else $vm_filter end),
-        timeout_sec: $timeout_sec,
+        vm_filter: $vm_filter,
+        service_filter: (if $service_filter == "" then null else $service_filter end),
         summary: {
           total: $total,
-          healthy: $healthy,
-          unhealthy: $unhealthy,
-          skipped: $skipped,
-          no_probe: $no_probe
+          ok: $ok,
+          fail: $fail,
+          skip: $skip,
+          missing: $missing
         },
-        failed: ($results | map(select(.code == "FAIL"))),
         results: $results
       }
     }'
 else
   echo "media.health.check"
   echo "==================="
-  echo "total: $TOTAL | healthy: $HEALTHY | unhealthy: $UNHEALTHY | skipped: $SKIPPED | no_probe: $NO_PROBE"
-  echo ""
-  for r in "${RESULTS[@]}"; do
-    echo "  ${r//$'\t'/:}"
+  echo "vm: media-home"
+  echo "total: $TOTAL | ok: $OK_COUNT | fail: $FAIL_COUNT | skip: $SKIP_COUNT | missing: $MISSING_COUNT"
+  echo
+  for result in "${RESULTS[@]}"; do
+    echo "  ${result//$'\t'/: }"
   done
-
-  if [[ ${#FAILED_SERVICES[@]} -gt 0 ]]; then
-    echo ""
-    echo "FAILED SERVICES:"
-    for f in "${FAILED_SERVICES[@]}"; do
-      echo "  - ${f//$'\t'/:}"
-    done
-  fi
 fi
 
-# Exit code based on health
-if [[ $UNHEALTHY -gt 0 ]]; then
+if [[ $FAIL_COUNT -gt 0 || $MISSING_COUNT -gt 0 ]]; then
   exit 1
 fi
 exit 0

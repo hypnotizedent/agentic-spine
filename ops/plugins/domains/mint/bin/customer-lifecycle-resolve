@@ -1,0 +1,1092 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from customer_identity_common import normalize_space  # noqa: E402
+from customer_inbox_disposition_common import resolve_message_disposition  # noqa: E402
+from customer_repair_common import record_customer_repair_item  # noqa: E402
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    compact_utc,
+    fail,
+    iso_utc,
+    message_sender,
+    message_subject,
+    resolve_spine_root,
+    resolve_spine_state,
+    run_cap_capture,
+    utc_now,
+    write_json,
+)
+
+
+CAPABILITY_NAME = "mint.customer.lifecycle.resolve"
+SCHEMA_VERSION = "1.0"
+DEFAULT_MAILBOX = "team@mintprints.com"
+CONTRACT_FALLBACK = "ops/bindings/mint.customer.lifecycle.resolve.contract.yaml"
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_CUSTOMER_LIFECYCLE_RESOLVE_CAPABILITY_NAME") or CAPABILITY_NAME
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-lifecycle-resolve",
+        description=(
+            "Resolve governed Mint customer lifecycle state from quote intake, outbound binding, "
+            "Printavo bridge, payment visibility, and art-review truth."
+        ),
+    )
+    parser.add_argument("message_id", nargs="?", help="Mailbox message id")
+    parser.add_argument("--message-id", dest="message_id_flag", default="", help="Mailbox message id")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox to read from (default: {DEFAULT_MAILBOX})")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    args.message_id = normalize_space(args.message_id_flag or args.message_id or "")
+    if not args.message_id:
+        fail("message_id required")
+    return args
+
+
+def normalize_lower(value: Any) -> str:
+    return normalize_space(value).lower()
+
+
+def normalize_lookup_key(value: Any) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", normalize_lower(value)))
+
+
+def confidence_rank(value: Any) -> int:
+    return {"low": 1, "medium": 2, "high": 3}.get(normalize_lower(value), 0)
+
+
+def max_confidence(*values: Any) -> str:
+    ranked = sorted(((confidence_rank(value), normalize_lower(value)) for value in values if normalize_lower(value)), reverse=True)
+    return ranked[0][1] if ranked else "low"
+
+
+def load_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def load_yaml_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def iter_index_records(index_file: Path) -> list[dict[str, Any]]:
+    if not index_file.is_file():
+        return []
+    records: list[dict[str, Any]] = []
+    for raw in index_file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
+
+
+def quote_intake_score(record: dict[str, Any]) -> int:
+    handoff = dict(record.get("handoff") or {})
+    estimate_surface = dict(record.get("estimate_surface") or {})
+    score = 0
+    if normalize_space(handoff.get("source_state") or "") == "completed":
+        score += 80
+    if normalize_space(handoff.get("estimate_state") or "") == "completed":
+        score += 60
+    if int(estimate_surface.get("quote_safe_line_item_count") or 0) > 0:
+        score += 40
+    if normalize_space(record.get("qualification_status") or "") == "qualified_enough_to_quote":
+        score += 30
+    if normalize_space(((record.get("intake_quality") or {}).get("classification")) or "") != "headache":
+        score += 20
+    return score
+
+
+def binding_score(record: dict[str, Any], *, message_ids: set[str], packet_ids: set[str], customer_emails: set[str]) -> int:
+    score = 0
+    record_messages = {
+        normalize_space(record.get("external_message_id") or ""),
+        normalize_space(record.get("selected_from_source_message_id") or ""),
+        *[normalize_space(item) for item in (record.get("source_message_history") or []) if normalize_space(item)],
+    }
+    if normalize_space(record.get("external_message_id") or "") in message_ids:
+        score += 40
+    if normalize_space(record.get("selected_from_source_message_id") or "") in message_ids:
+        score += 35
+    if record_messages.intersection(message_ids):
+        score += 20
+    packet_id = normalize_space(((record.get("quote_binding") or {}).get("packet_id")) or "")
+    if packet_id and packet_id in packet_ids:
+        score += 25
+    record_emails = {
+        normalize_lower(record.get("external_sender") or ""),
+        *[normalize_lower(item) for item in (((record.get("canonical_recipients") or {}).get("to")) or []) if normalize_space(item)],
+    }
+    if record_emails.intersection(customer_emails):
+        score += 10
+    participant_resolution = dict((record.get("participant_resolution") or record.get("selection") or {}))
+    if normalize_space(participant_resolution.get("reply_target_role") or "") == "customer":
+        score += 40
+    if isinstance(participant_resolution.get("canonical_customer_thread"), dict) and participant_resolution.get("canonical_customer_thread"):
+        score += 30
+    parsed_number, parsed_nickname = parse_subject_parts(
+        ((record.get("quote_binding") or {}).get("quote_subject")) or record.get("quote_subject") or ""
+    )
+    if parsed_number and parsed_nickname:
+        score += 20
+    quote_subject = normalize_space(((record.get("quote_binding") or {}).get("quote_subject")) or record.get("quote_subject") or "")
+    if quote_subject and not quote_subject.lower().startswith("re:"):
+        score += 10
+    return score
+
+
+def binding_has_anchor_match(record: dict[str, Any], *, message_ids: set[str], packet_ids: set[str], customer_emails: set[str]) -> bool:
+    record_messages = {
+        normalize_space(record.get("external_message_id") or ""),
+        normalize_space(record.get("selected_from_source_message_id") or ""),
+        *[normalize_space(item) for item in (record.get("source_message_history") or []) if normalize_space(item)],
+    }
+    if record_messages.intersection(message_ids):
+        return True
+    packet_id = normalize_space(((record.get("quote_binding") or {}).get("packet_id")) or "")
+    if packet_id and packet_id in packet_ids:
+        return True
+    record_emails = {
+        normalize_lower(record.get("external_sender") or ""),
+        *[normalize_lower(item) for item in (((record.get("canonical_recipients") or {}).get("to")) or []) if normalize_space(item)],
+    }
+    return bool(record_emails.intersection(customer_emails))
+
+
+def resolve_contract_path(spine_root: Path) -> Path:
+    override = normalize_space(os.environ.get("MINT_CUSTOMER_LIFECYCLE_RESOLVE_CONTRACT") or "")
+    if override:
+        path = Path(override).expanduser().resolve()
+    else:
+        path = (spine_root / CONTRACT_FALLBACK).resolve()
+    if not path.is_file():
+        fail(f"lifecycle resolve contract not found: {path}")
+    return path
+
+
+def resolve_state_path(raw: str, *, spine_root: Path, state_root: Path) -> Path:
+    value = str(raw or "").replace("$SPINE_ROOT", str(spine_root)).replace("$SPINE_STATE", str(state_root))
+    return Path(value).expanduser().resolve()
+
+
+def load_contract(spine_root: Path, state_root: Path) -> dict[str, Any]:
+    contract_path = resolve_contract_path(spine_root)
+    raw = yaml.safe_load(contract_path.read_text(encoding="utf-8")) or {}
+    storage = dict(raw.get("storage") or {})
+    states = dict(raw.get("lifecycle_states") or {})
+    dependencies = dict(raw.get("dependencies") or {})
+    guards = dict(raw.get("guards") or {})
+    if not storage or not states or not dependencies:
+        fail(f"lifecycle resolve contract missing storage/states/dependencies: {contract_path}")
+    return {
+        "path": str(contract_path),
+        "dependencies": dependencies,
+        "states": states,
+        "guards": guards,
+        "internal_domains": [normalize_lower(item) for item in (guards.get("internal_domains") or ["mintprints.com"]) if normalize_space(item)],
+        "storage": {
+            "records_root": resolve_state_path(str(storage.get("records_root") or ""), spine_root=spine_root, state_root=state_root),
+            "index_file": resolve_state_path(str(storage.get("index_file") or ""), spine_root=spine_root, state_root=state_root),
+            "lock_file": resolve_state_path(str(storage.get("lock_file") or ""), spine_root=spine_root, state_root=state_root),
+        },
+    }
+
+
+def run_cap_json(spine_root: Path, capability: str, args: list[str]) -> tuple[dict[str, Any], str]:
+    return run_cap_capture(spine_root, capability, args)
+
+
+def latest_quote_intake_record(state_root: Path, message_ids: list[str]) -> dict[str, Any]:
+    wanted = {normalize_space(item) for item in message_ids if normalize_space(item)}
+    if not wanted:
+        return {}
+    index_file = state_root / "mint" / "customer-quote-intakes" / "index.ndjson"
+    best_record: dict[str, Any] = {}
+    best_score = -1
+    best_timestamp = ""
+    for entry in reversed(iter_index_records(index_file)):
+        if normalize_space(entry.get("message_id") or "") not in wanted:
+            continue
+        record_path = Path(str(entry.get("record_file") or "")).expanduser()
+        record = load_json_file(record_path) if record_path.is_file() else {}
+        if not record:
+            continue
+        score = quote_intake_score(record)
+        timestamp = normalize_space(record.get("stored_at_utc") or "")
+        if score > best_score or (score == best_score and timestamp >= best_timestamp):
+            best_record = record
+            best_score = score
+            best_timestamp = timestamp
+    return best_record
+
+
+def load_quote_intake_context(
+    spine_root: Path,
+    state_root: Path,
+    *,
+    mailbox: str,
+    message_ids: list[str],
+    preferred_message_id: str,
+    quote_intake_capability: str,
+) -> tuple[dict[str, Any], str]:
+    record = latest_quote_intake_record(state_root, message_ids)
+    receipt = ""
+    if not record:
+        payload, receipt = run_cap_json(
+            spine_root,
+            quote_intake_capability,
+            ["--mailbox", mailbox, "--message-id", preferred_message_id, "--json"],
+        )
+        data = dict(payload.get("data") or payload)
+        record_path = Path(str(data.get("record_file") or "")).expanduser()
+        record = load_json_file(record_path) if record_path.is_file() else data
+    packet_file = Path(str(((record.get("handoff") or {}).get("packet_file")) or "")).expanduser()
+    packet = load_yaml_file(packet_file) if packet_file.is_file() else {}
+    return record, receipt
+
+
+def resolve_outbound_binding(state_root: Path, *, message_ids: list[str], packet_ids: list[str], customer_emails: list[str]) -> dict[str, Any]:
+    wanted_messages = {normalize_space(item) for item in message_ids if normalize_space(item)}
+    wanted_packets = {normalize_space(item) for item in packet_ids if normalize_space(item)}
+    wanted_emails = {normalize_lower(item) for item in customer_emails if normalize_space(item)}
+    index_file = state_root / "mint" / "customer-outbound-bindings" / "index.ndjson"
+    best_record: dict[str, Any] = {}
+    best_score = -1
+    best_timestamp = ""
+    for entry in reversed(iter_index_records(index_file)):
+        record_path = Path(str(entry.get("record_file") or "")).expanduser()
+        record = load_json_file(record_path) if record_path.is_file() else {}
+        if not record:
+            continue
+        if not binding_has_anchor_match(record, message_ids=wanted_messages, packet_ids=wanted_packets, customer_emails=wanted_emails):
+            continue
+        score = binding_score(record, message_ids=wanted_messages, packet_ids=wanted_packets, customer_emails=wanted_emails)
+        if score <= 0:
+            continue
+        timestamp = normalize_space(record.get("updated_at_utc") or "")
+        if score > best_score or (score == best_score and timestamp >= best_timestamp):
+            best_record = record
+            best_score = score
+            best_timestamp = timestamp
+    return best_record
+
+
+def packet_seed_id(packet: dict[str, Any]) -> str:
+    for source_ref in (packet.get("source_refs") or []):
+        seed_id = normalize_space((source_ref or {}).get("seed_id") or "")
+        if seed_id:
+            return seed_id
+    return ""
+
+
+def packet_customer_id(packet: dict[str, Any]) -> str:
+    return normalize_space(((packet.get("customer_ref") or {}).get("customer_id")) or "")
+
+
+def packet_customer_email(packet: dict[str, Any]) -> str:
+    return normalize_lower(((packet.get("customer_ref") or {}).get("resolved_email")) or "")
+
+
+def packet_customer_name(packet: dict[str, Any]) -> str:
+    return normalize_space(((packet.get("customer_ref") or {}).get("resolved_name")) or "")
+
+
+def parse_subject_parts(subject: str) -> tuple[str, str]:
+    cleaned = normalize_space(re.sub(r"^(?:(?:re|fw|fwd)\s*:\s*)+", "", subject or "", flags=re.IGNORECASE))
+    match = re.match(r"^(?P<number>[0-9]{4,})\s+(?P<nickname>.+\S)$", cleaned)
+    if not match:
+        return "", ""
+    return normalize_space(match.group("number")), normalize_space(match.group("nickname"))
+
+
+def lifecycle_anchor_conflict_reason(
+    *,
+    source_message: dict[str, Any],
+    customer_email: str,
+    packet_id: str,
+    outbound_binding: dict[str, Any],
+    packet: dict[str, Any],
+    internal_domains: list[str],
+) -> str:
+    source_from = normalize_lower(message_sender(source_message))
+    if source_from and not any(source_from.endswith(f"@{domain}") for domain in internal_domains):
+        if customer_email and source_from != customer_email:
+            return "source message customer does not match resolved lifecycle customer"
+    packet_email = packet_customer_email(packet)
+    if packet_email and customer_email and packet_email != customer_email:
+        return "packet customer email does not match resolved lifecycle customer"
+    outbound_quote_binding = dict(outbound_binding.get("quote_binding") or {})
+    outbound_packet_id = normalize_space(outbound_quote_binding.get("packet_id") or "")
+    if outbound_packet_id and packet_id and outbound_packet_id != packet_id:
+        return "outbound binding packet does not match lifecycle packet"
+    outbound_customer_email = normalize_lower(
+        outbound_binding.get("external_sender")
+        or (((outbound_binding.get("canonical_recipients") or {}).get("to")) or [""])[0]
+        or ""
+    )
+    if outbound_customer_email and customer_email and outbound_customer_email != customer_email:
+        return "outbound binding customer email does not match resolved lifecycle customer"
+    return ""
+
+
+def effective_source_disposition(source_disposition: dict[str, Any], quote_context: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(source_disposition or {})
+    qualification_status = normalize_space(quote_context.get("qualification_status") or "")
+    product_scope = dict(quote_context.get("product_scope") or {})
+    product_scope_classification = normalize_space(product_scope.get("classification") or "")
+    if qualification_status not in {"out_of_scope_not_supported", "mixed_scope_requires_split"} and product_scope_classification not in {
+        "out_of_scope",
+        "mixed_scope",
+    }:
+        return updated
+    updated["disposition"] = "unsupported_scope"
+    updated["customer_truth_allowed"] = False
+    updated["primary_queue_visible"] = True
+    updated["reply_allowed"] = True
+    updated["recoverable_folder"] = ""
+    updated["product_scope"] = product_scope
+    reason_codes = [normalize_space(item) for item in (updated.get("reason_codes") or []) if normalize_space(item)]
+    if qualification_status:
+        reason_codes.append(f"qualification_status:{qualification_status}")
+    if product_scope_classification:
+        reason_codes.append(f"product_scope:{product_scope_classification}")
+    updated["reason_codes"] = list(dict.fromkeys(reason_codes))
+    return updated
+
+
+def outbound_binding_has_customer_anchor(
+    outbound_binding: dict[str, Any],
+    *,
+    message_ids: list[str],
+    packet_id: str,
+    customer_email: str,
+) -> bool:
+    participant_resolution = dict((outbound_binding.get("participant_resolution") or outbound_binding.get("selection") or {}))
+    if normalize_space(participant_resolution.get("reply_target_role") or "") != "customer":
+        return False
+    return binding_has_anchor_match(
+        outbound_binding,
+        message_ids={normalize_space(item) for item in message_ids if normalize_space(item)},
+        packet_ids={normalize_space(packet_id)} if normalize_space(packet_id) else set(),
+        customer_emails={normalize_lower(customer_email)} if normalize_space(customer_email) else set(),
+    )
+
+
+def lifecycle_truth_block_reason(
+    source_disposition: dict[str, Any],
+    quote_context: dict[str, Any],
+    outbound_binding: dict[str, Any],
+    *,
+    message_ids: list[str],
+    packet_id: str,
+    customer_email: str,
+) -> str:
+    disposition_name = normalize_space(source_disposition.get("disposition") or "")
+    qualification_status = normalize_space(quote_context.get("qualification_status") or "")
+    product_scope_classification = normalize_space(((quote_context.get("product_scope") or {}).get("classification")) or "")
+    if disposition_name == "unsupported_scope":
+        return "unsupported_scope thread cannot publish governed lifecycle truth"
+    if qualification_status in {"out_of_scope_not_supported", "mixed_scope_requires_split"} or product_scope_classification in {
+        "out_of_scope",
+        "mixed_scope",
+    }:
+        return "unsupported or mixed-scope thread cannot publish governed lifecycle truth"
+    if disposition_name in {"supplier_marketing", "risky_junk"}:
+        return f"disposition {disposition_name} cannot publish governed lifecycle truth"
+    if bool(source_disposition.get("customer_truth_allowed")):
+        return ""
+    if outbound_binding_has_customer_anchor(
+        outbound_binding,
+        message_ids=message_ids,
+        packet_id=packet_id,
+        customer_email=customer_email,
+    ):
+        return ""
+    return f"source disposition {disposition_name or 'unknown'} is not eligible to publish governed lifecycle truth without a governed customer anchor"
+
+
+def resolve_quote_binding_patch(outbound_binding: dict[str, Any], packet: dict[str, Any], printavo_payload: dict[str, Any]) -> dict[str, Any]:
+    binding = dict((outbound_binding.get("quote_binding") or {}))
+    latest_printavo = dict(printavo_payload.get("latest") or {})
+    summary = dict(latest_printavo.get("printavo_summary") or {})
+    quote_subject = normalize_space(binding.get("quote_subject") or outbound_binding.get("quote_subject") or "")
+    job_number = normalize_space(binding.get("job_number") or "")
+    job_nickname = normalize_space(binding.get("job_nickname") or "")
+    parsed_number, parsed_nickname = parse_subject_parts(quote_subject)
+    if not job_number:
+        job_number = parsed_number
+    if not job_nickname:
+        job_nickname = parsed_nickname
+    quote_url = normalize_space(
+        summary.get("printavo_public_invoice_url")
+        or summary.get("printavo_invoice_url")
+        or latest_printavo.get("printavo_invoice_url")
+        or ""
+    )
+    return {
+        "packet_id": normalize_space(binding.get("packet_id") or packet.get("quote_packet_id") or ""),
+        "packet_file": normalize_space(binding.get("packet_file") or ""),
+        "quote_subject": quote_subject,
+        "quote_url": quote_url,
+        "job_number": job_number,
+        "job_nickname": job_nickname,
+    }
+
+
+def select_customer_identity(source_message: dict[str, Any], outbound_binding: dict[str, Any], record: dict[str, Any], packet: dict[str, Any], internal_domains: list[str]) -> tuple[str, str]:
+    participant_resolution = dict((outbound_binding.get("participant_resolution") or outbound_binding.get("selection") or {}))
+    canonical_customer = dict(participant_resolution.get("canonical_customer_thread") or {})
+    customer_email = normalize_lower(
+        canonical_customer.get("from")
+        or outbound_binding.get("external_sender")
+        or (((outbound_binding.get("canonical_recipients") or {}).get("to")) or [""])[0]
+        or ((record.get("customer") or {}).get("email"))
+        or packet_customer_email(packet)
+        or message_sender(source_message)
+    )
+    customer_name = normalize_space(
+        canonical_customer.get("from_name")
+        or ((record.get("customer") or {}).get("name"))
+        or packet_customer_name(packet)
+        or (((source_message.get("from") or {}).get("emailAddress") or {}).get("name"))
+        or ""
+    )
+    if customer_email and any(customer_email.endswith(f"@{domain}") for domain in internal_domains):
+        customer_email = packet_customer_email(packet) or normalize_lower(((record.get("customer") or {}).get("email")) or "")
+    return customer_email, customer_name
+
+
+def first_quote_context_blocker(record: dict[str, Any]) -> list[str]:
+    customer_reply_guidance = dict(record.get("customer_reply_guidance") or {})
+    if not customer_reply_guidance:
+        customer_reply_guidance = {
+            "blockers": list(record.get("customer_reply_guidance_blockers") or []),
+        }
+    estimate_surface = dict(record.get("estimate_surface") or {})
+    line_item_estimates = list(estimate_surface.get("line_item_estimates") or record.get("line_item_estimates") or [])
+    blockers: list[str] = []
+    for entry in line_item_estimates:
+        for item in (entry.get("missing_clarifications") or []):
+            cleaned = normalize_space(item)
+            if cleaned and cleaned not in blockers:
+                blockers.append(cleaned)
+    if blockers:
+        return blockers[:1]
+    guidance_blockers: list[str] = []
+    for item in (customer_reply_guidance.get("blockers") or []):
+        cleaned = normalize_space(item)
+        if not cleaned:
+            continue
+        if "?" in cleaned:
+            guidance_blockers.append(cleaned)
+            continue
+        lowered = re.sub(r"(?i)\bconfirmation\b", "", cleaned).strip(" .,:;!-").lower()
+        if not lowered:
+            continue
+        if re.search(r"\bquantity\b", lowered):
+            guidance_blockers.append("Can you confirm the quantity?")
+        elif re.search(r"\bsize breakdown\b", lowered):
+            guidance_blockers.append("Can you send the size breakdown?")
+        elif re.search(r"\bprint locations?\b", lowered):
+            guidance_blockers.append("Can you confirm the print locations?")
+        elif re.search(r"\b(blank|style|style code)\b", lowered):
+            guidance_blockers.append("Can you confirm the blank/style?")
+        elif re.search(r"\b(color|garment color)\b", lowered):
+            guidance_blockers.append("Can you confirm the garment color?")
+        elif re.search(r"\b(timeline|due date|turn time|deadline)\b", lowered):
+            guidance_blockers.append("Can you confirm the timeline?")
+    return guidance_blockers[:1]
+
+
+def query_printavo_visibility(
+    spine_root: Path,
+    capability: str,
+    *,
+    seed_id: str,
+    customer_id: str,
+    email: str,
+) -> tuple[dict[str, Any], str]:
+    if seed_id:
+        return run_cap_json(spine_root, capability, ["--seed-id", seed_id, "--json"])
+    if customer_id:
+        return run_cap_json(spine_root, capability, ["--customer-id", customer_id, "--json"])
+    if email:
+        return run_cap_json(spine_root, capability, ["--email", email, "--json"])
+    return (
+        {
+            "capability": capability,
+            "state": "no_record_found",
+            "match_count": 0,
+            "latest": None,
+            "matches": [],
+        },
+        "",
+    )
+
+
+def query_payment_visibility(
+    spine_root: Path,
+    capability: str,
+    *,
+    customer_id: str,
+    email: str,
+) -> tuple[dict[str, Any], str]:
+    if customer_id:
+        return run_cap_json(spine_root, capability, ["--customer-id", customer_id, "--json"])
+    if email:
+        return run_cap_json(spine_root, capability, ["--email", email, "--json"])
+    return (
+        {
+            "capability": capability,
+            "state": "no_record_found",
+            "match_count": 0,
+            "latest": None,
+            "matches": [],
+        },
+        "",
+    )
+
+
+def resolve_art_review(state_root: Path, *, message_ids: list[str], job_number: str, customer_name: str) -> dict[str, Any]:
+    wanted_messages = {normalize_space(item) for item in message_ids if normalize_space(item)}
+    wanted_customer_key = normalize_lookup_key(customer_name)
+    index_file = state_root / "mint" / "artie-revision-reviews" / "index.ndjson"
+    for entry in reversed(iter_index_records(index_file)):
+        job_match = bool(job_number and normalize_space(entry.get("job_identity") or "") == job_number)
+        customer_match = bool(wanted_customer_key and normalize_lookup_key(entry.get("customer_identity") or "") == wanted_customer_key)
+        record_path = Path(str(entry.get("record_file") or "")).expanduser()
+        if not record_path.is_file():
+            continue
+        record = load_json_file(record_path)
+        if not record:
+            continue
+        source_message_id = normalize_space((((record.get("morpheus_consumption") or {}).get("source_message_id")) or ""))
+        if not (job_match or customer_match or (wanted_messages and source_message_id in wanted_messages)):
+            continue
+        return record
+    return {}
+
+
+def latest_printavo_state(payload: dict[str, Any]) -> str:
+    latest = dict(payload.get("latest") or {})
+    summary = dict(latest.get("printavo_summary") or {})
+    return normalize_space(summary.get("printavo_state") or latest.get("printavo_state") or payload.get("state") or "")
+
+
+def latest_payment_state(payload: dict[str, Any]) -> str:
+    latest = dict(payload.get("latest") or {})
+    summary = dict(latest.get("payment_summary") or {})
+    return normalize_space(latest.get("payment_state") or summary.get("payment_state") or "")
+
+
+def latest_payment_visibility_state(payload: dict[str, Any]) -> str:
+    latest = dict(payload.get("latest") or {})
+    return normalize_space(latest.get("payment_visibility_state") or payload.get("state") or "")
+
+
+def render_quote_live_body(quote_binding_patch: dict[str, Any], quote_context: dict[str, Any], next_step: str) -> tuple[str, list[dict[str, str]]]:
+    quote_url = normalize_space(quote_binding_patch.get("quote_url") or "")
+    quote_subject = normalize_space(quote_binding_patch.get("quote_subject") or "")
+    price_lane = normalize_space(quote_context.get("price_lane") or "")
+    lines = ["I have the live quote ready here."]
+    if quote_url:
+        lines.append(f"You can review it here: {quote_url}")
+    if quote_subject:
+        lines.append(f"This is tied to {quote_subject}.")
+    if price_lane:
+        lines.append(f"The current working price lane is about {price_lane} per shirt.")
+    if next_step:
+        lines.append(next_step)
+    links = [{"label": quote_subject or "View quote", "url": quote_url}] if quote_url else []
+    return "\n\n".join(lines), links
+
+
+def render_approved_payment_body(quote_binding_patch: dict[str, Any], next_step: str) -> tuple[str, list[dict[str, str]]]:
+    quote_url = normalize_space(quote_binding_patch.get("quote_url") or "")
+    quote_subject = normalize_space(quote_binding_patch.get("quote_subject") or "")
+    lines = ["I have your approval noted."]
+    if quote_url:
+        lines.append(f"The live quote is here: {quote_url}")
+    if next_step:
+        lines.append(next_step)
+    links = [{"label": quote_subject or "View quote", "url": quote_url}] if quote_url else []
+    return "\n\n".join(lines), links
+
+
+def render_art_revision_body(art_review: dict[str, Any], next_step: str) -> str:
+    exact_miss = normalize_space(art_review.get("exact_miss") or "")
+    lines = ["We are on the next art revision now with art dept."]
+    if exact_miss:
+        lines.append(f"The current proof still needs one correction: {exact_miss}.")
+    if next_step:
+        lines.append(next_step)
+    return "\n\n".join(lines)
+
+
+def render_in_progress_body(next_step: str) -> str:
+    lines = ["Payment is in and this is moving through production now."]
+    if next_step:
+        lines.append(next_step)
+    return "\n\n".join(lines)
+
+
+def state_config(contract: dict[str, Any], state: str) -> dict[str, Any]:
+    return dict((contract.get("states") or {}).get(state) or {})
+
+
+def derive_lifecycle_state(
+    contract: dict[str, Any],
+    *,
+    quote_context: dict[str, Any],
+    printavo_payload: dict[str, Any],
+    payment_payload: dict[str, Any],
+    art_review: dict[str, Any],
+    outbound_binding: dict[str, Any],
+) -> tuple[str, list[str], str]:
+    basis: list[str] = []
+    participant_resolution = dict((outbound_binding.get("participant_resolution") or outbound_binding.get("selection") or {}))
+    reply_target_role = normalize_space(participant_resolution.get("reply_target_role") or "")
+    printavo_state = latest_printavo_state(printavo_payload)
+    payment_state = latest_payment_state(payment_payload)
+    payment_visibility_state = latest_payment_visibility_state(payment_payload)
+    art_state = normalize_space(((art_review.get("proof_readiness") or {}).get("state")) or "")
+    qualification_status = normalize_space(quote_context.get("qualification_status") or "")
+    intake_quality = normalize_space(quote_context.get("intake_quality") or "")
+    source_state = normalize_space(quote_context.get("source_state") or "")
+    estimate_state = normalize_space(quote_context.get("estimate_state") or "")
+    quote_safe_count = int(quote_context.get("quote_safe_line_item_count") or 0)
+    clarification_count = int(quote_context.get("clarification_needed_count") or 0)
+
+    if reply_target_role and reply_target_role != "customer":
+        basis.append(f"reply_target_role:{reply_target_role}")
+        return "needs_manual_resolution", basis, "low"
+
+    if art_state == "revision_required":
+        basis.append("art_review:revision_required")
+        if printavo_state in {"paid", "converted_to_work_order"} or payment_state == "paid":
+            if printavo_state:
+                basis.append(f"printavo_state:{printavo_state}")
+            if payment_state:
+                basis.append(f"payment_state:{payment_state}")
+            return "paid_art_revision_required", basis, max_confidence(art_review.get("review_confidence"), "high")
+        return "art_revision_required", basis, max_confidence(art_review.get("review_confidence"), "medium")
+
+    if printavo_state in {"converted_to_work_order", "paid"} or payment_state == "paid":
+        if printavo_state:
+            basis.append(f"printavo_state:{printavo_state}")
+        if payment_state:
+            basis.append(f"payment_state:{payment_state}")
+        return "paid_in_production", basis, "high"
+
+    if printavo_state == "approved":
+        basis.append("printavo_state:approved")
+        if payment_visibility_state:
+            basis.append(f"payment_visibility:{payment_visibility_state}")
+        return "approved_payment_pending", basis, "high"
+
+    if printavo_state == "quote_live":
+        basis.append("printavo_state:quote_live")
+        return "quote_live_pending_customer_response", basis, "high"
+
+    if intake_quality == "headache" or qualification_status in {"headache_operator_burden", "out_of_scope_not_supported", "mixed_scope_requires_split"}:
+        basis.append(f"intake_quality:{intake_quality or 'headache'}")
+        if qualification_status:
+            basis.append(f"qualification_status:{qualification_status}")
+        return "headache_operator_review", basis, "medium"
+
+    if source_state == "completed" and estimate_state == "completed" and quote_safe_count > 0:
+        basis.extend(
+            [
+                "quote_context:source_completed",
+                "quote_context:estimate_completed",
+                f"quote_safe_count:{quote_safe_count}",
+            ]
+        )
+        return "estimate_ready_pending_quote_creation", basis, "medium"
+
+    if clarification_count > 0 or qualification_status in {"clarification_needed", "not_ready"}:
+        if clarification_count > 0:
+            basis.append(f"clarification_needed_count:{clarification_count}")
+        if qualification_status:
+            basis.append(f"qualification_status:{qualification_status}")
+        return "clarification_needed_before_quote", basis, "medium"
+
+    if source_state == "not_attempted" and normalize_space(quote_context.get("packet_id") or ""):
+        basis.append("quote_context:packet_present_without_ready_state")
+    return "needs_manual_resolution", basis or ["no_decisive_lifecycle_signal"], "low"
+
+
+def build_generated_reply(
+    state: str,
+    *,
+    contract: dict[str, Any],
+    quote_context: dict[str, Any],
+    quote_binding_patch: dict[str, Any],
+    art_review: dict[str, Any],
+) -> tuple[str, list[str], list[dict[str, str]]]:
+    config = state_config(contract, state)
+    next_step = normalize_space(config.get("customer_safe_next_step") or "")
+    if state == "quote_live_pending_customer_response":
+        body, links = render_quote_live_body(quote_binding_patch, quote_context, next_step)
+        return body, [], links
+    if state == "approved_payment_pending":
+        body, links = render_approved_payment_body(quote_binding_patch, next_step)
+        return body, [], links
+    if state in {"art_revision_required", "paid_art_revision_required"}:
+        return render_art_revision_body(art_review, next_step), [], []
+    if state == "paid_in_production":
+        return render_in_progress_body(next_step), [], []
+    if state == "clarification_needed_before_quote":
+        return "", first_quote_context_blocker(quote_context), []
+    return "", [], []
+
+
+def write_record(state_root: Path, lifecycle_id: str, payload: dict[str, Any], now: Any, contract: dict[str, Any]) -> tuple[Path, Path]:
+    stamp = now.astimezone().strftime("%Y/%m/%d")
+    record_file = contract["storage"]["records_root"] / stamp / f"{lifecycle_id}.json"
+    index_file = contract["storage"]["index_file"]
+    lock_file = contract["storage"]["lock_file"]
+    write_json(record_file, payload)
+    append_ndjson(
+        index_file,
+        lock_file,
+        {
+            "lifecycle_id": lifecycle_id,
+            "message_id": payload.get("source_message_id"),
+            "customer_email": payload.get("customer_email"),
+            "packet_id": ((payload.get("quote_binding_patch") or {}).get("packet_id")),
+            "lifecycle_state": payload.get("lifecycle_state"),
+            "reply_mode": payload.get("reply_mode"),
+            "record_file": str(record_file),
+            "stored_at_utc": payload.get("stored_at_utc"),
+        },
+    )
+    return record_file, index_file
+
+
+def text_output(payload: dict[str, Any]) -> str:
+    quote_binding_patch = dict(payload.get("quote_binding_patch") or {})
+    printavo = dict(payload.get("printavo_visibility") or {})
+    payment = dict(payload.get("payment_visibility") or {})
+    art_review = dict(payload.get("art_review") or {})
+    lines = [
+        capability_name(),
+        f"message_id: {payload.get('source_message_id') or ''}",
+        f"customer_email: {payload.get('customer_email') or ''}",
+        f"lifecycle_state: {payload.get('lifecycle_state') or ''}",
+        f"reply_mode: {payload.get('reply_mode') or ''}",
+        f"confidence: {payload.get('confidence') or ''}",
+        f"printavo_state: {latest_printavo_state(printavo)}",
+        f"payment_state: {latest_payment_state(payment)}",
+        f"art_state: {normalize_space(((art_review.get('proof_readiness') or {}).get('state')) or '')}",
+        f"quote_subject: {quote_binding_patch.get('quote_subject') or ''}",
+        f"quote_url: {quote_binding_patch.get('quote_url') or ''}",
+        f"record_file: {payload.get('record_file') or ''}",
+    ]
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    now = utc_now()
+    stamp = compact_utc(now)
+    short_id = re.sub(r"[^A-Za-z0-9]+", "", args.message_id)[-6:] or "000000"
+    lifecycle_id = f"MCLR-{stamp}-{short_id}"
+
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    contract = load_contract(spine_root, state_root)
+    deps = dict(contract.get("dependencies") or {})
+
+    source_message, source_receipt = run_cap_json(
+        spine_root,
+        str(deps.get("message_get") or "microsoft.mail.get"),
+        ["--message-id", args.message_id, "--mailbox", args.mailbox],
+    )
+    source_disposition = resolve_message_disposition(spine_root, source_message)
+
+    initial_binding = resolve_outbound_binding(state_root, message_ids=[args.message_id], packet_ids=[], customer_emails=[message_sender(source_message)])
+    candidate_message_ids = [
+        args.message_id,
+        normalize_space(initial_binding.get("external_message_id") or ""),
+        normalize_space(initial_binding.get("selected_from_source_message_id") or ""),
+        *[normalize_space(item) for item in (initial_binding.get("source_message_history") or []) if normalize_space(item)],
+    ]
+    record, quote_intake_receipt = load_quote_intake_context(
+        spine_root,
+        state_root,
+        mailbox=args.mailbox,
+        message_ids=candidate_message_ids,
+        preferred_message_id=args.message_id,
+        quote_intake_capability=str(deps.get("quote_intake") or "mint.customer.quote.intake"),
+    )
+    packet_file = Path(str(((record.get("handoff") or {}).get("packet_file")) or "")).expanduser()
+    packet = load_yaml_file(packet_file) if packet_file.is_file() else {}
+    packet_id = normalize_space(((record.get("handoff") or {}).get("packet_id")) or packet.get("quote_packet_id") or "")
+
+    outbound_binding = initial_binding
+    if not outbound_binding:
+        outbound_binding = resolve_outbound_binding(
+            state_root,
+            message_ids=candidate_message_ids,
+            packet_ids=[packet_id],
+            customer_emails=[packet_customer_email(packet), normalize_lower(((record.get("customer") or {}).get("email")) or ""), message_sender(source_message)],
+        )
+
+    customer_email, customer_name = select_customer_identity(source_message, outbound_binding, record, packet, contract["internal_domains"])
+    if not customer_email:
+        customer_email = normalize_lower((source_disposition.get("customer_contact") or {}).get("email") or "")
+    if not customer_name:
+        customer_name = normalize_space((source_disposition.get("customer_contact") or {}).get("display_name") or "")
+    seed_id = packet_seed_id(packet)
+    customer_id = packet_customer_id(packet) or normalize_space(((record.get("customer") or {}).get("customer_id")) or "")
+
+    printavo_payload, printavo_receipt = query_printavo_visibility(
+        spine_root,
+        str(deps.get("printavo_snapshot") or "mint.printavo.bridge.snapshot"),
+        seed_id=seed_id,
+        customer_id=customer_id,
+        email=customer_email,
+    )
+    payment_payload, payment_receipt = query_payment_visibility(
+        spine_root,
+        str(deps.get("payment_snapshot") or "mint.payment.record.snapshot"),
+        customer_id=customer_id,
+        email=customer_email,
+    )
+
+    quote_context = {
+        "packet_id": packet_id,
+        "packet_file": str(packet_file) if packet_file.is_file() else "",
+        "source_state": normalize_space(((record.get("handoff") or {}).get("source_state")) or ""),
+        "estimate_state": normalize_space(((record.get("handoff") or {}).get("estimate_state")) or ""),
+        "pricing_state": normalize_space(((record.get("handoff") or {}).get("pricing_state")) or ""),
+        "intake_quality": normalize_space(((record.get("intake_quality") or {}).get("classification")) or ""),
+        "qualification_status": normalize_space(record.get("qualification_status") or ""),
+        "product_scope": dict(record.get("product_scope") or {}),
+        "quote_safe_line_item_count": int(((record.get("estimate_surface") or {}).get("quote_safe_line_item_count")) or 0),
+        "clarification_needed_count": int(((record.get("estimate_surface") or {}).get("clarification_needed_count")) or 0),
+        "price_lane": normalize_space(((record.get("pricing_surface") or {}).get("price_lane")) or ""),
+        "customer_reply_guidance_mode": normalize_space(((record.get("customer_reply_guidance") or {}).get("mode")) or ""),
+        "customer_reply_guidance_summary": normalize_space(((record.get("customer_reply_guidance") or {}).get("summary")) or ""),
+        "customer_reply_guidance_blockers": list(((record.get("customer_reply_guidance") or {}).get("blockers")) or []),
+        "line_item_estimates": list(((record.get("estimate_surface") or {}).get("line_item_estimates")) or []),
+        "record_file": normalize_space(record.get("record_file") or ""),
+    }
+    source_disposition = effective_source_disposition(source_disposition, quote_context)
+    outbound_quote_binding = dict((outbound_binding.get("quote_binding") or {}))
+    if not quote_context["price_lane"]:
+        quote_context["price_lane"] = normalize_space(((record.get("estimate_surface") or {}).get("price_lane")) or "")
+    if not quote_context["record_file"]:
+        quote_context["record_file"] = normalize_space(record.get("record_file") or "")
+
+    job_number = normalize_space(outbound_quote_binding.get("job_number") or "")
+    job_nickname = normalize_space(outbound_quote_binding.get("job_nickname") or "")
+    parsed_number, parsed_nickname = parse_subject_parts(outbound_quote_binding.get("quote_subject") or outbound_binding.get("quote_subject") or "")
+    if not job_number:
+        job_number = parsed_number
+    if not job_nickname:
+        job_nickname = parsed_nickname
+
+    art_review = resolve_art_review(
+        state_root,
+        message_ids=candidate_message_ids,
+        job_number=job_number,
+        customer_name=customer_name,
+    )
+
+    lifecycle_state, state_basis, confidence = derive_lifecycle_state(
+        contract,
+        quote_context=quote_context,
+        printavo_payload=printavo_payload,
+        payment_payload=payment_payload,
+        art_review=art_review,
+        outbound_binding=outbound_binding,
+    )
+    anchor_conflict = lifecycle_anchor_conflict_reason(
+        source_message=source_message,
+        customer_email=customer_email,
+        packet_id=packet_id,
+        outbound_binding=outbound_binding,
+        packet=packet,
+        internal_domains=contract["internal_domains"],
+    )
+    truth_block = lifecycle_truth_block_reason(
+        source_disposition,
+        quote_context,
+        outbound_binding,
+        message_ids=candidate_message_ids,
+        packet_id=packet_id,
+        customer_email=customer_email,
+    )
+    repair_item: dict[str, Any] | None = None
+    fail_closed_reason = anchor_conflict or truth_block
+    if fail_closed_reason:
+        lifecycle_state = "needs_manual_resolution"
+        basis_label = "anchor_conflict" if anchor_conflict else "truth_blocked"
+        state_basis = [f"{basis_label}:{fail_closed_reason}"]
+        confidence = "low"
+
+    config = state_config(contract, lifecycle_state)
+    quote_binding_patch = resolve_quote_binding_patch(outbound_binding, packet, printavo_payload)
+    if not quote_binding_patch.get("packet_file") and packet_file.is_file():
+        quote_binding_patch["packet_file"] = str(packet_file)
+    if not quote_binding_patch.get("job_number"):
+        quote_binding_patch["job_number"] = job_number
+    if not quote_binding_patch.get("job_nickname"):
+        quote_binding_patch["job_nickname"] = job_nickname
+    if fail_closed_reason:
+        issue_type = "lifecycle_anchor_mismatch" if anchor_conflict else "lifecycle_truth_blocked"
+        repair_item = record_customer_repair_item(
+            state_root,
+            issue_type=issue_type,
+            mailbox=args.mailbox,
+            message_id=args.message_id,
+            source_subject=message_subject(source_message),
+            source_from=message_sender(source_message),
+            capability=capability_name(),
+            note=fail_closed_reason,
+            expected={
+                "source_from": message_sender(source_message),
+                "resolved_customer_email": customer_email,
+                "packet_id": packet_id,
+                "source_disposition": normalize_space(source_disposition.get("disposition") or ""),
+            },
+            observed={
+                "source_customer_truth_allowed": bool(source_disposition.get("customer_truth_allowed")),
+                "source_product_scope_classification": normalize_space(((source_disposition.get("product_scope") or {}).get("classification")) or ""),
+                "qualification_status": normalize_space(quote_context.get("qualification_status") or ""),
+                "packet_customer_email": packet_customer_email(packet),
+                "outbound_binding_packet_id": ((outbound_binding.get("quote_binding") or {}).get("packet_id")),
+                "outbound_binding_customer_email": outbound_binding.get("external_sender"),
+            },
+        )
+        quote_binding_patch = {
+            "packet_id": "",
+            "packet_file": "",
+            "quote_subject": "",
+            "quote_url": "",
+            "job_number": "",
+            "job_nickname": "",
+        }
+    generated_body, blockers, reference_links = build_generated_reply(
+        lifecycle_state,
+        contract=contract,
+        quote_context=quote_context,
+        quote_binding_patch=quote_binding_patch,
+        art_review=art_review,
+    )
+
+    participant_resolution = dict((outbound_binding.get("participant_resolution") or outbound_binding.get("selection") or {}))
+    if not bool(config.get("draft_allowed", True)) and not blockers:
+        blocked = normalize_space(contract["guards"].get("blocked_customer_target_message") or "")
+        if participant_resolution.get("reply_target_role") and participant_resolution.get("reply_target_role") != "customer" and blocked:
+            blockers = [blocked]
+        elif normalize_space(contract["guards"].get("unresolved_lifecycle_message") or ""):
+            blockers = [normalize_space(contract["guards"]["unresolved_lifecycle_message"])]
+
+    record_payload = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "lifecycle_id": lifecycle_id,
+        "stored_at_utc": iso_utc(now),
+        "contract_file": contract["path"],
+        "mailbox": args.mailbox,
+        "source_message_id": args.message_id,
+        "source_subject": message_subject(source_message),
+        "source_from": message_sender(source_message),
+        "customer_email": customer_email or None,
+        "customer_name": customer_name or None,
+        "source_disposition": source_disposition,
+        "lifecycle_state": lifecycle_state,
+        "confidence": confidence,
+        "state_basis": state_basis,
+        "reply_mode": normalize_space(config.get("reply_mode") or ""),
+        "draft_allowed": bool(config.get("draft_allowed", True)),
+        "customer_safe_next_step": normalize_space(config.get("customer_safe_next_step") or ""),
+        "operator_next_action": normalize_space(config.get("operator_next_action") or ""),
+        "current_action": normalize_space(config.get("current_action") or ""),
+        "blockers": blockers,
+        "generated_body": generated_body or "",
+        "reference_links": reference_links,
+        "quote_binding_patch": {
+            **quote_binding_patch,
+            "customer_email": customer_email or None,
+            "customer_name": customer_name or None,
+        },
+        "repair_item": repair_item,
+        "quote_context": quote_context,
+        "printavo_visibility": printavo_payload,
+        "payment_visibility": payment_payload,
+        "art_review": art_review or None,
+        "outbound_binding": {
+            "binding_id": outbound_binding.get("binding_id"),
+            "record_file": outbound_binding.get("record_file"),
+            "reply_target_role": participant_resolution.get("reply_target_role"),
+            "canonical_customer_thread": participant_resolution.get("canonical_customer_thread"),
+            "canonical_vendor_thread": participant_resolution.get("canonical_vendor_thread"),
+            "quote_subject": normalize_space(outbound_quote_binding.get("quote_subject") or outbound_binding.get("quote_subject") or ""),
+        },
+        "provider_receipts": {
+            "message_get_receipt": source_receipt or None,
+            "quote_intake_receipt": quote_intake_receipt or None,
+            "printavo_snapshot_receipt": printavo_receipt or None,
+            "payment_snapshot_receipt": payment_receipt or None,
+        },
+    }
+    record_file, index_file = write_record(state_root, lifecycle_id, record_payload, now, contract)
+    record_payload["record_file"] = str(record_file)
+    record_payload["index_file"] = str(index_file)
+    write_json(record_file, record_payload)
+
+    payload = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "generated_at": iso_utc(now),
+        "data": record_payload,
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(text_output(record_payload))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

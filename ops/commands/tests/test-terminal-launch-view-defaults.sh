@@ -44,9 +44,21 @@ trap 'rm -rf "$TMPDIR_BASE"' EXIT
 FAKE_SPINE="$TMPDIR_BASE/spine"
 FAKE_WORKBENCH="$TMPDIR_BASE/workbench"
 mkdir -p "$FAKE_SPINE/ops/bindings"
+mkdir -p "$FAKE_SPINE/ops/lib"
 mkdir -p "$FAKE_SPINE/ops/plugins/core/session/bin"
 mkdir -p "$FAKE_SPINE/mailroom/state/loop-scopes"
 mkdir -p "$FAKE_WORKBENCH"
+
+cat > "$FAKE_SPINE/ops/lib/runtime-paths.sh" <<'FIXTURE_RUNTIME'
+#!/usr/bin/env bash
+spine_runtime_resolve_paths() {
+  : "${SPINE_STATE:=$SPINE_REPO/mailroom/state}"
+  : "${SPINE_INBOX:=$SPINE_REPO/mailroom/inbox}"
+  : "${SPINE_OUTBOX:=$SPINE_REPO/mailroom/outbox}"
+  : "${SPINE_LOGS:=$SPINE_REPO/mailroom/logs}"
+  export SPINE_STATE SPINE_INBOX SPINE_OUTBOX SPINE_LOGS
+}
+FIXTURE_RUNTIME
 
 # Fixture: terminal.launcher.view.yaml (3 terminals with distinct defaults)
 cat > "$FAKE_SPINE/ops/bindings/terminal.launcher.view.yaml" <<'FIXTURE_VIEW'
@@ -149,6 +161,16 @@ assert_contains "$t3_out" "allowed_tools=claude,opencode" "allowed_tools exporte
 assert_contains "$t3_out" "terminal=BETA-DOMAIN-01" "terminal passed through"
 
 # ── T4: explicit --lane --tool wins over view ────────────────────────────
+
+echo ""
+echo "── T3b: dispatched handoff args propagate through launch command ──"
+t3b_handoff_file="$TMPDIR_BASE/handoffs/HO-TEST-001.yaml"
+mkdir -p "$(dirname "$t3b_handoff_file")"
+t3b_out=$(bash "$SCRIPT" launch --terminal BETA-DOMAIN-01 --handoff-id HO-TEST-001 --handoff-file "$t3b_handoff_file" 2>&1)
+assert_contains "$t3b_out" "handoff_id=HO-TEST-001" "dry run surfaces handoff id"
+assert_contains "$t3b_out" "handoff_file=$t3b_handoff_file" "dry run surfaces handoff file"
+assert_contains "$t3b_out" "--handoff-id' 'HO-TEST-001'" "launch command passes handoff id to terminal exec"
+assert_contains "$t3b_out" "--handoff-file' '$t3b_handoff_file'" "launch command passes handoff file to terminal exec"
 
 echo ""
 echo "── T4: explicit flags win ──"

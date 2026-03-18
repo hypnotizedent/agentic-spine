@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../../lib/git-lock.sh"
+source "$SCRIPT_DIR/../../../lib/runtime-paths.sh"
 
 # proposals-apply: Apply a change proposal to the repo (non-interactive).
 #
@@ -188,7 +189,7 @@ run_domain_routing_admission() {
     [[ -n "$path" ]] || continue
     recommend_cmd+=(--path "$path")
     case "$path" in
-      ops/bindings/operational.gaps.yaml|mailroom/state/loop-scopes/*|mailroom/outbox/proposals/*)
+      ops/bindings/operational.gaps.yaml|state/loop-scopes/*|mailroom/outbox/proposals/*|.runtime/spine/state/loop-scopes/*|.runtime/spine/mailroom/outbox/proposals/*)
         include_loop_gap=1
         ;;
     esac
@@ -1053,9 +1054,10 @@ if [[ -z "$PROPOSAL_NAME" ]]; then
 fi
 
 SPINE_CODE="${SPINE_CODE:-.}"
+spine_runtime_resolve_paths
 WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
 WORKBENCH_AOF_CHECKER="${WORKBENCH_AOF_CHECKER:-$WORKBENCH_ROOT/scripts/root/aof/workbench-aof-check.sh}"
-PROPOSALS_DIR="$SPINE_CODE/mailroom/outbox/proposals"
+PROPOSALS_DIR="$SPINE_OUTBOX/proposals"
 PROPOSAL_DIR="$PROPOSALS_DIR/$PROPOSAL_NAME"
 PROPOSALS_LIFECYCLE_CONTRACT="$SPINE_CODE/ops/bindings/proposals.lifecycle.yaml"
 SCHEMA_CONVENTIONS_CONTRACT="$SPINE_CODE/ops/bindings/spine.schema.conventions.yaml"
@@ -1063,7 +1065,7 @@ VERTICAL_INTEGRATION_CONTRACT="$SPINE_CODE/ops/bindings/vertical.integration.adm
 VERIFY_TOPOLOGY_BIN="$SPINE_CODE/ops/plugins/core/verify/bin/verify-topology"
 GAPS_FILE="$SPINE_CODE/ops/bindings/operational.gaps.yaml"
 CHANGE_INTAKE_POLICY="$SPINE_CODE/ops/bindings/change.intake.policy.yaml"
-LOOP_SCOPES_DIR="$SPINE_CODE/mailroom/state/loop-scopes"
+LOOP_SCOPES_DIR="$SPINE_STATE/loop-scopes"
 
 if [[ ! -d "$PROPOSAL_DIR" ]]; then
   echo "ERROR: Proposal not found: $PROPOSAL_DIR" >&2
@@ -1203,11 +1205,14 @@ fi
 
 # Phase B: inline loop scope bootstrap
 if [[ "$BOOTSTRAP_LOOP_SCOPE" -eq 1 && -n "${loop_id:-}" ]]; then
-  scope_rel="mailroom/state/loop-scopes/${loop_id}.scope.md"
-  if [[ ! -f "$SPINE_CODE/$scope_rel" ]]; then
+  scope_target="$SPINE_STATE/loop-scopes/${loop_id}.scope.md"
+  if [[ ! -f "$scope_target" ]]; then
     echo "Bootstrap: creating loop scope for $loop_id"
-    mkdir -p "$files_dir/mailroom/state/loop-scopes"
-    cat > "$files_dir/$scope_rel" <<SCOPE
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "WARN: --bootstrap-loop-scope is skipped during dry-run (would write $scope_target)" >&2
+    else
+      mkdir -p "$(dirname "$scope_target")"
+      cat > "$scope_target" <<SCOPE
 ---
 loop_id: $loop_id
 status: active
@@ -1217,8 +1222,7 @@ created: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 Bootstrapped by proposals-apply --bootstrap-loop-scope.
 SCOPE
-    # Inject synthetic create change before admission
-    printf 'create\t%s\tbootstrap loop scope\n' "$scope_rel" >> "$changes_tmp"
+    fi
   fi
 fi
 

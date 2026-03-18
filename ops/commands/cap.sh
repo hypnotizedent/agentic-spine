@@ -566,6 +566,10 @@ run_cap() {
     #   - orchestration.wave.kickoff
     #   - orchestration.launcher.claim
     #   - orchestration.terminal.entry
+    #   - mailroom.runtime.ensure
+    #   - session.handoff.task_reconcile
+    #   - mailroom.task.worker.start
+    #   - mailroom.task.worker.stop
     #   - worktree.lifecycle.rehydrate
     if [[ -z "$blocked_reason" && -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
       local caller_branch
@@ -582,7 +586,7 @@ run_cap() {
       wt_bypass_lc="$(printf '%s' "$wt_bypass" | tr '[:upper:]' '[:lower:]')"
 
       case "$name" in
-        session.start|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate)
+        session.start|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|mailroom.runtime.ensure|session.handoff.accept|session.handoff.task_reconcile|mailroom.task.worker.start|mailroom.task.worker.stop|worktree.lifecycle.rehydrate)
           context_guard_exempt=1
           ;;
       esac

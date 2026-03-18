@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Get approved frontdesk facts for Morpheus voice agent."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+CAPABILITY_NAME = "mint.customer.frontdesk.facts.get"
+SCHEMA_VERSION = "1.0"
+DEFAULT_SPINE_ROOT = Path(__file__).resolve().parents[4]
+
+
+def load_frontdesk_contract() -> dict:
+    spine_root = Path(os.environ.get("SPINE_ROOT", DEFAULT_SPINE_ROOT)).expanduser().resolve()
+    contract_path = spine_root / "ops/bindings/mint.customer.frontdesk.facts.contract.yaml"
+    if not contract_path.exists():
+        return {}
+    try:
+        return yaml.safe_load(contract_path.read_text()) or {}
+    except Exception:
+        return {}
+
+
+def get_facts_by_topic(contract: dict, topic: str) -> dict:
+    approved_facts = contract.get("approved_facts", {})
+    approved_responses = contract.get("approved_responses", {})
+
+    if topic == "all":
+        return {
+            "business_name": approved_facts.get("business_name", ""),
+            "hours": approved_facts.get("hours", {}),
+            "contact": approved_facts.get("contact", {}),
+            "pickup_policy": approved_facts.get("pickup_policy", {}),
+            "dropoff_policy": approved_facts.get("dropoff_policy", {}),
+            "quote_intake": approved_facts.get("quote_intake", {}),
+        }
+    elif topic == "hours":
+        hours_data = approved_facts.get("hours", {})
+        hours_response = approved_responses.get("hours_question", "")
+        return {"hours": hours_data, "response": hours_response}
+    elif topic == "address":
+        contact_data = approved_facts.get("contact", {})
+        address_response = approved_responses.get("address_question", "")
+        return {
+            "street_address": contact_data.get("street_address", ""),
+            "street_address_known": bool(contact_data.get("street_address_known", False)),
+            "response": address_response,
+        }
+    elif topic == "email":
+        contact_data = approved_facts.get("contact", {})
+        return {"email": contact_data.get("email", "")}
+    elif topic == "website":
+        contact_data = approved_facts.get("contact", {})
+        return {"website": contact_data.get("website", "")}
+    elif topic == "policy":
+        return {
+            "pickup_policy": approved_facts.get("pickup_policy", {}),
+            "dropoff_policy": approved_facts.get("dropoff_policy", {}),
+        }
+    else:
+        return {}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Get frontdesk facts for voice agent")
+    parser.add_argument("--topic", required=True, choices=["all", "hours", "address", "email", "policy", "website"], help="Fact topic to retrieve")
+    parser.add_argument("--json", action="store_true", help="Output JSON envelope")
+
+    args = parser.parse_args()
+
+    try:
+        contract = load_frontdesk_contract()
+        if not contract:
+            raise FileNotFoundError("frontdesk facts contract not found or unreadable")
+        facts = get_facts_by_topic(contract, args.topic)
+
+        if args.json:
+            envelope = {
+                "capability": CAPABILITY_NAME,
+                "schema_version": SCHEMA_VERSION,
+                "status": "ok",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "data": {
+                    "topic": args.topic,
+                    "facts": facts,
+                },
+            }
+            print(json.dumps(envelope, indent=2))
+        else:
+            print(f"Frontdesk facts for topic: {args.topic}")
+            print(json.dumps(facts, indent=2))
+
+        return 0
+
+    except Exception as e:
+        if args.json:
+            envelope = {
+                "capability": CAPABILITY_NAME,
+                "schema_version": SCHEMA_VERSION,
+                "status": "error",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "error": str(e),
+            }
+            print(json.dumps(envelope, indent=2))
+        else:
+            print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

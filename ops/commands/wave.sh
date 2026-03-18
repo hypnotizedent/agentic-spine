@@ -1319,14 +1319,15 @@ PYROLE
     # Auto-populate required refs from wave packet/scope context when not
     # explicitly provided.  Orchestrator-generated dispatches should not fail
     # for refs that can be derived from the loop scope (GAP-OP-1488/1489).
-    input_refs_json="$(python3 - "$sf" "$input_refs_json" "$required_inputs_json" <<'PYAUTOREFS'
+    input_refs_json="$(python3 - "$sf" "$input_refs_json" "$required_inputs_json" "${SPINE_STATE:-}" <<'PYAUTOREFS'
 import json, sys
 state = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 refs = json.loads(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else {}
 required = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else []
+state_root = str(sys.argv[4]).strip()
 packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
 loop_id = str(packet.get("loop_id") or state.get("wave_id") or "").strip()
-scope_path = f"mailroom/state/loop-scopes/{loop_id}.scope.md" if loop_id else ""
+scope_path = f"{state_root}/loop-scopes/{loop_id}.scope.md" if loop_id and state_root else ""
 auto_map = {
     "research_brief_ref": scope_path,
     "scope_ref": scope_path,
@@ -1338,14 +1339,15 @@ for key in required:
 print(json.dumps(refs))
 PYAUTOREFS
 )"
-    output_refs_json="$(python3 - "$sf" "$output_refs_json" "$required_outputs_json" <<'PYAUTOOUTREFS'
+    output_refs_json="$(python3 - "$sf" "$output_refs_json" "$required_outputs_json" "${SPINE_STATE:-}" <<'PYAUTOOUTREFS'
 import json, sys
 state = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 refs = json.loads(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else {}
 required = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else []
+state_root = str(sys.argv[4]).strip()
 packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
 loop_id = str(packet.get("loop_id") or state.get("wave_id") or "").strip()
-scope_path = f"mailroom/state/loop-scopes/{loop_id}.scope.md" if loop_id else ""
+scope_path = f"{state_root}/loop-scopes/{loop_id}.scope.md" if loop_id and state_root else ""
 auto_map = {
     "execution_plan_ref": scope_path,
     "acceptance_criteria_ref": scope_path,

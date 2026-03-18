@@ -1,0 +1,103 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-13
+scope: mint-vendor-email-to-finance-cogs-handoff
+version: 1
+
+surface:
+  capture_capability: mint.finance.vendor.receipt.capture
+  snapshot_capability: mint.finance.cogs.evidence.snapshot
+  operator_terminal: MINT-MORPHEUS-01
+  description: Governed bridge from vendor receipt email intake into queryable finance/COGS evidence while Printavo-backed order truth is still the operational anchor.
+
+storage:
+  vendor_receipts:
+    records_root: "$SPINE_STATE/mint/vendor-email-evidence/records"
+    index_file: "$SPINE_STATE/mint/vendor-email-evidence/index.ndjson"
+    lock_file: "$SPINE_STATE/locks/mint-vendor-email-evidence.lock"
+  finance_cogs_evidence:
+    records_root: "$SPINE_STATE/mint/finance-cogs-evidence/records"
+    index_file: "$SPINE_STATE/mint/finance-cogs-evidence/index.ndjson"
+    lock_file: "$SPINE_STATE/locks/mint-finance-cogs-evidence.lock"
+  evidence_root: "$SPINE_STATE/mint/vendor-email-evidence/files"
+
+canonical_path:
+  - Morpheus detects a vendor email on the governed mailbox path
+  - persist immutable vendor_receipt_email record with message ids, attachment metadata, hashes, and extracted fields
+  - resolve or create an external_order_ref bridge anchored to seed/customer truth instead of guessing a fresh-slate order_id
+  - persist immutable finance_cogs_evidence record normalized from the vendor receipt
+  - Fin reads the normalized handoff through mint.finance.cogs.evidence.snapshot
+
+canonical_answers:
+  first_record_written: >
+    Immutable vendor_receipt_email. The mailbox message and attachment evidence
+    are the first governed truth, not a mutable order projection.
+  bridge_owner: >
+    external_order_ref bridge. When fresh-slate order truth is incomplete, the
+    handoff attaches first to a Printavo-backed external_order_ref anchored by
+    seed_id/customer truth when available.
+  pre_migration_reference_rule: >
+    Use external_system=printavo with external_order_number/PO plus seed_id,
+    customer_id/customer_email, and printavo_customer_id when known. Do not
+    invent a fresh-slate order_id.
+  finance_record: >
+    Immutable finance_cogs_evidence linked to vendor_receipt_id and
+    external_order_ref. It carries normalized totals, line items, ship nodes,
+    tracking data, timestamps, and provenance.
+  finance_read_surface: >
+    Fin uses mint.finance.cogs.evidence.snapshot keyed by external_order_number,
+    vendor_order_number, seed_id, message_id, or customer email.
+
+event_kinds:
+  - order_acknowledgment
+  - shipping_notice
+  - packing_slip
+  - invoice
+  - cost_evidence
+  - vendor_message_unclassified
+
+cogs_visibility_states:
+  - vendor_cost_visible
+  - logistics_only
+  - vendor_receipt_logged_without_cost
+  - no_record_found
+
+required_vendor_receipt_fields:
+  - vendor_receipt_id
+  - mailbox
+  - vendor_id
+  - source_message_id
+  - source_internet_message_id
+  - source_conversation_id
+  - received_at_utc
+  - event_kinds
+  - attachments
+  - extracted_fields
+  - external_order_ref
+  - receipts
+
+required_finance_evidence_fields:
+  - finance_evidence_id
+  - vendor_receipt_id
+  - cogs_visibility_state
+  - cost_basis_status
+  - vendor_id
+  - event_primary
+  - external_order_ref
+  - normalized_extract
+  - provenance
+  - receipts
+
+vendor_policy:
+  supported_vendors:
+    - sanmar
+  sender_domains:
+    sanmar:
+      - sanmar.com
+
+forbidden_shortcuts:
+  - chat memory as vendor cost truth
+  - mailbox screenshots or ad hoc notes as the only receipt linkage
+  - direct mutation into fresh-slate order truth when the order is still Printavo-backed
+  - unverifiable COGS numbers without source message ids and attachment hashes

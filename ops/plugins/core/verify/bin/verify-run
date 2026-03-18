@@ -7,6 +7,7 @@ spine_runtime_resolve_paths
 
 VERIFY_TOPOLOGY="$ROOT/ops/plugins/core/verify/bin/verify-topology"
 VERIFY_PACK="$ROOT/ops/plugins/core/verify/bin/verify-pack"
+D67_DIAGNOSTICS="$ROOT/ops/plugins/core/ops/bin/capability-triad-diagnostics"
 REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
 TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
 DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
@@ -33,6 +34,7 @@ fail() {
 
 [[ -x "$VERIFY_TOPOLOGY" ]] || fail "missing verify runtime: $VERIFY_TOPOLOGY"
 [[ -x "$VERIFY_PACK" ]] || fail "missing verify pack runtime: $VERIFY_PACK"
+[[ -x "$D67_DIAGNOSTICS" ]] || fail "missing D67 diagnostics helper: $D67_DIAGNOSTICS"
 [[ -f "$REGISTRY" ]] || fail "missing gate registry: $REGISTRY"
 [[ -f "$TOPOLOGY" ]] || fail "missing topology binding: $TOPOLOGY"
 [[ -f "$DOMAIN_PROFILES" ]] || fail "missing domain profiles binding: $DOMAIN_PROFILES"
@@ -499,6 +501,29 @@ parity_diff() {
   '
 }
 
+has_failing_gate() {
+  local needle="$1"
+  local failing_json="$2"
+  jq -e --arg gate "$needle" '(. // []) | index($gate) != null' >/dev/null 2>&1 <<<"$failing_json"
+}
+
+collect_run_diagnostics() {
+  local failing_json="$1"
+  local diagnostics='{}'
+  local d67_json=""
+
+  if has_failing_gate "D67" "$failing_json"; then
+    d67_json="$("$D67_DIAGNOSTICS" --compare-live 2>/dev/null || true)"
+    if [[ -n "$d67_json" ]] && jq -e . >/dev/null 2>&1 <<<"$d67_json"; then
+      diagnostics="$(jq -cn --argjson d67 "$d67_json" '{D67:$d67}')"
+    else
+      diagnostics="$(jq -cn --arg helper "$D67_DIAGNOSTICS" '{D67:{error:"diagnostics_unavailable",helper:$helper}}')"
+    fi
+  fi
+
+  printf '%s\n' "$diagnostics"
+}
+
 IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_wrapper "$scope" "$target_domain")
 
 # Some verify-topology paths can return non-zero despite zero failed gates.
@@ -524,6 +549,8 @@ if [[ "$shadow_mode" -eq 1 ]]; then
   diff_json="$(parity_diff "$wrapper_json" "$legacy_json")"
 fi
 
+diagnostics_json="$(collect_run_diagnostics "$(jq -c '.failing_ids // []' <<<"$wrapper_json")")"
+
 if [[ "$json_mode" -eq 1 ]]; then
   jq -n \
     --arg scope "$scope" \
@@ -539,8 +566,9 @@ if [[ "$json_mode" -eq 1 ]]; then
     --argjson warning_gate_ids "$(jq -c '.warning_ids // []' <<<"$wrapper_json")" \
     --argjson blocking_fail_ids "$(jq -c '.blocking_fail_ids // []' <<<"$wrapper_json")" \
     --argjson non_blocking_fail_ids "$(jq -c '.non_blocking_fail_ids // []' <<<"$wrapper_json")" \
+    --argjson diagnostics "$diagnostics_json" \
     --arg history_file "$HISTORY_FILE" \
-    '{scope:$scope,domain:$domain,wrapper_rc:$wrapper_rc,wrapper:$wrapper,failing_gate_ids:$failing_gate_ids,warning_gate_ids:$warning_gate_ids,blocking_fail_ids:$blocking_fail_ids,non_blocking_fail_ids:$non_blocking_fail_ids,shadow_mode:$shadow,legacy_rc:$legacy_rc,legacy:$legacy,parity_diff:$parity_diff,failure_class:$failure_class,history_file:$history_file}'
+    '{scope:$scope,domain:$domain,wrapper_rc:$wrapper_rc,wrapper:$wrapper,failing_gate_ids:$failing_gate_ids,warning_gate_ids:$warning_gate_ids,blocking_fail_ids:$blocking_fail_ids,non_blocking_fail_ids:$non_blocking_fail_ids,shadow_mode:$shadow,legacy_rc:$legacy_rc,legacy:$legacy,parity_diff:$parity_diff,failure_class:$failure_class,diagnostics:$diagnostics,history_file:$history_file}'
 else
   echo "verify.run"
   echo "scope: $scope"
@@ -554,6 +582,9 @@ else
     echo "parity_diff: total_delta=$(jq -r '.total_delta // 0' <<<"$diff_json") pass_delta=$(jq -r '.pass_delta // 0' <<<"$diff_json") fail_delta=$(jq -r '.fail_delta // 0' <<<"$diff_json")"
     echo "parity_wrapper_only_failures: $(jq -r '(.wrapper_only_failures // []) | join(",")' <<<"$diff_json")"
     echo "parity_legacy_only_failures: $(jq -r '(.legacy_only_failures // []) | join(",")' <<<"$diff_json")"
+  fi
+  if jq -e '.D67' >/dev/null 2>&1 <<<"$diagnostics_json"; then
+    echo "diagnostics_d67: $(jq -c '.D67' <<<"$diagnostics_json")"
   fi
   echo "history_file: $HISTORY_FILE"
 fi

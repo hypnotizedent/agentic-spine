@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Capture and normalize Vapi end-of-call report into governed interaction record."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+from customer_interaction_record_common import (
+    generate_interaction_id,
+    normalize_interaction_record,
+    write_evidence_artifact,
+    write_interaction_record,
+)
+
+
+CAPABILITY_NAME = "mint.customer.voice.intake.capture"
+SCHEMA_VERSION = "1.0"
+
+
+def extract_vapi_report(payload: dict) -> dict:
+    """Accept either a raw Vapi report or a webhook wrapper."""
+    for key in ("message", "body", "report"):
+        candidate = payload.get(key)
+        if isinstance(candidate, dict) and any(name in candidate for name in ("call", "analysis", "transcript")):
+            return candidate
+    return payload
+
+
+def parse_vapi_payload(payload: dict) -> dict:
+    """Parse Vapi end-of-call report and extract relevant fields."""
+    report = extract_vapi_report(payload)
+    call = report.get("call", {}) or {}
+    transcript = report.get("transcript", "") or ""
+    analysis = report.get("analysis", {}) or {}
+
+    # Extract basic call info
+    call_id = call.get("id", "")
+    started_at = call.get("startedAt", "")
+    ended_at = call.get("endedAt", "")
+
+    # Extract customer info
+    customer = call.get("customer", {}) or {}
+    caller_number = customer.get("number", "")
+
+    # Extract summary/analysis fields
+    summary = analysis.get("summary", "")
+    structured_data = analysis.get("structuredData", {}) or {}
+
+    caller_name = structured_data.get("caller_name", "")
+    company = structured_data.get("company", "")
+    reason = structured_data.get("reason", "")
+    urgency = structured_data.get("urgency", "medium")
+    callback_requested = structured_data.get("callback_requested", False)
+    preferred_followup = structured_data.get("preferred_followup_channel", "email")
+    order_ref = structured_data.get("order_or_quote_ref", "")
+    live_transfer_attempted = bool(call.get("transferDestination") or structured_data.get("live_transfer_attempted", False))
+    live_transfer_result = structured_data.get("live_transfer_result", "")
+
+    # Determine disposition
+    disposition = "question_answered"
+    operator_followup_required = False
+    if callback_requested:
+        disposition = "callback_created"
+        operator_followup_required = True
+    elif live_transfer_attempted and live_transfer_result:
+        disposition = "live_transfer_completed" if live_transfer_result == "completed" else "live_transfer_failed"
+        operator_followup_required = live_transfer_result != "completed"
+
+    # Check for transcript reference
+    transcript_ref = ""
+    if transcript:
+        transcript_ref = f"embedded-in-evidence"
+
+    return {
+        "provider_call_id": call_id,
+        "started_at_utc": started_at or datetime.now(timezone.utc).isoformat(),
+        "ended_at_utc": ended_at or datetime.now(timezone.utc).isoformat(),
+        "caller_number": caller_number,
+        "caller_name": caller_name,
+        "company": company,
+        "reason": reason,
+        "urgency": urgency,
+        "callback_requested": callback_requested,
+        "preferred_followup_channel": preferred_followup,
+        "order_or_quote_ref": order_ref,
+        "disposition": disposition,
+        "summary": summary,
+        "transcript_ref": transcript_ref,
+        "live_transfer_attempted": live_transfer_attempted,
+        "live_transfer_result": live_transfer_result,
+        "operator_followup_required": operator_followup_required,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Capture voice intake from Vapi end-of-call report")
+    parser.add_argument("--payload-base64", required=True, help="Base64-encoded Vapi payload JSON")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate without writing")
+    parser.add_argument("--json", action="store_true", help="Output JSON envelope")
+
+    args = parser.parse_args()
+
+    try:
+        # Decode payload
+        payload_bytes = base64.b64decode(args.payload_base64)
+        payload_text = payload_bytes.decode("utf-8")
+        payload = json.loads(payload_text)
+
+        # Generate interaction ID
+        interaction_id = generate_interaction_id()
+
+        # Parse Vapi payload
+        parsed = parse_vapi_payload(payload)
+
+        # Write evidence artifact
+        evidence_path = write_evidence_artifact(payload_text, interaction_id, dry_run=args.dry_run)
+        evidence_refs = [str(evidence_path)]
+
+        # Normalize interaction record
+        record = normalize_interaction_record(
+            interaction_id=interaction_id,
+            channel="phone",
+            provider="vapi",
+            evidence_refs=evidence_refs,
+            **parsed,
+        )
+
+        # Write interaction record
+        record_path = write_interaction_record(record, dry_run=args.dry_run)
+
+        # Output
+        if args.json:
+            envelope = {
+                "capability": CAPABILITY_NAME,
+                "schema_version": SCHEMA_VERSION,
+                "status": "ok",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "data": {
+                    "interaction_id": interaction_id,
+                    "record_path": str(record_path),
+                    "evidence_path": str(evidence_path),
+                    "dry_run": args.dry_run,
+                    "channel": record["channel"],
+                    "callback_requested": record["callback_requested"],
+                    "operator_followup_required": record["operator_followup_required"],
+                },
+            }
+            print(json.dumps(envelope, indent=2))
+        else:
+            print(f"✓ Captured voice intake: {interaction_id}")
+            if args.dry_run:
+                print(f"  [DRY RUN] Would write to: {record_path}")
+            else:
+                print(f"  Record: {record_path}")
+                print(f"  Evidence: {evidence_path}")
+
+        return 0
+
+    except Exception as e:
+        if args.json:
+            envelope = {
+                "capability": CAPABILITY_NAME,
+                "schema_version": SCHEMA_VERSION,
+                "status": "error",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "error": str(e),
+            }
+            print(json.dumps(envelope, indent=2))
+        else:
+            print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

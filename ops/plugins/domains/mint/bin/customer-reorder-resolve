@@ -1,0 +1,1156 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    compact_utc,
+    fail,
+    iso_utc,
+    message_body_text,
+    message_sender,
+    message_subject,
+    normalized_subject,
+    resolve_spine_root,
+    resolve_spine_state,
+    run_cap_capture,
+    strip_html,
+    tokenize,
+    utc_now,
+    write_json,
+)
+from customer_mailbox_history_common import search_governed_mail_history  # noqa: E402
+
+
+SCHEMA_VERSION = "1.0"
+CAPABILITY_FALLBACK = "mint.customer.reorder.resolve"
+DEFAULT_MAILBOX = "team@mintprints.com"
+GET_CAPABILITY = "microsoft.mail.get"
+SEARCH_CAPABILITY = "communications.mail.search"
+REPLY_DRAFT_CAPABILITY = "mint.customer.reply.draft"
+WORK_TYPE_ENUM = ("new_quote", "reorder", "art_revision", "proof", "vendor", "spam", "ambiguous")
+REORDER_PHRASES = (
+    "same as last time",
+    "same as my last order",
+    "same shirts as my last order",
+    "same as last order",
+    "same as before",
+    "same order",
+    "last order",
+    "reorder",
+    "re-order",
+    "again",
+    "this time",
+    "instead of",
+)
+QUOTE_PHRASES = ("quote", "pricing", "price", "how much", "estimate")
+ART_REVISION_PHRASES = ("revise", "revision", "updated art", "update the logo", "change the art", "artwork")
+PROOF_PHRASES = ("proof", "mockup", "approve", "approval")
+VENDOR_PHRASES = ("invoice attached", "tracking", "shipment", "po ", "purchase order", "supplier")
+SPAM_PHRASES = ("unsubscribe", "manage preferences", "view in browser", "special offer", "verify account", "click here")
+SIZE_ALIASES = {
+    "xs": "XS",
+    "s": "S",
+    "m": "M",
+    "l": "L",
+    "xl": "XL",
+    "xxl": "XXL",
+    "xxxl": "XXXL",
+    "2xl": "XXL",
+    "3xl": "XXXL",
+    "4xl": "4XL",
+    "5xl": "5XL",
+}
+COLOR_WORDS = (
+    "black",
+    "navy",
+    "blue",
+    "red",
+    "white",
+    "grey",
+    "gray",
+    "green",
+    "gold",
+    "yellow",
+    "orange",
+    "purple",
+    "pink",
+    "brown",
+    "maroon",
+    "tan",
+    "khaki",
+    "charcoal",
+    "heather",
+)
+PRODUCT_TERMS = {
+    "polo": "polo",
+    "polos": "polo",
+    "shirt": "shirt",
+    "shirts": "shirt",
+    "tee": "shirt",
+    "tees": "shirt",
+    "tshirt": "shirt",
+    "tshirts": "shirt",
+    "hoodie": "hoodie",
+    "hoodies": "hoodie",
+    "hat": "hat",
+    "hats": "hat",
+    "cap": "hat",
+    "caps": "hat",
+    "beanie": "hat",
+    "beanies": "hat",
+    "jacket": "jacket",
+    "jackets": "jacket",
+}
+ART_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".dst", ".emb", ".ai", ".eps", ".svg"}
+THREAD_QUERY_TOP = 10
+HISTORY_QUERY_TOP = 15
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_CUSTOMER_REORDER_RESOLVE_CAPABILITY_NAME") or CAPABILITY_FALLBACK
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-reorder-resolve",
+        description=(
+            "Resolve an existing-customer reorder email into customer memory, a matched historical job, "
+            "a structured delta, a governed draft work object, and a reply draft."
+        ),
+    )
+    parser.add_argument("message_id", nargs="?", help="Mailbox message id for the inbound reorder email or forwarded wrapper")
+    parser.add_argument("--message-id", dest="message_id_flag", default="", help="Mailbox message id for the inbound reorder email or forwarded wrapper")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox to read from (default: {DEFAULT_MAILBOX})")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    resolved_message_id = args.message_id_flag.strip() or str(args.message_id or "").strip()
+    if not resolved_message_id:
+        fail("message_id required")
+    args.message_id = resolved_message_id
+    return args
+
+
+def normalize_loose(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def normalize_compact(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+
+
+def parse_bool(value: str) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def parse_date(value: str) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M:%S"):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def latest_glob_path(pattern: str) -> Path | None:
+    expanded = pattern.replace("$HOME", str(Path.home()))
+    home = Path.home()
+    base = home
+    static_parts: list[str] = []
+    for part in Path(expanded).parts:
+        if any(ch in part for ch in "*?[]"):
+            break
+        static_parts.append(part)
+    if static_parts:
+        base = Path(*static_parts)
+    matches = sorted(
+        (path for path in base.glob(str(Path(expanded).relative_to(base))) if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return matches[0] if matches else None
+
+
+def resolve_customers_export() -> Path:
+    override = os.environ.get("MINT_CUSTOMER_REORDER_CUSTOMERS_EXPORT", "").strip()
+    if override:
+        path = Path(override).expanduser().resolve()
+        if not path.is_file():
+            fail(f"customer export not found: {path}")
+        return path
+    path = latest_glob_path("$HOME/ronny-ops/mint-os/data/imports/**/*ExportsCustomersJob_export*.csv")
+    if path is None:
+        fail("could not find a Printavo customers export under ~/ronny-ops/mint-os/data/imports")
+    return path
+
+
+def resolve_orders_export() -> Path:
+    override = os.environ.get("MINT_CUSTOMER_REORDER_ORDERS_EXPORT", "").strip()
+    if override:
+        path = Path(override).expanduser().resolve()
+        if not path.is_file():
+            fail(f"orders export not found: {path}")
+        return path
+    path = latest_glob_path("$HOME/ronny-ops/mint-os/data/imports/**/*ExportsOrdersJob_export*.csv")
+    if path is None:
+        fail("could not find a Printavo orders export under ~/ronny-ops/mint-os/data/imports")
+    return path
+
+
+def resolve_client_assets_root() -> Path | None:
+    override = os.environ.get("MINT_CUSTOMER_REORDER_CLIENT_ASSETS_ROOT", "").strip()
+    if override:
+        path = Path(override).expanduser().resolve()
+        return path if path.is_dir() else None
+    default = (Path.home() / "Library" / "CloudStorage" / "OneDrive-MintPrints" / "Client Assets").resolve()
+    return default if default.is_dir() else None
+
+
+def unwrap_search_results(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    microsoft = dict(((payload.get("data") or {}).get("microsoft")) or {})
+    if microsoft:
+        return list(microsoft.get("value") or [])
+    if isinstance(payload.get("value"), list):
+        return list(payload.get("value") or [])
+    return []
+
+
+def mailbox_search(
+    spine_root: Path,
+    mailbox: str,
+    query: str,
+    top: int,
+) -> tuple[list[dict[str, Any]], str]:
+    payload, receipt = run_cap_capture(
+        spine_root,
+        SEARCH_CAPABILITY,
+        ["--json", "--query", query, "--top", str(top), "--mailbox", mailbox],
+    )
+    return unwrap_search_results(payload), receipt
+
+
+def history_mailbox_search(
+    spine_root: Path,
+    mailbox: str,
+    query: str,
+    top: int,
+    *,
+    exclude_message_ids: list[str] | None = None,
+    exclude_internet_message_ids: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    messages, receipts, _errors = search_governed_mail_history(
+        spine_root,
+        query=query,
+        preferred_mailbox=mailbox,
+        top=top,
+        exclude_message_ids=exclude_message_ids,
+        exclude_internet_message_ids=exclude_internet_message_ids,
+    )
+    return messages, ", ".join(item for item in receipts if item)
+
+
+def extract_forwarded_external_emails(message: dict[str, Any]) -> list[str]:
+    text = " ".join(
+        part for part in (message_body_text(message), strip_html(str(message.get("bodyPreview") or ""))) if part
+    )
+    candidates = []
+    for address in re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, flags=re.IGNORECASE):
+        lower = address.lower()
+        if lower.endswith("@mintprints.com"):
+            continue
+        if lower not in candidates:
+            candidates.append(lower)
+    return candidates
+
+
+def first_external_email(message: dict[str, Any]) -> str:
+    sender = message_sender(message).lower()
+    if sender and not sender.endswith("@mintprints.com"):
+        return sender
+    forwarded = extract_forwarded_external_emails(message)
+    return forwarded[0] if forwarded else ""
+
+
+def find_message_by_id(messages: list[dict[str, Any]], message_id: str) -> dict[str, Any] | None:
+    for message in messages:
+        if str(message.get("id") or "").strip() == message_id:
+            return message
+    return None
+
+
+def choose_effective_customer_message(
+    source_message: dict[str, Any],
+    thread_messages: list[dict[str, Any]],
+    forwarded_emails: list[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    source_sender = message_sender(source_message).lower()
+    normalized = normalized_subject(message_subject(source_message))
+    source_id = str(source_message.get("id") or "")
+    if source_sender and not source_sender.endswith("@mintprints.com"):
+        return source_message, {"mode": "source_external_sender", "basis": source_sender}
+
+    candidates: list[dict[str, Any]] = []
+    for message in thread_messages:
+        sender = message_sender(message).lower()
+        if not sender or sender.endswith("@mintprints.com"):
+            continue
+        score = 0
+        reasons: list[str] = []
+        if normalized_subject(message_subject(message)) == normalized:
+            score += 15
+            reasons.append("normalized_subject_match")
+        if sender in forwarded_emails:
+            score += 20
+            reasons.append("forwarded_header_email_match")
+        if str(message.get("id") or "") != source_id:
+            score += 2
+            reasons.append("separate_customer_message")
+        candidates.append({"message": message, "score": score, "reasons": reasons})
+
+    candidates.sort(
+        key=lambda item: (
+            -int(item["score"]),
+            str((item["message"].get("receivedDateTime") or "")),
+        ),
+        reverse=False,
+    )
+    if candidates:
+        chosen = sorted(
+            candidates,
+            key=lambda item: (
+                int(item["score"]),
+                str((item["message"].get("receivedDateTime") or "")),
+            ),
+            reverse=True,
+        )[0]
+        return chosen["message"], {"mode": "resolved_from_thread_search", "basis": chosen["reasons"]}
+
+    return source_message, {"mode": "source_fallback", "basis": "no_external_thread_match_found"}
+
+
+def classify_work_type(message: dict[str, Any]) -> tuple[str, list[str]]:
+    sender = message_sender(message).lower()
+    text = " ".join(
+        part
+        for part in (
+            sender,
+            normalized_subject(message_subject(message)),
+            strip_html(str(message.get("bodyPreview") or "")),
+            message_body_text(message),
+        )
+        if part
+    ).lower()
+    reasons: list[str] = []
+    if any(phrase in text for phrase in SPAM_PHRASES) or sender.startswith("no-reply@") or sender.startswith("noreply@"):
+        reasons.append("spam_or_promotional_marker")
+        return "spam", reasons
+    if any(phrase in text for phrase in REORDER_PHRASES):
+        reasons.append("reorder_phrase_present")
+        return "reorder", reasons
+    if any(phrase in text for phrase in PROOF_PHRASES):
+        reasons.append("proof_marker_present")
+        return "proof", reasons
+    if any(phrase in text for phrase in ART_REVISION_PHRASES):
+        reasons.append("art_revision_marker_present")
+        return "art_revision", reasons
+    if any(phrase in text for phrase in QUOTE_PHRASES):
+        reasons.append("quote_marker_present")
+        return "new_quote", reasons
+    if any(phrase in text for phrase in VENDOR_PHRASES):
+        reasons.append("vendor_marker_present")
+        return "vendor", reasons
+    reasons.append("no_strong_marker")
+    return "ambiguous", reasons
+
+
+def load_csv_rows(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        return list(csv.DictReader(handle))
+
+
+def score_customer_row(
+    row: dict[str, str],
+    *,
+    email: str,
+    name_hint: str,
+    company_hint: str,
+) -> tuple[int, list[str]]:
+    score = 0
+    reasons: list[str] = []
+    row_email = str(row.get("Email") or "").strip().lower()
+    row_company = normalize_loose(str(row.get("Company") or ""))
+    row_name = normalize_loose(f"{row.get('First Name', '')} {row.get('Last Name', '')}")
+    if email and row_email == email:
+        score += 120
+        reasons.append("exact_email_match")
+    if email and row_email and email.split("@", 1)[0] == row_email.split("@", 1)[0]:
+        score += 10
+        reasons.append("email_localpart_match")
+    if company_hint and row_company == normalize_loose(company_hint):
+        score += 40
+        reasons.append("exact_company_match")
+    overlap_company = set(tokenize(company_hint)) & set(tokenize(row.get("Company", "")))
+    if overlap_company:
+        score += len(overlap_company) * 5
+        reasons.append(f"company_token_overlap:{','.join(sorted(overlap_company))}")
+    overlap_name = set(tokenize(name_hint)) & set(tokenize(f"{row.get('First Name', '')} {row.get('Last Name', '')}"))
+    if overlap_name:
+        score += len(overlap_name) * 6
+        reasons.append(f"name_token_overlap:{','.join(sorted(overlap_name))}")
+    if name_hint and row_name == normalize_loose(name_hint):
+        score += 30
+        reasons.append("exact_name_match")
+    return score, reasons
+
+
+def resolve_customer(
+    customers_rows: list[dict[str, str]],
+    *,
+    email: str,
+    name_hint: str,
+    company_hint: str,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    scored: list[dict[str, Any]] = []
+    for row in customers_rows:
+        score, reasons = score_customer_row(row, email=email, name_hint=name_hint, company_hint=company_hint)
+        if score <= 0:
+            continue
+        scored.append(
+            {
+                "score": score,
+                "reasons": reasons,
+                "row": row,
+            }
+        )
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    if not scored:
+        return None, []
+    top = scored[0]
+    second_score = scored[1]["score"] if len(scored) > 1 else -999
+    if top["score"] < 40 or top["score"] < second_score + 10:
+        return None, scored[:5]
+    row = top["row"]
+    customer = {
+        "status": "resolved",
+        "confidence": "high" if top["score"] >= 120 else "medium",
+        "score": top["score"],
+        "match_reasons": top["reasons"],
+        "customer_id": str(row.get("Customer ID") or "").strip(),
+        "first_name": str(row.get("First Name") or "").strip(),
+        "last_name": str(row.get("Last Name") or "").strip(),
+        "full_name": " ".join(part for part in (row.get("First Name"), row.get("Last Name")) if part).strip(),
+        "company": str(row.get("Company") or "").strip(),
+        "email": str(row.get("Email") or "").strip(),
+        "phone": str(row.get("Phone") or "").strip(),
+        "created_at": str(row.get("Created") or "").strip(),
+        "summary": " / ".join(
+            part
+            for part in (
+                " ".join(part for part in (row.get("First Name"), row.get("Last Name")) if part).strip(),
+                str(row.get("Company") or "").strip(),
+            )
+            if part
+        ),
+    }
+    return customer, scored[:5]
+
+
+def resolve_customer_folder(client_assets_root: Path | None, customer: dict[str, Any] | None) -> dict[str, Any] | None:
+    if client_assets_root is None or customer is None or not client_assets_root.is_dir():
+        return None
+    full_name = str(customer.get("full_name") or "").strip()
+    company = str(customer.get("company") or "").strip()
+    candidates: list[dict[str, Any]] = []
+    for child in sorted(client_assets_root.iterdir(), key=lambda path: path.name.lower()):
+        if not child.is_dir():
+            continue
+        score = 0
+        reasons: list[str] = []
+        if full_name and normalize_loose(child.name) == normalize_loose(full_name):
+            score += 120
+            reasons.append("exact_full_name_match")
+        overlap_name = set(tokenize(full_name)) & set(tokenize(child.name))
+        if overlap_name:
+            score += len(overlap_name) * 8
+            reasons.append(f"name_token_overlap:{','.join(sorted(overlap_name))}")
+        overlap_company = set(tokenize(company)) & set(tokenize(child.name))
+        if overlap_company:
+            score += len(overlap_company) * 4
+            reasons.append(f"company_token_overlap:{','.join(sorted(overlap_company))}")
+        if score:
+            candidates.append({"score": score, "reasons": reasons, "path": child})
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    if not candidates:
+        return None
+    top = candidates[0]
+    return {"path": str(top["path"]), "score": top["score"], "reasons": top["reasons"]}
+
+
+def resolve_order_folder(customer_folder_path: str | None, invoice_number: str, nickname: str) -> dict[str, Any] | None:
+    if not customer_folder_path:
+        return None
+    customer_folder = Path(customer_folder_path)
+    if not customer_folder.is_dir():
+        return None
+    invoice_number = str(invoice_number or "").strip()
+    nickname_tokens = set(tokenize(nickname))
+    candidates: list[dict[str, Any]] = []
+    for child in sorted(customer_folder.iterdir(), key=lambda path: path.name.lower()):
+        if not child.is_dir():
+            continue
+        score = 0
+        reasons: list[str] = []
+        if invoice_number and invoice_number in child.name:
+            score += 120
+            reasons.append("invoice_in_folder_name")
+        overlap = nickname_tokens & set(tokenize(child.name))
+        if overlap:
+            score += len(overlap) * 6
+            reasons.append(f"nickname_token_overlap:{','.join(sorted(overlap))}")
+        if score:
+            candidates.append({"score": score, "reasons": reasons, "path": child})
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    if not candidates:
+        return None
+    top = candidates[0]
+    return {"path": str(top["path"]), "score": top["score"], "reasons": top["reasons"]}
+
+
+def detect_product_family(text: str) -> str | None:
+    tokens = tokenize(text)
+    for token in tokens:
+        if token in PRODUCT_TERMS:
+            return PRODUCT_TERMS[token]
+    return None
+
+
+def extract_requested_colors(text: str) -> dict[str, str]:
+    lowered = normalize_loose(text)
+    explicit = re.search(rf"\b({'|'.join(COLOR_WORDS)})\s+instead of\s+({'|'.join(COLOR_WORDS)})\b", lowered)
+    if explicit:
+        return {"current": explicit.group(1), "previous_hint": explicit.group(2), "basis": "explicit_instead_of_phrase"}
+    current = re.search(rf"\b({'|'.join(COLOR_WORDS)})\s+this time\b", lowered)
+    if current:
+        return {"current": current.group(1), "basis": "explicit_this_time_phrase"}
+    for color in COLOR_WORDS:
+        if re.search(rf"\b{re.escape(color)}\b", lowered):
+            return {"current": color, "basis": "color_token_present"}
+    return {}
+
+
+def extract_size_breakdown(text: str) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for qty, raw_size in re.findall(r"(?i)\b(\d+)\s*(xs|s|m|l|xl|xxl|xxxl|2xl|3xl|4xl|5xl)\b", text or ""):
+        size = SIZE_ALIASES.get(raw_size.lower())
+        if not size:
+            continue
+        key = f"{qty}:{size}"
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append({"size": size, "qty": int(qty)})
+    return found
+
+
+def size_breakdown_total(breakdown: list[dict[str, Any]]) -> int | None:
+    if not breakdown:
+        return None
+    return sum(int(item["qty"]) for item in breakdown)
+
+
+def has_due_date(text: str) -> bool:
+    lowered = normalize_loose(text)
+    if any(phrase in lowered for phrase in ("need by", "needed by", "due date", "deadline", "rush", "asap")):
+        return True
+    if re.search(
+        r"\b(?:need|needed|due|ready|pickup|pick up|deliver|delivery|ship)\b.{0,24}\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b",
+        lowered,
+    ):
+        return True
+    if re.search(
+        r"\b(?:need|needed|due|ready|pickup|pick up|deliver|delivery|ship)\b.{0,32}\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b",
+        lowered,
+    ):
+        return True
+    return any(phrase in lowered for phrase in ("by friday", "by monday", "by tuesday", "by wednesday", "by thursday"))
+
+
+def read_pdf_text(pdf_path: Path) -> str:
+    try:
+        if not pdf_path.read_bytes().startswith(b"%PDF"):
+            return ""
+    except Exception:
+        return ""
+    try:
+        from pypdf import PdfReader  # type: ignore
+    except Exception:
+        return ""
+    try:
+        reader = PdfReader(str(pdf_path))
+    except Exception:
+        return ""
+    chunks: list[str] = []
+    for page in reader.pages[:2]:
+        try:
+            chunks.append(page.extract_text() or "")
+        except Exception:
+            continue
+    return " ".join(chunks)
+
+
+def detect_style_code(text: str) -> str | None:
+    match = re.search(r"\b([A-Z]{1,4}\d{2,5}[A-Z]?)\b", text or "")
+    return match.group(1) if match else None
+
+
+def summarize_archive(order_folder_path: str | None) -> dict[str, Any] | None:
+    if not order_folder_path:
+        return None
+    order_folder = Path(order_folder_path)
+    if not order_folder.is_dir():
+        return None
+    files = [path for path in sorted(order_folder.iterdir(), key=lambda path: path.name.lower()) if path.is_file() and not path.name.startswith(".")]
+    art_files = [path for path in files if path.suffix.lower() in ART_EXTENSIONS][:12]
+    joined_names = " ".join(path.name for path in art_files)
+    pdf_text = " ".join(read_pdf_text(path) for path in art_files if path.suffix.lower() == ".pdf")
+    combined = " ".join(part for part in (order_folder.name, joined_names, pdf_text) if part)
+    product_family = detect_product_family(combined)
+    print_method = None
+    lower_combined = combined.lower()
+    if any(path.suffix.lower() in {".dst", ".emb"} for path in art_files) or "embroidery" in lower_combined:
+        print_method = "embroidery"
+    elif "screen print" in lower_combined or "screenprint" in lower_combined:
+        print_method = "screenprint"
+    style_code = detect_style_code(" ".join(path.name for path in art_files))
+    color_mentions = [color for color in COLOR_WORDS if re.search(rf"\b{re.escape(color)}\b", lower_combined)]
+    return {
+        "folder_path": str(order_folder),
+        "product_family": product_family,
+        "print_method": print_method,
+        "style_code": style_code,
+        "color_mentions": color_mentions[:6],
+        "artwork_refs": [str(path) for path in art_files],
+    }
+
+
+def score_order_row(
+    row: dict[str, str],
+    *,
+    customer: dict[str, Any],
+    message_text: str,
+    customer_folder_path: str | None,
+) -> tuple[int, list[str], dict[str, Any] | None]:
+    score = 0
+    reasons: list[str] = []
+    invoice = str(row.get("Invoice #") or "").strip()
+    nickname = str(row.get("Nickname") or "").strip()
+    customer_id = str(customer.get("customer_id") or "").strip()
+    row_customer_id = str(row.get("Customer Id") or "").strip()
+    customer_email = str(customer.get("email") or "").strip().lower()
+    row_email = str(row.get("Customer Email") or "").strip().lower()
+    if customer_id and row_customer_id == customer_id:
+        score += 100
+        reasons.append("customer_id_match")
+    if customer_email and row_email == customer_email:
+        score += 50
+        reasons.append("customer_email_match")
+    if parse_bool(row.get("Paid?", "")):
+        score += 15
+        reasons.append("paid_order")
+    if str(row.get("Invoice Status") or "").strip().upper() == "COMPLETE":
+        score += 15
+        reasons.append("complete_order")
+    overlap = set(tokenize(message_text)) & set(tokenize(nickname))
+    if overlap:
+        score += len(overlap) * 4
+        reasons.append(f"nickname_overlap:{','.join(sorted(overlap))}")
+    created = parse_date(str(row.get("Created Date") or ""))
+    if created:
+        recency_bonus = max(0, 12 - min(12, (utc_now() - created).days // 30))
+        if recency_bonus:
+            score += recency_bonus
+            reasons.append(f"recent_job_bonus:{recency_bonus}")
+    order_folder = resolve_order_folder(customer_folder_path, invoice, nickname)
+    if order_folder is not None:
+        score += 20
+        reasons.append("client_assets_folder_found")
+    return score, reasons, order_folder
+
+
+def resolve_prior_job(
+    order_rows: list[dict[str, str]],
+    *,
+    customer: dict[str, Any],
+    message_text: str,
+    customer_folder_path: str | None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    matches: list[dict[str, Any]] = []
+    for row in order_rows:
+        row_customer_id = str(row.get("Customer Id") or "").strip()
+        row_email = str(row.get("Customer Email") or "").strip().lower()
+        row_company = normalize_loose(str(row.get("Customer Company") or ""))
+        if customer.get("customer_id") and row_customer_id != customer.get("customer_id"):
+            if customer.get("email") and row_email != str(customer.get("email") or "").strip().lower():
+                if customer.get("company") and row_company != normalize_loose(str(customer.get("company") or "")):
+                    continue
+        score, reasons, order_folder = score_order_row(
+            row,
+            customer=customer,
+            message_text=message_text,
+            customer_folder_path=customer_folder_path,
+        )
+        if score <= 0:
+            continue
+        matches.append(
+            {
+                "score": score,
+                "reasons": reasons,
+                "row": row,
+                "order_folder": order_folder,
+            }
+        )
+    matches.sort(key=lambda item: item["score"], reverse=True)
+    if not matches:
+        return None, []
+    top = matches[0]
+    second_score = matches[1]["score"] if len(matches) > 1 else -999
+    if top["score"] < 60 or top["score"] < second_score + 8:
+        return None, matches[:5]
+    row = top["row"]
+    order_folder = dict(top["order_folder"] or {})
+    archive = summarize_archive(order_folder.get("path"))
+    prior_job = {
+        "status": "resolved",
+        "confidence": "high" if top["score"] >= 100 else "medium",
+        "score": top["score"],
+        "match_reasons": top["reasons"],
+        "invoice": str(row.get("Invoice #") or "").strip(),
+        "nickname": str(row.get("Nickname") or "").strip(),
+        "created_date": str(row.get("Created Date") or "").strip(),
+        "production_due_date": str(row.get("Production Due Date") or "").strip(),
+        "total_quantity": str(row.get("Total Quantity") or "").strip(),
+        "invoice_status": str(row.get("Invoice Status") or "").strip(),
+        "paid": parse_bool(row.get("Paid?", "")),
+        "public_invoice_url": str(row.get("Public Invoice View URL") or "").strip(),
+        "invoice_url": str(row.get("Invoice URL") or "").strip(),
+        "summary": " ".join(part for part in (str(row.get("Invoice #") or "").strip(), str(row.get("Nickname") or "").strip()) if part),
+        "archive": archive,
+    }
+    return prior_job, matches[:5]
+
+
+def summarize_history_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summarized = []
+    for message in messages[:8]:
+        summarized.append(
+            {
+                "id": str(message.get("id") or ""),
+                "received_utc": str(message.get("receivedDateTime") or ""),
+                "from": message_sender(message),
+                "subject": message_subject(message),
+            }
+        )
+    return summarized
+
+
+def build_delta(
+    *,
+    customer: dict[str, Any] | None,
+    prior_job: dict[str, Any] | None,
+    message: dict[str, Any],
+    history_messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]], str]:
+    body = message_body_text(message)
+    subject = message_subject(message)
+    combined = " ".join(part for part in (subject, body) if part)
+    size_breakdown = extract_size_breakdown(body)
+    total_qty = size_breakdown_total(size_breakdown)
+    color_change = extract_requested_colors(combined)
+    current_product_family = detect_product_family(combined)
+    prior_archive = dict((prior_job or {}).get("archive") or {})
+    prior_product_family = prior_archive.get("product_family") or detect_product_family(str((prior_job or {}).get("nickname") or ""))
+
+    reused: list[dict[str, Any]] = []
+    changed: dict[str, Any] = {}
+    missing: list[dict[str, Any]] = []
+
+    if customer:
+        reused.append(
+            {
+                "field": "customer",
+                "value": customer.get("summary"),
+                "basis": "printavo_customer_export",
+            }
+        )
+    if prior_job:
+        reused.append(
+            {
+                "field": "matched_prior_job",
+                "value": prior_job.get("summary"),
+                "basis": "printavo_orders_export",
+            }
+        )
+        if prior_archive.get("print_method"):
+            reused.append(
+                {
+                    "field": "print_method",
+                    "value": prior_archive.get("print_method"),
+                    "basis": "client_assets_archive",
+                }
+            )
+        if prior_archive.get("artwork_refs"):
+            reused.append(
+                {
+                    "field": "artwork_refs",
+                    "value": prior_archive.get("artwork_refs"),
+                    "basis": "client_assets_archive",
+                }
+            )
+        if prior_archive.get("style_code"):
+            reused.append(
+                {
+                    "field": "style_code",
+                    "value": prior_archive.get("style_code"),
+                    "basis": "client_assets_archive",
+                }
+            )
+    if history_messages:
+        reused.append(
+            {
+                "field": "mail_history_hits",
+                "value": len(history_messages),
+                "basis": "governed_mailbox_history",
+            }
+        )
+
+    if size_breakdown:
+        changed["requested_size_breakdown"] = size_breakdown
+        if total_qty is not None:
+            changed["requested_total_quantity"] = total_qty
+    if color_change:
+        changed["requested_color"] = color_change
+    if current_product_family:
+        changed["requested_product_family"] = current_product_family
+
+    if prior_job is None:
+        missing.append(
+            {
+                "field": "matched_prior_job",
+                "reason": "No single high-confidence prior job could be resolved from governed truth.",
+                "operator_follow_up": "Which prior job should anchor this reorder?",
+            }
+        )
+    if current_product_family and prior_product_family and current_product_family != prior_product_family:
+        missing.append(
+            {
+                "field": "product_family_confirmation",
+                "reason": f"Current email points to {current_product_family}, while the matched prior job points to {prior_product_family}.",
+                "customer_follow_up": f"Should we use the same {prior_product_family}s from the last order, or do you want {current_product_family}s instead?",
+            }
+        )
+
+    if any("operator_follow_up" in item for item in missing):
+        next_step = "ask_operator_to_choose_prior_job_before_customer_reply"
+    elif missing:
+        next_step = "draft_clarification_reply_and_hold_draft_work_object"
+    else:
+        next_step = "draft_reorder_confirmation_reply_and_create_draft_packet"
+    return reused, changed, missing, next_step
+
+
+def build_operator_question(customer: dict[str, Any] | None, prior_job: dict[str, Any] | None) -> str | None:
+    if customer is None:
+        return "Which existing customer should this reorder attach to?"
+    if prior_job is None:
+        return "Which prior job should anchor this reorder?"
+    return None
+
+
+def format_size_breakdown(size_breakdown: list[dict[str, Any]]) -> str:
+    return ", ".join(f"{item['qty']} {item['size']}" for item in size_breakdown)
+
+
+def build_reply_body(summary: dict[str, Any]) -> str:
+    customer = dict(summary.get("customer") or {})
+    changed = dict(summary.get("changed") or {})
+    missing = list(summary.get("missing") or [])
+    first_name = str(customer.get("first_name") or "").strip() or "there"
+    total_qty = changed.get("requested_total_quantity")
+    opener = f"Got the reorder for {total_qty} pieces." if total_qty else "Got the reorder."
+    lines = [f"Hi {first_name},", "", opener]
+    customer_questions = [str(item.get("customer_follow_up") or "").strip() for item in missing if str(item.get("customer_follow_up") or "").strip()]
+    if customer_questions:
+        lines.extend(["", customer_questions[0]])
+    else:
+        lines.extend(["", "I’ll keep it moving from the last job."])
+    return "\n".join(lines).strip()
+
+
+def work_object_state(summary: dict[str, Any]) -> str:
+    operator_question = str(summary.get("operator_question") or "").strip()
+    if operator_question:
+        return "needs_operator_choice"
+    missing = list(summary.get("missing") or [])
+    if missing:
+        return "needs_customer_clarification"
+    return "draft_ready"
+
+
+def text_output(summary: dict[str, Any]) -> str:
+    lines = [
+        capability_name(),
+        f"status: {summary['status']}",
+        f"work_type: {summary['work_type']}",
+        f"customer: {(summary.get('customer') or {}).get('summary', '')}",
+        f"matched_prior_job: {(summary.get('matched_prior_job') or {}).get('summary', '')}",
+        f"work_object_state: {summary['work_object_state']}",
+        f"next_step: {summary['next_step']}",
+        f"record_file: {summary['record_file']}",
+    ]
+    reply_draft = dict(summary.get("reply_draft") or {})
+    if reply_draft:
+        lines.append(f"reply_draft_id: {reply_draft.get('reply_draft_id', '')}")
+    operator_question = str(summary.get("operator_question") or "").strip()
+    if operator_question:
+        lines.append(f"operator_question: {operator_question}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    now = utc_now()
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    customers_export = resolve_customers_export()
+    orders_export = resolve_orders_export()
+    client_assets_root = resolve_client_assets_root()
+    source_message, source_get_receipt = run_cap_capture(
+        spine_root,
+        GET_CAPABILITY,
+        ["--message-id", args.message_id, "--mailbox", args.mailbox],
+    )
+
+    source_sender = message_sender(source_message).lower()
+    source_body = message_body_text(source_message)
+    normalized_subject_query = normalized_subject(message_subject(source_message)) or first_external_email(source_message) or source_sender or "*"
+    thread_messages, thread_search_receipt = mailbox_search(
+        spine_root,
+        args.mailbox,
+        normalized_subject_query,
+        THREAD_QUERY_TOP,
+    )
+    forwarded_emails = extract_forwarded_external_emails(source_message)
+    effective_message, effective_resolution = choose_effective_customer_message(source_message, thread_messages, forwarded_emails)
+    effective_get_receipt = ""
+    effective_message_id = str(effective_message.get("id") or "")
+    if effective_message_id and effective_message_id != args.message_id:
+        effective_message, effective_get_receipt = run_cap_capture(
+            spine_root,
+            GET_CAPABILITY,
+            ["--message-id", effective_message_id, "--mailbox", args.mailbox],
+        )
+
+    effective_sender = first_external_email(effective_message) or first_external_email(source_message)
+    history_messages: list[dict[str, Any]] = []
+    history_search_receipt = ""
+    if effective_sender:
+        history_messages, history_search_receipt = history_mailbox_search(
+            spine_root,
+            args.mailbox,
+            effective_sender,
+            HISTORY_QUERY_TOP,
+            exclude_message_ids=[effective_message_id or args.message_id],
+            exclude_internet_message_ids=[str(effective_message.get("internetMessageId") or source_message.get("internetMessageId") or "")],
+        )
+
+    work_type, work_type_reasons = classify_work_type(effective_message)
+    customers_rows = load_csv_rows(customers_export)
+    order_rows = load_csv_rows(orders_export)
+    effective_name_hint = str((((effective_message.get("from") or {}).get("emailAddress") or {}).get("name")) or "").strip()
+    message_text = " ".join(part for part in (message_subject(effective_message), message_body_text(effective_message)) if part)
+    company_hint_tokens = tokenize(message_text)[:6]
+    company_hint = " ".join(company_hint_tokens)
+
+    customer, customer_candidates = resolve_customer(
+        customers_rows,
+        email=effective_sender,
+        name_hint=effective_name_hint,
+        company_hint=company_hint,
+    )
+    customer_folder = resolve_customer_folder(client_assets_root, customer)
+    prior_job = None
+    prior_job_candidates: list[dict[str, Any]] = []
+    if customer is not None:
+        prior_job, prior_job_candidates = resolve_prior_job(
+            order_rows,
+            customer=customer,
+            message_text=message_text,
+            customer_folder_path=(customer_folder or {}).get("path"),
+        )
+
+    reused, changed, missing, next_step = build_delta(
+        customer=customer,
+        prior_job=prior_job,
+        message=effective_message,
+        history_messages=history_messages,
+    )
+    operator_question = build_operator_question(customer, prior_job) if work_type == "reorder" else None
+    status = "ok"
+    if work_type != "reorder":
+        status = "not_reorder"
+        next_step = f"route_to_{work_type}_lane"
+    elif operator_question:
+        status = "needs_operator_choice"
+
+    reorder_id = f"MRR-{compact_utc(now)}-{os.urandom(2).hex()}"
+    reply_draft: dict[str, Any] | None = None
+    reply_draft_receipt = ""
+    if work_type == "reorder" and not operator_question:
+        summary_for_reply = {
+            "customer": customer or {},
+            "matched_prior_job": prior_job or {},
+            "changed": changed,
+            "missing": missing,
+        }
+        reply_body = build_reply_body(summary_for_reply)
+        reply_args = [
+            "--message-id",
+            str(effective_message.get("id") or args.message_id),
+            "--body",
+            reply_body,
+            "--mailbox",
+            args.mailbox,
+            "--customer",
+            str((customer or {}).get("summary") or ""),
+            "--job",
+            str((prior_job or {}).get("summary") or ""),
+            "--json",
+        ]
+        reply_payload, reply_draft_receipt = run_cap_capture(spine_root, REPLY_DRAFT_CAPABILITY, reply_args)
+        reply_data = dict(reply_payload.get("data") or {})
+        reply_draft = {
+            "reply_draft_id": reply_data.get("reply_draft_id"),
+            "draft_id": reply_data.get("draft_id"),
+            "record_file": reply_data.get("record_file"),
+            "draft_subject": reply_data.get("draft_subject"),
+            "draft_to": reply_data.get("draft_to"),
+            "receipt": reply_draft_receipt or None,
+        }
+
+    summary = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "generated_at": iso_utc(now),
+        "reorder_id": reorder_id,
+        "mailbox": args.mailbox,
+        "source_message_id": args.message_id,
+        "source_subject": message_subject(source_message),
+        "source_sender": source_sender,
+        "effective_message_id": str(effective_message.get("id") or ""),
+        "effective_message_sender": message_sender(effective_message),
+        "effective_message_subject": message_subject(effective_message),
+        "effective_message_resolution": effective_resolution,
+        "work_type": work_type,
+        "work_type_reasons": work_type_reasons,
+        "customer": customer,
+        "matched_prior_job": prior_job,
+        "reused": reused,
+        "changed": changed,
+        "missing": missing,
+        "next_step": next_step,
+        "work_object_state": "not_reorder" if work_type != "reorder" else work_object_state({"missing": missing, "operator_question": operator_question}),
+        "operator_question": operator_question,
+        "reply_draft": reply_draft,
+        "source_refs": {
+            "customers_export": str(customers_export),
+            "orders_export": str(orders_export),
+            "client_assets_root": str(client_assets_root) if client_assets_root else None,
+            "customer_folder": (customer_folder or {}).get("path"),
+            "customer_history_messages": summarize_history_messages(history_messages),
+        },
+        "candidate_context": {
+            "customer_candidates": [
+                {
+                    "score": item["score"],
+                    "email": item["row"].get("Email"),
+                    "company": item["row"].get("Company"),
+                    "name": " ".join(part for part in (item["row"].get("First Name"), item["row"].get("Last Name")) if part),
+                }
+                for item in customer_candidates
+            ],
+            "prior_job_candidates": [
+                {
+                    "score": item["score"],
+                    "invoice": item["row"].get("Invoice #"),
+                    "nickname": item["row"].get("Nickname"),
+                }
+                for item in prior_job_candidates
+            ],
+        },
+        "receipts": {
+            "source_get_receipt": source_get_receipt or None,
+            "effective_get_receipt": effective_get_receipt or None,
+            "thread_search_receipt": thread_search_receipt or None,
+            "history_search_receipt": history_search_receipt or None,
+            "reply_draft_receipt": reply_draft_receipt or None,
+        },
+    }
+
+    records_dir = state_root / "mint" / "customer-reorder-drafts" / "records" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{reorder_id}.json"
+    index_file = state_root / "mint" / "customer-reorder-drafts" / "index.ndjson"
+    lock_file = state_root / "locks" / "mint-customer-reorder-drafts.lock"
+    write_json(record_file, summary)
+    append_ndjson(
+        index_file,
+        lock_file,
+        {
+            "reorder_id": reorder_id,
+            "status": status,
+            "work_type": work_type,
+            "work_object_state": summary["work_object_state"],
+            "source_message_id": args.message_id,
+            "effective_message_id": summary["effective_message_id"],
+            "customer": (customer or {}).get("summary"),
+            "matched_prior_job": (prior_job or {}).get("summary"),
+            "reply_draft_id": (reply_draft or {}).get("reply_draft_id"),
+            "missing_count": len(missing),
+            "record_file": str(record_file),
+            "stored_at_utc": iso_utc(now),
+        },
+    )
+    summary["record_file"] = str(record_file)
+    summary["index_file"] = str(index_file)
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+
+    print(text_output(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+COMM_LIB_DIR = SCRIPT_DIR.parent.parent / "communications" / "lib"
+for path in (LIB_DIR, COMM_LIB_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from mail_triage_classifier import classify_message  # noqa: E402
+from customer_inbox_disposition_common import load_disposition_contract, resolve_message_disposition  # noqa: E402
+from customer_junk_review_common import ensure_destination_folder, load_review_contract  # noqa: E402
+from operator_mail_common import (  # noqa: E402
+    append_ndjson,
+    iso_utc,
+    message_body_text,
+    message_sender,
+    message_subject,
+    resolve_spine_root,
+    resolve_spine_state,
+    run_cap_capture,
+    utc_now,
+    write_json,
+)
+
+
+SCHEMA_VERSION = "1.0"
+CAPABILITY_FALLBACK = "mint.customer.inbox.junk"
+DEFAULT_MAILBOX = "team@mintprints.com"
+GET_CAPABILITY = "microsoft.mail.get"
+MOVE_CAPABILITY = "microsoft.mail.move"
+DEFAULT_DESTINATION = "Junk Email"
+ALLOWED_DISPOSITIONS = {"supplier_marketing", "risky_junk"}
+
+
+def capability_name() -> str:
+    return os.environ.get("MINT_CUSTOMER_INBOX_JUNK_CAPABILITY_NAME") or CAPABILITY_FALLBACK
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="customer-inbox-junk",
+        description="Move a promotional/risky Mint inbox message to Junk through the governed Microsoft mailbox path.",
+    )
+    parser.add_argument("message_id", nargs="?", help="Mailbox message id to move to Junk")
+    parser.add_argument("--message-id", dest="message_id_flag", default="", help="Mailbox message id to move to Junk")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX, help=f"Mailbox to act on (default: {DEFAULT_MAILBOX})")
+    parser.add_argument("--destination-folder", default=DEFAULT_DESTINATION, help=f"Target folder (default: {DEFAULT_DESTINATION})")
+    parser.add_argument("--force", action="store_true", help="Allow moving a non-promotional message to Junk")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args(argv)
+    resolved_message_id = args.message_id_flag.strip() or str(args.message_id or "").strip()
+    if not resolved_message_id:
+        fail("message_id required")
+    args.message_id = resolved_message_id
+    return args
+
+
+def text_output(summary: dict[str, Any]) -> str:
+    lines = [
+        capability_name(),
+        f"status: {summary['status']}",
+        f"message_id: {summary['source_message_id']}",
+        f"classification: {summary['classification']['triage_class']}",
+        f"recommended_action: {summary['classification']['recommended_action']}",
+        f"destination_folder: {summary.get('destination_folder_display_name', '')}",
+        f"moved_message_id: {summary.get('moved_message_id', '')}",
+        f"record_file: {summary['record_file']}",
+    ]
+    if summary.get("classification_blocker"):
+        lines.append(f"classification_blocker: {summary['classification_blocker']}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    spine_root = resolve_spine_root()
+    state_root = resolve_spine_state(spine_root)
+    disposition_contract = load_disposition_contract(spine_root)
+    review_contract = load_review_contract(spine_root)
+    now = utc_now()
+    action_id = f"MCJ-{now.strftime('%Y%m%dT%H%M%SZ')}-{os.urandom(2).hex()}"
+
+    source_message, source_receipt = run_cap_capture(
+        spine_root,
+        GET_CAPABILITY,
+        ["--message-id", args.message_id, "--mailbox", args.mailbox],
+    )
+    sender = message_sender(source_message)
+    subject = message_subject(source_message)
+    preview_text = message_body_text(source_message)
+    disposition = resolve_message_disposition(spine_root, source_message)
+    triage_class, recommended_action, classification_basis = classify_message(sender, subject, preview_text)
+
+    classification = {
+        "triage_class": triage_class,
+        "recommended_action": recommended_action,
+        "classification_basis": classification_basis,
+        "disposition": disposition.get("disposition"),
+        "disposition_reasons": disposition.get("reason_codes") or [],
+        "link_policy": "do_not_open_body_links",
+    }
+
+    blocker = None
+    resolved_destination = args.destination_folder
+    disposition_name = str(disposition.get("disposition") or "")
+    if args.destination_folder == DEFAULT_DESTINATION:
+        contract_folder = str((disposition_contract.get("recoverable_folder_by_disposition") or {}).get(disposition_name) or "").strip()
+        if contract_folder:
+            resolved_destination = contract_folder
+    if disposition_name not in ALLOWED_DISPOSITIONS and not args.force:
+        blocker = (
+            f"Refusing to move message because disposition is {disposition_name or triage_class}. "
+            "Use --force only for an explicit operator override."
+        )
+        fail(blocker)
+
+    if resolved_destination == "Supplier Marketing":
+        ensure_destination_folder(spine_root, args.mailbox, resolved_destination, review_contract)
+
+    move_payload, move_receipt = run_cap_capture(
+        spine_root,
+        MOVE_CAPABILITY,
+        ["--message-id", args.message_id, "--destination-folder", resolved_destination, "--mailbox", args.mailbox],
+    )
+
+    moved_message_id = str(move_payload.get("id") or move_payload.get("messageId") or "")
+    destination_folder_id = str(move_payload.get("destinationFolderId") or "")
+    destination_folder_display_name = str(move_payload.get("destinationFolderDisplayName") or args.destination_folder)
+
+    summary = {
+        "capability": capability_name(),
+        "schema_version": SCHEMA_VERSION,
+        "status": "moved",
+        "generated_at": iso_utc(now),
+        "action_id": action_id,
+        "mailbox": args.mailbox,
+        "source_message_id": args.message_id,
+        "source_sender": sender,
+        "source_subject": subject,
+        "classification": classification,
+        "forced": args.force,
+        "classification_blocker": blocker,
+        "destination_folder_id": destination_folder_id,
+        "destination_folder_display_name": destination_folder_display_name,
+        "moved_message_id": moved_message_id,
+        "receipts": {
+            "source_get_receipt": source_receipt or None,
+            "move_receipt": move_receipt or None,
+        },
+    }
+
+    records_dir = state_root / "mint" / "customer-junk-actions" / "records" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
+    record_file = records_dir / f"{action_id}.json"
+    index_file = state_root / "mint" / "customer-junk-actions" / "index.ndjson"
+    lock_file = state_root / "locks" / "mint-customer-junk-actions.lock"
+    write_json(record_file, summary)
+    append_ndjson(
+        index_file,
+        lock_file,
+        {
+            "action_id": action_id,
+            "status": "moved",
+            "source_message_id": args.message_id,
+            "moved_message_id": moved_message_id,
+            "mailbox": args.mailbox,
+            "classification": triage_class,
+            "destination_folder": destination_folder_display_name,
+            "forced": args.force,
+            "record_file": str(record_file),
+            "stored_at_utc": iso_utc(now),
+        },
+    )
+    summary["record_file"] = str(record_file)
+    summary["index_file"] = str(index_file)
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+
+    print(text_output(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
