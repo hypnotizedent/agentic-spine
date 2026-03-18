@@ -95,7 +95,7 @@ if os.path.exists(contract_file):
 # Fallback if YAML not loaded
 if not profiles:
     profiles = {
-        "control":   {"desc": "Writer for canonical docs + governance. Can merge.", "write": "docs/core/*, docs/contracts/*, docs/governance/*, docs/reference/*, docs/runbooks/*, mailroom/state/*", "mode": "read-write", "merge": "Y"},
+        "control":   {"desc": "Writer for canonical docs + governance. Can merge.", "write": "docs/core/*, docs/contracts/*, docs/governance/*, docs/reference/*, docs/runbooks/*", "mode": "read-write", "merge": "Y"},
         "execution": {"desc": "Writer for domain repos (plugins, surfaces). No canonical-doc edits.", "write": "ops/plugins/*, surfaces/*", "mode": "read-write", "merge": "N"},
         "audit":     {"desc": "Read-only evidence collection.", "write": "(none)", "mode": "read-only", "merge": "N"},
         "watcher":   {"desc": "Read-only background checks.", "write": "(none)", "mode": "read-only", "merge": "N"},
@@ -369,7 +369,7 @@ if os.path.exists(contract_file):
 
 if not profiles:
     profiles = {
-        "control":   {"write_scope": ["docs/core/*", "docs/contracts/*", "docs/governance/*", "docs/reference/*", "docs/runbooks/*", "mailroom/state/*"], "deny_scope": []},
+        "control":   {"write_scope": ["docs/core/*", "docs/contracts/*", "docs/governance/*", "docs/reference/*", "docs/runbooks/*"], "deny_scope": []},
         "execution": {"write_scope": ["ops/plugins/*", "surfaces/*"], "deny_scope": ["docs/core/*", "docs/contracts/*", "docs/governance/*", "docs/reference/*", "docs/runbooks/*"]},
         "audit":     {"write_scope": [], "deny_scope": ["*"]},
         "watcher":   {"write_scope": [], "deny_scope": ["*"]},
