@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# media.stack.restart — Restart docker compose stacks on media VMs
+# media.stack.restart — Restart the canonical media-home docker compose stack
 #
 # Usage:
 #   ./bin/ops cap run media.stack.restart
-#   ./bin/ops cap run media.stack.restart --vm download-stack
-#   ./bin/ops cap run media.stack.restart --vm streaming-stack
+#   ./bin/ops cap run media.stack.restart --vm media-home
+#   ./bin/ops cap run media.stack.restart --jellyfin-only
 #   ./bin/ops cap run media.stack.restart --dry-run
 #
 # Contract:
-# - Reads VM targets from ops/bindings/docker.compose.targets.yaml
-# - Executes: docker compose down && docker compose up -d
-# - Requires SSH access to target VMs
+# - Reads VM target from ops/bindings/docker.compose.targets.yaml
+# - Full restart is blocked while media.data.readiness.verify reports blocked
+# - Jellyfin-only recovery is allowed explicitly via --jellyfin-only
+# - Requires SSH access to media-home
 # - Generates receipt with before/after container states
 
 set -euo pipefail
@@ -18,25 +19,30 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
 COMPOSE_BINDING="$ROOT/ops/bindings/docker.compose.targets.yaml"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
+READINESS_SCRIPT="$ROOT/ops/plugins/domains/media/bin/media-data-readiness-verify"
 
 usage() {
   cat <<'USAGE'
-media.stack.restart — Restart docker compose stacks on media VMs
+media.stack.restart — Restart the canonical media-home docker compose stack
 
 Args:
-  --vm HOST         Restart only this VM (download-stack|streaming-stack)
+  --vm HOST         Restart only this VM (media-home)
+  --jellyfin-only   Enforce jellyfin-only recovery instead of full stack restart
   --dry-run         Show what would be done without executing
   --timeout SEC     SSH connection timeout (default: 30)
 
 Examples:
-  ./bin/ops cap run media.stack.restart --vm download-stack
+  ./bin/ops cap run media.stack.restart --vm media-home
+  ./bin/ops cap run media.stack.restart --jellyfin-only
   ./bin/ops cap run media.stack.restart --dry-run
 USAGE
 }
 
 VM_FILTER=""
 DRY_RUN=false
+JELLYFIN_ONLY=false
 TIMEOUT_SEC=30
+READINESS_JSON=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,6 +50,8 @@ while [[ $# -gt 0 ]]; do
       VM_FILTER="${2:-}"; shift 2 ;;
     --dry-run)
       DRY_RUN=true; shift ;;
+    --jellyfin-only)
+      JELLYFIN_ONLY=true; shift ;;
     --timeout)
       TIMEOUT_SEC="${2:-}"; shift 2 ;;
     -h|--help)
@@ -53,11 +61,74 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$VM_FILTER" && "$VM_FILTER" != "media-home" ]]; then
+  echo "FAIL: media.stack.restart only supports media-home" >&2
+  exit 1
+fi
+VM_FILTER="${VM_FILTER:-media-home}"
+
 command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
 command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "MISSING_DEP: python3" >&2; exit 2; }
 
-# Media VMs only
-MEDIA_VMS=("download-stack" "streaming-stack")
+MEDIA_VMS=("media-home")
+
+load_readiness_json() {
+  if [[ -n "$READINESS_JSON" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$READINESS_SCRIPT" ]]; then
+    echo "FAIL: missing readiness verifier: $READINESS_SCRIPT" >&2
+    exit 1
+  fi
+  READINESS_JSON="$(python3 "$READINESS_SCRIPT" --json)"
+}
+
+readiness_query() {
+  local mode="$1"
+  local service="${2:-}"
+  MEDIA_READINESS_JSON="$READINESS_JSON" python3 - "$mode" "$service" <<'PY'
+import json
+import os
+import sys
+
+payload = json.loads(os.environ["MEDIA_READINESS_JSON"])
+mode = sys.argv[1]
+service = sys.argv[2]
+
+if mode == "global_allowed":
+    print("true" if payload.get("global_automation_state") == "allowed" else "false")
+elif mode == "current_live_surface":
+    print(",".join(payload.get("execution_posture", {}).get("current_live_surface", [])))
+elif mode == "service_allowed":
+    services = payload.get("services", {})
+    if service in services:
+        print("true" if services[service].get("effective_state") == "allowed" else "false")
+    else:
+        surface = payload.get("execution_posture", {}).get("current_live_surface", [])
+        print("true" if service in surface else "false")
+else:
+    raise SystemExit(2)
+PY
+}
+
+guard_restart_mode() {
+  load_readiness_json
+  if $JELLYFIN_ONLY; then
+    if [[ "$(readiness_query service_allowed jellyfin)" != "true" ]]; then
+      echo "FAIL: jellyfin-only recovery is not allowed by media.data.readiness.verify" >&2
+      exit 1
+    fi
+    return 0
+  fi
+
+  if [[ "$(readiness_query global_allowed)" != "true" ]]; then
+    echo "FAIL: full media-home restart blocked by media.data.readiness.verify" >&2
+    echo "allowed_live_surface: $(readiness_query current_live_surface)" >&2
+    echo "hint: use ./bin/ops cap run media.stack.restart -- --jellyfin-only" >&2
+    exit 1
+  fi
+}
 
 get_vm_ssh_ref() {
   local vm="$1"
@@ -87,10 +158,17 @@ restart_vm_stack() {
   local vm="$1"
   local compose_path
   local ssh_ref
+  local restart_mode="full"
+  $JELLYFIN_ONLY && restart_mode="jellyfin_only"
 
   compose_path=$(get_compose_path "$vm")
   if [[ -z "$compose_path" ]]; then
     echo "FAIL: no compose path found for $vm"
+    return 1
+  fi
+
+  if [[ "$compose_path" != */media-stack ]]; then
+    echo "FAIL: $vm does not resolve to the canonical media-stack compose root"
     return 1
   fi
 
@@ -104,12 +182,15 @@ restart_vm_stack() {
   fi
 
   if $DRY_RUN; then
-    echo "DRY_RUN: would execute:"
-    echo "  ssh $ssh_ref 'cd $compose_path && docker compose down && docker compose up -d'"
+    echo "DRY_RUN: restart_mode=$restart_mode"
+    if $JELLYFIN_ONLY; then
+      echo "DRY_RUN: would enforce jellyfin-only recovery on $vm at $compose_path"
+    else
+      echo "DRY_RUN: would execute full docker compose down/up for $vm"
+    fi
     return 0
   fi
 
-  # Get before state
   echo "BEFORE:"
   before_out=$(ssh -o BatchMode=yes -o ConnectTimeout="$TIMEOUT_SEC" "$ssh_ref" "docker ps --format 'table {{.Names}}\t{{.Status}}'" 2>&1 || true)
   if echo "$before_out" | grep -qi "permission denied while trying to connect to the docker api"; then
@@ -121,20 +202,65 @@ restart_vm_stack() {
   fi
   echo "$before_out"
 
-  # Restart
   echo ""
   echo "RESTARTING..."
+  REMOTE_SCRIPT="$(cat <<'EOS'
+set -euo pipefail
+MODE="$1"
+PATHX="$2"
+
+case "$PATHX" in
+  "~/"*) PATHX="$HOME/${PATHX:2}" ;;
+  "~") PATHX="$HOME" ;;
+esac
+
+if [[ ! -d "$PATHX" ]]; then
+  echo "FAIL: stack dir missing: $PATHX" >&2
+  exit 2
+fi
+cd "$PATHX"
+
+FILE=""
+if [[ -f docker-compose.yml ]]; then FILE="docker-compose.yml"; fi
+if [[ -z "$FILE" && -f compose.yml ]]; then FILE="compose.yml"; fi
+if [[ -z "$FILE" ]]; then
+  echo "FAIL: compose file missing (docker-compose.yml/compose.yml) in $PATHX" >&2
+  exit 2
+fi
+
+DOCKER_CMD=(docker)
+if ! docker info >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+    DOCKER_CMD=(sudo -n docker)
+  else
+    echo "FAIL: docker daemon unreachable (no docker group + no sudo -n)" >&2
+    exit 1
+  fi
+fi
+
+if [[ "$MODE" == "jellyfin_only" ]]; then
+  mapfile -t declared_services < <("${DOCKER_CMD[@]}" compose -f "$FILE" config --services 2>/dev/null || true)
+  stop_services=()
+  for svc in "${declared_services[@]}"; do
+    if [[ "$svc" != "jellyfin" ]]; then
+      stop_services+=("$svc")
+    fi
+  done
+  if [[ "${#stop_services[@]}" -gt 0 ]]; then
+    "${DOCKER_CMD[@]}" compose -f "$FILE" stop "${stop_services[@]}" >/dev/null 2>&1 || true
+  fi
+  "${DOCKER_CMD[@]}" compose -f "$FILE" up -d jellyfin
+else
+  "${DOCKER_CMD[@]}" compose -f "$FILE" down
+  "${DOCKER_CMD[@]}" compose -f "$FILE" up -d
+fi
+EOS
+)"
+
   set +e
-  restart_out=$(ssh -o BatchMode=yes -o ConnectTimeout="$TIMEOUT_SEC" "$ssh_ref" "cd $compose_path && docker compose down && docker compose up -d" 2>&1)
+  restart_out=$(ssh -o BatchMode=yes -o ConnectTimeout="$TIMEOUT_SEC" "$ssh_ref" "bash -lc $(printf "%q" "$REMOTE_SCRIPT") -- $(printf "%q" "$restart_mode") $(printf "%q" "$compose_path")" 2>&1)
   restart_rc=$?
   set -e
-
-  if [[ $restart_rc -ne 0 ]] || echo "$restart_out" | grep -qi "permission denied"; then
-    set +e
-    restart_out=$(ssh -o BatchMode=yes -o ConnectTimeout="$TIMEOUT_SEC" "$ssh_ref" "cd $compose_path && sudo -n docker compose down && sudo -n docker compose up -d" 2>&1)
-    restart_rc=$?
-    set -e
-  fi
 
   if [[ $restart_rc -ne 0 ]] || echo "$restart_out" | grep -qi "^sudo: "; then
     echo "$restart_out"
@@ -143,7 +269,6 @@ restart_vm_stack() {
   fi
   echo "$restart_out"
 
-  # Get after state
   echo ""
   echo "AFTER:"
   after_out=$(ssh -o BatchMode=yes -o ConnectTimeout="$TIMEOUT_SEC" "$ssh_ref" "docker ps --format 'table {{.Names}}\t{{.Status}}'" 2>&1 || true)
@@ -155,7 +280,6 @@ restart_vm_stack() {
     return 1
   fi
   echo "$after_out"
-
   return 0
 }
 
@@ -163,9 +287,11 @@ echo "media.stack.restart"
 echo "==================="
 echo "vm_filter: ${VM_FILTER:-all}"
 echo "dry_run: $DRY_RUN"
+echo "jellyfin_only: $JELLYFIN_ONLY"
+
+guard_restart_mode
 
 ERRORS=0
-
 for vm in "${MEDIA_VMS[@]}"; do
   if [[ -n "$VM_FILTER" && "$vm" != "$VM_FILTER" ]]; then
     continue

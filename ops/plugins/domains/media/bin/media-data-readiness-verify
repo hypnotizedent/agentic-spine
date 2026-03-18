@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""media.data.readiness.verify — boring gate for media inbox/library/cold-shop lifecycle."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[5]
+EXECUTION_BINDING = ROOT / "ops/bindings/media.data.lifecycle.execution.yaml"
+RESIDUE_BINDING = ROOT / "ops/bindings/home.media.residue.inventory.yaml"
+
+
+def stop(message: str, code: int = 2) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict:
+    if not path.exists():
+        stop(f"MISSING_BINDING: {path}")
+    try:
+        result = subprocess.run(
+            ["yq", "-o=json", ".", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        stop("MISSING_DEP: yq")
+    except subprocess.CalledProcessError as exc:
+        stop(f"FAIL: unable to load {path}: {exc.stderr.strip()}")
+    return json.loads(result.stdout)
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def lane_count(residue: dict, lane_id: str):
+    return residue.get("lanes", {}).get(lane_id, {}).get("entry_count")
+
+
+def build_report(execution: dict, residue: dict) -> dict:
+    control_flags = execution.get("control_flags", {})
+    posture = execution.get("execution_posture", {})
+    thresholds = execution.get("thresholds", {})
+    lane_policies = execution.get("lane_policies", {})
+    service_gates = execution.get("service_gates", {})
+
+    lanes = []
+    for lane_id, policy in lane_policies.items():
+        observed = residue.get("lanes", {}).get(lane_id, {})
+        entry_count = observed.get("entry_count")
+        target_count = policy.get("steady_state_target_count")
+        ready = True
+        if target_count is not None:
+            ready = entry_count is not None and entry_count <= target_count
+        lanes.append(
+            {
+                "lane_id": lane_id,
+                "lane_role": policy.get("lane_role"),
+                "canonical_path": policy.get("canonical_path"),
+                "inventory_path": policy.get("inventory_path"),
+                "default_action": policy.get("default_action"),
+                "entry_count": entry_count,
+                "steady_state_target_count": target_count,
+                "ready_for_steady_state": ready,
+                "current_classification": observed.get("note", ""),
+                "failure_mode": observed.get("note", ""),
+            }
+        )
+
+    effective = {}
+
+    def service_allowed(service: str) -> bool:
+        if service in effective:
+            return effective[service]["effective_state"] == "allowed"
+
+        gate = service_gates.get(service)
+        if gate is None:
+            allowed = service in posture.get("current_live_surface", [])
+            effective[service] = {
+                "service": service,
+                "gate_mode": "implicit_current_surface_only",
+                "effective_state": "allowed" if allowed else "blocked",
+                "rationale": "Service is allowed only when explicitly present in the current live surface.",
+                "blockers": [] if allowed else [{"type": "not_in_current_live_surface", "message": "Service is not part of the current live surface."}],
+            }
+            return allowed
+
+        blockers = []
+        if gate.get("gate_mode") != "always_allowed":
+            for blocker in gate.get("blockers", []):
+                blocker_type = blocker.get("type")
+                if blocker_type == "control_flag_false":
+                    flag = blocker.get("flag")
+                    if not control_flags.get(flag, False):
+                        blockers.append(
+                            {
+                                "type": blocker_type,
+                                "flag": flag,
+                                "message": blocker.get("message", ""),
+                            }
+                        )
+                elif blocker_type == "lane_nonzero":
+                    lane_id = blocker.get("lane_id")
+                    threshold = blocker.get("threshold", thresholds.get("restart_requires_zero", 0))
+                    count = lane_count(residue, lane_id)
+                    if count is None or count > threshold:
+                        blockers.append(
+                            {
+                                "type": blocker_type,
+                                "lane_id": lane_id,
+                                "entry_count": count,
+                                "threshold": threshold,
+                                "message": blocker.get("message", ""),
+                            }
+                        )
+                elif blocker_type == "service_not_allowed":
+                    deps = blocker.get("services", [])
+                    blocked_deps = [dep for dep in deps if not service_allowed(dep)]
+                    if blocked_deps:
+                        blockers.append(
+                            {
+                                "type": blocker_type,
+                                "services": blocked_deps,
+                                "message": blocker.get("message", ""),
+                            }
+                        )
+
+        effective[service] = {
+            "service": service,
+            "gate_mode": gate.get("gate_mode"),
+            "effective_state": "blocked" if blockers else "allowed",
+            "rationale": gate.get("rationale", ""),
+            "blockers": blockers,
+        }
+        return not blockers
+
+    for service in service_gates:
+        service_allowed(service)
+
+    blocked_services = [
+        service
+        for service, info in effective.items()
+        if service != "jellyfin" and info["effective_state"] != "allowed"
+    ]
+
+    return {
+        "capability": "media.data.readiness.verify",
+        "generated_at": utc_now(),
+        "execution_posture": posture,
+        "control_flags": control_flags,
+        "global_automation_state": "allowed" if not blocked_services else "blocked",
+        "blocked_automation_services": blocked_services,
+        "lanes": lanes,
+        "services": effective,
+        "cleanup_waves": execution.get("cleanup_waves", []),
+        "operator_surfaces": execution.get("operator_surfaces", {}),
+    }
+
+
+def render_text(report: dict) -> str:
+    lines = [
+        "media.data.readiness.verify",
+        "================================",
+        f"current_state: {report['execution_posture'].get('current_state', 'unknown')}",
+        f"global_automation_state: {report['global_automation_state']}",
+        "current_live_surface: " + ", ".join(report["execution_posture"].get("current_live_surface", [])),
+        "",
+        "blocked_automation_services:",
+    ]
+    blocked = report.get("blocked_automation_services", [])
+    if blocked:
+        for service in blocked:
+            lines.append(f"  - {service}")
+    else:
+        lines.append("  - none")
+    lines.append("")
+    lines.append("lane_counts:")
+    for lane in report.get("lanes", []):
+        lines.append(
+            f"  - {lane['lane_id']}: count={lane['entry_count']} "
+            f"default={lane['default_action']} ready={lane['ready_for_steady_state']}"
+        )
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--json", action="store_true", help="Emit JSON report")
+    args = parser.parse_args()
+
+    execution = load_yaml(EXECUTION_BINDING)
+    residue = load_yaml(RESIDUE_BINDING)
+    report = build_report(execution, residue)
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_text(report))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

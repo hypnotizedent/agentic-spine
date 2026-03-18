@@ -8664,7 +8664,7 @@ capabilities:
     domain: infra
     plane: fabric
   docker.compose.up:
-    description: 'Mutating: docker compose up -d for a declared stack.'
+    description: 'Mutating: docker compose up -d for a declared stack. media-home/media-stack obeys media.data.readiness.verify.'
     tags:
       - docker
     command: ./ops/plugins/infra/docker/bin/docker-compose-up
@@ -9117,7 +9117,7 @@ capabilities:
     implementation_repo: /Users/ronnyworks/code/workbench
     implementation_path: agents/media/tools/src/
   media.stack.restart:
-    description: Restart docker compose stacks on media VMs (download-stack, streaming-stack). Dry-run by default.
+    description: Restart the canonical media-home compose stack. Full restart is blocked while media.data.readiness.verify is blocked; jellyfin-only recovery is allowed explicitly.
     tags:
       - media
       - docker
@@ -9125,6 +9125,25 @@ capabilities:
     cwd: $SPINE_CODE
     safety: mutating
     approval: manual
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+      - stdout
+    plane: domain_external
+    domain: media
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/media/tools/src/
+  media.data.readiness.verify:
+    description: Verify media inbox/library/cold-shop boringness gates before any media automation or full stack restart is re-enabled.
+    tags:
+      - media
+      - readiness
+      - data
+      - lifecycle
+    command: ./ops/plugins/domains/media/bin/media-data-readiness-verify
+    cwd: $SPINE_CODE
+    safety: read-only
+    approval: auto
     arg_protocol: passthrough
     lifecycle: ready
     outputs:
@@ -12474,5 +12493,69 @@ capabilities:
       - "docs/reference/generated/HOME_RACK_SCORECARD.md"
       - "docs/reference/generated/ESTATE_BORINGNESS_SCORECARD.md"
     domain: infra
+    plane: fabric
+    arg_protocol: passthrough
+  mint.customer.voice.intake.capture:
+    description: "Persist a normalized Morpheus voice interaction record from a Vapi end-of-call payload."
+    tags:
+      - "mint"
+      - "voice"
+      - "customer"
+    command: "./ops/plugins/domains/mint/bin/customer-voice-intake-capture"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    outputs:
+      - "stdout"
+    domain: mint
+    plane: fabric
+    arg_protocol: passthrough
+  mint.customer.voice.callback.enqueue:
+    description: "Create or return an idempotent Morpheus voice callback queue item."
+    tags:
+      - "mint"
+      - "voice"
+      - "customer"
+    command: "./ops/plugins/domains/mint/bin/customer-voice-callback-enqueue"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    outputs:
+      - "stdout"
+    domain: mint
+    plane: fabric
+    arg_protocol: passthrough
+  mint.customer.frontdesk.facts.get:
+    description: "Read approved Mint front desk facts for Morpheus Voice."
+    tags:
+      - "mint"
+      - "voice"
+      - "customer"
+    command: "./ops/plugins/domains/mint/bin/customer-frontdesk-facts-get"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs:
+      - "stdout"
+    domain: mint
+    plane: fabric
+    arg_protocol: passthrough
+  mint.customer.order.status.lookup:
+    description: "Return a governed read-only order status result for Morpheus Voice."
+    tags:
+      - "mint"
+      - "voice"
+      - "customer"
+    command: "./ops/plugins/domains/mint/bin/customer-order-status-lookup"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs:
+      - "stdout"
+    domain: mint
     plane: fabric
     arg_protocol: passthrough

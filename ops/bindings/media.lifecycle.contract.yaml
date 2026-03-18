@@ -1,0 +1,85 @@
+contract: MEDIA_LIFECYCLE_CONTRACT_V1
+version: "1.0"
+status: authoritative
+owner: "@ronny"
+updated_at: "2026-03-18"
+scope: media-lifecycle
+
+purpose: >
+  Canonical boring lifecycle for media payload. This separates hot-home runtime
+  truth from shop cold-retention truth and makes delete the default when intent
+  is unclear.
+
+authority:
+  doctrine:
+    - docs/governance/HOME_SERVER_SSOT.md
+    - docs/governance/SHOP_SERVER_SSOT.md
+    - docs/governance/domains/media.md
+
+principles:
+  - Home is the canonical live media runtime.
+  - Shop is the canonical cold-retention plane.
+  - Inbox is transit only, not storage truth.
+  - Library is live playback truth.
+  - When intent is unclear, delete instead of retaining by accident.
+  - Cold retain only deliberate keepers.
+
+planes:
+  hot_home:
+    inbox:
+      logical_root: /srv/media/downloads
+      physical_root: synology918:/volume1/media-staging/downloads
+      role: transit_only
+    library:
+      logical_root: /srv/media
+      physical_root: synology918:/volume1/media-staging
+      class_roots:
+        movies: /srv/media/movies
+        tv: /srv/media/tv
+        music: /srv/media/music
+      role: live_library_truth
+  cold_shop:
+    library:
+      logical_root: /md1400/archive/media-library
+      class_roots:
+        movies: /md1400/archive/media-library/movies
+        tv: /md1400/archive/media-library/tv
+        music: /md1400/archive/media-library/music
+      role: cold_retention_truth
+
+state_machine:
+  states:
+    - request
+    - download_inbox
+    - imported_home_library
+    - watched_or_reviewed
+    - deleted
+    - promoted_to_cold_shop
+    - restored_to_home
+  normal_flow:
+    - request
+    - download_inbox
+    - imported_home_library
+    - watched_or_reviewed
+    - delete_or_promote
+  boring_rule: >
+    The normal branch after watching is delete unless the title has explicit
+    keep intent. Cold retention is deliberate, not automatic.
+
+classification_rules:
+  regenerable_default_delete:
+    - incomplete downloads
+    - speculative grabs
+    - backlog residue in downloads/complete
+    - duplicate payload
+    - media that was downloaded only because automation could fetch it
+  archive_worthy_examples:
+    - explicitly kept titles
+    - hard-to-reacquire titles
+    - curated personal keepers
+    - titles with intentional cold-retention value
+
+operator_invariants:
+  - Do not promote directly from inbox to cold shop in the normal path.
+  - Import into the canonical home library first if the title is a deliberate keeper.
+  - Do not re-enable automation while transit residue still acts like storage.

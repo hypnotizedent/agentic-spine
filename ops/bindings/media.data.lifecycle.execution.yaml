@@ -1,0 +1,249 @@
+contract: MEDIA_DATA_LIFECYCLE_EXECUTION_V1
+version: "1.0"
+status: authoritative
+owner: "@ronny"
+updated_at: "2026-03-18"
+scope: media-data-lifecycle-execution
+
+purpose: >
+  Execution-grade boringness contract for media payload handling across inbox,
+  live library, and shop cold retention. This binding turns the high-level
+  lifecycle doctrine into explicit lane policy and restart gates so automation
+  cannot be re-enabled ambiguously.
+
+authority:
+  parent_contracts:
+    - ops/bindings/media.lifecycle.contract.yaml
+    - ops/bindings/home.media.residue.inventory.yaml
+    - ops/bindings/home.media.readiness.baseline.yaml
+  doctrine:
+    - docs/governance/HOME_SERVER_SSOT.md
+    - docs/governance/SHOP_SERVER_SSOT.md
+    - docs/governance/domains/media.md
+  verification_surface:
+    capability: media.data.readiness.verify
+    command_pattern: ./bin/ops cap run media.data.readiness.verify -- --json
+
+execution_posture:
+  current_state: jellyfin_only_recovery
+  current_live_surface:
+    - jellyfin
+  blocked_surfaces:
+    - sabnzbd
+    - qbittorrent
+    - prowlarr
+    - radarr
+    - sonarr
+    - lidarr
+    - jellyseerr
+    - homarr
+    - navidrome
+    - bazarr
+    - wizarr
+    - spotisub
+  principle: >
+    Do not restart automation until inbox, library, and cold-retention meanings
+    are explicit and the transit residue lanes are drained back toward zero.
+
+control_flags:
+  movies_automation_enabled: false
+  tv_allowlist_declared: false
+  music_lane_declared: false
+  direct_cold_promote_from_inbox_allowed: false
+
+thresholds:
+  restart_requires_zero: 0
+
+lane_policies:
+  downloads.incomplete:
+    lane_role: transit_only
+    canonical_path: /srv/media/downloads/incomplete
+    inventory_path: /srv/media/downloads/incomplete
+    default_action: purge
+    steady_state_target_count: 0
+    allowed_next_actions:
+      - finish_then_import
+      - purge
+    forbidden_next_actions:
+      - treat_as_library
+      - treat_as_cold_truth
+  downloads.complete.movies:
+    lane_role: transit_only
+    canonical_path: /srv/media/downloads/complete/movies
+    inventory_path: /srv/media/downloads/complete/movies
+    default_action: delete
+    steady_state_target_count: 0
+    allowed_next_actions:
+      - import_to_library_if_explicit_keeper
+      - delete
+    forbidden_next_actions:
+      - treat_as_library
+      - cold_promote_directly_from_inbox
+  downloads.complete.tv:
+    lane_role: transit_only
+    canonical_path: /srv/media/downloads/complete/tv
+    inventory_path: /srv/media/downloads/complete/tv
+    default_action: import_or_delete
+    steady_state_target_count: 0
+    allowed_next_actions:
+      - import_if_show_is_in_explicit_keep_allowlist
+      - delete
+    forbidden_next_actions:
+      - treat_as_library
+      - leave_indefinitely
+  downloads.complete.music:
+    lane_role: transit_only
+    canonical_path: /srv/media/downloads/complete/music
+    inventory_path: /srv/media/downloads/complete/music
+    default_action: delete
+    steady_state_target_count: 0
+    allowed_next_actions:
+      - import_if_artist_or_album_is_explicitly_wanted
+      - delete
+    forbidden_next_actions:
+      - treat_as_library
+      - leave_indefinitely
+  library.movies:
+    lane_role: live_library_truth
+    canonical_path: /srv/media/movies
+    inventory_path: /srv/media/movies
+    default_action: protect
+    steady_state_target_count: null
+  library.tv:
+    lane_role: live_library_truth
+    canonical_path: /srv/media/tv
+    inventory_path: /srv/media/tv
+    default_action: protect
+    steady_state_target_count: null
+  library.music:
+    lane_role: live_library_truth
+    canonical_path: /srv/media/music
+    inventory_path: /srv/media/music
+    default_action: protect
+    steady_state_target_count: null
+  cold_shop.media_library:
+    lane_role: cold_retention_truth
+    canonical_path: /md1400/archive/media-library
+    inventory_path: /md1400/archive/media-library
+    default_action: protect
+    steady_state_target_count: null
+
+service_gates:
+  jellyfin:
+    gate_mode: always_allowed
+    rationale: Jellyfin may remain live because it reads only the canonical home library.
+    blockers: []
+  radarr:
+    gate_mode: blocked_until_clear
+    rationale: Movie automation stays off until movie transit is zero and movies remain deliberate, not speculative.
+    blockers:
+      - type: control_flag_false
+        flag: movies_automation_enabled
+        message: Movie automation is intentionally disabled.
+      - type: lane_nonzero
+        lane_id: downloads.complete.movies
+        threshold: 0
+        message: Movie transit residue must be zero before Radarr returns.
+  sonarr:
+    gate_mode: blocked_until_clear
+    rationale: TV automation only comes back against an explicit kept-show scope and a clean transit lane.
+    blockers:
+      - type: control_flag_false
+        flag: tv_allowlist_declared
+        message: TV keep allowlist is not declared.
+      - type: lane_nonzero
+        lane_id: downloads.incomplete
+        threshold: 0
+        message: Incomplete transit still contains mixed active and stale residue.
+      - type: lane_nonzero
+        lane_id: downloads.complete.tv
+        threshold: 0
+        message: TV complete transit is not yet drained.
+  lidarr:
+    gate_mode: blocked_until_clear
+    rationale: Music automation stays off until the music lane is explicit and residue is drained.
+    blockers:
+      - type: control_flag_false
+        flag: music_lane_declared
+        message: Music lane is not declared active.
+      - type: lane_nonzero
+        lane_id: downloads.complete.music
+        threshold: 0
+        message: Music complete transit is not yet drained.
+  sabnzbd:
+    gate_mode: blocked_until_clear
+    rationale: Download clients stay off while downstream library automation lanes are blocked.
+    blockers:
+      - type: service_not_allowed
+        services:
+          - radarr
+          - sonarr
+          - lidarr
+        message: Downstream automation lanes are still blocked.
+  qbittorrent:
+    gate_mode: blocked_until_clear
+    rationale: Download clients stay off while downstream library automation lanes are blocked.
+    blockers:
+      - type: service_not_allowed
+        services:
+          - radarr
+          - sonarr
+          - lidarr
+        message: Downstream automation lanes are still blocked.
+  prowlarr:
+    gate_mode: blocked_until_clear
+    rationale: Indexing stays off while the write lane is blocked.
+    blockers:
+      - type: service_not_allowed
+        services:
+          - radarr
+          - sonarr
+          - lidarr
+        message: Library automation lanes are still blocked.
+  jellyseerr:
+    gate_mode: blocked_until_clear
+    rationale: Requests stay off until the write lane returns intentionally.
+    blockers:
+      - type: service_not_allowed
+        services:
+          - radarr
+          - sonarr
+        message: Request fulfillment services are still blocked.
+  navidrome:
+    gate_mode: blocked_until_clear
+    rationale: Music playback stays off until the music lane is declared active.
+    blockers:
+      - type: control_flag_false
+        flag: music_lane_declared
+        message: Music lane is not declared active.
+  homarr:
+    gate_mode: blocked_until_clear
+    rationale: The operator dashboard stays off until the non-Jellyfin surfaces are intentionally live again.
+    blockers:
+      - type: service_not_allowed
+        services:
+          - jellyseerr
+          - navidrome
+        message: Non-Jellyfin media surfaces are still blocked.
+
+cleanup_waves:
+  - step: 1
+    action: Protect canonical library roots and keep Jellyfin as the only live surface.
+  - step: 2
+    action: Reduce downloads.complete.movies to zero by delete-by-default, importing only deliberate keeper titles first.
+  - step: 3
+    action: Declare the explicit TV keep allowlist and drain downloads.incomplete plus downloads.complete.tv back to zero.
+  - step: 4
+    action: Decide whether music is an active library or historical residue, then drain downloads.complete.music accordingly.
+  - step: 5
+    action: Re-enable only the automation group whose blockers are fully clear.
+
+operator_surfaces:
+  readiness_verify:
+    capability: media.data.readiness.verify
+    command_pattern: ./bin/ops cap run media.data.readiness.verify -- --json
+    output: service_gate_report
+  safe_restart:
+    capability: media.stack.restart
+    command_pattern: ./bin/ops cap run media.stack.restart -- --jellyfin-only
+    note: Full media-home or media split-stack restarts are blocked while the readiness gate is blocked.

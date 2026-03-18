@@ -10,6 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
 BINDING="$SPINE_ROOT/ops/bindings/docker.compose.targets.yaml"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+READINESS_SCRIPT="$SPINE_ROOT/ops/plugins/domains/media/bin/media-data-readiness-verify"
 
 # Source shared SSH resolver for LAN→Tailscale fallback.
 # shellcheck source=../../../lib/ssh-resolve.sh
@@ -37,6 +38,7 @@ Examples:
 Notes:
   - Service arguments accept either compose service names OR container_name values.
   - Container names are normalized to their backing compose service automatically.
+  - media-home/media-stack obeys media.data.readiness.verify before startup.
 EOF
 }
 
@@ -51,6 +53,73 @@ TARGET="$1"
 STACK="$2"
 shift 2
 SERVICES=("$@")
+READINESS_JSON=""
+
+load_readiness_json() {
+  if [[ -n "$READINESS_JSON" ]]; then
+    return 0
+  fi
+  [[ -f "$READINESS_SCRIPT" ]] || stop "missing readiness verifier: $READINESS_SCRIPT"
+  command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+  READINESS_JSON="$(python3 "$READINESS_SCRIPT" --json)"
+}
+
+readiness_query() {
+  local mode="$1"
+  local service="${2:-}"
+  MEDIA_READINESS_JSON="$READINESS_JSON" python3 - "$mode" "$service" <<'PY'
+import json
+import os
+import sys
+
+payload = json.loads(os.environ["MEDIA_READINESS_JSON"])
+mode = sys.argv[1]
+service = sys.argv[2]
+
+if mode == "global_allowed":
+    print("true" if payload.get("global_automation_state") == "allowed" else "false")
+elif mode == "current_live_surface":
+    print(",".join(payload.get("execution_posture", {}).get("current_live_surface", [])))
+elif mode == "service_allowed":
+    services = payload.get("services", {})
+    if service in services:
+        print("true" if services[service].get("effective_state") == "allowed" else "false")
+    else:
+        surface = payload.get("execution_posture", {}).get("current_live_surface", [])
+        print("true" if service in surface else "false")
+else:
+    raise SystemExit(2)
+PY
+}
+
+guard_media_home_compose_up() {
+  [[ "$TARGET" == "media-home" && "$STACK" == "media-stack" ]] || return 0
+  load_readiness_json
+
+  local allowed_surface
+  allowed_surface="$(readiness_query current_live_surface)"
+
+  if [[ ${#SERVICES[@]} -eq 0 ]]; then
+    if [[ "$(readiness_query global_allowed)" != "true" ]]; then
+      stop "media-home/media-stack full start blocked by media.data.readiness.verify (allowed_live_surface=${allowed_surface:-none})"
+    fi
+    return 0
+  fi
+
+  local blocked=()
+  local service
+  for service in "${SERVICES[@]}"; do
+    if [[ "$(readiness_query service_allowed "$service")" != "true" ]]; then
+      blocked+=("$service")
+    fi
+  done
+
+  if [[ ${#blocked[@]} -gt 0 ]]; then
+    stop "media-home/media-stack blocked service(s): ${blocked[*]} (allowed_live_surface=${allowed_surface:-none})"
+  fi
+}
+
+guard_media_home_compose_up
 
 ssh_target_id="$(yq -r ".targets.\"$TARGET\".ssh_target // \"\"" "$BINDING")"
 [[ -n "$ssh_target_id" && "$ssh_target_id" != "null" ]] || stop "unknown target (or missing ssh_target): $TARGET"

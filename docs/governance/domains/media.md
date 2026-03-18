@@ -17,6 +17,7 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 | `media.backup.create` |
 | `media.capacity.runway.status` |
 | `media.capacity.snapshot.build` |
+| `media.data.readiness.verify` |
 | `media.config.restore.drill` |
 | `media.e2e.verify` |
 | `media.health.check` |

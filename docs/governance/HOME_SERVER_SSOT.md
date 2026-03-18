@@ -45,10 +45,21 @@ Authority boundary:
 ## Generated Projections
 
 - Storage authority projection: `ops/bindings/home.storage.map.yaml`
+- Home media residue inventory: `ops/bindings/home.media.residue.inventory.yaml`
+- Media lifecycle contract: `ops/bindings/media.lifecycle.contract.yaml`
+- Media data execution gate: `ops/bindings/media.data.lifecycle.execution.yaml`
 - Ingress authority projection: `ops/bindings/home.ingress.map.yaml`
 - Rack scorecard: `docs/reference/generated/HOME_RACK_SCORECARD.md`
 - Estate closure scorecard: `docs/reference/generated/ESTATE_BORINGNESS_SCORECARD.md`
 - Rebuild command: `./bin/ops cap run infra.estate.boringness.build`
+
+## Current Media Recovery State
+
+- `media-home` is in `jellyfin_only_recovery` while the data-side boringness pass remains active.
+- The authoritative residue baseline is `ops/bindings/home.media.residue.inventory.yaml`.
+- The authoritative lifecycle doctrine is `ops/bindings/media.lifecycle.contract.yaml`.
+- The restart gate is `ops/bindings/media.data.lifecycle.execution.yaml`, enforced by `./bin/ops cap run media.data.readiness.verify`.
+- Full media-home restarts are intentionally blocked while transit residue still acts like storage.
 
 ## Current Tombstones
 
@@ -64,4 +75,5 @@ Authority boundary:
 ./bin/ops cap run infra.estate.boringness.build -- --check
 ./bin/ops cap run home.vm.status
 ./bin/ops cap run home.backup.status
+./bin/ops cap run media.data.readiness.verify
 ```

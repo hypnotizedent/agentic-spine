@@ -1,0 +1,74 @@
+inventory: HOME_MEDIA_RESIDUE_INVENTORY_V1
+version: "1.0"
+status: authoritative
+owner: "@ronny"
+observed_at: "2026-03-18"
+scope: home-media-residue
+
+purpose: >
+  Reset baseline for the home media boringness pass. Captures what is in transit
+  residue versus what is actually in the live home library so automation can
+  stay off until the lanes are normalized.
+
+observation:
+  posture: jellyfin_only_recovery
+  source: operator session live inventory from media-home and Synology-backed media lanes
+  findings:
+    - The live movie library is sparse while downloads/complete still carries historical residue.
+    - Historical movie residue clustered in early January 2026 and is not treated as canonical library truth.
+
+lanes:
+  downloads.incomplete:
+    role: transit_only
+    canonical_path: /srv/media/downloads/incomplete
+    entry_count: 291
+    default_action: purge
+    note: Active and stale residue are mixed.
+  downloads.complete.movies:
+    role: transit_only
+    canonical_path: /srv/media/downloads/complete/movies
+    entry_count: 514
+    default_action: delete
+    note: Historical movie backlog; not canonical library truth.
+  downloads.complete.tv:
+    role: transit_only
+    canonical_path: /srv/media/downloads/complete/tv
+    entry_count: 148
+    default_action: import_or_delete
+    note: Recent TV backlog mixed with residue.
+  downloads.complete.music:
+    role: transit_only
+    canonical_path: /srv/media/downloads/complete/music
+    entry_count: 445
+    default_action: delete
+    note: Historical music backlog; not canonical library truth.
+  library.movies:
+    role: live_library_truth
+    canonical_path: /srv/media/movies
+    entry_count: 1
+    default_action: protect
+  library.tv:
+    role: live_library_truth
+    canonical_path: /srv/media/tv
+    entry_count: 7
+    default_action: protect
+  library.music:
+    role: live_library_truth
+    canonical_path: /srv/media/music
+    entry_count: 34
+    default_action: protect
+  cold_shop.media_library:
+    role: cold_retention_truth
+    canonical_path: /md1400/archive/media-library
+    entry_count: null
+    default_action: protect
+
+decision_defaults:
+  downloads.incomplete: finish_then_import_or_purge
+  downloads.complete.movies: delete_by_default_unless_explicit_keeper
+  downloads.complete.tv: import_only_for_explicit_keep_allowlist_else_delete
+  downloads.complete.music: delete_by_default_unless_explicit_artist_or_album_keep
+  library.movies: protect
+  library.tv: protect
+  library.music: protect
+  cold_shop.media_library: protect
