@@ -7,6 +7,7 @@ set -euo pipefail
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CLOSEOUT_CMD="${SPINE_ROOT}/ops/commands/nightly-closeout.sh"
 WORKSPACE_VERIFY_CMD="${SPINE_ROOT}/ops/plugins/core/verify/bin/workspace-closeout-verify"
+D399_CMD="${SPINE_ROOT}/surfaces/verify/d399-microsoft-mint-customer-mailbox-canonical-lock.sh"
 CONTRACT="${SPINE_ROOT}/ops/bindings/nightly.closeout.contract.yaml"
 source "${SPINE_ROOT}/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
@@ -173,9 +174,50 @@ run_workspace_closeout_verify() {
   return 0
 }
 
+run_microsoft_mailbox_lock() {
+  local d399_output d399_rc
+
+  [[ -x "$D399_CMD" ]] || {
+    echo "[nightly-closeout-daily] missing mailbox lock verifier: $D399_CMD" >&2
+    return 2
+  }
+
+  set +e
+  d399_output="$("$D399_CMD" 2>&1)"
+  d399_rc=$?
+  set -e
+
+  if [[ "$d399_rc" -ne 0 ]]; then
+    spine_enqueue_email_intent \
+      "microsoft-mailbox-lock" \
+      "error" \
+      "Mint mailbox lock verify failed" \
+      "d399_rc=${d399_rc} output=${d399_output}" \
+      "nightly-closeout-daily"
+    printf '%s\n' "$d399_output" >&2
+    return 1
+  fi
+
+  echo "[nightly-closeout-daily] microsoft mailbox lock passed"
+  return 0
+}
+
 run_nightly_closeout_and_workspace_verify() {
-  run_nightly_closeout_dry_run
-  run_workspace_closeout_verify
+  local closeout_rc workspace_rc d399_rc overall_rc
+  closeout_rc=0
+  workspace_rc=0
+  d399_rc=0
+  overall_rc=0
+
+  run_nightly_closeout_dry_run || closeout_rc=$?
+  run_workspace_closeout_verify || workspace_rc=$?
+  run_microsoft_mailbox_lock || d399_rc=$?
+
+  (( closeout_rc == 0 && workspace_rc == 0 && d399_rc == 0 )) || overall_rc=1
+  if [[ "$overall_rc" -ne 0 ]]; then
+    echo "[nightly-closeout-daily] failure closeout_rc=$closeout_rc workspace_rc=$workspace_rc d399_rc=$d399_rc" >&2
+  fi
+  return "$overall_rc"
 }
 
 echo "[nightly-closeout-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
