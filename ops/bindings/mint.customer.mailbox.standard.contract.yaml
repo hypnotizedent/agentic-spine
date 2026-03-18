@@ -16,9 +16,14 @@ purpose: |
 
 authority:
   canonical_mailbox: team@mintprints.com
-  ingress_aliases:
-    - info@mintprints.com
+  ingress_aliases: []
   executive_safety_copy_mailboxes:
+    - ronny@mintprints.com
+  protected_historical_mailboxes:
+    - info@mintprints.com
+    - info-legacy@mintprints.onmicrosoft.com
+  agent_mutation_mailboxes:
+    - team@mintprints.com
     - ronny@mintprints.com
   parked_legacy_mailboxes:
     - info-legacy@mintprints.onmicrosoft.com
@@ -37,8 +42,10 @@ standard_procedure:
     required_mailbox: team@mintprints.com
     rule: "Customer replies go out from team@ only unless Ronny is intentionally handling an executive-only thread."
   ingress_handling:
-    info_alias_rule: "info@mintprints.com is ingress-only and must land in the team@ lane."
+    info_alias_rule: "info@mintprints.com is a protected historical mailbox. Agents may read it for lineage and context but must not move, draft, update, or reply from it."
     ronny_rule: "ronny@mintprints.com is executive-only and not part of the normal customer-service queue."
+    ronny_promote_rule: "If a real customer thread lands only in ronny@, promote it into team@ through the governed promote-to-team surface before agent handling."
+    operational_lane_rule: "team@ remains the operational customer-service lane for new agent work, but it must never overwrite or absorb the historical info@ mailbox identity."
   system_sender_handling:
     no_reply_rule: "no-reply@mintprints.com is a hidden transactional sender only and must not receive shadow copies of human customer mail."
   duplicate_interpretation:
@@ -47,6 +54,27 @@ standard_procedure:
       - "One sent copy in ronny@ Sent Items plus one delivered copy in team@ Inbox"
       - "One sent copy in ronny@ Sent Items plus one delivered copy in ronny@ Inbox"
     bug_definition: "A real duplicate bug is two or more items in the same authoritative folder with the same internetMessageId."
+
+history_context:
+  rule: "Customer history may be read across the governed Mint mailbox history scope, but queue truth and reply anchors stay on team@ while info@ remains a protected read-only history lane."
+  live_search_capability: communications.mail.search
+  archive_search_capability: communications.mailarchiver.search
+  live_context_mailboxes:
+    - team@mintprints.com
+    - info@mintprints.com
+  archive_context_mailboxes:
+    - team@mintprints.com
+    - info@mintprints.com
+    - info-legacy@mintprints.onmicrosoft.com
+    - ronny@mintprints.com
+  archive_alias_map: {}
+  invariants:
+    - "Auxiliary mailbox history is read-only context, not queue truth."
+    - "Historical info@ context remains attached to the original info@ mailbox identity and must not be remapped into team@."
+    - "Agents may read historical info@ threads but must never mutate the mailbox or change its live identity."
+    - "Executive safety-copy history from ronny@ may inform context but must not replace the team@ reply anchor."
+    - "Cross-mailbox live history is intentionally limited to read-only context on info@ and operational work on team@."
+    - "Ronny-only customer ingress must be promoted into team@ before it becomes agent queue truth."
 
 agent_rules:
   morpheus:
@@ -78,15 +106,32 @@ outlook_local_interpretation:
 boring_invariants:
   required:
     - "team@mintprints.com remains the only canonical customer-service mailbox"
-    - "info@mintprints.com remains alias-only ingress"
+    - "info@mintprints.com remains a standalone protected historical mailbox"
+    - "info@mintprints.com is read-only for agents"
     - "ronny@mintprints.com remains executive/safety-copy only"
     - "Customer-path duplicates are measured only within team@ Inbox"
     - "All agent customer triage starts from governed team@ surfaces"
+    - "resolved_name never doubles as the greeting source in customer-facing mail"
   forbidden:
-    - "Standalone info@ shared mailbox returning as a live customer mailbox surface"
-    - "Inbox redirect rules from info@ or ronny@ into team@"
+    - "Repointing info@ mailbox identity, alias, or anchor onto team@"
+    - "Agent draft/update/move operations against info@mintprints.com or info-legacy@mintprints.onmicrosoft.com"
+    - "Inbox redirect rules from info@ into team@"
     - "Agents treating Outlook conversation rollups as proof of transport duplication"
     - "Hidden BCC or shadow-copy drift that sends human customer mail into no-reply@ or any other non-canonical mailbox"
+
+receipts_and_controls:
+  rule: "Every Microsoft mailbox mutation must leave a governed receipt with operation, target mailbox, status, and exit code."
+  enforced_by:
+    - ops/plugins/providers/microsoft/bin/microsoft-cap-exec
+  receipt_root: "/Users/ronnyworks/code/.runtime/spine/mailroom/outbox/reports/microsoft-mailbox-op-receipts"
+  required_fields:
+    - timestamp_utc
+    - operation
+    - target_mailbox
+    - mutating
+    - status
+    - exit_code
+    - contract_path
 
 verification:
   gates:

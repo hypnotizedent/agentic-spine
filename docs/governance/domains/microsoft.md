@@ -10,14 +10,15 @@ Canonical domain policy for `microsoft`.
 
 ## Mint Customer Mailbox Standard
 
-For Mint customer work, the only authoritative queue is `team@mintprints.com / Inbox`.
+For Mint customer work, the only authoritative new-work queue is `team@mintprints.com / Inbox`.
 
-- `info@mintprints.com` is ingress-only and must resolve into the `team@` lane.
+- `info@mintprints.com` is a protected historical mailbox and must remain readable without being repointed, merged, or mutated by agents.
 - `ronny@mintprints.com` is executive/safety-copy only and not the normal customer-service queue.
 - `no-reply@mintprints.com` is a hidden transactional sender only and must not receive shadow copies of human customer mail.
 - `Sent Items` and Outlook conversation rollups are not authoritative duplicate evidence.
 - A real duplicate bug means the same `internetMessageId` appears more than once in `team@ Inbox`.
 - If Outlook shows multiple rows, agents must separate `Inbox` copies from `Sent Items` copies before escalating.
+- Microsoft mailbox mutations must be receipt-backed and must not target `info@mintprints.com` or `info-legacy@mintprints.onmicrosoft.com`.
 
 ## Tenant Boringness
 

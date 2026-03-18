@@ -1,0 +1,54 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-17
+scope: mint-customer-inbox-history-materialize
+version: "1.0"
+updated_at: "2026-03-17"
+capability: mint.customer.inbox.history.materialize
+
+surface:
+  description: Materialize archived Mint customer thread history into a recoverable team@ Outlook folder as separate message objects.
+  canonical_mailbox: team@mintprints.com
+  archive_search_script: ./ops/plugins/domains/communications/bin/communications-mail-archiver-search
+  default_parent_folder: Recovered History
+  default_top: 25
+  sort_order: oldest_first
+
+materialization:
+  outlook_root_folder: msgfolderroot
+  folder_name_sanitization: slash_to_dash
+  dedupe_key_order:
+    - internetMessageId
+    - archivedRowId
+    - subject_from_received
+  preserve_subject: true
+  preserve_headers:
+    - Message-ID
+    - Date
+    - From
+    - To
+    - Cc
+  mark_read: true
+  custom_headers:
+    X-Mint-History-Materialized: "true"
+  attachment_restore_mode: metadata_only
+  attachment_notice: |
+    Attachment payloads are not retained in the current mail-archiver model.
+    This materialized message restores the thread body and headers only.
+
+runtime:
+  records_root: $SPINE_STATE/mint/customer-history-materializations/records
+  index_file: $SPINE_STATE/mint/customer-history-materializations/index.ndjson
+  lock_file: $SPINE_STATE/locks/mint-customer-history-materializations.lock
+
+governance:
+  execution_mode: break_glass_recovery
+  receipt_expectation: Governed capability receipt plus persisted record file are required for every apply run.
+  note: This surface exists only for historical mailbox recovery and must not become a normal agent mailbox mutation path.
+
+invariants:
+  - Materialized history goes into a recoverable non-Inbox team@ folder by default.
+  - Materialized history is for operator/context recovery and must not become queue truth automatically.
+  - A rerun must dedupe by preserved message identity and skip already materialized messages.
+  - When archived messages report attachments, the materialized copy must clearly warn that payload restoration is unavailable.
