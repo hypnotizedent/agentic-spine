@@ -48,153 +48,148 @@ done
 command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: missing dependency: python3" >&2; exit 1; }
+python3 -c 'import yaml' >/dev/null 2>&1 || { echo "ERROR: missing dependency: python3 yaml" >&2; exit 1; }
 [[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo "ERROR: --limit must be numeric" >&2; exit 2; }
 
 retry_enabled="$(yq -r '.retry_policy.enabled // true' "$QUEUE_CONTRACT" 2>/dev/null || echo true)"
 dead_letter_dir_raw="$(yq -r '.retry_policy.dead_letter_dir // "$SPINE_OUTBOX/alerts/email-intents-dead-letter"' "$QUEUE_CONTRACT" 2>/dev/null || echo '$SPINE_OUTBOX/alerts/email-intents-dead-letter')"
 DEAD_LETTER_DIR="${dead_letter_dir_raw//\$SPINE_OUTBOX/$SPINE_OUTBOX}"
 
-iso_to_epoch() {
-  local iso="$1"
-  python3 - "$iso" <<'PY'
-from datetime import datetime
-import sys
+queue_scan_json="$(python3 - "$INTENT_DIR" "$DEAD_LETTER_DIR" "$LIMIT" "$retry_enabled" <<'PY'
+from __future__ import annotations
 
-raw = (sys.argv[1] or "").strip()
-if not raw:
-    print("")
-    raise SystemExit(0)
-try:
-    ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-except Exception:
-    print("")
-    raise SystemExit(0)
-print(int(ts.timestamp()))
-PY
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+def parse_iso_epoch(raw: object) -> int | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+    except Exception:
+        return None
+
+
+intent_dir = Path(sys.argv[1])
+dead_letter_dir = Path(sys.argv[2])
+limit = int(sys.argv[3])
+retry_enabled = sys.argv[4].lower() == "true"
+now_epoch = int(datetime.now(timezone.utc).timestamp())
+
+data = {
+    "pending_count": 0,
+    "pending_ready_count": 0,
+    "retry_scheduled_count": 0,
+    "sent_count": 0,
+    "failed_count": 0,
+    "dead_letter_count": 0,
+    "oldest_pending_age_seconds": 0,
+    "newest_pending_age_seconds": 0,
+    "top_pending": [],
 }
 
-now_epoch="$(date +%s)"
+oldest_pending_epoch: int | None = None
+newest_pending_epoch: int | None = None
 
-pending_count=0
-pending_ready_count=0
-retry_scheduled_count=0
-sent_count=0
-failed_count=0
-dead_letter_count=0
-oldest_pending_epoch=""
-newest_pending_epoch=""
-pending_intents_json="[]"
+if intent_dir.is_dir():
+    for path in sorted(intent_dir.rglob("*.yaml")):
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            payload = {}
 
-if [[ -d "$INTENT_DIR" ]]; then
-  while IFS= read -r f; do
-    [[ -n "$f" ]] || continue
-    flush_status="$(yq -r '.flush_status // "pending"' "$f" 2>/dev/null || echo "pending")"
-    created_at="$(yq -r '.created_at // ""' "$f" 2>/dev/null || echo "")"
-    attempts="$(yq -r '.attempts // 0' "$f" 2>/dev/null || echo 0)"
-    next_retry_at="$(yq -r '.next_retry_at // ""' "$f" 2>/dev/null || echo "")"
-    last_error="$(yq -r '.last_error // ""' "$f" 2>/dev/null || echo "")"
+        flush_status = str(payload.get("flush_status") or "pending")
+        created_at = str(payload.get("created_at") or "")
+        next_retry_at = str(payload.get("next_retry_at") or "")
+        last_error = str(payload.get("last_error") or "")
+        intent_id = str(payload.get("intent_id") or "")
+        domain_id = str(payload.get("domain_id") or "")
+        severity = str(payload.get("severity") or "")
+        recipient = str(payload.get("suggested_recipient") or "")
 
-    if [[ ! "$attempts" =~ ^[0-9]+$ ]]; then
-      attempts=0
-    fi
+        attempts_raw = payload.get("attempts", 0)
+        try:
+            attempts = int(attempts_raw)
+        except Exception:
+            attempts = 0
 
-    ready_now="false"
-    case "$flush_status" in
-      sent)
-        sent_count=$((sent_count + 1))
-        continue
-        ;;
-      dead-letter)
-        dead_letter_count=$((dead_letter_count + 1))
-        continue
-        ;;
-      retry_scheduled)
-        retry_scheduled_count=$((retry_scheduled_count + 1))
-        if [[ "$retry_enabled" == "true" ]]; then
-          if [[ -z "$next_retry_at" ]]; then
-            ready_now="true"
-          else
-            next_retry_epoch="$(iso_to_epoch "$next_retry_at")"
-            if [[ -n "$next_retry_epoch" && "$next_retry_epoch" =~ ^[0-9]+$ && "$next_retry_epoch" -le "$now_epoch" ]]; then
-              ready_now="true"
-            fi
-          fi
-        else
-          ready_now="true"
-        fi
-        ;;
-      failed)
-        failed_count=$((failed_count + 1))
-        ready_now="true"
-        ;;
-      *)
-        ready_now="true"
-        ;;
-    esac
+        ready_now = True
 
-    pending_count=$((pending_count + 1))
-    if [[ "$ready_now" == "true" ]]; then
-      pending_ready_count=$((pending_ready_count + 1))
-    fi
+        if flush_status == "sent":
+            data["sent_count"] += 1
+            continue
 
-    if [[ -n "$created_at" ]]; then
-      file_epoch="$(iso_to_epoch "$created_at")"
-      if [[ -n "$file_epoch" && "$file_epoch" =~ ^[0-9]+$ ]]; then
-        if [[ -z "$oldest_pending_epoch" || "$file_epoch" -lt "$oldest_pending_epoch" ]]; then
-          oldest_pending_epoch="$file_epoch"
-        fi
-        if [[ -z "$newest_pending_epoch" || "$file_epoch" -gt "$newest_pending_epoch" ]]; then
-          newest_pending_epoch="$file_epoch"
-        fi
-      fi
-    fi
+        if flush_status == "dead-letter":
+            data["dead_letter_count"] += 1
+            continue
 
-    if [[ "$(echo "$pending_intents_json" | jq 'length')" -lt "$LIMIT" ]]; then
-      intent_id="$(yq -r '.intent_id // ""' "$f" 2>/dev/null || echo "")"
-      domain_id="$(yq -r '.domain_id // ""' "$f" 2>/dev/null || echo "")"
-      severity="$(yq -r '.severity // ""' "$f" 2>/dev/null || echo "")"
-      recipient="$(yq -r '.suggested_recipient // ""' "$f" 2>/dev/null || echo "")"
-      pending_intents_json="$(echo "$pending_intents_json" | jq -c \
-        --arg id "$intent_id" \
-        --arg domain "$domain_id" \
-        --arg sev "$severity" \
-        --arg created "$created_at" \
-        --arg recip "$recipient" \
-        --arg status "$flush_status" \
-        --argjson attempts "$attempts" \
-        --arg next_retry_at "$next_retry_at" \
-        --arg ready_now "$ready_now" \
-        --arg last_error "$last_error" \
-        '. + [{
-          intent_id:$id,
-          domain_id:$domain,
-          severity:$sev,
-          created_at:$created,
-          recipient:$recip,
-          flush_status:$status,
-          attempts:$attempts,
-          next_retry_at:$next_retry_at,
-          ready_now:($ready_now == "true"),
-          last_error:$last_error
-        }]')"
-    fi
-  done < <(find "$INTENT_DIR" -name '*.yaml' -type f 2>/dev/null | sort)
-fi
+        if flush_status == "retry_scheduled":
+            data["retry_scheduled_count"] += 1
+            if retry_enabled:
+                if next_retry_at:
+                    next_retry_epoch = parse_iso_epoch(next_retry_at)
+                    ready_now = next_retry_epoch is None or next_retry_epoch <= now_epoch
+                else:
+                    ready_now = True
+            else:
+                ready_now = True
+        elif flush_status == "failed":
+            data["failed_count"] += 1
 
-if [[ -d "$DEAD_LETTER_DIR" ]]; then
-  while IFS= read -r _; do
-    dead_letter_count=$((dead_letter_count + 1))
-  done < <(find "$DEAD_LETTER_DIR" -name '*.yaml' -type f 2>/dev/null | sort)
-fi
+        data["pending_count"] += 1
+        if ready_now:
+            data["pending_ready_count"] += 1
 
-oldest_pending_age=0
-newest_pending_age=0
-if [[ -n "$oldest_pending_epoch" && "$oldest_pending_epoch" =~ ^[0-9]+$ ]]; then
-  oldest_pending_age=$((now_epoch - oldest_pending_epoch))
-fi
-if [[ -n "$newest_pending_epoch" && "$newest_pending_epoch" =~ ^[0-9]+$ ]]; then
-  newest_pending_age=$((now_epoch - newest_pending_epoch))
-fi
+        created_epoch = parse_iso_epoch(created_at)
+        if created_epoch is not None:
+            if oldest_pending_epoch is None or created_epoch < oldest_pending_epoch:
+                oldest_pending_epoch = created_epoch
+            if newest_pending_epoch is None or created_epoch > newest_pending_epoch:
+                newest_pending_epoch = created_epoch
+
+        if len(data["top_pending"]) < limit:
+            data["top_pending"].append(
+                {
+                    "intent_id": intent_id,
+                    "domain_id": domain_id,
+                    "severity": severity,
+                    "created_at": created_at,
+                    "recipient": recipient,
+                    "flush_status": flush_status,
+                    "attempts": attempts,
+                    "next_retry_at": next_retry_at,
+                    "ready_now": ready_now,
+                    "last_error": last_error,
+                }
+            )
+
+if dead_letter_dir.is_dir():
+    data["dead_letter_count"] += sum(1 for _ in dead_letter_dir.rglob("*.yaml"))
+
+if oldest_pending_epoch is not None:
+    data["oldest_pending_age_seconds"] = max(0, now_epoch - oldest_pending_epoch)
+if newest_pending_epoch is not None:
+    data["newest_pending_age_seconds"] = max(0, now_epoch - newest_pending_epoch)
+
+print(json.dumps(data, separators=(",", ":")))
+PY
+)"
+
+pending_count="$(jq -r '.pending_count' <<<"$queue_scan_json")"
+pending_ready_count="$(jq -r '.pending_ready_count' <<<"$queue_scan_json")"
+retry_scheduled_count="$(jq -r '.retry_scheduled_count' <<<"$queue_scan_json")"
+sent_count="$(jq -r '.sent_count' <<<"$queue_scan_json")"
+failed_count="$(jq -r '.failed_count' <<<"$queue_scan_json")"
+dead_letter_count="$(jq -r '.dead_letter_count' <<<"$queue_scan_json")"
+oldest_pending_age="$(jq -r '.oldest_pending_age_seconds' <<<"$queue_scan_json")"
+newest_pending_age="$(jq -r '.newest_pending_age_seconds' <<<"$queue_scan_json")"
+pending_intents_json="$(jq -c '.top_pending' <<<"$queue_scan_json")"
 
 if [[ "$JSON" -eq 1 ]]; then
   jq -n \
