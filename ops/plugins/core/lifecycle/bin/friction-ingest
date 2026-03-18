@@ -12,12 +12,35 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+import yaml
 
 ROOT = Path(__file__).resolve().parents[5]
-DEFAULT_QUEUE = ROOT / "mailroom/state/friction-queue.ndjson"
-DEFAULT_LOCK = ROOT / "mailroom/state/locks/friction-queue.lock"
 FRICTION_RECONCILE = ROOT / "ops/plugins/core/lifecycle/bin/friction-reconcile"
 VALID_SEVERITIES = {"low", "medium", "high", "critical"}
+
+
+def default_state_root() -> Path:
+    override = os.environ.get("SPINE_STATE", "").strip()
+    if override:
+        return Path(override).expanduser()
+    contract = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
+    if contract.exists():
+        try:
+            doc = yaml.safe_load(contract.read_text(encoding="utf-8")) or {}
+            runtime_root_raw = str(doc.get("runtime_root") or "").strip()
+            if runtime_root_raw:
+                runtime_root = Path(os.path.expanduser(runtime_root_raw))
+                if not runtime_root.is_absolute():
+                    runtime_root = (ROOT / runtime_root).resolve()
+                return runtime_root / "state"
+        except Exception:
+            pass
+    return (ROOT.parent / ".runtime/spine/state").resolve()
+
+
+DEFAULT_STATE_ROOT = default_state_root()
+DEFAULT_QUEUE = DEFAULT_STATE_ROOT / "friction-queue.ndjson"
+DEFAULT_LOCK = DEFAULT_STATE_ROOT / "locks/friction-queue.lock"
 
 
 def utc_now() -> datetime:

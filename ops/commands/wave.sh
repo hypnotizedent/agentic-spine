@@ -40,10 +40,10 @@ mkdir -p "$WAVES_DIR"
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 RUNTIME_ROLE_CONTROL_LOADED=0
-PATH_CLAIMS_FILE="$SPINE_REPO/mailroom/state/path.claims.yaml"
+PATH_CLAIMS_FILE="$SPINE_STATE/path.claims.yaml"
 PATH_CLAIMS_TTL_MINUTES="180"
 PATH_CLAIMS_NON_OVERLAP="true"
-TRAFFIC_INDEX_FILE="$SPINE_REPO/mailroom/state/traffic.index.yaml"
+TRAFFIC_INDEX_FILE="$SPINE_STATE/traffic.index.yaml"
 
 _repo_abs_path() {
   local p="${1:-}"

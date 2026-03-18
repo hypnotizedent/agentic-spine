@@ -5,6 +5,8 @@ set -euo pipefail
 # D386: backup-shopvm-restore-drill-freshness-lock
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
 BACKUP_SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
 CAPABILITIES="$ROOT/ops/capabilities.yaml"
 CAP_MAP="$ROOT/ops/bindings/capability_map.yaml"
@@ -53,10 +55,11 @@ schedule_capability="$(yq -r '.jobs[] | select(.id == "backup-shopvm-restore-dri
 schedule_glob="$(yq -r '.jobs[] | select(.id == "backup-shopvm-restore-drill-monthly") | .receipt_glob // ""' "$BACKUP_SCHEDULE")"
 [[ "$schedule_glob" == "$expected_receipt_glob" ]] || err "backup-shopvm-restore-drill-monthly receipt_glob mismatch"
 
-latest_receipt="$(python3 - "$ROOT" "$expected_receipt_glob" <<'PY'
+latest_receipt="$(python3 - "$SPINE_OUTBOX" "$expected_receipt_glob" <<'PY'
 import glob, os, sys
-root, pattern = sys.argv[1], sys.argv[2]
-matches = glob.glob(os.path.join(root, pattern))
+outbox_root, pattern = sys.argv[1], sys.argv[2]
+pattern = pattern.replace("mailroom/outbox", outbox_root, 1)
+matches = glob.glob(pattern)
 matches = [m for m in matches if os.path.isfile(m)]
 if not matches:
     sys.exit(1)

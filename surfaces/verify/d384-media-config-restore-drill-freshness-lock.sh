@@ -3,7 +3,9 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-RECEIPT_DIR="$ROOT/mailroom/outbox/reports/restore-drills"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
+RECEIPT_DIR="$SPINE_OUTBOX/reports/restore-drills"
 RECEIPT_PATTERN="media-config-restore-drill-*.yaml"
 MAX_AGE_DAYS=35
 

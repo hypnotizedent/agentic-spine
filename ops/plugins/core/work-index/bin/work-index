@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import os
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,24 @@ def read_frontmatter(path: Path) -> dict[str, Any]:
     except Exception:
         return {}
 
+
+def resolve_runtime_roots(root: Path) -> tuple[Path, Path]:
+    contract = load_yaml(root / "ops/bindings/mailroom.runtime.contract.yaml")
+    runtime_root_raw = str(contract.get("runtime_root") or "").strip() if isinstance(contract, dict) else ""
+    runtime_root_env = os.environ.get("SPINE_RUNTIME_ROOT", "").strip()
+    if runtime_root_env:
+        runtime_root_raw = runtime_root_env
+    if runtime_root_raw:
+        runtime_root = Path(os.path.expanduser(runtime_root_raw))
+        if not runtime_root.is_absolute():
+            runtime_root = (root / runtime_root).resolve()
+    else:
+        runtime_root = (root.parent / ".runtime/spine").resolve()
+
+    state_root = Path(os.environ.get("SPINE_STATE") or str(runtime_root / "state")).expanduser()
+    outbox_root = Path(os.environ.get("SPINE_OUTBOX") or str(runtime_root / "mailroom/outbox")).expanduser()
+    return state_root, outbox_root
+
     if not content.startswith("---\n"):
         return {}
 
@@ -85,7 +104,8 @@ def read_frontmatter(path: Path) -> dict[str, Any]:
 
 
 def parse_loops(root: Path) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    scopes_dir = root / "mailroom/state/loop-scopes"
+    state_root, _ = resolve_runtime_roots(root)
+    scopes_dir = state_root / "loop-scopes"
     items: list[dict[str, Any]] = []
     loop_domain_map: dict[str, str] = {}
 
@@ -177,7 +197,8 @@ def proposal_status(proposal_dir: Path, manifest_status: str) -> str:
 
 
 def parse_proposals(root: Path, loop_domain_map: dict[str, str]) -> list[dict[str, Any]]:
-    proposals_dir = root / "mailroom/outbox/proposals"
+    _, outbox_root = resolve_runtime_roots(root)
+    proposals_dir = outbox_root / "proposals"
     items: list[dict[str, Any]] = []
 
     if not proposals_dir.is_dir():

@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
 SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
 CAPABILITIES="$ROOT/ops/capabilities.yaml"
 CAP_MAP="$ROOT/ops/bindings/capability_map.yaml"
@@ -59,10 +61,11 @@ inventory_pihole_enabled="$(yq -r '.targets[] | select(.name == "home-lxc-105-pi
 inventory_ha_enabled="$(yq -r '.targets[] | select(.name == "home-vm-100-ha-primary") | .enabled // false' "$INVENTORY")"
 [[ "$inventory_ha_enabled" == "true" ]] || err "backup.inventory home-vm-100-ha-primary not enabled"
 
-latest_receipt="$(python3 - "$ROOT" "$expected_receipt_glob" <<'PY'
+latest_receipt="$(python3 - "$SPINE_OUTBOX" "$expected_receipt_glob" <<'PY'
 import glob, os, sys
-root, pattern = sys.argv[1], sys.argv[2]
-matches = glob.glob(os.path.join(root, pattern))
+outbox_root, pattern = sys.argv[1], sys.argv[2]
+pattern = pattern.replace("mailroom/outbox", outbox_root, 1)
+matches = glob.glob(pattern)
 matches = [m for m in matches if os.path.isfile(m)]
 if not matches:
     sys.exit(1)

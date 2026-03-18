@@ -3,12 +3,35 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import yaml
 
 ROOT = Path(__file__).resolve().parents[5]
-DEFAULT_QUEUE = ROOT / "mailroom/state/friction-queue.ndjson"
+
+
+def default_state_root() -> Path:
+    override = os.environ.get("SPINE_STATE", "").strip()
+    if override:
+        return Path(override).expanduser()
+    contract = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
+    if contract.exists():
+        try:
+            doc = yaml.safe_load(contract.read_text(encoding="utf-8")) or {}
+            runtime_root_raw = str(doc.get("runtime_root") or "").strip()
+            if runtime_root_raw:
+                runtime_root = Path(os.path.expanduser(runtime_root_raw))
+                if not runtime_root.is_absolute():
+                    runtime_root = (ROOT / runtime_root).resolve()
+                return runtime_root / "state"
+        except Exception:
+            pass
+    return (ROOT.parent / ".runtime/spine/state").resolve()
+
+
+DEFAULT_QUEUE = default_state_root() / "friction-queue.ndjson"
 
 
 def parse_utc(raw: str | None) -> datetime | None:

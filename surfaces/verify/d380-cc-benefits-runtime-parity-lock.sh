@@ -7,6 +7,7 @@ CONTRACT="$ROOT/ops/bindings/finance.cc-benefits.runtime.contract.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
 MAP="$ROOT/ops/bindings/capability_map.yaml"
 REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
+MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
 
 fail() {
   echo "D380 FAIL: $*" >&2
@@ -18,11 +19,14 @@ command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
 [[ -f "$CAPS" ]] || fail "missing capabilities registry"
 [[ -f "$MAP" ]] || fail "missing capability map"
 [[ -f "$REGISTRY" ]] || fail "missing launchd scheduler registry"
+[[ -f "$MANIFEST" ]] || fail "missing plugin manifest"
 
 yq e '.' "$CONTRACT" >/dev/null 2>&1 || fail "invalid YAML contract: $CONTRACT"
 
 plugin="$(yq e -r '.capabilities.plugin // ""' "$CONTRACT")"
 [[ "$plugin" == "observability" ]] || fail "contract capabilities.plugin must be observability"
+plugin_path="$(yq e -r ".plugins[] | select(.name == \"$plugin\") | .path // \"\"" "$MANIFEST" | head -n1)"
+[[ -n "$plugin_path" && "$plugin_path" != "null" ]] || fail "plugin path missing in MANIFEST for $plugin"
 
 required_caps=()
 while IFS= read -r cap; do
@@ -39,7 +43,7 @@ for cap in "${required_caps[@]}"; do
 
   [[ "$mapped_plugin" == "$plugin" ]] || fail "capability_map plugin mismatch for $cap (expected=$plugin actual=$mapped_plugin)"
   [[ "$mapped_script" == "$expected_script" ]] || fail "capability_map script mismatch for $cap (expected=$expected_script actual=$mapped_script)"
-  [[ -x "$ROOT/ops/plugins/$plugin/bin/$expected_script" ]] || fail "missing executable script: ops/plugins/$plugin/bin/$expected_script"
+  [[ -x "$ROOT/$plugin_path/bin/$expected_script" ]] || fail "missing executable script: ${plugin_path}/bin/$expected_script"
 done
 
 while IFS= read -r label; do

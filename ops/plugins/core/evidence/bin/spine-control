@@ -71,6 +71,17 @@ def load_yaml(path: Path, default: Any) -> Any:
     return default if loaded is None else loaded
 
 
+def render_path_for_payload(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        workspace_root = ROOT.parent
+        try:
+            return str(path.relative_to(workspace_root))
+        except ValueError:
+            return str(path)
+
+
 def resolve_runtime_paths() -> dict[str, Path]:
     contract = load_yaml(ROOT / "ops/bindings/mailroom.runtime.contract.yaml", {})
     runtime_active = bool(contract.get("active"))
@@ -121,7 +132,7 @@ def collect_open_loops() -> list[dict[str, Any]]:
         if m:
             open_ids.append(m.group(1))
 
-    loop_dir = ROOT / "mailroom/state/loop-scopes"
+    loop_dir = resolve_runtime_paths()["state"] / "loop-scopes"
     rows: list[dict[str, Any]] = []
     for loop_id in open_ids:
         path = loop_dir / f"{loop_id}.scope.md"
@@ -133,7 +144,7 @@ def collect_open_loops() -> list[dict[str, Any]]:
                 "owner": front.get("owner", ""),
                 "priority": front.get("priority", ""),
                 "objective": front.get("objective", ""),
-                "path": str(path.relative_to(ROOT)) if path.exists() else "",
+                "path": render_path_for_payload(path) if path.exists() else "",
             }
         )
     return rows

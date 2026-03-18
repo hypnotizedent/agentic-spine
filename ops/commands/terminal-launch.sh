@@ -28,8 +28,10 @@
 set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+source "$SPINE_REPO/ops/lib/spine-paths.sh"
+spine_paths_init
 LANE_PROFILES_YAML="$SPINE_REPO/ops/bindings/lane.profiles.yaml"
-SCOPES_DIR="$SPINE_REPO/mailroom/state/loop-scopes"
+SCOPES_DIR="$SPINE_STATE/loop-scopes"
 LAUNCHER_VIEW_YAML="$SPINE_REPO/ops/bindings/terminal.launcher.view.yaml"
 TERMINAL_ROLE_CONTRACT="$SPINE_REPO/ops/bindings/terminal.role.contract.yaml"
 ROLE_RUNTIME_CONTRACT="$SPINE_REPO/ops/bindings/role.runtime.control.contract.yaml"

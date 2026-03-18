@@ -57,6 +57,29 @@ if echo "$staged" | rg -q '^ops/bindings/.*\.ya?ml$'; then
   "$schema_audit" --mode staged
 fi
 
+# ─── Guard 5a: Repo-local mailroom runtime drift ──────────────────────────
+# mailroom runtime is externalized under .runtime/spine. Keep only stub/doc surfaces in repo.
+mailroom_drift="$(printf '%s\n' "$staged" | rg '^mailroom/' || true)"
+if [[ -n "${mailroom_drift:-}" ]]; then
+  disallowed_mailroom=()
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    case "$path" in
+      mailroom/.keep|mailroom/README.md|mailroom/templates|mailroom/templates/*) ;;
+      *) disallowed_mailroom+=("$path") ;;
+    esac
+  done <<<"$mailroom_drift"
+
+  if (( ${#disallowed_mailroom[@]} > 0 )); then
+    echo "BLOCKED: repo-local mailroom runtime artifacts are forbidden." >&2
+    printf '  - %s\n' "${disallowed_mailroom[@]}" >&2
+    echo "" >&2
+    echo "Remediation:" >&2
+    echo "  move runtime mailroom content under ~/.runtime/spine/mailroom via the path resolver" >&2
+    exit 1
+  fi
+fi
+
 # ─── Guard 5b: New shell scripts must use canonical path resolver ───────
 added_scripts="$(git diff --cached --name-only --diff-filter=A 2>/dev/null | rg '^(ops/plugins|ops/runtime)/.*\.sh$' || true)"
 if [[ -n "${added_scripts:-}" ]]; then

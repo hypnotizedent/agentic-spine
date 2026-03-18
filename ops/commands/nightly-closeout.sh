@@ -152,7 +152,7 @@ fi
 [[ "${#PROTECTED_RUNTIME_LANES[@]}" -gt 0 ]] || PROTECTED_RUNTIME_LANES=("ews-import" "md1400-rsync")
 
 OPEN_LOOP_IDS=()
-if [[ -d "$ROOT/mailroom/state/loop-scopes" ]]; then
+if [[ -d "$SPINE_STATE/loop-scopes" ]]; then
   while IFS= read -r scope_file; do
     [[ -f "$scope_file" ]] || continue
     loop_id="$(sed -nE 's/^loop_id:[[:space:]]*"?([^"]+)"?/\1/p' "$scope_file" | head -1)"
@@ -162,7 +162,7 @@ if [[ -d "$ROOT/mailroom/state/loop-scopes" ]]; then
     if [[ "$loop_status" != "closed" ]]; then
       OPEN_LOOP_IDS+=("$loop_id")
     fi
-  done < <(find "$ROOT/mailroom/state/loop-scopes" -maxdepth 1 -type f -name 'LOOP-*.scope.md' | sort)
+  done < <(find "$SPINE_STATE/loop-scopes" -maxdepth 1 -type f -name 'LOOP-*.scope.md' | sort)
 fi
 
 PROTECTED_TOKENS=()

@@ -13,7 +13,9 @@
 set -euo pipefail
 
 SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PROPOSALS_DIR="$SP/mailroom/outbox/proposals"
+source "$SP/ops/lib/spine-paths.sh"
+spine_paths_init
+PROPOSALS_DIR="$SPINE_OUTBOX/proposals"
 LIFECYCLE="$SP/ops/bindings/proposals.lifecycle.yaml"
 
 FAIL=0

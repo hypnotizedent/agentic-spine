@@ -12,8 +12,10 @@ set -euo pipefail
 #   - Scope-file direct count mismatching ops loops summary output
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
 LOOPS_SH="$ROOT/ops/commands/loops.sh"
-SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
+SCOPES_DIR="$SPINE_STATE/loop-scopes"
 
 fail() { echo "D34 FAIL: $*" >&2; exit 1; }
 
