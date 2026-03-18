@@ -1,0 +1,93 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-17
+scope: mint-customer-inbox-machine
+version: "1.0"
+updated_at: "2026-03-17"
+capability: mint.customer.inbox.machine
+
+surface:
+  description: Durable Mint inbox-item state machine for the canonical team@ customer-service lane.
+  canonical_mailbox: team@mintprints.com
+  queue_capability: mint.customer.inbox.work_items
+  open_capability: mint.customer.inbox.item.get
+  transition_capability: mint.customer.inbox.transition
+  promote_capability: mint.customer.inbox.promote_to_team
+  completion_capability: mint.customer.inbox.complete
+
+source_mailboxes:
+  canonical_team_mailbox: team@mintprints.com
+  promote_allowed_source_mailboxes:
+    - ronny@mintprints.com
+    - info@mintprints.com
+  promote_source_park_folder: Promoted to Team
+
+source_modes:
+  team_direct:
+    description: Real customer/business email that already landed in team@.
+  promoted_forward:
+    description: Governed promote-to-team copy from ronny@/info@ into team@ for agent handling without repointing or mutating historical mailbox identity.
+
+reply_anchor_modes:
+  reply_chain:
+    description: Draft from the real team@ reply chain.
+  fresh_outbound:
+    description: Draft a fresh team@ outbound because the source customer thread lives outside team@.
+
+states:
+  queued:
+    description: Primary customer-actionable item waiting in the canonical team queue.
+  claimed:
+    description: Actively claimed by one Morpheus session.
+  drafted:
+    description: Governed draft created; awaiting operator review/send decision.
+  waiting_on_customer:
+    description: Waiting for missing customer information before additional truth mutation.
+  unsupported_scope:
+    description: Real customer ask, but outside Mint's supported apparel lane.
+  vendor_revision:
+    description: Vendor/internal revision traffic; not customer-lane work.
+  supplier_marketing:
+    description: Recoverable supplier/promotional traffic hidden from the primary queue.
+  risky_junk:
+    description: Junk/suspicious traffic hidden from the primary queue.
+  closed:
+    description: Queue item intentionally closed.
+
+state_mapping:
+  disposition_defaults:
+    customer_actionable: queued
+    waiting_on_customer: waiting_on_customer
+    unsupported_scope: unsupported_scope
+    vendor_revision: vendor_revision
+    supplier_marketing: supplier_marketing
+    risky_junk: risky_junk
+  preserve_on_sync:
+    - claimed
+    - drafted
+    - closed
+  allowed_manual_transitions:
+    - queued
+    - claimed
+    - drafted
+    - waiting_on_customer
+    - unsupported_scope
+    - vendor_revision
+    - supplier_marketing
+    - risky_junk
+    - closed
+
+completion:
+  review_action: review
+  send_action: send
+  park_action: park
+  send_terminal_state: closed
+  park_terminal_state: closed
+  clear_claim_on_terminal_actions: true
+
+promote_comment:
+  header: MINT TEAM PROMOTE
+  footer: END MINT TEAM PROMOTE
+  search_key_prefix: MIP-
+  note: Promote into team@ so the customer lane has one governed queue object and Ronny can park the original source copy.

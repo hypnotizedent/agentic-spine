@@ -1,0 +1,53 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-17
+scope: mint-customer-inbox-history-restore
+version: "1.0"
+updated_at: "2026-03-17"
+capability: mint.customer.inbox.history.restore
+
+surface:
+  description: Restore archived legacy Mint customer thread history into the live team@ Inbox so Outlook can rebuild the native conversation scaffold.
+  canonical_mailbox: team@mintprints.com
+  archive_search_script: ./ops/plugins/domains/communications/bin/communications-mail-archiver-search
+  default_top: 25
+  destination_folder: Inbox
+  sort_order: oldest_first
+
+restore:
+  destination_folder_kind: inbox
+  preserve_subject: true
+  preserve_headers:
+    - Message-ID
+    - Date
+    - From
+    - To
+    - Cc
+    - In-Reply-To
+    - References
+    - Thread-Topic
+    - Thread-Index
+  mark_read: true
+  queue_shield: true
+  queue_shield_index: $SPINE_STATE/mint/customer-history-restores/index.ndjson
+  attachment_restore_mode: metadata_only
+  attachment_notice: |
+    Attachment payloads are not retained in the current mail-archiver model.
+    This restored message rebuilds the thread body and headers only.
+
+runtime:
+  records_root: $SPINE_STATE/mint/customer-history-restores/records
+  index_file: $SPINE_STATE/mint/customer-history-restores/index.ndjson
+  lock_file: $SPINE_STATE/locks/mint-customer-history-restores.lock
+
+governance:
+  execution_mode: break_glass_recovery
+  receipt_expectation: Governed capability receipt plus persisted record file are required for every apply run.
+  note: This surface exists only for historical mailbox recovery and must not become a normal agent mailbox mutation path.
+
+invariants:
+  - Restored legacy history must preserve thread headers when the archive provides them.
+  - Restored legacy history goes into team@ Inbox only when explicitly requested.
+  - Restored legacy history must be shielded from the Morpheus primary queue by runtime index.
+  - Restore reruns must dedupe against live Inbox items, not only local runtime memory.

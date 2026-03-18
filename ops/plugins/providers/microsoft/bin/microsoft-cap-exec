@@ -9,6 +9,8 @@ WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
 SECRETS_EXEC="$SPINE_CODE/ops/plugins/infra/secrets/bin/secrets-exec"
 TOKEN_EXEC="$SPINE_CODE/ops/plugins/providers/microsoft/bin/microsoft-token-exec"
 TOOLS_PY="${WORKBENCH_ROOT}/agents/microsoft/tools/microsoft_tools.py"
+MAILBOX_CONTRACT="${SPINE_CODE}/ops/bindings/mint.customer.mailbox.standard.contract.yaml"
+MAILBOX_RECEIPT_ROOT="${MAILBOX_RECEIPT_ROOT:-${HOME}/code/.runtime/spine/mailroom/outbox/reports/microsoft-mailbox-op-receipts}"
 
 usage() {
   cat <<'EOF'
@@ -17,9 +19,112 @@ Usage:
 
 Operations:
   mail_list_all | mail_export_mime
-  mail_search | mail_get | mail_send | draft_create | draft_update
+  mail_folders | mail_search | mail_folder_messages | mail_folder_ensure | mail_get | mail_attachments_list | mail_move | mail_forward | mail_send | draft_create | reply_draft | draft_send | draft_update | attachment_add | attachment_download
   calendar_list | calendar_get | calendar_create | calendar_update | calendar_rsvp
 EOF
+}
+
+is_internal_mint_email() {
+  local email="${1,,}"
+  [[ "$email" == *@mintprints.com ]]
+}
+
+extract_option_values() {
+  local option="$1"
+  shift
+  local values=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      "$option")
+        [[ $# -ge 2 ]] || break
+        values+=("$2")
+        shift 2
+        ;;
+      "${option}="*)
+        values+=("${1#*=}")
+        shift
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  printf '%s\n' "${values[@]}"
+}
+
+normalize_mailbox() {
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
+}
+
+load_contract_mailboxes() {
+  local expr="$1"
+  if ! command -v yq >/dev/null 2>&1 || [[ ! -f "$MAILBOX_CONTRACT" ]]; then
+    return 0
+  fi
+  yq e -r "${expr}[]? // \"\"" "$MAILBOX_CONTRACT" 2>/dev/null | awk 'NF {print tolower($0)}'
+}
+
+mailbox_in_list() {
+  local needle
+  needle="$(normalize_mailbox "${1:-}")"
+  shift || true
+  local item
+  for item in "$@"; do
+    [[ "$needle" == "$(normalize_mailbox "$item")" ]] && return 0
+  done
+  return 1
+}
+
+is_mutating_op() {
+  case "${1:-}" in
+    mail_move|mail_folder_ensure|draft_create|reply_draft|draft_send|draft_update|attachment_add|mail_send|mail_forward|calendar_create|calendar_update|calendar_rsvp)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+safe_receipt_token() {
+  printf '%s' "${1:-unknown}" | tr -c '[:alnum:].@_-' '_'
+}
+
+write_mailbox_receipt() {
+  local receipt_path="$1"
+  local status="$2"
+  local exit_code="$3"
+  local op_name="$4"
+  local target_mailbox="$5"
+  local mutating="$6"
+  local blocked_reason="$7"
+  local message_id="$8"
+  local destination_folder="$9"
+  python3 - "$receipt_path" "$status" "$exit_code" "$op_name" "$target_mailbox" "$mutating" "$blocked_reason" "$message_id" "$destination_folder" "$MAILBOX_CONTRACT" "$PWD" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+receipt_path = Path(sys.argv[1])
+receipt = {
+    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    "status": sys.argv[2],
+    "exit_code": int(sys.argv[3]),
+    "operation": sys.argv[4],
+    "target_mailbox": sys.argv[5],
+    "mutating": sys.argv[6].lower() == "true",
+    "blocked_reason": sys.argv[7],
+    "message_id": sys.argv[8],
+    "destination_folder": sys.argv[9],
+    "contract_path": sys.argv[10],
+    "cwd": sys.argv[11],
+}
+receipt_path.parent.mkdir(parents=True, exist_ok=True)
+receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+PY
 }
 
 if [[ $# -lt 1 ]]; then
@@ -30,8 +135,39 @@ fi
 op="$1"
 shift
 
+target_mailbox="$(extract_option_values --mailbox "$@" | head -n1 | tr -d '\n')"
+if [[ -z "$target_mailbox" ]]; then
+  target_mailbox="${MICROSOFT_USER:-Ronny@mintprints.com}"
+fi
+target_mailbox="$(normalize_mailbox "$target_mailbox")"
+
+mutating="false"
+if is_mutating_op "$op"; then
+  mutating="true"
+fi
+
+mapfile -t protected_historical_mailboxes < <(load_contract_mailboxes '.authority.protected_historical_mailboxes')
+mapfile -t allowed_mutation_mailboxes < <(load_contract_mailboxes '.authority.agent_mutation_mailboxes')
+blocked_reason=""
+
+if [[ "$mutating" == "true" ]]; then
+  if mailbox_in_list "$target_mailbox" "${protected_historical_mailboxes[@]}"; then
+    blocked_reason="protected historical mailbox is read-only for agent mutations"
+  elif [[ "$target_mailbox" == *@mintprints.com || "$target_mailbox" == *@mintprints.onmicrosoft.com ]]; then
+    if [[ "${#allowed_mutation_mailboxes[@]}" -gt 0 ]] && ! mailbox_in_list "$target_mailbox" "${allowed_mutation_mailboxes[@]}"; then
+      blocked_reason="target mailbox is not in the governed agent mutation allowlist"
+    fi
+  fi
+fi
+
+message_id="$(extract_option_values --message-id "$@" | head -n1 | tr -d '\n')"
+destination_folder="$(extract_option_values --destination-folder "$@" | head -n1 | tr -d '\n')"
+receipt_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+receipt_path="${MAILBOX_RECEIPT_ROOT}/${receipt_stamp}__${op}__$(safe_receipt_token "$target_mailbox")__$$.json"
+write_mailbox_receipt "$receipt_path" "started" 0 "$op" "$target_mailbox" "$mutating" "$blocked_reason" "$message_id" "$destination_folder"
+
 case "$op" in
-  mail_list_all|mail_export_mime|mail_search|mail_get|mail_send|draft_create|draft_update|calendar_list|calendar_get|calendar_create|calendar_update|calendar_rsvp)
+  mail_folders|mail_list_all|mail_export_mime|mail_search|mail_folder_messages|mail_folder_ensure|mail_get|mail_attachments_list|mail_move|mail_forward|mail_send|draft_create|reply_draft|draft_send|draft_update|attachment_add|attachment_download|calendar_list|calendar_get|calendar_create|calendar_update|calendar_rsvp)
     ;;
   *)
     echo "FAIL: unknown microsoft operation: $op" >&2
@@ -40,8 +176,40 @@ case "$op" in
     ;;
 esac
 
+if [[ "$op" =~ ^(mail_send|draft_send|calendar_create|calendar_update|calendar_rsvp)$ ]]; then
+  write_mailbox_receipt "$receipt_path" "blocked" 2 "$op" "$target_mailbox" "$mutating" "agent outbound mailbox/calendar mutations are disabled by policy" "$message_id" "$destination_folder"
+  echo "BLOCKED: agent outbound mailbox/calendar mutations are disabled by policy. Drafts only." >&2
+  echo "Hint: use draft_create / reply_draft / draft_update instead of send or invite operations." >&2
+  exit 2
+fi
+
+if [[ "$op" == "mail_forward" ]]; then
+  write_mailbox_receipt "$receipt_path" "blocked" 2 "$op" "$target_mailbox" "$mutating" "agent mailbox forwarding is disabled by policy" "$message_id" "$destination_folder"
+  echo "BLOCKED: agent mailbox forwarding is disabled by policy. Drafts only." >&2
+  echo "Hint: use draft_create / reply_draft / draft_update instead of relay operations." >&2
+  exit 2
+fi
+
+if [[ -n "$blocked_reason" ]]; then
+  write_mailbox_receipt "$receipt_path" "blocked" 2 "$op" "$target_mailbox" "$mutating" "$blocked_reason" "$message_id" "$destination_folder"
+  echo "BLOCKED: $blocked_reason" >&2
+  echo "Contract: $MAILBOX_CONTRACT" >&2
+  exit 2
+fi
+
 [[ -x "$SECRETS_EXEC" ]] || { echo "FAIL: missing executable $SECRETS_EXEC" >&2; exit 1; }
 [[ -x "$TOKEN_EXEC" ]] || { echo "FAIL: missing executable $TOKEN_EXEC" >&2; exit 1; }
 [[ -f "$TOOLS_PY" ]] || { echo "FAIL: missing tool script $TOOLS_PY" >&2; exit 1; }
 
-exec "$SECRETS_EXEC" -- "$TOKEN_EXEC" python3 "$TOOLS_PY" "$op" "$@"
+set +e
+"$SECRETS_EXEC" -- "$TOKEN_EXEC" python3 "$TOOLS_PY" "$op" "$@"
+rc=$?
+set -e
+
+if [[ "$rc" -eq 0 ]]; then
+  write_mailbox_receipt "$receipt_path" "success" "$rc" "$op" "$target_mailbox" "$mutating" "" "$message_id" "$destination_folder"
+else
+  write_mailbox_receipt "$receipt_path" "failed" "$rc" "$op" "$target_mailbox" "$mutating" "" "$message_id" "$destination_folder"
+fi
+
+exit "$rc"
