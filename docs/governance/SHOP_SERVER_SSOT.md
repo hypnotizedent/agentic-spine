@@ -45,7 +45,7 @@ Authority boundary:
 |-------|-------------------|---------------|
 | Substrate | `ops/bindings/hardware.inventory.yaml` | `pve` is the only shop hypervisor. |
 | Storage | `ops/bindings/shop.storage.map.yaml` + `ops/bindings/shop.media.pressure.authority.yaml` + `ops/bindings/hardware.inventory.yaml` + `ops/bindings/backup.inventory.yaml` | `tank` = hot runtime/app state, `media` = media payload only or phased-out pressure lane, `md1400` = cold backup/archive/staging only. Media pressure truth comes from the client-visible `/media` export, not the host-local child dataset mount view. |
-| Runtime | `ops/bindings/vm.lifecycle.yaml` + `docs/governance/STACK_REGISTRY.yaml` | Every kept workload is a named VM/LXC or a container stack inside one; tombstones are not runtime. |
+| Runtime | `ops/bindings/vm.lifecycle.yaml` + `docs/governance/STACK_REGISTRY.yaml` + `docs/governance/DOCKER_RUNTIME_BORINGNESS_CONTRACT.md` | Every kept workload is a named VM/LXC or a container stack inside one, and kept Docker stacks follow one boring compose/env/path contract. Tombstones are not runtime. |
 | Network | `docs/governance/DEVICE_IDENTITY_SSOT.md` + `ops/bindings/ssh.targets.yaml` | One LAN identity truth and one Tailscale truth per kept node. |
 | Ingress | `ops/bindings/shop.ingress.map.yaml` + `ops/bindings/domain.routing.registry.yaml` | Public services are either intentionally published via Cloudflare or explicitly private-only, and compatibility/ghost routes are explicit. |
 | Backup | `ops/bindings/backup.inventory.yaml` + `docs/governance/domains/backup.md` | One backup matrix per runtime unit: VM artifact, app/state supplement, offsite exception, and restore class. |

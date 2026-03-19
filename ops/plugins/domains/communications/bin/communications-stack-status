@@ -44,6 +44,7 @@ PY
 
 need yq
 need jq
+need curl
 [[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
 [[ -f "$PROVIDERS_CONTRACT" ]] || fail "missing providers contract: $PROVIDERS_CONTRACT"
 [[ -f "$POLICY_CONTRACT" ]] || fail "missing policy contract: $POLICY_CONTRACT"
@@ -53,6 +54,8 @@ need jq
 [[ -f "$POLICY" ]] || fail "missing placement policy: $POLICY"
 [[ -f "$CAPS" ]] || fail "missing capabilities registry: $CAPS"
 [[ -x "$MICROSOFT_EXEC" ]] || fail "missing Microsoft executor: $MICROSOFT_EXEC"
+
+source "$ROOT/ops/lib/ssh-resolve.sh"
 
 vm_host="$(yq e -r '.pilot.vm_target.hostname // ""' "$CONTRACT")"
 vm_id="$(yq e -r '.pilot.vm_target.vm_id // ""' "$CONTRACT")"
@@ -118,6 +121,33 @@ if [[ "$mode" != "simulation-only" ]]; then
   fi
 fi
 
+runtime_probe_status="ok"
+runtime_probe_host=""
+runtime_probe_results=()
+if runtime_resolve="$(ssh_resolve_host_with_fallback "$vm_host" 2 2>/dev/null)"; then
+  runtime_probe_host="$(awk '{print $1}' <<<"$runtime_resolve")"
+fi
+if [[ -z "$runtime_probe_host" ]]; then
+  runtime_probe_status="host_unresolved"
+  status="FAIL"
+else
+  probe_runtime_http() {
+    local probe_name="$1"
+    local probe_url="$2"
+    local expected_http="$3"
+    local http_code
+    http_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 --max-redirs 0 "$probe_url" 2>/dev/null || echo 000)"
+    runtime_probe_results+=("${probe_name}:${http_code}/${expected_http}")
+    if [[ "$http_code" != "$expected_http" ]]; then
+      runtime_probe_status="failed"
+      status="FAIL"
+    fi
+  }
+
+  probe_runtime_http "mail-archiver" "http://${runtime_probe_host}:5100/" "302"
+  probe_runtime_http "stalwart-admin" "http://${runtime_probe_host}:8080/" "200"
+fi
+
 echo "communications.stack.status"
 echo "provider: $provider"
 echo "stage: $stage"
@@ -135,6 +165,11 @@ echo "placement_policy_host_registered: $([[ -n "$policy_host_site" ]] && echo y
 echo "placement_policy_target_requirement: $([[ "$policy_req_host" == "$proxmox" ]] && echo yes || echo no)"
 echo "live_probe_status: $live_probe_status"
 echo "live_probe_count: $live_probe_count"
+echo "runtime_probe_host: ${runtime_probe_host:-unresolved}"
+echo "runtime_probe_status: $runtime_probe_status"
+for result in "${runtime_probe_results[@]}"; do
+  echo "runtime_probe: $result"
+done
 echo "status: $status"
 
 [[ "$status" == "OK" ]] || exit 1
