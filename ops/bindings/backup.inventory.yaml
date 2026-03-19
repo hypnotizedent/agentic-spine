@@ -3,7 +3,7 @@
 # NOTE: enabled=false by default; flip true intentionally per target.
 # Classifications: critical (26h), important (48h), rebuildable (168h)
 # Status: authoritative
-# Last verified: 2026-03-18
+# Last verified: 2026-03-19
 # yq selectors for gate authoring:
 #   .targets[]              → array of target objects (NOT map-keyed)
 #   .targets[].name         → target identifier (.name NOT .id)
@@ -72,7 +72,13 @@ model:
       base_path: /tank/backups/vzdump/dump
       max_total_gb: 4000
       max_file_count: 120
-      description: "Local pve vzdump generation lane. Canonical cold copies are promoted from here into /md1400/backup-cold/vzdump/pve."
+      description: "Local pve vzdump generation lane only. This is the shop generator surface, not the canonical cold recovery plane. Canonical cold copies are promoted from here into /md1400/backup-cold/vzdump/pve."
+    pve-vzdump-cold-canonical:
+      host: pve
+      base_path: /md1400/backup-cold/vzdump/pve
+      max_total_gb: 6000
+      max_file_count: 200
+      description: "Canonical cold recovery lane for shop VM/LXC artifacts on md1400. This is the authoritative restore surface for shop hypervisor backups."
     r730xd-finance-backups:
       host: pve
       base_path: /md1400/backup-cold/apps/finance
@@ -114,7 +120,13 @@ model:
       base_path: /volume1/backups/proxmox_backups/dump
       max_total_gb: 1600
       max_file_count: 400
-      description: "Canonical home-local backup lane on Synology for proxmox-home artifacts (Home Assistant VM 100, media-home VM 106, and home Pi-hole LXC 105)."
+      description: "Canonical home-local backup lane on Synology for proxmox-home artifacts (Home Assistant VM 100, media-home VM 106, and home Pi-hole LXC 105). Only /volume1/backups/proxmox_backups/dump is canonical; legacy residue was tombstoned out of the active root on 2026-03-19."
+    nas-legacy-tombstones:
+      host: nas
+      base_path: /volume1/backups/_legacy_tombstones
+      max_total_gb: 2000
+      max_file_count: 20000
+      description: "Explicit tombstone subtree for retired Synology backup lanes. This is not a canonical backup authority and exists only to quarantine legacy backup forests until a later delete/review wave."
     # nas-app-backups REMOVED 2026-03-08: Fully deprecated, migration complete to 730XD canonical plane.
     media-config-backups:
       host_group:
@@ -882,53 +894,62 @@ targets:
     classification: critical
     description: "Freshness manifest for archive-smb snapshot protection of md1400 live-share datasets (ronny-projects, mint-legacy)."
   # =============================================================================
-  # LEGACY NAS OFFSITE TARGETS - disabled after md1400 canonicalization
+  # LEGACY NAS OFFSITE TARGETS - tombstoned after md1400 canonicalization
+  # These remain inventoried only so operators can find the retired Synology residue
+  # under /volume1/backups/_legacy_tombstones/retired-20260319-shop-proxmox/.
   # =============================================================================
   - name: vm-offsite-critical
     enabled: false
     kind: file_glob
     host: nas
-    base_path: "/volume1/backups/proxmox/vzdump/critical"
+    base_path: "/volume1/backups/_legacy_tombstones/retired-20260319-shop-proxmox/vzdump/critical"
     glob: "vzdump-qemu-*.vma.zst"
     stale_after_hours: 48
     classification: important
-    description: "Disabled 2026-03-08: md1400 canonical cold plane supersedes NAS vm-offsite-critical."
+    description: "Disabled 2026-03-08 and tombstoned 2026-03-19: md1400 canonical cold plane supersedes the historical NAS vm-offsite-critical lane."
   - name: vm-211-finance-stack-offsite
     enabled: false
     kind: file_glob
     host: nas
-    base_path: "/volume1/backups/proxmox/vzdump/critical"
+    base_path: "/volume1/backups/_legacy_tombstones/retired-20260319-shop-proxmox/vzdump/critical"
     glob: "vzdump-qemu-211-*.vma.zst"
     stale_after_hours: 48
     classification: critical
-    description: "Disabled 2026-03-08: finance-stack canonical cold copy now lands on md1400."
+    description: "Disabled 2026-03-08 and tombstoned 2026-03-19: finance-stack canonical cold copy now lands on md1400."
   - name: vm-213-mint-apps-offsite
     enabled: false
     kind: file_glob
     host: nas
-    base_path: "/volume1/backups/proxmox/vzdump/critical"
+    base_path: "/volume1/backups/_legacy_tombstones/retired-20260319-shop-proxmox/vzdump/critical"
     glob: "vzdump-qemu-213-*.vma.zst"
     stale_after_hours: 48
     classification: important
-    description: "Disabled 2026-03-08: mint-apps canonical cold copy now lands on md1400."
+    description: "Disabled 2026-03-08 and tombstoned 2026-03-19: mint-apps canonical cold copy now lands on md1400."
   - name: vm-212-mint-data-offsite
     enabled: false
     kind: file_glob
     host: nas
-    base_path: "/volume1/backups/proxmox/vzdump/critical"
+    base_path: "/volume1/backups/_legacy_tombstones/retired-20260319-shop-proxmox/vzdump/critical"
     glob: "vzdump-qemu-212-*.vma.zst"
     stale_after_hours: 72
     classification: critical
-    description: "Disabled: mint-data VM 212 vzdump artifacts are 100GB-215GB and do not fit the nightly shop->NAS window. Requires app-level offsite lane."
+    description: "Disabled and tombstoned 2026-03-19: mint-data VM 212 vzdump artifacts are too large for the former nightly shop->NAS window. Canonical recovery stays on md1400 and app-level lanes cover off-host state."
   - name: vm-214-communications-stack-offsite
     enabled: false
     kind: file_glob
     host: nas
-    base_path: "/volume1/backups/proxmox/vzdump/critical"
+    base_path: "/volume1/backups/_legacy_tombstones/retired-20260319-shop-proxmox/vzdump/critical"
     glob: "vzdump-qemu-214-*.vma.zst"
     stale_after_hours: 72
     classification: important
-    description: "Disabled: communications-stack VM 214 vzdump artifacts approach 1TB and are not feasible for nightly offsite sync."
+    description: "Disabled and tombstoned 2026-03-19: communications-stack VM 214 vzdump artifacts are not feasible for the former nightly shop->NAS exact-offsite lane."
+  # Additional Synology legacy backup roots moved into the same tombstone subtree
+  # on 2026-03-19 and intentionally left disabled/non-canonical:
+  # - /volume1/backups/_legacy_tombstones/retired-20260319-mint-os-standalone
+  # - /volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue
+  # - /volume1/backups/_legacy_tombstones/retired-20260319-home-assistant-standalone
+  # - /volume1/backups/_legacy_tombstones/retired-20260319-finance-standalone
+  # - /volume1/backups/_legacy_tombstones/retired-20260319-media-config-standalone
   # =============================================================================
   # HOME VM/LXC BACKUPS - SYNOLGY CANONICAL EXCEPTIONS
   # Home-local backups remain canonical on Synology for fault-domain separation

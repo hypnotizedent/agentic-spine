@@ -1,6 +1,6 @@
 ---
 version: "1.0"
-last_verified: "2026-03-18"
+last_verified: "2026-03-19"
 owner: "@ronny"
 status: authoritative
 scope: dream-system-projection-first-execution-backlog
@@ -15,10 +15,10 @@ scope: dream-system-projection-first-execution-backlog
 # Type values: generator | gate | scaffold | migration | cleanup
 
 metadata:
-  total_backlog_items: 22
+  total_backlog_items: 24
   completed_milestones: 3
   in_progress_backlog_items: 2
-  not_started_backlog_items: 19
+  not_started_backlog_items: 21
   blocked_backlog_items: 1
 
 policy:
@@ -744,6 +744,57 @@ backlog:
     effort_estimate_hours: 4
     dependencies:
       - DREAM-021
+
+  - id: DREAM-023
+    title: "Finish backup authority cleanup for deferred ambiguous legacy lanes"
+    concern_family: machine_boringness_contract_surfaces
+    authority_file: ops/bindings/backup.inventory.yaml
+    projection_files:
+      - ops/bindings/synology918.storage.manifest.yaml
+    current_state: canonical_backup_authority_is_now_explicit_but_infrastructure_devices_and_backup_holds_still_need_lifecycle_decisions
+    target_state: every_remaining_backup_lane_is_either_canonical_generator_only_or_tombstoned
+    blast_radius: 4
+    priority: 23
+    status: not_started
+    type: cleanup
+    generator_exists: true
+    gate_exists: false
+    recommended_next_action: |
+      1. Inspect /volume1/backups/infrastructure and /volume1/backups/devices for active ownership, freshness, and restore value.
+      2. Inspect /md1400/archive/backup-holds and decide whether it is a true archive hold or an ungoverned duplicate lane.
+      3. Keep canonical lanes unchanged while ambiguous residue is classified.
+      4. Tombstone or reclassify only after each lane has an owner, retention posture, and explicit restore story.
+    notes: |
+      Wave 1 made shop cold, shop generator-only, home canonical, and Synology legacy tombstones legible.
+      The remaining problem is ambiguous backup residue, not duplicate active authority.
+    effort_estimate_hours: 2
+    dependencies: []
+
+  - id: DREAM-024
+    title: "Remove empty Synology intent shares and duplicate share meanings"
+    concern_family: machine_boringness_contract_surfaces
+    authority_file: docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+    projection_files:
+      - ops/bindings/synology918.storage.manifest.yaml
+    current_state: multiple_empty_or_near_empty_home_media_share_names_create_active_looking_ambiguity
+    target_state: one_share_per_meaning_with_no_empty_active-looking_synonyms
+    blast_radius: 4
+    priority: 24
+    status: not_started
+    type: cleanup
+    generator_exists: true
+    gate_exists: false
+    recommended_next_action: |
+      1. Pick one canonical home library/share root per meaning before moving any payload.
+      2. Tombstone empty or duplicate-intent shares rather than leaving them as future placeholders.
+      3. Update Synology storage manifest and any client-facing path docs to match the surviving roots.
+      4. Leave surveillance and /tank/docker untouched in this wave so the share cleanup stays low-risk.
+    notes: |
+      The filesystem census showed empty active-looking shares are a major source of operator ambiguity.
+      This is the planned wave-2 cleanup after backup authority consolidation.
+    effort_estimate_hours: 2
+    dependencies:
+      - DREAM-023
 
 migrations:
   - id: DREAM-CAP-MIGRATION

@@ -77,7 +77,7 @@ Primary does **not** mean offsite.
 
 A copy that is explicitly represented as a separate target outside the VM's primary failure domain.
 
-- For shop VMs, exact offsite usually means the NAS offsite lane under `/volume1/backups/proxmox/vzdump/...`.
+- For shop VMs, no active exact-offsite lane is currently declared as authoritative. Canonical cold recovery lives on `pve:/md1400/backup-cold/vzdump/pve`, and the former NAS exact-offsite residue is tombstoned under `/volume1/backups/_legacy_tombstones/retired-20260319-shop-proxmox/...`.
 - For home VMs, Synology is the current primary backup surface, not a true offsite DR copy for the home site.
 
 If no exact offsite target exists, the VM is not offsite-protected.

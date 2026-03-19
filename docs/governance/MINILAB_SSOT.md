@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-20
+last_verified: 2026-03-19
 verification_method: live-system-inspection
 scope: home-infrastructure
 github_issue: "#625"
@@ -16,7 +16,7 @@ parent_receipts:
 > Covers: Beelink (proxmox-home), Synology NAS, VMs/LXCs, and home network.
 > For device identity and Tailscale config, see [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md).
 >
-> **Last Verified:** February 20, 2026
+> **Last Verified:** March 19, 2026
 
 ---
 
@@ -301,9 +301,9 @@ nfs: synology-backups
 | Target | Path | Consumers | Status |
 |--------|------|-----------|--------|
 | Proxmox vzdump | `/volume1/backups/proxmox_backups` | proxmox-home vzdump | **Active** (2 jobs enabled, 1 disabled) |
-| Mint-OS PostgreSQL | `/volume1/backups/mint-os/postgres/` | docker-host | Unverified |
-| Mint-OS configs | `/volume1/backups/mint-os/configs/` | docker-host | Unverified |
-| Home Assistant | `/volume1/backups/homeassistant_backups/` | VM 100 | Unverified |
+| Legacy shop/offsite residue | `/volume1/backups/_legacy_tombstones/retired-20260319-shop-proxmox/` | historical shop exact-offsite copies | Tombstoned, non-canonical |
+| Legacy mint-os residue | `/volume1/backups/_legacy_tombstones/retired-20260319-mint-os-standalone/` and `/volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue/` | docker-host era | Tombstoned, non-canonical |
+| Legacy standalone app dumps | `/volume1/backups/_legacy_tombstones/retired-20260319-home-assistant-standalone/`, `/volume1/backups/_legacy_tombstones/retired-20260319-finance-standalone/`, `/volume1/backups/_legacy_tombstones/retired-20260319-media-config-standalone/` | historical one-off backup lanes | Tombstoned, non-canonical |
 
 ---
 

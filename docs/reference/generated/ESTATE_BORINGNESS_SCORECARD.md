@@ -8,7 +8,7 @@ source_binding: ops/bindings/estate.surface.register.yaml
 
 # Estate Boringness Scorecard
 
-- Generated: `2026-03-19T04:12:48Z`
+- Generated: `2026-03-19T09:26:02Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
 - Repo surfaces tracked: `2`
 - Ghosts: `10`
@@ -28,7 +28,7 @@ source_binding: ops/bindings/estate.surface.register.yaml
 | Environment | Boring Enough | Storage Story | Exact Blocker |
 | --- | --- | --- | --- |
 | shop | no | hot=tank, warm=media, cold=md1400 | media is at 99% usage and only has about 189G free.; Client-visible /media payload already accounts for about 15.9TiB of canonical movie/TV/music/archive content, so the remaining easy reclaim is mostly downloads.; media@forensic-20260226-2325 is still retained as a forensic hold and has grown to 278G, so the completed backup drain still does not immediately reclaim matching space. |
-| home | no | hot=proxmox-home local-lvm, warm_backup=synology /volume1/backups/proxmox_backups/dump, warm_data=synology /volume1, cold_offsite=none_declared | No declared second-environment cold/offsite restore plane exists for home personal data on Synology.; Home switch ports 3/4/6 still rely on inferred endpoint identity instead of traced physical truth.; Synology mint-os residue remains as non-canonical historical hold. |
+| home | no | hot=proxmox-home local-lvm, warm_backup=synology /volume1/backups/proxmox_backups/dump, warm_data=synology /volume1, cold_offsite=none_declared | No declared second-environment cold/offsite restore plane exists for home personal data on Synology.; Home switch ports 3/4/6 still rely on inferred endpoint identity instead of traced physical truth.; Legacy Synology backup lanes are now tombstoned, but infrastructure/devices plus ghost backup roots still need later-wave cleanup. |
 
 ## Ghosts
 
@@ -67,7 +67,7 @@ source_binding: ops/bindings/estate.surface.register.yaml
 | pricing.mintprints.co | shop | public_route | Legacy pricing alias retained during mintprints.com cutover. Canonical public URL is pricing.mintprints.com. |
 | shipping.mintprints.co | shop | public_route | Legacy shipping alias retained during mintprints.com cutover. Canonical public URL is shipping.mintprints.com. |
 | suppliers.mintprints.co | shop | public_route | Purpose-bound legacy hold. Keep suppliers.mintprints.co only for public lookup/MCP compatibility until the Pages/custom-domain migration to mintprints.com is complete. |
-| synology-mint-os-legacy-review | home | storage_residue | Legacy mint-os residue remains on Synology at /volume1/backups/proxmox_backups/mint-os. Reviewed and non-canonical. |
+| synology-mint-os-legacy-review | home | storage_residue | Legacy mint-os residue is tombstoned under /volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue. Reviewed and non-canonical. |
 | www.mintprints.co | shop | public_route | Legacy compatibility www. Not canonical for work surfaces; www.mintprints.com is the primary public host. |
 
 ## Tombstones
@@ -93,7 +93,8 @@ source_binding: ops/bindings/estate.surface.register.yaml
 | safe_to_delete | vm-200-disk-0 on pve local-lvm | done | Cold capsule path/size/SHA-256 and qemu config were captured before delete, then qm disk unlink removed scsi0 and the backing LV on 2026-03-12T04:30:02Z. |
 | safe_to_migrate | legacy media-stack tarballs from /media/backups to /md1400/media-cold/legacy-media-stack-backups | done | Canonical media config backups already live under /md1400/backup-cold/apps/media-config. The historical warm-lane tarballs are now fully parked on md1400 and no longer live on media. |
 | safe_to_delete | media@forensic-20260226-2325 | blocked | Snapshot still acts as a forensic restore hold for the copy-first utilization wave. Deleting it would change the restore story, not just free space. |
-| safe_to_delete | Synology mint-os legacy residue | candidate | Residue is reviewed and non-canonical, but it still functions as a historical hold and should be deleted only in a deliberate cleanup wave. |
+| safe_to_delete | Synology mint-os legacy residue | candidate | Residue is reviewed, non-canonical, and now tombstoned under /volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue. Delete only in a deliberate cleanup wave. |
+| safe_to_migrate | Synology stale backup lanes into /volume1/backups/_legacy_tombstones | done | Historical shop exact-offsite residue plus stale mint-os, home-assistant, finance, and media backup lanes were renamed into one explicit tombstone subtree on 2026-03-19 so they no longer look canonical. |
 | safe_to_migrate | mint-modules future, blocked, and deferred roots | ready | Spine lifecycle authority already declares these roots non-runtime; moving them behind explicit lifecycle boundaries will not change live runtime behavior. |
 | safe_to_migrate | ronny-products parked app contracts | done | app.contract runtime status now matches the execution board: parked products are no longer marked active. |
 | safe_to_change_drives | shop rack hot/warm/cold storage | blocked | VM200 hot LV is gone, but media remains at 99% usage, downloads still contribute about 2.61TiB of regenerable pressure, and the retained forensic snapshot prevents warm-lane deletions from reclaiming space immediately. |

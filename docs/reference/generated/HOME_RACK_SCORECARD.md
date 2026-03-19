@@ -8,7 +8,7 @@ source_binding: ops/bindings/home.storage.map.yaml
 
 # Home Rack Scorecard
 
-- Generated: `2026-03-19T04:12:48Z`
+- Generated: `2026-03-19T09:26:02Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
 - Active runtimes: `3`
 - Tombstones: `3`
@@ -50,4 +50,4 @@ source_binding: ops/bindings/home.storage.map.yaml
 
 - No declared second-environment cold/offsite restore plane exists for home personal data on Synology.
 - Home switch ports 3/4/6 still rely on inferred endpoint identity instead of traced physical truth.
-- Synology mint-os residue remains as non-canonical historical hold.
+- Legacy Synology backup lanes are now tombstoned, but infrastructure/devices plus ghost backup roots still need later-wave cleanup.
