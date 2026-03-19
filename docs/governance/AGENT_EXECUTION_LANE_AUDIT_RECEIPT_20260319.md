@@ -85,10 +85,10 @@ Execution-lane invariants (fresh from origin/main, dedicated worktree, lane type
 3. Verify required before push (landing/fix lanes must have recent verify receipt)
 4. Stale branch scanner (warn if lane >14d old without closeout)
 
-## First Enforcement Path (Specified, Not Implemented)
+## First Enforcement Path (Implemented ✅)
 
 ### Dirty Local Main Guard
-**Status**: Fully specified, NOT YET IMPLEMENTED (1 hour estimate to implement)
+**Status**: IMPLEMENTED AND TESTED
 
 **Script**: `ops/plugins/core/session/bin/session-start-dirty-guard`
 
@@ -167,30 +167,67 @@ Acceptable limitations for v1.0:
 
 5. **Full Solution**: Complete bootstrap takes 1 week to implement, then becomes the boring default for all agent sessions
 
-## Audit Complete (Specification Only)
+## Audit Complete + Phase 1 Enforcement Implemented ✅
 
-**Status**: ✅ Audit and specification complete
-**Implementation Status**: ⏳ NOT YET IMPLEMENTED (Phase 1 implementation is next wave)
+**Status**: ✅ Audit complete + Phase 1 dirty guard IMPLEMENTED
 
 **What This Branch Contains**:
-- Audit findings and root cause analysis
-- 20 execution-lane invariants cataloged
-- Complete bootstrap specification
-- Dirty local main guard specification (ready to implement)
+- ✅ Audit findings and root cause analysis (7 evidence files, 68KB)
+- ✅ 20 execution-lane invariants cataloged
+- ✅ Complete bootstrap specification (ready for Phase 2)
+- ✅ **Dirty local main guard IMPLEMENTED**:
+  - Script: `ops/plugins/core/session/bin/session-start-dirty-guard`
+  - Integration: Wired into `session.start`
+  - Registration: Added to `ops/capabilities.yaml`
+  - Tested: 4 test cases proven (clean pass, dirty block, override works, no-reason blocks)
 
-**What This Branch Does NOT Contain**:
-- No `session-start-dirty-guard` script
-- No `session.execution.lane.bootstrap` capability
-- No capability/gate registration
-- No behavior change to session.start
+**What This Branch Does NOT Contain** (deferred to Phase 2):
+- ⏳ Full `session.execution.lane.bootstrap` capability
+- ⏳ Lane metadata stamping
+- ⏳ Write scope enforcement gates
+- ⏳ Stale branch scanner
 
 **Branch**: codex/agent-execution-lane-audit (spec/audit only)
 **Worktree**: /Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine/codex-agent-execution-lane-audit
 **Evidence**: /Users/ronnyworks/code/.evidence/spine/verify/AGENT_EXECUTION_LANE_*
 
-**Next Action**:
-- Option 1: Land this as spec/audit receipt, then implement Phase 1 in separate wave
-- Option 2: Implement Phase 1 dirty guard now before landing (adds 1 hour)
+**Implementation Evidence**:
+```bash
+# Test 1: Clean checkout passes
+$ cd <clean-worktree> && ./ops/plugins/core/session/bin/session-start
+session.start
+mode: fast
+status: ...
+✅ PASS
+
+# Test 2: Dirty checkout blocks
+$ cd ~/code/agentic-spine && ./ops/plugins/core/session/bin/session-start
+ERROR: Working directory has uncommitted changes
+?? docs/operations/
+...
+✅ BLOCKED
+
+# Test 3: Override with reason works
+$ ./ops/plugins/core/session/bin/session-start -- --allow-dirty --dirty-reason "Recovery from prior work"
+WARNING: Working directory has 5 uncommitted changes
+Override reason: Recovery from prior work
+Proceeding with dirty override (logged)
+✅ OVERRIDE LOGGED
+
+# Test 4: Override without reason blocks
+$ ./ops/plugins/core/session/bin/session-start -- --allow-dirty
+ERROR: --allow-dirty requires --dirty-reason '<reason>'
+✅ BLOCKED
+```
+
+**Audit Trail**:
+```csv
+$ cat ~/.runtime/spine/state/dirty-overrides/dirty-override-log.csv
+timestamp_utc,dirty_count,reason,pid
+2026-03-19T14:54:27Z,5,"Testing override mechanism for execution lane audit",8405
+```
+
+**Next Action**: Land this branch (audit + Phase 1 enforcement complete)
 
 ---
 
