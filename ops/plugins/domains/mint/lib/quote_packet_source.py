@@ -351,8 +351,14 @@ def main(argv: list[str]) -> int:
 
     script_dir = Path(__file__).resolve().parent
     spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (spine_root / "runtime/domain-state/mint/quote-packets"))
-    index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (spine_root / "runtime/domain-state/mint/quote-packets-index.yaml"))
+    mint_data_root = Path(
+        os.environ.get("MINT_DATA_ROOT")
+        or os.environ.get("SPINE_DATA_ROOT")
+        or os.environ.get("SPINE_DOMAIN_STATE")
+        or (spine_root.parent / ".data")
+    ) / "mint"
+    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (mint_data_root / "quote-packets"))
+    index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (mint_data_root / "quote-packets-index.yaml"))
 
     packet_file = packet_file_for_id(packets_dir, args.packet_id)
     if not packet_file.exists():

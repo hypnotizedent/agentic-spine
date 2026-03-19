@@ -1125,8 +1125,14 @@ def main(argv: list[str]) -> int:
     script_dir = Path(__file__).resolve().parent
     spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
     mint_modules_root = Path(os.environ.get("MINT_MODULES_ROOT") or "/Users/ronnyworks/code/mint-modules")
-    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (spine_root / "runtime/domain-state/mint/quote-packets"))
-    index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (spine_root / "runtime/domain-state/mint/quote-packets-index.yaml"))
+    mint_data_root = Path(
+        os.environ.get("MINT_DATA_ROOT")
+        or os.environ.get("SPINE_DATA_ROOT")
+        or os.environ.get("SPINE_DOMAIN_STATE")
+        or (spine_root.parent / ".data")
+    ) / "mint"
+    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (mint_data_root / "quote-packets"))
+    index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (mint_data_root / "quote-packets-index.yaml"))
 
     ensure_dir(packets_dir)
 

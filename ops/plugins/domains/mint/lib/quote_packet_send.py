@@ -296,7 +296,12 @@ def main(argv: list[str]) -> int:
 
     script_dir = Path(__file__).resolve().parent
     spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
+    mint_root = Path(
+        os.environ.get("MINT_DATA_ROOT")
+        or os.environ.get("SPINE_DATA_ROOT")
+        or os.environ.get("SPINE_DOMAIN_STATE")
+        or (spine_root.parent / ".data")
+    ) / "mint"
 
     packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (mint_root / "quote-packets"))
     packet_index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (mint_root / "quote-packets-index.yaml"))

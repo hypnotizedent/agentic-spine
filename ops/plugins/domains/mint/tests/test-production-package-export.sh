@@ -52,8 +52,8 @@ machine_target: barudan
 source_asset_refs:
   - artwork-intake/jobs/30001/production/embroidery/logo.dst
   - artwork-intake/jobs/30001/production/embroidery/back.dst
-staged_bundle_path: runtime/domain-state/mint/production-packages/staged-bundles/ORD-30001--REV-1--barudan
-manifest_path: runtime/domain-state/mint/production-packages/staged-bundles/ORD-30001--REV-1--barudan/manifest.yaml
+staged_bundle_path: .data/mint/production-packages/staged-bundles/ORD-30001--REV-1--barudan
+manifest_path: .data/mint/production-packages/staged-bundles/ORD-30001--REV-1--barudan/manifest.yaml
 created_at: "2026-03-10T14:00:00Z"
 created_by: mint.production.package.stage
 receipt_notes: staged 2 assets for 2 line(s)
@@ -70,8 +70,8 @@ target_class: screen_print
 machine_target: screenpro
 source_asset_refs:
   - artwork-intake/jobs/30002/production/screen/design.eps
-staged_bundle_path: runtime/domain-state/mint/production-packages/staged-bundles/ORD-30002--REV-1--screenpro
-manifest_path: runtime/domain-state/mint/production-packages/staged-bundles/ORD-30002--REV-1--screenpro/manifest.yaml
+staged_bundle_path: .data/mint/production-packages/staged-bundles/ORD-30002--REV-1--screenpro
+manifest_path: .data/mint/production-packages/staged-bundles/ORD-30002--REV-1--screenpro/manifest.yaml
 created_at: "2026-03-10T14:05:00Z"
 created_by: mint.production.package.stage
 receipt_notes: staged 1 assets for 1 line(s)
