@@ -464,7 +464,7 @@ def audit_surveillance(ctx: AuditContext, registry_service: dict[str, Any]) -> d
 
     config_run = ctx.ssh_capture("surveillance-stack", "cat /srv/config/surveillance/config.yml 2>/dev/null || true", scope="surveillance.config")
     inspect_run = ctx.ssh_capture("surveillance-stack", "docker inspect frigate 2>/dev/null || true", scope="surveillance.docker_inspect")
-    fs_probe = df_probe(ctx, "surveillance-stack", "/srv/data/surveillance", scope="surveillance.df")
+    fs_probe = df_probe(ctx, "surveillance-stack", "/srv/data/surveillance/recordings", scope="surveillance.df")
     recordings_probe = path_probe(ctx, "surveillance-stack", "/srv/data/surveillance/recordings", scope="surveillance.recordings")
     clips_probe = path_probe(ctx, "surveillance-stack", "/srv/data/surveillance/clips", scope="surveillance.clips")
     snapshots_probe = path_probe(ctx, "surveillance-stack", "/srv/data/surveillance/snapshots", scope="surveillance.snapshots")
@@ -559,7 +559,6 @@ def audit_media(ctx: AuditContext, registry_service: dict[str, Any]) -> dict[str
 
     downloads_policy_days = ensure_dict(registry_service.get("retention_policy")).get("downloads_max_age_days")
     pve_downloads = path_probe(ctx, "pve", "/media/downloads", scope="media.pve_downloads")
-    nas_staging = path_probe(ctx, "nas", "/volume1/media-staging", scope="media.nas_media_staging")
 
     if pve_downloads.get("state") == "present" and pve_downloads.get("file_count", 0) > 0:
         oldest_age = pve_downloads.get("oldest_age_days")
@@ -574,20 +573,6 @@ def audit_media(ctx: AuditContext, registry_service: dict[str, Any]) -> dict[str
                 message=f"downloads lane oldest_age_days={oldest_age} exceeds policy={downloads_policy_days}",
             )
 
-    if nas_staging.get("state") == "present" and nas_staging.get("file_count", 0) > 0:
-        add_mismatch(
-            mismatches,
-            domain=domain,
-            severity="high",
-            code="retired_root_still_populated_nas",
-            host="nas",
-            path="/volume1/media-staging",
-            message=(
-                f"legacy Synology staging lane is still populated "
-                f"(size_bytes={nas_staging.get('size_bytes')} file_count={nas_staging.get('file_count')})"
-            ),
-        )
-
     summary = compare_background_actions(registry_service, live_rows=live_rows, mismatches=mismatches, domain=domain)
     return {
         "domain": domain,
@@ -596,7 +581,6 @@ def audit_media(ctx: AuditContext, registry_service: dict[str, Any]) -> dict[str
         "mismatches": mismatches,
         "observations": {
             "pve_downloads": pve_downloads,
-            "nas_media_staging": nas_staging,
         },
     }
 
