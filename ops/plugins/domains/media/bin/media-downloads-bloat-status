@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# media.downloads.bloat.status — read-only analysis of downloads folder bloat
+#
+# Usage:
+#   ./bin/ops cap run media.downloads.bloat.status
+#   ./bin/ops cap run media.downloads.bloat.status --json
+#
+# Contract:
+# - SSHs to streaming-stack (NFS client view is authority)
+# - Analyzes /mnt/media/downloads for size, age, and bloat candidates
+# - Read-only, no mutations
+# - Exit 0 if successful, exit 1 on error, exit 2 on config errors
+#
+# Phase 1 Audit Prep (2026-03-19):
+# This capability supports safe downloads audit per MEDIA_STORAGE_CONTRACT.md Phase 1.
+# Provides read-only inventory and classification without deletion or movement.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+usage() {
+  cat <<'USAGE'
+media.downloads.bloat.status — analyze downloads folder bloat (read-only)
+
+Args:
+  --json      Output JSON format
+  --timeout   SSH timeout in seconds (default: 15)
+
+Examples:
+  ./bin/ops cap run media.downloads.bloat.status
+  ./bin/ops cap run media.downloads.bloat.status --json
+
+Output:
+  - Total downloads size
+  - Age buckets (<7 days, 7-30 days, 30-90 days, >90 days)
+  - Top 20 space consumers
+  - Estimated bloat candidates (>30 days old)
+  - No deletions or moves (read-only audit)
+USAGE
+}
+
+OUTPUT_JSON=false
+TIMEOUT_SEC=15
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)     OUTPUT_JSON=true; shift ;;
+    --timeout)  TIMEOUT_SEC="${2:-15}"; shift 2 ;;
+    -h|--help)  usage; exit 0 ;;
+    --)         shift ;;
+    *)          echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+
+if [[ ! -f "$SSH_TARGETS" ]]; then
+  echo "MISSING_FILE: $SSH_TARGETS" >&2
+  exit 2
+fi
+
+# Resolve streaming-stack SSH target (NFS client view is authoritative)
+STREAMING_HOST=$(yq '.ssh.targets[] | select(.id == "streaming-stack") | .host' "$SSH_TARGETS")
+if [[ -z "$STREAMING_HOST" ]]; then
+  echo "MISSING_SSH_TARGET: streaming-stack not found in ssh.targets.yaml" >&2
+  exit 2
+fi
+
+# Read-only audit commands
+echo "# media.downloads.bloat.status"
+echo "# Generated: $GENERATED_AT"
+echo "# Target: streaming-stack (NFS client, authoritative view)"
+echo "# Downloads path: /mnt/media/downloads"
+echo ""
+
+# Check if downloads path exists. Missing path is a useful live-drift finding, not a script error.
+if ! ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" "test -d /mnt/media/downloads" 2>/dev/null; then
+  echo "## Status: PATH_MISSING"
+  echo ""
+  echo "Expected downloads path /mnt/media/downloads is not present on streaming-stack."
+  echo "This indicates live runtime drift or a missing NFS mount."
+  echo ""
+  echo "## Next Actions"
+  echo "1. Run: ./bin/ops cap run media.nfs.verify"
+  echo "2. Verify streaming-stack mount contract for /mnt/media"
+  echo "3. Check whether downloads are currently mounted only on download-stack"
+  echo "4. Do not delete or move anything until mount truth is reconciled"
+  echo ""
+  echo "# Audit complete (read-only, live drift detected)"
+
+  if [[ "$OUTPUT_JSON" == "true" ]]; then
+    cat <<JSON
+{
+  "generated_at": "$GENERATED_AT",
+  "target": "streaming-stack",
+  "downloads_path": "/mnt/media/downloads",
+  "status": "path_missing",
+  "exists": false,
+  "live_drift": true,
+  "mutations": "none"
+}
+JSON
+  fi
+
+  exit 0
+fi
+
+# Get total size
+echo "## Total Downloads Size"
+TOTAL_SIZE=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" "du -sh /mnt/media/downloads 2>/dev/null | cut -f1" || echo "UNKNOWN")
+echo "Total: $TOTAL_SIZE"
+echo ""
+
+# Age bucket analysis
+echo "## Age Bucket Analysis"
+echo "Analyzing file ages..."
+
+# Files by age (counts and estimated sizes)
+RECENT_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" \
+  "find /mnt/media/downloads -type f -mtime -7 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+echo "< 7 days: $RECENT_COUNT files"
+
+WEEK_MONTH_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" \
+  "find /mnt/media/downloads -type f -mtime +7 -mtime -30 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+echo "7-30 days: $WEEK_MONTH_COUNT files"
+
+MONTH_QUARTER_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" \
+  "find /mnt/media/downloads -type f -mtime +30 -mtime -90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+echo "30-90 days: $MONTH_QUARTER_COUNT files (bloat candidates)"
+
+OLD_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" \
+  "find /mnt/media/downloads -type f -mtime +90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+echo "> 90 days: $OLD_COUNT files (high-confidence bloat)"
+echo ""
+
+# Top space consumers
+echo "## Top 20 Space Consumers"
+echo "Largest items in downloads (top-level directories/files):"
+ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" \
+  "du -sh /mnt/media/downloads/* 2>/dev/null | sort -rh | head -20" || echo "ERROR: Could not list top consumers"
+echo ""
+
+# Summary
+BLOAT_ESTIMATE=$((MONTH_QUARTER_COUNT + OLD_COUNT))
+echo "## Bloat Estimate"
+echo "Files >30 days old: $BLOAT_ESTIMATE"
+echo "Status: $(if [[ $BLOAT_ESTIMATE -gt 100 ]]; then echo "BLOAT_DETECTED"; else echo "ACCEPTABLE"; fi)"
+echo ""
+echo "## Next Actions"
+echo "1. Review top space consumers manually"
+echo "2. Check if items >30 days are:"
+echo "   - Already imported (hardlinked) → safe to remove"
+echo "   - Failed downloads → safe to remove"
+echo "   - Stuck in processing → investigate"
+echo "3. Use dry-run rsync to test moves to cold/quarantine"
+echo "4. DO NOT DELETE without Phase 1 audit manifest approval"
+echo ""
+echo "# Audit complete (read-only, no mutations)"
+
+if [[ "$OUTPUT_JSON" == "true" ]]; then
+  cat <<JSON
+{
+  "generated_at": "$GENERATED_AT",
+  "target": "streaming-stack",
+  "downloads_path": "/mnt/media/downloads",
+  "total_size": "$TOTAL_SIZE",
+  "age_buckets": {
+    "recent_7d": $RECENT_COUNT,
+    "week_to_month": $WEEK_MONTH_COUNT,
+    "month_to_quarter": $MONTH_QUARTER_COUNT,
+    "over_90d": $OLD_COUNT
+  },
+  "bloat_estimate": $BLOAT_ESTIMATE,
+  "status": "$(if [[ $BLOAT_ESTIMATE -gt 100 ]]; then echo "BLOAT_DETECTED"; else echo "ACCEPTABLE"; fi)",
+  "mutations": "none",
+  "safe_for_phase_1": true
+}
+JSON
+fi
+
+exit 0

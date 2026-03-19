@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import sys
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+REGISTRY_PATH = ROOT / "ops" / "bindings" / "agents.registry.yaml"
+SPEC_PATH = ROOT / "ops" / "bindings" / "foundation.agent.contract.projection.spec.yaml"
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"foundation.agent.contracts.normalize FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def yaml_dump(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=False).strip()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="foundation-agent-contracts-normalize")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Fail if normalized projection markers drift from disk.",
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Verify registry inventory and required supplemental references.",
+    )
+    parser.add_argument(
+        "--foundation-root",
+        default=None,
+        help="Override the agentic-foundation repo root.",
+    )
+    return parser.parse_args()
+
+
+def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+    if not text.startswith("---\n"):
+        return {}, text
+    marker = "\n---\n"
+    end = text.find(marker, 4)
+    if end == -1:
+        return {}, text
+    frontmatter_text = text[4:end]
+    body = text[end + len(marker) :]
+    try:
+        frontmatter = yaml.safe_load(frontmatter_text) or {}
+    except Exception:
+        frontmatter = {}
+    if not isinstance(frontmatter, dict):
+        frontmatter = {}
+    return frontmatter, body
+
+
+def extract_tail(body: str) -> str:
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith("## "):
+            return "\n".join(lines[index:]).strip()
+    return ""
+
+
+def render_intro(agent_id: str, status_label: str) -> str:
+    return "\n".join(
+        [
+            f"# {agent_id} Compatibility Contract",
+            "",
+            f"> **Status:** {status_label}",
+            "> **Canonical Registry:** `~/code/agentic-spine/ops/bindings/agents.registry.yaml`",
+            "> **Surface Role:** path-compatible projection retained for spine references",
+            "",
+            "This compatibility path is a projection surface retained because spine still references it by exact file path.",
+            "Do not treat this file as authored truth. Additional sections below remain compatibility notes until `foundation.agent.contracts.build` is safe to land.",
+        ]
+    )
+
+
+def foundation_root_from(spec: dict[str, Any], override: str | None) -> Path:
+    if override:
+        return Path(override).expanduser().resolve()
+    authority = spec.get("authority") if isinstance(spec.get("authority"), dict) else {}
+    env_name = str(authority.get("consumer_root_env") or "SPINE_FOUNDATION_ROOT").strip()
+    if env_name and env_name in os_environ():
+        return Path(os_environ()[env_name]).expanduser().resolve()
+    default_rel = str(authority.get("consumer_root_default") or "../agentic-foundation").strip()
+    return (ROOT / default_rel).resolve()
+
+
+def os_environ() -> dict[str, str]:
+    return dict(**__import__("os").environ)
+
+
+def normalize_contract_rel(contract_rel: str) -> str:
+    rel = str(contract_rel).strip()
+    prefix = "../agentic-foundation/"
+    if not rel.startswith(prefix):
+        fail(f"unsupported contract path outside agentic-foundation projection root: {rel}")
+    return rel[len(prefix) :]
+
+
+def parse_required_frontmatter(spec: dict[str, Any]) -> dict[str, Any]:
+    items = spec.get("policy", {}).get("required_frontmatter")
+    if not isinstance(items, list):
+        fail("spec policy.required_frontmatter must be a list")
+    parsed: dict[str, Any] = {}
+    for entry in items:
+        if not isinstance(entry, dict):
+            fail("required_frontmatter entry must be a mapping")
+        key = str(entry.get("key") or "").strip()
+        if not key:
+            fail("required_frontmatter entry missing key")
+        parsed[key] = entry.get("value")
+    return parsed
+
+
+def expected_frontmatter(existing: dict[str, Any], required: dict[str, Any]) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
+    for key, value in required.items():
+        meta[str(key)] = value
+    owner = str(existing.get("owner") or "@ronny").strip() or "@ronny"
+    scope = str(existing.get("scope") or "agent-contract-compatibility-stub").strip() or "agent-contract-compatibility-stub"
+    meta["owner"] = owner
+    meta["scope"] = scope
+    return meta
+
+
+def render_contract(agent_id: str, existing_frontmatter: dict[str, Any], body: str, required: dict[str, Any], status_label: str) -> str:
+    tail = extract_tail(body)
+    frontmatter = expected_frontmatter(existing_frontmatter, required)
+    rendered = ["---", yaml_dump(frontmatter), "---", "", render_intro(agent_id, status_label)]
+    if tail:
+        rendered.extend(["", tail])
+    return "\n".join(rendered).rstrip() + "\n"
+
+
+def verify_required_refs(agent_id: str, text: str, blocked_examples: list[dict[str, Any]], *, errors: list[str]) -> None:
+    for entry in blocked_examples:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("agent") or "").strip() != agent_id:
+            continue
+        refs = entry.get("required_refs")
+        if not isinstance(refs, list):
+            continue
+        for ref in refs:
+            ref_text = str(ref).strip()
+            if ref_text and ref_text not in text:
+                errors.append(f"{agent_id}: missing required supplemental authority reference: {ref_text}")
+
+
+def main() -> None:
+    args = parse_args()
+    registry = load_yaml(REGISTRY_PATH)
+    spec = load_yaml(SPEC_PATH)
+    foundation_root = foundation_root_from(spec, args.foundation_root)
+    if not foundation_root.is_dir():
+        fail(f"missing agentic-foundation root: {foundation_root}")
+
+    authority = spec.get("authority") if isinstance(spec.get("authority"), dict) else {}
+    projection_root_rel = str(authority.get("projection_root") or "docs/agents").strip()
+    projection_root = foundation_root / projection_root_rel
+    if not projection_root.is_dir():
+        fail(f"missing projection root: {projection_root}")
+
+    policy = spec.get("policy") if isinstance(spec.get("policy"), dict) else {}
+    required_frontmatter = parse_required_frontmatter(spec)
+    status_label = str(policy.get("normalized_intro_status") or "projection compatibility stub").strip()
+    blocked = spec.get("blockers") if isinstance(spec.get("blockers"), dict) else {}
+    blocked_examples = blocked.get("examples") if isinstance(blocked.get("examples"), list) else []
+
+    agents = registry.get("agents")
+    if not isinstance(agents, list) or not agents:
+        fail("agents.registry.yaml is missing agents[]")
+
+    expected_paths: dict[str, str] = {}
+    rendered_by_path: dict[Path, str] = {}
+    errors: list[str] = []
+    changed = 0
+    checked = 0
+
+    for agent in agents:
+        if not isinstance(agent, dict):
+            errors.append("agents.registry.yaml contains non-mapping agent entry")
+            continue
+        agent_id = str(agent.get("id") or "").strip()
+        contract_rel = str(agent.get("contract") or "").strip()
+        if not agent_id or not contract_rel:
+            errors.append("agent entry missing id or contract")
+            continue
+        contract_path_rel = normalize_contract_rel(contract_rel)
+        contract_path = foundation_root / contract_path_rel
+        expected_paths[agent_id] = contract_path_rel
+        if not contract_path.is_file():
+            errors.append(f"{agent_id}: missing contract file {contract_path_rel}")
+            continue
+
+        original_text = contract_path.read_text(encoding="utf-8")
+        existing_frontmatter, body = split_frontmatter(original_text)
+        normalized_text = render_contract(agent_id, existing_frontmatter, body, required_frontmatter, status_label)
+        rendered_by_path[contract_path] = normalized_text
+        checked += 1
+
+        verify_required_refs(agent_id, normalized_text, blocked_examples, errors=errors)
+
+        if args.check:
+            if original_text != normalized_text:
+                errors.append(f"{agent_id}: projection marker drift in {contract_path_rel}")
+        else:
+            if original_text != normalized_text:
+                contract_path.write_text(normalized_text, encoding="utf-8")
+                changed += 1
+
+    actual_paths = {
+        path.relative_to(foundation_root).as_posix()
+        for path in projection_root.glob("*.contract.md")
+        if path.is_file()
+    }
+    expected_contract_paths = set(expected_paths.values())
+    extra_paths = sorted(actual_paths - expected_contract_paths)
+    missing_paths = sorted(expected_contract_paths - actual_paths)
+    for rel in extra_paths:
+        errors.append(f"extra foundation contract without registry entry: {rel}")
+    for rel in missing_paths:
+        errors.append(f"registry contract missing on disk: {rel}")
+
+    if args.verify:
+        if len(expected_contract_paths) != len(expected_paths):
+            errors.append("duplicate contract paths detected in agents.registry.yaml")
+
+    if errors:
+        for error in errors:
+            print(f"foundation.agent.contracts.normalize FAIL: {error}", file=sys.stderr)
+        raise SystemExit(1)
+
+    print(
+        "foundation.agent.contracts.normalize PASS: "
+        f"checked={checked} changed={changed} foundation_root={foundation_root}"
+    )
+
+
+if __name__ == "__main__":
+    main()
