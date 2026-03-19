@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# session-start-main-parity-guard — Detect a clean but diverged main checkout at session start
+#
+# Usage:
+#   session-start-main-parity-guard [--allow-main-divergence] [--main-divergence-reason "<reason>"]
+#
+# Returns:
+#   0 if not on main, main matches origin/main, or override approved
+#   1 if main diverged and no override
+#   2 if invalid args
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+ALLOW_MAIN_DIVERGENCE=false
+MAIN_DIVERGENCE_REASON=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --allow-main-divergence)
+      ALLOW_MAIN_DIVERGENCE=true
+      shift
+      ;;
+    --main-divergence-reason)
+      MAIN_DIVERGENCE_REASON="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "ERROR: Unknown argument: $1" >&2
+      echo "Usage: session-start-main-parity-guard [--allow-main-divergence] [--main-divergence-reason \"<reason>\"]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+CURRENT_DIR="$(pwd)"
+
+if ! git -C "$CURRENT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  echo "ERROR: Not in a git repository or worktree" >&2
+  echo "" >&2
+  echo "session.start must run from a governed checkout or worktree" >&2
+  echo "" >&2
+  echo "Current directory: $CURRENT_DIR" >&2
+  echo "" >&2
+  echo "Navigate to a git checkout first, e.g.:" >&2
+  echo "  cd ~/code/agentic-spine" >&2
+  exit 1
+fi
+
+CURRENT_BRANCH="$(git -C "$CURRENT_DIR" branch --show-current 2>/dev/null || true)"
+if [[ "$CURRENT_BRANCH" != "main" ]]; then
+  exit 0
+fi
+
+LOCAL_HEAD="$(git -C "$CURRENT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+ORIGIN_HEAD="missing"
+AHEAD="missing"
+BEHIND="missing"
+PARITY_FAILURE_REASON=""
+
+if ! git -C "$CURRENT_DIR" show-ref --verify --quiet refs/remotes/origin/main; then
+  PARITY_FAILURE_REASON="origin/main is missing"
+else
+  read -r BEHIND AHEAD < <(git -C "$CURRENT_DIR" rev-list --left-right --count origin/main...HEAD 2>/dev/null || echo "missing missing")
+  ORIGIN_HEAD="$(git -C "$CURRENT_DIR" rev-parse --short origin/main 2>/dev/null || echo "missing")"
+  if [[ "$AHEAD" == "0" && "$BEHIND" == "0" ]]; then
+    exit 0
+  fi
+  PARITY_FAILURE_REASON="HEAD does not match origin/main"
+fi
+
+if [[ "$ALLOW_MAIN_DIVERGENCE" == "true" ]]; then
+  if [[ -z "$MAIN_DIVERGENCE_REASON" ]]; then
+    echo "ERROR: --allow-main-divergence requires --main-divergence-reason '<reason>'" >&2
+    exit 1
+  fi
+
+  echo "WARNING: Current branch is 'main' but $PARITY_FAILURE_REASON" >&2
+  echo "Override reason: $MAIN_DIVERGENCE_REASON" >&2
+  echo "" >&2
+  echo "local_head: $LOCAL_HEAD" >&2
+  echo "origin_main_head: $ORIGIN_HEAD" >&2
+  echo "ahead: $AHEAD" >&2
+  echo "behind: $BEHIND" >&2
+  echo "" >&2
+  echo "Proceeding with main-divergence override (logged)" >&2
+
+  LOG_DIR="$SPINE_STATE/main-divergence-overrides"
+  mkdir -p "$LOG_DIR"
+  LOG_FILE="$LOG_DIR/main-divergence-override-log.csv"
+
+  if [[ ! -f "$LOG_FILE" ]]; then
+    echo "timestamp_utc,branch,ahead,behind,head,origin_main,reason,pid,cwd" > "$LOG_FILE"
+  fi
+
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),main,$AHEAD,$BEHIND,$LOCAL_HEAD,$ORIGIN_HEAD,\"$MAIN_DIVERGENCE_REASON\",$$,\"$CURRENT_DIR\"" >> "$LOG_FILE"
+  exit 0
+fi
+
+echo "ERROR: Current branch is 'main' but $PARITY_FAILURE_REASON" >&2
+echo "" >&2
+echo "local_head: $LOCAL_HEAD" >&2
+echo "origin_main_head: $ORIGIN_HEAD" >&2
+echo "ahead: $AHEAD" >&2
+echo "behind: $BEHIND" >&2
+echo "" >&2
+echo "Main checkouts must stay boring coordinator checkouts with origin/main parity." >&2
+echo "Use a worktree branch for real task work." >&2
+echo "" >&2
+echo "Options:" >&2
+echo "  1. Preserve or move any local main-only work onto a topic branch/worktree, then restore main parity" >&2
+echo "  2. Reconcile local main with origin/main, then re-run session.start" >&2
+echo "  3. Override with explicit reason (use sparingly):" >&2
+echo "       ./bin/ops cap run session.start fast -- --allow-main-divergence --main-divergence-reason '<why safe>'" >&2
+echo "" >&2
+
+exit 1

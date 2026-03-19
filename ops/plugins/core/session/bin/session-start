@@ -133,7 +133,11 @@ usage() {
   cat <<'EOF'
 Usage:
   session-start [--mode fast|full] [--strict] [--json]
+                [--allow-dirty --dirty-reason "<reason>"]
+                [--allow-main-divergence --main-divergence-reason "<reason>"]
   session-start <lane>
+                [--allow-dirty --dirty-reason "<reason>"]
+                [--allow-main-divergence --main-divergence-reason "<reason>"]
 
 Lanes:
   scan | apply | coordinator
@@ -141,8 +145,42 @@ Lanes:
 Notes:
   - No args defaults to fast startup mode.
   - full mode runs status + stability snapshot + core verify.
+  - startup blocks dirty checkouts and clean-but-diverged main checkouts by default.
 EOF
   exit 1
+}
+
+run_startup_checkout_guards() {
+  local allow_dirty="${1:-false}"
+  local dirty_reason="${2:-}"
+  local allow_main_divergence="${3:-false}"
+  local main_divergence_reason="${4:-}"
+
+  local dirty_guard_args=()
+  if [[ "$allow_dirty" == "true" ]]; then
+    dirty_guard_args+=(--allow-dirty)
+    if [[ -n "$dirty_reason" ]]; then
+      dirty_guard_args+=(--dirty-reason "$dirty_reason")
+    fi
+  fi
+
+  "$ROOT/ops/plugins/core/session/bin/session-start-dirty-guard" "${dirty_guard_args[@]}" || {
+    echo "session.start FAIL: dirty working directory blocked" >&2
+    return 1
+  }
+
+  local main_parity_guard_args=()
+  if [[ "$allow_main_divergence" == "true" ]]; then
+    main_parity_guard_args+=(--allow-main-divergence)
+    if [[ -n "$main_divergence_reason" ]]; then
+      main_parity_guard_args+=(--main-divergence-reason "$main_divergence_reason")
+    fi
+  fi
+
+  "$ROOT/ops/plugins/core/session/bin/session-start-main-parity-guard" "${main_parity_guard_args[@]}" || {
+    echo "session.start FAIL: main checkout diverged from origin/main" >&2
+    return 1
+  }
 }
 
 run_fast_startup() {
@@ -151,6 +189,8 @@ run_fast_startup() {
   local json_mode=0
   local allow_dirty=false
   local dirty_reason=""
+  local allow_main_divergence=false
+  local main_divergence_reason=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -177,6 +217,14 @@ run_fast_startup() {
         dirty_reason="${2:-}"
         shift 2
         ;;
+      --allow-main-divergence)
+        allow_main_divergence=true
+        shift
+        ;;
+      --main-divergence-reason)
+        main_divergence_reason="${2:-}"
+        shift 2
+        ;;
       fast|full)
         mode="$1"
         shift
@@ -199,19 +247,12 @@ run_fast_startup() {
       ;;
   esac
 
-  # Run dirty working directory guard (Phase 1 execution lane enforcement)
-  local dirty_guard_args=()
-  if [[ "$allow_dirty" == "true" ]]; then
-    dirty_guard_args+=(--allow-dirty)
-    if [[ -n "$dirty_reason" ]]; then
-      dirty_guard_args+=(--dirty-reason "$dirty_reason")
-    fi
-  fi
-
-  "$ROOT/ops/plugins/core/session/bin/session-start-dirty-guard" "${dirty_guard_args[@]}" || {
-    echo "session.start FAIL: dirty working directory blocked" >&2
-    return 1
-  }
+  # Run startup checkout guards before bootstrapping the session.
+  run_startup_checkout_guards \
+    "$allow_dirty" \
+    "$dirty_reason" \
+    "$allow_main_divergence" \
+    "$main_divergence_reason" || return 1
 
   if [[ "$mode" == "fast" ]]; then
     local status_brief
@@ -360,17 +401,60 @@ if [[ $# -eq 0 ]]; then
 fi
 
 case "${1:-}" in
-  fast|full|--mode|--strict|--json|--)
+  fast|full|--mode|--strict|--json|--allow-dirty|--dirty-reason|--allow-main-divergence|--main-divergence-reason|-h|--help|--)
     run_fast_startup "$@"
     exit $?
     ;;
 esac
 
 LANE="$1"
+shift
 case "$LANE" in
   scan|apply|coordinator) ;;
   *) echo "ERROR: unknown lane '$LANE'. Use: scan | apply | coordinator"; exit 1 ;;
 esac
+
+allow_dirty=false
+dirty_reason=""
+allow_main_divergence=false
+main_divergence_reason=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --allow-dirty)
+      allow_dirty=true
+      shift
+      ;;
+    --dirty-reason)
+      dirty_reason="${2:-}"
+      shift 2
+      ;;
+    --allow-main-divergence)
+      allow_main_divergence=true
+      shift
+      ;;
+    --main-divergence-reason)
+      main_divergence_reason="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      echo "session.start FAIL: unknown arg for lane '$LANE': $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+run_startup_checkout_guards \
+  "$allow_dirty" \
+  "$dirty_reason" \
+  "$allow_main_divergence" \
+  "$main_divergence_reason" || exit 1
 
 # ─── Session pruning + liveness ─────────────────────────────
 # Archive stale sessions: PID dead (immediate); also archive TTL-expired sessions.

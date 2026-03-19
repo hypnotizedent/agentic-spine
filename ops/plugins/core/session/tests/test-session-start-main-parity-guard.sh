@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
+source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
+spine_paths_init
+PARITY_GUARD="$ROOT/ops/plugins/core/session/bin/session-start-main-parity-guard"
+SESSION_START="$ROOT/ops/plugins/core/session/bin/session-start"
+
+PASS=0
+FAIL=0
+
+pass() { PASS=$((PASS + 1)); echo "PASS: $1"; }
+fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1" >&2; }
+
+assert_eq() {
+  local actual="$1" expected="$2" label="$3"
+  if [[ "$actual" == "$expected" ]]; then
+    pass "$label"
+  else
+    fail "$label (expected='$expected', got='$actual')"
+  fi
+}
+
+assert_contains() {
+  local haystack="$1" needle="$2" label="$3"
+  if echo "$haystack" | grep -Fq -- "$needle"; then
+    pass "$label"
+  else
+    fail "$label (expected: $needle)"
+  fi
+}
+
+echo "session-start main parity guard tests"
+echo "════════════════════════════════════════"
+
+TMPDIR_BASE="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR_BASE"' EXIT
+
+REMOTE="$TMPDIR_BASE/remote.git"
+WORK="$TMPDIR_BASE/work"
+STATE_ROOT="$TMPDIR_BASE/state"
+RUNTIME_ROOT="$TMPDIR_BASE/runtime"
+
+git init --bare "$REMOTE" >/dev/null
+git clone "$REMOTE" "$WORK" >/dev/null 2>&1
+git -C "$WORK" config user.name "Test User"
+git -C "$WORK" config user.email "test@example.com"
+git -C "$WORK" checkout -b main >/dev/null 2>&1
+printf 'base\n' > "$WORK/file.txt"
+git -C "$WORK" add file.txt
+git -C "$WORK" commit -m "base" >/dev/null
+git -C "$WORK" push -u origin main >/dev/null 2>&1
+
+export SPINE_STATE="$STATE_ROOT"
+export SPINE_RUNTIME_ROOT="$RUNTIME_ROOT"
+
+echo ""
+echo "── T1: clean main parity passes ──"
+set +e
+t1_out="$(cd "$WORK" && "$PARITY_GUARD" 2>&1)"
+t1_status=$?
+set -e
+assert_eq "$t1_status" "0" "clean main checkout passes"
+
+echo ""
+echo "── T2: diverged main blocks ──"
+printf 'ahead\n' >> "$WORK/file.txt"
+git -C "$WORK" commit -am "ahead local" >/dev/null
+set +e
+t2_out="$(cd "$WORK" && "$PARITY_GUARD" 2>&1)"
+t2_status=$?
+set -e
+assert_eq "$t2_status" "1" "diverged main exits non-zero"
+assert_contains "$t2_out" "Current branch is 'main'" "block message identifies main"
+assert_contains "$t2_out" "ahead: 1" "block message reports ahead count"
+assert_contains "$t2_out" "Use a worktree branch for real task work." "block message points to worktree flow"
+
+echo ""
+echo "── T3: override allows diverged main and logs reason ──"
+set +e
+t3_out="$(cd "$WORK" && "$PARITY_GUARD" --allow-main-divergence --main-divergence-reason "test override" 2>&1)"
+t3_status=$?
+set -e
+assert_eq "$t3_status" "0" "override permits diverged main"
+assert_contains "$t3_out" "Proceeding with main-divergence override" "override path is explicit"
+log_file="$STATE_ROOT/main-divergence-overrides/main-divergence-override-log.csv"
+if [[ -f "$log_file" ]]; then
+  pass "override log file created"
+else
+  fail "override log file created"
+fi
+assert_contains "$(cat "$log_file")" "test override" "override reason logged"
+
+echo ""
+echo "── T4: non-main branch is ignored ──"
+git -C "$WORK" switch -c feature/local >/dev/null
+set +e
+t4_out="$(cd "$WORK" && "$PARITY_GUARD" 2>&1)"
+t4_status=$?
+set -e
+assert_eq "$t4_status" "0" "non-main branch bypasses guard"
+assert_eq "$t4_out" "" "non-main branch stays quiet"
+
+echo ""
+echo "── T5: session-start --help no longer parses as lane ──"
+set +e
+t5_out="$("$SESSION_START" --help 2>&1)"
+t5_status=$?
+set -e
+assert_eq "$t5_status" "1" "--help exits with usage status"
+assert_contains "$t5_out" "session-start [--mode fast|full]" "help prints usage"
+assert_contains "$t5_out" "startup blocks dirty checkouts and clean-but-diverged main checkouts by default." "help documents parity guard"
+
+echo ""
+echo "────────────────────────────────────────"
+echo "Results: $PASS passed, $FAIL failed"
+exit "$FAIL"
