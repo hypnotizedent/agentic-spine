@@ -127,7 +127,7 @@ parent_receipts:
 |-------------|-------------|-----------|
 | /volume1/homelab | /mnt/pve/synology918 | proxmox-home |
 | /volume1/backups/proxmox_backups | /mnt/pve/synology-backups | proxmox-home vzdump |
-| /volume1/im2ch | - | Immich photos |
+| /volume1/im2ch | - | Derivative-only legacy Immich residue; not canonical personal photo authority |
 | /volume1/archives | - | Archive storage |
 | /volume1/photos | - | Photo library |
 | /volume1/videos | - | Video library |

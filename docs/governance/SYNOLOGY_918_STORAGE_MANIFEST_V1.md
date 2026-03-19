@@ -45,7 +45,8 @@ The Synology is **not** the canonical server-backup authority for shop or busine
 | `/volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue/*` | Tombstoned legacy mint-os residue only | Current Mint canonical planes on 730XD | Not active authority; moved out of active home backup root on 2026-03-19 |
 | `/volume1/media-staging/` | Active media import/current-watch share | Synology | Exported to `10.0.0.106` and `10.0.0.179`; only populated/exported media share currently used by `media-home` VM 106 |
 | `/volume1/media-holds/` | Active hold/review share | Synology | Exported to `10.0.0.179`; empty but intentionally retained for holds/review |
-| `/volume1/im2ch`, `/volume1/photo-keepers`, `/volume1/documents`, `/volume1/homelab` | Home/personal canonical data | Synology | Live storage families remain mounted and in use |
+| `/volume1/photo-keepers`, `/volume1/documents`, `/volume1/homelab`, `/volume1/media-staging`, `/volume1/media-holds` | Home/personal canonical data | Synology | These remain the canonical home-personal surfaces on Synology |
+| `/volume1/im2ch` | Derivative-only legacy Immich residue pending tombstone | None | Proven legacy share; not canonical home or Immich authority |
 
 ## Share Surface Truth
 
@@ -110,12 +111,17 @@ The Synology remains canonical for home-local backup storage and home/personal d
 |------|------|------|
 | `/volume1/backups/proxmox_backups/dump/` | `96G` | Home-local canonical backup surface |
 | `/volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue/` | `110G` | Tombstoned legacy mint-os residue, not canonical |
-| `/volume1/im2ch/` | `2.3T` | Immich photo library |
 | `/volume1/photo-keepers/` | `1.9T` | Personal photo archive |
 | `/volume1/media-staging/` | `1.4T` | Active media import/current-watch share |
 | `/volume1/media-holds/` | `0B` | Explicit hold/review share |
 | `/volume1/documents/` | `81G` | Documents archive |
 | `/volume1/homelab/` | `71G` | Homelab assets |
+
+Legacy residue retained on Synology:
+
+| Path | Size | Role |
+|------|------|------|
+| `/volume1/im2ch/` | `2.3T` | Derivative-only legacy Immich residue pending verification then tombstone |
 
 Current home backup artifacts:
 
