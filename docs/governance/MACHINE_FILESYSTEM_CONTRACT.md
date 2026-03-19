@@ -120,16 +120,18 @@ Purpose: make every managed machine boring to read. A path must tell the operato
 ## Stack Root Rules
 
 - Canonical active stack root on guests: `/opt/stacks/<stack>`.
+- `/opt/stacks/<stack>` may be a thin entrypoint symlink to `/srv/config/<stack>` when the guest is normalized into `/srv/config|data|runtime/<stack>`.
 - A stack root must contain stack config and small stack-local assets, not the whole payload archive.
 - Durable payload belongs on declared data planes, then bind-mounts into the stack.
 - Stack names must match repo truth. If the machine path and repo stack id disagree, repo truth is wrong or runtime is wrong.
 
-### Explicit Current Exception
+### Normalized Example
 
-- `surveillance-stack:/home/ubuntu/surveillance`
-  - Current state: live runtime truth as of 2026-03-18.
-  - Why it is an exception: active stack root is in a home directory, which violates boring path policy.
-  - Exit criterion: migrate runtime to `/opt/stacks/surveillance` or explicitly retire the workload.
+- `surveillance-stack`
+  - Compose authority: `/srv/config/surveillance`
+  - Thin stack entrypoint: `/opt/stacks/surveillance` -> `/srv/config/surveillance`
+  - Durable data: `/srv/data/surveillance/*` backed by the dedicated `/mnt/data` disk
+  - Runtime cache: `/srv/runtime/surveillance/cache`
 
 ## Bind-Mount Discipline
 

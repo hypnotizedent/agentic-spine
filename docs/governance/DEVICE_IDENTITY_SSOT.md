@@ -196,7 +196,7 @@ Notes (Shop LAN-only endpoints):
 | mint-data | `mint-data` | 192.168.1.212 | 212 | bc:24:11:2b:85:2b | Fresh-slate data plane (PostgreSQL + MinIO + Redis) |
 | mint-apps | `mint-apps` | 192.168.1.213 | 213 | bc:24:11:39:7a:46 | Fresh-slate app plane (artwork, quote-page, order-intake) |
 | communications-stack | `communications-stack` | 192.168.1.26 | 214 | bc:24:11:24:82:05 | Stalwart mail server (static .26). Tailscale: 100.115.16.37. |
-| surveillance-stack | `surveillance-stack` | 192.168.1.215 | 215 | — | Frigate/go2rtc surveillance platform. Tailscale: 100.89.1.111. Current live compose root: `/home/ubuntu/surveillance`. |
+| surveillance-stack | `surveillance-stack` | 192.168.1.215 | 215 | — | Frigate/go2rtc surveillance platform. Tailscale: 100.89.1.111. Live compose authority: `/srv/config/surveillance`; `/opt/stacks/surveillance` is a thin entrypoint symlink. |
 | archive-smb | `archive-smb` | 192.168.1.217 | 220 | — | Archive SMB file-plane LXC on shop LAN. SSH auth drift observed 2026-03-18; use `pve` control path until repaired. |
 
 ### Subnet Table
