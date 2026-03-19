@@ -175,13 +175,13 @@ This is the core operational pattern that makes the system self-governing.
 - `AGENTS.md` gate metadata block (projection of `gate.registry.yaml`)
 - `ops/bindings/backup.posture.snapshot.yaml` (projection of `backup.inventory.yaml`)
 - `ops/bindings/internet.asset.registry.projected.yaml` (projection of `internet.asset.registry.yaml`)
+- `ronny-products/EXECUTION_BOARD.md` (projection of repo-local `app.contract.yaml`)
 
 ### Should Become Projections (Not Yet Generated)
 - `ops/bindings/gate.execution.topology.yaml` — should derive from `gate.registry.yaml`
 - `ops/bindings/intake.lifecycle.contract.yaml` domain entries — should derive from `capabilities.yaml`
 - `ops/bindings/capability_map.yaml` — should derive from `capabilities.yaml`
-- `ronny-products/EXECUTION_BOARD.md` — should derive from `app.contract.yaml`
-- `agentic-foundation/docs/agents/*.contract.md` (26 files) — should derive from spine's `agents.registry.yaml`
+- `agentic-foundation/docs/agents/*.contract.md` (17 files) — now projection-marked compatibility stubs; full generation is still blocked on explicit supplemental authorities
 
 ### Recognition Rule
 If the authority changes, does this doc update automatically?
