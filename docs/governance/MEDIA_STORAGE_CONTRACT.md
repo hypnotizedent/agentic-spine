@@ -27,6 +27,7 @@ This contract defines the canonical media storage architecture, tier assignments
 - Quarantine tier (md1400) operational with 2.07T pending review
 - Home tier (Synology) has 13T available
 - media-home VM 106 canonicalized in governance
+- Synology share truth is now explicit: `/volume1/media-staging` is the only populated/exported media share currently used by VM 106, `/volume1/media-holds` is the explicit hold/review share, and `/volume1/media-home` is not a live share
 
 **Target State**:
 - Home is the best playback/download experience (fast internet, low latency)
@@ -44,7 +45,7 @@ This contract defines the canonical media storage architecture, tier assignments
 ### 1. Hot Tier (Home Playback)
 
 **Canonical Host**: `synology918` (Synology DS918+) + `media-home` VM 106 (proxmox-home)
-**Role**: Fast access playback library for home consumption
+**Role**: Fast access playback for home consumption, with current share truth kept explicit
 **Capacity**: 20T total, 13T available (34% usage)
 **Content Classes**:
 - Favorites / frequently watched
@@ -52,20 +53,22 @@ This contract defines the canonical media storage architecture, tier assignments
 - High-demand family content
 - Active downloads (staging before import)
 
-**Path Layout** (Synology):
+**Current Live Share Layout** (Synology):
 ```
-/volume1/media-home/         # Active home playback library
-  movies/                    # Hot home movies
-  tv/                        # Hot home TV
-  music/                     # Hot home music
-/volume1/media-staging/      # Download staging area
-  incoming/                  # Fresh downloads
-  processing/                # Import pipeline
-  quarantine/                # Low-confidence imports before review
-/volume1/media-holds/        # Temporary overflow from shop cold tier
+/volume1/media-staging/      # Only populated/exported media share currently used by VM 106
+  downloads/                 # Fresh downloads + in-flight staging
+  movies/                    # Current live movies share subtree
+  tv/                        # Current live TV share subtree
+  music/                     # Current live music share subtree
+/volume1/media-holds/        # Explicit hold/review/overflow lane
+  manual-import-review/
+  duplicate-review/
+  forensic-holds/
 ```
 
-**Serving Method**: media-home VM 106 mounts via NFS/SMB, serves Jellyfin/Plex to home network
+There is currently **no dedicated live `/volume1/media-home/` share**. The old `media-home`, `media`, `hot-media`, `live-library`, and `library-home` names are ghost placeholders, not active share truth.
+
+**Serving Method**: media-home VM 106 currently consumes `/volume1/media-staging`; `media-holds` is exported separately as a hold/review share.
 
 **Performance Target**:
 - Read latency: <50ms for local playback
@@ -213,10 +216,10 @@ This contract defines the canonical media storage architecture, tier assignments
 
 | Media Class | Canonical Home | Serving Home | Backup Home | Notes |
 |-------------|---------------|--------------|-------------|-------|
-| **Movies (favorites)** | synology918:/volume1/media-home/movies | media-home VM 106 | Not backed up (regenerable) | Fast access for family |
+| **Movies (home current-watch, transitional)** | synology918:/volume1/media-staging/movies | media-home VM 106 | Not backed up (regenerable) | No dedicated hot-library share exists yet; current live share truth is staging-first. |
 | **Movies (main library)** | pve:/media/movies | streaming-stack VM 210 | Not backed up | 9.6T current |
 | **Movies (watched/aged)** | pve:/md1400/archive/media-cold/movies | Cold tier (manual rehydration) | Snapshot only | Infrequent access |
-| **TV (recent)** | synology918:/volume1/media-home/tv | media-home VM 106 | Not backed up | Active series |
+| **TV (home current-watch, transitional)** | synology918:/volume1/media-staging/tv | media-home VM 106 | Not backed up | No dedicated hot-library share exists yet; current live share truth is staging-first. |
 | **TV (main library)** | pve:/media/tv | streaming-stack VM 210 | Not backed up | 5.5T current |
 | **TV (completed series)** | pve:/md1400/archive/media-cold/tv | Cold tier | Snapshot only | Binge-watched, done |
 | **Music** | pve:/media/music | streaming-stack VM 210 (Navidrome) | Not backed up | 666G current |
@@ -324,15 +327,13 @@ frequency: Monthly
 
 ```
 /volume1/
-  media-home/                    # Active home playback library
-    movies/                      # Favorites + recent
-    tv/                          # Active series
-    music/                       # Home music (if separate from shop)
-  media-staging/                 # Download staging (<100G target)
-    incoming/                    # Fresh downloads
-    processing/                  # *arr import in progress
-  media-holds/                   # Overflow from shop (if needed)
-  hot-media/                     # (Purpose unclear - to be audited)
+  media-staging/                 # Current live media import/current-watch share
+    downloads/                   # Fresh downloads + in-flight staging
+    movies/                      # Current live movies subtree
+    tv/                          # Current live TV subtree
+    music/                       # Current live music subtree
+  media-holds/                   # Explicit hold/review/overflow share
+  # No live /volume1/media-home share currently exists
 ```
 
 ---
@@ -490,8 +491,9 @@ frequency: Monthly
 
 **Steps**:
 1. Audit Synology media volumes:
-   - What's in /volume1/media-home/?
-   - What's in /volume1/hot-media/?
+   - Confirm `/volume1/media-staging/` is still the only populated/exported media share consumed by VM 106.
+   - Confirm `/volume1/media-holds/` remains a hold/review lane, not a disguised main library.
+   - Delete root-owned ghost placeholder dirs once a root/DSM-console cleanup path is available.
    - What's in /volume1/media-holds/?
 2. Define home tier content policy:
    - Favorites only? Or favorites + recent?
@@ -563,7 +565,7 @@ ssh streaming-stack "du -sh /mnt/media/*"
 ssh pve "du -sh /md1400/archive/media-*"
 
 # Home tier content
-ssh nas "du -sh /volume1/media-home/* /volume1/media-staging/*"
+ssh nas "du -sh /volume1/media-staging /volume1/media-holds"
 ```
 
 ### Downloads Bloat Check

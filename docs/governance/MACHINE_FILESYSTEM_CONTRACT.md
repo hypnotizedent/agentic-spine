@@ -162,9 +162,11 @@ Purpose: make every managed machine boring to read. A path must tell the operato
 - No mystery durable app piles should accumulate directly on the hypervisor filesystem
 
 ### `synology918`
-- `/volume1/backups/...` = canonical home backup plane
-- `/volume1/media-holds/...` = canonical home hot/current library plane
-- `/volume1/media-staging/...` = canonical home import / warm / rehydration plane
+- `/volume1/backups/proxmox_backups/dump` = canonical home VM/LXC backup lane
+- `/volume1/backups/_legacy_tombstones` = explicit retired backup subtree
+- `/volume1/media-staging/...` = canonical active home media import surface and the only live share currently consumed by `media-home` VM 106
+- `/volume1/media-holds/...` = canonical hold/review/overflow lane, not the primary playback library
+- Empty placeholder names such as `/volume1/media-home`, `/volume1/media`, `/volume1/hot-media`, `/volume1/live-library`, and `/volume1/library-home` are defects, not canonical roots
 
 ## Operator Rule
 

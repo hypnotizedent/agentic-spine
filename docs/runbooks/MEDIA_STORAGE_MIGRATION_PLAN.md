@@ -35,13 +35,13 @@ This runbook provides step-by-step procedures for safely migrating the media sto
 
 ### Home (synology918 + media-home VM 106)
 - **Synology**: 20T total, 34% usage (6.5T/20T)
-- **media-home VM 106**: Live on proxmox-home, **NOT in governance**
+- **media-home VM 106**: Live on proxmox-home and now governed; current live Synology share consumed is `/volume1/media-staging`
 
 ### Problems (Phase 1 Results)
 1. ✅ **RESOLVED**: media pool 96% → 86% (2.77T reclaimed)
 2. ✅ **RESOLVED**: 2.3T downloads bloat → 105G (staging-only rule restored)
 3. ✅ **RESOLVED**: Quarantine tier created and operational (456 items quarantined)
-4. **media-home VM 106 ungoverned** operational blind spot
+4. **No dedicated home hot-library share is live**; Synology current-watch/import still rides `/volume1/media-staging`
 5. **Unclear tier boundaries** which host is canonical for what?
 
 ---
@@ -576,18 +576,15 @@ git commit -m "fix(hardware): Update media pool to 4x14TB SAS after replacement"
 ssh nas "ls -lh /volume1/ | grep media"
 
 # Check usage
-ssh nas "du -sh /volume1/media-home/* /volume1/hot-media/* /volume1/media-holds/* /volume1/media-staging/*"
+ssh nas "du -sh /volume1/media-staging /volume1/media-holds"
 
 # Check what's in each volume
-ssh nas "find /volume1/media-home -maxdepth 2 -type d"
-ssh nas "find /volume1/hot-media -maxdepth 2 -type d"
 ssh nas "find /volume1/media-holds -maxdepth 2 -type d"
 ssh nas "find /volume1/media-staging -maxdepth 2 -type d"
 ```
 
 **Questions to answer**:
-- What's in /volume1/media-home? (empty? has content?)
-- What's in /volume1/hot-media? (duplicate of media-home? different purpose?)
+- Are any empty placeholder share names still physically present under `/volume1`?
 - What's in /volume1/media-holds? (shop overflow? sync staging?)
 - What's in /volume1/media-staging? (active downloads? empty?)
 
@@ -625,7 +622,7 @@ ssh nas "find /volume1/media-staging -maxdepth 2 -type d"
   os: ubuntu-24.04  # Verify actual OS
   status: active
   owner: ronny
-  description: "Home media playback VM. Mounts Synology media-home and media-staging exports. Serves Jellyfin/Plex to home network."
+  description: "Home media playback VM. Currently consumes Synology media-staging; no separate live media-home share exists."
 ```
 
 **Add to backup.inventory.yaml**:
@@ -673,7 +670,7 @@ ssh media-home "df -h && docker ps"
 
 # Check Synology mounts
 ssh media-home "mount | grep volume1"
-# Expected: /volume1/media-home and /volume1/media-staging mounted
+# Expected: /volume1/media-staging mounted; /volume1/media-holds may be absent on the guest
 
 # Test Jellyfin (or Plex) playback from home network
 # - Open Jellyfin UI (http://media-home:8096 or http://10.0.0.106:8096)
@@ -681,7 +678,7 @@ ssh media-home "mount | grep volume1"
 # - Verify: fast playback, no buffering
 
 # Measure read latency (optional)
-ssh media-home "dd if=/volume1/media-home/movies/test.mkv of=/dev/null bs=1M count=100"
+ssh media-home "dd if=/volume1/media-staging/movies/test.mkv of=/dev/null bs=1M count=100"
 # Expected: >100MB/s read speed
 ```
 
@@ -710,11 +707,11 @@ ITEM=$2    # path to movie/TV item
 case $ACTION in
   promote)
     # Move from shop warm → home hot
-    rsync -avh --remove-source-files "pve:/media/movies/$ITEM" "nas:/volume1/media-home/movies/$ITEM"
+    rsync -avh --remove-source-files "pve:/media/movies/$ITEM" "nas:/volume1/media-staging/movies/$ITEM"
     ;;
   archive)
     # Move from home hot → shop cold
-    rsync -avh --remove-source-files "nas:/volume1/media-home/movies/$ITEM" "pve:/md1400/archive/media-cold/movies/$ITEM"
+    rsync -avh --remove-source-files "nas:/volume1/media-staging/movies/$ITEM" "pve:/md1400/archive/media-cold/movies/$ITEM"
     ;;
   *)
     echo "Usage: media-home-sync {promote|archive} <item>"
@@ -729,7 +726,7 @@ esac
 ./bin/ops cap run media.home.sync -- promote "Test Movie (2024)"
 
 # Verify movie moved to home and playback works
-ssh media-home "ls -lh /volume1/media-home/movies/Test\ Movie\ \(2024\)"
+ssh media-home "ls -lh /volume1/media-staging/movies/Test\ Movie\ \(2024\)"
 # Play in Jellyfin on media-home
 
 # Archive one test movie

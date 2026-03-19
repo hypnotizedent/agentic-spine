@@ -3,7 +3,7 @@
 # Companion to: docs/governance/SYNOLOGY_918_STORAGE_MANIFEST_V1.md
 # Authority: authoritative
 # Last verified: 2026-03-19
-version: 1.2
+version: 1.3
 loop: LOOP-BACKUP-PLANE-CONSOLIDATION-730XD-E2E-20260308
 
 device:
@@ -41,11 +41,21 @@ canonical_roles:
     synology_path_root: /volume1/backups/_legacy_tombstones
     current_use: active_tombstone_subtree
     detail: "Explicit quarantine subtree for retired Synology backup lanes. These paths are not canonical backup authority."
+  - role_id: home-media-staging
+    canonical_authority: synology
+    synology_path_root: /volume1/media-staging
+    current_use: active_media_import_and_transitional_watch_surface
+    detail: "This is the only populated/exported Synology media share currently consumed by media-home VM 106. It is the live current-watch/import surface until a dedicated hot-library share exists."
+  - role_id: home-media-holds
+    canonical_authority: synology
+    synology_path_root: /volume1/media-holds
+    current_use: active_hold_review_surface
+    detail: "Explicit hold/review/overflow share. This is not the primary playback library."
   - role_id: home-personal-data
     canonical_authority: synology
     synology_path_root: /volume1
     current_use: active
-    detail: "Immich, photo archives, media staging, documents, and homelab assets remain canonical on Synology."
+    detail: "Immich, photo archives, media staging, media holds, documents, and homelab assets remain canonical on Synology. No separate /volume1/media-home share is live."
 
 business_app_grace_mirror:
   canonical_recovery_plane:
@@ -118,6 +128,51 @@ legacy_backup_tombstones:
       size: 8K
       note: retired_media_config_standalone_lane
 
+share_surface_truth:
+  registered_active_shares:
+    - share_name: backups
+      path: /volume1/backups
+      protocols:
+        - smb
+        - nfs
+      detail: Canonical home backup share family plus explicit legacy tombstones.
+    - share_name: media-staging
+      path: /volume1/media-staging
+      protocols:
+        - smb
+        - nfs
+      exported_to:
+        - 10.0.0.106
+        - 10.0.0.179
+      detail: Only populated/exported media share currently consumed by media-home VM 106.
+    - share_name: media-holds
+      path: /volume1/media-holds
+      protocols:
+        - smb
+        - nfs
+      exported_to:
+        - 10.0.0.179
+      detail: Explicit hold/review share; empty but intentional.
+  ghost_placeholder_dirs:
+    - path: /volume1/media-home
+      status: empty_unregistered_placeholder
+      cleanup_state: root_owned_removal_blocked_2026_03_19
+    - path: /volume1/media
+      status: empty_unregistered_placeholder
+      cleanup_state: root_owned_removal_blocked_2026_03_19
+    - path: /volume1/hot-media
+      status: empty_unregistered_placeholder
+      cleanup_state: root_owned_removal_blocked_2026_03_19
+    - path: /volume1/live-library
+      status: empty_unregistered_placeholder
+      cleanup_state: root_owned_removal_blocked_2026_03_19
+    - path: /volume1/library-home
+      status: empty_unregistered_placeholder
+      cleanup_state: root_owned_removal_blocked_2026_03_19
+    - path: /volume1/tmp-spine-share
+      status: empty_unregistered_placeholder
+      cleanup_state: root_owned_removal_blocked_2026_03_19
+
 home_personal_data:
   - path: /volume1/im2ch/
     size: 2.3T
@@ -126,8 +181,11 @@ home_personal_data:
     size: 1.9T
     role: personal_photo_archive
   - path: /volume1/media-staging/
-    size: 602G
-    role: media_staging
+    size: 1.4T
+    role: media_import_and_transitional_current_watch_surface
+  - path: /volume1/media-holds/
+    size: 0B
+    role: media_hold_review_surface
   - path: /volume1/documents/
     size: 81G
     role: documents_archive

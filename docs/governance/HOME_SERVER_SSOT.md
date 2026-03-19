@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-18
+last_verified: 2026-03-19
 verification_method: home inventory parity + live proxmox/synology read-only checks
 scope: home-control-plane-summary
 ---
@@ -38,7 +38,7 @@ Authority boundary:
 | Plane | Canonical surface | Boring target |
 |-------|-------------------|---------------|
 | Substrate | `ops/bindings/home.hardware.inventory.yaml` + `ops/bindings/home.proxmox.inventory.yaml` | `proxmox-home` is the only home hypervisor. |
-| Storage | `ops/bindings/home.storage.map.yaml` + `ops/bindings/synology918.storage.manifest.yaml` | `local-lvm` = hot runtime boot disks, Synology `/volume1/backups/proxmox_backups/dump` = canonical home VM/LXC backup lane, Synology `/volume1/media-holds` + `/volume1/media-staging` = home media watch/import lanes, Synology `/volume1` = canonical home personal-data lane. |
+| Storage | `ops/bindings/home.storage.map.yaml` + `ops/bindings/synology918.storage.manifest.yaml` | `local-lvm` = hot runtime boot disks, Synology `/volume1/backups/proxmox_backups/dump` = canonical home VM/LXC backup lane, Synology `/volume1/media-staging` = current active home media import/current-watch share, Synology `/volume1/media-holds` = explicit hold/review lane, and there is no separate live `/volume1/media-home` share. |
 | Runtime | `ops/bindings/home.proxmox.inventory.yaml` | Every kept home workload is a named VM/LXC; `media-home` VM 106 is now explicit as the transitional home media/watch plane, and decommissioned guests are explicit tombstones. |
 | Network | `ops/bindings/home.unifi.network.inventory.yaml` + `ops/bindings/network.dns.local.registry.yaml` | One LAN truth, one local DNS truth, and one Tailscale access path per kept node. |
 | Ingress | `ops/bindings/home.ingress.map.yaml` + `ops/bindings/domain.routing.registry.yaml` | Public home ingress is minimal and intentional; LAN ingress uses `.mint.local`; remote private ingress uses Tailscale or proxmox relay. |
