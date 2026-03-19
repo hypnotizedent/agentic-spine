@@ -102,6 +102,14 @@ consent_required="$(yq e -r ".consent.channels.\"$CHANNEL\".require_opt_in" "$PO
 if [[ -z "$consent_required" || "$consent_required" == "null" ]]; then
   consent_required="true"
 fi
+if [[ "$CHANNEL" == "email" ]]; then
+  internal_mailbox_bypass="$(yq e -r '.internal_mailbox_policy.email_bypass_opt_in_for_allowed_mailboxes // false' "$POLICY_CONTRACT")"
+  if [[ "$internal_mailbox_bypass" == "true" ]]; then
+    if yq e -r '.write_authority.allowed_mailboxes_now[]?' "$PROVIDERS_CONTRACT" 2>/dev/null | grep -Fxiq "$RECIPIENT"; then
+      consent_required="false"
+    fi
+  fi
+fi
 policy_block_reasons="[]"
 if [[ "$consent_required" == "true" && "$CONSENT_STATE" != "opted-in" ]]; then
   policy_block_reasons="$(echo "$policy_block_reasons" | jq -c --arg reason "consent_not_opted_in" '. + [$reason]')"

@@ -1,20 +1,29 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-17
+last_verified: 2026-03-19
 scope: mint-customer-inbox-machine
 version: "1.0"
-updated_at: "2026-03-17"
+updated_at: "2026-03-19"
 capability: mint.customer.inbox.machine
 
 surface:
-  description: Durable Mint inbox-item state machine for the canonical team@ customer-service lane.
+  description: Durable Mint customer inbox machine for the canonical team@ customer-service lane, including governed voice follow-up projection from the Mint front desk number.
   canonical_mailbox: team@mintprints.com
-  queue_capability: mint.customer.inbox.work_items
-  open_capability: mint.customer.inbox.item.get
-  transition_capability: mint.customer.inbox.transition
-  promote_capability: mint.customer.inbox.promote_to_team
-  completion_capability: mint.customer.inbox.complete
+  channels:
+    - email
+    - voice
+  mailbox_search_capability: communications.mail.search
+  mailbox_thread_capability: microsoft.mail.message.get
+  mailbox_reply_capability: microsoft.mail.draft.reply
+  voice_ingest_capability: mint.customer.voice.intake.capture
+  voice_callback_capability: mint.customer.voice.callback.enqueue
+  voice_facts_capability: mint.customer.frontdesk.facts.get
+  voice_projection_rule: "Calls that require human follow-up project into team@ as structured governed email from the transactional communications path; calls handled fully by the assistant remain runtime records only."
+  runtime_roots:
+    interactions: /Users/ronnyworks/code/.runtime/spine/state/mint/customer-interactions
+    callbacks: /Users/ronnyworks/code/.runtime/spine/state/mint/customer-voice-callbacks
+    mailbox_projection_mailbox: team@mintprints.com
 
 source_mailboxes:
   canonical_team_mailbox: team@mintprints.com
@@ -28,6 +37,8 @@ source_modes:
     description: Real customer/business email that already landed in team@.
   promoted_forward:
     description: Governed promote-to-team copy from ronny@/info@ into team@ for agent handling without repointing or mutating historical mailbox identity.
+  voice_projection:
+    description: Governed internal projection generated from the Mint front desk voice lane when operator follow-up is required.
 
 reply_anchor_modes:
   reply_chain:
@@ -91,3 +102,18 @@ promote_comment:
   footer: END MINT TEAM PROMOTE
   search_key_prefix: MIP-
   note: Promote into team@ so the customer lane has one governed queue object and Ronny can park the original source copy.
+
+voice_lane:
+  canonical_number: "+15619335513"
+  telephony_provider: twilio
+  orchestration_provider: vapi
+  webhook_ingress: n8n
+  post_call_payload_capability: mint.customer.voice.intake.capture
+  followup_projection_mailbox: team@mintprints.com
+  followup_projection_sender: no-reply@mintprints.com
+  callback_runtime_root: /Users/ronnyworks/code/.runtime/spine/state/mint/customer-voice-callbacks
+  interaction_runtime_root: /Users/ronnyworks/code/.runtime/spine/state/mint/customer-interactions
+  invariants:
+    - "Voice is not a separate customer queue; it projects into the canonical team@ lane only when operator follow-up is required."
+    - "Twilio carries the number, Vapi orchestrates the call, and n8n posts one normalized event into the governed mint.customer.voice.* capability surface."
+    - "The runtime records are authoritative for call evidence; the mailbox projection is the operator-facing escalation object."
