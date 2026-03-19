@@ -1,0 +1,508 @@
+# Surveillance Operating Model Contract
+# Non-secret. Spine-native.
+# Status: authoritative
+# Authority: Ronny (ops)
+# Created: 2026-03-19
+# Purpose: Define lean smart-monitoring operating model for shop surveillance
+
+version: 1.0
+status: authoritative
+last_updated: 2026-03-19
+owner: "@ronny"
+
+# Operating Model Classification
+classification:
+  model_type: lean_smart_monitoring
+  not_model_type: retained_archival_nvr
+  rationale: |
+    Ronny's stated intent is remote shop monitoring, smart detection, and
+    useful recent playback for incident review - NOT a giant passive footage
+    archive for forensic search or compliance retention.
+
+# Purpose and Scope
+purpose:
+  primary:
+    - Remote live camera access from anywhere (phone, browser, Home Assistant)
+    - Smart shop monitoring via AI detections (person, vehicle activity)
+    - Recent incident review (7-day playback window for investigation)
+    - Manual export workflow for important incidents (customer disputes, security events)
+
+  secondary:
+    - Home Assistant integration (camera state, MQTT motion/detection events)
+    - Shop status awareness (activity, parking, closed hours monitoring)
+
+  explicitly_out_of_scope:
+    - Long-term passive footage archive (30-90 day rolling retention)
+    - Forensic-grade retention for compliance/legal requirements
+    - Continuous 24/7 recording (motion-only reduces disk 70-80%)
+    - High-resolution archive (current 704x480 adequate for shop monitoring)
+
+# Camera Inventory and Classification
+cameras:
+  total_count: 8
+  resolution: 704x480
+  fps: 5
+  detection_hardware: cpu  # No Coral TPU
+
+  tier_1_perimeter_security:
+    count: 3
+    cameras:
+      - id: front_drive
+        zone_type: perimeter_security
+        purpose: Shop entrance, parking, deliveries
+        security_value: high
+        activity_level: high
+        detection_types: [person, car, motorcycle, bicycle]
+        description: Primary security camera - main shop entrance and parking lot monitoring
+
+      - id: bay5_back
+        zone_type: perimeter_security
+        purpose: Back loading area, employee entrance
+        security_value: high
+        activity_level: medium
+        detection_types: [person, car]
+        description: Secondary security camera - employee entrance and delivery bay monitoring
+
+      - id: front_exit
+        zone_type: ingress_egress
+        purpose: Customer exit, foot traffic
+        security_value: high
+        activity_level: high
+        detection_types: [person, car]
+        description: Customer flow monitoring - incident review value for disputes and exit activity
+
+  tier_2_interior_monitoring:
+    count: 5
+    cameras:
+      - id: sticker
+        zone_type: interior_monitoring
+        purpose: Sticker workstation area
+        security_value: medium
+        activity_level: medium
+        detection_types: [person]
+        description: Operations monitoring - sticker production workstation
+
+      - id: emb
+        zone_type: interior_monitoring
+        purpose: Embroidery workstation area
+        security_value: medium
+        activity_level: medium
+        detection_types: [person]
+        description: Operations monitoring - embroidery production workstation
+
+      - id: dtg
+        zone_type: interior_monitoring
+        purpose: DTG printing workstation area
+        security_value: medium
+        activity_level: medium
+        detection_types: [person]
+        description: Operations monitoring - DTG printing workstation
+
+      - id: screen_room
+        zone_type: interior_monitoring
+        purpose: Screen printing room
+        security_value: medium
+        activity_level: medium
+        detection_types: [person]
+        description: Operations monitoring - screen printing production room
+
+      - id: dark_room
+        zone_type: interior_monitoring
+        purpose: Dark room / prep area
+        security_value: medium
+        activity_level: low
+        detection_types: [person]
+        description: Contextual coverage - infrequent access area
+
+# Retention Policy (Tiered by Evidence Value)
+retention_policy:
+  policy_version: 2.0  # v1.0 was aspirational 14d/30d, v2.0 is achievable 7d/14d
+
+  tier_1_critical_evidence:
+    type: manual_exports
+    purpose: Long-term preservation of incident evidence
+    hot_retention_days: 30
+    hot_storage_path: /srv/data/surveillance/clips/export
+    cold_retention_years: 2
+    cold_storage_path: /mnt/md1400/archive/surveillance-exports
+    offsite_backup: true
+    offsite_backup_path: synology918:/volume1/backups/pve/md1400
+    auto_purge: false  # Manual monthly archive move + annual review
+    operator_action_required: export_within_7d_then_monthly_archive_move
+
+  tier_2_high_value:
+    type: detection_clips
+    purpose: AI-filtered events (person, vehicle detections)
+    retention_days: 14
+    storage_path: /srv/data/surveillance/clips
+    disk_footprint_gb: 11
+    backup: false  # Ephemeral by design
+    auto_purge: true
+    auto_purge_method: frigate_automatic_after_retention_expires
+
+  tier_3_medium_value:
+    type: motion_recordings
+    purpose: Raw motion recordings (context, incident discovery)
+    retention_days: 7
+    storage_path: /srv/data/surveillance/recordings
+    disk_footprint_gb: 1386
+    backup: false  # Ephemeral by design, high volume
+    auto_purge: true
+    auto_purge_method: frigate_automatic_after_retention_expires
+
+  tier_4_low_value:
+    type: snapshots_cache
+    purpose: Frigate UI thumbnails for timeline preview
+    retention_days: 30
+    storage_path: /srv/data/surveillance/snapshots
+    disk_footprint_gb: 0.1
+    backup: false  # Rebuildable UI cache
+    auto_purge: true
+    auto_purge_method: frigate_automatic_lru
+
+  # Unified Frigate config (maps to tiers)
+  frigate_config:
+    record:
+      retain:
+        days: 7  # Tier 3 (motion)
+        mode: motion
+      events:
+        retain:
+          default: 14  # Tier 2 (detections)
+          mode: motion
+      continuous:
+        days: 0  # Disabled (motion-only)
+    snapshots:
+      retain:
+        default: 30  # Tier 4 (UI cache)
+
+# Capacity Target (Derived from Operating Model)
+capacity:
+  disk_size_gb: 2000  # 2TB
+  disk_allocation_method: lvm_from_pve_tank_pool
+  disk_cost: 0  # Uses existing pve capacity (9.3TB available)
+
+  # Recording rate (measured 2026-03-19)
+  recording_rate:
+    cameras_active: 8
+    resolution: 704x480
+    fps: 5
+    measured_gb_per_hour: 8.25
+    measured_gb_per_day: 198
+    measured_gb_per_week: 1386
+
+  # Capacity breakdown
+  capacity_breakdown:
+    tier_1_exports_buffer_gb: 100
+    tier_2_detection_clips_gb: 11
+    tier_3_motion_recordings_gb: 1386
+    tier_4_snapshots_gb: 0.1
+    total_used_gb: 1497
+    free_buffer_gb: 503
+    steady_state_usage_pct: 75
+
+  # Thresholds
+  thresholds:
+    warn_pct: 85
+    critical_pct: 90
+    emergency_purge_pct: 92  # Frigate hardcoded threshold
+
+  # Capacity planning rules
+  camera_count_limit:
+    max_cameras_2tb_disk: 10  # 11+ requires 3TB disk for 7d retention
+    current_cameras: 8
+    headroom: 2  # Can add 2 more cameras before capacity pressure
+
+  # Growth scenarios
+  growth_scenarios:
+    - scenario: camera_count_increase_to_12
+      required_disk_gb: 3000
+      trigger: Adding 4+ cameras
+
+    - scenario: resolution_upgrade_to_1080p
+      required_disk_gb: 5000
+      trigger: 3x recording rate increase
+
+    - scenario: retention_increase_to_14d
+      required_disk_gb: 3000
+      trigger: Operating model reclassified to retained_archival_nvr
+
+# Export and Archive Workflow
+export_workflow:
+  version: 1.0
+
+  stages:
+    stage_1_hot_export:
+      purpose: Operator export staging
+      path: /srv/data/surveillance/clips/export
+      retention_days: 30
+      capacity_gb: 100
+      backup: false
+      operator_action: export_via_frigate_ui_within_7d
+
+    stage_2_cold_archive:
+      purpose: Long-term incident evidence
+      path: /mnt/md1400/archive/surveillance-exports
+      retention_years: 2
+      capacity_gb: 100
+      backup: true
+      backup_destination: synology918:/volume1/backups/pve/md1400
+      backup_frequency: weekly
+      operator_action: monthly_archive_move_1st_of_month
+
+    stage_3_offsite_backup:
+      purpose: Disaster recovery
+      path: synology918:/volume1/backups/pve/md1400
+      retention: permanent_until_annual_review
+      capacity_unlimited: true
+      operator_action: none_automatic
+
+  # Operator tasks
+  operator_tasks:
+    - name: export_incident
+      frequency: as_needed_within_7d
+      duration_minutes: 5
+      description: Export important footage via Frigate UI "Export" button
+      trigger: Incident may need long-term preservation (dispute, legal, security)
+
+    - name: monthly_archive_move
+      frequency: monthly_1st
+      duration_minutes: 15
+      description: Rsync hot exports from Stage 1 to Stage 2 (cold archive)
+      command: |
+        rsync -av --remove-source-files \
+          /srv/data/surveillance/clips/export/ \
+          /mnt/md1400/archive/surveillance-exports/$(date +%Y-%m)/
+
+    - name: annual_review
+      frequency: yearly_january
+      duration_minutes: 60
+      description: Review and delete exports older than 2 years (no legal hold)
+      command: |
+        find /mnt/md1400/archive/surveillance-exports/ -type d -mtime +730
+        # Review, delete if no ongoing legal/business need
+
+  # Health checks
+  health_checks:
+    - name: hot_export_under_50gb
+      check_method: du_size
+      path: /srv/data/surveillance/clips/export
+      threshold_gb: 50
+      action: warn_monthly_archive_overdue
+
+    - name: hot_export_under_100gb
+      check_method: du_size
+      path: /srv/data/surveillance/clips/export
+      threshold_gb: 100
+      action: critical_export_staging_full
+
+    - name: monthly_archive_move_completed
+      check_method: find_files_older_than
+      path: /srv/data/surveillance/clips/export
+      age_days: 45
+      action: alert_if_any_found
+
+    - name: cold_archive_under_500gb
+      check_method: du_size
+      path: /mnt/md1400/archive/surveillance-exports
+      threshold_gb: 500
+      action: warn_annual_review_recommended
+
+# Boringness Criteria (What "Boring Surveillance" Means)
+boringness:
+  definition: |
+    Surveillance is boring when config matches reality, retention is predictable,
+    emergency purges are rare (not daily), and operator can trust the system.
+
+  criteria:
+    - id: config_matches_reality
+      description: Config says 7-day retention → 7 days of recordings actually exist
+      check_method: find /mnt/data/frigate/recordings -maxdepth 1 -type d -name "2026-*" | wc -l
+      expected_result: 7
+      status: ready
+
+    - id: disk_usage_stable
+      description: Disk usage stable 70-80% (not oscillating 77-92% due to emergency purges)
+      check_method: df -h /mnt/data | awk '{print $5}' | tail -1
+      expected_result: 70-80%
+      status: ready
+
+    - id: zero_emergency_purges
+      description: No emergency purges in last 30 days
+      check_method: docker logs frigate 2>&1 | grep -c "storage maintenance"
+      expected_result: 0
+      status: ready
+
+    - id: operator_trust
+      description: Operator can review incidents from past week without guessing if footage exists
+      check_method: manual_operator_verification
+      expected_result: playback_reliable_for_7d_window
+      status: ready
+
+    - id: export_workflow_clear
+      description: Important incidents → hot staging → cold archive → offsite backup
+      check_method: manual_operator_verification
+      expected_result: workflow_documented_and_practiced
+      status: ready
+
+    - id: capacity_planning_explicit
+      description: Camera count + resolution + retention → disk size formula documented
+      check_method: verify_contract_exists
+      expected_result: this_contract_file
+      status: ready
+
+    - id: health_check_green
+      description: surveillance.stack.status returns HEALTHY
+      check_method: ./bin/ops cap run surveillance.stack.status
+      expected_result: all_checks_pass
+      status: ready
+
+    - id: ha_integration_healthy
+      description: Home Assistant sees 8 cameras and detection events
+      check_method: manual_ha_verification
+      expected_result: 8_cameras_visible_events_flowing
+      status: ready
+
+# Health Checks (Automated Monitoring)
+health_checks:
+  - name: disk_usage_under_85pct
+    check_method: df_usage_percent
+    path: /mnt/data
+    threshold: 85
+    frequency: every_5_minutes
+    action: ntfy_alert_ops_channel
+
+  - name: zero_emergency_purges_24h
+    check_method: grep_docker_logs
+    container: frigate
+    pattern: "storage maintenance"
+    threshold: 0
+    lookback_hours: 24
+    frequency: hourly
+    action: ntfy_alert_frigate_emergency_purge_detected
+
+  - name: retention_reality_check_7d
+    check_method: count_recording_directories
+    path: /mnt/data/frigate/recordings
+    pattern: "2026-*"
+    expected: 7
+    threshold_min: 6  # Allow 1 day variance (Day 6-7 accumulation)
+    frequency: daily
+    action: ntfy_alert_retention_collapsed
+
+  - name: config_vs_capacity_drift
+    check_method: capacity_math
+    formula: (retention_days * 198GB) < (disk_total * 0.8)
+    frequency: on_config_change
+    action: block_commit_if_capacity_insufficient
+
+# Drift Detection
+drift_scenarios:
+  - name: config_increased_without_disk_expansion
+    symptom: Config says 14-day motion, disk still 2TB
+    detection: capacity_check_fails
+    action: block_config_commit_via_pre_commit_hook
+
+  - name: camera_count_increased_without_capacity_review
+    symptom: 12 cameras active, disk still 2TB, 7-day retention config
+    detection: disk_usage_exceeds_90pct
+    action: alert_operator_reduce_retention_or_upgrade_disk
+
+  - name: emergency_purges_return
+    symptom: Frigate logs show "storage maintenance"
+    detection: daily_health_check_grep_finds_purges
+    action: alert_operator_investigate_blackhole_regression
+
+  - name: export_directory_accumulation
+    symptom: /srv/data/surveillance/clips/export exceeds 50-100 GB
+    detection: weekly_operator_check_or_automated_du
+    action: warn_operator_monthly_archive_move_overdue
+
+# Trust Model (What Operator Should Trust)
+trust_model:
+  config_matches_reality:
+    trust: Config retention values are achievable, not aspirational
+    verification: Audit retention directories match config retention days
+
+  retention_is_predictable:
+    trust: 7 days of footage always available (not 8 hours, not random)
+    verification: Zero emergency purges in last 30 days
+
+  export_workflow_is_clear:
+    trust: Operator knows where exports go and how long they're kept
+    verification: Monthly archive move completed, cold archive path documented
+
+  disk_pressure_is_visible:
+    trust: Operator gets alert before emergency purges trigger
+    verification: Ntfy alert at 85% disk usage (before 92% emergency threshold)
+
+  capacity_planning_is_explicit:
+    trust: Operator knows when to upgrade disk (camera count, resolution, retention rules)
+    verification: This contract documents growth scenarios and disk size formula
+
+# Related Documentation
+related_docs:
+  evidence_files:
+    - path: .evidence/spine/verify/SURVEILLANCE_OPERATING_MODEL_CONTRACT_20260319.md
+      description: Full operating model contract narrative
+    - path: .evidence/spine/verify/SURVEILLANCE_CAMERA_CLASSIFICATION_20260319.csv
+      description: Camera classification by zone, value, retention tier
+    - path: .evidence/spine/verify/SURVEILLANCE_RETENTION_BY_VALUE_20260319.md
+      description: Tiered retention policy by evidence value
+    - path: .evidence/spine/verify/SURVEILLANCE_EXPORT_ARCHIVE_WORKFLOW_20260319.md
+      description: Export workflow (hot → cold → offsite)
+    - path: .evidence/spine/verify/SURVEILLANCE_CAPACITY_TARGET_DECISION_20260319.md
+      description: 2TB vs 3TB reconciliation and capacity decision
+    - path: .evidence/spine/verify/SURVEILLANCE_REMEDIATION_SPEC_20260319.md
+      description: Execution plan for implementing operating model
+
+  prior_audits:
+    - path: .evidence/spine/verify/SURVEILLANCE_NORMALIZATION_WAVE_20260319.md
+      description: Filesystem normalization (home-dir → /srv structure)
+    - path: .evidence/spine/verify/SURVEILLANCE_RETENTION_AUDIT_20260319.md
+      description: Blackhole behavior audit (27x undersized disk)
+    - path: .evidence/spine/verify/SURVEILLANCE_RETENTION_POLICY_20260319.md
+      description: Retention policy analysis (aspirational vs achievable)
+    - path: .evidence/spine/verify/SURVEILLANCE_DISK_PRESSURE_ANALYSIS_20260319.md
+      description: Disk pressure root cause (27x undersized, emergency purges)
+
+  config_files:
+    - path: /srv/config/surveillance/config.yml
+      description: Frigate retention configuration (target 7d/14d after remediation)
+    - path: /srv/config/surveillance/docker-compose.yml
+      description: Frigate stack compose file
+
+  governance_bindings:
+    - path: ops/bindings/vm.lifecycle.yaml
+      description: VM 215 disk allocation (100GB → 2TB after remediation)
+    - path: ops/bindings/services.health.yaml
+      description: Surveillance health check thresholds
+    - path: docs/governance/SHOP_SERVER_SSOT.md
+      description: Shop server canonical authority
+
+# Implementation Status
+implementation_status:
+  current_state: blackhole
+  current_state_description: |
+    100GB disk, emergency purges 2-3x daily, 8-hour actual retention (not 14-day config),
+    operator cannot trust retention, config lies about capability.
+
+  target_state: boring
+  target_state_description: |
+    2TB disk, zero emergency purges, 7-day actual retention (matches 7-day config),
+    operator can trust retention, config matches disk capacity.
+
+  remediation_required: true
+  remediation_spec: .evidence/spine/verify/SURVEILLANCE_REMEDIATION_SPEC_20260319.md
+  remediation_timeline: next_30_days
+  remediation_downtime: 5-10_minutes
+  remediation_cost: 0_dollars
+
+  verification_gates:
+    - frigate_service_healthy
+    - recordings_exist_7d
+    - disk_usage_stable_70_80pct
+    - zero_emergency_purges
+    - surveillance_health_check_healthy
+    - config_matches_reality
+    - ha_integration_working
