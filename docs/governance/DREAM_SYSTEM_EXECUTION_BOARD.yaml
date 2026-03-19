@@ -78,13 +78,15 @@ concern_families:
     description: "Agentic-foundation agent contracts should generate from spine registry"
     authority_file: agentic-spine/ops/bindings/agents.registry.yaml
     projection_files:
-      - "agentic-foundation/docs/agents/*.contract.md (26 files)"
-    current_state: compatibility_stubs_hand_maintained
+      - "agentic-foundation/docs/agents/*.contract.md (17 files)"
+    current_state: projection_markers_normalized_manual_body_dependencies_remaining
     target_state: generated_projection
     blast_radius: 2
     backfill_frequency: low
     rollout_priority: 4
     generator_exists: false
+    normalization_tool_exists: true
+    verification_exists: true
     gate_exists: false
     estimated_effort_hours: 2
 
@@ -93,13 +95,13 @@ concern_families:
     authority_file: "ronny-products/*/app.contract.yaml"
     projection_files:
       - ronny-products/EXECUTION_BOARD.md
-    current_state: hand_maintained_262_lines
+    current_state: generated_projection_with_repo_local_lock
     target_state: generated_projection
     blast_radius: 2
     backfill_frequency: medium
     rollout_priority: 5
-    generator_exists: false
-    gate_exists: false
+    generator_exists: true
+    gate_exists: true
     estimated_effort_hours: 2
 
 backlog:
@@ -204,28 +206,32 @@ backlog:
     concern_family: foundation_agent_contract_surfaces
     authority_file: agentic-spine/ops/bindings/agents.registry.yaml
     projection_files:
-      - "agentic-foundation/docs/agents/*.contract.md (26 files)"
-    current_state: hand_maintained_compatibility_stubs
+      - "agentic-foundation/docs/agents/*.contract.md (17 files)"
+    current_state: projection_markers_normalized_manual_body_dependencies_remaining
     target_state: generated_projection
     blast_radius: 2
     priority: 4
-    status: not_started
+    status: blocked
     type: generator
     generator_exists: false
     generator_capability_name: foundation.agent.contracts.build
+    normalization_tool_exists: true
+    normalization_capability_name: foundation.agent.contracts.normalize
+    verification_exists: true
     gate_exists: false
     gate_id_planned: D404
     recommended_next_action: |
-      1. Write generator cap: ops/generators/gen-foundation-agent-contracts.sh
-      2. Generator reads spine's agents.registry.yaml
-      3. Produces markdown contracts in agentic-foundation/docs/agents/
-      4. Add D404 gate checking contracts ↔ registry parity
-      5. Run generator once, commit result to agentic-foundation repo
-      6. Add projection markers to all 26 files
+      1. Keep `foundation.agent.contracts.normalize` as the metadata-normalization/check lane for the current compatibility stubs.
+      2. Normalize remaining contract-body dependencies into explicit authoritative inputs before attempting full generation.
+      3. Current known blockers are modeled in `ops/bindings/foundation.agent.contract.projection.spec.yaml`:
+         - `home-assistant-agent` depends on `ops/bindings/ha.identity.mutation.contract.yaml`
+         - `mint-agent` depends on the quote packet / normalization / payment bridge authorities enforced by D395
+      4. Once those supplemental inputs are explicit generator inputs, implement `foundation.agent.contracts.build`.
+      5. Add D404 only after the full body generator is honest about those multi-authority dependencies.
     notes: |
-      Currently all 26 files are marked "compatibility" but are hand-maintained.
-      Any update to spine's agent registry needs manual reflection here.
-      Lower blast radius but high misleading-authority risk.
+      Real inventory is 17 files, not 26.
+      This wave normalized all 17 compatibility stubs as projection surfaces and added a spine-side normalizer/check command.
+      Full generation is still blocked because agents.registry.yaml is not yet the only authoritative input for every contract body.
     effort_estimate_hours: 2
     dependencies: []
 
@@ -235,27 +241,24 @@ backlog:
     authority_file: "ronny-products/*/app.contract.yaml"
     projection_files:
       - ronny-products/EXECUTION_BOARD.md
-    current_state: hand_maintained_262_line_lane_sequencing
+    current_state: generated_projection_with_repo_local_lock
     target_state: generated_projection
     blast_radius: 2
     priority: 5
-    status: not_started
+    status: completed
     type: generator
-    generator_exists: false
+    generator_exists: true
     generator_capability_name: productctl.render_board
-    gate_exists: false
+    gate_exists: true
     gate_id_planned: D405
     recommended_next_action: |
-      1. Add productctl command: render-board
-      2. Command reads all app.contract.yaml execution_state fields
-      3. Generates EXECUTION_BOARD.md with current product lane status
-      4. Add D405 gate checking board ↔ contracts parity
-      5. Run generator once, commit result to ronny-products repo
-      6. Add projection marker to EXECUTION_BOARD.md
+      1. Keep `bin/productctl render-board` as the single renderer for EXECUTION_BOARD.md.
+      2. Keep `scripts/guard/execution-board-projection-lock.sh` in the repo-local blocking guard path.
+      3. If richer board semantics are needed later, extend `app.contract.yaml` instead of hand-editing the board.
+      4. Promote D405 only if this repo-local lock needs to move into spine's central gate registry.
     notes: |
-      When product states change, this board must be manually updated.
-      Generator makes board always current with contract authority.
-      Lower priority because products repo has low velocity (12 commits total).
+      This wave landed a real board renderer, a projection-marked EXECUTION_BOARD.md, and a blocking repo-local parity lock.
+      The board now reflects repo-local contract state instead of pretending to be authored planning truth.
     effort_estimate_hours: 2
     dependencies: []
 
