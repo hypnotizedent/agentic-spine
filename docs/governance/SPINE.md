@@ -47,6 +47,27 @@ OPS_GOVERNED_MAIN_OVERRIDE=1 git push origin main
 `mailroom/state/` is governance-only state: loops, plans, proposals, sessions, orchestration, alerts, gaps, friction, locks, verify evidence.
 Domain runtime data must live in domain runtime roots/services, not in `mailroom/state/`.
 
+## First-Class Governance Features
+
+### Session Entry Hook (Agent Admission Control)
+**Path**: `.claude/hooks/session-entry-hook.sh` (372 lines)
+
+Every agent that starts a Claude Code session in this repo is automatically enrolled in the governance system before executing a single command. The hook enforces:
+- Worktree isolation (D140): rejects unidentified worktree sessions
+- Terminal role validation: establishes agent role context
+- Multi-agent detection: blocks conflicts (4-hour TTL)
+- Dynamic governance brief: delivers current governance context
+- Proposal queue gating: alerts if >5 pending proposals
+
+This is the **first line of agent governance**. See: `docs/governance/DREAM_SYSTEM.md` for details.
+
+### D399: Live External-State Enforcement
+**Path**: `surfaces/verify/d399-microsoft-mint-customer-mailbox-canonical-lock.sh` (560 lines)
+
+Unlike file-check gates, D399 makes **LIVE API calls to Microsoft** on every push to main. It performs 14 live checks against Microsoft Exchange/Graph API to enforce consistency between declared contracts (`communications.providers.contract.yaml`) and live production state.
+
+This is the current frontier of spine enforcement: gates that reach into live production systems before they allow a merge. See: `docs/governance/DREAM_SYSTEM.md` for details.
+
 ## Projection Metadata
 
 <!-- ENTRY_SURFACE_GATE_METADATA_START -->

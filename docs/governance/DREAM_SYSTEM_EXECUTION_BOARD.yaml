@@ -1,0 +1,604 @@
+---
+version: "1.0"
+updated: "2026-03-18"
+owner: "@ronny"
+status: authoritative
+scope: dream-system-projection-first-execution-backlog
+---
+
+# Dream System Execution Board
+#
+# This file is the authoritative ordered backlog for converting "docs that should be executable"
+# into actual authority → generator → projection → gate lanes.
+#
+# Priority calculation: impact × feasibility × blast_radius_reduction
+# Status values: not_started | planning | in_progress | blocked | completed
+# Type values: generator | gate | scaffold | migration | cleanup
+
+metadata:
+  total_items: 15
+  completed: 3
+  in_progress: 0
+  not_started: 12
+  blocked: 0
+
+policy:
+  new_item_requires_concern_family: true
+  all_items_must_have_recommended_action: true
+  target_state_must_be_verifiable: true
+
+concern_families:
+  # These are the top-priority concern families for conversion
+  # Ordered by: blast_radius × backfill_frequency × feasibility
+
+  gate_topology_surfaces:
+    description: "Gate execution topology should derive from gate.registry.yaml"
+    authority_file: ops/bindings/gate.registry.yaml
+    projection_files:
+      - ops/bindings/gate.execution.topology.yaml
+    current_state: projection_pretending_to_be_canonical
+    target_state: generated_projection_with_gate
+    blast_radius: 4
+    backfill_frequency: high
+    rollout_priority: 1
+    generator_exists: false
+    gate_exists: false
+    estimated_effort_hours: 3
+
+  capability_map_surfaces:
+    description: "Capability map should derive from capabilities.yaml"
+    authority_file: ops/capabilities.yaml
+    projection_files:
+      - ops/bindings/capability_map.yaml
+    current_state: hand_maintained_with_drift_detection
+    target_state: generated_projection_with_gate
+    blast_radius: 4
+    backfill_frequency: medium
+    rollout_priority: 2
+    generator_exists: false
+    gate_exists: true
+    gate_id: D67
+    gate_status: detects_drift_after_fact
+    estimated_effort_hours: 4
+
+  intake_lifecycle_surfaces:
+    description: "Intake lifecycle domain entries should derive from capabilities.yaml"
+    authority_file: ops/capabilities.yaml
+    projection_files:
+      - ops/bindings/intake.lifecycle.contract.yaml
+    current_state: partially_hand_maintained
+    target_state: generated_projection_with_gate
+    blast_radius: 3
+    backfill_frequency: high
+    rollout_priority: 3
+    generator_exists: false
+    gate_exists: false
+    estimated_effort_hours: 2
+
+  foundation_agent_contract_surfaces:
+    description: "Agentic-foundation agent contracts should generate from spine registry"
+    authority_file: agentic-spine/ops/bindings/agents.registry.yaml
+    projection_files:
+      - "agentic-foundation/docs/agents/*.contract.md (26 files)"
+    current_state: compatibility_stubs_hand_maintained
+    target_state: generated_projection
+    blast_radius: 2
+    backfill_frequency: low
+    rollout_priority: 4
+    generator_exists: false
+    gate_exists: false
+    estimated_effort_hours: 2
+
+  ronny_products_execution_board_surfaces:
+    description: "Ronny-products execution board should generate from app.contract.yaml"
+    authority_file: "ronny-products/*/app.contract.yaml"
+    projection_files:
+      - ronny-products/EXECUTION_BOARD.md
+    current_state: hand_maintained_262_lines
+    target_state: generated_projection
+    blast_radius: 2
+    backfill_frequency: medium
+    rollout_priority: 5
+    generator_exists: false
+    gate_exists: false
+    estimated_effort_hours: 2
+
+backlog:
+  # Tier 1: HIGH IMPACT — These are generation targets today
+
+  - id: DREAM-001
+    title: "Generate gate.execution.topology.yaml from gate.registry.yaml"
+    concern_family: gate_topology_surfaces
+    authority_file: ops/bindings/gate.registry.yaml
+    projection_files:
+      - ops/bindings/gate.execution.topology.yaml
+    current_state: hand_maintained_800_lines
+    target_state: generated_projection_with_blocking_gate
+    blast_radius: 4
+    priority: 1
+    status: not_started
+    type: generator
+    generator_exists: false
+    generator_capability_name: gate.topology.projection.build
+    gate_exists: false
+    gate_id_planned: D400
+    recommended_next_action: |
+      1. Write generator cap: ops/generators/gen-gate-topology.py
+      2. Generator reads gate.registry.yaml + capabilities.yaml domain fields
+      3. Produces gate.execution.topology.yaml with all domain_metadata + gate_assignments
+      4. Add D400 gate checking topology ↔ registry parity
+      5. Wire into pre-commit advisory check
+      6. Run generator once, commit result
+      7. Mark topology file with `authority_state: projection` header
+    notes: |
+      This eliminates 1 of 8 manual touches per domain addition.
+      Every domain addition currently requires manual update here (Loop 1 touchpoint).
+      Priority 1 because it has highest backfill frequency.
+    effort_estimate_hours: 3
+    dependencies: []
+
+  - id: DREAM-002
+    title: "Generate capability_map.yaml from capabilities.yaml"
+    concern_family: capability_map_surfaces
+    authority_file: ops/capabilities.yaml
+    projection_files:
+      - ops/bindings/capability_map.yaml
+    current_state: hand_maintained_1500_lines_with_d67_detection
+    target_state: generated_projection_with_prevention_gate
+    blast_radius: 4
+    priority: 2
+    status: not_started
+    type: generator
+    generator_exists: false
+    generator_capability_name: capability.map.projection.build
+    gate_exists: true
+    gate_id_existing: D67
+    gate_status: detects_orphans_after_fact_does_not_prevent
+    gate_id_planned: D401
+    recommended_next_action: |
+      1. Add `script_path` field to capabilities.yaml entries (migration step)
+      2. Write generator cap: ops/generators/gen-capability-map.py
+      3. Generator reads capabilities.yaml, produces capability_map.yaml
+      4. Add D401 gate checking map ↔ caps parity (replaces D67 or supplements it)
+      5. Run generator once, commit result
+      6. Mark capability_map.yaml with `authority_state: projection` header
+      7. Update D67 to check generator was used instead of checking consistency
+    notes: |
+      D67 catches missing entries AFTER the fact, not during creation.
+      Generator + prevention gate eliminates this entire backfill class.
+      Requires 1-time capabilities.yaml migration to add script_path field.
+    effort_estimate_hours: 4
+    dependencies:
+      - DREAM-CAP-MIGRATION
+
+  - id: DREAM-003
+    title: "Generate intake.lifecycle.contract.yaml domain entries from capabilities.yaml"
+    concern_family: intake_lifecycle_surfaces
+    authority_file: ops/capabilities.yaml
+    projection_files:
+      - ops/bindings/intake.lifecycle.contract.yaml
+    current_state: hand_maintained_16_domain_entries
+    target_state: generated_projection_with_gate
+    blast_radius: 3
+    priority: 3
+    status: not_started
+    type: generator
+    generator_exists: false
+    generator_capability_name: intake.lifecycle.projection.build
+    gate_exists: false
+    gate_id_planned: D402
+    recommended_next_action: |
+      1. Write generator cap: ops/generators/gen-intake-lifecycle.py
+      2. Generator reads capabilities.yaml, extracts unique `domain:` values
+      3. Produces intake domain entries with lifecycle defaults
+      4. Add D402 gate checking intake ↔ caps domain parity
+      5. Run generator once, commit result
+      6. Mark intake.lifecycle.contract.yaml domain section with projection marker
+    notes: |
+      Every new domain requires adding an intake entry here (Loop 1).
+      Generator eliminates 1 of 8 manual touches per domain addition.
+      Lower priority than topology because fewer domains added than gates.
+    effort_estimate_hours: 2
+    dependencies: []
+
+  - id: DREAM-004
+    title: "Generate agentic-foundation agent contracts from spine registry"
+    concern_family: foundation_agent_contract_surfaces
+    authority_file: agentic-spine/ops/bindings/agents.registry.yaml
+    projection_files:
+      - "agentic-foundation/docs/agents/*.contract.md (26 files)"
+    current_state: hand_maintained_compatibility_stubs
+    target_state: generated_projection
+    blast_radius: 2
+    priority: 4
+    status: not_started
+    type: generator
+    generator_exists: false
+    generator_capability_name: foundation.agent.contracts.build
+    gate_exists: false
+    gate_id_planned: D403
+    recommended_next_action: |
+      1. Write generator cap: ops/generators/gen-foundation-agent-contracts.sh
+      2. Generator reads spine's agents.registry.yaml
+      3. Produces markdown contracts in agentic-foundation/docs/agents/
+      4. Add D403 gate checking contracts ↔ registry parity
+      5. Run generator once, commit result to agentic-foundation repo
+      6. Add projection markers to all 26 files
+    notes: |
+      Currently all 26 files are marked "compatibility" but are hand-maintained.
+      Any update to spine's agent registry needs manual reflection here.
+      Lower blast radius but high misleading-authority risk.
+    effort_estimate_hours: 2
+    dependencies: []
+
+  - id: DREAM-005
+    title: "Generate ronny-products EXECUTION_BOARD.md from app.contract.yaml"
+    concern_family: ronny_products_execution_board_surfaces
+    authority_file: "ronny-products/*/app.contract.yaml"
+    projection_files:
+      - ronny-products/EXECUTION_BOARD.md
+    current_state: hand_maintained_262_line_lane_sequencing
+    target_state: generated_projection
+    blast_radius: 2
+    priority: 5
+    status: not_started
+    type: generator
+    generator_exists: false
+    generator_capability_name: productctl.render_board
+    gate_exists: false
+    gate_id_planned: D404
+    recommended_next_action: |
+      1. Add productctl command: render-board
+      2. Command reads all app.contract.yaml execution_state fields
+      3. Generates EXECUTION_BOARD.md with current product lane status
+      4. Add D404 gate checking board ↔ contracts parity
+      5. Run generator once, commit result to ronny-products repo
+      6. Add projection marker to EXECUTION_BOARD.md
+    notes: |
+      When product states change, this board must be manually updated.
+      Generator makes board always current with contract authority.
+      Lower priority because products repo has low velocity (12 commits total).
+    effort_estimate_hours: 2
+    dependencies: []
+
+  # Tier 2: MEDIUM IMPACT — Next-generation targets
+
+  - id: DREAM-006
+    title: "Complete domain.projection.contract.yaml registration"
+    concern_family: projection_metadata_completeness
+    authority_file: ops/bindings/domain.projection.contract.yaml
+    projection_files:
+      - "ops/bindings/*.snapshot.yaml (8 files)"
+      - "ops/bindings/*.projected.yaml (multiple)"
+    current_state: 8_entries_with_generated_only_rest_ambiguous
+    target_state: all_projections_registered_and_marked
+    blast_radius: 3
+    priority: 6
+    status: not_started
+    type: migration
+    generator_exists: false
+    gate_exists: false
+    gate_id_planned: D405
+    recommended_next_action: |
+      1. Audit all ops/bindings/ files for generated/projection status
+      2. Add projection entries to domain.projection.contract.yaml for all generated files
+      3. Add `generated_only: true` flags to all projection entries
+      4. Add D405 gate checking all projections are registered
+      5. Add pre-commit check blocking staged edits of projection files unless OPS_PROJECTION_OVERRIDE=1
+    notes: |
+      8 HA auto-generated snapshots carry # Auto-generated markers but NOT registered in projection contract.
+      Ambiguous authority risk — agents can't tell what should/shouldn't be edited.
+      D339 partially enforces this but incompletely.
+    effort_estimate_hours: 3
+    dependencies: []
+
+  - id: DREAM-007
+    title: "Add hardcoded-path gate for gate scripts"
+    concern_family: path_portability
+    authority_file: ops/lib/runtime-paths.sh
+    projection_files: []
+    current_state: 20_gate_scripts_with_hardcoded_home_code_agentic_spine
+    target_state: all_gate_scripts_use_runtime_paths_lib
+    blast_radius: 3
+    priority: 7
+    status: not_started
+    type: gate
+    generator_exists: false
+    gate_exists: false
+    gate_id_planned: D406
+    recommended_next_action: |
+      1. Write D406 gate: fail if any shell script under surfaces/verify/ or ops/plugins/ contains `$HOME/code/agentic-spine` without BASH_SOURCE pattern
+      2. Identify all 20+ violations (rg '$HOME/code/agentic-spine' surfaces/verify/ ops/plugins/)
+      3. Fix violations by sourcing ops/lib/runtime-paths.sh and using $SPINE_ROOT
+      4. Run verify to confirm D406 passes
+      5. Add D406 to verify fast ring
+    notes: |
+      ~20 gate scripts still hardcode $HOME/code/agentic-spine despite runtime-paths.sh existing.
+      Each worktree/CI attempt rediscovers this (Loop 2).
+      GAP-OP-1496 fixed D343 specifically; systemic gap still open.
+    effort_estimate_hours: 2
+    dependencies: []
+
+  - id: DREAM-008
+    title: "Add mailroom boundary gate"
+    concern_family: mailroom_boundary_enforcement
+    authority_file: docs/governance/SPINE.md
+    projection_files: []
+    current_state: 14_contracts_reference_mailroom_state_for_domain_data
+    target_state: gate_blocks_domain_data_in_mailroom
+    blast_radius: 3
+    priority: 8
+    status: not_started
+    type: gate
+    generator_exists: false
+    gate_exists: false
+    gate_id_planned: D407
+    recommended_next_action: |
+      1. Write D407 gate: fail if domain data patterns detected in mailroom/state/
+      2. Define domain data patterns: cases/, calendar-sync/, communications/, capacity/, runtime-snapshots/, cloudflare-control-plane/
+      3. Scan mailroom/state/ for violations
+      4. Fix 14 contracts that reference wrong paths (migrate to runtime/domain-state/)
+      5. Run verify to confirm D407 passes
+      6. Add D407 to verify fast ring
+    notes: |
+      Mailroom boundary rule established 2026-03-05 but unenforced.
+      6 polluted dirs found; 14 contracts still reference wrong paths (Loop 3).
+      Gate makes the boundary enforceable instead of advisory.
+    effort_estimate_hours: 2
+    dependencies: []
+
+  - id: DREAM-009
+    title: "Auto-retire gates with 30+ pass streaks"
+    concern_family: gate_lifecycle_automation
+    authority_file: ops/bindings/gate.registry.yaml
+    projection_files: []
+    current_state: 302_of_394_gates_retired_77_percent_manual_retirement
+    target_state: automatic_retirement_proposals_for_streak_threshold
+    blast_radius: 3
+    priority: 9
+    status: not_started
+    type: generator
+    generator_exists: false
+    generator_capability_name: gate.retirement.propose
+    gate_exists: false
+    recommended_next_action: |
+      1. Write cap: gate.retirement.propose
+      2. Cap reads verify state for pass streaks (tracks in ~/.runtime/spine/state/verify/)
+      3. Identifies gates at 30+ pass streak threshold
+      4. Generates retirement proposals in mailroom/outbox/proposals/
+      5. Human reviews and approves/denies retirement
+      6. Approved retirements update gate.registry.yaml retirement_status
+    notes: |
+      Adding is cheap (1 script + 1 registry entry). Retiring is expensive (registry + script + topology + caps).
+      Asymmetry causes inflation (Loop 5).
+      retirement_trigger field exists but is advisory — no automation retires gates.
+    effort_estimate_hours: 3
+    dependencies: []
+
+  - id: DREAM-010
+    title: "Move cloudflare Zone IDs to spine binding"
+    concern_family: secret_hardcoding_elimination
+    authority_file: ops/bindings/cloudflare.zones.yaml
+    projection_files: []
+    current_state: hardcoded_zone_ids_tunnel_ids_in_workbench_script
+    target_state: zone_ids_in_spine_binding_or_infisical
+    blast_radius: 2
+    priority: 10
+    status: not_started
+    type: migration
+    generator_exists: false
+    gate_exists: false
+    gate_id_planned: D408
+    recommended_next_action: |
+      1. Create ops/bindings/cloudflare.zones.yaml authority file
+      2. Move Zone IDs and Tunnel IDs from workbench/scripts/agents/cloudflare-agent.sh to binding
+      3. Update cloudflare-agent.sh to read from binding (or via Infisical)
+      4. Add D408 gate checking cloudflare-agent.sh has no hardcoded IDs
+      5. Commit binding to spine, update workbench script
+    notes: |
+      workbench/scripts/agents/cloudflare-agent.sh hardcodes Zone IDs and Tunnel IDs.
+      Should be in Infisical or spine bindings.
+      High exposure risk — Zone IDs are not secrets but should be governed.
+    effort_estimate_hours: 1
+    dependencies: []
+
+  # Tier 3: Aspirational — Lower priority or blocked
+
+  - id: DREAM-011
+    title: "Add cross-repo CI to workbench"
+    concern_family: cross_repo_governance_enforcement
+    authority_file: agentic-spine/ops/bindings/*.contract.yaml
+    projection_files: []
+    current_state: workbench_has_no_ci_only_pre_commit_hook
+    target_state: gitea_workflows_validate_workbench_spine_link_compliance
+    blast_radius: 3
+    priority: 11
+    status: not_started
+    type: gate
+    generator_exists: false
+    gate_exists: false
+    recommended_next_action: |
+      1. Create .gitea/workflows/verify.yml in workbench repo
+      2. Workflow pulls spine's declared workbench contracts
+      3. Validates .spine-link.yaml compliance
+      4. Validates MCP server build artifacts exist
+      5. Runs verify checks declared in spine
+    notes: |
+      Workbench has no CI (only 1 pre-commit hook for MCP parity).
+      "Spine declares, nobody enforces" gap.
+      Mint-modules is the only consumer repo with actual CI enforcement.
+    effort_estimate_hours: 2
+    dependencies: []
+
+  - id: DREAM-012
+    title: "Add cross-repo CI to ronny-products"
+    concern_family: cross_repo_governance_enforcement
+    authority_file: agentic-spine/templates/app/app.contract.yaml
+    projection_files: []
+    current_state: ronny_products_has_no_ci_only_pre_commit_hooks
+    target_state: gitea_workflows_validate_app_contract_shape
+    blast_radius: 2
+    priority: 12
+    status: not_started
+    type: gate
+    generator_exists: false
+    gate_exists: false
+    recommended_next_action: |
+      1. Create .gitea/workflows/verify.yml in ronny-products repo
+      2. Workflow validates app.contract.yaml shape against spine's product scaffold contract
+      3. Runs shape-lock → content-lock → dna-lock chain in CI (not just pre-commit)
+      4. Validates spine loop binding references are valid
+    notes: |
+      Ronny-products has no CI (only pre-commit hooks).
+      Very few commits (12 total), products all parked.
+      Lower priority due to low velocity.
+    effort_estimate_hours: 2
+    dependencies: []
+
+  - id: DREAM-013
+    title: "Mark all projection files with GENERATED header"
+    concern_family: projection_metadata_completeness
+    authority_file: ops/bindings/domain.projection.contract.yaml
+    projection_files: []
+    current_state: some_projections_marked_some_not
+    target_state: all_projections_have_generated_do_not_edit_header
+    blast_radius: 2
+    priority: 13
+    status: not_started
+    type: migration
+    generator_exists: false
+    gate_exists: false
+    gate_id_planned: D409
+    recommended_next_action: |
+      1. Add header to all generated files: # GENERATED — DO NOT EDIT
+      2. Add pre-commit check blocking staged edits of marked files unless OPS_PROJECTION_OVERRIDE=1
+      3. Update all generators to include header in output
+      4. Add D409 gate checking all domain.projection.contract.yaml entries have header
+    notes: |
+      Currently only some projections have clear markers.
+      Pre-commit doesn't block hand-edits of projection files.
+      D339 partially enforces `generated_only: true` but incompletely.
+    effort_estimate_hours: 2
+    dependencies:
+      - DREAM-006
+
+  - id: DREAM-014
+    title: "Freeze ops/bindings/ file count with budget gate"
+    concern_family: file_count_containment
+    authority_file: ops/bindings/gate.budget.add_one_retire_one.contract.yaml
+    projection_files: []
+    current_state: 362_binding_files_unconstrained_growth
+    target_state: binding_file_count_frozen_at_budget
+    blast_radius: 2
+    priority: 14
+    status: not_started
+    type: gate
+    generator_exists: false
+    gate_exists: false
+    gate_id_planned: D410
+    recommended_next_action: |
+      1. Count current ops/bindings/ files (362)
+      2. Set budget: max 370 files (small growth allowance)
+      3. Write D410 gate: fail if file count exceeds budget
+      4. Gate message: "New bindings require retiring old ones first"
+      5. Add D410 to verify fast ring
+    notes: |
+      362 binding files is already too many; projection-first should reduce this.
+      Budget gate prevents further unconstrained growth.
+      Forces consolidation before expansion.
+    effort_estimate_hours: 1
+    dependencies: []
+
+  - id: DREAM-015
+    title: "Wire generate-scaffold to authority.concerns.yaml"
+    concern_family: scaffold_completeness
+    authority_file: ops/bindings/authority.concerns.yaml
+    projection_files: []
+    current_state: generate_scaffold_incomplete_misses_3_of_8_surfaces
+    target_state: scaffold_reads_concerns_produces_all_surfaces_atomically
+    blast_radius: 5
+    priority: 15
+    status: not_started
+    type: scaffold
+    generator_exists: false
+    gate_exists: false
+    gate_id_planned: D411
+    recommended_next_action: |
+      1. Update generate-scaffold.sh to read authority.concerns.yaml
+      2. Scaffold uses concern map to determine required projection entries
+      3. Scaffold produces ALL 8 required surfaces atomically:
+         - gate.registry.yaml entry
+         - surfaces/verify/dXXX-*.sh script
+         - ops/capabilities.yaml entry
+         - ops/bindings/capability_map.yaml entry
+         - ops/bindings/gate.execution.topology.yaml domain_metadata + gate_assignments
+         - ops/bindings/intake.lifecycle.contract.yaml domain entry
+         - ops/bindings/master.inventory.registry.yaml authority row
+         - ops/bindings/domain.projection.contract.yaml projection entry
+      4. Add D411 gate: fail if new domain/gate added without using scaffold
+      5. Run scaffold for next new domain to validate completeness
+    notes: |
+      authority.concerns.yaml already maps concerns to authority files + projections.
+      If scaffold reads this file, creating a new domain concern automatically produces all required entries.
+      The Rosetta Stone becomes the generator input.
+      This is the ultimate Loop 1 killer.
+    effort_estimate_hours: 4
+    dependencies:
+      - DREAM-001
+      - DREAM-002
+      - DREAM-003
+
+migrations:
+  - id: DREAM-CAP-MIGRATION
+    title: "Add script_path field to capabilities.yaml entries"
+    status: not_started
+    required_for:
+      - DREAM-002
+    effort_estimate_hours: 2
+    recommended_action: |
+      1. Audit all 702 capabilities.yaml entries
+      2. Add `script_path:` field to each entry (read from existing capability_map.yaml)
+      3. Validate all paths exist
+      4. Commit migrated capabilities.yaml
+      5. Now DREAM-002 generator can consume script_path field
+
+completed:
+  - id: COMPLETE-001
+    title: "Service registry projection (D275)"
+    concern_family: service_registry_surfaces
+    completed_date: "2026-03-18"
+    authority_file: docs/governance/SERVICE_REGISTRY.yaml
+    projection_files:
+      - ops/bindings/services.health.yaml
+      - ops/bindings/docker.compose.targets.yaml
+    generator_capability: service.registry.projection.build
+    gate_id: D275
+
+  - id: COMPLETE-002
+    title: "Gate metadata projection to CLAUDE.md (D275)"
+    concern_family: gate_metadata_surfaces
+    completed_date: "2026-03-18"
+    authority_file: ops/bindings/gate.registry.yaml
+    projection_files:
+      - CLAUDE.md
+    generator_capability: gate.metadata.projection.build
+    gate_id: D275
+
+  - id: COMPLETE-003
+    title: "Backup inventory projection"
+    concern_family: backup_inventory_surfaces
+    completed_date: "2026-03-18"
+    authority_file: ops/bindings/backup.inventory.yaml
+    projection_files:
+      - ops/bindings/backup.posture.snapshot.yaml
+    generator_capability: backup.posture.snapshot.build
+    gate_id: null
+
+summary:
+  total_backlog_items: 15
+  tier_1_high_impact: 5
+  tier_2_medium_impact: 9
+  tier_3_aspirational: 1
+  total_estimated_hours: 41
+  completed_milestones: 3
+  next_recommended_start: DREAM-001
