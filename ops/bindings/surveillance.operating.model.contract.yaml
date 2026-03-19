@@ -123,12 +123,15 @@ retention_policy:
     purpose: Long-term preservation of incident evidence
     hot_retention_days: 30
     hot_storage_path: /srv/data/surveillance/clips/export
+    hot_storage_host: surveillance-stack
     cold_retention_years: 2
-    cold_storage_path: /mnt/md1400/archive/surveillance-exports
-    offsite_backup: true
-    offsite_backup_path: synology918:/volume1/backups/pve/md1400
+    cold_storage_path: /md1400/archive/surveillance-exports
+    cold_storage_host: pve
+    offsite_backup: covered_by_existing_md1400_backup_to_synology
+    offsite_backup_note: md1400 is already backed up to Synology via existing governed backup inventory, no new surveillance-specific lane needed
     auto_purge: false  # Manual monthly archive move + annual review
-    operator_action_required: export_within_7d_then_monthly_archive_move
+    operator_action_required: export_within_7d_then_pve_host_side_archive_move
+    transport_mechanism: pve_host_pulls_from_surveillance_stack_via_ssh
 
   tier_2_high_value:
     type: detection_clips
@@ -235,6 +238,7 @@ export_workflow:
     stage_1_hot_export:
       purpose: Operator export staging
       path: /srv/data/surveillance/clips/export
+      host: surveillance-stack
       retention_days: 30
       capacity_gb: 100
       backup: false
@@ -242,19 +246,20 @@ export_workflow:
 
     stage_2_cold_archive:
       purpose: Long-term incident evidence
-      path: /mnt/md1400/archive/surveillance-exports
+      path: /md1400/archive/surveillance-exports
+      host: pve
       retention_years: 2
       capacity_gb: 100
-      backup: true
-      backup_destination: synology918:/volume1/backups/pve/md1400
-      backup_frequency: weekly
-      operator_action: monthly_archive_move_1st_of_month
+      backup: covered_by_existing_md1400_backup
+      backup_note: md1400 is already in backup.inventory.yaml, backed up to Synology via governed destination lanes, no new surveillance lane needed
+      operator_action: monthly_archive_move_1st_of_month_pve_host_side
+      transport_mechanism: pve_pulls_from_surveillance_stack_via_ssh
 
     stage_3_offsite_backup:
-      purpose: Disaster recovery
-      path: synology918:/volume1/backups/pve/md1400
-      retention: permanent_until_annual_review
-      capacity_unlimited: true
+      status: covered_by_existing_md1400_backup
+      purpose: Disaster recovery for Stage 2 cold archive
+      mechanism: md1400 backup to Synology via existing backup.inventory.yaml governed lanes
+      note: No new Synology lane invented - surveillance exports in /md1400/archive/ are covered by existing md1400 backup schedule
       operator_action: none_automatic
 
   # Operator tasks
