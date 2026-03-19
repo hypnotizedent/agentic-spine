@@ -582,7 +582,7 @@ run_cap() {
       wt_bypass_lc="$(printf '%s' "$wt_bypass" | tr '[:upper:]' '[:lower:]')"
 
       case "$name" in
-        session.start|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate)
+        session.start|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate|session.execution.lane.bootstrap|session.execution.lane.closeout|session.execution.lane.scan)
           context_guard_exempt=1
           ;;
       esac
