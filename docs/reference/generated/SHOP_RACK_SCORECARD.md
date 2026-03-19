@@ -1,14 +1,14 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-12
+last_verified: 2026-03-19
 scope: shop-rack-scorecard
 source_binding: ops/bindings/shop.storage.map.yaml
 ---
 
 # Shop Rack Scorecard
 
-- Generated: `2026-03-12T05:13:36Z`
+- Generated: `2026-03-19T04:12:38Z`
 - Rebuild: `./bin/ops cap run infra.shop.storage.authority.build`
 - Active runtimes: `14`
 - Tombstones: `1`
@@ -74,8 +74,8 @@ source_binding: ops/bindings/shop.storage.map.yaml
 | 212 | mint-data | vm | auto | boot-only | tank-vms:/dev/vda ext4 secondary disk mounted at /mnt/data; DockerRootDir=/mnt/data/docker, boot-disk:/opt/stacks/mint-data | pve-vzdump-primary, r730xd-mint-backups | private-only | 1 probes |
 | 213 | mint-apps | vm | auto | boot-only | boot-disk:mint-apps boot disk (50G), boot-disk:/opt/stacks/mint-apps | pve-vzdump-primary | suppliers.mintprints.co, customer.mintprints.co, customer.mintprints.com, estimator.mintprints.co, mintprints-app.ronny.works, mintprints.com, pricing.mintprints.co, pricing.mintprints.com, shipping.mintprints.co, shipping.mintprints.com, www.mintprints.com | 9 probes |
 | 214 | communications-stack | vm | auto | tank-vms | tank:tank/vms/vm-214-disk-0, /opt/stacks/communications-stack, /srv/mail-archiver/backups | pve-vzdump-primary, r730xd-communications-backups | mail-archive.ronny.works | 2 probes |
-| 215 | surveillance-stack | vm | auto | tank-vms | tank:/dev/vda ext4 secondary disk mounted at /mnt/data; Frigate durable paths bind-mounted under /mnt/data/frigate/{recordings,clips,snapshots}. | pve-vzdump-primary | private-only | 2 probes |
-| 220 | archive-smb | lxc | auto | md1400 | md1400:md1400 live-share datasets, md1400:/md1400/mint-legacy, md1400:/md1400/ronny-projects | r730xd-archive-smb-snapshots | private-only | 0 probes |
+| 215 | surveillance-stack | vm | auto | tank-vms | tank:/dev/vda ext4 secondary disk mounted at /mnt/data; Frigate durable paths bind-mounted under /mnt/data/frigate/{recordings,clips,snapshots}. | pve-vzdump-primary | private-only | 1 probes |
+| 220 | archive-smb | lxc | auto | md1400 | md1400:md1400 live-share datasets, md1400:/md1400/archive/live-share/mint-legacy, md1400:/md1400/archive/live-share/ronny-projects | r730xd-archive-smb-snapshots | private-only | 0 probes |
 
 ## Tombstones
 

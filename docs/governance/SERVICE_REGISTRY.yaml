@@ -2,8 +2,8 @@
 # Status: authoritative
 # authority_state: authoritative
 # authority_concern: service_registry_surfaces
-# Last verified: 2026-03-08
-# Updated: 2026-03-08
+# Last verified: 2026-03-18
+# Updated: 2026-03-18
 #
 # This registry defines WHAT services exist, WHERE they run, and the canonical
 # stack/health inputs that generate:
@@ -40,6 +40,7 @@
 # Status values:
 #   active      — running, serving traffic
 #   deprecated  — marked for decommission, may still be running with dependents
+#   retired     — tombstoned or historical-only; not expected to run
 #   parked      — intentionally stopped (operator decision, not a failure)
 #   stopped     — crashed or exited unexpectedly, no health monitoring
 
@@ -53,16 +54,16 @@ services:
     health: /health
     container: mint-os-dashboard-api
     compose: ~/stacks/mint-os/docker-compose.yml
-    status: deprecated
-    notes: "DEPRECATED legacy hold API on docker-host. Health probe disabled. Legacy secret authority retired; active secret authority is Spine-native infrastructure plus /spine/services/*."
+    status: retired
+    notes: "RETIRED with docker-host VM 200 tombstone. Historical compose metadata only; no active runtime or operator path should target this API."
 
   mint-os-postgres:
     host: docker-host
     port: 15432
     container: mint-os-postgres
     compose: ~/stacks/mint-os/docker-compose.yml
-    status: deprecated
-    notes: "DEPRECATED legacy data hold on docker-host. No fresh-slate Mint runtime depends on this database; preserve for forensic/rollback reads only until final retirement."
+    status: retired
+    notes: "RETIRED with docker-host VM 200 tombstone. Historical data hold only; no fresh-slate Mint runtime depends on this database."
 
   # ─── Mint OS Frontends (docker-host) — legacy hold only ─────────────
   mint-os-admin:
@@ -70,32 +71,32 @@ services:
     port: 3333
     container: mint-os-admin
     compose: ~/stacks/mint-os/docker-compose.frontends.yml
-    status: deprecated
-    notes: "DEPRECATED legacy hold frontend on docker-host. Not a canonical Mint operator surface; fresh-slate Mint authority is mint-apps + mint-data."
+    status: retired
+    notes: "RETIRED with docker-host VM 200 tombstone. Not a canonical Mint operator surface; fresh-slate Mint authority is mint-apps + mint-data."
 
   mint-os-customer:
     host: docker-host
     port: 3334
     container: mint-os-customer
     compose: ~/stacks/mint-os/docker-compose.frontends.yml
-    status: deprecated
-    notes: "DEPRECATED legacy hold frontend on docker-host. Not canonical for customer-facing Mint flow."
+    status: retired
+    notes: "RETIRED with docker-host VM 200 tombstone. Not canonical for customer-facing Mint flow."
 
   mint-os-production:
     host: docker-host
     port: 3336
     container: mint-os-production
     compose: ~/stacks/mint-os/docker-compose.frontends.yml
-    status: deprecated
-    notes: "DEPRECATED legacy hold frontend on docker-host. Fresh-slate production flow authority lives on mint-apps + finance-stack."
+    status: retired
+    notes: "RETIRED with docker-host VM 200 tombstone. Fresh-slate production flow authority lives on mint-apps + finance-stack."
 
   mint-os-kanban:
     host: docker-host
     port: 3337
     container: mint-os-kanban
     compose: ~/stacks/mint-os/docker-compose.frontends.yml
-    status: deprecated
-    notes: "DEPRECATED legacy hold frontend on docker-host. Not a canonical Mint workflow surface."
+    status: retired
+    notes: "RETIRED with docker-host VM 200 tombstone. Not a canonical Mint workflow surface."
 
   mint-os-job-estimator:
     host: docker-host
@@ -110,8 +111,8 @@ services:
     port: 16379
     container: mint-os-redis
     compose: ~/stacks/mint-os/docker-compose.yml
-    status: deprecated
-    notes: "DEPRECATED redis backing the docker-host legacy hold stack only. Not authoritative for active Mint runtime."
+    status: retired
+    notes: "RETIRED with docker-host VM 200 tombstone. Historical redis data only; not authoritative for active Mint runtime."
 
   minio:
     host: docker-host
@@ -121,9 +122,9 @@ services:
     compose: ~/stacks/storage/docker-compose.yml
     volume: /mnt/docker/mint-os-data/minio
     networks: [storage-network, mint-os-network]
-    status: deprecated
+    status: retired
     notes: >
-      DEPRECATED legacy MinIO hold on docker-host. Active Mint MinIO authority is
+      RETIRED with docker-host VM 200 tombstone. Active Mint MinIO authority is
       mint-modules-minio on mint-data VM 212, and active Mint usage is artwork-only.
       Invoice PDFs are not active MinIO truth; retained-doc authority is Paperless.
 
@@ -420,10 +421,10 @@ services:
     health: /api/version
     healthcheck:
       endpoint_id: frigate-vm215
-    compose: /opt/stacks/surveillance/docker-compose.yml
+    compose: /home/ubuntu/surveillance/docker-compose.yml
     container: frigate
     status: active
-    notes: "Shop surveillance runtime on VM 215. CPU-first Frigate baseline with 8 live cameras. Home Assistant uses direct Tailscale URL http://100.89.1.111:5000 and MQTT at 100.67.120.1:1883."
+    notes: "Shop surveillance runtime on VM 215. Current live compose root is /home/ubuntu/surveillance. CPU-first Frigate baseline with 8 live cameras. Home Assistant uses direct Tailscale URL http://100.89.1.111:5000 and MQTT at 100.67.120.1:1883."
 
   go2rtc:
     host: surveillance-stack
@@ -431,10 +432,10 @@ services:
     health: /api/go2rtc/api/streams
     healthcheck:
       endpoint_id: go2rtc-vm215
-    compose: /opt/stacks/surveillance/docker-compose.yml
+    compose: /home/ubuntu/surveillance/docker-compose.yml
     container: frigate
-    status: active
-    notes: "Low-latency RTSP/WebRTC proxy bundled inside Frigate on surveillance-stack VM 215 and exposed through the Frigate API path. No standalone go2rtc container or socat relay is canonical."
+    status: parked
+    notes: "Low-latency RTSP/WebRTC proxy bundled inside Frigate on surveillance-stack VM 215 and exposed through the Frigate API path. Current live compose root is /home/ubuntu/surveillance, and the standalone go2rtc container was observed exited during the 2026-03-18 census. Treat this surface as transitional until the stack root is normalized."
 
   prometheus:
     host: observability
@@ -973,7 +974,8 @@ hosts:
     ssh: docker-host
     os: linux-mint
     compose_target:
-      description: "Mint OS frontends (customer/admin/production/kanban) are active. Dashy migrated to observability VM 205. Finance migrated to finance-stack VM 211; mail-archiver canonicalized to communications-stack VM 214. API is deprecated. Legacy standalone storage stack retired; MinIO runs under mint-os compose."
+      enabled: false
+      description: "Tombstoned VM 200. Historical compose roots retained only for isolated restore/extraction work; there is no active docker-host runtime, deploy path, or recovery-startup target."
       stacks:
         - name: mint-os
           path: /home/docker-host/stacks/mint-os
@@ -981,7 +983,7 @@ hosts:
           path: /home/docker-host/mint-modules-prod
           legacy_only: true
           authoritative_runtime: false
-    notes: "Legacy hold VM 200 only. Not authoritative for fresh-slate Mint runtime, finance, or retained-doc workflows."
+    notes: "Legacy hold VM 200 only. Tombstoned 2026-03-06 and removed from hot runtime storage 2026-03-12. Not authoritative for fresh-slate Mint runtime, finance, retained-doc workflows, or normal recovery operations."
 
   automation-stack:
     lan_ip: 192.168.1.110
@@ -1199,11 +1201,11 @@ hosts:
     vmid: 215
     proxmox_host: pve
     compose_target:
-      description: "Surveillance stack VM 215 (Frigate + bundled go2rtc). Internal-only by design."
+      description: "Surveillance stack VM 215 (Frigate + bundled go2rtc). Current live compose authority is /home/ubuntu/surveillance; migration back to /opt/stacks/surveillance remains follow-up work."
       stacks:
         - name: surveillance
-          path: /opt/stacks/surveillance
-    notes: "Surveillance stack (Frigate + bundled go2rtc). Internal-only by design. CPU-first baseline launched 2026-03-05 on VM 215. HA integration is direct over Tailscale with no proxy relay."
+          path: /home/ubuntu/surveillance
+    notes: "Surveillance stack (Frigate + bundled go2rtc). Internal-only by design. CPU-first baseline launched 2026-03-05 on VM 215. Live runtime is currently rooted under /home/ubuntu/surveillance; HA integration is direct over Tailscale with no proxy relay."
 
   ha:
     tailscale_ip: 100.67.120.1

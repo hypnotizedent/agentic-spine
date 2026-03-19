@@ -1,7 +1,7 @@
 # Startup Sequencing Binding (SSOT)
 # Non-secret. Spine-native.
 # Status: authoritative
-# Last verified: 2026-02-25
+# Last verified: 2026-03-18
 #
 # Declares the correct startup order for hosts and stacks after a power cycle.
 # Used by infra.post_power.recovery and infra.maintenance.window capabilities.
@@ -10,7 +10,7 @@
 #   - Hosts start in phase order (lower = earlier)
 #   - Within a host, stacks start in declared order
 #   - Health probes run after each phase to confirm readiness
-#   - docker-host is last because its services depend on infra-core (tunnel, DNS)
+#   - tombstoned guests must not appear in startup phases
 #   - Each phase has a site tag (shop|home) for site-scoped maintenance
 #
 # Sites:
@@ -21,7 +21,7 @@
 # Do NOT rely on comment-parsing for VM lists.
 
 version: 3
-updated: "2026-02-28"
+updated: "2026-03-18"
 
 # ── Authoritative VM lifecycle lists ──────────────────────────────────────────
 # These are the SSOT for which VMs exist on each site and their startup/shutdown order.
@@ -35,20 +35,20 @@ updated: "2026-02-28"
 
 shop_vm_lifecycle:
   host_id: pve
-  active_vm_ids: [200, 202, 203, 204, 205, 206, 207, 209, 210, 211, 212, 213, 214]
+  active_vm_ids: [202, 203, 204, 205, 206, 207, 209, 210, 211, 212, 213, 214, 215, 220]
   destroyed_vm_ids: [201]  # media-stack, decommissioned 2026-02-10
   template_vm_ids: [9000]  # ubuntu-2404-cloudinit-template
-  startup_order:  [204, 205, 206, 207, 209, 210, 200, 202, 203, 211, 212, 213, 214]
-  shutdown_order: [214, 213, 212, 211, 203, 210, 209, 207, 206, 205, 202, 200, 204]
+  startup_order:  [204, 205, 206, 207, 209, 210, 202, 203, 211, 212, 213, 214, 215, 220]
+  shutdown_order: [220, 215, 214, 213, 212, 211, 203, 202, 210, 209, 207, 206, 205, 204]
 
 home_vm_lifecycle:
   host_id: proxmox-home
-  active_vm_ids: [100, 105]
-  startup_order:  [100, 105]
-  shutdown_order: [105, 100]
+  active_vm_ids: [100, 105, 106]
+  startup_order:  [100, 105, 106]
+  shutdown_order: [106, 105, 100]
 
-# Shop phases (1-4): Core → Observability → Apps → Legacy
-# Home phases (10-12): HA VM → Home DNS → Home NAS
+# Shop phases (1-4): Core → Observability → Apps → Auxiliary
+# Home phases (10-13): HA VM → Home DNS → Home NAS → Home media
 
 phases:
   # ─── Shop site (pve / R730XD) ────────────────────────────────────────
@@ -121,13 +121,13 @@ phases:
 
   - phase: 4
     site: shop
-    label: "Legacy production (docker-host)"
+    label: "Auxiliary workloads"
     hosts:
-      - target: docker-host
+      - target: surveillance-stack
         stacks:
-          - mint-os
+          - surveillance
         wait_after_sec: 15
-        description: "Depends on cloudflared (phase 1) for tunnel routing. Container names must not conflict with stopped containers — run compose down before up if exit code 128 detected."
+        description: "VM 215 Frigate/go2rtc surveillance runtime. Current live compose root is /home/ubuntu/surveillance."
 
   # ─── Home site (proxmox-home / Beelink SER7) ─────────────────────────
   - phase: 10
@@ -161,3 +161,12 @@ phases:
         description: "Synology DS918+ NAS storage services (NFS exports, backup target surface)."
         health_probes:
           - "http://100.102.199.111:5000/"  # Synology DSM web endpoint
+
+  - phase: 13
+    site: home
+    label: "Home media/watch VM"
+    hosts:
+      - target: proxmox-home
+        vm_ids: [106]
+        wait_after_sec: 20
+        description: "VM 106 (media-home) current home media/watch plane. Service inventory remains transitional; do not infer guest readiness from boot alone."

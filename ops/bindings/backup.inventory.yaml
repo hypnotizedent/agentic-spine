@@ -3,7 +3,7 @@
 # NOTE: enabled=false by default; flip true intentionally per target.
 # Classifications: critical (26h), important (48h), rebuildable (168h)
 # Status: authoritative
-# Last verified: 2026-03-08
+# Last verified: 2026-03-18
 # yq selectors for gate authoring:
 #   .targets[]              → array of target objects (NOT map-keyed)
 #   .targets[].name         → target identifier (.name NOT .id)
@@ -114,7 +114,7 @@ model:
       base_path: /volume1/backups/proxmox_backups/dump
       max_total_gb: 1600
       max_file_count: 400
-      description: "Canonical home-local backup lane on Synology for proxmox-home artifacts (Home Assistant VM 100 and home Pi-hole LXC 105)."
+      description: "Canonical home-local backup lane on Synology for proxmox-home artifacts (Home Assistant VM 100, media-home VM 106, and home Pi-hole LXC 105)."
     # nas-app-backups REMOVED 2026-03-08: Fully deprecated, migration complete to 730XD canonical plane.
     media-config-backups:
       host_group:
@@ -178,8 +178,9 @@ runtime_units:
     inventory_targets:
       - home-vm-100-ha-primary
       - home-lxc-105-pihole-primary
+      - home-vm-106-media-home-primary
     backup_admission_state: production_ready
-    description: "Home hypervisor VM/LXC backups. Local generation and canonical recovery both remain on Synology-backed storage mounted by proxmox-home."
+    description: "Home hypervisor guest backup plane. Proxmox-home generates and stages the canonical Synology-backed artifacts for VM 100, LXC 105, and VM 106."
   # machine-nas REMOVED 2026-03-08: All business backup authority migrated to 730XD canonical plane.
   # Home systems remain canonical on Synology-backed storage; md1400 is reserved for the 730XD/shop environment.
   # Former targets migrated to r730xd-*-backups lanes (finance, infra-core, dev-tools, communications).
@@ -351,7 +352,8 @@ runtime_units:
       - app-ghostfolio
       - app-paperless-db
       - app-paperless-export
-    backup_admission_state: production_ready
+    backup_admission_state: planned
+    description: "Finance VM 211 remains active, but the required app-level lanes (Firefly, finance manifest, Ghostfolio, Paperless) were stale in the 2026-03-18 census, so backup admission is planned until freshness is repaired."
   - unit_id: vm-212-mint-data
     kind: vm
     hostname: mint-data
@@ -398,7 +400,8 @@ runtime_units:
     inventory_targets:
       - vm-214-communications-stack-primary
       - app-mail-archiver
-    backup_admission_state: production_ready
+    backup_admission_state: planned
+    description: "Communications VM 214 remains active, but the primary VM artifact was stale in the 2026-03-18 census. App-mail-archiver is current; production-ready backup admission is withheld until the primary lane is fresh again."
   - unit_id: vm-215-surveillance-stack
     kind: vm
     hostname: surveillance-stack
@@ -413,7 +416,8 @@ runtime_units:
     restore_class: vm-dry-run-quarterly
     inventory_targets:
       - vm-215-surveillance-stack-primary
-    backup_admission_state: production_ready
+    backup_admission_state: planned
+    description: "Surveillance VM 215 remains active, but the primary VM artifact was stale in the 2026-03-18 census. Backup admission stays planned until freshness is restored."
   - unit_id: vm-100-homeassistant
     kind: vm
     hostname: homeassistant
@@ -430,13 +434,13 @@ runtime_units:
       - home-vm-100-ha-primary
     backup_admission_state: production_ready
     description: "Home Assistant VM 100 canonical backup on Synology via proxmox-home."
-  - unit_id: vm-105-pihole-home
-    kind: vm
+  - unit_id: lxc-105-pihole-home
+    kind: lxc
     hostname: pihole-home
     backup_profile: vm-rebuildable
     data_class: payload_regenerable
     include_paths:
-      - vm-disk
+      - rootfs
     exclude_paths:
       - payload_regenerable
     destination_lane: nas-home-local-exception
@@ -446,6 +450,22 @@ runtime_units:
       - home-lxc-105-pihole-primary
     backup_admission_state: production_ready
     description: "Home Pi-hole LXC 105 canonical backup on Synology via proxmox-home."
+  - unit_id: vm-106-media-home
+    kind: vm
+    hostname: media-home
+    backup_profile: vm-primary
+    data_class: large_state
+    include_paths:
+      - vm-disk
+    exclude_paths:
+      - payload_regenerable
+    destination_lane: nas-home-local-exception
+    schedule_class: daily-home-primary-est
+    restore_class: vm-dry-run-quarterly
+    inventory_targets:
+      - home-vm-106-media-home-primary
+    backup_admission_state: planned
+    description: "Home media/watch VM 106 declared from the 2026-03-18 census. Synology vzdump artifacts prove backup existence, but restore proof and guest service inventory are still transitional."
   - unit_id: lxc-220-archive-smb
     kind: lxc
     hostname: archive-smb
@@ -453,8 +473,8 @@ runtime_units:
     data_class: tier1_critical
     include_paths:
       - rootfs
-      - /md1400/ronny-projects
-      - /md1400/mint-legacy
+      - /md1400/archive/live-share/ronny-projects
+      - /md1400/archive/live-share/mint-legacy
     exclude_paths:
       - payload_regenerable
     destination_lane: r730xd-archive-smb-snapshots
@@ -932,6 +952,15 @@ targets:
     stale_after_hours: 168
     classification: rebuildable
     description: "Home Pi-hole LXC 105 canonical backup on Synology. Generated by proxmox-home vzdump job backup-home-p2-weekly."
+  - name: home-vm-106-media-home-primary
+    enabled: true
+    kind: file_glob
+    host: nas
+    base_path: "/volume1/backups/proxmox_backups/dump"
+    glob: "vzdump-qemu-106-*.vma.zst"
+    stale_after_hours: 48
+    classification: important
+    description: "Home media/watch VM 106 canonical backup on Synology. Covered by proxmox-home daily vzdump job backup-home-p0-daily (shared with VM 100)."
   # =============================================================================
   # APP-LEVEL BACKUPS (NAS at house, Tailscale)
   # =============================================================================
