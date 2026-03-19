@@ -59,6 +59,17 @@ Purpose: define the estate-wide boring contract for Docker Compose stacks so cur
 14. No parallel compose authorities.
     There is never a "real" compose and a separate "prod" compose both claiming to be canonical for the same live stack.
 
+## Active Management Posture
+
+Until a later adoption wave explicitly changes the executor posture:
+
+- spine is the governance, smoke, and verification authority
+- workbench is the Git truth for compose and non-secret env shape
+- `/opt/stacks/<stack>` is the deployed host mirror
+- governed SSH + `docker compose` remains the active executor
+
+Future control-plane posture is tracked in `docs/governance/DOCKER_CONTROL_PLANE_DECISION.md`.
+
 ## Standard Operating Model For New Stacks
 
 Every new Docker/Compose stack must ship with:
