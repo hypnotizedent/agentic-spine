@@ -22,6 +22,7 @@ SERVICE_REGISTRY_PATH = ROOT / "docs/governance/SERVICE_REGISTRY.yaml"
 SERVICES_HEALTH_PATH = ROOT / "ops/bindings/services.health.yaml"
 ROUTING_PATH = ROOT / "ops/bindings/domain.routing.registry.yaml"
 MEDIA_PRESSURE_PATH = ROOT / "ops/bindings/shop.media.pressure.authority.yaml"
+LIFECYCLE_REGISTRY_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
 OUTPUT_BINDING_PATH = ROOT / "ops/bindings/shop.storage.map.yaml"
 OUTPUT_SCORECARD_PATH = ROOT / "docs/reference/generated/SHOP_RACK_SCORECARD.md"
 
@@ -79,6 +80,14 @@ def format_list(values: list[str]) -> str:
     return ", ".join(filtered) if filtered else "none"
 
 
+def ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def runtime_kind(vm: dict[str, Any]) -> str:
     return str(vm.get("vm_type") or "vm")
 
@@ -115,6 +124,105 @@ def parse_pool_from_source(source: str) -> str | None:
     if "boot" in source.lower():
         return "boot-disk"
     return None
+
+
+def render_lifecycle_paths(rows: list[dict[str, Any]]) -> list[str]:
+    rendered: list[str] = []
+    for row in rows:
+        item = ensure_dict(row)
+        host = str(item.get("host") or "").strip()
+        path = str(item.get("path") or "").strip()
+        purpose = str(item.get("purpose") or "").strip()
+        if not host or not path:
+            continue
+        value = f"{host}:{path}"
+        if purpose:
+            value = f"{value} ({purpose})"
+        rendered.append(value)
+    return rendered
+
+
+def lifecycle_capacity_honesty(service: dict[str, Any]) -> dict[str, Any]:
+    retention = ensure_dict(service.get("retention_policy"))
+    capacity = ensure_dict(service.get("capacity_model"))
+    if str(capacity.get("type") or "") != "rolling_retention_bytes":
+        return {
+            "status": "unknown",
+            "assessment": "not_applicable",
+            "description": "Capacity honesty does not apply because this service has no rolling retention byte model.",
+        }
+    if retention.get("claim_days") in {None, ""}:
+        return {
+            "status": "unknown",
+            "assessment": "not_applicable",
+            "description": "Capacity honesty does not apply because this service has no day-based retention claim.",
+        }
+
+    try:
+        claim_days = float(retention.get("claim_days"))
+        usable_capacity_gib = float(capacity.get("usable_capacity_gib"))
+        observed_used_gib = float(capacity.get("observed_used_gib"))
+        reserved_headroom_gib = float(capacity.get("reserved_headroom_gib"))
+        observed_daily_growth_gib = float(capacity.get("observed_daily_growth_gib"))
+    except Exception:
+        return {
+            "status": "unknown",
+            "assessment": "insufficient_data",
+            "description": "Capacity honesty cannot be calculated because numeric capacity inputs are incomplete.",
+        }
+
+    if observed_daily_growth_gib <= 0:
+        return {
+            "status": "unknown",
+            "assessment": "insufficient_data",
+            "description": "Capacity honesty cannot be calculated because observed daily growth is not positive.",
+        }
+
+    safe_free_gib = usable_capacity_gib - observed_used_gib - reserved_headroom_gib
+    achievable_days = max(0.0, safe_free_gib) / observed_daily_growth_gib
+    dishonest = claim_days > achievable_days
+    return {
+        "status": "blocked" if dishonest else "accepted",
+        "assessment": "dishonest" if dishonest else "honest",
+        "description": (
+            "Retention claim exceeds modeled safe capacity."
+            if dishonest
+            else "Retention claim fits within modeled safe capacity."
+        ),
+        "claim_days": claim_days,
+        "achievable_days": round(achievable_days, 2),
+    }
+
+
+def build_lifecycle_site_rows(registry: dict[str, Any], site: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for service_id, raw_service in sorted(ensure_dict(registry.get("services")).items()):
+        service = ensure_dict(raw_service)
+        refs = ensure_dict(service.get("binding_refs"))
+        storage_sites = [str(item).strip() for item in ensure_list(refs.get("storage_map_sites")) if str(item).strip()]
+        declared_sites = [str(item).strip() for item in ensure_list(service.get("sites")) if str(item).strip()]
+        if site not in storage_sites and site not in declared_sites:
+            continue
+        rows.append(
+            {
+                "service_id": str(service_id),
+                "display_name": str(service.get("display_name") or service_id),
+                "criticality": str(service.get("criticality") or ""),
+                "data_class": str(service.get("data_class") or ""),
+                "runtime_hosts": [str(item).strip() for item in ensure_list(refs.get("services_health_hosts")) if str(item).strip()],
+                "backup_runtime_units": [str(item).strip() for item in ensure_list(refs.get("backup_runtime_units")) if str(item).strip()],
+                "backup_targets": [str(item).strip() for item in ensure_list(refs.get("backup_targets")) if str(item).strip()],
+                "canonical_live_roots": render_lifecycle_paths(ensure_list(service.get("canonical_live_roots"))),
+                "allowed_secondary_roots": render_lifecycle_paths(ensure_list(service.get("allowed_secondary_roots"))),
+                "staging_roots": render_lifecycle_paths(ensure_list(service.get("staging_roots"))),
+                "quarantine_roots": render_lifecycle_paths(ensure_list(service.get("quarantine_roots"))),
+                "export_archive_lanes": render_lifecycle_paths(ensure_list(service.get("export_archive_lanes"))),
+                "retention_policy": ensure_dict(service.get("retention_policy")),
+                "tombstone_policy": ensure_dict(service.get("tombstone_policy")),
+                "capacity_honesty": lifecycle_capacity_honesty(service),
+            }
+        )
+    return rows
 
 
 def dedupe_storage_objects(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -362,6 +470,7 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
     health = load_yaml(SERVICES_HEALTH_PATH)
     routing = load_yaml(ROUTING_PATH)
     media_pressure = load_yaml(MEDIA_PRESSURE_PATH)
+    lifecycle = load_yaml(LIFECYCLE_REGISTRY_PATH)
 
     source_surfaces = [
         rel(HARDWARE_PATH),
@@ -373,6 +482,7 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
         rel(SERVICES_HEALTH_PATH),
         rel(ROUTING_PATH),
         rel(MEDIA_PRESSURE_PATH),
+        rel(LIFECYCLE_REGISTRY_PATH),
     ]
 
     machines = {str(row.get("machine_id") or ""): row for row in hardware.get("machines") or [] if isinstance(row, dict)}
@@ -751,8 +861,27 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
         seen_risks.add(key)
         risk_rows_unique.append(row)
 
+    lifecycle_rows = build_lifecycle_site_rows(lifecycle, "shop")
+    for row in lifecycle_rows:
+        honesty = ensure_dict(row.get("capacity_honesty"))
+        if str(honesty.get("assessment") or "") != "dishonest":
+            continue
+        risk_rows_unique.append(
+            {
+                "risk_id": f"lifecycle-{row.get('service_id')}",
+                "severity": "high",
+                "runtime": str(row.get("service_id") or ""),
+                "source": rel(LIFECYCLE_REGISTRY_PATH),
+                "detail": (
+                    f"{row.get('display_name')}: claim_days={honesty.get('claim_days')} "
+                    f"exceeds achievable_days={honesty.get('achievable_days')}"
+                ),
+            }
+        )
+
     storage_map: dict[str, Any] = {
         "version": 1,
+        "authority_state": "projection",
         "generated_at_utc": generated_at_utc,
         "site": "shop",
         "generated_by": {
@@ -771,12 +900,14 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
             "external_shelves": pve_machine.get("external_shelves"),
         },
         "media_pressure": media_pressure_view,
+        "service_lifecycle": lifecycle_rows,
         "runtime_storage": runtime_rows,
         "tombstones": tombstones,
         "current_risks": risk_rows_unique,
         "summary": {
             "active_runtime_count": len(runtime_rows),
             "tombstone_count": len(tombstones),
+            "lifecycle_service_count": len(lifecycle_rows),
             "public_runtime_count": len([row for row in runtime_rows if row.get("public_route_count", 0) > 0]),
             "private_only_runtime_count": len([row for row in runtime_rows if row.get("public_route_count", 0) == 0]),
         },

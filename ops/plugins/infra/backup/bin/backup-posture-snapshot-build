@@ -7,6 +7,7 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)
 INV="$ROOT/ops/bindings/backup.inventory.yaml"
 SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
 SSH_BIND="$ROOT/ops/bindings/ssh.targets.yaml"
+LIFECYCLE="$ROOT/ops/bindings/service.data.lifecycle.registry.yaml"
 OUT_DEFAULT="$ROOT/ops/bindings/backup.posture.snapshot.yaml"
 BACKUP_STATUS_BIN="$ROOT/ops/plugins/infra/backup/bin/backup-status"
 
@@ -47,6 +48,7 @@ done
 [[ -f "$INV" ]] || { echo "FAIL: missing $INV" >&2; exit 1; }
 [[ -f "$SCHEDULE" ]] || { echo "FAIL: missing $SCHEDULE" >&2; exit 1; }
 [[ -f "$SSH_BIND" ]] || { echo "FAIL: missing $SSH_BIND" >&2; exit 1; }
+[[ -f "$LIFECYCLE" ]] || { echo "FAIL: missing $LIFECYCLE" >&2; exit 1; }
 [[ -x "$BACKUP_STATUS_BIN" ]] || { echo "FAIL: missing executable $BACKUP_STATUS_BIN" >&2; exit 1; }
 
 STATUS_TMP="$(mktemp)"
@@ -61,7 +63,7 @@ if ! "$BACKUP_STATUS_BIN" >"$STATUS_TMP" 2>&1; then
   STATUS_RC=$?
 fi
 
-python3 - "$INV" "$SCHEDULE" "$SSH_BIND" "$STATUS_TMP" "$STATUS_RC" <<'PY' > "$JSON_TMP"
+python3 - "$INV" "$SCHEDULE" "$SSH_BIND" "$STATUS_TMP" "$STATUS_RC" "$LIFECYCLE" <<'PY' > "$JSON_TMP"
 import ipaddress
 import json
 import re
@@ -75,6 +77,7 @@ schedule_path = sys.argv[2]
 ssh_path = sys.argv[3]
 status_path = sys.argv[4]
 status_rc = int(sys.argv[5])
+lifecycle_path = sys.argv[6]
 
 
 def yq_json(path):
@@ -197,6 +200,7 @@ def ssh_probe(host_cfg, base_path):
 inv = yq_json(inv_path)
 schedule = yq_json(schedule_path)
 ssh_data = yq_json(ssh_path)
+lifecycle = yq_json(lifecycle_path)
 status_text = open(status_path, "r", encoding="utf-8", errors="replace").read()
 
 now_utc = datetime.now(timezone.utc)
@@ -347,6 +351,36 @@ for lane_id, lane in dest_lanes.items():
         }
     )
 
+lifecycle_backup_rows = []
+for service_id, raw_service in sorted((lifecycle.get("services") or {}).items()):
+    if not isinstance(raw_service, dict):
+        continue
+    refs = (raw_service.get("binding_refs") or {})
+    runtime_units = [str(item) for item in (refs.get("backup_runtime_units") or []) if str(item).strip()]
+    targets_for_service = [str(item) for item in (refs.get("backup_targets") or []) if str(item).strip()]
+    if not runtime_units and not targets_for_service:
+        continue
+    lifecycle_backup_rows.append(
+        {
+            "service_id": str(service_id),
+            "display_name": str(raw_service.get("display_name") or service_id),
+            "backup_class": str(raw_service.get("backup_class") or ""),
+            "restore_proof_expectation": raw_service.get("restore_proof_expectation") or {},
+            "backup_runtime_units": runtime_units,
+            "backup_targets": targets_for_service,
+            "canonical_live_roots": [
+                f"{row.get('host')}:{row.get('path')}"
+                for row in (raw_service.get("canonical_live_roots") or [])
+                if isinstance(row, dict) and row.get("host") and row.get("path")
+            ],
+            "export_archive_lanes": [
+                f"{row.get('host')}:{row.get('path')}"
+                for row in (raw_service.get("export_archive_lanes") or [])
+                if isinstance(row, dict) and row.get("host") and row.get("path")
+            ],
+        }
+    )
+
 posture = {
     "status": "generated",
     "owner": "@ronny",
@@ -359,6 +393,7 @@ posture = {
     "projection_of": [
         "ops/bindings/backup.inventory.yaml",
         "ops/bindings/backup.schedule.yaml",
+        "ops/bindings/service.data.lifecycle.registry.yaml",
         "backup.status",
     ],
     "summary": {
@@ -373,6 +408,7 @@ posture = {
         "runtime_units_invalid_admission_total": len(invalid_admission),
         "restore_coverage_rows_total": len(restore_rows),
         "restore_coverage_missing_total": len(restore_missing),
+        "lifecycle_bound_services_total": len(lifecycle_backup_rows),
         "lane_over_budget_total": over_budget,
         "lane_collect_errors_total": collect_errors,
     },
@@ -390,6 +426,10 @@ posture = {
     },
     "lane_budgets": {
         "rows": lane_rows,
+    },
+    "lifecycle_backup_bindings": {
+        "source_registry": "ops/bindings/service.data.lifecycle.registry.yaml",
+        "rows": lifecycle_backup_rows,
     },
     "schedule_reference": {
         "timezone": schedule.get("timezone"),

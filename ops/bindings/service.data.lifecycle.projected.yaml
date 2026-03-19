@@ -1,0 +1,319 @@
+# Service Data Lifecycle Projection
+# Non-secret. Spine-native.
+# Status: projection
+# projection_of: ops/bindings/service.data.lifecycle.registry.yaml
+# Do NOT edit manually. Rebuild with: ./bin/ops cap run service.data.lifecycle.projection.build
+version: 1
+status: projection
+authority_state: projection
+projection_of: ops/bindings/service.data.lifecycle.registry.yaml
+source_capability: service.data.lifecycle.projection.build
+source_sha256: 34ebfc184483e0af546ed6d65e68090a9a1899ddc24d78ee9d0becb24467100b
+generated_at_utc: '2026-03-19T15:11:44Z'
+services:
+- service_id: backups
+  display_name: Backups
+  sites:
+  - shop
+  - home
+  criticality: tier1
+  data_class: restore_artifacts
+  canonical_live_root_count: 2
+  canonical_live_roots:
+  - pve:/md1400/backup-cold (Canonical shop cold backup plane.)
+  - nas:/volume1/backups/proxmox_backups/dump (Canonical home backup plane.)
+  allowed_secondary_root_count: 2
+  allowed_secondary_roots:
+  - pve:/tank/backups/vzdump/dump (Local shop generation lane before promotion to
+    md1400.)
+  - proxmox-home:/mnt/pve/synology-backups/dump (Home generation mount before the
+    canonical Synology lane.)
+  staging_root_count: 1
+  staging_roots:
+  - pve:/tank/backups/vzdump/dump (Shop local generation lane.)
+  quarantine_root_count: 0
+  quarantine_roots: []
+  export_archive_lanes:
+  - pve:/md1400/backup-cold (Canonical shop restore/archive plane.)
+  - nas:/volume1/backups/proxmox_backups/dump (Canonical home restore plane.)
+  retention_policy:
+    policy_type: freshness_windows
+    claim_days: null
+    primary_stale_after_hours: 26
+    important_stale_after_hours: 48
+    rebuildable_stale_after_hours: 168
+    description: Per-target freshness windows remain authoritative in backup.inventory.yaml.
+      This registry governs root intent, staging, archive, and restore expectations.
+  tombstone_policy:
+    expiry_mode: review_then_delete
+    default_review_days: 180
+    writer_drain_required: true
+  backup_class: canonical_restore_plane
+  restore_proof_expectation:
+    mode: dry_run
+    cadence: monthly_and_quarterly
+    authority_ref: ops/bindings/backup.inventory.yaml
+  capacity_model:
+    mode: advisory
+    type: lane_budget_guard
+    source_ref: ops/bindings/backup.inventory.yaml
+    description: Per-lane max_total_gb and max_file_count budgets remain authoritative
+      in backup.inventory.yaml.
+  capacity_honesty:
+    status: unknown
+    assessment: not_applicable
+    description: Capacity honesty does not apply because this service has no enforceable
+      rolling day claim.
+  drift_rules:
+    canonical_root_count_limit: 2
+    staging_requires_expiry: true
+    quarantine_requires_expiry: false
+    retired_roots: []
+  binding_refs:
+    storage_map_sites:
+    - shop
+    - home
+    services_health_hosts: []
+    backup_runtime_units:
+    - machine-pve
+    - machine-proxmox-home
+    - vm-203-immich
+    - vm-209-download-stack
+    - vm-210-streaming-stack
+    - vm-215-surveillance-stack
+    backup_targets:
+    - vm-203-primary
+    - vm-209-download-stack-primary
+    - vm-210-streaming-stack-primary
+    - vm-215-surveillance-stack-primary
+    - home-vm-100-ha-primary
+    - home-vm-106-media-home-primary
+- service_id: immich
+  display_name: Immich
+  sites:
+  - shop
+  criticality: tier1
+  data_class: personal_media_library
+  canonical_live_root_count: 2
+  canonical_live_roots:
+  - immich:/mnt/pve-immich-upload (Canonical active imported-asset surface from UPLOAD_LOCATION
+    on VM 203.)
+  - immich:/tank/immich/db (Canonical guest-local PostgreSQL data root on VM 203.)
+  allowed_secondary_root_count: 3
+  allowed_secondary_roots:
+  - pve:/tank/immich/uploads-vm203 (Backing ZFS dataset exported to VM 203 over NFS
+    for the canonical upload surface.)
+  - immich:/home/ronny/immich (Live compose/runtime root on the guest.)
+  - immich:/home/ronny/backups (Daily pg_dump export lane on VM 203.)
+  staging_root_count: 0
+  staging_roots: []
+  quarantine_root_count: 2
+  quarantine_roots:
+  - pve:/tank/immich/photos (Legacy external-library residue proven not imported into
+    the active Immich database.)
+  - nas:/volume1/im2ch (Legacy home-side Immich residue/archive lane pending later
+    consolidation.)
+  export_archive_lanes:
+  - immich:/home/ronny/backups (Daily pg_dump export lane.)
+  retention_policy:
+    policy_type: mixed_state
+    claim_days: null
+    db_dump_days: 7
+    description: The active imported asset lane is /mnt/pve-immich-upload backed by
+      pve:/tank/immich/uploads-vm203. /tank/immich/photos remains orphaned residue,
+      not canonical imported state.
+  tombstone_policy:
+    expiry_mode: requires_final_backup
+    default_review_days: 90
+    writer_drain_required: true
+  backup_class: vm_primary_plus_db_export
+  restore_proof_expectation:
+    mode: dry_run
+    cadence: quarterly
+    authority_ref: ops/bindings/backup.inventory.yaml
+  capacity_model:
+    mode: advisory
+    type: split_root_watch
+    source_ref: ops/bindings/infra.storage.placement.policy.yaml
+    description: Immich now has a known active imported asset lane plus explicit residue
+      roots. The goal is to prevent future silent root sprawl.
+  capacity_honesty:
+    status: unknown
+    assessment: not_applicable
+    description: Capacity honesty does not apply because this service has no enforceable
+      rolling day claim.
+  drift_rules:
+    canonical_root_count_limit: 2
+    staging_requires_expiry: false
+    quarantine_requires_expiry: true
+    retired_roots: []
+  binding_refs:
+    storage_map_sites:
+    - shop
+    services_health_hosts:
+    - immich
+    backup_runtime_units:
+    - vm-203-immich
+    - container-fleet-immich
+    backup_targets:
+    - vm-203-primary
+- service_id: media
+  display_name: Media
+  sites:
+  - shop
+  criticality: tier1
+  data_class: mixed_payload_and_regenerable
+  canonical_live_root_count: 1
+  canonical_live_roots:
+  - pve:/media (Canonical NFS export for movies, tv, music, archive, and import surfaces.)
+  allowed_secondary_root_count: 4
+  allowed_secondary_roots:
+  - download-stack:/mnt/media (RW consumer mount of the canonical /media export.)
+  - streaming-stack:/mnt/media (RO consumer mount of the canonical /media export.)
+  - download-stack:/mnt/docker (Config-state mount for download-stack.)
+  - streaming-stack:/mnt/docker (Config-state mount for streaming-stack.)
+  staging_root_count: 1
+  staging_roots:
+  - download-stack:/mnt/media/downloads (Active import/download lane. Must drain after
+    import and must never become a permanent residence.)
+  quarantine_root_count: 2
+  quarantine_roots:
+  - pve:/md1400/archive/media-quarantine/pending (Operator review queue for unresolved
+    media.)
+  - pve:/md1400/archive/media-quarantine/reviewed (Reviewed hold lane awaiting archive
+    or delete.)
+  export_archive_lanes:
+  - pve:/md1400/media-cold (Cold archive and legacy media hold lane.)
+  - pve:/md1400/backup-cold/apps/media-config (Canonical config backup archive for
+    download/streaming stacks.)
+  retention_policy:
+    policy_type: bounded_stage_windows
+    claim_days: null
+    downloads_max_age_days: 7
+    quarantine_pending_max_age_days: 30
+    quarantine_reviewed_max_age_days: 90
+    description: Payload libraries are canonical live state, not a rolling retention
+      bucket. Downloads and quarantine are explicitly time-boxed.
+  tombstone_policy:
+    expiry_mode: review_then_delete
+    default_review_days: 90
+    writer_drain_required: true
+  backup_class: vm_plus_config_archive
+  restore_proof_expectation:
+    mode: dry_run
+    cadence: monthly
+    authority_ref: ops/bindings/backup.inventory.yaml
+  capacity_model:
+    mode: advisory
+    type: dataset_pressure_watch
+    source_ref: ops/bindings/shop.media.pressure.authority.yaml
+    description: The media pool is near saturation; this registry captures drain/expiry
+      intent rather than inventing a fake rolling-retention day count.
+  capacity_honesty:
+    status: unknown
+    assessment: not_applicable
+    description: Capacity honesty does not apply because this service has no enforceable
+      rolling day claim.
+  drift_rules:
+    canonical_root_count_limit: 1
+    staging_requires_expiry: true
+    quarantine_requires_expiry: true
+    retired_roots:
+    - host: pve
+      path: /media/backups
+      reason: Legacy warm-lane media-stack tarball hold. Historical only; not canonical
+        backup truth.
+  binding_refs:
+    storage_map_sites:
+    - shop
+    services_health_hosts:
+    - download-stack
+    - streaming-stack
+    backup_runtime_units:
+    - vm-209-download-stack
+    - vm-210-streaming-stack
+    - container-fleet-download-stack
+    - container-fleet-streaming-stack
+    backup_targets:
+    - vm-209-download-stack-primary
+    - vm-210-streaming-stack-primary
+    - app-media-config-download-stack
+    - app-media-config-streaming-stack
+- service_id: surveillance
+  display_name: Surveillance
+  sites:
+  - shop
+  criticality: tier1
+  data_class: time_series_video
+  canonical_live_root_count: 3
+  canonical_live_roots:
+  - surveillance-stack:/srv/config/surveillance (Canonical live compose/config authority
+    proved by the 2026-03-19 normalization wave.)
+  - surveillance-stack:/srv/data/surveillance (Canonical durable appstate, recordings,
+    clips, and snapshots surface.)
+  - surveillance-stack:/srv/runtime/surveillance (Canonical runtime cache surface
+    for tmpfs-backed transient state.)
+  allowed_secondary_root_count: 1
+  allowed_secondary_roots:
+  - surveillance-stack:/opt/stacks/surveillance (Thin compatibility symlink to /srv/config/surveillance;
+    entrypoint only, not a separate live root.)
+  staging_root_count: 0
+  staging_roots: []
+  quarantine_root_count: 0
+  quarantine_roots: []
+  export_archive_lanes:
+  - pve:/md1400/backup-cold/vzdump/pve (Canonical cold VM restore plane.)
+  retention_policy:
+    policy_type: rolling_days
+    claim_days: 1
+    clips_days: 14
+    snapshots_days: 30
+    description: The current honest claim on the 100G disk is 1d motion recordings,
+      14d detection clips, and 30d snapshots. The surveillance operating-model contract
+      still targets 7d/14d after the 2TB remediation wave.
+  tombstone_policy:
+    expiry_mode: review_before_delete
+    default_review_days: 30
+    writer_drain_required: true
+  backup_class: vm_only
+  restore_proof_expectation:
+    mode: dry_run
+    cadence: quarterly
+    authority_ref: ops/bindings/backup.inventory.yaml
+  capacity_model:
+    mode: enforce
+    type: rolling_retention_bytes
+    source_ref: ops/bindings/surveillance.operating.model.contract.yaml
+    usable_capacity_gib: 100
+    observed_used_gib: 81.1
+    reserved_headroom_gib: 10
+    observed_daily_growth_gib: 7.0
+    description: The 2026-03-18 placement census recorded 76G recordings plus 5.1G
+      clips on the 100G data disk. The remaining safe headroom supports about 1.27
+      days, so the current claim is capped at 1 day until the 2TB remediation lands.
+  capacity_honesty:
+    status: accepted
+    assessment: honest
+    description: Retention claim fits within modeled safe capacity.
+    claim_days: 1.0
+    estimated_achievable_days: 1.27
+    safe_free_gib: 8.9
+    enforcement_mode: enforce
+  drift_rules:
+    canonical_root_count_limit: 3
+    staging_requires_expiry: false
+    quarantine_requires_expiry: false
+    retired_roots:
+    - host: surveillance-stack
+      path: /home/ubuntu/surveillance.pre-normalization-20260319T120655Z
+      reason: Rollback capsule retained after the 2026-03-19 /srv normalization wave;
+        not a live writer root.
+  binding_refs:
+    storage_map_sites:
+    - shop
+    services_health_hosts:
+    - surveillance-stack
+    backup_runtime_units:
+    - vm-215-surveillance-stack
+    backup_targets:
+    - vm-215-surveillance-stack-primary

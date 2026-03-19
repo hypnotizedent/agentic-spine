@@ -22,6 +22,7 @@ HOME_PROXMOX_PATH = ROOT / "ops/bindings/home.proxmox.inventory.yaml"
 HOME_UNIFI_PATH = ROOT / "ops/bindings/home.unifi.network.inventory.yaml"
 NETWORK_DNS_LOCAL_PATH = ROOT / "ops/bindings/network.dns.local.registry.yaml"
 SERVICE_REGISTRY_PATH = ROOT / "docs/governance/SERVICE_REGISTRY.yaml"
+LIFECYCLE_REGISTRY_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
 SHOP_STORAGE_MAP_PATH = ROOT / "ops/bindings/shop.storage.map.yaml"
 SSH_TARGETS_PATH = ROOT / "ops/bindings/ssh.targets.yaml"
 SYNOLOGY_STORAGE_PATH = ROOT / "ops/bindings/synology918.storage.manifest.yaml"
@@ -96,6 +97,51 @@ def ensure_list(value: Any) -> list[Any]:
 
 def ensure_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def render_lifecycle_paths(rows: list[dict[str, Any]]) -> list[str]:
+    rendered: list[str] = []
+    for row in rows:
+        item = ensure_dict(row)
+        host = str(item.get("host") or "").strip()
+        path = str(item.get("path") or "").strip()
+        purpose = str(item.get("purpose") or "").strip()
+        if not host or not path:
+            continue
+        value = f"{host}:{path}"
+        if purpose:
+            value = f"{value} ({purpose})"
+        rendered.append(value)
+    return rendered
+
+
+def build_lifecycle_site_rows(registry: dict[str, Any], site: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for service_id, raw_service in sorted(ensure_dict(registry.get("services")).items()):
+        service = ensure_dict(raw_service)
+        refs = ensure_dict(service.get("binding_refs"))
+        storage_sites = [str(item).strip() for item in ensure_list(refs.get("storage_map_sites")) if str(item).strip()]
+        declared_sites = [str(item).strip() for item in ensure_list(service.get("sites")) if str(item).strip()]
+        if site not in storage_sites and site not in declared_sites:
+            continue
+        rows.append(
+            {
+                "service_id": str(service_id),
+                "display_name": str(service.get("display_name") or service_id),
+                "criticality": str(service.get("criticality") or ""),
+                "data_class": str(service.get("data_class") or ""),
+                "backup_runtime_units": [str(item).strip() for item in ensure_list(refs.get("backup_runtime_units")) if str(item).strip()],
+                "backup_targets": [str(item).strip() for item in ensure_list(refs.get("backup_targets")) if str(item).strip()],
+                "canonical_live_roots": render_lifecycle_paths(ensure_list(service.get("canonical_live_roots"))),
+                "allowed_secondary_roots": render_lifecycle_paths(ensure_list(service.get("allowed_secondary_roots"))),
+                "staging_roots": render_lifecycle_paths(ensure_list(service.get("staging_roots"))),
+                "quarantine_roots": render_lifecycle_paths(ensure_list(service.get("quarantine_roots"))),
+                "export_archive_lanes": render_lifecycle_paths(ensure_list(service.get("export_archive_lanes"))),
+                "retention_policy": ensure_dict(service.get("retention_policy")),
+                "tombstone_policy": ensure_dict(service.get("tombstone_policy")),
+            }
+        )
+    return rows
 
 
 def extract_first_int(value: str) -> int:
@@ -390,6 +436,7 @@ def build_home_storage_map(
     backup: dict[str, Any],
     estate_authority: dict[str, Any],
     home_hardware: dict[str, Any],
+    lifecycle_registry: dict[str, Any],
     home_proxmox: dict[str, Any],
     synology: dict[str, Any],
 ) -> dict[str, Any]:
@@ -526,6 +573,7 @@ def build_home_storage_map(
 
     return {
         "version": 1,
+        "authority_state": "projection",
         "generated_at_utc": now_utc_iso(),
         "site": "home",
         "generated_by": {
@@ -539,6 +587,7 @@ def build_home_storage_map(
             rel(SYNOLOGY_STORAGE_PATH),
             rel(BACKUP_PATH),
             rel(ESTATE_AUTHORITY_PATH),
+            rel(LIFECYCLE_REGISTRY_PATH),
         ],
         "tier_model": [
             {
@@ -618,6 +667,7 @@ def build_home_storage_map(
         },
         "runtime_storage": sorted(runtime_storage, key=lambda row: row["vm_id"]),
         "decommissioned_units": sorted(decommissioned_units, key=lambda row: (row["vm_id"], row["name"])),
+        "service_lifecycle": build_lifecycle_site_rows(lifecycle_registry, "home"),
         "canonical_personal_data": home_personal_data,
         "current_risks": blockers,
     }
@@ -946,6 +996,7 @@ def build_generated_yaml_with_header(title: str, data: dict[str, Any]) -> str:
         f"# {title}\n"
         "# Non-secret. Spine-native.\n"
         "# Status: generated\n"
+        "# authority_state: projection\n"
         "# Do not edit manually — rebuild with: ./bin/ops cap run infra.estate.boringness.build\n"
         + yaml_dump(data)
     )
@@ -985,6 +1036,7 @@ def main() -> int:
     home_unifi = load_yaml(HOME_UNIFI_PATH)
     network_dns_local = load_yaml(NETWORK_DNS_LOCAL_PATH)
     service_registry = load_yaml(SERVICE_REGISTRY_PATH)
+    lifecycle_registry = load_yaml(LIFECYCLE_REGISTRY_PATH)
     shop_storage_map = load_yaml(SHOP_STORAGE_MAP_PATH)
     ssh_targets = load_yaml(SSH_TARGETS_PATH)
     synology = load_yaml(SYNOLOGY_STORAGE_PATH)
@@ -1013,6 +1065,7 @@ def main() -> int:
         backup=backup,
         estate_authority=estate_authority,
         home_hardware=home_hardware,
+        lifecycle_registry=lifecycle_registry,
         home_proxmox=home_proxmox,
         synology=synology,
     )

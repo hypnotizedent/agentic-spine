@@ -15,8 +15,8 @@ scope: dream-system-projection-first-execution-backlog
 # Type values: generator | gate | scaffold | migration | cleanup
 
 metadata:
-  total_backlog_items: 26
-  completed_milestones: 3
+  total_backlog_items: 27
+  completed_milestones: 4
   in_progress_backlog_items: 2
   not_started_backlog_items: 18
   blocked_backlog_items: 3
@@ -129,6 +129,26 @@ concern_families:
     generator_exists: false
     gate_exists: false
     estimated_effort_hours: 3
+
+  service_lifecycle_retention_surfaces:
+    description: "Service lifecycle authority should govern canonical roots, staging/quarantine expiry, archive intent, and retention-capacity honesty."
+    authority_file: ops/bindings/service.data.lifecycle.registry.yaml
+    projection_files:
+      - ops/bindings/service.data.lifecycle.projected.yaml
+      - ops/bindings/services.health.yaml
+      - ops/bindings/shop.storage.map.yaml
+      - ops/bindings/home.storage.map.yaml
+      - ops/bindings/backup.posture.snapshot.yaml
+    current_state: generated_projection_with_blocking_honesty_gate
+    target_state: generated_projection_with_prevention_gates
+    blast_radius: 4
+    backfill_frequency: high
+    rollout_priority: 9
+    generator_exists: true
+    generator_capability_name: service.data.lifecycle.projection.build
+    gate_exists: true
+    gate_id_existing: D407
+    estimated_effort_hours: 4
 
   docker_runtime_boringness_surfaces:
     description: "Docker Compose contract, executor posture, and deferred runtime gaps should be explicit and adoption-gated."
@@ -859,6 +879,37 @@ backlog:
     effort_estimate_hours: 2
     dependencies: []
 
+  - id: DREAM-027
+    title: "Govern service data lifecycle and retention surfaces"
+    concern_family: service_lifecycle_retention_surfaces
+    authority_file: ops/bindings/service.data.lifecycle.registry.yaml
+    projection_files:
+      - ops/bindings/service.data.lifecycle.projected.yaml
+      - ops/bindings/services.health.yaml
+      - ops/bindings/shop.storage.map.yaml
+      - ops/bindings/home.storage.map.yaml
+      - ops/bindings/backup.posture.snapshot.yaml
+    current_state: generated_projection_with_blocking_honesty_gate
+    target_state: extend_temporal_governance_to_writer_drift_and_tombstone_expiry
+    blast_radius: 4
+    priority: 27
+    status: completed
+    type: generator
+    generator_exists: true
+    generator_capability_name: service.data.lifecycle.projection.build
+    gate_exists: true
+    gate_id_existing: D407
+    recommended_next_action: |
+      1. Keep `service.data.lifecycle.registry.yaml` as the only time-aware lifecycle authority.
+      2. Re-run `service.data.lifecycle.projection.build` plus downstream generators whenever backup, surveillance, media, or Immich runtime truth changes.
+      3. Keep D407 blocking until surveillance retention claims and similar capacity claims become honest.
+      4. Extend the lane with retired-root writer drift and tombstone expiry gates instead of service-by-service cleanup notes.
+    notes: |
+      This wave lands one authoritative lifecycle registry, one projected lifecycle surface, and downstream projections into services.health, storage maps, and backup posture.
+      D406 now enforces master/projection registration completeness for the concern family, and D407 blocks impossible retention claims plus missing expiry windows.
+    effort_estimate_hours: 4
+    dependencies: []
+
 migrations:
   - id: DREAM-CAP-MIGRATION
     title: "Add script_path field to capabilities.yaml entries"
@@ -907,11 +958,25 @@ completed:
     generator_capability: backup.posture.snapshot.build
     gate_id: null
 
+  - id: COMPLETE-004
+    title: "Service data lifecycle retention projection"
+    concern_family: service_lifecycle_retention_surfaces
+    completed_date: "2026-03-19"
+    authority_file: ops/bindings/service.data.lifecycle.registry.yaml
+    projection_files:
+      - ops/bindings/service.data.lifecycle.projected.yaml
+      - ops/bindings/services.health.yaml
+      - ops/bindings/shop.storage.map.yaml
+      - ops/bindings/home.storage.map.yaml
+      - ops/bindings/backup.posture.snapshot.yaml
+    generator_capability: service.data.lifecycle.projection.build
+    gate_id: D407
+
 summary:
-  total_backlog_items: 26
+  total_backlog_items: 27
   tier_1_high_impact: 5
-  tier_2_medium_impact: 21
+  tier_2_medium_impact: 22
   tier_3_aspirational: 0
-  total_estimated_hours: 63
-  completed_milestones: 3
+  total_estimated_hours: 67
+  completed_milestones: 4
   next_recommended_start: DREAM-001

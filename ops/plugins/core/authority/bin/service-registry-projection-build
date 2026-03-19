@@ -12,6 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[5]
 AUTHORITY_PATH = ROOT / "docs/governance" / "SERVICE_REGISTRY.yaml"
+LIFECYCLE_REGISTRY_PATH = ROOT / "ops" / "bindings" / "service.data.lifecycle.registry.yaml"
 SERVICES_HEALTH_PATH = ROOT / "ops" / "bindings" / "services.health.yaml"
 DOCKER_TARGETS_PATH = ROOT / "ops" / "bindings" / "docker.compose.targets.yaml"
 SSH_TARGETS_PATH = ROOT / "ops" / "bindings" / "ssh.targets.yaml"
@@ -87,6 +88,16 @@ def ensure_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def combined_source_sha(paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(rel(path).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def projection_metadata(source_sha: str) -> dict[str, Any]:
     return {
         "status": "projection",
@@ -96,6 +107,60 @@ def projection_metadata(source_sha: str) -> dict[str, Any]:
         "source_capability": "service.registry.projection.build",
         "source_sha256": source_sha,
     }
+
+
+def render_lifecycle_paths(rows: list[dict[str, Any]]) -> list[str]:
+    rendered: list[str] = []
+    for row in rows:
+        item = ensure_mapping(row)
+        host = str(item.get("host") or "").strip()
+        path = str(item.get("path") or "").strip()
+        purpose = str(item.get("purpose") or "").strip()
+        if not host or not path:
+            continue
+        value = f"{host}:{path}"
+        if purpose:
+            value = f"{value} ({purpose})"
+        rendered.append(value)
+    return rendered
+
+
+def build_lifecycle_bindings_by_host() -> list[dict[str, Any]]:
+    if not LIFECYCLE_REGISTRY_PATH.is_file():
+        return []
+
+    lifecycle = load_yaml(LIFECYCLE_REGISTRY_PATH)
+    services = ensure_mapping(lifecycle.get("services"))
+    bindings_by_host: dict[str, list[dict[str, Any]]] = {}
+
+    for service_id, raw_service in sorted(services.items()):
+        service = ensure_mapping(raw_service)
+        refs = ensure_mapping(service.get("binding_refs"))
+        host_ids = [str(host).strip() for host in ensure_list(refs.get("services_health_hosts")) if str(host).strip()]
+        if not host_ids:
+            continue
+        summary = {
+            "service_id": str(service_id),
+            "display_name": str(service.get("display_name") or service_id),
+            "criticality": str(service.get("criticality") or ""),
+            "canonical_live_roots": render_lifecycle_paths(ensure_list(service.get("canonical_live_roots"))),
+            "staging_roots": render_lifecycle_paths(ensure_list(service.get("staging_roots"))),
+            "quarantine_roots": render_lifecycle_paths(ensure_list(service.get("quarantine_roots"))),
+            "export_archive_lanes": render_lifecycle_paths(ensure_list(service.get("export_archive_lanes"))),
+            "retention_policy": ensure_mapping(service.get("retention_policy")),
+            "capacity_model": ensure_mapping(service.get("capacity_model")),
+        }
+        for host_id in host_ids:
+            bindings_by_host.setdefault(host_id, []).append(summary)
+
+    return [
+        {
+            "host": host_id,
+            "source_registry": rel(LIFECYCLE_REGISTRY_PATH),
+            "services": bindings_by_host[host_id],
+        }
+        for host_id in sorted(bindings_by_host)
+    ]
 
 
 def normalized_health_path(value: Any) -> str:
@@ -174,7 +239,11 @@ def build_endpoint(
     return endpoint
 
 
-def build_services_health(authority: dict[str, Any], source_sha: str) -> tuple[str, list[dict[str, Any]]]:
+def build_services_health(
+    authority: dict[str, Any],
+    source_sha: str,
+    lifecycle_bindings: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
     services = ensure_mapping(authority.get("services"))
     hosts = ensure_mapping(authority.get("hosts"))
     endpoints: list[dict[str, Any]] = []
@@ -221,6 +290,7 @@ def build_services_health(authority: dict[str, Any], source_sha: str) -> tuple[s
         **projection_metadata(source_sha),
         "defaults": dict(HEALTH_DEFAULTS),
         "endpoints": endpoints,
+        "lifecycle_bindings": lifecycle_bindings,
     }
 
     header = "\n".join(
@@ -317,7 +387,12 @@ def load_ssh_target_ids() -> set[str]:
     return ids
 
 
-def verify(authority: dict[str, Any], endpoints: list[dict[str, Any]], compose_targets: dict[str, Any]) -> None:
+def verify(
+    authority: dict[str, Any],
+    endpoints: list[dict[str, Any]],
+    compose_targets: dict[str, Any],
+    lifecycle_bindings: list[dict[str, Any]],
+) -> None:
     hosts = ensure_mapping(authority.get("hosts"))
     services = ensure_mapping(authority.get("services"))
     ssh_target_ids = load_ssh_target_ids()
@@ -348,6 +423,11 @@ def verify(authority: dict[str, Any], endpoints: list[dict[str, Any]], compose_t
         elif ssh_target not in ssh_target_ids:
             errors.append(f"projected compose target '{target_id}' references missing ssh target '{ssh_target}'")
 
+    for binding in lifecycle_bindings:
+        host_id = str(binding.get("host") or "").strip()
+        if host_id and host_id not in hosts:
+            errors.append(f"lifecycle binding references missing registry host '{host_id}'")
+
     if errors:
         for error in errors:
             print(f"service.registry.projection.build VERIFY FAIL: {error}", file=sys.stderr)
@@ -374,13 +454,17 @@ def check_matches(path: Path, expected: str) -> None:
 def main() -> None:
     args = parse_args()
     authority = load_yaml(AUTHORITY_PATH)
-    source_sha = hashlib.sha256(AUTHORITY_PATH.read_bytes()).hexdigest()
+    source_paths = [AUTHORITY_PATH]
+    if LIFECYCLE_REGISTRY_PATH.is_file():
+        source_paths.append(LIFECYCLE_REGISTRY_PATH)
+    source_sha = combined_source_sha(source_paths)
+    lifecycle_bindings = build_lifecycle_bindings_by_host()
 
-    services_health_text, endpoints = build_services_health(authority, source_sha)
+    services_health_text, endpoints = build_services_health(authority, source_sha, lifecycle_bindings)
     docker_targets_text, compose_targets = build_docker_targets(authority, source_sha)
 
     if args.verify:
-        verify(authority, endpoints, compose_targets)
+        verify(authority, endpoints, compose_targets, lifecycle_bindings)
 
     if args.check:
         check_matches(SERVICES_HEALTH_PATH, services_health_text)

@@ -36,6 +36,7 @@ projection_path = Path(sys.argv[4]).expanduser().resolve()
 ENFORCED_CONCERNS = {
     "service_registry_surfaces",
     "backup_inventory_surfaces",
+    "service_lifecycle_retention_surfaces",
     "internet_asset_surfaces",
 }
 

@@ -1,9 +1,11 @@
 # Home Storage Authority Projection
 # Non-secret. Spine-native.
 # Status: generated
+# authority_state: projection
 # Do not edit manually — rebuild with: ./bin/ops cap run infra.estate.boringness.build
 version: 1
-generated_at_utc: '2026-03-19T10:07:56Z'
+authority_state: projection
+generated_at_utc: '2026-03-19T15:11:44Z'
 site: home
 generated_by:
   capability: infra.estate.boringness.build
@@ -15,6 +17,7 @@ source_surfaces:
 - ops/bindings/synology918.storage.manifest.yaml
 - ops/bindings/backup.inventory.yaml
 - ops/bindings/estate.boringness.authority.yaml
+- ops/bindings/service.data.lifecycle.registry.yaml
 tier_model:
 - tier_id: home-local-lvm
   plane: hot_runtime
@@ -190,6 +193,51 @@ decommissioned_units:
   classification: tombstone
   note: Historical home guest retained only as decommissioned inventory.
   decommissioned_on: ''
+service_lifecycle:
+- service_id: backups
+  display_name: Backups
+  criticality: tier1
+  data_class: restore_artifacts
+  backup_runtime_units:
+  - machine-pve
+  - machine-proxmox-home
+  - vm-203-immich
+  - vm-209-download-stack
+  - vm-210-streaming-stack
+  - vm-215-surveillance-stack
+  backup_targets:
+  - vm-203-primary
+  - vm-209-download-stack-primary
+  - vm-210-streaming-stack-primary
+  - vm-215-surveillance-stack-primary
+  - home-vm-100-ha-primary
+  - home-vm-106-media-home-primary
+  canonical_live_roots:
+  - pve:/md1400/backup-cold (Canonical shop cold backup plane.)
+  - nas:/volume1/backups/proxmox_backups/dump (Canonical home backup plane.)
+  allowed_secondary_roots:
+  - pve:/tank/backups/vzdump/dump (Local shop generation lane before promotion to
+    md1400.)
+  - proxmox-home:/mnt/pve/synology-backups/dump (Home generation mount before the
+    canonical Synology lane.)
+  staging_roots:
+  - pve:/tank/backups/vzdump/dump (Shop local generation lane.)
+  quarantine_roots: []
+  export_archive_lanes:
+  - pve:/md1400/backup-cold (Canonical shop restore/archive plane.)
+  - nas:/volume1/backups/proxmox_backups/dump (Canonical home restore plane.)
+  retention_policy:
+    policy_type: freshness_windows
+    claim_days: null
+    primary_stale_after_hours: 26
+    important_stale_after_hours: 48
+    rebuildable_stale_after_hours: 168
+    description: Per-target freshness windows remain authoritative in backup.inventory.yaml.
+      This registry governs root intent, staging, archive, and restore expectations.
+  tombstone_policy:
+    expiry_mode: review_then_delete
+    default_review_days: 180
+    writer_drain_required: true
 canonical_personal_data:
 - path: /volume1/im2ch/
   size: 2.3T

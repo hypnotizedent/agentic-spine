@@ -5,7 +5,7 @@
 # authority_concern: service_registry_surfaces
 # projection_of: docs/governance/SERVICE_REGISTRY.yaml
 # generated_by: service.registry.projection.build
-# source_sha256: fb38b8229a00d3639d06e6914d479c03b96afc398c0717d21bdd385e4010fed5
+# source_sha256: 01519a066964395ae4f46bcbf1af317f4bece99975d287e34d59d6f5e4de81b7
 # Do NOT edit manually. Rebuild with: ./bin/ops cap run service.registry.projection.build
 version: 1
 status: projection
@@ -13,7 +13,7 @@ authority_state: projection
 authority_concern: service_registry_surfaces
 projection_of: docs/governance/SERVICE_REGISTRY.yaml
 source_capability: service.registry.projection.build
-source_sha256: 4db75cbdfb8077e17821e247b33b7729c45a378758aefb9fff96fadf3a9233b3
+source_sha256: 01519a066964395ae4f46bcbf1af317f4bece99975d287e34d59d6f5e4de81b7
 defaults:
   connect_timeout_sec: 5
   max_time_sec: 10
@@ -157,10 +157,10 @@ endpoints:
   expect: 200
   enabled: true
   description: Shop surveillance runtime on VM 215. Live compose authority is /srv/config/surveillance,
-    with durable binds under /srv/data/surveillance and host runtime cache under
-    /srv/runtime/surveillance. CPU-first Frigate baseline with 8 live cameras.
-    Home Assistant uses direct Tailscale URL http://100.89.1.111:5000 and MQTT
-    at 100.67.120.1:1883.
+    with /opt/stacks/surveillance as a thin entrypoint symlink. Frigate appstate and
+    media payload now bind from /srv/data/surveillance and cache from /srv/runtime/surveillance.
+    CPU-first Frigate baseline with 8 live cameras. Home Assistant uses direct Tailscale
+    URL http://100.89.1.111:5000 and MQTT at 100.67.120.1:1883.
 - id: prometheus
   host: observability
   url: http://192.168.1.205:9090/-/healthy
@@ -402,3 +402,111 @@ endpoints:
   expect: 200
   enabled: true
   description: Migrated from macbook (LOOP-AI-CONSOLIDATION-20260208)
+lifecycle_bindings:
+- host: download-stack
+  source_registry: ops/bindings/service.data.lifecycle.registry.yaml
+  services:
+  - &id001
+    service_id: media
+    display_name: Media
+    criticality: tier1
+    canonical_live_roots:
+    - pve:/media (Canonical NFS export for movies, tv, music, archive, and import
+      surfaces.)
+    staging_roots:
+    - download-stack:/mnt/media/downloads (Active import/download lane. Must drain
+      after import and must never become a permanent residence.)
+    quarantine_roots:
+    - pve:/md1400/archive/media-quarantine/pending (Operator review queue for unresolved
+      media.)
+    - pve:/md1400/archive/media-quarantine/reviewed (Reviewed hold lane awaiting archive
+      or delete.)
+    export_archive_lanes:
+    - pve:/md1400/media-cold (Cold archive and legacy media hold lane.)
+    - pve:/md1400/backup-cold/apps/media-config (Canonical config backup archive for
+      download/streaming stacks.)
+    retention_policy:
+      policy_type: bounded_stage_windows
+      claim_days: null
+      downloads_max_age_days: 7
+      quarantine_pending_max_age_days: 30
+      quarantine_reviewed_max_age_days: 90
+      description: Payload libraries are canonical live state, not a rolling retention
+        bucket. Downloads and quarantine are explicitly time-boxed.
+    capacity_model:
+      mode: advisory
+      type: dataset_pressure_watch
+      source_ref: ops/bindings/shop.media.pressure.authority.yaml
+      description: The media pool is near saturation; this registry captures drain/expiry
+        intent rather than inventing a fake rolling-retention day count.
+- host: immich
+  source_registry: ops/bindings/service.data.lifecycle.registry.yaml
+  services:
+  - service_id: immich
+    display_name: Immich
+    criticality: tier1
+    canonical_live_roots:
+    - immich:/mnt/pve-immich-upload (Canonical active imported-asset surface from
+      UPLOAD_LOCATION on VM 203.)
+    - immich:/tank/immich/db (Canonical guest-local PostgreSQL data root on VM 203.)
+    staging_roots: []
+    quarantine_roots:
+    - pve:/tank/immich/photos (Legacy external-library residue proven not imported
+      into the active Immich database.)
+    - nas:/volume1/im2ch (Legacy home-side Immich residue/archive lane pending later
+      consolidation.)
+    export_archive_lanes:
+    - immich:/home/ronny/backups (Daily pg_dump export lane.)
+    retention_policy:
+      policy_type: mixed_state
+      claim_days: null
+      db_dump_days: 7
+      description: The active imported asset lane is /mnt/pve-immich-upload backed
+        by pve:/tank/immich/uploads-vm203. /tank/immich/photos remains orphaned residue,
+        not canonical imported state.
+    capacity_model:
+      mode: advisory
+      type: split_root_watch
+      source_ref: ops/bindings/infra.storage.placement.policy.yaml
+      description: Immich now has a known active imported asset lane plus explicit
+        residue roots. The goal is to prevent future silent root sprawl.
+- host: streaming-stack
+  source_registry: ops/bindings/service.data.lifecycle.registry.yaml
+  services:
+  - *id001
+- host: surveillance-stack
+  source_registry: ops/bindings/service.data.lifecycle.registry.yaml
+  services:
+  - service_id: surveillance
+    display_name: Surveillance
+    criticality: tier1
+    canonical_live_roots:
+    - surveillance-stack:/srv/config/surveillance (Canonical live compose/config authority
+      proved by the 2026-03-19 normalization wave.)
+    - surveillance-stack:/srv/data/surveillance (Canonical durable appstate, recordings,
+      clips, and snapshots surface.)
+    - surveillance-stack:/srv/runtime/surveillance (Canonical runtime cache surface
+      for tmpfs-backed transient state.)
+    staging_roots: []
+    quarantine_roots: []
+    export_archive_lanes:
+    - pve:/md1400/backup-cold/vzdump/pve (Canonical cold VM restore plane.)
+    retention_policy:
+      policy_type: rolling_days
+      claim_days: 1
+      clips_days: 14
+      snapshots_days: 30
+      description: The current honest claim on the 100G disk is 1d motion recordings,
+        14d detection clips, and 30d snapshots. The surveillance operating-model contract
+        still targets 7d/14d after the 2TB remediation wave.
+    capacity_model:
+      mode: enforce
+      type: rolling_retention_bytes
+      source_ref: ops/bindings/surveillance.operating.model.contract.yaml
+      usable_capacity_gib: 100
+      observed_used_gib: 81.1
+      reserved_headroom_gib: 10
+      observed_daily_growth_gib: 7.0
+      description: The 2026-03-18 placement census recorded 76G recordings plus 5.1G
+        clips on the 100G data disk. The remaining safe headroom supports about 1.27
+        days, so the current claim is capped at 1 day until the 2TB remediation lands.

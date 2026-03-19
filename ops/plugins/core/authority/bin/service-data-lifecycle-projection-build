@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+REGISTRY_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
+SERVICE_REGISTRY_PATH = ROOT / "docs/governance/SERVICE_REGISTRY.yaml"
+BACKUP_INVENTORY_PATH = ROOT / "ops/bindings/backup.inventory.yaml"
+OUTPUT_PATH = ROOT / "ops/bindings/service.data.lifecycle.projected.yaml"
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"service.data.lifecycle.projection.build FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def yaml_dump(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=False)
+
+
+def ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def rel(path: Path) -> str:
+    return str(path.resolve().relative_to(ROOT))
+
+
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="service-data-lifecycle-projection-build")
+    parser.add_argument("--check", action="store_true", help="Fail if generated projection drifts from disk.")
+    parser.add_argument("--verify", action="store_true", help="Verify lifecycle authority shape and cross-surface refs.")
+    return parser.parse_args()
+
+
+def combined_source_sha(paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(rel(path).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def path_list(rows: list[dict[str, Any]]) -> list[str]:
+    rendered: list[str] = []
+    for row in rows:
+        host = str(row.get("host") or "").strip()
+        path = str(row.get("path") or "").strip()
+        purpose = str(row.get("purpose") or "").strip()
+        if not host or not path:
+            continue
+        value = f"{host}:{path}"
+        if purpose:
+            value = f"{value} ({purpose})"
+        rendered.append(value)
+    return rendered
+
+
+def capacity_honesty(service: dict[str, Any]) -> dict[str, Any]:
+    retention = ensure_dict(service.get("retention_policy"))
+    capacity = ensure_dict(service.get("capacity_model"))
+    claimed_days = retention.get("claim_days")
+    if capacity.get("type") != "rolling_retention_bytes" or claimed_days in {None, ""}:
+        return {
+            "status": "unknown",
+            "assessment": "not_applicable",
+            "description": "Capacity honesty does not apply because this service has no enforceable rolling day claim.",
+        }
+
+    try:
+        claim = float(claimed_days)
+        usable = float(capacity.get("usable_capacity_gib"))
+        used = float(capacity.get("observed_used_gib"))
+        reserve = float(capacity.get("reserved_headroom_gib"))
+        growth = float(capacity.get("observed_daily_growth_gib"))
+    except Exception:
+        return {
+            "status": "unknown",
+            "assessment": "insufficient_data",
+            "description": "Capacity honesty cannot be calculated because numeric capacity inputs are incomplete.",
+        }
+
+    if growth <= 0:
+        return {
+            "status": "unknown",
+            "assessment": "insufficient_data",
+            "description": "Capacity honesty cannot be calculated because observed daily growth is not positive.",
+        }
+
+    safe_free = usable - used - reserve
+    achievable_days = max(0.0, safe_free) / growth
+    dishonest = claim > achievable_days
+    return {
+        "status": "blocked" if dishonest else "accepted",
+        "assessment": "dishonest" if dishonest else "honest",
+        "description": (
+            "Retention claim exceeds modeled safe capacity."
+            if dishonest
+            else "Retention claim fits within modeled safe capacity."
+        ),
+        "claim_days": claim,
+        "estimated_achievable_days": round(achievable_days, 2),
+        "safe_free_gib": round(max(0.0, safe_free), 2),
+        "enforcement_mode": str(capacity.get("mode") or "advisory"),
+    }
+
+
+def existing_generated_at() -> str | None:
+    if not OUTPUT_PATH.is_file():
+        return None
+    try:
+        current = load_yaml(OUTPUT_PATH)
+    except SystemExit:
+        return None
+    generated_at = str(current.get("generated_at_utc") or "").strip()
+    return generated_at or None
+
+
+def build_projection(registry: dict[str, Any], source_sha: str, generated_at_utc: str) -> str:
+    services_out: list[dict[str, Any]] = []
+    for service_id, raw_service in sorted(ensure_dict(registry.get("services")).items()):
+        service = ensure_dict(raw_service)
+        services_out.append(
+            {
+                "service_id": service_id,
+                "display_name": str(service.get("display_name") or service_id),
+                "sites": ensure_list(service.get("sites")),
+                "criticality": str(service.get("criticality") or ""),
+                "data_class": str(service.get("data_class") or ""),
+                "canonical_live_root_count": len(ensure_list(service.get("canonical_live_roots"))),
+                "canonical_live_roots": path_list(ensure_list(service.get("canonical_live_roots"))),
+                "allowed_secondary_root_count": len(ensure_list(service.get("allowed_secondary_roots"))),
+                "allowed_secondary_roots": path_list(ensure_list(service.get("allowed_secondary_roots"))),
+                "staging_root_count": len(ensure_list(service.get("staging_roots"))),
+                "staging_roots": path_list(ensure_list(service.get("staging_roots"))),
+                "quarantine_root_count": len(ensure_list(service.get("quarantine_roots"))),
+                "quarantine_roots": path_list(ensure_list(service.get("quarantine_roots"))),
+                "export_archive_lanes": path_list(ensure_list(service.get("export_archive_lanes"))),
+                "retention_policy": ensure_dict(service.get("retention_policy")),
+                "tombstone_policy": ensure_dict(service.get("tombstone_policy")),
+                "backup_class": str(service.get("backup_class") or ""),
+                "restore_proof_expectation": ensure_dict(service.get("restore_proof_expectation")),
+                "capacity_model": ensure_dict(service.get("capacity_model")),
+                "capacity_honesty": capacity_honesty(service),
+                "drift_rules": ensure_dict(service.get("drift_rules")),
+                "binding_refs": ensure_dict(service.get("binding_refs")),
+            }
+        )
+
+    payload = {
+        "version": 1,
+        "status": "projection",
+        "authority_state": "projection",
+        "projection_of": "ops/bindings/service.data.lifecycle.registry.yaml",
+        "source_capability": "service.data.lifecycle.projection.build",
+        "source_sha256": source_sha,
+        "generated_at_utc": generated_at_utc,
+        "services": services_out,
+    }
+    header = "\n".join(
+        [
+            "# Service Data Lifecycle Projection",
+            "# Non-secret. Spine-native.",
+            "# Status: projection",
+            "# projection_of: ops/bindings/service.data.lifecycle.registry.yaml",
+            "# Do NOT edit manually. Rebuild with: ./bin/ops cap run service.data.lifecycle.projection.build",
+            "",
+        ]
+    )
+    return header + yaml_dump(payload)
+
+
+def verify(registry: dict[str, Any]) -> None:
+    service_registry = load_yaml(SERVICE_REGISTRY_PATH)
+    backup_inventory = load_yaml(BACKUP_INVENTORY_PATH)
+    service_hosts = set(ensure_dict(service_registry.get("hosts")).keys())
+    runtime_units = {
+        str(row.get("unit_id") or "")
+        for row in ensure_list(backup_inventory.get("runtime_units"))
+        if isinstance(row, dict)
+    }
+    targets = {
+        str(row.get("name") or "")
+        for row in ensure_list(backup_inventory.get("targets"))
+        if isinstance(row, dict)
+    }
+
+    errors: list[str] = []
+    if str(registry.get("authority_state") or "") != "authoritative":
+        errors.append("registry missing authority_state=authoritative")
+
+    services = ensure_dict(registry.get("services"))
+    if not services:
+        errors.append("services map is empty")
+
+    for service_id, raw_service in sorted(services.items()):
+        service = ensure_dict(raw_service)
+        if not str(service.get("criticality") or "").strip():
+            errors.append(f"{service_id}: missing criticality")
+        if not str(service.get("data_class") or "").strip():
+            errors.append(f"{service_id}: missing data_class")
+        canonical_live_roots = ensure_list(service.get("canonical_live_roots"))
+        if not canonical_live_roots:
+            errors.append(f"{service_id}: canonical_live_roots must declare at least one root")
+
+        seen_roots: set[tuple[str, str]] = set()
+        for group_name in ("canonical_live_roots", "allowed_secondary_roots", "staging_roots", "quarantine_roots", "export_archive_lanes"):
+            for row in ensure_list(service.get(group_name)):
+                item = ensure_dict(row)
+                host = str(item.get("host") or "").strip()
+                path = str(item.get("path") or "").strip()
+                if not host or not path:
+                    errors.append(f"{service_id}: {group_name} entries require host/path")
+                    continue
+                key = (host, path)
+                if group_name == "canonical_live_roots":
+                    seen_roots.add(key)
+                elif group_name in {"allowed_secondary_roots", "staging_roots", "quarantine_roots"} and key in seen_roots:
+                    errors.append(f"{service_id}: root {host}:{path} duplicated across canonical and non-canonical sets")
+
+        for group_name in ("staging_roots", "quarantine_roots"):
+            for row in ensure_list(service.get(group_name)):
+                expiry = ensure_dict(ensure_dict(row).get("expiry_policy"))
+                if not expiry:
+                    errors.append(f"{service_id}: {group_name} entries require expiry_policy")
+                    continue
+                if expiry.get("max_age_days") in {None, ""}:
+                    errors.append(f"{service_id}: {group_name} entries require expiry_policy.max_age_days")
+
+        refs = ensure_dict(service.get("binding_refs"))
+        for host in ensure_list(refs.get("services_health_hosts")):
+            if str(host) not in service_hosts:
+                errors.append(f"{service_id}: services_health host missing from SERVICE_REGISTRY hosts: {host}")
+        for unit_id in ensure_list(refs.get("backup_runtime_units")):
+            if str(unit_id) not in runtime_units:
+                errors.append(f"{service_id}: backup_runtime_unit missing from backup.inventory.yaml: {unit_id}")
+        for target_name in ensure_list(refs.get("backup_targets")):
+            if str(target_name) not in targets:
+                errors.append(f"{service_id}: backup target missing from backup.inventory.yaml: {target_name}")
+
+        retention = ensure_dict(service.get("retention_policy"))
+        capacity = ensure_dict(service.get("capacity_model"))
+        if retention.get("claim_days") not in {None, ""} and not capacity:
+            errors.append(f"{service_id}: claim_days requires a capacity_model")
+
+    if errors:
+        for error in errors:
+            print(f"service.data.lifecycle.projection.build VERIFY FAIL: {error}", file=sys.stderr)
+        raise SystemExit(1)
+
+    print(
+        "service.data.lifecycle.projection.build VERIFY PASS: "
+        f"services={len(services)} hosts={len(service_hosts)} targets={len(targets)}"
+    )
+
+
+def write_text(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+
+
+def check_matches(path: Path, expected: str) -> None:
+    if not path.is_file():
+        fail(f"missing projection: {rel(path)}")
+    actual = path.read_text(encoding="utf-8")
+    if actual != expected:
+        fail(f"projection drift: {rel(path)} (run service.data.lifecycle.projection.build)")
+
+
+def main() -> None:
+    args = parse_args()
+    registry = load_yaml(REGISTRY_PATH)
+    source_sha = combined_source_sha([REGISTRY_PATH])
+    generated_at_utc = existing_generated_at() if args.check else None
+    projected_text = build_projection(registry, source_sha, generated_at_utc or now_utc_iso())
+
+    if args.verify:
+        verify(registry)
+
+    if args.check:
+        check_matches(OUTPUT_PATH, projected_text)
+    else:
+        write_text(OUTPUT_PATH, projected_text)
+
+    print("service.data.lifecycle.projection.build")
+    print("status: OK")
+    print(f"authority: {rel(REGISTRY_PATH)}")
+    print(f"projected: {rel(OUTPUT_PATH)}")
+
+
+if __name__ == "__main__":
+    main()
