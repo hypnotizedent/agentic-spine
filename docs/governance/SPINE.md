@@ -27,6 +27,43 @@ OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "..."
 OPS_GOVERNED_MAIN_OVERRIDE=1 git push origin main
 ```
 
+## Execution Lane Bootstrap (Phase 2)
+
+Create governed execution lanes instead of manual worktree setup:
+
+```bash
+# Create clean execution lane from origin/main
+./bin/ops cap run session.execution.lane.bootstrap \
+  --type <discovery|fix|landing|review|hotfix> \
+  --branch <branch-name> \
+  [--parent-loop <LOOP-ID>] \
+  [--domain <domain>]
+
+# Close lane when done
+./bin/ops cap run session.execution.lane.closeout \
+  --lane-id <LANE-ID> \
+  --status <landed|deferred|abandoned|...>
+
+# Scan for stale/floating lanes
+./bin/ops cap run session.execution.lane.scan
+```
+
+**Lane types**:
+- `discovery`: Read-only exploration, evidence-only writes
+- `fix`: Bounded bug fix or gap closure, verify required
+- `landing`: Merge approved changes to main, verify must pass
+- `review`: Review code or proposals, no mutations
+- `hotfix`: Emergency fix to main, requires incident ref
+
+**What bootstrap guarantees**:
+- Fresh worktree from current `origin/main`
+- Clean branch (no collision with existing branches)
+- Lane metadata stamped (type, created_at, status)
+- Closeout checklist generated
+- State tracked in `~/.runtime/spine/state/execution-lanes/`
+
+See: `docs/governance/AGENT_EXECUTION_LANE_AUDIT_RECEIPT_20260319.md` for background.
+
 ## Verify
 
 ```bash

@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# session-execution-lane-closeout — Mark execution lane as closed with explicit state
+#
+# Usage:
+#   session-execution-lane-closeout --lane-id <ID> --status <status> [options]
+#
+# Required:
+#   --lane-id <LANE-ID>
+#   --status <landed|deferred|abandoned|blocked|review-complete|changes-requested|findings-documented>
+#
+# Optional:
+#   --reason "<reason>"         # Required for some statuses
+#   --landing-commit <sha>      # SHA if landed
+#   --json                      # Machine-readable output
+#
+# Returns:
+#   0 if closeout successful
+#   1 if validation fails
+#   2 if invalid arguments
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+CONTRACT_FILE="$ROOT/ops/bindings/session.execution.lane.contract.yaml"
+STATE_ROOT="$SPINE_STATE/execution-lanes"
+RECEIPT_ROOT="$SPINE_EVIDENCE_ROOT/execution-lanes"
+
+# Args
+LANE_ID=""
+STATUS=""
+REASON=""
+LANDING_COMMIT=""
+JSON_OUTPUT=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --lane-id)
+      LANE_ID="${2:-}"
+      shift 2
+      ;;
+    --status)
+      STATUS="${2:-}"
+      shift 2
+      ;;
+    --reason)
+      REASON="${2:-}"
+      shift 2
+      ;;
+    --landing-commit)
+      LANDING_COMMIT="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_OUTPUT=true
+      shift
+      ;;
+    *)
+      echo "ERROR: Unknown argument: $1" >&2
+      echo "Usage: session-execution-lane-closeout --lane-id <ID> --status <status> [options]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# Validation
+if [[ -z "$LANE_ID" ]]; then
+  echo "ERROR: --lane-id required" >&2
+  exit 2
+fi
+
+if [[ -z "$STATUS" ]]; then
+  echo "ERROR: --status required" >&2
+  exit 2
+fi
+
+# Check if lane state file exists
+LANE_STATE_FILE="$STATE_ROOT/${LANE_ID}.yaml"
+if [[ ! -f "$LANE_STATE_FILE" ]]; then
+  echo "ERROR: Lane state file not found: $LANE_STATE_FILE" >&2
+  echo "Lane ID may be invalid or already closed" >&2
+  exit 1
+fi
+
+# Read current lane state
+LANE_TYPE=$(yq e '.type' "$LANE_STATE_FILE" 2>/dev/null || echo "")
+CURRENT_STATUS=$(yq e '.status' "$LANE_STATE_FILE" 2>/dev/null || echo "active")
+BRANCH=$(yq e '.branch' "$LANE_STATE_FILE" 2>/dev/null || echo "")
+WORKTREE_PATH=$(yq e '.worktree_path' "$LANE_STATE_FILE" 2>/dev/null || echo "")
+
+if [[ -z "$LANE_TYPE" ]]; then
+  echo "ERROR: Could not read lane type from state file" >&2
+  exit 1
+fi
+
+# Check if already closed
+if [[ "$CURRENT_STATUS" != "active" ]]; then
+  echo "ERROR: Lane $LANE_ID is already closed (status: $CURRENT_STATUS)" >&2
+  exit 1
+fi
+
+# Validate status is allowed for this lane type
+ALLOWED_STATUSES=$(yq e ".lane_types.${LANE_TYPE}.closeout_options | join(\",\")" "$CONTRACT_FILE" 2>/dev/null || echo "")
+if [[ ! ",$ALLOWED_STATUSES," =~ ,"$STATUS", ]]; then
+  echo "ERROR: Status '$STATUS' not allowed for $LANE_TYPE lane" >&2
+  echo "Allowed: $ALLOWED_STATUSES" >&2
+  exit 1
+fi
+
+# Check if reason is required
+REASON_REQUIRED=$(yq e ".closeout_requirements.${LANE_TYPE}.reason_required // false" "$CONTRACT_FILE" 2>/dev/null)
+if [[ "$REASON_REQUIRED" == "true" ]] && [[ -z "$REASON" ]]; then
+  echo "ERROR: --reason required for $LANE_TYPE lane closeout" >&2
+  exit 1
+fi
+
+# Update lane state file
+yq e -i ".status = \"$STATUS\"" "$LANE_STATE_FILE"
+yq e -i ".closed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" "$LANE_STATE_FILE"
+yq e -i ".closed_by = \"session.execution.lane.closeout\"" "$LANE_STATE_FILE"
+
+if [[ -n "$REASON" ]]; then
+  yq e -i ".closeout_reason = \"$REASON\"" "$LANE_STATE_FILE"
+fi
+
+if [[ -n "$LANDING_COMMIT" ]]; then
+  yq e -i ".landing_commit = \"$LANDING_COMMIT\"" "$LANE_STATE_FILE"
+fi
+
+# Create closeout receipt
+mkdir -p "$RECEIPT_ROOT"
+RECEIPT_FILE="$RECEIPT_ROOT/${LANE_ID}-closeout-$(date +%Y%m%d-%H%M%S).yaml"
+cat > "$RECEIPT_FILE" <<YAML
+lane_id: "$LANE_ID"
+lane_type: "$LANE_TYPE"
+branch: "$BRANCH"
+worktree_path: "$WORKTREE_PATH"
+status: "$STATUS"
+closed_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+closed_by: "session.execution.lane.closeout"
+reason: "${REASON:-}"
+landing_commit: "${LANDING_COMMIT:-}"
+YAML
+
+# Log to audit trail
+AUDIT_LOG="$STATE_ROOT/audit.log"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|closeout|$LANE_ID|$LANE_TYPE|$STATUS|$REASON" >> "$AUDIT_LOG"
+
+# Output
+if [[ "$JSON_OUTPUT" == "true" ]]; then
+  jq -n \
+    --arg lane_id "$LANE_ID" \
+    --arg status "$STATUS" \
+    --arg receipt "$RECEIPT_FILE" \
+    '{
+      lane_id: $lane_id,
+      status: $status,
+      receipt: $receipt
+    }'
+else
+  echo "════════════════════════════════════════════════════════════"
+  echo "LANE CLOSED"
+  echo "════════════════════════════════════════════════════════════"
+  echo "Lane ID:    $LANE_ID"
+  echo "Type:       $LANE_TYPE"
+  echo "Status:     $STATUS"
+  echo "Receipt:    $RECEIPT_FILE"
+  echo ""
+
+  if [[ "$STATUS" == "landed" || "$STATUS" == "abandoned" ]]; then
+    echo "Safe to delete worktree:"
+    echo "  cd ~"
+    echo "  git worktree remove '$WORKTREE_PATH'"
+    if [[ "$STATUS" == "landed" ]]; then
+      echo "  git branch -d '$BRANCH'  # Merged, safe to delete"
+    else
+      echo "  git branch -D '$BRANCH'  # Force delete (not merged)"
+    fi
+  elif [[ "$STATUS" == "deferred" ]]; then
+    echo "Lane deferred - branch preserved for future work"
+    echo "To resume: Check out branch or create new worktree"
+  fi
+  echo "════════════════════════════════════════════════════════════"
+fi
+
+exit 0

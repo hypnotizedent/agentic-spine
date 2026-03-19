@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# session-execution-lane-scan — Detect stale/floating execution lanes
+#
+# Usage:
+#   session-execution-lane-scan [--json] [--warn-days <N>]
+#
+# Optional:
+#   --json              # Machine-readable output
+#   --warn-days <N>     # Warn if active lane older than N days (default: 7)
+#   --stale-days <N>    # Flag as stale if older than N days (default: 14)
+#
+# Returns:
+#   0 if scan completes (even if issues found)
+#   1 if scan fails
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+CONTRACT_FILE="$ROOT/ops/bindings/session.execution.lane.contract.yaml"
+STATE_ROOT="$SPINE_STATE/execution-lanes"
+
+# Args
+JSON_OUTPUT=false
+WARN_DAYS=7
+STALE_DAYS=14
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)
+      JSON_OUTPUT=true
+      shift
+      ;;
+    --warn-days)
+      WARN_DAYS="${2:-7}"
+      shift 2
+      ;;
+    --stale-days)
+      STALE_DAYS="${2:-14}"
+      shift 2
+      ;;
+    *)
+      echo "ERROR: Unknown argument: $1" >&2
+      echo "Usage: session-execution-lane-scan [--json] [--warn-days <N>]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Check if state directory exists
+if [[ ! -d "$STATE_ROOT" ]]; then
+  if [[ "$JSON_OUTPUT" == "true" ]]; then
+    echo '{"active_lanes": 0, "warnings": [], "stale_lanes": [], "no_closeout": []}'
+  else
+    echo "No execution lanes found (state directory does not exist)"
+  fi
+  exit 0
+fi
+
+# Scan active lanes
+NOW_EPOCH=$(date +%s)
+WARN_THRESHOLD=$((WARN_DAYS * 86400))
+STALE_THRESHOLD=$((STALE_DAYS * 86400))
+
+ACTIVE_COUNT=0
+WARN_LANES=()
+STALE_LANES=()
+NO_CLOSEOUT_LANES=()
+
+for state_file in "$STATE_ROOT"/LANE-*.yaml; do
+  [[ -f "$state_file" ]] || continue
+
+  LANE_ID=$(basename "$state_file" .yaml)
+  STATUS=$(yq e '.status' "$state_file" 2>/dev/null || echo "unknown")
+  CREATED_AT=$(yq e '.created_at' "$state_file" 2>/dev/null || echo "")
+  LANE_TYPE=$(yq e '.type' "$state_file" 2>/dev/null || echo "unknown")
+  BRANCH=$(yq e '.branch' "$state_file" 2>/dev/null || echo "")
+  WORKTREE_PATH=$(yq e '.worktree_path' "$state_file" 2>/dev/null || echo "")
+
+  # Skip if already closed
+  if [[ "$STATUS" != "active" ]]; then
+    continue
+  fi
+
+  ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
+
+  # Calculate age
+  CREATED_EPOCH=0
+  if [[ -n "$CREATED_AT" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      CREATED_EPOCH=$(python3 -c "from datetime import datetime; print(int(datetime.fromisoformat('${CREATED_AT}'.replace('Z', '+00:00')).timestamp()))" 2>/dev/null || echo 0)
+    fi
+  fi
+
+  AGE_SECONDS=$((NOW_EPOCH - CREATED_EPOCH))
+  AGE_DAYS=$((AGE_SECONDS / 86400))
+
+  # Check if stale
+  if [[ "$AGE_SECONDS" -gt "$STALE_THRESHOLD" ]]; then
+    STALE_LANES+=("$LANE_ID|$LANE_TYPE|$BRANCH|$AGE_DAYS|$WORKTREE_PATH")
+  elif [[ "$AGE_SECONDS" -gt "$WARN_THRESHOLD" ]]; then
+    WARN_LANES+=("$LANE_ID|$LANE_TYPE|$BRANCH|$AGE_DAYS|$WORKTREE_PATH")
+  fi
+
+  # Check if branch is no longer ahead of main
+  if [[ -n "$BRANCH" ]]; then
+    if git rev-parse --verify "$BRANCH" >/dev/null 2>&1 && git rev-parse --verify origin/main >/dev/null 2>&1; then
+      AHEAD=$(git rev-list --count origin/main.."$BRANCH" 2>/dev/null || echo "0")
+      if [[ "$AHEAD" == "0" ]]; then
+        NO_CLOSEOUT_LANES+=("$LANE_ID|$LANE_TYPE|$BRANCH|no_changes|$WORKTREE_PATH")
+      fi
+    fi
+  fi
+done
+
+# Output
+if [[ "$JSON_OUTPUT" == "true" ]]; then
+  # Build JSON output
+  WARN_JSON="[]"
+  if [[ ${#WARN_LANES[@]} -gt 0 ]]; then
+    WARN_JSON="["
+    for i in "${!WARN_LANES[@]}"; do
+      IFS='|' read -r lane_id type branch age path <<< "${WARN_LANES[$i]}"
+      if [[ $i -gt 0 ]]; then WARN_JSON+=","; fi
+      WARN_JSON+="{\"lane_id\":\"$lane_id\",\"type\":\"$type\",\"branch\":\"$branch\",\"age_days\":$age,\"worktree\":\"$path\"}"
+    done
+    WARN_JSON+="]"
+  fi
+
+  STALE_JSON="[]"
+  if [[ ${#STALE_LANES[@]} -gt 0 ]]; then
+    STALE_JSON="["
+    for i in "${!STALE_LANES[@]}"; do
+      IFS='|' read -r lane_id type branch age path <<< "${STALE_LANES[$i]}"
+      if [[ $i -gt 0 ]]; then STALE_JSON+=","; fi
+      STALE_JSON+="{\"lane_id\":\"$lane_id\",\"type\":\"$type\",\"branch\":\"$branch\",\"age_days\":$age,\"worktree\":\"$path\"}"
+    done
+    STALE_JSON+="]"
+  fi
+
+  NO_CLOSEOUT_JSON="[]"
+  if [[ ${#NO_CLOSEOUT_LANES[@]} -gt 0 ]]; then
+    NO_CLOSEOUT_JSON="["
+    for i in "${!NO_CLOSEOUT_LANES[@]}"; do
+      IFS='|' read -r lane_id type branch status path <<< "${NO_CLOSEOUT_LANES[$i]}"
+      if [[ $i -gt 0 ]]; then NO_CLOSEOUT_JSON+=","; fi
+      NO_CLOSEOUT_JSON+="{\"lane_id\":\"$lane_id\",\"type\":\"$type\",\"branch\":\"$branch\",\"status\":\"$status\",\"worktree\":\"$path\"}"
+    done
+    NO_CLOSEOUT_JSON+="]"
+  fi
+
+  echo "{\"active_lanes\":$ACTIVE_COUNT,\"warnings\":$WARN_JSON,\"stale_lanes\":$STALE_JSON,\"no_closeout\":$NO_CLOSEOUT_JSON}"
+else
+  echo "════════════════════════════════════════════════════════════"
+  echo "EXECUTION LANE SCAN"
+  echo "════════════════════════════════════════════════════════════"
+  echo "Active lanes: $ACTIVE_COUNT"
+  echo ""
+
+  if [[ ${#WARN_LANES[@]} -gt 0 ]]; then
+    echo "⚠️  WARNING: Lanes older than ${WARN_DAYS}d (${#WARN_LANES[@]})"
+    echo ""
+    for entry in "${WARN_LANES[@]}"; do
+      IFS='|' read -r lane_id type branch age path <<< "$entry"
+      echo "  Lane ID: $lane_id"
+      echo "  Type:    $type"
+      echo "  Branch:  $branch"
+      echo "  Age:     ${age}d"
+      echo "  Path:    $path"
+      echo ""
+      echo "  Action:  Close lane or continue work"
+      echo "  Close:   ./bin/ops cap run session.execution.lane.closeout --lane-id $lane_id --status <status>"
+      echo ""
+    done
+  fi
+
+  if [[ ${#STALE_LANES[@]} -gt 0 ]]; then
+    echo "🚨 STALE: Lanes older than ${STALE_DAYS}d (${#STALE_LANES[@]})"
+    echo ""
+    for entry in "${STALE_LANES[@]}"; do
+      IFS='|' read -r lane_id type branch age path <<< "$entry"
+      echo "  Lane ID: $lane_id"
+      echo "  Type:    $type"
+      echo "  Branch:  $branch"
+      echo "  Age:     ${age}d (STALE)"
+      echo "  Path:    $path"
+      echo ""
+      echo "  Action:  Close lane immediately"
+      echo "  Close:   ./bin/ops cap run session.execution.lane.closeout --lane-id $lane_id --status abandoned"
+      echo "  Cleanup: git worktree remove '$path' && git branch -D '$branch'"
+      echo ""
+    done
+  fi
+
+  if [[ ${#NO_CLOSEOUT_LANES[@]} -gt 0 ]]; then
+    echo "📋 NO CHANGES: Lanes with no commits ahead of main (${#NO_CLOSEOUT_LANES[@]})"
+    echo ""
+    for entry in "${NO_CLOSEOUT_LANES[@]}"; do
+      IFS='|' read -r lane_id type branch status path <<< "$entry"
+      echo "  Lane ID: $lane_id"
+      echo "  Type:    $type"
+      echo "  Branch:  $branch"
+      echo "  Status:  Branch not ahead of main (likely abandoned or already merged)"
+      echo ""
+      echo "  Action:  Close as abandoned"
+      echo "  Close:   ./bin/ops cap run session.execution.lane.closeout --lane-id $lane_id --status abandoned"
+      echo ""
+    done
+  fi
+
+  if [[ ${#WARN_LANES[@]} -eq 0 ]] && [[ ${#STALE_LANES[@]} -eq 0 ]] && [[ ${#NO_CLOSEOUT_LANES[@]} -eq 0 ]]; then
+    echo "✅ No warnings or stale lanes detected"
+  fi
+
+  echo "════════════════════════════════════════════════════════════"
+fi
+
+exit 0
