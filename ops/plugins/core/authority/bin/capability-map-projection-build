@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+"""Capability Map Projection Builder.
+
+Reads ops/capabilities.yaml (authority) and generates
+ops/bindings/capability_map.yaml (projection).
+
+For each capability, derives plugin and script from the ``command`` field,
+copies ``safety`` directly, copies ``arg_protocol`` when present, and
+preserves hand-curated ``note`` values from the existing map on disk.
+
+Supports --check mode (compare to disk, exit 1 on drift) and default
+write mode.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+AUTHORITY_PATH = ROOT / "ops" / "capabilities.yaml"
+OUTPUT_PATH = ROOT / "ops" / "bindings" / "capability_map.yaml"
+
+# Commands that are bare system utilities (no plugin script).
+# Map from capability name to the plugin override (or None).
+BARE_COMMANDS = {
+    "ls",
+    "gh",
+    "docker",
+}
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(
+        f"capability.map.projection.build FAIL: {message}",
+        file=sys.stderr,
+    )
+    raise SystemExit(exit_code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def yaml_dump(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(
+        data,
+        sort_keys=False,
+        allow_unicode=False,
+        default_flow_style=False,
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="capability-map-projection-build",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Fail if generated projection drifts from disk.",
+    )
+    return parser.parse_args()
+
+
+def rel(path: Path) -> str:
+    return str(path.resolve().relative_to(ROOT))
+
+
+def source_sha(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(rel(path).encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def strip_command_wrappers(command: str) -> str:
+    """Strip interpreter and env-var prefixes from *command*.
+
+    Handles:
+      - ``python3 ./ops/...``
+      - ``bash ./ops/...``
+      - ``/usr/bin/env VAR=val ... ./ops/...``
+      - ``env VAR=val ... ./ops/...``
+      - ``secrets-exec -- <actual command>`` (recursive)
+    """
+    cmd = command.strip()
+
+    # Strip interpreter prefix.
+    for prefix in ("python3 ", "bash "):
+        if cmd.startswith(prefix):
+            cmd = cmd[len(prefix):].lstrip()
+            break
+
+    # Strip /usr/bin/env VAR=val ... prefix.
+    # Pattern: /usr/bin/env followed by one or more KEY=VALUE pairs.
+    m = re.match(r"^/usr/bin/env\s+((?:\S+=\S+\s+)+)(.*)", cmd)
+    if m:
+        cmd = m.group(2).strip()
+    else:
+        # env VAR=val ... prefix (no absolute path).
+        m = re.match(r"^env\s+((?:\S+=\S+\s+)+)(.*)", cmd)
+        if m:
+            cmd = m.group(2).strip()
+
+    # secrets-exec wrapper: unwrap to the real command after --.
+    # ./ops/plugins/infra/secrets/bin/secrets-exec -- <real command>
+    se_match = re.match(r".*secrets-exec\s+--\s+(.*)", cmd)
+    if se_match:
+        cmd = se_match.group(1).strip()
+        # Recurse to strip any prefixes on the inner command.
+        cmd = strip_command_wrappers(cmd)
+
+    return cmd
+
+
+# Standard plugin path:
+#   ./ops/plugins/{tier}/{plugin}/bin/{script} [args...]
+PLUGIN_PATH_RE = re.compile(
+    r"^\.?/?(?:agentic-spine/)?ops/plugins/"
+    r"([^/]+)/([^/]+)/bin/([^\s]+)"
+)
+
+# Flat tier path (no plugin subdir):
+#   ./ops/plugins/{tier}/bin/{script} [args...]
+FLAT_TIER_RE = re.compile(
+    r"^\.?/?(?:agentic-spine/)?ops/plugins/"
+    r"([^/]+)/bin/([^\s]+)"
+)
+
+# ops/commands path:
+#   ./ops/commands/{script} [args...]
+OPS_COMMANDS_RE = re.compile(
+    r"^\.?/?ops/commands/([^\s]+)"
+)
+
+
+def derive_plugin_script(
+    cap_name: str,
+    command: str,
+) -> tuple[str | None, str | None]:
+    """Derive (plugin, script) from a capability command string.
+
+    Returns (None, None) for bare system commands.
+    """
+    cleaned = strip_command_wrappers(command)
+
+    # 1. Standard plugin path.
+    m = PLUGIN_PATH_RE.match(cleaned)
+    if m:
+        _tier, plugin, script_with_args = m.groups()
+        script = script_with_args.split()[0]
+        return plugin, script
+
+    # 2. Flat tier path (e.g. ./ops/plugins/infra/bin/script).
+    m = FLAT_TIER_RE.match(cleaned)
+    if m:
+        tier, script_with_args = m.groups()
+        script = script_with_args.split()[0]
+        return tier, script
+
+    # 3. ops/commands path.
+    m = OPS_COMMANDS_RE.match(cleaned)
+    if m:
+        script = m.group(1).split()[0]
+        return "ops", script
+
+    # 4. Bare system command (ls, gh, docker, etc.).
+    first_token = cleaned.split()[0] if cleaned else ""
+    if first_token in BARE_COMMANDS or "/" not in cleaned:
+        return None, None
+
+    # Fallback: unknown path structure.
+    return None, None
+
+
+def load_existing_notes(path: Path) -> dict[str, str]:
+    """Load hand-curated notes from the existing capability_map.yaml."""
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception:
+        return {}
+    notes: dict[str, str] = {}
+    for cap_name, cap_data in (data.get("capabilities") or {}).items():
+        if isinstance(cap_data, dict) and "note" in cap_data:
+            notes[cap_name] = str(cap_data["note"])
+    return notes
+
+
+def is_auto_note(note: str) -> bool:
+    """Return True if note was auto-generated (not hand-curated)."""
+    return note.startswith("command runs ")
+
+
+def needs_auto_note(
+    cap_name: str,
+    command: str,
+    plugin: str | None,
+    script: str | None,
+) -> str | None:
+    """Return an auto-generated note when script name alone is ambiguous.
+
+    Multiple capabilities sharing the same script (with different args)
+    need a note so operators can tell them apart.  Also, commands using
+    a non-standard path structure get a note.
+    """
+    if plugin is None and script is None:
+        # Bare system command -- describe it.
+        cleaned = strip_command_wrappers(command)
+        return f"bare '{cleaned}' command (no plugin script)"
+
+    cleaned = strip_command_wrappers(command)
+    # If the cleaned command has args after the script path, it is
+    # potentially ambiguous when multiple caps share the same script.
+    # Extract path + args.
+    m = PLUGIN_PATH_RE.match(cleaned) or FLAT_TIER_RE.match(cleaned)
+    if m:
+        # Full command after stripping wrappers.
+        path_portion = m.group(0)
+        remainder = cleaned[len(path_portion):].strip()
+        if remainder:
+            return f"command runs {cleaned}"
+
+    # ops/commands path.
+    m = OPS_COMMANDS_RE.match(cleaned)
+    if m:
+        path_portion = m.group(0)
+        remainder = cleaned[len(path_portion):].strip()
+        if remainder:
+            return f"command runs {cleaned}"
+
+    return None
+
+
+def build_capability_map(
+    caps: dict[str, dict[str, Any]],
+    existing_notes: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    """Build the capability map from the capabilities authority."""
+    result: dict[str, dict[str, Any]] = {}
+
+    for cap_name, cap_data in caps.items():
+        command = str(cap_data.get("command") or "")
+        safety = str(cap_data.get("safety") or "read-only")
+        arg_protocol = cap_data.get("arg_protocol")
+
+        plugin, script = derive_plugin_script(cap_name, command)
+
+        entry: dict[str, Any] = {
+            "plugin": plugin,
+            "script": script,
+            "safety": safety,
+        }
+
+        # arg_protocol: copy from authority when present.
+        if arg_protocol is not None:
+            entry["arg_protocol"] = str(arg_protocol)
+
+        # Note logic:
+        # 1. If there is an existing hand-curated note, preserve it.
+        # 2. If there is an existing auto note, regenerate it.
+        # 3. If no existing note, generate one only when needed.
+        existing_note = existing_notes.get(cap_name)
+        if existing_note is not None and not is_auto_note(existing_note):
+            # Preserve hand-curated note.
+            entry["note"] = existing_note
+        else:
+            # Generate note if script is ambiguous.
+            auto = needs_auto_note(cap_name, command, plugin, script)
+            if auto:
+                entry["note"] = auto
+
+        result[cap_name] = entry
+
+    return result
+
+
+def render_output(
+    capabilities: dict[str, dict[str, Any]],
+    sha: str,
+) -> str:
+    """Render the full YAML output with projection header."""
+    header = "\n".join([
+        "# Capability Map Binding",
+        "# Projection of ops/capabilities.yaml",
+        "# Status: projection",
+        "# authority_state: projection",
+        "# authority_concern: capability_map_surface",
+        "# projection_of: ops/capabilities.yaml",
+        "# generated_by: capability.map.projection.build",
+        f"# source_sha256: {sha}",
+        "# Do NOT edit manually. Rebuild with:"
+        "  ./bin/ops cap run capability.map.projection.build",
+        "",
+    ])
+    payload = {"capabilities": capabilities}
+    return header + yaml_dump(payload)
+
+
+def check_matches(path: Path, expected: str) -> None:
+    if not path.is_file():
+        fail(f"missing projection: {rel(path)}")
+    actual = path.read_text(encoding="utf-8")
+    if actual != expected:
+        fail(
+            f"projection drift: {rel(path)} "
+            "(run capability.map.projection.build)"
+        )
+
+
+def main() -> None:
+    args = parse_args()
+    authority = load_yaml(AUTHORITY_PATH)
+    caps = authority.get("capabilities")
+    if not caps or not isinstance(caps, dict):
+        fail("no capabilities found in authority")
+
+    sha = source_sha(AUTHORITY_PATH)
+    existing_notes = load_existing_notes(OUTPUT_PATH)
+    capabilities = build_capability_map(caps, existing_notes)
+
+    output_text = render_output(capabilities, sha)
+
+    if args.check:
+        check_matches(OUTPUT_PATH, output_text)
+        print("capability.map.projection.build --check PASS")
+    else:
+        OUTPUT_PATH.write_text(output_text, encoding="utf-8")
+        print("capability.map.projection.build")
+
+    print(f"status: OK")
+    print(f"authority: {rel(AUTHORITY_PATH)}")
+    print(f"projected: {rel(OUTPUT_PATH)}")
+    print(f"capabilities: {len(capabilities)}")
+
+
+if __name__ == "__main__":
+    main()
