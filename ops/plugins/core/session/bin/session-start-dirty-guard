@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# session-start-dirty-guard — Detect dirty working directory at session start
+#
+# Usage:
+#   session-start-dirty-guard [--allow-dirty] [--dirty-reason "<reason>"]
+#
+# Returns:
+#   0 if clean or override approved
+#   1 if dirty and no override
+#   2 if invalid args
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+ALLOW_DIRTY=false
+DIRTY_REASON=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --allow-dirty)
+      ALLOW_DIRTY=true
+      shift
+      ;;
+    --dirty-reason)
+      DIRTY_REASON="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "ERROR: Unknown argument: $1" >&2
+      echo "Usage: session-start-dirty-guard [--allow-dirty] [--dirty-reason \"<reason>\"]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# Check if we're in a git repo/worktree first
+CURRENT_DIR="$(pwd)"
+
+if ! git -C "$CURRENT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  echo "ERROR: Not in a git repository or worktree" >&2
+  echo "" >&2
+  echo "session.start must run from a governed checkout or worktree" >&2
+  echo "" >&2
+  echo "Current directory: $CURRENT_DIR" >&2
+  echo "" >&2
+  echo "Navigate to a git checkout first, e.g.:" >&2
+  echo "  cd ~/code/agentic-spine" >&2
+  exit 1
+fi
+
+# Check if current working directory is dirty
+DIRTY_COUNT=$(git -C "$CURRENT_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+
+if [[ "$DIRTY_COUNT" -eq 0 ]]; then
+  # Clean, all good
+  exit 0
+fi
+
+# Working directory is dirty
+if [[ "$ALLOW_DIRTY" == "true" ]]; then
+  if [[ -z "$DIRTY_REASON" ]]; then
+    echo "ERROR: --allow-dirty requires --dirty-reason '<reason>'" >&2
+    exit 1
+  fi
+
+  echo "WARNING: Working directory has $DIRTY_COUNT uncommitted changes" >&2
+  echo "Override reason: $DIRTY_REASON" >&2
+  echo "" >&2
+  git -C "$CURRENT_DIR" status --short >&2
+  echo "" >&2
+  echo "Proceeding with dirty override (logged)" >&2
+
+  # Log override for audit trail
+  LOG_DIR="$SPINE_STATE/dirty-overrides"
+  mkdir -p "$LOG_DIR"
+  LOG_FILE="$LOG_DIR/dirty-override-log.csv"
+
+  # Add header if file doesn't exist
+  if [[ ! -f "$LOG_FILE" ]]; then
+    echo "timestamp_utc,dirty_count,reason,pid" > "$LOG_FILE"
+  fi
+
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$DIRTY_COUNT,\"$DIRTY_REASON\",$$" >> "$LOG_FILE"
+
+  exit 0
+fi
+
+# Dirty and no override - block
+echo "ERROR: Working directory has uncommitted changes" >&2
+echo "" >&2
+git -C "$CURRENT_DIR" status --short >&2
+echo "" >&2
+echo "This prevents starting a clean execution lane." >&2
+echo "" >&2
+echo "Options:" >&2
+echo "  1. Commit or stash changes, then re-run session.start" >&2
+echo "  2. Create worktree for new work (recommended):" >&2
+echo "       git worktree add /path/to/worktree -b <branch> origin/main" >&2
+echo "  3. Override with explicit reason (use sparingly):" >&2
+echo "       ./bin/ops cap run session.start -- --allow-dirty --dirty-reason '<why safe>'" >&2
+echo "" >&2
+
+exit 1
