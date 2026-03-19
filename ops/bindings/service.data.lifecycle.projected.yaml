@@ -8,8 +8,8 @@ status: projection
 authority_state: projection
 projection_of: ops/bindings/service.data.lifecycle.registry.yaml
 source_capability: service.data.lifecycle.projection.build
-source_sha256: 6287446c09771bca5661881b225fadefea6d649687396b47736483c4512d9d13
-generated_at_utc: '2026-03-19T15:25:39Z'
+source_sha256: 21cb1c118b3c11aa6368e2c296e5e0ab2ac710e3ebe142e863b6dc97763cb2bd
+generated_at_utc: '2026-03-19T15:52:40Z'
 services:
 - service_id: backups
   display_name: Backups
@@ -36,6 +36,69 @@ services:
   export_archive_lanes:
   - pve:/md1400/backup-cold (Canonical shop restore/archive plane.)
   - nas:/volume1/backups/proxmox_backups/dump (Canonical home restore plane.)
+  background_actions:
+    declared:
+    - action_id: pve_shop_vzdump_scheduler
+      host: pve
+      mechanism: proxmox_jobs_cfg
+      locus: /etc/pve/jobs.cfg
+      schedule: daily_01_00
+      effect: write_shop_vzdump_backups
+      evidence_ref: /Users/ronnyworks/code/.evidence/spine/verify/SYNOLOGY_BACKUP_WRITER_DRIFT_DISCOVERY_20260319.md
+    - action_id: proxmox_home_daily_vzdump_scheduler
+      host: proxmox-home
+      mechanism: proxmox_jobs_cfg
+      locus: /etc/pve/jobs.cfg
+      schedule: daily_03_00
+      effect: write_home_daily_vzdump_backups
+      evidence_ref: /Users/ronnyworks/code/.evidence/spine/verify/SYNOLOGY_BACKUP_WRITER_DRIFT_DISCOVERY_20260319.md
+    - action_id: proxmox_home_weekly_vzdump_scheduler
+      host: proxmox-home
+      mechanism: proxmox_jobs_cfg
+      locus: /etc/pve/jobs.cfg
+      schedule: weekly_sunday_04_00
+      effect: write_home_weekly_vzdump_backups
+      evidence_ref: /Users/ronnyworks/code/.evidence/spine/verify/SYNOLOGY_BACKUP_WRITER_DRIFT_DISCOVERY_20260319.md
+    - action_id: pve_archive_smb_snapshot
+      host: pve
+      mechanism: cron_d
+      locus: /etc/cron.d/archive-smb-snapshot
+      schedule: daily_01_05
+      effect: write_archive_snapshot_manifests
+      evidence_ref: /Users/ronnyworks/code/.evidence/spine/verify/ESTATE_SERVICE_DATA_ARCHITECTURE_20260319.md
+    retired:
+    - action_id: pve_vzdump_offsite_sync_cron
+      host: pve
+      mechanism: root_crontab
+      locus: root_crontab
+      match_hint: /usr/local/bin/vzdump-offsite-sync.sh
+      reason: Synology backup canon moved to /volume1/backups/proxmox_backups/dump;
+        legacy offsite sync writer must stay absent.
+      evidence_ref: /Users/ronnyworks/code/.evidence/spine/verify/SYNOLOGY_BACKUP_WRITER_DISABLEMENT_20260319.md
+  destructive_behaviors:
+  - behavior_id: pve_shop_vzdump_prune_keep_2
+    host: pve
+    trigger: proxmox_maxfiles_prune
+    effect: prune_shop_vzdump_history
+    target_roots:
+    - host: pve
+      path: /tank/backups/vzdump/dump
+    - host: pve
+      path: /md1400/backup-cold/vzdump/pve
+  - behavior_id: proxmox_home_daily_prune_keep_3
+    host: proxmox-home
+    trigger: proxmox_prune_backups
+    effect: prune_home_daily_vzdump_history
+    target_roots:
+    - host: nas
+      path: /volume1/backups/proxmox_backups/dump
+  - behavior_id: proxmox_home_weekly_prune_keep_2
+    host: proxmox-home
+    trigger: proxmox_prune_backups
+    effect: prune_home_weekly_vzdump_history
+    target_roots:
+    - host: nas
+      path: /volume1/backups/proxmox_backups/dump
   retention_policy:
     policy_type: freshness_windows
     claim_days: null
@@ -69,6 +132,10 @@ services:
     staging_requires_expiry: true
     quarantine_requires_expiry: false
     retired_roots: []
+  drift_signals:
+  - retired_background_writer_present
+  - undeclared_backup_scheduler
+  - noncanonical_backup_root_written
   binding_refs:
     storage_map_sites:
     - shop
@@ -115,6 +182,25 @@ services:
     then tombstone; not canonical home personal data.)
   export_archive_lanes:
   - immich:/home/ronny/backups (Daily pg_dump export lane.)
+  background_actions:
+    declared:
+    - action_id: immich_db_backup_cron
+      host: immich
+      mechanism: cron_d
+      locus: /etc/cron.d/immich-backup
+      schedule: daily_03_00
+      effect: write_pg_dump_exports
+      evidence_ref: /Users/ronnyworks/code/.evidence/spine/verify/IMMICH_PHASE1_RUNTIME_TRUTH_20260319.md
+    retired: []
+  destructive_behaviors:
+  - behavior_id: immich_db_backup_prune_after_7_days
+    host: immich
+    trigger: backup_script_retention
+    effect: delete_old_db_exports
+    target_roots:
+    - host: immich
+      path: /home/ronny/backups/immich/postgres
+    policy_ref: /home/ronny/scripts/backup-immich-db.sh
   retention_policy:
     policy_type: mixed_state
     claim_days: null
@@ -147,6 +233,10 @@ services:
     staging_requires_expiry: false
     quarantine_requires_expiry: true
     retired_roots: []
+  drift_signals:
+  - quarantine_root_age_exceeds_policy
+  - undeclared_backup_export_lane
+  - active_upload_root_split_from_residue_root
   binding_refs:
     storage_map_sites:
     - shop
@@ -186,6 +276,10 @@ services:
   - pve:/md1400/media-cold (Cold archive and legacy media hold lane.)
   - pve:/md1400/backup-cold/apps/media-config (Canonical config backup archive for
     download/streaming stacks.)
+  background_actions:
+    declared: []
+    retired: []
+  destructive_behaviors: []
   retention_policy:
     policy_type: bounded_stage_windows
     claim_days: null
@@ -223,6 +317,14 @@ services:
       path: /media/backups
       reason: Legacy warm-lane media-stack tarball hold. Historical only; not canonical
         backup truth.
+    - host: nas
+      path: /volume1/media-staging
+      reason: Legacy Synology-side staging/archive lane outside the canonical /media
+        export; presence must be treated as drift until explicitly re-authorized.
+  drift_signals:
+  - staging_root_age_exceeds_policy
+  - undeclared_secondary_root_receiving_payload
+  - retired_root_written
   binding_refs:
     storage_map_sites:
     - shop
@@ -266,6 +368,45 @@ services:
     export lane pending operator archive move.)
   - pve:/md1400/archive/surveillance-exports (Cold archive lane for exported surveillance
     evidence; offsite coverage comes from the existing md1400 backup program.)
+  background_actions:
+    declared:
+    - action_id: frigate_recording_writer
+      host: surveillance-stack
+      mechanism: docker_container
+      locus: /srv/config/surveillance/config.yml
+      schedule: continuous
+      effect: write_recordings_clips_snapshots
+      evidence_ref: /Users/ronnyworks/code/.evidence/spine/verify/SURVEILLANCE_OPERATING_MODEL_CONTRACT_20260319.md
+    - action_id: frigate_retention_purger
+      host: surveillance-stack
+      mechanism: docker_container
+      locus: /srv/config/surveillance/config.yml
+      schedule: continuous
+      effect: auto_purge_by_retention_policy
+      evidence_ref: /Users/ronnyworks/code/.evidence/spine/verify/SURVEILLANCE_RETENTION_AUDIT_20260319.md
+    retired: []
+  destructive_behaviors:
+  - behavior_id: recordings_retention_expiry
+    host: surveillance-stack
+    trigger: application_retention_policy
+    effect: delete_expired_recordings
+    target_roots:
+    - host: surveillance-stack
+      path: /srv/data/surveillance/recordings
+  - behavior_id: clips_retention_expiry
+    host: surveillance-stack
+    trigger: application_retention_policy
+    effect: delete_expired_clips
+    target_roots:
+    - host: surveillance-stack
+      path: /srv/data/surveillance/clips
+  - behavior_id: snapshots_retention_expiry
+    host: surveillance-stack
+    trigger: application_retention_policy
+    effect: delete_expired_snapshots
+    target_roots:
+    - host: surveillance-stack
+      path: /srv/data/surveillance/snapshots
   retention_policy:
     policy_type: rolling_days
     claim_days: 1
@@ -311,6 +452,10 @@ services:
       path: /home/ubuntu/surveillance.pre-normalization-20260319T120655Z
       reason: Rollback capsule retained after the 2026-03-19 /srv normalization wave;
         not a live writer root.
+  drift_signals:
+  - retention_claim_exceeds_capacity
+  - undeclared_retention_purger
+  - retired_root_written
   binding_refs:
     storage_map_sites:
     - shop

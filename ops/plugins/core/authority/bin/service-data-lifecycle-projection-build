@@ -168,6 +168,8 @@ def build_projection(registry: dict[str, Any], source_sha: str, generated_at_utc
                 "quarantine_root_count": len(ensure_list(service.get("quarantine_roots"))),
                 "quarantine_roots": path_list(ensure_list(service.get("quarantine_roots"))),
                 "export_archive_lanes": path_list(ensure_list(service.get("export_archive_lanes"))),
+                "background_actions": ensure_dict(service.get("background_actions")),
+                "destructive_behaviors": ensure_list(service.get("destructive_behaviors")),
                 "retention_policy": ensure_dict(service.get("retention_policy")),
                 "tombstone_policy": ensure_dict(service.get("tombstone_policy")),
                 "backup_class": str(service.get("backup_class") or ""),
@@ -175,6 +177,7 @@ def build_projection(registry: dict[str, Any], source_sha: str, generated_at_utc
                 "capacity_model": ensure_dict(service.get("capacity_model")),
                 "capacity_honesty": capacity_honesty(service),
                 "drift_rules": ensure_dict(service.get("drift_rules")),
+                "drift_signals": ensure_list(service.get("drift_signals")),
                 "binding_refs": ensure_dict(service.get("binding_refs")),
             }
         )
@@ -274,6 +277,30 @@ def verify(registry: dict[str, Any]) -> None:
         capacity = ensure_dict(service.get("capacity_model"))
         if retention.get("claim_days") not in {None, ""} and not capacity:
             errors.append(f"{service_id}: claim_days requires a capacity_model")
+
+        background_actions = ensure_dict(service.get("background_actions"))
+        for bucket_name in ("declared", "retired"):
+            for row in ensure_list(background_actions.get(bucket_name)):
+                item = ensure_dict(row)
+                if not str(item.get("action_id") or "").strip():
+                    errors.append(f"{service_id}: {bucket_name} background action missing action_id")
+                if not str(item.get("host") or "").strip():
+                    errors.append(f"{service_id}: {bucket_name} background action missing host")
+                if not str(item.get("mechanism") or "").strip():
+                    errors.append(f"{service_id}: {bucket_name} background action missing mechanism")
+
+        for row in ensure_list(service.get("destructive_behaviors")):
+            item = ensure_dict(row)
+            if not str(item.get("behavior_id") or "").strip():
+                errors.append(f"{service_id}: destructive_behaviors entry missing behavior_id")
+            if not str(item.get("host") or "").strip():
+                errors.append(f"{service_id}: destructive_behaviors entry missing host")
+            if not str(item.get("effect") or "").strip():
+                errors.append(f"{service_id}: destructive_behaviors entry missing effect")
+
+        for signal in ensure_list(service.get("drift_signals")):
+            if not str(signal).strip():
+                errors.append(f"{service_id}: drift_signals entries must be non-empty strings")
 
     if errors:
         for error in errors:
