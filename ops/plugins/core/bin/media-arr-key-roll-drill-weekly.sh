@@ -4,7 +4,7 @@ set -euo pipefail
 # Weekly non-mutating rehearsal to catch ARR key drift early.
 # This validates canonical key routing/auth plus downstream media pipeline health.
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
 

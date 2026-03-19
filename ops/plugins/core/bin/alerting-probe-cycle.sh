@@ -5,7 +5,7 @@ set -euo pipefail
 # LaunchAgent: com.ronny.alerting-probe-cycle
 # Gaps: GAP-OP-740
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
 SNAPSHOT_FILE="/tmp/spine-alerting-probe-latest.json"

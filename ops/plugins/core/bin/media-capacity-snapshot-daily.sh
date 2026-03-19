@@ -4,7 +4,7 @@ set -euo pipefail
 # Scheduled runner: refresh media capacity runway snapshot projection.
 # LaunchAgent: com.ronny.media-capacity-snapshot-daily
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
 

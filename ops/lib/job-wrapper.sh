@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 SPINE_OPERATOR_TZ="${SPINE_OPERATOR_TZ:-America/New_York}"
 export SPINE_OPERATOR_TZ
 export TZ="${SPINE_OPERATOR_TZ}"

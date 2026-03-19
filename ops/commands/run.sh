@@ -58,7 +58,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Resolve SPINE_REPO
-SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 SPINE_CODE="${SPINE_CODE:-$SPINE_REPO}"
 source "$SPINE_REPO/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths

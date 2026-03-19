@@ -5,7 +5,7 @@
 # Freshness: files must be < 30 days old.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 WORKBENCH="${WORKBENCH_ROOT:-$HOME/code/workbench}"
 CONFIG_DIR="$WORKBENCH/infra/homeassistant/config"
 

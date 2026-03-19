@@ -14,7 +14,7 @@ resolve_root() {
     printf '%s\n' "$detected_root"
     return 0
   fi
-  printf '%s\n' "$HOME/code/agentic-spine"
+  printf '%s\n' "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 }
 
 ROOT="$(resolve_root)"

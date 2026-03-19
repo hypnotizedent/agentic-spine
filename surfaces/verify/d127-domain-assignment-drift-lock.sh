@@ -2,7 +2,7 @@
 # TRIAGE: Keep gate.execution.topology.yaml complete: every active gate domain-assigned, all refs defined, release sequence covering declared domains.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
 TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
 DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"

@@ -4,7 +4,7 @@ set -euo pipefail
 # Scheduled runner: reconcile friction queue into matched/filed governed gaps.
 # LaunchAgent: com.ronny.friction-reconcile
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 FRICTION_LOOP_ID="${FRICTION_RECONCILE_LOOP_ID:-LOOP-AGENT-FRICTION-QUEUE-OPERATIONS-20260302}"
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"

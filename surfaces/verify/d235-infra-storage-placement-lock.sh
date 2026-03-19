@@ -4,10 +4,10 @@
 # Report/enforce drift between storage placement policy and live docker-root placement for mint-data/mint-apps.
 set -euo pipefail
 
-source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
+_D235_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"; source "$_D235_ROOT/surfaces/verify/lib/tailscale-guard.sh"
 require_tailscale_for "mint-data"
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
 STORAGE_POLICY="$ROOT/ops/bindings/infra.storage.placement.policy.yaml"
 MAP_FILE="$ROOT/ops/bindings/mint.storage.findings.map.yaml"

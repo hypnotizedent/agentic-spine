@@ -9,7 +9,7 @@
 # 5) RAG CLI does not pass Authorization bearer token directly in curl args.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 BINDING="$ROOT/ops/bindings/rag.remote.runner.yaml"
 SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"

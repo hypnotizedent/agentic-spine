@@ -5,7 +5,7 @@
 # and stable JSON envelope for all json_contract caps.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 TEST="$ROOT/ops/plugins/infra/mailroom-bridge/tests/test-consumers-registry.sh"
 
 if [[ ! -f "$TEST" ]]; then

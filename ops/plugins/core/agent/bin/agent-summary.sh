@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../" && pwd)}"
 source "$SPINE/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 INBOX="${SPINE_INBOX}"

@@ -5,10 +5,10 @@
 set -euo pipefail
 
 # Network gate — skip cleanly when Tailscale VPN is disconnected
-source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
+_D107_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"; source "$_D107_ROOT/surfaces/verify/lib/tailscale-guard.sh"
 require_tailscale_for "download-stack"
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 TENANT_BINDING="$ROOT/ops/bindings/tenants/media-stack.yaml"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 source "${ROOT}/ops/lib/ssh-resolve.sh"

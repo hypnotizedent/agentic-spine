@@ -2,7 +2,7 @@
 # TRIAGE: Keep spine as fabric control plane. Update fabric.boundary.contract.yaml when changing capability/domain ownership rules.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 BOUNDARY="$ROOT/ops/bindings/fabric.boundary.contract.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
 AGENTS="$ROOT/ops/bindings/agents.registry.yaml"

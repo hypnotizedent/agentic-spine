@@ -2,7 +2,7 @@
 # TRIAGE: Run secrets.binding and secrets.auth.status before API-touching capabilities.
 set -euo pipefail
 
-REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 CAP_FILE="$REPO/ops/capabilities.yaml"
 
 # Requires yq (already a core dep of ops cap)

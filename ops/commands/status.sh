@@ -15,7 +15,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 source "$SPINE_REPO/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 MODE="${1:-}"

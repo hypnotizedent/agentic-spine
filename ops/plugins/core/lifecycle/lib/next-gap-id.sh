@@ -6,7 +6,7 @@
 # Sourceable — no set -euo pipefail at top level.
 
 next_gap_id() {
-  local gaps_file="${GAPS_FILE:-${SPINE_REPO:-$HOME/code/agentic-spine}/ops/bindings/operational.gaps.yaml}"
+  local gaps_file="${GAPS_FILE:-${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../" && pwd)}/ops/bindings/operational.gaps.yaml}"
   local max_num=0
 
   while IFS= read -r gid; do

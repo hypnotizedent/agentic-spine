@@ -5,7 +5,7 @@ set -euo pipefail
 # LaunchAgent template: com.ronny.domain-inventory-refresh-daily
 # W69 freshness recovery: D188
 
-CONTROL_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+CONTROL_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 source "${CONTROL_ROOT}/ops/lib/runtime-managed-worktree.sh"
 RUNTIME_ROOT="$(spine_runtime_prepare_managed_worktree "$CONTROL_ROOT")"
 CAP_RUNNER="$RUNTIME_ROOT/bin/ops"

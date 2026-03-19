@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-_PLATFORM_CONTROL_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+_PLATFORM_CONTROL_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 _PLATFORM_CONTROL_BINDING="${_PLATFORM_CONTROL_ROOT}/ops/bindings/platform.control.surfaces.yaml"
 
 if [[ ! -r "${_PLATFORM_CONTROL_ROOT}/ops/lib/ssh-resolve.sh" ]]; then
@@ -8,7 +8,7 @@ if [[ ! -r "${_PLATFORM_CONTROL_ROOT}/ops/lib/ssh-resolve.sh" ]]; then
   return 2 2>/dev/null || exit 2
 fi
 
-# shellcheck source=/Users/ronnyworks/code/agentic-spine/ops/lib/ssh-resolve.sh
+# shellcheck source=ops/lib/ssh-resolve.sh
 source "${_PLATFORM_CONTROL_ROOT}/ops/lib/ssh-resolve.sh"
 
 control_surface_binding_path() {

@@ -10,7 +10,7 @@
 # INCORRECT: Extract port/path via mint_service_port/path, then rebuild with probe host.
 # This violates D390's principle that HTTP truth must come from services.health.yaml.
 
-_MINT_HEALTH_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+_MINT_HEALTH_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 _MINT_HEALTH_BINDING="${_MINT_HEALTH_ROOT}/ops/bindings/services.health.yaml"
 _MINT_PROBE_BINDING="${_MINT_HEALTH_ROOT}/ops/bindings/mint.probe.targets.yaml"
 _MINT_HEALTH_SSH_BINDING="${_MINT_HEALTH_ROOT}/ops/bindings/ssh.targets.yaml"

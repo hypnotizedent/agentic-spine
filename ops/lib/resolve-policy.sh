@@ -46,7 +46,7 @@ _BALANCED_MULTI_AGENT_WRITES="direct"
 _BALANCED_MULTI_AGENT_WRITES_WHEN_MULTI_SESSION="proposal-only"
 
 resolve_policy_knobs() {
-  local sp="${SP:-${SPINE_ROOT:-${SPINE_CODE:-$HOME/code/agentic-spine}}}"
+  local sp="${SP:-${SPINE_ROOT:-${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}}}"
   local presets_file="$sp/ops/bindings/policy.presets.yaml"
   local preset_name=""
   local profile_path=""

@@ -6,7 +6,7 @@
 # and root AOF contracts pass strict validation.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 FOUNDATION_ROOT="${SPINE_FOUNDATION_ROOT}"

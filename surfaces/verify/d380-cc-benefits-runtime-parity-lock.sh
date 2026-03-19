@@ -2,7 +2,7 @@
 # TRIAGE: Keep cc-benefits tracker schema/runtime/scheduler/capability wiring in deterministic parity.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 CONTRACT="$ROOT/ops/bindings/finance.cc-benefits.runtime.contract.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
 MAP="$ROOT/ops/bindings/capability_map.yaml"

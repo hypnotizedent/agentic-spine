@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 ARCHIVER="${SPINE_ROOT}/ops/plugins/core/proposals/bin/proposals-archive"
 OUTBOX_RETENTION="${SPINE_ROOT}/ops/plugins/infra/mailroom-bridge/bin/mailroom-outbox-retention"
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"

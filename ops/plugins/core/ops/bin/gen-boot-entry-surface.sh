@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../" && pwd)}"
 CONTRACT="$ROOT/ops/bindings/entry.boot.surface.contract.yaml"
 MODE="write"
 WRITE_SURFACES=0

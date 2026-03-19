@@ -5,7 +5,7 @@ set -euo pipefail
 # LaunchAgent: com.ronny.spine-briefing-email-daily
 # Gap: GAP-OP-742
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 STACK_CONTRACT="${SPINE_ROOT}/ops/bindings/communications.stack.contract.yaml"
 source "${SPINE_ROOT}/ops/lib/runtime-paths.sh"

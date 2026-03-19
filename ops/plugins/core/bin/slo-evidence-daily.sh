@@ -5,7 +5,7 @@ set -euo pipefail
 # LaunchAgent: com.ronny.slo-evidence-daily
 # Gaps: GAP-OP-736
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 MAX_ATTEMPTS="${SLO_EVIDENCE_MAX_ATTEMPTS:-3}"
 BASE_BACKOFF_SECONDS="${SLO_EVIDENCE_BACKOFF_SECONDS:-20}"

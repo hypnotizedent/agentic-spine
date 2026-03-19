@@ -31,7 +31,7 @@ fi
 
 set -eo pipefail
 
-REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../" && pwd)}"
 MEMORY_FILE="$REPO/docs/reference/brain/memory.md"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 DATE=$(date +%Y-%m-%d)

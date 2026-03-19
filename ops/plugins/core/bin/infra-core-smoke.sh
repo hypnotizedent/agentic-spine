@@ -4,7 +4,7 @@
 # Runs deterministic read-only probes and reports blocker-class failures.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 source "${ROOT}/ops/lib/job-wrapper.sh"
 CAP="$ROOT/bin/ops"
 SYSTEM="${1:-all}"

@@ -27,7 +27,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 source "$SPINE_REPO/ops/lib/spine-paths.sh"
 spine_paths_init
 LANE_PROFILES_YAML="$SPINE_REPO/ops/bindings/lane.profiles.yaml"

@@ -7,7 +7,7 @@
 # Reads from ops/bindings/ssh.targets.yaml (SSOT).
 #
 # Usage:
-#   source "${SPINE_ROOT:-$HOME/code/agentic-spine}/ops/lib/ssh-resolve.sh"
+#   source "${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/ops/lib/ssh-resolve.sh"
 #   ref="$(ssh_resolve_ref "download-stack")"    # => ubuntu@192.168.1.209
 #   host="$(ssh_resolve_host "download-stack")"  # => 192.168.1.209
 #   user="$(ssh_resolve_user "download-stack")"  # => ubuntu
@@ -20,7 +20,7 @@
 #
 # ═══════════════════════════════════════════════════════════════
 
-_SSH_RESOLVE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+_SSH_RESOLVE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 _SSH_RESOLVE_BINDING="${_SSH_RESOLVE_ROOT}/ops/bindings/ssh.targets.yaml"
 
 ssh_resolve_host() {

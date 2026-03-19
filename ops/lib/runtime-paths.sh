@@ -76,7 +76,7 @@ spine_runtime_resolve_paths() {
     SPINE_REPO="$detected_root"
   else
     if [[ -z "${SPINE_CODE:-}" ]]; then
-      SPINE_CODE="${SPINE_REPO:-$HOME/code/agentic-spine}"
+      SPINE_CODE="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
     fi
     SPINE_REPO="${SPINE_REPO:-$SPINE_CODE}"
   fi
@@ -287,7 +287,7 @@ spine_runtime_resolve_paths() {
 
 spine_resolve_mailroom_path() {
   local path="$1"
-  local repo="${SPINE_REPO:-$HOME/code/agentic-spine}"
+  local repo="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
   local inbox="${SPINE_INBOX:-$HOME/code/.runtime/spine/mailroom/inbox}"
   local outbox="${SPINE_OUTBOX:-$HOME/code/.runtime/spine/mailroom/outbox}"
   local state="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"

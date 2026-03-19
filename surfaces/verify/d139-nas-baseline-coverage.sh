@@ -3,7 +3,7 @@
 # D139: NAS baseline coverage present across device registry and backup inventory contracts.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DEVICE_REG="$ROOT/ops/bindings/home.device.registry.yaml"
 BACKUP_INV="$ROOT/ops/bindings/backup.inventory.yaml"
 

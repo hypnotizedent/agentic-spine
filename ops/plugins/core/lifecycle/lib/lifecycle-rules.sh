@@ -5,7 +5,7 @@
 #
 # Sourceable — no set -euo pipefail at top level.
 
-_LIFECYCLE_RULES_FILE="${SP:-${SPINE_ROOT:-${SPINE_CODE:-$HOME/code/agentic-spine}}}/ops/bindings/lifecycle.rules.yaml"
+_LIFECYCLE_RULES_FILE="${SP:-${SPINE_ROOT:-${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../" && pwd)}}}/ops/bindings/lifecycle.rules.yaml"
 
 _lc_read() {
   local path="$1" fallback="$2"

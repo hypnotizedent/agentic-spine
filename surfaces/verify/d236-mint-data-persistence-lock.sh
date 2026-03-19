@@ -4,10 +4,10 @@
 # Report/enforce mint-data persistence baseline (postgres/minio/redis mounts + redis durability posture).
 set -euo pipefail
 
-source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
+_D236_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"; source "$_D236_ROOT/surfaces/verify/lib/tailscale-guard.sh"
 require_tailscale_for "mint-data"
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
 STORAGE_POLICY="$ROOT/ops/bindings/infra.storage.placement.policy.yaml"
 GUARD_POLICY="$ROOT/ops/bindings/mint.storage.guard.policy.yaml"

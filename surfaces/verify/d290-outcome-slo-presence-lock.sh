@@ -2,7 +2,7 @@
 # TRIAGE: fail if critical tier has no outcome probes declared.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 CONTRACT="$ROOT/ops/bindings/outcome.slo.contract.yaml"
 SCRIPT="$ROOT/ops/plugins/core/verify/bin/outcome-slo-report"
 CAPS="$ROOT/ops/capabilities.yaml"

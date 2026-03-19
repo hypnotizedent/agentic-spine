@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.2.0 — canonical source: /Users/ronnyworks/code/agentic-spine/ops/plugins/providers/bin/
+# Version: 1.2.0 — canonical source: ops/plugins/providers/bin/
 # Infisical Secrets Management Agent
 # Direct API calls - no CLI dependency
 # Fixed: removed declare -A to avoid set -u issues

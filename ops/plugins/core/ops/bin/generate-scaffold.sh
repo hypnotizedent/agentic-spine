@@ -119,7 +119,7 @@ cat <<'SCAFFOLD_EOF'
 # ────────────────────────────────────────────────────────────────
 # 1) COORDINATES (LOCKED)
 # ────────────────────────────────────────────────────────────────
-# SPINE_REPO="$HOME/code/agentic-spine"
+# SPINE_REPO — resolved via BASH_SOURCE (portable)
 # WORKBENCH_REPO="$HOME/code/workbench"   # infrastructure docs + scripts
 # LEGACY_REPO="$LEGACY_ROOT"             # LEGACY ONLY — NEVER RUNTIME
 #

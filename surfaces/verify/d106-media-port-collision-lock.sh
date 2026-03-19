@@ -4,7 +4,7 @@
 # Enforces: No port conflicts between download-stack (VM 209) and streaming-stack (VM 210)
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 BINDING="$ROOT/ops/bindings/media.services.yaml"
 
 ERRORS=0

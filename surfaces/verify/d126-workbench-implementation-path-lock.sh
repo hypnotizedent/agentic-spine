@@ -2,7 +2,7 @@
 # TRIAGE: Fix domain_external capability implementation paths so they resolve to canonical workbench files.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 AUDIT="$ROOT/ops/plugins/core/verify/bin/workbench-impl-audit"
 
 fail() {

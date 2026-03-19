@@ -8,7 +8,7 @@ set -euo pipefail
 # Exit 0 on success, non-zero on critical failure (baseline build fails).
 # Individual snapshot failures are logged but do not abort the run.
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 CAP_RUNNER="$SPINE_ROOT/bin/ops"
 LOG_PREFIX="[ha-baseline-refresh]"
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"

@@ -4,7 +4,7 @@ set -euo pipefail
 # Scheduled runner: refresh cc-benefits deterministic status + queue artifacts
 # LaunchAgent: com.ronny.cc-benefits-refresh-daily
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
 

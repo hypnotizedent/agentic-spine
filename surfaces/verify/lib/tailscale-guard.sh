@@ -11,7 +11,7 @@
 #   3. False failures in verify output
 #
 # Usage:
-#   source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
+#   source "${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}/surfaces/verify/lib/tailscale-guard.sh"
 #   require_tailscale            # skip gate if Tailscale offline
 #   require_tailscale_for "nas"  # skip only if target needs Tailscale
 # Optional cache:
@@ -79,7 +79,7 @@ require_tailscale() {
 # Gates that SSH to lan_first targets do NOT need this guard.
 require_tailscale_for() {
   local target_id="$1"
-  local root="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+  local root="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
   local binding="$root/ops/bindings/ssh.targets.yaml"
   local policy
   policy="$(yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .access_policy // \"lan_first\"" \

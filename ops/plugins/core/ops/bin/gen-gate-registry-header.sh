@@ -8,7 +8,7 @@ set -euo pipefail
 #   gen-gate-registry-header.sh           # rewrite header in place
 #   gen-gate-registry-header.sh --check   # verify drift, exit 1 if stale
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../" && pwd)}"
 REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
 MODE="write"
 LOCK_HELD=0

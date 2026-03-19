@@ -4,7 +4,7 @@ set -euo pipefail
 # Scheduled runner: nightly closeout dry-run with findings notification.
 # LaunchAgent: com.ronny.nightly-closeout-daily
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 CLOSEOUT_CMD="${SPINE_ROOT}/ops/commands/nightly-closeout.sh"
 WORKSPACE_VERIFY_CMD="${SPINE_ROOT}/ops/plugins/core/verify/bin/workspace-closeout-verify"
 D399_CMD="${SPINE_ROOT}/surfaces/verify/d399-microsoft-mint-customer-mailbox-canonical-lock.sh"

@@ -2,7 +2,7 @@
 # ops ssot - SSOT registry discovery helper
 set -euo pipefail
 
-SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 REGISTRY="$SPINE_REPO/docs/governance/SSOT_REGISTRY.yaml"
 
 usage() {

@@ -4,7 +4,7 @@
 # Enforces: ha.addons.yaml exists, has addon_count > 0, freshness < 14 days
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 BINDING="$ROOT/ops/bindings/ha.addons.yaml"
 
 if [[ ! -f "$BINDING" ]]; then

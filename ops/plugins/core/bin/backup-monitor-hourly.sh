@@ -4,7 +4,7 @@ set -euo pipefail
 # Scheduled runner: backup monitor and governed alert intent enqueue
 # LaunchAgent: com.ronny.backup-monitor-hourly
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 # Default scheduled backup probes to passive mode to avoid interactive tailscale
 # browser auth prompts on operator workstations.

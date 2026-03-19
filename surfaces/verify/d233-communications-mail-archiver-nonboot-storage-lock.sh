@@ -3,7 +3,7 @@
 # Enforces: mail-archiver high-write paths are bind-mounted to non-boot storage on communications-stack
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 source "$ROOT/surfaces/verify/lib/tailscale-guard.sh"
 require_tailscale_for "communications-stack"
 

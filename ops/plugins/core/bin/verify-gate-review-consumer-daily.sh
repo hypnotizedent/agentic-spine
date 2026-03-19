@@ -4,7 +4,7 @@ set -euo pipefail
 # Scheduled runner: consume verify gate-bug review queue and emit digest.
 # LaunchAgent: com.ronny.verify-gate-review-consumer-daily
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 source "${SPINE_ROOT}/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 QUEUE_FILE="${VERIFY_GATE_REVIEW_QUEUE_FILE:-$SPINE_OUTBOX/alerts/verify-gate-review-queue.ndjson}"

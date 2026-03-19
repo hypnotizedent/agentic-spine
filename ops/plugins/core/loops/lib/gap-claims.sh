@@ -13,7 +13,7 @@
 #
 # Usage: source this file, then call functions.
 
-SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../" && pwd)}"
 CLAIMS_DIR="${SPINE_REPO}/mailroom/state/gaps"
 GAPS_FILE="${SPINE_REPO}/ops/bindings/operational.gaps.yaml"
 

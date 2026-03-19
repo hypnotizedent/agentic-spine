@@ -3,7 +3,7 @@
 # TRIAGE: non-main sessions must carry explicit identity + managed worktree placement
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 STATUS_SCRIPT="$ROOT/ops/plugins/core/ops/bin/worktree-session-status"
 CONTRACT="$ROOT/ops/bindings/worktree.session.isolation.yaml"
 

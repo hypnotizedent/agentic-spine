@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 V="$SPINE_ROOT/surfaces/verify"
 DIAG_REGISTRY="$SPINE_ROOT/ops/bindings/verify.diagnostics.registry.yaml"
 

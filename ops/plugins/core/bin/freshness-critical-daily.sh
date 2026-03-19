@@ -5,7 +5,7 @@ set -euo pipefail
 # Covers gates: D192, D193, D194, D205, D208 (+ D104 freshness support).
 # LaunchAgent: com.ronny.freshness-critical-daily
 
-CONTROL_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+CONTROL_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 source "${CONTROL_ROOT}/ops/lib/runtime-managed-worktree.sh"
 RUNTIME_ROOT="$(spine_runtime_prepare_managed_worktree "$CONTROL_ROOT")"
 CAP_RUNNER="${RUNTIME_ROOT}/bin/ops"

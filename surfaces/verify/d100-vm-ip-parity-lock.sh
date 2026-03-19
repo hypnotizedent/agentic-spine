@@ -4,7 +4,7 @@
 # Enforces: vm.lifecycle.yaml lan_ip matches DEVICE_IDENTITY_SSOT.md Shop VM LAN IPs table
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 CONTRACT="$ROOT/ops/bindings/vm.lifecycle.contract.yaml"
 
 ERRORS=0

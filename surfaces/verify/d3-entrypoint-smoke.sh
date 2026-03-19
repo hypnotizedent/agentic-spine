@@ -2,7 +2,7 @@
 # TRIAGE: Validate bin/ops entrypoint wiring without invoking heavyweight preflight.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 if [[ ! -x "$ROOT/bin/ops" ]]; then
   echo "D3 FAIL: missing executable bin/ops at $ROOT/bin/ops" >&2

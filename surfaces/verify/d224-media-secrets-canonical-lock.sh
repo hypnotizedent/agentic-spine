@@ -4,7 +4,7 @@
 # Enforces: compose secret registration, canonical path placement, SSH target contract parity
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 POLICY="$ROOT/ops/bindings/secrets.namespace.policy.yaml"

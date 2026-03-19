@@ -4,7 +4,7 @@
 # Fast-path check only: file existence + required field parity.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 REGISTRY="$ROOT/ops/bindings/agents.registry.yaml"
 DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
 AGENT_PROFILES="$ROOT/ops/bindings/gate.agent.profiles.yaml"

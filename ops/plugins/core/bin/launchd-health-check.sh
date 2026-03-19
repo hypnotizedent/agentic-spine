@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
 REGISTRY="${SPINE_ROOT}/ops/bindings/launchd.scheduler.registry.yaml"
 SCHEDULER_STATUS_SCRIPT="${SPINE_ROOT}/ops/plugins/infra/host/bin/launchd-scheduler-health-status"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"

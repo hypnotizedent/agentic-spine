@@ -3,7 +3,7 @@
 # Report-only capacity governance check for the shop media pool.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 POLICY_FILE="$ROOT/ops/bindings/infra.capacity.guard.policy.yaml"
 GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
 

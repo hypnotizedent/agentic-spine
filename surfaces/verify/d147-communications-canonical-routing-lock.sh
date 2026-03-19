@@ -3,7 +3,7 @@
 # D147: Communications canonical routing lock
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
 ALLOWED_SPINE_PREFIX="$ROOT/ops/plugins/domains/communications/"
 
