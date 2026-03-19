@@ -274,17 +274,19 @@ export_workflow:
       frequency: monthly_1st
       duration_minutes: 15
       description: Rsync hot exports from Stage 1 to Stage 2 (cold archive)
+      note: Execute on pve host (surveillance-stack has no md1400 mount)
       command: |
-        rsync -av --remove-source-files \
-          /srv/data/surveillance/clips/export/ \
-          /mnt/md1400/archive/surveillance-exports/$(date +%Y-%m)/
+        ssh pve "rsync -av --remove-source-files \
+          surveillance-stack:/srv/data/surveillance/clips/export/ \
+          /md1400/archive/surveillance-exports/$(date +%Y-%m)/"
 
     - name: annual_review
       frequency: yearly_january
       duration_minutes: 60
       description: Review and delete exports older than 2 years (no legal hold)
+      note: Execute on pve host (md1400 is pve-local ZFS pool)
       command: |
-        find /mnt/md1400/archive/surveillance-exports/ -type d -mtime +730
+        ssh pve "find /md1400/archive/surveillance-exports/ -type d -mtime +730"
         # Review, delete if no ongoing legal/business need
 
   # Health checks
@@ -309,7 +311,8 @@ export_workflow:
 
     - name: cold_archive_under_500gb
       check_method: du_size
-      path: /mnt/md1400/archive/surveillance-exports
+      host: pve
+      path: /md1400/archive/surveillance-exports
       threshold_gb: 500
       action: warn_annual_review_recommended
 
