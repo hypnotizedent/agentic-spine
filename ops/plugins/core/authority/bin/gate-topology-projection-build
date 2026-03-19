@@ -1,0 +1,345 @@
+#!/usr/bin/env python3
+"""Gate Topology Projection Builder.
+
+Reads gate.registry.yaml (source of truth for active gates) and the current
+gate.execution.topology.yaml, then regenerates the projection sections:
+
+  - gate_assignments: one entry per active gate (preserves existing domain
+    ownership, stubs new gates as UNASSIGNED or uses category heuristics)
+  - domain_metadata[].gate_count: recomputed from assignments
+  - core_mode.core_gate_ids: kept in sync (active gates only)
+
+Hand-maintained (authority) sections are preserved verbatim:
+  - domain_metadata definitions (descriptions, capability_prefixes, path_triggers, etc.)
+  - release_sequence
+  - validation_rules
+
+Usage:
+  gate-topology-projection-build           # Write updated topology to disk
+  gate-topology-projection-build --check   # Fail if topology drifts from generated state
+"""
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+REGISTRY_PATH = ROOT / "ops/bindings/gate.registry.yaml"
+TOPOLOGY_PATH = ROOT / "ops/bindings/gate.execution.topology.yaml"
+
+# Category-to-domain heuristic for gates that have no existing assignment.
+# Derived from established patterns in the existing topology.
+CATEGORY_DOMAIN_HEURISTIC: dict[str, str] = {
+    "path-hygiene": "core",
+    "process-hygiene": "core",
+    "agent-surface-hygiene": "core",
+    "loop-gap-hygiene": "loop_gap",
+    "ssot-hygiene": "core",
+    "ssot-integrity": "infra",
+    "secrets-hygiene": "secrets",
+    "workbench-hygiene": "workbench",
+    "infra-hygiene": "infra",
+    "media-hygiene": "media",
+    "home-automation": "home",
+    "infrastructure-parity": "home",
+    "network-security": "proxmox-network",
+    "doc-hygiene": "core",
+    "domain-governance": "core",
+    "domain-drift": "communications",
+    "backup": "backup",
+    "backup-hygiene": "backup",
+    "finance": "finance",
+    "parity": "core",
+}
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"gate.topology.projection.build FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def rel(path: Path) -> str:
+    return str(path.resolve().relative_to(ROOT))
+
+
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="gate-topology-projection-build")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Fail if generated projection drifts from disk.",
+    )
+    return parser.parse_args()
+
+
+def combined_source_sha(paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(rel(path).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def gate_sort_key(gate_id: str) -> int:
+    """Extract numeric suffix for natural sort order."""
+    return int(gate_id.lstrip("D")) if gate_id.startswith("D") else 0
+
+
+def build_active_gate_set(registry: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return {gate_id: gate_entry} for all non-retired gates."""
+    active: dict[str, dict[str, Any]] = {}
+    for gate in ensure_list(registry.get("gates")):
+        gate = ensure_dict(gate)
+        if gate.get("retired", False):
+            continue
+        gid = str(gate.get("id") or "")
+        if gid:
+            active[gid] = gate
+    return active
+
+
+def build_existing_assignments(topology: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return {gate_id: assignment_entry} from current topology."""
+    assignments: dict[str, dict[str, Any]] = {}
+    for entry in ensure_list(topology.get("gate_assignments")):
+        entry = ensure_dict(entry)
+        gid = str(entry.get("gate_id") or "")
+        if gid:
+            assignments[gid] = entry
+    return assignments
+
+
+def infer_domain_for_gate(gate: dict[str, Any]) -> str:
+    """Use category heuristic to guess primary_domain for a new gate."""
+    category = str(gate.get("category") or "")
+    return CATEGORY_DOMAIN_HEURISTIC.get(category, "UNASSIGNED")
+
+
+def build_gate_assignments(
+    active_gates: dict[str, dict[str, Any]],
+    existing_assignments: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build the projected gate_assignments list.
+
+    - Preserves primary_domain, secondary_domains, family for existing gates.
+    - Adds stub entries for new active gates (with heuristic domain).
+    - Removes entries for retired/missing gates.
+    - Sorts by numeric gate ID.
+    """
+    assignments: list[dict[str, Any]] = []
+
+    for gid in sorted(active_gates.keys(), key=gate_sort_key):
+        gate = active_gates[gid]
+        if gid in existing_assignments:
+            # Preserve existing assignment verbatim
+            existing = existing_assignments[gid]
+            assignments.append({
+                "gate_id": gid,
+                "primary_domain": str(existing.get("primary_domain") or "UNASSIGNED"),
+                "secondary_domains": ensure_list(existing.get("secondary_domains")),
+                "family": str(existing.get("family") or gate.get("category") or ""),
+            })
+        else:
+            # New gate: infer domain from category
+            domain = infer_domain_for_gate(gate)
+            assignments.append({
+                "gate_id": gid,
+                "primary_domain": domain,
+                "secondary_domains": [],
+                "family": str(gate.get("category") or ""),
+            })
+
+    return assignments
+
+
+def compute_gate_counts(
+    assignments: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Count gates per primary_domain."""
+    counts: dict[str, int] = {}
+    for entry in assignments:
+        domain = str(entry.get("primary_domain") or "")
+        if domain and domain != "UNASSIGNED":
+            counts[domain] = counts.get(domain, 0) + 1
+    return counts
+
+
+def update_domain_gate_counts(
+    domain_metadata: list[dict[str, Any]],
+    gate_counts: dict[str, int],
+) -> list[dict[str, Any]]:
+    """Return a copy of domain_metadata with gate_count recomputed."""
+    updated = copy.deepcopy(domain_metadata)
+    for entry in updated:
+        domain_id = str(entry.get("domain_id") or "")
+        entry["gate_count"] = gate_counts.get(domain_id, 0)
+    return updated
+
+
+def prune_core_gate_ids(
+    core_gate_ids: list[str],
+    active_gates: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Remove any retired gates from core_gate_ids."""
+    return [gid for gid in core_gate_ids if gid in active_gates]
+
+
+def build_topology(
+    topology: dict[str, Any],
+    registry: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the full projected topology."""
+    active_gates = build_active_gate_set(registry)
+    existing_assignments = build_existing_assignments(topology)
+
+    # Build projected gate_assignments
+    assignments = build_gate_assignments(active_gates, existing_assignments)
+    gate_counts = compute_gate_counts(assignments)
+
+    # Preserve authority sections, update projection sections
+    result: dict[str, Any] = {}
+
+    # Preserve top-level metadata
+    result["version"] = topology.get("version", "1.0")
+    result["updated"] = now_utc_iso()[:10]
+    result["owner"] = topology.get("owner", "@ronny")
+    result["scope"] = topology.get("scope", "gate-execution-topology")
+
+    # Preserve core_mode, prune retired gates
+    core_mode = copy.deepcopy(ensure_dict(topology.get("core_mode")))
+    core_ids = ensure_list(core_mode.get("core_gate_ids"))
+    pruned = prune_core_gate_ids(core_ids, active_gates)
+    core_mode["core_gate_ids"] = pruned
+    core_mode["core_count_limit"] = len(pruned)
+    result["core_mode"] = core_mode
+
+    # Update domain_metadata gate_counts
+    domain_metadata = ensure_list(topology.get("domain_metadata"))
+    result["domain_metadata"] = update_domain_gate_counts(domain_metadata, gate_counts)
+
+    # Projected gate_assignments
+    result["gate_assignments"] = assignments
+
+    # Preserve authority sections
+    result["release_sequence"] = topology.get("release_sequence", [])
+    result["validation_rules"] = topology.get("validation_rules", {})
+
+    # Intentionally omit stale domain_gates section
+
+    return result
+
+
+def yaml_dump(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=False, width=120)
+
+
+def render_topology(data: dict[str, Any]) -> str:
+    header = "\n".join([
+        "# Gate Execution Topology",
+        "# Non-secret. Spine-native.",
+        "# Authority sections (domain_metadata, release_sequence, validation_rules): hand-maintained.",
+        "# Projection sections (gate_assignments, gate_count): generated by gate-topology-projection-build.",
+        "# Do NOT edit gate_assignments or gate_count manually.",
+        "# Rebuild with: ./bin/ops cap run gate.topology.projection.build",
+        "",
+    ])
+    return header + yaml_dump(data)
+
+
+def check_matches(path: Path, expected: str) -> None:
+    if not path.is_file():
+        fail(f"missing topology: {rel(path)}")
+    actual = path.read_text(encoding="utf-8")
+    if actual != expected:
+        fail(f"topology drift: {rel(path)} (run gate.topology.projection.build to update)")
+
+
+def write_text(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+
+
+def main() -> None:
+    args = parse_args()
+    registry = load_yaml(REGISTRY_PATH)
+    topology = load_yaml(TOPOLOGY_PATH)
+
+    projected = build_topology(topology, registry)
+    rendered = render_topology(projected)
+
+    active_gates = build_active_gate_set(registry)
+    existing_assignments = build_existing_assignments(topology)
+
+    # Report new and removed assignments
+    new_gates = sorted(
+        set(active_gates.keys()) - set(existing_assignments.keys()),
+        key=gate_sort_key,
+    )
+    removed_gates = sorted(
+        set(existing_assignments.keys()) - set(active_gates.keys()),
+        key=gate_sort_key,
+    )
+
+    if args.check:
+        check_matches(TOPOLOGY_PATH, rendered)
+        print("gate.topology.projection.build --check PASS (no drift)")
+    else:
+        write_text(TOPOLOGY_PATH, rendered)
+        print("gate.topology.projection.build")
+        print("status: OK")
+        print(f"authority: {rel(REGISTRY_PATH)}")
+        print(f"projected: {rel(TOPOLOGY_PATH)}")
+
+    print(f"active_gates: {len(active_gates)}")
+    print(f"assigned_gates: {len(projected['gate_assignments'])}")
+    if new_gates:
+        print(f"new_assignments: {', '.join(new_gates)}")
+    if removed_gates:
+        print(f"removed_assignments: {', '.join(removed_gates)}")
+
+    # Warn about UNASSIGNED gates
+    unassigned = [
+        a["gate_id"]
+        for a in projected["gate_assignments"]
+        if a.get("primary_domain") == "UNASSIGNED"
+    ]
+    if unassigned:
+        print(f"WARNING: {len(unassigned)} gates need manual domain assignment: {', '.join(unassigned)}")
+
+
+if __name__ == "__main__":
+    main()
