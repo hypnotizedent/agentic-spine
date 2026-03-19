@@ -1,66 +1,23 @@
 ---
-status: operator_gate
-phase: 2B
-updated: 2026-03-19
+status: ready_for_evacuation
+phase: 2C_gate
+updated: 2026-03-19T05:54:00-04:00
 ---
 
-# Media Phase 2 Drive Swap Status
+# Media Phase 2 Status (Evacuate-Rebuild-Restore)
 
-**Current Phase**: 2B - Operator Physical Drive Installation Gate
-**Updated**: 2026-03-19 05:26 EDT
+**Strategy**: CORRECTED - Chassis-aware evacuate-rebuild
+**Phase**: 2C Gate - Ready for Evacuation
+**Updated**: 2026-03-19 05:54 EDT
 
----
+## Phase 2A/2B Complete ✅
 
-## Phase 2A: Pre-Replacement Verification ✅ COMPLETE
+✅ md1400 capacity verified: 22.2T free > 18.2T payload (4T margin)
+✅ Staging area created: /md1400/stage/media-phase2-evacuation/2026-03-19/
+✅ Strategy corrected: evacuate → remove → rebuild (no empty bays)
 
-**Result**: ALL PREREQUISITES MET
-**Duration**: 6 minutes (05:18-05:24 EDT)
-**Risk**: LOW - System stable and ready
+## Next: Phase 2C Evacuation (6-12h)
 
-**Verified**:
-- ✅ Pool health: ONLINE, 0 errors, last scrub March 15 (clean)
-- ✅ Capacity: 86% (25.1T/29.1T), 4.01T free (14% margin)
-- ✅ NFS consumers: download-stack (209) and streaming-stack (210) running
-- ✅ Quarantine operational: 2.07T (456 items from Phase 1)
-- ✅ Services stable: 2+ weeks uptime
-- ✅ 14TB drives: Not installed yet (expected)
+**Awaiting operator authorization** to begin evacuation.
 
-**Full Report**: `/Users/ronnyworks/code/.evidence/spine/verify/MEDIA_PHASE2_DRIVE_SWAP_EXECUTION_20260319.md`
-
----
-
-## Phase 2B: Operator Physical Install Gate ⏸️ AWAITING OPERATOR
-
-**Status**: PAUSED for physical drive installation
-
-**Required Actions** (by @ronny):
-
-1. Review installation checklist:
-   ```
-   /Users/ronnyworks/code/.evidence/spine/verify/MEDIA_PHASE2_OPERATOR_INSTALL_CHECKLIST_20260319.md
-   ```
-
-2. Physical installation:
-   - Shutdown: `ssh pve "shutdown -h now"`
-   - Install 4x14TB SAS drives in empty R730XD bays
-   - Power on pve
-   - Verify: `ssh pve "lsblk -o NAME,SIZE,MODEL | grep -E '(13|14)T'"`
-   - Record drive device names (e.g., sdm, sdn, sdo, sdp)
-
-3. Confirm installation complete
-
-**Safety**: DO NOT remove existing media pool drives (sdi-sdl)
-
----
-
-## Evidence Files
-
-**Created** (in /Users/ronnyworks/code/.evidence/spine/verify/):
-- MEDIA_PHASE2_DRIVE_SWAP_EXECUTION_20260319.md (Phase 2A report)
-- MEDIA_PHASE2_OPERATOR_INSTALL_CHECKLIST_20260319.md (Phase 2B checklist)
-
-**Pending** (will be created after 2B):
-- MEDIA_PHASE2_COPY_RECEIPTS_20260319.md (Phase 2D)
-- MEDIA_PHASE2_CUTOVER_VALIDATION_20260319.md (Phase 2E/2F)
-- MEDIA_PHASE2_48H_MONITORING_CHECKLIST_20260319.md (Phase 2G)
-- MEDIA_PHASE2_FINALIZATION_STATUS_20260319.md (Phase 2H)
+See full report: `.evidence/spine/verify/MEDIA_PHASE2_EVACUATE_REBUILD_EXECUTION_20260319.md`
