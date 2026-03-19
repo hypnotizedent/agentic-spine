@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# media.quarantine.review — list quarantine tier contents (read-only)
+#
+# Usage:
+#   ./bin/ops cap run media.quarantine.review
+#   ./bin/ops cap run media.quarantine.review --json
+#
+# Contract:
+# - SSHs to pve and checks /md1400/archive/media-quarantine/
+# - Lists contents and aging if quarantine exists
+# - Reports "not initialized" if quarantine path doesn't exist yet
+# - Read-only, no mutations
+# - Exit 0 if successful, exit 1 on error, exit 2 on config errors
+#
+# Phase 1 Audit Prep (2026-03-19):
+# This capability supports quarantine tier review per MEDIA_STORAGE_CONTRACT.md.
+# Quarantine tier creation is part of Phase 1 capacity crisis resolution.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+usage() {
+  cat <<'USAGE'
+media.quarantine.review — list quarantine tier contents (read-only)
+
+Args:
+  --json      Output JSON format
+  --timeout   SSH timeout in seconds (default: 10)
+
+Examples:
+  ./bin/ops cap run media.quarantine.review
+  ./bin/ops cap run media.quarantine.review --json
+
+Output:
+  - Quarantine path status (exists/not initialized)
+  - Contents listing if exists
+  - Age analysis for quarantined items
+  - No deletions or moves (read-only review)
+
+Quarantine Path:
+  /md1400/archive/media-quarantine/ (on pve)
+USAGE
+}
+
+OUTPUT_JSON=false
+TIMEOUT_SEC=10
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)     OUTPUT_JSON=true; shift ;;
+    --timeout)  TIMEOUT_SEC="${2:-10}"; shift 2 ;;
+    -h|--help)  usage; exit 0 ;;
+    --)         shift ;;
+    *)          echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+
+if [[ ! -f "$SSH_TARGETS" ]]; then
+  echo "MISSING_FILE: $SSH_TARGETS" >&2
+  exit 2
+fi
+
+# Resolve pve SSH target
+PVE_HOST=$(yq '.ssh.targets[] | select(.id == "pve") | .host' "$SSH_TARGETS")
+if [[ -z "$PVE_HOST" ]]; then
+  echo "MISSING_SSH_TARGET: pve not found in ssh.targets.yaml" >&2
+  exit 2
+fi
+
+QUARANTINE_PATH="/md1400/archive/media-quarantine"
+
+echo "# media.quarantine.review"
+echo "# Generated: $GENERATED_AT"
+echo "# Target: pve"
+echo "# Quarantine path: $QUARANTINE_PATH"
+echo ""
+
+# Check if quarantine path exists
+if ! ssh -o ConnectTimeout="$TIMEOUT_SEC" "$PVE_HOST" "test -d $QUARANTINE_PATH" 2>/dev/null; then
+  echo "## Status: NOT INITIALIZED"
+  echo ""
+  echo "The quarantine tier does not exist yet."
+  echo ""
+  echo "## Next Actions"
+  echo "1. Create quarantine tier as part of Phase 1:"
+  echo "   ssh pve \"zfs create md1400/archive/media-quarantine\""
+  echo "   ssh pve \"mkdir -p $QUARANTINE_PATH/pending\""
+  echo "   ssh pve \"mkdir -p $QUARANTINE_PATH/reviewed\""
+  echo "2. Move low-value bulk imports to quarantine for 30-day review"
+  echo "3. Review monthly and promote to cold or mark for deletion"
+  echo ""
+  echo "Per MEDIA_STORAGE_CONTRACT.md:"
+  echo "- Quarantine duration: 30 days minimum"
+  echo "- Review frequency: Monthly"
+  echo "- Post-review: promote_to_cold OR delete"
+
+  if [[ "$OUTPUT_JSON" == "true" ]]; then
+    cat <<JSON
+{
+  "generated_at": "$GENERATED_AT",
+  "target": "pve",
+  "quarantine_path": "$QUARANTINE_PATH",
+  "status": "not_initialized",
+  "exists": false,
+  "item_count": 0,
+  "mutations": "none"
+}
+JSON
+  fi
+
+  exit 0
+fi
+
+# Quarantine exists, analyze contents
+echo "## Status: INITIALIZED"
+echo ""
+
+# Count items in pending
+PENDING_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" "$PVE_HOST" \
+  "find $QUARANTINE_PATH/pending -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+echo "Pending items: $PENDING_COUNT"
+
+# Count items in reviewed
+REVIEWED_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" "$PVE_HOST" \
+  "find $QUARANTINE_PATH/reviewed -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+echo "Reviewed items: $REVIEWED_COUNT"
+
+TOTAL_COUNT=$((PENDING_COUNT + REVIEWED_COUNT))
+echo "Total quarantined: $TOTAL_COUNT"
+echo ""
+
+if [[ $TOTAL_COUNT -eq 0 ]]; then
+  echo "## Contents: EMPTY"
+  echo "Quarantine tier is initialized but empty."
+  echo ""
+else
+  echo "## Pending Items (awaiting review)"
+  ssh -o ConnectTimeout="$TIMEOUT_SEC" "$PVE_HOST" \
+    "ls -lh $QUARANTINE_PATH/pending/ 2>/dev/null | head -20" || echo "ERROR: Could not list pending"
+  echo ""
+
+  echo "## Reviewed Items (awaiting decision)"
+  ssh -o ConnectTimeout="$TIMEOUT_SEC" "$PVE_HOST" \
+    "ls -lh $QUARANTINE_PATH/reviewed/ 2>/dev/null | head -20" || echo "ERROR: Could not list reviewed"
+  echo ""
+
+  echo "## Age Analysis"
+  echo "Items >30 days old (ready for final decision):"
+  OLD_ITEMS=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" "$PVE_HOST" \
+    "find $QUARANTINE_PATH -type f -mtime +30 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+  echo "Count: $OLD_ITEMS"
+  echo ""
+fi
+
+echo "## Next Actions"
+echo "1. Review quarantined items monthly"
+echo "2. For each item, decide:"
+echo "   - Promote to cold (keep) → rsync to /md1400/archive/media-cold/"
+echo "   - Mark for deletion → move to delete_candidates/"
+echo "3. Final deletion requires operator confirmation (not automated)"
+echo ""
+echo "# Review complete (read-only, no mutations)"
+
+if [[ "$OUTPUT_JSON" == "true" ]]; then
+  cat <<JSON
+{
+  "generated_at": "$GENERATED_AT",
+  "target": "pve",
+  "quarantine_path": "$QUARANTINE_PATH",
+  "status": "initialized",
+  "exists": true,
+  "pending_count": $PENDING_COUNT,
+  "reviewed_count": $REVIEWED_COUNT,
+  "total_count": $TOTAL_COUNT,
+  "old_items_30d": $OLD_ITEMS,
+  "mutations": "none"
+}
+JSON
+fi
+
+exit 0
