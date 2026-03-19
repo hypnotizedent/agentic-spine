@@ -115,6 +115,7 @@ Purpose: remove ambiguity about where media belongs and stop `/downloads` from b
 - `download-stack` and `streaming-stack` still mount shop `/media` from the 730XD side.
 - `streaming-stack` is not currently a reliable playback authority because the VM is up but the declared Docker stack is empty.
 - Cold archive path normalization on 730XD is not complete yet. The target contract is `/md1400/archive/media/*`, and current runtime/storage layout should be treated as transitional until migration closes.
+- **Registry alignment (2026-03-19)**: `service.data.lifecycle.registry.yaml` previously listed `nas:/volume1/media-staging` under `drift_rules.retired_roots`. This was the only governance document treating the path as retired; all other contracts (this file, `MEDIA_STORAGE_CONTRACT.md`, tier model, canonical placements) already describe it as the active warm/home share. The registry has been corrected to classify this path as an `allowed_secondary_root`.
 
 ## Operator Standard
 

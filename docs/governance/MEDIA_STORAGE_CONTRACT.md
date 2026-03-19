@@ -621,6 +621,7 @@ ssh pve "find /md1400/archive/media-quarantine -type f -printf '%TY-%Tm-%Td %p\n
 - Service registry: `docs/governance/SERVICE_REGISTRY.yaml`
 - Media domain runbook: `docs/runbooks/domains/media.md`
 - Shop media pressure audit: `docs/reference/audits/SHOP_MEDIA_PRESSURE_CLOSURE_20260312.md`
+- Service data lifecycle registry: `ops/bindings/service.data.lifecycle.registry.yaml`
 
 ---
 
@@ -640,5 +641,11 @@ ssh pve "find /md1400/archive/media-quarantine -type f -printf '%TY-%Tm-%Td %p\n
 - Downloads staging-only restored (2.3T → 105G)
 - Phase 2 ready: drive replacement prerequisites met
 - Updated current state sections to reflect Phase 1 completion
+
+**Version 1.1.1** (2026-03-19):
+- Registry alignment: `service.data.lifecycle.registry.yaml` reclassified
+  `nas:/volume1/media-staging` from `drift_rules.retired_roots` to
+  `allowed_secondary_root`, resolving a conflict where the registry was the
+  sole document treating this active path as retired.
 
 **Next Review**: After Phase 2 completion (drive replacement)
