@@ -114,6 +114,27 @@ assert_contains "$t5_out" "session-start [--mode fast|full]" "help prints usage"
 assert_contains "$t5_out" "startup blocks dirty checkouts and clean-but-diverged main checkouts by default." "help documents parity guard"
 
 echo ""
+echo "── T6: coordinator env activation does not leak governed main override ──"
+git -C "$WORK" switch main >/dev/null
+git -C "$WORK" reset --hard origin/main >/dev/null
+set +e
+t6_out="$(cd "$WORK" && "$SESSION_START" coordinator 2>&1)"
+t6_status=$?
+set -e
+assert_eq "$t6_status" "0" "coordinator startup succeeds on clean main"
+env_file="$(printf '%s\n' "$t6_out" | sed -n 's/^  source \(.*env\.sh\)$/\1/p' | tail -1)"
+if [[ -n "$env_file" && -f "$env_file" ]]; then
+  pass "coordinator env file emitted"
+else
+  fail "coordinator env file emitted"
+fi
+if grep -Fq 'OPS_GOVERNED_MAIN_OVERRIDE' "$env_file"; then
+  fail "coordinator env file does not export governed main override"
+else
+  pass "coordinator env file does not export governed main override"
+fi
+
+echo ""
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"
 exit "$FAIL"
