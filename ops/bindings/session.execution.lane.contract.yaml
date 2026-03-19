@@ -1,0 +1,148 @@
+---
+version: "1.0"
+status: authoritative
+owner: "@ronny"
+last_updated: "2026-03-19"
+scope: execution-lane-bootstrap-contract
+authority_state: authoritative
+
+# Execution Lane Contract
+# Defines lane types, metadata requirements, closeout states, and scanner policy
+
+lane_types:
+  discovery:
+    description: "Read-only exploration, research, analysis"
+    allowed_mutations: []
+    allowed_writes:
+      - "*.md"
+      - ".evidence/**"
+      - "docs/**/*.md"
+    verify_required: false
+    verify_must_pass: false
+    closeout_options:
+      - abandoned
+      - findings-documented
+    default_closeout: findings-documented
+
+  fix:
+    description: "Bounded bug fix or gap closure"
+    allowed_mutations:
+      - code
+      - config
+      - bindings
+    verify_required: true
+    verify_must_pass: false
+    closeout_options:
+      - landed
+      - deferred
+      - blocked
+    default_closeout: landed
+
+  landing:
+    description: "Land approved changes from side branch to main"
+    allowed_mutations:
+      - merge-only
+    verify_required: true
+    verify_must_pass: true
+    closeout_options:
+      - landed
+    default_closeout: landed
+
+  review:
+    description: "Review existing code or proposed changes"
+    allowed_mutations: []
+    allowed_writes:
+      - "*.md"
+      - ".evidence/**"
+    verify_required: false
+    verify_must_pass: false
+    closeout_options:
+      - review-complete
+      - changes-requested
+    default_closeout: review-complete
+
+  hotfix:
+    description: "Emergency fix directly to main"
+    allowed_mutations:
+      - code
+      - config
+    requires_incident_ref: true
+    verify_required: false
+    verify_must_pass: false
+    closeout_options:
+      - landed
+    default_closeout: landed
+
+metadata_schema:
+  required_fields:
+    - lane_id
+    - type
+    - created_at
+    - created_by
+    - branch
+    - worktree_path
+    - origin_commit
+    - status
+  optional_fields:
+    - parent_loop
+    - domain
+    - incident_ref
+    - intended_closeout
+    - write_scope
+    - rollback_plan
+    - closed_at
+    - closed_by
+    - closeout_reason
+    - landing_commit
+
+allowed_statuses:
+  - active
+  - landed
+  - deferred
+  - abandoned
+  - blocked
+
+stale_detection:
+  active_threshold_days: 14
+  warn_after_days: 7
+  check_frequency: daily
+  scanner_policy: warn_only
+
+worktree_conventions:
+  root: "/Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine"
+  naming_pattern: "{lane_type}-{branch_basename}"
+  cleanup_after_closeout: manual
+
+branch_conventions:
+  prefix: "codex/"
+  naming_pattern: "codex/{lane_type}-{description}"
+  tracking_remote: origin
+  base_branch: main
+
+state_storage:
+  root: "/Users/ronnyworks/code/.runtime/spine/state/execution-lanes"
+  format: yaml
+  per_lane_file: true
+  audit_log: "/Users/ronnyworks/code/.runtime/spine/state/execution-lanes/audit.log"
+
+closeout_requirements:
+  discovery:
+    evidence_required: true
+    verify_required: false
+    reason_required: false
+  fix:
+    evidence_required: true
+    verify_required: true
+    reason_required: true
+  landing:
+    evidence_required: true
+    verify_required: true
+    reason_required: false
+  review:
+    evidence_required: true
+    verify_required: false
+    reason_required: true
+  hotfix:
+    evidence_required: true
+    verify_required: false
+    reason_required: true

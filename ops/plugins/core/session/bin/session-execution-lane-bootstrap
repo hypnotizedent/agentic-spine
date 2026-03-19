@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# session-execution-lane-bootstrap — Create governed execution lane with metadata
+#
+# Usage:
+#   session-execution-lane-bootstrap --type <type> --branch <name> [options]
+#
+# Required:
+#   --type <discovery|fix|landing|review|hotfix>
+#   --branch <branch-name>
+#
+# Optional:
+#   --parent-loop <LOOP-ID>
+#   --domain <domain>
+#   --incident-ref <ref>        # Required for hotfix
+#   --json                      # Machine-readable output
+#
+# Returns:
+#   0 if lane created successfully
+#   1 if validation fails or creation blocked
+#   2 if invalid arguments
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+CONTRACT_FILE="$ROOT/ops/bindings/session.execution.lane.contract.yaml"
+STATE_ROOT="$SPINE_STATE/execution-lanes"
+WORKTREE_ROOT="/Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine"
+
+# Args
+LANE_TYPE=""
+BRANCH_NAME=""
+PARENT_LOOP=""
+DOMAIN=""
+INCIDENT_REF=""
+JSON_OUTPUT=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --type)
+      LANE_TYPE="${2:-}"
+      shift 2
+      ;;
+    --branch)
+      BRANCH_NAME="${2:-}"
+      shift 2
+      ;;
+    --parent-loop)
+      PARENT_LOOP="${2:-}"
+      shift 2
+      ;;
+    --domain)
+      DOMAIN="${2:-}"
+      shift 2
+      ;;
+    --incident-ref)
+      INCIDENT_REF="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_OUTPUT=true
+      shift
+      ;;
+    *)
+      echo "ERROR: Unknown argument: $1" >&2
+      echo "Usage: session-execution-lane-bootstrap --type <type> --branch <name> [options]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# Validation
+if [[ -z "$LANE_TYPE" ]]; then
+  echo "ERROR: --type required" >&2
+  exit 2
+fi
+
+if [[ -z "$BRANCH_NAME" ]]; then
+  echo "ERROR: --branch required" >&2
+  exit 2
+fi
+
+# Validate lane type
+case "$LANE_TYPE" in
+  discovery|fix|landing|review|hotfix) ;;
+  *)
+    echo "ERROR: Invalid lane type '$LANE_TYPE'" >&2
+    echo "Must be: discovery | fix | landing | review | hotfix" >&2
+    exit 1
+    ;;
+esac
+
+# Hotfix requires incident ref
+if [[ "$LANE_TYPE" == "hotfix" ]] && [[ -z "$INCIDENT_REF" ]]; then
+  echo "ERROR: Hotfix lane requires --incident-ref" >&2
+  exit 1
+fi
+
+# Preflight Check 1: Can we reach origin?
+if ! git fetch origin >/dev/null 2>&1; then
+  echo "ERROR: Cannot reach origin remote" >&2
+  exit 1
+fi
+
+# Preflight Check 2: Does branch already exist on origin?
+if git rev-parse --verify "origin/$BRANCH_NAME" >/dev/null 2>&1; then
+  echo "ERROR: Branch '$BRANCH_NAME' already exists on origin" >&2
+  echo "Use a different branch name or delete the remote branch first" >&2
+  exit 1
+fi
+
+# Preflight Check 3: Does branch exist locally?
+if git rev-parse --verify "$BRANCH_NAME" >/dev/null 2>&1; then
+  echo "WARNING: Branch '$BRANCH_NAME' exists locally" >&2
+  echo "Creating worktree from origin/main anyway (local branch ignored)" >&2
+fi
+
+# Generate lane ID
+LANE_ID="LANE-$(date +%Y%m%d-%H%M%S)-${LANE_TYPE}-$(head -c 3 /dev/urandom | xxd -p | head -c 6)"
+
+# Determine worktree path
+BRANCH_BASENAME=$(basename "$BRANCH_NAME")
+WORKTREE_NAME="${LANE_TYPE}-${BRANCH_BASENAME}"
+WORKTREE_PATH="${WORKTREE_ROOT}/${WORKTREE_NAME}"
+
+# Check if worktree path already exists
+if [[ -d "$WORKTREE_PATH" ]]; then
+  echo "ERROR: Worktree path already exists: $WORKTREE_PATH" >&2
+  echo "Remove it first or use a different branch name" >&2
+  exit 1
+fi
+
+# Create worktree from current origin/main
+mkdir -p "$WORKTREE_ROOT"
+git worktree add "$WORKTREE_PATH" -b "$BRANCH_NAME" origin/main >/dev/null 2>&1
+
+# Capture origin commit for provenance
+ORIGIN_COMMIT=$(git rev-parse origin/main)
+
+# Get default closeout from contract
+DEFAULT_CLOSEOUT=$(yq e ".lane_types.${LANE_TYPE}.default_closeout" "$CONTRACT_FILE" 2>/dev/null || echo "landed")
+
+# Create state directory
+mkdir -p "$STATE_ROOT"
+
+# Write lane state file
+LANE_STATE_FILE="$STATE_ROOT/${LANE_ID}.yaml"
+cat > "$LANE_STATE_FILE" <<YAML
+lane_id: "$LANE_ID"
+type: "$LANE_TYPE"
+created_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+created_by: "session.execution.lane.bootstrap"
+branch: "$BRANCH_NAME"
+worktree_path: "$WORKTREE_PATH"
+origin_commit: "$ORIGIN_COMMIT"
+status: active
+parent_loop: "${PARENT_LOOP:-}"
+domain: "${DOMAIN:-}"
+incident_ref: "${INCIDENT_REF:-}"
+intended_closeout: "$DEFAULT_CLOSEOUT"
+YAML
+
+# Write lane metadata in worktree (for local reference)
+cat > "$WORKTREE_PATH/.lane-metadata.yaml" <<YAML
+lane_id: "$LANE_ID"
+type: "$LANE_TYPE"
+created_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+created_by: "session.execution.lane.bootstrap"
+branch: "$BRANCH_NAME"
+worktree_path: "$WORKTREE_PATH"
+origin_commit: "$ORIGIN_COMMIT"
+status: active
+parent_loop: "${PARENT_LOOP:-}"
+domain: "${DOMAIN:-}"
+incident_ref: "${INCIDENT_REF:-}"
+intended_closeout: "$DEFAULT_CLOSEOUT"
+YAML
+
+# Mark metadata as non-committable (worktree-safe: use .gitignore)
+if [[ ! -f "$WORKTREE_PATH/.gitignore" ]] || ! grep -q "^\.lane-metadata\.yaml$" "$WORKTREE_PATH/.gitignore" 2>/dev/null; then
+  echo ".lane-metadata.yaml" >> "$WORKTREE_PATH/.gitignore"
+fi
+
+# Create closeout checklist
+cat > "$WORKTREE_PATH/.lane-closeout.md" <<MD
+# Lane Closeout Checklist
+
+**Lane ID**: $LANE_ID
+**Type**: $LANE_TYPE
+**Branch**: $BRANCH_NAME
+**Created**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+## Required Before Closeout
+
+- [ ] Work complete
+- [ ] Changes committed
+- [ ] Branch pushed to origin
+$(if [[ "$LANE_TYPE" == "fix" || "$LANE_TYPE" == "landing" ]]; then echo "- [ ] Verify passed"; fi)
+$(if [[ "$LANE_TYPE" == "landing" ]]; then echo "- [ ] Branch merged to main"; fi)
+
+## Closeout Command
+
+When ready to close this lane, run:
+
+\`\`\`bash
+./bin/ops cap run session.execution.lane.closeout \\
+  --lane-id $LANE_ID \\
+  --status <status>
+\`\`\`
+
+**Allowed statuses for $LANE_TYPE**: $(yq e ".lane_types.${LANE_TYPE}.closeout_options | join(\", \")" "$CONTRACT_FILE" 2>/dev/null || echo "unknown")
+
+## Rollback
+
+If you need to abandon this lane:
+
+\`\`\`bash
+./bin/ops cap run session.execution.lane.closeout --lane-id $LANE_ID --status abandoned
+# Then remove worktree:
+git worktree remove "$WORKTREE_PATH"
+git branch -d "$BRANCH_NAME"
+\`\`\`
+MD
+
+# Mark checklist as non-committable (worktree-safe: use .gitignore)
+if ! grep -q "^\.lane-closeout\.md$" "$WORKTREE_PATH/.gitignore" 2>/dev/null; then
+  echo ".lane-closeout.md" >> "$WORKTREE_PATH/.gitignore"
+fi
+
+# Log to audit trail
+AUDIT_LOG="$STATE_ROOT/audit.log"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|bootstrap|$LANE_ID|$LANE_TYPE|$BRANCH_NAME|$WORKTREE_PATH" >> "$AUDIT_LOG"
+
+# Output
+if [[ "$JSON_OUTPUT" == "true" ]]; then
+  jq -n \
+    --arg lane_id "$LANE_ID" \
+    --arg type "$LANE_TYPE" \
+    --arg branch "$BRANCH_NAME" \
+    --arg worktree "$WORKTREE_PATH" \
+    --arg origin_commit "$ORIGIN_COMMIT" \
+    --arg state_file "$LANE_STATE_FILE" \
+    '{
+      lane_id: $lane_id,
+      type: $type,
+      branch: $branch,
+      worktree_path: $worktree,
+      origin_commit: $origin_commit,
+      state_file: $state_file,
+      status: "active"
+    }'
+else
+  echo "════════════════════════════════════════════════════════════"
+  echo "EXECUTION LANE CREATED"
+  echo "════════════════════════════════════════════════════════════"
+  echo "Lane ID:    $LANE_ID"
+  echo "Type:       $LANE_TYPE"
+  echo "Branch:     $BRANCH_NAME"
+  echo "Worktree:   $WORKTREE_PATH"
+  echo "Based on:   origin/main @ $ORIGIN_COMMIT"
+  echo "State:      $LANE_STATE_FILE"
+  echo ""
+  echo "Next steps:"
+  echo "  1. cd $WORKTREE_PATH"
+  echo "  2. Do your work (read/edit files, run commands)"
+  if [[ "$LANE_TYPE" == "fix" || "$LANE_TYPE" == "landing" ]]; then
+    echo "  3. Run: ./bin/ops cap run verify.pack.run ${DOMAIN:-core}"
+  fi
+  echo "  4. Commit changes: git commit -m '...'"
+  echo "  5. Push branch: git push origin $BRANCH_NAME"
+  echo "  6. Close lane: ./bin/ops cap run session.execution.lane.closeout --lane-id $LANE_ID --status <status>"
+  echo ""
+  echo "Closeout checklist: $WORKTREE_PATH/.lane-closeout.md"
+  echo "════════════════════════════════════════════════════════════"
+fi
+
+exit 0
