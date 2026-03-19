@@ -421,10 +421,10 @@ frequency: Monthly
 **Deliverables**:
 - ✅ This contract (MEDIA_STORAGE_CONTRACT.md)
 - ✅ Migration runbook (MEDIA_STORAGE_MIGRATION_PLAN.md)
-- [ ] Add media-home VM 106 to vm.lifecycle.yaml
-- [ ] Add media-home to backup.inventory.yaml
-- [ ] Create media.quarantine.review capability
-- [ ] Create media.downloads.bloat.status capability
+- [x] Add media-home VM 106 to vm.lifecycle.yaml
+- [x] Add media-home to backup.inventory.yaml
+- [x] Create media.quarantine.review capability
+- [x] Create media.downloads.bloat.status capability
 - [ ] Update DREAM_SYSTEM_EXECUTION_BOARD.yaml with media backlog items
 
 **No data moves in this phase** — documentation only.

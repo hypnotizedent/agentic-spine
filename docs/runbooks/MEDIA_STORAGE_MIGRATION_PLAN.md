@@ -53,10 +53,10 @@ This runbook provides step-by-step procedures for safely migrating the media sto
 **Deliverables**:
 - [x] Media storage contract created
 - [x] Migration plan created
-- [ ] Add media-home VM 106 to vm.lifecycle.yaml
-- [ ] Add media-home VM 106 to backup.inventory.yaml
-- [ ] Create media.quarantine.review capability
-- [ ] Create media.downloads.bloat.status capability
+- [x] Add media-home VM 106 to vm.lifecycle.yaml
+- [x] Add media-home VM 106 to backup.inventory.yaml
+- [x] Create media.quarantine.review capability
+- [x] Create media.downloads.bloat.status capability
 - [ ] Update DREAM_SYSTEM_EXECUTION_BOARD.yaml
 
 **Duration**: 1 session (2026-03-19)

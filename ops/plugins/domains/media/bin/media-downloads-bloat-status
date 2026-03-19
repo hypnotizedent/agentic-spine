@@ -77,10 +77,36 @@ echo "# Target: streaming-stack (NFS client, authoritative view)"
 echo "# Downloads path: /mnt/media/downloads"
 echo ""
 
-# Check if downloads path exists
+# Check if downloads path exists. Missing path is a useful live-drift finding, not a script error.
 if ! ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" "test -d /mnt/media/downloads" 2>/dev/null; then
-  echo "ERROR: /mnt/media/downloads not found on streaming-stack" >&2
-  exit 1
+  echo "## Status: PATH_MISSING"
+  echo ""
+  echo "Expected downloads path /mnt/media/downloads is not present on streaming-stack."
+  echo "This indicates live runtime drift or a missing NFS mount."
+  echo ""
+  echo "## Next Actions"
+  echo "1. Run: ./bin/ops cap run media.nfs.verify"
+  echo "2. Verify streaming-stack mount contract for /mnt/media"
+  echo "3. Check whether downloads are currently mounted only on download-stack"
+  echo "4. Do not delete or move anything until mount truth is reconciled"
+  echo ""
+  echo "# Audit complete (read-only, live drift detected)"
+
+  if [[ "$OUTPUT_JSON" == "true" ]]; then
+    cat <<JSON
+{
+  "generated_at": "$GENERATED_AT",
+  "target": "streaming-stack",
+  "downloads_path": "/mnt/media/downloads",
+  "status": "path_missing",
+  "exists": false,
+  "live_drift": true,
+  "mutations": "none"
+}
+JSON
+  fi
+
+  exit 0
 fi
 
 # Get total size
