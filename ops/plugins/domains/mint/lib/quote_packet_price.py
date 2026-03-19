@@ -7,6 +7,7 @@ import argparse
 import copy
 import json
 import os
+from hashlib import sha256
 import subprocess
 import sys
 import uuid
@@ -48,6 +49,11 @@ PRICE_BLOCKING_GAP_TYPES = {
     "proof_routing_blocked",
 }
 CONFIDENCE_ORDER = {"none": 0, "low": 1, "medium": 2, "high": 3}
+PRICING_AUTHORITY_VERSION = "pricing-authority-v1"
+
+
+def sha16(value: str) -> str:
+    return sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -271,8 +277,13 @@ def customer_ref_string(packet: dict[str, Any]) -> str | None:
     return None
 
 
-def pricing_request_payload(packet: dict[str, Any], line_item: dict[str, Any], timestamp: str) -> dict[str, Any]:
-    method = str(line_item["decoration_method"])
+def pricing_request_payload(
+    packet: dict[str, Any],
+    line_item: dict[str, Any],
+    timestamp: str,
+    method_override: str | None = None,
+) -> dict[str, Any]:
+    method = str(method_override or line_item["decoration_method"])
     payload: dict[str, Any] = {
         "correlation_id": f"{packet['quote_packet_id']}:{line_item['line_item_id']}",
         "request_timestamp_utc": timestamp,
@@ -280,12 +291,12 @@ def pricing_request_payload(packet: dict[str, Any], line_item: dict[str, Any], t
         "revision": str(packet.get("updated_at") or packet.get("created_at") or packet["quote_packet_id"]),
         "item_type": method,
         "qty": int(line_item["quantity"]),
-        "colors": int(line_item["color_count"]),
+        "colors": int(line_item.get("color_count") or 0),
         "stitch_count": int(line_item.get("stitch_count") or 0),
-        "locations": copy.deepcopy(line_item["print_locations"]),
+        "locations": copy.deepcopy(line_item.get("print_locations") or []),
         "blanks_cost": round(float(line_item["blanks_cost_cents"]) / 100, 2),
         "supplier_source": str(line_item["supplier_source"]),
-        "lead_time": int(line_item["lead_time_days"]),
+        "lead_time": int(line_item.get("lead_time_days") or 0),
     }
     customer_ref = customer_ref_string(packet)
     if customer_ref:
@@ -296,21 +307,29 @@ def pricing_request_payload(packet: dict[str, Any], line_item: dict[str, Any], t
         payload["artwork_fingerprint_sha256"] = line_item["artwork_fingerprint_sha256"]
 
     if method in METHODS_REQUIRING_GRAPHIC_SIZE:
-        payload["graphic_size_inches"] = copy.deepcopy(line_item["graphic_size_inches"])
+        if line_item.get("graphic_size_inches"):
+            payload["graphic_size_inches"] = copy.deepcopy(line_item["graphic_size_inches"])
         metric = inches_to_metric(line_item.get("graphic_size_inches"))
         if metric:
             payload["graphic_size_metric"] = metric
-        payload["size_tier_label"] = line_item["size_tier_label"]
-        payload["setup_mode"] = line_item["setup_mode"]
+        if line_item.get("size_tier_label") is not None:
+            payload["size_tier_label"] = line_item["size_tier_label"]
+        if line_item.get("setup_mode") is not None:
+            payload["setup_mode"] = line_item["setup_mode"]
 
     if method == "screen_print":
-        payload["method_variant"] = line_item["method_variant"]
-        payload["underbase_needed"] = bool(line_item["underbase_needed"])
+        if line_item.get("method_variant") is not None:
+            payload["method_variant"] = line_item["method_variant"]
+        if line_item.get("underbase_needed") is not None:
+            payload["underbase_needed"] = bool(line_item["underbase_needed"])
     elif method == "embroidery":
-        payload["stitch_count"] = int(line_item["stitch_count"])
-        payload["puff_mode"] = line_item["puff_mode"]
-        payload["thread_type"] = line_item["thread_type"]
-        payload["hoop_class"] = line_item["hoop_class"]
+        payload["stitch_count"] = int(line_item.get("stitch_count") or 0)
+        if line_item.get("puff_mode") is not None:
+            payload["puff_mode"] = line_item["puff_mode"]
+        if line_item.get("thread_type") is not None:
+            payload["thread_type"] = line_item["thread_type"]
+        if line_item.get("hoop_class") is not None:
+            payload["hoop_class"] = line_item["hoop_class"]
         if line_item.get("garment_material"):
             payload["garment_material"] = line_item["garment_material"]
         if line_item.get("curved_panel_cap") is not None:
@@ -318,18 +337,194 @@ def pricing_request_payload(packet: dict[str, Any], line_item: dict[str, Any], t
         if line_item.get("graphic_size_inches"):
             payload["graphic_size_inches"] = copy.deepcopy(line_item["graphic_size_inches"])
     elif method == "engraving":
-        payload["material_class"] = line_item["material_class"]
-        engraving_size_tier = size_tier_to_method_tier(str(line_item["size_tier_label"]), method)
+        if line_item.get("material_class") is not None:
+            payload["material_class"] = line_item["material_class"]
+        engraving_size_tier = size_tier_to_method_tier(str(line_item.get("size_tier_label") or ""), method)
         if engraving_size_tier:
             payload["engraving_size_tier"] = engraving_size_tier
     elif method == "transfers":
-        payload["transfer_type"] = line_item["transfer_type"]
-        payload["garment_family"] = line_item["garment_family"]
-        transfer_size_tier = size_tier_to_method_tier(str(line_item["size_tier_label"]), method)
+        if line_item.get("transfer_type") is not None:
+            payload["transfer_type"] = line_item["transfer_type"]
+        if line_item.get("garment_family") is not None:
+            payload["garment_family"] = line_item["garment_family"]
+        transfer_size_tier = size_tier_to_method_tier(str(line_item.get("size_tier_label") or ""), method)
         if transfer_size_tier:
             payload["transfer_size_tier"] = transfer_size_tier
 
     return payload
+
+
+def component_pricing_payload(
+    packet: dict[str, Any],
+    line_item: dict[str, Any],
+    component: dict[str, Any],
+    component_index: int,
+    timestamp: str,
+) -> dict[str, Any]:
+    method = str(component.get("decoration_method") or "")
+    payload = pricing_request_payload(packet, line_item, timestamp, method_override=method)
+    payload["correlation_id"] = f"{packet['quote_packet_id']}:{line_item['line_item_id']}:{component_index}"
+    payload["item_type"] = method
+    payload["locations"] = copy.deepcopy(component.get("print_locations") or line_item.get("print_locations") or [])
+    payload["lead_time"] = int(component.get("lead_time_days") or line_item.get("lead_time_days") or payload["lead_time"])
+    payload["blanks_cost"] = round(float(line_item["blanks_cost_cents"]) / 100, 2)
+    if component.get("artwork_fingerprint_sha256"):
+        payload["artwork_fingerprint_sha256"] = component["artwork_fingerprint_sha256"]
+    if component.get("graphic_size_inches"):
+        payload["graphic_size_inches"] = copy.deepcopy(component["graphic_size_inches"])
+        metric = inches_to_metric(component.get("graphic_size_inches"))
+        if metric:
+            payload["graphic_size_metric"] = metric
+    if component.get("size_tier_label"):
+        payload["size_tier_label"] = component["size_tier_label"]
+    if component.get("setup_mode"):
+        payload["setup_mode"] = component["setup_mode"]
+    if method == "screen_print":
+        payload["method_variant"] = component.get("method_variant") or line_item.get("method_variant") or "standard"
+        payload["underbase_needed"] = bool(component.get("underbase_needed") if component.get("underbase_needed") is not None else line_item.get("underbase_needed"))
+        payload["colors"] = int(component.get("color_count") or line_item.get("color_count") or payload["colors"])
+        payload["color_count"] = payload["colors"]
+    elif method == "embroidery":
+        payload["stitch_count"] = int(component.get("stitch_count") or line_item.get("stitch_count") or 0)
+        payload["puff_mode"] = component.get("puff_mode") or line_item.get("puff_mode") or "none"
+        payload["thread_type"] = component.get("thread_type") or line_item.get("thread_type") or "standard"
+        payload["hoop_class"] = component.get("hoop_class") or line_item.get("hoop_class") or "none"
+        if component.get("garment_material") or line_item.get("garment_material"):
+            payload["garment_material"] = component.get("garment_material") or line_item.get("garment_material")
+        if component.get("curved_panel_cap") is not None:
+            payload["curved_panel_cap"] = bool(component.get("curved_panel_cap"))
+    elif method == "engraving":
+        payload["material_class"] = component.get("material_class") or line_item.get("material_class") or "stainless_steel"
+    elif method == "transfers":
+        payload["transfer_type"] = component.get("transfer_type") or line_item.get("transfer_type") or "dtf"
+        payload["garment_family"] = component.get("garment_family") or line_item.get("garment_family") or "t-shirt"
+        payload["colors"] = int(component.get("color_count") or line_item.get("color_count") or payload["colors"])
+        payload["color_count"] = payload["colors"]
+        transfer_size_tier = size_tier_to_method_tier(str(component.get("size_tier_label") or line_item.get("size_tier_label") or ""), method)
+        if transfer_size_tier:
+            payload["transfer_size_tier"] = transfer_size_tier
+    return payload
+
+
+def response_subtotal_cents(response: dict[str, Any]) -> int:
+    subtotal_cents = 0
+    for entry in response.get("line_items") or []:
+        if not isinstance(entry, dict):
+            continue
+        subtotal_cents += round(float(entry.get("total_amount") or 0) * 100)
+    return subtotal_cents
+
+
+def confidence_rank(level: str) -> int:
+    return CONFIDENCE_ORDER.get(level if level in CONFIDENCE_ORDER else "low", 1)
+
+
+def confidence_floor_level(levels: list[str]) -> str:
+    if not levels:
+        return "none"
+    resolved = [level if level in CONFIDENCE_ORDER else "low" for level in levels]
+    return min(resolved, key=lambda level: CONFIDENCE_ORDER[level])
+
+
+def aggregate_component_response(
+    packet: dict[str, Any],
+    line_item: dict[str, Any],
+    component_results: list[dict[str, Any]],
+    timestamp: str,
+) -> dict[str, Any]:
+    blank_total_cents = int(line_item.get("blanks_cost_cents") or 0) * int(line_item.get("quantity") or 0)
+    component_subtotals = [response_subtotal_cents(entry["response"]) for entry in component_results]
+    combined_subtotal_cents = max(
+        0,
+        sum(component_subtotals) - blank_total_cents * max(0, len(component_results) - 1),
+    )
+    combined_tax_cents = round((combined_subtotal_cents * 825) / 10_000)
+    combined_total = combined_subtotal_cents + combined_tax_cents
+    confidence_level = confidence_floor_level([
+        str(((entry["response"].get("confidence") or {}).get("level")) or "low") for entry in component_results
+    ])
+    pricing_trace: list[dict[str, Any]] = []
+    component_payloads: list[dict[str, Any]] = []
+    for entry, component_subtotal in zip(component_results, component_subtotals, strict=False):
+        response = entry["response"]
+        component = entry["component"]
+        component_payloads.append({
+            "component_index": entry["component_index"],
+            "method": component.get("decoration_method"),
+            "placement": component.get("placement"),
+            "print_locations": copy.deepcopy(component.get("print_locations") or []),
+            "total_amount": response.get("receipt", {}).get("total_amount"),
+            "subtotal_before_tax": money_from_cents(component_subtotal),
+            "pricing_trace": copy.deepcopy(response.get("pricing_trace") or []),
+            "customer_explanation": copy.deepcopy(response.get("customer_explanation") or {}),
+        })
+        pricing_trace.extend(copy.deepcopy(response.get("pricing_trace") or []))
+
+    estimate_id = "mix_" + sha16(f"{packet['quote_packet_id']}:{line_item['line_item_id']}:{timestamp}")
+    receipt = {
+        "receipt_id": f"rcpt_{sha16(f'{estimate_id}:{combined_total}')}",
+        "receipt_generated_at_utc": timestamp,
+        "normalized_input_fingerprint": sha16(json.dumps({
+            "quote_packet_id": packet["quote_packet_id"],
+            "line_item_id": line_item["line_item_id"],
+            "components": component_payloads,
+            "blank_total_cents": blank_total_cents,
+        }, sort_keys=True)),
+        "output_fingerprint": sha16(json.dumps({
+            "combined_subtotal_cents": combined_subtotal_cents,
+            "combined_tax_cents": combined_tax_cents,
+            "component_count": len(component_results),
+        }, sort_keys=True)),
+        "total_amount": combined_total,
+        "version_snapshot": copy.deepcopy(component_results[0]["response"].get("receipt", {}).get("version_snapshot") or {}),
+    }
+    explanation = {
+        "size_tier_label": line_item.get("size_tier_label") or "mixed",
+        "size_bounds_inches": None,
+        "method_variant": None,
+        "underbase_needed": None,
+        "setup_mode": line_item.get("setup_mode") or "new_setup",
+        "rationale": [
+            f"component[{entry['component_index']}]={entry['component'].get('decoration_method')}:{', '.join(entry['component'].get('print_locations') or []) or 'placement'}"
+            for entry in component_results
+        ],
+        "method_details": {
+            "shared_blank_total_cents": blank_total_cents,
+            "components": [
+                {
+                    "component_index": payload["component_index"],
+                    "method": payload["method"],
+                    "placement": payload["placement"],
+                    "print_locations": payload["print_locations"],
+                    "subtotal_before_tax": payload["subtotal_before_tax"],
+                    "pricing_trace": payload["pricing_trace"],
+                }
+                for payload in component_payloads
+            ],
+        },
+    }
+    return {
+        "estimate_id": estimate_id,
+        "requested_at_utc": timestamp,
+        "pricing_source": "mixed_bundle",
+        "pricing_authority_path": "job_estimator",
+        "pricing_authority_version": PRICING_AUTHORITY_VERSION,
+        "confidence": {"level": confidence_level},
+        "receipt": receipt,
+        "line_items": [
+            {
+                "code": "mixed_bundle",
+                "description": f"Mixed-method bundle for {line_item.get('description') or line_item.get('product_type')}",
+                "unit_amount": money_from_cents(round(combined_total / max(1, int(line_item.get("quantity") or 1)))),
+                "quantity": int(line_item.get("quantity") or 0),
+                "total_amount": money_from_cents(combined_total),
+                "source": "mixed_bundle",
+            }
+        ],
+        "pricing_trace": pricing_trace,
+        "customer_explanation": explanation,
+        "component_responses": component_payloads,
+    }
 
 
 def post_pricing_request(base_url: str, api_key: str, payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
@@ -401,6 +596,7 @@ def snapshot_from_successes(
                 "line_items": copy.deepcopy(response.get("line_items") or []),
                 "pricing_trace": copy.deepcopy(response.get("pricing_trace") or []),
                 "customer_explanation": copy.deepcopy(response.get("customer_explanation") or {}),
+                "component_responses": copy.deepcopy(response.get("component_responses") or []),
             }
         )
         pricing_receipt_refs.append(
@@ -563,6 +759,21 @@ def main(argv: list[str]) -> int:
             base_url = canonical_pricing_base_url(spine_root)
             try:
                 for item in line_items:
+                    components = [component for component in (item.get("decoration_components") or []) if isinstance(component, dict)]
+                    if components:
+                        component_results: list[dict[str, Any]] = []
+                        for component_index, component in enumerate(components):
+                            payload = component_pricing_payload(packet, item, component, component_index, timestamp)
+                            response = post_pricing_request(base_url, api_key, payload, args.timeout_seconds)
+                            component_results.append({
+                                "component_index": component_index,
+                                "component": component,
+                                "response": response,
+                            })
+                        aggregate_response = aggregate_component_response(packet, item, component_results, timestamp)
+                        responses.append({"line_item_id": item["line_item_id"], "response": aggregate_response})
+                        continue
+
                     payload = pricing_request_payload(packet, item, timestamp)
                     response = post_pricing_request(base_url, api_key, payload, args.timeout_seconds)
                     responses.append({"line_item_id": item["line_item_id"], "response": response})

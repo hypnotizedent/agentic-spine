@@ -119,14 +119,33 @@ def line_entries(packet: dict[str, Any]) -> list[dict[str, Any]]:
         }
 
         decoration_parts: list[str] = []
-        if item.get("decoration_method"):
-            decoration_parts.append(humanize_token(str(item["decoration_method"])).title())
-        print_locations = item.get("print_locations") or ([] if not item.get("placement") else [item["placement"]])
-        if print_locations:
-            decoration_parts.append(", ".join(str(location) for location in print_locations))
-        if item.get("color_count") is not None:
-            color_count = int(item["color_count"])
-            decoration_parts.append(f"{color_count} color" if color_count == 1 else f"{color_count} colors")
+        components = item.get("decoration_components")
+        if isinstance(components, list) and components:
+            for component in components:
+                if not isinstance(component, dict):
+                    continue
+                component_parts: list[str] = []
+                if component.get("decoration_method"):
+                    component_parts.append(humanize_token(str(component["decoration_method"])).title())
+                print_locations = component.get("print_locations") or ([] if not component.get("placement") else [component["placement"]])
+                if print_locations:
+                    component_parts.append(", ".join(str(location) for location in print_locations))
+                if component.get("color_count") is not None:
+                    color_count = int(component["color_count"])
+                    component_parts.append(f"{color_count} color" if color_count == 1 else f"{color_count} colors")
+                if component.get("size_tier_label"):
+                    component_parts.append(str(component["size_tier_label"]))
+                if component_parts:
+                    decoration_parts.append(" ".join(component_parts))
+        else:
+            if item.get("decoration_method"):
+                decoration_parts.append(humanize_token(str(item["decoration_method"])).title())
+            print_locations = item.get("print_locations") or ([] if not item.get("placement") else [item["placement"]])
+            if print_locations:
+                decoration_parts.append(", ".join(str(location) for location in print_locations))
+            if item.get("color_count") is not None:
+                color_count = int(item["color_count"])
+                decoration_parts.append(f"{color_count} color" if color_count == 1 else f"{color_count} colors")
         if decoration_parts:
             entry["decoration_summary"] = " | ".join(decoration_parts)
 
@@ -161,6 +180,10 @@ def warning_notes(packet: dict[str, Any]) -> list[str]:
 def review_ready(packet: dict[str, Any]) -> tuple[bool, list[str]]:
     reasons: list[str] = []
     state = str(packet.get("state") or "")
+    componentized = any(
+        isinstance(item, dict) and isinstance(item.get("decoration_components"), list) and bool(item.get("decoration_components"))
+        for item in packet.get("line_items") or []
+    )
     if state in TERMINAL_STATES:
         reasons.append(f"packet is already in terminal state {state}")
 
@@ -183,7 +206,7 @@ def review_ready(packet: dict[str, Any]) -> tuple[bool, list[str]]:
         if pricing_state in BLOCKED_PRICING_STATES:
             reasons.append(f"pricing is not complete ({pricing_state})")
         confidence = str(pricing_snapshot.get("confidence_level") or "none")
-        if confidence not in {"medium", "high"}:
+        if confidence not in {"medium", "high"} and not componentized:
             reasons.append(f"pricing confidence must be medium or high (found {confidence})")
 
     return (not reasons), reasons

@@ -24,6 +24,7 @@ CANONICAL_LINE_FIELDS = {
     "size_breakdown",
     "description",
     "operator_notes",
+    "decoration_components",
     "decoration_method",
     "color_count",
     "print_locations",
@@ -98,46 +99,100 @@ def has_canonical_value(value: Any) -> bool:
 
 def pricing_missing_fields(item: dict[str, Any]) -> list[str]:
     missing: list[str] = []
+    components = item.get("decoration_components")
+    componentized = has_canonical_value(components)
+
     for field in PRICING_REQUIRED_FIELDS:
+        if componentized and field in {"decoration_method", "color_count", "lead_time_days"}:
+            continue
         if not has_canonical_value(item.get(field)):
             missing.append(field)
 
-    method = item.get("decoration_method")
-    if not has_canonical_value(method):
-        return missing
+    if componentized:
+        if not isinstance(components, list) or not components:
+            missing.append("decoration_components")
+        else:
+            for index, raw_component in enumerate(components):
+                prefix = f"decoration_components[{index}]"
+                if not isinstance(raw_component, dict):
+                    missing.append(prefix)
+                    continue
 
-    if method == "screen_print":
-        for field in ("method_variant", "underbase_needed", "graphic_size_inches", "size_tier_label", "setup_mode"):
-            if not has_canonical_value(item.get(field)):
-                missing.append(field)
-    elif method == "embroidery":
-        for field in ("stitch_count", "puff_mode", "thread_type", "hoop_class"):
-            if not has_canonical_value(item.get(field)):
-                missing.append(field)
-        if item.get("puff_mode") == "puff" and not has_canonical_value(item.get("garment_material")):
-            missing.append("garment_material")
-        if item.get("hoop_class") == "cap_hoop" and item.get("curved_panel_cap") is not True:
-            missing.append("curved_panel_cap")
-        if item.get("hoop_class") in EMBROIDERY_GRAPHIC_SIZE_HOOPS and not has_canonical_value(item.get("graphic_size_inches")):
-            missing.append("graphic_size_inches")
-    elif method == "engraving":
-        for field in ("graphic_size_inches", "size_tier_label", "setup_mode", "material_class"):
-            if not has_canonical_value(item.get(field)):
-                missing.append(field)
-    elif method == "transfers":
-        for field in (
-            "graphic_size_inches",
-            "size_tier_label",
-            "setup_mode",
-            "transfer_type",
-            "artwork_fingerprint_sha256",
-            "garment_family",
-        ):
-            if not has_canonical_value(item.get(field)):
-                missing.append(field)
+                method = raw_component.get("decoration_method")
+                if not has_canonical_value(method):
+                    missing.append(f"{prefix}.decoration_method")
+                    continue
 
-    if method in {"engraving", "transfers"} and item.get("setup_mode") == "re_setup":
-        missing.append("prior_job_match")
+                if not has_canonical_value(raw_component.get("color_count")):
+                    missing.append(f"{prefix}.color_count")
+                if not has_canonical_value(raw_component.get("print_locations")):
+                    missing.append(f"{prefix}.print_locations")
+
+                if method in {"screen_print", "engraving", "transfers"}:
+                    for field in ("graphic_size_inches", "size_tier_label", "setup_mode"):
+                        if not has_canonical_value(raw_component.get(field)):
+                            missing.append(f"{prefix}.{field}")
+
+                if method == "screen_print":
+                    for field in ("method_variant", "underbase_needed"):
+                        if not has_canonical_value(raw_component.get(field)):
+                            missing.append(f"{prefix}.{field}")
+                elif method == "embroidery":
+                    for field in ("stitch_count", "puff_mode", "thread_type", "hoop_class"):
+                        if not has_canonical_value(raw_component.get(field)):
+                            missing.append(f"{prefix}.{field}")
+                    if raw_component.get("puff_mode") == "puff" and not has_canonical_value(raw_component.get("garment_material")):
+                        missing.append(f"{prefix}.garment_material")
+                    if raw_component.get("hoop_class") == "cap_hoop" and raw_component.get("curved_panel_cap") is not True:
+                        missing.append(f"{prefix}.curved_panel_cap")
+                    if raw_component.get("hoop_class") in EMBROIDERY_GRAPHIC_SIZE_HOOPS and not has_canonical_value(raw_component.get("graphic_size_inches")):
+                        missing.append(f"{prefix}.graphic_size_inches")
+                elif method == "engraving":
+                    if not has_canonical_value(raw_component.get("material_class")):
+                        missing.append(f"{prefix}.material_class")
+                elif method == "transfers":
+                    for field in ("transfer_type", "artwork_fingerprint_sha256", "garment_family"):
+                        if not has_canonical_value(raw_component.get(field)):
+                            missing.append(f"{prefix}.{field}")
+                    if raw_component.get("setup_mode") == "re_setup":
+                        missing.append(f"{prefix}.prior_job_match")
+    else:
+        method = item.get("decoration_method")
+        if not has_canonical_value(method):
+            return missing
+
+        if method == "screen_print":
+            for field in ("method_variant", "underbase_needed", "graphic_size_inches", "size_tier_label", "setup_mode"):
+                if not has_canonical_value(item.get(field)):
+                    missing.append(field)
+        elif method == "embroidery":
+            for field in ("stitch_count", "puff_mode", "thread_type", "hoop_class"):
+                if not has_canonical_value(item.get(field)):
+                    missing.append(field)
+            if item.get("puff_mode") == "puff" and not has_canonical_value(item.get("garment_material")):
+                missing.append("garment_material")
+            if item.get("hoop_class") == "cap_hoop" and item.get("curved_panel_cap") is not True:
+                missing.append("curved_panel_cap")
+            if item.get("hoop_class") in EMBROIDERY_GRAPHIC_SIZE_HOOPS and not has_canonical_value(item.get("graphic_size_inches")):
+                missing.append("graphic_size_inches")
+        elif method == "engraving":
+            for field in ("graphic_size_inches", "size_tier_label", "setup_mode", "material_class"):
+                if not has_canonical_value(item.get(field)):
+                    missing.append(field)
+        elif method == "transfers":
+            for field in (
+                "graphic_size_inches",
+                "size_tier_label",
+                "setup_mode",
+                "transfer_type",
+                "artwork_fingerprint_sha256",
+                "garment_family",
+            ):
+                if not has_canonical_value(item.get(field)):
+                    missing.append(field)
+
+        if method in {"engraving", "transfers"} and item.get("setup_mode") == "re_setup":
+            missing.append("prior_job_match")
 
     deduped: list[str] = []
     seen = set()
@@ -722,7 +777,7 @@ def derive_gaps_and_decisions(
                 timestamp,
             )
 
-        requires_decoration = hints.get("requires_decoration_method", True)
+        requires_decoration = hints.get("requires_decoration_method", not bool(item.get("decoration_components")))
         if requires_decoration and not item.get("decoration_method"):
             add_gap(
                 gaps,
