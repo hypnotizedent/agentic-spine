@@ -17,9 +17,9 @@ scope: dream-system-projection-first-execution-backlog
 metadata:
   total_backlog_items: 15
   completed_milestones: 3
-  in_progress_backlog_items: 1
-  not_started_backlog_items: 14
-  blocked_backlog_items: 0
+  in_progress_backlog_items: 2
+  not_started_backlog_items: 12
+  blocked_backlog_items: 1
 
 policy:
   new_item_requires_concern_family: true
@@ -176,26 +176,25 @@ backlog:
     authority_file: ops/capabilities.yaml
     projection_files:
       - ops/bindings/intake.lifecycle.contract.yaml
-    current_state: hand_maintained_16_domain_entries
+    current_state: blocked_on_domain_taxonomy_normalization
     target_state: generated_projection_with_gate
     blast_radius: 3
     priority: 3
-    status: not_started
+    status: blocked
     type: generator
     generator_exists: false
     generator_capability_name: intake.lifecycle.projection.build
     gate_exists: false
     gate_id_planned: D403
     recommended_next_action: |
-      1. Write generator cap: ops/generators/gen-intake-lifecycle.py
-      2. Generator reads capabilities.yaml, extracts unique `domain:` values
-      3. Produces intake domain entries with lifecycle defaults
-      4. Add D403 gate checking intake ↔ caps domain parity
-      5. Run generator once, commit result
-      6. Mark intake.lifecycle.contract.yaml domain section with projection marker
+      1. Normalize `ops/capabilities.yaml` into an intake-eligible domain taxonomy (or add an explicit domain alias/skip authority).
+      2. Resolve capability-only values: `none`, `home-assistant`, `network`, `infrastructure`.
+      3. Resolve intake/topology-only values missing from capabilities: `workbench`, `hygiene-weekly`, `proxmox-network`.
+      4. Once the taxonomy is authoritative, write `intake.lifecycle.projection.build` and D403 against that normalized source.
     notes: |
       Every new domain requires adding an intake entry here (Loop 1).
-      Generator eliminates 1 of 8 manual touches per domain addition.
+      Generator eliminates 1 of 8 manual touches per domain addition once the source taxonomy is clean.
+      Blocked after 2026-03-18 inspection: direct generation from current capabilities.yaml would bake undocumented normalization rules into code.
       Lower priority than topology because fewer domains added than gates.
     effort_estimate_hours: 2
     dependencies: []
@@ -269,25 +268,25 @@ backlog:
     projection_files:
       - "ops/bindings/*.snapshot.yaml (8 files)"
       - "ops/bindings/*.projected.yaml (multiple)"
-    current_state: 8_entries_with_generated_only_rest_ambiguous
+    current_state: core_concern_family_registration_in_progress
     target_state: all_projections_registered_and_marked
     blast_radius: 3
     priority: 6
-    status: not_started
+    status: in_progress
     type: migration
     generator_exists: false
     gate_exists: false
     gate_id_planned: D406
     recommended_next_action: |
-      1. Audit all ops/bindings/ files for generated/projection status
-      2. Add projection entries to domain.projection.contract.yaml for all generated files
-      3. Add `generated_only: true` flags to all projection entries
-      4. Add D406 gate checking all projections are registered
-      5. Add pre-commit check blocking staged edits of projection files unless OPS_PROJECTION_OVERRIDE=1
+      1. Keep registering generated projection families against master.inventory.registry.yaml and domain.projection.contract.yaml.
+      2. Expand D406 from core concern families to the remaining normalized projection families.
+      3. Normalize generator identity markers on the deferred surfaces (notably terminal-role and HA snapshot families).
+      4. Add staged-edit prevention only after the remaining generated surfaces are explicitly registered.
     notes: |
-      8 HA auto-generated snapshots carry # Auto-generated markers but NOT registered in projection contract.
-      Ambiguous authority risk — agents can't tell what should/shouldn't be edited.
-      D339 partially enforces this but incompletely.
+      Partial landing on 2026-03-18: service-registry, backup, and internet-asset concern families are registered through master.inventory.registry.yaml + domain.projection.contract.yaml, and D406 now enforces that completeness for this bounded family set.
+      Remaining HA auto-generated snapshots still need master-row coverage plus normalized projection metadata.
+      Terminal-role projection metadata is deferred until its generator identity is exposed as a governed machine-readable marker.
+      D339 partially enforced generated_only discipline already; D406 adds concern-family completeness on top.
     effort_estimate_hours: 3
     dependencies: []
 
