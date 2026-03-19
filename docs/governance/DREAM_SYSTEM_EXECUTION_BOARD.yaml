@@ -16,10 +16,10 @@ scope: dream-system-projection-first-execution-backlog
 
 metadata:
   total_backlog_items: 27
-  completed_milestones: 4
-  in_progress_backlog_items: 2
-  not_started_backlog_items: 18
-  blocked_backlog_items: 3
+  completed_milestones: 7
+  in_progress_backlog_items: 1
+  not_started_backlog_items: 17
+  blocked_backlog_items: 2
 
 policy:
   new_item_requires_concern_family: true
@@ -35,13 +35,15 @@ concern_families:
     authority_file: ops/bindings/gate.registry.yaml
     projection_files:
       - ops/bindings/gate.execution.topology.yaml
-    current_state: projection_pretending_to_be_canonical
+    current_state: generated_projection_with_gate
     target_state: generated_projection_with_gate
     blast_radius: 4
     backfill_frequency: high
     rollout_priority: 1
-    generator_exists: false
-    gate_exists: false
+    generator_exists: true
+    generator_capability_name: gate.topology.projection.build
+    gate_exists: true
+    gate_id_existing: D401
     estimated_effort_hours: 3
 
   capability_map_surfaces:
@@ -49,15 +51,16 @@ concern_families:
     authority_file: ops/capabilities.yaml
     projection_files:
       - ops/bindings/capability_map.yaml
-    current_state: hand_maintained_with_drift_detection
+    current_state: generated_projection_with_gate
     target_state: generated_projection_with_gate
     blast_radius: 4
     backfill_frequency: medium
     rollout_priority: 2
-    generator_exists: false
+    generator_exists: true
+    generator_capability_name: capability.map.projection.build
     gate_exists: true
-    gate_id: D67
-    gate_status: detects_drift_after_fact
+    gate_id_existing: D402
+    gate_status: prevention_gate_active
     estimated_effort_hours: 4
 
   intake_lifecycle_surfaces:
@@ -174,30 +177,25 @@ backlog:
     authority_file: ops/bindings/gate.registry.yaml
     projection_files:
       - ops/bindings/gate.execution.topology.yaml
-    current_state: hand_maintained_800_lines
+    current_state: generated_projection_with_blocking_gate
     target_state: generated_projection_with_blocking_gate
     blast_radius: 4
     priority: 1
-    status: blocked
+    status: completed
     type: generator
-    generator_exists: false
+    generator_exists: true
     generator_capability_name: gate.topology.projection.build
-    gate_exists: false
-    gate_id_planned: D401
+    gate_exists: true
+    gate_id_existing: D401
     recommended_next_action: |
-      1. Write generator cap: ops/generators/gen-gate-topology.py
-      2. Generator reads gate.registry.yaml + capabilities.yaml domain fields
-      3. Produces gate.execution.topology.yaml with all domain_metadata + gate_assignments
-      4. Add D401 gate checking topology ↔ registry parity
-      5. Wire into pre-commit advisory check
-      6. Run generator once, commit result
-      7. Mark topology file with `authority_state: projection` header
+      Completed. Generator landed and D401 active. Capability registered.
     notes: |
-      This eliminates 1 of 8 manual touches per domain addition.
-      Every domain addition currently requires manual update here (Loop 1 touchpoint).
-      Priority 1 because it has highest backfill frequency.
+      Generator landed in overnight wave. D401 is active.
+      Capability gate.topology.projection.build registered in ops/capabilities.yaml.
+      Supports --check mode for drift detection.
     effort_estimate_hours: 3
     dependencies: []
+    completed_date: "2026-03-19"
 
   - id: DREAM-002
     title: "Generate capability_map.yaml from capabilities.yaml"
@@ -205,33 +203,27 @@ backlog:
     authority_file: ops/capabilities.yaml
     projection_files:
       - ops/bindings/capability_map.yaml
-    current_state: hand_maintained_1500_lines_with_d67_detection
+    current_state: generated_projection_with_prevention_gate
     target_state: generated_projection_with_prevention_gate
     blast_radius: 4
     priority: 2
-    status: not_started
+    status: completed
     type: generator
-    generator_exists: false
+    generator_exists: true
     generator_capability_name: capability.map.projection.build
     gate_exists: true
-    gate_id_existing: D67
-    gate_status: detects_orphans_after_fact_does_not_prevent
-    gate_id_planned: D402
+    gate_id_existing: D402
+    gate_status: prevention_gate_active
     recommended_next_action: |
-      1. Add `script_path` field to capabilities.yaml entries (migration step)
-      2. Write generator cap: ops/generators/gen-capability-map.py
-      3. Generator reads capabilities.yaml, produces capability_map.yaml
-      4. Add D402 gate checking map ↔ caps parity (replaces D67 or supplements it)
-      5. Run generator once, commit result
-      6. Mark capability_map.yaml with `authority_state: projection` header
-      7. Update D67 to check generator was used instead of checking consistency
+      Completed. Generator landed and D402 active. Capability registered.
     notes: |
-      D67 catches missing entries AFTER the fact, not during creation.
-      Generator + prevention gate eliminates this entire backfill class.
-      Requires 1-time capabilities.yaml migration to add script_path field.
+      Generator landed in overnight wave. D402 is active.
+      Capability capability.map.projection.build registered in ops/capabilities.yaml.
+      Supports --check mode for drift detection. DREAM-CAP-MIGRATION (script_path) also completed.
     effort_estimate_hours: 4
     dependencies:
       - DREAM-CAP-MIGRATION
+    completed_date: "2026-03-19"
 
   - id: DREAM-003
     title: "Generate intake.lifecycle.contract.yaml domain entries from capabilities.yaml"
@@ -359,27 +351,24 @@ backlog:
     concern_family: path_portability
     authority_file: ops/lib/runtime-paths.sh
     projection_files: []
-    current_state: d400_warn_only_live_56_violations_detected
+    current_state: d400_fully_cleared_0_violations
     target_state: all_gate_scripts_use_runtime_paths_lib
     blast_radius: 3
     priority: 7
-    status: in_progress
+    status: completed
     type: gate
     generator_exists: false
     gate_exists: true
     gate_id_existing: D400
-    gate_status: warn_only_report_mode
+    gate_status: fully_cleared_0_violations
     recommended_next_action: |
-      1. Fix the 56 detected violations by sourcing ops/lib/runtime-paths.sh or using BASH_SOURCE-relative roots
-      2. Re-run D400 until zero violations remain
-      3. Transition D400 from warn_only/report mode to blocking enforce mode
-      4. Add D400 to the fast ring once the violation count reaches zero
+      Completed. D400 now reports 0 violations. Ready to transition to blocking enforce mode.
     notes: |
-      D400 landed in this wave and currently reports 56 violations across gate/plugin scripts.
-      The forensic estimate of ~20 was low; the live gate provides the real inventory.
-      Once the violations are fixed, this concern can move from advisory to enforced.
+      All 56 original violations have been fixed. D400 reports 0 violations as of 2026-03-19.
+      Next optional step: transition D400 from warn_only to blocking enforce mode.
     effort_estimate_hours: 2
     dependencies: []
+    completed_date: "2026-03-19"
 
   - id: DREAM-008
     title: "Add mailroom boundary gate"
@@ -916,16 +905,14 @@ backlog:
 migrations:
   - id: DREAM-CAP-MIGRATION
     title: "Add script_path field to capabilities.yaml entries"
-    status: not_started
+    status: completed
     required_for:
       - DREAM-002
     effort_estimate_hours: 2
     recommended_action: |
-      1. Audit all 702 capabilities.yaml entries
-      2. Add `script_path:` field to each entry (read from existing capability_map.yaml)
-      3. Validate all paths exist
-      4. Commit migrated capabilities.yaml
-      5. Now DREAM-002 generator can consume script_path field
+      Completed. script_path added to all 711 capabilities.yaml entries.
+      DREAM-002 generator now consumes script_path field.
+    completed_date: "2026-03-19"
 
 completed:
   - id: COMPLETE-001
@@ -982,5 +969,5 @@ summary:
   tier_2_medium_impact: 22
   tier_3_aspirational: 0
   total_estimated_hours: 67
-  completed_milestones: 4
-  next_recommended_start: DREAM-001
+  completed_milestones: 7
+  next_recommended_start: DREAM-003
