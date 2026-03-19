@@ -15,10 +15,10 @@ scope: dream-system-projection-first-execution-backlog
 # Type values: generator | gate | scaffold | migration | cleanup
 
 metadata:
-  total_backlog_items: 15
+  total_backlog_items: 22
   completed_milestones: 3
   in_progress_backlog_items: 2
-  not_started_backlog_items: 12
+  not_started_backlog_items: 19
   blocked_backlog_items: 1
 
 policy:
@@ -101,6 +101,32 @@ concern_families:
     generator_exists: false
     gate_exists: false
     estimated_effort_hours: 2
+
+  machine_boringness_contract_surfaces:
+    description: "Managed machine paths, tombstones, startup surfaces, and access truth should be explicit and boring."
+    authority_file: docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+    projection_files: []
+    current_state: mixed_runtime_truth_and_path_exceptions
+    target_state: canonical_contract_with_cleanup_backlog
+    blast_radius: 4
+    backfill_frequency: medium
+    rollout_priority: 6
+    generator_exists: false
+    gate_exists: false
+    estimated_effort_hours: 4
+
+  media_lifecycle_contract_surfaces:
+    description: "Home-first media placement and 730XD cold archive policy should live in one canonical contract."
+    authority_file: docs/governance/MEDIA_STORAGE_LIFECYCLE.md
+    projection_files: []
+    current_state: implicit_placement_rules_and_transitional_runtime
+    target_state: canonical_hot_warm_cold_media_contract
+    blast_radius: 4
+    backfill_frequency: medium
+    rollout_priority: 7
+    generator_exists: false
+    gate_exists: false
+    estimated_effort_hours: 3
 
 backlog:
   # Tier 1: HIGH IMPACT — These are generation targets today
@@ -546,6 +572,176 @@ backlog:
       - DREAM-002
       - DREAM-003
 
+  - id: DREAM-016
+    title: "Retire docker-host and mint-os ghost runtime claims from active operator surfaces"
+    concern_family: machine_boringness_contract_surfaces
+    authority_file: docs/governance/SERVICE_REGISTRY.yaml
+    projection_files:
+      - ops/bindings/docker.compose.targets.yaml
+    current_state: docker_host_tombstone_still_looks_startable_or_deployable
+    target_state: tombstone_only_surfaces_with_no_active_runtime_claim
+    blast_radius: 4
+    priority: 16
+    status: not_started
+    type: cleanup
+    generator_exists: true
+    gate_exists: true
+    recommended_next_action: |
+      1. Keep docker-host compose targets disabled in generated projections
+      2. Keep startup/deploy surfaces free of docker-host active entries
+      3. Treat mint-os as retired/tombstoned, not deprecated-running
+      4. Remove any remaining operator checks that assume live SSH/docker access
+    notes: |
+      VM 200 is stopped and tombstoned.
+      The problem is no longer migration; it is ghost-runtime legibility drift.
+    effort_estimate_hours: 2
+    dependencies: []
+
+  - id: DREAM-017
+    title: "Normalize surveillance-stack onto the boring stack-root contract"
+    concern_family: machine_boringness_contract_surfaces
+    authority_file: docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+    projection_files:
+      - ops/bindings/docker.compose.targets.yaml
+    current_state: live_runtime_under_home_directory_exception
+    target_state: declared_exception_closed_or_migrated_to_opt_stacks
+    blast_radius: 4
+    priority: 17
+    status: not_started
+    type: migration
+    generator_exists: true
+    gate_exists: false
+    recommended_next_action: |
+      1. Keep current truth explicit at /home/ubuntu/surveillance
+      2. Capture exact config/data split for the stack
+      3. Migrate runtime root to /opt/stacks/surveillance
+      4. Close the exception only after compose/path parity is proven
+    notes: |
+      This wave made repo truth honest.
+      The next wave should make runtime boring.
+    effort_estimate_hours: 3
+    dependencies:
+      - DREAM-020
+
+  - id: DREAM-018
+    title: "Repair archive-smb control-path truth and SSH admission"
+    concern_family: machine_boringness_contract_surfaces
+    authority_file: ops/bindings/ssh.targets.yaml
+    projection_files: []
+    current_state: archive_smb_live_but_governed_ssh_auth_denied
+    target_state: access_surface_matches_runtime_truth
+    blast_radius: 4
+    priority: 18
+    status: not_started
+    type: cleanup
+    generator_exists: false
+    gate_exists: false
+    recommended_next_action: |
+      1. Repair governed SSH credentials or accepted auth path for archive-smb
+      2. Re-run ssh.target.status and pct-based checks
+      3. Keep pve as the interim control path until direct guest auth passes
+    notes: |
+      This is an access-truth problem, not a workload-existence problem.
+      LXC 220 is live and serving authoritative md1400 datasets now.
+    effort_estimate_hours: 2
+    dependencies: []
+
+  - id: DREAM-019
+    title: "Align backup admission with live freshness for finance, communications, and surveillance"
+    concern_family: machine_boringness_contract_surfaces
+    authority_file: ops/bindings/backup.inventory.yaml
+    projection_files:
+      - ops/bindings/backup.posture.snapshot.yaml
+    current_state: production_ready_claims_outrun_live_backup_freshness
+    target_state: admission_and_posture_say_the_same_thing
+    blast_radius: 5
+    priority: 19
+    status: not_started
+    type: cleanup
+    generator_exists: true
+    gate_exists: false
+    recommended_next_action: |
+      1. Refresh VM 214 / VM 215 primary backup artifacts
+      2. Repair finance app-level backup generation
+      3. Promote units back to production_ready only after freshness and proof are current
+      4. Keep posture projection current after each repair
+    notes: |
+      This wave intentionally demoted the affected units to planned so repo truth stops overstating recovery readiness.
+    effort_estimate_hours: 3
+    dependencies: []
+
+  - id: DREAM-020
+    title: "Adopt the machine filesystem contract across managed hosts"
+    concern_family: machine_boringness_contract_surfaces
+    authority_file: docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+    projection_files: []
+    current_state: path_meaning_is_implicit_and_exception_heavy
+    target_state: every_kept_path_has_one_clear_class_and_owner
+    blast_radius: 4
+    priority: 20
+    status: not_started
+    type: migration
+    generator_exists: false
+    gate_exists: false
+    recommended_next_action: |
+      1. Audit active guest stack roots against /opt/stacks/<stack>
+      2. Eliminate or explicitly register home-directory exceptions
+      3. Normalize data/archive/backup/tombstone roots on pve and synology
+      4. Add a bounded path-parity check once the exception count is low
+    notes: |
+      The contract exists now; the estate still needs adoption work.
+    effort_estimate_hours: 4
+    dependencies: []
+
+  - id: DREAM-021
+    title: "Canonicalize media-home VM 106 in home authority surfaces"
+    concern_family: media_lifecycle_contract_surfaces
+    authority_file: docs/governance/HOME_SERVER_SSOT.md
+    projection_files:
+      - ops/bindings/home.storage.map.yaml
+    current_state: live_home_media_vm_was_missing_from_authority
+    target_state: home_hot_watch_plane_is_explicit_and_inventory_backed
+    blast_radius: 4
+    priority: 21
+    status: not_started
+    type: cleanup
+    generator_exists: true
+    gate_exists: false
+    recommended_next_action: |
+      1. Keep media-home in home hardware, proxmox, backup, and startup surfaces
+      2. Capture direct guest service inventory once governed SSH auth is admitted
+      3. Decide whether a Tailscale identity is required or whether proxmox relay is canonical
+    notes: |
+      This wave registered the VM and its backup existence.
+      Guest-runtime detail is still intentionally transitional.
+    effort_estimate_hours: 2
+    dependencies: []
+
+  - id: DREAM-022
+    title: "Adopt the home-first hot/warm/cold media lifecycle"
+    concern_family: media_lifecycle_contract_surfaces
+    authority_file: docs/governance/MEDIA_STORAGE_LIFECYCLE.md
+    projection_files: []
+    current_state: media_placement_split_between_downloads_home_and_shop_without_one_contract
+    target_state: home_first_watch_plane_and_730xd_cold_archive_are_canonical
+    blast_radius: 5
+    priority: 22
+    status: not_started
+    type: migration
+    generator_exists: false
+    gate_exists: false
+    recommended_next_action: |
+      1. Move current-watch payload to Synology home library roots
+      2. Use media-staging as the import/rehydration lane
+      3. Keep 730XD for cold archive, not primary family playback
+      4. Drain /downloads after import instead of letting it become a residence
+    notes: |
+      This is the operator-legibility fix for "where is it?" anxiety.
+      The contract defines target state even where runtime is still transitional.
+    effort_estimate_hours: 4
+    dependencies:
+      - DREAM-021
+
 migrations:
   - id: DREAM-CAP-MIGRATION
     title: "Add script_path field to capabilities.yaml entries"
@@ -595,10 +791,10 @@ completed:
     gate_id: null
 
 summary:
-  total_backlog_items: 15
+  total_backlog_items: 22
   tier_1_high_impact: 5
-  tier_2_medium_impact: 9
+  tier_2_medium_impact: 16
   tier_3_aspirational: 1
-  total_estimated_hours: 41
+  total_estimated_hours: 61
   completed_milestones: 3
   next_recommended_start: DREAM-001

@@ -1,16 +1,16 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-12
+last_verified: 2026-03-19
 scope: home-rack-scorecard
 source_binding: ops/bindings/home.storage.map.yaml
 ---
 
 # Home Rack Scorecard
 
-- Generated: `2026-03-12T05:09:25Z`
+- Generated: `2026-03-19T04:12:48Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
-- Active runtimes: `2`
+- Active runtimes: `3`
 - Tombstones: `3`
 - Public routes: `1`
 
@@ -36,6 +36,7 @@ source_binding: ops/bindings/home.storage.map.yaml
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 100 | homeassistant | vm | auto | home-local-lvm | local-lvm:vm-100-disk-1, local-lvm:vm-100-disk-0 | nas-home-local-exception | ha.ronny.works |
 | 105 | pihole-home | lxc | auto | home-local-lvm | local-lvm:vm-105-disk-0 | nas-home-local-exception | private-only |
+| 106 | media-home | vm | auto | home-local-lvm | local-lvm:vm-105-disk-0 | nas-home-local-exception | private-only |
 
 ## Tombstones
 

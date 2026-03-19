@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-12
+last_verified: 2026-03-18
 verification_method: home inventory parity + live proxmox/synology read-only checks
 scope: home-control-plane-summary
 ---
@@ -13,6 +13,8 @@ This is the spine-facing summary for the home rack and home-managed endpoints.
 Authority boundary:
 - Canonical home domain contract lives in `ops/bindings/home.authority.contract.yaml`.
 - Detailed device/runtime/network/storage inventories live in the `ops/bindings/home.*` bindings plus `ops/bindings/synology918.storage.manifest.yaml`.
+- Machine path rules live in `docs/governance/MACHINE_FILESYSTEM_CONTRACT.md`.
+- Media placement and archive rules live in `docs/governance/MEDIA_STORAGE_LIFECYCLE.md`.
 - This doc keeps the boring target model, generated projections, and current closure blockers in one governed surface.
 
 ## Managed Home Endpoints
@@ -26,6 +28,7 @@ Authority boundary:
 | NAS | `synology918` | `10.0.0.150` / `100.102.199.111` | LAN + Tailscale | Canonical home backup and personal-data appliance |
 | Home Assistant | `ha` | `10.0.0.100` / `100.67.120.1` | LAN + Tailscale | Primary home automation runtime |
 | Pi-hole | `pihole-home` | `10.0.0.53` / `100.105.148.96` | LAN + Tailscale | Home-local DNS filtering |
+| Media home | `media-home` | `10.0.0.106` | LAN via proxmox relay | Home media/watch VM. Guest auth/runtime inventory still transitional. |
 | Zigbee coordinator | `slzb-06` | `10.0.0.51` | LAN-only | Primary Zigbee coordinator |
 | Thread coordinator | `slzb-06mu` | `10.0.0.52` | LAN-only | Matter/Thread border router |
 | Z-Wave coordinator | `tubeszb-2026-zw` | `10.0.0.90` | LAN-only | Primary Z-Wave coordinator |
@@ -35,11 +38,11 @@ Authority boundary:
 | Plane | Canonical surface | Boring target |
 |-------|-------------------|---------------|
 | Substrate | `ops/bindings/home.hardware.inventory.yaml` + `ops/bindings/home.proxmox.inventory.yaml` | `proxmox-home` is the only home hypervisor. |
-| Storage | `ops/bindings/home.storage.map.yaml` + `ops/bindings/synology918.storage.manifest.yaml` | `local-lvm` = hot runtime boot disks, Synology `/volume1/backups/proxmox_backups/dump` = canonical home VM/LXC backup lane, Synology `/volume1` = canonical home personal-data lane. |
-| Runtime | `ops/bindings/home.proxmox.inventory.yaml` | Every kept home workload is a named VM/LXC; decommissioned guests are explicit tombstones. |
+| Storage | `ops/bindings/home.storage.map.yaml` + `ops/bindings/synology918.storage.manifest.yaml` | `local-lvm` = hot runtime boot disks, Synology `/volume1/backups/proxmox_backups/dump` = canonical home VM/LXC backup lane, Synology `/volume1/media-holds` + `/volume1/media-staging` = home media watch/import lanes, Synology `/volume1` = canonical home personal-data lane. |
+| Runtime | `ops/bindings/home.proxmox.inventory.yaml` | Every kept home workload is a named VM/LXC; `media-home` VM 106 is now explicit as the transitional home media/watch plane, and decommissioned guests are explicit tombstones. |
 | Network | `ops/bindings/home.unifi.network.inventory.yaml` + `ops/bindings/network.dns.local.registry.yaml` | One LAN truth, one local DNS truth, and one Tailscale access path per kept node. |
 | Ingress | `ops/bindings/home.ingress.map.yaml` + `ops/bindings/domain.routing.registry.yaml` | Public home ingress is minimal and intentional; LAN ingress uses `.mint.local`; remote private ingress uses Tailscale or proxmox relay. |
-| Backup | `ops/bindings/backup.inventory.yaml` + `ops/bindings/synology918.storage.manifest.yaml` | Home runtime backups land on Synology; no second-environment cold plane is currently declared for home personal data. |
+| Backup | `ops/bindings/backup.inventory.yaml` + `ops/bindings/synology918.storage.manifest.yaml` | Home runtime backups land on Synology; VM 106 is declared but remains `planned` until restore-proof/service inventory catches up. No second-environment cold plane is currently declared for home personal data. |
 | Tombstones | `ops/bindings/home.proxmox.inventory.yaml` + `ops/bindings/estate.surface.register.yaml` | Decommissioned home guests are explicit non-runtime surfaces. |
 
 ## Generated Projections

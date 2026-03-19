@@ -35,21 +35,31 @@ if [[ -f "$BACKUP_INV" ]]; then
   schema_missing="$(yq e -r '[.targets[] | select(.kind == "file_glob") | select((.name // "") == "" or (.host // "") == "" or (.base_path // "") == "" or (.glob // "") == "")] | length' "$BACKUP_INV" 2>/dev/null || echo 999)"
   [[ "$schema_missing" == "0" ]] || err "file_glob targets missing required schema fields (name/host/base_path/glob)"
 
-  # Ensure required host lanes exist.
-  for host in pve proxmox-home nas; do
+  # Ensure required enabled target host lanes exist for current canonical artifact hosts.
+  for host in pve nas; do
     host_count="$(yq e -r "[.targets[] | select(.enabled == true and .host == \"$host\")] | length" "$BACKUP_INV" 2>/dev/null || echo 0)"
     [[ "$host_count" =~ ^[0-9]+$ ]] || host_count=0
     [[ "$host_count" -gt 0 ]] || err "no enabled targets for host lane '$host'"
   done
+
+  # Home hypervisor coverage is modeled as Synology-backed NAS targets plus an explicit
+  # proxmox-home machine unit, not enabled target.host=proxmox-home entries.
+  home_lane_path="$(yq e -r '.model.destination_lanes.nas-home-local-exception.base_path // ""' "$BACKUP_INV" 2>/dev/null || true)"
+  [[ "$home_lane_path" == "/volume1/backups/proxmox_backups/dump" ]] || err "nas-home-local-exception lane missing canonical Synology dump path"
+  home_machine_unit="$(yq e -r '.runtime_units[] | select(.unit_id == "machine-proxmox-home") | .unit_id' "$BACKUP_INV" 2>/dev/null || true)"
+  [[ "$home_machine_unit" == "machine-proxmox-home" ]] || err "machine-proxmox-home runtime unit missing"
+  home_guest_targets="$(yq e -r '[.targets[] | select(.enabled == true and .host == "nas" and (.name == "home-vm-100-ha-primary" or .name == "home-lxc-105-pihole-primary" or .name == "home-vm-106-media-home-primary"))] | length' "$BACKUP_INV" 2>/dev/null || echo 0)"
+  [[ "$home_guest_targets" =~ ^[0-9]+$ ]] || home_guest_targets=0
+  [[ "$home_guest_targets" -eq 3 ]] || err "home guest Synology targets missing (expected HA VM 100, Pi-hole LXC 105, media-home VM 106)"
 
   # NAS lane must include /volume1 destinations.
   nas_volume_targets="$(yq e -r '[.targets[] | select(.enabled == true and .host == "nas" and (.base_path | test("^/volume1/")))] | length' "$BACKUP_INV" 2>/dev/null || echo 0)"
   [[ "$nas_volume_targets" =~ ^[0-9]+$ ]] || nas_volume_targets=0
   [[ "$nas_volume_targets" -gt 0 ]] || err "enabled NAS targets do not use /volume1 backup lane"
 
-  # Offsite VM lane must exist.
-  offsite_target="$(yq e -r '.targets[] | select(.name == "vm-offsite-critical" and .enabled == true) | .name' "$BACKUP_INV" 2>/dev/null || true)"
-  [[ "$offsite_target" == "vm-offsite-critical" ]] || err "missing enabled vm-offsite-critical target"
+  # Legacy NAS offsite VM lane must remain explicitly disabled after md1400 canonicalization.
+  offsite_target_state="$(yq e -r '.targets[] | select(.name == "vm-offsite-critical") | (.enabled | tostring)' "$BACKUP_INV" 2>/dev/null || true)"
+  [[ "$offsite_target_state" == "false" ]] || err "vm-offsite-critical must remain present as an explicit disabled legacy target"
 
   # Media config-state targets are required in systemic model.
   media_cfg_count="$(yq e -r '[.targets[] | select(.enabled == true and (.name == "app-media-config-download-stack" or .name == "app-media-config-streaming-stack"))] | length' "$BACKUP_INV" 2>/dev/null || echo 0)"
@@ -67,7 +77,7 @@ if [[ -f "$BACKUP_INV" ]]; then
   [[ "$vm_units" =~ ^[0-9]+$ && "$vm_units" -gt 0 ]] || err "runtime_units missing vm class coverage"
   [[ "$fleet_units" =~ ^[0-9]+$ && "$fleet_units" -gt 0 ]] || err "runtime_units missing container-fleet class coverage"
 
-  ok "targets=$target_count nas_volume_targets=$nas_volume_targets offsite_target=$offsite_target runtime_units=$runtime_units"
+  ok "targets=$target_count nas_volume_targets=$nas_volume_targets home_guest_targets=$home_guest_targets offsite_target_state=$offsite_target_state runtime_units=$runtime_units"
 fi
 
 if [[ "$ERRORS" -gt 0 ]]; then
