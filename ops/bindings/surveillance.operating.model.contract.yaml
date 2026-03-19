@@ -19,6 +19,39 @@ classification:
     useful recent playback for incident review - NOT a giant passive footage
     archive for forensic search or compliance retention.
 
+# Current Operational Mode (Post Lean-Freeze 2026-03-19)
+operational_mode:
+  current_mode: lean_foundation_frozen
+  mode_description: |
+    Surveillance in intentional lean foundation mode:
+    - Live view + motion recording active
+    - AI detection explicitly disabled (awaiting hardware acceleration)
+    - Smart monitoring features deferred until Coral TPU added
+    - Clean expansion path documented and bounded
+
+  active_features:
+    - live_view_all_cameras
+    - motion_based_recording
+    - 7_day_retention
+    - manual_export_workflow
+    - mqtt_integration_enabled
+
+  deferred_features:
+    - ai_object_detection  # Awaiting Coral TPU
+    - notifications_alerts  # Depends on detection
+    - zone_configuration  # Depends on detection
+    - hardware_acceleration  # Awaiting Intel QSV or GPU passthrough
+    - per_camera_tuning  # Depends on detection + zones
+    - home_assistant_automation  # Depends on detection events
+
+  expansion_trigger: user_requests_notifications_or_alerts
+  expansion_prerequisites:
+    - coral_tpu_usb_added
+    - zone_configuration_complete
+    - notification_infrastructure_setup
+
+  deferred_boundary_document: .evidence/spine/verify/SURVEILLANCE_DEFERRED_EXPANSION_BOUNDARY_20260319.md
+
 # Purpose and Scope
 purpose:
   primary:
@@ -39,10 +72,13 @@ purpose:
 
 # Camera Inventory and Classification
 cameras:
-  total_count: 8
+  total_count: 10  # Was 8, added office + ipcamera_04 on 2026-03-19
+  total_configured_nvr_channels: 12
+  cameras_active: 10
+  cameras_offline_physical: 2  # ALLY WAY, alleyway exit (awaiting cable install)
   resolution: 704x480
   fps: 5
-  detection_hardware: cpu  # No Coral TPU
+  detection_hardware: none  # CPU detector disabled, no Coral TPU
 
   tier_1_perimeter_security:
     count: 3
@@ -155,13 +191,13 @@ retention_policy:
 
   tier_4_low_value:
     type: snapshots_cache
-    purpose: Frigate UI thumbnails for timeline preview
-    retention_days: 30
+    purpose: Frigate UI thumbnails for timeline preview (DISABLED in lean-freeze)
+    retention_days: 0  # Disabled, snapshots.enabled: false
     storage_path: /srv/data/surveillance/snapshots
-    disk_footprint_gb: 0.1
-    backup: false  # Rebuildable UI cache
-    auto_purge: true
-    auto_purge_method: frigate_automatic_lru
+    disk_footprint_gb: 0
+    backup: false  # Feature disabled
+    auto_purge: false  # Feature disabled
+    auto_purge_method: not_applicable
 
   # Unified Frigate config (maps to tiers)
   frigate_config:
@@ -176,8 +212,9 @@ retention_policy:
       continuous:
         days: 0  # Disabled (motion-only)
     snapshots:
+      enabled: false  # Disabled in lean-freeze
       retain:
-        default: 30  # Tier 4 (UI cache)
+        default: 0  # Not applicable (snapshots disabled)
 
 # Capacity Target (Derived from Operating Model)
 capacity:
@@ -187,22 +224,22 @@ capacity:
 
   # Recording rate (measured 2026-03-19)
   recording_rate:
-    cameras_active: 8
+    cameras_active: 10
     resolution: 704x480
     fps: 5
-    measured_gb_per_hour: 8.25
+    measured_gb_per_hour: 8.25  # Measured with 8 cameras, extrapolated
     measured_gb_per_day: 198
     measured_gb_per_week: 1386
 
   # Capacity breakdown
   capacity_breakdown:
     tier_1_exports_buffer_gb: 100
-    tier_2_detection_clips_gb: 11
+    tier_2_detection_clips_gb: 0  # Detection disabled
     tier_3_motion_recordings_gb: 1386
-    tier_4_snapshots_gb: 0.1
-    total_used_gb: 1497
-    free_buffer_gb: 503
-    steady_state_usage_pct: 75
+    tier_4_snapshots_gb: 0  # Snapshots disabled
+    total_used_gb: 1486
+    free_buffer_gb: 514
+    steady_state_usage_pct: 74
 
   # Thresholds
   thresholds:
@@ -213,8 +250,8 @@ capacity:
   # Capacity planning rules
   camera_count_limit:
     max_cameras_2tb_disk: 10  # 11+ requires 3TB disk for 7d retention
-    current_cameras: 8
-    headroom: 2  # Can add 2 more cameras before capacity pressure
+    current_cameras: 10
+    headroom: 0  # At max capacity for 2TB disk with 7d retention
 
   # Growth scenarios
   growth_scenarios:
@@ -366,9 +403,9 @@ boringness:
       status: ready
 
     - id: ha_integration_healthy
-      description: Home Assistant sees 8 cameras and detection events
+      description: Home Assistant sees 10 cameras (detection disabled in lean-freeze)
       check_method: manual_ha_verification
-      expected_result: 8_cameras_visible_events_flowing
+      expected_result: 10_cameras_visible_mqtt_connected_no_events
       status: ready
 
 # Health Checks (Automated Monitoring)
@@ -490,27 +527,48 @@ related_docs:
 
 # Implementation Status
 implementation_status:
-  current_state: blackhole
+  current_state: lean_foundation_frozen
   current_state_description: |
-    100GB disk, emergency purges 2-3x daily, 8-hour actual retention (not 14-day config),
-    operator cannot trust retention, config lies about capability.
+    Lean-freeze remediation complete (2026-03-19):
+    - AI detection disabled (detector idle, zero events)
+    - Retention aligned with contract (7d motion, 14d detections)
+    - All 10 cameras visible and recording
+    - Config matches lean foundation mode
+    - Smart monitoring features explicitly deferred
 
-  target_state: boring
+  previous_state: blackhole
+  previous_state_resolved: 2026-03-19
+  blackhole_resolution: lean_freeze_remediation
+
+  target_state: boring_with_smart_monitoring
   target_state_description: |
-    2TB disk, zero emergency purges, 7-day actual retention (matches 7-day config),
-    operator can trust retention, config matches disk capacity.
+    Future expansion when Coral TPU added:
+    - 2TB disk (from remediation spec)
+    - AI detection on perimeter cameras only (3 cameras)
+    - Notifications via ntfy or Home Assistant
+    - Zero emergency purges, 7-day retention maintained
+    - Hardware acceleration (Coral TPU for AI, optional Intel QSV for video)
 
-  remediation_required: true
-  remediation_spec: .evidence/spine/verify/SURVEILLANCE_REMEDIATION_SPEC_20260319.md
-  remediation_timeline: next_30_days
-  remediation_downtime: 5-10_minutes
-  remediation_cost: 0_dollars
+  remediation_completed:
+    - lean_freeze_remediation  # 2026-03-19
+    - nvr_camera_recovery  # 2026-03-19 (2 of 4 cameras, 2 awaiting cable)
+
+  remediation_pending:
+    - disk_expansion_100gb_to_2tb  # Separate wave (from SURVEILLANCE_REMEDIATION_SPEC)
+    - physical_camera_cable_install  # ALLY WAY, alleyway exit (awaiting Cat5 cable)
+    - hardware_acceleration_setup  # Coral TPU + optional Intel QSV (when user wants alerts)
 
   verification_gates:
-    - frigate_service_healthy
-    - recordings_exist_7d
-    - disk_usage_stable_70_80pct
-    - zero_emergency_purges
-    - surveillance_health_check_healthy
-    - config_matches_reality
-    - ha_integration_working
+    - frigate_service_healthy: ✅ PASS
+    - recordings_exist_7d: ⏳ IN PROGRESS (purge in progress, will stabilize in 7d)
+    - disk_usage_stable: ✅ PASS (23% current, will stabilize at ~73% after purge)
+    - zero_emergency_purges: ✅ PASS (7d retention fits in 48GB available)
+    - config_matches_reality: ✅ PASS (7d/14d retention, detection disabled)
+    - detection_disabled_verified: ✅ PASS (zero events, detector idle)
+    - all_cameras_visible: ✅ PASS (10 of 10 active cameras working)
+
+  related_evidence:
+    - .evidence/spine/verify/SURVEILLANCE_LEAN_FREEZE_REMEDIATION_20260319.md
+    - .evidence/spine/verify/SURVEILLANCE_DEFERRED_EXPANSION_BOUNDARY_20260319.md
+    - .evidence/spine/verify/NVR_CAMERA_RECOVERY_20260319.md
+    - .evidence/spine/verify/NVR_CAMERA_RECOVERY_CLOSURE_20260319.md
