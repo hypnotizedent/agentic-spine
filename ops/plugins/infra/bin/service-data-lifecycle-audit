@@ -1,0 +1,854 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import csv
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import sys
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+REGISTRY_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
+SSH_TARGETS_PATH = ROOT / "ops/bindings/ssh.targets.yaml"
+SSH_RESOLVE_PATH = ROOT / "ops/lib/ssh-resolve.sh"
+
+
+@dataclass
+class CommandRecord:
+    scope: str
+    target: str
+    command: str
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"service.data.lifecycle.audit FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_utc_iso() -> str:
+    return now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def days_since_epoch(epoch_value: int | None) -> float | None:
+    if not epoch_value:
+        return None
+    delta = now_utc() - datetime.fromtimestamp(epoch_value, timezone.utc)
+    return round(delta.total_seconds() / 86400.0, 2)
+
+
+def yaml_dump(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=False)
+
+
+def json_dump(data: dict[str, Any]) -> str:
+    return json.dumps(data, indent=2, sort_keys=False)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="service-data-lifecycle-audit")
+    parser.add_argument("--format", choices=("text", "json", "yaml"), default="text")
+    parser.add_argument("--strict", action="store_true", help="Exit non-zero when any domain posture is fail.")
+    parser.add_argument("--snapshot-output", help="Optional YAML snapshot output path.")
+    parser.add_argument("--drift-csv-output", help="Optional CSV output path for mismatch rows.")
+    parser.add_argument("--background-csv-output", help="Optional CSV output path for observed background actions.")
+    parser.add_argument("--command-log-output", help="Optional Markdown output path for executed command log.")
+    return parser.parse_args()
+
+
+class AuditContext:
+    def __init__(self, *, registry: dict[str, Any], ssh_targets: dict[str, Any]) -> None:
+        self.registry = registry
+        self.ssh_targets = {
+            str(row.get("id") or ""): row
+            for row in ensure_list(ensure_dict(ssh_targets.get("ssh")).get("targets"))
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        }
+        self.command_log: list[CommandRecord] = []
+        self.ssh_bin = shutil.which("ssh") or "/usr/bin/ssh"
+
+    def _record(self, *, scope: str, target: str, command: str, run: subprocess.CompletedProcess[str]) -> None:
+        self.command_log.append(
+            CommandRecord(
+                scope=scope,
+                target=target,
+                command=command,
+                returncode=run.returncode,
+                stdout=(run.stdout or "").strip(),
+                stderr=(run.stderr or "").strip(),
+            )
+        )
+
+    def run_local_bash(self, script: str, *, scope: str, target: str) -> subprocess.CompletedProcess[str]:
+        run = subprocess.run(
+            ["/bin/bash", "-lc", script],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+        )
+        self._record(scope=scope, target=target, command=script, run=run)
+        return run
+
+    def resolve_target(self, target_id: str) -> dict[str, Any]:
+        target = ensure_dict(self.ssh_targets.get(target_id))
+        if not target:
+            fail(f"missing ssh target in binding: {target_id}")
+
+        script = "\n".join(
+            [
+                f"source {shlex.quote(str(SSH_RESOLVE_PATH))}",
+                f"read -r resolved_host path_used <<< \"$(ssh_resolve_ssh_host_with_fallback {shlex.quote(target_id)} 6 || true)\"",
+                "printf '%s\\t%s\\n' \"$resolved_host\" \"$path_used\"",
+            ]
+        )
+        run = self.run_local_bash(script, scope="resolve", target=target_id)
+        if run.returncode != 0:
+            fail(f"failed to resolve ssh target {target_id}: {run.stderr.strip()}")
+
+        parts = (run.stdout or "").strip().split("\t")
+        resolved_host = parts[0].strip() if len(parts) >= 1 else ""
+        path_used = parts[1].strip() if len(parts) >= 2 else ""
+        if not resolved_host or path_used == "unreachable":
+            fail(f"unable to resolve reachable SSH host for {target_id}")
+
+        return {
+            "target_id": target_id,
+            "user": str(target.get("user") or "ubuntu"),
+            "port": int(target.get("port") or 22),
+            "resolved_host": resolved_host,
+            "path_used": path_used or "direct",
+        }
+
+    def ssh_capture(self, target_id: str, remote_script: str, *, scope: str) -> subprocess.CompletedProcess[str]:
+        resolved = self.resolve_target(target_id)
+        cmd = [
+            self.ssh_bin,
+            "-n",
+            "-o",
+            "ConnectTimeout=8",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
+            "-p",
+            str(resolved["port"]),
+            f"{resolved['user']}@{resolved['resolved_host']}",
+            remote_script,
+        ]
+        run = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+        self._record(scope=scope, target=target_id, command=" ".join(shlex.quote(part) for part in cmd), run=run)
+        return run
+
+
+def path_probe_script(path: str) -> str:
+    quoted = shlex.quote(path)
+    return f"""
+path={quoted}
+if [ ! -e "$path" ]; then
+  echo "state=missing"
+  exit 0
+fi
+size_kib="$(du -sk "$path" 2>/dev/null | awk 'NR==1 {{print $1}}')"
+file_count="$(find "$path" -type f 2>/dev/null | wc -l | tr -d ' ')"
+oldest_file="$(find "$path" -type f -exec ls -dt {{}} + 2>/dev/null | tail -n 1 || true)"
+oldest_epoch=""
+if [ -n "$oldest_file" ]; then
+  oldest_epoch="$(stat -c %Y "$oldest_file" 2>/dev/null || stat -f %m "$oldest_file" 2>/dev/null || true)"
+fi
+echo "state=present"
+echo "size_bytes=$((${{size_kib:-0}} * 1024))"
+echo "file_count=${{file_count:-0}}"
+echo "oldest_epoch=${{oldest_epoch:-}}"
+echo "oldest_file=${{oldest_file:-}}"
+"""
+
+
+def df_probe_script(path: str) -> str:
+    quoted = shlex.quote(path)
+    return f"""
+df -B1 {quoted} 2>/dev/null | awk 'NR==2 {{print "total_bytes=" $2 "\\nused_bytes=" $3 "\\navail_bytes=" $4}}'
+"""
+
+
+def parse_key_value_output(text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for raw_line in (text or "").splitlines():
+        if "=" not in raw_line:
+            continue
+        key, value = raw_line.split("=", 1)
+        out[key.strip()] = value.strip()
+    return out
+
+
+def path_probe(ctx: AuditContext, target_id: str, path: str, *, scope: str) -> dict[str, Any]:
+    run = ctx.ssh_capture(target_id, path_probe_script(path), scope=scope)
+    if run.returncode != 0:
+        return {"state": "error", "error": (run.stderr or "").strip(), "path": path}
+    parsed = parse_key_value_output(run.stdout or "")
+    oldest_epoch_raw = parsed.get("oldest_epoch") or ""
+    oldest_epoch = int(oldest_epoch_raw) if oldest_epoch_raw.isdigit() else None
+    return {
+        "path": path,
+        "state": parsed.get("state") or "missing",
+        "size_bytes": int(parsed.get("size_bytes") or 0),
+        "file_count": int(parsed.get("file_count") or 0),
+        "oldest_epoch": oldest_epoch,
+        "oldest_age_days": days_since_epoch(oldest_epoch),
+        "oldest_file": parsed.get("oldest_file") or "",
+    }
+
+
+def df_probe(ctx: AuditContext, target_id: str, path: str, *, scope: str) -> dict[str, int]:
+    run = ctx.ssh_capture(target_id, df_probe_script(path), scope=scope)
+    if run.returncode != 0:
+        return {}
+    parsed = parse_key_value_output(run.stdout or "")
+    out: dict[str, int] = {}
+    for key in ("total_bytes", "used_bytes", "avail_bytes"):
+        value = parsed.get(key) or ""
+        if value.isdigit():
+            out[key] = int(value)
+    return out
+
+
+def retention_honesty(registry_service: dict[str, Any], *, live_total_bytes: int, live_used_bytes: int) -> dict[str, Any]:
+    retention = ensure_dict(registry_service.get("retention_policy"))
+    capacity = ensure_dict(registry_service.get("capacity_model"))
+    if str(capacity.get("type") or "") != "rolling_retention_bytes":
+        return {"status": "not_applicable"}
+    if retention.get("claim_days") in {None, ""}:
+        return {"status": "not_applicable"}
+
+    claim_days = float(retention.get("claim_days"))
+    reserved_headroom_gib = float(capacity.get("reserved_headroom_gib") or 0)
+    observed_daily_growth_gib = float(capacity.get("observed_daily_growth_gib") or 0)
+    if observed_daily_growth_gib <= 0:
+        return {"status": "insufficient_data"}
+
+    safe_free_gib = (live_total_bytes / (1024 ** 3)) - (live_used_bytes / (1024 ** 3)) - reserved_headroom_gib
+    achievable_days = max(0.0, safe_free_gib) / observed_daily_growth_gib
+    return {
+        "status": "dishonest" if claim_days > achievable_days + 0.01 else "honest",
+        "claim_days": claim_days,
+        "achievable_days": round(achievable_days, 2),
+        "safe_free_gib": round(max(0.0, safe_free_gib), 2),
+        "observed_daily_growth_gib": observed_daily_growth_gib,
+    }
+
+
+def build_live_action_row(*, domain: str, action_id: str, host: str, mechanism: str, locus: str, schedule: str, effect: str, classification: str) -> dict[str, Any]:
+    return {
+        "domain": domain,
+        "action_id": action_id,
+        "host": host,
+        "mechanism": mechanism,
+        "locus": locus,
+        "schedule": schedule,
+        "effect": effect,
+        "classification": classification,
+    }
+
+
+def add_mismatch(rows: list[dict[str, Any]], *, domain: str, severity: str, code: str, host: str, path: str, message: str) -> None:
+    rows.append(
+        {
+            "domain": domain,
+            "severity": severity,
+            "code": code,
+            "host": host,
+            "path": path,
+            "message": message,
+        }
+    )
+
+
+def compare_background_actions(
+    registry_service: dict[str, Any],
+    *,
+    live_rows: list[dict[str, Any]],
+    mismatches: list[dict[str, Any]],
+    domain: str,
+) -> dict[str, Any]:
+    actions = ensure_dict(registry_service.get("background_actions"))
+    declared_ids = {str(ensure_dict(row).get("action_id") or "").strip() for row in ensure_list(actions.get("declared"))}
+    declared_ids.discard("")
+    retired_ids = {str(ensure_dict(row).get("action_id") or "").strip() for row in ensure_list(actions.get("retired"))}
+    retired_ids.discard("")
+    live_ids = {str(row.get("action_id") or "").strip() for row in live_rows}
+    live_ids.discard("")
+
+    for missing in sorted(declared_ids - live_ids):
+        add_mismatch(
+            mismatches,
+            domain=domain,
+            severity="warn",
+            code="declared_background_action_not_observed",
+            host="",
+            path="",
+            message=f"declared background action {missing} was not observed in live inspection",
+        )
+
+    for row in live_rows:
+        action_id = str(row.get("action_id") or "").strip()
+        if action_id in retired_ids:
+            row["classification"] = "retired_hit"
+            add_mismatch(
+                mismatches,
+                domain=domain,
+                severity="high",
+                code="retired_background_action_present",
+                host=str(row.get("host") or ""),
+                path=str(row.get("locus") or ""),
+                message=f"retired background action {action_id} is still live",
+            )
+        elif action_id in declared_ids:
+            row["classification"] = "declared"
+        else:
+            row["classification"] = "undeclared"
+            add_mismatch(
+                mismatches,
+                domain=domain,
+                severity="high",
+                code="undeclared_background_action",
+                host=str(row.get("host") or ""),
+                path=str(row.get("locus") or ""),
+                message=f"live background action {action_id} is not declared in authority",
+            )
+
+    return {
+        "declared_action_ids": sorted(declared_ids),
+        "retired_action_ids": sorted(retired_ids),
+        "live_action_ids": sorted(live_ids),
+    }
+
+
+def audit_backups(ctx: AuditContext, registry_service: dict[str, Any]) -> dict[str, Any]:
+    domain = "backups"
+    mismatches: list[dict[str, Any]] = []
+    live_rows: list[dict[str, Any]] = []
+
+    pve_cron = ctx.ssh_capture("pve", "crontab -l 2>/dev/null || true", scope="backups.pve_root_crontab")
+    pve_jobs = ctx.ssh_capture("pve", "cat /etc/pve/jobs.cfg 2>/dev/null || true", scope="backups.pve_jobs_cfg")
+    pve_archive = ctx.ssh_capture("pve", "cat /etc/cron.d/archive-smb-snapshot 2>/dev/null || true", scope="backups.pve_archive_smb_snapshot")
+    home_jobs = ctx.ssh_capture("proxmox-home", "cat /etc/pve/jobs.cfg 2>/dev/null || true", scope="backups.proxmox_home_jobs_cfg")
+    nas_cron = ctx.ssh_capture("nas", "crontab -l 2>/dev/null || true", scope="backups.nas_crontab")
+
+    pve_jobs_text = pve_jobs.stdout or ""
+    if "schedule 01:00" in pve_jobs_text and "vmid 202,203,204,205,206,207,209,210,211,212,213,214,215,220" in pve_jobs_text:
+        live_rows.append(
+            build_live_action_row(
+                domain=domain,
+                action_id="pve_shop_vzdump_scheduler",
+                host="pve",
+                mechanism="proxmox_jobs_cfg",
+                locus="/etc/pve/jobs.cfg",
+                schedule="daily_01_00",
+                effect="write_shop_vzdump_backups",
+                classification="unknown",
+            )
+        )
+
+    home_jobs_text = home_jobs.stdout or ""
+    if "backup-home-p0-daily" in home_jobs_text and "schedule 03:00" in home_jobs_text:
+        live_rows.append(
+            build_live_action_row(
+                domain=domain,
+                action_id="proxmox_home_daily_vzdump_scheduler",
+                host="proxmox-home",
+                mechanism="proxmox_jobs_cfg",
+                locus="/etc/pve/jobs.cfg",
+                schedule="daily_03_00",
+                effect="write_home_daily_vzdump_backups",
+                classification="unknown",
+            )
+        )
+    if "backup-home-p2-weekly" in home_jobs_text and "schedule sun 04:00" in home_jobs_text:
+        live_rows.append(
+            build_live_action_row(
+                domain=domain,
+                action_id="proxmox_home_weekly_vzdump_scheduler",
+                host="proxmox-home",
+                mechanism="proxmox_jobs_cfg",
+                locus="/etc/pve/jobs.cfg",
+                schedule="weekly_sunday_04_00",
+                effect="write_home_weekly_vzdump_backups",
+                classification="unknown",
+            )
+        )
+
+    if "/usr/local/bin/archive-smb-snapshot" in (pve_archive.stdout or ""):
+        live_rows.append(
+            build_live_action_row(
+                domain=domain,
+                action_id="pve_archive_smb_snapshot",
+                host="pve",
+                mechanism="cron_d",
+                locus="/etc/cron.d/archive-smb-snapshot",
+                schedule="daily_01_05",
+                effect="write_archive_snapshot_manifests",
+                classification="unknown",
+            )
+        )
+
+    if "vzdump-offsite-sync.sh" in (pve_cron.stdout or ""):
+        live_rows.append(
+            build_live_action_row(
+                domain=domain,
+                action_id="pve_vzdump_offsite_sync_cron",
+                host="pve",
+                mechanism="root_crontab",
+                locus="root_crontab",
+                schedule="unknown",
+                effect="legacy_offsite_sync",
+                classification="unknown",
+            )
+        )
+
+    summary = compare_background_actions(registry_service, live_rows=live_rows, mismatches=mismatches, domain=domain)
+    return {
+        "domain": domain,
+        "background_actions": summary,
+        "observed_background_rows": live_rows,
+        "mismatches": mismatches,
+        "observations": {
+            "pve_root_crontab_present_lines": len([line for line in (pve_cron.stdout or "").splitlines() if line.strip()]),
+            "nas_user_crontab_present_lines": len([line for line in (nas_cron.stdout or "").splitlines() if line.strip()]),
+        },
+    }
+
+
+def audit_surveillance(ctx: AuditContext, registry_service: dict[str, Any]) -> dict[str, Any]:
+    domain = "surveillance"
+    mismatches: list[dict[str, Any]] = []
+    live_rows: list[dict[str, Any]] = []
+
+    config_run = ctx.ssh_capture("surveillance-stack", "cat /srv/config/surveillance/config.yml 2>/dev/null || true", scope="surveillance.config")
+    inspect_run = ctx.ssh_capture("surveillance-stack", "docker inspect frigate 2>/dev/null || true", scope="surveillance.docker_inspect")
+    fs_probe = df_probe(ctx, "surveillance-stack", "/srv/data/surveillance", scope="surveillance.df")
+    recordings_probe = path_probe(ctx, "surveillance-stack", "/srv/data/surveillance/recordings", scope="surveillance.recordings")
+    clips_probe = path_probe(ctx, "surveillance-stack", "/srv/data/surveillance/clips", scope="surveillance.clips")
+    snapshots_probe = path_probe(ctx, "surveillance-stack", "/srv/data/surveillance/snapshots", scope="surveillance.snapshots")
+
+    config = yaml.safe_load(config_run.stdout or "") or {}
+    config = ensure_dict(config)
+    motion_days = (
+        ensure_dict(ensure_dict(config.get("record")).get("motion")).get("days")
+        if isinstance(config, dict)
+        else None
+    )
+    alerts_days = ensure_dict(ensure_dict(config.get("record")).get("alerts")).get("retain")
+    alerts_days = ensure_dict(alerts_days).get("days")
+    detections_days = ensure_dict(ensure_dict(config.get("record")).get("detections")).get("retain")
+    detections_days = ensure_dict(detections_days).get("days")
+    snapshots_days = ensure_dict(ensure_dict(config.get("snapshots")).get("retain")).get("default")
+
+    inspect_json = json.loads(inspect_run.stdout or "[]") if (inspect_run.stdout or "").strip() else []
+    mounts = []
+    if inspect_json and isinstance(inspect_json, list) and isinstance(inspect_json[0], dict):
+        mounts = ensure_list(inspect_json[0].get("Mounts"))
+
+    if mounts:
+        live_rows.append(
+            build_live_action_row(
+                domain=domain,
+                action_id="frigate_recording_writer",
+                host="surveillance-stack",
+                mechanism="docker_container",
+                locus="/srv/config/surveillance/config.yml",
+                schedule="continuous",
+                effect="write_recordings_clips_snapshots",
+                classification="unknown",
+            )
+        )
+        live_rows.append(
+            build_live_action_row(
+                domain=domain,
+                action_id="frigate_retention_purger",
+                host="surveillance-stack",
+                mechanism="docker_container",
+                locus="/srv/config/surveillance/config.yml",
+                schedule="continuous",
+                effect="auto_purge_by_retention_policy",
+                classification="unknown",
+            )
+        )
+
+    honesty = retention_honesty(
+        registry_service,
+        live_total_bytes=int(fs_probe.get("total_bytes") or 0),
+        live_used_bytes=recordings_probe.get("size_bytes", 0) + clips_probe.get("size_bytes", 0) + snapshots_probe.get("size_bytes", 0),
+    )
+    if honesty.get("status") == "dishonest":
+        add_mismatch(
+            mismatches,
+            domain=domain,
+            severity="high",
+            code="retention_honesty_gap",
+            host="surveillance-stack",
+            path="/srv/data/surveillance",
+            message=(
+                f"claim_days={honesty.get('claim_days')} exceeds achievable_days={honesty.get('achievable_days')} "
+                f"with safe_free_gib={honesty.get('safe_free_gib')}"
+            ),
+        )
+
+    summary = compare_background_actions(registry_service, live_rows=live_rows, mismatches=mismatches, domain=domain)
+    return {
+        "domain": domain,
+        "background_actions": summary,
+        "observed_background_rows": live_rows,
+        "mismatches": mismatches,
+        "observations": {
+            "motion_days": motion_days,
+            "alerts_days": alerts_days,
+            "detections_days": detections_days,
+            "snapshots_days": snapshots_days,
+            "filesystem": fs_probe,
+            "recordings_probe": recordings_probe,
+            "clips_probe": clips_probe,
+            "snapshots_probe": snapshots_probe,
+            "capacity_honesty": honesty,
+        },
+    }
+
+
+def audit_media(ctx: AuditContext, registry_service: dict[str, Any]) -> dict[str, Any]:
+    domain = "media"
+    mismatches: list[dict[str, Any]] = []
+    live_rows: list[dict[str, Any]] = []
+
+    downloads_policy_days = ensure_dict(registry_service.get("retention_policy")).get("downloads_max_age_days")
+    pve_downloads = path_probe(ctx, "pve", "/media/downloads", scope="media.pve_downloads")
+    nas_staging = path_probe(ctx, "nas", "/volume1/media-staging", scope="media.nas_media_staging")
+
+    if pve_downloads.get("state") == "present" and pve_downloads.get("file_count", 0) > 0:
+        oldest_age = pve_downloads.get("oldest_age_days")
+        if isinstance(downloads_policy_days, (int, float)) and oldest_age is not None and oldest_age > float(downloads_policy_days):
+            add_mismatch(
+                mismatches,
+                domain=domain,
+                severity="high",
+                code="staging_root_aged_into_residence_pve",
+                host="pve",
+                path="/media/downloads",
+                message=f"downloads lane oldest_age_days={oldest_age} exceeds policy={downloads_policy_days}",
+            )
+
+    if nas_staging.get("state") == "present" and nas_staging.get("file_count", 0) > 0:
+        add_mismatch(
+            mismatches,
+            domain=domain,
+            severity="high",
+            code="retired_root_still_populated_nas",
+            host="nas",
+            path="/volume1/media-staging",
+            message=(
+                f"legacy Synology staging lane is still populated "
+                f"(size_bytes={nas_staging.get('size_bytes')} file_count={nas_staging.get('file_count')})"
+            ),
+        )
+
+    summary = compare_background_actions(registry_service, live_rows=live_rows, mismatches=mismatches, domain=domain)
+    return {
+        "domain": domain,
+        "background_actions": summary,
+        "observed_background_rows": live_rows,
+        "mismatches": mismatches,
+        "observations": {
+            "pve_downloads": pve_downloads,
+            "nas_media_staging": nas_staging,
+        },
+    }
+
+
+def parse_env_file(text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        out[key.strip()] = value.strip()
+    return out
+
+
+def audit_immich(ctx: AuditContext, registry_service: dict[str, Any]) -> dict[str, Any]:
+    domain = "immich"
+    mismatches: list[dict[str, Any]] = []
+    live_rows: list[dict[str, Any]] = []
+
+    cron_run = ctx.ssh_capture("immich", "cat /etc/cron.d/immich-backup 2>/dev/null || true", scope="immich.cron")
+    script_run = ctx.ssh_capture("immich", "sed -n '1,220p' ~/scripts/backup-immich-db.sh 2>/dev/null || true", scope="immich.backup_script")
+    env_run = ctx.ssh_capture("immich", "sed -n '1,120p' ~/immich/.env 2>/dev/null || true", scope="immich.env")
+    pve_photos = path_probe(ctx, "pve", "/tank/immich/photos", scope="immich.pve_photos")
+    nas_im2ch = path_probe(ctx, "nas", "/volume1/im2ch", scope="immich.nas_im2ch")
+
+    if "backup-immich-db.sh" in (cron_run.stdout or ""):
+        live_rows.append(
+            build_live_action_row(
+                domain=domain,
+                action_id="immich_db_backup_cron",
+                host="immich",
+                mechanism="cron_d",
+                locus="/etc/cron.d/immich-backup",
+                schedule="daily_03_00",
+                effect="write_pg_dump_exports",
+                classification="unknown",
+            )
+        )
+
+    destructive_behavior_ids: list[str] = []
+    if "-mtime +${RETENTION_DAYS} -delete" in (script_run.stdout or "") or "-mtime +7 -delete" in (script_run.stdout or ""):
+        destructive_behavior_ids.append("immich_db_backup_prune_after_7_days")
+
+    env_values = parse_env_file(env_run.stdout or "")
+    canonical_paths = {str(row.get("path") or "") for row in ensure_list(registry_service.get("canonical_live_roots")) if isinstance(row, dict)}
+    for key in ("UPLOAD_LOCATION", "DB_DATA_LOCATION"):
+        value = env_values.get(key)
+        if value and value not in canonical_paths:
+            add_mismatch(
+                mismatches,
+                domain=domain,
+                severity="high",
+                code="canonical_root_mismatch",
+                host="immich",
+                path=value,
+                message=f"{key}={value} is not declared as a canonical live root",
+            )
+
+    if pve_photos.get("state") == "present" and pve_photos.get("file_count", 0) > 0:
+        add_mismatch(
+            mismatches,
+            domain=domain,
+            severity="warn",
+            code="legacy_quarantine_root_still_populated_pve",
+            host="pve",
+            path="/tank/immich/photos",
+            message=f"legacy quarantine root remains populated (file_count={pve_photos.get('file_count')})",
+        )
+
+    if nas_im2ch.get("state") == "present" and nas_im2ch.get("file_count", 0) > 0:
+        add_mismatch(
+            mismatches,
+            domain=domain,
+            severity="warn",
+            code="legacy_quarantine_root_still_populated_nas",
+            host="nas",
+            path="/volume1/im2ch",
+            message=f"legacy home quarantine root remains populated (file_count={nas_im2ch.get('file_count')})",
+        )
+
+    summary = compare_background_actions(registry_service, live_rows=live_rows, mismatches=mismatches, domain=domain)
+    return {
+        "domain": domain,
+        "background_actions": summary,
+        "observed_background_rows": live_rows,
+        "mismatches": mismatches,
+        "observations": {
+            "env": {
+                "UPLOAD_LOCATION": env_values.get("UPLOAD_LOCATION"),
+                "DB_DATA_LOCATION": env_values.get("DB_DATA_LOCATION"),
+            },
+            "observed_destructive_behavior_ids": destructive_behavior_ids,
+            "pve_photos": pve_photos,
+            "nas_im2ch": nas_im2ch,
+        },
+    }
+
+
+def posture_from_mismatches(mismatches: list[dict[str, Any]]) -> str:
+    severities = {str(row.get("severity") or "") for row in mismatches}
+    if "high" in severities or "medium" in severities:
+        return "fail"
+    if "warn" in severities:
+        return "warn"
+    return "pass"
+
+
+def flatten_background_rows(domains: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for domain in domains:
+        for row in ensure_list(domain.get("observed_background_rows")):
+            rows.append(dict(row))
+    return rows
+
+
+def flatten_mismatch_rows(domains: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for domain in domains:
+        for row in ensure_list(domain.get("mismatches")):
+            rows.append(dict(row))
+    return rows
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
+
+
+def write_command_log(path: Path, records: list[CommandRecord]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Service Data Lifecycle Audit Command Log",
+        "",
+        f"generated_at_utc: {now_utc_iso()}",
+        "",
+    ]
+    for record in records:
+        lines.append(f"## {record.scope}")
+        lines.append(f"- target: `{record.target}`")
+        lines.append(f"- returncode: `{record.returncode}`")
+        lines.append(f"- command: `{record.command}`")
+        if record.stdout:
+            lines.append("- stdout:")
+            lines.append("```text")
+            lines.append(record.stdout)
+            lines.append("```")
+        if record.stderr:
+            lines.append("- stderr:")
+            lines.append("```text")
+            lines.append(record.stderr)
+            lines.append("```")
+        lines.append("")
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def render_text(snapshot: dict[str, Any]) -> str:
+    lines = [
+        "service.data.lifecycle.audit",
+        f"generated_at_utc: {snapshot.get('generated_at_utc')}",
+    ]
+    summary = ensure_dict(snapshot.get("summary"))
+    lines.append(
+        "summary: "
+        f"pass={summary.get('domain_posture_pass')} "
+        f"warn={summary.get('domain_posture_warn')} "
+        f"fail={summary.get('domain_posture_fail')} "
+        f"background_actions={summary.get('background_actions_total')} "
+        f"drift_findings={summary.get('drift_findings_total')}"
+    )
+    for domain in ensure_list(snapshot.get("domains")):
+        lines.append(f"{domain.get('domain')}: posture={domain.get('posture')} mismatches={len(ensure_list(domain.get('mismatches')))}")
+        for mismatch in ensure_list(domain.get("mismatches")):
+            lines.append(f"  - [{mismatch.get('severity')}] {mismatch.get('code')}: {mismatch.get('message')}")
+    return "\n".join(lines)
+
+
+def build_snapshot(registry: dict[str, Any], domains: list[dict[str, Any]]) -> dict[str, Any]:
+    for domain in domains:
+        domain["posture"] = posture_from_mismatches(ensure_list(domain.get("mismatches")))
+
+    summary = {
+        "domain_posture_pass": len([row for row in domains if row.get("posture") == "pass"]),
+        "domain_posture_warn": len([row for row in domains if row.get("posture") == "warn"]),
+        "domain_posture_fail": len([row for row in domains if row.get("posture") == "fail"]),
+        "background_actions_total": len(flatten_background_rows(domains)),
+        "drift_findings_total": len(flatten_mismatch_rows(domains)),
+    }
+    return {
+        "version": 1,
+        "status": "audit",
+        "generated_at_utc": now_utc_iso(),
+        "source_registry": "ops/bindings/service.data.lifecycle.registry.yaml",
+        "source_capability": "service.data.lifecycle.audit",
+        "authority_state": "audit",
+        "policy": ensure_dict(registry.get("policy")),
+        "summary": summary,
+        "domains": domains,
+    }
+
+
+def main() -> None:
+    args = parse_args()
+    registry = load_yaml(REGISTRY_PATH)
+    ssh_targets = load_yaml(SSH_TARGETS_PATH)
+    ctx = AuditContext(registry=registry, ssh_targets=ssh_targets)
+    services = ensure_dict(registry.get("services"))
+
+    domains = [
+        audit_backups(ctx, ensure_dict(services.get("backups"))),
+        audit_surveillance(ctx, ensure_dict(services.get("surveillance"))),
+        audit_media(ctx, ensure_dict(services.get("media"))),
+        audit_immich(ctx, ensure_dict(services.get("immich"))),
+    ]
+    snapshot = build_snapshot(registry, domains)
+
+    if args.snapshot_output:
+        output_path = Path(args.snapshot_output).expanduser().resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(yaml_dump(snapshot), encoding="utf-8")
+
+    if args.drift_csv_output:
+        write_csv(
+            Path(args.drift_csv_output).expanduser().resolve(),
+            flatten_mismatch_rows(domains),
+            ["domain", "severity", "code", "host", "path", "message"],
+        )
+
+    if args.background_csv_output:
+        write_csv(
+            Path(args.background_csv_output).expanduser().resolve(),
+            flatten_background_rows(domains),
+            ["domain", "action_id", "classification", "host", "mechanism", "locus", "schedule", "effect"],
+        )
+
+    if args.command_log_output:
+        write_command_log(Path(args.command_log_output).expanduser().resolve(), ctx.command_log)
+
+    if args.format == "json":
+        print(json_dump(snapshot))
+    elif args.format == "yaml":
+        print(yaml_dump(snapshot), end="")
+    else:
+        print(render_text(snapshot))
+
+    if args.strict and ensure_dict(snapshot.get("summary")).get("domain_posture_fail", 0):
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
