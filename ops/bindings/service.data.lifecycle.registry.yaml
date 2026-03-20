@@ -3,7 +3,7 @@
 # Scope: service-data-lifecycle-retention-registry
 
 version: 1
-updated_at: "2026-03-19"
+updated_at: "2026-03-20"
 owner: "@ronny"
 status: authoritative
 authority_state: authoritative
@@ -21,33 +21,28 @@ services:
   media:
     display_name: "Media"
     sites:
+      - home
       - shop
     criticality: tier1
     data_class: mixed_payload_and_regenerable
     canonical_live_roots:
-      - host: pve
-        path: /media
-        purpose: "Canonical NFS export for movies, tv, music, archive, and import surfaces."
-    allowed_secondary_roots:
-      - host: download-stack
-        path: /mnt/media
-        purpose: "RW consumer mount of the canonical /media export."
-      - host: streaming-stack
-        path: /mnt/media
-        purpose: "RO consumer mount of the canonical /media export."
-      - host: download-stack
-        path: /mnt/docker
-        purpose: "Config-state mount for download-stack."
-      - host: streaming-stack
-        path: /mnt/docker
-        purpose: "Config-state mount for streaming-stack."
       - host: nas
         path: /volume1/media-staging
-        purpose: "Active home media import and transitional current-watch surface consumed by media-home VM 106."
-    staging_roots:
+        purpose: "Canonical active media library and intake share for the home plane."
+    allowed_secondary_roots:
+      - host: media-home
+        path: /srv/media
+        purpose: "Canonical media-home mount of the active Synology library."
       - host: download-stack
-        path: /mnt/media/downloads
-        purpose: "Active import/download lane. Must drain after import and must never become a permanent residence."
+        path: /mnt/media
+        purpose: "Residual shop-side compatibility view of the active home library while writer cutover remains incomplete."
+      - host: nas
+        path: /volume1/media-holds
+        purpose: "Explicit hold/review share, not the main library."
+    staging_roots:
+      - host: nas
+        path: /volume1/media-staging/downloads
+        purpose: "Active home intake/download lane. Must drain after import and must never become a permanent residence."
         expiry_policy:
           mode: drain_after_import
           max_age_days: 7
@@ -70,7 +65,7 @@ services:
         purpose: "Cold archive and legacy media hold lane."
       - host: pve
         path: /md1400/backup-cold/apps/media-config
-        purpose: "Canonical config backup archive for download/streaming stacks."
+        purpose: "Canonical config backup archive for the combined media-home plane."
     background_actions:
       declared: []
       retired: []
@@ -110,20 +105,17 @@ services:
       - retired_root_written
     binding_refs:
       storage_map_sites:
+        - home
         - shop
       services_health_hosts:
+        - media-home
         - download-stack
-        - streaming-stack
       backup_runtime_units:
-        - vm-209-download-stack
-        - vm-210-streaming-stack
-        - container-fleet-download-stack
-        - container-fleet-streaming-stack
+        - vm-106-media-home
+        - container-fleet-media-home
       backup_targets:
-        - vm-209-download-stack-primary
-        - vm-210-streaming-stack-primary
-        - app-media-config-download-stack
-        - app-media-config-streaming-stack
+        - home-vm-106-media-home-primary
+        - app-media-config-media-home
 
   surveillance:
     display_name: "Surveillance"
@@ -475,8 +467,7 @@ services:
         - machine-pve
         - machine-proxmox-home
         - vm-203-immich
-        - vm-209-download-stack
-        - vm-210-streaming-stack
+        - container-fleet-media-home
         - vm-215-surveillance-stack
       backup_targets:
         - vm-203-primary
@@ -485,3 +476,4 @@ services:
         - vm-215-surveillance-stack-primary
         - home-vm-100-ha-primary
         - home-vm-106-media-home-primary
+        - app-media-config-media-home

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# media-config-restore-drill — governed scratch restore proof for media config-state
+# media-config-restore-drill — governed scratch restore proof for media-home config-state
 # Domain: media
 # Safety: mutating
 # Approval: auto
@@ -12,6 +12,7 @@ VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 BACKUP_SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
 RECEIPT_DIR="$SPINE_OUTBOX/reports/restore-drills"
 KEEP_ARTIFACTS=0
+SSH_RESOLVE="$ROOT/ops/lib/ssh-resolve.sh"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
@@ -21,16 +22,19 @@ need ssh
 [[ -f "$VM_BINDING" ]] || fail "missing vm lifecycle: $VM_BINDING"
 [[ -f "$BACKUP_SCHEDULE" ]] || fail "missing backup schedule: $BACKUP_SCHEDULE"
 
+# shellcheck source=ops/lib/ssh-resolve.sh
+source "$SSH_RESOLVE" 2>/dev/null || true
+
 usage() {
   cat <<'EOF'
 Usage: media-config-restore-drill [--keep-artifacts]
 
-Runs a scratch restore drill covering both download-stack and streaming-stack:
-  - download-stack: radarr config
-  - streaming-stack: jellyfin config
+Runs a scratch restore drill covering the combined media-home plane:
+  - writer_plane: radarr config
+  - playback_plane: jellyfin config
 
-For each stack:
-  1. Find latest config artifact from /mnt/docker/backups/media-config/
+For each plane:
+  1. Find latest config artifact from /srv/appdata/backups/media-config/
   2. Extract representative config files to temporary location
   3. Validate config structure and key files present
   4. Cleanup (unless --keep-artifacts)
@@ -50,14 +54,25 @@ done
 
 get_vm_ssh_ref() {
   local vm="$1"
-  local target user
+  local target user resolved_host
   target="$(yq e -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .hostname // \"\"" "$VM_BINDING" 2>/dev/null || true)"
   user="$(yq e -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || true)"
   [[ -n "$target" && "$target" != "null" ]] || return 1
+
+  resolved_host="$target"
+  if type ssh_resolve_host_with_fallback &>/dev/null; then
+    local resolution
+    resolution="$(ssh_resolve_host_with_fallback "$target" 2>/dev/null || true)"
+    if [[ -n "$resolution" ]]; then
+      resolved_host="$(awk '{print $1}' <<<"$resolution")"
+    fi
+  fi
+
+  [[ -n "$resolved_host" ]] || return 1
   if [[ -n "$user" && "$user" != "null" ]]; then
-    echo "${user}@${target}"
+    echo "${user}@${resolved_host}"
   else
-    echo "$target"
+    echo "$resolved_host"
   fi
 }
 
@@ -69,14 +84,8 @@ PY
 }
 
 SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-
-download_stack_ssh="$(get_vm_ssh_ref "download-stack" 2>/dev/null || true)"
-streaming_stack_ssh="$(get_vm_ssh_ref "streaming-stack" 2>/dev/null || true)"
-[[ -n "$download_stack_ssh" ]] || fail "no ssh target found for download-stack"
-[[ -n "$streaming_stack_ssh" ]] || fail "no ssh target found for streaming-stack"
-
-download_ssh() { ssh $SSH_OPTS "$download_stack_ssh" "$@"; }
-streaming_ssh() { ssh $SSH_OPTS "$streaming_stack_ssh" "$@"; }
+media_home_ssh="$(get_vm_ssh_ref "media-home" 2>/dev/null || true)"
+[[ -n "$media_home_ssh" ]] || fail "no ssh target found for media-home"
 
 RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DAY="$(date -u +%Y%m%d)"
@@ -87,35 +96,34 @@ RESULT="PASS"
 ERROR_MSG=""
 declare -a DRILL_RESULTS=()
 
-run_stack_drill() {
-  local stack="$1"
-  local ssh_ref="$2"
-  local service="$3"
+run_plane_drill() {
+  local role="$1"
+  local service="$2"
+  local config_root="$3"
   local config_key_file="$4"
 
-  local backup_root="/mnt/docker/backups/media-config"
+  local backup_root="/srv/appdata/backups/media-config"
   local latest_backup
-  # Prefer last-good subdirectory, fallback to parent directory
-  latest_backup="$(ssh $SSH_OPTS "$ssh_ref" \
-    "find '$backup_root/last-good' '$backup_root' -maxdepth 1 -type f -name '${stack}-config-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-" || true)"
+  latest_backup="$(ssh $SSH_OPTS "$media_home_ssh" \
+    "find '$backup_root/last-good' '$backup_root' -maxdepth 1 -type f -name 'media-home-config-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-" || true)"
 
   if [[ -z "$latest_backup" ]]; then
-    echo "  $stack: FAIL (no backup found)"
-    DRILL_RESULTS+=("$stack|FAIL|no_backup_found||")
+    echo "  $role: FAIL (no backup found)"
+    DRILL_RESULTS+=("$role|FAIL|no_backup_found|$service|$config_root|$config_key_file|no_backup_found")
     RESULT="FAIL"
     return 1
   fi
 
-  local drill_dir="/tmp/media-config-drill-${stack}-${RUN_TS}"
+  local drill_dir="/tmp/media-config-drill-${role}-${RUN_TS}"
   local restore_output
   local restore_error
 
   set +e
-  restore_output="$(ssh $SSH_OPTS "$ssh_ref" bash -s -- "$latest_backup" "$drill_dir" "$service" "$config_key_file" "$KEEP_ARTIFACTS" <<'REMOTE_SCRIPT' 2>&1
+  restore_output="$(ssh $SSH_OPTS "$media_home_ssh" bash -s -- "$latest_backup" "$drill_dir" "$config_root" "$config_key_file" "$KEEP_ARTIFACTS" <<'REMOTE_SCRIPT' 2>&1
 set -euo pipefail
 backup_file="$1"
 drill_dir="$2"
-service="$3"
+config_root="$3"
 config_key_file="$4"
 keep_artifacts="${5:-0}"
 
@@ -129,22 +137,16 @@ trap cleanup EXIT
 rm -rf "$drill_dir"
 mkdir -p "$drill_dir"
 
-# Find the service config path in archive (without extracting everything)
-# Disable pipefail to avoid SIGPIPE from grep -q
 set +o pipefail
-found_path=""
-if tar -tzf "$backup_file" | grep -q "^mnt/docker/volumes/${service}/config/"; then
-  found_path="mnt/docker/volumes/${service}/config"
-elif tar -tzf "$backup_file" | grep -q "^opt/appdata/${service}/"; then
-  found_path="opt/appdata/${service}"
+if ! tar -tzf "$backup_file" | grep -q "^${config_root}/"; then
+  set -o pipefail
+  echo "config root missing in archive: $config_root" >&2
+  exit 1
 fi
 set -o pipefail
 
-[[ -n "$found_path" ]] || { echo "service config path not found in backup" >&2; exit 1; }
-
-# Verify key config file exists in archive
 set +o pipefail
-key_file_path="${found_path}/${config_key_file}"
+key_file_path="${config_root}/${config_key_file}"
 if ! tar -tzf "$backup_file" | grep -Fxq "$key_file_path"; then
   set -o pipefail
   echo "key config file missing in archive: $config_key_file" >&2
@@ -152,17 +154,14 @@ if ! tar -tzf "$backup_file" | grep -Fxq "$key_file_path"; then
 fi
 set -o pipefail
 
-# Count files in config directory within archive
 set +o pipefail
-file_count="$(tar -tzf "$backup_file" | grep "^${found_path}/" | grep -v '/$' | wc -l | tr -d ' ')"
+file_count="$(tar -tzf "$backup_file" | grep "^${config_root}/" | grep -v '/$' | wc -l | tr -d ' ')"
 set -o pipefail
 [[ "$file_count" -gt 0 ]] || { echo "config directory empty in archive" >&2; exit 3; }
 
-# Extract only the key config file to verify it's valid
 mkdir -p "$drill_dir/$(dirname "$key_file_path")"
 tar -xzf "$backup_file" -C "$drill_dir" "$key_file_path"
 
-# Verify extracted file is not empty
 [[ -s "$drill_dir/$key_file_path" ]] || { echo "extracted key file is empty" >&2; exit 4; }
 
 echo "OK: verified $file_count files in archive, key file extracted and valid"
@@ -172,39 +171,44 @@ REMOTE_SCRIPT
   set -e
 
   if [[ $rc -eq 0 ]]; then
-    echo "  $stack: PASS"
+    echo "  $role: PASS"
     local backup_basename
     backup_basename="$(basename "$latest_backup")"
-    DRILL_RESULTS+=("$stack|PASS|$backup_basename|$service|$config_key_file")
+    DRILL_RESULTS+=("$role|PASS|$backup_basename|$service|$config_root|$config_key_file|")
   else
-    echo "  $stack: FAIL (restore error)"
+    echo "  $role: FAIL (restore error)"
     restore_error="$(echo "$restore_output" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' | sed 's/^ //; s/ $//')"
-    DRILL_RESULTS+=("$stack|FAIL|restore_failed||$restore_error")
+    DRILL_RESULTS+=("$role|FAIL|restore_failed|$service|$config_root|$config_key_file|$restore_error")
     RESULT="FAIL"
-    ERROR_MSG="${ERROR_MSG}${stack}: ${restore_error}; "
+    ERROR_MSG="${ERROR_MSG}${role}: ${restore_error}; "
   fi
 }
 
 echo "=== Media Config Restore Drill ==="
 echo "timestamp: $RUN_TS"
 
-run_stack_drill "download-stack" "$download_stack_ssh" "radarr" "config.xml"
-run_stack_drill "streaming-stack" "$streaming_stack_ssh" "jellyfin" "config/system.xml"
+run_plane_drill "writer_plane" "radarr" "srv/appdata/compose/media-write/volumes/radarr/config" "config.xml"
+run_plane_drill "playback_plane" "jellyfin" "srv/appdata/compose/media-playback/volumes/jellyfin/config" "config/system.xml"
 
 ERROR_MSG="${ERROR_MSG%; }"
 
+writer_result="${DRILL_RESULTS[0]#*|}"
+writer_result="${writer_result%%|*}"
+playback_result="${DRILL_RESULTS[1]#*|}"
+playback_result="${playback_result%%|*}"
+
 {
   echo "kind: media_config_restore_drill"
-  echo "version: 1"
+  echo "version: 2"
   echo "generated_at: \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
   echo "result: $RESULT"
   echo "target:"
-  echo "  download_stack_ssh_ref: $(yaml_quote "$download_stack_ssh")"
-  echo "  streaming_stack_ssh_ref: $(yaml_quote "$streaming_stack_ssh")"
+  echo "  media_home_ssh_ref: $(yaml_quote "$media_home_ssh")"
   echo "artifacts:"
   for drill_line in "${DRILL_RESULTS[@]}"; do
-    IFS='|' read -r stack result backup service config_file <<< "$drill_line"
-    echo "  - stack: $(yaml_quote "$stack")"
+    IFS='|' read -r role result backup service config_root config_file detail <<< "$drill_line"
+    echo "  - stack: \"media-home\""
+    echo "    role: $(yaml_quote "$role")"
     echo "    result: $(yaml_quote "$result")"
     if [[ -n "$backup" ]]; then
       echo "    backup: $(yaml_quote "$backup")"
@@ -216,6 +220,11 @@ ERROR_MSG="${ERROR_MSG%; }"
     else
       echo "    service: null"
     fi
+    if [[ -n "$config_root" ]]; then
+      echo "    config_root: $(yaml_quote "$config_root")"
+    else
+      echo "    config_root: null"
+    fi
     if [[ -n "$config_file" ]]; then
       echo "    key_config_file: $(yaml_quote "$config_file")"
     else
@@ -226,14 +235,11 @@ ERROR_MSG="${ERROR_MSG%; }"
   echo "  mode: scratch_extract_verify"
   echo "  keep_artifacts: $([[ "$KEEP_ARTIFACTS" -eq 1 ]] && echo true || echo false)"
   echo "comparison:"
-  echo "  download_stack:"
-  download_result="${DRILL_RESULTS[0]#*|}"  # Remove stack name
-  download_result="${download_result%%|*}"  # Extract result field
-  echo "    result: $(yaml_quote "$download_result")"
-  echo "  streaming_stack:"
-  streaming_result="${DRILL_RESULTS[1]#*|}"  # Remove stack name
-  streaming_result="${streaming_result%%|*}"  # Extract result field
-  echo "    result: $(yaml_quote "$streaming_result")"
+  echo "  media_home:"
+  echo "    writer_plane:"
+  echo "      result: $(yaml_quote "$writer_result")"
+  echo "    playback_plane:"
+  echo "      result: $(yaml_quote "$playback_result")"
   if [[ -n "$ERROR_MSG" ]]; then
     echo "error: $(yaml_quote "$ERROR_MSG")"
   else

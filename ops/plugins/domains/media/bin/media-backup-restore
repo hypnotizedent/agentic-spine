@@ -5,14 +5,18 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 SERVICES_HEALTH="$ROOT/ops/bindings/services.health.yaml"
-BACKUP_ROOT="/mnt/docker/backups/media-config"
+BACKUP_ROOT="/srv/appdata/backups/media-config"
+SSH_RESOLVE="$ROOT/ops/lib/ssh-resolve.sh"
+
+# shellcheck source=ops/lib/ssh-resolve.sh
+source "$SSH_RESOLVE" 2>/dev/null || true
 
 usage() {
   cat <<'USAGE'
 media.backup.restore - Restore media config-state from backup
 
 Args:
-  --vm HOST            Required: download-stack|streaming-stack
+  --vm HOST            Required: media-home
   --service NAME       Required: media service id (radarr, sonarr, jellyfin, etc.)
   --backup-file PATH   Optional: explicit backup archive path on target VM
   --retention DAYS     Optional: backup lookup window (default: 14)
@@ -49,8 +53,8 @@ done
 [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || stop "--retention must be numeric"
 
 case "$VM" in
-  download-stack|streaming-stack) ;;
-  *) stop "--vm must be download-stack or streaming-stack" ;;
+  media-home) ;;
+  *) stop "--vm must be media-home" ;;
 esac
 
 command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
@@ -61,29 +65,63 @@ map_service_paths() {
   local vm="$1"
   local service="$2"
   case "$service" in
-    radarr|sonarr|lidarr|prowlarr|sabnzbd|qbittorrent|trailarr)
-      [[ "$vm" == "download-stack" ]] || return 1
-      PRIMARY_PATH="/mnt/docker/volumes/${service}/config"
-      APPDATA_PATH="/opt/appdata/${service}"
+    radarr|sonarr|lidarr|prowlarr|sabnzbd|qbittorrent|recyclarr|unpackerr|trailarr|flaresolverr|crosswatch)
+      [[ "$vm" == "media-home" ]] || return 1
+      PRIMARY_PATH="/srv/appdata/compose/media-write/volumes/${service}/config"
+      APPDATA_PATH="/srv/appdata/opt-appdata/${service}"
       ;;
     jellyfin|jellyseerr|bazarr)
-      [[ "$vm" == "streaming-stack" ]] || return 1
-      PRIMARY_PATH="/mnt/docker/volumes/${service}/config"
-      APPDATA_PATH="/opt/appdata/${service}"
+      [[ "$vm" == "media-home" ]] || return 1
+      PRIMARY_PATH="/srv/appdata/compose/media-playback/volumes/${service}/config"
+      APPDATA_PATH="/srv/appdata/opt-appdata/${service}"
       ;;
     navidrome)
-      [[ "$vm" == "streaming-stack" ]] || return 1
-      PRIMARY_PATH="/mnt/docker/volumes/navidrome/data"
-      APPDATA_PATH="/opt/appdata/navidrome"
+      [[ "$vm" == "media-home" ]] || return 1
+      PRIMARY_PATH="/srv/appdata/compose/media-playback/volumes/navidrome/data"
+      APPDATA_PATH="/srv/appdata/opt-appdata/navidrome"
       ;;
     homarr)
-      [[ "$vm" == "streaming-stack" ]] || return 1
-      PRIMARY_PATH="/mnt/docker/volumes/homarr/configs"
-      APPDATA_PATH="/opt/appdata/homarr"
+      [[ "$vm" == "media-home" ]] || return 1
+      PRIMARY_PATH="/srv/appdata/compose/media-playback/volumes/homarr/configs"
+      APPDATA_PATH=""
+      ;;
+    wizarr)
+      [[ "$vm" == "media-home" ]] || return 1
+      PRIMARY_PATH="/srv/appdata/compose/media-playback/volumes/wizarr/data"
+      APPDATA_PATH=""
+      ;;
+    spotisub|subgen)
+      [[ "$vm" == "media-home" ]] || return 1
+      PRIMARY_PATH="/srv/appdata/compose/media-playback/volumes/${service}/config"
+      APPDATA_PATH=""
+      ;;
+    autopulse|gluetun|posterizarr)
+      [[ "$vm" == "media-home" ]] || return 1
+      PRIMARY_PATH="/srv/appdata/compose/media-write/volumes/${service}"
+      APPDATA_PATH=""
+      ;;
+    slskd)
+      [[ "$vm" == "media-home" ]] || return 1
+      PRIMARY_PATH="/srv/appdata/compose/media-write/volumes/slskd/app"
+      APPDATA_PATH="/srv/appdata/compose/media-write/volumes/slskd/data"
+      ;;
+    soularr)
+      [[ "$vm" == "media-home" ]] || return 1
+      PRIMARY_PATH="/srv/appdata/compose/media-write/volumes/soularr/data"
+      APPDATA_PATH=""
+      ;;
+    crowdsec)
+      [[ "$vm" == "media-home" ]] || return 1
+      PRIMARY_PATH="/srv/appdata/compose/media-write/volumes/crowdsec/config"
+      APPDATA_PATH="/srv/appdata/compose/media-write/volumes/crowdsec/data"
+      ;;
+    decypharr)
+      [[ "$vm" == "media-home" ]] || return 1
+      PRIMARY_PATH="/srv/appdata/compose/media-write/volumes/decypharr/config"
+      APPDATA_PATH="/srv/appdata/compose/media-write/volumes/decypharr/app"
       ;;
     *)
-      return 1
-      ;;
+      return 1 ;;
   esac
 }
 
@@ -94,14 +132,25 @@ container_name="$SERVICE"
 
 get_vm_ssh_ref() {
   local vm="$1"
-  local target user
+  local target user resolved_host
   target="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .hostname // \"\"" "$VM_BINDING" 2>/dev/null || true)"
   user="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || true)"
   [[ -n "$target" && "$target" != "null" ]] || return 1
+
+  resolved_host="$target"
+  if type ssh_resolve_host_with_fallback &>/dev/null; then
+    local resolution
+    resolution="$(ssh_resolve_host_with_fallback "$target" 2>/dev/null || true)"
+    if [[ -n "$resolution" ]]; then
+      resolved_host="$(awk '{print $1}' <<<"$resolution")"
+    fi
+  fi
+
+  [[ -n "$resolved_host" ]] || return 1
   if [[ -n "$user" && "$user" != "null" ]]; then
-    echo "${user}@${target}"
+    echo "${user}@${resolved_host}"
   else
-    echo "$target"
+    echo "$resolved_host"
   fi
 }
 

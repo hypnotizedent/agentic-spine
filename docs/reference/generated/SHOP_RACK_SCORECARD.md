@@ -1,14 +1,14 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-19
+last_verified: 2026-03-20
 scope: shop-rack-scorecard
 source_binding: ops/bindings/shop.storage.map.yaml
 ---
 
 # Shop Rack Scorecard
 
-- Generated: `2026-03-19T15:25:40Z`
+- Generated: `2026-03-20T21:09:06Z`
 - Rebuild: `./bin/ops cap run infra.shop.storage.authority.build`
 - Active runtimes: `14`
 - Tombstones: `1`
@@ -68,8 +68,8 @@ source_binding: ops/bindings/shop.storage.map.yaml
 | 205 | observability | vm | auto | boot-only | boot-disk:observability boot disk (50G), boot-disk:/opt/stacks | pve-vzdump-primary | dash.ronny.works, grafana.ronny.works | 6 probes, node-exporter |
 | 206 | dev-tools | vm | auto | boot-only | boot-disk:dev-tools boot disk (50G), boot-disk:/opt/stacks/gitea | pve-vzdump-primary, r730xd-dev-tools-backups | git.ronny.works | 1 probes |
 | 207 | ai-consolidation | vm | auto | boot-only | boot-disk:ai-consolidation boot disk (200G), boot-disk:/opt/stacks/ai-consolidation | pve-vzdump-primary | private-only | 2 probes |
-| 209 | download-stack | vm | auto | tank-docker | tank:tank/docker/download-stack, media:media, +2 more | r730xd-media-config-backups | private-only | 7 probes, node-exporter |
-| 210 | streaming-stack | vm | auto | tank-docker | tank:tank/docker/streaming-stack, media:media, +2 more | r730xd-media-config-backups | homarr.ronny.works, jellyfin.ronny.works, music.ronny.works, requests.ronny.works, spotisub.ronny.works | 8 probes, node-exporter |
+| 209 | download-stack | vm | auto | tank-docker | tank:tank/docker/download-stack, media:media | none | private-only | 7 probes, node-exporter |
+| 210 | streaming-stack | vm | auto | tank-docker | tank:tank/docker/streaming-stack, media:media | none | homarr.ronny.works, jellyfin.ronny.works, music.ronny.works, requests.ronny.works, spotisub.ronny.works | 8 probes, node-exporter |
 | 211 | finance-stack | vm | auto | boot-only | boot-disk:finance-stack boot disk (96G), boot-disk:/opt/stacks/finance | pve-vzdump-primary, r730xd-finance-backups | docs.mintprints.com, docs.ronny.works, finances.mintprints.com, finances.ronny.works, firefly.ronny.works, investments.mintprints.com, investments.ronny.works | 4 probes |
 | 212 | mint-data | vm | auto | boot-only | tank-vms:/dev/vda ext4 secondary disk mounted at /mnt/data; DockerRootDir=/mnt/data/docker, boot-disk:/opt/stacks/mint-data | pve-vzdump-primary, r730xd-mint-backups | private-only | 1 probes |
 | 213 | mint-apps | vm | auto | boot-only | boot-disk:mint-apps boot disk (50G), boot-disk:/opt/stacks/mint-apps | pve-vzdump-primary | suppliers.mintprints.co, customer.mintprints.co, customer.mintprints.com, estimator.mintprints.co, mintprints-app.ronny.works, mintprints.com, pricing.mintprints.co, pricing.mintprints.com, shipping.mintprints.co, shipping.mintprints.com, www.mintprints.com | 9 probes |

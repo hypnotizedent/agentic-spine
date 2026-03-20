@@ -6,7 +6,7 @@
 # Do not edit manually — rebuild with: ./bin/ops cap run infra.shop.storage.authority.build
 version: 1
 authority_state: projection
-generated_at_utc: '2026-03-19T15:25:40Z'
+generated_at_utc: '2026-03-20T21:09:06Z'
 site: shop
 generated_by:
   capability: infra.shop.storage.authority.build
@@ -286,8 +286,7 @@ service_lifecycle:
   - machine-pve
   - machine-proxmox-home
   - vm-203-immich
-  - vm-209-download-stack
-  - vm-210-streaming-stack
+  - container-fleet-media-home
   - vm-215-surveillance-stack
   backup_targets:
   - vm-203-primary
@@ -296,6 +295,7 @@ service_lifecycle:
   - vm-215-surveillance-stack-primary
   - home-vm-100-ha-primary
   - home-vm-106-media-home-primary
+  - app-media-config-media-home
   canonical_live_roots:
   - pve:/md1400/backup-cold (Canonical shop cold backup plane.)
   - nas:/volume1/backups/proxmox_backups/dump (Canonical home backup plane.)
@@ -376,28 +376,25 @@ service_lifecycle:
   criticality: tier1
   data_class: mixed_payload_and_regenerable
   runtime_hosts:
+  - media-home
   - download-stack
-  - streaming-stack
   backup_runtime_units:
-  - vm-209-download-stack
-  - vm-210-streaming-stack
-  - container-fleet-download-stack
-  - container-fleet-streaming-stack
+  - vm-106-media-home
+  - container-fleet-media-home
   backup_targets:
-  - vm-209-download-stack-primary
-  - vm-210-streaming-stack-primary
-  - app-media-config-download-stack
-  - app-media-config-streaming-stack
+  - home-vm-106-media-home-primary
+  - app-media-config-media-home
   canonical_live_roots:
-  - pve:/media (Canonical NFS export for movies, tv, music, archive, and import surfaces.)
+  - nas:/volume1/media-staging (Canonical active media library and intake share for
+    the home plane.)
   allowed_secondary_roots:
-  - download-stack:/mnt/media (RW consumer mount of the canonical /media export.)
-  - streaming-stack:/mnt/media (RO consumer mount of the canonical /media export.)
-  - download-stack:/mnt/docker (Config-state mount for download-stack.)
-  - streaming-stack:/mnt/docker (Config-state mount for streaming-stack.)
+  - media-home:/srv/media (Canonical media-home mount of the active Synology library.)
+  - download-stack:/mnt/media (Residual shop-side compatibility view of the active
+    home library while writer cutover remains incomplete.)
+  - nas:/volume1/media-holds (Explicit hold/review share, not the main library.)
   staging_roots:
-  - download-stack:/mnt/media/downloads (Active import/download lane. Must drain after
-    import and must never become a permanent residence.)
+  - nas:/volume1/media-staging/downloads (Active home intake/download lane. Must drain
+    after import and must never become a permanent residence.)
   quarantine_roots:
   - pve:/md1400/archive/media-quarantine/pending (Operator review queue for unresolved
     media.)
@@ -406,7 +403,7 @@ service_lifecycle:
   export_archive_lanes:
   - pve:/md1400/media-cold (Cold archive and legacy media hold lane.)
   - pve:/md1400/backup-cold/apps/media-config (Canonical config backup archive for
-    download/streaming stacks.)
+    the combined media-home plane.)
   retention_policy:
     policy_type: bounded_stage_windows
     claim_days: null
@@ -926,13 +923,9 @@ runtime_storage:
   - sonarr
   public_routes: []
   public_route_count: 0
-  backup_profiles:
-  - media-config-lean
-  - media-lean
-  durability_classes:
-  - small_state
-  restore_classes:
-  - media-config-dry-run-monthly
+  backup_profiles: []
+  durability_classes: []
+  restore_classes: []
   storage_objects:
   - kind: zfs_dataset_nfs_export
     object: tank/docker/download-stack
@@ -954,36 +947,10 @@ runtime_storage:
     pool: media
     mount_path: /mnt/media
     note: mode=rw
-  - kind: path
-    object: /mnt/docker/volumes
-    purpose: Config-state path declared in backup inventory
-    durability_role: runtime_primary
-    pool: tank
-  - kind: path
-    object: /opt/appdata
-    purpose: Config-state path declared in backup inventory
-    durability_role: runtime_primary
-    pool: tank
-  backup_generation_lanes:
-  - lane_id: r730xd-media-config-backups
-    host: pve
-    base_path: /md1400/backup-cold/apps/media-config
-  restore_targets:
-  - name: app-media-config-download-stack
-    enabled: true
-    host: pve
-    base_path: /md1400/backup-cold/apps/media-config/download-stack
-    glob: download-stack-config-*.tar.gz
-    classification: critical
-  - name: vm-209-download-stack-primary
-    enabled: true
-    host: pve
-    base_path: /md1400/backup-cold/vzdump/pve
-    glob: vzdump-qemu-209-*.vma.zst
-    classification: important
-  backup_admission_states:
-  - production_ready
-  primary_backup_unit: vm-209-download-stack
+  backup_generation_lanes: []
+  restore_targets: []
+  backup_admission_states: []
+  primary_backup_unit: ''
 - vm_id: 210
   hostname: streaming-stack
   kind: vm
@@ -1034,13 +1001,9 @@ runtime_storage:
     routing_layer: cloudflare_tunnel
     zone: ronny.works
   public_route_count: 5
-  backup_profiles:
-  - media-config-lean
-  - media-lean
-  durability_classes:
-  - small_state
-  restore_classes:
-  - media-config-dry-run-monthly
+  backup_profiles: []
+  durability_classes: []
+  restore_classes: []
   storage_objects:
   - kind: zfs_dataset_nfs_export
     object: tank/docker/streaming-stack
@@ -1062,36 +1025,10 @@ runtime_storage:
     pool: media
     mount_path: /mnt/media
     note: mode=ro
-  - kind: path
-    object: /mnt/docker/volumes
-    purpose: Config-state path declared in backup inventory
-    durability_role: runtime_primary
-    pool: tank
-  - kind: path
-    object: /opt/appdata
-    purpose: Config-state path declared in backup inventory
-    durability_role: runtime_primary
-    pool: tank
-  backup_generation_lanes:
-  - lane_id: r730xd-media-config-backups
-    host: pve
-    base_path: /md1400/backup-cold/apps/media-config
-  restore_targets:
-  - name: app-media-config-streaming-stack
-    enabled: true
-    host: pve
-    base_path: /md1400/backup-cold/apps/media-config/streaming-stack
-    glob: streaming-stack-config-*.tar.gz
-    classification: critical
-  - name: vm-210-streaming-stack-primary
-    enabled: true
-    host: pve
-    base_path: /md1400/backup-cold/vzdump/pve
-    glob: vzdump-qemu-210-*.vma.zst
-    classification: important
-  backup_admission_states:
-  - production_ready
-  primary_backup_unit: vm-210-streaming-stack
+  backup_generation_lanes: []
+  restore_targets: []
+  backup_admission_states: []
+  primary_backup_unit: ''
 - vm_id: 211
   hostname: finance-stack
   kind: vm

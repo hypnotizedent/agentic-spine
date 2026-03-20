@@ -114,7 +114,7 @@ model:
       base_path: /md1400/backup-cold/apps/media-config
       max_total_gb: 500
       max_file_count: 1000
-      description: "Canonical 730XD backup plane for media config-state (download-stack, streaming-stack). Media payload remains regenerable."
+      description: "Canonical 730XD backup plane for media-home combined config-state archives. Legacy split-shop VM capsules remain historical restore residue only."
     nas-home-local-exception:
       host: nas
       base_path: /volume1/backups/proxmox_backups/dump
@@ -130,12 +130,12 @@ model:
     # nas-app-backups REMOVED 2026-03-08: Fully deprecated, migration complete to 730XD canonical plane.
     media-config-backups:
       host_group:
-        - download-stack
-        - streaming-stack
-      base_path: /mnt/docker/backups/media-config
+        - media-home
+      base_path: /srv/appdata/backups/media-config
       exclusion_policy:
-        - /mnt/media
+        - /srv/media
         - "*/cache"
+        - "*/tmp"
       max_total_gb: 300
       max_file_count: 800
     r730xd-archive-smb-snapshots:
@@ -306,44 +306,6 @@ runtime_units:
     restore_class: vm-dry-run-quarterly
     inventory_targets:
       - vm-207-ai-consolidation-primary
-    backup_admission_state: production_ready
-  - unit_id: vm-209-download-stack
-    kind: vm
-    hostname: download-stack
-    backup_profile: media-lean
-    data_class: small_state
-    include_paths:
-      - /mnt/docker/volumes
-      - /opt/appdata
-    exclude_paths:
-      - /mnt/media
-      - /mnt/docker/volumes/*/cache
-      - /mnt/docker/volumes/*/tmp
-    destination_lane: r730xd-media-config-backups
-    schedule_class: daily-config-est
-    restore_class: media-config-dry-run-monthly
-    inventory_targets:
-      - vm-209-download-stack-primary
-      - app-media-config-download-stack
-    backup_admission_state: production_ready
-  - unit_id: vm-210-streaming-stack
-    kind: vm
-    hostname: streaming-stack
-    backup_profile: media-lean
-    data_class: small_state
-    include_paths:
-      - /mnt/docker/volumes
-      - /opt/appdata
-    exclude_paths:
-      - /mnt/media
-      - /mnt/docker/volumes/*/cache
-      - /mnt/docker/volumes/*/tmp
-    destination_lane: r730xd-media-config-backups
-    schedule_class: daily-config-est
-    restore_class: media-config-dry-run-monthly
-    inventory_targets:
-      - vm-210-streaming-stack-primary
-      - app-media-config-streaming-stack
     backup_admission_state: production_ready
   - unit_id: vm-211-finance-stack
     kind: vm
@@ -531,42 +493,28 @@ runtime_units:
       - app-infisical
       - app-vaultwarden
     backup_admission_state: production_ready
-  - unit_id: container-fleet-download-stack
+  - unit_id: container-fleet-media-home
     kind: container-fleet
-    hostname: download-stack
+    hostname: media-home-config
     backup_profile: media-config-lean
     data_class: small_state
     include_paths:
-      - /mnt/docker/volumes
-      - /opt/appdata
+      - /srv/appdata/compose/media-write/volumes
+      - /srv/appdata/compose/media-playback/volumes
+      - /srv/appdata/opt-appdata
     exclude_paths:
-      - /mnt/media
-      - /mnt/docker/volumes/*/cache
-      - /mnt/docker/volumes/*/tmp
+      - /srv/media
+      - /srv/appdata/compose/media-write/volumes/*/cache
+      - /srv/appdata/compose/media-write/volumes/*/tmp
+      - /srv/appdata/compose/media-playback/volumes/*/cache
+      - /srv/appdata/compose/media-playback/volumes/*/tmp
     destination_lane: r730xd-media-config-backups
     schedule_class: daily-config-est
     restore_class: media-config-dry-run-monthly
     inventory_targets:
-      - app-media-config-download-stack
+      - app-media-config-media-home
     backup_admission_state: production_ready
-  - unit_id: container-fleet-streaming-stack
-    kind: container-fleet
-    hostname: streaming-stack
-    backup_profile: media-config-lean
-    data_class: small_state
-    include_paths:
-      - /mnt/docker/volumes
-      - /opt/appdata
-    exclude_paths:
-      - /mnt/media
-      - /mnt/docker/volumes/*/cache
-      - /mnt/docker/volumes/*/tmp
-    destination_lane: r730xd-media-config-backups
-    schedule_class: daily-config-est
-    restore_class: media-config-dry-run-monthly
-    inventory_targets:
-      - app-media-config-streaming-stack
-    backup_admission_state: production_ready
+    description: "Combined media-home config-state fleet for the active home media plane. Payload remains on Synology and is excluded from config archives."
   - unit_id: container-fleet-immich
     kind: container-fleet
     hostname: immich
@@ -1102,24 +1050,15 @@ targets:
     stale_after_hours: 26
     classification: important
     description: "n8n workflow snapshot archive. Daily local workflow export on VM 202 is packaged and synced to the 730XD canonical backup plane."
-  - name: app-media-config-download-stack
+  - name: app-media-config-media-home
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/media-config/download-stack"
-    glob: "download-stack-config-*.tar.gz"
+    base_path: "/md1400/backup-cold/apps/media-config/media-home"
+    glob: "media-home-config-*.tar.gz"
     stale_after_hours: 30
     classification: critical
-    description: "Media config-state backups (download-stack). Synced to the 730XD canonical backup plane; media payload remains regenerable and excluded."
-  - name: app-media-config-streaming-stack
-    enabled: true
-    kind: file_glob
-    host: pve
-    base_path: "/md1400/backup-cold/apps/media-config/streaming-stack"
-    glob: "streaming-stack-config-*.tar.gz"
-    stale_after_hours: 30
-    classification: critical
-    description: "Media config-state backups (streaming-stack). Synced to the 730XD canonical backup plane; media payload remains regenerable and excluded."
+    description: "Media-home combined config-state backups. Synced to the 730XD canonical backup plane; media payload remains regenerable and excluded."
   - name: device-ronny-macbook
     enabled: false
     kind: file_glob

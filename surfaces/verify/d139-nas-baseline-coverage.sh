@@ -3,7 +3,18 @@
 # D139: NAS baseline coverage present across device registry and backup inventory contracts.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT_DEFAULT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
+if CWD_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"; then
+  ROOT_DEFAULT="$CWD_ROOT"
+elif SCRIPT_ROOT="$(git -C "$SCRIPT_DIR/../.." rev-parse --show-toplevel 2>/dev/null)"; then
+  ROOT_DEFAULT="$SCRIPT_ROOT"
+fi
+if [[ -n "${SPINE_ROOT:-}" && "$SPINE_ROOT" == "$ROOT_DEFAULT" ]]; then
+  ROOT="$SPINE_ROOT"
+else
+  ROOT="$ROOT_DEFAULT"
+fi
 DEVICE_REG="$ROOT/ops/bindings/home.device.registry.yaml"
 BACKUP_INV="$ROOT/ops/bindings/backup.inventory.yaml"
 
@@ -62,9 +73,9 @@ if [[ -f "$BACKUP_INV" ]]; then
   [[ "$offsite_target_state" == "false" ]] || err "vm-offsite-critical must remain present as an explicit disabled legacy target"
 
   # Media config-state targets are required in systemic model.
-  media_cfg_count="$(yq e -r '[.targets[] | select(.enabled == true and (.name == "app-media-config-download-stack" or .name == "app-media-config-streaming-stack"))] | length' "$BACKUP_INV" 2>/dev/null || echo 0)"
+  media_cfg_count="$(yq e -r '[.targets[] | select(.enabled == true and .name == "app-media-config-media-home")] | length' "$BACKUP_INV" 2>/dev/null || echo 0)"
   [[ "$media_cfg_count" =~ ^[0-9]+$ ]] || media_cfg_count=0
-  [[ "$media_cfg_count" -eq 2 ]] || err "media config-state targets missing (expected app-media-config-download-stack + app-media-config-streaming-stack)"
+  [[ "$media_cfg_count" -eq 1 ]] || err "media config-state target missing (expected app-media-config-media-home)"
 
   # Runtime unit model must be present and include machine/vm/container-fleet classes.
   runtime_units="$(yq e -r '.runtime_units | length' "$BACKUP_INV" 2>/dev/null || echo 0)"

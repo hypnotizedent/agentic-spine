@@ -377,7 +377,7 @@ frequency: Monthly
 **Replacement Steps** (after prerequisites met):
 1. Create new pool `media-new` with 4x14TB SAS (alongside existing `media`)
 2. Rsync canonical libraries from `media` → `media-new` (verify checksums)
-3. Stop download-stack and streaming-stack VMs
+3. Stop media-home and any residual split-era media VMs still attached to shop exports
 4. Remount NFS export from `media-new` (update /etc/exports)
 5. Restart VMs, verify playback and *arr access
 6. Monitor for 48 hours (no silent corruption, performance acceptable)

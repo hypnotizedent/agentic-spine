@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# media.backup.create — create media config-state snapshots (non-payload)
+# media.backup.create — create media-home config-state snapshots (non-payload)
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
-BACKUP_ROOT="/mnt/docker/backups/media-config"
+BACKUP_ROOT="/srv/appdata/backups/media-config"
 SSH_RESOLVE="$ROOT/ops/lib/ssh-resolve.sh"
 
 # shellcheck source=ops/lib/ssh-resolve.sh
@@ -15,13 +15,14 @@ usage() {
 media.backup.create — Create media config-state snapshots
 
 Args:
-  --vm HOST         Backup only this VM (download-stack|streaming-stack)
+  --vm HOST         Backup only this VM (media-home)
   --dry-run         Show plan without mutation
   --retention DAYS  Keep snapshots for N days (default: 14)
 
 Notes:
-  - Includes: /mnt/docker/volumes + /opt/appdata service config metadata
-  - Excludes: /mnt/media payload and regenerable cache lanes
+  - Includes: /srv/appdata/compose/media-write/volumes, /srv/appdata/compose/media-playback/volumes,
+              and /srv/appdata/opt-appdata
+  - Excludes: /srv/media payload and regenerable cache/tmp lanes
 USAGE
 }
 
@@ -40,6 +41,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || { echo "FAIL: --retention must be numeric" >&2; exit 1; }
+[[ -z "$VM_FILTER" || "$VM_FILTER" == "media-home" ]] || { echo "FAIL: --vm must be media-home" >&2; exit 1; }
 command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
 command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
 
@@ -67,36 +69,10 @@ get_vm_ssh_ref() {
   fi
 }
 
-DOWNLOAD_PATHS=(
-  "/mnt/docker/volumes/radarr/config"
-  "/mnt/docker/volumes/sonarr/config"
-  "/mnt/docker/volumes/lidarr/config"
-  "/mnt/docker/volumes/prowlarr/config"
-  "/mnt/docker/volumes/sabnzbd/config"
-  "/mnt/docker/volumes/qbittorrent/config"
-  "/mnt/docker/volumes/recyclarr/config"
-  "/mnt/docker/volumes/flaresolverr/config"
-  "/mnt/docker/volumes/trailarr/config"
-  "/mnt/docker/volumes/autopulse"
-  "/opt/appdata/radarr"
-  "/opt/appdata/sonarr"
-  "/opt/appdata/lidarr"
-  "/opt/appdata/prowlarr"
-  "/opt/appdata/sabnzbd"
-  "/opt/appdata/qbittorrent"
-  "/opt/appdata/trailarr"
-)
-
-STREAMING_PATHS=(
-  "/mnt/docker/volumes/jellyfin/config"
-  "/mnt/docker/volumes/navidrome/data"
-  "/mnt/docker/volumes/jellyseerr/config"
-  "/mnt/docker/volumes/bazarr/config"
-  "/mnt/docker/volumes/homarr/configs"
-  "/opt/appdata/jellyfin"
-  "/opt/appdata/navidrome"
-  "/opt/appdata/jellyseerr"
-  "/opt/appdata/bazarr"
+MEDIA_HOME_PATHS=(
+  "/srv/appdata/compose/media-write/volumes"
+  "/srv/appdata/compose/media-playback/volumes"
+  "/srv/appdata/opt-appdata"
 )
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
@@ -124,9 +100,11 @@ backup_vm_configs() {
       echo "  - $p"
     done
     echo "DRY_RUN: payload exclusions:"
-    echo "  - /mnt/media"
-    echo "  - */cache"
-    echo "  - */tmp"
+    echo "  - /srv/media"
+    echo "  - /srv/appdata/compose/media-write/volumes/*/cache"
+    echo "  - /srv/appdata/compose/media-write/volumes/*/tmp"
+    echo "  - /srv/appdata/compose/media-playback/volumes/*/cache"
+    echo "  - /srv/appdata/compose/media-playback/volumes/*/tmp"
     echo "DRY_RUN: output archive: $backup_file"
     return 0
   fi
@@ -176,7 +154,20 @@ if [[ "${#include_paths[@]}" -eq 0 ]]; then
   exit 3
 fi
 
-"${FS_PREFIX[@]}" tar -czf "$backup_file" -C / "${include_paths[@]}"
+tar_excludes=(
+  "srv/media"
+  "srv/appdata/compose/media-write/volumes/*/cache"
+  "srv/appdata/compose/media-write/volumes/*/tmp"
+  "srv/appdata/compose/media-playback/volumes/*/cache"
+  "srv/appdata/compose/media-playback/volumes/*/tmp"
+)
+
+tar_args=()
+for pattern in "${tar_excludes[@]}"; do
+  tar_args+=(--exclude="$pattern")
+done
+
+"${FS_PREFIX[@]}" tar "${tar_args[@]}" -czf "$backup_file" -C / "${include_paths[@]}"
 "${FS_PREFIX[@]}" find "$backup_root" -maxdepth 1 -type f -name "$prune_glob" -mtime +"$retention_days" -delete || true
 "${FS_PREFIX[@]}" ls -lh "$backup_file"
 REMOTE
@@ -197,12 +188,8 @@ echo "dry_run: $([[ "$DRY_RUN" -eq 1 ]] && echo true || echo false)"
 
 ERRORS=0
 
-if [[ -z "$VM_FILTER" || "$VM_FILTER" == "download-stack" ]]; then
-  backup_vm_configs "download-stack" "${DOWNLOAD_PATHS[@]}" || ERRORS=$((ERRORS + 1))
-fi
-
-if [[ -z "$VM_FILTER" || "$VM_FILTER" == "streaming-stack" ]]; then
-  backup_vm_configs "streaming-stack" "${STREAMING_PATHS[@]}" || ERRORS=$((ERRORS + 1))
+if [[ -z "$VM_FILTER" || "$VM_FILTER" == "media-home" ]]; then
+  backup_vm_configs "media-home" "${MEDIA_HOME_PATHS[@]}" || ERRORS=$((ERRORS + 1))
 fi
 
 if [[ $ERRORS -gt 0 ]]; then
@@ -212,5 +199,5 @@ if [[ $ERRORS -gt 0 ]]; then
 fi
 
 echo ""
-echo "OK: config-state backups created"
+echo "OK: media-home config-state backup created"
 exit 0

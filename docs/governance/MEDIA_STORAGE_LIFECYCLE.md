@@ -114,6 +114,9 @@ Purpose: remove ambiguity about where media belongs and stop `/downloads` from b
 - Shop split runtime still exists as transitional residue:
   - `download-stack` remains a residual writer/import surface.
   - `streaming-stack` is no longer the declared playback authority.
+- Backup/config/restore authority is now home-first:
+  - `media-home` is the only canonical config backup + restore drill target.
+  - `download-stack` and `streaming-stack` no longer define media config restore posture.
 - Cold archive path normalization on 730XD is not fully closed yet. The target contract remains `/md1400/archive/media/*`.
 - **Registry alignment (2026-03-19)**: `service.data.lifecycle.registry.yaml` previously listed `nas:/volume1/media-staging` under `drift_rules.retired_roots`. This was the only governance document treating the path as retired; all other contracts (this file, `MEDIA_STORAGE_CONTRACT.md`, tier model, canonical placements) already describe it as the active warm/home share. The registry has been corrected to classify this path as an `allowed_secondary_root`.
 

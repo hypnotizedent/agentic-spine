@@ -2,7 +2,18 @@
 # TRIAGE: D384 media-config-restore-drill-freshness-lock
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT_DEFAULT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
+if CWD_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"; then
+  ROOT_DEFAULT="$CWD_ROOT"
+elif SCRIPT_ROOT="$(git -C "$SCRIPT_DIR/../.." rev-parse --show-toplevel 2>/dev/null)"; then
+  ROOT_DEFAULT="$SCRIPT_ROOT"
+fi
+if [[ -n "${SPINE_ROOT:-}" && "$SPINE_ROOT" == "$ROOT_DEFAULT" ]]; then
+  ROOT="$SPINE_ROOT"
+else
+  ROOT="$ROOT_DEFAULT"
+fi
 source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
 RECEIPT_DIR="$SPINE_OUTBOX/reports/restore-drills"
@@ -60,18 +71,20 @@ age_days=$((age_seconds / 86400))
 result="$(yq e -r '.result // ""' "$latest_receipt")"
 [[ "$result" == "PASS" ]] || fail "latest receipt result: $result (expected: PASS)"
 
-# Check both stacks present
-download_count="$(yq e '[.artifacts[] | select(.stack == "download-stack")] | length' "$latest_receipt")"
-streaming_count="$(yq e '[.artifacts[] | select(.stack == "streaming-stack")] | length' "$latest_receipt")"
+# Check media-home writer + playback artifacts present
+media_home_count="$(yq e '[.artifacts[] | select(.stack == "media-home")] | length' "$latest_receipt")"
+writer_count="$(yq e '[.artifacts[] | select(.stack == "media-home" and .role == "writer_plane")] | length' "$latest_receipt")"
+playback_count="$(yq e '[.artifacts[] | select(.stack == "media-home" and .role == "playback_plane")] | length' "$latest_receipt")"
 
-[[ "$download_count" -ge 1 ]] || fail "download-stack artifact missing from receipt"
-[[ "$streaming_count" -ge 1 ]] || fail "streaming-stack artifact missing from receipt"
+[[ "$media_home_count" -ge 2 ]] || fail "media-home artifacts missing from receipt"
+[[ "$writer_count" -ge 1 ]] || fail "media-home writer_plane artifact missing from receipt"
+[[ "$playback_count" -ge 1 ]] || fail "media-home playback_plane artifact missing from receipt"
 
-# Check both stacks passed
-download_result="$(yq e -r '.comparison.download_stack.result // ""' "$latest_receipt")"
-streaming_result="$(yq e -r '.comparison.streaming_stack.result // ""' "$latest_receipt")"
+# Check both planes passed
+writer_result="$(yq e -r '.comparison.media_home.writer_plane.result // ""' "$latest_receipt")"
+playback_result="$(yq e -r '.comparison.media_home.playback_plane.result // ""' "$latest_receipt")"
 
-[[ "$download_result" == "PASS" ]] || fail "download-stack drill failed: $download_result"
-[[ "$streaming_result" == "PASS" ]] || fail "streaming-stack drill failed: $streaming_result"
+[[ "$writer_result" == "PASS" ]] || fail "media-home writer_plane drill failed: $writer_result"
+[[ "$playback_result" == "PASS" ]] || fail "media-home playback_plane drill failed: $playback_result"
 
-echo "PASS: media config restore drill receipt fresh (${age_days}d) and both stacks verified"
+echo "PASS: media-home config restore drill receipt fresh (${age_days}d) and both planes verified"

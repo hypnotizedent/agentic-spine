@@ -5,7 +5,7 @@
 # Do not edit manually — rebuild with: ./bin/ops cap run infra.estate.boringness.build
 version: 1
 authority_state: projection
-generated_at_utc: '2026-03-19T15:25:40Z'
+generated_at_utc: '2026-03-20T21:09:04Z'
 site: home
 generated_by:
   capability: infra.estate.boringness.build
@@ -202,8 +202,7 @@ service_lifecycle:
   - machine-pve
   - machine-proxmox-home
   - vm-203-immich
-  - vm-209-download-stack
-  - vm-210-streaming-stack
+  - container-fleet-media-home
   - vm-215-surveillance-stack
   backup_targets:
   - vm-203-primary
@@ -212,6 +211,7 @@ service_lifecycle:
   - vm-215-surveillance-stack-primary
   - home-vm-100-ha-primary
   - home-vm-106-media-home-primary
+  - app-media-config-media-home
   canonical_live_roots:
   - pve:/md1400/backup-cold (Canonical shop cold backup plane.)
   - nas:/volume1/backups/proxmox_backups/dump (Canonical home backup plane.)
@@ -237,6 +237,48 @@ service_lifecycle:
   tombstone_policy:
     expiry_mode: review_then_delete
     default_review_days: 180
+    writer_drain_required: true
+- service_id: media
+  display_name: Media
+  criticality: tier1
+  data_class: mixed_payload_and_regenerable
+  backup_runtime_units:
+  - vm-106-media-home
+  - container-fleet-media-home
+  backup_targets:
+  - home-vm-106-media-home-primary
+  - app-media-config-media-home
+  canonical_live_roots:
+  - nas:/volume1/media-staging (Canonical active media library and intake share for
+    the home plane.)
+  allowed_secondary_roots:
+  - media-home:/srv/media (Canonical media-home mount of the active Synology library.)
+  - download-stack:/mnt/media (Residual shop-side compatibility view of the active
+    home library while writer cutover remains incomplete.)
+  - nas:/volume1/media-holds (Explicit hold/review share, not the main library.)
+  staging_roots:
+  - nas:/volume1/media-staging/downloads (Active home intake/download lane. Must drain
+    after import and must never become a permanent residence.)
+  quarantine_roots:
+  - pve:/md1400/archive/media-quarantine/pending (Operator review queue for unresolved
+    media.)
+  - pve:/md1400/archive/media-quarantine/reviewed (Reviewed hold lane awaiting archive
+    or delete.)
+  export_archive_lanes:
+  - pve:/md1400/media-cold (Cold archive and legacy media hold lane.)
+  - pve:/md1400/backup-cold/apps/media-config (Canonical config backup archive for
+    the combined media-home plane.)
+  retention_policy:
+    policy_type: bounded_stage_windows
+    claim_days: null
+    downloads_max_age_days: 7
+    quarantine_pending_max_age_days: 30
+    quarantine_reviewed_max_age_days: 90
+    description: Payload libraries are canonical live state, not a rolling retention
+      bucket. Downloads and quarantine are explicitly time-boxed.
+  tombstone_policy:
+    expiry_mode: review_then_delete
+    default_review_days: 90
     writer_drain_required: true
 canonical_personal_data:
 - path: /volume1/photo-keepers/
