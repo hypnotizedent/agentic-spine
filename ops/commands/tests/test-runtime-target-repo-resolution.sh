@@ -89,6 +89,74 @@ t3_out="$(
 assert_eq "$(printf '%s\n' "$t3_out" | grep -E '^(PASS|FAIL) issues=' | tail -1)" "PASS issues=0 warnings=0 worktrees=0 temp_clones=0 root=1 stashes=0" "cap-run executes against current checkout, not inherited root repo"
 
 echo ""
+echo "── T4: schema conventions audit honors current checkout over inherited SPINE_ROOT ──"
+mkdir -p "$TARGET/ops/bindings" "$TARGET/ops"
+cat > "$TARGET/ops/capabilities.yaml" <<'YAML'
+---
+status: authoritative
+YAML
+cat > "$TARGET/ops/bindings/spine.schema.conventions.yaml" <<'YAML'
+---
+status: authoritative
+owner: "@test"
+last_verified: 2026-03-20
+scope: schema-conventions-test
+
+version: 1
+updated_at: "2026-03-20"
+
+policy:
+  enforcement_mode: touch_and_fix
+  changed_file_enforcement: true
+  include_globs:
+    - "ops/bindings/**/*.yaml"
+  always_validate_files:
+    - ops/bindings/spine.schema.conventions.yaml
+
+status_rules:
+  canonical_field: status
+  allowed_values: [authoritative]
+  lifecycle_field: lifecycle
+  lifecycle_values: [ready]
+
+date_rules:
+  canonical_fields: [created_at, updated_at, closed_at]
+  accepted_legacy_fields: [last_verified]
+  iso_8601_regex: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+
+field_rules:
+  canonical_id_field: id
+  canonical_description_field: description
+  disallowed_alias_keys: []
+  discouraged_alias_keys: []
+
+legacy_alias_rules:
+  touch_to_fix_required: true
+  legacy_exceptions: []
+
+schema_bound_files: []
+YAML
+cat > "$TARGET/ops/bindings/service.closure.contract.yaml" <<'YAML'
+---
+status: authoritative
+owner: "@test"
+last_verified: 2026-03-20
+scope: closure-test
+
+closures: []
+YAML
+(
+  cd "$TARGET"
+  git add ops/capabilities.yaml ops/bindings/spine.schema.conventions.yaml ops/bindings/service.closure.contract.yaml
+)
+t4_out="$(
+  cd "$TARGET"
+  env -u SPINE_TARGET_REPO SPINE_ROOT="$ROOT" SPINE_REPO="$ROOT" SPINE_CODE="$ROOT" \
+    "$ROOT/ops/plugins/core/verify/bin/schema-conventions-audit" --mode staged
+)"
+assert_eq "$(printf '%s\n' "$t4_out" | grep '^violations:' | awk '{print $2}')" "0" "schema audit uses the current checkout, not inherited SPINE_ROOT"
+
+echo ""
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"
 exit "$FAIL"

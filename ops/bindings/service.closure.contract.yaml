@@ -1,0 +1,107 @@
+# Status: authoritative
+# Last verified: 2026-03-20
+# Scope: service-closure-control-plane
+
+version: 1
+updated_at: "2026-03-20"
+owner: "@ronny"
+status: authoritative
+authority_state: authoritative
+scope: service-closure-control-plane
+
+defaults:
+  route_registry: ops/bindings/domain.routing.registry.yaml
+  ingress_projection: ops/bindings/shop.ingress.map.yaml
+  services_health: ops/bindings/services.health.yaml
+  backup_schedule: ops/bindings/backup.schedule.yaml
+  ssh_targets: ops/bindings/ssh.targets.yaml
+  cloudflare_tunnel_name: homelab-tunnel
+
+closures:
+  - id: media-home-public-closure
+    domain: media
+    description: "Media control-plane closure: public routes, monitoring, and media-home cold-sync deployment must converge on the declared home active plane."
+    active_plane:
+      host: media-home
+      stack_aliases:
+        - media-home
+        - media-home-stack
+    public_routes:
+      provider: cloudflare_tunnel
+      routes:
+        - hostname: jellyfin.ronny.works
+          service: jellyfin
+          expected_stack_aliases: [media-home, media-home-stack]
+          expected_target_patterns:
+            - "media-home"
+            - "10\\.0\\.0\\.106:8096"
+        - hostname: music.ronny.works
+          service: navidrome
+          expected_stack_aliases: [media-home, media-home-stack]
+          expected_target_patterns:
+            - "media-home"
+            - "10\\.0\\.0\\.106:4533"
+        - hostname: requests.ronny.works
+          service: jellyseerr
+          expected_stack_aliases: [media-home, media-home-stack]
+          expected_target_patterns:
+            - "media-home"
+            - "10\\.0\\.0\\.106:5055"
+        - hostname: homarr.ronny.works
+          service: homarr
+          expected_stack_aliases: [media-home, media-home-stack]
+          expected_target_patterns:
+            - "media-home"
+            - "10\\.0\\.0\\.106:7575"
+        - hostname: spotisub.ronny.works
+          service: spotisub
+          expected_stack_aliases: [media-home, media-home-stack]
+          expected_target_patterns:
+            - "media-home"
+            - "10\\.0\\.0\\.106:8766"
+    monitoring:
+      endpoints:
+        - endpoint_id: jellyfin
+          expected_host: media-home
+          expected_url_patterns:
+            - "media-home"
+            - "10\\.0\\.0\\.106:8096"
+        - endpoint_id: navidrome
+          expected_host: media-home
+          expected_url_patterns:
+            - "media-home"
+            - "10\\.0\\.0\\.106:4533"
+        - endpoint_id: jellyseerr
+          expected_host: media-home
+          expected_url_patterns:
+            - "media-home"
+            - "10\\.0\\.0\\.106:5055"
+        - endpoint_id: homarr
+          expected_host: media-home
+          expected_url_patterns:
+            - "media-home"
+            - "10\\.0\\.0\\.106:7575"
+        - endpoint_id: spotisub
+          expected_host: media-home
+          expected_url_patterns:
+            - "media-home"
+            - "10\\.0\\.0\\.106:8766"
+    backups:
+      jobs:
+        - job_id: media-config-media-home-cold-sync-daily
+          expected_host: media-home
+          expected_script_ref: /usr/local/bin/media-config-backup.sh
+          remote_checks:
+            - kind: remote_file_exists
+              host: media-home
+              path: /usr/local/bin/media-config-backup.sh
+            - kind: remote_cron_file_line
+              host: media-home
+              path: /etc/cron.d/media-config-backup
+              expected_regex: "^15 4 \\* \\* \\* root /usr/local/bin/media-config-backup\\.sh( .*)?$"
+          trust_edges:
+            - kind: ssh_batch
+              from_host: media-home
+              to_target: pve
+              to_user: root
+              to_address_source: tailscale_ip

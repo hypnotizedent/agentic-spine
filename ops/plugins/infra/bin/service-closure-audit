@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[4]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.infra.lib.service_closure import json_dump, render_text, run_service_closure_audit, yaml_dump
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="service-closure-audit")
+    parser.add_argument("--id", help="Limit to one closure id")
+    parser.add_argument("--domain", help="Limit to one domain")
+    parser.add_argument("--format", choices=("text", "json", "yaml"), default="text")
+    parser.add_argument("--strict", action="store_true", help="Exit non-zero if any closure posture is fail")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    snapshot = run_service_closure_audit(closure_id=args.id, domain=args.domain)
+
+    if args.format == "json":
+        print(json_dump(snapshot))
+    elif args.format == "yaml":
+        print(yaml_dump(snapshot), end="")
+    else:
+        print(render_text(snapshot))
+
+    if args.strict and snapshot["summary"].get("closure_posture_fail", 0):
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

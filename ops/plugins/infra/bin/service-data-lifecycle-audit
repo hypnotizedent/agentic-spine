@@ -17,6 +17,11 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[4]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.infra.lib.service_closure import run_service_closure_audit
+
 REGISTRY_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
 SSH_TARGETS_PATH = ROOT / "ops/bindings/ssh.targets.yaml"
 SSH_RESOLVE_PATH = ROOT / "ops/lib/ssh-resolve.sh"
@@ -573,6 +578,14 @@ def audit_media(ctx: AuditContext, registry_service: dict[str, Any]) -> dict[str
                 message=f"downloads lane oldest_age_days={oldest_age} exceeds policy={downloads_policy_days}",
             )
 
+    closure_snapshot = run_service_closure_audit(closure_id="media-home-public-closure")
+    closure_rows = ensure_list(closure_snapshot.get("closures"))
+    closure_row = ensure_dict(closure_rows[0]) if closure_rows else {}
+    for row in ensure_list(closure_row.get("mismatches")):
+        mismatch = dict(ensure_dict(row))
+        mismatch["domain"] = domain
+        mismatches.append(mismatch)
+
     summary = compare_background_actions(registry_service, live_rows=live_rows, mismatches=mismatches, domain=domain)
     return {
         "domain": domain,
@@ -581,6 +594,7 @@ def audit_media(ctx: AuditContext, registry_service: dict[str, Any]) -> dict[str
         "mismatches": mismatches,
         "observations": {
             "pve_downloads": pve_downloads,
+            "closure_audit": closure_row,
         },
     }
 

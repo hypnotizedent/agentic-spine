@@ -1,22 +1,57 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+BOOTSTRAP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$BOOTSTRAP_ROOT/ops/lib/runtime-paths.sh"
+
 resolve_root() {
-  if [[ -n "${SPINE_ROOT:-}" && -f "${SPINE_ROOT}/ops/capabilities.yaml" ]]; then
-    printf '%s\n' "$SPINE_ROOT"
-    return 0
-  fi
   local detected_root=""
+  local explicit_target="${SPINE_TARGET_REPO:-}"
+  local inherited_repo="${SPINE_REPO:-}"
+  local inherited_root="${SPINE_ROOT:-}"
+
   detected_root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
-  if [[ -n "$detected_root" && -f "$detected_root/ops/capabilities.yaml" ]]; then
-    printf '%s\n' "$detected_root"
+  if [[ -n "$detected_root" ]]; then
+    detected_root="$(_spine_canonicalize_repoish_path "$detected_root")"
+    if _spine_has_capability_registry "$detected_root"; then
+      printf '%s\n' "$detected_root"
+      return 0
+    fi
+  fi
+
+  if [[ -n "$explicit_target" ]]; then
+    explicit_target="$(_spine_canonicalize_repoish_path "$explicit_target")"
+    if _spine_has_capability_registry "$explicit_target"; then
+      printf '%s\n' "$explicit_target"
+      return 0
+    fi
+  fi
+
+  if [[ -n "$inherited_repo" ]]; then
+    inherited_repo="$(_spine_canonicalize_repoish_path "$inherited_repo")"
+    if _spine_has_capability_registry "$inherited_repo"; then
+      printf '%s\n' "$inherited_repo"
+      return 0
+    fi
+  fi
+
+  if _spine_has_capability_registry "$BOOTSTRAP_ROOT"; then
+    printf '%s\n' "$BOOTSTRAP_ROOT"
     return 0
   fi
-  cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd
+
+  if [[ -n "$inherited_root" ]]; then
+    inherited_root="$(_spine_canonicalize_repoish_path "$inherited_root")"
+    if _spine_has_capability_registry "$inherited_root"; then
+      printf '%s\n' "$inherited_root"
+      return 0
+    fi
+  fi
+
+  printf '%s\n' "$BOOTSTRAP_ROOT"
 }
 
 ROOT="$(resolve_root)"
-source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 MAPFILE_COMPAT="$ROOT/ops/plugins/core/verify/bin/bash-mapfile-compat.sh"
 if [[ -f "$MAPFILE_COMPAT" ]]; then
