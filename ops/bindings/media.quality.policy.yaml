@@ -1,0 +1,307 @@
+status: authoritative
+owner: "@ronny"
+version: "1.0"
+last_verified: "2026-03-20"
+authority_concern: media_quality_policy
+scope: media-quality-tiers-and-acquisition-policy
+
+runtime_enforcement:
+  owner_surface: ~/code/workbench/agents/media
+  implementation_targets:
+    - radarr
+    - sonarr
+    - lidarr
+    - recyclarr
+  deployment_status: planned_authority
+  note: >
+    This binding is canonical policy now. Live ARR/Recyclarr state may lag until
+    home-writer promotion is complete, but future runtime configuration must
+    converge to this file rather than to ad hoc UI choices.
+
+defaults:
+  agents_must_default_to: standard
+  acquisition_tier:
+    movies: standard
+    tv: standard
+    music: standard
+  promotion_scope: per_title_only
+  keep_duplicate_copies: false
+  language_policy:
+    movies: english_audio_required
+    tv: english_audio_required
+    music: language_agnostic
+
+hardware_gates:
+  home_theater_reference:
+    status: blocked
+    unblock_when:
+      display:
+        - projector
+        - oled_65_plus
+      audio:
+        - surround_5_1_plus
+        - dedicated_receiver
+      network:
+        - gigabit_lan_to_media_server
+
+tiers:
+  movies:
+    standard:
+      label: Standard-1080p
+      target_release: WEBDL-1080p
+      acceptable_releases:
+        - WEBDL-1080p
+        - WEBRip-1080p
+      blocked_releases:
+        - Bluray-1080p
+        - Bluray-1080p-Remux
+        - Bluray-2160p
+        - Bluray-2160p-Remux
+        - HDTV-1080p
+        - WEBDL-2160p
+        - WEBRip-2160p
+        - Raw-HD
+        - CAM
+        - TS
+        - 720p
+        - 480p
+      size_gb:
+        min: 2
+        max: 10
+    premium:
+      label: Premium-Theater
+      target_release: Bluray-1080p
+      acceptable_releases:
+        - Bluray-1080p-Remux
+        - Bluray-1080p
+        - WEBDL-1080p
+        - WEBRip-1080p
+      blocked_releases:
+        - Bluray-2160p
+        - Bluray-2160p-Remux
+        - Raw-HD
+      size_gb:
+        min: 5
+        max: 40
+    reference:
+      label: Reference-4K
+      status: blocked
+      gated_by: home_theater_reference
+      target_release: Bluray-2160p-Remux
+      acceptable_releases:
+        - Bluray-2160p-Remux
+        - Bluray-2160p
+        - WEBDL-2160p
+        - Bluray-1080p-Remux
+        - Bluray-1080p
+        - WEBDL-1080p
+      size_gb:
+        min: 10
+        max: 80
+  tv:
+    standard:
+      label: Standard-TV
+      target_release: WEBDL-1080p
+      acceptable_releases:
+        - WEBDL-1080p
+        - WEBRip-1080p
+      blocked_releases:
+        - Bluray-1080p
+        - Bluray-1080p-Remux
+        - HDTV-1080p
+        - Raw-HD
+        - CAM
+        - TS
+        - 720p
+        - 480p
+      size_gb_per_episode:
+        min: 0.5
+        max: 5
+    premium:
+      label: Premium-TV
+      target_release: Bluray-1080p
+      acceptable_releases:
+        - Bluray-1080p
+        - WEBDL-1080p
+        - WEBRip-1080p
+      size_gb_per_episode:
+        min: 1
+        max: 10
+  music:
+    standard:
+      label: Standard-Music
+      target_release: FLAC
+      acceptable_releases:
+        - FLAC
+        - ALAC
+      blocked_releases:
+        - MP3
+        - AAC
+        - OGG
+    premium:
+      label: Premium-Music
+      status: operator_review_only
+      target_release: HiRes-FLAC
+      acceptable_releases:
+        - HiRes-FLAC
+        - FLAC
+        - ALAC
+      blocked_releases:
+        - MP3
+        - AAC
+        - OGG
+      note: >
+        Premium music is a policy tier, but precise Lidarr automation for this
+        tier is not yet verified. Treat it as operator-tagged exception handling,
+        not blanket automation.
+
+promotion_model:
+  per_title_only: true
+  trigger_tags:
+    premium: premium
+    reference: reference
+  rollback_supported: true
+  never:
+    - blanket_promote_library
+    - keep_standard_and_premium_just_in_case
+    - enable_reference_without_home_theater_gate
+    - acquire_above_standard_without_explicit_tag
+
+language_policy:
+  movies:
+    required_audio: english
+    foreign_films_allowed: true
+    requires_english_subtitles_when_foreign_audio: true
+    blocked_case: foreign_audio_only_without_english_subtitles
+  tv:
+    required_audio: english
+    foreign_films_allowed: true
+    requires_english_subtitles_when_foreign_audio: true
+    blocked_case: foreign_audio_only_without_english_subtitles
+  music:
+    required_audio: none
+
+dedup_policy:
+  movies:
+    one_file_per_title: true
+    keep: highest_quality_within_active_profile
+    exception: tagged_distinct_cuts_only
+  tv:
+    one_file_per_episode: true
+    keep: highest_quality_within_active_profile
+  music:
+    one_release_per_album: true
+    prefer_original_release: true
+    exception: tagged_keep_both_only
+    artist_name_normalization:
+      merge_case_variants: true
+      merge_trailing_punctuation_variants: true
+      merge_distinct_artists: false
+
+existing_library_remediation:
+  mode: organic_background_convergence
+  bulk_delete_replace: false
+  movies_tv:
+    import_existing_library_with_standard_profile: true
+    above_cutoff_behavior: search_for_standard_replacement_over_time
+    replacement_timing: opportunistic
+  music:
+    duplicate_albums: operator_review_then_recycle_bin
+
+tool_profile_targets:
+  radarr:
+    default_profile: Standard-1080p
+    profiles:
+      Standard-1080p:
+        cutoff: WEBDL-1080p
+        allowed:
+          - WEBDL-1080p
+          - WEBRip-1080p
+        blocked:
+          - Bluray-1080p
+          - Bluray-1080p-Remux
+          - Bluray-2160p
+          - Bluray-2160p-Remux
+          - HDTV-1080p
+          - WEBDL-2160p
+          - WEBRip-2160p
+          - Raw-HD
+        size_gb:
+          min: 2
+          max: 10
+      Premium-Theater:
+        cutoff: Bluray-1080p
+        allowed:
+          - Bluray-1080p-Remux
+          - Bluray-1080p
+          - WEBDL-1080p
+          - WEBRip-1080p
+        blocked:
+          - Bluray-2160p
+          - Bluray-2160p-Remux
+          - Raw-HD
+        size_gb:
+          min: 5
+          max: 40
+      Reference-4K:
+        status: blocked
+        gated_by: home_theater_reference
+        cutoff: Bluray-2160p-Remux
+        allowed:
+          - Bluray-2160p-Remux
+          - Bluray-2160p
+          - WEBDL-2160p
+          - Bluray-1080p-Remux
+          - Bluray-1080p
+          - WEBDL-1080p
+        size_gb:
+          min: 10
+          max: 80
+  sonarr:
+    default_profile: Standard-TV
+    profiles:
+      Standard-TV:
+        cutoff: WEBDL-1080p
+        allowed:
+          - WEBDL-1080p
+          - WEBRip-1080p
+        blocked:
+          - Bluray-1080p
+          - Bluray-1080p-Remux
+          - HDTV-1080p
+          - Raw-HD
+        size_gb_per_episode:
+          min: 0.5
+          max: 5
+      Premium-TV:
+        cutoff: Bluray-1080p
+        allowed:
+          - Bluray-1080p
+          - WEBDL-1080p
+          - WEBRip-1080p
+        size_gb_per_episode:
+          min: 1
+          max: 10
+  lidarr:
+    default_profile: Standard-Music
+    profiles:
+      Standard-Music:
+        cutoff: FLAC
+        allowed:
+          - FLAC
+          - ALAC
+        blocked:
+          - MP3
+          - AAC
+          - OGG
+      Premium-Music:
+        status: operator_review_only
+        cutoff: HiRes-FLAC
+        allowed:
+          - HiRes-FLAC
+          - FLAC
+          - ALAC
+        blocked:
+          - MP3
+          - AAC
+          - OGG

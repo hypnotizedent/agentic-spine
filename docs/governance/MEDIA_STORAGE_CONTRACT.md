@@ -43,6 +43,10 @@ For media placement truth, agents should prefer only:
 - `docs/governance/MEDIA_STORAGE_LIFECYCLE.md`
 - `ops/bindings/media.services.yaml`
 - `ops/bindings/media.path.authority.contract.yaml`
+- `ops/bindings/media.quality.policy.yaml`
+
+Keep media quality/acquisition policy in binding form. Do not fork it into a new
+governance-doc family.
 
 Historical planning packets remain in-repo for lineage only and must not be used as active placement authority:
 - `docs/runbooks/MEDIA_STORAGE_MIGRATION_PLAN.md`
