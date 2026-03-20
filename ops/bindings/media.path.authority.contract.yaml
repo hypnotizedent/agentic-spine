@@ -10,7 +10,7 @@
 # (`media-home` VM 106 consuming Synology `/volume1/media-staging/*`).
 
 contract: MEDIA_PATH_AUTHORITY_CONTRACT_V1
-version: "1.2"
+version: "1.3"
 status: active
 created: "2026-03-03"
 updated_at: "2026-03-20"
@@ -190,41 +190,51 @@ path_tuples:
     path_parity_status: "CONSISTENT"
 
   jellyfin:
-    vm: streaming-stack
-    compose_mount: "/mnt/media -> /media (ro)"
+    vm: media-home
+    plane_status: active_home
+    canonical_mount: "/srv/media -> /media"
+    historical_shop_vm: streaming-stack
+    historical_shop_mount: "/mnt/media -> /media (ro)"
     app_root: null
     downloader_path: null
     library_path: "/media/movies,/media/tv,/media/music"
     verification_status: verified
     verified_at: "2026-03-04"
     evidence: |
-      2026-03-04 runtime verification via SSH:
+      2026-03-04 shop runtime verification via SSH (historical):
       - docker inspect: /mnt/media -> /media (ro)
       - NFS mount: 192.168.1.184:/media -> /mnt/media (ro, NFSv4.2)
       - Jellyfin search API confirms library entries at /media/movies/*, /media/tv/*
       - E2E sample: 5/5 movies found in Jellyfin with correct paths
+      2026-03-20: canonical runtime moved to media-home VM 106 backed by /srv/media.
     path_parity_status: "CONSISTENT"
 
   navidrome:
-    vm: streaming-stack
-    compose_mount: "/mnt/media/music -> /music (ro)"
+    vm: media-home
+    plane_status: active_home
+    canonical_mount: "/srv/media/music -> /music"
+    historical_shop_vm: streaming-stack
+    historical_shop_mount: "/mnt/media/music -> /music (ro)"
     app_root: null
     downloader_path: null
     library_path: "/music"
     verification_status: verified
     verified_at: "2026-03-04"
-    evidence: "Feb 25 audit + 2026-03-04: docker inspect confirms mount. NFS ro."
+    evidence: "Feb 25 audit + 2026-03-04: shop docker inspect confirms historical mount. 2026-03-20: canonical runtime now on media-home VM 106."
     path_parity_status: "CONSISTENT"
 
   bazarr:
-    vm: streaming-stack
-    compose_mount: "/mnt/media -> /media (ro)"
+    vm: media-home
+    plane_status: active_home
+    canonical_mount: "/srv/media -> /media"
+    historical_shop_vm: streaming-stack
+    historical_shop_mount: "/mnt/media -> /media (ro)"
     app_root: null
     downloader_path: null
     library_path: "/media/movies,/media/tv"
     verification_status: verified
     verified_at: "2026-03-04"
-    evidence: "Feb 25 audit + 2026-03-04: docker inspect confirms mount. NFS ro."
+    evidence: "Feb 25 audit + 2026-03-04: shop docker inspect confirms historical mount. 2026-03-20: service is defined on media-home VM 106 and intentionally parked."
     path_parity_status: "CONSISTENT"
 
 # Known findings from Feb 25 audit requiring attention
@@ -255,7 +265,7 @@ known_findings:
     detail: "Artifacts from failed imports and unpack operations. Not blocking but should be cleaned."
 
 # Enforcement
-drift_gate: TBD
+drift_gate: D408
 verification_command: "media.path.authority.verify"
 verification_description: |
   Future capability that SSHes to download-stack and streaming-stack,

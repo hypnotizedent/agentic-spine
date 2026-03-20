@@ -8,11 +8,11 @@ source_binding: ops/bindings/home.storage.map.yaml
 
 # Home Rack Scorecard
 
-- Generated: `2026-03-20T21:09:04Z`
+- Generated: `2026-03-20T22:48:35Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
 - Active runtimes: `3`
 - Tombstones: `3`
-- Public routes: `1`
+- Public routes: `5`
 
 ## Substrate
 
