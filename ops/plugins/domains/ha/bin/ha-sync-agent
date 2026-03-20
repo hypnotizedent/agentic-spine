@@ -4,7 +4,8 @@
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # Connects to HA WebSocket event bus and triggers snapshot capabilities
-# when relevant HA events fire. Commits and pushes binding changes.
+# when relevant HA events fire. Writes into the managed runtime worktree;
+# tracked promotion is explicit.
 #
 # Usage:
 #   ha-sync-agent --daemon    # Run as background daemon
@@ -15,8 +16,11 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-SPINE_CODE="${SPINE_CODE:-$SPINE_ROOT}"
+SPINE_CODE="${SPINE_CODE:-$HOME/code/agentic-spine}"
+CONTROL_ROOT="${SPINE_CONTROL_ROOT:-$SPINE_CODE}"
+source "$SPINE_CODE/ops/lib/runtime-managed-worktree.sh"
+RUNTIME_ROOT="$(spine_runtime_prepare_managed_worktree "$CONTROL_ROOT")"
+export SPINE_ROOT="$RUNTIME_ROOT"
 source "$SPINE_CODE/ops/lib/spine-paths.sh"
 spine_paths_init
 CONFIG_FILE="$SPINE_CODE/ops/bindings/ha.sync.config.yaml"
@@ -24,6 +28,7 @@ INFISICAL_AGENT="$SPINE_CODE/ops/plugins/providers/bin/infisical-agent.sh"
 PID_FILE="$SPINE_STATE/ha-sync-agent.pid"
 LOG_FILE="$SPINE_LOGS/ha-sync-agent.log"
 EVENT_QUEUE="$SPINE_STATE/ha-sync-events.queue"
+CAP_RUNNER="$RUNTIME_ROOT/bin/ops"
 
 HA_HOST="${HA_HOST:-10.0.0.100}"
 HA_PORT="${HA_PORT:-8123}"
@@ -75,17 +80,47 @@ get_commit_prefix_for_event() {
   yq e ".event_mappings.\"$event_type\".commit_prefix" "$CONFIG_FILE" 2>/dev/null || echo "sync(ha): bindings refreshed"
 }
 
+git_auto_commit_enabled() {
+  yq e '.git.auto_commit' "$CONFIG_FILE" 2>/dev/null | grep -q 'true'
+}
+
+git_auto_push_enabled() {
+  yq e '.git.auto_push' "$CONFIG_FILE" 2>/dev/null | grep -q 'true'
+}
+
+list_changed_bindings() {
+  git -C "$RUNTIME_ROOT" diff --name-only -- ops/bindings/ha.*.yaml 2>/dev/null || true
+}
+
+report_changed_bindings() {
+  local changed_files
+  changed_files=$(list_changed_bindings)
+
+  if [[ -z "$changed_files" ]]; then
+    log "No binding changes detected"
+    return 0
+  fi
+
+  log "Binding changes captured in managed runtime worktree; promotion remains manual"
+  while IFS= read -r changed_file; do
+    [[ -n "$changed_file" ]] || continue
+    log "  ${changed_file}"
+  done <<< "$changed_files"
+}
+
 run_snapshot() {
   local snapshot_cap="$1"
   local commit_prefix="$2"
   
   log "Running snapshot: $snapshot_cap"
   
-  if "$SPINE_CODE/bin/ops" cap run "$snapshot_cap" >> "$LOG_FILE" 2>&1; then
+  if "$CAP_RUNNER" cap run "$snapshot_cap" >> "$LOG_FILE" 2>&1; then
     log "Snapshot completed: $snapshot_cap"
     
-    if yq e '.git.auto_commit' "$CONFIG_FILE" | grep -q 'true'; then
+    if git_auto_commit_enabled; then
       commit_if_changed "$commit_prefix"
+    else
+      report_changed_bindings
     fi
   else
     log "ERROR: Snapshot failed: $snapshot_cap"
@@ -96,13 +131,13 @@ run_snapshot() {
 commit_if_changed() {
   local commit_prefix="$1"
   
-  cd "$SPINE_ROOT"
+  cd "$RUNTIME_ROOT"
   
   local changed_files
-  changed_files=$(git diff --name-only ops/bindings/ha.*.yaml 2>/dev/null || true)
+  changed_files=$(list_changed_bindings)
   
   if [[ -n "$changed_files" ]]; then
-    log "Binding changes detected, committing..."
+    log "Binding changes detected in managed runtime worktree, committing..."
     
     local commit_msg="$commit_prefix
 
@@ -113,12 +148,14 @@ $changed_files"
     git add ops/bindings/ha.*.yaml
     git commit -m "$commit_msg"
     
-    if yq e '.git.auto_push' "$CONFIG_FILE" | grep -q 'true'; then
-      log "Pushing to origin..."
-      git push origin main
+    if git_auto_push_enabled; then
+      local current_branch
+      current_branch=$(git branch --show-current)
+      log "Pushing managed runtime branch: ${current_branch}"
+      git push origin "$current_branch"
     fi
     
-    log "Committed and pushed binding changes"
+    log "Committed binding changes in managed runtime worktree"
   else
     log "No binding changes to commit"
   fi
@@ -323,6 +360,10 @@ show_status() {
   echo
   echo "Config: $CONFIG_FILE"
   echo "Log: $LOG_FILE"
+  echo "Control root: $CONTROL_ROOT"
+  echo "Runtime root: $RUNTIME_ROOT"
+  echo "Auto commit: $(yq e '.git.auto_commit' "$CONFIG_FILE" 2>/dev/null || echo 'false')"
+  echo "Auto push: $(yq e '.git.auto_push' "$CONFIG_FILE" 2>/dev/null || echo 'false')"
   
   if [[ -f "$LOG_FILE" ]]; then
     echo
@@ -348,10 +389,14 @@ single_sync() {
   
   for snapshot in "${snapshots[@]}"; do
     log "Snapshot: $snapshot"
-    "$SPINE_CODE/bin/ops" cap run "$snapshot" >> "$LOG_FILE" 2>&1 || true
+    "$CAP_RUNNER" cap run "$snapshot" >> "$LOG_FILE" 2>&1 || true
   done
   
-  commit_if_changed "sync(ha): manual sync"
+  if git_auto_commit_enabled; then
+    commit_if_changed "sync(ha): manual sync"
+  else
+    report_changed_bindings
+  fi
 }
 
 check_deps

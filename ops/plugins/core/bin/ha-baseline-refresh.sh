@@ -2,18 +2,24 @@
 set -euo pipefail
 
 # ha-baseline-refresh.sh — Automated weekly refresh of all HA SSOT bindings
-# Runs all HA snapshot capabilities sequentially, then rebuilds unified baseline.
+# Runs all HA snapshot capabilities sequentially in the managed runtime worktree,
+# then rebuilds the unified baseline. Promotion to tracked git history is manual.
 # Designed to be invoked by launchd (com.ronny.ha-baseline-refresh.plist).
 #
 # Exit 0 on success, non-zero on critical failure (baseline build fails).
 # Individual snapshot failures are logged but do not abort the run.
 
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
-CAP_RUNNER="$SPINE_ROOT/bin/ops"
+CONTROL_ROOT="${SPINE_CONTROL_ROOT:-${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}}"
+source "${CONTROL_ROOT}/ops/lib/runtime-managed-worktree.sh"
+RUNTIME_ROOT="$(spine_runtime_prepare_managed_worktree "$CONTROL_ROOT")"
+CAP_RUNNER="$RUNTIME_ROOT/bin/ops"
 LOG_PREFIX="[ha-baseline-refresh]"
-source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
+source "${RUNTIME_ROOT}/ops/lib/job-wrapper.sh"
 
 echo "$LOG_PREFIX Starting HA baseline refresh at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+echo "$LOG_PREFIX control_root=${CONTROL_ROOT}"
+echo "$LOG_PREFIX runtime_root=${RUNTIME_ROOT}"
+echo "$LOG_PREFIX worktree_identity=${OPS_WORKTREE_IDENTITY:-unset}"
 echo
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -95,40 +101,17 @@ fi
 # GIT SYNC (commit + push if bindings changed)
 # ─────────────────────────────────────────────────────────────────────────────
 
-cd "$SPINE_ROOT"
+cd "$RUNTIME_ROOT"
 
 CHANGED_FILES=$(git diff --name-only ops/bindings/ha.*.yaml ops/bindings/z2m.*.yaml ops/bindings/zwave.*.yaml 2>/dev/null || true)
 
 if [[ -n "$CHANGED_FILES" ]]; then
   echo
-  echo "$LOG_PREFIX Binding changes detected, committing..."
-
-  COMMIT_TS=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-  COMMIT_MSG="sync(ha): weekly baseline refresh [$COMMIT_TS]
-
-Snapshots: $PASS/$((PASS + FAIL)) passed
-Files changed:
-$CHANGED_FILES"
-
-  git add ops/bindings/ha.*.yaml ops/bindings/z2m.*.yaml ops/bindings/zwave.*.yaml 2>/dev/null || true
-  git commit -m "$COMMIT_MSG"
-  echo "$LOG_PREFIX Committed binding changes"
-
-  if git remote | grep -q origin; then
-    echo "$LOG_PREFIX Pushing to origin..."
-    if git push origin main 2>&1; then
-      echo "$LOG_PREFIX Pushed successfully"
-    else
-      echo "$LOG_PREFIX WARN: Push failed (may need manual intervention)"
-      spine_enqueue_email_intent \
-        "ha-baseline-refresh" \
-        "warn" \
-        "ha-baseline-refresh push failed" \
-        "Binding changes were committed but push to origin failed. Manual intervention may be required."
-    fi
-  fi
+  echo "$LOG_PREFIX Binding changes captured in managed runtime worktree:"
+  printf '%s\n' "$CHANGED_FILES"
+  echo "$LOG_PREFIX Promotion is manual; no commit or push performed"
 else
-  echo "$LOG_PREFIX No binding changes to commit"
+  echo "$LOG_PREFIX No binding changes detected"
 fi
 
 echo
