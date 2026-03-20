@@ -9,7 +9,7 @@
 # Used by: media.health.check, media.service.status capabilities
 #          D106-D110 drift gates
 
-version: 2
+version: 3
 updated_at: "2026-03-20"
 owner: "@ronny"
 
@@ -36,13 +36,23 @@ naming_aliases:
 operating_model:
   active_plane:
     vm: media-home
-    note: "Canonical live watch/download plane."
+    vm_id: 106
+    backing_store: "synology918:/volume1/media-staging"
+    mount_point: "/srv/media"
+    note: "Only active serving and management plane. All read-side and future write-side services belong here."
   archive_plane:
     vm: pve
-    note: "Canonical passive archive plane on md1400."
+    storage: md1400
+    note: "Passive archive plane only. Post-watch/low-churn content. Not the active playback surface."
+  staging:
+    host: synology918
+    path: "/volume1/media-staging/downloads"
+    note: "Temporary download staging only. Not archive. Not long-term library truth."
   transitional_shop_residue:
-    - download-stack
-    - streaming-stack
+    - vm: download-stack
+      role: "Residual writer/import surfaces. Services mostly stopped. Shrinking, not growing."
+    - vm: streaming-stack
+      role: "Historical split-era read plane. No active media containers. Will be fully retired."
 
 services:
   # ════════════════════════════════════════════════════════════════════════
@@ -388,7 +398,7 @@ services:
     category: infrastructure
     description: "Host metrics exporter for Prometheus (not part of current boring baseline)"
 
-# Jellyfin plugins (active home media plane; inventory key retained under streaming-stack compatibility)
+# Jellyfin plugins (active home media plane on media-home VM 106)
 jellyfin_plugins:
   repositories:
     - name: "IAmParadox"
@@ -444,7 +454,7 @@ ports:
     8787: crosswatch
     9100: download-node-exporter
 
-  streaming-stack:
+  media-home:
     8096: jellyfin
     4533: navidrome
     5055: jellyseerr
@@ -462,11 +472,11 @@ ha_overlaps:
   overlaps:
     - ha_addon: overseerr
       shop_service: jellyseerr
-      shop_vm: streaming-stack
+      canonical_vm: media-home
       active_surface: media-home
-      shop_port: 5055
+      canonical_port: 5055
       recommendation: decommission
-      reason: "jellyseerr on media-home is the canonical request manager; streaming-stack key retained for compatibility"
+      reason: "jellyseerr on media-home is the canonical request manager; streaming-stack residue is historical only"
 
     - ha_addon: lidarr
       shop_service: lidarr

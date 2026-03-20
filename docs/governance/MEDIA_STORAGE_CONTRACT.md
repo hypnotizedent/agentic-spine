@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-version: "1.2"
+version: "1.3"
 last_verified: "2026-03-20"
 authority_concern: media_storage_lifecycle
 scope: media-storage-architecture-and-lifecycle
@@ -10,7 +10,7 @@ scope: media-storage-architecture-and-lifecycle
 # Media Storage Contract
 
 **Status**: AUTHORITATIVE
-**Version**: 1.2
+**Version**: 1.3
 **Last Verified**: 2026-03-20
 
 ## Purpose
@@ -112,9 +112,9 @@ There is currently **no dedicated live `/volume1/media-home/` share**. The old `
 **Path Layout** (pve:/media):
 ```
 /media/
-  movies/              # 9.6T - Primary movie library
-  tv/                  # 5.5T - Primary TV library
-  music/               # 666G - Primary music library
+  movies/              # 9.6T - Residual shop movie library (active plane is now home)
+  tv/                  # 5.5T - Residual shop TV library (active plane is now home)
+  music/               # 666G - Residual shop music library (active plane is now home)
   downloads/           # 105G - Staging only (Phase 1 reclaim complete) ✅
   movies-archive/      # 205G - Overlay mount from md1400 cold tier
 ```
@@ -306,13 +306,13 @@ frequency: Monthly
 
 ### Shop (pve)
 
-#### Warm Tier (/media)
+#### Warm Tier (/media) — Residual Shop Plane
 ```
-/media/                          # NFS export to download-stack, streaming-stack
-  movies/                        # 9.6T active movie library
-  tv/                            # 5.5T active TV library
-  music/                         # 666G active music library
-  downloads/                     # 2.3T BLOAT (target: <200G)
+/media/                          # NFS export (residual; active plane is now media-home)
+  movies/                        # 9.6T residual movie library
+  tv/                            # 5.5T residual TV library
+  music/                         # 666G residual music library
+  downloads/                     # 105G staging only (Phase 1 reclaim complete)
   movies-archive/                # 205G overlay from md1400 (read-only)
 ```
 
@@ -654,5 +654,11 @@ ssh pve "find /md1400/archive/media-quarantine -type f -printf '%TY-%Tm-%Td %p\n
   `nas:/volume1/media-staging` from `drift_rules.retired_roots` to
   `allowed_secondary_root`, resolving a conflict where the registry was the
   sole document treating this active path as retired.
+
+**Version 1.3** (2026-03-20):
+- Active/archive closure: reclassified shop `/media/*` paths from "Primary" to
+  "Residual" throughout the contract to match the home-first active plane model.
+- Downloads bloat label corrected (was 2.3T, now 105G per Phase 1 completion).
+- Aligned shop warm tier heading with residual role.
 
 **Next Review**: After Phase 2 completion (drive replacement)
