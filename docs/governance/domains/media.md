@@ -3,8 +3,16 @@
 Canonical domain policy for `media`.
 
 - Authority: `docs/governance/SPINE.md`
+- Placement/lifecycle authority: `docs/governance/MEDIA_STORAGE_CONTRACT.md`
+- Short lifecycle rules: `docs/governance/MEDIA_STORAGE_LIFECYCLE.md`
 - Runtime contracts: `ops/bindings/domains/media.bundle.yaml`
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain media`
+
+Minimal agent reading order:
+1. `MEDIA_STORAGE_CONTRACT.md`
+2. `MEDIA_STORAGE_LIFECYCLE.md`
+3. `ops/bindings/media.services.yaml`
+4. `ops/bindings/media.path.authority.contract.yaml`
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog

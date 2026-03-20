@@ -1,11 +1,21 @@
+---
+status: superseded_historical
+last_verified: 2026-03-20
+superseded_by:
+  - docs/governance/MEDIA_STORAGE_CONTRACT.md
+  - docs/governance/MEDIA_STORAGE_LIFECYCLE.md
+---
+
 # Media Shop-to-Home Migration Transaction Packet
 
 > Canonical transaction packet for media stack relocation from shop to home.
 > Authority: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
-> Status: planning (not yet executable)
+> Status: superseded historical transaction packet
 > Closes: GAP-OP-1402
 
-## Prerequisites (all must be true before cutover)
+This packet captured a not-yet-closed shop-to-home cutover design. It is retained for lineage only. Do not use it as the active execution packet now that the home plane is already the declared live plane.
+
+## Historical Prerequisites Snapshot
 
 | # | Prerequisite | Gate/Evidence | Status |
 |---|-------------|---------------|--------|

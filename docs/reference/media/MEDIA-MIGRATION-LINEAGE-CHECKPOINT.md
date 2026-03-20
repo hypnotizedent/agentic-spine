@@ -1,16 +1,21 @@
+---
+status: superseded_historical
+last_verified: 2026-03-20
+superseded_by:
+  - docs/governance/MEDIA_STORAGE_CONTRACT.md
+  - docs/governance/MEDIA_STORAGE_LIFECYCLE.md
+---
+
 # Media Migration Lineage Checkpoint
 
 > Carry-forward checkpoint linking split-era lessons to future migration execution.
 > Authority: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
-> Status: active (must be reviewed before any migration execution)
+> Status: superseded historical checkpoint
 > Closes: GAP-OP-1406
 
 ## Purpose
 
-This checkpoint exists to prevent future migration execution from repeating
-known historical failure patterns. Any future media migration loop MUST
-reference this document and explicitly address each lesson before promoting
-execution_readiness from blocked to runnable.
+This checkpoint exists as carry-forward split-era history only. It may inform future archive/cutover work, but it is no longer an active prerequisite gate for current media placement truth.
 
 ## Source Loops (Lineage)
 

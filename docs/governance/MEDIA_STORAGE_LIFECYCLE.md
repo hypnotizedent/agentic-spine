@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-19
+last_verified: 2026-03-20
 scope: media-storage-lifecycle-contract
 ---
 
@@ -11,32 +11,30 @@ Purpose: remove ambiguity about where media belongs and stop `/downloads` from b
 
 ## Canonical Decision
 
-- Home is the hot watch plane.
-- Home may also hold the warm/current library.
+- Home is the active watch plane.
+- Home is also the active current library and intake plane.
 - Shop / 730XD is cold archive capacity.
 - 730XD is not the primary family playback surface.
 - Downloads are staging only, never permanent residence.
 - Current live Synology share truth is smaller than the old naming sprawl: `/volume1/media-staging` is the only populated/exported media share currently consumed by `media-home` VM 106, `/volume1/media-holds` is the explicit hold/review lane, and no separate `/volume1/media-home` share exists today.
+- Shop `/media/*` may still exist as transitional writer or transfer residue, but it is not canonical active placement truth.
 
 ## Tier Model
 
 ### Hot
 - Purpose: current-watch UX, low-friction playback, family-facing library.
 - Canonical authority: `synology918`
-- Current live share state: no dedicated hot-only Synology share is instantiated yet.
-- Approved future share name if a dedicated hot-library share is later created:
-  - `/volume1/media-home/tv`
-  - `/volume1/media-home/movies`
-  - `/volume1/media-home/music`
-- Runtime note: `media-home` VM 106 is live, but it currently consumes `/volume1/media-staging`, so the hot tier remains a target-state contract rather than a populated share today.
+- Current live share state: the hot plane currently rides the active `/volume1/media-staging/*` tree.
+- Runtime note: `media-home` VM 106 is live and serves the current home plane from `/volume1/media-staging/*`.
 
 ### Warm
-- Purpose: import buffer, metadata cleanup, rehydration landing zone, current-but-not-yet-archived library.
+- Purpose: import buffer, metadata cleanup, rehydration landing zone, and the active library path used by home today.
 - Canonical authority: `synology918`
 - Canonical roots:
   - `/volume1/media-staging/tv`
   - `/volume1/media-staging/movies`
   - `/volume1/media-staging/music`
+  - `/volume1/media-staging/downloads`
 
 ### Hold / Review
 - Purpose: explicit hold lane for manual-import review, duplicate review, forensic holds, and overflow that should not look like the primary library.
@@ -58,19 +56,19 @@ Purpose: remove ambiguity about where media belongs and stop `/downloads` from b
 ## Canonical Placement by Media Type
 
 ### TV
-- Staging: `download-stack:/downloads/tv`
+- Staging: `synology918:/volume1/media-staging/downloads`
 - Current live home-watch lane: `synology918:/volume1/media-staging/tv`
 - Warm/rehydration: `synology918:/volume1/media-staging/tv`
 - Cold archive: `pve:/md1400/archive/media/tv`
 
 ### Movies
-- Staging: `download-stack:/downloads/movies`
+- Staging: `synology918:/volume1/media-staging/downloads`
 - Current live home-watch lane: `synology918:/volume1/media-staging/movies`
 - Warm/rehydration: `synology918:/volume1/media-staging/movies`
 - Cold archive: `pve:/md1400/archive/media/movies`
 
 ### Music
-- Staging: `download-stack:/downloads/music`
+- Staging: `synology918:/volume1/media-staging/downloads`
 - Current live home-watch lane: `synology918:/volume1/media-staging/music`
 - Warm/rehydration: `synology918:/volume1/media-staging/music`
 - Cold archive: `pve:/md1400/archive/media/music`
@@ -81,6 +79,7 @@ Purpose: remove ambiguity about where media belongs and stop `/downloads` from b
 - New payload lands in a downloads staging path only.
 - Download tooling may sort and enrich metadata, but it does not own long-term residence.
 - If a file still lives under `/downloads` after import/archive review, that is drift.
+- Canonical intake is the home plane. Shop-side download paths are transitional residue until home writer cutover finishes.
 
 ### 2. Import
 - Staging payload is normalized into the Synology warm lane.
@@ -88,11 +87,11 @@ Purpose: remove ambiguity about where media belongs and stop `/downloads` from b
 
 ### 3. Home Library Placement
 - Items meant to be readily watchable/playable stay on the home Synology plane.
-- Until a dedicated `/volume1/media-home` share is intentionally instantiated, the current live share path is `/volume1/media-staging/*`.
+- There is no dedicated `/volume1/media-home` share today. The current live share path is `/volume1/media-staging/*`.
 - Current-watch UX remains home-first even if the shop has more raw capacity.
 
 ### 4. Watched-State Archival
-- Once a title becomes cold, duplicate, or low-likelihood for immediate replay, it may be copied to 730XD cold archive.
+- Once a title becomes cold, duplicate, or low-likelihood for immediate replay, it may be copied from home to 730XD cold archive.
 - Archive status must be explicit; the home copy may be pruned later for capacity relief.
 
 ### 5. Retrieval / Rehydration
@@ -107,14 +106,15 @@ Purpose: remove ambiguity about where media belongs and stop `/downloads` from b
 - Config and payload sharing the same ambiguous root
 - "I think it lives on the 730XD somewhere" as an operating model
 
-## Current Transitional Reality (2026-03-19)
+## Current Transitional Reality (2026-03-20)
 
 - `media-home` VM 106 is live on `proxmox-home`, consumes Synology media-staging, and has daily Synology backup artifacts.
 - `/volume1/media-home`, `/volume1/media`, `/volume1/hot-media`, `/volume1/live-library`, and `/volume1/library-home` are empty ghost placeholder directories, not active media shares.
 - `media-holds` is an explicit hold/review share, not a populated home library.
-- `download-stack` and `streaming-stack` still mount shop `/media` from the 730XD side.
-- `streaming-stack` is not currently a reliable playback authority because the VM is up but the declared Docker stack is empty.
-- Cold archive path normalization on 730XD is not complete yet. The target contract is `/md1400/archive/media/*`, and current runtime/storage layout should be treated as transitional until migration closes.
+- Shop split runtime still exists as transitional residue:
+  - `download-stack` remains a residual writer/import surface.
+  - `streaming-stack` is no longer the declared playback authority.
+- Cold archive path normalization on 730XD is not fully closed yet. The target contract remains `/md1400/archive/media/*`.
 - **Registry alignment (2026-03-19)**: `service.data.lifecycle.registry.yaml` previously listed `nas:/volume1/media-staging` under `drift_rules.retired_roots`. This was the only governance document treating the path as retired; all other contracts (this file, `MEDIA_STORAGE_CONTRACT.md`, tier model, canonical placements) already describe it as the active warm/home share. The registry has been corrected to classify this path as an `allowed_secondary_root`.
 
 ## Operator Standard

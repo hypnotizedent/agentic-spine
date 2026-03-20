@@ -1,22 +1,25 @@
 ---
-status: authoritative
+status: superseded_historical
 owner: "@ronny"
 version: "1.1"
-last_verified: "2026-03-19"
+last_verified: "2026-03-20"
 scope: media-storage-migration-execution
 parent_contract: docs/governance/MEDIA_STORAGE_CONTRACT.md
+superseded_by:
+  - docs/governance/MEDIA_STORAGE_CONTRACT.md
+  - docs/governance/MEDIA_STORAGE_LIFECYCLE.md
 ---
 
 # Media Storage Migration Plan
 
-**Status**: AUTHORITATIVE
+**Status**: SUPERSEDED_HISTORICAL
 **Version**: 1.1
 **Last Verified**: 2026-03-19
 **Parent Contract**: `docs/governance/MEDIA_STORAGE_CONTRACT.md`
 
 ## Purpose
 
-This runbook provides step-by-step procedures for safely migrating the media storage architecture from its current bloated/ambiguous state to the explicit, boring target state defined in the media storage contract.
+This runbook is retained as split-era cutover history only. Do not use it as the active media placement or migration source of truth now that home is the declared live plane and shop is the archive plane.
 
 **CRITICAL SAFETY RULE**: No large data moves until prerequisites are met. This plan is phased with explicit gates to prevent data loss.
 

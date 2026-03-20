@@ -1,8 +1,8 @@
 ---
 status: authoritative
 owner: "@ronny"
-version: "1.0"
-last_verified: "2026-03-19"
+version: "1.2"
+last_verified: "2026-03-20"
 authority_concern: media_storage_lifecycle
 scope: media-storage-architecture-and-lifecycle
 ---
@@ -10,8 +10,8 @@ scope: media-storage-architecture-and-lifecycle
 # Media Storage Contract
 
 **Status**: AUTHORITATIVE
-**Version**: 1.1
-**Last Verified**: 2026-03-19
+**Version**: 1.2
+**Last Verified**: 2026-03-20
 
 ## Purpose
 
@@ -19,33 +19,44 @@ This contract defines the canonical media storage architecture, tier assignments
 
 ## Executive Summary
 
-**Current State (Verified 2026-03-19, Post-Phase 1)**:
-- Shop media pool at **86% capacity** (25.1T/29.1T) — SAFE ✅
-- **105G downloads** (staging-only rule restored — was 2.3T)
-- Active libraries: 9.6T movies + 5.5T TV + 666G music = ~15.8T
-- Cold tier (md1400) has 20.4T available headroom
-- Quarantine tier (md1400) operational with 2.07T pending review
-- Home tier (Synology) has 13T available
-- media-home VM 106 canonicalized in governance
-- Synology share truth is now explicit: `/volume1/media-staging` is the only populated/exported media share currently used by VM 106, `/volume1/media-holds` is the explicit hold/review share, and `/volume1/media-home` is not a live share
+**Current State (Verified 2026-03-20)**:
+- `media-home` VM 106 plus Synology `/volume1/media-staging/*` is the canonical live active media plane.
+- Home owns the operator experience: fast downloads, local playback, and the current-watch library.
+- Shop `pve:/media/*` is no longer the desired family watch plane. It is transitional residue plus transfer/rehydration support while home-writer promotion finishes.
+- Shop `pve:/md1400/archive/*` is the canonical archive plane for watched/aged media.
+- `/volume1/media-holds` is the explicit hold/review lane. It is not a disguised main library.
+- `/volume1/media-home` is still not a live share. The active home library path is the current live Synology staging tree.
 
-**Target State**:
-- Home is the best playback/download experience (fast internet, low latency)
-- Shop 730xd is the canonical cold archive plane (large capacity, infrequent access)
-- Downloads are staging-only, never permanent residence
-- Quarantine tier exists for low-value bulk imports before deletion review
-- Clear tier boundaries with explicit lifecycle automation support
+**Boring Target State**:
+- Home stays the single active download/watch plane.
+- Shop stays the passive archive plane.
+- Downloads are staging-only and age out of home into library placement or archive.
+- Archive moves are deliberate, low-churn, and capacity-aware.
+- Agents answer placement questions from one contract instead of stitching together migration packets.
 
-**Critical Constraint**: No large data moves until the target architecture is explicit and the media pool capacity crisis is resolved.
+**Critical Constraint**: `md1400` is pressure-bound. Treat archive writes as deliberate and incremental, not as another bulk migration wave.
+
+## Minimal Canonical Surface
+
+For media placement truth, agents should prefer only:
+- `docs/governance/MEDIA_STORAGE_CONTRACT.md`
+- `docs/governance/MEDIA_STORAGE_LIFECYCLE.md`
+- `ops/bindings/media.services.yaml`
+- `ops/bindings/media.path.authority.contract.yaml`
+
+Historical planning packets remain in-repo for lineage only and must not be used as active placement authority:
+- `docs/runbooks/MEDIA_STORAGE_MIGRATION_PLAN.md`
+- `docs/reference/media/MEDIA-MIGRATION-LINEAGE-CHECKPOINT.md`
+- `docs/reference/media/MEDIA-SHOP-HOME-MIGRATION-TRANSACTION-PACKET.md`
 
 ---
 
 ## Tier Definitions
 
-### 1. Hot Tier (Home Playback)
+### 1. Active Home Plane
 
 **Canonical Host**: `synology918` (Synology DS918+) + `media-home` VM 106 (proxmox-home)
-**Role**: Fast access playback for home consumption, with current share truth kept explicit
+**Role**: Fast access download + playback plane for home consumption
 **Capacity**: 20T total, 13T available (34% usage)
 **Content Classes**:
 - Favorites / frequently watched
@@ -81,18 +92,18 @@ There is currently **no dedicated live `/volume1/media-home/` share**. The old `
 
 ---
 
-### 2. Warm Tier (Shop Active Library)
+### 2. Shop Transfer / Residual Writer Plane
 
 **Canonical Host**: `pve` (R730XD) — `media` pool
-**Role**: Primary active library for streaming-stack and download-stack services
+**Role**: Transitional shop-side transfer, residual writer, and rehydration support plane
 **Current Hardware**: 4x8TB SATA RAIDZ1 (Archive/SMR, aging)
 **Target Hardware**: 4x14TB SAS RAIDZ1 (acquired, ready for Phase 2 installation)
 **Capacity**: 25.1T used / 29.1T total (86% SAFE — ready for replacement) ✅
 **Content Classes**:
-- Main movie library (non-favorites)
-- Main TV library (non-recent)
-- Main music library
-- Archive overflow when cold tier is inaccessible
+- Residual shop-side writer/import surfaces not yet retired
+- Rehydration landing when archive content must be made hot again
+- Temporary transfer buffer during archive pushes
+- Operational residue that should shrink over time, not grow
 
 **Path Layout** (pve:/media):
 ```
@@ -104,27 +115,20 @@ There is currently **no dedicated live `/volume1/media-home/` share**. The old `
   movies-archive/      # 205G - Overlay mount from md1400 cold tier
 ```
 
-**Serving Method**: NFS export to download-stack (VM 209) and streaming-stack (VM 210)
+**Serving Method**: residual NFS export and transfer support only. This is not the canonical family watch plane.
 
 **Performance Target**:
-- Streaming bandwidth: 50MB/s+ concurrent for 3-5 streams
-- *arr service writes: 20MB/s+
+- Rehydration/transfer bandwidth sufficient for one-item-at-a-time archive flow
+- Writer residue should be treated as transitional, not as a growth target
 
 **Backup**:
-- Config state only (download-stack, streaming-stack VM backups)
+- Config state only (legacy shop media VMs / residual writer surfaces)
 - Media payload: regenerable (not backed up)
 
-**Critical Issues (Resolved in Phase 1)**:
-1. ✅ **86% full** — safe headroom for drive replacement (was 96%)
-2. ⏸️ **SMR drives** — pending Phase 2 replacement with 14TB SAS
-3. ✅ **Downloads staging-only restored** — 105G (was 2.3T)
-4. ✅ **Quarantine tier operational** — 2.07T in 30-day review buffer
-
-**Phase 2 Ready**:
-- ✅ Downloads drained to <200G (now 105G)
-- ✅ Quarantine tier created and populated
-- ✅ 2.77T space freed (Phase 1 complete)
-- ✅ Pool safe for drive replacement
+**Operator Rule**:
+- keep this plane boring and shrinking
+- do not re-promote it into the primary watch/download plane
+- use it only where the home plane has not yet absorbed the function
 
 ---
 
@@ -132,7 +136,7 @@ There is currently **no dedicated live `/volume1/media-home/` share**. The old `
 
 **Canonical Host**: `pve` (R730XD) — `md1400` external shelf
 **Hardware**: 12x4TB SAS RAIDZ2 (Dell MD1400 DAS)
-**Capacity**: 15.6T used / 43.7T total (43% — healthy headroom)
+**Capacity**: pressure-bound enough to require deliberate archive policy, not bulk dump behavior
 **Role**: Long-term archive for watched/aged/low-demand content
 **Content Classes**:
 - Watched movies (not pinned as favorites)
@@ -188,9 +192,8 @@ There is currently **no dedicated live `/volume1/media-home/` share**. The old `
 
 ### 4. Staging Tier (Downloads - Ephemeral)
 
-**Canonical Host**: Varies by use case
-**Home staging**: `synology918:/volume1/media-staging/`
-**Shop staging**: `pve:/media/downloads/` (CURRENTLY BLOATED)
+**Canonical Host**: `synology918:/volume1/media-staging/downloads`
+**Residual Secondary Host**: `pve:/media/downloads` (transitional only; not canonical)
 
 **Role**: Temporary holding area for fresh downloads ONLY
 **Capacity Target**: <200G at any time (not 2.3T!)
@@ -200,15 +203,14 @@ There is currently **no dedicated live `/volume1/media-home/` share**. The old `
 - Failed downloads awaiting retry/cleanup
 
 **Lifecycle Rules**:
-- Downloads complete → *arr imports → moves to active library → staging cleaned
+- Downloads complete → imports into the home plane → staging cleaned
 - Stuck downloads (>7 days) → manual review → retry or delete
 - Staging >500G → alert operator (bloat detected)
 
-**CRITICAL VIOLATION (Current State)**:
-- Shop downloads at 2.3T (should be <200G)
-- This indicates downloads are not being imported or cleaned
-- Likely cause: *arr not moving files, or post-processing disabled
-- **Action required**: Audit download-stack config, enable hardlinks, drain bloat
+**Operator Rule**:
+- home staging is the canonical intake lane
+- shop staging is residual drift until writer cutover closes
+- never let either downloads tree become permanent residence
 
 ---
 
@@ -216,16 +218,15 @@ There is currently **no dedicated live `/volume1/media-home/` share**. The old `
 
 | Media Class | Canonical Home | Serving Home | Backup Home | Notes |
 |-------------|---------------|--------------|-------------|-------|
-| **Movies (home current-watch, transitional)** | synology918:/volume1/media-staging/movies | media-home VM 106 | Not backed up (regenerable) | No dedicated hot-library share exists yet; current live share truth is staging-first. |
-| **Movies (main library)** | pve:/media/movies | streaming-stack VM 210 | Not backed up | 9.6T current |
-| **Movies (watched/aged)** | pve:/md1400/archive/media-cold/movies | Cold tier (manual rehydration) | Snapshot only | Infrequent access |
-| **TV (home current-watch, transitional)** | synology918:/volume1/media-staging/tv | media-home VM 106 | Not backed up | No dedicated hot-library share exists yet; current live share truth is staging-first. |
-| **TV (main library)** | pve:/media/tv | streaming-stack VM 210 | Not backed up | 5.5T current |
-| **TV (completed series)** | pve:/md1400/archive/media-cold/tv | Cold tier | Snapshot only | Binge-watched, done |
-| **Music** | pve:/media/music | streaming-stack VM 210 (Navidrome) | Not backed up | 666G current |
-| **Downloads (home)** | synology918:/volume1/media-staging/ | media-home VM 106 | Not backed up | Staging only (<100G) |
-| **Downloads (shop)** | pve:/media/downloads | download-stack VM 209 | Not backed up | **BLOATED** 2.3T (should be <200G) |
-| **Quarantine** | pve:/md1400/archive/media-quarantine/ | Cold tier (no serving) | Snapshot only | Low-value imports, 30-day review |
+| **Movies (active)** | synology918:/volume1/media-staging/movies | media-home VM 106 | Not backed up (regenerable) | Canonical live movie plane today. |
+| **Movies (archive)** | pve:/md1400/archive/media-cold/movies | Cold tier (rehydrate to home before normal watching) | Snapshot only | Passive watched/aged archive. |
+| **TV (active)** | synology918:/volume1/media-staging/tv | media-home VM 106 | Not backed up | Canonical live TV plane today. |
+| **TV (archive)** | pve:/md1400/archive/media-cold/tv | Cold tier | Snapshot only | Completed/aged series archive. |
+| **Music (active)** | synology918:/volume1/media-staging/music | media-home VM 106 (Navidrome) | Not backed up | Canonical live music plane today. |
+| **Music (archive)** | pve:/md1400/archive/media-cold/music | Cold tier | Snapshot only | Passive long-tail music archive. |
+| **Downloads (active intake)** | synology918:/volume1/media-staging/downloads | media-home VM 106 | Not backed up | Canonical intake lane. |
+| **Downloads (shop residue)** | pve:/media/downloads | Residual shop writer/import surfaces only | Not backed up | Transitional residue; should shrink, not grow. |
+| **Quarantine** | pve:/md1400/archive/media-quarantine/ | Cold tier (no serving) | Snapshot only | Low-value imports, 30-day review. |
 
 ---
 
@@ -236,47 +237,49 @@ There is currently **no dedicated live `/volume1/media-home/` share**. The old `
 ```yaml
 rule: fresh_download_import
 trigger: download_complete
-source: /media/downloads/ OR /volume1/media-staging/
-destination: Active library tier (home or shop based on content type)
-method: hardlink (if same filesystem) OR copy+delete
-automation: Radarr/Sonarr/Lidarr post-processing
-frequency: Real-time on completion
+source: /volume1/media-staging/downloads/
+destination: /volume1/media-staging/{movies,tv,music}
+method: move_or_hardlink_within_home_plane
+automation: home acquisition/runtime when promoted
+frequency: real_time_on_completion
 ```
 
 ### Archive Rules (active → cold)
 
 ```yaml
 rule: watched_aged_archive
-trigger: Manual operator decision (future: automated based on metadata)
+trigger: deliberate_archive_pass
 conditions:
-  - Movie/TV watched (Jellyfin playback history)
-  - Aged >90 days (movies) or >180 days (TV series complete)
-  - NOT pinned as favorite
-source: /media/movies/ OR /media/tv/
+  - watched_or_low_replay_probability
+  - not_pinned_as_keep_hot
+  - md1400_has_safe_headroom_for_single_item_move
+source: /volume1/media-staging/{movies,tv,music}
 destination: /md1400/archive/media-cold/
-method: rsync --remove-source-files (move, not copy)
-automation: NOT IMPLEMENTED YET (manual only)
-frequency: Monthly cleanup passes
+method: copy_verify_then_prune_later
+automation: future_single_item_archive_capability
+frequency: low_churn_incremental
 ```
 
 ### Quarantine Rules (staging → quarantine → cold or delete)
 
 ```yaml
 rule: bulk_import_quarantine
-trigger: Bulk list import (Trakt, IMDB, etc.)
+trigger: low_confidence_or_bulk_acquisition
 conditions:
-  - Low confidence score (<60%)
-  - IMDB rating <6.0 AND no personal tag
-  - Duplicate detected
-source: /media/downloads/ OR *arr request queue
+  - low_confidence_score
+  - duplicate_detected
+  - operator_does_not_want_hot_residency
+source: active_intake_or_transitional_shop_writer
 destination: /md1400/archive/media-quarantine/
-method: Move after acquisition
-automation: Manual *arr list tag + custom script
-frequency: On bulk import events
-quarantine_duration: 30 days minimum
-review_frequency: Monthly
-post_review_action: promote_to_cold OR delete
+method: move_after_review_intake
+automation: manual_until_home_writer_cutover_closes
+frequency: as_needed
+quarantine_duration: 30_days_minimum
+review_frequency: monthly
+post_review_action: promote_to_archive OR delete
 ```
+
+Historical cutover planning below is retained for lineage only. Placement decisions should follow the tier model, canonical homes table, and lifecycle rules above.
 
 ### Deletion Rules (quarantine → purge)
 

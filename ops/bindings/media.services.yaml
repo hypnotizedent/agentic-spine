@@ -1,7 +1,7 @@
 # Media Services Binding (SSOT)
 # Status: authoritative
 # Owner: "@ronny"
-# Last verified: 2026-02-15
+# Last verified: 2026-03-20
 # Scope: media-stack-services
 #
 # Consolidated service inventory for media-stack tenant.
@@ -9,8 +9,8 @@
 # Used by: media.health.check, media.service.status capabilities
 #          D106-D110 drift gates
 
-version: 1
-updated_at: "2026-02-25"
+version: 2
+updated_at: "2026-03-20"
 owner: "@ronny"
 
 defaults:
@@ -27,7 +27,22 @@ naming_aliases:
   arr-stack:
     status: active
     canonical_vm: download-stack
-    note: "ARR services run on download-stack unless explicitly listed under streaming-stack."
+    note: "Residual ARR services still run on download-stack until home writer cutover closes."
+  media-home-stack:
+    status: active
+    canonical_vm: media-home
+    note: "Canonical active watch plane on media-home VM 106 backed by Synology /volume1/media-staging."
+
+operating_model:
+  active_plane:
+    vm: media-home
+    note: "Canonical live watch/download plane."
+  archive_plane:
+    vm: pve
+    note: "Canonical passive archive plane on md1400."
+  transitional_shop_residue:
+    - download-stack
+    - streaming-stack
 
 services:
   # ════════════════════════════════════════════════════════════════════════
@@ -275,104 +290,115 @@ services:
     description: "Host metrics exporter for Prometheus"
 
   # ════════════════════════════════════════════════════════════════════════
-  # VM 210 — streaming-stack (192.168.1.210)
+  # Compatibility inventory key: streaming-stack
+  # Active read-side surface now lives on media-home VM 106.
   # ════════════════════════════════════════════════════════════════════════
 
   # Video streaming
   jellyfin:
     vm: streaming-stack
+    active_surface: media-home
     port: 8096
     health: /health
     status: active
     category: streaming
-    description: "Video streaming server"
+    description: "Canonical home video streaming server"
     critical: true
 
   # Music streaming
   navidrome:
     vm: streaming-stack
+    active_surface: media-home
     port: 4533
     health: /ping
     status: active
     category: streaming
-    description: "Music streaming server"
+    description: "Canonical home music streaming server"
 
   # Request management
   jellyseerr:
     vm: streaming-stack
+    active_surface: media-home
     port: 5055
     health: /api/v1/status
     status: active
     category: requests
-    description: "Media request management"
+    description: "Canonical home request management surface"
 
   # Subtitles
   bazarr:
     vm: streaming-stack
+    active_surface: media-home
     port: 6767
     health: /ping
-    status: active
+    status: parked
     category: enhancement
-    description: "Subtitle management"
+    description: "Subtitle management (defined on home plane, intentionally not promoted yet)"
 
   # Dashboard
   homarr:
     vm: streaming-stack
+    active_surface: media-home
     port: 7575
     health: /
     status: active
     category: dashboard
     role: operator-dashboard
-    description: "Media dashboard"
+    description: "Canonical home media dashboard"
 
   # User management
   wizarr:
     vm: streaming-stack
+    active_surface: media-home
     port: 5690
     health: /
     status: active
     category: user-mgmt
-    description: "Media server invitation management"
+    description: "Canonical home media invitation management"
 
   # Music sync
   spotisub:
     vm: streaming-stack
+    active_surface: media-home
     port: 8766
     health: /api/v1/utils/healthcheck
-    status: active
+    status: parked
     category: enhancement
-    description: "Spotify-to-Navidrome sync"
+    description: "Spotify-to-Navidrome sync (defined on home plane, not promoted in boring soak)"
 
   subgen:
     vm: streaming-stack
+    active_surface: media-home
     port: null
     health: null
     health_reason: no_http_port
-    status: active
+    status: parked
     category: enhancement
-    description: "AI subtitle generation for Jellyfin"
+    description: "AI subtitle generation for Jellyfin (left off in boring baseline)"
 
   # Infrastructure
   watchtower-streaming:
     vm: streaming-stack
+    active_surface: media-home
     container: watchtower
     port: null
     health: null
     health_reason: no_http_port
-    status: active
+    status: parked
     category: infrastructure
-    description: "Auto-update utility"
+    description: "Auto-update utility (disabled for boring baseline)"
 
   streaming-node-exporter:
     vm: streaming-stack
+    active_surface: media-home
     container: node-exporter
     port: 9100
     health: /
-    status: active
+    status: parked
     category: infrastructure
-    description: "Host metrics exporter for Prometheus"
+    description: "Host metrics exporter for Prometheus (not part of current boring baseline)"
 
-# Jellyfin plugins (installed on streaming-stack VM 210)
+# Jellyfin plugins (active home media plane; inventory key retained under streaming-stack compatibility)
 jellyfin_plugins:
   repositories:
     - name: "IAmParadox"
@@ -447,9 +473,10 @@ ha_overlaps:
     - ha_addon: overseerr
       shop_service: jellyseerr
       shop_vm: streaming-stack
+      active_surface: media-home
       shop_port: 5055
       recommendation: decommission
-      reason: "jellyseerr on streaming-stack is the canonical request manager"
+      reason: "jellyseerr on media-home is the canonical request manager; streaming-stack key retained for compatibility"
 
     - ha_addon: lidarr
       shop_service: lidarr
