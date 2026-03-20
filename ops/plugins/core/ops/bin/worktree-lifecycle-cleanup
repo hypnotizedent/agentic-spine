@@ -91,9 +91,13 @@ if command -v yq >/dev/null 2>&1 && [[ -f "$CLOSEOUT_CONTRACT" ]]; then
   RECEIPT_GATE_SCRIPT="$CONTROL_ROOT/$RECEIPT_GATE_REL"
 fi
 
-if [[ "$ARCHIVE_ROOT" == "~/"* ]]; then
-  ARCHIVE_ROOT="$HOME/${ARCHIVE_ROOT#~/}"
-fi
+ARCHIVE_ROOT="$(python3 - "$ARCHIVE_ROOT" <<'PY'
+import os
+import sys
+
+print(os.path.expanduser(sys.argv[1]))
+PY
+)"
 
 if [[ -n "${OPS_WORKTREE_CLEANUP_REQUIRE_RECEIPT_GATE_PASS_DELETE:-}" ]]; then
   REQUIRE_RECEIPT_GATE_PASS_DELETE="${OPS_WORKTREE_CLEANUP_REQUIRE_RECEIPT_GATE_PASS_DELETE}"
@@ -144,6 +148,7 @@ normalize_root = sys.argv[10].lower() == "true"
 
 rows = report.get("worktrees", [])
 clone_rows = report.get("temp_clones", [])
+stash_rows = report.get("stashes", [])
 root_checkout = report.get("root_checkout") or {}
 
 blocked = []
@@ -151,6 +156,8 @@ delete_candidates = []
 root_violations = []
 clone_blocked = []
 clone_delete_candidates = []
+stash_blocked = []
+stash_delete_candidates = []
 root_normalization = {"candidate": None, "blocked": None}
 
 for row in rows:
@@ -190,6 +197,26 @@ for row in clone_rows:
     else:
         clone_delete_candidates.append({"path": row["path"], "branch": row.get("branch")})
 
+for row in stash_rows:
+    reasons = []
+    if not row.get("cleanup_candidate"):
+        reasons.append("not_cleanup_candidate")
+    candidate = {
+        "ref": row.get("ref"),
+        "commit": row.get("commit"),
+        "branch": row.get("branch"),
+        "subject": row.get("subject"),
+        "message": row.get("message"),
+        "age_hours": row.get("age_hours"),
+        "issues": list(row.get("issues") or []),
+        "warnings": list(row.get("warnings") or []),
+    }
+    if reasons:
+        candidate["reasons"] = reasons
+        stash_blocked.append(candidate)
+    else:
+        stash_delete_candidates.append(candidate)
+
 if root_checkout.get("checked"):
     if normalize_root and root_checkout.get("normalizable"):
         root_normalization["candidate"] = {
@@ -212,6 +239,8 @@ summary = {
     "temp_clone_delete_candidate_count": len(clone_delete_candidates),
     "blocked_count": len(blocked),
     "temp_clone_blocked_count": len(clone_blocked),
+    "stash_delete_candidate_count": len(stash_delete_candidates),
+    "stash_blocked_count": len(stash_blocked),
     "root_violation_count": len(root_violations),
     "root_normalization_candidate_count": 1 if root_normalization["candidate"] else 0,
     "root_normalization_blocked_count": 1 if root_normalization["blocked"] else 0,
@@ -222,6 +251,8 @@ report["delete_candidates"] = delete_candidates
 report["blocked"] = blocked
 report["temp_clone_delete_candidates"] = clone_delete_candidates
 report["temp_clone_blocked"] = clone_blocked
+report["stash_delete_candidates"] = stash_delete_candidates
+report["stash_blocked"] = stash_blocked
 report["root_normalization"] = root_normalization
 report["root_violations"] = root_violations
 Path(sys.argv[1]).write_text(json.dumps(report, indent=2) + "\n")
@@ -233,8 +264,10 @@ with md.open("w", encoding="utf-8") as f:
     f.write(f"- temp_clones: {summary['temp_clone_count']}\n")
     f.write(f"- delete_candidates: {summary['delete_candidate_count']}\n")
     f.write(f"- temp_clone_delete_candidates: {summary['temp_clone_delete_candidate_count']}\n")
+    f.write(f"- stash_delete_candidates: {summary['stash_delete_candidate_count']}\n")
     f.write(f"- blocked: {summary['blocked_count']}\n")
     f.write(f"- temp_clone_blocked: {summary['temp_clone_blocked_count']}\n")
+    f.write(f"- stash_blocked: {summary['stash_blocked_count']}\n")
     f.write(f"- root_violations: {summary['root_violation_count']}\n\n")
     f.write("## Delete Candidates\n")
     for item in delete_candidates:
@@ -246,6 +279,11 @@ with md.open("w", encoding="utf-8") as f:
       f.write(f"- {item['path']} | {item.get('branch') or '<detached>'}\n")
     if not clone_delete_candidates:
       f.write("- none\n")
+    f.write("\n## Stash Delete Candidates\n")
+    for item in stash_delete_candidates:
+      f.write(f"- {item['ref']} | {item.get('branch') or '<unknown>'} | {item.get('commit') or '<unknown>'}\n")
+    if not stash_delete_candidates:
+      f.write("- none\n")
     f.write("\n## Blocked\n")
     for item in blocked:
       f.write(f"- {item['path']} | {item['branch']} | {','.join(item['reasons'])}\n")
@@ -255,6 +293,11 @@ with md.open("w", encoding="utf-8") as f:
     for item in clone_blocked:
       f.write(f"- {item['path']} | {item.get('branch') or '<detached>'} | {','.join(item['reasons'])}\n")
     if not clone_blocked:
+      f.write("- none\n")
+    f.write("\n## Stash Blocked\n")
+    for item in stash_blocked:
+      f.write(f"- {item['ref']} | {item.get('branch') or '<unknown>'} | {','.join(item['reasons'])}\n")
+    if not stash_blocked:
       f.write("- none\n")
     f.write("\n## Root Normalization\n")
     if root_normalization["candidate"]:
@@ -267,6 +310,22 @@ with md.open("w", encoding="utf-8") as f:
       f.write("- none\n")
 PY
 
+REQUIRE_RECEIPT_GATE_FOR_RUN="$REQUIRE_RECEIPT_GATE_PASS_DELETE"
+if [[ "$REQUIRE_RECEIPT_GATE_FOR_RUN" == "true" ]]; then
+  WORKTREE_DELETE_CANDIDATE_COUNT="$(python3 - "$REPORT_JSON" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+report = json.loads(Path(sys.argv[1]).read_text())
+print(len(report.get("delete_candidates", [])))
+PY
+)"
+  if [[ "$WORKTREE_DELETE_CANDIDATE_COUNT" == "0" ]]; then
+    REQUIRE_RECEIPT_GATE_FOR_RUN="false"
+  fi
+fi
+
 : > "$ACTIONS_LOG"
 
 if [[ "$MODE" == "archive-only" || "$MODE" == "delete" ]]; then
@@ -274,14 +333,15 @@ if [[ "$MODE" == "archive-only" || "$MODE" == "delete" ]]; then
   ARCHIVE_RUN_DIR="$ARCHIVE_ROOT/$RUN_ID"
   mkdir -p "$ARCHIVE_RUN_DIR"
 
-  python3 - "$REPORT_JSON" "$ARCHIVE_RUN_DIR" "$ARCHIVE_MANIFEST" "$ACTIONS_LOG" <<'PY'
-import json, sys, tarfile
+  python3 - "$TARGET_ROOT" "$REPORT_JSON" "$ARCHIVE_RUN_DIR" "$ARCHIVE_MANIFEST" "$ACTIONS_LOG" <<'PY'
+import json, subprocess, sys, tarfile
 from pathlib import Path
 
-report = json.loads(Path(sys.argv[1]).read_text())
-archive_dir = Path(sys.argv[2])
-manifest_path = Path(sys.argv[3])
-actions_log = Path(sys.argv[4])
+repo = Path(sys.argv[1]).resolve()
+report = json.loads(Path(sys.argv[2]).read_text())
+archive_dir = Path(sys.argv[3])
+manifest_path = Path(sys.argv[4])
+actions_log = Path(sys.argv[5])
 
 items = []
 for row in report.get("delete_candidates", []):
@@ -310,6 +370,41 @@ for row in report.get("temp_clone_delete_candidates", []):
         "archive": str(tar_path),
         "branch": row.get("branch"),
     })
+for row in report.get("stash_delete_candidates", []):
+    ref = str(row.get("ref") or "").strip()
+    commit = str(row.get("commit") or "").strip()
+    if not ref or not commit:
+        continue
+    stash_dir = archive_dir / f"stash-{commit[:12]}"
+    stash_dir.mkdir(parents=True, exist_ok=True)
+    patch_path = stash_dir / "stash.patch"
+    metadata_path = stash_dir / "metadata.json"
+    patch = subprocess.run(["git", "-C", str(repo), "stash", "show", "-p", ref], text=True, capture_output=True)
+    if patch.returncode != 0:
+        with actions_log.open("a", encoding="utf-8") as f:
+            f.write(f"skip_archive_stash={ref}|show_failed|{(patch.stderr or patch.stdout).strip()}\n")
+        continue
+    patch_path.write_text(patch.stdout, encoding="utf-8")
+    metadata = {
+        "kind": "stash",
+        "ref": ref,
+        "commit": commit,
+        "branch": row.get("branch"),
+        "subject": row.get("subject"),
+        "message": row.get("message"),
+        "age_hours": row.get("age_hours"),
+        "issues": row.get("issues") or [],
+        "warnings": row.get("warnings") or [],
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    items.append({
+        "kind": "stash",
+        "path": ref,
+        "ref": ref,
+        "commit": commit,
+        "archive": str(stash_dir),
+        "branch": row.get("branch"),
+    })
 
 manifest = {
     "archive_dir": str(archive_dir),
@@ -329,7 +424,7 @@ if [[ "$MODE" == "delete" ]]; then
     exit 1
   fi
 
-  if [[ "$REQUIRE_RECEIPT_GATE_PASS_DELETE" == "true" ]]; then
+  if [[ "$REQUIRE_RECEIPT_GATE_FOR_RUN" == "true" ]]; then
     if [[ ! -x "$RECEIPT_GATE_SCRIPT" ]]; then
       echo "FAIL: delete mode requires receipt gate script: $RECEIPT_GATE_SCRIPT" >&2
       exit 1
@@ -363,7 +458,31 @@ archived = {}
 if require_archive and manifest_path and manifest_path.exists():
     m = json.loads(manifest_path.read_text())
     for item in m.get("items", []):
-        archived[(item.get("kind"), item.get("path"))] = item.get("archive")
+        if item.get("kind") == "stash":
+            archived[(item.get("kind"), item.get("commit"))] = item.get("archive")
+        else:
+            archived[(item.get("kind"), item.get("path"))] = item.get("archive")
+
+
+def current_stash_refs(repo_root: Path):
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "stash", "list", "--format=%gd%x09%H"],
+        text=True,
+        capture_output=True,
+    )
+    mapping = {}
+    if proc.returncode != 0:
+        return mapping
+    for raw in (proc.stdout or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        ref, commit = parts
+        mapping[commit.strip()] = ref.strip()
+    return mapping
 
 with actions.open("a", encoding="utf-8") as log:
     for item in report.get("delete_candidates", []):
@@ -393,7 +512,7 @@ with actions.open("a", encoding="utf-8") as log:
             if d.returncode == 0:
                 log.write(f"deleted_branch={br}\n")
         else:
-            log.write(f"skip_branch={br}|{(d.stderr or d.stdout).strip()}\n")
+            log.write(f"skip_branch={br}|branch_not_deleted\n")
 
     for item in report.get("temp_clone_delete_candidates", []):
         clone_path = item["path"]
@@ -416,6 +535,26 @@ with actions.open("a", encoding="utf-8") as log:
             log.write(f"skip={clone_path}|remove_failed|{exc}\n")
             continue
         log.write(f"deleted_temp_clone={clone_path}|{item.get('branch') or '<detached>'}\n")
+
+    stash_refs = current_stash_refs(repo)
+    for item in report.get("stash_delete_candidates", []):
+        commit = str(item.get("commit") or "").strip()
+        if not commit:
+            log.write("skip_stash=<unknown>|missing_commit\n")
+            continue
+        if require_archive and ("stash", commit) not in archived:
+            log.write(f"skip_stash={commit}|not_archived\n")
+            continue
+        ref = stash_refs.get(commit)
+        if not ref:
+            log.write(f"skip_stash={commit}|missing_or_shifted_ref\n")
+            continue
+        drop = subprocess.run(["git", "-C", str(repo), "stash", "drop", ref], text=True, capture_output=True)
+        if drop.returncode != 0:
+            log.write(f"skip_stash={commit}|drop_failed|{(drop.stderr or drop.stdout).strip()}\n")
+            continue
+        log.write(f"deleted_stash={ref}|{commit}|{item.get('branch') or '<unknown>'}\n")
+        stash_refs = current_stash_refs(repo)
 
     root_action = report.get("root_normalization", {}).get("candidate")
     if root_action:

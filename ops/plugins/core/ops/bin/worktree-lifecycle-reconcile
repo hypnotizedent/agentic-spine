@@ -47,6 +47,8 @@ MERGED_GRACE_HOURS="24"
 CLOSED_OWNER_GRACE_HOURS="6"
 UNOWNED_LOCAL_GRACE_HOURS="168"
 TEMP_CLONE_GRACE_HOURS="24"
+MAIN_STASH_WARN_HOURS="${SPINE_WORKTREE_LIFECYCLE_MAIN_STASH_WARN_HOURS:-24}"
+MAIN_STASH_FAIL_HOURS="${SPINE_WORKTREE_LIFECYCLE_MAIN_STASH_FAIL_HOURS:-72}"
 FAIL_ON_DETACHED="true"
 FAIL_ON_DIRTY_CLOSED="true"
 WARN_ON_DIRTY_ACTIVE="true"
@@ -87,6 +89,12 @@ if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   CLOSED_OWNER_GRACE_HOURS="$(yq e -r '.policy.closed_owner_grace_hours // 6' "$CONTRACT" 2>/dev/null || echo 6)"
   UNOWNED_LOCAL_GRACE_HOURS="$(yq e -r '.policy.unowned_local_branch_grace_hours // 168' "$CONTRACT" 2>/dev/null || echo 168)"
   TEMP_CLONE_GRACE_HOURS="$(yq e -r '.policy.temp_clone_grace_hours // 24' "$CONTRACT" 2>/dev/null || echo 24)"
+  if [[ -z "${SPINE_WORKTREE_LIFECYCLE_MAIN_STASH_WARN_HOURS:-}" ]]; then
+    MAIN_STASH_WARN_HOURS="$(yq e -r '.policy.main_stash_warn_hours // 24' "$CONTRACT" 2>/dev/null || echo 24)"
+  fi
+  if [[ -z "${SPINE_WORKTREE_LIFECYCLE_MAIN_STASH_FAIL_HOURS:-}" ]]; then
+    MAIN_STASH_FAIL_HOURS="$(yq e -r '.policy.main_stash_fail_hours // 72' "$CONTRACT" 2>/dev/null || echo 72)"
+  fi
   FAIL_ON_DETACHED="$(yq e -r '.policy.fail_on_detached_head // true' "$CONTRACT" 2>/dev/null || echo true)"
   FAIL_ON_DIRTY_CLOSED="$(yq e -r '.policy.fail_on_dirty_when_owner_closed // true' "$CONTRACT" 2>/dev/null || echo true)"
   WARN_ON_DIRTY_ACTIVE="$(yq e -r '.policy.warn_on_dirty_when_owner_active // true' "$CONTRACT" 2>/dev/null || echo true)"
@@ -113,7 +121,7 @@ if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   fi
 fi
 
-python3 - "$TARGET_ROOT" "$MAIN_BRANCH" "$CANONICAL_WORKTREE_ROOT" "$CANONICAL_TEMP_CLONE_ROOT" "$MANAGED_WORKTREE_PATHS_CSV" "$LEASE_FILENAME" "$LEASE_TTL_HOURS" "$PREFIX_CSV" "$MERGED_GRACE_HOURS" "$CLOSED_OWNER_GRACE_HOURS" "$UNOWNED_LOCAL_GRACE_HOURS" "$TEMP_CLONE_GRACE_HOURS" "$FAIL_ON_DETACHED" "$FAIL_ON_DIRTY_CLOSED" "$WARN_ON_DIRTY_ACTIVE" "$FAIL_ON_DIRTY_TEMP_CLONE" "$FAIL_ON_MISSING_TEMP_CLONE_ORIGIN" "$FAIL_ON_ROOT_NON_MAIN" "$FAIL_ON_ROOT_DIRTY" "$WAVES_DIR" "$LOOPS_SCOPE_DIR" "$MODE" "$JSON_MODE" "$BRIEF_MODE" <<'PY'
+python3 - "$TARGET_ROOT" "$MAIN_BRANCH" "$CANONICAL_WORKTREE_ROOT" "$CANONICAL_TEMP_CLONE_ROOT" "$MANAGED_WORKTREE_PATHS_CSV" "$LEASE_FILENAME" "$LEASE_TTL_HOURS" "$PREFIX_CSV" "$MERGED_GRACE_HOURS" "$CLOSED_OWNER_GRACE_HOURS" "$UNOWNED_LOCAL_GRACE_HOURS" "$TEMP_CLONE_GRACE_HOURS" "$MAIN_STASH_WARN_HOURS" "$MAIN_STASH_FAIL_HOURS" "$FAIL_ON_DETACHED" "$FAIL_ON_DIRTY_CLOSED" "$WARN_ON_DIRTY_ACTIVE" "$FAIL_ON_DIRTY_TEMP_CLONE" "$FAIL_ON_MISSING_TEMP_CLONE_ORIGIN" "$FAIL_ON_ROOT_NON_MAIN" "$FAIL_ON_ROOT_DIRTY" "$WAVES_DIR" "$LOOPS_SCOPE_DIR" "$MODE" "$JSON_MODE" "$BRIEF_MODE" <<'PY'
 import json
 import os
 import re
@@ -135,18 +143,20 @@ merged_grace_h = float(sys.argv[9])
 closed_owner_grace_h = float(sys.argv[10])
 unowned_local_grace_h = float(sys.argv[11])
 temp_clone_grace_h = float(sys.argv[12])
-fail_on_detached = sys.argv[13].lower() == "true"
-fail_on_dirty_closed = sys.argv[14].lower() == "true"
-warn_on_dirty_active = sys.argv[15].lower() == "true"
-fail_on_dirty_temp_clone = sys.argv[16].lower() == "true"
-fail_on_missing_temp_clone_origin = sys.argv[17].lower() == "true"
-fail_on_root_non_main = sys.argv[18].lower() == "true"
-fail_on_root_dirty = sys.argv[19].lower() == "true"
-waves_dir = Path(os.path.expanduser(sys.argv[20]))
-loops_scope_rel = sys.argv[21]
-mode = sys.argv[22]
-json_mode = sys.argv[23] == "1"
-brief_mode = sys.argv[24] == "1"
+main_stash_warn_h = float(sys.argv[13])
+main_stash_fail_h = float(sys.argv[14])
+fail_on_detached = sys.argv[15].lower() == "true"
+fail_on_dirty_closed = sys.argv[16].lower() == "true"
+warn_on_dirty_active = sys.argv[17].lower() == "true"
+fail_on_dirty_temp_clone = sys.argv[18].lower() == "true"
+fail_on_missing_temp_clone_origin = sys.argv[19].lower() == "true"
+fail_on_root_non_main = sys.argv[20].lower() == "true"
+fail_on_root_dirty = sys.argv[21].lower() == "true"
+waves_dir = Path(os.path.expanduser(sys.argv[22]))
+loops_scope_rel = sys.argv[23]
+mode = sys.argv[24]
+json_mode = sys.argv[25] == "1"
+brief_mode = sys.argv[26] == "1"
 
 now_epoch = time.time()
 
@@ -392,6 +402,24 @@ def discover_session_loop_id(worktree: Path):
         if loop_id.startswith("LOOP-"):
             return loop_id
     return None
+
+
+def parse_stash_subject(subject: str):
+    text = (subject or "").strip()
+    lowered = text.lower()
+    prefixes = [
+        ("on ", 3),
+        ("wip on ", 7),
+    ]
+    for prefix, length in prefixes:
+        if lowered.startswith(prefix):
+            remainder = text[length:]
+            if ":" in remainder:
+                branch, message = remainder.split(":", 1)
+            else:
+                branch, message = remainder, ""
+            return branch.strip(), message.strip()
+    return "", text
 
 
 repo_root = Path(subprocess.check_output(["git", "-C", str(root), "rev-parse", "--show-toplevel"], text=True).strip()).resolve()
@@ -710,30 +738,77 @@ if not path_under(repo_root, canonical_worktree_root) and not path_under(repo_ro
         })
 
 # Stash audit
+stash_rows = []
 stash_issues = []
 stash_warnings = []
-_, stash_out = sh(["git", "-C", str(repo_root), "stash", "list"], check=False)
+_, stash_out = sh(
+    ["git", "-C", str(repo_root), "stash", "list", "--format=%gd%x09%H%x09%ct%x09%gs"],
+    check=False,
+)
 stash_lines = [ln.strip() for ln in stash_out.splitlines() if ln.strip()]
 for line in stash_lines:
-    ref = line.split(":", 1)[0].strip()
-    if " On " in line:
-        branch_part = line.split(" On ", 1)[1]
-    elif " on " in line:
-        branch_part = line.split(" on ", 1)[1]
-    else:
-        continue
-    stash_branch = branch_part.split(":", 1)[0].strip()
-    if not stash_branch or stash_branch in {"main", "master"}:
-        continue
+    parts = line.split("\t", 3)
+    ref = parts[0].strip() if len(parts) > 0 else ""
+    commit = parts[1].strip() if len(parts) > 1 else ""
+    commit_epoch = float(parts[2]) if len(parts) > 2 and parts[2].strip().isdigit() else None
+    subject = parts[3].strip() if len(parts) > 3 else ""
+    stash_branch, stash_message = parse_stash_subject(subject)
+    age_hours = None if commit_epoch is None else max(0.0, (now_epoch - commit_epoch) / 3600.0)
+    row = {
+        "ref": ref,
+        "commit": commit,
+        "subject": subject,
+        "message": stash_message,
+        "branch": stash_branch,
+        "age_hours": age_hours,
+        "issues": [],
+        "warnings": [],
+        "cleanup_candidate": False,
+    }
 
-    rc, _ = sh(["git", "-C", str(repo_root), "rev-parse", "--verify", "--quiet", f"refs/heads/{stash_branch}"], check=False)
-    exists = rc == 0
-    if not exists:
-        stash_issues.append({"ref": ref, "branch": stash_branch, "code": "stash_branch_gone"})
-    elif merged_into_main(repo_root, stash_branch):
-        stash_issues.append({"ref": ref, "branch": stash_branch, "code": "stash_branch_merged"})
-    elif is_local_prefix(stash_branch):
-        stash_warnings.append({"ref": ref, "branch": stash_branch, "code": "stash_local_branch"})
+    if stash_branch in {"main", "master"}:
+        if age_hours is not None and age_hours >= main_stash_fail_h:
+            row["issues"].append("main_stash_past_fail_grace")
+        elif age_hours is not None and age_hours >= main_stash_warn_h:
+            row["warnings"].append("main_stash_past_warn_grace")
+    elif stash_branch:
+        rc, _ = sh(["git", "-C", str(repo_root), "rev-parse", "--verify", "--quiet", f"refs/heads/{stash_branch}"], check=False)
+        exists = rc == 0
+        if not exists:
+            row["issues"].append("stash_branch_gone")
+        elif merged_into_main(repo_root, stash_branch):
+            row["issues"].append("stash_branch_merged")
+        elif is_local_prefix(stash_branch):
+            row["warnings"].append("stash_local_branch")
+
+    row["cleanup_candidate"] = any(
+        code in {"stash_branch_gone", "stash_branch_merged", "main_stash_past_fail_grace"}
+        for code in row["issues"]
+    ) or any(code in {"main_stash_past_warn_grace"} for code in row["warnings"])
+    stash_rows.append(row)
+
+    for code in row["issues"]:
+        stash_issues.append(
+            {
+                "ref": ref,
+                "commit": commit,
+                "branch": stash_branch,
+                "subject": subject,
+                "age_hours": age_hours,
+                "code": code,
+            }
+        )
+    for code in row["warnings"]:
+        stash_warnings.append(
+            {
+                "ref": ref,
+                "commit": commit,
+                "branch": stash_branch,
+                "subject": subject,
+                "age_hours": age_hours,
+                "code": code,
+            }
+        )
 
 summary = {
     "repo": str(repo_root),
@@ -743,6 +818,7 @@ summary = {
     "worktree_issue_count": len(issues),
     "worktree_warning_count": len(warnings),
     "stash_count": len(stash_lines),
+    "stash_cleanup_candidate_count": sum(1 for row in stash_rows if row["cleanup_candidate"]),
     "stash_issue_count": len(stash_issues),
     "stash_warning_count": len(stash_warnings),
     "total_issue_count": len(issues) + len(stash_issues),
@@ -759,6 +835,8 @@ summary = {
         "closed_owner_grace_hours": closed_owner_grace_h,
         "unowned_local_branch_grace_hours": unowned_local_grace_h,
         "temp_clone_grace_hours": temp_clone_grace_h,
+        "main_stash_warn_hours": main_stash_warn_h,
+        "main_stash_fail_hours": main_stash_fail_h,
     },
 }
 
@@ -769,6 +847,7 @@ payload = {
     "root_checkout": root_checkout,
     "issues": issues,
     "warnings": warnings,
+    "stashes": stash_rows,
     "stash_issues": stash_issues,
     "stash_warnings": stash_warnings,
 }
@@ -782,6 +861,14 @@ def format_item(item):
         owner = item.get("owner_id") or "none"
         return f"{path}: {branch} -> {code} (owner={item.get('owner_type')}:{owner} state={item.get('owner_state')})"
     return f"{kind} {path}: {branch} -> {code}"
+
+
+def format_stash_item(item):
+    age_hours = item.get("age_hours")
+    age_fragment = ""
+    if isinstance(age_hours, (int, float)):
+        age_fragment = f", age={age_hours:.1f}h"
+    return f"stash {item.get('ref')} ({item.get('branch') or '<unknown>'}{age_fragment}): {item.get('code')}"
 
 if json_mode:
     print(json.dumps(payload, indent=2))
@@ -799,14 +886,14 @@ else:
             for item in issues:
                 print(f"  - {format_item(item)}")
             for item in stash_issues:
-                print(f"  - stash {item['ref']} ({item['branch']}): {item['code']}")
+                print(f"  - {format_stash_item(item)}")
             if warnings:
                 print("  WARNINGS:")
                 for item in warnings:
                     print(f"    - {format_item(item)}")
             if stash_warnings:
                 for item in stash_warnings:
-                    print(f"    - stash {item['ref']} ({item['branch']}): {item['code']}")
+                    print(f"    - {format_stash_item(item)}")
         else:
             print(
                 "D48 PASS: lifecycle clean "
@@ -835,11 +922,11 @@ else:
         if stash_issues:
             print("stash_issues:")
             for item in stash_issues:
-                print(f"  - {item['ref']} ({item['branch']}): {item['code']}")
+                print(f"  - {format_stash_item(item)}")
         if stash_warnings:
             print("stash_warnings:")
             for item in stash_warnings:
-                print(f"  - {item['ref']} ({item['branch']}): {item['code']}")
+                print(f"  - {format_stash_item(item)}")
 
 if mode == "gate" and summary["total_issue_count"] > 0:
     sys.exit(1)

@@ -32,6 +32,31 @@ assert_contains() {
   fi
 }
 
+hours_ago_iso() {
+  local hours="$1"
+  python3 - "$hours" <<'PY'
+import sys
+from datetime import datetime, timedelta, timezone
+
+hours = float(sys.argv[1])
+dt = datetime.now(timezone.utc) - timedelta(hours=hours)
+print(dt.strftime("%Y-%m-%dT%H:%M:%S %z"))
+PY
+}
+
+create_main_stash() {
+  local repo_path="$1" age_hours="$2" label="$3"
+  local ts
+  ts="$(hours_ago_iso "$age_hours")"
+  printf '%s\n' "$label" >> "$repo_path/file.txt"
+  (
+    cd "$repo_path" && \
+    GIT_AUTHOR_DATE="$ts" \
+    GIT_COMMITTER_DATE="$ts" \
+    git stash push -m "$label" >/dev/null
+  )
+}
+
 touch_old_repo() {
   local repo_path="$1"
   python3 - "$repo_path" <<'PY'
@@ -88,6 +113,9 @@ printf 'base\n' > "$TARGET/file.txt"
 git -C "$TARGET" add file.txt
 git -C "$TARGET" commit -m "base" >/dev/null
 git -C "$TARGET" branch -M main >/dev/null
+create_main_stash "$TARGET" 96 "ancient main stash"
+create_main_stash "$TARGET" 30 "aging main stash"
+create_main_stash "$TARGET" 1 "fresh main stash"
 
 git init "$OTHER" >/dev/null
 git -C "$OTHER" config user.name "Test User"
@@ -125,12 +153,17 @@ RECONCILE_JSON="$TMPDIR_BASE/reconcile.json"
 )
 assert_eq "$(json_eval "$RECONCILE_JSON" 'payload["summary"]["checked_worktrees"]')" "1" "managed runtime worktree is still inventoried"
 assert_eq "$(json_eval "$RECONCILE_JSON" 'payload["summary"]["checked_temp_clones"]')" "2" "only repo-matching temp clones are counted"
+assert_eq "$(json_eval "$RECONCILE_JSON" 'payload["summary"]["stash_count"]')" "3" "main stashes are inventoried"
+assert_eq "$(json_eval "$RECONCILE_JSON" 'payload["summary"]["stash_cleanup_candidate_count"]')" "2" "aged main stashes become cleanup candidates"
 assert_eq "$(json_eval "$RECONCILE_JSON" 'payload["root_checkout"]["normalizable"]')" "True" "root checkout is marked normalizable when head matches main"
 assert_eq "$(json_eval "$RECONCILE_JSON" '"root_checkout_matches_main_but_branch_not_main" in payload["root_checkout"]["issues"]')" "True" "root non-main normalization issue is reported"
 assert_eq "$(json_eval "$RECONCILE_JSON" 'sorted(row["path"].split("/")[-1] for row in payload["temp_clones"])')" "['verify-target-clean', 'verify-target-dirty']" "non-matching clone is ignored"
 assert_eq "$(json_eval "$RECONCILE_JSON" 'sorted(sorted(row["issues"]) for row in payload["temp_clones"])')" "[['dirty_temp_clone', 'temp_clone_past_grace'], ['temp_clone_past_grace']]" "temp clone issues distinguish dirty and stale"
 assert_eq "$(json_eval "$RECONCILE_JSON" 'payload["worktrees"][0]["managed_worktree"]')" "True" "managed worktree is classified explicitly"
 assert_eq "$(json_eval "$RECONCILE_JSON" 'payload["worktrees"][0]["issues"]')" "[]" "managed worktree at main parity is not treated as orphaned lane debt"
+assert_eq "$(json_eval "$RECONCILE_JSON" 'sum(1 for row in payload["stashes"] if "main_stash_past_fail_grace" in row["issues"])')" "1" "very old main stash escalates to issue"
+assert_eq "$(json_eval "$RECONCILE_JSON" 'sum(1 for row in payload["stashes"] if "main_stash_past_warn_grace" in row["warnings"])')" "1" "aging main stash escalates to warning"
+assert_eq "$(json_eval "$RECONCILE_JSON" 'sum(1 for row in payload["stashes"] if row["cleanup_candidate"])')" "2" "only aged main stashes are cleanup candidates"
 
 echo ""
 echo "── T2: cleanup report classifies clone candidates and root action ──"
@@ -144,10 +177,13 @@ CLEANUP_JSON="$TMPDIR_BASE/cleanup.json"
     "$CLEANUP" --mode report-only --json > "$CLEANUP_JSON"
 )
 assert_eq "$(json_eval "$CLEANUP_JSON" 'payload["summary"]["temp_clone_delete_candidate_count"]')" "1" "report-only exposes one clean stale temp clone candidate"
+assert_eq "$(json_eval "$CLEANUP_JSON" 'payload["summary"]["stash_delete_candidate_count"]')" "2" "report-only exposes aged main stashes as delete candidates"
 assert_eq "$(json_eval "$CLEANUP_JSON" 'payload["summary"]["temp_clone_blocked_count"]')" "1" "report-only blocks dirty stale temp clone"
+assert_eq "$(json_eval "$CLEANUP_JSON" 'payload["summary"]["stash_blocked_count"]')" "1" "recent main stash stays blocked from cleanup"
 assert_eq "$(json_eval "$CLEANUP_JSON" 'payload["summary"]["blocked_count"]')" "1" "managed worktree stays protected from cleanup delete"
 assert_eq "$(json_eval "$CLEANUP_JSON" 'payload["root_normalization"]["candidate"]["to_branch"]')" "main" "report-only exposes root normalization target"
 assert_eq "$(json_eval "$CLEANUP_JSON" 'payload["temp_clone_delete_candidates"][0]["path"].split("/")[-1]')" "verify-target-clean" "clean stale clone becomes delete candidate"
+assert_eq "$(json_eval "$CLEANUP_JSON" 'sorted(item["subject"] for item in payload["stash_delete_candidates"])')" "['On main: aging main stash', 'On main: ancient main stash']" "cleanup candidates preserve stash identity"
 
 echo ""
 echo "── T3: archive/delete removes clean stale clone and normalizes root ──"
@@ -166,6 +202,7 @@ if [[ -n "$manifest_path" && -f "$manifest_path" ]]; then
 else
   fail "archive manifest created"
 fi
+assert_eq "$(json_eval "$manifest_path" "all('/~/.local/' not in item.get('archive', '') for item in payload['items'])")" "True" "archive paths expand home correctly"
 delete_out="$(
   cd "$TARGET" && \
   env -u SPINE_TARGET_REPO -u SPINE_REPO -u SPINE_CODE \
@@ -173,7 +210,6 @@ delete_out="$(
     SPINE_WORKTREE_LIFECYCLE_TEMP_CLONE_ROOT="$CLONE_ROOT" \
     SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS="$MANAGED_WORKTREE" \
     OPS_WORKTREE_DELETE_TOKEN=RELEASE_MAIN_CLEANUP_WINDOW \
-    OPS_WORKTREE_CLEANUP_REQUIRE_RECEIPT_GATE_PASS_DELETE=false \
     "$CLEANUP" --mode delete --manifest "$manifest_path" 2>&1
 )"
 assert_contains "$delete_out" "artifact.actions=" "delete emits actions log"
@@ -193,6 +229,8 @@ else
   fail "managed worktree preserved"
 fi
 assert_eq "$(git -C "$TARGET" branch --show-current)" "main" "root checkout normalized back to main"
+assert_eq "$(git -C "$TARGET" stash list | wc -l | tr -d ' ')" "1" "aged main stashes deleted after archive"
+assert_contains "$(git -C "$TARGET" stash list)" "fresh main stash" "fresh main stash is retained"
 
 echo ""
 echo "────────────────────────────────────────"
