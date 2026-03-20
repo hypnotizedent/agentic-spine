@@ -586,7 +586,7 @@ run_cap() {
       wt_bypass_lc="$(printf '%s' "$wt_bypass" | tr '[:upper:]' '[:lower:]')"
 
       case "$name" in
-        session.start|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate|session.execution.lane.bootstrap|session.execution.lane.closeout|session.execution.lane.scan)
+        session.start|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate|worktree.lifecycle.managed.sync|session.execution.lane.bootstrap|session.execution.lane.closeout|session.execution.lane.scan)
           context_guard_exempt=1
           ;;
       esac
@@ -797,7 +797,7 @@ run_cap() {
       # Allow bootstrap and orchestration control-plane capabilities to bypass
       # lock evidence checks when they are establishing lock claims.
       case "$name" in
-        orchestration.launcher.claim|orchestration.terminal.entry|orchestration.wave.kickoff|orchestration.wave.start|orchestration.wave.dispatch|orchestration.wave.ack|orchestration.wave.close|loops.create|session.start|aof.contract.acknowledge|session.role.override|state.shared.reconcile) orchestrator_loop_id="" ;;
+        orchestration.launcher.claim|orchestration.terminal.entry|orchestration.wave.kickoff|orchestration.wave.start|orchestration.wave.dispatch|orchestration.wave.ack|orchestration.wave.close|loops.create|session.start|aof.contract.acknowledge|session.role.override|state.shared.reconcile|worktree.lifecycle.managed.sync) orchestrator_loop_id="" ;;
       esac
 
       if [[ -n "$orchestrator_loop_id" ]]; then

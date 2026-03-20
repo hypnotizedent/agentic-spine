@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONTROL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+TARGET_ROOT="${SPINE_TARGET_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "${SPINE_REPO:-$PWD}")}"
+export SPINE_CODE="${SPINE_CODE:-$CONTROL_ROOT}"
+export SPINE_REPO="$TARGET_ROOT"
+source "$CONTROL_ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+CONTRACT="$CONTROL_ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+
+TRIGGER="${SPINE_MANAGED_WORKTREE_SYNC_TRIGGER:-manual}"
+JSON_MODE=0
+BRIEF_MODE=0
+
+usage() {
+  cat <<'USAGE'
+worktree-lifecycle-managed-sync
+
+Usage:
+  worktree-lifecycle-managed-sync [--trigger <label>] [--json] [--brief]
+
+Notes:
+  - Fast-forward only sync from local refs/heads/main into contract-managed worktrees.
+  - Dirty or non-fast-forwardable managed worktrees fail loudly and are not mutated.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --trigger)
+      TRIGGER="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    --brief)
+      BRIEF_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+MAIN_BRANCH="main"
+MANAGED_WORKTREE_PATHS_CSV="${SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS:-}"
+
+if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+  MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo main)"
+  if [[ -z "${SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS:-}" ]]; then
+    managed_paths_accum=""
+    while IFS= read -r managed_path; do
+      [[ -n "$managed_path" && "$managed_path" != "null" ]] || continue
+      if [[ -n "$managed_paths_accum" ]]; then
+        managed_paths_accum+=",${managed_path}"
+      else
+        managed_paths_accum="$managed_path"
+      fi
+    done < <(yq e -r '.policy.managed_worktree_paths[]?' "$CONTRACT" 2>/dev/null || true)
+    MANAGED_WORKTREE_PATHS_CSV="$managed_paths_accum"
+  fi
+fi
+
+RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_ID="WORKTREE-MSYNC-${RUN_TS}-$$"
+ARTIFACT_ROOT="$(spine_resolve_mailroom_path 'evidence/loop-closeouts/worktree-lifecycle-managed-sync')"
+ARTIFACT_DIR="$ARTIFACT_ROOT/$RUN_ID"
+mkdir -p "$ARTIFACT_DIR"
+
+REPORT_JSON="$ARTIFACT_DIR/report.json"
+REPORT_MD="$ARTIFACT_DIR/report.md"
+ACTIONS_LOG="$ARTIFACT_DIR/actions.log"
+
+python3 - "$TARGET_ROOT" "$MAIN_BRANCH" "$MANAGED_WORKTREE_PATHS_CSV" "$TRIGGER" "$REPORT_JSON" "$REPORT_MD" "$ACTIONS_LOG" "$JSON_MODE" "$BRIEF_MODE" <<'PY'
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+target_root = Path(sys.argv[1]).resolve()
+main_branch = sys.argv[2]
+managed_paths = [item for item in sys.argv[3].split(",") if item]
+trigger = sys.argv[4]
+report_json = Path(sys.argv[5])
+report_md = Path(sys.argv[6])
+actions_log = Path(sys.argv[7])
+json_mode = sys.argv[8] == "1"
+brief_mode = sys.argv[9] == "1"
+
+
+def sh(args, check=True):
+    proc = subprocess.run(args, text=True, capture_output=True)
+    if check and proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "command failed")
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def git_value(path: Path, *args: str) -> str:
+    rc, out, _ = sh(["git", "-C", str(path), *args], check=False)
+    return out if rc == 0 else ""
+
+
+def git_head(path: Path, ref: str = "HEAD") -> str:
+    return git_value(path, "rev-parse", "--verify", "--quiet", ref)
+
+
+def git_branch(path: Path) -> str:
+    branch = git_value(path, "symbolic-ref", "--short", "HEAD")
+    return branch or "<detached>"
+
+
+def git_status_dirty(path: Path) -> bool:
+    return bool(git_value(path, "status", "--porcelain"))
+
+
+def git_common_dir(path: Path) -> str:
+    raw = git_value(path, "rev-parse", "--git-common-dir")
+    if not raw:
+        return ""
+    common = Path(raw)
+    if not common.is_absolute():
+        common = (path / common).resolve()
+    else:
+        common = common.resolve()
+    return str(common)
+
+
+def is_ancestor(path: Path, older: str, newer: str) -> bool:
+    proc = subprocess.run(
+        ["git", "-C", str(path), "merge-base", "--is-ancestor", older, newer],
+        text=True,
+        capture_output=True,
+    )
+    return proc.returncode == 0
+
+
+def rel_path(path: Path) -> str:
+    return str(path)
+
+
+repo_root_raw = git_value(target_root, "rev-parse", "--show-toplevel")
+if not repo_root_raw:
+    payload = {
+        "summary": {
+            "repo": str(target_root),
+            "trigger": trigger,
+            "managed_worktree_count": 0,
+            "synced_count": 0,
+            "already_current_count": 0,
+            "blocked_count": 1,
+            "status": "failed",
+        },
+        "rows": [],
+        "issues": [{"code": "target_repo_not_git_repo", "path": str(target_root)}],
+        "artifact": {
+            "report_json": str(report_json),
+            "report_md": str(report_md),
+            "actions_log": str(actions_log),
+        },
+    }
+    report_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    report_md.write_text("# Managed Worktree Sync\n\n- status: failed\n- issue: target_repo_not_git_repo\n", encoding="utf-8")
+    actions_log.write_text("issue=target_repo_not_git_repo\n", encoding="utf-8")
+    if json_mode:
+        print(json.dumps(payload, indent=2))
+    elif brief_mode:
+        print(f"FAIL managed=0 synced=0 current=0 blocked=1 trigger={trigger}")
+    else:
+        print("worktree.lifecycle.managed.sync")
+        print("status=failed")
+        print("issue=target_repo_not_git_repo")
+        print(f"artifact.report_json={report_json}")
+        print(f"artifact.report_md={report_md}")
+        print(f"artifact.actions={actions_log}")
+    sys.exit(1)
+
+repo_root = Path(repo_root_raw).resolve()
+repo_common_dir = git_common_dir(repo_root)
+main_head = git_head(repo_root, f"refs/heads/{main_branch}")
+current_branch = git_branch(target_root)
+
+rows = []
+issues = []
+actions = []
+
+if not main_head:
+    issues.append({"code": "missing_main_branch", "branch": main_branch, "path": str(repo_root)})
+
+for raw_path in managed_paths:
+    path = Path(os.path.expanduser(raw_path))
+    resolved = path.resolve(strict=False)
+    row = {
+        "path": str(resolved),
+        "configured_path": raw_path,
+        "trigger": trigger,
+        "branch": "",
+        "head": "",
+        "main_branch": main_branch,
+        "main_head": main_head,
+        "dirty": False,
+        "status": "",
+        "issues": [],
+    }
+
+    if not path.exists():
+        row["status"] = "blocked_missing_path"
+        row["issues"].append("managed_worktree_missing_path")
+    else:
+        root_probe = git_value(path, "rev-parse", "--show-toplevel")
+        if not root_probe:
+            row["status"] = "blocked_not_git_repo"
+            row["issues"].append("managed_worktree_not_git_repo")
+        else:
+            row["branch"] = git_branch(path)
+            row["head"] = git_head(path)
+            row["dirty"] = git_status_dirty(path)
+            path_common_dir = git_common_dir(path)
+            if repo_common_dir and path_common_dir and path_common_dir != repo_common_dir:
+                row["status"] = "blocked_foreign_repo"
+                row["issues"].append("managed_worktree_foreign_repo")
+            elif row["branch"] == "<detached>":
+                row["status"] = "blocked_detached_head"
+                row["issues"].append("managed_worktree_detached_head")
+            elif row["dirty"]:
+                row["status"] = "blocked_dirty"
+                row["issues"].append("dirty_managed_worktree")
+            elif not main_head:
+                row["status"] = "blocked_missing_main"
+                row["issues"].append("missing_main_branch")
+            elif row["head"] == main_head:
+                row["status"] = "already_current"
+            elif not row["head"] or not is_ancestor(path, row["head"], main_head):
+                row["status"] = "blocked_non_fast_forward"
+                row["issues"].append("managed_worktree_non_fast_forward")
+            else:
+                proc = subprocess.run(
+                    ["git", "-C", str(path), "merge", "--ff-only", main_head],
+                    text=True,
+                    capture_output=True,
+                )
+                if proc.returncode != 0:
+                    row["status"] = "blocked_merge_failed"
+                    row["issues"].append("managed_worktree_merge_failed")
+                    row["merge_output"] = (proc.stderr or proc.stdout).strip()
+                else:
+                    row["status"] = "synced"
+                    row["head"] = git_head(path)
+                    actions.append(f"synced={resolved}|{row['branch']}|{row['head']}")
+
+    if row["status"].startswith("blocked_"):
+        issues.append(
+            {
+                "code": row["status"],
+                "path": row["path"],
+                "branch": row["branch"] or "<unknown>",
+                "issues": list(row["issues"]),
+            }
+        )
+        actions.append(f"blocked={resolved}|{row['status']}|{row['branch'] or '<unknown>'}")
+    elif row["status"] == "already_current":
+        actions.append(f"noop={resolved}|already_current|{row['branch']}")
+
+    rows.append(row)
+
+synced_count = sum(1 for row in rows if row["status"] == "synced")
+already_current_count = sum(1 for row in rows if row["status"] == "already_current")
+blocked_count = sum(1 for row in rows if row["status"].startswith("blocked_"))
+status = "failed" if issues else "done"
+if not rows and not issues:
+    status = "done"
+
+payload = {
+    "summary": {
+        "repo": str(repo_root),
+        "current_branch": current_branch,
+        "main_branch": main_branch,
+        "main_head": main_head,
+        "trigger": trigger,
+        "managed_worktree_count": len(rows),
+        "synced_count": synced_count,
+        "already_current_count": already_current_count,
+        "blocked_count": blocked_count,
+        "status": status,
+    },
+    "rows": rows,
+    "issues": issues,
+    "artifact": {
+        "report_json": str(report_json),
+        "report_md": str(report_md),
+        "actions_log": str(actions_log),
+    },
+}
+
+report_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+actions_log.write_text("\n".join(actions) + ("\n" if actions else ""), encoding="utf-8")
+
+with report_md.open("w", encoding="utf-8") as fh:
+    fh.write("# Managed Worktree Sync\n\n")
+    fh.write(f"- repo: {repo_root}\n")
+    fh.write(f"- trigger: {trigger}\n")
+    fh.write(f"- main_branch: {main_branch}\n")
+    fh.write(f"- managed_worktrees: {len(rows)}\n")
+    fh.write(f"- synced: {synced_count}\n")
+    fh.write(f"- already_current: {already_current_count}\n")
+    fh.write(f"- blocked: {blocked_count}\n")
+    fh.write(f"- status: {status}\n\n")
+    fh.write("## Rows\n")
+    if rows:
+        for row in rows:
+            fh.write(f"- {row['path']} | {row['branch'] or '<unknown>'} | {row['status']}\n")
+    else:
+        fh.write("- none\n")
+    fh.write("\n## Issues\n")
+    if issues:
+        for item in issues:
+            fh.write(f"- {item['path']} | {item['branch']} | {item['code']}\n")
+    else:
+        fh.write("- none\n")
+
+if json_mode:
+    print(json.dumps(payload, indent=2))
+elif brief_mode:
+    status_word = "FAIL" if issues else "PASS"
+    print(
+        f"{status_word} managed={len(rows)} synced={synced_count} current={already_current_count} "
+        f"blocked={blocked_count} trigger={trigger}"
+    )
+else:
+    print("worktree.lifecycle.managed.sync")
+    print(f"status={status}")
+    print(f"trigger={trigger}")
+    print(f"managed_worktrees={len(rows)}")
+    print(f"synced={synced_count}")
+    print(f"already_current={already_current_count}")
+    print(f"blocked={blocked_count}")
+    print(f"artifact.report_json={report_json}")
+    print(f"artifact.report_md={report_md}")
+    print(f"artifact.actions={actions_log}")
+
+if issues:
+    sys.exit(1)
+PY

@@ -135,6 +135,23 @@ else
 fi
 
 echo ""
+echo "── T7: session-start triggers managed worktree sync path ──"
+sync_stub="$TMPDIR_BASE/session-sync-stub.sh"
+sync_log="$TMPDIR_BASE/session-sync.log"
+cat > "$sync_stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${SYNC_STUB_LOG:?}"
+EOF
+chmod +x "$sync_stub"
+set +e
+t7_out="$(cd "$WORK" && SYNC_STUB_LOG="$sync_log" SPINE_MANAGED_WORKTREE_SYNC_BIN="$sync_stub" "$SESSION_START" 2>&1)"
+t7_status=$?
+set -e
+assert_eq "$t7_status" "0" "fast startup succeeds with sync stub"
+assert_contains "$(cat "$sync_log")" "--trigger session.start.fast --brief" "fast startup invokes managed sync runner"
+
+echo ""
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"
 exit "$FAIL"

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "${ROOT:-}" ]] || exit 0
+
+current_branch="$(git -C "$ROOT" branch --show-current 2>/dev/null || true)"
+if [[ "$current_branch" != "main" && "$current_branch" != "master" ]]; then
+  exit 0
+fi
+
+SYNC_BIN="${SPINE_MANAGED_WORKTREE_SYNC_BIN:-$ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-managed-sync}"
+TRIGGER="${1:-git.post-update}"
+
+if [[ ! -x "$SYNC_BIN" ]]; then
+  echo "WARN: managed worktree sync runner missing: $SYNC_BIN" >&2
+  exit 0
+fi
+
+sync_out=""
+if ! sync_out="$(SPINE_TARGET_REPO="$ROOT" SPINE_REPO="$ROOT" SPINE_CODE="$ROOT" "$SYNC_BIN" --trigger "$TRIGGER" --brief 2>&1)"; then
+  [[ -n "$sync_out" ]] && printf '%s\n' "$sync_out" >&2
+  echo "NOTICE: managed worktree sync blocked after $TRIGGER." >&2
+  exit 1
+fi
+
+[[ -n "$sync_out" ]] && printf '%s\n' "$sync_out" >&2
+exit 0

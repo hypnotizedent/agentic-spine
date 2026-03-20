@@ -183,6 +183,20 @@ run_startup_checkout_guards() {
   }
 }
 
+run_managed_worktree_sync() {
+  local trigger="${1:-session.start}"
+  local sync_bin="${SPINE_MANAGED_WORKTREE_SYNC_BIN:-$ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-managed-sync}"
+
+  [[ -x "$sync_bin" ]] || return 0
+
+  local sync_out=""
+  if ! sync_out="$(SPINE_TARGET_REPO="$SPINE_TARGET_REPO" SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" "$sync_bin" --trigger "$trigger" --brief 2>&1)"; then
+    [[ -n "$sync_out" ]] && printf '%s\n' "$sync_out" >&2
+    echo "session.start FAIL: managed worktree sync blocked" >&2
+    return 1
+  fi
+}
+
 run_fast_startup() {
   local mode="fast"
   local strict=0
@@ -253,6 +267,8 @@ run_fast_startup() {
     "$dirty_reason" \
     "$allow_main_divergence" \
     "$main_divergence_reason" || return 1
+
+  run_managed_worktree_sync "session.start.${mode}" || return 1
 
   if [[ "$mode" == "fast" ]]; then
     local status_brief
@@ -455,6 +471,8 @@ run_startup_checkout_guards \
   "$dirty_reason" \
   "$allow_main_divergence" \
   "$main_divergence_reason" || exit 1
+
+run_managed_worktree_sync "session.start.lane.${LANE}" || exit 1
 
 # ─── Session pruning + liveness ─────────────────────────────
 # Archive stale sessions: PID dead (immediate); also archive TTL-expired sessions.
