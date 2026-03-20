@@ -1,36 +1,82 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# media-status — Unified media stack status dashboard
+# media-status — Unified media estate status dashboard
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+SPINE_ROOT="$ROOT"
 SPINE_CODE="${SPINE_CODE:-$SPINE_ROOT}"
-BINDINGS_DIR="$SPINE_ROOT/ops/bindings"
 CAP_RUNNER="$SPINE_CODE/bin/ops"
-SSH_RESOLVE="$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+SERVICE_BINDING="$SPINE_ROOT/ops/bindings/media.services.yaml"
+VM_BINDING="$SPINE_ROOT/ops/bindings/vm.lifecycle.yaml"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+SSH_OPTS="-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null"
 
-SSH_USER="ubuntu"
-SSH_OPTS="-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes"
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
 
-# shellcheck source=ops/lib/ssh-resolve.sh
-source "$SSH_RESOLVE"
-
-resolve_target_host() {
-  local target="$1"
-  local result host path
-  result="$(ssh_resolve_ssh_host_with_fallback "$target" 2)" || return 1
-  host="$(echo "$result" | awk '{print $1}')"
-  path="$(echo "$result" | awk '{print $2}')"
-  [[ -n "$host" && "$path" != "unreachable" ]] || return 1
-  printf '%s\n' "$host"
+get_media_vms() {
+  yq -r '.services | to_entries[] | .value.vm' "$SERVICE_BINDING" 2>/dev/null \
+    | awk 'NF && $0 != "null" && !seen[$0]++'
 }
 
-DOWNLOAD_STACK_IP="$(resolve_target_host "download-stack")"
-STREAMING_STACK_IP="$(resolve_target_host "streaming-stack")"
+ordered_media_vms() {
+  local preferred=("media-home" "download-stack" "streaming-stack")
+  local discovered=()
+  local vm
+
+  while IFS= read -r vm; do
+    [[ -n "$vm" ]] && discovered+=("$vm")
+  done < <(get_media_vms)
+
+  for vm in "${preferred[@]}"; do
+    if printf '%s\n' "${discovered[@]}" | grep -qx "$vm"; then
+      printf '%s\n' "$vm"
+    fi
+  done
+
+  for vm in "${discovered[@]}"; do
+    if ! printf '%s\n' "${preferred[@]}" | grep -qx "$vm"; then
+      printf '%s\n' "$vm"
+    fi
+  done
+}
+
+get_vm_ip() {
+  local vm="$1"
+  local lan_ip tailscale_ip
+  lan_ip="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .lan_ip // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+  tailscale_ip="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .tailscale_ip // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+
+  if [[ -n "$lan_ip" ]] && ping -c 1 -W 1000 "$lan_ip" >/dev/null 2>&1; then
+    echo "$lan_ip"
+    return 0
+  fi
+  if [[ -n "$tailscale_ip" ]] && ping -c 1 -W 1000 "$tailscale_ip" >/dev/null 2>&1; then
+    echo "$tailscale_ip"
+    return 0
+  fi
+  [[ -n "$lan_ip" ]] && { echo "$lan_ip"; return 0; }
+  [[ -n "$tailscale_ip" ]] && { echo "$tailscale_ip"; return 0; }
+  echo ""
+}
+
+get_vm_id() {
+  local vm="$1"
+  yq -r ".vms[] | select(.hostname == \"$vm\") | .id // .vmid // \"?\"" "$VM_BINDING" 2>/dev/null || echo "?"
+}
+
+get_ssh_user() {
+  local vm="$1"
+  yq -r ".ssh.targets[] | select(.id == \"$vm\") | .user // \"ubuntu\"" "$SSH_BINDING" 2>/dev/null || echo "ubuntu"
+}
+
+DOWNLOAD_STACK_IP="$(get_vm_ip "download-stack")"
+STREAMING_STACK_IP="$(get_vm_ip "streaming-stack")"
 
 echo "═══════════════════════════════════════════════════════════════════════════"
-echo "MEDIA STACK STATUS"
+echo "MEDIA ESTATE STATUS"
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo
 
@@ -54,8 +100,14 @@ check_vm() {
   fi
 }
 
-check_vm "download-stack" "$DOWNLOAD_STACK_IP" "209" || true
-check_vm "streaming-stack" "$STREAMING_STACK_IP" "210" || true
+mapfile -t MEDIA_VMS < <(ordered_media_vms)
+
+for vm in "${MEDIA_VMS[@]}"; do
+  vm_ip="$(get_vm_ip "$vm")"
+  vm_id="$(get_vm_id "$vm")"
+  [[ -n "$vm_ip" ]] || vm_ip="unresolved"
+  check_vm "$vm" "$vm_ip" "$vm_id" || true
+done
 
 echo "└──────────────────────────────────────────────────────────────────────────┘"
 echo
@@ -68,10 +120,11 @@ echo "┌─ SERVICES ───────────────────�
 
 get_service_counts() {
   local ip="$1"
+  local ssh_user="${2:-ubuntu}"
   local result
   
   # Try to get container counts via SSH with sudo
-  result=$(ssh $SSH_OPTS "${SSH_USER}@${ip}" \
+  result=$(ssh $SSH_OPTS "${ssh_user}@${ip}" \
     "sudo docker ps --format '{{.Status}}' 2>/dev/null | sort | uniq -c | sort -rn" 2>/dev/null || echo "")
   
   if [[ -z "$result" ]]; then
@@ -82,20 +135,20 @@ get_service_counts() {
   local total running exited
   
   # Get total count
-  total=$(ssh $SSH_OPTS "${SSH_USER}@${ip}" \
+  total=$(ssh $SSH_OPTS "${ssh_user}@${ip}" \
     "sudo docker ps -a --format '{{.Names}}' 2>/dev/null | wc -l" 2>/dev/null || echo "0")
   
   # Get running count
-  running=$(ssh $SSH_OPTS "${SSH_USER}@${ip}" \
+  running=$(ssh $SSH_OPTS "${ssh_user}@${ip}" \
     "sudo docker ps --format '{{.Names}}' 2>/dev/null | wc -l" 2>/dev/null || echo "0")
   
   # Get exited count
-  exited=$(ssh $SSH_OPTS "${SSH_USER}@${ip}" \
+  exited=$(ssh $SSH_OPTS "${ssh_user}@${ip}" \
     "sudo docker ps -a --filter 'status=exited' --format '{{.Names}}' 2>/dev/null | wc -l" 2>/dev/null || echo "0")
   
   # Get error/unhealthy count (approximation)
   local unhealthy
-  unhealthy=$(ssh $SSH_OPTS "${SSH_USER}@${ip}" \
+  unhealthy=$(ssh $SSH_OPTS "${ssh_user}@${ip}" \
     "sudo docker ps --filter 'health=unhealthy' --format '{{.Names}}' 2>/dev/null | wc -l" 2>/dev/null || echo "0")
   
   # Trim whitespace
@@ -107,31 +160,27 @@ get_service_counts() {
   echo "${total}:${running}:${exited}:${unhealthy}"
 }
 
-# Download stack
-DL_COUNTS=$(get_service_counts "$DOWNLOAD_STACK_IP")
-if [[ "$DL_COUNTS" == "unreachable" ]]; then
-  printf "│  %-20s %s\n" "download-stack:" "(unreachable)"
-else
-  DL_TOTAL=$(echo "$DL_COUNTS" | cut -d: -f1)
-  DL_RUNNING=$(echo "$DL_COUNTS" | cut -d: -f2)
-  DL_EXITED=$(echo "$DL_COUNTS" | cut -d: -f3)
-  DL_UNHEALTHY=$(echo "$DL_COUNTS" | cut -d: -f4)
-  printf "│  %-20s %s total | %s running | %s exited | %s unhealthy\n" \
-    "download-stack:" "$DL_TOTAL" "$DL_RUNNING" "$DL_EXITED" "$DL_UNHEALTHY"
-fi
+for vm in "${MEDIA_VMS[@]}"; do
+  vm_ip="$(get_vm_ip "$vm")"
+  ssh_user="$(get_ssh_user "$vm")"
+  if [[ -z "$vm_ip" ]]; then
+    printf "│  %-20s %s\n" "${vm}:" "(unreachable)"
+    continue
+  fi
 
-# Streaming stack
-ST_COUNTS=$(get_service_counts "$STREAMING_STACK_IP")
-if [[ "$ST_COUNTS" == "unreachable" ]]; then
-  printf "│  %-20s %s\n" "streaming-stack:" "(unreachable)"
-else
-  ST_TOTAL=$(echo "$ST_COUNTS" | cut -d: -f1)
-  ST_RUNNING=$(echo "$ST_COUNTS" | cut -d: -f2)
-  ST_EXITED=$(echo "$ST_COUNTS" | cut -d: -f3)
-  ST_UNHEALTHY=$(echo "$ST_COUNTS" | cut -d: -f4)
+  counts="$(get_service_counts "$vm_ip" "$ssh_user")"
+  if [[ "$counts" == "unreachable" ]]; then
+    printf "│  %-20s %s\n" "${vm}:" "(unreachable)"
+    continue
+  fi
+
+  total="$(echo "$counts" | cut -d: -f1)"
+  running="$(echo "$counts" | cut -d: -f2)"
+  exited="$(echo "$counts" | cut -d: -f3)"
+  unhealthy="$(echo "$counts" | cut -d: -f4)"
   printf "│  %-20s %s total | %s running | %s exited | %s unhealthy\n" \
-    "streaming-stack:" "$ST_TOTAL" "$ST_RUNNING" "$ST_EXITED" "$ST_UNHEALTHY"
-fi
+    "${vm}:" "$total" "$running" "$exited" "$unhealthy"
+done
 
 echo "└──────────────────────────────────────────────────────────────────────────┘"
 echo
@@ -140,17 +189,18 @@ echo
 # 3. NFS STATUS
 # ═══════════════════════════════════════════════════════════════════════════
 
-echo "┌─ NFS ────────────────────────────────────────────────────────────────────┐"
+echo "┌─ RESIDUAL NFS ───────────────────────────────────────────────────────────┐"
 
 check_nfs() {
   local name="$1"
   local ip="$2"
   local mount_point="$3"
   local expected_mode="$4"
+  local ssh_user="${5:-ubuntu}"
   
   local result
-  result=$(ssh $SSH_OPTS "${SSH_USER}@${ip}" \
-    "mount | grep '${mount_point}' 2>/dev/null" 2>/dev/null || echo "")
+  result=$(ssh $SSH_OPTS "${ssh_user}@${ip}" \
+    "mount | grep ' on ${mount_point} ' 2>/dev/null | tail -1" 2>/dev/null || echo "")
   
   if [[ -z "$result" ]]; then
     printf "│  %-20s %s\n" "$name:" "✗ NOT MOUNTED"
@@ -158,21 +208,21 @@ check_nfs() {
   fi
   
   local mode
-  if echo "$result" | grep -q "rw,"; then
+  if echo "$result" | grep -qE '(^|[,(])rw([,)]|$)'; then
     mode="rw"
   else
     mode="ro"
   fi
   
   local free_space
-  free_space=$(ssh $SSH_OPTS "${SSH_USER}@${ip}" \
+  free_space=$(ssh $SSH_OPTS "${ssh_user}@${ip}" \
     "df -h '${mount_point}' 2>/dev/null | tail -1 | awk '{print \$4}'" 2>/dev/null || echo "?")
   
   printf "│  %-20s %s    %s %s free\n" "$name:" "$mode ✓ OK" "$free_space"
 }
 
-check_nfs "download-stack" "$DOWNLOAD_STACK_IP" "/mnt/media" "rw" || true
-check_nfs "streaming-stack" "$STREAMING_STACK_IP" "/mnt/media" "ro" || true
+[[ -n "$DOWNLOAD_STACK_IP" ]] && check_nfs "download-stack" "$DOWNLOAD_STACK_IP" "/mnt/media" "rw" "$(get_ssh_user "download-stack")" || true
+[[ -n "$STREAMING_STACK_IP" ]] && check_nfs "streaming-stack" "$STREAMING_STACK_IP" "/mnt/media" "ro" "$(get_ssh_user "streaming-stack")" || true
 
 echo "└──────────────────────────────────────────────────────────────────────────┘"
 echo
@@ -184,7 +234,7 @@ echo
 echo "┌─ STORAGE ────────────────────────────────────────────────────────────────┐"
 
 # Try to get storage info from Proxmox or one of the VMs
-STORAGE_INFO=$(ssh $SSH_OPTS "${SSH_USER}@${DOWNLOAD_STACK_IP}" \
+STORAGE_INFO=$(ssh $SSH_OPTS "$(get_ssh_user "download-stack")@${DOWNLOAD_STACK_IP}" \
   "df -h /mnt/media 2>/dev/null | tail -1" 2>/dev/null || echo "")
 
 if [[ -n "$STORAGE_INFO" ]]; then
@@ -213,7 +263,7 @@ HEALTH_RESULT=$("$CAP_RUNNER" cap run media.health.check 2>/dev/null || true)
 if [[ -n "$HEALTH_RESULT" ]]; then
   # Count OK vs FAIL from output - match "OK:" and "UNHEALTHY:" prefixes
   OK_COUNT=$(echo "$HEALTH_RESULT" | grep -c "^  OK:" 2>/dev/null || true)
-  FAIL_COUNT=$(echo "$HEALTH_RESULT" | grep -c "^  UNHEALTHY:" 2>/dev/null || true)
+  FAIL_COUNT=$(echo "$HEALTH_RESULT" | grep -c "^  FAIL:" 2>/dev/null || true)
   # Default to 0 if empty or not numeric
   OK_COUNT="${OK_COUNT:-0}"
   FAIL_COUNT="${FAIL_COUNT:-0}"

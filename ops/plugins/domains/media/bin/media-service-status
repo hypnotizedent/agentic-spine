@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./bin/ops cap run media.service.status
-#   ./bin/ops cap run media.service.status --vm download-stack
+#   ./bin/ops cap run media.service.status --vm media-home
 #   ./bin/ops cap run media.service.status --service radarr
 #   ./bin/ops cap run media.service.status --json
 #
@@ -25,12 +25,12 @@ usage() {
 media.service.status — Get container status for media services
 
 Args:
-  --vm HOST         Check only this VM (download-stack|streaming-stack)
+  --vm HOST         Check only this VM (for example: media-home, download-stack, streaming-stack)
   --service NAME    Check only this service
   --json            Output JSON format
 
 Examples:
-  ./bin/ops cap run media.service.status --vm download-stack
+  ./bin/ops cap run media.service.status --vm media-home
   ./bin/ops cap run media.service.status --service radarr --json
 USAGE
 }
@@ -60,7 +60,32 @@ if $OUTPUT_JSON; then
   command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
 fi
 
-MEDIA_VMS=("download-stack" "streaming-stack")
+get_media_vms() {
+  yq -r '.services | to_entries[] | .value.vm' "$SERVICE_BINDING" 2>/dev/null \
+    | awk 'NF && $0 != "null" && !seen[$0]++'
+}
+
+ordered_media_vms() {
+  local preferred=("media-home" "download-stack" "streaming-stack")
+  local seen=()
+  local vm
+
+  while IFS= read -r vm; do
+    [[ -n "$vm" ]] && seen+=("$vm")
+  done < <(get_media_vms)
+
+  for vm in "${preferred[@]}"; do
+    if printf '%s\n' "${seen[@]}" | grep -qx "$vm"; then
+      printf '%s\n' "$vm"
+    fi
+  done
+
+  for vm in "${seen[@]}"; do
+    if ! printf '%s\n' "${preferred[@]}" | grep -qx "$vm"; then
+      printf '%s\n' "$vm"
+    fi
+  done
+}
 
 get_vm_ssh_ref() {
   local vm="$1"
@@ -128,6 +153,7 @@ parse_status() {
 }
 
 declare -A ALL_RESULTS
+mapfile -t MEDIA_VMS < <(ordered_media_vms)
 
 for vm in "${MEDIA_VMS[@]}"; do
   if [[ -n "$VM_FILTER" && "$vm" != "$VM_FILTER" ]]; then

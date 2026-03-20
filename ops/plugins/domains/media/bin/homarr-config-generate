@@ -2,7 +2,8 @@
 # homarr.config.generate - Generate media operator dashboard JSON from media.services.yaml.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"
+ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
 MEDIA_SERVICES="$ROOT/ops/bindings/media.services.yaml"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 
@@ -13,7 +14,8 @@ homarr.config.generate - Generate media operator dashboard JSON
 Args:
   --output PATH        Optional: write generated JSON to PATH
   --download-base URL  Optional override for download-stack base URL (default: VM tailscale IP)
-  --streaming-base URL Optional override for streaming-stack base URL (default: VM tailscale IP)
+  --home-base URL      Optional override for media-home base URL (default: VM LAN/Tailscale IP)
+  --streaming-base URL Deprecated alias for --home-base
 
 Example:
   ./bin/ops cap run homarr.config.generate -- --output /tmp/homarr-media-board.json
@@ -27,7 +29,7 @@ stop() {
 
 OUTPUT_FILE=""
 DOWNLOAD_BASE=""
-STREAMING_BASE=""
+HOME_BASE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,8 +44,12 @@ while [[ $# -gt 0 ]]; do
       DOWNLOAD_BASE="${2:-}"
       shift 2
       ;;
+    --home-base)
+      HOME_BASE="${2:-}"
+      shift 2
+      ;;
     --streaming-base)
-      STREAMING_BASE="${2:-}"
+      HOME_BASE="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -72,10 +78,10 @@ if [[ -z "$DOWNLOAD_BASE" ]]; then
   DOWNLOAD_BASE="http://${dl_ip}"
 fi
 
-if [[ -z "$STREAMING_BASE" ]]; then
-  st_ip="$(resolve_vm_ip "streaming-stack")"
-  [[ -n "$st_ip" ]] || stop "could not resolve streaming-stack IP"
-  STREAMING_BASE="http://${st_ip}"
+if [[ -z "$HOME_BASE" ]]; then
+  home_ip="$(resolve_vm_ip "media-home")"
+  [[ -n "$home_ip" ]] || stop "could not resolve media-home IP"
+  HOME_BASE="http://${home_ip}"
 fi
 
 build_filter='
@@ -103,7 +109,7 @@ build_services_json() {
 }
 
 download_services="$(build_services_json "download-stack" "$DOWNLOAD_BASE")"
-streaming_services="$(build_services_json "streaming-stack" "$STREAMING_BASE")"
+home_services="$(build_services_json "media-home" "$HOME_BASE")"
 
 dashboard_filter='
 {
@@ -113,29 +119,29 @@ dashboard_filter='
   intent: "Single-pane media operations view generated from media.services.yaml",
   sections: [
     {
-      id: "download-stack",
-      label: "Download Stack",
-      base_url: $download_base,
-      services: $download_services
+      id: "media-home",
+      label: "Home Active Plane",
+      base_url: $home_base,
+      services: $home_services
     },
     {
-      id: "streaming-stack",
-      label: "Streaming Stack",
-      base_url: $streaming_base,
-      services: $streaming_services
+      id: "download-stack",
+      label: "Shop Writer Residue",
+      base_url: $download_base,
+      services: $download_services
     }
   ],
-  categories: ([$download_services[], $streaming_services[]] | map(.category) | unique)
+  categories: ([$home_services[], $download_services[]] | map(.category) | unique)
 }
 '
 
 generated_json="$(
   jq -n \
     --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg home_base "$HOME_BASE" \
     --arg download_base "$DOWNLOAD_BASE" \
-    --arg streaming_base "$STREAMING_BASE" \
+    --argjson home_services "$home_services" \
     --argjson download_services "$download_services" \
-    --argjson streaming_services "$streaming_services" \
     "$dashboard_filter"
 )"
 
@@ -144,8 +150,8 @@ if [[ -n "$OUTPUT_FILE" ]]; then
   printf '%s\n' "$generated_json" > "$OUTPUT_FILE"
   echo "homarr.config.generate"
   echo "output: $OUTPUT_FILE"
-  echo "download_services: $(jq -r '.sections[0].services | length' <<<"$generated_json")"
-  echo "streaming_services: $(jq -r '.sections[1].services | length' <<<"$generated_json")"
+  echo "home_services: $(jq -r '.sections[] | select(.id == "media-home") | .services | length' <<<"$generated_json")"
+  echo "download_services: $(jq -r '.sections[] | select(.id == "download-stack") | .services | length' <<<"$generated_json")"
   exit 0
 fi
 
