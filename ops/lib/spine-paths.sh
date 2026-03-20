@@ -14,6 +14,7 @@ source "$_SP_PATHS_LIB_DIR/runtime-paths.sh"
 spine_paths_init() {
   spine_runtime_resolve_paths
   export \
+    SPINE_TARGET_REPO \
     SPINE_WORKSPACE_ROOT \
     SPINE_RUNTIME_ROOT \
     SPINE_MAILROOM_ROOT \

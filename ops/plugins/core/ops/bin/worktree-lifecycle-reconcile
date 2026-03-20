@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-source "$ROOT/ops/lib/runtime-paths.sh"
+CONTROL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+TARGET_ROOT="${SPINE_TARGET_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "${SPINE_REPO:-$PWD}")}"
+export SPINE_CODE="${SPINE_CODE:-$CONTROL_ROOT}"
+export SPINE_REPO="$TARGET_ROOT"
+source "$CONTROL_ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
-CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+CONTRACT="$CONTROL_ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
 
 MODE="report"
 JSON_MODE=0
@@ -34,24 +37,63 @@ USAGE
 done
 
 MAIN_BRANCH="main"
+CANONICAL_WORKTREE_ROOT="${SPINE_WORKTREE_LIFECYCLE_WORKTREE_ROOT:-$SPINE_TMP/worktrees}"
+CANONICAL_TEMP_CLONE_ROOT="${SPINE_WORKTREE_LIFECYCLE_TEMP_CLONE_ROOT:-$SPINE_TMP/clones}"
+MANAGED_WORKTREE_PATHS_CSV="${SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS:-}"
+LEASE_FILENAME=".spine-lane-lease.yaml"
+LEASE_TTL_HOURS="24"
 PREFIX_CSV="codex/,orchestration/"
 MERGED_GRACE_HOURS="24"
 CLOSED_OWNER_GRACE_HOURS="6"
 UNOWNED_LOCAL_GRACE_HOURS="168"
+TEMP_CLONE_GRACE_HOURS="24"
 FAIL_ON_DETACHED="true"
 FAIL_ON_DIRTY_CLOSED="true"
 WARN_ON_DIRTY_ACTIVE="true"
+FAIL_ON_DIRTY_TEMP_CLONE="true"
+FAIL_ON_MISSING_TEMP_CLONE_ORIGIN="true"
+FAIL_ON_ROOT_NON_MAIN="true"
+FAIL_ON_ROOT_DIRTY="true"
 WAVES_DIR="$SPINE_STATE/waves"
 LOOPS_SCOPE_DIR="$SPINE_STATE/loop-scopes"
 
 if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo main)"
+  if [[ -z "${SPINE_WORKTREE_LIFECYCLE_WORKTREE_ROOT:-}" ]]; then
+    CANONICAL_WORKTREE_ROOT="$(yq e -r '.policy.canonical_worktree_root // ""' "$CONTRACT" 2>/dev/null || echo "$CANONICAL_WORKTREE_ROOT")"
+    [[ -n "$CANONICAL_WORKTREE_ROOT" && "$CANONICAL_WORKTREE_ROOT" != "null" ]] || CANONICAL_WORKTREE_ROOT="$SPINE_TMP/worktrees"
+  fi
+  if [[ -z "${SPINE_WORKTREE_LIFECYCLE_TEMP_CLONE_ROOT:-}" ]]; then
+    CANONICAL_TEMP_CLONE_ROOT="$(yq e -r '.policy.canonical_temp_clone_root // ""' "$CONTRACT" 2>/dev/null || echo "$CANONICAL_TEMP_CLONE_ROOT")"
+    [[ -n "$CANONICAL_TEMP_CLONE_ROOT" && "$CANONICAL_TEMP_CLONE_ROOT" != "null" ]] || CANONICAL_TEMP_CLONE_ROOT="$SPINE_TMP/clones"
+  fi
+  if [[ -z "${SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS:-}" ]]; then
+    managed_paths_accum=""
+    while IFS= read -r managed_path; do
+      [[ -n "$managed_path" && "$managed_path" != "null" ]] || continue
+      if [[ -n "$managed_paths_accum" ]]; then
+        managed_paths_accum+=",${managed_path}"
+      else
+        managed_paths_accum="$managed_path"
+      fi
+    done < <(yq e -r '.policy.managed_worktree_paths[]?' "$CONTRACT" 2>/dev/null || true)
+    if [[ -n "$managed_paths_accum" ]]; then
+      MANAGED_WORKTREE_PATHS_CSV="$managed_paths_accum"
+    fi
+  fi
+  LEASE_FILENAME="$(yq e -r '.policy.lease_filename // ".spine-lane-lease.yaml"' "$CONTRACT" 2>/dev/null || echo "$LEASE_FILENAME")"
+  LEASE_TTL_HOURS="$(yq e -r '.policy.lease_ttl_hours_default // 24' "$CONTRACT" 2>/dev/null || echo 24)"
   MERGED_GRACE_HOURS="$(yq e -r '.policy.merged_branch_grace_hours // 24' "$CONTRACT" 2>/dev/null || echo 24)"
   CLOSED_OWNER_GRACE_HOURS="$(yq e -r '.policy.closed_owner_grace_hours // 6' "$CONTRACT" 2>/dev/null || echo 6)"
   UNOWNED_LOCAL_GRACE_HOURS="$(yq e -r '.policy.unowned_local_branch_grace_hours // 168' "$CONTRACT" 2>/dev/null || echo 168)"
+  TEMP_CLONE_GRACE_HOURS="$(yq e -r '.policy.temp_clone_grace_hours // 24' "$CONTRACT" 2>/dev/null || echo 24)"
   FAIL_ON_DETACHED="$(yq e -r '.policy.fail_on_detached_head // true' "$CONTRACT" 2>/dev/null || echo true)"
   FAIL_ON_DIRTY_CLOSED="$(yq e -r '.policy.fail_on_dirty_when_owner_closed // true' "$CONTRACT" 2>/dev/null || echo true)"
   WARN_ON_DIRTY_ACTIVE="$(yq e -r '.policy.warn_on_dirty_when_owner_active // true' "$CONTRACT" 2>/dev/null || echo true)"
+  FAIL_ON_DIRTY_TEMP_CLONE="$(yq e -r '.policy.fail_on_dirty_temp_clone // true' "$CONTRACT" 2>/dev/null || echo true)"
+  FAIL_ON_MISSING_TEMP_CLONE_ORIGIN="$(yq e -r '.policy.fail_on_missing_temp_clone_origin // true' "$CONTRACT" 2>/dev/null || echo true)"
+  FAIL_ON_ROOT_NON_MAIN="$(yq e -r '.policy.fail_on_root_non_main // true' "$CONTRACT" 2>/dev/null || echo true)"
+  FAIL_ON_ROOT_DIRTY="$(yq e -r '.policy.fail_on_root_dirty // true' "$CONTRACT" 2>/dev/null || echo true)"
   WAVES_DIR="$(yq e -r '.runtime.waves_state_dir // ""' "$CONTRACT" 2>/dev/null || echo "$WAVES_DIR")"
   [[ -n "$WAVES_DIR" && "$WAVES_DIR" != "null" ]] || WAVES_DIR="$SPINE_STATE/waves"
   LOOPS_SCOPE_DIR="$(yq e -r '.runtime.loops_scope_dir // ""' "$CONTRACT" 2>/dev/null || echo "$LOOPS_SCOPE_DIR")"
@@ -71,7 +113,7 @@ if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   fi
 fi
 
-python3 - "$ROOT" "$MAIN_BRANCH" "$PREFIX_CSV" "$MERGED_GRACE_HOURS" "$CLOSED_OWNER_GRACE_HOURS" "$UNOWNED_LOCAL_GRACE_HOURS" "$FAIL_ON_DETACHED" "$FAIL_ON_DIRTY_CLOSED" "$WARN_ON_DIRTY_ACTIVE" "$WAVES_DIR" "$LOOPS_SCOPE_DIR" "$MODE" "$JSON_MODE" "$BRIEF_MODE" <<'PY'
+python3 - "$TARGET_ROOT" "$MAIN_BRANCH" "$CANONICAL_WORKTREE_ROOT" "$CANONICAL_TEMP_CLONE_ROOT" "$MANAGED_WORKTREE_PATHS_CSV" "$LEASE_FILENAME" "$LEASE_TTL_HOURS" "$PREFIX_CSV" "$MERGED_GRACE_HOURS" "$CLOSED_OWNER_GRACE_HOURS" "$UNOWNED_LOCAL_GRACE_HOURS" "$TEMP_CLONE_GRACE_HOURS" "$FAIL_ON_DETACHED" "$FAIL_ON_DIRTY_CLOSED" "$WARN_ON_DIRTY_ACTIVE" "$FAIL_ON_DIRTY_TEMP_CLONE" "$FAIL_ON_MISSING_TEMP_CLONE_ORIGIN" "$FAIL_ON_ROOT_NON_MAIN" "$FAIL_ON_ROOT_DIRTY" "$WAVES_DIR" "$LOOPS_SCOPE_DIR" "$MODE" "$JSON_MODE" "$BRIEF_MODE" <<'PY'
 import json
 import os
 import re
@@ -83,24 +125,34 @@ from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
 main_branch = sys.argv[2]
-local_prefixes = [p for p in sys.argv[3].split(",") if p]
-merged_grace_h = float(sys.argv[4])
-closed_owner_grace_h = float(sys.argv[5])
-unowned_local_grace_h = float(sys.argv[6])
-fail_on_detached = sys.argv[7].lower() == "true"
-fail_on_dirty_closed = sys.argv[8].lower() == "true"
-warn_on_dirty_active = sys.argv[9].lower() == "true"
-waves_dir = Path(os.path.expanduser(sys.argv[10]))
-loops_scope_rel = sys.argv[11]
-mode = sys.argv[12]
-json_mode = sys.argv[13] == "1"
-brief_mode = sys.argv[14] == "1"
+canonical_worktree_root = Path(os.path.expanduser(sys.argv[3])).resolve()
+canonical_temp_clone_root = Path(os.path.expanduser(sys.argv[4])).resolve()
+managed_worktree_paths = [Path(os.path.expanduser(p)).resolve() for p in sys.argv[5].split(",") if p]
+lease_filename = sys.argv[6]
+lease_ttl_h = float(sys.argv[7])
+local_prefixes = [p for p in sys.argv[8].split(",") if p]
+merged_grace_h = float(sys.argv[9])
+closed_owner_grace_h = float(sys.argv[10])
+unowned_local_grace_h = float(sys.argv[11])
+temp_clone_grace_h = float(sys.argv[12])
+fail_on_detached = sys.argv[13].lower() == "true"
+fail_on_dirty_closed = sys.argv[14].lower() == "true"
+warn_on_dirty_active = sys.argv[15].lower() == "true"
+fail_on_dirty_temp_clone = sys.argv[16].lower() == "true"
+fail_on_missing_temp_clone_origin = sys.argv[17].lower() == "true"
+fail_on_root_non_main = sys.argv[18].lower() == "true"
+fail_on_root_dirty = sys.argv[19].lower() == "true"
+waves_dir = Path(os.path.expanduser(sys.argv[20]))
+loops_scope_rel = sys.argv[21]
+mode = sys.argv[22]
+json_mode = sys.argv[23] == "1"
+brief_mode = sys.argv[24] == "1"
 
 now_epoch = time.time()
 
 
-def sh(args, check=True):
-    proc = subprocess.run(args, text=True, capture_output=True)
+def sh(args, check=True, cwd=None):
+    proc = subprocess.run(args, text=True, capture_output=True, cwd=cwd)
     if check and proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "command failed")
     return proc.returncode, proc.stdout
@@ -141,6 +193,47 @@ def parse_frontmatter(path: Path):
         key, val = line.split(":", 1)
         data[key.strip()] = val.strip().strip('"')
     return data
+
+
+def parse_lease(path: Path):
+    if not path.exists():
+        return {"present": False}
+    kv = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return {"present": True, "path": str(path), "status": "unreadable", "active": False}
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s or s == "---" or ":" not in s:
+            continue
+        k, v = s.split(":", 1)
+        kv[k.strip()] = v.strip().strip('"')
+    ttl = float(kv.get("ttl_hours") or lease_ttl_h)
+    heartbeat_at = kv.get("heartbeat_at")
+    age_h = None
+    if heartbeat_at:
+        parsed = parse_iso_epoch(heartbeat_at)
+        if parsed is not None:
+            age_h = max(0.0, (now_epoch - parsed) / 3600.0)
+    status = (kv.get("status") or "").strip().lower() or "unknown"
+    active = False
+    if status in {"active", "running"}:
+        if age_h is None:
+            active = True
+        else:
+            active = age_h <= ttl
+    return {
+        "present": True,
+        "path": str(path),
+        "status": status,
+        "owner": kv.get("owner"),
+        "loop_or_wave_id": kv.get("loop_or_wave_id"),
+        "heartbeat_at": heartbeat_at,
+        "ttl_hours": ttl,
+        "age_hours": age_h,
+        "active": active,
+    }
 
 
 def parse_worktrees(repo_root: Path):
@@ -205,6 +298,85 @@ def is_local_prefix(branch: str):
     return False
 
 
+def git_branch(path: Path):
+    rc, out = sh(["git", "-C", str(path), "symbolic-ref", "--short", "HEAD"], check=False)
+    return (out or "").strip() if rc == 0 else "<detached>"
+
+
+def git_status_dirty(path: Path):
+    rc, out = sh(["git", "-C", str(path), "status", "--porcelain"], check=False)
+    return rc == 0 and bool((out or "").strip())
+
+
+def git_head(path: Path, ref: str = "HEAD"):
+    rc, out = sh(["git", "-C", str(path), "rev-parse", "--verify", "--quiet", ref], check=False)
+    return (out or "").strip() if rc == 0 else ""
+
+
+def git_origin_url(path: Path):
+    rc, out = sh(["git", "-C", str(path), "remote", "get-url", "origin"], check=False)
+    return (out or "").strip() if rc == 0 else ""
+
+
+def normalize_remote_url(raw: str, cwd: Path):
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if text.startswith("file://"):
+        text = text[7:]
+    if "://" in text or re.match(r"^[^@]+@[^:]+:.*", text):
+        return text[:-4] if text.endswith(".git") else text
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = (cwd / path).resolve()
+    else:
+        path = path.resolve()
+    return str(path)
+
+
+def repo_activity_age_hours(path: Path):
+    rc, out = sh(["git", "-C", str(path), "rev-parse", "--git-dir"], check=False)
+    if rc != 0:
+        return None
+    git_dir = Path((out or "").strip())
+    if not git_dir.is_absolute():
+        git_dir = (path / git_dir).resolve()
+    candidates = [
+        path,
+        git_dir / "HEAD",
+        git_dir / "FETCH_HEAD",
+        git_dir / "logs" / "HEAD",
+    ]
+    mtimes = []
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                mtimes.append(candidate.stat().st_mtime)
+        except Exception:
+            continue
+    if not mtimes:
+        return None
+    return max(0.0, (now_epoch - max(mtimes)) / 3600.0)
+
+
+def path_is_git_repo(path: Path):
+    rc, _ = sh(["git", "-C", str(path), "rev-parse", "--git-dir"], check=False)
+    return rc == 0
+
+
+def path_under(path: Path, parent: Path):
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def is_managed_worktree(path: Path):
+    resolved = path.resolve()
+    return any(resolved == managed_path for managed_path in managed_worktree_paths)
+
+
 def discover_session_loop_id(worktree: Path):
     session_root = worktree / "docs" / "sessions"
     if not session_root.exists():
@@ -223,6 +395,11 @@ def discover_session_loop_id(worktree: Path):
 
 
 repo_root = Path(subprocess.check_output(["git", "-C", str(root), "rev-parse", "--show-toplevel"], text=True).strip()).resolve()
+repo_origin = normalize_remote_url(git_origin_url(repo_root), repo_root)
+repo_identity = {str(repo_root)}
+if repo_origin:
+    repo_identity.add(repo_origin)
+main_branch_head = git_head(repo_root, f"refs/heads/{main_branch}")
 
 # Loop scopes (authoritative owner state)
 loop_scopes = {}
@@ -258,6 +435,7 @@ if waves_dir.exists():
         }
 
 worktree_rows = []
+temp_clone_rows = []
 issues = []
 warnings = []
 
@@ -275,6 +453,8 @@ for wt, raw_branch in parse_worktrees(repo_root):
     row = {
         "path": str(wt),
         "branch": branch,
+        "kind": "worktree",
+        "managed_worktree": is_managed_worktree(wt),
         "owner_type": "none",
         "owner_id": None,
         "owner_state": "unknown",
@@ -282,14 +462,23 @@ for wt, raw_branch in parse_worktrees(repo_root):
         "has_origin": None,
         "merged_into_main": False,
         "branch_age_hours": None,
+        "canonical_root_ok": path_under(wt, canonical_worktree_root),
+        "lease": parse_lease(wt / lease_filename),
         "dirty": False,
         "issues": [],
         "warnings": [],
     }
 
+    if row["managed_worktree"]:
+        row["owner_type"] = "managed"
+        row["owner_id"] = wt.name
+        row["owner_state"] = "active"
+
     wave = wave_worktrees.get(str(wt))
     loop_id = None
-    if wave:
+    if row["managed_worktree"]:
+        pass
+    elif wave:
         row["owner_type"] = "wave"
         row["owner_id"] = wave.get("wave_id")
         wave_status = wave.get("status") or "unknown"
@@ -333,7 +522,7 @@ for wt, raw_branch in parse_worktrees(repo_root):
         row["has_origin"] = has_origin_branch(repo_root, branch)
         row["branch_age_hours"] = branch_age_hours(repo_root, branch)
 
-        if not row["has_origin"]:
+        if not row["has_origin"] and not row["managed_worktree"]:
             owner_active = row["owner_type"] in {"loop", "wave"} and row["owner_state"] not in {"closed", "unknown"}
             if owner_active:
                 pass
@@ -342,7 +531,7 @@ for wt, raw_branch in parse_worktrees(repo_root):
             else:
                 row["issues"].append("orphan_branch_no_remote")
 
-        if row["merged_into_main"]:
+        if row["merged_into_main"] and not row["managed_worktree"]:
             age = row["branch_age_hours"]
             if age is not None and age >= merged_grace_h:
                 row["issues"].append("merged_branch_past_grace")
@@ -354,10 +543,15 @@ for wt, raw_branch in parse_worktrees(repo_root):
             if age is not None and age >= unowned_local_grace_h:
                 row["issues"].append("unowned_local_branch_past_grace")
 
+        if row["managed_worktree"] and main_branch_head and git_head(wt) != main_branch_head:
+            row["issues"].append("managed_worktree_not_at_main")
+
     dirty_rc, dirty_out = sh(["git", "-C", str(wt), "status", "--porcelain"], check=False)
     row["dirty"] = bool((dirty_out or "").strip())
     if row["dirty"]:
-        if row["owner_state"] == "closed" and fail_on_dirty_closed:
+        if row["managed_worktree"]:
+            row["issues"].append("dirty_managed_worktree")
+        elif row["owner_state"] == "closed" and fail_on_dirty_closed:
             row["issues"].append("dirty_closed_owner")
         elif row["owner_state"] == "active" and warn_on_dirty_active:
             row["warnings"].append("dirty_active_owner")
@@ -374,6 +568,7 @@ for wt, raw_branch in parse_worktrees(repo_root):
     worktree_rows.append(row)
     for code in row["issues"]:
         issues.append({
+            "kind": "worktree",
             "path": row["path"],
             "branch": row["branch"],
             "code": code,
@@ -383,12 +578,135 @@ for wt, raw_branch in parse_worktrees(repo_root):
         })
     for code in row["warnings"]:
         warnings.append({
+            "kind": "worktree",
             "path": row["path"],
             "branch": row["branch"],
             "code": code,
             "owner_type": row["owner_type"],
             "owner_id": row["owner_id"],
             "owner_state": row["owner_state"],
+        })
+
+if canonical_temp_clone_root.exists():
+    for clone_path in sorted(canonical_temp_clone_root.iterdir()):
+        if not clone_path.is_dir() or not path_is_git_repo(clone_path):
+            continue
+        origin_raw = git_origin_url(clone_path)
+        origin_url = normalize_remote_url(origin_raw, clone_path)
+        if origin_url not in repo_identity:
+            continue
+        is_remote_origin = bool(origin_raw) and ("://" in origin_raw or re.match(r"^[^@]+@[^:]+:.*", origin_raw))
+        origin_kind = "remote" if is_remote_origin else "local_path"
+        origin_exists = True if is_remote_origin else Path(origin_url).exists()
+        row = {
+            "path": str(clone_path.resolve()),
+            "branch": git_branch(clone_path),
+            "kind": "temp_clone",
+            "origin_url": origin_raw,
+            "origin_kind": origin_kind,
+            "origin_exists": origin_exists,
+            "age_hours": repo_activity_age_hours(clone_path),
+            "dirty": git_status_dirty(clone_path),
+            "issues": [],
+            "warnings": [],
+        }
+
+        if row["dirty"]:
+            if fail_on_dirty_temp_clone:
+                row["issues"].append("dirty_temp_clone")
+            else:
+                row["warnings"].append("dirty_temp_clone")
+
+        if origin_kind == "local_path" and not origin_exists:
+            if fail_on_missing_temp_clone_origin:
+                row["issues"].append("temp_clone_origin_missing")
+            else:
+                row["warnings"].append("temp_clone_origin_missing")
+
+        age = row["age_hours"]
+        if age is not None and age >= temp_clone_grace_h:
+            row["issues"].append("temp_clone_past_grace")
+
+        temp_clone_rows.append(row)
+        for code in row["issues"]:
+            issues.append({
+                "kind": "temp_clone",
+                "path": row["path"],
+                "branch": row["branch"],
+                "code": code,
+                "owner_type": "temp_clone",
+                "owner_id": None,
+                "owner_state": "n/a",
+            })
+        for code in row["warnings"]:
+            warnings.append({
+                "kind": "temp_clone",
+                "path": row["path"],
+                "branch": row["branch"],
+                "code": code,
+                "owner_type": "temp_clone",
+                "owner_id": None,
+                "owner_state": "n/a",
+            })
+
+root_checkout = {
+    "checked": False,
+    "path": str(repo_root),
+    "branch": git_branch(repo_root),
+    "dirty": git_status_dirty(repo_root),
+    "main_branch": main_branch,
+    "main_exists": bool(git_head(repo_root, f"refs/heads/{main_branch}")),
+    "head": git_head(repo_root, "HEAD"),
+    "main_head": git_head(repo_root, f"refs/heads/{main_branch}"),
+    "head_matches_main": False,
+    "normalizable": False,
+    "issues": [],
+    "warnings": [],
+}
+root_checkout["head_matches_main"] = bool(
+    root_checkout["head"] and root_checkout["main_head"] and root_checkout["head"] == root_checkout["main_head"]
+)
+
+if not path_under(repo_root, canonical_worktree_root) and not path_under(repo_root, canonical_temp_clone_root) and ".wt" not in repo_root.parts:
+    root_checkout["checked"] = True
+    if root_checkout["branch"] == "<detached>":
+        root_checkout["issues"].append("root_checkout_detached")
+    elif root_checkout["branch"] != main_branch:
+        code = "root_checkout_matches_main_but_branch_not_main" if root_checkout["head_matches_main"] else "root_checkout_not_main"
+        if fail_on_root_non_main:
+            root_checkout["issues"].append(code)
+        else:
+            root_checkout["warnings"].append(code)
+    if root_checkout["dirty"]:
+        if fail_on_root_dirty:
+            root_checkout["issues"].append("root_checkout_dirty")
+        else:
+            root_checkout["warnings"].append("root_checkout_dirty")
+    root_checkout["normalizable"] = (
+        root_checkout["branch"] not in {"", "<detached>", main_branch}
+        and not root_checkout["dirty"]
+        and root_checkout["main_exists"]
+        and root_checkout["head_matches_main"]
+    )
+    for code in root_checkout["issues"]:
+        issues.append({
+            "kind": "root_checkout",
+            "path": root_checkout["path"],
+            "branch": root_checkout["branch"],
+            "code": code,
+            "owner_type": "root_checkout",
+            "owner_id": None,
+            "owner_state": "n/a",
+        })
+    for code in root_checkout["warnings"]:
+        warnings.append({
+            "kind": "root_checkout",
+            "path": root_checkout["path"],
+            "branch": root_checkout["branch"],
+            "code": code,
+            "owner_type": "root_checkout",
+            "owner_id": None,
+            "owner_state": "n/a",
         })
 
 # Stash audit
@@ -420,6 +738,8 @@ for line in stash_lines:
 summary = {
     "repo": str(repo_root),
     "checked_worktrees": len(worktree_rows),
+    "checked_temp_clones": len(temp_clone_rows),
+    "checked_root_checkout": 1 if root_checkout["checked"] else 0,
     "worktree_issue_count": len(issues),
     "worktree_warning_count": len(warnings),
     "stash_count": len(stash_lines),
@@ -429,21 +749,39 @@ summary = {
     "total_warning_count": len(warnings) + len(stash_warnings),
     "policy": {
         "main_branch": main_branch,
+        "canonical_worktree_root": str(canonical_worktree_root),
+        "canonical_temp_clone_root": str(canonical_temp_clone_root),
+        "managed_worktree_paths": [str(p) for p in managed_worktree_paths],
+        "lease_filename": lease_filename,
+        "lease_ttl_hours_default": lease_ttl_h,
         "local_branch_prefixes_allow_no_remote": local_prefixes,
         "merged_branch_grace_hours": merged_grace_h,
         "closed_owner_grace_hours": closed_owner_grace_h,
         "unowned_local_branch_grace_hours": unowned_local_grace_h,
+        "temp_clone_grace_hours": temp_clone_grace_h,
     },
 }
 
 payload = {
     "summary": summary,
     "worktrees": worktree_rows,
+    "temp_clones": temp_clone_rows,
+    "root_checkout": root_checkout,
     "issues": issues,
     "warnings": warnings,
     "stash_issues": stash_issues,
     "stash_warnings": stash_warnings,
 }
+
+def format_item(item):
+    kind = item.get("kind") or "worktree"
+    path = item.get("path") or "<unknown>"
+    branch = item.get("branch") or "<unknown>"
+    code = item.get("code") or "unknown"
+    if kind == "worktree":
+        owner = item.get("owner_id") or "none"
+        return f"{path}: {branch} -> {code} (owner={item.get('owner_type')}:{owner} state={item.get('owner_state')})"
+    return f"{kind} {path}: {branch} -> {code}"
 
 if json_mode:
     print(json.dumps(payload, indent=2))
@@ -452,40 +790,36 @@ else:
         status = "FAIL" if summary["total_issue_count"] > 0 else "PASS"
         print(
             f"{status} issues={summary['total_issue_count']} warnings={summary['total_warning_count']} "
-            f"worktrees={summary['checked_worktrees']} stashes={summary['stash_count']}"
+            f"worktrees={summary['checked_worktrees']} temp_clones={summary['checked_temp_clones']} "
+            f"root={summary['checked_root_checkout']} stashes={summary['stash_count']}"
         )
     elif mode == "gate":
         if summary["total_issue_count"] > 0:
             print("D48 FAIL: worktree lifecycle issues detected")
             for item in issues:
-                owner = item["owner_id"] or "none"
-                print(
-                    f"  - {item['path']}: {item['branch']} -> {item['code']} "
-                    f"(owner={item['owner_type']}:{owner} state={item['owner_state']})"
-                )
+                print(f"  - {format_item(item)}")
             for item in stash_issues:
                 print(f"  - stash {item['ref']} ({item['branch']}): {item['code']}")
             if warnings:
                 print("  WARNINGS:")
                 for item in warnings:
-                    owner = item["owner_id"] or "none"
-                    print(
-                        f"    - {item['path']}: {item['branch']} -> {item['code']} "
-                        f"(owner={item['owner_type']}:{owner} state={item['owner_state']})"
-                    )
+                    print(f"    - {format_item(item)}")
             if stash_warnings:
                 for item in stash_warnings:
                     print(f"    - stash {item['ref']} ({item['branch']}): {item['code']}")
         else:
             print(
                 "D48 PASS: lifecycle clean "
-                f"(worktrees={summary['checked_worktrees']} warnings={summary['total_warning_count']} "
+                f"(worktrees={summary['checked_worktrees']} temp_clones={summary['checked_temp_clones']} "
+                f"root={summary['checked_root_checkout']} warnings={summary['total_warning_count']} "
                 f"stashes={summary['stash_count']})"
             )
     else:
         print("worktree.lifecycle.reconcile")
         print(f"repo: {summary['repo']}")
         print(f"checked_worktrees: {summary['checked_worktrees']}")
+        print(f"checked_temp_clones: {summary['checked_temp_clones']}")
+        print(f"checked_root_checkout: {summary['checked_root_checkout']}")
         print(f"issues: {summary['total_issue_count']}")
         print(f"warnings: {summary['total_warning_count']}")
         print(f"stashes: {summary['stash_count']}")
@@ -493,19 +827,11 @@ else:
         if issues:
             print("issue_details:")
             for item in issues:
-                owner = item["owner_id"] or "none"
-                print(
-                    f"  - {item['path']}: {item['branch']} -> {item['code']} "
-                    f"(owner={item['owner_type']}:{owner} state={item['owner_state']})"
-                )
+                print(f"  - {format_item(item)}")
         if warnings:
             print("warning_details:")
             for item in warnings:
-                owner = item["owner_id"] or "none"
-                print(
-                    f"  - {item['path']}: {item['branch']} -> {item['code']} "
-                    f"(owner={item['owner_type']}:{owner} state={item['owner_state']})"
-                )
+                print(f"  - {format_item(item)}")
         if stash_issues:
             print("stash_issues:")
             for item in stash_issues:

@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-source "$ROOT/ops/lib/runtime-paths.sh"
+CONTROL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+TARGET_ROOT="${SPINE_TARGET_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "${SPINE_REPO:-$PWD}")}"
+export SPINE_CODE="${SPINE_CODE:-$CONTROL_ROOT}"
+export SPINE_REPO="$TARGET_ROOT"
+source "$CONTROL_ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
-CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
-CLOSEOUT_CONTRACT="$ROOT/ops/bindings/wave.closeout.contract.yaml"
+CONTRACT="$CONTROL_ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+CLOSEOUT_CONTRACT="$CONTROL_ROOT/ops/bindings/wave.closeout.contract.yaml"
+RECONCILE_SCRIPT="$CONTROL_ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-reconcile"
 
 MODE="report-only"
 TOKEN=""
@@ -44,44 +48,61 @@ case "$MODE" in
 esac
 
 MAIN_BRANCH="main"
-CANONICAL_ROOT="$HOME/.wt"
-LEASE_FILENAME=".spine-lane-lease.yaml"
-LEASE_TTL_HOURS="24"
+CANONICAL_WORKTREE_ROOT="${SPINE_WORKTREE_LIFECYCLE_WORKTREE_ROOT:-$SPINE_TMP/worktrees}"
+CANONICAL_TEMP_CLONE_ROOT="${SPINE_WORKTREE_LIFECYCLE_TEMP_CLONE_ROOT:-$SPINE_TMP/clones}"
+TEMP_CLONE_GRACE_HOURS="24"
 ARCHIVE_ROOT="$HOME/.local/state/agentic-spine/worktree-lifecycle-archive"
 DELETE_TOKEN_ENV="OPS_WORKTREE_DELETE_TOKEN"
 DELETE_TOKEN_VALUE="RELEASE_MAIN_CLEANUP_WINDOW"
 REQUIRE_ARCHIVE="true"
 REQUIRE_MERGED_OR_TOKEN="true"
 BLOCK_ACTIVE_LEASE="true"
+NORMALIZE_ROOT_WHEN_HEAD_MATCHES_MAIN="true"
 REQUIRE_CLEAN_WORKTREE_DELETE="true"
+REQUIRE_CLEAN_TEMP_CLONE_DELETE="true"
 REQUIRE_RECEIPT_GATE_PASS_DELETE="true"
-RECEIPT_GATE_SCRIPT="$ROOT/surfaces/verify/d274-receipt-closeout-completeness-lock.sh"
+RECEIPT_GATE_SCRIPT="$CONTROL_ROOT/surfaces/verify/d274-receipt-closeout-completeness-lock.sh"
 
 if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
   MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo "$MAIN_BRANCH")"
-  CANONICAL_ROOT="$(yq e -r '.policy.canonical_worktree_root // "~/.wt"' "$CONTRACT" 2>/dev/null || echo "$CANONICAL_ROOT")"
-  LEASE_FILENAME="$(yq e -r '.policy.lease_filename // ".spine-lane-lease.yaml"' "$CONTRACT" 2>/dev/null || echo "$LEASE_FILENAME")"
-  LEASE_TTL_HOURS="$(yq e -r '.policy.lease_ttl_hours_default // 24' "$CONTRACT" 2>/dev/null || echo "$LEASE_TTL_HOURS")"
+  if [[ -z "${SPINE_WORKTREE_LIFECYCLE_WORKTREE_ROOT:-}" ]]; then
+    CANONICAL_WORKTREE_ROOT="$(yq e -r '.policy.canonical_worktree_root // ""' "$CONTRACT" 2>/dev/null || echo "$CANONICAL_WORKTREE_ROOT")"
+    [[ -n "$CANONICAL_WORKTREE_ROOT" && "$CANONICAL_WORKTREE_ROOT" != "null" ]] || CANONICAL_WORKTREE_ROOT="$SPINE_TMP/worktrees"
+  fi
+  if [[ -z "${SPINE_WORKTREE_LIFECYCLE_TEMP_CLONE_ROOT:-}" ]]; then
+    CANONICAL_TEMP_CLONE_ROOT="$(yq e -r '.policy.canonical_temp_clone_root // ""' "$CONTRACT" 2>/dev/null || echo "$CANONICAL_TEMP_CLONE_ROOT")"
+    [[ -n "$CANONICAL_TEMP_CLONE_ROOT" && "$CANONICAL_TEMP_CLONE_ROOT" != "null" ]] || CANONICAL_TEMP_CLONE_ROOT="$SPINE_TMP/clones"
+  fi
+  TEMP_CLONE_GRACE_HOURS="$(yq e -r '.policy.temp_clone_grace_hours // 24' "$CONTRACT" 2>/dev/null || echo "$TEMP_CLONE_GRACE_HOURS")"
   ARCHIVE_ROOT="$(yq e -r '.runtime.archive_root // "~/.local/state/agentic-spine/worktree-lifecycle-archive"' "$CONTRACT" 2>/dev/null || echo "$ARCHIVE_ROOT")"
   DELETE_TOKEN_ENV="$(yq e -r '.cleanup.delete_token_env_var // "OPS_WORKTREE_DELETE_TOKEN"' "$CONTRACT" 2>/dev/null || echo "$DELETE_TOKEN_ENV")"
   DELETE_TOKEN_VALUE="$(yq e -r '.cleanup.delete_token_value // "RELEASE_MAIN_CLEANUP_WINDOW"' "$CONTRACT" 2>/dev/null || echo "$DELETE_TOKEN_VALUE")"
   REQUIRE_ARCHIVE="$(yq e -r '.cleanup.require_archive_before_delete // true' "$CONTRACT" 2>/dev/null || echo true)"
   REQUIRE_MERGED_OR_TOKEN="$(yq e -r '.cleanup.require_branch_merged_or_explicit_token // true' "$CONTRACT" 2>/dev/null || echo true)"
   BLOCK_ACTIVE_LEASE="$(yq e -r '.cleanup.block_if_active_lease // true' "$CONTRACT" 2>/dev/null || echo true)"
+  NORMALIZE_ROOT_WHEN_HEAD_MATCHES_MAIN="$(yq e -r '.cleanup.normalize_root_when_head_matches_main // true' "$CONTRACT" 2>/dev/null || echo true)"
+  REQUIRE_CLEAN_TEMP_CLONE_DELETE="$(yq e -r '.cleanup.require_clean_temp_clone_for_delete // true' "$CONTRACT" 2>/dev/null || echo true)"
 fi
 
 if command -v yq >/dev/null 2>&1 && [[ -f "$CLOSEOUT_CONTRACT" ]]; then
   REQUIRE_CLEAN_WORKTREE_DELETE="$(yq e -r '.closeout.require_clean_worktree_for_cleanup_delete // true' "$CLOSEOUT_CONTRACT" 2>/dev/null || echo true)"
   REQUIRE_RECEIPT_GATE_PASS_DELETE="$(yq e -r '.closeout.require_receipt_gate_pass_for_cleanup_delete // true' "$CLOSEOUT_CONTRACT" 2>/dev/null || echo true)"
   RECEIPT_GATE_REL="$(yq e -r '.finalize.gate_script // "surfaces/verify/d274-receipt-closeout-completeness-lock.sh"' "$CLOSEOUT_CONTRACT" 2>/dev/null || echo "surfaces/verify/d274-receipt-closeout-completeness-lock.sh")"
-  RECEIPT_GATE_SCRIPT="$ROOT/$RECEIPT_GATE_REL"
+  RECEIPT_GATE_SCRIPT="$CONTROL_ROOT/$RECEIPT_GATE_REL"
 fi
 
-if [[ "$CANONICAL_ROOT" == "~/"* ]]; then
-  CANONICAL_ROOT="$HOME/${CANONICAL_ROOT#~/}"
-fi
 if [[ "$ARCHIVE_ROOT" == "~/"* ]]; then
   ARCHIVE_ROOT="$HOME/${ARCHIVE_ROOT#~/}"
+fi
+
+if [[ -n "${OPS_WORKTREE_CLEANUP_REQUIRE_RECEIPT_GATE_PASS_DELETE:-}" ]]; then
+  REQUIRE_RECEIPT_GATE_PASS_DELETE="${OPS_WORKTREE_CLEANUP_REQUIRE_RECEIPT_GATE_PASS_DELETE}"
+fi
+if [[ -n "${OPS_WORKTREE_CLEANUP_REQUIRE_CLEAN_WORKTREE_DELETE:-}" ]]; then
+  REQUIRE_CLEAN_WORKTREE_DELETE="${OPS_WORKTREE_CLEANUP_REQUIRE_CLEAN_WORKTREE_DELETE}"
+fi
+if [[ -n "${OPS_WORKTREE_CLEANUP_REQUIRE_CLEAN_TEMP_CLONE_DELETE:-}" ]]; then
+  REQUIRE_CLEAN_TEMP_CLONE_DELETE="${OPS_WORKTREE_CLEANUP_REQUIRE_CLEAN_TEMP_CLONE_DELETE}"
 fi
 
 ENV_TOKEN="${!DELETE_TOKEN_ENV-}"
@@ -104,145 +125,9 @@ REPORT_MD="$ARTIFACT_DIR/report.md"
 ARCHIVE_MANIFEST="$ARTIFACT_DIR/archive-manifest.json"
 ACTIONS_LOG="$ARTIFACT_DIR/actions.log"
 
-python3 - "$ROOT" "$MAIN_BRANCH" "$CANONICAL_ROOT" "$LEASE_FILENAME" "$LEASE_TTL_HOURS" "$REPORT_JSON" <<'PY'
-import json
-import sys
-import subprocess
-from pathlib import Path
-from datetime import datetime, timezone
+SPINE_TARGET_REPO="$TARGET_ROOT" "$RECONCILE_SCRIPT" --json > "$REPORT_JSON"
 
-repo_root = Path(sys.argv[1]).resolve()
-main_branch = sys.argv[2]
-canonical_root = Path(sys.argv[3]).expanduser().resolve()
-lease_filename = sys.argv[4]
-default_ttl = float(sys.argv[5])
-out_path = Path(sys.argv[6])
-now = datetime.now(timezone.utc)
-
-def sh(args, check=True):
-    p = subprocess.run(args, text=True, capture_output=True)
-    if check and p.returncode != 0:
-        raise RuntimeError(p.stderr.strip() or p.stdout.strip() or "command failed")
-    return p.returncode, p.stdout
-
-def parse_worktrees():
-    _, out = sh(["git", "-C", str(repo_root), "worktree", "list", "--porcelain"])
-    rows = []
-    cur = {}
-    for raw in out.splitlines():
-        line = raw.strip()
-        if not line:
-            if cur:
-                rows.append(cur)
-                cur = {}
-            continue
-        if " " not in line:
-            continue
-        k, v = line.split(" ", 1)
-        cur[k] = v.strip()
-    if cur:
-        rows.append(cur)
-    parsed = []
-    for row in rows:
-        wt = row.get("worktree")
-        if not wt:
-            continue
-        branch = row.get("branch", "")
-        if branch.startswith("refs/heads/"):
-            branch = branch.split("refs/heads/", 1)[1]
-        if not branch:
-            rc, out = sh(["git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD"], check=False)
-            branch = out.strip() if rc == 0 else "<detached>"
-        parsed.append((Path(wt).resolve(), branch))
-    return parsed
-
-def worktree_clean(path: Path):
-    rc, out = sh(["git", "-C", str(path), "status", "--porcelain"], check=False)
-    if rc != 0:
-        return False
-    return not bool(out.strip())
-
-def merged(branch):
-    if branch == "<detached>":
-        return False
-    return subprocess.run(["git","-C",str(repo_root),"merge-base","--is-ancestor",branch,main_branch]).returncode == 0
-
-def branch_age_hours(branch):
-    if branch == "<detached>":
-        return None
-    rc, out = sh(["git","-C",str(repo_root),"show","-s","--format=%ct",branch], check=False)
-    if rc != 0 or not out.strip().isdigit():
-        return None
-    ts = datetime.fromtimestamp(int(out.strip()), tz=timezone.utc)
-    return max(0.0, (now - ts).total_seconds() / 3600.0)
-
-def parse_lease(path: Path):
-    if not path.exists():
-        return {"present": False}
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    kv = {}
-    for ln in text.splitlines():
-        s = ln.strip()
-        if not s or s == "---" or ":" not in s:
-            continue
-        k, v = s.split(":", 1)
-        kv[k.strip()] = v.strip().strip('"')
-    ttl = float(kv.get("ttl_hours") or default_ttl)
-    hb = kv.get("heartbeat_at")
-    active = False
-    age_h = None
-    if hb:
-        try:
-            dt = datetime.fromisoformat(hb.replace("Z", "+00:00"))
-            age_h = max(0.0, (now - dt).total_seconds() / 3600.0)
-        except Exception:
-            age_h = None
-    status = (kv.get("status") or "").lower()
-    if status in {"active", "running"}:
-        if age_h is None:
-            active = True
-        else:
-            active = age_h <= ttl
-    return {
-        "present": True,
-        "path": str(path),
-        "status": status or "unknown",
-        "owner": kv.get("owner"),
-        "loop_or_wave_id": kv.get("loop_or_wave_id"),
-        "heartbeat_at": kv.get("heartbeat_at"),
-        "ttl_hours": ttl,
-        "age_hours": age_h,
-        "active": active,
-    }
-
-rows = []
-for wt, branch in parse_worktrees():
-    if wt == repo_root:
-        continue
-    lease = parse_lease(wt / lease_filename)
-    rows.append({
-        "worktree": str(wt),
-        "branch": branch,
-        "canonical_root_ok": str(wt).startswith(str(canonical_root) + "/"),
-        "merged_into_main": merged(branch),
-        "branch_age_hours": branch_age_hours(branch),
-        "worktree_clean": worktree_clean(wt),
-        "lease": lease,
-    })
-
-payload = {
-    "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "repo": str(repo_root),
-    "main_branch": main_branch,
-    "canonical_root": str(canonical_root),
-    "lease_filename": lease_filename,
-    "worktrees": rows,
-}
-out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-print(str(out_path))
-PY
-
-python3 - "$REPORT_JSON" "$REPORT_MD" "$MODE" "$BLOCK_ACTIVE_LEASE" "$REQUIRE_MERGED_OR_TOKEN" "$EXPLICIT_TOKEN" "$REQUIRE_CLEAN_WORKTREE_DELETE" <<'PY'
+python3 - "$REPORT_JSON" "$REPORT_MD" "$MODE" "$BLOCK_ACTIVE_LEASE" "$REQUIRE_MERGED_OR_TOKEN" "$EXPLICIT_TOKEN" "$REQUIRE_CLEAN_WORKTREE_DELETE" "$REQUIRE_CLEAN_TEMP_CLONE_DELETE" "$TEMP_CLONE_GRACE_HOURS" "$NORMALIZE_ROOT_WHEN_HEAD_MATCHES_MAIN" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -253,40 +138,91 @@ block_active = sys.argv[4].lower() == "true"
 require_merged_or_token = sys.argv[5].lower() == "true"
 explicit_token = sys.argv[6] == "1"
 require_clean_delete = sys.argv[7].lower() == "true"
+require_clean_temp_clone_delete = sys.argv[8].lower() == "true"
+temp_clone_grace_h = float(sys.argv[9])
+normalize_root = sys.argv[10].lower() == "true"
 
-rows = report["worktrees"]
+rows = report.get("worktrees", [])
+clone_rows = report.get("temp_clones", [])
+root_checkout = report.get("root_checkout") or {}
+
 blocked = []
 delete_candidates = []
 root_violations = []
+clone_blocked = []
+clone_delete_candidates = []
+root_normalization = {"candidate": None, "blocked": None}
+
 for row in rows:
     reasons = []
     lease = row.get("lease") or {}
-    if not row.get("canonical_root_ok"):
+    if row.get("managed_worktree"):
+        reasons.append("managed_worktree_protected")
+    elif not row.get("canonical_root_ok", True):
         reasons.append("noncanonical_worktree_root")
-        root_violations.append(row["worktree"])
+        root_violations.append(row["path"])
     if block_active and lease.get("active"):
         reasons.append("active_lease")
-    if require_merged_or_token and not row.get("merged_into_main") and not explicit_token:
+    if require_merged_or_token and not row.get("merged_into_main", False) and not explicit_token:
         reasons.append("not_merged_no_token")
-    if require_clean_delete and not row.get("worktree_clean", True):
+    if require_clean_delete and row.get("dirty", False):
         reasons.append("dirty_worktree")
 
     if reasons:
-        blocked.append({"worktree": row["worktree"], "branch": row["branch"], "reasons": reasons})
+        blocked.append({"path": row["path"], "branch": row["branch"], "reasons": reasons})
     else:
-        delete_candidates.append({"worktree": row["worktree"], "branch": row["branch"]})
+        delete_candidates.append({"path": row["path"], "branch": row["branch"]})
+
+for row in clone_rows:
+    reasons = []
+    eligible = False
+    age = row.get("age_hours")
+    if row.get("origin_kind") == "local_path" and row.get("origin_exists") is False:
+        eligible = True
+    if age is not None and age >= temp_clone_grace_h:
+        eligible = True
+    if not eligible:
+        reasons.append("within_grace")
+    if require_clean_temp_clone_delete and row.get("dirty", False):
+        reasons.append("dirty_temp_clone")
+    if reasons:
+        clone_blocked.append({"path": row["path"], "branch": row.get("branch"), "reasons": reasons})
+    else:
+        clone_delete_candidates.append({"path": row["path"], "branch": row.get("branch")})
+
+if root_checkout.get("checked"):
+    if normalize_root and root_checkout.get("normalizable"):
+        root_normalization["candidate"] = {
+            "path": root_checkout["path"],
+            "from_branch": root_checkout.get("branch"),
+            "to_branch": root_checkout.get("main_branch"),
+        }
+    elif root_checkout.get("issues"):
+        root_normalization["blocked"] = {
+            "path": root_checkout["path"],
+            "branch": root_checkout.get("branch"),
+            "reasons": list(root_checkout.get("issues") or []),
+        }
 
 summary = {
     "mode": mode,
     "worktree_count": len(rows),
+    "temp_clone_count": len(clone_rows),
     "delete_candidate_count": len(delete_candidates),
+    "temp_clone_delete_candidate_count": len(clone_delete_candidates),
     "blocked_count": len(blocked),
+    "temp_clone_blocked_count": len(clone_blocked),
     "root_violation_count": len(root_violations),
+    "root_normalization_candidate_count": 1 if root_normalization["candidate"] else 0,
+    "root_normalization_blocked_count": 1 if root_normalization["blocked"] else 0,
 }
 
 report["summary"] = summary
 report["delete_candidates"] = delete_candidates
 report["blocked"] = blocked
+report["temp_clone_delete_candidates"] = clone_delete_candidates
+report["temp_clone_blocked"] = clone_blocked
+report["root_normalization"] = root_normalization
 report["root_violations"] = root_violations
 Path(sys.argv[1]).write_text(json.dumps(report, indent=2) + "\n")
 
@@ -294,18 +230,40 @@ with md.open("w", encoding="utf-8") as f:
     f.write("# Worktree Lifecycle Cleanup Report\n\n")
     f.write(f"- mode: {mode}\n")
     f.write(f"- worktrees: {summary['worktree_count']}\n")
+    f.write(f"- temp_clones: {summary['temp_clone_count']}\n")
     f.write(f"- delete_candidates: {summary['delete_candidate_count']}\n")
+    f.write(f"- temp_clone_delete_candidates: {summary['temp_clone_delete_candidate_count']}\n")
     f.write(f"- blocked: {summary['blocked_count']}\n")
+    f.write(f"- temp_clone_blocked: {summary['temp_clone_blocked_count']}\n")
     f.write(f"- root_violations: {summary['root_violation_count']}\n\n")
     f.write("## Delete Candidates\n")
     for item in delete_candidates:
-      f.write(f"- {item['worktree']} | {item['branch']}\n")
+      f.write(f"- {item['path']} | {item['branch']}\n")
     if not delete_candidates:
+      f.write("- none\n")
+    f.write("\n## Temp Clone Delete Candidates\n")
+    for item in clone_delete_candidates:
+      f.write(f"- {item['path']} | {item.get('branch') or '<detached>'}\n")
+    if not clone_delete_candidates:
       f.write("- none\n")
     f.write("\n## Blocked\n")
     for item in blocked:
-      f.write(f"- {item['worktree']} | {item['branch']} | {','.join(item['reasons'])}\n")
+      f.write(f"- {item['path']} | {item['branch']} | {','.join(item['reasons'])}\n")
     if not blocked:
+      f.write("- none\n")
+    f.write("\n## Temp Clone Blocked\n")
+    for item in clone_blocked:
+      f.write(f"- {item['path']} | {item.get('branch') or '<detached>'} | {','.join(item['reasons'])}\n")
+    if not clone_blocked:
+      f.write("- none\n")
+    f.write("\n## Root Normalization\n")
+    if root_normalization["candidate"]:
+      item = root_normalization["candidate"]
+      f.write(f"- candidate: {item['path']} | {item['from_branch']} -> {item['to_branch']}\n")
+    elif root_normalization["blocked"]:
+      item = root_normalization["blocked"]
+      f.write(f"- blocked: {item['path']} | {item.get('branch') or '<detached>'} | {','.join(item['reasons'])}\n")
+    else:
       f.write("- none\n")
 PY
 
@@ -327,15 +285,28 @@ actions_log = Path(sys.argv[4])
 
 items = []
 for row in report.get("delete_candidates", []):
-    wt = Path(row["worktree"])
-    if not wt.exists():
+    item_path = Path(row["path"])
+    if not item_path.exists():
         continue
-    safe_name = wt.name.replace("/", "_")
-    tar_path = archive_dir / f"{safe_name}.tgz"
+    tar_path = archive_dir / f"worktree-{item_path.name}.tgz"
     with tarfile.open(tar_path, "w:gz") as tf:
-        tf.add(str(wt), arcname=wt.name)
+        tf.add(str(item_path), arcname=item_path.name)
     items.append({
-        "worktree": str(wt),
+        "kind": "worktree",
+        "path": str(item_path),
+        "archive": str(tar_path),
+        "branch": row.get("branch"),
+    })
+for row in report.get("temp_clone_delete_candidates", []):
+    item_path = Path(row["path"])
+    if not item_path.exists():
+        continue
+    tar_path = archive_dir / f"temp-clone-{item_path.name}.tgz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        tf.add(str(item_path), arcname=item_path.name)
+    items.append({
+        "kind": "temp_clone",
+        "path": str(item_path),
         "archive": str(tar_path),
         "branch": row.get("branch"),
     })
@@ -348,7 +319,7 @@ manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
 with actions_log.open("a", encoding="utf-8") as f:
     f.write(f"archive_created={manifest_path}\n")
     for item in items:
-        f.write(f"archived={item['worktree']}|{item['archive']}\n")
+        f.write(f"archived={item['kind']}|{item['path']}|{item['archive']}\n")
 PY
 fi
 
@@ -376,8 +347,8 @@ if [[ "$MODE" == "delete" ]]; then
     fi
   fi
 
-  python3 - "$ROOT" "$REPORT_JSON" "$MANIFEST" "$REQUIRE_ARCHIVE" "$ACTIONS_LOG" "$REQUIRE_CLEAN_WORKTREE_DELETE" <<'PY'
-import json, sys, subprocess
+  python3 - "$TARGET_ROOT" "$REPORT_JSON" "$MANIFEST" "$REQUIRE_ARCHIVE" "$ACTIONS_LOG" "$REQUIRE_CLEAN_WORKTREE_DELETE" "$REQUIRE_CLEAN_TEMP_CLONE_DELETE" <<'PY'
+import json, shutil, sys, subprocess
 from pathlib import Path
 
 repo = Path(sys.argv[1]).resolve()
@@ -386,18 +357,19 @@ manifest_path = Path(sys.argv[3]) if sys.argv[4].lower() == "true" else None
 require_archive = sys.argv[4].lower() == "true"
 actions = Path(sys.argv[5])
 require_clean = sys.argv[6].lower() == "true"
+require_clean_temp_clone = sys.argv[7].lower() == "true"
 
-archived = set()
+archived = {}
 if require_archive and manifest_path and manifest_path.exists():
     m = json.loads(manifest_path.read_text())
     for item in m.get("items", []):
-        archived.add(item.get("worktree"))
+        archived[(item.get("kind"), item.get("path"))] = item.get("archive")
 
 with actions.open("a", encoding="utf-8") as log:
     for item in report.get("delete_candidates", []):
-        wt = item["worktree"]
+        wt = item["path"]
         br = item.get("branch") or ""
-        if require_archive and wt not in archived:
+        if require_archive and ("worktree", wt) not in archived:
             log.write(f"skip={wt}|not_archived\n")
             continue
 
@@ -420,8 +392,44 @@ with actions.open("a", encoding="utf-8") as log:
             d = subprocess.run(["git", "-C", str(repo), "branch", "-d", br], text=True, capture_output=True)
             if d.returncode == 0:
                 log.write(f"deleted_branch={br}\n")
-            else:
-                log.write(f"skip_branch={br}|{(d.stderr or d.stdout).strip()}\n")
+        else:
+            log.write(f"skip_branch={br}|{(d.stderr or d.stdout).strip()}\n")
+
+    for item in report.get("temp_clone_delete_candidates", []):
+        clone_path = item["path"]
+        if require_archive and ("temp_clone", clone_path) not in archived:
+            log.write(f"skip={clone_path}|not_archived\n")
+            continue
+
+        if require_clean_temp_clone:
+            st = subprocess.run(["git", "-C", clone_path, "status", "--porcelain"], text=True, capture_output=True)
+            if st.returncode != 0:
+                log.write(f"skip={clone_path}|status_check_failed|{(st.stderr or st.stdout).strip()}\n")
+                continue
+            if (st.stdout or "").strip():
+                log.write(f"skip={clone_path}|dirty_temp_clone\n")
+                continue
+
+        try:
+            shutil.rmtree(clone_path)
+        except Exception as exc:
+            log.write(f"skip={clone_path}|remove_failed|{exc}\n")
+            continue
+        log.write(f"deleted_temp_clone={clone_path}|{item.get('branch') or '<detached>'}\n")
+
+    root_action = report.get("root_normalization", {}).get("candidate")
+    if root_action:
+        switch = subprocess.run(
+            ["git", "-C", str(repo), "switch", root_action.get("to_branch") or "main"],
+            text=True,
+            capture_output=True,
+        )
+        if switch.returncode == 0:
+            log.write(
+                f"normalized_root={root_action.get('path')}|{root_action.get('from_branch')}->{root_action.get('to_branch')}\n"
+            )
+        else:
+            log.write(f"skip_root={root_action.get('path')}|{(switch.stderr or switch.stdout).strip()}\n")
 PY
 fi
 

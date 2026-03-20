@@ -66,6 +66,7 @@ echo ""
 echo "── T4: launchd wiring advertises the managed runtime worktree ──"
 assert_file_contains "$HA_BASELINE_PLIST" '<key>SPINE_RUNTIME_WORKTREE</key>' "plist exports runtime worktree path"
 assert_file_contains "$HA_BASELINE_PLIST" '<key>SPINE_RUNTIME_WORKTREE_BRANCH</key>' "plist exports runtime worktree branch"
+assert_file_contains "$HA_BASELINE_PLIST" '<string>runtime/scheduler-projection</string>' "plist pins runtime worktree branch to runtime scheduler lane"
 assert_file_contains "$HA_BASELINE_PLIST" '<key>OPS_WORKTREE_IDENTITY</key>' "plist exports runtime worktree identity"
 
 echo ""

@@ -2,16 +2,20 @@
 set -euo pipefail
 
 SCRIPT_CODE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ACTIVE_CODE_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+ACTIVE_REPO_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+ACTIVE_CODE_ROOT=""
 
-if [[ -n "$ACTIVE_CODE_ROOT" && -f "$ACTIVE_CODE_ROOT/ops/capabilities.yaml" ]]; then
+if [[ -n "$ACTIVE_REPO_ROOT" && -f "$ACTIVE_REPO_ROOT/ops/capabilities.yaml" ]]; then
+    ACTIVE_CODE_ROOT="$ACTIVE_REPO_ROOT"
+fi
+
+SPINE_TARGET_REPO="${SPINE_TARGET_REPO:-${ACTIVE_REPO_ROOT:-${SPINE_REPO:-${SPINE_CODE:-$SCRIPT_CODE_ROOT}}}}"
+if [[ -n "$ACTIVE_CODE_ROOT" ]]; then
     SPINE_CODE="$ACTIVE_CODE_ROOT"
-    # Prefer active checkout/worktree for runtime artifacts (evidence/mailroom state).
-    SPINE_REPO="$ACTIVE_CODE_ROOT"
 else
     SPINE_CODE="${SPINE_CODE:-$SCRIPT_CODE_ROOT}"
-    SPINE_REPO="${SPINE_REPO:-$SPINE_CODE}"
 fi
+SPINE_REPO="$SPINE_TARGET_REPO"
 
 _SP_LIB_DIR="${BASH_SOURCE%/*}"
 [[ "$_SP_LIB_DIR" == "${BASH_SOURCE}" ]] && _SP_LIB_DIR="$(pwd)"
@@ -19,7 +23,7 @@ source "$_SP_LIB_DIR/../lib/yaml.sh"
 source "$_SP_LIB_DIR/../lib/runtime-paths.sh"
 source "$_SP_LIB_DIR/../lib/spine-log.sh"
 spine_runtime_resolve_paths
-export SPINE_INBOX SPINE_OUTBOX SPINE_STATE SPINE_LOCKS SPINE_LOGS SPINE_RECEIPTS SPINE_VERIFY_ROOT SPINE_DOMAIN_STATE
+export SPINE_INBOX SPINE_OUTBOX SPINE_STATE SPINE_LOCKS SPINE_LOGS SPINE_RECEIPTS SPINE_VERIFY_ROOT SPINE_DOMAIN_STATE SPINE_TARGET_REPO
 
 STATE_DIR="$SPINE_STATE"
 CAP_FILE="$SPINE_CODE/ops/capabilities.yaml"
@@ -1106,7 +1110,7 @@ PY
             echo ""
             echo "== PRECONDITION: ${req} =="
             set +e
-            SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" "$SPINE_CODE/bin/ops" cap run "${req}"
+            SPINE_TARGET_REPO="$SPINE_TARGET_REPO" SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" "$SPINE_CODE/bin/ops" cap run "${req}"
             rc=$?
             set -e
             if [[ "$rc" -ne 0 ]]; then
@@ -1135,13 +1139,13 @@ PY
         # ── Execute capability command, capture output ──
         # Force code root for scripts that rely on SPINE_ROOT, while keeping runtime root stable.
         if (( ${#args[@]} > 0 )); then
-            if (cd "$cwd" && SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" SPINE_ROOT="$SPINE_CODE" SPINE_CAP_RUN_KEY="$run_key" $cmd "${args[@]}" 2>&1 | tee "$output_file"); then
+            if (cd "$cwd" && SPINE_TARGET_REPO="$SPINE_TARGET_REPO" SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" SPINE_ROOT="$SPINE_CODE" SPINE_CAP_RUN_KEY="$run_key" $cmd "${args[@]}" 2>&1 | tee "$output_file"); then
                 exit_code=0
             else
                 exit_code=$?
             fi
         else
-            if (cd "$cwd" && SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" SPINE_ROOT="$SPINE_CODE" SPINE_CAP_RUN_KEY="$run_key" $cmd 2>&1 | tee "$output_file"); then
+            if (cd "$cwd" && SPINE_TARGET_REPO="$SPINE_TARGET_REPO" SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" SPINE_ROOT="$SPINE_CODE" SPINE_CAP_RUN_KEY="$run_key" $cmd 2>&1 | tee "$output_file"); then
                 exit_code=0
             else
                 exit_code=$?
@@ -1195,7 +1199,7 @@ PY
         echo ""
         echo "== POST-ACTION: ${post_action} =="
         echo "────────────────────────────────────────"
-        if SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" SPINE_ROOT="$SPINE_CODE" "$SPINE_CODE/bin/ops" cap run "${post_action}" 2>&1 | tee -a "$output_file"; then
+        if SPINE_TARGET_REPO="$SPINE_TARGET_REPO" SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" SPINE_ROOT="$SPINE_CODE" "$SPINE_CODE/bin/ops" cap run "${post_action}" 2>&1 | tee -a "$output_file"; then
             echo "POST-ACTION OK: ${post_action}"
         else
             echo "POST-ACTION WARN: ${post_action} failed (non-blocking)"

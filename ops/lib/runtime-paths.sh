@@ -68,18 +68,118 @@ _spine_runtime_contract_value() {
   printf '%s\n' "$default_value"
 }
 
-spine_runtime_resolve_paths() {
-  local detected_root=""
-  detected_root="$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || true)"
-  if [[ -n "$detected_root" && -f "$detected_root/ops/capabilities.yaml" ]]; then
-    SPINE_CODE="$detected_root"
-    SPINE_REPO="$detected_root"
-  else
-    if [[ -z "${SPINE_CODE:-}" ]]; then
-      SPINE_CODE="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-    fi
-    SPINE_REPO="${SPINE_REPO:-$SPINE_CODE}"
+_spine_default_control_root() {
+  cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd
+}
+
+_spine_canonicalize_repoish_path() {
+  local raw="${1:-}"
+  raw="$(_spine_expand_home_token "$raw")"
+  [[ -n "$raw" ]] || return 0
+
+  local resolved=""
+  resolved="$(git -C "$raw" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -n "$resolved" ]]; then
+    printf '%s\n' "$resolved"
+    return 0
   fi
+
+  if [[ -e "$raw" ]]; then
+    (
+      cd "$raw" 2>/dev/null && pwd -P
+    ) || printf '%s\n' "$raw"
+    return 0
+  fi
+
+  printf '%s\n' "$raw"
+}
+
+_spine_has_capability_registry() {
+  local root="${1:-}"
+  [[ -n "$root" && -f "$root/ops/capabilities.yaml" ]]
+}
+
+spine_resolve_target_repo() {
+  local explicit_target="${SPINE_TARGET_REPO:-}"
+  local inherited_repo="${SPINE_REPO:-}"
+  local inherited_code="${SPINE_CODE:-}"
+  local detected_root=""
+
+  detected_root="$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || true)"
+
+  if [[ -n "$explicit_target" ]]; then
+    _spine_canonicalize_repoish_path "$explicit_target"
+    return 0
+  fi
+
+  if [[ -n "$detected_root" ]]; then
+    printf '%s\n' "$detected_root"
+    return 0
+  fi
+
+  if [[ -n "$inherited_repo" ]]; then
+    _spine_canonicalize_repoish_path "$inherited_repo"
+    return 0
+  fi
+
+  if [[ -n "$inherited_code" ]]; then
+    _spine_canonicalize_repoish_path "$inherited_code"
+    return 0
+  fi
+
+  _spine_default_control_root
+}
+
+spine_resolve_control_root() {
+  local target_repo="${1:-}"
+  local detected_root=""
+  local explicit_code="${SPINE_CODE:-}"
+  local inherited_repo="${SPINE_REPO:-}"
+
+  detected_root="$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || true)"
+
+  if [[ -n "$explicit_code" ]]; then
+    explicit_code="$(_spine_canonicalize_repoish_path "$explicit_code")"
+    if _spine_has_capability_registry "$explicit_code"; then
+      printf '%s\n' "$explicit_code"
+      return 0
+    fi
+  fi
+
+  if [[ -n "$detected_root" ]] && _spine_has_capability_registry "$detected_root"; then
+    printf '%s\n' "$detected_root"
+    return 0
+  fi
+
+  if [[ -n "$target_repo" ]]; then
+    target_repo="$(_spine_canonicalize_repoish_path "$target_repo")"
+    if _spine_has_capability_registry "$target_repo"; then
+      printf '%s\n' "$target_repo"
+      return 0
+    fi
+  fi
+
+  if [[ -n "$inherited_repo" ]]; then
+    inherited_repo="$(_spine_canonicalize_repoish_path "$inherited_repo")"
+    if _spine_has_capability_registry "$inherited_repo"; then
+      printf '%s\n' "$inherited_repo"
+      return 0
+    fi
+  fi
+
+  _spine_default_control_root
+}
+
+spine_runtime_resolve_paths() {
+  local target_repo=""
+  local control_root=""
+
+  target_repo="$(spine_resolve_target_repo)"
+  control_root="$(spine_resolve_control_root "$target_repo")"
+
+  SPINE_CODE="$control_root"
+  SPINE_TARGET_REPO="$target_repo"
+  SPINE_REPO="$target_repo"
 
   local contract_file="$SPINE_CODE/ops/bindings/mailroom.runtime.contract.yaml"
   local workspace_root="${SPINE_WORKSPACE_ROOT:-}"
@@ -255,6 +355,7 @@ spine_runtime_resolve_paths() {
   export \
     SPINE_REPO \
     SPINE_CODE \
+    SPINE_TARGET_REPO \
     SPINE_WORKSPACE_ROOT="$workspace_root" \
     SPINE_RUNTIME_ROOT="$runtime_root" \
     SPINE_MAILROOM_ROOT="$mailroom_root" \
@@ -287,7 +388,7 @@ spine_runtime_resolve_paths() {
 
 spine_resolve_mailroom_path() {
   local path="$1"
-  local repo="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+  local repo="${SPINE_TARGET_REPO:-${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}}"
   local inbox="${SPINE_INBOX:-$HOME/code/.runtime/spine/mailroom/inbox}"
   local outbox="${SPINE_OUTBOX:-$HOME/code/.runtime/spine/mailroom/outbox}"
   local state="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
