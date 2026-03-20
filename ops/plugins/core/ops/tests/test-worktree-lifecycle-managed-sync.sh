@@ -177,6 +177,21 @@ printf 'base\n' > "$REPO5/file.txt"
 assert_contains "$(cat "$LOG5")" "--trigger git.post-merge --brief" "post-merge hook invokes managed sync runner"
 
 echo ""
+echo "── T6: post-commit hook fast-forwards managed worktree with real helper ──"
+REPO6="$TMPDIR_BASE/repo6"
+MANAGED6="$TMPDIR_BASE/repo6-managed"
+setup_repo "$REPO6" "$MANAGED6"
+git -C "$REPO6" config core.hooksPath "$ROOT/.githooks"
+printf 'main update\n' >> "$REPO6/file.txt"
+(
+  cd "$REPO6"
+  SPINE_MANAGED_WORKTREE_SYNC_BIN="$SYNC" \
+  SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS="$MANAGED6" \
+    git commit -am "main update" >/dev/null
+)
+assert_eq "$(git -C "$MANAGED6" rev-parse HEAD)" "$(git -C "$REPO6" rev-parse refs/heads/main)" "real post-commit hook keeps managed worktree at main"
+
+echo ""
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"
 exit "$FAIL"
