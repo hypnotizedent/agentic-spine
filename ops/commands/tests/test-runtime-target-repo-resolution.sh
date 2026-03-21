@@ -357,6 +357,69 @@ assert_eq "$t8_status" "0" "D396 uses current checkout instead of inherited SPIN
 assert_contains "$t8_out" "D396 PASS" "D396 accepts git worktree .git file roots"
 
 echo ""
+echo "── T9: D397 gate honors current checkout over inherited SPINE_ROOT ──"
+D397_FIXTURE="$TMPDIR_BASE/d397-fixture"
+MISDIRECT_ROOT_T9="$TMPDIR_BASE/d397-misdirect"
+D397_EXTERNAL_ROOT="$TMPDIR_BASE/d397-external"
+D397_RUNTIME_ROOT="$D397_EXTERNAL_ROOT/runtime"
+D397_MAILROOM_ROOT="$D397_RUNTIME_ROOT/mailroom"
+D397_STATE_ROOT="$D397_RUNTIME_ROOT/state"
+D397_LOGS_ROOT="$D397_RUNTIME_ROOT/logs"
+D397_EVIDENCE_ROOT="$D397_EXTERNAL_ROOT/evidence"
+D397_RECEIPTS_ROOT="$D397_EVIDENCE_ROOT/sessions"
+D397_VERIFY_ROOT="$D397_EVIDENCE_ROOT/verify"
+D397_DATA_ROOT="$D397_EXTERNAL_ROOT/data"
+D397_BACKUPS_ROOT="$D397_EXTERNAL_ROOT/backups"
+D397_FOUNDATION_ROOT="$D397_EXTERNAL_ROOT/foundation"
+
+git init "$D397_FIXTURE" >/dev/null
+git -C "$D397_FIXTURE" config user.name "Test User"
+git -C "$D397_FIXTURE" config user.email "test@example.com"
+printf 'fixture\n' > "$D397_FIXTURE/README.md"
+git -C "$D397_FIXTURE" add README.md
+git -C "$D397_FIXTURE" commit -m "fixture" >/dev/null
+git -C "$D397_FIXTURE" branch -M main >/dev/null
+
+mkdir -p "$MISDIRECT_ROOT_T9/mailroom" "$MISDIRECT_ROOT_T9/runtime"
+mkdir -p \
+  "$D397_MAILROOM_ROOT" \
+  "$D397_STATE_ROOT" \
+  "$D397_LOGS_ROOT" \
+  "$D397_RECEIPTS_ROOT" \
+  "$D397_VERIFY_ROOT" \
+  "$D397_DATA_ROOT" \
+  "$D397_BACKUPS_ROOT" \
+  "$D397_FOUNDATION_ROOT/docs/agents" \
+  "$D397_FOUNDATION_ROOT/docs/archive" \
+  "$D397_FOUNDATION_ROOT/docs/product" \
+  "$D397_FOUNDATION_ROOT/docs/reference" \
+  "$D397_FOUNDATION_ROOT/ops/domains" \
+  "$D397_FOUNDATION_ROOT/ops/infra"
+
+set +e
+t9_out="$(
+  cd "$D397_FIXTURE"
+  env -u SPINE_TARGET_REPO -u SPINE_REPO \
+    SPINE_ROOT="$MISDIRECT_ROOT_T9" \
+    SPINE_CODE="$ROOT" \
+    SPINE_RUNTIME_ROOT="$D397_RUNTIME_ROOT" \
+    SPINE_MAILROOM_ROOT="$D397_MAILROOM_ROOT" \
+    SPINE_STATE="$D397_STATE_ROOT" \
+    SPINE_LOGS="$D397_LOGS_ROOT" \
+    SPINE_EVIDENCE_ROOT="$D397_EVIDENCE_ROOT" \
+    SPINE_RECEIPTS="$D397_RECEIPTS_ROOT" \
+    SPINE_VERIFY_ROOT="$D397_VERIFY_ROOT" \
+    SPINE_DATA_ROOT="$D397_DATA_ROOT" \
+    SPINE_BACKUPS_ROOT="$D397_BACKUPS_ROOT" \
+    SPINE_FOUNDATION_ROOT="$D397_FOUNDATION_ROOT" \
+    "$ROOT/surfaces/verify/d397-externalized-runtime-evidence-lock.sh" 2>&1
+)"
+t9_status=$?
+set -e
+assert_eq "$t9_status" "0" "D397 uses current checkout instead of inherited SPINE_ROOT"
+assert_contains "$t9_out" "D397 PASS" "D397 reports pass for clean target repo"
+
+echo ""
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"
 exit "$FAIL"
