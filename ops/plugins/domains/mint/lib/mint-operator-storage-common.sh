@@ -56,11 +56,13 @@ mint_operator_contract_list() {
 }
 
 mint_operator_storage_load_contract() {
-  MINT_OPERATOR_MODE="$(mint_operator_contract_scalar '.critical_path.mode' 'mounted_operator_drop')"
+  MINT_OPERATOR_MODE="$(mint_operator_contract_scalar '.critical_path.mode' 'direct_remote_operator_drop')"
   MINT_OPERATOR_CANONICAL_DROP_ROOT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.canonical_operator_drop.path' '~/MinIO/artwork-intake/operator-drop')")"
+  MINT_OPERATOR_CANONICAL_DROP_BROWSE_ROOT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.canonical_operator_drop.browse_mount_path' "$MINT_OPERATOR_CANONICAL_DROP_ROOT")")"
   MINT_OPERATOR_BUCKET="$(mint_operator_contract_scalar '.canonical_operator_drop.bucket' 'artwork-intake')"
   MINT_OPERATOR_PREFIX="$(mint_operator_contract_scalar '.canonical_operator_drop.prefix' 'operator-drop')"
-  MINT_OPERATOR_INGEST_COMMAND="$(mint_operator_contract_scalar '.canonical_operator_drop.ingest_command' './bin/mintctl morpheus intake --source ~/MinIO/artwork-intake/operator-drop')"
+  MINT_OPERATOR_CANONICAL_DROP_REMOTE="$(mint_operator_contract_scalar '.canonical_operator_drop.remote' "${MINT_OPERATOR_REMOTE:-mintfiles}:${MINT_OPERATOR_BUCKET}/${MINT_OPERATOR_PREFIX}")"
+  MINT_OPERATOR_INGEST_COMMAND="$(mint_operator_contract_scalar '.canonical_operator_drop.ingest_command' './bin/mintctl morpheus intake')"
   MINT_OPERATOR_LEGACY_DESKTOP_PATH="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.legacy_desktop_inbox.path' '~/Desktop/Operator Drop')")"
   MINT_OPERATOR_REMOTE="$(mint_operator_contract_scalar '.remote_target.rclone_remote' 'mintfiles')"
   MINT_OPERATOR_HEALTH_PROBE_PATH="$(mint_operator_contract_scalar '.remote_target.health_probe_path' "${MINT_OPERATOR_BUCKET}")"
@@ -74,9 +76,13 @@ mint_operator_storage_load_contract() {
   MINT_OPERATOR_MOUNTPOINT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.mount_surface.mountpoint' '~/MinIO')")"
   MINT_OPERATOR_MOUNT_OPERATOR_DROP="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.mount_surface.operator_drop_path' '~/MinIO/artwork-intake/operator-drop')")"
   MINT_OPERATOR_LAUNCHD_HEALTH_INTERVAL_SECONDS="$(mint_operator_contract_scalar '.mount_surface.launchd_health_interval_seconds' '15')"
-  MINT_OPERATOR_ASSIST_MODE="$(mint_operator_contract_scalar '.assisted_move_surface.mode' 'governed_assisted_move')"
-  MINT_OPERATOR_ASSIST_DESTINATION_ROOT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.destination_root' '~/MinIO/artwork-intake/operator-drop')")"
-  MINT_OPERATOR_ASSIST_VERIFICATION_METHOD="$(mint_operator_contract_scalar '.assisted_move_surface.verification_method' 'rsync_checksum_dry_run')"
+  MINT_OPERATOR_MOUNT_ROLE="$(mint_operator_contract_scalar '.mount_surface.role' 'optional_browse_surface')"
+  MINT_OPERATOR_MOUNT_BROWSE_ONLY="$(mint_operator_contract_scalar '.mount_surface.browse_only' 'true')"
+  MINT_OPERATOR_ASSIST_MODE="$(mint_operator_contract_scalar '.assisted_move_surface.mode' 'governed_mountless_remote_move')"
+  MINT_OPERATOR_ASSIST_DESTINATION_ROOT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.destination_root' "$MINT_OPERATOR_CANONICAL_DROP_BROWSE_ROOT")")"
+  MINT_OPERATOR_ASSIST_REMOTE_DESTINATION="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.remote_destination' "$MINT_OPERATOR_CANONICAL_DROP_REMOTE")")"
+  MINT_OPERATOR_ASSIST_REMOTE_STAGING_PREFIX="$(mint_operator_contract_scalar '.assisted_move_surface.staging_prefix' "${MINT_OPERATOR_BUCKET}/${MINT_OPERATOR_PREFIX}/.incoming")"
+  MINT_OPERATOR_ASSIST_VERIFICATION_METHOD="$(mint_operator_contract_scalar '.assisted_move_surface.verification_method' 'rclone_check_size_one_way')"
   MINT_OPERATOR_ASSIST_CLEANUP_POLICY="$(mint_operator_contract_scalar '.assisted_move_surface.cleanup_policy' 'trash_after_verified_arrival')"
   MINT_OPERATOR_ASSIST_CONFLICT_POLICY="$(mint_operator_contract_scalar '.assisted_move_surface.conflict_policy' 'fail_if_destination_exists')"
   MINT_OPERATOR_ASSIST_RECEIPT_ROOT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.receipts_root' '.evidence/spine/mint/operator-drop-assist')")"
@@ -89,8 +95,10 @@ mint_operator_storage_load_contract() {
   export \
     MINT_OPERATOR_MODE \
     MINT_OPERATOR_CANONICAL_DROP_ROOT \
+    MINT_OPERATOR_CANONICAL_DROP_BROWSE_ROOT \
     MINT_OPERATOR_BUCKET \
     MINT_OPERATOR_PREFIX \
+    MINT_OPERATOR_CANONICAL_DROP_REMOTE \
     MINT_OPERATOR_INGEST_COMMAND \
     MINT_OPERATOR_LEGACY_DESKTOP_PATH \
     MINT_OPERATOR_REMOTE \
@@ -105,8 +113,12 @@ mint_operator_storage_load_contract() {
     MINT_OPERATOR_MOUNTPOINT \
     MINT_OPERATOR_MOUNT_OPERATOR_DROP \
     MINT_OPERATOR_LAUNCHD_HEALTH_INTERVAL_SECONDS \
+    MINT_OPERATOR_MOUNT_ROLE \
+    MINT_OPERATOR_MOUNT_BROWSE_ONLY \
     MINT_OPERATOR_ASSIST_MODE \
     MINT_OPERATOR_ASSIST_DESTINATION_ROOT \
+    MINT_OPERATOR_ASSIST_REMOTE_DESTINATION \
+    MINT_OPERATOR_ASSIST_REMOTE_STAGING_PREFIX \
     MINT_OPERATOR_ASSIST_VERIFICATION_METHOD \
     MINT_OPERATOR_ASSIST_CLEANUP_POLICY \
     MINT_OPERATOR_ASSIST_CONFLICT_POLICY \
@@ -188,6 +200,10 @@ mint_operator_storage_mount_status() {
 }
 
 mint_operator_storage_operator_drop_ready() {
+  if [[ "$MINT_OPERATOR_MODE" == "direct_remote_operator_drop" ]]; then
+    mint_operator_storage_remote_ok
+    return $?
+  fi
   [[ -d "$MINT_OPERATOR_MOUNT_OPERATOR_DROP" ]] || return 1
   ls -1 "$MINT_OPERATOR_MOUNT_OPERATOR_DROP" >/dev/null 2>&1
 }

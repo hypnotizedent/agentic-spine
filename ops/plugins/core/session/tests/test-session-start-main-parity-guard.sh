@@ -212,7 +212,7 @@ mint_stub="$TMPDIR_BASE/session-mint-storage-stub.sh"
 cat > "$mint_stub" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-echo "status=fail mode=mounted_operator_drop remote=ok mount=INACTIVE operator_drop=missing assist=ready desktop_legacy=dirty fallback=1"
+echo "status=warn mode=direct_remote_operator_drop remote=ok mount=INACTIVE operator_drop=ready assist=ready desktop_legacy=absent fallback=0"
 EOF
 chmod +x "$mint_stub"
 set +e
@@ -220,7 +220,7 @@ t11_out="$(cd "$WORK" && SPINE_ROOT_BORING_RECONCILE_BIN="$STARTUP_NOOP_STUB" SP
 t11_status=$?
 set -e
 assert_eq "$t11_status" "0" "fast startup succeeds with mint operator storage stub"
-assert_contains "$t11_out" "mint_operator_storage: status=fail mode=mounted_operator_drop remote=ok mount=INACTIVE operator_drop=missing assist=ready desktop_legacy=dirty fallback=1" "fast startup prints mint operator storage advisory"
+assert_contains "$t11_out" "mint_operator_storage: status=warn mode=direct_remote_operator_drop remote=ok mount=INACTIVE operator_drop=ready assist=ready desktop_legacy=absent fallback=0" "fast startup prints mint operator storage advisory"
 
 echo ""
 echo "────────────────────────────────────────"

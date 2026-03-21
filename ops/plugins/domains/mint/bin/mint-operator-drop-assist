@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/plugins/domains/mint/lib/mint-operator-storage-common.sh"
 
-MINT_OPERATOR_ASSIST_RSYNC_BIN="${MINT_OPERATOR_ASSIST_RSYNC_BIN:-rsync}"
+MINT_OPERATOR_ASSIST_RCLONE_BIN="${MINT_OPERATOR_ASSIST_RCLONE_BIN:-${RCLONE_BIN:-rclone}}"
 MINT_OPERATOR_ASSIST_OSASCRIPT_BIN="${MINT_OPERATOR_ASSIST_OSASCRIPT_BIN:-osascript}"
 MINT_OPERATOR_ASSIST_TRASH_STRATEGY="${MINT_OPERATOR_ASSIST_TRASH_STRATEGY:-finder_trash}"
 MINT_OPERATOR_ASSIST_TRASH_ROOT="${MINT_OPERATOR_ASSIST_TRASH_ROOT:-$HOME/.Trash}"
@@ -19,8 +19,8 @@ Usage:
   mint-operator-drop-assist status
 
 Notes:
-  - The canonical destination stays ~/MinIO/artwork-intake/operator-drop
-  - This surface verifies arrival before cleaning up the local source
+  - The canonical destination stays MinIO artwork-intake/operator-drop
+  - This surface uploads directly to MinIO instead of writing through ~/MinIO
   - Accepted source entries are directories only
 EOF
 }
@@ -104,40 +104,48 @@ assist_source_root_allowed() {
   return 1
 }
 
-assist_require_mount_ready() {
-  mint_operator_storage_require_contract
-  mint_operator_storage_load_contract
-
-  if ! mint_operator_storage_remote_ok; then
-    assist_fail "remote ${MINT_OPERATOR_REMOTE}:${MINT_OPERATOR_HEALTH_PROBE_PATH} is not reachable"
-  fi
-
-  local mount_payload mount_status
-  mount_payload="$(mint_operator_storage_mount_status)"
-  mount_status="${mount_payload%%|*}"
-  [[ "$mount_status" == "ACTIVE" ]] || assist_fail "mount ${MINT_OPERATOR_MOUNTPOINT} is not ACTIVE"
-
-  mint_operator_storage_operator_drop_ready || assist_fail "operator drop root is not accessible: ${MINT_OPERATOR_MOUNT_OPERATOR_DROP}"
-  mint_operator_storage_required_paths_ready || assist_fail "required mount paths are not all accessible under ${MINT_OPERATOR_MOUNTPOINT}"
+assist_rclone_base_args() {
+  printf '%s\0' \
+    --contimeout "$MINT_OPERATOR_CONTIMEOUT" \
+    --timeout "$MINT_OPERATOR_TIMEOUT" \
+    --retries "$MINT_OPERATOR_RETRIES" \
+    --low-level-retries "$MINT_OPERATOR_LOW_LEVEL_RETRIES"
 }
 
-assist_verify_rsync_parity() {
+assist_rclone_run() {
+  local -a base_args
+  mapfile -d '' -t base_args < <(assist_rclone_base_args)
+  "$MINT_OPERATOR_ASSIST_RCLONE_BIN" "$@" "${base_args[@]}"
+}
+
+assist_remote_path_exists() {
+  local remote_path="$1"
+  local listing=""
+  listing="$(assist_rclone_run lsjson "$remote_path" 2>/dev/null | tr -d '[:space:]' || true)"
+  [[ -n "$listing" && "$listing" != "[]" ]]
+}
+
+assist_remote_purge() {
+  local remote_path="$1"
+  assist_rclone_run purge "$remote_path" >/dev/null 2>&1 || true
+}
+
+assist_verify_remote_parity() {
   local source_dir="$1"
-  local dest_dir="$2"
-  local diff_output=""
-  diff_output="$("$MINT_OPERATOR_ASSIST_RSYNC_BIN" -anrcO --delete --itemize-changes "${source_dir}/" "${dest_dir}/" 2>/dev/null || true)"
-  [[ -z "$diff_output" ]]
+  local remote_dir="$2"
+  assist_rclone_run check "$source_dir" "$remote_dir" --one-way --size-only >/dev/null 2>&1
 }
 
 assist_write_receipt() {
   local receipt_id="$1"
   local status="$2"
   local source_path="$3"
-  local destination_path="$4"
-  local cleanup_action="$5"
-  local preview="$6"
-  local file_count="$7"
-  local total_bytes="$8"
+  local destination_remote="$4"
+  local destination_browse="$5"
+  local cleanup_action="$6"
+  local preview="$7"
+  local file_count="$8"
+  local total_bytes="$9"
 
   local receipt_dir="${MINT_OPERATOR_ASSIST_RECEIPT_ROOT}/${receipt_id}"
   mkdir -p "$receipt_dir"
@@ -146,7 +154,8 @@ receipt_id: ${receipt_id}
 status: ${status}
 generated_at: $(assist_timestamp)
 source_path: ${source_path}
-destination_path: ${destination_path}
+destination_remote: ${destination_remote}
+destination_browse_path: ${destination_browse}
 cleanup_action: ${cleanup_action}
 preview: ${preview}
 file_count: ${file_count}
@@ -191,6 +200,14 @@ EOF
   mv "$source_path" "$fallback_target"
 }
 
+assist_require_remote_ready() {
+  mint_operator_storage_require_contract
+  mint_operator_storage_load_contract
+
+  command -v "$MINT_OPERATOR_ASSIST_RCLONE_BIN" >/dev/null 2>&1 || assist_fail "missing required tool: ${MINT_OPERATOR_ASSIST_RCLONE_BIN}"
+  mint_operator_storage_remote_ok || assist_fail "remote ${MINT_OPERATOR_REMOTE}:${MINT_OPERATOR_HEALTH_PROBE_PATH} is not reachable"
+}
+
 assist_move_one() {
   local source_path="$1"
   local preview="$2"
@@ -199,13 +216,14 @@ assist_move_one() {
   [[ -d "$source_path" ]] || assist_fail "source must be an existing directory: ${source_path}"
   source_path="$(assist_absolute_path "$source_path")"
   assist_source_root_allowed "$source_path" || assist_fail "source is outside allowed assisted-move roots: ${source_path}"
-  assist_path_in_tree "$source_path" "$MINT_OPERATOR_MOUNT_OPERATOR_DROP" && assist_fail "source is already inside canonical operator-drop: ${source_path}"
   assist_path_in_tree "$source_path" "$MINT_OPERATOR_MOUNTPOINT" && assist_fail "source cannot live under the MinIO mount root: ${source_path}"
 
-  local folder_name destination_path staging_path metrics file_count total_bytes receipt_id cleanup_action
+  local folder_name destination_remote staging_remote destination_browse metrics file_count total_bytes receipt_id cleanup_action
   folder_name="$(basename "$source_path")"
-  destination_path="${MINT_OPERATOR_ASSIST_DESTINATION_ROOT}/${folder_name}"
-  [[ ! -e "$destination_path" ]] || assist_fail "destination already exists: ${destination_path}"
+  destination_remote="${MINT_OPERATOR_ASSIST_REMOTE_DESTINATION}/${folder_name}"
+  staging_remote="${MINT_OPERATOR_REMOTE}:${MINT_OPERATOR_ASSIST_REMOTE_STAGING_PREFIX}/${folder_name}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  destination_browse="${MINT_OPERATOR_CANONICAL_DROP_BROWSE_ROOT}/${folder_name}"
+  assist_remote_path_exists "$destination_remote" && assist_fail "destination already exists: ${destination_remote}"
 
   metrics="$(assist_collect_metrics "$source_path")"
   file_count="${metrics%%|*}"
@@ -213,11 +231,12 @@ assist_move_one() {
   receipt_id="$(assist_receipt_id)"
 
   if [[ "$preview" == "1" ]]; then
-    assist_write_receipt "$receipt_id" "preview" "$source_path" "$destination_path" "none" "true" "$file_count" "$total_bytes"
+    assist_write_receipt "$receipt_id" "preview" "$source_path" "$destination_remote" "$destination_browse" "none" "true" "$file_count" "$total_bytes"
     cat <<EOF
 preview: ready
 source: ${source_path}
-destination: ${destination_path}
+destination_remote: ${destination_remote}
+destination_browse_path: ${destination_browse}
 file_count: ${file_count}
 total_bytes: ${total_bytes}
 cleanup_policy: ${MINT_OPERATOR_ASSIST_CLEANUP_POLICY}
@@ -226,109 +245,114 @@ EOF
     return 0
   fi
 
-  staging_path="${MINT_OPERATOR_ASSIST_DESTINATION_ROOT}/.incoming-${folder_name}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-  mkdir -p "$staging_path"
-
-  "$MINT_OPERATOR_ASSIST_RSYNC_BIN" -aO "${source_path}/" "${staging_path}/"
-  assist_verify_rsync_parity "$source_path" "$staging_path" || {
-    rm -rf "$staging_path"
-    assist_fail "verification failed before promoting ${folder_name}"
-  }
-
-  mv "$staging_path" "$destination_path"
-  assist_verify_rsync_parity "$source_path" "$destination_path" || assist_fail "verification failed after promoting ${folder_name}"
-
-  cleanup_action="kept"
-  if [[ "$keep_source" == "0" ]]; then
-    assist_trash_source "$source_path"
-    cleanup_action="$MINT_OPERATOR_ASSIST_CLEANUP_POLICY"
+  assist_rclone_run copy "$source_path" "$staging_remote"
+  if ! assist_verify_remote_parity "$source_path" "$staging_remote"; then
+    assist_remote_purge "$staging_remote"
+    assist_fail "staging verification failed: ${source_path} -> ${staging_remote}"
   fi
 
-  assist_write_receipt "$receipt_id" "moved" "$source_path" "$destination_path" "$cleanup_action" "false" "$file_count" "$total_bytes"
+  assist_rclone_run copy "$staging_remote" "$destination_remote"
+  if ! assist_verify_remote_parity "$source_path" "$destination_remote"; then
+    assist_remote_purge "$staging_remote"
+    assist_remote_purge "$destination_remote"
+    assist_fail "final verification failed: ${source_path} -> ${destination_remote}"
+  fi
+  assist_remote_purge "$staging_remote"
+
+  cleanup_action="kept"
+  if [[ "$keep_source" != "1" && "$MINT_OPERATOR_ASSIST_CLEANUP_POLICY" == "trash_after_verified_arrival" ]]; then
+    assist_trash_source "$source_path"
+    cleanup_action="trashed"
+  fi
+
+  assist_write_receipt "$receipt_id" "moved" "$source_path" "$destination_remote" "$destination_browse" "$cleanup_action" "false" "$file_count" "$total_bytes"
   cat <<EOF
 status: moved
 source: ${source_path}
-destination: ${destination_path}
+destination_remote: ${destination_remote}
+destination_browse_path: ${destination_browse}
+cleanup_action: ${cleanup_action}
 file_count: ${file_count}
 total_bytes: ${total_bytes}
-cleanup_action: ${cleanup_action}
 receipt: ${MINT_OPERATOR_ASSIST_RECEIPT_ROOT}/${receipt_id}/receipt.yaml
 EOF
 }
 
-assist_open_destination() {
+assist_open() {
   mint_operator_storage_require_contract
   mint_operator_storage_load_contract
-  open "$MINT_OPERATOR_ASSIST_DESTINATION_ROOT"
+  local mount_payload mount_status
+  mount_payload="$(mint_operator_storage_mount_status)"
+  mount_status="${mount_payload%%|*}"
+  [[ "$mount_status" == "ACTIVE" ]] || assist_fail "browse mount is not active: ${MINT_OPERATOR_MOUNTPOINT}"
+  open "$MINT_OPERATOR_CANONICAL_DROP_BROWSE_ROOT"
+}
+
+assist_status() {
+  exec "$ROOT/ops/plugins/domains/mint/bin/mint-operator-storage-status"
 }
 
 main() {
-  local cmd="move"
+  local command="move"
   local preview=0
   local keep_source=0
-  local -a sources=()
 
   if [[ $# -gt 0 ]]; then
     case "$1" in
-      move|open|status|help)
-        cmd="$1"
+      move|open|status)
+        command="$1"
         shift
         ;;
-      -h|--help)
+      -h|--help|help)
         assist_usage
         exit 0
         ;;
     esac
   fi
 
-  case "$cmd" in
-    help)
-      assist_usage
-      exit 0
-      ;;
+  case "$command" in
     open)
-      assist_open_destination
-      exit 0
+      [[ $# -eq 0 ]] || assist_fail "open does not accept source paths"
+      assist_open
       ;;
     status)
-      exec "$ROOT/ops/plugins/domains/mint/bin/mint-operator-storage-status" "$@"
-      ;;
-    move)
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          --preview)
-            preview=1
-            shift
-            ;;
-          --keep-source)
-            keep_source=1
-            shift
-            ;;
-          -h|--help)
-            assist_usage
-            exit 0
-            ;;
-          --)
-            shift
-            while [[ $# -gt 0 ]]; do
-              sources+=("$1")
-              shift
-            done
-            ;;
-          *)
-            sources+=("$1")
-            shift
-            ;;
-        esac
-      done
+      [[ $# -eq 0 ]] || assist_fail "status does not accept source paths"
+      assist_status
       ;;
   esac
 
-  [[ "${#sources[@]}" -gt 0 ]] || assist_fail "pass one or more source directories"
+  local -a sources=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --preview)
+        preview=1
+        shift
+        ;;
+      --keep-source)
+        keep_source=1
+        shift
+        ;;
+      -h|--help|help)
+        assist_usage
+        exit 0
+        ;;
+      --)
+        shift
+        while [[ $# -gt 0 ]]; do
+          sources+=("$1")
+          shift
+        done
+        ;;
+      *)
+        sources+=("$1")
+        shift
+        ;;
+    esac
+  done
 
-  assist_require_mount_ready
-  mkdir -p "$MINT_OPERATOR_ASSIST_RECEIPT_ROOT"
+  ((${#sources[@]} > 0)) || assist_fail "at least one source directory is required"
 
+  assist_require_remote_ready
   local source
   for source in "${sources[@]}"; do
     assist_move_one "$source" "$preview" "$keep_source"

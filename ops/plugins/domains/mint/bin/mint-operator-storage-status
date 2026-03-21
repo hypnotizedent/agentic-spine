@@ -72,11 +72,13 @@ assist_app_state="$(mint_operator_storage_assist_app_state)"
 assist_surface_state="$(mint_operator_storage_assist_surface_state)"
 
 overall_status="ok"
-if [[ "$remote_status" != "ok" || "$mount_status" != "ACTIVE" || "$operator_drop_state" != "ready" || "$required_paths_state" != "ready" || "$fallback_count" -gt 0 || "$legacy_desktop_state" == "dirty" ]]; then
+if [[ "$remote_status" != "ok" || "$operator_drop_state" != "ready" || "$fallback_count" -gt 0 || "$legacy_desktop_state" == "dirty" ]]; then
   overall_status="fail"
 elif [[ "$MINT_OPERATOR_ASSIST_REQUIRES_ENTRY_SURFACE" == "true" && "$assist_surface_state" != "ready" ]]; then
   overall_status="warn"
 elif [[ "$legacy_desktop_state" == "empty" ]]; then
+  overall_status="warn"
+elif [[ "$mount_status" != "ACTIVE" || "$required_paths_state" != "ready" ]]; then
   overall_status="warn"
 fi
 
@@ -90,6 +92,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       --arg remote "${MINT_OPERATOR_REMOTE}:${MINT_OPERATOR_HEALTH_PROBE_PATH}" \
       --arg remote_status "$remote_status" \
       --arg remote_detail "$remote_detail" \
+      --arg remote_operator_drop "$MINT_OPERATOR_CANONICAL_DROP_REMOTE" \
       --arg mount_status "$mount_status" \
       --arg mount_label "$MINT_OPERATOR_MOUNT_LABEL" \
       --arg mountpoint "$MINT_OPERATOR_MOUNTPOINT" \
@@ -97,6 +100,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       --arg mount_accessible "$mount_accessible" \
       --arg mount_process "$mount_process" \
       --arg mount_rc "$mount_rc" \
+      --arg mount_role "$MINT_OPERATOR_MOUNT_ROLE" \
       --arg operator_drop_state "$operator_drop_state" \
       --arg required_paths_state "$required_paths_state" \
       --arg legacy_desktop_path "$MINT_OPERATOR_LEGACY_DESKTOP_PATH" \
@@ -117,9 +121,11 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
         remote_target: $remote,
         remote_status: $remote_status,
         remote_detail: $remote_detail,
+        remote_operator_drop: $remote_operator_drop,
         mount_surface: {
           label: $mount_label,
           mountpoint: $mountpoint,
+          role: $mount_role,
           status: $mount_status,
           attached: $mount_attached,
           accessible: $mount_accessible,
@@ -158,10 +164,12 @@ echo "mint.operator.storage.status"
 echo "status: ${overall_status}"
 echo "critical_path: ${MINT_OPERATOR_MODE}"
 echo "operator_drop_path: ${MINT_OPERATOR_CANONICAL_DROP_ROOT}"
+echo "operator_drop_remote: ${MINT_OPERATOR_CANONICAL_DROP_REMOTE}"
 echo "remote_target: ${MINT_OPERATOR_REMOTE}:${MINT_OPERATOR_HEALTH_PROBE_PATH}"
 echo "remote_status: ${remote_status}"
 echo "remote_detail: ${remote_detail}"
 echo "mount_label: ${MINT_OPERATOR_MOUNT_LABEL}"
+echo "mount_role: ${MINT_OPERATOR_MOUNT_ROLE}"
 echo "mount_status: ${mount_status}"
 echo "mountpoint: ${MINT_OPERATOR_MOUNTPOINT}"
 echo "mount_attached: ${mount_attached}"
@@ -180,4 +188,4 @@ echo "fallback_local_entries: ${fallback_count}"
 echo "legacy_desktop_path: ${MINT_OPERATOR_LEGACY_DESKTOP_PATH}"
 echo "legacy_desktop_state: ${legacy_desktop_state}"
 echo "legacy_desktop_entries: ${legacy_desktop_count}"
-echo "note: use the governed assisted-move surface for Desktop/Downloads -> operator-drop; manual Finder copy still leaves source drift"
+echo "note: use the governed assisted-move surface for Desktop/Downloads -> operator-drop; the MinIO mount is browse-only convenience, not the write path"

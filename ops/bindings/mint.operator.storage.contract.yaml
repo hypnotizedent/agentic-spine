@@ -5,21 +5,23 @@ last_verified: 2026-03-21
 scope: mint-operator-storage
 ---
 
-contract_id: MINT_OPERATOR_STORAGE_CONTRACT_V2
+contract_id: MINT_OPERATOR_STORAGE_CONTRACT_V3
 
 critical_path:
-  mode: mounted_operator_drop
+  mode: direct_remote_operator_drop
   rationale: >-
-    Business-critical Mint intake lands directly in the canonical mounted MinIO
-    operator-drop path. Desktop staging is forbidden because it creates local
-    drift and leaves duplicate source folders on the Mac.
+    Business-critical Mint intake lands through a governed direct-to-MinIO
+    operator-drop upload surface. The Finder mount remains useful for browsing,
+    but writes and source cleanup must not depend on a live FUSE mount.
 
 canonical_operator_drop:
   path: ~/MinIO/artwork-intake/operator-drop
+  browse_mount_path: ~/MinIO/artwork-intake/operator-drop
+  remote: mintfiles:artwork-intake/operator-drop
   bucket: artwork-intake
   prefix: operator-drop
   accepted_entries: directories_only
-  ingest_command: ./bin/mintctl morpheus intake --source ~/MinIO/artwork-intake/operator-drop
+  ingest_command: ./bin/mintctl morpheus intake
 
 legacy_desktop_inbox:
   path: ~/Desktop/Operator Drop
@@ -40,7 +42,11 @@ remote_target:
   low_level_retries: 1
 
 mount_surface:
-  role: critical_operator_surface
+  role: optional_browse_surface
+  rationale: >-
+    The MinIO mount is a Finder/operator browse surface only. It may be used to
+    inspect the canonical operator-drop after upload, but the critical write
+    path must remain mountless.
   launch_agent_label: com.ronnyworks.mintfiles.mount
   launchd_template: ops/plugins/infra/host/launchd/com.ronnyworks.mintfiles.mount.plist
   mount_script_path: ~/code/workbench/scripts/root/mounts/mintfiles-mount.sh
@@ -53,22 +59,24 @@ mount_surface:
     - ~/MinIO/client-assets
   launchd_health_interval_seconds: 15
   fallback_local_entries_policy: fail
+  browse_only: true
 
 assisted_move_surface:
-  mode: governed_assisted_move
+  mode: governed_mountless_remote_move
   rationale: >-
     Finder drag into the MinIO mount is a cross-volume copy, so the canonical
-    operator flow needs an explicit assisted move surface that verifies arrival
-    before cleaning up the local source.
+    operator flow needs an explicit assisted move surface that uploads directly
+    to MinIO, verifies arrival, and only then cleans up the local source.
   allowed_source_roots:
     - ~/Desktop
     - ~/Downloads
     - ~/Documents
     - /tmp
   accepted_entries: directories_only
-  destination_root: ~/MinIO/artwork-intake/operator-drop
+  remote_destination: mintfiles:artwork-intake/operator-drop
+  staging_prefix: artwork-intake/operator-drop/.incoming
   conflict_policy: fail_if_destination_exists
-  verification_method: rsync_checksum_dry_run
+  verification_method: rclone_check_size_one_way
   cleanup_policy: trash_after_verified_arrival
   receipts_root: .evidence/spine/mint/operator-drop-assist
   helper_bin_path: ~/.local/bin/mint-operator-drop-assist

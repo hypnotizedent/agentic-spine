@@ -39,10 +39,11 @@ echo "════════════════════════�
 
 echo ""
 echo "── T1: contract and launchd wiring follow the real mount workflow ──"
-assert_contains "$(cat "$CONTRACT")" "mode: mounted_operator_drop" "contract promotes mounted operator-drop as the critical path"
+assert_contains "$(cat "$CONTRACT")" "mode: direct_remote_operator_drop" "contract promotes direct remote operator-drop as the critical path"
 assert_contains "$(cat "$CONTRACT")" "path: ~/MinIO/artwork-intake/operator-drop" "contract pins canonical operator-drop mount path"
 assert_contains "$(cat "$CONTRACT")" "path: ~/Desktop/Operator Drop" "contract tracks legacy Desktop residue path"
-assert_contains "$(cat "$CONTRACT")" "mode: governed_assisted_move" "contract adds governed assisted move surface"
+assert_contains "$(cat "$CONTRACT")" "mode: governed_mountless_remote_move" "contract adds governed mountless assisted move surface"
+assert_contains "$(cat "$CONTRACT")" "remote_destination: mintfiles:artwork-intake/operator-drop" "contract pins canonical remote operator-drop destination"
 assert_contains "$(cat "$CONTRACT")" "helper_bin_path: ~/.local/bin/mint-operator-drop-assist" "contract pins local helper path"
 assert_contains "$(cat "$CONTRACT")" "finder_app_path: ~/Applications/Mint Operator Drop.app" "contract pins Finder app path"
 assert_contains "$(cat "$REGISTRY")" "com.ronnyworks.mintfiles.mount" "launchd registry tracks mintfiles mount"
@@ -122,9 +123,11 @@ last_verified: 2026-03-21
 scope: mint-operator-storage
 ---
 critical_path:
-  mode: mounted_operator_drop
+  mode: direct_remote_operator_drop
 canonical_operator_drop:
   path: "$DROP_ROOT"
+  browse_mount_path: "$DROP_ROOT"
+  remote: mintfiles:artwork-intake/operator-drop
   bucket: artwork-intake
   prefix: operator-drop
 legacy_desktop_inbox:
@@ -137,6 +140,7 @@ remote_target:
   retries: 1
   low_level_retries: 1
 mount_surface:
+  role: optional_browse_surface
   launch_agent_label: com.ronnyworks.mintfiles.mount
   launchd_template: ops/plugins/infra/host/launchd/com.ronnyworks.mintfiles.mount.plist
   mount_script_path: "$FAKE_MOUNT_SCRIPT"
@@ -148,9 +152,10 @@ mount_surface:
     - "$MOUNT_ROOT/artwork-output"
     - "$MOUNT_ROOT/client-assets"
 assisted_move_surface:
-  mode: governed_assisted_move
-  destination_root: "$DROP_ROOT"
-  verification_method: rsync_checksum_dry_run
+  mode: governed_mountless_remote_move
+  remote_destination: mintfiles:artwork-intake/operator-drop
+  staging_prefix: artwork-intake/operator-drop/.incoming
+  verification_method: rclone_check_size_one_way
   cleanup_policy: trash_after_verified_arrival
   receipts_root: "$TMPDIR_BASE/receipts"
   helper_bin_path: "$TMPDIR_BASE/bin/mint-operator-drop-assist"
@@ -161,7 +166,7 @@ assisted_move_surface:
 EOF
 
 echo ""
-echo "── T2: inactive mount is a failure even if the remote is reachable ──"
+echo "── T2: inactive mount is warning-only when the direct remote path is healthy ──"
 t2_out="$(
   cd "$ROOT" && \
   REMOTE_ROOT="$REMOTE_ROOT" \
@@ -171,13 +176,14 @@ t2_out="$(
   FAKE_MOUNT_ROOT="$MOUNT_ROOT" \
   "$STATUS_BIN" --brief
 )"
-assert_contains "$t2_out" "status=fail" "status fails when mount is inactive"
-assert_contains "$t2_out" "mode=mounted_operator_drop" "brief status reports mounted operator-drop mode"
+assert_contains "$t2_out" "status=warn" "status warns when browse mount is inactive"
+assert_contains "$t2_out" "mode=direct_remote_operator_drop" "brief status reports direct remote operator-drop mode"
 assert_contains "$t2_out" "remote=ok" "remote reachability still reports correctly"
 assert_contains "$t2_out" "mount=INACTIVE" "mount state is surfaced explicitly"
+assert_contains "$t2_out" "operator_drop=ready" "remote operator-drop stays ready without the mount"
 
 echo ""
-echo "── T3: active mount with canonical paths ready passes ──"
+echo "── T3: active browse mount with canonical paths ready passes ──"
 mkdir -p "$DROP_ROOT" "$MOUNT_ROOT/artwork-registry" "$MOUNT_ROOT/artwork-output" "$MOUNT_ROOT/client-assets"
 mkdir -p "$TMPDIR_BASE/bin" "$TMPDIR_BASE/Applications/Mint Operator Drop.app"
 touch "$TMPDIR_BASE/bin/mint-operator-drop-assist"
@@ -196,8 +202,8 @@ t3_out="$(
   FAKE_MOUNT_RC=yes \
   "$STATUS_BIN" --brief
 )"
-assert_contains "$t3_out" "status=ok" "status passes when mount and operator-drop are healthy"
-assert_contains "$t3_out" "operator_drop=ready" "status reports canonical operator-drop ready"
+assert_contains "$t3_out" "status=ok" "status passes when remote write path and browse mount are healthy"
+assert_contains "$t3_out" "operator_drop=ready" "status reports canonical operator-drop remote ready"
 assert_contains "$t3_out" "assist=ready" "status reports assisted move surface ready"
 assert_contains "$t3_out" "desktop_legacy=absent" "status reports no Desktop residue"
 
