@@ -207,20 +207,20 @@ assert_contains "$t10_out" "./bin/ops cap run receipts.summary -- --domain none 
 assert_contains "$t10_out" "./bin/ops cap run loops.status" "degraded mode emits loop fallback hint"
 
 echo ""
-echo "── T11: fast startup surfaces mint operator storage advisory hint ──"
-mint_stub="$TMPDIR_BASE/session-mint-storage-stub.sh"
-cat > "$mint_stub" <<'EOF'
+echo "── T11: fast startup surfaces operator storage advisory hint ──"
+storage_stub="$TMPDIR_BASE/session-operator-storage-stub.sh"
+cat > "$storage_stub" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-echo "status=warn mode=direct_remote_operator_drop remote=ok mount=INACTIVE operator_drop=ready assist=ready desktop_legacy=absent fallback=0"
+echo "status=warn runtime_root=ready mint=ok mint_mode=direct_remote_operator_drop mint_mount=ACTIVE archives=warn archives_mount=INACTIVE archives_entries=0"
 EOF
-chmod +x "$mint_stub"
+chmod +x "$storage_stub"
 set +e
-t11_out="$(cd "$WORK" && SPINE_ROOT_BORING_RECONCILE_BIN="$STARTUP_NOOP_STUB" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STARTUP_NOOP_STUB" SPINE_MINT_OPERATOR_STORAGE_STATUS_BIN="$mint_stub" "$SESSION_START" 2>&1)"
+t11_out="$(cd "$WORK" && SPINE_ROOT_BORING_RECONCILE_BIN="$STARTUP_NOOP_STUB" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STARTUP_NOOP_STUB" SPINE_OPERATOR_STORAGE_SURFACE_STATUS_BIN="$storage_stub" "$SESSION_START" 2>&1)"
 t11_status=$?
 set -e
-assert_eq "$t11_status" "0" "fast startup succeeds with mint operator storage stub"
-assert_contains "$t11_out" "mint_operator_storage: status=warn mode=direct_remote_operator_drop remote=ok mount=INACTIVE operator_drop=ready assist=ready desktop_legacy=absent fallback=0" "fast startup prints mint operator storage advisory"
+assert_eq "$t11_status" "0" "fast startup succeeds with operator storage stub"
+assert_contains "$t11_out" "operator_storage_surfaces: status=warn runtime_root=ready mint=ok mint_mode=direct_remote_operator_drop mint_mount=ACTIVE archives=warn archives_mount=INACTIVE archives_entries=0" "fast startup prints operator storage advisory"
 
 echo ""
 echo "────────────────────────────────────────"

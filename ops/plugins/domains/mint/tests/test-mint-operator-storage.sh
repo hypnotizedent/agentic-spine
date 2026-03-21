@@ -46,12 +46,15 @@ assert_contains "$(cat "$CONTRACT")" "mode: governed_mountless_remote_move" "con
 assert_contains "$(cat "$CONTRACT")" "remote_destination: mintfiles:artwork-intake/operator-drop" "contract pins canonical remote operator-drop destination"
 assert_contains "$(cat "$CONTRACT")" "helper_bin_path: ~/.local/bin/mint-operator-drop-assist" "contract pins local helper path"
 assert_contains "$(cat "$CONTRACT")" "finder_app_path: ~/Applications/Mint Operator Drop.app" "contract pins Finder app path"
+assert_contains "$(cat "$CONTRACT")" "/Users/ronnyworks/.wt/workbench/operator-storage-runtime/scripts/root/mounts/mintfiles-mount.sh" "contract points at stable workbench runtime mount helper"
 assert_contains "$(cat "$REGISTRY")" "com.ronnyworks.mintfiles.mount" "launchd registry tracks mintfiles mount"
+assert_contains "$(cat "$REGISTRY")" "com.ronnyworks.archives.mount" "launchd registry tracks archives mount alongside mintfiles"
 assert_contains "$(cat "$REGISTRY")" "template_path: ops/plugins/infra/host/launchd/com.ronnyworks.mintfiles.mount.plist" "launchd registry points at spine template"
 assert_contains "$(cat "$REGISTRY")" "monitor: true" "launchd registry monitors the mount label"
 assert_not_contains "$(cat "$REGISTRY")" "com.ronny.mint-operator-drop-sync" "desktop sync label removed from launchd registry"
 assert_contains "$(cat "$PLIST")" "mintfiles-mount.sh" "mintfiles mount template calls the mount helper"
 assert_contains "$(cat "$PLIST")" "launchd-run" "mintfiles mount template uses launchd-run supervision"
+assert_contains "$(cat "$PLIST")" "/Users/ronnyworks/.wt/workbench/operator-storage-runtime" "mintfiles mount template uses stable workbench runtime root"
 
 TMPDIR_BASE="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BASE"' EXIT

@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+CONTRACT="${OPERATOR_STORAGE_SURFACE_CONTRACT:-$ROOT/ops/bindings/operator.storage.surface.contract.yaml}"
+YQ_BIN="${OPERATOR_STORAGE_YQ_BIN:-yq}"
+JQ_BIN="${OPERATOR_STORAGE_JQ_BIN:-jq}"
+MINT_STATUS_BIN="${OPERATOR_STORAGE_MINT_STATUS_BIN:-$ROOT/ops/plugins/domains/mint/bin/mint-operator-storage-status}"
+
+BRIEF=0
+JSON_MODE=0
+
+usage() {
+  cat <<'EOF'
+operator.storage.surface.status
+
+Usage:
+  operator-storage-surface-status [--brief|--json]
+EOF
+}
+
+fail() {
+  echo "operator.storage.surface.status FAIL: $*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
+}
+
+contract_scalar() {
+  local query="$1"
+  "$YQ_BIN" e -r "$query // \"\"" "$CONTRACT" 2>/dev/null || true
+}
+
+expand_path() {
+  local raw="$1"
+  if [[ -z "$raw" ]]; then
+    printf '%s\n' ""
+    return 0
+  fi
+  if [[ "$raw" == "~"* ]]; then
+    printf '%s\n' "${HOME}${raw#\~}"
+    return 0
+  fi
+  printf '%s\n' "$raw"
+}
+
+collect_local_entries() {
+  local root="$1"
+  if [[ ! -d "$root" ]]; then
+    return 0
+  fi
+  find "$root" -mindepth 1 -maxdepth 1 -print 2>/dev/null | sort || true
+}
+
+count_lines() {
+  local payload="${1:-}"
+  if [[ -z "$payload" ]]; then
+    echo 0
+  else
+    printf '%s\n' "$payload" | awk 'NF {count++} END {print count+0}'
+  fi
+}
+
+contains_disallowed_entries() {
+  local entries="$1"
+  local allowlist_json="$2"
+  python3 - "$entries" "$allowlist_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+entries_raw = sys.argv[1]
+allowlist = set(json.loads(sys.argv[2] or "[]"))
+
+for line in entries_raw.splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    if line not in allowlist and Path(line).name not in allowlist:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+parse_mount_state() {
+  local status_text="$1"
+  printf '%s\n' "$status_text" | sed -n 's/^Mount: \([A-Z]*\).*/\1/p' | tail -n 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --brief) BRIEF=1; shift ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+need_cmd "$YQ_BIN"
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+
+runtime_root="$(contract_scalar '.runtime_workbench_root')"
+[[ -n "$runtime_root" ]] || fail "contract missing runtime_workbench_root"
+runtime_root_state="missing"
+if [[ -d "$runtime_root/.git" || -f "$runtime_root/.git" ]]; then
+  runtime_root_state="ready"
+fi
+
+mint_status="unknown"
+mint_mode=""
+mint_mount=""
+if [[ -x "$MINT_STATUS_BIN" ]]; then
+  if command -v "$JQ_BIN" >/dev/null 2>&1; then
+    mint_json="$(SPINE_TARGET_REPO="${SPINE_TARGET_REPO:-$ROOT}" SPINE_REPO="${SPINE_REPO:-$ROOT}" SPINE_CODE="${SPINE_CODE:-$ROOT}" "$MINT_STATUS_BIN" --json 2>/dev/null || true)"
+    if [[ -n "$mint_json" ]]; then
+      mint_status="$(printf '%s' "$mint_json" | "$JQ_BIN" -r '.status // "unknown"' 2>/dev/null || echo unknown)"
+      mint_mode="$(printf '%s' "$mint_json" | "$JQ_BIN" -r '.critical_path // ""' 2>/dev/null || true)"
+      mint_mount="$(printf '%s' "$mint_json" | "$JQ_BIN" -r '.mount_surface.status // ""' 2>/dev/null || true)"
+    fi
+  else
+    mint_brief="$("$MINT_STATUS_BIN" --brief 2>/dev/null || true)"
+    mint_status="$(printf '%s\n' "$mint_brief" | sed -n 's/.*status=\([^ ]*\).*/\1/p' | tail -n 1)"
+    mint_mode="$(printf '%s\n' "$mint_brief" | sed -n 's/.*mode=\([^ ]*\).*/\1/p' | tail -n 1)"
+    mint_mount="$(printf '%s\n' "$mint_brief" | sed -n 's/.*mount=\([^ ]*\).*/\1/p' | tail -n 1)"
+  fi
+fi
+
+archives_script="$(expand_path "$(contract_scalar '.surfaces.archives.mount_script_path')")"
+archives_root="$(expand_path "$(contract_scalar '.surfaces.archives.mount_root')")"
+archives_inactive_policy="$(contract_scalar '.surfaces.archives.mount_health_policy.inactive')"
+archives_stale_policy="$(contract_scalar '.surfaces.archives.mount_health_policy.stale')"
+archives_fallback_policy="$(contract_scalar '.surfaces.archives.mount_health_policy.local_fallback_entries')"
+archives_allowlist_json="$("$YQ_BIN" e -o=json '.surfaces.archives.allowed_local_entries_when_unmounted // []' "$CONTRACT" 2>/dev/null || echo '[]')"
+
+[[ -x "$archives_script" ]] || fail "archives mount script missing: $archives_script"
+archives_status_text="$("$archives_script" status 2>/dev/null || true)"
+archives_mount_state="$(parse_mount_state "$archives_status_text")"
+[[ -n "$archives_mount_state" ]] || archives_mount_state="UNKNOWN"
+archives_entries="$(collect_local_entries "$archives_root")"
+archives_entry_count="$(count_lines "$archives_entries")"
+archives_status="ok"
+
+case "$archives_mount_state" in
+  ACTIVE)
+    archives_status="ok"
+    ;;
+  STALE)
+    archives_status="${archives_stale_policy:-fail}"
+    ;;
+  INACTIVE)
+    archives_status="${archives_inactive_policy:-warn}"
+    if [[ "$archives_entry_count" -gt 0 ]] && contains_disallowed_entries "$archives_entries" "$archives_allowlist_json"; then
+      archives_status="${archives_fallback_policy:-fail}"
+    fi
+    ;;
+  *)
+    archives_status="warn"
+    ;;
+esac
+
+overall_status="ok"
+if [[ "$runtime_root_state" != "ready" || "$mint_status" == "fail" || "$archives_status" == "fail" ]]; then
+  overall_status="fail"
+elif [[ "$mint_status" == "warn" || "$archives_status" == "warn" ]]; then
+  overall_status="warn"
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  need_cmd "$JQ_BIN"
+  "$JQ_BIN" -n \
+    --arg capability "operator.storage.surface.status" \
+    --arg status "$overall_status" \
+    --arg runtime_root "$runtime_root" \
+    --arg runtime_root_state "$runtime_root_state" \
+    --arg mint_status "$mint_status" \
+    --arg mint_mode "$mint_mode" \
+    --arg mint_mount "$mint_mount" \
+    --arg archives_status "$archives_status" \
+    --arg archives_mount_state "$archives_mount_state" \
+    --arg archives_root "$archives_root" \
+    --arg archives_entry_count "$archives_entry_count" \
+    '{
+      capability: $capability,
+      status: $status,
+      runtime_workbench_root: {
+        path: $runtime_root,
+        state: $runtime_root_state
+      },
+      surfaces: {
+        mintfiles: {
+          status: $mint_status,
+          mode: $mint_mode,
+          mount_status: $mint_mount
+        },
+        archives: {
+          status: $archives_status,
+          mount_status: $archives_mount_state,
+          mount_root: $archives_root,
+          local_entries: ($archives_entry_count | tonumber)
+        }
+      }
+    }'
+  exit 0
+fi
+
+if [[ "$BRIEF" -eq 1 ]]; then
+  echo "status=${overall_status} runtime_root=${runtime_root_state} mint=${mint_status} mint_mode=${mint_mode} mint_mount=${mint_mount} archives=${archives_status} archives_mount=${archives_mount_state} archives_entries=${archives_entry_count}"
+  exit 0
+fi
+
+echo "operator.storage.surface.status"
+echo "status: ${overall_status}"
+echo "runtime_workbench_root: ${runtime_root}"
+echo "runtime_workbench_root_state: ${runtime_root_state}"
+echo "mint_status: ${mint_status}"
+echo "mint_mode: ${mint_mode}"
+echo "mint_mount_status: ${mint_mount}"
+echo "archives_status: ${archives_status}"
+echo "archives_mount_status: ${archives_mount_state}"
+echo "archives_mount_root: ${archives_root}"
+echo "archives_local_entries: ${archives_entry_count}"
+if [[ "$archives_entry_count" -gt 0 ]]; then
+  echo "archives_local_entry_list:"
+  printf '%s\n' "$archives_entries" | sed 's/^/  - /'
+fi
