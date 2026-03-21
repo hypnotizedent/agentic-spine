@@ -63,44 +63,58 @@ if [[ ! -f "$SSH_TARGETS" ]]; then
   exit 2
 fi
 
-# Resolve streaming-stack SSH target (NFS client view is authoritative)
-STREAMING_HOST=$(yq '.ssh.targets[] | select(.id == "streaming-stack") | .host' "$SSH_TARGETS")
-if [[ -z "$STREAMING_HOST" ]]; then
-  echo "MISSING_SSH_TARGET: streaming-stack not found in ssh.targets.yaml" >&2
-  exit 2
+# ─── Resolve targets ───
+# Primary: media-home /srv/media/downloads (canonical home Synology mount)
+# Fallback: streaming-stack /mnt/media/downloads (legacy shop NFS view)
+MEDIA_HOME_HOST=$(yq '.ssh.targets[] | select(.id == "media-home") | .host' "$SSH_TARGETS" 2>/dev/null)
+MEDIA_HOME_USER=$(yq '.ssh.targets[] | select(.id == "media-home") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null)
+STREAMING_HOST=$(yq '.ssh.targets[] | select(.id == "streaming-stack") | .host' "$SSH_TARGETS" 2>/dev/null)
+
+# Try media-home first (canonical), fall back to streaming-stack (legacy)
+TARGET_VM=""
+TARGET_SSH=""
+DOWNLOADS_PATH=""
+
+if [[ -n "$MEDIA_HOME_HOST" && "$MEDIA_HOME_HOST" != "null" ]]; then
+  TARGET_SSH="${MEDIA_HOME_USER}@${MEDIA_HOME_HOST}"
+  if ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" "test -d /srv/media/downloads" 2>/dev/null; then
+    TARGET_VM="media-home"
+    DOWNLOADS_PATH="/srv/media/downloads"
+  fi
 fi
 
-# Read-only audit commands
-echo "# media.downloads.bloat.status"
-echo "# Generated: $GENERATED_AT"
-echo "# Target: streaming-stack (NFS client, authoritative view)"
-echo "# Downloads path: /mnt/media/downloads"
-echo ""
+if [[ -z "$TARGET_VM" && -n "$STREAMING_HOST" && "$STREAMING_HOST" != "null" ]]; then
+  TARGET_SSH="$STREAMING_HOST"
+  if ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" "test -d /mnt/media/downloads" 2>/dev/null; then
+    TARGET_VM="streaming-stack"
+    DOWNLOADS_PATH="/mnt/media/downloads"
+  fi
+fi
 
-# Check if downloads path exists. Missing path is a useful live-drift finding, not a script error.
-if ! ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" "test -d /mnt/media/downloads" 2>/dev/null; then
+if [[ -z "$TARGET_VM" ]]; then
+  echo "# media.downloads.bloat.status"
+  echo "# Generated: $GENERATED_AT"
+  echo ""
   echo "## Status: PATH_MISSING"
   echo ""
-  echo "Expected downloads path /mnt/media/downloads is not present on streaming-stack."
-  echo "This indicates live runtime drift or a missing NFS mount."
+  echo "Downloads path not reachable on media-home (/srv/media/downloads)"
+  echo "or streaming-stack (/mnt/media/downloads)."
   echo ""
   echo "## Next Actions"
   echo "1. Run: ./bin/ops cap run media.nfs.verify"
-  echo "2. Verify streaming-stack mount contract for /mnt/media"
-  echo "3. Check whether downloads are currently mounted only on download-stack"
+  echo "2. Verify media-home Synology mount for /srv/media"
+  echo "3. Verify streaming-stack mount contract for /mnt/media"
   echo "4. Do not delete or move anything until mount truth is reconciled"
   echo ""
-  echo "# Audit complete (read-only, live drift detected)"
+  echo "# Audit complete (read-only, no reachable target)"
 
   if [[ "$OUTPUT_JSON" == "true" ]]; then
     cat <<JSON
 {
   "generated_at": "$GENERATED_AT",
-  "target": "streaming-stack",
-  "downloads_path": "/mnt/media/downloads",
+  "targets_tried": ["media-home:/srv/media/downloads", "streaming-stack:/mnt/media/downloads"],
   "status": "path_missing",
   "exists": false,
-  "live_drift": true,
   "mutations": "none"
 }
 JSON
@@ -109,9 +123,16 @@ JSON
   exit 0
 fi
 
+# Read-only audit commands
+echo "# media.downloads.bloat.status"
+echo "# Generated: $GENERATED_AT"
+echo "# Target: $TARGET_VM ($(if [[ "$TARGET_VM" == "media-home" ]]; then echo "canonical home Synology mount"; else echo "legacy shop NFS view"; fi))"
+echo "# Downloads path: $DOWNLOADS_PATH"
+echo ""
+
 # Get total size
 echo "## Total Downloads Size"
-TOTAL_SIZE=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" "du -sh /mnt/media/downloads 2>/dev/null | cut -f1" || echo "UNKNOWN")
+TOTAL_SIZE=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" "du -sh $DOWNLOADS_PATH 2>/dev/null | cut -f1" || echo "UNKNOWN")
 echo "Total: $TOTAL_SIZE"
 echo ""
 
@@ -119,29 +140,28 @@ echo ""
 echo "## Age Bucket Analysis"
 echo "Analyzing file ages..."
 
-# Files by age (counts and estimated sizes)
-RECENT_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" \
-  "find /mnt/media/downloads -type f -mtime -7 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+RECENT_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "find $DOWNLOADS_PATH -type f -mtime -7 2>/dev/null | wc -l | tr -d ' '" || echo "0")
 echo "< 7 days: $RECENT_COUNT files"
 
-WEEK_MONTH_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" \
-  "find /mnt/media/downloads -type f -mtime +7 -mtime -30 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+WEEK_MONTH_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "find $DOWNLOADS_PATH -type f -mtime +7 -mtime -30 2>/dev/null | wc -l | tr -d ' '" || echo "0")
 echo "7-30 days: $WEEK_MONTH_COUNT files"
 
-MONTH_QUARTER_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" \
-  "find /mnt/media/downloads -type f -mtime +30 -mtime -90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+MONTH_QUARTER_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "find $DOWNLOADS_PATH -type f -mtime +30 -mtime -90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
 echo "30-90 days: $MONTH_QUARTER_COUNT files (bloat candidates)"
 
-OLD_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" \
-  "find /mnt/media/downloads -type f -mtime +90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+OLD_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "find $DOWNLOADS_PATH -type f -mtime +90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
 echo "> 90 days: $OLD_COUNT files (high-confidence bloat)"
 echo ""
 
 # Top space consumers
 echo "## Top 20 Space Consumers"
 echo "Largest items in downloads (top-level directories/files):"
-ssh -o ConnectTimeout="$TIMEOUT_SEC" "$STREAMING_HOST" \
-  "du -sh /mnt/media/downloads/* 2>/dev/null | sort -rh | head -20" || echo "ERROR: Could not list top consumers"
+ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "du -sh $DOWNLOADS_PATH/* 2>/dev/null | sort -rh | head -20" || echo "ERROR: Could not list top consumers"
 echo ""
 
 # Summary
@@ -165,8 +185,8 @@ if [[ "$OUTPUT_JSON" == "true" ]]; then
   cat <<JSON
 {
   "generated_at": "$GENERATED_AT",
-  "target": "streaming-stack",
-  "downloads_path": "/mnt/media/downloads",
+  "target": "$TARGET_VM",
+  "downloads_path": "$DOWNLOADS_PATH",
   "total_size": "$TOTAL_SIZE",
   "age_buckets": {
     "recent_7d": $RECENT_COUNT,

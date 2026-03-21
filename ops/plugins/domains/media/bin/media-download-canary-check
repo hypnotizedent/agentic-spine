@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# media.download.canary.check — verify canary guardrails are enforced at runtime
+#
+# Usage:
+#   ./bin/ops cap run media.download.canary.check
+#   ./bin/ops cap run media.download.canary.check --json
+#
+# Contract:
+# - SSHs to media-home and queries SABnzbd + Radarr + Sonarr APIs
+# - Verifies canary guardrails from media.download.canary.guardrails.yaml
+# - Read-only, no mutations
+# - Exit 0 if all checks pass, exit 1 if any fail
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
+GUARDRAILS="$ROOT/ops/bindings/media.download.canary.guardrails.yaml"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+OUTPUT_JSON=false
+TIMEOUT_SEC=15
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)     OUTPUT_JSON=true; shift ;;
+    --timeout)  TIMEOUT_SEC="${2:-15}"; shift 2 ;;
+    -h|--help)
+      echo "media.download.canary.check — verify canary guardrails at runtime"
+      echo "  --json     JSON output"
+      echo "  --timeout  SSH timeout (default: 15)"
+      exit 0 ;;
+    --)         shift ;;
+    *)          echo "FAIL: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+
+if [[ ! -f "$GUARDRAILS" ]]; then
+  echo "MISSING_FILE: $GUARDRAILS — canary guardrails contract not found" >&2
+  exit 2
+fi
+
+# Resolve media-home SSH
+MEDIA_HOME_HOST=$(yq '.ssh.targets[] | select(.id == "media-home") | .host' "$SSH_TARGETS" 2>/dev/null)
+MEDIA_HOME_USER=$(yq '.ssh.targets[] | select(.id == "media-home") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null)
+
+if [[ -z "$MEDIA_HOME_HOST" || "$MEDIA_HOME_HOST" == "null" ]]; then
+  echo "MISSING_SSH_TARGET: media-home not in ssh.targets.yaml" >&2
+  exit 2
+fi
+
+TARGET_SSH="${MEDIA_HOME_USER}@${MEDIA_HOME_HOST}"
+
+# Read expected values from guardrails contract
+EXPECTED_MAX_DOWNLOADS=$(yq '.anti_bloat.max_concurrent_downloads' "$GUARDRAILS")
+EXPECTED_CLIENT=$(yq '.client_scope.active_client' "$GUARDRAILS")
+
+PASS=0
+FAIL=0
+CHECKS=()
+
+check() {
+  local name="$1" result="$2" detail="$3"
+  if [[ "$result" == "pass" ]]; then
+    PASS=$((PASS + 1))
+    echo "  PASS  $name — $detail"
+  else
+    FAIL=$((FAIL + 1))
+    echo "  FAIL  $name — $detail"
+  fi
+  CHECKS+=("{\"name\":\"$name\",\"result\":\"$result\",\"detail\":\"$detail\"}")
+}
+
+echo "# media.download.canary.check"
+echo "# Generated: $GENERATED_AT"
+echo "# Target: media-home ($TARGET_SSH)"
+echo ""
+
+# ── Check 1: SABnzbd container running ──
+SAB_STATUS=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "docker ps --filter name=sabnzbd --format '{{.Status}}'" 2>/dev/null || echo "UNREACHABLE")
+if [[ "$SAB_STATUS" == *"Up"* ]]; then
+  check "sabnzbd_running" "pass" "container up: $SAB_STATUS"
+else
+  check "sabnzbd_running" "fail" "expected running, got: $SAB_STATUS"
+fi
+
+# ── Check 2: qBittorrent container NOT running ──
+QBIT_STATUS=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "docker ps --filter name=qbittorrent --format '{{.Status}}'" 2>/dev/null || echo "UNREACHABLE")
+if [[ -z "$QBIT_STATUS" || "$QBIT_STATUS" == *"Exited"* ]]; then
+  check "qbittorrent_parked" "pass" "container not running: ${QBIT_STATUS:-no container}"
+else
+  check "qbittorrent_parked" "fail" "expected stopped, got: $QBIT_STATUS"
+fi
+
+# ── Check 3: SABnzbd queue_limit ──
+SAB_APIKEY=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "docker exec sabnzbd grep '^api_key' /config/sabnzbd.ini 2>/dev/null | cut -d= -f2 | tr -d ' '" 2>/dev/null || echo "")
+
+if [[ -n "$SAB_APIKEY" ]]; then
+  QUEUE_LIMIT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+    "curl -sf 'http://localhost:8080/api?mode=get_config&section=misc&output=json&apikey=$SAB_APIKEY' 2>/dev/null" \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["config"]["misc"]["queue_limit"])' 2>/dev/null || echo "UNKNOWN")
+
+  if [[ "$QUEUE_LIMIT" == "$EXPECTED_MAX_DOWNLOADS" ]]; then
+    check "sab_queue_limit" "pass" "queue_limit=$QUEUE_LIMIT (expected $EXPECTED_MAX_DOWNLOADS)"
+  else
+    check "sab_queue_limit" "fail" "queue_limit=$QUEUE_LIMIT (expected $EXPECTED_MAX_DOWNLOADS)"
+  fi
+
+  # ── Check 4: SABnzbd RSS feeds = 0 ──
+  RSS_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+    "curl -sf 'http://localhost:8080/api?mode=get_config&section=rss&output=json&apikey=$SAB_APIKEY' 2>/dev/null" \
+    | python3 -c 'import sys,json; c=json.load(sys.stdin).get("config",{}); print(len(c.get("rss",[])))' 2>/dev/null || echo "UNKNOWN")
+
+  if [[ "$RSS_COUNT" == "0" ]]; then
+    check "sab_rss_disabled" "pass" "rss_feeds=0"
+  else
+    check "sab_rss_disabled" "fail" "rss_feeds=$RSS_COUNT (expected 0)"
+  fi
+else
+  check "sab_queue_limit" "fail" "could not read SABnzbd API key"
+  check "sab_rss_disabled" "fail" "could not read SABnzbd API key"
+fi
+
+# ── Check 5: Radarr qBittorrent disabled ──
+RADARR_KEY=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "docker exec radarr cat /config/config.xml 2>/dev/null" \
+  | sed -n 's/.*<ApiKey>\(.*\)<\/ApiKey>.*/\1/p' 2>/dev/null || echo "")
+
+if [[ -n "$RADARR_KEY" ]]; then
+  RADARR_QBIT_ENABLED=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+    "curl -sf http://localhost:7878/api/v3/downloadclient -H 'X-Api-Key: $RADARR_KEY' 2>/dev/null" \
+    | python3 -c 'import sys,json; [print(c["enable"]) for c in json.load(sys.stdin) if c["implementation"]=="QBittorrent"]' 2>/dev/null || echo "UNKNOWN")
+
+  if [[ "$RADARR_QBIT_ENABLED" == "False" ]]; then
+    check "radarr_qbit_disabled" "pass" "qBittorrent client disabled in Radarr"
+  else
+    check "radarr_qbit_disabled" "fail" "qBittorrent client enabled=$RADARR_QBIT_ENABLED in Radarr"
+  fi
+
+  # ── Check 6: Radarr RSS sync disabled ──
+  RADARR_RSS=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+    "curl -sf http://localhost:7878/api/v3/config/indexer -H 'X-Api-Key: $RADARR_KEY' 2>/dev/null" \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["rssSyncInterval"])' 2>/dev/null || echo "UNKNOWN")
+
+  if [[ "$RADARR_RSS" == "0" ]]; then
+    check "radarr_rss_disabled" "pass" "rssSyncInterval=0"
+  else
+    check "radarr_rss_disabled" "fail" "rssSyncInterval=$RADARR_RSS (expected 0)"
+  fi
+else
+  check "radarr_qbit_disabled" "fail" "could not read Radarr API key"
+  check "radarr_rss_disabled" "fail" "could not read Radarr API key"
+fi
+
+# ── Check 7: Sonarr qBittorrent disabled ──
+SONARR_KEY=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "docker exec sonarr cat /config/config.xml 2>/dev/null" \
+  | sed -n 's/.*<ApiKey>\(.*\)<\/ApiKey>.*/\1/p' 2>/dev/null || echo "")
+
+if [[ -n "$SONARR_KEY" ]]; then
+  SONARR_QBIT_ENABLED=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+    "curl -sf http://localhost:8989/api/v3/downloadclient -H 'X-Api-Key: $SONARR_KEY' 2>/dev/null" \
+    | python3 -c 'import sys,json; [print(c["enable"]) for c in json.load(sys.stdin) if c["implementation"]=="QBittorrent"]' 2>/dev/null || echo "UNKNOWN")
+
+  if [[ "$SONARR_QBIT_ENABLED" == "False" ]]; then
+    check "sonarr_qbit_disabled" "pass" "qBittorrent client disabled in Sonarr"
+  else
+    check "sonarr_qbit_disabled" "fail" "qBittorrent client enabled=$SONARR_QBIT_ENABLED in Sonarr"
+  fi
+
+  # ── Check 8: Sonarr RSS sync disabled ──
+  SONARR_RSS=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+    "curl -sf http://localhost:8989/api/v3/config/indexer -H 'X-Api-Key: $SONARR_KEY' 2>/dev/null" \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["rssSyncInterval"])' 2>/dev/null || echo "UNKNOWN")
+
+  if [[ "$SONARR_RSS" == "0" ]]; then
+    check "sonarr_rss_disabled" "pass" "rssSyncInterval=0"
+  else
+    check "sonarr_rss_disabled" "fail" "rssSyncInterval=$SONARR_RSS (expected 0)"
+  fi
+else
+  check "sonarr_qbit_disabled" "fail" "could not read Sonarr API key"
+  check "sonarr_rss_disabled" "fail" "could not read Sonarr API key"
+fi
+
+# ── Check 9: Downloads path is distinct from library roots ──
+STAGING_EXISTS=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "test -d /srv/media/downloads && echo yes || echo no" 2>/dev/null || echo "UNKNOWN")
+
+if [[ "$STAGING_EXISTS" == "yes" ]]; then
+  check "staging_path_exists" "pass" "/srv/media/downloads exists on media-home"
+else
+  check "staging_path_exists" "fail" "/srv/media/downloads not found"
+fi
+
+# ── Summary ──
+TOTAL=$((PASS + FAIL))
+echo ""
+echo "# Result: $PASS/$TOTAL PASS"
+
+if [[ "$OUTPUT_JSON" == "true" ]]; then
+  CHECKS_JSON=$(printf '%s,' "${CHECKS[@]}" | sed 's/,$//')
+  cat <<JSON
+{
+  "generated_at": "$GENERATED_AT",
+  "target": "media-home",
+  "pass": $PASS,
+  "fail": $FAIL,
+  "total": $TOTAL,
+  "checks": [$CHECKS_JSON]
+}
+JSON
+fi
+
+if [[ $FAIL -gt 0 ]]; then
+  exit 1
+fi
+exit 0
