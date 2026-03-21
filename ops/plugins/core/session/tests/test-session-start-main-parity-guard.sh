@@ -110,7 +110,7 @@ t5_out="$("$SESSION_START" --help 2>&1)"
 t5_status=$?
 set -e
 assert_eq "$t5_status" "1" "--help exits with usage status"
-assert_contains "$t5_out" "session-start [--mode fast|full]" "help prints usage"
+assert_contains "$t5_out" "session-start [--mode fast|full|degraded]" "help prints usage"
 assert_contains "$t5_out" "startup blocks dirty checkouts and clean-but-diverged main checkouts by default." "help documents parity guard"
 
 echo ""
@@ -184,6 +184,19 @@ t9_status=$?
 set -e
 assert_eq "$t9_status" "0" "fast startup succeeds with sync stub"
 assert_contains "$(cat "$sync_log")" "--trigger session.start.fast --brief" "fast startup invokes managed sync runner"
+
+echo ""
+echo "── T10: degraded mode emits continuity packet ──"
+set +e
+t10_out="$(cd "$WORK" && "$SESSION_START" degraded 2>&1)"
+t10_status=$?
+set -e
+assert_eq "$t10_status" "0" "degraded startup succeeds on clean main"
+assert_contains "$t10_out" "mode: degraded" "degraded mode is explicit"
+assert_contains "$t10_out" "logical_state_path: mailroom/state" "degraded mode exposes logical state path"
+assert_contains "$t10_out" "runtime_state_root: $STATE_ROOT" "degraded mode exposes runtime state root"
+assert_contains "$t10_out" "./bin/ops cap run receipts.summary -- --domain none --days 7" "degraded mode emits receipts fallback hint"
+assert_contains "$t10_out" "./bin/ops cap run loops.status" "degraded mode emits loop fallback hint"
 
 echo ""
 echo "────────────────────────────────────────"

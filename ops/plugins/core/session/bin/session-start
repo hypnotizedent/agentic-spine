@@ -6,6 +6,7 @@ set -euo pipefail
 # Usage:
 #   session-start                     # fast startup summary (default)
 #   session-start full               # deep startup diagnostics
+#   session-start degraded           # reduced continuity packet when full startup is not needed
 #   session-start <lane>             # lane wiring: scan | apply | coordinator
 #
 # Creates:
@@ -29,6 +30,7 @@ export SPINE_OPERATOR_TZ
 TERMINAL_LAUNCHER_VIEW="$ROOT/ops/bindings/terminal.launcher.view.yaml"
 TERMINAL_ROLE_CONTRACT="$ROOT/ops/bindings/terminal.role.contract.yaml"
 ROLE_RUNTIME_CONTRACT="$ROOT/ops/bindings/role.runtime.control.contract.yaml"
+MEMORY_CONTINUITY_CONTRACT="$ROOT/ops/bindings/memory.continuity.contract.yaml"
 SESSIONS_DIR="$SPINE_STATE/sessions"
 ARCHIVE_DIR="$SESSIONS_DIR/.archive"
 SESSION_TTL=${SPINE_SESSION_TTL:-14400}  # 4 hours default
@@ -132,7 +134,7 @@ emit_terminal_title_contract() {
 usage() {
   cat <<'EOF'
 Usage:
-  session-start [--mode fast|full] [--strict] [--json]
+  session-start [--mode fast|full|degraded] [--strict] [--json]
                 [--allow-dirty --dirty-reason "<reason>"]
                 [--allow-main-divergence --main-divergence-reason "<reason>"]
   session-start <lane>
@@ -145,10 +147,56 @@ Lanes:
 Notes:
   - No args defaults to fast startup mode.
   - full mode runs status + stability snapshot + core verify.
+  - degraded mode preserves boring-root + parity + managed-worktree guards, then emits continuity fallbacks and runtime state hints.
   - startup attempts bounded boring-root auto-heal before enforcing dirty/parity guards.
   - startup blocks dirty checkouts and clean-but-diverged main checkouts by default.
 EOF
   exit 1
+}
+
+read_memory_contract_list() {
+  local query="$1"
+  shift || true
+  local default_lines=("$@")
+
+  if [[ -f "$MEMORY_CONTINUITY_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+    local out=""
+    out="$(yq e -r "$query" "$MEMORY_CONTINUITY_CONTRACT" 2>/dev/null || true)"
+    if [[ -n "$out" ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+  fi
+
+  printf '%s\n' "${default_lines[@]}"
+}
+
+read_memory_contract_scalar() {
+  local query="$1"
+  local default_value="${2:-}"
+
+  if [[ -f "$MEMORY_CONTINUITY_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+    local out=""
+    out="$(yq e -r "$query // \"\"" "$MEMORY_CONTINUITY_CONTRACT" 2>/dev/null || true)"
+    if [[ -n "$out" && "$out" != "null" ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+  fi
+
+  printf '%s\n' "$default_value"
+}
+
+build_active_handoff_hint() {
+  if [[ -x "$ROOT/ops/plugins/core/handoff/bin/session-handoff-list" ]]; then
+    local active_count
+    active_count="$("$ROOT/ops/plugins/core/handoff/bin/session-handoff-list" --state active --json 2>/dev/null | jq -r '.handoffs | length // 0' 2>/dev/null || echo 0)"
+    if [[ "$active_count" =~ ^[0-9]+$ ]] && (( active_count > 0 )); then
+      printf '%s\n' "$active_count active handoff(s) — run: ./bin/ops cap run session.handoff.list --state active"
+      return 0
+    fi
+  fi
+  printf '%s\n' ""
 }
 
 run_startup_checkout_guards() {
@@ -254,7 +302,7 @@ run_fast_startup() {
         main_divergence_reason="${2:-}"
         shift 2
         ;;
-      fast|full)
+      fast|full|degraded)
         mode="$1"
         shift
         ;;
@@ -269,9 +317,9 @@ run_fast_startup() {
   done
 
   case "$mode" in
-    fast|full) ;;
+    fast|full|degraded) ;;
     *)
-      echo "session.start FAIL: --mode must be fast|full" >&2
+      echo "session.start FAIL: --mode must be fast|full|degraded" >&2
       return 2
       ;;
   esac
@@ -287,7 +335,7 @@ run_fast_startup() {
 
   run_managed_worktree_sync "session.start.${mode}" || return 1
 
-  if [[ "$mode" == "fast" ]]; then
+  if [[ "$mode" == "fast" || "$mode" == "degraded" ]]; then
     local status_brief
     local hardware_brief=""
     local recommend_output=""
@@ -296,16 +344,15 @@ run_fast_startup() {
     local recommended_first_domain="core"
     local receipt_memory_domain="none"
     local receipt_memory_hint="./bin/ops cap run receipts.summary -- --domain none --days 7"
-
     status_brief="$("$ROOT/bin/ops" status --brief 2>&1 || true)"
-    if [[ -x "$ROOT/ops/plugins/infra/bin/infra-media-capacity-guard-reconcile" ]]; then
+    if [[ "$mode" == "fast" ]] && [[ -x "$ROOT/ops/plugins/infra/bin/infra-media-capacity-guard-reconcile" ]]; then
       hardware_brief="$("$ROOT/ops/plugins/infra/bin/infra-media-capacity-guard-reconcile" --brief 2>/dev/null || true)"
     fi
     if [[ -z "$hardware_brief" ]]; then
       hardware_brief="HW: UNKNOWN (media capacity brief unavailable)"
     fi
 
-    if [[ -x "$ROOT/ops/plugins/core/verify/bin/verify-topology" ]]; then
+    if [[ "$mode" == "fast" ]] && [[ -x "$ROOT/ops/plugins/core/verify/bin/verify-topology" ]]; then
       recommend_output="$("$ROOT/ops/plugins/core/verify/bin/verify-topology" recommend --json 2>/dev/null || true)"
       if [[ -n "$recommend_output" ]] && jq -e '.' >/dev/null 2>&1 <<< "$recommend_output"; then
         recommend_domains="$(jq -r '.recommended_domains | join(",")' <<< "$recommend_output" 2>/dev/null || echo core)"
@@ -332,12 +379,76 @@ run_fast_startup() {
 
     # Check for active handoffs from prior sessions
     local active_handoff_hint=""
-    if [[ -x "$ROOT/ops/plugins/core/handoff/bin/session-handoff-list" ]]; then
-      local active_count
-      active_count="$("$ROOT/ops/plugins/core/handoff/bin/session-handoff-list" --state active --json 2>/dev/null | jq -r '.handoffs | length // 0' 2>/dev/null || echo 0)"
-      if [[ "$active_count" =~ ^[0-9]+$ ]] && (( active_count > 0 )); then
-        active_handoff_hint="$active_count active handoff(s) — run: ./bin/ops cap run session.handoff.list --state active"
+    active_handoff_hint="$(build_active_handoff_hint)"
+
+    if [[ "$mode" == "degraded" ]]; then
+      local continuity_policy=""
+      local primary_layer=""
+      local fallback_layers=()
+      local startup_hints=()
+      local line=""
+
+      continuity_policy="$(read_memory_contract_scalar '.degraded_mode.policy' 'continue_with_explicit_fallback_chain')"
+      primary_layer="$(read_memory_contract_scalar '.primary_layer.id' 'anythingllm')"
+
+      while IFS= read -r line; do
+        [[ -n "$line" ]] && fallback_layers+=("$line")
+      done < <(read_memory_contract_list '.fallback_layers[].id' 'spine_rag_mcp' 'receipts_summary' 'active_handoffs' 'loop_gap_runtime' 'direct_file_truth' 'rg_search')
+
+      while IFS= read -r line; do
+        [[ -n "$line" ]] && startup_hints+=("$line")
+      done < <(read_memory_contract_list '.degraded_mode.required_startup_hints[]' \
+        './bin/ops cap run session.handoff.list --state active' \
+        './bin/ops cap run receipts.summary -- --domain none --days 7' \
+        './bin/ops cap run loops.status' \
+        './bin/ops cap run gaps.status')
+
+      if [[ "$json_mode" -eq 1 ]]; then
+        local fallback_json hints_json
+        fallback_json="$(printf '%s\n' "${fallback_layers[@]}" | jq -R . | jq -s .)"
+        hints_json="$(printf '%s\n' "${startup_hints[@]}" | jq -R . | jq -s .)"
+        jq -n \
+          --arg capability "session.start" \
+          --arg mode "degraded" \
+          --arg status_brief "$status_brief" \
+          --arg continuity_policy "$continuity_policy" \
+          --arg primary_layer "$primary_layer" \
+          --arg runtime_state_root "$SPINE_STATE" \
+          --arg logical_state_path "mailroom/state" \
+          --arg active_handoff_hint "$active_handoff_hint" \
+          --argjson fallback_layers "$fallback_json" \
+          --argjson startup_hints "$hints_json" \
+          '{
+            capability: $capability,
+            mode: $mode,
+            status_brief: $status_brief,
+            continuity_policy: $continuity_policy,
+            primary_memory_layer: $primary_layer,
+            fallback_layers: $fallback_layers,
+            startup_hints: $startup_hints,
+            logical_state_path: $logical_state_path,
+            runtime_state_root: $runtime_state_root,
+            note: "degraded bootstrap complete; prefer fallback continuity surfaces until fast startup is healthy"
+          } + (if $active_handoff_hint != "" then {active_handoff_hint: $active_handoff_hint} else {} end)'
+      else
+        echo "session.start"
+        echo "mode: degraded"
+        echo "status: ${status_brief}"
+        echo "continuity_policy: ${continuity_policy}"
+        echo "primary_memory_layer: ${primary_layer}"
+        echo "logical_state_path: mailroom/state"
+        echo "runtime_state_root: ${SPINE_STATE}"
+        if [[ -n "$active_handoff_hint" ]]; then
+          echo "active_handoff: ${active_handoff_hint}"
+        fi
+        echo "fallback_layers: $(IFS=,; echo "${fallback_layers[*]}")"
+        echo "startup_hints:"
+        for line in "${startup_hints[@]}"; do
+          echo "  - ${line}"
+        done
+        echo "note: degraded bootstrap complete; prefer fallback continuity surfaces until fast startup is healthy"
       fi
+      return 0
     fi
 
     if [[ "$json_mode" -eq 1 ]]; then
@@ -434,7 +545,7 @@ if [[ $# -eq 0 ]]; then
 fi
 
 case "${1:-}" in
-  fast|full|--mode|--strict|--json|--allow-dirty|--dirty-reason|--allow-main-divergence|--main-divergence-reason|-h|--help|--)
+  fast|full|degraded|--mode|--strict|--json|--allow-dirty|--dirty-reason|--allow-main-divergence|--main-divergence-reason|-h|--help|--)
     run_fast_startup "$@"
     exit $?
     ;;
