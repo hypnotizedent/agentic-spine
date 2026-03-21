@@ -130,30 +130,36 @@ echo "# Target: $TARGET_VM ($(if [[ "$TARGET_VM" == "media-home" ]]; then echo "
 echo "# Downloads path: $DOWNLOADS_PATH"
 echo ""
 
-# Get total size
+# Get total size (exclude .quarantine/ from active staging measurement)
 echo "## Total Downloads Size"
-TOTAL_SIZE=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" "du -sh $DOWNLOADS_PATH 2>/dev/null | cut -f1" || echo "UNKNOWN")
+TOTAL_SIZE=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" "du -sh --exclude=.quarantine $DOWNLOADS_PATH 2>/dev/null | cut -f1" || echo "UNKNOWN")
 echo "Total: $TOTAL_SIZE"
+
+QUARANTINE_SIZE=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "du -sh $DOWNLOADS_PATH/.quarantine 2>/dev/null | cut -f1" || echo "none")
+if [[ "$QUARANTINE_SIZE" != "none" && "$QUARANTINE_SIZE" != "0" ]]; then
+  echo "Quarantine: $QUARANTINE_SIZE (classified, pending operator review)"
+fi
 echo ""
 
-# Age bucket analysis
+# Age bucket analysis (exclude .quarantine/ — those are already classified)
 echo "## Age Bucket Analysis"
 echo "Analyzing file ages..."
 
 RECENT_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
-  "find $DOWNLOADS_PATH -type f -mtime -7 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+  "find $DOWNLOADS_PATH -not -path '*/.quarantine/*' -type f -mtime -7 2>/dev/null | wc -l | tr -d ' '" || echo "0")
 echo "< 7 days: $RECENT_COUNT files"
 
 WEEK_MONTH_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
-  "find $DOWNLOADS_PATH -type f -mtime +7 -mtime -30 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+  "find $DOWNLOADS_PATH -not -path '*/.quarantine/*' -type f -mtime +7 -mtime -30 2>/dev/null | wc -l | tr -d ' '" || echo "0")
 echo "7-30 days: $WEEK_MONTH_COUNT files"
 
 MONTH_QUARTER_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
-  "find $DOWNLOADS_PATH -type f -mtime +30 -mtime -90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+  "find $DOWNLOADS_PATH -not -path '*/.quarantine/*' -type f -mtime +30 -mtime -90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
 echo "30-90 days: $MONTH_QUARTER_COUNT files (bloat candidates)"
 
 OLD_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
-  "find $DOWNLOADS_PATH -type f -mtime +90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+  "find $DOWNLOADS_PATH -not -path '*/.quarantine/*' -type f -mtime +90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
 echo "> 90 days: $OLD_COUNT files (high-confidence bloat)"
 echo ""
 
@@ -188,6 +194,7 @@ if [[ "$OUTPUT_JSON" == "true" ]]; then
   "target": "$TARGET_VM",
   "downloads_path": "$DOWNLOADS_PATH",
   "total_size": "$TOTAL_SIZE",
+  "quarantine_size": "$QUARANTINE_SIZE",
   "age_buckets": {
     "recent_7d": $RECENT_COUNT,
     "week_to_month": $WEEK_MONTH_COUNT,
