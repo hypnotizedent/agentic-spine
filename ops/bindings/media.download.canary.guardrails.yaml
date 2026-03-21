@@ -1,0 +1,205 @@
+# Media Download Canary Guardrails Contract
+# Status: authoritative
+# Owner: @ronny
+# Created: 2026-03-21
+# Scope: media-download-canary-anti-bloat
+#
+# This contract governs the canary download activation on media-home.
+# It defines hard limits that prevent the canary from escalating into
+# uncontrolled bulk acquisition or storage bloat.
+
+contract: MEDIA_DOWNLOAD_CANARY_GUARDRAILS_V1
+version: "1.0"
+status: active
+created: "2026-03-21"
+updated_at: "2026-03-21"
+owner: "@ronny"
+
+description: |
+  Anti-bloat guardrails for the first governed download client activation
+  on the media-home plane. SABnzbd is the canary client. qBittorrent
+  remains parked. This contract is required reading before any download
+  client activation or broadening.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Client Activation Scope
+# ─────────────────────────────────────────────────────────────────────────
+
+client_scope:
+  active_client: sabnzbd
+  active_client_vm: media-home
+  active_client_port: 8080
+  parked_clients:
+    - qbittorrent
+    - slskd
+  activation_reason: |
+    SABnzbd chosen over qBittorrent for canary because:
+    - Usenet downloads have clear success/failure states (no seeding accumulation)
+    - Category-based directory separation built in
+    - Simpler connection model (stateless per-download)
+    - No seed ratio enforcement or DHT/peer discovery complexity
+
+# ─────────────────────────────────────────────────────────────────────────
+# Staging Path Authority
+# ─────────────────────────────────────────────────────────────────────────
+
+staging_path:
+  host_path: /srv/media/downloads
+  container_path: /media/downloads
+  nfs_backing: "10.0.0.150:/volume1/media-staging/downloads"
+  lifecycle_class: regenerable
+  expiry_policy: drain_after_import
+  max_age_days: 7
+  distinct_from_library_roots: true
+  library_roots:
+    - /srv/media/movies
+    - /srv/media/tv
+    - /srv/media/music
+  separation_proof: |
+    /srv/media/downloads is a sibling directory to /srv/media/movies,
+    /srv/media/tv, and /srv/media/music under the same NFS mount.
+    Downloads are NOT nested inside any library root. ARR import moves
+    or hardlinks files FROM staging TO library roots, never the reverse.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Anti-Bloat Hard Limits
+# ─────────────────────────────────────────────────────────────────────────
+
+anti_bloat:
+  max_concurrent_downloads: 3
+  max_staging_size_gib: 50
+  free_space_gate:
+    min_free_pct: 15
+    current_free_pct: 14
+    current_status: marginal
+    action_when_breached: "Pause all downloads. Do not resume until free_pct > min_free_pct."
+    note: "Pool at 86% usage (critical per infra.capacity.guard.policy). Canary must not worsen this."
+
+  rss_feeds:
+    enabled: false
+    reason: "RSS disabled to prevent automatic bulk acquisition."
+
+  automatic_search:
+    enabled: false
+    reason: "No background search. All downloads must be operator-initiated or via explicit Jellyseerr request approval."
+
+  backlog_search:
+    enabled: false
+    reason: "No missing-media backlog search. Would trigger hundreds of simultaneous grabs."
+
+  upgrade_search:
+    enabled: false
+    reason: "No automatic quality upgrade search. Canary scope only."
+
+  import_list_monitoring:
+    must_have_tier: true
+    nice_to_have_tier: true
+    fill_later_tier: false
+    note: "fill-later tier stays unmonitored (media.import.policy). Only must-have and nice-to-have items eligible for canary downloads."
+
+# ─────────────────────────────────────────────────────────────────────────
+# Post-Import Cleanup Rules
+# ─────────────────────────────────────────────────────────────────────────
+
+cleanup:
+  mode: operator_assisted
+  description: |
+    After SABnzbd completes a download and the ARR app successfully imports
+    (hardlink or move) the file to its library root, the staging copy must
+    be cleaned within the 7-day max_age window.
+
+  sabnzbd_settings:
+    completed_download_handling: true
+    remove_from_history_after_days: 7
+    category_cleanup: true
+    note: "SABnzbd should be configured to auto-remove completed downloads from history after 7 days."
+
+  arr_settings:
+    remove_completed_downloads: true
+    remove_failed_downloads: false
+    note: "Radarr/Sonarr 'Completed Download Handling > Remove' should be enabled. Failed downloads require operator review."
+
+  manual_verification:
+    command: "./bin/ops cap run media.downloads.bloat.status"
+    frequency: "Run after each canary download cycle to verify staging is draining."
+
+# ─────────────────────────────────────────────────────────────────────────
+# Canary Proof Requirements
+# ─────────────────────────────────────────────────────────────────────────
+
+canary_proof:
+  scope: single_item_operator_initiated
+  description: |
+    The canary proof is a single operator-initiated download through the
+    full pipeline: Jellyseerr request -> ARR search -> SABnzbd download ->
+    ARR import -> library verification -> staging cleanup.
+
+  proof_checklist:
+    - "SABnzbd health endpoint responds (/api?mode=version&output=json)"
+    - "Download lands in /srv/media/downloads (staging), NOT in library root"
+    - "ARR import moves/hardlinks file to correct library root"
+    - "Staging copy cleaned after successful import"
+    - "No duplicate file in both staging and library"
+    - "media.downloads.bloat.status shows no new bloat"
+
+  activation_command: |
+    SSH to media-home and start the SABnzbd container:
+      ssh media-home 'cd /opt/media-home && docker compose up -d sabnzbd'
+    Then verify health:
+      curl -s http://media-home:8080/api?mode=version&output=json
+
+# ─────────────────────────────────────────────────────────────────────────
+# Prohibited Actions (Hard No)
+# ─────────────────────────────────────────────────────────────────────────
+
+prohibited:
+  - "Activate qBittorrent before SABnzbd canary proves stable 72+ hours"
+  - "Enable RSS feeds or automatic search"
+  - "Run backlog search or missing-media scan"
+  - "Enable automatic quality upgrade search"
+  - "Start broad movie/TV reacquisition"
+  - "Let download directories point at library roots"
+  - "Delete shop-era copies on download-stack or md1400"
+  - "Delete backups on md1400 or 730XD"
+  - "Promote fill-later import list tier to monitored"
+  - "Enable Reference-4K tier (hardware-gated)"
+  - "Bulk queue or mass search"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Escalation Path
+# ─────────────────────────────────────────────────────────────────────────
+
+escalation:
+  next_wave:
+    name: "5-title authorized canary replacement wave"
+    prerequisites:
+      - "SABnzbd canary proves stable 72+ hours"
+      - "At least 1 successful download/import/cleanup cycle completed"
+      - "media.downloads.bloat.status shows ACCEPTABLE"
+      - "Pool usage does not worsen beyond 87%"
+      - "Operator explicit approval"
+    blocked_by:
+      - "Pool at 86% (critical per capacity guard) — canary must prove it does not worsen"
+      - "No post-import cleanup automation yet (operator-assisted only)"
+      - "qBittorrent still parked"
+
+  broader_shop_drain:
+    ready: false
+    blockers:
+      - "media-shop-residue-retirement-proof-set incomplete"
+      - "media-home active < 14 days (started 2026-03-17, need ~2026-03-31)"
+      - "forensic snapshot hold (278 GiB) not yet archived"
+      - "download-stack / streaming-stack VM decommission gates not met"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Cross-References
+# ─────────────────────────────────────────────────────────────────────────
+
+cross_references:
+  service_binding: ops/bindings/media.services.yaml
+  path_authority: ops/bindings/media.path.authority.contract.yaml
+  quality_policy: ops/bindings/media.quality.policy.yaml
+  queue_policy: ops/bindings/media.queue.reconciliation.policy.yaml
+  capacity_guard: ops/bindings/infra.capacity.guard.policy.yaml
+  capacity_snapshot: ops/bindings/media.capacity.snapshot.yaml
+  data_lifecycle: ops/bindings/service.data.lifecycle.registry.yaml
