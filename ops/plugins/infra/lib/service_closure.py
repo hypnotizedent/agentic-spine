@@ -19,7 +19,13 @@ DEFAULT_ROUTE_REGISTRY = ROOT / "ops/bindings/domain.routing.registry.yaml"
 DEFAULT_INGRESS_PROJECTION = ROOT / "ops/bindings/shop.ingress.map.yaml"
 DEFAULT_SERVICES_HEALTH = ROOT / "ops/bindings/services.health.yaml"
 DEFAULT_BACKUP_SCHEDULE = ROOT / "ops/bindings/backup.schedule.yaml"
+DEFAULT_BACKUP_INVENTORY = ROOT / "ops/bindings/backup.inventory.yaml"
+DEFAULT_SERVICE_DATA_LIFECYCLE = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
 DEFAULT_SSH_TARGETS = ROOT / "ops/bindings/ssh.targets.yaml"
+DEFAULT_AGENTS_REGISTRY = ROOT / "ops/bindings/agents.registry.yaml"
+DEFAULT_WORKER_CATALOG = ROOT / "ops/bindings/terminal.worker.catalog.yaml"
+DEFAULT_SECRETS_BUNDLE_CONTRACT = ROOT / "ops/bindings/secrets.bundle.contract.yaml"
+DEFAULT_RUNTIME_SERVICES = ROOT / "ops/bindings/media.services.yaml"
 DEFAULT_CF_INGRESS_SCRIPT = ROOT / "ops/plugins/providers/cloudflare/bin/cloudflare-tunnel-ingress-status"
 DEFAULT_SSH_RESOLVE_PATH = ROOT / "ops/lib/ssh-resolve.sh"
 
@@ -57,6 +63,23 @@ def json_dump(data: dict[str, Any]) -> str:
 def resolve_env_path(env_name: str, default_path: Path) -> Path:
     value = os.environ.get(env_name, "").strip()
     return Path(value).expanduser().resolve() if value else default_path
+
+
+def resolve_default_source_path(env_name: str, default_path: Path, contract_default: str | None = None) -> Path:
+    value = os.environ.get(env_name, "").strip()
+    if value:
+        return Path(value).expanduser().resolve()
+    return resolve_contract_path(contract_default, default_path)
+
+
+def resolve_contract_path(ref: str | None, default_path: Path) -> Path:
+    value = str(ref or "").strip()
+    if not value:
+        return default_path
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.resolve()
 
 
 def display_path(path: Path) -> str:
@@ -314,6 +337,62 @@ def load_backup_jobs(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+def load_backup_targets(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(row.get("name") or "").strip(): row
+        for row in ensure_list(payload.get("targets"))
+        if isinstance(row, dict) and str(row.get("name") or "").strip()
+    }
+
+
+def load_backup_runtime_units(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(row.get("unit_id") or "").strip(): row
+        for row in ensure_list(payload.get("runtime_units"))
+        if isinstance(row, dict) and str(row.get("unit_id") or "").strip()
+    }
+
+
+def load_lifecycle_services(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(key).strip(): ensure_dict(value)
+        for key, value in ensure_dict(payload.get("services")).items()
+        if str(key).strip()
+    }
+
+
+def load_agents_registry(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(row.get("id") or "").strip(): row
+        for row in ensure_list(payload.get("agents"))
+        if isinstance(row, dict) and str(row.get("id") or "").strip()
+    }
+
+
+def load_worker_catalog(payload: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        str(key).strip(): ensure_dict(value)
+        for key, value in ensure_dict(payload.get("workers")).items()
+        if str(key).strip()
+    }
+
+
+def load_secret_bundles(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(key).strip(): ensure_dict(value)
+        for key, value in ensure_dict(payload.get("bundles")).items()
+        if str(key).strip()
+    }
+
+
+def load_runtime_services(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(key).strip(): ensure_dict(value)
+        for key, value in ensure_dict(payload.get("services")).items()
+        if str(key).strip()
+    }
+
+
 def closure_posture(mismatches: list[dict[str, Any]]) -> str:
     if any(str(row.get("severity") or "") == "high" for row in mismatches):
         return "fail"
@@ -331,6 +410,13 @@ def audit_closure(
     live_cloudflare_error: str | None,
     services_health_rows: dict[str, dict[str, Any]],
     backup_job_rows: dict[str, dict[str, Any]],
+    backup_target_rows: dict[str, dict[str, Any]],
+    backup_runtime_unit_rows: dict[str, dict[str, Any]],
+    lifecycle_service_rows: dict[str, dict[str, Any]],
+    agent_rows: dict[str, dict[str, Any]],
+    worker_rows: dict[str, dict[str, Any]],
+    secret_bundle_rows: dict[str, dict[str, Any]],
+    runtime_service_rows: dict[str, dict[str, Any]],
     ssh_probe: SSHProbe,
 ) -> dict[str, Any]:
     closure_id = str(closure.get("id") or "").strip()
@@ -527,6 +613,113 @@ def audit_closure(
                     message=f"{hostname} live Cloudflare target matches active plane",
                 )
 
+    for route in ensure_list(ensure_dict(closure.get("public_routes")).get("parked")):
+        route_row = ensure_dict(route)
+        hostname = str(route_row.get("hostname") or "").strip()
+        forbidden_stacks = [str(item).strip() for item in ensure_list(route_row.get("forbidden_stack_aliases")) if str(item).strip()]
+        forbidden_patterns = compile_patterns([str(item).strip() for item in ensure_list(route_row.get("forbidden_target_patterns")) if str(item).strip()])
+
+        registry_row = ensure_dict(route_registry_rows.get(hostname))
+        registry_stack = str(registry_row.get("stack") or "").strip()
+        registry_target = str(registry_row.get("target_hint") or "").strip()
+        if registry_row and forbidden_stacks and registry_stack in forbidden_stacks:
+            add_check(
+                checks,
+                mismatches,
+                kind="parked_route_registry",
+                status="fail",
+                code="parked_route_registry_active_stack",
+                severity="high",
+                host=registry_stack or active_host,
+                path=hostname,
+                message=f"{hostname} parked route registry still points at active stack {registry_stack}",
+            )
+        elif registry_row and forbidden_patterns and matches_any(forbidden_patterns, registry_target):
+            add_check(
+                checks,
+                mismatches,
+                kind="parked_route_registry",
+                status="fail",
+                code="parked_route_registry_active_target",
+                severity="high",
+                host=registry_stack or active_host,
+                path=hostname,
+                message=f"{hostname} parked route registry target_hint={registry_target!r} still matches active plane",
+            )
+        else:
+            add_check(
+                checks,
+                mismatches,
+                kind="parked_route_registry",
+                status="pass",
+                code="parked_route_registry_ok",
+                host=active_host,
+                path=hostname,
+                message=f"{hostname} parked route registry is not routed to the active plane",
+            )
+
+        if hostname in ingress_projection_rows:
+            projection_row = ensure_dict(ingress_projection_rows.get(hostname))
+            add_check(
+                checks,
+                mismatches,
+                kind="parked_ingress_projection",
+                status="fail",
+                code="parked_ingress_projection_present",
+                severity="high",
+                host=str(projection_row.get("stack") or active_host).strip(),
+                path=hostname,
+                message=f"{hostname} parked route is still published in ingress projection",
+            )
+        else:
+            add_check(
+                checks,
+                mismatches,
+                kind="parked_ingress_projection",
+                status="pass",
+                code="parked_ingress_projection_absent",
+                host=active_host,
+                path=hostname,
+                message=f"{hostname} parked route is absent from ingress projection",
+            )
+
+        live_target = live_cloudflare_rows.get(hostname, "")
+        if live_cloudflare_error:
+            add_check(
+                checks,
+                mismatches,
+                kind="parked_cloudflare_live",
+                status="warn",
+                code="parked_cloudflare_live_probe_unavailable",
+                severity="warn",
+                host=active_host,
+                path=hostname,
+                message=f"Cloudflare live ingress probe unavailable: {live_cloudflare_error}",
+            )
+        elif live_target:
+            add_check(
+                checks,
+                mismatches,
+                kind="parked_cloudflare_live",
+                status="fail",
+                code="parked_cloudflare_live_present",
+                severity="high",
+                host=active_host,
+                path=hostname,
+                message=f"{hostname} parked route is still live in Cloudflare ingress: {live_target!r}",
+            )
+        else:
+            add_check(
+                checks,
+                mismatches,
+                kind="parked_cloudflare_live",
+                status="pass",
+                code="parked_cloudflare_live_absent",
+                host=active_host,
+                path=hostname,
+                message=f"{hostname} parked route is absent from live Cloudflare ingress",
+            )
+
     for endpoint in ensure_list(ensure_dict(closure.get("monitoring")).get("endpoints")):
         endpoint_row = ensure_dict(endpoint)
         endpoint_id = str(endpoint_row.get("endpoint_id") or "").strip()
@@ -585,11 +778,340 @@ def audit_closure(
                 message=f"services.health endpoint {endpoint_id} matches active plane",
             )
 
+    for runtime_service in ensure_list(ensure_dict(closure.get("runtime_services")).get("services")):
+        runtime_row = ensure_dict(runtime_service)
+        service_id = str(runtime_row.get("service_id") or "").strip()
+        expected_vm = str(runtime_row.get("expected_vm") or active_host).strip()
+        expected_target_vm = str(runtime_row.get("expected_target_vm") or expected_vm).strip()
+        expected_status = str(runtime_row.get("expected_status") or "").strip()
+        actual = ensure_dict(runtime_service_rows.get(service_id))
+        if not actual:
+            add_check(
+                checks,
+                mismatches,
+                kind="runtime_services",
+                status="fail",
+                code="runtime_service_missing",
+                severity="high",
+                host=expected_vm,
+                path=service_id,
+                message=f"runtime service {service_id} missing from runtime services source",
+            )
+            continue
+        actual_vm = str(actual.get("vm") or "").strip()
+        actual_target_vm = str(actual.get("target_vm") or actual_vm).strip()
+        actual_status = str(actual.get("status") or "").strip()
+        if expected_vm and actual_vm != expected_vm:
+            add_check(
+                checks,
+                mismatches,
+                kind="runtime_services",
+                status="fail",
+                code="runtime_service_vm_mismatch",
+                severity="high",
+                host=actual_vm or expected_vm,
+                path=service_id,
+                message=f"runtime service {service_id} vm={actual_vm} expected={expected_vm}",
+            )
+        elif expected_target_vm and actual_target_vm != expected_target_vm:
+            add_check(
+                checks,
+                mismatches,
+                kind="runtime_services",
+                status="fail",
+                code="runtime_service_target_vm_mismatch",
+                severity="high",
+                host=actual_target_vm or expected_target_vm,
+                path=service_id,
+                message=f"runtime service {service_id} target_vm={actual_target_vm} expected={expected_target_vm}",
+            )
+        elif expected_status and actual_status != expected_status:
+            add_check(
+                checks,
+                mismatches,
+                kind="runtime_services",
+                status="fail",
+                code="runtime_service_status_mismatch",
+                severity="high",
+                host=actual_vm or expected_vm,
+                path=service_id,
+                message=f"runtime service {service_id} status={actual_status} expected={expected_status}",
+            )
+        else:
+            add_check(
+                checks,
+                mismatches,
+                kind="runtime_services",
+                status="pass",
+                code="runtime_service_ok",
+                host=expected_vm,
+                path=service_id,
+                message=f"runtime service {service_id} matches declared active plane",
+            )
+
+    dependents = ensure_dict(closure.get("dependents"))
+    for binding in ensure_list(dependents.get("agent_endpoints")):
+        binding_row = ensure_dict(binding)
+        agent_id = str(binding_row.get("agent_id") or "").strip()
+        agent = ensure_dict(agent_rows.get(agent_id))
+        if not agent:
+            add_check(
+                checks,
+                mismatches,
+                kind="agent_endpoints",
+                status="fail",
+                code="agent_endpoint_agent_missing",
+                severity="high",
+                host=active_host,
+                path=agent_id,
+                message=f"agent registry entry {agent_id} missing",
+            )
+            continue
+        endpoints = ensure_dict(agent.get("endpoints"))
+        for endpoint in ensure_list(binding_row.get("endpoints")):
+            endpoint_row = ensure_dict(endpoint)
+            endpoint_id = str(endpoint_row.get("endpoint_id") or "").strip()
+            expected_health_id = str(endpoint_row.get("expected_health_id") or endpoint_id).strip()
+            patterns = compile_patterns([str(item).strip() for item in ensure_list(endpoint_row.get("expected_url_patterns")) if str(item).strip()])
+            actual = ensure_dict(endpoints.get(endpoint_id))
+            if not actual:
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="agent_endpoints",
+                    status="fail",
+                    code="agent_endpoint_missing",
+                    severity="high",
+                    host=active_host,
+                    path=f"{agent_id}:{endpoint_id}",
+                    message=f"agent endpoint {agent_id}.{endpoint_id} missing",
+                )
+                continue
+            actual_health_id = str(actual.get("health_id") or "").strip()
+            actual_url = str(actual.get("url") or "").strip()
+            if expected_health_id and actual_health_id != expected_health_id:
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="agent_endpoints",
+                    status="fail",
+                    code="agent_endpoint_health_mismatch",
+                    severity="high",
+                    host=active_host,
+                    path=f"{agent_id}:{endpoint_id}",
+                    message=f"agent endpoint {agent_id}.{endpoint_id} health_id={actual_health_id} expected={expected_health_id}",
+                )
+            elif not matches_any(patterns, actual_url):
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="agent_endpoints",
+                    status="fail",
+                    code="agent_endpoint_url_mismatch",
+                    severity="high",
+                    host=active_host,
+                    path=f"{agent_id}:{endpoint_id}",
+                    message=f"agent endpoint {agent_id}.{endpoint_id} url={actual_url!r} does not match active plane patterns",
+                )
+            else:
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="agent_endpoints",
+                    status="pass",
+                    code="agent_endpoint_ok",
+                    host=active_host,
+                    path=f"{agent_id}:{endpoint_id}",
+                    message=f"agent endpoint {agent_id}.{endpoint_id} matches active plane",
+                )
+
+    for binding in ensure_list(dependents.get("worker_endpoints")):
+        binding_row = ensure_dict(binding)
+        terminal_id = str(binding_row.get("terminal_id") or "").strip()
+        worker = ensure_dict(worker_rows.get(terminal_id))
+        if not worker:
+            add_check(
+                checks,
+                mismatches,
+                kind="worker_endpoints",
+                status="fail",
+                code="worker_endpoint_terminal_missing",
+                severity="high",
+                host=active_host,
+                path=terminal_id,
+                message=f"worker catalog entry {terminal_id} missing",
+            )
+            continue
+        endpoints = ensure_dict(worker.get("endpoints"))
+        for endpoint in ensure_list(binding_row.get("endpoints")):
+            endpoint_row = ensure_dict(endpoint)
+            endpoint_id = str(endpoint_row.get("endpoint_id") or "").strip()
+            expected_health_id = str(endpoint_row.get("expected_health_id") or endpoint_id).strip()
+            patterns = compile_patterns([str(item).strip() for item in ensure_list(endpoint_row.get("expected_url_patterns")) if str(item).strip()])
+            actual = ensure_dict(endpoints.get(endpoint_id))
+            if not actual:
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="worker_endpoints",
+                    status="fail",
+                    code="worker_endpoint_missing",
+                    severity="high",
+                    host=active_host,
+                    path=f"{terminal_id}:{endpoint_id}",
+                    message=f"worker endpoint {terminal_id}.{endpoint_id} missing",
+                )
+                continue
+            actual_health_id = str(actual.get("health_id") or "").strip()
+            actual_url = str(actual.get("url") or "").strip()
+            if expected_health_id and actual_health_id != expected_health_id:
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="worker_endpoints",
+                    status="fail",
+                    code="worker_endpoint_health_mismatch",
+                    severity="high",
+                    host=active_host,
+                    path=f"{terminal_id}:{endpoint_id}",
+                    message=f"worker endpoint {terminal_id}.{endpoint_id} health_id={actual_health_id} expected={expected_health_id}",
+                )
+            elif not matches_any(patterns, actual_url):
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="worker_endpoints",
+                    status="fail",
+                    code="worker_endpoint_url_mismatch",
+                    severity="high",
+                    host=active_host,
+                    path=f"{terminal_id}:{endpoint_id}",
+                    message=f"worker endpoint {terminal_id}.{endpoint_id} url={actual_url!r} does not match active plane patterns",
+                )
+            else:
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="worker_endpoints",
+                    status="pass",
+                    code="worker_endpoint_ok",
+                    host=active_host,
+                    path=f"{terminal_id}:{endpoint_id}",
+                    message=f"worker endpoint {terminal_id}.{endpoint_id} matches active plane",
+                )
+
+    for binding in ensure_list(dependents.get("secret_bundles")):
+        binding_row = ensure_dict(binding)
+        bundle_id = str(binding_row.get("bundle_id") or "").strip()
+        bundle = ensure_dict(secret_bundle_rows.get(bundle_id))
+        if not bundle:
+            add_check(
+                checks,
+                mismatches,
+                kind="secret_bundles",
+                status="fail",
+                code="secret_bundle_missing",
+                severity="high",
+                host=active_host,
+                path=bundle_id,
+                message=f"secret bundle {bundle_id} missing",
+            )
+            continue
+        verify_rows = {
+            str(row.get("id") or "").strip(): ensure_dict(row)
+            for row in ensure_list(bundle.get("verify"))
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        }
+        static_rows = ensure_dict(ensure_dict(bundle.get("local_env")).get("static"))
+        for verify in ensure_list(binding_row.get("verify")):
+            verify_row = ensure_dict(verify)
+            verify_id = str(verify_row.get("verify_id") or "").strip()
+            patterns = compile_patterns([str(item).strip() for item in ensure_list(verify_row.get("expected_url_patterns")) if str(item).strip()])
+            actual = ensure_dict(verify_rows.get(verify_id))
+            if not actual:
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="secret_bundles",
+                    status="fail",
+                    code="secret_bundle_verify_missing",
+                    severity="high",
+                    host=active_host,
+                    path=f"{bundle_id}:{verify_id}",
+                    message=f"secret bundle verify {bundle_id}.{verify_id} missing",
+                )
+                continue
+            actual_url = str(actual.get("url") or "").strip()
+            if not matches_any(patterns, actual_url):
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="secret_bundles",
+                    status="fail",
+                    code="secret_bundle_verify_url_mismatch",
+                    severity="high",
+                    host=active_host,
+                    path=f"{bundle_id}:{verify_id}",
+                    message=f"secret bundle verify {bundle_id}.{verify_id} url={actual_url!r} does not match active plane patterns",
+                )
+            else:
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="secret_bundles",
+                    status="pass",
+                    code="secret_bundle_verify_ok",
+                    host=active_host,
+                    path=f"{bundle_id}:{verify_id}",
+                    message=f"secret bundle verify {bundle_id}.{verify_id} matches active plane",
+                )
+        for local_env in ensure_list(binding_row.get("local_env_static")):
+            env_row = ensure_dict(local_env)
+            env_key = str(env_row.get("key") or "").strip()
+            patterns = compile_patterns([str(item).strip() for item in ensure_list(env_row.get("expected_url_patterns")) if str(item).strip()])
+            actual_value = str(static_rows.get(env_key) or "").strip()
+            if not actual_value:
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="secret_bundles",
+                    status="fail",
+                    code="secret_bundle_local_env_missing",
+                    severity="high",
+                    host=active_host,
+                    path=f"{bundle_id}:{env_key}",
+                    message=f"secret bundle local env static {bundle_id}.{env_key} missing",
+                )
+            elif not matches_any(patterns, actual_value):
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="secret_bundles",
+                    status="fail",
+                    code="secret_bundle_local_env_url_mismatch",
+                    severity="high",
+                    host=active_host,
+                    path=f"{bundle_id}:{env_key}",
+                    message=f"secret bundle local env static {bundle_id}.{env_key} value={actual_value!r} does not match active plane patterns",
+                )
+            else:
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="secret_bundles",
+                    status="pass",
+                    code="secret_bundle_local_env_ok",
+                    host=active_host,
+                    path=f"{bundle_id}:{env_key}",
+                    message=f"secret bundle local env static {bundle_id}.{env_key} matches active plane",
+                )
+
     for backup in ensure_list(ensure_dict(closure.get("backups")).get("jobs")):
         backup_row = ensure_dict(backup)
         job_id = str(backup_row.get("job_id") or "").strip()
         expected_host = str(backup_row.get("expected_host") or active_host).strip()
         expected_script_ref = str(backup_row.get("expected_script_ref") or "").strip()
+        expected_capability_ref = str(backup_row.get("expected_capability_ref") or "").strip()
         schedule_row = ensure_dict(backup_job_rows.get(job_id))
         if not schedule_row:
             add_check(
@@ -606,6 +1128,7 @@ def audit_closure(
         else:
             actual_host = str(schedule_row.get("host") or "").strip()
             script_ref = str(schedule_row.get("script_ref") or "").strip()
+            capability_ref = str(schedule_row.get("capability_ref") or "").strip()
             enabled = bool(schedule_row.get("enabled", False))
             if not enabled:
                 add_check(
@@ -642,6 +1165,18 @@ def audit_closure(
                     host=actual_host or expected_host,
                     path=job_id,
                     message=f"backup.schedule job {job_id} script_ref={script_ref!r} expected={expected_script_ref!r}",
+                )
+            elif expected_capability_ref and capability_ref != expected_capability_ref:
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="backup_schedule",
+                    status="fail",
+                    code="backup_schedule_capability_mismatch",
+                    severity="high",
+                    host=actual_host or expected_host,
+                    path=job_id,
+                    message=f"backup.schedule job {job_id} capability_ref={capability_ref!r} expected={expected_capability_ref!r}",
                 )
             else:
                 add_check(
@@ -780,6 +1315,225 @@ def audit_closure(
                     extra={"probe_path": probe.get("path_used", "")},
                 )
 
+    backups_section = ensure_dict(closure.get("backups"))
+    for target in ensure_list(backups_section.get("inventory_targets")):
+        target_row = ensure_dict(target)
+        target_id = str(target_row.get("target_id") or "").strip()
+        expected_host = str(target_row.get("expected_host") or "").strip()
+        patterns = compile_patterns([str(item).strip() for item in ensure_list(target_row.get("expected_base_path_patterns")) if str(item).strip()])
+        actual = ensure_dict(backup_target_rows.get(target_id))
+        if not actual:
+            add_check(
+                checks,
+                mismatches,
+                kind="backup_inventory",
+                status="fail",
+                code="backup_inventory_target_missing",
+                severity="high",
+                host=expected_host,
+                path=target_id,
+                message=f"backup.inventory target {target_id} missing",
+            )
+            continue
+        actual_host = str(actual.get("host") or "").strip()
+        actual_base_path = str(actual.get("base_path") or "").strip()
+        if expected_host and actual_host != expected_host:
+            add_check(
+                checks,
+                mismatches,
+                kind="backup_inventory",
+                status="fail",
+                code="backup_inventory_target_host_mismatch",
+                severity="high",
+                host=actual_host or expected_host,
+                path=target_id,
+                message=f"backup.inventory target {target_id} host={actual_host} expected={expected_host}",
+            )
+        elif not matches_any(patterns, actual_base_path):
+            add_check(
+                checks,
+                mismatches,
+                kind="backup_inventory",
+                status="fail",
+                code="backup_inventory_target_base_path_mismatch",
+                severity="high",
+                host=actual_host or expected_host,
+                path=target_id,
+                message=f"backup.inventory target {target_id} base_path={actual_base_path!r} does not match expected locality patterns",
+            )
+        else:
+            add_check(
+                checks,
+                mismatches,
+                kind="backup_inventory",
+                status="pass",
+                code="backup_inventory_target_ok",
+                host=expected_host,
+                path=target_id,
+                message=f"backup.inventory target {target_id} matches declared locality role",
+            )
+
+    for unit in ensure_list(backups_section.get("runtime_units")):
+        unit_row = ensure_dict(unit)
+        unit_id = str(unit_row.get("unit_id") or "").strip()
+        expected_hostname = str(unit_row.get("expected_hostname") or "").strip()
+        expected_destination_lane = str(unit_row.get("expected_destination_lane") or "").strip()
+        expected_restore_class = str(unit_row.get("expected_restore_class") or "").strip()
+        expected_inventory_targets = [str(item).strip() for item in ensure_list(unit_row.get("expected_inventory_targets")) if str(item).strip()]
+        actual = ensure_dict(backup_runtime_unit_rows.get(unit_id))
+        if not actual:
+            add_check(
+                checks,
+                mismatches,
+                kind="backup_runtime_units",
+                status="fail",
+                code="backup_runtime_unit_missing",
+                severity="high",
+                host=expected_hostname,
+                path=unit_id,
+                message=f"backup.inventory runtime unit {unit_id} missing",
+            )
+            continue
+        actual_hostname = str(actual.get("hostname") or "").strip()
+        actual_destination_lane = str(actual.get("destination_lane") or "").strip()
+        actual_restore_class = str(actual.get("restore_class") or "").strip()
+        actual_targets = [str(item).strip() for item in ensure_list(actual.get("inventory_targets")) if str(item).strip()]
+        if expected_hostname and actual_hostname != expected_hostname:
+            add_check(
+                checks,
+                mismatches,
+                kind="backup_runtime_units",
+                status="fail",
+                code="backup_runtime_unit_hostname_mismatch",
+                severity="high",
+                host=actual_hostname or expected_hostname,
+                path=unit_id,
+                message=f"backup runtime unit {unit_id} hostname={actual_hostname} expected={expected_hostname}",
+            )
+        elif expected_destination_lane and actual_destination_lane != expected_destination_lane:
+            add_check(
+                checks,
+                mismatches,
+                kind="backup_runtime_units",
+                status="fail",
+                code="backup_runtime_unit_destination_lane_mismatch",
+                severity="high",
+                host=actual_hostname or expected_hostname,
+                path=unit_id,
+                message=f"backup runtime unit {unit_id} destination_lane={actual_destination_lane} expected={expected_destination_lane}",
+            )
+        elif expected_restore_class and actual_restore_class != expected_restore_class:
+            add_check(
+                checks,
+                mismatches,
+                kind="backup_runtime_units",
+                status="fail",
+                code="backup_runtime_unit_restore_class_mismatch",
+                severity="high",
+                host=actual_hostname or expected_hostname,
+                path=unit_id,
+                message=f"backup runtime unit {unit_id} restore_class={actual_restore_class} expected={expected_restore_class}",
+            )
+        elif any(target_id not in actual_targets for target_id in expected_inventory_targets):
+            add_check(
+                checks,
+                mismatches,
+                kind="backup_runtime_units",
+                status="fail",
+                code="backup_runtime_unit_inventory_target_mismatch",
+                severity="high",
+                host=actual_hostname or expected_hostname,
+                path=unit_id,
+                message=f"backup runtime unit {unit_id} inventory_targets={actual_targets} missing expected targets {expected_inventory_targets}",
+            )
+        else:
+            add_check(
+                checks,
+                mismatches,
+                kind="backup_runtime_units",
+                status="pass",
+                code="backup_runtime_unit_ok",
+                host=expected_hostname,
+                path=unit_id,
+                message=f"backup runtime unit {unit_id} matches declared locality role",
+            )
+
+    lifecycle_binding = ensure_dict(backups_section.get("lifecycle_binding"))
+    lifecycle_service_id = str(lifecycle_binding.get("service_id") or "").strip()
+    if lifecycle_service_id:
+        actual = ensure_dict(lifecycle_service_rows.get(lifecycle_service_id))
+        if not actual:
+            add_check(
+                checks,
+                mismatches,
+                kind="service_data_lifecycle",
+                status="fail",
+                code="lifecycle_service_missing",
+                severity="high",
+                host=active_host,
+                path=lifecycle_service_id,
+                message=f"service.data.lifecycle entry {lifecycle_service_id} missing",
+            )
+        else:
+            declared_actions = {
+                str(row.get("action_id") or "").strip()
+                for row in ensure_list(ensure_dict(actual.get("background_actions")).get("declared"))
+                if isinstance(row, dict) and str(row.get("action_id") or "").strip()
+            }
+            expected_actions = [str(item).strip() for item in ensure_list(lifecycle_binding.get("expected_background_action_ids")) if str(item).strip()]
+            binding_refs = ensure_dict(actual.get("binding_refs"))
+            actual_backup_targets = [str(item).strip() for item in ensure_list(binding_refs.get("backup_targets")) if str(item).strip()]
+            actual_backup_runtime_units = [str(item).strip() for item in ensure_list(binding_refs.get("backup_runtime_units")) if str(item).strip()]
+            expected_backup_targets = [str(item).strip() for item in ensure_list(lifecycle_binding.get("expected_backup_targets")) if str(item).strip()]
+            expected_backup_runtime_units = [str(item).strip() for item in ensure_list(lifecycle_binding.get("expected_backup_runtime_units")) if str(item).strip()]
+            if any(action_id not in declared_actions for action_id in expected_actions):
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="service_data_lifecycle",
+                    status="fail",
+                    code="lifecycle_background_action_missing",
+                    severity="high",
+                    host=active_host,
+                    path=lifecycle_service_id,
+                    message=f"service.data.lifecycle {lifecycle_service_id} missing expected background actions {expected_actions}",
+                )
+            elif any(target_id not in actual_backup_targets for target_id in expected_backup_targets):
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="service_data_lifecycle",
+                    status="fail",
+                    code="lifecycle_backup_target_missing",
+                    severity="high",
+                    host=active_host,
+                    path=lifecycle_service_id,
+                    message=f"service.data.lifecycle {lifecycle_service_id} backup_targets={actual_backup_targets} missing expected targets {expected_backup_targets}",
+                )
+            elif any(unit_id not in actual_backup_runtime_units for unit_id in expected_backup_runtime_units):
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="service_data_lifecycle",
+                    status="fail",
+                    code="lifecycle_backup_runtime_unit_missing",
+                    severity="high",
+                    host=active_host,
+                    path=lifecycle_service_id,
+                    message=f"service.data.lifecycle {lifecycle_service_id} backup_runtime_units={actual_backup_runtime_units} missing expected units {expected_backup_runtime_units}",
+                )
+            else:
+                add_check(
+                    checks,
+                    mismatches,
+                    kind="service_data_lifecycle",
+                    status="pass",
+                    code="lifecycle_binding_ok",
+                    host=active_host,
+                    path=lifecycle_service_id,
+                    message=f"service.data.lifecycle {lifecycle_service_id} matches relocation backup locality policy",
+                )
+
     for mismatch in mismatches:
         mismatch["domain"] = domain
     posture = closure_posture(mismatches)
@@ -799,18 +1553,53 @@ def run_service_closure_audit(*, closure_id: str | None = None, domain: str | No
     contract = load_yaml(contract_path)
     defaults = ensure_dict(contract.get("defaults"))
 
-    route_registry_path = resolve_env_path("SPINE_SERVICE_CLOSURE_ROUTE_REGISTRY", DEFAULT_ROUTE_REGISTRY)
-    ingress_projection_path = resolve_env_path("SPINE_SERVICE_CLOSURE_INGRESS_PROJECTION", DEFAULT_INGRESS_PROJECTION)
-    services_health_path = resolve_env_path("SPINE_SERVICE_CLOSURE_SERVICES_HEALTH", DEFAULT_SERVICES_HEALTH)
-    backup_schedule_path = resolve_env_path("SPINE_SERVICE_CLOSURE_BACKUP_SCHEDULE", DEFAULT_BACKUP_SCHEDULE)
-    ssh_targets_path = resolve_env_path("SPINE_SERVICE_CLOSURE_SSH_TARGETS", DEFAULT_SSH_TARGETS)
+    route_registry_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_ROUTE_REGISTRY", DEFAULT_ROUTE_REGISTRY, str(defaults.get("route_registry") or ""))
+    ingress_projection_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_INGRESS_PROJECTION", DEFAULT_INGRESS_PROJECTION, str(defaults.get("ingress_projection") or ""))
+    services_health_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_SERVICES_HEALTH", DEFAULT_SERVICES_HEALTH, str(defaults.get("services_health") or ""))
+    backup_schedule_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_BACKUP_SCHEDULE", DEFAULT_BACKUP_SCHEDULE, str(defaults.get("backup_schedule") or ""))
+    backup_inventory_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_BACKUP_INVENTORY", DEFAULT_BACKUP_INVENTORY, str(defaults.get("backup_inventory") or ""))
+    service_data_lifecycle_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_SERVICE_DATA_LIFECYCLE", DEFAULT_SERVICE_DATA_LIFECYCLE, str(defaults.get("service_data_lifecycle") or ""))
+    ssh_targets_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_SSH_TARGETS", DEFAULT_SSH_TARGETS, str(defaults.get("ssh_targets") or ""))
+    agents_registry_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_AGENTS_REGISTRY", DEFAULT_AGENTS_REGISTRY, str(defaults.get("agents_registry") or ""))
+    worker_catalog_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_WORKER_CATALOG", DEFAULT_WORKER_CATALOG, str(defaults.get("worker_catalog") or ""))
+    secrets_bundle_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_SECRETS_BUNDLE_CONTRACT", DEFAULT_SECRETS_BUNDLE_CONTRACT, str(defaults.get("secrets_bundle_contract") or ""))
+    runtime_services_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_RUNTIME_SERVICES", DEFAULT_RUNTIME_SERVICES, str(defaults.get("runtime_services") or ""))
 
-    route_registry_rows = flatten_route_registry(load_yaml(route_registry_path))
-    ingress_projection_rows = flatten_ingress_projection(load_yaml(ingress_projection_path))
-    services_health_rows = load_services_health(load_yaml(services_health_path))
-    backup_job_rows = load_backup_jobs(load_yaml(backup_schedule_path))
     live_cloudflare_rows, live_cloudflare_error = load_live_cloudflare_routes(defaults)
     ssh_probe = SSHProbe(ssh_targets_path)
+    yaml_cache: dict[Path, dict[str, Any]] = {}
+
+    def yaml_payload(path: Path) -> dict[str, Any]:
+        resolved = path.resolve()
+        if resolved not in yaml_cache:
+            yaml_cache[resolved] = load_yaml(resolved)
+        return yaml_cache[resolved]
+
+    def rows_for_closure(closure: dict[str, Any]) -> dict[str, Any]:
+        refs = ensure_dict(closure.get("refs"))
+        resolved_route_registry_path = resolve_contract_path(str(refs.get("route_registry") or ""), route_registry_path)
+        resolved_ingress_projection_path = resolve_contract_path(str(refs.get("ingress_projection") or ""), ingress_projection_path)
+        resolved_services_health_path = resolve_contract_path(str(refs.get("services_health") or ""), services_health_path)
+        resolved_backup_schedule_path = resolve_contract_path(str(refs.get("backup_schedule") or ""), backup_schedule_path)
+        resolved_backup_inventory_path = resolve_contract_path(str(refs.get("backup_inventory") or ""), backup_inventory_path)
+        resolved_lifecycle_path = resolve_contract_path(str(refs.get("service_data_lifecycle") or ""), service_data_lifecycle_path)
+        resolved_agents_registry_path = resolve_contract_path(str(refs.get("agents_registry") or ""), agents_registry_path)
+        resolved_worker_catalog_path = resolve_contract_path(str(refs.get("worker_catalog") or ""), worker_catalog_path)
+        resolved_secrets_bundle_path = resolve_contract_path(str(refs.get("secrets_bundle_contract") or ""), secrets_bundle_path)
+        resolved_runtime_services_path = resolve_contract_path(str(refs.get("runtime_services") or ""), runtime_services_path)
+        return {
+            "route_registry_rows": flatten_route_registry(yaml_payload(resolved_route_registry_path)),
+            "ingress_projection_rows": flatten_ingress_projection(yaml_payload(resolved_ingress_projection_path)),
+            "services_health_rows": load_services_health(yaml_payload(resolved_services_health_path)),
+            "backup_job_rows": load_backup_jobs(yaml_payload(resolved_backup_schedule_path)),
+            "backup_target_rows": load_backup_targets(yaml_payload(resolved_backup_inventory_path)),
+            "backup_runtime_unit_rows": load_backup_runtime_units(yaml_payload(resolved_backup_inventory_path)),
+            "lifecycle_service_rows": load_lifecycle_services(yaml_payload(resolved_lifecycle_path)),
+            "agent_rows": load_agents_registry(yaml_payload(resolved_agents_registry_path)),
+            "worker_rows": load_worker_catalog(yaml_payload(resolved_worker_catalog_path)),
+            "secret_bundle_rows": load_secret_bundles(yaml_payload(resolved_secrets_bundle_path)),
+            "runtime_service_rows": load_runtime_services(yaml_payload(resolved_runtime_services_path)),
+        }
 
     filtered_closures = []
     for item in ensure_list(contract.get("closures")):
@@ -826,13 +1615,10 @@ def run_service_closure_audit(*, closure_id: str | None = None, domain: str | No
     results = [
         audit_closure(
             row,
-            route_registry_rows=route_registry_rows,
-            ingress_projection_rows=ingress_projection_rows,
             live_cloudflare_rows=live_cloudflare_rows,
             live_cloudflare_error=live_cloudflare_error,
-            services_health_rows=services_health_rows,
-            backup_job_rows=backup_job_rows,
             ssh_probe=ssh_probe,
+            **rows_for_closure(row),
         )
         for row in filtered_closures
     ]

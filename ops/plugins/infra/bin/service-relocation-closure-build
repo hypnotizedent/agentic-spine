@@ -1,0 +1,484 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+from pathlib import Path
+import re
+import sys
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+
+
+def source_path() -> Path:
+    value = os.environ.get("SPINE_SERVICE_RELOCATION_REGISTRY", "").strip()
+    if value:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = ROOT / path
+        return path.resolve()
+    return (ROOT / "ops/bindings/service.relocation.registry.yaml").resolve()
+
+
+def output_path() -> Path:
+    value = os.environ.get("SPINE_SERVICE_CLOSURE_OUTPUT", "").strip()
+    if value:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = ROOT / path
+        return path.resolve()
+    return (ROOT / "ops/bindings/service.closure.contract.yaml").resolve()
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"service.relocation.closure.build FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def yaml_dump(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=False)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="service-relocation-closure-build")
+    parser.add_argument("--check", action="store_true", help="Fail if projected contract differs from disk.")
+    parser.add_argument("--stdout", action="store_true", help="Print projection to stdout instead of writing to disk.")
+    return parser.parse_args()
+
+
+def rel(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(ROOT))
+    except ValueError:
+        return str(resolved)
+
+
+def ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def compile_target_patterns(host: str, lan_ip: str, tailscale_ip: str, port: int) -> list[str]:
+    patterns: list[str] = []
+    if host:
+        patterns.append(re.escape(host))
+    if lan_ip:
+        patterns.append(re.escape(f"{lan_ip}:{port}"))
+    if tailscale_ip:
+        patterns.append(re.escape(f"{tailscale_ip}:{port}"))
+    return patterns
+
+
+def runtime_url_patterns(host: str, lan_ip: str, tailscale_ip: str, port: int) -> list[str]:
+    return compile_target_patterns(host, lan_ip, tailscale_ip, port)
+
+
+def runtime_services_by_id(relocation: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    for raw in ensure_list(relocation.get("runtime_services")):
+        row = ensure_dict(raw)
+        service_id = str(row.get("service_id") or "").strip()
+        if service_id:
+            rows[service_id] = row
+    return rows
+
+
+def build_public_routes(relocation: dict[str, Any], active_plane: dict[str, Any]) -> list[dict[str, Any]]:
+    services = runtime_services_by_id(relocation)
+    routes: list[dict[str, Any]] = []
+    for raw in ensure_list(ensure_dict(relocation.get("public_routes")).get("live")):
+        row = ensure_dict(raw)
+        service = str(row.get("service") or "").strip()
+        route_service = services.get(service)
+        if not route_service:
+            fail(f"public route references unknown runtime service: {service}")
+        port = int(route_service.get("port"))
+        routes.append(
+            {
+                "hostname": str(row.get("hostname") or "").strip(),
+                "service": service,
+                "expected_stack_aliases": ensure_list(active_plane.get("stack_aliases")),
+                "expected_target_patterns": compile_target_patterns(
+                    str(active_plane.get("host") or "").strip(),
+                    str(active_plane.get("lan_ip") or "").strip(),
+                    str(active_plane.get("tailscale_ip") or "").strip(),
+                    port,
+                ),
+            }
+        )
+    return routes
+
+
+def build_parked_routes(relocation: dict[str, Any], active_plane: dict[str, Any]) -> list[dict[str, Any]]:
+    services = runtime_services_by_id(relocation)
+    routes: list[dict[str, Any]] = []
+    for raw in ensure_list(ensure_dict(relocation.get("public_routes")).get("parked")):
+        row = ensure_dict(raw)
+        service = str(row.get("service") or "").strip()
+        route_service = services.get(service)
+        if not route_service:
+            fail(f"parked route references unknown runtime service: {service}")
+        port = int(route_service.get("port"))
+        routes.append(
+            {
+                "hostname": str(row.get("hostname") or "").strip(),
+                "service": service,
+                "expected_absent_from": ["ingress_projection", "cloudflare_live"],
+                "forbidden_target_patterns": compile_target_patterns(
+                    str(active_plane.get("host") or "").strip(),
+                    str(active_plane.get("lan_ip") or "").strip(),
+                    str(active_plane.get("tailscale_ip") or "").strip(),
+                    port,
+                ),
+                "forbidden_stack_aliases": ensure_list(active_plane.get("stack_aliases")),
+            }
+        )
+    return routes
+
+
+def build_monitoring(relocation: dict[str, Any], active_plane: dict[str, Any]) -> list[dict[str, Any]]:
+    services = runtime_services_by_id(relocation)
+    endpoints: list[dict[str, Any]] = []
+    for service_id in ensure_list(relocation.get("monitoring_services")):
+        service = services.get(str(service_id).strip())
+        if not service:
+            fail(f"monitoring_services references unknown runtime service: {service_id}")
+        endpoints.append(
+            {
+                "endpoint_id": str(service_id).strip(),
+                "expected_host": str(active_plane.get("host") or "").strip(),
+                "expected_url_patterns": runtime_url_patterns(
+                    str(active_plane.get("host") or "").strip(),
+                    str(active_plane.get("lan_ip") or "").strip(),
+                    str(active_plane.get("tailscale_ip") or "").strip(),
+                    int(service.get("port")),
+                ),
+            }
+        )
+    return endpoints
+
+
+def build_runtime_service_checks(relocation: dict[str, Any], active_plane: dict[str, Any]) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    for row in ensure_list(relocation.get("runtime_services")):
+        service = ensure_dict(row)
+        checks.append(
+            {
+                "service_id": str(service.get("service_id") or "").strip(),
+                "expected_vm": str(active_plane.get("current_vm") or "").strip(),
+                "expected_target_vm": str(active_plane.get("target_vm") or "").strip(),
+                "expected_status": str(service.get("expected_status") or "").strip(),
+            }
+        )
+    return checks
+
+
+def build_agent_endpoints(relocation: dict[str, Any], active_plane: dict[str, Any]) -> list[dict[str, Any]]:
+    services = runtime_services_by_id(relocation)
+    rows: list[dict[str, Any]] = []
+    for raw in ensure_list(ensure_dict(relocation.get("dependents")).get("agent_endpoints")):
+        binding = ensure_dict(raw)
+        endpoints: list[dict[str, Any]] = []
+        for service_id in ensure_list(binding.get("services")):
+            service = services.get(str(service_id).strip())
+            if not service:
+                fail(f"agent endpoint references unknown runtime service: {service_id}")
+            endpoints.append(
+                {
+                    "endpoint_id": str(service_id).strip(),
+                    "expected_health_id": str(service_id).strip(),
+                    "expected_url_patterns": runtime_url_patterns(
+                        str(active_plane.get("host") or "").strip(),
+                        str(active_plane.get("lan_ip") or "").strip(),
+                        str(active_plane.get("tailscale_ip") or "").strip(),
+                        int(service.get("port")),
+                    ),
+                }
+            )
+        rows.append({"agent_id": str(binding.get("agent_id") or "").strip(), "endpoints": endpoints})
+    return rows
+
+
+def build_worker_endpoints(relocation: dict[str, Any], active_plane: dict[str, Any]) -> list[dict[str, Any]]:
+    services = runtime_services_by_id(relocation)
+    rows: list[dict[str, Any]] = []
+    for raw in ensure_list(ensure_dict(relocation.get("dependents")).get("worker_endpoints")):
+        binding = ensure_dict(raw)
+        endpoints: list[dict[str, Any]] = []
+        for service_id in ensure_list(binding.get("services")):
+            service = services.get(str(service_id).strip())
+            if not service:
+                fail(f"worker endpoint references unknown runtime service: {service_id}")
+            endpoints.append(
+                {
+                    "endpoint_id": str(service_id).strip(),
+                    "expected_health_id": str(service_id).strip(),
+                    "expected_url_patterns": runtime_url_patterns(
+                        str(active_plane.get("host") or "").strip(),
+                        str(active_plane.get("lan_ip") or "").strip(),
+                        str(active_plane.get("tailscale_ip") or "").strip(),
+                        int(service.get("port")),
+                    ),
+                }
+            )
+        rows.append({"terminal_id": str(binding.get("terminal_id") or "").strip(), "endpoints": endpoints})
+    return rows
+
+
+def build_secret_bundles(relocation: dict[str, Any], active_plane: dict[str, Any]) -> list[dict[str, Any]]:
+    services = runtime_services_by_id(relocation)
+    rows: list[dict[str, Any]] = []
+    for raw in ensure_list(ensure_dict(relocation.get("dependents")).get("secret_bundles")):
+        binding = ensure_dict(raw)
+        verify_rows: list[dict[str, Any]] = []
+        for service_id, verify_id in ensure_dict(binding.get("verify")).items():
+            service = services.get(str(service_id).strip())
+            if not service:
+                fail(f"secret bundle verify references unknown runtime service: {service_id}")
+            verify_rows.append(
+                {
+                    "verify_id": str(verify_id).strip(),
+                    "expected_url_patterns": runtime_url_patterns(
+                        str(active_plane.get("host") or "").strip(),
+                        str(active_plane.get("lan_ip") or "").strip(),
+                        str(active_plane.get("tailscale_ip") or "").strip(),
+                        int(service.get("port")),
+                    ),
+                }
+            )
+        local_env_rows: list[dict[str, Any]] = []
+        for service_id, env_key in ensure_dict(binding.get("local_env_static")).items():
+            service = services.get(str(service_id).strip())
+            if not service:
+                fail(f"secret bundle local_env_static references unknown runtime service: {service_id}")
+            local_env_rows.append(
+                {
+                    "key": str(env_key).strip(),
+                    "expected_url_patterns": runtime_url_patterns(
+                        str(active_plane.get("host") or "").strip(),
+                        str(active_plane.get("lan_ip") or "").strip(),
+                        str(active_plane.get("tailscale_ip") or "").strip(),
+                        int(service.get("port")),
+                    ),
+                }
+            )
+        rows.append(
+            {
+                "bundle_id": str(binding.get("bundle_id") or "").strip(),
+                "verify": verify_rows,
+                "local_env_static": local_env_rows,
+            }
+        )
+    return rows
+
+
+def build_backup_schedule_jobs(section: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in ensure_list(section.get("schedule_jobs")):
+        row = ensure_dict(raw)
+        out = {"job_id": str(row.get("job_id") or "").strip(), "expected_host": str(row.get("expected_host") or "").strip()}
+        expected_script_ref = str(row.get("expected_script_ref") or "").strip()
+        expected_capability_ref = str(row.get("expected_capability_ref") or "").strip()
+        if expected_script_ref:
+            out["expected_script_ref"] = expected_script_ref
+        if expected_capability_ref:
+            out["expected_capability_ref"] = expected_capability_ref
+        remote_checks = ensure_list(row.get("remote_checks"))
+        trust_edges = ensure_list(row.get("trust_edges"))
+        if remote_checks:
+            out["remote_checks"] = remote_checks
+        if trust_edges:
+            out["trust_edges"] = trust_edges
+        rows.append(out)
+    return rows
+
+
+def build_backup_inventory_targets(section: dict[str, Any], locality_role: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in ensure_list(section.get("inventory_targets")):
+        row = ensure_dict(raw)
+        rows.append(
+            {
+                "target_id": str(row.get("target_id") or "").strip(),
+                "expected_host": str(row.get("expected_host") or "").strip(),
+                "expected_base_path_patterns": [re.escape(str(row.get("expected_base_path") or "").strip())],
+                "locality_role": locality_role,
+            }
+        )
+    return rows
+
+
+def build_backup_runtime_units(section: dict[str, Any], locality_role: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in ensure_list(section.get("runtime_units")):
+        row = ensure_dict(raw)
+        rows.append(
+            {
+                "unit_id": str(row.get("unit_id") or "").strip(),
+                "expected_hostname": str(row.get("expected_hostname") or "").strip(),
+                "expected_destination_lane": str(row.get("expected_destination_lane") or "").strip(),
+                "expected_restore_class": str(row.get("expected_restore_class") or "").strip(),
+                "expected_inventory_targets": ensure_list(row.get("expected_inventory_targets")),
+                "locality_role": locality_role,
+            }
+        )
+    return rows
+
+
+def build_closure(relocation: dict[str, Any]) -> dict[str, Any]:
+    refs = ensure_dict(relocation.get("refs"))
+    active_plane = ensure_dict(relocation.get("active_plane"))
+    backups = ensure_dict(relocation.get("backup_locality"))
+    lifecycle_binding = ensure_dict(backups.get("lifecycle_binding"))
+    description = str(relocation.get("description") or "").strip()
+
+    return {
+        "id": str(relocation.get("closure_id") or relocation.get("id") or "").strip(),
+        "domain": str(relocation.get("domain") or "").strip(),
+        "description": description,
+        "refs": {
+            "ingress_projection": str(refs.get("ingress_projection") or "").strip(),
+            "runtime_services": str(refs.get("runtime_services") or "").strip(),
+        },
+        "active_plane": {
+            "site": str(active_plane.get("site") or "").strip(),
+            "host": str(active_plane.get("host") or "").strip(),
+            "current_vm": str(active_plane.get("current_vm") or "").strip(),
+            "target_vm": str(active_plane.get("target_vm") or "").strip(),
+            "lan_ip": str(active_plane.get("lan_ip") or "").strip(),
+            "tailscale_ip": str(active_plane.get("tailscale_ip") or "").strip(),
+            "stack_aliases": ensure_list(active_plane.get("stack_aliases")),
+        },
+        "runtime_services": {
+            "services": build_runtime_service_checks(relocation, active_plane),
+        },
+        "public_routes": {
+            "provider": "cloudflare_tunnel",
+            "routes": build_public_routes(relocation, active_plane),
+            "parked": build_parked_routes(relocation, active_plane),
+        },
+        "monitoring": {
+            "endpoints": build_monitoring(relocation, active_plane),
+        },
+        "dependents": {
+            "agent_endpoints": build_agent_endpoints(relocation, active_plane),
+            "worker_endpoints": build_worker_endpoints(relocation, active_plane),
+            "secret_bundles": build_secret_bundles(relocation, active_plane),
+        },
+        "backups": {
+            "jobs": build_backup_schedule_jobs(ensure_dict(backups.get("same_site_primary")))
+            + build_backup_schedule_jobs(ensure_dict(backups.get("offsite_secondary"))),
+            "inventory_targets": build_backup_inventory_targets(ensure_dict(backups.get("same_site_primary")), "same_site_primary")
+            + build_backup_inventory_targets(ensure_dict(backups.get("offsite_secondary")), "offsite_secondary"),
+            "runtime_units": build_backup_runtime_units(ensure_dict(backups.get("same_site_primary")), "same_site_primary")
+            + build_backup_runtime_units(ensure_dict(backups.get("offsite_secondary")), "offsite_secondary"),
+            "lifecycle_binding": {
+                "service_id": str(lifecycle_binding.get("service_id") or "").strip(),
+                "expected_background_action_ids": ensure_list(lifecycle_binding.get("expected_background_action_ids")),
+                "expected_backup_targets": ensure_list(lifecycle_binding.get("expected_backup_targets")),
+                "expected_backup_runtime_units": ensure_list(lifecycle_binding.get("expected_backup_runtime_units")),
+            },
+        },
+        "residual_source_policy": ensure_dict(relocation.get("residual_source_policy")),
+    }
+
+
+def source_sha(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(rel(path).encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def build_projection() -> str:
+    registry_path = source_path()
+    source = load_yaml(registry_path)
+    sha = source_sha(registry_path)
+    defaults = ensure_dict(source.get("defaults"))
+    projected = {
+        "version": 1,
+        "updated_at": ensure_dict(source).get("updated_at"),
+        "owner": ensure_dict(source).get("owner"),
+        "status": "projection",
+        "authority_state": "projection",
+        "scope": "service-closure-control-plane",
+        "projection_of": rel(registry_path),
+        "source_capability": "service.relocation.closure.build",
+        "source_sha256": sha,
+        "defaults": {
+            "route_registry": str(defaults.get("route_registry") or ""),
+            "ingress_projection": str(defaults.get("ingress_projection") or ""),
+            "services_health": str(defaults.get("services_health") or ""),
+            "backup_schedule": str(defaults.get("backup_schedule") or ""),
+            "backup_inventory": str(defaults.get("backup_inventory") or ""),
+            "service_data_lifecycle": str(defaults.get("service_data_lifecycle") or ""),
+            "ssh_targets": str(defaults.get("ssh_targets") or ""),
+            "agents_registry": str(defaults.get("agents_registry") or ""),
+            "worker_catalog": str(defaults.get("worker_catalog") or ""),
+            "secrets_bundle_contract": str(defaults.get("secrets_bundle_contract") or ""),
+            "runtime_services": str(defaults.get("runtime_services") or ""),
+            "cloudflare_tunnel_name": str(defaults.get("cloudflare_tunnel_name") or "homelab-tunnel"),
+        },
+        "closures": [build_closure(ensure_dict(item)) for item in ensure_list(source.get("relocations"))],
+    }
+    body = yaml_dump(projected)
+    header = [
+        "# Status: projection",
+        "# Last verified: 2026-03-21",
+        "# Scope: service-closure-control-plane",
+        f"# generated_by: service.relocation.closure.build",
+        f"# source_sha256: {sha}",
+        "# Do NOT edit manually. Rebuild with: ./bin/ops cap run service.relocation.closure.build",
+        "",
+    ]
+    return "\n".join(header) + body
+
+
+def main() -> None:
+    args = parse_args()
+    projection = build_projection()
+    target_output = output_path()
+
+    if args.stdout:
+        print(projection, end="")
+        return
+
+    if args.check:
+        current = target_output.read_text(encoding="utf-8") if target_output.is_file() else ""
+        if current != projection:
+            fail(f"projection drift: {rel(target_output)} (run service.relocation.closure.build)")
+        print("service.relocation.closure.build VERIFY PASS")
+        return
+
+    target_output.write_text(projection, encoding="utf-8")
+    print("service.relocation.closure.build")
+    print(f"source: {rel(source_path())}")
+    print(f"projected: {rel(target_output)}")
+    print(f"closures: {len(load_yaml(source_path()).get('relocations') or [])}")
+
+
+if __name__ == "__main__":
+    main()
