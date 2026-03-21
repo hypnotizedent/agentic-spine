@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import os
-from datetime import datetime, timezone
+import subprocess
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -21,8 +23,60 @@ def load_yaml(path: Path) -> dict:
     return data
 
 
+def resolve_path(root: Path, raw: str, fallback: Path) -> Path:
+    text = str(raw).strip()
+    if not text:
+        return fallback
+    candidate = Path(text)
+    return candidate if candidate.is_absolute() else root / candidate
+
+
+def parse_date(value: str) -> date | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def resolve_repo_root(explicit_root: str | None) -> Path:
+    if explicit_root:
+        return Path(explicit_root).resolve()
+
+    script_dir = Path(__file__).resolve().parent
+    try:
+        git_root = subprocess.check_output(
+            ["git", "-C", str(script_dir), "rev-parse", "--show-toplevel"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        git_root = ""
+    if git_root:
+        return Path(git_root).resolve()
+
+    script_root = Path(__file__).resolve().parents[5]
+    if script_root.exists():
+        return script_root.resolve()
+
+    env_root = os.environ.get("SPINE_TARGET_REPO") or os.environ.get("SPINE_ROOT")
+    if env_root:
+        return Path(env_root).resolve()
+
+    return script_root.resolve()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate gate add-one-retire-one budget evidence")
+    parser.add_argument("--root", help="Optional repo root override for tests or detached audits")
+    return parser.parse_args()
+
+
 def main() -> None:
-    root = Path(__file__).resolve().parents[5]
+    args = parse_args()
+    root = resolve_repo_root(args.root)
     reports_root = Path(
         os.environ.get("SPINE_VERIFY_REPORTS_ROOT")
         or (
@@ -32,7 +86,6 @@ def main() -> None:
     )
     reports_root.mkdir(parents=True, exist_ok=True)
     contract_path = root / "ops/bindings/gate.budget.add_one_retire_one.contract.yaml"
-
     if not contract_path.exists():
         fail(f"missing contract: {contract_path}")
 
@@ -40,17 +93,25 @@ def main() -> None:
     sources = contract.get("sources", {}) if isinstance(contract.get("sources"), dict) else {}
     baseline = contract.get("baseline", {}) if isinstance(contract.get("baseline"), dict) else {}
     report_cfg = contract.get("report", {}) if isinstance(contract.get("report"), dict) else {}
+    coverage = contract.get("coverage", {}) if isinstance(contract.get("coverage"), dict) else {}
     mode = str(contract.get("mode", "report-only")).strip() or "report-only"
 
-    registry_path = root / str(sources.get("gate_registry", "ops/bindings/gate.registry.yaml"))
-    rec_json_path = Path(
-        str(sources.get("recommendations_json", str(reports_root / "W67_GATE_PORTFOLIO_RECOMMENDATIONS.json")))
+    registry_path = resolve_path(root, str(sources.get("gate_registry", "")), root / "ops/bindings/gate.registry.yaml")
+    rec_json_path = resolve_path(
+        root,
+        str(sources.get("recommendations_json", "")),
+        reports_root / "W67_GATE_PORTFOLIO_RECOMMENDATIONS.json",
     )
-    report_path = Path(str(report_cfg.get("markdown_path", str(reports_root / "W67_GATE_BUDGET_REPORT.md"))))
-    if not rec_json_path.is_absolute():
-        rec_json_path = root / rec_json_path
-    if not report_path.is_absolute():
-        report_path = root / report_path
+    triage_path = resolve_path(
+        root,
+        str(sources.get("triage_yaml", "")),
+        root / "ops/bindings/gate.portfolio.triage.yaml",
+    )
+    report_path = resolve_path(
+        root,
+        str(report_cfg.get("markdown_path", "")),
+        reports_root / "W67_GATE_BUDGET_REPORT.md",
+    )
 
     if not registry_path.exists():
         fail(f"missing gate registry: {registry_path}")
@@ -60,21 +121,24 @@ def main() -> None:
     if not isinstance(gates, list):
         fail("gate registry malformed (gates must be list)")
 
-    current_invariants = sum(1 for gate in gates if gate.get("gate_class") == "invariant")
-    baseline_invariants = int(baseline.get("invariant_count", current_invariants))
-
-    delta = current_invariants - baseline_invariants
+    current_active_invariants = sum(
+        1 for gate in gates if gate.get("gate_class") == "invariant" and not bool(gate.get("retired", False))
+    )
+    baseline_active_invariants = int(baseline.get("active_invariant_count", current_active_invariants))
+    delta = current_active_invariants - baseline_active_invariants
     invariants_added = max(delta, 0)
     invariants_retired = max(-delta, 0)
 
-    recommendations = []
+    recommendations: list[dict] = []
     rec_parse_note = "recommendations source available"
+    recommendations_available = False
     if rec_json_path.exists():
         try:
             rec_obj = json.loads(rec_json_path.read_text(encoding="utf-8"))
             rec_list = rec_obj.get("recommendations", [])
             if isinstance(rec_list, list):
-                recommendations = rec_list
+                recommendations = [row for row in rec_list if isinstance(row, dict)]
+                recommendations_available = True
             else:
                 rec_parse_note = "recommendations source malformed (recommendations must be list)"
         except Exception:
@@ -82,18 +146,64 @@ def main() -> None:
     else:
         rec_parse_note = "recommendations source missing"
 
-    plan_count = 0
-    for row in recommendations:
+    triage_exists = triage_path.exists()
+    triage_note = "triage source available" if triage_exists else "triage source missing"
+    triage_entries: list[dict] = []
+    triage_updated = ""
+    triage_recommendations_file = ""
+    if triage_exists:
+        triage = load_yaml(triage_path)
+        triage_updated = str(triage.get("updated", "")).strip()
+        triage_entries = triage.get("triage_entries", []) if isinstance(triage.get("triage_entries"), list) else []
+        triage_recommendations_file = str(
+            (triage.get("source_recommendations", {}) or {}).get("file", "")
+        ).strip()
+
+    coverage_decisions = {
+        str(x).strip()
+        for x in coverage.get("triage_decisions_count_as_plan", [])
+        if str(x).strip()
+    }
+    actionable_plan_count = sum(
+        1
+        for row in triage_entries
+        if isinstance(row, dict) and str(row.get("triage_decision", "")).strip() in coverage_decisions
+    )
+
+    today = datetime.now(timezone.utc).date()
+    overdue_count = 0
+    for row in triage_entries:
         if not isinstance(row, dict):
             continue
-        current_class = str(row.get("current_class", "")).strip()
-        rec_type = str(row.get("recommendation_type", "")).strip()
-        if current_class == "invariant" and rec_type in {"demote_to_advisory", "retire_review"}:
-            plan_count += 1
+        due_date = parse_date(str(row.get("due", "")).strip())
+        if due_date and due_date < today:
+            overdue_count += 1
 
-    violations = max(0, invariants_added - plan_count)
+    triage_recommendations_valid = bool(triage_recommendations_file) and resolve_path(
+        root, triage_recommendations_file, rec_json_path
+    ) == rec_json_path
+    triage_status = "current"
+    if not triage_exists:
+        triage_status = "missing"
+    elif overdue_count > 0:
+        triage_status = "overdue"
+    elif not triage_recommendations_valid:
+        triage_status = "invalid_source"
+
+    budget_violations = max(0, invariants_added - actionable_plan_count)
+    enforcement_failures: list[str] = []
+    if not recommendations_available:
+        enforcement_failures.append("recommendations_missing")
+    if not triage_exists:
+        enforcement_failures.append("triage_missing")
+    elif not triage_recommendations_valid:
+        enforcement_failures.append("triage_source_invalid")
+    elif overdue_count > 0:
+        enforcement_failures.append("triage_overdue")
+    if budget_violations > 0:
+        enforcement_failures.append("budget_coverage_missing")
+
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
     report_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# W67 Gate Budget Report",
@@ -102,33 +212,43 @@ def main() -> None:
         f"Contract: `{contract_path}`",
         f"Registry: `{registry_path}`",
         f"Recommendations: `{rec_json_path}` ({rec_parse_note})",
+        f"Triage: `{triage_path}` ({triage_note})",
         "",
         "## Metrics",
         "",
-        f"- baseline_invariants: **{baseline_invariants}**",
-        f"- current_invariants: **{current_invariants}**",
+        f"- baseline_active_invariants: **{baseline_active_invariants}**",
+        f"- current_active_invariants: **{current_active_invariants}**",
         f"- invariants_added: **{invariants_added}**",
         f"- invariants_retired: **{invariants_retired}**",
         f"- delta: **{delta}**",
-        f"- retirement_or_demotion_plan_count: **{plan_count}**",
-        f"- violations: **{violations}**",
+        f"- actionable_plan_count: **{actionable_plan_count}**",
+        f"- budget_violations: **{budget_violations}**",
+        f"- triage_status: **{triage_status}**",
+        f"- triage_entries: **{len(triage_entries)}**",
+        f"- triage_overdue_entries: **{overdue_count}**",
         "",
-        "## Rule",
+        "## Enforcement",
         "",
-        "- Violation when `net_new_invariants > 0` and there is no matching retirement/demotion plan coverage.",
-        f"- Enforcement mode: **{mode}**.",
+        f"- mode: **{mode}**",
+        f"- failures: **{', '.join(enforcement_failures) or 'none'}**",
     ]
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print("verify.gate_budget.report")
-    print(f"baseline_invariants: {baseline_invariants}")
-    print(f"current_invariants: {current_invariants}")
+    print(f"baseline_active_invariants: {baseline_active_invariants}")
+    print(f"current_active_invariants: {current_active_invariants}")
     print(f"invariants_added: {invariants_added}")
     print(f"invariants_retired: {invariants_retired}")
     print(f"delta: {delta}")
-    print(f"retirement_or_demotion_plan_count: {plan_count}")
-    print(f"violations: {violations}")
+    print(f"actionable_plan_count: {actionable_plan_count}")
+    print(f"budget_violations: {budget_violations}")
+    print(f"triage_status: {triage_status}")
+    print(f"triage_overdue_entries: {overdue_count}")
+    print(f"enforcement_failures: {','.join(enforcement_failures) or 'none'}")
     print(f"report_md: {report_path}")
+
+    if mode == "enforce" and enforcement_failures:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

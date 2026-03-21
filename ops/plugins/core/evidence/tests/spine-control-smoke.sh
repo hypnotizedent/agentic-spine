@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 BIN="$ROOT/ops/plugins/core/evidence/bin/spine-control"
 
 pass() { echo "PASS: $*"; }
@@ -18,6 +18,14 @@ pass "tick emits graph-aware summary envelope"
 plan_json="$("$BIN" plan --json)"
 jq -e '.capability=="spine.control.plan"' <<<"$plan_json" >/dev/null || fail "plan capability envelope"
 jq -e '(.data.actions | type)=="array"' <<<"$plan_json" >/dev/null || fail "plan actions array"
+jq -e '
+  [ .data.actions[]
+    | select(.route_target.capability == "loops.progress")
+    | .route_target.args
+    | .[0] == "--loop" and ((.[1] // "") | length > 0)
+  ]
+  | all
+' <<<"$plan_json" >/dev/null || fail "plan loops.progress actions must pass --loop LOOP-ID"
 pass "plan emits actions array"
 
 set +e

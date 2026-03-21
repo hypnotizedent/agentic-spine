@@ -43,6 +43,7 @@ AGENT_ROUTE_BIN = os.path.join(
 )
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 RUNTIME_ENV = dict(os.environ)
+DEFAULT_CAP_RUN_MAX_CHARS = int(os.environ.get("SPINE_MCP_CAP_RUN_MAX_CHARS", "16000"))
 
 TOOLS = [
     {
@@ -89,6 +90,14 @@ TOOLS = [
                 "confirm": {
                     "type": "boolean",
                     "description": "Set true to forward 'yes' for manual approval prompts"
+                },
+                "full_output": {
+                    "type": "boolean",
+                    "description": "Set true to return the full cap transcript instead of the default bounded interactive payload"
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Optional cap on interactive response size when full_output is false"
                 }
             },
             "required": ["name"]
@@ -280,7 +289,64 @@ def normalize_cap_args(raw: Any) -> List[str]:
     raise RuntimeError("args must be an array of strings or a string")
 
 
-def run_capability(name: str, cap_args: List[str], confirm: bool) -> str:
+def _extract_cap_metadata(text: str, prefix: str) -> str:
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s.startswith(prefix):
+            continue
+        val = s.split(prefix, 1)[1].strip()
+        if val:
+            return val
+    return ""
+
+
+def _bounded_cap_output(stdout: str, stderr: str, *, full_output: bool, max_chars: Optional[int]) -> str:
+    combined = f"{stdout}\n{stderr}".strip() if stderr else (stdout or "").strip()
+    if not combined:
+        return "(no output)"
+    if full_output:
+        return combined
+
+    limit = DEFAULT_CAP_RUN_MAX_CHARS if max_chars is None else int(max_chars)
+    if limit < 200:
+        raise RuntimeError("max_chars must be at least 200")
+    if limit > 200000:
+        raise RuntimeError("max_chars must be at most 200000")
+    if len(combined) <= limit:
+        return combined
+
+    run_key = _extract_cap_metadata(combined, "Run Key:")
+    receipt = _extract_cap_metadata(combined, "Receipt:")
+    output_path = _extract_cap_metadata(combined, "Output:")
+    preview = combined[:limit].rstrip()
+    note = (
+        f"[truncated interactive cap_run output at {limit} chars; "
+        "rerun with full_output=true or inspect the receipt/output artifact]"
+    )
+
+    parts: List[str] = []
+    if run_key:
+        parts.append(f"Run Key: {run_key}")
+    if receipt:
+        parts.append(f"Receipt: {receipt}")
+    if output_path:
+        parts.append(f"Output: {output_path}")
+    if parts:
+        parts.append("")
+    parts.append(preview)
+    parts.append("")
+    parts.append(note)
+    return "\n".join(parts).strip()
+
+
+def run_capability(
+    name: str,
+    cap_args: List[str],
+    confirm: bool,
+    *,
+    full_output: bool = False,
+    max_chars: Optional[int] = None,
+) -> str:
     if not SAFE_NAME.match(name or ""):
         raise RuntimeError("invalid capability name")
 
@@ -302,12 +368,11 @@ def run_capability(name: str, cap_args: List[str], confirm: bool) -> str:
         stdin_text = "yes\n"
 
     code, out, err = run_cmd(cmd, stdin_text=stdin_text, timeout=600)
+    bounded = _bounded_cap_output(out, err, full_output=full_output, max_chars=max_chars)
     if code != 0:
-        detail = err or out or "no output"
+        detail = bounded or "no output"
         raise RuntimeError(f"cap_run failed for {name} (rc={code}): {detail}")
-    if err:
-        return f"{out}\n{err}".strip()
-    return out or "(no output)"
+    return bounded
 
 
 def list_capabilities(filter_text: Optional[str], safety: Optional[str]) -> str:
@@ -477,7 +542,19 @@ def handle_tools_call(msg: Dict[str, Any]) -> Dict[str, Any]:
             if not isinstance(confirm_raw, bool):
                 raise RuntimeError("confirm must be a boolean")
             confirm = confirm_raw
-            text = run_capability(cap_name, cap_args, confirm)
+            full_output_raw = arguments.get("full_output", False)
+            if not isinstance(full_output_raw, bool):
+                raise RuntimeError("full_output must be a boolean")
+            max_chars_raw = arguments.get("max_chars")
+            if max_chars_raw is not None and not isinstance(max_chars_raw, int):
+                raise RuntimeError("max_chars must be an integer")
+            text = run_capability(
+                cap_name,
+                cap_args,
+                confirm,
+                full_output=full_output_raw,
+                max_chars=max_chars_raw,
+            )
         elif name == "agent_list":
             text = list_agents(
                 arguments.get("filter"),

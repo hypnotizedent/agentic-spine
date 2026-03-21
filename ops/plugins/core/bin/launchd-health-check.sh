@@ -1,12 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_ROOT="$(cd "${SCRIPT_DIR}/../../../../" && pwd)"
+
+resolve_spine_root() {
+  local git_root
+  git_root="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -n "${git_root}" ]]; then
+    printf '%s\n' "${git_root}"
+    return
+  fi
+
+  if [[ -n "${SCRIPT_ROOT}" ]]; then
+    printf '%s\n' "${SCRIPT_ROOT}"
+    return
+  fi
+
+  if [[ -n "${SPINE_TARGET_REPO:-}" ]]; then
+    printf '%s\n' "${SPINE_TARGET_REPO}"
+    return
+  fi
+
+  if [[ -n "${SPINE_ROOT:-}" ]]; then
+    printf '%s\n' "${SPINE_ROOT}"
+    return
+  fi
+
+  printf '%s\n' "${SCRIPT_ROOT}"
+}
+
+SPINE_ROOT="$(resolve_spine_root)"
 REGISTRY="${SPINE_ROOT}/ops/bindings/launchd.scheduler.registry.yaml"
 SCHEDULER_STATUS_SCRIPT="${SPINE_ROOT}/ops/plugins/infra/host/bin/launchd-scheduler-health-status"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
+TASK_WORKER_SCRIPT="${SPINE_ROOT}/ops/plugins/infra/mailroom-bridge/bin/mailroom-task-worker"
 AUTO_RESTART=0
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
+
+run_cap() {
+  env \
+    SPINE_TARGET_REPO="${SPINE_ROOT}" \
+    SPINE_ROOT="${SPINE_ROOT}" \
+    SPINE_REPO="${SPINE_ROOT}" \
+    SPINE_CODE="${SPINE_ROOT}" \
+    "$CAP_RUNNER" cap run "$@"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -21,6 +60,47 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+check_task_worker_health() {
+  if [[ ! -x "$TASK_WORKER_SCRIPT" ]]; then
+    echo "[launchd-health-check] missing task worker script: $TASK_WORKER_SCRIPT" >&2
+    return 2
+  fi
+
+  local status_out status_rc
+  set +e
+  status_out="$("$TASK_WORKER_SCRIPT" --status --brief --strict 2>&1)"
+  status_rc=$?
+  set -e
+  if [[ "$status_rc" -eq 0 ]]; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] OK mailroom.task.worker ${status_out}"
+    return 0
+  fi
+
+  if [[ "$AUTO_RESTART" -eq 1 ]]; then
+    OPS_CAP_AUTO_APPROVE=yes run_cap mailroom.task.worker.stop >/dev/null 2>&1 || true
+    if OPS_CAP_AUTO_APPROVE=yes run_cap mailroom.task.worker.start >/dev/null 2>&1; then
+      sleep 3
+      set +e
+      status_out="$("$TASK_WORKER_SCRIPT" --status --brief --strict 2>&1)"
+      status_rc=$?
+      set -e
+      if [[ "$status_rc" -eq 0 ]]; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] RECOVERED mailroom.task.worker (auto-restart) ${status_out}"
+        return 0
+      fi
+    fi
+  fi
+
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] FAIL mailroom.task.worker ${status_out}"
+  spine_enqueue_email_intent \
+    "launchd-health-check" \
+    "incident" \
+    "Mailroom task worker unhealthy" \
+    "worker_status=${status_out:-unknown} auto_restart=${AUTO_RESTART}" \
+    "launchd-health-check"
+  return 1
+}
 
 check_launchd_health() {
   if [[ ! -f "$REGISTRY" ]]; then
@@ -65,7 +145,7 @@ check_launchd_health() {
     fi
 
     if [[ "$AUTO_RESTART" -eq 1 ]]; then
-      if "$CAP_RUNNER" cap run recovery.launchd.restart -- --label "$label" >/dev/null 2>&1 && \
+      if run_cap recovery.launchd.restart -- --label "$label" >/dev/null 2>&1 && \
          launchctl print "gui/${uid_val}/${label}" >/dev/null 2>&1; then
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] RECOVERED ${label} (auto-restart)"
         recovered=$((recovered + 1))
@@ -88,6 +168,9 @@ check_launchd_health() {
       "launchd-health-check"
   fi
 
+  local worker_rc=0
+  check_task_worker_health || worker_rc=$?
+
   local scheduler_payload scheduler_status scheduler_stale scheduler_failed scheduler_unknown scheduler_total
   local scheduler_stale_labels scheduler_failed_labels
   scheduler_payload="$("$SCHEDULER_STATUS_SCRIPT" --json 2>/dev/null || true)"
@@ -108,7 +191,7 @@ check_launchd_health() {
       "launchd-health-check"
   fi
 
-  [[ "$missing" -eq 0 && "$scheduler_failed" -eq 0 && "$scheduler_stale" -eq 0 ]]
+  [[ "$missing" -eq 0 && "$worker_rc" -eq 0 && "$scheduler_failed" -eq 0 && "$scheduler_stale" -eq 0 ]]
 }
 
 echo "[launchd-health-check] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
