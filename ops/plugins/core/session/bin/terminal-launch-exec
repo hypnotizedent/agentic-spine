@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/launcher-control-worktree.sh"
 
 ROLE="solo"
 LOOP_ID=""
@@ -19,7 +20,7 @@ CODE_ROOT="${CODE_ROOT:-$CODE_ROOT_DEFAULT}"
 if [[ ! -d "$CODE_ROOT" ]]; then
   CODE_ROOT="${HOME_DIR}/code"
 fi
-SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
+SPINE_ROOT="$(spine_runtime_prepare_launcher_control_worktree "$ROOT")"
 WORKBENCH_ROOT="${WORKBENCH_ROOT:-$CODE_ROOT/workbench}"
 SESSION_START="$SPINE_ROOT/ops/plugins/core/session/bin/session-start"
 OPS_BIN="$SPINE_ROOT/bin/ops"
@@ -372,6 +373,14 @@ done
 [[ -d "$WORKBENCH_ROOT" ]] || fail "workbench repo not found: $WORKBENCH_ROOT"
 [[ -x "$SESSION_START" ]] || fail "session-start missing/executable: $SESSION_START"
 [[ -x "$OPS_BIN" ]] || fail "missing ops entrypoint: $OPS_BIN"
+
+# Treat the resolved launcher control worktree as the authoritative control
+# root for startup surfaces, regardless of ambient shell exports.
+SPINE_TARGET_REPO="$SPINE_ROOT"
+SPINE_REPO="$SPINE_ROOT"
+SPINE_CODE="$SPINE_ROOT"
+SPINE_WORKTREE="$SPINE_ROOT"
+export SPINE_ROOT SPINE_TARGET_REPO SPINE_REPO SPINE_CODE SPINE_WORKTREE
 
 ROLE_INPUT="$ROLE"
 ROLE="$(printf '%s' "$ROLE" | tr '[:upper:]' '[:lower:]')"
