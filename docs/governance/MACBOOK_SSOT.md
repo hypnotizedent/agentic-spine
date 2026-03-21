@@ -22,7 +22,8 @@ Authority boundary:
 | Canonical name | `macbook` |
 | Tailscale IP | `100.85.186.7` |
 | Role | Mobile workstation and spine control-plane entry host |
-| Canonical launcher entry | `./bin/ops terminal launch ...` |
+| Canonical launcher entry | `spine-ops terminal launch ...` (resolves control-plane first, then mutable root) |
+| Stable operator shim | `~/.local/bin/spine-ops` → `~/code/workbench/scripts/bin/spine-ops` |
 | Canonical watcher label | `com.ronny.agent-inbox` |
 | Managed configs owner | `/Users/ronnyworks/code/workbench/dotfiles/macbook` |
 
@@ -54,11 +55,28 @@ Direct ad hoc launcher hotkeys are retired.
 | **Ctrl+Shift+R** | Manual friction.reconcile trigger for current loop | `~/.hammerspoon/` |
 <!-- END AUTO HOTKEYS -->
 
+## Operator Entrypoint Resolution
+
+All operator entry surfaces resolve the spine ops binary through a stable entrypoint
+that prefers the clean control-plane worktree (`~/.wt/agentic-spine/control-plane`)
+and falls back to the mutable checkout (`~/code/agentic-spine`) only when the
+control-plane is unavailable.
+
+Resolution order (same in all surfaces):
+1. `$SPINE_ROOT/bin/ops` — explicit override
+2. `~/.wt/agentic-spine/control-plane/bin/ops` — clean worktree (preferred)
+3. `~/code/agentic-spine/bin/ops` — mutable checkout (fallback)
+
+Implementations:
+- **Hammerspoon**: `resolveSpineRoot()` in `~/.hammerspoon/init.lua`
+- **Raycast / shell scripts**: `workbench_spine_root()` in `workbench/scripts/lib/workspace-paths.sh`
+- **Shell aliases / OpenCode**: `spine-ops` shim at `~/.local/bin/spine-ops`
+
 ## Raycast Surfaces
 
-All active Raycast launcher surfaces must call `./bin/ops terminal launch` or a
-governed spine capability. Workbench wrappers are compatibility edges, not the
-source of launcher policy.
+All active Raycast launcher surfaces resolve through `workbench_spine_ops_bin()`
+which prefers the control-plane worktree. Workbench wrappers are compatibility
+edges, not the source of launcher policy.
 
 <!-- BEGIN AUTO RAYCAST -->
 | Tool | Script | Command |
