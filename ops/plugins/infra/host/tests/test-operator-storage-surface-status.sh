@@ -31,6 +31,11 @@ trap 'rm -rf "$TMPDIR_BASE"' EXIT
 RUNTIME_ROOT="$TMPDIR_BASE/workbench-runtime"
 ARCHIVES_ROOT="$TMPDIR_BASE/Archives"
 mkdir -p "$RUNTIME_ROOT/.git" "$ARCHIVES_ROOT"
+ARCHIVE_HELPER="$TMPDIR_BASE/bin/archive-operator-drop-assist"
+ARCHIVE_APP="$TMPDIR_BASE/Archive Operator Drop.app"
+mkdir -p "$(dirname "$ARCHIVE_HELPER")" "$ARCHIVE_APP"
+touch "$ARCHIVE_HELPER"
+chmod +x "$ARCHIVE_HELPER"
 
 MINT_STATUS_STUB="$TMPDIR_BASE/mint-status-stub.sh"
 cat > "$MINT_STATUS_STUB" <<'EOF'
@@ -77,6 +82,9 @@ surfaces:
   archives:
     mount_script_path: "$ARCHIVES_STUB"
     mount_root: "$ARCHIVES_ROOT"
+    assisted_move_surface:
+      helper_bin_path: "$ARCHIVE_HELPER"
+      finder_app_path: "$ARCHIVE_APP"
     allowed_local_entries_when_unmounted: []
     mount_health_policy:
       inactive: warn
@@ -91,6 +99,7 @@ assert_contains "$t1_out" "status=warn" "overall status warns on inactive browse
 assert_contains "$t1_out" "runtime_root=ready" "runtime workbench root is reported ready"
 assert_contains "$t1_out" "mint=ok" "mint slice is carried through"
 assert_contains "$t1_out" "archives=warn" "archive surface warns while inactive"
+assert_contains "$t1_out" "archives_assist=ready" "archive assist is reported ready"
 assert_contains "$t1_out" "archives_entries=0" "no archive residue entries are reported"
 
 echo ""
@@ -107,6 +116,15 @@ mkdir -p "$ARCHIVES_ROOT/tool-history"
 t3_out="$(OPERATOR_STORAGE_SURFACE_CONTRACT="$CONTRACT" OPERATOR_STORAGE_MINT_STATUS_BIN="$MINT_STATUS_STUB" ARCHIVE_MOUNT_ROOT="$ARCHIVES_ROOT" ARCHIVE_MOUNT_STATE=INACTIVE "$STATUS_BIN" --brief)"
 assert_contains "$t3_out" "status=fail" "overall status fails on archive fallback residue"
 assert_contains "$t3_out" "archives=fail" "archive surface fails when local residue blocks clean mount"
+
+echo ""
+echo "── T4: missing archive assist surfaces warning even when mount is active ──"
+rm -f "$ARCHIVE_HELPER"
+rm -rf "$ARCHIVE_APP"
+mkdir -p "$ARCHIVES_ROOT/mint-legacy" "$ARCHIVES_ROOT/Hypnotized" "$ARCHIVES_ROOT/Legacy"
+t4_out="$(OPERATOR_STORAGE_SURFACE_CONTRACT="$CONTRACT" OPERATOR_STORAGE_MINT_STATUS_BIN="$MINT_STATUS_STUB" ARCHIVE_MOUNT_ROOT="$ARCHIVES_ROOT" ARCHIVE_MOUNT_STATE=ACTIVE "$STATUS_BIN" --brief)"
+assert_contains "$t4_out" "status=warn" "overall status warns when archive assist is missing"
+assert_contains "$t4_out" "archives_assist=missing" "archive assist missing is surfaced"
 
 echo ""
 echo "────────────────────────────────────────"

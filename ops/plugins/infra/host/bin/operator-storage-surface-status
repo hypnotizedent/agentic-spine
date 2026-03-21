@@ -111,6 +111,7 @@ fi
 mint_status="unknown"
 mint_mode=""
 mint_mount=""
+mint_assist="unknown"
 if [[ -x "$MINT_STATUS_BIN" ]]; then
   if command -v "$JQ_BIN" >/dev/null 2>&1; then
     mint_json="$(SPINE_TARGET_REPO="${SPINE_TARGET_REPO:-$ROOT}" SPINE_REPO="${SPINE_REPO:-$ROOT}" SPINE_CODE="${SPINE_CODE:-$ROOT}" "$MINT_STATUS_BIN" --json 2>/dev/null || true)"
@@ -118,12 +119,14 @@ if [[ -x "$MINT_STATUS_BIN" ]]; then
       mint_status="$(printf '%s' "$mint_json" | "$JQ_BIN" -r '.status // "unknown"' 2>/dev/null || echo unknown)"
       mint_mode="$(printf '%s' "$mint_json" | "$JQ_BIN" -r '.critical_path // ""' 2>/dev/null || true)"
       mint_mount="$(printf '%s' "$mint_json" | "$JQ_BIN" -r '.mount_surface.status // ""' 2>/dev/null || true)"
+      mint_assist="$(printf '%s' "$mint_json" | "$JQ_BIN" -r '.assisted_move_surface.surface_state // "unknown"' 2>/dev/null || true)"
     fi
   else
     mint_brief="$("$MINT_STATUS_BIN" --brief 2>/dev/null || true)"
     mint_status="$(printf '%s\n' "$mint_brief" | sed -n 's/.*status=\([^ ]*\).*/\1/p' | tail -n 1)"
     mint_mode="$(printf '%s\n' "$mint_brief" | sed -n 's/.*mode=\([^ ]*\).*/\1/p' | tail -n 1)"
     mint_mount="$(printf '%s\n' "$mint_brief" | sed -n 's/.*mount=\([^ ]*\).*/\1/p' | tail -n 1)"
+    mint_assist="$(printf '%s\n' "$mint_brief" | sed -n 's/.*assist=\([^ ]*\).*/\1/p' | tail -n 1)"
   fi
 fi
 
@@ -138,6 +141,12 @@ archives_allowlist_json="$("$YQ_BIN" e -o=json '.surfaces.archives.allowed_local
 archives_status_text="$("$archives_script" status 2>/dev/null || true)"
 archives_mount_state="$(parse_mount_state "$archives_status_text")"
 [[ -n "$archives_mount_state" ]] || archives_mount_state="UNKNOWN"
+archives_assist_helper="$(expand_path "$(contract_scalar '.surfaces.archives.assisted_move_surface.helper_bin_path')")"
+archives_assist_app="$(expand_path "$(contract_scalar '.surfaces.archives.assisted_move_surface.finder_app_path')")"
+archives_assist_state="missing"
+if [[ -x "$archives_assist_helper" && ( -d "$archives_assist_app" || -f "$archives_assist_app" ) ]]; then
+  archives_assist_state="ready"
+fi
 archives_entries=""
 archives_entry_count=0
 archives_status="ok"
@@ -164,6 +173,10 @@ case "$archives_mount_state" in
     ;;
 esac
 
+if [[ "$archives_assist_state" != "ready" && "$archives_status" == "ok" ]]; then
+  archives_status="warn"
+fi
+
 overall_status="ok"
 if [[ "$runtime_root_state" != "ready" || "$mint_status" == "fail" || "$archives_status" == "fail" ]]; then
   overall_status="fail"
@@ -181,8 +194,10 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --arg mint_status "$mint_status" \
     --arg mint_mode "$mint_mode" \
     --arg mint_mount "$mint_mount" \
+    --arg mint_assist "$mint_assist" \
     --arg archives_status "$archives_status" \
     --arg archives_mount_state "$archives_mount_state" \
+    --arg archives_assist_state "$archives_assist_state" \
     --arg archives_root "$archives_root" \
     --arg archives_entry_count "$archives_entry_count" \
     '{
@@ -196,11 +211,13 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
         mintfiles: {
           status: $mint_status,
           mode: $mint_mode,
-          mount_status: $mint_mount
+          mount_status: $mint_mount,
+          assist_state: $mint_assist
         },
         archives: {
           status: $archives_status,
           mount_status: $archives_mount_state,
+          assist_state: $archives_assist_state,
           mount_root: $archives_root,
           local_entries: ($archives_entry_count | tonumber)
         }
@@ -210,7 +227,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
 fi
 
 if [[ "$BRIEF" -eq 1 ]]; then
-  echo "status=${overall_status} runtime_root=${runtime_root_state} mint=${mint_status} mint_mode=${mint_mode} mint_mount=${mint_mount} archives=${archives_status} archives_mount=${archives_mount_state} archives_entries=${archives_entry_count}"
+  echo "status=${overall_status} runtime_root=${runtime_root_state} mint=${mint_status} mint_mode=${mint_mode} mint_mount=${mint_mount} mint_assist=${mint_assist} archives=${archives_status} archives_mount=${archives_mount_state} archives_assist=${archives_assist_state} archives_entries=${archives_entry_count}"
   exit 0
 fi
 
@@ -221,8 +238,10 @@ echo "runtime_workbench_root_state: ${runtime_root_state}"
 echo "mint_status: ${mint_status}"
 echo "mint_mode: ${mint_mode}"
 echo "mint_mount_status: ${mint_mount}"
+echo "mint_assist_state: ${mint_assist}"
 echo "archives_status: ${archives_status}"
 echo "archives_mount_status: ${archives_mount_state}"
+echo "archives_assist_state: ${archives_assist_state}"
 echo "archives_mount_root: ${archives_root}"
 echo "archives_local_entries: ${archives_entry_count}"
 if [[ "$archives_entry_count" -gt 0 ]]; then

@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/plugins/infra/host/lib/archive-operator-drop-common.sh"
+
+assist_usage() {
+  cat <<'EOF'
+archive.operator.drop.assist
+
+Usage:
+  archive-operator-drop-assist move --family <mint-legacy|Hypnotized|Legacy> [--into RELATIVE/PATH] [--preview] [--keep-source] [PATH ...]
+  archive-operator-drop-assist open --family <mint-legacy|Hypnotized|Legacy>
+  archive-operator-drop-assist status
+  archive-operator-drop-assist families
+
+Notes:
+  - The canonical destination remains the archive family roots on the archive-smb plane
+  - This surface uploads directly to the remote archive plane instead of writing through ~/Archives
+  - Accepted source entries are directories only
+EOF
+}
+
+assist_require_route() {
+  local route_id="${1:-}"
+  [[ -n "$route_id" ]] || archive_operator_fail "--family is required"
+  archive_operator_route_json "$route_id" >/dev/null 2>&1 || archive_operator_fail "unknown archive family: $route_id"
+}
+
+assist_list_families() {
+  archive_operator_load_contract
+  archive_operator_route_ids
+}
+
+assist_require_remote_ready() {
+  local route_id="$1"
+  archive_operator_load_contract
+  archive_operator_ensure_rclone_remotes
+  local probe_remote
+  probe_remote="$(archive_operator_route_field "$route_id" '.readiness_probe_remote')"
+  [[ -n "$probe_remote" ]] || archive_operator_fail "route missing readiness probe: $route_id"
+  archive_operator_assist_remote_ok "$probe_remote" || archive_operator_fail "archive route is not reachable: $route_id ($probe_remote)"
+}
+
+assist_move_one() {
+  local route_id="$1"
+  local source_path="$2"
+  local preview="$3"
+  local keep_source="$4"
+  local into_path="$5"
+
+  [[ -d "$source_path" ]] || archive_operator_fail "source must be an existing directory: $source_path"
+  source_path="$(archive_operator_absolute_path "$source_path")"
+  archive_operator_source_root_allowed "$source_path" || archive_operator_fail "source is outside allowed assisted-move roots: $source_path"
+  archive_operator_path_in_tree "$source_path" "$ARCHIVE_OPERATOR_MOUNT_ROOT" && archive_operator_fail "source cannot live under the Archives mount root: $source_path"
+
+  local route_remote_root route_staging_root route_browse_root folder_name destination_remote staging_remote destination_browse metrics file_count total_bytes receipt_id cleanup_action
+  route_remote_root="$(archive_operator_route_field "$route_id" '.remote_root')"
+  route_staging_root="$(archive_operator_route_field "$route_id" '.staging_root')"
+  route_browse_root="$(archive_operator_expand_path "$(archive_operator_route_field "$route_id" '.browse_root')")"
+  [[ -n "$route_remote_root" && -n "$route_staging_root" && -n "$route_browse_root" ]] || archive_operator_fail "route missing required fields: $route_id"
+
+  folder_name="$(basename "$source_path")"
+  destination_remote="$(archive_operator_join_remote_path "$route_remote_root" "$into_path")"
+  destination_remote="$(archive_operator_join_remote_path "$destination_remote" "$folder_name")"
+  staging_remote="$(archive_operator_join_remote_path "$route_staging_root" "${folder_name}-$(date -u +%Y%m%dT%H%M%SZ)-$$")"
+  destination_browse="$(archive_operator_join_browse_path "$route_browse_root" "$into_path")"
+  destination_browse="$(archive_operator_join_browse_path "$destination_browse" "$folder_name")"
+
+  archive_operator_remote_path_exists "$destination_remote" && archive_operator_fail "destination already exists: ${destination_remote}"
+
+  metrics="$(archive_operator_collect_metrics "$source_path")"
+  file_count="${metrics%%|*}"
+  total_bytes="${metrics##*|}"
+  receipt_id="$(archive_operator_receipt_id)"
+
+  if [[ "$preview" == "1" ]]; then
+    archive_operator_write_receipt "$receipt_id" "preview" "$route_id" "$source_path" "$destination_remote" "$destination_browse" "none" "true" "$file_count" "$total_bytes" "$into_path"
+    cat <<EOF
+preview: ready
+surface: archives
+family: ${route_id}
+source: ${source_path}
+destination_remote: ${destination_remote}
+destination_browse_path: ${destination_browse}
+file_count: ${file_count}
+total_bytes: ${total_bytes}
+cleanup_policy: ${ARCHIVE_OPERATOR_ASSIST_CLEANUP_POLICY}
+receipt: ${ARCHIVE_OPERATOR_ASSIST_RECEIPT_ROOT}/${receipt_id}/receipt.yaml
+EOF
+    return 0
+  fi
+
+  archive_operator_rclone_run copy "$source_path" "$staging_remote"
+  if ! archive_operator_verify_remote_parity "$source_path" "$staging_remote"; then
+    archive_operator_remote_purge "$staging_remote"
+    archive_operator_fail "staging verification failed: ${source_path} -> ${staging_remote}"
+  fi
+
+  archive_operator_rclone_run copy "$staging_remote" "$destination_remote"
+  if ! archive_operator_verify_remote_parity "$source_path" "$destination_remote"; then
+    archive_operator_remote_purge "$staging_remote"
+    archive_operator_remote_purge "$destination_remote"
+    archive_operator_fail "final verification failed: ${source_path} -> ${destination_remote}"
+  fi
+  archive_operator_remote_purge "$staging_remote"
+
+  cleanup_action="kept"
+  if [[ "$keep_source" != "1" && "$ARCHIVE_OPERATOR_ASSIST_CLEANUP_POLICY" == "trash_after_verified_arrival" ]]; then
+    archive_operator_trash_source "$source_path"
+    cleanup_action="trashed"
+  fi
+
+  archive_operator_write_receipt "$receipt_id" "moved" "$route_id" "$source_path" "$destination_remote" "$destination_browse" "$cleanup_action" "false" "$file_count" "$total_bytes" "$into_path"
+  cat <<EOF
+status: moved
+surface: archives
+family: ${route_id}
+source: ${source_path}
+destination_remote: ${destination_remote}
+destination_browse_path: ${destination_browse}
+cleanup_action: ${cleanup_action}
+file_count: ${file_count}
+total_bytes: ${total_bytes}
+receipt: ${ARCHIVE_OPERATOR_ASSIST_RECEIPT_ROOT}/${receipt_id}/receipt.yaml
+EOF
+}
+
+assist_open() {
+  local route_id="$1"
+  archive_operator_load_contract
+  local mount_status browse_root
+  mount_status="$(archive_operator_mount_status)"
+  [[ "$mount_status" == "ACTIVE" ]] || archive_operator_fail "archive browse mount is not active: ${ARCHIVE_OPERATOR_MOUNT_ROOT}"
+  browse_root="$(archive_operator_expand_path "$(archive_operator_route_field "$route_id" '.browse_root')")"
+  open "$browse_root"
+}
+
+assist_status() {
+  exec "$ROOT/ops/plugins/infra/host/bin/operator-storage-surface-status"
+}
+
+main() {
+  local command="move"
+  local preview=0
+  local keep_source=0
+  local route_id=""
+  local into_path=""
+
+  if [[ $# -gt 0 ]]; then
+    case "$1" in
+      move|open|status|families)
+        command="$1"
+        shift
+        ;;
+      -h|--help|help)
+        assist_usage
+        exit 0
+        ;;
+    esac
+  fi
+
+  local -a sources=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --family|--route)
+        route_id="${2:?$1 requires value}"
+        shift 2
+        ;;
+      --into)
+        into_path="${2:?--into requires value}"
+        shift 2
+        ;;
+      --preview)
+        preview=1
+        shift
+        ;;
+      --keep-source)
+        keep_source=1
+        shift
+        ;;
+      -h|--help|help)
+        assist_usage
+        exit 0
+        ;;
+      --)
+        shift
+        while [[ $# -gt 0 ]]; do
+          sources+=("$1")
+          shift
+        done
+        ;;
+      *)
+        sources+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  archive_operator_load_contract
+  into_path="$(archive_operator_normalize_relative_path "$into_path")"
+
+  case "$command" in
+    status)
+      [[ ${#sources[@]} -eq 0 ]] || archive_operator_fail "status does not accept source paths"
+      assist_status
+      ;;
+    families)
+      [[ ${#sources[@]} -eq 0 ]] || archive_operator_fail "families does not accept source paths"
+      assist_list_families
+      ;;
+    open)
+      if [[ -z "$route_id" ]]; then
+        if [[ "$ARCHIVE_OPERATOR_ASSIST_SELECTOR_REQUIRED" == "true" ]]; then
+          archive_operator_fail "--${ARCHIVE_OPERATOR_ASSIST_SELECTOR_LABEL} is required"
+        fi
+        route_id="$ARCHIVE_OPERATOR_ASSIST_DEFAULT_ROUTE"
+      fi
+      assist_require_route "$route_id"
+      [[ ${#sources[@]} -eq 0 ]] || archive_operator_fail "open does not accept source paths"
+      assist_open "$route_id"
+      ;;
+    move)
+      if [[ -z "$route_id" ]]; then
+        if [[ "$ARCHIVE_OPERATOR_ASSIST_SELECTOR_REQUIRED" == "true" ]]; then
+          archive_operator_fail "--${ARCHIVE_OPERATOR_ASSIST_SELECTOR_LABEL} is required"
+        fi
+        route_id="$ARCHIVE_OPERATOR_ASSIST_DEFAULT_ROUTE"
+      fi
+      assist_require_route "$route_id"
+      ((${#sources[@]} > 0)) || archive_operator_fail "at least one source directory is required"
+      assist_require_remote_ready "$route_id"
+      local source
+      for source in "${sources[@]}"; do
+        assist_move_one "$route_id" "$source" "$preview" "$keep_source" "$into_path"
+      done
+      ;;
+    *)
+      archive_operator_fail "unknown command: $command"
+      ;;
+  esac
+}
+
+main "$@"

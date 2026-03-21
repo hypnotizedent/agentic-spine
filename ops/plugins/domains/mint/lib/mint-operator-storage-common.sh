@@ -27,6 +27,7 @@ mint_operator_expand_path() {
   case "$raw" in
     "~") printf '%s\n' "$HOME" ;;
     "~/"*) printf '%s\n' "$HOME/${raw#"~/"}" ;;
+    \$SPINE_EVIDENCE_ROOT/*|\$SPINE_VERIFY_ROOT/*|evidence/*|receipts/*) spine_resolve_mailroom_path "$raw" ;;
     .runtime/*|.evidence/*|.data/*|.backups/*) printf '%s\n' "${SPINE_WORKSPACE_ROOT}/${raw}" ;;
     /*) printf '%s\n' "$raw" ;;
     *) printf '%s\n' "$raw" ;;
