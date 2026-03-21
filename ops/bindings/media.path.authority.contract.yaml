@@ -10,10 +10,10 @@
 # (`media-home` VM 106 consuming Synology `/volume1/media-staging/*`).
 
 contract: MEDIA_PATH_AUTHORITY_CONTRACT_V1
-version: "1.3"
+version: "1.4"
 status: active
 created: "2026-03-03"
-updated_at: "2026-03-20"
+updated_at: "2026-03-21"
 owner: "@ronny"
 authority_loop: LOOP-MEDIA-RUNTIME-REPAIR-20260303
 original_skeleton_loop: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
@@ -35,6 +35,11 @@ current_operating_model:
     library_root: "/srv/media"
     backing_store: "10.0.0.150:/volume1/media-staging"
     note: "This is the live watch/download plane. The active library path is the Synology staging tree."
+  canonical_writer_plane:
+    target_host: media-home
+    target_vm_id: 106
+    status: planned
+    note: "ARR writer services (Radarr/Sonarr/Lidarr/Prowlarr) planned for media-home. Currently operational on download-stack but will migrate to media-home for home-first writer promotion."
   canonical_archive_plane:
     host: pve
     archive_root: "/md1400/archive/media*"
@@ -43,9 +48,9 @@ current_operating_model:
     - download-stack
     - streaming-stack
   interpretation_rule: |
-    Treat the tuples below as residual shop writer/archive truth until the home
-    writer cutover is complete. Do not mistake them for the canonical active
-    placement model.
+    Treat the shop-hosted tuples below as transitional operational truth. The canonical
+    writer plane target is media-home, but services remain on download-stack until cutover.
+    Do not mistake historical shop placement for the canonical target model.
 
 # NFS mount topology (runtime verified 2026-03-04, classification updated 2026-03-21)
 nfs_mount_topology:
@@ -80,10 +85,18 @@ nfs_mount_topology:
       mode: rw
 
 # Path parity tuples — each service's file access paths must be internally consistent
-# All fields verified via runtime API queries + docker inspect on 2026-03-04
+# Historical shop tuples verified 2026-03-04 via runtime API queries + docker inspect
+# Planned home tuples documented 2026-03-21 for home-first writer promotion
 path_tuples:
   radarr:
-    vm: download-stack
+    planned_vm: media-home
+    planned_status: not_yet_deployed
+    planned_canonical_mount: "/srv/media -> /media"
+    planned_app_root: "/media/movies"
+    planned_library_path: "/media/movies"
+    planned_note: "Target configuration for home-first writer promotion. Will replace transitional shop placement."
+    transitional_shop_vm: download-stack
+    transitional_shop_status: operational
     compose_mount: "/mnt/media/movies -> /movies, /mnt/media -> /media"
     app_root: "/movies"
     app_root_id: 1
@@ -113,9 +126,17 @@ path_tuples:
       - 34 unmapped folders found in /movies root (failed/unpack artifacts + mismatched names)
     runtime_fix_required: false
     path_parity_status: "CONSISTENT — /movies bind mount maps to /mnt/media/movies on host"
+    transition_note: "Operational on download-stack until home writer cutover. Planned paths reflect media-home target."
 
   sonarr:
-    vm: download-stack
+    planned_vm: media-home
+    planned_status: not_yet_deployed
+    planned_canonical_mount: "/srv/media -> /media"
+    planned_app_root: "/media/tv"
+    planned_library_path: "/media/tv"
+    planned_note: "Target configuration for home-first writer promotion. Will replace transitional shop placement."
+    transitional_shop_vm: download-stack
+    transitional_shop_status: operational
     compose_mount: "/mnt/media/tv -> /tv, /mnt/media -> /media"
     app_root: "/tv"
     app_root_id: 1
@@ -134,9 +155,17 @@ path_tuples:
       - docker inspect: /mnt/media/tv -> /tv, /mnt/media -> /media
       - Path parity confirmed: /tv bind mount maps to /mnt/media/tv on host
     path_parity_status: "CONSISTENT"
+    transition_note: "Operational on download-stack until home writer cutover. Planned paths reflect media-home target."
 
   lidarr:
-    vm: download-stack
+    planned_vm: media-home
+    planned_status: not_yet_deployed
+    planned_canonical_mount: "/srv/media -> /media"
+    planned_app_root: "/media/music"
+    planned_library_path: "/media/music"
+    planned_note: "Target configuration for home-first writer promotion. Will replace transitional shop placement."
+    transitional_shop_vm: download-stack
+    transitional_shop_status: operational
     compose_mount: "/mnt/media/music -> /music, /mnt/media -> /media"
     app_root: "/media/music"
     app_root_id: 2
@@ -162,9 +191,31 @@ path_tuples:
         Both paths resolve to the same host directory /mnt/media/music. No conflict.
       - slskd remote path mapping enables Soulseek downloads via /media/downloads/slskd/
     path_parity_status: "CONSISTENT — dual mount path, both resolve to /mnt/media/music"
+    transition_note: "Operational on download-stack until home writer cutover. Planned paths reflect media-home target."
+
+  prowlarr:
+    planned_vm: media-home
+    planned_status: not_yet_deployed
+    planned_canonical_mount: "/srv/media -> /media"
+    planned_note: "Indexer manager for *arr services. Target configuration for home-first writer promotion."
+    transitional_shop_vm: download-stack
+    transitional_shop_status: operational
+    app_root: null
+    downloader_path: null
+    library_path: null
+    verification_status: operational
+    verified_at: "2026-03-21"
+    path_parity_status: "No direct media path dependencies — manages indexer integrations only"
+    transition_note: "Operational on download-stack until home writer cutover. Will move with ARR stack to media-home."
 
   sabnzbd:
-    vm: download-stack
+    planned_vm: media-home
+    planned_status: not_yet_deployed
+    planned_canonical_mount: "/srv/media -> /media"
+    planned_downloader_path: "/media/downloads"
+    planned_note: "Target configuration for home-first writer promotion. Will replace transitional shop placement."
+    transitional_shop_vm: download-stack
+    transitional_shop_status: operational
     compose_mount: "/mnt/media/downloads -> /downloads"
     app_root: null
     downloader_path: "/downloads"
@@ -179,9 +230,16 @@ path_tuples:
       - The host path /mnt/media/downloads IS the same NFS mount as /mnt/media (subpath)
       - Category subdirs are created dynamically by SAB on download completion
     path_parity_status: "CONSISTENT"
+    transition_note: "Operational on download-stack until home writer cutover. Planned paths reflect media-home target."
 
   qbittorrent:
-    vm: download-stack
+    planned_vm: media-home
+    planned_status: not_yet_deployed
+    planned_canonical_mount: "/srv/media -> /media"
+    planned_downloader_path: "/media/downloads"
+    planned_note: "Target configuration for home-first writer promotion. Will replace transitional shop placement."
+    transitional_shop_vm: download-stack
+    transitional_shop_status: operational
     compose_mount: "/mnt/media/downloads -> /downloads"
     app_root: null
     downloader_path: "/downloads"
@@ -192,6 +250,7 @@ path_tuples:
       2026-03-04: docker inspect confirms /mnt/media/downloads -> /downloads.
       Same NFS path as sabnzbd. Consistent.
     path_parity_status: "CONSISTENT"
+    transition_note: "Operational on download-stack until home writer cutover. Planned paths reflect media-home target."
 
   jellyfin:
     vm: media-home

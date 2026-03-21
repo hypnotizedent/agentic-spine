@@ -128,11 +128,15 @@ else
   [[ -n "$JSEERR_KEY" ]] || err "missing JELLYSEERR_API_KEY from canonical infrastructure route"
   [[ -n "$JFIN_TOKEN" ]] || err "missing JELLYFIN_API_TOKEN from canonical infrastructure route"
 
-  RADARR_URL="${RADARR_URL:-http://192.168.1.209:7878}"
-  SONARR_URL="${SONARR_URL:-http://192.168.1.209:8989}"
-  LIDARR_URL="${LIDARR_URL:-http://192.168.1.209:8686}"
-  PROWLARR_URL="${PROWLARR_URL:-http://192.168.1.209:9696}"
-  JSEERR_URL="${JSEERR_URL:-http://192.168.1.210:5055}"
+  # TRANSITIONAL: ARR writer services currently operational on download-stack (VM 209)
+  # but planned for media-home (VM 106). Update these defaults when cutover completes.
+  # Jellyseerr already on streaming-stack (VM 210), planned move to media-home (VM 106).
+  # See: ops/bindings/media.path.authority.contract.yaml v1.4, canonical_writer_plane
+  RADARR_URL="${RADARR_URL:-http://192.168.1.209:7878}"       # download-stack transitional
+  SONARR_URL="${SONARR_URL:-http://192.168.1.209:8989}"       # download-stack transitional
+  LIDARR_URL="${LIDARR_URL:-http://192.168.1.209:8686}"       # download-stack transitional
+  PROWLARR_URL="${PROWLARR_URL:-http://192.168.1.209:9696}"   # download-stack transitional
+  JSEERR_URL="${JSEERR_URL:-http://192.168.1.210:5055}"       # streaming-stack transitional
 
   if [[ -n "$RADARR_KEY" ]]; then
     code="$(curl -s -o /dev/null -w "%{http_code}" -H "X-Api-Key: $RADARR_KEY" "$RADARR_URL/api/v3/system/status" || true)"
