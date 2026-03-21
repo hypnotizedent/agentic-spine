@@ -3,6 +3,49 @@ set -euo pipefail
 
 # Resolve or create managed runtime worktree for scheduled projection apply jobs.
 # This prevents launchd jobs from writing tracked bindings in the operator main checkout.
+spine_runtime_resolve_control_root() {
+  local script_path="${1:-}"
+  local cwd_root=""
+  local script_root=""
+  local env_name=""
+  local value=""
+  local probe=""
+
+  cwd_root="$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -n "$cwd_root" && -f "$cwd_root/ops/capabilities.yaml" ]]; then
+    printf '%s\n' "$cwd_root"
+    return 0
+  fi
+
+  if [[ -n "$script_path" ]]; then
+    if [[ -d "$script_path" ]]; then
+      probe="$script_path"
+    else
+      probe="$(dirname "$script_path")"
+    fi
+    script_root="$(git -C "$probe" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -n "$script_root" && -f "$script_root/ops/capabilities.yaml" ]]; then
+      printf '%s\n' "$script_root"
+      return 0
+    fi
+  fi
+
+  for env_name in SPINE_TARGET_REPO SPINE_ROOT SPINE_REPO SPINE_CODE; do
+    value="${!env_name:-}"
+    if [[ -z "$value" ]]; then
+      continue
+    fi
+    if value="$(cd "$value" 2>/dev/null && pwd -P)"; then
+      if [[ -f "$value/ops/capabilities.yaml" ]]; then
+        printf '%s\n' "$value"
+        return 0
+      fi
+    fi
+  done
+
+  cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd
+}
+
 spine_runtime_prepare_managed_worktree() {
   local control_root="$1"
   local runtime_root="${SPINE_RUNTIME_WORKTREE:-$HOME/.wt/agentic-spine/runtime-scheduler}"

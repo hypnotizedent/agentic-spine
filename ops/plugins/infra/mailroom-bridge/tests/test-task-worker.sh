@@ -82,6 +82,7 @@ set -e
 
 status_json="$(env "${worker_env[@]}" "$BIN" --status --json)"
 echo "$status_json" | jq -e '.health_status=="fail" and .health_reason=="worker_not_running"' >/dev/null || fail "status json should classify stopped worker as unhealthy"
+echo "$status_json" | jq -e '.paths.repo_root == "'"$ROOT"'"' >/dev/null || fail "status json should expose resolved repo root"
 pass "worker status exposes strict/json health semantics"
 
 contract_agent_tool="$tmp/worker.agent-tool.contract.yaml"

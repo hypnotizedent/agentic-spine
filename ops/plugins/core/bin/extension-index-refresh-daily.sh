@@ -5,8 +5,9 @@ set -euo pipefail
 # LaunchAgent template: com.ronny.extension-index-refresh-daily
 # W69 freshness recovery: D178
 
-CONTROL_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
-source "${CONTROL_ROOT}/ops/lib/runtime-managed-worktree.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../../../lib/runtime-managed-worktree.sh"
+CONTROL_ROOT="$(spine_runtime_resolve_control_root "${BASH_SOURCE[0]}")"
 spine_runtime_activate_managed_worktree "$CONTROL_ROOT"
 RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"
 CAP_RUNNER="$RUNTIME_ROOT/bin/ops"

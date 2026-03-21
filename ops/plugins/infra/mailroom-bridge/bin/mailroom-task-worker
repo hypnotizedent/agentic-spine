@@ -24,11 +24,45 @@ from typing import Any
 import yaml
 
 
-ROOT = Path(__file__).resolve().parents[5]
+def expand(raw: str | Path) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
+
+
+DEFAULT_ROOT = expand(Path(__file__).resolve().parents[5])
+
+
+def git_top_level(start: Path) -> Path | None:
+    probe = start if start.is_dir() else start.parent
+    proc = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    return Path(stdout).resolve() if stdout else None
+
+
+def resolve_target_root(explicit: str | None = None) -> Path:
+    if explicit:
+        return expand(explicit)
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+    script_root = git_top_level(Path(__file__).resolve())
+    if script_root is not None:
+        return script_root
+    for env_name in ("SPINE_TARGET_REPO", "SPINE_ROOT", "SPINE_REPO", "SPINE_CODE"):
+        value = os.environ.get(env_name)
+        if value:
+            return expand(value)
+    return DEFAULT_ROOT
+
+
+ROOT = DEFAULT_ROOT
 RUNTIME_CONTRACT = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
-WORKER_CONTRACT = Path(
-    os.environ.get("MAILROOM_TASK_WORKER_CONTRACT", str(ROOT / "ops/bindings/mailroom.task.worker.contract.yaml"))
-)
+WORKER_CONTRACT = Path(os.environ.get("MAILROOM_TASK_WORKER_CONTRACT", str(ROOT / "ops/bindings/mailroom.task.worker.contract.yaml")))
 ROLE_RUNTIME_CONTRACT = ROOT / "ops/bindings/role.runtime.control.contract.yaml"
 
 _SHUTDOWN = False
@@ -59,6 +93,16 @@ def load_yaml(path: Path, default: Any) -> Any:
                 merged.update(doc)
         data = merged if merged else docs[-1]
     return default if data is None else data
+
+
+def configure_root(root: Path) -> None:
+    global ROOT, RUNTIME_CONTRACT, WORKER_CONTRACT, ROLE_RUNTIME_CONTRACT, _CAP_APPROVALS
+
+    ROOT = root
+    RUNTIME_CONTRACT = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
+    WORKER_CONTRACT = Path(os.environ.get("MAILROOM_TASK_WORKER_CONTRACT", str(ROOT / "ops/bindings/mailroom.task.worker.contract.yaml")))
+    ROLE_RUNTIME_CONTRACT = ROOT / "ops/bindings/role.runtime.control.contract.yaml"
+    _CAP_APPROVALS = None
 
 
 def resolve_runtime_paths() -> dict[str, Path]:
@@ -494,6 +538,7 @@ class TaskWorker:
             "last_tick_age_seconds": health["last_tick_age_seconds"],
             "stale_threshold_seconds": health["stale_threshold_seconds"],
             "paths": {
+                "repo_root": str(ROOT),
                 "contract": str(WORKER_CONTRACT),
                 "runtime_contract": str(RUNTIME_CONTRACT),
                 "pid_file": str(self.pid_file),
@@ -1025,6 +1070,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--once", action="store_true", help="Run a single tick (cycle + task consume)")
     mode.add_argument("--status", action="store_true", help="Show worker status")
     mode.add_argument("--stop", action="store_true", help="Stop worker daemon")
+    p.add_argument("--root", help="Target checkout root.")
     p.add_argument("--json", action="store_true", help="Emit machine-readable status payload")
     p.add_argument("--brief", action="store_true", help="Emit compact status summary")
     p.add_argument("--strict", action="store_true", help="Exit nonzero unless worker status is healthy")
@@ -1036,6 +1082,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    configure_root(resolve_target_root(args.root))
     worker = TaskWorker(
         worker_id=args.worker_id,
         poll_override=args.poll_seconds,
@@ -1060,7 +1107,7 @@ def main() -> int:
                 print(f"mailroom.task.worker: already running pid={pid}")
                 return 0
 
-        cmd = [sys.executable, str(Path(__file__).resolve()), "--foreground"]
+        cmd = [sys.executable, str(ROOT / "ops/plugins/infra/mailroom-bridge/bin/mailroom-task-worker"), "--foreground", "--root", str(ROOT)]
         if args.worker_id:
             cmd.extend(["--worker-id", args.worker_id])
         if args.poll_seconds is not None:

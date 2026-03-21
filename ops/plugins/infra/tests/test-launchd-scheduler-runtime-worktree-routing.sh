@@ -40,9 +40,30 @@ echo "════════════════════════�
 echo ""
 echo "── T1: helper exposes parent-shell runtime activation ──"
 assert_file_contains "$HELPER" 'spine_runtime_activate_managed_worktree()' "managed runtime activation helper exists"
+assert_file_contains "$HELPER" 'spine_runtime_resolve_control_root()' "managed runtime helper resolves control root"
 assert_file_contains "$HELPER" 'export SPINE_RUNTIME_ACTIVE_ROOT="$runtime_root"' "helper exports active runtime root"
 assert_file_contains "$HELPER" 'export SPINE_TARGET_REPO="$runtime_root"' "helper exports target repo"
 assert_file_contains "$HELPER" 'cd "$runtime_root"' "helper changes into runtime worktree"
+
+echo ""
+echo "── T1b: helper prefers current/script checkout over inherited stale roots ──"
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+bad_root="$tmpdir/stale-root"
+mkdir -p "$bad_root/ops"
+touch "$bad_root/ops/capabilities.yaml"
+
+resolved_from_cwd="$(
+  env SPINE_TARGET_REPO="$bad_root" SPINE_ROOT="$bad_root" SPINE_REPO="$bad_root" SPINE_CODE="$bad_root" \
+    bash -lc 'source "'"$HELPER"'"; cd "'"$ROOT"'"; spine_runtime_resolve_control_root "'"$ROOT/ops/plugins/core/bin/cc-benefits-refresh-daily.sh"'"'
+)"
+[[ "$resolved_from_cwd" == "$ROOT" ]] && pass "helper prefers current checkout over stale env" || fail "helper should prefer current checkout over stale env"
+
+resolved_from_script="$(
+  env SPINE_TARGET_REPO="$bad_root" SPINE_ROOT="$bad_root" SPINE_REPO="$bad_root" SPINE_CODE="$bad_root" \
+    bash -lc 'cd "'"$tmpdir"'"; source "'"$HELPER"'"; spine_runtime_resolve_control_root "'"$ROOT/ops/plugins/core/bin/cc-benefits-refresh-daily.sh"'"'
+)"
+[[ "$resolved_from_script" == "$ROOT" ]] && pass "helper prefers script checkout over stale env" || fail "helper should prefer script checkout over stale env"
 
 echo ""
 echo "── T2: scheduled mutator wrappers activate runtime worktree ──"
@@ -57,6 +78,9 @@ for script in \
   "$ROOT/ops/plugins/core/bin/cc-benefits-reminder-dispatch-daily.sh"
 do
   base="$(basename "$script")"
+  assert_file_contains "$script" 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' "$base resolves script directory"
+  assert_file_contains "$script" 'source "${SCRIPT_DIR}/../../../lib/runtime-managed-worktree.sh"' "$base sources helper relative to script checkout"
+  assert_file_contains "$script" 'CONTROL_ROOT="$(spine_runtime_resolve_control_root "${BASH_SOURCE[0]}")"' "$base resolves control root through helper"
   assert_file_contains "$script" 'spine_runtime_activate_managed_worktree "$CONTROL_ROOT"' "$base activates runtime worktree"
   assert_file_contains "$script" 'RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"' "$base records runtime root"
 done

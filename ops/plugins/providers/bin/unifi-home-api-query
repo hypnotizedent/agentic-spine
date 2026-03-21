@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def expand(raw: str | Path) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
+
+
+def git_top_level(start: Path) -> Path | None:
+    probe = start if start.is_dir() else start.parent
+    proc = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    return Path(stdout).resolve() if stdout else None
+
+
+def resolve_root() -> Path:
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+    script_root = git_top_level(Path(__file__).resolve())
+    if script_root is not None:
+        return script_root
+    for env_name in ("SPINE_TARGET_REPO", "SPINE_ROOT", "SPINE_REPO", "SPINE_CODE"):
+        value = os.environ.get(env_name)
+        if value:
+            return expand(value)
+    return expand(Path(__file__).resolve().parents[4])
+
+
+ROOT = resolve_root()
+SSH_BINDING = ROOT / "ops/bindings/ssh.targets.yaml"
+INFISICAL_AGENT = ROOT / "ops/plugins/providers/bin/infisical-agent.sh"
+
+
+def fail(message: str, code: int = 1) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"STOP (2): missing binding: {path}", 2)
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def resolve_targets() -> tuple[str, str, str, str, str]:
+    payload = load_yaml(SSH_BINDING)
+    ssh_cfg = payload.get("ssh", {}) if isinstance(payload, dict) else {}
+    targets = ssh_cfg.get("targets", []) if isinstance(ssh_cfg, dict) else []
+    defaults = ssh_cfg.get("defaults", {}) if isinstance(ssh_cfg, dict) else {}
+
+    udr = next((row for row in targets if isinstance(row, dict) and row.get("id") == "udr-home"), {})
+    proxy = next((row for row in targets if isinstance(row, dict) and row.get("id") == "proxmox-home"), {})
+
+    udr_host = str(udr.get("host", "")).strip()
+    proxy_host = str(proxy.get("host", "")).strip()
+    proxy_user = str(proxy.get("user", "root") or "root").strip()
+    strict = str(defaults.get("strict_host_key_checking", "no") or "no").strip()
+    known_hosts = str(defaults.get("user_known_hosts_file", "/dev/null") or "/dev/null").strip()
+    timeout = str(defaults.get("connect_timeout_sec", 5) or 5).strip()
+
+    if not udr_host:
+        fail("STOP (2): udr-home not found in ssh.targets.yaml", 2)
+    if not proxy_host:
+        fail("STOP (2): proxmox-home not found in ssh.targets.yaml", 2)
+    return udr_host, proxy_host, proxy_user, strict, known_hosts, timeout
+
+
+def resolve_api_key() -> str:
+    explicit = os.environ.get("UNIFI_HOME_API_KEY", "").strip()
+    if explicit:
+        return explicit
+    if not INFISICAL_AGENT.is_file():
+        fail(f"STOP (2): missing infisical agent: {INFISICAL_AGENT}", 2)
+    env = os.environ.copy()
+    env["SPINE_ROOT"] = str(ROOT)
+    env["SPINE_REPO"] = str(ROOT)
+    env["SPINE_CODE"] = str(ROOT)
+    proc = subprocess.run(
+        [str(INFISICAL_AGENT), "get-cached", "infrastructure", "prod", "UNIFI_HOME_API_KEY"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    value = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not value:
+        fail("FAIL: UNIFI_HOME_API_KEY not available", 1)
+    return value
+
+
+def query_clients(site: str) -> dict[str, Any]:
+    udr_host, proxy_host, proxy_user, strict, known_hosts, timeout = resolve_targets()
+    api_key = resolve_api_key()
+    ssh_args = [
+        "ssh",
+        "-o",
+        f"ConnectTimeout={timeout}",
+        "-o",
+        f"StrictHostKeyChecking={strict}",
+        "-o",
+        f"UserKnownHostsFile={known_hosts}",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "LogLevel=ERROR",
+        f"{proxy_user}@{proxy_host}",
+        "bash -s",
+    ]
+    script = (
+        f"curl -sk \"https://{udr_host}/proxy/network/api/s/{site}/stat/sta\" "
+        f"-H \"X-API-KEY: {api_key}\" "
+        "-H \"Accept: application/json\" 2>/dev/null"
+    )
+    proc = subprocess.run(ssh_args, input=script, text=True, capture_output=True)
+    if proc.returncode != 0:
+        fail(f"FAIL: could not query UniFi API via proxmox-home\n{proc.stderr.strip()}".rstrip(), 1)
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        fail(f"FAIL: could not parse UniFi response\n{(proc.stdout or '').strip()}", 1)
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        fail(f"FAIL: could not parse UniFi response\n{json.dumps(payload, sort_keys=True)}", 1)
+    return payload
+
+
+def cmd_auth() -> int:
+    payload = query_clients("default")
+    udr_host, proxy_host, *_rest = resolve_targets()
+    print("unifi-home-agent: auth")
+    print(f"host: {udr_host} (via proxmox-home {proxy_host})")
+    print(f"status: OK (api-key authenticated, clients={len(payload.get('data', []))})")
+    return 0
+
+
+def cmd_clients(site: str, json_mode: bool) -> int:
+    payload = query_clients(site)
+    rows = [
+        {
+            "mac": row.get("mac"),
+            "ip": row.get("ip"),
+            "hostname": row.get("hostname") or row.get("name") or "unknown",
+            "name": row.get("name") or row.get("hostname") or "unknown",
+            "is_wired": row.get("is_wired"),
+            "last_seen": row.get("last_seen"),
+        }
+        for row in payload.get("data", [])
+        if isinstance(row, dict)
+    ]
+    if json_mode:
+        print(json.dumps(rows, indent=2, sort_keys=False))
+        return 0
+
+    udr_host, proxy_host, *_rest = resolve_targets()
+    print(f"unifi-home-agent: clients (site={site})")
+    print(f"host: {udr_host} (via proxmox-home {proxy_host})")
+    print()
+    print("MAC\tIP\tNAME\tTYPE")
+    for row in sorted(rows, key=lambda item: str(item.get("ip") or "")):
+        kind = "wired" if row.get("is_wired") else "wireless"
+        print(f"{row.get('mac','')}\t{row.get('ip','n/a')}\t{row.get('hostname','unknown')}\t{kind}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Governed home UniFi API helper")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("auth", help="Verify home UniFi API key authentication")
+    clients = sub.add_parser("clients", help="List home UniFi clients")
+    clients.add_argument("--site", default="default")
+    clients.add_argument("--json", action="store_true")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.command == "auth":
+        return cmd_auth()
+    if args.command == "clients":
+        return cmd_clients(args.site, bool(args.json))
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
