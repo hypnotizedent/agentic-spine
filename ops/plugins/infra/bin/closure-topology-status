@@ -14,7 +14,12 @@
 
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+if [[ -n "${SPINE_ROOT:-}" && -f "${SPINE_ROOT}/ops/bindings/topology.closure.graph.yaml" ]]; then
+  ROOT="${SPINE_ROOT}"
+else
+  ROOT="${SCRIPT_ROOT}"
+fi
 
 GRAPH="$ROOT/ops/bindings/topology.closure.graph.yaml"
 SERVICE_REG="$ROOT/docs/governance/SERVICE_REGISTRY.yaml"
@@ -76,6 +81,36 @@ if [[ "$unresolved" -eq 0 ]]; then
   check "host_ref_resolution" "PASS" "All host_refs resolve to ssh targets"
 else
   check "host_ref_resolution" "FAIL" "$unresolved host_refs have no ssh target"
+fi
+
+# ─── Check 3b: Graph host_refs match service registry hosts where both exist ───
+mismatched_hosts=0
+while IFS='|' read -r service_id host_ref registry_host; do
+  [[ -z "$service_id" ]] && continue
+  [[ "$registry_host" == "null" || -z "$registry_host" ]] && continue
+  if [[ "$host_ref" != "$registry_host" ]]; then
+    mismatched_hosts=$((mismatched_hosts + 1))
+  fi
+done < <(
+  python3 - <<'PY' "$GRAPH" "$SERVICE_REG"
+import sys
+from pathlib import Path
+import yaml
+
+graph = yaml.safe_load(Path(sys.argv[1]).read_text())
+registry = yaml.safe_load(Path(sys.argv[2]).read_text())
+services = registry.get("services", {}) if isinstance(registry, dict) else {}
+
+for service_id, endpoint in (graph.get("service_endpoints") or {}).items():
+    registry_row = services.get(service_id) or {}
+    print(f"{service_id}|{endpoint.get('host_ref','')}|{registry_row.get('host','')}")
+PY
+)
+
+if [[ "$mismatched_hosts" -eq 0 ]]; then
+  check "service_registry_host_alignment" "PASS" "Graph host_refs match SERVICE_REGISTRY hosts"
+else
+  check "service_registry_host_alignment" "FAIL" "$mismatched_hosts graph host_refs disagree with SERVICE_REGISTRY"
 fi
 
 # ─── Check 4: Dependency edges reference valid services ───

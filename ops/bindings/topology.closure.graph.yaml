@@ -89,8 +89,8 @@ graph_model:
 # ═══════════════════════════════════════════════════════════════
 #
 # These define HOW to reach a service once the HOST is resolved via
-# ssh-resolve.sh. The host is NOT stored here — it's resolved at
-# runtime from SERVICE_REGISTRY.yaml host → ssh.targets.yaml.
+# ssh-resolve.sh. `host_ref` is stored here as the canonical closure
+# binding and must stay aligned with SERVICE_REGISTRY.yaml host.
 #
 # Fields:
 #   host_ref:      SSH target ID (matches ssh.targets.yaml .id)
@@ -243,9 +243,9 @@ service_endpoints:
     protocol: http
     internal_only: true
 
-  # ─── Media Download (download-stack VM 209) ───
+  # ─── Media Home (VM 106) — canonical active media plane ───
   radarr:
-    host_ref: download-stack
+    host_ref: media-home
     port: 7878
     health_path: /ping
     health_expect: 200
@@ -253,7 +253,7 @@ service_endpoints:
     internal_only: true
 
   sonarr:
-    host_ref: download-stack
+    host_ref: media-home
     port: 8989
     health_path: /ping
     health_expect: 200
@@ -261,7 +261,7 @@ service_endpoints:
     internal_only: true
 
   lidarr:
-    host_ref: download-stack
+    host_ref: media-home
     port: 8686
     health_path: /ping
     health_expect: 200
@@ -269,7 +269,7 @@ service_endpoints:
     internal_only: true
 
   prowlarr:
-    host_ref: download-stack
+    host_ref: media-home
     port: 9696
     health_path: /ping
     health_expect: 200
@@ -277,32 +277,31 @@ service_endpoints:
     internal_only: true
 
   sabnzbd:
-    host_ref: download-stack
-    port: 8085
-    health_path: /sabnzbd/api?mode=version
+    host_ref: media-home
+    port: 8080
+    health_path: /api?mode=version&output=json
     health_expect: 200
     protocol: http
     internal_only: true
 
   qbittorrent:
-    host_ref: download-stack
-    port: 8082
+    host_ref: media-home
+    port: 8081
     health_path: /
     health_expect: 200
     protocol: http
     internal_only: true
 
-  # ─── Media Streaming (streaming-stack VM 210) ───
   jellyfin:
-    host_ref: streaming-stack
+    host_ref: media-home
     port: 8096
     health_path: /health
     health_expect: 200
     protocol: http
-    public_url: https://watch.ronny.works
+    public_url: https://jellyfin.ronny.works
 
   navidrome:
-    host_ref: streaming-stack
+    host_ref: media-home
     port: 4533
     health_path: /ping
     health_expect: 200
@@ -310,17 +309,41 @@ service_endpoints:
     public_url: https://music.ronny.works
 
   jellyseerr:
-    host_ref: streaming-stack
+    host_ref: media-home
     port: 5055
     health_path: /api/v1/status
     health_expect: 200
     protocol: http
-    public_url: https://request.ronny.works
+    public_url: https://requests.ronny.works
 
   bazarr:
-    host_ref: streaming-stack
+    host_ref: media-home
     port: 6767
     health_path: /ping
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  homarr:
+    host_ref: media-home
+    port: 7575
+    health_path: /
+    health_expect: 307
+    protocol: http
+    internal_only: true
+
+  wizarr:
+    host_ref: media-home
+    port: 5690
+    health_path: /
+    health_expect: 302
+    protocol: http
+    internal_only: true
+
+  spotisub:
+    host_ref: media-home
+    port: 8766
+    health_path: /api/v1/utils/healthcheck
     health_expect: 200
     protocol: http
     internal_only: true
@@ -580,23 +603,23 @@ dependency_edges:
     type: indexer
     cross_vm: false
 
-  # Streaming → download (cross-VM media requests)
+  # Media-home request and subtitle flows (same active VM)
   - from: jellyseerr
     to: radarr
     type: request_fulfillment
-    cross_vm: true
+    cross_vm: false
   - from: jellyseerr
     to: sonarr
     type: request_fulfillment
-    cross_vm: true
+    cross_vm: false
   - from: bazarr
     to: radarr
     type: subtitle_sync
-    cross_vm: true
+    cross_vm: false
   - from: bazarr
     to: sonarr
     type: subtitle_sync
-    cross_vm: true
+    cross_vm: false
 
   # Surveillance → HA integration
   - from: frigate

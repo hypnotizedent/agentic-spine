@@ -27,7 +27,12 @@
 #
 # ═══════════════════════════════════════════════════════════════
 
-_ENDPOINT_RESOLVE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+_ENDPOINT_RESOLVE_SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+if [[ -n "${SPINE_ROOT:-}" && -f "${SPINE_ROOT}/ops/bindings/topology.closure.graph.yaml" ]]; then
+  _ENDPOINT_RESOLVE_ROOT="${SPINE_ROOT}"
+else
+  _ENDPOINT_RESOLVE_ROOT="${_ENDPOINT_RESOLVE_SCRIPT_ROOT}"
+fi
 _ENDPOINT_RESOLVE_GRAPH="${_ENDPOINT_RESOLVE_ROOT}/ops/bindings/topology.closure.graph.yaml"
 
 # Source ssh-resolve.sh if not already loaded
