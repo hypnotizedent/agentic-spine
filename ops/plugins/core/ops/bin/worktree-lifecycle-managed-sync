@@ -182,6 +182,16 @@ def merge_ff_only_with_retry(path: Path, target_head: str):
     return 1, last_output
 
 
+def detach_to_head(path: Path, target_head: str):
+    proc = subprocess.run(
+        ["git", "-C", str(path), "checkout", "--detach", "--force", target_head],
+        text=True,
+        capture_output=True,
+    )
+    combined = (proc.stderr or proc.stdout or "").strip()
+    return proc.returncode, combined
+
+
 repo_root_raw = git_value(target_root, "rev-parse", "--show-toplevel")
 if not repo_root_raw:
     payload = {
@@ -262,15 +272,30 @@ for raw_path in managed_paths:
             if repo_common_dir and path_common_dir and path_common_dir != repo_common_dir:
                 row["status"] = "blocked_foreign_repo"
                 row["issues"].append("managed_worktree_foreign_repo")
-            elif row["branch"] == "<detached>":
-                row["status"] = "blocked_detached_head"
-                row["issues"].append("managed_worktree_detached_head")
             elif row["dirty"]:
                 row["status"] = "blocked_dirty"
                 row["issues"].append("dirty_managed_worktree")
             elif not main_head:
                 row["status"] = "blocked_missing_main"
                 row["issues"].append("missing_main_branch")
+            elif row["branch"] == "<detached>":
+                if row["head"] == main_head:
+                    row["status"] = "already_current"
+                elif row["head"] and is_ancestor(path, row["head"], main_head):
+                    rc, checkout_output = detach_to_head(path, main_head)
+                    if rc != 0:
+                        row["status"] = "blocked_merge_failed"
+                        row["issues"].append("managed_worktree_merge_failed")
+                        row["issues"].append("managed_worktree_detached_head")
+                        row["merge_output"] = checkout_output
+                    else:
+                        row["status"] = "synced"
+                        row["head"] = git_head(path)
+                        actions.append(f"synced={resolved}|<detached>|{row['head']}|detached_ff")
+                else:
+                    row["status"] = "blocked_non_fast_forward"
+                    row["issues"].append("managed_worktree_non_fast_forward")
+                    row["issues"].append("managed_worktree_detached_head")
             elif row["head"] == main_head:
                 row["status"] = "already_current"
             elif not row["head"] or not is_ancestor(path, row["head"], main_head):

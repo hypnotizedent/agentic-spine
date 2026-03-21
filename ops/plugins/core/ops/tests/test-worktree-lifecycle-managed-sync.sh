@@ -142,7 +142,7 @@ printf 'base\n' > "$REPO4/file.txt"
   cd "$REPO4"
   git checkout -b main >/dev/null 2>&1
   git add file.txt
-  SYNC_STUB_LOG="$LOG4" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STUB4" git commit -m "base" >/dev/null
+  OPS_GOVERNED_MAIN_OVERRIDE=1 SYNC_STUB_LOG="$LOG4" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STUB4" git commit -m "base" >/dev/null
 )
 assert_contains "$(cat "$LOG4")" "--trigger git.post-commit --brief" "post-commit hook invokes managed sync runner"
 
@@ -166,13 +166,13 @@ printf 'base\n' > "$REPO5/file.txt"
   cd "$REPO5"
   git checkout -b main >/dev/null 2>&1
   git add file.txt
-  SYNC_STUB_LOG="$LOG5" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STUB5" git commit -m "base" >/dev/null
+  OPS_GOVERNED_MAIN_OVERRIDE=1 SYNC_STUB_LOG="$LOG5" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STUB5" git commit -m "base" >/dev/null
   : > "$LOG5"
   git switch -c feature/branch >/dev/null
   printf 'feature\n' >> file.txt
   git commit -am "feature" >/dev/null
   git switch main >/dev/null
-  SYNC_STUB_LOG="$LOG5" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STUB5" git merge --no-ff feature/branch -m "merge feature" >/dev/null
+  OPS_GOVERNED_MAIN_OVERRIDE=1 SYNC_STUB_LOG="$LOG5" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STUB5" git merge --no-ff feature/branch -m "merge feature" >/dev/null
 )
 assert_contains "$(cat "$LOG5")" "--trigger git.post-merge --brief" "post-merge hook invokes managed sync runner"
 
@@ -185,11 +185,31 @@ git -C "$REPO6" config core.hooksPath "$ROOT/.githooks"
 printf 'main update\n' >> "$REPO6/file.txt"
 (
   cd "$REPO6"
+  OPS_GOVERNED_MAIN_OVERRIDE=1 \
   SPINE_MANAGED_WORKTREE_SYNC_BIN="$SYNC" \
   SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS="$MANAGED6" \
     git commit -am "main update" >/dev/null
 )
 assert_eq "$(git -C "$MANAGED6" rev-parse HEAD)" "$(git -C "$REPO6" rev-parse refs/heads/main)" "real post-commit hook keeps managed worktree at main"
+
+echo ""
+echo "── T7: detached managed worktree fast-forwards without blocking startup ──"
+REPO7="$TMPDIR_BASE/repo7"
+MANAGED7="$TMPDIR_BASE/repo7-managed"
+setup_repo "$REPO7" "$MANAGED7"
+git -C "$MANAGED7" checkout --detach >/dev/null 2>&1
+printf 'main update\n' >> "$REPO7/file.txt"
+git -C "$REPO7" commit -am "main update" >/dev/null
+SYNC_JSON7="$TMPDIR_BASE/sync7.json"
+(
+  cd "$REPO7"
+  env -u SPINE_TARGET_REPO -u SPINE_REPO -u SPINE_CODE \
+    SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS="$MANAGED7" \
+    "$SYNC" --trigger test.detached --json > "$SYNC_JSON7"
+)
+assert_eq "$(git -C "$MANAGED7" rev-parse HEAD)" "$(git -C "$REPO7" rev-parse refs/heads/main)" "detached managed worktree catches up to main"
+assert_eq "$(json_eval "$SYNC_JSON7" 'payload["summary"]["blocked_count"]')" "0" "detached managed worktree does not block sync"
+assert_eq "$(json_eval "$SYNC_JSON7" 'payload["summary"]["synced_count"]')" "1" "detached managed worktree counts as synced after fast-forward"
 
 echo ""
 echo "────────────────────────────────────────"

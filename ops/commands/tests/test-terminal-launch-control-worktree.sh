@@ -192,6 +192,28 @@ else
   fail "launcher auto-created control worktree"
 fi
 
+printf 'drift\n' >> "$CONTROL_WT/ops/bindings/lane.profiles.yaml"
+set +e
+launch_out_dirty="$(
+  cd "$FAKE_ROOT" && \
+  env SPINE_LAUNCHER_SOURCE_REPO="$FAKE_ROOT" WORKBENCH_ROOT="$WORKBENCH" TERMINAL_LAUNCH_DRY_RUN=1 \
+    bash "$LAUNCH_SCRIPT" launch --terminal SPINE-CONTROL-01 --tool verify 2>&1
+)"
+launch_dirty_rc=$?
+set -e
+if [[ "$launch_dirty_rc" -eq 0 ]]; then
+  pass "launcher dry-run self-heals dirty control worktree"
+else
+  fail "launcher dry-run self-heals dirty control worktree"
+  echo "$launch_out_dirty" >&2
+fi
+
+if [[ -z "$(git -C "$CONTROL_WT" status --porcelain 2>/dev/null || true)" ]]; then
+  pass "launcher refresh returns control worktree to clean state"
+else
+  fail "launcher refresh returns control worktree to clean state"
+fi
+
 set +e
 exec_out="$(
   cd "$FAKE_ROOT" && \
