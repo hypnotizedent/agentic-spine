@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def expand(raw: str | Path) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
+
+
+def git_top_level(start: Path) -> Path | None:
+    probe = start if start.is_dir() else start.parent
+    proc = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    return Path(stdout).resolve() if stdout else None
+
+
+def resolve_target_root() -> Path:
+    explicit = os.environ.get("SPINE_TARGET_REPO")
+    if explicit:
+        return expand(explicit)
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+    script_root = git_top_level(Path(__file__).resolve())
+    if script_root is not None:
+        return script_root
+    return expand(Path(__file__).resolve().parents[5])
+
+
+ROOT = resolve_target_root()
+CONTRACT = ROOT / "ops/bindings/spine.self-governance.lifecycle.contract.yaml"
+PROJECTED = ROOT / "ops/bindings/spine.self-governance.lifecycle.projected.yaml"
+CATALOG = ROOT / "ops/bindings/workflow.vocabulary.catalog.yaml"
+WORKFLOW_CONTRACT = ROOT / "ops/bindings/workflow.vocabulary.contract.yaml"
+MEMORY_CONTRACT = ROOT / "ops/bindings/memory.continuity.contract.yaml"
+PROJECTION_BUILD = ROOT / "ops/plugins/core/authority/bin/spine-self-governance-projection-build"
+WORKFLOW_ROUTE = ROOT / "ops/plugins/core/ops/bin/workflow-route"
+USAGE_TELEMETRY = ROOT / "ops/plugins/core/evidence/bin/spine-surface-usage-telemetry"
+SESSION_START = ROOT / "ops/plugins/core/session/bin/session-start"
+
+
+def fail(message: str, code: int = 1) -> None:
+    print(f"spine.self-governance.status FAIL: {message}", file=os.sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        fail(f"expected mapping root: {path}")
+    return data
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="spine-self-governance-status")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--brief", action="store_true")
+    parser.add_argument("--strict", action="store_true")
+    return parser.parse_args()
+
+
+def run_checked(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, text=True, capture_output=True)
+
+
+def main() -> None:
+    args = parse_args()
+    checks: list[dict[str, str]] = []
+    fail_count = 0
+    warn_count = 0
+    missing_required = False
+
+    def record(name: str, status: str, detail: str) -> None:
+        nonlocal fail_count, warn_count
+        checks.append({"name": name, "status": status, "detail": detail})
+        if status == "FAIL":
+            fail_count += 1
+        elif status == "WARN":
+            warn_count += 1
+
+    for required in (CONTRACT, WORKFLOW_CONTRACT, MEMORY_CONTRACT, PROJECTED, CATALOG):
+        if required.is_file():
+            record(required.name, "PASS", "present")
+        else:
+            record(required.name, "FAIL", "missing")
+            missing_required = True
+
+    if missing_required:
+        overall = "FAIL"
+        if args.json:
+            print(json.dumps({
+                "capability": "spine.self-governance.status",
+                "status": overall.lower(),
+                "fail": fail_count,
+                "warn": warn_count,
+                "checks": checks,
+            }, indent=2, sort_keys=False))
+            raise SystemExit(1)
+        if args.brief:
+            print(f"{overall} issues={fail_count} warnings={warn_count} workflow_concepts=0 capability_dormant=0 gate_dormant=0 binding_low_ref=0")
+            raise SystemExit(1)
+        print("spine.self-governance.status")
+        print(f"status: {overall}")
+        print(f"fail: {fail_count}")
+        print(f"warn: {warn_count}")
+        for check in checks:
+            print(f"[{check['status']}] {check['name']}: {check['detail']}")
+        raise SystemExit(1)
+
+    projection_proc = run_checked(["python3", str(PROJECTION_BUILD), "--check"])
+    if projection_proc.returncode == 0:
+        record("projection_parity", "PASS", "self-governance projections are in sync")
+    else:
+        detail = projection_proc.stdout.strip() or projection_proc.stderr.strip() or "projection drift"
+        record("projection_parity", "FAIL", detail)
+
+    workflow_contract = load_yaml(WORKFLOW_CONTRACT)
+    workflow_catalog = load_yaml(CATALOG)
+    required_concepts = [str(item) for item in (workflow_contract.get("required_core_concepts") or [])]
+    concept_rows = workflow_catalog.get("concepts") or {}
+    missing_routes = []
+    for concept in required_concepts:
+        row = concept_rows.get(concept) or {}
+        if not row or not row.get("route_ready"):
+            missing_routes.append(concept)
+    if missing_routes:
+        record("workflow_vocabulary", "FAIL", f"concepts not route-ready: {', '.join(missing_routes)}")
+    else:
+        record("workflow_vocabulary", "PASS", f"{len(required_concepts)} core concepts are route-ready")
+
+    route_proc = run_checked(["python3", str(WORKFLOW_ROUTE), "loop", "--json"])
+    if route_proc.returncode == 0:
+        record("workflow_route_command", "PASS", "workflow.route resolves canonical concepts")
+    else:
+        record("workflow_route_command", "FAIL", route_proc.stderr.strip() or "workflow.route failed")
+
+    help_proc = run_checked([str(SESSION_START), "--help"])
+    help_text = (help_proc.stdout or "") + (help_proc.stderr or "")
+    if "fast|full|degraded" in help_text or "fast|full|degraded" in help_text.replace(" ", ""):
+        record("session_start_degraded", "PASS", "session.start advertises degraded mode")
+    else:
+        record("session_start_degraded", "FAIL", "session.start help does not advertise degraded mode")
+
+    memory_contract = load_yaml(MEMORY_CONTRACT)
+    fallback_layers = memory_contract.get("fallback_layers") or []
+    non_anything_fallbacks = [row for row in fallback_layers if isinstance(row, dict) and row.get("id") != "anythingllm"]
+    if len(non_anything_fallbacks) >= 3:
+        record("memory_continuity", "PASS", f"{len(non_anything_fallbacks)} non-AnythingLLM fallback layers declared")
+    else:
+        record("memory_continuity", "FAIL", "fewer than 3 non-AnythingLLM fallback layers declared")
+
+    usage_proc = run_checked(["python3", str(USAGE_TELEMETRY), "--json"])
+    if usage_proc.returncode != 0:
+        record("usage_telemetry", "FAIL", usage_proc.stderr.strip() or "usage telemetry failed")
+        telemetry = {}
+    else:
+        telemetry = json.loads(usage_proc.stdout or "{}")
+        record("usage_telemetry", "PASS", "usage telemetry surface executed")
+
+    capability_dormant = len(((telemetry.get("capabilities") or {}).get("dormant_candidates") or []))
+    gate_dormant = len(((telemetry.get("gates") or {}).get("dormant_candidates") or []))
+    binding_low_ref = len(((telemetry.get("bindings") or {}).get("low_reference_candidates") or []))
+    if capability_dormant or gate_dormant or binding_low_ref:
+        record(
+            "dormancy_candidates",
+            "WARN",
+            f"capabilities={capability_dormant}, gates={gate_dormant}, bindings={binding_low_ref}",
+        )
+    else:
+        record("dormancy_candidates", "PASS", "no dormant candidate surfaces in current telemetry window")
+
+    overall = "PASS" if fail_count == 0 else "FAIL"
+    if fail_count == 0 and warn_count > 0:
+        overall = "WARN"
+
+    if args.json:
+        print(json.dumps({
+            "capability": "spine.self-governance.status",
+            "status": overall.lower(),
+            "fail": fail_count,
+            "warn": warn_count,
+            "checks": checks,
+        }, indent=2, sort_keys=False))
+        raise SystemExit(1 if (args.strict and fail_count > 0) else (1 if fail_count > 0 else 0))
+
+    if args.brief:
+        issues = fail_count
+        print(
+            f"{overall} issues={issues} warnings={warn_count} "
+            f"workflow_concepts={len(required_concepts)} "
+            f"capability_dormant={capability_dormant} gate_dormant={gate_dormant} binding_low_ref={binding_low_ref}"
+        )
+        raise SystemExit(1 if fail_count > 0 else 0)
+
+    print("spine.self-governance.status")
+    print(f"status: {overall}")
+    print(f"fail: {fail_count}")
+    print(f"warn: {warn_count}")
+    for check in checks:
+        print(f"[{check['status']}] {check['name']}: {check['detail']}")
+    raise SystemExit(1 if fail_count > 0 else 0)
+
+
+if __name__ == "__main__":
+    main()

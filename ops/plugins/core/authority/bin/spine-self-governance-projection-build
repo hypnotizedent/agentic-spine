@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def expand(raw: str | Path) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
+
+
+def git_top_level(start: Path) -> Path | None:
+    probe = start if start.is_dir() else start.parent
+    proc = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    return Path(stdout).resolve() if stdout else None
+
+
+def resolve_target_root() -> Path:
+    explicit = os.environ.get("SPINE_TARGET_REPO")
+    if explicit:
+        return expand(explicit)
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+    script_root = git_top_level(Path(__file__).resolve())
+    if script_root is not None:
+        return script_root
+    return expand(Path(__file__).resolve().parents[5])
+
+
+ROOT = resolve_target_root()
+
+SELF_GOV_CONTRACT = ROOT / "ops/bindings/spine.self-governance.lifecycle.contract.yaml"
+WORKFLOW_CONTRACT = ROOT / "ops/bindings/workflow.vocabulary.contract.yaml"
+MEMORY_CONTRACT = ROOT / "ops/bindings/memory.continuity.contract.yaml"
+USAGE_CONTRACT = ROOT / "ops/bindings/spine.surface.usage.telemetry.contract.yaml"
+CAPABILITIES = ROOT / "ops/capabilities.yaml"
+ROUTING = ROOT / "ops/bindings/routing.dispatch.yaml"
+SESSION_START = ROOT / "ops/plugins/core/session/bin/session-start"
+WORKFLOW_CATALOG = ROOT / "ops/bindings/workflow.vocabulary.catalog.yaml"
+SELF_GOV_PROJECTED = ROOT / "ops/bindings/spine.self-governance.lifecycle.projected.yaml"
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"spine.self-governance.projection.build FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def yaml_dump(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=False)
+
+
+def rel(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except Exception:
+        return str(path.resolve())
+
+
+def source_stamp(paths: list[Path]) -> str:
+    latest = 0.0
+    for path in paths:
+        if path.exists():
+            latest = max(latest, path.stat().st_mtime)
+    if latest == 0.0:
+        latest = datetime.now(timezone.utc).timestamp()
+    return datetime.fromtimestamp(latest, tz=timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="spine-self-governance-projection-build")
+    parser.add_argument("--check", action="store_true", help="Fail if generated outputs differ from disk.")
+    parser.add_argument("--stdout", choices=("catalog", "projected"), help="Print a single generated artifact to stdout.")
+    return parser.parse_args()
+
+
+def ensure_mapping(value: Any, *, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        fail(f"{label} must be a mapping")
+    return value
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def bool_from_text(text: str, needle: str) -> bool:
+    return needle in text
+
+
+def build_workflow_catalog(
+    workflow_contract: dict[str, Any],
+    capabilities: dict[str, Any],
+    routing: dict[str, Any],
+    generated_at: str,
+) -> dict[str, Any]:
+    capability_rows = ensure_mapping(capabilities.get("capabilities"), label="capabilities")
+    dispatch_rows = ensure_mapping(routing.get("dispatch"), label="routing.dispatch")
+    required = ensure_list(workflow_contract.get("required_core_concepts"))
+    concepts = ensure_mapping(workflow_contract.get("concepts"), label="workflow concepts")
+    output_concepts: dict[str, Any] = {}
+
+    for concept_id, raw in concepts.items():
+      concept = ensure_mapping(raw, label=f"workflow concept {concept_id}")
+      primary = str(concept.get("primary_capability") or "").strip()
+      status_cap = str(concept.get("status_capability") or "").strip()
+      supporting = [str(item).strip() for item in ensure_list(concept.get("supporting_capabilities")) if str(item).strip()]
+      caps = [item for item in [primary, status_cap, *supporting] if item]
+      missing_caps = [cap for cap in caps if cap not in capability_rows]
+      missing_routes = [cap for cap in caps if cap not in dispatch_rows]
+      route_ready = not missing_caps and not missing_routes and bool(primary)
+      output_concepts[concept_id] = {
+          "class": str(concept.get("class") or "").strip(),
+          "lifecycle_state": str(concept.get("lifecycle_state") or "").strip(),
+          "description": str(concept.get("description") or "").strip(),
+          "aliases": ensure_list(concept.get("aliases")),
+          "domain": str(concept.get("domain") or "").strip(),
+          "primary_capability": primary,
+          "primary_route_command": f"./bin/ops cap run {primary}" if primary else "",
+          "status_capability": status_cap,
+          "supporting_capabilities": supporting,
+          "authorities": ensure_list(concept.get("authorities")),
+          "route_ready": route_ready,
+          "missing_capabilities": missing_caps,
+          "missing_dispatch_entries": missing_routes,
+      }
+
+    for required_concept in required:
+      if str(required_concept) not in output_concepts:
+        fail(f"workflow contract missing required core concept: {required_concept}")
+
+    route_ready_total = sum(1 for concept in output_concepts.values() if concept["route_ready"])
+    return {
+        "status": "generated",
+        "owner": "@ronny",
+        "last_verified": "2026-03-21",
+        "scope": "workflow-vocabulary-catalog",
+        "version": 1,
+        "generated_at": generated_at,
+        "generated_by": "spine.self-governance.projection.build",
+        "generated_from": [
+            rel(WORKFLOW_CONTRACT),
+            rel(CAPABILITIES),
+            rel(ROUTING),
+        ],
+        "contract": str(workflow_contract.get("contract") or ""),
+        "required_core_concepts": required,
+        "summary": {
+            "concepts_total": len(output_concepts),
+            "route_ready_total": route_ready_total,
+        },
+        "concepts": output_concepts,
+    }
+
+
+def build_projected(
+    self_gov_contract: dict[str, Any],
+    workflow_catalog: dict[str, Any],
+    memory_contract: dict[str, Any],
+    usage_contract: dict[str, Any],
+    session_modes: list[str],
+    generated_at: str,
+) -> dict[str, Any]:
+    fallback_layers = ensure_list(memory_contract.get("fallback_layers"))
+    route_ready = [
+        concept_id
+        for concept_id, row in ensure_mapping(workflow_catalog.get("concepts"), label="workflow catalog concepts").items()
+        if ensure_mapping(row, label=f"workflow catalog {concept_id}").get("route_ready")
+    ]
+    return {
+        "status": "generated",
+        "owner": "@ronny",
+        "last_verified": "2026-03-21",
+        "scope": "spine-self-governance-projected",
+        "version": 1,
+        "generated_at": generated_at,
+        "generated_by": "spine.self-governance.projection.build",
+        "generated_from": [
+            rel(SELF_GOV_CONTRACT),
+            rel(WORKFLOW_CONTRACT),
+            rel(MEMORY_CONTRACT),
+            rel(USAGE_CONTRACT),
+            rel(SESSION_START),
+        ],
+        "contract": str(self_gov_contract.get("contract") or ""),
+        "projection_summary": {
+            "workflow_concepts_total": ensure_mapping(workflow_catalog.get("summary"), label="workflow catalog summary").get("concepts_total", 0),
+            "workflow_route_ready_total": ensure_mapping(workflow_catalog.get("summary"), label="workflow catalog summary").get("route_ready_total", 0),
+            "session_modes_available": session_modes,
+            "memory_fallback_layers_total": len(fallback_layers),
+            "usage_telemetry_recent_days": ensure_mapping(usage_contract.get("telemetry_windows"), label="usage telemetry windows").get("recent_days"),
+        },
+        "closure_dimensions": {
+            "vocabulary_and_routing": {
+                "required_core_concepts": ensure_list(workflow_catalog.get("required_core_concepts")),
+                "route_ready_concepts": route_ready,
+            },
+            "session_entry_and_degraded_bootstrap": {
+                "session_start_script": rel(SESSION_START),
+                "degraded_mode": {
+                    "available": "degraded" in session_modes,
+                    "preserves_checkout_guards": True,
+                },
+            },
+            "memory_and_recall_continuity": {
+                "primary_layer": ensure_mapping(memory_contract.get("primary_layer"), label="memory primary layer").get("id"),
+                "fallback_layers": [ensure_mapping(row, label="memory fallback layer").get("id") for row in fallback_layers],
+                "degraded_mode": ensure_mapping(memory_contract.get("degraded_mode"), label="memory degraded mode"),
+            },
+            "usage_and_dormancy": {
+                "telemetry_contract": rel(USAGE_CONTRACT),
+                "telemetry_capability": "spine.surface.usage.telemetry",
+            },
+            "supersession_and_tombstoning": {
+                "lifecycle_states": list(ensure_mapping(self_gov_contract.get("lifecycle_states"), label="self governance lifecycle states").keys()),
+            },
+            "logical_vs_physical_runtime_paths": {
+                "stateful_surface_examples": [
+                    "mailroom/state",
+                    ".runtime/spine/state",
+                ],
+            },
+        },
+    }
+
+
+def session_modes_from_script(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    modes = ["fast", "full"]
+    if bool_from_text(text, "degraded"):
+        modes.append("degraded")
+    return modes
+
+
+def compare_or_write(path: Path, rendered: str, *, check: bool) -> bool:
+    current = path.read_text(encoding="utf-8") if path.exists() else None
+    if check:
+        return current == rendered
+    path.write_text(rendered, encoding="utf-8")
+    return True
+
+
+def main() -> None:
+    args = parse_args()
+    self_gov_contract = load_yaml(SELF_GOV_CONTRACT)
+    workflow_contract = load_yaml(WORKFLOW_CONTRACT)
+    memory_contract = load_yaml(MEMORY_CONTRACT)
+    usage_contract = load_yaml(USAGE_CONTRACT)
+    capabilities = load_yaml(CAPABILITIES)
+    routing = load_yaml(ROUTING)
+    session_modes = session_modes_from_script(SESSION_START)
+    generated_at = source_stamp([
+        SELF_GOV_CONTRACT,
+        WORKFLOW_CONTRACT,
+        MEMORY_CONTRACT,
+        USAGE_CONTRACT,
+        CAPABILITIES,
+        ROUTING,
+        SESSION_START,
+    ])
+
+    workflow_catalog = build_workflow_catalog(workflow_contract, capabilities, routing, generated_at)
+    projected = build_projected(
+        self_gov_contract,
+        workflow_catalog,
+        memory_contract,
+        usage_contract,
+        session_modes,
+        generated_at,
+    )
+    rendered_catalog = yaml_dump(workflow_catalog)
+    rendered_projected = yaml_dump(projected)
+
+    if args.stdout == "catalog":
+        print(rendered_catalog, end="")
+        return
+    if args.stdout == "projected":
+        print(rendered_projected, end="")
+        return
+
+    ok_catalog = compare_or_write(WORKFLOW_CATALOG, rendered_catalog, check=args.check)
+    ok_projected = compare_or_write(SELF_GOV_PROJECTED, rendered_projected, check=args.check)
+
+    if args.check:
+        if ok_catalog and ok_projected:
+            print("spine.self-governance.projection.build --check PASS")
+            return
+        if not ok_catalog:
+            print(f"projection drift: {rel(WORKFLOW_CATALOG)}")
+        if not ok_projected:
+            print(f"projection drift: {rel(SELF_GOV_PROJECTED)}")
+        raise SystemExit(1)
+
+    print("spine.self-governance.projection.build")
+    print(f"projected: {rel(WORKFLOW_CATALOG)}")
+    print(f"projected: {rel(SELF_GOV_PROJECTED)}")
+
+
+if __name__ == "__main__":
+    main()

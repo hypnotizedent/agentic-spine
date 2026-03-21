@@ -52,6 +52,7 @@ Full spine access. Follow all sections below in order.
 1. **Start the session**
    - Run `./bin/ops cap run session.start` — default fast startup (status brief + recommended post-work verify command).
    - Run `./bin/ops cap run session.start full` only when explicitly requested for deep startup diagnostics.
+   - Run `./bin/ops cap run session.start degraded` when startup dependencies are partially unhealthy; it preserves checkout/worktree guards and emits continuity fallbacks plus runtime state location hints.
    - If you need to touch secrets, source `~/.config/infisical/credentials` first.
    - Canonical nightly closeout SOP entrypoint: `./bin/ops cap run nightly.closeout -- --mode dry-run` then `./bin/ops cap run nightly.closeout -- --mode apply`.
 2. **Start work**
@@ -63,8 +64,9 @@ Full spine access. Follow all sections below in order.
    - If capability syntax is uncertain, run `./bin/ops cap show <capability>` before execution. Do not guess.
    - Discover capabilities with `./bin/ops cap list` when needed. Do not invent commands.
 3. **Trace truth**
-   - Query hierarchy: direct file read → `./bin/ops cap run rag.anythingllm.ask "<query>"` → `spine-rag` MCP → `rg` fallback.
+   - Query hierarchy: direct file read → `./bin/ops cap run rag.anythingllm.ask "<query>"` → `spine-rag` MCP → `./bin/ops cap run receipts.summary -- --domain none --days 7` → `./bin/ops cap run session.handoff.list --state active` → `./bin/ops cap run loops.status` / `./bin/ops cap run gaps.status` → `rg` fallback.
    - Before guessing remote paths, consult `ops/bindings/docker.compose.targets.yaml` and `ops/bindings/ssh.targets.yaml` first.
+   - Logical `mailroom/state` is externalized at runtime under `~/code/.runtime/spine/state`; do not treat the repo-relative path as the only physical location.
    - **Before any shop network change:** run `./bin/ops cap run network.shop.audit.status` (D54 enforces).
 4. **Operate through the spine**
    - Every mutating command must go through `./bin/ops cap run <capability>` so receipts land in `~/code/.evidence/spine/sessions/`.
@@ -79,6 +81,7 @@ Full spine access. Follow all sections below in order.
 |----------|---------------|
 | Startup baseline | `ops cap run session.start` (fast default) |
 | Deep startup diagnostics (opt-in) | `ops cap run session.start full` |
+| Degraded bootstrap / memory fallback | `ops cap run session.start degraded` |
 | Single read-only query | `ops cap run` (auto-approval) |
 | Single mutating action | `ops cap run` (manual approval) |
 | Multi-step coordinated work | Open a loop, use proposal flow |
