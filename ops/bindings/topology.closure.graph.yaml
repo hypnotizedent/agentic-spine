@@ -1,0 +1,698 @@
+# Topology Closure Graph — Canonical cross-surface topology authority
+# Status: authoritative
+# authority_state: authoritative
+# authority_concern: topology_closure_surfaces
+# Last verified: 2026-03-21
+#
+# Purpose: Unified site→VM→service→endpoint graph that enables compound
+# closure operations (relocation, backup locality, lifecycle transitions).
+# All other surfaces (services.health, agents.registry, secrets.bundle,
+# domain.routing) should DERIVE endpoint addresses from this graph via
+# endpoint-resolve.sh instead of hardcoding IPs.
+#
+# Authority chain:
+#   topology.sites.yaml   → site definitions (LAN CIDR, vmid_range)
+#   vm.lifecycle.yaml      → VM identity, status, IP assignments
+#   ssh.targets.yaml       → SSH resolution + access_policy
+#   SERVICE_REGISTRY.yaml  → service→host→port→health mappings
+#   This file              → closure graph edges + resolution contract
+#
+# This file does NOT duplicate data from its sources. It defines:
+#   1. The graph model (node types, edge types, invariants)
+#   2. Service endpoint descriptors (port, path, protocol) for resolution
+#   3. Dependency edges between services
+#   4. Closure surface bindings (what must change together)
+#
+# Consumer: ops/lib/endpoint-resolve.sh
+
+version: 1
+updated_at: "2026-03-21"
+owner: "@ronny"
+status: authoritative
+authority_state: authoritative
+scope: topology-closure-graph
+
+# ═══════════════════════════════════════════════════════════════
+# Graph Model
+# ═══════════════════════════════════════════════════════════════
+
+graph_model:
+  node_types:
+    site:
+      authority: ops/bindings/topology.sites.yaml
+      key_field: id
+      description: "Physical location with LAN CIDR and Proxmox host"
+    vm:
+      authority: ops/bindings/vm.lifecycle.yaml
+      key_field: hostname
+      description: "Proxmox VM or LXC with lifecycle status"
+    service:
+      authority: docs/governance/SERVICE_REGISTRY.yaml
+      key_field: service_id
+      description: "Docker container or native service with port/health"
+    ssh_target:
+      authority: ops/bindings/ssh.targets.yaml
+      key_field: id
+      description: "SSH resolution target with access_policy"
+
+  edge_types:
+    site_hosts_vm:
+      from: site
+      to: vm
+      resolved_by: "vm.proxmox_host maps to site.proxmox_alias"
+    vm_runs_service:
+      from: vm
+      to: service
+      resolved_by: "SERVICE_REGISTRY.yaml host field matches vm.hostname"
+    vm_has_ssh_target:
+      from: vm
+      to: ssh_target
+      resolved_by: "vm.ssh_target matches ssh_target.id"
+    service_depends_on:
+      from: service
+      to: service
+      resolved_by: "dependency_edges below"
+    service_backed_by:
+      from: service
+      to: vm
+      resolved_by: "cross-VM data dependencies (e.g. mint-apps → mint-data)"
+
+  invariants:
+    - "Every active service has exactly one hosting VM"
+    - "Every VM has exactly one site"
+    - "Every VM with health_probe_policy != none has an ssh_target"
+    - "Endpoint resolution uses ssh_target access_policy, never hardcoded IPs"
+    - "Service moves require closure across all bound surfaces"
+
+# ═══════════════════════════════════════════════════════════════
+# Service Endpoint Descriptors
+# ═══════════════════════════════════════════════════════════════
+#
+# These define HOW to reach a service once the HOST is resolved via
+# ssh-resolve.sh. The host is NOT stored here — it's resolved at
+# runtime from SERVICE_REGISTRY.yaml host → ssh.targets.yaml.
+#
+# Fields:
+#   host_ref:      SSH target ID (matches ssh.targets.yaml .id)
+#   port:          Service port
+#   health_path:   HTTP path for health probes
+#   health_expect: Expected HTTP status code
+#   protocol:      http | https | tcp | grpc
+#   public_url:    Optional CF tunnel / external URL
+#   internal_only: true if no external route exists
+
+service_endpoints:
+  # ─── Infrastructure (infra-core VM 204) ───
+  cloudflared:
+    host_ref: infra-core
+    port: 60123
+    health_path: /metrics
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  pihole:
+    host_ref: infra-core
+    port: 8053
+    health_path: /admin/
+    health_expect: 302
+    protocol: http
+    internal_only: true
+
+  infisical:
+    host_ref: infra-core
+    port: 8088
+    health_path: /api/status
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  vaultwarden:
+    host_ref: infra-core
+    port: 8081
+    health_path: /alive
+    health_expect: 200
+    protocol: http
+    public_url: https://vault.ronny.works
+
+  caddy:
+    host_ref: infra-core
+    port: 80
+    health_path: /
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  authentik:
+    host_ref: infra-core
+    port: 9000
+    health_path: /if/flow/initial-setup/
+    health_expect: 200
+    protocol: http
+    public_url: https://auth.ronny.works
+
+  # ─── Observability (observability VM 205) ───
+  prometheus:
+    host_ref: observability
+    port: 9090
+    health_path: /-/healthy
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  grafana:
+    host_ref: observability
+    port: 3000
+    health_path: /api/health
+    health_expect: 200
+    protocol: http
+    public_url: https://grafana.ronny.works
+
+  loki:
+    host_ref: observability
+    port: 3100
+    health_path: /ready
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  uptime-kuma:
+    host_ref: observability
+    port: 3001
+    health_path: /
+    health_expect: 200
+    protocol: http
+    public_url: https://status.ronny.works
+
+  dashy:
+    host_ref: observability
+    port: 4000
+    health_path: /
+    health_expect: 200
+    protocol: http
+    public_url: https://dash.ronny.works
+
+  # ─── Dev Tools (dev-tools VM 206) ───
+  gitea:
+    host_ref: dev-tools
+    port: 3000
+    health_path: /api/v1/version
+    health_expect: 200
+    protocol: http
+    public_url: https://git.ronny.works
+
+  # ─── AI (ai-consolidation VM 207) ───
+  anythingllm:
+    host_ref: ai-consolidation
+    port: 3001
+    health_path: /api/ping
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  qdrant:
+    host_ref: ai-consolidation
+    port: 6333
+    health_path: /healthz
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  # ─── Automation (automation-stack VM 202) ───
+  n8n:
+    host_ref: automation-stack
+    port: 5678
+    health_path: /healthz
+    health_expect: 200
+    protocol: http
+    public_url: https://n8n.ronny.works
+
+  open-webui:
+    host_ref: automation-stack
+    port: 8080
+    health_path: /
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  ollama:
+    host_ref: automation-stack
+    port: 11434
+    health_path: /
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  # ─── Media Download (download-stack VM 209) ───
+  radarr:
+    host_ref: download-stack
+    port: 7878
+    health_path: /ping
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  sonarr:
+    host_ref: download-stack
+    port: 8989
+    health_path: /ping
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  lidarr:
+    host_ref: download-stack
+    port: 8686
+    health_path: /ping
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  prowlarr:
+    host_ref: download-stack
+    port: 9696
+    health_path: /ping
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  sabnzbd:
+    host_ref: download-stack
+    port: 8085
+    health_path: /sabnzbd/api?mode=version
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  qbittorrent:
+    host_ref: download-stack
+    port: 8082
+    health_path: /
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  # ─── Media Streaming (streaming-stack VM 210) ───
+  jellyfin:
+    host_ref: streaming-stack
+    port: 8096
+    health_path: /health
+    health_expect: 200
+    protocol: http
+    public_url: https://watch.ronny.works
+
+  navidrome:
+    host_ref: streaming-stack
+    port: 4533
+    health_path: /ping
+    health_expect: 200
+    protocol: http
+    public_url: https://music.ronny.works
+
+  jellyseerr:
+    host_ref: streaming-stack
+    port: 5055
+    health_path: /api/v1/status
+    health_expect: 200
+    protocol: http
+    public_url: https://request.ronny.works
+
+  bazarr:
+    host_ref: streaming-stack
+    port: 6767
+    health_path: /ping
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  # ─── Finance (finance-stack VM 211) ───
+  firefly-iii:
+    host_ref: finance-stack
+    port: 8090
+    health_path: /api/v1/about
+    health_expect: 200
+    protocol: http
+    public_url: https://finance.ronny.works
+
+  paperless-ngx:
+    host_ref: finance-stack
+    port: 8000
+    health_path: /api/
+    health_expect: 200
+    protocol: http
+    public_url: https://docs.ronny.works
+
+  ghostfolio:
+    host_ref: finance-stack
+    port: 3333
+    health_path: /api/v1/health
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  # ─── Mint Data (mint-data VM 212) ───
+  mint-modules-minio:
+    host_ref: mint-data
+    port: 9000
+    health_path: /minio/health/live
+    health_expect: 200
+    protocol: http
+    address_source: tailscale_ip
+    internal_only: true
+
+  mint-modules-postgres:
+    host_ref: mint-data
+    port: 5432
+    protocol: tcp
+    internal_only: true
+
+  mint-modules-redis:
+    host_ref: mint-data
+    port: 6379
+    protocol: tcp
+    internal_only: true
+
+  # ─── Mint Apps (mint-apps VM 213) ───
+  files-api:
+    host_ref: mint-apps
+    port: 3500
+    health_path: /health
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  quote-page:
+    host_ref: mint-apps
+    port: 3341
+    health_path: /health
+    health_expect: 200
+    protocol: http
+    public_url: https://mintprints.com/quote
+
+  order-intake:
+    host_ref: mint-apps
+    port: 3400
+    health_path: /health
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  finance-adapter:
+    host_ref: mint-apps
+    port: 3600
+    health_path: /health
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  auth:
+    host_ref: mint-apps
+    port: 4300
+    health_path: /health
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  pricing:
+    host_ref: mint-apps
+    port: 3700
+    health_path: /health
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  suppliers:
+    host_ref: mint-apps
+    port: 3800
+    health_path: /health
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  shipping:
+    host_ref: mint-apps
+    port: 3900
+    health_path: /health
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  payment:
+    host_ref: mint-apps
+    port: 4100
+    health_path: /health
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  # ─── Communications (communications-stack VM 214) ───
+  stalwart-mail:
+    host_ref: communications-stack
+    port: 443
+    health_path: /healthz
+    health_expect: 200
+    protocol: https
+    public_url: https://mail.ronny.works
+
+  mail-archiver:
+    host_ref: communications-stack
+    port: 8025
+    health_path: /health
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  # ─── Surveillance (surveillance-stack VM 215) ───
+  frigate:
+    host_ref: surveillance-stack
+    port: 5000
+    health_path: /api/version
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  go2rtc:
+    host_ref: surveillance-stack
+    port: 1984
+    health_path: /api/streams
+    health_expect: 200
+    protocol: http
+    internal_only: true
+
+  # ─── Immich (immich VM 203) ───
+  immich-server:
+    host_ref: immich
+    port: 2283
+    health_path: /api/server/ping
+    health_expect: 200
+    protocol: http
+    public_url: https://photos.ronny.works
+
+  # ─── Home (cross-site) ───
+  home-assistant:
+    host_ref: ha
+    port: 8123
+    health_path: /api/
+    health_expect: 401
+    protocol: http
+    internal_only: true
+
+  # ─── Archive (archive-smb LXC 220) ───
+  samba-archive-smb:
+    host_ref: archive-smb
+    port: 445
+    protocol: tcp
+    internal_only: true
+
+# ═══════════════════════════════════════════════════════════════
+# Dependency Edges
+# ═══════════════════════════════════════════════════════════════
+#
+# Cross-VM data dependencies. When the upstream moves, the downstream
+# must update its connection endpoint.
+
+dependency_edges:
+  # Mint apps → Mint data plane
+  - from: files-api
+    to: mint-modules-postgres
+    type: database
+    cross_vm: true
+  - from: files-api
+    to: mint-modules-minio
+    type: object_store
+    cross_vm: true
+  - from: quote-page
+    to: mint-modules-postgres
+    type: database
+    cross_vm: true
+  - from: order-intake
+    to: mint-modules-postgres
+    type: database
+    cross_vm: true
+  - from: finance-adapter
+    to: mint-modules-postgres
+    type: database
+    cross_vm: true
+  - from: finance-adapter
+    to: firefly-iii
+    type: api
+    cross_vm: true
+  - from: auth
+    to: mint-modules-postgres
+    type: database
+    cross_vm: true
+  - from: auth
+    to: mint-modules-redis
+    type: cache
+    cross_vm: true
+  - from: pricing
+    to: mint-modules-postgres
+    type: database
+    cross_vm: true
+  - from: suppliers
+    to: mint-modules-postgres
+    type: database
+    cross_vm: true
+  - from: shipping
+    to: mint-modules-postgres
+    type: database
+    cross_vm: true
+  - from: payment
+    to: mint-modules-postgres
+    type: database
+    cross_vm: true
+
+  # Media arr stack → media library (NFS from pve)
+  - from: radarr
+    to: sonarr
+    type: coordination
+    cross_vm: false
+  - from: prowlarr
+    to: radarr
+    type: indexer
+    cross_vm: false
+  - from: prowlarr
+    to: sonarr
+    type: indexer
+    cross_vm: false
+  - from: prowlarr
+    to: lidarr
+    type: indexer
+    cross_vm: false
+
+  # Streaming → download (cross-VM media requests)
+  - from: jellyseerr
+    to: radarr
+    type: request_fulfillment
+    cross_vm: true
+  - from: jellyseerr
+    to: sonarr
+    type: request_fulfillment
+    cross_vm: true
+  - from: bazarr
+    to: radarr
+    type: subtitle_sync
+    cross_vm: true
+  - from: bazarr
+    to: sonarr
+    type: subtitle_sync
+    cross_vm: true
+
+  # Surveillance → HA integration
+  - from: frigate
+    to: home-assistant
+    type: mqtt_integration
+    cross_vm: true
+
+  # Observability → all (scrape targets)
+  - from: prometheus
+    to: grafana
+    type: datasource
+    cross_vm: false
+
+  # Mail archiver → stalwart
+  - from: mail-archiver
+    to: stalwart-mail
+    type: imap_fetch
+    cross_vm: false
+
+# ═══════════════════════════════════════════════════════════════
+# Closure Surface Bindings
+# ═══════════════════════════════════════════════════════════════
+#
+# When a service moves, these are the surfaces that must be updated.
+# Each surface references the file that contains the hardcoded truth
+# that the closure compiler must patch.
+
+closure_surfaces:
+  ingress:
+    description: "CF tunnel routes, public DNS, domain routing"
+    authority: ops/bindings/domain.routing.registry.yaml
+    contains_hardcoded_ips: true
+    resolution_contract: "target_hint must resolve via endpoint-resolve.sh"
+
+  transport:
+    description: "SSH targets and access policies"
+    authority: ops/bindings/ssh.targets.yaml
+    contains_hardcoded_ips: true
+    resolution_contract: "host and tailscale_ip fields are source of truth for IP resolution"
+
+  health:
+    description: "Service health probes"
+    authority: ops/bindings/services.health.yaml
+    contains_hardcoded_ips: true
+    resolution_contract: "PROJECTION — must be regenerated from SERVICE_REGISTRY.yaml"
+    generator: service.registry.projection.build
+
+  agents:
+    description: "Agent endpoint bindings"
+    authority: ops/bindings/agents.registry.yaml
+    contains_hardcoded_ips: true
+    resolution_contract: "endpoint URLs must resolve via endpoint-resolve.sh"
+
+  secrets:
+    description: "Secret bundle verification endpoints"
+    authority: ops/bindings/secrets.bundle.contract.yaml
+    contains_hardcoded_ips: true
+    resolution_contract: "verify URLs must resolve via endpoint-resolve.sh"
+
+  backup_locality:
+    description: "Backup target assignments and locality"
+    authority: ops/bindings/backup.inventory.yaml
+    contains_hardcoded_ips: false
+    resolution_contract: "backup_target field on vm.lifecycle.yaml; locality from backup.locality.contract.yaml"
+
+  vm_lifecycle:
+    description: "VM and service lifecycle state"
+    authority: ops/bindings/vm.lifecycle.yaml
+    contains_hardcoded_ips: true
+    resolution_contract: "lan_ip and tailscale_ip are source IPs; service list tracks what runs where"
+
+  data_roots:
+    description: "Service data lifecycle roots"
+    authority: ops/bindings/service.data.lifecycle.registry.yaml
+    contains_hardcoded_ips: false
+    resolution_contract: "host fields reference ssh_target IDs, not raw IPs"
+
+# ═══════════════════════════════════════════════════════════════
+# Resolution Contract
+# ═══════════════════════════════════════════════════════════════
+
+resolution_contract:
+  resolver_library: ops/lib/endpoint-resolve.sh
+  ssh_resolver_library: ops/lib/ssh-resolve.sh
+  resolution_chain:
+    - step: 1
+      action: "Look up service_id in service_endpoints above"
+      yields: "host_ref, port, health_path, protocol"
+    - step: 2
+      action: "Resolve host_ref through ssh.targets.yaml via ssh-resolve.sh"
+      yields: "resolved_ip, path_used (lan|tailscale|direct|unreachable)"
+    - step: 3
+      action: "Construct URL: {protocol}://{resolved_ip}:{port}{health_path}"
+      yields: "fully resolved endpoint URL"
+  anti_patterns:
+    - "Hardcoding LAN IPs (192.168.x.x) in binding files"
+    - "Hardcoding Tailscale IPs (100.x.x.x) in binding files"
+    - "Resolving endpoints without consulting access_policy"
+    - "Duplicating port/path info outside SERVICE_REGISTRY.yaml"

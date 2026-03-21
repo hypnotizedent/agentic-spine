@@ -1,0 +1,327 @@
+# Lifecycle Closure Contract — Explicit transition state machine
+# Status: authoritative
+# authority_state: authoritative
+# authority_concern: topology_closure_surfaces
+# Last verified: 2026-03-21
+#
+# Purpose: Defines the canonical lifecycle state machine for VMs and
+# services. Each transition has explicit closure requirements — what
+# must happen before a VM/service can move to the next state. Prevents
+# "abandoned" states where something is neither active nor properly
+# decommissioned.
+#
+# Authority chain:
+#   vm.lifecycle.yaml         → current VM status (the state)
+#   SERVICE_REGISTRY.yaml     → current service status
+#   This file                 → transition rules and closure gates
+
+version: 1
+updated_at: "2026-03-21"
+owner: "@ronny"
+status: authoritative
+
+# ═══════════════════════════════════════════════════════════════
+# VM Lifecycle State Machine
+# ═══════════════════════════════════════════════════════════════
+
+vm_states:
+  planning:
+    description: "VM defined but not yet created in Proxmox"
+    health_probe: none
+    backup_required: false
+    services_allowed: false
+
+  provisioned:
+    description: "VM created in Proxmox, OS installed, not yet configured"
+    health_probe: none
+    backup_required: false
+    services_allowed: false
+
+  registered:
+    description: "VM has SSH target, Tailscale joined, spine-ready profile applied"
+    health_probe: basic
+    backup_required: true
+    services_allowed: false
+
+  active:
+    description: "VM running production services"
+    health_probe: full
+    backup_required: true
+    services_allowed: true
+
+  transitional:
+    description: "VM has services being moved away; some may still be running"
+    health_probe: selective
+    backup_required: true
+    services_allowed: true
+    max_duration_days: 30
+    escalation: "If transitional > 30 days, file gap for stale transition"
+
+  residual:
+    description: "All services moved away; VM kept for data access or validation"
+    health_probe: none
+    backup_required: true
+    services_allowed: false
+    max_duration_days: 90
+    escalation: "If residual > 90 days, must tombstone or reactivate"
+
+  decommissioned:
+    description: "VM shut down, final backup taken, tombstone filed if applicable"
+    health_probe: none
+    backup_required: false
+    services_allowed: false
+
+  tombstoned:
+    description: "VM destroyed, restore capsule retained, review date set"
+    health_probe: none
+    backup_required: false
+    services_allowed: false
+    restore_capsule_required: true
+
+  purge_eligible:
+    description: "Tombstone review date passed, restore capsule can be deleted"
+    health_probe: none
+    backup_required: false
+    services_allowed: false
+
+# ═══════════════════════════════════════════════════════════════
+# VM State Transitions
+# ═══════════════════════════════════════════════════════════════
+
+vm_transitions:
+  - from: planning
+    to: provisioned
+    closure_requirements:
+      - "VM created in Proxmox with assigned VMID"
+      - "OS installed and accessible"
+
+  - from: provisioned
+    to: registered
+    closure_requirements:
+      - "SSH target added to ssh.targets.yaml"
+      - "Tailscale joined and IP recorded in vm.lifecycle.yaml"
+      - "spine-ready profile applied (or exemption documented)"
+      - "Backup target created in backup.inventory.yaml"
+
+  - from: registered
+    to: active
+    closure_requirements:
+      - "At least one service deployed and healthy"
+      - "Service entries added to SERVICE_REGISTRY.yaml"
+      - "Health probes passing"
+      - "Backup schedule covers this VM"
+      - "Endpoint descriptor added to topology.closure.graph.yaml"
+
+  - from: active
+    to: transitional
+    closure_requirements:
+      - "Relocation closure initiated (relocation.closure.contract.yaml)"
+      - "Target VM identified and prepared"
+      - "transition_started_at recorded in vm.lifecycle.yaml"
+
+  - from: transitional
+    to: active
+    closure_requirements:
+      - "Relocation aborted or completed back to this VM"
+      - "All services confirmed running on this VM"
+    note: "Revert path — services stayed or came back"
+
+  - from: transitional
+    to: residual
+    closure_requirements:
+      - "All services successfully moved to target VM(s)"
+      - "No active containers remain"
+      - "Data roots reclassified (canonical vs retired)"
+
+  - from: residual
+    to: decommissioned
+    closure_requirements:
+      - "Final backup completed"
+      - "No data roots require this VM for access"
+      - "All dependent services updated to new endpoints"
+      - "SSH target marked optional or removed"
+
+  - from: decommissioned
+    to: tombstoned
+    closure_requirements:
+      - "VM destroyed in Proxmox (qm destroy)"
+      - "Tombstone entry added to vm.lifecycle.yaml"
+      - "Restore capsule path documented"
+      - "restore_review_by date set (default: 6 months)"
+      - "Backup target disabled"
+
+  - from: tombstoned
+    to: purge_eligible
+    closure_requirements:
+      - "restore_review_by date has passed"
+      - "Operator confirms no future restore need"
+      - "Restore capsule deletion approved"
+
+  # Direct paths for exceptional cases
+  - from: active
+    to: decommissioned
+    closure_requirements:
+      - "All services migrated (full relocation closure completed)"
+      - "Final backup completed"
+      - "decommission_policy satisfied"
+    note: "Fast path when transitional/residual phases are instant"
+
+  - from: planning
+    to: decommissioned
+    closure_requirements:
+      - "VM never provisioned — plan abandoned"
+    note: "Abandoned plan cleanup"
+
+# ═══════════════════════════════════════════════════════════════
+# Service Lifecycle State Machine
+# ═══════════════════════════════════════════════════════════════
+
+service_states:
+  active:
+    description: "Service running and healthy"
+
+  deprecated:
+    description: "Service running but marked for removal; dependents may exist"
+    max_duration_days: 30
+
+  parked:
+    description: "Intentionally stopped by operator (not a failure)"
+
+  stopped:
+    description: "Unintentionally stopped or crashed"
+
+  migrating:
+    description: "Service being moved to a new VM; may be running on both"
+    max_duration_days: 7
+
+  retired:
+    description: "Service permanently stopped and not expected to run again"
+
+service_transitions:
+  - from: active
+    to: deprecated
+    closure_requirements:
+      - "Replacement identified or removal approved"
+      - "Dependents notified (dependency_edges in topology graph)"
+
+  - from: active
+    to: migrating
+    closure_requirements:
+      - "Target VM prepared"
+      - "Relocation closure initiated"
+
+  - from: migrating
+    to: active
+    closure_requirements:
+      - "Service healthy on new VM"
+      - "All closure steps completed"
+      - "Old instance stopped"
+
+  - from: deprecated
+    to: retired
+    closure_requirements:
+      - "No active dependents"
+      - "Data migrated or archived"
+      - "Endpoint removed from topology graph"
+
+  - from: active
+    to: parked
+    closure_requirements:
+      - "Operator decision documented"
+      - "Health probes excluded"
+
+  - from: parked
+    to: active
+    closure_requirements:
+      - "Container started"
+      - "Health probes re-enabled"
+
+# ═══════════════════════════════════════════════════════════════
+# Current Estate Lifecycle Snapshot
+# ═══════════════════════════════════════════════════════════════
+#
+# Mapping of current VM statuses to this state machine.
+# Used by closure.compiler.status to detect state violations.
+
+estate_snapshot:
+  active_vms:
+    - hostname: automation-stack
+      state: active
+      lifecycle_compliant: true
+    - hostname: immich
+      state: active
+      lifecycle_compliant: true
+    - hostname: infra-core
+      state: active
+      lifecycle_compliant: true
+    - hostname: observability
+      state: active
+      lifecycle_compliant: true
+    - hostname: dev-tools
+      state: active
+      lifecycle_compliant: true
+    - hostname: ai-consolidation
+      state: active
+      lifecycle_compliant: true
+    - hostname: download-stack
+      state: active
+      lifecycle_compliant: true
+      note: "Some media services transitioning to media-home (RELOC-004)"
+    - hostname: streaming-stack
+      state: active
+      lifecycle_compliant: true
+      note: "Some media services transitioning to media-home (RELOC-004)"
+    - hostname: finance-stack
+      state: active
+      lifecycle_compliant: true
+      note: "mail-archiver marked migration_source (RELOC-003 complete)"
+    - hostname: mint-data
+      state: active
+      lifecycle_compliant: true
+    - hostname: mint-apps
+      state: active
+      lifecycle_compliant: true
+    - hostname: communications-stack
+      state: active
+      lifecycle_compliant: true
+    - hostname: surveillance-stack
+      state: active
+      lifecycle_compliant: true
+    - hostname: archive-smb
+      state: active
+      lifecycle_compliant: true
+    - hostname: homeassistant
+      state: active
+      lifecycle_compliant: true
+    - hostname: pihole-home
+      state: active
+      lifecycle_compliant: true
+    - hostname: media-home
+      state: active
+      lifecycle_compliant: true
+      note: "Transitional — services/stacks lists empty in vm.lifecycle.yaml while writer-plane adoption completes"
+
+  decommissioned_vms:
+    - hostname: docker-host
+      state: tombstoned
+      lifecycle_compliant: true
+      tombstone_class: cold_restore_capsule
+      restore_review_by: "2026-09-06"
+    - hostname: media-stack
+      state: tombstoned
+      lifecycle_compliant: true
+      note: "Destroyed 2026-02-12, no restore capsule retained"
+    - hostname: immich-home
+      state: tombstoned
+      lifecycle_compliant: true
+      note: "VM 101 destroyed 2026-02-20"
+    - hostname: vaultwarden-home
+      state: tombstoned
+      lifecycle_compliant: true
+      note: "VM 102 decommissioned 2026-02-16"
+    - hostname: download-home
+      state: tombstoned
+      lifecycle_compliant: true
+      note: "LXC 103 destroyed 2026-02-20"
+
+  lifecycle_violations: []

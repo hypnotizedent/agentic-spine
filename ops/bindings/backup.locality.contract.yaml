@@ -1,0 +1,296 @@
+# Backup Locality Contract — Site-aware backup topology semantics
+# Status: authoritative
+# authority_state: authoritative
+# authority_concern: topology_closure_surfaces
+# Last verified: 2026-03-21
+#
+# Purpose: Prevents "backup is green but restore would fail because the
+# data is on the wrong side of a WAN link." Every backup target gets an
+# explicit locality class relative to its source, so relocation closure
+# can verify that backup locality remains valid after a service moves.
+#
+# Authority chain:
+#   backup.inventory.yaml   → backup targets, schedules, freshness
+#   topology.sites.yaml     → site definitions
+#   vm.lifecycle.yaml        → VM→site mapping
+#   This file               → locality classification per target
+
+version: 1
+updated_at: "2026-03-21"
+owner: "@ronny"
+status: authoritative
+
+# ═══════════════════════════════════════════════════════════════
+# Locality Classes
+# ═══════════════════════════════════════════════════════════════
+
+locality_classes:
+  local_hot:
+    description: "Backup on the same hypervisor or local storage (fast restore)"
+    restore_speed: minutes
+    survives_site_loss: false
+    example: "/tank/backups/vzdump/dump on pve for shop VMs"
+
+  same_site_cold:
+    description: "Backup on separate storage at the same site (md1400, NAS)"
+    restore_speed: minutes_to_hours
+    survives_site_loss: false
+    example: "/md1400/backup-cold/vzdump/pve for shop VMs"
+
+  offsite_warm:
+    description: "Backup replicated to another site via Tailscale/network"
+    restore_speed: hours
+    survives_site_loss: true
+    example: "Synology NAS at home backing shop VMs"
+
+  offsite_cold:
+    description: "Cold archive at a remote site, not immediately restorable"
+    restore_speed: hours_to_days
+    survives_site_loss: true
+    example: "Legacy Synology dump for decommissioned home VMs"
+
+  archive_only:
+    description: "Retained for compliance/forensic, not intended for restore"
+    restore_speed: days
+    survives_site_loss: true
+    example: "VM 200 tombstone capsule on md1400"
+
+# ═══════════════════════════════════════════════════════════════
+# Backup Target Locality Assignments
+# ═══════════════════════════════════════════════════════════════
+#
+# Each entry maps a backup target (from backup.inventory.yaml) to
+# its locality class, source site, and destination site.
+
+target_localities:
+  # ─── Shop VMs: local hot (pve vzdump) ───
+  - target: vm-202-primary
+    source_site: shop
+    source_vm: automation-stack
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  - target: vm-203-primary
+    source_site: shop
+    source_vm: immich
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  - target: vm-204-infra-core-primary
+    source_site: shop
+    source_vm: infra-core
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  - target: vm-205-observability-primary
+    source_site: shop
+    source_vm: observability
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  - target: vm-206-dev-tools-primary
+    source_site: shop
+    source_vm: dev-tools
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  - target: vm-207-ai-consolidation-primary
+    source_site: shop
+    source_vm: ai-consolidation
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  - target: vm-209-download-stack-primary
+    source_site: shop
+    source_vm: download-stack
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  - target: vm-210-streaming-stack-primary
+    source_site: shop
+    source_vm: streaming-stack
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  - target: vm-211-finance-stack-primary
+    source_site: shop
+    source_vm: finance-stack
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  - target: vm-212-mint-data-primary
+    source_site: shop
+    source_vm: mint-data
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  - target: vm-213-mint-apps-primary
+    source_site: shop
+    source_vm: mint-apps
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  - target: vm-214-communications-stack-primary
+    source_site: shop
+    source_vm: communications-stack
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  - target: vm-215-surveillance-stack-primary
+    source_site: shop
+    source_vm: surveillance-stack
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  - target: lxc-220-archive-smb-primary
+    source_site: shop
+    source_vm: archive-smb
+    destination_lane: pve-vzdump-primary
+    destination_site: shop
+    locality: local_hot
+    cold_promotion: pve-vzdump-cold-canonical
+    cold_locality: same_site_cold
+
+  # ─── Home VMs: local hot (proxmox-home) → offsite warm (Synology NAS) ───
+  - target: home-vm-100-ha-primary
+    source_site: home
+    source_vm: homeassistant
+    destination_lane: proxmox-home-vzdump
+    destination_site: home
+    locality: local_hot
+    cold_promotion: synology-nas-backup
+    cold_locality: offsite_warm
+    cold_destination_site: home
+
+  - target: home-lxc-105-pihole-primary
+    source_site: home
+    source_vm: pihole-home
+    destination_lane: proxmox-home-vzdump
+    destination_site: home
+    locality: local_hot
+
+  - target: home-vm-106-media-home-primary
+    source_site: home
+    source_vm: media-home
+    destination_lane: proxmox-home-vzdump
+    destination_site: home
+    locality: local_hot
+    cold_promotion: synology-nas-backup
+    cold_locality: offsite_warm
+
+  # ─── App-level backups ───
+  - target: app-media-config-media-home
+    source_site: home
+    source_vm: media-home
+    destination_lane: md1400-cold-apps
+    destination_site: shop
+    locality: offsite_warm
+    note: "Media config cold-sync crosses sites (home→shop md1400)"
+
+  # ─── Tombstone capsules ───
+  - target: vm-200-docker-host-primary
+    source_site: shop
+    source_vm: docker-host
+    destination_lane: pve-vzdump-cold-canonical
+    destination_site: shop
+    locality: archive_only
+    note: "Tombstoned VM 200. Single cold restore capsule on md1400."
+
+# ═══════════════════════════════════════════════════════════════
+# Locality Invariants
+# ═══════════════════════════════════════════════════════════════
+
+invariants:
+  - id: "Every active VM has at least local_hot backup"
+    check: "All active VMs in vm.lifecycle.yaml have a target_locality with locality != archive_only"
+
+  - id: "Cross-site services have offsite backup coverage"
+    check: "Services with cross-site dependency_edges should have at least one offsite_warm or offsite_cold locality"
+
+  - id: "Relocation updates locality"
+    check: "When a service moves cross-site, backup.locality must be reclassified"
+
+  - id: "Tombstoned VMs use archive_only"
+    check: "Decommissioned VMs with tombstone should have locality: archive_only"
+
+# ═══════════════════════════════════════════════════════════════
+# Restore Matrix
+# ═══════════════════════════════════════════════════════════════
+#
+# For each locality class, what's the expected restore path?
+
+restore_matrix:
+  local_hot:
+    restore_tool: qmrestore
+    restore_source: "Local vzdump on same hypervisor"
+    rto_target: "< 30 minutes"
+    drill_cadence: quarterly
+    drill_authority: ops/bindings/backup.schedule.yaml
+
+  same_site_cold:
+    restore_tool: qmrestore
+    restore_source: "md1400 cold plane"
+    rto_target: "< 2 hours"
+    drill_cadence: quarterly
+    drill_authority: ops/bindings/backup.schedule.yaml
+
+  offsite_warm:
+    restore_tool: qmrestore
+    restore_source: "Synology NAS via Tailscale or NFS"
+    rto_target: "< 4 hours"
+    drill_cadence: quarterly
+    drill_authority: ops/bindings/backup.schedule.yaml
+
+  offsite_cold:
+    restore_tool: manual
+    restore_source: "Remote cold archive"
+    rto_target: "< 24 hours"
+    drill_cadence: annual
+    drill_authority: null
+
+  archive_only:
+    restore_tool: qmrestore
+    restore_source: "Cold capsule with isolation flag"
+    rto_target: "best-effort"
+    drill_cadence: none
+    drill_authority: null
+    note: "Restore only into isolated sandbox identity"

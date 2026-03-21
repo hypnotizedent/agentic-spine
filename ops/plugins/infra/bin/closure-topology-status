@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# closure.topology.status — Validate topology closure graph integrity
+#
+# Usage:
+#   ./bin/ops cap run closure.topology.status
+#   ./bin/ops cap run closure.topology.status --json
+#
+# Contract:
+# - Validates topology.closure.graph.yaml service_endpoints against
+#   SERVICE_REGISTRY.yaml and ssh.targets.yaml
+# - Reports endpoint resolution coverage
+# - Detects hardcoded IP drift in downstream surfaces
+# - Reports dependency edge completeness
+
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+GRAPH="$ROOT/ops/bindings/topology.closure.graph.yaml"
+SERVICE_REG="$ROOT/docs/governance/SERVICE_REGISTRY.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+AGENTS_REG="$ROOT/ops/bindings/agents.registry.yaml"
+SECRETS_BUNDLE="$ROOT/ops/bindings/secrets.bundle.contract.yaml"
+RELOCATION_CONTRACT="$ROOT/ops/bindings/relocation.closure.contract.yaml"
+LIFECYCLE_CONTRACT="$ROOT/ops/bindings/lifecycle.closure.contract.yaml"
+BACKUP_LOCALITY="$ROOT/ops/bindings/backup.locality.contract.yaml"
+
+OUTPUT_JSON=false
+[[ "${1:-}" == "--json" ]] && OUTPUT_JSON=true
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+
+PASS=0
+FAIL=0
+WARN=0
+CHECKS=()
+
+check() {
+  local name="$1"
+  local status="$2"
+  local detail="$3"
+  CHECKS+=("$name|$status|$detail")
+  case "$status" in
+    PASS) PASS=$((PASS + 1)) ;;
+    FAIL) FAIL=$((FAIL + 1)) ;;
+    WARN) WARN=$((WARN + 1)) ;;
+  esac
+}
+
+# ─── Check 1: Graph file exists ───
+if [[ -f "$GRAPH" ]]; then
+  check "graph_exists" "PASS" "topology.closure.graph.yaml present"
+else
+  check "graph_exists" "FAIL" "topology.closure.graph.yaml missing"
+fi
+
+# ─── Check 2: Endpoint count ───
+ep_count=$(yq -r '.service_endpoints | length' "$GRAPH" 2>/dev/null || echo "0")
+if [[ "$ep_count" -gt 30 ]]; then
+  check "endpoint_coverage" "PASS" "$ep_count service endpoints defined"
+else
+  check "endpoint_coverage" "WARN" "Only $ep_count endpoints (expected 30+)"
+fi
+
+# ─── Check 3: All host_refs resolve to ssh targets ───
+unresolved=0
+while IFS= read -r host_ref; do
+  [[ -z "$host_ref" || "$host_ref" == "null" ]] && continue
+  exists=$(yq -r ".ssh.targets[] | select(.id == \"$host_ref\") | .id" "$SSH_BINDING" 2>/dev/null || echo "")
+  if [[ -z "$exists" ]]; then
+    unresolved=$((unresolved + 1))
+  fi
+done < <(yq -r '.service_endpoints[].host_ref' "$GRAPH" 2>/dev/null | sort -u)
+
+if [[ "$unresolved" -eq 0 ]]; then
+  check "host_ref_resolution" "PASS" "All host_refs resolve to ssh targets"
+else
+  check "host_ref_resolution" "FAIL" "$unresolved host_refs have no ssh target"
+fi
+
+# ─── Check 4: Dependency edges reference valid services ───
+invalid_deps=0
+while IFS= read -r svc; do
+  [[ -z "$svc" || "$svc" == "null" ]] && continue
+  exists=$(yq -r ".service_endpoints[\"$svc\"] // \"\"" "$GRAPH" 2>/dev/null || echo "")
+  if [[ -z "$exists" || "$exists" == "null" ]]; then
+    invalid_deps=$((invalid_deps + 1))
+  fi
+done < <(yq -r '.dependency_edges[].from, .dependency_edges[].to' "$GRAPH" 2>/dev/null | sort -u)
+
+if [[ "$invalid_deps" -eq 0 ]]; then
+  check "dependency_edge_validity" "PASS" "All dependency edges reference valid services"
+else
+  check "dependency_edge_validity" "FAIL" "$invalid_deps dependency refs not in service_endpoints"
+fi
+
+# ─── Check 5: Closure contracts exist ───
+for contract_file in "$RELOCATION_CONTRACT" "$LIFECYCLE_CONTRACT" "$BACKUP_LOCALITY"; do
+  contract_name=$(basename "$contract_file" .yaml)
+  if [[ -f "$contract_file" ]]; then
+    check "${contract_name}_exists" "PASS" "$contract_name present"
+  else
+    check "${contract_name}_exists" "FAIL" "$contract_name missing"
+  fi
+done
+
+# ─── Check 6: Endpoint resolver library exists ───
+if [[ -f "$ROOT/ops/lib/endpoint-resolve.sh" ]]; then
+  check "endpoint_resolver" "PASS" "endpoint-resolve.sh library present"
+else
+  check "endpoint_resolver" "FAIL" "endpoint-resolve.sh library missing"
+fi
+
+# ─── Check 7: Hardcoded IP count in agents registry ───
+agent_ips=$(grep -cE 'url:.*http://100\.' "$AGENTS_REG" 2>/dev/null || echo "0")
+if [[ "$agent_ips" -eq 0 ]]; then
+  check "agent_hardcoded_ips" "PASS" "No hardcoded IPs in agents registry"
+else
+  check "agent_hardcoded_ips" "WARN" "$agent_ips hardcoded Tailscale IPs in agents registry (promote to endpoint-resolve)"
+fi
+
+# ─── Check 8: Hardcoded IP count in secrets bundle ───
+secret_ips=$(grep -cE 'url:.*http://100\.' "$SECRETS_BUNDLE" 2>/dev/null || echo "0")
+if [[ "$secret_ips" -eq 0 ]]; then
+  check "secret_hardcoded_ips" "PASS" "No hardcoded IPs in secrets bundle"
+else
+  check "secret_hardcoded_ips" "WARN" "$secret_ips hardcoded Tailscale IPs in secrets bundle (promote to endpoint-resolve)"
+fi
+
+# ─── Check 9: Active relocations have no blocking gaps ───
+active_relocs=$(yq -r '[.historical_relocations[] | select(.status == "in_progress")] | length' "$RELOCATION_CONTRACT" 2>/dev/null || echo "0")
+if [[ "$active_relocs" -eq 0 ]]; then
+  check "active_relocations" "PASS" "No active relocations with open closure gaps"
+else
+  check "active_relocations" "WARN" "$active_relocs active relocations with open closure gaps"
+fi
+
+# ─── Check 10: Lifecycle violations ───
+violations=$(yq -r '.estate_snapshot.lifecycle_violations | length' "$LIFECYCLE_CONTRACT" 2>/dev/null || echo "0")
+if [[ "$violations" -eq 0 ]]; then
+  check "lifecycle_violations" "PASS" "No lifecycle state violations"
+else
+  check "lifecycle_violations" "FAIL" "$violations lifecycle state violations"
+fi
+
+# ─── Output ───
+TOTAL=$((PASS + FAIL + WARN))
+overall="ok"
+[[ "$FAIL" -gt 0 ]] && overall="fail"
+[[ "$WARN" -gt 0 && "$FAIL" -eq 0 ]] && overall="warn"
+
+if $OUTPUT_JSON; then
+  checks_json=""
+  for entry in "${CHECKS[@]}"; do
+    IFS='|' read -r name status detail <<< "$entry"
+    checks_json+="$(printf '{"name":"%s","status":"%s","detail":"%s"},' "$name" "$status" "$detail")"
+  done
+  checks_json="[${checks_json%,}]"
+  printf '{"capability":"closure.topology.status","status":"%s","pass":%d,"fail":%d,"warn":%d,"total":%d,"checks":%s}\n' \
+    "$overall" "$PASS" "$FAIL" "$WARN" "$TOTAL" "$checks_json"
+else
+  echo "closure.topology.status"
+  echo "========================"
+  printf "Status: %s (%d/%d pass, %d warn, %d fail)\n\n" "$overall" "$PASS" "$TOTAL" "$WARN" "$FAIL"
+  printf "%-35s %-6s %s\n" "CHECK" "STATUS" "DETAIL"
+  printf "%-35s %-6s %s\n" "-----" "------" "------"
+  for entry in "${CHECKS[@]}"; do
+    IFS='|' read -r name status detail <<< "$entry"
+    printf "%-35s %-6s %s\n" "$name" "$status" "$detail"
+  done
+fi
