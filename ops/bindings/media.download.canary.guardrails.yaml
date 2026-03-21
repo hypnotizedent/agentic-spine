@@ -9,7 +9,7 @@
 # uncontrolled bulk acquisition or storage bloat.
 
 contract: MEDIA_DOWNLOAD_CANARY_GUARDRAILS_V1
-version: "1.0"
+version: "1.1"
 status: active
 created: "2026-03-21"
 updated_at: "2026-03-21"
@@ -113,11 +113,12 @@ anti_bloat:
 # ─────────────────────────────────────────────────────────────────────────
 
 cleanup:
-  mode: operator_assisted
+  mode: hardlink_auto_drain
   description: |
     After SABnzbd completes a download and the ARR app successfully imports
-    (hardlink or move) the file to its library root, the staging copy must
-    be cleaned within the 7-day max_age window.
+    (hardlink via broad /media mount) the file to its library root, the
+    staging copy is automatically cleaned by Completed Download Handling.
+    Hardlinks enabled 2026-03-21 via root folder promotion and RPM.
 
   sabnzbd_settings:
     completed_download_handling: true
@@ -136,13 +137,24 @@ cleanup:
 
   hardlink_issue:
     discovered: "2026-03-21"
+    fixed: "2026-03-21"
     description: |
-      Docker bind mount topology breaks hardlinks. Sonarr/Radarr have
-      copyUsingHardlinks=true but it silently fails (EXDEV) because /tv
-      and /downloads are separate bind mounts. Fix: change ARR root
-      folders from /tv → /media/tv and /movies → /media/movies.
-    impact: "Every import doubles disk usage (copy instead of hardlink). Staging copies never auto-drain."
-    fix_status: documented_not_applied
+      Docker bind mount topology broke hardlinks. Sonarr/Radarr had
+      copyUsingHardlinks=true but it silently failed (EXDEV) because /tv
+      and /downloads were separate bind mounts (mount IDs 847 and 848).
+      Fix applied: ARR root folders changed from /tv → /media/tv and
+      /movies → /media/movies. RPM added to route /downloads/ → /media/downloads/.
+      Both source and destination now on mount 846 (/media broad mount).
+    impact: "Previously doubled disk usage on every import. Now hardlinks work and staging auto-drains."
+    fix_status: applied
+    fix_lane: codex/media-home-hardlink-and-auto-drain-fix-v1
+    fix_details:
+      sonarr_root: "/tv → /media/tv (id=1 → id=2)"
+      radarr_root: "/movies → /media/movies (id=1 → id=3)"
+      sonarr_rpm: "host=sabnzbd, /downloads/ → /media/downloads/ (id=2)"
+      radarr_rpm: "host=sabnzbd, /downloads/ → /media/downloads/ (id=3)"
+      hardlink_proof: "inode=212350, nlink=2 via broad mount; EXDEV via narrow mount"
+      staging_drain_observed: "215G → 189G in 10 minutes after fix"
 
   staging_debt_drain_history:
     - date: "2026-03-21"
@@ -213,8 +225,8 @@ escalation:
       - "Operator explicit approval"
     blocked_by:
       - "Pool at 86% (critical per capacity guard) — canary must prove it does not worsen"
-      - "No post-import cleanup automation yet (operator-assisted only)"
       - "qBittorrent still parked"
+      - "Compose narrow mounts not yet removed (dead weight, not blocking hardlinks)"
 
   broader_shop_drain:
     ready: false

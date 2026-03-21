@@ -10,7 +10,7 @@
 # (`media-home` VM 106 consuming Synology `/volume1/media-staging/*`).
 
 contract: MEDIA_PATH_AUTHORITY_CONTRACT_V1
-version: "1.4"
+version: "1.5"
 status: active
 created: "2026-03-03"
 updated_at: "2026-03-21"
@@ -95,36 +95,36 @@ path_tuples:
     planned_canonical_mount: "/srv/media -> /media"
     planned_app_root: "/media/movies"
     planned_library_path: "/media/movies"
-    planned_note: "Activated on media-home 2026-03-21. Home root folder `/movies` and broad `/media` mount verified live."
+    planned_note: "Activated on media-home 2026-03-21. Root folder changed from /movies to /media/movies to enable hardlinks."
     transitional_shop_vm: download-stack
     transitional_shop_status: parked_residue
     compose_mount: "/srv/media/movies -> /movies, /srv/media -> /media"
-    app_root: "/movies"
-    app_root_id: 1
+    app_root: "/media/movies"
+    app_root_id: 3
     app_root_archive: "/media/movies-archive"
     app_root_archive_id: 2
     downloader_path:
-      - host: "100.125.138.110"
-        remote: "/downloads/complete/"
-        local: "/downloads/complete/"
-        id: 1
-      - host: "100.125.138.110"
-        remote: "/mnt/staging/downloads/complete/"
-        local: "/downloads/complete/"
-        id: 2
-    library_path: "/movies"
+      - host: "sabnzbd"
+        remote: "/downloads/"
+        local: "/media/downloads/"
+        id: 3
+        note: "RPM added 2026-03-21 to route downloads through broad /media mount for hardlinks"
+    library_path: "/media/movies"
     verification_status: verified
     verified_at: "2026-03-21"
     gap_ref: GAP-OP-1387
     evidence: |
-      2026-03-21 runtime API query on media-home:
-      - GET /api/v3/rootfolder: returns [{path: "/movies", accessible: true, freeSpace: 13924803018752, id: 1}]
-      - GET /api/v3/remotepathmapping: returns []
-      - docker host verification: `/srv/media/movies` and `/srv/media` are mounted into the active media-home container
-      - Root folder `/movies` is accessible and internally consistent on the home plane.
+      2026-03-21 hardlink topology fix on media-home:
+      - Root folder changed: /movies (id=1, narrow mount) → /media/movies (id=3, broad mount)
+      - Remote path mapping added: host=sabnzbd, /downloads/ → /media/downloads/ (id=3)
+      - All 9556 movies bulk-updated to /media/movies root via PUT /api/v3/movie/editor
+      - Old /movies root folder removed (id=1)
+      - Hardlink probe: ln /media/downloads/test → /media/tv/test succeeded (inode=212350, nlink=2)
+      - Control: ln /downloads/test → /tv/test failed (EXDEV — different mount IDs)
+      - Mount topology: /media (mount 846), /tv (mount 847), /downloads (mount 848)
     runtime_fix_required: false
-    path_parity_status: "CONSISTENT — /movies bind mount maps to /mnt/media/movies on host"
-    transition_note: "Now active on media-home. Shop copy is parked rollback residue only."
+    path_parity_status: "CONSISTENT — /media/movies via broad /srv/media mount enables hardlinks"
+    transition_note: "Root folder promoted from narrow /movies to broad /media/movies for hardlink support. Shop copy is parked rollback residue only."
 
   sonarr:
     planned_vm: media-home
@@ -132,28 +132,31 @@ path_tuples:
     planned_canonical_mount: "/srv/media -> /media"
     planned_app_root: "/media/tv"
     planned_library_path: "/media/tv"
-    planned_note: "Activated on media-home 2026-03-21. Home root folder `/tv` and broad `/media` mount verified live."
+    planned_note: "Activated on media-home 2026-03-21. Root folder changed from /tv to /media/tv to enable hardlinks."
     transitional_shop_vm: download-stack
     transitional_shop_status: parked_residue
     compose_mount: "/srv/media/tv -> /tv, /srv/media -> /media"
-    app_root: "/tv"
-    app_root_id: 1
+    app_root: "/media/tv"
+    app_root_id: 2
     downloader_path:
-      - host: "100.125.138.110"
-        remote: "/downloads/complete/"
-        local: "/downloads/complete/"
-        id: 1
-    library_path: "/tv"
+      - host: "sabnzbd"
+        remote: "/downloads/"
+        local: "/media/downloads/"
+        id: 2
+        note: "RPM added 2026-03-21 to route downloads through broad /media mount for hardlinks"
+    library_path: "/media/tv"
     verification_status: verified
     verified_at: "2026-03-21"
     evidence: |
-      2026-03-21 runtime API query on media-home:
-      - GET /api/v3/rootfolder: [{path: "/tv", accessible: true, freeSpace: 13924803018752, id: 1}]
-      - GET /api/v3/remotepathmapping: returns []
-      - docker host verification: `/srv/media/tv` and `/srv/media` are mounted into the active media-home container
-      - Path parity confirmed: /tv bind mount maps to the home Synology-backed TV root.
-    path_parity_status: "CONSISTENT"
-    transition_note: "Now active on media-home. Shop copy is parked rollback residue only."
+      2026-03-21 hardlink topology fix on media-home:
+      - Root folder changed: /tv (id=1, narrow mount) → /media/tv (id=2, broad mount)
+      - Remote path mapping added: host=sabnzbd, /downloads/ → /media/downloads/ (id=2)
+      - All 72 series bulk-updated to /media/tv root via PUT /api/v3/series/editor
+      - Old /tv root folder removed (id=1)
+      - Episode files confirmed at /media/tv/ paths (97 Cheers episodes verified)
+      - Staging auto-drain observed: 215G → 189G in 10 minutes after fix
+    path_parity_status: "CONSISTENT — /media/tv via broad /srv/media mount enables hardlinks"
+    transition_note: "Root folder promoted from narrow /tv to broad /media/tv for hardlink support. Shop copy is parked rollback residue only."
 
   lidarr:
     planned_vm: media-home
