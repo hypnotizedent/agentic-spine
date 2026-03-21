@@ -20,6 +20,15 @@ assert_eq() {
   fi
 }
 
+assert_contains() {
+  local haystack="$1" needle="$2" label="$3"
+  if grep -Fq -- "$needle" <<<"$haystack"; then
+    pass "$label"
+  else
+    fail "$label (expected: $needle)"
+  fi
+}
+
 echo "runtime target repo resolution tests"
 echo "════════════════════════════════════════"
 
@@ -272,6 +281,38 @@ if [[ -f "$WORKER_FIXTURE/runtime/domain-state/projections/worker-usage/README.m
 else
   fail "worker runtime generator writes usage projection under current checkout runtime root"
 fi
+
+echo ""
+echo "── T7: D377 gate honors current checkout over inherited SPINE_ROOT ──"
+D377_FIXTURE="$TMPDIR_BASE/d377-fixture"
+MISDIRECT_ROOT="$TMPDIR_BASE/d377-misdirect"
+git init "$D377_FIXTURE" >/dev/null
+git -C "$D377_FIXTURE" config user.name "Test User"
+git -C "$D377_FIXTURE" config user.email "test@example.com"
+printf 'fixture\n' > "$D377_FIXTURE/README.md"
+git -C "$D377_FIXTURE" add README.md
+git -C "$D377_FIXTURE" commit -m "fixture" >/dev/null
+git -C "$D377_FIXTURE" branch -M main >/dev/null
+
+git init "$MISDIRECT_ROOT" >/dev/null
+git -C "$MISDIRECT_ROOT" config user.name "Test User"
+git -C "$MISDIRECT_ROOT" config user.email "test@example.com"
+mkdir -p "$MISDIRECT_ROOT/ops/lib" "$MISDIRECT_ROOT/mailroom/logs"
+cp "$ROOT/ops/lib/runtime-paths.sh" "$MISDIRECT_ROOT/ops/lib/runtime-paths.sh"
+printf 'misdirect\n' > "$MISDIRECT_ROOT/README.md"
+git -C "$MISDIRECT_ROOT" add README.md ops/lib/runtime-paths.sh
+git -C "$MISDIRECT_ROOT" commit -m "misdirect" >/dev/null
+git -C "$MISDIRECT_ROOT" branch -M main >/dev/null
+
+set +e
+t7_out="$(
+  cd "$D377_FIXTURE"
+  env SPINE_ROOT="$MISDIRECT_ROOT" "$ROOT/surfaces/verify/d377-mailroom-runtime-split-brain-lock.sh" 2>&1
+)"
+t7_status=$?
+set -e
+assert_eq "$t7_status" "0" "D377 uses current checkout instead of inherited SPINE_ROOT"
+assert_contains "$t7_out" "D377 PASS" "D377 reports pass for clean target repo"
 
 echo ""
 echo "────────────────────────────────────────"

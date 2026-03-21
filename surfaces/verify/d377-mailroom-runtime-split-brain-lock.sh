@@ -2,9 +2,10 @@
 # TRIAGE: Fail when repo-local mailroom runtime trees or tracked mailroom runtime artifacts drift back into agentic-spine.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-source "$ROOT/ops/lib/runtime-paths.sh"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$SCRIPT_ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
+ROOT="$SPINE_TARGET_REPO"
 
 fail() {
   echo "D377 FAIL: $*" >&2
