@@ -30,7 +30,7 @@ need_cmd() {
 
 contract_scalar() {
   local query="$1"
-  "$YQ_BIN" e -r "$query // \"\"" "$CONTRACT" 2>/dev/null || true
+  "$YQ_BIN" e -r "$query // \"\"" "$CONTRACT" 2>/dev/null | awk 'NF && $0 != "---" {value=$0} END {print value}' || true
 }
 
 expand_path() {
@@ -138,8 +138,8 @@ archives_allowlist_json="$("$YQ_BIN" e -o=json '.surfaces.archives.allowed_local
 archives_status_text="$("$archives_script" status 2>/dev/null || true)"
 archives_mount_state="$(parse_mount_state "$archives_status_text")"
 [[ -n "$archives_mount_state" ]] || archives_mount_state="UNKNOWN"
-archives_entries="$(collect_local_entries "$archives_root")"
-archives_entry_count="$(count_lines "$archives_entries")"
+archives_entries=""
+archives_entry_count=0
 archives_status="ok"
 
 case "$archives_mount_state" in
@@ -147,9 +147,13 @@ case "$archives_mount_state" in
     archives_status="ok"
     ;;
   STALE)
+    archives_entries="$(collect_local_entries "$archives_root")"
+    archives_entry_count="$(count_lines "$archives_entries")"
     archives_status="${archives_stale_policy:-fail}"
     ;;
   INACTIVE)
+    archives_entries="$(collect_local_entries "$archives_root")"
+    archives_entry_count="$(count_lines "$archives_entries")"
     archives_status="${archives_inactive_policy:-warn}"
     if [[ "$archives_entry_count" -gt 0 ]] && contains_disallowed_entries "$archives_entries" "$archives_allowlist_json"; then
       archives_status="${archives_fallback_policy:-fail}"
