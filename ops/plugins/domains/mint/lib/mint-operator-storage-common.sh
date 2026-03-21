@@ -74,6 +74,17 @@ mint_operator_storage_load_contract() {
   MINT_OPERATOR_MOUNTPOINT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.mount_surface.mountpoint' '~/MinIO')")"
   MINT_OPERATOR_MOUNT_OPERATOR_DROP="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.mount_surface.operator_drop_path' '~/MinIO/artwork-intake/operator-drop')")"
   MINT_OPERATOR_LAUNCHD_HEALTH_INTERVAL_SECONDS="$(mint_operator_contract_scalar '.mount_surface.launchd_health_interval_seconds' '15')"
+  MINT_OPERATOR_ASSIST_MODE="$(mint_operator_contract_scalar '.assisted_move_surface.mode' 'governed_assisted_move')"
+  MINT_OPERATOR_ASSIST_DESTINATION_ROOT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.destination_root' '~/MinIO/artwork-intake/operator-drop')")"
+  MINT_OPERATOR_ASSIST_VERIFICATION_METHOD="$(mint_operator_contract_scalar '.assisted_move_surface.verification_method' 'rsync_checksum_dry_run')"
+  MINT_OPERATOR_ASSIST_CLEANUP_POLICY="$(mint_operator_contract_scalar '.assisted_move_surface.cleanup_policy' 'trash_after_verified_arrival')"
+  MINT_OPERATOR_ASSIST_CONFLICT_POLICY="$(mint_operator_contract_scalar '.assisted_move_surface.conflict_policy' 'fail_if_destination_exists')"
+  MINT_OPERATOR_ASSIST_RECEIPT_ROOT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.receipts_root' '.evidence/spine/mint/operator-drop-assist')")"
+  MINT_OPERATOR_ASSIST_HELPER_BIN="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.helper_bin_path' '~/.local/bin/mint-operator-drop-assist')")"
+  MINT_OPERATOR_ASSIST_FINDER_APP="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.finder_app_path' '~/Applications/Mint Operator Drop.app')")"
+  MINT_OPERATOR_ASSIST_CONTROL_PLANE_ROOT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.control_plane_root' '~/.wt/agentic-spine/control-plane')")"
+  MINT_OPERATOR_ASSIST_INSTALLER_SCRIPT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.installer_script_path' '~/code/workbench/scripts/root/operator/install-mint-operator-drop-surface.sh')")"
+  MINT_OPERATOR_ASSIST_REQUIRES_ENTRY_SURFACE="$(mint_operator_contract_scalar '.assisted_move_surface.boring_state_requires_entry_surface' 'true')"
 
   export \
     MINT_OPERATOR_MODE \
@@ -93,7 +104,18 @@ mint_operator_storage_load_contract() {
     MINT_OPERATOR_MOUNT_SCRIPT \
     MINT_OPERATOR_MOUNTPOINT \
     MINT_OPERATOR_MOUNT_OPERATOR_DROP \
-    MINT_OPERATOR_LAUNCHD_HEALTH_INTERVAL_SECONDS
+    MINT_OPERATOR_LAUNCHD_HEALTH_INTERVAL_SECONDS \
+    MINT_OPERATOR_ASSIST_MODE \
+    MINT_OPERATOR_ASSIST_DESTINATION_ROOT \
+    MINT_OPERATOR_ASSIST_VERIFICATION_METHOD \
+    MINT_OPERATOR_ASSIST_CLEANUP_POLICY \
+    MINT_OPERATOR_ASSIST_CONFLICT_POLICY \
+    MINT_OPERATOR_ASSIST_RECEIPT_ROOT \
+    MINT_OPERATOR_ASSIST_HELPER_BIN \
+    MINT_OPERATOR_ASSIST_FINDER_APP \
+    MINT_OPERATOR_ASSIST_CONTROL_PLANE_ROOT \
+    MINT_OPERATOR_ASSIST_INSTALLER_SCRIPT \
+    MINT_OPERATOR_ASSIST_REQUIRES_ENTRY_SURFACE
 }
 
 mint_operator_storage_require_contract() {
@@ -213,5 +235,35 @@ mint_operator_storage_legacy_desktop_state() {
     printf 'empty\n'
   else
     printf 'dirty\n'
+  fi
+}
+
+mint_operator_storage_assist_helper_state() {
+  if [[ -x "$MINT_OPERATOR_ASSIST_HELPER_BIN" ]]; then
+    printf 'installed\n'
+  else
+    printf 'missing\n'
+  fi
+}
+
+mint_operator_storage_assist_app_state() {
+  if [[ -d "$MINT_OPERATOR_ASSIST_FINDER_APP" || -f "$MINT_OPERATOR_ASSIST_FINDER_APP" ]]; then
+    printf 'installed\n'
+  else
+    printf 'missing\n'
+  fi
+}
+
+mint_operator_storage_assist_surface_state() {
+  local helper_state app_state
+  helper_state="$(mint_operator_storage_assist_helper_state)"
+  app_state="$(mint_operator_storage_assist_app_state)"
+
+  if [[ "$helper_state" == "installed" && "$app_state" == "installed" ]]; then
+    printf 'ready\n'
+  elif [[ "$helper_state" == "missing" && "$app_state" == "missing" ]]; then
+    printf 'missing\n'
+  else
+    printf 'partial\n'
   fi
 }

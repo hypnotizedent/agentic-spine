@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/plugins/domains/mint/lib/mint-operator-storage-common.sh"
+
+MINT_OPERATOR_ASSIST_RSYNC_BIN="${MINT_OPERATOR_ASSIST_RSYNC_BIN:-rsync}"
+MINT_OPERATOR_ASSIST_OSASCRIPT_BIN="${MINT_OPERATOR_ASSIST_OSASCRIPT_BIN:-osascript}"
+MINT_OPERATOR_ASSIST_TRASH_STRATEGY="${MINT_OPERATOR_ASSIST_TRASH_STRATEGY:-finder_trash}"
+MINT_OPERATOR_ASSIST_TRASH_ROOT="${MINT_OPERATOR_ASSIST_TRASH_ROOT:-$HOME/.Trash}"
+
+assist_usage() {
+  cat <<'EOF'
+mint.operator.drop.assist
+
+Usage:
+  mint-operator-drop-assist move [--preview] [--keep-source] [PATH ...]
+  mint-operator-drop-assist open
+  mint-operator-drop-assist status
+
+Notes:
+  - The canonical destination stays ~/MinIO/artwork-intake/operator-drop
+  - This surface verifies arrival before cleaning up the local source
+  - Accepted source entries are directories only
+EOF
+}
+
+assist_fail() {
+  echo "mint.operator.drop.assist FAIL: $*" >&2
+  exit 1
+}
+
+assist_timestamp() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+assist_receipt_id() {
+  date -u +"MINT-DROP-%Y%m%dT%H%M%SZ-$PPID-$RANDOM"
+}
+
+assist_path_in_tree() {
+  local path_a="$1"
+  local path_b="$2"
+  [[ "$path_a" == "$path_b" || "$path_a" == "$path_b/"* ]]
+}
+
+assist_absolute_path() {
+  local raw="$1"
+  (cd "$(dirname "$raw")" && printf '%s/%s\n' "$(pwd)" "$(basename "$raw")")
+}
+
+assist_unique_path() {
+  local target="$1"
+  if [[ ! -e "$target" ]]; then
+    printf '%s\n' "$target"
+    return 0
+  fi
+
+  local dir base name ext candidate idx
+  dir="$(dirname "$target")"
+  base="$(basename "$target")"
+  name="$base"
+  ext=""
+  if [[ "$base" == *.* && "$base" != .* ]]; then
+    name="${base%.*}"
+    ext=".${base##*.}"
+  fi
+  idx=1
+  while :; do
+    candidate="${dir}/${name}-${idx}${ext}"
+    if [[ ! -e "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    idx=$((idx + 1))
+  done
+}
+
+assist_collect_metrics() {
+  local root="$1"
+  local count=0
+  local bytes=0
+  while IFS= read -r -d '' file; do
+    count=$((count + 1))
+    bytes=$((bytes + $(stat -f '%z' "$file")))
+  done < <(find "$root" -type f -print0)
+  printf '%s|%s\n' "$count" "$bytes"
+}
+
+assist_source_root_allowed() {
+  local source_path="$1"
+  local raw allowed_root
+  local any=0
+  while IFS= read -r raw; do
+    [[ -n "$raw" ]] || continue
+    any=1
+    allowed_root="$(mint_operator_expand_path "$raw")"
+    assist_path_in_tree "$source_path" "$allowed_root" && return 0
+  done < <(mint_operator_contract_list '.assisted_move_surface.allowed_source_roots')
+
+  if [[ "$any" -eq 0 ]]; then
+    return 0
+  fi
+  return 1
+}
+
+assist_require_mount_ready() {
+  mint_operator_storage_require_contract
+  mint_operator_storage_load_contract
+
+  if ! mint_operator_storage_remote_ok; then
+    assist_fail "remote ${MINT_OPERATOR_REMOTE}:${MINT_OPERATOR_HEALTH_PROBE_PATH} is not reachable"
+  fi
+
+  local mount_payload mount_status
+  mount_payload="$(mint_operator_storage_mount_status)"
+  mount_status="${mount_payload%%|*}"
+  [[ "$mount_status" == "ACTIVE" ]] || assist_fail "mount ${MINT_OPERATOR_MOUNTPOINT} is not ACTIVE"
+
+  mint_operator_storage_operator_drop_ready || assist_fail "operator drop root is not accessible: ${MINT_OPERATOR_MOUNT_OPERATOR_DROP}"
+  mint_operator_storage_required_paths_ready || assist_fail "required mount paths are not all accessible under ${MINT_OPERATOR_MOUNTPOINT}"
+}
+
+assist_verify_rsync_parity() {
+  local source_dir="$1"
+  local dest_dir="$2"
+  local diff_output=""
+  diff_output="$("$MINT_OPERATOR_ASSIST_RSYNC_BIN" -anrc --delete --itemize-changes "${source_dir}/" "${dest_dir}/" 2>/dev/null || true)"
+  [[ -z "$diff_output" ]]
+}
+
+assist_write_receipt() {
+  local receipt_id="$1"
+  local status="$2"
+  local source_path="$3"
+  local destination_path="$4"
+  local cleanup_action="$5"
+  local preview="$6"
+  local file_count="$7"
+  local total_bytes="$8"
+
+  local receipt_dir="${MINT_OPERATOR_ASSIST_RECEIPT_ROOT}/${receipt_id}"
+  mkdir -p "$receipt_dir"
+  cat > "${receipt_dir}/receipt.yaml" <<EOF
+receipt_id: ${receipt_id}
+status: ${status}
+generated_at: $(assist_timestamp)
+source_path: ${source_path}
+destination_path: ${destination_path}
+cleanup_action: ${cleanup_action}
+preview: ${preview}
+file_count: ${file_count}
+total_bytes: ${total_bytes}
+verification_method: ${MINT_OPERATOR_ASSIST_VERIFICATION_METHOD}
+EOF
+}
+
+assist_trash_source() {
+  local source_path="$1"
+
+  case "$MINT_OPERATOR_ASSIST_TRASH_STRATEGY" in
+    keep)
+      return 0
+      ;;
+    trash_dir)
+      mkdir -p "$MINT_OPERATOR_ASSIST_TRASH_ROOT"
+      local trash_target
+      trash_target="$(assist_unique_path "${MINT_OPERATOR_ASSIST_TRASH_ROOT}/$(basename "$source_path")")"
+      mv "$source_path" "$trash_target"
+      return 0
+      ;;
+    finder_trash)
+      if command -v "$MINT_OPERATOR_ASSIST_OSASCRIPT_BIN" >/dev/null 2>&1; then
+        if "$MINT_OPERATOR_ASSIST_OSASCRIPT_BIN" - "$source_path" >/dev/null 2>&1 <<'EOF'
+on run argv
+  tell application "Finder"
+    delete POSIX file (item 1 of argv)
+  end tell
+end run
+EOF
+        then
+          return 0
+        fi
+      fi
+      ;;
+  esac
+
+  mkdir -p "$MINT_OPERATOR_ASSIST_TRASH_ROOT"
+  local fallback_target
+  fallback_target="$(assist_unique_path "${MINT_OPERATOR_ASSIST_TRASH_ROOT}/$(basename "$source_path")")"
+  mv "$source_path" "$fallback_target"
+}
+
+assist_move_one() {
+  local source_path="$1"
+  local preview="$2"
+  local keep_source="$3"
+
+  [[ -d "$source_path" ]] || assist_fail "source must be an existing directory: ${source_path}"
+  source_path="$(assist_absolute_path "$source_path")"
+  assist_source_root_allowed "$source_path" || assist_fail "source is outside allowed assisted-move roots: ${source_path}"
+  assist_path_in_tree "$source_path" "$MINT_OPERATOR_MOUNT_OPERATOR_DROP" && assist_fail "source is already inside canonical operator-drop: ${source_path}"
+  assist_path_in_tree "$source_path" "$MINT_OPERATOR_MOUNTPOINT" && assist_fail "source cannot live under the MinIO mount root: ${source_path}"
+
+  local folder_name destination_path staging_path metrics file_count total_bytes receipt_id cleanup_action
+  folder_name="$(basename "$source_path")"
+  destination_path="${MINT_OPERATOR_ASSIST_DESTINATION_ROOT}/${folder_name}"
+  [[ ! -e "$destination_path" ]] || assist_fail "destination already exists: ${destination_path}"
+
+  metrics="$(assist_collect_metrics "$source_path")"
+  file_count="${metrics%%|*}"
+  total_bytes="${metrics##*|}"
+  receipt_id="$(assist_receipt_id)"
+
+  if [[ "$preview" == "1" ]]; then
+    assist_write_receipt "$receipt_id" "preview" "$source_path" "$destination_path" "none" "true" "$file_count" "$total_bytes"
+    cat <<EOF
+preview: ready
+source: ${source_path}
+destination: ${destination_path}
+file_count: ${file_count}
+total_bytes: ${total_bytes}
+cleanup_policy: ${MINT_OPERATOR_ASSIST_CLEANUP_POLICY}
+receipt: ${MINT_OPERATOR_ASSIST_RECEIPT_ROOT}/${receipt_id}/receipt.yaml
+EOF
+    return 0
+  fi
+
+  staging_path="${MINT_OPERATOR_ASSIST_DESTINATION_ROOT}/.incoming-${folder_name}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  mkdir -p "$staging_path"
+
+  "$MINT_OPERATOR_ASSIST_RSYNC_BIN" -a "${source_path}/" "${staging_path}/"
+  assist_verify_rsync_parity "$source_path" "$staging_path" || {
+    rm -rf "$staging_path"
+    assist_fail "verification failed before promoting ${folder_name}"
+  }
+
+  mv "$staging_path" "$destination_path"
+  assist_verify_rsync_parity "$source_path" "$destination_path" || assist_fail "verification failed after promoting ${folder_name}"
+
+  cleanup_action="kept"
+  if [[ "$keep_source" == "0" ]]; then
+    assist_trash_source "$source_path"
+    cleanup_action="$MINT_OPERATOR_ASSIST_CLEANUP_POLICY"
+  fi
+
+  assist_write_receipt "$receipt_id" "moved" "$source_path" "$destination_path" "$cleanup_action" "false" "$file_count" "$total_bytes"
+  cat <<EOF
+status: moved
+source: ${source_path}
+destination: ${destination_path}
+file_count: ${file_count}
+total_bytes: ${total_bytes}
+cleanup_action: ${cleanup_action}
+receipt: ${MINT_OPERATOR_ASSIST_RECEIPT_ROOT}/${receipt_id}/receipt.yaml
+EOF
+}
+
+assist_open_destination() {
+  mint_operator_storage_require_contract
+  mint_operator_storage_load_contract
+  open "$MINT_OPERATOR_ASSIST_DESTINATION_ROOT"
+}
+
+main() {
+  local cmd="move"
+  local preview=0
+  local keep_source=0
+  local -a sources=()
+
+  if [[ $# -gt 0 ]]; then
+    case "$1" in
+      move|open|status|help)
+        cmd="$1"
+        shift
+        ;;
+      -h|--help)
+        assist_usage
+        exit 0
+        ;;
+    esac
+  fi
+
+  case "$cmd" in
+    help)
+      assist_usage
+      exit 0
+      ;;
+    open)
+      assist_open_destination
+      exit 0
+      ;;
+    status)
+      exec "$ROOT/ops/plugins/domains/mint/bin/mint-operator-storage-status" "$@"
+      ;;
+    move)
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --preview)
+            preview=1
+            shift
+            ;;
+          --keep-source)
+            keep_source=1
+            shift
+            ;;
+          -h|--help)
+            assist_usage
+            exit 0
+            ;;
+          --)
+            shift
+            while [[ $# -gt 0 ]]; do
+              sources+=("$1")
+              shift
+            done
+            ;;
+          *)
+            sources+=("$1")
+            shift
+            ;;
+        esac
+      done
+      ;;
+  esac
+
+  [[ "${#sources[@]}" -gt 0 ]] || assist_fail "pass one or more source directories"
+
+  assist_require_mount_ready
+  mkdir -p "$MINT_OPERATOR_ASSIST_RECEIPT_ROOT"
+
+  local source
+  for source in "${sources[@]}"; do
+    assist_move_one "$source" "$preview" "$keep_source"
+  done
+}
+
+main "$@"

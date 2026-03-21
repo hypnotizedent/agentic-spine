@@ -67,10 +67,15 @@ fallback_count="$(mint_operator_storage_count_lines "$fallback_entries")"
 legacy_desktop_state="$(mint_operator_storage_legacy_desktop_state)"
 legacy_desktop_entries="$(mint_operator_storage_legacy_desktop_entries || true)"
 legacy_desktop_count="$(mint_operator_storage_count_lines "$legacy_desktop_entries")"
+assist_helper_state="$(mint_operator_storage_assist_helper_state)"
+assist_app_state="$(mint_operator_storage_assist_app_state)"
+assist_surface_state="$(mint_operator_storage_assist_surface_state)"
 
 overall_status="ok"
 if [[ "$remote_status" != "ok" || "$mount_status" != "ACTIVE" || "$operator_drop_state" != "ready" || "$required_paths_state" != "ready" || "$fallback_count" -gt 0 || "$legacy_desktop_state" == "dirty" ]]; then
   overall_status="fail"
+elif [[ "$MINT_OPERATOR_ASSIST_REQUIRES_ENTRY_SURFACE" == "true" && "$assist_surface_state" != "ready" ]]; then
+  overall_status="warn"
 elif [[ "$legacy_desktop_state" == "empty" ]]; then
   overall_status="warn"
 fi
@@ -96,6 +101,12 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       --arg required_paths_state "$required_paths_state" \
       --arg legacy_desktop_path "$MINT_OPERATOR_LEGACY_DESKTOP_PATH" \
       --arg legacy_desktop_state "$legacy_desktop_state" \
+      --arg assist_mode "$MINT_OPERATOR_ASSIST_MODE" \
+      --arg assist_helper_bin "$MINT_OPERATOR_ASSIST_HELPER_BIN" \
+      --arg assist_helper_state "$assist_helper_state" \
+      --arg assist_app_path "$MINT_OPERATOR_ASSIST_FINDER_APP" \
+      --arg assist_app_state "$assist_app_state" \
+      --arg assist_surface_state "$assist_surface_state" \
       --arg fallback_count "$fallback_count" \
       --arg legacy_desktop_count "$legacy_desktop_count" \
       '{
@@ -117,6 +128,14 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
         },
         operator_drop_state: $operator_drop_state,
         required_paths_state: $required_paths_state,
+        assisted_move_surface: {
+          mode: $assist_mode,
+          helper_bin: $assist_helper_bin,
+          helper_state: $assist_helper_state,
+          finder_app_path: $assist_app_path,
+          finder_app_state: $assist_app_state,
+          surface_state: $assist_surface_state
+        },
         fallback_local_entries: ($fallback_count | tonumber),
         legacy_desktop: {
           path: $legacy_desktop_path,
@@ -131,7 +150,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
 fi
 
 if [[ "$BRIEF" -eq 1 ]]; then
-  echo "status=${overall_status} mode=${MINT_OPERATOR_MODE} remote=${remote_status} mount=${mount_status} operator_drop=${operator_drop_state} desktop_legacy=${legacy_desktop_state} fallback=${fallback_count}"
+  echo "status=${overall_status} mode=${MINT_OPERATOR_MODE} remote=${remote_status} mount=${mount_status} operator_drop=${operator_drop_state} assist=${assist_surface_state} desktop_legacy=${legacy_desktop_state} fallback=${fallback_count}"
   exit 0
 fi
 
@@ -151,8 +170,14 @@ echo "mount_process_running: ${mount_process}"
 echo "mount_rc_reachable: ${mount_rc}"
 echo "operator_drop_state: ${operator_drop_state}"
 echo "required_paths_state: ${required_paths_state}"
+echo "assisted_move_mode: ${MINT_OPERATOR_ASSIST_MODE}"
+echo "assisted_move_helper: ${MINT_OPERATOR_ASSIST_HELPER_BIN}"
+echo "assisted_move_helper_state: ${assist_helper_state}"
+echo "assisted_move_finder_app: ${MINT_OPERATOR_ASSIST_FINDER_APP}"
+echo "assisted_move_finder_app_state: ${assist_app_state}"
+echo "assisted_move_surface_state: ${assist_surface_state}"
 echo "fallback_local_entries: ${fallback_count}"
 echo "legacy_desktop_path: ${MINT_OPERATOR_LEGACY_DESKTOP_PATH}"
 echo "legacy_desktop_state: ${legacy_desktop_state}"
 echo "legacy_desktop_entries: ${legacy_desktop_count}"
-echo "note: drag directly into ~/MinIO/artwork-intake/operator-drop; Desktop staging is legacy drift"
+echo "note: use the governed assisted-move surface for Desktop/Downloads -> operator-drop; manual Finder copy still leaves source drift"

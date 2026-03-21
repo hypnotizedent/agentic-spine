@@ -42,6 +42,9 @@ echo "── T1: contract and launchd wiring follow the real mount workflow ─�
 assert_contains "$(cat "$CONTRACT")" "mode: mounted_operator_drop" "contract promotes mounted operator-drop as the critical path"
 assert_contains "$(cat "$CONTRACT")" "path: ~/MinIO/artwork-intake/operator-drop" "contract pins canonical operator-drop mount path"
 assert_contains "$(cat "$CONTRACT")" "path: ~/Desktop/Operator Drop" "contract tracks legacy Desktop residue path"
+assert_contains "$(cat "$CONTRACT")" "mode: governed_assisted_move" "contract adds governed assisted move surface"
+assert_contains "$(cat "$CONTRACT")" "helper_bin_path: ~/.local/bin/mint-operator-drop-assist" "contract pins local helper path"
+assert_contains "$(cat "$CONTRACT")" "finder_app_path: ~/Applications/Mint Operator Drop.app" "contract pins Finder app path"
 assert_contains "$(cat "$REGISTRY")" "com.ronnyworks.mintfiles.mount" "launchd registry tracks mintfiles mount"
 assert_contains "$(cat "$REGISTRY")" "template_path: ops/plugins/infra/host/launchd/com.ronnyworks.mintfiles.mount.plist" "launchd registry points at spine template"
 assert_contains "$(cat "$REGISTRY")" "monitor: true" "launchd registry monitors the mount label"
@@ -144,6 +147,17 @@ mount_surface:
     - "$MOUNT_ROOT/artwork-registry"
     - "$MOUNT_ROOT/artwork-output"
     - "$MOUNT_ROOT/client-assets"
+assisted_move_surface:
+  mode: governed_assisted_move
+  destination_root: "$DROP_ROOT"
+  verification_method: rsync_checksum_dry_run
+  cleanup_policy: trash_after_verified_arrival
+  receipts_root: "$TMPDIR_BASE/receipts"
+  helper_bin_path: "$TMPDIR_BASE/bin/mint-operator-drop-assist"
+  finder_app_path: "$TMPDIR_BASE/Applications/Mint Operator Drop.app"
+  control_plane_root: "$TMPDIR_BASE/control-plane"
+  installer_script_path: "$TMPDIR_BASE/install-mint-operator-drop-surface.sh"
+  boring_state_requires_entry_surface: true
 EOF
 
 echo ""
@@ -165,6 +179,9 @@ assert_contains "$t2_out" "mount=INACTIVE" "mount state is surfaced explicitly"
 echo ""
 echo "── T3: active mount with canonical paths ready passes ──"
 mkdir -p "$DROP_ROOT" "$MOUNT_ROOT/artwork-registry" "$MOUNT_ROOT/artwork-output" "$MOUNT_ROOT/client-assets"
+mkdir -p "$TMPDIR_BASE/bin" "$TMPDIR_BASE/Applications/Mint Operator Drop.app"
+touch "$TMPDIR_BASE/bin/mint-operator-drop-assist"
+chmod +x "$TMPDIR_BASE/bin/mint-operator-drop-assist"
 t3_out="$(
   cd "$ROOT" && \
   REMOTE_ROOT="$REMOTE_ROOT" \
@@ -181,6 +198,7 @@ t3_out="$(
 )"
 assert_contains "$t3_out" "status=ok" "status passes when mount and operator-drop are healthy"
 assert_contains "$t3_out" "operator_drop=ready" "status reports canonical operator-drop ready"
+assert_contains "$t3_out" "assist=ready" "status reports assisted move surface ready"
 assert_contains "$t3_out" "desktop_legacy=absent" "status reports no Desktop residue"
 
 echo ""
@@ -223,6 +241,26 @@ t5_out="$(
 )"
 assert_contains "$t5_out" "status=warn" "status warns on empty legacy Desktop folder"
 assert_contains "$t5_out" "desktop_legacy=empty" "status reports empty legacy Desktop folder"
+
+echo ""
+echo "── T6: missing assisted move surface is warning-only when mount is healthy ──"
+rm -rf "$TMPDIR_BASE/bin" "$TMPDIR_BASE/Applications/Mint Operator Drop.app"
+t6_out="$(
+  cd "$ROOT" && \
+  REMOTE_ROOT="$REMOTE_ROOT" \
+  MINT_OPERATOR_STORAGE_CONTRACT="$TEST_CONTRACT" \
+  MINT_OPERATOR_MOUNT_SCRIPT="$FAKE_MOUNT_SCRIPT" \
+  MINT_OPERATOR_RCLONE_BIN="$RCLONE_BIN" \
+  FAKE_MOUNT_ROOT="$MOUNT_ROOT" \
+  FAKE_MOUNT_STATE=ACTIVE \
+  FAKE_MOUNT_ATTACHED=yes \
+  FAKE_MOUNT_ACCESSIBLE=yes \
+  FAKE_MOUNT_PROCESS=yes \
+  FAKE_MOUNT_RC=yes \
+  "$STATUS_BIN" --brief
+)"
+assert_contains "$t6_out" "status=warn" "status warns when assisted move surface is not installed"
+assert_contains "$t6_out" "assist=missing" "status reports assisted move surface missing"
 
 echo ""
 echo "────────────────────────────────────────"
