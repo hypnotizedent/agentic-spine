@@ -13,7 +13,7 @@ fail() {
 }
 
 required_dirs=(bin docs fixtures ops surfaces)
-allowed_dirs=(.claude .gitea .githooks .github bin docs fixtures ops surfaces)
+allowed_dirs=(.claude .git .gitea .githooks .github bin docs fixtures ops surfaces)
 allowed_files=(.environment.yaml .git .gitignore .identity.yaml .mcp.json AGENTS.md CLAUDE.md README.md)
 
 contains() {
