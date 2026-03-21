@@ -9,7 +9,7 @@
 # Used by: media.health.check, media.service.status capabilities
 #          D106-D110 drift gates
 
-version: 4
+version: 5
 updated_at: "2026-03-21"
 owner: "@ronny"
 
@@ -26,9 +26,9 @@ naming_aliases:
     note: "Legacy media-stack host alias retired after VM split."
   arr-stack:
     status: active
-    canonical_vm: download-stack
+    canonical_vm: media-home
     target_vm: media-home
-    note: "Current parked ARR writer stack remains on download-stack. Home-first writer promotion target is media-home."
+    note: "Canonical ARR writer control plane is now active on media-home. Residual shop copies remain parked rollback residue."
   media-home-stack:
     status: active
     canonical_vm: media-home
@@ -37,12 +37,12 @@ naming_aliases:
 operating_model:
   active_plane:
     vm: media-home
-    note: "Canonical live read/watch plane. Active streaming services (Jellyfin/Navidrome) operational. Writer services planned but not yet deployed."
+    note: "Canonical live read/watch plane. Streaming services plus ARR management services are operational on media-home. Download clients remain intentionally parked."
   writer_plane:
     target_vm: media-home
-    current_vm: download-stack
-    transition_state: in_progress
-    note: "ARR writer services (Radarr/Sonarr/Lidarr/Prowlarr/SABnzbd/qBittorrent) currently operational on download-stack, planned for media-home home-first promotion."
+    current_vm: media-home
+    transition_state: promoted_management_only
+    note: "ARR management services (Radarr/Sonarr/Lidarr/Prowlarr) are active on media-home. Download clients remain intentionally parked while home-first stabilization continues. Residual shop copies are rollback residue only."
   archive_plane:
     vm: pve
     note: "Canonical passive archive plane on md1400."
@@ -57,69 +57,69 @@ services:
 
   # Indexing
   prowlarr:
-    vm: download-stack
+    vm: media-home
     target_vm: media-home
     port: 9696
     health: /ping
-    status: parked
-    target_status: planned
+    status: active
+    target_status: active
     category: indexing
-    description: "Indexer manager for *arr services (currently parked on residual writer plane; canonical target is media-home)"
+    description: "Indexer manager for *arr services on the active home writer-management plane"
 
   # Management (*arr stack)
   radarr:
-    vm: download-stack
+    vm: media-home
     target_vm: media-home
     port: 7878
     health: /ping
-    status: parked
-    target_status: planned
+    status: active
+    target_status: active
     category: management
-    description: "Movie management (currently parked on residual writer plane; canonical target is media-home)"
+    description: "Movie management active on media-home. Download clients remain intentionally parked during stabilization."
     dependencies: [prowlarr, sabnzbd, qbittorrent]
 
   sonarr:
-    vm: download-stack
+    vm: media-home
     target_vm: media-home
     port: 8989
     health: /ping
-    status: parked
-    target_status: planned
+    status: active
+    target_status: active
     category: management
-    description: "TV management (currently parked on residual writer plane; canonical target is media-home)"
+    description: "TV management active on media-home. Download clients remain intentionally parked during stabilization."
     dependencies: [prowlarr, sabnzbd, qbittorrent]
 
   lidarr:
-    vm: download-stack
+    vm: media-home
     target_vm: media-home
     port: 8686
     health: /ping
-    status: parked
-    target_status: planned
+    status: active
+    target_status: active
     category: management
-    description: "Music management (currently parked on residual writer plane; canonical target is media-home)"
+    description: "Music management active on media-home. Download clients remain intentionally parked during stabilization."
     dependencies: [prowlarr, sabnzbd, slskd]
 
   # Download clients
   sabnzbd:
-    vm: download-stack
+    vm: media-home
     target_vm: media-home
     port: 8080
     health: /api?mode=version&output=json
     status: parked
     target_status: planned
     category: download
-    description: "Usenet downloader (currently parked on residual writer plane; canonical target is media-home)"
+    description: "Usenet downloader configured on media-home but intentionally parked to prevent downloads during stabilization"
 
   qbittorrent:
-    vm: download-stack
+    vm: media-home
     target_vm: media-home
     port: 8081
     health: /
     status: parked
     target_status: planned
     category: download
-    description: "BitTorrent client (currently parked on residual writer plane; canonical target is media-home)"
+    description: "BitTorrent client configured on media-home but intentionally parked to prevent downloads during stabilization"
 
   # Enhancement services
   bazarr-dl:

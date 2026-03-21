@@ -1,7 +1,7 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-09
+last_verified: 2026-03-21
 scope: worker-usage-generated-index
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
