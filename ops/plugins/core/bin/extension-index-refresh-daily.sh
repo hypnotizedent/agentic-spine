@@ -5,11 +5,17 @@ set -euo pipefail
 # LaunchAgent template: com.ronny.extension-index-refresh-daily
 # W69 freshness recovery: D178
 
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
-CAP_RUNNER="$SPINE_ROOT/bin/ops"
-source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
+CONTROL_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
+source "${CONTROL_ROOT}/ops/lib/runtime-managed-worktree.sh"
+spine_runtime_activate_managed_worktree "$CONTROL_ROOT"
+RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"
+CAP_RUNNER="$RUNTIME_ROOT/bin/ops"
+source "${RUNTIME_ROOT}/ops/lib/job-wrapper.sh"
 
 echo "[extension-index-refresh-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "[extension-index-refresh-daily] control_root=${CONTROL_ROOT}"
+echo "[extension-index-refresh-daily] runtime_root=${RUNTIME_ROOT}"
+echo "[extension-index-refresh-daily] worktree_identity=${OPS_WORKTREE_IDENTITY:-unset}"
 
 spine_job_run \
   "extension-index-refresh-daily:platform.extension.index.build" \

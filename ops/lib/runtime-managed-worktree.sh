@@ -46,6 +46,21 @@ spine_runtime_prepare_managed_worktree() {
   fi
 
   export OPS_WORKTREE_IDENTITY="${OPS_WORKTREE_IDENTITY:-CP-RUNTIME-SCHEDULER}"
-  export SPINE_ROOT="$runtime_root"
   printf '%s\n' "$runtime_root"
+}
+
+spine_runtime_activate_managed_worktree() {
+  local control_root="$1"
+  local runtime_root=""
+
+  runtime_root="$(spine_runtime_prepare_managed_worktree "$control_root")" || return 1
+
+  export SPINE_CONTROL_ROOT="${SPINE_CONTROL_ROOT:-$control_root}"
+  export SPINE_RUNTIME_ACTIVE_ROOT="$runtime_root"
+  export SPINE_ROOT="$runtime_root"
+  export SPINE_TARGET_REPO="$runtime_root"
+  export SPINE_REPO="$runtime_root"
+  export SPINE_CODE="$runtime_root"
+
+  cd "$runtime_root"
 }

@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
-CAP_RUNNER="$SPINE_ROOT/bin/ops"
-CHECKSUM="$SPINE_ROOT/ops/plugins/core/evidence/bin/receipts-checksum-parity-report"
-source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
+CONTROL_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
+source "${CONTROL_ROOT}/ops/lib/runtime-managed-worktree.sh"
+spine_runtime_activate_managed_worktree "$CONTROL_ROOT"
+RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"
+CAP_RUNNER="$RUNTIME_ROOT/bin/ops"
+CHECKSUM="$RUNTIME_ROOT/ops/plugins/core/evidence/bin/receipts-checksum-parity-report"
+source "${RUNTIME_ROOT}/ops/lib/job-wrapper.sh"
 
 echo "[receipts-archive-reconcile-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "[receipts-archive-reconcile-daily] control_root=${CONTROL_ROOT}"
+echo "[receipts-archive-reconcile-daily] runtime_root=${RUNTIME_ROOT}"
+echo "[receipts-archive-reconcile-daily] worktree_identity=${OPS_WORKTREE_IDENTITY:-unset}"
 
 spine_job_run "receipts-archive-reconcile-daily:receipts.index.build" \
   "$CAP_RUNNER" cap run receipts.index.build

@@ -172,7 +172,7 @@ check_launchd_health() {
   check_task_worker_health || worker_rc=$?
 
   local scheduler_payload scheduler_status scheduler_stale scheduler_failed scheduler_unknown scheduler_total
-  local scheduler_stale_labels scheduler_failed_labels
+  local scheduler_stale_labels scheduler_failed_labels scheduler_failed_labels_filtered
   scheduler_payload="$("$SCHEDULER_STATUS_SCRIPT" --json 2>/dev/null || true)"
   scheduler_status="$(jq -r '.status // "unknown"' <<<"$scheduler_payload" 2>/dev/null || echo "unknown")"
   scheduler_stale="$(jq -r '.data.summary.stale // 0' <<<"$scheduler_payload" 2>/dev/null || echo "0")"
@@ -181,13 +181,31 @@ check_launchd_health() {
   scheduler_total="$(jq -r '.data.summary.total // 0' <<<"$scheduler_payload" 2>/dev/null || echo "0")"
   scheduler_stale_labels="$(jq -r '.data.stale_labels // [] | join(", ")' <<<"$scheduler_payload" 2>/dev/null || true)"
   scheduler_failed_labels="$(jq -r '.data.failed_labels // [] | join(", ")' <<<"$scheduler_payload" 2>/dev/null || true)"
+  scheduler_failed_labels_filtered="$(
+    jq -r '
+      (.data.failed_labels // [])
+      | map(select(. != "com.ronny.launchd-health-check"))
+      | join(", ")
+    ' <<<"$scheduler_payload" 2>/dev/null || true
+  )"
+  if [[ -n "$scheduler_failed_labels_filtered" ]]; then
+    scheduler_failed="$(jq -r '
+      (.data.failed_labels // [])
+      | map(select(. != "com.ronny.launchd-health-check"))
+      | length
+    ' <<<"$scheduler_payload" 2>/dev/null || echo "$scheduler_failed")"
+  else
+    scheduler_failed=0
+  fi
 
-  if [[ "$scheduler_status" == "warn" || "$scheduler_status" == "error" ]]; then
+  echo "[launchd-health-check] scheduler_status=${scheduler_status} total=${scheduler_total} stale=${scheduler_stale} failed=${scheduler_failed} unknown=${scheduler_unknown} stale_labels=${scheduler_stale_labels:-none} failed_labels=${scheduler_failed_labels_filtered:-none}"
+
+  if [[ "$scheduler_stale" -gt 0 || "$scheduler_failed" -gt 0 || "$scheduler_unknown" -gt 0 ]]; then
     spine_enqueue_email_intent \
       "launchd-health-check" \
       "incident" \
       "LaunchAgent recency/status drift detected" \
-      "scheduler_status=${scheduler_status} total=${scheduler_total} stale=${scheduler_stale} failed=${scheduler_failed} unknown=${scheduler_unknown} stale_labels=${scheduler_stale_labels:-none} failed_labels=${scheduler_failed_labels:-none}" \
+      "scheduler_status=${scheduler_status} total=${scheduler_total} stale=${scheduler_stale} failed=${scheduler_failed} unknown=${scheduler_unknown} stale_labels=${scheduler_stale_labels:-none} failed_labels=${scheduler_failed_labels_filtered:-none}" \
       "launchd-health-check"
   fi
 
