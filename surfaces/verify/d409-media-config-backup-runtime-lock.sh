@@ -27,13 +27,16 @@ JOB_HOST="$(yq -r '.jobs[] | select(.id == "media-config-media-home-cold-sync-da
 JOB_SCRIPT="$(yq -r '.jobs[] | select(.id == "media-config-media-home-cold-sync-daily") | .script_ref // ""' "$SCHEDULE" 2>/dev/null || true)"
 TARGET_HOST="$(yq -r '.targets[] | select(.name == "app-media-config-media-home") | .host // ""' "$INVENTORY" 2>/dev/null || true)"
 TARGET_PATH="$(yq -r '.targets[] | select(.name == "app-media-config-media-home") | .base_path // ""' "$INVENTORY" 2>/dev/null || true)"
+NAS_USER="$(yq -r '.ssh.targets[] | select(.id == "nas") | .user // "ronadmin"' "$SSH_TARGETS" 2>/dev/null || true)"
+NAS_HOST="$(yq -r '.ssh.targets[] | select(.id == "nas") | .host // ""' "$SSH_TARGETS" 2>/dev/null || true)"
 PVE_HOST="$(yq -r '.ssh.targets[] | select(.id == "pve") | .host // ""' "$SSH_TARGETS" 2>/dev/null || true)"
 
 [[ "$JOB_HOST" == "media-home" ]] || err "backup.schedule host is '$JOB_HOST', expected 'media-home'"
 [[ "$JOB_SCRIPT" == "/usr/local/bin/media-config-backup.sh" ]] || err "backup.schedule script_ref is '$JOB_SCRIPT', expected '/usr/local/bin/media-config-backup.sh'"
-[[ "$TARGET_HOST" == "pve" ]] || err "backup inventory target host is '$TARGET_HOST', expected 'pve'"
-[[ "$TARGET_PATH" == "/md1400/backup-cold/apps/media-config/media-home" ]] || err "backup inventory target path is '$TARGET_PATH'"
+[[ "$TARGET_HOST" == "nas" ]] || err "backup inventory target host is '$TARGET_HOST', expected 'nas'"
+[[ "$TARGET_PATH" == "/volume1/backups/apps/media-config/media-home" ]] || err "backup inventory target path is '$TARGET_PATH'"
 [[ -n "$PVE_HOST" ]] || err "pve host missing from ssh.targets.yaml"
+[[ -n "$NAS_HOST" ]] || err "nas host missing from ssh.targets.yaml"
 
 read -r MEDIA_HOME_HOST MEDIA_HOME_PATH <<<"$(ssh_resolve_ssh_host_with_fallback media-home 8 || true)"
 MEDIA_HOME_USER="$(yq -r '.ssh.targets[] | select(.id == "media-home") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null || true)"
@@ -57,7 +60,8 @@ if [[ "$ERRORS" -eq 0 ]]; then
       test -x /usr/local/bin/media-config-backup.sh &&
       test -f /etc/cron.d/media-config-backup &&
       grep -Fqx \"15 4 * * * root /usr/local/bin/media-config-backup.sh >> /var/log/media-config-backup.log 2>&1\" /etc/cron.d/media-config-backup &&
-      ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@${PVE_HOST} \"test -d ${TARGET_PATH}\"
+      ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${NAS_USER}@${NAS_HOST} \"test -d ${TARGET_PATH}\" &&
+      ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@${PVE_HOST} \"test -d /md1400/backup-cold/apps/media-config/media-home\"
     '" 2>&1) || {
       err "remote runtime check failed: ${REMOTE_CHECK:-unknown error}"
     }

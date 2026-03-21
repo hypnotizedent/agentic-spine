@@ -114,7 +114,17 @@ model:
       base_path: /md1400/backup-cold/apps/media-config
       max_total_gb: 500
       max_file_count: 1000
-      description: "Canonical 730XD backup plane for media-home combined config-state archives. Legacy split-shop VM capsules remain historical restore residue only."
+      description: "Secondary/offsite cold copy lane for media-home combined config-state archives. Legacy split-shop VM capsules remain historical restore residue only."
+    media-config-backups:
+      host: nas
+      base_path: /volume1/backups/apps/media-config
+      exclusion_policy:
+        - /srv/media
+        - "*/cache"
+        - "*/tmp"
+      max_total_gb: 500
+      max_file_count: 800
+      description: "Canonical primary app/config backup plane for media-home combined config-state archives. Payload remains on Synology and is excluded from config archives."
     nas-home-local-exception:
       host: nas
       base_path: /volume1/backups/proxmox_backups/dump
@@ -128,16 +138,6 @@ model:
       max_file_count: 20000
       description: "Explicit tombstone subtree for retired Synology backup lanes. This is not a canonical backup authority and exists only to quarantine legacy backup forests until a later delete/review wave."
     # nas-app-backups REMOVED 2026-03-08: Fully deprecated, migration complete to 730XD canonical plane.
-    media-config-backups:
-      host_group:
-        - media-home
-      base_path: /srv/appdata/backups/media-config
-      exclusion_policy:
-        - /srv/media
-        - "*/cache"
-        - "*/tmp"
-      max_total_gb: 300
-      max_file_count: 800
     r730xd-archive-smb-snapshots:
       host: pve
       base_path: /md1400/backup-cold/archive-smb/snapshots
@@ -508,13 +508,13 @@ runtime_units:
       - /srv/appdata/compose/media-write/volumes/*/tmp
       - /srv/appdata/compose/media-playback/volumes/*/cache
       - /srv/appdata/compose/media-playback/volumes/*/tmp
-    destination_lane: r730xd-media-config-backups
+    destination_lane: media-config-backups
     schedule_class: daily-config-est
     restore_class: media-config-dry-run-monthly
     inventory_targets:
       - app-media-config-media-home
     backup_admission_state: production_ready
-    description: "Combined media-home config-state fleet for the active home media plane. Payload remains on Synology and is excluded from config archives."
+    description: "Combined media-home config-state fleet for the active home media plane. Synology is the canonical primary app/config backup plane; md1400 receives the secondary cold copy."
   - unit_id: container-fleet-immich
     kind: container-fleet
     hostname: immich
@@ -1053,12 +1053,12 @@ targets:
   - name: app-media-config-media-home
     enabled: true
     kind: file_glob
-    host: pve
-    base_path: "/md1400/backup-cold/apps/media-config/media-home"
+    host: nas
+    base_path: "/volume1/backups/apps/media-config/media-home"
     glob: "media-home-config-*.tar.gz"
     stale_after_hours: 30
     classification: critical
-    description: "Media-home combined config-state backups. Synced to the 730XD canonical backup plane; media payload remains regenerable and excluded."
+    description: "Media-home combined config-state backups. Synology is canonical primary; md1400 receives the secondary cold copy and media payload remains regenerable and excluded."
   - name: device-ronny-macbook
     enabled: false
     kind: file_glob
