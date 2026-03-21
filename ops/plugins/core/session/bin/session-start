@@ -145,6 +145,7 @@ Lanes:
 Notes:
   - No args defaults to fast startup mode.
   - full mode runs status + stability snapshot + core verify.
+  - startup attempts bounded boring-root auto-heal before enforcing dirty/parity guards.
   - startup blocks dirty checkouts and clean-but-diverged main checkouts by default.
 EOF
   exit 1
@@ -181,6 +182,20 @@ run_startup_checkout_guards() {
     echo "session.start FAIL: main checkout diverged from origin/main" >&2
     return 1
   }
+}
+
+run_root_boring_reconcile() {
+  local trigger="${1:-session.start}"
+  local normalize_bin="${SPINE_ROOT_BORING_RECONCILE_BIN:-$ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-root-normalize}"
+
+  [[ -x "$normalize_bin" ]] || return 0
+
+  local normalize_out=""
+  if ! normalize_out="$(SPINE_TARGET_REPO="$SPINE_TARGET_REPO" SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" "$normalize_bin" --trigger "$trigger" --brief 2>&1)"; then
+    [[ -n "$normalize_out" ]] && printf '%s\n' "$normalize_out" >&2
+    echo "session.start FAIL: root boring reconcile blocked" >&2
+    return 1
+  fi
 }
 
 run_managed_worktree_sync() {
@@ -260,6 +275,8 @@ run_fast_startup() {
       return 2
       ;;
   esac
+
+  run_root_boring_reconcile "session.start.${mode}" || return 1
 
   # Run startup checkout guards before bootstrapping the session.
   run_startup_checkout_guards \
@@ -465,6 +482,8 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+run_root_boring_reconcile "session.start.lane.${LANE}" || exit 1
 
 run_startup_checkout_guards \
   "$allow_dirty" \

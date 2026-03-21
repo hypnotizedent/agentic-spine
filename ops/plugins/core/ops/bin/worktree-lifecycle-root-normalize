@@ -1,0 +1,647 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if command -v git >/dev/null 2>&1; then
+  while IFS= read -r git_var; do
+    [[ -n "$git_var" ]] || continue
+    unset "$git_var"
+  done < <(git rev-parse --local-env-vars 2>/dev/null || true)
+fi
+
+CONTROL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+TARGET_ROOT="${SPINE_TARGET_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "${SPINE_REPO:-$PWD}")}"
+export SPINE_CODE="${SPINE_CODE:-$CONTROL_ROOT}"
+export SPINE_REPO="$TARGET_ROOT"
+source "$CONTROL_ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+CONTRACT="$CONTROL_ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+
+TRIGGER="${SPINE_ROOT_BORING_RECONCILE_TRIGGER:-manual}"
+REPORT_ONLY=0
+JSON_MODE=0
+BRIEF_MODE=0
+
+usage() {
+  cat <<'USAGE'
+worktree-lifecycle-root-normalize
+
+Usage:
+  worktree-lifecycle-root-normalize [--trigger <label>] [--report-only] [--json] [--brief]
+
+Notes:
+  - Bounded self-heal for coordinator root checkout only.
+  - Restores governed generated drift, switches parked root back to main, fast-forwards
+    main when safe, and archives/drops stale cleanup-candidate stashes.
+  - Fails closed on untracked files, ungoverned dirt, or non-fast-forward main divergence.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --trigger)
+      TRIGGER="${2:-}"
+      shift 2
+      ;;
+    --report-only)
+      REPORT_ONLY=1
+      shift
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    --brief)
+      BRIEF_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+MAIN_BRANCH="main"
+CANONICAL_WORKTREE_ROOT="${SPINE_WORKTREE_LIFECYCLE_WORKTREE_ROOT:-$SPINE_TMP/worktrees}"
+CANONICAL_TEMP_CLONE_ROOT="${SPINE_WORKTREE_LIFECYCLE_TEMP_CLONE_ROOT:-$SPINE_TMP/clones}"
+ROOT_NORMALIZATION_CONTRACTS_CSV="${SPINE_WORKTREE_ROOT_NORMALIZATION_CONTRACTS:-}"
+DROP_CANDIDATE_STASHES="${SPINE_WORKTREE_ROOT_NORMALIZATION_DROP_STASHES:-}"
+REQUIRE_FF_ONLY_MAIN_UPDATE="${SPINE_WORKTREE_ROOT_NORMALIZATION_REQUIRE_FF_ONLY:-}"
+
+if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+  MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo "$MAIN_BRANCH")"
+  if [[ -z "${SPINE_WORKTREE_LIFECYCLE_WORKTREE_ROOT:-}" ]]; then
+    CANONICAL_WORKTREE_ROOT="$(yq e -r '.policy.canonical_worktree_root // ""' "$CONTRACT" 2>/dev/null || echo "$CANONICAL_WORKTREE_ROOT")"
+    [[ -n "$CANONICAL_WORKTREE_ROOT" && "$CANONICAL_WORKTREE_ROOT" != "null" ]] || CANONICAL_WORKTREE_ROOT="$SPINE_TMP/worktrees"
+  fi
+  if [[ -z "${SPINE_WORKTREE_LIFECYCLE_TEMP_CLONE_ROOT:-}" ]]; then
+    CANONICAL_TEMP_CLONE_ROOT="$(yq e -r '.policy.canonical_temp_clone_root // ""' "$CONTRACT" 2>/dev/null || echo "$CANONICAL_TEMP_CLONE_ROOT")"
+    [[ -n "$CANONICAL_TEMP_CLONE_ROOT" && "$CANONICAL_TEMP_CLONE_ROOT" != "null" ]] || CANONICAL_TEMP_CLONE_ROOT="$SPINE_TMP/clones"
+  fi
+  if [[ -z "${SPINE_WORKTREE_ROOT_NORMALIZATION_CONTRACTS:-}" ]]; then
+    contracts_accum=""
+    while IFS= read -r contract_path; do
+      [[ -n "$contract_path" && "$contract_path" != "null" ]] || continue
+      if [[ -n "$contracts_accum" ]]; then
+        contracts_accum+=",${contract_path}"
+      else
+        contracts_accum="$contract_path"
+      fi
+    done < <(yq e -r '.cleanup.root_normalization_contracts[]?' "$CONTRACT" 2>/dev/null || true)
+    ROOT_NORMALIZATION_CONTRACTS_CSV="$contracts_accum"
+  fi
+  if [[ -z "${SPINE_WORKTREE_ROOT_NORMALIZATION_DROP_STASHES:-}" ]]; then
+    DROP_CANDIDATE_STASHES="$(yq e -r '.cleanup.root_normalization_drop_cleanup_candidate_stashes // true' "$CONTRACT" 2>/dev/null || echo true)"
+  fi
+  if [[ -z "${SPINE_WORKTREE_ROOT_NORMALIZATION_REQUIRE_FF_ONLY:-}" ]]; then
+    REQUIRE_FF_ONLY_MAIN_UPDATE="$(yq e -r '.cleanup.root_normalization_require_ff_only_main_update // true' "$CONTRACT" 2>/dev/null || echo true)"
+  fi
+fi
+
+RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_ID="WORKTREE-RNORM-${RUN_TS}-$$"
+ARTIFACT_ROOT="$(spine_resolve_mailroom_path 'evidence/loop-closeouts/worktree-lifecycle-root-normalize')"
+ARTIFACT_DIR="$ARTIFACT_ROOT/$RUN_ID"
+mkdir -p "$ARTIFACT_DIR"
+
+REPORT_JSON="$ARTIFACT_DIR/report.json"
+REPORT_MD="$ARTIFACT_DIR/report.md"
+ACTIONS_LOG="$ARTIFACT_DIR/actions.log"
+ARCHIVE_DIR="$ARTIFACT_DIR/archive"
+
+python3 - "$CONTROL_ROOT" "$TARGET_ROOT" "$MAIN_BRANCH" "$CANONICAL_WORKTREE_ROOT" "$CANONICAL_TEMP_CLONE_ROOT" "$ROOT_NORMALIZATION_CONTRACTS_CSV" "$TRIGGER" "$REPORT_ONLY" "$DROP_CANDIDATE_STASHES" "$REQUIRE_FF_ONLY_MAIN_UPDATE" "$REPORT_JSON" "$REPORT_MD" "$ACTIONS_LOG" "$ARCHIVE_DIR" "$JSON_MODE" "$BRIEF_MODE" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+control_root = Path(sys.argv[1]).resolve()
+target_root = Path(sys.argv[2]).resolve()
+main_branch = sys.argv[3]
+canonical_worktree_root = Path(os.path.expanduser(sys.argv[4])).resolve()
+canonical_temp_clone_root = Path(os.path.expanduser(sys.argv[5])).resolve()
+contract_paths = [item for item in sys.argv[6].split(",") if item]
+trigger = sys.argv[7]
+report_only = sys.argv[8] == "1"
+drop_candidate_stashes = sys.argv[9].lower() == "true"
+require_ff_only = sys.argv[10].lower() == "true"
+report_json = Path(sys.argv[11])
+report_md = Path(sys.argv[12])
+actions_log = Path(sys.argv[13])
+archive_dir = Path(sys.argv[14])
+json_mode = sys.argv[15] == "1"
+brief_mode = sys.argv[16] == "1"
+
+
+def sh(args: list[str], check: bool = True) -> tuple[int, str, str]:
+    proc = subprocess.run(args, text=True, capture_output=True)
+    if check and proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "command failed")
+    return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+
+
+def git_value(path: Path, *args: str) -> str:
+    rc, out, _ = sh(["git", "-C", str(path), *args], check=False)
+    return out if rc == 0 else ""
+
+
+def git_branch(path: Path) -> str:
+    branch = git_value(path, "symbolic-ref", "--short", "HEAD")
+    return branch or "<detached>"
+
+
+def git_head(path: Path, ref: str = "HEAD") -> str:
+    return git_value(path, "rev-parse", "--verify", "--quiet", ref)
+
+
+def load_yaml(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def path_under(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def is_root_checkout(path: Path) -> bool:
+    if path_under(path, canonical_worktree_root):
+        return False
+    if path_under(path, canonical_temp_clone_root):
+        return False
+    return ".wt" not in path.parts
+
+
+def parse_status_porcelain(path: Path) -> tuple[list[str], list[str]]:
+    rc, out, _ = sh(["git", "-C", str(path), "status", "--porcelain", "-uall"], check=False)
+    tracked: list[str] = []
+    untracked: list[str] = []
+    if rc != 0:
+        return tracked, untracked
+    for raw in (out or "").splitlines():
+        if not raw:
+            continue
+        if raw.startswith("?? "):
+            untracked.append(raw[3:].strip())
+            continue
+        if len(raw) < 4 or raw[2] != " ":
+            payload = raw[2:].strip()
+        else:
+            payload = raw[3:].strip()
+        if " -> " in payload:
+            payload = payload.split(" -> ", 1)[1].strip()
+        tracked.append(payload)
+    return sorted(set(tracked)), sorted(set(untracked))
+
+
+def parse_stash_subject(subject: str) -> tuple[str, str]:
+    text = (subject or "").strip()
+    lowered = text.lower()
+    prefixes = (("on ", 3), ("wip on ", 7))
+    for prefix, length in prefixes:
+        if lowered.startswith(prefix):
+            remainder = text[length:]
+            if ":" in remainder:
+                branch, message = remainder.split(":", 1)
+            else:
+                branch, message = remainder, ""
+            return branch.strip(), message.strip()
+    return "", text
+
+
+def parse_iso_epoch(text: str | None) -> float | None:
+    if not text:
+        return None
+    value = str(text).strip()
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def merged_into_main(path: Path, branch: str) -> bool:
+    rc, out, _ = sh(["git", "-C", str(path), "branch", "--merged", main_branch, "--list", branch], check=False)
+    return rc == 0 and bool((out or "").strip())
+
+
+def collect_governed_paths(control_root: Path, rel_paths: list[str]) -> tuple[list[str], list[dict[str, str]]]:
+    governed: set[str] = set()
+    missing_contracts: list[dict[str, str]] = []
+    for rel in rel_paths:
+        raw = (rel or "").strip()
+        if not raw:
+            continue
+        contract_path = Path(raw)
+        if not contract_path.is_absolute():
+            contract_path = (control_root / contract_path).resolve()
+        if not contract_path.exists():
+            missing_contracts.append({"path": str(contract_path), "code": "missing_root_normalization_contract"})
+            continue
+        doc = load_yaml(contract_path)
+        explicit = ((doc.get("root_normalization") or {}).get("safe_discard_tracked_paths") or [])
+        for item in explicit:
+            if item:
+                governed.add(str(item).strip().rstrip("/"))
+        for row in doc.get("governed_surfaces") or []:
+            if not isinstance(row, dict):
+                continue
+            for key in ("tracked_binding", "tracked_output"):
+                value = row.get(key)
+                if value:
+                    governed.add(str(value).strip().rstrip("/"))
+    return sorted(governed), missing_contracts
+
+
+def path_allowed(rel_path: str, governed_roots: list[str]) -> bool:
+    value = str(rel_path).strip().lstrip("./")
+    for raw in governed_roots:
+        root = str(raw).strip().lstrip("./").rstrip("/")
+        if value == root or value.startswith(f"{root}/"):
+            return True
+    return False
+
+
+def ahead_behind_counts(path: Path, left: str, right: str) -> tuple[int | None, int | None]:
+    rc, out, _ = sh(["git", "-C", str(path), "rev-list", "--left-right", "--count", f"{left}...{right}"], check=False)
+    if rc != 0:
+        return None, None
+    parts = (out or "").replace("\t", " ").split()
+    if len(parts) < 2:
+        return None, None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None, None
+
+
+def current_stash_rows(path: Path) -> list[dict[str, Any]]:
+    now_epoch = datetime.now(timezone.utc).timestamp()
+    rc, out, _ = sh(
+        ["git", "-C", str(path), "stash", "list", "--format=%gd%x09%H%x09%ct%x09%gs"],
+        check=False,
+    )
+    if rc != 0:
+        return []
+    rows = []
+    for line in (out or "").splitlines():
+        parts = line.split("\t", 3)
+        ref = parts[0].strip() if len(parts) > 0 else ""
+        commit = parts[1].strip() if len(parts) > 1 else ""
+        commit_epoch = float(parts[2]) if len(parts) > 2 and parts[2].strip().isdigit() else None
+        subject = parts[3].strip() if len(parts) > 3 else ""
+        branch, message = parse_stash_subject(subject)
+        age_hours = None if commit_epoch is None else max(0.0, (now_epoch - commit_epoch) / 3600.0)
+        issues: list[str] = []
+        warnings: list[str] = []
+        cleanup_candidate = False
+        if branch in {"main", "master"}:
+            if age_hours is not None and age_hours >= 72:
+                issues.append("main_stash_past_fail_grace")
+            elif age_hours is not None and age_hours >= 24:
+                warnings.append("main_stash_past_warn_grace")
+        elif branch:
+            exists = bool(git_head(path, f"refs/heads/{branch}"))
+            if not exists:
+                issues.append("stash_branch_gone")
+            elif merged_into_main(path, branch):
+                issues.append("stash_branch_merged")
+        cleanup_candidate = any(code in {"stash_branch_gone", "stash_branch_merged", "main_stash_past_fail_grace"} for code in issues)
+        cleanup_candidate = cleanup_candidate or any(code in {"main_stash_past_warn_grace"} for code in warnings)
+        rows.append(
+            {
+                "ref": ref,
+                "commit": commit,
+                "branch": branch,
+                "subject": subject,
+                "message": message,
+                "age_hours": age_hours,
+                "issues": issues,
+                "warnings": warnings,
+                "cleanup_candidate": cleanup_candidate,
+            }
+        )
+    return rows
+
+
+def current_stash_ref_by_commit(path: Path) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    rc, out, _ = sh(
+        ["git", "-C", str(path), "stash", "list", "--format=%gd%x09%H"],
+        check=False,
+    )
+    if rc != 0:
+        return mapping
+    for line in (out or "").splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        ref, commit = parts
+        mapping[commit.strip()] = ref.strip()
+    return mapping
+
+
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+repo_root_raw = git_value(target_root, "rev-parse", "--show-toplevel")
+issues: list[dict[str, Any]] = []
+actions: list[str] = []
+
+if not repo_root_raw:
+    payload = {
+        "summary": {
+            "repo": str(target_root),
+            "trigger": trigger,
+            "status": "failed",
+        },
+        "issues": [{"code": "target_repo_not_git_repo", "path": str(target_root)}],
+        "artifact": {
+            "report_json": str(report_json),
+            "report_md": str(report_md),
+            "actions_log": str(actions_log),
+            "archive_dir": str(archive_dir),
+        },
+    }
+    write_text(report_json, json.dumps(payload, indent=2) + "\n")
+    write_text(report_md, "# Root Normalize\n\n- status: failed\n- issue: target_repo_not_git_repo\n")
+    write_text(actions_log, "issue=target_repo_not_git_repo\n")
+    if json_mode:
+        print(json.dumps(payload, indent=2))
+    elif brief_mode:
+        print("FAIL status=failed issues=1 action=none")
+    else:
+        print("worktree.lifecycle.root.normalize")
+        print("status=failed")
+        print("issue=target_repo_not_git_repo")
+        print(f"artifact.report_json={report_json}")
+        print(f"artifact.report_md={report_md}")
+        print(f"artifact.actions={actions_log}")
+    sys.exit(1)
+
+repo_root = Path(repo_root_raw).resolve()
+branch = git_branch(repo_root)
+head = git_head(repo_root, "HEAD")
+local_main_head = git_head(repo_root, f"refs/heads/{main_branch}")
+origin_main_head = git_head(repo_root, f"refs/remotes/origin/{main_branch}")
+ahead_count, behind_count = (None, None)
+if origin_main_head:
+    ahead_count, behind_count = ahead_behind_counts(repo_root, "HEAD", f"refs/remotes/origin/{main_branch}")
+
+tracked_dirty, untracked_dirty = parse_status_porcelain(repo_root)
+governed_paths, missing_contracts = collect_governed_paths(control_root, contract_paths)
+for item in missing_contracts:
+    issues.append(item)
+
+is_root = is_root_checkout(repo_root)
+head_matches_local_main = bool(head and local_main_head and head == local_main_head)
+
+dirty_rows = []
+ungoverned_dirty = []
+for rel_path in tracked_dirty:
+    governed = path_allowed(rel_path, governed_paths)
+    dirty_rows.append({"path": rel_path, "governed": governed})
+    if not governed:
+        ungoverned_dirty.append(rel_path)
+
+stash_rows = current_stash_rows(repo_root)
+candidate_stashes = [row for row in stash_rows if row.get("cleanup_candidate")]
+
+switch_to_main = False
+restore_generated_drift = False
+fast_forward_main = False
+drop_stashes = False
+
+if not is_root:
+    actions.append(f"noop={repo_root}|not_root_checkout")
+else:
+    if branch == "<detached>":
+        issues.append({"code": "root_checkout_detached", "path": str(repo_root)})
+    elif branch != main_branch and not head_matches_local_main:
+        issues.append({"code": "root_checkout_not_normalizable_branch", "path": str(repo_root), "branch": branch})
+
+    if untracked_dirty:
+        issues.append({"code": "root_checkout_untracked_present", "paths": untracked_dirty})
+    if ungoverned_dirty:
+        issues.append({"code": "root_checkout_ungoverned_dirty", "paths": ungoverned_dirty})
+
+    if require_ff_only and ahead_count is not None and ahead_count > 0:
+        issues.append(
+            {
+                "code": "root_checkout_non_fast_forward_main",
+                "branch": branch,
+                "ahead": ahead_count,
+                "behind": behind_count,
+            }
+        )
+
+    if not issues:
+        restore_generated_drift = bool(tracked_dirty)
+        switch_to_main = branch != main_branch and head_matches_local_main
+        fast_forward_main = bool(origin_main_head) and ahead_count == 0 and behind_count is not None and behind_count > 0
+        drop_stashes = bool(drop_candidate_stashes and candidate_stashes)
+
+status = "noop"
+artifact_rows: list[dict[str, Any]] = []
+
+if issues:
+    status = "blocked"
+else:
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    if restore_generated_drift:
+        diff_proc = subprocess.run(
+            ["git", "-C", str(repo_root), "diff", "--binary", "--", *tracked_dirty],
+            text=True,
+            capture_output=True,
+        )
+        write_text(archive_dir / "root-generated-drift.patch", diff_proc.stdout or "")
+        write_text(archive_dir / "root-generated-drift.paths", "\n".join(tracked_dirty) + ("\n" if tracked_dirty else ""))
+        artifact_rows.append({"kind": "root_generated_drift", "paths": tracked_dirty, "archive": str(archive_dir / "root-generated-drift.patch")})
+        if not report_only:
+            proc = subprocess.run(
+                ["git", "-C", str(repo_root), "restore", "--source=HEAD", "--staged", "--worktree", "--", *tracked_dirty],
+                text=True,
+                capture_output=True,
+            )
+            if proc.returncode != 0:
+                issues.append({"code": "root_generated_drift_restore_failed", "stderr": (proc.stderr or proc.stdout).strip()})
+            else:
+                actions.append(f"restored_generated_drift={repo_root}|count={len(tracked_dirty)}")
+
+    if not issues and switch_to_main:
+        if not report_only:
+            proc = subprocess.run(["git", "-C", str(repo_root), "switch", main_branch], text=True, capture_output=True)
+            if proc.returncode != 0:
+                issues.append({"code": "root_switch_main_failed", "stderr": (proc.stderr or proc.stdout).strip()})
+            else:
+                actions.append(f"switched_root={repo_root}|{branch}->{main_branch}")
+                branch = main_branch
+        else:
+            actions.append(f"would_switch_root={repo_root}|{branch}->{main_branch}")
+
+    if not issues and fast_forward_main:
+        if not report_only:
+            proc = subprocess.run(
+                ["git", "-C", str(repo_root), "merge", "--ff-only", f"refs/remotes/origin/{main_branch}"],
+                text=True,
+                capture_output=True,
+            )
+            if proc.returncode != 0:
+                issues.append({"code": "root_fast_forward_failed", "stderr": (proc.stderr or proc.stdout).strip()})
+            else:
+                actions.append(f"fast_forwarded_root={repo_root}|behind={behind_count or 0}")
+                head = git_head(repo_root, "HEAD")
+        else:
+            actions.append(f"would_fast_forward_root={repo_root}|behind={behind_count or 0}")
+
+    if not issues and drop_stashes:
+        for row in candidate_stashes:
+            commit = str(row.get("commit") or "")
+            if not commit:
+                continue
+            ref = current_stash_ref_by_commit(repo_root).get(commit)
+            if not ref:
+                issues.append({"code": "root_stash_ref_shifted", "commit": commit})
+                break
+            stash_dir = archive_dir / f"stash-{commit[:12]}"
+            stash_dir.mkdir(parents=True, exist_ok=True)
+            patch = subprocess.run(["git", "-C", str(repo_root), "stash", "show", "-p", ref], text=True, capture_output=True)
+            if patch.returncode == 0:
+                write_text(stash_dir / "stash.patch", patch.stdout or "")
+            write_text(stash_dir / "metadata.json", json.dumps(row, indent=2) + "\n")
+            artifact_rows.append({"kind": "stash", "ref": ref, "commit": commit, "archive": str(stash_dir)})
+            if not report_only:
+                drop = subprocess.run(["git", "-C", str(repo_root), "stash", "drop", ref], text=True, capture_output=True)
+                if drop.returncode != 0:
+                    issues.append({"code": "root_stash_drop_failed", "ref": ref, "stderr": (drop.stderr or drop.stdout).strip()})
+                    break
+                actions.append(f"dropped_stash={ref}|{commit}")
+            else:
+                actions.append(f"would_drop_stash={ref}|{commit}")
+
+    if issues:
+        status = "blocked"
+    elif restore_generated_drift or switch_to_main or fast_forward_main or drop_stashes:
+        status = "healed" if not report_only else "candidate"
+    else:
+        status = "noop"
+
+summary = {
+    "repo": str(repo_root),
+    "trigger": trigger,
+    "current_branch": branch,
+    "main_branch": main_branch,
+    "head": head,
+    "local_main_head": local_main_head,
+    "origin_main_head": origin_main_head,
+    "ahead_count": ahead_count,
+    "behind_count": behind_count,
+    "is_root_checkout": is_root,
+    "tracked_dirty_count": len(tracked_dirty),
+    "untracked_dirty_count": len(untracked_dirty),
+    "governed_dirty_count": sum(1 for row in dirty_rows if row["governed"]),
+    "ungoverned_dirty_count": len(ungoverned_dirty),
+    "candidate_stash_count": len(candidate_stashes),
+    "status": status,
+    "restored_generated_drift": restore_generated_drift and not issues,
+    "switched_to_main": switch_to_main and not issues,
+    "fast_forwarded_main": fast_forward_main and not issues,
+    "dropped_stashes": len(candidate_stashes) if drop_stashes and not issues else 0,
+}
+
+payload = {
+    "summary": summary,
+    "dirty_paths": dirty_rows,
+    "untracked_paths": untracked_dirty,
+    "governed_paths": governed_paths,
+    "governed_contracts": contract_paths,
+    "stashes": stash_rows,
+    "issues": issues,
+    "artifact": {
+        "report_json": str(report_json),
+        "report_md": str(report_md),
+        "actions_log": str(actions_log),
+        "archive_dir": str(archive_dir),
+    },
+    "archives": artifact_rows,
+}
+
+write_text(report_json, json.dumps(payload, indent=2) + "\n")
+write_text(actions_log, "\n".join(actions) + ("\n" if actions else ""))
+
+with report_md.open("w", encoding="utf-8") as fh:
+    fh.write("# Root Normalize\n\n")
+    fh.write(f"- repo: {repo_root}\n")
+    fh.write(f"- trigger: {trigger}\n")
+    fh.write(f"- status: {status}\n")
+    fh.write(f"- branch: {branch}\n")
+    fh.write(f"- ahead: {ahead_count}\n")
+    fh.write(f"- behind: {behind_count}\n")
+    fh.write(f"- tracked_dirty: {len(tracked_dirty)}\n")
+    fh.write(f"- untracked_dirty: {len(untracked_dirty)}\n")
+    fh.write(f"- candidate_stashes: {len(candidate_stashes)}\n\n")
+    fh.write("## Dirty Paths\n")
+    if dirty_rows:
+        for row in dirty_rows:
+            fh.write(f"- {row['path']} | governed={row['governed']}\n")
+    else:
+        fh.write("- none\n")
+    fh.write("\n## Issues\n")
+    if issues:
+        for item in issues:
+            fh.write(f"- {json.dumps(item, sort_keys=True)}\n")
+    else:
+        fh.write("- none\n")
+
+if json_mode:
+    print(json.dumps(payload, indent=2))
+elif brief_mode:
+    status_word = "FAIL" if issues else "PASS"
+    print(
+        f"{status_word} status={status} branch={branch} ahead={ahead_count if ahead_count is not None else 'na'} "
+        f"behind={behind_count if behind_count is not None else 'na'} dirty={len(tracked_dirty)} "
+        f"untracked={len(untracked_dirty)} stashes={len(candidate_stashes)}"
+    )
+else:
+    print("worktree.lifecycle.root.normalize")
+    print(f"status={status}")
+    print(f"trigger={trigger}")
+    print(f"branch={branch}")
+    print(f"ahead={ahead_count if ahead_count is not None else 'na'}")
+    print(f"behind={behind_count if behind_count is not None else 'na'}")
+    print(f"tracked_dirty={len(tracked_dirty)}")
+    print(f"untracked_dirty={len(untracked_dirty)}")
+    print(f"candidate_stashes={len(candidate_stashes)}")
+    print(f"artifact.report_json={report_json}")
+    print(f"artifact.report_md={report_md}")
+    print(f"artifact.actions={actions_log}")
+
+if issues:
+    sys.exit(1)
+PY

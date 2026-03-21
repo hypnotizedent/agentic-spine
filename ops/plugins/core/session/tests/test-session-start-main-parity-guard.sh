@@ -135,7 +135,41 @@ else
 fi
 
 echo ""
-echo "── T7: session-start triggers managed worktree sync path ──"
+echo "── T7: session-start triggers root boring reconcile path ──"
+root_stub="$TMPDIR_BASE/session-root-stub.sh"
+root_log="$TMPDIR_BASE/session-root.log"
+cat > "$root_stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${ROOT_STUB_LOG:?}"
+EOF
+chmod +x "$root_stub"
+set +e
+t7_out="$(cd "$WORK" && ROOT_STUB_LOG="$root_log" SPINE_ROOT_BORING_RECONCILE_BIN="$root_stub" "$SESSION_START" 2>&1)"
+t7_status=$?
+set -e
+assert_eq "$t7_status" "0" "fast startup succeeds with root normalize stub"
+assert_contains "$(cat "$root_log")" "--trigger session.start.fast --brief" "fast startup invokes root boring reconcile"
+
+echo ""
+echo "── T8: session-start fails closed when root boring reconcile blocks ──"
+root_fail_stub="$TMPDIR_BASE/session-root-fail-stub.sh"
+cat > "$root_fail_stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "forced root normalize failure" >&2
+exit 1
+EOF
+chmod +x "$root_fail_stub"
+set +e
+t8_out="$(cd "$WORK" && SPINE_ROOT_BORING_RECONCILE_BIN="$root_fail_stub" "$SESSION_START" 2>&1)"
+t8_status=$?
+set -e
+assert_eq "$t8_status" "1" "startup exits non-zero when root reconcile blocks"
+assert_contains "$t8_out" "session.start FAIL: root boring reconcile blocked" "root reconcile failure is explicit"
+
+echo ""
+echo "── T9: session-start triggers managed worktree sync path ──"
 sync_stub="$TMPDIR_BASE/session-sync-stub.sh"
 sync_log="$TMPDIR_BASE/session-sync.log"
 cat > "$sync_stub" <<'EOF'
@@ -145,10 +179,10 @@ printf '%s\n' "$*" >> "${SYNC_STUB_LOG:?}"
 EOF
 chmod +x "$sync_stub"
 set +e
-t7_out="$(cd "$WORK" && SYNC_STUB_LOG="$sync_log" SPINE_MANAGED_WORKTREE_SYNC_BIN="$sync_stub" "$SESSION_START" 2>&1)"
-t7_status=$?
+t9_out="$(cd "$WORK" && SYNC_STUB_LOG="$sync_log" SPINE_MANAGED_WORKTREE_SYNC_BIN="$sync_stub" "$SESSION_START" 2>&1)"
+t9_status=$?
 set -e
-assert_eq "$t7_status" "0" "fast startup succeeds with sync stub"
+assert_eq "$t9_status" "0" "fast startup succeeds with sync stub"
 assert_contains "$(cat "$sync_log")" "--trigger session.start.fast --brief" "fast startup invokes managed sync runner"
 
 echo ""
