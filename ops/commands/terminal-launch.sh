@@ -27,15 +27,53 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+SCRIPT_SPINE_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SPINE_REPO="${SPINE_LAUNCHER_SOURCE_REPO:-$SCRIPT_SPINE_REPO}"
+source "$SCRIPT_SPINE_REPO/ops/lib/launcher-control-worktree.sh"
 source "$SPINE_REPO/ops/lib/spine-paths.sh"
-spine_paths_init
-LANE_PROFILES_YAML="$SPINE_REPO/ops/bindings/lane.profiles.yaml"
-SCOPES_DIR="$SPINE_STATE/loop-scopes"
-LAUNCHER_VIEW_YAML="$SPINE_REPO/ops/bindings/terminal.launcher.view.yaml"
-TERMINAL_ROLE_CONTRACT="$SPINE_REPO/ops/bindings/terminal.role.contract.yaml"
-ROLE_RUNTIME_CONTRACT="$SPINE_REPO/ops/bindings/role.runtime.control.contract.yaml"
-SESSION_EXEC="$SPINE_REPO/ops/plugins/core/session/bin/terminal-launch-exec"
+
+reset_runtime_path_context() {
+    unset \
+        SPINE_WORKSPACE_ROOT \
+        SPINE_RUNTIME_ROOT \
+        SPINE_MAILROOM_ROOT \
+        SPINE_INBOX \
+        SPINE_OUTBOX \
+        SPINE_STATE \
+        SPINE_LOCKS \
+        SPINE_LOGS \
+        SPINE_TMP \
+        SPINE_EVIDENCE_ROOT \
+        SPINE_RECEIPTS \
+        SPINE_VERIFY_ROOT \
+        SPINE_CAP_RUNS_ROOT \
+        SPINE_DATA_ROOT \
+        SPINE_BACKUPS_ROOT \
+        SPINE_FOUNDATION_ROOT \
+        SPINE_DOMAIN_STATE
+}
+
+set_repo_context() {
+    local repo="$1"
+    SPINE_TARGET_REPO="$repo"
+    SPINE_REPO="$repo"
+    SPINE_CODE="$repo"
+    SPINE_ROOT="$repo"
+    reset_runtime_path_context
+    spine_paths_init
+    LANE_PROFILES_YAML="$SPINE_REPO/ops/bindings/lane.profiles.yaml"
+    SCOPES_DIR="$SPINE_STATE/loop-scopes"
+    LAUNCHER_VIEW_YAML="$SPINE_REPO/ops/bindings/terminal.launcher.view.yaml"
+    TERMINAL_ROLE_CONTRACT="$SPINE_REPO/ops/bindings/terminal.role.contract.yaml"
+    ROLE_RUNTIME_CONTRACT="$SPINE_REPO/ops/bindings/role.runtime.control.contract.yaml"
+    SESSION_EXEC="$SPINE_REPO/ops/plugins/core/session/bin/terminal-launch-exec"
+}
+
+resolve_launch_repo() {
+    spine_runtime_prepare_launcher_control_worktree "$SPINE_REPO"
+}
+
+set_repo_context "$SPINE_REPO"
 
 # ── Output helpers ─────────────────────────────────────────────────────────
 
@@ -475,6 +513,7 @@ EOF
 }
 
 cmd_launch() {
+    local base_repo="$SPINE_REPO"
     local lane=""
     local loop_id=""
     local tool=""
@@ -589,6 +628,9 @@ cmd_launch() {
     fi
 
     local terminal_label runtime_role terminal_title
+    local launch_repo=""
+    launch_repo="$(resolve_launch_repo)"
+    set_repo_context "$launch_repo"
     terminal_label="$(resolve_terminal_label "$terminal_name")"
     runtime_role="$(resolve_runtime_role_for_terminal "$terminal_name")"
     terminal_title="${terminal_label} [${runtime_role}]"
@@ -621,7 +663,11 @@ cmd_launch() {
     local quoted_args full_cmd
     quoted_args="$(join_shell_quoted_args "${exec_args[@]}")"
     full_cmd="$(
-        printf 'cd %s && SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 SPINE_TERMINAL_NAME=%s OPS_TERMINAL_ROLE=%s SPINE_TERMINAL_LABEL=%s SPINE_RUNTIME_ROLE=%s SPINE_TERMINAL_TITLE=%s %s %s' \
+        printf 'cd %s && SPINE_TARGET_REPO=%s SPINE_REPO=%s SPINE_CODE=%s SPINE_ROOT=%s SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 SPINE_TERMINAL_NAME=%s OPS_TERMINAL_ROLE=%s SPINE_TERMINAL_LABEL=%s SPINE_RUNTIME_ROLE=%s SPINE_TERMINAL_TITLE=%s %s %s' \
+            "$(shell_quote "$SPINE_REPO")" \
+            "$(shell_quote "$SPINE_REPO")" \
+            "$(shell_quote "$SPINE_REPO")" \
+            "$(shell_quote "$SPINE_REPO")" \
             "$(shell_quote "$SPINE_REPO")" \
             "$(shell_quote "$terminal_name")" \
             "$(shell_quote "$terminal_name")" \
@@ -648,9 +694,13 @@ cmd_launch() {
     end tell" 2>/dev/null
 
     echo "Launched: lane=$lane tool=$tool terminal=$terminal_name label=$terminal_label title=${terminal_title} loop=${loop_id:-none}"
+    set_repo_context "$base_repo"
 }
 
 cmd_exec() {
+    local launch_repo=""
+    launch_repo="$(resolve_launch_repo)"
+    set_repo_context "$launch_repo"
     [[ -x "$SESSION_EXEC" ]] || fail "missing launcher exec surface: $SESSION_EXEC"
     exec "$SESSION_EXEC" "$@"
 }
