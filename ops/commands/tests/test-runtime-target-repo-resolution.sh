@@ -157,6 +157,56 @@ t4_out="$(
 assert_eq "$(printf '%s\n' "$t4_out" | grep '^violations:' | awk '{print $2}')" "0" "schema audit uses the current checkout, not inherited SPINE_ROOT"
 
 echo ""
+echo "── T5: operator hygiene reconcile honors current checkout over inherited SPINE_ROOT ──"
+mkdir -p "$TARGET/debug"
+printf 'old-debug\n' > "$TARGET/debug/old.log"
+python3 - "$TARGET/debug/old.log" <<'PY'
+import os
+import sys
+import time
+
+ts = time.time() - (45 * 86400)
+os.utime(sys.argv[1], (ts, ts))
+PY
+cat > "$TARGET/ops/bindings/operator.hygiene.contract.yaml" <<YAML
+status: authoritative
+owner: "@test"
+last_verified: 2026-03-21
+scope: operator-hygiene-test
+version: 2
+updated_at: "2026-03-21"
+paths:
+  archive_root: "$TMPDIR_BASE/archive"
+tool_history:
+  policies:
+    - id: target.operator.hygiene
+      status: active
+      kind: aged_file_report
+      root: "$TARGET/debug"
+      retention_days: 30
+      execute_by_default: false
+YAML
+t5_json="$TMPDIR_BASE/t5-operator-hygiene.json"
+TARGET_DEBUG_CANON="$(cd "$TARGET" && cd debug && pwd -P)"
+(
+  cd "$TARGET"
+  env -u SPINE_TARGET_REPO SPINE_ROOT="$ROOT" SPINE_REPO="$ROOT" SPINE_CODE="$ROOT" \
+    "$ROOT/ops/plugins/core/ops/bin/operator-hygiene-reconcile" --json > "$t5_json"
+)
+assert_eq "$(python3 - <<'PY' "$t5_json"
+import json, sys
+payload = json.load(open(sys.argv[1], encoding='utf-8'))
+print(payload['rows'][0]['id'])
+PY
+)" "target.operator.hygiene" "operator hygiene reconcile loads target repo contract from current checkout"
+assert_eq "$(python3 - <<'PY' "$t5_json"
+import json, sys
+payload = json.load(open(sys.argv[1], encoding='utf-8'))
+print(payload['rows'][0]['root'])
+PY
+)" "$TARGET_DEBUG_CANON" "operator hygiene reconcile reports target repo roots, not inherited spine root"
+
+echo ""
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"
 exit "$FAIL"

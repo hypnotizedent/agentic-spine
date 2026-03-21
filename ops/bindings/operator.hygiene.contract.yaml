@@ -4,7 +4,7 @@ owner: "@ronny"
 last_verified: 2026-03-21
 scope: operator-hygiene-contract
 
-version: 1
+version: 2
 updated_at: "2026-03-21"
 
 paths:
@@ -49,11 +49,26 @@ tool_history:
       description: Archive Claude transcripts older than 30 days before deleting live copies.
     - id: claude.projects.retention
       status: active
-      kind: aged_file_report
+      kind: aged_project_tree_archive_compact
+      governance_class: retained_memory
       root: "~/.claude/projects"
       retention_days: 30
-      execute_by_default: false
-      description: Report stale Claude project history older than 30 days; keep report-only because this is long-tail operator memory.
+      execute_by_default: true
+      project_tree_glob: "*/*"
+      ignore_names:
+        - memory
+      stub_filename: "ARCHIVED_PROJECT_MEMORY.yaml"
+      archive_prefix: "claude-project-memory"
+      severity_tiers:
+        warn:
+          candidate_count: 12
+          candidate_bytes: 157286400
+          oldest_age_days: 45
+        fail:
+          candidate_count: 40
+          candidate_bytes: 536870912
+          oldest_age_days: 90
+      description: Keep recent Claude project memory live, compact older project trees into archives, and leave a searchable recovery stub in place.
     - id: codex.sessions.retention
       status: active
       kind: month_dir_archive_delete
@@ -67,6 +82,7 @@ dev_artifacts:
   policies:
     - id: mint-modules.dev_artifacts
       status: active
+      governance_class: cold_rehydrateable
       root: "~/code/mint-modules"
       generated_dir_names:
         - dist
@@ -82,6 +98,22 @@ dev_artifacts:
         - node_modules
       dependency_manifest_names:
         - package-lock.json
-      dependency_strategy: report_only
+      dependency_strategy: cold_rehydrateable
       dependency_rehydrate_command: "npm ci"
-      description: Mint modules are many standalone npm packages. Auto-clean only stale untracked generated outputs; keep node_modules report-only and rehydrate with npm per module when needed.
+      dependency_heat:
+        hot_days: 7
+        warm_days: 30
+      severity_tiers:
+        warn:
+          generated_candidate_count: 1
+          blocked_generated_count: 1
+          blocked_dependency_count: 1
+          cold_dependency_count: 6
+          cold_dependency_bytes: 2147483648
+        fail:
+          generated_candidate_count: 10
+          blocked_generated_count: 5
+          blocked_dependency_count: 3
+          cold_dependency_count: 12
+          cold_dependency_bytes: 5368709120
+      description: Mint modules are many standalone npm packages. Auto-clean only stale untracked generated outputs; keep node_modules as cold-rehydrateable recommendations only when module heat and budgets say they are truly cold.

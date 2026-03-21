@@ -14,11 +14,46 @@ from typing import Iterable
 import yaml
 
 
-ROOT = Path(
-    os.environ.get("SPINE_CODE")
-    or os.environ.get("SPINE_ROOT")
-    or Path(__file__).resolve().parents[5]
-).resolve()
+def expand_path(raw: str | Path) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
+
+
+def git_top_level(start: Path) -> Path | None:
+    probe = start
+    if probe.is_file():
+        probe = probe.parent
+    proc = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    if not stdout:
+        return None
+    return Path(stdout).resolve()
+
+
+def resolve_target_root() -> Path:
+    explicit = os.environ.get("SPINE_TARGET_REPO")
+    if explicit:
+        return expand_path(explicit)
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+    script_root = git_top_level(Path(__file__).resolve())
+    if script_root is not None:
+        return script_root
+    return expand_path(
+        os.environ.get("SPINE_REPO")
+        or os.environ.get("SPINE_CODE")
+        or os.environ.get("SPINE_ROOT")
+        or Path(__file__).resolve().parents[5]
+    )
+
+
+ROOT = resolve_target_root()
 DEFAULT_CONTRACT = Path(
     os.environ.get("SPINE_OPERATOR_HYGIENE_CONTRACT")
     or ROOT / "ops/bindings/operator.hygiene.contract.yaml"
@@ -42,10 +77,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def expand_path(raw: str | Path) -> Path:
-    return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
-
-
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -59,29 +90,66 @@ def iso_from_ts(ts: float | None) -> str | None:
 def age_days(ts: float | None) -> int | None:
     if ts is None:
         return None
-    return int((NOW - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds() // 86400)
+    return int(
+        (NOW - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds() // 86400
+    )
 
 
-def tree_stats(path: Path) -> tuple[int, float | None, int]:
+def tree_stats(
+    path: Path, ignored_names: set[str] | None = None
+) -> tuple[int, float | None, int]:
+    ignored = ignored_names or set()
     if not path.exists():
         return 0, None, 0
+    if path.is_symlink():
+        return 0, None, 0
     if path.is_file():
+        if path.name in ignored:
+            return 0, None, 0
         st = path.stat()
         return st.st_size, st.st_mtime, 1
+
     total = 0
-    newest = path.stat().st_mtime
+    newest: float | None = None
     file_count = 0
-    for child in path.rglob("*"):
-        if child.is_symlink():
-            continue
-        if child.is_file():
-            st = child.stat()
+    for current_root, dirnames, filenames in os.walk(path):
+        dirnames[:] = [name for name in dirnames if name not in ignored]
+        current_path = Path(current_root)
+        for filename in filenames:
+            if filename in ignored:
+                continue
+            candidate = current_path / filename
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            st = candidate.stat()
             total += st.st_size
             file_count += 1
-            newest = max(newest, st.st_mtime)
-        elif child.is_dir():
-            newest = max(newest, child.stat().st_mtime)
+            newest = st.st_mtime if newest is None else max(newest, st.st_mtime)
+    if file_count == 0:
+        newest = path.stat().st_mtime
     return total, newest, file_count
+
+
+def sample_tree_paths(
+    path: Path, limit: int = SAMPLE_LIMIT, ignored_names: set[str] | None = None
+) -> list[str]:
+    ignored = ignored_names or set()
+    rows: list[str] = []
+    if not path.exists():
+        return rows
+    for current_root, dirnames, filenames in os.walk(path):
+        dirnames[:] = [name for name in dirnames if name not in ignored]
+        current_path = Path(current_root)
+        for filename in sorted(filenames):
+            if filename in ignored:
+                continue
+            candidate = current_path / filename
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            rows.append(str(candidate.relative_to(path)))
+            if len(rows) >= limit:
+                return rows
+    return rows
 
 
 def find_old_files(root: Path, retention_days: int) -> list[dict]:
@@ -156,8 +224,46 @@ def month_dir_candidates(root: Path, retention_days: int) -> list[dict]:
                     "size_bytes": total,
                     "modified_at": iso_from_ts(newest),
                     "age_days": age_days(newest),
+                    "file_count": file_count,
                 }
             )
+    return rows
+
+
+def project_tree_candidates(policy: dict, root: Path, retention_days: int) -> list[dict]:
+    if not root.exists():
+        return []
+    cutoff = NOW - timedelta(days=retention_days)
+    tree_glob = policy.get("project_tree_glob", "*/*")
+    ignore_names = set(policy.get("ignore_names") or [])
+    stub_filename = policy.get("stub_filename", "ARCHIVED_PROJECT_MEMORY.yaml")
+    rows = []
+    for project_dir in sorted(root.glob(tree_glob)):
+        if not project_dir.is_dir():
+            continue
+        if project_dir.name in ignore_names:
+            continue
+        total, newest, file_count = tree_stats(project_dir, ignored_names={stub_filename})
+        if file_count == 0 or newest is None:
+            continue
+        modified = datetime.fromtimestamp(newest, tz=timezone.utc)
+        if modified >= cutoff:
+            continue
+        rows.append(
+            {
+                "path": str(project_dir),
+                "relative_path": str(project_dir.relative_to(root)),
+                "workspace_group": project_dir.parent.name,
+                "project_id": project_dir.name,
+                "size_bytes": total,
+                "modified_at": iso_from_ts(newest),
+                "age_days": age_days(newest),
+                "file_count": file_count,
+                "sample_paths": sample_tree_paths(
+                    project_dir, ignored_names={stub_filename}
+                ),
+            }
+        )
     return rows
 
 
@@ -169,6 +275,12 @@ def write_tar(archive_path: Path, source_root: Path, paths: Iterable[Path]) -> N
     with tarfile.open(archive_path, "r:gz") as tar:
         if not tar.getmembers():
             raise RuntimeError(f"archive has no members: {archive_path}")
+
+
+def append_jsonl(path: Path, payload: dict) -> None:
+    ensure_dir(path.parent)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
 def git_tracked_files(repo_root: Path, candidate: Path) -> list[str]:
@@ -183,6 +295,52 @@ def git_tracked_files(repo_root: Path, candidate: Path) -> list[str]:
     return [line for line in proc.stdout.splitlines() if line.strip()]
 
 
+def git_last_activity_ts(repo_root: Path, candidate: Path) -> float | None:
+    rel = candidate.relative_to(repo_root)
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "log", "-1", "--format=%ct", "--", str(rel)],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    if not stdout:
+        return None
+    try:
+        return float(stdout)
+    except ValueError:
+        return None
+
+
+def classify_heat(age: int | None, hot_days: int, warm_days: int) -> str:
+    if age is None:
+        return "unknown"
+    if age <= hot_days:
+        return "hot"
+    if age <= warm_days:
+        return "warm"
+    return "cold"
+
+
+def evaluate_status(
+    policy: dict, metrics: dict[str, int], fallback_warn: bool
+) -> tuple[str, dict[str, dict[str, int]]]:
+    tiers = policy.get("severity_tiers") or {}
+    for tier_name in ("fail", "warn"):
+        threshold_map = tiers.get(tier_name) or {}
+        triggered: dict[str, dict[str, int]] = {}
+        for key, threshold in threshold_map.items():
+            value = int(metrics.get(key, 0) or 0)
+            if value >= int(threshold):
+                triggered[key] = {"value": value, "threshold": int(threshold)}
+        if triggered:
+            return tier_name, triggered
+    if tiers:
+        return "pass", {}
+    return ("warn" if fallback_warn else "pass"), {}
+
+
 def scan_dev_artifacts(policy: dict, execute: bool, actions: list[str]) -> dict:
     repo_root = expand_path(policy["root"])
     generated_names = set(policy.get("generated_dir_names") or [])
@@ -191,18 +349,28 @@ def scan_dev_artifacts(policy: dict, execute: bool, actions: list[str]) -> dict:
     retention_days = int(policy.get("generated_retention_days") or 14)
     execute_generated = bool(policy.get("execute_generated_cleanup", False)) and execute
     cutoff = NOW - timedelta(days=retention_days)
+    heat_policy = policy.get("dependency_heat") or {}
+    hot_days = int(heat_policy.get("hot_days") or 7)
+    warm_days = int(heat_policy.get("warm_days") or 30)
+    source_ignore_names = set(heat_policy.get("source_ignore_dir_names") or [])
 
     row = {
         "id": policy["id"],
         "category": "dev_artifacts",
+        "governance_class": policy.get("governance_class"),
         "status": "pass",
+        "severity_tier": "pass",
         "root": str(repo_root),
         "description": policy.get("description", ""),
         "generated_candidates": [],
         "dependency_candidates": [],
+        "hot_dependencies": [],
+        "warm_dependencies": [],
+        "blocked_dependencies": [],
         "deleted_generated": [],
         "blocked_generated": [],
         "dependency_strategy": policy.get("dependency_strategy", "report_only"),
+        "metrics": {},
     }
     if not repo_root.exists():
         row["status"] = "missing"
@@ -213,7 +381,11 @@ def scan_dev_artifacts(policy: dict, execute: bool, actions: list[str]) -> dict:
         current_path = Path(current_root)
         if ".git" in dirnames:
             dirnames.remove(".git")
-        matches = [name for name in list(dirnames) if name in generated_names or name in dependency_names]
+        matches = [
+            name
+            for name in list(dirnames)
+            if name in generated_names or name in dependency_names
+        ]
         for name in matches:
             dirnames.remove(name)
             candidate = current_path / name
@@ -240,19 +412,84 @@ def scan_dev_artifacts(policy: dict, execute: bool, actions: list[str]) -> dict:
                     shutil.rmtree(candidate)
                     row["deleted_generated"].append(candidate_data)
                     actions.append(f"deleted_generated={candidate}")
-            else:
-                module_root = candidate.parent
-                rehydrate = None
-                for manifest_name in manifest_names:
-                    if (module_root / manifest_name).exists():
-                        rehydrate = f"(cd {module_root} && {policy.get('dependency_rehydrate_command', 'npm ci')})"
-                        break
-                candidate_data["strategy"] = policy.get("dependency_strategy", "report_only")
-                candidate_data["rehydrate_command"] = rehydrate
-                row["dependency_candidates"].append(candidate_data)
+                continue
 
-    if row["generated_candidates"] or row["blocked_generated"] or row["dependency_candidates"]:
-        row["status"] = "warn"
+            module_root = candidate.parent
+            rehydrate = None
+            has_lockfile = False
+            for manifest_name in manifest_names:
+                if (module_root / manifest_name).exists():
+                    has_lockfile = True
+                    command = policy.get("dependency_rehydrate_command", "npm ci")
+                    rehydrate = f"(cd {module_root} && {command})"
+                    break
+
+            git_activity_ts = git_last_activity_ts(repo_root, module_root)
+            _, source_newest, source_file_count = tree_stats(
+                module_root,
+                ignored_names=generated_names | dependency_names | source_ignore_names | {".git"},
+            )
+            effective_activity_ts = max(
+                [ts for ts in (git_activity_ts, source_newest, newest) if ts is not None],
+                default=None,
+            )
+            effective_activity_days = age_days(effective_activity_ts)
+            heat = classify_heat(effective_activity_days, hot_days, warm_days)
+
+            candidate_data.update(
+                {
+                    "module_root": str(module_root),
+                    "module_relative_path": str(module_root.relative_to(repo_root)),
+                    "governance_class": policy.get("governance_class"),
+                    "has_lockfile": has_lockfile,
+                    "rehydrate_command": rehydrate,
+                    "git_activity_days": age_days(git_activity_ts),
+                    "source_activity_days": age_days(source_newest),
+                    "source_file_count": source_file_count,
+                    "dependency_age_days": age_days(newest),
+                    "effective_activity_days": effective_activity_days,
+                    "heat": heat,
+                }
+            )
+
+            if not has_lockfile:
+                candidate_data["reason"] = "missing_lockfile"
+                row["blocked_dependencies"].append(candidate_data)
+            elif not rehydrate:
+                candidate_data["reason"] = "missing_rehydrate_command"
+                row["blocked_dependencies"].append(candidate_data)
+            elif heat == "cold":
+                row["dependency_candidates"].append(candidate_data)
+            elif heat == "warm":
+                row["warm_dependencies"].append(candidate_data)
+            else:
+                row["hot_dependencies"].append(candidate_data)
+
+    metrics = {
+        "generated_candidate_count": len(row["generated_candidates"]),
+        "generated_candidate_bytes": sum(
+            item["size_bytes"] for item in row["generated_candidates"]
+        ),
+        "blocked_generated_count": len(row["blocked_generated"]),
+        "cold_dependency_count": len(row["dependency_candidates"]),
+        "cold_dependency_bytes": sum(
+            item["size_bytes"] for item in row["dependency_candidates"]
+        ),
+        "warm_dependency_count": len(row["warm_dependencies"]),
+        "hot_dependency_count": len(row["hot_dependencies"]),
+        "blocked_dependency_count": len(row["blocked_dependencies"]),
+    }
+    row["metrics"] = metrics
+    fallback_warn = bool(
+        row["generated_candidates"]
+        or row["blocked_generated"]
+        or row["dependency_candidates"]
+        or row["blocked_dependencies"]
+    )
+    row["status"], triggers = evaluate_status(policy, metrics, fallback_warn)
+    row["severity_tier"] = row["status"]
+    if triggers:
+        row["severity_triggers"] = triggers
     return row
 
 
@@ -264,8 +501,10 @@ def process_tool_policy(policy: dict, archive_root: Path, execute: bool, actions
     row = {
         "id": policy["id"],
         "category": "tool_history",
+        "governance_class": policy.get("governance_class"),
         "kind": kind,
         "status": "pass",
+        "severity_tier": "pass",
         "root": str(root),
         "description": policy.get("description", ""),
         "retention_days": retention_days if retention_days else None,
@@ -276,6 +515,7 @@ def process_tool_policy(policy: dict, archive_root: Path, execute: bool, actions
         "archives": [],
         "deleted_count": 0,
         "deleted_bytes": 0,
+        "metrics": {},
     }
     if not root.exists():
         row["status"] = "missing"
@@ -292,14 +532,27 @@ def process_tool_policy(policy: dict, archive_root: Path, execute: bool, actions
         candidates = find_old_files(root, retention_days)
     elif kind == "month_dir_archive_delete":
         candidates = month_dir_candidates(root, retention_days)
+    elif kind == "aged_project_tree_archive_compact":
+        candidates = project_tree_candidates(policy, root, retention_days)
     else:
         raise RuntimeError(f"unsupported policy kind: {kind}")
 
     row["candidate_count"] = len(candidates)
     row["candidate_bytes"] = sum(item["size_bytes"] for item in candidates)
     row["sample_candidates"] = candidates[:SAMPLE_LIMIT]
-    if candidates:
-        row["status"] = "warn"
+    metrics = {
+        "candidate_count": len(candidates),
+        "candidate_bytes": row["candidate_bytes"],
+        "candidate_file_count": sum(item.get("file_count", 0) for item in candidates),
+        "oldest_age_days": max(
+            [item.get("age_days") or 0 for item in candidates], default=0
+        ),
+    }
+    row["metrics"] = metrics
+    row["status"], triggers = evaluate_status(policy, metrics, bool(candidates))
+    row["severity_tier"] = row["status"]
+    if triggers:
+        row["severity_triggers"] = triggers
 
     if not execute_allowed or not candidates:
         return row
@@ -351,6 +604,50 @@ def process_tool_policy(policy: dict, archive_root: Path, execute: bool, actions
             actions.append(f"deleted_month_dir={month_dir}")
         return row
 
+    if kind == "aged_project_tree_archive_compact":
+        stub_filename = policy.get("stub_filename", "ARCHIVED_PROJECT_MEMORY.yaml")
+        index_path = archive_root / policy["id"] / "archive-index.jsonl"
+        for item in candidates:
+            project_path = Path(item["path"])
+            archive_path = archive_root / policy["id"] / (
+                f"{policy.get('archive_prefix', policy['id'])}-{item['relative_path'].replace('/', '-')}-{NOW.strftime('%Y%m%dT%H%M%SZ')}.tar.gz"
+            )
+            write_tar(archive_path, root, [project_path])
+            for child in list(project_path.iterdir()):
+                if child.is_symlink() or child.is_file():
+                    child.unlink()
+                elif child.is_dir():
+                    shutil.rmtree(child)
+            stub_payload = {
+                "status": "archived",
+                "policy_id": policy["id"],
+                "governance_class": policy.get("governance_class"),
+                "project_root": str(project_path),
+                "project_relative_path": item["relative_path"],
+                "workspace_group": item["workspace_group"],
+                "project_id": item["project_id"],
+                "archived_at": NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "archive_path": str(archive_path),
+                "archived_bytes": item["size_bytes"],
+                "archived_file_count": item["file_count"],
+                "last_activity_at": item["modified_at"],
+                "age_days_at_archive": item["age_days"],
+                "sample_paths": item.get("sample_paths", []),
+                "restore_command": f"tar -xzf '{archive_path}' -C '{root}'",
+            }
+            (project_path / stub_filename).write_text(
+                yaml.safe_dump(stub_payload, sort_keys=False), encoding="utf-8"
+            )
+            append_jsonl(index_path, stub_payload)
+            row["archives"].append(str(archive_path))
+            row["deleted_count"] += 1
+            row["deleted_bytes"] += item["size_bytes"]
+            row["compacted_count"] = row.get("compacted_count", 0) + 1
+            row["archive_index"] = str(index_path)
+            actions.append(f"archived={archive_path}")
+            actions.append(f"compacted_project_tree={project_path}")
+        return row
+
     return row
 
 
@@ -366,20 +663,37 @@ def write_markdown(report_path: Path, payload: dict) -> None:
         f"- archived_count: {payload['summary']['archived_count']}",
         f"- blocked_count: {payload['summary']['blocked_count']}",
         f"- report_only_candidates: {payload['summary']['report_only_candidates']}",
+        f"- retained_memory_candidates: {payload['summary']['retained_memory_candidates']}",
+        f"- cold_rehydrateable_candidates: {payload['summary']['cold_rehydrateable_candidates']}",
         "",
         "## Rows",
     ]
     for row in payload["rows"]:
-        lines.append(f"- {row['id']}: status={row['status']}")
+        lines.append(
+            f"- {row['id']}: status={row['status']} severity={row.get('severity_tier', row['status'])}"
+        )
         lines.append(f"  root={row['root']}")
+        if row.get("governance_class"):
+            lines.append(f"  governance_class={row['governance_class']}")
+        if row.get("metrics"):
+            metrics = " ".join(f"{key}={value}" for key, value in sorted(row["metrics"].items()))
+            lines.append(f"  metrics={metrics}")
         if row.get("candidate_count") is not None:
-            lines.append(f"  candidates={row.get('candidate_count', 0)} bytes={row.get('candidate_bytes', 0)}")
+            lines.append(
+                f"  candidates={row.get('candidate_count', 0)} bytes={row.get('candidate_bytes', 0)}"
+            )
         if row.get("deleted_count"):
             lines.append(f"  deleted={row['deleted_count']} bytes={row.get('deleted_bytes', 0)}")
         if row.get("archives"):
             lines.append(f"  archives={len(row['archives'])}")
         if row.get("dependency_candidates"):
             lines.append(f"  dependency_candidates={len(row['dependency_candidates'])}")
+        if row.get("warm_dependencies"):
+            lines.append(f"  warm_dependencies={len(row['warm_dependencies'])}")
+        if row.get("hot_dependencies"):
+            lines.append(f"  hot_dependencies={len(row['hot_dependencies'])}")
+        if row.get("blocked_dependencies"):
+            lines.append(f"  blocked_dependencies={len(row['blocked_dependencies'])}")
         if row.get("generated_candidates"):
             lines.append(f"  generated_candidates={len(row['generated_candidates'])}")
         if row.get("blocked_generated"):
@@ -396,7 +710,9 @@ def print_output(payload: dict, json_mode: bool, brief_mode: bool) -> None:
         print(
             f"{summary['status'].upper()} candidates={summary['candidate_count']} "
             f"deleted={summary['deleted_count']} archived={summary['archived_count']} "
-            f"report_only={summary['report_only_candidates']} blocked={summary['blocked_count']}"
+            f"retained_memory={summary['retained_memory_candidates']} "
+            f"cold_rehydrateable={summary['cold_rehydrateable_candidates']} "
+            f"blocked={summary['blocked_count']}"
         )
         return
     print("operator.hygiene.reconcile")
@@ -409,6 +725,8 @@ def print_output(payload: dict, json_mode: bool, brief_mode: bool) -> None:
         "archived_count",
         "blocked_count",
         "report_only_candidates",
+        "retained_memory_candidates",
+        "cold_rehydrateable_candidates",
     ):
         print(f"{key}: {summary[key]}")
     print(f"artifact.report_json={payload['artifact']['report_json']}")
@@ -420,7 +738,9 @@ def main() -> int:
     args = parse_args()
     contract_path = expand_path(args.contract)
     contract = yaml.safe_load(contract_path.read_text(encoding="utf-8")) or {}
-    archive_root = expand_path((contract.get("paths") or {}).get("archive_root", "~/Archives/tool-history"))
+    archive_root = expand_path(
+        (contract.get("paths") or {}).get("archive_root", "~/Archives/tool-history")
+    )
     evidence_root = DEFAULT_EVIDENCE_ROOT
     artifact_root = evidence_root / "loop-closeouts" / "operator-hygiene-reconcile"
     run_id = f"OPHYG-{NOW.strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}"
@@ -454,17 +774,32 @@ def main() -> int:
         "deleted_count": sum(row.get("deleted_count", 0) for row in rows)
         + sum(len(row.get("deleted_generated", [])) for row in rows),
         "archived_count": sum(len(row.get("archives", [])) for row in rows),
-        "blocked_count": sum(len(row.get("blocked_generated", [])) for row in rows),
+        "blocked_count": sum(len(row.get("blocked_generated", [])) for row in rows)
+        + sum(len(row.get("blocked_dependencies", [])) for row in rows),
         "report_only_candidates": sum(
             row.get("candidate_count", 0)
             for row in rows
             if row.get("kind") == "aged_file_report"
         )
-        + sum(len(row.get("dependency_candidates", [])) for row in rows),
+        + sum(
+            len(row.get("dependency_candidates", []))
+            for row in rows
+            if row.get("governance_class") == "cold_rehydrateable"
+        ),
+        "retained_memory_candidates": sum(
+            row.get("candidate_count", 0)
+            for row in rows
+            if row.get("governance_class") == "retained_memory"
+        ),
+        "cold_rehydrateable_candidates": sum(
+            len(row.get("dependency_candidates", []))
+            for row in rows
+            if row.get("governance_class") == "cold_rehydrateable"
+        ),
     }
-    if any(row.get("status") == "warn" for row in rows):
-        summary["status"] = "warn"
-    if any(row.get("status") == "missing" for row in rows):
+    if any(row.get("status") == "fail" for row in rows):
+        summary["status"] = "fail"
+    elif any(row.get("status") in {"warn", "missing"} for row in rows):
         summary["status"] = "warn"
 
     payload = {
