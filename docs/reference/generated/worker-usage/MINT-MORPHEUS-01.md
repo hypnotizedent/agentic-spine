@@ -18,9 +18,11 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ## Write Scope
 - `../agentic-foundation/docs/agents/mint-agent.contract.md`
 
-## Capabilities (3)
+## Capabilities (5)
 - `mint.intake.validate`
 - `mint.modules.health`
+- `mint.operator.drop.sync`
+- `mint.operator.storage.status`
 - `mint.seeds.query`
 
 ## Gates (46)

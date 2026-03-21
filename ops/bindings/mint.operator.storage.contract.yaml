@@ -1,0 +1,62 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-21
+scope: mint-operator-storage
+---
+
+contract_id: MINT_OPERATOR_STORAGE_CONTRACT_V1
+
+critical_path:
+  mode: direct_remote_sync
+  rationale: >-
+    Business-critical operator intake must not depend on the macOS FUSE mount.
+    Drag-and-drop lands in a local Desktop inbox, syncs directly to canonical
+    MinIO via rclone, then runs deterministic operator-drop ingest.
+
+local_inbox:
+  path: ~/Desktop/Operator Drop
+  accepted_entries: directories_only
+  create_if_missing: true
+  delete_local_source_after_verified_ingest: true
+  ignore_names:
+    - .DS_Store
+    - .localized
+
+remote_target:
+  rclone_remote: mintfiles
+  bucket: artwork-intake
+  prefix: operator-drop
+  health_probe_path: artwork-intake
+  contimeout: 2s
+  timeout: 10s
+  retries: 1
+  low_level_retries: 1
+  create_empty_src_dirs: true
+
+ingest:
+  mint_repo_root: ~/code/mint-modules
+  mintctl_command: ./bin/mintctl morpheus intake
+  folder_flag: --folder
+  source_flag: --source
+
+convenience_mount:
+  role: convenience_only
+  launch_agent_label: com.ronnyworks.mintfiles.mount
+  mountpoint: ~/MinIO
+  required_visible_paths:
+    - ~/MinIO/artwork-intake
+    - ~/MinIO/artwork-registry
+    - ~/MinIO/artwork-output
+    - ~/MinIO/client-assets
+  fallback_local_entries_policy: warn
+
+automation:
+  sync_launchd_label: com.ronny.mint-operator-drop-sync
+  launchd_template: ops/plugins/infra/host/launchd/com.ronny.mint-operator-drop-sync.plist
+  cadence_seconds: 60
+  session_preflight: advisory
+
+runtime_state:
+  state_root: .runtime/spine/state/mint/operator-drop
+  sync_history_file: .runtime/spine/state/mint/operator-drop/sync-history.tsv

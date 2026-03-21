@@ -199,6 +199,16 @@ build_active_handoff_hint() {
   printf '%s\n' ""
 }
 
+build_mint_operator_storage_hint() {
+  local status_bin="${SPINE_MINT_OPERATOR_STORAGE_STATUS_BIN:-$ROOT/ops/plugins/domains/mint/bin/mint-operator-storage-status}"
+  [[ -x "$status_bin" ]] || return 0
+
+  local hint=""
+  hint="$(SPINE_TARGET_REPO="$SPINE_TARGET_REPO" SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" "$status_bin" --brief 2>/dev/null || true)"
+  [[ -n "$hint" ]] || return 0
+  printf '%s\n' "$hint"
+}
+
 run_startup_checkout_guards() {
   local allow_dirty="${1:-false}"
   local dirty_reason="${2:-}"
@@ -379,7 +389,9 @@ run_fast_startup() {
 
     # Check for active handoffs from prior sessions
     local active_handoff_hint=""
+    local mint_operator_storage_hint=""
     active_handoff_hint="$(build_active_handoff_hint)"
+    mint_operator_storage_hint="$(build_mint_operator_storage_hint)"
 
     if [[ "$mode" == "degraded" ]]; then
       local continuity_policy=""
@@ -416,6 +428,7 @@ run_fast_startup() {
           --arg runtime_state_root "$SPINE_STATE" \
           --arg logical_state_path "mailroom/state" \
           --arg active_handoff_hint "$active_handoff_hint" \
+          --arg mint_operator_storage_hint "$mint_operator_storage_hint" \
           --argjson fallback_layers "$fallback_json" \
           --argjson startup_hints "$hints_json" \
           '{
@@ -429,7 +442,9 @@ run_fast_startup() {
             logical_state_path: $logical_state_path,
             runtime_state_root: $runtime_state_root,
             note: "degraded bootstrap complete; prefer fallback continuity surfaces until fast startup is healthy"
-          } + (if $active_handoff_hint != "" then {active_handoff_hint: $active_handoff_hint} else {} end)'
+          }
+          + (if $active_handoff_hint != "" then {active_handoff_hint: $active_handoff_hint} else {} end)
+          + (if $mint_operator_storage_hint != "" then {mint_operator_storage_hint: $mint_operator_storage_hint} else {} end)'
       else
         echo "session.start"
         echo "mode: degraded"
@@ -440,6 +455,9 @@ run_fast_startup() {
         echo "runtime_state_root: ${SPINE_STATE}"
         if [[ -n "$active_handoff_hint" ]]; then
           echo "active_handoff: ${active_handoff_hint}"
+        fi
+        if [[ -n "$mint_operator_storage_hint" ]]; then
+          echo "mint_operator_storage: ${mint_operator_storage_hint}"
         fi
         echo "fallback_layers: $(IFS=,; echo "${fallback_layers[*]}")"
         echo "startup_hints:"
@@ -461,6 +479,7 @@ run_fast_startup() {
         --arg recommended_verify_command "$recommend_cmd" \
         --arg receipt_memory_hint "$receipt_memory_hint" \
         --arg active_handoff_hint "$active_handoff_hint" \
+        --arg mint_operator_storage_hint "$mint_operator_storage_hint" \
         '{
           capability: $capability,
           mode: $mode,
@@ -470,7 +489,9 @@ run_fast_startup() {
           recommended_verify_command: $recommended_verify_command,
           receipt_memory_hint_command: $receipt_memory_hint,
           note: "fast lane complete; run recommended verify after domain edits"
-        } + (if $active_handoff_hint != "" then {active_handoff_hint: $active_handoff_hint} else {} end)'
+        }
+        + (if $active_handoff_hint != "" then {active_handoff_hint: $active_handoff_hint} else {} end)
+        + (if $mint_operator_storage_hint != "" then {mint_operator_storage_hint: $mint_operator_storage_hint} else {} end)'
     else
       echo "session.start"
       echo "mode: fast"
@@ -481,6 +502,9 @@ run_fast_startup() {
       echo "receipt_memory_hint: ${receipt_memory_hint}"
       if [[ -n "$active_handoff_hint" ]]; then
         echo "active_handoff: ${active_handoff_hint}"
+      fi
+      if [[ -n "$mint_operator_storage_hint" ]]; then
+        echo "mint_operator_storage: ${mint_operator_storage_hint}"
       fi
       echo "note: fast lane complete; run recommended verify after domain edits"
     fi

@@ -56,6 +56,14 @@ git -C "$WORK" push -u origin main >/dev/null 2>&1
 export SPINE_STATE="$STATE_ROOT"
 export SPINE_RUNTIME_ROOT="$RUNTIME_ROOT"
 
+STARTUP_NOOP_STUB="$TMPDIR_BASE/session-startup-noop.sh"
+cat > "$STARTUP_NOOP_STUB" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+EOF
+chmod +x "$STARTUP_NOOP_STUB"
+
 echo ""
 echo "── T1: clean main parity passes ──"
 set +e
@@ -118,7 +126,7 @@ echo "── T6: coordinator env activation does not leak governed main override
 git -C "$WORK" switch main >/dev/null
 git -C "$WORK" reset --hard origin/main >/dev/null
 set +e
-t6_out="$(cd "$WORK" && "$SESSION_START" coordinator 2>&1)"
+t6_out="$(cd "$WORK" && SPINE_ROOT_BORING_RECONCILE_BIN="$STARTUP_NOOP_STUB" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STARTUP_NOOP_STUB" "$SESSION_START" coordinator 2>&1)"
 t6_status=$?
 set -e
 assert_eq "$t6_status" "0" "coordinator startup succeeds on clean main"
@@ -145,7 +153,7 @@ printf '%s\n' "$*" >> "${ROOT_STUB_LOG:?}"
 EOF
 chmod +x "$root_stub"
 set +e
-t7_out="$(cd "$WORK" && ROOT_STUB_LOG="$root_log" SPINE_ROOT_BORING_RECONCILE_BIN="$root_stub" "$SESSION_START" 2>&1)"
+t7_out="$(cd "$WORK" && ROOT_STUB_LOG="$root_log" SPINE_ROOT_BORING_RECONCILE_BIN="$root_stub" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STARTUP_NOOP_STUB" "$SESSION_START" 2>&1)"
 t7_status=$?
 set -e
 assert_eq "$t7_status" "0" "fast startup succeeds with root normalize stub"
@@ -188,7 +196,7 @@ assert_contains "$(cat "$sync_log")" "--trigger session.start.fast --brief" "fas
 echo ""
 echo "── T10: degraded mode emits continuity packet ──"
 set +e
-t10_out="$(cd "$WORK" && "$SESSION_START" degraded 2>&1)"
+t10_out="$(cd "$WORK" && SPINE_ROOT_BORING_RECONCILE_BIN="$STARTUP_NOOP_STUB" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STARTUP_NOOP_STUB" "$SESSION_START" degraded 2>&1)"
 t10_status=$?
 set -e
 assert_eq "$t10_status" "0" "degraded startup succeeds on clean main"
@@ -197,6 +205,22 @@ assert_contains "$t10_out" "logical_state_path: mailroom/state" "degraded mode e
 assert_contains "$t10_out" "runtime_state_root: $STATE_ROOT" "degraded mode exposes runtime state root"
 assert_contains "$t10_out" "./bin/ops cap run receipts.summary -- --domain none --days 7" "degraded mode emits receipts fallback hint"
 assert_contains "$t10_out" "./bin/ops cap run loops.status" "degraded mode emits loop fallback hint"
+
+echo ""
+echo "── T11: fast startup surfaces mint operator storage advisory hint ──"
+mint_stub="$TMPDIR_BASE/session-mint-storage-stub.sh"
+cat > "$mint_stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "status=warn mode=direct_remote_sync remote=ok mount=inactive pending=2 loose=0 fallback=0"
+EOF
+chmod +x "$mint_stub"
+set +e
+t11_out="$(cd "$WORK" && SPINE_ROOT_BORING_RECONCILE_BIN="$STARTUP_NOOP_STUB" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STARTUP_NOOP_STUB" SPINE_MINT_OPERATOR_STORAGE_STATUS_BIN="$mint_stub" "$SESSION_START" 2>&1)"
+t11_status=$?
+set -e
+assert_eq "$t11_status" "0" "fast startup succeeds with mint operator storage stub"
+assert_contains "$t11_out" "mint_operator_storage: status=warn mode=direct_remote_sync remote=ok mount=inactive pending=2 loose=0 fallback=0" "fast startup prints mint operator storage advisory"
 
 echo ""
 echo "────────────────────────────────────────"

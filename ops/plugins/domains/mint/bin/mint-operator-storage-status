@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/plugins/domains/mint/lib/mint-operator-storage-common.sh"
+
+BRIEF=0
+JSON_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --brief) BRIEF=1; shift ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help)
+      cat <<'EOF'
+mint.operator.storage.status
+
+Usage:
+  mint-operator-storage-status [--brief|--json]
+EOF
+      exit 0
+      ;;
+    *)
+      echo "mint.operator.storage.status FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+mint_operator_storage_require_contract
+mint_operator_storage_load_contract
+mint_operator_storage_ensure_local_roots
+
+mount_payload="$(mint_operator_storage_mount_status)"
+mount_status="${mount_payload%%|*}"
+rest="${mount_payload#*|}"
+mount_attached="${rest%%|*}"
+rest="${rest#*|}"
+mount_accessible="${rest%%|*}"
+mount_process="${rest##*|}"
+
+fallback_entries="$(mint_operator_storage_list_mount_fallback_entries || true)"
+fallback_count="$(mint_operator_storage_count_lines "$fallback_entries")"
+pending_dirs="$(mint_operator_storage_list_inbox_dirs || true)"
+pending_count="$(mint_operator_storage_count_lines "$pending_dirs")"
+loose_entries="$(mint_operator_storage_list_inbox_loose_entries || true)"
+loose_count="$(mint_operator_storage_count_lines "$loose_entries")"
+last_history_line="$(mint_operator_storage_last_history_line || true)"
+
+remote_status="fail"
+remote_detail="probe_failed"
+if mint_operator_storage_remote_ok; then
+  remote_status="ok"
+  remote_detail="reachable"
+else
+  rc=$?
+  if [[ "$rc" == "2" ]]; then
+    remote_status="missing_tool"
+    remote_detail="rclone_missing"
+  fi
+fi
+
+overall_status="ok"
+if [[ "$remote_status" != "ok" && "$pending_count" -gt 0 ]]; then
+  overall_status="fail"
+elif [[ "$remote_status" != "ok" || "$mount_status" != "ACTIVE" || "$fallback_count" -gt 0 || "$pending_count" -gt 0 || "$loose_count" -gt 0 ]]; then
+  overall_status="warn"
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  if command -v "$MINT_OPERATOR_JQ_BIN" >/dev/null 2>&1; then
+    jq -n \
+      --arg capability "mint.operator.storage.status" \
+      --arg status "$overall_status" \
+      --arg mode "direct_remote_sync" \
+      --arg local_inbox "$MINT_OPERATOR_LOCAL_INBOX" \
+      --arg remote "${MINT_OPERATOR_REMOTE}:${MINT_OPERATOR_BUCKET}/${MINT_OPERATOR_PREFIX}" \
+      --arg remote_status "$remote_status" \
+      --arg remote_detail "$remote_detail" \
+      --arg mount_status "$mount_status" \
+      --arg mount_label "$MINT_OPERATOR_MOUNT_LABEL" \
+      --arg mountpoint "$MINT_OPERATOR_MOUNTPOINT" \
+      --arg mount_attached "$mount_attached" \
+      --arg mount_accessible "$mount_accessible" \
+      --arg mount_process "$mount_process" \
+      --arg pending_count "$pending_count" \
+      --arg loose_count "$loose_count" \
+      --arg fallback_count "$fallback_count" \
+      --arg last_sync "${last_history_line}" \
+      '{
+        capability: $capability,
+        status: $status,
+        critical_path: $mode,
+        local_inbox: $local_inbox,
+        remote_target: $remote,
+        remote_status: $remote_status,
+        remote_detail: $remote_detail,
+        mount_status: $mount_status,
+        convenience_mount: {
+          label: $mount_label,
+          mountpoint: $mountpoint,
+          attached: $mount_attached,
+          accessible: $mount_accessible,
+          process_running: $mount_process
+        },
+        pending_folders: ($pending_count | tonumber),
+        loose_entries: ($loose_count | tonumber),
+        fallback_local_entries: ($fallback_count | tonumber),
+        last_sync: $last_sync
+      }'
+  else
+    echo "{\"status\":\"$overall_status\"}"
+  fi
+  exit 0
+fi
+
+if [[ "$BRIEF" -eq 1 ]]; then
+  echo "status=${overall_status} mode=direct_remote_sync remote=${remote_status} mount=${mount_status} pending=${pending_count} loose=${loose_count} fallback=${fallback_count}"
+  exit 0
+fi
+
+echo "mint.operator.storage.status"
+echo "status: ${overall_status}"
+echo "critical_path: direct_remote_sync"
+echo "local_inbox: ${MINT_OPERATOR_LOCAL_INBOX}"
+echo "remote_target: ${MINT_OPERATOR_REMOTE}:${MINT_OPERATOR_BUCKET}/${MINT_OPERATOR_PREFIX}"
+echo "remote_status: ${remote_status}"
+echo "remote_detail: ${remote_detail}"
+echo "convenience_mount_label: ${MINT_OPERATOR_MOUNT_LABEL}"
+echo "convenience_mount_status: ${mount_status}"
+echo "convenience_mountpoint: ${MINT_OPERATOR_MOUNTPOINT}"
+echo "mount_attached: ${mount_attached}"
+echo "mount_accessible: ${mount_accessible}"
+echo "mount_process_running: ${mount_process}"
+echo "pending_folders: ${pending_count}"
+echo "loose_entries: ${loose_count}"
+echo "fallback_local_entries: ${fallback_count}"
+if [[ -n "$last_history_line" ]]; then
+  echo "last_sync: ${last_history_line}"
+fi
+echo "note: drag into the Desktop inbox; the mount is convenience-only"
