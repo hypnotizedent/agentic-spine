@@ -29,6 +29,8 @@ compat_exceptions = {
     "ops/lib/runtime-paths.sh",
     "ops/bindings/mailroom.bridge.yaml",
     "ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-serve",
+    "ops/plugins/domains/mint/lib/mint-operator-storage-common.sh",
+    "ops/plugins/infra/host/lib/archive-operator-drop-common.sh",
     "surfaces/verify/d19-backup-drift.sh",
     "surfaces/verify/d398-repo-local-evidence-write-target-lock.sh",
 }
