@@ -6,10 +6,9 @@ SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
 source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
 STATUS_BIN="$ROOT/ops/plugins/domains/mint/bin/mint-operator-storage-status"
-SYNC_BIN="$ROOT/ops/plugins/domains/mint/bin/mint-operator-drop-sync"
 CONTRACT="$ROOT/ops/bindings/mint.operator.storage.contract.yaml"
 REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
-PLIST="$ROOT/ops/plugins/infra/host/launchd/com.ronny.mint-operator-drop-sync.plist"
+PLIST="$ROOT/ops/plugins/infra/host/launchd/com.ronnyworks.mintfiles.mount.plist"
 
 PASS=0
 FAIL=0
@@ -26,28 +25,40 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local haystack="$1" needle="$2" label="$3"
+  if grep -Fq -- "$needle" <<<"$haystack"; then
+    fail "$label (unexpected: $needle)"
+  else
+    pass "$label"
+  fi
+}
+
 echo "mint operator storage governance tests"
 echo "════════════════════════════════════════"
 
 echo ""
-echo "── T1: contract and launchd wiring are governed ──"
-assert_contains "$(cat "$CONTRACT")" "mode: direct_remote_sync" "contract promotes direct remote sync"
-assert_contains "$(cat "$CONTRACT")" "role: convenience_only" "contract demotes FUSE mount to convenience only"
-assert_contains "$(cat "$REGISTRY")" "com.ronny.mint-operator-drop-sync" "launchd registry includes governed sync label"
-assert_contains "$(cat "$REGISTRY")" "com.ronnyworks.mintfiles.mount" "launchd registry still tracks convenience mount"
-assert_contains "$(cat "$REGISTRY")" "contract_required: true" "registry now requires contract coverage"
-assert_contains "$(cat "$PLIST")" "runtime-scheduler/ops/plugins/core/bin/mint-operator-drop-sync-cycle.sh" "plist runs from managed runtime worktree"
+echo "── T1: contract and launchd wiring follow the real mount workflow ──"
+assert_contains "$(cat "$CONTRACT")" "mode: mounted_operator_drop" "contract promotes mounted operator-drop as the critical path"
+assert_contains "$(cat "$CONTRACT")" "path: ~/MinIO/artwork-intake/operator-drop" "contract pins canonical operator-drop mount path"
+assert_contains "$(cat "$CONTRACT")" "path: ~/Desktop/Operator Drop" "contract tracks legacy Desktop residue path"
+assert_contains "$(cat "$REGISTRY")" "com.ronnyworks.mintfiles.mount" "launchd registry tracks mintfiles mount"
+assert_contains "$(cat "$REGISTRY")" "template_path: ops/plugins/infra/host/launchd/com.ronnyworks.mintfiles.mount.plist" "launchd registry points at spine template"
+assert_contains "$(cat "$REGISTRY")" "monitor: true" "launchd registry monitors the mount label"
+assert_not_contains "$(cat "$REGISTRY")" "com.ronny.mint-operator-drop-sync" "desktop sync label removed from launchd registry"
+assert_contains "$(cat "$PLIST")" "mintfiles-mount.sh" "mintfiles mount template calls the mount helper"
+assert_contains "$(cat "$PLIST")" "launchd-run" "mintfiles mount template uses launchd-run supervision"
 
 TMPDIR_BASE="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BASE"' EXIT
 
-LOCAL_INBOX="$TMPDIR_BASE/Desktop/Operator Drop"
+MOUNT_ROOT="$TMPDIR_BASE/MinIO"
+DROP_ROOT="$MOUNT_ROOT/artwork-intake/operator-drop"
+DESKTOP_ROOT="$TMPDIR_BASE/Desktop/Operator Drop"
 REMOTE_ROOT="$TMPDIR_BASE/remote"
-STATE_ROOT="$TMPDIR_BASE/state"
-LOCKS_ROOT="$TMPDIR_BASE/locks"
-MINT_ROOT="$TMPDIR_BASE/mint-modules"
-mkdir -p "$LOCAL_INBOX/Job 1001" "$REMOTE_ROOT/artwork-intake" "$STATE_ROOT" "$LOCKS_ROOT" "$MINT_ROOT/bin"
-printf 'logo-data\n' > "$LOCAL_INBOX/Job 1001/logo.ai"
+FAKE_MOUNT_SCRIPT="$TMPDIR_BASE/mintfiles-mount.sh"
+
+mkdir -p "$REMOTE_ROOT/artwork-intake" "$MOUNT_ROOT"
 
 RCLONE_BIN="$TMPDIR_BASE/rclone"
 cat > "$RCLONE_BIN" <<'EOF'
@@ -61,12 +72,6 @@ case "$cmd" in
     [[ -d "$REMOTE_ROOT/$target" ]] || exit 1
     ls -1 "$REMOTE_ROOT/$target"
     ;;
-  copy)
-    src="${2:?}"
-    dest="${3#*:}"
-    mkdir -p "$REMOTE_ROOT/$dest"
-    cp -R "$src"/. "$REMOTE_ROOT/$dest"/
-    ;;
   *)
     echo "unsupported rclone subcommand: $cmd" >&2
     exit 2
@@ -75,14 +80,35 @@ esac
 EOF
 chmod +x "$RCLONE_BIN"
 
-MINTCTL_BIN="$MINT_ROOT/bin/mintctl"
-cat > "$MINTCTL_BIN" <<'EOF'
+cat > "$FAKE_MOUNT_SCRIPT" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$*" >> "${MINTCTL_LOG:?}"
-exit 0
+state="${FAKE_MOUNT_STATE:-INACTIVE}"
+attached="${FAKE_MOUNT_ATTACHED:-no}"
+accessible="${FAKE_MOUNT_ACCESSIBLE:-no}"
+process="${FAKE_MOUNT_PROCESS:-no}"
+rc="${FAKE_MOUNT_RC:-no}"
+mount_root="${FAKE_MOUNT_ROOT:?}"
+
+case "${1:-}" in
+  status)
+    cat <<OUT
+Remote: mintfiles
+Mount root: ${mount_root}
+Mount attached: ${attached}
+Mount accessible: ${accessible}
+rclone process: ${process}
+RC reachable: ${rc}
+Mount: ${state} (${mount_root})
+OUT
+    ;;
+  *)
+    echo "unsupported fake mount command: ${1:-}" >&2
+    exit 2
+    ;;
+esac
 EOF
-chmod +x "$MINTCTL_BIN"
+chmod +x "$FAKE_MOUNT_SCRIPT"
 
 TEST_CONTRACT="$TMPDIR_BASE/mint.operator.storage.contract.yaml"
 cat > "$TEST_CONTRACT" <<EOF
@@ -93,76 +119,110 @@ last_verified: 2026-03-21
 scope: mint-operator-storage
 ---
 critical_path:
-  mode: direct_remote_sync
-local_inbox:
-  path: "$LOCAL_INBOX"
-remote_target:
-  rclone_remote: mintfiles
+  mode: mounted_operator_drop
+canonical_operator_drop:
+  path: "$DROP_ROOT"
   bucket: artwork-intake
   prefix: operator-drop
+legacy_desktop_inbox:
+  path: "$DESKTOP_ROOT"
+remote_target:
+  rclone_remote: mintfiles
   health_probe_path: artwork-intake
   contimeout: 2s
   timeout: 10s
   retries: 1
   low_level_retries: 1
-  create_empty_src_dirs: true
-ingest:
-  mint_repo_root: "$MINT_ROOT"
-  mintctl_command: ./bin/mintctl morpheus intake
-  folder_flag: --folder
-  source_flag: --source
-convenience_mount:
+mount_surface:
   launch_agent_label: com.ronnyworks.mintfiles.mount
-  mountpoint: "$TMPDIR_BASE/MinIO"
-automation:
-  sync_launchd_label: com.ronny.mint-operator-drop-sync
-runtime_state:
-  state_root: "$STATE_ROOT"
-  sync_history_file: "$STATE_ROOT/sync-history.tsv"
+  launchd_template: ops/plugins/infra/host/launchd/com.ronnyworks.mintfiles.mount.plist
+  mount_script_path: "$FAKE_MOUNT_SCRIPT"
+  mountpoint: "$MOUNT_ROOT"
+  operator_drop_path: "$DROP_ROOT"
+  required_visible_paths:
+    - "$MOUNT_ROOT/artwork-intake"
+    - "$MOUNT_ROOT/artwork-registry"
+    - "$MOUNT_ROOT/artwork-output"
+    - "$MOUNT_ROOT/client-assets"
 EOF
 
 echo ""
-echo "── T2: status reports pending Desktop inbox work ──"
+echo "── T2: inactive mount is a failure even if the remote is reachable ──"
 t2_out="$(
   cd "$ROOT" && \
   REMOTE_ROOT="$REMOTE_ROOT" \
   MINT_OPERATOR_STORAGE_CONTRACT="$TEST_CONTRACT" \
+  MINT_OPERATOR_MOUNT_SCRIPT="$FAKE_MOUNT_SCRIPT" \
   MINT_OPERATOR_RCLONE_BIN="$RCLONE_BIN" \
-  MINTCTL_LOG="$TMPDIR_BASE/mintctl.log" \
-  SPINE_STATE="$STATE_ROOT" \
-  SPINE_LOCKS="$LOCKS_ROOT" \
+  FAKE_MOUNT_ROOT="$MOUNT_ROOT" \
   "$STATUS_BIN" --brief
 )"
-assert_contains "$t2_out" "status=warn" "status warns while pending folders exist"
-assert_contains "$t2_out" "pending=1" "status reports pending folder count"
-assert_contains "$t2_out" "remote=ok" "status reports direct remote reachability"
+assert_contains "$t2_out" "status=fail" "status fails when mount is inactive"
+assert_contains "$t2_out" "mode=mounted_operator_drop" "brief status reports mounted operator-drop mode"
+assert_contains "$t2_out" "remote=ok" "remote reachability still reports correctly"
+assert_contains "$t2_out" "mount=INACTIVE" "mount state is surfaced explicitly"
 
 echo ""
-echo "── T3: sync uploads, ingests, and deletes local source ──"
+echo "── T3: active mount with canonical paths ready passes ──"
+mkdir -p "$DROP_ROOT" "$MOUNT_ROOT/artwork-registry" "$MOUNT_ROOT/artwork-output" "$MOUNT_ROOT/client-assets"
 t3_out="$(
   cd "$ROOT" && \
   REMOTE_ROOT="$REMOTE_ROOT" \
   MINT_OPERATOR_STORAGE_CONTRACT="$TEST_CONTRACT" \
+  MINT_OPERATOR_MOUNT_SCRIPT="$FAKE_MOUNT_SCRIPT" \
   MINT_OPERATOR_RCLONE_BIN="$RCLONE_BIN" \
-  MINTCTL_BIN="$MINTCTL_BIN" \
-  MINTCTL_LOG="$TMPDIR_BASE/mintctl.log" \
-  SPINE_STATE="$STATE_ROOT" \
-  SPINE_LOCKS="$LOCKS_ROOT" \
-  "$SYNC_BIN" --execute --json
+  FAKE_MOUNT_ROOT="$MOUNT_ROOT" \
+  FAKE_MOUNT_STATE=ACTIVE \
+  FAKE_MOUNT_ATTACHED=yes \
+  FAKE_MOUNT_ACCESSIBLE=yes \
+  FAKE_MOUNT_PROCESS=yes \
+  FAKE_MOUNT_RC=yes \
+  "$STATUS_BIN" --brief
 )"
-assert_contains "$t3_out" "\"status\":\"ok\"" "sync returns ok JSON payload"
-if [[ -f "$REMOTE_ROOT/artwork-intake/operator-drop/Job 1001/logo.ai" ]]; then
-  pass "sync copied folder to direct MinIO target"
-else
-  fail "sync copied folder to direct MinIO target"
-fi
-if [[ ! -d "$LOCAL_INBOX/Job 1001" ]]; then
-  pass "sync removed local source folder after verified ingest"
-else
-  fail "sync removed local source folder after verified ingest"
-fi
-assert_contains "$(cat "$TMPDIR_BASE/mintctl.log")" "morpheus intake --folder Job 1001" "sync invokes targeted ingest"
-assert_contains "$(cat "$STATE_ROOT/sync-history.tsv")" "synced" "sync records runtime history"
+assert_contains "$t3_out" "status=ok" "status passes when mount and operator-drop are healthy"
+assert_contains "$t3_out" "operator_drop=ready" "status reports canonical operator-drop ready"
+assert_contains "$t3_out" "desktop_legacy=absent" "status reports no Desktop residue"
+
+echo ""
+echo "── T4: dirty Desktop residue fails the canonical workflow ──"
+mkdir -p "$DESKTOP_ROOT/Job 1001"
+t4_out="$(
+  cd "$ROOT" && \
+  REMOTE_ROOT="$REMOTE_ROOT" \
+  MINT_OPERATOR_STORAGE_CONTRACT="$TEST_CONTRACT" \
+  MINT_OPERATOR_MOUNT_SCRIPT="$FAKE_MOUNT_SCRIPT" \
+  MINT_OPERATOR_RCLONE_BIN="$RCLONE_BIN" \
+  FAKE_MOUNT_ROOT="$MOUNT_ROOT" \
+  FAKE_MOUNT_STATE=ACTIVE \
+  FAKE_MOUNT_ATTACHED=yes \
+  FAKE_MOUNT_ACCESSIBLE=yes \
+  FAKE_MOUNT_PROCESS=yes \
+  FAKE_MOUNT_RC=yes \
+  "$STATUS_BIN" --brief
+)"
+assert_contains "$t4_out" "status=fail" "status fails when legacy Desktop drift is present"
+assert_contains "$t4_out" "desktop_legacy=dirty" "status classifies Desktop residue as dirty"
+rm -rf "$DESKTOP_ROOT"
+
+echo ""
+echo "── T5: empty legacy Desktop folder is warning-only residue ──"
+mkdir -p "$DESKTOP_ROOT"
+t5_out="$(
+  cd "$ROOT" && \
+  REMOTE_ROOT="$REMOTE_ROOT" \
+  MINT_OPERATOR_STORAGE_CONTRACT="$TEST_CONTRACT" \
+  MINT_OPERATOR_MOUNT_SCRIPT="$FAKE_MOUNT_SCRIPT" \
+  MINT_OPERATOR_RCLONE_BIN="$RCLONE_BIN" \
+  FAKE_MOUNT_ROOT="$MOUNT_ROOT" \
+  FAKE_MOUNT_STATE=ACTIVE \
+  FAKE_MOUNT_ATTACHED=yes \
+  FAKE_MOUNT_ACCESSIBLE=yes \
+  FAKE_MOUNT_PROCESS=yes \
+  FAKE_MOUNT_RC=yes \
+  "$STATUS_BIN" --brief
+)"
+assert_contains "$t5_out" "status=warn" "status warns on empty legacy Desktop folder"
+assert_contains "$t5_out" "desktop_legacy=empty" "status reports empty legacy Desktop folder"
 
 echo ""
 echo "────────────────────────────────────────"

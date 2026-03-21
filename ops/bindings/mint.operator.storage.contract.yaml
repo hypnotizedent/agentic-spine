@@ -5,20 +5,26 @@ last_verified: 2026-03-21
 scope: mint-operator-storage
 ---
 
-contract_id: MINT_OPERATOR_STORAGE_CONTRACT_V1
+contract_id: MINT_OPERATOR_STORAGE_CONTRACT_V2
 
 critical_path:
-  mode: direct_remote_sync
+  mode: mounted_operator_drop
   rationale: >-
-    Business-critical operator intake must not depend on the macOS FUSE mount.
-    Drag-and-drop lands in a local Desktop inbox, syncs directly to canonical
-    MinIO via rclone, then runs deterministic operator-drop ingest.
+    Business-critical Mint intake lands directly in the canonical mounted MinIO
+    operator-drop path. Desktop staging is forbidden because it creates local
+    drift and leaves duplicate source folders on the Mac.
 
-local_inbox:
-  path: ~/Desktop/Operator Drop
+canonical_operator_drop:
+  path: ~/MinIO/artwork-intake/operator-drop
+  bucket: artwork-intake
+  prefix: operator-drop
   accepted_entries: directories_only
-  create_if_missing: true
-  delete_local_source_after_verified_ingest: true
+  ingest_command: ./bin/mintctl morpheus intake --source ~/MinIO/artwork-intake/operator-drop
+
+legacy_desktop_inbox:
+  path: ~/Desktop/Operator Drop
+  policy: forbidden
+  failure_mode: local_drift
   ignore_names:
     - .DS_Store
     - .localized
@@ -32,31 +38,21 @@ remote_target:
   timeout: 10s
   retries: 1
   low_level_retries: 1
-  create_empty_src_dirs: true
 
-ingest:
-  mint_repo_root: ~/code/mint-modules
-  mintctl_command: ./bin/mintctl morpheus intake
-  folder_flag: --folder
-  source_flag: --source
-
-convenience_mount:
-  role: convenience_only
+mount_surface:
+  role: critical_operator_surface
   launch_agent_label: com.ronnyworks.mintfiles.mount
+  launchd_template: ops/plugins/infra/host/launchd/com.ronnyworks.mintfiles.mount.plist
+  mount_script_path: ~/code/workbench/scripts/root/mounts/mintfiles-mount.sh
   mountpoint: ~/MinIO
+  operator_drop_path: ~/MinIO/artwork-intake/operator-drop
   required_visible_paths:
     - ~/MinIO/artwork-intake
     - ~/MinIO/artwork-registry
     - ~/MinIO/artwork-output
     - ~/MinIO/client-assets
-  fallback_local_entries_policy: warn
+  launchd_health_interval_seconds: 15
+  fallback_local_entries_policy: fail
 
 automation:
-  sync_launchd_label: com.ronny.mint-operator-drop-sync
-  launchd_template: ops/plugins/infra/host/launchd/com.ronny.mint-operator-drop-sync.plist
-  cadence_seconds: 60
   session_preflight: advisory
-
-runtime_state:
-  state_root: .runtime/spine/state/mint/operator-drop
-  sync_history_file: .runtime/spine/state/mint/operator-drop/sync-history.tsv
