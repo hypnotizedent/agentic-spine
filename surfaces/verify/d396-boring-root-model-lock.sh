@@ -2,7 +2,10 @@
 # TRIAGE: keep agentic-spine as a five-home control-plane repo with only tiny root stubs/config.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$SCRIPT_ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+ROOT="$SPINE_TARGET_REPO"
 
 fail() {
   echo "D396 FAIL: $*" >&2
@@ -10,8 +13,8 @@ fail() {
 }
 
 required_dirs=(bin docs fixtures ops surfaces)
-allowed_dirs=(.git .claude .gitea .githooks .github bin docs fixtures ops surfaces)
-allowed_files=(.environment.yaml .gitignore .identity.yaml .mcp.json AGENTS.md CLAUDE.md README.md)
+allowed_dirs=(.claude .gitea .githooks .github bin docs fixtures ops surfaces)
+allowed_files=(.environment.yaml .git .gitignore .identity.yaml .mcp.json AGENTS.md CLAUDE.md README.md)
 
 contains() {
   local needle="$1"

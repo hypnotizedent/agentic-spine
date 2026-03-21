@@ -315,6 +315,48 @@ assert_eq "$t7_status" "0" "D377 uses current checkout instead of inherited SPIN
 assert_contains "$t7_out" "D377 PASS" "D377 reports pass for clean target repo"
 
 echo ""
+echo "── T8: D396 gate honors current checkout and allows git worktree .git files ──"
+D396_FIXTURE="$TMPDIR_BASE/d396-fixture"
+D396_WORKTREE_PARENT="$TMPDIR_BASE/d396-worktrees"
+D396_WORKTREE="$D396_WORKTREE_PARENT/check"
+MISDIRECT_ROOT_T8="$TMPDIR_BASE/d396-misdirect"
+git init "$D396_FIXTURE" >/dev/null
+git -C "$D396_FIXTURE" config user.name "Test User"
+git -C "$D396_FIXTURE" config user.email "test@example.com"
+mkdir -p "$D396_FIXTURE/bin" "$D396_FIXTURE/docs" "$D396_FIXTURE/fixtures" "$D396_FIXTURE/ops/lib" "$D396_FIXTURE/surfaces/verify"
+printf 'fixture\n' > "$D396_FIXTURE/README.md"
+printf 'keep\n' > "$D396_FIXTURE/bin/.keep"
+printf 'keep\n' > "$D396_FIXTURE/docs/.keep"
+printf 'keep\n' > "$D396_FIXTURE/fixtures/.keep"
+cp "$ROOT/ops/lib/runtime-paths.sh" "$D396_FIXTURE/ops/lib/runtime-paths.sh"
+cp "$ROOT/surfaces/verify/d396-boring-root-model-lock.sh" "$D396_FIXTURE/surfaces/verify/d396-boring-root-model-lock.sh"
+git -C "$D396_FIXTURE" add README.md bin docs fixtures ops/lib/runtime-paths.sh surfaces/verify/d396-boring-root-model-lock.sh
+git -C "$D396_FIXTURE" commit -m "fixture" >/dev/null
+git -C "$D396_FIXTURE" branch -M main >/dev/null
+mkdir -p "$D396_WORKTREE_PARENT"
+git -C "$D396_FIXTURE" worktree add "$D396_WORKTREE" -b check >/dev/null
+
+git init "$MISDIRECT_ROOT_T8" >/dev/null
+git -C "$MISDIRECT_ROOT_T8" config user.name "Test User"
+git -C "$MISDIRECT_ROOT_T8" config user.email "test@example.com"
+mkdir -p "$MISDIRECT_ROOT_T8/ops/lib" "$MISDIRECT_ROOT_T8/mailroom"
+cp "$ROOT/ops/lib/runtime-paths.sh" "$MISDIRECT_ROOT_T8/ops/lib/runtime-paths.sh"
+printf 'misdirect\n' > "$MISDIRECT_ROOT_T8/README.md"
+git -C "$MISDIRECT_ROOT_T8" add README.md ops/lib/runtime-paths.sh
+git -C "$MISDIRECT_ROOT_T8" commit -m "misdirect" >/dev/null
+git -C "$MISDIRECT_ROOT_T8" branch -M main >/dev/null
+
+set +e
+t8_out="$(
+  cd "$D396_WORKTREE"
+  env SPINE_ROOT="$MISDIRECT_ROOT_T8" "$D396_WORKTREE/surfaces/verify/d396-boring-root-model-lock.sh" 2>&1
+)"
+t8_status=$?
+set -e
+assert_eq "$t8_status" "0" "D396 uses current checkout instead of inherited SPINE_ROOT"
+assert_contains "$t8_out" "D396 PASS" "D396 accepts git worktree .git file roots"
+
+echo ""
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"
 exit "$FAIL"
