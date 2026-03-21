@@ -9,6 +9,7 @@ source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 POLICY="$ROOT/ops/bindings/secrets.namespace.policy.yaml"
 RUNWAY="$ROOT/ops/bindings/secrets.runway.contract.yaml"
+MEDIA_SERVICES="$ROOT/ops/bindings/media.services.yaml"
 DL_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/domains/download-stack/docker-compose.yml"
 ST_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/domains/streaming-stack/docker-compose.yml"
 SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
@@ -21,9 +22,60 @@ command -v yq >/dev/null 2>&1 || { err "yq not installed"; exit 1; }
 command -v jq >/dev/null 2>&1 || { err "jq not installed"; exit 1; }
 command -v curl >/dev/null 2>&1 || { err "curl not installed"; exit 1; }
 
-for file in "$POLICY" "$RUNWAY" "$DL_COMPOSE" "$ST_COMPOSE" "$SSH_TARGETS"; do
+for file in "$POLICY" "$RUNWAY" "$MEDIA_SERVICES" "$DL_COMPOSE" "$ST_COMPOSE" "$SSH_TARGETS"; do
   [[ -f "$file" ]] || { err "missing required file: $file"; exit 1; }
 done
+
+get_service_field() {
+  local service="$1" field="$2"
+  yq -r ".services[\"$service\"].$field // \"\"" "$MEDIA_SERVICES" 2>/dev/null || true
+}
+
+get_target_field() {
+  local target="$1" field="$2"
+  yq -r ".ssh.targets[] | select(.id == \"$target\") | .$field // \"\"" "$SSH_TARGETS" 2>/dev/null || true
+}
+
+resolve_service_host() {
+  local service="$1"
+  local vm tailscale_ip host
+
+  vm="$(get_service_field "$service" "vm")"
+  [[ -n "$vm" && "$vm" != "null" ]] || return 1
+
+  tailscale_ip="$(get_target_field "$vm" "tailscale_ip")"
+  host="$(get_target_field "$vm" "host")"
+
+  if [[ -n "$tailscale_ip" && "$tailscale_ip" != "null" ]]; then
+    printf '%s\n' "$tailscale_ip"
+    return 0
+  fi
+
+  [[ -n "$host" && "$host" != "null" ]] || return 1
+  printf '%s\n' "$host"
+}
+
+resolve_service_base_url() {
+  local service="$1"
+  local host port
+
+  host="$(resolve_service_host "$service" || true)"
+  port="$(get_service_field "$service" "port")"
+  [[ -n "$host" && -n "$port" && "$port" != "null" ]] || return 1
+  printf 'http://%s:%s\n' "$host" "$port"
+}
+
+service_runtime_checkable() {
+  local service="$1"
+  local status
+
+  status="$(get_service_field "$service" "status")"
+  case "$status" in
+    active) return 0 ;;
+    parked|planned) return 1 ;;
+    *) return 0 ;;
+  esac
+}
 
 # ── 1. Compose secret vars must be registered in policy or runway ──────────
 check_compose_keys() {
@@ -128,72 +180,95 @@ else
   [[ -n "$JSEERR_KEY" ]] || err "missing JELLYSEERR_API_KEY from canonical infrastructure route"
   [[ -n "$JFIN_TOKEN" ]] || err "missing JELLYFIN_API_TOKEN from canonical infrastructure route"
 
-  # TRANSITIONAL: ARR writer services currently operational on download-stack (VM 209)
-  # but planned for media-home (VM 106). Update these defaults when cutover completes.
-  # Jellyseerr already on streaming-stack (VM 210), planned move to media-home (VM 106).
-  # See: ops/bindings/media.path.authority.contract.yaml v1.4, canonical_writer_plane
-  RADARR_URL="${RADARR_URL:-http://192.168.1.209:7878}"       # download-stack transitional
-  SONARR_URL="${SONARR_URL:-http://192.168.1.209:8989}"       # download-stack transitional
-  LIDARR_URL="${LIDARR_URL:-http://192.168.1.209:8686}"       # download-stack transitional
-  PROWLARR_URL="${PROWLARR_URL:-http://192.168.1.209:9696}"   # download-stack transitional
-  JSEERR_URL="${JSEERR_URL:-http://192.168.1.210:5055}"       # streaming-stack transitional
+  RADARR_URL="${RADARR_URL:-$(resolve_service_base_url radarr || true)}"
+  SONARR_URL="${SONARR_URL:-$(resolve_service_base_url sonarr || true)}"
+  LIDARR_URL="${LIDARR_URL:-$(resolve_service_base_url lidarr || true)}"
+  PROWLARR_URL="${PROWLARR_URL:-$(resolve_service_base_url prowlarr || true)}"
+  JSEERR_URL="${JSEERR_URL:-$(resolve_service_base_url jellyseerr || true)}"
 
-  if [[ -n "$RADARR_KEY" ]]; then
+  if [[ -z "$RADARR_URL" ]]; then
+    err "failed to resolve RADARR_URL from media.services.yaml + ssh.targets.yaml"
+  elif [[ -n "$RADARR_KEY" ]] && service_runtime_checkable radarr; then
     code="$(curl -s -o /dev/null -w "%{http_code}" -H "X-Api-Key: $RADARR_KEY" "$RADARR_URL/api/v3/system/status" || true)"
     [[ "$code" == "200" ]] || err "RADARR_API_KEY auth failed against $RADARR_URL (http=$code)"
+  else
+    ok "radarr runtime auth skipped (status=$(get_service_field radarr status), url=$RADARR_URL)"
   fi
 
-  if [[ -n "$SONARR_KEY" ]]; then
+  if [[ -z "$SONARR_URL" ]]; then
+    err "failed to resolve SONARR_URL from media.services.yaml + ssh.targets.yaml"
+  elif [[ -n "$SONARR_KEY" ]] && service_runtime_checkable sonarr; then
     code="$(curl -s -o /dev/null -w "%{http_code}" -H "X-Api-Key: $SONARR_KEY" "$SONARR_URL/api/v3/system/status" || true)"
     [[ "$code" == "200" ]] || err "SONARR_API_KEY auth failed against $SONARR_URL (http=$code)"
+  else
+    ok "sonarr runtime auth skipped (status=$(get_service_field sonarr status), url=$SONARR_URL)"
   fi
 
-  if [[ -n "$LIDARR_KEY" ]]; then
+  if [[ -z "$LIDARR_URL" ]]; then
+    err "failed to resolve LIDARR_URL from media.services.yaml + ssh.targets.yaml"
+  elif [[ -n "$LIDARR_KEY" ]] && service_runtime_checkable lidarr; then
     code="$(curl -s -o /dev/null -w "%{http_code}" -H "X-Api-Key: $LIDARR_KEY" "$LIDARR_URL/api/v1/system/status" || true)"
     [[ "$code" == "200" ]] || err "LIDARR_API_KEY auth failed against $LIDARR_URL (http=$code)"
+  else
+    ok "lidarr runtime auth skipped (status=$(get_service_field lidarr status), url=$LIDARR_URL)"
   fi
 
-  if [[ -n "$PROWLARR_KEY" ]]; then
+  if [[ -z "$PROWLARR_URL" ]]; then
+    err "failed to resolve PROWLARR_URL from media.services.yaml + ssh.targets.yaml"
+  elif [[ -n "$PROWLARR_KEY" ]] && service_runtime_checkable prowlarr; then
     code="$(curl -s -o /dev/null -w "%{http_code}" -H "X-Api-Key: $PROWLARR_KEY" "$PROWLARR_URL/api/v1/health" || true)"
     [[ "$code" == "200" ]] || err "PROWLARR_API_KEY auth failed against $PROWLARR_URL (http=$code)"
     testall="$(curl -s -X POST -H "X-Api-Key: $PROWLARR_KEY" -H "Content-Type: application/json" --data '{}' "$PROWLARR_URL/api/v1/applications/testall" || true)"
     valid="$(echo "$testall" | jq -r '[.[].isValid] | all' 2>/dev/null || echo false)"
     [[ "$valid" == "true" ]] || err "Prowlarr application parity check failed (testall reported invalid Sonarr/Radarr bindings)"
+  else
+    ok "prowlarr runtime auth skipped (status=$(get_service_field prowlarr status), url=$PROWLARR_URL)"
   fi
 
-  if [[ -n "$JSEERR_KEY" ]]; then
+  if [[ -z "$JSEERR_URL" ]]; then
+    err "failed to resolve JSEERR_URL from media.services.yaml + ssh.targets.yaml"
+  elif [[ -n "$JSEERR_KEY" ]]; then
     code="$(curl -s -o /dev/null -w "%{http_code}" -H "X-Api-Key: $JSEERR_KEY" "$JSEERR_URL/api/v1/settings/main" || true)"
     [[ "$code" == "200" ]] || err "JELLYSEERR_API_KEY auth failed against $JSEERR_URL (http=$code)"
 
-    rad_settings="$(curl -s -H "X-Api-Key: $JSEERR_KEY" "$JSEERR_URL/api/v1/settings/radarr" || true)"
-    son_settings="$(curl -s -H "X-Api-Key: $JSEERR_KEY" "$JSEERR_URL/api/v1/settings/sonarr" || true)"
-    rad_match="$(echo "$rad_settings" | jq -r --arg k "$RADARR_KEY" '.[0].apiKey == $k' 2>/dev/null || echo false)"
-    son_match="$(echo "$son_settings" | jq -r --arg k "$SONARR_KEY" '.[0].apiKey == $k' 2>/dev/null || echo false)"
-    [[ "$rad_match" == "true" ]] || err "Jellyseerr Radarr API key does not match canonical RADARR_API_KEY"
-    [[ "$son_match" == "true" ]] || err "Jellyseerr Sonarr API key does not match canonical SONARR_API_KEY"
+    if service_runtime_checkable radarr && service_runtime_checkable sonarr; then
+      rad_settings="$(curl -s -H "X-Api-Key: $JSEERR_KEY" "$JSEERR_URL/api/v1/settings/radarr" || true)"
+      son_settings="$(curl -s -H "X-Api-Key: $JSEERR_KEY" "$JSEERR_URL/api/v1/settings/sonarr" || true)"
+      rad_match="$(echo "$rad_settings" | jq -r --arg k "$RADARR_KEY" '.[0].apiKey == $k' 2>/dev/null || echo false)"
+      son_match="$(echo "$son_settings" | jq -r --arg k "$SONARR_KEY" '.[0].apiKey == $k' 2>/dev/null || echo false)"
+      [[ "$rad_match" == "true" ]] || err "Jellyseerr Radarr API key does not match canonical RADARR_API_KEY"
+      [[ "$son_match" == "true" ]] || err "Jellyseerr Sonarr API key does not match canonical SONARR_API_KEY"
 
-    rad_test_payload="$(echo "$rad_settings" | jq '.[0] | del(.id) | .minimumAvailability=(.minimumAvailability // "released")' 2>/dev/null || true)"
-    son_test_payload="$(echo "$son_settings" | jq '.[0] | del(.id)' 2>/dev/null || true)"
-    rad_test_code="$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "X-Api-Key: $JSEERR_KEY" -H "Content-Type: application/json" --data "$rad_test_payload" "$JSEERR_URL/api/v1/settings/radarr/test" || true)"
-    son_test_code="$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "X-Api-Key: $JSEERR_KEY" -H "Content-Type: application/json" --data "$son_test_payload" "$JSEERR_URL/api/v1/settings/sonarr/test" || true)"
-    [[ "$rad_test_code" == "200" ]] || err "Jellyseerr Radarr test failed (http=$rad_test_code)"
-    [[ "$son_test_code" == "200" ]] || err "Jellyseerr Sonarr test failed (http=$son_test_code)"
+      rad_test_payload="$(echo "$rad_settings" | jq '.[0] | del(.id) | .minimumAvailability=(.minimumAvailability // "released")' 2>/dev/null || true)"
+      son_test_payload="$(echo "$son_settings" | jq '.[0] | del(.id)' 2>/dev/null || true)"
+      rad_test_code="$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "X-Api-Key: $JSEERR_KEY" -H "Content-Type: application/json" --data "$rad_test_payload" "$JSEERR_URL/api/v1/settings/radarr/test" || true)"
+      son_test_code="$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "X-Api-Key: $JSEERR_KEY" -H "Content-Type: application/json" --data "$son_test_payload" "$JSEERR_URL/api/v1/settings/sonarr/test" || true)"
+      [[ "$rad_test_code" == "200" ]] || err "Jellyseerr Radarr test failed (http=$rad_test_code)"
+      [[ "$son_test_code" == "200" ]] || err "Jellyseerr Sonarr test failed (http=$son_test_code)"
+    else
+      ok "jellyseerr downstream arr parity skipped (radarr_status=$(get_service_field radarr status), sonarr_status=$(get_service_field sonarr status))"
+    fi
   fi
 
-  # Ensure dependent docker env on VM 209 tracks canonical keys.
-  dl_host="${DOWNLOAD_STACK_SSH_HOST:-download-stack}"
-  dl_rad_key="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^RADARR_API_KEY=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
-  dl_son_key="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^SONARR_API_KEY=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
-  dl_lid_key="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^LIDARR_API_KEY=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
-  dl_jfin_token="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^JELLYFIN_API_TOKEN=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
-  [[ -n "$dl_rad_key" ]] || err "download-stack .env missing RADARR_API_KEY"
-  [[ -n "$dl_son_key" ]] || err "download-stack .env missing SONARR_API_KEY"
-  [[ -n "$dl_lid_key" ]] || err "download-stack .env missing LIDARR_API_KEY"
-  [[ -n "$dl_jfin_token" ]] || err "download-stack .env missing JELLYFIN_API_TOKEN"
-  [[ "$dl_rad_key" == "$RADARR_KEY" ]] || err "download-stack .env RADARR_API_KEY drift from canonical key"
-  [[ "$dl_son_key" == "$SONARR_KEY" ]] || err "download-stack .env SONARR_API_KEY drift from canonical key"
-  [[ "$dl_lid_key" == "$LIDARR_KEY" ]] || err "download-stack .env LIDARR_API_KEY drift from canonical key"
-  [[ "$dl_jfin_token" == "$JFIN_TOKEN" ]] || err "download-stack .env JELLYFIN_API_TOKEN drift from canonical key"
+  # Ensure the current writer-plane env tracks canonical keys.
+  current_writer_vm="$(yq -r '.operating_model.writer_plane.current_vm // "download-stack"' "$MEDIA_SERVICES" 2>/dev/null || echo "download-stack")"
+  dl_host="${DOWNLOAD_STACK_SSH_HOST:-$current_writer_vm}"
+  if [[ "$current_writer_vm" == "download-stack" ]]; then
+    dl_rad_key="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^RADARR_API_KEY=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
+    dl_son_key="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^SONARR_API_KEY=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
+    dl_lid_key="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^LIDARR_API_KEY=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
+    dl_jfin_token="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^JELLYFIN_API_TOKEN=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
+    [[ -n "$dl_rad_key" ]] || err "download-stack .env missing RADARR_API_KEY"
+    [[ -n "$dl_son_key" ]] || err "download-stack .env missing SONARR_API_KEY"
+    [[ -n "$dl_lid_key" ]] || err "download-stack .env missing LIDARR_API_KEY"
+    [[ -n "$dl_jfin_token" ]] || err "download-stack .env missing JELLYFIN_API_TOKEN"
+    [[ "$dl_rad_key" == "$RADARR_KEY" ]] || err "download-stack .env RADARR_API_KEY drift from canonical key"
+    [[ "$dl_son_key" == "$SONARR_KEY" ]] || err "download-stack .env SONARR_API_KEY drift from canonical key"
+    [[ "$dl_lid_key" == "$LIDARR_KEY" ]] || err "download-stack .env LIDARR_API_KEY drift from canonical key"
+    [[ "$dl_jfin_token" == "$JFIN_TOKEN" ]] || err "download-stack .env JELLYFIN_API_TOKEN drift from canonical key"
+  else
+    ok "current writer-plane env parity skipped for $current_writer_vm (download-stack env path is transitional-only)"
+  fi
 fi
 
 # ── 4. Stack defaults must NOT use legacy media-stack project ──────────────

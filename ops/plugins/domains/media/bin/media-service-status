@@ -17,6 +17,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
 SERVICE_BINDING="$ROOT/ops/bindings/media.services.yaml"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
 SCHEMA_VERSION="1.0.0"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -87,16 +88,30 @@ ordered_media_vms() {
   done
 }
 
-get_vm_ssh_ref() {
+get_vm_ssh_refs() {
   local vm="$1"
-  local target user
+  local target user host tailscale_ip
 
   target=$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .hostname // \"\"" "$VM_BINDING" 2>/dev/null || echo "")
   user=$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || echo "")
+  host=$(yq -r ".ssh.targets[] | select(.id == \"$target\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")
+  tailscale_ip=$(yq -r ".ssh.targets[] | select(.id == \"$target\") | .tailscale_ip // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")
 
   if [[ -z "$target" || "$target" == "null" ]]; then
     echo ""
     return 1
+  fi
+
+  if [[ -z "$user" || "$user" == "null" ]]; then
+    user=$(yq -r ".ssh.targets[] | select(.id == \"$target\") | .user // \"ubuntu\"" "$SSH_BINDING" 2>/dev/null || echo "ubuntu")
+  fi
+
+  if [[ -n "$host" && "$host" != "null" ]]; then
+    echo "${user}@${host}"
+  fi
+
+  if [[ -n "$tailscale_ip" && "$tailscale_ip" != "null" && "$tailscale_ip" != "$host" ]]; then
+    echo "${user}@${tailscale_ip}"
   fi
 
   if [[ -n "$user" && "$user" != "null" ]]; then
@@ -111,22 +126,40 @@ get_vm_containers() {
   local ssh_ref
   local docker_cmd
   local out
-  ssh_ref=$(get_vm_ssh_ref "$vm" 2>/dev/null || true)
-  [[ -z "$ssh_ref" ]] && return 0
+  local rc
 
   docker_cmd="docker ps -a --format '{{.Names}}\t{{.Status}}'"
-  out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" "$docker_cmd" 2>&1 || true)
-  if echo "$out" | grep -qi "permission denied while trying to connect to the docker api"; then
-    out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" "sudo -n $docker_cmd" 2>&1 || true)
-  fi
+  while IFS= read -r ssh_ref; do
+    [[ -z "$ssh_ref" ]] && continue
 
-  # If sudo fallback also fails, return empty list and let caller report missing containers.
-  if echo "$out" | grep -qi "^sudo: "; then
-    echo ""
-    return 0
-  fi
+    if out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" "$docker_cmd" 2>&1); then
+      rc=0
+    else
+      rc=$?
+    fi
+    if [[ $rc -eq 0 ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
 
-  printf '%s\n' "$out"
+    if echo "$out" | grep -qi "permission denied while trying to connect to the docker api"; then
+      if out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" "sudo -n $docker_cmd" 2>&1); then
+        rc=0
+      else
+        rc=$?
+      fi
+      if [[ $rc -eq 0 ]] || ! echo "$out" | grep -qi "^sudo: "; then
+        printf '%s\n' "$out"
+        return 0
+      fi
+    fi
+
+    if echo "$out" | grep -Eqi "tailnet policy does not permit|connection closed by|no route to host|connection timed out|connection refused|could not resolve hostname"; then
+      continue
+    fi
+  done < <(get_vm_ssh_refs "$vm" 2>/dev/null || true)
+
+  echo ""
 }
 
 get_service_container() {
