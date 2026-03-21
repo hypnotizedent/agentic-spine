@@ -63,6 +63,40 @@ required_labels:
   - com.ronny.projection-reconcile
   - com.ronny.infra-core-smoke
 
+canonical_path_policy:
+  canonical_path: "/Users/ronnyworks/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  rationale: >
+    All launchd templates MUST use the canonical PATH. ~/.local/bin is required
+    for pipx-installed tools (e.g. yq, ntfy). /opt/homebrew/bin is required for
+    Homebrew on Apple Silicon. All templates were normalized to this PATH on
+    2026-03-21.
+  enforcement: "host.launchagents.sync and launchd-health-check should flag PATH drift"
+
+governed_main_override_policy:
+  description: >
+    LaunchAgents that invoke cap.sh on the main branch require
+    OPS_GOVERNED_MAIN_OVERRIDE=1 in EnvironmentVariables. Without it,
+    cap.sh's main-branch mutation guard blocks mutating caps (exit 6).
+    Labels using SPINE_RUNTIME_WORKTREE also need the override as a
+    belt-and-suspenders measure.
+  applied_to:
+    - com.ronny.domain-inventory-refresh-daily
+    - com.ronny.freshness-critical-daily
+    - com.ronny.extension-index-refresh-daily
+    - com.ronny.operator-hygiene-daily
+    - com.ronny.receipts-archive-reconcile-daily
+    - com.ronny.spine-daily-briefing
+    - com.ronny.spine-briefing-email-daily
+
+orphaned_live_labels:
+  description: >
+    These labels exist as live plists in ~/Library/LaunchAgents/ but have
+    NO template in the spine. They point to missing binaries and should be
+    unloaded and removed at next host.launchagents.sync.
+  labels:
+    - com.ronny.mailroom-runtime-ensure
+    - com.ronny.media-config-backup-daily
+
 scheduler_expectations:
   com.ronny.launchd-health-check:
     start_interval_seconds: 300
