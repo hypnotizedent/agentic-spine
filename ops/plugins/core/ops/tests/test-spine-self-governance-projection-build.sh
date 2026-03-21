@@ -60,6 +60,15 @@ else
 fi
 assert_contains "$check_out" "PASS" "projection parity check prints pass"
 
+baseline_catalog="$(cd "$ROOT" && SPINE_TARGET_REPO="$ROOT" python3 "$BUILD" --stdout catalog 2>/dev/null)"
+touch -m "$ROOT/ops/bindings/workflow.vocabulary.contract.yaml"
+stable_catalog="$(cd "$ROOT" && SPINE_TARGET_REPO="$ROOT" python3 "$BUILD" --stdout catalog 2>/dev/null)"
+if [[ "$baseline_catalog" == "$stable_catalog" ]]; then
+  pass "generated_at remains stable across source mtime-only changes"
+else
+  fail "generated_at remains stable across source mtime-only changes"
+fi
+
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"
 exit "$FAIL"

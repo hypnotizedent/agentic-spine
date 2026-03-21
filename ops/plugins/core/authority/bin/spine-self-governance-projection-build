@@ -84,6 +84,26 @@ def rel(path: Path) -> str:
 
 
 def source_stamp(paths: list[Path]) -> str:
+    rel_paths: list[str] = []
+    for path in paths:
+        try:
+            rel_paths.append(str(path.resolve().relative_to(ROOT)))
+        except Exception:
+            continue
+
+    if rel_paths:
+        proc = subprocess.run(
+            ["git", "-C", str(ROOT), "log", "-1", "--format=%cI", "--", *rel_paths],
+            text=True,
+            capture_output=True,
+        )
+        stamp = proc.stdout.strip()
+        if proc.returncode == 0 and stamp:
+            try:
+                return datetime.fromisoformat(stamp).astimezone(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                return stamp
+
     latest = 0.0
     for path in paths:
         if path.exists():
