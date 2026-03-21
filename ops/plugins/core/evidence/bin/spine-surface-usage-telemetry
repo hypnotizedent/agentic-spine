@@ -16,6 +16,9 @@ def expand(raw: str | Path) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
 
 
+DEFAULT_ROOT = expand(Path(__file__).resolve().parents[5])
+
+
 def git_top_level(start: Path) -> Path | None:
     probe = start if start.is_dir() else start.parent
     proc = subprocess.run(
@@ -29,8 +32,7 @@ def git_top_level(start: Path) -> Path | None:
     return Path(stdout).resolve() if stdout else None
 
 
-def resolve_target_root() -> Path:
-    explicit = os.environ.get("SPINE_TARGET_REPO")
+def resolve_target_root(explicit: str | None = None) -> Path:
     if explicit:
         return expand(explicit)
     cwd_root = git_top_level(Path.cwd())
@@ -39,10 +41,14 @@ def resolve_target_root() -> Path:
     script_root = git_top_level(Path(__file__).resolve())
     if script_root is not None:
         return script_root
-    return expand(Path(__file__).resolve().parents[5])
+    for env_name in ("SPINE_TARGET_REPO", "SPINE_ROOT", "SPINE_REPO", "SPINE_CODE"):
+        value = os.environ.get(env_name)
+        if value:
+            return expand(value)
+    return DEFAULT_ROOT
 
 
-ROOT = resolve_target_root()
+ROOT = DEFAULT_ROOT
 CONTRACT = ROOT / "ops/bindings/spine.surface.usage.telemetry.contract.yaml"
 CAPABILITIES = ROOT / "ops/capabilities.yaml"
 GATE_REGISTRY = ROOT / "ops/bindings/gate.registry.yaml"
@@ -65,9 +71,19 @@ def load_yaml(path: Path) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="spine-surface-usage-telemetry")
+    parser.add_argument("--root", help="Target checkout root.")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--brief", action="store_true")
     return parser.parse_args()
+
+
+def configure_root(root: Path) -> None:
+    global ROOT, CONTRACT, CAPABILITIES, GATE_REGISTRY
+
+    ROOT = root
+    CONTRACT = ROOT / "ops/bindings/spine.surface.usage.telemetry.contract.yaml"
+    CAPABILITIES = ROOT / "ops/capabilities.yaml"
+    GATE_REGISTRY = ROOT / "ops/bindings/gate.registry.yaml"
 
 
 def receipt_capability_counts(receipts_root: Path, cutoff: datetime) -> dict[str, int]:
@@ -130,6 +146,7 @@ def binding_reference_count(root: Path, relative_path: str, scan_roots: list[str
 
 def main() -> None:
     args = parse_args()
+    configure_root(resolve_target_root(args.root))
     contract = load_yaml(CONTRACT)
     capabilities = load_yaml(CAPABILITIES)
     gate_registry = load_yaml(GATE_REGISTRY)

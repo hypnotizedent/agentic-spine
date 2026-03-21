@@ -2,8 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
-source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
+source "${ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
 STATUS="$ROOT/ops/plugins/core/verify/bin/spine-self-governance-status"
 
@@ -26,7 +25,7 @@ echo "spine self-governance status tests"
 echo "════════════════════════════════════════"
 
 set +e
-brief_out="$(cd "$ROOT" && SPINE_TARGET_REPO="$ROOT" python3 "$STATUS" --brief 2>&1)"
+brief_out="$(cd "$ROOT" && python3 "$STATUS" --root "$ROOT" --brief 2>&1)"
 brief_status=$?
 set -e
 if [[ "$brief_status" == "0" ]]; then
@@ -38,7 +37,7 @@ assert_contains "$brief_out" "workflow_concepts=5" "status reports workflow conc
 assert_contains "$brief_out" "issues=0" "status reports zero failing issues"
 
 set +e
-json_out="$(cd "$ROOT" && SPINE_TARGET_REPO="$ROOT" python3 "$STATUS" --json 2>&1)"
+json_out="$(cd "$ROOT" && python3 "$STATUS" --root "$ROOT" --json 2>&1)"
 json_status=$?
 set -e
 if [[ "$json_status" == "0" ]]; then

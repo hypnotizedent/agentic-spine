@@ -15,6 +15,9 @@ def expand(raw: str | Path) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
 
 
+DEFAULT_ROOT = expand(Path(__file__).resolve().parents[5])
+
+
 def git_top_level(start: Path) -> Path | None:
     probe = start if start.is_dir() else start.parent
     proc = subprocess.run(
@@ -28,8 +31,7 @@ def git_top_level(start: Path) -> Path | None:
     return Path(stdout).resolve() if stdout else None
 
 
-def resolve_target_root() -> Path:
-    explicit = os.environ.get("SPINE_TARGET_REPO")
+def resolve_target_root(explicit: str | None = None) -> Path:
     if explicit:
         return expand(explicit)
     cwd_root = git_top_level(Path.cwd())
@@ -38,10 +40,14 @@ def resolve_target_root() -> Path:
     script_root = git_top_level(Path(__file__).resolve())
     if script_root is not None:
         return script_root
-    return expand(Path(__file__).resolve().parents[5])
+    for env_name in ("SPINE_TARGET_REPO", "SPINE_ROOT", "SPINE_REPO", "SPINE_CODE"):
+        value = os.environ.get(env_name)
+        if value:
+            return expand(value)
+    return DEFAULT_ROOT
 
 
-ROOT = resolve_target_root()
+ROOT = DEFAULT_ROOT
 CONTRACT = ROOT / "ops/bindings/spine.self-governance.lifecycle.contract.yaml"
 PROJECTED = ROOT / "ops/bindings/spine.self-governance.lifecycle.projected.yaml"
 CATALOG = ROOT / "ops/bindings/workflow.vocabulary.catalog.yaml"
@@ -69,18 +75,41 @@ def load_yaml(path: Path) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="spine-self-governance-status")
+    parser.add_argument("--root", help="Target checkout root.")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--brief", action="store_true")
     parser.add_argument("--strict", action="store_true")
     return parser.parse_args()
 
 
-def run_checked(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, text=True, capture_output=True)
+def configure_root(root: Path) -> None:
+    global ROOT, CONTRACT, PROJECTED, CATALOG, WORKFLOW_CONTRACT, MEMORY_CONTRACT
+    global PROJECTION_BUILD, WORKFLOW_ROUTE, USAGE_TELEMETRY, SESSION_START
+
+    ROOT = root
+    CONTRACT = ROOT / "ops/bindings/spine.self-governance.lifecycle.contract.yaml"
+    PROJECTED = ROOT / "ops/bindings/spine.self-governance.lifecycle.projected.yaml"
+    CATALOG = ROOT / "ops/bindings/workflow.vocabulary.catalog.yaml"
+    WORKFLOW_CONTRACT = ROOT / "ops/bindings/workflow.vocabulary.contract.yaml"
+    MEMORY_CONTRACT = ROOT / "ops/bindings/memory.continuity.contract.yaml"
+    PROJECTION_BUILD = ROOT / "ops/plugins/core/authority/bin/spine-self-governance-projection-build"
+    WORKFLOW_ROUTE = ROOT / "ops/plugins/core/ops/bin/workflow-route"
+    USAGE_TELEMETRY = ROOT / "ops/plugins/core/evidence/bin/spine-surface-usage-telemetry"
+    SESSION_START = ROOT / "ops/plugins/core/session/bin/session-start"
+
+
+def run_checked(command: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["SPINE_TARGET_REPO"] = str(ROOT)
+    env["SPINE_ROOT"] = str(ROOT)
+    env["SPINE_REPO"] = str(ROOT)
+    env["SPINE_CODE"] = str(ROOT)
+    return subprocess.run(command, text=True, capture_output=True, cwd=str(cwd or ROOT), env=env)
 
 
 def main() -> None:
     args = parse_args()
+    configure_root(resolve_target_root(args.root))
     checks: list[dict[str, str]] = []
     fail_count = 0
     warn_count = 0
@@ -123,7 +152,7 @@ def main() -> None:
             print(f"[{check['status']}] {check['name']}: {check['detail']}")
         raise SystemExit(1)
 
-    projection_proc = run_checked(["python3", str(PROJECTION_BUILD), "--check"])
+    projection_proc = run_checked(["python3", str(PROJECTION_BUILD), "--root", str(ROOT), "--check"])
     if projection_proc.returncode == 0:
         record("projection_parity", "PASS", "self-governance projections are in sync")
     else:
@@ -144,13 +173,13 @@ def main() -> None:
     else:
         record("workflow_vocabulary", "PASS", f"{len(required_concepts)} core concepts are route-ready")
 
-    route_proc = run_checked(["python3", str(WORKFLOW_ROUTE), "loop", "--json"])
+    route_proc = run_checked(["python3", str(WORKFLOW_ROUTE), "loop", "--json"], cwd=ROOT)
     if route_proc.returncode == 0:
         record("workflow_route_command", "PASS", "workflow.route resolves canonical concepts")
     else:
         record("workflow_route_command", "FAIL", route_proc.stderr.strip() or "workflow.route failed")
 
-    help_proc = run_checked([str(SESSION_START), "--help"])
+    help_proc = run_checked([str(SESSION_START), "--help"], cwd=ROOT)
     help_text = (help_proc.stdout or "") + (help_proc.stderr or "")
     if "fast|full|degraded" in help_text or "fast|full|degraded" in help_text.replace(" ", ""):
         record("session_start_degraded", "PASS", "session.start advertises degraded mode")
@@ -165,7 +194,7 @@ def main() -> None:
     else:
         record("memory_continuity", "FAIL", "fewer than 3 non-AnythingLLM fallback layers declared")
 
-    usage_proc = run_checked(["python3", str(USAGE_TELEMETRY), "--json"])
+    usage_proc = run_checked(["python3", str(USAGE_TELEMETRY), "--root", str(ROOT), "--json"])
     if usage_proc.returncode != 0:
         record("usage_telemetry", "FAIL", usage_proc.stderr.strip() or "usage telemetry failed")
         telemetry = {}

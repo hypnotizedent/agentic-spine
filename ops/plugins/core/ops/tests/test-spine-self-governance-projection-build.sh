@@ -2,8 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
-source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
+source "${ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
 BUILD="$ROOT/ops/plugins/core/authority/bin/spine-self-governance-projection-build"
 
@@ -26,7 +25,7 @@ echo "spine self-governance projection build tests"
 echo "════════════════════════════════════════"
 
 set +e
-catalog_out="$(cd "$ROOT" && SPINE_TARGET_REPO="$ROOT" python3 "$BUILD" --stdout catalog 2>&1)"
+catalog_out="$(cd "$ROOT" && python3 "$BUILD" --root "$ROOT" --stdout catalog 2>&1)"
 catalog_status=$?
 set -e
 if [[ "$catalog_status" == "0" ]]; then
@@ -38,7 +37,7 @@ assert_contains "$catalog_out" "required_core_concepts:" "catalog includes requi
 assert_contains "$catalog_out" "route_ready: true" "catalog includes route readiness"
 
 set +e
-projected_out="$(cd "$ROOT" && SPINE_TARGET_REPO="$ROOT" python3 "$BUILD" --stdout projected 2>&1)"
+projected_out="$(cd "$ROOT" && python3 "$BUILD" --root "$ROOT" --stdout projected 2>&1)"
 projected_status=$?
 set -e
 if [[ "$projected_status" == "0" ]]; then
@@ -50,7 +49,7 @@ assert_contains "$projected_out" "session_entry_and_degraded_bootstrap:" "projec
 assert_contains "$projected_out" "telemetry_capability: spine.surface.usage.telemetry" "projected output includes telemetry capability"
 
 set +e
-check_out="$(cd "$ROOT" && SPINE_TARGET_REPO="$ROOT" python3 "$BUILD" --check 2>&1)"
+check_out="$(cd "$ROOT" && python3 "$BUILD" --root "$ROOT" --check 2>&1)"
 check_status=$?
 set -e
 if [[ "$check_status" == "0" ]]; then
@@ -60,9 +59,9 @@ else
 fi
 assert_contains "$check_out" "PASS" "projection parity check prints pass"
 
-baseline_catalog="$(cd "$ROOT" && SPINE_TARGET_REPO="$ROOT" python3 "$BUILD" --stdout catalog 2>/dev/null)"
+baseline_catalog="$(cd "$ROOT" && python3 "$BUILD" --root "$ROOT" --stdout catalog 2>/dev/null)"
 touch -m "$ROOT/ops/bindings/workflow.vocabulary.contract.yaml"
-stable_catalog="$(cd "$ROOT" && SPINE_TARGET_REPO="$ROOT" python3 "$BUILD" --stdout catalog 2>/dev/null)"
+stable_catalog="$(cd "$ROOT" && python3 "$BUILD" --root "$ROOT" --stdout catalog 2>/dev/null)"
 if [[ "$baseline_catalog" == "$stable_catalog" ]]; then
   pass "generated_at remains stable across source mtime-only changes"
 else

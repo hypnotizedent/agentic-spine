@@ -2,8 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
-source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
+source "${ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
 TELEMETRY="$ROOT/ops/plugins/core/evidence/bin/spine-surface-usage-telemetry"
 
@@ -26,7 +25,7 @@ echo "spine surface usage telemetry tests"
 echo "════════════════════════════════════════"
 
 set +e
-brief_out="$(cd "$ROOT" && SPINE_TARGET_REPO="$ROOT" python3 "$TELEMETRY" --brief 2>&1)"
+brief_out="$(cd "$ROOT" && python3 "$TELEMETRY" --root "$ROOT" --brief 2>&1)"
 brief_status=$?
 set -e
 if [[ "$brief_status" == "0" ]]; then
@@ -37,7 +36,7 @@ fi
 assert_contains "$brief_out" "status=ok" "brief telemetry reports status"
 
 set +e
-json_out="$(cd "$ROOT" && SPINE_TARGET_REPO="$ROOT" python3 "$TELEMETRY" --json 2>&1)"
+json_out="$(cd "$ROOT" && python3 "$TELEMETRY" --root "$ROOT" --json 2>&1)"
 json_status=$?
 set -e
 if [[ "$json_status" == "0" ]]; then
