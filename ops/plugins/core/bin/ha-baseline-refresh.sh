@@ -11,7 +11,8 @@ set -euo pipefail
 
 CONTROL_ROOT="${SPINE_CONTROL_ROOT:-${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}}"
 source "${CONTROL_ROOT}/ops/lib/runtime-managed-worktree.sh"
-RUNTIME_ROOT="$(spine_runtime_prepare_managed_worktree "$CONTROL_ROOT")"
+spine_runtime_activate_managed_worktree "$CONTROL_ROOT"
+RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"
 CAP_RUNNER="$RUNTIME_ROOT/bin/ops"
 LOG_PREFIX="[ha-baseline-refresh]"
 source "${RUNTIME_ROOT}/ops/lib/job-wrapper.sh"
