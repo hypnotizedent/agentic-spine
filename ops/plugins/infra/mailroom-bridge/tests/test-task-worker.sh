@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 BIN="$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-task-worker"
 ENQUEUE_BIN="$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-task-enqueue"
 
@@ -73,6 +73,17 @@ echo "$status_out" | grep "status: stopped" >/dev/null || fail "status output sh
 echo "$status_out" | grep "worker_id: test-worker" >/dev/null || fail "status output should include worker id"
 pass "worker --status output contract"
 
+set +e
+strict_out="$(env "${worker_env[@]}" "$BIN" --status --brief --strict 2>&1)"
+strict_rc=$?
+set -e
+[[ "$strict_rc" -ne 0 ]] || fail "strict status should fail when worker is stopped"
+[[ "$strict_out" == *"health=fail"* ]] || fail "strict brief status should expose failing health"
+
+status_json="$(env "${worker_env[@]}" "$BIN" --status --json)"
+echo "$status_json" | jq -e '.health_status=="fail" and .health_reason=="worker_not_running"' >/dev/null || fail "status json should classify stopped worker as unhealthy"
+pass "worker status exposes strict/json health semantics"
+
 contract_agent_tool="$tmp/worker.agent-tool.contract.yaml"
 cat >"$contract_agent_tool" <<'YAML'
 runtime:
@@ -109,7 +120,16 @@ queued_file="$tmp/runtime/state/agent-tasks/queued/TASK-AGENT-001.yaml"
 stored_payload="$(yq e -r '.payload' "$queued_file")"
 [[ "$stored_payload" == "$agent_payload" ]] || fail "queued task payload should round-trip JSON envelope safely"
 
-agent_once_json="$(env MAILROOM_TASK_WORKER_CONTRACT="$contract_agent_tool" SPINE_INBOX="$tmp/runtime/inbox" SPINE_OUTBOX="$tmp/runtime/outbox" SPINE_STATE="$tmp/runtime/state" SPINE_LOGS="$tmp/runtime/logs" "$BIN" --once | extract_json)"
+agent_once_json="$(
+  env \
+    MAILROOM_TASK_WORKER_CONTRACT="$contract_agent_tool" \
+    SPINE_INBOX="$tmp/runtime/inbox" \
+    SPINE_OUTBOX="$tmp/runtime/outbox" \
+    SPINE_STATE="$tmp/runtime/state" \
+    SPINE_LOGS="$tmp/runtime/logs" \
+    OPS_GOVERNED_MAIN_OVERRIDE=1 \
+    "$BIN" --once | extract_json
+)"
 echo "$agent_once_json" | jq -e '.tasks.claimed==1 and .tasks.completed==1 and .tasks.failed==0' >/dev/null || fail "agent_tool task should be claimed and completed"
 
 done_file="$tmp/runtime/state/agent-tasks/done/TASK-AGENT-001.yaml"
@@ -150,6 +170,7 @@ bounded_env=(
   "SPINE_OUTBOX=$tmp/runtime/outbox"
   "SPINE_STATE=$tmp/runtime/state"
   "SPINE_LOGS=$tmp/runtime/logs"
+  "OPS_GOVERNED_MAIN_OVERRIDE=1"
 )
 
 # Clean queued dir from previous tests

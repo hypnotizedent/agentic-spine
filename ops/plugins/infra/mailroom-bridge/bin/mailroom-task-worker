@@ -24,7 +24,7 @@ from typing import Any
 import yaml
 
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(__file__).resolve().parents[5]
 RUNTIME_CONTRACT = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
 WORKER_CONTRACT = Path(
     os.environ.get("MAILROOM_TASK_WORKER_CONTRACT", str(ROOT / "ops/bindings/mailroom.task.worker.contract.yaml"))
@@ -88,6 +88,19 @@ def resolve_runtime_paths() -> dict[str, Path]:
         "state": Path(state),
         "logs": Path(logs),
     }
+
+
+def build_runtime_env(repo_root: Path, runtime_paths: dict[str, Path]) -> dict[str, str]:
+    env = dict(os.environ)
+    env["SPINE_TARGET_REPO"] = str(repo_root)
+    env["SPINE_ROOT"] = str(repo_root)
+    env["SPINE_REPO"] = str(repo_root)
+    env["SPINE_CODE"] = str(repo_root)
+    env["SPINE_INBOX"] = str(runtime_paths["inbox"])
+    env["SPINE_OUTBOX"] = str(runtime_paths["outbox"])
+    env["SPINE_STATE"] = str(runtime_paths["state"])
+    env["SPINE_LOGS"] = str(runtime_paths["logs"])
+    return env
 
 
 def resolve_path(base: Path, raw: str) -> Path:
@@ -184,7 +197,14 @@ def extract_receipt_path(text: str) -> str:
     return ""
 
 
-def run_ops_cap(capability: str, args: list[str], *, confirm: bool = False, timeout: int = 900) -> dict[str, Any]:
+def run_ops_cap(
+    capability: str,
+    args: list[str],
+    *,
+    confirm: bool = False,
+    timeout: int = 900,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
     cmd = [str(ROOT / "bin/ops"), "cap", "run", capability] + args
     stdin_text = "yes\n" if confirm else None
     proc = subprocess.run(
@@ -195,6 +215,7 @@ def run_ops_cap(capability: str, args: list[str], *, confirm: bool = False, time
         capture_output=True,
         check=False,
         timeout=timeout,
+        env=env,
     )
     stdout = proc.stdout or ""
     stderr = proc.stderr or ""
@@ -300,6 +321,7 @@ def pid_running(pid: int) -> bool:
 class TaskWorker:
     def __init__(self, *, worker_id: str | None = None, poll_override: int | None = None, max_claims_override: int | None = None) -> None:
         self.runtime_paths = resolve_runtime_paths()
+        self.runtime_env = build_runtime_env(ROOT, self.runtime_paths)
         self.contract = load_yaml(WORKER_CONTRACT, {})
         self.role_runtime_contract = load_yaml(ROLE_RUNTIME_CONTRACT, {})
         self.runtime_cfg = self.contract.get("runtime", {}) if isinstance(self.contract, dict) else {}
@@ -380,10 +402,106 @@ class TaskWorker:
             "capability": "mailroom.task.worker.status",
             "schema_version": "1.0",
             "generated_at": utc_now(),
-            "status": "ok",
+            "status": str(payload.get("health_status", "ok")).strip() or "ok",
             "data": payload,
         }
         self.status_file.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def _load_status_snapshot(self) -> tuple[int, bool, dict[str, Any], str]:
+        pid = 0
+        if self.pid_file.exists():
+            try:
+                pid = int(self.pid_file.read_text(encoding="utf-8").strip())
+            except Exception:
+                pid = 0
+        running = pid > 0 and pid_running(pid)
+
+        status_payload: dict[str, Any] = {}
+        generated_at = ""
+        if self.status_file.exists():
+            try:
+                raw = json.loads(self.status_file.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    status_payload = raw
+                    generated_at = str(raw.get("generated_at", "")).strip()
+            except Exception:
+                status_payload = {}
+                generated_at = ""
+        return pid, running, status_payload, generated_at
+
+    def _classify_health(self, running: bool, status_payload: dict[str, Any], generated_at: str) -> dict[str, Any]:
+        data = status_payload.get("data", {}) if isinstance(status_payload.get("data"), dict) else {}
+        cycle = data.get("cycle", {}) if isinstance(data.get("cycle"), dict) else {}
+        tasks = data.get("tasks", {}) if isinstance(data.get("tasks"), dict) else {}
+        task_failures = int(tasks.get("failed", 0) or 0)
+        cycle_status = str(cycle.get("status", "")).strip() or "unknown"
+        stale_threshold = max(self.poll_seconds * 3, self.error_backoff_seconds * 4, 300)
+
+        age_seconds: int | None = None
+        if generated_at:
+            try:
+                parsed = dt.datetime.strptime(generated_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+                age_seconds = max(0, int((dt.datetime.now(dt.timezone.utc) - parsed).total_seconds()))
+            except ValueError:
+                age_seconds = None
+
+        health_status = "ok"
+        health_reason = ""
+        if not running:
+            health_status = "fail"
+            health_reason = "worker_not_running"
+        elif not status_payload:
+            health_status = "warn"
+            health_reason = "status_missing"
+        elif age_seconds is None and generated_at:
+            health_status = "warn"
+            health_reason = "status_unparseable"
+        elif age_seconds is not None and age_seconds > stale_threshold:
+            health_status = "fail"
+            health_reason = "status_stale"
+        elif cycle_status == "failed":
+            health_status = "fail"
+            health_reason = "cycle_failed"
+        elif task_failures > 0:
+            health_status = "warn"
+            health_reason = "task_failures"
+
+        return {
+            "health_status": health_status,
+            "health_reason": health_reason,
+            "last_tick_age_seconds": age_seconds,
+            "stale_threshold_seconds": stale_threshold,
+            "last_cycle_status": cycle_status,
+            "last_task_failures": task_failures,
+        }
+
+    def status_payload(self) -> dict[str, Any]:
+        pid, running, status_payload, generated_at = self._load_status_snapshot()
+        data = status_payload.get("data", {}) if isinstance(status_payload.get("data"), dict) else {}
+        cycle = data.get("cycle", {}) if isinstance(data.get("cycle"), dict) else {}
+        tasks = data.get("tasks", {}) if isinstance(data.get("tasks"), dict) else {}
+        health = self._classify_health(running, status_payload, generated_at)
+        return {
+            "worker_id": self.worker_id,
+            "running": running,
+            "status": "running" if running else "stopped",
+            "pid": pid if pid > 0 else None,
+            "last_tick": generated_at or "",
+            "cycle": cycle,
+            "tasks": tasks,
+            "health_status": health["health_status"],
+            "health_reason": health["health_reason"],
+            "last_tick_age_seconds": health["last_tick_age_seconds"],
+            "stale_threshold_seconds": health["stale_threshold_seconds"],
+            "paths": {
+                "contract": str(WORKER_CONTRACT),
+                "runtime_contract": str(RUNTIME_CONTRACT),
+                "pid_file": str(self.pid_file),
+                "log_file": str(self.log_file),
+                "status_file": str(self.status_file),
+                "queued_dir": str(self.queued_dir),
+            },
+        }
 
     def run_cycle_once(self) -> dict[str, Any]:
         if not bool(self.cycle_cfg.get("enabled", True)):
@@ -408,7 +526,7 @@ class TaskWorker:
         cycle_timeout = int(self.cycle_cfg.get("timeout_seconds", 120))
         if cycle_timeout < 15:
             cycle_timeout = 15
-        result = run_ops_cap("spine.control.cycle", args, confirm=True, timeout=cycle_timeout)
+        result = run_ops_cap("spine.control.cycle", args, confirm=True, timeout=cycle_timeout, env=self.runtime_env)
         cycle_status = "ok" if result["ok"] else "failed"
         if result["ok"]:
             self.log(
@@ -565,13 +683,31 @@ class TaskWorker:
         return tool, route_input, route_resolution
 
     def _heartbeat(self, task_id: str, progress: str) -> None:
-        run_ops_cap("mailroom.task.heartbeat", ["--task-id", task_id, "--progress", progress, "--json"], confirm=False, timeout=180)
+        run_ops_cap(
+            "mailroom.task.heartbeat",
+            ["--task-id", task_id, "--progress", progress, "--json"],
+            confirm=False,
+            timeout=180,
+            env=self.runtime_env,
+        )
 
     def _complete(self, task_id: str, result_text: str) -> None:
-        run_ops_cap("mailroom.task.complete", ["--task-id", task_id, "--result", safe_reason(result_text), "--json"], confirm=False, timeout=180)
+        run_ops_cap(
+            "mailroom.task.complete",
+            ["--task-id", task_id, "--result", safe_reason(result_text), "--json"],
+            confirm=False,
+            timeout=180,
+            env=self.runtime_env,
+        )
 
     def _fail(self, task_id: str, reason: str) -> None:
-        run_ops_cap("mailroom.task.fail", ["--task-id", task_id, "--reason", safe_reason(reason), "--json"], confirm=False, timeout=180)
+        run_ops_cap(
+            "mailroom.task.fail",
+            ["--task-id", task_id, "--reason", safe_reason(reason), "--json"],
+            confirm=False,
+            timeout=180,
+            env=self.runtime_env,
+        )
 
     def _execute_capability_task(self, task_id: str, task: dict[str, Any]) -> tuple[bool, str]:
         capability, cap_args, payload_confirm = self._extract_capability_request(task)
@@ -587,7 +723,13 @@ class TaskWorker:
             return False, f"manual_confirmation_required:{capability}"
 
         self._heartbeat(task_id, f"executing capability={capability}")
-        run = run_ops_cap(capability, cap_args, confirm=(approval == "manual" and payload_confirm), timeout=1200)
+        run = run_ops_cap(
+            capability,
+            cap_args,
+            confirm=(approval == "manual" and payload_confirm),
+            timeout=1200,
+            env=self.runtime_env,
+        )
         if not run["ok"]:
             detail = run.get("stderr") or run.get("output") or f"capability failed rc={run.get('exit_code', 1)}"
             return False, detail
@@ -611,7 +753,7 @@ class TaskWorker:
             return False, "route_resolve_input_required"
 
         self._heartbeat(task_id, f"executing agent_tool={tool} input={route_input}")
-        run = run_ops_cap("agent.route", ["--json", route_input], confirm=False, timeout=600)
+        run = run_ops_cap("agent.route", ["--json", route_input], confirm=False, timeout=600, env=self.runtime_env)
         if not run["ok"]:
             detail = run.get("stderr") or run.get("output") or f"agent_tool failed rc={run.get('exit_code', 1)}"
             return False, detail
@@ -669,7 +811,7 @@ class TaskWorker:
             claim_args = ["--task-id", task_id, "--worker", self.worker_id, "--json"]
             if self.allow_unhealthy_claims:
                 claim_args.append("--allow-unhealthy")
-            claim = run_ops_cap("mailroom.task.claim", claim_args, confirm=False, timeout=240)
+            claim = run_ops_cap("mailroom.task.claim", claim_args, confirm=False, timeout=240, env=self.runtime_env)
             if not claim["ok"]:
                 failed += 1
                 self.log(
@@ -739,6 +881,15 @@ class TaskWorker:
                 "status_file": str(self.status_file),
             },
         }
+        if cycle.get("status") == "failed":
+            payload["health_status"] = "fail"
+            payload["health_reason"] = "cycle_failed"
+        elif int(tasks.get("failed", 0) or 0) > 0:
+            payload["health_status"] = "warn"
+            payload["health_reason"] = "task_failures"
+        else:
+            payload["health_status"] = "ok"
+            payload["health_reason"] = ""
         self.write_status(payload)
         return payload
 
@@ -779,44 +930,55 @@ class TaskWorker:
             self.log("worker stop")
         return 0
 
-    def status(self) -> int:
-        pid = 0
-        if self.pid_file.exists():
-            try:
-                pid = int(self.pid_file.read_text(encoding="utf-8").strip())
-            except Exception:
-                pid = 0
-        running = pid > 0 and pid_running(pid)
+    def status(self, *, json_mode: bool = False, brief: bool = False, strict: bool = False) -> int:
+        payload = self.status_payload()
+        running = bool(payload.get("running", False))
+        pid = payload.get("pid")
+        health_status = str(payload.get("health_status", "unknown"))
+        health_reason = str(payload.get("health_reason", ""))
+        cycle = payload.get("cycle", {}) if isinstance(payload.get("cycle"), dict) else {}
+        tasks = payload.get("tasks", {}) if isinstance(payload.get("tasks"), dict) else {}
 
-        print("mailroom.task.worker")
-        print(f"  contract: {WORKER_CONTRACT}")
-        print(f"  runtime_contract: {RUNTIME_CONTRACT}")
-        print(f"  worker_id: {self.worker_id}")
-        print(f"  status: {'running' if running else 'stopped'}")
-        print(f"  pid: {pid if pid > 0 else '-'}")
-        print(f"  pid_file: {self.pid_file}")
-        print(f"  log_file: {self.log_file}")
-        print(f"  status_file: {self.status_file}")
-        print(f"  queued_dir: {self.queued_dir}")
-        if self.status_file.exists():
-            try:
-                status_payload = json.loads(self.status_file.read_text(encoding="utf-8"))
-                generated_at = status_payload.get("generated_at", "")
-                data = status_payload.get("data", {})
-                tasks = data.get("tasks", {})
-                cycle = data.get("cycle", {})
-                print(f"  last_tick: {generated_at}")
-                print(f"  last_cycle_status: {cycle.get('status', '-')}")
-                print(
-                    "  last_tasks: "
-                    f"claimed={tasks.get('claimed', 0)} "
-                    f"completed={tasks.get('completed', 0)} "
-                    f"failed={tasks.get('failed', 0)} "
-                    f"skipped={tasks.get('skipped', 0)}"
-                )
-            except Exception:
-                print("  last_tick: unreadable")
-        return 0
+        if json_mode:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        elif brief:
+            reason_part = f" reason={health_reason}" if health_reason else ""
+            age = payload.get("last_tick_age_seconds")
+            age_part = f" last_tick_age={age}" if age is not None else ""
+            print(
+                f"status={payload.get('status')} health={health_status}{reason_part} "
+                f"cycle={cycle.get('status', 'unknown')} tasks_failed={tasks.get('failed', 0)}{age_part}"
+            )
+        else:
+            contract_path = payload.get("paths", {}).get("contract", str(WORKER_CONTRACT))
+            runtime_contract_path = payload.get("paths", {}).get("runtime_contract", str(RUNTIME_CONTRACT))
+            print("mailroom.task.worker")
+            print(f"  contract: {contract_path}")
+            print(f"  runtime_contract: {runtime_contract_path}")
+            print(f"  worker_id: {self.worker_id}")
+            print(f"  status: {'running' if running else 'stopped'}")
+            print(f"  health: {health_status}")
+            if health_reason:
+                print(f"  health_reason: {health_reason}")
+            print(f"  pid: {pid if pid else '-'}")
+            print(f"  pid_file: {self.pid_file}")
+            print(f"  log_file: {self.log_file}")
+            print(f"  status_file: {self.status_file}")
+            print(f"  queued_dir: {self.queued_dir}")
+            if payload.get("last_tick"):
+                print(f"  last_tick: {payload.get('last_tick')}")
+            if payload.get("last_tick_age_seconds") is not None:
+                print(f"  last_tick_age_seconds: {payload.get('last_tick_age_seconds')}")
+            print(f"  last_cycle_status: {cycle.get('status', '-')}")
+            print(
+                "  last_tasks: "
+                f"claimed={tasks.get('claimed', 0)} "
+                f"completed={tasks.get('completed', 0)} "
+                f"failed={tasks.get('failed', 0)} "
+                f"skipped={tasks.get('skipped', 0)}"
+            )
+            print(f"  stale_threshold_seconds: {payload.get('stale_threshold_seconds', '-')}")
+        return 0 if (not strict or health_status == "ok") else 1
 
     def stop(self) -> int:
         if not self.pid_file.exists():
@@ -863,6 +1025,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--once", action="store_true", help="Run a single tick (cycle + task consume)")
     mode.add_argument("--status", action="store_true", help="Show worker status")
     mode.add_argument("--stop", action="store_true", help="Stop worker daemon")
+    p.add_argument("--json", action="store_true", help="Emit machine-readable status payload")
+    p.add_argument("--brief", action="store_true", help="Emit compact status summary")
+    p.add_argument("--strict", action="store_true", help="Exit nonzero unless worker status is healthy")
     p.add_argument("--worker-id", help="Override claim policy worker id")
     p.add_argument("--poll-seconds", type=int, help="Override poll interval in seconds")
     p.add_argument("--max-claims-per-tick", type=int, help="Override task max claims per tick")
@@ -878,7 +1043,7 @@ def main() -> int:
     )
 
     if args.status:
-        return worker.status()
+        return worker.status(json_mode=args.json, brief=args.brief, strict=args.strict)
     if args.stop:
         return worker.stop()
     if args.once:
@@ -909,6 +1074,7 @@ def main() -> int:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=worker.runtime_env,
         )
         time.sleep(0.5)
         return worker.status()

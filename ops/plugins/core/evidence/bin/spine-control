@@ -34,6 +34,20 @@ def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def runtime_env() -> dict[str, str]:
+    runtime_paths = resolve_runtime_paths()
+    env = dict(os.environ)
+    env["SPINE_TARGET_REPO"] = str(ROOT)
+    env["SPINE_ROOT"] = str(ROOT)
+    env["SPINE_REPO"] = str(ROOT)
+    env["SPINE_CODE"] = str(ROOT)
+    env["SPINE_INBOX"] = str(runtime_paths["inbox"])
+    env["SPINE_OUTBOX"] = str(runtime_paths["outbox"])
+    env["SPINE_STATE"] = str(runtime_paths["state"])
+    env["SPINE_LOGS"] = str(runtime_paths["logs"])
+    return env
+
+
 def run_cmd(cmd: list[str], *, cwd: Path | None = None, input_text: str | None = None) -> tuple[int, str, str]:
     proc = subprocess.run(
         cmd,
@@ -42,6 +56,7 @@ def run_cmd(cmd: list[str], *, cwd: Path | None = None, input_text: str | None =
         text=True,
         capture_output=True,
         check=False,
+        env=runtime_env(),
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -810,7 +825,7 @@ def build_plan_payload(tick_payload: dict[str, Any]) -> dict[str, Any]:
             priority="P1",
             title=f"Inspect loop progress: {loop_id}",
             reason=f"Loop is {loop.get('status', 'active')} and still open.",
-            route_target={"type": "capability", "capability": "loops.progress", "args": [loop_id]},
+            route_target={"type": "capability", "capability": "loops.progress", "args": ["--loop", loop_id]},
         )
 
     if proposals.get("pending", 0) > 0:
@@ -822,7 +837,8 @@ def build_plan_payload(tick_payload: dict[str, Any]) -> dict[str, Any]:
             route_target={"type": "capability", "capability": "proposals.status", "args": []},
         )
 
-    if alerts.get("total_alerts", 0) > 0:
+    active_incidents = int(alerts.get("active_incident_alerts", 0) or 0)
+    if alerts.get("total_alerts", 0) > 0 and active_incidents == 0:
         add_action(
             action_id="A30-stability-snapshot",
             priority="P0",
