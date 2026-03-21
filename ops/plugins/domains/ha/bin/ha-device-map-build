@@ -5,17 +5,20 @@ set -euo pipefail
 # Queries HA REST API (states + template) and merges with local SSOT bindings.
 # Output: ops/bindings/ha.device.map.yaml
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-OUTPUT="$SPINE_ROOT/ops/bindings/ha.device.map.yaml"
-DEVICE_REGISTRY="$SPINE_ROOT/ops/bindings/home.device.registry.yaml"
-Z2M_REGISTRY="$SPINE_ROOT/ops/bindings/z2m.devices.yaml"
-INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/ha-snapshot-common.sh"
 HA_HOST="${HA_HOST:-10.0.0.100}"
 HA_PORT="${HA_PORT:-8123}"
 HA_BASE="http://${HA_HOST}:${HA_PORT}"
 
 TMPDIR_WORK=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_WORK"' EXIT
+ha_snapshot_init "ha.device.map.yaml" "$@"
+OUTPUT="$HA_SNAPSHOT_OUTPUT"
+STAGED_OUTPUT="$TMPDIR_WORK/ha.device.map.yaml"
+DEVICE_REGISTRY="$HA_SNAPSHOT_ROOT/ops/bindings/home.device.registry.yaml"
+Z2M_REGISTRY="$(ha_snapshot_resolve_source_path "$HA_SNAPSHOT_ROOT" "ops/bindings/z2m.devices.yaml")"
+INFISICAL_AGENT="${HA_SNAPSHOT_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
 
 echo "ha.device.map.build"
 echo
@@ -97,7 +100,7 @@ echo
 # CROSS-REFERENCE (Python)
 # ─────────────────────────────────────────────────────────────────────────────
 
-python3 - "$TMPDIR_WORK" "$DEVICE_REGISTRY" "$Z2M_REGISTRY" "$OUTPUT" << 'PYEOF'
+python3 - "$TMPDIR_WORK" "$DEVICE_REGISTRY" "$Z2M_REGISTRY" "$STAGED_OUTPUT" "$HA_SNAPSHOT_ROOT" << 'PYEOF'
 import json, sys, datetime, re, os
 
 try:
@@ -106,7 +109,7 @@ except ImportError:
     print("STOP (2): PyYAML not installed", file=sys.stderr)
     sys.exit(2)
 
-tmpdir, dev_reg_path, z2m_reg_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+tmpdir, dev_reg_path, z2m_reg_path, out_path, root_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 
 # ── Load HA states ──────────────────────────────────────────────────────────
 with open(os.path.join(tmpdir, 'states.json'), 'r') as f:
@@ -270,8 +273,7 @@ for did, dev in sorted(ha_devices.items(), key=lambda x: x[1]['name']):
     output_devices.append(entry)
 
 # ── Load orphan classifications ──────────────────────────────────────────
-classify_path = os.path.join(os.environ.get('SPINE_ROOT', os.path.expanduser('~/code/agentic-spine')),
-                             'ops/bindings/ha.orphan.classification.yaml')
+classify_path = os.path.join(root_path, 'ops/bindings/ha.orphan.classification.yaml')
 orphan_categories = {}  # category -> count
 if os.path.isfile(classify_path):
     with open(classify_path, 'r') as f:
@@ -300,8 +302,7 @@ if os.path.isfile(classify_path):
         print(f"  Classified {classified}/{orphan_count} orphan(s) from classification file")
 
 # ── Merge manual overrides ──────────────────────────────────────────────────
-overrides_path = os.path.join(os.environ.get('SPINE_ROOT', os.path.expanduser('~/code/agentic-spine')),
-                              'ops/bindings/ha.device.map.overrides.yaml')
+overrides_path = os.path.join(root_path, 'ops/bindings/ha.device.map.overrides.yaml')
 if os.path.isfile(overrides_path):
     with open(overrides_path, 'r') as f:
         overrides_data = yaml.safe_load(f) or {}
@@ -357,5 +358,13 @@ if orphan_categories:
         print(f"  All orphans classified — no action items")
 PYEOF
 
+ha_snapshot_finalize "$STAGED_OUTPUT"
+ha_snapshot_assert_tracked_unchanged_in_check_mode
+
 echo
 echo "sha256: $(shasum -a 256 "$OUTPUT" | cut -d' ' -f1)"
+if [[ "${HA_SNAPSHOT_FINAL_ACTION:-wrote}" == "semantic-noop" ]]; then
+  echo "result: semantic no-op (ignored volatile timestamp fields)"
+fi
+echo "mode: $HA_SNAPSHOT_MODE"
+echo "tracked_binding: $HA_SNAPSHOT_TRACKED_OUTPUT"

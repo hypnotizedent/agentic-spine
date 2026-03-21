@@ -4,12 +4,31 @@ set -euo pipefail
 # ha.addons.snapshot — Extract HA Supervisor add-on inventory to YAML binding
 # Queries Supervisor API via SSH + bash -l (SUPERVISOR_TOKEN injected by HA environment).
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-OUTPUT="$SPINE_ROOT/ops/bindings/ha.addons.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/ha-snapshot-common.sh"
 SSH_TARGET="hassio@ha"
 SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
 TMPDIR_WORK=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_WORK"' EXIT
+
+usage() {
+  cat <<'USAGE'
+ha-addons-snapshot
+
+Usage:
+  ./bin/ops cap run ha.addons.snapshot
+  ./bin/ops cap run ha.addons.snapshot -- --apply
+
+Flags:
+  --apply               Write tracked projection binding.
+  --check               Read-only mode (default): write runtime state only.
+  --state-path <path>   Override output path (defaults to runtime state path).
+USAGE
+}
+
+ha_snapshot_init "ha.addons.yaml" "$@"
+OUTPUT="$HA_SNAPSHOT_OUTPUT"
+STAGED_OUTPUT="$TMPDIR_WORK/ha.addons.yaml"
 
 echo "ha.addons.snapshot"
 echo
@@ -31,7 +50,7 @@ if [[ ! -s "$TMPDIR_WORK/addons.json" ]]; then
 fi
 
 # Parse JSON into YAML binding
-python3 - "$TMPDIR_WORK/addons.json" "$OUTPUT" << 'PYEOF'
+python3 - "$TMPDIR_WORK/addons.json" "$STAGED_OUTPUT" << 'PYEOF'
 import json, sys, datetime
 
 try:
@@ -84,3 +103,13 @@ errors = sum(1 for a in addons if a.get('state') == 'error')
 print(f"Wrote {out_path}")
 print(f"  {len(addons)} add-ons ({started} started, {errors} errors, {updates} updates available)")
 PYEOF
+
+ha_snapshot_finalize "$STAGED_OUTPUT"
+ha_snapshot_assert_tracked_unchanged_in_check_mode
+
+echo "output: $OUTPUT"
+if [[ "${HA_SNAPSHOT_FINAL_ACTION:-wrote}" == "semantic-noop" ]]; then
+  echo "result: semantic no-op (ignored volatile timestamp fields)"
+fi
+echo "mode: $HA_SNAPSHOT_MODE"
+echo "tracked_binding: $HA_SNAPSHOT_TRACKED_OUTPUT"

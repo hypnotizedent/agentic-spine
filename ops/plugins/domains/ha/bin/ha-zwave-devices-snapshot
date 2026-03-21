@@ -5,12 +5,17 @@ set -euo pipefail
 # Reads zwave_js entities from HA Core API, writes YAML binding.
 # Requires: HA_API_TOKEN from Infisical, HA reachable via LAN (default) or HA_HOST override.
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-OUTPUT="$SPINE_ROOT/ops/bindings/zwave.devices.yaml"
-INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/ha-snapshot-common.sh"
 HA_HOST="${HA_HOST:-10.0.0.100}"
 HA_PORT="${HA_PORT:-8123}"
 HA_API="http://${HA_HOST}:${HA_PORT}/api"
+TMPDIR_WORK=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_WORK"' EXIT
+ha_snapshot_init "zwave.devices.yaml" "$@"
+OUTPUT="$HA_SNAPSHOT_OUTPUT"
+STAGED_OUTPUT="$TMPDIR_WORK/zwave.devices.yaml"
+INFISICAL_AGENT="${HA_SNAPSHOT_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
 
 echo "ha.zwave.devices.snapshot"
 echo
@@ -50,7 +55,7 @@ TUBESZB_IP=$(echo "$ALL_STATES" | jq -r '.[] | select(.entity_id == "sensor.tube
 TUBESZB_FW=$(echo "$ALL_STATES" | jq -r '.[] | select(.entity_id == "update.tubeszb_2026_zw_tubeszb_firmware_update") | .attributes.installed_version // "unknown"' 2>/dev/null) || TUBESZB_FW="unknown"
 
 # Write YAML binding
-python3 - "$OUTPUT" "$ZW_ADDON_VERSION" "$ZW_SERIAL" "$TUBESZB_IP" "$TUBESZB_FW" "$ZWAVE_COUNT" "$ALL_STATES" << 'PYEOF'
+python3 - "$STAGED_OUTPUT" "$ZW_ADDON_VERSION" "$ZW_SERIAL" "$TUBESZB_IP" "$TUBESZB_FW" "$ZWAVE_COUNT" "$ALL_STATES" << 'PYEOF'
 import json, sys, datetime
 
 try:
@@ -135,6 +140,14 @@ print(f"serial_connected={serial_state}")
 print(f"addon_version={addon_version}")
 PYEOF
 
+ha_snapshot_finalize "$STAGED_OUTPUT"
+ha_snapshot_assert_tracked_unchanged_in_check_mode
+
 echo
 echo "Wrote $OUTPUT"
 echo "sha256: $(shasum -a 256 "$OUTPUT" | cut -d' ' -f1)"
+if [[ "${HA_SNAPSHOT_FINAL_ACTION:-wrote}" == "semantic-noop" ]]; then
+  echo "result: semantic no-op (ignored volatile timestamp fields)"
+fi
+echo "mode: $HA_SNAPSHOT_MODE"
+echo "tracked_binding: $HA_SNAPSHOT_TRACKED_OUTPUT"

@@ -4,14 +4,14 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-SPINE_CODE="${SPINE_CODE:-$SPINE_ROOT}"
-CAP_RUNNER="$SPINE_CODE/bin/ops"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
+CAP_RUNNER="$ROOT/bin/ops"
 
 START_TIME=$(date +%s)
 
 echo "═══════════════════════════════════════════════════════════════════════════"
-echo "HA REFRESH — Refresh all HA bindings"
+echo "HA REFRESH — Refresh runtime HA snapshots"
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo
 
@@ -36,7 +36,7 @@ FAILED_CAPS=()
 
 for cap in "${SNAPSHOTS[@]}"; do
   printf "%-35s " "$cap"
-  if "$CAP_RUNNER" cap run "$cap" >/dev/null 2>&1; then
+  if "$CAP_RUNNER" cap run "$cap" -- --check >/dev/null 2>&1; then
     PASS=$((PASS + 1))
     echo "✓"
   else
@@ -52,7 +52,7 @@ echo "BASELINE BUILD"
 echo "─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─"
 
 printf "%-35s " "ha.ssot.baseline.build"
-if "$CAP_RUNNER" cap run ha.ssot.baseline.build >/dev/null 2>&1; then
+if "$CAP_RUNNER" cap run ha.ssot.baseline.build -- --check >/dev/null 2>&1; then
   echo "✓"
 else
   FAIL=$((FAIL + 1))
@@ -81,5 +81,6 @@ if (( FAIL > 0 )); then
   exit 1
 fi
 
-echo "All HA bindings refreshed successfully."
+echo "All HA runtime snapshots refreshed successfully."
+echo "Promotion remains explicit via snapshot.projection.apply or per-capability --apply."
 exit 0

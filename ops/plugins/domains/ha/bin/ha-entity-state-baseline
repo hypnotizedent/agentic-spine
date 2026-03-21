@@ -5,17 +5,20 @@ set -euo pipefail
 # Queries HA REST API for all entity states, cross-references expected-unavailable allowlist.
 # Output: ops/bindings/ha.entity.state.baseline.yaml
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-OUTPUT="$SPINE_ROOT/ops/bindings/ha.entity.state.baseline.yaml"
-EXPECTED_UNAVAIL="$SPINE_ROOT/ops/bindings/ha.entity.state.expected-unavailable.yaml"
-EXPECTED_UNKNOWN="$SPINE_ROOT/ops/bindings/ha.entity.state.expected-unknown.yaml"
-INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/ha-snapshot-common.sh"
 HA_HOST="${HA_HOST:-10.0.0.100}"
 HA_PORT="${HA_PORT:-8123}"
 HA_BASE="http://${HA_HOST}:${HA_PORT}"
 
 TMPDIR_WORK=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_WORK"' EXIT
+ha_snapshot_init "ha.entity.state.baseline.yaml" "$@"
+OUTPUT="$HA_SNAPSHOT_OUTPUT"
+STAGED_OUTPUT="$TMPDIR_WORK/ha.entity.state.baseline.yaml"
+EXPECTED_UNAVAIL="$HA_SNAPSHOT_ROOT/ops/bindings/ha.entity.state.expected-unavailable.yaml"
+EXPECTED_UNKNOWN="$HA_SNAPSHOT_ROOT/ops/bindings/ha.entity.state.expected-unknown.yaml"
+INFISICAL_AGENT="${HA_SNAPSHOT_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
 
 echo "ha.entity.state.baseline"
 echo
@@ -63,7 +66,7 @@ echo "Building entity state baseline..."
 # BUILD YAML BINDING (Python)
 # ─────────────────────────────────────────────────────────────────────────────
 
-python3 - "$TMPDIR_WORK" "$OUTPUT" "$EXPECTED_UNAVAIL" "$EXPECTED_UNKNOWN" << 'PYEOF'
+python3 - "$TMPDIR_WORK" "$STAGED_OUTPUT" "$EXPECTED_UNAVAIL" "$EXPECTED_UNKNOWN" << 'PYEOF'
 import json, sys, datetime, os
 from collections import Counter
 
@@ -191,5 +194,13 @@ for domain, count in sorted(domain_counts.items(), key=lambda x: -x[1])[:10]:
     print(f"  {domain}: {count}")
 PYEOF
 
+ha_snapshot_finalize "$STAGED_OUTPUT"
+ha_snapshot_assert_tracked_unchanged_in_check_mode
+
 echo
 echo "sha256: $(shasum -a 256 "$OUTPUT" | cut -d' ' -f1)"
+if [[ "${HA_SNAPSHOT_FINAL_ACTION:-wrote}" == "semantic-noop" ]]; then
+  echo "result: semantic no-op (ignored volatile timestamp fields)"
+fi
+echo "mode: $HA_SNAPSHOT_MODE"
+echo "tracked_binding: $HA_SNAPSHOT_TRACKED_OUTPUT"

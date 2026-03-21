@@ -20,7 +20,7 @@ SPINE_CODE="${SPINE_CODE:-$HOME/code/agentic-spine}"
 CONTROL_ROOT="${SPINE_CONTROL_ROOT:-$SPINE_CODE}"
 source "$SPINE_CODE/ops/lib/runtime-managed-worktree.sh"
 RUNTIME_ROOT="$(spine_runtime_prepare_managed_worktree "$CONTROL_ROOT")"
-export SPINE_ROOT="$RUNTIME_ROOT"
+export SPINE_TARGET_REPO="$RUNTIME_ROOT"
 source "$SPINE_CODE/ops/lib/spine-paths.sh"
 spine_paths_init
 CONFIG_FILE="$SPINE_CODE/ops/bindings/ha.sync.config.yaml"
@@ -88,24 +88,42 @@ git_auto_push_enabled() {
   yq e '.git.auto_push' "$CONFIG_FILE" 2>/dev/null | grep -q 'true'
 }
 
-list_changed_bindings() {
-  git -C "$RUNTIME_ROOT" diff --name-only -- ops/bindings/ha.*.yaml 2>/dev/null || true
+runtime_snapshot_for_cap() {
+  case "$1" in
+    ha.addons.snapshot) echo "ha.addons.yaml" ;;
+    ha.automations.snapshot) echo "ha.automations.yaml" ;;
+    ha.dashboard.snapshot) echo "ha.dashboards.yaml" ;;
+    ha.helpers.snapshot) echo "ha.helpers.yaml" ;;
+    ha.integrations.snapshot) echo "ha.integrations.yaml" ;;
+    ha.scenes.snapshot) echo "ha.scenes.yaml" ;;
+    ha.scripts.snapshot) echo "ha.scripts.yaml" ;;
+    ha.hacs.snapshot) echo "ha.hacs.yaml" ;;
+    ha.entity.state.baseline) echo "ha.entity.state.baseline.yaml" ;;
+    ha.device.map.build) echo "ha.device.map.yaml" ;;
+    ha.z2m.devices.snapshot) echo "z2m.devices.yaml" ;;
+    ha.zwave.devices.snapshot) echo "zwave.devices.yaml" ;;
+    ha.ssot.baseline.build) echo "ha.ssot.baseline.yaml" ;;
+    ha-inventory-snapshot-build) echo "ha.inventory.snapshot.yaml" ;;
+    *) return 1 ;;
+  esac
 }
 
-report_changed_bindings() {
-  local changed_files
-  changed_files=$(list_changed_bindings)
+list_changed_bindings() {
+  git -C "$RUNTIME_ROOT" diff --name-only -- ops/bindings/ha.*.yaml ops/bindings/z2m.*.yaml ops/bindings/zwave.*.yaml 2>/dev/null || true
+}
 
-  if [[ -z "$changed_files" ]]; then
-    log "No binding changes detected"
-    return 0
+report_runtime_snapshot() {
+  local snapshot_cap="$1"
+  local snapshot_file=""
+  snapshot_file="$(runtime_snapshot_for_cap "$snapshot_cap" 2>/dev/null || true)"
+
+  if [[ -n "$snapshot_file" ]]; then
+    log "Runtime snapshot refreshed: runtime/domain-state/snapshots/${snapshot_file}"
+  else
+    log "Runtime snapshot refreshed for ${snapshot_cap}"
   fi
 
-  log "Binding changes captured in managed runtime worktree; promotion remains manual"
-  while IFS= read -r changed_file; do
-    [[ -n "$changed_file" ]] || continue
-    log "  ${changed_file}"
-  done <<< "$changed_files"
+  log "Tracked promotion remains manual via snapshot.projection.apply or per-capability --apply"
 }
 
 run_snapshot() {
@@ -114,13 +132,12 @@ run_snapshot() {
   
   log "Running snapshot: $snapshot_cap"
   
-  if "$CAP_RUNNER" cap run "$snapshot_cap" >> "$LOG_FILE" 2>&1; then
+  if "$CAP_RUNNER" cap run "$snapshot_cap" -- --check >> "$LOG_FILE" 2>&1; then
     log "Snapshot completed: $snapshot_cap"
+    report_runtime_snapshot "$snapshot_cap"
     
     if git_auto_commit_enabled; then
       commit_if_changed "$commit_prefix"
-    else
-      report_changed_bindings
     fi
   else
     log "ERROR: Snapshot failed: $snapshot_cap"
@@ -137,7 +154,7 @@ commit_if_changed() {
   changed_files=$(list_changed_bindings)
   
   if [[ -n "$changed_files" ]]; then
-    log "Binding changes detected in managed runtime worktree, committing..."
+    log "Tracked binding changes detected in managed runtime worktree, committing..."
     
     local commit_msg="$commit_prefix
 
@@ -145,7 +162,7 @@ Event-driven sync via ha-sync-agent
 Files changed:
 $changed_files"
 
-    git add ops/bindings/ha.*.yaml
+    git add ops/bindings/ha.*.yaml ops/bindings/z2m.*.yaml ops/bindings/zwave.*.yaml
     git commit -m "$commit_msg"
     
     if git_auto_push_enabled; then
@@ -157,7 +174,7 @@ $changed_files"
     
     log "Committed binding changes in managed runtime worktree"
   else
-    log "No binding changes to commit"
+    log "No tracked binding changes to commit"
   fi
 }
 

@@ -5,16 +5,21 @@ set -euo pipefail
 # Reads all HA sub-bindings + queries HA API for live infrastructure facts.
 # Output: ops/bindings/ha.ssot.baseline.yaml
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-OUTPUT="$SPINE_ROOT/ops/bindings/ha.ssot.baseline.yaml"
-BINDINGS_DIR="$SPINE_ROOT/ops/bindings"
-INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/ha-snapshot-common.sh"
 HA_HOST="${HA_HOST:-10.0.0.100}"
 HA_PORT="${HA_PORT:-8123}"
 HA_BASE="http://${HA_HOST}:${HA_PORT}"
 
 TMPDIR_WORK=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_WORK"' EXIT
+ha_snapshot_init "ha.ssot.baseline.yaml" "$@"
+OUTPUT="$HA_SNAPSHOT_OUTPUT"
+STAGED_OUTPUT="$TMPDIR_WORK/ha.ssot.baseline.yaml"
+ROOT="$HA_SNAPSHOT_ROOT"
+BINDINGS_DIR="$ROOT/ops/bindings"
+RUNTIME_SNAPSHOTS_DIR="$ROOT/runtime/domain-state/snapshots"
+INFISICAL_AGENT="${ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
 
 echo "ha.ssot.baseline.build"
 echo
@@ -62,7 +67,7 @@ echo "Building unified baseline..."
 # BUILD UNIFIED BASELINE (Python)
 # ─────────────────────────────────────────────────────────────────────────────
 
-python3 - "$TMPDIR_WORK" "$OUTPUT" "$BINDINGS_DIR" << 'PYEOF'
+python3 - "$TMPDIR_WORK" "$STAGED_OUTPUT" "$BINDINGS_DIR" "$RUNTIME_SNAPSHOTS_DIR" << 'PYEOF'
 import json, sys, datetime, os
 
 try:
@@ -71,14 +76,15 @@ except ImportError:
     print("STOP (2): PyYAML not installed", file=sys.stderr)
     sys.exit(2)
 
-tmpdir, out_path, bindings_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+tmpdir, out_path, bindings_dir, runtime_snapshots_dir = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 now = datetime.datetime.now(datetime.timezone.utc)
 now_str = now.strftime('%Y-%m-%dT%H:%M:%SZ')
 
 # ── Helper: load YAML binding ───────────────────────────────────────────────
 def load_binding(filename):
-    path = os.path.join(bindings_dir, filename)
+    runtime_path = os.path.join(runtime_snapshots_dir, filename)
+    path = runtime_path if os.path.isfile(runtime_path) else os.path.join(bindings_dir, filename)
     if not os.path.isfile(path):
         return None, path
     with open(path, 'r') as f:
@@ -90,10 +96,13 @@ def load_binding(filename):
 
 def binding_age_days(data):
     """Compute age in days from 'generated' field."""
-    if not data or 'generated' not in data:
+    if not data:
         return -1
     try:
-        gen = datetime.datetime.strptime(data['generated'], '%Y-%m-%dT%H:%M:%SZ')
+        stamp = data.get('generated') or data.get('generated_at') or data.get('updated_at') or data.get('last_snapshot')
+        if not stamp:
+            return -1
+        gen = datetime.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ')
         gen = gen.replace(tzinfo=datetime.timezone.utc)
         return (now - gen).days
     except (ValueError, TypeError):
@@ -328,5 +337,13 @@ for b in binding_index:
     print(f"    {b['path']:45s}  {status:8s}  age={age}")
 PYEOF
 
+ha_snapshot_finalize "$STAGED_OUTPUT"
+ha_snapshot_assert_tracked_unchanged_in_check_mode
+
 echo
 echo "sha256: $(shasum -a 256 "$OUTPUT" | cut -d' ' -f1)"
+if [[ "${HA_SNAPSHOT_FINAL_ACTION:-wrote}" == "semantic-noop" ]]; then
+  echo "result: semantic no-op (ignored volatile timestamp fields)"
+fi
+echo "mode: $HA_SNAPSHOT_MODE"
+echo "tracked_binding: $HA_SNAPSHOT_TRACKED_OUTPUT"

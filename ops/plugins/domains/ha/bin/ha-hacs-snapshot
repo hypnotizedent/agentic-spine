@@ -6,9 +6,8 @@ set -euo pipefail
 # Fallback: if SSH/file read fails, writes minimal binding with HACS update entity state from API
 # Output: ops/bindings/ha.hacs.yaml
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-OUTPUT="$SPINE_ROOT/ops/bindings/ha.hacs.yaml"
-INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/ha-snapshot-common.sh"
 SSH_TARGET="hassio@ha"
 SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
 HA_HOST="${HA_HOST:-10.0.0.100}"
@@ -17,6 +16,10 @@ HA_BASE="http://${HA_HOST}:${HA_PORT}"
 
 TMPDIR_WORK=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_WORK"' EXIT
+ha_snapshot_init "ha.hacs.yaml" "$@"
+OUTPUT="$HA_SNAPSHOT_OUTPUT"
+STAGED_OUTPUT="$TMPDIR_WORK/ha.hacs.yaml"
+INFISICAL_AGENT="${HA_SNAPSHOT_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
 
 echo "ha.hacs.snapshot"
 echo
@@ -78,7 +81,7 @@ echo "Building HACS binding (method=$HACS_METHOD)..."
 # BUILD YAML BINDING (Python)
 # ─────────────────────────────────────────────────────────────────────────────
 
-python3 - "$TMPDIR_WORK" "$OUTPUT" "$HACS_METHOD" << 'PYEOF'
+python3 - "$TMPDIR_WORK" "$STAGED_OUTPUT" "$HACS_METHOD" << 'PYEOF'
 import json, sys, datetime, os
 
 try:
@@ -187,5 +190,13 @@ else:
     print(f"  Fallback mode — HACS update entity state: {binding.get('hacs_update_entity', {}).get('state', 'unknown')}")
 PYEOF
 
+ha_snapshot_finalize "$STAGED_OUTPUT"
+ha_snapshot_assert_tracked_unchanged_in_check_mode
+
 echo
 echo "sha256: $(shasum -a 256 "$OUTPUT" | cut -d' ' -f1)"
+if [[ "${HA_SNAPSHOT_FINAL_ACTION:-wrote}" == "semantic-noop" ]]; then
+  echo "result: semantic no-op (ignored volatile timestamp fields)"
+fi
+echo "mode: $HA_SNAPSHOT_MODE"
+echo "tracked_binding: $HA_SNAPSHOT_TRACKED_OUTPUT"

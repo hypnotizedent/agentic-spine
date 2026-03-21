@@ -6,15 +6,18 @@ set -euo pipefail
 # input_text, counter, and timer entities.
 # Output: ops/bindings/ha.helpers.yaml
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-OUTPUT="$SPINE_ROOT/ops/bindings/ha.helpers.yaml"
-INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/ha-snapshot-common.sh"
 HA_HOST="${HA_HOST:-10.0.0.100}"
 HA_PORT="${HA_PORT:-8123}"
 HA_BASE="http://${HA_HOST}:${HA_PORT}"
 
 TMPDIR_WORK=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_WORK"' EXIT
+ha_snapshot_init "ha.helpers.yaml" "$@"
+OUTPUT="$HA_SNAPSHOT_OUTPUT"
+STAGED_OUTPUT="$TMPDIR_WORK/ha.helpers.yaml"
+INFISICAL_AGENT="${HA_SNAPSHOT_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
 
 echo "ha.helpers.snapshot"
 echo
@@ -62,7 +65,7 @@ echo "Building helper binding..."
 # BUILD YAML BINDING (Python)
 # ─────────────────────────────────────────────────────────────────────────────
 
-python3 - "$TMPDIR_WORK" "$OUTPUT" << 'PYEOF'
+python3 - "$TMPDIR_WORK" "$STAGED_OUTPUT" << 'PYEOF'
 import json, sys, datetime, os
 
 try:
@@ -147,5 +150,13 @@ for d, c in sorted(by_domain.items()):
     print(f"  {d}: {c}")
 PYEOF
 
+ha_snapshot_finalize "$STAGED_OUTPUT"
+ha_snapshot_assert_tracked_unchanged_in_check_mode
+
 echo
 echo "sha256: $(shasum -a 256 "$OUTPUT" | cut -d' ' -f1)"
+if [[ "${HA_SNAPSHOT_FINAL_ACTION:-wrote}" == "semantic-noop" ]]; then
+  echo "result: semantic no-op (ignored volatile timestamp fields)"
+fi
+echo "mode: $HA_SNAPSHOT_MODE"
+echo "tracked_binding: $HA_SNAPSHOT_TRACKED_OUTPUT"

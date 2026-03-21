@@ -57,7 +57,7 @@ for cap in "${SNAPSHOT_CAPS[@]}"; do
   echo "$LOG_PREFIX Running: $cap"
   if spine_job_run \
     "ha-baseline-refresh:${cap}" \
-    "$CAP_RUNNER" cap run "$cap" 2>&1; then
+    "$CAP_RUNNER" cap run "$cap" -- --check 2>&1; then
     PASS=$((PASS + 1))
     echo "$LOG_PREFIX OK: $cap"
   else
@@ -77,7 +77,7 @@ echo
 echo "$LOG_PREFIX Running: ha.ssot.baseline.build"
 if spine_job_run \
   "ha-baseline-refresh:ha.ssot.baseline.build" \
-  "$CAP_RUNNER" cap run ha.ssot.baseline.build 2>&1; then
+  "$CAP_RUNNER" cap run ha.ssot.baseline.build -- --check 2>&1; then
   echo "$LOG_PREFIX OK: baseline built successfully"
 else
   echo "$LOG_PREFIX FATAL: ha.ssot.baseline.build failed"
@@ -98,21 +98,10 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GIT SYNC (commit + push if bindings changed)
+# RUNTIME SNAPSHOT SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
-
-cd "$RUNTIME_ROOT"
-
-CHANGED_FILES=$(git diff --name-only ops/bindings/ha.*.yaml ops/bindings/z2m.*.yaml ops/bindings/zwave.*.yaml 2>/dev/null || true)
-
-if [[ -n "$CHANGED_FILES" ]]; then
-  echo
-  echo "$LOG_PREFIX Binding changes captured in managed runtime worktree:"
-  printf '%s\n' "$CHANGED_FILES"
-  echo "$LOG_PREFIX Promotion is manual; no commit or push performed"
-else
-  echo "$LOG_PREFIX No binding changes detected"
-fi
+echo "$LOG_PREFIX Runtime snapshots refreshed under $RUNTIME_ROOT/runtime/domain-state/snapshots"
+echo "$LOG_PREFIX Promotion is manual; use snapshot.projection.apply or per-capability --apply for tracked ops/bindings writes"
 
 echo
 echo "$LOG_PREFIX Finished at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

@@ -4,11 +4,8 @@ set -euo pipefail
 # ha-inventory-snapshot-build
 # Builds a unified HA inventory snapshot from governed HA bindings.
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-TRACKED_OUTPUT="$ROOT/ops/bindings/ha.inventory.snapshot.yaml"
-RUNTIME_OUTPUT_DEFAULT="$ROOT/runtime/domain-state/snapshots/ha.inventory.snapshot.yaml"
-OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
-MODE="check"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/ha-snapshot-common.sh"
 
 usage() {
   cat <<'USAGE'
@@ -25,60 +22,19 @@ Flags:
 USAGE
 }
 
-if [[ "${1:-}" == "--" ]]; then
-  shift
-fi
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --apply)
-      MODE="apply"
-      OUTPUT="$TRACKED_OUTPUT"
-      shift
-      ;;
-    --check)
-      MODE="check"
-      OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
-      shift
-      ;;
-    --state-path|--output)
-      OUTPUT="${2:-}"
-      shift 2
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "ha-inventory-snapshot-build FAIL: unknown arg '$1'" >&2
-      usage >&2
-      exit 1
-      ;;
-  esac
-done
-
-if [[ -z "$OUTPUT" ]]; then
-  echo "ha-inventory-snapshot-build FAIL: output path cannot be empty" >&2
-  exit 1
-fi
-
-file_hash() {
-  local path="$1"
-  if [[ -f "$path" ]]; then
-    shasum -a 256 "$path" | awk '{print $1}'
-    return
-  fi
-  echo "missing"
-}
-
-tracked_hash_before="$(file_hash "$TRACKED_OUTPUT")"
+TMPDIR_WORK=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_WORK"' EXIT
+ha_snapshot_init "ha.inventory.snapshot.yaml" "$@"
+ROOT="$HA_SNAPSHOT_ROOT"
+OUTPUT="$HA_SNAPSHOT_OUTPUT"
+STAGED_OUTPUT="$TMPDIR_WORK/ha.inventory.snapshot.yaml"
 
 command -v python3 >/dev/null 2>&1 || {
   echo "STOP (2): missing dependency python3" >&2
   exit 2
 }
 
-python3 - "$ROOT" "$OUTPUT" <<'PY'
+python3 - "$ROOT" "$STAGED_OUTPUT" <<'PY'
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -136,7 +92,9 @@ section_counts: dict[str, int] = {}
 source_metadata: dict[str, dict] = {}
 
 for section, (relative_path, key) in SECTION_SOURCES.items():
-    source_path = root / relative_path
+    source_path = root / "runtime" / "domain-state" / "snapshots" / Path(relative_path).name
+    if not source_path.is_file():
+        source_path = root / relative_path
     if not source_path.is_file():
         missing.append(relative_path)
         section_values[section] = []
@@ -153,6 +111,7 @@ for section, (relative_path, key) in SECTION_SOURCES.items():
     section_counts[section] = len(values)
     source_metadata[section] = {
         "binding": relative_path,
+        "source_path": str(source_path.relative_to(root)),
         "generated": str(doc.get("generated_at") or doc.get("generated") or doc.get("updated_at") or ""),
     }
 
@@ -206,13 +165,11 @@ for section in (
     print(f"{section}: {section_counts[section]}")
 PY
 
-if [[ "$MODE" == "check" ]]; then
-  tracked_hash_after="$(file_hash "$TRACKED_OUTPUT")"
-  if [[ "$tracked_hash_before" != "$tracked_hash_after" ]]; then
-    echo "ha-inventory-snapshot-build FAIL: tracked binding mutated in check mode: $TRACKED_OUTPUT" >&2
-    exit 1
-  fi
-fi
+ha_snapshot_finalize "$STAGED_OUTPUT"
+ha_snapshot_assert_tracked_unchanged_in_check_mode
 
-echo "mode: $MODE"
-echo "tracked_binding: $TRACKED_OUTPUT"
+if [[ "${HA_SNAPSHOT_FINAL_ACTION:-wrote}" == "semantic-noop" ]]; then
+  echo "result: semantic no-op (ignored volatile timestamp fields)"
+fi
+echo "mode: $HA_SNAPSHOT_MODE"
+echo "tracked_binding: $HA_SNAPSHOT_TRACKED_OUTPUT"
