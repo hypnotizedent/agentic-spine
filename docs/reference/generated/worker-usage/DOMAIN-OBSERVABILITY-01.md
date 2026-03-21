@@ -1,7 +1,7 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-09
+last_verified: 2026-03-21
 scope: worker-usage-domain-observability-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -32,7 +32,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `switch.health.status`
 - `uptime.kuma.monitors.sync`
 
-## Gates (9)
+## Gates (12)
 - `D124`
 - `D126`
 - `D127`
@@ -40,6 +40,9 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D150`
 - `D153`
 - `D3`
+- `D389`
+- `D391`
+- `D410`
 - `D63`
 - `D67`
 
