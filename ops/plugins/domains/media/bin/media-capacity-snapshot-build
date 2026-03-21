@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../../../../../" && pwd)"
-POLICY_FILE="$ROOT/ops/bindings/infra.capacity.guard.policy.yaml"
-SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
-PRESSURE_AUTHORITY="$ROOT/ops/bindings/shop.media.pressure.authority.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../../core/snapshot/lib/snapshot-surface-common.sh"
 
 DRY_RUN=0
 JSON_MODE=0
@@ -15,30 +13,35 @@ media.capacity.snapshot.build
 
 Usage:
   ./bin/ops cap run media.capacity.snapshot.build
+  ./bin/ops cap run media.capacity.snapshot.build -- --apply
+  ./bin/ops cap run media.capacity.snapshot.build -- --check
+  ./bin/ops cap run media.capacity.snapshot.build -- --state-path /tmp/media.capacity.snapshot.yaml
   ./bin/ops cap run media.capacity.snapshot.build --dry-run
   ./bin/ops cap run media.capacity.snapshot.build --json
 USAGE
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
+snapshot_surface_init "ops/bindings/media.capacity.snapshot.yaml" "$@"
+ROOT="$SNAPSHOT_SURFACE_ROOT"
+POLICY_FILE="$ROOT/ops/bindings/infra.capacity.guard.policy.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+PRESSURE_AUTHORITY="$ROOT/ops/bindings/shop.media.pressure.authority.yaml"
+MODE="$SNAPSHOT_SURFACE_MODE"
+OUTPUT="$SNAPSHOT_SURFACE_OUTPUT"
+
+ARGS=("${SNAPSHOT_SURFACE_REMAINING_ARGS[@]}")
+while [[ ${#ARGS[@]} -gt 0 ]]; do
+  case "${ARGS[0]}" in
     --dry-run)
       DRY_RUN=1
-      shift
+      ARGS=("${ARGS[@]:1}")
       ;;
     --json)
       JSON_MODE=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    --)
-      shift
+      ARGS=("${ARGS[@]:1}")
       ;;
     *)
-      echo "media.capacity.snapshot.build FAIL: unknown arg: $1" >&2
+      echo "media.capacity.snapshot.build FAIL: unknown arg: ${ARGS[0]}" >&2
       exit 2
       ;;
   esac
@@ -58,12 +61,10 @@ RUNWAY_MIN_DAYS="$(yq -r '.runway.runway_min_days // 30' "$POLICY_FILE")"
 WINDOW_DAYS="$(yq -r '.runway.growth_window_days // 14' "$POLICY_FILE")"
 TTL_HOURS="$(yq -r '.runway.projection_freshness_ttl_hours // 30' "$POLICY_FILE")"
 TOP_LIMIT="$(yq -r '.runway.top_contributors_limit // 8' "$POLICY_FILE")"
-SNAPSHOT_REL="$(yq -r '.runway.snapshot_path // "ops/bindings/media.capacity.snapshot.yaml"' "$POLICY_FILE")"
 HISTORY_REL="$(yq -r '.runway.history_path // "runtime/domain-state/capacity/media-capacity-history.ndjson"' "$POLICY_FILE")"
 NO_WAN_RULE="$(yq -r '.policy_links.wan_transfer_policy.rule // ""' "$POLICY_FILE")"
 
-SNAPSHOT_PATH="$SNAPSHOT_REL"
-[[ "$SNAPSHOT_PATH" = /* ]] || SNAPSHOT_PATH="$ROOT/$SNAPSHOT_PATH"
+SNAPSHOT_PATH="$OUTPUT"
 HISTORY_PATH="$HISTORY_REL"
 [[ "$HISTORY_PATH" = /* ]] || HISTORY_PATH="$ROOT/$HISTORY_PATH"
 
@@ -86,13 +87,14 @@ if [[ -z "$pool_line" ]]; then
 fi
 
 dataset_tmp="$(mktemp)"
-trap 'rm -f "$dataset_tmp"' EXIT
+staged_snapshot_tmp="$(mktemp)"
+trap 'rm -f "$dataset_tmp" "$staged_snapshot_tmp"' EXIT
 ssh "${SSH_OPTS[@]}" "$REF" "zfs list -Hp -o name,used -r '$POOL_NAME' 2>/dev/null" > "$dataset_tmp" || true
 
 ts_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 mkdir -p "$(dirname "$SNAPSHOT_PATH")" "$(dirname "$HISTORY_PATH")"
 
-python3 - "$ROOT" "$POLICY_FILE" "$SNAPSHOT_PATH" "$HISTORY_PATH" "$dataset_tmp" "$ts_utc" "$pool_line" "$POOL_NAME" "$STORAGE_HOST_ID" "$WARN_PCT" "$FAIL_PCT" "$RUNWAY_MIN_DAYS" "$WINDOW_DAYS" "$TTL_HOURS" "$TOP_LIMIT" "$NO_WAN_RULE" "$DRY_RUN" "$JSON_MODE" "$PRESSURE_AUTHORITY" <<'PY'
+python3 - "$ROOT" "$POLICY_FILE" "$staged_snapshot_tmp" "$SNAPSHOT_PATH" "$HISTORY_PATH" "$dataset_tmp" "$ts_utc" "$pool_line" "$POOL_NAME" "$STORAGE_HOST_ID" "$WARN_PCT" "$FAIL_PCT" "$RUNWAY_MIN_DAYS" "$WINDOW_DAYS" "$TTL_HOURS" "$TOP_LIMIT" "$NO_WAN_RULE" "$DRY_RUN" "$JSON_MODE" "$PRESSURE_AUTHORITY" <<'PY'
 import datetime as dt
 import json
 import math
@@ -105,7 +107,8 @@ import yaml
 (
     root,
     policy_path,
-    snapshot_path,
+    staged_snapshot_path,
+    snapshot_display_path,
     history_path,
     dataset_path,
     ts_utc,
@@ -122,11 +125,12 @@ import yaml
     dry_run,
     json_mode,
     pressure_authority_path,
-) = sys.argv[1:20]
+) = sys.argv[1:21]
 
 root_path = pathlib.Path(root)
 policy_path = pathlib.Path(policy_path)
-snapshot_path = pathlib.Path(snapshot_path)
+staged_snapshot_path = pathlib.Path(staged_snapshot_path)
+snapshot_display_path = pathlib.Path(snapshot_display_path)
 history_path = pathlib.Path(history_path)
 dataset_path = pathlib.Path(dataset_path)
 pressure_authority_path = pathlib.Path(pressure_authority_path)
@@ -388,15 +392,15 @@ if not dry:
     with history_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(sample, sort_keys=True) + "\n")
 
-    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    with snapshot_path.open("w", encoding="utf-8") as fh:
+    staged_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    with staged_snapshot_path.open("w", encoding="utf-8") as fh:
         yaml.safe_dump(snapshot, fh, sort_keys=False, allow_unicode=False)
 
 if json_out:
     print(json.dumps({
         "capability": "media.capacity.snapshot.build",
         "generated_at_utc": ts_utc,
-        "snapshot_path": str(snapshot_path),
+        "snapshot_path": str(snapshot_display_path),
         "history_path": str(history_path),
         "usage_pct": usage_pct,
         "days_to_warn": snapshot["projection"]["days_to_warn"],
@@ -408,7 +412,7 @@ if json_out:
 else:
     print("media.capacity.snapshot.build")
     print(f"generated_at_utc: {ts_utc}")
-    print(f"snapshot_path: {snapshot_path}")
+    print(f"snapshot_path: {snapshot_display_path}")
     print(f"history_path: {history_path}")
     print(f"usage_pct: {usage_pct}")
     print(f"days_to_warn: {snapshot['projection']['days_to_warn']}")
@@ -418,3 +422,17 @@ else:
     print(f"top_contributors_count: {len(contributors)}")
     print(f"dry_run: {str(dry).lower()}")
 PY
+
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  snapshot_surface_finalize "$staged_snapshot_tmp"
+  snapshot_surface_assert_tracked_unchanged_in_check_mode
+fi
+
+echo "mode: $MODE"
+echo "tracked_binding: $SNAPSHOT_SURFACE_TRACKED_OUTPUT"
+echo "output: $OUTPUT"
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  echo "final_action: ${SNAPSHOT_SURFACE_FINAL_ACTION:-wrote}"
+else
+  echo "final_action: dry-run"
+fi

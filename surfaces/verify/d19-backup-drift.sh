@@ -5,7 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CAP_SCRIPT="$ROOT/ops/plugins/infra/backup/bin/backup-status"
 BINDING_FILE="$ROOT/ops/bindings/backup.inventory.yaml"
-POSTURE_FILE="$ROOT/ops/bindings/backup.posture.snapshot.yaml"
+source "$ROOT/ops/plugins/core/snapshot/lib/snapshot-surface-common.sh"
+POSTURE_FILE="$(snapshot_surface_resolve_source_path "$ROOT" "ops/bindings/backup.posture.snapshot.yaml")"
 
 fail(){ echo "D19 FAIL: $*" >&2; exit 1; }
 

@@ -6,6 +6,7 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 POLICY_FILE="$ROOT/ops/bindings/infra.capacity.guard.policy.yaml"
 GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+source "$ROOT/ops/plugins/core/snapshot/lib/snapshot-surface-common.sh"
 
 POLICY_MODE="report"
 
@@ -38,8 +39,7 @@ command -v python3 >/dev/null 2>&1 || { echo "D257 FAIL: python3 missing"; [[ "$
 [[ -f "$GAPS_FILE" ]] || { echo "D257 FAIL: missing $GAPS_FILE"; [[ "$POLICY_MODE" == "enforce" ]] && exit 1 || exit 0; }
 
 SNAPSHOT_REL="$(yq -r '.runway.snapshot_path // "ops/bindings/media.capacity.snapshot.yaml"' "$POLICY_FILE" 2>/dev/null || echo "ops/bindings/media.capacity.snapshot.yaml")"
-SNAPSHOT_PATH="$SNAPSHOT_REL"
-[[ "$SNAPSHOT_PATH" = /* ]] || SNAPSHOT_PATH="$ROOT/$SNAPSHOT_PATH"
+SNAPSHOT_PATH="$(snapshot_surface_resolve_source_path "$ROOT" "$SNAPSHOT_REL")"
 
 WARN_PCT="$(yq -r '.thresholds.media_warn_pct // 80' "$POLICY_FILE" 2>/dev/null || echo 80)"
 FAIL_PCT="$(yq -r '.thresholds.media_fail_pct // 85' "$POLICY_FILE" 2>/dev/null || echo 85)"

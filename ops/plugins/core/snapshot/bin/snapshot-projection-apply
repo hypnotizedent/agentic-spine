@@ -1,57 +1,20 @@
 #!/usr/bin/env bash
 # TRIAGE: centralized mutating promoter for tracked snapshot bindings.
-# This is the ONLY authorized write-path for tracked snapshot surfaces.
+# This is the ONLY governed tracked promotion path for snapshot surfaces.
 # All snapshot/status capabilities MUST use --check (runtime-only) by default.
-# Only this capability may invoke --apply to write tracked bindings.
+# This surface invokes the underlying capability with --apply to write the
+# tracked binding explicitly.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
 OPS_BIN="$ROOT/bin/ops"
-
-TRACKED_TARGETS=(
-  "ha.addons.yaml"
-  "ha.automations.yaml"
-  "ha.dashboards.yaml"
-  "ha.device.map.yaml"
-  "ha.entity.state.baseline.yaml"
-  "ha.hacs.yaml"
-  "ha.helpers.yaml"
-  "ha.inventory.snapshot.yaml"
-  "ha.integrations.yaml"
-  "ha.scenes.yaml"
-  "ha.scripts.yaml"
-  "ha.ssot.baseline.yaml"
-  "home.dhcp.audit.yaml"
-  "media.content.snapshot.yaml"
-  "network.inventory.snapshot.yaml"
-  "z2m.devices.yaml"
-  "zwave.devices.yaml"
-)
-
-CAPABILITY_MAP=(
-  "ha.addons.snapshot"
-  "ha.automations.snapshot"
-  "ha.dashboard.snapshot"
-  "ha.device.map.build"
-  "ha.entity.state.baseline"
-  "ha.hacs.snapshot"
-  "ha.helpers.snapshot"
-  "ha-inventory-snapshot-build"
-  "ha.integrations.snapshot"
-  "ha.scenes.snapshot"
-  "ha.scripts.snapshot"
-  "ha.ssot.baseline.build"
-  "network.home.dhcp.audit"
-  "media-content-snapshot-refresh"
-  "network-inventory-snapshot-build"
-  "ha.z2m.devices.snapshot"
-  "ha.zwave.devices.snapshot"
-)
+CONTRACT="$ROOT/ops/bindings/snapshot.surface.contract.yaml"
 
 DRY_RUN=0
 TARGETS=()
 ALL=0
+LIST_GOVERNED=0
 
 usage() {
   cat <<'USAGE'
@@ -61,11 +24,13 @@ Usage:
   ./bin/ops cap run snapshot.projection.apply -- --all
   ./bin/ops cap run snapshot.projection.apply -- --target ha.inventory.snapshot.yaml
   ./bin/ops cap run snapshot.projection.apply -- --all --dry-run
+  ./bin/ops cap run snapshot.projection.apply -- --list-governed
 
 Flags:
   --all                 Promote all governed tracked snapshot surfaces.
   --target <file>       Promote a single snapshot surface (base filename).
   --dry-run             Show what would be promoted without writing.
+  --list-governed       List governed tracked snapshot targets.
   -h|--help             Show this help.
 
 Safety:
@@ -84,6 +49,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --list-governed) LIST_GOVERNED=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift ;;
     *)
@@ -94,8 +60,30 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+command -v yq >/dev/null 2>&1 || { echo "snapshot-projection-apply FAIL: missing dependency yq" >&2; exit 1; }
+[[ -f "$CONTRACT" ]] || { echo "snapshot-projection-apply FAIL: missing contract $CONTRACT" >&2; exit 1; }
+
+load_all_targets() {
+  yq -r '.governed_surfaces[].tracked_binding | split("/") | .[-1]' "$CONTRACT" 2>/dev/null
+}
+
+resolve_cap() {
+  local target="$1"
+  yq -r --arg target "$target" '.governed_surfaces[] | select((.tracked_binding | split("/") | .[-1]) == $target) | .capability' "$CONTRACT" 2>/dev/null | head -n1
+}
+
+resolve_tracked_rel() {
+  local target="$1"
+  yq -r --arg target "$target" '.governed_surfaces[] | select((.tracked_binding | split("/") | .[-1]) == $target) | .tracked_binding' "$CONTRACT" 2>/dev/null | head -n1
+}
+
+if [[ "$LIST_GOVERNED" -eq 1 ]]; then
+  load_all_targets
+  exit 0
+fi
+
 if [[ "$ALL" -eq 1 ]]; then
-  TARGETS=("${TRACKED_TARGETS[@]}")
+  mapfile -t TARGETS < <(load_all_targets)
 fi
 
 if [[ "${#TARGETS[@]}" -eq 0 ]]; then
@@ -104,30 +92,19 @@ if [[ "${#TARGETS[@]}" -eq 0 ]]; then
   exit 1
 fi
 
-resolve_cap() {
-  local target="$1"
-  local idx=0
-  for tracked in "${TRACKED_TARGETS[@]}"; do
-    if [[ "$tracked" == "$target" ]]; then
-      echo "${CAPABILITY_MAP[$idx]}"
-      return 0
-    fi
-    idx=$((idx + 1))
-  done
-  return 1
-}
-
 PASS=0
 FAIL=0
 SKIP=0
 
 for target in "${TARGETS[@]}"; do
-  cap=$(resolve_cap "$target" 2>/dev/null) || {
+  cap="$(resolve_cap "$target" 2>/dev/null || true)"
+  tracked_rel="$(resolve_tracked_rel "$target" 2>/dev/null || true)"
+  if [[ -z "$cap" || -z "$tracked_rel" || "$cap" == "null" || "$tracked_rel" == "null" ]]; then
     echo "SKIP: unknown target '$target' (not in tracked targets list)"
     SKIP=$((SKIP + 1))
     continue
-  }
-  tracked_path="$ROOT/ops/bindings/$target"
+  fi
+  tracked_path="$ROOT/$tracked_rel"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "DRY-RUN: would run '$cap --apply' -> $tracked_path"

@@ -11,6 +11,7 @@ SYNC_AGENT="$ROOT/ops/plugins/domains/ha/bin/ha-sync-agent"
 SYNC_CONFIG="$ROOT/ops/bindings/ha.sync.config.yaml"
 HA_BASELINE_PLIST="$ROOT/ops/plugins/infra/host/launchd/com.ronny.ha-baseline-refresh.plist"
 SNAPSHOT_APPLY="$ROOT/ops/plugins/core/snapshot/bin/snapshot-projection-apply"
+SNAPSHOT_CONTRACT="$ROOT/ops/bindings/snapshot.surface.contract.yaml"
 
 PASS=0
 FAIL=0
@@ -60,14 +61,16 @@ assert_file_contains "$SYNC_AGENT" 'export SPINE_TARGET_REPO="$RUNTIME_ROOT"' "s
 assert_file_contains "$SYNC_AGENT" 'cap run "$snapshot_cap" -- --check' "sync agent runs snapshots in explicit check mode"
 assert_file_contains "$SYNC_AGENT" 'Tracked promotion remains manual via snapshot.projection.apply or per-capability --apply' "sync agent reports manual promotion"
 assert_file_not_contains "$SYNC_AGENT" 'git push origin main' "sync agent no longer pushes main"
-assert_file_contains "$SYNC_AGENT" 'git push origin "$current_branch"' "sync agent pushes current branch only when explicitly enabled"
+assert_file_not_contains "$SYNC_AGENT" 'git push origin "$current_branch"' "sync agent no longer carries dormant branch push logic"
+assert_file_not_contains "$SYNC_AGENT" 'git commit -m' "sync agent no longer carries dormant commit logic"
 
 echo ""
 echo "── T3: snapshot orchestrators stay runtime-first by default ──"
 assert_file_contains "$HA_REFRESH" 'cap run "$cap" -- --check' "ha-refresh runs component snapshots in check mode"
 assert_file_contains "$HA_REFRESH" 'snapshot.projection.apply or per-capability --apply' "ha-refresh points operators at explicit promotion"
-assert_file_contains "$SNAPSHOT_APPLY" '"ha.addons.yaml"' "snapshot apply governs ha.addons tracked promotion"
-assert_file_contains "$SNAPSHOT_APPLY" '"ha.ssot.baseline.yaml"' "snapshot apply governs ha.ssot baseline promotion"
+assert_file_contains "$SNAPSHOT_APPLY" 'snapshot.surface.contract.yaml' "snapshot apply is contract-driven"
+assert_file_contains "$SNAPSHOT_CONTRACT" 'capability: ha.addons.snapshot' "snapshot contract governs ha.addons promotion"
+assert_file_contains "$SNAPSHOT_CONTRACT" 'tracked_binding: ops/bindings/ha.ssot.baseline.yaml' "snapshot contract governs ha.ssot baseline promotion"
 
 echo ""
 echo "── T4: shipped defaults keep promotion disabled ──"

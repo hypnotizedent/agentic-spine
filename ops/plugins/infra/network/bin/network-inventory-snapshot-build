@@ -4,11 +4,8 @@ set -euo pipefail
 # network-inventory-snapshot-build
 # Builds a unified network + hardware inventory snapshot.
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-TRACKED_OUTPUT="$ROOT/ops/bindings/network.inventory.snapshot.yaml"
-RUNTIME_OUTPUT_DEFAULT="$ROOT/runtime/domain-state/snapshots/network.inventory.snapshot.yaml"
-OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
-MODE="check"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../../core/snapshot/lib/snapshot-surface-common.sh"
 
 usage() {
   cat <<'USAGE'
@@ -25,60 +22,27 @@ Flags:
 USAGE
 }
 
-if [[ "${1:-}" == "--" ]]; then
-  shift
-fi
+snapshot_surface_init "ops/bindings/network.inventory.snapshot.yaml" "$@"
+ROOT="$SNAPSHOT_SURFACE_ROOT"
+TRACKED_OUTPUT="$SNAPSHOT_SURFACE_TRACKED_OUTPUT"
+OUTPUT="$SNAPSHOT_SURFACE_OUTPUT"
+MODE="$SNAPSHOT_SURFACE_MODE"
+TMPDIR_WORK="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR_WORK"' EXIT
+STAGED_OUTPUT="$TMPDIR_WORK/network.inventory.snapshot.yaml"
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --apply)
-      MODE="apply"
-      OUTPUT="$TRACKED_OUTPUT"
-      shift
-      ;;
-    --check)
-      MODE="check"
-      OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
-      shift
-      ;;
-    --state-path|--output)
-      OUTPUT="${2:-}"
-      shift 2
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "network-inventory-snapshot-build FAIL: unknown arg '$1'" >&2
-      usage >&2
-      exit 1
-      ;;
-  esac
-done
-
-if [[ -z "$OUTPUT" ]]; then
-  echo "network-inventory-snapshot-build FAIL: output path cannot be empty" >&2
+if [[ "${#SNAPSHOT_SURFACE_REMAINING_ARGS[@]}" -gt 0 ]]; then
+  echo "network-inventory-snapshot-build FAIL: unknown arg '${SNAPSHOT_SURFACE_REMAINING_ARGS[0]}'" >&2
+  usage >&2
   exit 1
 fi
-
-file_hash() {
-  local path="$1"
-  if [[ -f "$path" ]]; then
-    shasum -a 256 "$path" | awk '{print $1}'
-    return
-  fi
-  echo "missing"
-}
-
-tracked_hash_before="$(file_hash "$TRACKED_OUTPUT")"
 
 command -v python3 >/dev/null 2>&1 || {
   echo "STOP (2): missing dependency python3" >&2
   exit 2
 }
 
-python3 - "$ROOT" "$OUTPUT" <<'PY'
+python3 - "$ROOT" "$STAGED_OUTPUT" <<'PY'
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -281,13 +245,10 @@ print(f"hardware_assets: {len(hardware_assets)}")
 print(f"upgrade_candidates: {len(upgrade_candidates)}")
 PY
 
-if [[ "$MODE" == "check" ]]; then
-  tracked_hash_after="$(file_hash "$TRACKED_OUTPUT")"
-  if [[ "$tracked_hash_before" != "$tracked_hash_after" ]]; then
-    echo "network-inventory-snapshot-build FAIL: tracked binding mutated in check mode: $TRACKED_OUTPUT" >&2
-    exit 1
-  fi
-fi
+snapshot_surface_finalize "$STAGED_OUTPUT"
+snapshot_surface_assert_tracked_unchanged_in_check_mode
 
 echo "mode: $MODE"
 echo "tracked_binding: $TRACKED_OUTPUT"
+echo "output: $OUTPUT"
+echo "final_action: ${SNAPSHOT_SURFACE_FINAL_ACTION:-wrote}"

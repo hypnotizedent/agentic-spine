@@ -80,14 +80,6 @@ get_commit_prefix_for_event() {
   yq e ".event_mappings.\"$event_type\".commit_prefix" "$CONFIG_FILE" 2>/dev/null || echo "sync(ha): bindings refreshed"
 }
 
-git_auto_commit_enabled() {
-  yq e '.git.auto_commit' "$CONFIG_FILE" 2>/dev/null | grep -q 'true'
-}
-
-git_auto_push_enabled() {
-  yq e '.git.auto_push' "$CONFIG_FILE" 2>/dev/null | grep -q 'true'
-}
-
 runtime_snapshot_for_cap() {
   case "$1" in
     ha.addons.snapshot) echo "ha.addons.yaml" ;;
@@ -108,10 +100,6 @@ runtime_snapshot_for_cap() {
   esac
 }
 
-list_changed_bindings() {
-  git -C "$RUNTIME_ROOT" diff --name-only -- ops/bindings/ha.*.yaml ops/bindings/z2m.*.yaml ops/bindings/zwave.*.yaml 2>/dev/null || true
-}
-
 report_runtime_snapshot() {
   local snapshot_cap="$1"
   local snapshot_file=""
@@ -126,6 +114,10 @@ report_runtime_snapshot() {
   log "Tracked promotion remains manual via snapshot.projection.apply or per-capability --apply"
 }
 
+report_changed_bindings() {
+  log "Tracked promotion remains manual via snapshot.projection.apply or per-capability --apply"
+}
+
 run_snapshot() {
   local snapshot_cap="$1"
   local commit_prefix="$2"
@@ -135,46 +127,9 @@ run_snapshot() {
   if "$CAP_RUNNER" cap run "$snapshot_cap" -- --check >> "$LOG_FILE" 2>&1; then
     log "Snapshot completed: $snapshot_cap"
     report_runtime_snapshot "$snapshot_cap"
-    
-    if git_auto_commit_enabled; then
-      commit_if_changed "$commit_prefix"
-    fi
   else
     log "ERROR: Snapshot failed: $snapshot_cap"
     return 1
-  fi
-}
-
-commit_if_changed() {
-  local commit_prefix="$1"
-  
-  cd "$RUNTIME_ROOT"
-  
-  local changed_files
-  changed_files=$(list_changed_bindings)
-  
-  if [[ -n "$changed_files" ]]; then
-    log "Tracked binding changes detected in managed runtime worktree, committing..."
-    
-    local commit_msg="$commit_prefix
-
-Event-driven sync via ha-sync-agent
-Files changed:
-$changed_files"
-
-    git add ops/bindings/ha.*.yaml ops/bindings/z2m.*.yaml ops/bindings/zwave.*.yaml
-    git commit -m "$commit_msg"
-    
-    if git_auto_push_enabled; then
-      local current_branch
-      current_branch=$(git branch --show-current)
-      log "Pushing managed runtime branch: ${current_branch}"
-      git push origin "$current_branch"
-    fi
-    
-    log "Committed binding changes in managed runtime worktree"
-  else
-    log "No tracked binding changes to commit"
   fi
 }
 
@@ -409,11 +364,7 @@ single_sync() {
     "$CAP_RUNNER" cap run "$snapshot" >> "$LOG_FILE" 2>&1 || true
   done
   
-  if git_auto_commit_enabled; then
-    commit_if_changed "sync(ha): manual sync"
-  else
-    report_changed_bindings
-  fi
+  report_changed_bindings
 }
 
 check_deps

@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+SCRIPT_PATH = Path(__file__).resolve()
+DEFAULT_ROOT = SCRIPT_PATH.parents[5]
+DEFAULT_CONTRACT = Path("ops/bindings/snapshot.surface.contract.yaml")
+DEFAULT_CAPABILITIES = Path("ops/capabilities.yaml")
+DEFAULT_ROUTING = Path("ops/bindings/routing.dispatch.yaml")
+
+TARGET_REPO_MARKERS = (
+    "snapshot_surface_init",
+    "ha_snapshot_init",
+    "spine_resolve_target_repo",
+)
+FORBIDDEN_GIT_PATTERNS = (
+    re.compile(r"git\s+add\b.*ops/bindings", re.MULTILINE),
+    re.compile(r"git\s+commit\b", re.MULTILINE),
+    re.compile(r"git\s+push\b", re.MULTILINE),
+    re.compile(r"git\s+diff\b[^\n]*ops/bindings", re.MULTILINE),
+)
+
+
+def load_yaml(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def canonicalize_repoish(raw: str) -> Path:
+    expanded = Path(raw).expanduser()
+    if expanded.exists():
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(expanded), "rev-parse", "--show-toplevel"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return Path(result.stdout.strip()).resolve()
+        except subprocess.CalledProcessError:
+            return expanded.resolve()
+    return expanded
+
+
+def resolve_root(explicit_root: str | None) -> Path:
+    if explicit_root:
+        return canonicalize_repoish(explicit_root)
+
+    explicit_target = os.environ.get("SPINE_TARGET_REPO")
+    if explicit_target:
+        return canonicalize_repoish(explicit_target)
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(Path.cwd()), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return Path(result.stdout.strip()).resolve()
+    except subprocess.CalledProcessError:
+        pass
+
+    for key in ("SPINE_REPO", "SPINE_CODE"):
+        value = os.environ.get(key)
+        if value:
+            return canonicalize_repoish(value)
+
+    return DEFAULT_ROOT
+
+
+def rel_runtime_output(tracked_binding: str) -> str:
+    return f"runtime/domain-state/snapshots/{Path(tracked_binding).name}"
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Audit governed snapshot surfaces for runtime-first contract compliance.")
+    parser.add_argument("--root", help="Override target repo root.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON.")
+    parser.add_argument("--brief", action="store_true", help="Emit single-line summary.")
+    args = parser.parse_args()
+
+    root = resolve_root(args.root)
+    contract_path = root / DEFAULT_CONTRACT
+    capabilities_path = root / DEFAULT_CAPABILITIES
+    routing_path = root / DEFAULT_ROUTING
+
+    missing = [str(path) for path in (contract_path, capabilities_path, routing_path) if not path.exists()]
+    if missing:
+        msg = {
+            "status": "FAIL",
+            "root": str(root),
+            "issues_total": len(missing),
+            "issues": [{"code": "missing_required_file", "path": item} for item in missing],
+        }
+        if args.json:
+            print(json.dumps(msg, sort_keys=True))
+        elif args.brief:
+            print(f"FAIL issues={len(missing)} root={root}")
+        else:
+            print("snapshot.surface.audit")
+            print(f"root: {root}")
+            print("status: FAIL")
+            for item in missing:
+                print(f"ISSUE missing_required_file path={item}")
+        return 1
+
+    contract = load_yaml(contract_path)
+    capabilities_doc = load_yaml(capabilities_path)
+    routing_doc = load_yaml(routing_path)
+    capabilities = capabilities_doc.get("capabilities") if isinstance(capabilities_doc, dict) else None
+    routing = routing_doc.get("dispatch") if isinstance(routing_doc, dict) else None
+    if not isinstance(capabilities, dict):
+        capabilities = capabilities_doc if isinstance(capabilities_doc, dict) else {}
+    if not isinstance(routing, dict):
+        routing = routing_doc if isinstance(routing_doc, dict) else {}
+
+    governed = contract.get("governed_surfaces") or []
+    automation = contract.get("automation_surfaces") or []
+    prefix = str(((contract.get("policy") or {}).get("description_prefix")) or "Read-only by default:")
+    suffix = str(((contract.get("policy") or {}).get("promotion_suffix")) or "tracked promotion requires --apply.")
+
+    issues: list[dict[str, Any]] = []
+
+    for row in governed:
+        if not isinstance(row, dict):
+            continue
+        capability_id = str(row.get("capability") or "").strip()
+        tracked_binding = str(row.get("tracked_binding") or "").strip()
+        if not capability_id or not tracked_binding:
+            issues.append(
+                {
+                    "code": "invalid_contract_surface",
+                    "capability": capability_id,
+                    "tracked_binding": tracked_binding,
+                }
+            )
+            continue
+
+        capability_row = capabilities.get(capability_id)
+        routing_row = routing.get(capability_id)
+        runtime_output = rel_runtime_output(tracked_binding)
+
+        if not isinstance(capability_row, dict):
+            issues.append({"code": "missing_capability", "capability": capability_id})
+            continue
+        if not isinstance(routing_row, dict):
+            issues.append({"code": "missing_routing", "capability": capability_id})
+            continue
+
+        capability_desc = str(capability_row.get("description") or "")
+        routing_desc = str(routing_row.get("description") or "")
+        expected_tokens = (prefix, runtime_output, suffix)
+        for token in expected_tokens:
+            if token not in capability_desc:
+                issues.append(
+                    {
+                        "code": "capability_description_drift",
+                        "capability": capability_id,
+                        "missing": token,
+                    }
+                )
+            if token not in routing_desc:
+                issues.append(
+                    {
+                        "code": "routing_description_drift",
+                        "capability": capability_id,
+                        "missing": token,
+                    }
+                )
+
+        if capability_desc != routing_desc:
+            issues.append({"code": "capability_routing_description_mismatch", "capability": capability_id})
+
+        if str(capability_row.get("safety") or "") != "read-only":
+            issues.append({"code": "capability_safety_not_read_only", "capability": capability_id})
+        if str(routing_row.get("safety") or "") != "read-only":
+            issues.append({"code": "routing_safety_not_read_only", "capability": capability_id})
+
+        script_path = Path(str(capability_row.get("script_path") or "")).expanduser()
+        if not script_path.is_absolute():
+            script_path = root / script_path
+        if not script_path.exists():
+            issues.append({"code": "missing_script_path", "capability": capability_id, "path": str(script_path)})
+            continue
+
+        script_text = read_text(script_path)
+
+        helper_based = any(marker in script_text for marker in TARGET_REPO_MARKERS)
+
+        if not helper_based:
+            issues.append({"code": "target_repo_resolution_missing", "capability": capability_id, "path": str(script_path)})
+
+        if not helper_based and ("--apply" not in script_text or "--check" not in script_text):
+            issues.append({"code": "apply_check_split_missing", "capability": capability_id, "path": str(script_path)})
+
+        if tracked_binding in script_text and "runtime/domain-state/snapshots" not in script_text and "snapshot_surface_init" not in script_text and "ha_snapshot_init" not in script_text:
+            issues.append({"code": "tracked_default_writepath", "capability": capability_id, "path": str(script_path)})
+
+        for pattern in FORBIDDEN_GIT_PATTERNS:
+            if pattern.search(script_text):
+                issues.append(
+                    {
+                        "code": "implicit_tracked_git_mutation",
+                        "capability": capability_id,
+                        "path": str(script_path),
+                        "pattern": pattern.pattern,
+                    }
+                )
+
+    for row in automation:
+        if not isinstance(row, dict):
+            continue
+        rel_path = str(row.get("path") or "").strip()
+        if not rel_path:
+            continue
+        path = root / rel_path
+        if not path.exists():
+            issues.append({"code": "missing_automation_surface", "path": rel_path})
+            continue
+        text = read_text(path)
+        for pattern in FORBIDDEN_GIT_PATTERNS:
+            if pattern.search(text):
+                issues.append(
+                    {
+                        "code": "automation_implicit_tracked_git_mutation",
+                        "path": rel_path,
+                        "pattern": pattern.pattern,
+                    }
+                )
+
+    payload = {
+        "capability": "snapshot.surface.audit",
+        "root": str(root),
+        "contract": str(contract_path),
+        "governed_surfaces": len(governed),
+        "automation_surfaces": len(automation),
+        "issues_total": len(issues),
+        "status": "PASS" if not issues else "FAIL",
+        "issues": issues,
+    }
+
+    if args.json:
+        print(json.dumps(payload, sort_keys=True))
+    elif args.brief:
+        print(
+            f"{payload['status']} issues={payload['issues_total']} governed={payload['governed_surfaces']} "
+            f"automation={payload['automation_surfaces']} root={payload['root']}"
+        )
+    else:
+        print("snapshot.surface.audit")
+        print(f"root: {payload['root']}")
+        print(f"contract: {payload['contract']}")
+        print(f"governed_surfaces: {payload['governed_surfaces']}")
+        print(f"automation_surfaces: {payload['automation_surfaces']}")
+        print(f"issues: {payload['issues_total']}")
+        print(f"status: {payload['status']}")
+        for issue in issues:
+            details = " ".join(f"{key}={value}" for key, value in issue.items() if key != "code")
+            print(f"ISSUE {issue['code']} {details}".rstrip())
+
+    return 0 if not issues else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

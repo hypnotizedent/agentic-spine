@@ -5,13 +5,8 @@ set -euo pipefail
 # Refreshes and normalizes ops/bindings/media.content.snapshot.yaml with
 # movie/tv/music item-level IDs for ledger parity enforcement.
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-TRACKED_OUTPUT="$ROOT/ops/bindings/media.content.snapshot.yaml"
-RUNTIME_OUTPUT_DEFAULT="$ROOT/runtime/domain-state/snapshots/media.content.snapshot.yaml"
-OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
-MODE="check"
-SERVICES="$ROOT/ops/bindings/services.health.yaml"
-SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../../core/snapshot/lib/snapshot-surface-common.sh"
 STRICT=0
 
 usage() {
@@ -31,37 +26,32 @@ Flags:
 USAGE
 }
 
+snapshot_surface_init "ops/bindings/media.content.snapshot.yaml" "$@"
+ROOT="$SNAPSHOT_SURFACE_ROOT"
+TRACKED_OUTPUT="$SNAPSHOT_SURFACE_TRACKED_OUTPUT"
+OUTPUT="$SNAPSHOT_SURFACE_OUTPUT"
+MODE="$SNAPSHOT_SURFACE_MODE"
+SERVICES="$ROOT/ops/bindings/services.health.yaml"
+SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
+TMPDIR_WORK="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR_WORK"' EXIT
+STAGED_OUTPUT="$TMPDIR_WORK/media.content.snapshot.yaml"
+SOURCE_SNAPSHOT="$(snapshot_surface_resolve_source_path "$ROOT" "ops/bindings/media.content.snapshot.yaml")"
+
 if [[ -z "${SPINE_SECRETS_INJECTED:-}" && -x "$SECRETS_EXEC" ]]; then
   export SPINE_SECRETS_INJECTED=1
   exec "$SECRETS_EXEC" -- "$0" "$@"
 fi
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --apply)
-      MODE="apply"
-      OUTPUT="$TRACKED_OUTPUT"
-      shift
-      ;;
-    --check)
-      MODE="check"
-      OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
-      shift
-      ;;
-    --state-path|--output)
-      OUTPUT="${2:-}"
-      shift 2
-      ;;
+ARGS=("${SNAPSHOT_SURFACE_REMAINING_ARGS[@]}")
+while [[ ${#ARGS[@]} -gt 0 ]]; do
+  case "${ARGS[0]}" in
     --strict)
       STRICT=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
+      ARGS=("${ARGS[@]:1}")
       ;;
     *)
-      echo "FAIL: unknown arg '$1'" >&2
+      echo "FAIL: unknown arg '${ARGS[0]}'" >&2
       usage >&2
       exit 1
       ;;
@@ -73,23 +63,12 @@ if [[ -z "$OUTPUT" ]]; then
   exit 1
 fi
 
-file_hash() {
-  local path="$1"
-  if [[ -f "$path" ]]; then
-    shasum -a 256 "$path" | awk '{print $1}'
-    return
-  fi
-  echo "missing"
-}
-
-tracked_hash_before="$(file_hash "$TRACKED_OUTPUT")"
-
 command -v python3 >/dev/null 2>&1 || {
   echo "STOP (2): missing dependency python3" >&2
   exit 2
 }
 
-python3 - "$OUTPUT" "$SERVICES" "$STRICT" <<'PY'
+python3 - "$SOURCE_SNAPSHOT" "$STAGED_OUTPUT" "$SERVICES" "$STRICT" <<'PY'
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -103,9 +82,10 @@ import urllib.request
 
 import yaml
 
-output_path = Path(sys.argv[1]).expanduser().resolve()
-services_path = Path(sys.argv[2]).expanduser().resolve()
-strict_mode = sys.argv[3] == "1"
+source_path = Path(sys.argv[1]).expanduser().resolve()
+output_path = Path(sys.argv[2]).expanduser().resolve()
+services_path = Path(sys.argv[3]).expanduser().resolve()
+strict_mode = sys.argv[4] == "1"
 
 
 def now_utc() -> datetime:
@@ -337,7 +317,7 @@ def parse_music_rows(base_url: str, api_key: str) -> list[dict]:
     return out
 
 
-snapshot = load_yaml(output_path)
+snapshot = load_yaml(source_path)
 services = load_yaml(services_path)
 stamp = now_iso()
 
@@ -443,13 +423,10 @@ if errors:
         print(f"WARN: {msg}", file=sys.stderr)
 PY
 
-if [[ "$MODE" == "check" ]]; then
-  tracked_hash_after="$(file_hash "$TRACKED_OUTPUT")"
-  if [[ "$tracked_hash_before" != "$tracked_hash_after" ]]; then
-    echo "media-content-snapshot-refresh FAIL: tracked binding mutated in check mode: $TRACKED_OUTPUT" >&2
-    exit 1
-  fi
-fi
+snapshot_surface_finalize "$STAGED_OUTPUT"
+snapshot_surface_assert_tracked_unchanged_in_check_mode
 
 echo "mode: $MODE"
 echo "tracked_binding: $TRACKED_OUTPUT"
+echo "output: $OUTPUT"
+echo "final_action: ${SNAPSHOT_SURFACE_FINAL_ACTION:-wrote}"

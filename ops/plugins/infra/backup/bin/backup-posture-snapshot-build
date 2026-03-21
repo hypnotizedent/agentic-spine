@@ -3,15 +3,20 @@
 # Combines inventory + schedule + live backup.status + lane budget telemetry.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../../core/snapshot/lib/snapshot-surface-common.sh"
+
+snapshot_surface_init "ops/bindings/backup.posture.snapshot.yaml" "$@"
+
+ROOT="$SNAPSHOT_SURFACE_ROOT"
 INV="$ROOT/ops/bindings/backup.inventory.yaml"
 SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
 SSH_BIND="$ROOT/ops/bindings/ssh.targets.yaml"
 LIFECYCLE="$ROOT/ops/bindings/service.data.lifecycle.registry.yaml"
-OUT_DEFAULT="$ROOT/ops/bindings/backup.posture.snapshot.yaml"
 BACKUP_STATUS_BIN="$ROOT/ops/plugins/infra/backup/bin/backup-status"
 
-OUT="$OUT_DEFAULT"
+OUT="$SNAPSHOT_SURFACE_OUTPUT"
+MODE="$SNAPSHOT_SURFACE_MODE"
 JSON_MODE=0
 
 usage() {
@@ -19,10 +24,10 @@ usage() {
 backup.posture.snapshot.build - Build canonical backup posture projection.
 
 Usage:
-  backup-posture-snapshot-build [--output <path>] [--json]
+  backup-posture-snapshot-build [--check|--apply] [--state-path <path>] [--json]
 
 Outputs:
-  - projection file (default: ops/bindings/backup.posture.snapshot.yaml)
+  - projection file (default: runtime/domain-state/snapshots/backup.posture.snapshot.yaml)
   - summary on stdout
 
 Notes:
@@ -32,13 +37,18 @@ Notes:
 USAGE
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --) shift ;;
-    --output) OUT="${2:?--output requires a path}"; shift 2 ;;
-    --json) JSON_MODE=1; shift ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
+ARGS=("${SNAPSHOT_SURFACE_REMAINING_ARGS[@]}")
+while [[ ${#ARGS[@]} -gt 0 ]]; do
+  case "${ARGS[0]}" in
+    --json)
+      JSON_MODE=1
+      ARGS=("${ARGS[@]:1}")
+      ;;
+    *)
+      echo "FAIL: unknown arg: ${ARGS[0]}" >&2
+      usage >&2
+      exit 2
+      ;;
   esac
 done
 
@@ -53,8 +63,9 @@ done
 
 STATUS_TMP="$(mktemp)"
 JSON_TMP="$(mktemp)"
+STAGED_OUT="$(mktemp)"
 cleanup() {
-  rm -f "$STATUS_TMP" "$JSON_TMP"
+  rm -f "$STATUS_TMP" "$JSON_TMP" "$STAGED_OUT"
 }
 trap cleanup EXIT INT TERM
 
@@ -440,7 +451,10 @@ posture = {
 print(json.dumps(posture, indent=2, sort_keys=False))
 PY
 
-yq -P -oy '.' "$JSON_TMP" > "$OUT"
+yq -P -oy '.' "$JSON_TMP" > "$STAGED_OUT"
+
+snapshot_surface_finalize "$STAGED_OUT"
+snapshot_surface_assert_tracked_unchanged_in_check_mode
 
 if [[ "$JSON_MODE" -eq 1 ]]; then
   cat "$OUT"
@@ -463,6 +477,9 @@ fi
 
 echo "backup.posture.snapshot.build"
 echo "output: $OUT"
+echo "mode: $MODE"
+echo "tracked_binding: $SNAPSHOT_SURFACE_TRACKED_OUTPUT"
+echo "final_action: ${SNAPSHOT_SURFACE_FINAL_ACTION:-wrote}"
 echo "enabled_targets: $enabled_targets"
 echo "restore_missing: $missing_restore"
 echo "lane_over_budget: $over_budget"
