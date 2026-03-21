@@ -70,10 +70,21 @@ anti_bloat:
   max_staging_size_gib: 50
   free_space_gate:
     min_free_pct: 15
-    current_free_pct: 14
-    current_status: marginal
+    current_free_pct: 65
+    current_condition: within_budget
     action_when_breached: "Pause all downloads. Do not resume until free_pct > min_free_pct."
-    note: "Pool at 86% usage (critical per infra.capacity.guard.policy). Canary must not worsen this."
+    note: "Canary operates on Synology home pool (20 TB, 35% used, 13 TB free). The 86% critical is the PVE shop pool — a separate storage plane that canary does not write to."
+    storage_pools:
+      synology_home:
+        total_tb: 20
+        used_tb: 6.6
+        free_tb: 13
+        usage_pct: 35
+        condition: healthy
+      pve_shop:
+        usage_pct: 86
+        condition: critical_separate_pool
+        note: "Separate pool. Canary does not write here."
 
   rss_feeds:
     enabled: false
@@ -144,9 +155,10 @@ canary_proof:
 
   activation_command: |
     SSH to media-home and start the SABnzbd container:
-      ssh media-home 'cd /opt/media-home && docker compose up -d sabnzbd'
+      ssh ubuntu@10.0.0.106 'cd /srv/appdata/compose/media-stack && docker compose up -d sabnzbd'
     Then verify health:
-      curl -s http://media-home:8080/api?mode=version&output=json
+      ssh ubuntu@10.0.0.106 'curl -s http://localhost:8080/api?mode=version\&output=json'
+    Canary executed 2026-03-21: SVU S27E15 downloaded 3.1 GB in 43s to staging. SABnzbd then paused.
 
 # ─────────────────────────────────────────────────────────────────────────
 # Prohibited Actions (Hard No)
