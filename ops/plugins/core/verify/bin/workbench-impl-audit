@@ -1,223 +1,366 @@
-#!/usr/bin/env bash
-# TRIAGE: Keep domain_external capability implementation paths truthful and discoverable.
-# Verifies every domain_external capability resolves to an existing path in canonical workbench.
-set -euo pipefail
+#!/usr/bin/env python3
+from __future__ import annotations
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
-CAPS="${CAPABILITIES_FILE:-$ROOT/ops/capabilities.yaml}"
-BOUNDARY="${FABRIC_BOUNDARY_FILE:-$ROOT/ops/bindings/fabric.boundary.contract.yaml}"
+import argparse
+import os
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-STRICT=0
-LIST_MODE=0
-DOMAIN_FILTER=""
+import yaml
 
-usage() {
-  cat <<'USAGE'
-workbench-impl-audit
 
-Usage:
-  workbench-impl-audit [--strict] [--list] [--domain <name>]
+def expand(raw: str | Path) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
 
-Options:
-  --strict         Exit non-zero if any domain_external path is missing or invalid.
-  --list           Print capability -> resolved path mapping with status.
-  --domain <name>  Filter to a single domain (e.g., immich, n8n, microsoft).
-USAGE
-}
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --strict)
-      STRICT=1
-      shift
-      ;;
-    --list)
-      LIST_MODE=1
-      shift
-      ;;
-    --domain)
-      DOMAIN_FILTER="${2:?--domain requires a value}"
-      shift 2
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "FAIL: unknown arg: $1" >&2
-      usage >&2
-      exit 2
-      ;;
-  esac
-done
+DEFAULT_ROOT = expand(Path(__file__).resolve().parents[5])
 
-fail() {
-  echo "workbench.impl.audit FAIL: $*" >&2
-  exit 1
-}
 
-[[ -f "$CAPS" ]] || fail "capabilities file missing: $CAPS"
-[[ -f "$BOUNDARY" ]] || fail "boundary contract missing: $BOUNDARY"
-command -v yq >/dev/null 2>&1 || fail "required tool missing: yq"
+def git_top_level(start: Path) -> Path | None:
+    probe = start if start.is_dir() else start.parent
+    proc = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    return Path(stdout).resolve() if stdout else None
 
-yq e '.' "$CAPS" >/dev/null 2>&1 || fail "invalid YAML: $CAPS"
-yq e '.' "$BOUNDARY" >/dev/null 2>&1 || fail "invalid YAML: $BOUNDARY"
 
-WB_REPO="$(yq e -r '.workbench.canonical_repo // ""' "$BOUNDARY")"
-[[ -n "$WB_REPO" && "$WB_REPO" != "null" ]] || fail "missing workbench.canonical_repo in boundary contract"
+def resolve_target_root(explicit: str | None = None) -> Path:
+    if explicit:
+        return expand(explicit)
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+    script_root = git_top_level(Path(__file__).resolve())
+    if script_root is not None:
+        return script_root
+    for env_name in ("SPINE_TARGET_REPO", "SPINE_ROOT", "SPINE_REPO", "SPINE_CODE"):
+        value = os.environ.get(env_name)
+        if value:
+            return expand(value)
+    return DEFAULT_ROOT
 
-declare -i total=0 ok=0 missing=0 metadata_errors=0 repo_errors=0
-declare -A domain_total=()
-declare -A domain_ok=()
-declare -A domain_missing=()
-declare -a missing_entries=()
-declare -a metadata_entries=()
-declare -a repo_entries=()
-declare -a list_entries=()
 
-while IFS=$'\t' read -r cap domain repo path; do
-  [[ -z "$cap" ]] && continue
+def fail(message: str, exit_code: int = 1) -> None:
+    print(f"workbench.impl.audit FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
 
-  if [[ -n "$DOMAIN_FILTER" && "$domain" != "$DOMAIN_FILTER" ]]; then
-    continue
-  fi
 
-  total=$((total + 1))
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
 
-  domain_key="$domain"
-  [[ -n "$domain_key" ]] || domain_key="none"
-  domain_total["$domain_key"]=$(( ${domain_total["$domain_key"]:-0} + 1 ))
 
-  if [[ -z "$repo" || -z "$path" ]]; then
-    metadata_errors=$((metadata_errors + 1))
-    missing=$((missing + 1))
-    domain_missing["$domain_key"]=$(( ${domain_missing["$domain_key"]:-0} + 1 ))
-    metadata_entries+=("$cap|$domain_key|repo='$repo' path='$path'")
-    if [[ "$LIST_MODE" -eq 1 ]]; then
-      list_entries+=("$cap|$domain_key|metadata_error|<invalid>")
-    fi
-    continue
-  fi
+def require_string(value: Any, label: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        fail(f"missing {label} in boundary contract")
+    return text
 
-  if [[ "$repo" != "$WB_REPO" ]]; then
-    repo_errors=$((repo_errors + 1))
-    missing=$((missing + 1))
-    domain_missing["$domain_key"]=$(( ${domain_missing["$domain_key"]:-0} + 1 ))
-    repo_entries+=("$cap|$domain_key|repo=$repo expected=$WB_REPO")
-    if [[ "$LIST_MODE" -eq 1 ]]; then
-      list_entries+=("$cap|$domain_key|repo_mismatch|$repo/$path")
-    fi
-    continue
-  fi
 
-  if [[ "$path" = /* ]]; then
-    target="$path"
-  else
-    target="$repo/$path"
-  fi
+def normalize_roots(raw: Any, *, label: str) -> tuple[str, ...]:
+    if not isinstance(raw, list) or not raw:
+        fail(f"{label} must be a non-empty list")
+    normalized: list[str] = []
+    for item in raw:
+        text = str(item or "").strip().lstrip("/")
+        if not text:
+            fail(f"{label} contains an empty root")
+        normalized.append(text.rstrip("/") + "/")
+    return tuple(normalized)
 
-  if [[ "$target" != "$WB_REPO"* ]]; then
-    repo_errors=$((repo_errors + 1))
-    missing=$((missing + 1))
-    domain_missing["$domain_key"]=$(( ${domain_missing["$domain_key"]:-0} + 1 ))
-    repo_entries+=("$cap|$domain_key|target=$target outside=$WB_REPO")
-    if [[ "$LIST_MODE" -eq 1 ]]; then
-      list_entries+=("$cap|$domain_key|outside_workbench|$target")
-    fi
-    continue
-  fi
 
-  if [[ -e "$target" ]]; then
-    ok=$((ok + 1))
-    domain_ok["$domain_key"]=$(( ${domain_ok["$domain_key"]:-0} + 1 ))
-    if [[ "$LIST_MODE" -eq 1 ]]; then
-      list_entries+=("$cap|$domain_key|ok|$target")
-    fi
-  else
-    missing=$((missing + 1))
-    domain_missing["$domain_key"]=$(( ${domain_missing["$domain_key"]:-0} + 1 ))
-    missing_entries+=("$cap|$domain_key|$target")
-    if [[ "$LIST_MODE" -eq 1 ]]; then
-      list_entries+=("$cap|$domain_key|missing|$target")
-    fi
-  fi
-done < <(
-  yq e -r '.capabilities
-    | to_entries[]
-    | select((.value.plane // "") == "domain_external")
-    | [.key, (.value.domain // "none"), (.value.implementation_repo // ""), (.value.implementation_path // "")]
-    | @tsv' "$CAPS"
-)
+def target_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
-echo "workbench.impl.audit"
-echo "source: $CAPS"
-echo "workbench_repo: $WB_REPO"
-if [[ -n "$DOMAIN_FILTER" ]]; then
-  echo "domain_filter: $DOMAIN_FILTER"
-fi
-echo "domain_external_capabilities: $total"
-echo "resolved_paths_exist: $ok"
-echo "missing_paths: $missing"
-echo "metadata_errors: $metadata_errors"
-echo "repo_errors: $repo_errors"
-echo ""
 
-echo "by_domain:"
-if [[ "${#domain_total[@]}" -eq 0 ]]; then
-  echo "  (none)"
-else
-  mapfile -t domain_keys < <(printf '%s\n' "${!domain_total[@]}" | sort)
-  for domain_key in "${domain_keys[@]}"; do
-    d_total="${domain_total["$domain_key"]:-0}"
-    d_ok="${domain_ok["$domain_key"]:-0}"
-    d_missing="${domain_missing["$domain_key"]:-0}"
-    echo "  - $domain_key: total=$d_total ok=$d_ok missing=$d_missing"
-  done
-fi
+@dataclass(frozen=True)
+class AllowedLocation:
+    rule_id: str
+    repo: Path
+    allowed_roots: tuple[str, ...]
+    rationale: str
 
-if [[ "${#metadata_entries[@]}" -gt 0 ]]; then
-  echo ""
-  echo "metadata_violations:"
-  for row in "${metadata_entries[@]}"; do
-    IFS='|' read -r cap domain_key detail <<<"$row"
-    echo "  - $cap (domain=$domain_key): $detail"
-  done
-fi
+    def allows(self, target: Path) -> bool:
+        if not target_within(target, self.repo):
+            return False
+        rel = target.relative_to(self.repo).as_posix().rstrip("/")
+        rel = f"{rel}/" if rel else ""
+        return any(rel.startswith(root) for root in self.allowed_roots)
 
-if [[ "${#repo_entries[@]}" -gt 0 ]]; then
-  echo ""
-  echo "repo_scope_violations:"
-  for row in "${repo_entries[@]}"; do
-    IFS='|' read -r cap domain_key detail <<<"$row"
-    echo "  - $cap (domain=$domain_key): $detail"
-  done
-fi
 
-if [[ "${#missing_entries[@]}" -gt 0 ]]; then
-  echo ""
-  echo "missing_paths_detail:"
-  for row in "${missing_entries[@]}"; do
-    IFS='|' read -r cap domain_key target <<<"$row"
-    echo "  - $cap (domain=$domain_key): $target"
-  done
-fi
+def format_rule(rule: AllowedLocation) -> str:
+    return f"{rule.rule_id}[repo={rule.repo}; roots={','.join(rule.allowed_roots)}]"
 
-if [[ "$LIST_MODE" -eq 1 ]]; then
-  echo ""
-  echo "capability_path_map:"
-  echo "  capability | domain | status | target"
-  if [[ "${#list_entries[@]}" -eq 0 ]]; then
-    echo "  (none)"
-  else
-    for row in "${list_entries[@]}"; do
-      IFS='|' read -r cap domain_key status target <<<"$row"
-      echo "  $cap | $domain_key | $status | $target"
-    done
-  fi
-fi
 
-if [[ "$STRICT" -eq 1 && ( "$missing" -gt 0 || "$metadata_errors" -gt 0 || "$repo_errors" -gt 0 ) ]]; then
-  exit 1
-fi
+def matches_rule(match: dict[str, Any], capability_id: str, domain: str) -> bool:
+    if not isinstance(match, dict) or not match:
+        return False
 
-exit 0
+    capability_ids = [str(item).strip() for item in match.get("capability_ids", []) or [] if str(item).strip()]
+    capability_prefixes = [str(item).strip() for item in match.get("capability_prefixes", []) or [] if str(item).strip()]
+    domains = [str(item).strip() for item in match.get("domains", []) or [] if str(item).strip()]
+
+    matched = False
+    if capability_ids:
+        matched = capability_id in capability_ids
+        if not matched:
+            return False
+    if capability_prefixes:
+        matched = any(capability_id.startswith(prefix) for prefix in capability_prefixes)
+        if not matched:
+            return False
+    if domains:
+        matched = domain in domains
+        if not matched:
+            return False
+    return matched
+
+
+def resolve_repo_ref(ref: str, repo_refs: dict[str, Path]) -> Path:
+    return repo_refs.get(ref, expand(ref))
+
+
+def build_allowed_locations(boundary: dict[str, Any]) -> tuple[AllowedLocation, list[dict[str, Any]], dict[str, Path]]:
+    spine_repo = expand(require_string(boundary.get("spine", {}).get("canonical_repo"), "spine.canonical_repo"))
+    workbench_repo = expand(require_string(boundary.get("workbench", {}).get("canonical_repo"), "workbench.canonical_repo"))
+    repo_refs = {"spine": spine_repo, "workbench": workbench_repo}
+
+    policy = boundary.get("domain_external_implementation_boundary")
+    if not isinstance(policy, dict):
+        fail("missing domain_external_implementation_boundary in boundary contract")
+
+    default_raw = policy.get("default_allowed_location")
+    if not isinstance(default_raw, dict):
+        fail("missing domain_external_implementation_boundary.default_allowed_location")
+
+    default_location = AllowedLocation(
+        rule_id=require_string(default_raw.get("id"), "domain_external_implementation_boundary.default_allowed_location.id"),
+        repo=resolve_repo_ref(
+            require_string(default_raw.get("repo"), "domain_external_implementation_boundary.default_allowed_location.repo"),
+            repo_refs,
+        ),
+        allowed_roots=normalize_roots(
+            default_raw.get("allowed_roots"),
+            label="domain_external_implementation_boundary.default_allowed_location.allowed_roots",
+        ),
+        rationale=str(default_raw.get("rationale") or "").strip(),
+    )
+
+    overrides_raw = policy.get("allowed_location_overrides", []) or []
+    if not isinstance(overrides_raw, list):
+        fail("domain_external_implementation_boundary.allowed_location_overrides must be a list")
+    return default_location, overrides_raw, repo_refs
+
+
+def build_override(rule_raw: dict[str, Any], repo_refs: dict[str, Path]) -> AllowedLocation:
+    return AllowedLocation(
+        rule_id=require_string(rule_raw.get("id"), "domain_external_implementation_boundary.allowed_location_overrides[].id"),
+        repo=resolve_repo_ref(
+            require_string(rule_raw.get("repo"), "domain_external_implementation_boundary.allowed_location_overrides[].repo"),
+            repo_refs,
+        ),
+        allowed_roots=normalize_roots(
+            rule_raw.get("allowed_roots"),
+            label="domain_external_implementation_boundary.allowed_location_overrides[].allowed_roots",
+        ),
+        rationale=str(rule_raw.get("rationale") or "").strip(),
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="workbench-impl-audit",
+        description="Audit domain_external implementation paths against declared allowed repos/roots.",
+    )
+    parser.add_argument("--strict", action="store_true", help="Exit non-zero if any domain_external path is missing or invalid.")
+    parser.add_argument("--list", action="store_true", help="Print capability -> resolved path mapping with status and authority.")
+    parser.add_argument("--domain", help="Filter to a single domain (e.g., media, mint, microsoft).")
+    parser.add_argument("--root", help="Target checkout root. Overrides cwd/env root detection.")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    root = resolve_target_root(args.root)
+    caps_path = expand(os.environ.get("CAPABILITIES_FILE") or root / "ops/capabilities.yaml")
+    boundary_path = expand(os.environ.get("FABRIC_BOUNDARY_FILE") or root / "ops/bindings/fabric.boundary.contract.yaml")
+
+    capabilities_doc = load_yaml(caps_path)
+    capabilities = capabilities_doc.get("capabilities")
+    if not isinstance(capabilities, dict):
+        fail(f"expected capabilities mapping in {caps_path}")
+
+    boundary = load_yaml(boundary_path)
+    default_location, override_rules_raw, repo_refs = build_allowed_locations(boundary)
+
+    all_rules: list[AllowedLocation] = [default_location]
+    for raw in override_rules_raw:
+        if not isinstance(raw, dict):
+            fail("domain_external_implementation_boundary.allowed_location_overrides contains a non-mapping entry")
+        all_rules.append(build_override(raw, repo_refs))
+
+    total = ok = missing = metadata_errors = repo_errors = 0
+    domain_total: dict[str, int] = {}
+    domain_ok: dict[str, int] = {}
+    domain_missing: dict[str, int] = {}
+    metadata_entries: list[str] = []
+    repo_entries: list[str] = []
+    missing_entries: list[str] = []
+    list_entries: list[str] = []
+
+    for capability_id, payload in capabilities.items():
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("plane") or "") != "domain_external":
+            continue
+
+        domain = str(payload.get("domain") or "none").strip() or "none"
+        if args.domain and domain != args.domain:
+            continue
+
+        total += 1
+        domain_total[domain] = domain_total.get(domain, 0) + 1
+
+        repo_raw = str(payload.get("implementation_repo") or "").strip()
+        path_raw = str(payload.get("implementation_path") or "").strip()
+        if not repo_raw or not path_raw:
+            metadata_errors += 1
+            missing += 1
+            domain_missing[domain] = domain_missing.get(domain, 0) + 1
+            metadata_entries.append(f"{capability_id}|{domain}|repo='{repo_raw}' path='{path_raw}'")
+            if args.list:
+                list_entries.append(f"{capability_id}|{domain}|metadata_error|<invalid>|<invalid>")
+            continue
+
+        repo_path = expand(repo_raw)
+        target = expand(path_raw) if Path(path_raw).is_absolute() else (repo_path / path_raw).resolve()
+
+        matched_rules = [default_location]
+        for raw in override_rules_raw:
+            match = raw.get("match")
+            if isinstance(match, dict) and matches_rule(match, capability_id, domain):
+                matched_rules.append(build_override(raw, repo_refs))
+
+        if not any(repo_path == rule.repo for rule in matched_rules):
+            repo_errors += 1
+            missing += 1
+            domain_missing[domain] = domain_missing.get(domain, 0) + 1
+            allowed = "; ".join(format_rule(rule) for rule in matched_rules)
+            repo_entries.append(f"{capability_id}|{domain}|repo={repo_path} target={target} allowed={allowed}")
+            if args.list:
+                list_entries.append(f"{capability_id}|{domain}|repo_scope_violation|<none>|{target}")
+            continue
+
+        chosen_rule: AllowedLocation | None = None
+        for rule in matched_rules:
+            if repo_path == rule.repo and rule.allows(target):
+                chosen_rule = rule
+                break
+
+        if chosen_rule is None:
+            repo_errors += 1
+            missing += 1
+            domain_missing[domain] = domain_missing.get(domain, 0) + 1
+            allowed = "; ".join(format_rule(rule) for rule in matched_rules if repo_path == rule.repo)
+            repo_entries.append(f"{capability_id}|{domain}|repo={repo_path} target={target} outside_allowed_roots={allowed}")
+            if args.list:
+                list_entries.append(f"{capability_id}|{domain}|repo_scope_violation|<repo-matched-but-root-disallowed>|{target}")
+            continue
+
+        if target.exists():
+            ok += 1
+            domain_ok[domain] = domain_ok.get(domain, 0) + 1
+            if args.list:
+                list_entries.append(f"{capability_id}|{domain}|ok|{chosen_rule.rule_id}|{target}")
+        else:
+            missing += 1
+            domain_missing[domain] = domain_missing.get(domain, 0) + 1
+            missing_entries.append(f"{capability_id}|{domain}|{chosen_rule.rule_id}|{target}")
+            if args.list:
+                list_entries.append(f"{capability_id}|{domain}|missing|{chosen_rule.rule_id}|{target}")
+
+    print("workbench.impl.audit")
+    print(f"source: {caps_path}")
+    print(f"boundary: {boundary_path}")
+    print(f"default_repo: {default_location.repo}")
+    if args.domain:
+        print(f"domain_filter: {args.domain}")
+    print(f"domain_external_capabilities: {total}")
+    print(f"resolved_paths_exist: {ok}")
+    print(f"missing_paths: {missing}")
+    print(f"metadata_errors: {metadata_errors}")
+    print(f"repo_errors: {repo_errors}")
+    print()
+
+    print("authority_rules:")
+    for rule in all_rules:
+        print(f"  - {rule.rule_id}: repo={rule.repo} roots={','.join(rule.allowed_roots)}")
+
+    print()
+    print("by_domain:")
+    if not domain_total:
+        print("  (none)")
+    else:
+        for domain in sorted(domain_total):
+            print(
+                f"  - {domain}: total={domain_total.get(domain, 0)} ok={domain_ok.get(domain, 0)} missing={domain_missing.get(domain, 0)}"
+            )
+
+    if metadata_entries:
+        print()
+        print("metadata_violations:")
+        for row in metadata_entries:
+            capability_id, domain, detail = row.split("|", 2)
+            print(f"  - {capability_id} (domain={domain}): {detail}")
+
+    if repo_entries:
+        print()
+        print("repo_scope_violations:")
+        for row in repo_entries:
+            capability_id, domain, detail = row.split("|", 2)
+            print(f"  - {capability_id} (domain={domain}): {detail}")
+
+    if missing_entries:
+        print()
+        print("missing_paths_detail:")
+        for row in missing_entries:
+            capability_id, domain, authority, target = row.split("|", 3)
+            print(f"  - {capability_id} (domain={domain}, authority={authority}): {target}")
+
+    if args.list:
+        print()
+        print("capability_path_map:")
+        print("  capability | domain | status | authority | target")
+        if not list_entries:
+            print("  (none)")
+        else:
+            for row in list_entries:
+                capability_id, domain, status, authority, target = row.split("|", 4)
+                print(f"  {capability_id} | {domain} | {status} | {authority} | {target}")
+
+    if args.strict and (missing > 0 or metadata_errors > 0 or repo_errors > 0):
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
