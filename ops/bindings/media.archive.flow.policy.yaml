@@ -1,0 +1,139 @@
+# Status: authoritative
+# Last verified: 2026-03-21
+# Scope: media-archive-flow-policy
+# Absorbed from: codex/media-lifecycle-archive-flow-v1 (superseded)
+
+version: 1
+updated_at: "2026-03-21"
+owner: "@ronny"
+status: authoritative
+authority_state: authoritative
+scope: media-archive-flow-policy
+
+summary:
+  active_plane: "Home media plane stays canonical on synology918:/volume1/media-staging via media-home VM 106."
+  archive_plane: "Shop md1400 stays the canonical passive archive plane."
+  staging_plane: "Downloads are temporary staging only and must never become permanent residence."
+  execution_mode: "Archive movement remains planner-first and plan-only until final archive library roots are provisioned and md1400 headroom is safe."
+
+current_archive_state:
+  provisioned_roots:
+    hold_root:
+      host: pve
+      path: /md1400/archive/media-holds
+      purpose: "Current provisioned archive-adjacent hold lane for operator review, legacy tarball residue, imports under review, and temporary archive staging."
+    quarantine_pending:
+      host: pve
+      path: /md1400/archive/media-quarantine/pending
+      purpose: "Fresh unresolved media queued for operator review."
+    quarantine_reviewed:
+      host: pve
+      path: /md1400/archive/media-quarantine/reviewed
+      purpose: "Reviewed quarantine lane awaiting archive decision or delete decision."
+    evacuation_hold:
+      host: pve
+      path: /md1400/stage/media-phase2-evacuation/2026-03-19
+      purpose: "Read-only evacuation hold and cutover reference copy. Not canonical active playback or final cold archive."
+  planned_final_archive_roots:
+    movies:
+      host: pve
+      path: /md1400/archive/media/movies
+      status: planned
+      provisioning_state: not_provisioned
+    tv:
+      host: pve
+      path: /md1400/archive/media/tv
+      status: planned
+      provisioning_state: not_provisioned
+    music:
+      host: pve
+      path: /md1400/archive/media/music
+      status: planned
+      provisioning_state: not_provisioned
+
+execution_policy:
+  mode: plan_only
+  planner_capability: media.archive.plan
+  planner_granularity: single_title
+  automatic_archive_moves: false
+  automatic_home_deletes: false
+  movement_rule: copy_verify_then_manual_prune_later
+  preserve_home_contract: true
+  final_archive_root_required_for_ready_state: true
+  fallback_hold_root:
+    host: pve
+    path: /md1400/archive/media-holds
+    note: "If final archive roots are not provisioned, plans stay blocked and the hold root is only a fallback reference, not a permission to move."
+
+classification:
+  active_library:
+    host: nas
+    path: /volume1/media-staging
+  staging_only:
+    host: nas
+    path: /volume1/media-staging/downloads
+  archive_only:
+    host: pve
+    path: /md1400/archive
+  not_archive_truth:
+    - /md1400/stage/media-phase2-evacuation/2026-03-19
+    - /volume1/media-staging/downloads
+
+eligibility:
+  reasons:
+    - id: operator_archive_request
+      description: "Explicit operator decision to archive a title."
+    - id: watched_and_cooled
+      description: "Watched movie or episode collection after a cooling window."
+    - id: completed_series_and_cooled
+      description: "Completed TV series after a longer cooling window."
+    - id: duplicate_release
+      description: "Superseded duplicate or redundant release not worth hot residency."
+    - id: low_replay_probability
+      description: "Long-tail title unlikely to be replayed from the hot plane soon."
+    - id: library_pressure_relief_after_review
+      description: "Operator-approved capacity relief after review; never automatic."
+  cooldown_defaults_days:
+    watched_and_cooled:
+      movies: 14
+      tv: 14
+    completed_series_and_cooled:
+      tv: 30
+    low_replay_probability:
+      music: 180
+    operator_archive_request:
+      any: 0
+    duplicate_release:
+      any: 0
+    library_pressure_relief_after_review:
+      any: 0
+
+capacity_policy:
+  home_active_plane:
+    host: nas
+    path: /volume1/media-staging
+    archive_planning_warn_pct: 80
+    archive_planning_pressure_pct: 85
+    note: "Home is the active plane. Pressure here may justify planning, not automatic movement."
+  shop_archive_plane:
+    host: pve
+    pool: md1400
+    warn_pct: 90
+    hard_stop_pct: 95
+    note: "Archive moves must stop before md1400 becomes another pressure crisis."
+
+planner_defaults:
+  media_classes:
+    movies:
+      active_root: /volume1/media-staging/movies
+      planned_archive_root: /md1400/archive/media/movies
+    tv:
+      active_root: /volume1/media-staging/tv
+      planned_archive_root: /md1400/archive/media/tv
+    music:
+      active_root: /volume1/media-staging/music
+      planned_archive_root: /md1400/archive/media/music
+  fallback_hold_root: /md1400/archive/media-holds
+  block_if_planned_root_missing: true
+  warn_if_md1400_above_warn_pct: true
+  block_if_md1400_at_or_above_hard_stop_pct: true
