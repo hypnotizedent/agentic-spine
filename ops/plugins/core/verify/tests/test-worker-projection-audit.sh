@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
-source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
+SPINE_ROOT="$ROOT"
+source "${ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
 AUDIT="$ROOT/ops/plugins/core/verify/bin/worker-projection-audit"
 
@@ -179,16 +179,24 @@ else
   fail "fail fixture reports wrapper drift"
 fi
 
-if live_out="$("$AUDIT" --brief 2>&1)"; then
-  pass "live audit exits 0"
+if live_out="$(
+  cd "$ROOT"
+  env \
+    SPINE_TARGET_REPO="$bad_dir" \
+    SPINE_ROOT="$bad_dir" \
+    SPINE_REPO="$bad_dir" \
+    SPINE_CODE="$bad_dir" \
+    "$AUDIT" --brief 2>&1
+)"; then
+  pass "live audit exits 0 under stale env"
 else
-  fail "live audit exits 0"
+  fail "live audit exits 0 under stale env"
   echo "$live_out" >&2
 fi
 if echo "$live_out" | grep -q '^PASS issues=0 '; then
-  pass "live audit brief reports zero issues"
+  pass "live audit brief reports zero issues under stale env"
 else
-  fail "live audit brief reports zero issues"
+  fail "live audit brief reports zero issues under stale env"
 fi
 
 echo "────────────────────────────────────────"

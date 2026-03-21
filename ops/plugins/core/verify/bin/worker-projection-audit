@@ -41,24 +41,36 @@ def canonicalize_repoish(raw: str) -> Path:
     return expanded
 
 
-def resolve_root(explicit_root: str | None) -> Path:
-    if explicit_root:
-        return canonicalize_repoish(explicit_root)
-
-    explicit_target = os.environ.get("SPINE_TARGET_REPO")
-    if explicit_target:
-        return canonicalize_repoish(explicit_target)
-
+def git_top_level(start: Path) -> Path | None:
+    probe = start if start.is_dir() else start.parent
     try:
         result = subprocess.run(
-            ["git", "-C", str(Path.cwd()), "rev-parse", "--show-toplevel"],
+            ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
             check=True,
             capture_output=True,
             text=True,
         )
-        return Path(result.stdout.strip()).resolve()
     except subprocess.CalledProcessError:
-        pass
+        return None
+    stdout = result.stdout.strip()
+    return Path(stdout).resolve() if stdout else None
+
+
+def resolve_root(explicit_root: str | None) -> Path:
+    if explicit_root:
+        return canonicalize_repoish(explicit_root)
+
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+
+    script_root = git_top_level(SCRIPT_PATH)
+    if script_root is not None:
+        return script_root
+
+    explicit_target = os.environ.get("SPINE_TARGET_REPO")
+    if explicit_target:
+        return canonicalize_repoish(explicit_target)
 
     for key in ("SPINE_REPO", "SPINE_CODE"):
         value = os.environ.get(key)
@@ -72,8 +84,14 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-def run_checked(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+def run_checked(cmd: list[str], cwd: Path, root: Path) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    root_str = str(root)
+    env["SPINE_ROOT"] = root_str
+    env["SPINE_TARGET_REPO"] = root_str
+    env["SPINE_REPO"] = root_str
+    env["SPINE_CODE"] = root_str
+    return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, env=env)
 
 
 def tree_hash(path: Path) -> str:
@@ -174,7 +192,7 @@ def main() -> int:
             issues.append({"code": "missing_governed_surface", "target": target})
             continue
         wrapper_path = root / str(row.get("wrapper"))
-        proc = run_checked(["bash", str(wrapper_path), "--check"], root)
+        proc = run_checked(["bash", str(wrapper_path), "--check"], root, root)
         if proc.returncode != 0:
             issues.append(
                 {
@@ -191,7 +209,7 @@ def main() -> int:
         tracked_before = tree_hash(tracked_usage_root)
         tmpdir = Path(tempfile.mkdtemp(prefix="worker-usage-runtime-"))
         try:
-            proc = run_checked(["bash", str(usage_wrapper), f"--usage-output-dir={tmpdir}"], root)
+            proc = run_checked(["bash", str(usage_wrapper), f"--usage-output-dir={tmpdir}"], root, root)
             if proc.returncode != 0:
                 issues.append(
                     {
