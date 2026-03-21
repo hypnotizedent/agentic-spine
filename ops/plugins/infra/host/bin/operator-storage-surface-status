@@ -6,6 +6,7 @@ CONTRACT="${OPERATOR_STORAGE_SURFACE_CONTRACT:-$ROOT/ops/bindings/operator.stora
 YQ_BIN="${OPERATOR_STORAGE_YQ_BIN:-yq}"
 JQ_BIN="${OPERATOR_STORAGE_JQ_BIN:-jq}"
 MINT_STATUS_BIN="${OPERATOR_STORAGE_MINT_STATUS_BIN:-$ROOT/ops/plugins/domains/mint/bin/mint-operator-storage-status}"
+SYNC_STATUS_BIN="${OPERATOR_STORAGE_SYNC_STATUS_BIN:-$ROOT/ops/plugins/infra/host/bin/operator-storage-surface-sync}"
 
 BRIEF=0
 JSON_MODE=0
@@ -178,9 +179,23 @@ if [[ "$archives_assist_state" != "ready" && "$archives_status" == "ok" ]]; then
 fi
 
 overall_status="ok"
-if [[ "$runtime_root_state" != "ready" || "$mint_status" == "fail" || "$archives_status" == "fail" ]]; then
+sync_status="unknown"
+sync_agent="missing"
+sync_pending=0
+sync_conflicts=0
+if [[ -x "$SYNC_STATUS_BIN" && -x "$(command -v "$JQ_BIN" 2>/dev/null || true)" ]]; then
+  sync_json="$("$SYNC_STATUS_BIN" status --json 2>/dev/null || true)"
+  if [[ -n "$sync_json" ]]; then
+    sync_status="$(printf '%s' "$sync_json" | "$JQ_BIN" -r '.status // "unknown"' 2>/dev/null || echo unknown)"
+    sync_agent="$(printf '%s' "$sync_json" | "$JQ_BIN" -r '.launch_agent.state // "missing"' 2>/dev/null || echo missing)"
+    sync_pending="$(printf '%s' "$sync_json" | "$JQ_BIN" -r '(.surfaces.mintfiles.pending // 0) + (.surfaces.archives.pending // 0)' 2>/dev/null || echo 0)"
+    sync_conflicts="$(printf '%s' "$sync_json" | "$JQ_BIN" -r '(.surfaces.mintfiles.conflicts // 0) + (.surfaces.archives.conflicts // 0)' 2>/dev/null || echo 0)"
+  fi
+fi
+
+if [[ "$runtime_root_state" != "ready" || "$mint_status" == "fail" || "$archives_status" == "fail" || "$sync_status" == "fail" ]]; then
   overall_status="fail"
-elif [[ "$mint_status" == "warn" || "$archives_status" == "warn" ]]; then
+elif [[ "$mint_status" == "warn" || "$archives_status" == "warn" || "$sync_status" == "warn" ]]; then
   overall_status="warn"
 fi
 
@@ -200,6 +215,10 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --arg archives_assist_state "$archives_assist_state" \
     --arg archives_root "$archives_root" \
     --arg archives_entry_count "$archives_entry_count" \
+    --arg sync_status "$sync_status" \
+    --arg sync_agent "$sync_agent" \
+    --arg sync_pending "$sync_pending" \
+    --arg sync_conflicts "$sync_conflicts" \
     '{
       capability: $capability,
       status: $status,
@@ -220,6 +239,12 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
           assist_state: $archives_assist_state,
           mount_root: $archives_root,
           local_entries: ($archives_entry_count | tonumber)
+        },
+        sync: {
+          status: $sync_status,
+          launch_agent_state: $sync_agent,
+          pending: ($sync_pending | tonumber),
+          conflicts: ($sync_conflicts | tonumber)
         }
       }
     }'
@@ -227,7 +252,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
 fi
 
 if [[ "$BRIEF" -eq 1 ]]; then
-  echo "status=${overall_status} runtime_root=${runtime_root_state} mint=${mint_status} mint_mode=${mint_mode} mint_mount=${mint_mount} mint_assist=${mint_assist} archives=${archives_status} archives_mount=${archives_mount_state} archives_assist=${archives_assist_state} archives_entries=${archives_entry_count}"
+  echo "status=${overall_status} runtime_root=${runtime_root_state} mint=${mint_status} mint_mode=${mint_mode} mint_mount=${mint_mount} mint_assist=${mint_assist} archives=${archives_status} archives_mount=${archives_mount_state} archives_assist=${archives_assist_state} archives_entries=${archives_entry_count} sync=${sync_status} sync_agent=${sync_agent} sync_pending=${sync_pending} sync_conflicts=${sync_conflicts}"
   exit 0
 fi
 
@@ -244,6 +269,10 @@ echo "archives_mount_status: ${archives_mount_state}"
 echo "archives_assist_state: ${archives_assist_state}"
 echo "archives_mount_root: ${archives_root}"
 echo "archives_local_entries: ${archives_entry_count}"
+echo "sync_status: ${sync_status}"
+echo "sync_launch_agent_state: ${sync_agent}"
+echo "sync_pending_entries: ${sync_pending}"
+echo "sync_conflicts: ${sync_conflicts}"
 if [[ "$archives_entry_count" -gt 0 ]]; then
   echo "archives_local_entry_list:"
   printf '%s\n' "$archives_entries" | sed 's/^/  - /'

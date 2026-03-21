@@ -9,8 +9,37 @@ contract_id: OPERATOR_STORAGE_SURFACE_CONTRACT_V1
 
 runtime_workbench_root: /Users/ronnyworks/.wt/workbench/operator-storage-runtime
 
+bootstrap:
+  capability: operator.storage.surface.bootstrap
+  installer_script_path: /Users/ronnyworks/.wt/workbench/operator-storage-runtime/scripts/root/operator/install-client-storage-surfaces.sh
+  sync_launch_agent_label: com.ronny.operator-storage-surface-sync
+  sync_launchd_template: ops/plugins/infra/host/launchd/com.ronny.operator-storage-surface-sync.plist
+  sync_root: ~/Operator Sync
+  conflicts_root: ~/Operator Sync/.conflicts
+
+surface_classes:
+  browse_mount:
+    semantics: browse_only_remote_view
+    write_semantics: never_assume_safe_write_path
+  direct_remote_assist:
+    semantics: explicit_verified_remote_move
+    write_semantics: upload_then_verify_then_cleanup
+  watched_outbox_sync:
+    semantics: append_only_watched_outbox
+    write_semantics: background_verified_remote_move
+    conflict_policy: quarantine_if_destination_exists
+    retention_model: successful_items_are_cleaned_up_after_verified_arrival
+  continuous_sync_surface:
+    semantics: retained_mirror_sync
+    state: deferred_beyond_v1
+    note: true Dropbox/OneDrive-class retained mirror sync remains an open product gap
+
 surfaces:
   mintfiles:
+    surface_classes:
+      - browse_mount
+      - direct_remote_assist
+      - watched_outbox_sync
     status_capability: mint.operator.storage.status
     assist_capability: mint.operator.drop.assist
     criticality: critical_write_path
@@ -31,7 +60,10 @@ surfaces:
       allowed_source_roots:
         - ~/Desktop
         - ~/Downloads
+        - ~/Operator Sync/Mint/operator-drop
       default_route: operator-drop
+      accepted_source_kind: directory
+      conflict_policy: fail_if_destination_exists
       routes:
         - id: operator-drop
           browse_root: ~/MinIO/artwork-intake/operator-drop
@@ -41,8 +73,22 @@ surfaces:
       receipts_root: $SPINE_EVIDENCE_ROOT/operator-storage/mint/operator-drop-assist
       verification_method: rclone_check_size_one_way
       cleanup_policy: trash_after_verified_arrival
+    watched_outbox_surface:
+      enabled: true
+      mode: watched_outbox_sync
+      local_root: ~/Operator Sync/Mint/operator-drop
+      conflicts_root: ~/Operator Sync/.conflicts/Mint
+      journal_root: $SPINE_EVIDENCE_ROOT/operator-storage/mint/operator-drop-sync
+      sync_command_path: ./ops/plugins/domains/mint/bin/mint-operator-drop-assist
+      remote_root: mintfiles:artwork-intake/operator-drop
+      accepted_entries: directories_only
+      conflict_policy: quarantine_if_destination_exists
 
   archives:
+    surface_classes:
+      - browse_mount
+      - direct_remote_assist
+      - watched_outbox_sync
     assist_capability: archive.operator.drop.assist
     criticality: assisted_write_path_with_browse_mount
     runtime_mode: direct_remote_archive_family_move
@@ -77,9 +123,12 @@ surfaces:
       allowed_source_roots:
         - ~/Desktop
         - ~/Downloads
+        - ~/Operator Sync/Archives
       default_route: Legacy
       route_selector_required: true
       selector_label: family
+      accepted_source_kind: directory
+      conflict_policy: fail_if_destination_exists
       routes:
         - id: mint-legacy
           browse_root: ~/Archives/mint-legacy
@@ -99,6 +148,25 @@ surfaces:
       receipts_root: $SPINE_EVIDENCE_ROOT/operator-storage/archive/operator-drop-assist
       verification_method: rclone_check_size_one_way
       cleanup_policy: trash_after_verified_arrival
+    watched_outbox_surface:
+      enabled: true
+      mode: watched_outbox_sync
+      local_root: ~/Operator Sync/Archives
+      conflicts_root: ~/Operator Sync/.conflicts/Archives
+      journal_root: $SPINE_EVIDENCE_ROOT/operator-storage/archive/operator-drop-sync
+      sync_command_path: ./ops/plugins/infra/host/bin/archive-operator-drop-assist
+      conflict_policy: quarantine_if_destination_exists
+      accepted_entries: directories_only
+      routes:
+        - id: mint-legacy
+          local_root: ~/Operator Sync/Archives/mint-legacy
+          remote_root: archives-mint-legacy:mint-legacy
+        - id: Hypnotized
+          local_root: ~/Operator Sync/Archives/Hypnotized
+          remote_root: archives-ronny-projects:ronny-projects/Hypnotized
+        - id: Legacy
+          local_root: ~/Operator Sync/Archives/Legacy
+          remote_root: archives-ronny-projects:ronny-projects/Legacy
 
 normalization_principles:
   - one governed contract for operator-visible storage surfaces
@@ -106,3 +174,4 @@ normalization_principles:
   - browse mounts are convenience surfaces unless explicitly promoted otherwise
   - LaunchAgents for governed storage mounts must be spine-managed, monitored, and contract-required
   - local archive/history artifacts must not share a mount root with governed browse surfaces
+  - watched sync roots are client outboxes, not retained mirror authorities
