@@ -1,7 +1,7 @@
 version: 1
 status: authoritative
 owner: "@ronny"
-updated_at: "2026-03-12"
+updated_at: "2026-03-21"
 scope: shop-media-pressure
 
 purpose: >
@@ -17,26 +17,19 @@ evidence:
     - docs/reference/audits/MD1400_CAPACITY_NORMALIZATION_EXECUTION_20260227.md
   live_reads:
     - host: pve
-      observed_at_utc: "2026-03-12T05:08:17Z"
+      observed_at_utc: "2026-03-21T05:25:47Z"
       proof:
-        - "zpool list -Hp -o name,size,alloc,free,capacity media md1400"
-        - "zfs list -o name,used,refer,mountpoint media media/movies media/music media/tv md1400/media-cold md1400/media-cold/movies-archive"
-        - "zfs list -t snapshot -o name,used,creation -s used -r media"
-        - "zfs get -H -o property,value used,referenced,clones media@forensic-20260226-2325"
-        - "exportfs -v | grep -A2 '^/media '"
-        - "find /media/backups -maxdepth 1 -type f -name 'media-stack-2026-*.tar.gz' | wc -l"
-        - "du -sx --block-size=1 /media/backups"
-        - "find /md1400/media-cold/legacy-media-stack-backups -maxdepth 1 -type f -name 'media-stack-2026-*.tar.gz' | wc -l"
-        - "du -sx --block-size=1 /md1400/media-cold/legacy-media-stack-backups"
-    - host: streaming-stack
-      observed_at_utc: "2026-03-12T05:08:17Z"
+        - "zpool list -Hp -o name,size,alloc,free,capacity media"
+        - "date -u"
+    - host: download-stack
+      observed_at_utc: "2026-03-21T05:25:47Z"
       proof:
         - "mount | grep '/mnt/media '"
-        - "du -xhd1 /mnt/media | sort -h"
-        - "du -sx --block-size=1 /mnt/media/backups /mnt/media/downloads /mnt/media/movies /mnt/media/movies-archive /mnt/media/music /mnt/media/tv | sort -nr"
+        - "du -sb /mnt/media/movies /mnt/media/tv /mnt/media/music /mnt/media/movies-archive /mnt/media/downloads /mnt/media/backups | sort -rn"
+        - "du -sh /mnt/media"
 
 pool_state:
-  observed_at_utc: "2026-03-21T05:20:00Z"
+  observed_at_utc: "2026-03-21T05:25:47Z"
   media:
     total_bytes: 32006096289792
     used_bytes: 27598970830848
@@ -153,7 +146,7 @@ reclaim_lanes:
   - lane_id: media-downloads-reclaim
     surface_class: runtime
     reclaim_class: regenerable
-    status: reclaimed
+    status: done
     path: /mnt/media/downloads
     used_bytes: 116698405125
     used_display: "108G"
@@ -162,13 +155,13 @@ reclaim_lanes:
       Remaining 108GB is active/recent downloads. Further selective cleanup available if needed.
 
 summary:
-  canonical_payload_bytes: 17466866683392
-  canonical_payload_display: "15.9TiB"
-  regenerable_runtime_bytes: 2873736959488
-  regenerable_runtime_display: "2.61TiB"
+  canonical_payload_bytes: 18026955808491
+  canonical_payload_display: "16.4TiB"
+  regenerable_runtime_bytes: 116698405125
+  regenerable_runtime_display: "108GiB"
   blocking_summary: >
-    media is at 99% usage. NFS-visible canonical payload already accounts for about 15.9TiB
-    (movies/tv/music plus movies-archive), downloads adds about 2.61TiB of regenerable pressure,
-    the legacy warm-lane media-stack tarballs are now offloaded to md1400, and the retained forensic
-    snapshot has grown to 278G, so the migration does not reclaim space immediately.
+    media is at 86% usage. NFS-visible canonical payload accounts for about 16.4TiB
+    (movies/tv/music plus movies-archive), downloads cleaned to 108GiB of regenerable pressure,
+    the legacy warm-lane media-stack tarballs are offloaded to md1400, and the retained forensic
+    snapshot remains at 278G. Downloads cleanup 2026-03-12 to 2026-03-21 freed 2.6TB.
   safe_to_change_drives: blocked
