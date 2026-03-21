@@ -172,6 +172,7 @@ closures:
           trust_edges:
             - kind: ssh_batch
               from_host: media-home
+              from_user: root
               to_target: pve
               to_user: root
               to_address_source: tailscale_ip
@@ -446,7 +447,7 @@ if [[ "$target" == "ubuntu@10.0.0.106" && "$remote" == "cat /etc/cron.d/media-co
   exit 0
 fi
 
-if [[ "$target" == "ubuntu@10.0.0.106" && "$remote" == *"root@100.96.211.33 true"* ]]; then
+if [[ "$target" == "ubuntu@10.0.0.106" && "$remote" == *"sudo -n -u root -- /bin/bash -lc"* && "$remote" == *"root@100.96.211.33 true"* ]]; then
   if [[ "$scenario" == "ok" ]]; then
     exit 0
   fi

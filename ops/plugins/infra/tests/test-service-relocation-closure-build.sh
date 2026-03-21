@@ -119,6 +119,13 @@ relocations:
           - job_id: media-config-media-home-cold-sync-daily
             expected_host: media-home
             expected_script_ref: /usr/local/bin/media-config-backup.sh
+            trust_edges:
+              - kind: ssh_batch
+                from_host: media-home
+                from_user: root
+                to_target: pve
+                to_user: root
+                to_address_source: tailscale_ip
         inventory_targets:
           - target_id: app-media-config-media-home
             expected_host: pve
@@ -164,6 +171,7 @@ assert_contains "$contract_body" "status: projection" "projection status emitted
 assert_contains "$contract_body" "projection_of:" "projection source recorded"
 assert_contains "$contract_body" "parked:" "parked route section emitted"
 assert_contains "$contract_body" "forbidden_stack_aliases" "parked route tombstone policy emitted"
+assert_contains "$contract_body" "from_user: root" "trust edge execution user emitted"
 assert_contains "$contract_body" "refs:" "closure refs emitted"
 assert_contains "$contract_body" "runtime_services:" "runtime service checks emitted"
 

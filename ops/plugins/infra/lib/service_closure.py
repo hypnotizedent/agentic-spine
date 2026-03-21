@@ -1266,6 +1266,7 @@ def audit_closure(
             if str(edge.get("kind") or "").strip() != "ssh_batch":
                 continue
             from_host = str(edge.get("from_host") or expected_host).strip()
+            from_user = str(edge.get("from_user") or "").strip()
             to_target = str(edge.get("to_target") or "").strip()
             to_user = str(edge.get("to_user") or "root").strip()
             to_address_source = str(edge.get("to_address_source") or "host").strip()
@@ -1289,6 +1290,13 @@ def audit_closure(
                 f"ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no "
                 f"-o UserKnownHostsFile=/dev/null {shlex.quote(to_user)}@{shlex.quote(to_address)} true"
             )
+            source_row = ssh_probe.target_row(from_host)
+            source_login_user = str(source_row.get("user") or ssh_probe.defaults.get("user") or "root").strip()
+            if from_user and from_user != source_login_user:
+                remote_cmd = (
+                    f"sudo -n -u {shlex.quote(from_user)} -- /bin/bash -lc "
+                    f"{shlex.quote(remote_cmd)}"
+                )
             probe = ssh_probe.ssh_capture(from_host, remote_cmd, timeout=8)
             if probe["ok"]:
                 add_check(
