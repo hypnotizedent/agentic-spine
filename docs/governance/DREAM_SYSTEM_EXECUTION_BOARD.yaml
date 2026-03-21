@@ -1,6 +1,6 @@
 ---
 version: "1.0"
-last_verified: "2026-03-19"
+last_verified: "2026-03-21"
 owner: "@ronny"
 status: authoritative
 scope: dream-system-projection-first-execution-backlog
@@ -15,10 +15,10 @@ scope: dream-system-projection-first-execution-backlog
 # Type values: generator | gate | scaffold | migration | cleanup
 
 metadata:
-  total_backlog_items: 27
+  total_backlog_items: 32
   completed_milestones: 7
   in_progress_backlog_items: 1
-  not_started_backlog_items: 17
+  not_started_backlog_items: 22
   blocked_backlog_items: 2
 
 policy:
@@ -167,6 +167,87 @@ concern_families:
     generator_exists: false
     gate_exists: false
     estimated_effort_hours: 2
+
+  site_service_topology_surfaces:
+    description: "Site, VM, service, and storage placement should derive from one topology graph instead of drifting across independent bindings."
+    authority_file: ops/bindings/topology.sites.yaml
+    projection_files:
+      - ops/bindings/vm.lifecycle.yaml
+      - ops/bindings/domain.routing.registry.yaml
+      - ops/bindings/ssh.targets.yaml
+      - ops/bindings/agents.registry.yaml
+      - ops/bindings/terminal.worker.catalog.yaml
+    current_state: service_location_truth_fragmented_across_site_vm_routing_and_agent_surfaces
+    target_state: one_topology_graph_generates_placement_transport_and_operator_views
+    blast_radius: 5
+    backfill_frequency: high
+    rollout_priority: 10
+    generator_exists: false
+    gate_exists: false
+    estimated_effort_hours: 6
+
+  endpoint_dependency_closure_surfaces:
+    description: "LAN, Tailscale, public, operator, and agent endpoints should resolve from topology truth with dependent-client closure."
+    authority_file: ops/bindings/domain.routing.registry.yaml
+    projection_files:
+      - ops/bindings/services.health.yaml
+      - ops/bindings/secrets.bundle.contract.yaml
+      - ops/bindings/agents.registry.yaml
+      - ops/bindings/terminal.worker.catalog.yaml
+      - ops/bindings/home.ingress.map.yaml
+      - ops/bindings/shop.ingress.map.yaml
+    current_state: endpoint_targets_are_partly_hardcoded_and_partly_reconstructed
+    target_state: binding_driven_endpoint_resolution_with_dependency_closure_packs
+    blast_radius: 5
+    backfill_frequency: high
+    rollout_priority: 11
+    generator_exists: false
+    gate_exists: false
+    estimated_effort_hours: 5
+
+  backup_restore_topology_surfaces:
+    description: "Backup locality, offsite copies, and restore classes should derive from site-aware workload topology instead of freshness-only lanes."
+    authority_file: ops/bindings/backup.inventory.yaml
+    projection_files:
+      - ops/bindings/backup.schedule.yaml
+      - ops/bindings/backup.posture.snapshot.yaml
+      - ops/bindings/service.data.lifecycle.registry.yaml
+    current_state: backup_existence_and_freshness_are_governed_but_locality_semantics_are_not
+    target_state: same_site_local_offsite_archive_and_restore_semantics_are_generated_and_enforced
+    blast_radius: 5
+    backfill_frequency: high
+    rollout_priority: 12
+    generator_exists: false
+    gate_exists: false
+    estimated_effort_hours: 5
+
+  relocation_closure_surfaces:
+    description: "Service, VM, and storage moves should compile into one closure pack that updates linked surfaces and forbids stale endpoints."
+    authority_file: ops/bindings/topology.sites.yaml
+    projection_files: []
+    current_state: relocations_are_manual_multi_surface_projects_with_missing_step_4_5_6_closure
+    target_state: named_change_primitives_drive_generators_gates_and_closeout_receipts
+    blast_radius: 5
+    backfill_frequency: medium
+    rollout_priority: 13
+    generator_exists: false
+    gate_exists: false
+    estimated_effort_hours: 6
+
+  tenant_portability_support_surfaces:
+    description: "Tenant-scoped deployment, evidence, support, and incident workflows should work beyond Ronny-local host assumptions."
+    authority_file: ops/bindings/tenant.storage.contract.yaml
+    projection_files:
+      - ops/bindings/agents.registry.yaml
+      - ops/bindings/terminal.worker.catalog.yaml
+    current_state: operator_and_support_flows_are_ronny_centric_and_path_assumption_heavy
+    target_state: tenant_portable_environment_layering_with_support_grade_observability
+    blast_radius: 4
+    backfill_frequency: medium
+    rollout_priority: 14
+    generator_exists: false
+    gate_exists: false
+    estimated_effort_hours: 6
 
 backlog:
   # Tier 1: HIGH IMPACT — These are generation targets today
@@ -902,6 +983,149 @@ backlog:
     effort_estimate_hours: 4
     dependencies: []
 
+  - id: DREAM-028
+    title: "Build a unified site/service/data topology graph"
+    concern_family: site_service_topology_surfaces
+    authority_file: ops/bindings/topology.sites.yaml
+    projection_files:
+      - ops/bindings/vm.lifecycle.yaml
+      - ops/bindings/domain.routing.registry.yaml
+      - ops/bindings/ssh.targets.yaml
+      - ops/bindings/agents.registry.yaml
+      - ops/bindings/terminal.worker.catalog.yaml
+    current_state: fragmented_site_vm_service_and_storage_truth_requires_manual_cross_surface_reconciliation
+    target_state: one_graph_expresses_site_vm_current_target_and_storage_truth_for_every_managed_service
+    blast_radius: 5
+    priority: 28
+    status: not_started
+    type: generator
+    generator_exists: false
+    gate_exists: false
+    recommended_next_action: |
+      1. Define canonical entities for site, VM, service, storage root, and transport identity in one authority surface.
+      2. Capture both `current_*` and `target_*` placement so transitions are explicit instead of overwritten.
+      3. Generate downstream VM, routing, SSH, agent, and worker surfaces from that graph.
+      4. Bind future media and Mint relocation work to this graph instead of ad hoc file-by-file updates.
+    notes: |
+      Seeded by LOOP-SPINE-ARCHITECTURAL-CLOSURE-CANONICALIZATION-20260321 after repeated media relocation drift.
+      This is the core topology-compiler primitive the Spine is currently missing.
+    effort_estimate_hours: 6
+    dependencies: []
+
+  - id: DREAM-029
+    title: "Generate transport-aware endpoint resolution and dependency closure packs"
+    concern_family: endpoint_dependency_closure_surfaces
+    authority_file: ops/bindings/domain.routing.registry.yaml
+    projection_files:
+      - ops/bindings/services.health.yaml
+      - ops/bindings/secrets.bundle.contract.yaml
+      - ops/bindings/agents.registry.yaml
+      - ops/bindings/terminal.worker.catalog.yaml
+      - ops/bindings/home.ingress.map.yaml
+      - ops/bindings/shop.ingress.map.yaml
+    current_state: endpoint_targets_are_partly_hardcoded_and_partly_reconstructed_across_lan_tailscale_public_and_agent_contexts
+    target_state: lan_tailscale_public_operator_and_agent_endpoints_resolve_from_topology_truth_and_move_together
+    blast_radius: 5
+    priority: 29
+    status: not_started
+    type: generator
+    generator_exists: false
+    gate_exists: false
+    recommended_next_action: |
+      1. Define endpoint classes (`lan`, `tailscale`, `public`, `operator`, `agent`) and make each service expose only the classes it actually owns.
+      2. Generate health, agent, worker, secrets, and ingress targets from those endpoint classes instead of reconstructing URLs in scripts.
+      3. Add closure logic so dependent clients are re-pointed whenever a service endpoint changes.
+      4. Add a gate that fails when a live dependent still targets a stale endpoint after a declared move.
+    notes: |
+      This turns "update Cloudflare, Tailscale, API URLs, and agent endpoints" from operator memory into generated closure.
+    effort_estimate_hours: 5
+    dependencies:
+      - DREAM-028
+
+  - id: DREAM-030
+    title: "Model backup topology and restore locality from site-aware workload truth"
+    concern_family: backup_restore_topology_surfaces
+    authority_file: ops/bindings/backup.inventory.yaml
+    projection_files:
+      - ops/bindings/backup.schedule.yaml
+      - ops/bindings/backup.posture.snapshot.yaml
+      - ops/bindings/service.data.lifecycle.registry.yaml
+    current_state: backup_lanes_can_be_green_while_primary_locality_and_restore_semantics_are_architecturally_wrong
+    target_state: workload_backups_distinguish_local_same_site_offsite_cold_and_archive_roles_with_explicit_restore_classes
+    blast_radius: 5
+    priority: 30
+    status: not_started
+    type: generator
+    generator_exists: false
+    gate_exists: false
+    recommended_next_action: |
+      1. Extend backup inventory rows with site-locality and restore-class semantics instead of only destination/freshness semantics.
+      2. Generate schedule and posture views that differentiate primary recovery, same-site durability, offsite cold copy, and archive-only copies.
+      3. Add a gate that fails when a moved workload's primary backup topology does not match its declared site.
+      4. Reconcile media-home, Home Assistant, Pi-hole, and future Mint moves through the same model.
+    notes: |
+      This closes the "backup exists but on the wrong plane" class of regression.
+    effort_estimate_hours: 5
+    dependencies:
+      - DREAM-028
+
+  - id: DREAM-031
+    title: "Productize relocation closure packs for service, VM, and storage moves"
+    concern_family: relocation_closure_surfaces
+    authority_file: ops/bindings/topology.sites.yaml
+    projection_files:
+      - ops/bindings/domain.routing.registry.yaml
+      - ops/bindings/secrets.bundle.contract.yaml
+      - ops/bindings/agents.registry.yaml
+      - ops/bindings/services.health.yaml
+      - ops/bindings/backup.inventory.yaml
+    current_state: moving_one_service_still_requires_ronny_to_remember_cloudflare_tailscale_api_backup_restore_and_old_target_cleanup_steps
+    target_state: every_declared_move_generates_a_closure_pack_covering_dependents_old_target_tombstones_and_required_proofs
+    blast_radius: 5
+    priority: 31
+    status: not_started
+    type: scaffold
+    generator_exists: false
+    gate_exists: false
+    recommended_next_action: |
+      1. Define relocation pack inputs for service, VM, storage root, endpoint classes, dependents, backup topology, and residual-source policy.
+      2. Generate move-specific checklists and post-change verification receipts from those inputs.
+      3. Block closeout when old targets remain active without an explicit residual/tombstone classification.
+      4. Reuse the same relocation primitive for media, Mint, and future client migrations.
+    notes: |
+      This is the product primitive behind "do steps 1,2,3 and automatically cover 4,5,6."
+    effort_estimate_hours: 6
+    dependencies:
+      - DREAM-028
+      - DREAM-029
+      - DREAM-030
+
+  - id: DREAM-032
+    title: "Productize tenant portability and support-grade observability"
+    concern_family: tenant_portability_support_surfaces
+    authority_file: ops/bindings/tenant.storage.contract.yaml
+    projection_files:
+      - ops/bindings/agents.registry.yaml
+      - ops/bindings/terminal.worker.catalog.yaml
+    current_state: multi_site_and_client_scale_workflows_still_depend_on_ronny_local_paths_operator_memory_and_ad_hoc_incident_reasoning
+    target_state: tenant_scoped_environment_layers_support_bundles_and_neutral_operator_workflows_exist_for_agentic_systems_as_a_service
+    blast_radius: 4
+    priority: 32
+    status: not_started
+    type: migration
+    generator_exists: false
+    gate_exists: false
+    recommended_next_action: |
+      1. Define tenant-scoped config, secrets, evidence, backup, and restore boundaries that do not assume Ronny-local paths or hostnames.
+      2. Add support-grade diagnostic bundles that explain dependency failures across site, transport, and tenant surfaces.
+      3. Normalize operator workflows so incident response and rollout proofs are portable across home, Mint, and client estates.
+      4. Treat this as the boundary between a personal operator system and a sellable implementation platform.
+    notes: |
+      This is the scalability lane for offering agentic-system implementation as a service instead of only operating Ronny-owned systems.
+    effort_estimate_hours: 6
+    dependencies:
+      - DREAM-028
+
 migrations:
   - id: DREAM-CAP-MIGRATION
     title: "Add script_path field to capabilities.yaml entries"
@@ -964,10 +1188,10 @@ completed:
     gate_id: D407
 
 summary:
-  total_backlog_items: 27
+  total_backlog_items: 32
   tier_1_high_impact: 5
-  tier_2_medium_impact: 22
+  tier_2_medium_impact: 27
   tier_3_aspirational: 0
-  total_estimated_hours: 67
+  total_estimated_hours: 95
   completed_milestones: 7
-  next_recommended_start: DREAM-003
+  next_recommended_start: DREAM-028
