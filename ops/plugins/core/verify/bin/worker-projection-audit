@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+SCRIPT_PATH = Path(__file__).resolve()
+DEFAULT_ROOT = SCRIPT_PATH.parents[5]
+DEFAULT_CONTRACT = Path("ops/bindings/terminal.worker.projection.contract.yaml")
+
+
+def load_yaml(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def canonicalize_repoish(raw: str) -> Path:
+    expanded = Path(raw).expanduser()
+    if expanded.exists():
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(expanded), "rev-parse", "--show-toplevel"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return Path(result.stdout.strip()).resolve()
+        except subprocess.CalledProcessError:
+            return expanded.resolve()
+    return expanded
+
+
+def resolve_root(explicit_root: str | None) -> Path:
+    if explicit_root:
+        return canonicalize_repoish(explicit_root)
+
+    explicit_target = os.environ.get("SPINE_TARGET_REPO")
+    if explicit_target:
+        return canonicalize_repoish(explicit_target)
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(Path.cwd()), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return Path(result.stdout.strip()).resolve()
+    except subprocess.CalledProcessError:
+        pass
+
+    for key in ("SPINE_REPO", "SPINE_CODE"):
+        value = os.environ.get(key)
+        if value:
+            return canonicalize_repoish(value)
+
+    return DEFAULT_ROOT
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def run_checked(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+
+
+def tree_hash(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+    digest = hashlib.sha256()
+    for child in sorted(p for p in path.rglob("*") if p.is_file()):
+        digest.update(str(child.relative_to(path)).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(child.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Audit terminal worker catalog and usage projection governance.")
+    parser.add_argument("--root", help="Override target repo root.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON.")
+    parser.add_argument("--brief", action="store_true", help="Emit single-line summary.")
+    args = parser.parse_args()
+
+    root = resolve_root(args.root)
+    contract_path = root / DEFAULT_CONTRACT
+    missing = [str(contract_path)] if not contract_path.exists() else []
+    if missing:
+        payload = {
+            "status": "FAIL",
+            "root": str(root),
+            "issues_total": len(missing),
+            "issues": [{"code": "missing_required_file", "path": item} for item in missing],
+        }
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+        elif args.brief:
+            print(f"FAIL issues={len(missing)} root={root}")
+        else:
+            print("worker.projection.audit")
+            print(f"root: {root}")
+            print("status: FAIL")
+            for item in missing:
+                print(f"ISSUE missing_required_file path={item}")
+        return 1
+
+    contract = load_yaml(contract_path)
+    policy = contract.get("policy") or {}
+    generator_rel = str((contract.get("generator") or {}).get("path") or "").strip()
+    governed = contract.get("governed_surfaces") or []
+    issues: list[dict[str, Any]] = []
+
+    if not generator_rel:
+        issues.append({"code": "missing_generator_path", "path": str(contract_path)})
+        generator_path = None
+    else:
+        generator_path = root / generator_rel
+        if not generator_path.exists():
+            issues.append({"code": "missing_generator_path", "path": generator_rel})
+            generator_path = None
+
+    tracked_usage_root = root / str(policy.get("tracked_usage_root") or "")
+    runtime_usage_root_rel = str(policy.get("runtime_usage_root") or "")
+    runtime_usage_root = root / runtime_usage_root_rel if runtime_usage_root_rel else None
+
+    if generator_path is not None:
+        generator_text = read_text(generator_path)
+        generator_markers = {
+            "target_repo_resolution_missing": "_resolve_root(" not in generator_text,
+            "apply_mode_missing": "--apply" not in generator_text,
+            "semantic_noop_missing": "_semantic_equal(" not in generator_text,
+            "runtime_usage_root_missing": runtime_usage_root_rel not in generator_text,
+        }
+        for code, failed in generator_markers.items():
+            if failed:
+                issues.append({"code": code, "path": generator_rel})
+
+    wrappers_by_target = {str(row.get("target")): row for row in governed if isinstance(row, dict)}
+    for target, row in wrappers_by_target.items():
+        wrapper_rel = str(row.get("wrapper") or "").strip()
+        if not wrapper_rel:
+            issues.append({"code": "missing_wrapper_path", "target": target})
+            continue
+        wrapper_path = root / wrapper_rel
+        if not wrapper_path.exists():
+            issues.append({"code": "missing_wrapper_path", "target": target, "path": wrapper_rel})
+            continue
+        text = read_text(wrapper_path)
+        required = {
+            "wrapper_target_repo_resolution_missing": "spine_paths_init" not in text,
+            "wrapper_root_passthrough_missing": '--root "$ROOT"' not in text,
+            "wrapper_apply_flag_missing": "--apply" not in text,
+            "wrapper_check_flag_missing": "--check" not in text,
+        }
+        for code, failed in required.items():
+            if failed:
+                issues.append({"code": code, "target": target, "path": wrapper_rel})
+    for target in ("catalog", "dispatch", "launcher", "usage"):
+        row = wrappers_by_target.get(target)
+        if not row:
+            issues.append({"code": "missing_governed_surface", "target": target})
+            continue
+        wrapper_path = root / str(row.get("wrapper"))
+        proc = run_checked(["bash", str(wrapper_path), "--check"], root)
+        if proc.returncode != 0:
+            issues.append(
+                {
+                    "code": "tracked_surface_drift",
+                    "target": target,
+                    "path": str(wrapper_path.relative_to(root)),
+                    "stderr": proc.stderr.strip() or proc.stdout.strip(),
+                }
+            )
+
+    usage_row = wrappers_by_target.get("usage")
+    if usage_row:
+        usage_wrapper = root / str(usage_row.get("wrapper"))
+        tracked_before = tree_hash(tracked_usage_root)
+        tmpdir = Path(tempfile.mkdtemp(prefix="worker-usage-runtime-"))
+        try:
+            proc = run_checked(["bash", str(usage_wrapper), f"--usage-output-dir={tmpdir}"], root)
+            if proc.returncode != 0:
+                issues.append(
+                    {
+                        "code": "runtime_usage_projection_failed",
+                        "path": str(usage_wrapper.relative_to(root)),
+                        "stderr": proc.stderr.strip() or proc.stdout.strip(),
+                    }
+                )
+            else:
+                tracked_after = tree_hash(tracked_usage_root)
+                if tracked_before != tracked_after:
+                    issues.append(
+                        {
+                            "code": "usage_runtime_projection_mutated_tracked_docs",
+                            "path": str(tracked_usage_root.relative_to(root)),
+                        }
+                    )
+                if not (tmpdir / "README.md").exists():
+                    issues.append(
+                        {
+                            "code": "usage_runtime_projection_missing_readme",
+                            "path": str(tmpdir),
+                        }
+                    )
+                generated_docs = list(tmpdir.glob("*.md"))
+                if len(generated_docs) <= 1:
+                    issues.append(
+                        {
+                            "code": "usage_runtime_projection_missing_docs",
+                            "path": str(tmpdir),
+                        }
+                    )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    payload = {
+        "capability": "terminal.worker.projection.audit",
+        "root": str(root),
+        "contract": str(contract_path),
+        "governed_surfaces": len(governed),
+        "issues_total": len(issues),
+        "status": "PASS" if not issues else "FAIL",
+        "issues": issues,
+    }
+
+    if args.json:
+        print(json.dumps(payload, sort_keys=True))
+    elif args.brief:
+        print(f"{payload['status']} issues={payload['issues_total']} governed={payload['governed_surfaces']}")
+    else:
+        print("terminal.worker.projection.audit")
+        print(f"root: {root}")
+        print(f"contract: {contract_path}")
+        print(f"status: {payload['status']}")
+        print(f"governed_surfaces: {len(governed)}")
+        for issue in issues:
+            details = " ".join(f"{key}={value}" for key, value in issue.items() if key != "code")
+            print(f"ISSUE {issue['code']} {details}".rstrip())
+
+    return 0 if not issues else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

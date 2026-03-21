@@ -107,11 +107,13 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
 - Output:
   - `ops/bindings/terminal.worker.catalog.yaml`
 - Command:
-  - `./ops/plugins/core/ops/bin/gen-worker-catalog.sh`
+  - `./ops/plugins/core/ops/bin/gen-worker-catalog.sh --check`
+  - `./ops/plugins/core/ops/bin/gen-worker-catalog.sh --apply`
 - Validate:
   - every terminal role is represented exactly once
   - domain-runtime workers resolve scoped capabilities and gate packs
   - non-domain terminals pin verify target to `core`
+  - tracked catalog + usage-doc updates require explicit `--apply`
 
 ### 8) Routing Dispatch Generator
 - Input:
@@ -121,7 +123,8 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
 - Output:
   - `ops/bindings/routing.dispatch.yaml`
 - Command:
-  - `./ops/plugins/core/ops/bin/gen-routing-dispatch.sh`
+  - `./ops/plugins/core/ops/bin/gen-routing-dispatch.sh --check`
+  - `./ops/plugins/core/ops/bin/gen-routing-dispatch.sh --apply`
 - Validate:
   - every capability has exactly one runtime dispatch target (`plugin`, `agent`, or `builtin`)
   - safety/approval metadata parity with `ops/capabilities.yaml`
@@ -134,7 +137,8 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
 - Output:
   - `ops/bindings/terminal.launcher.view.yaml`
 - Command:
-  - `./ops/plugins/core/ops/bin/gen-launcher-view.sh`
+  - `./ops/plugins/core/ops/bin/gen-launcher-view.sh --check`
+  - `./ops/plugins/core/ops/bin/gen-launcher-view.sh --apply`
 - Validate:
   - picker ordering is deterministic
   - capability/gate counts match worker catalog
@@ -147,10 +151,14 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
   - `docs/reference/generated/worker-usage/*.md`
 - Command:
   - `./ops/plugins/core/ops/bin/gen-worker-usage-docs.sh`
+  - `./ops/plugins/core/ops/bin/gen-worker-usage-docs.sh --check`
+  - `./ops/plugins/core/ops/bin/gen-worker-usage-docs.sh --apply`
 - Validate:
   - one usage surface doc per terminal
   - stale generated docs are removed
   - generated docs retain deterministic metadata headers
+  - default writes land under `runtime/domain-state/projections/worker-usage/`
+  - tracked docs under `docs/reference/generated/worker-usage/` update only with explicit `--apply`
 
 ### 11) Unified Runtime v2 Generator
 - Command:
@@ -158,6 +166,8 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
 - Notes:
   - Generates all v2 runtime surfaces in one pass.
   - Supports `--check` for drift-only validation.
+  - Supports `--apply` for tracked authoritative/projection writes.
+  - Without `--apply`, worker-usage docs write to runtime projection output instead of tracked docs.
 
 ## Phase 3 Schema Expansion (Concrete)
 Prioritize schema definitions for top edited/critical authoritative bindings:

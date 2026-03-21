@@ -11,7 +11,9 @@ Outputs:
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,18 +21,9 @@ from typing import Any
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[5]
-
-AGENTS_REGISTRY = ROOT / "ops/bindings/agents.registry.yaml"
-TERMINAL_ROLE_CONTRACT = ROOT / "ops/bindings/terminal.role.contract.yaml"
-GATE_DOMAIN_PROFILES = ROOT / "ops/bindings/gate.domain.profiles.yaml"
-GATE_AGENT_PROFILES = ROOT / "ops/bindings/gate.agent.profiles.yaml"
-CAPABILITIES_REGISTRY = ROOT / "ops/capabilities.yaml"
-
-WORKER_CATALOG_OUT = ROOT / "ops/bindings/terminal.worker.catalog.yaml"
-ROUTING_DISPATCH_OUT = ROOT / "ops/bindings/routing.dispatch.yaml"
-LAUNCHER_VIEW_OUT = ROOT / "ops/bindings/terminal.launcher.view.yaml"
-WORKER_USAGE_DIR = ROOT / "docs/reference/generated/worker-usage"
+SCRIPT_PATH = Path(__file__).resolve()
+DEFAULT_ROOT = SCRIPT_PATH.parents[5]
+WORKER_USAGE_RUNTIME_REL = Path("runtime/domain-state/projections/worker-usage")
 
 GENERATOR_ID = "ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py"
 
@@ -73,11 +66,6 @@ DOMAIN_SCORING_PREFIX_EXCLUSIONS = (
     "proposals.",
 )
 
-
-def _today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-
 def _iso_from_epoch(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -97,6 +85,69 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         raise FileNotFoundError(f"missing required input: {path}")
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
+
+
+def _date_from_iso(timestamp: str) -> str:
+    return str(timestamp).split("T", 1)[0]
+
+
+def _canonicalize_repoish(raw: str) -> Path:
+    expanded = Path(raw).expanduser()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(expanded), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return Path(result.stdout.strip()).resolve()
+    except subprocess.CalledProcessError:
+        if expanded.exists():
+            return expanded.resolve()
+        return expanded
+
+
+def _resolve_root(explicit_root: str | None) -> Path:
+    if explicit_root:
+        return _canonicalize_repoish(explicit_root)
+
+    explicit_target = os.environ.get("SPINE_TARGET_REPO")
+    if explicit_target:
+        return _canonicalize_repoish(explicit_target)
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(Path.cwd()), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return Path(result.stdout.strip()).resolve()
+    except subprocess.CalledProcessError:
+        pass
+
+    for key in ("SPINE_REPO", "SPINE_CODE"):
+        value = os.environ.get(key)
+        if value:
+            return _canonicalize_repoish(value)
+
+    return DEFAULT_ROOT
+
+
+def _paths_for_root(root: Path) -> dict[str, Path]:
+    return {
+        "root": root,
+        "agents_registry": root / "ops/bindings/agents.registry.yaml",
+        "terminal_role_contract": root / "ops/bindings/terminal.role.contract.yaml",
+        "gate_domain_profiles": root / "ops/bindings/gate.domain.profiles.yaml",
+        "gate_agent_profiles": root / "ops/bindings/gate.agent.profiles.yaml",
+        "capabilities_registry": root / "ops/capabilities.yaml",
+        "worker_catalog_out": root / "ops/bindings/terminal.worker.catalog.yaml",
+        "routing_dispatch_out": root / "ops/bindings/routing.dispatch.yaml",
+        "launcher_view_out": root / "ops/bindings/terminal.launcher.view.yaml",
+        "worker_usage_tracked_dir": root / "docs/reference/generated/worker-usage",
+        "worker_usage_runtime_dir": root / WORKER_USAGE_RUNTIME_REL,
+    }
 
 
 def _sorted_unique(values: list[str]) -> list[str]:
@@ -339,6 +390,7 @@ def _build_worker_catalog(
     agent_profiles: dict[str, dict[str, Any]],
     all_capability_keys: set[str],
     generated_at: str,
+    generated_date: str,
 ) -> dict[str, Any]:
     agent_by_contract: dict[str, dict[str, Any]] = {}
     for agent in agents:
@@ -445,7 +497,7 @@ def _build_worker_catalog(
     return {
         "status": "generated",
         "owner": "@ronny",
-        "last_verified": _today(),
+        "last_verified": generated_date,
         "scope": "terminal-worker-runtime-catalog",
         "version": "2.0",
         "generated_at": generated_at,
@@ -487,6 +539,7 @@ def _build_routing_dispatch(
     agents: list[dict[str, Any]],
     workers: dict[str, Any],
     generated_at: str,
+    generated_date: str,
 ) -> dict[str, Any]:
     worker_ids = sorted(
         workers.keys(),
@@ -569,7 +622,7 @@ def _build_routing_dispatch(
     return {
         "status": "generated",
         "owner": "@ronny",
-        "last_verified": _today(),
+        "last_verified": generated_date,
         "scope": "routing-dispatch",
         "version": "2.0",
         "generated_at": generated_at,
@@ -583,7 +636,7 @@ def _build_routing_dispatch(
     }
 
 
-def _build_launcher_view(workers: dict[str, Any], generated_at: str) -> dict[str, Any]:
+def _build_launcher_view(workers: dict[str, Any], generated_at: str, generated_date: str) -> dict[str, Any]:
     ordered_worker_ids = sorted(
         workers.keys(),
         key=lambda terminal_id: (
@@ -633,7 +686,7 @@ def _build_launcher_view(workers: dict[str, Any], generated_at: str) -> dict[str
     return {
         "status": "generated",
         "owner": "@ronny",
-        "last_verified": _today(),
+        "last_verified": generated_date,
         "scope": "terminal-launcher-view",
         "version": "2.0",
         "generated_at": generated_at,
@@ -646,7 +699,7 @@ def _build_launcher_view(workers: dict[str, Any], generated_at: str) -> dict[str
     }
 
 
-def _render_worker_usage_doc(worker: dict[str, Any]) -> str:
+def _render_worker_usage_doc(worker: dict[str, Any], generated_date: str) -> str:
     terminal_id = worker.get("terminal_id")
     capabilities = worker.get("capabilities_scoped") or []
     gates = worker.get("gates_scoped") or []
@@ -657,7 +710,7 @@ def _render_worker_usage_doc(worker: dict[str, Any]) -> str:
         "---",
         "status: generated",
         "owner: \"@ronny\"",
-        f"last_verified: {_today()}",
+        f"last_verified: {generated_date}",
         f"scope: worker-usage-{str(terminal_id).lower()}",
         "source_catalog: ops/bindings/terminal.worker.catalog.yaml",
         "---",
@@ -713,12 +766,12 @@ def _render_worker_usage_doc(worker: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_worker_usage_index(worker_ids: list[str]) -> str:
+def _render_worker_usage_index(worker_ids: list[str], generated_date: str) -> str:
     lines = [
         "---",
         "status: generated",
         "owner: \"@ronny\"",
-        f"last_verified: {_today()}",
+        f"last_verified: {generated_date}",
         "scope: worker-usage-generated-index",
         "source_catalog: ops/bindings/terminal.worker.catalog.yaml",
         "---",
@@ -743,12 +796,49 @@ def _dump_yaml(document: dict[str, Any]) -> str:
     return f"---\n{payload}"
 
 
-def _write_if_changed(path: Path, content: str, check_only: bool) -> bool:
+def _normalize_yaml_semantics(text: str) -> Any:
+    ignored_keys = {"last_verified", "generated_at", "updated_at"}
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: normalize(item)
+                for key, item in value.items()
+                if key not in ignored_keys
+            }
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        return value
+
+    return normalize(yaml.safe_load(text) or {})
+
+
+def _normalize_usage_doc_semantics(text: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        if line.startswith("last_verified: "):
+            continue
+        lines.append(line.rstrip())
+    return "\n".join(lines).strip()
+
+
+def _semantic_equal(kind: str, current: str, incoming: str) -> bool:
+    if kind == "yaml":
+        return _normalize_yaml_semantics(current) == _normalize_yaml_semantics(incoming)
+    if kind == "markdown":
+        return _normalize_usage_doc_semantics(current) == _normalize_usage_doc_semantics(incoming)
+    return current == incoming
+
+
+def _write_if_changed(path: Path, content: str, check_only: bool, kind: str) -> bool:
     current = ""
     if path.exists():
         current = path.read_text(encoding="utf-8")
 
     if current == content:
+        return False
+
+    if current and _semantic_equal(kind, current, content):
         return False
 
     if not check_only:
@@ -758,10 +848,17 @@ def _write_if_changed(path: Path, content: str, check_only: bool) -> bool:
     return True
 
 
-def _collect_existing_usage_docs() -> set[Path]:
-    if not WORKER_USAGE_DIR.exists():
+def _collect_existing_usage_docs(worker_usage_dir: Path) -> set[Path]:
+    if not worker_usage_dir.exists():
         return set()
-    return {path for path in WORKER_USAGE_DIR.glob("*.md") if path.is_file()}
+    return {path for path in worker_usage_dir.glob("*.md") if path.is_file()}
+
+
+def _display_path(root: Path, path: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
 
 
 def main() -> int:
@@ -773,22 +870,41 @@ def main() -> int:
         help="artifact target to generate (default: all)",
     )
     parser.add_argument(
+        "--root",
+        help="Override target repo root (defaults to current checkout or SPINE_TARGET_REPO).",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write tracked authoritative surfaces and generated docs.",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
-        help="check mode: fail if generated output differs from disk",
+        help="Check tracked surfaces for drift without writing.",
+    )
+    parser.add_argument(
+        "--usage-output-dir",
+        help="Override runtime usage projection directory when not using --apply.",
     )
     args = parser.parse_args()
+
+    if args.apply and args.check:
+        parser.error("--apply and --check are mutually exclusive")
 
     raw_targets = args.target or ["all"]
     targets = set(raw_targets)
     if "all" in targets:
         targets = {"catalog", "dispatch", "launcher", "usage"}
 
-    agents_doc = _load_yaml(AGENTS_REGISTRY)
-    roles_doc = _load_yaml(TERMINAL_ROLE_CONTRACT)
-    gate_domain_doc = _load_yaml(GATE_DOMAIN_PROFILES)
-    gate_agent_doc = _load_yaml(GATE_AGENT_PROFILES)
-    capabilities_doc = _load_yaml(CAPABILITIES_REGISTRY)
+    root = _resolve_root(args.root)
+    paths = _paths_for_root(root)
+
+    agents_doc = _load_yaml(paths["agents_registry"])
+    roles_doc = _load_yaml(paths["terminal_role_contract"])
+    gate_domain_doc = _load_yaml(paths["gate_domain_profiles"])
+    gate_agent_doc = _load_yaml(paths["gate_agent_profiles"])
+    capabilities_doc = _load_yaml(paths["capabilities_registry"])
 
     agents = agents_doc.get("agents") or []
     roles = roles_doc.get("roles") or []
@@ -803,14 +919,15 @@ def main() -> int:
 
     generated_at = _source_timestamp(
         [
-            AGENTS_REGISTRY,
-            TERMINAL_ROLE_CONTRACT,
-            GATE_DOMAIN_PROFILES,
-            GATE_AGENT_PROFILES,
-            CAPABILITIES_REGISTRY,
-            Path(__file__),
+            paths["agents_registry"],
+            paths["terminal_role_contract"],
+            paths["gate_domain_profiles"],
+            paths["gate_agent_profiles"],
+            paths["capabilities_registry"],
+            SCRIPT_PATH,
         ]
     )
+    generated_date = _date_from_iso(generated_at)
 
     catalog = _build_worker_catalog(
         roles,
@@ -819,30 +936,57 @@ def main() -> int:
         agent_profiles,
         all_capability_keys,
         generated_at,
+        generated_date,
     )
     workers = catalog.get("workers") or {}
 
-    dispatch = _build_routing_dispatch(capabilities, agents, workers, generated_at)
-    launcher = _build_launcher_view(workers, generated_at)
+    dispatch = _build_routing_dispatch(capabilities, agents, workers, generated_at, generated_date)
+    launcher = _build_launcher_view(workers, generated_at, generated_date)
 
     changed_paths: list[Path] = []
+    drift_paths: list[Path] = []
+    tracked_check_only = not args.apply
 
     if "catalog" in targets:
         content = _dump_yaml(catalog)
-        if _write_if_changed(WORKER_CATALOG_OUT, content, args.check):
-            changed_paths.append(WORKER_CATALOG_OUT)
+        if _write_if_changed(paths["worker_catalog_out"], content, tracked_check_only, "yaml"):
+            if tracked_check_only:
+                drift_paths.append(paths["worker_catalog_out"])
+            else:
+                changed_paths.append(paths["worker_catalog_out"])
 
     if "dispatch" in targets:
         content = _dump_yaml(dispatch)
-        if _write_if_changed(ROUTING_DISPATCH_OUT, content, args.check):
-            changed_paths.append(ROUTING_DISPATCH_OUT)
+        if _write_if_changed(paths["routing_dispatch_out"], content, tracked_check_only, "yaml"):
+            if tracked_check_only:
+                drift_paths.append(paths["routing_dispatch_out"])
+            else:
+                changed_paths.append(paths["routing_dispatch_out"])
 
     if "launcher" in targets:
         content = _dump_yaml(launcher)
-        if _write_if_changed(LAUNCHER_VIEW_OUT, content, args.check):
-            changed_paths.append(LAUNCHER_VIEW_OUT)
+        if _write_if_changed(paths["launcher_view_out"], content, tracked_check_only, "yaml"):
+            if tracked_check_only:
+                drift_paths.append(paths["launcher_view_out"])
+            else:
+                changed_paths.append(paths["launcher_view_out"])
 
     if "usage" in targets:
+        if args.apply:
+            usage_dir = paths["worker_usage_tracked_dir"]
+            usage_check_only = False
+        elif args.check:
+            usage_dir = paths["worker_usage_tracked_dir"]
+            usage_check_only = True
+        elif args.usage_output_dir:
+            usage_dir = Path(args.usage_output_dir).expanduser()
+            if not usage_dir.is_absolute():
+                usage_dir = (root / usage_dir).resolve()
+            usage_check_only = False
+        else:
+            usage_dir = paths["worker_usage_runtime_dir"]
+            usage_check_only = False
+
         expected_paths: set[Path] = set()
         ordered_worker_ids = sorted(
             workers.keys(),
@@ -854,31 +998,43 @@ def main() -> int:
 
         for terminal_id in ordered_worker_ids:
             worker = workers[terminal_id]
-            usage_path = WORKER_USAGE_DIR / f"{terminal_id}.md"
+            usage_path = usage_dir / f"{terminal_id}.md"
             expected_paths.add(usage_path)
-            usage_content = _render_worker_usage_doc(worker)
-            if _write_if_changed(usage_path, usage_content, args.check):
-                changed_paths.append(usage_path)
+            usage_content = _render_worker_usage_doc(worker, generated_date)
+            if _write_if_changed(usage_path, usage_content, usage_check_only, "markdown"):
+                if usage_check_only:
+                    drift_paths.append(usage_path)
+                else:
+                    changed_paths.append(usage_path)
 
-        index_path = WORKER_USAGE_DIR / "README.md"
+        index_path = usage_dir / "README.md"
         expected_paths.add(index_path)
-        index_content = _render_worker_usage_index(ordered_worker_ids)
-        if _write_if_changed(index_path, index_content, args.check):
-            changed_paths.append(index_path)
+        index_content = _render_worker_usage_index(ordered_worker_ids, generated_date)
+        if _write_if_changed(index_path, index_content, usage_check_only, "markdown"):
+            if usage_check_only:
+                drift_paths.append(index_path)
+            else:
+                changed_paths.append(index_path)
 
         # Remove stale generated usage docs that no longer map to known terminals.
-        for stale_path in sorted(_collect_existing_usage_docs() - expected_paths):
-            if args.check:
-                changed_paths.append(stale_path)
+        for stale_path in sorted(_collect_existing_usage_docs(usage_dir) - expected_paths):
+            if usage_check_only:
+                drift_paths.append(stale_path)
             else:
                 stale_path.unlink(missing_ok=True)
                 changed_paths.append(stale_path)
+
+    if drift_paths:
+        print("drift detected in generated artifacts:", file=sys.stderr)
+        for path in drift_paths:
+            print(f"- {_display_path(root, path)}", file=sys.stderr)
+        return 1
 
     if args.check:
         if changed_paths:
             print("drift detected in generated artifacts:", file=sys.stderr)
             for path in changed_paths:
-                print(f"- {path.relative_to(ROOT)}", file=sys.stderr)
+                print(f"- {_display_path(root, path)}", file=sys.stderr)
             return 1
         print("generated artifacts are in sync")
         return 0
@@ -886,7 +1042,7 @@ def main() -> int:
     if changed_paths:
         print("updated generated artifacts:")
         for path in changed_paths:
-            print(f"- {path.relative_to(ROOT)}")
+            print(f"- {_display_path(root, path)}")
     else:
         print("no generated artifact changes")
     return 0

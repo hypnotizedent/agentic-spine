@@ -207,6 +207,73 @@ PY
 )" "$TARGET_DEBUG_CANON" "operator hygiene reconcile reports target repo roots, not inherited spine root"
 
 echo ""
+echo "── T6: worker runtime generator writes runtime projection to current checkout, not inherited spine root ──"
+WORKER_FIXTURE="$TMPDIR_BASE/worker-fixture"
+git init "$WORKER_FIXTURE" >/dev/null
+git -C "$WORKER_FIXTURE" config user.name "Test User"
+git -C "$WORKER_FIXTURE" config user.email "test@example.com"
+mkdir -p "$WORKER_FIXTURE/ops/bindings"
+cat > "$WORKER_FIXTURE/ops/bindings/agents.registry.yaml" <<'YAML'
+agents: []
+YAML
+cat > "$WORKER_FIXTURE/ops/bindings/terminal.role.contract.yaml" <<'YAML'
+roles:
+  - terminal_id: SPINE-CONTROL-01
+    terminal_type: control-plane
+    status: active
+    description: Test control terminal
+    domain: core
+    capabilities:
+      - spine.verify
+    write_scope: []
+    picker_group: spine
+    sort_order: 1
+    default_tool: codex
+    allowed_tools:
+      - codex
+YAML
+cat > "$WORKER_FIXTURE/ops/bindings/gate.domain.profiles.yaml" <<'YAML'
+domains:
+  core:
+    gate_ids:
+      - D3
+YAML
+cat > "$WORKER_FIXTURE/ops/bindings/gate.agent.profiles.yaml" <<'YAML'
+profiles: []
+YAML
+cat > "$WORKER_FIXTURE/ops/capabilities.yaml" <<'YAML'
+capabilities:
+  spine.verify:
+    description: Test verify capability
+    command: ./ops/plugins/core/verify/bin/verify-run fast
+    safety: read-only
+    approval: auto
+    domain: none
+YAML
+(
+  cd "$WORKER_FIXTURE"
+  git add ops
+  git commit -m "fixture" >/dev/null
+)
+
+ROOT_CATALOG_HASH_BEFORE="$(shasum -a 256 "$ROOT/ops/bindings/terminal.worker.catalog.yaml" | awk '{print $1}')"
+ROOT_USAGE_HASH_BEFORE="$(shasum -a 256 "$ROOT/docs/reference/generated/worker-usage/README.md" | awk '{print $1}')"
+(
+  cd "$WORKER_FIXTURE"
+  env -u SPINE_TARGET_REPO SPINE_ROOT="$ROOT" SPINE_REPO="$ROOT" SPINE_CODE="$ROOT" \
+    python3 "$ROOT/ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py" --target usage >/dev/null
+)
+ROOT_CATALOG_HASH_AFTER="$(shasum -a 256 "$ROOT/ops/bindings/terminal.worker.catalog.yaml" | awk '{print $1}')"
+ROOT_USAGE_HASH_AFTER="$(shasum -a 256 "$ROOT/docs/reference/generated/worker-usage/README.md" | awk '{print $1}')"
+assert_eq "$ROOT_CATALOG_HASH_AFTER" "$ROOT_CATALOG_HASH_BEFORE" "worker runtime generator leaves inherited root catalog untouched"
+assert_eq "$ROOT_USAGE_HASH_AFTER" "$ROOT_USAGE_HASH_BEFORE" "worker runtime generator leaves inherited root usage docs untouched"
+if [[ -f "$WORKER_FIXTURE/runtime/domain-state/projections/worker-usage/README.md" ]]; then
+  pass "worker runtime generator writes usage projection under current checkout runtime root"
+else
+  fail "worker runtime generator writes usage projection under current checkout runtime root"
+fi
+
+echo ""
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"
 exit "$FAIL"
