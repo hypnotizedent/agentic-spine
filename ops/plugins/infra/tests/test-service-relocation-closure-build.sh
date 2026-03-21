@@ -105,7 +105,7 @@ relocations:
             expected_host: proxmox-home
         inventory_targets:
           - target_id: home-vm-106-media-home-primary
-            expected_host: proxmox-home
+            expected_host: nas
             expected_base_path: /volume1/backups/proxmox_backups/dump
         runtime_units:
           - unit_id: vm-106-media-home
@@ -128,12 +128,12 @@ relocations:
                 to_address_source: tailscale_ip
         inventory_targets:
           - target_id: app-media-config-media-home
-            expected_host: pve
-            expected_base_path: /md1400/backup-cold/apps/media-config/media-home
+            expected_host: nas
+            expected_base_path: /volume1/backups/apps/media-config/media-home
         runtime_units:
           - unit_id: container-fleet-media-home
             expected_hostname: media-home-config
-            expected_destination_lane: r730xd-media-config-backups
+            expected_destination_lane: media-config-backups
             expected_restore_class: media-config-dry-run-monthly
             expected_inventory_targets:
               - app-media-config-media-home

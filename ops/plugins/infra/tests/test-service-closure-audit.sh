@@ -60,6 +60,7 @@ defaults:
   agents_registry: "$root/ops/bindings/agents.registry.yaml"
   worker_catalog: "$root/ops/bindings/terminal.worker.catalog.yaml"
   secrets_bundle_contract: "$root/ops/bindings/secrets.bundle.contract.yaml"
+  service_endpoint_catalog: "$root/ops/bindings/service.endpoint.catalog.yaml"
 closures:
   - id: media-home-public-closure
     domain: media
@@ -181,12 +182,12 @@ closures:
           expected_capability_ref: media.config.restore.drill
       inventory_targets:
         - target_id: home-vm-106-media-home-primary
-          expected_host: proxmox-home
+          expected_host: nas
           expected_base_path_patterns: ["/volume1/backups/proxmox_backups/dump"]
           locality_role: same_site_primary
         - target_id: app-media-config-media-home
-          expected_host: pve
-          expected_base_path_patterns: ["/md1400/backup-cold/apps/media-config/media-home"]
+          expected_host: nas
+          expected_base_path_patterns: ["/volume1/backups/apps/media-config/media-home"]
           locality_role: offsite_secondary
       runtime_units:
         - unit_id: vm-106-media-home
@@ -197,7 +198,7 @@ closures:
           locality_role: same_site_primary
         - unit_id: container-fleet-media-home
           expected_hostname: media-home-config
-          expected_destination_lane: r730xd-media-config-backups
+          expected_destination_lane: media-config-backups
           expected_restore_class: media-config-dry-run-monthly
           expected_inventory_targets: [app-media-config-media-home]
           locality_role: offsite_secondary
@@ -276,11 +277,11 @@ YAML
 version: 1
 targets:
   - name: home-vm-106-media-home-primary
-    host: proxmox-home
+    host: nas
     base_path: /volume1/backups/proxmox_backups/dump
   - name: app-media-config-media-home
-    host: pve
-    base_path: /md1400/backup-cold/apps/media-config/media-home
+    host: nas
+    base_path: /volume1/backups/apps/media-config/media-home
 runtime_units:
   - unit_id: vm-106-media-home
     hostname: media-home
@@ -290,7 +291,7 @@ runtime_units:
       - home-vm-106-media-home-primary
   - unit_id: container-fleet-media-home
     hostname: media-home-config
-    destination_lane: r730xd-media-config-backups
+    destination_lane: media-config-backups
     restore_class: media-config-dry-run-monthly
     inventory_targets:
       - app-media-config-media-home
@@ -317,13 +318,16 @@ agents:
     endpoints:
       radarr:
         health_id: radarr
-        url: http://100.113.72.41:7878/ping
+        service_ref: radarr
+        endpoint_kind: agent_health_url
       jellyfin:
         health_id: jellyfin
-        url: http://100.113.72.41:8096/health
+        service_ref: jellyfin
+        endpoint_kind: agent_health_url
       jellyseerr:
         health_id: jellyseerr
-        url: http://100.113.72.41:5055
+        service_ref: jellyseerr
+        endpoint_kind: operator_base_url
 YAML
 
   cat > "$root/ops/bindings/terminal.worker.catalog.yaml" <<'YAML'
@@ -332,13 +336,16 @@ workers:
     endpoints:
       radarr:
         health_id: radarr
-        url: http://100.113.72.41:7878/ping
+        service_ref: radarr
+        endpoint_kind: agent_health_url
       jellyfin:
         health_id: jellyfin
-        url: http://100.113.72.41:8096/health
+        service_ref: jellyfin
+        endpoint_kind: agent_health_url
       jellyseerr:
         health_id: jellyseerr
-        url: http://100.113.72.41:5055
+        service_ref: jellyseerr
+        endpoint_kind: operator_base_url
 YAML
 
   cat > "$root/ops/bindings/secrets.bundle.contract.yaml" <<'YAML'
@@ -346,13 +353,40 @@ bundles:
   media-arr:
     verify:
       - id: radarr_status
-        url: http://100.113.72.41:7878/api/v3/system/status
+        service_ref: radarr
+        endpoint_kind: operator_base_url
+        url_suffix: /api/v3/system/status
       - id: jellyseerr_auth
-        url: http://100.113.72.41:5055/api/v1/settings/main
+        service_ref: jellyseerr
+        endpoint_kind: operator_base_url
+        url_suffix: /api/v1/settings/main
     local_env:
-      static:
-        RADARR_URL: http://100.113.72.41:7878
-        JELLYSEERR_URL: http://100.113.72.41:5055
+      resolved_static:
+        - key: RADARR_URL
+          service_ref: radarr
+          endpoint_kind: operator_base_url
+        - key: JELLYSEERR_URL
+          service_ref: jellyseerr
+          endpoint_kind: operator_base_url
+YAML
+
+  cat > "$root/ops/bindings/service.endpoint.catalog.yaml" <<'YAML'
+services:
+  radarr:
+    endpoints:
+      operator_base_url: http://100.113.72.41:7878
+      operator_health_url: http://100.113.72.41:7878/ping
+      agent_health_url: http://100.113.72.41:7878/ping
+  jellyfin:
+    endpoints:
+      operator_base_url: http://100.113.72.41:8096
+      operator_health_url: http://100.113.72.41:8096/health
+      agent_health_url: http://100.113.72.41:8096/health
+  jellyseerr:
+    endpoints:
+      operator_base_url: http://100.113.72.41:5055
+      operator_health_url: http://100.113.72.41:5055/api/v1/status
+      agent_health_url: http://100.113.72.41:5055/api/v1/status
 YAML
 
   cat > "$root/ops/bindings/media.services.yaml" <<'YAML'
@@ -544,8 +578,11 @@ workers["workers"]["DOMAIN-MEDIA-01"]["endpoints"]["jellyseerr"]["url"] = "http:
 
 bundles = yaml.safe_load((root / "ops/bindings/secrets.bundle.contract.yaml").read_text()) or {}
 bundles["bundles"]["media-arr"]["verify"][1]["url"] = "http://100.123.207.64:5055/api/v1/settings/main"
-bundles["bundles"]["media-arr"]["local_env"]["static"]["JELLYSEERR_URL"] = "http://100.123.207.64:5055"
 (root / "ops/bindings/secrets.bundle.contract.yaml").write_text(yaml.safe_dump(bundles, sort_keys=False), encoding="utf-8")
+
+catalog = yaml.safe_load((root / "ops/bindings/service.endpoint.catalog.yaml").read_text()) or {}
+catalog["services"]["jellyseerr"]["endpoints"]["operator_base_url"] = "http://100.123.207.64:5055"
+(root / "ops/bindings/service.endpoint.catalog.yaml").write_text(yaml.safe_dump(catalog, sort_keys=False), encoding="utf-8")
 
 inventory = yaml.safe_load((root / "ops/bindings/backup.inventory.yaml").read_text()) or {}
 inventory["targets"][0]["host"] = "pve"

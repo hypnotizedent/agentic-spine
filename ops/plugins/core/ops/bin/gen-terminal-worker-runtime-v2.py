@@ -138,6 +138,7 @@ def _paths_for_root(root: Path) -> dict[str, Path]:
     return {
         "root": root,
         "agents_registry": root / "ops/bindings/agents.registry.yaml",
+        "service_endpoint_catalog": root / "ops/bindings/service.endpoint.catalog.yaml",
         "terminal_role_contract": root / "ops/bindings/terminal.role.contract.yaml",
         "gate_domain_profiles": root / "ops/bindings/gate.domain.profiles.yaml",
         "gate_agent_profiles": root / "ops/bindings/gate.agent.profiles.yaml",
@@ -195,14 +196,53 @@ def _infer_domain_from_terminal_id(terminal_id: str) -> str:
     return "core"
 
 
-def _first_endpoint_url(agent: dict[str, Any] | None) -> str | None:
+def _endpoint_url_from_catalog(
+    endpoint_catalog: dict[str, Any],
+    endpoint: dict[str, Any] | None,
+    *,
+    fallback_service_ref: str = "",
+    fallback_endpoint_kind: str = "agent_health_url",
+) -> str | None:
+    if not endpoint:
+        return None
+    url = endpoint.get("url")
+    if url:
+        return str(url)
+
+    service_ref = str(endpoint.get("service_ref") or fallback_service_ref).strip()
+    if not service_ref:
+        return None
+    endpoint_kind = str(endpoint.get("endpoint_kind") or fallback_endpoint_kind).strip()
+    if not endpoint_kind:
+        return None
+
+    services = endpoint_catalog.get("services") or {}
+    service_row = services.get(service_ref) or {}
+    endpoints = service_row.get("endpoints") or {}
+    base_url = str(endpoints.get(endpoint_kind) or "").strip()
+    if not base_url:
+        return None
+
+    url_suffix = str(endpoint.get("url_suffix") or "").strip()
+    if not url_suffix:
+        return base_url
+    if url_suffix.startswith("/"):
+        return f"{base_url.rstrip('/')}{url_suffix}"
+    return f"{base_url.rstrip('/')}/{url_suffix}"
+
+
+def _first_endpoint_url(agent: dict[str, Any] | None, endpoint_catalog: dict[str, Any]) -> str | None:
     if not agent:
         return None
     endpoints = agent.get("endpoints") or {}
     if isinstance(endpoints, dict):
         for key in sorted(endpoints.keys()):
             endpoint = endpoints.get(key) or {}
-            url = endpoint.get("url")
+            url = _endpoint_url_from_catalog(
+                endpoint_catalog,
+                endpoint,
+                fallback_service_ref=str(endpoint.get("health_id") or key),
+            )
             if url:
                 return str(url)
     return None
@@ -636,7 +676,12 @@ def _build_routing_dispatch(
     }
 
 
-def _build_launcher_view(workers: dict[str, Any], generated_at: str, generated_date: str) -> dict[str, Any]:
+def _build_launcher_view(
+    workers: dict[str, Any],
+    endpoint_catalog: dict[str, Any],
+    generated_at: str,
+    generated_date: str,
+) -> dict[str, Any]:
     ordered_worker_ids = sorted(
         workers.keys(),
         key=lambda terminal_id: (
@@ -678,7 +723,7 @@ def _build_launcher_view(workers: dict[str, Any], generated_at: str, generated_d
             "verify_domain": launcher_ref.get("verify_domain"),
             "capability_count": len(worker.get("capabilities_scoped") or []),
             "gate_count": len(worker.get("gates_scoped") or []),
-            "health_url": _first_endpoint_url(worker),
+            "health_url": _first_endpoint_url(worker, endpoint_catalog),
             "usage_doc": worker.get("usage_surface"),
             "tags": tags,
         }
@@ -901,6 +946,7 @@ def main() -> int:
     paths = _paths_for_root(root)
 
     agents_doc = _load_yaml(paths["agents_registry"])
+    endpoint_catalog_doc = _load_yaml(paths["service_endpoint_catalog"]) if paths["service_endpoint_catalog"].exists() else {}
     roles_doc = _load_yaml(paths["terminal_role_contract"])
     gate_domain_doc = _load_yaml(paths["gate_domain_profiles"])
     gate_agent_doc = _load_yaml(paths["gate_agent_profiles"])
@@ -920,6 +966,7 @@ def main() -> int:
     generated_at = _source_timestamp(
         [
             paths["agents_registry"],
+            paths["service_endpoint_catalog"],
             paths["terminal_role_contract"],
             paths["gate_domain_profiles"],
             paths["gate_agent_profiles"],
@@ -941,7 +988,7 @@ def main() -> int:
     workers = catalog.get("workers") or {}
 
     dispatch = _build_routing_dispatch(capabilities, agents, workers, generated_at, generated_date)
-    launcher = _build_launcher_view(workers, generated_at, generated_date)
+    launcher = _build_launcher_view(workers, endpoint_catalog_doc, generated_at, generated_date)
 
     changed_paths: list[Path] = []
     drift_paths: list[Path] = []

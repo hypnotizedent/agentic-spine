@@ -25,6 +25,7 @@ DEFAULT_SSH_TARGETS = ROOT / "ops/bindings/ssh.targets.yaml"
 DEFAULT_AGENTS_REGISTRY = ROOT / "ops/bindings/agents.registry.yaml"
 DEFAULT_WORKER_CATALOG = ROOT / "ops/bindings/terminal.worker.catalog.yaml"
 DEFAULT_SECRETS_BUNDLE_CONTRACT = ROOT / "ops/bindings/secrets.bundle.contract.yaml"
+DEFAULT_SERVICE_ENDPOINT_CATALOG = ROOT / "ops/bindings/service.endpoint.catalog.yaml"
 DEFAULT_RUNTIME_SERVICES = ROOT / "ops/bindings/media.services.yaml"
 DEFAULT_CF_INGRESS_SCRIPT = ROOT / "ops/plugins/providers/cloudflare/bin/cloudflare-tunnel-ingress-status"
 DEFAULT_SSH_RESOLVE_PATH = ROOT / "ops/lib/ssh-resolve.sh"
@@ -87,6 +88,59 @@ def display_path(path: Path) -> str:
         return str(path.relative_to(ROOT))
     except ValueError:
         return str(path)
+
+
+def resolve_endpoint_url(
+    endpoint_catalog_rows: dict[str, Any],
+    row: dict[str, Any],
+    *,
+    fallback_service_ref: str = "",
+    fallback_endpoint_kind: str = "",
+) -> str:
+    explicit_url = str(row.get("url") or "").strip()
+    if explicit_url:
+        return explicit_url
+
+    service_ref = str(row.get("service_ref") or fallback_service_ref).strip()
+    if not service_ref:
+        return ""
+    endpoint_kind = str(row.get("endpoint_kind") or fallback_endpoint_kind).strip()
+    if not endpoint_kind:
+        return ""
+
+    service_row = ensure_dict(endpoint_catalog_rows.get(service_ref))
+    base_url = str(ensure_dict(service_row.get("endpoints")).get(endpoint_kind) or "").strip()
+    if not base_url:
+        return ""
+
+    url_suffix = str(row.get("url_suffix") or "").strip()
+    if not url_suffix:
+        return base_url
+    if url_suffix.startswith("/"):
+        return f"{base_url}{url_suffix}"
+    return f"{base_url.rstrip('/')}/{url_suffix}"
+
+
+def resolved_local_env_static(bundle: dict[str, Any], endpoint_catalog_rows: dict[str, Any]) -> dict[str, str]:
+    local_env = ensure_dict(bundle.get("local_env"))
+    static_rows = {
+        str(key): str(value)
+        for key, value in ensure_dict(local_env.get("static")).items()
+        if not isinstance(value, dict)
+    }
+    for row in ensure_list(local_env.get("resolved_static")):
+        resolved_row = ensure_dict(row)
+        key = str(resolved_row.get("key") or "").strip()
+        if not key:
+            continue
+        resolved_value = resolve_endpoint_url(
+            endpoint_catalog_rows,
+            resolved_row,
+            fallback_endpoint_kind="operator_base_url",
+        )
+        if resolved_value:
+            static_rows[key] = resolved_value
+    return static_rows
 
 
 def compile_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
@@ -416,6 +470,7 @@ def audit_closure(
     agent_rows: dict[str, dict[str, Any]],
     worker_rows: dict[str, dict[str, Any]],
     secret_bundle_rows: dict[str, dict[str, Any]],
+    service_endpoint_catalog_rows: dict[str, dict[str, Any]],
     runtime_service_rows: dict[str, dict[str, Any]],
     ssh_probe: SSHProbe,
 ) -> dict[str, Any]:
@@ -888,7 +943,13 @@ def audit_closure(
                 )
                 continue
             actual_health_id = str(actual.get("health_id") or "").strip()
-            actual_url = str(actual.get("url") or "").strip()
+            fallback_service_ref = expected_health_id or endpoint_id
+            actual_url = resolve_endpoint_url(
+                service_endpoint_catalog_rows,
+                actual,
+                fallback_service_ref=fallback_service_ref,
+                fallback_endpoint_kind="agent_health_url",
+            )
             if expected_health_id and actual_health_id != expected_health_id:
                 add_check(
                     checks,
@@ -963,7 +1024,13 @@ def audit_closure(
                 )
                 continue
             actual_health_id = str(actual.get("health_id") or "").strip()
-            actual_url = str(actual.get("url") or "").strip()
+            fallback_service_ref = expected_health_id or endpoint_id
+            actual_url = resolve_endpoint_url(
+                service_endpoint_catalog_rows,
+                actual,
+                fallback_service_ref=fallback_service_ref,
+                fallback_endpoint_kind="agent_health_url",
+            )
             if expected_health_id and actual_health_id != expected_health_id:
                 add_check(
                     checks,
@@ -1022,7 +1089,7 @@ def audit_closure(
             for row in ensure_list(bundle.get("verify"))
             if isinstance(row, dict) and str(row.get("id") or "").strip()
         }
-        static_rows = ensure_dict(ensure_dict(bundle.get("local_env")).get("static"))
+        static_rows = resolved_local_env_static(bundle, service_endpoint_catalog_rows)
         for verify in ensure_list(binding_row.get("verify")):
             verify_row = ensure_dict(verify)
             verify_id = str(verify_row.get("verify_id") or "").strip()
@@ -1041,7 +1108,11 @@ def audit_closure(
                     message=f"secret bundle verify {bundle_id}.{verify_id} missing",
                 )
                 continue
-            actual_url = str(actual.get("url") or "").strip()
+            actual_url = resolve_endpoint_url(
+                service_endpoint_catalog_rows,
+                actual,
+                fallback_endpoint_kind="operator_base_url",
+            )
             if not matches_any(patterns, actual_url):
                 add_check(
                     checks,
@@ -1571,6 +1642,11 @@ def run_service_closure_audit(*, closure_id: str | None = None, domain: str | No
     agents_registry_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_AGENTS_REGISTRY", DEFAULT_AGENTS_REGISTRY, str(defaults.get("agents_registry") or ""))
     worker_catalog_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_WORKER_CATALOG", DEFAULT_WORKER_CATALOG, str(defaults.get("worker_catalog") or ""))
     secrets_bundle_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_SECRETS_BUNDLE_CONTRACT", DEFAULT_SECRETS_BUNDLE_CONTRACT, str(defaults.get("secrets_bundle_contract") or ""))
+    service_endpoint_catalog_path = resolve_default_source_path(
+        "SPINE_SERVICE_CLOSURE_SERVICE_ENDPOINT_CATALOG",
+        DEFAULT_SERVICE_ENDPOINT_CATALOG,
+        str(defaults.get("service_endpoint_catalog") or ""),
+    )
     runtime_services_path = resolve_default_source_path("SPINE_SERVICE_CLOSURE_RUNTIME_SERVICES", DEFAULT_RUNTIME_SERVICES, str(defaults.get("runtime_services") or ""))
 
     live_cloudflare_rows, live_cloudflare_error = load_live_cloudflare_routes(defaults)
@@ -1583,6 +1659,12 @@ def run_service_closure_audit(*, closure_id: str | None = None, domain: str | No
             yaml_cache[resolved] = load_yaml(resolved)
         return yaml_cache[resolved]
 
+    def optional_yaml_payload(path: Path) -> dict[str, Any]:
+        resolved = path.resolve()
+        if not resolved.is_file():
+            return {}
+        return yaml_payload(resolved)
+
     def rows_for_closure(closure: dict[str, Any]) -> dict[str, Any]:
         refs = ensure_dict(closure.get("refs"))
         resolved_route_registry_path = resolve_contract_path(str(refs.get("route_registry") or ""), route_registry_path)
@@ -1594,6 +1676,10 @@ def run_service_closure_audit(*, closure_id: str | None = None, domain: str | No
         resolved_agents_registry_path = resolve_contract_path(str(refs.get("agents_registry") or ""), agents_registry_path)
         resolved_worker_catalog_path = resolve_contract_path(str(refs.get("worker_catalog") or ""), worker_catalog_path)
         resolved_secrets_bundle_path = resolve_contract_path(str(refs.get("secrets_bundle_contract") or ""), secrets_bundle_path)
+        resolved_service_endpoint_catalog_path = resolve_contract_path(
+            str(refs.get("service_endpoint_catalog") or ""),
+            service_endpoint_catalog_path,
+        )
         resolved_runtime_services_path = resolve_contract_path(str(refs.get("runtime_services") or ""), runtime_services_path)
         return {
             "route_registry_rows": flatten_route_registry(yaml_payload(resolved_route_registry_path)),
@@ -1606,6 +1692,9 @@ def run_service_closure_audit(*, closure_id: str | None = None, domain: str | No
             "agent_rows": load_agents_registry(yaml_payload(resolved_agents_registry_path)),
             "worker_rows": load_worker_catalog(yaml_payload(resolved_worker_catalog_path)),
             "secret_bundle_rows": load_secret_bundles(yaml_payload(resolved_secrets_bundle_path)),
+            "service_endpoint_catalog_rows": ensure_dict(
+                optional_yaml_payload(resolved_service_endpoint_catalog_path).get("services")
+            ),
             "runtime_service_rows": load_runtime_services(yaml_payload(resolved_runtime_services_path)),
         }
 

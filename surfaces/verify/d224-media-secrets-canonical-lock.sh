@@ -7,12 +7,14 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
+ROOT="${SPINE_TARGET_REPO:-${SPINE_REPO:-$ROOT}}"
+source "$ROOT/ops/lib/endpoint-resolve.sh"
 POLICY="$ROOT/ops/bindings/secrets.namespace.policy.yaml"
 RUNWAY="$ROOT/ops/bindings/secrets.runway.contract.yaml"
 MEDIA_SERVICES="$ROOT/ops/bindings/media.services.yaml"
+SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
 DL_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/domains/download-stack/docker-compose.yml"
 ST_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/domains/streaming-stack/docker-compose.yml"
-SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
 
 ERRORS=0
 err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }
@@ -22,7 +24,7 @@ command -v yq >/dev/null 2>&1 || { err "yq not installed"; exit 1; }
 command -v jq >/dev/null 2>&1 || { err "jq not installed"; exit 1; }
 command -v curl >/dev/null 2>&1 || { err "curl not installed"; exit 1; }
 
-for file in "$POLICY" "$RUNWAY" "$MEDIA_SERVICES" "$DL_COMPOSE" "$ST_COMPOSE" "$SSH_TARGETS"; do
+for file in "$POLICY" "$RUNWAY" "$MEDIA_SERVICES" "$SSH_TARGETS" "$DL_COMPOSE" "$ST_COMPOSE"; do
   [[ -f "$file" ]] || { err "missing required file: $file"; exit 1; }
 done
 
@@ -31,38 +33,9 @@ get_service_field() {
   yq -r ".services[\"$service\"].$field // \"\"" "$MEDIA_SERVICES" 2>/dev/null || true
 }
 
-get_target_field() {
-  local target="$1" field="$2"
-  yq -r ".ssh.targets[] | select(.id == \"$target\") | .$field // \"\"" "$SSH_TARGETS" 2>/dev/null || true
-}
-
-resolve_service_host() {
-  local service="$1"
-  local vm tailscale_ip host
-
-  vm="$(get_service_field "$service" "vm")"
-  [[ -n "$vm" && "$vm" != "null" ]] || return 1
-
-  tailscale_ip="$(get_target_field "$vm" "tailscale_ip")"
-  host="$(get_target_field "$vm" "host")"
-
-  if [[ -n "$tailscale_ip" && "$tailscale_ip" != "null" ]]; then
-    printf '%s\n' "$tailscale_ip"
-    return 0
-  fi
-
-  [[ -n "$host" && "$host" != "null" ]] || return 1
-  printf '%s\n' "$host"
-}
-
 resolve_service_base_url() {
   local service="$1"
-  local host port
-
-  host="$(resolve_service_host "$service" || true)"
-  port="$(get_service_field "$service" "port")"
-  [[ -n "$host" && -n "$port" && "$port" != "null" ]] || return 1
-  printf 'http://%s:%s\n' "$host" "$port"
+  endpoint_resolve_operator_base_url "$service"
 }
 
 service_runtime_checkable() {
@@ -187,7 +160,7 @@ else
   JSEERR_URL="${JSEERR_URL:-$(resolve_service_base_url jellyseerr || true)}"
 
   if [[ -z "$RADARR_URL" ]]; then
-    err "failed to resolve RADARR_URL from media.services.yaml + ssh.targets.yaml"
+    err "failed to resolve RADARR_URL from canonical endpoint resolver"
   elif [[ -n "$RADARR_KEY" ]] && service_runtime_checkable radarr; then
     code="$(curl -s -o /dev/null -w "%{http_code}" -H "X-Api-Key: $RADARR_KEY" "$RADARR_URL/api/v3/system/status" || true)"
     [[ "$code" == "200" ]] || err "RADARR_API_KEY auth failed against $RADARR_URL (http=$code)"
@@ -196,7 +169,7 @@ else
   fi
 
   if [[ -z "$SONARR_URL" ]]; then
-    err "failed to resolve SONARR_URL from media.services.yaml + ssh.targets.yaml"
+    err "failed to resolve SONARR_URL from canonical endpoint resolver"
   elif [[ -n "$SONARR_KEY" ]] && service_runtime_checkable sonarr; then
     code="$(curl -s -o /dev/null -w "%{http_code}" -H "X-Api-Key: $SONARR_KEY" "$SONARR_URL/api/v3/system/status" || true)"
     [[ "$code" == "200" ]] || err "SONARR_API_KEY auth failed against $SONARR_URL (http=$code)"
@@ -205,7 +178,7 @@ else
   fi
 
   if [[ -z "$LIDARR_URL" ]]; then
-    err "failed to resolve LIDARR_URL from media.services.yaml + ssh.targets.yaml"
+    err "failed to resolve LIDARR_URL from canonical endpoint resolver"
   elif [[ -n "$LIDARR_KEY" ]] && service_runtime_checkable lidarr; then
     code="$(curl -s -o /dev/null -w "%{http_code}" -H "X-Api-Key: $LIDARR_KEY" "$LIDARR_URL/api/v1/system/status" || true)"
     [[ "$code" == "200" ]] || err "LIDARR_API_KEY auth failed against $LIDARR_URL (http=$code)"
@@ -214,7 +187,7 @@ else
   fi
 
   if [[ -z "$PROWLARR_URL" ]]; then
-    err "failed to resolve PROWLARR_URL from media.services.yaml + ssh.targets.yaml"
+    err "failed to resolve PROWLARR_URL from canonical endpoint resolver"
   elif [[ -n "$PROWLARR_KEY" ]] && service_runtime_checkable prowlarr; then
     code="$(curl -s -o /dev/null -w "%{http_code}" -H "X-Api-Key: $PROWLARR_KEY" "$PROWLARR_URL/api/v1/health" || true)"
     [[ "$code" == "200" ]] || err "PROWLARR_API_KEY auth failed against $PROWLARR_URL (http=$code)"
@@ -226,7 +199,7 @@ else
   fi
 
   if [[ -z "$JSEERR_URL" ]]; then
-    err "failed to resolve JSEERR_URL from media.services.yaml + ssh.targets.yaml"
+    err "failed to resolve JSEERR_URL from canonical endpoint resolver"
   elif [[ -n "$JSEERR_KEY" ]]; then
     code="$(curl -s -o /dev/null -w "%{http_code}" -H "X-Api-Key: $JSEERR_KEY" "$JSEERR_URL/api/v1/settings/main" || true)"
     [[ "$code" == "200" ]] || err "JELLYSEERR_API_KEY auth failed against $JSEERR_URL (http=$code)"

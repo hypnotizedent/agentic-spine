@@ -7,7 +7,11 @@ set -euo pipefail
 #   agent-health-check-all [--agents "id1,id2"] [--timeout 3] [--strict] [--json]
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-REGISTRY="$ROOT/ops/bindings/agents.registry.yaml"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+ROOT="${SPINE_TARGET_REPO:-${SPINE_REPO:-$ROOT}}"
+source "$ROOT/ops/lib/endpoint-resolve.sh"
+REGISTRY="${SPINE_AGENTS_REGISTRY:-$ROOT/ops/bindings/agents.registry.yaml}"
 CAPABILITY="agent.health.check-all"
 
 AGENTS_FILTER=""
@@ -50,17 +54,74 @@ in_filter() {
   jq -e --arg id "$agent_id" '. | index($id) != null' <<<"$FILTER_JSON" >/dev/null 2>&1
 }
 
+resolve_endpoint_url() {
+  local health_id="$1"
+  local explicit_url="$2"
+  local service_ref="$3"
+  local endpoint_kind="$4"
+  local url_suffix="$5"
+  local base_url resolved
+
+  if [[ -n "$explicit_url" ]]; then
+    printf '%s\n' "$explicit_url"
+    return 0
+  fi
+
+  [[ -n "$service_ref" ]] || service_ref="$health_id"
+  [[ -n "$service_ref" ]] || return 1
+  [[ -n "$endpoint_kind" ]] || endpoint_kind="agent_health_url"
+
+  case "$endpoint_kind" in
+    lan_base_url) base_url="$(endpoint_resolve_lan_base_url "$service_ref" || true)" ;;
+    lan_health_url) base_url="$(endpoint_resolve_lan_health_url "$service_ref" || true)" ;;
+    tailscale_base_url) base_url="$(endpoint_resolve_tailscale_base_url "$service_ref" || true)" ;;
+    tailscale_health_url) base_url="$(endpoint_resolve_tailscale_health_url "$service_ref" || true)" ;;
+    operator_base_url) base_url="$(endpoint_resolve_operator_base_url "$service_ref" || true)" ;;
+    operator_health_url) base_url="$(endpoint_resolve_operator_health_url "$service_ref" || true)" ;;
+    agent_base_url) base_url="$(endpoint_resolve_agent_base_url "$service_ref" || true)" ;;
+    agent_health_url|"") base_url="$(endpoint_resolve_agent_health_url "$service_ref" || true)" ;;
+    public_base_url) base_url="$(endpoint_resolve_public_base_url "$service_ref" || true)" ;;
+    *) return 1 ;;
+  esac
+
+  [[ -n "$base_url" ]] || return 1
+  if [[ -n "$url_suffix" ]]; then
+    if [[ "$url_suffix" == /* ]]; then
+      resolved="${base_url%/}${url_suffix}"
+    else
+      resolved="${base_url%/}/$url_suffix"
+    fi
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  printf '%s\n' "$base_url"
+}
+
 probes='[]'
 checked=0
 healthy=0
 unhealthy=0
 
-while IFS=$'\t' read -r agent_id endpoint_name endpoint_url expected_codes_json; do
-  [[ -z "$agent_id" || -z "$endpoint_name" || -z "$endpoint_url" ]] && continue
+while IFS= read -r endpoint_row; do
+  [[ -n "$endpoint_row" ]] || continue
+
+  agent_id="$(jq -r '.agent_id // ""' <<<"$endpoint_row")"
+  endpoint_name="$(jq -r '.endpoint_name // ""' <<<"$endpoint_row")"
+  health_id="$(jq -r '.health_id // ""' <<<"$endpoint_row")"
+  endpoint_url="$(jq -r '.url // ""' <<<"$endpoint_row")"
+  service_ref="$(jq -r '.service_ref // ""' <<<"$endpoint_row")"
+  endpoint_kind="$(jq -r '.endpoint_kind // ""' <<<"$endpoint_row")"
+  url_suffix="$(jq -r '.url_suffix // ""' <<<"$endpoint_row")"
+  expected_codes_json="$(jq -c '.expected_http_codes // []' <<<"$endpoint_row")"
+
+  [[ -z "$agent_id" || -z "$endpoint_name" ]] && continue
 
   if [[ -n "$AGENTS_FILTER" ]] && ! in_filter "$agent_id"; then
     continue
   fi
+
+  endpoint_url="$(resolve_endpoint_url "$health_id" "$endpoint_url" "$service_ref" "$endpoint_kind" "$url_suffix" || true)"
+  [[ -n "$endpoint_url" ]] || continue
 
   if [[ -z "${expected_codes_json:-}" || "$expected_codes_json" == "null" ]]; then
     expected_codes_json='[]'
@@ -112,7 +173,30 @@ while IFS=$'\t' read -r agent_id endpoint_name endpoint_url expected_codes_json;
     --argjson expected_http_codes "$expected_codes_json" \
     '{agent_id:$agent_id,endpoint:$endpoint,url:$url,state:$state,http_code:$http_code,health_policy:$health_policy,expected_http_codes:$expected_http_codes}')"
   probes="$(jq --argjson p "$probe" '. + [$p]' <<<"$probes")"
-done < <(yq -r '.agents[] as $a | ($a.endpoints // {}) | to_entries[]? | [$a.id, .key, (.value.url // ""), ((.value.expected_http_codes // []) | @json)] | @tsv' "$REGISTRY")
+done < <(
+  python3 - "$REGISTRY" <<'PY'
+import json
+import sys
+
+import yaml
+
+payload = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+for agent in payload.get("agents", []) or []:
+    endpoints = (agent or {}).get("endpoints") or {}
+    for endpoint_name, endpoint in endpoints.items():
+        row = endpoint or {}
+        print(json.dumps({
+            "agent_id": (agent or {}).get("id", ""),
+            "endpoint_name": endpoint_name,
+            "health_id": row.get("health_id", ""),
+            "url": row.get("url", ""),
+            "service_ref": row.get("service_ref", ""),
+            "endpoint_kind": row.get("endpoint_kind", ""),
+            "url_suffix": row.get("url_suffix", ""),
+            "expected_http_codes": row.get("expected_http_codes", []),
+        }))
+PY
+)
 
 status="ok"
 if (( checked == 0 )); then

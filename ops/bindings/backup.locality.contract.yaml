@@ -26,22 +26,22 @@ status: authoritative
 
 locality_classes:
   local_hot:
-    description: "Backup on the same hypervisor or local storage (fast restore)"
+    description: "Generator surface on the source hypervisor or same-host local storage"
     restore_speed: minutes
     survives_site_loss: false
     example: "/tank/backups/vzdump/dump on pve for shop VMs"
 
   same_site_cold:
-    description: "Backup on separate storage at the same site (md1400, NAS)"
+    description: "Canonical durable backup on separate storage at the same site (md1400, Synology, NAS)"
     restore_speed: minutes_to_hours
     survives_site_loss: false
-    example: "/md1400/backup-cold/vzdump/pve for shop VMs"
+    example: "/volume1/backups/proxmox_backups/dump for home VMs or /md1400/backup-cold/vzdump/pve for shop VMs"
 
   offsite_warm:
     description: "Backup replicated to another site via Tailscale/network"
     restore_speed: hours
     survives_site_loss: true
-    example: "Synology NAS at home backing shop VMs"
+    example: "Shop md1400 mirror of home media config-state archives"
 
   offsite_cold:
     description: "Cold archive at a remote site, not immediately restorable"
@@ -190,41 +190,42 @@ target_localities:
     cold_promotion: pve-vzdump-cold-canonical
     cold_locality: same_site_cold
 
-  # ─── Home VMs: local hot (proxmox-home) → offsite warm (Synology NAS) ───
+  # ─── Home VMs: canonical durable copies stay on home Synology ───
   - target: home-vm-100-ha-primary
     source_site: home
     source_vm: homeassistant
-    destination_lane: proxmox-home-vzdump
+    generation_lane: proxmox-home-vzdump
+    destination_lane: nas-home-local-exception
     destination_site: home
-    locality: local_hot
-    cold_promotion: synology-nas-backup
-    cold_locality: offsite_warm
-    cold_destination_site: home
+    locality: same_site_cold
 
   - target: home-lxc-105-pihole-primary
     source_site: home
     source_vm: pihole-home
-    destination_lane: proxmox-home-vzdump
+    generation_lane: proxmox-home-vzdump
+    destination_lane: nas-home-local-exception
     destination_site: home
-    locality: local_hot
+    locality: same_site_cold
 
   - target: home-vm-106-media-home-primary
     source_site: home
     source_vm: media-home
-    destination_lane: proxmox-home-vzdump
+    generation_lane: proxmox-home-vzdump
+    destination_lane: nas-home-local-exception
     destination_site: home
-    locality: local_hot
-    cold_promotion: synology-nas-backup
-    cold_locality: offsite_warm
+    locality: same_site_cold
 
   # ─── App-level backups ───
   - target: app-media-config-media-home
     source_site: home
     source_vm: media-home
-    destination_lane: md1400-cold-apps
-    destination_site: shop
-    locality: offsite_warm
-    note: "Media config cold-sync crosses sites (home→shop md1400)"
+    destination_lane: media-config-backups
+    destination_site: home
+    locality: same_site_cold
+    secondary_promotion: r730xd-media-config-backups
+    secondary_destination_site: shop
+    secondary_locality: offsite_warm
+    note: "Synology remains the canonical primary media-config backup plane at home; md1400 is the secondary cold mirror only."
 
   # ─── Tombstone capsules ───
   - target: vm-200-docker-host-primary
@@ -240,7 +241,7 @@ target_localities:
 # ═══════════════════════════════════════════════════════════════
 
 invariants:
-  - id: "Every active VM has at least local_hot backup"
+  - id: "Every active VM has at least one restoreable backup"
     check: "All active VMs in vm.lifecycle.yaml have a target_locality with locality != archive_only"
 
   - id: "Cross-site services have offsite backup coverage"
@@ -261,21 +262,21 @@ invariants:
 restore_matrix:
   local_hot:
     restore_tool: qmrestore
-    restore_source: "Local vzdump on same hypervisor"
+    restore_source: "Generator surface on same hypervisor or source host"
     rto_target: "< 30 minutes"
     drill_cadence: quarterly
     drill_authority: ops/bindings/backup.schedule.yaml
 
   same_site_cold:
     restore_tool: qmrestore
-    restore_source: "md1400 cold plane"
+    restore_source: "Same-site durable backup plane (Synology/NAS/md1400)"
     rto_target: "< 2 hours"
     drill_cadence: quarterly
     drill_authority: ops/bindings/backup.schedule.yaml
 
   offsite_warm:
     restore_tool: qmrestore
-    restore_source: "Synology NAS via Tailscale or NFS"
+    restore_source: "Remote-site mirrored backup plane via Tailscale/network"
     rto_target: "< 4 hours"
     drill_cadence: quarterly
     drill_authority: ops/bindings/backup.schedule.yaml
