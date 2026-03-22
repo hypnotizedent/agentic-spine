@@ -214,6 +214,7 @@ parent_receipts:
 | TubesZB (Z-Wave) | 10.0.0.90 | - | Z-Wave coordinator |
 | homeassistant | 10.0.0.100 | 100.67.120.1 | VM 100 |
 | vaultwarden | 10.0.0.102 | 100.93.142.63 | VM 102 |
+| media-home | 10.0.0.106 | - | VM 106 |
 | pihole-home | 10.0.0.53 | 100.105.148.96 | LXC 105 (active) |
 | ~~download-home~~ | ~~10.0.0.103~~ | — | LXC 103 (destroyed 2026-02-20) |
 
