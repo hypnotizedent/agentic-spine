@@ -10,6 +10,7 @@ archive.operator.drop.assist
 
 Usage:
   archive-operator-drop-assist move --family <mint-legacy|Hypnotized|Legacy> [--into RELATIVE/PATH] [--preview] [--keep-source] [PATH ...]
+  archive-operator-drop-assist rehome --family <mint-legacy|Hypnotized|Legacy> --source-host <binding-id> --source-path <absolute-path> [--into RELATIVE/PATH] [--verify <quick|strict|strict-delete>] [--preview] [--retire-source]
   archive-operator-drop-assist open --family <mint-legacy|Hypnotized|Legacy>
   archive-operator-drop-assist status
   archive-operator-drop-assist families
@@ -18,13 +19,14 @@ Notes:
   - The canonical destination remains the archive family roots on the archive-smb plane
   - This surface uploads directly to the remote archive plane instead of writing through ~/Archives
   - Accepted source entries are directories only
+  - rehome is the governed remote-source drain path with explicit strategy, verification, and source retirement receipts
 EOF
 }
 
 assist_require_route() {
   local route_id="${1:-}"
   [[ -n "$route_id" ]] || archive_operator_fail "--family is required"
-  archive_operator_route_json "$route_id" >/dev/null 2>&1 || archive_operator_fail "unknown archive family: $route_id"
+  [[ -n "$(archive_operator_route_json "$route_id")" ]] || archive_operator_fail "unknown archive family: $route_id"
 }
 
 assist_list_families() {
@@ -40,6 +42,19 @@ assist_require_remote_ready() {
   probe_remote="$(archive_operator_route_field "$route_id" '.readiness_probe_remote')"
   [[ -n "$probe_remote" ]] || archive_operator_fail "route missing readiness probe: $route_id"
   archive_operator_assist_remote_ok "$probe_remote" || archive_operator_fail "archive route is not reachable: $route_id ($probe_remote)"
+}
+
+assist_require_rehome_host() {
+  local host_id="${1:-}"
+  [[ -n "$host_id" ]] || archive_operator_fail "--source-host is required"
+  [[ -n "$(archive_operator_rehome_host_json "$host_id")" ]] || archive_operator_fail "unknown rehome source host binding: $host_id"
+}
+
+assist_require_verify_mode() {
+  local verify_mode="${1:-}"
+  local basis
+  basis="$(archive_operator_rehome_verify_basis "$verify_mode")"
+  [[ -n "$basis" ]] || archive_operator_fail "unknown verify mode: $verify_mode"
 }
 
 assist_move_one() {
@@ -140,16 +155,239 @@ assist_status() {
   exec "$ROOT/ops/plugins/infra/host/bin/operator-storage-surface-status"
 }
 
+assist_rehome_write_receipt() {
+  local receipt_dir="$1"
+  local receipt_id="$2"
+  local route_id="$3"
+  local source_host="$4"
+  local source_path="$5"
+  local destination_host="$6"
+  local canonical_path="$7"
+  local strategy="$8"
+  local strategy_reason="$9"
+  local verify_mode="${10}"
+  local preview="${11}"
+  local retire_requested="${12}"
+  local retire_allowed="${13}"
+  local retire_result="${14}"
+  local retire_reason="${15}"
+  local operation_status="${16}"
+  local source_manifest="${17}"
+  local destination_manifest="${18}"
+  local diff_summary="${19}"
+
+  cat > "${receipt_dir}/receipt.yaml" <<EOF
+receipt_id: ${receipt_id}
+status: ${operation_status}
+generated_at: $(archive_operator_timestamp)
+surface: archives
+command: rehome
+route: ${route_id}
+source_host: ${source_host}
+source_path: ${source_path}
+destination_host: ${destination_host}
+final_canonical_archive_path: ${destination_host}:${canonical_path}
+transfer_strategy: ${strategy}
+strategy_reason: ${strategy_reason}
+verify_mode: ${verify_mode}
+preview: ${preview}
+source_manifest: ${source_manifest}
+destination_manifest: ${destination_manifest}
+diff_summary: ${diff_summary}
+source_retirement:
+  requested: ${retire_requested}
+  allowed: ${retire_allowed}
+  result: ${retire_result}
+  reason: ${retire_reason}
+EOF
+}
+
+assist_rehome_emit_summary() {
+  local operation_status="$1"
+  local route_id="$2"
+  local source_host="$3"
+  local source_path="$4"
+  local strategy="$5"
+  local strategy_reason="$6"
+  local verify_mode="$7"
+  local retire_result="$8"
+  local canonical_path="$9"
+  local receipt_yaml="${10}"
+  cat <<EOF
+status: ${operation_status}
+surface: archives
+command: rehome
+family: ${route_id}
+source_host: ${source_host}
+source_path: ${source_path}
+transfer_strategy: ${strategy}
+strategy_reason: ${strategy_reason}
+verify_mode: ${verify_mode}
+source_retirement_result: ${retire_result}
+final_canonical_archive_path: ${canonical_path}
+receipt: ${receipt_yaml}
+EOF
+}
+
+assist_rehome_one() {
+  local route_id="$1"
+  local source_host="$2"
+  local source_path="$3"
+  local preview="$4"
+  local into_path="$5"
+  local verify_mode="$6"
+  local retire_source="$7"
+
+  [[ -n "$source_path" ]] || archive_operator_fail "--source-path is required"
+  [[ "$source_path" == /* ]] || archive_operator_fail "--source-path must be absolute: $source_path"
+  source_path="${source_path%/}"
+  archive_operator_rehome_source_root_allowed "$source_host" "$source_path" || archive_operator_fail "source path is outside allowed roots for ${source_host}: ${source_path}"
+  assist_require_verify_mode "$verify_mode"
+
+  local folder_name canonical_root destination_host destination_path canonical_label strategy strategy_reason basis
+  folder_name="$(basename "$source_path")"
+  canonical_root="$(archive_operator_route_field "$route_id" '.canonical_path')"
+  destination_host="$(archive_operator_route_field "$route_id" '.canonical_host_binding')"
+  [[ -n "$canonical_root" && -n "$destination_host" ]] || archive_operator_fail "route missing canonical rehome destination fields: $route_id"
+  destination_path="$(archive_operator_join_browse_path "$canonical_root" "$into_path")"
+  destination_path="$(archive_operator_join_browse_path "$destination_path" "$folder_name")"
+  canonical_label="${destination_host}:${destination_path}"
+  basis="$(archive_operator_rehome_verify_basis "$verify_mode")"
+
+  if archive_operator_rehome_direct_possible "$source_host" "$destination_host" "$canonical_root"; then
+    strategy="direct_remote"
+    strategy_reason="source_host_can_reach_destination"
+  else
+    strategy="relay_stage"
+    if archive_operator_truthy "$(archive_operator_rehome_host_field "$source_host" '.direct_remote_allowed' 2>/dev/null || echo false)"; then
+      strategy_reason="direct_remote_probe_failed_or_unsafe"
+    else
+      strategy_reason="direct_remote_not_allowed_by_binding"
+    fi
+  fi
+
+  local receipt_id receipt_dir source_manifest destination_manifest diff_summary operation_status retire_allowed_bool retire_result retire_reason
+  receipt_id="$(archive_operator_rehome_receipt_id)"
+  receipt_dir="${ARCHIVE_OPERATOR_REHOME_RECEIPT_ROOT}/${receipt_id}"
+  mkdir -p "$receipt_dir"
+  source_manifest="${receipt_dir}/source-manifest.tsv"
+  destination_manifest="${receipt_dir}/destination-manifest.tsv"
+  diff_summary="${receipt_dir}/diff-summary.tsv"
+  retire_result="not_requested"
+  retire_reason="source retirement not requested"
+  operation_status="preview"
+  retire_allowed_bool="false"
+
+  archive_operator_binding_manifest "$source_host" "$source_path" "$basis" "$source_manifest"
+
+  if archive_operator_binding_path_exists "$destination_host" "$destination_path"; then
+    archive_operator_binding_manifest "$destination_host" "$destination_path" "$basis" "$destination_manifest"
+  else
+    : > "$destination_manifest"
+  fi
+  archive_operator_manifest_diff_summary "$source_manifest" "$destination_manifest" "$diff_summary"
+
+  if [[ "$retire_source" == "1" ]]; then
+    if archive_operator_rehome_verify_allows_delete "$verify_mode"; then
+      retire_allowed_bool="true"
+      retire_result="pending"
+      retire_reason="strict-delete verification still required before retirement"
+    else
+      retire_allowed_bool="false"
+      retire_result="blocked"
+      retire_reason="verify mode ${verify_mode} does not authorize source retirement"
+      operation_status="blocked"
+      assist_rehome_write_receipt "$receipt_dir" "$receipt_id" "$route_id" "$source_host" "$source_path" "$destination_host" "$destination_path" "$strategy" "$strategy_reason" "$verify_mode" "$preview" "true" "$retire_allowed_bool" "$retire_result" "$retire_reason" "$operation_status" "$source_manifest" "$destination_manifest" "$diff_summary"
+      assist_rehome_emit_summary "$operation_status" "$route_id" "$source_host" "$source_path" "$strategy" "$strategy_reason" "$verify_mode" "$retire_result" "$canonical_label" "${receipt_dir}/receipt.yaml"
+      return 1
+    fi
+  fi
+
+  if [[ "$preview" == "1" ]]; then
+    assist_rehome_write_receipt "$receipt_dir" "$receipt_id" "$route_id" "$source_host" "$source_path" "$destination_host" "$destination_path" "$strategy" "$strategy_reason" "$verify_mode" "true" "$retire_source" "$retire_allowed_bool" "$retire_result" "$retire_reason" "$operation_status" "$source_manifest" "$destination_manifest" "$diff_summary"
+    assist_rehome_emit_summary "$operation_status" "$route_id" "$source_host" "$source_path" "$strategy" "$strategy_reason" "$verify_mode" "$retire_result" "$canonical_label" "${receipt_dir}/receipt.yaml"
+    return 0
+  fi
+
+  if archive_operator_binding_path_exists "$destination_host" "$destination_path"; then
+    operation_status="blocked"
+    retire_result="blocked"
+    retire_reason="destination already exists"
+    assist_rehome_write_receipt "$receipt_dir" "$receipt_id" "$route_id" "$source_host" "$source_path" "$destination_host" "$destination_path" "$strategy" "$strategy_reason" "$verify_mode" "false" "$retire_source" "$retire_allowed_bool" "$retire_result" "$retire_reason" "$operation_status" "$source_manifest" "$destination_manifest" "$diff_summary"
+    assist_rehome_emit_summary "$operation_status" "$route_id" "$source_host" "$source_path" "$strategy" "$strategy_reason" "$verify_mode" "$retire_result" "$canonical_label" "${receipt_dir}/receipt.yaml"
+    return 1
+  fi
+
+  local stage_dir stage_manifest
+  if [[ "$strategy" == "relay_stage" ]]; then
+    mkdir -p "$ARCHIVE_OPERATOR_REHOME_RELAY_STAGE_ROOT"
+    stage_dir="$(mktemp -d "${ARCHIVE_OPERATOR_REHOME_RELAY_STAGE_ROOT%/}/${folder_name}.XXXXXX")"
+    trap '[[ -n "${stage_dir:-}" && -d "${stage_dir:-}" ]] && rm -rf "$stage_dir"' RETURN
+    assist_require_route "$route_id"
+    archive_operator_rehome_pull_to_stage "$source_host" "$source_path" "$stage_dir"
+    stage_manifest="${receipt_dir}/relay-stage-manifest.tsv"
+    archive_operator_manifest_local "$basis" "$stage_dir" "$stage_manifest"
+    if ! archive_operator_manifest_compare "$source_manifest" "$stage_manifest"; then
+      operation_status="failed"
+      retire_result="blocked"
+      retire_reason="relay stage manifest does not match source manifest"
+      : > "$destination_manifest"
+      archive_operator_manifest_diff_summary "$source_manifest" "$destination_manifest" "$diff_summary"
+      assist_rehome_write_receipt "$receipt_dir" "$receipt_id" "$route_id" "$source_host" "$source_path" "$destination_host" "$destination_path" "$strategy" "$strategy_reason" "$verify_mode" "false" "$retire_source" "$retire_allowed_bool" "$retire_result" "$retire_reason" "$operation_status" "$source_manifest" "$destination_manifest" "$diff_summary"
+      assist_rehome_emit_summary "$operation_status" "$route_id" "$source_host" "$source_path" "$strategy" "$strategy_reason" "$verify_mode" "$retire_result" "$canonical_label" "${receipt_dir}/receipt.yaml"
+      return 1
+    fi
+    archive_operator_rehome_push_stage_to_destination "$stage_dir" "$destination_host" "$destination_path"
+  else
+    archive_operator_rehome_direct_copy "$source_host" "$source_path" "$destination_host" "$destination_path"
+  fi
+
+  archive_operator_binding_manifest "$destination_host" "$destination_path" "$basis" "$destination_manifest"
+  archive_operator_manifest_diff_summary "$source_manifest" "$destination_manifest" "$diff_summary"
+
+  if ! archive_operator_manifest_compare "$source_manifest" "$destination_manifest"; then
+    operation_status="failed"
+    retire_result="blocked"
+    retire_reason="destination manifest does not match source manifest"
+    assist_rehome_write_receipt "$receipt_dir" "$receipt_id" "$route_id" "$source_host" "$source_path" "$destination_host" "$destination_path" "$strategy" "$strategy_reason" "$verify_mode" "false" "$retire_source" "$retire_allowed_bool" "$retire_result" "$retire_reason" "$operation_status" "$source_manifest" "$destination_manifest" "$diff_summary"
+    assist_rehome_emit_summary "$operation_status" "$route_id" "$source_host" "$source_path" "$strategy" "$strategy_reason" "$verify_mode" "$retire_result" "$canonical_label" "${receipt_dir}/receipt.yaml"
+    return 1
+  fi
+
+  operation_status="rehomed"
+  if [[ "$retire_source" == "1" ]]; then
+    archive_operator_rehome_delete_source "$source_host" "$source_path"
+    if archive_operator_binding_path_exists "$source_host" "$source_path"; then
+      operation_status="rehomed_not_retired"
+      retire_result="blocked"
+      retire_reason="source still exists after retirement attempt"
+      assist_rehome_write_receipt "$receipt_dir" "$receipt_id" "$route_id" "$source_host" "$source_path" "$destination_host" "$destination_path" "$strategy" "$strategy_reason" "$verify_mode" "false" "true" "true" "$retire_result" "$retire_reason" "$operation_status" "$source_manifest" "$destination_manifest" "$diff_summary"
+      assist_rehome_emit_summary "$operation_status" "$route_id" "$source_host" "$source_path" "$strategy" "$strategy_reason" "$verify_mode" "$retire_result" "$canonical_label" "${receipt_dir}/receipt.yaml"
+      return 1
+    fi
+    operation_status="rehomed_and_retired_source"
+    retire_result="retired"
+    retire_reason="strict-delete manifest parity satisfied and source deletion completed"
+  fi
+
+  assist_rehome_write_receipt "$receipt_dir" "$receipt_id" "$route_id" "$source_host" "$source_path" "$destination_host" "$destination_path" "$strategy" "$strategy_reason" "$verify_mode" "false" "$retire_source" "$retire_allowed_bool" "$retire_result" "$retire_reason" "$operation_status" "$source_manifest" "$destination_manifest" "$diff_summary"
+  assist_rehome_emit_summary "$operation_status" "$route_id" "$source_host" "$source_path" "$strategy" "$strategy_reason" "$verify_mode" "$retire_result" "$canonical_label" "${receipt_dir}/receipt.yaml"
+}
+
 main() {
   local command="move"
   local preview=0
   local keep_source=0
+  local retire_source=0
   local route_id=""
   local into_path=""
+  local source_host=""
+  local source_path=""
+  local verify_mode=""
 
   if [[ $# -gt 0 ]]; then
     case "$1" in
-      move|open|status|families)
+      move|rehome|open|status|families)
         command="$1"
         shift
         ;;
@@ -179,6 +417,22 @@ main() {
         keep_source=1
         shift
         ;;
+      --source-host)
+        source_host="${2:?--source-host requires value}"
+        shift 2
+        ;;
+      --source-path)
+        source_path="${2:?--source-path requires value}"
+        shift 2
+        ;;
+      --verify)
+        verify_mode="${2:?--verify requires value}"
+        shift 2
+        ;;
+      --retire-source)
+        retire_source=1
+        shift
+        ;;
       -h|--help|help)
         assist_usage
         exit 0
@@ -199,6 +453,7 @@ main() {
 
   archive_operator_load_contract
   into_path="$(archive_operator_normalize_relative_path "$into_path")"
+  [[ -n "$verify_mode" ]] || verify_mode="$ARCHIVE_OPERATOR_REHOME_DEFAULT_VERIFY_MODE"
 
   case "$command" in
     status)
@@ -234,6 +489,19 @@ main() {
       for source in "${sources[@]}"; do
         assist_move_one "$route_id" "$source" "$preview" "$keep_source" "$into_path"
       done
+      ;;
+    rehome)
+      [[ "$keep_source" == "0" ]] || archive_operator_fail "--keep-source is not supported for rehome; source retirement is explicit via --retire-source"
+      [[ ${#sources[@]} -eq 0 ]] || archive_operator_fail "rehome does not accept positional source paths; use --source-path"
+      if [[ -z "$route_id" ]]; then
+        if [[ "$ARCHIVE_OPERATOR_ASSIST_SELECTOR_REQUIRED" == "true" ]]; then
+          archive_operator_fail "--${ARCHIVE_OPERATOR_ASSIST_SELECTOR_LABEL} is required"
+        fi
+        route_id="$ARCHIVE_OPERATOR_ASSIST_DEFAULT_ROUTE"
+      fi
+      assist_require_route "$route_id"
+      assist_require_rehome_host "$source_host"
+      assist_rehome_one "$route_id" "$source_host" "$source_path" "$preview" "$into_path" "$verify_mode" "$retire_source"
       ;;
     *)
       archive_operator_fail "unknown command: $command"
