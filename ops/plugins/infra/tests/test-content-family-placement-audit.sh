@@ -27,8 +27,9 @@ echo "content family placement audit tests"
 echo "════════════════════════════════════════"
 
 tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
-mkdir -p "$tmpdir/ops/bindings" "$tmpdir/docs/reference/generated"
+tmpdir_cross=""
+trap 'rm -rf "$tmpdir" "$tmpdir_cross"' EXIT
+mkdir -p "$tmpdir/ops/bindings" "$tmpdir/docs/reference/generated" "$tmpdir/docs/governance"
 
 cat > "$tmpdir/ops/bindings/content.family.placement.policy.yaml" <<'YAML'
 version: 1
@@ -78,7 +79,7 @@ families:
     lifecycle_policy: import_curate
     service_authority: {primary_service_planes: [immich], residual_compatibility_planes: [], planned_service_planes: []}
     decommission_dependencies: {required_storage_planes: [shop.photos.active], optional_storage_planes: [photos.legacy.residue], required_service_planes: [immich], optional_service_planes: [], planned_service_planes: [], prohibited_future_placeholders: [download-stack, streaming-stack]}
-    notes: ok
+    description: ok
   media.movies:
     family_id: media.movies
     active_plane: {plane_id: home.media.movies.active, posture: canonical_active}
@@ -92,7 +93,7 @@ families:
     lifecycle_policy: request_ingest_import_watch_archive
     service_authority: {primary_service_planes: [media-home], residual_compatibility_planes: [download-stack, streaming-stack], planned_service_planes: []}
     decommission_dependencies: {required_storage_planes: [home.media.movies.active], optional_storage_planes: [], required_service_planes: [media-home], optional_service_planes: [download-stack, streaming-stack], planned_service_planes: [], prohibited_future_placeholders: []}
-    notes: ok
+    description: ok
   media.tv:
     family_id: media.tv
     active_plane: {plane_id: home.media.tv.active, posture: canonical_active}
@@ -106,7 +107,7 @@ families:
     lifecycle_policy: request_ingest_import_watch
     service_authority: {primary_service_planes: [media-home], residual_compatibility_planes: [download-stack, streaming-stack], planned_service_planes: []}
     decommission_dependencies: {required_storage_planes: [home.media.tv.active], optional_storage_planes: [shop.media.tv.archive], required_service_planes: [media-home], optional_service_planes: [download-stack, streaming-stack], planned_service_planes: [], prohibited_future_placeholders: []}
-    notes: ok
+    description: ok
   media.music:
     family_id: media.music
     active_plane: {plane_id: home.media.music.active, posture: canonical_active}
@@ -120,7 +121,7 @@ families:
     lifecycle_policy: request_ingest_import_listen
     service_authority: {primary_service_planes: [media-home], residual_compatibility_planes: [download-stack, streaming-stack], planned_service_planes: []}
     decommission_dependencies: {required_storage_planes: [home.media.music.active], optional_storage_planes: [shop.media.music.archive], required_service_planes: [media-home], optional_service_planes: [download-stack, streaming-stack], planned_service_planes: [], prohibited_future_placeholders: []}
-    notes: ok
+    description: ok
   games:
     family_id: games
     active_plane: {plane_id: shop.games.active, posture: planned_shop_primary}
@@ -134,13 +135,53 @@ families:
     lifecycle_policy: planned_intake_install_play_archive_restore
     service_authority: {primary_service_planes: [], residual_compatibility_planes: [], planned_service_planes: [games-stack]}
     decommission_dependencies: {required_storage_planes: [], optional_storage_planes: [], required_service_planes: [], optional_service_planes: [], planned_service_planes: [games-stack], prohibited_future_placeholders: [download-stack, streaming-stack]}
-    notes: ok
+    description: ok
 YAML
+
+cat > "$tmpdir/ops/bindings/service.data.lifecycle.registry.yaml" <<'YAML'
+version: 1
+status: authoritative
+authority_state: authoritative
+updated_at: "2026-03-22"
+owner: "@ronny"
+scope: service-data-lifecycle-retention-registry
+services:
+  media:
+    display_name: Media
+    export_archive_lanes:
+      - host: pve
+        path: /md1400/archive/media
+        purpose: canonical cold archive root
+YAML
+
+cat > "$tmpdir/ops/bindings/services.health.yaml" <<'YAML'
+version: 1
+status: projection
+lifecycle_bindings:
+  - host: media-home
+    source_registry: ops/bindings/service.data.lifecycle.registry.yaml
+    services:
+      - service_id: media
+        export_archive_lanes:
+          - pve:/md1400/archive/media (canonical cold archive root)
+YAML
+
+cat > "$tmpdir/docs/governance/MEDIA_STORAGE_CONTRACT.md" <<'MD'
+# Media Storage Contract
+
+Canonical archive roots:
+- pve:/md1400/archive/media/movies
+- pve:/md1400/archive/media/tv
+- pve:/md1400/archive/media/music
+MD
 
 python3 "$BUILD" --root "$tmpdir" >/dev/null
 
 pass_out="$(python3 "$AUDIT" --root "$tmpdir" --brief --strict 2>&1)"
 assert_contains "$pass_out" "PASS issues=0" "audit passes on consistent policy"
+
+tmpdir_cross="$(mktemp -d)"
+cp -R "$tmpdir/." "$tmpdir_cross/"
 
 python3 - <<'PY' "$tmpdir/ops/bindings/content.family.placement.policy.yaml"
 from pathlib import Path
@@ -158,6 +199,25 @@ if [[ "$fail_rc" -eq 1 ]]; then
   pass "audit fails on residual games placeholder reuse"
 else
   fail "audit fails on residual games placeholder reuse (rc=$fail_rc)"
+fi
+
+python3 - <<'PY' "$tmpdir_cross/ops/bindings/services.health.yaml"
+from pathlib import Path
+path = Path(__import__("sys").argv[1])
+text = path.read_text()
+text = text.replace("host: media-home", "host: download-stack", 1)
+text = text.replace("pve:/md1400/archive/media (canonical cold archive root)", "pve:/md1400/media-cold (legacy cold archive root)", 1)
+path.write_text(text)
+PY
+
+set +e
+cross_fail_out="$(python3 "$AUDIT" --root "$tmpdir_cross" --brief --strict 2>&1)"
+cross_fail_rc=$?
+set -e
+if [[ "$cross_fail_rc" -eq 1 ]]; then
+  pass "audit fails on services.health archive drift"
+else
+  fail "audit fails on services.health archive drift (rc=$cross_fail_rc)"
 fi
 
 echo "────────────────────────────────────────"

@@ -151,7 +151,7 @@ There is currently **no dedicated live `/volume1/media-home/` share**. The old `
 **Path Layout** (pve:/md1400/archive):
 ```
 /md1400/archive/
-  media-cold/
+  media/
     movies/              # Watched/aged movies
     tv/                  # Completed TV series
     music/               # Rarely accessed music
@@ -223,11 +223,11 @@ There is currently **no dedicated live `/volume1/media-home/` share**. The old `
 | Media Class | Canonical Home | Serving Home | Backup Home | Notes |
 |-------------|---------------|--------------|-------------|-------|
 | **Movies (active)** | synology918:/volume1/media-staging/movies | media-home VM 106 | Not backed up (regenerable) | Canonical live movie plane today. |
-| **Movies (archive)** | pve:/md1400/archive/media-cold/movies | Cold tier (rehydrate to home before normal watching) | Snapshot only | Passive watched/aged archive. |
+| **Movies (archive)** | pve:/md1400/archive/media/movies | Cold tier (rehydrate to home before normal watching) | Snapshot only | Passive watched/aged archive. |
 | **TV (active)** | synology918:/volume1/media-staging/tv | media-home VM 106 | Not backed up | Canonical live TV plane today. |
-| **TV (archive)** | pve:/md1400/archive/media-cold/tv | Cold tier | Snapshot only | Completed/aged series archive. |
+| **TV (archive)** | pve:/md1400/archive/media/tv | Cold tier | Snapshot only | Completed/aged series archive. |
 | **Music (active)** | synology918:/volume1/media-staging/music | media-home VM 106 (Navidrome) | Not backed up | Canonical live music plane today. |
-| **Music (archive)** | pve:/md1400/archive/media-cold/music | Cold tier | Snapshot only | Passive long-tail music archive. |
+| **Music (archive)** | pve:/md1400/archive/media/music | Cold tier | Snapshot only | Passive long-tail music archive. |
 | **Downloads (active intake)** | synology918:/volume1/media-staging/downloads | media-home VM 106 | Not backed up | Canonical intake lane. |
 | **Downloads (shop residue)** | pve:/media/downloads | Residual shop writer/import surfaces only | Not backed up | Transitional residue; should shrink, not grow. |
 | **Quarantine** | pve:/md1400/archive/media-quarantine/ | Cold tier (no serving) | Snapshot only | Low-value imports, 30-day review. |
@@ -258,7 +258,7 @@ conditions:
   - not_pinned_as_keep_hot
   - md1400_has_safe_headroom_for_single_item_move
 source: /volume1/media-staging/{movies,tv,music}
-destination: /md1400/archive/media-cold/
+destination: /md1400/archive/media/
 method: copy_verify_then_prune_later
 automation: future_single_item_archive_capability
 frequency: low_churn_incremental
@@ -319,7 +319,7 @@ frequency: Monthly
 #### Cold Tier (/md1400/archive)
 ```
 /md1400/archive/
-  media-cold/
+  media/
     movies/                      # Watched/aged movies
     tv/                          # Completed TV series
     music/                       # Rarely accessed music

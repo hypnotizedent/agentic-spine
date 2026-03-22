@@ -17,6 +17,24 @@ REQUIRED_FAMILIES = [
     "games",
 ]
 
+MEDIA_ARCHIVE_FAMILY_PLANES = [
+    "shop.media.movies.archive",
+    "shop.media.tv.archive",
+    "shop.media.music.archive",
+]
+
+CANONICAL_MEDIA_ARCHIVE_ROOT = "pve:/md1400/archive/media"
+MEDIA_CONTRACT_REQUIRED_PATHS = [
+    "pve:/md1400/archive/media/movies",
+    "pve:/md1400/archive/media/tv",
+    "pve:/md1400/archive/media/music",
+]
+LEGACY_MEDIA_ARCHIVE_TOKENS = [
+    "/md1400/archive/media-cold",
+    "/md1400/media-cold",
+    "media-cold/",
+]
+
 PLANE_FIELDS = [
     "active_plane",
     "archive_plane",
@@ -348,5 +366,140 @@ def validate_policy(policy: dict[str, Any], projection_on_disk: dict[str, Any] |
 
     if expected_projection is not None and projection_on_disk is not None and expected_projection != projection_on_disk:
         issues.append(Issue("error", "content.family.placement.projected.yaml drifted from authoritative policy"))
+
+    return issues
+
+
+def _render_host_paths(rows: list[Any]) -> list[str]:
+    rendered: list[str] = []
+    for raw in rows:
+        row = ensure_dict(raw)
+        host = str(row.get("host") or "").strip()
+        path = str(row.get("path") or "").strip()
+        if host and path:
+            rendered.append(f"{host}:{path}")
+    return rendered
+
+
+def validate_cross_surface_policy(root: Path, policy: dict[str, Any]) -> list[Issue]:
+    issues: list[Issue] = []
+
+    storage_planes = ensure_dict(policy.get("storage_planes"))
+    expected_family_archive_refs: list[str] = []
+    for plane_id in MEDIA_ARCHIVE_FAMILY_PLANES:
+        plane = ensure_dict(storage_planes.get(plane_id))
+        expected_family_archive_refs.extend(
+            [str(item).strip() for item in ensure_list(plane.get("canonical_refs")) if str(item).strip()]
+        )
+
+    lifecycle_path = root / "ops/bindings/service.data.lifecycle.registry.yaml"
+    if not lifecycle_path.is_file():
+        issues.append(Issue("error", "service.data.lifecycle.registry.yaml missing for cross-surface archive validation"))
+        return issues
+    lifecycle = load_yaml(lifecycle_path)
+    media_service = ensure_dict(ensure_dict(lifecycle.get("services")).get("media"))
+    lifecycle_archive_lanes = _render_host_paths(ensure_list(media_service.get("export_archive_lanes")))
+    if CANONICAL_MEDIA_ARCHIVE_ROOT not in lifecycle_archive_lanes:
+        issues.append(
+            Issue(
+                "error",
+                "service.data.lifecycle.registry media export_archive_lanes missing canonical root "
+                f"'{CANONICAL_MEDIA_ARCHIVE_ROOT}'",
+            )
+        )
+    for lane in lifecycle_archive_lanes:
+        if any(token in lane for token in LEGACY_MEDIA_ARCHIVE_TOKENS):
+            issues.append(
+                Issue(
+                    "error",
+                    "service.data.lifecycle.registry media export_archive_lanes still reference legacy media-cold path "
+                    f"'{lane}'",
+                )
+            )
+
+    services_health_path = root / "ops/bindings/services.health.yaml"
+    if not services_health_path.is_file():
+        issues.append(Issue("error", "services.health.yaml missing for cross-surface archive validation"))
+        return issues
+    services_health = load_yaml(services_health_path)
+    lifecycle_bindings = ensure_list(services_health.get("lifecycle_bindings"))
+    media_bindings: list[dict[str, Any]] = []
+    for raw_binding in lifecycle_bindings:
+        binding = ensure_dict(raw_binding)
+        services = ensure_list(binding.get("services"))
+        for raw_service in services:
+            service = ensure_dict(raw_service)
+            if str(service.get("service_id") or "").strip() == "media":
+                media_bindings.append(binding)
+                break
+
+    if not media_bindings:
+        issues.append(Issue("error", "services.health missing lifecycle binding for media"))
+    else:
+        if len(media_bindings) != 1:
+            issues.append(Issue("error", f"services.health expected 1 media lifecycle binding, found {len(media_bindings)}"))
+        for binding in media_bindings:
+            host = str(binding.get("host") or "").strip()
+            if host != "media-home":
+                issues.append(
+                    Issue(
+                        "error",
+                        f"services.health media lifecycle binding must resolve to media-home, found '{host or 'unknown'}'",
+                    )
+                )
+            for raw_service in ensure_list(binding.get("services")):
+                service = ensure_dict(raw_service)
+                if str(service.get("service_id") or "").strip() != "media":
+                    continue
+                archive_lanes = [str(item).strip() for item in ensure_list(service.get("export_archive_lanes")) if str(item).strip()]
+                if not any(CANONICAL_MEDIA_ARCHIVE_ROOT in lane for lane in archive_lanes):
+                    issues.append(
+                        Issue(
+                            "error",
+                            "services.health media export_archive_lanes missing canonical root "
+                            f"'{CANONICAL_MEDIA_ARCHIVE_ROOT}'",
+                        )
+                    )
+                for lane in archive_lanes:
+                    if any(token in lane for token in LEGACY_MEDIA_ARCHIVE_TOKENS):
+                        issues.append(
+                            Issue(
+                                "error",
+                                "services.health media export_archive_lanes still reference legacy media-cold path "
+                                f"'{lane}'",
+                            )
+                        )
+
+    media_contract_path = root / "docs/governance/MEDIA_STORAGE_CONTRACT.md"
+    if not media_contract_path.is_file():
+        issues.append(Issue("error", "MEDIA_STORAGE_CONTRACT.md missing for cross-surface archive validation"))
+        return issues
+    contract_text = media_contract_path.read_text(encoding="utf-8")
+    for token in LEGACY_MEDIA_ARCHIVE_TOKENS:
+        if token in contract_text:
+            issues.append(
+                Issue(
+                    "error",
+                    "MEDIA_STORAGE_CONTRACT.md still references legacy media-cold archive path "
+                    f"'{token}'",
+                )
+            )
+    for ref in MEDIA_CONTRACT_REQUIRED_PATHS:
+        if ref not in contract_text:
+            issues.append(
+                Issue(
+                    "error",
+                    f"MEDIA_STORAGE_CONTRACT.md missing canonical media archive path '{ref}'",
+                )
+            )
+
+    expected_set = set(expected_family_archive_refs)
+    if expected_set and set(MEDIA_CONTRACT_REQUIRED_PATHS) != expected_set:
+        issues.append(
+            Issue(
+                "error",
+                "content family archive planes drift from required media contract paths",
+            )
+        )
 
     return issues
