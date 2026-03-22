@@ -96,6 +96,24 @@ else
   check "qbittorrent_active" "fail" "expected running, got: ${QBIT_STATUS:-no container}"
 fi
 
+# ── Check 2b: gluetun container running (VPN transport for qBittorrent) ──
+GLUETUN_STATUS=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "docker ps --filter name=gluetun --format '{{.Status}}'" 2>/dev/null || echo "UNREACHABLE")
+if [[ "$GLUETUN_STATUS" == *"Up"* && "$GLUETUN_STATUS" == *"healthy"* ]]; then
+  check "gluetun_healthy" "pass" "gluetun up and healthy: $GLUETUN_STATUS"
+else
+  check "gluetun_healthy" "fail" "gluetun expected healthy, got: ${GLUETUN_STATUS:-no container}"
+fi
+
+# ── Check 2c: qBittorrent tunneled through gluetun (not direct) ──
+QBIT_NETMODE=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "docker inspect qbittorrent --format='{{.HostConfig.NetworkMode}}'" 2>/dev/null || echo "UNKNOWN")
+if [[ "$QBIT_NETMODE" == container:* ]]; then
+  check "qbittorrent_vpn_tunneled" "pass" "network_mode=$QBIT_NETMODE (shared gluetun namespace)"
+else
+  check "qbittorrent_vpn_tunneled" "fail" "expected container:<gluetun>, got: $QBIT_NETMODE"
+fi
+
 # ── Check 3: SABnzbd queue_limit ──
 SAB_APIKEY=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
   "docker exec sabnzbd grep '^api_key' /config/sabnzbd.ini 2>/dev/null | cut -d= -f2 | tr -d ' '" 2>/dev/null || echo "")

@@ -6,9 +6,9 @@
 #   ./bin/ops cap run media.qbittorrent.status --json
 #
 # Contract:
-# - SSHs to download-stack to query qBittorrent WebUI API
+# - SSHs to media-home to query qBittorrent WebUI API
 # - Reports active/stalled/completed torrents, speeds, disk usage
-# - qBittorrent WebUI at port 8081 (direct bridge, not VPN)
+# - qBittorrent WebUI at port 8081 (tunneled via gluetun)
 # - Exit 0 if reachable, exit 1 if issues, exit 2 on config error
 
 set -euo pipefail
@@ -53,11 +53,11 @@ if [[ ! -f "$SSH_TARGETS" ]]; then
   exit 2
 fi
 
-SSH_HOST=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .host // ""' "$SSH_TARGETS" 2>/dev/null || true)
-SSH_USER=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null || true)
+SSH_HOST=$(yq -r '.ssh.targets[] | select(.id == "media-home") | .host // ""' "$SSH_TARGETS" 2>/dev/null || true)
+SSH_USER=$(yq -r '.ssh.targets[] | select(.id == "media-home") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null || true)
 
 if [[ -z "$SSH_HOST" ]]; then
-  echo "STOP: download-stack SSH target not found" >&2
+  echo "STOP: media-home SSH target not found" >&2
   exit 2
 fi
 
@@ -68,7 +68,7 @@ ssh_cmd() {
 }
 
 # Check 1: Container status
-CONTAINER_STATE=$(ssh_cmd "sudo docker inspect --format='{{.State.Status}}' qbittorrent 2>/dev/null" || echo "not_found")
+CONTAINER_STATE=$(ssh_cmd "docker inspect --format='{{.State.Status}}' qbittorrent 2>/dev/null" || echo "not_found")
 
 # Check 2: qBittorrent API — transfer info (no auth required for API v2 by default)
 QBIT_URL="http://localhost:8081"

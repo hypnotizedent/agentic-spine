@@ -6,9 +6,10 @@
 #   ./bin/ops cap run media.vpn.health --json
 #
 # Contract:
-# - SSHs to download-stack to check gluetun container health
+# - SSHs to media-home to check gluetun container health
 # - Verifies VPN is connected (Docker healthcheck passes)
 # - Verifies external IP differs from home network
+# - Verifies qBittorrent is tunneled through gluetun (not direct)
 # - Reads vpn.provider.yaml for expected configuration
 # - Exit 0 if healthy, exit 1 if unhealthy, exit 2 on config error
 
@@ -21,7 +22,7 @@ GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 usage() {
   cat <<'USAGE'
-media.vpn.health — VPN tunnel health for gluetun on download-stack
+media.vpn.health — VPN tunnel health for gluetun on media-home
 
 Args:
   --json      Output JSON format
@@ -54,11 +55,11 @@ if [[ ! -f "$SSH_TARGETS" ]]; then
   exit 2
 fi
 
-SSH_HOST=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .host // ""' "$SSH_TARGETS" 2>/dev/null || true)
-SSH_USER=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null || true)
+SSH_HOST=$(yq -r '.ssh.targets[] | select(.id == "media-home") | .host // ""' "$SSH_TARGETS" 2>/dev/null || true)
+SSH_USER=$(yq -r '.ssh.targets[] | select(.id == "media-home") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null || true)
 
 if [[ -z "$SSH_HOST" ]]; then
-  echo "STOP: download-stack SSH target not found in $SSH_TARGETS" >&2
+  echo "STOP: media-home SSH target not found in $SSH_TARGETS" >&2
   exit 2
 fi
 
@@ -69,14 +70,14 @@ ssh_cmd() {
 }
 
 # Check 1: gluetun container running
-CONTAINER_STATE=$(ssh_cmd "sudo docker inspect --format='{{.State.Status}}' gluetun 2>/dev/null" || echo "not_found")
+CONTAINER_STATE=$(ssh_cmd "docker inspect --format='{{.State.Status}}' gluetun 2>/dev/null" || echo "not_found")
 
 # Check 2: gluetun Docker healthcheck
-HEALTH_STATUS=$(ssh_cmd "sudo docker inspect --format='{{.State.Health.Status}}' gluetun 2>/dev/null" || echo "unknown")
+HEALTH_STATUS=$(ssh_cmd "docker inspect --format='{{.State.Health.Status}}' gluetun 2>/dev/null" || echo "unknown")
 
 # Check 3: VPN external IP (via gluetun)
 # gluetun has wget (busybox) but not curl; use icanhazip.com (returns plain text IP)
-VPN_IP=$(ssh_cmd "sudo docker exec gluetun wget -qO- --timeout=10 http://icanhazip.com 2>/dev/null" || echo "unreachable")
+VPN_IP=$(ssh_cmd "docker exec gluetun wget -qO- --timeout=10 http://icanhazip.com 2>/dev/null" || echo "unreachable")
 VPN_IP=$(echo "$VPN_IP" | tr -d '[:space:]')
 
 # Check 4: Expected provider from binding
@@ -102,6 +103,16 @@ fi
 if [[ "$VPN_IP" == "unreachable" || -z "$VPN_IP" ]]; then
   STATUS="fail"
   ISSUES+=("VPN external IP unreachable")
+fi
+
+# Check 5: qBittorrent tunneled through gluetun
+QBIT_NETMODE=$(ssh_cmd "docker inspect qbittorrent --format='{{.HostConfig.NetworkMode}}' 2>/dev/null" || echo "unknown")
+if [[ "$QBIT_NETMODE" == container:* ]]; then
+  QBIT_TUNNELED="true"
+else
+  STATUS="fail"
+  QBIT_TUNNELED="false"
+  ISSUES+=("qBittorrent not tunneled (NetworkMode=$QBIT_NETMODE, expected container:<gluetun>)")
 fi
 
 if $OUTPUT_JSON; then
