@@ -508,6 +508,165 @@ def append_runtime_index(*, category: str, row: dict[str, Any]) -> Path:
     return index_path
 
 
+def read_runtime_index(*, category: str) -> list[dict[str, Any]]:
+    index_path = state_root() / "mint" / category / "index.ndjson"
+    if not index_path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in index_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def read_runtime_record(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def outbound_binding_record(binding_id: str) -> dict[str, Any] | None:
+    binding_id = safe_text(binding_id)
+    if not binding_id:
+        return None
+    path = state_root() / "mint" / "customer-outbound-bindings" / "records" / f"{binding_id}.json"
+    return read_runtime_record(path)
+
+
+def _reply_target_role(payload: dict[str, Any]) -> str:
+    participant_resolution = dict(payload.get("participant_resolution") or {})
+    selection = dict(payload.get("selection") or {})
+    return safe_text(
+        participant_resolution.get("reply_target_role")
+        or selection.get("reply_target_role")
+    ).lower()
+
+
+def _canonical_customer_thread(payload: dict[str, Any]) -> dict[str, Any]:
+    participant_resolution = dict(payload.get("participant_resolution") or {})
+    selection = dict(payload.get("selection") or {})
+    return dict(
+        participant_resolution.get("canonical_customer_thread")
+        or selection.get("canonical_customer_thread")
+        or {}
+    )
+
+
+def resolve_reply_target(*, mailbox: str, source_message_id: str, source_message: dict[str, Any]) -> dict[str, Any]:
+    source_message_id = safe_text(source_message_id)
+    source_conversation_id = safe_text(source_message.get("conversationId"))
+    sender = safe_text((((source_message.get("from") or {}).get("emailAddress")) or {}).get("address")).lower()
+    default_target = {
+        "state": "unresolved",
+        "source": "none",
+        "reply_target_role": "",
+        "target_message_id": source_message_id,
+        "target_conversation_id": source_conversation_id,
+        "canonical_recipients": {"to": [], "cc": [], "mailbox": mailbox},
+        "customer_email": sender,
+        "customer_name": safe_text((((source_message.get("from") or {}).get("emailAddress")) or {}).get("name")),
+        "binding_id": "",
+        "lifecycle_id": "",
+        "record_file": "",
+    }
+
+    lifecycle_candidates: list[tuple[str, dict[str, Any]]] = []
+    for row in read_runtime_index(category="customer-lifecycle-resolutions"):
+        if safe_text(row.get("message_id")) != source_message_id:
+            continue
+        record = read_runtime_record(Path(safe_text(row.get("record_file"))))
+        if not record:
+            continue
+        lifecycle_candidates.append((safe_text(row.get("stored_at_utc")), record))
+
+    def lifecycle_target(record: dict[str, Any]) -> dict[str, Any]:
+        outbound_binding = dict(record.get("outbound_binding") or {})
+        binding_id = safe_text(outbound_binding.get("binding_id"))
+        binding_record = outbound_binding_record(binding_id) or {}
+        customer_thread = dict(outbound_binding.get("canonical_customer_thread") or {})
+        canonical_recipients = dict(binding_record.get("canonical_recipients") or {})
+        return {
+            "state": "resolved" if safe_text(outbound_binding.get("reply_target_role")).lower() == "customer" and safe_text(customer_thread.get("message_id")) else "blocked",
+            "source": "customer_lifecycle_resolution",
+            "reply_target_role": safe_text(outbound_binding.get("reply_target_role")).lower(),
+            "target_message_id": safe_text(customer_thread.get("message_id")),
+            "target_conversation_id": safe_text(customer_thread.get("conversation_id")),
+            "canonical_recipients": {
+                "to": list(canonical_recipients.get("to") or []),
+                "cc": list(canonical_recipients.get("cc") or []),
+                "mailbox": safe_text(canonical_recipients.get("mailbox")) or mailbox,
+            },
+            "customer_email": safe_text(record.get("customer_email"))
+            or safe_text(customer_thread.get("from"))
+            or sender,
+            "customer_name": safe_text(record.get("customer_name"))
+            or safe_text(customer_thread.get("from_name")),
+            "binding_id": binding_id,
+            "lifecycle_id": safe_text(record.get("lifecycle_id")),
+            "record_file": safe_text(record.get("record_file")),
+        }
+
+    for _, record in sorted(lifecycle_candidates, key=lambda item: item[0], reverse=True):
+        candidate = lifecycle_target(record)
+        if candidate["reply_target_role"] == "customer" and candidate["target_message_id"]:
+            return candidate
+        if candidate["reply_target_role"]:
+            return candidate
+
+    binding_candidates: list[tuple[str, dict[str, Any]]] = []
+    for row in read_runtime_index(category="customer-outbound-bindings"):
+        if safe_text(row.get("mailbox")) != mailbox:
+            continue
+        if safe_text(row.get("external_message_id")) != source_message_id and (
+            not source_conversation_id or safe_text(row.get("external_conversation_id")) != source_conversation_id
+        ):
+            continue
+        record = read_runtime_record(Path(safe_text(row.get("record_file"))))
+        if not record:
+            continue
+        binding_candidates.append((safe_text(row.get("updated_at_utc")), record))
+
+    for _, record in sorted(binding_candidates, key=lambda item: item[0], reverse=True):
+        customer_thread = _canonical_customer_thread(record)
+        canonical_recipients = dict(record.get("canonical_recipients") or {})
+        candidate = {
+            "state": "resolved" if _reply_target_role(record) == "customer" and safe_text(customer_thread.get("message_id")) else "blocked",
+            "source": "customer_outbound_binding",
+            "reply_target_role": _reply_target_role(record),
+            "target_message_id": safe_text(customer_thread.get("message_id")),
+            "target_conversation_id": safe_text(customer_thread.get("conversation_id")),
+            "canonical_recipients": {
+                "to": list(canonical_recipients.get("to") or []),
+                "cc": list(canonical_recipients.get("cc") or []),
+                "mailbox": safe_text(canonical_recipients.get("mailbox")) or mailbox,
+            },
+            "customer_email": safe_text(customer_thread.get("from"))
+            or safe_text((canonical_recipients.get("to") or [""])[0])
+            or sender,
+            "customer_name": safe_text(customer_thread.get("from_name")),
+            "binding_id": safe_text(record.get("binding_id")),
+            "lifecycle_id": "",
+            "record_file": "",
+        }
+        if candidate["reply_target_role"] == "customer" and candidate["target_message_id"]:
+            return candidate
+        if candidate["reply_target_role"]:
+            return candidate
+
+    return default_target
+
+
 def choose_anchor_seed(seed_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not seed_rows:
         return None

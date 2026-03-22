@@ -23,6 +23,7 @@ from ops.plugins.domains.mint.lib.customer_inbox_common import (  # noqa: E402
     classify_message,
     extract_receipt_path,
     mailbox_message_by_id,
+    resolve_reply_target,
     resolve_customer,
     run_cap_result,
     safe_text,
@@ -181,30 +182,36 @@ def extract_existing_chain(body: str, content_type: str) -> str:
     return parts[1].strip() if len(parts) == 2 else ""
 
 
-def blocked_target(message: dict[str, Any], args: argparse.Namespace, policy: dict[str, Any]) -> str:
+def blocked_target(message: dict[str, Any], resolved_target: dict[str, Any], args: argparse.Namespace, policy: dict[str, Any]) -> str:
+    participant_policy = dict(policy.get("participant_resolution") or {})
+    required_role = safe_text(participant_policy.get("required_reply_target_role") or "customer").lower()
+    blocked_message = safe_text(participant_policy.get("blocked_customer_target_message")) or "Need the real customer thread before drafting."
     if args.to.strip():
         return ""
+    if safe_text(resolved_target.get("reply_target_role")):
+        if safe_text(resolved_target.get("reply_target_role")).lower() == required_role and safe_text(resolved_target.get("target_message_id")):
+            return ""
+        return blocked_message
     sender = safe_text((((message.get("from") or {}).get("emailAddress")) or {}).get("address")).lower()
     sender_name = safe_text((((message.get("from") or {}).get("emailAddress")) or {}).get("name")).lower()
     subject = safe_text(message.get("subject")).lower()
     preview = safe_text(message.get("bodyPreview")).lower()
-    participant_policy = dict(policy.get("participant_resolution") or {})
     internal_domains = {safe_text(item).lower() for item in participant_policy.get("internal_domains") or []}
     if sender and sender.split("@")[-1] in internal_domains:
-        return safe_text(participant_policy.get("blocked_customer_target_message")) or "Need the real customer thread before drafting."
+        return blocked_message
 
     vendor_markers = dict(participant_policy.get("vendor_markers") or {})
     if sender in {safe_text(item).lower() for item in vendor_markers.get("exact_emails") or []}:
-        return safe_text(participant_policy.get("blocked_customer_target_message")) or "Need the real customer thread before drafting."
+        return blocked_message
     haystacks = [sender_name, subject, preview]
     for marker in vendor_markers.get("name_markers") or []:
         marker_text = safe_text(marker).lower()
         if marker_text and any(marker_text in hay for hay in haystacks):
-            return safe_text(participant_policy.get("blocked_customer_target_message")) or "Need the real customer thread before drafting."
+            return blocked_message
     for marker in vendor_markers.get("subject_markers") or []:
         marker_text = safe_text(marker).lower()
         if marker_text and marker_text in subject:
-            return safe_text(participant_policy.get("blocked_customer_target_message")) or "Need the real customer thread before drafting."
+            return blocked_message
     return ""
 
 
@@ -256,7 +263,8 @@ def main() -> int:
     body_text = read_body(args)
     reject_generic_filler(body_text, policy)
     source_message = mailbox_message_by_id(mailbox=mailbox, message_id=args.message_id)
-    blocked_reason = blocked_target(source_message, args, policy)
+    reply_target = resolve_reply_target(mailbox=mailbox, source_message_id=args.message_id, source_message=source_message)
+    blocked_reason = blocked_target(source_message, reply_target, args, policy)
     if blocked_reason:
         payload = {
             "capability": CAPABILITY,
@@ -264,23 +272,36 @@ def main() -> int:
             "reason": blocked_reason,
             "message_id": args.message_id,
             "mailbox": mailbox,
+            "reply_target": reply_target,
         }
         print(json.dumps(payload, indent=2) if args.json else "\n".join(f"{k}: {v}" for k, v in payload.items()))
         return 2
 
-    source_subject = safe_text(source_message.get("subject"))
+    reply_source_message_id = safe_text(reply_target.get("target_message_id")) or args.message_id
+    reply_source_message = source_message
+    if reply_source_message_id and reply_source_message_id != args.message_id:
+        reply_source_message = mailbox_message_by_id(mailbox=mailbox, message_id=reply_source_message_id)
+
+    source_subject = safe_text(reply_source_message.get("subject")) or safe_text(source_message.get("subject"))
     resolved_subject = reply_subject(source_subject, args, policy)
     content_type = (args.content_type or safe_text((((policy.get("content") or {}).get("default_mode")) or "HTML"))).upper()
-    sender_email = safe_text((((source_message.get("from") or {}).get("emailAddress")) or {}).get("address"))
-    customer_resolution = resolve_customer(sender_email)
+    sender_email = safe_text((((reply_source_message.get("from") or {}).get("emailAddress")) or {}).get("address")) or safe_text((((source_message.get("from") or {}).get("emailAddress")) or {}).get("address"))
+    customer_query = safe_text(reply_target.get("customer_email")) or sender_email
+    customer_resolution = resolve_customer(customer_query)
     existing_row = latest_existing_record(mailbox, args.message_id)
     existing_draft = None
     provider_receipts: dict[str, Any] = {}
     provider_payload: dict[str, Any]
     reply_draft_id = existing_row.get("reply_draft_id") if existing_row else ""
     receipt_id = reply_draft_id or f"MRD-{utc_now().strftime('%Y%m%dT%H%M%SZ')}-{slugify_fragment(args.message_id)}"
+    canonical_to = args.to.strip() or ",".join((reply_target.get("canonical_recipients") or {}).get("to") or [])
+    canonical_cc = args.cc.strip() or ",".join((reply_target.get("canonical_recipients") or {}).get("cc") or [])
 
-    if existing_row and safe_text(existing_row.get("draft_id")):
+    reuse_existing = bool(existing_row) and (
+        safe_text(existing_row.get("target_message_id")) == reply_source_message_id
+        or (not safe_text(existing_row.get("target_message_id")) and reply_source_message_id == args.message_id)
+    )
+    if reuse_existing and existing_row and safe_text(existing_row.get("draft_id")):
         existing_draft = maybe_existing_draft(mailbox, safe_text(existing_row.get("draft_id")))
     if existing_draft:
         existing_body = safe_text(((existing_draft.get("body") or {}).get("content")) or "")
@@ -298,8 +319,8 @@ def main() -> int:
             content_type,
             "--mailbox",
             mailbox,
-            *(["--cc", args.cc] if args.cc.strip() else []),
-            *(["--to", args.to] if args.to.strip() else []),
+            *(["--cc", canonical_cc] if canonical_cc else []),
+            *(["--to", canonical_to] if canonical_to else []),
         )
         if update_result.status_code != 0 or not update_result.payload:
             fail(f"microsoft.mail.draft.update failed for {existing_row.get('draft_id')}")
@@ -311,7 +332,7 @@ def main() -> int:
         reply_result = run_cap_result(
             "microsoft.mail.reply.draft",
             "--message-id",
-            args.message_id,
+            reply_source_message_id,
             "--mailbox",
             mailbox,
             "--subject",
@@ -320,11 +341,11 @@ def main() -> int:
             rendered_body,
             "--content-type",
             content_type,
-            *(["--cc", args.cc] if args.cc.strip() else []),
-            *(["--to", args.to] if args.to.strip() else []),
+            *(["--cc", canonical_cc] if canonical_cc else []),
+            *(["--to", canonical_to] if canonical_to else []),
         )
         if reply_result.status_code != 0 or not reply_result.payload:
-            fail(f"microsoft.mail.reply.draft failed for {args.message_id}")
+            fail(f"microsoft.mail.reply.draft failed for {reply_source_message_id}")
         provider_receipts["reply_draft_receipt"] = extract_receipt_path(reply_result.stdout)
         provider_payload = reply_result.payload
         reply_draft_id = receipt_id
@@ -365,6 +386,10 @@ def main() -> int:
         "mailbox": mailbox,
         "author_mode": args.author_mode,
         "source_message_id": args.message_id,
+        "target_message_id": reply_source_message_id,
+        "target_conversation_id": safe_text(reply_target.get("target_conversation_id")) or safe_text(reply_source_message.get("conversationId")),
+        "reply_target_role": safe_text(reply_target.get("reply_target_role")) or "customer",
+        "reply_target_source": safe_text(reply_target.get("source")) or "heuristic_fallback",
         "source_subject": source_subject,
         "source_sender": sender_email,
         "work_type": classify_message(source_message).get("work_type"),
@@ -372,6 +397,7 @@ def main() -> int:
         "thread_mode": "reply_chain",
         "subject": resolved_subject,
         "content_type": content_type,
+        "reply_target": reply_target,
         "customer_resolution": {
             "state": customer_resolution.get("state"),
             "reason": customer_resolution.get("reason"),
@@ -391,6 +417,8 @@ def main() -> int:
             "reply_draft_id": reply_draft_id,
             "mailbox": mailbox,
             "source_message_id": args.message_id,
+            "target_message_id": reply_source_message_id,
+            "reply_target_role": safe_text(reply_target.get("reply_target_role")) or "customer",
             "draft_id": draft_id,
             "record_file": str(record_file),
             "thread_mode": "reply_chain",
@@ -404,6 +432,8 @@ def main() -> int:
         "draft_id": draft_id,
         "mailbox": mailbox,
         "source_message_id": args.message_id,
+        "target_message_id": reply_source_message_id,
+        "reply_target_role": safe_text(reply_target.get("reply_target_role")) or "customer",
         "subject": resolved_subject,
         "record_file": str(record_file),
         "attachment_count": len(attachment_results),
