@@ -1,15 +1,16 @@
 # Tenant Profile: media-stack
 # Status: authoritative
 # Owner: "@ronny"
-# Last verified: 2026-02-15
+# Last verified: 2026-03-21
 # Scope: media-stack-tenant
 #
 # Defines the media-stack tenant for AOF governance.
-# Services span VM 209 (download-stack) and VM 210 (streaming-stack).
+# Canonical active plane: media-home (VM 106).
+# Residual shop planes: download-stack (VM 209), streaming-stack (VM 210).
 # Follows schema defined in ops/bindings/tenant.profile.schema.yaml.
 
-version: 1
-updated: "2026-02-15"
+version: 2
+updated: "2026-03-21"
 owner: "@ronny"
 
 identity:
@@ -48,24 +49,40 @@ evidence:
 # Media-stack specific configuration
 media:
   vms:
+    # Canonical active plane
+    media-home:
+      id: 106
+      hostname: media-home
+      lan_ip: 10.0.0.106
+      tailscale_ip: 100.113.72.41
+      role: active
+      compose_path: /srv/appdata/compose/media-stack
+      media_mount: /srv/media
+      backing_store: "10.0.0.150:/volume1/media-staging"
+      note: "Canonical active watch/download plane. All core ARR + streaming services operational."
+    # Residual shop planes (transitional)
     download:
       id: 209
       hostname: download-stack
       lan_ip: 192.168.1.209
       tailscale_ip: 100.107.36.76
       role: download
+      status: residual
       compose_path: /opt/stacks/download-stack
       nfs_mount: /mnt/media
       nfs_mode: rw
+      note: "Shop residue. Services parked. Retained for rollback."
     streaming:
       id: 210
       hostname: streaming-stack
       lan_ip: 192.168.1.210
       tailscale_ip: 100.123.207.64
       role: streaming
+      status: residual
       compose_path: /opt/stacks/streaming-stack
       nfs_mount: /mnt/media
       nfs_mode: ro
+      note: "Shop residue. Services parked. Retained for rollback."
 
   nfs:
     source: pve:/media
@@ -77,10 +94,10 @@ media:
 
   # Home Assistant add-ons that duplicate shop services (investigate for decommission)
   ha_overlaps:
-    - overseerr      # duplicates jellyseerr (VM 210)
-    - lidarr         # duplicates lidarr (VM 209)
-    - sonarr         # duplicates sonarr (VM 209)
-    - sabnzbd        # duplicates sabnzbd (VM 209)
+    - overseerr      # duplicates jellyseerr (media-home)
+    - lidarr         # duplicates lidarr (media-home)
+    - sonarr         # duplicates sonarr (media-home)
+    - sabnzbd        # duplicates sabnzbd (media-home)
 
   dependency_chain:
     # Prowlarr provides indexers to the *arr stack
@@ -101,6 +118,6 @@ media:
       - soularr
     slskd:
       - gluetun
-    # Cross-VM: streaming services consume media downloaded by download-stack
+    # Streaming services consume media from the active plane
     jellyfin:
-      depends_on_media_from: download-stack
+      depends_on_media_from: media-home
