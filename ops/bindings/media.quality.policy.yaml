@@ -1,7 +1,7 @@
 status: authoritative
 owner: "@ronny"
-version: "1.0"
-last_verified: "2026-03-20"
+version: "1.1"
+last_verified: "2026-03-21"
 authority_concern: media_quality_policy
 scope: media-quality-tiers-and-acquisition-policy
 
@@ -12,11 +12,14 @@ runtime_enforcement:
     - sonarr
     - lidarr
     - recyclarr
-  deployment_status: planned_authority
+  deployment_status: partially_enforced
   note: >
-    This binding is canonical policy now. Live ARR/Recyclarr state may lag until
-    home-writer promotion is complete, but future runtime configuration must
-    converge to this file rather than to ad hoc UI choices.
+    This binding is canonical policy. TV acquisition policy is now enforced at
+    runtime on Sonarr (media-home) as of 2026-03-21. See the TV-specific
+    supplemental policy: ops/bindings/media.tv.acquisition.policy.yaml.
+    Radarr and Lidarr enforcement remains planned_authority.
+
+tv_supplemental_policy: ops/bindings/media.tv.acquisition.policy.yaml
 
 defaults:
   agents_must_default_to: standard
@@ -105,15 +108,28 @@ tiers:
       acceptable_releases:
         - WEBDL-1080p
         - WEBRip-1080p
+        - WEBDL-720p
+        - WEBRip-720p
+        - HDTV-720p
+        - HDTV-1080p
+        - SDTV
+        - WEB-480p
+        - DVD
       blocked_releases:
+        - Bluray-480p
+        - Bluray-576p
+        - Bluray-720p
         - Bluray-1080p
         - Bluray-1080p-Remux
-        - HDTV-1080p
+        - Bluray-2160p
+        - Bluray-2160p-Remux
         - Raw-HD
-        - CAM
-        - TS
-        - 720p
-        - 480p
+        - HDTV-2160p
+        - WEBDL-2160p
+        - WEBRip-2160p
+      enforcement_status: enforced_at_runtime
+      enforced_at: "2026-03-21"
+      supplemental_policy: ops/bindings/media.tv.acquisition.policy.yaml
       size_gb_per_episode:
         min: 0.5
         max: 5
@@ -140,7 +156,7 @@ tiers:
         - OGG
     premium:
       label: Premium-Music
-      status: operator_review_only
+      status: planned
       target_release: HiRes-FLAC
       acceptable_releases:
         - HiRes-FLAC
@@ -259,17 +275,36 @@ tool_profile_targets:
           max: 80
   sonarr:
     default_profile: Standard-TV
+    enforcement_status: enforced_at_runtime
+    enforced_at: "2026-03-21"
+    supplemental_policy: ops/bindings/media.tv.acquisition.policy.yaml
     profiles:
       Standard-TV:
-        cutoff: WEBDL-1080p
+        cutoff: SDTV
+        upgrade_allowed: false
         allowed:
-          - WEBDL-1080p
-          - WEBRip-1080p
+          - SDTV
+          - WEB-480p
+          - DVD
+          - HDTV-720p
+          - HDTV-1080p
+          - WEB-720p
+          - WEB-1080p
         blocked:
+          - Bluray-480p
+          - Bluray-576p
+          - Bluray-720p
           - Bluray-1080p
           - Bluray-1080p-Remux
-          - HDTV-1080p
+          - Bluray-2160p
+          - Bluray-2160p-Remux
           - Raw-HD
+          - HDTV-2160p
+          - WEB-2160p
+        custom_format_scores:
+          BR-DISK: -10000
+          "Language: Not English": -10000
+          "Language: Not Original": 0
         size_gb_per_episode:
           min: 0.5
           max: 5
@@ -282,6 +317,18 @@ tool_profile_targets:
         size_gb_per_episode:
           min: 1
           max: 10
+      WEB-1080p:
+        cutoff: WEB-1080p
+        upgrade_allowed: true
+        allowed:
+          - WEBRip-1080p
+          - WEBDL-1080p
+        blocked_everything_else: true
+        custom_format_scores:
+          BR-DISK: -10000
+          "Language: Not Original": -10000
+          "Language: Not English": -10000
+        note: "Strict WEB-only profile for series requiring quality guarantee"
   lidarr:
     default_profile: Standard-Music
     profiles:
@@ -295,7 +342,7 @@ tool_profile_targets:
           - AAC
           - OGG
       Premium-Music:
-        status: operator_review_only
+        status: planned
         cutoff: HiRes-FLAC
         allowed:
           - HiRes-FLAC

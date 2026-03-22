@@ -1,0 +1,291 @@
+# Media TV Acquisition Policy (SSOT)
+# Status: authoritative
+# Owner: "@ronny"
+# Last verified: 2026-03-21
+# Scope: media-tv-acquisition-quality-and-language-lockdown
+# Authority: Extends media.quality.policy.yaml for TV-specific enforcement
+# Runtime target: Sonarr profile "Any" (ID=1) on media-home (VM 106)
+# Enforcement date: 2026-03-21 (runtime applied via API by orchestrator)
+# Evidence: MEDIA_TV_POLICY_LOCKDOWN_AND_DRIFT_CANON_V1_20260321.md
+
+version: 1
+updated_at: "2026-03-21"
+owner: "@ronny"
+status: authoritative
+authority_concern: media_tv_acquisition_policy
+
+description: |
+  Canonical TV acquisition policy for Sonarr. This file is the single source
+  of truth for which quality classes are allowed, which are blocked, and what
+  language/custom-format scoring is enforced. All 72 series use profile "Any"
+  (ID=1) exclusively. This policy was enforced at runtime on 2026-03-21.
+
+  Design principle: TV content targets WEB sources only. Blu-ray releases are
+  unconditionally blocked because (a) they are oversized for episodic content,
+  (b) the home theater hardware gate is not met, and (c) Blu-ray releases
+  frequently arrive in non-English variants (German, Italian) that violate
+  the English-required language policy.
+
+# ────────────────────────────────────────────────────────────────────────────
+# Quality Classes
+# ────────────────────────────────────────────────────────────────────────────
+
+quality_policy:
+  profile_name: "Any"
+  profile_id: 1
+  series_count: 72
+  cutoff: SDTV
+  upgrade_allowed: false
+
+  allowed:
+    - quality: SDTV
+      id: 1
+      source: television
+      resolution: 480
+      note: "Lowest acceptable floor for legacy content"
+    - quality: WEB-480p
+      group_id: 1000
+      members:
+        - quality: WEBRip-480p
+          id: 12
+        - quality: WEBDL-480p
+          id: 8
+      note: "SD web sources acceptable for older titles"
+    - quality: DVD
+      id: 2
+      source: dvd
+      resolution: 480
+      note: "Physical DVD rips acceptable for legacy content without WEB source"
+    - quality: HDTV-720p
+      id: 4
+      source: television
+      resolution: 720
+    - quality: HDTV-1080p
+      id: 9
+      source: television
+      resolution: 1080
+    - quality: WEB-720p
+      group_id: 1001
+      members:
+        - quality: WEBRip-720p
+          id: 14
+        - quality: WEBDL-720p
+          id: 5
+    - quality: WEB-1080p
+      group_id: 1002
+      members:
+        - quality: WEBRip-1080p
+          id: 15
+        - quality: WEBDL-1080p
+          id: 3
+      note: "Primary target quality tier for all new TV acquisitions"
+
+  blocked:
+    - quality: Unknown
+      id: 0
+      reason: "Unidentifiable source — never acquire"
+    - quality: Bluray-480p
+      id: 13
+      reason: "Blu-ray unconditionally blocked — hardware gate not met, oversized"
+    - quality: Bluray-576p
+      id: 22
+      reason: "Blu-ray unconditionally blocked"
+    - quality: Bluray-720p
+      id: 6
+      reason: "Blu-ray unconditionally blocked"
+    - quality: Bluray-1080p
+      id: 7
+      reason: "Blu-ray unconditionally blocked — most common drift source"
+    - quality: Bluray-1080p Remux
+      id: 20
+      reason: "Blu-ray Remux unconditionally blocked — extreme file sizes"
+    - quality: Raw-HD
+      id: 10
+      reason: "Raw captures never acceptable"
+    - quality: HDTV-2160p
+      id: 16
+      reason: "4K blocked — hardware gate not met"
+    - quality: WEB-2160p
+      group_id: 1003
+      members:
+        - quality: WEBRip-2160p
+          id: 17
+        - quality: WEBDL-2160p
+          id: 18
+      reason: "4K WEB blocked — hardware gate not met"
+    - quality: Bluray-2160p
+      id: 19
+      reason: "4K Blu-ray unconditionally blocked"
+    - quality: Bluray-2160p Remux
+      id: 21
+      reason: "4K Blu-ray Remux unconditionally blocked"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Custom Format Scoring
+# ────────────────────────────────────────────────────────────────────────────
+
+custom_format_scores:
+  profile_name: "Any"
+  profile_id: 1
+  formats:
+    - name: "BR-DISK"
+      format_id: 1
+      score: -10000
+      reason: "Hard reject — raw disc images are never acceptable regardless of quality tier"
+    - name: "Language: Not English"
+      format_id: 33
+      score: -10000
+      reason: "Hard reject — enforces English-required policy for all English-original series"
+    - name: "Language: Not Original"
+      format_id: 32
+      score: 0
+      reason: "Neutral — original language is allowed (covers bilingual releases)"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Language Policy
+# ────────────────────────────────────────────────────────────────────────────
+
+language_policy:
+  default_rule: english_required
+  enforcement_method: custom_format_scoring
+  english_original_series:
+    required_audio: english
+    non_english_score: -10000
+    effect: "Releases detected as non-English are scored below any viable threshold"
+  exception_model:
+    description: |
+      Non-English-original content (e.g., anime with Japanese audio, Spanish-original
+      series like Narcos) may be granted exceptions. Exceptions must be explicitly named
+      and tagged in Sonarr with a dedicated profile or tag.
+    current_exceptions: []
+    exception_candidates:
+      - series: "Narcos"
+        original_language: Spanish
+        status: "candidate"
+        note: |
+          Narcos has Spanish-language scenes as part of the original production.
+          Current Blu-ray files on disk have English audio tracks. The CF scoring
+          allows this because the releases include English audio. No exception needed
+          unless English-audio releases become unavailable.
+    never_exceptions:
+      - "German dubbed releases of English-original content"
+      - "Italian dubbed releases of English-original content"
+      - "Any non-English dub of English-original content"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Upgrade and Cutoff Policy
+# ────────────────────────────────────────────────────────────────────────────
+
+upgrade_policy:
+  upgrade_allowed: false
+  cutoff: SDTV
+  cutoff_id: 1
+  rationale: |
+    Upgrades are disabled. The "Any" profile accepts any allowed quality class
+    starting from SDTV. Once an episode file exists, Sonarr will not replace it
+    with a higher quality version. This prevents churn and bandwidth waste.
+    If a specific series needs upgrade behavior, assign it to a dedicated profile
+    (e.g., WEB-1080p profile ID=7) with upgrade_allowed=true.
+
+# ────────────────────────────────────────────────────────────────────────────
+# WEB-1080p Profile (supplemental — for premium TV use)
+# ────────────────────────────────────────────────────────────────────────────
+
+supplemental_profiles:
+  - name: "WEB-1080p"
+    id: 7
+    purpose: "Strict WEB-only 1080p profile for series requiring quality guarantee"
+    upgrade_allowed: true
+    cutoff_group: "WEB 1080p"
+    cutoff_group_id: 1002
+    allowed:
+      - "WEBRip-1080p"
+      - "WEBDL-1080p"
+    blocked_everything_else: true
+    custom_format_scores:
+      BR-DISK: -10000
+      "Language: Not Original": -10000
+      "Language: Not English": -10000
+    series_assigned: 0
+    note: "Available but not currently assigned to any series. Use for premium TV titles."
+
+# ────────────────────────────────────────────────────────────────────────────
+# Runtime Proof
+# ────────────────────────────────────────────────────────────────────────────
+
+runtime_enforcement:
+  applied_at: "2026-03-21"
+  applied_by: orchestrator
+  target_host: "media-home (10.0.0.106)"
+  target_service: "Sonarr (http://localhost:8989)"
+  api_version: v3
+  changes_applied:
+    - action: "Set Bluray-480p allowed=false in profile Any"
+      quality_id: 13
+    - action: "Set Bluray-576p allowed=false in profile Any"
+      quality_id: 22
+    - action: "Set Bluray-720p allowed=false in profile Any"
+      quality_id: 6
+    - action: "Set Bluray-1080p allowed=false in profile Any"
+      quality_id: 7
+    - action: "Set CF 'Language: Not English' score=-10000 in profile Any"
+      format_id: 33
+    - action: "Set CF 'BR-DISK' score=-10000 in profile Any"
+      format_id: 1
+    - action: "Purged 211 Blu-ray items from Sonarr download queue"
+    - action: "Deleted Severance S01 German Blu-ray files, re-downloaded English WEBDL-1080p (9/9, 26.9 GiB)"
+    - action: "Unpaused SABnzbd"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Drift Remediation Queue
+# ────────────────────────────────────────────────────────────────────────────
+
+drift_remediation:
+  scan_date: "2026-03-21"
+  scan_path: "/srv/media/tv/"
+  total_files_scanned: 356
+  summary:
+    bluray_drift: 162
+    non_english_drift: 8
+    compliant_web: 139
+    compliant_dvdrip: 42
+    compliant_other: 5
+  by_series:
+    - series: Cheers
+      bluray_files: 137
+      classification: keep_exception
+      reason: "Pre-streaming era show (1982-1993), no WEB source available"
+    - series: Prison Break
+      bluray_files: 9
+      classification: keep_exception
+      reason: "S01 only available in Bluray, no WEB source for this season"
+    - series: Narcos
+      bluray_files: 9
+      classification: keep_exception
+      reason: "S01 Bluray with English audio, Spanish dialogue is original production"
+    - series: The Big Bang Theory
+      bluray_files: 7
+      non_english_files: 1
+      classification: replace_when_approved
+      reason: "WEB sources available, Bluray unnecessary. 1 German dubbed file."
+    - series: Superstore
+      non_english_files: 7
+      classification: operator_review
+      reason: "1 German dubbed, 6 Italian ITA-ENG (may have English audio track)"
+  classification_note: |
+    Blu-ray files are classified as replace_when_approved because Sonarr will not
+    automatically replace existing files (upgrade_allowed=false). Replacement requires
+    either (a) enabling upgrades temporarily, (b) manual file delete + re-search, or
+    (c) organic replacement if the file is deleted for other reasons.
+
+# ────────────────────────────────────────────────────────────────────────────
+# Cross References
+# ────────────────────────────────────────────────────────────────────────────
+
+cross_references:
+  parent_quality_policy: "ops/bindings/media.quality.policy.yaml"
+  path_authority: "ops/bindings/media.path.authority.contract.yaml"
+  queue_reconciliation: "ops/bindings/media.queue.reconciliation.policy.yaml"
+  archive_flow: "ops/bindings/media.archive.flow.policy.yaml"
+  canary_guardrails: "ops/bindings/media.download.canary.guardrails.yaml"
+  evidence: ".evidence/spine/verify/MEDIA_TV_POLICY_LOCKDOWN_AND_DRIFT_CANON_V1_20260321.md"
