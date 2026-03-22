@@ -1,7 +1,7 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-21
+last_verified: 2026-03-22
 scope: worker-usage-spine-execution-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -25,7 +25,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `spine.control.plan`
 - `spine.control.tick`
 
-## Gates (14)
+## Gates (15)
 - `D124`
 - `D126`
 - `D127`
@@ -38,6 +38,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D410`
 - `D411`
 - `D415`
+- `D416`
 - `D63`
 - `D67`
 

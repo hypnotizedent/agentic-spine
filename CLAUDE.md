@@ -17,9 +17,9 @@ cd ~/code/agentic-spine
 # ENTRY SURFACE GATE METADATA (generated)
 entry_surface_gate_metadata: projection
 source_registry: ops/bindings/gate.registry.yaml
-registry_updated: 2026-03-19
-gate_count_total: 405
-gate_count_active: 105
+registry_updated: 2026-03-21
+gate_count_total: 406
+gate_count_active: 106
 gate_count_retired: 300
-max_gate_id: D415
+max_gate_id: D416
 <!-- ENTRY_SURFACE_GATE_METADATA_END -->

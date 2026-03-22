@@ -1,7 +1,7 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-21
+last_verified: 2026-03-22
 scope: worker-usage-domain-taxlegal-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -30,7 +30,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `taxlegal.source.ingest`
 - `taxlegal.source.recall`
 
-## Gates (14)
+## Gates (15)
 - `D124`
 - `D126`
 - `D127`
@@ -43,6 +43,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D410`
 - `D411`
 - `D415`
+- `D416`
 - `D63`
 - `D67`
 
