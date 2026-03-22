@@ -170,6 +170,72 @@ spine_resolve_control_root() {
   _spine_default_control_root
 }
 
+spine_resolve_peer_repo() {
+  local peer_name="${1:?peer repo name required}"
+  local target_repo="${2:-}"
+  local workspace_root="${SPINE_WORKSPACE_ROOT:-}"
+  local candidate=""
+  local lane_name=""
+  local topology_root=""
+  local source_repo=""
+
+  [[ -n "$target_repo" ]] || target_repo="$(spine_resolve_target_repo)"
+  target_repo="$(_spine_canonicalize_repoish_path "$target_repo")"
+
+  case "$target_repo" in
+    */.wt/*/*)
+      topology_root="${target_repo%%/.wt/*}"
+      lane_name="$(basename "$target_repo")"
+      source_repo="$(basename "$(dirname "$target_repo")")"
+      if [[ "$source_repo" != "$peer_name" ]]; then
+        candidate="$topology_root/.wt/$peer_name/$lane_name"
+        if [[ -d "$candidate" ]]; then
+          _spine_canonicalize_repoish_path "$candidate"
+          return 0
+        fi
+      fi
+      ;;
+    */.wt/*)
+      topology_root="${target_repo%%/.wt/*}"
+      lane_name="$(basename "$target_repo")"
+      candidate="$topology_root/.wt/$peer_name/$lane_name"
+      if [[ -d "$candidate" ]]; then
+        _spine_canonicalize_repoish_path "$candidate"
+        return 0
+      fi
+      ;;
+    */.runtime/spine/tmp/worktrees/*/*)
+      topology_root="${target_repo%%/.runtime/spine/tmp/worktrees/*}"
+      lane_name="$(basename "$target_repo")"
+      source_repo="$(basename "$(dirname "$target_repo")")"
+      if [[ "$source_repo" != "$peer_name" ]]; then
+        candidate="$topology_root/.runtime/spine/tmp/worktrees/$peer_name/$lane_name"
+        if [[ -d "$candidate" ]]; then
+          _spine_canonicalize_repoish_path "$candidate"
+          return 0
+        fi
+      fi
+      ;;
+    */.runtime/spine/tmp/worktrees/*)
+      topology_root="${target_repo%%/.runtime/spine/tmp/worktrees/*}"
+      lane_name="$(basename "$target_repo")"
+      candidate="$topology_root/.runtime/spine/tmp/worktrees/$peer_name/$lane_name"
+      if [[ -d "$candidate" ]]; then
+        _spine_canonicalize_repoish_path "$candidate"
+        return 0
+      fi
+      ;;
+  esac
+
+  if [[ -z "$workspace_root" ]]; then
+    workspace_root="$(_spine_guess_workspace_root "$(spine_resolve_control_root "$target_repo")")"
+  fi
+  workspace_root="$(_spine_expand_home_token "$workspace_root")"
+
+  candidate="$workspace_root/$peer_name"
+  _spine_canonicalize_repoish_path "$candidate"
+}
+
 spine_runtime_resolve_paths() {
   local target_repo=""
   local control_root=""

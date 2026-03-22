@@ -188,6 +188,19 @@ def run_cap_json(capability: str, *args: str, allow_nonzero: bool = False) -> di
     return result.payload
 
 
+def run_cap_result(capability: str, *args: str, allow_nonzero: bool = False) -> CommandResult:
+    cmd = [str(ops_bin()), "cap", "run", capability]
+    if args:
+        cmd.append("--")
+        cmd.extend(args)
+    return run_json_command(cmd, cwd=spine_root(), allow_nonzero=allow_nonzero)
+
+
+def extract_receipt_path(output: str) -> str:
+    match = re.search(r"^Receipt:\s+(.+)$", strip_ansi(output), re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
 def mailbox_messages(*, mailbox: str, top: int) -> list[dict[str, Any]]:
     payload = run_cap_json(
         "communications.mail.search",
@@ -425,7 +438,7 @@ def build_work_item(message: dict[str, Any]) -> dict[str, Any]:
     elif triage["work_type"] == "reorder_candidate" and archive_lane.get("linked_job_count", 0):
         next_step = f"mintctl morpheus inbox reorder --message-id {triage['message_id']}"
     elif triage["work_type"] == "artwork_revision" and asset_history_present:
-        next_step = "prepare_artwork_revision_handoff"
+        next_step = f"mintctl morpheus inbox revision-prepare --message-id {triage['message_id']}"
     elif archive_lane.get("seed_count", 0) and not packets and seed_ids:
         next_step = f"mintctl morpheus contact packetize --seed-id {seed_ids[0]}"
     elif quote_ready and primary_packet.get("quote_packet_id"):

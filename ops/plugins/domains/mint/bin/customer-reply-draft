@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.domains.mint.lib.customer_inbox_common import (  # noqa: E402
+    append_runtime_index,
+    classify_message,
+    extract_receipt_path,
+    mailbox_message_by_id,
+    resolve_customer,
+    run_cap_result,
+    safe_text,
+    slugify_fragment,
+    state_root,
+)
+
+
+CAPABILITY = "mint.customer.reply.draft"
+POLICY_PATH = ROOT / "ops/bindings/mint.customer.reply.draft.policy.contract.yaml"
+DEFAULT_MAILBOX = "team@mintprints.com"
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Create a governed Morpheus customer reply draft in the canonical mailbox.")
+    parser.add_argument("message_id", nargs="?")
+    parser.add_argument("--message-id", dest="message_id_flag", default="")
+    parser.add_argument("--body", default="")
+    parser.add_argument("--body-file", default="")
+    parser.add_argument("--subject", default="")
+    parser.add_argument("--to", default="")
+    parser.add_argument("--cc", default="")
+    parser.add_argument("--content-type", default="")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX)
+    parser.add_argument("--author-mode", default="morpheus", choices=["morpheus", "ronny"])
+    parser.add_argument("--job-number", default="")
+    parser.add_argument("--job-nickname", default="")
+    parser.add_argument(
+        "--reply-mode",
+        default="general",
+        choices=[
+            "general",
+            "delay",
+            "art_revision",
+            "in_progress",
+            "clarification_only",
+            "guided_estimate",
+            "formal_quote_ready",
+            "not_a_fit",
+        ],
+    )
+    parser.add_argument("--attach", action="append", default=[])
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    args.message_id = args.message_id_flag.strip() or str(args.message_id or "").strip()
+    if not args.message_id:
+        fail("message_id required")
+    if bool(args.body.strip()) == bool(args.body_file.strip()):
+        fail("provide exactly one of --body or --body-file")
+    return args
+
+
+def load_policy() -> dict[str, Any]:
+    if not POLICY_PATH.is_file():
+        fail(f"reply policy contract not found: {POLICY_PATH}")
+    payload = yaml.safe_load(POLICY_PATH.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        fail(f"invalid reply policy contract: {POLICY_PATH}")
+    return payload
+
+
+def read_body(args: argparse.Namespace) -> str:
+    if args.body_file.strip():
+        path = Path(args.body_file).expanduser().resolve()
+        if not path.is_file():
+            fail(f"body file not found: {path}")
+        return path.read_text(encoding="utf-8").strip()
+    return args.body.strip()
+
+
+def reply_subject(source_subject: str, args: argparse.Namespace, policy: dict[str, Any]) -> str:
+    if args.subject.strip():
+        return args.subject.strip()
+    if args.job_number.strip() and args.job_nickname.strip():
+        template = safe_text((((policy.get("subject") or {}).get("format_template")) or "{job_number} {job_nickname}"))
+        return template.format(job_number=args.job_number.strip(), job_nickname=args.job_nickname.strip())
+    strip_regex = safe_text((((policy.get("subject") or {}).get("strip_prefix_regex")) or ""))
+    cleaned = source_subject
+    if strip_regex:
+        cleaned = re.sub(strip_regex, "", source_subject, flags=re.IGNORECASE).strip()
+    if source_subject.lower().startswith(("re:", "fw:", "fwd:")):
+        return source_subject
+    if cleaned:
+        return f"Re: {cleaned}"
+    fail(safe_text((((policy.get("subject") or {}).get("unresolved_blocker")) or "Need a subject.")))
+    raise AssertionError("unreachable")
+
+
+def render_html(text: str) -> str:
+    stripped = text.strip()
+    if re.search(r"<(p|div|br|ul|ol|li|table|strong|em)\b", stripped, re.IGNORECASE):
+        return stripped
+    paragraphs = [p.strip() for p in stripped.split("\n") if p.strip()]
+    return "".join(f"<p>{html.escape(paragraph)}</p>" for paragraph in paragraphs)
+
+
+def render_text(text: str) -> str:
+    return "\n\n".join(part.strip() for part in text.split("\n") if part.strip())
+
+
+def render_footer(policy: dict[str, Any], receipt_id: str, content_type: str) -> str:
+    lines = []
+    for raw in (((policy.get("identity") or {}).get("visible_footer_lines")) or []):
+        line = safe_text(str(raw).replace("{outbound_receipt_id}", receipt_id))
+        lines.append(line)
+    if content_type.upper() == "HTML":
+        return "".join("<p>&nbsp;</p>" if not line else f"<p>{html.escape(line)}</p>" for line in lines)
+    return "\n".join(lines)
+
+
+def render_body(body_text: str, args: argparse.Namespace, policy: dict[str, Any], receipt_id: str, existing_chain: str = "") -> str:
+    content_type = (args.content_type or safe_text((((policy.get("content") or {}).get("default_mode")) or "HTML"))).upper()
+    intro = safe_text((((policy.get("style") or {}).get("reply_mode_intros")) or {}).get(args.reply_mode))
+    parts: list[str] = []
+    if content_type == "HTML":
+        if intro and intro.lower() not in body_text.lower():
+            parts.append(render_html(intro))
+        parts.append(render_html(body_text))
+        parts.append(render_footer(policy, receipt_id, content_type))
+        composed = "".join(parts)
+        if existing_chain:
+            return f"{composed}<hr>{existing_chain}"
+        return composed
+
+    if intro and intro.lower() not in body_text.lower():
+        parts.append(render_text(intro))
+    parts.append(render_text(body_text))
+    parts.append(render_footer(policy, receipt_id, content_type))
+    composed = "\n\n".join(part for part in parts if part.strip())
+    if existing_chain:
+        return f"{composed}\n\n{existing_chain}"
+    return composed
+
+
+def extract_existing_chain(body: str, content_type: str) -> str:
+    if not body.strip():
+        return ""
+    if content_type.upper() == "HTML":
+        _, separator, tail = body.partition("<hr>")
+        return tail.strip() if separator else ""
+    marker = "\n\n"
+    parts = body.split(marker, 1)
+    return parts[1].strip() if len(parts) == 2 else ""
+
+
+def blocked_target(message: dict[str, Any], args: argparse.Namespace, policy: dict[str, Any]) -> str:
+    if args.to.strip():
+        return ""
+    sender = safe_text((((message.get("from") or {}).get("emailAddress")) or {}).get("address")).lower()
+    sender_name = safe_text((((message.get("from") or {}).get("emailAddress")) or {}).get("name")).lower()
+    subject = safe_text(message.get("subject")).lower()
+    preview = safe_text(message.get("bodyPreview")).lower()
+    participant_policy = dict(policy.get("participant_resolution") or {})
+    internal_domains = {safe_text(item).lower() for item in participant_policy.get("internal_domains") or []}
+    if sender and sender.split("@")[-1] in internal_domains:
+        return safe_text(participant_policy.get("blocked_customer_target_message")) or "Need the real customer thread before drafting."
+
+    vendor_markers = dict(participant_policy.get("vendor_markers") or {})
+    if sender in {safe_text(item).lower() for item in vendor_markers.get("exact_emails") or []}:
+        return safe_text(participant_policy.get("blocked_customer_target_message")) or "Need the real customer thread before drafting."
+    haystacks = [sender_name, subject, preview]
+    for marker in vendor_markers.get("name_markers") or []:
+        marker_text = safe_text(marker).lower()
+        if marker_text and any(marker_text in hay for hay in haystacks):
+            return safe_text(participant_policy.get("blocked_customer_target_message")) or "Need the real customer thread before drafting."
+    for marker in vendor_markers.get("subject_markers") or []:
+        marker_text = safe_text(marker).lower()
+        if marker_text and marker_text in subject:
+            return safe_text(participant_policy.get("blocked_customer_target_message")) or "Need the real customer thread before drafting."
+    return ""
+
+
+def reject_generic_filler(body: str, policy: dict[str, Any]) -> None:
+    lowered = body.lower()
+    for phrase in (((policy.get("style") or {}).get("generic_filler_blocklist")) or []):
+        phrase_text = safe_text(phrase).lower()
+        if phrase_text and phrase_text in lowered:
+            fail(f"body contains blocked filler phrase: {phrase_text}")
+
+
+def runtime_record_path(reply_draft_id: str) -> Path:
+    now = utc_now()
+    base = state_root() / "mint" / "customer-reply-drafts" / "records" / now.strftime("%Y/%m/%d")
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"{reply_draft_id}.json"
+
+
+def latest_existing_record(mailbox: str, source_message_id: str) -> dict[str, Any] | None:
+    index_path = state_root() / "mint" / "customer-reply-drafts" / "index.ndjson"
+    if not index_path.is_file():
+        return None
+    latest: dict[str, Any] | None = None
+    for line in index_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("mailbox") == mailbox and row.get("source_message_id") == source_message_id:
+            latest = row
+    return latest
+
+
+def maybe_existing_draft(mailbox: str, draft_id: str) -> dict[str, Any] | None:
+    result = run_cap_result("microsoft.mail.get", "--message-id", draft_id, "--mailbox", mailbox, allow_nonzero=True)
+    return result.payload if result.status_code == 0 and result.payload else None
+
+
+def main() -> int:
+    args = parse_args()
+    policy = load_policy()
+    mailbox = safe_text(args.mailbox or (((policy.get("routing") or {}).get("default_mailbox")) or DEFAULT_MAILBOX)) or DEFAULT_MAILBOX
+    if args.author_mode == "morpheus" and mailbox != DEFAULT_MAILBOX:
+        fail("Morpheus customer drafts must stay on team@mintprints.com")
+
+    body_text = read_body(args)
+    reject_generic_filler(body_text, policy)
+    source_message = mailbox_message_by_id(mailbox=mailbox, message_id=args.message_id)
+    blocked_reason = blocked_target(source_message, args, policy)
+    if blocked_reason:
+        payload = {
+            "capability": CAPABILITY,
+            "status": "blocked",
+            "reason": blocked_reason,
+            "message_id": args.message_id,
+            "mailbox": mailbox,
+        }
+        print(json.dumps(payload, indent=2) if args.json else "\n".join(f"{k}: {v}" for k, v in payload.items()))
+        return 2
+
+    source_subject = safe_text(source_message.get("subject"))
+    resolved_subject = reply_subject(source_subject, args, policy)
+    content_type = (args.content_type or safe_text((((policy.get("content") or {}).get("default_mode")) or "HTML"))).upper()
+    sender_email = safe_text((((source_message.get("from") or {}).get("emailAddress")) or {}).get("address"))
+    customer_resolution = resolve_customer(sender_email)
+    existing_row = latest_existing_record(mailbox, args.message_id)
+    existing_draft = None
+    provider_receipts: dict[str, Any] = {}
+    provider_payload: dict[str, Any]
+    reply_draft_id = existing_row.get("reply_draft_id") if existing_row else ""
+    receipt_id = reply_draft_id or f"MRD-{utc_now().strftime('%Y%m%dT%H%M%SZ')}-{slugify_fragment(args.message_id)}"
+
+    if existing_row and safe_text(existing_row.get("draft_id")):
+        existing_draft = maybe_existing_draft(mailbox, safe_text(existing_row.get("draft_id")))
+    if existing_draft:
+        existing_body = safe_text(((existing_draft.get("body") or {}).get("content")) or "")
+        existing_chain = extract_existing_chain(existing_body, content_type)
+        rendered_body = render_body(body_text, args, policy, receipt_id, existing_chain=existing_chain)
+        update_result = run_cap_result(
+            "microsoft.mail.draft.update",
+            "--message-id",
+            safe_text(existing_row.get("draft_id")),
+            "--subject",
+            resolved_subject,
+            "--body",
+            rendered_body,
+            "--content-type",
+            content_type,
+            "--mailbox",
+            mailbox,
+            *(["--cc", args.cc] if args.cc.strip() else []),
+            *(["--to", args.to] if args.to.strip() else []),
+        )
+        if update_result.status_code != 0 or not update_result.payload:
+            fail(f"microsoft.mail.draft.update failed for {existing_row.get('draft_id')}")
+        provider_receipts["draft_update_receipt"] = extract_receipt_path(update_result.stdout)
+        provider_payload = maybe_existing_draft(mailbox, safe_text(existing_row.get("draft_id"))) or update_result.payload
+        reply_draft_id = safe_text(existing_row.get("reply_draft_id"))
+    else:
+        rendered_body = render_body(body_text, args, policy, receipt_id)
+        reply_result = run_cap_result(
+            "microsoft.mail.reply.draft",
+            "--message-id",
+            args.message_id,
+            "--mailbox",
+            mailbox,
+            "--subject",
+            resolved_subject,
+            "--body",
+            rendered_body,
+            "--content-type",
+            content_type,
+            *(["--cc", args.cc] if args.cc.strip() else []),
+            *(["--to", args.to] if args.to.strip() else []),
+        )
+        if reply_result.status_code != 0 or not reply_result.payload:
+            fail(f"microsoft.mail.reply.draft failed for {args.message_id}")
+        provider_receipts["reply_draft_receipt"] = extract_receipt_path(reply_result.stdout)
+        provider_payload = reply_result.payload
+        reply_draft_id = receipt_id
+
+    draft_id = safe_text(provider_payload.get("id"))
+    if not draft_id:
+        fail("provider did not return a draft id")
+
+    attachment_results: list[dict[str, Any]] = []
+    for raw_path in args.attach:
+        attach_path = Path(raw_path).expanduser().resolve()
+        if not attach_path.is_file():
+            fail(f"attachment file not found: {attach_path}")
+        attach_result = run_cap_result(
+            "microsoft.mail.attachment.add",
+            "--message-id",
+            draft_id,
+            "--mailbox",
+            mailbox,
+            "--file",
+            str(attach_path),
+        )
+        if attach_result.status_code != 0 or not attach_result.payload:
+            fail(f"microsoft.mail.attachment.add failed for {attach_path}")
+        attachment_results.append(
+            {
+                "file": str(attach_path),
+                "provider_payload": attach_result.payload,
+                "receipt": extract_receipt_path(attach_result.stdout),
+            }
+        )
+
+    now = utc_now()
+    record = {
+        "reply_draft_id": reply_draft_id,
+        "captured_at": iso_utc(now),
+        "capability": CAPABILITY,
+        "mailbox": mailbox,
+        "author_mode": args.author_mode,
+        "source_message_id": args.message_id,
+        "source_subject": source_subject,
+        "source_sender": sender_email,
+        "work_type": classify_message(source_message).get("work_type"),
+        "draft_id": draft_id,
+        "thread_mode": "reply_chain",
+        "subject": resolved_subject,
+        "content_type": content_type,
+        "customer_resolution": {
+            "state": customer_resolution.get("state"),
+            "reason": customer_resolution.get("reason"),
+            "confidence": customer_resolution.get("confidence"),
+            "resolved_customer": customer_resolution.get("resolved_customer"),
+        },
+        "attachments": attachment_results,
+        "provider_receipts": provider_receipts,
+        "policy_contract": str(POLICY_PATH),
+    }
+    record_file = runtime_record_path(reply_draft_id)
+    record_file.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    append_runtime_index(
+        category="customer-reply-drafts",
+        row={
+            "captured_at": iso_utc(now),
+            "reply_draft_id": reply_draft_id,
+            "mailbox": mailbox,
+            "source_message_id": args.message_id,
+            "draft_id": draft_id,
+            "record_file": str(record_file),
+            "thread_mode": "reply_chain",
+        },
+    )
+
+    payload = {
+        "capability": CAPABILITY,
+        "status": "ok",
+        "reply_draft_id": reply_draft_id,
+        "draft_id": draft_id,
+        "mailbox": mailbox,
+        "source_message_id": args.message_id,
+        "subject": resolved_subject,
+        "record_file": str(record_file),
+        "attachment_count": len(attachment_results),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(CAPABILITY)
+        for key, value in payload.items():
+            if key == "capability":
+                continue
+            print(f"{key}: {value}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

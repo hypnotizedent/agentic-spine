@@ -1,0 +1,383 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[5]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.domains.mint.lib.customer_inbox_common import (  # noqa: E402
+    append_runtime_index,
+    extract_receipt_path,
+    mailbox_message_by_id,
+    run_cap_result,
+    run_cap_json,
+    safe_text,
+    slugify_fragment,
+    state_root,
+)
+
+
+CAPABILITY = "mint.customer.forwarded.attachment.resolve"
+DEFAULT_MAILBOX = "team@mintprints.com"
+SOURCE_MESSAGE_BONUS = 20
+RELATED_RECENCY_BONUS = 3
+AMBIGUITY_MARGIN = 3
+EXTENSION_WEIGHTS = {
+    "pdf": 8,
+    "ai": 9,
+    "eps": 9,
+    "svg": 8,
+    "cdr": 7,
+    "png": 5,
+    "jpg": 4,
+    "jpeg": 4,
+}
+POSITIVE_TOKENS = {
+    "approved": 6,
+    "current": 6,
+    "final": 7,
+    "latest": 7,
+    "rev": 4,
+    "revision": 5,
+    "updated": 6,
+}
+NEGATIVE_TOKENS = {
+    "bad": -12,
+    "draft": -6,
+    "old": -8,
+    "proof": -3,
+    "superseded": -12,
+    "wrong": -12,
+}
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def tokenize(text: str) -> list[str]:
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for token in re.findall(r"[a-z0-9]+", text.lower()):
+        if token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    return tokens
+
+
+def record_path(resolve_id: str) -> Path:
+    now = utc_now()
+    base = state_root() / "mint" / "forwarded-attachment-resolutions" / "records" / now.strftime("%Y/%m/%d")
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"{resolve_id}.json"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Resolve a forwarded customer/vendor attachment and place it canonically.")
+    parser.add_argument("message_id", nargs="?")
+    parser.add_argument("--message-id", dest="message_id_flag", default="")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX)
+    parser.add_argument("--context", default="")
+    parser.add_argument("--job-ref", default="")
+    parser.add_argument("--order-id", default="")
+    parser.add_argument("--artifact-role", default="original")
+    parser.add_argument("--related-query", default="")
+    parser.add_argument("--top-related", type=int, default=5)
+    parser.add_argument("--no-place", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    args.message_id = args.message_id_flag.strip() or str(args.message_id or "").strip()
+    if not args.message_id:
+        fail("message_id required")
+    return args
+
+
+def derive_related_query(source_message: dict[str, Any], args: argparse.Namespace) -> str:
+    if args.related_query.strip():
+        return args.related_query.strip()
+    candidates = tokenize(" ".join(part for part in [args.context, source_message.get("subject"), source_message.get("bodyPreview")] if part))
+    return max(candidates, key=len) if candidates else safe_text(source_message.get("subject")) or "*"
+
+
+def search_related(mailbox: str, query: str, top: int, source_message_id: str) -> list[dict[str, Any]]:
+    payload = run_cap_json(
+        "communications.mail.search",
+        "--json",
+        "--query",
+        query,
+        "--top",
+        str(top),
+        "--mailbox",
+        mailbox,
+    )
+    messages = (((payload.get("data") or {}).get("microsoft")) or {}).get("value") or []
+    return [message for message in messages if safe_text(message.get("id")) != source_message_id]
+
+
+def list_attachments(mailbox: str, message_id: str) -> tuple[list[dict[str, Any]], str]:
+    result = run_cap_result(
+        "microsoft.mail.attachments.list",
+        "--message-id",
+        message_id,
+        "--mailbox",
+        mailbox,
+    )
+    if result.status_code != 0 or not result.payload:
+        fail(f"microsoft.mail.attachments.list failed for {message_id}")
+    return (result.payload.get("value") or []), extract_receipt_path(result.stdout)
+
+
+def score_attachment(
+    attachment: dict[str, Any],
+    *,
+    source: bool,
+    related_rank: int,
+    context_tokens: list[str],
+    source_preview: str,
+    source_subject: str,
+) -> tuple[int, list[str]]:
+    name = safe_text(attachment.get("name")).lower()
+    extension = Path(name).suffix.lower().lstrip(".")
+    score = SOURCE_MESSAGE_BONUS if source else max(0, RELATED_RECENCY_BONUS - related_rank)
+    reasons = ["source_message"] if source else [f"related_rank:{related_rank + 1}"]
+    ext_weight = EXTENSION_WEIGHTS.get(extension, 0)
+    if ext_weight:
+        score += ext_weight
+        reasons.append(f"preferred_extension:{extension}")
+    for token in context_tokens:
+        if token in name:
+            score += 3
+            reasons.append(f"context_token:{token}")
+    for token in context_tokens:
+        if token in source_subject.lower() or token in source_preview.lower():
+            score += 1
+            reasons.append(f"source_context_token:{token}")
+    for token, weight in POSITIVE_TOKENS.items():
+        if token in name:
+            score += weight
+            reasons.append(f"positive_token:{token}")
+    for token, weight in NEGATIVE_TOKENS.items():
+        if token in name:
+            score += weight
+            reasons.append(f"negative_token:{token}")
+    if bool(attachment.get("isInline")):
+        score -= 2
+        reasons.append("inline_penalty")
+    return score, reasons
+
+
+def main() -> int:
+    args = parse_args()
+    mailbox = safe_text(args.mailbox) or DEFAULT_MAILBOX
+    source_message = mailbox_message_by_id(mailbox=mailbox, message_id=args.message_id)
+    source_subject = safe_text(source_message.get("subject"))
+    source_preview = safe_text(source_message.get("bodyPreview"))
+    related_query = derive_related_query(source_message, args)
+    related_messages = search_related(mailbox, related_query, args.top_related, args.message_id)
+    context_tokens = tokenize(" ".join(part for part in [args.context, args.job_ref, args.order_id, source_subject, source_preview] if part))
+
+    candidates: list[dict[str, Any]] = []
+    receipts: dict[str, Any] = {"attachment_list_receipts": {}}
+    source_attachments, source_receipt = list_attachments(mailbox, args.message_id)
+    receipts["attachment_list_receipts"][args.message_id] = source_receipt
+    for attachment in source_attachments:
+        score, reasons = score_attachment(
+            attachment,
+            source=True,
+            related_rank=0,
+            context_tokens=context_tokens,
+            source_preview=source_preview,
+            source_subject=source_subject,
+        )
+        candidates.append(
+            {
+                "message_id": args.message_id,
+                "origin": "source_message",
+                "score": score,
+                "reasons": reasons,
+                "attachment": attachment,
+            }
+        )
+
+    for rank, message in enumerate(related_messages):
+        attachments, receipt = list_attachments(mailbox, safe_text(message.get("id")))
+        receipts["attachment_list_receipts"][safe_text(message.get("id"))] = receipt
+        for attachment in attachments:
+            score, reasons = score_attachment(
+                attachment,
+                source=False,
+                related_rank=rank,
+                context_tokens=context_tokens,
+                source_preview=source_preview,
+                source_subject=source_subject,
+            )
+            candidates.append(
+                {
+                    "message_id": safe_text(message.get("id")),
+                    "origin": "related_message",
+                    "score": score,
+                    "reasons": reasons,
+                    "attachment": attachment,
+                }
+            )
+
+    resolve_id = f"MFAR-{utc_now().strftime('%Y%m%dT%H%M%SZ')}-{slugify_fragment(args.message_id)}"
+    if not candidates:
+        payload = {
+            "capability": CAPABILITY,
+            "status": "blocked",
+            "reason": "no_visible_attachments",
+            "message_id": args.message_id,
+            "related_query": related_query,
+        }
+        print(json.dumps(payload, indent=2) if args.json else "\n".join(f"{k}: {v}" for k, v in payload.items()))
+        return 2
+
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    best = candidates[0]
+    second_score = candidates[1]["score"] if len(candidates) > 1 else -999
+    if best["score"] < 1 or best["score"] <= second_score + AMBIGUITY_MARGIN:
+        record = {
+            "resolve_id": resolve_id,
+            "captured_at": iso_utc(utc_now()),
+            "capability": CAPABILITY,
+            "mailbox": mailbox,
+            "source_message_id": args.message_id,
+            "status": "needs_operator_choice",
+            "operator_question": "More than one plausible attachment version matched. Pick the intended file explicitly.",
+            "candidates": candidates[:5],
+            "receipts": receipts,
+        }
+        record_file = record_path(resolve_id)
+        record_file.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        payload = {
+            "capability": CAPABILITY,
+            "status": "needs_operator_choice",
+            "resolve_id": resolve_id,
+            "record_file": str(record_file),
+            "operator_question": record["operator_question"],
+            "candidates": candidates[:5],
+        }
+        print(json.dumps(payload, indent=2) if args.json else "\n".join(f"{k}: {v}" for k, v in payload.items()))
+        return 0
+
+    selected_attachment = dict(best["attachment"])
+    download_dir = state_root() / "mint" / "forwarded-attachment-resolutions" / "downloads" / utc_now().strftime("%Y/%m/%d") / resolve_id
+    download_result = run_cap_result(
+        "microsoft.mail.attachment.download",
+        "--message-id",
+        best["message_id"],
+        "--attachment-id",
+        safe_text(selected_attachment.get("id")),
+        "--mailbox",
+        mailbox,
+        "--output-dir",
+        str(download_dir),
+    )
+    if download_result.status_code != 0 or not download_result.payload:
+        fail("attachment download failed")
+    receipts["attachment_download_receipt"] = extract_receipt_path(download_result.stdout)
+
+    placement_payload: dict[str, Any] | None = None
+    placement_receipt = ""
+    if not args.no_place:
+        place_args = [
+            str(download_result.payload.get("output_file")),
+            "--context",
+            args.context or source_subject,
+            "--artifact-role",
+            args.artifact_role,
+            "--job-ref",
+            args.job_ref,
+            "--order-id",
+            args.order_id,
+            "--json",
+        ]
+        place_result = run_cap_result("mint.artwork.place", *place_args)
+        if place_result.status_code != 0 or not place_result.payload:
+            fail("mint.artwork.place failed")
+        placement_payload = place_result.payload
+        placement_receipt = extract_receipt_path(place_result.stdout)
+
+    now = utc_now()
+    record = {
+        "resolve_id": resolve_id,
+        "captured_at": iso_utc(now),
+        "capability": CAPABILITY,
+        "mailbox": mailbox,
+        "source_message_id": args.message_id,
+        "related_query": related_query,
+        "selected_attachment": {
+            "message_id": best["message_id"],
+            "attachment_id": safe_text(selected_attachment.get("id")),
+            "attachment_name": safe_text(selected_attachment.get("name")),
+            "content_type": safe_text(selected_attachment.get("contentType")),
+            "score": best["score"],
+            "reasons": best["reasons"],
+            "downloaded_file": download_result.payload.get("output_file"),
+            "sha256": download_result.payload.get("sha256"),
+        },
+        "placement": placement_payload,
+        "receipts": {**receipts, "placement_receipt": placement_receipt},
+        "candidates": candidates[:8],
+    }
+    record_file = record_path(resolve_id)
+    record_file.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    append_runtime_index(
+        category="forwarded-attachment-resolutions",
+        row={
+            "captured_at": iso_utc(now),
+            "resolve_id": resolve_id,
+            "source_message_id": args.message_id,
+            "selected_attachment_name": safe_text(selected_attachment.get("name")),
+            "record_file": str(record_file),
+        },
+    )
+
+    payload = {
+        "capability": CAPABILITY,
+        "status": "selected",
+        "resolve_id": resolve_id,
+        "message_id": args.message_id,
+        "record_file": str(record_file),
+        "selected_attachment": {
+            "attachment_name": safe_text(selected_attachment.get("name")),
+            "attachment_id": safe_text(selected_attachment.get("id")),
+            "message_id": best["message_id"],
+            "score": best["score"],
+        },
+        "placement": placement_payload or {},
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(CAPABILITY)
+        for key, value in payload.items():
+            if key == "capability":
+                continue
+            print(f"{key}: {value}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[5]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.domains.mint.lib.customer_inbox_common import (  # noqa: E402
+    append_runtime_index,
+    mailbox_message_by_id,
+    run_cap_result,
+    safe_text,
+    slugify_fragment,
+    state_root,
+)
+
+
+CAPABILITY = "mint.customer.artwork.revision.prepare"
+DEFAULT_MAILBOX = "team@mintprints.com"
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Prepare a bounded artwork-revision handoff from customer-thread context.")
+    parser.add_argument("message_id", nargs="?")
+    parser.add_argument("--message-id", dest="message_id_flag", default="")
+    parser.add_argument("--mailbox", default=DEFAULT_MAILBOX)
+    parser.add_argument("--context", default="")
+    parser.add_argument("--customer", default="")
+    parser.add_argument("--job", default="")
+    parser.add_argument("--related-query", default="")
+    parser.add_argument("--revision-request", default="")
+    parser.add_argument("--operator-context", default="")
+    parser.add_argument("--quote-status", default="auto", choices=["auto", "sufficient", "clarification_needed", "unknown"])
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    args.message_id = args.message_id_flag.strip() or str(args.message_id or "").strip()
+    if not args.message_id:
+        fail("message_id required")
+    return args
+
+
+def infer_quote_status(message: dict[str, Any], operator_context: str) -> tuple[str, str]:
+    text = " ".join(
+        part for part in [safe_text(message.get("subject")), safe_text(message.get("bodyPreview")), operator_context] if part
+    ).lower()
+    if any(phrase in text for phrase in ("not enough info", "need more info", "cannot quote", "can't quote")):
+        return "clarification_needed", "message_text_requires_more_quote_inputs"
+    if any(token.isdigit() for token in text.split()) and any(term in text for term in ("shirt", "hoodie", "tee", "print")):
+        return "sufficient", "message_text_contains_basic_quote_inputs"
+    return "unknown", "quote_status_not_explicit"
+
+
+def runtime_record_path(handoff_id: str) -> Path:
+    now = utc_now()
+    base = state_root() / "mint" / "customer-artwork-revision-prepares" / "records" / now.strftime("%Y/%m/%d")
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"{handoff_id}.json"
+
+
+def main() -> int:
+    args = parse_args()
+    mailbox = safe_text(args.mailbox) or DEFAULT_MAILBOX
+    source_message = mailbox_message_by_id(mailbox=mailbox, message_id=args.message_id)
+    if args.quote_status == "auto":
+        quote_status, quote_basis = infer_quote_status(source_message, args.operator_context)
+    else:
+        quote_status, quote_basis = args.quote_status, "operator_override"
+
+    resolve_args = [
+        "--message-id",
+        args.message_id,
+        "--mailbox",
+        mailbox,
+        "--json",
+        "--artifact-role",
+        "proof",
+    ]
+    if args.context.strip():
+        resolve_args.extend(["--context", args.context.strip()])
+    if args.job.strip():
+        resolve_args.extend(["--job-ref", args.job.strip()])
+    if args.related_query.strip():
+        resolve_args.extend(["--related-query", args.related_query.strip()])
+    resolve_result = run_cap_result("mint.customer.forwarded.attachment.resolve", *resolve_args)
+    if resolve_result.status_code != 0 or not resolve_result.payload:
+        fail("mint.customer.forwarded.attachment.resolve failed")
+    resolve_payload = resolve_result.payload
+
+    now = utc_now()
+    handoff_id = f"MARP-{now.strftime('%Y%m%dT%H%M%SZ')}-{slugify_fragment(args.message_id)}"
+    selected_attachment = dict(resolve_payload.get("selected_attachment") or {})
+    placement = dict(resolve_payload.get("placement") or {})
+    status = "ok"
+    handoff_state = "ready_for_artie"
+    operator_question = ""
+    if safe_text(resolve_payload.get("status")) != "selected":
+        status = "needs_operator_choice"
+        handoff_state = "needs_operator_choice"
+        operator_question = safe_text(resolve_payload.get("operator_question")) or "Pick the intended artwork file before the next revision handoff."
+
+    revision_request = safe_text(args.revision_request or args.operator_context or source_message.get("bodyPreview"))
+    if not revision_request:
+        revision_request = "Use the selected artwork for the next correction pass and return the updated revision proof."
+
+    record = {
+        "handoff_id": handoff_id,
+        "captured_at": iso_utc(now),
+        "capability": CAPABILITY,
+        "status": status,
+        "handoff_state": handoff_state,
+        "mailbox": mailbox,
+        "source_message_id": args.message_id,
+        "quote_status": quote_status,
+        "quote_status_basis": quote_basis,
+        "revision_request": revision_request,
+        "selected_artwork_ref": {
+            "attachment_name": selected_attachment.get("attachment_name"),
+            "attachment_id": selected_attachment.get("attachment_id"),
+            "message_id": selected_attachment.get("message_id"),
+            "resolved_file_path": placement.get("resolved_file_path"),
+            "resolved_target_key": placement.get("resolved_target_key"),
+        },
+        "receipts": {
+            "resolve_receipt": "",
+        },
+        "operator_question": operator_question,
+        "next_expected_action": (
+            "Artie should review the selected artwork/proof context and return the next revision handoff."
+            if handoff_state == "ready_for_artie"
+            else "Resolve the attachment ambiguity before Artie starts the next pass."
+        ),
+    }
+    record_file = runtime_record_path(handoff_id)
+    record_file.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    index_file = append_runtime_index(
+        category="customer-artwork-revision-prepares",
+        row={
+            "captured_at": iso_utc(now),
+            "handoff_id": handoff_id,
+            "source_message_id": args.message_id,
+            "status": status,
+            "record_file": str(record_file),
+        },
+    )
+
+    payload = {
+        "capability": CAPABILITY,
+        "status": status,
+        "handoff_id": handoff_id,
+        "handoff_state": handoff_state,
+        "mailbox": mailbox,
+        "source_message_id": args.message_id,
+        "quote_status": quote_status,
+        "record_file": str(record_file),
+        "index_file": str(index_file),
+        "selected_artwork_ref": record["selected_artwork_ref"],
+    }
+    if operator_question:
+        payload["operator_question"] = operator_question
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(CAPABILITY)
+        for key, value in payload.items():
+            if key == "capability":
+                continue
+            print(f"{key}: {value}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

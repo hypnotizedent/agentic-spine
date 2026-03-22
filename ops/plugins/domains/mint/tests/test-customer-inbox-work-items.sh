@@ -141,7 +141,7 @@ assert_contains "$json_out" "\"capability\": \"mint.customer.inbox.work_items\""
 assert_contains "$json_out" "\"work_type\": \"reorder_candidate\"" "reorder work item classified"
 assert_contains "$json_out" "\"next_business_step\": \"mintctl morpheus inbox reorder --message-id msg-reorder\"" "reorder next step derived"
 assert_contains "$json_out" "\"quote_ready\": true" "quote readiness surfaces from trace"
-assert_contains "$json_out" "\"next_business_step\": \"prepare_artwork_revision_handoff\"" "revision work item routes to artwork prep"
+assert_contains "$json_out" "\"next_business_step\": \"mintctl morpheus inbox revision-prepare --message-id msg-revision\"" "revision work item routes to artwork prep"
 assert_contains "$json_out" "\"state\": \"skipped_promotional\"" "promotional mail skips heavy lookups"
 
 text_out="$(

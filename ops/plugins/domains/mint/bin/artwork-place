@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[5]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.domains.mint.lib.customer_inbox_common import slugify_fragment  # noqa: E402
+
+
+CAPABILITY = "mint.artwork.place"
+DEFAULT_ROLE = "original"
+ROOT_JOBS = "jobs"
+ROOT_OPERATOR_DROP = "operator-drop"
+STAGING_PREFIX = "_staging"
+ROLE_FOLDERS = {
+    "original": "1. Originals",
+    "reference_mockup": "2. Reference Mockups",
+    "proof": "2. Proofs",
+    "print_ready": "3. Print Ready",
+    "production_asset": "4. Production Assets",
+    "superseded": "_superseded",
+}
+STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "art",
+    "artwork",
+    "customer",
+    "design",
+    "file",
+    "for",
+    "from",
+    "job",
+    "logo",
+    "of",
+    "on",
+    "order",
+    "our",
+    "pdf",
+    "proof",
+    "revision",
+    "shirt",
+    "the",
+    "to",
+    "with",
+}
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def resolve_state_root() -> Path:
+    override = os.environ.get("SPINE_STATE", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    workspace_root = ROOT.parent
+    return (workspace_root / ".runtime" / "spine" / "state").resolve()
+
+
+def resolve_minio_root() -> Path:
+    override = os.environ.get("MINIO_MOUNT_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / "MinIO").resolve()
+
+
+def tokenize(text: str) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in re.findall(r"[a-z0-9]+", text.lower()):
+        if token in STOP_WORDS:
+            continue
+        if len(token) < 2 and not token.isdigit():
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    return tokens
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def record_path(record_id: str) -> Path:
+    now = utc_now()
+    base = resolve_state_root() / "mint" / "artwork-placement" / "records" / now.strftime("%Y/%m/%d")
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"{record_id}.json"
+
+
+def append_index(row: dict[str, Any]) -> Path:
+    index_path = resolve_state_root() / "mint" / "artwork-placement" / "index.ndjson"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    with index_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+    return index_path
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Resolve canonical Mint artwork placement before any write.")
+    parser.add_argument("source_file")
+    parser.add_argument("--context", default="")
+    parser.add_argument("--target", default="")
+    parser.add_argument("--artifact-role", default=DEFAULT_ROLE)
+    parser.add_argument("--job-ref", default="")
+    parser.add_argument("--customer", default="")
+    parser.add_argument("--order-id", default="")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    return parser.parse_args()
+
+
+def candidate_directories(intake_root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    for root_name in (ROOT_JOBS, ROOT_OPERATOR_DROP):
+        root = intake_root / root_name
+        if not root.is_dir():
+            continue
+        for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+            if not child.is_dir():
+                continue
+            if root_name == ROOT_OPERATOR_DROP and child.name.startswith(STAGING_PREFIX):
+                continue
+            candidates.append(child)
+    return candidates
+
+
+def score_candidate(path: Path, query_tokens: list[str], source_stem: str) -> tuple[int, list[str]]:
+    score = 0
+    reasons: list[str] = []
+    text = path.as_posix().lower()
+    child_names = " ".join(p.name.lower() for p in sorted(path.iterdir())[:10]) if path.exists() else ""
+    source_norm = re.sub(r"[^a-z0-9]+", "", source_stem.lower())
+    path_norm = re.sub(r"[^a-z0-9]+", "", path.name.lower())
+    if source_norm and source_norm in path_norm:
+        score += 8
+        reasons.append("folder_name_matches_source")
+    for token in query_tokens:
+        if token in text:
+            score += 5 if token.isdigit() else 3
+            reasons.append(f"path_token:{token}")
+        elif token in child_names:
+            score += 1
+            reasons.append(f"child_token:{token}")
+    if path.parts[-2] == ROOT_JOBS:
+        score += 3
+        reasons.append("jobs_root_preferred")
+    return score, reasons
+
+
+def ensure_inside(root: Path, target: Path) -> Path:
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise SystemExit(f"target must stay inside {root}") from exc
+    return target
+
+
+def resolve_destination(args: argparse.Namespace, intake_root: Path, source_file: Path) -> tuple[Path, str, list[str], bool]:
+    role_folder = ROLE_FOLDERS.get(args.artifact_role, ROLE_FOLDERS[DEFAULT_ROLE])
+    if args.target.strip():
+        explicit = Path(args.target).expanduser()
+        if not explicit.is_absolute():
+            explicit = intake_root / explicit
+        explicit = ensure_inside(intake_root, explicit.resolve())
+        if not explicit.exists():
+            fail(f"explicit target directory does not exist: {explicit}")
+        destination = explicit / role_folder
+        return destination, destination.relative_to(intake_root).as_posix(), ["explicit_target"], False
+
+    query = " ".join(part for part in [args.context, args.job_ref, args.customer, args.order_id, source_file.stem] if part)
+    query_tokens = tokenize(query)
+    scored: list[tuple[int, list[str], Path]] = []
+    for candidate in candidate_directories(intake_root):
+        score, reasons = score_candidate(candidate, query_tokens, source_file.stem)
+        scored.append((score, reasons, candidate))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if scored and scored[0][0] > 0:
+        best_score, reasons, best = scored[0]
+        second_score = scored[1][0] if len(scored) > 1 else -999
+        matched_context = any(reason != "jobs_root_preferred" for reason in reasons)
+        if matched_context and best_score >= second_score + 3:
+            destination = best / role_folder
+            return destination, destination.relative_to(intake_root).as_posix(), reasons, False
+
+    now = utc_now()
+    label = slugify_fragment(args.job_ref or args.context or source_file.stem)
+    staging = intake_root / ROOT_OPERATOR_DROP / STAGING_PREFIX / now.strftime("%Y/%m/%d") / label / role_folder
+    return staging, staging.relative_to(intake_root).as_posix(), ["staging_fallback"], True
+
+
+def main() -> int:
+    args = parse_args()
+    source_file = Path(args.source_file).expanduser().resolve()
+    if not source_file.is_file():
+        fail(f"source file not found: {source_file}")
+
+    intake_root = resolve_minio_root() / "artwork-intake"
+    intake_root.mkdir(parents=True, exist_ok=True)
+    destination_dir, relative_target, reasons, used_staging = resolve_destination(args, intake_root, source_file)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination_file = destination_dir / source_file.name
+
+    if not args.dry_run:
+        shutil.copy2(source_file, destination_file)
+
+    now = utc_now()
+    placement_id = f"MAP-{now.strftime('%Y%m%dT%H%M%SZ')}-{slugify_fragment(source_file.stem)}"
+    record = {
+        "placement_id": placement_id,
+        "captured_at": iso_utc(now),
+        "capability": CAPABILITY,
+        "source_file": str(source_file),
+        "artifact_role": args.artifact_role,
+        "job_ref": args.job_ref,
+        "customer": args.customer,
+        "order_id": args.order_id,
+        "selection": {
+            "target_relative_key": relative_target,
+            "resolved_target_dir": str(destination_dir),
+            "resolved_target_file": str(destination_file),
+            "selection_reasons": reasons,
+            "used_staging_fallback": used_staging,
+        },
+        "artifact": {
+            "filename": source_file.name,
+            "size_bytes": source_file.stat().st_size,
+            "sha256": sha256(source_file),
+        },
+        "dry_run": args.dry_run,
+    }
+    record_file = record_path(placement_id)
+    record_file.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    index_file = append_index(
+        {
+            "captured_at": iso_utc(now),
+            "placement_id": placement_id,
+            "source_file": str(source_file),
+            "resolved_target_file": str(destination_file),
+            "record_file": str(record_file),
+            "used_staging_fallback": used_staging,
+        }
+    )
+
+    payload = {
+        "capability": CAPABILITY,
+        "status": "ok",
+        "placement_id": placement_id,
+        "resolved_target_key": relative_target,
+        "resolved_file_path": str(destination_file),
+        "record_file": str(record_file),
+        "index_file": str(index_file),
+        "used_staging_fallback": used_staging,
+        "selection_reasons": reasons,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(CAPABILITY)
+        for key, value in payload.items():
+            if key == "capability":
+                continue
+            print(f"{key}: {value}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

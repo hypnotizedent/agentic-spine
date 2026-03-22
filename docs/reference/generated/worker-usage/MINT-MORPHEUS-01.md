@@ -18,11 +18,15 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ## Write Scope
 - `../agentic-foundation/docs/agents/mint-agent.contract.md`
 
-## Capabilities (9)
+## Capabilities (13)
 - `MINT-MORPHEUS-01.launch`
+- `mint.artwork.place`
+- `mint.customer.artwork.revision.prepare`
+- `mint.customer.forwarded.attachment.resolve`
 - `mint.customer.inbox.triage`
 - `mint.customer.inbox.work_items`
 - `mint.customer.reorder.resolve`
+- `mint.customer.reply.draft`
 - `mint.intake.validate`
 - `mint.modules.health`
 - `mint.operator.drop.assist`
