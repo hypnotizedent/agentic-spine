@@ -5,12 +5,14 @@ set -euo pipefail
 # LaunchAgent: com.ronny.mcp-runtime-anti-drift-cycle
 # Gaps: GAP-OP-759
 
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
-CAP_RUNNER="${SPINE_ROOT}/bin/ops"
-source "${SPINE_ROOT}/ops/lib/runtime-paths.sh"
-spine_runtime_resolve_paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../../../lib/runtime-managed-worktree.sh"
+CONTROL_ROOT="$(spine_runtime_resolve_control_root "${BASH_SOURCE[0]}")"
+spine_runtime_activate_managed_worktree "$CONTROL_ROOT"
+RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"
+CAP_RUNNER="${RUNTIME_ROOT}/bin/ops"
+source "${RUNTIME_ROOT}/ops/lib/job-wrapper.sh"
 SNAPSHOT_FILE="${SPINE_OUTBOX}/alerts/mcp-runtime-anti-drift-latest.json"
-source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
 
 TMP_DIR="$(mktemp -d)"
 cleanup() {
@@ -54,6 +56,9 @@ run_cap() {
 require_cmd jq
 
 echo "[mcp-runtime-anti-drift-cycle] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "[mcp-runtime-anti-drift-cycle] control_root=${CONTROL_ROOT}"
+echo "[mcp-runtime-anti-drift-cycle] runtime_root=${RUNTIME_ROOT}"
+echo "[mcp-runtime-anti-drift-cycle] worktree_identity=${OPS_WORKTREE_IDENTITY:-unset}"
 
 mcp_log="$TMP_DIR/mcp-runtime-status.log"
 health_log="$TMP_DIR/mcp-health-probe.log"

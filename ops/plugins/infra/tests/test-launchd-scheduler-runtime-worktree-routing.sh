@@ -68,6 +68,11 @@ resolved_from_script="$(
 echo ""
 echo "── T2: scheduled mutator wrappers activate runtime worktree ──"
 for script in \
+  "$ROOT/ops/plugins/core/bin/backup-monitor-hourly.sh" \
+  "$ROOT/ops/plugins/core/bin/friction-reconcile.sh" \
+  "$ROOT/ops/plugins/core/bin/mcp-runtime-anti-drift-cycle.sh" \
+  "$ROOT/ops/plugins/core/bin/projection-reconcile.sh" \
+  "$ROOT/ops/plugins/core/bin/state-shared-reconcile.sh" \
   "$ROOT/ops/plugins/core/bin/domain-inventory-refresh-daily.sh" \
   "$ROOT/ops/plugins/core/bin/extension-index-refresh-daily.sh" \
   "$ROOT/ops/plugins/core/bin/freshness-critical-daily.sh" \
@@ -88,6 +93,11 @@ done
 echo ""
 echo "── T3: launchd contract governs the expanded managed-runtime set ──"
 for label in \
+  "com.ronny.backup-monitor-hourly" \
+  "com.ronny.friction-reconcile" \
+  "com.ronny.mcp-runtime-anti-drift-cycle" \
+  "com.ronny.projection-reconcile" \
+  "com.ronny.state-shared-reconcile" \
   "com.ronny.domain-inventory-refresh-daily" \
   "com.ronny.extension-index-refresh-daily" \
   "com.ronny.freshness-critical-daily" \
@@ -110,9 +120,19 @@ assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.receipt
 assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.spine-daily-briefing.plist" "spine-daily-briefing plist"
 assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.cc-benefits-refresh-daily.plist" "cc-benefits-refresh plist"
 assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.cc-benefits-reminder-dispatch-daily.plist" "cc-benefits-reminder plist"
+assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.backup-monitor-hourly.plist" "backup-monitor plist"
+assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.friction-reconcile.plist" "friction-reconcile plist"
+assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.mcp-runtime-anti-drift-cycle.plist" "mcp-runtime-anti-drift plist"
+assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.projection-reconcile.plist" "projection-reconcile plist"
+assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.state-shared-reconcile.plist" "state-shared-reconcile plist"
 
 echo ""
-echo "── T5: launchd health-check excludes its own previous failure from residue count ──"
+echo "── T5: scheduler health reads externalized runtime logs and live exit codes ──"
+assert_file_contains "$ROOT/ops/plugins/infra/host/bin/launchd-scheduler-health-status" 'mailroom.runtime.contract.yaml' "scheduler health loads runtime contract"
+assert_file_contains "$ROOT/ops/plugins/infra/host/bin/launchd-scheduler-health-status" 'last exit code = ' "scheduler health inspects launchctl last exit codes"
+
+echo ""
+echo "── T6: launchd health-check excludes its own previous failure from residue count ──"
 assert_file_contains "$HEALTH_CHECK" 'map(select(. != "com.ronny.launchd-health-check"))' "health-check filters self from failed labels"
 assert_file_contains "$HEALTH_CHECK" 'scheduler_status=${scheduler_status}' "health-check prints explicit scheduler summary"
 

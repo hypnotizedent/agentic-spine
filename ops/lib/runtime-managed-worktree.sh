@@ -107,3 +107,29 @@ spine_runtime_activate_managed_worktree() {
 
   cd "$runtime_root"
 }
+
+spine_runtime_refresh_managed_worktree() {
+  local control_root="$1"
+  local runtime_root="${SPINE_RUNTIME_ACTIVE_ROOT:-}"
+  local runtime_branch="${SPINE_RUNTIME_WORKTREE_BRANCH:-runtime/scheduler-projection}"
+  local contract="$control_root/ops/bindings/worktree.lifecycle.contract.yaml"
+  local main_branch="main"
+  local target_ref=""
+
+  if [[ -f "$contract" ]] && command -v yq >/dev/null 2>&1; then
+    main_branch="$(yq e -r '.policy.main_branch // "main"' "$contract" 2>/dev/null || echo "$main_branch")"
+  fi
+
+  if [[ -z "$runtime_root" ]]; then
+    runtime_root="$(spine_runtime_prepare_managed_worktree "$control_root")" || return 1
+  fi
+
+  target_ref="origin/${main_branch}"
+  if ! git -C "$runtime_root" rev-parse -q --verify "${target_ref}^{commit}" >/dev/null 2>&1; then
+    target_ref="$main_branch"
+  fi
+
+  git -C "$runtime_root" checkout --force -B "$runtime_branch" "$target_ref" >/dev/null 2>&1 || return 1
+  git -C "$runtime_root" clean -fdx >/dev/null 2>&1 || true
+  printf '%s\n' "$runtime_root"
+}

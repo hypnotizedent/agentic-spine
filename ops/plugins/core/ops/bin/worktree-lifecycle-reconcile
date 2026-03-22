@@ -308,6 +308,10 @@ def is_local_prefix(branch: str):
     return False
 
 
+def is_stable_runtime_branch(branch: str):
+    return branch.startswith("runtime/") or branch.startswith("managed/")
+
+
 def git_branch(path: Path):
     rc, out = sh(["git", "-C", str(path), "symbolic-ref", "--short", "HEAD"], check=False)
     return (out or "").strip() if rc == 0 else "<detached>"
@@ -554,12 +558,14 @@ for wt, raw_branch in parse_worktrees(repo_root):
             owner_active = row["owner_type"] in {"loop", "wave"} and row["owner_state"] not in {"closed", "unknown"}
             if owner_active:
                 pass
+            elif is_stable_runtime_branch(branch):
+                pass
             elif is_local_prefix(branch):
                 row["warnings"].append("local_branch_no_remote")
             else:
                 row["issues"].append("orphan_branch_no_remote")
 
-        if row["merged_into_main"] and not row["managed_worktree"]:
+        if row["merged_into_main"] and not row["managed_worktree"] and not is_stable_runtime_branch(branch):
             age = row["branch_age_hours"]
             if age is not None and age >= merged_grace_h:
                 row["issues"].append("merged_branch_past_grace")

@@ -173,7 +173,10 @@ check_launchd_health() {
 
   local scheduler_payload scheduler_status scheduler_stale scheduler_failed scheduler_unknown scheduler_total
   local scheduler_stale_labels scheduler_failed_labels scheduler_failed_labels_filtered
-  scheduler_payload="$("$SCHEDULER_STATUS_SCRIPT" --json 2>/dev/null || true)"
+  scheduler_payload="$(
+    env -u SPINE_TARGET_REPO -u SPINE_ROOT -u SPINE_REPO -u SPINE_CODE \
+      "$SCHEDULER_STATUS_SCRIPT" --json 2>/dev/null || true
+  )"
   scheduler_status="$(jq -r '.status // "unknown"' <<<"$scheduler_payload" 2>/dev/null || echo "unknown")"
   scheduler_stale="$(jq -r '.data.summary.stale // 0' <<<"$scheduler_payload" 2>/dev/null || echo "0")"
   scheduler_failed="$(jq -r '.data.summary.failed // 0' <<<"$scheduler_payload" 2>/dev/null || echo "0")"

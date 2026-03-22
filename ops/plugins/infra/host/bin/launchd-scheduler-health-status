@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import plistlib
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,6 +74,14 @@ def load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         payload = yaml.safe_load(handle) or {}
     return payload if isinstance(payload, dict) else {}
+
+
+def runtime_logs_root(root: Path) -> Path:
+    contract = load_yaml(root / "ops/bindings/mailroom.runtime.contract.yaml")
+    logs_root = str(contract.get("logs_root", "") or "").strip()
+    if logs_root:
+      return Path(os.path.expanduser(logs_root))
+    return root / "mailroom" / "logs"
 
 
 def load_runtime_job_index(path: Path) -> dict[str, JobEvidence]:
@@ -183,6 +192,42 @@ def mtime_evidence(paths: list[str]) -> JobEvidence:
     return JobEvidence(timestamp=newest_ts, exit_code=None, source="log-mtime" if newest_ts else "none")
 
 
+def choose_evidence(*evidences: JobEvidence) -> JobEvidence:
+    chosen = JobEvidence(timestamp=None, exit_code=None, source="none")
+    for evidence in evidences:
+        if evidence.timestamp is None:
+            continue
+        if chosen.timestamp is None or evidence.timestamp > chosen.timestamp:
+            chosen = evidence
+    return chosen
+
+
+def launchctl_last_exit_code(label: str) -> int | None:
+    uid = os.getuid()
+    try:
+        proc = subprocess.run(
+            ["launchctl", "print", f"gui/{uid}/{label}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+
+    if proc.returncode != 0:
+        return None
+
+    for raw in proc.stdout.splitlines():
+        line = raw.strip()
+        if line.startswith("last exit code = "):
+            value = line.split("=", 1)[1].strip()
+            try:
+                return int(value)
+            except ValueError:
+                return None
+    return None
+
+
 def classify_status(now: datetime, evidence: JobEvidence, cadence_seconds: int) -> tuple[str, int | None, int]:
     threshold = max(int(cadence_seconds * 2 + 600), 1800)
     if evidence.timestamp is None:
@@ -199,7 +244,7 @@ def classify_status(now: datetime, evidence: JobEvidence, cadence_seconds: int) 
 def build_payload(root: Path) -> dict[str, Any]:
     registry_path = root / "ops/bindings/launchd.scheduler.registry.yaml"
     contract_path = root / "ops/bindings/launchd.runtime.contract.yaml"
-    logs_root = Path(os.environ.get("SPINE_LOGS") or str(root / "mailroom" / "logs"))
+    logs_root = runtime_logs_root(root)
     runtime_jobs_path = logs_root / "runtime-jobs.ndjson"
 
     registry = load_yaml(registry_path)
@@ -232,13 +277,20 @@ def build_payload(root: Path) -> dict[str, Any]:
         cadence_seconds, schedule = cadence_from_plist(plist_payload)
         job_name = label.replace("com.ronny.", "", 1)
 
-        evidence = runtime_index.get(job_name)
-        if evidence is None:
-            log_paths = [
-                str(plist_payload.get("StandardOutPath", "") or ""),
-                str(plist_payload.get("StandardErrorPath", "") or ""),
-            ]
-            evidence = mtime_evidence(log_paths)
+        runtime_evidence = runtime_index.get(job_name) or JobEvidence(timestamp=None, exit_code=None, source="none")
+        log_paths = [
+            str(plist_payload.get("StandardOutPath", "") or ""),
+            str(plist_payload.get("StandardErrorPath", "") or ""),
+        ]
+        mtime = mtime_evidence(log_paths)
+        evidence = choose_evidence(runtime_evidence, mtime)
+        launchctl_exit = launchctl_last_exit_code(label)
+        if launchctl_exit is not None:
+            evidence = JobEvidence(
+                timestamp=evidence.timestamp,
+                exit_code=launchctl_exit,
+                source=evidence.source if evidence.source != "none" else "launchctl",
+            )
 
         status, age_seconds, stale_threshold = classify_status(now, evidence, cadence_seconds)
         if label in exempt_labels and status in {"stale", "failed"}:

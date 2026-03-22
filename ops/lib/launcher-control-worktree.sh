@@ -20,7 +20,7 @@ spine_launcher_archive_control_worktree_state() {
   export SPINE_CODE="${SPINE_CODE:-$control_root}"
   spine_runtime_resolve_paths >/dev/null 2>&1 || true
 
-  archive_root="$(spine_resolve_mailroom_path 'state/quarantine/launcher-control-worktree')"
+  archive_root="$(spine_resolve_mailroom_path 'mailroom/state/quarantine/launcher-control-worktree')"
   stamp="$(date -u +%Y%m%d-%H%M%S)"
   archive_dir="${archive_root}/$(basename "$control_path")-${stamp}-$$-${reason}"
   mkdir -p "$archive_dir"
@@ -29,6 +29,7 @@ spine_launcher_archive_control_worktree_state() {
   git -C "$control_path" diff --binary >"$archive_dir/worktree.diff" 2>&1 || true
   git -C "$control_path" diff --binary --cached >"$archive_dir/index.diff" 2>&1 || true
   git -C "$control_path" ls-files --others --exclude-standard >"$archive_dir/untracked.txt" 2>&1 || true
+  git -C "$control_path" ls-files --others -i --exclude-standard >"$archive_dir/ignored.txt" 2>&1 || true
 }
 
 spine_launcher_refresh_control_worktree() {
@@ -40,7 +41,7 @@ spine_launcher_refresh_control_worktree() {
 
   spine_launcher_archive_control_worktree_state "$control_root" "$control_path" "$reason" || true
   git -C "$control_path" checkout --force -B "$control_branch" "$target_ref" >/dev/null 2>&1 || return 1
-  git -C "$control_path" clean -fd >/dev/null 2>&1 || true
+  git -C "$control_path" clean -fdx >/dev/null 2>&1 || true
 }
 
 spine_runtime_prepare_launcher_control_worktree() {

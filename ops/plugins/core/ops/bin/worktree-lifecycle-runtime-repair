@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONTROL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+JSON_MODE=0
+BRIEF_MODE=0
+
+usage() {
+  cat <<'USAGE'
+worktree-lifecycle-runtime-repair
+
+Usage:
+  worktree-lifecycle-runtime-repair [--json] [--brief]
+
+Behavior:
+  - Self-heal the stable launcher control worktree.
+  - Refresh the managed runtime scheduler worktree back to current main.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    --brief)
+      BRIEF_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+source "$CONTROL_ROOT/ops/lib/runtime-managed-worktree.sh"
+source "$CONTROL_ROOT/ops/lib/launcher-control-worktree.sh"
+
+CONTROL_PATH="$(spine_runtime_prepare_launcher_control_worktree "$CONTROL_ROOT")"
+RUNTIME_PATH="$(spine_runtime_refresh_managed_worktree "$CONTROL_ROOT")"
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  python3 - "$NOW" "$CONTROL_ROOT" "$CONTROL_PATH" "$RUNTIME_PATH" <<'PY'
+import json
+import sys
+
+payload = {
+    "capability": "worktree.lifecycle.runtime.repair",
+    "status": "done",
+    "generated_at": sys.argv[1],
+    "control_root": sys.argv[2],
+    "launcher_control_worktree": sys.argv[3],
+    "managed_runtime_worktree": sys.argv[4],
+}
+print(json.dumps(payload, indent=2))
+PY
+  exit 0
+fi
+
+if [[ "$BRIEF_MODE" -eq 1 ]]; then
+  echo "DONE control=${CONTROL_PATH} runtime=${RUNTIME_PATH}"
+  exit 0
+fi
+
+echo "worktree.lifecycle.runtime.repair"
+echo "status: done"
+echo "control_root: ${CONTROL_ROOT}"
+echo "launcher_control_worktree: ${CONTROL_PATH}"
+echo "managed_runtime_worktree: ${RUNTIME_PATH}"
