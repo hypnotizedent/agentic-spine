@@ -15,7 +15,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
-CAP_RUNNER="$ROOT/bin/ops"
+CAP_RUNNER="${MEDIA_PIPELINE_TRACE_CAP_RUNNER:-$ROOT/bin/ops}"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 usage() {
@@ -107,9 +107,9 @@ issues = []
 for cap, obj in data.items():
     s = obj.get('status', 'error')
     statuses.append(s)
-    if s not in ('ok',):
+    if s not in ('ok', 'parked'):
         issues.append(f'{cap}: {s}')
-if all(s == 'ok' for s in statuses):
+if all(s in ('ok', 'parked') for s in statuses):
     print('ok')
 elif any(s == 'fail' for s in statuses) or any(s == 'error' for s in statuses):
     print('fail')
@@ -143,6 +143,8 @@ else
       marker="XX"
     elif [[ "$cap_status" == "warn" ]]; then
       marker="!!"
+    elif [[ "$cap_status" == "parked" ]]; then
+      marker="PP"
     fi
     echo "  ${marker} ${cap}: ${cap_status}"
   done

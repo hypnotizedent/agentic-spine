@@ -6,8 +6,9 @@
 #   ./bin/ops cap run media.downloads.bloat.status --json
 #
 # Contract:
-# - SSHs to streaming-stack (NFS client view is authority)
-# - Analyzes /mnt/media/downloads for size, age, and bloat candidates
+# - Resolves the canonical downloads path on media-home first
+# - Falls back to streaming-stack only if the residual shop view is the only reachable path
+# - Analyzes the resolved downloads root for size, age, and bloat candidates
 # - Read-only, no mutations
 # - Exit 0 if successful, exit 1 on error, exit 2 on config errors
 #
@@ -18,8 +19,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
-SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# shellcheck source=/dev/null
+source "$ROOT/ops/lib/media-residual-probe.sh"
 
 usage() {
   cat <<'USAGE'
@@ -55,59 +58,37 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
-command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+media_residual_probe_require_deps || exit $?
 
-if [[ ! -f "$SSH_TARGETS" ]]; then
-  echo "MISSING_FILE: $SSH_TARGETS" >&2
-  exit 2
-fi
-
-# ─── Resolve targets ───
-# Primary: media-home /srv/media/downloads (canonical home Synology mount)
-# Fallback: streaming-stack /mnt/media/downloads (legacy shop NFS view)
-MEDIA_HOME_HOST=$(yq '.ssh.targets[] | select(.id == "media-home") | .host' "$SSH_TARGETS" 2>/dev/null)
-MEDIA_HOME_USER=$(yq '.ssh.targets[] | select(.id == "media-home") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null)
-STREAMING_HOST=$(yq '.ssh.targets[] | select(.id == "streaming-stack") | .host' "$SSH_TARGETS" 2>/dev/null)
+target_ssh() {
+  media_residual_probe_ssh "$1"
+}
 
 # Try media-home first (canonical), fall back to streaming-stack (legacy)
 TARGET_VM=""
-TARGET_SSH=""
+TARGET_HOST=""
+TARGET_PATH_USED=""
 DOWNLOADS_PATH=""
 
-if [[ -n "$MEDIA_HOME_HOST" && "$MEDIA_HOME_HOST" != "null" ]]; then
-  TARGET_SSH="${MEDIA_HOME_USER}@${MEDIA_HOME_HOST}"
-  if ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" "test -d /srv/media/downloads" 2>/dev/null; then
+if media_residual_probe_init "media-home" "$TIMEOUT_SEC"; then
+  if target_ssh "test -d /srv/media/downloads" >/dev/null 2>&1; then
     TARGET_VM="media-home"
+    TARGET_HOST="$MEDIA_RESIDUAL_HOST"
+    TARGET_PATH_USED="$MEDIA_RESIDUAL_PATH_USED"
     DOWNLOADS_PATH="/srv/media/downloads"
   fi
 fi
 
-if [[ -z "$TARGET_VM" && -n "$STREAMING_HOST" && "$STREAMING_HOST" != "null" ]]; then
-  TARGET_SSH="$STREAMING_HOST"
-  if ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" "test -d /mnt/media/downloads" 2>/dev/null; then
+if [[ -z "$TARGET_VM" ]] && media_residual_probe_init "streaming-stack" "$TIMEOUT_SEC"; then
+  if target_ssh "test -d /mnt/media/downloads" >/dev/null 2>&1; then
     TARGET_VM="streaming-stack"
+    TARGET_HOST="$MEDIA_RESIDUAL_HOST"
+    TARGET_PATH_USED="$MEDIA_RESIDUAL_PATH_USED"
     DOWNLOADS_PATH="/mnt/media/downloads"
   fi
 fi
 
 if [[ -z "$TARGET_VM" ]]; then
-  echo "# media.downloads.bloat.status"
-  echo "# Generated: $GENERATED_AT"
-  echo ""
-  echo "## Status: PATH_MISSING"
-  echo ""
-  echo "Downloads path not reachable on media-home (/srv/media/downloads)"
-  echo "or streaming-stack (/mnt/media/downloads)."
-  echo ""
-  echo "## Next Actions"
-  echo "1. Run: ./bin/ops cap run media.nfs.verify"
-  echo "2. Verify media-home Synology mount for /srv/media"
-  echo "3. Verify streaming-stack mount contract for /mnt/media"
-  echo "4. Do not delete or move anything until mount truth is reconciled"
-  echo ""
-  echo "# Audit complete (read-only, no reachable target)"
-
   if [[ "$OUTPUT_JSON" == "true" ]]; then
     cat <<JSON
 {
@@ -118,80 +99,46 @@ if [[ -z "$TARGET_VM" ]]; then
   "mutations": "none"
 }
 JSON
+  else
+    echo "# media.downloads.bloat.status"
+    echo "# Generated: $GENERATED_AT"
+    echo ""
+    echo "## Status: PATH_MISSING"
+    echo ""
+    echo "Downloads path not reachable on media-home (/srv/media/downloads)"
+    echo "or streaming-stack (/mnt/media/downloads)."
+    echo ""
+    echo "## Next Actions"
+    echo "1. Run: ./bin/ops cap run media.nfs.verify"
+    echo "2. Verify media-home Synology mount for /srv/media"
+    echo "3. Verify streaming-stack mount contract for /mnt/media"
+    echo "4. Do not delete or move anything until mount truth is reconciled"
+    echo ""
+    echo "# Audit complete (read-only, no reachable target)"
   fi
 
   exit 0
 fi
 
-# Read-only audit commands
-echo "# media.downloads.bloat.status"
-echo "# Generated: $GENERATED_AT"
-echo "# Target: $TARGET_VM ($(if [[ "$TARGET_VM" == "media-home" ]]; then echo "canonical home Synology mount"; else echo "legacy shop NFS view"; fi))"
-echo "# Downloads path: $DOWNLOADS_PATH"
-echo ""
+media_residual_probe_init "$TARGET_VM" "$TIMEOUT_SEC" >/dev/null 2>&1 || true
 
-# Get total size (exclude .quarantine/ from active staging measurement)
-echo "## Total Downloads Size"
-TOTAL_SIZE=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" "du -sh --exclude=.quarantine $DOWNLOADS_PATH 2>/dev/null | cut -f1" || echo "UNKNOWN")
-echo "Total: $TOTAL_SIZE"
-
-QUARANTINE_SIZE=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
-  "du -sh $DOWNLOADS_PATH/.quarantine 2>/dev/null | cut -f1" || echo "none")
-if [[ "$QUARANTINE_SIZE" != "none" && "$QUARANTINE_SIZE" != "0" ]]; then
-  echo "Quarantine: $QUARANTINE_SIZE (classified, pending operator review)"
-fi
-echo ""
-
-# Age bucket analysis (exclude .quarantine/ — those are already classified)
-echo "## Age Bucket Analysis"
-echo "Analyzing file ages..."
-
-RECENT_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
-  "find $DOWNLOADS_PATH -not -path '*/.quarantine/*' -type f -mtime -7 2>/dev/null | wc -l | tr -d ' '" || echo "0")
-echo "< 7 days: $RECENT_COUNT files"
-
-WEEK_MONTH_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
-  "find $DOWNLOADS_PATH -not -path '*/.quarantine/*' -type f -mtime +7 -mtime -30 2>/dev/null | wc -l | tr -d ' '" || echo "0")
-echo "7-30 days: $WEEK_MONTH_COUNT files"
-
-MONTH_QUARTER_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
-  "find $DOWNLOADS_PATH -not -path '*/.quarantine/*' -type f -mtime +30 -mtime -90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
-echo "30-90 days: $MONTH_QUARTER_COUNT files (bloat candidates)"
-
-OLD_COUNT=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
-  "find $DOWNLOADS_PATH -not -path '*/.quarantine/*' -type f -mtime +90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
-echo "> 90 days: $OLD_COUNT files (high-confidence bloat)"
-echo ""
-
-# Top space consumers
-echo "## Top 20 Space Consumers"
-echo "Largest items in downloads (top-level directories/files):"
-ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
-  "du -sh $DOWNLOADS_PATH/* 2>/dev/null | sort -rh | head -20" || echo "ERROR: Could not list top consumers"
-echo ""
-
-# Summary
+TOTAL_SIZE=$(target_ssh "du -sh --exclude=.quarantine $DOWNLOADS_PATH 2>/dev/null | cut -f1" || echo "UNKNOWN")
+QUARANTINE_SIZE=$(target_ssh "du -sh $DOWNLOADS_PATH/.quarantine 2>/dev/null | cut -f1" || echo "none")
+RECENT_COUNT=$(target_ssh "find $DOWNLOADS_PATH -not -path '*/.quarantine/*' -type f -mtime -7 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+WEEK_MONTH_COUNT=$(target_ssh "find $DOWNLOADS_PATH -not -path '*/.quarantine/*' -type f -mtime +7 -mtime -30 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+MONTH_QUARTER_COUNT=$(target_ssh "find $DOWNLOADS_PATH -not -path '*/.quarantine/*' -type f -mtime +30 -mtime -90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+OLD_COUNT=$(target_ssh "find $DOWNLOADS_PATH -not -path '*/.quarantine/*' -type f -mtime +90 2>/dev/null | wc -l | tr -d ' '" || echo "0")
+TOP_CONSUMERS=$(target_ssh "du -sh $DOWNLOADS_PATH/* 2>/dev/null | sort -rh | head -20" || echo "ERROR: Could not list top consumers")
 BLOAT_ESTIMATE=$((MONTH_QUARTER_COUNT + OLD_COUNT))
-echo "## Bloat Estimate"
-echo "Files >30 days old: $BLOAT_ESTIMATE"
-echo "Status: $(if [[ $BLOAT_ESTIMATE -gt 100 ]]; then echo "BLOAT_DETECTED"; else echo "ACCEPTABLE"; fi)"
-echo ""
-echo "## Next Actions"
-echo "1. Review top space consumers manually"
-echo "2. Check if items >30 days are:"
-echo "   - Already imported (hardlinked) → safe to remove"
-echo "   - Failed downloads → safe to remove"
-echo "   - Stuck in processing → investigate"
-echo "3. Use dry-run rsync to test moves to cold/quarantine"
-echo "4. DO NOT DELETE without Phase 1 audit manifest approval"
-echo ""
-echo "# Audit complete (read-only, no mutations)"
 
 if [[ "$OUTPUT_JSON" == "true" ]]; then
   cat <<JSON
 {
   "generated_at": "$GENERATED_AT",
   "target": "$TARGET_VM",
+  "resolution_target": "$TARGET_VM",
+  "resolution_host": "$TARGET_HOST",
+  "resolution_path": "$TARGET_PATH_USED",
   "downloads_path": "$DOWNLOADS_PATH",
   "total_size": "$TOTAL_SIZE",
   "quarantine_size": "$QUARANTINE_SIZE",
@@ -203,10 +150,51 @@ if [[ "$OUTPUT_JSON" == "true" ]]; then
   },
   "bloat_estimate": $BLOAT_ESTIMATE,
   "status": "$(if [[ $BLOAT_ESTIMATE -gt 100 ]]; then echo "BLOAT_DETECTED"; else echo "ACCEPTABLE"; fi)",
+  "top_consumers": $(printf '%s\n' "$TOP_CONSUMERS" | python3 -c 'import json,sys; print(json.dumps([line for line in sys.stdin.read().splitlines() if line]))'),
   "mutations": "none",
   "safe_for_phase_1": true
 }
 JSON
+else
+  echo "# media.downloads.bloat.status"
+  echo "# Generated: $GENERATED_AT"
+  echo "# Target: $TARGET_VM ($(if [[ "$TARGET_VM" == "media-home" ]]; then echo "canonical home Synology mount"; else echo "legacy shop NFS view"; fi))"
+  echo "# Resolution target: $TARGET_VM"
+  echo "# Resolution host: $TARGET_HOST"
+  echo "# Resolution path: $TARGET_PATH_USED"
+  echo "# Downloads path: $DOWNLOADS_PATH"
+  echo ""
+  echo "## Total Downloads Size"
+  echo "Total: $TOTAL_SIZE"
+  if [[ "$QUARANTINE_SIZE" != "none" && "$QUARANTINE_SIZE" != "0" ]]; then
+    echo "Quarantine: $QUARANTINE_SIZE (classified, pending operator review)"
+  fi
+  echo ""
+  echo "## Age Bucket Analysis"
+  echo "Analyzing file ages..."
+  echo "< 7 days: $RECENT_COUNT files"
+  echo "7-30 days: $WEEK_MONTH_COUNT files"
+  echo "30-90 days: $MONTH_QUARTER_COUNT files (bloat candidates)"
+  echo "> 90 days: $OLD_COUNT files (high-confidence bloat)"
+  echo ""
+  echo "## Top 20 Space Consumers"
+  echo "Largest items in downloads (top-level directories/files):"
+  printf '%s\n' "$TOP_CONSUMERS"
+  echo ""
+  echo "## Bloat Estimate"
+  echo "Files >30 days old: $BLOAT_ESTIMATE"
+  echo "Status: $(if [[ $BLOAT_ESTIMATE -gt 100 ]]; then echo "BLOAT_DETECTED"; else echo "ACCEPTABLE"; fi)"
+  echo ""
+  echo "## Next Actions"
+  echo "1. Review top space consumers manually"
+  echo "2. Check if items >30 days are:"
+  echo "   - Already imported (hardlinked) → safe to remove"
+  echo "   - Failed downloads → safe to remove"
+  echo "   - Stuck in processing → investigate"
+  echo "3. Use dry-run rsync to test moves to cold/quarantine"
+  echo "4. DO NOT DELETE without Phase 1 audit manifest approval"
+  echo ""
+  echo "# Audit complete (read-only, no mutations)"
 fi
 
 exit 0

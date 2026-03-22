@@ -14,8 +14,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
-SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# shellcheck source=/dev/null
+source "$ROOT/ops/lib/media-residual-probe.sh"
 
 usage() {
   cat <<'USAGE'
@@ -47,39 +49,23 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
-command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
-
-if [[ ! -f "$SSH_TARGETS" ]]; then
-  echo "STOP: ssh targets not found: $SSH_TARGETS" >&2
+media_residual_probe_require_deps || exit $?
+if ! media_residual_probe_init "download-stack" "$TIMEOUT_SEC"; then
+  media_residual_probe_stop_unreachable "download-stack"
   exit 2
 fi
-
-SSH_HOST=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .host // ""' "$SSH_TARGETS" 2>/dev/null || true)
-SSH_USER=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null || true)
-
-if [[ -z "$SSH_HOST" ]]; then
-  echo "STOP: download-stack SSH target not found" >&2
-  exit 2
-fi
-
-SSH_OPTS="-o ConnectTimeout=$TIMEOUT_SEC -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
-
-ssh_cmd() {
-  ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "$@" 2>/dev/null
-}
 
 # Check 1: Container status
-CONTAINER_STATE=$(ssh_cmd "sudo docker inspect --format='{{.State.Status}}' soularr 2>/dev/null" || echo "not_found")
+CONTAINER_STATE=$(media_residual_probe_ssh "sudo docker inspect --format='{{.State.Status}}' soularr 2>/dev/null" || echo "not_found")
 
 # Check 2: Container uptime
-STARTED_AT=$(ssh_cmd "sudo docker inspect --format='{{.State.StartedAt}}' soularr 2>/dev/null" || echo "unknown")
+STARTED_AT=$(media_residual_probe_ssh "sudo docker inspect --format='{{.State.StartedAt}}' soularr 2>/dev/null" || echo "unknown")
 
 # Check 3: Recent logs analysis
-LOGS=$(ssh_cmd "sudo docker logs soularr --tail $TAIL_LINES 2>&1" || echo "")
+LOGS=$(media_residual_probe_ssh "sudo docker logs soularr --tail $TAIL_LINES 2>&1" || echo "")
 
 # Extract last cycle timestamp
-LAST_CYCLE=$(echo "$LOGS" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' | tail -1)
+LAST_CYCLE=$(printf '%s\n' "$LOGS" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' | tail -1 || true)
 if [[ -z "$LAST_CYCLE" ]]; then
   LAST_CYCLE="unknown"
 fi
@@ -93,13 +79,19 @@ SLEEP_LINE=$(echo "$LOGS" | grep -i "sleep\|wait\|interval\|next" | tail -1 || t
 # Determine status
 STATUS="ok"
 ISSUES=()
+SERVICE_INTENT="$(media_residual_service_status "soularr")"
 
 if [[ "$CONTAINER_STATE" != "running" ]]; then
-  STATUS="fail"
-  ISSUES+=("soularr container not running (state=$CONTAINER_STATE)")
+  if [[ "$SERVICE_INTENT" == "parked" ]]; then
+    STATUS="parked"
+    ISSUES+=("soularr intentionally parked on download-stack residual plane")
+  else
+    STATUS="fail"
+    ISSUES+=("soularr container not running (state=$CONTAINER_STATE)")
+  fi
 fi
 
-if [[ $ERROR_COUNT -gt 5 ]]; then
+if [[ "$STATUS" != "parked" && $ERROR_COUNT -gt 5 ]]; then
   STATUS="warn"
   ISSUES+=("high error count in recent logs ($ERROR_COUNT errors)")
 fi
@@ -111,6 +103,10 @@ if $OUTPUT_JSON; then
     --arg capability "media.soularr.status" \
     --arg generated_at "$GENERATED_AT" \
     --arg status "$STATUS" \
+    --arg intent "$SERVICE_INTENT" \
+    --arg resolution_target "$MEDIA_RESIDUAL_TARGET_ID" \
+    --arg resolution_host "$MEDIA_RESIDUAL_HOST" \
+    --arg resolution_path "$MEDIA_RESIDUAL_PATH_USED" \
     --arg container_state "$CONTAINER_STATE" \
     --arg started_at "$STARTED_AT" \
     --arg last_cycle "$LAST_CYCLE" \
@@ -124,6 +120,10 @@ if $OUTPUT_JSON; then
       generated_at: $generated_at,
       status: $status,
       data: {
+        intent: $intent,
+        resolution_target: $resolution_target,
+        resolution_host: $resolution_host,
+        resolution_path: $resolution_path,
         container_state: $container_state,
         started_at: $started_at,
         last_cycle: $last_cycle,
@@ -138,6 +138,10 @@ else
   echo "media.soularr.status"
   echo "====================="
   echo "status: $STATUS"
+  echo "intent: $SERVICE_INTENT"
+  echo "resolution_target: $MEDIA_RESIDUAL_TARGET_ID"
+  echo "resolution_host: $MEDIA_RESIDUAL_HOST"
+  echo "resolution_path: $MEDIA_RESIDUAL_PATH_USED"
   echo "container_state: $CONTAINER_STATE"
   echo "started_at: $STARTED_AT"
   echo "last_cycle: $LAST_CYCLE"

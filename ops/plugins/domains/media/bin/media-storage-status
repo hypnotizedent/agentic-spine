@@ -14,8 +14,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
-SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# shellcheck source=/dev/null
+source "$ROOT/ops/lib/media-residual-probe.sh"
 
 usage() {
   cat <<'USAGE'
@@ -44,36 +46,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
-command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
-
-if [[ ! -f "$SSH_TARGETS" ]]; then
-  echo "STOP: ssh targets not found: $SSH_TARGETS" >&2
+media_residual_probe_require_deps || exit $?
+if ! media_residual_probe_init "download-stack" "$TIMEOUT_SEC"; then
+  media_residual_probe_stop_unreachable "download-stack"
   exit 2
 fi
 
-SSH_HOST=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .host // ""' "$SSH_TARGETS" 2>/dev/null || true)
-SSH_USER=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null || true)
-
-if [[ -z "$SSH_HOST" ]]; then
-  echo "STOP: download-stack SSH target not found in $SSH_TARGETS" >&2
-  exit 2
-fi
-
-SSH_OPTS="-o ConnectTimeout=$TIMEOUT_SEC -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
-
-ssh_cmd() {
-  ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "$@" 2>/dev/null
-}
-
-INSPECT_JSON=$(ssh_cmd "sudo docker inspect posterizarr flaresolverr decypharr 2>/dev/null" || echo "")
+INSPECT_JSON=$(media_residual_probe_ssh "sudo docker inspect posterizarr flaresolverr decypharr 2>/dev/null" || echo "")
 if [[ -z "$INSPECT_JSON" || "$INSPECT_JSON" == "[]" ]]; then
   echo "STOP: unable to inspect posterizarr/flaresolverr/decypharr on download-stack" >&2
   exit 2
 fi
 
-POSTER_OWNER=$(ssh_cmd "sudo stat -c '%u:%g' /mnt/docker/volumes/posterizarr 2>/dev/null" || echo "missing")
-POSTER_MODE=$(ssh_cmd "sudo stat -c '%a' /mnt/docker/volumes/posterizarr 2>/dev/null" || echo "missing")
+POSTER_OWNER=$(media_residual_probe_ssh "sudo stat -c '%u:%g' /mnt/docker/volumes/posterizarr 2>/dev/null" || echo "missing")
+POSTER_MODE=$(media_residual_probe_ssh "sudo stat -c '%a' /mnt/docker/volumes/posterizarr 2>/dev/null" || echo "missing")
 
 PARSED_JSON=$(INSPECT_JSON="$INSPECT_JSON" POSTER_OWNER="$POSTER_OWNER" POSTER_MODE="$POSTER_MODE" python3 - <<'PY' 2>/dev/null || true
 import json
@@ -159,16 +145,6 @@ data["decypharr"] = {
     "config_mount": decy_cfg,
 }
 
-if poster_state != "running":
-    status = "fail"
-    issues.append(f"posterizarr not running (state={poster_state})")
-if flare_state != "running":
-    status = "fail"
-    issues.append(f"flaresolverr not running (state={flare_state})")
-if decy_state != "running":
-    status = "fail"
-    issues.append(f"decypharr not running (state={decy_state})")
-
 if not poster_cfg.startswith("/mnt/docker/volumes/posterizarr"):
     status = "fail"
     issues.append(f"posterizarr /config not bound to canonical host path (actual={poster_cfg or 'missing'})")
@@ -208,25 +184,79 @@ STATUS=$(printf '%s' "$PARSED_JSON" | python3 -c 'import json,sys; print(json.lo
 ISSUES_JSON=$(printf '%s' "$PARSED_JSON" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("issues", [])))' 2>/dev/null || echo "[]")
 DATA_JSON=$(printf '%s' "$PARSED_JSON" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("data", {})))' 2>/dev/null || echo "{}")
 
+POSTER_STATE=$(printf '%s' "$DATA_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("posterizarr",{}).get("state","unknown"))' 2>/dev/null || echo "unknown")
+FLARE_STATE=$(printf '%s' "$DATA_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("flaresolverr",{}).get("state","unknown"))' 2>/dev/null || echo "unknown")
+DECY_STATE=$(printf '%s' "$DATA_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("decypharr",{}).get("state","unknown"))' 2>/dev/null || echo "unknown")
+
+append_issue_json() {
+  local issue="$1"
+  ISSUES_JSON=$(ISSUES_JSON="$ISSUES_JSON" ISSUE="$issue" python3 - <<'PY'
+import json
+import os
+
+issues = json.loads(os.environ.get("ISSUES_JSON", "[]"))
+issue = os.environ.get("ISSUE", "").strip()
+if issue:
+    issues.append(issue)
+print(json.dumps(issues))
+PY
+)
+}
+
+if media_residual_all_services_parked posterizarr flaresolverr decypharr; then
+  if [[ "$POSTER_STATE" != "running" && "$FLARE_STATE" != "running" && "$DECY_STATE" != "running" ]]; then
+    if [[ "$STATUS" == "ok" ]]; then
+      STATUS="parked"
+    else
+      STATUS="warn"
+    fi
+    append_issue_json "helper containers intentionally parked on download-stack residual plane"
+  fi
+else
+  if [[ "$POSTER_STATE" != "running" ]]; then
+    STATUS="fail"
+    append_issue_json "posterizarr not running (state=$POSTER_STATE)"
+  fi
+  if [[ "$FLARE_STATE" != "running" ]]; then
+    STATUS="fail"
+    append_issue_json "flaresolverr not running (state=$FLARE_STATE)"
+  fi
+  if [[ "$DECY_STATE" != "running" ]]; then
+    STATUS="fail"
+    append_issue_json "decypharr not running (state=$DECY_STATE)"
+  fi
+fi
+
 if $OUTPUT_JSON; then
   command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
   jq -n \
     --arg capability "media.storage.status" \
     --arg generated_at "$GENERATED_AT" \
     --arg status "$STATUS" \
+    --arg resolution_target "$MEDIA_RESIDUAL_TARGET_ID" \
+    --arg resolution_host "$MEDIA_RESIDUAL_HOST" \
+    --arg resolution_path "$MEDIA_RESIDUAL_PATH_USED" \
     --argjson issues "$ISSUES_JSON" \
     --argjson data "$DATA_JSON" \
     '{
       capability: $capability,
       generated_at: $generated_at,
       status: $status,
-      data: ($data + {issues: $issues})
+      data: ($data + {
+        resolution_target: $resolution_target,
+        resolution_host: $resolution_host,
+        resolution_path: $resolution_path,
+        issues: $issues
+      })
     }'
 else
   echo "media.storage.status"
   echo "===================="
   echo "status: $STATUS"
   echo "generated_at: $GENERATED_AT"
+  echo "resolution_target: $MEDIA_RESIDUAL_TARGET_ID"
+  echo "resolution_host: $MEDIA_RESIDUAL_HOST"
+  echo "resolution_path: $MEDIA_RESIDUAL_PATH_USED"
   echo ""
   printf '%s' "$DATA_JSON" | python3 - <<'PY'
 import json
