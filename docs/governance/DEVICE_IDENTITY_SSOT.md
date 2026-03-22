@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-08
+last_verified: 2026-03-22
 verification_method: spine-capabilities
 scope: all-infrastructure
 github_issue: "#615"
@@ -16,7 +16,7 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 > For service endpoints/ports/health routes → CHECK `docs/governance/SERVICE_REGISTRY.yaml`.
 > Before creating ANY new device/VM/service → FOLLOW THESE RULES.
 >
-> Last Verified: March 8, 2026
+> Last Verified: March 22, 2026
 
 ---
 
@@ -87,6 +87,7 @@ This document establishes:
 | Subnet | 10.0.0.0/24 |
 | Gateway | 10.0.0.1 (Ubiquiti UDR) |
 | Proxmox Host | `proxmox-home` (Beelink Mini) |
+| Active media VM | `media-home` (VM 106) — 10.0.0.106 / 100.113.72.41 |
 | LXCs | `pihole-home` active, `download-home` soft-decommissioned |
 | NAS | Synology 918+ (`nas`) |
 | Home Assistant | `ha` (VM on proxmox-home) |
@@ -96,6 +97,7 @@ This document establishes:
 ```bash
 ssh proxmox-home "qm list && pct list"
 ping -c1 nas pihole-home ha
+ssh media-home docker ps
 ```
 
 ### Shop Rack (R730XD + N2024P + UDR6)
@@ -159,6 +161,7 @@ Deep, mutable infra detail lives in the surviving live summaries:
 | mint-data | 100.106.72.25 | Shop | Mint data plane (PostgreSQL, MinIO, Redis) (VM 212) |
 | mint-apps | 100.79.183.14 | Shop | Mint app plane (artwork, quote-page, order-intake) (VM 213) |
 | proxmox-home | 100.103.99.62 | Home | Proxmox VE (home host) |
+| media-home | 100.113.72.41 | Home | Canonical home media plane (VM 106) |
 | nas | 100.102.199.111 | Home | Synology NAS |
 | ha | 100.67.120.1 | Home | Home Assistant |
 | pihole-home | 100.105.148.96 | Home | Pi-hole (home DNS) |
@@ -263,6 +266,7 @@ curl -s https://n8n.ronny.works/healthz
 
 | Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
 |--------|-------------------|--------------|------|----------|--------------|
+| media-home VM | `media-home` | 100.113.72.41 | Canonical home media plane (VM 106) | Home | `ssh media-home docker ps` |
 | download-stack VM | `download-stack` | 100.107.36.76 | Residual downloads + *arr fallback (VM 209) | Shop | `ssh download-stack docker ps` |
 | streaming-stack VM | `streaming-stack` | 100.123.207.64 | Residual streaming fallback (VM 210) | Shop | `ssh streaming-stack docker ps` |
 

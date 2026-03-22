@@ -18,6 +18,8 @@ MEDIA_COMPOSE="$WORKBENCH_ROOT/infra/compose/media-stack/docker-compose.yml"
 MEDIA_MCPJUNGLE_CONFIG="$WORKBENCH_ROOT/infra/compose/mcpjungle/servers/media-stack.json"
 DL_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/domains/download-stack/docker-compose.yml"
 ST_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/domains/streaming-stack/docker-compose.yml"
+PRIMARY_STACK="media-home"
+RESIDUAL_STACKS=("download-stack" "streaming-stack")
 
 ERRORS=0
 err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }
@@ -27,7 +29,7 @@ command -v yq >/dev/null 2>&1 || { err "yq not installed"; exit 1; }
 command -v jq >/dev/null 2>&1 || { err "jq not installed"; exit 1; }
 command -v curl >/dev/null 2>&1 || { err "curl not installed"; exit 1; }
 
-for file in "$POLICY" "$RUNWAY" "$MEDIA_SERVICES" "$SSH_TARGETS" "$MEDIA_COMPOSE" "$MEDIA_MCPJUNGLE_CONFIG" "$DL_COMPOSE" "$ST_COMPOSE"; do
+for file in "$POLICY" "$RUNWAY" "$MEDIA_SERVICES" "$SSH_TARGETS" "$MEDIA_COMPOSE" "$MEDIA_MCPJUNGLE_CONFIG"; do
   [[ -f "$file" ]] || { err "missing required file: $file"; exit 1; }
 done
 
@@ -89,11 +91,18 @@ check_compose_keys() {
   done
 }
 
-check_compose_keys "$MEDIA_COMPOSE" "media-home"
-check_compose_keys "$DL_COMPOSE" "download-stack"
-check_compose_keys "$ST_COMPOSE" "streaming-stack"
+check_compose_keys "$MEDIA_COMPOSE" "$PRIMARY_STACK"
 
-# Ensure canonical media-home keeps autopulse/crosswatch wiring.
+if [[ -f "$DL_COMPOSE" ]]; then
+  check_compose_keys "$DL_COMPOSE" "download-stack"
+fi
+
+if [[ -f "$ST_COMPOSE" ]]; then
+  check_compose_keys "$ST_COMPOSE" "streaming-stack"
+fi
+
+# Residual compatibility only: preserve bridge wiring while the shop fallback
+# surfaces still exist, but do not treat download-stack as a co-equal authority.
 for required in \
   'AUTOPULSE__TARGETS__JELLYFIN__TOKEN=${JELLYFIN_API_TOKEN}' \
   'AUTOPULSE__TARGETS__JELLYFIN__URL=' \
@@ -102,7 +111,7 @@ for required in \
   'AUTOPULSE__TRIGGERS__LIDARR__TYPE=lidarr' \
   '127.0.0.1:8787:8787'
 do
-  if ! grep -Fq "$required" "$DL_COMPOSE"; then
+  if [[ -f "$DL_COMPOSE" ]] && ! grep -Fq "$required" "$DL_COMPOSE"; then
     err "download-stack: missing required canonical media bridge setting: $required"
   fi
 done
@@ -262,7 +271,7 @@ else
 fi
 
 # ── 4. Stack defaults must NOT use legacy media-stack project ──────────────
-for stack in media-home download-stack streaming-stack; do
+for stack in "$PRIMARY_STACK" "${RESIDUAL_STACKS[@]}"; do
   local_project=$(yq -r ".stack_defaults[\"$stack\"].project // \"\"" "$RUNWAY" 2>/dev/null || true)
   local_path=$(yq -r ".stack_defaults[\"$stack\"].path // \"\"" "$RUNWAY" 2>/dev/null || true)
 
@@ -274,7 +283,7 @@ for stack in media-home download-stack streaming-stack; do
 done
 
 # ── 5. SSH target contract parity ──────────────────────────────────────────
-for target in media-home download-stack streaming-stack; do
+for target in "$PRIMARY_STACK" "${RESIDUAL_STACKS[@]}"; do
   ssh_host=$(yq -r ".ssh.targets[] | select(.id == \"$target\") | .host // \"\"" "$SSH_TARGETS" 2>/dev/null || true)
   if [[ -z "$ssh_host" ]]; then
     err "SSH target '$target' missing from ssh.targets.yaml"

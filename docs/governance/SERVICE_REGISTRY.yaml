@@ -2,8 +2,8 @@
 # Status: authoritative
 # authority_state: authoritative
 # authority_concern: service_registry_surfaces
-# Last verified: 2026-03-18
-# Updated: 2026-03-18
+# Last verified: 2026-03-22
+# Updated: 2026-03-22
 #
 # This registry defines WHAT services exist, WHERE they run, and the canonical
 # stack/health inputs that generate:
@@ -512,7 +512,7 @@ services:
     compose: /srv/appdata/compose/media-stack/docker-compose.yml
     container: radarr
     status: active
-    notes: "Canonical home movie-management surface on media-home VM 106. Download clients remain intentionally parked during stabilization."
+    notes: "Canonical home movie-management surface on media-home VM 106. Dual-ingest is live: SABnzbd primary, qBittorrent secondary via gluetun."
 
   sonarr:
     host: media-home
@@ -521,7 +521,7 @@ services:
     compose: /srv/appdata/compose/media-stack/docker-compose.yml
     container: sonarr
     status: active
-    notes: "Canonical home TV-management surface on media-home VM 106. Download clients remain intentionally parked during stabilization."
+    notes: "Canonical home TV-management surface on media-home VM 106. Dual-ingest is live: SABnzbd primary, qBittorrent secondary via gluetun."
 
   lidarr:
     host: media-home
@@ -530,7 +530,7 @@ services:
     compose: /srv/appdata/compose/media-stack/docker-compose.yml
     container: lidarr
     status: active
-    notes: "Canonical home music-management surface on media-home VM 106. Download clients remain intentionally parked during stabilization."
+    notes: "Canonical home music-management surface on media-home VM 106. SABnzbd is the sole active download client; qBittorrent remains intentionally disabled here."
 
   prowlarr:
     host: media-home
@@ -547,8 +547,8 @@ services:
     health: /api?mode=version&output=json
     compose: /srv/appdata/compose/media-stack/docker-compose.yml
     container: sabnzbd
-    status: parked
-    notes: "Canonical home download surface, intentionally parked during the no-download stabilization phase."
+    status: active
+    notes: "Canonical home usenet ingest surface on media-home VM 106. queue_limit=3 and canary guardrails are live."
 
   tdarr:
     host: download-stack
@@ -575,8 +575,8 @@ services:
     port: 8081
     compose: /srv/appdata/compose/media-stack/docker-compose.yml
     container: qbittorrent
-    status: parked
-    notes: "Canonical home torrent download surface, intentionally parked during the no-download stabilization phase."
+    status: active
+    notes: "Canonical home torrent ingest surface on media-home VM 106. Secondary path only, VPN-tunneled via gluetun."
 
   unpackerr:
     host: download-stack
@@ -602,11 +602,11 @@ services:
     notes: "Residual shop writer helper. Container exists on VM 209 but is intentionally parked during home-first stabilization."
 
   gluetun:
-    host: download-stack
-    compose: /opt/stacks/download-stack/docker-compose.yml
+    host: media-home
+    compose: /srv/appdata/compose/media-stack/docker-compose.yml
     container: gluetun
-    status: parked
-    notes: "Residual shop VPN sidecar. Container exists on VM 209 but is intentionally parked during the no-download stabilization phase."
+    status: active
+    notes: "Canonical VPN sidecar on media-home VM 106 for qBittorrent secondary ingest."
 
   slskd:
     host: download-stack
@@ -685,18 +685,18 @@ services:
     notes: "Residual shop helper. Container exists on VM 209 but is intentionally parked during home-first stabilization."
 
   crowdsec:
-    host: download-stack
-    compose: /opt/stacks/download-stack/docker-compose.yml
+    host: media-home
+    compose: /srv/appdata/compose/media-stack/docker-compose.yml
     container: crowdsec
-    status: parked
-    notes: "Residual shop security sidecar. Container exists on VM 209 but is intentionally parked during home-first stabilization."
+    status: active
+    notes: "Canonical security monitoring sidecar on media-home VM 106."
 
   watchtower-download:
     host: download-stack
     container: watchtower
     compose: /opt/stacks/download-stack/docker-compose.yml
     status: active
-    notes: "Auto-update utility. Requires DOCKER_API_VERSION=1.45 on Docker CE 29.x. No health probe (infrastructure sidecar)."
+    notes: "Residual shop auto-update utility. Active only on download-stack and not part of media-home canonical health."
 
   download-node-exporter:
     host: download-stack
@@ -705,7 +705,7 @@ services:
     container: node-exporter
     compose: /opt/stacks/download-stack/docker-compose.yml
     status: active
-    notes: "Host metrics exporter for Prometheus on download-stack."
+    notes: "Residual shop host metrics exporter on download-stack; not part of media-home canonical health."
 
   # ─── Media Home (VM 106) — canonical active read/watch plane ───────────────
   jellyfin:
@@ -790,7 +790,7 @@ services:
     container: watchtower
     compose: /srv/appdata/compose/media-stack/docker-compose.yml
     status: parked
-    notes: "Home media auto-update utility is intentionally parked in the boring baseline."
+    notes: "Media-home auto-update utility is intentionally parked in the boring baseline."
 
   streaming-node-exporter:
     host: media-home
@@ -799,7 +799,7 @@ services:
     container: node-exporter
     compose: /srv/appdata/compose/media-stack/docker-compose.yml
     status: parked
-    notes: "Home media node-exporter exists on the compose surface but is intentionally parked in the boring baseline."
+    notes: "Media-home node-exporter exists on the compose surface but is intentionally parked in the boring baseline."
 
   # ─── Immich (VM 203) ────────────────────────────────────────────────
   immich-server:
@@ -1156,7 +1156,7 @@ hosts:
       stacks:
         - name: media-stack
           path: /srv/appdata/compose/media-stack
-    notes: "Canonical home media plane (read/watch active, helper surfaces selectively parked during boring stabilization)."
+    notes: "Canonical home media plane (ARR, download, and read/watch surfaces active on VM 106; a small parked helper set remains intentionally off)."
 
   finance-stack:
     lan_ip: 192.168.1.211

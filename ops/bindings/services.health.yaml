@@ -5,7 +5,7 @@
 # authority_concern: service_registry_surfaces
 # projection_of: docs/governance/SERVICE_REGISTRY.yaml
 # generated_by: service.registry.projection.build
-# source_sha256: 72d9ee37114c501fb4917c9ae48c842f086dff855452ec8f8b2b6d80dc8cf27e
+# source_sha256: e9390dc3e98c89b66e170f672b56e87d7dacb24b737bb6d362a458cb43cbd754
 # Do NOT edit manually. Rebuild with: ./bin/ops cap run service.registry.projection.build
 version: 1
 status: projection
@@ -13,7 +13,7 @@ authority_state: projection
 authority_concern: service_registry_surfaces
 projection_of: docs/governance/SERVICE_REGISTRY.yaml
 source_capability: service.registry.projection.build
-source_sha256: 72d9ee37114c501fb4917c9ae48c842f086dff855452ec8f8b2b6d80dc8cf27e
+source_sha256: e9390dc3e98c89b66e170f672b56e87d7dacb24b737bb6d362a458cb43cbd754
 defaults:
   connect_timeout_sec: 5
   max_time_sec: 10
@@ -202,28 +202,36 @@ endpoints:
   url: http://100.113.72.41:7878/ping
   expect: 200
   enabled: true
-  description: Canonical home movie-management surface on media-home VM 106. Download
-    clients remain intentionally parked during stabilization.
+  description: 'Canonical home movie-management surface on media-home VM 106. Dual-ingest
+    is live: SABnzbd primary, qBittorrent secondary via gluetun.'
 - id: sonarr
   host: media-home
   url: http://100.113.72.41:8989/ping
   expect: 200
   enabled: true
-  description: Canonical home TV-management surface on media-home VM 106. Download
-    clients remain intentionally parked during stabilization.
+  description: 'Canonical home TV-management surface on media-home VM 106. Dual-ingest
+    is live: SABnzbd primary, qBittorrent secondary via gluetun.'
 - id: lidarr
   host: media-home
   url: http://100.113.72.41:8686/ping
   expect: 200
   enabled: true
-  description: Canonical home music-management surface on media-home VM 106. Download
-    clients remain intentionally parked during stabilization.
+  description: Canonical home music-management surface on media-home VM 106. SABnzbd
+    is the sole active download client; qBittorrent remains intentionally disabled
+    here.
 - id: prowlarr
   host: media-home
   url: http://100.113.72.41:9696/ping
   expect: 200
   enabled: true
   description: Canonical home indexer-management surface on media-home VM 106.
+- id: sabnzbd
+  host: media-home
+  url: http://100.113.72.41:8080/api?mode=version&output=json
+  expect: 200
+  enabled: true
+  description: Canonical home usenet ingest surface on media-home VM 106. queue_limit=3
+    and canary guardrails are live.
 - id: tdarr
   host: download-stack
   url: http://192.168.1.209:8265/
@@ -236,7 +244,8 @@ endpoints:
   url: http://192.168.1.209:9100/metrics
   expect: 200
   enabled: true
-  description: Residual host metrics exporter for Prometheus on download-stack.
+  description: Residual shop host metrics exporter on download-stack; not part of
+    media-home canonical health.
 - id: jellyfin
   host: media-home
   url: http://100.113.72.41:8096/health
@@ -356,46 +365,6 @@ endpoints:
   enabled: true
   description: Migrated from macbook (LOOP-AI-CONSOLIDATION-20260208)
 lifecycle_bindings:
-- host: download-stack
-  source_registry: ops/bindings/service.data.lifecycle.registry.yaml
-  services:
-  - &id001
-    service_id: media
-    display_name: Media
-    criticality: tier1
-    canonical_live_roots:
-    - nas:/volume1/media-staging (Canonical active media library and intake share
-      for the home plane.)
-    staging_roots:
-    - nas:/volume1/media-staging/downloads (Active home intake/download lane. Must
-      drain after import and must never become a permanent residence.)
-    - media-home:/srv/media/downloads (Compatibility alias for the active home intake/download
-      lane. Must drain after import and must never become a permanent residence.)
-    quarantine_roots:
-    - pve:/md1400/archive/media-quarantine/pending (Operator review queue for unresolved
-      media.)
-    - pve:/md1400/archive/media-quarantine/reviewed (Reviewed hold lane awaiting archive
-      or delete.)
-    export_archive_lanes:
-    - pve:/md1400/media-cold (Cold archive and legacy media hold lane.)
-    - nas:/volume1/backups/apps/media-config (Canonical primary config backup archive
-      for the combined media-home plane.)
-    - pve:/md1400/backup-cold/apps/media-config (Secondary/offsite cold copy lane
-      for the combined media-home config archive.)
-    retention_policy:
-      policy_type: bounded_stage_windows
-      claim_days: null
-      downloads_max_age_days: 7
-      quarantine_pending_max_age_days: 30
-      quarantine_reviewed_max_age_days: 90
-      description: Payload libraries are canonical live state, not a rolling retention
-        bucket. Downloads and quarantine are explicitly time-boxed.
-    capacity_model:
-      mode: advisory
-      type: dataset_pressure_watch
-      source_ref: ops/bindings/shop.media.pressure.authority.yaml
-      description: The media pool is near saturation; this registry captures drain/expiry
-        intent rather than inventing a fake rolling-retention day count.
 - host: immich
   source_registry: ops/bindings/service.data.lifecycle.registry.yaml
   services:
@@ -430,7 +399,43 @@ lifecycle_bindings:
 - host: media-home
   source_registry: ops/bindings/service.data.lifecycle.registry.yaml
   services:
-  - *id001
+  - service_id: media
+    display_name: Media
+    criticality: tier1
+    canonical_live_roots:
+    - nas:/volume1/media-staging (Canonical active media library and intake share
+      for the home plane.)
+    staging_roots:
+    - nas:/volume1/media-staging/downloads (Active home intake/download lane. Must
+      drain after import and must never become a permanent residence.)
+    - media-home:/srv/media/downloads (Compatibility alias for the active home intake/download
+      lane. Must drain after import and must never become a permanent residence.)
+    quarantine_roots:
+    - pve:/md1400/archive/media-quarantine/pending (Operator review queue for unresolved
+      media.)
+    - pve:/md1400/archive/media-quarantine/reviewed (Reviewed hold lane awaiting archive
+      or delete.)
+    export_archive_lanes:
+    - pve:/md1400/media-cold (Cold archive and legacy media hold lane.)
+    - nas:/volume1/backups/apps/media-config (Canonical primary config backup archive
+      for the combined media-home plane.)
+    - pve:/md1400/backup-cold/apps/media-config (Secondary/offsite cold copy lane
+      for the combined media-home config archive.)
+    retention_policy:
+      policy_type: bounded_stage_windows
+      claim_days: null
+      downloads_max_age_days: 7
+      quarantine_pending_max_age_days: 30
+      quarantine_reviewed_max_age_days: 90
+      description: Payload libraries are canonical live state, not a rolling retention
+        bucket. Downloads and quarantine are explicitly time-boxed.
+    capacity_model:
+      mode: advisory
+      type: dataset_pressure_watch
+      source_ref: ops/bindings/home.media.pressure.authority.yaml
+      description: The canonical media capacity watch is now home-first. This registry
+        captures honest drain/expiry intent against the active Synology-backed home
+        plane.
 - host: surveillance-stack
   source_registry: ops/bindings/service.data.lifecycle.registry.yaml
   services:

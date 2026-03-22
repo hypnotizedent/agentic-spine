@@ -4,13 +4,13 @@
 # Original skeleton: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
 # Closes: GAP-OP-1405 (when enforced at runtime with drift gate)
 # Addresses: GAP-OP-1389 (availability truth split)
-# Runtime validation: 2026-03-04 — 4-leg E2E manual check + Jellyseerr sync triggered
+# Runtime validation: 2026-03-22 — active-plane media-home proofs + historical pre-cutover reference preserved
 
 contract: MEDIA_AVAILABILITY_PROGRESSION_CONTRACT_V1
 version: "1.2"
 status: active
 created: "2026-03-03"
-updated_at: "2026-03-04"
+updated_at: "2026-03-22"
 owner: "@ronny"
 authority_loop: LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303
 original_skeleton_loop: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
@@ -27,16 +27,46 @@ description: |
   availability, the earlier-stage authority wins and the later-stage system
   must be reconciled to match.
 
-  Runtime validation performed 2026-03-04 via SSH Tailscale probes:
-  - 5-movie E2E sample: all 4 legs PASS (Radarr -> filesystem -> Jellyfin -> Jellyseerr)
-  - Jellyseerr availability-sync, radarr-scan, sonarr-scan all triggered via jobs API
-  - 62 processing requests identified (AVAIL-F2 pattern confirmed active)
-  - Queue: 9 entries, 0 ghost (hasFile=true), 1 import-blocked, 2 downloadClientUnavailable
+  Current active-plane validation is media-home-first. Historical 2026-03-04
+  shop probes remain preserved as pre-cutover evidence only.
 
-# Runtime validation evidence (2026-03-04)
+# Runtime validation evidence (2026-03-22 active plane)
 runtime_validation:
+  date: "2026-03-22"
+  method: "Current active-plane validation via media-home read-only status capabilities, direct docker runtime proof on 10.0.0.106, and canonical endpoint checks against media-home."
+  active_plane_host: media-home
+  active_plane_lan_ip: 10.0.0.106
+  active_plane_tailscale_ip: 100.113.72.41
+  status_caps:
+    media_service_status: ok
+    media_download_canary_check: "12/12 PASS"
+    media_vpn_health: OK
+    media_qbittorrent_status: OK
+  docker_runtime_proof:
+    running:
+      - qbittorrent
+      - gluetun
+      - sabnzbd
+      - crowdsec
+      - sonarr
+      - radarr
+      - lidarr
+      - prowlarr
+      - jellyfin
+      - jellyseerr
+      - homarr
+      - navidrome
+      - wizarr
+    parked:
+      - bazarr
+      - spotisub
+      - subgen
+      - watchtower
+      - node-exporter
+  note: "Historical shop-hosted validation is retained below as pre-cutover reference only."
+historical_shop_validation:
   date: "2026-03-04"
-  method: "Historical SSH via Tailscale to residual shop download-stack (100.107.36.76) and streaming-stack (100.123.207.64); current active home-plane validation is handled by the home storage contracts."
+  method: "Historical SSH via Tailscale to residual shop download-stack (100.107.36.76) and streaming-stack (100.123.207.64) before the canonical home-plane cutover settled."
   e2e_sample:
     size: 5
     movies_tested:
@@ -160,8 +190,8 @@ sync_handshakes:
       - "Jellyfin library root path does not match NFS mount point"
       - "Autopulse webhook misconfigured or down"
       - "Jellyfin scan interval too long or scan skipped due to lock"
-      - "NFS mount on streaming-stack is stale or unmounted"
-    reconciliation: "Trigger manual library scan; if still missing, verify Jellyfin library root includes the file path"
+      - "media-home /srv/media mount is stale or unmounted"
+    reconciliation: "Trigger manual library scan; if still missing, verify media-home library roots include the file path"
     gap_ref: GAP-OP-1392
     runtime_observation: |
       2026-03-04: 5/5 sampled movies present in Jellyfin. Handshake functional for existing library.
@@ -261,7 +291,7 @@ verification:
         pass_if: "hasFile=true"
       - leg: 2
         check: "File exists on filesystem at movieFile.path"
-        method: "SSH + stat on download-stack"
+        method: "SSH + stat on media-home"
         pass_if: "file exists and size > 0"
       - leg: 3
         check: "Jellyfin library contains the item"
