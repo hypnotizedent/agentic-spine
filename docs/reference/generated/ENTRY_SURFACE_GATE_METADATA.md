@@ -5,4 +5,4 @@ registry_updated: 2026-03-19
 gate_count_total: 405
 gate_count_active: 105
 gate_count_retired: 300
-max_gate_id: D415
+max_gate_id: D417
