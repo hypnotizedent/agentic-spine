@@ -1,0 +1,306 @@
+# Media Runtime Canon Convergence Audit
+# Status: authoritative
+# Owner: "@ronny"
+# Created: 2026-03-21
+# Authority: Lane 3 — media-runtime-canon-convergence-and-pipeline-cleanse-v1
+
+contract: MEDIA_RUNTIME_CANON_CONVERGENCE_AUDIT_V1
+version: "1.0"
+status: active
+created: "2026-03-21"
+updated_at: "2026-03-21"
+owner: "@ronny"
+
+description: |
+  Cross-domain audit of Radarr, Lidarr, and Jellyfin runtime state against
+  media.quality.policy.yaml canon. Documents drift, remediation queues, and
+  blocking issues discovered during convergence audit.
+
+# ─────────────────────────────────────────────────────────────────
+# Radarr Runtime State
+# ─────────────────────────────────────────────────────────────────
+
+radarr:
+  audit_timestamp: "2026-03-22T01:00:00Z"
+  movies_total: 9556
+  movies_with_files: 1
+  movies_monitored: 0
+  operating_mode: catalog_only
+  root_folder: /media/movies
+  root_folder_accessible: true
+  stale_root_references:
+    - path: /movies
+      affected_surfaces:
+        - movie_collections
+        - import_lists
+      severity: high
+
+  profiles:
+    - id: 1
+      label: Any
+      movies_assigned: 7
+      bluray_allowed: true
+      bluray_drift: true
+      cf_penalties: none
+      note: "Divergent from Sonarr canon where all Blu-ray was disabled"
+
+    - id: 4
+      label: HD-1080p
+      movies_assigned: 5412
+      bluray_allowed: false
+      bluray_drift: false
+      cf_penalties:
+        - "Language: Not English = -10000"
+        - "Language: Not Original = -10000"
+      note: "Converged with canon; Bluray-1080p allowed but as upgrade target only"
+
+    - id: 7
+      label: HD Bluray + WEB
+      movies_assigned: 4135
+      bluray_allowed: true
+      bluray_drift: false
+      cf_penalties:
+        - "BR-DISK = -10000"
+        - "Language: Not English = -10000"
+        - "Language: Not Original = -10000"
+      note: "Bluray-720p/1080p allowed (profile purpose); BR-DISK blocked via CF"
+
+  custom_formats:
+    - id: 41
+      label: "Language: Not Original"
+      scored_profiles: [4, 7]
+    - id: 42
+      label: "Language: Not English"
+      scored_profiles: [4, 7]
+    - id: 43
+      label: BR-DISK
+      scored_profiles: [7]
+
+  download_clients:
+    sabnzbd:
+      runtime_status: enabled
+      port: 8080
+      category: movies
+    qbittorrent:
+      runtime_status: disabled
+      port: 8081
+      category: radarr
+
+  queue:
+    total: 6
+    state: delay
+    bluray_in_queue: 2
+    note: "Normal delay processing; Bluray-1080p items allowed by HD Bluray+WEB profile"
+
+  health_issues:
+    - source: MovieCollectionRootFolderCheck
+      type: error
+      root_cause: "Stale /movies root; should be /media/movies"
+    - source: ImportListRootFolderCheck
+      type: error
+      root_cause: "Same stale /movies root"
+    - source: RemovedMovieCheck
+      type: error
+      root_cause: "tmdbid 1618667 removed from TMDb"
+
+# ─────────────────────────────────────────────────────────────────
+# Lidarr Runtime State
+# ─────────────────────────────────────────────────────────────────
+
+lidarr:
+  audit_timestamp: "2026-03-22T01:00:00Z"
+  artists_total: 275
+  artists_monitored: 275
+  track_files: 580
+  size_gb: 13.17
+  wanted_missing: 3038
+  root_folder: /media/music
+  root_folder_accessible: true
+
+  profiles:
+    - id: 1
+      label: Any
+      artists_assigned: 2
+      note: "All formats including trash lossy"
+    - id: 2
+      label: Lossless
+      artists_assigned: 35
+      note: "FLAC/ALAC only"
+    - id: 3
+      label: Standard
+      artists_assigned: 238
+      upgrades_allowed: true
+      cutoff: "High Quality Lossy"
+      note: "Primary profile; allows low-quality through lossless with upgrade path"
+
+  metadata_profiles:
+    - id: 1
+      label: Standard
+      official_only: true
+    - id: 2
+      label: None
+      all_disabled: true
+
+  download_clients:
+    qbittorrent:
+      runtime_status: broken
+      error: "Resource temporarily unavailable (qbittorrent:8081)"
+    sabnzbd:
+      runtime_status: path_broken
+      error: "/downloads/complete/music not visible inside container"
+
+  queue:
+    total: 24
+    import_failed: 21
+    import_pending: 3
+    root_cause: "Track count mismatch between release and MusicBrainz metadata"
+
+  health_issues:
+    - source: DownloadClientStatusCheck
+      type: warning
+      detail: "qBittorrent unreachable"
+    - source: DownloadClientCheck
+      type: error
+      detail: "Unable to communicate with qBittorrent"
+    - source: RemotePathMappingCheck
+      type: error
+      detail: "SABnzbd path /downloads/complete/music not visible in container"
+    - source: IndexerLongTermStatusCheck
+      type: warning
+      detail: "NZBFinder, Usenet-Crawler failing 6+ hours"
+
+# ─────────────────────────────────────────────────────────────────
+# Jellyfin Runtime State
+# ─────────────────────────────────────────────────────────────────
+
+jellyfin:
+  audit_timestamp: "2026-03-22T01:00:00Z"
+  version: "10.11.6"
+
+  libraries:
+    - label: Movies
+      path: /media/movies
+      type: movies
+      realtime_monitor: true
+      health: active
+    - label: TV Shows
+      path: /media/tv
+      type: tvshows
+      realtime_monitor: true
+      health: active
+    - label: Collections
+      path: "%AppDataPath%/collections"
+      type: boxsets
+      realtime_monitor: false
+      health: active
+
+  missing_libraries:
+    - label: Music
+      expected_path: /media/music
+      host_path: /srv/media/music
+      size_gb: 14
+      managed_by: lidarr
+      note: "Path mounted and accessible; library not configured"
+
+  container_mounts:
+    - host: /srv/media
+      container: /media
+      type: bind
+    - host: /srv/appdata/compose/media-playback/volumes/jellyfin/config
+      container: /config
+      type: bind
+    - host: /srv/appdata/compose/media-playback/volumes/jellyfin/cache
+      container: /cache
+      type: bind
+
+  stale_artifacts:
+    - path: /media/host_test
+      recommendation: remove_from_host
+    - path: /media/test_file
+      recommendation: remove_from_host
+
+# ─────────────────────────────────────────────────────────────────
+# Downloads / Pipeline Residue
+# ─────────────────────────────────────────────────────────────────
+
+downloads:
+  audit_timestamp: "2026-03-22T01:00:00Z"
+  total_size_gb: 270
+
+  quarantine:
+    path: /srv/media/downloads/.quarantine/20260321
+    size_gb: 253
+    breakdown:
+      tv_gb: 127
+      tv_items: 26
+      music_gb: 126
+      music_items: 445
+      slskd_gb: 1.4
+      slskd_items: 6
+    note: "Today's Sonarr Blu-ray purge + music quarantine"
+
+  complete_residue:
+    tv:
+      size_gb: 3.6
+      items:
+        - "Narcos.S01E06 BluRay (hardlink residue)"
+        - "Will.&.Grace.S03 WebDL"
+    music:
+      size_mb: 231
+      items:
+        - "Paul Oakenfold (matches Lidarr importFailed)"
+
+  music_migration_staging:
+    path: /srv/media/downloads/music-migration-staging
+    size_gb: 13
+    artist_count: 237
+    note: "Pre-import staging; blocked by download client path fix"
+
+  incomplete:
+    size_kb: 300
+    items:
+      - "Cheers.S10E25 (in progress)"
+
+# ─────────────────────────────────────────────────────────────────
+# Capacity
+# ─────────────────────────────────────────────────────────────────
+
+capacity:
+  usage_pct: 86
+  runway_status: critical
+  days_to_warn: 0.0
+  days_to_fail: 0.0
+  policy_compliant: false
+  primary_lever: "Clean quarantine (253 GB)"
+  secondary_lever: "Drain music-migration-staging (13 GB)"
+  quarantine_tier_initialized: false
+  note: "md1400 quarantine tier not created yet"
+
+# ─────────────────────────────────────────────────────────────────
+# Verification Results
+# ─────────────────────────────────────────────────────────────────
+
+verifications:
+  media_e2e_verify:
+    status: failed
+    reason: "Cannot reach Radarr API from local machine (localhost routing)"
+    note: "Environment limitation, not runtime issue"
+  media_capacity_snapshot_build:
+    status: done
+    result: "86% usage, critical runway"
+  media_quarantine_review:
+    status: done
+    result: "Quarantine tier NOT INITIALIZED on md1400"
+
+# ─────────────────────────────────────────────────────────────────
+# Evidence
+# ─────────────────────────────────────────────────────────────────
+
+evidence:
+  path: "~/.evidence/spine/verify/"
+  files:
+    - MEDIA_RUNTIME_CANON_CONVERGENCE_AND_PIPELINE_CLEANSE_V1_20260321.md
+    - MEDIA_RUNTIME_CANON_BEFORE_AFTER_20260321.tsv
+    - MEDIA_RUNTIME_CANON_COMMAND_LOG_20260321.md
+    - MEDIA_RUNTIME_APP_PARITY_20260321.tsv
+    - MEDIA_RUNTIME_REMEDIATION_QUEUES_20260321.tsv
