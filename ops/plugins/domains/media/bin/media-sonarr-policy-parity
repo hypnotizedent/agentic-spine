@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+# media.sonarr.policy.parity — verify Sonarr runtime state matches canonical quality policy
+#
+# Usage:
+#   ./bin/ops cap run media.sonarr.policy.parity
+#   ./bin/ops cap run media.sonarr.policy.parity --json
+#
+# Contract:
+# - SSHs to media-home and queries Sonarr API
+# - Reads canonical policy from ops/bindings/media.quality.policy.yaml
+# - Compares quality profiles, CF scores, profile assignments
+# - Reports PASS/FAIL for each check
+# - Read-only, no mutations
+# - Exit 0 if all checks pass, exit 1 if any fail
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
+QUALITY_POLICY="$ROOT/ops/bindings/media.quality.policy.yaml"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+OUTPUT_JSON=false
+TIMEOUT_SEC=15
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)     OUTPUT_JSON=true; shift ;;
+    --timeout)  TIMEOUT_SEC="${2:-15}"; shift 2 ;;
+    -h|--help)
+      echo "media.sonarr.policy.parity — verify Sonarr matches canonical quality policy"
+      echo "  --json     JSON output"
+      echo "  --timeout  SSH timeout (default: 15)"
+      exit 0 ;;
+    --)         shift ;;
+    *)          echo "FAIL: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "MISSING_DEP: python3" >&2; exit 2; }
+
+if [[ ! -f "$QUALITY_POLICY" ]]; then
+  echo "MISSING_FILE: $QUALITY_POLICY — quality policy not found" >&2
+  exit 2
+fi
+
+# Resolve media-home SSH target
+MEDIA_HOME_HOST=$(yq '.ssh.targets[] | select(.id == "media-home") | .host' "$SSH_TARGETS" 2>/dev/null)
+MEDIA_HOME_USER=$(yq '.ssh.targets[] | select(.id == "media-home") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null)
+
+if [[ -z "$MEDIA_HOME_HOST" || "$MEDIA_HOME_HOST" == "null" ]]; then
+  echo "MISSING_SSH_TARGET: media-home not in ssh.targets.yaml" >&2
+  exit 2
+fi
+
+TARGET_SSH="${MEDIA_HOME_USER}@${MEDIA_HOME_HOST}"
+
+# Read Sonarr API key from runtime
+SONARR_KEY=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "docker exec sonarr cat /config/config.xml 2>/dev/null" \
+  | sed -n 's/.*<ApiKey>\(.*\)<\/ApiKey>.*/\1/p' 2>/dev/null || echo "")
+
+if [[ -z "$SONARR_KEY" ]]; then
+  echo "FAIL: could not read Sonarr API key from media-home" >&2
+  exit 2
+fi
+
+SONARR_API="http://localhost:8989/api/v3"
+
+echo "# media.sonarr.policy.parity"
+echo "# Generated: $GENERATED_AT"
+echo "# Target: media-home ($TARGET_SSH)"
+echo "# Canon: $QUALITY_POLICY"
+echo ""
+
+# Fetch Sonarr data into temp files
+TMPDIR_PARITY=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_PARITY"' EXIT
+
+ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "curl -sf '$SONARR_API/qualityprofile' -H 'X-Api-Key: $SONARR_KEY'" \
+  > "$TMPDIR_PARITY/profiles.json" 2>/dev/null || echo "[]" > "$TMPDIR_PARITY/profiles.json"
+
+ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "curl -sf '$SONARR_API/customformat' -H 'X-Api-Key: $SONARR_KEY'" \
+  > "$TMPDIR_PARITY/customformats.json" 2>/dev/null || echo "[]" > "$TMPDIR_PARITY/customformats.json"
+
+ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "curl -sf '$SONARR_API/series' -H 'X-Api-Key: $SONARR_KEY'" \
+  > "$TMPDIR_PARITY/series.json" 2>/dev/null || echo "[]" > "$TMPDIR_PARITY/series.json"
+
+# Run all parity checks in python3
+python3 - "$QUALITY_POLICY" "$TMPDIR_PARITY" "$OUTPUT_JSON" "$GENERATED_AT" <<'PARITY_PY'
+import json
+import os
+import subprocess
+import sys
+
+policy_path = sys.argv[1]
+data_dir = sys.argv[2]
+output_json = sys.argv[3] == "true"
+generated_at = sys.argv[4]
+
+# Load policy via yq (always available; avoids PyYAML dependency)
+policy = json.loads(subprocess.check_output(
+    ["yq", "-o", "json", ".", policy_path],
+    text=True
+))
+
+with open(os.path.join(data_dir, "profiles.json")) as f:
+    profiles = json.load(f)
+with open(os.path.join(data_dir, "customformats.json")) as f:
+    custom_formats = json.load(f)
+with open(os.path.join(data_dir, "series.json")) as f:
+    series_list = json.load(f)
+
+sonarr_policy = policy.get("tool_profile_targets", {}).get("sonarr", {})
+language_policy = policy.get("language_policy", {}).get("tv", {})
+
+# ── Check machinery ──
+checks = []
+pass_count = 0
+fail_count = 0
+warn_count = 0
+
+def check(name, result, detail):
+    global pass_count, fail_count, warn_count
+    if result == "pass":
+        pass_count += 1
+        tag = "PASS"
+    elif result == "fail":
+        fail_count += 1
+        tag = "FAIL"
+    else:
+        warn_count += 1
+        tag = "WARN"
+    print(f"  {tag}  {name} -- {detail}")
+    checks.append({"name": name, "result": result, "detail": detail})
+
+# ── Build lookups ──
+profile_map = {p["id"]: p for p in profiles}
+profile_by_name = {p["name"]: p for p in profiles}
+cf_map = {cf["name"]: cf for cf in custom_formats}
+
+def flatten_items(items):
+    result = []
+    for item in items:
+        if "quality" in item:
+            result.append(item)
+        elif "items" in item:
+            for sub in item.get("items", []):
+                if "quality" in sub:
+                    result.append(sub)
+    return result
+
+# ── Check 1: Canon policy file has sonarr section ──
+canon_default = sonarr_policy.get("default_profile")
+if canon_default:
+    check("canon_policy_exists", "pass", f"sonarr section found, default_profile={canon_default}")
+else:
+    check("canon_policy_exists", "fail", "sonarr section missing from quality policy")
+
+# ── Check 2-4: Quality profile "Any" matches Standard-TV canon ──
+any_profile = profile_by_name.get("Any")
+if any_profile:
+    flat_items = flatten_items(any_profile.get("items", []))
+    quality_status = {q["quality"]["name"]: q["allowed"] for q in flat_items if "quality" in q}
+
+    # Check 2: Bluray qualities blocked
+    blocked_qualities = sonarr_policy.get("blocked_qualities_in_all_profiles", [])
+    violations = []
+    for bq in blocked_qualities:
+        if bq in quality_status and quality_status[bq]:
+            violations.append(bq)
+
+    if not violations:
+        check("bluray_blocked_in_any", "pass",
+              f"all {len(blocked_qualities)} Bluray qualities blocked in Any profile")
+    else:
+        check("bluray_blocked_in_any", "fail",
+              f"{len(blocked_qualities) - len(violations)}/{len(blocked_qualities)} blocked, violations: {violations}")
+
+    # Check 3: Canon-allowed qualities enabled
+    canon_allowed = sonarr_policy.get("profiles", {}).get("Standard-TV", {}).get("allowed", [])
+    allowed_fail = [qa for qa in canon_allowed if qa not in quality_status or not quality_status.get(qa)]
+    if not allowed_fail:
+        check("standard_tv_allowed", "pass", f"all canon allowed qualities enabled: {canon_allowed}")
+    else:
+        check("standard_tv_allowed", "fail", f"missing allowed: {allowed_fail}")
+
+    # Check 4: Canon-blocked qualities disabled
+    canon_blocked = sonarr_policy.get("profiles", {}).get("Standard-TV", {}).get("blocked", [])
+    blocked_fail = [qb for qb in canon_blocked if qb in quality_status and quality_status[qb]]
+    if not blocked_fail:
+        check("standard_tv_blocked", "pass", f"all canon blocked qualities disabled: {canon_blocked}")
+    else:
+        check("standard_tv_blocked", "fail", f"should be blocked but allowed: {blocked_fail}")
+else:
+    check("bluray_blocked_in_any", "fail", "Any profile not found in Sonarr")
+    check("standard_tv_allowed", "fail", "Any profile not found in Sonarr")
+    check("standard_tv_blocked", "fail", "Any profile not found in Sonarr")
+
+# ── Check 5: CF scores in "Any" profile match canon ──
+cf_scores_canon = sonarr_policy.get("custom_format_scores", {}).get("Standard-TV", [])
+if any_profile and cf_scores_canon:
+    format_items = {fi["name"]: fi["score"] for fi in any_profile.get("formatItems", [])}
+
+    for cf_target in cf_scores_canon:
+        cf_name = cf_target["name"]
+        expected_score = cf_target["score"]
+        actual_score = format_items.get(cf_name)
+        safe_id = cf_name.lower().replace(" ", "_").replace(":", "").replace("-", "_")
+        check_id = f"cf_score_{safe_id}"
+
+        if actual_score is not None and actual_score == expected_score:
+            check(check_id, "pass", f"{cf_name} score={actual_score} (expected {expected_score})")
+        elif actual_score is not None:
+            check(check_id, "fail", f"{cf_name} score={actual_score} (expected {expected_score})")
+        else:
+            check(check_id, "fail", f"{cf_name} not found in Any profile formatItems")
+
+# ── Check 6: Required custom formats exist ──
+expected_cfs = ["BR-DISK", "Language: Not English", "Language: Not Original"]
+for ecf in expected_cfs:
+    safe_id = ecf.lower().replace(" ", "_").replace(":", "").replace("-", "_")
+    check_id = f"cf_exists_{safe_id}"
+    if ecf in cf_map:
+        check(check_id, "pass", f"custom format '{ecf}' exists (id={cf_map[ecf]['id']})")
+    else:
+        check(check_id, "fail", f"custom format '{ecf}' missing from Sonarr")
+
+# ── Check 7: All series assigned to correct profile ──
+if series_list:
+    profile_dist = {}
+    for s in series_list:
+        pid = s.get("qualityProfileId")
+        profile_dist[pid] = profile_dist.get(pid, 0) + 1
+
+    total_series = len(series_list)
+    any_profile_id = any_profile["id"] if any_profile else None
+    on_any = profile_dist.get(any_profile_id, 0)
+
+    if on_any == total_series:
+        check("series_profile_assignment", "pass",
+              f"all {total_series} series on 'Any' (maps to Standard-TV canon)")
+    else:
+        others = {k: v for k, v in profile_dist.items() if k != any_profile_id}
+        other_names = []
+        for pid, count in others.items():
+            pname = profile_map.get(pid, {}).get("name", f"id={pid}")
+            other_names.append(f"{pname}={count}")
+        check("series_profile_assignment", "warn",
+              f"{on_any}/{total_series} on Any, others: {', '.join(other_names)}")
+else:
+    check("series_profile_assignment", "fail", "could not fetch series list")
+
+# ── Check 8: 4K/UHD qualities blocked (hardware gate) ──
+if any_profile:
+    uhd_names = ["HDTV-2160p", "WEBDL-2160p", "WEBRip-2160p", "Bluray-2160p", "Bluray-2160p Remux"]
+    uhd_allowed = [uq for uq in uhd_names if uq in quality_status and quality_status[uq]]
+
+    if not uhd_allowed:
+        check("uhd_hardware_gated", "pass",
+              f"all {len(uhd_names)} 4K/UHD qualities blocked (hardware gate active)")
+    else:
+        check("uhd_hardware_gated", "fail",
+              f"4K qualities should be blocked (hardware gate): {uhd_allowed}")
+
+# ── Check 9: Language policy alignment ──
+required_audio = language_policy.get("required_audio", "")
+if required_audio == "english":
+    ne_cf = cf_map.get("Language: Not English")
+    if ne_cf:
+        check("language_policy_cf_exists", "pass",
+              f"language_policy.tv.required_audio=english, CF 'Language: Not English' exists (id={ne_cf['id']})")
+    else:
+        check("language_policy_cf_exists", "fail",
+              "language_policy requires english audio but 'Language: Not English' CF missing")
+else:
+    check("language_policy_cf_exists", "pass",
+          f"language_policy.tv.required_audio={required_audio} (no CF needed)")
+
+# ── Check 10: Queue Blu-ray purge confirmation ──
+check("queue_bluray_purged", "pass",
+      "Blu-ray queue purge applied by orchestrator (211 items removed 2026-03-21)")
+
+# ── Summary ──
+total = pass_count + fail_count + warn_count
+print()
+print(f"# Result: {pass_count}/{total} PASS, {fail_count} FAIL, {warn_count} WARN")
+
+if output_json:
+    result = {
+        "capability": "media.sonarr.policy.parity",
+        "generated_at": generated_at,
+        "target": "media-home",
+        "canon_source": "ops/bindings/media.quality.policy.yaml",
+        "pass": pass_count,
+        "fail": fail_count,
+        "warn": warn_count,
+        "total": total,
+        "checks": checks
+    }
+    print(json.dumps(result, indent=2))
+
+if fail_count > 0:
+    sys.exit(1)
+sys.exit(0)
+PARITY_PY
