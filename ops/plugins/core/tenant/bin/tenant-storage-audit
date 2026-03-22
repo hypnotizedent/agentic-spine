@@ -2,7 +2,33 @@
 # tenant.storage.audit — Verify runtime storage paths comply with tenant storage contract
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
+ROOT=""
+
+usage() {
+  echo "Usage: tenant-storage-audit [--root <path>]" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root) ROOT="$2"; shift 2 ;;
+    -h|--help) usage ;;
+    *) echo "unknown argument: $1" >&2; usage ;;
+  esac
+done
+
+if [[ -z "$ROOT" ]]; then
+  ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -z "$ROOT" ]]; then
+    source "$DEFAULT_ROOT/ops/lib/spine-paths.sh"
+    spine_paths_init >/dev/null 2>&1 || true
+    ROOT="${SPINE_TARGET_REPO:-${SPINE_CODE:-$DEFAULT_ROOT}}"
+  fi
+fi
+
+ROOT="$(cd "$ROOT" && pwd)"
 CONTRACT="$ROOT/ops/bindings/tenant.storage.contract.yaml"
 
 echo "=== Tenant Storage Audit ==="
@@ -28,7 +54,7 @@ for boundary in receipts ledger mailroom_inbox mailroom_outbox loop_scopes; do
   current_path="$(sed -n "/^  ${boundary}:/,/^  [a-z]/p" "$CONTRACT" | grep 'current_path:' | head -1 | sed 's/.*: *"//' | sed 's/".*//')"
   if [[ -n "$current_path" ]]; then
     full_path="$ROOT/$current_path"
-    if [[ -d "$full_path" ]]; then
+    if [[ -d "$full_path" || -f "$full_path" ]]; then
       echo "  $boundary: $current_path — EXISTS"
     else
       echo "  $boundary: $current_path — PLANNED (dir not yet created)"

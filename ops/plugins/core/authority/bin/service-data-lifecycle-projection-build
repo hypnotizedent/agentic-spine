@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[5]
 REGISTRY_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
 SERVICE_REGISTRY_PATH = ROOT / "docs/governance/SERVICE_REGISTRY.yaml"
 BACKUP_INVENTORY_PATH = ROOT / "ops/bindings/backup.inventory.yaml"
+BACKUP_LOCALITY_PATH = ROOT / "ops/bindings/backup.locality.contract.yaml"
+VM_LIFECYCLE_PATH = ROOT / "ops/bindings/vm.lifecycle.yaml"
 OUTPUT_PATH = ROOT / "ops/bindings/service.data.lifecycle.projected.yaml"
 
 
@@ -208,6 +210,8 @@ def build_projection(registry: dict[str, Any], source_sha: str, generated_at_utc
 def verify(registry: dict[str, Any]) -> None:
     service_registry = load_yaml(SERVICE_REGISTRY_PATH)
     backup_inventory = load_yaml(BACKUP_INVENTORY_PATH)
+    backup_locality = load_yaml(BACKUP_LOCALITY_PATH)
+    vm_lifecycle = load_yaml(VM_LIFECYCLE_PATH)
     service_hosts = set(ensure_dict(service_registry.get("hosts")).keys())
     runtime_units = {
         str(row.get("unit_id") or "")
@@ -218,6 +222,11 @@ def verify(registry: dict[str, Any]) -> None:
         str(row.get("name") or "")
         for row in ensure_list(backup_inventory.get("targets"))
         if isinstance(row, dict)
+    }
+    archive_only_targets = {
+        str(ensure_dict(row).get("target") or "")
+        for row in ensure_list(backup_locality.get("target_localities"))
+        if str(ensure_dict(row).get("locality") or "").strip() == "archive_only"
     }
 
     errors: list[str] = []
@@ -301,6 +310,28 @@ def verify(registry: dict[str, Any]) -> None:
         for signal in ensure_list(service.get("drift_signals")):
             if not str(signal).strip():
                 errors.append(f"{service_id}: drift_signals entries must be non-empty strings")
+
+    for raw_vm in ensure_list(vm_lifecycle.get("vms")):
+        vm = ensure_dict(raw_vm)
+        hostname = str(vm.get("hostname") or "").strip()
+        status = str(vm.get("status") or "").strip()
+        tombstone = ensure_dict(vm.get("tombstone"))
+        if status not in {"decommissioned", "tombstoned", "purge_eligible"}:
+            continue
+        if not tombstone:
+            continue
+        restore_artifact = str(tombstone.get("retained_restore_artifact") or vm.get("backup_target") or "").strip()
+        if not restore_artifact:
+            errors.append(f"{hostname}: tombstoned/decommissioned VM missing retained_restore_artifact or backup_target")
+        elif restore_artifact not in targets:
+            errors.append(f"{hostname}: retained restore artifact missing from backup.inventory.yaml targets: {restore_artifact}")
+        elif restore_artifact not in archive_only_targets:
+            errors.append(f"{hostname}: retained restore artifact must be archive_only in backup.locality.contract.yaml: {restore_artifact}")
+
+        if not str(tombstone.get("retained_restore_storage") or "").strip():
+            errors.append(f"{hostname}: tombstone missing retained_restore_storage")
+        if not str(tombstone.get("restore_review_by") or "").strip():
+            errors.append(f"{hostname}: tombstone missing restore_review_by")
 
     if errors:
         for error in errors:

@@ -3,12 +3,12 @@
 # Usage: tenant-profile-validate --profile <path>
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
-SCHEMA="$ROOT/ops/bindings/tenant.profile.schema.yaml"
-PRESETS="$ROOT/ops/bindings/policy.presets.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
+ROOT=""
 
 usage() {
-  echo "Usage: tenant-profile-validate --profile <path>"
+  echo "Usage: tenant-profile-validate [--root <path>] --profile <path>"
   echo "  Validates a tenant profile YAML against the AOF tenant schema."
   echo "  Read-only — no mutations."
   exit 1
@@ -17,12 +17,29 @@ usage() {
 PROFILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --root) ROOT="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
 
 [[ -z "$PROFILE" ]] && usage
+
+if [[ -z "$ROOT" ]]; then
+  ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -z "$ROOT" ]]; then
+    source "$DEFAULT_ROOT/ops/lib/spine-paths.sh"
+    spine_paths_init >/dev/null 2>&1 || true
+    ROOT="${SPINE_TARGET_REPO:-${SPINE_CODE:-$DEFAULT_ROOT}}"
+  fi
+fi
+
+ROOT="$(cd "$ROOT" && pwd)"
+SCHEMA="$ROOT/ops/bindings/tenant.profile.schema.yaml"
+PRESETS="$ROOT/ops/bindings/policy.presets.yaml"
+if [[ "$PROFILE" != /* ]]; then
+  PROFILE="$ROOT/$PROFILE"
+fi
 
 # Check dependencies
 command -v yq >/dev/null 2>&1 || { echo "ERROR: yq is required but not found"; exit 1; }

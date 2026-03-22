@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def expand(raw: str | Path) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
+
+
+DEFAULT_ROOT = expand(Path(__file__).resolve().parents[5])
+
+
+def git_top_level(start: Path) -> Path | None:
+    probe = start if start.is_dir() else start.parent
+    proc = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    return Path(stdout).resolve() if stdout else None
+
+
+def resolve_target_root(explicit: str | None = None) -> Path:
+    if explicit:
+        return expand(explicit)
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+    script_root = git_top_level(Path(__file__).resolve())
+    if script_root is not None:
+        return script_root
+    for env_name in ("SPINE_TARGET_REPO", "SPINE_ROOT", "SPINE_REPO", "SPINE_CODE"):
+        value = os.environ.get(env_name)
+        if value:
+            return expand(value)
+    return DEFAULT_ROOT
+
+
+ROOT = DEFAULT_ROOT
+CONTRACT_PATH = ROOT / "ops/bindings/backup.locality.contract.yaml"
+BACKUP_INVENTORY_PATH = ROOT / "ops/bindings/backup.inventory.yaml"
+TOPOLOGY_SITES_PATH = ROOT / "ops/bindings/topology.sites.yaml"
+VM_LIFECYCLE_PATH = ROOT / "ops/bindings/vm.lifecycle.yaml"
+OUTPUT_PATH = ROOT / "ops/bindings/backup.locality.projected.yaml"
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"backup.locality.projection.build FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping root: {path}")
+    return data
+
+
+def yaml_dump(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=False)
+
+
+def rel(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except Exception:
+        return str(path.resolve())
+
+
+def source_stamp(paths: list[Path]) -> str:
+    rel_paths: list[str] = []
+    for path in paths:
+        try:
+            rel_paths.append(str(path.resolve().relative_to(ROOT)))
+        except Exception:
+            continue
+    if rel_paths:
+        proc = subprocess.run(
+            ["git", "-C", str(ROOT), "log", "-1", "--format=%cI", "--", *rel_paths],
+            text=True,
+            capture_output=True,
+        )
+        stamp = proc.stdout.strip()
+        if proc.returncode == 0 and stamp:
+            try:
+                return (
+                    datetime.fromisoformat(stamp)
+                    .astimezone(timezone.utc)
+                    .replace(microsecond=0)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ")
+                )
+            except ValueError:
+                return stamp
+    latest = 0.0
+    for path in paths:
+        if path.exists():
+            latest = max(latest, path.stat().st_mtime)
+    if latest == 0.0:
+        latest = datetime.now(timezone.utc).timestamp()
+    return datetime.fromtimestamp(latest, tz=timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def sha256_for_paths(paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(rel(path).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="backup-locality-projection-build")
+    parser.add_argument("--root", help="Target checkout root.")
+    parser.add_argument("--check", action="store_true", help="Fail if projection differs from disk.")
+    parser.add_argument("--stdout", action="store_true", help="Print rendered projection instead of writing.")
+    return parser.parse_args()
+
+
+def configure_root(root: Path) -> None:
+    global ROOT, CONTRACT_PATH, BACKUP_INVENTORY_PATH, TOPOLOGY_SITES_PATH, VM_LIFECYCLE_PATH, OUTPUT_PATH
+    ROOT = root
+    CONTRACT_PATH = ROOT / "ops/bindings/backup.locality.contract.yaml"
+    BACKUP_INVENTORY_PATH = ROOT / "ops/bindings/backup.inventory.yaml"
+    TOPOLOGY_SITES_PATH = ROOT / "ops/bindings/topology.sites.yaml"
+    VM_LIFECYCLE_PATH = ROOT / "ops/bindings/vm.lifecycle.yaml"
+    OUTPUT_PATH = ROOT / "ops/bindings/backup.locality.projected.yaml"
+
+
+def build_host_site_index(topology: dict[str, Any], lifecycle: dict[str, Any]) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+    host_to_site: dict[str, str] = {}
+    vm_rows: dict[str, dict[str, Any]] = {}
+
+    status_rank = {
+        "active": 5,
+        "registered": 4,
+        "provisioned": 3,
+        "planning": 2,
+        "residual": 2,
+        "transitional": 2,
+        "decommissioned": 1,
+        "tombstoned": 0,
+        "purge_eligible": 0,
+        "abandoned": 0,
+    }
+
+    def bind_host(ref: str, site_id: str, site_status: str) -> None:
+        if not ref:
+            return
+        existing_site = host_to_site.get(ref)
+        if not existing_site:
+            host_to_site[ref] = site_id
+            return
+        if existing_site == site_id:
+            return
+        # Planned/template sites must not shadow active site truth for shared refs like pve.
+        if site_status == "active":
+            host_to_site[ref] = site_id
+
+    for raw_site in ensure_list(topology.get("sites")):
+        site = ensure_dict(raw_site)
+        site_id = str(site.get("id") or "").strip()
+        if not site_id:
+            continue
+        site_status = str(site.get("status") or "").strip()
+        for key in ("proxmox_alias", "tailscale_anchor"):
+            value = str(site.get(key) or "").strip()
+            bind_host(value, site_id, site_status)
+        for value in ensure_list(site.get("host_refs")):
+            ref = str(value or "").strip()
+            bind_host(ref, site_id, site_status)
+
+    for raw_vm in ensure_list(lifecycle.get("vms")):
+        vm = ensure_dict(raw_vm)
+        hostname = str(vm.get("hostname") or "").strip()
+        if not hostname:
+            continue
+        existing = ensure_dict(vm_rows.get(hostname))
+        current_rank = status_rank.get(str(vm.get("status") or "").strip(), 0)
+        existing_rank = status_rank.get(str(existing.get("status") or "").strip(), -1)
+        if existing and existing_rank > current_rank:
+            continue
+        vm_rows[hostname] = vm
+        proxmox_host = str(vm.get("proxmox_host") or "").strip()
+        site_id = host_to_site.get(proxmox_host, "")
+        if site_id:
+            host_to_site[hostname] = site_id
+
+    return host_to_site, vm_rows
+
+
+def locality_relationship(locality: str, source_site: str, destination_site: str) -> tuple[str, bool]:
+    locality = locality.strip()
+    if locality in {"local_hot", "same_site_cold"}:
+        expected = "same_site"
+        return expected, bool(source_site and destination_site and source_site == destination_site)
+    if locality in {"offsite_warm", "offsite_cold"}:
+        expected = "cross_site"
+        return expected, bool(source_site and destination_site and source_site != destination_site)
+    return "neutral", True
+
+
+def build_projection(
+    contract: dict[str, Any],
+    backup_inventory: dict[str, Any],
+    topology: dict[str, Any],
+    lifecycle: dict[str, Any],
+    generated_at: str,
+) -> dict[str, Any]:
+    host_to_site, vm_rows = build_host_site_index(topology, lifecycle)
+    lane_rows = ensure_dict(ensure_dict(backup_inventory.get("model")).get("destination_lanes"))
+    target_rows = {
+        str(ensure_dict(row).get("name") or "").strip(): ensure_dict(row)
+        for row in ensure_list(backup_inventory.get("targets"))
+        if str(ensure_dict(row).get("name") or "").strip()
+    }
+    runtime_units = [ensure_dict(row) for row in ensure_list(backup_inventory.get("runtime_units"))]
+
+    projected_targets: list[dict[str, Any]] = []
+    mismatches = 0
+
+    for raw_row in ensure_list(contract.get("target_localities")):
+        row = ensure_dict(raw_row)
+        target_id = str(row.get("target") or "").strip()
+        source_vm = str(row.get("source_vm") or "").strip()
+        declared_source_site = str(row.get("source_site") or "").strip()
+        declared_destination_site = str(row.get("destination_site") or "").strip()
+        locality = str(row.get("locality") or "").strip()
+
+        source_vm_row = ensure_dict(vm_rows.get(source_vm))
+        proxmox_host = str(source_vm_row.get("proxmox_host") or "").strip()
+        derived_source_site = host_to_site.get(source_vm) or host_to_site.get(proxmox_host, "")
+
+        canonical_lane = str(row.get("destination_lane") or row.get("generation_lane") or "").strip()
+        canonical_lane_row = ensure_dict(lane_rows.get(canonical_lane))
+        canonical_host = str(canonical_lane_row.get("host") or "").strip()
+        derived_destination_site = host_to_site.get(canonical_host, "")
+
+        promotion_bindings: list[dict[str, Any]] = []
+        for binding_key in ("cold_promotion", "secondary_promotion"):
+            lane_name = str(row.get(binding_key) or "").strip()
+            if not lane_name:
+                continue
+            lane_row = ensure_dict(lane_rows.get(lane_name))
+            lane_host = str(lane_row.get("host") or "").strip()
+            promotion_bindings.append(
+                {
+                    "binding": binding_key,
+                    "lane": lane_name,
+                    "host": lane_host or None,
+                    "site": host_to_site.get(lane_host) or None,
+                    "lane_present": bool(lane_row),
+                }
+            )
+
+        runtime_unit_ids = [
+            str(unit.get("unit_id") or "").strip()
+            for unit in runtime_units
+            if target_id in {str(item) for item in ensure_list(unit.get("inventory_targets"))}
+        ]
+
+        expected_relationship, locality_consistent = locality_relationship(
+            locality,
+            derived_source_site,
+            derived_destination_site,
+        )
+        checks = {
+            "source_vm_present": bool(source_vm_row),
+            "source_site_match": bool(derived_source_site and declared_source_site == derived_source_site),
+            "destination_lane_present": bool(canonical_lane_row),
+            "destination_site_match": bool(
+                declared_destination_site and derived_destination_site and declared_destination_site == derived_destination_site
+            ),
+            "locality_consistent": locality_consistent,
+            "inventory_target_present": target_id in target_rows,
+            "runtime_unit_linked": bool(runtime_unit_ids),
+            "promotion_lanes_present": all(binding.get("lane_present") for binding in promotion_bindings) if promotion_bindings else True,
+        }
+        mismatches += sum(1 for value in checks.values() if not value)
+
+        projected_targets.append(
+            {
+                "target": target_id,
+                "declared": {
+                    "source_vm": source_vm,
+                    "source_site": declared_source_site,
+                    "destination_lane": canonical_lane or None,
+                    "destination_site": declared_destination_site or None,
+                    "locality": locality,
+                },
+                "derived": {
+                    "source_vm_proxmox_host": proxmox_host or None,
+                    "source_site": derived_source_site or None,
+                    "destination_host": canonical_host or None,
+                    "destination_site": derived_destination_site or None,
+                    "expected_relationship": expected_relationship,
+                    "inventory_target_present": target_id in target_rows,
+                    "runtime_unit_ids": runtime_unit_ids,
+                    "promotion_bindings": promotion_bindings,
+                },
+                "checks": checks,
+            }
+        )
+
+    passing_targets = sum(1 for row in projected_targets if all(ensure_dict(row.get("checks")).values()))
+    return {
+        "status": "projection",
+        "owner": "@ronny",
+        "last_verified": "2026-03-21",
+        "scope": "backup-locality-derived",
+        "projection_of": rel(CONTRACT_PATH),
+        "generated_by": "backup-locality-projection-build",
+        "generated_from": [
+            rel(CONTRACT_PATH),
+            rel(BACKUP_INVENTORY_PATH),
+            rel(TOPOLOGY_SITES_PATH),
+            rel(VM_LIFECYCLE_PATH),
+        ],
+        "generated_at": generated_at,
+        "source_sha256": sha256_for_paths([CONTRACT_PATH, BACKUP_INVENTORY_PATH, TOPOLOGY_SITES_PATH, VM_LIFECYCLE_PATH]),
+        "summary": {
+            "targets_total": len(projected_targets),
+            "targets_passing": passing_targets,
+            "targets_with_issues": len(projected_targets) - passing_targets,
+            "check_failures_total": mismatches,
+        },
+        "targets": projected_targets,
+    }
+
+
+def compare_or_write(path: Path, rendered: str, *, check: bool) -> bool:
+    current = path.read_text(encoding="utf-8") if path.exists() else None
+    if check:
+        return current == rendered
+    path.write_text(rendered, encoding="utf-8")
+    return True
+
+
+def main() -> None:
+    args = parse_args()
+    configure_root(resolve_target_root(args.root))
+    contract = load_yaml(CONTRACT_PATH)
+    backup_inventory = load_yaml(BACKUP_INVENTORY_PATH)
+    topology = load_yaml(TOPOLOGY_SITES_PATH)
+    lifecycle = load_yaml(VM_LIFECYCLE_PATH)
+    generated_at = source_stamp([CONTRACT_PATH, BACKUP_INVENTORY_PATH, TOPOLOGY_SITES_PATH, VM_LIFECYCLE_PATH])
+    payload = build_projection(contract, backup_inventory, topology, lifecycle, generated_at)
+    rendered = yaml_dump(payload)
+
+    if args.stdout:
+        print(rendered, end="")
+        return
+
+    matches = compare_or_write(OUTPUT_PATH, rendered, check=args.check)
+    if args.check:
+        if matches:
+            print("backup.locality.projection.build --check PASS")
+            return
+        print(f"projection drift: {rel(OUTPUT_PATH)}")
+        raise SystemExit(1)
+
+    print("backup.locality.projection.build")
+    print(f"projected: {rel(OUTPUT_PATH)}")
+
+
+if __name__ == "__main__":
+    main()
