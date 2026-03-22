@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def expand(raw: str | Path) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
+
+
+DEFAULT_ROOT = expand(Path(__file__).resolve().parents[4])
+
+
+def git_top_level(start: Path) -> Path | None:
+    probe = start if start.is_dir() else start.parent
+    proc = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    return Path(stdout).resolve() if stdout else None
+
+
+def resolve_target_root(explicit: str | None = None) -> Path:
+    if explicit:
+        return expand(explicit)
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+    script_root = git_top_level(Path(__file__).resolve())
+    if script_root is not None:
+        return script_root
+    for env_name in ("SPINE_TARGET_REPO", "SPINE_ROOT", "SPINE_REPO", "SPINE_CODE"):
+        value = os.environ.get(env_name)
+        if value:
+            return expand(value)
+    return DEFAULT_ROOT
+
+
+ROOT = DEFAULT_ROOT
+SCAFFOLD_PATH = ROOT / "ops/bindings/storage.scaffold.authority.yaml"
+SYNOLOGY_PATH = ROOT / "ops/bindings/synology918.storage.manifest.yaml"
+HOME_MAP_PATH = ROOT / "ops/bindings/home.storage.map.yaml"
+SHOP_MAP_PATH = ROOT / "ops/bindings/shop.storage.map.yaml"
+BACKUP_PATH = ROOT / "ops/bindings/backup.inventory.yaml"
+LIFECYCLE_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"storage.scaffold.audit FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        fail(f"expected mapping root: {path}")
+    return data
+
+
+def ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="storage-scaffold-audit")
+    parser.add_argument("--root", help="Target checkout root.")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--brief", action="store_true")
+    parser.add_argument("--strict", action="store_true")
+    return parser.parse_args()
+
+
+def configure_root(root: Path) -> None:
+    global ROOT, SCAFFOLD_PATH, SYNOLOGY_PATH, HOME_MAP_PATH, SHOP_MAP_PATH, BACKUP_PATH, LIFECYCLE_PATH
+    ROOT = root
+    SCAFFOLD_PATH = ROOT / "ops/bindings/storage.scaffold.authority.yaml"
+    SYNOLOGY_PATH = ROOT / "ops/bindings/synology918.storage.manifest.yaml"
+    HOME_MAP_PATH = ROOT / "ops/bindings/home.storage.map.yaml"
+    SHOP_MAP_PATH = ROOT / "ops/bindings/shop.storage.map.yaml"
+    BACKUP_PATH = ROOT / "ops/bindings/backup.inventory.yaml"
+    LIFECYCLE_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
+
+
+def add_issue(issues: list[dict[str, Any]], *, issue_id: str, detail: str) -> None:
+    issues.append({"issue_id": issue_id, "detail": detail})
+
+
+def list_paths(rows: list[dict[str, Any]], key: str = "path") -> set[str]:
+    return {
+        str(ensure_dict(row).get(key) or "").rstrip("/")
+        for row in rows
+        if str(ensure_dict(row).get(key) or "").strip()
+    }
+
+
+def main() -> None:
+    args = parse_args()
+    configure_root(resolve_target_root(args.root))
+
+    scaffold = load_yaml(SCAFFOLD_PATH)
+    synology = load_yaml(SYNOLOGY_PATH)
+    home_map = load_yaml(HOME_MAP_PATH)
+    shop_map = load_yaml(SHOP_MAP_PATH)
+    backup = load_yaml(BACKUP_PATH)
+    lifecycle = load_yaml(LIFECYCLE_PATH)
+
+    issues: list[dict[str, Any]] = []
+
+    classes = {
+        str(ensure_dict(row).get("scaffold_class") or "")
+        for row in ensure_list(ensure_dict(scaffold.get("ontology")).get("classes"))
+        if str(ensure_dict(row).get("scaffold_class") or "").strip()
+    }
+    surfaces = [ensure_dict(row) for row in ensure_list(scaffold.get("surfaces"))]
+    surface_index = {
+        (str(row.get("device") or "").strip(), str(row.get("path") or "").rstrip("/")): row
+        for row in surfaces
+        if str(row.get("device") or "").strip() and str(row.get("path") or "").strip()
+    }
+
+    for row in surfaces:
+        scaffold_class = str(row.get("scaffold_class") or "").strip()
+        if scaffold_class not in classes:
+            add_issue(
+                issues,
+                issue_id="unknown_scaffold_class",
+                detail=f"{row.get('device')}:{row.get('path')} uses unknown class {scaffold_class}",
+            )
+
+    required_rows = [
+        ("pve", "/md1400/backup-cold"),
+        ("pve", "/md1400/archive"),
+        ("pve", "/md1400/stage"),
+        ("pve", "/md1400/tombstones"),
+        ("pve", "/media"),
+        ("synology918", "/volume1/backups/proxmox_backups/dump"),
+        ("synology918", "/volume1/backups/apps/media-config"),
+        ("synology918", "/volume1/backups/_legacy_tombstones"),
+        ("synology918", "/volume1/media-staging"),
+        ("synology918", "/volume1/media-holds"),
+        ("synology918", "/volume1/documents"),
+        ("synology918", "/volume1/homelab"),
+    ]
+    for device, path in required_rows:
+        if (device, path) not in surface_index:
+            add_issue(issues, issue_id="missing_scaffold_row", detail=f"{device}:{path} is missing from storage.scaffold.authority.yaml")
+
+    scaffold_ref = "ops/bindings/storage.scaffold.authority.yaml"
+    if str(synology.get("scaffold_ref") or "") != scaffold_ref:
+        add_issue(issues, issue_id="manifest_scaffold_ref_mismatch", detail="synology manifest scaffold_ref does not point at storage.scaffold.authority.yaml")
+    if str(home_map.get("storage_scaffold_ref") or "") != scaffold_ref:
+        add_issue(issues, issue_id="home_map_scaffold_ref_mismatch", detail="home.storage.map.yaml is missing storage_scaffold_ref")
+    if str(shop_map.get("storage_scaffold_ref") or "") != scaffold_ref:
+        add_issue(issues, issue_id="shop_map_scaffold_ref_mismatch", detail="shop.storage.map.yaml is missing storage_scaffold_ref")
+
+    home_personal_paths = list_paths([ensure_dict(row) for row in ensure_list(synology.get("home_personal_data"))])
+    for stale_path in ("/volume1/documents", "/volume1/homelab"):
+        if stale_path in home_personal_paths:
+            add_issue(issues, issue_id="stale_home_personal_data", detail=f"{stale_path} still appears in synology home_personal_data")
+
+    drained_paths = list_paths([ensure_dict(row) for row in ensure_list(synology.get("drained_retired_surfaces"))])
+    if "/volume1/documents" not in drained_paths:
+        add_issue(issues, issue_id="missing_drained_documents", detail="/volume1/documents is not declared in drained_retired_surfaces")
+
+    review_paths = list_paths([ensure_dict(row) for row in ensure_list(synology.get("review_pending_surfaces"))])
+    for expected in ("/volume1/backups/infrastructure", "/volume1/backups/devices", "/volume1/homelab"):
+        if expected not in review_paths:
+            add_issue(issues, issue_id="missing_review_pending", detail=f"{expected} is not declared review_pending in synology manifest")
+
+    docs_row = surface_index.get(("synology918", "/volume1/documents"), {})
+    if str(docs_row.get("scaffold_class") or "") != "drained_retired":
+        add_issue(issues, issue_id="documents_not_drained", detail="/volume1/documents is not classified as drained_retired")
+
+    tombstones_row = surface_index.get(("synology918", "/volume1/backups/_legacy_tombstones"), {})
+    if str(tombstones_row.get("scaffold_class") or "") != "tombstone_retained":
+        add_issue(issues, issue_id="tombstones_not_retained", detail="/volume1/backups/_legacy_tombstones is not classified as tombstone_retained")
+
+    for role in ensure_list(synology.get("canonical_roles")):
+        row = ensure_dict(role)
+        if str(row.get("synology_path_root") or "").rstrip("/") == "/volume1/backups/apps":
+            if "cleared" in str(row.get("current_use") or "").lower():
+                add_issue(issues, issue_id="backup_apps_cleared_drift", detail="/volume1/backups/apps is still described as cleared despite live canonical subpaths")
+
+    canonical_personal_data = list_paths([ensure_dict(row) for row in ensure_list(home_map.get("canonical_personal_data"))])
+    for stale_path in ("/volume1/documents", "/volume1/homelab"):
+        if stale_path in canonical_personal_data:
+            add_issue(issues, issue_id="home_map_stale_personal_data", detail=f"{stale_path} still appears in home.storage.map canonical_personal_data")
+
+    home_scaffold_paths = list_paths([ensure_dict(row) for row in ensure_list(home_map.get("storage_scaffold_status"))])
+    for expected in ("/volume1/backups/apps/media-config", "/volume1/documents", "/volume1/homelab"):
+        if expected not in home_scaffold_paths:
+            add_issue(issues, issue_id="home_map_missing_scaffold_status", detail=f"{expected} missing from home.storage.map storage_scaffold_status")
+
+    shop_scaffold_paths = list_paths([ensure_dict(row) for row in ensure_list(shop_map.get("storage_scaffold_status"))])
+    for expected in ("/md1400/backup-cold", "/md1400/archive", "/md1400/stage", "/md1400/tombstones", "/media"):
+        if expected not in shop_scaffold_paths:
+            add_issue(issues, issue_id="shop_map_missing_scaffold_status", detail=f"{expected} missing from shop.storage.map storage_scaffold_status")
+
+    enabled_nas_targets = [
+        ensure_dict(target)
+        for target in ensure_list(backup.get("targets"))
+        if bool(ensure_dict(target).get("enabled"))
+        and str(ensure_dict(target).get("host") or "") == "nas"
+        and str(ensure_dict(target).get("base_path") or "").startswith("/volume1/backups/apps/")
+    ]
+    for target in enabled_nas_targets:
+        base_path = str(target.get("base_path") or "").rstrip("/")
+        matches = [
+            row
+            for row in surfaces
+            if str(row.get("device") or "") == "synology918"
+            and base_path.startswith(str(row.get("path") or "").rstrip("/"))
+        ]
+        if not any(str(row.get("scaffold_class") or "") in {"backup_primary", "backup_secondary"} for row in matches):
+            add_issue(issues, issue_id="hidden_canonical_subpath", detail=f"{base_path} has an enabled backup target but no matching scaffold backup row")
+
+    media_service = ensure_dict(ensure_dict(lifecycle.get("services")).get("media"))
+    media_canonical = {
+        f"{str(ensure_dict(row).get('host') or '').strip()}:{str(ensure_dict(row).get('path') or '').rstrip('/')}"
+        for row in ensure_list(media_service.get("canonical_live_roots"))
+    }
+    if "nas:/volume1/media-staging" in media_canonical:
+        media_row = surface_index.get(("synology918", "/volume1/media-staging"), {})
+        if str(media_row.get("scaffold_class") or "") != "personal_live":
+            add_issue(issues, issue_id="media_staging_scaffold_drift", detail="/volume1/media-staging is canonical in lifecycle registry but not classified as personal_live")
+
+    media_exports = {
+        f"{str(ensure_dict(row).get('host') or '').strip()}:{str(ensure_dict(row).get('path') or '').rstrip('/')}"
+        for row in ensure_list(media_service.get("export_archive_lanes"))
+    }
+    if "nas:/volume1/backups/apps/media-config" in media_exports:
+        media_backup_row = surface_index.get(("synology918", "/volume1/backups/apps/media-config"), {})
+        if str(media_backup_row.get("scaffold_class") or "") != "backup_primary":
+            add_issue(issues, issue_id="media_config_backup_scaffold_drift", detail="/volume1/backups/apps/media-config is canonical in lifecycle registry but not classified as backup_primary")
+
+    status = "PASS" if not issues else "FAIL"
+    result = {
+        "capability": "storage.scaffold.audit",
+        "status": status.lower(),
+        "issues": len(issues),
+        "issue_rows": issues,
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=False))
+        raise SystemExit(1 if args.strict and issues else 0)
+
+    if args.brief:
+        print(f"{status} issues={len(issues)}")
+        for issue in issues:
+            print(f"- {issue['issue_id']}: {issue['detail']}")
+        raise SystemExit(1 if issues else 0)
+
+    print("storage.scaffold.audit")
+    print(f"status: {status}")
+    print(f"issues: {len(issues)}")
+    for issue in issues:
+        print(f"[FAIL] {issue['issue_id']}: {issue['detail']}")
+    raise SystemExit(1 if issues else 0)
+
+
+if __name__ == "__main__":
+    main()

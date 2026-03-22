@@ -1,14 +1,14 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-20
+last_verified: 2026-03-22
 scope: home-rack-scorecard
 source_binding: ops/bindings/home.storage.map.yaml
 ---
 
 # Home Rack Scorecard
 
-- Generated: `2026-03-20T22:48:35Z`
+- Generated: `2026-03-22T05:39:28Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
 - Active runtimes: `3`
 - Tombstones: `3`
@@ -28,7 +28,7 @@ source_binding: ops/bindings/home.storage.map.yaml
 | --- | --- | --- | --- |
 | home-local-lvm | hot_runtime | Primary local-lvm runtime backing for proxmox-home guest boot/root disks. | single-host NVMe + lvmthin |
 | synology-home-backup | warm_backup | Canonical home backup lane for proxmox-home VM/LXC artifacts. | Synology volume1 share exported to proxmox-home as synology-backups |
-| synology-home-data | warm_payload | Canonical home personal data and media lane. | Synology volume1 |
+| synology-home-data | warm_payload | Canonical home payload lane for declared photo and media families; review and drained roots are surfaced separately. | Synology volume1 |
 
 ## Active Runtime Units
 

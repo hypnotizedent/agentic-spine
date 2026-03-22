@@ -23,6 +23,7 @@ HOME_UNIFI_PATH = ROOT / "ops/bindings/home.unifi.network.inventory.yaml"
 NETWORK_DNS_LOCAL_PATH = ROOT / "ops/bindings/network.dns.local.registry.yaml"
 SERVICE_REGISTRY_PATH = ROOT / "docs/governance/SERVICE_REGISTRY.yaml"
 LIFECYCLE_REGISTRY_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
+STORAGE_SCAFFOLD_PATH = ROOT / "ops/bindings/storage.scaffold.authority.yaml"
 SHOP_STORAGE_MAP_PATH = ROOT / "ops/bindings/shop.storage.map.yaml"
 SSH_TARGETS_PATH = ROOT / "ops/bindings/ssh.targets.yaml"
 SYNOLOGY_STORAGE_PATH = ROOT / "ops/bindings/synology918.storage.manifest.yaml"
@@ -97,6 +98,16 @@ def ensure_list(value: Any) -> list[Any]:
 
 def ensure_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def scaffold_rows_for_device(scaffold: dict[str, Any], device: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw_row in ensure_list(scaffold.get("surfaces")):
+        row = ensure_dict(raw_row)
+        if str(row.get("device") or "").strip() != device:
+            continue
+        rows.append(row)
+    return sorted(rows, key=lambda row: str(row.get("path") or ""))
 
 
 def render_lifecycle_paths(rows: list[dict[str, Any]]) -> list[str]:
@@ -438,6 +449,7 @@ def build_home_storage_map(
     home_hardware: dict[str, Any],
     lifecycle_registry: dict[str, Any],
     home_proxmox: dict[str, Any],
+    storage_scaffold: dict[str, Any],
     synology: dict[str, Any],
 ) -> dict[str, Any]:
     target_map = {
@@ -569,6 +581,7 @@ def build_home_storage_map(
     )
     home_personal_data = ensure_list(synology.get("home_personal_data"))
     legacy_personal_residue = ensure_list(synology.get("legacy_personal_residue"))
+    home_scaffold = scaffold_rows_for_device(storage_scaffold, "synology918")
 
     blockers = ensure_list(ensure_dict(ensure_dict(estate_authority.get("sites")).get("home")).get("blockers"))
 
@@ -586,6 +599,7 @@ def build_home_storage_map(
             rel(HOME_HARDWARE_PATH),
             rel(HOME_PROXMOX_PATH),
             rel(SYNOLOGY_STORAGE_PATH),
+            rel(STORAGE_SCAFFOLD_PATH),
             rel(BACKUP_PATH),
             rel(ESTATE_AUTHORITY_PATH),
             rel(LIFECYCLE_REGISTRY_PATH),
@@ -608,7 +622,7 @@ def build_home_storage_map(
             {
                 "tier_id": "synology-home-data",
                 "plane": "warm_payload",
-                "purpose": "Canonical home personal data and media lane.",
+                "purpose": "Canonical home payload lane for declared photo and media families; review and drained roots are surfaced separately.",
                 "host": "synology918",
                 "layout": "Synology volume1",
             },
@@ -636,17 +650,31 @@ def build_home_storage_map(
                 "durability_class": "home_backup_primary",
             },
             {
-                "object_id": "synology/volume1",
+                "object_id": "synology/volume1/backups/apps/media-config",
                 "kind": "path_family",
                 "owner": "synology918",
-                "purpose": "Canonical home personal data lane.",
+                "purpose": "Canonical primary config backup lane for media-home.",
+                "durability_class": "home_backup_primary",
+            },
+            {
+                "object_id": "synology/volume1/media-staging",
+                "kind": "path_family",
+                "owner": "synology918",
+                "purpose": "Canonical home media import and current-watch surface.",
                 "durability_class": "payload_primary",
             },
             {
-                "object_id": "synology/volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue",
+                "object_id": "synology/volume1/media-holds",
                 "kind": "path_family",
                 "owner": "synology918",
-                "purpose": "Tombstoned legacy mint-os historical residue only; not canonical.",
+                "purpose": "Explicit hold and review lane for home media.",
+                "durability_class": "compatibility_hold",
+            },
+            {
+                "object_id": "synology/volume1/backups/_legacy_tombstones",
+                "kind": "path_family",
+                "owner": "synology918",
+                "purpose": "Retained historical backup tombstone subtree; not canonical.",
                 "durability_class": "compatibility_hold",
             },
         ],
@@ -666,6 +694,8 @@ def build_home_storage_map(
                 "role": str(nas_device.get("role") or ""),
             },
         },
+        "storage_scaffold_ref": rel(STORAGE_SCAFFOLD_PATH),
+        "storage_scaffold_status": home_scaffold,
         "runtime_storage": sorted(runtime_storage, key=lambda row: row["vm_id"]),
         "decommissioned_units": sorted(decommissioned_units, key=lambda row: (row["vm_id"], row["name"])),
         "service_lifecycle": build_lifecycle_site_rows(lifecycle_registry, "home"),
@@ -1039,6 +1069,7 @@ def main() -> int:
     network_dns_local = load_yaml(NETWORK_DNS_LOCAL_PATH)
     service_registry = load_yaml(SERVICE_REGISTRY_PATH)
     lifecycle_registry = load_yaml(LIFECYCLE_REGISTRY_PATH)
+    storage_scaffold = load_yaml(STORAGE_SCAFFOLD_PATH)
     shop_storage_map = load_yaml(SHOP_STORAGE_MAP_PATH)
     ssh_targets = load_yaml(SSH_TARGETS_PATH)
     synology = load_yaml(SYNOLOGY_STORAGE_PATH)
@@ -1069,6 +1100,7 @@ def main() -> int:
         home_hardware=home_hardware,
         lifecycle_registry=lifecycle_registry,
         home_proxmox=home_proxmox,
+        storage_scaffold=storage_scaffold,
         synology=synology,
     )
     estate_surface_register = build_estate_surface_register(

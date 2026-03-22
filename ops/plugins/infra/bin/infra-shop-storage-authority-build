@@ -23,6 +23,7 @@ SERVICES_HEALTH_PATH = ROOT / "ops/bindings/services.health.yaml"
 ROUTING_PATH = ROOT / "ops/bindings/domain.routing.registry.yaml"
 MEDIA_PRESSURE_PATH = ROOT / "ops/bindings/shop.media.pressure.authority.yaml"
 LIFECYCLE_REGISTRY_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
+STORAGE_SCAFFOLD_PATH = ROOT / "ops/bindings/storage.scaffold.authority.yaml"
 OUTPUT_BINDING_PATH = ROOT / "ops/bindings/shop.storage.map.yaml"
 OUTPUT_SCORECARD_PATH = ROOT / "docs/reference/generated/SHOP_RACK_SCORECARD.md"
 
@@ -86,6 +87,16 @@ def ensure_dict(value: Any) -> dict[str, Any]:
 
 def ensure_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def scaffold_rows_for_device(scaffold: dict[str, Any], device: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw_row in ensure_list(scaffold.get("surfaces")):
+        row = ensure_dict(raw_row)
+        if str(row.get("device") or "").strip() != device:
+            continue
+        rows.append(row)
+    return sorted(rows, key=lambda row: str(row.get("path") or ""))
 
 
 def runtime_kind(vm: dict[str, Any]) -> str:
@@ -471,6 +482,7 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
     routing = load_yaml(ROUTING_PATH)
     media_pressure = load_yaml(MEDIA_PRESSURE_PATH)
     lifecycle = load_yaml(LIFECYCLE_REGISTRY_PATH)
+    storage_scaffold = load_yaml(STORAGE_SCAFFOLD_PATH)
 
     source_surfaces = [
         rel(HARDWARE_PATH),
@@ -483,7 +495,9 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
         rel(ROUTING_PATH),
         rel(MEDIA_PRESSURE_PATH),
         rel(LIFECYCLE_REGISTRY_PATH),
+        rel(STORAGE_SCAFFOLD_PATH),
     ]
+    shop_scaffold = scaffold_rows_for_device(storage_scaffold, "pve")
 
     machines = {str(row.get("machine_id") or ""): row for row in hardware.get("machines") or [] if isinstance(row, dict)}
     pve_machine = machines.get("pve")
@@ -660,6 +674,30 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
             "owner": "pve",
             "purpose": "Canonical app-level cold backup plane for shop services.",
             "durability_class": "cold_restore_primary",
+        },
+        {
+            "object_id": "md1400/archive",
+            "kind": "path_family",
+            "pool": "md1400",
+            "owner": "pve",
+            "purpose": "Canonical cold archive plane on md1400.",
+            "durability_class": "cold_archive_primary",
+        },
+        {
+            "object_id": "md1400/stage",
+            "kind": "path_family",
+            "pool": "md1400",
+            "owner": "pve",
+            "purpose": "Controlled staging and reconciliation lane on md1400.",
+            "durability_class": "staging_generation",
+        },
+        {
+            "object_id": "md1400/tombstones",
+            "kind": "path_family",
+            "pool": "md1400",
+            "owner": "pve",
+            "purpose": "Retained tombstone lane for retired shop residue and evidence.",
+            "durability_class": "compatibility_hold",
         },
         {
             "object_id": "md1400/backup-cold/archive-smb/snapshots",
@@ -889,6 +927,8 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
             "script": rel(Path(__file__)),
         },
         "source_surfaces": source_surfaces,
+        "storage_scaffold_ref": rel(STORAGE_SCAFFOLD_PATH),
+        "storage_scaffold_status": shop_scaffold,
         "tier_model": storage_tiers,
         "storage_planes": storage_planes,
         "machine_summary": {

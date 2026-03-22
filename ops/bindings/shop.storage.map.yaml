@@ -6,7 +6,7 @@
 # Do not edit manually — rebuild with: ./bin/ops cap run infra.shop.storage.authority.build
 version: 1
 authority_state: projection
-generated_at_utc: '2026-03-20T21:09:06Z'
+generated_at_utc: '2026-03-22T05:39:28Z'
 site: shop
 generated_by:
   capability: infra.shop.storage.authority.build
@@ -22,6 +22,79 @@ source_surfaces:
 - ops/bindings/domain.routing.registry.yaml
 - ops/bindings/shop.media.pressure.authority.yaml
 - ops/bindings/service.data.lifecycle.registry.yaml
+- ops/bindings/storage.scaffold.authority.yaml
+storage_scaffold_ref: ops/bindings/storage.scaffold.authority.yaml
+storage_scaffold_status:
+- device: pve
+  path: /md1400/archive
+  scaffold_class: archive_cold
+  authority_state: canonical_live
+  retention_state: active
+  canonicality: canonical
+  detail: Canonical shop cold archive plane, including the live-share datasets exported
+    by archive-smb.
+  blockers: ''
+  source_refs:
+  - docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+  - ops/bindings/shop.storage.map.yaml
+- device: pve
+  path: /md1400/backup-cold
+  scaffold_class: backup_primary
+  authority_state: canonical_live
+  retention_state: active
+  canonicality: canonical
+  detail: Canonical shop cold backup plane on md1400.
+  blockers: ''
+  source_refs:
+  - docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+  - ops/bindings/shop.storage.map.yaml
+  - ops/bindings/backup.inventory.yaml
+- device: pve
+  path: /md1400/backup-cold/apps/media-config
+  scaffold_class: backup_secondary
+  authority_state: declared_secondary_copy
+  retention_state: active
+  canonicality: secondary
+  detail: Secondary/offsite cold copy lane for media-home config archives. Primary
+    authority remains on Synology.
+  blockers: ''
+  source_refs:
+  - ops/bindings/backup.inventory.yaml
+  - ops/bindings/service.data.lifecycle.registry.yaml
+- device: pve
+  path: /md1400/stage
+  scaffold_class: intake_stage
+  authority_state: controlled_stage
+  retention_state: active
+  canonicality: canonical
+  detail: Controlled import, reconciliation, and promotion lane. Payload should drain
+    onward.
+  blockers: ''
+  source_refs:
+  - docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+- device: pve
+  path: /md1400/tombstones
+  scaffold_class: tombstone_retained
+  authority_state: retained_noncanonical
+  retention_state: retained
+  canonicality: noncanonical
+  detail: Shop retired-runtime residue and evidence lane. Not an active runtime or
+    backup authority.
+  blockers: ''
+  source_refs:
+  - docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+- device: pve
+  path: /media
+  scaffold_class: review_pending
+  authority_state: deprecated_compatibility_surface
+  retention_state: review_required
+  canonicality: noncanonical
+  detail: Deprecated shop-side media evacuation pressure lane. Active home media authority
+    is on Synology.
+  blockers: writer_cutover_and_reclaim_policy_still_in_flight
+  source_refs:
+  - ops/bindings/shop.storage.map.yaml
+  - ops/bindings/service.data.lifecycle.registry.yaml
 tier_model:
 - tier_id: tank
   plane: hot_runtime
@@ -30,8 +103,8 @@ tier_model:
   layout: RAIDZ2
   drives: sda-sdh
 - tier_id: media
-  plane: deprecated_evacuation_pressure
-  purpose: "Deprecated media payload pool. NOT the active family media plane — that is home Synology. This pool holds NFS-exported evacuation residue pending archive/reclaim."
+  plane: warm_payload
+  purpose: Media payload only or phased-out pressure lane.
   host: pve
   layout: RAIDZ1
   drives: sdi-sdl
@@ -52,8 +125,8 @@ storage_planes:
   kind: zpool
   pool: media
   owner: pve
-  purpose: "Deprecated media evacuation pool. NFS-exported payload residue from pre-migration era. Not the active family media plane (that is home Synology) and not the canonical cold backup plane."
-  durability_class: evacuation_residue
+  purpose: Media payload lane; not the canonical cold backup plane.
+  durability_class: payload_primary
 - object_id: md1400
   kind: zpool
   pool: md1400
@@ -79,6 +152,24 @@ storage_planes:
   owner: pve
   purpose: Canonical app-level cold backup plane for shop services.
   durability_class: cold_restore_primary
+- object_id: md1400/archive
+  kind: path_family
+  pool: md1400
+  owner: pve
+  purpose: Canonical cold archive plane on md1400.
+  durability_class: cold_archive_primary
+- object_id: md1400/stage
+  kind: path_family
+  pool: md1400
+  owner: pve
+  purpose: Controlled staging and reconciliation lane on md1400.
+  durability_class: staging_generation
+- object_id: md1400/tombstones
+  kind: path_family
+  pool: md1400
+  owner: pve
+  purpose: Retained tombstone lane for retired shop residue and evidence.
+  durability_class: compatibility_hold
 - object_id: md1400/backup-cold/archive-smb/snapshots
   kind: path_family
   pool: md1400
@@ -131,15 +222,15 @@ machine_summary:
     last_verified: '2026-03-01'
 media_pressure:
   pool_state:
-    observed_at_utc: '2026-03-12T05:08:17Z'
+    observed_at_utc: '2026-03-21T05:25:47Z'
     media:
       total_bytes: 32006096289792
-      used_bytes: 31816960622592
-      free_bytes: 189135667200
-      usage_pct: 99
+      used_bytes: 27598970830848
+      free_bytes: 4407125458944
+      usage_pct: 86
       total_display: 29.1T
-      used_display: 28.9T
-      free_display: 176G
+      used_display: 25.1T
+      free_display: 4.1T
     md1400:
       total_bytes: 48000554500096
       used_bytes: 8030321017344
@@ -151,20 +242,29 @@ media_pressure:
   nfs_export_truth:
     export_host: pve
     export_path: /media
+    status: deprecated
+    note: 'These NFS exports are legacy shop infrastructure. The canonical active
+      media runtime is HOME (Synology /volume1/media-staging via media-home VM 106).
+      download-stack and streaming-stack are parked residue, not active consumers.
+
+      '
     consumers:
     - host: download-stack
       mount_path: /mnt/media
       mode: rw
+      status: parked
     - host: streaming-stack
       mount_path: /mnt/media
       mode: ro
+      status: parked
     local_view_drift:
       status: accepted
-      summary: 'The client-visible /media export is authoritative for payload accounting.
-        The host-local paths /media/movies, /media/tv, and /media/music are empty
-        child datasets, and /media/movies-archive is currently masked by md1400/media-cold/movies-archive.
-        NFS consumers still observe live parent payload at those paths, so host-local
-        du/zfs output alone is not storage truth.
+      summary: 'The client-visible /media export accounts for payload residue on the
+        deprecated shop pool. Host-local paths /media/movies, /media/tv, and /media/music
+        are empty child datasets, and /media/movies-archive is masked by md1400/media-cold/movies-archive.
+        NFS consumers still observe parent payload at those paths, so host-local du/zfs
+        output alone is not storage truth. This is evacuation accounting, not active
+        media truth.
 
         '
       affected_paths:
@@ -174,49 +274,50 @@ media_pressure:
       - /media/movies-archive
   payload_by_path:
   - path: /mnt/media/movies
-    surface_class: runtime
+    surface_class: evacuation_residue
     reclaim_class: payload
-    owner: streaming-stack
-    purpose: Residual shop-side movie compatibility view of the active media-home
-      library.
-    used_bytes: 10534383010816
-    used_display: 9.6T
+    owner: legacy_nfs_residue
+    purpose: Movie payload residue on deprecated shop pool. Canonical active movie
+      library is on home Synology /volume1/media-staging/movies via media-home VM
+      106.
+    used_bytes: 10876177733125
+    used_display: 10.1T
   - path: /mnt/media/tv
-    surface_class: runtime
+    surface_class: evacuation_residue
     reclaim_class: payload
-    owner: streaming-stack
-    purpose: Residual shop-side TV compatibility view of the active media-home
-      library.
-    used_bytes: 5998179902464
-    used_display: 5.5T
+    owner: legacy_nfs_residue
+    purpose: TV payload residue on deprecated shop pool. Canonical active TV library
+      is on home Synology via media-home VM 106.
+    used_bytes: 6183208820213
+    used_display: 5.7T
   - path: /mnt/media/downloads
-    surface_class: runtime
+    surface_class: evacuation_residue
     reclaim_class: regenerable
-    owner: download-stack
-    purpose: Residual shop-side import/download lane retained for compatibility
-      while the media-home plane remains canonical.
-    used_bytes: 2873736959488
-    used_display: 2.7T
+    owner: legacy_nfs_residue
+    purpose: Downloads residue on deprecated shop pool. Active downloads now land
+      on home Synology via SABnzbd on media-home.
+    used_bytes: 116698405125
+    used_display: 108G
   - path: /mnt/media/music
-    surface_class: runtime
+    surface_class: evacuation_residue
     reclaim_class: payload
-    owner: streaming-stack
-    purpose: Residual shop-side music compatibility view of the active media-home
-      library.
-    used_bytes: 714370220032
-    used_display: 666G
+    owner: legacy_nfs_residue
+    purpose: Music payload residue on deprecated shop pool. Canonical active music
+      library is on home Synology via media-home VM 106.
+    used_bytes: 736408065826
+    used_display: 686G
   - path: /mnt/media/movies-archive
     surface_class: archive
     reclaim_class: archive
-    owner: download-stack
-    purpose: Radarr archive root reachable over the canonical /media export.
-    used_bytes: 219933550080
-    used_display: 205G
+    owner: legacy_nfs_residue
+    purpose: Radarr archive root on deprecated shop pool. Not active playback surface.
+    used_bytes: 230161189327
+    used_display: 214G
   - path: /mnt/media/backups
     surface_class: compatibility-hold
     reclaim_class: archive
     owner: pve
-    purpose: Legacy warm-lane media-stack tarballs being drained to md1400; not canonical
+    purpose: Legacy warm-lane media-stack tarballs drained to md1400. Not canonical
       backup truth.
     used_bytes: 6971392
     used_display: 6.7M
@@ -255,25 +356,24 @@ media_pressure:
   - lane_id: media-downloads-reclaim
     surface_class: runtime
     reclaim_class: regenerable
-    status: candidate
+    status: done
     path: /mnt/media/downloads
-    used_bytes: 2873736959488
-    used_display: 2.7T
-    rationale: 'Downloads are the largest regenerable consumer on the warm lane. Reclaim
-      should be selective and tool-aware, not a blind delete, but this is the highest-value
-      live cleanup path once active imports are reviewed.
-
-      '
+    used_bytes: 116698405125
+    used_display: 108G
+    rationale: "Downloads cleanup executed 2026-03-12 to 2026-03-21: 2.7TB \u2192\
+      \ 108GB (2.6TB reclaimed). Remaining 108GB is active/recent downloads. Further\
+      \ selective cleanup available if needed.\n"
   summary:
-    canonical_payload_bytes: 17466866683392
-    canonical_payload_display: 15.9TiB
-    regenerable_runtime_bytes: 2873736959488
-    regenerable_runtime_display: 2.61TiB
-    blocking_summary: 'media is at 99% usage. NFS-visible canonical payload already
-      accounts for about 15.9TiB (movies/tv/music plus movies-archive), downloads
-      adds about 2.61TiB of regenerable pressure, the legacy warm-lane media-stack
-      tarballs are now offloaded to md1400, and the retained forensic snapshot has
-      grown to 278G, so the migration does not reclaim space immediately.
+    shop_pool_residue_bytes: 18026955808491
+    shop_pool_residue_display: 16.4TiB
+    regenerable_residue_bytes: 116698405125
+    regenerable_residue_display: 108GiB
+    blocking_summary: 'The SHOP pve:/media pool is at 86% usage. This is NOT the home
+      canonical plane. NFS-visible payload residue accounts for about 16.4TiB (movies/tv/music
+      plus movies-archive), downloads cleaned to 108GiB of regenerable pressure. Legacy
+      warm-lane tarballs are offloaded to md1400; retained forensic snapshot at 278G.
+      The canonical active family media runtime is HOME (Synology, 20T, ~35% used,
+      14T free).
 
       '
     safe_to_change_drives: blocked
@@ -396,6 +496,8 @@ service_lifecycle:
   staging_roots:
   - nas:/volume1/media-staging/downloads (Active home intake/download lane. Must drain
     after import and must never become a permanent residence.)
+  - media-home:/srv/media/downloads (Compatibility alias for the active home intake/download
+    lane. Must drain after import and must never become a permanent residence.)
   quarantine_roots:
   - pve:/md1400/archive/media-quarantine/pending (Operator review queue for unresolved
     media.)
@@ -403,8 +505,10 @@ service_lifecycle:
     or delete.)
   export_archive_lanes:
   - pve:/md1400/media-cold (Cold archive and legacy media hold lane.)
-  - pve:/md1400/backup-cold/apps/media-config (Canonical config backup archive for
-    the combined media-home plane.)
+  - nas:/volume1/backups/apps/media-config (Canonical primary config backup archive
+    for the combined media-home plane.)
+  - pve:/md1400/backup-cold/apps/media-config (Secondary/offsite cold copy lane for
+    the combined media-home config archive.)
   retention_policy:
     policy_type: bounded_stage_windows
     claim_days: null
@@ -877,159 +981,6 @@ runtime_storage:
   backup_admission_states:
   - production_ready
   primary_backup_unit: vm-207-ai-consolidation
-- vm_id: 209
-  hostname: download-stack
-  kind: vm
-  role: media-download
-  status: active
-  startup_policy: auto
-  health_probe_policy: selective
-  storage_tier: tank-docker
-  placement_status: compliant
-  placement_notes: Configs on NFS. /opt/appdata for SQLite (intentional). Media on
-    NFS.
-  owner: '@ronny'
-  purpose: Download services. Split from media-stack (VM 201). NFS mounts from pve.
-  active_services:
-  - autopulse
-  - crosswatch
-  - crowdsec
-  - decypharr
-  - download-node-exporter
-  - flaresolverr
-  - gluetun
-  - lidarr
-  - posterizarr
-  - prowlarr
-  - qbittorrent
-  - radarr
-  - recyclarr
-  - sabnzbd
-  - slskd
-  - sonarr
-  - soularr
-  - swaparr-lidarr
-  - swaparr-radarr
-  - swaparr-sonarr
-  - trailarr
-  - unpackerr
-  - watchtower-download
-  health_probe_ids:
-  - download-node-exporter
-  - flaresolverr
-  - lidarr
-  - prowlarr
-  - radarr
-  - sabnzbd
-  - sonarr
-  public_routes: []
-  public_route_count: 0
-  backup_profiles: []
-  durability_classes: []
-  restore_classes: []
-  storage_objects:
-  - kind: zfs_dataset_nfs_export
-    object: tank/docker/download-stack
-    purpose: Primary runtime dataset on tank
-    durability_role: runtime_primary
-    pool: tank
-    mount_path: /mnt/docker
-  - kind: nfs_mount
-    object: tank/docker/download-stack
-    purpose: Config/data export from tank/docker
-    durability_role: supplemental_runtime
-    pool: tank
-    mount_path: /mnt/docker
-    note: mode=rw
-  - kind: nfs_mount
-    object: media
-    purpose: Media payload mount
-    durability_role: supplemental_runtime
-    pool: media
-    mount_path: /mnt/media
-    note: mode=rw
-  backup_generation_lanes: []
-  restore_targets: []
-  backup_admission_states: []
-  primary_backup_unit: ''
-- vm_id: 210
-  hostname: streaming-stack
-  kind: vm
-  role: media-streaming
-  status: active
-  startup_policy: auto
-  health_probe_policy: full
-  storage_tier: tank-docker
-  placement_status: compliant
-  placement_notes: "Configs on NFS (RW), media on NFS (RO). Pruned images + truncated\
-    \ 2.9GB log, 54%\u219244%. Log rotation added."
-  owner: '@ronny'
-  purpose: Streaming services. Split from media-stack (VM 201). NFS mounts from pve.
-  active_services:
-  - bazarr
-  - homarr
-  - jellyfin
-  - jellyseerr
-  - navidrome
-  - spotisub
-  - streaming-node-exporter
-  - subgen
-  - watchtower-streaming
-  - wizarr
-  health_probe_ids:
-  - bazarr
-  - homarr
-  - jellyfin
-  - jellyseerr
-  - navidrome
-  - spotisub
-  - streaming-node-exporter
-  - wizarr
-  public_routes:
-  - hostname: homarr.ronny.works
-    routing_layer: cloudflare_tunnel
-    zone: ronny.works
-  - hostname: jellyfin.ronny.works
-    routing_layer: cloudflare_tunnel
-    zone: ronny.works
-  - hostname: music.ronny.works
-    routing_layer: cloudflare_tunnel
-    zone: ronny.works
-  - hostname: requests.ronny.works
-    routing_layer: cloudflare_tunnel
-    zone: ronny.works
-  - hostname: spotisub.ronny.works
-    routing_layer: cloudflare_tunnel
-    zone: ronny.works
-  public_route_count: 5
-  backup_profiles: []
-  durability_classes: []
-  restore_classes: []
-  storage_objects:
-  - kind: zfs_dataset_nfs_export
-    object: tank/docker/streaming-stack
-    purpose: Primary runtime dataset on tank
-    durability_role: runtime_primary
-    pool: tank
-    mount_path: /mnt/docker
-  - kind: nfs_mount
-    object: tank/docker/streaming-stack
-    purpose: Config/data export from tank/docker
-    durability_role: supplemental_runtime
-    pool: tank
-    mount_path: /mnt/docker
-    note: mode=rw
-  - kind: nfs_mount
-    object: media
-    purpose: Media payload mount
-    durability_role: supplemental_runtime
-    pool: media
-    mount_path: /mnt/media
-    note: mode=ro
-  backup_generation_lanes: []
-  restore_targets: []
-  backup_admission_states: []
-  primary_backup_unit: ''
 - vm_id: 211
   hostname: finance-stack
   kind: vm
@@ -1601,15 +1552,15 @@ current_risks:
   severity: high
   runtime: media
   source: ops/bindings/shop.media.pressure.authority.yaml
-  detail: deprecated shop pve:/media evacuation residue is at 99% usage. NFS-visible
-    payload already accounts for about 15.9TiB (movies/tv/music plus movies-archive),
-    downloads adds about 2.61TiB of regenerable pressure, the legacy warm-lane
-    media-stack tarballs are now offloaded to md1400, and the retained forensic
-    snapshot has grown to 278G. The canonical active media-home plane is separate
-    and is not measured by this residue snapshot.
+  detail: The SHOP pve:/media pool is at 86% usage. This is NOT the home canonical
+    plane. NFS-visible payload residue accounts for about 16.4TiB (movies/tv/music
+    plus movies-archive), downloads cleaned to 108GiB of regenerable pressure. Legacy
+    warm-lane tarballs are offloaded to md1400; retained forensic snapshot at 278G.
+    The canonical active family media runtime is HOME (Synology, 20T, ~35% used, 14T
+    free).
 summary:
-  active_runtime_count: 14
+  active_runtime_count: 12
   tombstone_count: 1
   lifecycle_service_count: 4
-  public_runtime_count: 8
-  private_only_runtime_count: 6
+  public_runtime_count: 7
+  private_only_runtime_count: 5

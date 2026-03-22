@@ -2,9 +2,10 @@
 # Machine-readable Synology DS918+ storage manifest
 # Companion to: docs/governance/SYNOLOGY_918_STORAGE_MANIFEST_V1.md
 # Authority: authoritative
-# Last verified: 2026-03-19
-version: 1.3
-loop: LOOP-BACKUP-PLANE-CONSOLIDATION-730XD-E2E-20260308
+# Last verified: 2026-03-22
+version: 1.4
+loop: LOOP-STORAGE-SCAFFOLD-CANONICALIZATION-20260322
+scaffold_ref: ops/bindings/storage.scaffold.authority.yaml
 
 device:
   model: Synology DS918+
@@ -16,90 +17,111 @@ device:
   utilization_pct: 38
 
 canonical_roles:
-  - role_id: business-app-grace-mirror
-    canonical_authority: r730xd_md1400_backup_cold
-    synology_path_root: /volume1/backups/apps
-    current_use: cleared_2026_03_09
-    detail: "Legacy NAS app mirror deleted on 2026-03-09. Canonical business/app recovery remains on 730XD."
-  - role_id: selective-shop-exact-offsite
-    canonical_authority: r730xd_md1400_backup_cold
-    synology_path_root: /volume1/backups/_legacy_tombstones/retired-20260319-shop-proxmox/vzdump/critical
-    current_use: tombstoned_2026_03_19
-    detail: "Historical shop exact-offsite residue was reclassified into an explicit Synology tombstone subtree on 2026-03-19. Canonical cold recovery lives on /md1400/backup-cold/vzdump/pve."
   - role_id: home-local-primary
     canonical_authority: synology
     synology_path_root: /volume1/backups/proxmox_backups/dump
+    scaffold_class: backup_primary
     current_use: canonical_home_backup_surface
-    detail: "Canonical home backup surface for proxmox-home artifacts (Home Assistant VM 100, media-home VM 106, and home Pi-hole LXC 105)."
+    detail: Canonical home backup surface for proxmox-home artifacts.
+  - role_id: home-media-config-primary
+    canonical_authority: synology
+    synology_path_root: /volume1/backups/apps/media-config
+    scaffold_class: backup_primary
+    current_use: canonical_primary_config_backup_surface
+    detail: Canonical primary config backup surface for media-home combined config-state archives.
+  - role_id: backup-apps-parent-review
+    canonical_authority: mixed
+    synology_path_root: /volume1/backups/apps
+    scaffold_class: review_pending
+    current_use: contains_live_canonical_subpath
+    detail: Parent backup-apps root is not globally cleared because /volume1/backups/apps/media-config remains canonical.
+  - role_id: selective-shop-exact-offsite
+    canonical_authority: r730xd_md1400_backup_cold
+    synology_path_root: /volume1/backups/_legacy_tombstones/retired-20260319-shop-proxmox/vzdump/critical
+    scaffold_class: tombstone_retained
+    current_use: tombstoned_2026_03_19
+    detail: Historical shop exact-offsite residue retained only as tombstone. Canonical shop cold recovery lives on /md1400/backup-cold/vzdump/pve.
   - role_id: mint-os-legacy-review
     canonical_authority: r730xd_md1400_backup_cold
     synology_path_root: /volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue
+    scaffold_class: tombstone_retained
     current_use: tombstoned_2026_03_19
-    detail: "Legacy mint-os residue was moved out of the active proxmox_backups root and into the explicit Synology tombstone subtree on 2026-03-19; not canonical."
+    detail: Legacy mint-os residue retained only as non-canonical tombstone.
   - role_id: legacy-backup-tombstones
     canonical_authority: none
     synology_path_root: /volume1/backups/_legacy_tombstones
+    scaffold_class: tombstone_retained
     current_use: active_tombstone_subtree
-    detail: "Explicit quarantine subtree for retired Synology backup lanes. These paths are not canonical backup authority."
+    detail: Explicit retained subtree for retired Synology backup lanes.
   - role_id: home-media-staging
     canonical_authority: synology
     synology_path_root: /volume1/media-staging
+    scaffold_class: personal_live
     current_use: active_media_import_and_transitional_watch_surface
-    detail: "This is the only populated/exported Synology media share currently consumed by media-home VM 106. It is the live current-watch/import surface until a dedicated hot-library share exists."
+    detail: Canonical home media import and current-watch surface.
   - role_id: home-media-holds
     canonical_authority: synology
     synology_path_root: /volume1/media-holds
+    scaffold_class: review_hold
     current_use: active_hold_review_surface
-    detail: "Explicit hold/review/overflow share. This is not the primary playback library."
+    detail: Explicit hold and review share. Not the primary playback library.
   - role_id: home-personal-data
     canonical_authority: synology
     synology_path_root: /volume1
-    current_use: active
-    detail: "photo-keepers, media staging, media holds, documents, and homelab assets remain canonical on Synology. /volume1/im2ch is derivative-only legacy residue pending tombstone, not canonical home data."
+    scaffold_class: personal_live
+    current_use: scoped_personal_and_media_family_root
+    detail: Photo keepers plus the declared media-staging and media-holds shares remain canonical on Synology. Documents are drained and homelab is review-pending.
+  - role_id: drained-documents-root
+    canonical_authority: none
+    synology_path_root: /volume1/documents
+    scaffold_class: drained_retired
+    current_use: drained_empty_2026_03_22
+    detail: Former documents payload root is now empty and no longer canonical.
+  - role_id: homelab-review-pending
+    canonical_authority: unresolved
+    synology_path_root: /volume1/homelab
+    scaffold_class: review_pending
+    current_use: retained_review_pending
+    detail: Homelab durable weight remains retained but not fully classified in canon.
   - role_id: legacy-immich-derivative-residue
     canonical_authority: none
     synology_path_root: /volume1/im2ch
+    scaffold_class: review_pending
     current_use: legacy_derivative_residue_pending_tombstone
-    detail: "Historical Synology Immich derivative share retained only for verification and controlled retirement. Canonical personal photo truth does not live here."
+    detail: Historical Synology Immich derivative share retained only for verification and controlled retirement.
 
-business_app_grace_mirror:
-  canonical_recovery_plane:
-    finance: /md1400/backup-cold/apps/finance
-    infra_core: /md1400/backup-cold/apps/infra-core
-    dev_tools: /md1400/backup-cold/apps/dev-tools
-    mint_data: /md1400/backup-cold/apps/mint-data
-    communications: /md1400/backup-cold/apps/communications
-  services: []
-  nas_root_size: 0
-  current_use: cleared_2026_03_09
-  r730xd_usage:
-    finance: 1.4G
-    infra_core: 49M
-    dev_tools: 332M
-    mint_data: 35M
-    communications: 5.9M
+app_config_primary:
+  path: /volume1/backups/apps/media-config/
+  current_size: 4.6G
+  latest_artifact: media-home/media-home-config-20260321-180711.tar.gz
+  latest_artifact_at_utc: 2026-03-21T13:09:32Z
+  policy_note: Synology is the canonical primary config backup surface for media-home. md1400 holds the declared secondary cold copy.
+
+home_local_primary:
+  path: /volume1/backups/proxmox_backups/dump/
+  current_size: 114G
+  active_artifacts:
+    vm_100: vzdump-qemu-100-2026_03_21-03_00_01.vma.zst
+    lxc_105: vzdump-lxc-105-2026_03_15-04_00_03.tar.zst
+    vm_106: vzdump-qemu-106-2026_03_21-03_01_31.vma.zst
+  latest_artifact_times_utc:
+    vm_100: 2026-03-21T02:01:31Z
+    lxc_105: 2026-03-15T03:00:13Z
+    vm_106: 2026-03-21T02:06:18Z
+  policy_note: VM 100, VM 106, and LXC 105 remain canonical home backup exceptions on Synology.
 
 selective_shop_exact_offsite:
   path: /volume1/backups/_legacy_tombstones/retired-20260319-shop-proxmox/vzdump/critical/
   current_size: 744G
   runtime_status: tombstoned_2026_03_19
   hardened_on: 2026-03-19
-  hardening_detail: "Historical residue from the pre-md1400 exact-offsite lane was renamed into the explicit Synology tombstone subtree on 2026-03-19. Canonical cold recovery for shop guests lives on /md1400/backup-cold/vzdump/pve."
-
-home_local_primary:
-  path: /volume1/backups/proxmox_backups/dump/
-  size: 96G
-  active_artifacts:
-    vm_100: vzdump-qemu-100-2026_03_19-03_00_02.vma.zst
-    lxc_105: vzdump-lxc-105-2026_03_15-04_00_03.tar.zst
-    vm_106: vzdump-qemu-106-2026_03_19-03_01_33.vma.zst
-  policy_note: "VM 100, VM 106, and LXC 105 remain canonical home backup exceptions on Synology. md1400 is reserved for the 730XD/shop environment."
+  hardening_detail: Historical residue from the pre-md1400 exact-offsite lane was renamed into the explicit Synology tombstone subtree. Canonical cold recovery for shop guests lives on /md1400/backup-cold/vzdump/pve.
 
 mint_os_legacy_review:
   path: /volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue/
   current_use: tombstoned_not_deleted
-  last_reviewed: 2026-03-19
-  note: "Legacy mint-os residue only; not canonical. It was moved out of the active proxmox_backups root into the explicit tombstone subtree on 2026-03-19."
+  last_reviewed: 2026-03-22
+  note: Legacy mint-os residue only; not canonical. One nested .DS_Store under configs remained root-owned and blocked from cleanup in this wave.
   subpaths:
     - path: /volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue/minio/
       size: 110G
@@ -110,6 +132,7 @@ mint_os_legacy_review:
     - path: /volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue/configs/
       size: 392K
       note: stale_legacy_config_residue
+      cleanup_blocker: root_owned_ds_store
     - path: /volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue/strapi/
       size: 8K
       note: stale_legacy_strapi_residue
@@ -149,7 +172,7 @@ share_surface_truth:
       exported_to:
         - 10.0.0.106
         - 10.0.0.179
-      detail: Only populated/exported media share currently consumed by media-home VM 106.
+      detail: Canonical active media share currently consumed by media-home VM 106.
     - share_name: media-holds
       path: /volume1/media-holds
       protocols:
@@ -157,7 +180,7 @@ share_surface_truth:
         - nfs
       exported_to:
         - 10.0.0.179
-      detail: Explicit hold/review share; empty but intentional.
+      detail: Explicit hold and review share.
   ghost_placeholder_dirs:
     - path: /volume1/media-home
       status: inactive
@@ -194,16 +217,50 @@ home_personal_data:
   - path: /volume1/media-holds/
     size: 0B
     role: media_hold_review_surface
-  - path: /volume1/documents/
-    size: 81G
-    role: documents_archive
+
+review_pending_surfaces:
+  - path: /volume1/backups/infrastructure/
+    size: 3.1G
+    scaffold_class: review_pending
+    latest_touch_utc: 2026-01-17T02:58:30Z
+    note: Fresh retained backup weight with no narrow lifecycle contract yet.
+  - path: /volume1/backups/devices/
+    size: 462M
+    scaffold_class: review_pending
+    latest_touch_utc: 2026-02-01T09:00:05Z
+    note: Device residue remains; ronny-macbook capture includes ephemeral .ssh/sockets and the backup target is disabled in backup.inventory.
   - path: /volume1/homelab/
     size: 71G
-    role: homelab_assets
+    scaffold_class: review_pending
+    note: Root retained for later classification. photo-cleanup remains out of scope for this wave.
+  - path: /volume1/homelab/images/
+    size: 68G
+    scaffold_class: review_pending
+    latest_touch_utc: 2025-07-19T20:55:56Z
+    note: Old VM image payload; no 2026 writes observed.
+  - path: /volume1/homelab/template/
+    size: 3.0G
+    scaffold_class: review_pending
+    latest_touch_utc: 2025-02-16T22:49:40Z
+    note: Old template lane; no 2026 writes observed.
+
+drained_retired_surfaces:
+  - path: /volume1/documents/
+    size: 0
+    scaffold_class: drained_retired
+    latest_touch_utc: 2026-03-22T00:00:00Z
+    note: Root is empty after governed archive rehome and cleanup receipts.
+
+defect_cruft_surfaces:
+  - path: /volume1/backups/synoreport/
+    size: 66M
+    scaffold_class: defect_cruft
+    latest_touch_utc: 2025-12-27T03:55:38Z
+    note: Generated report residue with no 2026 writes observed.
 
 legacy_personal_residue:
   - path: /volume1/im2ch/
     size: 2.3T
     role: derivative_only_legacy_immich_residue
     disposition: verify_then_tombstone
-    detail: "Separate decommissioned Immich share dominated by processed derivatives, thumbnails, and encoded video; not canonical originals."
+    detail: Separate decommissioned Immich share dominated by processed derivatives, thumbnails, and encoded video; not canonical originals.

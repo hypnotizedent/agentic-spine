@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-18
+last_verified: 2026-03-22
 scope: managed-machine-filesystem-contract
 ---
 
@@ -100,6 +100,33 @@ Purpose: make every managed machine boring to read. A path must tell the operato
   - No health-green claim.
   - One restore procedure, one review/expiry story.
 
+## Shared Storage Scaffold Classes
+
+Every cross-device storage map should project durable roots into the same small scaffold model so agents see semantic symmetry even when literal directory names differ.
+
+- `backup_primary`
+  - Meaning: canonical primary backup or restore authority for an active plane.
+- `backup_secondary`
+  - Meaning: declared secondary or offsite copy; not the primary authority.
+- `archive_cold`
+  - Meaning: canonical cold archive plane for retained payload.
+- `intake_stage`
+  - Meaning: controlled staging or reconciliation lane with drain/expiry expectations.
+- `review_hold`
+  - Meaning: explicit hold or review lane retained on purpose.
+- `tombstone_retained`
+  - Meaning: retired non-canonical residue kept for review, extraction, or evidence.
+- `personal_live`
+  - Meaning: active home-personal payload surface that remains canonical.
+- `review_pending`
+  - Meaning: durable surface intentionally retained but not yet fully classified for cleanup or canon.
+- `defect_cruft`
+  - Meaning: generated clutter or placeholder residue with no canonical authority claim.
+- `drained_retired`
+  - Meaning: previously used root that is now intentionally drained and no longer canonical.
+
+The authoritative machine-readable projection for these classes is `ops/bindings/storage.scaffold.authority.yaml`.
+
 ## Active, Parked, Retired
 
 ### Active
@@ -165,9 +192,12 @@ Purpose: make every managed machine boring to read. A path must tell the operato
 
 ### `synology918`
 - `/volume1/backups/proxmox_backups/dump` = canonical home VM/LXC backup lane
+- `/volume1/backups/apps/media-config` = canonical primary media-home config backup lane
 - `/volume1/backups/_legacy_tombstones` = explicit retired backup subtree
 - `/volume1/media-staging/...` = canonical active home media import surface and the only live share currently consumed by `media-home` VM 106
 - `/volume1/media-holds/...` = canonical hold/review/overflow lane, not the primary playback library
+- `/volume1/documents` = drained retired root; no longer a canonical business payload surface
+- `/volume1/homelab` = review-pending durable residue; not implicitly canonical
 - Empty placeholder names such as `/volume1/media-home`, `/volume1/media`, `/volume1/hot-media`, `/volume1/live-library`, and `/volume1/library-home` are defects, not canonical roots
 
 ## Operator Rule
