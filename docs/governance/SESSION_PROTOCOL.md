@@ -100,6 +100,13 @@ Full spine access. Follow all sections below in order.
 
 Network gates (infra health, backup checks, media stack) have Tailscale guards — they SKIP cleanly when VPN is disconnected instead of hanging or triggering login popups.
 
+### Backlog Survival Bar
+
+- Leave a backlog item open only when it has an owner, a parent loop (or explicit terminal disposition), and one concrete `next_action`.
+- If work already landed, close the loop/gap/proposal in the same session instead of leaving a stale open artifact behind.
+- If two active items describe the same outcome, merge to one survivor and close the duplicate with a note pointing at the survivor.
+- If a proposal is past its review point and still unowned or inactive, supersede/archive it instead of preserving zombie backlog.
+
 ### After the session (Desktop)
 
 - Store any learnings in `docs/reference/brain/memory.md` if that system is enabled.
