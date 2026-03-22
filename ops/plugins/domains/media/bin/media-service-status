@@ -167,6 +167,11 @@ get_service_container() {
   yq -r ".services[\"$service\"].container // \"$service\"" "$SERVICE_BINDING" 2>/dev/null || echo "$service"
 }
 
+get_service_intent() {
+  local service="$1"
+  yq -r ".services[\"$service\"].status // \"active\"" "$SERVICE_BINDING" 2>/dev/null || echo "active"
+}
+
 get_service_vm() {
   local service="$1"
   yq -r ".services[\"$service\"].vm // \"\"" "$SERVICE_BINDING" 2>/dev/null || echo ""
@@ -183,6 +188,40 @@ parse_status() {
   else
     echo "unknown"
   fi
+}
+
+evaluate_service() {
+  local intent="$1"
+  local runtime_status="$2"
+  case "$intent" in
+    active)
+      if [[ "$runtime_status" == "running" ]]; then
+        echo "active_ok"
+      else
+        echo "active_fail"
+      fi
+      ;;
+    parked)
+      case "$runtime_status" in
+        exited|missing|created)
+          echo "parked_ok"
+          ;;
+        running)
+          echo "parked_unexpected_running"
+          ;;
+        *)
+          echo "parked_unknown"
+          ;;
+      esac
+      ;;
+    *)
+      if [[ "$runtime_status" == "running" ]]; then
+        echo "active_ok"
+      else
+        echo "active_fail"
+      fi
+      ;;
+  esac
 }
 
 declare -A ALL_RESULTS
@@ -209,12 +248,16 @@ for vm in "${MEDIA_VMS[@]}"; do
     fi
 
     container=$(get_service_container "$service")
+    intent=$(get_service_intent "$service")
 
     if [[ -n "${VM_CONTAINERS[$container]:-}" ]]; then
-      status=$(parse_status "${VM_CONTAINERS[$container]}")
-      ALL_RESULTS["$service"]="$vm:$status:${VM_CONTAINERS[$container]}"
+      runtime_status=$(parse_status "${VM_CONTAINERS[$container]}")
+      evaluation=$(evaluate_service "$intent" "$runtime_status")
+      ALL_RESULTS["$service"]="$vm:$container:$intent:$runtime_status:$evaluation:${VM_CONTAINERS[$container]}"
     else
-      ALL_RESULTS["$service"]="$vm:missing:container-not-found"
+      runtime_status="missing"
+      evaluation=$(evaluate_service "$intent" "$runtime_status")
+      ALL_RESULTS["$service"]="$vm:$container:$intent:$runtime_status:$evaluation:container-not-found"
     fi
   done
 
@@ -225,17 +268,17 @@ done
 if $OUTPUT_JSON; then
   services_json="$(
     for service in $(printf '%s\n' "${!ALL_RESULTS[@]}" | sort); do
-      IFS=':' read -r vm status detail <<< "${ALL_RESULTS[$service]}"
-      printf '%s\t%s\t%s\t%s\n' "$service" "$vm" "$status" "$detail"
+      IFS=':' read -r vm container intent runtime_status evaluation detail <<< "${ALL_RESULTS[$service]}"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$service" "$vm" "$container" "$intent" "$runtime_status" "$evaluation" "$detail"
     done | jq -R -s '
       split("\n")
       | map(select(length > 0))
-      | map(split("\t") | {service: .[0], vm: .[1], status: .[2], detail: .[3]})
+      | map(split("\t") | {service: .[0], vm: .[1], container: .[2], intent: .[3], status: .[4], evaluation: .[5], detail: .[6]})
     '
   )"
 
   overall_status="ok"
-  if jq -e 'any(.[]; .status != "running")' >/dev/null 2>&1 <<<"$services_json"; then
+  if jq -e 'any(.[]; .evaluation == "active_fail" or .evaluation == "parked_unexpected_running" or .evaluation == "parked_unknown")' >/dev/null 2>&1 <<<"$services_json"; then
     overall_status="warn"
   fi
 
@@ -261,7 +304,14 @@ if $OUTPUT_JSON; then
           exited: ($services | map(select(.status == "exited")) | length),
           missing: ($services | map(select(.status == "missing")) | length),
           created: ($services | map(select(.status == "created")) | length),
-          unknown: ($services | map(select(.status == "unknown")) | length)
+          unknown: ($services | map(select(.status == "unknown")) | length),
+          active_total: ($services | map(select(.intent == "active")) | length),
+          active_running: ($services | map(select(.evaluation == "active_ok")) | length),
+          active_fail: ($services | map(select(.evaluation == "active_fail")) | length),
+          parked_total: ($services | map(select(.intent == "parked")) | length),
+          parked_ok: ($services | map(select(.evaluation == "parked_ok")) | length),
+          parked_unexpected_running: ($services | map(select(.evaluation == "parked_unexpected_running")) | length),
+          parked_unknown: ($services | map(select(.evaluation == "parked_unknown")) | length)
         },
         services: $services
       }
@@ -269,16 +319,59 @@ if $OUTPUT_JSON; then
 else
   echo "media.service.status"
   echo "===================="
-  printf "%-25s %-20s %-12s %s\n" "SERVICE" "VM" "STATUS" "DETAIL"
-  printf "%-25s %-20s %-12s %s\n" "-------" "--" "------" "------"
+  active_total=0
+  active_running=0
+  active_fail=0
+  parked_total=0
+  parked_ok=0
+  parked_unexpected_running=0
+  parked_unknown=0
 
-  # Sort by VM then service
+  for service in $(printf '%s\n' "${!ALL_RESULTS[@]}" | sort); do
+    IFS=':' read -r vm container intent runtime_status evaluation detail <<< "${ALL_RESULTS[$service]}"
+    case "$evaluation" in
+      active_ok) active_total=$((active_total + 1)); active_running=$((active_running + 1)) ;;
+      active_fail) active_total=$((active_total + 1)); active_fail=$((active_fail + 1)) ;;
+      parked_ok) parked_total=$((parked_total + 1)); parked_ok=$((parked_ok + 1)) ;;
+      parked_unexpected_running) parked_total=$((parked_total + 1)); parked_unexpected_running=$((parked_unexpected_running + 1)) ;;
+      parked_unknown) parked_total=$((parked_total + 1)); parked_unknown=$((parked_unknown + 1)) ;;
+    esac
+  done
+
+  overall_status="ok"
+  if [[ "$active_fail" -gt 0 || "$parked_unexpected_running" -gt 0 || "$parked_unknown" -gt 0 ]]; then
+    overall_status="warn"
+  fi
+
+  echo "status: $overall_status"
+  echo "active_running: ${active_running}/${active_total}"
+  echo "parked_ok: ${parked_ok}/${parked_total}"
+  echo
+  echo "Active Services"
+  echo "---------------"
+  printf "%-25s %-20s %-18s %-12s %s\n" "SERVICE" "VM" "CONTAINER" "RUNTIME" "DETAIL"
   for vm in "${MEDIA_VMS[@]}"; do
     for service in $(echo "${!ALL_RESULTS[@]}" | tr ' ' '\n' | sort); do
       result="${ALL_RESULTS[$service]}"
       if [[ "$result" == "$vm:"* ]]; then
-        IFS=':' read -r svm status detail <<< "$result"
-        printf "%-25s %-20s %-12s %s\n" "$service" "$svm" "$status" "$detail"
+        IFS=':' read -r svm container intent runtime_status evaluation detail <<< "$result"
+        [[ "$intent" == "active" ]] || continue
+        printf "%-25s %-20s %-18s %-12s %s\n" "$service" "$svm" "$container" "$runtime_status" "$detail"
+      fi
+    done
+  done
+
+  echo
+  echo "Parked Services"
+  echo "---------------"
+  printf "%-25s %-20s %-18s %-12s %s\n" "SERVICE" "VM" "CONTAINER" "RUNTIME" "DETAIL"
+  for vm in "${MEDIA_VMS[@]}"; do
+    for service in $(echo "${!ALL_RESULTS[@]}" | tr ' ' '\n' | sort); do
+      result="${ALL_RESULTS[$service]}"
+      if [[ "$result" == "$vm:"* ]]; then
+        IFS=':' read -r svm container intent runtime_status evaluation detail <<< "$result"
+        [[ "$intent" == "parked" ]] || continue
+        printf "%-25s %-20s %-18s %-12s %s\n" "$service" "$svm" "$container" "$runtime_status" "$detail"
       fi
     done
   done
