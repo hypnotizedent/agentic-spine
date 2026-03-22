@@ -8,7 +8,7 @@ set -euo pipefail
 # Default: dry-run (prints generated config to stdout).
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
-CONTRACT="$ROOT/ops/bindings/mcp.runtime.contract.yaml"
+CONTRACT="${MCP_CONTRACT_OVERRIDE:-$ROOT/ops/bindings/mcp.runtime.contract.yaml}"
 AGENTS_REGISTRY="$ROOT/ops/bindings/agents.registry.yaml"
 
 fail() {
@@ -55,8 +55,8 @@ done
 
 [[ "$SURFACE" == "claude_desktop" ]] || fail "only claude_desktop surface is supported"
 
-# Resolve the live config path from contract
-LIVE_CONFIG="$(yq e -r '.surface_paths.claude_desktop // ""' "$CONTRACT" 2>/dev/null || true)"
+# Resolve the live config path from contract (env override for testing)
+LIVE_CONFIG="${MCP_LIVE_CONFIG_OVERRIDE:-$(yq e -r '.surface_paths.claude_desktop // ""' "$CONTRACT" 2>/dev/null || true)}"
 [[ -n "$LIVE_CONFIG" ]] || fail "surface_paths.claude_desktop not set in contract"
 
 # Build the mcpServers object from the live config as baseline.
@@ -84,18 +84,6 @@ generate_config() {
     [[ -n "$srv" ]] && required_servers+=("$srv")
   done < <(yq e -r ".required_servers_by_surface.${SURFACE}[]?" "$CONTRACT" 2>/dev/null || true)
 
-  # Verify all required servers exist in live config
-  local missing_required=()
-  for srv in "${required_servers[@]}"; do
-    if ! jq -e --arg n "$srv" '.[$n]' <<<"$existing_servers" >/dev/null 2>&1; then
-      missing_required+=("$srv")
-    fi
-  done
-
-  if [[ "${#missing_required[@]}" -gt 0 ]]; then
-    echo "WARNING: required servers missing from live config: ${missing_required[*]}" >&2
-  fi
-
   # Get optional servers for this surface
   local -a optional_servers=()
   while IFS= read -r srv; do
@@ -106,12 +94,24 @@ generate_config() {
   # Order: required first (sorted), then optional (sorted, only if present)
   local governed_servers='{}'
 
-  # Add required servers (must exist)
+  # Add required servers: live config preferred, supplemental_server_definitions fallback
   for srv in "${required_servers[@]}"; do
     local srv_config
     srv_config="$(jq -c --arg n "$srv" '.[$n] // null' <<<"$existing_servers" 2>/dev/null || echo 'null')"
     if [[ "$srv_config" != "null" ]]; then
       governed_servers="$(jq -c --arg n "$srv" --argjson v "$srv_config" '. + {($n): $v}' <<<"$governed_servers")"
+    else
+      # Fallback: provision from supplemental_server_definitions in contract
+      local supp_config
+      supp_config="$(yq e -o=json ".supplemental_server_definitions[\"$srv\"] // null" "$CONTRACT" 2>/dev/null || echo 'null')"
+      if [[ "$supp_config" != "null" ]]; then
+        local provisioned
+        provisioned="$(echo "$supp_config" | jq -c '{command, args} + (if .env then {env} else {} end)')"
+        governed_servers="$(jq -c --arg n "$srv" --argjson v "$provisioned" '. + {($n): $v}' <<<"$governed_servers")"
+        echo "PROVISIONED: required server '$srv' from supplemental_server_definitions" >&2
+      else
+        echo "WARNING: required server '$srv' not in live config or supplemental definitions" >&2
+      fi
     fi
   done
 
