@@ -155,11 +155,36 @@ print((datetime.date.today() - d).days)
 PY
 }
 
-MEDIA_PCT="$(get_pool_pct "$MEDIA_POOL")"
-MD_PCT="$(get_pool_pct "$MD_POOL")"
+USE_SNAPSHOT_ONLY=0
+if [[ "$STORAGE_HOST_ID" == "media-home" ]]; then
+  USE_SNAPSHOT_ONLY=1
+fi
+
+SNAPSHOT_PATH="$SNAPSHOT_REL_PATH"
+SNAPSHOT_PATH="$(snapshot_surface_resolve_source_path "$ROOT" "$SNAPSHOT_REL_PATH")"
+SNAPSHOT_STATUS="unknown"
+SNAPSHOT_DAYS_TO_FAIL="none"
+SNAPSHOT_GENERATED_AT=""
+if [[ -f "$SNAPSHOT_PATH" ]]; then
+  SNAPSHOT_STATUS="$(yq -r '.runway_status // "unknown"' "$SNAPSHOT_PATH" 2>/dev/null || echo unknown)"
+  SNAPSHOT_DAYS_TO_FAIL="$(yq -r '.projection.days_to_fail // "none"' "$SNAPSHOT_PATH" 2>/dev/null || echo none)"
+  SNAPSHOT_GENERATED_AT="$(yq -r '.generated_at_utc // ""' "$SNAPSHOT_PATH" 2>/dev/null || true)"
+fi
+
+if [[ "$USE_SNAPSHOT_ONLY" -eq 1 ]]; then
+  MEDIA_PCT="$(yq -r '.pool.usage_pct // 0' "$SNAPSHOT_PATH" 2>/dev/null || echo 0)"
+  MD_PCT="n/a"
+else
+  MEDIA_PCT="$(get_pool_pct "$MEDIA_POOL")"
+  MD_PCT="$(get_pool_pct "$MD_POOL")"
+fi
 
 if [[ -z "$MEDIA_PCT" ]]; then
   if [[ "$MODE" == "brief" ]]; then
+    if [[ "$USE_SNAPSHOT_ONLY" -eq 1 ]]; then
+      echo "HW: media=${MEDIA_PCT:-unknown}% ${SNAPSHOT_STATUS} | md1400=${MD_PCT:-n/a}% | runway=${SNAPSHOT_STATUS} | days_to_fail=${SNAPSHOT_DAYS_TO_FAIL:-none} | snapshot=${SNAPSHOT_GENERATED_AT:-unknown}"
+      exit 0
+    fi
     echo "HW: UNKNOWN (pool probe failed for $MEDIA_POOL on $STORAGE_HOST_ID) | run: infra.media.capacity.guard.reconcile --check-only"
     exit 0
   fi
@@ -193,13 +218,8 @@ if [[ -n "$GAP_ID" ]]; then
 fi
 
 HW_BRIEF="HW: media=${MEDIA_PCT}% ${STATE} | md1400=${MD_PCT:-unknown}% | capacity_gap=${GAP_ID:-none} | age=${age_field}"
-SNAPSHOT_PATH="$SNAPSHOT_REL_PATH"
-SNAPSHOT_PATH="$(snapshot_surface_resolve_source_path "$ROOT" "$SNAPSHOT_REL_PATH")"
 if [[ -f "$SNAPSHOT_PATH" ]]; then
-  snapshot_status="$(yq -r '.runway_status // "unknown"' "$SNAPSHOT_PATH" 2>/dev/null || echo unknown)"
-  snapshot_days_to_fail="$(yq -r '.projection.days_to_fail // "none"' "$SNAPSHOT_PATH" 2>/dev/null || echo none)"
-  snapshot_generated_at="$(yq -r '.generated_at_utc // ""' "$SNAPSHOT_PATH" 2>/dev/null || true)"
-  HW_BRIEF="${HW_BRIEF} | runway=${snapshot_status} | days_to_fail=${snapshot_days_to_fail} | snapshot=${snapshot_generated_at:-unknown}"
+  HW_BRIEF="${HW_BRIEF} | runway=${SNAPSHOT_STATUS} | days_to_fail=${SNAPSHOT_DAYS_TO_FAIL} | snapshot=${SNAPSHOT_GENERATED_AT:-unknown}"
 fi
 
 if [[ "$MODE" == "brief" ]]; then

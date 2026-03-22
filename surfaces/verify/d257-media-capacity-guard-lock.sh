@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # TRIAGE: D257 media-capacity-guard-lock
-# Report-only capacity governance check for the shop media pool.
+# Report-only capacity governance check for the active home media plane.
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
@@ -40,6 +40,13 @@ command -v python3 >/dev/null 2>&1 || { echo "D257 FAIL: python3 missing"; [[ "$
 
 SNAPSHOT_REL="$(yq -r '.runway.snapshot_path // "ops/bindings/media.capacity.snapshot.yaml"' "$POLICY_FILE" 2>/dev/null || echo "ops/bindings/media.capacity.snapshot.yaml")"
 SNAPSHOT_PATH="$(snapshot_surface_resolve_source_path "$ROOT" "$SNAPSHOT_REL")"
+STORAGE_HOST_ID="$(yq -r '.target.storage_host_id // "pve"' "$POLICY_FILE" 2>/dev/null || echo pve)"
+USE_SNAPSHOT_ONLY=0
+
+if [[ "$STORAGE_HOST_ID" == "media-home" ]]; then
+  USE_SNAPSHOT_ONLY=1
+  SNAPSHOT_PATH="$ROOT/ops/bindings/media.capacity.snapshot.yaml"
+fi
 
 WARN_PCT="$(yq -r '.thresholds.media_warn_pct // 80' "$POLICY_FILE" 2>/dev/null || echo 80)"
 FAIL_PCT="$(yq -r '.thresholds.media_fail_pct // 85' "$POLICY_FILE" 2>/dev/null || echo 85)"
@@ -94,6 +101,23 @@ SLOPE_BPD="${SNAPSHOT_FIELDS[3]:-}"
 GENERATED_AT="${SNAPSHOT_FIELDS[4]:-}"
 AGE_DAYS="${SNAPSHOT_FIELDS[5]:-0}"
 SAMPLE_COUNT="${SNAPSHOT_FIELDS[6]:-0}"
+
+if [[ "$USE_SNAPSHOT_ONLY" -eq 1 ]]; then
+  MD_PCT="n/a"
+else
+  ssh_host="$(yq -r ".ssh.targets[] | select(.id == \"$STORAGE_HOST_ID\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || true)"
+  ssh_user="$(yq -r ".ssh.targets[] | select(.id == \"$STORAGE_HOST_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" 2>/dev/null || echo ubuntu)"
+  [[ -n "$ssh_host" ]] || { echo "D257 FAIL: missing ssh target id='$STORAGE_HOST_ID'"; [[ "$POLICY_MODE" == "enforce" ]] && exit 1 || exit 0; }
+  REF="$ssh_user@$ssh_host"
+  SSH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+  raw_md="$(ssh "${SSH_OPTS[@]}" "$REF" "zpool list -Hp -o capacity 'md1400' 2>/dev/null | head -1" 2>/dev/null || true)"
+  MD_PCT="$(python3 - "$raw_md" <<'PY'
+import re, sys
+m = re.search(r'(\d+(\.\d+)?)', (sys.argv[1] or '').strip())
+print(int(float(m.group(1)))) if m else print('unknown')
+PY
+  )"
+fi
 
 readarray -t GAP_FIELDS < <(python3 - "$GAPS_FILE" "$OWNING_LOOP_PREFIX" <<'PY'
 import sys
