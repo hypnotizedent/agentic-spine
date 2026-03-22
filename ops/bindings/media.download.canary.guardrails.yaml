@@ -171,12 +171,17 @@ manual_catalog_model:
 
   monitoring_audit:
     frequency: monthly
-    command: "./bin/ops cap run media.monitoring.audit"
+    method: manual_api_query
     action: |
-      Review all monitored series/movies with zero files. These are either:
-      - Stuck searches (should be unmonitored or deleted)
-      - Wishlist items (should be unmonitored until ready)
-      Unmonitor or delete to prevent queue bloat.
+      Manually query Radarr/Sonarr APIs to review monitored items with zero files:
+      - Radarr: curl -H 'X-Api-Key: $KEY' http://localhost:7878/api/v3/movie | jq '[.[] | select(.monitored == true and .hasFile == false)]'
+      - Sonarr: curl -H 'X-Api-Key: $KEY' http://localhost:8989/api/v3/series | jq '[.[] | select(.monitored == true and .statistics.episodeFileCount == 0)]'
+
+      Review results:
+      - Stuck searches: unmonitor or delete
+      - Wishlist items: unmonitor until ready to acquire
+
+      Prevents queue bloat from monitored-with-no-files drift.
 
 # ─────────────────────────────────────────────────────────────────────────
 # Incident History (Learning Archive)
