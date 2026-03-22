@@ -9,7 +9,7 @@
 # Projection of: git history, receipts, operational.gaps.yaml evidence
 
 version: 1
-updated_at: "2026-03-01"
+updated_at: "2026-03-22"
 owner: "@ronny"
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -39,8 +39,8 @@ eras:
       commits: ["04e1158", "3e1de65", "241bff6"]
 
   - id: split-download-streaming
-    period: "2026-02-10 to present"
-    description: "Download-stack (VM 209) and streaming-stack (VM 210) separated by I/O profile"
+    period: "2026-02-10 to 2026-03-17"
+    description: "Download-stack (VM 209) and streaming-stack (VM 210) separated by I/O profile before the home cutover"
     vms:
       download-stack:
         vm_id: 209
@@ -64,6 +64,26 @@ eras:
     evidence:
       loop: LOOP-MEDIA-STACK-SPLIT-20260208
       commits: ["04e1158", "3e1de65"]
+
+  - id: home-media-plane
+    period: "2026-03-17 to present"
+    description: "media-home (VM 106) is the active media plane; download-stack and streaming-stack remain residual fallback/archive support."
+    vms:
+      media-home:
+        vm_id: 106
+        location: home
+        media_role: primary
+      download-stack:
+        vm_id: 209
+        location: pve-shop
+        media_role: residual
+      streaming-stack:
+        vm_id: 210
+        location: pve-shop
+        media_role: residual
+    evidence:
+      loop: LOOP-MEDIA-SPLIT-AUTHORITY-CANONICALIZATION-20260322
+      note: "Home-first media authority cutover verified in the current media split-authority wave."
 
 # ─────────────────────────────────────────────────────────────────────────
 # Download Client Evolution
@@ -150,7 +170,7 @@ transfer:
       measured_down_mbps: null
       measured_up_mbps: null
       measurement_required: false
-      measurement_policy: "Home has no media processing role; tier-3 WAN transfer is prohibited."
+      measurement_policy: "Home is the active media processing role; tier-3 WAN transfer is prohibited."
 
   sneakernet:
     lifecycle: deprecated
@@ -159,11 +179,11 @@ transfer:
       gap_ref: "GAP-OP-880 area (workbench scripts)"
 
   policy:
-    - "Media downloads happen on pve-shop only (VM 209)"
-    - "Streaming happens on pve-shop only (VM 210)"
-    - "No bulk media transfer over WAN — all media is local to pve-shop"
+    - "Media downloads happen on media-home (VM 106); shop VMs 209/210 remain residual fallback/archive support only"
+    - "Streaming happens on media-home (VM 106); shop VMs 209/210 remain residual fallback/archive support only"
+    - "No bulk media transfer over WAN — all media is local to media-home"
     - "Synology NAS is backup-only, not media ingest"
-    - "Home network has no media processing role"
+    - "Home network has the active media processing role through media-home"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Network Topology (media-relevant)
@@ -174,13 +194,13 @@ network:
     home:
       proxmox: proxmox-home
       vmid_range: 100-199
-      media_role: none
+      media_role: primary
       devices: [macbook, beelink, nas, pihole-home, ha]
 
     shop:
       proxmox: pve
       vmid_range: 200-299
-      media_role: primary
+      media_role: residual
       media_vms: [download-stack, streaming-stack]
       storage: [tank/docker, tank/media, md1400]
 
