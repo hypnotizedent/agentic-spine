@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.domains.mint.lib.customer_inbox_common import now_utc, slugify_fragment, spine_root, workspace_root
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Capture governed Mint customer-thread hardening deltas")
+    parser.add_argument("--message-id", required=True)
+    parser.add_argument("--classification", required=True)
+    parser.add_argument("--severity", choices=("low", "medium", "high", "critical"), default="medium")
+    parser.add_argument("--confidence", choices=("low", "medium", "high"), default="medium")
+    parser.add_argument("--summary", required=True)
+    parser.add_argument("--next-action", required=True)
+    parser.add_argument("--mailbox", default="team@mintprints.com")
+    parser.add_argument("--customer-email", default="")
+    parser.add_argument("--subject", default="")
+    parser.add_argument("--evidence-ref", action="append", default=[])
+    parser.add_argument("--json", action="store_true")
+    return parser.parse_args()
+
+
+def state_root() -> Path:
+    explicit = os.environ.get("SPINE_STATE")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    return workspace_root() / ".runtime/spine/state"
+
+
+def main() -> int:
+    args = parse_args()
+    captured_at = now_utc()
+    delta_id = f"mint-thread-delta-{captured_at.replace(':', '').replace('-', '')}-{slugify_fragment(args.message_id)}"
+    root = state_root() / "mint" / "customer-thread-deltas" / "records"
+    root.mkdir(parents=True, exist_ok=True)
+    filename = f"{captured_at.replace(':', '').replace('-', '')}__{slugify_fragment(args.message_id)}.json"
+    record_path = root / filename
+    payload = {
+        "delta_id": delta_id,
+        "captured_at": captured_at,
+        "capability": "mint.customer.thread.delta.capture",
+        "spine_root": str(spine_root()),
+        "mailbox": args.mailbox,
+        "message_id": args.message_id,
+        "customer_email": args.customer_email or None,
+        "subject": args.subject or None,
+        "classification": args.classification,
+        "severity": args.severity,
+        "confidence": args.confidence,
+        "summary": args.summary,
+        "next_action": args.next_action,
+        "evidence_refs": args.evidence_ref,
+    }
+    record_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    result = {
+        "capability": "mint.customer.thread.delta.capture",
+        "status": "ok",
+        "delta_id": delta_id,
+        "record_path": str(record_path),
+        "classification": args.classification,
+        "severity": args.severity,
+        "next_action": args.next_action,
+    }
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print("mint.customer.thread.delta.capture")
+        print("status: ok")
+        print(f"delta_id: {delta_id}")
+        print(f"record_path: {record_path}")
+        print(f"classification: {args.classification}")
+        print(f"severity: {args.severity}")
+        print(f"next_action: {args.next_action}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

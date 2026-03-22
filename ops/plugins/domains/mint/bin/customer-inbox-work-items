@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.domains.mint.lib.customer_inbox_common import build_work_item, mailbox_messages, now_utc
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build governed Mint inbox backlog work items")
+    parser.add_argument("--mailbox", default="team@mintprints.com")
+    parser.add_argument("--top", type=int, default=10)
+    parser.add_argument("--json", action="store_true")
+    return parser.parse_args()
+
+
+def render_text(items: list[dict[str, object]], mailbox: str, top: int) -> str:
+    lines = [
+        "mint.customer.inbox.work_items",
+        f"mailbox: {mailbox}",
+        f"top: {top}",
+        f"work_items: {len(items)}",
+        "",
+    ]
+    for item in items:
+        message = item.get("message") or {}
+        customer = item.get("customer_resolution") or {}
+        readiness = item.get("readiness") or {}
+        trace = item.get("trace_summary") or {}
+        lines.extend(
+            [
+                f"- id: {message.get('message_id') or ''}",
+                f"  from: {message.get('from_email') or ''}",
+                f"  subject: {message.get('subject') or ''}",
+                f"  work_type: {message.get('work_type') or ''}",
+                f"  customer_state: {customer.get('state') or ''}",
+                f"  history_present: {readiness.get('history_present')}",
+                f"  asset_history_present: {readiness.get('asset_history_present')}",
+                f"  pricing_ready: {readiness.get('pricing_ready')}",
+                f"  quote_ready: {readiness.get('quote_ready')}",
+                f"  packet_count: {trace.get('packet_count')}",
+                f"  next_business_step: {item.get('next_business_step') or ''}",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip()
+
+
+def main() -> int:
+    args = parse_args()
+    messages = mailbox_messages(mailbox=args.mailbox, top=args.top)
+    items = [build_work_item(message) for message in messages]
+    payload = {
+        "capability": "mint.customer.inbox.work_items",
+        "generated_at": now_utc(),
+        "mailbox": args.mailbox,
+        "top": args.top,
+        "work_item_count": len(items),
+        "items": items,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(render_text(items, args.mailbox, args.top))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

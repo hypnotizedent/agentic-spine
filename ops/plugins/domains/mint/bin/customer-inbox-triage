@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.domains.mint.lib.customer_inbox_common import classify_message, mailbox_messages, now_utc
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Governed Mint inbox triage view")
+    parser.add_argument("--mailbox", default="team@mintprints.com")
+    parser.add_argument("--top", type=int, default=12)
+    parser.add_argument("--json", action="store_true")
+    return parser.parse_args()
+
+
+def render_text(items: list[dict[str, object]], mailbox: str, top: int) -> str:
+    lines = [
+        "mint.customer.inbox.triage",
+        f"mailbox: {mailbox}",
+        f"top: {top}",
+        f"messages: {len(items)}",
+        "",
+    ]
+    for item in items:
+        lines.extend(
+            [
+                f"- id: {item.get('message_id') or ''}",
+                f"  received_utc: {item.get('received_utc') or ''}",
+                f"  from: {item.get('from_email') or ''}",
+                f"  subject: {item.get('subject') or ''}",
+                f"  work_type: {item.get('work_type') or ''}",
+                f"  lane_disposition: {item.get('lane_disposition') or ''}",
+                f"  risk: {item.get('risk_level') or ''}",
+                f"  next_step: {item.get('suggested_next_step') or ''}",
+                f"  reason_codes: {', '.join(item.get('reason_codes') or [])}",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip()
+
+
+def main() -> int:
+    args = parse_args()
+    messages = mailbox_messages(mailbox=args.mailbox, top=args.top)
+    items = [classify_message(message) for message in messages]
+    payload = {
+        "capability": "mint.customer.inbox.triage",
+        "generated_at": now_utc(),
+        "mailbox": args.mailbox,
+        "top": args.top,
+        "message_count": len(items),
+        "items": items,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(render_text(items, args.mailbox, args.top))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
