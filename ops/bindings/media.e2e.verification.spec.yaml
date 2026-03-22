@@ -8,7 +8,7 @@ contract: MEDIA_E2E_VERIFICATION_SPEC_V1
 version: "1.1"
 status: active
 created: "2026-03-03"
-updated_at: "2026-03-03"
+updated_at: "2026-03-22"
 owner: "@ronny"
 authority_loop: LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303
 
@@ -56,7 +56,7 @@ check_chain:
     - leg: 1
       id: arr_hasfile
       description: "Radarr/Sonarr reports hasFile=true for the title"
-      target_vm: download-stack
+      target_vm: media-home
       target_service: radarr
       api_endpoint: "/api/v3/movie/{id}"
       api_auth: "X-Api-Key header from Infisical"
@@ -72,7 +72,7 @@ check_chain:
     - leg: 2
       id: filesystem_exists
       description: "File physically exists on disk at the path declared by Radarr"
-      target_vm: download-stack
+      target_vm: media-home
       method: "SSH + stat"
       check_command: "stat -c '%s' '{movieFile.path}'"
       pass_criteria: "exit code 0 AND file size > 0"
@@ -81,14 +81,14 @@ check_chain:
       depends_on: arr_hasfile
       detail: |
         The file path comes from Radarr's movieFile.path field. This leg
-        verifies that the path is reachable from the download-stack VM
-        where Radarr runs. Common failure: NFS mount /media/movies is
-        unmounted or the file was removed outside of Radarr.
+        verifies that the path is reachable from the media-home VM where
+        Radarr runs. Common failure: the /srv/media mount is unavailable or
+        the file was removed outside of Radarr.
 
     - leg: 3
       id: jellyfin_indexed
       description: "Jellyfin library contains the item and can serve it"
-      target_vm: streaming-stack
+      target_vm: media-home
       target_service: jellyfin
       api_endpoint: "/Items"
       api_params:
@@ -111,7 +111,7 @@ check_chain:
     - leg: 4
       id: jellyseerr_fulfilled
       description: "Jellyseerr request shows available status"
-      target_vm: streaming-stack
+      target_vm: media-home
       target_service: jellyseerr
       api_endpoint: "/api/v1/request/{requestId}"
       api_auth: "X-Api-Key header from Infisical"

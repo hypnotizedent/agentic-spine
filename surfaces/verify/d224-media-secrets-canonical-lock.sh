@@ -13,6 +13,9 @@ POLICY="$ROOT/ops/bindings/secrets.namespace.policy.yaml"
 RUNWAY="$ROOT/ops/bindings/secrets.runway.contract.yaml"
 MEDIA_SERVICES="$ROOT/ops/bindings/media.services.yaml"
 SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
+WORKBENCH_ROOT="$(spine_resolve_peer_repo workbench "$ROOT")"
+MEDIA_COMPOSE="$WORKBENCH_ROOT/infra/compose/media-stack/docker-compose.yml"
+MEDIA_MCPJUNGLE_CONFIG="$WORKBENCH_ROOT/infra/compose/mcpjungle/servers/media-stack.json"
 DL_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/domains/download-stack/docker-compose.yml"
 ST_COMPOSE="$SPINE_FOUNDATION_ROOT/ops/domains/streaming-stack/docker-compose.yml"
 
@@ -24,7 +27,7 @@ command -v yq >/dev/null 2>&1 || { err "yq not installed"; exit 1; }
 command -v jq >/dev/null 2>&1 || { err "jq not installed"; exit 1; }
 command -v curl >/dev/null 2>&1 || { err "curl not installed"; exit 1; }
 
-for file in "$POLICY" "$RUNWAY" "$MEDIA_SERVICES" "$SSH_TARGETS" "$DL_COMPOSE" "$ST_COMPOSE"; do
+for file in "$POLICY" "$RUNWAY" "$MEDIA_SERVICES" "$SSH_TARGETS" "$MEDIA_COMPOSE" "$MEDIA_MCPJUNGLE_CONFIG" "$DL_COMPOSE" "$ST_COMPOSE"; do
   [[ -f "$file" ]] || { err "missing required file: $file"; exit 1; }
 done
 
@@ -57,9 +60,9 @@ check_compose_keys() {
   keys=$(grep -oE '\$\{[A-Z_]+\}' "$compose" 2>/dev/null | sed 's/\${//;s/}//' | sort -u)
 
   for key in $keys; do
-    # Skip non-secret env vars (TZ, PUID, PGID, static defaults)
+    # Skip non-secret env vars (TZ, PUID, PGID, static defaults, path plumbing)
     case "$key" in
-      TZ|PUID|PGID|WEBUI_PORT|DOCKER_API_VERSION|VPN_SERVER_COUNTRIES) continue ;;
+      TZ|PUID|PGID|WEBUI_PORT|DOCKER_API_VERSION|VPN_SERVER_COUNTRIES|MEDIA_PATH|DOWNLOADS_PATH|DOCKER_VOLUMES) continue ;;
     esac
 
     # Check in: required_key_paths, key_path_overrides, planned_key_paths
@@ -86,10 +89,11 @@ check_compose_keys() {
   done
 }
 
+check_compose_keys "$MEDIA_COMPOSE" "media-home"
 check_compose_keys "$DL_COMPOSE" "download-stack"
 check_compose_keys "$ST_COMPOSE" "streaming-stack"
 
-# Ensure canonical download-stack keeps autopulse/crosswatch wiring.
+# Ensure canonical media-home keeps autopulse/crosswatch wiring.
 for required in \
   'AUTOPULSE__TARGETS__JELLYFIN__TOKEN=${JELLYFIN_API_TOKEN}' \
   'AUTOPULSE__TARGETS__JELLYFIN__URL=' \
@@ -224,9 +228,22 @@ else
   fi
 
   # Ensure the current writer-plane env tracks canonical keys.
-  current_writer_vm="$(yq -r '.operating_model.writer_plane.current_vm // "download-stack"' "$MEDIA_SERVICES" 2>/dev/null || echo "download-stack")"
-  dl_host="${DOWNLOAD_STACK_SSH_HOST:-$current_writer_vm}"
-  if [[ "$current_writer_vm" == "download-stack" ]]; then
+  current_writer_vm="$(yq -r '.operating_model.writer_plane.current_vm // "media-home"' "$MEDIA_SERVICES" 2>/dev/null || echo "media-home")"
+  if [[ "$current_writer_vm" == "media-home" ]]; then
+    media_rad_key="$(jq -r '.env.RADARR_API_KEY // ""' "$MEDIA_MCPJUNGLE_CONFIG" 2>/dev/null || true)"
+    media_son_key="$(jq -r '.env.SONARR_API_KEY // ""' "$MEDIA_MCPJUNGLE_CONFIG" 2>/dev/null || true)"
+    media_lid_key="$(jq -r '.env.LIDARR_API_KEY // ""' "$MEDIA_MCPJUNGLE_CONFIG" 2>/dev/null || true)"
+    media_jfin_token="$(jq -r '.env.JELLYFIN_API_TOKEN // ""' "$MEDIA_MCPJUNGLE_CONFIG" 2>/dev/null || true)"
+    [[ -n "$media_rad_key" ]] || err "media-home MCPJungle config missing RADARR_API_KEY"
+    [[ -n "$media_son_key" ]] || err "media-home MCPJungle config missing SONARR_API_KEY"
+    [[ -n "$media_lid_key" ]] || err "media-home MCPJungle config missing LIDARR_API_KEY"
+    [[ -n "$media_jfin_token" ]] || err "media-home MCPJungle config missing JELLYFIN_API_TOKEN"
+    [[ "$media_rad_key" == "<GET_FROM_INFISICAL:infrastructure/prod/spine/vm-infra/media-stack/download/RADARR_API_KEY>" ]] || err "media-home MCPJungle RADARR_API_KEY route is not canonical"
+    [[ "$media_son_key" == "<GET_FROM_INFISICAL:infrastructure/prod/spine/vm-infra/media-stack/download/SONARR_API_KEY>" ]] || err "media-home MCPJungle SONARR_API_KEY route is not canonical"
+    [[ "$media_lid_key" == "<GET_FROM_INFISICAL:infrastructure/prod/spine/vm-infra/media-stack/download/LIDARR_API_KEY>" ]] || err "media-home MCPJungle LIDARR_API_KEY route is not canonical"
+    [[ "$media_jfin_token" == "<GET_FROM_INFISICAL:infrastructure/prod/spine/vm-infra/media-stack/streaming/JELLYFIN_API_TOKEN>" ]] || err "media-home MCPJungle JELLYFIN_API_TOKEN route is not canonical"
+  elif [[ "$current_writer_vm" == "download-stack" ]]; then
+    dl_host="${DOWNLOAD_STACK_SSH_HOST:-$current_writer_vm}"
     dl_rad_key="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^RADARR_API_KEY=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
     dl_son_key="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^SONARR_API_KEY=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
     dl_lid_key="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^LIDARR_API_KEY=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
@@ -240,12 +257,12 @@ else
     [[ "$dl_lid_key" == "$LIDARR_KEY" ]] || err "download-stack .env LIDARR_API_KEY drift from canonical key"
     [[ "$dl_jfin_token" == "$JFIN_TOKEN" ]] || err "download-stack .env JELLYFIN_API_TOKEN drift from canonical key"
   else
-    ok "current writer-plane env parity skipped for $current_writer_vm (download-stack env path is transitional-only)"
+    ok "current writer-plane env parity skipped for $current_writer_vm (no active canonical env path configured)"
   fi
 fi
 
 # ── 4. Stack defaults must NOT use legacy media-stack project ──────────────
-for stack in download-stack streaming-stack; do
+for stack in media-home download-stack streaming-stack; do
   local_project=$(yq -r ".stack_defaults[\"$stack\"].project // \"\"" "$RUNWAY" 2>/dev/null || true)
   local_path=$(yq -r ".stack_defaults[\"$stack\"].path // \"\"" "$RUNWAY" 2>/dev/null || true)
 
@@ -257,7 +274,7 @@ for stack in download-stack streaming-stack; do
 done
 
 # ── 5. SSH target contract parity ──────────────────────────────────────────
-for target in download-stack streaming-stack; do
+for target in media-home download-stack streaming-stack; do
   ssh_host=$(yq -r ".ssh.targets[] | select(.id == \"$target\") | .host // \"\"" "$SSH_TARGETS" 2>/dev/null || true)
   if [[ -z "$ssh_host" ]]; then
     err "SSH target '$target' missing from ssh.targets.yaml"
