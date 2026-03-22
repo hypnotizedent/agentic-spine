@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,7 +95,26 @@ def source_sha(root: Path, paths: list[Path]) -> str:
     return digest.hexdigest()
 
 
-def source_stamp(paths: list[Path]) -> str:
+def source_stamp(root: Path, paths: list[Path]) -> str:
+    rel_paths = [rel(root, path) for path in paths if path.exists()]
+    if rel_paths:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "log", "-1", "--format=%cI", "--", *rel_paths],
+            text=True,
+            capture_output=True,
+        )
+        stamp = proc.stdout.strip()
+        if proc.returncode == 0 and stamp:
+            try:
+                return (
+                    datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                    .astimezone(timezone.utc)
+                    .replace(microsecond=0)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ")
+                )
+            except ValueError:
+                pass
+
     latest = 0.0
     for path in paths:
         if path.exists():
