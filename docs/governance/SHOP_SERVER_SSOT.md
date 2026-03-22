@@ -32,8 +32,8 @@ Authority boundary:
 | Observability VM | `observability` | `192.168.1.205` | LAN | Prometheus / Grafana / Loki |
 | Dev tools VM | `dev-tools` | `192.168.1.206` | LAN | Gitea and related services |
 | AI VM | `ai-consolidation` | `192.168.1.8` | LAN | Qdrant / AI workloads |
-| Downloads VM | `download-stack` | `192.168.1.209` | LAN | Download services |
-| Streaming VM | `streaming-stack` | `192.168.1.210` | LAN | Streaming services |
+| Downloads VM | `download-stack` | `192.168.1.209` | LAN | Residual media fallback; canonical media plane is media-home VM 106 |
+| Streaming VM | `streaming-stack` | `192.168.1.210` | LAN | Residual media fallback; canonical media plane is media-home VM 106 |
 | Finance VM | `finance-stack` | `192.168.1.211` | LAN | Finance services |
 | Mint data VM | `mint-data` | `192.168.1.212` | LAN | Mint data plane |
 | Mint apps VM | `mint-apps` | `192.168.1.213` | LAN | Mint app plane |
@@ -44,7 +44,7 @@ Authority boundary:
 | Plane | Canonical surface | Boring target |
 |-------|-------------------|---------------|
 | Substrate | `ops/bindings/hardware.inventory.yaml` | `pve` is the only shop hypervisor. |
-| Storage | `ops/bindings/shop.storage.map.yaml` + `ops/bindings/shop.media.pressure.authority.yaml` + `ops/bindings/hardware.inventory.yaml` + `ops/bindings/backup.inventory.yaml` | `tank` = hot runtime/app state, `media` = media payload only or phased-out pressure lane, `md1400` = cold backup/archive/staging only. Media pressure truth comes from the client-visible `/media` export, not the host-local child dataset mount view. |
+| Storage | `ops/bindings/shop.storage.map.yaml` + `ops/bindings/shop.media.pressure.authority.yaml` + `ops/bindings/hardware.inventory.yaml` + `ops/bindings/backup.inventory.yaml` | `tank` = hot runtime/app state, `media` = residual media fallback and rehydration lane, `md1400` = cold backup/archive/staging only. Media pressure truth comes from the client-visible `/media` export, not the host-local child dataset mount view. |
 | Runtime | `ops/bindings/vm.lifecycle.yaml` + `docs/governance/STACK_REGISTRY.yaml` + `docs/governance/DOCKER_RUNTIME_BORINGNESS_CONTRACT.md` | Every kept workload is a named VM/LXC or a container stack inside one, and kept Docker stacks follow one boring compose/env/path contract. Tombstones are not runtime. |
 | Network | `docs/governance/DEVICE_IDENTITY_SSOT.md` + `ops/bindings/ssh.targets.yaml` | One LAN identity truth and one Tailscale truth per kept node. |
 | Ingress | `ops/bindings/shop.ingress.map.yaml` + `ops/bindings/domain.routing.registry.yaml` | Public services are either intentionally published via Cloudflare or explicitly private-only, and compatibility/ghost routes are explicit. |

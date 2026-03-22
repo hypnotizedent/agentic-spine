@@ -28,7 +28,7 @@ Authority boundary:
 | NAS | `synology918` | `10.0.0.150` / `100.102.199.111` | LAN + Tailscale | Canonical home backup and personal-data appliance |
 | Home Assistant | `ha` | `10.0.0.100` / `100.67.120.1` | LAN + Tailscale | Primary home automation runtime |
 | Pi-hole | `pihole-home` | `10.0.0.53` / `100.105.148.96` | LAN + Tailscale | Home-local DNS filtering |
-| Media home | `media-home` | `10.0.0.106` | LAN via proxmox relay | Home media/watch VM. Guest auth/runtime inventory still transitional. |
+| Media home | `media-home` | `10.0.0.106` | LAN via proxmox relay | Active home media/watch VM; governed service inventory and backup posture live in `vm.lifecycle` and `SERVICE_REGISTRY`. |
 | Zigbee coordinator | `slzb-06` | `10.0.0.51` | LAN-only | Primary Zigbee coordinator |
 | Thread coordinator | `slzb-06mu` | `10.0.0.52` | LAN-only | Matter/Thread border router |
 | Z-Wave coordinator | `tubeszb-2026-zw` | `10.0.0.90` | LAN-only | Primary Z-Wave coordinator |
@@ -39,10 +39,10 @@ Authority boundary:
 |-------|-------------------|---------------|
 | Substrate | `ops/bindings/home.hardware.inventory.yaml` + `ops/bindings/home.proxmox.inventory.yaml` | `proxmox-home` is the only home hypervisor. |
 | Storage | `ops/bindings/home.storage.map.yaml` + `ops/bindings/synology918.storage.manifest.yaml` | `local-lvm` = hot runtime boot disks, Synology `/volume1/backups/proxmox_backups/dump` = canonical home VM/LXC backup lane, Synology `/volume1/media-staging` = current active home media import/current-watch share, Synology `/volume1/media-holds` = explicit hold/review lane, and there is no separate live `/volume1/media-home` share. |
-| Runtime | `ops/bindings/home.proxmox.inventory.yaml` | Every kept home workload is a named VM/LXC; `media-home` VM 106 is now explicit as the transitional home media/watch plane, and decommissioned guests are explicit tombstones. |
+| Runtime | `ops/bindings/home.proxmox.inventory.yaml` | Every kept home workload is a named VM/LXC; `media-home` VM 106 is the active home media/watch plane, and decommissioned guests are explicit tombstones. |
 | Network | `ops/bindings/home.unifi.network.inventory.yaml` + `ops/bindings/network.dns.local.registry.yaml` | One LAN truth, one local DNS truth, and one Tailscale access path per kept node. |
 | Ingress | `ops/bindings/home.ingress.map.yaml` + `ops/bindings/domain.routing.registry.yaml` | Public home ingress is minimal and intentional; LAN ingress uses `.mint.local`; remote private ingress uses Tailscale or proxmox relay. |
-| Backup | `ops/bindings/backup.inventory.yaml` + `ops/bindings/synology918.storage.manifest.yaml` | Home runtime backups land on Synology; VM 106 is declared but remains `planned` until restore-proof/service inventory catches up. No second-environment cold plane is currently declared for home personal data. |
+| Backup | `ops/bindings/backup.inventory.yaml` + `ops/bindings/synology918.storage.manifest.yaml` | Home runtime backups land on Synology; VM 106 is declared and backed by the active home media service inventory. No second-environment cold plane is currently declared for home personal data. |
 | Tombstones | `ops/bindings/home.proxmox.inventory.yaml` + `ops/bindings/estate.surface.register.yaml` | Decommissioned home guests are explicit non-runtime surfaces. |
 
 ## Generated Projections

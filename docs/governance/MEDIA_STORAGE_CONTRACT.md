@@ -22,7 +22,7 @@ This contract defines the canonical media storage architecture, tier assignments
 **Current State (Verified 2026-03-20)**:
 - `media-home` VM 106 plus Synology `/volume1/media-staging/*` is the canonical live active media plane.
 - Home owns the operator experience: fast downloads, local playback, and the current-watch library.
-- Shop `pve:/media/*` is no longer the desired family watch plane. It is transitional residue plus transfer/rehydration support while home-writer promotion finishes.
+- Shop `pve:/media/*` is no longer the desired family watch plane. It is residual transfer/rehydration support only.
 - Shop `pve:/md1400/archive/*` is the canonical archive plane for watched/aged media.
 - `/volume1/media-holds` is the explicit hold/review lane. It is not a disguised main library.
 - `/volume1/media-home` is still not a live share. The active home library path is the current live Synology staging tree.
@@ -99,7 +99,7 @@ There is currently **no dedicated live `/volume1/media-home/` share**. The old `
 ### 2. Shop Transfer / Residual Writer Plane
 
 **Canonical Host**: `pve` (R730XD) — `media` pool
-**Role**: Transitional shop-side transfer, residual writer, and rehydration support plane
+**Role**: Residual shop-side transfer, writer fallback, and rehydration support plane
 **Current Hardware**: 4x8TB SATA RAIDZ1 (Archive/SMR, aging)
 **Target Hardware**: 4x14TB SAS RAIDZ1 (acquired, ready for Phase 2 installation)
 **Capacity**: 25.1T used / 29.1T total (86% SAFE — ready for replacement) ✅
@@ -123,7 +123,7 @@ There is currently **no dedicated live `/volume1/media-home/` share**. The old `
 
 **Performance Target**:
 - Rehydration/transfer bandwidth sufficient for one-item-at-a-time archive flow
-- Writer residue should be treated as transitional, not as a growth target
+- Writer residue should be treated as residual fallback, not as a growth target
 
 **Backup**:
 - Config state only (legacy shop media VMs / residual writer surfaces)
@@ -197,7 +197,7 @@ There is currently **no dedicated live `/volume1/media-home/` share**. The old `
 ### 4. Staging Tier (Downloads - Ephemeral)
 
 **Canonical Host**: `synology918:/volume1/media-staging/downloads`
-**Residual Secondary Host**: `pve:/media/downloads` (transitional only; not canonical)
+**Residual Secondary Host**: `pve:/media/downloads` (fallback only; not canonical)
 
 **Role**: Temporary holding area for fresh downloads ONLY
 **Capacity Target**: <200G at any time (not 2.3T!)
@@ -244,7 +244,7 @@ trigger: download_complete
 source: /volume1/media-staging/downloads/
 destination: /volume1/media-staging/{movies,tv,music}
 method: move_or_hardlink_within_home_plane
-automation: home acquisition/runtime when promoted
+automation: home acquisition/runtime
 frequency: real_time_on_completion
 ```
 
@@ -273,7 +273,7 @@ conditions:
   - low_confidence_score
   - duplicate_detected
   - operator_does_not_want_hot_residency
-source: active_intake_or_transitional_shop_writer
+source: active_intake_or_residual_shop_writer
 destination: /md1400/archive/media-quarantine/
 method: move_after_review_intake
 automation: manual_until_home_writer_cutover_closes
@@ -377,7 +377,7 @@ frequency: Monthly
 **Replacement Steps** (after prerequisites met):
 1. Create new pool `media-new` with 4x14TB SAS (alongside existing `media`)
 2. Rsync canonical libraries from `media` → `media-new` (verify checksums)
-3. Stop media-home and any residual split-era media VMs still attached to shop exports
+3. Stop any residual split-era shop media VMs still attached to shop exports
 4. Remount NFS export from `media-new` (update /etc/exports)
 5. Restart VMs, verify playback and *arr access
 6. Monitor for 48 hours (no silent corruption, performance acceptable)

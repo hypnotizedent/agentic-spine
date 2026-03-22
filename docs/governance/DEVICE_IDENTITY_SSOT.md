@@ -109,7 +109,7 @@ ping -c1 nas pihole-home ha
 | Switch mgmt IP | 192.168.1.2 (Dell N2024P) |
 | iDRAC | `idrac-shop` — 192.168.1.250 (LAN-only) |
 | Proxmox Host | `pve` (Dell R730XD) |
-| Production VMs | infra-core, observability, dev-tools, ai-consolidation, automation-stack (core); finance-stack, mint-data, mint-apps (Mint); download-stack, streaming-stack (media split); immich-1 (deferred) |
+| Production VMs | infra-core, observability, dev-tools, ai-consolidation, automation-stack (core); finance-stack, mint-data, mint-apps (Mint); download-stack, streaming-stack (residual media fallback after media-home cutover); immich-1 (deferred) |
 | Legacy tombstone VM | `docker-host` historical identity only; not canonical runtime and not expected to stay as a live guest |
 | NVR | `nvr-shop` — 192.168.1.216 (LAN-only) |
 | WiFi AP | `ap-shop` — 192.168.1.185 (LAN-only) |
@@ -152,8 +152,8 @@ Deep, mutable infra detail lives in the surviving live summaries:
 | dev-tools | 100.90.167.39 | Shop | Dev tools (Gitea, runner, postgres) |
 | ai-consolidation | 100.71.17.29 | Shop | AI services (Qdrant, AnythingLLM) (VM 207) |
 | automation-stack | 100.98.70.70 | Shop | Automation (n8n) |
-| download-stack | 100.107.36.76 | Shop | Downloads + *arr (split from legacy media VM) |
-| streaming-stack | 100.123.207.64 | Shop | Streaming (Jellyfin, Navidrome, Jellyseerr, Bazarr, Homarr, Spotisub) (split from legacy media VM) |
+| download-stack | 100.107.36.76 | Shop | Residual downloads + *arr fallback after media-home cutover |
+| streaming-stack | 100.123.207.64 | Shop | Residual streaming fallback (Jellyfin, Navidrome, Jellyseerr, Bazarr, Homarr, Spotisub) after media-home cutover |
 | immich-1 | 100.114.101.50 | Shop | Photos (VM 203) |
 | finance-stack | 100.76.153.100 | Shop | Finance (Firefly III, Paperless, Ghostfolio) (VM 211) |
 | mint-data | 100.106.72.25 | Shop | Mint data plane (PostgreSQL, MinIO, Redis) (VM 212) |
@@ -190,8 +190,8 @@ Notes (Shop LAN-only endpoints):
 | observability | `observability` | 192.168.1.205 | 205 | bc:24:11:5a:79:ed | Static IP |
 | dev-tools | `dev-tools` | 192.168.1.206 | 206 | bc:24:11:d9:d6:bc | Static IP |
 | ai-consolidation | `ai-consolidation` | 192.168.1.8 | 207 | bc:24:11:42:0e:b4 | DHCP lease at .8 (no VMID parity). AI workloads (Qdrant, AnythingLLM). |
-| download-stack | `download-stack` | 192.168.1.209 | 209 | bc:24:11:44:d0:7b | NFS mounts use this IP |
-| streaming-stack | `streaming-stack` | 192.168.1.210 | 210 | bc:24:11:09:5d:76 | NFS mounts use this IP |
+| download-stack | `download-stack` | 192.168.1.209 | 209 | bc:24:11:44:d0:7b | Residual media fallback; NFS mounts use this IP |
+| streaming-stack | `streaming-stack` | 192.168.1.210 | 210 | bc:24:11:09:5d:76 | Residual media fallback; NFS mounts use this IP |
 | finance-stack | `finance-stack` | 192.168.1.211 | 211 | bc:24:11:6f:74:82 | Finance (Firefly III, Paperless, Ghostfolio) |
 | mint-data | `mint-data` | 192.168.1.212 | 212 | bc:24:11:2b:85:2b | Fresh-slate data plane (PostgreSQL + MinIO + Redis) |
 | mint-apps | `mint-apps` | 192.168.1.213 | 213 | bc:24:11:39:7a:46 | Fresh-slate app plane (artwork, quote-page, order-intake) |
@@ -263,8 +263,8 @@ curl -s https://n8n.ronny.works/healthz
 
 | Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
 |--------|-------------------|--------------|------|----------|--------------|
-| download-stack VM | `download-stack` | 100.107.36.76 | Downloads + *arr (VM 209) | Shop | `ssh download-stack docker ps` |
-| streaming-stack VM | `streaming-stack` | 100.123.207.64 | Jellyfin + Navidrome (VM 210) | Shop | `ssh streaming-stack docker ps` |
+| download-stack VM | `download-stack` | 100.107.36.76 | Residual downloads + *arr fallback (VM 209) | Shop | `ssh download-stack docker ps` |
+| streaming-stack VM | `streaming-stack` | 100.123.207.64 | Residual streaming fallback (VM 210) | Shop | `ssh streaming-stack docker ps` |
 
 ### Tier 2: Production Services (Finance + Mint)
 

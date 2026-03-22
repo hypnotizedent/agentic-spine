@@ -13,11 +13,11 @@ Purpose: remove ambiguity about where media belongs and stop `/downloads` from b
 
 - Home is the active watch plane.
 - Home is also the active current library and intake plane.
-- Shop / 730XD is cold archive capacity.
+- Shop / 730XD is cold archive capacity and residual fallback only.
 - 730XD is not the primary family playback surface.
 - Downloads are staging only, never permanent residence.
 - Current live Synology share truth is smaller than the old naming sprawl: `/volume1/media-staging` is the only populated/exported media share currently consumed by `media-home` VM 106, `/volume1/media-holds` is the explicit hold/review lane, and no separate `/volume1/media-home` share exists today.
-- Shop `/media/*` may still exist as transitional writer or transfer residue, but it is not canonical active placement truth.
+- Shop `/media/*` may still exist as residual writer or transfer residue, but it is not canonical active placement truth.
 
 ## Tier Model
 
@@ -79,7 +79,7 @@ Purpose: remove ambiguity about where media belongs and stop `/downloads` from b
 - New payload lands in a downloads staging path only.
 - Download tooling may sort and enrich metadata, but it does not own long-term residence.
 - If a file still lives under `/downloads` after import/archive review, that is drift.
-- Canonical intake is the home plane. Shop-side download paths are transitional residue until home writer cutover finishes.
+- Canonical intake is the home plane. Shop-side download paths are residual fallback only.
 
 ### 2. Import
 - Staging payload is normalized into the Synology warm lane.
@@ -106,14 +106,14 @@ Purpose: remove ambiguity about where media belongs and stop `/downloads` from b
 - Config and payload sharing the same ambiguous root
 - "I think it lives on the 730XD somewhere" as an operating model
 
-## Current Transitional Reality (2026-03-20)
+## Current Residual Reality (2026-03-20)
 
 - `media-home` VM 106 is live on `proxmox-home`, consumes Synology media-staging, and has daily Synology backup artifacts.
 - `/volume1/media-home`, `/volume1/media`, `/volume1/hot-media`, `/volume1/live-library`, and `/volume1/library-home` are empty ghost placeholder directories, not active media shares.
 - `media-holds` is an explicit hold/review share, not a populated home library.
-- Shop split runtime still exists as transitional residue:
+- Shop split runtime still exists as residual fallback:
   - `download-stack` remains a residual writer/import surface.
-  - `streaming-stack` is no longer the declared playback authority.
+  - `streaming-stack` is residual playback fallback only.
 - Backup/config/restore authority is now home-first:
   - `media-home` is the only canonical config backup + restore drill target.
   - `download-stack` and `streaming-stack` no longer define media config restore posture.

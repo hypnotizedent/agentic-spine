@@ -144,6 +144,7 @@ parent_receipts:
 | 100 | homeassistant | 100.67.120.1 | 4GB | 32GB | Running |
 | 101 | immich | — | — | — | **Destroyed** 2026-02-20 (shop VM 203 is canonical) |
 | 102 | vaultwarden | 100.93.142.63 | 2GB | 16GB | **Decommissioned** (2026-02-16; superseded by infra-core VM 204) |
+| 106 | media-home | — | 12GB | 64GB + 256GB | Running | Active home media/watch VM; see vm.lifecycle.yaml for service inventory and backup posture |
 
 ### LXC Containers
 
@@ -197,6 +198,16 @@ parent_receipts:
 | Tailscale IP | 100.105.148.96 |
 | Purpose | Home DNS server + ad-blocking |
 | Status | **Running** (reactivated 2026-02-21) |
+
+#### VM 106: media-home
+
+| Field | Value |
+|-------|-------|
+| Local IP | 10.0.0.106 |
+| Tailscale IP | — |
+| Status | **Running** |
+| Purpose | Active home media/watch plane |
+| Inventory | Governed in `ops/bindings/vm.lifecycle.yaml`; service posture is canonical |
 
 ---
 
