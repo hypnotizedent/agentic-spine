@@ -20,6 +20,8 @@ echo "[domain-inventory-refresh-daily] worktree_identity=${OPS_WORKTREE_IDENTITY
 
 spine_job_run \
   "domain-inventory-refresh-daily:domain-inventory-refresh" \
-  "$CAP_RUNNER" cap run domain-inventory-refresh -- --once --apply
+  "$CAP_RUNNER" cap run domain-inventory-refresh -- --once --check
+
+echo "[domain-inventory-refresh-daily] tracked promotion remains manual"
 
 echo "[domain-inventory-refresh-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

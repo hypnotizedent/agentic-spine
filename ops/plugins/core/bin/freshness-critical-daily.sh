@@ -33,8 +33,8 @@ echo "[freshness-critical-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "[freshness-critical-daily] control_root=${CONTROL_ROOT}"
 echo "[freshness-critical-daily] runtime_root=${RUNTIME_ROOT}"
 echo "[freshness-critical-daily] worktree_identity=${OPS_WORKTREE_IDENTITY:-unset}"
+echo "[freshness-critical-daily] tracked projection promotion remains manual"
 
-run_cap snapshot.projection.apply -- --all
 run_cap calendar.external.ingest.refresh
 run_cap calendar.ha.ingest.refresh
 run_cap infra.storage.audit.snapshot

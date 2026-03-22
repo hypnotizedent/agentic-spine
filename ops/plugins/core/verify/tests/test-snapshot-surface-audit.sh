@@ -15,7 +15,7 @@ fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1" >&2; }
 
 fixture_root() {
   local dir="$1"
-  mkdir -p "$dir/ops/bindings" "$dir/ops/plugins/demo/bin"
+  mkdir -p "$dir/ops/bindings" "$dir/ops/plugins/demo/bin" "$dir/ops/plugins/core/bin" "$dir/ops/plugins/infra/host/launchd"
   cat > "$dir/ops/bindings/snapshot.surface.contract.yaml" <<'YAML'
 status: authoritative
 version: 1
@@ -27,6 +27,14 @@ governed_surfaces:
     tracked_binding: ops/bindings/demo.snapshot.yaml
 automation_surfaces:
   - path: ops/plugins/demo/bin/demo-refresh
+YAML
+  cat > "$dir/ops/bindings/launchd.runtime.contract.yaml" <<'YAML'
+version: "1.3"
+managed_runtime_worktree:
+  required_for_labels:
+    - com.example.runtime-daily
+paths:
+  source_dir: ops/plugins/infra/host/launchd
 YAML
 }
 
@@ -53,7 +61,24 @@ SH
 #!/usr/bin/env bash
 echo refresh
 SH
-  chmod +x "$dir/ops/plugins/demo/bin/demo-snapshot" "$dir/ops/plugins/demo/bin/demo-refresh"
+  cat > "$dir/ops/plugins/core/bin/runtime-daily.sh" <<'SH'
+#!/usr/bin/env bash
+./bin/ops cap run demo.snapshot -- --check
+SH
+  cat > "$dir/ops/plugins/infra/host/launchd/com.example.runtime-daily.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$dir/ops/plugins/core/bin/runtime-daily.sh</string>
+  </array>
+</dict>
+</plist>
+EOF
+  chmod +x "$dir/ops/plugins/demo/bin/demo-snapshot" "$dir/ops/plugins/demo/bin/demo-refresh" "$dir/ops/plugins/core/bin/runtime-daily.sh"
 }
 
 write_fail_fixture() {
@@ -79,7 +104,25 @@ SH
 #!/usr/bin/env bash
 git commit -m bad
 SH
-  chmod +x "$dir/ops/plugins/demo/bin/demo-snapshot" "$dir/ops/plugins/demo/bin/demo-refresh"
+  cat > "$dir/ops/plugins/core/bin/runtime-daily.sh" <<'SH'
+#!/usr/bin/env bash
+./bin/ops cap run demo.snapshot -- --apply
+./bin/ops cap run snapshot.projection.apply -- --all
+SH
+  cat > "$dir/ops/plugins/infra/host/launchd/com.example.runtime-daily.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$dir/ops/plugins/core/bin/runtime-daily.sh</string>
+  </array>
+</dict>
+</plist>
+EOF
+  chmod +x "$dir/ops/plugins/demo/bin/demo-snapshot" "$dir/ops/plugins/demo/bin/demo-refresh" "$dir/ops/plugins/core/bin/runtime-daily.sh"
 }
 
 echo "snapshot-surface-audit tests"
@@ -135,6 +178,11 @@ if echo "$bad_out" | grep -q 'automation_implicit_tracked_git_mutation'; then
   pass "fail fixture reports automation git mutation"
 else
   fail "fail fixture reports automation git mutation"
+fi
+if echo "$bad_out" | grep -q 'managed_runtime_launchd_tracked_promotion'; then
+  pass "fail fixture reports managed runtime tracked promotion"
+else
+  fail "fail fixture reports managed runtime tracked promotion"
 fi
 
 if live_out="$("$AUDIT" --brief 2>&1)"; then

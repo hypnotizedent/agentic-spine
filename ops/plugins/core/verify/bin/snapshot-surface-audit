@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
 import re
 import subprocess
 import sys
@@ -18,6 +19,7 @@ DEFAULT_ROOT = SCRIPT_PATH.parents[5]
 DEFAULT_CONTRACT = Path("ops/bindings/snapshot.surface.contract.yaml")
 DEFAULT_CAPABILITIES = Path("ops/capabilities.yaml")
 DEFAULT_ROUTING = Path("ops/bindings/routing.dispatch.yaml")
+DEFAULT_LAUNCHD_RUNTIME_CONTRACT = Path("ops/bindings/launchd.runtime.contract.yaml")
 
 TARGET_REPO_MARKERS = (
     "snapshot_surface_init",
@@ -29,6 +31,10 @@ FORBIDDEN_GIT_PATTERNS = (
     re.compile(r"git\s+commit\b", re.MULTILINE),
     re.compile(r"git\s+push\b", re.MULTILINE),
     re.compile(r"git\s+diff\b[^\n]*ops/bindings", re.MULTILINE),
+)
+FORBIDDEN_MANAGED_RUNTIME_PROMOTION_PATTERNS = (
+    re.compile(r"\bcap\s+run\b[^\n]*\bsnapshot\.projection\.apply\b", re.MULTILINE),
+    re.compile(r"\bcap\s+run\b[^\n]*--\s+--apply\b", re.MULTILINE),
 )
 
 
@@ -88,6 +94,32 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def load_plist(path: Path) -> dict[str, Any]:
+    with path.open("rb") as handle:
+        data = plistlib.load(handle)
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_launchd_wrapper(root: Path, plist_path: Path) -> Path | None:
+    data = load_plist(plist_path)
+    args = data.get("ProgramArguments")
+    if not isinstance(args, list):
+        return None
+
+    for raw in args[1:]:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        candidate = candidate.resolve(strict=False)
+        if candidate.suffix in {".sh", ".py"} or candidate.name.endswith((".sh", ".py")):
+            return candidate
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Audit governed snapshot surfaces for runtime-first contract compliance.")
     parser.add_argument("--root", help="Override target repo root.")
@@ -99,6 +131,7 @@ def main() -> int:
     contract_path = root / DEFAULT_CONTRACT
     capabilities_path = root / DEFAULT_CAPABILITIES
     routing_path = root / DEFAULT_ROUTING
+    launchd_runtime_contract_path = root / DEFAULT_LAUNCHD_RUNTIME_CONTRACT
 
     missing = [str(path) for path in (contract_path, capabilities_path, routing_path) if not path.exists()]
     if missing:
@@ -123,6 +156,7 @@ def main() -> int:
     contract = load_yaml(contract_path)
     capabilities_doc = load_yaml(capabilities_path)
     routing_doc = load_yaml(routing_path)
+    launchd_runtime_contract = load_yaml(launchd_runtime_contract_path) if launchd_runtime_contract_path.exists() else {}
     capabilities = capabilities_doc.get("capabilities") if isinstance(capabilities_doc, dict) else None
     routing = routing_doc.get("dispatch") if isinstance(routing_doc, dict) else None
     if not isinstance(capabilities, dict):
@@ -240,6 +274,68 @@ def main() -> int:
                     {
                         "code": "automation_implicit_tracked_git_mutation",
                         "path": rel_path,
+                        "pattern": pattern.pattern,
+                    }
+                )
+
+    managed_runtime = launchd_runtime_contract.get("managed_runtime_worktree") or {}
+    launchd_paths = launchd_runtime_contract.get("paths") or {}
+    managed_labels = managed_runtime.get("required_for_labels") or []
+    launchd_source_dir = Path(str(launchd_paths.get("source_dir") or "ops/plugins/infra/host/launchd")).expanduser()
+    if not launchd_source_dir.is_absolute():
+        launchd_source_dir = root / launchd_source_dir
+
+    for raw_label in managed_labels:
+        label = str(raw_label or "").strip()
+        if not label:
+            continue
+
+        plist_path = launchd_source_dir / f"{label}.plist"
+        if not plist_path.exists():
+            issues.append({"code": "managed_runtime_launchd_missing_plist", "label": label, "path": str(plist_path)})
+            continue
+
+        try:
+            wrapper_path = resolve_launchd_wrapper(root, plist_path)
+        except Exception as exc:  # pragma: no cover - defensive parsing guard
+            issues.append(
+                {
+                    "code": "managed_runtime_launchd_invalid_plist",
+                    "label": label,
+                    "path": str(plist_path),
+                    "detail": str(exc),
+                }
+            )
+            continue
+
+        if wrapper_path is None:
+            issues.append(
+                {
+                    "code": "managed_runtime_launchd_missing_wrapper",
+                    "label": label,
+                    "path": str(plist_path),
+                }
+            )
+            continue
+
+        if not wrapper_path.exists():
+            issues.append(
+                {
+                    "code": "managed_runtime_launchd_missing_wrapper",
+                    "label": label,
+                    "path": str(wrapper_path),
+                }
+            )
+            continue
+
+        wrapper_text = read_text(wrapper_path)
+        for pattern in FORBIDDEN_MANAGED_RUNTIME_PROMOTION_PATTERNS:
+            if pattern.search(wrapper_text):
+                issues.append(
+                    {
+                        "code": "managed_runtime_launchd_tracked_promotion",
+                        "label": label,
+                        "path": str(wrapper_path),
                         "pattern": pattern.pattern,
                     }
                 )
