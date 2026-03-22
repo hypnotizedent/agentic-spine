@@ -8,7 +8,7 @@ source_binding: ops/bindings/shop.storage.map.yaml
 
 # Shop Rack Scorecard
 
-- Generated: `2026-03-22T15:25:07Z`
+- Generated: `2026-03-22T17:35:09Z`
 - Rebuild: `./bin/ops cap run infra.shop.storage.authority.build`
 - Active runtimes: `12`
 - Tombstones: `1`
