@@ -16,28 +16,38 @@ updated_at: "2026-03-21"
 owner: "@ronny"
 
 description: |
-  Anti-bloat guardrails for the first governed download client activation
-  on the media-home plane. SABnzbd is the canary client. qBittorrent
-  remains parked. This contract is required reading before any download
-  client activation or broadening.
+  Anti-bloat guardrails for governed download client activation on the
+  media-home plane. Dual-ingest model: SABnzbd primary (usenet),
+  qBittorrent secondary (torrent, direct network). This contract is
+  required reading before any download client broadening.
 
 # ─────────────────────────────────────────────────────────────────────────
 # Client Activation Scope
 # ─────────────────────────────────────────────────────────────────────────
 
 client_scope:
-  active_client: sabnzbd
-  active_client_vm: media-home
-  active_client_port: 8080
-  parked_clients:
+  ingest_model: dual
+  primary_client: sabnzbd
+  primary_protocol: usenet
+  primary_priority: 1
+  secondary_client: qbittorrent
+  secondary_protocol: torrent
+  secondary_priority: 2
+  secondary_network: direct
+  secondary_vpn: false
+  active_clients:
+    - sabnzbd
     - qbittorrent
+  parked_clients:
     - slskd
+  active_client_vm: media-home
+  dual_ingest_activated: "2026-03-22"
   activation_reason: |
-    SABnzbd chosen over qBittorrent for canary because:
-    - Usenet downloads have clear success/failure states (no seeding accumulation)
-    - Category-based directory separation built in
-    - Simpler connection model (stateless per-download)
-    - No seed ratio enforcement or DHT/peer discovery complexity
+    SABnzbd remains primary (usenet, priority 1). qBittorrent activated as
+    secondary (torrent, priority 2, direct network) to enable torrent-only
+    content acquisition when usenet sources are unavailable. Conservative
+    model: Sonarr and Radarr use both clients, Lidarr stays SABnzbd-only.
+    qBittorrent max_active_downloads=3, max_active_torrents=5.
 
 # ─────────────────────────────────────────────────────────────────────────
 # Staging Path Authority
@@ -198,7 +208,7 @@ canary_proof:
 # ─────────────────────────────────────────────────────────────────────────
 
 prohibited:
-  - "Activate qBittorrent before SABnzbd canary proves stable 72+ hours"
+  - "Activate additional download clients beyond SABnzbd and qBittorrent"
   - "Enable RSS feeds or automatic search"
   - "Run backlog search or missing-media scan"
   - "Enable automatic quality upgrade search"
@@ -224,8 +234,7 @@ escalation:
       - "Pool usage does not worsen beyond 87%"
       - "Operator explicit approval"
     blocked_by:
-      - "Pool at 86% (critical per capacity guard) — canary must prove it does not worsen"
-      - "qBittorrent still parked"
+      - "Pool at 86% (critical per capacity guard — shop pool, NOT home) — canary must prove home pool does not worsen"
       - "Compose narrow mounts not yet removed (dead weight, not blocking hardlinks)"
 
   broader_shop_drain:

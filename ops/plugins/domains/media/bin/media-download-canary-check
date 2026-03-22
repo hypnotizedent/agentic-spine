@@ -87,13 +87,13 @@ else
   check "sabnzbd_running" "fail" "expected running, got: $SAB_STATUS"
 fi
 
-# ── Check 2: qBittorrent container NOT running ──
+# ── Check 2: qBittorrent container running (dual-ingest model) ──
 QBIT_STATUS=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
   "docker ps --filter name=qbittorrent --format '{{.Status}}'" 2>/dev/null || echo "UNREACHABLE")
-if [[ -z "$QBIT_STATUS" || "$QBIT_STATUS" == *"Exited"* ]]; then
-  check "qbittorrent_parked" "pass" "container not running: ${QBIT_STATUS:-no container}"
+if [[ "$QBIT_STATUS" == *"Up"* ]]; then
+  check "qbittorrent_active" "pass" "container up: $QBIT_STATUS"
 else
-  check "qbittorrent_parked" "fail" "expected stopped, got: $QBIT_STATUS"
+  check "qbittorrent_active" "fail" "expected running, got: ${QBIT_STATUS:-no container}"
 fi
 
 # ── Check 3: SABnzbd queue_limit ──
@@ -136,10 +136,10 @@ if [[ -n "$RADARR_KEY" ]]; then
     "curl -sf http://localhost:7878/api/v3/downloadclient -H 'X-Api-Key: $RADARR_KEY' 2>/dev/null" \
     | python3 -c 'import sys,json; [print(c["enable"]) for c in json.load(sys.stdin) if c["implementation"]=="QBittorrent"]' 2>/dev/null || echo "UNKNOWN")
 
-  if [[ "$RADARR_QBIT_ENABLED" == "False" ]]; then
-    check "radarr_qbit_disabled" "pass" "qBittorrent client disabled in Radarr"
+  if [[ "$RADARR_QBIT_ENABLED" == "True" ]]; then
+    check "radarr_qbit_enabled" "pass" "qBittorrent client enabled in Radarr (dual-ingest)"
   else
-    check "radarr_qbit_disabled" "fail" "qBittorrent client enabled=$RADARR_QBIT_ENABLED in Radarr"
+    check "radarr_qbit_enabled" "fail" "qBittorrent client disabled in Radarr (expected enabled for dual-ingest)"
   fi
 
   # ── Check 6: Radarr RSS sync disabled ──
@@ -167,10 +167,10 @@ if [[ -n "$SONARR_KEY" ]]; then
     "curl -sf http://localhost:8989/api/v3/downloadclient -H 'X-Api-Key: $SONARR_KEY' 2>/dev/null" \
     | python3 -c 'import sys,json; [print(c["enable"]) for c in json.load(sys.stdin) if c["implementation"]=="QBittorrent"]' 2>/dev/null || echo "UNKNOWN")
 
-  if [[ "$SONARR_QBIT_ENABLED" == "False" ]]; then
-    check "sonarr_qbit_disabled" "pass" "qBittorrent client disabled in Sonarr"
+  if [[ "$SONARR_QBIT_ENABLED" == "True" ]]; then
+    check "sonarr_qbit_enabled" "pass" "qBittorrent client enabled in Sonarr (dual-ingest)"
   else
-    check "sonarr_qbit_disabled" "fail" "qBittorrent client enabled=$SONARR_QBIT_ENABLED in Sonarr"
+    check "sonarr_qbit_enabled" "fail" "qBittorrent client disabled in Sonarr (expected enabled for dual-ingest)"
   fi
 
   # ── Check 8: Sonarr RSS sync disabled ──
@@ -196,6 +196,25 @@ if [[ "$STAGING_EXISTS" == "yes" ]]; then
   check "staging_path_exists" "pass" "/srv/media/downloads exists on media-home"
 else
   check "staging_path_exists" "fail" "/srv/media/downloads not found"
+fi
+
+# ── Check 10: Lidarr qBittorrent disabled (conservative model) ──
+LIDARR_KEY=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+  "docker exec lidarr cat /config/config.xml 2>/dev/null" \
+  | sed -n 's/.*<ApiKey>\(.*\)<\/ApiKey>.*/\1/p' 2>/dev/null || echo "")
+
+if [[ -n "$LIDARR_KEY" ]]; then
+  LIDARR_QBIT_ENABLED=$(ssh -o ConnectTimeout="$TIMEOUT_SEC" -o BatchMode=yes "$TARGET_SSH" \
+    "curl -sf http://localhost:8686/api/v1/downloadclient -H 'X-Api-Key: $LIDARR_KEY' 2>/dev/null" \
+    | python3 -c 'import sys,json; [print(c["enable"]) for c in json.load(sys.stdin) if c["implementation"]=="QBittorrent"]' 2>/dev/null || echo "UNKNOWN")
+
+  if [[ "$LIDARR_QBIT_ENABLED" == "False" ]]; then
+    check "lidarr_qbit_disabled" "pass" "qBittorrent disabled in Lidarr (conservative dual-ingest)"
+  else
+    check "lidarr_qbit_disabled" "fail" "qBittorrent enabled=$LIDARR_QBIT_ENABLED in Lidarr (expected disabled)"
+  fi
+else
+  check "lidarr_qbit_disabled" "fail" "could not read Lidarr API key"
 fi
 
 # ── Summary ──

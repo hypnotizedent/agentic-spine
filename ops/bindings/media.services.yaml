@@ -37,12 +37,12 @@ naming_aliases:
 operating_model:
   active_plane:
     vm: media-home
-    note: "Canonical live read/watch plane. Streaming services plus ARR management services are operational on media-home. SABnzbd activated as canary download client; qBittorrent remains parked."
+    note: "Canonical live read/watch plane. Streaming services plus ARR management services are operational on media-home. Dual-ingest model active: SABnzbd primary (usenet), qBittorrent secondary (torrent)."
   writer_plane:
     target_vm: media-home
     current_vm: media-home
-    transition_state: promoted_management_plus_canary_download
-    note: "ARR management services (Radarr/Sonarr/Lidarr/Prowlarr) are active on media-home. SABnzbd promoted to canary-active for governed single-client download lane. qBittorrent remains intentionally parked. See media.download.canary.guardrails.yaml for anti-bloat constraints. Residual shop copies are rollback residue only."
+    transition_state: dual_ingest_active
+    note: "ARR management services (Radarr/Sonarr/Lidarr/Prowlarr) are active on media-home. Dual-ingest model: SABnzbd primary (usenet, priority 1), qBittorrent secondary (torrent, priority 2, direct network). Sonarr and Radarr use both clients. Lidarr uses SABnzbd only (conservative). See media.download.canary.guardrails.yaml for anti-bloat constraints."
   archive_plane:
     vm: pve
     note: "Canonical passive archive plane on md1400."
@@ -109,19 +109,43 @@ services:
     status: active
     target_status: active
     category: download
+    ingest_role: primary
+    ingest_protocol: usenet
+    ingest_priority: 1
     canary_scope: true
     guardrails_contract: media.download.canary.guardrails.yaml
-    description: "Usenet downloader on media-home — canary-active with anti-bloat guardrails. Single governed download client. See media.download.canary.guardrails.yaml."
+    categories:
+      tv: /downloads/complete/tv
+      movies: /downloads/complete/movies
+      audio: /downloads/complete/audio
+    enabled_in:
+      - sonarr
+      - radarr
+      - lidarr
+    description: "Usenet downloader on media-home — primary ingest path with anti-bloat guardrails. See media.download.canary.guardrails.yaml."
 
   qbittorrent:
     vm: media-home
     target_vm: media-home
     port: 8081
     health: /
-    status: parked
-    target_status: planned
+    status: active
+    target_status: active
     category: download
-    description: "BitTorrent client configured on media-home — intentionally parked. SABnzbd is the canary-active client. qBittorrent activation deferred until SABnzbd canary proves stable 72+ hours."
+    ingest_role: secondary
+    ingest_protocol: torrent
+    ingest_priority: 2
+    network_mode: direct
+    vpn_routed: false
+    categories:
+      sonarr: /downloads/complete/sonarr
+      radarr: /downloads/complete/radarr
+    enabled_in:
+      - sonarr
+      - radarr
+    disabled_in:
+      - lidarr
+    description: "BitTorrent client on media-home — secondary ingest path. Direct network (not VPN-routed, decision QB-VPN-ROUTE-001). SABnzbd remains primary. Activated 2026-03-22."
 
   # Enhancement services
   bazarr-dl:
