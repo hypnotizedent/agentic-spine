@@ -200,6 +200,16 @@ def mailbox_messages(*, mailbox: str, top: int) -> list[dict[str, Any]]:
     return (((payload.get("data") or {}).get("microsoft") or {}).get("value") or [])
 
 
+def mailbox_message_by_id(*, mailbox: str, message_id: str) -> dict[str, Any]:
+    return run_cap_json(
+        "microsoft.mail.get",
+        "--message-id",
+        message_id,
+        "--mailbox",
+        mailbox,
+    )
+
+
 def safe_text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -216,6 +226,20 @@ def flatten_message_text(message: dict[str, Any]) -> str:
         )
         if part
     ).lower()
+
+
+def parse_received_timestamp(value: Any) -> str:
+    return safe_text(value)
+
+
+def is_customer_lane_actionable(message: dict[str, Any], *, mailbox: str) -> bool:
+    sender = safe_text(message.get("from_email")).lower()
+    return bool(
+        sender
+        and sender != mailbox.lower()
+        and not bool(message.get("is_read"))
+        and safe_text(message.get("lane_disposition")) == "keep_in_customer_lane"
+    )
 
 
 def marker_hits(text: str, markers: tuple[str, ...]) -> list[str]:
@@ -399,7 +423,7 @@ def build_work_item(message: dict[str, Any]) -> dict[str, Any]:
     if triage["work_type"] == "promotional_or_risky":
         next_step = "keep_recoverable_and_do_not_open_body_links"
     elif triage["work_type"] == "reorder_candidate" and archive_lane.get("linked_job_count", 0):
-        next_step = "resolve_prior_job_and_prepare_reorder_draft"
+        next_step = f"mintctl morpheus inbox reorder --message-id {triage['message_id']}"
     elif triage["work_type"] == "artwork_revision" and asset_history_present:
         next_step = "prepare_artwork_revision_handoff"
     elif archive_lane.get("seed_count", 0) and not packets and seed_ids:
@@ -440,3 +464,69 @@ def build_work_item(message: dict[str, Any]) -> dict[str, Any]:
 def slugify_fragment(raw: str) -> str:
     lowered = raw.lower()
     return re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-") or "unknown"
+
+
+def state_root() -> Path:
+    explicit = os.environ.get("SPINE_STATE")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    return workspace_root() / ".runtime/spine/state"
+
+
+def runtime_record_path(*, category: str, record_id: str, extension: str = "json") -> Path:
+    stamp = now_utc()
+    day = stamp[:10].split("-")
+    root = state_root() / "mint" / category / "records" / day[0] / day[1] / day[2]
+    root.mkdir(parents=True, exist_ok=True)
+    return root / f"{record_id}.{extension}"
+
+
+def write_runtime_record(*, category: str, record_id: str, payload: dict[str, Any]) -> Path:
+    path = runtime_record_path(category=category, record_id=record_id)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def append_runtime_index(*, category: str, row: dict[str, Any]) -> Path:
+    index_path = state_root() / "mint" / category / "index.ndjson"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    with index_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+    return index_path
+
+
+def choose_anchor_seed(seed_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not seed_rows:
+        return None
+
+    def sort_key(row: dict[str, Any]) -> tuple[int, str]:
+        has_job = 0 if safe_text(row.get("job_number")) not in {"", "-"} else 1
+        created = safe_text(row.get("created_at"))
+        return (has_job, created)
+
+    return sorted(seed_rows, key=sort_key)[0]
+
+
+def extract_reorder_hints(message: dict[str, Any]) -> dict[str, Any]:
+    text = flatten_message_text(message)
+    reused_fields = ["customer", "historical_artwork", "historical_job_context"]
+    missing_fields = []
+    changed_fields = []
+
+    quantity_match = re.search(r"\b(\d{1,4})\b", text)
+    if quantity_match:
+        changed_fields.append(f"quantity:{quantity_match.group(1)}")
+    else:
+        missing_fields.append("quantity")
+
+    if "different" in text or "change" in text or "update" in text:
+        changed_fields.append("art_or_spec_change")
+
+    if "same as last" in text or "same as last time" in text:
+        reused_fields.append("same_as_last_time_requested")
+
+    return {
+        "reused_fields": reused_fields,
+        "missing_fields": missing_fields,
+        "changed_fields": changed_fields,
+    }

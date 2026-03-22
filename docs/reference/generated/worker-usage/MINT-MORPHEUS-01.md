@@ -1,7 +1,7 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-21
+last_verified: 2026-03-22
 scope: worker-usage-mint-morpheus-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -18,7 +18,11 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ## Write Scope
 - `../agentic-foundation/docs/agents/mint-agent.contract.md`
 
-## Capabilities (5)
+## Capabilities (9)
+- `MINT-MORPHEUS-01.launch`
+- `mint.customer.inbox.triage`
+- `mint.customer.inbox.work_items`
+- `mint.customer.reorder.resolve`
 - `mint.intake.validate`
 - `mint.modules.health`
 - `mint.operator.drop.assist`

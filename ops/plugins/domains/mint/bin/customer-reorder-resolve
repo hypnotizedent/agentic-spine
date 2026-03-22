@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.domains.mint.lib.customer_inbox_common import (
+    append_runtime_index,
+    choose_anchor_seed,
+    classify_message,
+    contact_trace,
+    extract_reorder_hints,
+    mailbox_message_by_id,
+    now_utc,
+    resolve_customer,
+    safe_text,
+    slugify_fragment,
+    write_runtime_record,
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Resolve a governed Mint reorder draft object from mailbox and history truth")
+    parser.add_argument("--message-id", required=True)
+    parser.add_argument("--mailbox", default="team@mintprints.com")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    message = mailbox_message_by_id(mailbox=args.mailbox, message_id=args.message_id)
+    triage = classify_message(message)
+
+    if triage["work_type"] != "reorder_candidate" and not args.force:
+        payload = {
+            "capability": "mint.customer.reorder.resolve",
+            "status": "blocked",
+            "reason": "message_not_classified_as_reorder_candidate",
+            "message_id": args.message_id,
+            "work_type": triage["work_type"],
+        }
+        print(json.dumps(payload, indent=2) if args.json else "\n".join(f"{k}: {v}" for k, v in payload.items()))
+        return 2
+
+    sender_query = safe_text(triage.get("from_email") or triage.get("from_name"))
+    customer = resolve_customer(sender_query)
+    trace = contact_trace(safe_text(triage.get("from_email")))
+    archive_lane = trace.get("archive_lane") or {}
+    seed_rows = archive_lane.get("seeds") or []
+    anchor_seed = choose_anchor_seed(seed_rows)
+    hints = extract_reorder_hints(message)
+    captured_at = now_utc()
+    reorder_id = f"mint-reorder-draft-{captured_at.replace(':', '').replace('-', '')}-{slugify_fragment(args.message_id)}"
+
+    next_step = "manual_history_resolution_required"
+    if anchor_seed and safe_text(anchor_seed.get("job_number")) not in {"", "-"}:
+        next_step = f"review_anchor_job {anchor_seed['job_number']} and confirm quantity_or_changes"
+    elif anchor_seed and safe_text(anchor_seed.get("seed_id")):
+        next_step = f"mintctl morpheus contact packetize --seed-id {anchor_seed['seed_id']}"
+
+    record = {
+        "reorder_id": reorder_id,
+        "captured_at": captured_at,
+        "capability": "mint.customer.reorder.resolve",
+        "mailbox": args.mailbox,
+        "message": triage,
+        "customer_resolution": {
+            "state": customer.get("state"),
+            "reason": customer.get("reason"),
+            "confidence": customer.get("confidence"),
+            "resolved_customer": customer.get("resolved_customer"),
+            "candidate_count": len(customer.get("candidates") or []),
+        },
+        "history": {
+            "seed_count": archive_lane.get("seed_count", 0),
+            "linked_job_count": archive_lane.get("linked_job_count", 0),
+            "seed_ids": archive_lane.get("seed_ids") or [],
+            "anchor_seed": anchor_seed,
+        },
+        "intent": hints,
+        "next_business_step": next_step,
+    }
+
+    record_path = write_runtime_record(category="customer-reorder-drafts", record_id=reorder_id, payload=record)
+    append_runtime_index(
+        category="customer-reorder-drafts",
+        row={
+            "captured_at": captured_at,
+            "reorder_id": reorder_id,
+            "mailbox": args.mailbox,
+            "message_id": args.message_id,
+            "record_file": str(record_path),
+            "anchor_job_number": (anchor_seed or {}).get("job_number"),
+        },
+    )
+
+    result = {
+        "capability": "mint.customer.reorder.resolve",
+        "status": "ok",
+        "reorder_id": reorder_id,
+        "record_path": str(record_path),
+        "message_id": args.message_id,
+        "anchor_job_number": (anchor_seed or {}).get("job_number"),
+        "next_business_step": next_step,
+        "reused_fields": hints["reused_fields"],
+        "missing_fields": hints["missing_fields"],
+        "changed_fields": hints["changed_fields"],
+    }
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print("mint.customer.reorder.resolve")
+        print("status: ok")
+        print(f"reorder_id: {reorder_id}")
+        print(f"message_id: {args.message_id}")
+        print(f"anchor_job_number: {(anchor_seed or {}).get('job_number') or ''}")
+        print(f"next_business_step: {next_step}")
+        print(f"record_path: {record_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

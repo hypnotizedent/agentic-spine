@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.domains.mint.lib.customer_inbox_common import (
+    build_work_item,
+    classify_message,
+    is_customer_lane_actionable,
+    mailbox_messages,
+    now_utc,
+    parse_received_timestamp,
+    safe_text,
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Launch Morpheus into the governed Mint customer queue mode")
+    parser.add_argument("--top", type=int, default=3)
+    parser.add_argument("--mailbox", default="team@mintprints.com")
+    parser.add_argument("--json", action="store_true")
+    return parser.parse_args()
+
+
+def launch_command(item: dict[str, object], mailbox: str) -> str:
+    message = item.get("message") or {}
+    trace = item.get("trace_summary") or {}
+    work_type = safe_text(message.get("work_type"))
+    message_id = safe_text(message.get("message_id"))
+    sender = safe_text(message.get("from_email"))
+    if work_type == "reorder_candidate" and int(trace.get("linked_job_count") or 0) > 0:
+        return f"mintctl morpheus inbox reorder --message-id {message_id}"
+    if sender:
+        return f"mintctl morpheus contact trace --email {sender}"
+    return f"mintctl morpheus inbox thread {message_id}"
+
+
+def main() -> int:
+    args = parse_args()
+    messages = mailbox_messages(mailbox=args.mailbox, top=args.top)
+    triaged = [classify_message(message) for message in messages]
+    actionable = [
+        message
+        for message in sorted(triaged, key=lambda item: parse_received_timestamp(item.get("received_utc")))
+        if is_customer_lane_actionable(message, mailbox=args.mailbox)
+    ]
+    first_message_id = safe_text((actionable[0] or {}).get("message_id")) if actionable else ""
+    first_raw_message = next((message for message in messages if safe_text(message.get("id")) == first_message_id), None)
+    first_item = build_work_item(first_raw_message) if first_raw_message else None
+    result = {
+        "capability": "MINT-MORPHEUS-01.launch",
+        "generated_at": now_utc(),
+        "terminal_id": "MINT-MORPHEUS-01",
+        "launch_mode": "customer_inbox_queue",
+        "canonical_mailbox": args.mailbox,
+        "queue_surface": "mint.customer.inbox.triage",
+        "detail_surface": "mint.customer.inbox.work_items",
+        "queue_order": "oldest_first",
+        "queue_count": len(actionable),
+        "first_action_item": first_item,
+        "recommended_command": launch_command(first_item, args.mailbox) if first_item else "mintctl morpheus inbox triage --top 10",
+    }
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print("MINT-MORPHEUS-01.launch")
+        print("mode: customer_inbox_queue")
+        print(f"mailbox: {args.mailbox}")
+        print(f"queue_count: {len(actionable)}")
+        print(f"recommended_command: {result['recommended_command']}")
+        if first_item:
+            message = first_item.get("message") or {}
+            print(f"first_message_id: {message.get('message_id') or ''}")
+            print(f"first_subject: {message.get('subject') or ''}")
+            print(f"first_work_type: {message.get('work_type') or ''}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -139,7 +139,7 @@ json_out="$(
 )"
 assert_contains "$json_out" "\"capability\": \"mint.customer.inbox.work_items\"" "json output includes capability id"
 assert_contains "$json_out" "\"work_type\": \"reorder_candidate\"" "reorder work item classified"
-assert_contains "$json_out" "\"next_business_step\": \"resolve_prior_job_and_prepare_reorder_draft\"" "reorder next step derived"
+assert_contains "$json_out" "\"next_business_step\": \"mintctl morpheus inbox reorder --message-id msg-reorder\"" "reorder next step derived"
 assert_contains "$json_out" "\"quote_ready\": true" "quote readiness surfaces from trace"
 assert_contains "$json_out" "\"next_business_step\": \"prepare_artwork_revision_handoff\"" "revision work item routes to artwork prep"
 assert_contains "$json_out" "\"state\": \"skipped_promotional\"" "promotional mail skips heavy lookups"
