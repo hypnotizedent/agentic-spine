@@ -1,14 +1,22 @@
-version: 1
+version: 2
 status: authoritative
 owner: "@ronny"
-updated_at: "2026-03-21"
-scope: shop-media-pressure
+updated_at: "2026-03-22"
+scope: shop-media-evacuation-pressure
+
+canonical_active_plane_notice: >
+  The canonical active media runtime is HOME — Synology 10.0.0.150:/volume1/media-staging
+  served via media-home VM 106. This file does NOT describe the active media plane.
+  It tracks evacuation pressure on the deprecated pve:/media shop pool so operators
+  know what NFS-exported residue remains and what can be reclaimed or archived.
+  See: docs/governance/MEDIA_STORAGE_CONTRACT.md for the canonical tier model.
 
 purpose: >
-  Live-backed authority for shop warm-lane pressure on the media pool.
-  Records client-visible /media payload truth, local mount overlay drift,
-  reclaim candidates, and blocked holds so scorecards do not confuse the
-  host-local ZFS mount view with the runtime-visible NFS export.
+  Evacuation pressure tracking for the deprecated pve:/media shop pool.
+  Records NFS-visible payload residue, local mount overlay drift, reclaim
+  candidates, and blocked holds. This pool is legacy shop residue — NOT the
+  canonical active family watch/intake plane. The home Synology pool (20T,
+  ~35% used) is the active media plane.
 
 evidence:
   docs:
@@ -50,21 +58,28 @@ pool_state:
 nfs_export_truth:
   export_host: pve
   export_path: /media
+  status: deprecated
+  note: >
+    These NFS exports are legacy shop infrastructure. The canonical active media
+    runtime is HOME (Synology /volume1/media-staging via media-home VM 106).
+    download-stack and streaming-stack are parked residue, not active consumers.
   consumers:
     - host: download-stack
       mount_path: /mnt/media
       mode: rw
+      status: parked
     - host: streaming-stack
       mount_path: /mnt/media
       mode: ro
+      status: parked
   local_view_drift:
     status: accepted
     summary: >
-      The client-visible /media export is authoritative for payload accounting.
-      The host-local paths /media/movies, /media/tv, and /media/music are empty
-      child datasets, and /media/movies-archive is currently masked by
-      md1400/media-cold/movies-archive. NFS consumers still observe live parent
-      payload at those paths, so host-local du/zfs output alone is not storage truth.
+      The client-visible /media export accounts for payload residue on the deprecated
+      shop pool. Host-local paths /media/movies, /media/tv, and /media/music are empty
+      child datasets, and /media/movies-archive is masked by md1400/media-cold/movies-archive.
+      NFS consumers still observe parent payload at those paths, so host-local du/zfs
+      output alone is not storage truth. This is evacuation accounting, not active media truth.
     affected_paths:
       - /media/movies
       - /media/tv
@@ -73,45 +88,45 @@ nfs_export_truth:
 
 payload_by_path:
   - path: /mnt/media/movies
-    surface_class: runtime
+    surface_class: evacuation_residue
     reclaim_class: payload
-    owner: streaming-stack
-    purpose: Canonical movie library served to streaming-stack and maintained from download-stack.
+    owner: legacy_nfs_residue
+    purpose: "Movie payload residue on deprecated shop pool. Canonical active movie library is on home Synology /volume1/media-staging/movies via media-home VM 106."
     used_bytes: 10876177733125
     used_display: "10.1T"
   - path: /mnt/media/tv
-    surface_class: runtime
+    surface_class: evacuation_residue
     reclaim_class: payload
-    owner: streaming-stack
-    purpose: Canonical TV library served to streaming-stack and maintained from download-stack.
+    owner: legacy_nfs_residue
+    purpose: "TV payload residue on deprecated shop pool. Canonical active TV library is on home Synology via media-home VM 106."
     used_bytes: 6183208820213
     used_display: "5.7T"
   - path: /mnt/media/downloads
-    surface_class: runtime
+    surface_class: evacuation_residue
     reclaim_class: regenerable
-    owner: download-stack
-    purpose: Active import/download lane for SABnzbd, qBittorrent, and related media tooling.
+    owner: legacy_nfs_residue
+    purpose: "Downloads residue on deprecated shop pool. Active downloads now land on home Synology via SABnzbd on media-home."
     used_bytes: 116698405125
     used_display: "108G"
   - path: /mnt/media/music
-    surface_class: runtime
+    surface_class: evacuation_residue
     reclaim_class: payload
-    owner: streaming-stack
-    purpose: Canonical music library served to streaming-stack and maintained from download-stack.
+    owner: legacy_nfs_residue
+    purpose: "Music payload residue on deprecated shop pool. Canonical active music library is on home Synology via media-home VM 106."
     used_bytes: 736408065826
     used_display: "686G"
   - path: /mnt/media/movies-archive
     surface_class: archive
     reclaim_class: archive
-    owner: download-stack
-    purpose: Radarr archive root reachable over the canonical /media export.
+    owner: legacy_nfs_residue
+    purpose: "Radarr archive root on deprecated shop pool. Not active playback surface."
     used_bytes: 230161189327
     used_display: "214G"
   - path: /mnt/media/backups
     surface_class: compatibility-hold
     reclaim_class: archive
     owner: pve
-    purpose: Legacy warm-lane media-stack tarballs being drained to md1400; not canonical backup truth.
+    purpose: "Legacy warm-lane media-stack tarballs drained to md1400. Not canonical backup truth."
     used_bytes: 6971392
     used_display: "6.7M"
 
@@ -155,13 +170,14 @@ reclaim_lanes:
       Remaining 108GB is active/recent downloads. Further selective cleanup available if needed.
 
 summary:
-  canonical_payload_bytes: 18026955808491
-  canonical_payload_display: "16.4TiB"
-  regenerable_runtime_bytes: 116698405125
-  regenerable_runtime_display: "108GiB"
+  shop_pool_residue_bytes: 18026955808491
+  shop_pool_residue_display: "16.4TiB"
+  regenerable_residue_bytes: 116698405125
+  regenerable_residue_display: "108GiB"
   blocking_summary: >
-    media is at 86% usage. NFS-visible canonical payload accounts for about 16.4TiB
-    (movies/tv/music plus movies-archive), downloads cleaned to 108GiB of regenerable pressure,
-    the legacy warm-lane media-stack tarballs are offloaded to md1400, and the retained forensic
-    snapshot remains at 278G. Downloads cleanup 2026-03-12 to 2026-03-21 freed 2.6TB.
+    The SHOP pve:/media pool is at 86% usage. This is NOT the home canonical plane.
+    NFS-visible payload residue accounts for about 16.4TiB (movies/tv/music plus
+    movies-archive), downloads cleaned to 108GiB of regenerable pressure. Legacy
+    warm-lane tarballs are offloaded to md1400; retained forensic snapshot at 278G.
+    The canonical active family media runtime is HOME (Synology, 20T, ~35% used, 14T free).
   safe_to_change_drives: blocked
