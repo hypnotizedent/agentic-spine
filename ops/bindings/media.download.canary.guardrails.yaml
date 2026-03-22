@@ -9,10 +9,10 @@
 # uncontrolled bulk acquisition or storage bloat.
 
 contract: MEDIA_DOWNLOAD_CANARY_GUARDRAILS_V1
-version: "1.1"
+version: "1.2"
 status: active
 created: "2026-03-21"
-updated_at: "2026-03-21"
+updated_at: "2026-03-22"
 owner: "@ronny"
 
 description: |
@@ -20,6 +20,10 @@ description: |
   media-home plane. Dual-ingest model: SABnzbd primary (usenet),
   qBittorrent secondary (torrent, VPN-tunneled via gluetun). This contract
   is required reading before any download client broadening.
+
+  Operating posture: MANUAL CATALOG ONLY. Ronny manually curates what enters
+  the catalog. No bulk acquisition. No automatic backfill of missing content.
+  Single-item or small-batch testing only.
 
 # ─────────────────────────────────────────────────────────────────────────
 # Client Activation Scope
@@ -119,6 +123,90 @@ anti_bloat:
     nice_to_have_tier: true
     fill_later_tier: false
     note: "fill-later tier stays unmonitored (media.import.policy). Only must-have and nice-to-have items eligible for canary downloads."
+
+  search_on_add:
+    enabled: false
+    reason: |
+      When series/movies are added to ARR apps as "monitored" with no files,
+      ARR apps trigger automatic searches for ALL missing content regardless
+      of RSS/backlog settings. This bypasses the manual-catalog posture.
+      Series/movies MUST be added as UNMONITORED by default. Operator manually
+      sets monitored=true only when ready to acquire that specific content.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Manual Catalog Operating Model
+# ─────────────────────────────────────────────────────────────────────────
+
+manual_catalog_model:
+  posture: manual_operator_curated
+  description: |
+    Ronny manually builds the media catalog. No bulk acquisition waves.
+    No automatic list-fed expansion. Pipeline remains end-to-end testable
+    but operates in single-item or small-batch mode only.
+
+  series_hygiene:
+    rule: add_unmonitored_by_default
+    detail: |
+      When adding series to Sonarr:
+      - Add as UNMONITORED
+      - Review series details, quality profile, root folder
+      - Manually set monitored=true ONLY when ready to acquire
+      - Do NOT bulk-add dozens of series and set them all to monitored
+
+  movie_hygiene:
+    rule: add_unmonitored_by_default
+    detail: |
+      When adding movies to Radarr:
+      - Add as UNMONITORED via import lists (per media.import.policy.yaml tiers)
+      - Manually promote from unmonitored to monitored when ready to acquire
+      - Do NOT enable automatic monitoring on import list sync
+
+  jellyseerr_workflow:
+    rule: preferred_acquisition_path
+    detail: |
+      Jellyseerr requests are the PREFERRED path for new acquisitions.
+      Requests flow: Jellyseerr -> Radarr/Sonarr (auto-monitored for that item)
+      -> search -> download -> import. This is operator-approved, single-item,
+      and does not trigger bulk backfill.
+
+  monitoring_audit:
+    frequency: monthly
+    command: "./bin/ops cap run media.monitoring.audit"
+    action: |
+      Review all monitored series/movies with zero files. These are either:
+      - Stuck searches (should be unmonitored or deleted)
+      - Wishlist items (should be unmonitored until ready)
+      Unmonitor or delete to prevent queue bloat.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Incident History (Learning Archive)
+# ─────────────────────────────────────────────────────────────────────────
+
+incidents:
+  - id: MEDIA-BLOAT-001
+    date: "2026-02-14"
+    discovered: "2026-03-22"
+    summary: "Bulk series add triggered 3.5TB queue flood (867 items)"
+    root_cause: |
+      On 2026-02-14 between 04:02-04:26 UTC, 31 TV series (Smallville, Big Bang
+      Theory, Seinfeld, Friends, House, etc.) were bulk-added to Sonarr as
+      "monitored" with zero files. This represents ~4,500 missing episodes.
+      Even with RSS disabled, Sonarr triggered automatic "search on add" for
+      all missing content, flooding SABnzbd queue with 867 items (3.5TB).
+      All items were paused but queue remained armed for 37 days unnoticed.
+    impact: |
+      - Storage risk: 3.5TB would have consumed 27% of available Synology space
+      - Manual-catalog posture violated: bulk acquisition contradicts operator intent
+      - Pipeline confidence eroded: unclear what would trigger if items unpaused
+    resolution: |
+      2026-03-22: Queue purged (867 items), 31 series unmonitored, guardrails
+      updated to prohibit monitored-with-no-files, manual-catalog model made
+      canonical. Lane: codex/media-manual-catalog-canary-brake-v1-20260322
+    lessons: |
+      - "Monitored" is an acquisition trigger, not a wishlist marker
+      - Series hygiene: add as unmonitored, promote deliberately
+      - Monthly monitoring audit needed to catch drift
+      - RSS disabled ≠ no automatic search (search-on-add is separate)
 
 # ─────────────────────────────────────────────────────────────────────────
 # Post-Import Cleanup Rules
