@@ -171,28 +171,41 @@ path_tuples:
     app_root: "/media/music"
     app_root_id: 2
     app_root_name: "Music"
-    downloader_path:
+    downloader_path: []
+    downloader_path_removed:
       - host: "100.125.138.110"
-        remote: "/downloads/complete/"
-        local: "/downloads/complete/"
         id: 1
-        stale: true
-        stale_reason: "Points to destroyed download-home LXC 103 (Tailscale IP 100.125.138.110, decommissioned 2026-02-20). Lidarr RPM id=1 and download client id=2 (SABnzbd-Home) should be removed via API."
+        removed_at: "2026-03-22"
+        reason: "Stale mapping to dead LXC 103. Deleted via Lidarr API."
       - host: "slskd"
-        remote: "/downloads/"
-        local: "/media/downloads/slskd/"
         id: 2
+        removed_at: "2026-03-22"
+        reason: "Slskd parked on download-stack, unreachable. Deleted via Lidarr API."
+    download_clients_cleaned:
+      - id: 2
+        name: "SABnzbd-Home"
+        action: deleted
+        reason: "Stale client pointing at dead LXC 103 (100.125.138.110)"
+        deleted_at: "2026-03-22"
+      - id: 3
+        name: "qBittorrent"
+        action: disabled
+        reason: "Container intentionally parked"
+        disabled_at: "2026-03-22"
     library_path: "/media/music"
     verification_status: verified
-    verified_at: "2026-03-21"
+    verified_at: "2026-03-22"
     evidence: |
-      2026-03-21 runtime API query on media-home:
-      - GET /api/v1/rootfolder: [{name: "Music", path: "/media/music", id: 2}]
-      - GET /api/v1/remotepathmapping: 2 entries (SAB legacy mapping and slskd internal mapping retained in DB)
-      - docker host verification: `/srv/media/music` and `/srv/media` are mounted into the active media-home container
-      - Lidarr uses `/media/music` as root via the broad home mount, matching the active home plane.
-    path_parity_status: "CONSISTENT — dual mount path, both resolve to /mnt/media/music"
-    transition_note: "Now active on media-home. Shop copy is parked rollback residue only."
+      2026-03-22 endgame cleanup on media-home:
+      - Stale download client SABnzbd-Home (id=2, host=100.125.138.110) deleted
+      - qBittorrent (id=3) disabled (container parked)
+      - Remote path mapping id=1 (100.125.138.110) deleted
+      - Remote path mapping id=2 (slskd) deleted
+      - Remaining: SABnzbd (id=1, host=sabnzbd:8080, enabled) is sole active client
+      - Zero remote path mappings remain
+      - Root folder: /media/music (id=2, accessible, 14T free)
+    path_parity_status: "CONSISTENT — sole active client SABnzbd, no stale mappings"
+    transition_note: "Now active on media-home. Stale clients/mappings removed 2026-03-22."
 
   prowlarr:
     planned_vm: media-home
@@ -268,17 +281,20 @@ path_tuples:
     historical_shop_mount: "/mnt/media -> /media (ro)"
     app_root: null
     downloader_path: null
-    library_path: "/media/movies,/media/tv,/media/music"
+    library_path: "/media/movies,/media/tv"
+    library_path_hidden:
+      - path: "/media/music"
+        status: planned
+        note: "Music library intentionally not exposed in Jellyfin until migration is verified. Hidden until import complete."
     verification_status: verified
-    verified_at: "2026-03-04"
+    verified_at: "2026-03-22"
     evidence: |
-      2026-03-04 shop runtime verification via SSH (historical):
-      - docker inspect: /mnt/media -> /media (ro)
-      - NFS mount: 192.168.1.184:/media -> /mnt/media (ro, NFSv4.2)
-      - Jellyfin search API confirms library entries at /media/movies/*, /media/tv/*
-      - E2E sample: 5/5 movies found in Jellyfin with correct paths
-      2026-03-20: canonical runtime moved to media-home VM 106 backed by /srv/media.
-    path_parity_status: "CONSISTENT"
+      2026-03-22 endgame cleanup on media-home:
+      - Collections library removed (empty stale boxset)
+      - Libraries now: Movies (/media/movies), TV Shows (/media/tv) — 2 total
+      - Music intentionally absent per canon policy
+      - Item counts: 1 movie, 9 series, 356 episodes
+    path_parity_status: "CONSISTENT — 2 active libraries, Music hidden until ready"
 
   navidrome:
     vm: media-home

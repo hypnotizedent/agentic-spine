@@ -5,16 +5,16 @@
 # Authority: Lane 3 — media-runtime-canon-convergence-and-pipeline-cleanse-v1
 
 contract: MEDIA_RUNTIME_CANON_CONVERGENCE_AUDIT_V1
-version: "1.0"
+version: "2.0"
 status: active
 created: "2026-03-21"
-updated_at: "2026-03-21"
+updated_at: "2026-03-22"
 owner: "@ronny"
 
 description: |
-  Cross-domain audit of Radarr, Lidarr, and Jellyfin runtime state against
+  Cross-domain audit of Radarr, Sonarr, Lidarr, Jellyfin, and Jellyseerr runtime state against
   media.quality.policy.yaml canon. Documents drift, remediation queues, and
-  blocking issues discovered during convergence audit.
+  blocking issues discovered during convergence audit and endgame lane cleanup.
 
 # ─────────────────────────────────────────────────────────────────
 # Radarr Runtime State
@@ -142,12 +142,30 @@ lidarr:
       all_disabled: true
 
   download_clients:
-    qbittorrent:
-      runtime_status: broken
-      error: "Resource temporarily unavailable (qbittorrent:8081)"
     sabnzbd:
-      runtime_status: path_broken
-      error: "/downloads/complete/music not visible inside container"
+      id: 1
+      runtime_status: enabled
+      host: "sabnzbd:8080"
+      category: audio
+      note: "Sole active download client after endgame cleanup"
+    qbittorrent:
+      id: 3
+      runtime_status: disabled
+      host: "qbittorrent:8081"
+      note: "Intentionally parked — container stopped. Disabled in Lidarr 2026-03-22."
+    sabnzbd_home:
+      id: 2
+      runtime_status: removed
+      note: "Stale client pointing at dead LXC 103 (100.125.138.110). Deleted 2026-03-22."
+  remote_path_mappings:
+    stale_100_125_138_110:
+      id: 1
+      runtime_status: removed
+      note: "Pointed at dead download-home LXC 103. Deleted 2026-03-22."
+    slskd:
+      id: 2
+      runtime_status: removed
+      note: "Slskd parked on download-stack. Mapping unreachable. Deleted 2026-03-22."
 
   queue:
     total: 24
@@ -156,18 +174,19 @@ lidarr:
     root_cause: "Track count mismatch between release and MusicBrainz metadata"
 
   health_issues:
-    - source: DownloadClientStatusCheck
-      type: warning
-      detail: "qBittorrent unreachable"
-    - source: DownloadClientCheck
-      type: error
-      detail: "Unable to communicate with qBittorrent"
-    - source: RemotePathMappingCheck
-      type: error
-      detail: "SABnzbd path /downloads/complete/music not visible in container"
     - source: IndexerLongTermStatusCheck
       type: warning
       detail: "NZBFinder, Usenet-Crawler failing 6+ hours"
+  health_issues_resolved:
+    - source: DownloadClientStatusCheck
+      resolved_at: "2026-03-22"
+      action: "qBittorrent disabled in Lidarr (no longer flagged as broken)"
+    - source: DownloadClientCheck
+      resolved_at: "2026-03-22"
+      action: "qBittorrent disabled in Lidarr"
+    - source: RemotePathMappingCheck
+      resolved_at: "2026-03-22"
+      action: "Stale SABnzbd-Home client and mapping removed"
 
 # ─────────────────────────────────────────────────────────────────
 # Jellyfin Runtime State
@@ -188,19 +207,20 @@ jellyfin:
       type: tvshows
       realtime_monitor: true
       health: active
+  libraries_removed:
     - label: Collections
       path: "%AppDataPath%/collections"
       type: boxsets
-      realtime_monitor: false
-      health: active
-
-  missing_libraries:
+      removed_at: "2026-03-22"
+      reason: "Empty stale boxset library. Removed via Jellyfin API."
+  intentionally_absent_libraries:
     - label: Music
       expected_path: /media/music
       host_path: /srv/media/music
       size_gb: 14
       managed_by: lidarr
-      note: "Path mounted and accessible; library not configured"
+      status: planned
+      note: "Path mounted and accessible; library intentionally NOT configured until music import/migration is verified complete. Hidden until import complete."
 
   container_mounts:
     - host: /srv/media
@@ -218,6 +238,77 @@ jellyfin:
       recommendation: remove_from_host
     - path: /media/test_file
       recommendation: remove_from_host
+
+# ─────────────────────────────────────────────────────────────────
+# Sonarr Runtime State (added 2026-03-22)
+# ─────────────────────────────────────────────────────────────────
+
+sonarr:
+  audit_timestamp: "2026-03-22T02:57:00Z"
+  series_total: 72
+  series_monitored: 9
+  series_unmonitored: 63
+  series_with_files: 10
+  episode_files: 356
+  root_folder: /media/tv
+  root_folder_accessible: true
+  endgame_cleanup:
+    action: unmonitor_no_file_wishlist
+    applied_at: "2026-03-22"
+    series_unmonitored: 62
+    reason: "Speculative catalog debt — monitored series with zero episode files"
+    series_retained_monitored:
+      - {id: 54, title: "Cheers", files: 142}
+      - {id: 69, title: "Narcos", files: 9}
+      - {id: 66, title: "Ozark", files: 1}
+      - {id: 21, title: "Prison Break", files: 9}
+      - {id: 61, title: "Severance", files: 9}
+      - {id: 67, title: "Superstore", files: 42}
+      - {id: 40, title: "The Big Bang Theory", files: 8}
+      - {id: 68, title: "The Twilight Zone (1985)", files: 42}
+      - {id: 63, title: "Will & Grace", files: 97}
+  profiles:
+    - id: 1
+      label: Any
+      canon_mapping: Standard-TV
+      enforcement_status: enforced_at_runtime
+      enforced_at: "2026-03-21"
+
+# ─────────────────────────────────────────────────────────────────
+# Jellyseerr Runtime State (added 2026-03-22)
+# ─────────────────────────────────────────────────────────────────
+
+jellyseerr:
+  audit_timestamp: "2026-03-22T02:57:00Z"
+  version: "3.0.1"
+  image: "ghcr.io/seerr-team/seerr:v3.0.1"
+  radarr_connection:
+    hostname: "10.0.0.106"
+    port: 7878
+    activeDirectory: /media/movies
+    activeProfile: Any
+    syncEnabled: true
+    is4k: false
+  sonarr_connection:
+    hostname: "10.0.0.106"
+    port: 8989
+    activeDirectory: /media/tv
+    activeProfile: Any
+    syncEnabled: true
+    is4k: false
+  jellyfin_connection:
+    host: jellyfin
+    port: 8096
+    libraries: [Movies, TV Shows]
+  endgame_cleanup:
+    - action: fix_radarr_activeDirectory
+      before: /movies
+      after: /media/movies
+      applied_at: "2026-03-22"
+    - action: fix_sonarr_activeDirectory
+      before: /tv
+      after: /media/tv
+      applied_at: "2026-03-22"
 
 # ─────────────────────────────────────────────────────────────────
 # Downloads / Pipeline Residue
