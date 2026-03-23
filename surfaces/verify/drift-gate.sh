@@ -26,6 +26,21 @@ RECEIPTS_ROOT="${SPINE_RECEIPTS:-$HOME/code/.evidence/spine/sessions}"
 source "$SP/ops/lib/resolve-policy.sh"
 resolve_policy_knobs
 
+# ── Retired gate skip (registry-driven) ──
+# Build set of retired gate IDs at startup. Gates in this set are skipped entirely.
+REGISTRY="$SP/ops/bindings/gate.registry.yaml"
+RETIRED_GATES=" "
+RETIRED_SKIP_COUNT=0
+if [[ -f "$REGISTRY" ]] && command -v yq >/dev/null 2>&1; then
+  while IFS= read -r gid; do
+    [[ -n "$gid" && "$gid" != "null" ]] && RETIRED_GATES="${RETIRED_GATES}${gid} "
+  done < <(yq e '.gates[] | select(.retired == true) | .id' "$REGISTRY" 2>/dev/null)
+fi
+
+is_retired() {
+  [[ "$RETIRED_GATES" == *" $1 "* ]]
+}
+
 FAIL=0
 WARN_COUNT=0
 
@@ -99,6 +114,23 @@ gate_script() {
   local script="$1"
   local gate_id="${2:-}"
   local tmp rc
+
+  # Auto-detect gate ID from script path (e.g., d16-docs-quarantine.sh → D16)
+  if [[ -z "$gate_id" ]]; then
+    local base
+    base="$(basename "$script")"
+    if [[ "$base" =~ ^d([0-9]+)- ]]; then
+      gate_id="D${BASH_REMATCH[1]}"
+    fi
+  fi
+
+  # Skip retired gates entirely
+  if [[ -n "$gate_id" ]] && is_retired "$gate_id"; then
+    echo "SKIP (retired)"
+    RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1))
+    return 0
+  fi
+
   tmp="$(mktemp)"
   set +e
   bash "$script" >"$tmp" 2>&1
@@ -138,15 +170,17 @@ gate_script() {
 echo "=== DRIFT GATE (v3.0) ==="
 
 # D1: Top-level directory policy
-# TRIAGE: Only bin/ docs/ fixtures/ ops/ surfaces/ allowed at top level. Remove or move extra directories.
+if ! is_retired D1; then
 echo -n "D1 top-level dirs... "
 EXTRA="$(ls -1d */ 2>/dev/null | rg -v '^(bin|docs|fixtures|ops|surfaces)/$' || true)"
-if [[ -z "$EXTRA" ]]; then pass; else scoped_fail D1 "extra dirs: $(echo "$EXTRA" | tr '\n' ' ')"; echo "  TRIAGE: Only bin/ docs/ fixtures/ ops/ surfaces/ allowed at top level."; fi
+if [[ -z "$EXTRA" ]]; then pass; else scoped_fail D1 "extra dirs: $(echo "$EXTRA" | tr '\n' ' ')"; fi
+else echo "D1 top-level dirs... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D2: No runs/ trace
-# TRIAGE: Remove runs/ directory. Execution traces belong in ~/code/.evidence/spine/sessions/.
+if ! is_retired D2; then
 echo -n "D2 one trace (no runs/)... "
-if [[ ! -d runs ]]; then pass; else scoped_fail D2 "runs/ exists"; echo "  TRIAGE: Remove runs/ directory. Traces belong in ~/code/.evidence/spine/sessions/."; fi
+if [[ ! -d runs ]]; then pass; else scoped_fail D2 "runs/ exists"; fi
+else echo "D2 one trace (no runs/)... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D3: Entrypoint smoke
 # TRIAGE: bin/ops preflight must succeed. Check bin/ops exists and is executable.
@@ -158,6 +192,7 @@ else
 fi
 
 # D4: Watcher (launchd canonical; warn only, no fail)
+if ! is_retired D4; then
 echo -n "D4 watcher... "
 WATCHER_PRINT="$(launchctl print "gui/$(id -u)/com.ronny.agent-inbox" 2>/dev/null || true)"
 if [[ -n "$WATCHER_PRINT" ]]; then
@@ -181,9 +216,10 @@ else
     warn "(launchd service not loaded)"
   fi
 fi
+else echo "D4 watcher... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D5: No executable ~/agent coupling
-# TRIAGE: Replace ~/agent or $HOME/agent references with mailroom/ paths. Legacy coupling is forbidden.
+if ! is_retired D5; then
 echo -n "D5 no legacy coupling... "
 COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/plugins/core/agent/bin surfaces/verify 2>/dev/null \
   | rg -v '^[[:space:]]*#' \
@@ -198,10 +234,11 @@ COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/plugins/core/agent/bin surf
   | rg -v 'd23-health-drift.sh' \
   | rg -v 'd24-github-labels-drift.sh' \
   | rg -v 'gate.registry.yaml' || true)"
-if [[ -z "$COUPLE" ]]; then pass; else fail "legacy coupling found"; echo "  TRIAGE: Replace ~/agent or \$HOME/agent refs with mailroom/ paths."; fi
+if [[ -z "$COUPLE" ]]; then pass; else fail "legacy coupling found"; fi
+else echo "D5 no legacy coupling... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D6: Receipts exist (latest 5 have receipt.md)
-# TRIAGE: Ensure receipt.md exists in latest receipt dirs. Capabilities auto-generate receipts.
+if ! is_retired D6; then
 echo -n "D6 receipts exist... "
 MISSING=0
 COUNT=0
@@ -210,34 +247,37 @@ for s in $(ls -1t "$RECEIPTS_ROOT" 2>/dev/null); do
   COUNT=$((COUNT+1))
   [[ "$COUNT" -ge 5 ]] && break
 done
-if [[ "$MISSING" -eq 0 ]]; then pass; else scoped_fail D6 "$MISSING missing receipt.md"; echo "  TRIAGE: Check ~/code/.evidence/spine/sessions/ for dirs missing receipt.md. Re-run capability to regenerate."; fi
+if [[ "$MISSING" -eq 0 ]]; then pass; else scoped_fail D6 "$MISSING missing receipt.md"; fi
+else echo "D6 receipts exist... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D7: Executables only in four zones
-# TRIAGE: Shell scripts only allowed in bin/, ops/, surfaces/verify/. Move or remove out-of-bounds .sh files.
+if ! is_retired D7; then
 echo -n "D7 executables bounded... "
 BAD="$(find . -type f -name "*.sh" \
   | rg -v '^\./(bin/|ops/|surfaces/verify/)' \
   | rg -v '^\./(_imports/|docs/|mailroom/|\.git/|\.spine/|\.archive/|\.worktrees/)' || true)"
-if [[ -z "$BAD" ]]; then pass; else scoped_fail D7 "out-of-bounds: $(echo "$BAD" | wc -l | tr -d ' ')"; echo "  TRIAGE: .sh files only in bin/, ops/, surfaces/verify/. Move out-of-bounds scripts."; fi
+if [[ -z "$BAD" ]]; then pass; else scoped_fail D7 "out-of-bounds: $(echo "$BAD" | wc -l | tr -d ' ')"; fi
+else echo "D7 executables bounded... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D8: No backup clutter
-# TRIAGE: Remove .bak and fix_bak files from bin/ and ops/. These are accidental leftovers.
+if ! is_retired D8; then
 echo -n "D8 no backup clutter... "
 BK="$(find bin ops -maxdepth 1 -type f 2>/dev/null | rg '\.bak|fix_bak' || true)"
-if [[ -z "$BK" ]]; then pass; else fail "backup files"; echo "  TRIAGE: Delete .bak/fix_bak files from bin/ and ops/."; fi
+if [[ -z "$BK" ]]; then pass; else fail "backup files"; fi
+else echo "D8 no backup clutter... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D10: No spurious top-level logs (must be under mailroom/)
-# TRIAGE: Move or remove $SPINE/logs. Logs belong under mailroom/logs/.
+if ! is_retired D10; then
 echo -n "D10 logs under mailroom... "
 if [[ -d "$SP/logs" ]]; then
   fail "spurious \$SPINE/logs exists (should be mailroom/logs)"
-  echo "  TRIAGE: Move logs/ to mailroom/logs/ or remove it."
 else
   pass
 fi
+else echo "D10 logs under mailroom... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D11: ~/agent must be symlink to mailroom (if exists)
-# TRIAGE: If ~/agent exists it must be a symlink to agentic-spine/mailroom. Fix: ln -sf ~/code/agentic-spine/mailroom ~/agent
+if ! is_retired D11; then
 echo -n "D11 home surface... "
 if [[ -e "$HOME/agent" ]]; then
   if [[ -L "$HOME/agent" ]]; then
@@ -246,24 +286,23 @@ if [[ -e "$HOME/agent" ]]; then
       pass
     else
       fail "~/agent symlink points to wrong target: $TARGET"
-      echo "  TRIAGE: Fix symlink: ln -sf ~/code/agentic-spine/mailroom ~/agent"
     fi
   else
     fail "~/agent is a directory (should be symlink to mailroom)"
-    echo "  TRIAGE: Remove ~/agent dir and create symlink: ln -sf ~/code/agentic-spine/mailroom ~/agent"
   fi
 else
-  pass  # doesn't exist, that's fine
+  pass
 fi
+else echo "D11 home surface... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D12: CORE_LOCK.md must exist (repo validity marker)
-# TRIAGE: docs/core/CORE_LOCK.md is the repo validity marker. Restore it if deleted.
+if ! is_retired D12; then
 echo -n "D12 core lock exists... "
-if [[ -f "$SP/docs/core/CORE_LOCK.md" ]]; then pass; else scoped_fail D12 "docs/core/CORE_LOCK.md missing"; echo "  TRIAGE: Restore docs/core/CORE_LOCK.md — this is the repo validity marker."; fi
+if [[ -f "$SP/docs/core/CORE_LOCK.md" ]]; then pass; else scoped_fail D12 "docs/core/CORE_LOCK.md missing"; fi
+else echo "D12 core lock exists... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D9: Receipt stamps (STRICT - required fields for all new receipts)
-# Receipts created after core-v1.0 must have: Run ID, Generated, Status, Model, Inputs, Outputs
-# TRIAGE: Latest receipt missing required fields. Check ops/cap.sh receipt template for correct format.
+if ! is_retired D9; then
 echo -n "D9 receipt stamps... "
 LATEST=""
 for s in $(ls -1t "$RECEIPTS_ROOT" 2>/dev/null); do
@@ -298,11 +337,12 @@ if [[ -n "$LATEST" ]] && [[ -f "$RECEIPTS_ROOT/$LATEST/receipt.md" ]]; then
 else
   warn "no receipts to check"
 fi
+else echo "D9 receipt stamps... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D13: API capability secrets preconditions (locked rule)
 echo -n "D13 api capability preconditions... "
 if [[ -x "$SP/surfaces/verify/api-preconditions.sh" ]]; then
-  gate_script "$SP/surfaces/verify/api-preconditions.sh"
+  gate_script "$SP/surfaces/verify/api-preconditions.sh" "D13"
 else
   warn "api-preconditions verifier not present"
 fi
@@ -310,7 +350,7 @@ fi
 # D14: Cloudflare surface drift gate (no legacy smells, read-only)
 echo -n "D14 cloudflare drift gate... "
 if [[ -x "$SP/surfaces/verify/cloudflare-drift-gate.sh" ]]; then
-  gate_script "$SP/surfaces/verify/cloudflare-drift-gate.sh"
+  gate_script "$SP/surfaces/verify/cloudflare-drift-gate.sh" "D14"
 else
   warn "cloudflare drift gate not present"
 fi
@@ -318,7 +358,7 @@ fi
 # D15: GitHub Actions surface drift gate (no legacy smells, read-only, no leak fields)
 echo -n "D15 github actions drift gate... "
 if [[ -x "$SP/surfaces/verify/github-actions-gate.sh" ]]; then
-  gate_script "$SP/surfaces/verify/github-actions-gate.sh"
+  gate_script "$SP/surfaces/verify/github-actions-gate.sh" "D15"
 else
   warn "github actions drift gate not present"
 fi
@@ -1247,5 +1287,8 @@ else
 fi
 if [[ "$WARN_COUNT" -gt 0 ]]; then
   echo "  WARNINGS: $WARN_COUNT gate(s) reported warnings (policy=$WARN_POLICY)"
+fi
+if [[ "$RETIRED_SKIP_COUNT" -gt 0 ]]; then
+  echo "  RETIRED: $RETIRED_SKIP_COUNT gate(s) skipped (registry-driven)"
 fi
 exit "$FAIL"

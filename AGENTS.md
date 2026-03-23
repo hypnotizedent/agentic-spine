@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-05
+last_verified: 2026-03-23
 scope: agent-runtime-contract
 ---
 
