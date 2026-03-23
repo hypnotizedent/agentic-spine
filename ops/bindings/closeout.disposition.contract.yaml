@@ -38,3 +38,58 @@ propagation_guidance:
     - "Projections reflect the change (docs, dashboards, gate registry)"
     - "Residue is retired (stale branches, worktrees, exports, mounts)"
   rule: "If code changed but runtime or control plane did not, the disposition is deferred, not landed."
+
+# ═══════════════════════════════════════════════════════════════
+# Completion Level Taxonomy
+# ═══════════════════════════════════════════════════════════════
+#
+# Every landed disposition MUST declare its completion_level.
+# This prevents "complete" from meaning everything and nothing.
+# A backup writer retarget is not an estate backup completion.
+
+completion_levels:
+  allowed:
+    - slice_proven
+    - domain_aligned
+    - estate_verified
+    - migration_landed
+    - swap_ready
+
+  definitions:
+    slice_proven:
+      meaning: "A specific proof within a domain passed."
+      example: "vzdump writer path to /data proven via manual execution"
+      what_it_is_not: "Does NOT mean all targets in the domain are aligned."
+      propagation_bar: "At least one runtime proof + binding update for the specific seam."
+
+    domain_aligned:
+      meaning: "All targets within a single domain agree across runtime, control plane, and projections."
+      example: "All 14 vzdump targets writing to /data, cold sync proven, all bindings updated"
+      what_it_is_not: "Does NOT mean other domains or the estate are complete."
+      propagation_bar: "Every target in the domain has fresh posture + matching bindings + no open gaps."
+
+    estate_verified:
+      meaning: "All domains, all sites, all projections agree. verify.run passes clean."
+      example: "All backup targets across shop and home are fresh, all drills have receipts"
+      what_it_is_not: "Does NOT mean a migration from old to new infrastructure is done."
+      propagation_bar: "verify.run full PASS + nightly closeout clean + 0 open gaps in scope."
+
+    migration_landed:
+      meaning: "Old path fully deprecated, new path canonical, residue classified."
+      example: "/tank → /data: all writers retargeted, cold sync retargeted, tank classified as safety copy"
+      what_it_is_not: "Does NOT mean old infrastructure is safe to remove."
+      propagation_bar: "All of domain_aligned + old path has no active writers + residue has disposition."
+
+    swap_ready:
+      meaning: "Old infrastructure is safe to decommission or remove."
+      example: "2+ nightlies on /data, md1400 cold copies verified, tank backup purge approved"
+      what_it_is_not: "Does NOT mean old infrastructure HAS been removed — only that it CAN be."
+      propagation_bar: "All of migration_landed + stability window passed + operator approval on record."
+
+  enforcement:
+    require_on_landed: true
+    require_on_deferred: false
+    require_on_superseded: false
+    require_on_abandoned: false
+    fail_closeout_when_missing: true
+    message: "disposition: landed requires completion_level. Declare: slice_proven|domain_aligned|estate_verified|migration_landed|swap_ready"
