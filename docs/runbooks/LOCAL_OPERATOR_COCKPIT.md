@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-19
+last_verified: 2026-03-22
 scope: local-operator-daily-standard
 ---
 
@@ -14,7 +14,7 @@ How to operate from the Mac day-to-day without creating local drift.
 ```bash
 cd ~/code/agentic-spine
 git status                              # Must be: main, clean
-./bin/ops cap run session.start         # Orientation
+./bin/ops cap run session.v3.attach -- --allow-no-loop
 ```
 
 If `git status` shows you're not on main or not clean:

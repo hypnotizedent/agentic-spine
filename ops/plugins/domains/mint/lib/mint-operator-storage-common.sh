@@ -89,7 +89,7 @@ mint_operator_storage_load_contract() {
   MINT_OPERATOR_ASSIST_RECEIPT_ROOT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.receipts_root' '.evidence/spine/mint/operator-drop-assist')")"
   MINT_OPERATOR_ASSIST_HELPER_BIN="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.helper_bin_path' '~/.local/bin/mint-operator-drop-assist')")"
   MINT_OPERATOR_ASSIST_FINDER_APP="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.finder_app_path' '~/Applications/Mint Operator Drop.app')")"
-  MINT_OPERATOR_ASSIST_CONTROL_PLANE_ROOT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.control_plane_root' '~/.wt/agentic-spine/control-plane')")"
+  MINT_OPERATOR_ASSIST_CONTROL_PLANE_ROOT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.control_plane_root' '~/code/agentic-spine')")"
   MINT_OPERATOR_ASSIST_INSTALLER_SCRIPT="$(mint_operator_expand_path "$(mint_operator_contract_scalar '.assisted_move_surface.installer_script_path' '~/code/workbench/scripts/root/operator/install-mint-operator-drop-surface.sh')")"
   MINT_OPERATOR_ASSIST_REQUIRES_ENTRY_SURFACE="$(mint_operator_contract_scalar '.assisted_move_surface.boring_state_requires_entry_surface' 'true')"
 
