@@ -32,11 +32,10 @@ Do not run `./bin/ops` unless step 1 succeeded.
 
 ## Bootstrap: Desktop
 
-1. Read `docs/governance/SESSION_PROTOCOL.md`.
-2. Run `./bin/ops cap run spine.status`.
-3. Run `./bin/ops cap list`.
-4. For deep context, run `docs/brain/generate-context.sh`.
-5. Execute via capabilities; produce receipts.
+1. Run `./bin/ops cap run session.v3.attach -- --allow-no-loop`.
+2. Read `docs/governance/SESSION_PROTOCOL.md` if deeper context is needed.
+3. For deep context, run `docs/brain/generate-context.sh`.
+4. Execute via capabilities; produce receipts.
 
 ## Bootstrap: Bridge-capable mobile/remote
 

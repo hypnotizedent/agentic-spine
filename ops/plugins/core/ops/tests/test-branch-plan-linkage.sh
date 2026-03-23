@@ -7,6 +7,8 @@ source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
 RECONCILE="$ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-reconcile"
 PLANS_CREATE="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-create"
+PLANS_RECONCILE="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-reconcile"
+LOOPS_CREATE="$ROOT/ops/plugins/core/lifecycle/bin/loops-create"
 
 PASS=0
 FAIL=0
@@ -20,6 +22,15 @@ assert_eq() {
     pass "$label"
   else
     fail "$label (expected='$expected', got='$actual')"
+  fi
+}
+
+assert_contains() {
+  local haystack="$1" needle="$2" label="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    pass "$label"
+  else
+    fail "$label (missing '$needle')"
   fi
 }
 
@@ -64,6 +75,21 @@ updated_at: "2026-03-22"
 plans: []
 EOF
 
+missing_scope_output="$(
+  PLANS_DB_PATH="$STATE/shared_authority.db" \
+  PLANS_INDEX_PATH="$STATE/plans/index.yaml" \
+  PLANS_DIR_PATH="$STATE/plans" \
+  "$PLANS_CREATE" \
+    --plan-id PLAN-MISSING-SCOPE \
+    --loop-id LOOP-MISSING-SCOPE-20260322 \
+    --owner @ronny \
+    --horizon later \
+    --review-date 2026-03-29 \
+    --description "Should fail when source loop scope does not exist." \
+    2>&1 || true
+)"
+assert_contains "$missing_scope_output" "source_loop_id must resolve to a real scope file" "plan creation rejects nonexistent source loop scope"
+
 FIRST_JSON="$TMPDIR_BASE/reconcile-before.json"
 (
   cd "$TARGET"
@@ -74,27 +100,29 @@ FIRST_JSON="$TMPDIR_BASE/reconcile-before.json"
 assert_eq "$(json_eval "$FIRST_JSON" "payload['summary']['checked_local_branches']")" "1" "local branch inventory is exposed"
 assert_eq "$(json_eval "$FIRST_JSON" "any(item['code'] == 'branch_missing_plan_linkage' and item['branch'] == 'codex/deferred-branch' for item in payload['issues'])")" "True" "unlinked deferred branch is flagged as lifecycle drift"
 
-cat > "$STATE/loop-scopes/LOOP-DEFERRED-BRANCH-KEEP-20260322.scope.md" <<'EOF'
----
-loop_id: LOOP-DEFERRED-BRANCH-KEEP-20260322
-created: 2026-03-22
-status: planned
-owner: "@ronny"
-scope: branch
-priority: medium
-horizon: later
-execution_readiness: blocked
-execution_mode: single_worker
-objective: Preserve deferred branch memory.
----
-EOF
+loop_json="$(
+  SPINE_STATE="$STATE" \
+  "$LOOPS_CREATE" \
+    --name "loop-deferred-branch-keep-20260322" \
+    --objective "Preserve deferred branch memory." \
+    --priority medium \
+    --horizon later \
+    --readiness blocked \
+    --execution-mode single_worker \
+    --json
+)"
+LOOP_ID="$(printf '%s' "$loop_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["loop_id"])')"
+LOOP_SCOPE_FILE="$(printf '%s' "$loop_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["scope_file"])')"
+TODAY_UTC="$(date -u +%Y%m%d)"
+assert_eq "$LOOP_ID" "LOOP-DEFERRED-BRANCH-KEEP-$TODAY_UTC" "loops-create json returns canonical loop id"
+assert_eq "$LOOP_SCOPE_FILE" "$STATE/loop-scopes/$LOOP_ID.scope.md" "loops-create json exposes canonical scope path"
 
 PLANS_DB_PATH="$STATE/shared_authority.db" \
 PLANS_INDEX_PATH="$STATE/plans/index.yaml" \
 PLANS_DIR_PATH="$STATE/plans" \
 "$PLANS_CREATE" \
   --plan-id PLAN-DEFERRED-BRANCH-KEEP \
-  --loop-id LOOP-DEFERRED-BRANCH-KEEP-20260322 \
+  --loop-id "$LOOP_ID" \
   --owner @ronny \
   --horizon later \
   --review-date 2026-03-29 \
@@ -102,6 +130,30 @@ PLANS_DIR_PATH="$STATE/plans" \
   --branch-ref codex/deferred-branch \
   --worktree-path "$TARGET" \
   --branch-retention-state keep >/dev/null
+
+PLAN_DOC="$STATE/plans/PLAN-DEFERRED-BRANCH-KEEP.md"
+python3 - "$PLAN_DOC" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+path.write_text(text.replace("source_loop_id: `LOOP-DEFERRED-BRANCH-KEEP-", "source_loop_id: `LOOP-DEFERRED-BRANCH-KEEP-STALE-"), encoding="utf-8")
+PY
+
+reconcile_check_output="$(
+  PLANS_DB_PATH="$STATE/shared_authority.db" \
+  PLANS_INDEX_PATH="$STATE/plans/index.yaml" \
+  PLANS_DIR_PATH="$STATE/plans" \
+  "$PLANS_RECONCILE" --check 2>&1 || true
+)"
+assert_contains "$reconcile_check_output" "stale placeholder plan docs: 1" "reconcile check detects stale placeholder plan docs"
+
+PLANS_DB_PATH="$STATE/shared_authority.db" \
+PLANS_INDEX_PATH="$STATE/plans/index.yaml" \
+PLANS_DIR_PATH="$STATE/plans" \
+"$PLANS_RECONCILE" --fix >/dev/null
+assert_contains "$(cat "$PLAN_DOC")" "source_loop_id: \`$LOOP_ID\`" "reconcile fix refreshes placeholder doc from authority"
 
 SECOND_JSON="$TMPDIR_BASE/reconcile-after.json"
 (

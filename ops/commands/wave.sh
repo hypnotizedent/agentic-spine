@@ -805,7 +805,16 @@ cmd_start() {
     fi
   fi
 
-  [[ -n "$loop_id" ]] || loop_id="${SPINE_LOOP_ID:-LOOP-${wave_id}}"
+  if [[ -z "$loop_id" ]]; then
+    if [[ -n "${SPINE_LOOP_ID:-}" ]]; then
+      loop_id="$SPINE_LOOP_ID"
+    else
+      echo "FAIL: no loop_id resolved for wave '$wave_id'." >&2
+      echo "  → Pass --loop-id LOOP-ID, or set SPINE_LOOP_ID." >&2
+      echo "  → Create a loop first: ./bin/ops cap run loops.create -- --name \"$wave_id\" --objective \"...\"" >&2
+      exit 1
+    fi
+  fi
   [[ -n "$deadline_utc" ]] || deadline_utc="$(python3 - "$packet_default_deadline_hours" <<'PYDEADLINE'
 import datetime as dt
 import sys
@@ -1331,7 +1340,7 @@ if errors:
     stub_rel = ""
     stub_id = f"STUB-cross-repo-pushability-{wave_id.lower()}-{lane.lower()}"
     if loop_id:
-        stub_dir = os.path.join(spine_repo, "mailroom", "state", "orchestration", loop_id, "stubs")
+        stub_dir = os.path.join(os.environ.get("SPINE_STATE", os.path.join(os.environ.get("HOME", ""), "code", ".runtime", "spine", "state")), "orchestration", loop_id, "stubs")
         os.makedirs(stub_dir, exist_ok=True)
         stub_path = os.path.join(stub_dir, f"{stub_id}.md")
         unblock_cmd = f"git -C {repo} push --dry-run {remote} {branch}:{branch}" if repo and branch else "git remote -v"

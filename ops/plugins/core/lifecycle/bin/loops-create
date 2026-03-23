@@ -17,6 +17,7 @@ TEMPLATE="$ROOT/ops/plugins/core/lifecycle/templates/loop-scope.template.md"
 
 NAME="" OBJECTIVE="" PRIORITY="medium" HORIZON="now" READINESS="runnable" EXEC_MODE="orchestrator_subagents"
 FORCE=0
+JSON_OUTPUT=0
 declare -a PHASES=()
 declare -a SUCCESS_CRITERIA=()
 declare -a DOD_ITEMS=()
@@ -34,15 +35,17 @@ while [[ $# -gt 0 ]]; do
     --success)   SUCCESS_CRITERIA+=("${2:?--success requires a value}"); shift 2 ;;
     --dod)       DOD_ITEMS+=("${2:?--dod requires a value}"); shift 2 ;;
     --force)     FORCE=1; shift ;;
+    --json)      JSON_OUTPUT=1; shift ;;
     -h|--help)
       echo "Usage: loops-create --name NAME --objective \"desc\" [--priority high|medium|low]"
       echo "       [--horizon now|later|future] [--readiness runnable|blocked]"
       echo "       [--execution-mode single_worker|orchestrator_subagents]"
       echo "       [--phase \"Step 1:desc\"]... [--success \"criterion\"]... [--dod \"item\"]..."
-      echo "       [--force]"
+      echo "       [--force] [--json]"
       echo ""
       echo "Creates a new loop scope file from template with optional scaffold sections."
       echo "Blocks if an active loop with overlapping scope exists (use --force to override)."
+      echo "Use --json for machine-consumable output."
       exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -213,5 +216,9 @@ fi
   fi
 } >> "$SCOPE_FILE"
 
-echo "CREATED: $LOOP_ID"
-echo "File: $SCOPE_FILE"
+if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+  printf '{"loop_id":"%s","scope_file":"%s"}\n' "$LOOP_ID" "$SCOPE_FILE"
+else
+  echo "CREATED: $LOOP_ID"
+  echo "File: $SCOPE_FILE"
+fi

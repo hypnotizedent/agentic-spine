@@ -43,6 +43,11 @@ PLAN_BRANCH_RETENTION_STATE=""
 PLAN_PR_URL=""
 JSON_OUTPUT=false
 
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
 normalize_branch_token() {
   local raw="$1"
   local normalized
@@ -186,19 +191,23 @@ if [[ "$STATUS" == "deferred" ]]; then
   [[ -n "$PLAN_BRANCH_RETENTION_STATE" ]] || PLAN_BRANCH_RETENTION_STATE="keep"
 
   if [[ -z "$PLAN_LOOP_ID" ]]; then
-    PLAN_LOOP_ID="LOOP-${branch_token}-$(date -u +%Y%m%d)"
-  fi
-
-  PLAN_SCOPE_FILE="$SPINE_STATE/loop-scopes/${PLAN_LOOP_ID}.scope.md"
-  if [[ ! -f "$PLAN_SCOPE_FILE" ]]; then
-    "$LOOPS_CREATE_BIN" \
+    create_output="$("$LOOPS_CREATE_BIN" \
       --name "$branch_token" \
       --objective "Governed deferred branch memory for ${BRANCH} after lane ${LANE_ID} closeout." \
       --priority medium \
       --horizon later \
       --readiness blocked \
-      --execution-mode single_worker >/dev/null
+      --execution-mode single_worker \
+      --json)"
+    PLAN_LOOP_ID="$(printf '%s' "$create_output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["loop_id"])')"
+    PLAN_SCOPE_FILE="$(printf '%s' "$create_output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["scope_file"])')"
+  else
+    [[ "$PLAN_LOOP_ID" =~ ^LOOP-[A-Z0-9-]+$ ]] || fail "invalid --plan-loop-id: $PLAN_LOOP_ID"
+    PLAN_SCOPE_FILE="$SPINE_STATE/loop-scopes/${PLAN_LOOP_ID}.scope.md"
+    [[ -f "$PLAN_SCOPE_FILE" ]] || fail "--plan-loop-id does not resolve to a real scope file: $PLAN_SCOPE_FILE"
   fi
+
+  [[ -n "${PLAN_SCOPE_FILE:-}" ]] || PLAN_SCOPE_FILE="$SPINE_STATE/loop-scopes/${PLAN_LOOP_ID}.scope.md"
 
   PLAN_INDEX="$SPINE_STATE/plans/index.yaml"
   PLAN_EXISTS=0

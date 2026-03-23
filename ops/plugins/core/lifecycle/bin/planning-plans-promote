@@ -59,7 +59,15 @@ plan_id = sys.argv[2].strip()
 loop_id_override = sys.argv[3].strip()
 
 sys.path.insert(0, str(root / "ops/plugins/core/lifecycle/lib"))
-from plans_sql_authority import bootstrap_from_index_if_needed, connect, ensure_schema, get_plan, resolve_paths  # type: ignore
+from plans_sql_authority import (  # type: ignore
+    bootstrap_from_index_if_needed,
+    connect,
+    ensure_schema,
+    get_plan,
+    require_scope_file,
+    resolve_paths,
+    validate_plan_loop_bindings,
+)
 
 if not re.fullmatch(r"PLAN-[A-Z0-9-]+", plan_id):
     raise SystemExit(f"FAIL: invalid plan_id: {plan_id}")
@@ -71,12 +79,19 @@ bootstrap_from_index_if_needed(conn, index_path)
 plan = get_plan(conn, plan_id)
 if plan is None:
     raise SystemExit(f"FAIL: plan not found: {plan_id}")
+binding_errors = validate_plan_loop_bindings(index_path, plan, fields=("source_loop_id", "target_loop_id"))
+if binding_errors:
+    raise SystemExit("FAIL: " + "; ".join(binding_errors))
 
 resolved = loop_id_override or str(plan.get("target_loop_id") or "").strip() or str(plan.get("source_loop_id") or "").strip()
 if not resolved:
     raise SystemExit(f"FAIL: unable to resolve loop_id for {plan_id}; pass --loop-id")
 if not re.fullmatch(r"LOOP-[A-Z0-9-]+", resolved):
     raise SystemExit(f"FAIL: resolved loop_id is invalid: {resolved}")
+try:
+    require_scope_file(index_path, resolved, field_name="resolved loop_id")
+except RuntimeError as exc:
+    raise SystemExit(f"FAIL: {exc}") from None
 
 print(resolved)
 PY

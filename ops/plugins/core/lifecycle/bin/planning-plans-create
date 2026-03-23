@@ -160,6 +160,7 @@ from plans_sql_authority import (  # type: ignore
     get_plan,
     insert_event,
     project_to_surfaces,
+    require_scope_file,
     resolve_paths,
     upsert_plan,
     utc_now_text,
@@ -185,6 +186,17 @@ if linked_gaps_raw:
         linked_gaps.append(gap)
 
 _db_path, index_path, plans_dir = resolve_paths(root)
+
+# Validate source loop scope file exists — prevents silent binding to nonexistent loops.
+try:
+    require_scope_file(index_path, source_loop_id, field_name="source_loop_id")
+    if target_loop_id:
+        require_scope_file(index_path, target_loop_id, field_name="target_loop_id")
+    if depends_on_loop:
+        require_scope_file(index_path, depends_on_loop, field_name="depends_on_loop")
+except RuntimeError as exc:
+    raise SystemExit(f"FAIL: {exc}") from None
+
 conn = connect(_db_path)
 ensure_schema(conn)
 bootstrap_from_index_if_needed(conn, index_path)

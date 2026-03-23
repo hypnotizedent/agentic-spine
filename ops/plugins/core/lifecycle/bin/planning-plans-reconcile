@@ -82,6 +82,7 @@ from plans_sql_authority import (  # type: ignore
     resolve_paths,
     upsert_plan,
     utc_now_text,
+    validate_plan_loop_bindings,
 )
 
 contract = load_lifecycle_contract(root)
@@ -103,6 +104,7 @@ actions: list[str] = []
 noncanonical_status = 0
 legacy_normalized = 0
 missing_terminal_audit = 0
+missing_loop_scope_refs = 0
 updated_rows = 0
 
 for plan in fetch_plans(conn):
@@ -117,6 +119,11 @@ for plan in fetch_plans(conn):
             continue
         if not str(plan.get(fname) or "").strip():
             warnings.append(f"{plan_id}: missing required field '{fname}'")
+
+    binding_errors = validate_plan_loop_bindings(index_path, plan)
+    if binding_errors:
+        missing_loop_scope_refs += len(binding_errors)
+        errors.extend(binding_errors)
 
     source_status = str(plan.get("status") or "").strip() or "deferred"
     status = source_status
@@ -235,6 +242,7 @@ for plan in fetch_plans(conn):
 projection_result = {
     "plans_total": len(fetch_plans(conn)),
     "created_docs": 0,
+    "updated_docs": 0,
     "archived_docs": 0,
     "index_hash": "",
     "docs_hash": "",
@@ -252,6 +260,7 @@ if fix_mode:
 parity = db_parity_snapshot(conn, index_path, plans_dir)
 missing_projection_docs = len(parity.get("missing_docs") or [])
 orphan_projection_docs = len(parity.get("orphan_docs") or [])
+stale_placeholder_docs = len(parity.get("stale_placeholder_docs") or [])
 projection_parity_mismatch = 0 if parity.get("plans_match") else 1
 watermark_mismatch = 0
 watermark_hash = parity.get("watermark_index_hash")
@@ -269,6 +278,8 @@ if missing_projection_docs:
     errors.append(f"missing plan projection docs: {missing_projection_docs}")
 if orphan_projection_docs:
     errors.append(f"orphan plan projection docs: {orphan_projection_docs}")
+if stale_placeholder_docs:
+    errors.append(f"stale placeholder plan docs: {stale_placeholder_docs}")
 if watermark_mismatch:
     errors.append("projection watermark hash mismatch or missing")
 if not integrity_ok:
@@ -283,8 +294,10 @@ summary = {
     "noncanonical_status": noncanonical_status,
     "legacy_normalized": legacy_normalized,
     "missing_terminal_audit": missing_terminal_audit,
+    "missing_loop_scope_refs": missing_loop_scope_refs,
     "missing_projection_docs": missing_projection_docs,
     "orphan_projection_docs": orphan_projection_docs,
+    "stale_placeholder_docs": stale_placeholder_docs,
     "projection_parity_mismatch": projection_parity_mismatch,
     "watermark_mismatch": watermark_mismatch,
     "sqlite_integrity_ok": 1 if integrity_ok else 0,
@@ -295,6 +308,7 @@ summary = {
     "updated_rows": updated_rows,
     "actions_applied": len(actions),
     "created_docs": projection_result["created_docs"],
+    "updated_docs": projection_result["updated_docs"],
     "archived_docs": projection_result["archived_docs"],
     "index_hash": projection_result["index_hash"] if fix_mode else str(parity.get("index_file_hash") or ""),
     "docs_hash": projection_result["docs_hash"] if fix_mode else "",
@@ -321,8 +335,10 @@ else:
         "noncanonical_status",
         "legacy_normalized",
         "missing_terminal_audit",
+        "missing_loop_scope_refs",
         "missing_projection_docs",
         "orphan_projection_docs",
+        "stale_placeholder_docs",
         "projection_parity_mismatch",
         "watermark_mismatch",
         "sqlite_integrity_ok",
@@ -333,6 +349,7 @@ else:
         "updated_rows",
         "actions_applied",
         "created_docs",
+        "updated_docs",
         "archived_docs",
     ]:
         print(f"{key}: {summary[key]}")
@@ -354,8 +371,10 @@ drift_present = any(
     for k in [
         "noncanonical_status",
         "missing_terminal_audit",
+        "missing_loop_scope_refs",
         "missing_projection_docs",
         "orphan_projection_docs",
+        "stale_placeholder_docs",
         "projection_parity_mismatch",
         "watermark_mismatch",
     ]
