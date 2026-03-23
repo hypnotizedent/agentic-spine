@@ -112,3 +112,39 @@ if echo "$staged" | grep -qx 'ops/bindings/gate.registry.yaml'; then
   echo "NOTICE: projection sync is explicit (not run by pre-commit)." >&2
   echo "NOTICE: run './ops/plugins/core/docs/bin/docs-projection-sync' and stage projection files before push." >&2
 fi
+
+# ─── Guard 7: D411 terminal-worker projection convergence ──
+# When any D411 input is staged, governed projections must be regenerated
+# in the same commit. This prevents stale projection surfaces from landing.
+D411_INPUTS="ops/capabilities.yaml
+ops/bindings/capability_map.yaml
+ops/bindings/agents.registry.yaml
+ops/bindings/terminal.role.contract.yaml
+ops/bindings/gate.domain.profiles.yaml
+ops/bindings/gate.agent.profiles.yaml
+ops/bindings/service.endpoint.catalog.yaml
+ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py"
+
+d411_input_staged=0
+while IFS= read -r d411_input; do
+  [[ -n "$d411_input" ]] || continue
+  if printf '%s\n' "$staged" | grep -Fxq "$d411_input"; then
+    d411_input_staged=1
+    break
+  fi
+done <<< "$D411_INPUTS"
+
+if [[ "$d411_input_staged" -eq 1 ]]; then
+  d411_gate="$ROOT/surfaces/verify/d411-terminal-worker-projection-lock.sh"
+  if [[ -x "$d411_gate" ]] && ! bash "$d411_gate" > /dev/null 2>&1; then
+    echo "BLOCKED: D411 input staged but governed projections are stale." >&2
+    echo "" >&2
+    echo "Remediation:" >&2
+    echo "  bash ops/plugins/core/ops/bin/gen-worker-catalog.sh --apply" >&2
+    echo "  bash ops/plugins/core/ops/bin/gen-routing-dispatch.sh --apply" >&2
+    echo "  bash ops/plugins/core/ops/bin/gen-launcher-view.sh --apply" >&2
+    echo "  bash ops/plugins/core/ops/bin/gen-worker-usage-docs.sh --apply" >&2
+    echo "  git add ops/bindings/terminal.worker.catalog.yaml ops/bindings/routing.dispatch.yaml ops/bindings/terminal.launcher.view.yaml docs/reference/generated/worker-usage/" >&2
+    exit 1
+  fi
+fi
