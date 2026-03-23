@@ -8,6 +8,7 @@ source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
 RECONCILE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-reconcile"
 REVIEW_SWEEP_BIN="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-review-sweep"
+GAPS_PROJECT_BIN="$ROOT/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
 
 MODE="check"
 JSON_MODE=0
@@ -139,8 +140,17 @@ if [[ "$converged" -eq 1 ]]; then
   set -e
 fi
 
+gaps_project_rc=0
+gaps_project_payload="{}"
+if [[ "$MODE" == "fix" && "$converged" -eq 1 ]]; then
+  set +e
+  gaps_project_payload="$($GAPS_PROJECT_BIN project 2>/dev/null)"
+  gaps_project_rc=$?
+  set -e
+fi
+
 status="done"
-if [[ "$converged" -ne 1 || "$review_rc" -ne 0 ]]; then
+if [[ "$converged" -ne 1 || "$review_rc" -ne 0 || "$gaps_project_rc" -ne 0 ]]; then
   status="failed"
 fi
 
@@ -160,6 +170,7 @@ normalize_json_payload() {
 fix_payload="$(normalize_json_payload "${fix_payload:-}")"
 check_payload="$(normalize_json_payload "${check_payload:-}")"
 review_payload="$(normalize_json_payload "${review_payload:-}")"
+gaps_project_payload="$(normalize_json_payload "${gaps_project_payload:-}")"
 
 if [[ "$JSON_MODE" -eq 1 ]]; then
   jq -n \
@@ -174,9 +185,11 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --argjson fix_rc "$fix_rc" \
     --argjson check_rc "$check_rc" \
     --argjson review_rc "$review_rc" \
+    --argjson gaps_project_rc "$gaps_project_rc" \
     --argjson fix_payload "$fix_payload" \
     --argjson check_payload "$check_payload" \
     --argjson review_payload "$review_payload" \
+    --argjson gaps_project_payload "$gaps_project_payload" \
     '{
       capability:$capability,
       mode:$mode,
@@ -190,9 +203,11 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       fix_rc:$fix_rc,
       check_rc:$check_rc,
       review_rc:$review_rc,
+      gaps_project_rc:$gaps_project_rc,
       fix: $fix_payload,
       check: $check_payload,
-      review_sweep: $review_payload
+      review_sweep: $review_payload,
+      gaps_projection: $gaps_project_payload
     }'
 else
   echo "state.shared.reconcile"
@@ -207,6 +222,7 @@ else
   echo "fix_rc: $fix_rc"
   echo "check_rc: $check_rc"
   echo "review_rc: $review_rc"
+  echo "gaps_project_rc: $gaps_project_rc"
 fi
 
 if [[ "$status" != "done" ]]; then
