@@ -13,9 +13,12 @@
 #
 # Usage: source this file, then call functions.
 
-SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../" && pwd)}"
+GAP_CLAIMS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../" && pwd)"
+# Derive the repo root from the library location so clean clones and worktrees
+# do not inherit a different checkout's gap registry through ambient SPINE_REPO.
+SPINE_REPO="$GAP_CLAIMS_ROOT"
 CLAIMS_DIR="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/gaps"
-GAPS_FILE="${SPINE_REPO}/ops/bindings/operational.gaps.yaml"
+GAPS_FILE="${GAP_CLAIMS_ROOT}/ops/bindings/operational.gaps.yaml"
 
 command -v yq >/dev/null 2>&1 || { echo "ERROR: yq required" >&2; exit 1; }
 

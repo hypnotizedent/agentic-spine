@@ -362,10 +362,35 @@ test_gaps_close_validation() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────
-# Test 7: Concurrent git-lock serialization
+# Test 7: gap-claims ignores ambient SPINE_REPO
+# ─────────────────────────────────────────────────────────────────────────
+test_gap_claims_ignore_ambient_repo() {
+  echo "Test 7: gap-claims ignores ambient SPINE_REPO"
+
+  export SPINE_REPO="$TEST_GAPS_DIR/fake-repo"
+  mkdir -p "$SPINE_REPO"
+  source "$ROOT/ops/plugins/core/loops/lib/gap-claims.sh"
+
+  if [[ "$GAPS_FILE" == "$ROOT/ops/bindings/operational.gaps.yaml" ]]; then
+    pass "gap-claims resolves GAPS_FILE from library root"
+  else
+    fail "gap-claims leaked ambient SPINE_REPO into GAPS_FILE ($GAPS_FILE)"
+  fi
+
+  local sample_gap
+  sample_gap="$(yq e -r '.gaps[0].id // ""' "$ORIG_GAPS_FILE" 2>/dev/null)"
+  if [[ -n "$sample_gap" && "$sample_gap" != "null" ]] && gap_exists "$sample_gap"; then
+    pass "gap_exists reads the canonical gap registry"
+  else
+    fail "gap_exists should still resolve canonical operational.gaps.yaml"
+  fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Test 8: Concurrent git-lock serialization
 # ─────────────────────────────────────────────────────────────────────────
 test_concurrent_lock_serialization() {
-  echo "Test 7: Concurrent git-lock serialization"
+  echo "Test 8: Concurrent git-lock serialization"
 
   local SPINE_REPO="$ROOT"
   source "$ROOT/ops/lib/git-lock.sh"
@@ -412,6 +437,8 @@ echo
 run_isolated_test test_gaps_file_validation
 echo
 run_isolated_test test_gaps_close_validation
+echo
+run_isolated_test test_gap_claims_ignore_ambient_repo
 echo
 run_isolated_test test_concurrent_lock_serialization
 echo
