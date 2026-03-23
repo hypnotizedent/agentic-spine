@@ -347,6 +347,234 @@ finally:
 PYPATHRELEASE
 }
 
+reconcile_wave_path_claims() {
+  local wave_id_filter="${1:-}"
+  local output_mode="${2:-text}"
+  load_runtime_role_control
+  python3 - "$PATH_CLAIMS_FILE" "$WAVES_DIR" "$wave_id_filter" "$output_mode" <<'PYPATHRECONCILE'
+import json
+import os
+import sys
+import fcntl
+from datetime import datetime, timezone
+
+claims_file = sys.argv[1]
+waves_dir = sys.argv[2]
+wave_id_filter = sys.argv[3] if len(sys.argv) > 3 else ""
+output_mode = sys.argv[4] if len(sys.argv) > 4 else "text"
+now_dt = datetime.now(timezone.utc)
+now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _load_doc(path: str) -> dict:
+    payload = {"schema_version": "1.0", "updated_at": now, "claims": []}
+    if not path or not os.path.exists(path):
+        return payload
+    raw = open(path, "r", encoding="utf-8").read().strip()
+    if not raw:
+        return payload
+    try:
+        loaded = json.loads(raw)
+        if isinstance(loaded, dict):
+            payload.update(loaded)
+            return payload
+    except Exception:
+        pass
+    try:
+        import yaml
+
+        loaded = yaml.safe_load(raw) or {}
+        if isinstance(loaded, dict):
+            payload.update(loaded)
+    except Exception:
+        pass
+    return payload
+
+
+def _save_doc(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+        fh.write("\n")
+
+
+def _parse_iso(raw: str):
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _normalize_path(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if text == ".":
+        return "."
+    while text.startswith("./"):
+        text = text[2:]
+    text = text.rstrip("/")
+    return text or "."
+
+
+def _normalize_paths(items):
+    out = []
+    seen = set()
+    for item in items if isinstance(items, list) else []:
+        normalized = _normalize_path(str(item))
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+
+def _load_wave_state(wave_id: str):
+    if not wave_id:
+        return None
+    state_path = os.path.join(waves_dir, wave_id, "state.json")
+    if not os.path.exists(state_path):
+        return None
+    try:
+        return json.load(open(state_path, "r", encoding="utf-8"))
+    except Exception:
+        return None
+
+
+summary = {
+    "claims_file": claims_file,
+    "target_wave_id": wave_id_filter or None,
+    "scanned": 0,
+    "updated": 0,
+    "expired": 0,
+    "released": 0,
+    "resynced": 0,
+    "unchanged": 0,
+}
+changes = []
+
+lock_file = f"{claims_file}.lock"
+os.makedirs(os.path.dirname(lock_file), exist_ok=True)
+fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o644)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+    doc = _load_doc(claims_file)
+    claims = doc.get("claims")
+    if not isinstance(claims, list):
+        claims = []
+
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        summary["scanned"] += 1
+        wave_id = str(claim.get("wave_id", "")).strip()
+        if wave_id_filter and wave_id != wave_id_filter:
+            continue
+
+        status = str(claim.get("status", "active")).strip() or "active"
+        if status != "active":
+            summary["unchanged"] += 1
+            continue
+
+        original_paths = _normalize_paths(claim.get("claimed_paths"))
+        wave_state = _load_wave_state(wave_id)
+        wave_packet = wave_state.get("packet") if isinstance(wave_state, dict) and isinstance(wave_state.get("packet"), dict) else {}
+        wave_paths = _normalize_paths(wave_packet.get("claimed_paths"))
+        wave_status = str(wave_state.get("status", "")).strip() if isinstance(wave_state, dict) else ""
+        lifecycle_state = str(wave_state.get("lifecycle_state", "")).strip() if isinstance(wave_state, dict) else ""
+        expires_at = _parse_iso(str(claim.get("expires_at", "")).strip())
+
+        reason = ""
+        action = ""
+        if expires_at is not None and expires_at <= now_dt:
+          reason = "ttl_expired"
+          action = "expired"
+        elif not original_paths:
+          reason = "claim_scope_missing"
+          action = "expired"
+        elif wave_state is None:
+          reason = "wave_state_missing"
+          action = "expired"
+        elif wave_status and wave_status != "active":
+          reason = f"wave_status_{wave_status}"
+          action = "released"
+        elif lifecycle_state == "closed":
+          reason = "wave_lifecycle_closed"
+          action = "released"
+        elif not wave_paths:
+          reason = "wave_scope_missing"
+          action = "expired"
+        elif original_paths != wave_paths:
+          reason = "wave_scope_sync"
+          action = "resynced"
+
+        if not action:
+            summary["unchanged"] += 1
+            continue
+
+        claim["reconciled_at"] = now
+        claim["reconciled_reason"] = reason
+        if action == "expired":
+            claim["status"] = "expired"
+            claim["expired_at"] = now
+            summary["expired"] += 1
+        elif action == "released":
+            claim["status"] = "released"
+            claim["released_at"] = now
+            summary["released"] += 1
+        elif action == "resynced":
+            claim["claimed_paths"] = wave_paths
+            summary["resynced"] += 1
+
+        summary["updated"] += 1
+        changes.append(
+            {
+                "claim_id": str(claim.get("claim_id", "")).strip(),
+                "wave_id": wave_id,
+                "action": action,
+                "reason": reason,
+                "claimed_paths": claim.get("claimed_paths") if isinstance(claim.get("claimed_paths"), list) else [],
+            }
+        )
+
+    doc["schema_version"] = "1.0"
+    doc["updated_at"] = now
+    doc["claims"] = claims
+    _save_doc(claims_file, doc)
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+payload = {
+    "capability": "orchestration.wave.claims.reconcile",
+    "status": "done",
+    "generated_at": now,
+    "summary": summary,
+    "changes": changes,
+}
+
+if output_mode == "json":
+    print(json.dumps(payload, indent=2))
+elif output_mode == "quiet":
+    pass
+else:
+    print("wave.claims.reconcile")
+    print(f"claims_file: {claims_file}")
+    if wave_id_filter:
+        print(f"wave_id: {wave_id_filter}")
+    print(f"scanned: {summary['scanned']}")
+    print(f"updated: {summary['updated']}")
+    print(f"expired: {summary['expired']}")
+    print(f"released: {summary['released']}")
+    print(f"resynced: {summary['resynced']}")
+    print(f"unchanged: {summary['unchanged']}")
+PYPATHRECONCILE
+}
+
 wave_state_dir() {
   echo "$WAVES_DIR/${1:?wave_id required}"
 }
@@ -461,6 +689,8 @@ Usage:
   ops wave ack <WAVE_ID> --lane <L> --result "text" [--lock-override "<reason>"]  Acknowledge task completion
   ops wave collect <WAVE_ID>                         Collect results from lanes
   ops wave status [WAVE_ID]                          Show wave status (or all)
+  ops wave claims-reconcile [--wave-id <WAVE_ID>] [--json]
+                                                    Reconcile stale path claims against TTL and live wave state
   ops wave close <WAVE_ID> --disposition <state> [--force] [--dod-override "<reason>"] [--lock-override "<reason>"]  Close a wave
   ops wave preflight <domain>                        Fast non-blocking preflight
   ops wave receipt-validate <path>                   Validate EXEC_RECEIPT JSON
@@ -587,6 +817,8 @@ PYDEADLINE
     echo "Wave '$wave_id' start blocked: claimed paths unresolved for terminal '$owner_terminal'. Set a contract-managed terminal role or pass --claimed-paths explicitly." >&2
     exit 1
   fi
+
+  reconcile_wave_path_claims "" "quiet"
 
   mkdir -p "$sd"
   WAVE_START_CREATED_STATEDIR="$sd"
@@ -1005,6 +1237,23 @@ PYSTART
   # Success -- disarm the cleanup trap so artifacts are preserved.
   wave_start_reset_cleanup_state
   trap - EXIT
+}
+
+cmd_claims_reconcile() {
+  local wave_id=""
+  local output_mode="text"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --) shift ;;
+      --wave-id) wave_id="${2:-}"; shift 2 ;;
+      --json) output_mode="json"; shift ;;
+      -*) echo "Unknown flag: $1" >&2; exit 1 ;;
+      *) echo "Unknown argument: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  reconcile_wave_path_claims "$wave_id" "$output_mode"
 }
 
 dispatch_pushability_preflight() {
@@ -4398,6 +4647,7 @@ case "${1:-}" in
   ack)                shift; cmd_ack "$@" ;;
   collect)            shift; cmd_collect_v2 "$@" ;;
   status)             shift; cmd_status "$@" ;;
+  claims-reconcile)   shift; cmd_claims_reconcile "$@" ;;
   close)              shift; cmd_close_v2 "$@" ;;
   preflight)          shift; cmd_preflight "$@" ;;
   receipt-validate)   shift; cmd_receipt_validate "$@" ;;

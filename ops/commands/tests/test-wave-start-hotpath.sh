@@ -204,6 +204,109 @@ assert_contains "$out_three_b" "path claim collision detected" "collision report
 assert_not_contains "$out_three_b" "unbound variable" "collision failure does not trip cleanup trap"
 assert_not_exists "$runtime_three/waves/WAVE-TEST-03B" "collision failure cleans transient state dir"
 
+runtime_four="$tmpdir/runtime-four"
+mkdir -p "$runtime_four/mailroom/state" "$runtime_four/waves/WAVE-STALE-04"
+cat > "$runtime_four/mailroom/state/path.claims.yaml" <<'JSON'
+{
+  "schema_version": "1.0",
+  "updated_at": "2026-03-23T03:00:00Z",
+  "claims": [
+    {
+      "claim_id": "CLM-WAVE-STALE-04-20260323T030000Z",
+      "wave_id": "WAVE-STALE-04",
+      "loop_id": "LOOP-STALE-04",
+      "owner_terminal": "tester",
+      "status": "active",
+      "claimed_paths": ["ops/commands/wave.sh"],
+      "created_at": "2026-03-23T03:00:00Z",
+      "expires_at": "2099-03-23T06:00:00Z"
+    }
+  ]
+}
+JSON
+cat > "$runtime_four/waves/WAVE-STALE-04/state.json" <<'JSON'
+{
+  "wave_id": "WAVE-STALE-04",
+  "status": "active",
+  "lifecycle_state": "active",
+  "packet": {
+    "claimed_paths": []
+  }
+}
+JSON
+
+reconcile_out="$(
+  cd "$repo" && \
+  env -u OPS_TERMINAL_ROLE -u SPINE_TERMINAL_ROLE -u SPINE_TERMINAL_NAME -u SPINE_TERMINAL_ID -u SPINE_REPO -u SPINE_STATE -u SPINE_CODE -u SPINE_TARGET_REPO \
+    USER=tester \
+    SPINE_REPO="$repo" \
+    SPINE_STATE="$runtime_four/state" \
+    SPINE_RUNTIME_ROOT="$runtime_four" \
+    bash ops/commands/wave.sh claims-reconcile --json 2>&1
+)"
+python3 - <<'PY' "$reconcile_out"
+import json, sys
+payload = json.loads(sys.argv[1])
+assert payload["summary"]["expired"] == 1, payload
+assert payload["summary"]["updated"] == 1, payload
+PY
+pass "claims-reconcile expires stale active claim when wave scope is missing"
+python3 - <<'PY' "$runtime_four/mailroom/state/path.claims.yaml"
+import json, sys
+claims = json.loads(open(sys.argv[1]).read())["claims"]
+claim = claims[0]
+assert claim["status"] == "expired", claim
+assert claim["reconciled_reason"] == "wave_scope_missing", claim
+PY
+pass "claims ledger records canonical stale-claim expiry"
+
+runtime_five="$tmpdir/runtime-five"
+mkdir -p "$runtime_five/mailroom/state"
+cat > "$runtime_five/mailroom/state/path.claims.yaml" <<'JSON'
+{
+  "schema_version": "1.0",
+  "updated_at": "2026-03-23T03:00:00Z",
+  "claims": [
+    {
+      "claim_id": "CLM-WAVE-STALE-05-20260323T030000Z",
+      "wave_id": "WAVE-STALE-05",
+      "loop_id": "LOOP-STALE-05",
+      "owner_terminal": "tester",
+      "status": "active",
+      "claimed_paths": ["ops/commands/wave.sh"],
+      "created_at": "2026-03-23T03:00:00Z",
+      "expires_at": "2099-03-23T06:00:00Z"
+    }
+  ]
+}
+JSON
+
+out_five="$(
+  cd "$repo" && \
+  env -u OPS_TERMINAL_ROLE -u SPINE_TERMINAL_ROLE -u SPINE_TERMINAL_NAME -u SPINE_TERMINAL_ID -u SPINE_REPO -u SPINE_STATE -u SPINE_CODE -u SPINE_TARGET_REPO \
+    USER=tester \
+    SPINE_REPO="$repo" \
+    SPINE_STATE="$runtime_five/state" \
+    SPINE_RUNTIME_ROOT="$runtime_five" \
+    bash ops/commands/wave.sh start WAVE-TEST-05 \
+      --objective "auto-reconcile stale claim before overlap check" \
+      --loop-id LOOP-TEST-05 \
+      --claimed-paths "ops/commands/wave.sh" \
+      --worktree off 2>&1
+)"
+assert_contains "$out_five" "Wave 'WAVE-TEST-05' created." "wave start auto-reconciles stale claim residue"
+python3 - <<'PY' "$runtime_five/mailroom/state/path.claims.yaml"
+import json, sys
+claims = json.loads(open(sys.argv[1]).read())["claims"]
+stale = next(c for c in claims if c["claim_id"] == "CLM-WAVE-STALE-05-20260323T030000Z")
+fresh = next(c for c in claims if c["wave_id"] == "WAVE-TEST-05")
+assert stale["status"] == "expired", stale
+assert stale["reconciled_reason"] == "wave_state_missing", stale
+assert fresh["status"] == "active", fresh
+assert fresh["claimed_paths"] == ["ops/commands/wave.sh"], fresh
+PY
+pass "wave start leaves new claim active after expiring stale residue"
+
 echo
 echo "Passed: $PASS"
 echo "Failed: $FAIL"
