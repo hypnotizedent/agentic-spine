@@ -31,6 +31,7 @@ FAKE_ROOT="$TMPDIR_BASE/agentic-spine"
 CONTROL_WT="$TMPDIR_BASE/.wt/agentic-spine/control-plane"
 WORKBENCH="$TMPDIR_BASE/workbench"
 SESSION_ENV="$TMPDIR_BASE/session-env.sh"
+ATTACH_LOG="$TMPDIR_BASE/attach.log"
 mkdir -p \
   "$FAKE_ROOT/bin" \
   "$FAKE_ROOT/ops/lib" \
@@ -132,6 +133,20 @@ SH
 echo "  source $SESSION_ENV"
 EOF
 
+cat > "$FAKE_ROOT/ops/plugins/core/session/bin/session-v3-attach" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" > "$ATTACH_LOG"
+cat <<'SH'
+export SPINE_LOOP_ID=''
+export SPINE_ENTRY_PACKET_PATH='/tmp/test.entry.packet.yaml'
+export SPINE_ENTRY_PACKET_HASH='test-packet-hash'
+export SPINE_EXECUTION_MODE='code'
+export SPINE_V3_ATTACH_RESOLUTION='adhoc'
+export SPINE_V3_SANITIZED_OUTPUT_PATH=''
+SH
+EOF
+
 cat > "$FAKE_ROOT/ops/plugins/core/orchestration/bin/orchestration-launcher-plan" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -156,6 +171,7 @@ chmod +x \
   "$FAKE_ROOT/ops/lib/spine-paths.sh" \
   "$FAKE_ROOT/ops/lib/launcher-control-worktree.sh" \
   "$FAKE_ROOT/ops/plugins/core/session/bin/session-start" \
+  "$FAKE_ROOT/ops/plugins/core/session/bin/session-v3-attach" \
   "$FAKE_ROOT/ops/plugins/core/session/bin/terminal-launch-exec" \
   "$FAKE_ROOT/ops/plugins/core/orchestration/bin/orchestration-launcher-plan"
 
@@ -241,6 +257,8 @@ assert_contains "$exec_out" "launch_cwd=$CONTROL_WT" "terminal-launch-exec launc
 assert_contains "$exec_out" "session_start_target_repo=$CONTROL_WT" "terminal-launch-exec pins session-start target repo to control worktree"
 assert_contains "$exec_out" "session_start_repo=$CONTROL_WT" "terminal-launch-exec pins session-start repo to control worktree"
 assert_contains "$exec_out" "session_start_code=$CONTROL_WT" "terminal-launch-exec pins session-start control root to control worktree"
+assert_contains "$exec_out" "V3 ATTACH READY: loop=none resolution=adhoc path=/tmp/test.entry.packet.yaml hash=test-packet-hash mode=code sanitize=none" "terminal-launch-exec announces V3 attach state"
+assert_contains "$(cat "$ATTACH_LOG")" "--allow-no-loop --role solo" "terminal-launch-exec routes through session-v3-attach"
 
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"

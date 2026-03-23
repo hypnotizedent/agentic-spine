@@ -494,6 +494,7 @@ The first concrete V3 border and read surfaces now live in the repo as:
 
 - `ops/deprecations.yaml`
 - `session.ingress.sanitize`
+- `session.v3.attach`
 - `session.entry.packet.compile`
 - `spine.broker.get_latest_loop`
 - `spine.broker.get_loop_status`

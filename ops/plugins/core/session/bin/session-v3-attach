@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""session-v3-attach
+
+Resolve loop truth, optionally sanitize imported text, and compile a governed
+entry packet for V3 terminal attach.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_yaml(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    with path.open("r", encoding="utf-8") as fh:
+        loaded = yaml.safe_load(fh)
+    return default if loaded is None else loaded
+
+
+def resolve_state_root() -> Path:
+    contract = load_yaml(ROOT / "ops/bindings/mailroom.runtime.contract.yaml", {})
+    runtime_active = bool(contract.get("active"))
+    runtime_root = str(contract.get("runtime_root", "")).strip()
+    if os.environ.get("SPINE_STATE"):
+        return Path(os.environ["SPINE_STATE"])
+    if runtime_active and runtime_root:
+        state_root = str(contract.get("state_root", "")).strip()
+        if state_root:
+            return Path(state_root)
+        return Path(runtime_root) / "state"
+    return ROOT / "mailroom" / "state"
+
+
+def run_json_command(cmd: list[str], *, input_text: str | None = None) -> tuple[int, dict[str, Any], str]:
+    proc = subprocess.run(
+        cmd,
+        text=True,
+        input=input_text,
+        capture_output=True,
+        check=False,
+        env=os.environ.copy(),
+    )
+    stdout = proc.stdout.strip()
+    payload: dict[str, Any] = {}
+    if stdout:
+        payload = json.loads(stdout)
+    return proc.returncode, payload, proc.stderr.strip()
+
+
+def default_sanitized_output(state_root: Path, source_type: str, loop_id: str, input_path: str | None) -> Path:
+    ingress_root = state_root / "ingress-sanitized"
+    ingress_root.mkdir(parents=True, exist_ok=True)
+    source_stem = Path(input_path).stem if input_path else "stdin"
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    loop_part = loop_id or "ADHOC"
+    return ingress_root / f"{loop_part}__{source_type}__{source_stem}__{stamp}.yaml"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Resolve latest loop, sanitize imported text when present, and compile a governed V3 entry packet"
+    )
+    parser.add_argument("--loop-id")
+    parser.add_argument("--latest-loop", action="store_true", help="Resolve the current loop via broker read API")
+    parser.add_argument("--allow-no-loop", action="store_true", help="Compile an adhoc packet if no loop can be resolved")
+    parser.add_argument("--role", required=True)
+    parser.add_argument("--lane")
+    parser.add_argument("--execution-mode", choices=["code", "operational"])
+    parser.add_argument("--transport", choices=["git", "mailroom"])
+    parser.add_argument("--objective")
+    parser.add_argument("--done-check")
+    parser.add_argument("--first-command")
+    parser.add_argument("--terminal-name", default=os.environ.get("OPS_TERMINAL_ROLE") or os.environ.get("SPINE_TERMINAL_NAME", ""))
+    parser.add_argument("--runtime-role", default=os.environ.get("SPINE_RUNTIME_ROLE", "unknown"))
+    parser.add_argument("--worktree", default=os.environ.get("SPINE_WORKTREE") or os.getcwd())
+    parser.add_argument("--repo-root", default=os.environ.get("SPINE_TARGET_REPO") or str(ROOT))
+    parser.add_argument("--input", help="Optional imported chat/note/archive file to sanitize during attach")
+    parser.add_argument("--source-type", choices=["chat", "notes", "archive", "unknown"], default="unknown")
+    parser.add_argument("--sanitized-output", help="Optional path for sanitized ingress artifact")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--emit-exports", action="store_true")
+    return parser
+
+
+def resolve_loop_id(args: argparse.Namespace, broker_script: Path) -> tuple[str, str, dict[str, Any] | None]:
+    if args.loop_id:
+        return args.loop_id, "explicit", None
+
+    want_latest = args.latest_loop or not args.allow_no_loop
+    if not want_latest:
+        return "", "adhoc", None
+
+    rc, payload, stderr = run_json_command([str(broker_script), "latest-loop", "--json"])
+    if rc != 0:
+        raise RuntimeError(f"latest-loop broker read failed: {stderr or 'unknown error'}")
+
+    loop_id = str(payload.get("data", {}).get("loop", {}).get("loop_id", "")).strip()
+    if loop_id:
+        return loop_id, "latest-loop", payload
+    if args.allow_no_loop:
+        return "", "adhoc", payload
+    raise RuntimeError("no active loop resolved via broker read path")
+
+
+def maybe_sanitize(
+    args: argparse.Namespace,
+    state_root: Path,
+    sanitize_script: Path,
+    loop_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    stdin_text = ""
+    if not args.input and not sys.stdin.isatty():
+        stdin_text = sys.stdin.read()
+
+    if not args.input and not stdin_text:
+        return None, ""
+
+    input_path = str(Path(args.input).expanduser().resolve()) if args.input else ""
+    out_path = (
+        Path(args.sanitized_output).expanduser().resolve()
+        if args.sanitized_output
+        else default_sanitized_output(state_root, args.source_type, loop_id, input_path or None)
+    )
+    cmd = [
+        str(sanitize_script),
+        "--source-type",
+        args.source_type,
+        "--output",
+        str(out_path),
+        "--json",
+    ]
+    if input_path:
+        cmd.extend(["--input", input_path])
+    rc, payload, stderr = run_json_command(cmd, input_text=stdin_text or None)
+    if rc not in (0, 1):
+        raise RuntimeError(f"sanitize failed: {stderr or 'unknown error'}")
+    return payload, str(out_path)
+
+
+def compile_entry_packet(args: argparse.Namespace, entry_script: Path, loop_id: str) -> dict[str, Any]:
+    cmd = [
+        str(entry_script),
+        "--role",
+        args.role,
+        "--worktree",
+        args.worktree,
+        "--repo-root",
+        args.repo_root,
+        "--terminal-name",
+        args.terminal_name,
+        "--runtime-role",
+        args.runtime_role,
+        "--json",
+    ]
+    if loop_id:
+        cmd.extend(["--loop-id", loop_id])
+    if args.lane:
+        cmd.extend(["--lane", args.lane])
+    if args.execution_mode:
+        cmd.extend(["--execution-mode", args.execution_mode])
+    if args.transport:
+        cmd.extend(["--transport", args.transport])
+    if args.objective:
+        cmd.extend(["--objective", args.objective])
+    if args.done_check:
+        cmd.extend(["--done-check", args.done_check])
+    if args.first_command:
+        cmd.extend(["--first-command", args.first_command])
+
+    rc, payload, stderr = run_json_command(cmd)
+    if rc != 0:
+        raise RuntimeError(f"entry packet compile failed: {stderr or 'unknown error'}")
+    return payload
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    state_root = resolve_state_root()
+    broker_script = ROOT / "ops/plugins/core/evidence/bin/spine-control"
+    sanitize_script = ROOT / "ops/plugins/core/session/bin/session-ingress-sanitize"
+    entry_script = ROOT / "ops/plugins/core/session/bin/session-entry-packet"
+
+    try:
+        loop_id, loop_resolution, latest_payload = resolve_loop_id(args, broker_script)
+        sanitize_payload, sanitized_output_path = maybe_sanitize(args, state_root, sanitize_script, loop_id)
+        if sanitize_payload and sanitize_payload.get("status") == "blocked":
+            payload = {
+                "capability": "session.v3.attach",
+                "schema_version": "1.0",
+                "status": "blocked",
+                "generated_at": utc_now(),
+                "data": {
+                    "loop": {
+                        "loop_id": loop_id,
+                        "resolution": loop_resolution,
+                        "latest_loop": latest_payload,
+                    },
+                    "sanitize": sanitize_payload,
+                    "sanitized_output_path": sanitized_output_path,
+                    "next_step": "Resolve sanitizer findings before attach can produce an executable packet.",
+                },
+            }
+            if args.json:
+                print(json.dumps(payload, indent=2))
+            else:
+                print("session.v3.attach")
+                print("status: blocked")
+                print(f"loop_id: {loop_id or 'none'}")
+                print(f"resolution: {loop_resolution}")
+                print(f"sanitized_output_path: {sanitized_output_path or 'none'}")
+            return 1
+
+        entry_payload = compile_entry_packet(args, entry_script, loop_id)
+        entry_data = entry_payload.get("data", {})
+        packet = entry_data.get("packet", {})
+        exports = {
+            "SPINE_LOOP_ID": loop_id,
+            "SPINE_ENTRY_PACKET_PATH": entry_data.get("packet_path", ""),
+            "SPINE_ENTRY_PACKET_HASH": entry_data.get("packet_hash", ""),
+            "SPINE_EXECUTION_MODE": packet.get("execution_mode", ""),
+            "SPINE_V3_ATTACH_RESOLUTION": loop_resolution,
+            "SPINE_V3_SANITIZED_OUTPUT_PATH": sanitized_output_path,
+        }
+        payload = {
+            "capability": "session.v3.attach",
+            "schema_version": "1.0",
+            "status": "done",
+            "generated_at": utc_now(),
+            "data": {
+                "loop": {
+                    "loop_id": loop_id,
+                    "resolution": loop_resolution,
+                    "latest_loop": latest_payload,
+                },
+                "sanitize": sanitize_payload,
+                "sanitized_output_path": sanitized_output_path,
+                "entry_packet": entry_data,
+                "exports": exports,
+                "next_step": packet.get("first_command", ""),
+            },
+        }
+    except Exception as exc:
+        payload = {
+            "capability": "session.v3.attach",
+            "schema_version": "1.0",
+            "status": "failed",
+            "generated_at": utc_now(),
+            "data": {
+                "message": str(exc),
+            },
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print("session.v3.attach")
+            print("status: failed")
+            print(f"message: {exc}")
+        return 1
+
+    if args.emit_exports:
+        for key, value in exports.items():
+            print(f"export {key}={value!r}")
+        return 0
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print("session.v3.attach")
+    print(f"loop_id: {loop_id or 'none'}")
+    print(f"resolution: {loop_resolution}")
+    print(f"packet_path: {entry_data.get('packet_path', '')}")
+    print(f"packet_hash: {entry_data.get('packet_hash', '')}")
+    print(f"execution_mode: {packet.get('execution_mode', '')}")
+    print(f"transport: {packet.get('transport', '')}")
+    print(f"sanitized_output_path: {sanitized_output_path or 'none'}")
+    print(f"next_step: {packet.get('first_command', '')}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
