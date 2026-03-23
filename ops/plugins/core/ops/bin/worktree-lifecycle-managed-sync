@@ -64,9 +64,11 @@ done
 
 MAIN_BRANCH="main"
 MANAGED_WORKTREE_PATHS_CSV="${SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS:-}"
+STALE_HOURS="${SPINE_WORKTREE_LIFECYCLE_STALE_HOURS:-24}"
 
 if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo main)"
+  STALE_HOURS="$(yq e -r '.policy.managed_worktree_sync_policy.stale_hours // 24' "$CONTRACT" 2>/dev/null || echo "$STALE_HOURS")"
   if [[ -z "${SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS:-}" ]]; then
     managed_paths_accum=""
     while IFS= read -r managed_path; do
@@ -91,7 +93,7 @@ REPORT_JSON="$ARTIFACT_DIR/report.json"
 REPORT_MD="$ARTIFACT_DIR/report.md"
 ACTIONS_LOG="$ARTIFACT_DIR/actions.log"
 
-python3 - "$TARGET_ROOT" "$MAIN_BRANCH" "$MANAGED_WORKTREE_PATHS_CSV" "$TRIGGER" "$REPORT_JSON" "$REPORT_MD" "$ACTIONS_LOG" "$JSON_MODE" "$BRIEF_MODE" <<'PY'
+python3 - "$TARGET_ROOT" "$MAIN_BRANCH" "$MANAGED_WORKTREE_PATHS_CSV" "$TRIGGER" "$REPORT_JSON" "$REPORT_MD" "$ACTIONS_LOG" "$JSON_MODE" "$BRIEF_MODE" "$STALE_HOURS" <<'PY'
 import json
 import os
 import subprocess
@@ -108,6 +110,7 @@ report_md = Path(sys.argv[6])
 actions_log = Path(sys.argv[7])
 json_mode = sys.argv[8] == "1"
 brief_mode = sys.argv[9] == "1"
+stale_hours = int(sys.argv[10]) if len(sys.argv) > 10 else 24
 
 
 def sh(args, check=True):
@@ -154,6 +157,18 @@ def is_ancestor(path: Path, older: str, newer: str) -> bool:
         capture_output=True,
     )
     return proc.returncode == 0
+
+
+def head_commit_age_hours(path: Path) -> float:
+    """Return age of HEAD commit in hours. Returns 0 on error."""
+    rc, out, _ = sh(["git", "-C", str(path), "log", "-1", "--format=%ct", "HEAD"], check=False)
+    if rc != 0 or not out.strip():
+        return 0.0
+    try:
+        commit_epoch = int(out.strip())
+        return (time.time() - commit_epoch) / 3600.0
+    except (ValueError, OSError):
+        return 0.0
 
 
 def merge_ff_only_with_retry(path: Path, target_head: str):
@@ -293,14 +308,43 @@ for raw_path in managed_paths:
                         row["head"] = git_head(path)
                         actions.append(f"synced={resolved}|<detached>|{row['head']}|detached_ff")
                 else:
-                    row["status"] = "blocked_non_fast_forward"
-                    row["issues"].append("managed_worktree_non_fast_forward")
-                    row["issues"].append("managed_worktree_detached_head")
+                    # Non-ff detached: try force-realign if stale and clean
+                    age_h = head_commit_age_hours(path)
+                    if not row["dirty"] and age_h >= stale_hours:
+                        rc, checkout_output = detach_to_head(path, main_head)
+                        if rc == 0:
+                            row["status"] = "synced"
+                            row["head"] = git_head(path)
+                            actions.append(f"synced={resolved}|<detached>|{row['head']}|stale_force_realign|age={age_h:.1f}h")
+                        else:
+                            row["status"] = "blocked_non_fast_forward"
+                            row["issues"].append("managed_worktree_non_fast_forward")
+                            row["issues"].append("managed_worktree_detached_head")
+                    else:
+                        row["status"] = "blocked_non_fast_forward"
+                        row["issues"].append("managed_worktree_non_fast_forward")
+                        row["issues"].append("managed_worktree_detached_head")
             elif row["head"] == main_head:
                 row["status"] = "already_current"
             elif not row["head"] or not is_ancestor(path, row["head"], main_head):
-                row["status"] = "blocked_non_fast_forward"
-                row["issues"].append("managed_worktree_non_fast_forward")
+                # Non-ff branch: try force-realign if stale and clean
+                age_h = head_commit_age_hours(path)
+                if not row["dirty"] and age_h >= stale_hours:
+                    branch_name = row["branch"]
+                    rc_co, co_out = sh(
+                        ["git", "-C", str(path), "checkout", "--force", "-B", branch_name, main_head],
+                        check=False,
+                    )
+                    if rc_co == 0:
+                        row["status"] = "synced"
+                        row["head"] = git_head(path)
+                        actions.append(f"synced={resolved}|{branch_name}|{row['head']}|stale_force_realign|age={age_h:.1f}h")
+                    else:
+                        row["status"] = "blocked_non_fast_forward"
+                        row["issues"].append("managed_worktree_non_fast_forward")
+                else:
+                    row["status"] = "blocked_non_fast_forward"
+                    row["issues"].append("managed_worktree_non_fast_forward")
             else:
                 rc, merge_output = merge_ff_only_with_retry(path, main_head)
                 if rc != 0:

@@ -81,6 +81,31 @@ if [[ "$HORIZON" != "now" ]]; then
   echo "NOTE: horizon=${HORIZON} — loop will be created with status=planned (deferred intent)" >&2
 fi
 
+# V3 Operating Model: Active WIP cap enforcement (SPINE.md Rule 3).
+# Maximum 5 active loops. New active loops are blocked when at or above cap.
+# Use --force to override (requires explicit triage justification).
+ACTIVE_WIP_CAP=5
+if [[ "$HORIZON" == "now" && -d "$SCOPES_DIR" ]]; then
+  ACTIVE_COUNT=0
+  while IFS= read -r scope_file; do
+    [[ -f "$scope_file" ]] || continue
+    file_status="$(awk '/^status:/{print $2; exit}' "$scope_file" | tr -d '"' || true)"
+    [[ "$file_status" == "active" ]] && (( ACTIVE_COUNT++ )) || true
+  done < <(find "$SCOPES_DIR" -name "LOOP-*.scope.md" -type f 2>/dev/null)
+  if [[ "$ACTIVE_COUNT" -ge "$ACTIVE_WIP_CAP" ]]; then
+    if [[ "$FORCE" -eq 1 ]]; then
+      echo "WARN: active WIP cap exceeded ($ACTIVE_COUNT/$ACTIVE_WIP_CAP active loops). --force used." >&2
+    else
+      echo "FAIL: active WIP cap reached ($ACTIVE_COUNT/$ACTIVE_WIP_CAP active loops)." >&2
+      echo "  → V3 Operating Model Rule 3: maximum $ACTIVE_WIP_CAP active loops." >&2
+      echo "  → Triage existing loops: close, supersede, defer, or consolidate." >&2
+      echo "  → To list active loops: ./bin/ops loops list --open" >&2
+      echo "  → To override: add --force (requires triage justification)" >&2
+      exit 1
+    fi
+  fi
+fi
+
 # Normalize name:
 # - uppercase
 # - collapse separators
