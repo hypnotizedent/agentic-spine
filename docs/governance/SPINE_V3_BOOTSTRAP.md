@@ -1,9 +1,10 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-22
+last_verified: 2026-03-23
 scope: spine-v3-bootstrap
 source_loop: LOOP-SPINE-V3-BOOTSTRAP-NODE-SEPARATION-20260322
+amended_by_loop: LOOP-SPINE-V3-RETIREMENT-ASYMMETRY-CANONICALIZATION-20260323
 ---
 
 # Spine V3 Bootstrap
@@ -562,6 +563,40 @@ The canonical replacement is:
 - execute through spine or mailroom
 - review receipts and attestation
 - disposition the lane or wave
+
+## Completion Pressure And Retirement Symmetry
+
+The structural failure to avoid is retirement asymmetry:
+
+- the system automates creation
+- the system automates drift detection
+- the system does not yet automate retirement strongly enough
+
+That causes every cycle to add net weight unless replacement and retirement are
+treated as the same unit of work.
+
+Canonical rule:
+
+- nothing new ships without retiring the thing it replaces in the same PR or the same loop
+
+Retirement must mean hot-path removal or archive, not soft tombstoning alone.
+
+Examples:
+
+- retired gates must stop executing in active verify paths
+- closed gaps must leave the hot operational registry on a bounded TTL and move to archive
+- superseded branches, worktrees, and helper lanes must be dispositioned and pruned instead of kept as ambient memory
+- deprecated entry or bridge surfaces must be unwired once the replacement is live
+
+Working rule:
+
+- active governance surfaces stay small
+- history moves to archive
+- replacement without retirement is incomplete work
+
+This is completion pressure, not extra ceremony.
+If a change adds a new active surface but leaves the old one active, the loop is
+not done.
 
 ## Friction To Eliminate
 
