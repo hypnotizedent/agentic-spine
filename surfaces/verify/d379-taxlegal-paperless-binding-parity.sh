@@ -3,6 +3,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+source "$ROOT/ops/lib/runtime-paths.sh"
 
 HITS=0
 CHECKS=0
@@ -70,11 +71,11 @@ fi
 
 # ── Check 8: Source lock entries have required fields ────────────────────
 CASE_CONTRACT="$ROOT/ops/bindings/taxlegal.case.lifecycle.contract.yaml"
-CASE_BASE="$ROOT/runtime/domain-state/taxlegal/cases"
+CASE_BASE="$(spine_resolve_domain_state 'taxlegal/cases')"
 if command -v yq >/dev/null 2>&1 && [[ -f "$CASE_CONTRACT" ]]; then
   case_root="$(yq -r '.case_pathing.root // ""' "$CASE_CONTRACT" 2>/dev/null || true)"
   if [[ -n "$case_root" && "$case_root" != "null" ]]; then
-    CASE_BASE="$ROOT/$case_root"
+    CASE_BASE="$(spine_resolve_mailroom_path "$case_root")"
   fi
 fi
 if [[ -d "$CASE_BASE" ]] && command -v yq &>/dev/null; then
