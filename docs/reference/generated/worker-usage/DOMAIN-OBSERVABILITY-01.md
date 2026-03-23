@@ -1,7 +1,7 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-22
+last_verified: 2026-03-23
 scope: worker-usage-domain-observability-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -17,11 +17,15 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 
 ## Write Scope
 - `ops/plugins/infra/observability/`
+- `ops/plugins/providers/gitea/`
 
-## Capabilities (12)
+## Capabilities (15)
 - `alerting.dispatch`
 - `alerting.probe`
 - `alerting.status`
+- `gitea.pr.close`
+- `gitea.pr.list`
+- `gitea.pr.status`
 - `gitea.status`
 - `idrac.health.status`
 - `nas.health.status`
