@@ -15,7 +15,12 @@
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SP="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# Prefer BASH_SOURCE-relative resolution to avoid ambient SPINE_ROOT pollution.
+_DG_COMPUTED="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+if [[ -n "${SPINE_ROOT:-}" && "${SPINE_ROOT}" != "$_DG_COMPUTED" ]]; then
+  echo "WARN: ambient SPINE_ROOT=$SPINE_ROOT disagrees with computed=$_DG_COMPUTED (using computed)" >&2
+fi
+SP="$_DG_COMPUTED"
 RT="${SPINE_REPO:-$SP}"
 cd "$SP"
 source "$SP/ops/lib/runtime-paths.sh"

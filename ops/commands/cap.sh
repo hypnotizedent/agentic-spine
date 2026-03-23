@@ -661,12 +661,14 @@ run_cap() {
 
     # ── Policy enforcement: proposal_required + multi_agent_writes ──
     # Skip enforcement for precondition runs, read-only caps, and governed
-    # bootstrap/friction surfaces that exist to make policy-visible debt
+    # bootstrap/friction/repair surfaces that exist to make policy-visible debt
     # capturable without requiring another override ceremony.
+    # Governance-repair caps (friction.reconcile, gaps.*, capability.map.projection.build)
+    # are first-class repair operations that should not require ad hoc ceremony.
     if [[ -z "${OPS_CAP_STACK:-}" && "$safety" == "mutating" ]]; then
       local policy_guard_exempt=0
       case "$name" in
-        session.start|session.v3.attach|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate|worktree.lifecycle.managed.sync|session.execution.lane.bootstrap|session.execution.lane.closeout|session.execution.lane.scan|friction.ingest)
+        session.start|session.v3.attach|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate|worktree.lifecycle.managed.sync|session.execution.lane.bootstrap|session.execution.lane.closeout|session.execution.lane.scan|friction.ingest|friction.reconcile|friction.close.resolved|capability.map.projection.build|gaps.file|gaps.close|gaps.claim|gaps.status)
           policy_guard_exempt=1
           ;;
       esac
@@ -705,17 +707,15 @@ run_cap() {
 
     # ── Hard-default mutation context guard (main + isolation) ──
     # Fail closed for mutating/destructive capabilities unless the execution
-    # context is explicitly governed. Bootstrap/control-plane allowlist is
-    # intentionally narrow:
-    #   - session.start
-    #   - session.role.override
-    #   - aof.contract.acknowledge
-    #   - session.v3.attach
-    #   - orchestration.wave.start
-    #   - orchestration.wave.kickoff
-    #   - orchestration.launcher.claim
-    #   - orchestration.terminal.entry
-    #   - worktree.lifecycle.rehydrate
+    # context is explicitly governed.
+    #
+    # Allowlist has two classes:
+    #   1. Bootstrap/control-plane: session.*, orchestration.*, worktree.lifecycle.*
+    #   2. Governance-repair: friction.*, gaps.*, capability.map.projection.build
+    #
+    # Governance-repair caps are idempotent/additive operations that maintain
+    # the system's own health. They must not require the same ceremony as
+    # product-domain mutations.
     if [[ -z "$blocked_reason" && -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
       local caller_branch
       local main_override_ref main_override_reason
@@ -731,7 +731,7 @@ run_cap() {
       wt_bypass_lc="$(printf '%s' "$wt_bypass" | tr '[:upper:]' '[:lower:]')"
 
       case "$name" in
-        session.start|session.v3.attach|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate|worktree.lifecycle.managed.sync|session.execution.lane.bootstrap|session.execution.lane.closeout|session.execution.lane.scan|friction.ingest)
+        session.start|session.v3.attach|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate|worktree.lifecycle.managed.sync|session.execution.lane.bootstrap|session.execution.lane.closeout|session.execution.lane.scan|friction.ingest|friction.reconcile|friction.close.resolved|capability.map.projection.build|gaps.file|gaps.close|gaps.claim|gaps.status)
           context_guard_exempt=1
           ;;
       esac

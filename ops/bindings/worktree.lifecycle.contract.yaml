@@ -3,8 +3,8 @@
 # Last verified: 2026-03-22
 # Scope: D48 lifecycle-aware worktree hygiene for multi-terminal wave/loop runtime
 
-version: "1.4"
-updated: "2026-03-22"
+version: "1.5"
+updated: "2026-03-23"
 owner: "@ronny"
 scope: worktree-lifecycle
 
@@ -51,6 +51,47 @@ policy:
   fail_on_missing_temp_clone_origin: true
   fail_on_root_non_main: true
   fail_on_root_dirty: true
+
+enforcement_tiers:
+  lane:
+    description: "Worker commit-time enforcement. Only current-lane safety issues block."
+    mode_flag: "--lane"
+    blocks_on:
+      - "current worktree: detached_head"
+      - "current worktree: dirty_closed_owner"
+      - "current worktree: closed_*_zombie (past grace)"
+      - "current worktree: closed_owner_missing_disposition"
+      - "current worktree: closed_owner_invalid_disposition"
+      - "current worktree: dirty_managed_worktree"
+      - "current worktree: managed_worktree_not_at_main"
+      - "current worktree: orphan_branch_no_remote"
+      - "current worktree: branch_missing_plan_linkage"
+      - "current worktree: unowned_local_branch_past_grace"
+      - "current worktree: merged_branch_past_grace"
+      - "current checkout (root): root_checkout_dirty"
+      - "current checkout (root): root_checkout_not_main"
+      - "current checkout (root): root_checkout_detached"
+    reports_only:
+      - "all issues from unrelated worktrees"
+      - "all issues from unrelated branches"
+      - "root checkout issues when running from a worktree"
+      - "temp clone issues"
+      - "stash issues"
+    invoked_by:
+      - "pre-commit hook (D48 --lane)"
+  gate:
+    description: "Full host-wide hygiene enforcement. All issues block."
+    mode_flag: "--gate"
+    blocks_on:
+      - "all lifecycle issues across all worktrees, branches, root, temp clones, stashes"
+    invoked_by:
+      - "surfaces/verify/drift-gate.sh (verify.fast)"
+      - "ops/commands/preflight.sh (informational)"
+  report:
+    description: "Informational classification. No exit code enforcement."
+    mode_flag: "(default, no flag)"
+    invoked_by:
+      - "manual invocation"
 
 cleanup:
   phases:

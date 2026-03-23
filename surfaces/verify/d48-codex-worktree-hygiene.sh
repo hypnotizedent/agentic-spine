@@ -11,4 +11,4 @@ if [[ ! -x "$SCRIPT" ]]; then
   exit 1
 fi
 
-exec "$SCRIPT" --gate
+exec "$SCRIPT" "${1:---gate}"

@@ -20,6 +20,7 @@ while [[ $# -gt 0 ]]; do
     --) shift ;;
     --json) JSON_MODE=1; shift ;;
     --gate) MODE="gate"; shift ;;
+    --lane) MODE="lane"; shift ;;
     --brief) BRIEF_MODE=1; shift ;;
     -h|--help)
       cat <<'USAGE'
@@ -28,10 +29,12 @@ worktree-lifecycle-reconcile
 Usage:
   worktree-lifecycle-reconcile [--json] [--brief]
   worktree-lifecycle-reconcile --gate [--brief]
+  worktree-lifecycle-reconcile --lane [--brief]
 
 Notes:
   - Read-only classifier for worktree lifecycle hygiene.
-  - --gate emits D48-style PASS/FAIL and exits non-zero on lifecycle issues.
+  - --gate emits D48-style PASS/FAIL and exits non-zero on any lifecycle issue (controller/global).
+  - --lane emits D48-style PASS/FAIL and exits non-zero only on current-lane issues (worker commit).
 USAGE
       exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
@@ -500,11 +503,23 @@ def parse_stash_subject(subject: str):
 
 
 repo_root = Path(subprocess.check_output(["git", "-C", str(root), "rev-parse", "--show-toplevel"], text=True).strip()).resolve()
+_all_wt_entries = parse_worktrees(repo_root)
+main_checkout_path = _all_wt_entries[0][0] if _all_wt_entries else repo_root
+is_root_context = (repo_root == main_checkout_path)
+current_branch = git_branch(repo_root)
 repo_origin = normalize_remote_url(git_origin_url(repo_root), repo_root)
 repo_identity = {str(repo_root)}
 if repo_origin:
     repo_identity.add(repo_origin)
 main_branch_head = git_head(repo_root, f"refs/heads/{main_branch}")
+
+# Lane-vs-global enforcement: identify the main checkout path (first entry in
+# git worktree list is always the main working tree) and whether we are running
+# from the main checkout or from a linked worktree.
+_all_wt_entries = parse_worktrees(repo_root)
+main_checkout_path = _all_wt_entries[0][0] if _all_wt_entries else repo_root
+is_root_context = (repo_root == main_checkout_path)
+current_branch = git_branch(repo_root)
 
 # Loop scopes (authoritative owner state)
 loop_scopes = {}
@@ -654,7 +669,11 @@ issues = []
 warnings = []
 
 for wt, raw_branch in parse_worktrees(repo_root):
-    if wt == repo_root:
+    # Always skip the main checkout — it gets root-style checks in the
+    # root_checkout section below.  When running FROM a linked worktree,
+    # the current worktree is now processed here so its issues can be
+    # classified as lane-scoped.
+    if wt == main_checkout_path:
         continue
 
     branch = (raw_branch or "").strip()
@@ -985,23 +1004,25 @@ if canonical_temp_clone_root.exists():
 
 root_checkout = {
     "checked": False,
-    "path": str(repo_root),
-    "branch": git_branch(repo_root),
+    "path": str(main_checkout_path),
+    "branch": git_branch(main_checkout_path),
     "main_branch": main_branch,
-    "main_exists": bool(git_head(repo_root, f"refs/heads/{main_branch}")),
-    "head": git_head(repo_root, "HEAD"),
-    "main_head": git_head(repo_root, f"refs/heads/{main_branch}"),
+    "main_exists": bool(git_head(main_checkout_path, f"refs/heads/{main_branch}")),
+    "head": git_head(main_checkout_path, "HEAD"),
+    "main_head": git_head(main_checkout_path, f"refs/heads/{main_branch}"),
     "head_matches_main": False,
     "normalizable": False,
     "issues": [],
     "warnings": [],
 }
-root_checkout.update(git_status_summary(repo_root))
+root_checkout.update(git_status_summary(main_checkout_path))
 root_checkout["head_matches_main"] = bool(
     root_checkout["head"] and root_checkout["main_head"] and root_checkout["head"] == root_checkout["main_head"]
 )
 
-if not path_under(repo_root, canonical_worktree_root) and not path_under(repo_root, canonical_temp_clone_root) and ".wt" not in repo_root.parts:
+# Always check the main checkout for root-specific issues, regardless of
+# whether we are running from the root or from a linked worktree.
+if not path_under(main_checkout_path, canonical_worktree_root) and not path_under(main_checkout_path, canonical_temp_clone_root):
     root_checkout["checked"] = True
     if root_checkout["branch"] == "<detached>":
         root_checkout["issues"].append("root_checkout_detached")
@@ -1118,6 +1139,54 @@ for line in stash_lines:
             }
         )
 
+# ── Lane-vs-global scope classification ──────────────────────────────
+# Each issue is classified as "lane" (blocks current worker commit) or
+# "global" (blocks controller/root operations, informational for workers).
+
+def _issue_scope(item):
+    kind = item.get("kind", "")
+    path = item.get("path", "")
+    branch = item.get("branch", "")
+    if kind == "root_checkout":
+        return "lane" if is_root_context else "global"
+    if kind == "worktree":
+        return "lane" if path == str(repo_root) else "global"
+    if kind == "local_branch":
+        return "lane" if branch == current_branch else "global"
+    return "global"  # temp_clone and anything else
+
+lane_issues = [i for i in issues if _issue_scope(i) == "lane"]
+global_issues = [i for i in issues if _issue_scope(i) == "global"]
+lane_warnings = [w for w in warnings if _issue_scope(w) == "lane"]
+global_warnings = [w for w in warnings if _issue_scope(w) == "global"]
+# Stash issues are always global (never block a lane commit).
+lane_issue_count = len(lane_issues)
+global_issue_count = len(global_issues) + len(stash_issues)
+
+# ── Lane-vs-global scope classification ──────────────────────────────
+# Each issue is classified as "lane" (blocks current worker commit) or
+# "global" (blocks controller/root operations, informational for workers).
+
+def _issue_scope(item):
+    kind = item.get("kind", "")
+    path = item.get("path", "")
+    branch = item.get("branch", "")
+    if kind == "root_checkout":
+        return "lane" if is_root_context else "global"
+    if kind == "worktree":
+        return "lane" if path == str(repo_root) else "global"
+    if kind == "local_branch":
+        return "lane" if branch == current_branch else "global"
+    return "global"  # temp_clone and anything else
+
+lane_issues = [i for i in issues if _issue_scope(i) == "lane"]
+global_issues = [i for i in issues if _issue_scope(i) == "global"]
+lane_warnings = [w for w in warnings if _issue_scope(w) == "lane"]
+global_warnings = [w for w in warnings if _issue_scope(w) == "global"]
+# Stash issues are always global (never block a lane commit).
+lane_issue_count = len(lane_issues)
+global_issue_count = len(global_issues) + len(stash_issues)
+
 summary = {
     "repo": str(repo_root),
     "checked_worktrees": len(worktree_rows),
@@ -1132,6 +1201,8 @@ summary = {
     "stash_warning_count": len(stash_warnings),
     "total_issue_count": len(issues) + len(stash_issues),
     "total_warning_count": len(warnings) + len(stash_warnings),
+    "lane_issue_count": lane_issue_count,
+    "global_issue_count": global_issue_count,
     "policy": {
         "main_branch": main_branch,
         "canonical_worktree_root": str(canonical_worktree_root),
@@ -1157,6 +1228,8 @@ payload = {
     "root_checkout": root_checkout,
     "issues": issues,
     "warnings": warnings,
+    "lane_issues": lane_issues,
+    "global_issues": global_issues,
     "stashes": stash_rows,
     "stash_issues": stash_issues,
     "stash_warnings": stash_warnings,
@@ -1212,6 +1285,48 @@ else:
                 f"root={summary['checked_root_checkout']} warnings={summary['total_warning_count']} "
                 f"stashes={summary['stash_count']})"
             )
+    elif mode == "lane":
+        if lane_issue_count > 0:
+            print("D48 FAIL (lane): current lane has lifecycle issues")
+            for item in lane_issues:
+                print(f"  - {format_item(item)}")
+            if global_issues or stash_issues:
+                print("  GLOBAL (non-blocking):")
+                for item in global_issues:
+                    print(f"    - {format_item(item)}")
+                for item in stash_issues:
+                    print(f"    - {format_stash_item(item)}")
+            if lane_warnings:
+                print("  WARNINGS (lane):")
+                for item in lane_warnings:
+                    print(f"    - {format_item(item)}")
+        else:
+            print(
+                f"D48 PASS (lane): current lane clean "
+                f"(global_issues={global_issue_count} warnings={summary['total_warning_count']} "
+                f"stashes={summary['stash_count']})"
+            )
+    elif mode == "lane":
+        if lane_issue_count > 0:
+            print("D48 FAIL (lane): current lane has lifecycle issues")
+            for item in lane_issues:
+                print(f"  - {format_item(item)}")
+            if global_issues or stash_issues:
+                print("  GLOBAL (non-blocking):")
+                for item in global_issues:
+                    print(f"    - {format_item(item)}")
+                for item in stash_issues:
+                    print(f"    - {format_stash_item(item)}")
+            if lane_warnings:
+                print("  WARNINGS (lane):")
+                for item in lane_warnings:
+                    print(f"    - {format_item(item)}")
+        else:
+            print(
+                f"D48 PASS (lane): current lane clean "
+                f"(global_issues={global_issue_count} warnings={summary['total_warning_count']} "
+                f"stashes={summary['stash_count']})"
+            )
     else:
         print("worktree.lifecycle.reconcile")
         print(f"repo: {summary['repo']}")
@@ -1240,5 +1355,7 @@ else:
                 print(f"  - {format_stash_item(item)}")
 
 if mode == "gate" and summary["total_issue_count"] > 0:
+    sys.exit(1)
+if mode == "lane" and lane_issue_count > 0:
     sys.exit(1)
 PY
