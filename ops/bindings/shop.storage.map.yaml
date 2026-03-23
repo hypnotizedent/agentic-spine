@@ -6,7 +6,7 @@
 # Do not edit manually — rebuild with: ./bin/ops cap run infra.shop.storage.authority.build
 version: 1
 authority_state: projection
-generated_at_utc: '2026-03-23T15:52:35Z'
+generated_at_utc: '2026-03-23T21:53:44Z'
 site: shop
 generated_by:
   capability: infra.shop.storage.authority.build
@@ -423,12 +423,12 @@ service_lifecycle:
   - pve:/md1400/backup-cold (Canonical shop cold backup plane.)
   - nas:/volume1/backups/proxmox_backups/dump (Canonical home backup plane.)
   allowed_secondary_roots:
-  - pve:/tank/backups/vzdump/dump (Local shop generation lane before promotion to
+  - pve:/data/backups/vzdump/dump (Local shop generation lane before promotion to
     md1400.)
   - proxmox-home:/mnt/pve/synology-backups/dump (Home generation mount before the
     canonical Synology lane.)
   staging_roots:
-  - pve:/tank/backups/vzdump/dump (Shop local generation lane.)
+  - pve:/data/backups/vzdump/dump (Shop local generation lane.)
   quarantine_roots: []
   export_archive_lanes:
   - pve:/md1400/backup-cold (Canonical shop restore/archive plane.)
@@ -601,10 +601,10 @@ runtime_storage:
   status: active
   startup_policy: auto
   health_probe_policy: full
-  storage_tier: tank-vms
-  placement_status: partial
-  placement_notes: Boot disk is ZFS-backed zvol (not local-lvm). Docker volumes still
-    on boot filesystem. Consider data disk for n8n/postgres.
+  storage_tier: data-vms
+  placement_status: compliant
+  placement_notes: "Moved tank-vms\u2192data-vms 2026-03-23. Boot is ZFS-backed zvol.\
+    \ Docker volumes on boot (small). Old tank zvol destroyed."
   owner: '@ronny'
   purpose: Workflow automation + MCP gateway.
   active_services:
@@ -635,11 +635,11 @@ runtime_storage:
   restore_classes:
   - app-dry-run-monthly
   storage_objects:
-  - kind: zfs_zvol
-    object: tank/vms/vm-202-disk-0
-    purpose: Primary runtime disk on tank/vms
+  - kind: declared_path
+    object: pve:data/vms/vm-202-disk-0 (ZFS zvol, 100G)
+    purpose: Declared storage path from placement policy
     durability_role: runtime_primary
-    pool: tank
+    pool: data-vms
   - kind: path
     object: /home/automation/backups/n8n-workflows
     purpose: Guest-level durable path
@@ -651,7 +651,7 @@ runtime_storage:
   backup_generation_lanes:
   - lane_id: pve-vzdump-primary
     host: pve
-    base_path: /tank/backups/vzdump/dump
+    base_path: /data/backups/vzdump/dump
   - lane_id: r730xd-infra-core-backups
     host: pve
     base_path: /md1400/backup-cold/apps/infra-core
@@ -680,8 +680,8 @@ runtime_storage:
   health_probe_policy: full
   storage_tier: tank-docker
   placement_status: compliant
-  placement_notes: Photo library on tank/immich ZFS dataset. Boot disk on local-lvm
-    but data is properly separated.
+  placement_notes: 'Photo library on tank/immich ZFS dataset. Boot disk on local-lvm
+    but data is properly separated. Target: migrate to data/immich.'
   owner: '@ronny'
   purpose: 135K+ assets, 3TB library. 8 CPU cores (host passthrough), 100GB boot.
     LAN IP 192.168.1.203 (static). Not in docker.compose.targets.yaml (known exemption).
@@ -711,7 +711,7 @@ runtime_storage:
   backup_generation_lanes:
   - lane_id: pve-vzdump-primary
     host: pve
-    base_path: /tank/backups/vzdump/dump
+    base_path: /data/backups/vzdump/dump
   restore_targets:
   - name: vm-203-primary
     enabled: true
@@ -785,7 +785,7 @@ runtime_storage:
   backup_generation_lanes:
   - lane_id: pve-vzdump-primary
     host: pve
-    base_path: /tank/backups/vzdump/dump
+    base_path: /data/backups/vzdump/dump
   - lane_id: r730xd-infra-core-backups
     host: pve
     base_path: /md1400/backup-cold/apps/infra-core
@@ -869,7 +869,7 @@ runtime_storage:
   backup_generation_lanes:
   - lane_id: pve-vzdump-primary
     host: pve
-    base_path: /tank/backups/vzdump/dump
+    base_path: /data/backups/vzdump/dump
   restore_targets:
   - name: vm-205-observability-primary
     enabled: true
@@ -927,7 +927,7 @@ runtime_storage:
   backup_generation_lanes:
   - lane_id: pve-vzdump-primary
     host: pve
-    base_path: /tank/backups/vzdump/dump
+    base_path: /data/backups/vzdump/dump
   - lane_id: r730xd-dev-tools-backups
     host: pve
     base_path: /md1400/backup-cold/apps/dev-tools
@@ -992,7 +992,7 @@ runtime_storage:
   backup_generation_lanes:
   - lane_id: pve-vzdump-primary
     host: pve
-    base_path: /tank/backups/vzdump/dump
+    base_path: /data/backups/vzdump/dump
   restore_targets:
   - name: vm-207-ai-consolidation-primary
     enabled: true
@@ -1079,7 +1079,7 @@ runtime_storage:
   backup_generation_lanes:
   - lane_id: pve-vzdump-primary
     host: pve
-    base_path: /tank/backups/vzdump/dump
+    base_path: /data/backups/vzdump/dump
   - lane_id: r730xd-finance-backups
     host: pve
     base_path: /md1400/backup-cold/apps/finance
@@ -1131,11 +1131,10 @@ runtime_storage:
   status: active
   startup_policy: auto
   health_probe_policy: full
-  storage_tier: boot-only
+  storage_tier: data-vms
   placement_status: compliant
-  placement_notes: 'Rebased to non-boot persistence: postgres/minio/redis bind mounts
-    under /mnt/data/mint-data/* with Redis appendonly=yes. Root usage now 8% (48G
-    boot), data disk 61% (118G).'
+  placement_notes: "Moved tank-vms\u2192data-vms 2026-03-23. Non-boot persistence:\
+    \ postgres/minio/redis under /mnt/data/mint-data/*. Old tank zvol destroyed."
   owner: '@ronny'
   purpose: Mint fresh-slate data plane. PostgreSQL 16 + MinIO + Redis.
   active_services:
@@ -1156,20 +1155,19 @@ runtime_storage:
   - vm-dry-run-quarterly
   storage_objects:
   - kind: declared_path
-    object: /dev/vda ext4 secondary disk mounted at /mnt/data; DockerRootDir=/mnt/data/docker
+    object: pve:data/vms/vm-212-disk-0 (ZFS zvol, 320G) mounted at /mnt/data; DockerRootDir=/mnt/data/docker
     purpose: Declared storage path from placement policy
     durability_role: runtime_primary
-    pool: tank-vms
+    pool: data-vms
     mount_path: /mnt/data
   - kind: path
     object: /opt/stacks/mint-data
     purpose: Guest-level durable path
     durability_role: supplemental_runtime
-    pool: boot-disk
   backup_generation_lanes:
   - lane_id: pve-vzdump-primary
     host: pve
-    base_path: /tank/backups/vzdump/dump
+    base_path: /data/backups/vzdump/dump
   - lane_id: r730xd-mint-backups
     host: pve
     base_path: /md1400/backup-cold/apps/mint-data
@@ -1299,7 +1297,7 @@ runtime_storage:
   backup_generation_lanes:
   - lane_id: pve-vzdump-primary
     host: pve
-    base_path: /tank/backups/vzdump/dump
+    base_path: /data/backups/vzdump/dump
   restore_targets:
   - name: vm-213-mint-apps-primary
     enabled: true
@@ -1317,10 +1315,11 @@ runtime_storage:
   status: active
   startup_policy: auto
   health_probe_policy: full
-  storage_tier: tank-vms
-  placement_status: partial
-  placement_notes: Boot is ZFS zvol (not local-lvm). Stalwart on named volume. Mail-archiver
-    needs /srv/mail-archiver non-boot path.
+  storage_tier: data-vms
+  placement_status: compliant
+  placement_notes: "Moved tank-vms\u2192data-vms 2026-03-23 (1T). data-vms is interim;\
+    \ archive payload (email+Paperless) final home is md1400. Old tank zvol+snapshots\
+    \ (4.1T) destroyed."
   owner: '@ronny'
   purpose: Stalwart self-hosted mail + mail-archiver. Spine communications stack (GAP-OP-820).
     Mail-archiver canonical runtime (LOOP-MAIL-ARCHIVER-COMMS-MIGRATION-20260225).
@@ -1345,11 +1344,11 @@ runtime_storage:
   - app-dry-run-monthly
   - tier1-small-state-dry-run-quarterly
   storage_objects:
-  - kind: zfs_zvol
-    object: tank/vms/vm-214-disk-0
-    purpose: Primary runtime disk on tank/vms
+  - kind: declared_path
+    object: pve:data/vms/vm-214-disk-0 (ZFS zvol, 1000G)
+    purpose: Declared storage path from placement policy
     durability_role: runtime_primary
-    pool: tank
+    pool: md1400
   - kind: path
     object: /opt/stacks/communications-stack
     purpose: Guest-level durable path
@@ -1361,7 +1360,7 @@ runtime_storage:
   backup_generation_lanes:
   - lane_id: pve-vzdump-primary
     host: pve
-    base_path: /tank/backups/vzdump/dump
+    base_path: /data/backups/vzdump/dump
   - lane_id: r730xd-communications-backups
     host: pve
     base_path: /md1400/backup-cold/apps/communications
@@ -1401,12 +1400,10 @@ runtime_storage:
   status: active
   startup_policy: auto
   health_probe_policy: full
-  storage_tier: tank-vms
+  storage_tier: md1400-vms
   placement_status: compliant
-  placement_notes: Compose authority now lives at /srv/config/surveillance, durable
-    appstate + media payload are surfaced at /srv/data/surveillance from the 100G
-    secondary tank-vms disk, and cache is tmpfs-backed at /srv/runtime/surveillance/cache.
-    No active surveillance runtime remains under /home.
+  placement_notes: "Moved tank-vms\u2192md1400-vms 2026-03-23 (direct to archive tier,\
+    \ not critical). Boot+data disks on md1400. Old tank zvols+snapshots (601G) destroyed."
   owner: '@ronny'
   purpose: Frigate/go2rtc surveillance platform for shop NVR (12 channels, CPU-first).
     Integrates with home HA. LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302.
@@ -1423,17 +1420,16 @@ runtime_storage:
   restore_classes:
   - vm-dry-run-quarterly
   storage_objects:
-  - kind: guest_data_disk
-    object: /dev/vda ext4 secondary disk mounted at /mnt/data and surfaced via /srv/data/surveillance/{appstate,recordings,clips,snapshots}
-      bind mounts.
-    purpose: Dedicated guest data disk on tank-vms tier
+  - kind: declared_path
+    object: pve:md1400-vms/vm-215-disk-{0,1} (boot 50G + data 100G)
+    purpose: Declared storage path from placement policy
     durability_role: runtime_primary
-    pool: tank
+    pool: boot-disk
     mount_path: /srv/data/surveillance
   backup_generation_lanes:
   - lane_id: pve-vzdump-primary
     host: pve
-    base_path: /tank/backups/vzdump/dump
+    base_path: /data/backups/vzdump/dump
   restore_targets:
   - name: vm-215-surveillance-stack-primary
     enabled: true
@@ -1451,11 +1447,10 @@ runtime_storage:
   status: active
   startup_policy: auto
   health_probe_policy: full
-  storage_tier: md1400
+  storage_tier: data-vms
   placement_status: compliant
-  placement_notes: LXC 220 serves md1400-backed archive/live-share data over Samba.
-    Dataset contents restore from md1400 snapshot manifests; runtime rootfs restores
-    from lxc vzdump.
+  placement_notes: "Rootfs moved tank-docker\u2192data-vms 2026-03-23. Serves md1400-backed\
+    \ archive/live-share data over Samba. Old tank subvol+snapshots destroyed."
   owner: '@ronny'
   purpose: Archive SMB LXC serving the authoritative md1400 live-share datasets `/md1400/archive/live-share/ronny-projects`
     and `/md1400/archive/live-share/mint-legacy` via Samba. Rootfs is rebuildable
@@ -1472,11 +1467,12 @@ runtime_storage:
   restore_classes:
   - tier1-small-state-dry-run-quarterly
   storage_objects:
-  - kind: md1400_live_share
-    object: md1400 live-share datasets
-    purpose: Authoritative archive/live-share payload
+  - kind: declared_path
+    object: pve:data/vms/subvol-220-disk-0 (rootfs 8G); serves md1400 datasets over
+      Samba.
+    purpose: Declared storage path from placement policy
     durability_role: runtime_primary
-    pool: md1400
+    pool: data-vms
     mount_path: /md1400
   - kind: path
     object: /md1400/archive/live-share/mint-legacy
@@ -1536,12 +1532,6 @@ tombstones:
     and mint-os-redis on pre-spine Linux Mint. If recovery is needed, restore only
     into an isolated temporary sandbox identity with no legacy DNS/routes.
 current_risks:
-- risk_id: storage-automation-stack
-  severity: medium
-  runtime: automation-stack
-  source: ops/bindings/infra.storage.placement.policy.yaml
-  detail: Boot disk is ZFS-backed zvol (not local-lvm). Docker volumes still on boot
-    filesystem. Consider data disk for n8n/postgres.
 - risk_id: storage-infra-core
   severity: accepted-risk
   runtime: infra-core
@@ -1574,12 +1564,6 @@ current_risks:
   detail: "12% boot usage (11GB/92GB) after truncating 59GB firefly-cron crash log.\
     \ Actual data only 531MB. Fixed cron binary (crond\u2192cron). Log rotation added.\
     \ Re-evaluate if usage exceeds 60%."
-- risk_id: storage-communications-stack
-  severity: medium
-  runtime: communications-stack
-  source: ops/bindings/infra.storage.placement.policy.yaml
-  detail: Boot is ZFS zvol (not local-lvm). Stalwart on named volume. Mail-archiver
-    needs /srv/mail-archiver non-boot path.
 - risk_id: shop-media-pressure
   severity: high
   runtime: media
