@@ -38,7 +38,9 @@ transport: mailroom
 environment_constraints: isolated worktree
 EOF_INPUT
 
-json="$(SPINE_STATE="$state_root" "$SCRIPT" --latest-loop --role worker --lane D --source-type chat --input "$tmpdir/import.txt" --json)"
+json="$(env -u SPINE_ROOT -u SPINE_REPO -u SPINE_TARGET_REPO -u SPINE_CODE \
+  SPINE_STATE="$state_root" \
+  "$SCRIPT" --skip-session-bootstrap --latest-loop --role worker --lane D --source-type chat --input "$tmpdir/import.txt" --json)"
 
 python3 - <<'PY' "$json"
 import json
@@ -49,14 +51,29 @@ payload = json.loads(sys.argv[1])
 assert payload["status"] == "done"
 assert payload["data"]["loop"]["loop_id"] == "LOOP-TEST-ATTACH-20260322"
 assert payload["data"]["loop"]["resolution"] == "latest-loop"
-assert payload["data"]["startup"]["status"] == "done"
-assert payload["data"]["startup"]["exports"]["SPINE_SESSION_ID"].startswith("SES-")
+assert payload["data"]["startup"]["status"] == "skipped"
+assert payload["data"]["repo_identity"]["checkout_root"]
 assert Path(payload["data"]["entry_packet"]["packet_path"]).exists()
 assert payload["data"]["entry_packet"]["packet"]["transport"] == "mailroom"
 assert Path(payload["data"]["sanitized_output_path"]).exists()
 assert payload["data"]["exports"]["SPINE_LOOP_ID"] == "LOOP-TEST-ATTACH-20260322"
-assert payload["data"]["exports"]["SPINE_SESSION_ID"].startswith("SES-")
 assert "friction_queue" in payload["data"]["friction_snapshot"]
+PY
+
+fail_json="$(env -u SPINE_TARGET_REPO -u SPINE_CODE \
+  SPINE_ROOT="$tmpdir/stale-root" \
+  SPINE_REPO="$tmpdir/stale-root" \
+  SPINE_STATE="$state_root" \
+  "$SCRIPT" --skip-session-bootstrap --allow-no-loop --json || true)"
+
+python3 - <<'PY' "$fail_json"
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["status"] == "failed"
+assert "ambient spine root mismatch" in payload["data"]["message"]
+assert "current checkout is" in payload["data"]["message"]
 PY
 
 echo "PASS: session-v3-attach resolves latest loop, sanitizes imports, and compiles entry packet"

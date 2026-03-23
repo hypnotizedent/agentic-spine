@@ -32,6 +32,30 @@ import yaml
 ROOT = Path(__file__).resolve().parents[5]
 
 
+def canonical_path(raw: str | None) -> Path:
+    expanded = Path(str(raw or "")).expanduser()
+    try:
+        return expanded.resolve(strict=False)
+    except Exception:
+        return expanded.absolute()
+
+
+def git_toplevel(path: Path) -> Path | None:
+    proc = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=os.environ.copy(),
+    )
+    if proc.returncode != 0:
+        return None
+    root = proc.stdout.strip()
+    if not root:
+        return None
+    return canonical_path(root)
+
+
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -119,6 +143,44 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--emit-exports", action="store_true")
     return parser
+
+
+def assert_attach_repo_identity(args: argparse.Namespace) -> dict[str, str]:
+    cwd_root = git_toplevel(Path.cwd())
+    requested_repo_root = canonical_path(args.repo_root)
+    expected_root = cwd_root or requested_repo_root
+
+    if requested_repo_root != expected_root:
+        raise RuntimeError(
+            "attach repo-root mismatch: "
+            f"--repo-root resolves to {requested_repo_root} but current checkout is {expected_root}"
+        )
+
+    mismatches: list[str] = []
+    for env_name in ("SPINE_REPO", "SPINE_ROOT"):
+        raw_value = os.environ.get(env_name, "").strip()
+        if not raw_value:
+            continue
+        resolved = canonical_path(raw_value)
+        if resolved != expected_root:
+            mismatches.append(f"{env_name}={resolved}")
+
+    if mismatches:
+        mismatch_text = ", ".join(mismatches)
+        raise RuntimeError(
+            "ambient spine root mismatch: "
+            f"{mismatch_text}; current checkout is {expected_root}. "
+            "Start from a clean terminal or re-attach after clearing leaked runtime env."
+        )
+
+    args.repo_root = str(expected_root)
+    if args.worktree:
+        args.worktree = str(canonical_path(args.worktree))
+    return {
+        "checkout_root": str(expected_root),
+        "cwd_root": str(cwd_root) if cwd_root else "",
+        "requested_repo_root": str(requested_repo_root),
+    }
 
 
 def startup_lane_for_role(role: str) -> str:
@@ -310,6 +372,7 @@ def main() -> int:
     session_start_script = ROOT / "ops/plugins/core/session/bin/session-start"
 
     try:
+        repo_identity = assert_attach_repo_identity(args)
         startup = run_session_bootstrap(args, session_start_script)
         startup_exports = startup.get("exports", {})
         if (not args.terminal_name) and startup_exports.get("OPS_TERMINAL_ROLE"):
@@ -332,6 +395,7 @@ def main() -> int:
                         "latest_loop": latest_payload,
                     },
                     "startup": startup,
+                    "repo_identity": repo_identity,
                     "sanitize": sanitize_payload,
                     "friction_snapshot": friction_snapshot,
                     "sanitized_output_path": sanitized_output_path,
@@ -372,6 +436,7 @@ def main() -> int:
                         "latest_loop": latest_payload,
                     },
                     "startup": startup,
+                    "repo_identity": repo_identity,
                     "sanitize": sanitize_payload,
                     "friction_snapshot": friction_snapshot,
                     "sanitized_output_path": sanitized_output_path,
