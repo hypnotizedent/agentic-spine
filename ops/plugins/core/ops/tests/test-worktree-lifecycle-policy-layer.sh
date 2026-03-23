@@ -166,6 +166,54 @@ assert_eq "$(json_eval "$RECONCILE_JSON" 'sum(1 for row in payload["stashes"] if
 assert_eq "$(json_eval "$RECONCILE_JSON" 'sum(1 for row in payload["stashes"] if row["cleanup_candidate"])')" "2" "only aged main stashes are cleanup candidates"
 
 echo ""
+echo "── T1b: root checkout staged-only changes warn but do not fail ──"
+printf 'staged-only\n' >> "$TARGET/file.txt"
+git -C "$TARGET" add file.txt
+STAGED_JSON="$TMPDIR_BASE/reconcile-staged.json"
+(
+  cd "$TARGET"
+  env -u SPINE_TARGET_REPO -u SPINE_REPO -u SPINE_CODE \
+    SPINE_TMP="$TMP_ROOT" \
+    SPINE_WORKTREE_LIFECYCLE_TEMP_CLONE_ROOT="$CLONE_ROOT" \
+    SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS="$MANAGED_WORKTREE" \
+    "$RECONCILE" --json > "$STAGED_JSON"
+)
+assert_eq "$(json_eval "$STAGED_JSON" 'payload["root_checkout"]["dirty_mode"]')" "staged_only" "root checkout classifies staged-only state"
+assert_eq "$(json_eval "$STAGED_JSON" '"root_checkout_dirty" in payload["root_checkout"]["issues"]')" "False" "staged-only root does not fail as dirty drift"
+assert_eq "$(json_eval "$STAGED_JSON" '"root_checkout_staged_only" in payload["root_checkout"]["warnings"]')" "True" "staged-only root emits commit-in-progress warning"
+
+echo ""
+echo "── T1c: root checkout unstaged and mixed changes still fail ──"
+git -C "$TARGET" reset --hard HEAD >/dev/null
+printf 'unstaged-only\n' >> "$TARGET/file.txt"
+UNSTAGED_JSON="$TMPDIR_BASE/reconcile-unstaged.json"
+(
+  cd "$TARGET"
+  env -u SPINE_TARGET_REPO -u SPINE_REPO -u SPINE_CODE \
+    SPINE_TMP="$TMP_ROOT" \
+    SPINE_WORKTREE_LIFECYCLE_TEMP_CLONE_ROOT="$CLONE_ROOT" \
+    SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS="$MANAGED_WORKTREE" \
+    "$RECONCILE" --json > "$UNSTAGED_JSON"
+)
+assert_eq "$(json_eval "$UNSTAGED_JSON" 'payload["root_checkout"]["dirty_mode"]')" "unstaged_only" "root checkout classifies unstaged-only state"
+assert_eq "$(json_eval "$UNSTAGED_JSON" '"root_checkout_dirty" in payload["root_checkout"]["issues"]')" "True" "unstaged-only root still fails as drift"
+
+git -C "$TARGET" add file.txt
+printf 'mixed\n' >> "$TARGET/file.txt"
+MIXED_JSON="$TMPDIR_BASE/reconcile-mixed.json"
+(
+  cd "$TARGET"
+  env -u SPINE_TARGET_REPO -u SPINE_REPO -u SPINE_CODE \
+    SPINE_TMP="$TMP_ROOT" \
+    SPINE_WORKTREE_LIFECYCLE_TEMP_CLONE_ROOT="$CLONE_ROOT" \
+    SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS="$MANAGED_WORKTREE" \
+    "$RECONCILE" --json > "$MIXED_JSON"
+)
+assert_eq "$(json_eval "$MIXED_JSON" 'payload["root_checkout"]["dirty_mode"]')" "mixed" "root checkout classifies mixed state"
+assert_eq "$(json_eval "$MIXED_JSON" '"root_checkout_dirty" in payload["root_checkout"]["issues"]')" "True" "mixed root still fails as drift"
+git -C "$TARGET" reset --hard HEAD >/dev/null
+
+echo ""
 echo "── T2: cleanup report classifies clone candidates and root action ──"
 CLEANUP_JSON="$TMPDIR_BASE/cleanup.json"
 (

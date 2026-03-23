@@ -356,6 +356,35 @@ def git_status_dirty(path: Path):
     return rc == 0 and bool((out or "").strip())
 
 
+def git_status_summary(path: Path):
+    rc, out = sh(["git", "-C", str(path), "status", "--porcelain"], check=False)
+    lines = [ln for ln in (out or "").splitlines() if ln.strip()]
+    has_staged = False
+    has_unstaged = False
+    for line in lines:
+        if len(line) < 2:
+            continue
+        x = line[0]
+        y = line[1]
+        if x not in {" ", "?"}:
+            has_staged = True
+        if y != " " or line.startswith("??"):
+            has_unstaged = True
+    mode = "clean"
+    if has_staged and has_unstaged:
+        mode = "mixed"
+    elif has_staged:
+        mode = "staged_only"
+    elif has_unstaged:
+        mode = "unstaged_only"
+    return {
+        "dirty": bool(lines),
+        "has_staged_changes": has_staged,
+        "has_unstaged_changes": has_unstaged,
+        "dirty_mode": mode,
+    }
+
+
 def git_head(path: Path, ref: str = "HEAD"):
     rc, out = sh(["git", "-C", str(path), "rev-parse", "--verify", "--quiet", ref], check=False)
     return (out or "").strip() if rc == 0 else ""
@@ -887,7 +916,6 @@ root_checkout = {
     "checked": False,
     "path": str(repo_root),
     "branch": git_branch(repo_root),
-    "dirty": git_status_dirty(repo_root),
     "main_branch": main_branch,
     "main_exists": bool(git_head(repo_root, f"refs/heads/{main_branch}")),
     "head": git_head(repo_root, "HEAD"),
@@ -897,6 +925,7 @@ root_checkout = {
     "issues": [],
     "warnings": [],
 }
+root_checkout.update(git_status_summary(repo_root))
 root_checkout["head_matches_main"] = bool(
     root_checkout["head"] and root_checkout["main_head"] and root_checkout["head"] == root_checkout["main_head"]
 )
@@ -912,7 +941,9 @@ if not path_under(repo_root, canonical_worktree_root) and not path_under(repo_ro
         else:
             root_checkout["warnings"].append(code)
     if root_checkout["dirty"]:
-        if fail_on_root_dirty:
+        if root_checkout["dirty_mode"] == "staged_only":
+            root_checkout["warnings"].append("root_checkout_staged_only")
+        elif fail_on_root_dirty:
             root_checkout["issues"].append("root_checkout_dirty")
         else:
             root_checkout["warnings"].append("root_checkout_dirty")
