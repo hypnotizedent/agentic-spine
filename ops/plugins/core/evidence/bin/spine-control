@@ -50,6 +50,26 @@ def runtime_env() -> dict[str, str]:
     return env
 
 
+def shared_workspace_root() -> Path:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=str(ROOT),
+            text=True,
+            capture_output=True,
+            check=False,
+            env=os.environ,
+        )
+        if proc.returncode == 0:
+            common_dir = Path(proc.stdout.strip())
+            if common_dir.name == ".git":
+                return common_dir.parent.parent
+            return common_dir.parent
+    except Exception:
+        pass
+    return ROOT.parent
+
+
 def run_cmd(cmd: list[str], *, cwd: Path | None = None, input_text: str | None = None) -> tuple[int, str, str]:
     proc = subprocess.run(
         cmd,
@@ -92,7 +112,7 @@ def render_path_for_payload(path: Path) -> str:
     try:
         return str(path.relative_to(ROOT))
     except ValueError:
-        workspace_root = ROOT.parent
+        workspace_root = shared_workspace_root()
         try:
             return str(path.relative_to(workspace_root))
         except ValueError:
@@ -327,7 +347,10 @@ def markdown_receipt_field(path: Path, field: str) -> str:
 
 
 def receipts_root() -> Path:
-    return Path(os.environ.get("SPINE_RECEIPTS") or (ROOT.parent / ".evidence" / "spine" / "sessions"))
+    override = (os.environ.get("SPINE_RECEIPTS") or "").strip()
+    if override:
+        return Path(override)
+    return shared_workspace_root() / ".evidence" / "spine" / "sessions"
 
 
 def request_receipt_dir(request_id: str) -> Path:
