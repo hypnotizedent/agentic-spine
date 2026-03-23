@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-05
+last_verified: 2026-03-22
 scope: spine-minimal-operating-contract
 ---
 
@@ -109,10 +109,11 @@ This is the current frontier of spine enforcement: gates that reach into live pr
 
 <!-- ENTRY_SURFACE_GATE_METADATA_START -->
 # ENTRY SURFACE GATE METADATA (generated)
+entry_surface_gate_metadata: projection
 source_registry: ops/bindings/gate.registry.yaml
-registry_updated: 2026-03-11
-gate_count_total: 394
-gate_count_active: 89
-gate_count_retired: 305
-max_gate_id: D398
+registry_updated: 2026-03-22
+gate_count_total: 411
+gate_count_active: 111
+gate_count_retired: 300
+max_gate_id: D421
 <!-- ENTRY_SURFACE_GATE_METADATA_END -->

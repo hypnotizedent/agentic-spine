@@ -1,6 +1,6 @@
 # BOOT ENTRY SURFACE (generated)
 source_contract: ops/bindings/entry.boot.surface.contract.yaml
-contract_updated: 2026-02-28
+contract_updated: 2026-03-22
 startup_command_count: 2
 post_work_verify_count: 2
 release_certification_count: 1
@@ -9,7 +9,7 @@ release_certification_count: 1
 
 ```bash
 cd ~/code/agentic-spine
-./bin/ops cap run session.start
+./bin/ops cap run session.v3.attach -- --allow-no-loop
 ```
 
 ## Post-Work Verify

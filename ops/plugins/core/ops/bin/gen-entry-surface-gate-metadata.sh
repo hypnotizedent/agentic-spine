@@ -21,7 +21,7 @@ Usage:
 
 Options:
   --check          Exit non-zero if generated artifact or entry-surface blocks drift.
-  --write-surfaces Rewrite AGENTS.md + CLAUDE.md metadata blocks to canonical generated content.
+  --write-surfaces Rewrite AGENTS.md + CLAUDE.md + docs/governance/SPINE.md metadata blocks to canonical generated content.
 USAGE
 }
 
