@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 from collections import Counter
@@ -97,6 +99,13 @@ def render_path_for_payload(path: Path) -> str:
             return str(path)
 
 
+def gaps_file_path() -> Path:
+    override = (os.environ.get("SPINE_GAPS_FILE") or "").strip()
+    if override:
+        return Path(override)
+    return ROOT / "ops/bindings/operational.gaps.yaml"
+
+
 def resolve_runtime_paths() -> dict[str, Path]:
     contract = load_yaml(ROOT / "ops/bindings/mailroom.runtime.contract.yaml", {})
     runtime_active = bool(contract.get("active"))
@@ -169,8 +178,76 @@ def collect_open_loops() -> list[dict[str, Any]]:
     return rows
 
 
+def parse_created_at(front: dict[str, str], path: Path) -> dt.datetime:
+    created = (front.get("created") or "").strip()
+    if created:
+        try:
+            if len(created) == 10:
+                return dt.datetime.fromisoformat(created + "T00:00:00+00:00")
+            parsed = dt.datetime.fromisoformat(created.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            return parsed.astimezone(dt.timezone.utc)
+        except ValueError:
+            pass
+    return dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
+
+
+def loop_scope_rows() -> list[dict[str, Any]]:
+    loop_dir = resolve_runtime_paths()["state"] / "loop-scopes"
+    rows: list[dict[str, Any]] = []
+    if not loop_dir.exists():
+        return rows
+
+    for path in sorted(loop_dir.glob("*.scope.md")):
+        front = parse_frontmatter(path)
+        loop_id = (front.get("loop_id") or path.name.replace(".scope.md", "")).strip()
+        if not loop_id.startswith("LOOP-"):
+            continue
+        status = (front.get("status") or "unknown").strip().lower()
+        rows.append(
+            {
+                "loop_id": loop_id,
+                "status": status,
+                "owner": front.get("owner", ""),
+                "priority": front.get("priority", ""),
+                "objective": front.get("objective", ""),
+                "created": front.get("created", ""),
+                "scope": front.get("scope", ""),
+                "path": render_path_for_payload(path),
+                "created_at_utc": parse_created_at(front, path).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "updated_at_utc": dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        )
+
+    rows.sort(key=lambda row: (row.get("created_at_utc", ""), row.get("loop_id", "")), reverse=True)
+    return rows
+
+
+def loop_is_open(status: str) -> bool:
+    return (status or "").strip().lower() in {"active", "open", "draft", "planned"}
+
+
+def latest_loop_row(include_closed: bool = False) -> dict[str, Any] | None:
+    for row in loop_scope_rows():
+        if include_closed or loop_is_open(str(row.get("status", ""))):
+            return row
+    return None
+
+
+def resolve_loop_row(loop_id: str | None = None, *, latest: bool = False, include_closed: bool = True) -> dict[str, Any] | None:
+    if latest:
+        return latest_loop_row(include_closed=include_closed)
+    if not loop_id:
+        return None
+    for row in loop_scope_rows():
+        if str(row.get("loop_id", "")) == loop_id:
+            return row
+    return None
+
+
 def collect_open_gaps() -> list[dict[str, Any]]:
-    data = load_yaml(ROOT / "ops/bindings/operational.gaps.yaml", {})
+    data = load_yaml(gaps_file_path(), {})
     rows = []
     for item in data.get("gaps", []):
         status = str(item.get("status", "")).strip().lower()
@@ -190,6 +267,231 @@ def collect_open_gaps() -> list[dict[str, Any]]:
         )
     rows.sort(key=lambda r: (severity_rank(r.get("severity", "")), gap_numeric_id(r.get("id", ""))))
     return rows
+
+
+def collect_loop_gap_progress(loop_id: str) -> dict[str, Any]:
+    data = load_yaml(gaps_file_path(), {})
+    linked = [g for g in data.get("gaps", []) if str(g.get("parent_loop", "")).strip() == loop_id]
+    total = len(linked)
+    by_status = Counter(str(g.get("status", "unknown")).strip().lower() or "unknown" for g in linked)
+    resolved = int(by_status.get("fixed", 0)) + int(by_status.get("closed", 0))
+    open_rows = []
+    for gap in linked:
+        if str(gap.get("status", "")).strip().lower() != "open":
+            continue
+        description = re.sub(r"\s+", " ", str(gap.get("description", "")).strip())
+        open_rows.append(
+            {
+                "gap_id": str(gap.get("id", "")).strip(),
+                "severity": str(gap.get("severity", "medium")).strip(),
+                "description": description,
+                "doc": str(gap.get("doc", "")).strip(),
+            }
+        )
+    open_rows.sort(key=lambda row: (severity_rank(row.get("severity", "")), gap_numeric_id(row.get("gap_id", ""))))
+    progress_pct = int((resolved / total) * 100) if total else 0
+    return {
+        "loop_id": loop_id,
+        "linked_gaps": total,
+        "resolved_gaps": resolved,
+        "open_gaps": len(open_rows),
+        "progress_percent": progress_pct,
+        "by_status": dict(by_status),
+        "open_gap_rows": open_rows,
+    }
+
+
+def governance_version() -> str:
+    front = parse_frontmatter(ROOT / "docs/governance/SPINE.md")
+    verified = (front.get("last_verified") or "unknown").strip() or "unknown"
+    return f"SPINE.md@{verified}"
+
+
+def sha256_for_path(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return "missing"
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def markdown_receipt_field(path: Path, field: str) -> str:
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    pattern = rf"\|\s*{re.escape(field)}\s*\|\s*`?([^`|]+)`?\s*\|"
+    match = re.search(pattern, text)
+    return match.group(1).strip() if match else ""
+
+
+def receipts_root() -> Path:
+    return Path(os.environ.get("SPINE_RECEIPTS") or (ROOT.parent / ".evidence" / "spine" / "sessions"))
+
+
+def request_receipt_dir(request_id: str) -> Path:
+    cleaned = request_id.strip()
+    if cleaned.startswith("R"):
+        return receipts_root() / cleaned
+    return receipts_root() / f"R{cleaned}"
+
+
+def synthesize_request_attestation(request_id: str, receipt_dir: Path) -> dict[str, Any]:
+    receipt_md = receipt_dir / "receipt.md"
+    receipt_exec = receipt_dir / "receipt.exec.json"
+    output_txt = receipt_dir / "output.txt"
+    exec_payload = load_yaml(receipt_exec, {}) if receipt_exec.exists() else {}
+
+    capability = str(exec_payload.get("task_id") or markdown_receipt_field(receipt_md, "Capability") or "unknown")
+    verdict = str(exec_payload.get("status") or markdown_receipt_field(receipt_md, "Status") or "unknown").strip().lower()
+    generated = str(exec_payload.get("timestamp_utc") or markdown_receipt_field(receipt_md, "Generated") or utc_now())
+    loop_id = str(exec_payload.get("loop_id") or "").strip()
+    prompt_lineage = exec_payload.get("prompt_lineage") if isinstance(exec_payload, dict) else {}
+    evidence_refs = exec_payload.get("evidence_refs") if isinstance(exec_payload, dict) else {}
+    checks_passed = []
+    checks_failed = []
+
+    for label, path in (
+        ("receipt_markdown_present", receipt_md),
+        ("receipt_exec_present", receipt_exec),
+        ("output_present", output_txt),
+    ):
+        if path.exists():
+            checks_passed.append(label)
+        else:
+            checks_failed.append(label)
+    if verdict == "done":
+        checks_passed.append("verdict_done")
+    else:
+        checks_failed.append("verdict_done")
+
+    attestation = {
+        "schema_version": "1.0",
+        "request_id": request_id,
+        "capability": capability,
+        "generated_at_utc": generated,
+        "loop_id": loop_id,
+        "entry_packet_path": str(exec_payload.get("entry_packet_path") or ""),
+        "entry_packet_hash": str(exec_payload.get("entry_packet_hash") or "none"),
+        "governance_version": str(exec_payload.get("governance_version") or governance_version()),
+        "execution_host": str(exec_payload.get("execution_host") or socket.gethostname()),
+        "execution_mode": str(exec_payload.get("execution_mode") or "capability"),
+        "runtime_role": str(exec_payload.get("runtime_role") or "unknown"),
+        "checks_passed": checks_passed,
+        "checks_failed": checks_failed,
+        "receipts": {
+            "markdown": {
+                "path": str(receipt_md),
+                "sha256": sha256_for_path(receipt_md),
+            },
+            "exec": {
+                "path": str(receipt_exec),
+                "sha256": sha256_for_path(receipt_exec),
+            },
+            "output": {
+                "path": str(output_txt),
+                "sha256": sha256_for_path(output_txt),
+            },
+        },
+        "evidence_refs": evidence_refs if isinstance(evidence_refs, dict) else {},
+        "prompt_lineage": prompt_lineage if isinstance(prompt_lineage, dict) else {},
+        "verdict": verdict,
+    }
+    return attestation
+
+
+def load_request_attestation(request_id: str) -> dict[str, Any] | None:
+    receipt_dir = request_receipt_dir(request_id)
+    if not receipt_dir.exists():
+        return None
+    attestation_path = receipt_dir / "receipt.attestation.json"
+    if attestation_path.exists():
+        payload = load_yaml(attestation_path, {})
+        if isinstance(payload, dict) and payload:
+            return payload
+    cleaned = request_id[1:] if request_id.startswith("R") else request_id
+    return synthesize_request_attestation(cleaned, receipt_dir)
+
+
+def broker_envelope(capability: str, status: str, data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "capability": capability,
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "generated_at": utc_now(),
+        "data": data,
+    }
+
+
+def latest_loop_payload(*, include_closed: bool = False) -> dict[str, Any]:
+    row = latest_loop_row(include_closed=include_closed)
+    if row is None:
+        return broker_envelope("spine.broker.get_latest_loop", "not_found", {"message": "no matching loops found"})
+    progress = collect_loop_gap_progress(str(row["loop_id"]))
+    return broker_envelope(
+        "spine.broker.get_latest_loop",
+        "done",
+        {
+            "loop": row,
+            "progress": {
+                "linked_gaps": progress["linked_gaps"],
+                "resolved_gaps": progress["resolved_gaps"],
+                "open_gaps": progress["open_gaps"],
+                "progress_percent": progress["progress_percent"],
+            },
+        },
+    )
+
+
+def loop_status_payload(loop_id: str | None, *, latest: bool = False) -> dict[str, Any]:
+    row = resolve_loop_row(loop_id, latest=latest)
+    if row is None:
+        return broker_envelope("spine.broker.get_loop_status", "not_found", {"loop_id": loop_id or "", "message": "loop not found"})
+    progress = collect_loop_gap_progress(str(row["loop_id"]))
+    return broker_envelope(
+        "spine.broker.get_loop_status",
+        "done",
+        {
+            "loop": row,
+            "linked_gaps": progress["linked_gaps"],
+            "resolved_gaps": progress["resolved_gaps"],
+            "open_gaps": progress["open_gaps"],
+        },
+    )
+
+
+def loop_progress_payload(loop_id: str | None, *, latest: bool = False) -> dict[str, Any]:
+    row = resolve_loop_row(loop_id, latest=latest)
+    if row is None:
+        return broker_envelope("spine.broker.get_loop_progress", "not_found", {"loop_id": loop_id or "", "message": "loop not found"})
+    progress = collect_loop_gap_progress(str(row["loop_id"]))
+    return broker_envelope(
+        "spine.broker.get_loop_progress",
+        "done",
+        {
+            "loop": row,
+            "progress": progress,
+        },
+    )
+
+
+def request_attestation_payload(request_id: str) -> dict[str, Any]:
+    attestation = load_request_attestation(request_id)
+    if attestation is None:
+        return broker_envelope(
+            "spine.broker.get_request_attestation",
+            "not_found",
+            {"request_id": request_id, "message": "request attestation not found"},
+        )
+    return broker_envelope(
+        "spine.broker.get_request_attestation",
+        "done",
+        {
+            "request_id": request_id,
+            "attestation": attestation,
+        },
+    )
 
 
 def parse_proposals_summary() -> dict[str, int]:
@@ -1461,6 +1763,85 @@ def render_cycle_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def render_latest_loop_markdown(payload: dict[str, Any]) -> str:
+    data = payload.get("data", {})
+    loop = data.get("loop", {}) if isinstance(data, dict) else {}
+    if payload.get("status") != "done":
+        return f"spine.broker.get_latest_loop\nstatus: {payload.get('status')}\nmessage: {data.get('message', 'not found')}\n"
+    progress = data.get("progress", {}) if isinstance(data, dict) else {}
+    lines = [
+        "spine.broker.get_latest_loop",
+        f"loop_id: {loop.get('loop_id', '')}",
+        f"status: {loop.get('status', '')}",
+        f"owner: {loop.get('owner', '') or 'unassigned'}",
+        f"objective: {loop.get('objective', '') or '(none)'}",
+        f"progress_percent: {progress.get('progress_percent', 0)}",
+        f"open_gaps: {progress.get('open_gaps', 0)}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def render_loop_status_markdown(payload: dict[str, Any]) -> str:
+    data = payload.get("data", {})
+    loop = data.get("loop", {}) if isinstance(data, dict) else {}
+    if payload.get("status") != "done":
+        return f"spine.broker.get_loop_status\nstatus: {payload.get('status')}\nmessage: {data.get('message', 'not found')}\n"
+    lines = [
+        "spine.broker.get_loop_status",
+        f"loop_id: {loop.get('loop_id', '')}",
+        f"status: {loop.get('status', '')}",
+        f"owner: {loop.get('owner', '') or 'unassigned'}",
+        f"priority: {loop.get('priority', '') or 'unset'}",
+        f"created: {loop.get('created', '') or 'unknown'}",
+        f"objective: {loop.get('objective', '') or '(none)'}",
+        f"linked_gaps: {data.get('linked_gaps', 0)}",
+        f"open_gaps: {data.get('open_gaps', 0)}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def render_loop_progress_markdown(payload: dict[str, Any]) -> str:
+    data = payload.get("data", {})
+    progress = data.get("progress", {}) if isinstance(data, dict) else {}
+    loop = data.get("loop", {}) if isinstance(data, dict) else {}
+    if payload.get("status") != "done":
+        return f"spine.broker.get_loop_progress\nstatus: {payload.get('status')}\nmessage: {data.get('message', 'not found')}\n"
+    lines = [
+        "spine.broker.get_loop_progress",
+        f"loop_id: {loop.get('loop_id', '')}",
+        f"linked_gaps: {progress.get('linked_gaps', 0)}",
+        f"resolved_gaps: {progress.get('resolved_gaps', 0)}",
+        f"open_gaps: {progress.get('open_gaps', 0)}",
+        f"progress_percent: {progress.get('progress_percent', 0)}",
+        "open_gap_rows:",
+    ]
+    for row in progress.get("open_gap_rows", [])[:5]:
+        lines.append(f"  - {row.get('gap_id', '')} [{row.get('severity', '')}] {row.get('description', '')}")
+    if not progress.get("open_gap_rows"):
+        lines.append("  - (none)")
+    return "\n".join(lines) + "\n"
+
+
+def render_request_attestation_markdown(payload: dict[str, Any]) -> str:
+    data = payload.get("data", {})
+    if payload.get("status") != "done":
+        return f"spine.broker.get_request_attestation\nstatus: {payload.get('status')}\nmessage: {data.get('message', 'not found')}\n"
+    attestation = data.get("attestation", {}) if isinstance(data, dict) else {}
+    lines = [
+        "spine.broker.get_request_attestation",
+        f"request_id: {attestation.get('request_id', data.get('request_id', ''))}",
+        f"capability: {attestation.get('capability', 'unknown')}",
+        f"verdict: {attestation.get('verdict', 'unknown')}",
+        f"loop_id: {attestation.get('loop_id', '') or 'none'}",
+        f"entry_packet_hash: {attestation.get('entry_packet_hash', 'none')}",
+        f"execution_host: {attestation.get('execution_host', 'unknown')}",
+        f"execution_mode: {attestation.get('execution_mode', 'unknown')}",
+        f"governance_version: {attestation.get('governance_version', 'unknown')}",
+        f"checks_passed: {len(attestation.get('checks_passed', []))}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Unified spine control loop surfaces")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1473,6 +1854,24 @@ def build_parser() -> argparse.ArgumentParser:
     plan = sub.add_parser("plan", help="Build prioritized next-action plan")
     plan.add_argument("--window-hours", type=int, default=24)
     plan.add_argument("--json", action="store_true")
+
+    latest_loop = sub.add_parser("latest-loop", help="Read the most recent governed loop")
+    latest_loop.add_argument("--include-closed", action="store_true")
+    latest_loop.add_argument("--json", action="store_true")
+
+    loop_status = sub.add_parser("loop-status", help="Read broker-shaped status for one loop")
+    loop_status.add_argument("--loop-id")
+    loop_status.add_argument("--latest", action="store_true")
+    loop_status.add_argument("--json", action="store_true")
+
+    loop_progress = sub.add_parser("loop-progress", help="Read broker-shaped progress for one loop")
+    loop_progress.add_argument("--loop-id")
+    loop_progress.add_argument("--latest", action="store_true")
+    loop_progress.add_argument("--json", action="store_true")
+
+    request_attestation = sub.add_parser("request-attestation", help="Read attestation for one governed request/run key")
+    request_attestation.add_argument("--request-id", required=True)
+    request_attestation.add_argument("--json", action="store_true")
 
     execute = sub.add_parser("execute", help="Execute approved plan actions")
     execute.add_argument("--action-id", action="append", default=[])
@@ -1513,6 +1912,38 @@ def main() -> int:
             print(json.dumps(payload, indent=2))
         else:
             print(render_plan_markdown(payload), end="")
+        return 0
+
+    if args.command == "latest-loop":
+        payload = latest_loop_payload(include_closed=bool(args.include_closed))
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(render_latest_loop_markdown(payload), end="")
+        return 0
+
+    if args.command == "loop-status":
+        payload = loop_status_payload(args.loop_id, latest=bool(args.latest))
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(render_loop_status_markdown(payload), end="")
+        return 0
+
+    if args.command == "loop-progress":
+        payload = loop_progress_payload(args.loop_id, latest=bool(args.latest))
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(render_loop_progress_markdown(payload), end="")
+        return 0
+
+    if args.command == "request-attestation":
+        payload = request_attestation_payload(args.request_id)
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(render_request_attestation_markdown(payload), end="")
         return 0
 
     if args.command == "execute":

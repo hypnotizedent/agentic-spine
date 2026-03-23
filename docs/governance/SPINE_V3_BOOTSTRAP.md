@@ -423,6 +423,27 @@ The continuity ledger is integrity.
 Mobile needs stronger attestation than desktop because it lacks direct substrate visibility.
 The goal is execution uniformity plus proof, not instruction uniformity alone.
 
+### Implemented V3 Surfaces
+
+The first concrete V3 border and read surfaces now live in the repo as:
+
+- `ops/deprecations.yaml`
+- `session.ingress.sanitize`
+- `session.entry.packet.compile`
+- `spine.broker.get_latest_loop`
+- `spine.broker.get_loop_status`
+- `spine.broker.get_loop_progress`
+- `spine.broker.get_request_attestation`
+- `receipt.attestation.json` emitted alongside `receipt.exec.json`
+
+Translator node contract, until extracted into a narrower document:
+
+- translator owns interpretation, routing, and status translation only
+- translator must not execute, verify, merge, or declare final success
+- imported chat text must pass sanitizer before broker compilation
+- entry packets, not conversational prose, are the execution boundary
+- remote clients query broker state and request attestations instead of relying on memory
+
 ## Friction To Eliminate
 
 - multiple entry surfaces without compiled assignment

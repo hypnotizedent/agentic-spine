@@ -24,9 +24,13 @@ Usage:
     [--wave-id <WAVE-ID>] [--commit-hashes <csv>] [--loop-id <LOOP-ID>] [--gap-ids <csv>] \
     [--evidence-run-keys <csv>] [--evidence-files <csv>] [--evidence-commits <csv>] \
     [--blocker-class <none|deterministic|freshness|dependency|cleanup|policy|external>] \
+    [--request-id <CAP-...>] [--execution-host <host>] [--execution-mode <mode>] \
+    [--runtime-role <role>] [--governance-version <version>] \
+    [--entry-packet-path <path>] [--entry-packet-hash <sha256|none>] \
     [--prompt-set-id <id>] [--prompt-version <version>] [--prompt-source-refs <csv>] \
     [--prompt-source-hash <sha256|none>] [--prompt-source-hashes <ref=sha|missing,csv>] \
     [--prompt-registry-path <path>] [--prompt-resolution <capability_override|defaults|missing_registry|invalid_registry>] \
+    [--attestation-json-out <path>] \
     [--json-out <path>] [--markdown-out <path>] [--no-validate]
 
 Notes:
@@ -53,6 +57,13 @@ EVIDENCE_RUN_KEYS=""
 EVIDENCE_FILES=""
 EVIDENCE_COMMITS=""
 BLOCKER_CLASS="none"
+REQUEST_ID=""
+EXECUTION_HOST=""
+EXECUTION_MODE="capability"
+RUNTIME_ROLE="unknown"
+GOVERNANCE_VERSION=""
+ENTRY_PACKET_PATH=""
+ENTRY_PACKET_HASH="none"
 PROMPT_SET_ID="unregistered"
 PROMPT_VERSION="none"
 PROMPT_SOURCE_REFS=""
@@ -60,6 +71,7 @@ PROMPT_SOURCE_HASH="none"
 PROMPT_SOURCE_HASHES=""
 PROMPT_REGISTRY_PATH="ops/bindings/prompt.registry.yaml"
 PROMPT_RESOLUTION="missing_registry"
+ATTESTATION_JSON_OUT=""
 JSON_OUT=""
 MARKDOWN_OUT=""
 VALIDATE=1
@@ -84,6 +96,13 @@ while [[ $# -gt 0 ]]; do
     --evidence-files) EVIDENCE_FILES="${2:-}"; shift 2 ;;
     --evidence-commits) EVIDENCE_COMMITS="${2:-}"; shift 2 ;;
     --blocker-class) BLOCKER_CLASS="${2:-}"; shift 2 ;;
+    --request-id) REQUEST_ID="${2:-}"; shift 2 ;;
+    --execution-host) EXECUTION_HOST="${2:-}"; shift 2 ;;
+    --execution-mode) EXECUTION_MODE="${2:-}"; shift 2 ;;
+    --runtime-role) RUNTIME_ROLE="${2:-}"; shift 2 ;;
+    --governance-version) GOVERNANCE_VERSION="${2:-}"; shift 2 ;;
+    --entry-packet-path) ENTRY_PACKET_PATH="${2:-}"; shift 2 ;;
+    --entry-packet-hash) ENTRY_PACKET_HASH="${2:-}"; shift 2 ;;
     --prompt-set-id) PROMPT_SET_ID="${2:-}"; shift 2 ;;
     --prompt-version) PROMPT_VERSION="${2:-}"; shift 2 ;;
     --prompt-source-refs) PROMPT_SOURCE_REFS="${2:-}"; shift 2 ;;
@@ -91,6 +110,7 @@ while [[ $# -gt 0 ]]; do
     --prompt-source-hashes) PROMPT_SOURCE_HASHES="${2:-}"; shift 2 ;;
     --prompt-registry-path) PROMPT_REGISTRY_PATH="${2:-}"; shift 2 ;;
     --prompt-resolution) PROMPT_RESOLUTION="${2:-}"; shift 2 ;;
+    --attestation-json-out) ATTESTATION_JSON_OUT="${2:-}"; shift 2 ;;
     --json-out) JSON_OUT="${2:-}"; shift 2 ;;
     --markdown-out) MARKDOWN_OUT="${2:-}"; shift 2 ;;
     --no-validate) VALIDATE=0; shift ;;
@@ -106,11 +126,13 @@ done
 [[ -n "$RUN_KEYS" ]] || { echo "FAIL: --run-keys is required" >&2; exit 2; }
 [[ -n "$READY_FOR_VERIFY" ]] || { echo "FAIL: --ready-for-verify is required" >&2; exit 2; }
 
-python3 - "$SCHEMA_PATH" "$TASK_ID" "$TERMINAL_ID" "$LANE" "$STATUS" "$FILES_CHANGED" "$RUN_KEYS" "$BLOCKERS" "$READY_FOR_VERIFY" "$TIMESTAMP_UTC" "$WAVE_ID" "$COMMIT_HASHES" "$LOOP_ID" "$GAP_IDS" "$EVIDENCE_RUN_KEYS" "$EVIDENCE_FILES" "$EVIDENCE_COMMITS" "$BLOCKER_CLASS" "$PROMPT_SET_ID" "$PROMPT_VERSION" "$PROMPT_SOURCE_REFS" "$PROMPT_SOURCE_HASH" "$PROMPT_SOURCE_HASHES" "$PROMPT_REGISTRY_PATH" "$PROMPT_RESOLUTION" "$JSON_OUT" "$MARKDOWN_OUT" "$VALIDATE" <<'PY'
+python3 - "$SCHEMA_PATH" "$TASK_ID" "$TERMINAL_ID" "$LANE" "$STATUS" "$FILES_CHANGED" "$RUN_KEYS" "$BLOCKERS" "$READY_FOR_VERIFY" "$TIMESTAMP_UTC" "$WAVE_ID" "$COMMIT_HASHES" "$LOOP_ID" "$GAP_IDS" "$EVIDENCE_RUN_KEYS" "$EVIDENCE_FILES" "$EVIDENCE_COMMITS" "$BLOCKER_CLASS" "$REQUEST_ID" "$EXECUTION_HOST" "$EXECUTION_MODE" "$RUNTIME_ROLE" "$GOVERNANCE_VERSION" "$ENTRY_PACKET_PATH" "$ENTRY_PACKET_HASH" "$PROMPT_SET_ID" "$PROMPT_VERSION" "$PROMPT_SOURCE_REFS" "$PROMPT_SOURCE_HASH" "$PROMPT_SOURCE_HASHES" "$PROMPT_REGISTRY_PATH" "$PROMPT_RESOLUTION" "$ATTESTATION_JSON_OUT" "$JSON_OUT" "$MARKDOWN_OUT" "$VALIDATE" <<'PY'
 import datetime as dt
+import hashlib
 import json
 import os
 import re
+import socket
 import sys
 from pathlib import Path
 
@@ -133,6 +155,13 @@ from pathlib import Path
     evidence_files_raw,
     evidence_commits_raw,
     blocker_class,
+    request_id_raw,
+    execution_host_raw,
+    execution_mode_raw,
+    runtime_role_raw,
+    governance_version_raw,
+    entry_packet_path_raw,
+    entry_packet_hash_raw,
     prompt_set_id_raw,
     prompt_version_raw,
     prompt_source_refs_raw,
@@ -140,10 +169,11 @@ from pathlib import Path
     prompt_source_hashes_raw,
     prompt_registry_path_raw,
     prompt_resolution_raw,
+    attestation_json_out,
     json_out,
     markdown_out,
     validate_raw,
-) = sys.argv[1:29]
+) = sys.argv[1:37]
 
 validate = validate_raw == "1"
 
@@ -242,6 +272,14 @@ if loop_id:
     receipt["loop_id"] = loop_id
 if gap_ids:
     receipt["gap_ids"] = gap_ids
+
+request_id = (request_id_raw or "").strip() or (run_keys[0] if run_keys else "")
+execution_host = (execution_host_raw or "").strip() or socket.gethostname()
+execution_mode = (execution_mode_raw or "").strip() or "capability"
+runtime_role = (runtime_role_raw or "").strip() or "unknown"
+governance_version = (governance_version_raw or "").strip() or "SPINE.md@unknown"
+entry_packet_path = (entry_packet_path_raw or "").strip()
+entry_packet_hash = (entry_packet_hash_raw or "").strip() or "none"
 
 if validate:
     if not os.path.isfile(schema_path):
@@ -357,11 +395,81 @@ if markdown_out:
         md_lines.extend([f"- {b}" for b in blockers])
     md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 
+
+def sha256_text_or_missing(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return "missing"
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+if attestation_json_out:
+    att_path = Path(attestation_json_out)
+    att_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_dir = att_path.parent
+    receipt_md = receipt_dir / "receipt.md"
+    receipt_exec = receipt_dir / "receipt.exec.json"
+    output_txt = receipt_dir / "output.txt"
+    checks_passed = []
+    checks_failed = []
+    for label, path in (
+        ("receipt_markdown_present", receipt_md),
+        ("receipt_exec_present", receipt_exec if json_out else att_path),
+        ("output_present", output_txt),
+    ):
+        if path.exists():
+            checks_passed.append(label)
+        else:
+            checks_failed.append(label)
+    if status == "done":
+        checks_passed.append("verdict_done")
+    else:
+        checks_failed.append("verdict_done")
+
+    attestation = {
+        "schema_version": "1.0",
+        "request_id": request_id,
+        "capability": task_id,
+        "generated_at_utc": timestamp_utc,
+        "loop_id": loop_id,
+        "entry_packet_path": entry_packet_path,
+        "entry_packet_hash": entry_packet_hash,
+        "governance_version": governance_version,
+        "execution_host": execution_host,
+        "execution_mode": execution_mode,
+        "runtime_role": runtime_role,
+        "checks_passed": checks_passed,
+        "checks_failed": checks_failed,
+        "receipts": {
+            "markdown": {
+                "path": str(receipt_md),
+                "sha256": sha256_text_or_missing(receipt_md),
+            },
+            "exec": {
+                "path": str(receipt_exec),
+                "sha256": sha256_text_or_missing(receipt_exec),
+            },
+            "output": {
+                "path": str(output_txt),
+                "sha256": sha256_text_or_missing(output_txt),
+            },
+        },
+        "evidence_refs": receipt["evidence_refs"],
+        "prompt_lineage": receipt["prompt_lineage"],
+        "verdict": status,
+    }
+    att_path.write_text(json.dumps(attestation, indent=2) + "\n", encoding="utf-8")
+
 if not json_out:
     print(payload)
 else:
     print("receipts.exec.emit")
     print(f"json_out: {json_out}")
+    if attestation_json_out:
+        print(f"attestation_json_out: {attestation_json_out}")
     if markdown_out:
         print(f"markdown_out: {markdown_out}")
     print(f"task_id: {task_id}")

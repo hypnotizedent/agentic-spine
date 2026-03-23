@@ -1309,6 +1309,20 @@ EOF
       *) lane_id="execution" ;;
     esac
 
+    local execution_host execution_mode governance_version entry_packet_path entry_packet_hash
+    execution_host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)"
+    execution_mode="${SPINE_EXECUTION_MODE:-capability}"
+    governance_version="SPINE.md@unknown"
+    if [[ -f "$SPINE_CODE/docs/governance/SPINE.md" ]]; then
+      local governance_last_verified
+      governance_last_verified="$(awk '/^last_verified:/{print $2; exit}' "$SPINE_CODE/docs/governance/SPINE.md" 2>/dev/null | tr -d '"')"
+      if [[ -n "$governance_last_verified" ]]; then
+        governance_version="SPINE.md@${governance_last_verified}"
+      fi
+    fi
+    entry_packet_path="${SPINE_ENTRY_PACKET_PATH:-}"
+    entry_packet_hash="${SPINE_ENTRY_PACKET_HASH:-none}"
+
     if [[ -x "$SPINE_CODE/ops/plugins/core/evidence/bin/receipts-exec-emit" ]]; then
       "$SPINE_CODE/ops/plugins/core/evidence/bin/receipts-exec-emit" \
         --task-id "$name" \
@@ -1324,6 +1338,13 @@ EOF
         --evidence-files "$receipt_dir/receipt.md,$receipt_dir/output.txt" \
         --blockers "$exec_receipt_blockers" \
         --blocker-class "$exec_receipt_blocker_class" \
+        --request-id "$run_key" \
+        --execution-host "$execution_host" \
+        --execution-mode "$execution_mode" \
+        --runtime-role "${runtime_role:-unknown}" \
+        --governance-version "$governance_version" \
+        --entry-packet-path "$entry_packet_path" \
+        --entry-packet-hash "$entry_packet_hash" \
         --prompt-set-id "${prompt_lineage_set:-unregistered}" \
         --prompt-version "${prompt_lineage_version:-none}" \
         --prompt-source-refs "${prompt_lineage_source_refs_csv:-}" \
@@ -1331,6 +1352,7 @@ EOF
         --prompt-source-hashes "${prompt_lineage_source_hashes_csv:-}" \
         --prompt-registry-path "${prompt_lineage_registry_rel:-ops/bindings/prompt.registry.yaml}" \
         --prompt-resolution "${prompt_lineage_resolution:-missing_registry}" \
+        --attestation-json-out "$receipt_dir/receipt.attestation.json" \
         --json-out "$receipt_dir/receipt.exec.json" \
         >/dev/null 2>&1 || echo "WARN: receipt.exec sidecar emit failed for $run_key"
     else

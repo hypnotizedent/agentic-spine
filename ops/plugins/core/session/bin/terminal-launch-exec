@@ -489,6 +489,7 @@ LAUNCH_CWD="$SPINE_WORKTREE"
 
 TERMINAL_ROLE_CONTRACT="$SPINE_ROOT/ops/bindings/terminal.role.contract.yaml"
 ROLE_RUNTIME_CONTRACT="$SPINE_ROOT/ops/bindings/role.runtime.control.contract.yaml"
+ENTRY_PACKET_SCRIPT="$SPINE_ROOT/ops/plugins/core/session/bin/session-entry-packet"
 RESOLVED_TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-}}}"
 if [[ -n "$RESOLVED_TERMINAL_ROLE" ]]; then
   export OPS_TERMINAL_ROLE="$RESOLVED_TERMINAL_ROLE"
@@ -509,6 +510,28 @@ if [[ -z "$RESOLVED_RUNTIME_ROLE" || "$RESOLVED_RUNTIME_ROLE" == "null" ]] && [[
 fi
 [[ -n "$RESOLVED_RUNTIME_ROLE" && "$RESOLVED_RUNTIME_ROLE" != "null" ]] || RESOLVED_RUNTIME_ROLE="researcher"
 export SPINE_RUNTIME_ROLE="$RESOLVED_RUNTIME_ROLE"
+
+if [[ -n "${LOOP_ID:-}" ]]; then
+  [[ -x "$ENTRY_PACKET_SCRIPT" ]] || fail "missing entry packet compiler: $ENTRY_PACKET_SCRIPT"
+  entry_cmd=(
+    "$ENTRY_PACKET_SCRIPT"
+    --loop-id "$LOOP_ID"
+    --role "$ROLE"
+    --worktree "$LAUNCH_CWD"
+    --repo-root "${SPINE_TARGET_REPO:-$SPINE_ROOT}"
+    --terminal-name "${OPS_TERMINAL_ROLE:-${TERMINAL_NAME:-}}"
+    --runtime-role "$SPINE_RUNTIME_ROLE"
+    --emit-exports
+  )
+  if [[ -n "${LANE:-}" ]]; then
+    entry_cmd+=(--lane "$LANE")
+  fi
+  entry_exports="$("${entry_cmd[@]}" 2>/dev/null)" || fail "entry packet compile failed for loop=$LOOP_ID role=$ROLE lane=${LANE:-none}"
+  [[ -n "$entry_exports" ]] || fail "entry packet compiler returned no exports"
+  eval "$entry_exports"
+  export SPINE_ENTRY_PACKET_PATH SPINE_ENTRY_PACKET_HASH SPINE_EXECUTION_MODE
+  echo "ENTRY PACKET READY: path=${SPINE_ENTRY_PACKET_PATH:-unset} hash=${SPINE_ENTRY_PACKET_HASH:-unset} mode=${SPINE_EXECUTION_MODE:-unset}" >&2
+fi
 
 echo "ENTRY READY: role=$ROLE tool=$TOOL terminal=${TERMINAL_NAME:-unset} terminal_role=${OPS_TERMINAL_ROLE:-unset} runtime_role=${SPINE_RUNTIME_ROLE:-unset} loop=${LOOP_ID:-none} lane=${LANE:-none} repo=${SPINE_TARGET_REPO:-$SPINE_ROOT} worktree=$LAUNCH_CWD" >&2
 
