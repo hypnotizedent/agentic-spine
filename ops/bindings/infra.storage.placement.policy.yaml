@@ -20,7 +20,7 @@
 #
 # Boot drive threshold: 80% usage triggers alert. >90% is critical.
 
-version: 2
+version: 3
 updated: "2026-03-23"
 owner: "@ronny"
 
@@ -67,12 +67,12 @@ vm_storage:
   automation-stack:
     vm_id: 202
     boot_disk_gb: 100
-    current_storage_tier: tank-vms
+    current_storage_tier: data-vms
     target_storage_tier: data-vms
     data_mount: null
-    data_source: "pve:tank/vms/vm-202-disk-0 (ZFS zvol)"
-    placement_status: partial
-    description: "Boot disk is ZFS-backed zvol (not local-lvm). Docker volumes still on boot filesystem. Consider data disk for n8n/postgres."
+    data_source: "pve:data/vms/vm-202-disk-0 (ZFS zvol, 100G)"
+    placement_status: compliant
+    description: "Moved tank-vms→data-vms 2026-03-23. Boot is ZFS-backed zvol. Docker volumes on boot (small). Old tank zvol destroyed."
     gap: GAP-OP-952
 
   immich:
@@ -182,12 +182,12 @@ vm_storage:
   mint-data:
     vm_id: 212
     boot_disk_gb: 50
-    current_storage_tier: tank-vms
+    current_storage_tier: data-vms
     target_storage_tier: data-vms
     data_mount: /mnt/data
-    data_source: "/dev/vda ext4 secondary disk mounted at /mnt/data; DockerRootDir=/mnt/data/docker"
+    data_source: "pve:data/vms/vm-212-disk-0 (ZFS zvol, 320G) mounted at /mnt/data; DockerRootDir=/mnt/data/docker"
     placement_status: compliant
-    description: "Rebased to non-boot persistence: postgres/minio/redis bind mounts under /mnt/data/mint-data/* with Redis appendonly=yes. Root usage now 8% (48G boot), data disk 61% (118G)."
+    description: "Moved tank-vms→data-vms 2026-03-23. Non-boot persistence: postgres/minio/redis under /mnt/data/mint-data/*. Old tank zvol destroyed."
     gap: GAP-OP-956
 
   mint-apps:
@@ -204,74 +204,57 @@ vm_storage:
   communications-stack:
     vm_id: 214
     boot_disk_gb: 50
-    current_storage_tier: tank-vms
-    target_storage_tier: data-vms
+    current_storage_tier: data-vms
+    target_storage_tier: md1400
     data_mount: null
-    data_source: "pve:tank/vms/vm-214-disk-0 (ZFS zvol, 1.03TB refer, 4.1T with snapshots)"
-    placement_status: partial
-    description: "Boot is ZFS zvol (not local-lvm). Stalwart on named volume. Mail-archiver needs /srv/mail-archiver non-boot path. Biggest tank consumer (4.1T)."
+    data_source: "pve:data/vms/vm-214-disk-0 (ZFS zvol, 1000G)"
+    placement_status: compliant
+    description: "Moved tank-vms→data-vms 2026-03-23 (1T). data-vms is interim; archive payload (email+Paperless) final home is md1400. Old tank zvol+snapshots (4.1T) destroyed."
     gap: GAP-OP-940
 
   surveillance-stack:
     vm_id: 215
     boot_disk_gb: 50
-    current_storage_tier: tank-vms
-    target_storage_tier: data-vms
+    current_storage_tier: md1400-vms
+    target_storage_tier: md1400
     data_mount: /srv/data/surveillance
-    data_source: "/dev/vda ext4 secondary disk mounted at /mnt/data and surfaced via /srv/data/surveillance/{appstate,recordings,clips,snapshots} bind mounts."
+    data_source: "pve:md1400-vms/vm-215-disk-{0,1} (boot 50G + data 100G)"
     placement_status: compliant
-    description: "Compose authority now lives at /srv/config/surveillance, durable appstate + media payload are surfaced at /srv/data/surveillance from the 100G secondary tank-vms disk, and cache is tmpfs-backed at /srv/runtime/surveillance/cache. No active surveillance runtime remains under /home."
+    description: "Moved tank-vms→md1400-vms 2026-03-23 (direct to archive tier, not critical). Boot+data disks on md1400. Old tank zvols+snapshots (601G) destroyed."
 
   archive-smb:
     vm_id: 220
     boot_disk_gb: 8
-    current_storage_tier: md1400
-    target_storage_tier: md1400
+    current_storage_tier: data-vms
+    target_storage_tier: data-vms
     data_mount: /md1400
-    data_source: "Authoritative md1400 live-share datasets /md1400/ronny-projects and /md1400/mint-legacy; rootfs protection via lxc vzdump."
+    data_source: "pve:data/vms/subvol-220-disk-0 (rootfs 8G); serves md1400 datasets over Samba."
     placement_status: compliant
-    description: "LXC 220 serves md1400-backed archive/live-share data over Samba. Dataset contents restore from md1400 snapshot manifests; runtime rootfs restores from lxc vzdump."
+    description: "Rootfs moved tank-docker→data-vms 2026-03-23. Serves md1400-backed archive/live-share data over Samba. Old tank subvol+snapshots destroyed."
 
 # Tank → Data migration priority (ordered by size, descending):
 # VMs 204/205/206/207/211/213 stay on boot-only (no migration needed).
 remediation_priority:
-  - vm_id: 214
-    hostname: communications-stack
-    urgency: high
-    action: "PVE disk move tank/vms/vm-214-disk-0 → data-vms (4.1T, biggest tank consumer)"
-    owner: "@ronny"
+  # COMPLETED 2026-03-23:
+  # - VM 214: tank-vms→data-vms (1T, old 4.1T zvol+snaps destroyed)
+  # - VM 215: tank-vms→md1400-vms (150G, old 601G zvol+snaps destroyed)
+  # - VM 212: tank-vms→data-vms (320G, old 578G zvol+snaps destroyed)
+  # - VM 202: tank-vms→data-vms (100G, old 144G zvol+snaps destroyed)
+  # - LXC 220: tank-docker→data-vms (8G rootfs, old 717M subvol+snaps destroyed)
+  #
+  # REMAINING:
   - vm_id: 203
     hostname: immich
     urgency: high
-    action: "Migrate tank/immich → data/immich (2.67T, NFS retarget required for VM 203)"
-    owner: "@ronny"
-  - vm_id: 215
-    hostname: surveillance-stack
-    urgency: medium
-    action: "PVE disk move tank/vms/vm-215-disk-{0,1} → data-vms (600G total)"
-    owner: "@ronny"
-  - vm_id: 212
-    hostname: mint-data
-    urgency: medium
-    action: "PVE disk move tank/vms/vm-212-data → data-vms (578G)"
+    action: "Migrate tank/immich → data/immich (2.67T, NFS retarget required). Tier-1, final home on data pool."
     owner: "@ronny"
   - vm_id: 209
     hostname: download-stack
     urgency: medium
-    action: "Create data/docker/download-stack, retarget NFS, remove broken /media mount from fstab"
+    action: "zfs send tank/docker/download-stack → data/docker/download-stack, retarget NFS, remove broken /media from fstab"
     owner: "@ronny"
   - vm_id: 210
     hostname: streaming-stack
     urgency: medium
-    action: "Create data/docker/streaming-stack, retarget NFS, remove broken /media mount from fstab"
-    owner: "@ronny"
-  - vm_id: 202
-    hostname: automation-stack
-    urgency: low
-    action: "PVE disk move tank/vms/vm-202-disk-0 → data-vms (144G)"
-    owner: "@ronny"
-  - vm_id: 220
-    hostname: archive-smb
-    urgency: low
-    action: "Move LXC rootfs tank/docker/subvol-220-disk-0 → data (717M)"
+    action: "zfs send tank/docker/streaming-stack → data/docker/streaming-stack, retarget NFS, remove broken /media from fstab"
     owner: "@ronny"
