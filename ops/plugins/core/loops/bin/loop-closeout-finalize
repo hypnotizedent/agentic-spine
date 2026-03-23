@@ -20,6 +20,7 @@ Usage:
     --disposition <state> [--regression-lock-id D###-...] [--evidence <ref>] [--owner <owner>] \
     [--expiry-check <date-or-cadence>] [--root-cause <text>] \
     [--propagation-evidence <text>] \
+    [--completion-level <level>] \
     [--receipt-path <path>] [--no-close-linked-gaps] \
     [--cleanup-branch <branch-name>]
 
@@ -29,6 +30,7 @@ Validation:
   - decision is MERGE_READY or DONE
   - blocker_count is zero when explicitly declared
   - disposition: landed requires --propagation-evidence when contract enforces it
+  - disposition: landed requires --completion-level (slice_proven|domain_aligned|estate_verified|migration_landed|swap_ready)
 
 Behavior:
   - closes loop scope status to closed
@@ -53,6 +55,7 @@ RECEIPT_PATH=""
 CLOSE_LINKED_GAPS=1
 CLEANUP_BRANCH=""
 DISPOSITION=""
+COMPLETION_LEVEL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -77,6 +80,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --disposition)
       DISPOSITION="${2:-}"
+      shift 2
+      ;;
+    --completion-level)
+      COMPLETION_LEVEL="${2:-}"
       shift 2
       ;;
     --evidence)
@@ -203,6 +210,52 @@ if [[ "$DISPOSITION" == "landed" && "$PROPAGATION_REQUIRED" == "true" ]]; then
     echo "" >&2
     echo "  If propagation is incomplete, use --disposition deferred instead." >&2
     exit 1
+  fi
+fi
+
+# ── Completion level enforcement gate ──
+# When the disposition contract requires completion_level for "landed",
+# block the closeout unless --completion-level is provided and valid.
+COMPLETION_LEVEL_REQUIRED="false"
+if [[ -f "$DISPOSITION_CONTRACT" ]]; then
+  COMPLETION_LEVEL_REQUIRED="$(yq e -r '.completion_levels.enforcement.require_on_landed // false' "$DISPOSITION_CONTRACT")"
+fi
+if [[ "$DISPOSITION" == "landed" && "$COMPLETION_LEVEL_REQUIRED" == "true" ]]; then
+  if [[ -z "$COMPLETION_LEVEL" ]]; then
+    cl_message="$(yq e -r '.completion_levels.enforcement.message // ""' "$DISPOSITION_CONTRACT" 2>/dev/null || true)"
+    echo "loop.closeout.finalize FAIL: ${cl_message:-disposition: landed requires --completion-level}" >&2
+    echo "" >&2
+    echo "  Allowed levels:" >&2
+    while IFS= read -r cl_item; do
+      [[ -n "$cl_item" && "$cl_item" != "null" ]] && echo "    - $cl_item" >&2
+    done < <(yq e -r '.completion_levels.allowed[]?' "$DISPOSITION_CONTRACT" 2>/dev/null || true)
+    echo "" >&2
+    echo "  If completion level is unclear, use --disposition deferred instead." >&2
+    exit 1
+  fi
+  # Validate completion level against allowed list
+  cl_csv=""
+  while IFS= read -r cl_item; do
+    [[ -n "$cl_item" && "$cl_item" != "null" ]] || continue
+    if [[ -n "$cl_csv" ]]; then
+      cl_csv+=",$cl_item"
+    else
+      cl_csv="$cl_item"
+    fi
+  done < <(yq e -r '.completion_levels.allowed[]?' "$DISPOSITION_CONTRACT" 2>/dev/null || true)
+  if [[ -n "$cl_csv" ]]; then
+    IFS=',' read -r -a ALLOWED_CL <<< "$cl_csv"
+    cl_ok=0
+    for allowed_cl in "${ALLOWED_CL[@]}"; do
+      if [[ "$COMPLETION_LEVEL" == "$allowed_cl" ]]; then
+        cl_ok=1
+        break
+      fi
+    done
+    if [[ "$cl_ok" -ne 1 ]]; then
+      echo "loop.closeout.finalize FAIL: invalid completion_level '$COMPLETION_LEVEL' (allowed: ${cl_csv//,/|})" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -425,7 +478,7 @@ fi
 
 # Atomic frontmatter status mutation.
 tmp_file="$(mktemp "${SCOPE_FILE}.tmp.XXXXXX")"
-if ! python3 - "$SCOPE_FILE" "$tmp_file" "$DISPOSITION" "$timestamp" <<'PY'
+if ! python3 - "$SCOPE_FILE" "$tmp_file" "$DISPOSITION" "$timestamp" "$COMPLETION_LEVEL" <<'PY'
 import sys
 from pathlib import Path
 
@@ -433,6 +486,7 @@ scope_path = Path(sys.argv[1])
 tmp_path = Path(sys.argv[2])
 disposition = sys.argv[3].strip()
 timestamp = sys.argv[4].strip()
+completion_level = sys.argv[5].strip() if len(sys.argv) > 5 else ""
 
 lines = scope_path.read_text(encoding="utf-8").splitlines()
 if not lines or lines[0].strip() != "---":
@@ -461,6 +515,8 @@ updates = {
     "closed_at": f'closed_at: "{timestamp}"',
     "disposition": f"disposition: {disposition}",
 }
+if completion_level:
+    updates["completion_level"] = f"completion_level: {completion_level}"
 
 for key, line in updates.items():
     if key in indices:
@@ -498,6 +554,7 @@ cat > "$RECEIPT_PATH" <<EOF
 - loop_id: $LOOP_ID
 - status: closed
 - disposition: $DISPOSITION
+- completion_level: ${COMPLETION_LEVEL:-n/a}
 - acceptance_matrix: $ACCEPTANCE_MATRIX
 - matrix_decision: $matrix_decision
 - matrix_run_key_count: $matrix_run_keys
@@ -595,6 +652,8 @@ fi
 echo "loop.closeout.finalize"
 echo "loop_id=$LOOP_ID"
 echo "acceptance_matrix=$ACCEPTANCE_MATRIX"
+echo "disposition=$DISPOSITION"
+echo "completion_level=${COMPLETION_LEVEL:-n/a}"
 echo "linked_open_gaps_before=$linked_open_count"
 echo "linked_gaps_closed=$closed_gap_count"
 echo "receipt=$RECEIPT_PATH"
