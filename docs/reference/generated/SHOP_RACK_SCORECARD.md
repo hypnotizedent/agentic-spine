@@ -1,14 +1,14 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-22
+last_verified: 2026-03-23
 scope: shop-rack-scorecard
 source_binding: ops/bindings/shop.storage.map.yaml
 ---
 
 # Shop Rack Scorecard
 
-- Generated: `2026-03-22T17:35:09Z`
+- Generated: `2026-03-23T15:52:35Z`
 - Rebuild: `./bin/ops cap run infra.shop.storage.authority.build`
 - Active runtimes: `12`
 - Tombstones: `1`
@@ -70,7 +70,7 @@ source_binding: ops/bindings/shop.storage.map.yaml
 | 207 | ai-consolidation | vm | auto | boot-only | boot-disk:ai-consolidation boot disk (200G), boot-disk:/opt/stacks/ai-consolidation | pve-vzdump-primary | private-only | 2 probes |
 | 211 | finance-stack | vm | auto | boot-only | boot-disk:finance-stack boot disk (96G), boot-disk:/opt/stacks/finance | pve-vzdump-primary, r730xd-finance-backups | docs.mintprints.com, docs.ronny.works, finances.mintprints.com, finances.ronny.works, firefly.ronny.works, investments.mintprints.com, investments.ronny.works | 4 probes |
 | 212 | mint-data | vm | auto | boot-only | tank-vms:/dev/vda ext4 secondary disk mounted at /mnt/data; DockerRootDir=/mnt/data/docker, boot-disk:/opt/stacks/mint-data | pve-vzdump-primary, r730xd-mint-backups | private-only | 1 probes |
-| 213 | mint-apps | vm | auto | boot-only | boot-disk:mint-apps boot disk (50G), boot-disk:/opt/stacks/mint-apps | pve-vzdump-primary | suppliers.mintprints.co, customer.mintprints.co, customer.mintprints.com, estimator.mintprints.co, mintprints-app.ronny.works, mintprints.com, pricing.mintprints.co, pricing.mintprints.com, shipping.mintprints.co, shipping.mintprints.com, www.mintprints.com | 9 probes |
+| 213 | mint-apps | vm | auto | boot-only | boot-disk:mint-apps boot disk (50G), boot-disk:/opt/stacks/mint-apps | pve-vzdump-primary | suppliers.mintprints.co, api.mintprints.com, customer.mintprints.co, customer.mintprints.com, estimator.mintprints.co, mintprints-app.ronny.works, mintprints.com, pricing.mintprints.co, pricing.mintprints.com, shipping.mintprints.co, shipping.mintprints.com, www.mintprints.com | 13 probes |
 | 214 | communications-stack | vm | auto | tank-vms | tank:tank/vms/vm-214-disk-0, /opt/stacks/communications-stack, /srv/mail-archiver/backups | pve-vzdump-primary, r730xd-communications-backups | mail-archive.ronny.works | 2 probes |
 | 215 | surveillance-stack | vm | auto | tank-vms | tank:/dev/vda ext4 secondary disk mounted at /mnt/data and surfaced via /srv/data/surveillance/{appstate,recordings,clips,snapshots} bind mounts. | pve-vzdump-primary | private-only | 1 probes |
 | 220 | archive-smb | lxc | auto | md1400 | md1400:md1400 live-share datasets, md1400:/md1400/archive/live-share/mint-legacy, md1400:/md1400/archive/live-share/ronny-projects | r730xd-archive-smb-snapshots | private-only | 0 probes |
