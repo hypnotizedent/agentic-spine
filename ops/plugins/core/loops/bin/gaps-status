@@ -11,24 +11,60 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
-GAPS="$ROOT/ops/bindings/operational.gaps.yaml"
 SCOPES="$SPINE_STATE/loop-scopes"
+AUTH_DUMP="$(
+  python3 - "$ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
 
-command -v yq >/dev/null 2>&1 || { echo "ERROR: yq required"; exit 1; }
+root = Path(sys.argv[1]).resolve()
+lib_dir = root / "ops" / "plugins" / "core" / "lifecycle" / "lib"
+sys.path.insert(0, str(lib_dir))
+
+import gaps_sql_authority as gsa
+
+db_path, gaps_yaml = gsa.resolve_paths(root)
+conn = gsa.connect(db_path)
+gsa.ensure_schema(conn)
+gsa.bootstrap_from_yaml(conn, gaps_yaml)
+gaps = gsa.fetch_gaps(conn)
+conn.close()
+
+total = len(gaps)
+open_count = sum(1 for g in gaps if g.get("status") == "open")
+fixed_count = sum(1 for g in gaps if g.get("status") == "fixed")
+closed_count = sum(1 for g in gaps if g.get("status") == "closed")
+null_status = sum(1 for g in gaps if not str(g.get("status") or "").strip())
+
+print(f"TOTAL={total}")
+print(f"OPEN={open_count}")
+print(f"FIXED={fixed_count}")
+print(f"CLOSED={closed_count}")
+print(f"NULL_STATUS={null_status}")
+for gap in gaps:
+    if gap.get("status") != "open":
+        continue
+    gap_id = str(gap.get("id") or "").strip()
+    severity = str(gap.get("severity") or "").strip()
+    parent_loop = str(gap.get("parent_loop") or "null").strip() or "null"
+    print(f"OPEN_GAP|{gap_id}|{severity}|{parent_loop}")
+PY
+)" || {
+  echo "ERROR: unable to read gaps authority" >&2
+  exit 1
+}
+
+total="$(printf '%s\n' "$AUTH_DUMP" | awk -F= '/^TOTAL=/{print $2; exit}')"
+open="$(printf '%s\n' "$AUTH_DUMP" | awk -F= '/^OPEN=/{print $2; exit}')"
+fixed="$(printf '%s\n' "$AUTH_DUMP" | awk -F= '/^FIXED=/{print $2; exit}')"
+closed="$(printf '%s\n' "$AUTH_DUMP" | awk -F= '/^CLOSED=/{print $2; exit}')"
+null_status="$(printf '%s\n' "$AUTH_DUMP" | awk -F= '/^NULL_STATUS=/{print $2; exit}')"
 
 echo "═══════════════════════════════════════════════════════════════"
 echo "  Gap-Loop Reconciliation"
 echo "═══════════════════════════════════════════════════════════════"
 echo
-
-# Count gaps by status
-total=$(yq e '.gaps | length' "$GAPS")
-open=$(yq e '[.gaps[] | select(.status == "open")] | length' "$GAPS")
-fixed=$(yq e '[.gaps[] | select(.status == "fixed")] | length' "$GAPS")
-closed=$(yq e '[.gaps[] | select(.status == "closed")] | length' "$GAPS")
-
-# Check for gaps with null/missing status
-null_status=$(yq e '[.gaps[] | select(.status == null or .status == "")] | length' "$GAPS")
 
 echo "Gaps: $total total | $open open | $fixed fixed | $closed closed"
 if [[ "$null_status" -gt 0 ]]; then
@@ -73,7 +109,7 @@ while IFS='|' read -r gap_id severity parent_loop; do
       echo "             note: $blocked_by"
     fi
   fi
-done < <(yq e '.gaps[] | select(.status == "open") | .id + "|" + .severity + "|" + (.parent_loop // "null")' "$GAPS" 2>/dev/null)
+done < <(printf '%s\n' "$AUTH_DUMP" | awk -F'|' '$1=="OPEN_GAP"{print $2 "|" $3 "|" $4}')
 
 echo
 echo "──────────────────────────────────────────────────────────────"
