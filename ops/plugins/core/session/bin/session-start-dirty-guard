@@ -51,15 +51,51 @@ if ! git -C "$CURRENT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
   exit 1
 fi
 
-# Check if current working directory is dirty
-DIRTY_COUNT=$(git -C "$CURRENT_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+# V3 convergence: Use context-aware dirty check
+CONTEXT_CHECKER="$ROOT/ops/plugins/core/session/bin/session-context-aware-dirty-check"
 
-if [[ "$DIRTY_COUNT" -eq 0 ]]; then
-  # Clean, all good
-  exit 0
+if [[ -x "$CONTEXT_CHECKER" ]]; then
+  # Use smart context-aware check
+  CONTEXT_JSON=$("$CONTEXT_CHECKER" --json --repo-path "$CURRENT_DIR" 2>/dev/null || echo '{}')
+
+  DIRTY_COUNT=$(echo "$CONTEXT_JSON" | jq -r '.dirty_count // 0' 2>/dev/null || echo 0)
+  SAFE_TO_PROCEED=$(echo "$CONTEXT_JSON" | jq -r '.safe_to_proceed // false' 2>/dev/null || echo false)
+  REASON=$(echo "$CONTEXT_JSON" | jq -r '.reason // "unknown"' 2>/dev/null || echo unknown)
+
+  if [[ "$DIRTY_COUNT" -eq 0 ]]; then
+    # Clean, all good
+    exit 0
+  fi
+
+  if [[ "$SAFE_TO_PROCEED" == "true" ]]; then
+    # Dirty but safe (governed operations in hotspot zones)
+    echo "INFO: Working directory has $DIRTY_COUNT uncommitted changes (governed operations)" >&2
+    echo "Context: $REASON" >&2
+    echo "" >&2
+    git -C "$CURRENT_DIR" status --short >&2
+    echo "" >&2
+    echo "Proceeding safely - changes are from governed operations in other terminals" >&2
+
+    # Log context for audit trail
+    LOG_DIR="$SPINE_STATE/dirty-context-logs"
+    mkdir -p "$LOG_DIR"
+    LOG_FILE="$LOG_DIR/context-aware-log.jsonl"
+
+    echo "$CONTEXT_JSON" | jq -c '. + {timestamp_utc: "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'", pid: '$$'}' >> "$LOG_FILE" 2>/dev/null || true
+
+    exit 0
+  fi
+else
+  # Fallback: simple dirty check
+  DIRTY_COUNT=$(git -C "$CURRENT_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+
+  if [[ "$DIRTY_COUNT" -eq 0 ]]; then
+    # Clean, all good
+    exit 0
+  fi
 fi
 
-# Working directory is dirty
+# Working directory is dirty (and not safe for auto-proceed)
 if [[ "$ALLOW_DIRTY" == "true" ]]; then
   if [[ -z "$DIRTY_REASON" ]]; then
     echo "ERROR: --allow-dirty requires --dirty-reason '<reason>'" >&2

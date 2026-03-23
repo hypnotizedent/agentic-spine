@@ -261,6 +261,19 @@ def run_session_bootstrap(args: argparse.Namespace, session_start_script: Path) 
     }
 
 
+def run_stale_cleanup() -> dict[str, Any]:
+    """Auto-cleanup stale worktrees/branches from closed loops."""
+    cleanup_script = ROOT / "ops/plugins/core/session/bin/session-stale-cleanup"
+    if not cleanup_script.exists():
+        return {"status": "skipped", "message": "cleanup script not available"}
+
+    rc, payload, stderr = run_json_command([str(cleanup_script), "--json"])
+    if rc != 0:
+        return {"status": "failed", "message": stderr or "stale cleanup failed"}
+
+    return payload
+
+
 def collect_friction_snapshot() -> dict[str, Any]:
     queue_script = ROOT / "ops/plugins/core/lifecycle/bin/friction-queue-status"
     lifecycle_script = ROOT / "ops/plugins/core/ops/bin/worktree-lifecycle-reconcile"
@@ -380,6 +393,8 @@ def main() -> int:
 
     try:
         repo_identity = assert_attach_repo_identity(args)
+        # V3 convergence: Auto-cleanup stale worktrees before bootstrap
+        stale_cleanup = run_stale_cleanup()
         startup = run_session_bootstrap(args, session_start_script)
         startup_exports = startup.get("exports", {})
         if (not args.terminal_name) and startup_exports.get("OPS_TERMINAL_ROLE"):
@@ -444,6 +459,7 @@ def main() -> int:
                     },
                     "startup": startup,
                     "repo_identity": repo_identity,
+                    "stale_cleanup": stale_cleanup,
                     "sanitize": sanitize_payload,
                     "friction_snapshot": friction_snapshot,
                     "sanitized_output_path": sanitized_output_path,
@@ -482,6 +498,9 @@ def main() -> int:
     print("session.v3.attach")
     print(f"session_id: {startup_exports.get('SPINE_SESSION_ID', 'none')}")
     print(f"startup_lane: {startup.get('lane', 'none')}")
+    stale_cleaned = stale_cleanup.get('cleaned', 0) if isinstance(stale_cleanup, dict) else 0
+    if stale_cleaned > 0:
+        print(f"stale_cleanup: {stale_cleaned} worktree(s) removed")
     print(f"loop_id: {loop_id or 'none'}")
     print(f"resolution: {loop_resolution}")
     print(f"packet_path: {entry_data.get('packet_path', '')}")

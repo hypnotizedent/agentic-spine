@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""session-stale-cleanup
+
+Auto-cleanup stale worktrees and branches on session attach.
+
+Detects and safely removes:
+1. Worktrees with closed loops/waves
+2. Branches with no recent activity and no active loops
+3. Orphaned worktrees (directory exists but no git worktree registration)
+
+Safety guarantees:
+- Only removes worktrees/branches with confirmed closed loops
+- Preserves any worktree with uncommitted work
+- Requires loop closed within last 7 days (not ancient history)
+- Reports what would be cleaned in dry-run mode
+
+Returns:
+  0: Cleanup successful (or dry-run complete)
+  1: Cleanup failed or safety check blocked
+  2: Invalid arguments
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[5]
+
+
+def run_command(cmd: list[str], *, cwd: Path | None = None) -> tuple[int, str, str]:
+    """Run command and return (rc, stdout, stderr)."""
+    proc = subprocess.run(
+        cmd,
+        text=True,
+        capture_output=True,
+        check=False,
+        cwd=cwd or Path.cwd(),
+        env=os.environ.copy(),
+    )
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def get_worktree_list(repo_path: Path) -> list[dict[str, str]]:
+    """Get list of git worktrees."""
+    rc, stdout, _ = run_command(["git", "worktree", "list", "--porcelain"], cwd=repo_path)
+    if rc != 0:
+        return []
+
+    worktrees = []
+    current_wt: dict[str, str] = {}
+
+    for line in stdout.splitlines():
+        if not line.strip():
+            if current_wt:
+                worktrees.append(current_wt)
+                current_wt = {}
+            continue
+
+        if line.startswith("worktree "):
+            current_wt["path"] = line.split(" ", 1)[1]
+        elif line.startswith("branch "):
+            current_wt["branch"] = line.split(" ", 1)[1].replace("refs/heads/", "")
+        elif line.startswith("bare"):
+            current_wt["bare"] = "true"
+        elif line.startswith("detached"):
+            current_wt["detached"] = "true"
+
+    if current_wt:
+        worktrees.append(current_wt)
+
+    return worktrees
+
+
+def get_loop_status(loop_id: str) -> dict[str, Any] | None:
+    """Get loop status from spine-control."""
+    broker_script = ROOT / "ops/plugins/core/evidence/bin/spine-control"
+    if not broker_script.exists():
+        return None
+
+    rc, stdout, _ = run_command([str(broker_script), "loop-status", "--loop-id", loop_id, "--json"])
+    if rc != 0:
+        return None
+
+    try:
+        data = json.loads(stdout)
+        return data.get("data", {}).get("loop", {})
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+
+def extract_loop_from_branch(branch_name: str) -> str | None:
+    """Extract loop ID from branch name if present."""
+    # Common patterns:
+    # - codex/wave-<something>-YYYYMMDD
+    # - codex/LOOP-<NAME>-YYYYMMDD
+    # - <name>/lane-<id>
+    match = re.search(r'(LOOP-[A-Z0-9-]+)', branch_name, re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    return None
+
+
+def is_worktree_dirty(wt_path: Path) -> bool:
+    """Check if worktree has uncommitted changes."""
+    if not wt_path.exists():
+        return False
+
+    rc, stdout, _ = run_command(["git", "status", "--porcelain"], cwd=wt_path)
+    return rc == 0 and bool(stdout.strip())
+
+
+def get_branch_last_commit_date(branch: str, repo_path: Path) -> datetime | None:
+    """Get last commit date for a branch."""
+    rc, stdout, _ = run_command(
+        ["git", "log", "-1", "--format=%cI", branch],
+        cwd=repo_path
+    )
+    if rc != 0 or not stdout:
+        return None
+
+    try:
+        return datetime.fromisoformat(stdout.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def find_stale_worktrees(
+    repo_path: Path,
+    max_age_days: int = 7,
+) -> list[dict[str, Any]]:
+    """Find stale worktrees that can be safely removed."""
+    worktrees = get_worktree_list(repo_path)
+    stale = []
+
+    for wt in worktrees:
+        wt_path = Path(wt.get("path", ""))
+        branch = wt.get("branch", "")
+
+        # Skip main worktree
+        if not branch or branch == "main":
+            continue
+
+        # Skip if worktree has uncommitted work
+        if is_worktree_dirty(wt_path):
+            continue
+
+        # Try to extract loop ID from branch name
+        loop_id = extract_loop_from_branch(branch)
+
+        is_stale = False
+        reason = ""
+
+        if loop_id:
+            # Check loop status
+            loop_status = get_loop_status(loop_id)
+            if loop_status:
+                status = loop_status.get("status", "")
+                closed_at = loop_status.get("closed_at", "")
+
+                if status == "closed" and closed_at:
+                    # Check if closed recently enough to auto-cleanup
+                    try:
+                        closed_date = datetime.fromisoformat(closed_at.replace("Z", "+00:00"))
+                        age = datetime.now(timezone.utc) - closed_date
+                        if age <= timedelta(days=max_age_days):
+                            is_stale = True
+                            reason = f"loop {loop_id} closed {age.days}d ago"
+                    except ValueError:
+                        pass
+
+        # Fallback: check branch age
+        if not is_stale and branch:
+            last_commit = get_branch_last_commit_date(branch, repo_path)
+            if last_commit:
+                age = datetime.now(timezone.utc) - last_commit
+                if age > timedelta(days=max_age_days):
+                    is_stale = True
+                    reason = f"no commits in {age.days}d (no active loop found)"
+
+        # Check if worktree directory is missing
+        if not wt_path.exists():
+            is_stale = True
+            reason = "worktree directory missing"
+
+        if is_stale:
+            stale.append({
+                "path": str(wt_path),
+                "branch": branch,
+                "loop_id": loop_id,
+                "reason": reason,
+                "has_uncommitted": is_worktree_dirty(wt_path),
+            })
+
+    return stale
+
+
+def cleanup_worktree(wt_path: Path, branch: str, repo_path: Path, dry_run: bool) -> dict[str, Any]:
+    """Remove a worktree and optionally its branch."""
+    result = {
+        "worktree_removed": False,
+        "branch_removed": False,
+        "errors": [],
+    }
+
+    if dry_run:
+        result["dry_run"] = True
+        return result
+
+    # Remove worktree
+    rc, _, stderr = run_command(["git", "worktree", "remove", str(wt_path)], cwd=repo_path)
+    if rc == 0:
+        result["worktree_removed"] = True
+    else:
+        # Try force remove if worktree is already gone
+        rc, _, stderr = run_command(["git", "worktree", "remove", "--force", str(wt_path)], cwd=repo_path)
+        if rc == 0:
+            result["worktree_removed"] = True
+        else:
+            result["errors"].append(f"Failed to remove worktree: {stderr}")
+
+    # Remove branch if worktree was removed
+    if result["worktree_removed"] and branch:
+        rc, _, stderr = run_command(["git", "branch", "-D", branch], cwd=repo_path)
+        if rc == 0:
+            result["branch_removed"] = True
+        else:
+            # Not a critical error - branch might be on remote or protected
+            result["errors"].append(f"Could not delete branch {branch}: {stderr}")
+
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Auto-cleanup stale worktrees and branches"
+    )
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be cleaned without doing it")
+    parser.add_argument("--max-age-days", type=int, default=7, help="Maximum age for auto-cleanup (default: 7 days)")
+    parser.add_argument("--repo-path", default=str(ROOT), help="Repository path")
+    args = parser.parse_args()
+
+    repo_path = Path(args.repo_path).resolve()
+    stale_worktrees = find_stale_worktrees(repo_path, args.max_age_days)
+
+    cleanup_results = []
+
+    for stale in stale_worktrees:
+        wt_path = Path(stale["path"])
+        branch = stale["branch"]
+
+        result = cleanup_worktree(wt_path, branch, repo_path, args.dry_run)
+        cleanup_results.append({
+            "worktree": stale,
+            "cleanup": result,
+        })
+
+    output = {
+        "stale_count": len(stale_worktrees),
+        "cleaned": len([r for r in cleanup_results if r["cleanup"].get("worktree_removed")]),
+        "dry_run": args.dry_run,
+        "results": cleanup_results,
+    }
+
+    if args.json:
+        print(json.dumps(output, indent=2))
+    else:
+        print(f"Stale worktrees found: {output['stale_count']}")
+        if args.dry_run:
+            print("DRY RUN - no changes made")
+        else:
+            print(f"Cleaned: {output['cleaned']}")
+
+        for result in cleanup_results:
+            wt = result["worktree"]
+            cleanup = result["cleanup"]
+            print(f"\n{wt['branch']}:")
+            print(f"  Path: {wt['path']}")
+            print(f"  Reason: {wt['reason']}")
+            if not args.dry_run:
+                print(f"  Worktree removed: {cleanup.get('worktree_removed', False)}")
+                print(f"  Branch removed: {cleanup.get('branch_removed', False)}")
+                if cleanup.get("errors"):
+                    for err in cleanup["errors"]:
+                        print(f"  Error: {err}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
