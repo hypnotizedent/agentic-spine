@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_SPINE_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
+if [[ -z "${SPINE_ROOT:-}" || ! -r "${SPINE_ROOT}/ops/plugins/providers/gitea/lib/gitea-api.sh" ]]; then
+  SPINE_ROOT="$DEFAULT_SPINE_ROOT"
+fi
+
+# shellcheck source=/Users/ronnyworks/code/agentic-spine/ops/plugins/providers/gitea/lib/gitea-api.sh
+source "$SPINE_ROOT/ops/plugins/providers/gitea/lib/gitea-api.sh"
+
+usage() {
+  cat <<'EOF'
+gitea-pr-merge - governed Gitea pull request merge surface
+
+Usage:
+  gitea-pr-merge --pr <number> [--repo owner/repo] [--reason <text>] [--merge-style merge|rebase|rebase-merge|squash|fast-forward-only|manually-merged] [--delete-branch-after-merge] [--dry-run] [--json]
+EOF
+}
+
+REPO_SLUG=""
+PR_NUMBER=""
+REASON=""
+MERGE_STYLE="merge"
+DELETE_BRANCH_AFTER_MERGE=0
+DRY_RUN=0
+JSON_OUT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) REPO_SLUG="${2:-}"; shift 2 ;;
+    --pr) PR_NUMBER="${2:-}"; shift 2 ;;
+    --reason) REASON="${2:-}"; shift 2 ;;
+    --merge-style) MERGE_STYLE="${2:-}"; shift 2 ;;
+    --delete-branch-after-merge) DELETE_BRANCH_AFTER_MERGE=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --json) JSON_OUT=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) gitea_stop "unknown argument: $1" ;;
+  esac
+done
+
+[[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || gitea_stop "--pr must be numeric"
+case "$MERGE_STYLE" in
+  merge|rebase|rebase-merge|squash|fast-forward-only|manually-merged) ;;
+  *) gitea_stop "--merge-style must be one of: merge, rebase, rebase-merge, squash, fast-forward-only, manually-merged" ;;
+esac
+
+gitea_require_tool python3
+repo_slug="$(gitea_repo_slug_resolve "$REPO_SLUG")"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    python3 - "$repo_slug" "$PR_NUMBER" "$REASON" "$MERGE_STYLE" "$DELETE_BRANCH_AFTER_MERGE" <<'PY'
+import json
+import sys
+
+print(json.dumps({
+    "surface": "gitea.pr.merge",
+    "repo": sys.argv[1],
+    "number": int(sys.argv[2]),
+    "reason": sys.argv[3],
+    "merge_style": sys.argv[4],
+    "delete_branch_after_merge": sys.argv[5] == "1",
+    "status": "dry_run",
+}, indent=2))
+PY
+  else
+    echo "gitea.pr.merge"
+    echo "repo: $repo_slug"
+    echo "number: $PR_NUMBER"
+    echo "reason: ${REASON:-n/a}"
+    echo "merge_style: $MERGE_STYLE"
+    echo "delete_branch_after_merge: $([[ "$DELETE_BRANCH_AFTER_MERGE" -eq 1 ]] && echo true || echo false)"
+    echo "status: dry_run"
+  fi
+  exit 0
+fi
+
+gitea_require_mutation_capability
+owner="$(gitea_repo_owner "$repo_slug")"
+repo="$(gitea_repo_name "$repo_slug")"
+pr_payload="$(gitea_api_request GET "/api/v1/repos/${owner}/${repo}/pulls/${PR_NUMBER}")"
+
+merge_payload="$(
+  GITEA_PR_PAYLOAD="$pr_payload" python3 - "$MERGE_STYLE" "$DELETE_BRANCH_AFTER_MERGE" "$REASON" <<'PY'
+import json
+import os
+import sys
+
+merge_style, delete_branch_flag, reason = sys.argv[1:4]
+pr = json.loads(os.environ["GITEA_PR_PAYLOAD"])
+head = pr.get("head") or {}
+base = pr.get("base") or {}
+
+state = str(pr.get("state") or "")
+draft = bool(pr.get("draft", False))
+merged = bool(pr.get("merged", False))
+mergeable = pr.get("mergeable")
+base_ref = str(base.get("ref") or "")
+
+if state != "open":
+    raise SystemExit(f"pull request must be open before merge (state={state or 'unknown'})")
+if draft:
+    raise SystemExit("draft pull request cannot be merged autonomously")
+if merged:
+    raise SystemExit("pull request is already merged")
+if mergeable is not True:
+    raise SystemExit(f"pull request is not mergeable (mergeable={mergeable!r})")
+if base_ref != "main":
+    raise SystemExit(f"pull request must target main for autonomous merge (base_ref={base_ref or 'unknown'})")
+
+payload = {
+    "Do": merge_style,
+    "delete_branch_after_merge": delete_branch_flag == "1",
+}
+head_sha = str(head.get("sha") or "").strip()
+if head_sha:
+    payload["head_commit_id"] = head_sha
+if reason.strip():
+    payload["MergeMessageField"] = reason.strip()
+
+print(json.dumps(payload, separators=(",", ":")))
+PY
+)" || gitea_stop "pull request failed merge preconditions"
+
+gitea_api_request POST "/api/v1/repos/${owner}/${repo}/pulls/${PR_NUMBER}/merge" "$merge_payload" >/dev/null
+status_payload="$(gitea_api_request GET "/api/v1/repos/${owner}/${repo}/pulls/${PR_NUMBER}")"
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  GITEA_PR_PAYLOAD="$status_payload" python3 - "$repo_slug" "$PR_NUMBER" "$REASON" "$MERGE_STYLE" "$DELETE_BRANCH_AFTER_MERGE" <<'PY'
+import json
+import os
+import sys
+
+pr = json.loads(os.environ["GITEA_PR_PAYLOAD"])
+head = pr.get("head") or {}
+base = pr.get("base") or {}
+print(json.dumps({
+    "surface": "gitea.pr.merge",
+    "repo": sys.argv[1],
+    "number": int(sys.argv[2]),
+    "reason": sys.argv[3],
+    "merge_style": sys.argv[4],
+    "delete_branch_after_merge": sys.argv[5] == "1",
+    "title": pr.get("title"),
+    "state": pr.get("state"),
+    "draft": pr.get("draft", False),
+    "merged": pr.get("merged", False),
+    "mergeable": pr.get("mergeable"),
+    "head": head.get("label") or head.get("ref"),
+    "base": base.get("label") or base.get("ref"),
+    "url": pr.get("html_url"),
+    "status": "merged",
+}, indent=2))
+PY
+  exit 0
+fi
+
+GITEA_PR_PAYLOAD="$status_payload" python3 - "$repo_slug" "$PR_NUMBER" "$REASON" "$MERGE_STYLE" "$DELETE_BRANCH_AFTER_MERGE" <<'PY'
+import json
+import os
+import sys
+
+pr = json.loads(os.environ["GITEA_PR_PAYLOAD"])
+head = pr.get("head") or {}
+base = pr.get("base") or {}
+print("gitea.pr.merge")
+print(f"repo: {sys.argv[1]}")
+print(f"number: {sys.argv[2]}")
+print(f"reason: {sys.argv[3] or 'n/a'}")
+print(f"merge_style: {sys.argv[4]}")
+print(f"delete_branch_after_merge: {'true' if sys.argv[5] == '1' else 'false'}")
+print(f"title: {pr.get('title')}")
+print(f"state: {pr.get('state')}")
+print(f"draft: {pr.get('draft', False)}")
+print(f"merged: {pr.get('merged', False)}")
+print(f"mergeable: {pr.get('mergeable')}")
+print(f"head: {head.get('label') or head.get('ref') or 'unknown'}")
+print(f"base: {base.get('label') or base.get('ref') or 'unknown'}")
+print(f"url: {pr.get('html_url') or 'n/a'}")
+print("status: merged")
+PY

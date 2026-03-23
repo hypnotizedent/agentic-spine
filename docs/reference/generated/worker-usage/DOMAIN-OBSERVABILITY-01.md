@@ -19,12 +19,13 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `ops/plugins/infra/observability/`
 - `ops/plugins/providers/gitea/`
 
-## Capabilities (15)
+## Capabilities (16)
 - `alerting.dispatch`
 - `alerting.probe`
 - `alerting.status`
 - `gitea.pr.close`
 - `gitea.pr.list`
+- `gitea.pr.merge`
 - `gitea.pr.status`
 - `gitea.status`
 - `idrac.health.status`
