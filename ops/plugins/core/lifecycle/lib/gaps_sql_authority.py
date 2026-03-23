@@ -1062,3 +1062,38 @@ def project_friction_to_ndjson(conn: sqlite3.Connection, ndjson_path: Path) -> d
         "by_status": by_status,
         "ndjson_hash": ndjson_hash,
     }
+
+
+# ── Friction: Compatibility aliases ──────────────────────────────
+# Scripts authored by parallel workers import these names. They delegate to
+# the canonical functions above so there is exactly one implementation.
+
+
+def ensure_friction_schema(conn: sqlite3.Connection) -> None:
+    """Alias: friction tables are created by ensure_schema()."""
+    ensure_schema(conn)
+
+
+def fetch_all_friction(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Alias for list_friction(conn, status=None)."""
+    return list_friction(conn)
+
+
+def fetch_friction_by_status(conn: sqlite3.Connection, status: str) -> list[dict[str, Any]]:
+    """Alias for list_friction(conn, status=status)."""
+    return list_friction(conn, status=status)
+
+
+def fetch_friction_filed_missing_gap_id(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return filed friction items that have no filed_gap_id."""
+    cur = conn.execute(
+        "SELECT * FROM friction WHERE status = 'filed' AND (filed_gap_id IS NULL OR filed_gap_id = '')"
+    )
+    return [friction_from_row(r) for r in cur.fetchall()]
+
+
+def get_friction_by_fingerprint(conn: sqlite3.Connection, fingerprint: str) -> dict[str, Any] | None:
+    """Look up a friction item by fingerprint (dedup check)."""
+    cur = conn.execute("SELECT * FROM friction WHERE fingerprint = ?", (fingerprint,))
+    row = cur.fetchone()
+    return friction_from_row(row) if row else None
