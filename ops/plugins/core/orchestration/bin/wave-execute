@@ -1,0 +1,751 @@
+#!/usr/bin/env bash
+# wave-execute - Governed wave dispatch with authority binding
+#
+# Wraps wave.sh with pre-flight authority validation, loop/gap context
+# binding in every dispatch, receipt validation, and wave-finish preparation.
+#
+# Part of the authority.resolve -> wave.execute -> wave.finish triad.
+#
+# Subcommands:
+#   start    --loop-id LOOP-... [--wave-id WAVE-...] [--objective "..."] [wave.sh start flags...]
+#   dispatch --wave-id WAVE-... --lane <lane> --task "desc" [--gap-ids GAP-OP-1234,GAP-OP-1235]
+#   collect  --wave-id WAVE-...
+#   close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate]
+#   status   --wave-id WAVE-...
+#
+# Exit codes:
+#   0 — success
+#   1 — blocked / failed
+#   2 — invalid args
+set -euo pipefail
+
+# ── Path bootstrap ───────────────────────────────────────────────
+SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$SP/ops/lib/spine-paths.sh"
+spine_paths_init
+
+RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine}"
+WAVES_DIR="$RUNTIME_ROOT/waves"
+WAVE_SH="$SP/ops/commands/wave.sh"
+AUTHORITY_RESOLVE="$SP/ops/plugins/core/orchestration/bin/authority-resolve"
+WAVE_FINISH="$SP/ops/plugins/core/orchestration/bin/wave-finish"
+
+mkdir -p "$WAVES_DIR"
+
+# ── Usage ────────────────────────────────────────────────────────
+usage() {
+  cat <<'USAGE'
+wave-execute - Governed wave dispatch with authority binding
+
+Usage:
+  wave-execute start    --loop-id LOOP-... [--wave-id WAVE-...] [--objective "..."]
+  wave-execute dispatch --wave-id WAVE-... --lane <lane> --task "desc" [--gap-ids GAP-OP-1234,GAP-OP-1235]
+  wave-execute collect  --wave-id WAVE-...
+  wave-execute close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate]
+  wave-execute status   --wave-id WAVE-...
+
+Wraps wave.sh with pre-flight authority validation and loop/gap context.
+
+Exit codes:
+  0  success
+  1  blocked / failed
+  2  invalid args
+USAGE
+}
+
+# ── Helpers ──────────────────────────────────────────────────────
+
+_header() {
+  local label="$1"
+  echo ""
+  echo "======================================="
+  echo "WAVE EXECUTE: $label"
+  echo "======================================="
+  echo ""
+}
+
+_fail() {
+  echo "wave.execute FAIL: $1" >&2
+  exit "${2:-1}"
+}
+
+_fail_args() {
+  echo "wave.execute FAIL: $1" >&2
+  exit 2
+}
+
+# Generate next sequential wave ID: WAVE-YYYYMMDD-NN
+_next_wave_id() {
+  local today
+  today="$(date -u +%Y%m%d)"
+  local prefix="WAVE-${today}-"
+  local max=0
+  if [[ -d "$WAVES_DIR" ]]; then
+    for d in "$WAVES_DIR"/${prefix}*/; do
+      [[ -d "$d" ]] || continue
+      local leaf
+      leaf="$(basename "$d")"
+      local nn="${leaf#"$prefix"}"
+      # Strip leading zeros for arithmetic
+      nn="$(echo "$nn" | sed 's/^0*//')"
+      [[ -n "$nn" ]] || nn=0
+      if (( nn > max )); then
+        max=$nn
+      fi
+    done
+  fi
+  local next=$(( max + 1 ))
+  printf '%s%02d' "$prefix" "$next"
+}
+
+# Read authority binding JSON for a wave
+_read_authority() {
+  local wave_id="$1"
+  local auth_file="$WAVES_DIR/$wave_id/authority.json"
+  if [[ ! -f "$auth_file" ]]; then
+    _fail "authority binding not found: $auth_file (was this wave started with wave-execute?)"
+  fi
+  cat "$auth_file"
+}
+
+# Extract a field from authority JSON
+_auth_field() {
+  local auth_json="$1"
+  local field="$2"
+  echo "$auth_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('$field',''))" 2>/dev/null || echo ""
+}
+
+# ── Subcommand: start ────────────────────────────────────────────
+cmd_start() {
+  local loop_id=""
+  local wave_id=""
+  local objective=""
+  local -a passthrough_args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --)           shift ;;
+      --loop-id)    loop_id="${2:?--loop-id requires a value}"; shift 2 ;;
+      --wave-id)    wave_id="${2:?--wave-id requires a value}"; shift 2 ;;
+      --objective)  objective="${2:?--objective requires a value}"; shift 2 ;;
+      -h|--help)    usage; exit 0 ;;
+      *)            passthrough_args+=("$1"); shift ;;
+    esac
+  done
+
+  [[ -n "$loop_id" ]] || _fail_args "--loop-id required"
+
+  _header "start"
+
+  # Step 1: Authority check
+  echo "Resolving authority for $loop_id..."
+  local auth_json
+  auth_json="$("$AUTHORITY_RESOLVE" --loop-id "$loop_id" --json 2>&1)" || {
+    local rc=$?
+    echo "$auth_json"
+    if [[ $rc -eq 2 ]]; then
+      _fail "loop not found or invalid: $loop_id" 2
+    fi
+    _fail "authority check blocked dispatch"
+  }
+
+  local ready
+  ready="$(_auth_field "$auth_json" "ready_for_dispatch")"
+  if [[ "$ready" != "True" ]]; then
+    echo "Authority: BLOCKED"
+    echo ""
+    local blockers
+    blockers="$(echo "$auth_json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for b in d.get('blockers',[]):
+    print('  - ' + b)
+" 2>/dev/null || true)"
+    echo "Blockers:"
+    echo "$blockers"
+    echo ""
+    _fail "authority check blocked dispatch"
+  fi
+
+  # Step 2: Generate wave ID if not provided
+  if [[ -z "$wave_id" ]]; then
+    wave_id="$(_next_wave_id)"
+  fi
+
+  # Validate wave ID format
+  if [[ ! "$wave_id" =~ ^WAVE-[0-9]{8}-[0-9]{2}$ ]]; then
+    _fail_args "wave ID must match WAVE-YYYYMMDD-NN (got: $wave_id)"
+  fi
+
+  # Step 3: Delegate to wave.sh start
+  local wave_start_args=("$wave_id" --loop-id "$loop_id")
+  if [[ -n "$objective" ]]; then
+    wave_start_args+=(--objective "$objective")
+  fi
+  # Pass through any additional wave.sh start flags
+  if [[ ${#passthrough_args[@]} -gt 0 ]]; then
+    wave_start_args+=("${passthrough_args[@]}")
+  fi
+
+  echo "Starting wave $wave_id..."
+  bash "$WAVE_SH" start "${wave_start_args[@]}" || {
+    _fail "wave.sh start failed for $wave_id"
+  }
+
+  # Step 4: Write authority binding
+  local wave_dir="$WAVES_DIR/$wave_id"
+  mkdir -p "$wave_dir"
+  local started_at
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  python3 -c "
+import json, sys
+
+auth = json.loads(sys.argv[1])
+auth['wave_id'] = sys.argv[2]
+auth['started_at_utc'] = sys.argv[3]
+auth['run_key'] = sys.argv[4]
+
+with open(sys.argv[5], 'w') as f:
+    json.dump(auth, f, indent=2)
+    f.write('\n')
+" "$auth_json" "$wave_id" "$started_at" "${SPINE_CAP_RUN_KEY:-manual}" "$wave_dir/authority.json"
+
+  # Step 5: Print summary
+  local exec_mode
+  exec_mode="$(_auth_field "$auth_json" "execution_mode")"
+  local owner
+  owner="$(_auth_field "$auth_json" "owner")"
+  local loop_objective
+  loop_objective="$(_auth_field "$auth_json" "objective")"
+
+  echo ""
+  printf "Authority:  %s -> READY\n" "$loop_id"
+  printf "Wave ID:    %s\n" "$wave_id"
+  printf "Objective:  %s\n" "${objective:-${loop_objective:-<not set>}}"
+  printf "Exec Mode:  %s\n" "$exec_mode"
+  printf "Owner:      %s\n" "$owner"
+  echo ""
+
+  # Print linked gaps
+  local gap_count
+  gap_count="$(echo "$auth_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('linked_gaps',[])))" 2>/dev/null || echo 0)"
+  if [[ "$gap_count" -gt 0 ]]; then
+    echo "Linked Gaps: $gap_count"
+    echo "$auth_json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for g in d.get('linked_gaps',[]):
+    print('  %-14s %-8s %s' % (g['gap_id'], g['severity'], g['title']))
+" 2>/dev/null || true
+  else
+    echo "Linked Gaps: none"
+  fi
+  echo ""
+
+  echo "WAVE STARTED -- dispatch tasks with:"
+  echo "  wave-execute dispatch --wave-id $wave_id --lane <lane> --task \"...\""
+  echo ""
+}
+
+# ── Subcommand: dispatch ─────────────────────────────────────────
+cmd_dispatch() {
+  local wave_id=""
+  local lane=""
+  local task=""
+  local gap_ids=""
+  local -a passthrough_args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --)           shift ;;
+      --wave-id)    wave_id="${2:?--wave-id requires a value}"; shift 2 ;;
+      --lane)       lane="${2:?--lane requires a value}"; shift 2 ;;
+      --task)       task="${2:?--task requires a value}"; shift 2 ;;
+      --gap-ids)    gap_ids="${2:?--gap-ids requires a value}"; shift 2 ;;
+      -h|--help)    usage; exit 0 ;;
+      *)            passthrough_args+=("$1"); shift ;;
+    esac
+  done
+
+  [[ -n "$wave_id" ]] || _fail_args "--wave-id required"
+  [[ -n "$lane" ]]    || _fail_args "--lane required"
+  [[ -n "$task" ]]    || _fail_args "--task required"
+
+  _header "dispatch"
+
+  # Step 1: Read authority binding
+  local auth_json
+  auth_json="$(_read_authority "$wave_id")"
+  local loop_id
+  loop_id="$(_auth_field "$auth_json" "loop_id")"
+
+  # Step 2: Validate wave exists and is active
+  local state_file="$WAVES_DIR/$wave_id/state.json"
+  if [[ ! -f "$state_file" ]]; then
+    _fail "wave state not found: $state_file"
+  fi
+  local wave_status
+  wave_status="$(python3 -c "import json; print(json.load(open('$state_file'))['status'])" 2>/dev/null || echo "unknown")"
+  if [[ "$wave_status" != "active" ]]; then
+    _fail "wave $wave_id is '$wave_status' (must be active)"
+  fi
+
+  printf "Wave:      %s (active)\n" "$wave_id"
+  printf "Loop:      %s\n" "$loop_id"
+  printf "Lane:      %s\n" "$lane"
+  printf "Task:      %s\n" "$task"
+  if [[ -n "$gap_ids" ]]; then
+    printf "Gap IDs:   %s\n" "$gap_ids"
+  fi
+  echo ""
+
+  # Step 3: Delegate to wave.sh dispatch
+  local dispatch_args=("$wave_id" --lane "$lane" --task "$task")
+  if [[ ${#passthrough_args[@]} -gt 0 ]]; then
+    dispatch_args+=("${passthrough_args[@]}")
+  fi
+
+  echo "Dispatching..."
+  bash "$WAVE_SH" dispatch "${dispatch_args[@]}" || {
+    _fail "wave.sh dispatch failed"
+  }
+
+  # Step 4: Log gap_ids binding to wave state
+  if [[ -n "$gap_ids" ]]; then
+    python3 -c "
+import json, sys, os, fcntl
+
+state_file = sys.argv[1]
+gap_ids_raw = sys.argv[2]
+lane = sys.argv[3]
+task = sys.argv[4]
+
+gap_list = [g.strip() for g in gap_ids_raw.split(',') if g.strip()]
+
+lock_file = state_file + '.lock'
+fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    with open(state_file) as f:
+        state = json.load(f)
+
+    # Add gap_ids to the most recent dispatch matching this lane/task
+    dispatches = state.get('dispatches', [])
+    for d in reversed(dispatches):
+        if d.get('lane') == lane and d.get('task') == task:
+            d['gap_ids'] = gap_list
+            break
+
+    # Also maintain a top-level gap_bindings map for quick lookup
+    if 'gap_bindings' not in state:
+        state['gap_bindings'] = {}
+    for gid in gap_list:
+        if gid not in state['gap_bindings']:
+            state['gap_bindings'][gid] = []
+        entry = {'lane': lane, 'task': task}
+        if entry not in state['gap_bindings'][gid]:
+            state['gap_bindings'][gid].append(entry)
+
+    with open(state_file, 'w') as f:
+        json.dump(state, f, indent=2)
+        f.write('\n')
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+" "$state_file" "$gap_ids" "$lane" "$task"
+    echo "Gap binding recorded: $gap_ids -> $lane"
+  fi
+
+  echo ""
+  echo "DISPATCH RECORDED"
+  echo "  Complete with: wave.sh ack $wave_id --lane $lane --result \"...\""
+  echo ""
+}
+
+# ── Subcommand: collect ──────────────────────────────────────────
+cmd_collect() {
+  local wave_id=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --)           shift ;;
+      --wave-id)    wave_id="${2:?--wave-id requires a value}"; shift 2 ;;
+      -h|--help)    usage; exit 0 ;;
+      *)            wave_id="$1"; shift ;;
+    esac
+  done
+
+  [[ -n "$wave_id" ]] || _fail_args "--wave-id required"
+
+  _header "collect"
+
+  # Step 1: Delegate to wave.sh collect
+  echo "Collecting receipts for $wave_id..."
+  bash "$WAVE_SH" collect "$wave_id" || {
+    _fail "wave.sh collect failed"
+  }
+  echo ""
+
+  # Step 2: Read authority binding and validate receipts
+  local auth_file="$WAVES_DIR/$wave_id/authority.json"
+  if [[ ! -f "$auth_file" ]]; then
+    echo "WARN: no authority binding found -- skipping receipt validation"
+    echo "(wave was not started with wave-execute)"
+    return 0
+  fi
+
+  local auth_json
+  auth_json="$(cat "$auth_file")"
+  local expected_loop_id
+  expected_loop_id="$(_auth_field "$auth_json" "loop_id")"
+
+  # Scan evidence directory for receipts
+  local evidence_dir="$WAVES_DIR/$wave_id/evidence"
+  if [[ ! -d "$evidence_dir" ]]; then
+    echo "No evidence directory found -- 0 receipts to validate"
+    return 0
+  fi
+
+  local valid=0
+  local invalid=0
+  local missing_loop=0
+  local missing_run_keys=0
+  local missing_gap_ids=0
+  local -a gap_ids_covered=()
+
+  echo "Receipt Validation (authority loop: $expected_loop_id):"
+  echo "---------------------------------------"
+
+  for receipt_file in "$evidence_dir"/*.json; do
+    [[ -f "$receipt_file" ]] || continue
+    local receipt_name
+    receipt_name="$(basename "$receipt_file")"
+
+    local validation
+    validation="$(python3 -c "
+import json, sys
+
+with open(sys.argv[1]) as f:
+    r = json.load(f)
+
+expected_loop = sys.argv[2]
+issues = []
+
+# Check loop_id matches
+receipt_loop = r.get('loop_id', '')
+if not receipt_loop:
+    issues.append('missing loop_id')
+elif receipt_loop != expected_loop:
+    issues.append(f'loop_id mismatch: {receipt_loop} != {expected_loop}')
+
+# Check run_keys non-empty
+run_keys = r.get('run_keys', [])
+if not run_keys:
+    issues.append('empty run_keys (no governed execution proof)')
+
+# Check gap_ids present
+gap_ids = r.get('gap_ids', [])
+if not gap_ids:
+    issues.append('missing gap_ids')
+
+if issues:
+    print('INVALID|' + '; '.join(issues))
+    for gid in gap_ids:
+        print('GAP|' + gid)
+else:
+    print('VALID|ok')
+    for gid in gap_ids:
+        print('GAP|' + gid)
+" "$receipt_file" "$expected_loop_id" 2>/dev/null || echo "INVALID|parse error")"
+
+    local first_line
+    first_line="$(echo "$validation" | head -1)"
+    local verdict="${first_line%%|*}"
+    local detail="${first_line#*|}"
+
+    if [[ "$verdict" == "VALID" ]]; then
+      (( valid++ )) || true
+      printf "  %-30s VALID\n" "$receipt_name"
+    else
+      (( invalid++ )) || true
+      printf "  %-30s INVALID: %s\n" "$receipt_name" "$detail"
+      [[ "$detail" != *"missing loop_id"* && "$detail" != *"loop_id mismatch"* ]] || (( missing_loop++ )) || true
+      [[ "$detail" != *"empty run_keys"* ]] || (( missing_run_keys++ )) || true
+      [[ "$detail" != *"missing gap_ids"* ]] || (( missing_gap_ids++ )) || true
+    fi
+
+    # Collect covered gap IDs
+    while IFS= read -r line; do
+      if [[ "$line" == GAP\|* ]]; then
+        gap_ids_covered+=("${line#GAP|}")
+      fi
+    done <<< "$validation"
+  done
+
+  echo ""
+  echo "Summary:"
+  printf "  Valid receipts:     %d\n" "$valid"
+  printf "  Invalid receipts:   %d\n" "$invalid"
+  if [[ $invalid -gt 0 ]]; then
+    printf "    Missing loop_id:  %d\n" "$missing_loop"
+    printf "    Empty run_keys:   %d\n" "$missing_run_keys"
+    printf "    Missing gap_ids:  %d\n" "$missing_gap_ids"
+  fi
+
+  # Gap coverage
+  local linked_gaps
+  linked_gaps="$(echo "$auth_json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for g in d.get('linked_gaps',[]):
+    print(g['gap_id'])
+" 2>/dev/null || true)"
+
+  if [[ -n "$linked_gaps" ]]; then
+    echo ""
+    echo "Gap Coverage:"
+    local covered=0
+    local uncovered=0
+    while IFS= read -r gid; do
+      [[ -n "$gid" ]] || continue
+      local found=0
+      for cid in "${gap_ids_covered[@]+"${gap_ids_covered[@]}"}"; do
+        if [[ "$cid" == "$gid" ]]; then
+          found=1
+          break
+        fi
+      done
+      if [[ $found -eq 1 ]]; then
+        printf "  %-14s COVERED\n" "$gid"
+        (( covered++ )) || true
+      else
+        printf "  %-14s UNCOVERED\n" "$gid"
+        (( uncovered++ )) || true
+      fi
+    done <<< "$linked_gaps"
+    printf "\n  Coverage: %d/%d linked gaps addressed in receipts\n" "$covered" "$((covered + uncovered))"
+  fi
+  echo ""
+}
+
+# ── Subcommand: close ────────────────────────────────────────────
+cmd_close() {
+  local wave_id=""
+  local disposition=""
+  local completion_level=""
+  local -a passthrough_args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --)                   shift ;;
+      --wave-id)            wave_id="${2:?--wave-id requires a value}"; shift 2 ;;
+      --disposition)        disposition="${2:?--disposition requires a value}"; shift 2 ;;
+      --completion-level)   completion_level="${2:?--completion-level requires a value}"; shift 2 ;;
+      -h|--help)            usage; exit 0 ;;
+      *)                    passthrough_args+=("$1"); shift ;;
+    esac
+  done
+
+  [[ -n "$wave_id" ]] || _fail_args "--wave-id required"
+
+  _header "close"
+
+  # Step 1: Read authority binding
+  local auth_json
+  auth_json="$(_read_authority "$wave_id")"
+  local loop_id
+  loop_id="$(_auth_field "$auth_json" "loop_id")"
+
+  printf "Wave:      %s\n" "$wave_id"
+  printf "Loop:      %s\n" "$loop_id"
+  echo ""
+
+  # Step 2: Run collect first (ensure all receipts are ingested)
+  echo "Running collect before close..."
+  bash "$WAVE_SH" collect "$wave_id" 2>/dev/null || true
+  echo ""
+
+  # Step 3: Validate dispatches have receipts or explicit blockers
+  local state_file="$WAVES_DIR/$wave_id/state.json"
+  if [[ -f "$state_file" ]]; then
+    local dispatch_check
+    dispatch_check="$(python3 -c "
+import json, sys
+
+with open(sys.argv[1]) as f:
+    state = json.load(f)
+
+dispatches = state.get('dispatches', [])
+pending = [d for d in dispatches if d.get('status') in ('pending', 'dispatched')]
+done_count = len([d for d in dispatches if d.get('status') in ('done', 'acked')])
+blocked_count = len([d for d in dispatches if d.get('status') == 'blocked'])
+failed_count = len([d for d in dispatches if d.get('status') == 'failed'])
+
+print(f'{len(dispatches)}|{done_count}|{blocked_count}|{failed_count}|{len(pending)}')
+for p in pending:
+    print(f'PENDING|{p.get(\"lane\",\"?\")}|{p.get(\"task\",\"?\")[:60]}')
+" "$state_file" 2>/dev/null || echo "0|0|0|0|0")"
+
+    local first_line
+    first_line="$(echo "$dispatch_check" | head -1)"
+    IFS='|' read -r total done blocked failed pending <<< "$first_line"
+
+    echo "Dispatch Status:"
+    printf "  Total:    %s\n" "$total"
+    printf "  Done:     %s\n" "$done"
+    printf "  Blocked:  %s\n" "$blocked"
+    printf "  Failed:   %s\n" "$failed"
+    printf "  Pending:  %s\n" "$pending"
+    echo ""
+
+    if [[ "$pending" -gt 0 ]]; then
+      echo "WARNING: $pending dispatch(es) still pending:"
+      echo "$dispatch_check" | while IFS='|' read -r tag lane task; do
+        [[ "$tag" == "PENDING" ]] && printf "  [%s] %s\n" "$lane" "$task"
+      done
+      echo ""
+    fi
+  fi
+
+  # Step 4: Delegate to wave.sh close
+  local close_args=("$wave_id")
+  if [[ ${#passthrough_args[@]} -gt 0 ]]; then
+    close_args+=("${passthrough_args[@]}")
+  fi
+
+  echo "Closing wave $wave_id..."
+  bash "$WAVE_SH" close "${close_args[@]}" || {
+    _fail "wave.sh close failed"
+  }
+  echo ""
+
+  # Step 5: Print wave-finish command suggestion
+  if [[ -n "$disposition" ]]; then
+    echo "======================================="
+    echo "NEXT STEP: wave.finish"
+    echo "======================================="
+    echo ""
+    echo "Wave is closed. To propagate closure across all surfaces, run:"
+    echo ""
+
+    local finish_cmd="  ./bin/ops cap run wave.finish -- \\"
+    finish_cmd+="\n    --loop-id $loop_id \\"
+    finish_cmd+="\n    --disposition $disposition"
+    if [[ -n "$completion_level" ]]; then
+      finish_cmd+=" \\\\\n    --completion-level $completion_level"
+    fi
+    finish_cmd+=" \\\\\n    --wave-id $wave_id"
+
+    printf "$finish_cmd\n"
+    echo ""
+    echo "(wave.finish is a separate governed capability requiring manual approval)"
+  fi
+  echo ""
+}
+
+# ── Subcommand: status ───────────────────────────────────────────
+cmd_status() {
+  local wave_id=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --)           shift ;;
+      --wave-id)    wave_id="${2:?--wave-id requires a value}"; shift 2 ;;
+      -h|--help)    usage; exit 0 ;;
+      *)            wave_id="$1"; shift ;;
+    esac
+  done
+
+  [[ -n "$wave_id" ]] || _fail_args "--wave-id required"
+
+  _header "status"
+
+  # Step 1: Delegate to wave.sh status
+  bash "$WAVE_SH" status "$wave_id" || {
+    _fail "wave.sh status failed"
+  }
+  echo ""
+
+  # Step 2: Add authority context
+  local auth_file="$WAVES_DIR/$wave_id/authority.json"
+  if [[ -f "$auth_file" ]]; then
+    local auth_json
+    auth_json="$(cat "$auth_file")"
+    local loop_id
+    loop_id="$(_auth_field "$auth_json" "loop_id")"
+    local started_at
+    started_at="$(_auth_field "$auth_json" "started_at_utc")"
+    local exec_mode
+    exec_mode="$(_auth_field "$auth_json" "execution_mode")"
+
+    echo "Authority Context:"
+    printf "  Loop ID:      %s\n" "$loop_id"
+    printf "  Exec Mode:    %s\n" "$exec_mode"
+    printf "  Started At:   %s\n" "$started_at"
+
+    # Linked gaps
+    local gap_count
+    gap_count="$(echo "$auth_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('linked_gaps',[])))" 2>/dev/null || echo 0)"
+    printf "  Linked Gaps:  %s\n" "$gap_count"
+    if [[ "$gap_count" -gt 0 ]]; then
+      echo "$auth_json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for g in d.get('linked_gaps',[]):
+    print('    %-14s %-8s %s' % (g['gap_id'], g['severity'], g['title']))
+" 2>/dev/null || true
+    fi
+
+    # Gap coverage from state
+    local state_file="$WAVES_DIR/$wave_id/state.json"
+    if [[ -f "$state_file" ]]; then
+      local gap_bindings
+      gap_bindings="$(python3 -c "
+import json
+with open('$state_file') as f:
+    state = json.load(f)
+bindings = state.get('gap_bindings', {})
+print(len(bindings))
+" 2>/dev/null || echo 0)"
+      printf "  Gap Bindings: %s\n" "$gap_bindings"
+    fi
+    echo ""
+  else
+    echo "Authority Context: not available (wave not started with wave-execute)"
+    echo ""
+  fi
+}
+
+# ── Self-check ───────────────────────────────────────────────────
+cmd_self_check() {
+  local errors=0
+  for dep in python3 bash; do
+    if ! command -v "$dep" >/dev/null 2>&1; then
+      echo "wave.execute self-check FAIL: missing $dep" >&2
+      errors=$((errors + 1))
+    fi
+  done
+  [[ -f "$WAVE_SH" ]] || { echo "wave.execute self-check FAIL: missing wave.sh at $WAVE_SH" >&2; errors=$((errors + 1)); }
+  [[ -f "$AUTHORITY_RESOLVE" ]] || { echo "wave.execute self-check FAIL: missing authority-resolve at $AUTHORITY_RESOLVE" >&2; errors=$((errors + 1)); }
+  [[ -f "$WAVE_FINISH" ]] || { echo "wave.execute self-check FAIL: missing wave-finish at $WAVE_FINISH" >&2; errors=$((errors + 1)); }
+
+  if [[ $errors -gt 0 ]]; then
+    exit 1
+  fi
+  echo "wave.execute self-check PASS"
+  exit 0
+}
+
+# ── Dispatch ─────────────────────────────────────────────────────
+case "${1:-}" in
+  start)        shift; cmd_start "$@" ;;
+  dispatch)     shift; cmd_dispatch "$@" ;;
+  collect)      shift; cmd_collect "$@" ;;
+  close)        shift; cmd_close "$@" ;;
+  status)       shift; cmd_status "$@" ;;
+  --self-check) cmd_self_check ;;
+  -h|--help)    usage; exit 0 ;;
+  "")           usage; exit 2 ;;
+  *)            echo "wave.execute FAIL: unknown subcommand: $1" >&2; usage; exit 2 ;;
+esac
