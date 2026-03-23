@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
 INDEX_CONTRACT="$ROOT/ops/bindings/platform.extension.index.contract.yaml"
@@ -37,12 +39,35 @@ fi
   exit 1
 }
 
+INDEX_PATH_RAW="$(yq -r '.index_path // ""' "$INDEX_CONTRACT" 2>/dev/null || true)"
+[[ -n "$INDEX_PATH_RAW" && "$INDEX_PATH_RAW" != "null" ]] || {
+  echo "platform.extension.index.build FAIL: index contract missing index_path" >&2
+  exit 1
+}
+
+MAILROOM_ALIAS="mailroom"
+RUNTIME_ALIAS="runtime"
+EVIDENCE_ALIAS="evidence"
+RECEIPTS_ALIAS="receipts"
+
+case "$INDEX_PATH_RAW" in
+  /*)
+    INDEX_PATH="$INDEX_PATH_RAW"
+    ;;
+  "${MAILROOM_ALIAS}/"*|"${RUNTIME_ALIAS}/"*|"${EVIDENCE_ALIAS}/"*|"${RECEIPTS_ALIAS}/"*)
+    INDEX_PATH="$(spine_resolve_mailroom_path "$INDEX_PATH_RAW")"
+    ;;
+  *)
+    INDEX_PATH="$ROOT/$INDEX_PATH_RAW"
+    ;;
+esac
+
 command -v python3 >/dev/null 2>&1 || {
   echo "platform.extension.index.build FAIL: missing required tool: python3" >&2
   exit 1
 }
 
-python3 - "$INDEX_CONTRACT" "$TX_CONTRACT" "$TX_DIR" <<'PY'
+python3 - "$INDEX_PATH" "$TX_CONTRACT" "$TX_DIR" <<'PY'
 from __future__ import annotations
 
 from collections import Counter
@@ -53,7 +78,7 @@ import sys
 
 import yaml
 
-index_contract_path = Path(sys.argv[1]).expanduser().resolve()
+index_path = Path(sys.argv[1]).expanduser().resolve()
 tx_contract_path = Path(sys.argv[2]).expanduser().resolve()
 tx_dir = Path(sys.argv[3]).expanduser().resolve()
 
@@ -67,19 +92,11 @@ def load_yaml(path: Path):
 
 
 try:
-    index_contract = load_yaml(index_contract_path)
     tx_contract = load_yaml(tx_contract_path)
 except Exception as exc:
     print(f"platform.extension.index.build FAIL: unable to parse contracts: {exc}", file=sys.stderr)
     raise SystemExit(1)
-
-index_path_raw = str(index_contract.get("index_path", "")).strip()
-if not index_path_raw:
-    print("platform.extension.index.build FAIL: index contract missing index_path", file=sys.stderr)
-    raise SystemExit(1)
-
-root = index_contract_path.parents[2]
-index_path = (root / index_path_raw).resolve()
+index_contract = load_yaml(tx_contract_path.parents[2] / "ops/bindings/platform.extension.index.contract.yaml")
 max_age_hours = int(index_contract.get("freshness_policy", {}).get("max_age_hours", 24))
 required_home_keys = [str(x).strip() for x in (tx_contract.get("required_homes_keys") or []) if str(x).strip()]
 

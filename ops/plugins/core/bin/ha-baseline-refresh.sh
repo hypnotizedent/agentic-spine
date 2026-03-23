@@ -16,6 +16,7 @@ RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"
 CAP_RUNNER="$RUNTIME_ROOT/bin/ops"
 LOG_PREFIX="[ha-baseline-refresh]"
 source "${RUNTIME_ROOT}/ops/lib/job-wrapper.sh"
+SNAPSHOT_RUNTIME_DIR="$(spine_resolve_domain_state "snapshots")"
 
 echo "$LOG_PREFIX Starting HA baseline refresh at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo "$LOG_PREFIX control_root=${CONTROL_ROOT}"
@@ -86,23 +87,10 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RUNBOOK SYNC (non-critical — log and continue on failure)
-# ─────────────────────────────────────────────────────────────────────────────
-
-echo "$LOG_PREFIX Running: ha.ssot.apply (runbook drift sync)"
-if echo "yes" | spine_job_run \
-  "ha-baseline-refresh:ha.ssot.apply" \
-  "$CAP_RUNNER" cap run ha.ssot.apply 2>&1; then
-  echo "$LOG_PREFIX OK: runbook synced"
-else
-  echo "$LOG_PREFIX WARN: ha.ssot.apply failed (runbook may be stale)"
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
 # RUNTIME SNAPSHOT SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
-echo "$LOG_PREFIX Runtime snapshots refreshed under $RUNTIME_ROOT/runtime/domain-state/snapshots"
-echo "$LOG_PREFIX Promotion is manual; use snapshot.projection.apply or per-capability --apply for tracked ops/bindings writes"
+echo "$LOG_PREFIX Runtime snapshots refreshed under $SNAPSHOT_RUNTIME_DIR"
+echo "$LOG_PREFIX Tracked promotion remains manual; use snapshot.projection.apply or per-capability --apply for tracked ops/bindings writes"
 
 echo
 echo "$LOG_PREFIX Finished at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

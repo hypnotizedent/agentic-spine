@@ -10,7 +10,7 @@ source "${SCRIPT_DIR}/../../../lib/runtime-managed-worktree.sh"
 CONTROL_ROOT="$(spine_runtime_resolve_control_root "${BASH_SOURCE[0]}")"
 spine_runtime_activate_managed_worktree "$CONTROL_ROOT"
 RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"
-CAP_RUNNER="$RUNTIME_ROOT/bin/ops"
+INDEX_BUILD_CMD="$RUNTIME_ROOT/ops/plugins/core/authority/bin/platform-extension-index-build"
 source "${RUNTIME_ROOT}/ops/lib/job-wrapper.sh"
 
 echo "[extension-index-refresh-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -20,6 +20,6 @@ echo "[extension-index-refresh-daily] worktree_identity=${OPS_WORKTREE_IDENTITY:
 
 spine_job_run \
   "extension-index-refresh-daily:platform.extension.index.build" \
-  "$CAP_RUNNER" cap run platform.extension.index.build
+  "$INDEX_BUILD_CMD"
 
 echo "[extension-index-refresh-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

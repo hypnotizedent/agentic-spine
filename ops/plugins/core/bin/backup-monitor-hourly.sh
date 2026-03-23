@@ -9,7 +9,8 @@ source "${SCRIPT_DIR}/../../../lib/runtime-managed-worktree.sh"
 CONTROL_ROOT="$(spine_runtime_resolve_control_root "${BASH_SOURCE[0]}")"
 spine_runtime_activate_managed_worktree "$CONTROL_ROOT"
 RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"
-CAP_RUNNER="${RUNTIME_ROOT}/bin/ops"
+BACKUP_SNAPSHOT_CMD="${RUNTIME_ROOT}/ops/plugins/infra/backup/bin/backup-posture-snapshot-build"
+BACKUP_MONITOR_CMD="${RUNTIME_ROOT}/ops/plugins/infra/backup/bin/backup-monitor"
 # Default scheduled backup probes to passive mode to avoid interactive tailscale
 # browser auth prompts on operator workstations.
 export VERIFY_TAILSCALE_PROBE_MODE="${VERIFY_TAILSCALE_PROBE_MODE:-passive}"
@@ -22,10 +23,10 @@ echo "[backup-monitor-hourly] worktree_identity=${OPS_WORKTREE_IDENTITY:-unset}"
 
 spine_job_run \
   "backup-monitor-hourly:backup.posture.snapshot.build" \
-  "$CAP_RUNNER" cap run backup.posture.snapshot.build
+  "$BACKUP_SNAPSHOT_CMD"
 
 spine_job_run \
   "backup-monitor-hourly:backup.monitor" \
-  "$CAP_RUNNER" cap run backup.monitor --json
+  "$BACKUP_MONITOR_CMD" --json
 
 echo "[backup-monitor-hourly] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

@@ -8,7 +8,7 @@ spine_runtime_activate_managed_worktree "$CONTROL_ROOT"
 RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"
 source "${RUNTIME_ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
-CAP_RUNNER="${RUNTIME_ROOT}/bin/ops"
+RECONCILE_CMD="${RUNTIME_ROOT}/ops/plugins/core/ops/bin/operator-hygiene-reconcile"
 source "${RUNTIME_ROOT}/ops/lib/job-wrapper.sh"
 
 echo "[operator-hygiene-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -16,6 +16,6 @@ echo "[operator-hygiene-daily] control_root=${CONTROL_ROOT}"
 echo "[operator-hygiene-daily] runtime_root=${RUNTIME_ROOT}"
 echo "[operator-hygiene-daily] worktree_identity=${OPS_WORKTREE_IDENTITY:-unset}"
 spine_job_run \
-  "operator-hygiene-daily:operator.hygiene.reconcile" \
-  "$CAP_RUNNER" cap run operator.hygiene.reconcile -- --execute
+  "operator-hygiene-daily:operator.hygiene.reconcile.check" \
+  "$RECONCILE_CMD" --json
 echo "[operator-hygiene-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

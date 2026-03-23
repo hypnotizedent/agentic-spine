@@ -11,6 +11,7 @@ CONTROL_ROOT="$(spine_runtime_resolve_control_root "${BASH_SOURCE[0]}")"
 spine_runtime_activate_managed_worktree "$CONTROL_ROOT"
 RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"
 CAP_RUNNER="${RUNTIME_ROOT}/bin/ops"
+ALERT_DISPATCH="${RUNTIME_ROOT}/ops/plugins/core/alerting/bin/alerting-dispatch"
 source "${RUNTIME_ROOT}/ops/lib/job-wrapper.sh"
 SNAPSHOT_FILE="${SPINE_OUTBOX}/alerts/mcp-runtime-anti-drift-latest.json"
 
@@ -154,7 +155,7 @@ jq -n \
 
 set +e
 spine_job_run "mcp-runtime-anti-drift-cycle:alerting.dispatch" \
-  "$CAP_RUNNER" cap run alerting.dispatch --snapshot "$SNAPSHOT_FILE" --no-probe
+  "$ALERT_DISPATCH" --snapshot "$SNAPSHOT_FILE" --no-probe
 dispatch_rc=$?
 set -e
 

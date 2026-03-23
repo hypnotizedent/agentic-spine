@@ -39,7 +39,7 @@ run_cap calendar.external.ingest.refresh
 run_cap calendar.ha.ingest.refresh
 run_cap infra.storage.audit.snapshot
 run_cap cloudflare.inventory.sync
-run_cap verify.freshness.reconcile
+echo "[freshness-critical-daily] verify.freshness.reconcile skipped in unattended runtime-only mode; explicit reconciliation remains manual"
 
 if (( failures > 0 )); then
   spine_enqueue_email_intent \

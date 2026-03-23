@@ -66,7 +66,16 @@ NO_WAN_RULE="$(yq -r '.policy_links.wan_transfer_policy.rule // ""' "$POLICY_FIL
 
 SNAPSHOT_PATH="$OUTPUT"
 HISTORY_PATH="$HISTORY_REL"
-[[ "$HISTORY_PATH" = /* ]] || HISTORY_PATH="$ROOT/$HISTORY_PATH"
+if [[ "$HISTORY_PATH" != /* ]]; then
+  case "$HISTORY_PATH" in
+    runtime/domain-state/*)
+      HISTORY_PATH="$(spine_resolve_domain_state "${HISTORY_PATH#runtime/domain-state/}")"
+      ;;
+    *)
+      HISTORY_PATH="$ROOT/$HISTORY_PATH"
+      ;;
+  esac
+fi
 
 ssh_host="$(yq -r ".ssh.targets[] | select(.id == \"$STORAGE_HOST_ID\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || true)"
 ssh_user="$(yq -r ".ssh.targets[] | select(.id == \"$STORAGE_HOST_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" 2>/dev/null || echo ubuntu)"

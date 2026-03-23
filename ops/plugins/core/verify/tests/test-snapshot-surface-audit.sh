@@ -2,7 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
+SPINE_ROOT="$ROOT"
+SPINE_REPO="$ROOT"
+SPINE_CODE="$ROOT"
 source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
 AUDIT="$ROOT/ops/plugins/core/verify/bin/snapshot-surface-audit"
@@ -31,8 +33,8 @@ automation_surfaces:
 YAML
   cat > "$dir/ops/bindings/launchd.runtime.contract.yaml" <<'YAML'
 version: "1.3"
-managed_runtime_worktree:
-  required_for_labels:
+scheduler_execution:
+  labels:
     - com.example.runtime-daily
 paths:
   source_dir: ops/plugins/infra/host/launchd

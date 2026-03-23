@@ -10,7 +10,7 @@ source "${SCRIPT_DIR}/../../../lib/runtime-managed-worktree.sh"
 CONTROL_ROOT="$(spine_runtime_resolve_control_root "${BASH_SOURCE[0]}")"
 spine_runtime_activate_managed_worktree "$CONTROL_ROOT"
 RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"
-CAP_RUNNER="$RUNTIME_ROOT/bin/ops"
+REFRESH_CMD="$RUNTIME_ROOT/ops/plugins/core/authority/bin/domain-inventory-refresh"
 source "${RUNTIME_ROOT}/ops/lib/job-wrapper.sh"
 
 echo "[domain-inventory-refresh-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -20,7 +20,7 @@ echo "[domain-inventory-refresh-daily] worktree_identity=${OPS_WORKTREE_IDENTITY
 
 spine_job_run \
   "domain-inventory-refresh-daily:domain-inventory-refresh" \
-  "$CAP_RUNNER" cap run domain-inventory-refresh -- --once --check
+  "$REFRESH_CMD" --once --check
 
 echo "[domain-inventory-refresh-daily] tracked promotion remains manual"
 

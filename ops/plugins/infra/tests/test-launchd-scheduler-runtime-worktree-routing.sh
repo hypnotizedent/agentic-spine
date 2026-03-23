@@ -26,21 +26,35 @@ assert_file_contains() {
   fi
 }
 
-assert_plist_runtime_env() {
+assert_file_not_contains() {
+  local file="$1"
+  local needle="$2"
+  local label="$3"
+  if grep -Fq -- "$needle" "$file"; then
+    fail "$label (unexpected: $needle)"
+  else
+    pass "$label"
+  fi
+}
+
+assert_plist_scheduler_env() {
   local plist="$1"
   local label="$2"
-  assert_file_contains "$plist" '<key>SPINE_RUNTIME_WORKTREE</key>' "$label exports runtime worktree"
-  assert_file_contains "$plist" '<key>SPINE_RUNTIME_WORKTREE_BRANCH</key>' "$label exports runtime worktree branch"
-  assert_file_contains "$plist" '<key>OPS_WORKTREE_IDENTITY</key>' "$label exports worktree identity"
+  assert_file_contains "$plist" '<key>SPINE_ROOT</key>' "$label exports control root"
+  assert_file_not_contains "$plist" '<key>SPINE_RUNTIME_WORKTREE</key>' "$label omits runtime worktree path"
+  assert_file_not_contains "$plist" '<key>SPINE_RUNTIME_WORKTREE_BRANCH</key>' "$label omits runtime worktree branch"
+  assert_file_not_contains "$plist" '<key>OPS_WORKTREE_IDENTITY</key>' "$label omits worktree identity"
 }
 
 echo "launchd scheduler runtime worktree routing tests"
 echo "════════════════════════════════════════"
 
 echo ""
-echo "── T1: helper exposes parent-shell runtime activation ──"
+echo "── T1: helper exposes control-root scheduler activation ──"
 assert_file_contains "$HELPER" 'spine_runtime_activate_managed_worktree()' "managed runtime activation helper exists"
 assert_file_contains "$HELPER" 'spine_runtime_resolve_control_root()' "managed runtime helper resolves control root"
+assert_file_contains "$HELPER" 'They no longer provision or impersonate a standing git worktree.' "helper documents de-worktree scheduler model"
+assert_file_contains "$HELPER" 'local runtime_root="$control_root"' "helper binds runtime root to control root"
 assert_file_contains "$HELPER" 'export SPINE_RUNTIME_ACTIVE_ROOT="$runtime_root"' "helper exports active runtime root"
 assert_file_contains "$HELPER" 'export SPINE_TARGET_REPO="$runtime_root"' "helper exports target repo"
 assert_file_contains "$HELPER" 'cd "$runtime_root"' "helper changes into runtime worktree"
@@ -66,7 +80,7 @@ resolved_from_script="$(
 [[ "$resolved_from_script" == "$ROOT" ]] && pass "helper prefers script checkout over stale env" || fail "helper should prefer script checkout over stale env"
 
 echo ""
-echo "── T2: scheduled mutator wrappers activate runtime worktree ──"
+echo "── T2: scheduled wrappers activate scheduler execution root ──"
 for script in \
   "$ROOT/ops/plugins/core/bin/backup-monitor-hourly.sh" \
   "$ROOT/ops/plugins/core/bin/friction-reconcile.sh" \
@@ -86,12 +100,12 @@ do
   assert_file_contains "$script" 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' "$base resolves script directory"
   assert_file_contains "$script" 'source "${SCRIPT_DIR}/../../../lib/runtime-managed-worktree.sh"' "$base sources helper relative to script checkout"
   assert_file_contains "$script" 'CONTROL_ROOT="$(spine_runtime_resolve_control_root "${BASH_SOURCE[0]}")"' "$base resolves control root through helper"
-  assert_file_contains "$script" 'spine_runtime_activate_managed_worktree "$CONTROL_ROOT"' "$base activates runtime worktree"
+  assert_file_contains "$script" 'spine_runtime_activate_managed_worktree "$CONTROL_ROOT"' "$base activates scheduler execution root"
   assert_file_contains "$script" 'RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"' "$base records runtime root"
 done
 
 echo ""
-echo "── T3: launchd contract governs the expanded managed-runtime set ──"
+echo "── T3: launchd contract governs the scheduler execution set ──"
 for label in \
   "com.ronny.backup-monitor-hourly" \
   "com.ronny.friction-reconcile" \
@@ -105,26 +119,31 @@ for label in \
   "com.ronny.receipts-archive-reconcile-daily" \
   "com.ronny.spine-daily-briefing" \
   "com.ronny.cc-benefits-refresh-daily" \
-  "com.ronny.cc-benefits-reminder-dispatch-daily"
+  "com.ronny.cc-benefits-reminder-dispatch-daily" \
+  "com.ronny.ha-baseline-refresh"
 do
-  assert_file_contains "$CONTRACT" "    - $label" "$label listed in managed runtime contract"
+  assert_file_contains "$CONTRACT" "    - $label" "$label listed in scheduler execution contract"
 done
 
 echo ""
-echo "── T4: matching launchd templates export runtime-worktree env ──"
-assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.domain-inventory-refresh-daily.plist" "domain-inventory plist"
-assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.extension-index-refresh-daily.plist" "extension-index plist"
-assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.freshness-critical-daily.plist" "freshness-critical plist"
-assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.operator-hygiene-daily.plist" "operator-hygiene plist"
-assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.receipts-archive-reconcile-daily.plist" "receipts-archive plist"
-assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.spine-daily-briefing.plist" "spine-daily-briefing plist"
-assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.cc-benefits-refresh-daily.plist" "cc-benefits-refresh plist"
-assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.cc-benefits-reminder-dispatch-daily.plist" "cc-benefits-reminder plist"
-assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.backup-monitor-hourly.plist" "backup-monitor plist"
-assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.friction-reconcile.plist" "friction-reconcile plist"
-assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.mcp-runtime-anti-drift-cycle.plist" "mcp-runtime-anti-drift plist"
-assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.projection-reconcile.plist" "projection-reconcile plist"
-assert_plist_runtime_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.state-shared-reconcile.plist" "state-shared-reconcile plist"
+echo "── T4: matching launchd templates stay on control root only ──"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.domain-inventory-refresh-daily.plist" "domain-inventory plist"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.extension-index-refresh-daily.plist" "extension-index plist"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.freshness-critical-daily.plist" "freshness-critical plist"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.operator-hygiene-daily.plist" "operator-hygiene plist"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.receipts-archive-reconcile-daily.plist" "receipts-archive plist"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.spine-daily-briefing.plist" "spine-daily-briefing plist"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.cc-benefits-refresh-daily.plist" "cc-benefits-refresh plist"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.cc-benefits-reminder-dispatch-daily.plist" "cc-benefits-reminder plist"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.backup-monitor-hourly.plist" "backup-monitor plist"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.friction-reconcile.plist" "friction-reconcile plist"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.mcp-runtime-anti-drift-cycle.plist" "mcp-runtime-anti-drift plist"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.projection-reconcile.plist" "projection-reconcile plist"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.state-shared-reconcile.plist" "state-shared-reconcile plist"
+assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.ha-baseline-refresh.plist" "ha-baseline-refresh plist"
+assert_file_contains "$ROOT/ops/plugins/infra/host/launchd/com.ronny.friction-reconcile.plist" '<key>OPS_GOVERNED_MAIN_OVERRIDE</key>' "friction-reconcile keeps governed main override"
+assert_file_not_contains "$ROOT/ops/plugins/infra/host/launchd/com.ronny.projection-reconcile.plist" '<key>OPS_GOVERNED_MAIN_OVERRIDE</key>' "projection-reconcile no longer needs governed main override"
+assert_file_not_contains "$ROOT/ops/plugins/infra/host/launchd/com.ronny.operator-hygiene-daily.plist" '<key>OPS_GOVERNED_MAIN_OVERRIDE</key>' "operator-hygiene no longer needs governed main override"
 
 echo ""
 echo "── T5: scheduler health reads externalized runtime logs and live exit codes ──"

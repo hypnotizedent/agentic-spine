@@ -10,7 +10,7 @@ source "${SCRIPT_DIR}/../../../lib/runtime-managed-worktree.sh"
 CONTROL_ROOT="$(spine_runtime_resolve_control_root "${BASH_SOURCE[0]}")"
 spine_runtime_activate_managed_worktree "$CONTROL_ROOT"
 RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"
-CAP_RUNNER="${RUNTIME_ROOT}/bin/ops"
+BRIEFING_CMD="${RUNTIME_ROOT}/ops/plugins/core/briefing/bin/spine-briefing"
 source "${RUNTIME_ROOT}/ops/lib/job-wrapper.sh"
 
 echo "[spine-daily-briefing] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -20,6 +20,6 @@ echo "[spine-daily-briefing] worktree_identity=${OPS_WORKTREE_IDENTITY:-unset}"
 
 spine_job_run \
   "spine-daily-briefing:spine.briefing" \
-  "$CAP_RUNNER" cap run spine.briefing --json
+  "$BRIEFING_CMD" --json
 
 echo "[spine-daily-briefing] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
