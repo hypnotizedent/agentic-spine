@@ -1295,6 +1295,8 @@ def run(cmd):
 state = json.load(open(sf, "r", encoding="utf-8"))
 workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
 packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+if not packet and isinstance(state.get("wave_packet"), dict):
+    packet = state["wave_packet"]
 repo = str(workspace.get("repo") or "").strip()
 branch = str(workspace.get("branch") or "").strip()
 wave_id = str(state.get("wave_id") or "").strip()
@@ -1303,6 +1305,46 @@ owner_terminal = str(packet.get("owner_terminal") or "SPINE-CONTROL-01").strip()
 remote = "origin"
 remote_url = ""
 errors = []
+execution_mode = str(packet.get("execution_mode") or state.get("execution_mode") or "").strip().lower()
+transport = str(packet.get("transport") or state.get("transport") or "").strip().lower()
+
+if execution_mode == "operational" or transport == "mailroom":
+    resolved_execution_mode = execution_mode or "code"
+    resolved_transport = transport or ("mailroom" if resolved_execution_mode == "operational" else "git")
+    push_gate = {
+        "status": "PASS",
+        "checked_at_utc": now,
+        "repo": repo,
+        "branch": branch,
+        "remote": remote,
+        "remote_url": "",
+        "failure": "",
+        "execution_mode": resolved_execution_mode,
+        "transport": resolved_transport,
+        "reason": "operational_or_mailroom_transport_skips_git_pushability",
+    }
+    packet["cross_repo_pushability_gate"] = push_gate
+    state["preflight"] = {
+        "domain": "dispatch-pushability",
+        "started_at": now,
+        "finished_at": now,
+        "duration_s": 0,
+        "verdict": "go",
+        "blockers": [],
+        "next_action": "Proceed with dispatch.",
+    }
+    state["packet"] = packet
+    state["wave_packet"] = packet
+    with open(sf, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
+
+    print(
+        "dispatch pushability preflight: PASS "
+        f"lane={lane} execution_mode={resolved_execution_mode} transport={resolved_transport} "
+        "(git pushability skipped)"
+    )
+    raise SystemExit(0)
 
 if not repo:
     errors.append("workspace.repo missing")
