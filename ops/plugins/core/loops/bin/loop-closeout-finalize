@@ -6,6 +6,7 @@ CONTRACT="$ROOT/ops/bindings/loop.closeout.contract.yaml"
 DISPOSITION_CONTRACT="$ROOT/ops/bindings/closeout.disposition.contract.yaml"
 SCOPES_DIR="$SPINE_STATE/loop-scopes"
 GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+GAPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
 
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
@@ -456,24 +457,25 @@ if [[ "$CLOSE_LINKED_GAPS" -eq 1 ]]; then
     gid="${LINKED_GAP_IDS[$idx]}"
     sev="${LINKED_GAP_SEVERITIES[$idx]}"
 
-    yq e -i "(.gaps[] | select(.id == \"$gid\")).status = \"fixed\"" "$GAPS_FILE"
-    yq e -i "(.gaps[] | select(.id == \"$gid\")).fixed_in = \"$LOOP_ID\"" "$GAPS_FILE"
-    yq e -i "(.gaps[] | select(.id == \"$gid\")).notes = ((.notes // \"\") + (if (.notes // \"\") == \"\" then \"\" else \" | \" end) + \"$close_note\")" "$GAPS_FILE"
+    # Close gap via SQLite authority bridge (writes SQLite, projects to YAML).
+    local bridge_args=("close" "--id" "$gid" "--status" "fixed" "--fixed-in" "$LOOP_ID")
+    bridge_args+=("--notes" "$close_note")
+    bridge_args+=("--actor" "loop.closeout.finalize")
+    bridge_args+=("--reason" "Linked gap closed by loop closeout: $LOOP_ID")
+
+    # Flow completion_level from closeout into gap authority (Part D binding).
+    [[ -n "$COMPLETION_LEVEL" ]] && bridge_args+=("--completion-level" "$COMPLETION_LEVEL")
 
     if severity_requires_fix_to_lock "$sev"; then
-      yq e -i "(.gaps[] | select(.id == \"$gid\")).regression_lock_id = \"$REGRESSION_LOCK_ID\"" "$GAPS_FILE"
-      yq e -i "(.gaps[] | select(.id == \"$gid\")).evidence = \"$EVIDENCE\"" "$GAPS_FILE"
-      [[ -n "$OWNER" ]] && yq e -i "(.gaps[] | select(.id == \"$gid\")).owner = \"$OWNER\"" "$GAPS_FILE"
-      [[ -n "$EXPIRY_CHECK" ]] && yq e -i "(.gaps[] | select(.id == \"$gid\")).expiry_check = \"$EXPIRY_CHECK\"" "$GAPS_FILE"
-      [[ -n "$ROOT_CAUSE" ]] && yq e -i "(.gaps[] | select(.id == \"$gid\")).root_cause = \"$ROOT_CAUSE\"" "$GAPS_FILE"
+      [[ -n "$REGRESSION_LOCK_ID" ]] && bridge_args+=("--regression-lock-id" "$REGRESSION_LOCK_ID")
     fi
+
+    python3 "$GAPS_BRIDGE" "${bridge_args[@]}" >/dev/null || {
+      echo "loop.closeout.finalize WARN: bridge close failed for $gid" >&2
+    }
 
     closed_gap_count=$((closed_gap_count + 1))
   done
-
-  if [[ "$closed_gap_count" -gt 0 ]]; then
-    yq e -i ".updated = \"$timestamp\"" "$GAPS_FILE"
-  fi
 fi
 
 # Atomic frontmatter status mutation.
