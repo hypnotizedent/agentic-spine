@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$(cd "$SCRIPT_DIR/../bin" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
 
 pass_count=0
 fail_count=0
@@ -35,13 +36,17 @@ make_repo() {
   repo="$root/repo"
   tmp_roots+=("$root")
 
-  mkdir -p "$repo/mailroom/state/orchestration"
+  mkdir -p "$repo/mailroom/state/orchestration" "$repo/ops/lib"
   git init -q -b main "$repo"
   git -C "$repo" config user.name "Orchestration Test"
   git -C "$repo" config user.email "orchestration-test@example.com"
 
+  cp "$ROOT/ops/lib/git-lock.sh" "$repo/ops/lib/"
+  cp "$ROOT/ops/lib/runtime-paths.sh" "$repo/ops/lib/"
+
   echo "seed" > "$repo/README.md"
   git -C "$repo" add README.md
+  git -C "$repo" add ops/lib/git-lock.sh ops/lib/runtime-paths.sh
   git -C "$repo" commit -q -m "seed"
 
   printf '%s\n' "$repo"
@@ -50,7 +55,10 @@ make_repo() {
 run_cap() {
   local repo="$1"
   shift
-  SPINE_ROOT="$repo" "$@"
+  SPINE_ROOT="$repo" \
+  SPINE_RUNTIME_ROOT="$repo/mailroom" \
+  SPINE_STATE="$repo/mailroom/state" \
+  "$@"
 }
 
 make_commit() {
@@ -225,9 +233,12 @@ case_out_of_sequence_rejected() {
 }
 
 case_terminal_entry_isolated_worktrees() {
-  local repo base commit_d commit_e out_d out_e wt_d wt_e
+  local repo base commit_d commit_e out_d out_e wt_d wt_e caller_wave_root
   repo="$(make_repo)"
   base="$(git -C "$repo" rev-parse HEAD)"
+  caller_wave_root="$HOME/code/.wt/agentic-spine/WAVE-TEST-ENTRY-$(printf '%06X' "$RANDOM")"
+  mkdir -p "$caller_wave_root"
+  tmp_roots+=("$caller_wave_root" "${caller_wave_root}-d" "${caller_wave_root}-e")
 
   run_cap "$repo" "$BIN_DIR/orchestration-loop-open" \
     --loop-id LOOP-T-ENTRY-ISOLATION \
@@ -258,14 +269,14 @@ case_terminal_entry_isolated_worktrees() {
     --role worker \
     --lane D \
     --session-id TEST-D \
-    --worktree "$repo" \
+    --worktree "$caller_wave_root" \
     --branch worker/lane-d 2>&1)"
   out_e="$(run_cap "$repo" "$BIN_DIR/orchestration-terminal-entry" \
     --loop-id LOOP-T-ENTRY-ISOLATION \
     --role worker \
     --lane E \
     --session-id TEST-E \
-    --worktree "$repo" \
+    --worktree "$caller_wave_root" \
     --branch worker/lane-e 2>&1)"
 
   wt_d="$(printf '%s\n' "$out_d" | sed -n 's/^export SPINE_WORKTREE=//p' | tail -1)"
@@ -283,9 +294,12 @@ case_terminal_entry_isolated_worktrees() {
 }
 
 case_terminal_entry_lane_branch_mismatch_rejected() {
-  local repo base
+  local repo base caller_wave_root
   repo="$(make_repo)"
   base="$(git -C "$repo" rev-parse HEAD)"
+  caller_wave_root="$HOME/code/.wt/agentic-spine/WAVE-TEST-MISMATCH-$(printf '%06X' "$RANDOM")"
+  mkdir -p "$caller_wave_root"
+  tmp_roots+=("$caller_wave_root" "${caller_wave_root}-d")
 
   run_cap "$repo" "$BIN_DIR/orchestration-loop-open" \
     --loop-id LOOP-T-ENTRY-MISMATCH \
@@ -309,7 +323,7 @@ case_terminal_entry_lane_branch_mismatch_rejected() {
       --role worker \
       --lane D \
       --session-id TEST-MISMATCH \
-      --worktree "$repo" \
+      --worktree "$caller_wave_root" \
       --branch worker/not-lane-d
 }
 

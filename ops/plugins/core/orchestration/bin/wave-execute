@@ -5,12 +5,14 @@
 # binding in every dispatch, receipt validation, and wave-finish preparation.
 #
 # Part of the authority.resolve -> wave.execute -> wave.finish triad.
+# When close is given a disposition, this surface drives wave.finish automatically
+# unless --no-finish is supplied.
 #
 # Subcommands:
 #   start    --loop-id LOOP-... [--wave-id WAVE-...] [--objective "..."] [wave.sh start flags...]
 #   dispatch --wave-id WAVE-... --lane <lane> --task "desc" [--gap-ids GAP-OP-1234,GAP-OP-1235]
 #   collect  --wave-id WAVE-...
-#   close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate]
+#   close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate] [--fixed-in <sha>] [--skip-residue-check] [--no-finish]
 #   status   --wave-id WAVE-...
 #
 # Exit codes:
@@ -41,7 +43,7 @@ Usage:
   wave-execute start    --loop-id LOOP-... [--wave-id WAVE-...] [--objective "..."]
   wave-execute dispatch --wave-id WAVE-... --lane <lane> --task "desc" [--gap-ids GAP-OP-1234,GAP-OP-1235]
   wave-execute collect  --wave-id WAVE-...
-  wave-execute close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate]
+  wave-execute close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate] [--fixed-in <sha>] [--skip-residue-check] [--no-finish]
   wave-execute status   --wave-id WAVE-...
 
 Wraps wave.sh with pre-flight authority validation and loop/gap context.
@@ -534,6 +536,9 @@ cmd_close() {
   local wave_id=""
   local disposition=""
   local completion_level=""
+  local fixed_in=""
+  local skip_residue_check=0
+  local no_finish=0
   local -a passthrough_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -542,6 +547,9 @@ cmd_close() {
       --wave-id)            wave_id="${2:?--wave-id requires a value}"; shift 2 ;;
       --disposition)        disposition="${2:?--disposition requires a value}"; shift 2 ;;
       --completion-level)   completion_level="${2:?--completion-level requires a value}"; shift 2 ;;
+      --fixed-in)           fixed_in="${2:?--fixed-in requires a value}"; shift 2 ;;
+      --skip-residue-check) skip_residue_check=1; shift ;;
+      --no-finish)          no_finish=1; shift ;;
       -h|--help)            usage; exit 0 ;;
       *)                    passthrough_args+=("$1"); shift ;;
     esac
@@ -620,26 +628,49 @@ for p in pending:
   }
   echo ""
 
-  # Step 5: Print wave-finish command suggestion
+  # Step 5: Propagate closure with wave.finish unless explicitly deferred.
   if [[ -n "$disposition" ]]; then
-    echo "======================================="
-    echo "NEXT STEP: wave.finish"
-    echo "======================================="
-    echo ""
-    echo "Wave is closed. To propagate closure across all surfaces, run:"
-    echo ""
-
     local finish_cmd="  ./bin/ops cap run wave.finish -- \\"
     finish_cmd+="\n    --loop-id $loop_id \\"
     finish_cmd+="\n    --disposition $disposition"
     if [[ -n "$completion_level" ]]; then
       finish_cmd+=" \\\\\n    --completion-level $completion_level"
     fi
+    if [[ -n "$fixed_in" ]]; then
+      finish_cmd+=" \\\\\n    --fixed-in $fixed_in"
+    fi
+    if [[ "$skip_residue_check" -eq 1 ]]; then
+      finish_cmd+=" \\\\\n    --skip-residue-check"
+    fi
     finish_cmd+=" \\\\\n    --wave-id $wave_id"
 
-    printf "$finish_cmd\n"
-    echo ""
-    echo "(wave.finish is a separate governed capability requiring manual approval)"
+    if [[ "$no_finish" -eq 1 ]]; then
+      echo "======================================="
+      echo "NEXT STEP: wave.finish"
+      echo "======================================="
+      echo ""
+      echo "Wave is closed. To propagate closure across all surfaces, run:"
+      echo ""
+      printf "$finish_cmd\n"
+      echo ""
+      echo "(wave.finish was skipped because --no-finish was supplied)"
+    else
+      local -a finish_args=(--loop-id "$loop_id" --disposition "$disposition" --wave-id "$wave_id")
+      if [[ -n "$completion_level" ]]; then
+        finish_args+=(--completion-level "$completion_level")
+      fi
+      if [[ -n "$fixed_in" ]]; then
+        finish_args+=(--fixed-in "$fixed_in")
+      fi
+      if [[ "$skip_residue_check" -eq 1 ]]; then
+        finish_args+=(--skip-residue-check)
+      fi
+
+      echo "Running wave.finish..."
+      bash "$WAVE_FINISH" "${finish_args[@]}" || {
+        _fail "wave.finish failed"
+      }
+    fi
   fi
   echo ""
 }

@@ -123,6 +123,8 @@ fi
 # ── Check 3: WIP cap ────────────────────────────────────────────
 WIP_CAP=5
 WIP_COUNT=0
+WIP_STATE="within_cap"
+WIP_NOTE=""
 
 if [[ -d "$SCOPES_DIR" ]]; then
   while IFS= read -r scope_file; do
@@ -132,11 +134,18 @@ if [[ -d "$SCOPES_DIR" ]]; then
   done < <(find "$SCOPES_DIR" -name "LOOP-*.scope.md" -type f 2>/dev/null)
 fi
 
-# If this loop is active, it already counts toward WIP. Only block if WIP
-# exceeds cap AND this loop is not yet active (i.e., new activation would breach).
+# If this loop is already active, do not deadlock reduction work just because the
+# estate is already over cap. Only block new activation when it would add to the breach.
 if [[ "$WIP_COUNT" -gt "$WIP_CAP" ]]; then
-  BLOCKERS+=("WIP cap exceeded ($WIP_COUNT/$WIP_CAP active loops)")
+  if [[ "$LOOP_STATUS" == "active" ]]; then
+    WIP_STATE="over_cap_active_loop_allowed"
+    WIP_NOTE="estate already over cap; active loop allowed to continue"
+  else
+    WIP_STATE="over_cap_blocked"
+    BLOCKERS+=("WIP cap exceeded ($WIP_COUNT/$WIP_CAP active loops)")
+  fi
 elif [[ "$WIP_COUNT" -ge "$WIP_CAP" && "$LOOP_STATUS" != "active" ]]; then
+  WIP_STATE="at_cap_new_activation_blocked"
   BLOCKERS+=("WIP cap reached ($WIP_COUNT/$WIP_CAP active loops, new activation blocked)")
 fi
 
@@ -249,6 +258,8 @@ data = {
     'linked_gaps': $LINKED_GAPS_JSON,
     'wip_count': $WIP_COUNT,
     'wip_cap': $WIP_CAP,
+    'wip_state': '$WIP_STATE',
+    'wip_note': $( [[ -n "$WIP_NOTE" ]] && python3 -c "import json; print(json.dumps('$WIP_NOTE'))" || echo 'None' ),
     'dirty_file_count': $DIRTY_FILE_COUNT,
     'superseded_by': $( [[ -n "$SUPERSEDED_BY" ]] && python3 -c "import json; print(json.dumps('$SUPERSEDED_BY'))" || echo 'None' ),
     'resolved_at_utc': '$RESOLVED_AT',
@@ -273,8 +284,10 @@ else
   printf "Objective:       %s\n" "$OBJECTIVE"
   echo ""
 
-  if [[ "$WIP_COUNT" -le "$WIP_CAP" ]]; then
+  if [[ "$WIP_STATE" == "within_cap" ]]; then
     printf "WIP:             %s/%s active loops (ok)\n" "$WIP_COUNT" "$WIP_CAP"
+  elif [[ "$WIP_STATE" == "over_cap_active_loop_allowed" ]]; then
+    printf "WIP:             %s/%s active loops (active loop allowed to continue)\n" "$WIP_COUNT" "$WIP_CAP"
   else
     printf "WIP:             %s/%s active loops (BLOCKED)\n" "$WIP_COUNT" "$WIP_CAP"
   fi

@@ -267,6 +267,7 @@ surface_projection="PASS"
 surface_projection_note=""
 surface_residue="PASS"
 surface_residue_note=""
+declare -a NON_PASS_SURFACES=()
 
 # Surface 1: Runtime Agreement
 # Check for open critical/high gaps that won't be closed.
@@ -323,6 +324,19 @@ else
   surface_residue_note="skipped (--skip-residue-check)"
 fi
 
+for surface_status in \
+  "runtime:$surface_runtime" \
+  "control-plane:$surface_control" \
+  "projections:$surface_projection" \
+  "residue:$surface_residue"
+do
+  surface_name="${surface_status%%:*}"
+  result="${surface_status#*:}"
+  if [[ "$result" != "PASS" ]]; then
+    NON_PASS_SURFACES+=("$surface_name=$result")
+  fi
+done
+
 # Print surface agreement.
 _surface_sym() {
   case "$1" in
@@ -346,6 +360,20 @@ printf "  Residue:        %s" "$(_surface_sym "$surface_residue")"
 [[ -n "$surface_residue_note" ]] && printf " (%s)" "$surface_residue_note"
 echo ""
 echo ""
+
+if [[ "$DISPOSITION" == "landed" && "${#NON_PASS_SURFACES[@]}" -gt 0 ]]; then
+  non_pass_csv="$(IFS=', '; echo "${NON_PASS_SURFACES[*]}")"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "DRY RUN: landed disposition would be blocked by non-PASS surfaces: $non_pass_csv"
+    echo ""
+    echo "Use disposition=deferred or repair the reported surfaces before landing."
+    exit 3
+  fi
+  echo "wave.finish FAIL: landed disposition requires PASS on all four surfaces" >&2
+  echo "Non-PASS surfaces: $non_pass_csv" >&2
+  echo "Use disposition=deferred or repair the reported surfaces before landing." >&2
+  exit 1
+fi
 
 # ── Step 4: Execute closure ──────────────────────────────────────
 
@@ -474,10 +502,10 @@ blocker_count: 0
 
 | check | surface | result | detail |
 |-------|---------|--------|--------|
-| runtime_agreement | runtime | PASS | ${surface_runtime_note:-no critical/high gaps remaining} |
-| control_plane_agreement | control-plane | PASS | ${surface_control_note:-no dirty bindings} |
-| projection_agreement | projections | PASS | ${surface_projection_note:-YAML and SQLite aligned} |
-| residue_check | residue | PASS | ${surface_residue_note:-no orphan worktrees or branches} |
+| runtime_agreement | runtime | $surface_runtime | ${surface_runtime_note:-no critical/high gaps remaining} |
+| control_plane_agreement | control-plane | $surface_control | ${surface_control_note:-no dirty bindings} |
+| projection_agreement | projections | $surface_projection | ${surface_projection_note:-YAML and SQLite aligned} |
+| residue_check | residue | $surface_residue | ${surface_residue_note:-no orphan worktrees or branches} |
 
 run_key: ${SPINE_CAP_RUN_KEY:-manual}
 EOF
