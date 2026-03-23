@@ -156,21 +156,23 @@ def assert_attach_repo_identity(args: argparse.Namespace) -> dict[str, str]:
             f"--repo-root resolves to {requested_repo_root} but current checkout is {expected_root}"
         )
 
-    mismatches: list[str] = []
-    for env_name in ("SPINE_REPO", "SPINE_ROOT"):
+    # Auto-clean leaked ambient env vars that don't match current checkout
+    cleaned_vars: list[str] = []
+    for env_name in ("SPINE_REPO", "SPINE_ROOT", "SPINE_CODE", "SPINE_TARGET_REPO"):
         raw_value = os.environ.get(env_name, "").strip()
         if not raw_value:
             continue
         resolved = canonical_path(raw_value)
         if resolved != expected_root:
-            mismatches.append(f"{env_name}={resolved}")
+            os.environ.pop(env_name, None)
+            cleaned_vars.append(f"{env_name}={resolved}")
 
-    if mismatches:
-        mismatch_text = ", ".join(mismatches)
-        raise RuntimeError(
-            "ambient spine root mismatch: "
-            f"{mismatch_text}; current checkout is {expected_root}. "
-            "Start from a clean terminal or re-attach after clearing leaked runtime env."
+    if cleaned_vars:
+        cleaned_text = ", ".join(cleaned_vars)
+        print(
+            f"attach: cleaned leaked ambient env ({cleaned_text}) "
+            f"→ using current checkout {expected_root}",
+            file=sys.stderr,
         )
 
     args.repo_root = str(expected_root)
