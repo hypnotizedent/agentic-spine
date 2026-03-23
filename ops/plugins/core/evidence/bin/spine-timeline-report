@@ -4,6 +4,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 SPINE_REPO="${SPINE_REPO:-$ROOT}"
 SPINE_CODE="${SPINE_CODE:-$ROOT}"
+
+# Query/report surfaces should follow the resolved repo contract, not whichever
+# derived runtime paths leaked from another attached terminal.
+unset SPINE_RUNTIME_ROOT SPINE_MAILROOM_ROOT SPINE_INBOX SPINE_OUTBOX SPINE_STATE
+unset SPINE_LOCKS SPINE_LOGS SPINE_TMP SPINE_EVIDENCE_ROOT SPINE_RECEIPTS
+unset SPINE_VERIFY_ROOT SPINE_VERIFY_REPORTS_ROOT SPINE_VERIFY_INDEXES_DIR
+unset SPINE_RECEIPT_INDEX_FILE SPINE_VERIFY_HISTORY_DIR SPINE_VERIFY_FAILURE_HISTORY_FILE
+unset SPINE_VERIFY_STATE_ROOT SPINE_VERIFY_PASS_STREAK_FILE SPINE_LOOP_CLOSEOUTS_ROOT
+unset SPINE_CENSUS_ROOT SPINE_CAP_RUNS_ROOT SPINE_DATA_ROOT SPINE_BACKUPS_ROOT
+unset SPINE_DOMAIN_STATE SPINE_FOUNDATION_ROOT SPINE_AGENT_CONTEXT_ROOT SPINE_AGENT_CONTEXT_FILE
+
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 
@@ -21,6 +32,7 @@ TITLE="Spine Timeline Report"
 OUTPUT_PATH=""
 FORCE=0
 REFRESH_INDEX=0
+DEFAULT_AUDIT_OUTBOX=""
 
 usage() {
   cat <<'USAGE'
@@ -35,7 +47,7 @@ Usage:
                         [--output <path>] [--format markdown|json] [--force]
 
 Notes:
-  - Writes report files under ${SPINE_OUTBOX}/audits by default.
+  - Writes report files under the canonical runtime audit outbox by default.
   - This capability is mutating; in multi-terminal sessions use writer-lane
     proposal/apply flow.
 USAGE
@@ -121,6 +133,20 @@ if [[ -n "$REPORT_ID" && ! "$REPORT_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
 fi
 
 command -v python3 >/dev/null 2>&1 || { echo "FAIL: missing dependency python3" >&2; exit 1; }
+command -v yq >/dev/null 2>&1 || { echo "FAIL: missing dependency yq" >&2; exit 1; }
+
+runtime_contract="$ROOT/ops/bindings/mailroom.runtime.contract.yaml"
+if [[ -f "$runtime_contract" ]]; then
+  runtime_active="$(yq e -r '.active // "false"' "$runtime_contract" 2>/dev/null || echo "false")"
+  contract_outbox_root="$(yq e -r '.outbox_root // ""' "$runtime_contract" 2>/dev/null || true)"
+  if [[ -n "$contract_outbox_root" && "$contract_outbox_root" != "null" ]]; then
+    DEFAULT_AUDIT_OUTBOX="$contract_outbox_root/audits"
+  elif [[ "$runtime_active" == "true" ]]; then
+    DEFAULT_AUDIT_OUTBOX="$SPINE_RUNTIME_ROOT/outbox/audits"
+  fi
+fi
+
+[[ -n "$DEFAULT_AUDIT_OUTBOX" ]] || DEFAULT_AUDIT_OUTBOX="$SPINE_OUTBOX/audits"
 
 if [[ "$REFRESH_INDEX" -eq 1 ]]; then
   "$ROOT/ops/plugins/core/evidence/bin/receipts-index-build" \
@@ -136,11 +162,11 @@ ext="md"
 [[ "$FORMAT" == "json" ]] && ext="json"
 
 if [[ -z "$OUTPUT_PATH" ]]; then
-  OUTPUT_PATH="$SPINE_OUTBOX/audits/${REPORT_ID}.${ext}"
+  OUTPUT_PATH="$DEFAULT_AUDIT_OUTBOX/${REPORT_ID}.${ext}"
 elif [[ "$OUTPUT_PATH" == mailroom/* ]]; then
   OUTPUT_PATH="$(spine_resolve_mailroom_path "$OUTPUT_PATH")"
 elif [[ "$OUTPUT_PATH" != /* ]]; then
-  OUTPUT_PATH="$SPINE_OUTBOX/audits/$OUTPUT_PATH"
+  OUTPUT_PATH="$DEFAULT_AUDIT_OUTBOX/$OUTPUT_PATH"
 fi
 
 if [[ "$OUTPUT_PATH" =~ /$ ]]; then

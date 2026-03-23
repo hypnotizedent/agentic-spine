@@ -96,7 +96,10 @@ _spine_canonicalize_repoish_path() {
 
 _spine_has_capability_registry() {
   local root="${1:-}"
-  [[ -n "$root" && -f "$root/ops/capabilities.yaml" ]]
+  [[ -n "$root" ]] || return 1
+  [[ -f "$root/ops/capabilities.yaml" ]] && return 0
+  [[ -f "$root/ops/bindings/mailroom.runtime.contract.yaml" ]] && return 0
+  return 1
 }
 
 spine_resolve_target_repo() {
@@ -109,7 +112,7 @@ spine_resolve_target_repo() {
 
   if [[ -n "$explicit_target" ]]; then
     explicit_target="$(_spine_canonicalize_repoish_path "$explicit_target")"
-    if [[ -n "$(git -C "$explicit_target" rev-parse --show-toplevel 2>/dev/null || true)" ]] || [[ -f "$explicit_target/ops/capabilities.yaml" ]]; then
+    if [[ -n "$(git -C "$explicit_target" rev-parse --show-toplevel 2>/dev/null || true)" ]] || _spine_has_capability_registry "$explicit_target"; then
       printf '%s\n' "$explicit_target"
       return 0
     fi

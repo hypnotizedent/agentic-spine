@@ -108,6 +108,13 @@ run_query() {
   (
     cd "$repo"
     SPINE_REPO="$repo" SPINE_CODE="$repo" \
+      SPINE_RUNTIME_ROOT="/tmp/stale-runtime-root" \
+      SPINE_MAILROOM_ROOT="/tmp/stale-mailroom-root" \
+      SPINE_OUTBOX="/tmp/stale-outbox" \
+      SPINE_STATE="/tmp/stale-state" \
+      SPINE_EVIDENCE_ROOT="/tmp/stale-evidence" \
+      SPINE_RECEIPTS="/tmp/stale-receipts" \
+      SPINE_VERIFY_ROOT="/tmp/stale-verify" \
       "$repo/ops/plugins/core/evidence/bin/spine-timeline-query" "$@"
   )
 }
@@ -118,6 +125,13 @@ run_report() {
   (
     cd "$repo"
     SPINE_REPO="$repo" SPINE_CODE="$repo" \
+      SPINE_RUNTIME_ROOT="/tmp/stale-runtime-root" \
+      SPINE_MAILROOM_ROOT="/tmp/stale-mailroom-root" \
+      SPINE_OUTBOX="/tmp/stale-outbox" \
+      SPINE_STATE="/tmp/stale-state" \
+      SPINE_EVIDENCE_ROOT="/tmp/stale-evidence" \
+      SPINE_RECEIPTS="/tmp/stale-receipts" \
+      SPINE_VERIFY_ROOT="/tmp/stale-verify" \
       "$repo/ops/plugins/core/evidence/bin/spine-timeline-report" "$@"
   )
 }
