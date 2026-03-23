@@ -16,7 +16,7 @@ usage() {
 session-handoff-list
 
 Usage:
-  session-handoff-list [--state <active|closed|expired|all>] [--json]
+  session-handoff-list [--state <active|parked|closed|expired|all>] [--json]
 USAGE
 }
 
@@ -54,13 +54,15 @@ while IFS= read -r file; do
   fi
   row="$(jq -n \
     --arg id "$(yq -r '.id // ""' "$file")" \
+    --arg kind "$(yq -r '.kind // "session"' "$file")" \
     --arg state "$state" \
     --arg owner "$(yq -r '.owner // ""' "$file")" \
     --arg summary "$(yq -r '.summary // ""' "$file")" \
     --arg created_at_utc "$(yq -r '.created_at_utc // ""' "$file")" \
     --arg expires_at_utc "$(yq -r '.expires_at_utc // ""' "$file")" \
+    --arg review_date "$(yq -r '.parking.review_date // ""' "$file" 2>/dev/null || true)" \
     --arg path "$file" \
-    '{id:$id,state:$state,owner:$owner,summary:$summary,created_at_utc:$created_at_utc,expires_at_utc:$expires_at_utc,path:$path}')"
+    '{id:$id,kind:$kind,state:$state,owner:$owner,summary:$summary,created_at_utc:$created_at_utc,expires_at_utc:$expires_at_utc,review_date:$review_date,path:$path}')"
   rows="$(jq -c --argjson row "$row" '. + [$row]' <<<"$rows")"
 done < <(find "$full_dir" -maxdepth 1 -type f -name 'HO-*.yaml' | sort)
 
@@ -72,4 +74,4 @@ fi
 echo "session.handoff.list"
 echo "state_filter: $STATE_FILTER"
 echo "count: $(jq -r 'length' <<<"$rows")"
-jq -r '.[] | "- \(.id) [\(.state)] \(.owner): \(.summary)"' <<<"$rows"
+jq -r '.[] | "- \(.id) [\(.kind)/\(.state)] \(.owner): \(.summary)"' <<<"$rows"

@@ -9,6 +9,7 @@ RECONCILE="$ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-reconcile"
 PLANS_CREATE="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-create"
 PLANS_RECONCILE="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-reconcile"
 LOOPS_CREATE="$ROOT/ops/plugins/core/lifecycle/bin/loops-create"
+HANDOFF_CREATE="$ROOT/ops/plugins/core/handoff/bin/session-handoff-create"
 
 PASS=0
 FAIL=0
@@ -116,6 +117,30 @@ LOOP_SCOPE_FILE="$(printf '%s' "$loop_json" | python3 -c 'import json,sys; print
 TODAY_UTC="$(date -u +%Y%m%d)"
 assert_eq "$LOOP_ID" "LOOP-DEFERRED-BRANCH-KEEP-$TODAY_UTC" "loops-create json returns canonical loop id"
 assert_eq "$LOOP_SCOPE_FILE" "$STATE/loop-scopes/$LOOP_ID.scope.md" "loops-create json exposes canonical scope path"
+
+HANDOFF_JSON="$(
+  SPINE_STATE="$STATE" \
+  "$HANDOFF_CREATE" \
+    --summary "Park deferred branch memory in mailroom handoff state." \
+    --loops "$LOOP_ID" \
+    --kind parked_lane \
+    --review-date 2026-03-29 \
+    --branch-refs codex/deferred-branch \
+    --worktree-paths "$TARGET" \
+    --json
+)"
+HANDOFF_ID="$(printf '%s' "$HANDOFF_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+
+HANDOFF_JSON_RECONCILE="$TMPDIR_BASE/reconcile-handoff.json"
+(
+  cd "$TARGET"
+  env -u SPINE_TARGET_REPO -u SPINE_REPO -u SPINE_CODE \
+    SPINE_STATE="$STATE" \
+    "$RECONCILE" --json > "$HANDOFF_JSON_RECONCILE"
+)
+assert_eq "$(json_eval "$HANDOFF_JSON_RECONCILE" "any(row['branch'] == 'codex/deferred-branch' and row['branch_memory_linked'] for row in payload['local_branches'])")" "True" "parked handoff also counts as branch memory linkage"
+assert_eq "$(json_eval "$HANDOFF_JSON_RECONCILE" "any(item['code'] == 'branch_missing_plan_linkage' and item['branch'] == 'codex/deferred-branch' for item in payload['issues'])")" "False" "parked handoff clears missing branch memory issue"
+assert_eq "$(json_eval "$HANDOFF_JSON_RECONCILE" "payload['local_branches'][0]['linked_handoff_refs']")" "['$HANDOFF_ID']" "local branch inventory exposes parked handoff linkage"
 
 PLANS_DB_PATH="$STATE/shared_authority.db" \
 PLANS_INDEX_PATH="$STATE/plans/index.yaml" \

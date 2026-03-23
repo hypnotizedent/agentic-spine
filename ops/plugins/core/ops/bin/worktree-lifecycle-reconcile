@@ -9,6 +9,7 @@ source "$CONTROL_ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 CONTRACT="$CONTROL_ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
 DISPOSITION_CONTRACT="$CONTROL_ROOT/ops/bindings/closeout.disposition.contract.yaml"
+HANDOFF_CONFIG="$CONTROL_ROOT/ops/bindings/handoff.config.yaml"
 
 MODE="report"
 JSON_MODE=0
@@ -59,6 +60,7 @@ FAIL_ON_ROOT_NON_MAIN="true"
 FAIL_ON_ROOT_DIRTY="true"
 WAVES_DIR="$SPINE_STATE/waves"
 LOOPS_SCOPE_DIR="$SPINE_STATE/loop-scopes"
+HANDOFFS_DIR="$SPINE_STATE/handoffs"
 ALLOWED_DISPOSITIONS_CSV="landed,deferred,superseded,abandoned"
 FAIL_ON_CLOSED_OWNER_MISSING_DISPOSITION="true"
 FAIL_ON_CLOSED_OWNER_INVALID_DISPOSITION="true"
@@ -142,7 +144,14 @@ if [[ -f "$DISPOSITION_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   FAIL_ON_CLOSED_OWNER_INVALID_DISPOSITION="$(yq e -r '.enforcement.fail_worktree_reconcile_when_closed_owner_invalid_disposition // true' "$DISPOSITION_CONTRACT" 2>/dev/null || echo true)"
 fi
 
-python3 - "$TARGET_ROOT" "$MAIN_BRANCH" "$CANONICAL_WORKTREE_ROOT" "$CANONICAL_TEMP_CLONE_ROOT" "$MANAGED_WORKTREE_PATHS_CSV" "$LEASE_FILENAME" "$LEASE_TTL_HOURS" "$PREFIX_CSV" "$MERGED_GRACE_HOURS" "$CLOSED_OWNER_GRACE_HOURS" "$UNOWNED_LOCAL_GRACE_HOURS" "$TEMP_CLONE_GRACE_HOURS" "$MAIN_STASH_WARN_HOURS" "$MAIN_STASH_FAIL_HOURS" "$FAIL_ON_DETACHED" "$FAIL_ON_DIRTY_CLOSED" "$WARN_ON_DIRTY_ACTIVE" "$FAIL_ON_DIRTY_TEMP_CLONE" "$FAIL_ON_MISSING_TEMP_CLONE_ORIGIN" "$FAIL_ON_ROOT_NON_MAIN" "$FAIL_ON_ROOT_DIRTY" "$WAVES_DIR" "$LOOPS_SCOPE_DIR" "$ALLOWED_DISPOSITIONS_CSV" "$FAIL_ON_CLOSED_OWNER_MISSING_DISPOSITION" "$FAIL_ON_CLOSED_OWNER_INVALID_DISPOSITION" "$MODE" "$JSON_MODE" "$BRIEF_MODE" <<'PY'
+if [[ -f "$HANDOFF_CONFIG" ]] && command -v yq >/dev/null 2>&1; then
+  handoff_dir_rel="$(yq e -r '.storage.directory // ""' "$HANDOFF_CONFIG" 2>/dev/null || true)"
+  if [[ -n "$handoff_dir_rel" && "$handoff_dir_rel" != "null" ]]; then
+    HANDOFFS_DIR="$(spine_resolve_mailroom_path "$handoff_dir_rel")"
+  fi
+fi
+
+python3 - "$TARGET_ROOT" "$MAIN_BRANCH" "$CANONICAL_WORKTREE_ROOT" "$CANONICAL_TEMP_CLONE_ROOT" "$MANAGED_WORKTREE_PATHS_CSV" "$LEASE_FILENAME" "$LEASE_TTL_HOURS" "$PREFIX_CSV" "$MERGED_GRACE_HOURS" "$CLOSED_OWNER_GRACE_HOURS" "$UNOWNED_LOCAL_GRACE_HOURS" "$TEMP_CLONE_GRACE_HOURS" "$MAIN_STASH_WARN_HOURS" "$MAIN_STASH_FAIL_HOURS" "$FAIL_ON_DETACHED" "$FAIL_ON_DIRTY_CLOSED" "$WARN_ON_DIRTY_ACTIVE" "$FAIL_ON_DIRTY_TEMP_CLONE" "$FAIL_ON_MISSING_TEMP_CLONE_ORIGIN" "$FAIL_ON_ROOT_NON_MAIN" "$FAIL_ON_ROOT_DIRTY" "$WAVES_DIR" "$LOOPS_SCOPE_DIR" "$HANDOFFS_DIR" "$ALLOWED_DISPOSITIONS_CSV" "$FAIL_ON_CLOSED_OWNER_MISSING_DISPOSITION" "$FAIL_ON_CLOSED_OWNER_INVALID_DISPOSITION" "$MODE" "$JSON_MODE" "$BRIEF_MODE" <<'PY'
 import json
 import os
 import re
@@ -176,12 +185,13 @@ fail_on_root_non_main = sys.argv[20].lower() == "true"
 fail_on_root_dirty = sys.argv[21].lower() == "true"
 waves_dir = Path(os.path.expanduser(sys.argv[22]))
 loops_scope_rel = sys.argv[23]
-allowed_dispositions = {item.strip() for item in sys.argv[24].split(",") if item.strip()}
-fail_on_closed_owner_missing_disposition = sys.argv[25].lower() == "true"
-fail_on_closed_owner_invalid_disposition = sys.argv[26].lower() == "true"
-mode = sys.argv[27]
-json_mode = sys.argv[28] == "1"
-brief_mode = sys.argv[29] == "1"
+handoffs_dir = Path(os.path.expanduser(sys.argv[24]))
+allowed_dispositions = {item.strip() for item in sys.argv[25].split(",") if item.strip()}
+fail_on_closed_owner_missing_disposition = sys.argv[26].lower() == "true"
+fail_on_closed_owner_invalid_disposition = sys.argv[27].lower() == "true"
+mode = sys.argv[28]
+json_mode = sys.argv[29] == "1"
+brief_mode = sys.argv[30] == "1"
 
 now_epoch = time.time()
 
@@ -526,6 +536,8 @@ if isinstance(policy_doc, dict):
 plans_index_path = loops_scope_dir.parent / "plans/index.yaml"
 branch_plan_index = {}
 worktree_plan_index = {}
+branch_handoff_index = {}
+worktree_handoff_index = {}
 plans_doc = load_yaml(plans_index_path)
 if isinstance(plans_doc, dict):
     plan_rows = plans_doc.get("plans") or []
@@ -552,6 +564,39 @@ if isinstance(plans_doc, dict):
                     resolved_wt = worktree_path
                 worktree_plan_index.setdefault(resolved_wt, []).append(plan_row)
 
+if handoffs_dir.exists():
+    for handoff_file in sorted(handoffs_dir.glob("HO-*.yaml")):
+        handoff = load_yaml(handoff_file)
+        if not isinstance(handoff, dict):
+            continue
+        if str(handoff.get("kind") or "").strip() != "parked_lane":
+            continue
+        state = str(handoff.get("state") or "").strip().lower()
+        if state not in {"active", "parked"}:
+            continue
+        parking = handoff.get("parking")
+        if not isinstance(parking, dict):
+            continue
+        handoff_row = {
+            "handoff_id": str(handoff.get("id") or handoff_file.stem).strip(),
+            "state": state,
+            "review_date": str(parking.get("review_date") or "").strip(),
+            "loops": [str(item).strip() for item in (handoff.get("loops") or []) if str(item).strip()],
+        }
+        for branch_ref in parking.get("branch_refs") or []:
+            ref = str(branch_ref or "").strip()
+            if ref:
+                branch_handoff_index.setdefault(ref, []).append(handoff_row)
+        for worktree_path in parking.get("worktree_paths") or []:
+            raw_path = str(worktree_path or "").strip()
+            if not raw_path:
+                continue
+            try:
+                resolved_wt = str(Path(raw_path).expanduser().resolve())
+            except Exception:
+                resolved_wt = raw_path
+            worktree_handoff_index.setdefault(resolved_wt, []).append(handoff_row)
+
 
 def linked_plans_for(branch: str, wt_path: str):
     linked = []
@@ -566,6 +611,22 @@ def linked_plans_for(branch: str, wt_path: str):
         if pid and pid not in seen:
             linked.append(plan)
             seen.add(pid)
+    return linked
+
+
+def linked_handoffs_for(branch: str, wt_path: str):
+    linked = []
+    seen = set()
+    for handoff in branch_handoff_index.get(branch, []):
+        hid = handoff.get("handoff_id")
+        if hid and hid not in seen:
+            linked.append(handoff)
+            seen.add(hid)
+    for handoff in worktree_handoff_index.get(wt_path, []):
+        hid = handoff.get("handoff_id")
+        if hid and hid not in seen:
+            linked.append(handoff)
+            seen.add(hid)
     return linked
 
 # Wave workspace owners (runtime state)
@@ -619,6 +680,8 @@ for wt, raw_branch in parse_worktrees(repo_root):
         "branch_memory_linked": False,
         "linked_plan_refs": [],
         "linked_plan_statuses": [],
+        "linked_handoff_refs": [],
+        "linked_handoff_states": [],
         "canonical_root_ok": path_under(wt, canonical_worktree_root),
         "lease": parse_lease(wt / lease_filename),
         "dirty": False,
@@ -681,9 +744,12 @@ for wt, raw_branch in parse_worktrees(repo_root):
         row["has_origin"] = has_origin_branch(repo_root, branch)
         row["branch_age_hours"] = branch_age_hours(repo_root, branch)
         linked_plans = linked_plans_for(branch, row["path"])
-        row["branch_memory_linked"] = bool(linked_plans)
+        linked_handoffs = linked_handoffs_for(branch, row["path"])
+        row["branch_memory_linked"] = bool(linked_plans or linked_handoffs)
         row["linked_plan_refs"] = [plan["plan_id"] for plan in linked_plans if plan.get("plan_id")]
         row["linked_plan_statuses"] = [plan["status"] for plan in linked_plans if plan.get("status")]
+        row["linked_handoff_refs"] = [handoff["handoff_id"] for handoff in linked_handoffs if handoff.get("handoff_id")]
+        row["linked_handoff_states"] = [handoff["state"] for handoff in linked_handoffs if handoff.get("state")]
 
         if not row["has_origin"] and not row["managed_worktree"]:
             owner_active = row["owner_type"] in {"loop", "wave"} and row["owner_state"] not in {"closed", "unknown"}
@@ -716,7 +782,7 @@ for wt, raw_branch in parse_worktrees(repo_root):
         ):
             if not row["branch_memory_linked"]:
                 row["issues"].append("branch_missing_plan_linkage")
-            elif all(status in branch_memory_terminal_statuses for status in row["linked_plan_statuses"]):
+            elif row["linked_plan_statuses"] and all(status in branch_memory_terminal_statuses for status in row["linked_plan_statuses"]):
                 row["warnings"].append("branch_linked_only_to_terminal_plan")
 
         if row["managed_worktree"] and main_branch_head and git_head(wt) != main_branch_head:
@@ -799,13 +865,18 @@ for raw_branch in [ln.strip() for ln in local_branch_out.splitlines() if ln.stri
         "branch_memory_linked": False,
         "linked_plan_refs": [],
         "linked_plan_statuses": [],
+        "linked_handoff_refs": [],
+        "linked_handoff_states": [],
         "issues": [],
         "warnings": [],
     }
     linked_plans = linked_plans_for(raw_branch, "")
-    row["branch_memory_linked"] = bool(linked_plans)
+    linked_handoffs = linked_handoffs_for(raw_branch, "")
+    row["branch_memory_linked"] = bool(linked_plans or linked_handoffs)
     row["linked_plan_refs"] = [plan["plan_id"] for plan in linked_plans if plan.get("plan_id")]
     row["linked_plan_statuses"] = [plan["status"] for plan in linked_plans if plan.get("status")]
+    row["linked_handoff_refs"] = [handoff["handoff_id"] for handoff in linked_handoffs if handoff.get("handoff_id")]
+    row["linked_handoff_states"] = [handoff["state"] for handoff in linked_handoffs if handoff.get("state")]
 
     if not row["has_origin"]:
         if is_local_prefix(raw_branch):
@@ -825,7 +896,7 @@ for raw_branch in [ln.strip() for ln in local_branch_out.splitlines() if ln.stri
     ):
         if not row["branch_memory_linked"]:
             row["issues"].append("branch_missing_plan_linkage")
-        elif all(status in branch_memory_terminal_statuses for status in row["linked_plan_statuses"]):
+        elif row["linked_plan_statuses"] and all(status in branch_memory_terminal_statuses for status in row["linked_plan_statuses"]):
             row["warnings"].append("branch_linked_only_to_terminal_plan")
 
     local_branch_rows.append(row)
@@ -834,21 +905,21 @@ for raw_branch in [ln.strip() for ln in local_branch_out.splitlines() if ln.stri
             "kind": "local_branch",
             "path": row["path"],
             "branch": row["branch"],
-            "code": code,
-            "owner_type": "branch_memory",
-            "owner_id": ",".join(row["linked_plan_refs"]) if row["linked_plan_refs"] else None,
-            "owner_state": "linked" if row["branch_memory_linked"] else "unlinked",
-        })
+                "code": code,
+                "owner_type": "branch_memory",
+                "owner_id": ",".join(row["linked_plan_refs"] + row["linked_handoff_refs"]) if (row["linked_plan_refs"] or row["linked_handoff_refs"]) else None,
+                "owner_state": "linked" if row["branch_memory_linked"] else "unlinked",
+            })
     for code in row["warnings"]:
         warnings.append({
             "kind": "local_branch",
             "path": row["path"],
             "branch": row["branch"],
-            "code": code,
-            "owner_type": "branch_memory",
-            "owner_id": ",".join(row["linked_plan_refs"]) if row["linked_plan_refs"] else None,
-            "owner_state": "linked" if row["branch_memory_linked"] else "unlinked",
-        })
+                "code": code,
+                "owner_type": "branch_memory",
+                "owner_id": ",".join(row["linked_plan_refs"] + row["linked_handoff_refs"]) if (row["linked_plan_refs"] or row["linked_handoff_refs"]) else None,
+                "owner_state": "linked" if row["branch_memory_linked"] else "unlinked",
+            })
 
 if canonical_temp_clone_root.exists():
     for clone_path in sorted(canonical_temp_clone_root.iterdir()):

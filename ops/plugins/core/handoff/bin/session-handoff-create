@@ -12,11 +12,19 @@ SUMMARY=""
 LOOPS_RAW=""
 ACTIONS_RAW=""
 OWNER="${USER:-unknown}"
+KIND="session"
 FROM_ROLE=""
 TO_ROLE=""
 INPUT_REFS_RAW=""
 OUTPUT_REFS_RAW=""
 TRANSITION_GATE=""
+REVIEW_DATE=""
+BRANCH_REFS_RAW=""
+TRACKING_REFS_RAW=""
+WORKTREE_PATHS_RAW=""
+PRESERVED_COMMITS_RAW=""
+FILE_REFS_RAW=""
+PLAN_REFS_RAW=""
 JSON_MODE=0
 
 usage() {
@@ -24,8 +32,18 @@ usage() {
 session-handoff-create
 
 Usage:
-  session-handoff-create --summary "..." [--loops "LOOP-A,LOOP-B"] [--actions "task1,task2"] [--owner <name>] [--from-role <role>] [--to-role <role>] [--input-refs "k=v,..."] [--output-refs "k=v,..."] [--json]
+  session-handoff-create --summary "..." [--loops "LOOP-A,LOOP-B"] [--actions "task1,task2"] [--owner <name>] [--kind <session|parked_lane>] [--from-role <role>] [--to-role <role>] [--input-refs "k=v,..."] [--output-refs "k=v,..."] [--review-date YYYY-MM-DD] [--branch-refs "branch,..."] [--tracking-refs "ref,..."] [--worktree-paths "path,..."] [--preserved-commits "sha,..."] [--file-refs "path,..."] [--plan-refs "PLAN-...,PLAN-..."] [--json]
 USAGE
+}
+
+csv_json_list() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+items = [x.strip() for x in sys.argv[1].split(',') if x.strip()]
+print(json.dumps(items))
+PY
 }
 
 while [[ $# -gt 0 ]]; do
@@ -46,6 +64,10 @@ while [[ $# -gt 0 ]]; do
       OWNER="${2:-}"
       shift 2
       ;;
+    --kind)
+      KIND="${2:-}"
+      shift 2
+      ;;
     --from-role)
       FROM_ROLE="${2:-}"
       shift 2
@@ -64,6 +86,34 @@ while [[ $# -gt 0 ]]; do
       ;;
     --transition-gate)
       TRANSITION_GATE="${2:-}"
+      shift 2
+      ;;
+    --review-date)
+      REVIEW_DATE="${2:-}"
+      shift 2
+      ;;
+    --branch-refs)
+      BRANCH_REFS_RAW="${2:-}"
+      shift 2
+      ;;
+    --tracking-refs)
+      TRACKING_REFS_RAW="${2:-}"
+      shift 2
+      ;;
+    --worktree-paths)
+      WORKTREE_PATHS_RAW="${2:-}"
+      shift 2
+      ;;
+    --preserved-commits)
+      PRESERVED_COMMITS_RAW="${2:-}"
+      shift 2
+      ;;
+    --file-refs)
+      FILE_REFS_RAW="${2:-}"
+      shift 2
+      ;;
+    --plan-refs)
+      PLAN_REFS_RAW="${2:-}"
       shift 2
       ;;
     --json)
@@ -88,9 +138,15 @@ ttl_hours="$(yq -r '.defaults.ttl_hours // 72' "$CONFIG")"
 max_active="$(yq -r '.defaults.max_active // 20' "$CONFIG")"
 role_io_enabled="$(yq -r '.role_io.enabled // false' "$CONFIG" 2>/dev/null || echo false)"
 role_io_policy_contract="$(yq -r '.role_io.policy_contract // ""' "$CONFIG" 2>/dev/null || true)"
+allowed_kinds_json="$(yq -o=json '.kinds.allowed // ["session"]' "$CONFIG" 2>/dev/null || echo '["session"]')"
 
 [[ "$ttl_hours" =~ ^[0-9]+$ ]] || ttl_hours=72
 [[ "$max_active" =~ ^[0-9]+$ ]] || max_active=20
+
+if ! jq -e --arg kind "$KIND" '.[] | select(. == $kind)' <<<"$allowed_kinds_json" >/dev/null 2>&1; then
+  echo "FAIL: unsupported handoff kind: $KIND" >&2
+  exit 2
+fi
 
 handoff_dir="$(spine_resolve_mailroom_path "$handoff_dir_rel")"
 mkdir -p "$handoff_dir"
@@ -124,21 +180,25 @@ PY
 loops_yaml="[]"
 actions_yaml="[]"
 if [[ -n "$LOOPS_RAW" ]]; then
-  loops_yaml="$(python3 - "$LOOPS_RAW" <<'PY'
-import json, sys
-items = [x.strip() for x in sys.argv[1].split(',') if x.strip()]
-print(json.dumps(items))
-PY
-)"
+  loops_yaml="$(csv_json_list "$LOOPS_RAW")"
 fi
 if [[ -n "$ACTIONS_RAW" ]]; then
-  actions_yaml="$(python3 - "$ACTIONS_RAW" <<'PY'
-import json, sys
-items = [x.strip() for x in sys.argv[1].split(',') if x.strip()]
-print(json.dumps(items))
-PY
-)"
+  actions_yaml="$(csv_json_list "$ACTIONS_RAW")"
 fi
+
+branch_refs_yaml='[]'
+tracking_refs_yaml='[]'
+worktree_paths_yaml='[]'
+preserved_commits_yaml='[]'
+file_refs_yaml='[]'
+plan_refs_yaml='[]'
+
+[[ -n "$BRANCH_REFS_RAW" ]] && branch_refs_yaml="$(csv_json_list "$BRANCH_REFS_RAW")"
+[[ -n "$TRACKING_REFS_RAW" ]] && tracking_refs_yaml="$(csv_json_list "$TRACKING_REFS_RAW")"
+[[ -n "$WORKTREE_PATHS_RAW" ]] && worktree_paths_yaml="$(csv_json_list "$WORKTREE_PATHS_RAW")"
+[[ -n "$PRESERVED_COMMITS_RAW" ]] && preserved_commits_yaml="$(csv_json_list "$PRESERVED_COMMITS_RAW")"
+[[ -n "$FILE_REFS_RAW" ]] && file_refs_yaml="$(csv_json_list "$FILE_REFS_RAW")"
+[[ -n "$PLAN_REFS_RAW" ]] && plan_refs_yaml="$(csv_json_list "$PLAN_REFS_RAW")"
 
 input_refs_yaml='{}'
 output_refs_yaml='{}'
@@ -185,7 +245,36 @@ PY
 )"
 fi
 
-if [[ "$role_io_enabled" == "true" ]]; then
+state="active"
+if [[ "$KIND" == "parked_lane" ]]; then
+  state="$(yq -r '.kinds.parked_lane.initial_state // "parked"' "$CONFIG" 2>/dev/null || echo parked)"
+  [[ -n "$REVIEW_DATE" ]] || {
+    echo "FAIL: --review-date is required for kind=parked_lane" >&2
+    exit 2
+  }
+  if ! [[ "$REVIEW_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    echo "FAIL: --review-date must be YYYY-MM-DD" >&2
+    exit 2
+  fi
+  if [[ "$(jq -r 'length' <<<"$loops_yaml")" == "0" ]]; then
+    echo "FAIL: --loops is required for kind=parked_lane" >&2
+    exit 2
+  fi
+  refs_total="$(jq -n \
+    --argjson branch_refs "$branch_refs_yaml" \
+    --argjson tracking_refs "$tracking_refs_yaml" \
+    --argjson worktree_paths "$worktree_paths_yaml" \
+    --argjson preserved_commits "$preserved_commits_yaml" \
+    --argjson file_refs "$file_refs_yaml" \
+    --argjson plan_refs "$plan_refs_yaml" \
+    '($branch_refs | length) + ($tracking_refs | length) + ($worktree_paths | length) + ($preserved_commits | length) + ($file_refs | length) + ($plan_refs | length)' 2>/dev/null || true)"
+  if [[ -z "$refs_total" || "$refs_total" == "0" ]]; then
+    echo "FAIL: kind=parked_lane requires at least one branch/worktree/commit/file/plan reference" >&2
+    exit 2
+  fi
+fi
+
+if [[ "$role_io_enabled" == "true" && "$KIND" == "session" ]]; then
   [[ -n "$FROM_ROLE" ]] || { echo "FAIL: --from-role is required (role_io.enabled=true)" >&2; exit 2; }
   [[ -n "$TO_ROLE" ]] || { echo "FAIL: --to-role is required (role_io.enabled=true)" >&2; exit 2; }
   [[ -n "$role_io_policy_contract" && "$role_io_policy_contract" != "null" ]] || {
@@ -227,26 +316,65 @@ fi
 jq -n \
   --arg id "$id" \
   --arg owner "$OWNER" \
+  --arg kind "$KIND" \
+  --arg state "$state" \
   --arg summary "$SUMMARY" \
   --arg created_at "$created_at" \
   --arg expires_at "$expires_at" \
   --arg from_role "$FROM_ROLE" \
   --arg to_role "$TO_ROLE" \
   --arg transition_gate "$TRANSITION_GATE" \
+  --arg review_date "$REVIEW_DATE" \
   --argjson loops "$loops_yaml" \
   --argjson actions "$actions_yaml" \
   --argjson input_refs "$input_refs_yaml" \
   --argjson output_refs "$output_refs_yaml" \
-  '{version:"1.1", id:$id, state:"active", owner:$owner, summary:$summary, created_at_utc:$created_at, expires_at_utc:$expires_at, loops:$loops, actions:$actions, from_role:$from_role, to_role:$to_role, transition_gate:$transition_gate, input_refs:$input_refs, output_refs:$output_refs, notes:[]}' \
+  --argjson branch_refs "$branch_refs_yaml" \
+  --argjson tracking_refs "$tracking_refs_yaml" \
+  --argjson worktree_paths "$worktree_paths_yaml" \
+  --argjson preserved_commits "$preserved_commits_yaml" \
+  --argjson file_refs "$file_refs_yaml" \
+  --argjson plan_refs "$plan_refs_yaml" \
+  '{
+      version:"1.2",
+      id:$id,
+      kind:$kind,
+      state:$state,
+      owner:$owner,
+      summary:$summary,
+      created_at_utc:$created_at,
+      expires_at_utc:$expires_at,
+      loops:$loops,
+      actions:$actions,
+      from_role:$from_role,
+      to_role:$to_role,
+      transition_gate:$transition_gate,
+      input_refs:$input_refs,
+      output_refs:$output_refs,
+      notes:[]
+    }
+    + (if $kind == "parked_lane" then {
+        parking: {
+          review_date: $review_date,
+          branch_refs: $branch_refs,
+          tracking_refs: $tracking_refs,
+          worktree_paths: $worktree_paths,
+          preserved_commits: $preserved_commits,
+          file_refs: $file_refs,
+          plan_refs: $plan_refs
+        }
+      } else {} end)' \
   | yq -P '.' >"$file"
 
 if [[ "$JSON_MODE" -eq 1 ]]; then
-  jq -n --arg capability "session.handoff.create" --arg id "$id" --arg file "$file" --arg created_at_utc "$created_at" --arg expires_at_utc "$expires_at" --arg from_role "$FROM_ROLE" --arg to_role "$TO_ROLE" --arg transition_gate "$TRANSITION_GATE" '{capability:$capability,id:$id,file:$file,created_at_utc:$created_at_utc,expires_at_utc:$expires_at_utc,from_role:$from_role,to_role:$to_role,transition_gate:$transition_gate}'
+  jq -n --arg capability "session.handoff.create" --arg id "$id" --arg kind "$KIND" --arg state "$state" --arg file "$file" --arg created_at_utc "$created_at" --arg expires_at_utc "$expires_at" --arg from_role "$FROM_ROLE" --arg to_role "$TO_ROLE" --arg transition_gate "$TRANSITION_GATE" '{capability:$capability,id:$id,kind:$kind,state:$state,file:$file,created_at_utc:$created_at_utc,expires_at_utc:$expires_at_utc,from_role:$from_role,to_role:$to_role,transition_gate:$transition_gate}'
   exit 0
 fi
 
 echo "session.handoff.create"
 echo "id: $id"
+echo "kind: $KIND"
+echo "state: $state"
 echo "file: $file"
 echo "created_at_utc: $created_at"
 echo "expires_at_utc: $expires_at"

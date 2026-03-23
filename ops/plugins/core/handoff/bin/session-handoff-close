@@ -49,13 +49,14 @@ file="$(spine_resolve_mailroom_path "$handoff_dir")/$ID.yaml"
 [[ -f "$file" ]] || { echo "FAIL: handoff not found: $ID" >&2; exit 1; }
 
 current_state="$(yq -r '.state // ""' "$file" 2>/dev/null || true)"
-[[ "$current_state" == "active" ]] || {
-  echo "FAIL: handoff must be active before close (id=$ID state=${current_state:-unknown})" >&2
+[[ "$current_state" == "active" || "$current_state" == "parked" ]] || {
+  echo "FAIL: handoff must be active or parked before close (id=$ID state=${current_state:-unknown})" >&2
   exit 1
 }
 
 role_io_enabled="$(yq -r '.role_io.enabled // false' "$CONFIG" 2>/dev/null || echo false)"
-if [[ "$role_io_enabled" == "true" ]]; then
+kind="$(yq -r '.kind // "session"' "$file" 2>/dev/null || echo session)"
+if [[ "$role_io_enabled" == "true" && "$kind" == "session" ]]; then
   while IFS= read -r field; do
     [[ -n "$field" ]] || continue
     value="$(yq -r ".$field // \"\"" "$file" 2>/dev/null || true)"
