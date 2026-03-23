@@ -1,0 +1,506 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-22
+scope: spine-v3-bootstrap
+source_loop: LOOP-SPINE-V3-BOOTSTRAP-NODE-SEPARATION-20260322
+---
+
+# Spine V3 Bootstrap
+
+This document is the first-class spine seed for the 2026-03-22 V3 conversation ingest.
+It exists so the system can read, interpret, and execute the V3 shift without relying on chat history, saved notes, or operator memory.
+All Desktop note folders imported on 2026-03-22 are consolidated here so other agents can use one canonical source instead of reading separate note dumps.
+
+Derived execution audit: [../reference/audits/SPINE_V3_BOOTSTRAP_ALIGNMENT_AUDIT_20260322.md](../reference/audits/SPINE_V3_BOOTSTRAP_ALIGNMENT_AUDIT_20260322.md)
+
+## Canonical Correction
+
+Do not keep Spine V3 as:
+
+- saved notes
+- manual rereads
+- operator-side synthesis
+
+Keep it as:
+
+- a governed spine artifact
+- an agent-readable execution seed
+- a versioned source for follow-on work
+
+This is the boundary between "knowledge Ronny saved" and "behavior the spine can execute."
+
+## Imported Note Policy
+
+Desktop note exports, pasted chats, copied synthesis, and historical conversations are non-authoritative after import.
+They become useful only after they are folded into this doc or converted into governed task artifacts.
+
+## Problem Statement
+
+The current bottleneck is interface-layer role collapse, not model capability.
+
+Observed failures:
+
+- Codex desktop still collapses translator, prompter, verifier, and git authority.
+- The MacBook still behaves like a cognitive and operational monolith.
+- Chat surfaces do not resolve live system state through one explicit broker truth.
+- Insight-to-execution handoff still depends on operator normalization.
+- Existing receipts, runtime state, and governance are real, but external clients reach them indirectly and inconsistently.
+
+## Non-Negotiable Principles
+
+1. Chat is an interface, not the workspace.
+2. A computer is a device. A node is a responsibility.
+3. Translator interprets intent; verifier judges outcomes; git agent publishes.
+4. No single surface should own translation, verification, and publish authority together.
+5. The translator may start a workflow, but it must never be the final judge of success.
+6. Uniformity is one execution and attestation plane queried by all clients, not shared memory.
+7. Every good idea passes through normalization before execution.
+8. Prefer many narrow nodes over few overloaded machines.
+9. Do not solve this with better prompting, better memory, or more chat ceremony.
+
+## Interface Trust Model
+
+Treat every UI as an untrusted interface:
+
+- ChatGPT
+- Claude
+- iPhone
+- MacBook UI
+- shell
+- browser
+- VM terminals
+- remote agents
+
+Only the spine repo and runtime may decide:
+
+- current workflow
+- valid context
+- applicable policies
+- allowed actions
+- required schemas
+- whether an output is safe to execute, save, or forward
+
+Uniformity means:
+
+- same control plane
+- same execution path
+- same proof surface
+
+Not:
+
+- same prompts
+- same memory
+- same prose
+
+Every model interaction should behave like a request against the spine governance kernel.
+
+## Human Workflow To Preserve
+
+Do not replace the current high-signal creative loop.
+
+Preserve:
+
+- Claude for exploration
+- Ronny for signal detection
+- ChatGPT for deep synthesis
+- normalization for governed translation into bounded work
+- spine execution, verification, and attestation downstream
+
+The change is at the handoff boundary:
+
+- before: chat -> chat -> chat -> manual execution
+- after: chat -> chat -> chat -> normalization -> spine execution
+
+## Operating Modes
+
+The post-reset interaction model is only:
+
+- Query mode
+- Request mode
+- Review mode
+
+### Query Mode
+
+Use for:
+
+- what is the latest loop
+- what is the current progress
+- what is blocked
+
+Expected behavior:
+
+- broker returns live state
+- no planning prose is treated as truth
+
+### Request Mode
+
+Use for bounded work only.
+
+Preferred form:
+
+- given loop X, lane Y, mode Z, perform this task
+
+Not:
+
+- help me build X
+- explain the system and then start working
+
+### Review Mode
+
+Read:
+
+- receipts
+- checks
+- outputs
+- verdicts
+
+Do not trust:
+
+- tone
+- confidence
+- prose alone
+
+Rule:
+
+- no work starts in chat
+- if work starts in chat, drift has already begun
+
+## Target Node Model
+
+### Operator Console
+
+- Primary host: MacBook
+- Purpose: inspect, approve, converse, launch, review
+- Should not remain the long-term home of recurring system authority
+
+### Translator Node
+
+Purpose:
+
+- receive messy human or chat input
+- normalize it into structured spine requests
+- route requests to the control plane
+- render attested outputs back to the user
+
+Allowed:
+
+- input ingestion
+- classification
+- normalization
+- routing
+- status translation
+- light session continuity
+- optional chat-native ingress such as OpenClaw or similar interface layers
+
+Forbidden:
+
+- repo mutation
+- execution authority
+- verification authority
+- git authority
+- final success claims
+
+The translator is the membrane, not the judge.
+It may interpret intent, but it must never become the spine seal of success.
+
+### Control Node
+
+Purpose:
+
+- broker
+- routing
+- loop and request state
+- packet compilation
+- attestation authority
+
+Properties:
+
+- stable
+- always-on
+- infrastructure-grade
+- not dependent on a user login session
+
+### Execution Nodes
+
+- workers
+- transforms
+- ingestion
+- task execution
+- replaceable and role-bounded
+
+### Verification Node
+
+- checks
+- audits
+- validation
+- policy gates
+- logically isolated from translator authority
+
+### Watcher Nodes
+
+- event and file monitoring only
+- small and disposable
+
+### Storage And Archive Node
+
+- datasets
+- evidence
+- archives
+- cold history
+
+## Required V3 System Surfaces
+
+### Loop Compiler
+
+Compile loop scope plus orchestration state into one machine-consumable loop packet.
+
+### Entry Compiler
+
+Compile:
+
+- objective
+- done check
+- first command
+- allowed and forbidden actions
+- required inputs
+- expected outputs
+- execution mode
+- transport
+- environment constraints
+
+Agents do not infer. They execute assigned packets.
+
+### Operational Dispatch Mode
+
+Operational mode must be first-class, not a code-lane exception.
+
+Requirements:
+
+- `execution_mode: code | operational`
+- `transport: git | mailroom`
+- operational mode must not require git pushability or worktree assumptions
+- operational mode validates refs, stop-gates, receipts, and policy checks instead
+
+### Context Bundle
+
+Generate one reusable per-loop bundle containing summary, blockers, decisions, and active constraints.
+This is a context compiler output, not chat memory.
+Most model calls should receive a governed projection of the repo and runtime, not ad hoc raw exploration.
+
+### Model Adapter Layer
+
+Provider adapters should render from one neutral intermediate form containing:
+
+- intent
+- context pack
+- tool affordances
+- autonomy level
+- expected artifact type
+- mutation policy
+
+Do not hand the same raw prompt to every model and call that uniformity.
+
+### Execution Broker
+
+One control-plane surface that:
+
+- accepts requests from any client
+- compiles loop and entry packets
+- chooses execution host
+- executes or delegates work
+- collects receipts
+- runs policy checks
+- returns attestation
+
+### Single Entry Surface
+
+Interactive entry should resolve through one front door:
+
+- terminal-launch
+- session.start
+- entry compile
+- tool launch
+
+Status views, RAG, and memory helpers are not entry surfaces.
+
+### Attestation Envelope
+
+Every execution should resolve to a structured proof envelope with at least:
+
+- request_id
+- loop_id
+- entry_packet_hash
+- context_bundle_hash
+- governance_version
+- execution_host
+- execution_mode
+- checks_passed
+- receipts
+- verdict
+- next allowed actions
+
+### Broker Read API
+
+Expose read-only state queries such as:
+
+- get_latest_loop
+- list_active_loops
+- get_loop_status
+- get_loop_progress
+- get_request_attestation
+- get_receipts
+
+Broker queries are for live truth.
+RAG and session narrative are for explanation, not state lookup.
+
+### Thin Client Integration
+
+Claude, ChatGPT, iOS, shell, and desktop should all act as thin request and response surfaces over the same broker truth.
+
+Fresh ChatGPT access has only two acceptable continuity paths:
+
+- project-contained context for convenience
+- live app or MCP-style broker connection for authoritative state
+
+The preferred path is the live broker connection.
+Projects and memory are convenience features, not the system of record.
+
+### Deprecation Surface
+
+Superseded entry paths, habits, and semantics must fail rather than linger as compatibility folklore.
+
+Minimum implementation shape:
+
+- `ops/deprecations.yaml`
+- a sanitize entrypoint that checks imported text against deprecations and packet requirements
+- governance versions inside packets that invalidate prior behavior
+
+New truth is not enough.
+Old truth must become impossible.
+
+### Sanitizer And Ingress Quarantine
+
+Everything imported from chats, notes, copied text, or archives should enter through quarantine.
+
+Minimum stages:
+
+- classify intent
+- detect deprecated patterns
+- detect missing packet references
+- detect implicit assumptions
+- mark invalid sections
+- reject or rewrite unsafe input
+
+Imported synthesis should run under a non-destructive synthesis mode:
+
+- no direct edits
+- no inferred state transitions
+- only reconciled summaries
+- uncertainty markers when needed
+- impact assessment before promotion
+
+The sanitizer is the border between exploratory chat output and governed execution.
+
+### Continuity Ledger
+
+Operational continuity must live in spine-owned state, not chat memory.
+
+Track:
+
+- decisions made
+- why they were made
+- current exceptions
+- unresolved contradictions
+- superseded assumptions
+- confidence and provenance
+
+Model memory is optional convenience.
+The continuity ledger is integrity.
+
+### Remote Attestation
+
+Mobile needs stronger attestation than desktop because it lacks direct substrate visibility.
+The goal is execution uniformity plus proof, not instruction uniformity alone.
+
+## Friction To Eliminate
+
+- multiple entry surfaces without compiled assignment
+- context reconstruction overhead
+- manual human compilation at agent entry
+- lane and role drift
+- mobile vs desktop disconnect
+- memory and history drift posing as state
+- MacBook persistence overload
+- manual insight-to-execution translation
+- weak remote attestation on mobile surfaces
+- operational mode inheriting code-lane assumptions
+
+## Constraints
+
+- Focus only on node roles, separation of powers, broker access, translator isolation, and execution plus attestation flow.
+- Do not redesign domain logic to solve this problem.
+- Do not propose fixes that depend on stronger prompts, saved memory, or improved chat rituals.
+- Translator node must not gain execution, verification, or git authority.
+- MacBook should converge toward operator-console duty.
+- Imported chat output, archives, and historical notes are untrusted until sanitized.
+
+## Archive And Reset Policy
+
+Archived chat history is not dead storage.
+It is read-only evidence.
+
+Archive state should be marked as:
+
+- legacy_context
+- untrusted
+- requires_sanitization
+
+Do not re-read archives directly as working context.
+Use:
+
+- sanitize
+- classify
+- extract
+- re-ingest
+
+Re-entry should always be:
+
+- create or select loop
+- compile context
+- submit broker request
+- receive attestation
+
+## Processing Directive
+
+Read this document.
+
+Do not summarize.
+
+Instead:
+
+1. Extract all actionable system changes.
+2. Map them to the current repo and runtime structure.
+3. Identify what already exists versus what is missing.
+4. Generate:
+   - node topology proposal
+   - translator node spec
+   - broker and read API requirements
+   - first 5 executable changes
+5. Output structured tasks ready for execution.
+
+## Success Criteria
+
+- MacBook runs minimal background services relative to system authority.
+- Translator is isolated and always-on.
+- Control plane is stable and centralized.
+- Workers are distributed and replaceable.
+- Fresh mobile or chat sessions resolve live loop state without pasted context.
+- Outputs are boring, consistent, and attested.
+- No workflow requires Ronny to manually re-explain the system.
+
+## Anchor Statements
+
+- If this stays in notes, it becomes knowledge. If it enters the spine, it becomes behavior.
+- The translator should own interpretation, not truth.
+- The spine is the system of truth. Chat surfaces are clients.

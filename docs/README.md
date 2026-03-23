@@ -12,6 +12,7 @@ Minimal landing page for live docs after the lean reset.
 ## Read First
 
 - [governance/SPINE.md](governance/SPINE.md) - single canonical governance contract
+- [governance/SPINE_V3_BOOTSTRAP.md](governance/SPINE_V3_BOOTSTRAP.md) - canonical V3 bootstrap seed for translator, broker, attestation, and node-role separation
 - [governance/SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) - session entry and closeout rules
 - [core/SPINE_STATE.md](core/SPINE_STATE.md) - what belongs in the repo and what does not
 
