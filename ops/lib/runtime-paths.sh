@@ -455,8 +455,9 @@ spine_runtime_resolve_paths() {
 spine_resolve_mailroom_path() {
   local path="$1"
   local repo="${SPINE_TARGET_REPO:-${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}}"
-  local inbox="${SPINE_INBOX:-$HOME/code/.runtime/spine/mailroom/inbox}"
-  local outbox="${SPINE_OUTBOX:-$HOME/code/.runtime/spine/mailroom/outbox}"
+  local mailroom_root="${SPINE_MAILROOM_ROOT:-$HOME/code/.runtime/spine/mailroom}"
+  local inbox="${SPINE_INBOX:-$mailroom_root/inbox}"
+  local outbox="${SPINE_OUTBOX:-$mailroom_root/outbox}"
   local state="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
   local logs="${SPINE_LOGS:-$HOME/code/.runtime/spine/logs}"
   local evidence_root="${SPINE_EVIDENCE_ROOT:-$HOME/code/.evidence/spine}"
@@ -568,6 +569,18 @@ spine_resolve_mailroom_path() {
       ;;
     runtime/domain-state/*)
       printf '%s\n' "$domain_state/${path#runtime/domain-state/}"
+      ;;
+    runtime/state)
+      printf '%s\n' "$state"
+      ;;
+    runtime/state/*)
+      printf '%s\n' "$state/${path#runtime/state/}"
+      ;;
+    mailroom)
+      printf '%s\n' "$mailroom_root"
+      ;;
+    mailroom/*)
+      printf '%s\n' "$mailroom_root/${path#mailroom/}"
       ;;
     *)
       printf '%s\n' "$repo/$path"

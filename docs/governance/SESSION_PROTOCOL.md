@@ -66,7 +66,7 @@ Full spine access. Follow all sections below in order.
 3. **Trace truth**
    - Query hierarchy: direct file read → `./bin/ops cap run rag.anythingllm.ask "<query>"` → `spine-rag` MCP → `./bin/ops cap run receipts.summary -- --domain none --days 7` → `./bin/ops cap run session.handoff.list --state active` → `./bin/ops cap run loops.status` / `./bin/ops cap run gaps.status` → `rg` fallback.
    - Before guessing remote paths, consult `ops/bindings/docker.compose.targets.yaml` and `ops/bindings/ssh.targets.yaml` first.
-   - Logical `mailroom/state` is externalized at runtime under `~/code/.runtime/spine/state`; do not treat the repo-relative path as the only physical location.
+   - **Mailroom state is externalized**: `mailroom/state/` paths resolve to `$SPINE_STATE` (`~/code/.runtime/spine/state/`) via `spine_resolve_mailroom_path()`. Repo-local `mailroom/` is **forbidden** (D377/D396/D397). Use `$SPINE_STATE/` directly.
    - **Before any shop network change:** run `./bin/ops cap run network.shop.audit.status` (D54 enforces).
 4. **Operate through the spine**
    - Every mutating command must go through `./bin/ops cap run <capability>` so receipts land in `~/code/.evidence/spine/sessions/`.
@@ -277,15 +277,15 @@ Valid loop scope status values (all lowercase):
 | `active` | Work is in progress under this loop |
 | `closed` | All work complete, receipts generated, loop finalized |
 
-All loop scope files in `mailroom/state/loop-scopes/` MUST use one of these three values in their status field.
+All loop scope files in `$SPINE_STATE/loop-scopes/` (externalized runtime) MUST use one of these three values in their status field.
 
 ---
 
 ## What Keeps This Predictable (Gates + Governance)
 
 - **Entry governance:** `AGENTS.md` + this `SESSION_PROTOCOL.md` define the canonical workflow: start in the spine repo, list open loops, do work via `./bin/ops cap run ...` / `./bin/ops run ...`, and close loops with receipts.
-- **Loop engine:** `./bin/ops loops ...` + `mailroom/state/loop-scopes/*.scope.md` are the shared coordination surface other agents can see.
-- **Receipts + ledger:** `~/code/.evidence/spine/sessions/**/receipt.md` are the primary proof trail. The runtime ledger at `~/code/.runtime/spine/state/ledger.csv` is the canonical run-history index (externalized per `mailroom.runtime.contract.yaml`). The in-repo `mailroom/state/ledger.csv` is a stale migration ghost — do not use it.
+- **Loop engine:** `./bin/ops loops ...` + `$SPINE_STATE/loop-scopes/*.scope.md` are the shared coordination surface other agents can see.
+- **Receipts + ledger:** `~/code/.evidence/spine/sessions/**/receipt.md` are the primary proof trail. The runtime ledger at `$SPINE_STATE/ledger.csv` is the canonical run-history index (externalized per `mailroom.runtime.contract.yaml`).
 - **Drift gates (enforced by `spine.verify`):**
   - D42 code-path case lock (keeps `~/code/...` canonical, blocks drift like `~/Code/...`).
   - D48 codex worktree hygiene (prevents orphaned/stale codex worktrees/branches).

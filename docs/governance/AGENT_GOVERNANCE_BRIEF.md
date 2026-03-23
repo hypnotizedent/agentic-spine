@@ -50,7 +50,7 @@ scope: agent-governance-brief
 
 - **Never fix inline.** Found a bug, drift, or missing feature? Register it first, then fix through the registration.
 - **Gaps:** Add an entry to `ops/bindings/operational.gaps.yaml` with `parent_loop` if one exists.
-- **Loops:** Create a scope file in `mailroom/state/loop-scopes/LOOP-<NAME>-<DATE>.scope.md` for any multi-step or cross-file work.
+- **Loops:** Create a scope file in `$SPINE_STATE/loop-scopes/LOOP-<NAME>-<DATE>.scope.md` (externalized, NOT repo-local `mailroom/state/`) for any multi-step or cross-file work.
 - **Commits reference the loop/gap.** Prefix: `fix(LOOP-X):` or `gov(GAP-OP-NNN):`.
 - **Do not ask "want me to fix this?"** — follow the spine: register, fix, receipt.
 

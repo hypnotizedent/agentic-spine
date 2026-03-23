@@ -81,8 +81,8 @@ See: `docs/governance/AGENT_EXECUTION_LANE_AUDIT_RECEIPT_20260319.md` for backgr
 
 ## Mailroom Boundary
 
-`mailroom/state/` is governance-only state: loops, plans, proposals, sessions, orchestration, alerts, gaps, friction, locks, verify evidence.
-Domain runtime data must live in domain runtime roots/services, not in `mailroom/state/`.
+Mailroom runtime state is **externalized** to `$SPINE_STATE` (canonical: `~/code/.runtime/spine/state/`).
+The repo-local `mailroom/` directory is **forbidden** (D377/D396/D397). All `mailroom/state/` paths in contracts resolve at runtime to the external state root via `spine_resolve_mailroom_path()`. Do NOT create files under repo-local `mailroom/`.
 
 ## First-Class Governance Features
 
