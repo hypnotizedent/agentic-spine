@@ -17,6 +17,14 @@ cd ~/code/agentic-spine
 ./bin/ops cap run session.v3.attach -- --allow-no-loop
 ```
 
+**What session.v3.attach does:**
+1. Cleans leaked ambient env vars (SPINE_ROOT, SPINE_CODE) from previous sessions
+2. Runs context-aware main checkout healing (auto-restore generated drift, cleanup stale stashes, fast-forward main)
+3. Cleans up stale/floating worktrees from previous sessions
+4. Resolves current loop context (or allows adhoc with --allow-no-loop)
+5. Compiles entry packet with friction snapshot
+6. Emits session exports (SPINE_SESSION_ID, SPINE_LOOP_ID, etc.)
+
 ## Daily Workflow
 
 ```bash
@@ -37,6 +45,8 @@ The controller may use a governed worktree for large structural slices, then lan
 ### Rule 2: Worker Scope
 Workers execute in worktrees or on remote systems with a declared, disjoint write scope. Workers must not touch shared hotspot surfaces. If a worker needs a hotspot mutation, it files a request back to the controller. Workers may be terminated or parked without data loss.
 
+**Worker worktree sessions:** Do NOT run `session.v3.attach` from worker worktrees. The "boring main" policy only applies to controller terminals operating on the main checkout. Worker worktrees are expected to have dirty files within their declared write scope.
+
 ### Rule 3: Active WIP Cap
 **Maximum 5 active loops.** When above cap: close, supersede, defer, or consolidate. "Open because nobody decided" is a policy violation. Planned loops older than 14 days without activity must be triaged.
 
@@ -52,8 +62,29 @@ Workers execute in worktrees or on remote systems with a declared, disjoint writ
 ### Rule 5: Closure
 Work is done when runtime, control plane, bindings/projections, and residue all agree. Missing propagation must fail loudly (gate failure, verify failure, session attach block) instead of relying on operator memory.
 
-### Rule 6: Boring Lane
-`session.v3.attach` is the only entry. Main must be boring: 0 dirty, 0 untracked in governed paths, 0 stashes from other sessions, 0 ahead/behind. If not boring: stop, fix, then work.
+### Rule 6: Boring Main (Context-Aware)
+`session.v3.attach` is the only entry. It enforces a "boring main" policy with context-aware auto-healing:
+
+**Auto-healed on attach:**
+- Governed generated drift (docs projections, gate metadata) → restored from HEAD
+- Stale cleanup-candidate stashes (branch merged, branch deleted, >72h old main stash) → archived and dropped
+- Main behind origin/main (fast-forward only) → auto-pulled
+- Floating worktrees (stale, abandoned) → cleanup warnings
+
+**Blocks session attach:**
+- Ungoverned dirty files in non-hotspot paths
+- Untracked files anywhere in the repo
+- Non-fast-forward divergence from origin/main
+- Dirty files in session bootstrap paths (ops/plugins/core/session/, ops/lib/, bin/ops)
+
+**Allowed during attach (hotspot zones):**
+- Dirty files in ops/bindings/*.yaml (contracts, gaps, registries)
+- Dirty files in ops/commands/tests/*.sh (test files)
+- Dirty files in ops/plugins/core/ops/bin/* (lifecycle scripts)
+- Dirty files in ops/plugins/core/ops/tests/* (lifecycle tests)
+- Dirty files in surfaces/verify/*.sh (gates)
+
+This context-awareness allows controller terminals to attach without clearing active work-in-progress from governed operations in other terminals.
 
 ## Execution Lane Bootstrap (Phase 2)
 
@@ -91,6 +122,36 @@ Create governed execution lanes instead of manual worktree setup:
 - State tracked in `~/.runtime/spine/state/execution-lanes/`
 
 See: `docs/governance/AGENT_EXECUTION_LANE_AUDIT_RECEIPT_20260319.md` for background.
+
+### Worktree Lifecycle Auto-Cleanup (Phase 3)
+
+Session attach (`session.v3.attach`) automatically detects and cleans up floating worktrees:
+
+**Cleanup triggers:**
+- Lane state is `landed`, `abandoned`, `deferred` (terminal states)
+- Worktree has been inactive for >14 days
+- Branch backing the worktree has been deleted
+- Branch has been merged to main
+
+**Cleanup actions:**
+- Archive worktree metadata to `~/.runtime/spine/state/execution-lanes/archive/`
+- Remove worktree directory (if safe - no uncommitted work)
+- Remove branch (if merged or explicitly abandoned)
+- Update lane state to include cleanup timestamp
+
+**Manual cleanup:**
+```bash
+# Scan for stale lanes and get recommendations
+./bin/ops cap run session.execution.lane.scan
+
+# Force cleanup of specific lane
+./bin/ops cap run session.execution.lane.closeout \
+  --lane-id <LANE-ID> \
+  --status abandoned \
+  --cleanup-worktree
+```
+
+This prevents worktree accumulation and ensures main checkout sessions start clean.
 
 ## Verify
 

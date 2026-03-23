@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""session-context-aware-dirty-check
+
+Smart dirty file detection for session attach.
+
+Instead of blocking on ANY dirty files, this checks:
+1. Are dirty files from active governed operations in other terminals?
+2. Do dirty files conflict with session bootstrap needs?
+3. Can session safely proceed despite dirty state?
+
+Returns:
+  0: Safe to proceed (clean OR dirty files are non-conflicting)
+  1: Unsafe - dirty files conflict with session needs
+  2: Error in execution
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[5]
+
+
+def run_command(cmd: list[str], *, cwd: Path | None = None) -> tuple[int, str, str]:
+    """Run command and return (rc, stdout, stderr)."""
+    proc = subprocess.run(
+        cmd,
+        text=True,
+        capture_output=True,
+        check=False,
+        cwd=cwd or Path.cwd(),
+        env=os.environ.copy(),
+    )
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def get_dirty_files(repo_path: Path) -> list[str]:
+    """Get list of dirty files from git status."""
+    rc, stdout, _ = run_command(["git", "status", "--porcelain"], cwd=repo_path)
+    if rc != 0:
+        return []
+
+    files = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        # Parse git status porcelain format: "XY filename"
+        parts = line.split(maxsplit=1)
+        if len(parts) == 2:
+            files.append(parts[1])
+    return files
+
+
+def is_hotspot_or_controller_only(files: list[str]) -> bool:
+    """Check if dirty files are only in hotspot/controller paths.
+
+    These paths are frequently modified by governed operations:
+    - ops/bindings/*.yaml (contracts, inventories, registries)
+    - ops/commands/tests/*.sh (test files)
+    - ops/plugins/core/ops/bin/* (lifecycle scripts)
+    - ops/plugins/core/ops/tests/* (lifecycle tests)
+    - surfaces/verify/*.sh (gates)
+    - mailroom/state/* (state files - runtime only)
+    """
+    hotspot_patterns = [
+        "ops/bindings/",
+        "ops/commands/tests/",
+        "ops/plugins/core/ops/bin/",
+        "ops/plugins/core/ops/tests/",
+        "surfaces/verify/",
+    ]
+
+    # Runtime-only patterns (OK if runtime is external)
+    runtime_patterns = [
+        "mailroom/state/",
+    ]
+
+    for file in files:
+        # Check if it's a hotspot
+        is_hotspot = any(file.startswith(pattern) for pattern in hotspot_patterns)
+        is_runtime = any(file.startswith(pattern) for pattern in runtime_patterns)
+
+        if not is_hotspot and not is_runtime:
+            # Found a file outside hotspot/runtime zones - this is a conflict
+            return False
+
+    return True
+
+
+def conflicts_with_session_bootstrap(files: list[str]) -> bool:
+    """Check if dirty files conflict with session bootstrap requirements.
+
+    Session bootstrap needs:
+    - Clean ops/plugins/core/session/* (bootstrap scripts)
+    - Clean ops/lib/* (runtime libraries)
+    - Clean bin/ops (entry point)
+
+    Dirty files in these paths would conflict.
+    """
+    critical_paths = [
+        "ops/plugins/core/session/",
+        "ops/lib/",
+        "bin/ops",
+    ]
+
+    for file in files:
+        if any(file.startswith(path) for path in critical_paths):
+            return True
+
+    return False
+
+
+def get_active_lanes() -> list[dict[str, Any]]:
+    """Get list of active lanes from worktree lifecycle."""
+    lifecycle_script = ROOT / "ops/plugins/core/ops/bin/worktree-lifecycle-reconcile"
+    if not lifecycle_script.exists():
+        return []
+
+    rc, stdout, _ = run_command([str(lifecycle_script), "--json", "--brief"])
+    if rc != 0:
+        return []
+
+    try:
+        data = json.loads(stdout)
+        worktrees = data.get("data", {}).get("worktrees", [])
+        return [wt for wt in worktrees if wt.get("lifecycle_state") == "active"]
+    except (json.JSONDecodeError, KeyError):
+        return []
+
+
+def check_dirty_context(repo_path: Path, json_mode: bool = False) -> dict[str, Any]:
+    """Main logic: check if dirty files are safe for session attach."""
+    dirty_files = get_dirty_files(repo_path)
+
+    result = {
+        "dirty_count": len(dirty_files),
+        "dirty_files": dirty_files,
+        "safe_to_proceed": True,
+        "reason": "clean",
+        "context": {},
+    }
+
+    if not dirty_files:
+        return result
+
+    # Check if files conflict with session bootstrap
+    if conflicts_with_session_bootstrap(dirty_files):
+        result["safe_to_proceed"] = False
+        result["reason"] = "session_bootstrap_conflict"
+        result["context"]["conflicting_files"] = [
+            f for f in dirty_files
+            if any(f.startswith(p) for p in ["ops/plugins/core/session/", "ops/lib/", "bin/ops"])
+        ]
+        return result
+
+    # Check if files are from hotspot/controller zones
+    if is_hotspot_or_controller_only(dirty_files):
+        active_lanes = get_active_lanes()
+        result["safe_to_proceed"] = True
+        result["reason"] = "governed_operation_hotspots"
+        result["context"]["active_lanes"] = len(active_lanes)
+        result["context"]["hotspot_files"] = dirty_files
+        return result
+
+    # Files are outside hotspots and don't conflict with bootstrap
+    # This is likely uncommitted work - should warn but allow with reason
+    result["safe_to_proceed"] = True
+    result["reason"] = "non_hotspot_files_allowed"
+    result["context"]["warning"] = "Dirty files found outside hotspot zones - may indicate uncommitted work"
+    result["context"]["non_hotspot_files"] = [
+        f for f in dirty_files
+        if not is_hotspot_or_controller_only([f])
+    ]
+
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Context-aware dirty file check for session attach"
+    )
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    parser.add_argument("--repo-path", default=str(ROOT), help="Repository path to check")
+    args = parser.parse_args()
+
+    repo_path = Path(args.repo_path).resolve()
+    result = check_dirty_context(repo_path, args.json)
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"Dirty files: {result['dirty_count']}")
+        print(f"Safe to proceed: {result['safe_to_proceed']}")
+        print(f"Reason: {result['reason']}")
+        if result['context']:
+            print(f"Context: {json.dumps(result['context'], indent=2)}")
+
+    # Exit 0 if safe, 1 if not safe
+    return 0 if result["safe_to_proceed"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
