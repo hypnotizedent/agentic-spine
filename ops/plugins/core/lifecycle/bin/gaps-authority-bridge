@@ -4,8 +4,10 @@
 Shell scripts (gaps-file, gaps-close, gaps-reparent) call this instead of
 mutating operational.gaps.yaml directly with yq. This script:
   1. Performs the SQLite mutation (upsert/close/reparent)
-  2. Projects the result back to operational.gaps.yaml
-  3. Returns status to the calling shell script
+  2. Returns status to the calling shell script
+
+YAML projection is NOT triggered on mutation. Refresh on demand:
+  gaps-authority-bridge project
 
 Usage:
   gaps-authority-bridge upsert --json '{"id":"GAP-OP-1234",...}'
@@ -32,6 +34,58 @@ sys.path.insert(0, str(LIB_DIR))
 
 import gaps_sql_authority as gsa
 
+# ── Mutation ceremony ────────────────────────────────────────────
+# Write operations require governed execution (SPINE_CAP_RUN_KEY set by cap.sh).
+# Read operations are always allowed.
+
+MUTATING_COMMANDS = frozenset({"upsert", "close", "reparent"})
+READ_COMMANDS = frozenset({"query", "bootstrap", "project", "next-id", "parity"})
+
+
+def check_mutation_ceremony(command: str, args: argparse.Namespace) -> tuple[str | None, str]:
+    """Verify mutation ceremony for write operations.
+
+    Returns (run_key, mutation_source) on success.
+    Prints error and calls sys.exit(1) if blocked.
+    """
+    if command not in MUTATING_COMMANDS:
+        return None, "read"
+
+    run_key = os.environ.get("SPINE_CAP_RUN_KEY", "").strip()
+    ungoverned = getattr(args, "ungoverned_override", False)
+    override_reason = getattr(args, "reason", None) or ""
+
+    if run_key:
+        print(
+            f"mutation-ceremony: governed (run_key={run_key})",
+            file=sys.stderr,
+        )
+        return run_key, "governed"
+
+    if ungoverned and override_reason.strip():
+        print(
+            f"mutation-ceremony: override (reason={override_reason.strip()})",
+            file=sys.stderr,
+        )
+        print(
+            "WARNING: ungoverned mutation — no SPINE_CAP_RUN_KEY audit trail",
+            file=sys.stderr,
+        )
+        return None, "override"
+
+    print(
+        "MUTATION BLOCKED: gaps-authority-bridge requires governed execution "
+        "(SPINE_CAP_RUN_KEY not set). "
+        "Run through: ./bin/ops cap run gaps.file|gaps.close",
+        file=sys.stderr,
+    )
+    if ungoverned and not override_reason.strip():
+        print(
+            "  --ungoverned-override requires --reason",
+            file=sys.stderr,
+        )
+    sys.exit(1)
+
 
 def resolve_root() -> Path:
     spine_root = os.environ.get("SPINE_ROOT") or os.environ.get("SPINE_CODE")
@@ -47,6 +101,8 @@ def resolve_root() -> Path:
 
 
 def cmd_upsert(args: argparse.Namespace) -> None:
+    run_key, mutation_source = check_mutation_ceremony("upsert", args)
+
     root = resolve_root()
     db_path, gaps_yaml = gsa.resolve_paths(root)
     conn = gsa.connect(db_path)
@@ -66,13 +122,18 @@ def cmd_upsert(args: argparse.Namespace) -> None:
         to_status=gap.get("status", "open"),
         reason="Filed via gaps-authority-bridge upsert",
         actor=args.actor or "gaps.file",
+        run_key=run_key,
+        mutation_source=mutation_source,
     )
-    result = gsa.project_to_yaml(conn, gaps_yaml)
+    conn.commit()
     conn.close()
-    print(json.dumps({"ok": True, "gap_id": gap_id, "projection": result}))
+    print(json.dumps({"ok": True, "gap_id": gap_id}), file=sys.stdout)
+    print("YAML projection skipped (on-demand only via 'project' subcommand)", file=sys.stderr)
 
 
 def cmd_close(args: argparse.Namespace) -> None:
+    run_key, mutation_source = check_mutation_ceremony("close", args)
+
     root = resolve_root()
     db_path, gaps_yaml = gsa.resolve_paths(root)
     conn = gsa.connect(db_path)
@@ -94,6 +155,8 @@ def cmd_close(args: argparse.Namespace) -> None:
         completion_level=args.completion_level,
         actor=args.actor or "gaps.close",
         reason=args.reason,
+        run_key=run_key,
+        mutation_source=mutation_source,
     )
     if gap is None:
         print(json.dumps({"ok": False, "error": f"{args.id} not found"}))
@@ -122,12 +185,15 @@ def cmd_close(args: argparse.Namespace) -> None:
         gap["root_cause"] = args.root_cause
         gsa.upsert_gap(conn, gap)
 
-    result = gsa.project_to_yaml(conn, gaps_yaml)
+    conn.commit()
     conn.close()
-    print(json.dumps({"ok": True, "gap_id": args.id, "status": args.status, "projection": result}))
+    print(json.dumps({"ok": True, "gap_id": args.id, "status": args.status}), file=sys.stdout)
+    print("YAML projection skipped (on-demand only via 'project' subcommand)", file=sys.stderr)
 
 
 def cmd_reparent(args: argparse.Namespace) -> None:
+    run_key, mutation_source = check_mutation_ceremony("reparent", args)
+
     root = resolve_root()
     db_path, gaps_yaml = gsa.resolve_paths(root)
     conn = gsa.connect(db_path)
@@ -150,10 +216,13 @@ def cmd_reparent(args: argparse.Namespace) -> None:
         to_status=None,
         reason=f"Reparented from {old_parent} to {args.parent_loop}",
         actor=args.actor or "gaps.reparent",
+        run_key=run_key,
+        mutation_source=mutation_source,
     )
-    result = gsa.project_to_yaml(conn, gaps_yaml)
+    conn.commit()
     conn.close()
-    print(json.dumps({"ok": True, "gap_id": args.id, "old_parent": old_parent, "new_parent": args.parent_loop, "projection": result}))
+    print(json.dumps({"ok": True, "gap_id": args.id, "old_parent": old_parent, "new_parent": args.parent_loop}), file=sys.stdout)
+    print("YAML projection skipped (on-demand only via 'project' subcommand)", file=sys.stderr)
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> None:
@@ -229,9 +298,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Gaps SQLite authority bridge")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # -- Shared override flags for mutating subcommands --
+    def add_mutation_override_flags(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--ungoverned-override",
+            action="store_true",
+            default=False,
+            help="Allow mutation without SPINE_CAP_RUN_KEY (emergency/bootstrap). Requires --reason.",
+        )
+
     p_upsert = sub.add_parser("upsert")
     p_upsert.add_argument("--json", required=True)
     p_upsert.add_argument("--actor", default="")
+    p_upsert.add_argument("--reason", default=None)
+    add_mutation_override_flags(p_upsert)
 
     p_close = sub.add_parser("close")
     p_close.add_argument("--id", required=True)
@@ -246,11 +326,14 @@ def main() -> None:
     p_close.add_argument("--root-cause", default=None)
     p_close.add_argument("--reason", default=None)
     p_close.add_argument("--actor", default="")
+    add_mutation_override_flags(p_close)
 
     p_reparent = sub.add_parser("reparent")
     p_reparent.add_argument("--id", required=True)
     p_reparent.add_argument("--parent-loop", required=True)
     p_reparent.add_argument("--actor", default="")
+    p_reparent.add_argument("--reason", default=None)
+    add_mutation_override_flags(p_reparent)
 
     p_query = sub.add_parser("query")
     p_query.add_argument("--id", required=True)

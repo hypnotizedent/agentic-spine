@@ -2,10 +2,13 @@
 """Shared SQLite authority helpers for operational.gaps lifecycle surfaces.
 
 Follows the same pattern as plans_sql_authority.py:
-  connect() → ensure_schema() → bootstrap_from_yaml() → upsert/close → project_to_yaml()
+  connect() → ensure_schema() → bootstrap_from_yaml() → upsert/close
+
+YAML projection is decoupled from the mutation path. Mutations write to
+SQLite only. The YAML projection is refreshed on demand via project_to_yaml().
 
 Authority: SQLite (WAL mode, shared_authority.db)
-Projection: operational.gaps.yaml (generated, not live)
+Projection: operational.gaps.yaml (on-demand, not auto-generated on mutation)
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from typing import Any
 import yaml
 
 
-SCHEMA_MIGRATION_ID = "20260323_gaps_authority_v1"
+SCHEMA_MIGRATION_ID = "20260323_gaps_authority_v2"
 ENV_DB_PATH = "GAPS_DB_PATH"
 ENV_GAPS_YAML = "GAPS_YAML_PATH"
 DEFAULT_GAPS_YAML_REL = "ops/bindings/operational.gaps.yaml"
@@ -138,6 +141,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           to_status TEXT,
           reason TEXT,
           actor TEXT,
+          run_key TEXT,
+          mutation_source TEXT NOT NULL DEFAULT 'legacy',
           payload_json TEXT NOT NULL,
           created_at_utc TEXT NOT NULL,
           FOREIGN KEY(gap_id) REFERENCES gaps(gap_id) ON DELETE CASCADE
@@ -154,6 +159,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    # Migrate existing gap_events tables: add audit columns if missing.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(gap_events)").fetchall()}
+    if "run_key" not in cols:
+        conn.execute("ALTER TABLE gap_events ADD COLUMN run_key TEXT")
+    if "mutation_source" not in cols:
+        conn.execute("ALTER TABLE gap_events ADD COLUMN mutation_source TEXT NOT NULL DEFAULT 'legacy'")
+
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(id, applied_at_utc) VALUES (?, ?)",
         (SCHEMA_MIGRATION_ID, utc_now_text()),
@@ -329,6 +341,8 @@ def close_gap(
     completion_level: str | None = None,
     actor: str | None = None,
     reason: str | None = None,
+    run_key: str | None = None,
+    mutation_source: str = "legacy",
 ) -> dict[str, Any] | None:
     """Close a gap — sets status, fixed_in, closed_at, optionally completion_level."""
     gap = get_gap(conn, gap_id)
@@ -353,6 +367,8 @@ def close_gap(
         to_status=status,
         reason=reason,
         actor=actor,
+        run_key=run_key,
+        mutation_source=mutation_source,
         payload={"fixed_in": fixed_in, "completion_level": completion_level},
     )
     return gap
@@ -371,11 +387,13 @@ def insert_event(
     reason: str | None = None,
     actor: str | None = None,
     payload: dict[str, Any] | None = None,
+    run_key: str | None = None,
+    mutation_source: str = "legacy",
 ) -> None:
     conn.execute(
         """
-        INSERT INTO gap_events(gap_id, event_type, from_status, to_status, reason, actor, payload_json, created_at_utc)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO gap_events(gap_id, event_type, from_status, to_status, reason, actor, run_key, mutation_source, payload_json, created_at_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             gap_id,
@@ -384,6 +402,8 @@ def insert_event(
             to_status,
             reason,
             actor,
+            run_key,
+            mutation_source,
             json.dumps(payload or {}, sort_keys=True),
             utc_now_text(),
         ),
@@ -405,6 +425,8 @@ def gap_event_history(conn: sqlite3.Connection, gap_id: str) -> list[dict[str, A
             "to_status": r["to_status"],
             "reason": r["reason"],
             "actor": r["actor"],
+            "run_key": r["run_key"] if "run_key" in r.keys() else None,
+            "mutation_source": r["mutation_source"] if "mutation_source" in r.keys() else "legacy",
             "created_at_utc": r["created_at_utc"],
         }
         try:

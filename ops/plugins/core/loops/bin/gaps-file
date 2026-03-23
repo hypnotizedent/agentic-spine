@@ -431,40 +431,17 @@ else
   fi
 fi
 
-# If all entries were idempotently skipped, no YAML mutation occurred — skip commit
+# If all entries were idempotently skipped, no SQLite mutation occurred
 if [[ ${#FILED_GAP_IDS[@]} -eq 0 ]]; then
-  echo "INFO: all entries already filed — nothing to commit"
+  echo "INFO: all entries already filed — nothing to do"
   for skip_id in "${IDEMPOTENT_SKIP_IDS[@]}"; do
     echo "SKIPPED_DUPLICATE: $skip_id"
   done
   exit 0
 fi
 
-# Timestamp is now set by SQLite projection (gaps-authority-bridge).
-
-git -C "$ROOT" add "$GAPS_FILE"
-if [[ "$NO_COMMIT" -eq 0 ]]; then
-  if (( ${#FILED_GAP_IDS[@]} == 1 )); then
-    COMMIT_SUBJECT="gov(${FILED_GAP_IDS[0]}): register gap via gaps.file"
-  else
-    COMMIT_SUBJECT="gov(gaps.batch): register ${#FILED_GAP_IDS[@]} gaps via gaps.file"
-  fi
-  FILED_IDS_CSV="$(IFS=,; echo "${FILED_GAP_IDS[*]}")"
-  git -C "$ROOT" commit -m "$(cat <<EOF
-$COMMIT_SUBJECT
-
-Filed IDs: $FILED_IDS_CSV
-Filed via atomic gaps.file capability.
-
-Gap-Mutation: capability
-Gap-Capability: gaps.file
-Gap-Run-Key: ${SPINE_CAP_RUN_KEY:-manual}
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
-EOF
-)"
-else
-  echo "STAGED (no commit): ${FILED_GAP_IDS[*]}"
-fi
+# Mutation is SQLite-only. YAML projection is on-demand (gaps-authority-bridge project).
+# No git add/commit needed — the YAML file is not modified during mutation.
 
 for filed_id in "${FILED_GAP_IDS[@]}"; do
   echo "FILED: $filed_id"

@@ -301,7 +301,7 @@ PY
 
 close_single() {
   local id="$1" status="$2" fixed_in="$3" notes="$4" reg_lock="$5"
-  local timestamp local_claim backup_file commit_msg
+  local timestamp local_claim
 
   acquire_git_lock gaps || exit 1
   trap 'release_git_lock' EXIT INT TERM
@@ -317,51 +317,11 @@ close_single() {
     return 0
   fi
 
-  backup_file="$(mktemp "${GAPS_FILE}.bak.XXXXXX")"
-  cp "$GAPS_FILE" "$backup_file"
-
-  commit_msg="$(cat <<EOF
-fix($id): mark $status via gaps.close
-
-Closed via atomic gaps.close capability.
-${fixed_in:+Fixed in: $fixed_in}
-
-Gap-Mutation: capability
-Gap-Capability: gaps.close
-Gap-Run-Key: ${SPINE_CAP_RUN_KEY:-manual}
-${reg_lock:+Regression-Lock-ID: $reg_lock}
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
-EOF
-)"
-
-  set +e
   timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   apply_gap_update "$id" "$status" "$fixed_in" "$notes" "$reg_lock" "$timestamp"
-  rc=$?
-  if [[ "$rc" -eq 0 ]]; then
-    git -C "$ROOT" add "$GAPS_FILE"
-    rc=$?
-  fi
-  if [[ "$rc" -eq 0 ]]; then
-    # Timeout protection: prevent indefinite hang from pre-commit hooks
-    timeout 30 git -C "$ROOT" commit -m "$commit_msg" || {
-      rc=$?
-      if [[ "$rc" -eq 124 ]]; then
-        echo "FAIL: git commit timed out (30s) — pre-commit hooks may be hanging" >&2
-        echo "Check: git status, pre-commit hook execution, network connectivity" >&2
-      fi
-    }
-  fi
-  set -e
 
-  if [[ "$rc" -ne 0 ]]; then
-    cp "$backup_file" "$GAPS_FILE"
-    git -C "$ROOT" add "$GAPS_FILE" >/dev/null 2>&1 || true
-    rm -f "$backup_file"
-    fail "transaction rolled back for $id (commit/update failed)"
-  fi
-
-  rm -f "$backup_file"
+  # Mutation is SQLite-only. YAML projection is on-demand (gaps-authority-bridge project).
+  # No git add/commit needed — the YAML file is not modified during mutation.
 
   local_claim="$(claim_file "$id")"
   if [[ -f "$local_claim" ]]; then
@@ -380,7 +340,7 @@ close_batch() {
   local default_reg_lock="$5"
   local entries_json
   local -a ids=() statuses=() fixed_ins=() notes=() reg_locks=()
-  local timestamp local_claim id_block i count backup_file commit_msg
+  local timestamp local_claim i count
 
   command -v jq >/dev/null 2>&1 || fail "jq required for --batch"
   entries_json="$(parse_batch_file "$batch_file" "$default_status" "$default_fixed_in" "$default_notes" "$default_reg_lock")"
@@ -421,64 +381,18 @@ close_batch() {
     return 0
   fi
 
-  backup_file="$(mktemp "${GAPS_FILE}.bak.XXXXXX")"
-  cp "$GAPS_FILE" "$backup_file"
-
   timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  rc=0
-  set +e
   for i in "${valid_indices[@]}"; do
     apply_gap_update "${ids[$i]}" "${statuses[$i]}" "${fixed_ins[$i]}" "${notes[$i]}" "${reg_locks[$i]}" "$timestamp"
-    rc=$?
-    [[ "$rc" -eq 0 ]] || break
   done
+
+  # Mutation is SQLite-only. YAML projection is on-demand (gaps-authority-bridge project).
+  # No git add/commit needed — the YAML file is not modified during mutation.
 
   local -a closed_ids=()
   for i in "${valid_indices[@]}"; do
     closed_ids+=("${ids[$i]}")
   done
-  id_block="$(printf '%s\n' "${closed_ids[@]}" | sed 's/^/- /')"
-
-  commit_msg="$(cat <<EOF
-fix(gaps): batch mark via gaps.close
-
-Closed ${#valid_indices[@]} gap(s) via atomic gaps.close --batch.
-Batch file: $batch_file
-${default_fixed_in:+Fixed in (default): $default_fixed_in}
-
-Gap IDs:
-$id_block
-
-Gap-Mutation: capability
-Gap-Capability: gaps.close
-Gap-Run-Key: ${SPINE_CAP_RUN_KEY:-manual}
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
-EOF
-)"
-  if [[ "${rc:-0}" -eq 0 ]]; then
-    git -C "$ROOT" add "$GAPS_FILE"
-    rc=$?
-  fi
-  if [[ "${rc:-0}" -eq 0 ]]; then
-    # Timeout protection: prevent indefinite hang from pre-commit hooks
-    timeout 30 git -C "$ROOT" commit -m "$commit_msg" || {
-      rc=$?
-      if [[ "$rc" -eq 124 ]]; then
-        echo "FAIL: git commit timed out (30s) — pre-commit hooks may be hanging" >&2
-        echo "Check: git status, pre-commit hook execution, network connectivity" >&2
-      fi
-    }
-  fi
-  set -e
-
-  if [[ "${rc:-0}" -ne 0 ]]; then
-    cp "$backup_file" "$GAPS_FILE"
-    git -C "$ROOT" add "$GAPS_FILE" >/dev/null 2>&1 || true
-    rm -f "$backup_file"
-    fail "batch transaction rolled back (commit/update failed)"
-  fi
-
-  rm -f "$backup_file"
 
   for id in "${closed_ids[@]}"; do
     local_claim="$(claim_file "$id")"
