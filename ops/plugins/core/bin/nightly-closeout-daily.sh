@@ -8,6 +8,7 @@ SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && 
 CLOSEOUT_CMD="${SPINE_ROOT}/ops/commands/nightly-closeout.sh"
 WORKSPACE_VERIFY_CMD="${SPINE_ROOT}/ops/plugins/core/verify/bin/workspace-closeout-verify"
 D399_CMD="${SPINE_ROOT}/surfaces/verify/d399-microsoft-mint-customer-mailbox-canonical-lock.sh"
+RECURRENCE_CONVERT_CMD="${SPINE_ROOT}/ops/plugins/core/lifecycle/bin/gate-recurrence-convert"
 CONTRACT="${SPINE_ROOT}/ops/bindings/nightly.closeout.contract.yaml"
 source "${SPINE_ROOT}/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
@@ -203,19 +204,27 @@ run_microsoft_mailbox_lock() {
 }
 
 run_nightly_closeout_and_workspace_verify() {
-  local closeout_rc workspace_rc d399_rc overall_rc
+  local closeout_rc workspace_rc d399_rc recurrence_rc overall_rc
   closeout_rc=0
   workspace_rc=0
   d399_rc=0
+  recurrence_rc=0
   overall_rc=0
 
   run_nightly_closeout_dry_run || closeout_rc=$?
   run_workspace_closeout_verify || workspace_rc=$?
   run_microsoft_mailbox_lock || d399_rc=$?
+  [[ -x "$RECURRENCE_CONVERT_CMD" ]] || {
+    echo "[nightly-closeout-daily] missing recurrence converter: $RECURRENCE_CONVERT_CMD" >&2
+    recurrence_rc=2
+  }
+  if [[ "$recurrence_rc" -eq 0 ]]; then
+    "$RECURRENCE_CONVERT_CMD" || recurrence_rc=$?
+  fi
 
-  (( closeout_rc == 0 && workspace_rc == 0 && d399_rc == 0 )) || overall_rc=1
+  (( closeout_rc == 0 && workspace_rc == 0 && d399_rc == 0 && recurrence_rc == 0 )) || overall_rc=1
   if [[ "$overall_rc" -ne 0 ]]; then
-    echo "[nightly-closeout-daily] failure closeout_rc=$closeout_rc workspace_rc=$workspace_rc d399_rc=$d399_rc" >&2
+    echo "[nightly-closeout-daily] failure closeout_rc=$closeout_rc workspace_rc=$workspace_rc d399_rc=$d399_rc recurrence_rc=$recurrence_rc" >&2
   fi
   return "$overall_rc"
 }

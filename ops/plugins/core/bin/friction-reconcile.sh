@@ -10,6 +10,7 @@ CONTROL_ROOT="$(spine_runtime_resolve_control_root "${BASH_SOURCE[0]}")"
 spine_runtime_activate_managed_worktree "$CONTROL_ROOT"
 RUNTIME_ROOT="${SPINE_RUNTIME_ACTIVE_ROOT}"
 CAP_RUNNER="${RUNTIME_ROOT}/bin/ops"
+RECURRENCE_CONVERT_CMD="${RUNTIME_ROOT}/ops/plugins/core/lifecycle/bin/gate-recurrence-convert"
 FRICTION_LOOP_ID="${FRICTION_RECONCILE_LOOP_ID:-LOOP-AGENT-FRICTION-QUEUE-OPERATIONS-20260302}"
 source "${RUNTIME_ROOT}/ops/lib/job-wrapper.sh"
 
@@ -17,6 +18,15 @@ echo "[friction-reconcile] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "[friction-reconcile] control_root=${CONTROL_ROOT}"
 echo "[friction-reconcile] runtime_root=${RUNTIME_ROOT}"
 echo "[friction-reconcile] worktree_identity=${OPS_WORKTREE_IDENTITY:-unset}"
+
+[[ -x "$RECURRENCE_CONVERT_CMD" ]] || {
+  echo "[friction-reconcile] missing recurrence converter: $RECURRENCE_CONVERT_CMD" >&2
+  exit 2
+}
+
+spine_job_run \
+  "friction-reconcile:gate.recurrence.convert" \
+  "$RECURRENCE_CONVERT_CMD"
 
 spine_job_run \
   "friction-reconcile:friction.reconcile" \

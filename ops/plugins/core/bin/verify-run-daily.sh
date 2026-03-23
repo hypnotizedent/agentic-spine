@@ -10,13 +10,15 @@ spine_paths_init
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 VERIFY_RESPONSE_LOOP="${SPINE_ROOT}/ops/plugins/core/verify/bin/verify-response-loop"
 D399_CMD="${SPINE_ROOT}/surfaces/verify/d399-microsoft-mint-customer-mailbox-canonical-lock.sh"
+RECURRENCE_CONVERT_CMD="${SPINE_ROOT}/ops/plugins/core/lifecycle/bin/gate-recurrence-convert"
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
 
 run_daily_verify() {
-  local fast_rc loop_gap_rc d399_rc verify_rc
+  local fast_rc loop_gap_rc d399_rc recurrence_rc verify_rc
   fast_rc=0
   loop_gap_rc=0
   d399_rc=0
+  recurrence_rc=0
   verify_rc=0
 
   [[ -x "$CAP_RUNNER" ]] || {
@@ -31,6 +33,10 @@ run_daily_verify() {
     echo "[verify-run-daily] missing mailbox lock verifier: $D399_CMD" >&2
     return 2
   }
+  [[ -x "$RECURRENCE_CONVERT_CMD" ]] || {
+    echo "[verify-run-daily] missing recurrence converter: $RECURRENCE_CONVERT_CMD" >&2
+    return 2
+  }
 
   set +e
   "$CAP_RUNNER" cap run verify.run -- fast
@@ -40,11 +46,13 @@ run_daily_verify() {
   "$D399_CMD"
   d399_rc=$?
   "$VERIFY_RESPONSE_LOOP" || true
+  "$RECURRENCE_CONVERT_CMD"
+  recurrence_rc=$?
   set -e
 
-  (( fast_rc == 0 && loop_gap_rc == 0 && d399_rc == 0 )) || verify_rc=1
+  (( fast_rc == 0 && loop_gap_rc == 0 && d399_rc == 0 && recurrence_rc == 0 )) || verify_rc=1
   if [[ "$verify_rc" -ne 0 ]]; then
-    echo "[verify-run-daily] failure fast_rc=$fast_rc loop_gap_rc=$loop_gap_rc d399_rc=$d399_rc" >&2
+    echo "[verify-run-daily] failure fast_rc=$fast_rc loop_gap_rc=$loop_gap_rc d399_rc=$d399_rc recurrence_rc=$recurrence_rc" >&2
   fi
   return "$verify_rc"
 }
