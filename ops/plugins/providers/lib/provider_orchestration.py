@@ -364,6 +364,25 @@ def opencode_small_model(contract: dict[str, Any], provider_id: str) -> str:
     return str(block.get("small_model") or block.get("model") or provider_model(contract, provider_id, "opencode"))
 
 
+def opencode_provider_id(contract: dict[str, Any], provider_id: str) -> str:
+    provider = contract["providers"][provider_id]
+    block = provider.get("opencode", {}) if isinstance(provider.get("opencode"), dict) else {}
+    configured = block.get("provider_id")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    return "openai"
+
+
+def opencode_base_url(contract: dict[str, Any], provider_id: str) -> str:
+    provider = contract["providers"][provider_id]
+    block = provider.get("opencode", {}) if isinstance(provider.get("opencode"), dict) else {}
+    configured = block.get("base_url")
+    if isinstance(configured, str) and configured.strip():
+        return configured.rstrip("/")
+    endpoint = provider.get("endpoint", {}) if isinstance(provider.get("endpoint"), dict) else {}
+    return str(endpoint.get("base_url", "")).rstrip("/")
+
+
 def openai_headers(contract: dict[str, Any], provider_id: str) -> dict[str, str]:
     provider = contract["providers"][provider_id]
     endpoint = provider.get("endpoint", {}) if isinstance(provider.get("endpoint"), dict) else {}
@@ -391,6 +410,8 @@ def launch_env(contract: dict[str, Any], tool: str, requested: str | None = None
     }
 
     base_url = str(endpoint.get("base_url", "")).rstrip("/")
+    if tool == "opencode":
+        base_url = opencode_base_url(contract, provider_id) or base_url
     if base_url:
         exports["SPINE_PROVIDER_BASE_URL"] = base_url
     chat_path = str(endpoint.get("chat_path") or endpoint.get("api_path") or "/chat/completions")
@@ -404,8 +425,9 @@ def launch_env(contract: dict[str, Any], tool: str, requested: str | None = None
         else:
             exports["SPINE_PROVIDER_ALLOW_ANON"] = "1"
         if tool == "opencode":
-            exports["SPINE_OPENCODE_MODEL"] = f"openai/{model}"
-            exports["SPINE_OPENCODE_SMALL_MODEL"] = f"openai/{opencode_small_model(contract, provider_id)}"
+            opencode_provider = opencode_provider_id(contract, provider_id)
+            exports["SPINE_OPENCODE_MODEL"] = f"{opencode_provider}/{model}"
+            exports["SPINE_OPENCODE_SMALL_MODEL"] = f"{opencode_provider}/{opencode_small_model(contract, provider_id)}"
         if tool == "codex":
             if provider_id == "local_lmstudio":
                 exports["CODEX_USE_OSS"] = "1"

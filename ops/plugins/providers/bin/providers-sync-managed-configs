@@ -10,6 +10,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from provider_orchestration import (  # noqa: E402
     load_contract,
+    opencode_base_url,
+    opencode_provider_id,
     opencode_small_model,
     provider_model,
     surface_status,
@@ -89,22 +91,46 @@ def build_codex_config(contract: dict) -> str:
 def build_opencode_config(workbench_root: Path, contract: dict, provider_id: str) -> tuple[str, str]:
     opencode_path = workbench_root / "dotfiles/opencode/opencode.json"
     ohmy_path = workbench_root / "dotfiles/opencode/oh-my-opencode.json"
-    opencode_model = f'openai/{provider_model(contract, provider_id, "opencode")}'
-    small_model = f'openai/{opencode_small_model(contract, provider_id)}'
-    base_url = str(contract["providers"][provider_id].get("endpoint", {}).get("base_url", "")).rstrip("/")
+    provider_alias = opencode_provider_id(contract, provider_id)
+    opencode_model = f"{provider_alias}/{provider_model(contract, provider_id, 'opencode')}"
+    small_model = f"{provider_alias}/{opencode_small_model(contract, provider_id)}"
+    base_url = opencode_base_url(contract, provider_id)
+    provider = contract["providers"][provider_id]
 
     current = json.loads(opencode_path.read_text(encoding="utf-8")) if opencode_path.exists() else {}
     current["$schema"] = "https://opencode.ai/config.json"
-    options = {
-        "baseURL": base_url,
-        "timeout": 300000,
-    }
-    auth_required = bool(contract["providers"][provider_id].get("auth_required", True))
-    if auth_required:
-        options["apiKey"] = "{env:OPENAI_API_KEY}"
-    current["provider"] = {"openai": {"options": options}}
-    current["enabled_providers"] = ["openai"]
+    current["model"] = opencode_model
     current["small_model"] = small_model
+    if provider_alias == "openai":
+        options = {
+            "baseURL": base_url,
+            "timeout": 300000,
+        }
+        auth_required = bool(provider.get("auth_required", True))
+        if auth_required:
+            options["apiKey"] = "{env:OPENAI_API_KEY}"
+        current["provider"] = {"openai": {"options": options}}
+        current["enabled_providers"] = ["openai"]
+    else:
+        current["provider"] = {
+            provider_alias: {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": str(provider.get("display_name", provider_alias)),
+                "options": {
+                    "baseURL": base_url,
+                    "timeout": 300000,
+                },
+                "models": {
+                    provider_model(contract, provider_id, "opencode"): {
+                        "name": provider_model(contract, provider_id, "opencode"),
+                    },
+                    opencode_small_model(contract, provider_id): {
+                        "name": opencode_small_model(contract, provider_id),
+                    },
+                },
+            }
+        }
+        current["enabled_providers"] = [provider_alias]
     agent = current.get("agent") if isinstance(current.get("agent"), dict) else {}
     default_agent = agent.get("default") if isinstance(agent.get("default"), dict) else {}
     default_agent["model"] = opencode_model
