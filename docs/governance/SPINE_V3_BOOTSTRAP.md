@@ -108,6 +108,20 @@ Therefore:
 - stale operator-facing docs must be marked as superseded, not left to compete silently
 - mixed realities are a V3 failure, not a documentation nuisance
 
+### Convergence Rule
+
+The Spine must behave as a mandatory convergence machine, not a set of helpful but optional surfaces.
+
+Three convergence invariants:
+
+1. **Authority resolution**: before creating new work, discover the existing owner. Loop scopes encode exclusions and supersessions. Agents must not create sibling loops for already-owned seams or rediscover already-excluded surfaces.
+2. **Boring checkout flow**: the ordinary path (main branch, single override, governed commit) must work without archaeology. If checkout/worktree/hook residue blocks ordinary execution, that is a spine defect, not operator cleanup duty.
+3. **Closure propagation**: "done" means runtime, control plane, bindings/projections, and residue retirement all agree. If code changed but runtime didn't, the disposition is `deferred`, not `landed`.
+
+If a change adds a new truth surface but leaves the old one active, the loop is not done.
+If a physical substrate change has no control-plane proof, the loop is not done.
+If the boring path requires manual archaeology, the attach flow has a defect.
+
 ## Problem Statement
 
 The current bottleneck is interface-layer role collapse, not model capability.

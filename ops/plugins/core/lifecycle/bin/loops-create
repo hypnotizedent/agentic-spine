@@ -16,6 +16,7 @@ SCOPES_DIR="$SPINE_STATE/loop-scopes"
 TEMPLATE="$ROOT/ops/plugins/core/lifecycle/templates/loop-scope.template.md"
 
 NAME="" OBJECTIVE="" PRIORITY="medium" HORIZON="now" READINESS="runnable" EXEC_MODE="orchestrator_subagents"
+FORCE=0
 declare -a PHASES=()
 declare -a SUCCESS_CRITERIA=()
 declare -a DOD_ITEMS=()
@@ -32,13 +33,16 @@ while [[ $# -gt 0 ]]; do
     --phase)           PHASES+=("${2:?--phase requires a value}"); shift 2 ;;
     --success)   SUCCESS_CRITERIA+=("${2:?--success requires a value}"); shift 2 ;;
     --dod)       DOD_ITEMS+=("${2:?--dod requires a value}"); shift 2 ;;
+    --force)     FORCE=1; shift ;;
     -h|--help)
       echo "Usage: loops-create --name NAME --objective \"desc\" [--priority high|medium|low]"
       echo "       [--horizon now|later|future] [--readiness runnable|blocked]"
       echo "       [--execution-mode single_worker|orchestrator_subagents]"
       echo "       [--phase \"Step 1:desc\"]... [--success \"criterion\"]... [--dod \"item\"]..."
+      echo "       [--force]"
       echo ""
       echo "Creates a new loop scope file from template with optional scaffold sections."
+      echo "Blocks if an active loop with overlapping scope exists (use --force to override)."
       exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -100,6 +104,42 @@ SCOPE_FILE="$SCOPES_DIR/${LOOP_ID}.scope.md"
 if [[ -f "$SCOPE_FILE" ]]; then
   echo "FAIL: Loop already exists: $SCOPE_FILE" >&2
   exit 1
+fi
+
+# Owner-overlap check: block if active loops share keywords with the new loop name.
+# Use --force to override when the overlap is intentional.
+if [[ -d "$SCOPES_DIR" ]]; then
+  NEW_KEYWORDS="$(echo "$NORM_NAME" | tr '-' '\n' | sort -u)"
+  overlap_found=0
+  overlap_ids=""
+  while IFS= read -r existing_scope; do
+    [[ -f "$existing_scope" ]] || continue
+    existing_status="$(awk '/^status:/{print $2; exit}' "$existing_scope" | tr -d '"' || true)"
+    [[ "$existing_status" == "active" ]] || continue
+    existing_id="$(awk '/^loop_id:/{print $2; exit}' "$existing_scope" | tr -d '"' || true)"
+    [[ "$existing_id" != "$LOOP_ID" ]] || continue
+    # Extract keywords from existing loop name (strip LOOP- prefix and date suffix)
+    existing_name="$(echo "$existing_id" | sed -E 's/^LOOP-//; s/-[0-9]{8}$//')"
+    existing_keywords="$(echo "$existing_name" | tr '-' '\n' | sort -u)"
+    # Count keyword overlap
+    shared="$(comm -12 <(echo "$NEW_KEYWORDS") <(echo "$existing_keywords") | grep -cv '^$' || true)"
+    if [[ "$shared" -ge 2 ]]; then
+      echo "OVERLAP: active loop $existing_id shares $shared keyword(s) with new loop $LOOP_ID" >&2
+      overlap_found=1
+      overlap_ids="${overlap_ids:+$overlap_ids, }$existing_id"
+    fi
+  done < <(find "$SCOPES_DIR" -name "LOOP-*.scope.md" -type f 2>/dev/null)
+  if [[ "$overlap_found" -eq 1 ]]; then
+    if [[ "$FORCE" -eq 1 ]]; then
+      echo "WARN: --force used, creating despite scope overlap with: $overlap_ids" >&2
+    else
+      echo "FAIL: active loop(s) with overlapping scope: $overlap_ids" >&2
+      echo "  → Check if the existing loop already owns this scope." >&2
+      echo "  → To list active loops: ./bin/ops loops list --open" >&2
+      echo "  → To override: add --force" >&2
+      exit 1
+    fi
+  fi
 fi
 
 # Derive scope from name (lowercase, first word)

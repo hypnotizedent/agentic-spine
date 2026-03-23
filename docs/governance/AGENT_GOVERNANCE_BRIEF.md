@@ -23,6 +23,17 @@ scope: agent-governance-brief
 - **Path recovery is canonicalized:** if a lane worktree path disappears, run `worktree.lifecycle.rehydrate` against the branch instead of ad-hoc `git worktree add`.
 - **Gitea is canonical** (origin). GitHub is a mirror. D62 enforces.
 
+## Boring Checkout Path
+
+The boring path is: **main branch, single override, governed commit.**
+
+- **Normal work**: stay on `main`. Commit with `OPS_GOVERNED_MAIN_OVERRIDE=1`.
+- **If not on main**: `session.v3.attach` will tell you. Either switch back (`git checkout main`) or create a governed worktree (`./bin/ops start loop <LOOP_ID>`).
+- **If env vars are stale**: `session.v3.attach` auto-cleans leaked `SPINE_ROOT`, `SPINE_REPO`, `SPINE_CODE`, `SPINE_TARGET_REPO`, `SPINE_WORKTREE`. If it can't, it says why.
+- **If worktrees are stale**: run `./bin/ops cap run worktree.lifecycle.reconcile -- --json` to see what's lingering. Cleanup is `report-only` then `archive-only` then `delete` (token-gated).
+- **Recovery rule**: if ordinary execution is blocked by checkout/worktree/hook residue, that is a spine defect worth filing as friction, not operator cleanup duty.
+- **Never debug checkout state silently.** If the boring path doesn't work, say what broke and file friction.
+
 ## Multi-Agent Write Policy (Mailroom-Gated Writes)
 
 - **Default rule:** if multiple terminals/agents may be active, treat the repo as **read-only**.
@@ -63,6 +74,8 @@ scope: agent-governance-brief
 - **Never fix inline.** Found a bug, drift, or missing feature? Register it first, then fix through the registration.
 - **Gaps:** Add an entry to `ops/bindings/operational.gaps.yaml` with `parent_loop` if one exists.
 - **Loops:** Create a scope file in `$SPINE_STATE/loop-scopes/LOOP-<NAME>-<DATE>.scope.md` (externalized runtime, NOT repo-local `mailroom/state/`) for any multi-step or cross-file work.
+- **Pre-creation owner check:** Before creating a new loop, run `./bin/ops loops list --open` and verify no active loop already owns overlapping scope. `loops.create` will warn on keyword overlap but will not block. If an owner exists, join that loop or extend it — do not create a sibling.
+- **Exclusions are mandatory scope.** When creating or updating a loop, populate the `exclusions` and `supersedes` fields in frontmatter. Agents must not rediscover or re-audit surfaces listed in exclusions.
 - **Commits reference the loop/gap.** Prefix: `fix(LOOP-X):` or `gov(GAP-OP-NNN):`.
 - **Do not ask "want me to fix this?"** — follow the spine: register, fix, receipt.
 
@@ -94,6 +107,14 @@ scope: agent-governance-brief
 - **One capability at a time.** Run the smallest deterministic `ops cap run <capability>` for the task in front of you.
 - **Syntax certainty first.** If command shape is uncertain, run `./bin/ops cap show <capability>` before execution.
 - **Discovery is scoped.** Use `./bin/ops cap list` only when you truly need capability discovery.
+
+## Closure Propagation
+
+- **"landed" means propagated.** Code changes alone do not earn `disposition: landed`. Runtime, control plane, bindings/projections, and residue retirement must all agree.
+- **If propagation is incomplete, use `deferred`.** A loop where code shipped but runtime wasn't updated is `deferred` with a note explaining what's missing, not `landed`.
+- **Use the closure checklist.** Every loop scope includes a closure checklist section. All boxes must be checked before `landed` disposition.
+- **Residue retirement is part of closure.** Stale branches, worktrees, mounts, exports, and config entries left behind by the change must be dispositioned. If they can't be cleaned up yet, note why.
+- **Physical substrate changes require control-plane proof.** If you created a pool, moved a service, changed a mount, or modified infrastructure, the relevant binding/contract/SSOT must reflect the change before close.
 
 ## Verify & Receipts
 

@@ -19,6 +19,7 @@ Usage:
   loop-closeout-finalize --loop-id LOOP-... --acceptance-matrix <path> \
     --disposition <state> [--regression-lock-id D###-...] [--evidence <ref>] [--owner <owner>] \
     [--expiry-check <date-or-cadence>] [--root-cause <text>] \
+    [--propagation-evidence <text>] \
     [--receipt-path <path>] [--no-close-linked-gaps] \
     [--cleanup-branch <branch-name>]
 
@@ -27,6 +28,7 @@ Validation:
   - required run keys exist in acceptance matrix or companion supervisor receipt
   - decision is MERGE_READY or DONE
   - blocker_count is zero when explicitly declared
+  - disposition: landed requires --propagation-evidence when contract enforces it
 
 Behavior:
   - closes loop scope status to closed
@@ -46,6 +48,7 @@ EVIDENCE=""
 OWNER=""
 EXPIRY_CHECK=""
 ROOT_CAUSE=""
+PROPAGATION_EVIDENCE=""
 RECEIPT_PATH=""
 CLOSE_LINKED_GAPS=1
 CLEANUP_BRANCH=""
@@ -90,6 +93,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --root-cause)
       ROOT_CAUSE="${2:-}"
+      shift 2
+      ;;
+    --propagation-evidence)
+      PROPAGATION_EVIDENCE="${2:-}"
       shift 2
       ;;
     --receipt-path)
@@ -170,6 +177,33 @@ done
 if [[ "$disposition_ok" -ne 1 ]]; then
   echo "loop.closeout.finalize FAIL: invalid disposition '$DISPOSITION' (allowed: ${DISPOSITION_CSV//,/|})" >&2
   exit 1
+fi
+
+# ── Propagation enforcement gate ──
+# When the closeout contract requires propagation evidence for "landed",
+# block the closeout unless --propagation-evidence is provided.
+PROPAGATION_REQUIRED="false"
+if [[ -f "$CONTRACT" ]]; then
+  PROPAGATION_REQUIRED="$(yq e -r '.propagation.require_for_landed // false' "$CONTRACT")"
+fi
+if [[ "$DISPOSITION" == "landed" && "$PROPAGATION_REQUIRED" == "true" ]]; then
+  if [[ -z "$PROPAGATION_EVIDENCE" ]]; then
+    echo "loop.closeout.finalize FAIL: disposition 'landed' requires --propagation-evidence" >&2
+    echo "" >&2
+    echo "  The closeout contract (propagation.require_for_landed: true) requires proof" >&2
+    echo "  that all propagation surfaces agree before 'landed' disposition." >&2
+    echo "" >&2
+    echo "  Required propagation surfaces:" >&2
+    while IFS= read -r surface; do
+      [[ -n "$surface" && "$surface" != "null" ]] && echo "    - $surface" >&2
+    done < <(yq e -r '.propagation.surfaces[]?' "$CONTRACT" 2>/dev/null || true)
+    echo "" >&2
+    echo "  Provide --propagation-evidence with a reference (path, commit, or attestation text)" >&2
+    echo "  describing how each surface was verified." >&2
+    echo "" >&2
+    echo "  If propagation is incomplete, use --disposition deferred instead." >&2
+    exit 1
+  fi
 fi
 
 mapfile -t PROTECTED_LOOPS < <(yq e -r '.protected_lanes.loops[]? // ""' "$CONTRACT" | sed '/^$/d')
@@ -472,6 +506,8 @@ cat > "$RECEIPT_PATH" <<EOF
 - linked_gap_close_mode: $([[ "$CLOSE_LINKED_GAPS" -eq 1 ]] && echo "enabled" || echo "disabled")
 - regression_lock_id_applied: ${REGRESSION_LOCK_ID:-n/a}
 - evidence_reference: ${EVIDENCE:-n/a}
+- propagation_evidence: ${PROPAGATION_EVIDENCE:-n/a}
+- propagation_required: $PROPAGATION_REQUIRED
 - closeout_gate: D289 loop-closeout-completeness-lock
 - capability: loop.closeout.finalize
 - run_key: ${SPINE_CAP_RUN_KEY:-manual}
