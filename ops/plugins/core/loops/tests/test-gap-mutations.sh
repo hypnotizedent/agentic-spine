@@ -20,6 +20,9 @@ PASS=0
 FAIL=0
 TEST_GAPS_DIR=""
 ORIG_GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+BASE_SPINE_REPO="${SPINE_REPO:-}"
+BASE_GAPS_FILE="${GAPS_FILE:-}"
+BASE_CLAIMS_DIR="${CLAIMS_DIR:-}"
 
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1" >&2; FAIL=$((FAIL + 1)); }
@@ -38,6 +41,49 @@ setup() {
 teardown() {
   rm -rf "$TEST_GAPS_DIR" 2>/dev/null || true
   rm -f "$ROOT/mailroom/state/gaps/GAP-OP-TEST-"*.claim 2>/dev/null || true
+}
+
+restore_ambient_env() {
+  if [[ -n "$BASE_SPINE_REPO" ]]; then
+    export SPINE_REPO="$BASE_SPINE_REPO"
+  else
+    unset SPINE_REPO
+  fi
+
+  if [[ -n "$BASE_GAPS_FILE" ]]; then
+    export GAPS_FILE="$BASE_GAPS_FILE"
+  else
+    unset GAPS_FILE
+  fi
+
+  if [[ -n "$BASE_CLAIMS_DIR" ]]; then
+    export CLAIMS_DIR="$BASE_CLAIMS_DIR"
+  else
+    unset CLAIMS_DIR
+  fi
+}
+
+run_isolated_test() {
+  "$@"
+  local status=$?
+  restore_ambient_env
+  return "$status"
+}
+
+assert_env_restored() {
+  local current_spine_repo="${SPINE_REPO:-}"
+  local current_gaps_file="${GAPS_FILE:-}"
+  local current_claims_dir="${CLAIMS_DIR:-}"
+
+  if [[ "$current_spine_repo" != "${BASE_SPINE_REPO:-}" ]]; then
+    fail "SPINE_REPO leaked across test boundaries"
+  elif [[ "$current_gaps_file" != "${BASE_GAPS_FILE:-}" ]]; then
+    fail "GAPS_FILE leaked across test boundaries"
+  elif [[ "$current_claims_dir" != "${BASE_CLAIMS_DIR:-}" ]]; then
+    fail "CLAIMS_DIR leaked across test boundaries"
+  else
+    pass "ambient fixture env restored after each test"
+  fi
 }
 
 trap teardown EXIT INT TERM
@@ -321,6 +367,7 @@ test_gaps_close_validation() {
 test_concurrent_lock_serialization() {
   echo "Test 7: Concurrent git-lock serialization"
 
+  local SPINE_REPO="$ROOT"
   source "$ROOT/ops/lib/git-lock.sh"
 
   # Acquire the lock
@@ -354,19 +401,21 @@ echo
 
 setup
 
-test_claim_lifecycle
+run_isolated_test test_claim_lifecycle
 echo
-test_wrong_owner_rejection
+run_isolated_test test_wrong_owner_rejection
 echo
-test_stale_claim_recovery
+run_isolated_test test_stale_claim_recovery
 echo
-test_double_claim_prevention
+run_isolated_test test_double_claim_prevention
 echo
-test_gaps_file_validation
+run_isolated_test test_gaps_file_validation
 echo
-test_gaps_close_validation
+run_isolated_test test_gaps_close_validation
 echo
-test_concurrent_lock_serialization
+run_isolated_test test_concurrent_lock_serialization
+echo
+assert_env_restored
 
 echo
 echo "═══════════════════════════════════════════════════════════════"
