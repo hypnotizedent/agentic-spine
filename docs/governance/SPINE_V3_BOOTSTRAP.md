@@ -59,6 +59,8 @@ Observed failures:
 7. Every good idea passes through normalization before execution.
 8. Prefer many narrow nodes over few overloaded machines.
 9. Do not solve this with better prompting, better memory, or more chat ceremony.
+10. Workflow identity belongs to loops, waves, packets, receipts, and broker state, not branches, worktrees, or chat history.
+11. Worktrees and branches are disposable implementation plumbing. Mailroom, runtime state, and attestation are the operating system.
 
 ## Interface Trust Model
 
@@ -371,6 +373,28 @@ Interactive entry should resolve through one front door:
 
 Status views, RAG, and memory helpers are not entry surfaces.
 
+### Canonical Substrate
+
+Spine V3 needs fewer truths, not more tools.
+
+The canonical split is:
+
+- `main` is contract truth
+- one declared runtime root is operational truth
+- `session.v3.attach` is human and agent ingress truth
+- broker reads plus attestation are status and proof truth
+- loops, waves, packets, receipts, and mailroom state are workflow identity
+- branches and worktrees are temporary implementation detail only
+
+Operational consequences:
+
+- a session with mismatched `SPINE_ROOT`, `SPINE_REPO`, `SPINE_CODE`, `SPINE_TARGET_REPO`, or runtime root should fail fast
+- repo-wide claims such as `.` are exceptional and time-bounded, not default operating mode
+- mailroom is transport and receipt routing, not a graveyard for plans
+- GitHub stores landed code and contracts; runtime stores live execution truth
+
+The system is not canonical until substrate truth is narrower than operator habit.
+
 ### Attestation Envelope
 
 Every execution should resolve to a structured proof envelope with at least:
@@ -510,6 +534,34 @@ Translator node contract, until extracted into a narrower document:
 - entry packets, not conversational prose, are the execution boundary
 - remote clients query broker state and request attestations instead of relying on memory
 
+### What Still Must Become Mandatory
+
+The repo now contains the first real V3 surfaces, but the operating model is not complete until these become mandatory:
+
+- every new terminal attaches through `session.v3.attach`
+- imported text reaches execution only through sanitizer plus packet compilation
+- remote and mobile status resolves through broker reads plus attestation, never freehand context
+- workflow identity lives in loops, waves, packets, receipts, and mailroom state
+- branches and worktrees must end quickly as `landed`, `deferred`, `superseded`, or `abandoned`
+- stale waves must not hold broad default claims that block unrelated work
+- substrate root mismatches must fail fast instead of silently drifting execution into the wrong checkout
+
+The anti-pattern to retire is:
+
+- branch as planning memory
+- worktree as operational identity
+- chat as active workspace
+- mailroom as dead plan storage
+
+The canonical replacement is:
+
+- sanitize import
+- attach to loop
+- compile packet
+- execute through spine or mailroom
+- review receipts and attestation
+- disposition the lane or wave
+
 ## Friction To Eliminate
 
 - multiple entry surfaces without compiled assignment
@@ -522,6 +574,10 @@ Translator node contract, until extracted into a narrower document:
 - manual insight-to-execution translation
 - weak remote attestation on mobile surfaces
 - operational mode inheriting code-lane assumptions
+- substrate root ambiguity across checkouts and sessions
+- branch and worktree sprawl acting as workflow memory
+- stale broad path claims blocking unrelated governed work
+- mailroom bypass or mailroom used as passive storage instead of live transport
 
 ## Constraints
 
@@ -531,6 +587,7 @@ Translator node contract, until extracted into a narrower document:
 - Translator node must not gain execution, verification, or git authority.
 - MacBook should converge toward operator-console duty.
 - Imported chat output, archives, and historical notes are untrusted until sanitized.
+- Do not treat detached worktrees, parked branches, or manual git ceremony as workflow canon.
 
 ## Archive And Reset Policy
 
@@ -554,9 +611,13 @@ Use:
 Re-entry should always be:
 
 - create or select loop
+- sanitize imported text if present
+- attach through `session.v3.attach`
 - compile context
 - submit broker request
 - receive attestation
+
+Do not treat branch creation, worktree creation, or ad hoc terminal state as re-entry.
 
 ## Processing Directive
 
