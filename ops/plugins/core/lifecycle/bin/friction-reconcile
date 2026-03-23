@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Authority: shared_authority.db -> friction table
+# NDJSON write: projection only -- remove after full migration
 from __future__ import annotations
 
 import argparse
@@ -18,6 +20,39 @@ ROOT = Path(__file__).resolve().parents[5]
 GAPS_DEDUPE = ROOT / "ops/plugins/core/loops/bin/gaps-dedupe"
 GAPS_FILE = ROOT / "ops/plugins/core/loops/bin/gaps-file"
 OP_GAPS_FILE = ROOT / "ops/bindings/operational.gaps.yaml"
+
+# ── SQLite authority (conditional) ────────────────────────────────
+sys.path.insert(0, str(ROOT / "ops/plugins/core/lifecycle/lib"))
+try:
+    from gaps_sql_authority import (
+        resolve_paths as _gsa_resolve_paths,
+        connect as _gsa_connect,
+        ensure_schema as _gsa_ensure_schema,
+        get_gap as _gsa_get_gap,
+    )
+    from gaps_sql_authority import (
+        ensure_friction_schema,
+        upsert_friction,
+        fetch_friction_by_status,
+        fetch_all_friction,
+    )
+    SQLITE_AVAILABLE = True
+except ImportError:
+    SQLITE_AVAILABLE = False
+
+
+def _sqlite_conn():
+    """Open and return a ready SQLite connection, or None if unavailable."""
+    if not SQLITE_AVAILABLE:
+        return None
+    try:
+        db_path, _ = _gsa_resolve_paths(ROOT)
+        conn = _gsa_connect(db_path)
+        _gsa_ensure_schema(conn)
+        ensure_friction_schema(conn)
+        return conn
+    except Exception:
+        return None
 
 
 def default_state_root() -> Path:
@@ -188,10 +223,22 @@ def main() -> int:
     queue_path = Path(args.queue).expanduser()
     lock_path = Path(args.lock_file).expanduser()
 
+    # Open SQLite if available — used for reading queued items and writing status updates.
+    sqlite_conn = _sqlite_conn()
+
     with queue_lock(lock_path):
         rows = load_queue(queue_path)
         now = utc_iso()
 
+        # ── Source queued items: SQLite-first, NDJSON fallback ──
+        if sqlite_conn:
+            sqlite_queued = fetch_friction_by_status(sqlite_conn, "queued")
+            # Build a fingerprint-to-NDJSON-index map for syncing updates back
+            fp_to_ndjson_idx: dict[str, int] = {}
+            for idx, r in enumerate(rows):
+                fp = str(r.get("fingerprint", "")).strip()
+                if fp:
+                    fp_to_ndjson_idx[fp] = idx
         queued_items = [r for r in rows if str(r.get("status", "queued")).strip().lower() == "queued"]
 
         matched_count = 0
@@ -200,6 +247,8 @@ def main() -> int:
         fallback_used = False
         pending_batch: list[dict[str, Any]] = []
         pending_indices: list[int] = []
+        # Track friction items that need SQLite status updates
+        sqlite_status_updates: list[dict[str, Any]] = []
 
         for idx, item in enumerate(rows):
             status = str(item.get("status", "queued")).strip().lower()
@@ -219,6 +268,7 @@ def main() -> int:
                 item["matched_gap_id"] = exact_gap_id
                 item["matched_at_utc"] = now
                 item["updated_at_utc"] = now
+                sqlite_status_updates.append(item)
                 matched_count += 1
                 continue
 
@@ -245,6 +295,7 @@ def main() -> int:
                     item["matched_gap_id"] = gap_id
                     item["matched_at_utc"] = now
                     item["updated_at_utc"] = now
+                    sqlite_status_updates.append(item)
                     matched_count += 1
                     continue
 
@@ -328,6 +379,7 @@ def main() -> int:
                     rows[row_index]["filed_gap_id"] = gap_id
                     rows[row_index]["filed_at_utc"] = now
                     rows[row_index]["updated_at_utc"] = now
+                    sqlite_status_updates.append(rows[row_index])
             else:
                 request_path = filed_request_paths[0] if filed_request_paths else ""
                 for row_index in pending_indices:
@@ -336,6 +388,7 @@ def main() -> int:
                     rows[row_index]["filed_request_path"] = request_path
                     rows[row_index]["filed_at_utc"] = now
                     rows[row_index]["updated_at_utc"] = now
+                    sqlite_status_updates.append(rows[row_index])
             # gaps-file can idempotently skip semantically-equivalent open gaps.
             # Treat these as matched so queue entries don't remain permanently queued.
             offset = filed_count
@@ -345,15 +398,28 @@ def main() -> int:
                 rows[row_index]["matched_gap_id"] = gap_id
                 rows[row_index]["matched_at_utc"] = now
                 rows[row_index]["updated_at_utc"] = now
+                sqlite_status_updates.append(rows[row_index])
                 matched_from_idempotent_skip += 1
             matched_count += matched_from_idempotent_skip
 
+        # ── Write status updates to SQLite authority ──
+        if sqlite_conn and not args.dry_run:
+            for updated_item in sqlite_status_updates:
+                upsert_friction(sqlite_conn, updated_item)
+            sqlite_conn.commit()
+
         if not args.dry_run:
+            # NDJSON write: projection only -- remove after full migration
             write_queue(queue_path, rows)
+
+    authority = "sqlite" if sqlite_conn else "ndjson"
+    if sqlite_conn:
+        sqlite_conn.close()
 
     payload = {
         "capability": "friction.reconcile",
         "status": "ok",
+        "authority": authority,
         "queue": str(queue_path),
         "loop_id": loop_id,
         "queued_before": len(queued_items),
@@ -370,6 +436,7 @@ def main() -> int:
         print(json.dumps(payload, indent=2))
     else:
         print("friction.reconcile")
+        print(f"authority: {authority}")
         print("status: ok")
         print(f"queue: {queue_path}")
         print(f"loop_id: {args.loop_id}")

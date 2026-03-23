@@ -24,7 +24,7 @@ from typing import Any
 import yaml
 
 
-SCHEMA_MIGRATION_ID = "20260323_gaps_authority_v2"
+SCHEMA_MIGRATION_ID = "20260323_gaps_authority_v3_friction"
 ENV_DB_PATH = "GAPS_DB_PATH"
 ENV_GAPS_YAML = "GAPS_YAML_PATH"
 DEFAULT_GAPS_YAML_REL = "ops/bindings/operational.gaps.yaml"
@@ -157,6 +157,52 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           version INTEGER NOT NULL,
           projected_at_utc TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS friction (
+          friction_id TEXT PRIMARY KEY,
+          fingerprint TEXT NOT NULL,
+          capability TEXT NOT NULL,
+          expected TEXT NOT NULL,
+          actual TEXT NOT NULL,
+          severity TEXT NOT NULL CHECK(severity IN ('critical','high','medium','low')),
+          status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','matched','filed','closed')),
+          first_seen_utc TEXT NOT NULL,
+          last_seen_utc TEXT NOT NULL,
+          updated_at_utc TEXT NOT NULL,
+          hit_count INTEGER DEFAULT 1,
+          sources_json TEXT,
+          matched_gap_id TEXT,
+          matched_at_utc TEXT,
+          filing_mode TEXT,
+          filed_gap_id TEXT,
+          filed_at_utc TEXT,
+          filed_request_path TEXT,
+          closed_reason TEXT,
+          closed_at_utc TEXT,
+          created_at_utc TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_friction_status ON friction(status);
+        CREATE INDEX IF NOT EXISTS idx_friction_severity ON friction(severity);
+        CREATE INDEX IF NOT EXISTS idx_friction_fingerprint ON friction(fingerprint);
+
+        CREATE TABLE IF NOT EXISTS friction_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          friction_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          from_status TEXT,
+          to_status TEXT,
+          reason TEXT,
+          actor TEXT,
+          run_key TEXT,
+          mutation_source TEXT NOT NULL DEFAULT 'legacy',
+          payload_json TEXT,
+          created_at_utc TEXT NOT NULL,
+          FOREIGN KEY (friction_id) REFERENCES friction(friction_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_friction_events_friction_id ON friction_events(friction_id);
+        CREATE INDEX IF NOT EXISTS idx_friction_events_created ON friction_events(created_at_utc);
         """
     )
     # Migrate existing gap_events tables: add audit columns if missing.
@@ -626,3 +672,393 @@ def gaps_missing_completion_on_close(conn: sqlite3.Connection) -> list[dict[str,
         "SELECT * FROM gaps WHERE status IN ('fixed', 'closed') AND completion_level IS NULL ORDER BY gap_id"
     ).fetchall()
     return [gap_from_row(r) for r in rows]
+
+
+# ── Friction: Row helpers ────────────────────────────────────────
+
+
+def friction_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    """Reconstruct a friction dict from a DB row."""
+    sources: list[str] = []
+    try:
+        sources = json.loads(row["sources_json"] or "[]")
+    except Exception:
+        sources = []
+
+    return {
+        "friction_id": row["friction_id"],
+        "fingerprint": row["fingerprint"],
+        "capability": row["capability"],
+        "expected": row["expected"],
+        "actual": row["actual"],
+        "severity": row["severity"],
+        "status": row["status"],
+        "first_seen_utc": row["first_seen_utc"],
+        "last_seen_utc": row["last_seen_utc"],
+        "updated_at_utc": row["updated_at_utc"],
+        "hit_count": int(row["hit_count"] or 1),
+        "sources": sources,
+        "matched_gap_id": row["matched_gap_id"],
+        "matched_at_utc": row["matched_at_utc"],
+        "filing_mode": row["filing_mode"],
+        "filed_gap_id": row["filed_gap_id"],
+        "filed_at_utc": row["filed_at_utc"],
+        "filed_request_path": row["filed_request_path"],
+        "closed_reason": row["closed_reason"],
+        "closed_at_utc": row["closed_at_utc"],
+        "created_at_utc": row["created_at_utc"],
+    }
+
+
+def friction_to_ndjson_entry(item: dict[str, Any]) -> dict[str, Any]:
+    """Produce the NDJSON-projection dict for a single friction item (stable key order)."""
+    ordered_keys = [
+        "friction_id", "fingerprint", "capability", "expected", "actual",
+        "severity", "status", "first_seen_utc", "last_seen_utc",
+        "updated_at_utc", "hit_count", "sources", "matched_gap_id",
+        "matched_at_utc", "filing_mode", "filed_gap_id", "filed_at_utc",
+        "filed_request_path", "closed_reason", "closed_at_utc",
+    ]
+    entry: dict[str, Any] = {}
+    for k in ordered_keys:
+        if k in item:
+            entry[k] = item[k]
+    return entry
+
+
+# ── Friction: CRUD ───────────────────────────────────────────────
+
+
+def upsert_friction(conn: sqlite3.Connection, item: dict[str, Any]) -> None:
+    """Insert or update a friction item by friction_id."""
+    friction_id = str(item.get("friction_id") or "").strip()
+    if not friction_id:
+        raise RuntimeError("friction_id required")
+
+    raw_sev = item.get("severity")
+    severity = str(raw_sev).strip().lower() if raw_sev else "medium"
+    if severity not in ("critical", "high", "medium", "low"):
+        severity = "medium"
+
+    raw_st = item.get("status")
+    status = str(raw_st).strip().lower() if raw_st else "queued"
+    if status not in ("queued", "matched", "filed", "closed"):
+        status = "queued"
+
+    now = utc_now_text()
+    existing = conn.execute(
+        "SELECT created_at_utc FROM friction WHERE friction_id = ?", (friction_id,)
+    ).fetchone()
+    created_at = existing["created_at_utc"] if existing else now
+
+    # Sources may be a list or JSON string.
+    sources = item.get("sources") or []
+    if isinstance(sources, str):
+        try:
+            sources = json.loads(sources)
+        except Exception:
+            sources = [sources]
+    sources_json = json.dumps(sources, sort_keys=True)
+
+    conn.execute(
+        """
+        INSERT INTO friction(
+          friction_id, fingerprint, capability, expected, actual,
+          severity, status, first_seen_utc, last_seen_utc, updated_at_utc,
+          hit_count, sources_json, matched_gap_id, matched_at_utc,
+          filing_mode, filed_gap_id, filed_at_utc, filed_request_path,
+          closed_reason, closed_at_utc, created_at_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(friction_id) DO UPDATE SET
+          fingerprint = excluded.fingerprint,
+          capability = excluded.capability,
+          expected = excluded.expected,
+          actual = excluded.actual,
+          severity = excluded.severity,
+          status = excluded.status,
+          first_seen_utc = excluded.first_seen_utc,
+          last_seen_utc = excluded.last_seen_utc,
+          updated_at_utc = excluded.updated_at_utc,
+          hit_count = excluded.hit_count,
+          sources_json = excluded.sources_json,
+          matched_gap_id = excluded.matched_gap_id,
+          matched_at_utc = excluded.matched_at_utc,
+          filing_mode = excluded.filing_mode,
+          filed_gap_id = excluded.filed_gap_id,
+          filed_at_utc = excluded.filed_at_utc,
+          filed_request_path = excluded.filed_request_path,
+          closed_reason = excluded.closed_reason,
+          closed_at_utc = excluded.closed_at_utc
+        """,
+        (
+            friction_id,
+            str(item.get("fingerprint") or ""),
+            str(item.get("capability") or ""),
+            str(item.get("expected") or ""),
+            str(item.get("actual") or ""),
+            severity,
+            status,
+            str(item.get("first_seen_utc") or now),
+            str(item.get("last_seen_utc") or now),
+            str(item.get("updated_at_utc") or now),
+            int(item.get("hit_count") or 1),
+            sources_json,
+            _str_or_none(item.get("matched_gap_id")),
+            _str_or_none(item.get("matched_at_utc")),
+            _str_or_none(item.get("filing_mode")),
+            _str_or_none(item.get("filed_gap_id")),
+            _str_or_none(item.get("filed_at_utc")),
+            _str_or_none(item.get("filed_request_path")),
+            _str_or_none(item.get("closed_reason")),
+            _str_or_none(item.get("closed_at_utc")),
+            created_at,
+        ),
+    )
+
+
+def get_friction(conn: sqlite3.Connection, friction_id: str) -> dict[str, Any] | None:
+    """Fetch a single friction item by friction_id."""
+    row = conn.execute(
+        "SELECT * FROM friction WHERE friction_id = ?", (friction_id,)
+    ).fetchone()
+    return friction_from_row(row) if row is not None else None
+
+
+def list_friction(conn: sqlite3.Connection, status: str | None = None) -> list[dict[str, Any]]:
+    """List all friction items, optionally filtered by status."""
+    if status:
+        rows = conn.execute(
+            "SELECT * FROM friction WHERE status = ? ORDER BY first_seen_utc",
+            (status,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM friction ORDER BY first_seen_utc"
+        ).fetchall()
+    return [friction_from_row(r) for r in rows]
+
+
+def friction_count(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("SELECT COUNT(*) AS c FROM friction").fetchone()["c"])
+
+
+def close_friction(
+    conn: sqlite3.Connection,
+    friction_id: str,
+    reason: str,
+    actor: str,
+    *,
+    run_key: str | None = None,
+    mutation_source: str = "governed",
+) -> dict[str, Any] | None:
+    """Close a friction item — sets status to closed, records reason and timestamp."""
+    item = get_friction(conn, friction_id)
+    if item is None:
+        return None
+    old_status = item.get("status", "queued")
+    now_ts = utc_now_text()
+
+    item["status"] = "closed"
+    item["closed_reason"] = reason
+    item["closed_at_utc"] = now_ts
+    item["updated_at_utc"] = now_ts
+
+    upsert_friction(conn, item)
+    insert_friction_event(
+        conn,
+        friction_id=friction_id,
+        event_type="close",
+        from_status=old_status,
+        to_status="closed",
+        reason=reason,
+        actor=actor,
+        run_key=run_key,
+        mutation_source=mutation_source,
+    )
+    return item
+
+
+def match_friction(
+    conn: sqlite3.Connection,
+    friction_id: str,
+    gap_id: str,
+    actor: str,
+    *,
+    run_key: str | None = None,
+    mutation_source: str = "governed",
+) -> dict[str, Any] | None:
+    """Link a friction item to a gap — sets status to matched."""
+    item = get_friction(conn, friction_id)
+    if item is None:
+        return None
+    old_status = item.get("status", "queued")
+    now_ts = utc_now_text()
+
+    item["status"] = "matched"
+    item["matched_gap_id"] = gap_id
+    item["matched_at_utc"] = now_ts
+    item["updated_at_utc"] = now_ts
+
+    upsert_friction(conn, item)
+    insert_friction_event(
+        conn,
+        friction_id=friction_id,
+        event_type="match",
+        from_status=old_status,
+        to_status="matched",
+        reason=f"Matched to {gap_id}",
+        actor=actor,
+        run_key=run_key,
+        mutation_source=mutation_source,
+    )
+    return item
+
+
+def friction_stats(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return counts by status and severity."""
+    status_rows = conn.execute(
+        "SELECT status, COUNT(*) AS c FROM friction GROUP BY status ORDER BY status"
+    ).fetchall()
+    severity_rows = conn.execute(
+        "SELECT severity, COUNT(*) AS c FROM friction GROUP BY severity ORDER BY severity"
+    ).fetchall()
+    total = friction_count(conn)
+
+    by_status: dict[str, int] = {}
+    for r in status_rows:
+        by_status[r["status"]] = int(r["c"])
+    by_severity: dict[str, int] = {}
+    for r in severity_rows:
+        by_severity[r["severity"]] = int(r["c"])
+
+    return {
+        "total": total,
+        "by_status": by_status,
+        "by_severity": by_severity,
+    }
+
+
+# ── Friction: Events ─────────────────────────────────────────────
+
+
+def insert_friction_event(
+    conn: sqlite3.Connection,
+    *,
+    friction_id: str,
+    event_type: str,
+    from_status: str | None = None,
+    to_status: str | None = None,
+    reason: str | None = None,
+    actor: str | None = None,
+    run_key: str | None = None,
+    mutation_source: str = "governed",
+    payload: dict[str, Any] | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO friction_events(
+          friction_id, event_type, from_status, to_status, reason,
+          actor, run_key, mutation_source, payload_json, created_at_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            friction_id,
+            event_type,
+            from_status,
+            to_status,
+            reason,
+            actor,
+            run_key,
+            mutation_source,
+            json.dumps(payload or {}, sort_keys=True),
+            utc_now_text(),
+        ),
+    )
+
+
+# ── Friction: Bootstrap (NDJSON -> SQLite) ───────────────────────
+
+
+def bootstrap_friction_from_ndjson(conn: sqlite3.Connection, ndjson_path: Path) -> int:
+    """Import friction-queue.ndjson into SQLite. Re-imports if NDJSON changed."""
+    if not ndjson_path.exists():
+        return 0
+    ndjson_text = ndjson_path.read_text(encoding="utf-8", errors="replace")
+    if not ndjson_text.strip():
+        return 0
+
+    ndjson_hash = sha256_text(ndjson_text)
+
+    count = friction_count(conn)
+    if count > 0:
+        wm_row = conn.execute(
+            "SELECT sha256 FROM gaps_projection_watermarks WHERE surface = 'friction.ndjson'"
+        ).fetchone()
+        if wm_row is not None and wm_row["sha256"] == ndjson_hash:
+            return 0  # DB and NDJSON in sync.
+        # NDJSON changed externally — re-sync from NDJSON.
+        conn.execute("DELETE FROM friction")
+        conn.execute("DELETE FROM friction_events")
+        conn.commit()
+
+    imported = 0
+    for raw_line in ndjson_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(item, dict):
+            continue
+        friction_id = str(item.get("friction_id") or "").strip()
+        if not friction_id:
+            continue
+        upsert_friction(conn, item)
+        insert_friction_event(
+            conn,
+            friction_id=friction_id,
+            event_type="bootstrap_import",
+            from_status=None,
+            to_status=str(item.get("status") or "queued"),
+            reason="Imported from friction-queue.ndjson during SQLite authority bootstrap.",
+            actor="friction.authority.bootstrap",
+            payload={"source": str(ndjson_path)},
+        )
+        imported += 1
+
+    update_watermark(conn, "friction.ndjson", ndjson_hash)
+    conn.commit()
+    return imported
+
+
+# ── Friction: Projection (SQLite -> NDJSON) ──────────────────────
+
+
+def project_friction_to_ndjson(conn: sqlite3.Connection, ndjson_path: Path) -> dict[str, Any]:
+    """Write SQLite friction rows back to NDJSON as a projection."""
+    all_items = list_friction(conn)
+    ndjson_entries = [friction_to_ndjson_entry(item) for item in all_items]
+
+    ndjson_path.parent.mkdir(parents=True, exist_ok=True)
+    with ndjson_path.open("w", encoding="utf-8") as fh:
+        for entry in ndjson_entries:
+            fh.write(json.dumps(entry, sort_keys=True))
+            fh.write("\n")
+
+    ndjson_text = ndjson_path.read_text(encoding="utf-8")
+    ndjson_hash = sha256_text(ndjson_text)
+    update_watermark(conn, "friction.ndjson", ndjson_hash)
+    conn.commit()
+
+    by_status: dict[str, int] = {}
+    for item in all_items:
+        st = item.get("status", "queued")
+        by_status[st] = by_status.get(st, 0) + 1
+
+    return {
+        "total": len(all_items),
+        "by_status": by_status,
+        "ndjson_hash": ndjson_hash,
+    }

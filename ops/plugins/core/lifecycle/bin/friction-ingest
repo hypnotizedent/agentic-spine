@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Authority: shared_authority.db -> friction table
+# NDJSON write: projection only -- remove after full migration
 from __future__ import annotations
 
 import argparse
@@ -17,6 +19,29 @@ import yaml
 ROOT = Path(__file__).resolve().parents[5]
 FRICTION_RECONCILE = ROOT / "ops/plugins/core/lifecycle/bin/friction-reconcile"
 VALID_SEVERITIES = {"low", "medium", "high", "critical"}
+
+# ── SQLite authority (conditional) ────────────────────────────────
+# The parallel worker adds friction functions to gaps_sql_authority.py.
+# Gracefully degrade to NDJSON-only when unavailable.
+sys.path.insert(0, str(ROOT / "ops/plugins/core/lifecycle/lib"))
+try:
+    from gaps_sql_authority import (
+        resolve_paths as _gsa_resolve_paths,
+        connect as _gsa_connect,
+        ensure_schema as _gsa_ensure_schema,
+        utc_now_text as _gsa_utc_now_text,
+    )
+    # Friction-specific functions (added by parallel worker)
+    from gaps_sql_authority import (
+        ensure_friction_schema,
+        upsert_friction,
+        get_friction_by_fingerprint,
+        friction_count,
+        fetch_all_friction,
+    )
+    SQLITE_AVAILABLE = True
+except ImportError:
+    SQLITE_AVAILABLE = False
 
 
 def default_state_root() -> Path:
@@ -128,6 +153,37 @@ def queue_lock(path: Path):
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
+def _sqlite_conn():
+    """Open and return a ready SQLite connection, or None if unavailable."""
+    if not SQLITE_AVAILABLE:
+        return None
+    try:
+        db_path, _ = _gsa_resolve_paths(ROOT)
+        conn = _gsa_connect(db_path)
+        _gsa_ensure_schema(conn)
+        ensure_friction_schema(conn)
+        return conn
+    except Exception:
+        return None
+
+
+def _sqlite_bootstrap_from_ndjson(conn, queue_path: Path) -> int:
+    """One-time bootstrap: load NDJSON rows into SQLite when friction table is empty."""
+    if not conn or not queue_path.exists():
+        return 0
+    if friction_count(conn) > 0:
+        return 0
+    rows = load_queue(queue_path)
+    if not rows:
+        return 0
+    imported = 0
+    for row in rows:
+        upsert_friction(conn, row)
+        imported += 1
+    conn.commit()
+    return imported
+
+
 def parse_items(args: argparse.Namespace) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
 
@@ -214,6 +270,11 @@ def main() -> int:
     now_iso = utc_iso(now)
     window = timedelta(days=max(0, args.dedupe_window_days))
 
+    # Open SQLite if available — used for dedup checks and primary writes.
+    sqlite_conn = _sqlite_conn()
+    if sqlite_conn:
+        _sqlite_bootstrap_from_ndjson(sqlite_conn, queue_path)
+
     with queue_lock(lock_path):
         queue = load_queue(queue_path)
 
@@ -225,45 +286,82 @@ def main() -> int:
             item = normalize_item(item_raw, args.source)
             ingested += 1
 
-            match_idx = -1
-            for idx, existing in enumerate(queue):
-                if str(existing.get("fingerprint", "")) != item["fingerprint"]:
-                    continue
-                seen = parse_utc(existing.get("last_seen_utc") or existing.get("first_seen_utc"))
-                if seen is None or (now - seen) <= window:
-                    match_idx = idx
-                    break
+            # ── Dedup check: SQLite-first, NDJSON fallback ──
+            matched_sqlite = False
+            if sqlite_conn:
+                existing_row = get_friction_by_fingerprint(sqlite_conn, item["fingerprint"])
+                if existing_row:
+                    seen = parse_utc(existing_row.get("last_seen_utc") or existing_row.get("first_seen_utc"))
+                    if seen is None or (now - seen) <= window:
+                        # Update existing SQLite row
+                        existing_row["last_seen_utc"] = now_iso
+                        existing_row["hit_count"] = int(existing_row.get("hit_count", 0) or 0) + 1
+                        ensure_sources(existing_row, item["source"], now_iso)
+                        upsert_friction(sqlite_conn, existing_row)
+                        matched_sqlite = True
+                        deduped += 1
 
-            if match_idx >= 0:
-                entry = queue[match_idx]
-                entry["last_seen_utc"] = now_iso
-                entry["hit_count"] = int(entry.get("hit_count", 0) or 0) + 1
-                ensure_sources(entry, item["source"], now_iso)
-                deduped += 1
+            if matched_sqlite:
+                # Also update NDJSON projection for backward compat
+                for idx, existing in enumerate(queue):
+                    if str(existing.get("fingerprint", "")) == item["fingerprint"]:
+                        existing["last_seen_utc"] = now_iso
+                        existing["hit_count"] = int(existing.get("hit_count", 0) or 0) + 1
+                        ensure_sources(existing, item["source"], now_iso)
+                        break
                 continue
 
+            # NDJSON-only dedup fallback (when SQLite unavailable)
+            if not sqlite_conn:
+                match_idx = -1
+                for idx, existing in enumerate(queue):
+                    if str(existing.get("fingerprint", "")) != item["fingerprint"]:
+                        continue
+                    seen = parse_utc(existing.get("last_seen_utc") or existing.get("first_seen_utc"))
+                    if seen is None or (now - seen) <= window:
+                        match_idx = idx
+                        break
+
+                if match_idx >= 0:
+                    entry = queue[match_idx]
+                    entry["last_seen_utc"] = now_iso
+                    entry["hit_count"] = int(entry.get("hit_count", 0) or 0) + 1
+                    ensure_sources(entry, item["source"], now_iso)
+                    deduped += 1
+                    continue
+
+            # ── New friction item ──
             friction_id = f"FR-{now.strftime('%Y%m%dT%H%M%SZ')}-{(created + 1):04d}"
-            queue.append(
-                {
-                    "friction_id": friction_id,
-                    "fingerprint": item["fingerprint"],
-                    "capability": item["capability"],
-                    "expected": item["expected"],
-                    "actual": item["actual"],
-                    "severity": item["severity"],
-                    "status": "queued",
-                    "first_seen_utc": now_iso,
-                    "last_seen_utc": now_iso,
-                    "updated_at_utc": now_iso,
-                    "hit_count": 1,
-                    "sources": [item["source"]],
-                    "matched_gap_id": None,
-                    "filed_gap_id": None,
-                }
-            )
+            new_entry = {
+                "friction_id": friction_id,
+                "fingerprint": item["fingerprint"],
+                "capability": item["capability"],
+                "expected": item["expected"],
+                "actual": item["actual"],
+                "severity": item["severity"],
+                "status": "queued",
+                "first_seen_utc": now_iso,
+                "last_seen_utc": now_iso,
+                "updated_at_utc": now_iso,
+                "hit_count": 1,
+                "sources": [item["source"]],
+                "matched_gap_id": None,
+                "filed_gap_id": None,
+            }
+
+            # Primary write: SQLite
+            if sqlite_conn:
+                upsert_friction(sqlite_conn, new_entry)
+
+            # Projection write: NDJSON (backward compat)
+            queue.append(new_entry)
             created += 1
 
+        if sqlite_conn:
+            sqlite_conn.commit()
+
         queue.sort(key=lambda r: str(r.get("first_seen_utc", "")))
+        # NDJSON write: projection only -- remove after full migration
         write_queue(queue_path, queue)
 
     loop_id = normalize_space(str(args.loop_id or os.environ.get("SPINE_LOOP_ID", "")))
@@ -299,9 +397,14 @@ def main() -> int:
             except json.JSONDecodeError:
                 reconcile_payload = {"raw_output": out}
 
+    authority = "sqlite" if sqlite_conn else "ndjson"
+    if sqlite_conn:
+        sqlite_conn.close()
+
     payload = {
         "capability": "friction.ingest",
         "status": "ok",
+        "authority": authority,
         "queue": str(queue_path),
         "ingested": ingested,
         "created": created,
@@ -316,6 +419,7 @@ def main() -> int:
         print(json.dumps(payload, indent=2))
     else:
         print("friction.ingest")
+        print(f"authority: {authority}")
         print("status: ok")
         print(f"queue: {queue_path}")
         print(f"ingested: {ingested}")

@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+# Authority: shared_authority.db -> friction table
+# NDJSON write: projection only -- remove after full migration
+"""Close friction items whose linked gap has been resolved.
+
+For each filed friction item with a filed_gap_id, checks if that gap is now
+closed/fixed in SQLite. If so, closes the friction item with
+closed_reason=gap_resolved.
+
+Usage:
+  friction-close-resolved [--dry-run] [--json]
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import sys
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[5]
+
+# ── SQLite authority (conditional) ────────────────────────────────
+sys.path.insert(0, str(ROOT / "ops/plugins/core/lifecycle/lib"))
+try:
+    from gaps_sql_authority import (
+        resolve_paths as _gsa_resolve_paths,
+        connect as _gsa_connect,
+        ensure_schema as _gsa_ensure_schema,
+        get_gap as _gsa_get_gap,
+    )
+    from gaps_sql_authority import (
+        ensure_friction_schema,
+        upsert_friction,
+        fetch_friction_by_status,
+        fetch_all_friction,
+    )
+    SQLITE_AVAILABLE = True
+except ImportError:
+    SQLITE_AVAILABLE = False
+
+GAP_CLOSED_STATUSES = frozenset({"fixed", "closed", "archived"})
+
+
+def default_state_root() -> Path:
+    override = os.environ.get("SPINE_STATE", "").strip()
+    if override:
+        return Path(override).expanduser()
+    contract = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
+    if contract.exists():
+        try:
+            doc = yaml.safe_load(contract.read_text(encoding="utf-8")) or {}
+            runtime_root_raw = str(doc.get("runtime_root") or "").strip()
+            if runtime_root_raw:
+                runtime_root = Path(os.path.expanduser(runtime_root_raw))
+                if not runtime_root.is_absolute():
+                    runtime_root = (ROOT / runtime_root).resolve()
+                return runtime_root / "state"
+        except Exception:
+            pass
+    return (ROOT.parent / ".runtime/spine/state").resolve()
+
+
+DEFAULT_STATE_ROOT = default_state_root()
+DEFAULT_QUEUE = DEFAULT_STATE_ROOT / "friction-queue.ndjson"
+DEFAULT_LOCK = DEFAULT_STATE_ROOT / "locks/friction-queue.lock"
+
+
+def utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_queue(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            rows.append(obj)
+    return rows
+
+
+def write_queue(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, sort_keys=True))
+            fh.write("\n")
+
+
+@contextmanager
+def queue_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _sqlite_conn():
+    """Open and return a ready SQLite connection, or None."""
+    if not SQLITE_AVAILABLE:
+        return None
+    try:
+        db_path, _ = _gsa_resolve_paths(ROOT)
+        conn = _gsa_connect(db_path)
+        _gsa_ensure_schema(conn)
+        ensure_friction_schema(conn)
+        return conn
+    except Exception:
+        return None
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Close friction items whose linked gap has been resolved")
+    ap.add_argument("--queue", default=str(DEFAULT_QUEUE))
+    ap.add_argument("--lock-file", default=str(DEFAULT_LOCK))
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    queue_path = Path(args.queue).expanduser()
+    lock_path = Path(args.lock_file).expanduser()
+    now = utc_iso()
+
+    conn = _sqlite_conn()
+
+    closed_count = 0
+    checked_count = 0
+    already_closed = 0
+    no_gap_id = 0
+    details: list[dict[str, str]] = []
+
+    with queue_lock(lock_path):
+        rows = load_queue(queue_path)
+
+        # Collect filed items from SQLite or NDJSON
+        if conn:
+            try:
+                filed_items = fetch_friction_by_status(conn, "filed")
+            except Exception:
+                filed_items = [r for r in rows if str(r.get("status", "")).strip().lower() == "filed"]
+        else:
+            filed_items = [r for r in rows if str(r.get("status", "")).strip().lower() == "filed"]
+
+        for item in filed_items:
+            friction_id = str(item.get("friction_id", "")).strip()
+            gap_id = str(item.get("filed_gap_id", "") or "").strip()
+
+            if not gap_id:
+                no_gap_id += 1
+                continue
+
+            checked_count += 1
+
+            # Check gap status in SQLite
+            gap_closed = False
+            if conn:
+                try:
+                    gap = _gsa_get_gap(conn, gap_id)
+                    if gap and str(gap.get("status", "")).strip().lower() in GAP_CLOSED_STATUSES:
+                        gap_closed = True
+                except Exception:
+                    pass
+
+            if not gap_closed:
+                continue
+
+            # Close this friction item
+            if not args.dry_run:
+                item["status"] = "closed"
+                item["closed_reason"] = "gap_resolved"
+                item["closed_at_utc"] = now
+                item["updated_at_utc"] = now
+
+                # Write to SQLite
+                if conn:
+                    upsert_friction(conn, item)
+
+                # Update NDJSON projection
+                fp = str(item.get("fingerprint", "")).strip()
+                for ndjson_row in rows:
+                    if str(ndjson_row.get("fingerprint", "")).strip() == fp:
+                        ndjson_row["status"] = "closed"
+                        ndjson_row["closed_reason"] = "gap_resolved"
+                        ndjson_row["closed_at_utc"] = now
+                        ndjson_row["updated_at_utc"] = now
+                        break
+
+            closed_count += 1
+            details.append({
+                "friction_id": friction_id,
+                "gap_id": gap_id,
+                "action": "closed",
+            })
+
+        if conn and not args.dry_run:
+            conn.commit()
+
+        if not args.dry_run:
+            # NDJSON write: projection only -- remove after full migration
+            write_queue(queue_path, rows)
+
+    if conn:
+        conn.close()
+
+    authority = "sqlite" if SQLITE_AVAILABLE and conn is not None else "ndjson"
+
+    payload = {
+        "capability": "friction.close.resolved",
+        "status": "ok",
+        "authority": authority,
+        "closed": closed_count,
+        "checked": checked_count,
+        "no_gap_id": no_gap_id,
+        "dry_run": args.dry_run,
+        "details": details,
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print("friction.close.resolved")
+        print(f"authority: {authority}")
+        print("status: ok")
+        print(f"closed: {closed_count}")
+        print(f"checked: {checked_count}")
+        print(f"no_gap_id: {no_gap_id}")
+        if args.dry_run:
+            print("dry_run: true")
+        for d in details:
+            print(f"  {d['friction_id']}: {d['action']} (gap: {d['gap_id']})")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

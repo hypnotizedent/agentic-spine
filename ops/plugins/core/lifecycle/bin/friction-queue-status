@@ -1,15 +1,49 @@
 #!/usr/bin/env python3
+# Authority: shared_authority.db -> friction table
+# NDJSON read: fallback only -- remove after full migration
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import yaml
 
 ROOT = Path(__file__).resolve().parents[5]
+
+# ── SQLite authority (conditional) ────────────────────────────────
+sys.path.insert(0, str(ROOT / "ops/plugins/core/lifecycle/lib"))
+try:
+    from gaps_sql_authority import (
+        resolve_paths as _gsa_resolve_paths,
+        connect as _gsa_connect,
+        ensure_schema as _gsa_ensure_schema,
+    )
+    from gaps_sql_authority import (
+        ensure_friction_schema,
+        friction_stats,
+        fetch_all_friction,
+    )
+    SQLITE_AVAILABLE = True
+except ImportError:
+    SQLITE_AVAILABLE = False
+
+
+def _sqlite_conn():
+    """Open and return a ready SQLite connection, or None if unavailable."""
+    if not SQLITE_AVAILABLE:
+        return None
+    try:
+        db_path, _ = _gsa_resolve_paths(ROOT)
+        conn = _gsa_connect(db_path)
+        _gsa_ensure_schema(conn)
+        ensure_friction_schema(conn)
+        return conn
+    except Exception:
+        return None
 
 
 def default_state_root() -> Path:
@@ -60,29 +94,17 @@ def load_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Summarize friction queue counters")
-    ap.add_argument("--queue", default=str(DEFAULT_QUEUE))
-    ap.add_argument("--stale-hours", type=int, default=24)
-    ap.add_argument("--json", action="store_true")
-    ap.add_argument("--check", action="store_true", help="Verify invariant: total == queued + filed + matched")
-    args = ap.parse_args()
-
-    now = datetime.now(timezone.utc)
-    queue = Path(args.queue).expanduser()
-    rows = load_rows(queue)
-
-    # Count from live NDJSON rows — no caching, no stale state.
+def _count_from_rows(rows: list[dict[str, Any]], stale_hours: int, now: datetime) -> dict[str, Any]:
+    """Compute status counters from a list of friction item dicts."""
     queued = 0
     stale = 0
     filed = 0
     matched = 0
+    closed = 0
     unknown_status = 0
     invalid_time = 0
     total_hits = 0
     dedupe_hits = 0
-
-    # Track per-status counts for invariant check
     status_counts: dict[str, int] = {}
 
     for row in rows:
@@ -97,6 +119,8 @@ def main() -> int:
             filed += 1
         elif status == "matched":
             matched += 1
+        elif status == "closed":
+            closed += 1
         elif status == "queued":
             queued += 1
             first_seen = parse_utc(row.get("first_seen_utc"))
@@ -104,7 +128,7 @@ def main() -> int:
                 invalid_time += 1
                 continue
             age_h = (now - first_seen).total_seconds() / 3600
-            if age_h > max(0, args.stale_hours):
+            if age_h > max(0, stale_hours):
                 stale += 1
         else:
             unknown_status += 1
@@ -114,23 +138,72 @@ def main() -> int:
     if total_hits > 0:
         dedupe_rate = round(dedupe_hits / total_hits, 4)
 
-    # Invariant: total must equal sum of categorized counts
-    categorized = queued + filed + matched
-    invariant_ok = categorized == len(rows)
+    categorized = queued + filed + matched + closed
+    return {
+        "total": len(rows),
+        "queued": queued,
+        "stale": stale,
+        "filed": filed,
+        "matched": matched,
+        "closed": closed,
+        "unknown_status": unknown_status,
+        "invalid_time": invalid_time,
+        "dedupe_rate": dedupe_rate,
+        "invariant_ok": categorized == len(rows),
+        "status_counts": status_counts,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Summarize friction queue counters")
+    ap.add_argument("--queue", default=str(DEFAULT_QUEUE))
+    ap.add_argument("--stale-hours", type=int, default=24)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--check", action="store_true", help="Verify invariant: total == queued + filed + matched + closed")
+    args = ap.parse_args()
+
+    now = datetime.now(timezone.utc)
+    queue = Path(args.queue).expanduser()
+
+    # ── Read from SQLite if available, NDJSON fallback ──
+    sqlite_conn = _sqlite_conn()
+    authority = "ndjson"
+
+    if sqlite_conn:
+        try:
+            stats = friction_stats(sqlite_conn)
+            authority = "sqlite"
+            # friction_stats returns a dict with the counters we need.
+            # Supplement with stale detection from full row data.
+            all_rows = fetch_all_friction(sqlite_conn)
+            summary = _count_from_rows(all_rows, args.stale_hours, now)
+            sqlite_conn.close()
+        except Exception:
+            # Friction functions may not be complete yet; fall back to NDJSON.
+            sqlite_conn.close()
+            sqlite_conn = None
+
+    if not sqlite_conn and authority == "ndjson":
+        rows = load_rows(queue)
+        summary = _count_from_rows(rows, args.stale_hours, now)
+
+    invariant_ok = summary["invariant_ok"]
 
     payload = {
         "capability": "friction.queue.status",
         "status": "ok" if invariant_ok else "invariant_violation",
+        "authority": authority,
         "queue": str(queue),
         "summary": {
-            "total": len(rows),
-            "queued": queued,
-            "stale": stale,
-            "filed": filed,
-            "matched": matched,
-            "unknown_status": unknown_status,
-            "invalid_time": invalid_time,
-            "dedupe_rate": dedupe_rate,
+            "total": summary["total"],
+            "queued": summary["queued"],
+            "stale": summary["stale"],
+            "filed": summary["filed"],
+            "matched": summary["matched"],
+            "closed": summary["closed"],
+            "unknown_status": summary["unknown_status"],
+            "invalid_time": summary["invalid_time"],
+            "dedupe_rate": summary["dedupe_rate"],
             "invariant_ok": invariant_ok,
         },
     }
@@ -138,25 +211,26 @@ def main() -> int:
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
-        summary = payload["summary"]
+        s = payload["summary"]
         print("friction.queue.status")
+        print(f"authority: {authority}")
         print(f"status: {payload['status']}")
         print(f"queue: {queue}")
         print(
             "summary: "
-            f"total={summary['total']} queued={summary['queued']} stale={summary['stale']} "
-            f"filed={summary['filed']} matched={summary['matched']} dedupe_rate={summary['dedupe_rate']}"
+            f"total={s['total']} queued={s['queued']} stale={s['stale']} "
+            f"filed={s['filed']} matched={s['matched']} closed={s['closed']} dedupe_rate={s['dedupe_rate']}"
         )
         if not invariant_ok:
-            print(f"INVARIANT VIOLATION: total={len(rows)} != queued({queued})+filed({filed})+matched({matched})={categorized}")
-            print(f"raw_status_counts: {json.dumps(status_counts)}")
+            print(f"INVARIANT VIOLATION: total={s['total']} != categorized={s['queued']+s['filed']+s['matched']+s['closed']}")
+            print(f"raw_status_counts: {json.dumps(summary['status_counts'])}")
 
     if args.check:
         if invariant_ok:
             print("CHECK PASS: friction queue counters are self-consistent")
             return 0
         else:
-            print(f"CHECK FAIL: invariant violation — total={len(rows)} categorized={categorized}")
+            print(f"CHECK FAIL: invariant violation -- total={summary['total']} categorized={summary['queued']+summary['filed']+summary['matched']+summary['closed']}")
             return 1
 
     return 0
