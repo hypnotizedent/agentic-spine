@@ -82,7 +82,7 @@ spine_runtime_prepare_launcher_control_worktree() {
     return 0
   }
 
-  [[ -n "$control_branch" ]] || control_branch="runtime/control-plane"
+  [[ -n "$control_branch" ]] || control_branch="$main_branch"
   [[ -n "$control_base_ref" ]] || control_base_ref="origin/${main_branch}"
 
   if [[ "$control_path" == "$control_root" ]]; then

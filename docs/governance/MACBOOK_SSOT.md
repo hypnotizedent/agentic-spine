@@ -1,8 +1,8 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-11
-verification_method: live-workstation-config + spine/workbench launcher audit
+last_verified: 2026-03-23
+verification_method: governed launcher contract + worktree lifecycle audit
 scope: macbook-control-plane
 ---
 
@@ -22,7 +22,7 @@ Authority boundary:
 | Canonical name | `macbook` |
 | Tailscale IP | `100.85.186.7` |
 | Role | Mobile workstation and spine control-plane entry host |
-| Canonical launcher entry | `spine-ops terminal launch ...` (resolves control-plane first, then mutable root) |
+| Canonical launcher entry | `spine-ops terminal launch ...` (resolves the governed launcher root from `worktree.lifecycle.contract.yaml`) |
 | Stable operator shim | `~/.local/bin/spine-ops` → `~/code/workbench/scripts/bin/spine-ops` |
 | Canonical watcher label | `com.ronny.agent-inbox` |
 | Managed configs owner | `/Users/ronnyworks/code/workbench/dotfiles/macbook` |
@@ -57,15 +57,17 @@ Direct ad hoc launcher hotkeys are retired.
 
 ## Operator Entrypoint Resolution
 
-All operator entry surfaces resolve the spine ops binary through a stable entrypoint
-that prefers the clean control-plane worktree (`~/.wt/agentic-spine/control-plane`)
-and falls back to the mutable checkout (`~/code/agentic-spine`) only when the
-control-plane is unavailable.
+All operator entry surfaces resolve the spine ops binary through the governed
+launcher contract. The canonical model no longer depends on a permanent
+`~/.wt/agentic-spine/control-plane` checkout.
 
 Resolution order (same in all surfaces):
 1. `$SPINE_ROOT/bin/ops` — explicit override
-2. `~/.wt/agentic-spine/control-plane/bin/ops` — clean worktree (preferred)
-3. `~/code/agentic-spine/bin/ops` — mutable checkout (fallback)
+2. `~/code/agentic-spine/bin/ops` — canonical control root
+
+If the launcher contract needs an isolated worktree for a governed lane, it
+creates one through the lifecycle policy instead of relying on a permanent
+named control-plane checkout.
 
 Implementations:
 - **Hammerspoon**: `resolveSpineRoot()` in `~/.hammerspoon/init.lua`
@@ -75,7 +77,7 @@ Implementations:
 ## Raycast Surfaces
 
 All active Raycast launcher surfaces resolve through `workbench_spine_ops_bin()`
-which prefers the control-plane worktree. Workbench wrappers are compatibility
+using the governed launcher root contract. Workbench wrappers are compatibility
 edges, not the source of launcher policy.
 
 <!-- BEGIN AUTO RAYCAST -->

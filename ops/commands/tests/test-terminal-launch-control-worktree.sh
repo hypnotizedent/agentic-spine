@@ -28,7 +28,7 @@ TMPDIR_BASE="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BASE"' EXIT
 
 FAKE_ROOT="$TMPDIR_BASE/agentic-spine"
-CONTROL_WT="$TMPDIR_BASE/.wt/agentic-spine/control-plane"
+CONTROL_WT="$TMPDIR_BASE/.wt/agentic-spine/launcher-main"
 WORKBENCH="$TMPDIR_BASE/workbench"
 SESSION_ENV="$TMPDIR_BASE/session-env.sh"
 ATTACH_LOG="$TMPDIR_BASE/attach.log"
@@ -117,7 +117,7 @@ policy:
   managed_worktree_paths:
     - "$CONTROL_WT"
   launcher_control_worktree_path: "$CONTROL_WT"
-  launcher_control_worktree_branch: "runtime/control-plane"
+  launcher_control_worktree_branch: "main"
   launcher_control_worktree_base_ref: "main"
 YAML
 
@@ -252,11 +252,10 @@ else
 fi
 
 assert_contains "$exec_out" "spine_root=$CONTROL_WT" "terminal-launch-exec resolves control worktree as spine root"
-assert_contains "$exec_out" "session_start=$CONTROL_WT/ops/plugins/core/session/bin/session-start" "terminal-launch-exec uses control worktree session-start"
 assert_contains "$exec_out" "launch_cwd=$CONTROL_WT" "terminal-launch-exec launches from control worktree"
-assert_contains "$exec_out" "session_start_target_repo=$CONTROL_WT" "terminal-launch-exec pins session-start target repo to control worktree"
-assert_contains "$exec_out" "session_start_repo=$CONTROL_WT" "terminal-launch-exec pins session-start repo to control worktree"
-assert_contains "$exec_out" "session_start_code=$CONTROL_WT" "terminal-launch-exec pins session-start control root to control worktree"
+assert_contains "$exec_out" "spine_target_repo=$CONTROL_WT" "terminal-launch-exec pins target repo to control worktree"
+assert_contains "$exec_out" "spine_worktree=$CONTROL_WT" "terminal-launch-exec pins worktree to control worktree"
+assert_contains "$exec_out" "command=$CONTROL_WT/bin/ops cap run verify.core.run" "terminal-launch-exec invokes ops from control worktree"
 assert_contains "$exec_out" "V3 ATTACH READY: loop=none resolution=adhoc path=/tmp/test.entry.packet.yaml hash=test-packet-hash mode=code sanitize=none" "terminal-launch-exec announces V3 attach state"
 assert_contains "$(cat "$ATTACH_LOG")" "--allow-no-loop --role solo" "terminal-launch-exec routes through session-v3-attach"
 
