@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-22
+last_verified: 2026-03-23
 scope: spine-minimal-operating-contract
 ---
 
@@ -26,6 +26,34 @@ OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "..."
 # Push on main (intentional only)
 OPS_GOVERNED_MAIN_OVERRIDE=1 git push origin main
 ```
+
+## V3 Operating Model (2026-03-23)
+
+### Rule 1: Controller Lane
+One controller terminal operates on `main`. The controller owns all shared authority surface mutations, loop lifecycle transitions, closeout propagation, worktree creation/pruning, and landing of worker branches. No other terminal may mutate shared authority surfaces directly.
+
+The controller may use a governed worktree for large structural slices, then land back to `main`. The constraint is one owner, one integration lane, no parallel hotspot mutation.
+
+### Rule 2: Worker Scope
+Workers execute in worktrees or on remote systems with a declared, disjoint write scope. Workers must not touch shared hotspot surfaces. If a worker needs a hotspot mutation, it files a request back to the controller. Workers may be terminated or parked without data loss.
+
+### Rule 3: Active WIP Cap
+**Maximum 5 active loops.** When above cap: close, supersede, defer, or consolidate. "Open because nobody decided" is a policy violation. Planned loops older than 14 days without activity must be triaged.
+
+### Rule 4: Shared Authority Hotspots (Controller-Only)
+| Surface | Rule |
+|---------|------|
+| `ops/bindings/operational.gaps.yaml` | Controller-only. Future: migrate to SQLite. |
+| Loop scope files | Controller owns lifecycle transitions. Workers may update own loop's `next_action` only. |
+| `friction-queue.ndjson` | Controller-only. Workers use `friction.ingest`. |
+| `gate-id-reservations.yaml` | Controller-only. |
+| `path.claims.yaml` | Controller-only. |
+
+### Rule 5: Closure
+Work is done when runtime, control plane, bindings/projections, and residue all agree. Missing propagation must fail loudly (gate failure, verify failure, session attach block) instead of relying on operator memory.
+
+### Rule 6: Boring Lane
+`session.v3.attach` is the only entry. Main must be boring: 0 dirty, 0 untracked in governed paths, 0 stashes from other sessions, 0 ahead/behind. If not boring: stop, fix, then work.
 
 ## Execution Lane Bootstrap (Phase 2)
 
