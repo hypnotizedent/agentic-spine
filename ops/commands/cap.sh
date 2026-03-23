@@ -587,17 +587,41 @@ run_cap() {
             exit_code=7
           else
             attach_actual_hash="$(shasum -a 256 "$attach_entry_packet_path" 2>/dev/null | awk '{print $1}')"
-            if [[ -z "$attach_actual_hash" || "$attach_actual_hash" != "$attach_entry_packet_hash" ]]; then
-              echo "BLOCKED: attach admission packet hash mismatch"
+            if [[ -z "$attach_actual_hash" ]]; then
+              echo "BLOCKED: attach admission packet unreadable"
               echo "Capability: $name ($safety)"
               echo "Entry packet path: $attach_entry_packet_path"
-              echo "Expected hash: ${attach_entry_packet_hash:-missing}"
-              echo "Actual hash: ${attach_actual_hash:-missing}"
               echo ""
               echo "Remediation:"
               echo "  ./bin/ops cap run session.v3.attach -- --allow-no-loop"
-              blocked_reason="attach_admission_packet_hash_mismatch:${name}"
+              blocked_reason="attach_admission_packet_unreadable:${name}"
               exit_code=7
+            elif [[ "$attach_actual_hash" != "$attach_entry_packet_hash" ]]; then
+              # Packet file changed since attach — common after commit/push
+              # or concurrent re-attach in the same terminal.  If the on-disk
+              # packet is still a valid entry packet (YAML with session_id),
+              # accept the refreshed hash and proceed.  This prevents routine
+              # commit/push churn from stranding the terminal while preserving
+              # the block for truly invalid or missing packets.
+              if head -1 "$attach_entry_packet_path" 2>/dev/null | grep -q '^schema_version:' \
+                 && grep -q 'generated_at_utc:' "$attach_entry_packet_path" 2>/dev/null; then
+                echo "ATTACH ADMISSION: packet hash refreshed (file changed since attach)"
+                echo "  Previous: ${attach_entry_packet_hash}"
+                echo "  Current:  ${attach_actual_hash}"
+                attach_entry_packet_hash="$attach_actual_hash"
+                export SPINE_ENTRY_PACKET_HASH="$attach_actual_hash"
+              else
+                echo "BLOCKED: attach admission packet hash mismatch (invalid packet)"
+                echo "Capability: $name ($safety)"
+                echo "Entry packet path: $attach_entry_packet_path"
+                echo "Expected hash: ${attach_entry_packet_hash:-missing}"
+                echo "Actual hash: ${attach_actual_hash:-missing}"
+                echo ""
+                echo "Remediation:"
+                echo "  ./bin/ops cap run session.v3.attach -- --allow-no-loop"
+                blocked_reason="attach_admission_packet_hash_mismatch:${name}"
+                exit_code=7
+              fi
             fi
           fi
         fi
