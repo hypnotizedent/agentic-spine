@@ -754,6 +754,32 @@ class TaskWorker:
             env=self.runtime_env,
         )
 
+    def _collect_wave_mailroom(self, task: dict[str, Any], task_id: str) -> None:
+        payload = parse_payload(task.get("payload"))
+        wave_id = _first_non_empty(task.get("wave_id"), payload.get("wave_id"))
+        dispatch_transport = _first_non_empty(task.get("dispatch_transport"), payload.get("dispatch_transport"))
+        execution_mode = _first_non_empty(task.get("execution_mode"), payload.get("execution_mode"))
+        if not wave_id:
+            return
+        if dispatch_transport != "mailroom" and execution_mode != "operational":
+            return
+
+        run = run_ops_cap(
+            "orchestration.wave.collect",
+            [wave_id],
+            confirm=False,
+            timeout=600,
+            env=self.runtime_env,
+        )
+        if run["ok"]:
+            detail = f"wave_id={wave_id}"
+            if run.get("run_key"):
+                detail += f" run_key={run['run_key']}"
+            self.log(f"task {task_id}: reconciled mailroom wave collect {detail}")
+        else:
+            reason = run.get("stderr") or run.get("output") or f"rc={run.get('exit_code', 1)}"
+            self.log(f"task {task_id}: mailroom wave collect failed wave_id={wave_id} reason={safe_reason(reason)}")
+
     def _execute_capability_task(self, task_id: str, task: dict[str, Any]) -> tuple[bool, str]:
         capability, cap_args, payload_confirm = self._extract_capability_request(task)
         if not capability:
@@ -880,10 +906,12 @@ class TaskWorker:
 
             if ok_exec:
                 self._complete(task_id, detail)
+                self._collect_wave_mailroom(task, task_id)
                 completed += 1
                 self.log(f"task {task_id}: completed {detail}")
             else:
                 self._fail(task_id, detail)
+                self._collect_wave_mailroom(task, task_id)
                 failed += 1
                 self.log(f"task {task_id}: failed {safe_reason(detail)}")
 

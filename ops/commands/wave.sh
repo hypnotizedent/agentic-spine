@@ -1486,6 +1486,297 @@ print(f"dispatch pushability preflight: PASS repo={repo} branch={branch} remote=
 PYPUSHGATE
 }
 
+_dispatch_operational_mailroom() {
+  local sf="${1:?state file required}"
+  local lane="${2:?lane required}"
+  local task="${3:?task required}"
+  local from_role="${4:-}"
+  local to_role="${5:-}"
+  local transition_gate="${6:-}"
+  local input_refs_json="${7:-}"
+  local output_refs_json="${8:-}"
+  local enqueue_script
+  enqueue_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/plugins/infra/mailroom-bridge/bin/mailroom-task-enqueue"
+
+  [[ -n "$input_refs_json" ]] || input_refs_json='{}'
+  [[ -n "$output_refs_json" ]] || output_refs_json='{}'
+
+  [[ -x "$enqueue_script" ]] || {
+    echo "FAIL: operational dispatch requires mailroom-task-enqueue at $enqueue_script" >&2
+    exit 1
+  }
+
+  local dispatch_ctx_json=""
+  dispatch_ctx_json="$(python3 - "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json" <<'PYMAILROOMCTX'
+import json
+import re
+import sys
+
+sf = sys.argv[1]
+lane = sys.argv[2]
+task = sys.argv[3]
+from_role = sys.argv[4] if len(sys.argv) > 4 else ""
+to_role = sys.argv[5] if len(sys.argv) > 5 else ""
+transition_gate = sys.argv[6] if len(sys.argv) > 6 else ""
+input_refs = json.loads(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] else {}
+expected_output_refs = json.loads(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8] else {}
+
+with open(sf, "r", encoding="utf-8") as f:
+    state = json.load(f)
+
+packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+wave_id = str(state.get("wave_id") or packet.get("wave_id") or "").strip()
+loop_id = str(packet.get("loop_id") or "").strip()
+owner_terminal = str(packet.get("owner_terminal") or "").strip()
+execution_mode = str(packet.get("execution_mode") or "code").strip() or "code"
+transport = str(packet.get("transport") or "git").strip() or "git"
+horizon = str(packet.get("horizon") or "").strip()
+execution_readiness = str(packet.get("execution_readiness") or "").strip()
+
+def derive_route_input(*parts: str) -> str:
+    corpus = " ".join(str(x or "") for x in parts).lower()
+    matchers = [
+        ("finance", r"\bfinance|firefly|paperless|tax|budget|transaction\b"),
+        ("identity", r"\bidentity|email|calendar|graph|outlook|office 365|microsoft\b"),
+        ("automation", r"\bautomation|workflow|n8n|webhook|cron\b"),
+        ("home-automation", r"\bhome assistant|hass|zigbee|z-wave|smart-home\b"),
+        ("photos", r"\bimmich|photo|asset|album\b"),
+        ("mint", r"\bmint|artwork|quote|intake|pricing|shipping|suppliers\b"),
+        ("media", r"\bmedia|jellyfin|radarr|sonarr|sabnzbd|navidrome\b"),
+    ]
+    for route_input, pattern in matchers:
+        if re.search(pattern, corpus):
+            return route_input
+    return "automation"
+
+route_input = derive_route_input(
+    lane,
+    task,
+    loop_id,
+    from_role,
+    to_role,
+    " ".join(str(v) for v in input_refs.values()),
+    " ".join(str(v) for v in expected_output_refs.values()),
+)
+
+payload = {
+    "wave_id": wave_id,
+    "loop_id": loop_id,
+    "lane": lane,
+    "task": task,
+    "owner_terminal": owner_terminal,
+    "from_role": from_role,
+    "to_role": to_role,
+    "transition_gate": transition_gate,
+    "input_refs": input_refs,
+    "expected_output_refs": expected_output_refs,
+    "execution_mode": execution_mode,
+    "transport": transport,
+    "horizon": horizon,
+    "execution_readiness": execution_readiness,
+    "dispatch_transport": "mailroom",
+    "route_target": {"type": "agent_tool", "tool": "route_resolve", "input": route_input},
+    "routing_status": "pending_resolution",
+}
+
+summary = " ".join(f"{wave_id} [{lane}] {task}".split())
+if len(summary) > 180:
+    summary = summary[:177] + "..."
+
+print(
+    json.dumps(
+        {
+            "wave_id": wave_id,
+            "loop_id": loop_id,
+            "owner_terminal": owner_terminal,
+            "execution_mode": execution_mode,
+            "transport": transport,
+            "horizon": horizon,
+            "execution_readiness": execution_readiness,
+            "route_input": route_input,
+            "summary": summary,
+            "payload": payload,
+        },
+        separators=(",", ":"),
+    )
+)
+PYMAILROOMCTX
+)"
+
+  local summary=""
+  summary="$(jq -r '.summary' <<<"$dispatch_ctx_json")"
+  local payload_json=""
+  payload_json="$(jq -c '.payload' <<<"$dispatch_ctx_json")"
+
+  local enqueue_json=""
+  enqueue_json="$("$enqueue_script" \
+    --summary "$summary" \
+    --route-target agent_tool \
+    --payload "$payload_json" \
+    --json)"
+
+  local dispatch_result_json=""
+  dispatch_result_json="$(python3 - "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json" "$dispatch_ctx_json" "$enqueue_json" <<'PYMAILROOMDISP'
+import fcntl
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+sf = sys.argv[1]
+lane = sys.argv[2]
+task = sys.argv[3]
+from_role = sys.argv[4] if len(sys.argv) > 4 else ""
+to_role = sys.argv[5] if len(sys.argv) > 5 else ""
+transition_gate = sys.argv[6] if len(sys.argv) > 6 else ""
+input_refs = json.loads(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] else {}
+expected_output_refs = json.loads(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8] else {}
+ctx = json.loads(sys.argv[9]) if len(sys.argv) > 9 and sys.argv[9] else {}
+enqueue = json.loads(sys.argv[10]) if len(sys.argv) > 10 and sys.argv[10] else {}
+queue_data = enqueue.get("data") if isinstance(enqueue.get("data"), dict) else {}
+lock_file = sf + ".lock"
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    with open(sf, "r", encoding="utf-8") as f:
+        state = json.load(f)
+    packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+
+    dispatches = state.get("dispatches")
+    if not isinstance(dispatches, list):
+        dispatches = []
+        state["dispatches"] = dispatches
+
+    idx = len(dispatches) + 1
+    task_id = f"D{idx}"
+    dispatch = {
+        "task_id": task_id,
+        "lane": lane,
+        "task": task,
+        "from_role": from_role,
+        "to_role": to_role,
+        "transition_gate": transition_gate,
+        "input_refs": input_refs,
+        "expected_output_refs": expected_output_refs,
+        "status": "dispatched",
+        "dispatched_at": now,
+        "completed_at": None,
+        "result": "mailroom task queued",
+        "run_key": None,
+        "receipt_validated": False,
+        "dispatch_transport": "mailroom",
+        "wave_execution_mode": str(ctx.get("execution_mode") or ""),
+        "wave_transport": str(ctx.get("transport") or ""),
+        "mailroom_task_id": str(queue_data.get("task_id") or ""),
+        "mailroom_task_file": str(queue_data.get("file") or ""),
+        "mailroom_task_state": str(queue_data.get("state") or "queued"),
+        "mailroom_route_target": str(queue_data.get("route_target") or "agent_tool"),
+        "mailroom_required_agents": queue_data.get("required_agents") if isinstance(queue_data.get("required_agents"), list) else [],
+        "mailroom_summary": str(queue_data.get("summary") or ""),
+        "mailroom_route_input": str(ctx.get("route_input") or ""),
+    }
+    dispatches.append(dispatch)
+
+    lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
+    lane_updated = False
+    for row in lane_outcomes:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("lane_id", "")).strip() != lane:
+            continue
+        row["lane_status"] = "DISPATCHED"
+        row["owner_terminal"] = str(row.get("owner_terminal") or packet.get("owner_terminal") or "").strip()
+        row["dispatch_transport"] = "mailroom"
+        row["dispatch_task_id"] = task_id
+        row["mailroom_task_id"] = dispatch["mailroom_task_id"]
+        row["stub_evidence_ref"] = ""
+        row.pop("blocker", None)
+        row["updated_at_utc"] = now
+        lane_updated = True
+        break
+    if not lane_updated:
+        lane_outcomes.append(
+            {
+                "lane_id": lane,
+                "lane_status": "DISPATCHED",
+                "owner_terminal": str(packet.get("owner_terminal") or "").strip(),
+                "dispatch_transport": "mailroom",
+                "dispatch_task_id": task_id,
+                "mailroom_task_id": dispatch["mailroom_task_id"],
+                "stub_evidence_ref": "",
+                "updated_at_utc": now,
+            }
+        )
+    packet["lane_outcomes"] = lane_outcomes
+    state["packet"] = packet
+    state["wave_packet"] = packet
+
+    role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
+    if from_role and not role_flow.get("current_role"):
+        role_flow["current_role"] = from_role
+    if to_role:
+        role_flow["next_role"] = to_role
+    role_flow["pending_transition"] = {
+        "task_id": task_id,
+        "from_role": from_role,
+        "to_role": to_role,
+        "gate": transition_gate,
+        "dispatched_at": now,
+        "dispatch_transport": "mailroom",
+        "mailroom_task_id": dispatch["mailroom_task_id"],
+    }
+    state["role_flow"] = role_flow
+
+    with open(sf, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+print(
+    json.dumps(
+        {
+            "dispatch_index": idx,
+            "dispatch_id": task_id,
+            "mailroom_task_id": str(queue_data.get("task_id") or ""),
+            "mailroom_task_file": str(queue_data.get("file") or ""),
+            "route_input": str(ctx.get("route_input") or ""),
+        },
+        separators=(",", ":"),
+    )
+)
+PYMAILROOMDISP
+)"
+
+  local dispatch_index=""
+  dispatch_index="$(jq -r '.dispatch_index' <<<"$dispatch_result_json")"
+  local dispatch_id=""
+  dispatch_id="$(jq -r '.dispatch_id' <<<"$dispatch_result_json")"
+  local mailroom_task_id=""
+  mailroom_task_id="$(jq -r '.mailroom_task_id' <<<"$dispatch_result_json")"
+  local mailroom_task_file=""
+  mailroom_task_file="$(jq -r '.mailroom_task_file' <<<"$dispatch_result_json")"
+  local route_input=""
+  route_input="$(jq -r '.route_input' <<<"$dispatch_result_json")"
+
+  echo "Dispatched task #${dispatch_index} to lane '${lane}':"
+  echo "  Task: ${task}"
+  echo "  Dispatch ID: ${dispatch_id}"
+  echo "  Transport: mailroom"
+  echo "  Mailroom Task: ${mailroom_task_id}"
+  echo "  Queue File: ${mailroom_task_file}"
+  echo "  Status: dispatched"
+  if [[ -n "$route_input" ]]; then
+    echo "  Route: agent_tool/route_resolve input=${route_input}"
+  fi
+  if [[ -n "$from_role" || -n "$to_role" ]]; then
+    echo "  Role transition: ${from_role:-?} -> ${to_role:-?} (gate=${transition_gate:-none})"
+  fi
+}
+
 cmd_dispatch() {
   local wave_id=""
   local lane=""
@@ -1849,6 +2140,30 @@ if errors:
 PYREFSEM
   fi
 
+  local dispatch_mode=""
+  dispatch_mode="$(python3 - "$sf" <<'PYDISPATCHMODE'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    state = json.load(f)
+
+packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+execution_mode = str(packet.get("execution_mode") or "code").strip() or "code"
+transport = str(packet.get("transport") or "git").strip() or "git"
+print(f"{execution_mode}|{transport}")
+PYDISPATCHMODE
+)"
+  local wave_execution_mode=""
+  local wave_transport=""
+  IFS='|' read -r wave_execution_mode wave_transport <<<"$dispatch_mode"
+
+  if [[ "$wave_execution_mode" == "operational" || "$wave_transport" == "mailroom" ]]; then
+    _dispatch_operational_mailroom "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json"
+    sync_runtime_traffic_index "$sf" "dispatch"
+    return
+  fi
+
   python3 - "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json" <<'PYDISP'
 import json, sys, fcntl, os
 from datetime import datetime, timezone
@@ -2153,6 +2468,16 @@ for i, d in enumerate(dispatches, 1):
     print(f"  #{i} [{d['lane']:10s}] {d['status']:12s} {d['task'][:50]}")
     if d.get("run_key"):
         print(f"     run_key: {d['run_key']}")
+    if d.get("dispatch_transport") == "mailroom":
+        mtid = d.get("mailroom_task_id", "")
+        mstate = d.get("mailroom_task_state", "")
+        route_input = d.get("mailroom_route_input", "")
+        detail = f"     mailroom: {mtid}" if mtid else "     mailroom: queued"
+        if mstate:
+            detail += f" [{mstate}]"
+        if route_input:
+            detail += f" route={route_input}"
+        print(detail)
 print()
 
 # Collect watcher results
@@ -2278,6 +2603,16 @@ if dispatches:
         print(f"  {status_icon} #{i} [{d['lane']:10s}] {d['task'][:50]}")
         if d.get("run_key"):
             print(f"     run_key: {d['run_key']}")
+        if d.get("dispatch_transport") == "mailroom":
+            mtid = d.get("mailroom_task_id", "")
+            mstate = d.get("mailroom_task_state", "")
+            route_input = d.get("mailroom_route_input", "")
+            detail = f"     mailroom: {mtid}" if mtid else "     mailroom: queued"
+            if mstate:
+                detail += f" [{mstate}]"
+            if route_input:
+                detail += f" route={route_input}"
+            print(detail)
     print()
 
 # Watcher checks
@@ -3538,8 +3873,8 @@ cmd_collect_v2() {
   local receipts_dir="$sd/evidence"
   local schema_path="$SPINE_REPO/ops/bindings/orchestration.exec_receipt.schema.json"
 
-  python3 - "$sf" "$sd" "$receipts_dir" "$schema_path" "$sync_roadmap" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" <<'PYCOLLECT2'
-import json, sys, os, re, glob, fcntl
+  python3 - "$sf" "$sd" "$receipts_dir" "$SPINE_STATE/agent-tasks" "$schema_path" "$sync_roadmap" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" <<'PYCOLLECT2'
+import json, sys, os, re, glob, fcntl, yaml
 from datetime import datetime, timezone
 
 run_key_patterns_text = [r"^(CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"]
@@ -3646,15 +3981,16 @@ def _validate_receipt(receipt):
 sf = sys.argv[1]
 sd = sys.argv[2]
 receipts_dir = sys.argv[3]
-schema_path = sys.argv[4]
-sync_roadmap = sys.argv[5] == "true"
-spine_repo = sys.argv[6]
-role_runtime_contract = sys.argv[7] if len(sys.argv) > 7 else ""
+mailroom_task_root = sys.argv[4]
+schema_path = sys.argv[5]
+sync_roadmap = sys.argv[6] == "true"
+spine_repo = sys.argv[7]
+role_runtime_contract = sys.argv[8] if len(sys.argv) > 8 else ""
 lock_file = sf + ".lock"
+promotion_next_by_role = {}
 
 if role_runtime_contract and os.path.exists(role_runtime_contract):
     try:
-        import yaml
         contract = yaml.safe_load(open(role_runtime_contract, "r", encoding="utf-8")) or {}
         evidence = contract.get("evidence") if isinstance(contract, dict) else {}
         if isinstance(evidence, dict):
@@ -3677,6 +4013,15 @@ if role_runtime_contract and os.path.exists(role_runtime_contract):
             aliases = runtime_roles.get("close_role_aliases")
             if isinstance(aliases, list) and aliases:
                 close_aliases = {str(x).strip() for x in aliases if str(x).strip()} or close_aliases
+        transitions = contract.get("promotion_gates", {}).get("transitions", [])
+        if isinstance(transitions, list):
+            for row in transitions:
+                if not isinstance(row, dict):
+                    continue
+                from_role = str(row.get("from", "")).strip()
+                to_role = str(row.get("to", "")).strip()
+                if from_role and to_role and from_role not in promotion_next_by_role:
+                    promotion_next_by_role[from_role] = to_role
     except Exception:
         pass
 
@@ -3701,6 +4046,75 @@ print("=" * 72)
 print(f"  WAVE COLLECT: {wave_id}")
 print("=" * 72)
 print()
+
+packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
+
+def _extract_run_key_from_text(text):
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"run_key=([^\s]+)", raw)
+    if match:
+        candidate = match.group(1).strip()
+        if _run_key_matches(candidate, run_key_patterns):
+            return candidate
+    for token in re.split(r"\s+", raw):
+        if _run_key_matches(token, run_key_patterns):
+            return token
+    return ""
+
+def _extract_receipt_from_text(text):
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"receipt=([^\s]+)", raw)
+    return match.group(1).strip() if match else ""
+
+def _upsert_lane_outcome(dispatch, lane_status, *, completed_at="", run_key="", blocker=""):
+    lane_id = str(dispatch.get("lane", "")).strip()
+    if not lane_id:
+        return
+    owner_terminal = str(dispatch.get("owner_terminal") or packet.get("owner_terminal") or "").strip()
+    for row in lane_outcomes:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("lane_id", "")).strip() != lane_id:
+            continue
+        row["lane_status"] = lane_status
+        if owner_terminal:
+            row["owner_terminal"] = owner_terminal
+        row["updated_at_utc"] = completed_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        row["dispatch_transport"] = str(dispatch.get("dispatch_transport") or row.get("dispatch_transport") or "").strip()
+        if dispatch.get("task_id"):
+            row["dispatch_task_id"] = dispatch.get("task_id")
+        if dispatch.get("mailroom_task_id"):
+            row["mailroom_task_id"] = dispatch.get("mailroom_task_id")
+        if run_key:
+            row["run_key"] = run_key
+        if blocker:
+            row["blocker"] = blocker
+        elif "blocker" in row:
+            row.pop("blocker", None)
+        return
+
+    entry = {
+        "lane_id": lane_id,
+        "lane_status": lane_status,
+        "owner_terminal": owner_terminal,
+        "updated_at_utc": completed_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if dispatch.get("dispatch_transport"):
+        entry["dispatch_transport"] = dispatch.get("dispatch_transport")
+    if dispatch.get("task_id"):
+        entry["dispatch_task_id"] = dispatch.get("task_id")
+    if dispatch.get("mailroom_task_id"):
+        entry["mailroom_task_id"] = dispatch.get("mailroom_task_id")
+    if run_key:
+        entry["run_key"] = run_key
+    if blocker:
+        entry["blocker"] = blocker
+    lane_outcomes.append(entry)
 
 # ── Scan receipt artifacts ──
 receipt_files = []
@@ -3738,10 +4152,47 @@ for fn, receipt in valid_receipts:
     print(f"  OK {fn}: task={receipt['task_id']} status={receipt['status']} lane={receipt['lane']}")
 print()
 
+# ── Scan mailroom task artifacts ──
+mailroom_task_files = []
+mailroom_tasks = {}
+for bucket in ("done", "failed"):
+    bucket_dir = os.path.join(mailroom_task_root, bucket)
+    if not os.path.isdir(bucket_dir):
+        continue
+    for fp in sorted(glob.glob(os.path.join(bucket_dir, "*.yaml"))):
+        mailroom_task_files.append(fp)
+        try:
+            task_doc = yaml.safe_load(open(fp, "r", encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(task_doc, dict):
+            continue
+        task_id = str(task_doc.get("task_id") or os.path.splitext(os.path.basename(fp))[0]).strip()
+        status = str(task_doc.get("status") or bucket).strip()
+        if not task_id or status not in {"done", "failed"}:
+            continue
+        updated_at = str(task_doc.get("updated_at") or task_doc.get("completed_at") or task_doc.get("failed_at") or "").strip()
+        mailroom_tasks[task_id] = {
+            "task_id": task_id,
+            "status": status,
+            "file": fp,
+            "updated_at": updated_at,
+            "completed_at": str(task_doc.get("completed_at") or task_doc.get("failed_at") or updated_at).strip(),
+            "result": str(task_doc.get("result") or "").strip(),
+            "failure_reason": str(task_doc.get("failure_reason") or "").strip(),
+        }
+
+print(f"MAILROOM TASKS ({len(mailroom_task_files)} found, {len(mailroom_tasks)} terminal states)")
+print("-" * 72)
+for task_id, task_doc in sorted(mailroom_tasks.items()):
+    print(f"  {task_doc['status'].upper():4s} {task_id}: {os.path.basename(task_doc['file'])}")
+print()
+
 # ── Match receipts to dispatches and update state ──
 dispatches = state.get("dispatches", [])
 matched = 0
 receipt_map = {r["task_id"]: r for _, r in valid_receipts}
+mailroom_matched = 0
 
 for i, d in enumerate(dispatches):
     task_id = d.get("task_id", d.get("task", f"D{i+1}"))
@@ -3758,6 +4209,45 @@ for i, d in enumerate(dispatches):
         d["receipt_validated"] = True
         matched += 1
 
+    if str(d.get("dispatch_transport", "")).strip() != "mailroom":
+        continue
+
+    mailroom_task_id = str(d.get("mailroom_task_id") or "").strip()
+    if not mailroom_task_id or mailroom_task_id not in mailroom_tasks:
+        continue
+
+    task_doc = mailroom_tasks[mailroom_task_id]
+    task_status = str(task_doc.get("status") or "").strip()
+    task_completed_at = str(task_doc.get("completed_at") or task_doc.get("updated_at") or "").strip()
+    task_result = str(task_doc.get("result") or "").strip()
+    task_failure = str(task_doc.get("failure_reason") or "").strip()
+    task_run_key = _extract_run_key_from_text(task_result)
+    task_receipt = _extract_receipt_from_text(task_result)
+
+    d["mailroom_task_state"] = task_status
+    d["mailroom_task_file"] = task_doc.get("file")
+    d["mailroom_task_updated_at"] = str(task_doc.get("updated_at") or "")
+    if task_receipt:
+        d["mailroom_receipt_path"] = task_receipt
+
+    if task_status == "done":
+        d["status"] = "done"
+        d["completed_at"] = task_completed_at
+        d["result"] = f"Mailroom: {task_result}" if task_result else "Mailroom: done"
+        if task_run_key:
+            d["run_key"] = task_run_key
+        _upsert_lane_outcome(d, "DONE", completed_at=task_completed_at, run_key=task_run_key)
+        matched += 1
+        mailroom_matched += 1
+    elif task_status == "failed":
+        blocker = task_failure or "mailroom task failed"
+        d["status"] = "failed"
+        d["completed_at"] = task_completed_at
+        d["result"] = f"Mailroom failed: {blocker}"
+        _upsert_lane_outcome(d, "BLOCKED", completed_at=task_completed_at, blocker=blocker)
+        matched += 1
+        mailroom_matched += 1
+
 # Promote role/lifecycle state deterministically from completed dispatches.
 role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
 lifecycle_state = str(state.get("lifecycle_state", "active")).strip() or "active"
@@ -3772,10 +4262,17 @@ if completed:
     last_done = completed[-1]
     last_to_role = str(last_done.get("to_role", "")).strip()
     last_from_role = str(last_done.get("from_role", "")).strip()
+    promotion_next = promotion_next_by_role.get(last_to_role, "")
     if last_to_role:
         role_flow["current_role"] = last_to_role
     elif last_from_role and not role_flow.get("current_role"):
         role_flow["current_role"] = last_from_role
+    if promotion_next:
+        role_flow["next_role"] = promotion_next
+    elif last_to_role in close_aliases:
+        role_flow["next_role"] = ""
+    elif last_to_role:
+        role_flow["next_role"] = last_to_role
     role_flow["last_transition"] = {
         "task_id": last_done.get("task_id"),
         "from_role": last_from_role,
@@ -3794,6 +4291,16 @@ for d in completed:
     elif to_role in close_aliases and lifecycle_state in {"active", "implemented"}:
         lifecycle_state = "validated"
 
+resolved_dispatch_ids = {
+    str(d.get("task_id", "")).strip()
+    for d in dispatches
+    if isinstance(d, dict) and str(d.get("status", "")).strip() in {"done", "failed", "blocked"}
+}
+pending_transition = role_flow.get("pending_transition") if isinstance(role_flow.get("pending_transition"), dict) else {}
+pending_transition_task_id = str(pending_transition.get("task_id", "")).strip()
+if pending_transition_task_id and pending_transition_task_id in resolved_dispatch_ids:
+    role_flow.pop("pending_transition", None)
+
 pending_transitions = [
     d for d in dispatches if isinstance(d, dict) and str(d.get("status", "")).strip() == "dispatched" and str(d.get("to_role", "")).strip()
 ]
@@ -3803,6 +4310,9 @@ if pending_transitions:
 elif str(role_flow.get("current_role", "")).strip() in close_aliases:
     role_flow["next_role"] = ""
 
+packet["lane_outcomes"] = lane_outcomes
+state["packet"] = packet
+state["wave_packet"] = packet
 state["role_flow"] = role_flow
 state["lifecycle_state"] = lifecycle_state
 
@@ -3828,6 +4338,8 @@ state["last_collect"] = {
     "receipts_scanned": len(receipt_files),
     "receipts_valid": len(valid_receipts),
     "receipts_invalid": len(invalid_receipts),
+    "mailroom_tasks_scanned": len(mailroom_task_files),
+    "mailroom_tasks_matched": mailroom_matched,
     "dispatches_matched": matched
 }
 
