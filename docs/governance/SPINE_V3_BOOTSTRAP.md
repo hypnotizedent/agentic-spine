@@ -11,6 +11,7 @@ source_loop: LOOP-SPINE-V3-BOOTSTRAP-NODE-SEPARATION-20260322
 This document is the first-class spine seed for the 2026-03-22 V3 conversation ingest.
 It exists so the system can read, interpret, and execute the V3 shift without relying on chat history, saved notes, or operator memory.
 All Desktop note folders imported on 2026-03-22 are consolidated here so other agents can use one canonical source instead of reading separate note dumps.
+This file was rechecked against all 16 Desktop note folders on 2026-03-22 so late-arriving constraints and packet details do not remain stranded outside the spine.
 
 Derived execution audit: [../reference/audits/SPINE_V3_BOOTSTRAP_ALIGNMENT_AUDIT_20260322.md](../reference/audits/SPINE_V3_BOOTSTRAP_ALIGNMENT_AUDIT_20260322.md)
 
@@ -94,6 +95,12 @@ Not:
 - same prose
 
 Every model interaction should behave like a request against the spine governance kernel.
+
+Working rule:
+
+- chat is a viewport, not a workspace
+- the phone is a remote, not an execution authority
+- outputs are proposals until validated
 
 ## Human Workflow To Preserve
 
@@ -249,6 +256,13 @@ Properties:
 - archives
 - cold history
 
+### Placement Rule
+
+Assign machines by trust boundary, authority set, persistence, and replacement story.
+Do not assign roles by raw performance alone.
+
+Hardware follows trust, not horsepower.
+
 ## Required V3 System Surfaces
 
 ### Loop Compiler
@@ -262,14 +276,30 @@ Compile:
 - objective
 - done check
 - first command
+- packet identity and compile lineage
+- authority metadata for entry, bootstrap, and tracking surfaces
 - allowed and forbidden actions
+- gated actions
 - required inputs
 - expected outputs
 - execution mode
 - transport
+- mutability and autonomy level
 - environment constraints
+- transport-specific preflight checks and skip checks
+- blockers, assumptions, and escalation target
+- `human_translation_needed: false`
 
 Agents do not infer. They execute assigned packets.
+Only one surface is allowed to assign.
+
+Operating rule:
+
+- contracts describe
+- docs explain
+- status reports
+- launcher invokes
+- compiler decides
 
 ### Operational Dispatch Mode
 
@@ -281,6 +311,7 @@ Requirements:
 - `transport: git | mailroom`
 - operational mode must not require git pushability or worktree assumptions
 - operational mode validates refs, stop-gates, receipts, and policy checks instead
+- preflight must be transport-specific, never globally inherited
 
 ### Context Bundle
 
@@ -300,6 +331,21 @@ Provider adapters should render from one neutral intermediate form containing:
 - mutation policy
 
 Do not hand the same raw prompt to every model and call that uniformity.
+
+### Governed Task Envelope
+
+Claude, ChatGPT, shell entry, and mobile clients should consume and emit one neutral governed task envelope rather than provider-native freeform context.
+
+Minimum envelope fields:
+
+- current workflow id
+- governance version or hash
+- active contracts
+- permissible scopes
+- forbidden mutation classes
+- expected artifact type
+- confidence requirements
+- whether the response is advisory, patch-ready, executable, or authoritative
 
 ### Execution Broker
 
@@ -335,10 +381,14 @@ Every execution should resolve to a structured proof envelope with at least:
 - governance_version
 - execution_host
 - execution_mode
+- transport
+- started_at
+- completed_at
 - checks_passed
 - receipts
 - verdict
 - next allowed actions
+- signed_by
 
 ### Broker Read API
 
@@ -357,6 +407,7 @@ RAG and session narrative are for explanation, not state lookup.
 ### Thin Client Integration
 
 Claude, ChatGPT, iOS, shell, and desktop should all act as thin request and response surfaces over the same broker truth.
+Remote clients are request consoles, not workspaces.
 
 Fresh ChatGPT access has only two acceptable continuity paths:
 
@@ -365,6 +416,17 @@ Fresh ChatGPT access has only two acceptable continuity paths:
 
 The preferred path is the live broker connection.
 Projects and memory are convenience features, not the system of record.
+
+### Confidence-Aware Action Ladder
+
+Not every model output should be equally executable.
+Use action classes and increase validation as authority rises:
+
+- Class A: conversational or exploratory
+- Class B: structured recommendation
+- Class C: patch proposal
+- Class D: executable command
+- Class E: autonomous action
 
 ### Deprecation Surface
 
