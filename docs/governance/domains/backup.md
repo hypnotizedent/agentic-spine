@@ -15,7 +15,7 @@ machine.
 
 ## Canonical Model
 
-- `tank/backups/vzdump/dump/` is the shop VM/LXC source backup plane.
+- `data/backups/vzdump/dump/` is the shop VM/LXC source backup generator plane (migrated from tank 2026-03-23).
 - `md1400/backup-cold/...` is the shop cold backup plane for app/state and promoted shop VM/LXC copies.
 - Synology is the canonical home backup plane for Home Assistant VM `100` and home Pi-hole LXC `105`.
 

@@ -11,7 +11,7 @@
 
 ### Rationale
 
-- **Capacity**: 34TB vs 8.4TB (`tank/backups`)
+- **Capacity**: 34TB (md1400) + 22TB (data/backups generator)
 - **Utilization**: Empty (128K used) vs 33% used (2.8TB)
 - **Purpose**: Dedicated backup pool per naming convention
 - **Growth**: Massive headroom for app/business backup expansion
@@ -21,11 +21,12 @@
 
 ### Two Separate ZFS Pools on 730XD
 
-#### Pool 1: tank/backups (8.4TB)
-- **Purpose**: Local hypervisor staging/source for VM vzdump generation
-- **Path**: `/tank/backups/vzdump/dump/`
-- **Usage**: 2.8TB (33%)
+#### Pool 1: data/backups (22TB)
+- **Purpose**: Local hypervisor staging/source for VM vzdump generation (migrated from tank 2026-03-23)
+- **Path**: `/data/backups/vzdump/dump/`
+- **Usage**: ~109G (< 1%)
 - **Scope**: Proxmox VM/LXC backup source artifacts before md1400 cold promotion
+- **Note**: `tank/backups` is draining; cold-sync reads from tank until data has full nightly coverage
 
 #### Pool 2: md1400/backup-cold (34TB)
 - **Purpose**: Canonical cold backup plane
@@ -75,7 +76,7 @@
 - Dev-tools (Gitea): NAS → `/md1400/backup-cold/apps/dev-tools/gitea/`
 
 ### VM/LXC Backups → md1400 Cold Copies
-- Shop/local vzdump generation remains on `/tank/backups/vzdump/dump/`
+- Shop/local vzdump generation moved to `/data/backups/vzdump/dump/` (from tank, 2026-03-23)
 - Canonical cold copies are promoted to `/md1400/backup-cold/vzdump/pve/`
 - Home/local vzdump generation and canonical retention remain on Synology-backed storage via proxmox-home
 

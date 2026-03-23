@@ -18,7 +18,7 @@ defaults:
   stale_after_hours: 26
 model:
   authority_state: authoritative
-  profile_version: "systemic-v1"
+  profile_version: "systemic-v3"
   data_classes:
     small_state:
       description: "Config, lightweight databases, and critical metadata."
@@ -66,6 +66,94 @@ model:
     tier1-small-state-dry-run-quarterly:
       mode: dry_run
       cadence: quarterly
+  # ═══════════════════════════════════════════════════════════════
+  # V3 vzdump schedule policy — derived, not hardcoded
+  # ═══════════════════════════════════════════════════════════════
+  # The Spine derives which VMs get daily vs weekly vzdump from
+  # mechanical criteria applied to each VM's properties. Service
+  # names are NEVER the selection key — criteria are.
+  vzdump_schedule_policy:
+    version: 3
+    updated_at: "2026-03-23"
+    canonical_cold_plane: "/md1400/backup-cold/vzdump/pve"
+    generator_surface: "/data/backups/vzdump/dump"
+    generator_transition:
+      note: "Generator transitioning from /tank/backups to /data/backups. Cold-sync reads from tank until data has full coverage."
+      tank_drain_target: "2026-03-25"
+    schedule_tiers:
+      minimal_hot:
+        vzdump_cadence: daily
+        stale_threshold_hours: 26
+        cold_promotion: daily
+        description: "Daily vzdump for VMs that meet ALL qualification criteria."
+        qualification_criteria:
+          - id: irreplaceable_small_state
+            description: "Primary data is user-created and cannot be regenerated from version control, automation, or upstream sources."
+          - id: artifact_fits_daily_window
+            description: "Compressed vzdump artifact < 50G, completing in the nightly window without contention."
+          - id: high_loss_impact
+            description: "Loss causes immediate estate-wide operational impact (auth/secrets outage) or compliance gap (financial/legal data)."
+      canonical_cold:
+        vzdump_cadence: daily
+        stale_threshold_hours: 26
+        cold_promotion: daily
+        description: "Default tier for all active VMs. Daily vzdump with cold promotion. Phase 2: cadence drops to weekly for VMs with app-level daily protection."
+        note: "Phase 1 keeps daily for all VMs to avoid regression. Phase 2 introduces weekly for canonical_cold VMs after app-level backup coverage is proven."
+      decommission_capsule:
+        vzdump_cadence: none
+        stale_threshold_hours: null
+        cold_promotion: none
+        description: "No recurring backup. Last-known-good cold artifact retained for 30-day hold."
+        hold_period_days: 30
+    derived_assignments:
+      minimal_hot:
+        - vm_id: 204
+          hostname: infra-core
+          rationale: "Infisical secrets + Vaultwarden passwords + Authentik SSO. Loss = estate-wide auth/secrets outage. Artifact ~5G."
+        - vm_id: 211
+          hostname: finance-stack
+          rationale: "Firefly III transactions + Paperless docs + Ghostfolio. Loss = financial compliance gap. Artifact ~35G."
+      canonical_cold:
+        - vm_id: 202
+          hostname: automation-stack
+          rationale: "Spine runtime. Rebuildable from git. No irreplaceable user data. Artifact ~19G."
+        - vm_id: 203
+          hostname: immich
+          rationale: "Photo library — irreplaceable but artifact ~60G exceeds daily threshold. ZFS snapshots provide point-in-time protection."
+        - vm_id: 205
+          hostname: observability
+          rationale: "Telemetry data regenerable over time. Artifact ~8G."
+        - vm_id: 206
+          hostname: dev-tools
+          rationale: "Gitea repos mirrored to external. Artifact ~10G."
+        - vm_id: 207
+          hostname: ai-consolidation
+          rationale: "Qdrant vectors regenerable from source documents. Artifact ~6G."
+        - vm_id: 212
+          hostname: mint-data
+          rationale: "Business data — irreplaceable but artifact ~202G. Has daily pgdump (app-level protection). Artifact exceeds threshold."
+        - vm_id: 213
+          hostname: mint-apps
+          rationale: "Stateless containers. No persistent user data. Artifact ~10G."
+        - vm_id: 214
+          hostname: communications-stack
+          rationale: "Email — irreplaceable but artifact ~971G. Has daily app-level backup (mail-archiver pgdump + uploads). Artifact vastly exceeds threshold."
+        - vm_id: 215
+          hostname: surveillance-stack
+          rationale: "Security footage with short retention. Artifact ~103G."
+        - vm_id: 220
+          hostname: archive-smb
+          rationale: "Stateless Samba proxy to md1400. ZFS snapshot protection for underlying datasets. Artifact ~1G."
+      decommission_capsule:
+        - vm_id: 200
+          hostname: docker-host
+          rationale: "Tombstoned 2026-03-06. Single cold capsule retained on md1400."
+        - vm_id: 209
+          hostname: download-stack
+          rationale: "Decommissioned 2026-03-23. Cold residue retained for 30-day hold."
+        - vm_id: 210
+          hostname: streaming-stack
+          rationale: "Decommissioned 2026-03-23. Cold residue retained for 30-day hold."
   destination_lanes:
     pve-vzdump-primary:
       host: pve
@@ -166,8 +254,8 @@ runtime_units:
       - vm-205-observability-primary
       - vm-206-dev-tools-primary
       - vm-207-ai-consolidation-primary
-      - vm-209-download-stack-primary
-      - vm-210-streaming-stack-primary
+      # vm-209-download-stack-primary — REMOVED 2026-03-23 (decommissioned)
+      # vm-210-streaming-stack-primary — REMOVED 2026-03-23 (decommissioned)
       - vm-211-finance-stack-primary
       - vm-212-mint-data-primary
       - vm-213-mint-apps-primary
@@ -728,41 +816,27 @@ targets:
     stale_after_hours: 26
     classification: important
   - name: vm-209-download-stack-primary
-    enabled: true
+    enabled: false
     kind: file_glob
     host: pve
     base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-209-*.vma.zst"
     stale_after_hours: 26
-    classification: important
-    retirement_state: residual
-    tombstone_eligible_when:
-      - "media-home (VM 106) passes 14-day stability window"
-      - "no active downloads routing to shop download-stack"
-      - "operator confirms no rollback needed"
-      - "final backup snapshot taken"
-    purge_eligible_when:
-      - "tombstone hold period (30 days) elapsed"
-      - "media-home proven stable through at least one canary wave"
-      - "operator explicit approval"
+    classification: decommissioned
+    retirement_state: decommissioned
+    decommissioned_at: "2026-03-23"
+    decommission_reason: "VM 209 tombstoned. No recurring backups. Cold residue retained on md1400 for 30-day hold."
   - name: vm-210-streaming-stack-primary
-    enabled: true
+    enabled: false
     kind: file_glob
     host: pve
     base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-210-*.vma.zst"
     stale_after_hours: 26
-    classification: important
-    retirement_state: residual
-    tombstone_eligible_when:
-      - "media-home (VM 106) passes 14-day stability window"
-      - "no active streaming clients pointed at shop streaming-stack"
-      - "operator confirms no rollback needed"
-      - "final backup snapshot taken"
-    purge_eligible_when:
-      - "tombstone hold period (30 days) elapsed"
-      - "media-home proven stable through at least one canary wave"
-      - "operator explicit approval"
+    classification: decommissioned
+    retirement_state: decommissioned
+    decommissioned_at: "2026-03-23"
+    decommission_reason: "VM 210 tombstoned. No recurring backups. Cold residue retained on md1400 for 30-day hold."
   - name: vm-207-ai-consolidation-primary
     enabled: true
     kind: file_glob
