@@ -47,7 +47,7 @@ Naming: directory name matches the branch name with `/` replaced by `-`.
 **Lifecycle**:
 1. Created by wave/loop execution
 2. Used for isolated feature branch work
-3. Pruned after branch merges to main and worktree is confirmed clean
+3. Pruned after branch merges to main, the owner has an explicit disposition (`landed|deferred|superseded|abandoned`), and the worktree is confirmed clean
 4. Dirty worktrees must be reviewed before pruning
 
 ### Codex Runtime: `~/.codex`

@@ -8,6 +8,7 @@ export SPINE_REPO="$TARGET_ROOT"
 source "$CONTROL_ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 CONTRACT="$CONTROL_ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+DISPOSITION_CONTRACT="$CONTROL_ROOT/ops/bindings/closeout.disposition.contract.yaml"
 
 MODE="report"
 JSON_MODE=0
@@ -58,6 +59,9 @@ FAIL_ON_ROOT_NON_MAIN="true"
 FAIL_ON_ROOT_DIRTY="true"
 WAVES_DIR="$SPINE_STATE/waves"
 LOOPS_SCOPE_DIR="$SPINE_STATE/loop-scopes"
+ALLOWED_DISPOSITIONS_CSV="landed,deferred,superseded,abandoned"
+FAIL_ON_CLOSED_OWNER_MISSING_DISPOSITION="true"
+FAIL_ON_CLOSED_OWNER_INVALID_DISPOSITION="true"
 
 if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo main)"
@@ -121,7 +125,22 @@ if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   fi
 fi
 
-python3 - "$TARGET_ROOT" "$MAIN_BRANCH" "$CANONICAL_WORKTREE_ROOT" "$CANONICAL_TEMP_CLONE_ROOT" "$MANAGED_WORKTREE_PATHS_CSV" "$LEASE_FILENAME" "$LEASE_TTL_HOURS" "$PREFIX_CSV" "$MERGED_GRACE_HOURS" "$CLOSED_OWNER_GRACE_HOURS" "$UNOWNED_LOCAL_GRACE_HOURS" "$TEMP_CLONE_GRACE_HOURS" "$MAIN_STASH_WARN_HOURS" "$MAIN_STASH_FAIL_HOURS" "$FAIL_ON_DETACHED" "$FAIL_ON_DIRTY_CLOSED" "$WARN_ON_DIRTY_ACTIVE" "$FAIL_ON_DIRTY_TEMP_CLONE" "$FAIL_ON_MISSING_TEMP_CLONE_ORIGIN" "$FAIL_ON_ROOT_NON_MAIN" "$FAIL_ON_ROOT_DIRTY" "$WAVES_DIR" "$LOOPS_SCOPE_DIR" "$MODE" "$JSON_MODE" "$BRIEF_MODE" <<'PY'
+if [[ -f "$DISPOSITION_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+  disposition_accum=""
+  while IFS= read -r disposition; do
+    [[ -n "$disposition" && "$disposition" != "null" ]] || continue
+    if [[ -n "$disposition_accum" ]]; then
+      disposition_accum+=",$disposition"
+    else
+      disposition_accum="$disposition"
+    fi
+  done < <(yq e -r '.terminal_dispositions.allowed[]?' "$DISPOSITION_CONTRACT" 2>/dev/null || true)
+  [[ -n "$disposition_accum" ]] && ALLOWED_DISPOSITIONS_CSV="$disposition_accum"
+  FAIL_ON_CLOSED_OWNER_MISSING_DISPOSITION="$(yq e -r '.enforcement.fail_worktree_reconcile_when_closed_owner_missing_disposition // true' "$DISPOSITION_CONTRACT" 2>/dev/null || echo true)"
+  FAIL_ON_CLOSED_OWNER_INVALID_DISPOSITION="$(yq e -r '.enforcement.fail_worktree_reconcile_when_closed_owner_invalid_disposition // true' "$DISPOSITION_CONTRACT" 2>/dev/null || echo true)"
+fi
+
+python3 - "$TARGET_ROOT" "$MAIN_BRANCH" "$CANONICAL_WORKTREE_ROOT" "$CANONICAL_TEMP_CLONE_ROOT" "$MANAGED_WORKTREE_PATHS_CSV" "$LEASE_FILENAME" "$LEASE_TTL_HOURS" "$PREFIX_CSV" "$MERGED_GRACE_HOURS" "$CLOSED_OWNER_GRACE_HOURS" "$UNOWNED_LOCAL_GRACE_HOURS" "$TEMP_CLONE_GRACE_HOURS" "$MAIN_STASH_WARN_HOURS" "$MAIN_STASH_FAIL_HOURS" "$FAIL_ON_DETACHED" "$FAIL_ON_DIRTY_CLOSED" "$WARN_ON_DIRTY_ACTIVE" "$FAIL_ON_DIRTY_TEMP_CLONE" "$FAIL_ON_MISSING_TEMP_CLONE_ORIGIN" "$FAIL_ON_ROOT_NON_MAIN" "$FAIL_ON_ROOT_DIRTY" "$WAVES_DIR" "$LOOPS_SCOPE_DIR" "$ALLOWED_DISPOSITIONS_CSV" "$FAIL_ON_CLOSED_OWNER_MISSING_DISPOSITION" "$FAIL_ON_CLOSED_OWNER_INVALID_DISPOSITION" "$MODE" "$JSON_MODE" "$BRIEF_MODE" <<'PY'
 import json
 import os
 import re
@@ -154,9 +173,12 @@ fail_on_root_non_main = sys.argv[20].lower() == "true"
 fail_on_root_dirty = sys.argv[21].lower() == "true"
 waves_dir = Path(os.path.expanduser(sys.argv[22]))
 loops_scope_rel = sys.argv[23]
-mode = sys.argv[24]
-json_mode = sys.argv[25] == "1"
-brief_mode = sys.argv[26] == "1"
+allowed_dispositions = {item.strip() for item in sys.argv[24].split(",") if item.strip()}
+fail_on_closed_owner_missing_disposition = sys.argv[25].lower() == "true"
+fail_on_closed_owner_invalid_disposition = sys.argv[26].lower() == "true"
+mode = sys.argv[27]
+json_mode = sys.argv[28] == "1"
+brief_mode = sys.argv[29] == "1"
 
 now_epoch = time.time()
 
@@ -443,6 +465,7 @@ if loops_scope_dir.exists():
         status = (fm.get("status") or "").strip().lower()
         loop_scopes[loop_id] = {
             "status": status,
+            "disposition": (fm.get("disposition") or "").strip().lower(),
             "mtime": scope.stat().st_mtime,
             "path": str(scope),
         }
@@ -490,6 +513,7 @@ for wt, raw_branch in parse_worktrees(repo_root):
         "owner_type": "none",
         "owner_id": None,
         "owner_state": "unknown",
+        "owner_disposition": None,
         "owner_age_hours": None,
         "has_origin": None,
         "merged_into_main": False,
@@ -515,6 +539,7 @@ for wt, raw_branch in parse_worktrees(repo_root):
         row["owner_id"] = wave.get("wave_id")
         wave_status = wave.get("status") or "unknown"
         row["owner_state"] = "closed" if wave_status == "closed" else "active" if wave_status == "active" else wave_status
+        row["owner_disposition"] = (wave.get("disposition") or "").strip().lower() or None
         closed_epoch = parse_iso_epoch(wave.get("closed_at"))
         if closed_epoch is not None:
             row["owner_age_hours"] = max(0.0, (now_epoch - closed_epoch) / 3600.0)
@@ -536,6 +561,7 @@ for wt, raw_branch in parse_worktrees(repo_root):
             scope = loop_scopes.get(loop_id)
             if scope:
                 status = scope.get("status") or "unknown"
+                row["owner_disposition"] = (scope.get("disposition") or "").strip().lower() or None
                 if status == "closed":
                     row["owner_state"] = "closed"
                     row["owner_age_hours"] = max(0.0, (now_epoch - scope["mtime"]) / 3600.0)
@@ -593,6 +619,19 @@ for wt, raw_branch in parse_worktrees(repo_root):
             row["warnings"].append("dirty_unowned")
 
     if row["owner_state"] == "closed":
+        disposition = row.get("owner_disposition")
+        if not disposition:
+            code = "closed_owner_missing_disposition"
+            if fail_on_closed_owner_missing_disposition:
+                row["issues"].append(code)
+            else:
+                row["warnings"].append(code)
+        elif allowed_dispositions and disposition not in allowed_dispositions:
+            code = "closed_owner_invalid_disposition"
+            if fail_on_closed_owner_invalid_disposition:
+                row["issues"].append(code)
+            else:
+                row["warnings"].append(code)
         age = row["owner_age_hours"]
         if age is not None and age >= closed_owner_grace_h:
             row["issues"].append(f"closed_{row['owner_type']}_zombie")
@@ -865,7 +904,8 @@ def format_item(item):
     code = item.get("code") or "unknown"
     if kind == "worktree":
         owner = item.get("owner_id") or "none"
-        return f"{path}: {branch} -> {code} (owner={item.get('owner_type')}:{owner} state={item.get('owner_state')})"
+        disposition = item.get("owner_disposition") or "n/a"
+        return f"{path}: {branch} -> {code} (owner={item.get('owner_type')}:{owner} state={item.get('owner_state')} disposition={disposition})"
     return f"{kind} {path}: {branch} -> {code}"
 
 

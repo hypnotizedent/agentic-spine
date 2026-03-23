@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
 CONTRACT="$ROOT/ops/bindings/loop.closeout.contract.yaml"
+DISPOSITION_CONTRACT="$ROOT/ops/bindings/closeout.disposition.contract.yaml"
 SCOPES_DIR="$SPINE_STATE/loop-scopes"
 GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
 
@@ -16,7 +17,7 @@ loop-closeout-finalize
 
 Usage:
   loop-closeout-finalize --loop-id LOOP-... --acceptance-matrix <path> \
-    [--regression-lock-id D###-...] [--evidence <ref>] [--owner <owner>] \
+    --disposition <state> [--regression-lock-id D###-...] [--evidence <ref>] [--owner <owner>] \
     [--expiry-check <date-or-cadence>] [--root-cause <text>] \
     [--receipt-path <path>] [--no-close-linked-gaps] \
     [--cleanup-branch <branch-name>]
@@ -48,6 +49,7 @@ ROOT_CAUSE=""
 RECEIPT_PATH=""
 CLOSE_LINKED_GAPS=1
 CLEANUP_BRANCH=""
+DISPOSITION=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -68,6 +70,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --regression-lock-id)
       REGRESSION_LOCK_ID="${2:-}"
+      shift 2
+      ;;
+    --disposition)
+      DISPOSITION="${2:-}"
       shift 2
       ;;
     --evidence)
@@ -128,6 +134,7 @@ fi
 
 [[ -n "$LOOP_ID" ]] || { echo "loop.closeout.finalize FAIL: --loop-id required" >&2; exit 2; }
 [[ -n "$ACCEPTANCE_MATRIX" ]] || { echo "loop.closeout.finalize FAIL: --acceptance-matrix required" >&2; exit 2; }
+[[ -n "$DISPOSITION" ]] || { echo "loop.closeout.finalize FAIL: --disposition required" >&2; exit 2; }
 
 if [[ "$ACCEPTANCE_MATRIX" != /* ]]; then
   ACCEPTANCE_MATRIX="$ROOT/$ACCEPTANCE_MATRIX"
@@ -139,6 +146,31 @@ MIN_RUN_KEYS="$(yq e -r '.validation.min_required_run_keys // 1' "$CONTRACT")"
 RECEIPT_DIR_REL="$(yq e -r '.closeout_receipts.directory // ""' "$CONTRACT")"
 [[ -n "$RECEIPT_DIR_REL" && "$RECEIPT_DIR_REL" != "null" ]] || RECEIPT_DIR_REL="${SPINE_LOOP_CLOSEOUTS_ROOT:-$HOME/code/.evidence/spine/loop-closeouts}"
 REQUIRE_MATRIX_PASS="$(yq e -r '.validation.require_acceptance_pass // true' "$CONTRACT")"
+DISPOSITION_CSV="landed,deferred,superseded,abandoned"
+if command -v yq >/dev/null 2>&1 && [[ -f "$DISPOSITION_CONTRACT" ]]; then
+  disposition_accum=""
+  while IFS= read -r disposition_item; do
+    [[ -n "$disposition_item" && "$disposition_item" != "null" ]] || continue
+    if [[ -n "$disposition_accum" ]]; then
+      disposition_accum+=",$disposition_item"
+    else
+      disposition_accum="$disposition_item"
+    fi
+  done < <(yq e -r '.terminal_dispositions.allowed[]?' "$DISPOSITION_CONTRACT" 2>/dev/null || true)
+  [[ -n "$disposition_accum" ]] && DISPOSITION_CSV="$disposition_accum"
+fi
+IFS=',' read -r -a ALLOWED_DISPOSITIONS <<< "$DISPOSITION_CSV"
+disposition_ok=0
+for allowed_disposition in "${ALLOWED_DISPOSITIONS[@]}"; do
+  if [[ "$DISPOSITION" == "$allowed_disposition" ]]; then
+    disposition_ok=1
+    break
+  fi
+done
+if [[ "$disposition_ok" -ne 1 ]]; then
+  echo "loop.closeout.finalize FAIL: invalid disposition '$DISPOSITION' (allowed: ${DISPOSITION_CSV//,/|})" >&2
+  exit 1
+fi
 
 mapfile -t PROTECTED_LOOPS < <(yq e -r '.protected_lanes.loops[]? // ""' "$CONTRACT" | sed '/^$/d')
 mapfile -t PROTECTED_LOOP_PREFIXES < <(yq e -r '.protected_lanes.loop_prefixes[]? // ""' "$CONTRACT" | sed '/^$/d')
@@ -359,26 +391,53 @@ fi
 
 # Atomic frontmatter status mutation.
 tmp_file="$(mktemp "${SCOPE_FILE}.tmp.XXXXXX")"
-if ! awk '
-  BEGIN { in_fm=0; replaced=0 }
-  {
-    if ($0 == "---") {
-      if (in_fm == 0) { in_fm=1; print; next }
-      if (in_fm == 1) { in_fm=2; print; next }
-    }
-    if (in_fm == 1 && replaced == 0 && $1 == "status:") {
-      print "status: closed"
-      replaced=1
-      next
-    }
-    print
-  }
-  END {
-    if (replaced == 0) {
-      exit 2
-    }
-  }
-' "$SCOPE_FILE" > "$tmp_file"; then
+if ! python3 - "$SCOPE_FILE" "$tmp_file" "$DISPOSITION" "$timestamp" <<'PY'
+import sys
+from pathlib import Path
+
+scope_path = Path(sys.argv[1])
+tmp_path = Path(sys.argv[2])
+disposition = sys.argv[3].strip()
+timestamp = sys.argv[4].strip()
+
+lines = scope_path.read_text(encoding="utf-8").splitlines()
+if not lines or lines[0].strip() != "---":
+    raise SystemExit(2)
+
+end_idx = None
+for idx in range(1, len(lines)):
+    if lines[idx].strip() == "---":
+        end_idx = idx
+        break
+if end_idx is None:
+    raise SystemExit(2)
+
+frontmatter = lines[1:end_idx]
+rest = lines[end_idx + 1 :]
+indices = {}
+for idx, line in enumerate(frontmatter):
+    if ":" not in line:
+        continue
+    key = line.split(":", 1)[0].strip()
+    if key and key not in indices:
+        indices[key] = idx
+
+updates = {
+    "status": "status: closed",
+    "closed_at": f'closed_at: "{timestamp}"',
+    "disposition": f"disposition: {disposition}",
+}
+
+for key, line in updates.items():
+    if key in indices:
+        frontmatter[indices[key]] = line
+    else:
+        frontmatter.append(line)
+
+output = ["---", *frontmatter, "---", *rest]
+tmp_path.write_text("\n".join(output) + "\n", encoding="utf-8")
+PY
+then
   rm -f "$tmp_file"
   echo "loop.closeout.finalize FAIL: unable to update loop status in $SCOPE_FILE" >&2
   exit 1
@@ -404,6 +463,7 @@ cat > "$RECEIPT_PATH" <<EOF
 
 - loop_id: $LOOP_ID
 - status: closed
+- disposition: $DISPOSITION
 - acceptance_matrix: $ACCEPTANCE_MATRIX
 - matrix_decision: $matrix_decision
 - matrix_run_key_count: $matrix_run_keys

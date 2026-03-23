@@ -5,7 +5,7 @@
 #
 # Usage:
 #   ops loops list [--open|--closed|--all]   List loops from scope files
-#   ops loops close <loop_id>                 Mark loop as closed (updates scope)
+#   ops loops close <loop_id> --disposition <state>  Mark loop as closed (updates scope)
 #   ops loops show <loop_id>                  Show loop scope file
 #   ops loops summary                         Show loop counts by status/severity
 #   ops loops collect                         (deprecated) Legacy receipt scanner
@@ -25,6 +25,7 @@ source "$SPINE_REPO/ops/lib/git-lock.sh"
 
 RECEIPTS_DIR="$SPINE_RECEIPTS"
 LEDGER="$STATE_DIR/ledger.csv"
+DISPOSITION_CONTRACT="$SPINE_REPO/ops/bindings/closeout.disposition.contract.yaml"
 
 usage() {
     cat <<'EOF'
@@ -32,7 +33,8 @@ ops loops - Open Loop Engine (scope-file backed)
 
 Usage:
   ops loops list [--open|--closed|--all]   List loops (default: open only)
-  ops loops close <loop_id>                 Mark loop as closed
+  ops loops close <loop_id> --disposition <state> [--close-summary "<text>"]
+                                           Mark loop as closed
   ops loops show <loop_id>                  Show loop scope file
   ops loops summary                         Show loop counts by status/severity
 
@@ -41,6 +43,54 @@ Deprecated:
 
 Canonical source: .runtime/spine/state/loop-scopes/*.scope.md
 EOF
+}
+
+_close_dispositions_csv() {
+    local csv="landed,deferred,superseded,abandoned"
+    local accum=""
+    local disposition=""
+
+    if command -v yq >/dev/null 2>&1 && [[ -f "$DISPOSITION_CONTRACT" ]]; then
+        while IFS= read -r disposition; do
+            [[ -n "$disposition" && "$disposition" != "null" ]] || continue
+            if [[ -n "$accum" ]]; then
+                accum+=",$disposition"
+            else
+                accum="$disposition"
+            fi
+        done < <(yq e -r '.terminal_dispositions.allowed[]?' "$DISPOSITION_CONTRACT" 2>/dev/null || true)
+        [[ -n "$accum" ]] && csv="$accum"
+    fi
+
+    printf '%s\n' "$csv"
+}
+
+_require_close_disposition() {
+    local disposition="${1:-}"
+    local csv="${2:-$(_close_dispositions_csv)}"
+    local missing_msg="Closed work must declare disposition: ${csv//,/|}."
+    local invalid_msg="Disposition must be one of: ${csv//,/|}."
+    local item=""
+
+    if command -v yq >/dev/null 2>&1 && [[ -f "$DISPOSITION_CONTRACT" ]]; then
+        missing_msg="$(yq e -r '.messages.missing // ""' "$DISPOSITION_CONTRACT" 2>/dev/null || echo "$missing_msg")"
+        [[ -n "$missing_msg" && "$missing_msg" != "null" ]] || missing_msg="Closed work must declare disposition: ${csv//,/|}."
+        invalid_msg="$(yq e -r '.messages.invalid // ""' "$DISPOSITION_CONTRACT" 2>/dev/null || echo "$invalid_msg")"
+        [[ -n "$invalid_msg" && "$invalid_msg" != "null" ]] || invalid_msg="Disposition must be one of: ${csv//,/|}."
+    fi
+
+    if [[ -z "$disposition" ]]; then
+        echo "ERROR: $missing_msg" >&2
+        exit 1
+    fi
+
+    IFS=',' read -r -a _allowed_items <<< "$csv"
+    for item in "${_allowed_items[@]}"; do
+        [[ "$disposition" == "$item" ]] && return 0
+    done
+
+    echo "ERROR: $invalid_msg" >&2
+    exit 1
 }
 
 # ── Frontmatter helpers ───────────────────────────────────────────────────
@@ -244,10 +294,48 @@ show_loop() {
 
 # ── Close loop ────────────────────────────────────────────────────────────
 close_loop() {
-    local loop_id="$1"
-    local scope_file="$SCOPES_DIR/${loop_id}.scope.md"
+    local loop_id=""
+    local disposition=""
+    local close_summary=""
+    local scope_file=""
     local tmp_file=""
     local pending_blob pending_count
+    local dispositions_csv=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --)
+                shift
+                ;;
+            --disposition)
+                disposition="${2:-}"
+                shift 2
+                ;;
+            --close-summary)
+                close_summary="${2:-}"
+                shift 2
+                ;;
+            -*)
+                echo "Unknown flag: $1" >&2
+                exit 1
+                ;;
+            *)
+                if [[ -z "$loop_id" ]]; then
+                    loop_id="$1"
+                else
+                    echo "ERROR: Unexpected extra argument: $1" >&2
+                    exit 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    [[ -n "$loop_id" ]] || { echo "Usage: ops loops close <loop_id> --disposition <state> [--close-summary \"<text>\"]" >&2; exit 1; }
+    dispositions_csv="$(_close_dispositions_csv)"
+    _require_close_disposition "$disposition" "$dispositions_csv"
+
+    scope_file="$SCOPES_DIR/${loop_id}.scope.md"
 
     if [[ ! -f "$scope_file" ]]; then
         echo "ERROR: Scope file not found: $scope_file" >&2
@@ -274,27 +362,58 @@ close_loop() {
     tmp_file="$(mktemp "${scope_file}.tmp.XXXXXX")"
     trap 'rm -f "$tmp_file" 2>/dev/null || true; release_git_lock' EXIT INT TERM
 
-    # Atomic frontmatter update: mutate only the first status key in YAML header.
-    if ! awk '
-      BEGIN { in_fm=0; replaced=0 }
-      {
-        if ($0 == "---") {
-          if (in_fm == 0) { in_fm=1; print; next }
-          if (in_fm == 1) { in_fm=2; print; next }
-        }
-        if (in_fm == 1 && replaced == 0 && $1 == "status:") {
-          print "status: closed"
-          replaced=1
-          next
-        }
-        print
-      }
-      END {
-        if (replaced == 0) {
-          exit 2
-        }
-      }
-    ' "$scope_file" > "$tmp_file"; then
+    if ! python3 - "$scope_file" "$tmp_file" "$disposition" "$close_summary" <<'PY'
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+scope_path = Path(sys.argv[1])
+tmp_path = Path(sys.argv[2])
+disposition = sys.argv[3].strip()
+close_summary = sys.argv[4]
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+lines = scope_path.read_text(encoding="utf-8").splitlines()
+if not lines or lines[0].strip() != "---":
+    raise SystemExit(2)
+
+end_idx = None
+for idx in range(1, len(lines)):
+    if lines[idx].strip() == "---":
+        end_idx = idx
+        break
+if end_idx is None:
+    raise SystemExit(2)
+
+frontmatter = lines[1:end_idx]
+rest = lines[end_idx + 1 :]
+indices = {}
+for idx, line in enumerate(frontmatter):
+    if ":" not in line:
+        continue
+    key = line.split(":", 1)[0].strip()
+    if key and key not in indices:
+        indices[key] = idx
+
+updates = {
+    "status": "status: closed",
+    "closed_at": f'closed_at: "{now}"',
+    "disposition": f"disposition: {disposition}",
+}
+if close_summary.strip():
+    escaped = close_summary.replace("\\", "\\\\").replace('"', '\\"')
+    updates["close_summary"] = f'close_summary: "{escaped}"'
+
+for key, line in updates.items():
+    if key in indices:
+        frontmatter[indices[key]] = line
+    else:
+        frontmatter.append(line)
+
+output = ["---", *frontmatter, "---", *rest]
+tmp_path.write_text("\n".join(output) + "\n", encoding="utf-8")
+PY
+    then
         echo "ERROR: Failed to update frontmatter status in $scope_file" >&2
         exit 1
     fi
@@ -303,7 +422,7 @@ close_loop() {
     trap - EXIT INT TERM
     release_git_lock
 
-    echo "CLOSED: $loop_id (updated $scope_file)"
+    echo "CLOSED: $loop_id disposition=$disposition (updated $scope_file)"
 }
 
 # ── Summary ───────────────────────────────────────────────────────────────
@@ -425,8 +544,8 @@ case "${1:-}" in
         collect_loops
         ;;
     close)
-        [[ -z "${2:-}" ]] && { echo "Usage: ops loops close <loop_id>"; exit 1; }
-        close_loop "$2"
+        shift
+        close_loop "$@"
         ;;
     show)
         [[ -z "${2:-}" ]] && { echo "Usage: ops loops show <loop_id>"; exit 1; }

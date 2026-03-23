@@ -11,7 +11,7 @@
 #   ops wave dispatch <WAVE_ID> --lane <lane> --task "<text>" [--from-role <role>] [--to-role <role>] [--input-refs "k=v,..."] [--output-refs "k=v,..."]
 #   ops wave collect <WAVE_ID>
 #   ops wave status [WAVE_ID]
-#   ops wave close <WAVE_ID>
+#   ops wave close <WAVE_ID> --disposition <state>
 #   ops wave preflight <domain>
 #   ops wave receipt-validate <path>
 #
@@ -32,6 +32,7 @@ SPINE_OUTBOX="${SPINE_OUTBOX:-$RUNTIME_ROOT/mailroom/outbox}"
 WAVES_DIR="$RUNTIME_ROOT/waves"
 LANES_STATE="$RUNTIME_ROOT/lanes/state.json"
 ROLE_RUNTIME_CONTRACT="$SPINE_REPO/ops/bindings/role.runtime.control.contract.yaml"
+DISPOSITION_CONTRACT="$SPINE_REPO/ops/bindings/closeout.disposition.contract.yaml"
 ENFORCED_WAVE_WORKTREE_PREFIX="${HOME}/code/.wt/agentic-spine/"
 source "$SPINE_REPO/ops/lib/git-lock.sh" 2>/dev/null || true
 
@@ -86,6 +87,54 @@ load_runtime_role_control() {
   [[ -n "$PATH_CLAIMS_FILE" ]] || PATH_CLAIMS_FILE="$SPINE_STATE/path.claims.yaml"
   [[ -n "$TRAFFIC_INDEX_FILE" ]] || TRAFFIC_INDEX_FILE="$SPINE_STATE/traffic.index.yaml"
   RUNTIME_ROLE_CONTROL_LOADED=1
+}
+
+close_dispositions_csv() {
+  local csv="landed,deferred,superseded,abandoned"
+  local accum=""
+  local disposition=""
+
+  if command -v yq >/dev/null 2>&1 && [[ -f "$DISPOSITION_CONTRACT" ]]; then
+    while IFS= read -r disposition; do
+      [[ -n "$disposition" && "$disposition" != "null" ]] || continue
+      if [[ -n "$accum" ]]; then
+        accum+=",$disposition"
+      else
+        accum="$disposition"
+      fi
+    done < <(yq e -r '.terminal_dispositions.allowed[]?' "$DISPOSITION_CONTRACT" 2>/dev/null || true)
+    [[ -n "$accum" ]] && csv="$accum"
+  fi
+
+  printf '%s\n' "$csv"
+}
+
+require_close_disposition() {
+  local disposition="${1:-}"
+  local csv="${2:-$(close_dispositions_csv)}"
+  local missing_msg="Closed work must declare disposition: ${csv//,/|}."
+  local invalid_msg="Disposition must be one of: ${csv//,/|}."
+  local item=""
+
+  if command -v yq >/dev/null 2>&1 && [[ -f "$DISPOSITION_CONTRACT" ]]; then
+    missing_msg="$(yq e -r '.messages.missing // ""' "$DISPOSITION_CONTRACT" 2>/dev/null || echo "$missing_msg")"
+    [[ -n "$missing_msg" && "$missing_msg" != "null" ]] || missing_msg="Closed work must declare disposition: ${csv//,/|}."
+    invalid_msg="$(yq e -r '.messages.invalid // ""' "$DISPOSITION_CONTRACT" 2>/dev/null || echo "$invalid_msg")"
+    [[ -n "$invalid_msg" && "$invalid_msg" != "null" ]] || invalid_msg="Disposition must be one of: ${csv//,/|}."
+  fi
+
+  if [[ -z "$disposition" ]]; then
+    echo "ERROR: $missing_msg" >&2
+    exit 1
+  fi
+
+  IFS=',' read -r -a _allowed_items <<< "$csv"
+  for item in "${_allowed_items[@]}"; do
+    [[ "$disposition" == "$item" ]] && return 0
+  done
+
+  echo "ERROR: $invalid_msg" >&2
+  exit 1
 }
 
 sync_runtime_traffic_index() {
@@ -373,7 +422,7 @@ Usage:
   ops wave ack <WAVE_ID> --lane <L> --result "text" [--lock-override "<reason>"]  Acknowledge task completion
   ops wave collect <WAVE_ID>                         Collect results from lanes
   ops wave status [WAVE_ID]                          Show wave status (or all)
-  ops wave close <WAVE_ID> [--force] [--dod-override "<reason>"] [--lock-override "<reason>"]  Close a wave (infra force requires --force, DoD force requires --dod-override)
+  ops wave close <WAVE_ID> --disposition <state> [--force] [--dod-override "<reason>"] [--lock-override "<reason>"]  Close a wave
   ops wave preflight <domain>                        Fast non-blocking preflight
   ops wave receipt-validate <path>                   Validate EXEC_RECEIPT JSON
 
@@ -1819,7 +1868,7 @@ if pf:
 print("=" * 72)
 all_done = all(c["status"] in ("done", "failed") for c in checks) if checks else True
 if all_done:
-    print("  All checks complete. Ready to close: ops wave close " + state["wave_id"])
+    print("  All checks complete. Ready to close: ops wave close " + state["wave_id"] + " --disposition landed")
 else:
     print("  Some checks still running. Re-check: ops wave status " + state["wave_id"])
 print("=" * 72)
@@ -3573,7 +3622,7 @@ else:
     if pending:
         print(f"  {pending} dispatch(es) still pending. Awaiting receipts.")
     else:
-        print(f"  Collection complete. Review before close: ops wave close {wave_id}")
+        print(f"  Collection complete. Review before close: ops wave close {wave_id} --disposition landed")
 print(f"  Summary: {summary_path}")
 print("=" * 72)
 PYCOLLECT2
@@ -3588,11 +3637,21 @@ cmd_close_v2() {
   local force=false
   local dod_override_reason=""
   local lock_override_reason=""
+  local disposition=""
+  local allowed_dispositions_csv=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --) shift ;;
       --force) force=true; shift ;;
+      --disposition)
+        if [[ $# -lt 2 || -z "${2:-}" ]]; then
+          echo "ERROR: --disposition requires a non-empty value" >&2
+          exit 1
+        fi
+        disposition="${2:-}"
+        shift 2
+        ;;
       --dod-override)
         if [[ $# -lt 2 || -z "${2:-}" ]]; then
           echo "ERROR: --dod-override requires a non-empty reason" >&2
@@ -3615,9 +3674,11 @@ cmd_close_v2() {
   done
 
   if [[ -z "$wave_id" ]]; then
-    echo "Usage: ops wave close <WAVE_ID> [--force] [--dod-override \"<reason>\"] [--lock-override \"<reason>\"]" >&2
+    echo "Usage: ops wave close <WAVE_ID> --disposition <state> [--force] [--dod-override \"<reason>\"] [--lock-override \"<reason>\"]" >&2
     exit 1
   fi
+  allowed_dispositions_csv="$(close_dispositions_csv)"
+  require_close_disposition "$disposition" "$allowed_dispositions_csv"
 
   ensure_wave_exists "$wave_id"
   wave_lock_guard "$wave_id" "close" "$lock_override_reason"
@@ -3626,7 +3687,7 @@ cmd_close_v2() {
   local sd
   sd="$(wave_state_dir "$wave_id")"
 
-  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" "$dod_override_reason" "$lock_override_reason" <<'PYCLOSE2'
+  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" "$dod_override_reason" "$lock_override_reason" "$disposition" "$allowed_dispositions_csv" <<'PYCLOSE2'
 import json, sys, os, re, fcntl
 from datetime import datetime, timezone
 
@@ -3637,6 +3698,8 @@ spine_repo = sys.argv[4]
 role_runtime_contract = sys.argv[5] if len(sys.argv) > 5 else ""
 dod_override_reason = (sys.argv[6] if len(sys.argv) > 6 else "").strip()
 lock_override_reason = (sys.argv[7] if len(sys.argv) > 7 else "").strip()
+disposition = (sys.argv[8] if len(sys.argv) > 8 else "").strip()
+allowed_dispositions = {item.strip() for item in (sys.argv[9] if len(sys.argv) > 9 else "").split(",") if item.strip()}
 lock_file = sf + ".lock"
 receipts_dir = os.path.join(sd, "receipts")
 
@@ -3715,6 +3778,13 @@ try:
     run_key_patterns = _compile_run_key_patterns(run_key_patterns_text)
 except RuntimeError as exc:
     print(f"FAIL: {exc}")
+    sys.exit(1)
+
+if not disposition:
+    print("FAIL: missing required close disposition")
+    sys.exit(1)
+if allowed_dispositions and disposition not in allowed_dispositions:
+    print(f"FAIL: invalid disposition '{disposition}'")
     sys.exit(1)
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
@@ -4080,6 +4150,7 @@ try:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     state["status"] = "closed"
     state["closed_at"] = now
+    state["disposition"] = disposition
     state["force_closed"] = bool(infra_violations)
     state["dod_overridden"] = bool(dod_violations)
     state["dod_override_reason"] = dod_override_reason if dod_violations else ""
@@ -4133,6 +4204,7 @@ close_receipt = {
     "objective": state.get("objective", ""),
     "created_at": state["created_at"],
     "closed_at": now,
+    "disposition": disposition,
     "force_closed": bool(infra_violations),
     "dod_overridden": bool(dod_violations),
     "dod_override_reason": dod_override_reason if dod_violations else "",
@@ -4166,6 +4238,7 @@ with open(receipt_path, "w") as rf:
     rf.write(f"- **Created**: {state['created_at']}\n")
     rf.write(f"- **Closed**: {now}\n")
     rf.write(f"- **Status**: closed\n\n")
+    rf.write(f"- **Disposition**: {disposition}\n\n")
     if workspace.get("enabled"):
         rf.write("## Workspace Lifecycle\n\n")
         rf.write(f"- Repo: {workspace.get('repo')}\n")
@@ -4229,6 +4302,7 @@ with open(receipt_path, "w") as rf:
     rf.write(f"---\nREADY_FOR_ADOPTION={'true' if ready_for_adoption else 'false'}\n")
 
 print(f"Wave '{state['wave_id']}' closed.")
+print(f"  Disposition: {disposition}")
 print(f"  Dispatches: {len(dispatches)} ({sum(1 for d in dispatches if d['status'] == 'done')} done, {sum(1 for d in dispatches if d['status'] == 'blocked')} blocked)")
 print(f"  Checks: {done_checks} done, {failed_checks} failed")
 print(f"  Receipts: {valid_receipt_count} valid, {len(invalid_receipts)} invalid")

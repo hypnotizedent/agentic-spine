@@ -18,6 +18,7 @@ scope: agent-governance-brief
 - **Worktrees are optional.** `./bin/ops start loop <LOOP_ID>` creates an isolated worktree if you want one. Not mandatory.
 - **Wave default:** `./bin/ops wave start <WAVE_ID> --objective "..."` auto-provisions a deterministic worktree (`~/.wt/<repo>/<WAVE_ID>`) unless `--worktree off` is set.
 - **D48 is lifecycle-aware:** classify first with `./bin/ops cap run worktree.lifecycle.reconcile -- --json`, then close loop/wave owners explicitly before any optional git cleanup.
+- **Closed work needs a terminal disposition:** `landed`, `deferred`, `superseded`, or `abandoned` must be recorded when closing loops and waves. No floating closes.
 - **Cleanup is 3-phase and token-gated:** `worktree.lifecycle.cleanup --mode report-only|archive-only|delete` and delete requires explicit token policy.
 - **Path recovery is canonicalized:** if a lane worktree path disappears, run `worktree.lifecycle.rehydrate` against the branch instead of ad-hoc `git worktree add`.
 - **Gitea is canonical** (origin). GitHub is a mirror. D62 enforces.
