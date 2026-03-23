@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-05
+last_verified: 2026-03-23
 scope: agent-governance-brief
 ---
 
@@ -46,6 +46,18 @@ scope: agent-governance-brief
 - **D54/D59:** SSOT bindings must match live infrastructure. Adding VMs/hosts requires updates in multiple SSOTs simultaneously.
 - **D58:** SSOTs with stale `last_reviewed` dates (>2 weeks) fail verify.
 
+## Authority Order
+
+- For active operational truth, prefer this order:
+  1. current operator directive
+  2. active loop scope in `$SPINE_STATE/loop-scopes/`
+  3. live runtime/broker state and current governed receipts
+  4. authoritative bindings/contracts/SSOT docs
+  5. historical evidence docs and old receipts
+  6. raw shell output
+- If raw shell output contradicts current governed truth, reconcile the contradiction. Do not answer from shell alone.
+- Old runbooks and evidence docs that are no longer active must be marked `superseded`/tombstoned with a pointer to the current authority surface.
+
 ## Work Discovery Rule
 
 - **Never fix inline.** Found a bug, drift, or missing feature? Register it first, then fix through the registration.
@@ -54,6 +66,12 @@ scope: agent-governance-brief
 - **Commits reference the loop/gap.** Prefix: `fix(LOOP-X):` or `gov(GAP-OP-NNN):`.
 - **Do not ask "want me to fix this?"** — follow the spine: register, fix, receipt.
 
+## Governed Ops First
+
+- If a governed capability exists for audit, precheck, shutdown, maintenance, reconcile, or recovery, use it before hand-rolled shell loops.
+- Raw shell is for diagnosis, bounded fallback, or physical steps that cannot go through a capability.
+- Infra loop scopes should list both guard capabilities and execution capabilities. Do not make operators rediscover the execution path from scratch.
+
 ## Query Hierarchy
 
 - **Tier 1: Direct read** — if you already know the exact file, read it directly.
@@ -61,6 +79,14 @@ scope: agent-governance-brief
 - **Tier 3: MCP (optional acceleration)** — use `spine-rag` MCP only when available.
 - **Tier 4: `rg` search** — exact-string fallback when capability/MCP discovery is unavailable.
 - **Fallback contract:** capability-first RAG is canonical; MCP is optional. Never guess.
+
+## Friction Capture Rule
+
+- Friction is not complete when it only appears in prose or an evidence note.
+- Record it with `./bin/ops cap run friction.ingest -- ...`
+- Prefer:
+  `./bin/ops cap run friction.ingest -- --loop-id <LOOP_ID> --capability <capability> --expected "..." --actual "..." --severity <low|medium|high> --auto-reconcile`
+- If the friction is a real defect, let `friction.reconcile` convert it or file the gap explicitly. Do not leave it as terminal chatter.
 
 ## Execution Focus Gate
 

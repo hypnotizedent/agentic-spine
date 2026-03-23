@@ -37,6 +37,77 @@ This is the boundary between "knowledge Ronny saved" and "behavior the spine can
 Desktop note exports, pasted chats, copied synthesis, and historical conversations are non-authoritative after import.
 They become useful only after they are folded into this doc or converted into governed task artifacts.
 
+## Operational Corrections
+
+The storage, mailroom, and closure waves exposed a repeat V3 failure mode:
+
+- agents read terminal output before governed truth
+- agents read stale evidence docs as if they were active runbooks
+- agents hand-roll shell sequences even when the spine already has the capability path
+- friction gets written as prose instead of being ingested as governed work
+
+V3 should treat that as structural drift, not personal style.
+
+### Authority Ordering
+
+When answering "what is true right now?", use this order:
+
+1. current operator directive
+2. active loop scope for the work in front of you
+3. live runtime/broker state and governed receipts
+4. authoritative contracts, bindings, and SSOT docs
+5. historical evidence and old receipts
+6. raw shell output
+
+Rules:
+
+- raw shell output does not outrank a current authoritative receipt or active loop scope
+- historical evidence may prove how a system changed, but it does not become the active runbook by accident
+- if an old runbook or evidence doc still contains instructions that are no longer true, mark it superseded or tombstoned immediately
+
+### Capability-First Execution
+
+If the spine already has a governed capability for:
+
+- precheck
+- shutdown
+- maintenance
+- audit
+- reconcile
+- friction capture
+
+use that capability before hand-rolled shell commands.
+
+Raw shell remains valid for:
+
+- diagnosis
+- bounded fallback when no governed path exists
+- physical maintenance steps that no capability can perform
+
+A successful shell sequence without governed receipts is still incomplete V3 execution.
+
+### Friction Must Become Governed Work
+
+Friction is not complete when it is only written in prose.
+
+When a surface fights the work:
+
+- ingest it with `friction.ingest`
+- tie it to the current loop
+- prefer `--auto-reconcile` when the friction should become governed cleanup
+
+Markdown-only friction notes may support the story, but they do not replace ingestion.
+
+### Supersession Discipline
+
+Transition plans and operational evidence can age faster than doctrine.
+
+Therefore:
+
+- active loop truth must supersede stale intermediate plans
+- stale operator-facing docs must be marked as superseded, not left to compete silently
+- mixed realities are a V3 failure, not a documentation nuisance
+
 ## Problem Statement
 
 The current bottleneck is interface-layer role collapse, not model capability.
@@ -62,6 +133,9 @@ Observed failures:
 9. Do not solve this with better prompting, better memory, or more chat ceremony.
 10. Workflow identity belongs to loops, waves, packets, receipts, and broker state, not branches, worktrees, or chat history.
 11. Worktrees and branches are disposable implementation plumbing. Mailroom, runtime state, and attestation are the operating system.
+12. Governed truth outranks terminal observation; stale evidence must be superseded, not rediscovered every session.
+13. If a governed capability already exists for the job, use it before raw shell.
+14. Friction that is not ingested remains drift.
 
 ## Interface Trust Model
 
