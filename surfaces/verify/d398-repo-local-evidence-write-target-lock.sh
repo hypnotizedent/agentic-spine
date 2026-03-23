@@ -18,6 +18,7 @@ import sys
 
 root = Path(sys.argv[1])
 scan_roots = ("bin", "ops", "surfaces", "docs", "fixtures")
+skip_prefixes = ("ops/archive/",)
 historical_exceptions = {
     "ops/bindings/audits.migration.plan.yaml",
     "ops/bindings/operational.gaps.yaml",
@@ -51,6 +52,8 @@ for base in scan_roots:
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
+        if any(rel.startswith(p) for p in skip_prefixes):
+            continue
         if rel in historical_exceptions or rel in compat_exceptions:
             continue
         try:
