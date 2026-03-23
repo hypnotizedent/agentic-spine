@@ -361,6 +361,18 @@ run_cap() {
       role_override_require_session_binding="$(yq e -r '.runtime_roles.session_role_override_cache.require_session_binding // true' "$role_runtime_contract" 2>/dev/null || echo "$role_override_require_session_binding")"
       role_override_require_terminal_binding="$(yq e -r '.runtime_roles.session_role_override_cache.require_terminal_role_binding // true' "$role_runtime_contract" 2>/dev/null || echo "$role_override_require_terminal_binding")"
     fi
+    local attach_admission_enabled="true"
+    local attach_admission_required_safety_csv="mutating,destructive"
+    local attach_admission_required_env_csv="SPINE_ENTRY_PACKET_PATH,SPINE_ENTRY_PACKET_HASH"
+    local attach_admission_exempt_csv="session.start,session.v3.attach,session.role.override,aof.contract.acknowledge,friction.ingest,friction.reconcile,friction.baseline.capture,worktree.lifecycle.rehydrate,worktree.lifecycle.managed.sync,session.execution.lane.bootstrap,session.execution.lane.closeout,session.execution.lane.scan"
+    if command -v yq >/dev/null 2>&1 && [[ -f "$role_runtime_contract" ]]; then
+      attach_admission_enabled="$(yq e -r '.attach_admission.enforce_top_level // true' "$role_runtime_contract" 2>/dev/null || echo true)"
+      attach_admission_required_safety_csv="$(yq e -r '.attach_admission.required_safety[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
+      attach_admission_required_env_csv="$(yq e -r '.attach_admission.required_env[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
+      attach_admission_exempt_csv="$(yq e -r '.attach_admission.exempt_capabilities[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
+    fi
+    [[ -n "$attach_admission_required_safety_csv" ]] || attach_admission_required_safety_csv="mutating,destructive"
+    [[ -n "$attach_admission_required_env_csv" ]] || attach_admission_required_env_csv="SPINE_ENTRY_PACKET_PATH,SPINE_ENTRY_PACKET_HASH"
     [[ "$role_override_cache_ttl_seconds" =~ ^[0-9]+$ ]] || role_override_cache_ttl_seconds="14400"
     local _role_override_cache="$STATE_DIR/$role_override_cache_filename"
 
@@ -487,8 +499,102 @@ run_cap() {
     echo "CWD:         $cwd"
     echo ""
 
+    # ── Prepare capture (receipt should exist even if preconditions fail) ──
+    local start_time
+    start_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local output_file="/tmp/cap_${run_key}_output.txt"
+    _cap_tmp="$output_file"
+    local exit_code=0
+    local blocked_reason=""
+
+    # ── Attach admission guard (V3 canonical ingress) ──
+    # Top-level mutating/destructive capability runs must originate from a
+    # governed attach unless explicitly allowlisted as bootstrap/control-plane
+    # infrastructure. This keeps entry-packet truth on the hot path instead of
+    # relying on ambient operator memory.
+    if [[ -z "$blocked_reason" && -z "${OPS_CAP_STACK:-}" && "$attach_admission_enabled" == "true" ]]; then
+      local attach_guard_applies=0
+      local attach_guard_exempt=0
+      local attach_key attach_value attach_entry_packet_path attach_entry_packet_hash attach_actual_hash
+      local -a attach_required_env=()
+      local -a attach_missing_env=()
+
+      IFS=',' read -r -a attach_required_env <<< "${attach_admission_required_env_csv:-}"
+      IFS=',' read -r -a _attach_safety <<< "${attach_admission_required_safety_csv:-}"
+      for attach_key in "${_attach_safety[@]:-}"; do
+        attach_key="$(printf '%s' "$attach_key" | xargs)"
+        [[ -n "$attach_key" ]] || continue
+        if [[ "$safety" == "$attach_key" ]]; then
+          attach_guard_applies=1
+          break
+        fi
+      done
+
+      if [[ "$attach_guard_applies" -eq 1 ]]; then
+        IFS=',' read -r -a _attach_exempt_caps <<< "${attach_admission_exempt_csv:-}"
+        for attach_key in "${_attach_exempt_caps[@]:-}"; do
+          attach_key="$(printf '%s' "$attach_key" | xargs)"
+          [[ -n "$attach_key" ]] || continue
+          if [[ "$name" == "$attach_key" ]]; then
+            attach_guard_exempt=1
+            break
+          fi
+        done
+
+        if [[ "$attach_guard_exempt" -eq 1 ]]; then
+          echo "ATTACH ADMISSION: allowlisted bootstrap/control-plane capability '$name'"
+        else
+          for attach_key in "${attach_required_env[@]:-}"; do
+            attach_key="$(printf '%s' "$attach_key" | xargs)"
+            [[ -n "$attach_key" ]] || continue
+            attach_value="${!attach_key:-}"
+            [[ -n "$attach_value" ]] || attach_missing_env+=("$attach_key")
+          done
+
+          attach_entry_packet_path="${SPINE_ENTRY_PACKET_PATH:-}"
+          attach_entry_packet_hash="${SPINE_ENTRY_PACKET_HASH:-}"
+
+          if (( ${#attach_missing_env[@]} > 0 )); then
+            echo "BLOCKED: attach admission required"
+            echo "Capability: $name ($safety)"
+            echo "Reason: top-level mutating/destructive execution requires a V3 attach packet in the current terminal."
+            echo "Missing env: ${attach_missing_env[*]}"
+            echo ""
+            echo "Remediation:"
+            echo "  ./bin/ops cap run session.v3.attach -- --allow-no-loop"
+            echo "  # Or launch through terminal-launch so attach state is exported automatically."
+            blocked_reason="attach_admission_required:${name}"
+            exit_code=7
+          elif [[ ! -f "$attach_entry_packet_path" ]]; then
+            echo "BLOCKED: attach admission packet missing"
+            echo "Capability: $name ($safety)"
+            echo "Entry packet path: $attach_entry_packet_path"
+            echo ""
+            echo "Remediation:"
+            echo "  ./bin/ops cap run session.v3.attach -- --allow-no-loop"
+            blocked_reason="attach_admission_packet_missing:${name}"
+            exit_code=7
+          else
+            attach_actual_hash="$(shasum -a 256 "$attach_entry_packet_path" 2>/dev/null | awk '{print $1}')"
+            if [[ -z "$attach_actual_hash" || "$attach_actual_hash" != "$attach_entry_packet_hash" ]]; then
+              echo "BLOCKED: attach admission packet hash mismatch"
+              echo "Capability: $name ($safety)"
+              echo "Entry packet path: $attach_entry_packet_path"
+              echo "Expected hash: ${attach_entry_packet_hash:-missing}"
+              echo "Actual hash: ${attach_actual_hash:-missing}"
+              echo ""
+              echo "Remediation:"
+              echo "  ./bin/ops cap run session.v3.attach -- --allow-no-loop"
+              blocked_reason="attach_admission_packet_hash_mismatch:${name}"
+              exit_code=7
+            fi
+          fi
+        fi
+      fi
+    fi
+
     # ── Approval gate (manual safety level) ──
-    if [[ "$approval" == "manual" ]]; then
+    if [[ -z "$blocked_reason" && "$approval" == "manual" ]]; then
         local auto_approve="${OPS_CAP_AUTO_APPROVE:-${SPINE_CAP_AUTO_APPROVE:-}}"
         case "$(printf '%s' "$auto_approve" | tr '[:upper:]' '[:lower:]')" in
           1|y|yes|true|auto|always)
@@ -517,14 +623,6 @@ run_cap() {
             ;;
         esac
     fi
-
-    # ── Prepare capture (receipt should exist even if preconditions fail) ──
-    local start_time
-    start_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    local output_file="/tmp/cap_${run_key}_output.txt"
-    _cap_tmp="$output_file"
-    local exit_code=0
-    local blocked_reason=""
 
     # ── Policy enforcement: proposal_required + multi_agent_writes ──
     # Skip enforcement for precondition runs, read-only caps, and governed
