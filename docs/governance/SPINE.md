@@ -14,7 +14,7 @@ All other governance docs should either be generated artifacts or scoped deep-di
 
 ```bash
 cd ~/code/agentic-spine
-./bin/ops cap run session.start
+./bin/ops cap run session.v3.attach -- --allow-no-loop
 ```
 
 ## Daily Workflow

@@ -364,14 +364,15 @@ One control-plane surface that:
 
 ### Single Entry Surface
 
-Interactive entry should resolve through one front door:
+Interactive entry should resolve through one canonical attach boundary:
 
-- terminal-launch
-- session.start
-- entry compile
-- tool launch
+- `session.v3.attach` for already-open terminals
+- `terminal-launch` only as a launcher wrapper that resolves into `session.v3.attach`
+- `session.start` only as the bootstrap subroutine nested inside attach/launcher flow
+- entry compile nested inside attach, not exposed as a second human ceremony
 
 Status views, RAG, and memory helpers are not entry surfaces.
+Any workflow that tells the operator to run `session.start` and then separately run `session.v3.attach` is split-brain and deprecated.
 
 ### Canonical Substrate
 
@@ -565,6 +566,7 @@ The canonical replacement is:
 ## Friction To Eliminate
 
 - multiple entry surfaces without compiled assignment
+- entry surfaces that require manual reconstruction of bootstrap + attach in the shell
 - context reconstruction overhead
 - manual human compilation at agent entry
 - lane and role drift
@@ -572,6 +574,7 @@ The canonical replacement is:
 - memory and history drift posing as state
 - MacBook persistence overload
 - manual insight-to-execution translation
+- gap filing or friction capture that depends on clean-worktree or direct git ceremony
 - weak remote attestation on mobile surfaces
 - operational mode inheriting code-lane assumptions
 - substrate root ambiguity across checkouts and sessions

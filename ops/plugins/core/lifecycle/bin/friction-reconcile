@@ -171,6 +171,8 @@ def main() -> int:
     ap.add_argument("--lock-file", default=str(DEFAULT_LOCK))
     ap.add_argument("--loop-id", help="Parent loop ID (e.g. LOOP-EXAMPLE-20260303). Falls back to SPINE_LOOP_ID.")
     ap.add_argument("--dedupe-threshold", type=float, default=0.85)
+    ap.add_argument("--lane-safe", action="store_true", help="Queue governed gap mutations instead of requiring direct git mutation in the current lane")
+    ap.add_argument("--lane-safe-loop-id", help="Explicit parent loop for lane-safe gap requests (falls back to --loop-id/SPINE_LOOP_ID)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
@@ -194,6 +196,8 @@ def main() -> int:
 
         matched_count = 0
         filed_count = 0
+        filing_mode = "none"
+        fallback_used = False
         pending_batch: list[dict[str, Any]] = []
         pending_indices: list[int] = []
 
@@ -257,47 +261,86 @@ def main() -> int:
             pending_indices.append(idx)
 
         filed_ids: list[str] = []
+        filed_request_paths: list[str] = []
         skipped_duplicate_ids: list[str] = []
         if pending_batch and not args.dry_run:
             with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as tmp:
                 tmp.write(build_batch_yaml(pending_batch))
                 tmp_path = Path(tmp.name)
+            direct_cmd = [str(GAPS_FILE), "--batch", str(tmp_path), "--loop-id", loop_id]
+            lane_safe_loop_id = str(args.lane_safe_loop_id or loop_id).strip()
+            lane_safe_cmd = direct_cmd + ["--lane-safe", "--lane-safe-loop-id", lane_safe_loop_id]
 
             proc = subprocess.run(
-                [str(GAPS_FILE), "--batch", str(tmp_path), "--loop-id", loop_id],
+                lane_safe_cmd if args.lane_safe else direct_cmd,
                 cwd=str(ROOT),
                 text=True,
                 capture_output=True,
                 check=False,
             )
+            output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+
+            if proc.returncode != 0 and not args.lane_safe:
+                fallback_used = True
+                proc = subprocess.run(
+                    lane_safe_cmd,
+                    cwd=str(ROOT),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+
             tmp_path.unlink(missing_ok=True)
 
-            output = (proc.stdout or "") + "\n" + (proc.stderr or "")
             for line in output.splitlines():
                 line = line.strip()
                 if line.startswith("FILED:"):
                     filed_ids.append(line.split(":", 1)[1].strip())
                 elif line.startswith("SKIPPED_DUPLICATE:"):
                     skipped_duplicate_ids.append(line.split(":", 1)[1].strip())
+                elif "LANE_SAFE_QUEUED:" in line:
+                    filed_request_paths.append(line.split("LANE_SAFE_QUEUED:", 1)[1].strip())
 
             if proc.returncode != 0:
                 raise SystemExit(f"friction.reconcile FAIL: gaps.file batch failed\n{output.strip()}")
 
+            if filed_request_paths:
+                filing_mode = "lane_safe_request"
+            elif filed_ids:
+                filing_mode = "direct"
+
         if args.dry_run:
             filed_count = len(pending_batch)
         else:
-            filed_count = min(len(pending_indices), len(filed_ids))
+            if filed_ids:
+                filed_count = min(len(pending_indices), len(filed_ids))
+            elif filed_request_paths:
+                filed_count = len(pending_indices)
+            else:
+                filed_count = 0
             matched_from_idempotent_skip = 0
-            for pos, gap_id in enumerate(filed_ids[: len(pending_indices)]):
-                row_index = pending_indices[pos]
-                rows[row_index]["status"] = "filed"
-                rows[row_index]["filed_gap_id"] = gap_id
-                rows[row_index]["filed_at_utc"] = now
-                rows[row_index]["updated_at_utc"] = now
+            if filed_ids:
+                for pos, gap_id in enumerate(filed_ids[: len(pending_indices)]):
+                    row_index = pending_indices[pos]
+                    rows[row_index]["status"] = "filed"
+                    rows[row_index]["filing_mode"] = "direct"
+                    rows[row_index]["filed_gap_id"] = gap_id
+                    rows[row_index]["filed_at_utc"] = now
+                    rows[row_index]["updated_at_utc"] = now
+            else:
+                request_path = filed_request_paths[0] if filed_request_paths else ""
+                for row_index in pending_indices:
+                    rows[row_index]["status"] = "filed"
+                    rows[row_index]["filing_mode"] = "lane_safe_request"
+                    rows[row_index]["filed_request_path"] = request_path
+                    rows[row_index]["filed_at_utc"] = now
+                    rows[row_index]["updated_at_utc"] = now
             # gaps-file can idempotently skip semantically-equivalent open gaps.
             # Treat these as matched so queue entries don't remain permanently queued.
             offset = filed_count
             for pos, gap_id in enumerate(skipped_duplicate_ids[: max(0, len(pending_indices) - offset)]):
+                row_index = pending_indices[pos]
                 row_index = pending_indices[offset + pos]
                 rows[row_index]["status"] = "matched"
                 rows[row_index]["matched_gap_id"] = gap_id
@@ -317,8 +360,11 @@ def main() -> int:
         "queued_before": len(queued_items),
         "matched": matched_count,
         "filed": filed_count,
+        "filing_mode": filing_mode,
+        "fallback_used": fallback_used,
         "dry_run": args.dry_run,
         "filed_gap_ids": filed_ids,
+        "filed_request_paths": filed_request_paths,
     }
 
     if args.json:
@@ -331,11 +377,17 @@ def main() -> int:
         print(f"queued_before: {len(queued_items)}")
         print(f"matched: {matched_count}")
         print(f"filed: {filed_count}")
+        print(f"filing_mode: {filing_mode}")
+        print(f"fallback_used: {str(fallback_used).lower()}")
         print(f"dry_run: {str(args.dry_run).lower()}")
         if filed_ids:
             print("filed_gap_ids:")
             for gid in filed_ids:
                 print(f"  - {gid}")
+        if filed_request_paths:
+            print("filed_request_paths:")
+            for path in filed_request_paths:
+                print(f"  - {path}")
 
     return 0
 

@@ -49,10 +49,14 @@ payload = json.loads(sys.argv[1])
 assert payload["status"] == "done"
 assert payload["data"]["loop"]["loop_id"] == "LOOP-TEST-ATTACH-20260322"
 assert payload["data"]["loop"]["resolution"] == "latest-loop"
+assert payload["data"]["startup"]["status"] == "done"
+assert payload["data"]["startup"]["exports"]["SPINE_SESSION_ID"].startswith("SES-")
 assert Path(payload["data"]["entry_packet"]["packet_path"]).exists()
 assert payload["data"]["entry_packet"]["packet"]["transport"] == "mailroom"
 assert Path(payload["data"]["sanitized_output_path"]).exists()
 assert payload["data"]["exports"]["SPINE_LOOP_ID"] == "LOOP-TEST-ATTACH-20260322"
+assert payload["data"]["exports"]["SPINE_SESSION_ID"].startswith("SES-")
+assert "friction_queue" in payload["data"]["friction_snapshot"]
 PY
 
 echo "PASS: session-v3-attach resolves latest loop, sanitizes imports, and compiles entry packet"

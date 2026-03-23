@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 """session-v3-attach
 
-Resolve loop truth, optionally sanitize imported text, and compile a governed
-entry packet for V3 terminal attach.
+Canonical terminal attach surface for Spine V3.
+
+This command is the human-facing entry for already-open terminals. It owns:
+- session bootstrap (unless explicitly skipped by launcher internals)
+- loop resolution
+- optional ingress sanitization
+- entry packet compilation
+- immediate friction snapshot
+
+Direct human use of ``session.start`` is deprecated; it remains the bootstrap
+subroutine used under this attach surface and by launcher internals.
 """
 
 from __future__ import annotations
@@ -11,6 +20,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -64,6 +74,17 @@ def run_json_command(cmd: list[str], *, input_text: str | None = None) -> tuple[
     return proc.returncode, payload, proc.stderr.strip()
 
 
+def run_text_command(cmd: list[str]) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        cmd,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=os.environ.copy(),
+    )
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
 def default_sanitized_output(state_root: Path, source_type: str, loop_id: str, input_path: str | None) -> Path:
     ingress_root = state_root / "ingress-sanitized"
     ingress_root.mkdir(parents=True, exist_ok=True)
@@ -75,12 +96,12 @@ def default_sanitized_output(state_root: Path, source_type: str, loop_id: str, i
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Resolve latest loop, sanitize imported text when present, and compile a governed V3 entry packet"
+        description="Canonical V3 terminal attach: bootstrap session, resolve loop truth, sanitize imported ingress when present, compile entry packet, and emit friction snapshot"
     )
     parser.add_argument("--loop-id")
     parser.add_argument("--latest-loop", action="store_true", help="Resolve the current loop via broker read API")
     parser.add_argument("--allow-no-loop", action="store_true", help="Compile an adhoc packet if no loop can be resolved")
-    parser.add_argument("--role", required=True)
+    parser.add_argument("--role", default=os.environ.get("SPINE_RUNTIME_ROLE") or os.environ.get("SPINE_ATTACH_ROLE") or "researcher")
     parser.add_argument("--lane")
     parser.add_argument("--execution-mode", choices=["code", "operational"])
     parser.add_argument("--transport", choices=["git", "mailroom"])
@@ -94,9 +115,99 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", help="Optional imported chat/note/archive file to sanitize during attach")
     parser.add_argument("--source-type", choices=["chat", "notes", "archive", "unknown"], default="unknown")
     parser.add_argument("--sanitized-output", help="Optional path for sanitized ingress artifact")
+    parser.add_argument("--skip-session-bootstrap", action="store_true", help="Internal-only launcher path: assume session.start bootstrap already ran")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--emit-exports", action="store_true")
     return parser
+
+
+def startup_lane_for_role(role: str) -> str:
+    normalized = str(role or "").strip().lower()
+    if normalized == "orchestrator":
+        return "coordinator"
+    return "scan"
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    exports: dict[str, str] = {}
+    if not path.exists():
+        return exports
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line.startswith("export ") or "=" not in line:
+            continue
+        key, value = line[len("export ") :].split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        exports[key] = value
+    return exports
+
+
+def run_session_bootstrap(args: argparse.Namespace, session_start_script: Path) -> dict[str, Any]:
+    if args.skip_session_bootstrap:
+        return {
+            "status": "skipped",
+            "lane": startup_lane_for_role(args.role),
+            "session_env_file": "",
+            "exports": {},
+        }
+
+    lane = startup_lane_for_role(args.role)
+    env = os.environ.copy()
+    env.setdefault("SPINE_MANAGED_WORKTREE_SYNC_BIN", "/usr/bin/true")
+    proc = subprocess.run(
+        [
+            str(session_start_script),
+            lane,
+            "--allow-dirty",
+            "--dirty-reason",
+            "session.v3.attach canonical reattach in existing terminal",
+            "--allow-main-divergence",
+            "--main-divergence-reason",
+            "session.v3.attach canonical reattach in existing terminal",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+    output = proc.stdout or ""
+    env_file = ""
+    for raw in output.splitlines():
+        match = re.match(r"^\s*source\s+(.*env\.sh)\s*$", raw)
+        if match:
+            env_file = match.group(1).strip()
+    if proc.returncode != 0:
+        raise RuntimeError(f"session bootstrap failed: {(proc.stderr or output).strip() or 'unknown error'}")
+    if not env_file:
+        raise RuntimeError("session bootstrap succeeded without emitting session env file")
+    exports = parse_env_file(Path(env_file))
+    return {
+        "status": "done",
+        "lane": lane,
+        "session_env_file": env_file,
+        "exports": exports,
+    }
+
+
+def collect_friction_snapshot() -> dict[str, Any]:
+    queue_script = ROOT / "ops/plugins/core/lifecycle/bin/friction-queue-status"
+    lifecycle_script = ROOT / "ops/plugins/core/ops/bin/worktree-lifecycle-reconcile"
+    snapshot: dict[str, Any] = {}
+
+    if queue_script.exists():
+        rc, payload, stderr = run_json_command([str(queue_script), "--json"])
+        snapshot["friction_queue"] = payload if rc == 0 else {"status": "failed", "message": stderr or "friction queue read failed"}
+
+    if lifecycle_script.exists():
+        rc, payload, stderr = run_json_command([str(lifecycle_script), "--json", "--brief"])
+        snapshot["lifecycle"] = payload if rc == 0 else {"status": "failed", "message": stderr or "worktree lifecycle reconcile failed"}
+
+    rc, stdout, stderr = run_text_command([str(ROOT / "bin/ops"), "status", "--brief"])
+    snapshot["ops_status"] = stdout if rc in (0, 1) else (stderr or stdout or "ops status unavailable")
+    return snapshot
 
 
 def resolve_loop_id(args: argparse.Namespace, broker_script: Path) -> tuple[str, str, dict[str, Any] | None]:
@@ -196,10 +307,18 @@ def main() -> int:
     broker_script = ROOT / "ops/plugins/core/evidence/bin/spine-control"
     sanitize_script = ROOT / "ops/plugins/core/session/bin/session-ingress-sanitize"
     entry_script = ROOT / "ops/plugins/core/session/bin/session-entry-packet"
+    session_start_script = ROOT / "ops/plugins/core/session/bin/session-start"
 
     try:
+        startup = run_session_bootstrap(args, session_start_script)
+        startup_exports = startup.get("exports", {})
+        if (not args.terminal_name) and startup_exports.get("OPS_TERMINAL_ROLE"):
+            args.terminal_name = str(startup_exports.get("OPS_TERMINAL_ROLE", ""))
+        if (not args.runtime_role or args.runtime_role == "unknown") and startup_exports.get("SPINE_RUNTIME_ROLE"):
+            args.runtime_role = str(startup_exports.get("SPINE_RUNTIME_ROLE", ""))
         loop_id, loop_resolution, latest_payload = resolve_loop_id(args, broker_script)
         sanitize_payload, sanitized_output_path = maybe_sanitize(args, state_root, sanitize_script, loop_id)
+        friction_snapshot = collect_friction_snapshot()
         if sanitize_payload and sanitize_payload.get("status") == "blocked":
             payload = {
                 "capability": "session.v3.attach",
@@ -212,7 +331,9 @@ def main() -> int:
                         "resolution": loop_resolution,
                         "latest_loop": latest_payload,
                     },
+                    "startup": startup,
                     "sanitize": sanitize_payload,
+                    "friction_snapshot": friction_snapshot,
                     "sanitized_output_path": sanitized_output_path,
                     "next_step": "Resolve sanitizer findings before attach can produce an executable packet.",
                 },
@@ -238,23 +359,26 @@ def main() -> int:
             "SPINE_V3_ATTACH_RESOLUTION": loop_resolution,
             "SPINE_V3_SANITIZED_OUTPUT_PATH": sanitized_output_path,
         }
+        exports.update({k: v for k, v in startup_exports.items() if k})
         payload = {
             "capability": "session.v3.attach",
             "schema_version": "1.0",
             "status": "done",
             "generated_at": utc_now(),
             "data": {
-                "loop": {
-                    "loop_id": loop_id,
-                    "resolution": loop_resolution,
-                    "latest_loop": latest_payload,
+                    "loop": {
+                        "loop_id": loop_id,
+                        "resolution": loop_resolution,
+                        "latest_loop": latest_payload,
+                    },
+                    "startup": startup,
+                    "sanitize": sanitize_payload,
+                    "friction_snapshot": friction_snapshot,
+                    "sanitized_output_path": sanitized_output_path,
+                    "entry_packet": entry_data,
+                    "exports": exports,
+                    "next_step": packet.get("first_command", ""),
                 },
-                "sanitize": sanitize_payload,
-                "sanitized_output_path": sanitized_output_path,
-                "entry_packet": entry_data,
-                "exports": exports,
-                "next_step": packet.get("first_command", ""),
-            },
         }
     except Exception as exc:
         payload = {
@@ -284,12 +408,18 @@ def main() -> int:
         return 0
 
     print("session.v3.attach")
+    print(f"session_id: {startup_exports.get('SPINE_SESSION_ID', 'none')}")
+    print(f"startup_lane: {startup.get('lane', 'none')}")
     print(f"loop_id: {loop_id or 'none'}")
     print(f"resolution: {loop_resolution}")
     print(f"packet_path: {entry_data.get('packet_path', '')}")
     print(f"packet_hash: {entry_data.get('packet_hash', '')}")
     print(f"execution_mode: {packet.get('execution_mode', '')}")
     print(f"transport: {packet.get('transport', '')}")
+    queue_summary = friction_snapshot.get("friction_queue", {}).get("summary", {}) if isinstance(friction_snapshot.get("friction_queue"), dict) else {}
+    lifecycle_summary = friction_snapshot.get("lifecycle", {}).get("summary", {}) if isinstance(friction_snapshot.get("lifecycle"), dict) else {}
+    print(f"friction_queued: {queue_summary.get('queued', 0)}")
+    print(f"lifecycle_issues: {lifecycle_summary.get('issue_count', lifecycle_summary.get('issues', 0))}")
     print(f"sanitized_output_path: {sanitized_output_path or 'none'}")
     print(f"next_step: {packet.get('first_command', '')}")
     return 0

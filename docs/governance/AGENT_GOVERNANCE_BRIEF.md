@@ -71,8 +71,8 @@ scope: agent-governance-brief
 
 ## Verify & Receipts
 
-- Session startup baseline: run `./bin/ops cap run session.start` (fast mode default).
-- Optional deep startup diagnostics: run `./bin/ops cap run session.start full` when explicitly requested.
+- Canonical terminal attach: run `./bin/ops cap run session.v3.attach -- --allow-no-loop`.
+- `session.start` is the bootstrap subroutine beneath attach/launcher flows, not the public human entry command.
 - Canonical nightly closeout SOP entrypoint: run `./bin/ops cap run nightly.closeout -- --mode dry-run`, then `./bin/ops cap run nightly.closeout -- --mode apply`.
 - Domain work: run `./bin/ops cap run verify.route.recommend` and then `./bin/ops cap run verify.run -- domain <domain>` (pack-level commands remain available for diagnostics).
 - Certification: run `./bin/ops cap run verify.run -- release` or `./bin/ops cap run verify.release.run` for release/nightly and final cutover.
@@ -82,8 +82,8 @@ scope: agent-governance-brief
 
 ## Quick Commands
 
-- `./bin/ops cap run session.start` — fast startup baseline
-- `./bin/ops cap run session.start full` — deep startup diagnostics (opt-in)
+- `./bin/ops cap run session.v3.attach -- --allow-no-loop` — canonical terminal entry
+- `./bin/ops cap run session.start full` — deep bootstrap diagnostics only (subroutine/debug use)
 - `./bin/ops cap list` — discover capabilities
 - `./bin/ops status` — unified work status (loops + gaps + inbox)
 - `./bin/ops loops list --open` — list open loops only

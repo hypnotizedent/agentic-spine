@@ -16,7 +16,7 @@ Use this file only as an entry pointer plus generated metadata block.
 
 ```bash
 cd ~/code/agentic-spine
-./bin/ops cap run session.start
+./bin/ops cap run session.v3.attach -- --allow-no-loop
 ```
 <!-- /SPINE_STARTUP_BLOCK -->
 
