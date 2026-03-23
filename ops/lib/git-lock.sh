@@ -11,8 +11,12 @@
 #
 set -euo pipefail
 
-ROOT="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# Derive ROOT from script location, ignoring ambient SPINE_REPO leak
+# (ambient env can point to wrong worktree/checkout from previous operations)
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT/ops/lib/runtime-paths.sh"
+# Set SPINE_CODE explicitly before calling resolve, so it uses script-derived root
+export SPINE_CODE="$ROOT"
 spine_runtime_resolve_paths
 
 LOCKS_DIR="${SPINE_LOCKS:-$HOME/code/.runtime/spine/locks}"
