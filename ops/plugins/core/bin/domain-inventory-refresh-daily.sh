@@ -20,8 +20,8 @@ echo "[domain-inventory-refresh-daily] worktree_identity=${OPS_WORKTREE_IDENTITY
 
 spine_job_run \
   "domain-inventory-refresh-daily:domain-inventory-refresh" \
-  "$REFRESH_CMD" --once --check
+  "$REFRESH_CMD" --once --apply
 
-echo "[domain-inventory-refresh-daily] tracked promotion remains manual"
+echo "[domain-inventory-refresh-daily] autonomous ledger reconcile enabled (media/ha/network)"
 
 echo "[domain-inventory-refresh-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
