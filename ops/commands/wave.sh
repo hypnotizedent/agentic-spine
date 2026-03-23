@@ -1646,7 +1646,8 @@ refs = json.loads(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else {}
 required = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else []
 packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
 loop_id = str(packet.get("loop_id") or state.get("wave_id") or "").strip()
-import os; state_root = os.environ.get("SPINE_STATE", "mailroom/state")
+import os
+state_root = os.environ.get("SPINE_STATE", "mailroom/state")
 scope_path = f"{state_root}/loop-scopes/{loop_id}.scope.md" if loop_id else ""
 auto_map = {
     "research_brief_ref": scope_path,
@@ -1666,7 +1667,8 @@ refs = json.loads(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else {}
 required = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else []
 packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
 loop_id = str(packet.get("loop_id") or state.get("wave_id") or "").strip()
-import os; state_root = os.environ.get("SPINE_STATE", "mailroom/state")
+import os
+state_root = os.environ.get("SPINE_STATE", "mailroom/state")
 scope_path = f"{state_root}/loop-scopes/{loop_id}.scope.md" if loop_id else ""
 auto_map = {
     "execution_plan_ref": scope_path,

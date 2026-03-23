@@ -580,6 +580,9 @@ spine_resolve_mailroom_path() {
       printf '%s\n' "$mailroom_root"
       ;;
     mailroom/*)
+      # Generic catch: any mailroom/* path not matched above goes to external
+      # mailroom root, NEVER to repo root.  Added by LOOP-MAILROOM-
+      # EXTERNALIZATION-CLOSEOUT-20260323 to stop repo-local reintroduction.
       printf '%s\n' "$mailroom_root/${path#mailroom/}"
       ;;
     *)
