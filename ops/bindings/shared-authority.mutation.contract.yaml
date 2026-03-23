@@ -1,0 +1,80 @@
+schema_version: "1.0"
+status: authoritative
+owner: "@ronny"
+updated_at: "2026-03-23T00:00:00Z"
+description: >
+  Mutation ceremony contract for shared_authority.db.
+  All write operations on the gaps SQLite authority must pass through
+  governed execution (cap run) or provide an explicit override with reason.
+
+authority_surface: shared_authority.db
+bridge_binary: ops/plugins/core/lifecycle/bin/gaps-authority-bridge
+library: ops/plugins/core/lifecycle/lib/gaps_sql_authority.py
+
+mutation_ceremony:
+  env_var: SPINE_CAP_RUN_KEY
+  set_by: ops/commands/cap.sh
+  description: >
+    cap.sh generates a unique run key (CAP-<timestamp>__<cap_name>__R<rand>)
+    and exports it as SPINE_CAP_RUN_KEY for the duration of governed execution.
+
+  mutating_commands:
+    - upsert
+    - close
+    - reparent
+
+  read_commands:
+    - query
+    - bootstrap
+    - project
+    - next-id
+    - parity
+
+  enforcement:
+    - check: SPINE_CAP_RUN_KEY env var must be non-empty
+    - on_missing: exit 1 with MUTATION BLOCKED message to stderr
+    - override_flag: --ungoverned-override
+    - override_requires: --reason (non-empty string)
+    - override_behavior: loud warning to stderr, mutation proceeds
+
+  audit_fields:
+    table: gap_events
+    columns:
+      run_key:
+        type: TEXT
+        nullable: true
+        description: >
+          The SPINE_CAP_RUN_KEY value from governed execution.
+          NULL for override or legacy (pre-ceremony) mutations.
+      mutation_source:
+        type: TEXT
+        not_null: true
+        default: legacy
+        allowed_values:
+          - governed   # SPINE_CAP_RUN_KEY was present
+          - override   # --ungoverned-override with --reason
+          - legacy     # pre-ceremony records or bootstrap imports
+
+governed_callers:
+  - capability: gaps.file
+    script: ops/plugins/core/loops/bin/gaps-file
+    notes: >
+      Invoked via cap run, SPINE_CAP_RUN_KEY injected by cap.sh.
+      Calls bridge upsert subcommand.
+  - capability: gaps.close
+    script: ops/plugins/core/loops/bin/gaps-close
+    notes: >
+      Invoked via cap run, SPINE_CAP_RUN_KEY injected by cap.sh.
+      Calls bridge close subcommand.
+
+override_protocol:
+  usage: >
+    For emergency or bootstrap use only. The override creates a loud
+    warning on stderr and records mutation_source=override in the
+    gap_events audit trail.
+  example: >
+    gaps-authority-bridge upsert --json '...' --ungoverned-override --reason "emergency bootstrap"
+  policy: >
+    Overrides should be rare. Any override without a substantive reason
+    is a governance violation. Automated reconciliation processes that
+    need ungoverned access should be migrated to cap-run wrappers.
