@@ -252,7 +252,7 @@ if [[ "${DIRTY_COUNT:-0}" != "0" ]]; then
 fi
 
 # ─── Multi-agent session detection ──────────────────────────
-SESSIONS_DIR="$SPINE_ROOT/mailroom/state/sessions"
+SESSIONS_DIR="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/sessions"
 SESSION_TTL=${SPINE_SESSION_TTL:-14400}  # 4 hours
 ACTIVE_SESSIONS=0
 NOW=$(date +%s)

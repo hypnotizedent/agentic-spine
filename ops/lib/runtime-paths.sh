@@ -455,6 +455,11 @@ spine_runtime_resolve_paths() {
     SPINE_AGENT_CONTEXT_FILE="$agent_context_file"
 }
 
+# COMPATIBILITY SHIM: resolves legacy mailroom/state/ prefixed paths to $SPINE_STATE/.
+# New code should use $SPINE_STATE/ directly. This resolver exists only for:
+# - legacy callers that pass mailroom/state/ prefixed paths
+# - test harnesses that simulate the old layout
+# Retirement trigger: when no caller passes mailroom/* prefixed paths (audit via grep).
 spine_resolve_mailroom_path() {
   local path="$1"
   local repo="${SPINE_TARGET_REPO:-${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}}"

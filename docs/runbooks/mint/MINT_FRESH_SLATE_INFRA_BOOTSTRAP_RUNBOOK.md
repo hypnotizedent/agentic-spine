@@ -102,7 +102,7 @@ Run before any execution begins:
 
 ```bash
 # In agentic-spine
-cat > mailroom/state/loop-scopes/LOOP-MINT-FRESH-SLATE-INFRA-BOOTSTRAP-<DATE>.scope.md <<'EOF'
+cat > "$SPINE_STATE/loop-scopes/LOOP-MINT-FRESH-SLATE-INFRA-BOOTSTRAP-<DATE>.scope.md" <<'EOF'
 ---
 loop_id: LOOP-MINT-FRESH-SLATE-INFRA-BOOTSTRAP-<DATE>
 status: open
@@ -181,7 +181,7 @@ Add two entries with `status: planning`:
 ### 3.3 Commit PLAN phase
 
 ```bash
-git add ops/bindings/vm.lifecycle.yaml mailroom/state/loop-scopes/LOOP-*.scope.md
+git add ops/bindings/vm.lifecycle.yaml
 git commit -m "gov(LOOP-MINT-FRESH-SLATE-INFRA-BOOTSTRAP-<DATE>): reserve VM 212 (mint-data) + VM 213 (mint-apps)"
 ```
 

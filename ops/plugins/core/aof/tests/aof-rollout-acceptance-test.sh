@@ -15,11 +15,12 @@ OPERATOR_TOKEN="${MAILROOM_BRIDGE_TOKEN:-}"
 MONITOR_TOKEN="${MAILROOM_BRIDGE_MONITOR_TOKEN:-}"
 
 # Try loading from state files if env not set
-if [[ -z "$OPERATOR_TOKEN" && -f "$SP/mailroom/state/mailroom-bridge.token" ]]; then
-  OPERATOR_TOKEN="$(tr -d '\r\n' < "$SP/mailroom/state/mailroom-bridge.token")"
+_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+if [[ -z "$OPERATOR_TOKEN" && -f "$_STATE/mailroom-bridge.token" ]]; then
+  OPERATOR_TOKEN="$(tr -d '\r\n' < "$_STATE/mailroom-bridge.token")"
 fi
-if [[ -z "$MONITOR_TOKEN" && -f "$SP/mailroom/state/mailroom-bridge-monitor.token" ]]; then
-  MONITOR_TOKEN="$(tr -d '\r\n' < "$SP/mailroom/state/mailroom-bridge-monitor.token")"
+if [[ -z "$MONITOR_TOKEN" && -f "$_STATE/mailroom-bridge-monitor.token" ]]; then
+  MONITOR_TOKEN="$(tr -d '\r\n' < "$_STATE/mailroom-bridge-monitor.token")"
 fi
 
 if [[ -z "$OPERATOR_TOKEN" ]]; then

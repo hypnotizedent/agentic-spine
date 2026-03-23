@@ -203,7 +203,7 @@ STATEFUL_BREAK_GLASS_ACK_20260308=1 ./bin/ops cap run docker.compose.down -- fin
 3. **Verify Artifact Quality**: Restore to test environment first
 4. **Get Approval**: Explicit operator approval before production restore
 5. **Execute Restore**: Follow restore runbook exactly
-6. **Root Cause**: Document incident chain in `mailroom/state/` with evidence
+6. **Root Cause**: Document incident chain in `$SPINE_STATE/` with evidence
 
 ### If Stateful Guard Blocks Operation
 
@@ -308,8 +308,8 @@ STATEFUL_BREAK_GLASS_ACK_20260308=1 ./bin/ops cap run docker.compose.down -- fin
 
 - **Doctrine**: `docs/governance/FINANCE_STACK_DOCTRINE_V1.md`
 - **Backup Runbook**: `docs/governance/FINANCE_STACK_BACKUP_RESTORE.md`
-- **Incident Receipt**: `mailroom/state/paperless-backup-incident/root-cause-receipt-20260308.md`
-- **Stateful Service Matrix**: `mailroom/state/paperless-backup-incident/stateful-service-matrix-20260308.yaml`
+- **Incident Receipt**: `$SPINE_STATE/paperless-backup-incident/root-cause-receipt-20260308.md`
+- **Stateful Service Matrix**: `$SPINE_STATE/paperless-backup-incident/stateful-service-matrix-20260308.yaml`
 - **Gap Filing**: `./bin/ops skill gaps.file -- --parent-loop LOOP-{CURRENT}`
 
 ---

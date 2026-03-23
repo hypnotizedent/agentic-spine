@@ -44,7 +44,7 @@ SPINE_LOOP_ID=LOOP-EXAMPLE-20260221 ./bin/ops cap run proposals.submit "what you
 
 - `proposals.submit` now fails fast if loop binding is missing (`loop_id: null` is disallowed).
 - `proposals.submit --help` is safe and does not create a proposal.
-- Loop ids must point to an existing non-closed scope in `mailroom/state/loop-scopes/`.
+- Loop ids must point to an existing non-closed scope in `$SPINE_STATE/loop-scopes/`.
 
 ### Queue Status Semantics
 

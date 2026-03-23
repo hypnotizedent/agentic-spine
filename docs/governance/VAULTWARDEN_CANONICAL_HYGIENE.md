@@ -102,14 +102,14 @@ Dry-run:
 
 ```bash
 ./bin/ops cap run vaultwarden.cleanup.window -- \
-  --input mailroom/state/vaultwarden-audit/duplicate-trash-decisions-YYYYMMDD.json
+  --input $SPINE_STATE/vaultwarden-audit/duplicate-trash-decisions-YYYYMMDD.json
 ```
 
 Execute cleanup window:
 
 ```bash
 ./bin/ops cap run vaultwarden.cleanup.window -- \
-  --input mailroom/state/vaultwarden-audit/duplicate-trash-decisions-YYYYMMDD.json \
+  --input $SPINE_STATE/vaultwarden-audit/duplicate-trash-decisions-YYYYMMDD.json \
   --execute \
   --confirm GO-LIVE-VAULTWARDEN-CLEANUP
 ```

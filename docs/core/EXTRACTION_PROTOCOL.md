@@ -149,7 +149,7 @@ Q3: How much documentation needed?
 - All utility requirements (registry entries)
 - `ops/bindings/<stack>.binding.yaml` — stack-specific config
 - `/Users/ronnyworks/code/workbench/docs/brain-lessons/<STACK>_LESSONS.md` — hard-won knowledge
-- Loop in `mailroom/state/loop-scopes/` — extraction tracking
+- Loop in `$SPINE_STATE/loop-scopes/` — extraction tracking
 
 **Does NOT create:**
 - Dedicated folder under `docs/governance/`
@@ -193,7 +193,7 @@ Before marking extraction complete:
 - [ ] Compose files in STACK_REGISTRY.yaml
 - [ ] Binding file: `ops/bindings/<stack>.binding.yaml`
 - [ ] Lessons file: `/Users/ronnyworks/code/workbench/docs/brain-lessons/<STACK>_LESSONS.md`
-- [ ] Loop scope in `mailroom/state/loop-scopes/`
+- [ ] Loop scope in `$SPINE_STATE/loop-scopes/`
 - [ ] No `docs/<stack>/` folder (use brain/lessons)
 - [ ] `./bin/ops cap run spine.verify` passes
 
@@ -228,4 +228,4 @@ Before marking extraction complete:
 | `docs/core/AGENTIC_GAP_MAP.md` | Tracks extraction coverage |
 | `docs/governance/SERVICE_REGISTRY.yaml` | Service locations |
 | `docs/governance/STACK_REGISTRY.yaml` | Compose file authority |
-| `mailroom/state/INFRA_MASTER_PLAN.md` | VM architecture roadmap |
+| `$SPINE_STATE/INFRA_MASTER_PLAN.md` | VM architecture roadmap |

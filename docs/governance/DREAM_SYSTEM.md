@@ -95,7 +95,7 @@ The human-facing surface. Raycast scripts for quick actions. SSH targets with LA
 **What it enforces**:
 1. **Worktree isolation (D140)**: Rejects agents in managed worktree prefixes unless `OPS_WORKTREE_IDENTITY` is set
 2. **Terminal role validation**: Checks `terminal.role.contract.yaml` to establish agent role context
-3. **Multi-agent detection**: Scans `mailroom/state/sessions/` for other active agents (4-hour TTL via `SPINE_SESSION_TTL`)
+3. **Multi-agent detection**: Scans `$SPINE_STATE/sessions/` for other active agents (4-hour TTL via `SPINE_SESSION_TTL`)
 4. **Dynamic governance brief**: Delivers current governance context (active gates, open gaps, pending proposals)
 5. **Proposal queue gating**: Alerts if >5 pending proposals in `mailroom/outbox/proposals/`
 

@@ -20,7 +20,7 @@ spine_launcher_archive_control_worktree_state() {
   export SPINE_CODE="${SPINE_CODE:-$control_root}"
   spine_runtime_resolve_paths >/dev/null 2>&1 || true
 
-  archive_root="$(spine_resolve_mailroom_path 'mailroom/state/quarantine/launcher-control-worktree')"
+  archive_root="${SPINE_STATE}/quarantine/launcher-control-worktree"
   stamp="$(date -u +%Y%m%d-%H%M%S)"
   archive_dir="${archive_root}/$(basename "$control_path")-${stamp}-$$-${reason}"
   mkdir -p "$archive_dir"

@@ -16,7 +16,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Verify Command: `./bin/ops cap run verify.core.run`
 
 ## Write Scope
-- `mailroom/state/`
+- `$SPINE_STATE/`
 - `evidence/sessions/`
 
 ## Capabilities (2)

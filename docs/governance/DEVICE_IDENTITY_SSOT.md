@@ -397,7 +397,7 @@ This SSOT does **not** track loop status (it drifts too easily).
 
 Use the loop ledger instead:
 - `./bin/ops loops list --open`
-- `mailroom/state/loop-scopes/*.scope.md`
+- `$SPINE_STATE/loop-scopes/*.scope.md`
 
 ---
 

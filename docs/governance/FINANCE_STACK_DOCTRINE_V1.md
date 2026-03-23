@@ -154,7 +154,7 @@ For every critical finance service, Spine must be able to answer:
 
 ### Restore Domain
 - `docs/governance/{SERVICE}_BACKUP_RESTORE.md`: Per-service restore runbook
-- Quarterly restore drill receipts in `evidence/sessions/` or `mailroom/state/`
+- Quarterly restore drill receipts in `evidence/sessions/` or `$SPINE_STATE/`
 - `backup.inventory.yaml` restore classes: `tier1-small-state-dry-run-quarterly`, etc.
 
 ### Runtime Domain
@@ -212,7 +212,7 @@ See companion document: `docs/governance/FINANCE_STACK_OPERATOR_CHECKLIST.md`
 - **Canonical Home**: `docs/governance/FINANCE_STACK_DOCTRINE_V1.md`
 - **Enforcement Surfaces**: `backup.inventory.yaml`, `stateful.compose.guard.yaml`, `finance-stack-backup.sh`
 - **Verification Gates**: D-series gates for backup/finance domains (see `ops/bindings/gate.registry.yaml`)
-- **Incident Receipt**: `mailroom/state/paperless-backup-incident/root-cause-receipt-20260308.md`
-- **Stateful Service Matrix**: `mailroom/state/paperless-backup-incident/stateful-service-matrix-20260308.yaml`
+- **Incident Receipt**: `$SPINE_STATE/paperless-backup-incident/root-cause-receipt-20260308.md`
+- **Stateful Service Matrix**: `$SPINE_STATE/paperless-backup-incident/stateful-service-matrix-20260308.yaml`
 
 **This doctrine is frozen as v1.0 on 2026-03-08. Future changes require explicit version increment and rationale.**

@@ -41,7 +41,7 @@ PLAN ──▶ PROVISION ──▶ REGISTER ──▶ VALIDATE ──▶ OPERATE
 
 | Artifact | Location | Description |
 |----------|----------|-------------|
-| Loop scope file | `mailroom/state/loop-scopes/LOOP-<NAME>-<DATE>.scope.md` | Why this VM exists, what it hosts, success criteria |
+| Loop scope file | `$SPINE_STATE/loop-scopes/LOOP-<NAME>-<DATE>.scope.md` | Why this VM exists, what it hosts, success criteria |
 | VMID reservation | `ops/bindings/vm.lifecycle.yaml` | Entry with `status: planning`, assigned VMID |
 | Profile selection | `ops/bindings/infra.vm.profiles.yaml` | Which bootstrap profile applies (e.g. `spine-ready-v1`) |
 

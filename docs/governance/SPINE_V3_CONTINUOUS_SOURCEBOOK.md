@@ -2399,7 +2399,7 @@ So operational mode is only acknowledged at wave creation time. It is not respec
 The proof is in your actual artifacts: the blocker stubs under  
   
 ```
-mailroom/state/orchestration/LOOP-SHOP-STORAGE-CUTOVER-20260322/stubs/
+$SPINE_STATE/orchestration/LOOP-SHOP-STORAGE-CUTOVER-20260322/stubs/
 
 ```
   

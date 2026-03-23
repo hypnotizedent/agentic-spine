@@ -56,6 +56,11 @@ _repo_abs_path() {
     echo ""
     return
   fi
+  # Resolve $SPINE_STATE references from contracts
+  case "$p" in
+    '$SPINE_STATE'/*) echo "${SPINE_STATE}/${p#\$SPINE_STATE/}"; return ;;
+    '$SPINE_STATE')   echo "${SPINE_STATE}"; return ;;
+  esac
   case "$p" in
     runtime/*|mailroom/*|evidence/*)
       if declare -F spine_resolve_mailroom_path >/dev/null 2>&1; then
@@ -110,21 +115,23 @@ load_runtime_role_control() {
   if [[ "$RUNTIME_ROLE_CONTROL_LOADED" -eq 1 ]]; then
     return
   fi
-  local path_claims_rel="mailroom/state/path.claims.yaml"
-  local traffic_index_rel="mailroom/state/traffic.index.yaml"
+  local path_claims_file="$SPINE_STATE/path.claims.yaml"
+  local traffic_index_file="$SPINE_STATE/traffic.index.yaml"
 
   if command -v yq >/dev/null 2>&1 && [[ -f "$ROLE_RUNTIME_CONTRACT" ]]; then
-    path_claims_rel="$(yq e -r '.path_claims.state_file // "mailroom/state/path.claims.yaml"' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo "$path_claims_rel")"
+    local raw_pc raw_ti
+    raw_pc="$(yq e -r '.path_claims.state_file // ""' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || true)"
     PATH_CLAIMS_TTL_MINUTES="$(yq e -r '.path_claims.default_ttl_minutes // 180' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo 180)"
     PATH_CLAIMS_NON_OVERLAP="$(yq e -r '.path_claims.require_non_overlapping_active_claims // true' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo true)"
-    traffic_index_rel="$(yq e -r '.traffic_index.state_file // "mailroom/state/traffic.index.yaml"' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo "$traffic_index_rel")"
+    raw_ti="$(yq e -r '.traffic_index.state_file // ""' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || true)"
+    # Resolve contract paths: $SPINE_STATE refs, mailroom/state compat, or fallback
+    [[ -n "$raw_pc" && "$raw_pc" != "null" ]] && path_claims_file="$(_repo_abs_path "$raw_pc")"
+    [[ -n "$raw_ti" && "$raw_ti" != "null" ]] && traffic_index_file="$(_repo_abs_path "$raw_ti")"
   fi
 
   [[ "$PATH_CLAIMS_TTL_MINUTES" =~ ^[0-9]+$ ]] || PATH_CLAIMS_TTL_MINUTES="180"
-  PATH_CLAIMS_FILE="$(_repo_abs_path "$path_claims_rel")"
-  TRAFFIC_INDEX_FILE="$(_repo_abs_path "$traffic_index_rel")"
-  [[ -n "$PATH_CLAIMS_FILE" ]] || PATH_CLAIMS_FILE="$SPINE_STATE/path.claims.yaml"
-  [[ -n "$TRAFFIC_INDEX_FILE" ]] || TRAFFIC_INDEX_FILE="$SPINE_STATE/traffic.index.yaml"
+  PATH_CLAIMS_FILE="${path_claims_file:-$SPINE_STATE/path.claims.yaml}"
+  TRAFFIC_INDEX_FILE="${traffic_index_file:-$SPINE_STATE/traffic.index.yaml}"
   RUNTIME_ROLE_CONTROL_LOADED=1
 }
 
@@ -1647,7 +1654,7 @@ required = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else []
 packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
 loop_id = str(packet.get("loop_id") or state.get("wave_id") or "").strip()
 import os
-state_root = os.environ.get("SPINE_STATE", "mailroom/state")
+state_root = os.environ.get("SPINE_STATE", os.path.join(os.environ.get("HOME", ""), "code", ".runtime", "spine", "state"))
 scope_path = f"{state_root}/loop-scopes/{loop_id}.scope.md" if loop_id else ""
 auto_map = {
     "research_brief_ref": scope_path,
@@ -1668,7 +1675,7 @@ required = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else []
 packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
 loop_id = str(packet.get("loop_id") or state.get("wave_id") or "").strip()
 import os
-state_root = os.environ.get("SPINE_STATE", "mailroom/state")
+state_root = os.environ.get("SPINE_STATE", os.path.join(os.environ.get("HOME", ""), "code", ".runtime", "spine", "state"))
 scope_path = f"{state_root}/loop-scopes/{loop_id}.scope.md" if loop_id else ""
 auto_map = {
     "execution_plan_ref": scope_path,

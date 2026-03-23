@@ -12,7 +12,7 @@ set -euo pipefail
 #   agent-park-inbox.sh                  # Park all inbox files
 #   agent-park-inbox.sh "^S2026"         # Keep files starting with S2026
 #
-# Parked files go to: mailroom/state/backups/inbox-parked/<timestamp>/
+# Parked files go to: $SPINE_STATE/backups/inbox-parked/<timestamp>/
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   sed -n '3,14p' "$0" | sed 's/^# //' | sed 's/^#//'
