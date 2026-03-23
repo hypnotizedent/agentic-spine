@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
+SPINE_ROOT="$ROOT"
 source "${SPINE_ROOT}/ops/lib/runtime-paths.sh"
 
 PASS=0
@@ -90,12 +90,36 @@ assert_eq "$t2_target" "$EXPLICIT_CANON" "explicit target repo wins"
 assert_eq "$t2_repo" "$EXPLICIT_CANON" "compat SPINE_REPO follows explicit target"
 
 echo ""
+echo "── T2b: missing explicit SPINE_TARGET_REPO falls back to current checkout ──"
+t2b_missing="$TMPDIR_BASE/missing-control-plane"
+t2b_out="$(
+  cd "$TARGET"
+  env SPINE_TARGET_REPO="$t2b_missing" SPINE_REPO="$ROOT" SPINE_CODE="$ROOT" bash -lc '
+    source "'"$ROOT"'/ops/lib/runtime-paths.sh"
+    spine_runtime_resolve_paths
+    printf "%s|%s\n" "$SPINE_TARGET_REPO" "$SPINE_REPO"
+  '
+)"
+t2b_target="${t2b_out%%|*}"
+t2b_repo="${t2b_out##*|}"
+assert_eq "$t2b_target" "$TARGET_CANON" "missing explicit target falls back to current checkout"
+assert_eq "$t2b_repo" "$TARGET_CANON" "compat SPINE_REPO follows fallback target"
+
+echo ""
 echo "── T3: cap runner advertises explicit target repo ──"
 t3_out="$(
   cd "$TARGET"
   env -u SPINE_TARGET_REPO SPINE_REPO="$ROOT" SPINE_CODE="$ROOT" "$ROOT/bin/ops" cap run worktree.lifecycle.reconcile -- --brief
 )"
 assert_eq "$(printf '%s\n' "$t3_out" | grep -E '^(PASS|FAIL) issues=' | tail -1)" "PASS issues=0 warnings=0 worktrees=0 temp_clones=0 root=1 stashes=0" "cap-run executes against current checkout, not inherited root repo"
+
+echo ""
+echo "── T3b: cap runner ignores missing ambient SPINE_TARGET_REPO ──"
+t3b_out="$(
+  cd "$TARGET"
+  env SPINE_TARGET_REPO="$t2b_missing" SPINE_REPO="$ROOT" SPINE_CODE="$ROOT" "$ROOT/bin/ops" cap run worktree.lifecycle.reconcile -- --brief
+)"
+assert_eq "$(printf '%s\n' "$t3b_out" | grep -E '^(PASS|FAIL) issues=' | tail -1)" "PASS issues=0 warnings=0 worktrees=0 temp_clones=0 root=1 stashes=0" "cap-run ignores missing ambient target repo and uses current checkout"
 
 echo ""
 echo "── T4: schema conventions audit honors current checkout over inherited SPINE_ROOT ──"
@@ -349,7 +373,7 @@ git -C "$MISDIRECT_ROOT_T8" branch -M main >/dev/null
 set +e
 t8_out="$(
   cd "$D396_WORKTREE"
-  env SPINE_ROOT="$MISDIRECT_ROOT_T8" "$D396_WORKTREE/surfaces/verify/d396-boring-root-model-lock.sh" 2>&1
+  env SPINE_ROOT="$MISDIRECT_ROOT_T8" SPINE_TARGET_REPO="$MISDIRECT_ROOT_T8/missing-control-plane" "$D396_WORKTREE/surfaces/verify/d396-boring-root-model-lock.sh" 2>&1
 )"
 t8_status=$?
 set -e
@@ -399,7 +423,8 @@ mkdir -p \
 set +e
 t9_out="$(
   cd "$D397_FIXTURE"
-  env -u SPINE_TARGET_REPO -u SPINE_REPO \
+  env -u SPINE_REPO \
+    SPINE_TARGET_REPO="$MISDIRECT_ROOT_T9/missing-control-plane" \
     SPINE_ROOT="$MISDIRECT_ROOT_T9" \
     SPINE_CODE="$ROOT" \
     SPINE_RUNTIME_ROOT="$D397_RUNTIME_ROOT" \

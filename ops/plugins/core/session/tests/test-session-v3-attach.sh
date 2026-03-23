@@ -60,11 +60,26 @@ assert payload["data"]["exports"]["SPINE_LOOP_ID"] == "LOOP-TEST-ATTACH-20260322
 assert "friction_queue" in payload["data"]["friction_snapshot"]
 PY
 
-fail_json="$(env -u SPINE_TARGET_REPO -u SPINE_CODE \
+clean_json="$(env -u SPINE_CODE \
   SPINE_ROOT="$tmpdir/stale-root" \
   SPINE_REPO="$tmpdir/stale-root" \
+  SPINE_TARGET_REPO="$tmpdir/stale-root" \
+  SPINE_WORKTREE="$tmpdir/stale-worktree" \
   SPINE_STATE="$state_root" \
-  "$SCRIPT" --skip-session-bootstrap --allow-no-loop --json || true)"
+  "$SCRIPT" --skip-session-bootstrap --allow-no-loop --json)"
+
+python3 - <<'PY' "$clean_json"
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["status"] == "done"
+assert payload["data"]["repo_identity"]["checkout_root"]
+assert payload["data"]["entry_packet"]["packet"]["environment_constraints"]["repo_root"] == payload["data"]["repo_identity"]["checkout_root"]
+assert payload["data"]["entry_packet"]["packet"]["environment_constraints"]["worktree"] == payload["data"]["repo_identity"]["checkout_root"]
+PY
+
+fail_json="$(env SPINE_STATE="$state_root" "$SCRIPT" --skip-session-bootstrap --allow-no-loop --repo-root "$tmpdir/other-root" --json || true)"
 
 python3 - <<'PY' "$fail_json"
 import json
@@ -72,7 +87,7 @@ import sys
 
 payload = json.loads(sys.argv[1])
 assert payload["status"] == "failed"
-assert "ambient spine root mismatch" in payload["data"]["message"]
+assert "attach repo-root mismatch" in payload["data"]["message"]
 assert "current checkout is" in payload["data"]["message"]
 PY
 

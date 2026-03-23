@@ -31,7 +31,7 @@ snapshot_surface_resolve_root() {
 snapshot_surface_runtime_output_path() {
   local root="$1"
   local tracked_rel="$2"
-  printf '%s/runtime/domain-state/snapshots/%s\n' "$root" "$(basename "$tracked_rel")"
+  spine_resolve_domain_state "snapshots/$(basename "$tracked_rel")"
 }
 
 snapshot_surface_resolve_source_path() {

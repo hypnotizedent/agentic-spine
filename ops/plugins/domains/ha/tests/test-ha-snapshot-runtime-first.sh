@@ -48,12 +48,14 @@ git -C "$INHERITED" branch -M main >/dev/null
 
 TARGET_CANON="$(cd "$TARGET" && pwd -P)"
 INHERITED_CANON="$(cd "$INHERITED" && pwd -P)"
+TARGET_DOMAIN_STATE="$TARGET_CANON/runtime/domain-state"
+INHERITED_DOMAIN_STATE="$INHERITED_CANON/runtime/domain-state"
 
 echo ""
 echo "── T1: current checkout wins over ambient SPINE_ROOT ──"
 t1_out="$(
   cd "$TARGET"
-  env -u SPINE_TARGET_REPO SPINE_ROOT="$INHERITED" SPINE_REPO="$INHERITED" SPINE_CODE="$ROOT" bash -lc '
+  env -u SPINE_TARGET_REPO SPINE_ROOT="$INHERITED" SPINE_REPO="$INHERITED" SPINE_CODE="$ROOT" SPINE_DOMAIN_STATE="$TARGET_DOMAIN_STATE" bash -lc '
     source "'"$HELPER"'"
     ha_snapshot_init "ha.addons.yaml"
     printf "%s|%s|%s\n" "$HA_SNAPSHOT_ROOT" "$HA_SNAPSHOT_OUTPUT" "$HA_SNAPSHOT_TRACKED_OUTPUT"
@@ -71,7 +73,7 @@ echo ""
 echo "── T2: explicit SPINE_TARGET_REPO overrides inherited roots ──"
 t2_out="$(
   cd "$TARGET"
-  env SPINE_TARGET_REPO="$INHERITED" SPINE_ROOT="$TARGET" SPINE_REPO="$TARGET" SPINE_CODE="$ROOT" bash -lc '
+  env SPINE_TARGET_REPO="$INHERITED" SPINE_ROOT="$TARGET" SPINE_REPO="$TARGET" SPINE_CODE="$ROOT" SPINE_DOMAIN_STATE="$INHERITED_DOMAIN_STATE" bash -lc '
     source "'"$HELPER"'"
     ha_snapshot_init "ha.addons.yaml"
     printf "%s|%s\n" "$HA_SNAPSHOT_ROOT" "$HA_SNAPSHOT_OUTPUT"
@@ -89,7 +91,7 @@ printf 'runtime\n' > "$TARGET/runtime/domain-state/snapshots/z2m.devices.yaml"
 printf 'tracked\n' > "$TARGET/ops/bindings/z2m.devices.yaml"
 t3_out="$(
   cd "$TARGET"
-  env -u SPINE_TARGET_REPO SPINE_ROOT="$INHERITED" SPINE_REPO="$INHERITED" SPINE_CODE="$ROOT" bash -lc '
+  env -u SPINE_TARGET_REPO SPINE_ROOT="$INHERITED" SPINE_REPO="$INHERITED" SPINE_CODE="$ROOT" SPINE_DOMAIN_STATE="$TARGET_DOMAIN_STATE" bash -lc '
     source "'"$HELPER"'"
     printf "%s\n" "$(ha_snapshot_resolve_source_path "'"$TARGET_CANON"'" "ops/bindings/z2m.devices.yaml")"
   '

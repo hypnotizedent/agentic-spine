@@ -134,8 +134,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--first-command")
     parser.add_argument("--terminal-name", default=os.environ.get("OPS_TERMINAL_ROLE") or os.environ.get("SPINE_TERMINAL_NAME", ""))
     parser.add_argument("--runtime-role", default=os.environ.get("SPINE_RUNTIME_ROLE", "unknown"))
-    parser.add_argument("--worktree", default=os.environ.get("SPINE_WORKTREE") or os.getcwd())
-    parser.add_argument("--repo-root", default=os.environ.get("SPINE_TARGET_REPO") or str(ROOT))
+    parser.add_argument("--worktree", default=os.getcwd())
+    parser.add_argument("--repo-root", default=str(ROOT))
     parser.add_argument("--input", help="Optional imported chat/note/archive file to sanitize during attach")
     parser.add_argument("--source-type", choices=["chat", "notes", "archive", "unknown"], default="unknown")
     parser.add_argument("--sanitized-output", help="Optional path for sanitized ingress artifact")
@@ -150,7 +150,8 @@ def assert_attach_repo_identity(args: argparse.Namespace) -> dict[str, str]:
     requested_repo_root = canonical_path(args.repo_root)
     expected_root = cwd_root or requested_repo_root
 
-    if requested_repo_root != expected_root:
+    explicit_repo_arg = "--repo-root" in sys.argv[1:]
+    if explicit_repo_arg and requested_repo_root != expected_root:
         raise RuntimeError(
             "attach repo-root mismatch: "
             f"--repo-root resolves to {requested_repo_root} but current checkout is {expected_root}"
@@ -158,12 +159,16 @@ def assert_attach_repo_identity(args: argparse.Namespace) -> dict[str, str]:
 
     # Auto-clean leaked ambient env vars that don't match current checkout
     cleaned_vars: list[str] = []
-    for env_name in ("SPINE_REPO", "SPINE_ROOT", "SPINE_CODE", "SPINE_TARGET_REPO"):
+    for env_name in ("SPINE_REPO", "SPINE_ROOT", "SPINE_CODE", "SPINE_TARGET_REPO", "SPINE_WORKTREE"):
         raw_value = os.environ.get(env_name, "").strip()
         if not raw_value:
             continue
         resolved = canonical_path(raw_value)
-        if resolved != expected_root:
+        if env_name == "SPINE_WORKTREE":
+            expected_path = canonical_path(args.worktree or str(Path.cwd()))
+        else:
+            expected_path = expected_root
+        if resolved != expected_path:
             os.environ.pop(env_name, None)
             cleaned_vars.append(f"{env_name}={resolved}")
 

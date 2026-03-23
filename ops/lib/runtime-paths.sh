@@ -108,8 +108,11 @@ spine_resolve_target_repo() {
   detected_root="$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || true)"
 
   if [[ -n "$explicit_target" ]]; then
-    _spine_canonicalize_repoish_path "$explicit_target"
-    return 0
+    explicit_target="$(_spine_canonicalize_repoish_path "$explicit_target")"
+    if [[ -n "$(git -C "$explicit_target" rev-parse --show-toplevel 2>/dev/null || true)" ]] || [[ -f "$explicit_target/ops/capabilities.yaml" ]]; then
+      printf '%s\n' "$explicit_target"
+      return 0
+    fi
   fi
 
   if [[ -n "$detected_root" ]]; then

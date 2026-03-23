@@ -4,12 +4,23 @@ set -euo pipefail
 SCRIPT_CODE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ACTIVE_REPO_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
 ACTIVE_CODE_ROOT=""
+VALID_AMBIENT_TARGET_REPO=""
+AMBIENT_TARGET_GIT_ROOT=""
 
 if [[ -n "$ACTIVE_REPO_ROOT" && -f "$ACTIVE_REPO_ROOT/ops/capabilities.yaml" ]]; then
     ACTIVE_CODE_ROOT="$ACTIVE_REPO_ROOT"
 fi
 
-SPINE_TARGET_REPO="${SPINE_TARGET_REPO:-${ACTIVE_REPO_ROOT:-${SPINE_REPO:-${SPINE_CODE:-$SCRIPT_CODE_ROOT}}}}"
+if [[ -n "${SPINE_TARGET_REPO:-}" ]]; then
+    AMBIENT_TARGET_GIT_ROOT="$(git -C "$SPINE_TARGET_REPO" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -n "$AMBIENT_TARGET_GIT_ROOT" ]]; then
+        VALID_AMBIENT_TARGET_REPO="$AMBIENT_TARGET_GIT_ROOT"
+    elif [[ -f "$SPINE_TARGET_REPO/ops/capabilities.yaml" ]]; then
+        VALID_AMBIENT_TARGET_REPO="$SPINE_TARGET_REPO"
+    fi
+fi
+
+SPINE_TARGET_REPO="${VALID_AMBIENT_TARGET_REPO:-${ACTIVE_REPO_ROOT:-${SPINE_REPO:-${SPINE_CODE:-$SCRIPT_CODE_ROOT}}}}"
 if [[ -n "$ACTIVE_CODE_ROOT" ]]; then
     SPINE_CODE="$ACTIVE_CODE_ROOT"
 else
