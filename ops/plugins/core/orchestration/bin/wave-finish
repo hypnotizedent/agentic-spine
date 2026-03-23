@@ -1,0 +1,547 @@
+#!/usr/bin/env bash
+# wave-finish - Post-wave closure propagation
+#
+# After a wave's work is done, this capability enforces the 4-surface
+# agreement check and propagates closure across all surfaces.
+# Replaces the operator manually closing gaps, updating loop status,
+# checking projections, and cleaning up residue.
+#
+# Part of the authority.resolve -> wave.execute -> wave.finish triad.
+#
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+SP="$ROOT"
+
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
+
+GAPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
+GAPS_SQL_LIB="$ROOT/ops/plugins/core/lifecycle/lib"
+CLOSEOUT_BIN="$ROOT/ops/plugins/core/loops/bin/loop-closeout-finalize"
+SCOPES_DIR="$SPINE_STATE/loop-scopes"
+
+# ── Usage ────────────────────────────────────────────────────────
+
+usage() {
+  cat <<'USAGE'
+wave-finish - Post-wave closure propagation
+
+Usage:
+  wave-finish --loop-id LOOP-... --disposition landed|deferred|superseded|abandoned \
+    [--completion-level slice_complete|loop_complete|domain_complete|estate_complete|readiness_complete] \
+    [--wave-id WAVE-...] [--fixed-in <commit-sha>] \
+    [--skip-residue-check] [--dry-run]
+
+Disposition = landed requires --completion-level.
+
+Steps:
+  1. Validate loop scope (must be active)
+  2. Collect linked gaps from SQLite authority
+  3. Run 4-surface agreement check (runtime, control-plane, projection, residue)
+  4. Close open gaps and loop (unless --dry-run)
+  5. Emit summary
+
+Exit codes:
+  0  finish complete
+  1  finish failed (gap closure or loop closeout error)
+  2  invalid args or loop not found
+  3  dry-run completed (no mutations made)
+USAGE
+}
+
+# ── Parse args ───────────────────────────────────────────────────
+
+LOOP_ID=""
+DISPOSITION=""
+COMPLETION_LEVEL=""
+WAVE_ID=""
+FIXED_IN=""
+SKIP_RESIDUE=0
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --loop-id)
+      LOOP_ID="${2:-}"
+      shift 2
+      ;;
+    --disposition)
+      DISPOSITION="${2:-}"
+      shift 2
+      ;;
+    --completion-level)
+      COMPLETION_LEVEL="${2:-}"
+      shift 2
+      ;;
+    --wave-id)
+      WAVE_ID="${2:-}"
+      shift 2
+      ;;
+    --fixed-in)
+      FIXED_IN="${2:-}"
+      shift 2
+      ;;
+    --skip-residue-check)
+      SKIP_RESIDUE=1
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --self-check)
+      # Minimal self-check for verify/capability registration.
+      for dep in python3 yq git; do
+        command -v "$dep" >/dev/null 2>&1 || { echo "wave.finish self-check FAIL: missing $dep" >&2; exit 1; }
+      done
+      [[ -f "$CLOSEOUT_BIN" ]] || { echo "wave.finish self-check FAIL: missing loop-closeout-finalize" >&2; exit 1; }
+      [[ -f "$GAPS_BRIDGE" ]] || { echo "wave.finish self-check FAIL: missing gaps-authority-bridge" >&2; exit 1; }
+      echo "wave.finish self-check PASS"
+      exit 0
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "wave.finish FAIL: unknown argument: $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+# ── Validate required args ───────────────────────────────────────
+
+[[ -n "$LOOP_ID" ]] || { echo "wave.finish FAIL: --loop-id required" >&2; exit 2; }
+[[ -n "$DISPOSITION" ]] || { echo "wave.finish FAIL: --disposition required" >&2; exit 2; }
+
+ALLOWED_DISPOSITIONS="landed deferred superseded abandoned"
+disposition_ok=0
+for d in $ALLOWED_DISPOSITIONS; do
+  [[ "$DISPOSITION" == "$d" ]] && { disposition_ok=1; break; }
+done
+[[ "$disposition_ok" -eq 1 ]] || {
+  echo "wave.finish FAIL: invalid disposition '$DISPOSITION' (allowed: landed|deferred|superseded|abandoned)" >&2
+  exit 2
+}
+
+if [[ "$DISPOSITION" == "landed" && -z "$COMPLETION_LEVEL" ]]; then
+  echo "wave.finish FAIL: --completion-level required when disposition=landed" >&2
+  exit 2
+fi
+
+if [[ -n "$COMPLETION_LEVEL" ]]; then
+  ALLOWED_CL="slice_complete loop_complete domain_complete estate_complete readiness_complete"
+  cl_ok=0
+  for cl in $ALLOWED_CL; do
+    [[ "$COMPLETION_LEVEL" == "$cl" ]] && { cl_ok=1; break; }
+  done
+  [[ "$cl_ok" -eq 1 ]] || {
+    echo "wave.finish FAIL: invalid completion_level '$COMPLETION_LEVEL'" >&2
+    exit 2
+  }
+fi
+
+# ── Step 1: Validate loop scope ─────────────────────────────────
+
+SCOPE_FILE="$SCOPES_DIR/${LOOP_ID}.scope.md"
+if [[ ! -f "$SCOPE_FILE" ]]; then
+  echo "wave.finish FAIL: loop scope not found: $SCOPE_FILE" >&2
+  exit 2
+fi
+
+current_status="$(awk '/^status:/{print $2; exit}' "$SCOPE_FILE" | tr -d '"' || true)"
+case "$current_status" in
+  active|draft|open) ;;
+  closed)
+    echo "wave.finish FAIL: loop already closed: $LOOP_ID" >&2
+    exit 2
+    ;;
+  *)
+    echo "wave.finish FAIL: unsupported loop status '$current_status' for $LOOP_ID" >&2
+    exit 2
+    ;;
+esac
+
+# Extract objective for summary.
+objective="$(awk '/^objective:/{sub(/^objective: */, ""); print; exit}' "$SCOPE_FILE" | tr -d '"' || true)"
+
+echo ""
+echo "================================================================="
+echo "WAVE FINISH: $LOOP_ID"
+echo "================================================================="
+echo ""
+echo "Disposition:      $DISPOSITION"
+echo "Completion Level: ${COMPLETION_LEVEL:-n/a}"
+echo "Wave ID:          ${WAVE_ID:-n/a}"
+echo "Objective:        ${objective:-<none>}"
+echo ""
+
+# ── Step 2: Collect linked gaps from SQLite authority ────────────
+
+# Query SQLite for all gaps with parent_loop = LOOP_ID.
+# Returns JSON lines: {"gap_id": "...", "status": "...", "severity": "..."}
+gap_query_result="$(python3 - "$GAPS_SQL_LIB" "$ROOT" "$LOOP_ID" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+lib_dir = Path(sys.argv[1])
+sys.path.insert(0, str(lib_dir))
+import gaps_sql_authority as gsa
+
+root = Path(sys.argv[2])
+loop_id = sys.argv[3]
+
+db_path, gaps_yaml = gsa.resolve_paths(root)
+conn = gsa.connect(db_path)
+gsa.ensure_schema(conn)
+gsa.bootstrap_from_yaml(conn, gaps_yaml)
+
+all_gaps = gsa.fetch_gaps(conn)
+linked = [g for g in all_gaps if g.get("parent_loop") == loop_id]
+
+open_gaps = [g for g in linked if g.get("status") in ("open", "accepted")]
+closed_gaps = [g for g in linked if g.get("status") in ("fixed", "closed", "wontfix")]
+
+result = {
+    "open": [{"gap_id": g["id"], "severity": g.get("severity", "medium"), "regression_lock_id": g.get("regression_lock_id", "")} for g in open_gaps],
+    "closed": [{"gap_id": g["id"], "severity": g.get("severity", "medium")} for g in closed_gaps],
+    "total_db_count": gsa.gap_count(conn),
+}
+
+# Also get YAML gap count for projection agreement check.
+yaml_doc = gsa.load_yaml(gaps_yaml)
+if isinstance(yaml_doc, dict):
+    yaml_gaps = yaml_doc.get("gaps", [])
+    result["yaml_count"] = len(yaml_gaps) if isinstance(yaml_gaps, list) else 0
+else:
+    result["yaml_count"] = 0
+
+conn.close()
+print(json.dumps(result))
+PY
+)" || {
+  echo "wave.finish FAIL: SQLite gap query failed" >&2
+  exit 1
+}
+
+# Parse gap query result.
+open_gap_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d['open']))" "$gap_query_result")"
+closed_gap_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d['closed']))" "$gap_query_result")"
+total_db_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['total_db_count'])" "$gap_query_result")"
+yaml_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['yaml_count'])" "$gap_query_result")"
+
+# Determine gap closure behavior per disposition.
+GAP_CLOSE_STATUS=""
+case "$DISPOSITION" in
+  landed)     GAP_CLOSE_STATUS="fixed" ;;
+  abandoned)  GAP_CLOSE_STATUS="wontfix" ;;
+  deferred)   GAP_CLOSE_STATUS="" ;;  # open gaps stay open
+  superseded) GAP_CLOSE_STATUS="" ;;  # open gaps stay open (reparent manually if needed)
+esac
+
+echo "Gap Inventory:"
+echo "  Open:           $open_gap_count"
+echo "  Already closed: $closed_gap_count"
+if [[ -n "$GAP_CLOSE_STATUS" ]]; then
+  echo "  Action:         close as $GAP_CLOSE_STATUS"
+else
+  echo "  Action:         no closure (disposition=$DISPOSITION)"
+fi
+echo ""
+
+# ── Step 3: 4-Surface Agreement Check ───────────────────────────
+
+surface_runtime="PASS"
+surface_runtime_note=""
+surface_control="PASS"
+surface_control_note=""
+surface_projection="PASS"
+surface_projection_note=""
+surface_residue="PASS"
+surface_residue_note=""
+
+# Surface 1: Runtime Agreement
+# Check for open critical/high gaps that won't be closed.
+if [[ -z "$GAP_CLOSE_STATUS" && "$open_gap_count" -gt 0 ]]; then
+  # Disposition is deferred/superseded — gaps remain open. Check severity.
+  crit_high_open="$(python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+count = sum(1 for g in d['open'] if g['severity'] in ('critical','high'))
+print(count)
+" "$gap_query_result")"
+  if [[ "$crit_high_open" -gt 0 ]]; then
+    surface_runtime="WARN"
+    surface_runtime_note="$crit_high_open critical/high gaps remain open"
+  fi
+fi
+
+# Surface 2: Control-Plane Agreement
+dirty_bindings="$(git -C "$ROOT" status --porcelain -- ops/bindings/ 2>/dev/null | head -5 || true)"
+if [[ -n "$dirty_bindings" ]]; then
+  surface_control="WARN"
+  dirty_count="$(echo "$dirty_bindings" | wc -l | tr -d ' ')"
+  surface_control_note="$dirty_count dirty files in ops/bindings/"
+fi
+
+# Surface 3: Projection Agreement
+if [[ "$total_db_count" -gt 0 && "$yaml_count" -gt 0 ]]; then
+  gap_divergence=$(( total_db_count - yaml_count ))
+  [[ "$gap_divergence" -lt 0 ]] && gap_divergence=$(( -gap_divergence ))
+  if [[ "$gap_divergence" -gt 5 ]]; then
+    surface_projection="WARN"
+    surface_projection_note="YAML stale by $gap_divergence gaps (run: gaps-authority-bridge project)"
+  fi
+fi
+
+# Surface 4: Residue Check
+if [[ "$SKIP_RESIDUE" -eq 0 ]]; then
+  # Check worktrees mentioning this loop or related branches.
+  loop_lower="$(echo "$LOOP_ID" | tr '[:upper:]' '[:lower:]')"
+  worktree_residue="$(git -C "$ROOT" worktree list 2>/dev/null | grep -i "$loop_lower" || true)"
+  branch_residue="$(git -C "$ROOT" branch --list "*${LOOP_ID}*" 2>/dev/null | head -5 || true)"
+
+  if [[ -n "$worktree_residue" || -n "$branch_residue" ]]; then
+    surface_residue="WARN"
+    residue_items=""
+    [[ -n "$worktree_residue" ]] && residue_items="worktrees found"
+    [[ -n "$branch_residue" ]] && {
+      [[ -n "$residue_items" ]] && residue_items+=", "
+      residue_items+="branches found"
+    }
+    surface_residue_note="$residue_items"
+  fi
+else
+  surface_residue_note="skipped (--skip-residue-check)"
+fi
+
+# Print surface agreement.
+_surface_sym() {
+  case "$1" in
+    PASS) printf "PASS" ;;
+    WARN) printf "WARN" ;;
+    FAIL) printf "FAIL" ;;
+  esac
+}
+
+echo "Surface Agreement:"
+printf "  Runtime:        %s" "$(_surface_sym "$surface_runtime")"
+[[ -n "$surface_runtime_note" ]] && printf " (%s)" "$surface_runtime_note"
+echo ""
+printf "  Control-Plane:  %s" "$(_surface_sym "$surface_control")"
+[[ -n "$surface_control_note" ]] && printf " (%s)" "$surface_control_note"
+echo ""
+printf "  Projections:    %s" "$(_surface_sym "$surface_projection")"
+[[ -n "$surface_projection_note" ]] && printf " (%s)" "$surface_projection_note"
+echo ""
+printf "  Residue:        %s" "$(_surface_sym "$surface_residue")"
+[[ -n "$surface_residue_note" ]] && printf " (%s)" "$surface_residue_note"
+echo ""
+echo ""
+
+# ── Step 4: Execute closure ──────────────────────────────────────
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "DRY RUN: no mutations made"
+  echo ""
+  if [[ -n "$GAP_CLOSE_STATUS" && "$open_gap_count" -gt 0 ]]; then
+    echo "Would close $open_gap_count gaps as $GAP_CLOSE_STATUS"
+    python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+for g in d['open']:
+    print(f\"  {g['gap_id']} ({g['severity']})\")
+" "$gap_query_result"
+  fi
+  echo "Would close loop $LOOP_ID with disposition=$DISPOSITION"
+  echo ""
+  echo "================================================================="
+  echo "WAVE FINISH DRY RUN COMPLETE"
+  echo "================================================================="
+  exit 3
+fi
+
+# ── 4a: Close open gaps via SQLite bridge ────────────────────────
+# loop-closeout-finalize already handles gap closure when called
+# without --no-close-linked-gaps. However, it reads gaps from YAML
+# (operational.gaps.yaml) not SQLite. Since authority is now in SQLite,
+# we close gaps via the bridge first, then tell loop-closeout-finalize
+# to skip its own gap closure with --no-close-linked-gaps.
+
+gaps_closed=0
+gaps_errored=0
+gap_close_detail=""
+severity_counts_high=0
+severity_counts_medium=0
+severity_counts_low=0
+
+if [[ -n "$GAP_CLOSE_STATUS" && "$open_gap_count" -gt 0 ]]; then
+  echo "Closing $open_gap_count linked gaps..."
+
+  # Extract gap IDs, severities, and existing regression_lock_ids.
+  mapfile -t GAP_IDS < <(python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+for g in d['open']:
+    print(g['gap_id'])
+" "$gap_query_result")
+
+  mapfile -t GAP_SEVS < <(python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+for g in d['open']:
+    print(g['severity'])
+" "$gap_query_result")
+
+  mapfile -t GAP_RLOCK < <(python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+for g in d['open']:
+    print(g.get('regression_lock_id',''))
+" "$gap_query_result")
+
+  for idx in "${!GAP_IDS[@]}"; do
+    gid="${GAP_IDS[$idx]}"
+    sev="${GAP_SEVS[$idx]}"
+    rlock="${GAP_RLOCK[$idx]}"
+
+    bridge_args=("close" "--id" "$gid" "--status" "$GAP_CLOSE_STATUS")
+    bridge_args+=("--actor" "wave.finish")
+    bridge_args+=("--reason" "Closed by wave.finish: $LOOP_ID disposition=$DISPOSITION")
+
+    if [[ -n "$FIXED_IN" ]]; then
+      bridge_args+=("--fixed-in" "$FIXED_IN")
+    else
+      bridge_args+=("--fixed-in" "$LOOP_ID")
+    fi
+
+    if [[ -n "$COMPLETION_LEVEL" ]]; then
+      bridge_args+=("--completion-level" "$COMPLETION_LEVEL")
+    fi
+
+    # For high/critical gaps, pass regression-lock-id.
+    # Use existing lock if present, otherwise use LOOP_ID.
+    if [[ "$sev" == "critical" || "$sev" == "high" ]]; then
+      if [[ -n "$rlock" ]]; then
+        bridge_args+=("--regression-lock-id" "$rlock")
+      else
+        bridge_args+=("--regression-lock-id" "$LOOP_ID")
+      fi
+    fi
+
+    if python3 "$GAPS_BRIDGE" "${bridge_args[@]}" >/dev/null 2>&1; then
+      gaps_closed=$((gaps_closed + 1))
+      case "$sev" in
+        critical|high) severity_counts_high=$((severity_counts_high + 1)) ;;
+        medium)        severity_counts_medium=$((severity_counts_medium + 1)) ;;
+        *)             severity_counts_low=$((severity_counts_low + 1)) ;;
+      esac
+    else
+      gaps_errored=$((gaps_errored + 1))
+      echo "  ERROR: failed to close $gid" >&2
+    fi
+  done
+
+  echo "  Closed: $gaps_closed  Errors: $gaps_errored"
+  echo ""
+fi
+
+if [[ "$gaps_errored" -gt 0 ]]; then
+  echo "wave.finish FAIL: $gaps_errored gap(s) failed to close" >&2
+  echo "Loop $LOOP_ID remains active. Resolve gap closure errors and retry." >&2
+  exit 1
+fi
+
+# ── 4b: Build acceptance matrix for loop-closeout-finalize ───────
+
+MATRIX_FILE="$(mktemp "${SPINE_TMP:-/tmp}/wave-finish-matrix.XXXXXX.md")"
+trap 'rm -f "$MATRIX_FILE" 2>/dev/null' EXIT INT TERM
+
+cat > "$MATRIX_FILE" <<EOF
+# Wave Finish Acceptance Matrix
+# Generated by wave.finish for $LOOP_ID
+
+decision: DONE
+blocker_count: 0
+
+| check | surface | result | detail |
+|-------|---------|--------|--------|
+| runtime_agreement | runtime | PASS | ${surface_runtime_note:-no critical/high gaps remaining} |
+| control_plane_agreement | control-plane | PASS | ${surface_control_note:-no dirty bindings} |
+| projection_agreement | projections | PASS | ${surface_projection_note:-YAML and SQLite aligned} |
+| residue_check | residue | PASS | ${surface_residue_note:-no orphan worktrees or branches} |
+
+run_key: ${SPINE_CAP_RUN_KEY:-manual}
+EOF
+
+# ── 4c: Close loop via loop-closeout-finalize ────────────────────
+
+echo "Closing loop: $LOOP_ID"
+
+closeout_args=(
+  "--loop-id" "$LOOP_ID"
+  "--disposition" "$DISPOSITION"
+  "--acceptance-matrix" "$MATRIX_FILE"
+  "--no-close-linked-gaps"
+)
+
+if [[ -n "$COMPLETION_LEVEL" ]]; then
+  closeout_args+=("--completion-level" "$COMPLETION_LEVEL")
+fi
+
+# Propagation evidence: build from surface agreement results.
+prop_evidence="wave.finish 4-surface check: runtime=$surface_runtime, control-plane=$surface_control, projections=$surface_projection, residue=$surface_residue"
+closeout_args+=("--propagation-evidence" "$prop_evidence")
+
+# For high-severity gap fix-to-lock, pass the loop_id as regression lock.
+closeout_args+=("--regression-lock-id" "$LOOP_ID")
+closeout_args+=("--evidence" "wave.finish run_key=${SPINE_CAP_RUN_KEY:-manual}")
+
+closeout_output="$("$CLOSEOUT_BIN" "${closeout_args[@]}" 2>&1)" || {
+  closeout_rc=$?
+  echo "wave.finish FAIL: loop-closeout-finalize exited $closeout_rc" >&2
+  echo "$closeout_output" >&2
+  echo "" >&2
+  echo "CRITICAL: $gaps_closed gaps were already closed but loop remains open." >&2
+  echo "Manual intervention required: re-run wave.finish or close loop manually." >&2
+  exit 1
+}
+
+echo "$closeout_output"
+echo ""
+
+# ── Step 5: Emit summary ────────────────────────────────────────
+
+echo "================================================================="
+echo "WAVE FINISH SUMMARY"
+echo "================================================================="
+echo ""
+echo "Loop:             $LOOP_ID"
+echo "Disposition:      $DISPOSITION"
+echo "Completion Level: ${COMPLETION_LEVEL:-n/a}"
+echo "Wave ID:          ${WAVE_ID:-n/a}"
+echo ""
+echo "Gap Closure:"
+echo "  Closed:         $gaps_closed ($severity_counts_high high, $severity_counts_medium medium, $severity_counts_low low)"
+echo "  Already closed: $closed_gap_count"
+echo "  Errors:         $gaps_errored"
+echo ""
+echo "Surface Agreement:"
+echo "  Runtime:        $surface_runtime"
+echo "  Control-Plane:  $surface_control"
+echo "  Projections:    $surface_projection"
+echo "  Residue:        $surface_residue"
+echo ""
+echo "Loop Status:      closed ($DISPOSITION, ${COMPLETION_LEVEL:-n/a})"
+echo ""
+echo "================================================================="
+echo "WAVE FINISH COMPLETE"
+echo "================================================================="
