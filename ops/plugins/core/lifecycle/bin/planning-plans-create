@@ -30,6 +30,11 @@ DESCRIPTION=""
 ACTIVATION_TRIGGER="manual"
 DEPENDS_ON_LOOP=""
 LINKED_GAPS=""
+BRANCH_REF=""
+WORKTREE_PATH=""
+BRANCH_RETENTION_STATE=""
+TRACKING_REF=""
+PR_URL=""
 USED_SOURCE_LOOP_ALIAS=0
 
 while [[ $# -gt 0 ]]; do
@@ -56,6 +61,11 @@ while [[ $# -gt 0 ]]; do
     --activation-trigger) ACTIVATION_TRIGGER="${2:-}"; shift 2 ;;
     --depends-on-loop) DEPENDS_ON_LOOP="${2:-}"; shift 2 ;;
     --linked-gaps) LINKED_GAPS="${2:-}"; shift 2 ;;
+    --branch-ref) BRANCH_REF="${2:-}"; shift 2 ;;
+    --worktree-path) WORKTREE_PATH="${2:-}"; shift 2 ;;
+    --branch-retention-state) BRANCH_RETENTION_STATE="${2:-}"; shift 2 ;;
+    --tracking-ref) TRACKING_REF="${2:-}"; shift 2 ;;
+    --pr-url) PR_URL="${2:-}"; shift 2 ;;
     -h|--help)
       cat <<'EOF'
 Usage: planning-plans-create --plan-id PLAN-ID --loop-id LOOP-ID --owner @owner --horizon later|future --review-date YYYY-MM-DD --description "..." [options]
@@ -65,6 +75,13 @@ Canonical loop-binding flag:
 
 Compatibility aliases (supported, but non-canonical):
   --source-loop-id LOOP-ID
+
+Optional branch-memory fields:
+  --branch-ref BRANCH
+  --worktree-path /abs/path
+  --branch-retention-state keep|auto_prune
+  --tracking-ref origin/...
+  --pr-url https://...
 EOF
       exit 0
       ;;
@@ -93,6 +110,17 @@ case "$ACTIVATION_TRIGGER" in
   *) echo "FAIL: --activation-trigger must be manual|date|dependency" >&2; exit 2 ;;
 esac
 
+if [[ -n "$BRANCH_RETENTION_STATE" ]]; then
+  case "$BRANCH_RETENTION_STATE" in
+    keep|auto_prune) ;;
+    *) echo "FAIL: --branch-retention-state must be keep|auto_prune" >&2; exit 2 ;;
+  esac
+fi
+
+if [[ -n "$BRANCH_REF" && -z "$BRANCH_RETENTION_STATE" ]]; then
+  BRANCH_RETENTION_STATE="keep"
+fi
+
 if [[ "$ACTIVATION_TRIGGER" == "dependency" && -z "$DEPENDS_ON_LOOP" ]]; then
   echo "FAIL: --depends-on-loop required when --activation-trigger=dependency" >&2
   exit 2
@@ -101,7 +129,7 @@ fi
 acquire_git_lock plans || exit 1
 trap 'release_git_lock' EXIT INT TERM
 
-python3 - "$ROOT" "$PLAN_ID" "$SOURCE_LOOP_ID" "$TARGET_LOOP_ID" "$OWNER" "$HORIZON" "$REVIEW_DATE" "$DESCRIPTION" "$ACTIVATION_TRIGGER" "$DEPENDS_ON_LOOP" "$LINKED_GAPS" <<'PY'
+python3 - "$ROOT" "$PLAN_ID" "$SOURCE_LOOP_ID" "$TARGET_LOOP_ID" "$OWNER" "$HORIZON" "$REVIEW_DATE" "$DESCRIPTION" "$ACTIVATION_TRIGGER" "$DEPENDS_ON_LOOP" "$LINKED_GAPS" "$BRANCH_REF" "$WORKTREE_PATH" "$BRANCH_RETENTION_STATE" "$TRACKING_REF" "$PR_URL" <<'PY'
 from datetime import timezone
 import re
 import sys
@@ -118,6 +146,11 @@ description = sys.argv[8].strip()
 activation_trigger = sys.argv[9].strip()
 depends_on_loop = sys.argv[10].strip()
 linked_gaps_raw = (sys.argv[11] or "").strip()
+branch_ref = (sys.argv[12] or "").strip()
+worktree_path = (sys.argv[13] or "").strip()
+branch_retention_state = (sys.argv[14] or "").strip()
+tracking_ref = (sys.argv[15] or "").strip()
+pr_url = (sys.argv[16] or "").strip()
 
 sys.path.insert(0, str(root / "ops/plugins/core/lifecycle/lib"))
 from plans_sql_authority import (  # type: ignore
@@ -176,6 +209,16 @@ if target_loop_id:
     plan["target_loop_id"] = target_loop_id
 if depends_on_loop:
     plan["depends_on_loop"] = depends_on_loop
+if branch_ref:
+    plan["branch_ref"] = branch_ref
+if worktree_path:
+    plan["worktree_path"] = worktree_path
+if branch_retention_state:
+    plan["branch_retention_state"] = branch_retention_state
+if tracking_ref:
+    plan["tracking_ref"] = tracking_ref
+if pr_url:
+    plan["pr_url"] = pr_url
 
 upsert_plan(conn, plan)
 insert_event(
@@ -204,4 +247,6 @@ print(f"plan_id: {plan_id}")
 print(f"source_loop_id: {source_loop_id}")
 print(f"horizon: {horizon}")
 print("status: deferred")
+if branch_ref:
+    print(f"branch_ref: {branch_ref}")
 PY

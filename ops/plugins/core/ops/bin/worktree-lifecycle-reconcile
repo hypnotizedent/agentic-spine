@@ -106,10 +106,12 @@ if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   FAIL_ON_MISSING_TEMP_CLONE_ORIGIN="$(yq e -r '.policy.fail_on_missing_temp_clone_origin // true' "$CONTRACT" 2>/dev/null || echo true)"
   FAIL_ON_ROOT_NON_MAIN="$(yq e -r '.policy.fail_on_root_non_main // true' "$CONTRACT" 2>/dev/null || echo true)"
   FAIL_ON_ROOT_DIRTY="$(yq e -r '.policy.fail_on_root_dirty // true' "$CONTRACT" 2>/dev/null || echo true)"
-  WAVES_DIR="$(yq e -r '.runtime.waves_state_dir // ""' "$CONTRACT" 2>/dev/null || echo "$WAVES_DIR")"
-  [[ -n "$WAVES_DIR" && "$WAVES_DIR" != "null" ]] || WAVES_DIR="$SPINE_STATE/waves"
-  LOOPS_SCOPE_DIR="$(yq e -r '.runtime.loops_scope_dir // ""' "$CONTRACT" 2>/dev/null || echo "$LOOPS_SCOPE_DIR")"
-  [[ -n "$LOOPS_SCOPE_DIR" && "$LOOPS_SCOPE_DIR" != "null" ]] || LOOPS_SCOPE_DIR="$SPINE_STATE/loop-scopes"
+  if [[ -z "${SPINE_STATE:-}" ]]; then
+    WAVES_DIR="$(yq e -r '.runtime.waves_state_dir // ""' "$CONTRACT" 2>/dev/null || echo "$WAVES_DIR")"
+    [[ -n "$WAVES_DIR" && "$WAVES_DIR" != "null" ]] || WAVES_DIR="$SPINE_STATE/waves"
+    LOOPS_SCOPE_DIR="$(yq e -r '.runtime.loops_scope_dir // ""' "$CONTRACT" 2>/dev/null || echo "$LOOPS_SCOPE_DIR")"
+    [[ -n "$LOOPS_SCOPE_DIR" && "$LOOPS_SCOPE_DIR" != "null" ]] || LOOPS_SCOPE_DIR="$SPINE_STATE/loop-scopes"
+  fi
 
   prefix_accum=""
   while IFS= read -r prefix; do
@@ -149,6 +151,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+import yaml
 
 root = Path(sys.argv[1]).resolve()
 main_branch = sys.argv[2]
@@ -266,6 +269,15 @@ def parse_lease(path: Path):
         "age_hours": age_h,
         "active": active,
     }
+
+
+def load_yaml(path: Path):
+    if not path.exists():
+        return None
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def parse_worktrees(repo_root: Path):
@@ -470,6 +482,63 @@ if loops_scope_dir.exists():
             "path": str(scope),
         }
 
+contract_doc = load_yaml(repo_root / "ops/bindings/worktree.lifecycle.contract.yaml") or {}
+policy_doc = contract_doc.get("policy") if isinstance(contract_doc, dict) else {}
+plan_linkage_required = True
+branch_memory_terminal_statuses = {"retired", "canceled"}
+if isinstance(policy_doc, dict):
+    raw_required = policy_doc.get("require_plan_linkage_for_unmerged_nonactive_local_branches")
+    if raw_required is not None:
+        plan_linkage_required = bool(raw_required)
+    raw_terminal = policy_doc.get("branch_memory_terminal_statuses")
+    if isinstance(raw_terminal, list):
+        branch_memory_terminal_statuses = {str(v).strip().lower() for v in raw_terminal if str(v).strip()}
+
+plans_index_path = loops_scope_dir.parent / "plans/index.yaml"
+branch_plan_index = {}
+worktree_plan_index = {}
+plans_doc = load_yaml(plans_index_path)
+if isinstance(plans_doc, dict):
+    plan_rows = plans_doc.get("plans") or []
+    if isinstance(plan_rows, list):
+        for plan in plan_rows:
+            if not isinstance(plan, dict):
+                continue
+            plan_id = str(plan.get("plan_id") or "").strip()
+            plan_status = str(plan.get("status") or "").strip().lower() or "deferred"
+            branch_ref = str(plan.get("branch_ref") or "").strip()
+            worktree_path = str(plan.get("worktree_path") or "").strip()
+            plan_row = {
+                "plan_id": plan_id,
+                "status": plan_status,
+                "review_date": str(plan.get("review_date") or "").strip(),
+                "source_loop_id": str(plan.get("source_loop_id") or "").strip(),
+            }
+            if branch_ref:
+                branch_plan_index.setdefault(branch_ref, []).append(plan_row)
+            if worktree_path:
+                try:
+                    resolved_wt = str(Path(worktree_path).expanduser().resolve())
+                except Exception:
+                    resolved_wt = worktree_path
+                worktree_plan_index.setdefault(resolved_wt, []).append(plan_row)
+
+
+def linked_plans_for(branch: str, wt_path: str):
+    linked = []
+    seen = set()
+    for plan in branch_plan_index.get(branch, []):
+        pid = plan.get("plan_id")
+        if pid and pid not in seen:
+            linked.append(plan)
+            seen.add(pid)
+    for plan in worktree_plan_index.get(wt_path, []):
+        pid = plan.get("plan_id")
+        if pid and pid not in seen:
+            linked.append(plan)
+            seen.add(pid)
+    return linked
+
 # Wave workspace owners (runtime state)
 wave_worktrees = {}
 if waves_dir.exists():
@@ -518,6 +587,9 @@ for wt, raw_branch in parse_worktrees(repo_root):
         "has_origin": None,
         "merged_into_main": False,
         "branch_age_hours": None,
+        "branch_memory_linked": False,
+        "linked_plan_refs": [],
+        "linked_plan_statuses": [],
         "canonical_root_ok": path_under(wt, canonical_worktree_root),
         "lease": parse_lease(wt / lease_filename),
         "dirty": False,
@@ -579,6 +651,10 @@ for wt, raw_branch in parse_worktrees(repo_root):
         row["merged_into_main"] = merged_into_main(repo_root, branch)
         row["has_origin"] = has_origin_branch(repo_root, branch)
         row["branch_age_hours"] = branch_age_hours(repo_root, branch)
+        linked_plans = linked_plans_for(branch, row["path"])
+        row["branch_memory_linked"] = bool(linked_plans)
+        row["linked_plan_refs"] = [plan["plan_id"] for plan in linked_plans if plan.get("plan_id")]
+        row["linked_plan_statuses"] = [plan["status"] for plan in linked_plans if plan.get("status")]
 
         if not row["has_origin"] and not row["managed_worktree"]:
             owner_active = row["owner_type"] in {"loop", "wave"} and row["owner_state"] not in {"closed", "unknown"}
@@ -602,6 +678,17 @@ for wt, raw_branch in parse_worktrees(repo_root):
             age = row["branch_age_hours"]
             if age is not None and age >= unowned_local_grace_h:
                 row["issues"].append("unowned_local_branch_past_grace")
+        if (
+            plan_linkage_required
+            and not row["managed_worktree"]
+            and not row["merged_into_main"]
+            and not is_stable_runtime_branch(branch)
+            and row["owner_state"] != "active"
+        ):
+            if not row["branch_memory_linked"]:
+                row["issues"].append("branch_missing_plan_linkage")
+            elif all(status in branch_memory_terminal_statuses for status in row["linked_plan_statuses"]):
+                row["warnings"].append("branch_linked_only_to_terminal_plan")
 
         if row["managed_worktree"] and main_branch_head and git_head(wt) != main_branch_head:
             row["issues"].append("managed_worktree_not_at_main")
@@ -658,6 +745,80 @@ for wt, raw_branch in parse_worktrees(repo_root):
             "owner_type": row["owner_type"],
             "owner_id": row["owner_id"],
             "owner_state": row["owner_state"],
+        })
+
+represented_branches = {
+    row["branch"]
+    for row in worktree_rows
+    if row.get("branch") and row["branch"] != "<detached>"
+}
+local_branch_rows = []
+_, local_branch_out = sh(
+    ["git", "-C", str(repo_root), "for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    check=False,
+)
+for raw_branch in [ln.strip() for ln in local_branch_out.splitlines() if ln.strip()]:
+    if raw_branch == main_branch or raw_branch in represented_branches:
+        continue
+    row = {
+        "kind": "local_branch",
+        "path": str(repo_root),
+        "branch": raw_branch,
+        "has_origin": has_origin_branch(repo_root, raw_branch),
+        "merged_into_main": merged_into_main(repo_root, raw_branch),
+        "branch_age_hours": branch_age_hours(repo_root, raw_branch),
+        "branch_memory_linked": False,
+        "linked_plan_refs": [],
+        "linked_plan_statuses": [],
+        "issues": [],
+        "warnings": [],
+    }
+    linked_plans = linked_plans_for(raw_branch, "")
+    row["branch_memory_linked"] = bool(linked_plans)
+    row["linked_plan_refs"] = [plan["plan_id"] for plan in linked_plans if plan.get("plan_id")]
+    row["linked_plan_statuses"] = [plan["status"] for plan in linked_plans if plan.get("status")]
+
+    if not row["has_origin"]:
+        if is_local_prefix(raw_branch):
+            row["warnings"].append("local_branch_no_remote")
+        else:
+            row["issues"].append("orphan_branch_no_remote")
+
+    if row["merged_into_main"] and not is_stable_runtime_branch(raw_branch):
+        age = row["branch_age_hours"]
+        if age is not None and age >= merged_grace_h:
+            row["issues"].append("merged_branch_past_grace")
+        else:
+            row["warnings"].append("merged_branch_within_grace")
+    elif (
+        plan_linkage_required
+        and not is_stable_runtime_branch(raw_branch)
+    ):
+        if not row["branch_memory_linked"]:
+            row["issues"].append("branch_missing_plan_linkage")
+        elif all(status in branch_memory_terminal_statuses for status in row["linked_plan_statuses"]):
+            row["warnings"].append("branch_linked_only_to_terminal_plan")
+
+    local_branch_rows.append(row)
+    for code in row["issues"]:
+        issues.append({
+            "kind": "local_branch",
+            "path": row["path"],
+            "branch": row["branch"],
+            "code": code,
+            "owner_type": "branch_memory",
+            "owner_id": ",".join(row["linked_plan_refs"]) if row["linked_plan_refs"] else None,
+            "owner_state": "linked" if row["branch_memory_linked"] else "unlinked",
+        })
+    for code in row["warnings"]:
+        warnings.append({
+            "kind": "local_branch",
+            "path": row["path"],
+            "branch": row["branch"],
+            "code": code,
+            "owner_type": "branch_memory",
+            "owner_id": ",".join(row["linked_plan_refs"]) if row["linked_plan_refs"] else None,
+            "owner_state": "linked" if row["branch_memory_linked"] else "unlinked",
         })
 
 if canonical_temp_clone_root.exists():
@@ -858,6 +1019,7 @@ for line in stash_lines:
 summary = {
     "repo": str(repo_root),
     "checked_worktrees": len(worktree_rows),
+    "checked_local_branches": len(local_branch_rows),
     "checked_temp_clones": len(temp_clone_rows),
     "checked_root_checkout": 1 if root_checkout["checked"] else 0,
     "worktree_issue_count": len(issues),
@@ -888,6 +1050,7 @@ summary = {
 payload = {
     "summary": summary,
     "worktrees": worktree_rows,
+    "local_branches": local_branch_rows,
     "temp_clones": temp_clone_rows,
     "root_checkout": root_checkout,
     "issues": issues,

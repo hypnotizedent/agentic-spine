@@ -27,13 +27,40 @@ spine_runtime_resolve_paths
 CONTRACT_FILE="$ROOT/ops/bindings/session.execution.lane.contract.yaml"
 STATE_ROOT="$SPINE_STATE/execution-lanes"
 RECEIPT_ROOT="$SPINE_EVIDENCE_ROOT/execution-lanes"
+PLAN_CREATE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-create"
+LOOPS_CREATE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/loops-create"
 
 # Args
 LANE_ID=""
 STATUS=""
 REASON=""
 LANDING_COMMIT=""
+PLAN_ID=""
+PLAN_REVIEW_DATE=""
+PLAN_DESCRIPTION=""
+PLAN_LOOP_ID=""
+PLAN_BRANCH_RETENTION_STATE=""
+PLAN_PR_URL=""
 JSON_OUTPUT=false
+
+normalize_branch_token() {
+  local raw="$1"
+  local normalized
+  normalized="$(printf '%s' "$raw" \
+    | tr '[:lower:]' '[:upper:]' \
+    | sed -E 's#[/[:space:]_]+#-#g; s/[^A-Z0-9-]//g; s/-+/-/g; s/^-+//; s/-+$//')"
+  while [[ "$normalized" == CODEX-* || "$normalized" == RUNTIME-* || "$normalized" == MANAGED-* || "$normalized" == WORKTREE-* ]]; do
+    normalized="${normalized#*-}"
+  done
+  printf '%s\n' "$normalized"
+}
+
+default_review_date() {
+  python3 - <<'PY'
+from datetime import datetime, timedelta, timezone
+print((datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%d"))
+PY
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -51,6 +78,30 @@ while [[ $# -gt 0 ]]; do
       ;;
     --landing-commit)
       LANDING_COMMIT="${2:-}"
+      shift 2
+      ;;
+    --plan-id)
+      PLAN_ID="${2:-}"
+      shift 2
+      ;;
+    --plan-review-date)
+      PLAN_REVIEW_DATE="${2:-}"
+      shift 2
+      ;;
+    --plan-description)
+      PLAN_DESCRIPTION="${2:-}"
+      shift 2
+      ;;
+    --plan-loop-id)
+      PLAN_LOOP_ID="${2:-}"
+      shift 2
+      ;;
+    --branch-retention-state)
+      PLAN_BRANCH_RETENTION_STATE="${2:-}"
+      shift 2
+      ;;
+    --pr-url)
+      PLAN_PR_URL="${2:-}"
       shift 2
       ;;
     --json)
@@ -89,6 +140,8 @@ LANE_TYPE=$(yq e '.type' "$LANE_STATE_FILE" 2>/dev/null || echo "")
 CURRENT_STATUS=$(yq e '.status' "$LANE_STATE_FILE" 2>/dev/null || echo "active")
 BRANCH=$(yq e '.branch' "$LANE_STATE_FILE" 2>/dev/null || echo "")
 WORKTREE_PATH=$(yq e '.worktree_path' "$LANE_STATE_FILE" 2>/dev/null || echo "")
+PARENT_LOOP=$(yq e '.parent_loop // ""' "$LANE_STATE_FILE" 2>/dev/null || echo "")
+CREATED_BY=$(yq e '.created_by // "@ronny"' "$LANE_STATE_FILE" 2>/dev/null || echo "@ronny")
 
 if [[ -z "$LANE_TYPE" ]]; then
   echo "ERROR: Could not read lane type from state file" >&2
@@ -116,6 +169,68 @@ if [[ "$REASON_REQUIRED" == "true" ]] && [[ -z "$REASON" ]]; then
   exit 1
 fi
 
+if [[ "$STATUS" == "deferred" ]]; then
+  if [[ -z "$BRANCH" || "$BRANCH" == "null" ]]; then
+    echo "ERROR: deferred closeout requires branch metadata in lane state" >&2
+    exit 1
+  fi
+  branch_token="$(normalize_branch_token "$BRANCH")"
+  [[ -n "$branch_token" ]] || {
+    echo "ERROR: could not derive deferred plan token from branch '$BRANCH'" >&2
+    exit 1
+  }
+
+  [[ -n "$PLAN_ID" ]] || PLAN_ID="PLAN-${branch_token}"
+  [[ -n "$PLAN_REVIEW_DATE" ]] || PLAN_REVIEW_DATE="$(default_review_date)"
+  [[ -n "$PLAN_DESCRIPTION" ]] || PLAN_DESCRIPTION="Deferred lane closeout preserved branch ${BRANCH} from ${LANE_ID}; future work must resume from governed plan memory, not branch-only memory."
+  [[ -n "$PLAN_BRANCH_RETENTION_STATE" ]] || PLAN_BRANCH_RETENTION_STATE="keep"
+
+  if [[ -z "$PLAN_LOOP_ID" ]]; then
+    PLAN_LOOP_ID="LOOP-${branch_token}-$(date -u +%Y%m%d)"
+  fi
+
+  PLAN_SCOPE_FILE="$SPINE_STATE/loop-scopes/${PLAN_LOOP_ID}.scope.md"
+  if [[ ! -f "$PLAN_SCOPE_FILE" ]]; then
+    "$LOOPS_CREATE_BIN" \
+      --name "$branch_token" \
+      --objective "Governed deferred branch memory for ${BRANCH} after lane ${LANE_ID} closeout." \
+      --priority medium \
+      --horizon later \
+      --readiness blocked \
+      --execution-mode single_worker >/dev/null
+  fi
+
+  PLAN_INDEX="$SPINE_STATE/plans/index.yaml"
+  PLAN_EXISTS=0
+  if [[ -f "$PLAN_INDEX" ]] && yq e -e ".plans[]? | select(.plan_id == \"$PLAN_ID\") | .plan_id" "$PLAN_INDEX" >/dev/null 2>&1; then
+    PLAN_EXISTS=1
+  fi
+
+  if [[ "$PLAN_EXISTS" -eq 0 ]]; then
+    TRACKING_REF="$(git -C "$ROOT" for-each-ref --format='%(upstream:short)' "refs/heads/${BRANCH}" 2>/dev/null | head -1 || true)"
+    plan_cmd=(
+      "$PLAN_CREATE_BIN"
+      --plan-id "$PLAN_ID"
+      --loop-id "$PLAN_LOOP_ID"
+      --owner "$CREATED_BY"
+      --horizon later
+      --review-date "$PLAN_REVIEW_DATE"
+      --description "$PLAN_DESCRIPTION"
+      --activation-trigger manual
+      --branch-ref "$BRANCH"
+      --worktree-path "$WORKTREE_PATH"
+      --branch-retention-state "$PLAN_BRANCH_RETENTION_STATE"
+    )
+    if [[ -n "$TRACKING_REF" ]]; then
+      plan_cmd+=(--tracking-ref "$TRACKING_REF")
+    fi
+    if [[ -n "$PLAN_PR_URL" ]]; then
+      plan_cmd+=(--pr-url "$PLAN_PR_URL")
+    fi
+    "${plan_cmd[@]}" >/dev/null
+  fi
+fi
+
 # Update lane state file
 yq e -i ".status = \"$STATUS\"" "$LANE_STATE_FILE"
 yq e -i ".closed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" "$LANE_STATE_FILE"
@@ -127,6 +242,18 @@ fi
 
 if [[ -n "$LANDING_COMMIT" ]]; then
   yq e -i ".landing_commit = \"$LANDING_COMMIT\"" "$LANE_STATE_FILE"
+fi
+if [[ "$STATUS" == "deferred" ]]; then
+  yq e -i ".deferred_plan_id = \"$PLAN_ID\"" "$LANE_STATE_FILE"
+  yq e -i ".deferred_loop_id = \"$PLAN_LOOP_ID\"" "$LANE_STATE_FILE"
+  yq e -i ".deferred_review_date = \"$PLAN_REVIEW_DATE\"" "$LANE_STATE_FILE"
+  yq e -i ".branch_retention_state = \"$PLAN_BRANCH_RETENTION_STATE\"" "$LANE_STATE_FILE"
+  if [[ -n "${TRACKING_REF:-}" ]]; then
+    yq e -i ".branch_tracking_ref = \"$TRACKING_REF\"" "$LANE_STATE_FILE"
+  fi
+  if [[ -n "$PLAN_PR_URL" ]]; then
+    yq e -i ".branch_pr_url = \"$PLAN_PR_URL\"" "$LANE_STATE_FILE"
+  fi
 fi
 
 # Create closeout receipt
@@ -142,6 +269,11 @@ closed_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 closed_by: "session.execution.lane.closeout"
 reason: "${REASON:-}"
 landing_commit: "${LANDING_COMMIT:-}"
+deferred_plan_id: "${PLAN_ID:-}"
+deferred_loop_id: "${PLAN_LOOP_ID:-}"
+deferred_review_date: "${PLAN_REVIEW_DATE:-}"
+branch_retention_state: "${PLAN_BRANCH_RETENTION_STATE:-}"
+branch_pr_url: "${PLAN_PR_URL:-}"
 YAML
 
 # Log to audit trail
@@ -179,8 +311,11 @@ else
       echo "  git branch -D '$BRANCH'  # Force delete (not merged)"
     fi
   elif [[ "$STATUS" == "deferred" ]]; then
-    echo "Lane deferred - branch preserved for future work"
-    echo "To resume: Check out branch or create new worktree"
+    echo "Lane deferred - branch preserved via governed plan memory"
+    echo "Deferred plan: $PLAN_ID"
+    echo "Deferred loop: $PLAN_LOOP_ID"
+    echo "Review date:   $PLAN_REVIEW_DATE"
+    echo "To resume: promote the plan/loop first, then re-enter execution"
   fi
   echo "════════════════════════════════════════════════════════════"
 fi
