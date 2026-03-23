@@ -210,6 +210,7 @@ Forbidden:
 
 The translator is the membrane, not the judge.
 It may interpret intent, but it must never become the spine seal of success.
+It should be always-on, but never final.
 
 ### Control Node
 
@@ -484,6 +485,8 @@ The continuity ledger is integrity.
 
 Mobile needs stronger attestation than desktop because it lacks direct substrate visibility.
 The goal is execution uniformity plus proof, not instruction uniformity alone.
+Proof objects should be inspectable by any client without requiring the chat model itself to be trusted as the verifier.
+Remote surfaces should receive dashboard-grade attestation, not narrative-only status.
 
 ### Implemented V3 Surfaces
 
