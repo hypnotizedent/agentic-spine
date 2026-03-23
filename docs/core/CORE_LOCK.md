@@ -44,7 +44,8 @@ This key is used everywhere:
 | Entry | Path | Purpose |
 |-------|------|---------|
 | CLI | `bin/ops` | Canonical operator and agent entrypoint |
-| Session start | `./bin/ops cap run session.start` | Fast startup baseline |
+| Terminal entry | `./bin/ops cap run session.v3.attach -- --allow-no-loop` | Canonical public terminal startup |
+| Session start (internal) | `./bin/ops cap run session.start` | Bootstrap subroutine; not public entry |
 | Verify | `./bin/ops cap run verify.run -- fast` | Canonical drift gate entrypoint |
 | Worktree lifecycle | `ops/plugins/core/ops/bin/worktree-lifecycle-*` | Workspace/worktree control surfaces |
 | Repo bootstrap | `ops/plugins/core/authority/bin/project-governance-bootstrap` | API-first Gitea repo ensure + remote alignment |
