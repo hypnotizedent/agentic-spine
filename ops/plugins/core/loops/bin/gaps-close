@@ -22,6 +22,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/git-lock.sh"
 source "$ROOT/ops/plugins/core/loops/lib/gap-claims.sh"
+GAPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
 
 usage() {
   cat <<'USAGE'
@@ -185,24 +186,24 @@ apply_gap_update() {
   local reg_lock="$5"
   local updated_at="$6"
 
-  # Build yq expression dynamically to avoid strenv() inside if-conditionals
-  # which causes lexer failures in some yq versions (GAP-OP-1493).
-  local yq_expr='(.gaps[] | select(.id == strenv(GAP_ID_ENV))).status = strenv(STATUS_ENV)'
-  if [[ -n "$fixed_in" ]]; then
-    yq_expr="$yq_expr | (.gaps[] | select(.id == strenv(GAP_ID_ENV))).fixed_in = strenv(FIXED_IN_ENV)"
-  fi
-  if [[ -n "$notes" ]]; then
-    yq_expr="$yq_expr | (.gaps[] | select(.id == strenv(GAP_ID_ENV))).notes = strenv(NOTES_ENV)"
-  fi
-  if [[ -n "$reg_lock" ]]; then
-    yq_expr="$yq_expr | (.gaps[] | select(.id == strenv(GAP_ID_ENV))).regression_lock_id = strenv(LOCK_ENV)"
-  fi
-  yq_expr="$yq_expr | .updated = strenv(UPDATED_ENV)"
+  # Delegate mutation to SQLite authority bridge (writes SQLite, projects to YAML).
+  local bridge_args=("close" "--id" "$id" "--status" "$status")
+  [[ -n "$fixed_in" ]] && bridge_args+=("--fixed-in" "$fixed_in")
+  [[ -n "$notes" ]] && bridge_args+=("--notes" "$notes")
+  [[ -n "$reg_lock" ]] && bridge_args+=("--regression-lock-id" "$reg_lock")
 
-  GAP_ID_ENV="$id" STATUS_ENV="$status" FIXED_IN_ENV="$fixed_in" NOTES_ENV="$notes" LOCK_ENV="$reg_lock" UPDATED_ENV="$updated_at" \
-    yq e -i "$yq_expr" "$GAPS_FILE" || {
-      fail "yq atomic update failed for $id"
-    }
+  local result
+  result="$(python3 "$GAPS_BRIDGE" "${bridge_args[@]}")" || {
+    fail "SQLite authority close failed for $id"
+  }
+
+  local ok
+  ok="$(printf '%s' "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))" 2>/dev/null || echo "False")"
+  if [[ "$ok" != "True" ]]; then
+    local err
+    err="$(printf '%s' "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error','unknown'))" 2>/dev/null || echo "bridge error")"
+    fail "authority bridge close failed for $id: $err"
+  fi
 }
 
 parse_batch_file() {

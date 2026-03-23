@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""CLI bridge for gaps SQLite authority operations.
+
+Shell scripts (gaps-file, gaps-close, gaps-reparent) call this instead of
+mutating operational.gaps.yaml directly with yq. This script:
+  1. Performs the SQLite mutation (upsert/close/reparent)
+  2. Projects the result back to operational.gaps.yaml
+  3. Returns status to the calling shell script
+
+Usage:
+  gaps-authority-bridge upsert --json '{"id":"GAP-OP-1234",...}'
+  gaps-authority-bridge close --id GAP-OP-1234 --status fixed [--fixed-in ref] [--completion-level slice_proven]
+  gaps-authority-bridge reparent --id GAP-OP-1234 --parent-loop LOOP-NEW
+  gaps-authority-bridge bootstrap
+  gaps-authority-bridge project
+  gaps-authority-bridge next-id
+  gaps-authority-bridge parity
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+# Resolve lib path relative to this script.
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+sys.path.insert(0, str(LIB_DIR))
+
+import gaps_sql_authority as gsa
+
+
+def resolve_root() -> Path:
+    spine_root = os.environ.get("SPINE_ROOT") or os.environ.get("SPINE_CODE")
+    if spine_root:
+        return Path(spine_root).resolve()
+    # Walk up from script location to find repo root.
+    candidate = SCRIPT_DIR
+    for _ in range(10):
+        if (candidate / "ops" / "bindings" / "operational.gaps.yaml").exists():
+            return candidate
+        candidate = candidate.parent
+    raise RuntimeError("Cannot resolve SPINE_ROOT")
+
+
+def cmd_upsert(args: argparse.Namespace) -> None:
+    root = resolve_root()
+    db_path, gaps_yaml = gsa.resolve_paths(root)
+    conn = gsa.connect(db_path)
+    gsa.ensure_schema(conn)
+    gsa.bootstrap_from_yaml(conn, gaps_yaml)
+
+    gap = json.loads(args.json)
+    gap_id = gap.get("id", "")
+
+    old = gsa.get_gap(conn, gap_id)
+    gsa.upsert_gap(conn, gap)
+    gsa.insert_event(
+        conn,
+        gap_id=gap_id,
+        event_type="upsert",
+        from_status=old["status"] if old else None,
+        to_status=gap.get("status", "open"),
+        reason="Filed via gaps-authority-bridge upsert",
+        actor=args.actor or "gaps.file",
+    )
+    result = gsa.project_to_yaml(conn, gaps_yaml)
+    conn.close()
+    print(json.dumps({"ok": True, "gap_id": gap_id, "projection": result}))
+
+
+def cmd_close(args: argparse.Namespace) -> None:
+    root = resolve_root()
+    db_path, gaps_yaml = gsa.resolve_paths(root)
+    conn = gsa.connect(db_path)
+    gsa.ensure_schema(conn)
+    gsa.bootstrap_from_yaml(conn, gaps_yaml)
+
+    # Validate completion level if provided.
+    if args.completion_level:
+        ok, msg = gsa.validate_completion_level(args.completion_level)
+        if not ok:
+            print(json.dumps({"ok": False, "error": msg}))
+            sys.exit(1)
+
+    gap = gsa.close_gap(
+        conn,
+        args.id,
+        status=args.status,
+        fixed_in=args.fixed_in,
+        completion_level=args.completion_level,
+        actor=args.actor or "gaps.close",
+        reason=args.reason,
+    )
+    if gap is None:
+        print(json.dumps({"ok": False, "error": f"{args.id} not found"}))
+        sys.exit(1)
+
+    # Apply notes if provided.
+    if args.notes:
+        gap["notes"] = args.notes
+        gsa.upsert_gap(conn, gap)
+
+    # Apply regression_lock_id if provided.
+    if args.regression_lock_id:
+        gap["regression_lock_id"] = args.regression_lock_id
+        gsa.upsert_gap(conn, gap)
+
+    result = gsa.project_to_yaml(conn, gaps_yaml)
+    conn.close()
+    print(json.dumps({"ok": True, "gap_id": args.id, "status": args.status, "projection": result}))
+
+
+def cmd_reparent(args: argparse.Namespace) -> None:
+    root = resolve_root()
+    db_path, gaps_yaml = gsa.resolve_paths(root)
+    conn = gsa.connect(db_path)
+    gsa.ensure_schema(conn)
+    gsa.bootstrap_from_yaml(conn, gaps_yaml)
+
+    gap = gsa.get_gap(conn, args.id)
+    if gap is None:
+        print(json.dumps({"ok": False, "error": f"{args.id} not found"}))
+        sys.exit(1)
+
+    old_parent = gap.get("parent_loop")
+    gap["parent_loop"] = args.parent_loop
+    gsa.upsert_gap(conn, gap)
+    gsa.insert_event(
+        conn,
+        gap_id=args.id,
+        event_type="reparent",
+        from_status=None,
+        to_status=None,
+        reason=f"Reparented from {old_parent} to {args.parent_loop}",
+        actor=args.actor or "gaps.reparent",
+    )
+    result = gsa.project_to_yaml(conn, gaps_yaml)
+    conn.close()
+    print(json.dumps({"ok": True, "gap_id": args.id, "old_parent": old_parent, "new_parent": args.parent_loop, "projection": result}))
+
+
+def cmd_bootstrap(args: argparse.Namespace) -> None:
+    root = resolve_root()
+    db_path, gaps_yaml = gsa.resolve_paths(root)
+    conn = gsa.connect(db_path)
+    gsa.ensure_schema(conn)
+    imported = gsa.bootstrap_from_yaml(conn, gaps_yaml)
+    total = gsa.gap_count(conn)
+    ok, msg = gsa.integrity_check(conn)
+    conn.close()
+    print(json.dumps({"ok": ok, "imported": imported, "total": total, "integrity": msg}))
+
+
+def cmd_project(args: argparse.Namespace) -> None:
+    root = resolve_root()
+    db_path, gaps_yaml = gsa.resolve_paths(root)
+    conn = gsa.connect(db_path)
+    gsa.ensure_schema(conn)
+    gsa.bootstrap_from_yaml(conn, gaps_yaml)
+    result = gsa.project_to_yaml(conn, gaps_yaml)
+    conn.close()
+    print(json.dumps({"ok": True, "projection": result}))
+
+
+def cmd_next_id(args: argparse.Namespace) -> None:
+    root = resolve_root()
+    db_path, gaps_yaml = gsa.resolve_paths(root)
+    conn = gsa.connect(db_path)
+    gsa.ensure_schema(conn)
+    gsa.bootstrap_from_yaml(conn, gaps_yaml)
+    nid = gsa.next_gap_id(conn)
+    conn.close()
+    print(nid)
+
+
+def cmd_parity(args: argparse.Namespace) -> None:
+    root = resolve_root()
+    db_path, gaps_yaml = gsa.resolve_paths(root)
+    conn = gsa.connect(db_path)
+    gsa.ensure_schema(conn)
+    gsa.bootstrap_from_yaml(conn, gaps_yaml)
+    snapshot = gsa.db_parity_snapshot(conn, gaps_yaml)
+    conn.close()
+    print(json.dumps(snapshot, indent=2))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Gaps SQLite authority bridge")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_upsert = sub.add_parser("upsert")
+    p_upsert.add_argument("--json", required=True)
+    p_upsert.add_argument("--actor", default="")
+
+    p_close = sub.add_parser("close")
+    p_close.add_argument("--id", required=True)
+    p_close.add_argument("--status", required=True)
+    p_close.add_argument("--fixed-in", default=None)
+    p_close.add_argument("--notes", default=None)
+    p_close.add_argument("--regression-lock-id", default=None)
+    p_close.add_argument("--completion-level", default=None)
+    p_close.add_argument("--reason", default=None)
+    p_close.add_argument("--actor", default="")
+
+    p_reparent = sub.add_parser("reparent")
+    p_reparent.add_argument("--id", required=True)
+    p_reparent.add_argument("--parent-loop", required=True)
+    p_reparent.add_argument("--actor", default="")
+
+    sub.add_parser("bootstrap")
+    sub.add_parser("project")
+    sub.add_parser("next-id")
+    sub.add_parser("parity")
+
+    args = parser.parse_args()
+    cmd_map = {
+        "upsert": cmd_upsert,
+        "close": cmd_close,
+        "reparent": cmd_reparent,
+        "bootstrap": cmd_bootstrap,
+        "project": cmd_project,
+        "next-id": cmd_next_id,
+        "parity": cmd_parity,
+    }
+    cmd_map[args.command](args)
+
+
+if __name__ == "__main__":
+    main()

@@ -19,7 +19,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/git-lock.sh"
 source "$ROOT/ops/plugins/core/loops/lib/gap-claims.sh"
 source "$ROOT/ops/lib/resolve-policy.sh"
-source "$ROOT/ops/plugins/core/lifecycle/lib/next-gap-id.sh"
+GAPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
+
+next_gap_id() {
+  python3 "$GAPS_BRIDGE" next-id
+}
 resolve_policy_knobs
 
 yaml_escape() {
@@ -192,36 +196,35 @@ append_gap_entry() {
   title="$(derive_gap_title "$description" "$gap_id")"
   classification="$type"
 
-  local tmpfile
-  tmpfile="$(mktemp)"
-  {
-    echo "id: \"$(yaml_escape "$gap_id")\""
-    echo "title: \"$(yaml_escape "$title")\""
-    echo "discovered_by: \"$(yaml_escape "$discovered_by")\""
-    echo "discovered_at: \"$today\""
-    echo "type: $type"
-    echo "classification: $classification"
-    if [[ -n "$doc" ]]; then
-      echo "doc: \"$(yaml_escape "$doc")\""
-    else
-      echo "doc: null"
-    fi
-    echo "description: |"
-    printf '%s\n' "$description" | sed 's/^/  /'
-    echo "severity: $severity"
-    echo "status: open"
-    echo "notes: \"Filed via gaps.file at $(yaml_escape "$timestamp")\""
-    if [[ -n "$parent_loop" ]]; then
-      echo "parent_loop: \"$(yaml_escape "$parent_loop")\""
-    fi
-  } > "$tmpfile"
+  # Build JSON gap dict for SQLite authority bridge.
+  local gap_json
+  gap_json="$(python3 -c "
+import json, sys
+gap = {
+    'id': sys.argv[1],
+    'title': sys.argv[2],
+    'discovered_by': sys.argv[3],
+    'discovered_at': sys.argv[4],
+    'type': sys.argv[5],
+    'classification': sys.argv[6],
+    'doc': sys.argv[7] if sys.argv[7] != '__null__' else None,
+    'description': sys.argv[8],
+    'severity': sys.argv[9],
+    'status': 'open',
+    'notes': sys.argv[10],
+    'parent_loop': sys.argv[11] if sys.argv[11] else None,
+}
+print(json.dumps(gap))
+" "$gap_id" "$title" "$discovered_by" "$today" "$type" "$classification" \
+  "${doc:-__null__}" "$description" "$severity" \
+  "Filed via gaps.file at $timestamp" \
+  "$parent_loop"
+  )"
 
-  yq e -i ".gaps += [load(\"$tmpfile\")]" "$GAPS_FILE" || {
-    rm -f "$tmpfile"
-    echo "FAIL: yq append failed for $gap_id" >&2
+  python3 "$GAPS_BRIDGE" upsert --json "$gap_json" --actor "gaps.file" >/dev/null || {
+    echo "FAIL: SQLite authority upsert failed for $gap_id" >&2
     exit 1
   }
-  rm -f "$tmpfile"
 }
 
 # Parse arguments
@@ -437,8 +440,7 @@ if [[ ${#FILED_GAP_IDS[@]} -eq 0 ]]; then
   exit 0
 fi
 
-# Update timestamp once per run
-yq e -i ".updated = \"$TIMESTAMP\"" "$GAPS_FILE"
+# Timestamp is now set by SQLite projection (gaps-authority-bridge).
 
 git -C "$ROOT" add "$GAPS_FILE"
 if [[ "$NO_COMMIT" -eq 0 ]]; then
