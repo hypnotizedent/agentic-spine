@@ -24,8 +24,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 BINDING="$TMP/calendar.global.yaml"
-RUNTIME="$TMP/runtime"
-STATE="$RUNTIME/runtime/domain-state/calendar/state.json"
+DOMAIN_STATE="$TMP/domain-state"
+STATE="$DOMAIN_STATE/calendar/state.json"
 MICROSOFT_DB="$TMP/mock-microsoft-db.json"
 MOCK_MICROSOFT="$TMP/mock-microsoft-cap-exec"
 
@@ -257,7 +257,7 @@ chmod +x "$MOCK_MICROSOFT"
 
 export CALENDAR_SYNC_MICROSOFT_EXEC="$MOCK_MICROSOFT"
 export MOCK_MICROSOFT_DB="$MICROSOFT_DB"
-export SPINE_REPO="$RUNTIME"
+export SPINE_DOMAIN_STATE="$DOMAIN_STATE"
 
 echo ""
 echo "T1: dry-run envelope includes summary/actions/conflicts/errors/state_path"
@@ -271,7 +271,7 @@ echo "T1: dry-run envelope includes summary/actions/conflicts/errors/state_path"
     (.data.actions | length >= 6) and
     (.data.conflicts | type == "array") and
     (.data.errors | type == "array") and
-    (.data.state_path | contains("runtime/domain-state/calendar/state.json"))
+    (.data.state_path | contains("domain-state/calendar/state.json"))
   ' >/dev/null
 ) && pass "dry-run output contract" || fail "dry-run output contract"
 
@@ -316,7 +316,7 @@ echo "T4: external-authoritative layers never emit remote create/update"
 echo ""
 echo "T5: partial outage yields partial status and no mapping corruption"
 (
-  rm -rf "$RUNTIME"
+  rm -rf "$DOMAIN_STATE"
   rm -f "$MICROSOFT_DB"
   export MOCK_TRANSPORT_FAIL_OP="calendar_create"
   export MOCK_TRANSPORT_FAIL_ALWAYS="1"

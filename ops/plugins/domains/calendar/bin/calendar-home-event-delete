@@ -15,6 +15,12 @@ from typing import Any
 
 import yaml
 
+CALENDAR_LIB = Path(__file__).resolve().parent.parent / "lib"
+if str(CALENDAR_LIB) not in sys.path:
+    sys.path.insert(0, str(CALENDAR_LIB))
+
+from calendar_runtime_paths import resolve_calendar_state_path
+
 
 def fail(msg: str, code: int = 1) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
@@ -160,10 +166,8 @@ def main() -> None:
         fail(f"remote calendar delete failed: {delete_result['output'] or 'curl returned non-zero'}")
 
     # Remove local store copy if exists
-    local_store_rel = str(
-        sync.get("local_calendar_store", {}).get("path", "runtime/domain-state/calendar/writable")
-    ).strip()
-    local_store_root = (root / local_store_rel).resolve()
+    local_store_rel = str(sync.get("local_calendar_store", {}).get("path", "writable")).strip()
+    local_store_root = resolve_calendar_state_path(local_store_rel, "writable")
     local_events_dir = local_store_root / "events"
     local_removed = False
     if local_events_dir.is_dir():
