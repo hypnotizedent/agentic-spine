@@ -103,6 +103,45 @@ YAML
   exit 0
 fi
 
+preflight_ceremony_check() {
+  # Preflight check: ensure working tree is closure-safe before attempting commit.
+  # Fail fast with clear diagnosis instead of hidden pre-commit surprise.
+
+  local porcelain_output staged_count unstaged_count
+
+  porcelain_output="$(git -C "$ROOT" status --porcelain 2>/dev/null || true)"
+  staged_count=$(echo "$porcelain_output" | grep -c '^[MADRC]' || true)
+  unstaged_count=$(echo "$porcelain_output" | grep -c '^.[MD]' || true)
+
+  if [[ -z "$porcelain_output" ]]; then
+    echo "INFO: working tree clean — closure-safe" >&2
+    return 0
+  fi
+
+  if [[ "$unstaged_count" -gt 0 ]]; then
+    echo "FAIL: gaps.close requires clean working tree before ceremony" >&2
+    echo "" >&2
+    echo "Unstaged changes detected:" >&2
+    echo "$porcelain_output" | grep '^.[MD]' | sed 's/^/  /' >&2
+    echo "" >&2
+    echo "Remediation:" >&2
+    echo "  1. Commit or stash unstaged changes" >&2
+    echo "  2. Or: git checkout -- <file> to discard" >&2
+    echo "  3. Then retry gaps.close" >&2
+    echo "" >&2
+    echo "Reason: mixed dirty state (staged + unstaged) causes pre-commit failures." >&2
+    return 1
+  fi
+
+  if [[ "$staged_count" -gt 0 ]]; then
+    echo "WARN: working tree has staged changes (not from gaps.close)" >&2
+    echo "$porcelain_output" | grep '^[MADRC]' | sed 's/^/  /' >&2
+    echo "Proceeding with ceremony — staged changes will be committed separately." >&2
+  fi
+
+  return 0
+}
+
 validate_gap_closure() {
   local id="$1"
   local status="$2"
@@ -264,6 +303,12 @@ close_single() {
   acquire_git_lock gaps || exit 1
   trap 'release_git_lock' EXIT INT TERM
 
+  # Preflight: check ceremony-safety before mutation
+  preflight_ceremony_check || {
+    release_git_lock
+    exit 1
+  }
+
   if ! validate_gap_closure "$id" "$status" "$reg_lock"; then
     echo "SKIPPED: $id (already closed)"
     return 0
@@ -295,8 +340,14 @@ EOF
     rc=$?
   fi
   if [[ "$rc" -eq 0 ]]; then
-    git -C "$ROOT" commit -m "$commit_msg"
-    rc=$?
+    # Timeout protection: prevent indefinite hang from pre-commit hooks
+    timeout 30 git -C "$ROOT" commit -m "$commit_msg" || {
+      rc=$?
+      if [[ "$rc" -eq 124 ]]; then
+        echo "FAIL: git commit timed out (30s) — pre-commit hooks may be hanging" >&2
+        echo "Check: git status, pre-commit hook execution, network connectivity" >&2
+      fi
+    }
   fi
   set -e
 
@@ -345,6 +396,12 @@ close_batch() {
 
   acquire_git_lock gaps || exit 1
   trap 'release_git_lock' EXIT INT TERM
+
+  # Preflight: check ceremony-safety before mutation
+  preflight_ceremony_check || {
+    release_git_lock
+    exit 1
+  }
 
   # Validate under lock to avoid stale read races between concurrent terminals.
   local -a valid_indices=()
@@ -400,8 +457,14 @@ EOF
     rc=$?
   fi
   if [[ "${rc:-0}" -eq 0 ]]; then
-    git -C "$ROOT" commit -m "$commit_msg"
-    rc=$?
+    # Timeout protection: prevent indefinite hang from pre-commit hooks
+    timeout 30 git -C "$ROOT" commit -m "$commit_msg" || {
+      rc=$?
+      if [[ "$rc" -eq 124 ]]; then
+        echo "FAIL: git commit timed out (30s) — pre-commit hooks may be hanging" >&2
+        echo "Check: git status, pre-commit hook execution, network connectivity" >&2
+      fi
+    }
   fi
   set -e
 
