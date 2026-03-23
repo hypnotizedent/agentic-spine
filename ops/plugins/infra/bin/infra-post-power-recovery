@@ -33,6 +33,10 @@ SEQ_BINDING="$SPINE_ROOT/ops/bindings/startup.sequencing.yaml"
 COMPOSE_UP="$SPINE_ROOT/ops/plugins/infra/docker/bin/docker-compose-up"
 COMPOSE_STATUS="$SPINE_ROOT/ops/plugins/infra/docker/bin/docker-compose-status"
 
+# Source shared SSH resolver for LAN->Tailscale fallback (D321 policy)
+# shellcheck source=../../../lib/ssh-resolve.sh
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
 command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
@@ -59,6 +63,10 @@ done
 [[ -n "$MODE" ]] || stop "--mode required (status|recover)"
 
 # ─── SSH helpers ──────────────────────────────────────────────────────────
+# Uses shared ssh-resolve.sh (sourced above) for LAN->Tailscale fallback.
+# The startup.sequencing.yaml references compose target IDs (e.g. "infra-core"),
+# which map to ssh_target IDs in docker.compose.targets.yaml. We resolve that
+# indirection, then use the shared resolver for actual host resolution.
 
 DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
 DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
@@ -66,30 +74,55 @@ DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
 DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_BINDING")"
 DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_BINDING")"
 
-resolve_ssh() {
+# Map a compose target id to its ssh_target id
+_compose_to_ssh_target() {
   local target_id="$1"
   local ssh_target_id
   ssh_target_id="$(yq -r ".targets.\"$target_id\".ssh_target // \"\"" "$COMPOSE_BINDING")"
-  [[ -n "$ssh_target_id" && "$ssh_target_id" != "null" ]] || { echo ""; return; }
+  if [[ -n "$ssh_target_id" && "$ssh_target_id" != "null" ]]; then
+    echo "$ssh_target_id"
+  else
+    # If no compose binding entry, assume target_id IS the ssh_target_id
+    # (handles targets like "nas", "proxmox-home" listed directly in startup.sequencing)
+    echo "$target_id"
+  fi
+}
 
-  local host user port
-  host="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
-  user="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .user // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
+# Resolve SSH connection details with LAN->Tailscale fallback.
+# Returns: "user host port path_used" (space-separated)
+resolve_ssh() {
+  local target_id="$1"
+  local ssh_target_id
+  ssh_target_id="$(_compose_to_ssh_target "$target_id")"
+
+  local user port
+  user="$(ssh_resolve_user "$ssh_target_id" "$DEF_USER")"
   port="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .port // $DEF_PORT" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
-  [[ -n "$user" && "$user" != "null" ]] || user="$DEF_USER"
   [[ -n "$port" && "$port" != "null" ]] || port="$DEF_PORT"
-  echo "$user@$host:$port"
+
+  # Resolve host with LAN->Tailscale fallback (TCP/22 probe)
+  local resolve_result resolved_host path_used
+  resolve_result="$(ssh_resolve_ssh_host_with_fallback "$ssh_target_id" "$DEF_TO")" || true
+  resolved_host="$(echo "$resolve_result" | awk '{print $1}')"
+  path_used="$(echo "$resolve_result" | awk '{print $2}')"
+  [[ -n "$resolved_host" ]] || resolved_host="$(ssh_resolve_host "$ssh_target_id")"
+  [[ -n "$path_used" ]] || path_used="unknown"
+
+  echo "$user $resolved_host $port $path_used"
 }
 
 ssh_check() {
   local target_id="$1"
-  local conn
-  conn="$(resolve_ssh "$target_id")"
-  [[ -n "$conn" ]] || return 1
-  local user="${conn%%@*}"
-  local hostport="${conn#*@}"
-  local host="${hostport%%:*}"
-  local port="${hostport##*:}"
+  local parts
+  parts="$(resolve_ssh "$target_id")"
+  [[ -n "$parts" ]] || return 1
+  local user host port path_used
+  user="$(echo "$parts" | awk '{print $1}')"
+  host="$(echo "$parts" | awk '{print $2}')"
+  port="$(echo "$parts" | awk '{print $3}')"
+  path_used="$(echo "$parts" | awk '{print $4}')"
+
+  [[ "$path_used" != "unreachable" ]] || return 1
 
   ssh -o "ConnectTimeout=$DEF_TO" -o "StrictHostKeyChecking=$DEF_STRICT" \
       -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS" -o "BatchMode=yes" \
@@ -101,13 +134,16 @@ ssh_check() {
 
 check_host_containers() {
   local target_id="$1"
-  local conn
-  conn="$(resolve_ssh "$target_id")"
-  [[ -n "$conn" ]] || { echo "unreachable"; return; }
-  local user="${conn%%@*}"
-  local hostport="${conn#*@}"
-  local host="${hostport%%:*}"
-  local port="${hostport##*:}"
+  local parts
+  parts="$(resolve_ssh "$target_id")"
+  [[ -n "$parts" ]] || { echo "unreachable"; return; }
+  local user host port path_used
+  user="$(echo "$parts" | awk '{print $1}')"
+  host="$(echo "$parts" | awk '{print $2}')"
+  port="$(echo "$parts" | awk '{print $3}')"
+  path_used="$(echo "$parts" | awk '{print $4}')"
+
+  [[ "$path_used" != "unreachable" ]] || { echo "unreachable"; return; }
 
   local out
   out="$(ssh -o "ConnectTimeout=$DEF_TO" -o "StrictHostKeyChecking=$DEF_STRICT" \
@@ -126,13 +162,16 @@ check_host_containers() {
 recover_stack() {
   local target_id="$1"
   local stack="$2"
-  local conn
-  conn="$(resolve_ssh "$target_id")"
-  [[ -n "$conn" ]] || { echo "FAIL: cannot resolve SSH for $target_id"; return 1; }
-  local user="${conn%%@*}"
-  local hostport="${conn#*@}"
-  local host="${hostport%%:*}"
-  local port="${hostport##*:}"
+  local parts
+  parts="$(resolve_ssh "$target_id")"
+  [[ -n "$parts" ]] || { echo "FAIL: cannot resolve SSH for $target_id"; return 1; }
+  local user host port path_used
+  user="$(echo "$parts" | awk '{print $1}')"
+  host="$(echo "$parts" | awk '{print $2}')"
+  port="$(echo "$parts" | awk '{print $3}')"
+  path_used="$(echo "$parts" | awk '{print $4}')"
+
+  [[ "$path_used" != "unreachable" ]] || { echo "FAIL: SSH unreachable for $target_id (tried LAN + Tailscale)"; return 1; }
 
   local stack_path
   stack_path="$(yq -r ".targets.\"$target_id\".stacks[] | select(.name == \"$stack\") | .path" "$COMPOSE_BINDING" 2>/dev/null | head -n1 || true)"
@@ -225,15 +264,18 @@ for pi in $(seq 0 $((phase_count - 1))); do
     echo
     echo "── $target ──"
 
-    # Check SSH reachability
+    # Check SSH reachability (with LAN->Tailscale fallback)
     if ! ssh_check "$target" 2>/dev/null; then
-      echo "  STATUS: UNREACHABLE (SSH failed)"
+      echo "  STATUS: UNREACHABLE (SSH failed — tried LAN + Tailscale)"
       stack_count="$(yq -r ".phases[$pi].hosts[$hi].stacks | length" "$SEQ_BINDING")"
       total_stacks=$((total_stacks + stack_count))
       total_failed=$((total_failed + stack_count))
       continue
     fi
-    echo "  ssh: OK"
+    # Show path used for diagnostics
+    _parts="$(resolve_ssh "$target")"
+    _path_used="$(echo "$_parts" | awk '{print $4}')"
+    echo "  ssh: OK (path=${_path_used:-direct})"
 
     # Get current container state
     container_state="$(check_host_containers "$target")"
