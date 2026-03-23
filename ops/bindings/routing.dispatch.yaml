@@ -4,7 +4,7 @@ owner: '@ronny'
 last_verified: '2026-03-23'
 scope: routing-dispatch
 version: '2.0'
-generated_at: '2026-03-23T01:34:33Z'
+generated_at: '2026-03-23T03:45:45Z'
 generated_by: ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py
 generated_from:
 - ops/capabilities.yaml
@@ -2541,7 +2541,8 @@ dispatch:
     agent_id: null
     terminal_affinity: []
     description: Consume queued friction, dedupe against open gaps, and file unmatched
-      items via gaps.file batch.
+      items via gaps.file batch with automatic lane-safe fallback when direct git
+      mutation is blocked.
   gaps.aging:
     capability_id: gaps.aging
     domain: loop_gap
@@ -7530,6 +7531,22 @@ dispatch:
     agent_id: null
     terminal_affinity: []
     description: Acknowledge a dispatched task completion with result and run key.
+  orchestration.wave.claims.reconcile:
+    capability_id: orchestration.wave.claims.reconcile
+    domain: orchestration
+    execution_target: plugin
+    safety: mutating
+    approval: auto
+    target:
+      plugin: orchestration
+      plugin_path: core/orchestration
+      script: orchestration-wave
+      subcommand: claims-reconcile
+      command: ./ops/plugins/core/orchestration/bin/orchestration-wave claims-reconcile
+    agent_id: null
+    terminal_affinity: []
+    description: Reconcile stale wave path claims against TTL and live wave state
+      so residue cannot block unrelated governed work.
   orchestration.wave.close:
     capability_id: orchestration.wave.close
     domain: orchestration
@@ -9823,8 +9840,9 @@ dispatch:
       command: ./ops/plugins/core/session/bin/session-start
     agent_id: null
     terminal_affinity: []
-    description: Initialize a governed spine session. Defaults to fast startup with
-      no args; supports full mode and lane-based session wiring.
+    description: Internal session bootstrap subroutine. Public terminal entry should
+      use session.v3.attach; direct session.start is for launcher internals and deep
+      diagnostics.
   session.start.dirty.guard:
     capability_id: session.start.dirty.guard
     domain: core
@@ -9868,8 +9886,9 @@ dispatch:
       command: ./ops/plugins/core/session/bin/session-v3-attach
     agent_id: null
     terminal_affinity: []
-    description: Resolve latest loop truth, sanitize imported ingress when present,
-      and compile the governed V3 entry packet for terminal attach.
+    description: 'Canonical Spine V3 terminal entry for already-open shells: bootstrap
+      session, resolve loop truth, sanitize imported ingress when present, compile
+      the governed entry packet, and emit immediate friction snapshot.'
   share.publish.apply:
     capability_id: share.publish.apply
     domain: share
