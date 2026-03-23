@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-18
+last_verified: 2026-03-23
 scope: dream-system-canonical-product-brief
 ---
 
@@ -29,7 +29,7 @@ The control plane. Every cap run produces a receipt. Every gate check is auditab
 **Core surfaces**:
 - `ops/capabilities.yaml` — 702 named, audited actions the system can take
 - `ops/bindings/gate.registry.yaml` — 394 rules (94 active) enforced automatically
-- `ops/bindings/operational.gaps.yaml` — 1,523 problems tracked, 1,315 resolved
+- `ops/bindings/operational.gaps.yaml` — projected from SQLite authority (`shared_authority.db`), 1,523+ problems tracked
 - `surfaces/verify/drift-gate.sh` — Master verify orchestrator
 - `.githooks/pre-commit` — 114-line commit gate (3 guards)
 - `.claude/hooks/session-entry-hook.sh` — 372-line agent enrollment surface
@@ -273,12 +273,14 @@ Everything else derives from these 5 or is runtime state.
 
 1. Read `AGENTS.md` (runtime contract)
 2. Read `docs/governance/SPINE.md` (operating rules)
-3. Run `./bin/ops cap run session.start` (orientation)
+3. Run `./bin/ops cap run session.v3.attach -- --allow-no-loop` (orientation and governed attach)
 4. Know that `cap run` commands write receipts to `~/.evidence/`
 5. Know that `verify.core.run` is the green/red signal for the whole system
 6. Never hand-edit files marked `generated_only: true`
 7. If filing a gap: `gaps.file --id auto`
 8. If closing a gap: `gaps.close --id GAP-OP-XXX`
+
+If you need diagnostics beyond the normal attach path, use `session.start` only as a bootstrap subroutine after attach.
 
 ---
 

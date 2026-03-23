@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-22
+last_verified: 2026-03-23
 scope: session-entry
 ---
 
@@ -50,9 +50,9 @@ Full spine access. Follow all sections below in order.
 ### Session steps
 
 1. **Start the session**
-   - Run `./bin/ops cap run session.v3.attach -- --allow-no-loop` — canonical terminal entry. It runs the `session.start` bootstrap internally, emits the current friction/lifecycle snapshot, and attaches governed context in one pass.
-   - Run `./bin/ops cap run session.start full` only when explicitly requested for deep bootstrap diagnostics.
-   - Run `./bin/ops cap run session.start degraded` only for degraded bootstrap / recovery when startup dependencies are partially unhealthy; it preserves checkout/worktree guards and emits continuity fallbacks plus runtime state location hints.
+   - Run `./bin/ops cap run session.v3.attach -- --allow-no-loop` — canonical terminal entry. It attaches governed context in one pass and is the only routine startup surface.
+   - Run `./bin/ops cap run session.start full` only when explicitly requested for deep bootstrap diagnostics after attach.
+   - Run `./bin/ops cap run session.start degraded` only for degraded bootstrap / recovery when startup dependencies are partially unhealthy; it is diagnostics-only and preserves checkout/worktree guards plus runtime state location hints.
    - If you need to touch secrets, source `~/.config/infisical/credentials` first.
    - Canonical nightly closeout SOP entrypoint: `./bin/ops cap run nightly.closeout -- --mode dry-run` then `./bin/ops cap run nightly.closeout -- --mode apply`.
 2. **Start work**
@@ -79,9 +79,9 @@ Full spine access. Follow all sections below in order.
 
 | Scenario | Execution Mode |
 |----------|---------------|
-| Startup baseline | `ops cap run session.v3.attach -- --allow-no-loop` |
-| Deep startup diagnostics (opt-in) | `ops cap run session.start full` |
-| Degraded bootstrap / memory fallback | `ops cap run session.start degraded` |
+| **Canonical startup** | `./bin/ops cap run session.v3.attach -- --allow-no-loop` |
+| LEGACY: deep diagnostics (only when attach fails) | `./bin/ops cap run session.start full` |
+| LEGACY: degraded recovery (only when dependencies are unhealthy) | `./bin/ops cap run session.start degraded` |
 | Single read-only query | `ops cap run` (auto-approval) |
 | Single mutating action | `ops cap run` (manual approval) |
 | Multi-step coordinated work | Open a loop, use proposal flow |

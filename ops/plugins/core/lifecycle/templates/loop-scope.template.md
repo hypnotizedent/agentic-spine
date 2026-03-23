@@ -12,6 +12,9 @@ objective: {{OBJECTIVE}}
 exclusions: []
 supersedes: []
 ---
+<!-- Authority: loop scope files are the canonical authority for loop lifecycle state.
+     Runtime location: $SPINE_STATE/loop-scopes/ (externalized from repo).
+     Mutation paths: loops.create, loops.auto-close, loop-closeout-finalize. -->
 
 # Loop Scope: {{LOOP_ID}}
 

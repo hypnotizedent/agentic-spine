@@ -9,7 +9,7 @@ mutating operational.gaps.yaml directly with yq. This script:
 
 Usage:
   gaps-authority-bridge upsert --json '{"id":"GAP-OP-1234",...}'
-  gaps-authority-bridge close --id GAP-OP-1234 --status fixed [--fixed-in ref] [--completion-level slice_proven]
+  gaps-authority-bridge close --id GAP-OP-1234 --status fixed [--fixed-in ref] [--completion-level slice_complete]
   gaps-authority-bridge reparent --id GAP-OP-1234 --parent-loop LOOP-NEW
   gaps-authority-bridge bootstrap
   gaps-authority-bridge project
@@ -109,6 +109,19 @@ def cmd_close(args: argparse.Namespace) -> None:
         gap["regression_lock_id"] = args.regression_lock_id
         gsa.upsert_gap(conn, gap)
 
+    if args.evidence:
+        gap["evidence"] = args.evidence
+        gsa.upsert_gap(conn, gap)
+    if args.owner:
+        gap["owner"] = args.owner
+        gsa.upsert_gap(conn, gap)
+    if args.expiry_check:
+        gap["expiry_check"] = args.expiry_check
+        gsa.upsert_gap(conn, gap)
+    if args.root_cause:
+        gap["root_cause"] = args.root_cause
+        gsa.upsert_gap(conn, gap)
+
     result = gsa.project_to_yaml(conn, gaps_yaml)
     conn.close()
     print(json.dumps({"ok": True, "gap_id": args.id, "status": args.status, "projection": result}))
@@ -188,6 +201,30 @@ def cmd_parity(args: argparse.Namespace) -> None:
     print(json.dumps(snapshot, indent=2))
 
 
+def cmd_query(args: argparse.Namespace) -> None:
+    """Query a single gap from SQLite authority. Returns JSON with exists/status/severity."""
+    root = resolve_root()
+    db_path, gaps_yaml = gsa.resolve_paths(root)
+    conn = gsa.connect(db_path)
+    gsa.ensure_schema(conn)
+    gsa.bootstrap_from_yaml(conn, gaps_yaml)
+
+    gap = gsa.get_gap(conn, args.id)
+    conn.close()
+
+    if gap is None:
+        print(json.dumps({"exists": False, "gap_id": args.id}))
+    else:
+        print(json.dumps({
+            "exists": True,
+            "gap_id": gap.get("id", args.id),
+            "status": gap.get("status", ""),
+            "severity": gap.get("severity", ""),
+            "regression_lock_id": gap.get("regression_lock_id", ""),
+            "parent_loop": gap.get("parent_loop", ""),
+        }))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Gaps SQLite authority bridge")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -203,6 +240,10 @@ def main() -> None:
     p_close.add_argument("--notes", default=None)
     p_close.add_argument("--regression-lock-id", default=None)
     p_close.add_argument("--completion-level", default=None)
+    p_close.add_argument("--evidence", default=None)
+    p_close.add_argument("--owner", default=None)
+    p_close.add_argument("--expiry-check", default=None)
+    p_close.add_argument("--root-cause", default=None)
     p_close.add_argument("--reason", default=None)
     p_close.add_argument("--actor", default="")
 
@@ -210,6 +251,9 @@ def main() -> None:
     p_reparent.add_argument("--id", required=True)
     p_reparent.add_argument("--parent-loop", required=True)
     p_reparent.add_argument("--actor", default="")
+
+    p_query = sub.add_parser("query")
+    p_query.add_argument("--id", required=True)
 
     sub.add_parser("bootstrap")
     sub.add_parser("project")
@@ -221,6 +265,7 @@ def main() -> None:
         "upsert": cmd_upsert,
         "close": cmd_close,
         "reparent": cmd_reparent,
+        "query": cmd_query,
         "bootstrap": cmd_bootstrap,
         "project": cmd_project,
         "next-id": cmd_next_id,

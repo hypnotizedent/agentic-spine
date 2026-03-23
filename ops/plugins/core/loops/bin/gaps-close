@@ -151,14 +151,16 @@ validate_gap_closure() {
 
   gap_exists "$id" || fail "$id does not exist in gap registry"
   if ! gap_is_open "$id"; then
+    # Query status from SQLite authority via bridge (YAML fallback in gap_query_field)
     local current_status
-    current_status="$(GAP_ID_ENV="$id" yq e -r '.gaps[] | select(.id == strenv(GAP_ID_ENV)) | .status // ""' "$GAPS_FILE" 2>/dev/null | head -n1)"
+    current_status="$(gap_query_field "$id" "status")"
     echo "INFO: $id already $current_status — skipping (idempotent)" >&2
     return 1
   fi
 
-  severity="$(GAP_ID_ENV="$id" yq e -r '.gaps[] | select(.id == strenv(GAP_ID_ENV)) | .severity // ""' "$GAPS_FILE" 2>/dev/null | head -n1)"
-  existing_lock="$(GAP_ID_ENV="$id" yq e -r '.gaps[] | select(.id == strenv(GAP_ID_ENV)) | .regression_lock_id // ""' "$GAPS_FILE" 2>/dev/null | head -n1)"
+  # Read severity and regression_lock_id from SQLite authority via bridge
+  severity="$(gap_query_field "$id" "severity")"
+  existing_lock="$(gap_query_field "$id" "regression_lock_id")"
   effective_lock="${lock_override:-$existing_lock}"
 
   # Enforce fix-to-lock discipline for high/critical closures.

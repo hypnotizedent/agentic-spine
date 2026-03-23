@@ -1,5 +1,9 @@
 # Proposals System - Quick Start Guide
 
+> **Note**: The proposals system is a transitional lifecycle surface. For deferred-intent work
+> (plans, future horizons), use `./bin/ops cap run planning.plans.create` instead.
+> Proposals remain useful for multi-file change gating and review workflows.
+
 > Full lifecycle reference: `docs/governance/PROPOSAL_LIFECYCLE_REFERENCE.md`
 
 ## For Agents: Submitting a Proposal

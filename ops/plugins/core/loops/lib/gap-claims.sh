@@ -19,6 +19,7 @@ GAP_CLAIMS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../" && pwd)"
 SPINE_REPO="$GAP_CLAIMS_ROOT"
 CLAIMS_DIR="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/gaps"
 GAPS_FILE="${GAP_CLAIMS_ROOT}/ops/bindings/operational.gaps.yaml"
+GAPS_BRIDGE="${GAP_CLAIMS_ROOT}/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
 
 command -v yq >/dev/null 2>&1 || { echo "ERROR: yq required" >&2; exit 1; }
 
@@ -26,20 +27,57 @@ _ensure_claims_dir() {
   mkdir -p "$CLAIMS_DIR"
 }
 
-# Check if a gap exists at all
-gap_exists() {
+# Query gap from SQLite authority via bridge. Returns JSON on stdout.
+# Falls back to YAML if bridge is unavailable (bootstrap safety).
+_bridge_query_gap() {
   local gap_id="$1"
+  local result
+  if result="$(python3 "$GAPS_BRIDGE" query --id "$gap_id" 2>/dev/null)"; then
+    printf '%s' "$result"
+    return 0
+  fi
+  # Fallback: read from YAML projection if bridge unavailable
   local count
   count=$(yq e "[.gaps[] | select(.id == \"$gap_id\")] | length" "$GAPS_FILE" 2>/dev/null)
-  [[ "$count" -gt 0 ]]
+  if [[ "$count" -gt 0 ]]; then
+    local status severity reg_lock
+    status=$(yq e ".gaps[] | select(.id == \"$gap_id\") | .status" "$GAPS_FILE" 2>/dev/null)
+    severity=$(yq e ".gaps[] | select(.id == \"$gap_id\") | .severity" "$GAPS_FILE" 2>/dev/null)
+    reg_lock=$(yq e ".gaps[] | select(.id == \"$gap_id\") | .regression_lock_id // \"\"" "$GAPS_FILE" 2>/dev/null)
+    printf '{"exists":true,"gap_id":"%s","status":"%s","severity":"%s","regression_lock_id":"%s"}' \
+      "$gap_id" "$status" "$severity" "$reg_lock"
+  else
+    printf '{"exists":false,"gap_id":"%s"}' "$gap_id"
+  fi
 }
 
-# Check if a gap exists and is open
+# Check if a gap exists at all (SQLite authority, YAML fallback)
+gap_exists() {
+  local gap_id="$1"
+  local result
+  result="$(_bridge_query_gap "$gap_id")"
+  local exists
+  exists="$(printf '%s' "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('exists',False))" 2>/dev/null || echo "False")"
+  [[ "$exists" == "True" ]]
+}
+
+# Check if a gap exists and is open (SQLite authority, YAML fallback)
 gap_is_open() {
   local gap_id="$1"
+  local result
+  result="$(_bridge_query_gap "$gap_id")"
   local status
-  status=$(yq e ".gaps[] | select(.id == \"$gap_id\") | .status" "$GAPS_FILE" 2>/dev/null)
+  status="$(printf '%s' "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || echo "")"
   [[ "$status" == "open" ]]
+}
+
+# Query gap field from SQLite authority (used by gaps-close for severity/lock checks)
+gap_query_field() {
+  local gap_id="$1"
+  local field="$2"
+  local result
+  result="$(_bridge_query_gap "$gap_id")"
+  printf '%s' "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$field',''))" 2>/dev/null || echo ""
 }
 
 # Get claim file path
