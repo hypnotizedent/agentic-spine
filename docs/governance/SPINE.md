@@ -82,7 +82,11 @@ See: `docs/governance/AGENT_EXECUTION_LANE_AUDIT_RECEIPT_20260319.md` for backgr
 ## Mailroom Boundary
 
 Mailroom runtime state is **externalized** to `$SPINE_STATE` (canonical: `~/code/.runtime/spine/state/`).
-The repo-local `mailroom/` directory is **forbidden** (D377/D396/D397). All `mailroom/state/` paths in contracts resolve at runtime to the external state root via `spine_resolve_mailroom_path()`. Do NOT create files under repo-local `mailroom/`.
+The repo-local `mailroom/` directory is **forbidden** and enforced by D377/D396/D397.
+
+All `mailroom/state/` paths in contracts are resolved at runtime by `spine_resolve_mailroom_path()` to the external state root. Do NOT create files under the repo-local `mailroom/` directory — use `$SPINE_STATE/` directly or rely on the path resolver.
+
+Domain runtime data must live in domain runtime roots/services, not in mailroom state.
 
 ## First-Class Governance Features
 
@@ -101,9 +105,9 @@ This is the **first line of agent governance**. See: `docs/governance/DREAM_SYST
 ### D399: Live External-State Enforcement
 **Path**: `surfaces/verify/d399-microsoft-mint-customer-mailbox-canonical-lock.sh` (560 lines)
 
-Unlike file-check gates, D399 makes **LIVE API calls to Microsoft** on every push to main. It performs 14 live checks against Microsoft Exchange/Graph API to enforce consistency between declared contracts (`communications.providers.contract.yaml`) and live production state.
+Unlike file-check gates, D399 makes **LIVE API calls to Microsoft** for a Mint-domain contract. It performs 14 live checks against Microsoft Exchange/Graph API to enforce consistency between declared contracts (`communications.providers.contract.yaml`) and live production state.
 
-This is the current frontier of spine enforcement: gates that reach into live production systems before they allow a merge. See: `docs/governance/DREAM_SYSTEM.md` for details.
+This is the current frontier of spine enforcement for domain-scoped live checks. It should run from Mint-domain verification and Mint-repo push paths, not as a Spine-global pre-push requirement on unrelated `agentic-spine` changes. See: `docs/governance/DREAM_SYSTEM.md` for details.
 
 ## Projection Metadata
 

@@ -109,7 +109,7 @@ The human-facing surface. Raycast scripts for quick actions. SSH targets with LA
 ### D399: Live External-State Enforcement
 **Path**: `surfaces/verify/d399-microsoft-mint-customer-mailbox-canonical-lock.sh`
 **Size**: 560 lines (Python+Bash hybrid)
-**Trigger**: Pre-push gate on every push to main
+**Trigger**: Mint-domain verification and Mint-repo push path, not Spine-global pushes to `main`
 
 **What it checks** (14 live Microsoft API calls):
 1-4: Team/info mailboxes exist + settings match contract (shared=true)
@@ -117,7 +117,7 @@ The human-facing surface. Raycast scripts for quick actions. SSH targets with LA
 7-8: Recent inbox (250 messages) free of duplicates + shadow copies
 9-14: Microsoft capability commands only use `microsoft-cap-exec` path
 
-**Why it's a product feature**: This is not a static file check — it's a **LIVE API call to Microsoft on every push to main**. This is the current frontier of spine governance: gates that reach into live production systems before they allow a merge.
+**Why it's a product feature**: This is not a static file check — it's a **LIVE API call to Microsoft** used to enforce a Mint-domain contract against live production state. It must stay domain-scoped instead of acting as a Spine-global pre-push requirement.
 
 **What it proves**: The system can enforce consistency between declared contracts (`communications.providers.contract.yaml`) and live production state (Microsoft Exchange/Graph API) before code hits main.
 
