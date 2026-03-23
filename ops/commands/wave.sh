@@ -45,6 +45,10 @@ PATH_CLAIMS_FILE="$SPINE_STATE/path.claims.yaml"
 PATH_CLAIMS_TTL_MINUTES="180"
 PATH_CLAIMS_NON_OVERLAP="true"
 TRAFFIC_INDEX_FILE="$SPINE_STATE/traffic.index.yaml"
+WAVE_START_CREATED_BRANCH=""
+WAVE_START_CREATED_WORKTREE=""
+WAVE_START_CREATED_REPO=""
+WAVE_START_CREATED_STATEDIR=""
 
 _repo_abs_path() {
   local p="${1:-}"
@@ -64,6 +68,41 @@ _repo_abs_path() {
     echo "$p"
   else
     echo "$SPINE_REPO/$p"
+  fi
+}
+
+resolve_wave_owner_terminal() {
+  printf '%s\n' "${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-${USER:-unknown}}}}}"
+}
+
+resolve_wave_claimed_paths() {
+  local terminal_id="${1:-}"
+  local contract="$SPINE_REPO/ops/bindings/terminal.role.contract.yaml"
+  [[ -n "$terminal_id" ]] || return 0
+  command -v yq >/dev/null 2>&1 || return 0
+  [[ -f "$contract" ]] || return 0
+  yq e -r ".roles[]? | select(.id == \"${terminal_id}\") | .write_scope[]?" "$contract" 2>/dev/null | paste -sd, -
+}
+
+wave_start_reset_cleanup_state() {
+  WAVE_START_CREATED_BRANCH=""
+  WAVE_START_CREATED_WORKTREE=""
+  WAVE_START_CREATED_REPO=""
+  WAVE_START_CREATED_STATEDIR=""
+}
+
+wave_start_cleanup_on_exit() {
+  local rc=$?
+  if [[ $rc -ne 0 ]]; then
+    if [[ -n "${WAVE_START_CREATED_WORKTREE:-}" && -d "${WAVE_START_CREATED_WORKTREE:-}" && -n "${WAVE_START_CREATED_REPO:-}" ]]; then
+      git -C "${WAVE_START_CREATED_REPO:-}" worktree remove --force "${WAVE_START_CREATED_WORKTREE:-}" 2>/dev/null || true
+    fi
+    if [[ -n "${WAVE_START_CREATED_BRANCH:-}" && -n "${WAVE_START_CREATED_REPO:-}" ]]; then
+      git -C "${WAVE_START_CREATED_REPO:-}" branch -D "${WAVE_START_CREATED_BRANCH:-}" 2>/dev/null || true
+    fi
+    if [[ -n "${WAVE_START_CREATED_STATEDIR:-}" && -d "${WAVE_START_CREATED_STATEDIR:-}" ]]; then
+      rm -rf "${WAVE_START_CREATED_STATEDIR:-}" 2>/dev/null || true
+    fi
   fi
 }
 
@@ -446,7 +485,8 @@ cmd_start() {
   local deadline_utc=""
   local horizon="now"
   local execution_readiness="runnable"
-  local owner_terminal="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-${USER:-unknown}}}"
+  local owner_terminal
+  owner_terminal="$(resolve_wave_owner_terminal)"
   local claimed_paths_raw=""
   local packet_required_fields="wave_id,loop_id,owner_terminal,current_role,next_role,deadline_utc,horizon,execution_readiness,claimed_paths"
   local packet_default_deadline_hours="24"
@@ -493,27 +533,9 @@ cmd_start() {
     exit 1
   fi
 
-  # Track artifacts for rollback on failure (GAP-OP-1491).
-  local _ws_created_branch=""
-  local _ws_created_worktree=""
-  local _ws_created_repo=""
-  local _ws_created_statedir=""
-  _wave_start_cleanup() {
-    local rc=$?
-    if [[ $rc -ne 0 ]]; then
-      # Rollback transient artifacts left by a failed wave start.
-      if [[ -n "$_ws_created_worktree" && -d "$_ws_created_worktree" && -n "$_ws_created_repo" ]]; then
-        git -C "$_ws_created_repo" worktree remove --force "$_ws_created_worktree" 2>/dev/null || true
-      fi
-      if [[ -n "$_ws_created_branch" && -n "$_ws_created_repo" ]]; then
-        git -C "$_ws_created_repo" branch -D "$_ws_created_branch" 2>/dev/null || true
-      fi
-      if [[ -n "$_ws_created_statedir" && -d "$_ws_created_statedir" ]]; then
-        rm -rf "$_ws_created_statedir" 2>/dev/null || true
-      fi
-    fi
-  }
-  trap _wave_start_cleanup EXIT
+  # Track artifacts for rollback on failure (GAP-OP-1491, GAP-OP-1585).
+  wave_start_reset_cleanup_state
+  trap wave_start_cleanup_on_exit EXIT
 
   local sd
   sd="$(wave_state_dir "$wave_id")"
@@ -560,11 +582,14 @@ deadline = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=max(1, hours))
 print(deadline.strftime("%Y-%m-%dT%H:%M:%SZ"))
 PYDEADLINE
 )"
-  [[ -n "$claimed_paths_raw" ]] || claimed_paths_raw="$(yq e -r ".roles[]? | select(.id == \"${OPS_TERMINAL_ROLE:-}\") | .write_scope[]?" "$SPINE_REPO/ops/bindings/terminal.role.contract.yaml" 2>/dev/null | paste -sd, -)"
-  [[ -n "$claimed_paths_raw" ]] || claimed_paths_raw="."
+  [[ -n "$claimed_paths_raw" ]] || claimed_paths_raw="$(resolve_wave_claimed_paths "$owner_terminal")"
+  if [[ -z "$claimed_paths_raw" ]]; then
+    echo "Wave '$wave_id' start blocked: claimed paths unresolved for terminal '$owner_terminal'. Set a contract-managed terminal role or pass --claimed-paths explicitly." >&2
+    exit 1
+  fi
 
   mkdir -p "$sd"
-  _ws_created_statedir="$sd"
+  WAVE_START_CREATED_STATEDIR="$sd"
 
   if [[ "$worktree_mode" == "auto" ]]; then
     workspace_repo="$(git -C "$workspace_repo" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -585,7 +610,7 @@ PYDEADLINE
     local canonical_root="$HOME/.wt"
     local lease_filename=".spine-lane-lease.yaml"
     local lease_ttl_hours="24"
-    local lease_owner="${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}"
+    local lease_owner="$owner_terminal"
     if command -v yq >/dev/null 2>&1 && [[ -f "$lifecycle_contract" ]]; then
       canonical_root="$(yq e -r '.policy.canonical_worktree_root // "~/.wt"' "$lifecycle_contract" 2>/dev/null || echo "$canonical_root")"
       lease_filename="$(yq e -r '.policy.lease_filename // ".spine-lane-lease.yaml"' "$lifecycle_contract" 2>/dev/null || echo "$lease_filename")"
@@ -611,8 +636,8 @@ PYDEADLINE
       else
         git -C "$workspace_repo" branch "$workspace_branch" "$default_branch" >/dev/null
       fi
-      _ws_created_branch="$workspace_branch"
-      _ws_created_repo="$workspace_repo"
+      WAVE_START_CREATED_BRANCH="$workspace_branch"
+      WAVE_START_CREATED_REPO="$workspace_repo"
     fi
 
     local occupied_worktree=""
@@ -653,8 +678,8 @@ PYOCCUPIED
     if ! git -C "$workspace_worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       mkdir -p "$(dirname "$workspace_worktree")"
       git -C "$workspace_repo" worktree add "$workspace_worktree" "$workspace_branch" >/dev/null
-      _ws_created_worktree="$workspace_worktree"
-      _ws_created_repo="$workspace_repo"
+      WAVE_START_CREATED_WORKTREE="$workspace_worktree"
+      WAVE_START_CREATED_REPO="$workspace_repo"
       if [[ -z "$workspace_note" ]]; then
         workspace_note="created deterministic wave worktree"
       fi
@@ -978,10 +1003,7 @@ PYSTART
   sync_runtime_traffic_index "$sf" "start"
 
   # Success -- disarm the cleanup trap so artifacts are preserved.
-  _ws_created_branch=""
-  _ws_created_worktree=""
-  _ws_created_repo=""
-  _ws_created_statedir=""
+  wave_start_reset_cleanup_state
   trap - EXIT
 }
 

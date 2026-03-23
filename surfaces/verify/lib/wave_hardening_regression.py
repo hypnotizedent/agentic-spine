@@ -360,7 +360,7 @@ def main() -> None:
         rc, out = run_wave(
             wave_cmd,
             base_env,
-            ["close", wave, "--force", "--dod-override", "regression pending force-close"],
+            ["close", wave, "--force", "--disposition", "abandoned", "--dod-override", "regression pending force-close"],
         )
         if rc == 0:
             fail("force-close pending-dispatch negative case unexpectedly succeeded", out)
@@ -391,7 +391,7 @@ def main() -> None:
         rc, out = run_wave(
             wave_cmd,
             base_env,
-            ["close", wave, "--force", "--dod-override", "regression missing stub"],
+            ["close", wave, "--force", "--disposition", "abandoned", "--dod-override", "regression missing stub"],
         )
         if rc == 0:
             fail("stub-missing negative case unexpectedly succeeded", out)
@@ -430,7 +430,7 @@ def main() -> None:
         rc, out = run_wave(
             wave_cmd,
             base_env,
-            ["close", wave, "--force", "--dod-override", "regression valid stub"],
+            ["close", wave, "--force", "--disposition", "abandoned", "--dod-override", "regression valid stub"],
         )
         if rc != 0:
             fail("stub-positive force-close case failed", out)
