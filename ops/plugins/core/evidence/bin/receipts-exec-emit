@@ -16,6 +16,7 @@ Usage:
     --terminal-id <TERMINAL-ID> \
     --lane <control|execution|audit|watcher> \
     --status <done|failed|blocked> \
+    [--completion-level <slice_complete|loop_complete|domain_complete|estate_complete|readiness_complete>] \
     --files-changed <csv> \
     --run-keys <csv> \
     --ready-for-verify <true|false> \
@@ -44,6 +45,7 @@ TASK_ID=""
 TERMINAL_ID=""
 LANE=""
 STATUS=""
+COMPLETION_LEVEL=""
 FILES_CHANGED=""
 RUN_KEYS=""
 BLOCKERS=""
@@ -83,6 +85,7 @@ while [[ $# -gt 0 ]]; do
     --terminal-id) TERMINAL_ID="${2:-}"; shift 2 ;;
     --lane) LANE="${2:-}"; shift 2 ;;
     --status) STATUS="${2:-}"; shift 2 ;;
+    --completion-level) COMPLETION_LEVEL="${2:-}"; shift 2 ;;
     --files-changed) FILES_CHANGED="${2:-}"; shift 2 ;;
     --run-keys) RUN_KEYS="${2:-}"; shift 2 ;;
     --blockers) BLOCKERS="${2:-}"; shift 2 ;;
@@ -126,7 +129,7 @@ done
 [[ -n "$RUN_KEYS" ]] || { echo "FAIL: --run-keys is required" >&2; exit 2; }
 [[ -n "$READY_FOR_VERIFY" ]] || { echo "FAIL: --ready-for-verify is required" >&2; exit 2; }
 
-python3 - "$SCHEMA_PATH" "$TASK_ID" "$TERMINAL_ID" "$LANE" "$STATUS" "$FILES_CHANGED" "$RUN_KEYS" "$BLOCKERS" "$READY_FOR_VERIFY" "$TIMESTAMP_UTC" "$WAVE_ID" "$COMMIT_HASHES" "$LOOP_ID" "$GAP_IDS" "$EVIDENCE_RUN_KEYS" "$EVIDENCE_FILES" "$EVIDENCE_COMMITS" "$BLOCKER_CLASS" "$REQUEST_ID" "$EXECUTION_HOST" "$EXECUTION_MODE" "$RUNTIME_ROLE" "$GOVERNANCE_VERSION" "$ENTRY_PACKET_PATH" "$ENTRY_PACKET_HASH" "$PROMPT_SET_ID" "$PROMPT_VERSION" "$PROMPT_SOURCE_REFS" "$PROMPT_SOURCE_HASH" "$PROMPT_SOURCE_HASHES" "$PROMPT_REGISTRY_PATH" "$PROMPT_RESOLUTION" "$ATTESTATION_JSON_OUT" "$JSON_OUT" "$MARKDOWN_OUT" "$VALIDATE" <<'PY'
+python3 - "$SCHEMA_PATH" "$TASK_ID" "$TERMINAL_ID" "$LANE" "$STATUS" "$COMPLETION_LEVEL" "$FILES_CHANGED" "$RUN_KEYS" "$BLOCKERS" "$READY_FOR_VERIFY" "$TIMESTAMP_UTC" "$WAVE_ID" "$COMMIT_HASHES" "$LOOP_ID" "$GAP_IDS" "$EVIDENCE_RUN_KEYS" "$EVIDENCE_FILES" "$EVIDENCE_COMMITS" "$BLOCKER_CLASS" "$REQUEST_ID" "$EXECUTION_HOST" "$EXECUTION_MODE" "$RUNTIME_ROLE" "$GOVERNANCE_VERSION" "$ENTRY_PACKET_PATH" "$ENTRY_PACKET_HASH" "$PROMPT_SET_ID" "$PROMPT_VERSION" "$PROMPT_SOURCE_REFS" "$PROMPT_SOURCE_HASH" "$PROMPT_SOURCE_HASHES" "$PROMPT_REGISTRY_PATH" "$PROMPT_RESOLUTION" "$ATTESTATION_JSON_OUT" "$JSON_OUT" "$MARKDOWN_OUT" "$VALIDATE" <<'PY'
 import datetime as dt
 import hashlib
 import json
@@ -142,6 +145,7 @@ from pathlib import Path
     terminal_id,
     lane,
     status,
+    completion_level_raw,
     files_changed_raw,
     run_keys_raw,
     blockers_raw,
@@ -173,7 +177,7 @@ from pathlib import Path
     json_out,
     markdown_out,
     validate_raw,
-) = sys.argv[1:37]
+) = sys.argv[1:38]
 
 validate = validate_raw == "1"
 
@@ -218,6 +222,7 @@ run_keys = split_csv(run_keys_raw)
 blockers = split_csv(blockers_raw)
 commit_hashes = split_csv(commit_hashes_raw)
 gap_ids = split_csv(gap_ids_raw)
+completion_level = (completion_level_raw or "").strip()
 
 # Evidence refs are always emitted (defaults keep compatibility deterministic).
 evidence_run_keys = split_csv(evidence_run_keys_raw) or list(run_keys)
@@ -263,6 +268,9 @@ receipt = {
         "resolution": prompt_resolution,
     },
 }
+
+if completion_level:
+    receipt["completion_level"] = completion_level
 
 if wave_id:
     receipt["wave_id"] = wave_id
@@ -323,6 +331,16 @@ if validate:
         raise SystemExit(f"FAIL: status invalid: {status}")
     if status == "blocked" and not blockers:
         raise SystemExit("FAIL: blockers required when status=blocked")
+    completion_level = (completion_level or "").strip()
+    allowed_completion_levels = {
+        "slice_complete",
+        "loop_complete",
+        "domain_complete",
+        "estate_complete",
+        "readiness_complete",
+    }
+    if completion_level and completion_level not in allowed_completion_levels:
+        raise SystemExit(f"FAIL: completion_level invalid: {completion_level}")
 
     ts_pattern = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
     if not ts_pattern.match(timestamp_utc):
@@ -371,11 +389,15 @@ if markdown_out:
         f"- terminal_id: {terminal_id}",
         f"- lane: {lane}",
         f"- status: {status}",
+    ]
+    if completion_level:
+        md_lines.append(f"- completion_level: {completion_level}")
+    md_lines.extend([
         f"- ready_for_verify: {str(ready_for_verify).lower()}",
         f"- timestamp_utc: {timestamp_utc}",
         "",
         "## Files Changed",
-    ]
+    ])
     md_lines.extend([f"- {p}" for p in files_changed] or ["- (none)"])
     md_lines.extend(["", "## Run Keys"])
     md_lines.extend([f"- {rk}" for rk in run_keys] or ["- (none)"])
@@ -441,6 +463,7 @@ if attestation_json_out:
         "execution_host": execution_host,
         "execution_mode": execution_mode,
         "runtime_role": runtime_role,
+        "completion_level": completion_level,
         "checks_passed": checks_passed,
         "checks_failed": checks_failed,
         "receipts": {
@@ -474,4 +497,6 @@ else:
         print(f"markdown_out: {markdown_out}")
     print(f"task_id: {task_id}")
     print(f"status: {status}")
+    if completion_level:
+        print(f"completion_level: {completion_level}")
 PY

@@ -18,6 +18,25 @@ import yaml
 SCRIPT_PATH = Path(__file__).resolve()
 DEFAULT_ROOT = SCRIPT_PATH.parents[5]
 DEFAULT_CONTRACT = Path("ops/bindings/terminal.worker.projection.contract.yaml")
+EXPECTED_GOVERNED_SURFACES = {
+    "catalog": {
+        "wrapper": "ops/plugins/core/ops/bin/gen-worker-catalog.sh",
+        "tracked_output": "ops/bindings/terminal.worker.catalog.yaml",
+    },
+    "dispatch": {
+        "wrapper": "ops/plugins/core/ops/bin/gen-routing-dispatch.sh",
+        "tracked_output": "ops/bindings/routing.dispatch.yaml",
+    },
+    "launcher": {
+        "wrapper": "ops/plugins/core/ops/bin/gen-launcher-view.sh",
+        "tracked_output": "ops/bindings/terminal.launcher.view.yaml",
+    },
+    "usage": {
+        "wrapper": "ops/plugins/core/ops/bin/gen-worker-usage-docs.sh",
+        "tracked_output": "docs/reference/generated/worker-usage",
+        "runtime_output": "runtime/domain-state/projections/worker-usage",
+    },
+}
 
 
 def load_yaml(path: Path) -> Any:
@@ -140,6 +159,64 @@ def main() -> int:
     generator_rel = str((contract.get("generator") or {}).get("path") or "").strip()
     governed = contract.get("governed_surfaces") or []
     issues: list[dict[str, Any]] = []
+    governed_by_target = {
+        str(row.get("target")): row for row in governed if isinstance(row, dict) and row.get("target")
+    }
+    expected_targets = set(EXPECTED_GOVERNED_SURFACES)
+
+    if set(governed_by_target) != expected_targets:
+        missing_targets = sorted(expected_targets - set(governed_by_target))
+        unexpected_targets = sorted(set(governed_by_target) - expected_targets)
+        if missing_targets:
+            issues.append(
+                {
+                    "code": "missing_governed_surface",
+                    "target": ",".join(missing_targets),
+                }
+            )
+        if unexpected_targets:
+            issues.append(
+                {
+                    "code": "unexpected_governed_surface",
+                    "target": ",".join(unexpected_targets),
+                }
+            )
+
+    for target, expected in EXPECTED_GOVERNED_SURFACES.items():
+        row = governed_by_target.get(target)
+        if not row:
+            continue
+        wrapper_rel = str(row.get("wrapper") or "").strip()
+        tracked_rel = str(row.get("tracked_output") or "").strip()
+        if wrapper_rel != expected["wrapper"]:
+            issues.append(
+                {
+                    "code": "governed_surface_wrapper_mismatch",
+                    "target": target,
+                    "expected": expected["wrapper"],
+                    "actual": wrapper_rel or "<missing>",
+                }
+            )
+        if tracked_rel != expected["tracked_output"]:
+            issues.append(
+                {
+                    "code": "governed_surface_tracked_output_mismatch",
+                    "target": target,
+                    "expected": expected["tracked_output"],
+                    "actual": tracked_rel or "<missing>",
+                }
+            )
+        runtime_expected = expected.get("runtime_output")
+        runtime_rel = str(row.get("runtime_output") or "").strip()
+        if runtime_expected and runtime_rel != runtime_expected:
+            issues.append(
+                {
+                    "code": "governed_surface_runtime_output_mismatch",
+                    "target": target,
+                    "expected": runtime_expected,
+                    "actual": runtime_rel or "<missing>",
+                }
+            )
 
     if not generator_rel:
         issues.append({"code": "missing_generator_path", "path": str(contract_path)})
@@ -166,8 +243,7 @@ def main() -> int:
             if failed:
                 issues.append({"code": code, "path": generator_rel})
 
-    wrappers_by_target = {str(row.get("target")): row for row in governed if isinstance(row, dict)}
-    for target, row in wrappers_by_target.items():
+    for target, row in governed_by_target.items():
         wrapper_rel = str(row.get("wrapper") or "").strip()
         if not wrapper_rel:
             issues.append({"code": "missing_wrapper_path", "target": target})
@@ -187,7 +263,7 @@ def main() -> int:
             if failed:
                 issues.append({"code": code, "target": target, "path": wrapper_rel})
     for target in ("catalog", "dispatch", "launcher", "usage"):
-        row = wrappers_by_target.get(target)
+        row = governed_by_target.get(target)
         if not row:
             issues.append({"code": "missing_governed_surface", "target": target})
             continue
@@ -203,7 +279,7 @@ def main() -> int:
                 }
             )
 
-    usage_row = wrappers_by_target.get("usage")
+    usage_row = governed_by_target.get("usage")
     if usage_row:
         usage_wrapper = root / str(usage_row.get("wrapper"))
         tracked_before = tree_hash(tracked_usage_root)

@@ -89,6 +89,7 @@ entries:
   - run_id: CAP-20260218-075500__spine.status__Raaaa11111
     capability: spine.status
     status: done
+    completion_level: slice_complete
     generated_at_utc: "2026-02-18T07:55:00Z"
     receipt_path: "/tmp/rcap-a/receipt.md"
     output_path: "/tmp/rcap-a/output.txt"
@@ -210,6 +211,12 @@ test_timezone_cross_midnight() {
     pass "timeline query renders cross-midnight local timestamps"
   else
     fail "cross-midnight timezone window should show both pre/post-midnight local times"
+  fi
+
+  if echo "$out" | grep -q "completion_level=slice_complete"; then
+    pass "timeline query surfaces completion_level for receipt index events"
+  else
+    fail "timeline query should surface completion_level from indexed receipts"
   fi
 }
 

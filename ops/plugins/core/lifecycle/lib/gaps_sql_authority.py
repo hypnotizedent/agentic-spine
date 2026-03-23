@@ -581,11 +581,11 @@ def integrity_check(conn: sqlite3.Connection) -> tuple[bool, str]:
 
 
 VALID_COMPLETION_LEVELS = frozenset({
-    "slice_proven",
-    "domain_aligned",
-    "estate_verified",
-    "migration_landed",
-    "swap_ready",
+    "slice_complete",
+    "loop_complete",
+    "domain_complete",
+    "estate_complete",
+    "readiness_complete",
 })
 
 

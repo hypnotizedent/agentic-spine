@@ -18,6 +18,7 @@ run_key="CAP-20260322-200000__verify.core.run__Rtest123"
   --terminal-id SPINE-CONTROL-01 \
   --lane execution \
   --status done \
+  --completion-level slice_complete \
   --files-changed "" \
   --run-keys "$run_key" \
   --ready-for-verify true \
@@ -43,6 +44,7 @@ data = json.loads(Path(sys.argv[1]).read_text())
 assert data["request_id"] == "CAP-20260322-200000__verify.core.run__Rtest123"
 assert data["execution_host"] == "test-host"
 assert data["entry_packet_hash"] == "abc123"
+assert data["completion_level"] == "slice_complete"
 assert data["verdict"] == "done"
 PY
 

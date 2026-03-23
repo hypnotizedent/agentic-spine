@@ -19,8 +19,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 PASS=0
 FAIL=0
 TEST_GAPS_DIR=""
+TEST_STATE_DIR=""
 ORIG_GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
 BASE_SPINE_REPO="${SPINE_REPO:-}"
+BASE_SPINE_STATE="${SPINE_STATE:-}"
 BASE_GAPS_FILE="${GAPS_FILE:-}"
 BASE_CLAIMS_DIR="${CLAIMS_DIR:-}"
 
@@ -30,17 +32,14 @@ fail() { echo "  FAIL: $1" >&2; FAIL=$((FAIL + 1)); }
 # Set up isolated test environment
 setup() {
   TEST_GAPS_DIR=$(mktemp -d)
+  TEST_STATE_DIR="$TEST_GAPS_DIR/state"
   # Copy gaps file for testing
   cp "$ORIG_GAPS_FILE" "$TEST_GAPS_DIR/operational.gaps.yaml"
-  # Create claims directory
-  mkdir -p "$TEST_GAPS_DIR/claims"
-  # Clean any leftover test claims
-  rm -f "$ROOT/mailroom/state/gaps/GAP-OP-TEST-"*.claim 2>/dev/null || true
+  mkdir -p "$TEST_STATE_DIR/gaps"
 }
 
 teardown() {
   rm -rf "$TEST_GAPS_DIR" 2>/dev/null || true
-  rm -f "$ROOT/mailroom/state/gaps/GAP-OP-TEST-"*.claim 2>/dev/null || true
 }
 
 restore_ambient_env() {
@@ -48,6 +47,12 @@ restore_ambient_env() {
     export SPINE_REPO="$BASE_SPINE_REPO"
   else
     unset SPINE_REPO
+  fi
+
+  if [[ -n "$BASE_SPINE_STATE" ]]; then
+    export SPINE_STATE="$BASE_SPINE_STATE"
+  else
+    unset SPINE_STATE
   fi
 
   if [[ -n "$BASE_GAPS_FILE" ]]; then
@@ -63,7 +68,15 @@ restore_ambient_env() {
   fi
 }
 
+activate_test_env() {
+  export SPINE_REPO="$ROOT"
+  export SPINE_STATE="$TEST_STATE_DIR"
+  export GAPS_FILE="$TEST_GAPS_DIR/operational.gaps.yaml"
+  export CLAIMS_DIR="$TEST_STATE_DIR/gaps"
+}
+
 run_isolated_test() {
+  activate_test_env
   "$@"
   local status=$?
   restore_ambient_env
@@ -72,11 +85,14 @@ run_isolated_test() {
 
 assert_env_restored() {
   local current_spine_repo="${SPINE_REPO:-}"
+  local current_spine_state="${SPINE_STATE:-}"
   local current_gaps_file="${GAPS_FILE:-}"
   local current_claims_dir="${CLAIMS_DIR:-}"
 
   if [[ "$current_spine_repo" != "${BASE_SPINE_REPO:-}" ]]; then
     fail "SPINE_REPO leaked across test boundaries"
+  elif [[ "$current_spine_state" != "${BASE_SPINE_STATE:-}" ]]; then
+    fail "SPINE_STATE leaked across test boundaries"
   elif [[ "$current_gaps_file" != "${BASE_GAPS_FILE:-}" ]]; then
     fail "GAPS_FILE leaked across test boundaries"
   elif [[ "$current_claims_dir" != "${BASE_CLAIMS_DIR:-}" ]]; then
@@ -95,7 +111,6 @@ test_claim_lifecycle() {
   echo "Test 1: Claim lifecycle"
 
   source "$ROOT/ops/plugins/core/loops/lib/gap-claims.sh"
-  mkdir -p "$ROOT/mailroom/state/gaps"
 
   # Use a known open gap for testing claims
   local test_gap="GAP-OP-135"  # known open gap
@@ -151,7 +166,6 @@ test_wrong_owner_rejection() {
   echo "Test 2: Wrong-owner close rejection"
 
   source "$ROOT/ops/plugins/core/loops/lib/gap-claims.sh"
-  mkdir -p "$ROOT/mailroom/state/gaps"
 
   local test_gap="GAP-OP-135"  # known open gap
   local cf
@@ -191,7 +205,6 @@ test_stale_claim_recovery() {
   echo "Test 3: Stale-claim recovery"
 
   source "$ROOT/ops/plugins/core/loops/lib/gap-claims.sh"
-  mkdir -p "$ROOT/mailroom/state/gaps"
 
   local test_gap="GAP-OP-135"
   local cf
@@ -248,7 +261,6 @@ test_double_claim_prevention() {
   echo "Test 4: Double-claim prevention"
 
   source "$ROOT/ops/plugins/core/loops/lib/gap-claims.sh"
-  mkdir -p "$ROOT/mailroom/state/gaps"
 
   local test_gap="GAP-OP-135"
   local cf

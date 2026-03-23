@@ -31,7 +31,7 @@ Validation:
   - decision is MERGE_READY or DONE
   - blocker_count is zero when explicitly declared
   - disposition: landed requires --propagation-evidence when contract enforces it
-  - disposition: landed requires --completion-level (slice_proven|domain_aligned|estate_verified|migration_landed|swap_ready)
+  - disposition: landed requires --completion-level (slice_complete|loop_complete|domain_complete|estate_complete|readiness_complete)
 
 Behavior:
   - closes loop scope status to closed
@@ -449,8 +449,9 @@ fi
 acquire_git_lock gaps || exit 1
 trap 'release_git_lock' EXIT INT TERM
 
+timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 if [[ "$CLOSE_LINKED_GAPS" -eq 1 ]]; then
-  timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   close_note="Closed by loop.closeout.finalize (${SPINE_CAP_RUN_KEY:-manual})"
 
   for idx in "${!LINKED_GAP_IDS[@]}"; do
@@ -458,7 +459,7 @@ if [[ "$CLOSE_LINKED_GAPS" -eq 1 ]]; then
     sev="${LINKED_GAP_SEVERITIES[$idx]}"
 
     # Close gap via SQLite authority bridge (writes SQLite, projects to YAML).
-    local bridge_args=("close" "--id" "$gid" "--status" "fixed" "--fixed-in" "$LOOP_ID")
+    bridge_args=("close" "--id" "$gid" "--status" "fixed" "--fixed-in" "$LOOP_ID")
     bridge_args+=("--notes" "$close_note")
     bridge_args+=("--actor" "loop.closeout.finalize")
     bridge_args+=("--reason" "Linked gap closed by loop closeout: $LOOP_ID")
@@ -468,10 +469,15 @@ if [[ "$CLOSE_LINKED_GAPS" -eq 1 ]]; then
 
     if severity_requires_fix_to_lock "$sev"; then
       [[ -n "$REGRESSION_LOCK_ID" ]] && bridge_args+=("--regression-lock-id" "$REGRESSION_LOCK_ID")
+      [[ -n "$EVIDENCE" ]] && bridge_args+=("--evidence" "$EVIDENCE")
+      [[ -n "$OWNER" ]] && bridge_args+=("--owner" "$OWNER")
+      [[ -n "$EXPIRY_CHECK" ]] && bridge_args+=("--expiry-check" "$EXPIRY_CHECK")
+      [[ -n "$ROOT_CAUSE" ]] && bridge_args+=("--root-cause" "$ROOT_CAUSE")
     fi
 
     python3 "$GAPS_BRIDGE" "${bridge_args[@]}" >/dev/null || {
-      echo "loop.closeout.finalize WARN: bridge close failed for $gid" >&2
+      echo "loop.closeout.finalize FAIL: bridge close failed for $gid" >&2
+      exit 1
     }
 
     closed_gap_count=$((closed_gap_count + 1))

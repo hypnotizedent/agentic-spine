@@ -192,7 +192,7 @@ If the authority changes, does this doc update automatically?
 
 ## The Gap Registry as Institutional Memory
 
-**File**: `ops/bindings/operational.gaps.yaml`
+**File**: `ops/bindings/operational.gaps.yaml` (PROJECTION — generated from SQLite `shared_authority.db`)
 **Size**: ~15,000 lines, 1,523 entries
 **Schema**: Enforced by D332 (gate checking `gap.schema.yaml` v1.1)
 
@@ -280,7 +280,7 @@ Everything else derives from these 5 or is runtime state.
 7. If filing a gap: `gaps.file --id auto`
 8. If closing a gap: `gaps.close --id GAP-OP-XXX`
 
-If you need diagnostics beyond the normal attach path, use `session.start` only as a bootstrap subroutine after attach.
+If you need diagnostics beyond the normal attach path, use `session.start` (LEGACY — deprecation-bannered) only for explicit deep diagnostics or degraded recovery.
 
 ---
 
