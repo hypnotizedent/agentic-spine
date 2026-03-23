@@ -6,6 +6,7 @@ SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
 source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
 AUDIT="$ROOT/ops/plugins/core/verify/bin/snapshot-surface-audit"
+D410="$ROOT/surfaces/verify/d410-snapshot-surface-runtime-first-lock.sh"
 
 PASS=0
 FAIL=0
@@ -183,6 +184,18 @@ if echo "$bad_out" | grep -q 'managed_runtime_launchd_tracked_promotion'; then
   pass "fail fixture reports managed runtime tracked promotion"
 else
   fail "fail fixture reports managed runtime tracked promotion"
+fi
+
+if d410_out="$(cd /tmp && env -u SPINE_REPO -u SPINE_CODE SPINE_ROOT="$ROOT" SPINE_TARGET_REPO="$bad_dir" "$D410" --brief 2>&1)"; then
+  pass "d410 wrapper honors explicit SPINE_ROOT over stale SPINE_TARGET_REPO"
+else
+  fail "d410 wrapper honors explicit SPINE_ROOT over stale SPINE_TARGET_REPO"
+  echo "$d410_out" >&2
+fi
+if echo "$d410_out" | grep -q '^PASS issues=0 ' && echo "$d410_out" | grep -q "root=$ROOT\$"; then
+  pass "d410 wrapper forwards args and selected root"
+else
+  fail "d410 wrapper forwards args and selected root"
 fi
 
 if live_out="$("$AUDIT" --brief 2>&1)"; then
