@@ -14,7 +14,7 @@
 # Usage: source this file, then call functions.
 
 SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../" && pwd)}"
-CLAIMS_DIR="${SPINE_REPO}/mailroom/state/gaps"
+CLAIMS_DIR="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/gaps"
 GAPS_FILE="${SPINE_REPO}/ops/bindings/operational.gaps.yaml"
 
 command -v yq >/dev/null 2>&1 || { echo "ERROR: yq required" >&2; exit 1; }
