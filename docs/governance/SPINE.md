@@ -144,8 +144,8 @@ This is the current frontier of spine enforcement for domain-scoped live checks.
 entry_surface_gate_metadata: projection
 source_registry: ops/bindings/gate.registry.yaml
 registry_updated: 2026-03-22
-gate_count_total: 411
-gate_count_active: 111
+gate_count_total: 412
+gate_count_active: 112
 gate_count_retired: 300
-max_gate_id: D421
+max_gate_id: D422
 <!-- ENTRY_SURFACE_GATE_METADATA_END -->
