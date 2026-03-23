@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from mint_runtime_paths import mint_override_path
 from quote_packet_normalize import fail, load_structured_file
 
 
@@ -29,12 +30,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
-
-    packages_dir = Path(os.environ.get("MINT_PRODUCTION_PACKAGES_DIR") or (mint_root / "production-packages"))
-    exports_dir = Path(os.environ.get("MINT_PRODUCTION_EXPORTS_DIR") or (mint_root / "production-package-exports"))
+    packages_dir = mint_override_path("MINT_PRODUCTION_PACKAGES_DIR", "production-packages")
+    exports_dir = mint_override_path("MINT_PRODUCTION_EXPORTS_DIR", "production-package-exports")
 
     package_id = args.production_package_id
     package_file = packages_dir / f"production_package_{package_id}.yaml"

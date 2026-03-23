@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from mint_runtime_paths import mint_override_path
 from quote_packet_normalize import dump_yaml, fail, load_structured_file, now_utc, stop
 
 
@@ -264,18 +265,10 @@ def build_summary(record: dict[str, Any], package_file: Path) -> dict[str, Any]:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
-
-    handoffs_dir = Path(os.environ.get("MINT_PRODUCTION_HANDOFFS_DIR") or (mint_root / "production-handoffs"))
-    packages_dir = Path(os.environ.get("MINT_PRODUCTION_PACKAGES_DIR") or (mint_root / "production-packages"))
-    packages_index_file = Path(
-        os.environ.get("MINT_PRODUCTION_PACKAGES_INDEX_FILE") or (mint_root / "production-packages-index.yaml")
-    )
-    staging_root = Path(
-        os.environ.get("MINT_PRODUCTION_PACKAGES_STAGING_ROOT") or (mint_root / "production-packages/staged-bundles")
-    )
+    handoffs_dir = mint_override_path("MINT_PRODUCTION_HANDOFFS_DIR", "production-handoffs")
+    packages_dir = mint_override_path("MINT_PRODUCTION_PACKAGES_DIR", "production-packages")
+    packages_index_file = mint_override_path("MINT_PRODUCTION_PACKAGES_INDEX_FILE", "production-packages-index.yaml")
+    staging_root = mint_override_path("MINT_PRODUCTION_PACKAGES_STAGING_ROOT", "production-packages/staged-bundles")
 
     handoff_id = args.production_handoff_id
     handoff_file = handoffs_dir / f"production_handoff_{handoff_id}.yaml"

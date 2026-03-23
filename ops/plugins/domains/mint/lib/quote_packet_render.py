@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from mint_runtime_paths import mint_override_path
 from quote_packet_normalize import append_receipt, dump_yaml, fail, load_structured_file, now_utc
 
 
@@ -308,9 +309,7 @@ def clear_stale_payment_ref(packet: dict[str, Any]) -> bool:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (spine_root / "runtime/domain-state/mint/quote-packets"))
+    packets_dir = mint_override_path("MINT_QUOTE_PACKETS_DIR", "quote-packets")
     packet_file = packets_dir / f"quote_packet_{args.packet_id}.yaml"
     if not packet_file.exists():
         fail(f"packet not found: {args.packet_id}")

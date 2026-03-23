@@ -13,6 +13,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
+from mint_runtime_paths import mint_override_path
 from quote_packet_normalize import append_receipt, dump_yaml, fail, load_structured_file, now_utc, update_index
 
 
@@ -296,12 +297,10 @@ def main(argv: list[str]) -> int:
 
     script_dir = Path(__file__).resolve().parent
     spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
-
-    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (mint_root / "quote-packets"))
-    packet_index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (mint_root / "quote-packets-index.yaml"))
-    quotes_dir = Path(os.environ.get("MINT_QUOTES_DIR") or (mint_root / "quotes"))
-    quotes_index_file = Path(os.environ.get("MINT_QUOTES_INDEX_FILE") or (mint_root / "quotes-index.yaml"))
+    packets_dir = mint_override_path("MINT_QUOTE_PACKETS_DIR", "quote-packets")
+    packet_index_file = mint_override_path("MINT_QUOTE_PACKET_INDEX_FILE", "quote-packets-index.yaml")
+    quotes_dir = mint_override_path("MINT_QUOTES_DIR", "quotes")
+    quotes_index_file = mint_override_path("MINT_QUOTES_INDEX_FILE", "quotes-index.yaml")
 
     packet_file = packet_file_for_id(packets_dir, args.packet_id)
     if not packet_file.exists():

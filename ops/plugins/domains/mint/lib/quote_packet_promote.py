@@ -13,6 +13,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
+from mint_runtime_paths import mint_override_path
 from quote_packet_normalize import (
     append_receipt,
     dump_yaml,
@@ -383,26 +384,18 @@ def print_existing_summary(
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
-
-    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (mint_root / "quote-packets"))
-    packet_index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (mint_root / "quote-packets-index.yaml"))
-    orders_dir = Path(os.environ.get("MINT_ORDER_RUNTIME_DIR") or (mint_root / "orders"))
-    orders_index_file = Path(os.environ.get("MINT_ORDER_INDEX_FILE") or (mint_root / "orders-index.yaml"))
-    order_revisions_dir = Path(os.environ.get("MINT_ORDER_REVISIONS_DIR") or (mint_root / "order-revisions"))
-    order_revisions_index_file = Path(os.environ.get("MINT_ORDER_REVISION_INDEX_FILE") or (mint_root / "order-revisions-index.yaml"))
-    quotes_dir = Path(os.environ.get("MINT_QUOTES_DIR") or (mint_root / "quotes"))
-    quotes_index_file = Path(os.environ.get("MINT_QUOTES_INDEX_FILE") or (mint_root / "quotes-index.yaml"))
-    pricing_snapshots_dir = Path(os.environ.get("MINT_PRICING_SNAPSHOTS_DIR") or (mint_root / "pricing-snapshots"))
-    pricing_snapshots_index_file = Path(
-        os.environ.get("MINT_PRICING_SNAPSHOT_INDEX_FILE") or (mint_root / "pricing-snapshots-index.yaml")
-    )
-    artwork_bindings_dir = Path(os.environ.get("MINT_ARTWORK_BINDINGS_DIR") or (mint_root / "artwork-bindings"))
-    artwork_bindings_index_file = Path(
-        os.environ.get("MINT_ARTWORK_BINDINGS_INDEX_FILE") or (mint_root / "artwork-bindings-index.yaml")
-    )
+    packets_dir = mint_override_path("MINT_QUOTE_PACKETS_DIR", "quote-packets")
+    packet_index_file = mint_override_path("MINT_QUOTE_PACKET_INDEX_FILE", "quote-packets-index.yaml")
+    orders_dir = mint_override_path("MINT_ORDER_RUNTIME_DIR", "orders")
+    orders_index_file = mint_override_path("MINT_ORDER_INDEX_FILE", "orders-index.yaml")
+    order_revisions_dir = mint_override_path("MINT_ORDER_REVISIONS_DIR", "order-revisions")
+    order_revisions_index_file = mint_override_path("MINT_ORDER_REVISION_INDEX_FILE", "order-revisions-index.yaml")
+    quotes_dir = mint_override_path("MINT_QUOTES_DIR", "quotes")
+    quotes_index_file = mint_override_path("MINT_QUOTES_INDEX_FILE", "quotes-index.yaml")
+    pricing_snapshots_dir = mint_override_path("MINT_PRICING_SNAPSHOTS_DIR", "pricing-snapshots")
+    pricing_snapshots_index_file = mint_override_path("MINT_PRICING_SNAPSHOT_INDEX_FILE", "pricing-snapshots-index.yaml")
+    artwork_bindings_dir = mint_override_path("MINT_ARTWORK_BINDINGS_DIR", "artwork-bindings")
+    artwork_bindings_index_file = mint_override_path("MINT_ARTWORK_BINDINGS_INDEX_FILE", "artwork-bindings-index.yaml")
 
     packet_file = packet_file_for_id(packets_dir, args.packet_id)
     if not packet_file.exists():

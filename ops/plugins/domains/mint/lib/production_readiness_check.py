@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 import yaml
 
+from mint_runtime_paths import mint_override_path
 from quote_packet_normalize import fail, load_structured_file, now_utc, pricing_missing_fields, stop
 
 
@@ -288,13 +289,9 @@ def build_readiness_summary(
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
-
-    orders_dir = Path(os.environ.get("MINT_ORDER_RUNTIME_DIR") or (mint_root / "orders"))
-    order_revisions_dir = Path(os.environ.get("MINT_ORDER_REVISIONS_DIR") or (mint_root / "order-revisions"))
-    artwork_bindings_dir = Path(os.environ.get("MINT_ARTWORK_BINDINGS_DIR") or (mint_root / "artwork-bindings"))
+    orders_dir = mint_override_path("MINT_ORDER_RUNTIME_DIR", "orders")
+    order_revisions_dir = mint_override_path("MINT_ORDER_REVISIONS_DIR", "order-revisions")
+    artwork_bindings_dir = mint_override_path("MINT_ARTWORK_BINDINGS_DIR", "artwork-bindings")
 
     summary = build_readiness_summary(args.order_id, orders_dir, order_revisions_dir, artwork_bindings_dir)
 

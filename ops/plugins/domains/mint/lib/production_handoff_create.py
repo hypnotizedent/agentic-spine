@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from mint_runtime_paths import mint_override_path
 from production_readiness_check import build_readiness_summary, entity_file
 from quote_packet_normalize import dump_yaml, fail, load_structured_file, now_utc, stop
 
@@ -173,18 +174,12 @@ def build_summary(record: dict[str, Any], handoff_file: Path, create_state: str)
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
-    script_dir = Path(__file__).resolve().parent
-    spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
-
-    orders_dir = Path(os.environ.get("MINT_ORDER_RUNTIME_DIR") or (mint_root / "orders"))
-    order_revisions_dir = Path(os.environ.get("MINT_ORDER_REVISIONS_DIR") or (mint_root / "order-revisions"))
-    quotes_dir = Path(os.environ.get("MINT_QUOTES_DIR") or (mint_root / "quotes"))
-    artwork_bindings_dir = Path(os.environ.get("MINT_ARTWORK_BINDINGS_DIR") or (mint_root / "artwork-bindings"))
-    handoffs_dir = Path(os.environ.get("MINT_PRODUCTION_HANDOFFS_DIR") or (mint_root / "production-handoffs"))
-    handoffs_index_file = Path(
-        os.environ.get("MINT_PRODUCTION_HANDOFFS_INDEX_FILE") or (mint_root / "production-handoffs-index.yaml")
-    )
+    orders_dir = mint_override_path("MINT_ORDER_RUNTIME_DIR", "orders")
+    order_revisions_dir = mint_override_path("MINT_ORDER_REVISIONS_DIR", "order-revisions")
+    quotes_dir = mint_override_path("MINT_QUOTES_DIR", "quotes")
+    artwork_bindings_dir = mint_override_path("MINT_ARTWORK_BINDINGS_DIR", "artwork-bindings")
+    handoffs_dir = mint_override_path("MINT_PRODUCTION_HANDOFFS_DIR", "production-handoffs")
+    handoffs_index_file = mint_override_path("MINT_PRODUCTION_HANDOFFS_INDEX_FILE", "production-handoffs-index.yaml")
 
     order_file = entity_file(orders_dir, "order", args.order_id)
     if not order_file.exists():

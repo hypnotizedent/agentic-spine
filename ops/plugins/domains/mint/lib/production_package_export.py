@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from mint_runtime_paths import mint_override_path
 from quote_packet_normalize import dump_yaml, fail, load_structured_file, now_utc, stop
 
 
@@ -199,21 +200,16 @@ def main(argv: list[str]) -> int:
 
     script_dir = Path(__file__).resolve().parent
     spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    mint_root = spine_root / "runtime/domain-state/mint"
 
-    packages_dir = Path(os.environ.get("MINT_PRODUCTION_PACKAGES_DIR") or (mint_root / "production-packages"))
-    exports_dir = Path(os.environ.get("MINT_PRODUCTION_EXPORTS_DIR") or (mint_root / "production-package-exports"))
-    exports_index_file = Path(
-        os.environ.get("MINT_PRODUCTION_EXPORTS_INDEX_FILE") or (mint_root / "production-package-exports-index.yaml")
-    )
+    packages_dir = mint_override_path("MINT_PRODUCTION_PACKAGES_DIR", "production-packages")
+    exports_dir = mint_override_path("MINT_PRODUCTION_EXPORTS_DIR", "production-package-exports")
+    exports_index_file = mint_override_path("MINT_PRODUCTION_EXPORTS_INDEX_FILE", "production-package-exports-index.yaml")
 
     # Export bundles root: deterministic governed outbox
     if args.export_root:
         export_bundles_root = Path(args.export_root)
     else:
-        export_bundles_root = Path(
-            os.environ.get("MINT_PRODUCTION_EXPORTS_BUNDLES_ROOT") or (mint_root / "production-package-exports/bundles")
-        )
+        export_bundles_root = mint_override_path("MINT_PRODUCTION_EXPORTS_BUNDLES_ROOT", "production-package-exports/bundles")
 
     package_id = args.production_package_id
     package_file = packages_dir / f"production_package_{package_id}.yaml"

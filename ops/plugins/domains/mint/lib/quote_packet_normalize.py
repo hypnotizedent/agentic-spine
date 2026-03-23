@@ -16,6 +16,7 @@ from typing import Any
 
 import yaml
 
+from mint_runtime_paths import mint_override_path
 
 CANONICAL_LINE_FIELDS = {
     "line_item_id",
@@ -1180,8 +1181,8 @@ def main(argv: list[str]) -> int:
     script_dir = Path(__file__).resolve().parent
     spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
     mint_modules_root = Path(os.environ.get("MINT_MODULES_ROOT") or "/Users/ronnyworks/code/mint-modules")
-    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (spine_root / "runtime/domain-state/mint/quote-packets"))
-    index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (spine_root / "runtime/domain-state/mint/quote-packets-index.yaml"))
+    packets_dir = mint_override_path("MINT_QUOTE_PACKETS_DIR", "quote-packets")
+    index_file = mint_override_path("MINT_QUOTE_PACKET_INDEX_FILE", "quote-packets-index.yaml")
 
     ensure_dir(packets_dir)
 

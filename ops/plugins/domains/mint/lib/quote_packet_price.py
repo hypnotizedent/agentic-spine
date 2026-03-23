@@ -17,6 +17,7 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
+from mint_runtime_paths import mint_override_path
 from quote_packet_normalize import (
     METHODS_REQUIRING_GRAPHIC_SIZE,
     add_gap,
@@ -705,8 +706,8 @@ def main(argv: list[str]) -> int:
 
     script_dir = Path(__file__).resolve().parent
     spine_root = Path(os.environ.get("SPINE_ROOT") or script_dir.parent.parent.parent.parent)
-    packets_dir = Path(os.environ.get("MINT_QUOTE_PACKETS_DIR") or (spine_root / "runtime/domain-state/mint/quote-packets"))
-    index_file = Path(os.environ.get("MINT_QUOTE_PACKET_INDEX_FILE") or (spine_root / "runtime/domain-state/mint/quote-packets-index.yaml"))
+    packets_dir = mint_override_path("MINT_QUOTE_PACKETS_DIR", "quote-packets")
+    index_file = mint_override_path("MINT_QUOTE_PACKET_INDEX_FILE", "quote-packets-index.yaml")
 
     packet_file = packet_file_for_id(packets_dir, args.packet_id)
     if not packet_file.exists():
