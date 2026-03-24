@@ -1,15 +1,23 @@
 ---
-status: authoritative
+status: superseded-phase1
 owner: "@ronny"
 created_at: "2026-03-24"
+superseded_by: V3 Sourcebook topology (lines 2822-2826) — MacBook stays control plane
 scope: control-node-vm207-requirements
 related_gaps:
-  - GAP-OP-1657  # operator-as-join-table (open)
+  - GAP-OP-1657  # operator-as-join-table (partially-fixed)
   - GAP-OP-1675  # no always-on single-writer control node (closed/deferred)
 related_arch: docs/governance/SPINE_V3_BOOTSTRAP.md
 ---
 
 # Control Node Requirements — VM 207
+
+> **SUPERSEDED FOR PHASE 1** (2026-03-24): The V3 Continuous Sourcebook established
+> the target topology: MacBook Pro = Spine Control Plane, Server/VM 207 = Workers.
+> This spec deviated by moving the control plane to VM 207. Phase 1 correction:
+> MacBook stays control plane. VM 207 gets worker roles (broker mirror, watcher,
+> verifier, scheduler, git-worker). The broker API on VM 207 is a **read-only mirror**,
+> not the primary control surface. Phase 2/3 content below may still apply later.
 
 This document defines the requirements for the always-on spine control node to be
 deployed on Proxmox VM 207. It is the governing complement to the node taxonomy in
