@@ -1,0 +1,164 @@
+# NAS Permission Architecture
+# Status: authoritative
+# Owner: "@ronny"
+# Updated: 2026-03-24
+# Scope: Synology NAS permission model, SSH access, rsync operations
+
+version: "1.0"
+created: "2026-03-24"
+owner: "@ronny"
+
+nas_target:
+  model: "Synology DS918+"
+  hostname: synology918
+  lan_ip: 10.0.0.150
+  tailscale_ip: 100.102.199.111
+
+primary_user: ronadmin
+
+permission_model:
+  issue: "Mixed ownership (admin:users vs ronadmin:users)"
+  root_cause: |
+    - Parent directories: admin:users (drwxrwxr-x)
+    - Child directories: ronadmin:users or USB-imported 1000:1000
+    - ronadmin can create NEW directories in parent
+    - ronadmin CANNOT write files into existing admin-owned directories
+  impact: "rsync mkstemp fails on admin-owned subdirs"
+  observed_failure_rate: "88% (19,233/21,970 files blocked)"
+  error_signature: "rsync: mkstemp \"/path/.file.ext.XXXXXX\" failed: Permission denied (13)"
+  workaround: "chmod -R u+w before rsync"
+  decision: "Pre-fix permissions mandatory for all NAS rsync operations"
+
+ssh_access_matrix:
+  ronadmin:
+    lan:
+      ip: 10.0.0.150
+      status: works
+      keys: configured
+    tailscale:
+      ip: 100.102.199.111
+      status: works
+      keys: configured
+  admin:
+    lan:
+      ip: 10.0.0.150
+      status: no_ssh_keys
+      keys: not_configured
+    tailscale:
+      ip: 100.102.199.111
+      status: no_ssh_keys
+      keys: not_configured
+
+rsync_contract:
+  canonical_pattern: |
+    #!/bin/bash
+    set -euo pipefail
+
+    TARGET="/volume1/media-staging/music"
+
+    # Step 1: Pre-fix permissions (allow writes to existing dirs)
+    ssh ronadmin@100.102.199.111 "chmod -R u+w '$TARGET' 2>/dev/null || true"
+    ssh ronadmin@100.102.199.111 "find '$TARGET' -type d -exec chmod 755 {} \\; 2>/dev/null || true"
+
+    # Step 2: Rsync with stats
+    ssh ronadmin@100.102.199.111 "rsync -av --stats \\
+      /volumeUSB1/usbshare/music/ \\
+      '$TARGET/' 2>&1" | tee rsync.log
+
+    # Step 3: Verify completion
+    EXPECTED_FILES=21970
+    ACTUAL_FILES=$(ssh ronadmin@100.102.199.111 "find '$TARGET' -type f | wc -l")
+
+    if [ "$ACTUAL_FILES" -lt "$EXPECTED_FILES" ]; then
+      echo "WARNING: Only $ACTUAL_FILES / $EXPECTED_FILES files copied"
+      exit 1
+    fi
+
+  steps:
+    step_1:
+      action: "chmod -R u+w $TARGET"
+      purpose: "Fix permissions on existing directories"
+      required: true
+    step_2:
+      action: "rsync -av $SOURCE $TARGET"
+      purpose: "Copy files with archive mode"
+      required: true
+    step_3:
+      action: "verify file count matches expected"
+      purpose: "Detect incomplete transfers"
+      required: true
+
+  failure_modes:
+    permission_denied:
+      signature: "mkstemp failed: Permission denied (13)"
+      cause: "Writing to admin-owned subdirectory"
+      resolution: "Run chmod pre-fix (step_1)"
+    partial_copy:
+      signature: "File count < expected"
+      cause: "Permission errors or process interruption"
+      resolution: "Check rsync.log for errors, re-run with pre-fix"
+
+workarounds:
+  option_1:
+    name: "Pre-Fix Permissions (Recommended)"
+    pattern: "chmod -R u+w + rsync"
+    pros: ["Scriptable", "No password required"]
+    cons: ["2-step process"]
+    status: canonical
+  option_2:
+    name: "Sudo Rsync"
+    pattern: "sudo rsync"
+    pros: ["1-step process"]
+    cons: ["Requires interactive password", "Not scriptable"]
+    status: not_recommended
+  option_3:
+    name: "SSH as admin User"
+    pattern: "ssh admin@NAS rsync"
+    pros: ["No permission issues"]
+    cons: ["Requires admin SSH keys setup"]
+    status: not_configured
+  option_4:
+    name: "chown After Failed Rsync"
+    pattern: "rsync || sudo chown"
+    pros: ["Eventual consistency"]
+    cons: ["Requires password", "Data loss if interrupted"]
+    status: not_recommended
+
+architecture_decisions:
+  decision_1:
+    choice: "Use ronadmin for all spine-governed NAS operations"
+    rationale: "Consistent with other VM SSH access patterns (ubuntu@, ronadmin@)"
+    consequence: "Must pre-fix permissions before rsync to mixed-ownership directories"
+  decision_2:
+    choice: "Permission pre-fixing required before all rsync operations"
+    rationale: "Avoids sudo password prompts, keeps operations scriptable"
+    consequence: "2-step process (fix perms, then rsync) instead of 1-step"
+  decision_3:
+    choice: "No sudo in automated scripts"
+    rationale: "Requires interactive password, breaks automation"
+    consequence: "Permission pre-fixing is mandatory step"
+
+agent_instructions:
+  before_rsync:
+    - "Read this contract"
+    - "Run permission pre-fix commands (chmod -R u+w, find -exec chmod 755)"
+    - "Execute rsync"
+    - "Verify file count matches expected"
+    - "If < 90% copied, file friction and escalate"
+  do_not:
+    - "Assume rsync will 'just work' on Synology"
+    - "Use sudo in automated scripts (requires password)"
+    - "Skip permission verification step"
+
+friction_filed:
+  - id: rsync.nas.permissions
+    queue: 259
+    severity: high
+    detail: "88% file copy failure rate due to permission denied"
+    root_cause: "ronadmin vs admin ownership conflict"
+    impact: "Requires chmod intervention before every rsync"
+
+related_documentation:
+  - ops/bindings/media.master.inventory.contract.yaml
+  - ops/bindings/ssh.targets.yaml
+  - .runtime/spine/state/wave4-storage-cleanup/music-import-RETRY-FINAL.md
