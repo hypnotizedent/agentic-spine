@@ -199,8 +199,28 @@ brief_mode = sys.argv[30] == "1"
 now_epoch = time.time()
 
 
+def _clean_git_env():
+    """Return env dict with GIT_DIR/GIT_WORK_TREE removed.
+
+    When running inside a git hook, GIT_DIR is set to the current
+    worktree's gitdir.  This leaks into any ``git -C <other-path>``
+    call and forces git to resolve the *hook's* worktree instead of the
+    target path.  Stripping these variables lets ``-C`` work correctly
+    when inspecting foreign worktrees or the primary checkout.
+    """
+    env = os.environ.copy()
+    env.pop("GIT_DIR", None)
+    env.pop("GIT_WORK_TREE", None)
+    env.pop("GIT_INDEX_FILE", None)
+    return env
+
+
 def sh(args, check=True, cwd=None):
-    proc = subprocess.run(args, text=True, capture_output=True, cwd=cwd)
+    is_git = args and args[0] == "git"
+    proc = subprocess.run(
+        args, text=True, capture_output=True, cwd=cwd,
+        env=_clean_git_env() if is_git else None,
+    )
     if check and proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "command failed")
     return proc.returncode, proc.stdout
@@ -502,7 +522,7 @@ def parse_stash_subject(subject: str):
     return "", text
 
 
-repo_root = Path(subprocess.check_output(["git", "-C", str(root), "rev-parse", "--show-toplevel"], text=True).strip()).resolve()
+repo_root = Path(subprocess.check_output(["git", "-C", str(root), "rev-parse", "--show-toplevel"], text=True, env=_clean_git_env()).strip()).resolve()
 _all_wt_entries = parse_worktrees(repo_root)
 main_checkout_path = _all_wt_entries[0][0] if _all_wt_entries else repo_root
 is_root_context = (repo_root == main_checkout_path)
