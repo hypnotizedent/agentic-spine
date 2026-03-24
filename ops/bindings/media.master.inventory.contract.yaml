@@ -1,0 +1,236 @@
+# MEDIA MASTER INVENTORY CONTRACT
+# Status: authoritative
+# Owner: "@ronny"
+# Scope: What media lives where, lifecycle rules, quality contracts
+#
+# OPERATOR DIRECTIVES:
+# - HOME (Synology DS918+) IS CANONICAL for all active media
+# - TV and Music ONLY live on the NAS. No shop copies.
+# - Movies flow: HOME (fresh/watching) → md1400 (cold archive after watched)
+# - NO FILE DELETES by terminals. Operator deletes on his word only.
+# - md1400 stays open as download plane + cold archive
+# - Old stuff on md1400 sits. Moving it costs more than it's worth.
+#
+# For per-title detail (genres, lifecycle, client state, lineage):
+#   ~/code/workbench/agents/media/data/MEDIA_LIBRARY_CATALOG.yaml
+# For pipeline and container details:
+#   ops/bindings/media.pipeline.contract.yaml
+
+contract: MEDIA_MASTER_INVENTORY_V1
+version: "1.0"
+created: "2026-03-24"
+owner: "@ronny"
+
+topology:
+  canonical_home:
+    host: synology918
+    ip: 10.0.0.150
+    volume: /volume1/media-staging
+    vm_serving: media-home
+    vm_id: 106
+    vm_ip: 10.0.0.106
+    nfs_export: "10.0.0.150:/volume1/media-staging"
+    vm_mount: /srv/media
+    container_mount: /media
+    capacity_total: 20T
+    capacity_used: 11T
+    capacity_free: 8.7T
+    capacity_pct: 55
+    role: "Active library. Where Ronny watches content at home."
+
+  cold_archive:
+    host: pve
+    zfs_pool: md1400
+    path: /md1400
+    capacity_total: 36T
+    capacity_used: 32T
+    capacity_free: 4T
+    role: "Passive cold archive + alternative download plane"
+    current_contents:
+      archive_media_holds:
+        path: /md1400/archive/media-holds
+        size: 372G
+        contents: [downloads-cleanup-20260317, immich-vhs-imports, legacy-media-stack-backups]
+      archive_media_quarantine:
+        path: /md1400/archive/media-quarantine
+        size: 2.1T
+        contents: "458 pending items, 0 reviewed"
+      stage_media_phase2:
+        path: /md1400/stage/media-phase2-evacuation
+        size: 17T
+        date: "2026-03-19"
+        note: "Old shop content evacuated during migration. Operator decides when to clean."
+    provisioned_archive_roots:
+      movies:
+        path: /md1400/archive/media/movies
+        status: not_yet_created
+        note: "Create when first movie is promoted from NAS after watched"
+      tv:
+        status: forbidden
+        reason: "TV lives on NAS only — operator directive"
+      music:
+        status: forbidden
+        reason: "Music lives on NAS only — operator directive"
+    download_plane:
+      status: active
+      path: /md1400/stage
+      use_cases: [games, promoted_blurays, torrent_keeps]
+      note: "Do NOT close this plumbing. md1400 is a valid download destination."
+
+library_roots:
+  movies:
+    home_path: /volume1/media-staging/movies
+    container_path: /media/movies
+    arr_root: /media/movies
+    arr_root_id: 3
+    lifecycle: "fresh → watching → watched → archive-eligible → promote to md1400"
+    archive_target: /md1400/archive/media/movies
+    quality_floor: "HD Bluray + WEB (must-have tier), Any (fill-later tier)"
+
+  tv:
+    home_path: /volume1/media-staging/tv
+    container_path: /media/tv
+    arr_root: /media/tv
+    arr_root_id: 2
+    lifecycle: "fresh → watching → watched → idle (stays on NAS forever)"
+    archive_target: null  # TV NEVER leaves the NAS
+    quality_floor: "WEB-DL 1080p preferred, Any accepted"
+
+  music:
+    home_path: /volume1/media-staging/music
+    container_path: /media/music
+    arr_root: /media/music
+    arr_root_id: 2
+    streaming_path: /music  # Navidrome narrow mount
+    lifecycle: "imported → indexed → streaming via Navidrome"
+    archive_target: null  # Music NEVER leaves the NAS
+    quality_floor: "FLAC preferred, MP3 320 accepted"
+
+current_state:
+  traced_at: "2026-03-24"
+  movies:
+    filesystem_size: 6.9G
+    filesystem_dirs: 1
+    radarr_total: 1
+    radarr_with_files: 1
+    radarr_monitored: 0
+    arr_free_space: 9491G
+    import_stall: false
+    note: "Nearly empty library — only 1 movie (10000 BC). Not a stall; library not yet built on home canonical."
+  tv:
+    filesystem_size: 3.3T
+    filesystem_dirs: 67
+    sonarr_total: 129
+    sonarr_with_files: 66
+    sonarr_monitored: 72
+    sonarr_queue_stuck: 401
+    arr_free_space: 9491G
+    import_stall: true
+    import_stall_detail: |
+      401 completed downloads stuck in Sonarr queue with warnings:
+      - "No files found are eligible for import" (files already hardlinked or dirs emptied)
+      - "Release matched by ID, automatic import not possible" (scene release ID mismatch)
+      Remediation: Manual queue cleanup — clear stale entries, manual import for ID-blocked items.
+  music:
+    filesystem_size: 59G
+    filesystem_dirs: 237
+    lidarr_total: 275
+    lidarr_with_tracks: 49
+    lidarr_monitored: 275
+    lidarr_queue_stuck: 24
+    arr_free_space: 9491G
+    import_stall: partial
+    import_stall_detail: |
+      24 items in Lidarr queue with warnings:
+      - Album match not close enough (below 80% threshold)
+      - "Not enough free space" (despite 9.5TB free — may be container-level quota or reporting bug)
+      226 monitored artists have zero tracks — bulk of staged 682G not yet grabbed or imported.
+  staging_debt:
+    total: 1.25T
+    dirs:
+      - path: /volume1/media-staging/downloads/music-import-20260323
+        size: 682G
+        type: music_import_staging
+      - path: /volume1/media-staging/downloads/tv-import-20260323
+        size: 546G
+        type: tv_import_staging
+      - path: /volume1/media-staging/downloads/music-migration-staging
+        size: 26G
+        type: music_migration_residue
+      - path: /volume1/media-staging/downloads/movies-import-20260323
+        size: 0
+        type: movies_import_staging
+        note: "Empty — no movie imports staged"
+    downloads_active:
+      complete_tv: 19G
+      complete_music: 231M
+      complete_movies: 0
+      complete_radarr: 0
+      complete_sonarr: 0
+      incomplete: 300K
+      slskd: 0
+
+per_title_catalog:
+  authority: "~/code/workbench/agents/media/data/MEDIA_LIBRARY_CATALOG.yaml"
+  note: "For per-title detail (genres, lifecycle state, client state, lineage), consult the workbench catalog. This contract is the topology/lifecycle layer; the catalog is the content layer."
+
+filesystem_rules:
+  - "Every path under /volume1/media-staging/ has a declared purpose"
+  - "Staging dirs (downloads/*-import-*) are temporary — exist only until import is verified"
+  - "No mystery folders. If a folder has no declared purpose, it is drift."
+  - "Scalable: structure supports adding libraries without reorganizing"
+
+storage_lifecycle:
+  movie_promotion:
+    trigger: "Operator marks as watched + archive-eligible in catalog"
+    method: "rsync from NAS → md1400, verify checksum, then operator confirms deletion from NAS"
+    automation: "plan_only — no automatic moves, no automatic deletes"
+    archive_root: /md1400/archive/media/movies
+    archive_root_status: not_yet_created
+  tv_retention:
+    policy: "TV stays on NAS forever. No promotion to md1400. No deletion."
+  music_retention:
+    policy: "Music stays on NAS forever. No promotion to md1400. No deletion."
+
+entropy_rules:
+  - severity: warn
+    condition: "Import staging dirs older than 7 days"
+    current: "All staging dirs dated 2026-03-23 — within threshold"
+  - severity: critical
+    condition: "Import staging dirs older than 30 days without documented hold"
+    current: "None currently — staging is fresh"
+  - severity: warn
+    condition: "Library roots must have matching ARR root folder configs"
+    current: "PASS — all roots confirmed matching"
+  - severity: warn
+    condition: "Download complete dirs should drain to library within 24h (new content)"
+    current: "19G TV in complete/tv — check if these are active downloads or stale"
+
+known_issues:
+  - id: autopulse-path-double-prefix
+    severity: high
+    detail: |
+      Autopulse path rewrites are stale. Config has:
+        Sonarr: /tv → /media/tv
+        Radarr: /movies → /media/movies
+        Lidarr: /music → /media/music
+      But ARR now sends /media/tv (broad mount), so rewrite produces /media/media/tv.
+      Fix: update rewrites to identity (FROM=/media/tv TO=/media/tv) or remove them.
+      Impact: Jellyfin library scans fail for all autopulse-triggered refreshes.
+  - id: sonarr-queue-401-stuck
+    severity: high
+    detail: "401 completed downloads stuck with warnings. Needs manual queue cleanup."
+  - id: lidarr-low-track-coverage
+    severity: medium
+    detail: "275 artists monitored but only 49 have tracks. 226 artists with zero files."
+  - id: radarr-empty-library
+    severity: info
+    detail: "Only 1 movie in Radarr. Library not yet built on home canonical."
+
+cross_references:
+  pipeline_contract: ops/bindings/media.pipeline.contract.yaml
+  path_authority: ops/bindings/media.path.authority.contract.yaml
+  services: ops/bindings/media.services.yaml
+  quality_policy: ops/bindings/media.quality.policy.yaml
+  download_guardrails: ops/bindings/media.download.canary.guardrails.yaml
+  availability_progression: ops/bindings/media.availability.progression.contract.yaml
