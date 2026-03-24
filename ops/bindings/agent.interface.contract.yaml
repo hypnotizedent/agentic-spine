@@ -1,0 +1,145 @@
+# Agent Interface Contract
+# Status: authoritative
+# Owner: "@ronny"
+# Created: 2026-03-24
+# Authority: LOOP-NAS-PERMISSION-REMEDIATION-20260324
+# Scope: What agents can expect on any host in the estate
+#
+# This is the SSOT for agent assumptions about remote host environments.
+# All capabilities that SSH into remote hosts should validate against this contract.
+
+version: "1.0"
+created: "2026-03-24"
+owner: "@ronny"
+
+ssh:
+  resolution: "Always resolve via ops/bindings/ssh.targets.yaml"
+  auth: "Key-based (BatchMode=yes)"
+  timeout_default_sec: 5
+  timeout_optional_sec: 20
+  known_hosts: "/dev/null (no persistence)"
+  fallback_resolution: "ops/lib/ssh-resolve.sh (ssh_resolve_host_with_fallback)"
+  gate: "D321 (Remote Probe Resolution Policy)"
+
+identity:
+  canonical:
+    uid: 1000
+    gid: 1000
+    user: ubuntu
+    note: "Standard for all cloud-init Ubuntu VMs"
+  exceptions:
+    - host: nas
+      uid: 1026
+      gid: 100
+      user: ronadmin
+      note: "Synology admin user, UID controlled by DSM"
+    - host_pattern: "hypervisors (pve, proxmox-home)"
+      uid: 0
+      gid: 0
+      user: root
+      note: "Expected for Proxmox hosts"
+    - host: pihole-home
+      uid: 0
+      gid: 0
+      user: root
+      note: "LXC root, expected"
+    - host: immich
+      uid: 1000
+      gid: 1000
+      user: ronny
+      note: "Cloud-init choice, UID matches canonical"
+    - host: automation-stack
+      uid: 1000
+      gid: 1000
+      user: automation
+      note: "Descriptive name, UID matches canonical"
+    - host: ha
+      uid: 1000
+      gid: 1000
+      user: hassio
+      note: "HAOS-mandated, not changeable"
+
+sudo:
+  default_available: true
+  default_pattern: "sudo -n <command>"
+  test_command: "sudo -n true 2>/dev/null"
+  exceptions:
+    - host: nas
+      available: true
+      passwordless: false
+      note: "Requires password — not usable in automated scripts"
+    - host: automation-stack
+      available: true
+      passwordless: false
+      note: "Docker works via group membership, no sudo needed for docker"
+
+docker:
+  default_available: true
+  default_pattern: "docker <command>"
+  test_command: "docker ps -q 2>/dev/null"
+  note: "No sudo needed if user is in docker group (standard for all Ubuntu VMs)"
+  puid_pgid:
+    canonical: "1000:1000"
+    env_template: |
+      PUID=1000
+      PGID=1000
+      TZ=America/New_York
+
+filesystem:
+  appdata_roots:
+    - "/srv/appdata"
+    - "/opt/stacks"
+    - "/srv/config"
+  data_roots:
+    - "/srv/data"
+    - "/srv/media"
+  expected_owner: "1000:1000 (or root for parent dirs)"
+  nfs_mounts:
+    - client: media-home
+      mount_point: "/srv/media"
+      server: "10.0.0.150:/volume1/media-staging"
+      type: nfs4
+      squash: "all_squash (anonuid=1024, anongid=100)"
+      note: "All NFS access maps to UID 1024 on disk, regardless of client UID"
+
+preflight:
+  description: "Standard pre-flight check agents should run on any target host"
+  script: |
+    echo "UID=$(id -u) GID=$(id -g)"
+    sudo -n true 2>/dev/null && echo "SUDO=yes" || echo "SUDO=no"
+    command -v docker &>/dev/null && echo "DOCKER=yes" || echo "DOCKER=no"
+    df -h / 2>/dev/null | tail -1
+
+error_lookup:
+  - error: "Permission denied (publickey)"
+    cause: "Wrong SSH user or key not deployed"
+    fix: "Check ssh.targets.yaml for correct user"
+  - error: "sudo: a password is required"
+    cause: "Host doesn't have NOPASSWD sudo"
+    fix: "Check sudo_check in identity fingerprint; use docker group if available"
+  - error: "permission denied while trying to connect to Docker"
+    cause: "User not in docker group"
+    fix: "Use sudo docker or add user to docker group"
+  - error: "rsync: mkstemp failed: Permission denied (13)"
+    cause: "NAS mixed ownership on direct access"
+    fix: "Run chmod pre-fix per nas.permission.architecture.yaml"
+  - error: "NFS Stale file handle"
+    cause: "NFS export changed or NAS rebooted"
+    fix: "Remount: sudo mount -o remount /srv/media"
+
+tombstoned_hosts:
+  - id: download-stack
+    tombstoned: "2026-03-24"
+    reason: "0 running containers, workloads consolidated on media-home VM 106"
+  - id: streaming-stack
+    tombstoned: "2026-03-24"
+    reason: "0 running containers, workloads consolidated on media-home VM 106"
+  - id: docker-host
+    tombstoned: "2026-03-06"
+    reason: "Legacy VM 200, historical identity only"
+
+related_bindings:
+  - ops/bindings/ssh.targets.yaml
+  - ops/bindings/nas.permission.architecture.yaml
+  - ops/bindings/media.path.authority.contract.yaml
+  - ops/bindings/services.health.yaml

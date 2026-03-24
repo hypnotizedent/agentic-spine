@@ -3,8 +3,9 @@
 # Owner: "@ronny"
 # Updated: 2026-03-24
 # Scope: Synology NAS permission model, SSH access, rsync operations
+# Remediation: LOOP-NAS-PERMISSION-REMEDIATION-20260324
 
-version: "1.0"
+version: "2.0"
 created: "2026-03-24"
 owner: "@ronny"
 
@@ -16,18 +17,59 @@ nas_target:
 
 primary_user: ronadmin
 
+nfs_export:
+  path: "/volume1/media-staging"
+  clients:
+    - host: "10.0.0.106"
+      description: "media-home VM 106"
+      options: "rw,async,no_wdelay,crossmnt,insecure,all_squash,anonuid=1024,anongid=100"
+    - host: "10.0.0.179"
+      description: "legacy (download-stack, tombstoned)"
+      options: "rw,async,no_wdelay,crossmnt,insecure,all_squash,anonuid=1024,anongid=100"
+  squash: all_squash
+  anonuid: 1024
+  anongid: 100
+  status: active
+  note: |
+    NFS all_squash maps ALL client UIDs to admin (1024) on the NAS.
+    This means UID 1000 (media-home/ubuntu) appears as UID 1024 on disk.
+    Even 700-permission directories are accessible through NFS because
+    the squashed UID matches the file owner UID.
+
 permission_model:
-  issue: "Mixed ownership (admin:users vs ronadmin:users)"
-  root_cause: |
-    - Parent directories: admin:users (drwxrwxr-x)
-    - Child directories: ronadmin:users or USB-imported 1000:1000
-    - ronadmin can create NEW directories in parent
-    - ronadmin CANNOT write files into existing admin-owned directories
-  impact: "rsync mkstemp fails on admin-owned subdirs"
-  observed_failure_rate: "88% (19,233/21,970 files blocked)"
-  error_signature: "rsync: mkstemp \"/path/.file.ext.XXXXXX\" failed: Permission denied (13)"
-  workaround: "chmod -R u+w before rsync"
-  decision: "Pre-fix permissions mandatory for all NAS rsync operations"
+  status: remediated
+  remediation_date: "2026-03-24"
+  remediation_loop: "LOOP-NAS-PERMISSION-REMEDIATION-20260324"
+  current_state: |
+    Movies: all dirs 755, files 644 (bulk chmod via NFS from media-home)
+    TV: all dirs 755 (were already clean)
+    Music: dirs 777, files 666 (owned by ronadmin/1026, cannot chmod via NFS squash to 1024)
+    Downloads: 755/644 (admin-owned, fixed in bulk chmod)
+  ownership:
+    admin_uid_1024: "movies, tv, downloads (majority)"
+    ronadmin_uid_1026: "music, some tv/movie subdirs"
+    shared_gid: 100  # users group
+  access_through_nfs: |
+    All content is accessible through NFS regardless of on-disk permissions
+    because all_squash maps client access to UID 1024 (admin), which owns
+    the majority of content. Even 700-perm dirs are accessible because the
+    squashed identity matches the owner.
+  remaining_issues:
+    - "Music dirs are 777/666 (ronadmin-owned, can't fix via NFS squash)"
+    - "New rsync transfers preserve source permissions (700/600) — need --chmod flag or periodic cleanup"
+
+historical:
+  pre_remediation:
+    issue: "Mixed ownership (admin:users vs ronadmin:users)"
+    root_cause: |
+      admin (UID 1024) created most content with umask 077 → 700 dirs, 600 files
+      ronadmin (UID 1026) created music with umask 000 → 777 dirs, 666 files
+    impact: "93% of movie directories had 700 permissions (265/283 dirs)"
+    observed_failure_rate: "88% (19,233/21,970 files blocked for rsync)"
+    note: |
+      The 700-permission dirs were NOT actually blocking NFS access because
+      all_squash was already configured. The original discovery incorrectly
+      assumed no squash. The chmod was done for defense-in-depth and cleanliness.
 
 ssh_access_matrix:
   ronadmin:
@@ -49,116 +91,64 @@ ssh_access_matrix:
       status: no_ssh_keys
       keys: not_configured
 
+ssh_hardening:
+  password_authentication: "yes"  # STILL ENABLED — needs manual DSM fix
+  deny_users_admin: false  # NOT YET CONFIGURED — needs manual DSM fix
+  remediation_blocked: |
+    SSH hardening requires root access on Synology. ronadmin has sudo
+    but requires a password (no NOPASSWD). Non-interactive SSH cannot
+    provide the password. Fix via DSM GUI or interactive SSH session.
+  manual_steps:
+    - "SSH to NAS interactively: ssh ronadmin@100.102.199.111"
+    - "Run: sudo sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config"
+    - "Run: echo 'DenyUsers admin' | sudo tee -a /etc/ssh/sshd_config"
+    - "Run: sudo synoservice --restart sshd"
+    - "Verify: key auth still works from another terminal before disconnecting"
+
+sudoers:
+  ronadmin_nopasswd: false  # NOT YET CONFIGURED
+  remediation_blocked: |
+    Same root-access blocker as SSH hardening. Needs interactive sudo.
+  manual_steps:
+    - "SSH to NAS interactively: ssh ronadmin@100.102.199.111"
+    - "Run: sudo mkdir -p /etc/sudoers.d"
+    - "Run: echo 'ronadmin ALL=(ALL) NOPASSWD: /bin/chmod, /bin/chown, /usr/bin/find, /bin/ls' | sudo tee /etc/sudoers.d/ronadmin-spine"
+    - "Run: sudo chmod 440 /etc/sudoers.d/ronadmin-spine"
+    - "Run: sudo visudo -c  # verify syntax"
+    - "WARNING: Synology DSM updates may overwrite /etc/sudoers.d/"
+
 rsync_contract:
   canonical_pattern: |
-    #!/bin/bash
-    set -euo pipefail
+    The NFS all_squash configuration means rsync through NFS (from media-home)
+    does not have the UID mismatch problem. Files created through NFS are
+    owned by UID 1024 on disk. However, rsync preserves source permissions,
+    so new transfers may create 700/600 files. Use --chmod flag to override:
 
-    TARGET="/volume1/media-staging/music"
+    rsync -av --chmod=D755,F644 /source/ /srv/media/target/
 
-    # Step 1: Pre-fix permissions (allow writes to existing dirs)
-    ssh ronadmin@100.102.199.111 "chmod -R u+w '$TARGET' 2>/dev/null || true"
-    ssh ronadmin@100.102.199.111 "find '$TARGET' -type d -exec chmod 755 {} \\; 2>/dev/null || true"
+  direct_nas_rsync: |
+    When running rsync directly ON the NAS (e.g., USB import), the old
+    permission pre-fix is still needed because ronadmin (1026) cannot
+    write to admin-owned (1024) directories without sudo:
 
-    # Step 2: Rsync with stats
-    ssh ronadmin@100.102.199.111 "rsync -av --stats \\
-      /volumeUSB1/usbshare/music/ \\
-      '$TARGET/' 2>&1" | tee rsync.log
-
-    # Step 3: Verify completion
-    EXPECTED_FILES=21970
-    ACTUAL_FILES=$(ssh ronadmin@100.102.199.111 "find '$TARGET' -type f | wc -l")
-
-    if [ "$ACTUAL_FILES" -lt "$EXPECTED_FILES" ]; then
-      echo "WARNING: Only $ACTUAL_FILES / $EXPECTED_FILES files copied"
-      exit 1
-    fi
-
-  steps:
-    step_1:
-      action: "chmod -R u+w $TARGET"
-      purpose: "Fix permissions on existing directories"
-      required: true
-    step_2:
-      action: "rsync -av $SOURCE $TARGET"
-      purpose: "Copy files with archive mode"
-      required: true
-    step_3:
-      action: "verify file count matches expected"
-      purpose: "Detect incomplete transfers"
-      required: true
-
-  failure_modes:
-    permission_denied:
-      signature: "mkstemp failed: Permission denied (13)"
-      cause: "Writing to admin-owned subdirectory"
-      resolution: "Run chmod pre-fix (step_1)"
-    partial_copy:
-      signature: "File count < expected"
-      cause: "Permission errors or process interruption"
-      resolution: "Check rsync.log for errors, re-run with pre-fix"
-
-workarounds:
-  option_1:
-    name: "Pre-Fix Permissions (Recommended)"
-    pattern: "chmod -R u+w + rsync"
-    pros: ["Scriptable", "No password required"]
-    cons: ["2-step process"]
-    status: canonical
-  option_2:
-    name: "Sudo Rsync"
-    pattern: "sudo rsync"
-    pros: ["1-step process"]
-    cons: ["Requires interactive password", "Not scriptable"]
-    status: not_recommended
-  option_3:
-    name: "SSH as admin User"
-    pattern: "ssh admin@NAS rsync"
-    pros: ["No permission issues"]
-    cons: ["Requires admin SSH keys setup"]
-    status: not_configured
-  option_4:
-    name: "chown After Failed Rsync"
-    pattern: "rsync || sudo chown"
-    pros: ["Eventual consistency"]
-    cons: ["Requires password", "Data loss if interrupted"]
-    status: not_recommended
-
-architecture_decisions:
-  decision_1:
-    choice: "Use ronadmin for all spine-governed NAS operations"
-    rationale: "Consistent with other VM SSH access patterns (ubuntu@, ronadmin@)"
-    consequence: "Must pre-fix permissions before rsync to mixed-ownership directories"
-  decision_2:
-    choice: "Permission pre-fixing required before all rsync operations"
-    rationale: "Avoids sudo password prompts, keeps operations scriptable"
-    consequence: "2-step process (fix perms, then rsync) instead of 1-step"
-  decision_3:
-    choice: "No sudo in automated scripts"
-    rationale: "Requires interactive password, breaks automation"
-    consequence: "Permission pre-fixing is mandatory step"
+    ssh ronadmin@100.102.199.111 "chmod -R u+w /volume1/media-staging/target"
+    ssh ronadmin@100.102.199.111 "rsync -av /source/ /volume1/media-staging/target/"
 
 agent_instructions:
-  before_rsync:
+  before_nfs_rsync:
+    - "Rsync through NFS (from media-home) works without permission fixes"
+    - "Use --chmod=D755,F644 to set clean permissions on new content"
+  before_direct_nas_rsync:
     - "Read this contract"
-    - "Run permission pre-fix commands (chmod -R u+w, find -exec chmod 755)"
+    - "Run permission pre-fix: chmod -R u+w on target directory"
     - "Execute rsync"
     - "Verify file count matches expected"
-    - "If < 90% copied, file friction and escalate"
   do_not:
-    - "Assume rsync will 'just work' on Synology"
+    - "Assume NFS has no squash (it has all_squash with anonuid=1024)"
     - "Use sudo in automated scripts (requires password)"
-    - "Skip permission verification step"
-
-friction_filed:
-  - id: rsync.nas.permissions
-    queue: 259
-    severity: high
-    detail: "88% file copy failure rate due to permission denied"
-    root_cause: "ronadmin vs admin ownership conflict"
-    impact: "Requires chmod intervention before every rsync"
+    - "Skip permission verification for direct NAS operations"
 
 related_documentation:
-  - ops/bindings/media.master.inventory.contract.yaml
+  - ops/bindings/media.path.authority.contract.yaml
   - ops/bindings/ssh.targets.yaml
-  - .runtime/spine/state/wave4-storage-cleanup/music-import-RETRY-FINAL.md
+  - ops/bindings/agent.interface.contract.yaml
