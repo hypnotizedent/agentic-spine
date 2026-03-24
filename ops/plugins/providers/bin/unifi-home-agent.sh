@@ -5,7 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "${SCRIPT_DIR}/../../../.." && pwd)}"
 INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
 HELPER="${SCRIPT_DIR}/unifi-home-api-query"
-TARGET="${WORKBENCH_ROOT:-$HOME/code/workbench}/scripts/agents/unifi-home-agent.sh"
+source "$SPINE_ROOT/ops/plugins/infra/lib/workbench-paths.sh"
+TARGET="$(workbench_repo_root)/scripts/agents/unifi-home-agent.sh"
 
 inject_home_creds() {
   if [[ -x "$INFISICAL_AGENT" ]]; then

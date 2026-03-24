@@ -22,16 +22,29 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate managed provider-aware tool configs in the workbench repo.")
     parser.add_argument("--tool", choices=["all", "codex", "opencode"], default="all")
     parser.add_argument("--provider", help="Explicit provider override for single-tool sync")
-    parser.add_argument("--workbench-root", help="Workbench repo root (defaults to WORKBENCH_REPO or ~/code/workbench)")
+    parser.add_argument(
+        "--workbench-root",
+        help="Workbench repo root (defaults to WORKBENCH_REPO, WORKBENCH_MANAGED_CONFIG_ROOT, or a canonical checkout)",
+    )
     return parser.parse_args()
 
 
 def detect_workbench_root(explicit: str | None) -> Path:
-    if explicit:
-        return Path(explicit).expanduser().resolve()
-    env_path = os.environ.get("WORKBENCH_REPO")
-    if env_path:
-        return Path(env_path).expanduser().resolve()
+    spine_root = Path(__file__).resolve().parents[4]
+    candidates = [
+        explicit,
+        os.environ.get("WORKBENCH_REPO"),
+        os.environ.get("WORKBENCH_MANAGED_CONFIG_ROOT"),
+        os.environ.get("WORKBENCH_ROOT"),
+        spine_root.parent / "workbench",
+        Path.home() / "code/workbench",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        resolved = Path(candidate).expanduser().resolve()
+        if resolved.is_dir():
+            return resolved
     return (Path.home() / "code/workbench").resolve()
 
 
