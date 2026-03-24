@@ -15,8 +15,11 @@ List drift gates, filter by category, and show fix hints.
 
 ## Actions
 
-### List all gates:
-Run `./bin/ops cap run spine.verify` and report all gate IDs with status.
+### List gate inventory:
+Run `./bin/ops cap run verify.drift_gates.certify --brief` for a scan-first inventory, or `--list-domains` to inspect domain packs.
+
+### Run full enforcement:
+Run `./bin/ops cap run spine.verify` and report failing gate IDs with status.
 
 ### Filter by category:
 If a category is specified, list only gates in that category.
@@ -41,6 +44,7 @@ If a gate ID is specified (e.g. D42):
 - D21: retired/reserved (merged into D56)
 - Some gates run in verbose mode only (D25, D26, D32, D37, D39, D46)
 - Composite gates (D55, D56, D57) replace verbose subchecks in default mode
+- `verify.drift_gates.certify` is the inventory surface; `spine.verify` is the enforcement surface.
 
 ## Output
 

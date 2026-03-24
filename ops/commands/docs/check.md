@@ -38,7 +38,7 @@ Check if planned changes will violate any drift gates before making them.
    ```
    Or read the `# TRIAGE:` header directly from the script file.
 4. Warn about potential violations with preventive guidance.
-5. Optionally run `./bin/ops cap run spine.verify` to confirm current baseline.
+5. Optionally run `./bin/ops cap run verify.drift_gates.certify --brief` for a scan-first inventory, then `./bin/ops cap run spine.verify` to confirm the canonical baseline.
 
 ## Output
 

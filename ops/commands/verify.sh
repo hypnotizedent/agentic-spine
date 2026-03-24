@@ -5,6 +5,25 @@ SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 V="$SPINE_ROOT/surfaces/verify"
 DIAG_REGISTRY="$SPINE_ROOT/ops/bindings/verify.diagnostics.registry.yaml"
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  cat <<'EOF'
+Usage: ops verify [--core-only]
+
+Run the canonical V3 verification baseline, then optionally extend into
+diagnostic surfaces.
+
+Tier 0:
+  spine.verify - canonical V3 verification baseline
+
+Tier 1:
+  extended diagnostics from surfaces/verify plus registry-driven scripts
+
+Options:
+  --core-only   Run the canonical baseline only
+EOF
+  exit 0
+fi
+
 if [[ ! -d "$V" ]]; then
   echo "ERROR: verify surface missing: $V" >&2
   exit 2
@@ -15,8 +34,8 @@ echo "VERIFY_SURFACE=$V"
 echo "VERIFY_DIAGNOSTICS_REGISTRY=$DIAG_REGISTRY"
 echo
 
-# Tier 0: Canonical drift lock
-echo "Tier 0: Canonical spine.verify"
+# Tier 0: Canonical V3 verification baseline
+echo "Tier 0: Canonical V3 verification baseline (spine.verify)"
 if ! "$SPINE_ROOT/bin/ops" cap run spine.verify; then
   echo "spine.verify failed - aborting extended verify"
   exit 1

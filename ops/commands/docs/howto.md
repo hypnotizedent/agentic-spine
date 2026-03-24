@@ -22,9 +22,9 @@ Route "I need to..." questions to the correct workflow.
 | Submit changes (multi-agent) | `/propose` — create proposal package for operator review |
 | Start multi-step work | `/loop` — create scope, file phase gaps, execute |
 | Check before making changes | `/check` — proactive gate validation |
-| Look up a gate | `/gates` — list gates, filter by category |
+| Look up a gate | `/gates` — gate inventory, domain briefs, and TRIAGE hints |
 | Load session context | `/ctx` — read governance docs, show status |
-| Run verification | `/verify` — spine.verify with failure analysis |
+| Run verification | `/verify` — spine.verify canonical baseline with failure analysis |
 
 ## Common Workflows
 

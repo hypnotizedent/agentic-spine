@@ -13,13 +13,14 @@ Run all pre-flight readiness checks for this terminal session.
 Checks performed:
   1. ops preflight      - Remote authority + worktree hygiene
   2. agent.session.closeout - Loop/receipt truth coherence (D61 freshness)
-  3. spine.verify       - Constitutional drift gate (50+ gates)
-  4. spine.replay       - Receipt replay verification
-  5. spine.status       - Unified work status
-  6. secrets.binding    - Secrets binding check
-  7. secrets.auth.load  - Load Infisical auth
-  8. secrets.auth.status - Verify auth is hydrated
-  9. secrets.projects.status - Project-level secrets check
+  3. verify.drift_gates.certify - Scan-first drift gate inventory and domain brief
+  4. spine.verify       - Canonical V3 verification baseline
+  5. spine.replay       - Receipt replay verification
+  6. spine.status       - Unified work status
+  7. secrets.binding    - Secrets binding check
+  8. secrets.auth.load  - Load Infisical auth
+  9. secrets.auth.status - Verify auth is hydrated
+  10. secrets.projects.status - Project-level secrets check
 
 On success: terminal is cleared for API-touching capabilities.
 On failure: follow printed remediation steps.
@@ -53,6 +54,8 @@ echo "────────────────────────�
 
 # Session closeout keeps loop/receipt truth coherent (D61 freshness).
 run_cap agent.session.closeout
+
+run_cap verify.drift_gates.certify --brief
 
 run_cap spine.verify
 run_cap spine.replay

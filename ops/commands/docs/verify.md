@@ -11,10 +11,11 @@ Run canonical spine verification and summarize failures with evidence.
 
 ## Actions
 
-1. Run `./bin/ops cap run spine.verify` (canonical drift lock).
-2. If failures exist, cite failing gate IDs and receipt/output paths.
-3. For each failing gate, read the TRIAGE hint from the output.
-4. Optionally run `./bin/ops verify --core-only` for compatibility checks.
+1. Run `./bin/ops cap run spine.verify` (canonical V3 baseline).
+2. If you need a gate inventory or domain brief first, run `./bin/ops cap run verify.drift_gates.certify --brief`.
+3. If failures exist, cite failing gate IDs and receipt/output paths.
+4. For each failing gate, read the TRIAGE hint from the output.
+5. Optionally run `./bin/ops verify --core-only` for compatibility checks.
 
 ## Output
 
