@@ -372,6 +372,24 @@ run_cap() {
       role_override_require_session_binding="$(yq e -r '.runtime_roles.session_role_override_cache.require_session_binding // true' "$role_runtime_contract" 2>/dev/null || echo "$role_override_require_session_binding")"
       role_override_require_terminal_binding="$(yq e -r '.runtime_roles.session_role_override_cache.require_terminal_role_binding // true' "$role_runtime_contract" 2>/dev/null || echo "$role_override_require_terminal_binding")"
     fi
+    # ── Maintenance allowlist (GAP-1673) ──────────────────────────
+    # Spine-internal housekeeping verbs that must work even with a dirty
+    # worktree, no attach packet, or a read-only role.  These are
+    # idempotent/additive governance operations — NOT product-domain
+    # mutations.  Keep mutation-guard and approval checks intact.
+    local _maintenance_allowlist="gaps.file,gaps.close,gaps.claim,gaps.status,gaps.aging,gaps.batch.close,gaps.auto.close,gaps.quick,friction.ingest,friction.reconcile,friction.close.resolved,friction.queue.status,friction.baseline.capture,friction.baseline.verify,loop.closeout.finalize,state.shared.reconcile,loops.authority.bridge,loops.auto.close,loops.progress,lifecycle.health,lifecycle.tombstone.expire,lifecycle.residue.scan,lifecycle.restore.capsule.verify,capability.map.projection.build,planning.plans.reconcile"
+
+    # Helper: returns 0 if $1 is in the maintenance allowlist.
+    _is_maintenance_cap() {
+      local _cap="$1"
+      local _entry
+      IFS=',' read -r -a _maint_arr <<< "$_maintenance_allowlist"
+      for _entry in "${_maint_arr[@]}"; do
+        [[ "$_entry" == "$_cap" ]] && return 0
+      done
+      return 1
+    }
+
     local attach_admission_enabled="true"
     local attach_admission_required_safety_csv="mutating,destructive"
     local attach_admission_required_env_csv="SPINE_ENTRY_PACKET_PATH,SPINE_ENTRY_PACKET_HASH"
@@ -542,6 +560,10 @@ run_cap() {
       done
 
       if [[ "$attach_guard_applies" -eq 1 ]]; then
+        # Check maintenance allowlist first (GAP-1673)
+        if _is_maintenance_cap "$name"; then
+          attach_guard_exempt=1
+        fi
         IFS=',' read -r -a _attach_exempt_caps <<< "${attach_admission_exempt_csv:-}"
         for attach_key in "${_attach_exempt_caps[@]:-}"; do
           attach_key="$(printf '%s' "$attach_key" | xargs)"
@@ -672,6 +694,10 @@ run_cap() {
           policy_guard_exempt=1
           ;;
       esac
+      # Maintenance allowlist fallback (GAP-1673)
+      if [[ "$policy_guard_exempt" -eq 0 ]] && _is_maintenance_cap "$name"; then
+        policy_guard_exempt=1
+      fi
 
       # proposal_required: strict preset forces proposal flow for mutating caps
       if [[ "$policy_guard_exempt" -eq 1 ]]; then
@@ -735,6 +761,10 @@ run_cap() {
           context_guard_exempt=1
           ;;
       esac
+      # Maintenance allowlist fallback (GAP-1673)
+      if [[ "$context_guard_exempt" -eq 0 ]] && _is_maintenance_cap "$name"; then
+        context_guard_exempt=1
+      fi
 
       caller_branch="$(git -C "$PWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
       [[ -n "$caller_branch" ]] || caller_branch="unknown"
@@ -890,6 +920,11 @@ run_cap() {
             break
           fi
         done
+        # Maintenance allowlist fallback (GAP-1673)
+        if [[ "$role_capability_allowlisted" != "true" ]] && _is_maintenance_cap "$name"; then
+          role_capability_allowlisted="true"
+          role_is_mutating=1
+        fi
         if [[ "$role_capability_allowlisted" == "true" ]]; then
           echo "RUNTIME ROLE ALLOWLIST: role=$runtime_role capability=$name"
         fi
@@ -941,9 +976,13 @@ run_cap() {
 
       # Allow bootstrap and orchestration control-plane capabilities to bypass
       # lock evidence checks when they are establishing lock claims.
+      # Maintenance allowlist (GAP-1673) also bypasses orchestrator lock evidence.
       case "$name" in
         orchestration.launcher.claim|orchestration.terminal.entry|orchestration.wave.kickoff|orchestration.wave.start|orchestration.wave.dispatch|orchestration.wave.ack|orchestration.wave.close|loops.create|session.start|session.v3.attach|aof.contract.acknowledge|session.role.override|state.shared.reconcile|worktree.lifecycle.managed.sync|friction.ingest) orchestrator_loop_id="" ;;
       esac
+      if [[ -n "$orchestrator_loop_id" ]] && _is_maintenance_cap "$name"; then
+        orchestrator_loop_id=""
+      fi
 
       if [[ -n "$orchestrator_loop_id" ]]; then
         orchestrator_scope_file="$SPINE_STATE/loop-scopes/${orchestrator_loop_id}.scope.md"
@@ -1053,7 +1092,9 @@ run_cap() {
 
     # ── Proactive mutation guard (critical domains, snapshot-driven) ──
     if [[ -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
-      if [[ "$governed_override_active" -eq 1 ]]; then
+      if _is_maintenance_cap "$name"; then
+        echo "PROACTIVE GUARD: maintenance allowlist bypass for '$name'"
+      elif [[ "$governed_override_active" -eq 1 ]]; then
         echo "PROACTIVE GUARD OVERRIDE: OPS_GOVERNED_MAIN_OVERRIDE=1"
       else
       local guard_policy="$SPINE_CODE/ops/bindings/proactive.guard.policy.yaml"
@@ -1203,7 +1244,7 @@ PY
     # When .environment.yaml exists, enforce daily contract read acknowledgment
     # before allowing mutating/destructive capabilities.
     # Auto-acknowledge when a session role override is active (operator already proved engagement).
-    if [[ -z "$blocked_reason" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]] && [[ "$name" != "aof.contract.acknowledge" && "$name" != "session.v3.attach" && "$name" != "friction.ingest" ]]; then
+    if [[ -z "$blocked_reason" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]] && [[ "$name" != "aof.contract.acknowledge" && "$name" != "session.v3.attach" && "$name" != "friction.ingest" ]] && ! _is_maintenance_cap "$name"; then
       local env_contract="${cwd}/.environment.yaml"
       if [[ -f "$env_contract" ]]; then
         local ack_check
