@@ -657,7 +657,7 @@ The canonical replacement is:
 The structural failure to avoid is retirement asymmetry:
 
 - the system automates creation
-- the system automates drift detection
+- the system automates convergence verification
 - the system does not yet automate retirement strongly enough
 
 That causes every cycle to add net weight unless replacement and retirement are
