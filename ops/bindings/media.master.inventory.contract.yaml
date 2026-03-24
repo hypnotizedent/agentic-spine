@@ -17,9 +17,11 @@
 #   ops/bindings/media.pipeline.contract.yaml
 
 contract: MEDIA_MASTER_INVENTORY_V1
-version: "1.0"
+version: "1.1"
 created: "2026-03-24"
+updated_at: "2026-03-24"
 owner: "@ronny"
+reconciliation_trace: "CP-060000 + CP-030000 combined wave — fresh SSH+API trace of all hosts"
 
 topology:
   canonical_home:
@@ -34,32 +36,45 @@ topology:
     container_mount: /media
     capacity_total: 20T
     capacity_used: 11T
-    capacity_free: 8.7T
-    capacity_pct: 55
+    capacity_free: 8.5T
+    capacity_pct: 56
     role: "Active library. Where Ronny watches content at home."
 
   cold_archive:
     host: pve
     zfs_pool: md1400
     path: /md1400
-    capacity_total: 36T
-    capacity_used: 32T
-    capacity_free: 4T
+    capacity_total: 4.1T
+    capacity_used: "~128K"
+    capacity_free: 4.1T
+    capacity_pct: 1
     role: "Passive cold archive + alternative download plane"
+    traced_at: "2026-03-24T00:00Z"
     current_contents:
-      archive_media_holds:
-        path: /md1400/archive/media-holds
-        size: 372G
-        contents: [downloads-cleanup-20260317, immich-vhs-imports, legacy-media-stack-backups]
-      archive_media_quarantine:
-        path: /md1400/archive/media-quarantine
-        size: 2.1T
-        contents: "458 pending items, 0 reviewed"
-      stage_media_phase2:
-        path: /md1400/stage/media-phase2-evacuation
+      archive:
+        path: /md1400/archive
+        size: 2.7T
+        children:
+          - {name: backup-holds, type: directory}
+          - {name: games, type: directory}
+          - {name: live-share, type: directory}
+          - {name: media-holds, type: directory}
+          - {name: media-quarantine, type: directory}
+      backup_cold:
+        path: /md1400/backup-cold
+        size: 3.5T
+      stage:
+        path: /md1400/stage
         size: 17T
-        date: "2026-03-19"
-        note: "Old shop content evacuated during migration. Operator decides when to clean."
+        children:
+          - {name: games, type: directory}
+          - {name: media-phase2-evacuation, type: directory, note: "Old shop content evacuated during migration. Operator decides when to clean."}
+      tombstones:
+        path: /md1400/tombstones
+        size: 183G
+      vms:
+        path: /md1400/vms
+        size: 512B
     provisioned_archive_roots:
       movies:
         path: /md1400/archive/media/movies
@@ -114,68 +129,92 @@ library_roots:
     quality_floor: "FLAC preferred, MP3 320 accepted"
 
 current_state:
-  traced_at: "2026-03-24"
+  traced_at: "2026-03-24T00:00Z"
+  trace_method: "SSH + ARR API queries from controller terminal"
   movies:
     filesystem_size: 6.9G
     filesystem_dirs: 1
     radarr_total: 1
     radarr_with_files: 1
-    radarr_monitored: 0
-    arr_free_space: 9491G
+    radarr_queue: 0
+    arr_free_space: 8671G
     import_stall: false
-    note: "Nearly empty library — only 1 movie (10000 BC). Not a stall; library not yet built on home canonical."
+    note: "Nearly empty library — only 1 movie. Not a stall; library not yet built on home canonical."
   tv:
-    filesystem_size: 3.3T
-    filesystem_dirs: 67
+    filesystem_size: 3.4T
     sonarr_total: 129
-    sonarr_with_files: 66
-    sonarr_monitored: 72
-    sonarr_queue_stuck: 401
-    arr_free_space: 9491G
-    import_stall: true
-    import_stall_detail: |
-      401 completed downloads stuck in Sonarr queue with warnings:
-      - "No files found are eligible for import" (files already hardlinked or dirs emptied)
-      - "Release matched by ID, automatic import not possible" (scene release ID mismatch)
-      Remediation: Manual queue cleanup — clear stale entries, manual import for ID-blocked items.
+    sonarr_with_files: 69
+    sonarr_episodes_on_disk: 2407
+    sonarr_queue_total: 545
+    sonarr_queue_status: downloading
+    sonarr_queue_sample: "Smallville S10 (active download, status=ok)"
+    arr_free_space: 8671G
+    import_stall: false
+    import_stall_note: |
+      Previous 401-item queue stall was fixed (2026-03-24). Current 545 queue items
+      are active downloads (status=downloading, trackedDownloadStatus=ok).
+      Active grabs: Dexter (S01-S08), Euphoria S01, Malcolm in the Middle (S01/S03),
+      Schitts Creek (S01/S02), Smallville (S01/S04/S10), Cheers S10E25, Wednesday S02.
+      Pipeline is flowing — these are in-progress, not stuck.
   music:
-    filesystem_size: 59G
-    filesystem_dirs: 237
+    filesystem_size: 99G
     lidarr_total: 275
-    lidarr_with_tracks: 49
-    lidarr_monitored: 275
-    lidarr_queue_stuck: 24
-    arr_free_space: 9491G
+    lidarr_with_tracks: 57
+    lidarr_tracks_on_disk: 2606
+    lidarr_size_on_disk: 65G
+    lidarr_queue: 24
+    arr_free_space: 8671G
     import_stall: partial
     import_stall_detail: |
-      24 items in Lidarr queue with warnings:
-      - Album match not close enough (below 80% threshold)
-      - "Not enough free space" (despite 9.5TB free — may be container-level quota or reporting bug)
-      226 monitored artists have zero tracks — bulk of staged 682G not yet grabbed or imported.
+      24 items in Lidarr queue with warnings.
+      218 monitored artists have zero tracks — bulk of staged 682G not yet grabbed or imported.
+      Music pipeline (slskd + soularr) is active and grabbing — 57 artists now have tracks (was 49).
+      Navidrome streaming 99G of indexed music.
   staging_debt:
     total: 1.25T
+    file_counts:
+      music_import: 21769
+      tv_import: 253
+      movies_import: 0
+      music_migration: 1009
     dirs:
       - path: /volume1/media-staging/downloads/music-import-20260323
         size: 682G
+        files: 21769
         type: music_import_staging
+        hardlinks: false
+        hardlink_nlink: 1
+        note: "All files have nlink=1 — these are standalone copies, NOT hardlinked to library. Safe for operator cleanup after Lidarr import verification."
       - path: /volume1/media-staging/downloads/tv-import-20260323
         size: 546G
+        files: 253
         type: tv_import_staging
+        hardlinks: false
+        hardlink_nlink: 1
+        note: "All files have nlink=1 — standalone copies. Contains 30 Rock, Knight of the Seven Kingdoms, etc."
       - path: /volume1/media-staging/downloads/music-migration-staging
         size: 26G
+        files: 1009
         type: music_migration_residue
+        hardlinks: false
+        hardlink_nlink: 1
+        note: "Legacy migration staging. All nlink=1. Subset of music-import content."
       - path: /volume1/media-staging/downloads/movies-import-20260323
         size: 0
+        files: 0
         type: movies_import_staging
         note: "Empty — no movie imports staged"
     downloads_active:
-      complete_tv: 19G
+      complete_tv: 23G
+      complete_tv_detail: "Wednesday S02 (8 eps), Narcos S01E06, Friends S02E13 (_UNPACK_ stale)"
       complete_music: 231M
       complete_movies: 0
       complete_radarr: 0
       complete_sonarr: 0
-      incomplete: 300K
-      slskd: 0
+      incomplete: 12G
+      incomplete_detail: "Active downloads: Dexter S01-S08, Euphoria S01, Malcolm S01/S03, Schitts Creek S01/S02, Smallville S01/S04/S10, Cheers S10E25"
+      slskd: 2.5G
+      slskd_detail: "4 albums + failed_imports + incomplete dirs"
 
 per_title_catalog:
   authority: "~/code/workbench/agents/media/data/MEDIA_LIBRARY_CATALOG.yaml"
@@ -208,10 +247,13 @@ entropy_rules:
     current: "None currently — staging is fresh"
   - severity: warn
     condition: "Library roots must have matching ARR root folder configs"
-    current: "PASS — all roots confirmed matching"
+    current: "PASS — all roots confirmed matching (radarr=/media/movies, sonarr=/media/tv, lidarr=/media/music)"
   - severity: warn
     condition: "Download complete dirs should drain to library within 24h (new content)"
-    current: "19G TV in complete/tv — check if these are active downloads or stale"
+    current: "23G TV in complete/tv — Wednesday S02 and Narcos S01E06 may need manual import. Friends S02E13 has _UNPACK_ prefix (stale extraction)."
+  - severity: info
+    condition: "Hardlink verification on staging dirs"
+    current: "All staging import dirs confirmed nlink=1 (no hardlinks). Safe for operator cleanup after import verification."
 
 known_issues:
   - id: autopulse-path-double-prefix

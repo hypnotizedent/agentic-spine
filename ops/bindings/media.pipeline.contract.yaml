@@ -12,9 +12,11 @@
 # For per-title detail: ~/code/workbench/agents/media/data/MEDIA_LIBRARY_CATALOG.yaml
 
 contract: MEDIA_PIPELINE_V1
-version: "1.0"
+version: "1.1"
 created: "2026-03-24"
+updated_at: "2026-03-24"
 owner: "@ronny"
+reconciliation_trace: "CP-060000 + CP-030000 combined wave — fresh docker ps + ARR API trace"
 
 pipeline:
   canonical_flow:
@@ -47,7 +49,8 @@ pipeline:
         service: unpackerr
         action: "Extracts archives if needed. Monitors Radarr/Sonarr/Lidarr queues."
         watch_interval: 1m
-        current_queue: "Radarr: 2, Sonarr: 409, Lidarr: 32"
+        current_queue: "Radarr: 0, Sonarr: 557, Lidarr: 24"
+        queue_status: "All items actively downloading or queued — no stuck extractions"
       5_import:
         service: "radarr | sonarr | lidarr"
         action: "Renames and hardlinks from download staging to library root"
@@ -99,8 +102,8 @@ pipeline:
     path: /md1400/stage
     note: "Plumbing stays open. ARR does NOT use this path for new canonical content."
 
-# Container inventory — 29 containers on media-home (VM 106)
-# Traced: 2026-03-24 via docker ps -a on ubuntu@10.0.0.106
+# Container inventory — 16 running + 13 parked on media-home (VM 106)
+# Traced: 2026-03-24T00:00Z via docker ps on ubuntu@10.0.0.106 (ProxyJump via proxmox-home)
 # 3 compose stacks: media-write, media-stack, media-playback
 containers:
   compose_stacks:
@@ -128,9 +131,9 @@ containers:
       port: 8989
       status: running
       category: management
-      uptime: "45 hours"
+      uptime: "46 hours"
       health: healthy
-      role: "TV management. 129 series (72 monitored). 401 queue items stuck."
+      role: "TV management. 129 series, 69 with files, 2407 episodes on disk. 545 queue items (active downloads)."
       dependencies: [prowlarr, sabnzbd, qbittorrent]
 
     lidarr:
@@ -140,7 +143,7 @@ containers:
       category: management
       uptime: "2 days"
       health: healthy
-      role: "Music management. 275 artists (275 monitored, 49 with tracks). SABnzbd only."
+      role: "Music management. 275 artists (275 monitored, 57 with tracks, 2606 tracks on disk, 65G). SABnzbd + slskd/soularr pipeline."
       dependencies: [prowlarr, sabnzbd]
 
     prowlarr:
@@ -158,7 +161,7 @@ containers:
       port: 8080
       status: running
       category: download
-      uptime: "37 hours"
+      uptime: "38 hours"
       health: healthy
       role: "Primary usenet downloader"
       ingest_role: primary
@@ -182,18 +185,19 @@ containers:
       port: null
       status: running
       category: utility
-      uptime: "1 hour"
+      uptime: "2 hours"
       health: operational
-      role: "Archive extraction. Monitors Radarr (2), Sonarr (409), Lidarr (32) queues."
-      note: "No HTTP port. Health inferred from log output."
+      role: "Archive extraction. Monitors Sonarr (557 items), queue clean (0 waiting/extracting/failed)."
+      note: "No HTTP port. Health inferred from log output. Last log: 0 retries, 0 finished."
 
     autopulse:
       vm: media-home
       port: 2875
       status: running
       category: utility
+      uptime: "15 minutes"
       health: healthy
-      role: "Library refresh trigger via webhooks to Jellyfin"
+      role: "Library refresh trigger via webhooks to Jellyfin/Navidrome. Actively processing — last log shows files being sent to targets."
       mount: "/srv/appdata/compose/media-write/volumes/autopulse -> /data"
       path_rewrites:
         radarr: {from: /media/movies, to: /media/movies, status: identity}
@@ -261,9 +265,9 @@ containers:
       port: null
       status: running
       category: infrastructure
-      uptime: "46 hours"
+      uptime: "47 hours"
       health: healthy
-      role: "Privado VPN tunnel for qBittorrent"
+      role: "Privado VPN tunnel for qBittorrent + slskd"
       exposed_ports: [5030, 6881, 8081, 50300]
 
     crowdsec:
@@ -271,7 +275,7 @@ containers:
       port: null
       status: running
       category: infrastructure
-      uptime: "37 hours"
+      uptime: "38 hours"
       role: "Security monitoring"
 
   parked:
@@ -415,24 +419,36 @@ config:
     scope: "All active container configs under /srv/appdata/compose/"
     retention: 7d
 
-# NFS mount health (traced 2026-03-24)
+# NFS mount health (traced 2026-03-24T00:00Z)
 nfs_health:
+  media-home:
+    vm_id: 106
+    source: "10.0.0.150:/volume1/media-staging"
+    mount: /srv/media
+    mode: rw
+    nfs_version: "4.1"
+    status: OK
+    classification: canonical_active
+    verified_at: "2026-03-24T00:00Z"
+    note: "Canonical NFS mount — NAS direct to media-home. All containers read/write via this mount."
   download-stack:
     vm_id: 209
     source: "192.168.1.184:/media"
     mount: /mnt/media
     mode: rw
     nfs_version: "4.2"
-    status: OK
+    status: legacy_residue
     classification: legacy_residue
+    note: "Shop NFS mount — NOT active truth. Canonical pipeline on media-home."
   streaming-stack:
     vm_id: 210
     source: "192.168.1.184:/media"
     mount: /mnt/media
     mode: ro
     nfs_version: "4.2"
-    status: OK
+    status: legacy_residue
     classification: legacy_residue
+    note: "Shop NFS mount — NOT active truth. Canonical streaming on media-home."
 
 cross_references:
   inventory_contract: ops/bindings/media.master.inventory.contract.yaml
