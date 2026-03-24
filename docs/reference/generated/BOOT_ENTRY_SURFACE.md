@@ -1,4 +1,6 @@
 # BOOT ENTRY SURFACE (generated)
+authority_state: projection
+projection_of: ops/bindings/entry.boot.surface.contract.yaml
 source_contract: ops/bindings/entry.boot.surface.contract.yaml
 contract_updated: 2026-03-22
 startup_command_count: 2

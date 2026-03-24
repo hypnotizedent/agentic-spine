@@ -1,7 +1,10 @@
 ---
 status: generated
+authority_state: projection
+projection_of:
+  - ops/bindings/terminal.worker.catalog.yaml
 owner: "@ronny"
-last_verified: 2026-03-23
+last_verified: 2026-03-24
 scope: worker-usage-domain-observability-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -54,6 +57,9 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D418`
 - `D63`
 - `D67`
+
+## Workflow
+- Canonical session entry: `./bin/ops cap run session.v3.attach -- --allow-no-loop`
 
 ## Boundaries
 - Runtime surface is generated from registration and role contracts.

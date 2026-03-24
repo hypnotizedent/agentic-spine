@@ -27,6 +27,23 @@ WORKER_USAGE_RUNTIME_REL = Path("runtime/domain-state/projections/worker-usage")
 
 GENERATOR_ID = "ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py"
 
+WORKER_CATALOG_PROJECTION_OF = [
+    "ops/bindings/agents.registry.yaml",
+    "ops/bindings/terminal.role.contract.yaml",
+    "ops/bindings/gate.domain.profiles.yaml",
+    "ops/bindings/gate.agent.profiles.yaml",
+    "ops/capabilities.yaml",
+]
+
+WORKER_LAUNCHER_VIEW_PROJECTION_OF = [
+    "ops/bindings/terminal.worker.catalog.yaml",
+    "ops/bindings/terminal.role.contract.yaml",
+]
+
+WORKER_USAGE_PROJECTION_OF = [
+    "ops/bindings/terminal.worker.catalog.yaml",
+]
+
 DOMAIN_ALIASES = {
     "home-assistant": "home",
     "home-automation": "home",
@@ -78,6 +95,13 @@ def _source_timestamp(paths: list[Path]) -> str:
     if latest <= 0.0:
         latest = datetime.now(tz=timezone.utc).timestamp()
     return _iso_from_epoch(latest)
+
+
+def _projection_fields(projection_of: list[str]) -> dict[str, Any]:
+    return {
+        "authority_state": "projection",
+        "projection_of": list(projection_of),
+    }
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -536,19 +560,14 @@ def _build_worker_catalog(
 
     return {
         "status": "generated",
+        **_projection_fields(WORKER_CATALOG_PROJECTION_OF),
         "owner": "@ronny",
         "last_verified": generated_date,
         "scope": "terminal-worker-runtime-catalog",
         "version": "2.0",
         "generated_at": generated_at,
         "generated_by": GENERATOR_ID,
-        "generated_from": [
-            "ops/bindings/agents.registry.yaml",
-            "ops/bindings/terminal.role.contract.yaml",
-            "ops/bindings/gate.domain.profiles.yaml",
-            "ops/bindings/gate.agent.profiles.yaml",
-            "ops/capabilities.yaml",
-        ],
+        "generated_from": list(WORKER_CATALOG_PROJECTION_OF),
         "workers": workers,
     }
 
@@ -730,16 +749,14 @@ def _build_launcher_view(
 
     return {
         "status": "generated",
+        **_projection_fields(WORKER_LAUNCHER_VIEW_PROJECTION_OF),
         "owner": "@ronny",
         "last_verified": generated_date,
         "scope": "terminal-launcher-view",
         "version": "2.0",
         "generated_at": generated_at,
         "generated_by": GENERATOR_ID,
-        "generated_from": [
-            "ops/bindings/terminal.worker.catalog.yaml",
-            "ops/bindings/terminal.role.contract.yaml",
-        ],
+        "generated_from": list(WORKER_LAUNCHER_VIEW_PROJECTION_OF),
         "terminals": terminals,
     }
 
@@ -754,6 +771,9 @@ def _render_worker_usage_doc(worker: dict[str, Any], generated_date: str) -> str
     lines: list[str] = [
         "---",
         "status: generated",
+        "authority_state: projection",
+        "projection_of:",
+        f"  - {WORKER_USAGE_PROJECTION_OF[0]}",
         "owner: \"@ronny\"",
         f"last_verified: {generated_date}",
         f"scope: worker-usage-{str(terminal_id).lower()}",
@@ -802,6 +822,9 @@ def _render_worker_usage_doc(worker: dict[str, Any], generated_date: str) -> str
 
     lines.extend([
         "",
+        "## Workflow",
+        "- Canonical session entry: `./bin/ops cap run session.v3.attach -- --allow-no-loop`",
+        "",
         "## Boundaries",
         "- Runtime surface is generated from registration and role contracts.",
         "- Do not hand-edit this file; regenerate via the generator script.",
@@ -815,6 +838,9 @@ def _render_worker_usage_index(worker_ids: list[str], generated_date: str) -> st
     lines = [
         "---",
         "status: generated",
+        "authority_state: projection",
+        "projection_of:",
+        f"  - {WORKER_USAGE_PROJECTION_OF[0]}",
         "owner: \"@ronny\"",
         f"last_verified: {generated_date}",
         "scope: worker-usage-generated-index",

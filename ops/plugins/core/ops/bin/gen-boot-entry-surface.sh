@@ -74,6 +74,8 @@ TMP_STARTUP="$(mktemp)"
 TMP_GENERATED="$(mktemp)"
 {
   echo "# BOOT ENTRY SURFACE (generated)"
+  echo "authority_state: projection"
+  echo "projection_of: ops/bindings/entry.boot.surface.contract.yaml"
   echo "source_contract: ops/bindings/entry.boot.surface.contract.yaml"
   echo "contract_updated: ${UPDATED}"
   echo "startup_command_count: $(yq e '.startup_block.commands | length' "$CONTRACT")"

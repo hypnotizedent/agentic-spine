@@ -1,7 +1,10 @@
 ---
 status: generated
+authority_state: projection
+projection_of:
+  - ops/bindings/terminal.worker.catalog.yaml
 owner: "@ronny"
-last_verified: 2026-03-21
+last_verified: 2026-03-24
 scope: worker-usage-mint-dutchman-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -39,6 +42,9 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D391`
 - `D394`
 - `D395`
+
+## Workflow
+- Canonical session entry: `./bin/ops cap run session.v3.attach -- --allow-no-loop`
 
 ## Boundaries
 - Runtime surface is generated from registration and role contracts.

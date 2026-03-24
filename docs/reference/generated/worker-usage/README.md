@@ -1,7 +1,10 @@
 ---
 status: generated
+authority_state: projection
+projection_of:
+  - ops/bindings/terminal.worker.catalog.yaml
 owner: "@ronny"
-last_verified: 2026-03-21
+last_verified: 2026-03-24
 scope: worker-usage-generated-index
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
