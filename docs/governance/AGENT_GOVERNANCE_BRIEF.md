@@ -28,7 +28,7 @@ scope: agent-governance-brief
 The boring path is: **main branch, single override, governed commit.**
 
 - **Normal work**: stay on `main`. Commit with `OPS_GOVERNED_MAIN_OVERRIDE=1`.
-- **If not on main**: `session.v3.attach` will tell you. Either switch back (`git checkout main`) or create a governed worktree (`./bin/ops start loop <LOOP_ID>`).
+- **If not on main**: `session.v3.attach` will tell you. Either switch back (`git checkout main`) or create a governed worktree with `./bin/ops start loop <LOOP_ID>` and then attach through `./bin/ops cap run session.v3.attach -- --allow-no-loop`.
 - **If env vars are stale**: `session.v3.attach` auto-cleans leaked `SPINE_ROOT`, `SPINE_REPO`, `SPINE_CODE`, `SPINE_TARGET_REPO`, `SPINE_WORKTREE`. If it can't, it says why.
 - **If worktrees are stale**: run `./bin/ops cap run worktree.lifecycle.reconcile -- --json` to see what's lingering. Cleanup is `report-only` then `archive-only` then `delete` (token-gated).
 - **Recovery rule**: if ordinary execution is blocked by checkout/worktree/hook residue, that is a spine defect worth filing as friction, not operator cleanup duty.

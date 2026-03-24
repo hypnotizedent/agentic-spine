@@ -416,16 +416,16 @@ case "${1:-}" in
   builder|1)
     source "$SPINE_REPO/ops/commands/preflight.sh"
     cat <<BUILDER
-  LANE 1: BUILDER (compat alias; new work should start with session.v3.attach)
+  LANE 1: BUILDER (legacy compat alias; new work should start with './bin/ops cap run session.v3.attach -- --allow-no-loop')
   Issue: ${CURRENT_ISSUE:-none}
   Worktree: ${CURRENT_WORKTREE:-main}
 BUILDER
     ;;
   runner|2)
-    echo "  LANE 2: RUNNER (legacy — use 'ops lane open execution' instead)"
+    echo "  LANE 2: RUNNER (legacy shim — use './bin/ops cap run session.v3.attach -- --allow-no-loop' instead)"
     ;;
   clerk|3)
-    echo "  LANE 3: CLERK (legacy — use 'ops lane open watcher' instead)"
+    echo "  LANE 3: CLERK (legacy shim — use './bin/ops cap run session.v3.attach -- --allow-no-loop' instead)"
     ;;
   *)
     echo "Unknown lane subcommand: $1" >&2
