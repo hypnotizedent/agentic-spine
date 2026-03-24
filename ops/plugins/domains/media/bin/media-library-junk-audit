@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# media.library.junk.audit — Identify movie folders with no video files
+#
+# Usage:
+#   ./bin/ops cap run media.library.junk.audit
+#   ./bin/ops cap run media.library.junk.audit --json
+#
+# Contract:
+# - SSHes to media-home and audits /srv/media/movies/
+# - Reports folders containing no video files (mkv, mp4, avi, m4v, ts, wmv)
+# - Read-only: does NOT delete anything
+# - Exit 0 always (audit is informational)
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+
+source "$ROOT/ops/lib/ssh-resolve.sh"
+
+OUTPUT_JSON=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) OUTPUT_JSON=true; shift ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+# Resolve media-home
+MEDIA_HOST="$(ssh_resolve_ssh_host_with_fallback "media-home")"
+[[ -n "$MEDIA_HOST" ]] || { echo "STOP: cannot resolve media-home SSH target" >&2; exit 2; }
+MEDIA_REF="$(ssh_resolve_user "media-home")@${MEDIA_HOST}"
+
+echo "=== Movie Folder Junk Audit ==="
+echo "Host: $MEDIA_REF"
+echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo ""
+
+ssh -o ConnectTimeout=10 -o BatchMode=yes "$MEDIA_REF" bash -s -- "$OUTPUT_JSON" << 'REMOTE'
+OUTPUT_JSON="$1"
+JUNK=0
+GOOD=0
+JUNK_LIST=""
+
+for d in /srv/media/movies/*/; do
+  [ -d "$d" ] || continue
+  DIRNAME=$(basename "$d")
+  VIDEO=$(find "$d" -maxdepth 2 -type f \( \
+    -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \
+    -o -iname "*.m4v" -o -iname "*.ts" -o -iname "*.wmv" \) 2>/dev/null | wc -l)
+
+  if [ "$VIDEO" -eq 0 ]; then
+    JUNK=$((JUNK + 1))
+    TOTAL_FILES=$(find "$d" -maxdepth 2 -type f 2>/dev/null | wc -l)
+    if [ "$OUTPUT_JSON" = "true" ]; then
+      JUNK_LIST="${JUNK_LIST}{\"folder\":\"$DIRNAME\",\"files\":$TOTAL_FILES},"
+    else
+      echo "JUNK: $DIRNAME (${TOTAL_FILES} non-video files)"
+    fi
+  else
+    GOOD=$((GOOD + 1))
+  fi
+done
+
+TOTAL=$((GOOD + JUNK))
+
+if [ "$OUTPUT_JSON" = "true" ]; then
+  JUNK_LIST="${JUNK_LIST%,}"
+  echo "{\"good\":$GOOD,\"junk\":$JUNK,\"total\":$TOTAL,\"junkFolders\":[$JUNK_LIST]}"
+else
+  echo ""
+  echo "=== Summary ==="
+  echo "Good (has video):  $GOOD"
+  echo "Junk (no video):   $JUNK"
+  echo "Total:             $TOTAL"
+fi
+REMOTE

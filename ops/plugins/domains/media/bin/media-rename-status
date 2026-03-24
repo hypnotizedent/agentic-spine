@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# media.rename.status — Check rename configuration in Radarr and Sonarr
+#
+# Usage:
+#   ./bin/ops cap run media.rename.status
+#   ./bin/ops cap run media.rename.status --json
+#
+# Contract:
+# - Reads Radarr/Sonarr API keys from config.xml via SSH
+# - Checks renameMovies (Radarr) and renameEpisodes (Sonarr) flags
+# - Reports current naming patterns configured
+# - Exit 0 if both enabled, exit 1 if either disabled, exit 2 on config error
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../.." && pwd)"
+
+source "$ROOT/ops/lib/ssh-resolve.sh"
+
+OUTPUT_JSON=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) OUTPUT_JSON=true; shift ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+# Resolve media-home SSH target
+MEDIA_HOST="$(ssh_resolve_ssh_host_with_fallback "media-home")"
+[[ -n "$MEDIA_HOST" ]] || { echo "STOP: cannot resolve media-home SSH target" >&2; exit 2; }
+MEDIA_REF="$(ssh_resolve_user "media-home")@${MEDIA_HOST}"
+
+# Resolve HTTP endpoint (LAN preferred for API calls)
+MEDIA_HTTP="$(ssh_resolve_host "media-home")"
+[[ -n "$MEDIA_HTTP" ]] || MEDIA_HTTP="$MEDIA_HOST"
+
+# Extract API keys
+RADARR_KEY=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$MEDIA_REF" \
+  "sudo sed -n 's/.*<ApiKey>\(.*\)<\/ApiKey>.*/\1/p' /srv/appdata/compose/media-write/volumes/radarr/config/config.xml" 2>/dev/null)
+SONARR_KEY=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$MEDIA_REF" \
+  "sudo sed -n 's/.*<ApiKey>\(.*\)<\/ApiKey>.*/\1/p' /srv/appdata/compose/media-write/volumes/sonarr/config/config.xml" 2>/dev/null)
+
+[[ -n "$RADARR_KEY" ]] || { echo "STOP: Radarr API key extraction failed" >&2; exit 2; }
+[[ -n "$SONARR_KEY" ]] || { echo "STOP: Sonarr API key extraction failed" >&2; exit 2; }
+
+# Query naming configs
+RADARR_NAMING=$(curl -sf "http://${MEDIA_HTTP}:7878/api/v3/config/naming" \
+  -H "X-Api-Key: $RADARR_KEY" 2>/dev/null) || { echo "STOP: Radarr API unreachable" >&2; exit 2; }
+SONARR_NAMING=$(curl -sf "http://${MEDIA_HTTP}:8989/api/v3/config/naming" \
+  -H "X-Api-Key: $SONARR_KEY" 2>/dev/null) || { echo "STOP: Sonarr API unreachable" >&2; exit 2; }
+
+# Parse
+RADARR_RENAME=$(echo "$RADARR_NAMING" | python3 -c "import sys,json; print(json.load(sys.stdin).get('renameMovies', False))")
+RADARR_PATTERN=$(echo "$RADARR_NAMING" | python3 -c "import sys,json; print(json.load(sys.stdin).get('standardMovieFormat', '?'))")
+SONARR_RENAME=$(echo "$SONARR_NAMING" | python3 -c "import sys,json; print(json.load(sys.stdin).get('renameEpisodes', False))")
+SONARR_PATTERN=$(echo "$SONARR_NAMING" | python3 -c "import sys,json; print(json.load(sys.stdin).get('standardEpisodeFormat', '?'))")
+
+BOTH_ENABLED="false"
+[[ "$RADARR_RENAME" == "True" && "$SONARR_RENAME" == "True" ]] && BOTH_ENABLED="true"
+
+if $OUTPUT_JSON; then
+  cat <<ENDJSON
+{
+  "radarr": {
+    "renameMovies": $( [[ "$RADARR_RENAME" == "True" ]] && echo true || echo false ),
+    "standardMovieFormat": "$RADARR_PATTERN"
+  },
+  "sonarr": {
+    "renameEpisodes": $( [[ "$SONARR_RENAME" == "True" ]] && echo true || echo false ),
+    "standardEpisodeFormat": "$SONARR_PATTERN"
+  },
+  "allEnabled": $BOTH_ENABLED,
+  "checkedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+ENDJSON
+else
+  echo "=== Media Rename Status ==="
+  echo ""
+  echo "Radarr:"
+  echo "  renameMovies:      $RADARR_RENAME"
+  echo "  movieFormat:       $RADARR_PATTERN"
+  echo ""
+  echo "Sonarr:"
+  echo "  renameEpisodes:    $SONARR_RENAME"
+  echo "  episodeFormat:     $SONARR_PATTERN"
+  echo ""
+  if [[ "$BOTH_ENABLED" == "true" ]]; then
+    echo "STATUS: BOTH ENABLED"
+  else
+    echo "STATUS: NOT FULLY ENABLED"
+  fi
+fi
+
+[[ "$BOTH_ENABLED" == "true" ]] && exit 0 || exit 1
