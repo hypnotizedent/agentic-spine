@@ -86,6 +86,39 @@ Work is done when runtime, control plane, bindings/projections, and residue all 
 
 This context-awareness allows controller terminals to attach without clearing active work-in-progress from governed operations in other terminals.
 
+## Bounded Work Fast Lane (Rule 7)
+
+Single-domain patches that meet all of the following criteria qualify for fast-lane mode,
+which collapses ceremony to attach → do → receipt without loop/gap/disposition overhead:
+
+**Criteria** (all must hold):
+- Patches touch **≤ 5 files**
+- All files are within **one domain**
+- No shared authority hotspot mutations (Rule 4 surfaces: operational.gaps.yaml, loop scopes, friction-queue.ndjson, gate-id-reservations.yaml, path.claims.yaml)
+- Domain already has CI governance (verify gate coverage)
+
+**Usage**:
+```bash
+./bin/ops cap run session.v3.attach -- --fast-lane
+# Make bounded fix, commit, verify — no loop required
+```
+
+**What fast-lane provides**:
+- Session attach with lane=fix, no loop resolution
+- `SPINE_FAST_LANE=1` exported for downstream guards
+- Governed commit still required
+- Verify still runs
+- Receipt emitted (session_id, files_touched, domain, verify_result, commit_sha)
+
+**What fast-lane omits**:
+- Loop registration
+- Gap filing
+- Disposition ceremony
+- Wave orchestration
+
+**Hotspot guard**: If a fast-lane commit touches any Rule 4 surface, the commit is
+rejected and the session must be re-attached with full ceremony (loop required).
+
 ## Execution Lane Bootstrap (Phase 2)
 
 Create governed execution lanes instead of manual worktree setup:
