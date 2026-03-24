@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# lifecycle.restore.capsule.verify — Verify restore capsule coverage
+#
+# For each tombstoned/decommissioned entry in the lifecycle registry:
+# checks if backup.inventory.yaml has a matching restore capsule.
+# Reports gaps: missing capsule, incomplete capsule, stale capsule.
+#
+# Safety: read-only
+# Approval: auto
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
+
+REGISTRY="$ROOT/ops/bindings/service.data.lifecycle.registry.yaml"
+BACKUP_INV="$ROOT/ops/bindings/backup.inventory.yaml"
+
+if [[ ! -f "$REGISTRY" ]]; then
+  echo "ERROR: lifecycle registry not found at $REGISTRY"
+  exit 1
+fi
+
+if [[ ! -f "$BACKUP_INV" ]]; then
+  echo "ERROR: backup inventory not found at $BACKUP_INV"
+  exit 1
+fi
+
+echo "=== LIFECYCLE RESTORE CAPSULE VERIFICATION ==="
+echo "Registry: $REGISTRY"
+echo "Backup inventory: $BACKUP_INV"
+echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo ""
+
+python3 - "$REGISTRY" "$BACKUP_INV" <<'PY'
+import json
+import subprocess
+import sys
+
+registry_path = sys.argv[1]
+backup_inv_path = sys.argv[2]
+
+def load_yaml(path):
+    try:
+        result = subprocess.run(
+            ["yq", "e", "-o=json", ".", path],
+            capture_output=True, text=True, check=True
+        )
+        return json.loads(result.stdout)
+    except Exception as e:
+        print(f"ERROR: failed to read {path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+registry = load_yaml(registry_path)
+backup_inv = load_yaml(backup_inv_path)
+
+services = registry.get("services", {})
+targets = backup_inv.get("targets", [])
+backup_policy = backup_inv.get("backup_policy", {})
+derived = backup_policy.get("derived_assignments", {}) if backup_policy else {}
+
+# Build lookup: hostname -> list of backup targets
+targets_by_host = {}
+for t in targets:
+    for h_key in ("hostname", "host"):
+        h = t.get(h_key, "")
+        if h:
+            targets_by_host.setdefault(h, []).append(t)
+
+# Build decommission capsule VM IDs
+decom_vm_ids = set()
+for capsule in derived.get("decommission_capsule", []):
+    decom_vm_ids.add(str(capsule.get("vm_id", "")))
+
+gaps = []
+verified = []
+total_checked = 0
+
+print("--- Service Restore Capsule Coverage ---")
+print("")
+
+for svc_id, svc in services.items():
+    total_checked += 1
+    backup_class = svc.get("backup_class", "")
+    restore_proof = svc.get("restore_proof_expectation", {})
+    tombstone_policy = svc.get("tombstone_policy", {})
+    binding_refs = svc.get("binding_refs", {})
+    backup_targets = binding_refs.get("backup_targets", [])
+    backup_runtime_units = binding_refs.get("backup_runtime_units", [])
+
+    if not backup_targets and not backup_runtime_units:
+        gaps.append({
+            "service": svc_id,
+            "issue": "no_backup_binding",
+            "detail": "No backup_targets or backup_runtime_units declared in binding_refs"
+        })
+        print(f"  GAP: {svc_id} — no backup binding declared")
+        continue
+
+    # Check each declared backup target exists in inventory
+    missing_targets = []
+    found_targets = []
+    stale_targets = []
+
+    for bt in backup_targets:
+        matched = False
+        for t in targets:
+            if t.get("target_id", "") == bt:
+                matched = True
+                status = t.get("status", "unknown")
+                if status in ("tombstoned", "disabled", "retired"):
+                    stale_targets.append({"target_id": bt, "status": status})
+                else:
+                    found_targets.append({"target_id": bt, "status": status})
+                break
+        if not matched:
+            missing_targets.append(bt)
+
+    if missing_targets:
+        gaps.append({
+            "service": svc_id,
+            "issue": "missing_backup_target",
+            "detail": f"Target IDs not found in inventory: {', '.join(missing_targets)}"
+        })
+        print(f"  GAP: {svc_id} — missing backup targets: {', '.join(missing_targets)}")
+
+    if stale_targets:
+        for st in stale_targets:
+            gaps.append({
+                "service": svc_id,
+                "issue": "stale_backup_target",
+                "detail": f"Target {st['target_id']} has status={st['status']}"
+            })
+            print(f"  STALE: {svc_id} — target {st['target_id']} is {st['status']}")
+
+    if found_targets and not missing_targets:
+        # Check restore proof expectation
+        restore_mode = restore_proof.get("mode", "none")
+        restore_cadence = restore_proof.get("cadence", "none")
+
+        if restore_mode == "none" or not restore_proof:
+            gaps.append({
+                "service": svc_id,
+                "issue": "no_restore_proof",
+                "detail": "No restore_proof_expectation defined"
+            })
+            print(f"  GAP: {svc_id} — no restore proof expectation defined")
+        else:
+            verified.append({
+                "service": svc_id,
+                "targets": [ft["target_id"] for ft in found_targets],
+                "restore_mode": restore_mode,
+                "restore_cadence": restore_cadence
+            })
+            target_str = ", ".join(ft["target_id"] for ft in found_targets)
+            print(f"  OK: {svc_id} — {len(found_targets)} target(s) ({target_str}), restore={restore_mode}/{restore_cadence}")
+
+# Check decommission capsule coverage
+print("")
+print("--- Decommission Capsule Verification ---")
+print("")
+
+decom_capsules = derived.get("decommission_capsule", [])
+if decom_capsules:
+    for capsule in decom_capsules:
+        vm_id = str(capsule.get("vm_id", ""))
+        hostname = capsule.get("hostname", "unknown")
+        total_checked += 1
+
+        # Find backup targets for this VM
+        capsule_targets = [t for t in targets if str(t.get("vm_id", "")) == vm_id]
+        if capsule_targets:
+            for ct in capsule_targets:
+                status = ct.get("status", "unknown")
+                target_id = ct.get("target_id", "unknown")
+                print(f"  OK: VM {vm_id} ({hostname}) — capsule target {target_id} (status={status})")
+                verified.append({
+                    "service": f"decom-vm-{vm_id}",
+                    "targets": [target_id],
+                    "restore_mode": "capsule_retained",
+                    "restore_cadence": "none"
+                })
+        else:
+            gaps.append({
+                "service": f"decom-vm-{vm_id}-{hostname}",
+                "issue": "missing_decommission_capsule",
+                "detail": f"No backup target found for decommissioned VM {vm_id} ({hostname})"
+            })
+            print(f"  GAP: VM {vm_id} ({hostname}) — no capsule target in backup inventory")
+else:
+    print("  No decommission capsules declared.")
+
+# Summary
+print("")
+print("--- Summary ---")
+print(f"Services/entries checked: {total_checked}")
+print(f"Verified (with restore coverage): {len(verified)}")
+print(f"Gaps found: {len(gaps)}")
+
+if gaps:
+    print("")
+    print("--- Gap Detail ---")
+    by_issue = {}
+    for g in gaps:
+        issue = g.get("issue", "unknown")
+        by_issue[issue] = by_issue.get(issue, 0) + 1
+    for issue, count in sorted(by_issue.items()):
+        print(f"  {issue}: {count}")
+
+exit_code = 1 if gaps else 0
+sys.exit(exit_code)
+PY
+rc=$?
+
+echo ""
+echo "=== END RESTORE CAPSULE VERIFICATION ==="
+exit $rc

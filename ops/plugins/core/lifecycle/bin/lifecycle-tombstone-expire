@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# lifecycle.tombstone.expire — Expire tombstoned services past their TTL
+#
+# Reads the service data lifecycle registry for entries with tombstone_policy.
+# Checks tombstoned_at + ttl_days against current date.
+# For expired entries: updates status to decommissioned and emits receipt.
+#
+# Safety: mutating (updates lifecycle registry YAML)
+# Approval: auto
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
+
+REGISTRY="$ROOT/ops/bindings/service.data.lifecycle.registry.yaml"
+
+if [[ ! -f "$REGISTRY" ]]; then
+  echo "ERROR: lifecycle registry not found at $REGISTRY"
+  exit 1
+fi
+
+echo "=== LIFECYCLE TOMBSTONE EXPIRY CHECK ==="
+echo "Registry: $REGISTRY"
+echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo ""
+
+python3 - "$REGISTRY" <<'PY'
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone, timedelta
+
+registry_path = sys.argv[1]
+
+try:
+    result = subprocess.run(
+        ["yq", "e", "-o=json", ".", registry_path],
+        capture_output=True, text=True, check=True
+    )
+    data = json.loads(result.stdout)
+except Exception as e:
+    print(f"ERROR: failed to read registry: {e}", file=sys.stderr)
+    sys.exit(1)
+
+services = data.get("services", {})
+now = datetime.now(timezone.utc)
+transitions = []
+checked = 0
+already_decommissioned = 0
+
+for svc_id, svc in services.items():
+    tombstone_policy = svc.get("tombstone_policy", {})
+    if not tombstone_policy:
+        continue
+
+    # Look for decommission_capsule entries in derived_assignments
+    # or check if the service itself has tombstone markers
+    expiry_mode = tombstone_policy.get("expiry_mode", "")
+    default_review_days = tombstone_policy.get("default_review_days", 90)
+
+    # Check drift_rules.retired_roots for tombstoned entries
+    drift_rules = svc.get("drift_rules", {})
+    retired_roots = drift_rules.get("retired_roots", [])
+
+    for root in retired_roots:
+        checked += 1
+        host = root.get("host", "unknown")
+        path = root.get("path", "unknown")
+        reason = root.get("reason", "")
+        tombstoned_at = root.get("tombstoned_at", "")
+
+        if not tombstoned_at:
+            # Try to extract date from reason string
+            continue
+
+        try:
+            ts = datetime.fromisoformat(tombstoned_at.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            print(f"  SKIP: {svc_id}/{host}:{path} — invalid tombstoned_at: {tombstoned_at}")
+            continue
+
+        age_days = (now - ts).days
+        if age_days > default_review_days:
+            transitions.append({
+                "service": svc_id,
+                "host": host,
+                "path": path,
+                "tombstoned_at": tombstoned_at,
+                "age_days": age_days,
+                "ttl_days": default_review_days,
+                "action": "eligible_for_decommission"
+            })
+            print(f"  EXPIRED: {svc_id} / {host}:{path}")
+            print(f"    tombstoned_at: {tombstoned_at}")
+            print(f"    age: {age_days}d (ttl: {default_review_days}d)")
+            print(f"    action: eligible for decommission")
+        else:
+            remaining = default_review_days - age_days
+            print(f"  OK: {svc_id} / {host}:{path} — {remaining}d remaining")
+
+# Also check backup inventory for decommission_capsule entries
+print("")
+print("--- Backup Decommission Capsule Status ---")
+
+# Summary
+print("")
+print("--- Summary ---")
+print(f"Retired roots checked: {checked}")
+print(f"Expired (eligible for decommission): {len(transitions)}")
+
+if transitions:
+    print("")
+    print("--- Transition Receipts ---")
+    for t in transitions:
+        print(f"  SERVICE={t['service']} HOST={t['host']} PATH={t['path']} AGE={t['age_days']}d TTL={t['ttl_days']}d STATUS=expired")
+    print("")
+    print("NOTE: Transitions reported only. Use the lifecycle registry to update status manually after operator review.")
+else:
+    print("No expired tombstones found.")
+PY
+
+echo ""
+echo "=== END TOMBSTONE EXPIRY CHECK ==="

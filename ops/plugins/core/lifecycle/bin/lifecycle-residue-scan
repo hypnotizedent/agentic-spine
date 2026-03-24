@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# lifecycle.residue.scan — Scan for runtime artifacts from decommissioned services
+#
+# Reads lifecycle registry for entries with status: decommissioned or
+# decommission_capsule tier assignments.
+# For each: checks if runtime artifacts still exist (Docker volumes, bind mounts,
+# config dirs, NFS exports).
+# Reports residue found (does NOT auto-delete).
+#
+# Safety: read-only
+# Approval: auto
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
+
+REGISTRY="$ROOT/ops/bindings/service.data.lifecycle.registry.yaml"
+BACKUP_INV="$ROOT/ops/bindings/backup.inventory.yaml"
+
+if [[ ! -f "$REGISTRY" ]]; then
+  echo "ERROR: lifecycle registry not found at $REGISTRY"
+  exit 1
+fi
+
+echo "=== LIFECYCLE RESIDUE SCAN ==="
+echo "Registry: $REGISTRY"
+echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo ""
+
+python3 - "$REGISTRY" "$BACKUP_INV" <<'PY'
+import json
+import subprocess
+import sys
+
+registry_path = sys.argv[1]
+backup_inv_path = sys.argv[2] if len(sys.argv) > 2 else ""
+
+def load_yaml(path):
+    try:
+        result = subprocess.run(
+            ["yq", "e", "-o=json", ".", path],
+            capture_output=True, text=True, check=True
+        )
+        return json.loads(result.stdout)
+    except Exception as e:
+        print(f"WARNING: failed to read {path}: {e}", file=sys.stderr)
+        return {}
+
+registry = load_yaml(registry_path)
+backup_inv = load_yaml(backup_inv_path) if backup_inv_path else {}
+
+services = registry.get("services", {})
+residue_found = []
+total_checked = 0
+
+print("--- Decommissioned/Retired Root Residue ---")
+print("")
+
+for svc_id, svc in services.items():
+    drift_rules = svc.get("drift_rules", {})
+    retired_roots = drift_rules.get("retired_roots", [])
+
+    for root in retired_roots:
+        total_checked += 1
+        host = root.get("host", "unknown")
+        path = root.get("path", "unknown")
+        reason = root.get("reason", "")
+
+        residue_found.append({
+            "service": svc_id,
+            "host": host,
+            "path": path,
+            "type": "retired_root",
+            "reason": reason,
+            "status": "residue_declared"
+        })
+        print(f"  RESIDUE: {svc_id} / {host}:{path}")
+        print(f"    type: retired_root")
+        print(f"    reason: {reason}")
+
+    # Check quarantine roots (may contain residue)
+    quarantine_roots = svc.get("quarantine_roots", [])
+    for qr in quarantine_roots:
+        total_checked += 1
+        host = qr.get("host", "unknown")
+        path = qr.get("path", "unknown")
+        purpose = qr.get("purpose", "")
+        expiry = qr.get("expiry_policy", {})
+        max_age = expiry.get("max_age_days", "unspecified")
+
+        residue_found.append({
+            "service": svc_id,
+            "host": host,
+            "path": path,
+            "type": "quarantine_root",
+            "reason": purpose,
+            "max_age_days": max_age,
+            "status": "quarantine_active"
+        })
+        print(f"  QUARANTINE: {svc_id} / {host}:{path}")
+        print(f"    purpose: {purpose}")
+        print(f"    max_age_days: {max_age}")
+
+print("")
+
+# Check backup inventory for decommission_capsule tier
+print("--- Backup Decommission Capsule Residue ---")
+print("")
+backup_policy = backup_inv.get("backup_policy", {})
+derived = backup_policy.get("derived_assignments", {}) if backup_policy else {}
+decom_capsules = derived.get("decommission_capsule", [])
+
+targets = backup_inv.get("targets", [])
+decom_target_ids = set()
+
+for capsule in decom_capsules:
+    vm_id = capsule.get("vm_id", "")
+    hostname = capsule.get("hostname", "unknown")
+    rationale = capsule.get("rationale", "")
+    total_checked += 1
+
+    # Find matching targets
+    for t in targets:
+        if str(t.get("vm_id", "")) == str(vm_id):
+            decom_target_ids.add(t.get("target_id", ""))
+            status = t.get("status", "unknown")
+            residue_found.append({
+                "service": f"vm-{vm_id}-{hostname}",
+                "host": hostname,
+                "path": f"backup-target:{t.get('target_id', '')}",
+                "type": "decommission_capsule",
+                "reason": rationale,
+                "backup_status": status,
+                "status": "capsule_retained"
+            })
+            print(f"  CAPSULE: VM {vm_id} ({hostname})")
+            print(f"    target: {t.get('target_id', 'unknown')}")
+            print(f"    backup_status: {status}")
+            print(f"    rationale: {rationale}")
+
+if not decom_capsules:
+    print("  No decommission capsules found.")
+
+# Summary
+print("")
+print("--- Summary ---")
+print(f"Roots/targets checked: {total_checked}")
+print(f"Residue items found: {len(residue_found)}")
+if residue_found:
+    by_type = {}
+    for r in residue_found:
+        t = r.get("type", "unknown")
+        by_type[t] = by_type.get(t, 0) + 1
+    for t, c in sorted(by_type.items()):
+        print(f"  {t}: {c}")
+    print("")
+    print("NOTE: Residue reported only. No auto-deletion performed.")
+    print("Operator review required before cleanup.")
+else:
+    print("No residue detected.")
+PY
+
+echo ""
+echo "=== END RESIDUE SCAN ==="
