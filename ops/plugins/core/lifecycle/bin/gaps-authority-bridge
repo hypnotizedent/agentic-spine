@@ -40,6 +40,7 @@ import gaps_sql_authority as gsa
 
 MUTATING_COMMANDS = frozenset({"upsert", "close", "reparent"})
 READ_COMMANDS = frozenset({"query", "bootstrap", "project", "next-id", "parity"})
+CONTROL_TERMINAL_ROLE = "SPINE-CONTROL-01"
 
 
 def check_mutation_ceremony(command: str, args: argparse.Namespace) -> tuple[str | None, str]:
@@ -60,9 +61,8 @@ def check_mutation_ceremony(command: str, args: argparse.Namespace) -> tuple[str
             f"mutation-ceremony: governed (run_key={run_key})",
             file=sys.stderr,
         )
-        return run_key, "governed"
-
-    if ungoverned and override_reason.strip():
+        mutation_source = "governed"
+    elif ungoverned and override_reason.strip():
         print(
             f"mutation-ceremony: override (reason={override_reason.strip()})",
             file=sys.stderr,
@@ -71,20 +71,35 @@ def check_mutation_ceremony(command: str, args: argparse.Namespace) -> tuple[str
             "WARNING: ungoverned mutation — no SPINE_CAP_RUN_KEY audit trail",
             file=sys.stderr,
         )
-        return None, "override"
-
-    print(
-        "MUTATION BLOCKED: gaps-authority-bridge requires governed execution "
-        "(SPINE_CAP_RUN_KEY not set). "
-        "Run through: ./bin/ops cap run gaps.file|gaps.close",
-        file=sys.stderr,
-    )
-    if ungoverned and not override_reason.strip():
+        mutation_source = "override"
+    else:
         print(
-            "  --ungoverned-override requires --reason",
+            "MUTATION BLOCKED: gaps-authority-bridge requires governed execution "
+            "(SPINE_CAP_RUN_KEY not set). "
+            "Run through: ./bin/ops cap run gaps.file|gaps.close",
             file=sys.stderr,
         )
-    sys.exit(1)
+        if ungoverned and not override_reason.strip():
+            print(
+                "  --ungoverned-override requires --reason",
+                file=sys.stderr,
+            )
+        sys.exit(1)
+
+    terminal_role = (
+        os.environ.get("OPS_TERMINAL_ROLE", "").strip()
+        or os.environ.get("SPINE_TERMINAL_ROLE", "").strip()
+    )
+    if terminal_role != CONTROL_TERMINAL_ROLE:
+        print(
+            "MUTATION BLOCKED: gaps-authority-bridge requires controller terminal "
+            f"role {CONTROL_TERMINAL_ROLE} for mutating commands "
+            f"(got {terminal_role or 'unset'})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return run_key or None, mutation_source
 
 
 def resolve_root() -> Path:

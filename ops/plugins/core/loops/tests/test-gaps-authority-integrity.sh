@@ -77,12 +77,24 @@ else
   fail "gaps.status did not report expected pre-close counts"
 fi
 
-SPINE_CAP_RUN_KEY="CAP-TEST-GAPS-CLOSE-R1" python3 "$BRIDGE" close \
+OPS_TERMINAL_ROLE="SPINE-CONTROL-01" SPINE_CAP_RUN_KEY="CAP-TEST-GAPS-CLOSE-R1" python3 "$BRIDGE" close \
   --id GAP-OP-9991 \
   --status fixed \
   --fixed-in TEST-SHA \
   --notes "authority integrity test" \
   --regression-lock-id test-gaps-authority-integrity.sh >/dev/null
+
+TOTAL=$((TOTAL + 1))
+if OPS_TERMINAL_ROLE="SPINE-WATCHER-01" SPINE_CAP_RUN_KEY="CAP-TEST-GAPS-CLOSE-R2" python3 "$BRIDGE" close \
+  --id GAP-OP-9990 \
+  --status fixed \
+  --fixed-in TEST-SHA \
+  --notes "should be blocked by controller-only gate" \
+  --regression-lock-id test-gaps-authority-integrity.sh >/dev/null 2>&1; then
+  fail "gaps authority bridge should reject non-controller terminal roles"
+else
+  pass "gaps authority bridge rejects non-controller terminal roles"
+fi
 
 TOTAL=$((TOTAL + 1))
 DB_ROW="$(sqlite3 "$GAPS_DB_PATH" "select status || '|' || ifnull(fixed_in,'') from gaps where gap_id='GAP-OP-9991';")"

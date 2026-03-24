@@ -35,6 +35,9 @@ else
 fi
 assert_contains "$brief_out" "workflow_concepts=5" "status reports workflow concept count"
 assert_contains "$brief_out" "issues=0" "status reports zero failing issues"
+assert_contains "$brief_out" "worktree_residue=PASS" "status reports current-lane worktree residue"
+assert_contains "$brief_out" "loop_scope=PASS" "status reports loop scope authority"
+assert_contains "$brief_out" "loop_closeout=PASS" "status reports loop closeout authority"
 
 set +e
 json_out="$(cd "$ROOT" && python3 "$STATUS" --root "$ROOT" --json 2>&1)"
@@ -46,6 +49,9 @@ else
   fail "json self-governance status succeeds"
 fi
 assert_contains "$json_out" "\"capability\": \"spine.self-governance.status\"" "json status reports capability name"
+assert_contains "$json_out" "\"loop_scope_authority\"" "json status includes loop scope authority check"
+assert_contains "$json_out" "\"loop_closeout_authority\"" "json status includes loop closeout authority check"
+assert_contains "$json_out" "\"worktree_residue\"" "json status includes worktree residue check"
 
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"

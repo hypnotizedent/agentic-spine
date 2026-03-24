@@ -128,6 +128,7 @@ echo ""
 
 # ── Test 3: Mutating commands pass with SPINE_CAP_RUN_KEY ──
 echo "-- Mutating commands governed --"
+export OPS_TERMINAL_ROLE="SPINE-CONTROL-01"
 export SPINE_CAP_RUN_KEY="CAP-20260323T120000Z__gaps.file__Rtest"
 
 check "upsert succeeds with SPINE_CAP_RUN_KEY" 0 \
@@ -147,6 +148,7 @@ echo ""
 # ── Test 4: Override mechanism ──
 echo "-- Override mechanism --"
 unset SPINE_CAP_RUN_KEY 2>/dev/null || true
+export OPS_TERMINAL_ROLE="SPINE-CONTROL-01"
 
 check "override with --reason succeeds" 0 \
   python3 "$BRIDGE" upsert --json '{"id":"GAP-OP-9994","status":"open","severity":"low","type":"agent-behavior","description":"override test","discovered_by":"test","parent_loop":"LOOP-TEST"}' \
