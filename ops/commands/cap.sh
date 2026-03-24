@@ -573,7 +573,7 @@ run_cap() {
             echo ""
             echo "Remediation:"
             echo "  ./bin/ops cap run session.v3.attach -- --allow-no-loop"
-            echo "  # Or launch through terminal-launch so attach state is exported automatically."
+            echo "  # Or use the governed terminal-launch wrapper, which resolves into session.v3.attach automatically."
             blocked_reason="attach_admission_required:${name}"
             exit_code=7
           elif [[ ! -f "$attach_entry_packet_path" ]]; then
