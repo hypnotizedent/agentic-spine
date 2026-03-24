@@ -24,15 +24,13 @@ discovery_sources:
     priority: 1
   spotisub:
     method: "Spotify playlists/likes → Navidrome library"
-    status: parked
-    target: active
-    gap: "spotisub container parked — needs promotion"
+    status: active
+    promoted_at: "2026-03-24"
     arabic_value: "Spotify Arabic playlists and algorithmic discovery feed into library"
   lastfm:
     method: "Scrobbling → similar artists → recommendations"
-    status: missing
-    target: configured
-    gap: "Last.fm integration removed during migration — was in legacy Navidrome config"
+    status: configured
+    restored_at: "2026-03-24"
     arabic_value: "Last.fm Arabic artist similar/related feeds discovery"
   import_lists:
     method: "Lidarr import lists from external sources"
@@ -66,10 +64,10 @@ grab_chain:
     indexers: "NONE for music — gap"
     protocol: torrent
     vpn: gluetun
-    status: disabled_in_lidarr
-    target: re-enabled
+    status: active
+    re_enabled_at: "2026-03-24"
     arabic_effectiveness: medium
-    gap: "qBit disabled in Lidarr. No torrent indexers for music in Prowlarr."
+    remaining_gap: "No torrent indexers for music in Prowlarr yet."
 
 import_chain:
   flow: "download complete → Lidarr import scan → MusicBrainz match → /media/music"
@@ -85,9 +83,8 @@ index_chain:
   navidrome:
     library_path: /music
     host_path: /srv/media/music
-    scan_schedule: 1h
-    target_scan_schedule: 15m
-    gap: "Scan schedule degraded from legacy 15m to current 1h"
+    scan_schedule: 15m
+    restored_at: "2026-03-24"
 
 stream_chain:
   navidrome:
@@ -99,8 +96,8 @@ stream_chain:
       spotify: {env: [ND_SPOTIFY_ID, ND_SPOTIFY_SECRET], purpose: "artist metadata/images"}
       lastfm: {env: [ND_LASTFM_APIKEY, ND_LASTFM_SECRET], purpose: "scrobbling + recommendations"}
       lrclib: {env: [ND_LRCLIB_URL], value: "https://lrclib.net", purpose: "lyrics display"}
-    integrations_current: none
-    gap: "All three integrations were in legacy config, lost during migration"
+    integrations_current: [spotify, lastfm, lrclib]
+    restored_at: "2026-03-24"
   music_assistant:
     platform: ha_addon
     version: 2.7.11
@@ -109,10 +106,10 @@ stream_chain:
 
 scrobble_chain:
   lastfm:
-    status: missing
-    target: active
-    gap: "Not configured in Navidrome or any client"
+    status: configured
+    restored_at: "2026-03-24"
     feedback_loop: "scrobbles → similar artists → discovery → Lidarr adds"
+    note: "ND_LASTFM_APIKEY + ND_LASTFM_SECRET set. User auth via Navidrome UI needed to activate scrobbling."
 
 playback_clients:
   feishin:
@@ -120,8 +117,8 @@ playback_clients:
     server: navidrome
     protocol: subsonic
     platforms: [desktop, mobile]
-    status: active_undocumented
-    gap: "Not in any spine binding"
+    status: active
+    documented_at: "2026-03-24"
 
 # Ideal state service map — all on media-home (VM 106)
 ideal_services:
@@ -129,7 +126,6 @@ ideal_services:
     status: active
     target_changes:
       - "Add import lists for automated discovery"
-      - "Re-enable qBittorrent as download client for music"
       - "Consider relaxing MusicBrainz match threshold for Arabic content"
   slskd:
     status: active
@@ -142,22 +138,20 @@ ideal_services:
     note: "Usenet music category. Good for mainstream."
   qbittorrent:
     status: active
-    target: re-enabled_in_lidarr
-    note: "Need torrent indexers for music in Prowlarr too."
+    re_enabled_at: "2026-03-24"
+    note: "Re-enabled in Lidarr via gluetun:8081. Need torrent indexers for music in Prowlarr."
   navidrome:
     status: active
-    target_changes:
-      - "Restore ND_SPOTIFY_ID + ND_SPOTIFY_SECRET"
-      - "Restore ND_LASTFM_APIKEY + ND_LASTFM_SECRET"
-      - "Add ND_LRCLIB_URL=https://lrclib.net"
-      - "Change ND_SCANSCHEDULE from 1h to 15m"
+    restored_at: "2026-03-24"
+    note: "All integrations restored: Spotify metadata, Last.fm scrobbling, LRClib lyrics. Scan 15m."
   spotisub:
-    status: parked
-    target: active
-    note: "Has Spotify OAuth + Last.fm keys. Just needs to be started."
+    status: active
+    promoted_at: "2026-03-24"
+    note: "Spotify OAuth + Last.fm keys configured. Syncing Spotify→Navidrome."
   feishin:
     type: client_app
-    target: documented_in_binding
+    status: documented
+    documented_at: "2026-03-24"
   music_assistant:
     platform: ha_addon
     target: navidrome_provider_configured
@@ -181,12 +175,16 @@ arabic_strategy:
 gaps:
   - id: navidrome-integrations-lost
     priority: high
+    status: fixed
+    fixed_at: "2026-03-24"
     description: "Restore Spotify, Last.fm, LRClib integrations in Navidrome compose"
     action: "Add env vars to media-playback compose, recreate container"
   - id: spotisub-parked
     priority: high
+    status: fixed
+    fixed_at: "2026-03-24"
     description: "Promote spotisub from parked to active"
-    action: "Start container from media-stack compose"
+    action: "Start container from media-playback compose"
   - id: no-import-lists
     priority: medium
     description: "No automated discovery in Lidarr"
@@ -197,20 +195,28 @@ gaps:
     action: "Add music-capable torrent indexers via Prowlarr"
   - id: qbit-disabled-in-lidarr
     priority: medium
+    status: fixed
+    fixed_at: "2026-03-24"
     description: "qBittorrent disabled in Lidarr for music"
-    action: "Re-enable qBit as secondary download client in Lidarr"
+    action: "Re-enable qBit as secondary download client in Lidarr (host: gluetun)"
   - id: navidrome-scan-degraded
     priority: low
+    status: fixed
+    fixed_at: "2026-03-24"
     description: "Scan schedule 1h vs legacy 15m"
-    action: "Change ND_SCANSCHEDULE to 15m in compose"
+    action: "Changed ND_SCANSCHEDULE to 15m in compose"
   - id: lidarr-queue-stuck
     priority: low
+    status: fixed
+    fixed_at: "2026-03-24"
     description: "24 items stuck on MusicBrainz matching"
-    action: "Clear unresolvable items, force-import where possible"
+    action: "Bulk-removed 24 warning items via Lidarr API"
   - id: feishin-undocumented
     priority: low
+    status: fixed
+    fixed_at: "2026-03-24"
     description: "Feishin client not in spine bindings"
-    action: "Add client binding entry"
+    action: "Added client_app binding in media.services.yaml"
   - id: music-assistant-integration
     priority: low
     description: "Music Assistant HA addon integration undocumented"

@@ -1,0 +1,248 @@
+# MUSIC PIPELINE CONTRACT
+# Status: authoritative
+# Owner: "@ronny"
+# Scope: Canonical music pipeline — services, flow, integrations, path topology
+# Operator intent: "I want more music and good Arabic music"
+#
+# For ideal state / gap tracking: ops/bindings/music.pipeline.ideal.contract.yaml
+# For full history / archaeology: ops/bindings/music.pipeline.history.yaml
+# For general media pipeline: ops/bindings/media.pipeline.contract.yaml
+
+contract: MUSIC_PIPELINE_V1
+version: "1.0"
+created: "2026-03-24"
+owner: "@ronny"
+
+operator_intent: |
+  Maximize music discovery. Arabic music is underserved by Usenet —
+  Soulseek (slskd) is the primary grab source for niche/Arabic content.
+  Feedback loop: listen → scrobble → discover → grab → listen more.
+
+# ─── Pipeline Flow ─────────────────────────────────────────────────────
+pipeline:
+  flow: "DISCOVER → WANTED → GRAB → DOWNLOAD → IMPORT → INDEX → STREAM → SCROBBLE → DISCOVER MORE"
+
+  discover:
+    manual:
+      method: "Operator adds artists/albums in Lidarr"
+      status: active
+    spotisub:
+      method: "Spotify playlists/likes → Navidrome library"
+      status: active
+      promoted_at: "2026-03-24"
+      compose_stack: media-playback
+    lastfm:
+      method: "Scrobbling → similar artists → recommendations"
+      status: configured
+      restored_at: "2026-03-24"
+      note: "API keys set in Navidrome. User auth needed in Navidrome UI to activate scrobbling."
+    import_lists:
+      method: "Lidarr import lists from external sources"
+      status: not_configured
+      gap: "No import lists in Lidarr — discovery is manual only"
+
+  wanted:
+    service: lidarr
+    port: 8686
+    vm: media-home
+    artists_monitored: 275
+    artists_with_tracks: 49
+    wanted_albums: 2907
+    queue: 0
+    queue_cleared_at: "2026-03-24"
+
+  grab:
+    usenet:
+      client: sabnzbd
+      protocol: usenet
+      priority: 1
+      category: audio
+      status: active
+      arabic_effectiveness: low
+    soulseek:
+      client: slskd
+      bridge: soularr
+      protocol: p2p
+      vpn: gluetun
+      status: active
+      arabic_effectiveness: high
+      note: "CRITICAL for Arabic music. Must stay running."
+    torrent:
+      client: qbittorrent
+      protocol: torrent
+      vpn: gluetun
+      priority: 2
+      category: lidarr
+      status: active
+      re_enabled_at: "2026-03-24"
+      host_in_lidarr: gluetun
+      arabic_effectiveness: medium
+      gap: "No torrent indexers for music in Prowlarr"
+
+  download_staging:
+    sabnzbd: /media/downloads/complete/audio
+    slskd: /media/downloads/slskd
+    qbittorrent: /media/downloads/complete/lidarr
+
+  import:
+    service: lidarr
+    library_root: /media/music
+    library_root_id: 2
+    metadata_provider: musicbrainz
+    hardlinks: true
+    note: "Same /media broad mount as downloads — hardlinks work."
+
+  index:
+    service: navidrome
+    library_path: /music
+    host_path: /srv/media/music
+    scan_schedule: 15m
+    restored_at: "2026-03-24"
+
+  stream:
+    service: navidrome
+    port: 4533
+    protocol: subsonic
+    integrations:
+      spotify: {status: active, env: [ND_SPOTIFY_ID, ND_SPOTIFY_SECRET], purpose: "artist metadata/images"}
+      lastfm: {status: active, env: [ND_LASTFM_APIKEY, ND_LASTFM_SECRET], purpose: "scrobbling + recommendations"}
+      lrclib: {status: active, env: [ND_LRCLIB_URL], value: "https://lrclib.net", purpose: "lyrics display"}
+    integrations_restored_at: "2026-03-24"
+
+  playback:
+    feishin:
+      type: client_app
+      server: navidrome
+      protocol: subsonic
+      platforms: [desktop, mobile]
+      status: active
+    music_assistant:
+      platform: ha_addon
+      version: 2.7.11
+      status: running
+      gap: "Navidrome provider not verified"
+
+  scrobble:
+    lastfm:
+      status: configured
+      note: "API keys set. User must authorize in Navidrome UI."
+      feedback_loop: "scrobbles → similar artists → discovery → Lidarr adds"
+
+# ─── Service Inventory ──────────────────────────────────────────────────
+# All on media-home (VM 106, 10.0.0.106)
+services:
+  lidarr:
+    vm: media-home
+    port: 8686
+    compose_stack: media-stack
+    status: running
+    download_clients: [sabnzbd, qbittorrent]
+    dependencies: [prowlarr, sabnzbd, qbittorrent]
+
+  slskd:
+    vm: media-home
+    port: 5030
+    compose_stack: media-stack
+    status: running
+    network_mode: "container:gluetun"
+    activated_at: "2026-03-24"
+
+  soularr:
+    vm: media-home
+    compose_stack: media-stack
+    status: running
+    cycle_interval: 5m
+    dependencies: [lidarr, slskd]
+    activated_at: "2026-03-24"
+
+  sabnzbd:
+    vm: media-home
+    port: 8080
+    compose_stack: media-write
+    status: running
+    music_category: audio
+
+  qbittorrent:
+    vm: media-home
+    port: 8081
+    compose_stack: media-stack
+    status: running
+    network_mode: "container:gluetun"
+    lidarr_host: gluetun
+    music_category: lidarr
+    re_enabled_at: "2026-03-24"
+
+  navidrome:
+    vm: media-home
+    port: 4533
+    compose_stack: media-playback
+    status: running
+    library_path: /music
+
+  spotisub:
+    vm: media-home
+    port: 8766
+    compose_stack: media-playback
+    status: running
+    promoted_at: "2026-03-24"
+    dependencies: [navidrome]
+
+  gluetun:
+    vm: media-home
+    compose_stack: media-stack
+    status: running
+    vpn_provider: privado
+    tunnels: [slskd, qbittorrent]
+
+# ─── Path Topology ──────────────────────────────────────────────────────
+path_topology:
+  nfs_backing:
+    source: "10.0.0.150:/volume1/media-staging"
+    target: /srv/media
+    mode: rw
+  library:
+    host: /srv/media/music
+    container_broad: /media/music
+    navidrome_narrow: /music
+    note: "Navidrome mounts /srv/media/music:/music (read-only narrow mount)"
+  downloads:
+    host: /srv/media/downloads
+    container: /media/downloads
+    note: "Same mount as library — enables hardlinks on import"
+
+# ─── Arabic Music Strategy ──────────────────────────────────────────────
+arabic_strategy:
+  primary_source: soulseek
+  actions:
+    - "Keep slskd + soularr always running (CRITICAL)"
+    - "Subscribe to Arabic music playlists on Spotify via spotisub"
+    - "Authorize Last.fm scrobbling in Navidrome UI for recommendation feedback"
+    - "Add Arabic-focused import lists to Lidarr when available"
+    - "Consider relaxing MusicBrainz match threshold for Arabic imports"
+
+# ─── Remaining Gaps ────────────────────────────────────────────────────
+remaining_gaps:
+  - id: no-import-lists
+    priority: medium
+    description: "No automated discovery in Lidarr — all adds are manual"
+  - id: no-torrent-music-indexers
+    priority: medium
+    description: "No torrent indexers for music in Prowlarr"
+  - id: lastfm-user-auth
+    priority: low
+    description: "Last.fm API keys set but user hasn't authorized scrobbling in Navidrome UI"
+  - id: music-assistant-navidrome
+    priority: low
+    description: "Music Assistant HA addon not verified with Navidrome provider"
+  - id: music-staging-debt
+    priority: low
+    description: "682G music-import-20260323 + 26G music-migration-staging on NAS"
+
+# ─── Cross References ──────────────────────────────────────────────────
+cross_references:
+  ideal_state: ops/bindings/music.pipeline.ideal.contract.yaml
+  history: ops/bindings/music.pipeline.history.yaml
+  media_pipeline: ops/bindings/media.pipeline.contract.yaml
+  media_inventory: ops/bindings/media.master.inventory.contract.yaml
+  services: ops/bindings/media.services.yaml
+  path_authority: ops/bindings/media.path.authority.contract.yaml
