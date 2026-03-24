@@ -194,20 +194,40 @@ assert_eq "$t9_status" "0" "fast startup succeeds with sync stub"
 assert_contains "$(cat "$sync_log")" "--trigger session.start.fast --brief" "fast startup invokes managed sync runner"
 
 echo ""
-echo "── T10: degraded mode emits continuity packet ──"
+echo "── T10: internal attach flags skip root normalize and managed sync ──"
+skip_root_log="$TMPDIR_BASE/session-root-skip.log"
+skip_sync_log="$TMPDIR_BASE/session-sync-skip.log"
 set +e
-t10_out="$(cd "$WORK" && SPINE_ROOT_BORING_RECONCILE_BIN="$STARTUP_NOOP_STUB" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STARTUP_NOOP_STUB" "$SESSION_START" degraded 2>&1)"
+t10_out="$(cd "$WORK" && ROOT_STUB_LOG="$skip_root_log" SYNC_STUB_LOG="$skip_sync_log" SPINE_ROOT_BORING_RECONCILE_BIN="$root_stub" SPINE_MANAGED_WORKTREE_SYNC_BIN="$sync_stub" "$SESSION_START" --skip-root-boring-reconcile --skip-managed-worktree-sync 2>&1)"
 t10_status=$?
 set -e
-assert_eq "$t10_status" "0" "degraded startup succeeds on clean main"
-assert_contains "$t10_out" "mode: degraded" "degraded mode is explicit"
-assert_contains "$t10_out" "logical_state_path: mailroom/state" "degraded mode exposes logical state path"
-assert_contains "$t10_out" "runtime_state_root: $STATE_ROOT" "degraded mode exposes runtime state root"
-assert_contains "$t10_out" "./bin/ops cap run receipts.summary -- --domain none --days 7" "degraded mode emits receipts fallback hint"
-assert_contains "$t10_out" "./bin/ops cap run loops.status" "degraded mode emits loop fallback hint"
+assert_eq "$t10_status" "0" "fast startup succeeds when attach-style skip flags are set"
+if [[ -f "$skip_root_log" ]]; then
+  fail "skip-root-boring-reconcile suppresses root normalize"
+else
+  pass "skip-root-boring-reconcile suppresses root normalize"
+fi
+if [[ -f "$skip_sync_log" ]]; then
+  fail "skip-managed-worktree-sync suppresses managed sync"
+else
+  pass "skip-managed-worktree-sync suppresses managed sync"
+fi
 
 echo ""
-echo "── T11: fast startup surfaces operator storage advisory hint ──"
+echo "── T11: degraded mode emits continuity packet ──"
+set +e
+t11_out="$(cd "$WORK" && SPINE_ROOT_BORING_RECONCILE_BIN="$STARTUP_NOOP_STUB" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STARTUP_NOOP_STUB" "$SESSION_START" degraded 2>&1)"
+t11_status=$?
+set -e
+assert_eq "$t11_status" "0" "degraded startup succeeds on clean main"
+assert_contains "$t11_out" "mode: degraded" "degraded mode is explicit"
+assert_contains "$t11_out" "logical_state_path: mailroom/state" "degraded mode exposes logical state path"
+assert_contains "$t11_out" "runtime_state_root: $STATE_ROOT" "degraded mode exposes runtime state root"
+assert_contains "$t11_out" "./bin/ops cap run receipts.summary -- --domain none --days 7" "degraded mode emits receipts fallback hint"
+assert_contains "$t11_out" "./bin/ops cap run loops.status" "degraded mode emits loop fallback hint"
+
+echo ""
+echo "── T12: fast startup surfaces operator storage advisory hint ──"
 storage_stub="$TMPDIR_BASE/session-operator-storage-stub.sh"
 cat > "$storage_stub" <<'EOF'
 #!/usr/bin/env bash
@@ -216,11 +236,11 @@ echo "status=warn runtime_root=ready mint=ok mint_mode=direct_remote_operator_dr
 EOF
 chmod +x "$storage_stub"
 set +e
-t11_out="$(cd "$WORK" && SPINE_ROOT_BORING_RECONCILE_BIN="$STARTUP_NOOP_STUB" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STARTUP_NOOP_STUB" SPINE_OPERATOR_STORAGE_SURFACE_STATUS_BIN="$storage_stub" "$SESSION_START" 2>&1)"
-t11_status=$?
+t12_out="$(cd "$WORK" && SPINE_ROOT_BORING_RECONCILE_BIN="$STARTUP_NOOP_STUB" SPINE_MANAGED_WORKTREE_SYNC_BIN="$STARTUP_NOOP_STUB" SPINE_OPERATOR_STORAGE_SURFACE_STATUS_BIN="$storage_stub" "$SESSION_START" 2>&1)"
+t12_status=$?
 set -e
-assert_eq "$t11_status" "0" "fast startup succeeds with operator storage stub"
-assert_contains "$t11_out" "operator_storage_surfaces: status=warn runtime_root=ready mint=ok mint_mode=direct_remote_operator_drop mint_mount=ACTIVE archives=warn archives_mount=INACTIVE archives_entries=0" "fast startup prints operator storage advisory"
+assert_eq "$t12_status" "0" "fast startup succeeds with operator storage stub"
+assert_contains "$t12_out" "operator_storage_surfaces: status=warn runtime_root=ready mint=ok mint_mode=direct_remote_operator_drop mint_mount=ACTIVE archives=warn archives_mount=INACTIVE archives_entries=0" "fast startup prints operator storage advisory"
 
 echo ""
 echo "────────────────────────────────────────"

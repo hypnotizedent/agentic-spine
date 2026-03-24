@@ -225,7 +225,6 @@ def run_session_bootstrap(args: argparse.Namespace, session_start_script: Path) 
 
     lane = startup_lane_for_role(args.role)
     env = os.environ.copy()
-    env.setdefault("SPINE_MANAGED_WORKTREE_SYNC_BIN", "/usr/bin/true")
     proc = subprocess.run(
         [
             str(session_start_script),
@@ -236,6 +235,8 @@ def run_session_bootstrap(args: argparse.Namespace, session_start_script: Path) 
             "--allow-main-divergence",
             "--main-divergence-reason",
             "session.v3.attach canonical reattach in existing terminal",
+            "--skip-root-boring-reconcile",
+            "--skip-managed-worktree-sync",
         ],
         text=True,
         capture_output=True,
@@ -389,7 +390,10 @@ def main() -> int:
     broker_script = ROOT / "ops/plugins/core/evidence/bin/spine-control"
     sanitize_script = ROOT / "ops/plugins/core/session/bin/session-ingress-sanitize"
     entry_script = ROOT / "ops/plugins/core/session/bin/session-entry-packet"
-    session_start_script = ROOT / "ops/plugins/core/session/bin/session-start"
+    session_start_script = Path(
+        os.environ.get("SPINE_SESSION_START_BIN")
+        or (ROOT / "ops/plugins/core/session/bin/session-start")
+    )
 
     try:
         repo_identity = assert_attach_repo_identity(args)

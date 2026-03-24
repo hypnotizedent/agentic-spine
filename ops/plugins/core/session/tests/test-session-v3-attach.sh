@@ -79,6 +79,44 @@ assert payload["data"]["entry_packet"]["packet"]["environment_constraints"]["rep
 assert payload["data"]["entry_packet"]["packet"]["environment_constraints"]["worktree"] == payload["data"]["repo_identity"]["checkout_root"]
 PY
 
+bootstrap_env="$tmpdir/bootstrap.env.sh"
+cat > "$bootstrap_env" <<'EOF_BOOTSTRAP'
+export OPS_TERMINAL_ROLE='worker-a'
+export SPINE_RUNTIME_ROLE='researcher'
+EOF_BOOTSTRAP
+
+bootstrap_log="$tmpdir/bootstrap-args.log"
+bootstrap_stub="$tmpdir/session-start-stub.sh"
+cat > "$bootstrap_stub" <<'EOF_STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${BOOTSTRAP_LOG:?}"
+echo "  source ${BOOTSTRAP_ENV:?}"
+EOF_STUB
+chmod +x "$bootstrap_stub"
+
+bootstrap_json="$(env -u SPINE_ROOT -u SPINE_REPO -u SPINE_TARGET_REPO -u SPINE_CODE \
+  SPINE_STATE="$state_root" \
+  SPINE_SESSION_START_BIN="$bootstrap_stub" \
+  BOOTSTRAP_LOG="$bootstrap_log" \
+  BOOTSTRAP_ENV="$bootstrap_env" \
+  "$SCRIPT" --allow-no-loop --json)"
+
+python3 - <<'PY' "$bootstrap_json" "$bootstrap_log"
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(sys.argv[1])
+args = Path(sys.argv[2]).read_text()
+assert payload["status"] == "done"
+assert payload["data"]["startup"]["status"] == "done"
+assert "--skip-root-boring-reconcile" in args
+assert "--skip-managed-worktree-sync" in args
+assert "--allow-dirty" in args
+assert "--allow-main-divergence" in args
+PY
+
 fail_json="$(env SPINE_STATE="$state_root" "$SCRIPT" --skip-session-bootstrap --allow-no-loop --repo-root "$tmpdir/other-root" --json || true)"
 
 python3 - <<'PY' "$fail_json"

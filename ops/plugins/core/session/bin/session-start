@@ -143,9 +143,11 @@ Usage:
   session-start [--mode fast|full|degraded] [--strict] [--json]
                 [--allow-dirty --dirty-reason "<reason>"]
                 [--allow-main-divergence --main-divergence-reason "<reason>"]
+                [--skip-root-boring-reconcile] [--skip-managed-worktree-sync]
   session-start <lane>
                 [--allow-dirty --dirty-reason "<reason>"]
                 [--allow-main-divergence --main-divergence-reason "<reason>"]
+                [--skip-root-boring-reconcile] [--skip-managed-worktree-sync]
 
 Lanes:
   scan | apply | coordinator
@@ -303,6 +305,8 @@ run_fast_startup() {
   local dirty_reason=""
   local allow_main_divergence=false
   local main_divergence_reason=""
+  local skip_root_boring_reconcile=false
+  local skip_managed_worktree_sync=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -337,6 +341,14 @@ run_fast_startup() {
         main_divergence_reason="${2:-}"
         shift 2
         ;;
+      --skip-root-boring-reconcile)
+        skip_root_boring_reconcile=true
+        shift
+        ;;
+      --skip-managed-worktree-sync)
+        skip_managed_worktree_sync=true
+        shift
+        ;;
       fast|full|degraded)
         mode="$1"
         shift
@@ -359,7 +371,9 @@ run_fast_startup() {
       ;;
   esac
 
-  run_root_boring_reconcile "session.start.${mode}" || return 1
+  if [[ "$skip_root_boring_reconcile" != "true" ]]; then
+    run_root_boring_reconcile "session.start.${mode}" || return 1
+  fi
 
   # Run startup checkout guards before bootstrapping the session.
   run_startup_checkout_guards \
@@ -368,7 +382,9 @@ run_fast_startup() {
     "$allow_main_divergence" \
     "$main_divergence_reason" || return 1
 
-  run_managed_worktree_sync "session.start.${mode}" || return 1
+  if [[ "$skip_managed_worktree_sync" != "true" ]]; then
+    run_managed_worktree_sync "session.start.${mode}" || return 1
+  fi
 
   if [[ "$mode" == "fast" || "$mode" == "degraded" ]]; then
     local status_brief
@@ -601,6 +617,8 @@ allow_dirty=false
 dirty_reason=""
 allow_main_divergence=false
 main_divergence_reason=""
+skip_root_boring_reconcile=false
+skip_managed_worktree_sync=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -623,6 +641,14 @@ while [[ $# -gt 0 ]]; do
       main_divergence_reason="${2:-}"
       shift 2
       ;;
+    --skip-root-boring-reconcile)
+      skip_root_boring_reconcile=true
+      shift
+      ;;
+    --skip-managed-worktree-sync)
+      skip_managed_worktree_sync=true
+      shift
+      ;;
     -h|--help)
       usage
       ;;
@@ -633,7 +659,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-run_root_boring_reconcile "session.start.lane.${LANE}" || exit 1
+if [[ "$skip_root_boring_reconcile" != "true" ]]; then
+  run_root_boring_reconcile "session.start.lane.${LANE}" || exit 1
+fi
 
 run_startup_checkout_guards \
   "$allow_dirty" \
@@ -641,7 +669,9 @@ run_startup_checkout_guards \
   "$allow_main_divergence" \
   "$main_divergence_reason" || exit 1
 
-run_managed_worktree_sync "session.start.lane.${LANE}" || exit 1
+if [[ "$skip_managed_worktree_sync" != "true" ]]; then
+  run_managed_worktree_sync "session.start.lane.${LANE}" || exit 1
+fi
 
 # ─── Session pruning + liveness ─────────────────────────────
 # Archive stale sessions: PID dead (immediate); also archive TTL-expired sessions.
