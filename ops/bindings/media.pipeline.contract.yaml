@@ -57,8 +57,9 @@ pipeline:
         service: autopulse
         port: 2875
         action: "Receives webhook from ARR, triggers Jellyfin/Navidrome library scan"
-        current_status: broken
-        bug: "Path rewrites produce double-prefix (/media/media/tv/) — see inventory contract known_issues"
+        current_status: fixed
+        fixed_at: "2026-03-24"
+        fix: "Path rewrites updated to identity (FROM=/media/tv TO=/media/tv) in media-stack compose"
       7_client:
         video: {service: jellyfin, port: 8096}
         music: {service: navidrome, port: 4533}
@@ -191,16 +192,15 @@ containers:
       port: 2875
       status: running
       category: utility
-      uptime: "1 hour"
-      health: degraded
+      health: healthy
       role: "Library refresh trigger via webhooks to Jellyfin"
-      degraded_reason: "Path rewrite bug causing /media/media/ double-prefix. Jellyfin scan failures."
       mount: "/srv/appdata/compose/media-write/volumes/autopulse -> /data"
       path_rewrites:
-        radarr: {from: /movies, to: /media/movies, status: stale}
-        sonarr: {from: /tv, to: /media/tv, status: stale}
-        lidarr: {from: /music, to: /media/music, status: stale}
-      fix_needed: "Update rewrites: FROM should match current ARR paths (/media/movies, /media/tv, /media/music)"
+        radarr: {from: /media/movies, to: /media/movies, status: identity}
+        sonarr: {from: /media/tv, to: /media/tv, status: identity}
+        lidarr: {from: /media/music, to: /media/music, status: identity}
+      fixed_at: "2026-03-24"
+      fix_note: "Rewrites updated from stale narrow-mount paths to identity after broad-mount hardlink fix"
 
     # Streaming
     jellyfin:
@@ -290,20 +290,23 @@ containers:
       category: enhancement
       role: "Subtitle management. Not yet promoted."
 
+  music_pipeline:
     slskd:
       vm: media-home
       port: 5030
-      status: stopped
+      status: running
       category: download
-      role: "Soulseek client. Parked."
+      role: "Soulseek client — music grab pipeline. VPN-tunneled via gluetun."
       network_mode: "container:gluetun"
+      activated_at: "2026-03-24"
 
     soularr:
       vm: media-home
-      status: stopped
+      status: running
       category: utility
-      role: "Soulseek-Lidarr integration. Parked."
+      role: "Soulseek-Lidarr bridge — searches wanted list, triggers slskd grabs. 5-min cycle."
       dependencies: [lidarr, slskd]
+      activated_at: "2026-03-24"
 
     spotisub:
       vm: media-home
