@@ -36,8 +36,8 @@ topology:
     container_mount: /media
     capacity_total: 20T
     capacity_used: 12T
-    capacity_free: 7.3T
-    capacity_pct: 63
+    capacity_free: 7.8T
+    capacity_pct: 60
     role: "Active library. Where Ronny watches content at home."
 
   cold_archive:
@@ -129,17 +129,21 @@ library_roots:
     quality_floor: "FLAC preferred, MP3 320 accepted"
 
 current_state:
-  traced_at: "2026-03-24T16:24Z"
-  trace_method: "SSH + ARR API queries — full pipeline diagnostic + rectification"
+  traced_at: "2026-03-24T16:47Z"
+  trace_method: "SSH + ARR API queries — stabilization wave (full freeze + snapshot + audit + drain)"
   movies:
     filesystem_size: 213G
     filesystem_dirs: 273
+    filesystem_dirs_with_media: 1
+    filesystem_note: "272 dirs have metadata only (nfo/images from partial USB rsync). 1 dir has media file (10,000 BC)."
     radarr_total: 1
     radarr_with_files: 1
     radarr_queue: 0
-    arr_free_space: 7374G
+    arr_free_space: 7965G
     import_stall: false
-    note: "273 dirs from USB transfer (mostly not Radarr-tracked). Radarr has 1 tracked movie. Pipeline healthy."
+    note: "273 dirs from USB transfer (272 empty shells with metadata). Radarr has 1 tracked movie. Pipeline healthy. Bulk import deferred to post-USB-transfer."
+    duplicate_dirs: 22
+    duplicate_note: ".1/.2 suffix dirs from overlapping grabs. Contain metadata files — not safe to bulk delete until USB transfer completes and Radarr import runs."
   tv:
     filesystem_size: 4.4T
     filesystem_dirs: 97
@@ -148,29 +152,34 @@ current_state:
     sonarr_episodes_on_disk: 2686
     sonarr_queue_total: 0
     sonarr_queue_status: clean
-    arr_free_space: 7374G
+    arr_free_space: 7965G
     import_stall: false
     import_stall_note: |
       Queue cleaned from 315 stale items to 0 (2026-03-24T16:23Z).
       Stale items: 117 failed (manual qBit downloads), 170 completed (already imported),
       28 downloadClientUnavailable. Pipeline flowing — Dexter S02 imported same day.
+    orphaned_in_complete:
+      size: 23G
+      count: 3
+      items: ["Community S01 (WEBRip)", "Wednesday S02 (MULTI)", "_UNPACK_Friends S02E13 (stale)"]
+      note: "Not in Sonarr queue — orphaned completed downloads. Need manual Sonarr import or cleanup."
   music:
-    filesystem_size: 707G
-    filesystem_dirs: 246
-    lidarr_total: 390
-    lidarr_with_tracks: 219
-    lidarr_tracks_on_disk: 20419
-    lidarr_size_on_disk: 707G
+    filesystem_size: 779G
+    filesystem_dirs: 275
+    lidarr_total: 418
+    lidarr_with_tracks: 245
+    lidarr_tracks_on_disk: 21578
+    lidarr_size_on_disk: 779G
     lidarr_queue: 60
-    lidarr_queue_detail: "45 ok (importing), 15 warning (unmatched tracks — need manual review)"
+    lidarr_queue_detail: "~1 importPending, ~59 importFailed (album match too low — needs manual import via Lidarr UI)"
     lidarr_wanted: 2975
-    arr_free_space: 7374G
-    import_stall: resolved
+    arr_free_space: 7965G
+    import_stall: partially_resolved
     import_stall_detail: |
-      FIXED 2026-03-24: Lidarr had ZERO remote path mappings — SABnzbd paths couldn't resolve.
-      Added sabnzbd + gluetun RPMs. Music library permissions fixed (755→777 for NFS root_squash).
-      Result: +247 tracks imported, +9 artists, 78 dirs cleared from complete/music (280→202).
-      Lidarr queue processing remaining 45 "ok" items automatically.
+      FIXED 2026-03-24: Lidarr RPMs added, permissions fixed. 27G drained in stabilization wave.
+      complete/music: 77G→50G (27G imported, +340 tracks, +5 artists).
+      60 queue items remain: mostly import-failed due to MusicBrainz matching threshold (39-80%).
+      These need manual import via Lidarr UI — cannot be auto-resolved.
   staging_debt:
     total: 546G
     file_counts:
@@ -204,18 +213,50 @@ current_state:
         size: 0
         files: 0
         type: movies_import_staging
-        status: empty_shells
-        note: "Empty dirs only (0 files). Cannot delete — owned by admin, ronadmin lacks permission. Needs DSM UI or root."
+        status: deleted
+        deleted_at: "2026-03-24"
+        note: "DELETED during stabilization wave. 0 files confirmed, empty dir tree removed via NAS SSH."
     downloads_active:
       complete_tv: 23G
-      complete_tv_detail: "Community S01 (1 ep remaining), Wednesday S02 (7 eps), _UNPACK_Friends (empty)"
-      complete_music: 120G
-      complete_music_detail: "205 dirs (was 280) — Lidarr actively importing, ~45 queued ok"
+      complete_tv_detail: "3 orphaned dirs: Community S01, Wednesday S02, _UNPACK_Friends. NOT in Sonarr queue — need manual import."
+      complete_music: 50G
+      complete_music_detail: "95 dirs (was 138). 27G drained during stabilization. 60 Lidarr queue items remain (import-failed)."
       complete_movies: 0
       complete_radarr: 0
       complete_sonarr: 0
-      incomplete: 3.9G
-      slskd: 25G
+      incomplete: 1.6G
+      slskd: 24G
+
+  stabilization_baseline:
+    date: "2026-03-24"
+    status: "clean_baseline"
+    method: "6-wave stabilization: freeze → snapshot → audit → fix → drain → verify"
+    pre_state:
+      complete_music: 77G
+      complete_tv: 23G
+      staging_leftovers: "546G tv-import + movies-import empty shells"
+      architecture_issues: 1
+      jellyfin_songs: 0
+    post_state:
+      complete_music: 50G
+      complete_tv: 23G
+      staging_leftovers: "546G tv-import only (movies-import deleted)"
+      architecture_issues: 0
+      jellyfin_songs: 23738
+    fixes_applied:
+      - "Jellyfin music library added — 23,738 songs now visible"
+      - "movies-import-20260323 empty shell tree deleted"
+      - "27G music drained from complete/ via Lidarr import scans"
+      - "Architecture audit: all 6 RPMs verified correct, all mounts verified, permissions functional"
+    deferred:
+      - "tv-import-20260323: 546G — operator pending"
+      - "complete/tv: 23G orphaned (not in Sonarr queue) — manual import needed"
+      - "complete/music: 50G (60 Lidarr queue items, import-failed) — manual Lidarr import"
+      - "22 duplicate .1/.2 movie dirs — have metadata, defer to post-USB cleanup"
+      - "Radarr bulk import — 272 untracked movie dirs, defer to post-USB transfer"
+    external_drives:
+      wd_5tb: "OUT OF SCOPE — address in separate prompt after NAS stable"
+      sandisk: "formatted ext4, 1.8T free, ready for next transport"
 
 per_title_catalog:
   authority: "~/code/workbench/agents/media/data/MEDIA_LIBRARY_CATALOG.yaml"
@@ -343,13 +384,22 @@ known_issues:
       NFS root_squash maps root→nobody, nobody can't write to 755 dirs.
       Movies dir was already 777 and worked fine.
       FIX: chmod 777 all music dirs, chmod 666 all music files (matching movies pattern).
+  - id: jellyfin-music-library-missing
+    severity: high
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: |
+      Jellyfin had NO music library configured. 21K+ tracks on disk invisible to streaming.
+      Fixed: Added /media/music as music library via Jellyfin API.
+      Result: 23,738 songs, 192 artists, 632 albums now indexed and streamable.
   - id: radarr-empty-library
     severity: info
     detail: "Only 1 movie in Radarr. 273 USB-transferred dirs not yet Radarr-tracked."
   - id: movies-import-staging-undeletable
     severity: low
-    status: open
-    detail: "movies-import-20260323/ has 0 files but empty dirs owned by admin — ronadmin can't delete. Needs DSM UI."
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: "movies-import-20260323/ deleted during stabilization wave via NAS SSH (ronadmin had sufficient perms after all)."
   - id: complete-music-corrupted-downloads
     severity: low
     status: open
