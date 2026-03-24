@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ops start <issue> | ops start loop <loop_id> - create a per-scope worktree + session folder
+# ops start <issue> | ops start loop <loop_id> - create a per-scope worktree + session folder, then attach through session.v3.attach
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -205,5 +205,5 @@ cat <<BOX
 ║ Session:  ${SESSION_DIR}                                   ║
 ╚═══════════════════════════════════════════════════════════╝
 
-Next: cd ${WORKTREE_DIR} && ops lane open control
+Next: cd ${WORKTREE_DIR} && ./bin/ops cap run session.v3.attach -- --allow-no-loop
 BOX

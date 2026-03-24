@@ -17,13 +17,13 @@ Everything the operator touches lives here or under `~/.codex`.
 
 | Path | Role | Branch policy |
 |------|------|---------------|
-| `agentic-spine/` | Governance control plane | Main checkout stays on `main`. Feature work uses managed worktrees. |
+| `agentic-spine/` | Governance control plane | Main checkout stays on `main`; managed worktrees are the execution lanes for wave/feature work. |
 | `workbench/` | Operator tooling | Feature branches OK in primary checkout. |
 | `mint-modules/` | Business service source | Main checkout stays on `main`. |
 | `ronny-products/` | Product repos | Main checkout stays on `main`. |
 | `agentic-foundation/` | Reusable implementation source | Main checkout stays on `main`. |
 
-**Rule**: `agentic-spine` primary checkout must be on `main` and clean for daily operation. All wave/feature work happens in managed worktrees.
+**Rule**: `agentic-spine` primary checkout must be on `main` and clean for daily operation. All wave/feature work happens in managed worktrees, and the public entry command is `session.v3.attach`.
 
 ### Non-Source Roots
 
@@ -81,7 +81,7 @@ Naming: directory name matches the branch name with `/` replaced by `-`.
 
 ### Unacceptable Dirty State
 
-- `agentic-spine/` on a feature branch as the primary checkout — all cap runs, verify, and session.start execute against this checkout
+- `agentic-spine/` on a feature branch as the primary checkout — keep the checkout boring and use `session.v3.attach` in the active lane; `session.start` is diagnostics-only
 - Untracked runtime state directories appearing in `git status` — add to `.gitignore`
 - Any repo's primary checkout diverged from `origin/main` by >1 day without an active reason
 

@@ -45,7 +45,7 @@ The controller may use a governed worktree for large structural slices, then lan
 ### Rule 2: Worker Scope
 Workers execute in worktrees or on remote systems with a declared, disjoint write scope. Workers must not touch shared hotspot surfaces. If a worker needs a hotspot mutation, it files a request back to the controller. Workers may be terminated or parked without data loss.
 
-**Worker worktree sessions:** Do NOT run `session.v3.attach` from worker worktrees. The "boring main" policy only applies to controller terminals operating on the main checkout. Worker worktrees are expected to have dirty files within their declared write scope.
+**Worker worktree sessions:** Worker worktrees should start through `session.v3.attach` as well. The attach surface resolves the active worktree, compiles the governed entry packet, and enforces the declared write scope. The "boring main" auto-heal behavior is for controller terminals on the primary checkout; worker lanes remain isolated in their own worktree write scope.
 
 ### Rule 3: Active WIP Cap
 **Maximum 5 active loops.** When above cap: close, supersede, defer, or consolidate. "Open because nobody decided" is a policy violation. Planned loops older than 14 days without activity must be triaged.
