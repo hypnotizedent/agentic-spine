@@ -4,13 +4,27 @@ owner: "@ronny"
 updated_at: "2026-03-23T00:00:00Z"
 description: >
   Mutation ceremony contract for shared_authority.db.
-  All write operations on the gaps SQLite authority must pass through
+  All write operations on the gaps and loops SQLite authority must pass through
   governed execution (cap run) or provide an explicit override with reason.
   This governs capability-mediated mutation. Raw file writes to externalized
   shared-authority state remain a separate direct-edit seam handled by
   D75/surface-readonly checks, not by this bridge.
 
 authority_surface: shared_authority.db
+
+bridges:
+  gaps:
+    binary: ops/plugins/core/lifecycle/bin/gaps-authority-bridge
+    library: ops/plugins/core/lifecycle/lib/gaps_sql_authority.py
+    tables: [gaps, gap_events, friction, friction_events]
+    projection: ops/bindings/operational.gaps.yaml
+  loops:
+    binary: ops/plugins/core/lifecycle/bin/loops-authority-bridge
+    library: ops/plugins/core/lifecycle/lib/loops_sql_authority.py
+    tables: [loops, loop_events]
+    projection: $SPINE_STATE/loop-scopes/*.scope.md
+
+# Legacy aliases (kept for backward compatibility until all callers migrate)
 bridge_binary: ops/plugins/core/lifecycle/bin/gaps-authority-bridge
 library: ops/plugins/core/lifecycle/lib/gaps_sql_authority.py
 
@@ -72,8 +86,16 @@ mutation_ceremony:
 governed_callers:
   - capability: gaps.file
     script: ops/plugins/core/loops/bin/gaps-file
+    bridge: gaps-authority-bridge
   - capability: gaps.close
     script: ops/plugins/core/loops/bin/gaps-close
+    bridge: gaps-authority-bridge
+  - capability: loops.create
+    script: ops/plugins/core/lifecycle/bin/loops-create
+    bridge: loops-authority-bridge
+  - capability: loop.closeout.finalize
+    script: ops/plugins/core/loops/bin/loop-closeout-finalize
+    bridge: loops-authority-bridge
 
 override_protocol:
   usage: >
@@ -110,3 +132,14 @@ file_classifications:
         2550 commits predate SQLite authority migration. All amnestied via
         enforcement_after_sha in d75-gap-mutation-policy.yaml. Post-enforcement
         commits must carry Gap-Mutation/Gap-Capability/Gap-Run-Key trailers.
+
+  - file: $SPINE_STATE/loop-scopes/*.scope.md
+    authority_state: projection
+    source_authority: shared_authority.db
+    source_table: loops
+    mutation_ceremony: controller-only via loops-authority-bridge
+    projection_command: loops-authority-bridge project
+    note: >
+      Loop scope files are projections of the loops table in shared_authority.db.
+      Direct file edits are supported during the transition period but should
+      converge to bridge-mediated mutations.

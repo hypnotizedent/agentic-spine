@@ -14,6 +14,7 @@ source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
 SCOPES_DIR="$SPINE_STATE/loop-scopes"
 TEMPLATE="$ROOT/ops/plugins/core/lifecycle/templates/loop-scope.template.md"
+LOOPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
 
 NAME="" OBJECTIVE="" PRIORITY="medium" HORIZON="now" READINESS="runnable" EXEC_MODE="orchestrator_subagents"
 FORCE=0
@@ -240,6 +241,37 @@ fi
     done
   fi
 } >> "$SCOPE_FILE"
+
+# ── SQLite authority bridge: upsert loop into shared_authority.db ──
+# The scope file is the projection surface. The bridge writes to SQLite
+# as the authoritative mutation. Failures are non-fatal during transition;
+# the scope file already exists on disk as the fallback authority.
+LOOP_STATUS="active"
+[[ "$HORIZON" == "now" ]] || LOOP_STATUS="planned"
+
+LOOP_JSON="$(python3 -c "
+import json, sys
+print(json.dumps({
+    'loop_id': sys.argv[1],
+    'created': sys.argv[2],
+    'status': sys.argv[3],
+    'owner': '@ronny',
+    'scope': sys.argv[4],
+    'priority': sys.argv[5],
+    'horizon': sys.argv[6],
+    'execution_readiness': sys.argv[7],
+    'execution_mode': sys.argv[8],
+    'objective': sys.argv[9],
+}))
+" "$LOOP_ID" "$(date -u +%Y-%m-%d)" "$LOOP_STATUS" "$SCOPE" "$PRIORITY" "$HORIZON" "$READINESS" "$EXEC_MODE" "$OBJECTIVE")"
+
+if [[ -x "$LOOPS_BRIDGE" ]]; then
+  if python3 "$LOOPS_BRIDGE" upsert --json "$LOOP_JSON" --actor "loops.create" 2>/dev/null; then
+    echo "loops-authority-bridge: upserted $LOOP_ID into shared_authority.db" >&2
+  else
+    echo "loops-authority-bridge: upsert failed (non-fatal, scope file is primary)" >&2
+  fi
+fi
 
 if [[ "$JSON_OUTPUT" -eq 1 ]]; then
   printf '{"loop_id":"%s","scope_file":"%s"}\n' "$LOOP_ID" "$SCOPE_FILE"

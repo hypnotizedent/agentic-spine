@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""CLI bridge for loops SQLite authority operations.
+
+Shell scripts (loops-create, loop-closeout-finalize) call this instead of
+mutating .scope.md files directly. This script:
+  1. Performs the SQLite mutation (upsert/close)
+  2. Returns status to the calling shell script
+
+Scope-file projection is NOT triggered on mutation. Refresh on demand:
+  loops-authority-bridge project
+
+This bridge governs capability-mediated mutation only. Raw file writes to
+externalized runtime state files remain outside its enforcement envelope and
+must be handled by the separate read-only / write-scope controls.
+
+Usage:
+  loops-authority-bridge upsert --json '{"loop_id":"LOOP-...",...}'
+  loops-authority-bridge close --id LOOP-... --status closed [--completion-level ...] [--disposition ...]
+  loops-authority-bridge query --id LOOP-...
+  loops-authority-bridge list [--status active|closed|all]
+  loops-authority-bridge bootstrap
+  loops-authority-bridge project
+  loops-authority-bridge parity
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+# Resolve lib path relative to this script.
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+sys.path.insert(0, str(LIB_DIR))
+
+import loops_sql_authority as lsa
+
+# -- Mutation ceremony ---------------------------------------------------------
+# Write operations require governed execution (SPINE_CAP_RUN_KEY set by cap.sh).
+# Read operations are always allowed.
+
+MUTATING_COMMANDS = frozenset({"upsert", "close"})
+READ_COMMANDS = frozenset({"query", "list", "bootstrap", "project", "parity"})
+CONTROL_TERMINAL_ROLE = "SPINE-CONTROL-01"
+
+
+def check_mutation_ceremony(
+    command: str, args: argparse.Namespace
+) -> tuple[str | None, str]:
+    """Verify mutation ceremony for write operations.
+
+    Returns (run_key, mutation_source) on success.
+    Prints error and calls sys.exit(1) if blocked.
+    """
+    if command not in MUTATING_COMMANDS:
+        return None, "read"
+
+    run_key = os.environ.get("SPINE_CAP_RUN_KEY", "").strip()
+    ungoverned = getattr(args, "ungoverned_override", False)
+    override_reason = getattr(args, "reason", None) or ""
+
+    if run_key:
+        print(
+            f"mutation-ceremony: governed (run_key={run_key})",
+            file=sys.stderr,
+        )
+        mutation_source = "governed"
+    elif ungoverned and override_reason.strip():
+        print(
+            f"mutation-ceremony: override (reason={override_reason.strip()})",
+            file=sys.stderr,
+        )
+        print(
+            "WARNING: ungoverned mutation -- no SPINE_CAP_RUN_KEY audit trail",
+            file=sys.stderr,
+        )
+        mutation_source = "override"
+    else:
+        print(
+            "MUTATION BLOCKED: loops-authority-bridge requires governed execution "
+            "(SPINE_CAP_RUN_KEY not set). "
+            "Run through: ./bin/ops cap run loops.create|loop.closeout.finalize",
+            file=sys.stderr,
+        )
+        if ungoverned and not override_reason.strip():
+            print(
+                "  --ungoverned-override requires --reason",
+                file=sys.stderr,
+            )
+        sys.exit(1)
+
+    terminal_role = (
+        os.environ.get("OPS_TERMINAL_ROLE", "").strip()
+        or os.environ.get("SPINE_TERMINAL_ROLE", "").strip()
+    )
+    if terminal_role != CONTROL_TERMINAL_ROLE:
+        print(
+            "MUTATION BLOCKED: loops-authority-bridge requires controller terminal "
+            f"role {CONTROL_TERMINAL_ROLE} for mutating commands "
+            f"(got {terminal_role or 'unset'})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return run_key or None, mutation_source
+
+
+def resolve_root() -> Path:
+    # Anchor to the checkout this bridge was launched from instead of trusting
+    # ambient SPINE_ROOT/SPINE_CODE, which may still point at a stale worktree.
+    candidate = SCRIPT_DIR
+    for _ in range(10):
+        if (candidate / "ops" / "bindings").exists():
+            return candidate
+        candidate = candidate.parent
+    raise RuntimeError("Cannot resolve SPINE_ROOT")
+
+
+def cmd_upsert(args: argparse.Namespace) -> None:
+    run_key, mutation_source = check_mutation_ceremony("upsert", args)
+
+    root = resolve_root()
+    db_path, scopes_dir = lsa.resolve_paths(root)
+    conn = lsa.connect(db_path)
+    lsa.ensure_schema(conn)
+    lsa.bootstrap_from_scope_files(conn, scopes_dir)
+
+    loop = json.loads(args.json)
+    loop_id = loop.get("loop_id", "")
+
+    old = lsa.get_loop(conn, loop_id)
+    lsa.upsert_loop(conn, loop)
+    lsa.insert_event(
+        conn,
+        loop_id=loop_id,
+        event_type="upsert",
+        from_status=old["status"] if old else None,
+        to_status=loop.get("status", "active"),
+        reason="Filed via loops-authority-bridge upsert",
+        actor=args.actor or "loops.create",
+        run_key=run_key,
+        mutation_source=mutation_source,
+    )
+    conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True, "loop_id": loop_id}), file=sys.stdout)
+    print(
+        "Scope-file projection skipped (on-demand only via 'project' subcommand)",
+        file=sys.stderr,
+    )
+
+
+def cmd_close(args: argparse.Namespace) -> None:
+    run_key, mutation_source = check_mutation_ceremony("close", args)
+
+    root = resolve_root()
+    db_path, scopes_dir = lsa.resolve_paths(root)
+    conn = lsa.connect(db_path)
+    lsa.ensure_schema(conn)
+    lsa.bootstrap_from_scope_files(conn, scopes_dir)
+
+    loop = lsa.close_loop(
+        conn,
+        args.id,
+        status=args.status,
+        completion_level=args.completion_level,
+        disposition=args.disposition,
+        actor=args.actor or "loop.closeout.finalize",
+        reason=args.reason,
+        run_key=run_key,
+        mutation_source=mutation_source,
+    )
+    if loop is None:
+        print(json.dumps({"ok": False, "error": f"{args.id} not found"}))
+        sys.exit(1)
+
+    conn.commit()
+    conn.close()
+    print(
+        json.dumps({"ok": True, "loop_id": args.id, "status": args.status}),
+        file=sys.stdout,
+    )
+    print(
+        "Scope-file projection skipped (on-demand only via 'project' subcommand)",
+        file=sys.stderr,
+    )
+
+
+def cmd_query(args: argparse.Namespace) -> None:
+    """Query a single loop from SQLite authority."""
+    root = resolve_root()
+    db_path, scopes_dir = lsa.resolve_paths(root)
+    conn = lsa.connect(db_path)
+    lsa.ensure_schema(conn)
+    lsa.bootstrap_from_scope_files(conn, scopes_dir)
+
+    loop = lsa.get_loop(conn, args.id)
+    conn.close()
+
+    if loop is None:
+        print(json.dumps({"exists": False, "loop_id": args.id}))
+    else:
+        print(
+            json.dumps(
+                {
+                    "exists": True,
+                    "loop_id": loop.get("loop_id", args.id),
+                    "status": loop.get("status", ""),
+                    "priority": loop.get("priority", ""),
+                    "owner": loop.get("owner", ""),
+                    "objective": loop.get("objective", ""),
+                    "scope": loop.get("scope", ""),
+                }
+            )
+        )
+
+
+def cmd_list(args: argparse.Namespace) -> None:
+    """List loops from SQLite authority."""
+    root = resolve_root()
+    db_path, scopes_dir = lsa.resolve_paths(root)
+    conn = lsa.connect(db_path)
+    lsa.ensure_schema(conn)
+    lsa.bootstrap_from_scope_files(conn, scopes_dir)
+
+    status_filter = args.status if args.status != "all" else None
+    loops = lsa.list_loops(conn, status=status_filter)
+    conn.close()
+
+    entries = []
+    for loop in loops:
+        entries.append(
+            {
+                "loop_id": loop.get("loop_id", ""),
+                "status": loop.get("status", ""),
+                "priority": loop.get("priority", ""),
+                "owner": loop.get("owner", ""),
+                "scope": loop.get("scope", ""),
+                "objective": loop.get("objective", ""),
+            }
+        )
+    print(json.dumps({"ok": True, "count": len(entries), "loops": entries}, indent=2))
+
+
+def cmd_bootstrap(args: argparse.Namespace) -> None:
+    root = resolve_root()
+    db_path, scopes_dir = lsa.resolve_paths(root)
+    conn = lsa.connect(db_path)
+    lsa.ensure_schema(conn)
+    imported = lsa.bootstrap_from_scope_files(conn, scopes_dir)
+    total = lsa.loop_count(conn)
+    ok, msg = lsa.integrity_check(conn)
+    conn.close()
+    print(
+        json.dumps(
+            {"ok": ok, "imported": imported, "total": total, "integrity": msg}
+        )
+    )
+
+
+def cmd_project(args: argparse.Namespace) -> None:
+    root = resolve_root()
+    db_path, scopes_dir = lsa.resolve_paths(root)
+    conn = lsa.connect(db_path)
+    lsa.ensure_schema(conn)
+    lsa.bootstrap_from_scope_files(conn, scopes_dir)
+    result = lsa.project_to_scope_files(conn, scopes_dir)
+    conn.close()
+    print(json.dumps({"ok": True, "projection": result}))
+
+
+def cmd_parity(args: argparse.Namespace) -> None:
+    root = resolve_root()
+    db_path, scopes_dir = lsa.resolve_paths(root)
+    conn = lsa.connect(db_path)
+    lsa.ensure_schema(conn)
+    lsa.bootstrap_from_scope_files(conn, scopes_dir)
+    snapshot = lsa.db_parity_snapshot(conn, scopes_dir)
+    conn.close()
+    print(json.dumps(snapshot, indent=2))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Loops SQLite authority bridge"
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # -- Shared override flags for mutating subcommands --
+    def add_mutation_override_flags(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--ungoverned-override",
+            action="store_true",
+            default=False,
+            help=(
+                "Allow mutation without SPINE_CAP_RUN_KEY "
+                "(emergency/bootstrap). Requires --reason."
+            ),
+        )
+
+    p_upsert = sub.add_parser("upsert")
+    p_upsert.add_argument("--json", required=True)
+    p_upsert.add_argument("--actor", default="")
+    p_upsert.add_argument("--reason", default=None)
+    add_mutation_override_flags(p_upsert)
+
+    p_close = sub.add_parser("close")
+    p_close.add_argument("--id", required=True)
+    p_close.add_argument("--status", required=True)
+    p_close.add_argument("--completion-level", default=None)
+    p_close.add_argument("--disposition", default=None)
+    p_close.add_argument("--reason", default=None)
+    p_close.add_argument("--actor", default="")
+    add_mutation_override_flags(p_close)
+
+    p_query = sub.add_parser("query")
+    p_query.add_argument("--id", required=True)
+
+    p_list = sub.add_parser("list")
+    p_list.add_argument("--status", default="all")
+
+    sub.add_parser("bootstrap")
+    sub.add_parser("project")
+    sub.add_parser("parity")
+
+    args = parser.parse_args()
+    cmd_map = {
+        "upsert": cmd_upsert,
+        "close": cmd_close,
+        "query": cmd_query,
+        "list": cmd_list,
+        "bootstrap": cmd_bootstrap,
+        "project": cmd_project,
+        "parity": cmd_parity,
+    }
+    cmd_map[args.command](args)
+
+
+if __name__ == "__main__":
+    main()
