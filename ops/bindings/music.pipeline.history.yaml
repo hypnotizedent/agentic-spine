@@ -1,0 +1,158 @@
+# Music Pipeline Archaeology — Full History
+# Status: reference
+# Owner: "@ronny"
+# Scope: Complete history of the music pipeline across all eras
+# Generated: 2026-03-24 from forensic trace of ronny-ops, git history, and live runtime
+
+version: 1
+owner: "@ronny"
+created: "2026-03-24"
+
+eras:
+  - id: legacy-ronny-ops
+    period: "pre-2026-02-08"
+    source: "/Users/ronnyworks/ronny-ops/ (READ-ONLY legacy)"
+    compose_file: "ronny-ops/media-stack/docker-compose.yml"
+    services:
+      lidarr:
+        image: "lscr.io/linuxserver/lidarr:latest"
+        port: 8686
+        paths:
+          config: "${DOCKER_VOLUMES}/lidarr/config"
+          music: "${MEDIA_PATH}/music"
+          downloads: "${DOWNLOADS_PATH}"
+        quality_profiles: [Standard, Lossless, Any]
+        dependencies: [prowlarr]
+      navidrome:
+        image: "deluan/navidrome:latest"
+        port: 4533
+        public_url: "https://music.ronny.works"
+        paths:
+          data: "${DOCKER_VOLUMES}/navidrome"
+          music: "${MEDIA_PATH}/music (read-only)"
+        scan_schedule: 15m
+        transcoding: {format: opus, bitrate: 192kbps, cache: 150MB}
+        integrations:
+          spotify: {env_keys: [ND_SPOTIFY_ID, ND_SPOTIFY_SECRET]}
+          lastfm: {env_keys: [ND_LASTFM_APIKEY, ND_LASTFM_SECRET]}
+          lrclib: {env_keys: [ND_LRCLIB_URL], url: "https://lrclib.net"}
+      slskd:
+        image: "slskd/slskd:latest"
+        ports: [5030, 50300]
+        paths:
+          app_data: "${DOCKER_VOLUMES}/slskd"
+          music: "${MEDIA_PATH}/music"
+          downloads: "${DOWNLOADS_PATH}/slskd"
+        env_keys: [SLSKD_REMOTE_CONFIGURATION]
+      soularr:
+        image: "mrusse08/soularr:latest"
+        paths:
+          config: "${DOCKER_VOLUMES}/soularr"
+          downloads: "${DOWNLOADS_PATH}/slskd"
+          music: "${MEDIA_PATH}/music"
+        env_keys: [SCRIPT_INTERVAL]
+        polling: 300s
+        dependencies: [slskd, lidarr]
+      spotisub:
+        image: "blastbeng/spotisub:latest"
+        port: 5183
+        paths:
+          cache: "${DOCKER_VOLUMES}/spotisub/cache"
+        env_keys: [SPOTIFY_ID, SPOTIFY_SECRET, SUBSONIC_API_HOST, SUBSONIC_API_PORT, SUBSONIC_API_USER, SUBSONIC_API_PASS]
+        connection: "http://navidrome:4533"
+    integrations_configured:
+      - "Lidarr → Prowlarr (indexer management)"
+      - "Lidarr → SABnzbd (usenet downloads)"
+      - "Soularr → Lidarr (wanted list) + slskd (soulseek grabs)"
+      - "Spotisub → Spotify (playlists) + Navidrome (subsonic API)"
+      - "Navidrome → Spotify (artist metadata) + Last.fm (scrobbling) + LRClib (lyrics)"
+    issues:
+      - "All services on single media-stack VM — no separation of concerns"
+      - "Infisical secrets management for API keys"
+
+  - id: shop-split
+    period: "2026-02-08 to 2026-03-17"
+    source: "agentic-spine git history + topology history"
+    key_events:
+      - date: "2026-02-08"
+        commit: "8619b643"
+        event: "slskd registered in compose + health on download-stack"
+      - date: "2026-02-11"
+        commit: "dc22cf11"
+        event: "slskd excluded from external health probes (localhost binding)"
+      - date: "2026-02-16"
+        commit: "1e93c842"
+        event: "Music Assistant addon v2.7.8 registered in HA (no media_player entities)"
+        gaps: [GAP-OP-895, GAP-OP-906]
+      - date: "2026-02-17"
+        commit: "acb3dd7d"
+        event: "NAVIDROME_USER → NAVIDROME_USERNAME naming fix"
+      - date: "2026-02-17"
+        commit: "5b1eb053"
+        event: "soularr status parked → active in media.services.yaml"
+      - date: "2026-02-24"
+        commit: "500f27d7"
+        event: "LOOP-MUSIC-PIPELINE-UPGRADE-20260225 created"
+      - date: "2026-02-24"
+        commit: "6d5bfe86"
+        event: "Soulseek pipeline activated — gluetun VPN (ProtonVPN → Privado), soularr 5-min cycle, huntarr continuous search, music-net Docker network"
+        gaps_fixed: [GAP-OP-887, GAP-OP-888, GAP-OP-889, GAP-OP-890, GAP-OP-891, GAP-OP-892, GAP-OP-893, GAP-OP-894]
+      - date: "2026-02-25"
+        commit: "19e1c157"
+        event: "Content snapshot baseline: 275 music artists"
+      - date: "2026-02-25"
+        commit: "ffc5ebff"
+        event: "Music pipeline loop closed, continuation loop for deferred observability"
+    service_topology:
+      download-stack: [lidarr, slskd, soularr, sabnzbd, qbittorrent, swaparr-lidarr]
+      streaming-stack: [navidrome, spotisub, jellyfin]
+    issues:
+      - "slskd + soularr on download-stack, Navidrome on streaming-stack — split architecture"
+      - "VPN provider churn: ProtonVPN → Privado within same session"
+      - "spotisub never promoted from parked in boring soak"
+      - "Navidrome lost Spotify/Last.fm/lyrics integrations during migration"
+
+  - id: home-plane
+    period: "2026-03-17 to present"
+    source: "agentic-spine bindings + live runtime probes"
+    key_events:
+      - date: "2026-03-17"
+        event: "Home plane cutover — all media containers moved to media-home (VM 106)"
+      - date: "2026-03-21"
+        event: "Lidarr activated on media-home, root folder /media/music (id=2)"
+      - date: "2026-03-22"
+        event: "Lidarr cleanup — stale SABnzbd-Home client deleted, qBit disabled, stale RPMs removed"
+      - date: "2026-03-24"
+        event: "slskd + soularr started on media-home by E2E canonicalization session"
+    current_runtime:
+      lidarr: {status: running, vm: media-home, port: 8686}
+      slskd: {status: running, vm: media-home, port: 5030, soulseek_connected: true, files_in_flight: 149}
+      soularr: {status: running, vm: media-home, actively_matching: true}
+      navidrome: {status: running, vm: media-home, port: 4533, artists_indexed: 238}
+      spotisub: {status: parked, vm: media-home, port: 8766, has_spotify_oauth: true, has_lastfm_keys: true}
+      sabnzbd: {status: running, vm: media-home, role: "sole active Lidarr download client"}
+      qbittorrent: {status: running, vm: media-home, role: "disabled in Lidarr for music"}
+    issues:
+      - "Navidrome missing legacy integrations: Spotify metadata, Last.fm scrobbling, LRClib lyrics"
+      - "Navidrome scan schedule degraded: 1h vs legacy 15m"
+      - "spotisub parked — Spotify→Navidrome discovery pipeline offline"
+      - "No import lists in Lidarr — no automated discovery flow"
+      - "No torrent indexers for music in Prowlarr — only Usenet"
+      - "218/275 artists at zero tracks — mainstream names, pipeline was dead"
+      - "24 stuck queue items — MusicBrainz metadata matching failures"
+      - "Music Assistant HA addon running but integration undocumented"
+      - "Feishin client not in any spine binding"
+
+integrations_lost_in_migration:
+  - service: navidrome
+    lost: "Spotify metadata (ND_SPOTIFY_ID, ND_SPOTIFY_SECRET)"
+    impact: "No artist images or metadata enrichment from Spotify"
+  - service: navidrome
+    lost: "Last.fm scrobbling (ND_LASTFM_APIKEY, ND_LASTFM_SECRET)"
+    impact: "No listening history, no recommendation feedback loop"
+  - service: navidrome
+    lost: "LRClib lyrics (ND_LRCLIB_URL)"
+    impact: "No lyrics display in Feishin/clients"
+  - service: navidrome
+    lost: "15-minute scan schedule (was 15m, now 1h)"
+    impact: "New imports take up to 1h to appear in streaming"
