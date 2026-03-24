@@ -559,21 +559,63 @@ def bootstrap_from_yaml(conn: sqlite3.Connection, gaps_yaml: Path) -> int:
 
 # ── Projection (SQLite → YAML) ──────────────────────────────────
 
+ARCHIVED_STATUSES = frozenset({"fixed", "closed"})
+ACTIVE_STATUSES = frozenset({"open", "accepted"})
+DEFAULT_ARCHIVE_REL = "ops/archive/operational.gaps.archive.yaml"
+
 
 def project_to_yaml(
     conn: sqlite3.Connection,
     gaps_yaml: Path,
     *,
-    archive_ref: str | None = None,
+    archive_closed: bool = True,
+    archive_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Write SQLite authority rows back to operational.gaps.yaml as a projection."""
-    all_gaps = fetch_gaps(conn)
-    yaml_entries = [gap_to_yaml_entry(g) for g in all_gaps]
+    """Write SQLite authority rows back to operational.gaps.yaml as a projection.
 
-    # Preserve existing archive_ref if not overridden.
-    existing = load_yaml(gaps_yaml)
-    if archive_ref is None and isinstance(existing, dict):
-        archive_ref = existing.get("archive_ref")
+    When archive_closed=True (default):
+      - Active gaps (open/accepted) are written to the main YAML.
+      - Fixed/closed gaps are written to a separate archive file.
+      - The main YAML carries an archive_ref field pointing to the archive.
+    When archive_closed=False:
+      - All gaps are written to the main YAML (legacy behaviour).
+    """
+    all_gaps = fetch_gaps(conn)
+
+    if archive_closed:
+        active_gaps = [g for g in all_gaps if g.get("status") not in ARCHIVED_STATUSES]
+        archived_gaps = [g for g in all_gaps if g.get("status") in ARCHIVED_STATUSES]
+
+        # Resolve archive output path.
+        if archive_path is None:
+            archive_path = gaps_yaml.parent.parent / "archive" / "operational.gaps.archive.yaml"
+        archive_rel = str(archive_path.relative_to(gaps_yaml.parent.parent.parent)
+                          if archive_path.is_absolute() else archive_path)
+
+        # Write archive file.
+        archive_entries = [gap_to_yaml_entry(g) for g in archived_gaps]
+        archive_payload: dict[str, Any] = {
+            "version": 1,
+            "archived_at": utc_now_text(),
+            "description": (
+                "Archived gaps with status fixed or closed. "
+                "Read-only historical reference. "
+                "Do not mutate — use operational.gaps.yaml for active work."
+            ),
+            "statuses_archived": sorted(ARCHIVED_STATUSES),
+            "count": len(archive_entries),
+            "gaps": archive_entries,
+        }
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        archive_path.write_text(dump_yaml(archive_payload), encoding="utf-8")
+
+        yaml_entries = [gap_to_yaml_entry(g) for g in active_gaps]
+        archive_ref: str | None = archive_rel
+    else:
+        yaml_entries = [gap_to_yaml_entry(g) for g in all_gaps]
+        archived_gaps = []
+        archive_ref = None
+        archive_path = None
 
     payload: dict[str, Any] = {
         "version": 1,
@@ -591,27 +633,47 @@ def project_to_yaml(
     update_watermark(conn, "gaps.yaml", yaml_hash)
     conn.commit()
 
-    open_count = sum(1 for g in all_gaps if g.get("status") in ("open", "accepted"))
-    closed_count = sum(1 for g in all_gaps if g.get("status") in ("fixed", "closed"))
+    open_count = sum(1 for g in all_gaps if g.get("status") in ACTIVE_STATUSES)
+    closed_count = sum(1 for g in all_gaps if g.get("status") in ARCHIVED_STATUSES)
 
-    return {
+    result: dict[str, Any] = {
         "total": len(all_gaps),
+        "active": len(yaml_entries),
+        "archived": len(archived_gaps),
         "open": open_count,
         "closed": closed_count,
         "yaml_hash": yaml_hash,
     }
+    if archive_path is not None:
+        result["archive_path"] = str(archive_path)
+    return result
 
 
 # ── Parity snapshot ─────────────────────────────────────────────
 
 
 def db_parity_snapshot(conn: sqlite3.Connection, gaps_yaml: Path) -> dict[str, Any]:
-    """Compare SQLite authority against the YAML projection on disk."""
-    db_gaps = fetch_gaps(conn)
+    """Compare SQLite authority against the YAML projection on disk.
+
+    When the main YAML carries an archive_ref, the parity check compares only
+    active (non-archived) DB entries against the YAML gaps list. Archived gaps
+    are expected to be absent from the main YAML — their presence in the DB is
+    not a parity violation.
+    """
+    yaml_doc = load_yaml(gaps_yaml) or {}
+    archive_ref = yaml_doc.get("archive_ref") if isinstance(yaml_doc, dict) else None
+
+    all_db_gaps = fetch_gaps(conn)
+
+    # When archive mode is active, restrict parity scope to active gaps only.
+    if archive_ref:
+        db_gaps = [g for g in all_db_gaps if g.get("status") not in ARCHIVED_STATUSES]
+    else:
+        db_gaps = all_db_gaps
+
     db_entries = [gap_to_yaml_entry(g) for g in db_gaps]
     db_json = json.dumps(db_entries, sort_keys=True)
 
-    yaml_doc = load_yaml(gaps_yaml) or {}
     yaml_gaps = yaml_doc.get("gaps", []) if isinstance(yaml_doc, dict) else []
     yaml_json = json.dumps(yaml_gaps, sort_keys=True)
 
@@ -622,7 +684,7 @@ def db_parity_snapshot(conn: sqlite3.Connection, gaps_yaml: Path) -> dict[str, A
         "SELECT sha256, version, projected_at_utc FROM gaps_projection_watermarks WHERE surface = 'gaps.yaml'"
     ).fetchone()
 
-    return {
+    result: dict[str, Any] = {
         "db_hash": sha256_text(db_json),
         "yaml_hash": sha256_text(yaml_json),
         "match": db_json == yaml_json,
@@ -633,6 +695,11 @@ def db_parity_snapshot(conn: sqlite3.Connection, gaps_yaml: Path) -> dict[str, A
         "watermark_hash": wm_row["sha256"] if wm_row else None,
         "watermark_version": int(wm_row["version"]) if wm_row else 0,
     }
+    if archive_ref:
+        archived_count = sum(1 for g in all_db_gaps if g.get("status") in ARCHIVED_STATUSES)
+        result["archive_ref"] = archive_ref
+        result["archived_in_db"] = archived_count
+    return result
 
 
 # ── Integrity ────────────────────────────────────────────────────

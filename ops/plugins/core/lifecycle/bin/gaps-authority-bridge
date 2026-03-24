@@ -260,7 +260,11 @@ def cmd_project(args: argparse.Namespace) -> None:
     conn = gsa.connect(db_path)
     gsa.ensure_schema(conn)
     gsa.bootstrap_from_yaml(conn, gaps_yaml)
-    result = gsa.project_to_yaml(conn, gaps_yaml)
+    archive_closed = not getattr(args, "no_archive", False)
+    archive_path = None
+    if getattr(args, "archive_path", None):
+        archive_path = Path(args.archive_path)
+    result = gsa.project_to_yaml(conn, gaps_yaml, archive_closed=archive_closed, archive_path=archive_path)
     conn.close()
     print(json.dumps({"ok": True, "projection": result}))
 
@@ -356,7 +360,18 @@ def main() -> None:
     p_query.add_argument("--id", required=True)
 
     sub.add_parser("bootstrap")
-    sub.add_parser("project")
+    p_project = sub.add_parser("project")
+    p_project.add_argument(
+        "--no-archive",
+        action="store_true",
+        default=False,
+        help="Disable archive split — write all gaps (including fixed/closed) to main YAML.",
+    )
+    p_project.add_argument(
+        "--archive-path",
+        default=None,
+        help="Override the archive output path (default: ops/archive/operational.gaps.archive.yaml).",
+    )
     sub.add_parser("next-id")
     sub.add_parser("parity")
 
