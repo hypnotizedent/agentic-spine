@@ -22,7 +22,8 @@ mkdir -p "$SCOPES"
 export SPINE_ROOT="$ROOT"
 export SPINE_STATE="$STATE"
 export GAPS_DB_PATH="$STATE/shared_authority.db"
-export GAPS_YAML_PATH="$TEST_DIR/operational.gaps.yaml"
+export GAPS_YAML_PATH="$TEST_DIR/ops/bindings/operational.gaps.yaml"
+mkdir -p "$TEST_DIR/ops/bindings" "$TEST_DIR/ops/archive"
 
 cat > "$GAPS_YAML_PATH" <<'YAML'
 version: 1
@@ -126,12 +127,30 @@ python3 "$BRIDGE" project >/dev/null
 TOTAL=$((TOTAL + 1))
 PROJECTED_STATUS="$(python3 - <<'PY'
 import yaml, os
-with open(os.environ["GAPS_YAML_PATH"], "r", encoding="utf-8") as fh:
+from pathlib import Path
+
+gaps_path = Path(os.environ["GAPS_YAML_PATH"])
+with open(gaps_path, "r", encoding="utf-8") as fh:
     doc = yaml.safe_load(fh)
-for gap in doc["gaps"]:
+
+# With archive mode, fixed gaps are in the archive file, not the main YAML.
+found = ""
+for gap in doc.get("gaps", []):
     if gap["id"] == "GAP-OP-9991":
-        print(f'{gap["status"]}|{gap.get("fixed_in","")}')
+        found = f'{gap["status"]}|{gap.get("fixed_in","")}'
         break
+
+if not found and doc.get("archive_ref"):
+    archive_path = gaps_path.parent.parent / "archive" / "operational.gaps.archive.yaml"
+    if archive_path.exists():
+        with open(archive_path, "r", encoding="utf-8") as fh:
+            archive_doc = yaml.safe_load(fh)
+        for gap in archive_doc.get("gaps", []):
+            if gap["id"] == "GAP-OP-9991":
+                found = f'{gap["status"]}|{gap.get("fixed_in","")}'
+                break
+
+print(found)
 PY
 )"
 if [[ "$PROJECTED_STATUS" == "fixed|TEST-SHA" ]]; then

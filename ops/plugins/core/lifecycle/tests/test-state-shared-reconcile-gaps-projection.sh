@@ -13,8 +13,9 @@ trap 'rm -rf "$tmpdir"' EXIT
 state_root="$tmpdir/state"
 plans_dir="$state_root/plans"
 loop_scopes_dir="$state_root/loop-scopes"
-gaps_yaml="$tmpdir/operational.gaps.yaml"
+gaps_yaml="$tmpdir/ops/bindings/operational.gaps.yaml"
 mkdir -p "$plans_dir" "$state_root/plans/_snapshots" "$loop_scopes_dir"
+mkdir -p "$tmpdir/ops/bindings" "$tmpdir/ops/archive"
 
 cat > "$loop_scopes_dir/LOOP-SPINE-V3-FORGE-LIFECYCLE-CANONICALIZATION-20260323.scope.md" <<'EOF'
 ---
@@ -113,7 +114,7 @@ json="$(
   "$SCRIPT" --fix --json
 )"
 
-python3 - <<'PY' "$json" "$gaps_yaml"
+python3 - <<'PY' "$json" "$gaps_yaml" "$tmpdir"
 import json
 import sys
 from pathlib import Path
@@ -122,6 +123,7 @@ import yaml
 
 payload = json.loads(sys.argv[1])
 gaps_path = Path(sys.argv[2])
+tmpdir = Path(sys.argv[3])
 
 assert payload["status"] == "done", payload
 assert payload["converged"] is True, payload
@@ -131,15 +133,29 @@ assert payload["gaps_project_rc"] == 0, payload
 assert payload["gaps_projection"]["ok"] is True, payload
 
 doc = yaml.safe_load(gaps_path.read_text())
-rows = {row["id"]: row for row in doc["gaps"]}
 
-assert rows["GAP-OP-1586"]["status"] == "fixed", rows["GAP-OP-1586"]
-assert rows["GAP-OP-1586"]["fixed_in"] == "5cedf09b", rows["GAP-OP-1586"]
-assert rows["GAP-OP-1586"]["closed_at"], rows["GAP-OP-1586"]
-
-assert rows["GAP-OP-1592"]["status"] == "fixed", rows["GAP-OP-1592"]
-assert rows["GAP-OP-1592"]["fixed_in"] == "worktree.lifecycle.contract.yaml v1.5 + wired capabilities (reconcile/cleanup/root.normalize)", rows["GAP-OP-1592"]
-assert rows["GAP-OP-1592"]["closed_at"], rows["GAP-OP-1592"]
+if doc.get("archive_ref"):
+    main_rows = {row["id"]: row for row in doc.get("gaps", [])}
+    assert "GAP-OP-1586" not in main_rows, f"Fixed gap should be in archive: {main_rows.get('GAP-OP-1586')}"
+    assert "GAP-OP-1592" not in main_rows, f"Fixed gap should be in archive: {main_rows.get('GAP-OP-1592')}"
+    archive_path = gaps_path.parent.parent / "archive" / "operational.gaps.archive.yaml"
+    if not archive_path.exists():
+        archive_path = tmpdir / "ops" / "archive" / "operational.gaps.archive.yaml"
+    assert archive_path.exists(), f"Archive file not found: {archive_path}"
+    archive_doc = yaml.safe_load(archive_path.read_text())
+    archive_rows = {row["id"]: row for row in archive_doc.get("gaps", [])}
+    assert archive_rows["GAP-OP-1586"]["status"] == "fixed", archive_rows["GAP-OP-1586"]
+    assert archive_rows["GAP-OP-1586"]["fixed_in"] == "5cedf09b", archive_rows["GAP-OP-1586"]
+    assert archive_rows["GAP-OP-1586"]["closed_at"], archive_rows["GAP-OP-1586"]
+    assert archive_rows["GAP-OP-1592"]["status"] == "fixed", archive_rows["GAP-OP-1592"]
+    assert archive_rows["GAP-OP-1592"]["closed_at"], archive_rows["GAP-OP-1592"]
+else:
+    rows = {row["id"]: row for row in doc["gaps"]}
+    assert rows["GAP-OP-1586"]["status"] == "fixed", rows["GAP-OP-1586"]
+    assert rows["GAP-OP-1586"]["fixed_in"] == "5cedf09b", rows["GAP-OP-1586"]
+    assert rows["GAP-OP-1586"]["closed_at"], rows["GAP-OP-1586"]
+    assert rows["GAP-OP-1592"]["status"] == "fixed", rows["GAP-OP-1592"]
+    assert rows["GAP-OP-1592"]["closed_at"], rows["GAP-OP-1592"]
 PY
 
 echo "PASS: state-shared-reconcile refreshes tracked gap projection after convergence"

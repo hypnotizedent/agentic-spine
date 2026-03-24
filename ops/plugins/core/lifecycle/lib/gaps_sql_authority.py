@@ -486,7 +486,23 @@ def gap_event_history(conn: sqlite3.Connection, gap_id: str) -> list[dict[str, A
 # ── Watermarks ───────────────────────────────────────────────────
 
 
-def update_watermark(conn: sqlite3.Connection, surface: str, sha: str) -> None:
+def _ensure_watermark_stat_columns(conn: sqlite3.Connection) -> None:
+    """Add file_size and file_mtime_ns columns if they don't exist yet."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(gaps_projection_watermarks)").fetchall()}
+    if "file_size" not in cols:
+        conn.execute("ALTER TABLE gaps_projection_watermarks ADD COLUMN file_size INTEGER")
+    if "file_mtime_ns" not in cols:
+        conn.execute("ALTER TABLE gaps_projection_watermarks ADD COLUMN file_mtime_ns INTEGER")
+
+
+def update_watermark(
+    conn: sqlite3.Connection,
+    surface: str,
+    sha: str,
+    *,
+    file_size: int | None = None,
+    file_mtime_ns: int | None = None,
+) -> None:
     row = conn.execute(
         "SELECT version FROM gaps_projection_watermarks WHERE surface = ?", (surface,)
     ).fetchone()
@@ -502,13 +518,58 @@ def update_watermark(conn: sqlite3.Connection, surface: str, sha: str) -> None:
         """,
         (surface, sha, version, utc_now_text()),
     )
+    if file_size is not None and file_mtime_ns is not None:
+        _ensure_watermark_stat_columns(conn)
+        conn.execute(
+            "UPDATE gaps_projection_watermarks SET file_size = ?, file_mtime_ns = ? WHERE surface = ?",
+            (file_size, file_mtime_ns, surface),
+        )
 
 
 # ── Bootstrap (YAML → SQLite) ───────────────────────────────────
 
 
+def _yaml_file_stats(gaps_yaml: Path) -> tuple[int, int]:
+    """Return (file_size, mtime_ns) for fast-path change detection."""
+    st = gaps_yaml.stat()
+    return st.st_size, st.st_mtime_ns
+
+
 def bootstrap_from_yaml(conn: sqlite3.Connection, gaps_yaml: Path) -> int:
-    """Import operational.gaps.yaml into SQLite if DB is empty or YAML changed."""
+    """Import operational.gaps.yaml into SQLite if DB is empty or YAML changed.
+
+    Fast path: when the DB already has rows, compare the YAML file's size and
+    mtime against the watermark before doing any YAML parsing.  This avoids
+    the expensive load_yaml/dump_yaml/sha256 cycle on every single gap
+    operation (file, close, query, parity).
+    """
+    if not gaps_yaml.exists():
+        return 0
+
+    count = gap_count(conn)
+
+    # ── Fast path: DB populated, file unchanged since last watermark ──
+    if count > 0:
+        _ensure_watermark_stat_columns(conn)
+        wm_row = conn.execute(
+            "SELECT sha256, file_size, file_mtime_ns FROM gaps_projection_watermarks WHERE surface = 'gaps.yaml'"
+        ).fetchone()
+        if wm_row is not None:
+            try:
+                cur_size, cur_mtime_ns = _yaml_file_stats(gaps_yaml)
+            except OSError:
+                cur_size, cur_mtime_ns = -1, -1
+            wm_size = wm_row["file_size"]
+            wm_mtime = wm_row["file_mtime_ns"]
+            if (
+                wm_size is not None
+                and wm_mtime is not None
+                and cur_size == wm_size
+                and cur_mtime_ns == wm_mtime
+            ):
+                return 0  # Fast path: file unchanged, skip YAML parse.
+
+    # ── Slow path: parse YAML and check SHA ──
     doc = load_yaml(gaps_yaml)
     if not isinstance(doc, dict):
         return 0
@@ -519,13 +580,19 @@ def bootstrap_from_yaml(conn: sqlite3.Connection, gaps_yaml: Path) -> int:
     yaml_text = dump_yaml(doc)
     yaml_hash = sha256_text(yaml_text)
 
-    count = gap_count(conn)
     if count > 0:
         wm_row = conn.execute(
             "SELECT sha256 FROM gaps_projection_watermarks WHERE surface = 'gaps.yaml'"
         ).fetchone()
         if wm_row is not None and wm_row["sha256"] == yaml_hash:
-            return 0  # DB and YAML in sync.
+            # Hash matches but stat metadata was stale/missing; refresh it.
+            try:
+                fsize, fmtime = _yaml_file_stats(gaps_yaml)
+            except OSError:
+                fsize, fmtime = None, None
+            update_watermark(conn, "gaps.yaml", yaml_hash, file_size=fsize, file_mtime_ns=fmtime)
+            conn.commit()
+            return 0
         # YAML changed externally — re-sync from YAML.
         conn.execute("DELETE FROM gaps")
         conn.execute("DELETE FROM gap_events")
@@ -552,7 +619,11 @@ def bootstrap_from_yaml(conn: sqlite3.Connection, gaps_yaml: Path) -> int:
         )
         imported += 1
 
-    update_watermark(conn, "gaps.yaml", yaml_hash)
+    try:
+        fsize, fmtime = _yaml_file_stats(gaps_yaml)
+    except OSError:
+        fsize, fmtime = None, None
+    update_watermark(conn, "gaps.yaml", yaml_hash, file_size=fsize, file_mtime_ns=fmtime)
     conn.commit()
     return imported
 
@@ -630,7 +701,11 @@ def project_to_yaml(
     gaps_yaml.write_text(yaml_text, encoding="utf-8")
 
     yaml_hash = sha256_text(yaml_text)
-    update_watermark(conn, "gaps.yaml", yaml_hash)
+    try:
+        cur_size, cur_mtime_ns = _yaml_file_stats(gaps_yaml)
+    except OSError:
+        cur_size, cur_mtime_ns = None, None
+    update_watermark(conn, "gaps.yaml", yaml_hash, file_size=cur_size, file_mtime_ns=cur_mtime_ns)
     conn.commit()
 
     open_count = sum(1 for g in all_gaps if g.get("status") in ACTIVE_STATUSES)
