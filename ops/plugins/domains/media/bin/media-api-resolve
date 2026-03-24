@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# media.api.resolve — Canonical API key resolver for media services
+# Usage: ./bin/ops cap run media.api.resolve -- <service>
+# Returns: API key for the requested service on stdout
+# Services: radarr, sonarr, lidarr, prowlarr, sabnzbd, jellyfin, jellyseerr
+#
+# SSOT: paths match media.pipeline.contract.yaml api_key_resolution section.
+# Added 2026-03-24 by LOOP-INFISICAL-AUTH-CONFIG-PATH-AUDIT-20260324
+set -euo pipefail
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+SERVICE="${1:-}"
+
+# --- resolve media-home SSH target ---
+RESOLVED_IP=""
+RESOLVED_USER="ubuntu"
+if [[ -f "$SPINE_ROOT/ops/lib/ssh-resolve.sh" ]]; then
+  # shellcheck source=ops/lib/ssh-resolve.sh
+  source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+  # ssh_resolve_host_with_fallback returns "<ip> <path>" (space-separated)
+  RESOLVE_RESULT="$(ssh_resolve_host_with_fallback "media-home" 2>/dev/null || true)"
+  RESOLVED_IP="${RESOLVE_RESULT%% *}"  # extract just the IP
+  RESOLVED_USER="$(ssh_resolve_user "media-home" "ubuntu" 2>/dev/null || echo "ubuntu")"
+fi
+
+# Fallback if ssh-resolve.sh unavailable or returned empty
+if [[ -z "$RESOLVED_IP" ]]; then
+  RESOLVED_IP="10.0.0.106"
+fi
+
+MEDIA_HOST="${RESOLVED_USER}@${RESOLVED_IP}"
+
+SSH_OPTS=(-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+
+# --- config.xml services (ARR apps) ---
+declare -A CONFIG_PATHS=(
+  [radarr]="/srv/appdata/compose/media-write/volumes/radarr/config/config.xml"
+  [sonarr]="/srv/appdata/compose/media-write/volumes/sonarr/config/config.xml"
+  [lidarr]="/srv/appdata/compose/media-write/volumes/lidarr/config/config.xml"
+  [prowlarr]="/srv/appdata/compose/media-write/volumes/prowlarr/config/config.xml"
+)
+
+# --- INI file services ---
+declare -A INI_PATHS=(
+  [sabnzbd]="/srv/appdata/compose/media-write/volumes/sabnzbd/config/sabnzbd.ini"
+)
+
+# --- .env file services ---
+declare -A ENV_KEYS=(
+  [jellyfin]="JELLYFIN_API_TOKEN:/srv/appdata/compose/media-stack/.env"
+  [jellyseerr]="JELLYSEERR_API_KEY:/srv/appdata/compose/media-stack/.env"
+)
+
+ALL_SERVICES=("${!CONFIG_PATHS[@]}" "${!INI_PATHS[@]}" "${!ENV_KEYS[@]}")
+
+if [[ -z "$SERVICE" ]]; then
+  echo "media.api.resolve — Canonical API key resolver for media services"
+  echo ""
+  echo "Usage: ./bin/ops cap run media.api.resolve -- <service>"
+  echo ""
+  echo "Services: ${ALL_SERVICES[*]}"
+  echo ""
+  echo "Returns the API key on stdout. Non-zero exit if extraction fails."
+  exit 0
+fi
+
+KEY=""
+
+if [[ -n "${CONFIG_PATHS[$SERVICE]:-}" ]]; then
+  # XML config.xml extraction
+  KEY=$(ssh "${SSH_OPTS[@]}" "$MEDIA_HOST" \
+    "sudo sed -n 's/.*<ApiKey>\(.*\)<\/ApiKey>.*/\1/p' '${CONFIG_PATHS[$SERVICE]}'" 2>/dev/null) || true
+elif [[ -n "${INI_PATHS[$SERVICE]:-}" ]]; then
+  # INI file extraction (sabnzbd)
+  KEY=$(ssh "${SSH_OPTS[@]}" "$MEDIA_HOST" \
+    "sudo grep '^api_key' '${INI_PATHS[$SERVICE]}' | cut -d'=' -f2 | tr -d ' '" 2>/dev/null) || true
+elif [[ -n "${ENV_KEYS[$SERVICE]:-}" ]]; then
+  # .env file extraction
+  ENV_KEY="${ENV_KEYS[$SERVICE]%%:*}"
+  ENV_FILE="${ENV_KEYS[$SERVICE]#*:}"
+  KEY=$(ssh "${SSH_OPTS[@]}" "$MEDIA_HOST" \
+    "sudo grep '^${ENV_KEY}=' '${ENV_FILE}' | cut -d'=' -f2" 2>/dev/null) || true
+else
+  echo "STOP: unknown service '$SERVICE'" >&2
+  echo "Known services: ${ALL_SERVICES[*]}" >&2
+  exit 2
+fi
+
+if [[ -n "$KEY" ]]; then
+  echo "$KEY"
+else
+  echo "STOP: could not extract API key for $SERVICE from $MEDIA_HOST" >&2
+  exit 2
+fi
