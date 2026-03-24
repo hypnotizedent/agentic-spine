@@ -668,7 +668,7 @@ run_cap() {
     if [[ -z "${OPS_CAP_STACK:-}" && "$safety" == "mutating" ]]; then
       local policy_guard_exempt=0
       case "$name" in
-        session.start|session.v3.attach|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate|worktree.lifecycle.managed.sync|session.execution.lane.bootstrap|session.execution.lane.closeout|session.execution.lane.scan|friction.ingest|friction.reconcile|friction.close.resolved|capability.map.projection.build|gaps.file|gaps.close|gaps.claim|gaps.status)
+        session.start|session.v3.attach|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate|worktree.lifecycle.managed.sync|session.execution.lane.bootstrap|session.execution.lane.closeout|session.execution.lane.scan|friction.ingest|friction.reconcile|friction.close.resolved|capability.map.projection.build|gaps.file|gaps.close|gaps.claim|gaps.status|planning.plans.reconcile)
           policy_guard_exempt=1
           ;;
       esac
@@ -731,7 +731,7 @@ run_cap() {
       wt_bypass_lc="$(printf '%s' "$wt_bypass" | tr '[:upper:]' '[:lower:]')"
 
       case "$name" in
-        session.start|session.v3.attach|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate|worktree.lifecycle.managed.sync|session.execution.lane.bootstrap|session.execution.lane.closeout|session.execution.lane.scan|friction.ingest|friction.reconcile|friction.close.resolved|capability.map.projection.build|gaps.file|gaps.close|gaps.claim|gaps.status)
+        session.start|session.v3.attach|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate|worktree.lifecycle.managed.sync|session.execution.lane.bootstrap|session.execution.lane.closeout|session.execution.lane.scan|friction.ingest|friction.reconcile|friction.close.resolved|capability.map.projection.build|gaps.file|gaps.close|gaps.claim|gaps.status|planning.plans.reconcile)
           context_guard_exempt=1
           ;;
       esac
