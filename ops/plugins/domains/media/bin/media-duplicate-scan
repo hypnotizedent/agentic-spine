@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# media.duplicate.scan — Detect duplicate movies in the library
+set -euo pipefail
+
+resolve_media_home() {
+  for host in "ubuntu@10.0.0.106" "ubuntu@100.113.72.41"; do
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" "echo ok" &>/dev/null; then
+      echo "$host"; return
+    fi
+  done
+  echo "ERROR: Cannot reach media-home" >&2; exit 1
+}
+
+MEDIA_HOME=$(resolve_media_home)
+MEDIA_IP=$(echo "$MEDIA_HOME" | cut -d@ -f2)
+
+RADARR_KEY=$(ssh "$MEDIA_HOME" \
+  "sudo sed -n 's/.*<ApiKey>\(.*\)<\/ApiKey>.*/\1/p' /srv/appdata/compose/media-write/volumes/radarr/config/config.xml" 2>/dev/null)
+
+echo "=== DUPLICATE MOVIE SCAN ==="
+echo "Date: $(date -u +%Y-%m-%dT%H:%MZ)"
+echo ""
+
+echo "--- Multi-file folders ---"
+ssh "$MEDIA_HOME" 'for dir in /srv/media/movies/*/; do
+  count=$(find "$dir" -maxdepth 1 -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.avi" -o -name "*.m4v" \) | wc -l)
+  [ "$count" -gt 1 ] && echo "DUPE: $dir ($count files)"
+done'
+
+echo ""
+echo "--- Radarr TMDB duplicates ---"
+if [ -n "$RADARR_KEY" ]; then
+  curl -s "http://$MEDIA_IP:7878/api/v3/movie" -H "X-Api-Key: $RADARR_KEY" \
+    | tr -d '\000-\037' | jq -r '
+    group_by(.tmdbId) | map(select(length > 1)) | .[] |
+    "TMDB_DUPE (\(.[0].tmdbId)): " + ([.[] | "\(.title) (\(.year))"] | join(" vs "))
+  '
+else
+  echo "WARN: No Radarr API key"
+fi
+
+echo ""
+echo "=== SCAN COMPLETE ==="
