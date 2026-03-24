@@ -2,8 +2,7 @@
 set -euo pipefail
 
 # Shared path resolution for workflow wrappers that need the workbench repo.
-# Keep explicit overrides first and only fall back to a canonical checkout
-# when no managed path is supplied.
+# Keep explicit overrides first and fail closed when no managed path is found.
 
 if [[ -z "${SPINE_ROOT:-}" ]]; then
   SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
@@ -39,5 +38,6 @@ workbench_repo_root() {
     fi
   done
 
-  printf '%s\n' "${HOME}/code/workbench"
+  echo "ERROR: unable to resolve workbench repo root from managed overrides or canonical sibling checkout" >&2
+  exit 1
 }
