@@ -332,6 +332,49 @@ path_tuples:
     evidence: "Feb 25 audit + 2026-03-04: shop docker inspect confirms historical mount. 2026-03-20: service is defined on media-home VM 106 and intentionally parked."
     path_parity_status: "CONSISTENT"
 
+# Post-download automation path topology
+# Added 2026-03-24 as part of media E2E canonicalization
+post_download_automation:
+  unpackerr:
+    vm: media-home
+    status: active
+    container_path: /downloads
+    host_path: /srv/media/downloads
+    watch_interval: 1m
+    connected_services: [radarr, sonarr, lidarr]
+    note: "Monitors ARR queues for completed downloads, extracts archives if needed"
+  autopulse:
+    vm: media-home
+    status: active
+    listen_port: 2875
+    trigger: webhook
+    target: jellyfin
+    mount: "/srv/appdata/compose/media-write/volumes/autopulse -> /data"
+    path_rewrites:
+      radarr:
+        from: /movies
+        to: /media/movies
+        status: stale
+        bug: "ARR now sends /media/movies, rewrite produces /media/media/movies"
+        fix: "Change FROM to /media/movies or remove rewrite"
+      sonarr:
+        from: /tv
+        to: /media/tv
+        status: stale
+        bug: "ARR now sends /media/tv, rewrite produces /media/media/tv"
+        fix: "Change FROM to /media/tv or remove rewrite"
+      lidarr:
+        from: /music
+        to: /media/music
+        status: stale
+        bug: "ARR now sends /media/music, rewrite produces /media/media/music"
+        fix: "Change FROM to /media/music or remove rewrite"
+    known_issue: |
+      Path rewrites written when ARR used narrow mounts (/tv, /movies, /music).
+      After 2026-03-21 hardlink fix, ARR now uses broad /media mount (/media/tv, etc.).
+      Rewrites do substring replacement: /tv → /media/tv inside /media/tv → /media/media/tv.
+      18 Cheers episodes failed to trigger Jellyfin scan on 2026-03-23.
+
 # Known findings from Feb 25 audit requiring attention
 known_findings:
   - id: posterizarr-permissions

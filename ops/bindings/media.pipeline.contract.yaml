@@ -1,0 +1,440 @@
+# MEDIA PIPELINE & CONTAINER CONTRACT
+# Status: authoritative
+# Owner: "@ronny"
+# Scope: How media flows, all containers, all configs
+#
+# OPERATOR DIRECTIVES:
+# - Home (media-home VM 106) is the canonical pipeline host
+# - ARR stack canonical = HOME. Old shop copies sit as parked residue.
+# - NO FILE DELETES by terminals
+#
+# For what media lives where: ops/bindings/media.master.inventory.contract.yaml
+# For per-title detail: ~/code/workbench/agents/media/data/MEDIA_LIBRARY_CATALOG.yaml
+
+contract: MEDIA_PIPELINE_V1
+version: "1.0"
+created: "2026-03-24"
+owner: "@ronny"
+
+pipeline:
+  canonical_flow:
+    description: "request → grab → download → extract → import → library → client → archive"
+    steps:
+      1_request:
+        service: jellyseerr
+        port: 5055
+        action: "User requests content via web UI"
+      2_grab:
+        service: "radarr | sonarr | lidarr"
+        action: "Searches indexers via Prowlarr, grabs NZB/torrent"
+      3_download:
+        primary:
+          service: sabnzbd
+          protocol: usenet
+          priority: 1
+          categories: [tv, movies, audio]
+          staging: /media/downloads/complete/{category}
+        secondary:
+          service: qbittorrent
+          protocol: torrent
+          priority: 2
+          vpn: gluetun
+          categories: [sonarr, radarr]
+          staging: /media/downloads/complete/{category}
+          enabled_in: [sonarr, radarr]
+          disabled_in: [lidarr]
+      4_extract:
+        service: unpackerr
+        action: "Extracts archives if needed. Monitors Radarr/Sonarr/Lidarr queues."
+        watch_interval: 1m
+        current_queue: "Radarr: 2, Sonarr: 409, Lidarr: 32"
+      5_import:
+        service: "radarr | sonarr | lidarr"
+        action: "Renames and hardlinks from download staging to library root"
+        hardlink_enabled: true
+        hardlink_note: "Broad /media mount enables hardlinks across downloads and library roots (same filesystem)"
+      6_notify:
+        service: autopulse
+        port: 2875
+        action: "Receives webhook from ARR, triggers Jellyfin/Navidrome library scan"
+        current_status: broken
+        bug: "Path rewrites produce double-prefix (/media/media/tv/) — see inventory contract known_issues"
+      7_client:
+        video: {service: jellyfin, port: 8096}
+        music: {service: navidrome, port: 4533}
+        action: "Serves content to user"
+      8_archive:
+        service: "operator-initiated rsync"
+        scope: "Movies only, after watched"
+        flow: "home NAS → md1400"
+        automation: none
+        note: "Operator moves on his word only. No automatic promotion."
+
+  home_download_flow:
+    description: "ARR canonical downloads — all new content"
+    host: media-home
+    vm_id: 106
+    usenet:
+      client: sabnzbd
+      priority: 1
+      categories: [tv, movies, audio]
+      staging_paths:
+        tv: /media/downloads/complete/tv
+        movies: /media/downloads/complete/movies
+        audio: /media/downloads/complete/audio
+    torrent:
+      client: qbittorrent
+      priority: 2
+      vpn: gluetun
+      categories: [sonarr, radarr]
+      staging_paths:
+        sonarr: /media/downloads/complete/sonarr
+        radarr: /media/downloads/complete/radarr
+
+  shop_download_flow:
+    description: "Alternative download plane — games, promoted blurays, special keeps"
+    host: pve
+    target: md1400
+    path: /md1400/stage
+    note: "Plumbing stays open. ARR does NOT use this path for new canonical content."
+
+# Container inventory — 29 containers on media-home (VM 106)
+# Traced: 2026-03-24 via docker ps -a on ubuntu@10.0.0.106
+# 3 compose stacks: media-write, media-stack, media-playback
+containers:
+  compose_stacks:
+    - path: /srv/appdata/compose/media-write/docker-compose.yml
+      role: "ARR management + download clients + utilities"
+    - path: /srv/appdata/compose/media-stack/docker-compose.yml
+      role: "Core media stack services"
+    - path: /srv/appdata/compose/media-playback/docker-compose.yml
+      role: "Streaming/playback services"
+
+  active:
+    # Management (*arr stack)
+    radarr:
+      vm: media-home
+      port: 7878
+      status: running
+      category: management
+      uptime: "2 days"
+      health: healthy
+      role: "Movie management. 1 movie tracked."
+      dependencies: [prowlarr, sabnzbd, qbittorrent]
+
+    sonarr:
+      vm: media-home
+      port: 8989
+      status: running
+      category: management
+      uptime: "45 hours"
+      health: healthy
+      role: "TV management. 129 series (72 monitored). 401 queue items stuck."
+      dependencies: [prowlarr, sabnzbd, qbittorrent]
+
+    lidarr:
+      vm: media-home
+      port: 8686
+      status: running
+      category: management
+      uptime: "2 days"
+      health: healthy
+      role: "Music management. 275 artists (275 monitored, 49 with tracks). SABnzbd only."
+      dependencies: [prowlarr, sabnzbd]
+
+    prowlarr:
+      vm: media-home
+      port: 9696
+      status: running
+      category: indexing
+      uptime: "2 days"
+      health: healthy
+      role: "Indexer manager for all *arr services"
+
+    # Download clients
+    sabnzbd:
+      vm: media-home
+      port: 8080
+      status: running
+      category: download
+      uptime: "37 hours"
+      health: healthy
+      role: "Primary usenet downloader"
+      ingest_role: primary
+      protocol: usenet
+
+    qbittorrent:
+      vm: media-home
+      port: 8081
+      status: running
+      category: download
+      uptime: "46 hours"
+      health: healthy
+      role: "Secondary torrent downloader. VPN-tunneled via gluetun."
+      ingest_role: secondary
+      protocol: torrent
+      network_mode: "container:gluetun"
+
+    # Post-download automation
+    unpackerr:
+      vm: media-home
+      port: null
+      status: running
+      category: utility
+      uptime: "1 hour"
+      health: operational
+      role: "Archive extraction. Monitors Radarr (2), Sonarr (409), Lidarr (32) queues."
+      note: "No HTTP port. Health inferred from log output."
+
+    autopulse:
+      vm: media-home
+      port: 2875
+      status: running
+      category: utility
+      uptime: "1 hour"
+      health: degraded
+      role: "Library refresh trigger via webhooks to Jellyfin"
+      degraded_reason: "Path rewrite bug causing /media/media/ double-prefix. Jellyfin scan failures."
+      mount: "/srv/appdata/compose/media-write/volumes/autopulse -> /data"
+      path_rewrites:
+        radarr: {from: /movies, to: /media/movies, status: stale}
+        sonarr: {from: /tv, to: /media/tv, status: stale}
+        lidarr: {from: /music, to: /media/music, status: stale}
+      fix_needed: "Update rewrites: FROM should match current ARR paths (/media/movies, /media/tv, /media/music)"
+
+    # Streaming
+    jellyfin:
+      vm: media-home
+      port: 8096
+      status: running
+      category: streaming
+      uptime: "2 days"
+      health: healthy
+      role: "Canonical home video streaming. Movies + TV libraries."
+      libraries:
+        - {name: Movies, path: /media/movies}
+        - {name: TV Shows, path: /media/tv}
+      critical: true
+
+    navidrome:
+      vm: media-home
+      port: 4533
+      status: running
+      category: streaming
+      uptime: "2 days"
+      health: healthy
+      role: "Canonical home music streaming"
+      library_path: /music
+
+    # Request management
+    jellyseerr:
+      vm: media-home
+      port: 5055
+      status: running
+      category: requests
+      uptime: "2 days"
+      health: healthy
+      role: "Content request management UI"
+
+    # Dashboard & user management
+    homarr:
+      vm: media-home
+      port: 7575
+      status: running
+      category: dashboard
+      uptime: "3 days"
+      health: healthy
+      role: "Operator dashboard"
+
+    wizarr:
+      vm: media-home
+      port: 5690
+      status: running
+      category: user-mgmt
+      uptime: "3 days"
+      health: healthy
+      role: "Media invitation management"
+
+    # Infrastructure
+    gluetun:
+      vm: media-home
+      port: null
+      status: running
+      category: infrastructure
+      uptime: "46 hours"
+      health: healthy
+      role: "Privado VPN tunnel for qBittorrent"
+      exposed_ports: [5030, 6881, 8081, 50300]
+
+    crowdsec:
+      vm: media-home
+      port: null
+      status: running
+      category: infrastructure
+      uptime: "37 hours"
+      role: "Security monitoring"
+
+  parked:
+    # Stopped containers on media-home — intentionally not running
+    recyclarr:
+      vm: media-home
+      status: stopped
+      category: utility
+      role: "TRaSH guide quality sync. Runs periodically, exits after sync."
+      note: "Exited 5 days ago — may need scheduled re-run"
+
+    bazarr:
+      vm: media-home
+      port: 6767
+      status: stopped
+      category: enhancement
+      role: "Subtitle management. Not yet promoted."
+
+    slskd:
+      vm: media-home
+      port: 5030
+      status: stopped
+      category: download
+      role: "Soulseek client. Parked."
+      network_mode: "container:gluetun"
+
+    soularr:
+      vm: media-home
+      status: stopped
+      category: utility
+      role: "Soulseek-Lidarr integration. Parked."
+      dependencies: [lidarr, slskd]
+
+    spotisub:
+      vm: media-home
+      port: 8766
+      status: stopped
+      category: enhancement
+      role: "Spotify-to-Navidrome sync. Parked."
+
+    flaresolverr:
+      vm: media-home
+      port: 8191
+      status: stopped
+      category: utility
+      role: "Cloudflare challenge solver. Parked."
+
+    crosswatch:
+      vm: media-home
+      port: 8787
+      status: stopped
+      category: experimental
+      role: "Cross-service watch sync. Parked."
+
+    decypharr:
+      vm: media-home
+      status: stopped
+      category: experimental
+      role: "Real-Debrid integration. Parked."
+
+    posterizarr:
+      vm: media-home
+      status: stopped
+      category: enhancement
+      role: "Poster art management. Parked."
+
+    trailarr:
+      vm: media-home
+      port: 7667
+      status: stopped
+      category: enhancement
+      role: "Trailer management. Parked."
+
+    subgen:
+      vm: media-home
+      status: stopped
+      category: enhancement
+      role: "AI subtitle generation. Parked."
+
+    arr-native-search:
+      vm: media-home
+      status: stopped
+      category: utility
+      role: "Native ARR missing-search scheduler. Parked."
+
+    watchtower:
+      vm: media-home
+      status: stopped
+      category: infrastructure
+      role: "Auto-update utility. Parked."
+
+    node-exporter:
+      vm: media-home
+      port: 9100
+      status: stopped
+      category: infrastructure
+      role: "Host metrics exporter. Parked."
+
+# Path authority reference — canonical mount topology
+# Full detail: ops/bindings/media.path.authority.contract.yaml
+path_topology:
+  nfs_backing:
+    source: "10.0.0.150:/volume1/media-staging"
+    target: /srv/media
+    mode: rw
+    verified: true
+  container_broad_mount:
+    host_path: /srv/media
+    container_path: /media
+    enables: "Hardlinks across downloads and library roots (same mount ID)"
+  library_mounts:
+    movies: "/srv/media/movies → /media/movies (also /movies legacy narrow mount)"
+    tv: "/srv/media/tv → /media/tv (also /tv legacy narrow mount)"
+    music: "/srv/media/music → /media/music (also /music Navidrome narrow mount)"
+  download_staging:
+    host_path: /srv/media/downloads
+    container_path: /media/downloads
+    note: "Same broad mount as library roots — enables hardlinks on import"
+
+# Config governance
+config:
+  recyclarr:
+    source: "workbench:agents/media/config/recyclarr.yml"
+    sync_cap: recyclarr.sync
+    status: "Container exited 5 days ago — needs periodic re-run"
+  quality_profiles:
+    authority: ops/bindings/media.quality.policy.yaml
+  import_lists:
+    authority: ops/bindings/media.import.policy.yaml
+  path_authority:
+    authority: ops/bindings/media.path.authority.contract.yaml
+  secrets:
+    store: infisical
+    project: media-stack
+    api_keys: "Stored in container config.xml files at /srv/appdata/compose/media-write/volumes/{service}/config/config.xml"
+  backup:
+    cap: media.backup.create
+    scope: "All active container configs under /srv/appdata/compose/"
+    retention: 7d
+
+# NFS mount health (traced 2026-03-24)
+nfs_health:
+  download-stack:
+    vm_id: 209
+    source: "192.168.1.184:/media"
+    mount: /mnt/media
+    mode: rw
+    nfs_version: "4.2"
+    status: OK
+    classification: legacy_residue
+  streaming-stack:
+    vm_id: 210
+    source: "192.168.1.184:/media"
+    mount: /mnt/media
+    mode: ro
+    nfs_version: "4.2"
+    status: OK
+    classification: legacy_residue
+
+cross_references:
+  inventory_contract: ops/bindings/media.master.inventory.contract.yaml
+  path_authority: ops/bindings/media.path.authority.contract.yaml
+  services: ops/bindings/media.services.yaml
+  download_guardrails: ops/bindings/media.download.canary.guardrails.yaml
+  quality_policy: ops/bindings/media.quality.policy.yaml
+  e2e_spec: ops/bindings/media.e2e.verification.spec.yaml
