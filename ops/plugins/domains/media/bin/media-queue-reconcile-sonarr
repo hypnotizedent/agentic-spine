@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# media.queue.reconcile — Deterministic queue reconciliation for media pipeline
+# media.queue.reconcile.sonarr — Deterministic queue reconciliation for Sonarr
 #
 # Usage (via spine):
-#   ./bin/ops cap run media.queue.reconcile
-#   ./bin/ops cap run media.queue.reconcile -- --dry-run
-#   ./bin/ops cap run media.queue.reconcile -- --json
+#   ./bin/ops cap run media.queue.reconcile.sonarr
+#   ./bin/ops cap run media.queue.reconcile.sonarr -- --apply
+#   ./bin/ops cap run media.queue.reconcile.sonarr -- --json
 #
 # Contract:
-# - Implements MEDIA_QUEUE_RECONCILIATION_POLICY_V1
-# - Reads Radarr queue via API, classifies items per policy
+# - Implements MEDIA_QUEUE_RECONCILIATION_POLICY_V1 for Sonarr
+# - Reads Sonarr queue via API, classifies items per policy
 # - Auto-removes QUEUE-C1 and QUEUE-C4 items (safe: hasFile=true)
 # - Reports QUEUE-C2, QUEUE-C3, QUEUE-C5 items for manual review
 # - Default: dry-run mode (no deletions without --apply)
@@ -35,7 +35,7 @@ source "$SSH_RESOLVE" 2>/dev/null || true
 
 usage() {
   cat <<'USAGE'
-media.queue.reconcile — Deterministic queue reconciliation
+media.queue.reconcile.sonarr — Deterministic Sonarr queue reconciliation
 
 Args:
   --dry-run    Show what would be removed (default)
@@ -44,9 +44,9 @@ Args:
   --batch N    Max items per run (default: 50)
 
 Examples:
-  ./bin/ops cap run media.queue.reconcile
-  ./bin/ops cap run media.queue.reconcile -- --apply
-  ./bin/ops cap run media.queue.reconcile -- --json --dry-run
+  ./bin/ops cap run media.queue.reconcile.sonarr
+  ./bin/ops cap run media.queue.reconcile.sonarr -- --apply
+  ./bin/ops cap run media.queue.reconcile.sonarr -- --json --dry-run
 USAGE
 }
 
@@ -71,44 +71,47 @@ command -v curl >/dev/null 2>&1 || { echo "MISSING_DEP: curl" >&2; exit 2; }
 command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
 [[ -f "$SERVICES_BINDING" ]] || { echo "STOP: missing binding $SERVICES_BINDING" >&2; exit 2; }
 
-# Resolve Radarr endpoint
-RADARR_HOST="${RADARR_HOST:-}"
-RADARR_URL="${RADARR_URL:-}"
-if [[ -z "$RADARR_URL" && -z "$RADARR_HOST" ]]; then
-  CANONICAL_RADARR_URL="$(yq -r '.endpoints[] | select(.id == "radarr") | .url // ""' "$SERVICES_BINDING" | head -n1)"
-  CANONICAL_RADARR_TARGET="$(yq -r '.endpoints[] | select(.id == "radarr") | .host // ""' "$SERVICES_BINDING" | head -n1)"
-  [[ -n "$CANONICAL_RADARR_URL" ]] || { echo "STOP: radarr missing from services.health.yaml" >&2; exit 2; }
-  if [[ -n "$CANONICAL_RADARR_TARGET" ]] && type ssh_resolve_url_with_fallback &>/dev/null; then
-    RADARR_URL="$(ssh_resolve_url_with_fallback "$CANONICAL_RADARR_URL" "$CANONICAL_RADARR_TARGET" 5 2>/dev/null | awk '{print $1}')"
+# Resolve Sonarr endpoint
+SONARR_HOST="${SONARR_HOST:-}"
+SONARR_URL="${SONARR_URL:-}"
+if [[ -z "$SONARR_URL" && -z "$SONARR_HOST" ]]; then
+  CANONICAL_SONARR_URL="$(yq -r '.endpoints[] | select(.id == "sonarr") | .url // ""' "$SERVICES_BINDING" | head -n1)"
+  CANONICAL_SONARR_TARGET="$(yq -r '.endpoints[] | select(.id == "sonarr") | .host // ""' "$SERVICES_BINDING" | head -n1)"
+  [[ -n "$CANONICAL_SONARR_URL" ]] || { echo "STOP: sonarr missing from services.health.yaml" >&2; exit 2; }
+  if [[ -n "$CANONICAL_SONARR_TARGET" ]] && type ssh_resolve_url_with_fallback &>/dev/null; then
+    SONARR_URL="$(ssh_resolve_url_with_fallback "$CANONICAL_SONARR_URL" "$CANONICAL_SONARR_TARGET" 5 2>/dev/null | awk '{print $1}')"
   fi
-  [[ -z "$RADARR_URL" ]] && RADARR_URL="$CANONICAL_RADARR_URL"
+  [[ -z "$SONARR_URL" ]] && SONARR_URL="$CANONICAL_SONARR_URL"
 fi
-if [[ -z "$RADARR_URL" ]]; then
-  RADARR_PORT="${RADARR_PORT:-7878}"
-  [[ -n "$RADARR_HOST" ]] || { echo "STOP: RADARR_HOST unresolved and RADARR_URL not provided" >&2; exit 2; }
-  RADARR_URL="http://${RADARR_HOST}:${RADARR_PORT}"
+if [[ -z "$SONARR_URL" ]]; then
+  SONARR_PORT="${SONARR_PORT:-8989}"
+  [[ -n "$SONARR_HOST" ]] || { echo "STOP: SONARR_HOST unresolved and SONARR_URL not provided" >&2; exit 2; }
+  SONARR_URL="http://${SONARR_HOST}:${SONARR_PORT}"
 fi
 
+# Strip /ping suffix if present (health endpoint URL → base URL)
+SONARR_URL="$(echo "$SONARR_URL" | sed 's|/ping$||')"
+
 # API key from secrets injection
-RADARR_API_KEY="${RADARR_API_KEY:-}"
-if [[ -z "$RADARR_API_KEY" ]]; then
-  echo "STOP: RADARR_API_KEY not available (secrets injection may have failed)" >&2
+SONARR_API_KEY="${SONARR_API_KEY:-}"
+if [[ -z "$SONARR_API_KEY" ]]; then
+  echo "STOP: SONARR_API_KEY not available (secrets injection may have failed)" >&2
   exit 2
 fi
 
 # Fetch queue
 fetch_queue() {
   curl -sf --max-time 15 \
-    -H "X-Api-Key: ${RADARR_API_KEY}" \
-    "${RADARR_URL}/api/v3/queue?page=1&pageSize=200&includeMovie=true" 2>/dev/null
+    -H "X-Api-Key: ${SONARR_API_KEY}" \
+    "${SONARR_URL}/api/v3/queue?page=1&pageSize=200&includeEpisode=true&includeSeries=true" 2>/dev/null
 }
 
-# Fetch movie by ID
-fetch_movie() {
-  local movie_id="$1"
+# Fetch series by ID
+fetch_series() {
+  local series_id="$1"
   curl -sf --max-time 10 \
-    -H "X-Api-Key: ${RADARR_API_KEY}" \
-    "${RADARR_URL}/api/v3/movie/${movie_id}" 2>/dev/null
+    -H "X-Api-Key: ${SONARR_API_KEY}" \
+    "${SONARR_URL}/api/v3/series/${series_id}" 2>/dev/null
 }
 
 # Delete queue item
@@ -119,15 +122,15 @@ delete_queue_item() {
     return 0
   fi
   curl -sf --max-time 10 -X DELETE \
-    -H "X-Api-Key: ${RADARR_API_KEY}" \
-    "${RADARR_URL}/api/v3/queue/${queue_id}?removeFromClient=false&blocklist=false" 2>/dev/null
+    -H "X-Api-Key: ${SONARR_API_KEY}" \
+    "${SONARR_URL}/api/v3/queue/${queue_id}?removeFromClient=false&blocklist=false" 2>/dev/null
 }
 
 # Main reconciliation logic
 QUEUE_JSON="$(fetch_queue)" || {
-  echo "FAIL: cannot reach Radarr queue API at ${RADARR_URL}" >&2
+  echo "FAIL: cannot reach Sonarr queue API at ${SONARR_URL}" >&2
   if $OUTPUT_JSON; then
-    jq -n --arg ts "$GENERATED_AT" '{capability: "media.queue.reconcile", generated_at: $ts, status: "unreachable", error: "Cannot reach Radarr queue API"}'
+    jq -n --arg ts "$GENERATED_AT" '{capability: "media.queue.reconcile.sonarr", generated_at: $ts, status: "unreachable", error: "Cannot reach Sonarr queue API"}'
   fi
   exit 1
 }
@@ -135,10 +138,10 @@ QUEUE_JSON="$(fetch_queue)" || {
 TOTAL_RECORDS="$(echo "$QUEUE_JSON" | jq '.totalRecords // 0')"
 if [[ "$TOTAL_RECORDS" -eq 0 ]]; then
   if $OUTPUT_JSON; then
-    jq -n --arg ts "$GENERATED_AT" '{capability: "media.queue.reconcile", generated_at: $ts, status: "clean", total_queue_items: 0, classifications: {}, actions: []}'
+    jq -n --arg ts "$GENERATED_AT" '{capability: "media.queue.reconcile.sonarr", generated_at: $ts, status: "clean", total_queue_items: 0, classifications: {}, actions: []}'
   else
-    echo "media.queue.reconcile"
-    echo "====================="
+    echo "media.queue.reconcile.sonarr"
+    echo "============================"
     echo "status: clean"
     echo "total_queue_items: 0"
     echo "generated_at: $GENERATED_AT"
@@ -150,28 +153,33 @@ fi
 CLASSIFICATIONS="$(echo "$QUEUE_JSON" | jq --argjson batch "$BATCH_SIZE" '
   [.records[:$batch][] | {
     queue_id: .id,
-    movie_id: (.movieId // null),
-    title: (.title // .movie.title // "unknown"),
+    series_id: (.seriesId // null),
+    episode_id: (.episodeId // null),
+    title: (.title // .series.title // "unknown"),
+    series_title: (.series.title // "unknown"),
+    episode_title: (.episode.title // "unknown"),
+    season: (.episode.seasonNumber // null),
+    episode: (.episode.episodeNumber // null),
     status: (.status // "unknown"),
     tracked_status: (.trackedDownloadStatus // "unknown"),
     tracked_state: (.trackedDownloadState // "unknown"),
-    has_file: (.movie.hasFile // false),
+    has_file: (.episode.hasFile // false),
     error_message: (.errorMessage // null),
     classification: (
-      if (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.movie.hasFile == true) then "QUEUE-C1"
-      elif (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.movie.hasFile == false) then "QUEUE-C2"
-      elif (.status == "warning" or .trackedDownloadStatus == "warning") and (.movie.hasFile == false) then "QUEUE-C3"
-      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.movie.hasFile == true) then "QUEUE-C4"
-      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.movie.hasFile == false) then "QUEUE-C5"
+      if (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.episode.hasFile == true) then "QUEUE-C1"
+      elif (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.episode.hasFile == false) then "QUEUE-C2"
+      elif (.status == "warning" or .trackedDownloadStatus == "warning") and (.episode.hasFile == false) then "QUEUE-C3"
+      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.episode.hasFile == true) then "QUEUE-C4"
+      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.episode.hasFile == false) then "QUEUE-C5"
       else "UNCLASSIFIED"
       end
     ),
     action: (
-      if (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.movie.hasFile == true) then "auto_remove"
-      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.movie.hasFile == true) then "auto_remove"
-      elif (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.movie.hasFile == false) then "manual_review"
-      elif (.status == "warning" or .trackedDownloadStatus == "warning") and (.movie.hasFile == false) then "age_flag"
-      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.movie.hasFile == false) then "manual_review"
+      if (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.episode.hasFile == true) then "auto_remove"
+      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.episode.hasFile == true) then "auto_remove"
+      elif (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.episode.hasFile == false) then "manual_review"
+      elif (.status == "warning" or .trackedDownloadStatus == "warning") and (.episode.hasFile == false) then "age_flag"
+      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.episode.hasFile == false) then "manual_review"
       else "skip"
       end
     )
@@ -220,7 +228,7 @@ if $OUTPUT_JSON; then
     --argjson removed "$REMOVED" \
     --argjson errors "$REMOVE_ERRORS" \
     '{
-      capability: "media.queue.reconcile",
+      capability: "media.queue.reconcile.sonarr",
       generated_at: $ts,
       mode: $mode,
       status: (if $errors > 0 then "partial" elif $removed > 0 then "cleaned" else "report_only" end),
@@ -244,8 +252,8 @@ if $OUTPUT_JSON; then
       items: .
     }'
 else
-  echo "media.queue.reconcile"
-  echo "====================="
+  echo "media.queue.reconcile.sonarr"
+  echo "============================"
   echo "mode: $MODE"
   echo "generated_at: $GENERATED_AT"
   echo "total_queue_items: $TOTAL_RECORDS"
@@ -267,7 +275,7 @@ else
   if [[ "$MANUAL_REVIEW_COUNT" -gt 0 ]]; then
     echo ""
     echo "Manual Review Items:"
-    echo "$CLASSIFICATIONS" | jq -r '.[] | select(.action == "manual_review") | "  - \(.title) [\(.classification)] status=\(.status) hasFile=\(.has_file)"'
+    echo "$CLASSIFICATIONS" | jq -r '.[] | select(.action == "manual_review") | "  - \(.series_title) S\(.season // "?")E\(.episode // "?") [\(.classification)] status=\(.status) hasFile=\(.has_file)"'
   fi
 fi
 

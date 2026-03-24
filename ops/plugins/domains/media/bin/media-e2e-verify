@@ -68,32 +68,40 @@ done
 command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
 command -v curl >/dev/null 2>&1 || { echo "MISSING_DEP: curl" >&2; exit 2; }
 
-# Resolve service endpoints
-DOWNLOAD_HOST="${DOWNLOAD_HOST:-}"
-STREAMING_HOST="${STREAMING_HOST:-}"
-if [[ -z "$DOWNLOAD_HOST" ]]; then
-  if type ssh_resolve_probe_host &>/dev/null; then
-    DOWNLOAD_HOST="$(ssh_resolve_probe_host download-stack 2>/dev/null | awk '{print $1}')"
-  fi
-fi
-if [[ -z "$STREAMING_HOST" ]]; then
-  if type ssh_resolve_probe_host &>/dev/null; then
-    STREAMING_HOST="$(ssh_resolve_probe_host streaming-stack 2>/dev/null | awk '{print $1}')"
-  fi
-fi
-[[ -n "$DOWNLOAD_HOST" ]] || { echo "STOP: cannot resolve download-stack probe host" >&2; exit 2; }
-[[ -n "$STREAMING_HOST" ]] || { echo "STOP: cannot resolve streaming-stack probe host" >&2; exit 2; }
+# Resolve service endpoints from services.health.yaml (all on media-home VM 106)
+SERVICES_BINDING="$ROOT/ops/bindings/services.health.yaml"
+[[ -f "$SERVICES_BINDING" ]] || { echo "STOP: missing binding $SERVICES_BINDING" >&2; exit 2; }
 
-RADARR_PORT="${RADARR_PORT:-7878}"
-JELLYFIN_PORT="${JELLYFIN_PORT:-8096}"
-JELLYSEERR_PORT="${JELLYSEERR_PORT:-5055}"
+RADARR_URL="${RADARR_URL:-}"
+if [[ -z "$RADARR_URL" ]]; then
+  CANONICAL_RADARR_URL="$(yq -r '.endpoints[] | select(.id == "radarr") | .url // ""' "$SERVICES_BINDING" | head -n1)"
+  [[ -n "$CANONICAL_RADARR_URL" ]] || { echo "STOP: radarr missing from services.health.yaml" >&2; exit 2; }
+  RADARR_URL="$(echo "$CANONICAL_RADARR_URL" | sed 's|/ping$||; s|/api/.*||')"
+fi
+
+JELLYFIN_URL="${JELLYFIN_URL:-}"
+if [[ -z "$JELLYFIN_URL" ]]; then
+  CANONICAL_JELLYFIN_URL="$(yq -r '.endpoints[] | select(.id == "jellyfin") | .url // ""' "$SERVICES_BINDING" | head -n1)"
+  [[ -n "$CANONICAL_JELLYFIN_URL" ]] || { echo "STOP: jellyfin missing from services.health.yaml" >&2; exit 2; }
+  JELLYFIN_URL="$(echo "$CANONICAL_JELLYFIN_URL" | sed 's|/health$||')"
+fi
+
+JELLYSEERR_URL="${JELLYSEERR_URL:-}"
+if [[ -z "$JELLYSEERR_URL" ]]; then
+  CANONICAL_JELLYSEERR_URL="$(yq -r '.endpoints[] | select(.id == "jellyseerr") | .url // ""' "$SERVICES_BINDING" | head -n1)"
+  [[ -n "$CANONICAL_JELLYSEERR_URL" ]] || { echo "STOP: jellyseerr missing from services.health.yaml" >&2; exit 2; }
+  JELLYSEERR_URL="$(echo "$CANONICAL_JELLYSEERR_URL" | sed 's|/api/.*||')"
+fi
+
+# Extract media-home SSH host for filesystem checks
+MEDIA_HOME_HOST="${MEDIA_HOME_HOST:-}"
+if [[ -z "$MEDIA_HOME_HOST" ]]; then
+  MEDIA_HOME_HOST="$(yq -r '.endpoints[] | select(.id == "radarr") | .url // ""' "$SERVICES_BINDING" | head -n1 | sed 's|http://||; s|:.*||')"
+fi
+
 CURL_CONNECT_TIMEOUT="${MEDIA_E2E_CONNECT_TIMEOUT:-5}"
 CURL_MAX_TIME="${MEDIA_E2E_CURL_TIMEOUT:-30}"
 RADARR_LIST_TIMEOUT="${MEDIA_E2E_RADARR_LIST_TIMEOUT:-120}"
-
-RADARR_URL="http://${DOWNLOAD_HOST}:${RADARR_PORT}"
-JELLYFIN_URL="http://${STREAMING_HOST}:${JELLYFIN_PORT}"
-JELLYSEERR_URL="http://${STREAMING_HOST}:${JELLYSEERR_PORT}"
 
 # API keys from secrets injection
 RADARR_API_KEY="${RADARR_API_KEY:-}"
@@ -139,7 +147,10 @@ check_filesystem_exists() {
   fi
   local ssh_result
   local download_ssh_host
-  download_ssh_host="$(ssh_resolve_ssh_host_with_fallback download-stack 2>/dev/null | awk '{print $1}')"
+  download_ssh_host="${MEDIA_HOME_HOST:-}"
+  if [[ -z "$download_ssh_host" ]] && type ssh_resolve_ssh_host_with_fallback &>/dev/null; then
+    download_ssh_host="$(ssh_resolve_ssh_host_with_fallback media-home 2>/dev/null | awk '{print $1}')"
+  fi
   [[ -n "$download_ssh_host" ]] || {
     echo '{"leg":"filesystem_exists","pass":false,"reason":"ssh_unreachable_or_file_missing"}'
     return
