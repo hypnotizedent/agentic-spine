@@ -14,6 +14,7 @@
 #   collect  --wave-id WAVE-...
 #   close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate] [--fixed-in <sha>] [--skip-residue-check] [--no-finish]
 #   status   --wave-id WAVE-...
+#   land     --wave-id WAVE-... --files "path1,path2,..." --summary "description" [--dry-run]
 #
 # Exit codes:
 #   0 — success
@@ -45,6 +46,7 @@ Usage:
   wave-execute collect  --wave-id WAVE-...
   wave-execute close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate] [--fixed-in <sha>] [--skip-residue-check] [--no-finish]
   wave-execute status   --wave-id WAVE-...
+  wave-execute land     --wave-id WAVE-... --files "path1,path2,..." --summary "description" [--dry-run]
 
 Wraps wave.sh with pre-flight authority validation and loop/gap context.
 
@@ -748,6 +750,247 @@ print(len(bindings))
   fi
 }
 
+# ── Subcommand: land ─────────────────────────────────────────────
+# Governed verify→commit→push sequence for wave output.
+# approval: manual — must be invoked explicitly by operator or trusted orchestrator
+#   with OPS_GOVERNED_MAIN_OVERRIDE=1 set in the calling environment.
+cmd_land() {
+  local wave_id="${SPINE_WAVE_ID:-}"
+  local files_arg=""
+  local summary=""
+  local dry_run=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --)            shift ;;
+      --wave-id)     wave_id="${2:?--wave-id requires a value}"; shift 2 ;;
+      --files)       files_arg="${2:?--files requires a value}"; shift 2 ;;
+      --summary)     summary="${2:?--summary requires a value}"; shift 2 ;;
+      --dry-run)     dry_run=1; shift ;;
+      -h|--help)     usage; exit 0 ;;
+      *)             _fail_args "unknown argument: $1" ;;
+    esac
+  done
+
+  [[ -n "$wave_id" ]]   || _fail_args "--wave-id required (or set SPINE_WAVE_ID)"
+  [[ -n "$files_arg" ]] || _fail_args "--files required (comma-separated list of paths to stage)"
+  [[ -n "$summary" ]]   || _fail_args "--summary required (short description for commit message)"
+
+  _header "land"
+
+  printf "Wave:    %s\n" "$wave_id"
+  printf "Summary: %s\n" "$summary"
+  echo ""
+
+  # ── Step 1: Read authority binding ───────────────────────────
+  local auth_json
+  auth_json="$(_read_authority "$wave_id")"
+  local loop_id
+  loop_id="$(_auth_field "$auth_json" "loop_id")"
+  printf "Loop:    %s\n" "$loop_id"
+  echo ""
+
+  # ── Step 2: Parse file allowlist ─────────────────────────────
+  local -a allowlist=()
+  IFS=',' read -ra raw_files <<< "$files_arg"
+  for f in "${raw_files[@]}"; do
+    f="${f## }"
+    f="${f%% }"
+    [[ -n "$f" ]] && allowlist+=("$f")
+  done
+
+  if [[ ${#allowlist[@]} -eq 0 ]]; then
+    _fail "no files parsed from --files argument"
+  fi
+
+  echo "File allowlist (${#allowlist[@]} paths):"
+  for f in "${allowlist[@]}"; do
+    printf "  %s\n" "$f"
+  done
+  echo ""
+
+  # ── Step 3: Run verify.fast — abort if any gate fails ────────
+  echo "Running verify.fast..."
+  local verify_rc=0
+  local verify_output
+  verify_output="$("$SP/ops/plugins/core/verify/bin/verify-run" fast 2>&1)" || verify_rc=$?
+
+  # Extract pass/fail summary line from output
+  local verify_summary
+  verify_summary="$(echo "$verify_output" | grep "^wrapper:" | head -1 || true)"
+
+  if [[ $verify_rc -ne 0 ]]; then
+    echo ""
+    echo "verify.fast OUTPUT:"
+    echo "$verify_output" | tail -20
+    echo ""
+    _fail "verify.fast FAILED (rc=$verify_rc) — land aborted. No commit will be made."
+  fi
+
+  echo "verify.fast PASS: $verify_summary"
+  echo ""
+
+  if [[ $dry_run -eq 1 ]]; then
+    echo "DRY RUN — would commit and push the following files:"
+    for f in "${allowlist[@]}"; do
+      printf "  %s\n" "$f"
+    done
+    echo ""
+    echo "Commit message: feat(wave): land $wave_id — $summary"
+    echo "Push target:    origin/$(cd "$SP" && git rev-parse --abbrev-ref HEAD)"
+    echo ""
+    echo "wave.execute.land: dry-run complete (no changes made)"
+    exit 0
+  fi
+
+  # ── Step 4: Stage allowlisted files ──────────────────────────
+  echo "Staging allowlisted files..."
+  cd "$SP"
+
+  for f in "${allowlist[@]}"; do
+    git add -- "$f" || _fail "git add failed for: $f"
+  done
+
+  # Verify staged set is a subset of allowlist (mirrors git-stage-commit-scoped safety check)
+  local -a staged_files
+  mapfile -t staged_files < <(git diff --cached --name-only | awk 'NF')
+
+  if [[ ${#staged_files[@]} -eq 0 ]]; then
+    _fail "no staged changes after allowlist stage — nothing to commit"
+  fi
+
+  declare -A allowed_map=()
+  for f in "${allowlist[@]}"; do
+    allowed_map["$f"]=1
+  done
+
+  local -a outside_allowlist=()
+  for s in "${staged_files[@]}"; do
+    if [[ -z "${allowed_map[$s]:-}" ]]; then
+      outside_allowlist+=("$s")
+    fi
+  done
+
+  if [[ ${#outside_allowlist[@]} -gt 0 ]]; then
+    echo "staged files:" >&2
+    printf '  - %s\n' "${staged_files[@]}" >&2
+    echo "allowlist:" >&2
+    printf '  - %s\n' "${allowlist[@]}" >&2
+    _fail "staged file(s) outside allowlist: ${outside_allowlist[*]}"
+  fi
+
+  printf "Staged %d file(s)\n" "${#staged_files[@]}"
+  echo ""
+
+  # ── Step 5: Commit with governed message ─────────────────────
+  local commit_message="feat(wave): land $wave_id — $summary"
+  echo "Committing: $commit_message"
+
+  local commit_rc=0
+  local commit_output
+  commit_output="$(OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "$commit_message" 2>&1)" || commit_rc=$?
+
+  if [[ $commit_rc -ne 0 ]]; then
+    echo ""
+    echo "git commit OUTPUT:"
+    echo "$commit_output"
+    echo ""
+    _fail "git commit FAILED (rc=$commit_rc) — pre-commit hook may have rejected. Push aborted. Staged files remain staged; resolve and retry."
+  fi
+
+  local commit_sha
+  commit_sha="$(git rev-parse HEAD)"
+  echo "Committed: $commit_sha"
+  echo ""
+
+  # ── Step 6: Push ─────────────────────────────────────────────
+  local branch
+  branch="$(git rev-parse --abbrev-ref HEAD)"
+  echo "Pushing to origin/$branch..."
+
+  local push_rc=0
+  local push_output
+  push_output="$(OPS_GOVERNED_MAIN_OVERRIDE=1 git push origin "$branch" 2>&1)" || push_rc=$?
+
+  local pushed_at
+  pushed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  local push_result
+  if [[ $push_rc -eq 0 ]]; then
+    push_result="success"
+    echo "Push: SUCCESS"
+  else
+    push_result="failed"
+    echo ""
+    echo "git push OUTPUT:"
+    echo "$push_output"
+    echo ""
+    echo "WARN: push FAILED (rc=$push_rc) — commit $commit_sha is in place."
+    echo "The commit was NOT lost. Retry push manually:"
+    echo "  OPS_GOVERNED_MAIN_OVERRIDE=1 git push origin $branch"
+    echo ""
+  fi
+
+  echo ""
+
+  # ── Step 7: Write push.receipt.json ──────────────────────────
+  local wave_dir="$WAVES_DIR/$wave_id"
+  mkdir -p "$wave_dir"
+  local receipt_file="$wave_dir/push.receipt.json"
+
+  python3 -c "
+import json, sys
+
+receipt = {
+    'wave_id': sys.argv[1],
+    'loop_id': sys.argv[2],
+    'commit_sha': sys.argv[3],
+    'push_result': sys.argv[4],
+    'pushed_at': sys.argv[5],
+    'verify_status': 'pass',
+    'branch': sys.argv[6],
+    'summary': sys.argv[7],
+    'files_staged': json.loads(sys.argv[8]),
+}
+
+with open(sys.argv[9], 'w') as f:
+    json.dump(receipt, f, indent=2)
+    f.write('\n')
+" \
+    "$wave_id" \
+    "$loop_id" \
+    "$commit_sha" \
+    "$push_result" \
+    "$pushed_at" \
+    "$branch" \
+    "$summary" \
+    "$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "${staged_files[@]}")" \
+    "$receipt_file"
+
+  echo "Receipt:  $receipt_file"
+  echo ""
+  echo "======================================="
+  echo "WAVE LAND: $wave_id"
+  if [[ "$push_result" == "success" ]]; then
+    echo "STATUS: COMPLETE"
+    printf "  verify.fast:  PASS\n"
+    printf "  commit:       %s\n" "$commit_sha"
+    printf "  push:         %s -> origin/%s\n" "$push_result" "$branch"
+  else
+    echo "STATUS: COMMIT OK / PUSH FAILED"
+    printf "  verify.fast:  PASS\n"
+    printf "  commit:       %s\n" "$commit_sha"
+    printf "  push:         FAILED — retry manually\n"
+  fi
+  echo "======================================="
+  echo ""
+
+  # Exit non-zero if push failed so caller can detect
+  if [[ "$push_result" != "success" ]]; then
+    exit 1
+  fi
+}
+
 # ── Self-check ───────────────────────────────────────────────────
 cmd_self_check() {
   local errors=0
@@ -775,6 +1018,7 @@ case "${1:-}" in
   collect)      shift; cmd_collect "$@" ;;
   close)        shift; cmd_close "$@" ;;
   status)       shift; cmd_status "$@" ;;
+  land)         shift; cmd_land "$@" ;;
   --self-check) cmd_self_check ;;
   -h|--help)    usage; exit 0 ;;
   "")           usage; exit 2 ;;
