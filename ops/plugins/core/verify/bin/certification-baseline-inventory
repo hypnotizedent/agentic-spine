@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_REPOS = [
+    ("agentic-spine", "/Users/ronnyworks/code/agentic-spine"),
+    ("agentic-foundation", "/Users/ronnyworks/code/agentic-foundation"),
+]
+
+
+@dataclass(frozen=True)
+class FileRecord:
+    repo: str
+    repo_root: str
+    path: str
+    top_folder: str
+    subfolder: str
+    classification: str
+    inline_certification_allowed: bool
+    inline_certification_present: bool
+    marker_hits: tuple[str, ...]
+
+
+def _git_ls_files(repo_root: Path) -> list[str]:
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "ls-files", "-z"],
+        check=True,
+        capture_output=True,
+    )
+    return [item for item in result.stdout.decode("utf-8", errors="ignore").split("\0") if item]
+
+
+def _read_head(path: Path, max_bytes: int = 8192) -> str:
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(max_bytes)
+    except OSError:
+        return ""
+    return data.decode("utf-8", errors="ignore")
+
+
+def _top_folder(rel: str) -> str:
+    parts = Path(rel).parts
+    if len(parts) == 0:
+        return "(root)"
+    if len(parts) == 1:
+        return "(root)"
+    return parts[0]
+
+
+def _subfolder(rel: str) -> str:
+    parts = Path(rel).parts
+    if len(parts) < 2:
+        return "(root)"
+    return f"{parts[0]}/{parts[1]}"
+
+
+def _marker_hits(rel: str, text: str) -> tuple[str, ...]:
+    hits: list[str] = []
+    markers = [
+        "authority_state: projection",
+        "projection_of:",
+        "status: generated",
+        "status: projection",
+        "generated_by:",
+        "generated_from:",
+        "entry_surface_gate_metadata: projection",
+        "# Status: projection",
+        "# authority_state: projection",
+    ]
+    for marker in markers:
+        if marker in text:
+            hits.append(marker)
+
+    lowered = rel.lower()
+    path_hints = [
+        "/docs/reference/generated/",
+        "/runtime/domain-state/projections/",
+        ".projected.",
+        ".projection.",
+        ".generated.",
+    ]
+    for hint in path_hints:
+        if hint in lowered:
+            hits.append(f"path:{hint}")
+    return tuple(sorted(dict.fromkeys(hits)))
+
+
+def _classify(rel: str, text: str) -> tuple[str, bool, bool, tuple[str, ...]]:
+    hits = _marker_hits(rel, text)
+    has_projection = any(
+        needle in text
+        for needle in (
+            "authority_state: projection",
+            "projection_of:",
+            "entry_surface_gate_metadata: projection",
+            "# authority_state: projection",
+        )
+    )
+    has_generated = any(
+        needle in text
+        for needle in (
+            "status: generated",
+            "generated_by:",
+            "generated_from:",
+            "# Status: projection",
+        )
+    )
+    has_authority = any(
+        needle in text
+        for needle in (
+            "authority_state: authoritative",
+            "status: authoritative",
+            "gate_metadata_authority: authoritative",
+        )
+    )
+    path_hint = any(
+        hint in rel.lower()
+        for hint in (
+            "/docs/reference/generated/",
+            "/runtime/domain-state/projections/",
+            ".projected.",
+            ".projection.",
+            ".generated.",
+        )
+    )
+
+    if has_projection:
+        return "projection", True, True, hits
+    if has_generated:
+        return "generated", True, True, hits
+    if has_authority:
+        return "authority", False, False, hits
+    if path_hint:
+        return "projection-candidate", True, False, hits
+    return "other", False, False, hits
+
+
+def _repo_records(label: str, repo_root: Path) -> tuple[list[FileRecord], dict[str, Any]]:
+    records: list[FileRecord] = []
+    top_counts: Counter[str] = Counter()
+    sub_counts: Counter[str] = Counter()
+    class_counts: Counter[str] = Counter()
+    cert_allowed = 0
+    cert_present = 0
+
+    for rel in _git_ls_files(repo_root):
+        path = repo_root / rel
+        text = _read_head(path)
+        classification, allowed, present, hits = _classify(rel, text)
+        top = _top_folder(rel)
+        sub = _subfolder(rel)
+        records.append(
+            FileRecord(
+                repo=label,
+                repo_root=str(repo_root),
+                path=rel,
+                top_folder=top,
+                subfolder=sub,
+                classification=classification,
+                inline_certification_allowed=allowed,
+                inline_certification_present=present,
+                marker_hits=hits,
+            )
+        )
+        top_counts[top] += 1
+        sub_counts[sub] += 1
+        class_counts[classification] += 1
+        cert_allowed += int(allowed)
+        cert_present += int(present)
+
+    summary = {
+        "label": label,
+        "repo_root": str(repo_root),
+        "tracked_files": len(records),
+        "top_folders": dict(sorted(top_counts.items())),
+        "subfolders": dict(sorted(sub_counts.items())),
+        "classification_counts": dict(sorted(class_counts.items())),
+        "inline_certification_allowed": cert_allowed,
+        "inline_certification_present": cert_present,
+        "inline_certification_blocked": len(records) - cert_allowed,
+    }
+    return records, summary
+
+
+def _combined_summary(records: list[FileRecord]) -> dict[str, Any]:
+    top_counts: Counter[str] = Counter()
+    sub_counts: Counter[str] = Counter()
+    class_counts: Counter[str] = Counter()
+    by_repo: Counter[str] = Counter()
+    cert_allowed = 0
+    cert_present = 0
+    for record in records:
+        by_repo[record.repo] += 1
+        top_counts[f"{record.repo}:{record.top_folder}"] += 1
+        sub_counts[f"{record.repo}:{record.subfolder}"] += 1
+        class_counts[record.classification] += 1
+        cert_allowed += int(record.inline_certification_allowed)
+        cert_present += int(record.inline_certification_present)
+    return {
+        "tracked_files": len(records),
+        "by_repo": dict(sorted(by_repo.items())),
+        "top_folders": dict(sorted(top_counts.items())),
+        "subfolders": dict(sorted(sub_counts.items())),
+        "classification_counts": dict(sorted(class_counts.items())),
+        "inline_certification_allowed": cert_allowed,
+        "inline_certification_present": cert_present,
+        "inline_certification_blocked": len(records) - cert_allowed,
+    }
+
+
+def _render_markdown(payload: dict[str, Any]) -> str:
+    lines: list[str] = [
+        "# Certification Baseline Inventory",
+        "",
+        f"- Generated at: `{payload['generated_at']}`",
+        f"- Files analyzed: `{payload['combined']['tracked_files']}`",
+        "",
+        "## Repo Totals",
+        "",
+        "| Repo | Tracked | Inline cert allowed | Inline cert present | Blocked |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for repo in payload["repos"]:
+        lines.append(
+            f"| {repo['label']} | {repo['tracked_files']} | {repo['inline_certification_allowed']} | "
+            f"{repo['inline_certification_present']} | {repo['inline_certification_blocked']} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Classification Summary",
+            "",
+            "| Class | Count |",
+            "|---|---:|",
+        ]
+    )
+    for cls, count in payload["combined"]["classification_counts"].items():
+        lines.append(f"| {cls} | {count} |")
+
+    lines.extend(
+        [
+            "",
+            "## Top-Level Folders",
+            "",
+        ]
+    )
+    for repo in payload["repos"]:
+        lines.extend([f"### {repo['label']}", "", "| Folder | Count |", "|---|---:|"])
+        for folder, count in repo["top_folders"].items():
+            lines.append(f"| {folder} | {count} |")
+        lines.append("")
+
+    lines.extend(
+        [
+            "## Subfolder Counts",
+            "",
+        ]
+    )
+    for repo in payload["repos"]:
+        lines.extend([f"### {repo['label']}", "", "| Folder/Subfolder | Count |", "|---|---:|"])
+        for folder, count in repo["subfolders"].items():
+            lines.append(f"| {folder} | {count} |")
+        lines.append("")
+
+    blockers = [
+        record
+        for record in payload["files"]
+        if record["classification"] == "projection-candidate" and not record["inline_certification_present"]
+    ]
+    lines.extend(
+        [
+            "## Blockers",
+            "",
+            f"- Projection-like surfaces lacking explicit inline certification markers: `{len(blockers)}`",
+        ]
+    )
+    if blockers:
+        for record in blockers[:50]:
+            lines.append(f"  - `{record['repo']}/{record['path']}`")
+        if len(blockers) > 50:
+            lines.append(f"  - ... and {len(blockers) - 50} more")
+    else:
+        lines.append("- None")
+
+    lines.extend(
+        [
+            "",
+            "## Notes",
+            "",
+            "- `projection` includes explicit projection markers in the file body.",
+            "- `generated` means generated surface markers are present without explicit projection markers.",
+            "- `authority` means the file declares authoritative state and should not carry inline certification.",
+            "- `projection-candidate` means the path looks like a generated/projection surface but the file is still missing explicit marker coverage.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Build a cross-repo certification baseline inventory.")
+    parser.add_argument(
+        "--repo",
+        action="append",
+        metavar="LABEL=PATH",
+        help="repo root to scan (repeatable). Defaults to agentic-spine and agentic-foundation.",
+    )
+    parser.add_argument("--markdown-out", help="write markdown report to this path")
+    parser.add_argument("--json-out", help="write json report to this path")
+    args = parser.parse_args()
+
+    repo_specs: list[tuple[str, Path]] = []
+    if args.repo:
+        for item in args.repo:
+            if "=" not in item:
+                raise SystemExit(f"invalid --repo value: {item!r}")
+            label, raw_path = item.split("=", 1)
+            repo_specs.append((label, Path(raw_path).expanduser().resolve()))
+    else:
+        repo_specs = [(label, Path(path).expanduser().resolve()) for label, path in DEFAULT_REPOS]
+
+    all_records: list[dict[str, Any]] = []
+    repo_summaries: list[dict[str, Any]] = []
+    for label, root in repo_specs:
+        records, summary = _repo_records(label, root)
+        repo_summaries.append(summary)
+        all_records.extend(record.__dict__ for record in records)
+
+    payload = {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "repos": repo_summaries,
+        "combined": _combined_summary([FileRecord(**record) for record in all_records]),
+        "files": all_records,
+    }
+
+    if args.json_out:
+        json_path = Path(args.json_out).expanduser()
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    if args.markdown_out:
+        md_path = Path(args.markdown_out).expanduser()
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text(_render_markdown(payload), encoding="utf-8")
+
+    if not args.json_out and not args.markdown_out:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
