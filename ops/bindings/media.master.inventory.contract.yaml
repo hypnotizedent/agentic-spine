@@ -35,9 +35,9 @@ topology:
     vm_mount: /srv/media
     container_mount: /media
     capacity_total: 20T
-    capacity_used: 11T
-    capacity_free: 8.5T
-    capacity_pct: 56
+    capacity_used: 12T
+    capacity_free: 7.3T
+    capacity_pct: 63
     role: "Active library. Where Ronny watches content at home."
 
   cold_archive:
@@ -129,48 +129,48 @@ library_roots:
     quality_floor: "FLAC preferred, MP3 320 accepted"
 
 current_state:
-  traced_at: "2026-03-24T00:00Z"
-  trace_method: "SSH + ARR API queries from controller terminal"
+  traced_at: "2026-03-24T16:24Z"
+  trace_method: "SSH + ARR API queries — full pipeline diagnostic + rectification"
   movies:
-    filesystem_size: 6.9G
-    filesystem_dirs: 1
+    filesystem_size: 213G
+    filesystem_dirs: 273
     radarr_total: 1
     radarr_with_files: 1
     radarr_queue: 0
-    arr_free_space: 8671G
+    arr_free_space: 7374G
     import_stall: false
-    note: "Nearly empty library — only 1 movie. Not a stall; library not yet built on home canonical."
+    note: "273 dirs from USB transfer (mostly not Radarr-tracked). Radarr has 1 tracked movie. Pipeline healthy."
   tv:
-    filesystem_size: 3.4T
-    sonarr_total: 129
-    sonarr_with_files: 69
-    sonarr_episodes_on_disk: 2407
-    sonarr_queue_total: 545
-    sonarr_queue_status: downloading
-    sonarr_queue_sample: "Smallville S10 (active download, status=ok)"
-    arr_free_space: 8671G
+    filesystem_size: 4.4T
+    filesystem_dirs: 97
+    sonarr_total: 130
+    sonarr_with_files: 72
+    sonarr_episodes_on_disk: 2686
+    sonarr_queue_total: 0
+    sonarr_queue_status: clean
+    arr_free_space: 7374G
     import_stall: false
     import_stall_note: |
-      Previous 401-item queue stall was fixed (2026-03-24). Current 545 queue items
-      are active downloads (status=downloading, trackedDownloadStatus=ok).
-      Active grabs: Dexter (S01-S08), Euphoria S01, Malcolm in the Middle (S01/S03),
-      Schitts Creek (S01/S02), Smallville (S01/S04/S10), Cheers S10E25, Wednesday S02.
-      Pipeline is flowing — these are in-progress, not stuck.
+      Queue cleaned from 315 stale items to 0 (2026-03-24T16:23Z).
+      Stale items: 117 failed (manual qBit downloads), 170 completed (already imported),
+      28 downloadClientUnavailable. Pipeline flowing — Dexter S02 imported same day.
   music:
-    filesystem_size: 696G
+    filesystem_size: 707G
+    filesystem_dirs: 246
     lidarr_total: 390
-    lidarr_with_tracks: 210
-    lidarr_tracks_on_disk: 20172
-    lidarr_size_on_disk: 696G
-    lidarr_queue: 61
+    lidarr_with_tracks: 219
+    lidarr_tracks_on_disk: 20419
+    lidarr_size_on_disk: 707G
+    lidarr_queue: 60
+    lidarr_queue_detail: "45 ok (importing), 15 warning (unmatched tracks — need manual review)"
     lidarr_wanted: 2975
-    arr_free_space: 8671G
+    arr_free_space: 7374G
     import_stall: resolved
     import_stall_detail: |
-      696GB rsync complete. 210/390 artists with tracks (was 57 pre-import).
-      20,172 tracks on disk. 61 items in queue (active grabs, not stuck).
-      Music pipeline (slskd + soularr) cycling continuously.
-      Navidrome streaming 696G of indexed music. Staging cleaned (708GB reclaimed).
+      FIXED 2026-03-24: Lidarr had ZERO remote path mappings — SABnzbd paths couldn't resolve.
+      Added sabnzbd + gluetun RPMs. Music library permissions fixed (755→777 for NFS root_squash).
+      Result: +247 tracks imported, +9 artists, 78 dirs cleared from complete/music (280→202).
+      Lidarr queue processing remaining 45 "ok" items automatically.
   staging_debt:
     total: 546G
     file_counts:
@@ -188,11 +188,11 @@ current_state:
         note: "DELETED after import verification. 696GB library confirmed, 22,358 files > 21,769 staging files."
       - path: /volume1/media-staging/downloads/tv-import-20260323
         size: 546G
-        files: 253
+        files: 42
         type: tv_import_staging
         hardlinks: false
         hardlink_nlink: 1
-        note: "All files have nlink=1 — standalone copies. Contains 30 Rock, Knight of the Seven Kingdoms, etc."
+        note: "All files have nlink=1 — standalone copies. DO NOT DELETE until TV import verified by operator."
       - path: /volume1/media-staging/downloads/music-migration-staging
         size: 0
         files: 0
@@ -204,18 +204,18 @@ current_state:
         size: 0
         files: 0
         type: movies_import_staging
-        note: "Empty — no movie imports staged"
+        status: empty_shells
+        note: "Empty dirs only (0 files). Cannot delete — owned by admin, ronadmin lacks permission. Needs DSM UI or root."
     downloads_active:
       complete_tv: 23G
-      complete_tv_detail: "Wednesday S02 (8 eps), Narcos S01E06, Friends S02E13 (_UNPACK_ stale)"
-      complete_music: 231M
+      complete_tv_detail: "Community S01 (1 ep remaining), Wednesday S02 (7 eps), _UNPACK_Friends (empty)"
+      complete_music: 120G
+      complete_music_detail: "205 dirs (was 280) — Lidarr actively importing, ~45 queued ok"
       complete_movies: 0
       complete_radarr: 0
       complete_sonarr: 0
-      incomplete: 12G
-      incomplete_detail: "Active downloads: Dexter S01-S08, Euphoria S01, Malcolm S01/S03, Schitts Creek S01/S02, Smallville S01/S04/S10, Cheers S10E25"
-      slskd: 2.5G
-      slskd_detail: "4 albums + failed_imports + incomplete dirs"
+      incomplete: 3.9G
+      slskd: 25G
 
 per_title_catalog:
   authority: "~/code/workbench/agents/media/data/MEDIA_LIBRARY_CATALOG.yaml"
@@ -310,15 +310,50 @@ known_issues:
     severity: high
     status: fixed
     fixed_at: "2026-03-24"
-    detail: "373 warning items bulk-removed via Sonarr API. Queue reduced from 619 to 258 (230 active OK, 28 transitional)."
+    detail: "Queue cleaned from 315→0. 117 failed (manual qBit), 170 stale completed, 28 unavailable — all removed."
   - id: music-pipeline-restored
     severity: medium
     status: fixed
     fixed_at: "2026-03-24"
-    detail: "slskd + soularr activated on media-home. Music grab pipeline restored. 74 files in flight immediately on startup. Soularr 5-min cycle will search Lidarr wanted list."
+    detail: "slskd + soularr activated on media-home. Music grab pipeline restored."
+  - id: lidarr-missing-remote-path-mappings
+    severity: critical
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: |
+      ROOT CAUSE: Lidarr had ZERO remote path mappings. SABnzbd reported /downloads/complete/music/
+      but Lidarr couldn't resolve to /media/downloads/complete/music/. All 280 completed downloads
+      (171G) were stuck with "Permissions error" (actually path-not-found).
+      FIX: Added RPMs for sabnzbd (/downloads/ → /media/downloads/) and gluetun (same).
+      RESULT: 247+ tracks imported, 78 dirs cleared from complete/music.
+  - id: qbittorrent-temp-password
+    severity: high
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: |
+      qBit v5.1.4 was generating temp passwords on each restart — PBKDF2 hash was stale from upgrade.
+      All 3 ARR apps had wrong credentials. Radarr IP was also banned by qBit (too many failed attempts).
+      FIX: Set permanent password via qBit API, restarted qBit to clear IP bans, updated all ARR download clients.
+  - id: music-library-permissions
+    severity: high
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: |
+      /volume1/media-staging/music/ was 755 (ronadmin:users). Lidarr runs as root in container,
+      NFS root_squash maps root→nobody, nobody can't write to 755 dirs.
+      Movies dir was already 777 and worked fine.
+      FIX: chmod 777 all music dirs, chmod 666 all music files (matching movies pattern).
   - id: radarr-empty-library
     severity: info
-    detail: "Only 1 movie in Radarr. Library not yet built on home canonical."
+    detail: "Only 1 movie in Radarr. 273 USB-transferred dirs not yet Radarr-tracked."
+  - id: movies-import-staging-undeletable
+    severity: low
+    status: open
+    detail: "movies-import-20260323/ has 0 files but empty dirs owned by admin — ronadmin can't delete. Needs DSM UI."
+  - id: complete-music-corrupted-downloads
+    severity: low
+    status: open
+    detail: "Ray Charles and George Benson download dirs contain German ebook files (epub/azw3) instead of music. Corrupted Usenet grabs."
 
 cross_references:
   pipeline_contract: ops/bindings/media.pipeline.contract.yaml
