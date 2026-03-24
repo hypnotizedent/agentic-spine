@@ -416,7 +416,7 @@ case "${1:-}" in
   builder|1)
     source "$SPINE_REPO/ops/commands/preflight.sh"
     cat <<BUILDER
-  LANE 1: BUILDER (legacy — use 'ops lane open control' instead)
+  LANE 1: BUILDER (compat alias; new work should start with session.v3.attach)
   Issue: ${CURRENT_ISSUE:-none}
   Worktree: ${CURRENT_WORKTREE:-main}
 BUILDER
