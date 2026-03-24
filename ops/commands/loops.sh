@@ -423,6 +423,24 @@ PY
     release_git_lock
 
     echo "CLOSED: $loop_id disposition=$disposition (updated $scope_file)"
+
+    # ── SQLite authority bridge: record close in shared_authority.db ──
+    # TODO: make authoritative once bridge is proven; non-fatal during transition.
+    # Scope file write already succeeded above; bridge failure does not block close.
+    local LOOPS_BRIDGE="$SPINE_REPO/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
+    if [[ -x "$LOOPS_BRIDGE" ]]; then
+        bridge_close_args=("close" "--id" "$loop_id" "--status" "closed"
+            "--disposition" "$disposition"
+            "--actor" "loops.close"
+            "--reason" "Closed via ops loops close"
+        )
+        [[ -n "${close_summary:-}" ]] && bridge_close_args+=("--reason" "Closed via ops loops close: $close_summary")
+        if python3 "$LOOPS_BRIDGE" "${bridge_close_args[@]}" 2>/dev/null; then
+            echo "loops-authority-bridge: recorded close for $loop_id in shared_authority.db" >&2
+        else
+            echo "loops-authority-bridge: close failed (non-fatal, scope file is primary)" >&2
+        fi
+    fi
 }
 
 # ── Summary ───────────────────────────────────────────────────────────────

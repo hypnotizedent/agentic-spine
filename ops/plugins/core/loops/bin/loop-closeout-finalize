@@ -542,6 +542,24 @@ then
 fi
 mv "$tmp_file" "$SCOPE_FILE"
 
+# ── SQLite authority bridge: record close in shared_authority.db ──
+# TODO: make authoritative once bridge is proven; non-fatal during transition.
+# Scope file write already succeeded above; bridge failure does not block closeout.
+LOOPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
+if [[ -x "$LOOPS_BRIDGE" ]]; then
+  bridge_close_args=("close" "--id" "$LOOP_ID" "--status" "closed"
+    "--disposition" "$DISPOSITION"
+    "--actor" "loop.closeout.finalize"
+    "--reason" "Closed via loop.closeout.finalize (run_key=${SPINE_CAP_RUN_KEY:-manual})"
+  )
+  [[ -n "$COMPLETION_LEVEL" ]] && bridge_close_args+=("--completion-level" "$COMPLETION_LEVEL")
+  if python3 "$LOOPS_BRIDGE" "${bridge_close_args[@]}" 2>/dev/null; then
+    echo "loops-authority-bridge: recorded close for $LOOP_ID in shared_authority.db" >&2
+  else
+    echo "loops-authority-bridge: close failed (non-fatal, scope file is primary)" >&2
+  fi
+fi
+
 if [[ -z "$RECEIPT_PATH" ]]; then
   if [[ "$RECEIPT_DIR_REL" == /* ]]; then
     RECEIPT_PATH="$RECEIPT_DIR_REL/${LOOP_ID}.closeout.md"
