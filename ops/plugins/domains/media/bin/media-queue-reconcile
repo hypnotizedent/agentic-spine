@@ -114,13 +114,28 @@ fetch_movie() {
 # Delete queue item
 delete_queue_item() {
   local queue_id="$1"
+  local remove_from_client="${2:-false}"
   if $DRY_RUN; then
-    echo "DRY-RUN: would DELETE /api/v3/queue/${queue_id}" >&2
+    echo "DRY-RUN: would DELETE /api/v3/queue/${queue_id}?removeFromClient=${remove_from_client}" >&2
     return 0
   fi
   curl -sf --max-time 10 -X DELETE \
     -H "X-Api-Key: ${RADARR_API_KEY}" \
-    "${RADARR_URL}/api/v3/queue/${queue_id}?removeFromClient=false&blocklist=false" 2>/dev/null
+    "${RADARR_URL}/api/v3/queue/${queue_id}?removeFromClient=${remove_from_client}&blocklist=false" 2>/dev/null
+}
+
+# Trigger movie search (for C6 auto-remove-and-research)
+trigger_movie_search() {
+  local movie_id="$1"
+  if $DRY_RUN; then
+    echo "DRY-RUN: would trigger MoviesSearch for movie ${movie_id}" >&2
+    return 0
+  fi
+  curl -sf --max-time 10 -X POST \
+    -H "X-Api-Key: ${RADARR_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\":\"MoviesSearch\",\"movieIds\":[${movie_id}]}" \
+    "${RADARR_URL}/api/v3/command" 2>/dev/null >/dev/null
 }
 
 # Main reconciliation logic
@@ -146,8 +161,12 @@ if [[ "$TOTAL_RECORDS" -eq 0 ]]; then
   exit 0
 fi
 
+# C6 age threshold (hours)
+NOW_EPOCH="$(date -u +%s)"
+STALE_IMPORT_THRESHOLD_HOURS=48
+
 # Classify each queue item per policy
-CLASSIFICATIONS="$(echo "$QUEUE_JSON" | jq --argjson batch "$BATCH_SIZE" '
+CLASSIFICATIONS="$(echo "$QUEUE_JSON" | jq --argjson batch "$BATCH_SIZE" --argjson now "$NOW_EPOCH" --argjson stale_h "$STALE_IMPORT_THRESHOLD_HOURS" '
   [.records[:$batch][] | {
     queue_id: .id,
     movie_id: (.movieId // null),
@@ -157,21 +176,25 @@ CLASSIFICATIONS="$(echo "$QUEUE_JSON" | jq --argjson batch "$BATCH_SIZE" '
     tracked_state: (.trackedDownloadState // "unknown"),
     has_file: (.movie.hasFile // false),
     error_message: (.errorMessage // null),
+    added: (.added // null),
+    age_hours: (if .added then (($now - (.added | split(".")[0] + "Z" | fromdateiso8601)) / 3600 | floor) else null end)
+  } | . + {
     classification: (
-      if (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.movie.hasFile == true) then "QUEUE-C1"
-      elif (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.movie.hasFile == false) then "QUEUE-C2"
-      elif (.status == "warning" or .trackedDownloadStatus == "warning") and (.movie.hasFile == false) then "QUEUE-C3"
-      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.movie.hasFile == true) then "QUEUE-C4"
-      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.movie.hasFile == false) then "QUEUE-C5"
+      if (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and .has_file then "QUEUE-C1"
+      elif (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.has_file | not) then "QUEUE-C2"
+      elif (.has_file | not) and (.age_hours != null and .age_hours >= $stale_h) and (.tracked_state == "importPending" or .trackedDownloadStatus == "warning" or (.error_message != null and (.error_message | test("match"; "i")))) then "QUEUE-C6"
+      elif (.status == "warning" or .trackedDownloadStatus == "warning") and (.has_file | not) then "QUEUE-C3"
+      elif (.status == "completed" or .trackedDownloadState == "importPending") and .has_file then "QUEUE-C4"
+      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.has_file | not) then "QUEUE-C5"
       else "UNCLASSIFIED"
       end
-    ),
+    )
+  } | . + {
     action: (
-      if (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.movie.hasFile == true) then "auto_remove"
-      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.movie.hasFile == true) then "auto_remove"
-      elif (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.movie.hasFile == false) then "manual_review"
-      elif (.status == "warning" or .trackedDownloadStatus == "warning") and (.movie.hasFile == false) then "age_flag"
-      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.movie.hasFile == false) then "manual_review"
+      if .classification == "QUEUE-C1" or .classification == "QUEUE-C4" then "auto_remove"
+      elif .classification == "QUEUE-C6" then "auto_remove_and_research"
+      elif .classification == "QUEUE-C2" or .classification == "QUEUE-C5" then "manual_review"
+      elif .classification == "QUEUE-C3" then "age_flag"
       else "skip"
       end
     )
@@ -184,11 +207,13 @@ C2_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.classification == "QUEU
 C3_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.classification == "QUEUE-C3")] | length')"
 C4_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.classification == "QUEUE-C4")] | length')"
 C5_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.classification == "QUEUE-C5")] | length')"
+C6_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.classification == "QUEUE-C6")] | length')"
 UNCLASSIFIED_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.classification == "UNCLASSIFIED")] | length')"
 AUTO_REMOVE_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.action == "auto_remove")] | length')"
+AUTO_REMOVE_AND_RESEARCH_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.action == "auto_remove_and_research")] | length')"
 MANUAL_REVIEW_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.action == "manual_review")] | length')"
 
-# Execute auto-remove actions
+# Execute auto-remove actions (C1, C4)
 REMOVED=0
 REMOVE_ERRORS=0
 if [[ "$AUTO_REMOVE_COUNT" -gt 0 ]]; then
@@ -199,6 +224,24 @@ if [[ "$AUTO_REMOVE_COUNT" -gt 0 ]]; then
       REMOVE_ERRORS=$((REMOVE_ERRORS + 1))
     fi
   done < <(echo "$CLASSIFICATIONS" | jq -r '.[] | select(.action == "auto_remove") | .queue_id')
+fi
+
+# Execute auto-remove-and-research actions (C6)
+RESEARCHED=0
+RESEARCH_ERRORS=0
+if [[ "$AUTO_REMOVE_AND_RESEARCH_COUNT" -gt 0 ]]; then
+  while IFS=$'\t' read -r queue_id movie_id; do
+    if delete_queue_item "$queue_id" "true"; then
+      REMOVED=$((REMOVED + 1))
+      if trigger_movie_search "$movie_id"; then
+        RESEARCHED=$((RESEARCHED + 1))
+      else
+        RESEARCH_ERRORS=$((RESEARCH_ERRORS + 1))
+      fi
+    else
+      REMOVE_ERRORS=$((REMOVE_ERRORS + 1))
+    fi
+  done < <(echo "$CLASSIFICATIONS" | jq -r '.[] | select(.action == "auto_remove_and_research") | [.queue_id, .movie_id] | @tsv')
 fi
 
 MODE="dry-run"
@@ -216,9 +259,12 @@ if $OUTPUT_JSON; then
     --argjson c3 "$C3_COUNT" \
     --argjson c4 "$C4_COUNT" \
     --argjson c5 "$C5_COUNT" \
+    --argjson c6 "$C6_COUNT" \
     --argjson unclassified "$UNCLASSIFIED_COUNT" \
     --argjson removed "$REMOVED" \
     --argjson errors "$REMOVE_ERRORS" \
+    --argjson researched "$RESEARCHED" \
+    --argjson research_errors "$RESEARCH_ERRORS" \
     '{
       capability: "media.queue.reconcile",
       generated_at: $ts,
@@ -232,14 +278,18 @@ if $OUTPUT_JSON; then
         "QUEUE-C3_stalled": $c3,
         "QUEUE-C4_completed_hasfile": $c4,
         "QUEUE-C5_completed_nofile": $c5,
+        "QUEUE-C6_stale_import": $c6,
         "UNCLASSIFIED": $unclassified
       },
       actions: {
         auto_removable: ($c1 + $c4),
+        auto_remove_and_research: $c6,
         manual_review: ($c2 + $c5),
         age_flag: $c3,
         removed: $removed,
-        remove_errors: $errors
+        remove_errors: $errors,
+        researched: $researched,
+        research_errors: $research_errors
       },
       items: .
     }'
@@ -256,12 +306,15 @@ else
   echo "  QUEUE-C3 (stalled/warning):         $C3_COUNT"
   echo "  QUEUE-C4 (completed, hasFile=true): $C4_COUNT"
   echo "  QUEUE-C5 (completed, no import):    $C5_COUNT"
+  echo "  QUEUE-C6 (stale import, >48h):      $C6_COUNT"
   echo "  UNCLASSIFIED:                       $UNCLASSIFIED_COUNT"
   echo ""
   echo "Actions:"
   echo "  auto_removable: $((C1_COUNT + C4_COUNT))"
+  echo "  auto_remove+research: $C6_COUNT"
   echo "  manual_review:  $((C2_COUNT + C5_COUNT))"
   echo "  removed:        $REMOVED"
+  echo "  researched:     $RESEARCHED"
   echo "  errors:         $REMOVE_ERRORS"
 
   if [[ "$MANUAL_REVIEW_COUNT" -gt 0 ]]; then
