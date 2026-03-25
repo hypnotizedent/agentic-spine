@@ -103,38 +103,61 @@ log ""
 log "── Phase 2: Apply file exclusions ────────────────────────"
 EXCLUDED_COUNT=0
 
-# Directory exclusions
+# Directory exclusions (Go-yq v4 compatible)
 while IFS= read -r dir; do
-  [[ -n "$dir" ]] || continue
+  [[ -n "$dir" && "$dir" != "null" ]] || continue
   if [[ -d "$WORKDIR/$dir" ]]; then
     rm -rf "${WORKDIR:?}/$dir"
     (( EXCLUDED_COUNT++ )) || true
     log "  excluded dir: $dir"
   fi
-done < <(yq -r '.excluded_directories[].path // empty' "$EXCLUSIONS_FILE" 2>/dev/null)
+done < <(yq eval '.excluded_directories[].path | select(. != null)' "$EXCLUSIONS_FILE" 2>/dev/null)
 
 # File exclusions
 while IFS= read -r file; do
-  [[ -n "$file" ]] || continue
+  [[ -n "$file" && "$file" != "null" ]] || continue
   if [[ -f "$WORKDIR/$file" ]]; then
     rm -f "$WORKDIR/$file"
     (( EXCLUDED_COUNT++ )) || true
     log "  excluded file: $file"
   fi
-done < <(yq -r '.excluded_files[].path // empty' "$EXCLUSIONS_FILE" 2>/dev/null)
+done < <(yq eval '.excluded_files[].path | select(. != null)' "$EXCLUSIONS_FILE" 2>/dev/null)
 
 # Pattern exclusions
 while IFS= read -r pattern; do
-  [[ -n "$pattern" ]] || continue
+  [[ -n "$pattern" && "$pattern" != "null" ]] || continue
   while IFS= read -r match; do
     [[ -n "$match" ]] || continue
     rm -f "$match"
     (( EXCLUDED_COUNT++ )) || true
     log "  excluded pattern match: ${match#$WORKDIR/}"
   done < <(find "$WORKDIR" -name "$pattern" -type f 2>/dev/null)
-done < <(yq -r '.excluded_patterns[].pattern // empty' "$EXCLUSIONS_FILE" 2>/dev/null)
+done < <(yq eval '.excluded_patterns[].pattern | select(. != null)' "$EXCLUSIONS_FILE" 2>/dev/null)
 
 log "  Total exclusions: $EXCLUDED_COUNT"
+
+# ── Phase 2b: Inject template replacements ────────────────────────
+TEMPLATE_DIR="$ROOT/ops/plugins/core/release/templates"
+TEMPLATES_INJECTED=0
+if [[ -d "$TEMPLATE_DIR" ]]; then
+  while IFS= read -r line; do
+    [[ -n "$line" && "$line" != "null" ]] || continue
+    original="$(echo "$line" | yq eval '.original' -)"
+    template="$(echo "$line" | yq eval '.template' -)"
+    [[ -n "$original" && -n "$template" ]] || continue
+    src="$TEMPLATE_DIR/$template"
+    if [[ -f "$src" ]]; then
+      dest_dir="$(dirname "$WORKDIR/$original")"
+      mkdir -p "$dest_dir"
+      cp "$src" "$WORKDIR/$template"
+      (( TEMPLATES_INJECTED++ )) || true
+      log "  injected template: $template (replaces $original)"
+    fi
+  done < <(yq eval '.replaced_with_template[] | @json' "$EXCLUSIONS_FILE" 2>/dev/null)
+fi
+if [[ "$TEMPLATES_INJECTED" -gt 0 ]]; then
+  log "  Templates injected: $TEMPLATES_INJECTED"
+fi
 
 # ── Phase 3: Content transformations ───────────────────────────────
 log ""
@@ -203,57 +226,28 @@ log "── Phase 4: Validate output ──────────────�
 # Run a lightweight check for remaining sensitive patterns
 VALIDATION_FAILURES=0
 
-# Helper: count grep matches safely (pipefail-safe)
-count_matches() { grep "$@" 2>/dev/null | wc -l | tr -d ' ' || echo 0; }
+# Helper: count grep matches safely (pipefail-safe — subshell absorbs grep exit 1)
+count_matches() { (grep "$@" 2>/dev/null || true) | wc -l | tr -d ' '; }
 
-# Check for remaining hardcoded paths
-REMAINING="$(count_matches -r --exclude-dir=.git '/Users/ronnyworks' "$WORKDIR")"
-if [[ "$REMAINING" -gt 0 ]]; then
-  log "  WARN: $REMAINING lines still contain /Users/ronnyworks"
-  (( VALIDATION_FAILURES += REMAINING )) || true
-fi
+check_residual() {
+  local label="$1"; shift
+  local count
+  count="$(count_matches "$@")"
+  if [[ "$count" -gt 0 ]]; then
+    log "  WARN: $count lines still contain $label"
+    (( VALIDATION_FAILURES += count )) || true
+  fi
+}
 
-# Check for remaining internal domains
-REMAINING="$(count_matches -rE --exclude-dir=.git '\.(ronny\.works|mintprints\.co)' "$WORKDIR")"
-if [[ "$REMAINING" -gt 0 ]]; then
-  log "  WARN: $REMAINING lines still contain internal domains"
-  (( VALIDATION_FAILURES += REMAINING )) || true
-fi
-
-# Check for remaining Tailscale IPs
-REMAINING="$(count_matches -rE --exclude-dir=.git '100\.(6[4-9]|[7-9][0-9]|1[0-2][0-9])\.[0-9]+\.[0-9]+' "$WORKDIR")"
-if [[ "$REMAINING" -gt 0 ]]; then
-  log "  WARN: $REMAINING lines still contain Tailscale IPs"
-  (( VALIDATION_FAILURES += REMAINING )) || true
-fi
-
-# Check for remaining private LAN IPs
-REMAINING="$(count_matches -rE --exclude-dir=.git '192\.168\.[0-9]+\.[0-9]+|10\.(0|10)\.[0-9]+\.[0-9]+' "$WORKDIR")"
-if [[ "$REMAINING" -gt 0 ]]; then
-  log "  WARN: $REMAINING lines still contain private LAN IPs"
-  (( VALIDATION_FAILURES += REMAINING )) || true
-fi
-
-# Check for remaining email addresses
-REMAINING="$(count_matches -rE --exclude-dir=.git 'hypnotizedent@gmail\.com|ronny@[a-z.]+\.(com|works|co)' "$WORKDIR")"
-if [[ "$REMAINING" -gt 0 ]]; then
-  log "  WARN: $REMAINING lines still contain personal email addresses"
-  (( VALIDATION_FAILURES += REMAINING )) || true
-fi
-
-# Check for remaining container registry refs
-REMAINING="$(count_matches -r --exclude-dir=.git 'ghcr.io/hypnotizedent/' "$WORKDIR")"
-if [[ "$REMAINING" -gt 0 ]]; then
-  log "  WARN: $REMAINING lines still contain personal container registry refs"
-  (( VALIDATION_FAILURES += REMAINING )) || true
-fi
-
-# Check for remaining infrastructure hostnames
-REMAINING="$(count_matches -rE --exclude-dir=.git '\b(md1400|r730xd|PM8072|UDR[67])\b' "$WORKDIR")"
-if [[ "$REMAINING" -gt 0 ]]; then
-  log "  WARN: $REMAINING lines still contain infrastructure hostnames"
-  (( VALIDATION_FAILURES += REMAINING )) || true
-fi
+check_residual "hardcoded paths"          -r  --exclude-dir=.git '/Users/ronnyworks' "$WORKDIR"
+check_residual "internal domains"         -rE --exclude-dir=.git '\bronny\.works\b|\bmintprints\.(com|co)\b' "$WORKDIR"
+check_residual "Tailscale IPs"            -rE --exclude-dir=.git '100\.(6[4-9]|[7-9][0-9]|1[0-2][0-9])\.[0-9]+\.[0-9]+' "$WORKDIR"
+check_residual "private LAN IPs"          -rE --exclude-dir=.git '192\.168\.[0-9]+\.[0-9]+|10\.(0|10)\.[0-9]+\.[0-9]+' "$WORKDIR"
+check_residual "personal emails"          -rE --exclude-dir=.git 'hypnotizedent@gmail\.com|ronny@[a-z.]+\.(com|works|co)' "$WORKDIR"
+check_residual "container registry refs"  -r  --exclude-dir=.git 'ghcr.io/hypnotizedent/' "$WORKDIR"
+check_residual "infrastructure hostnames" -rE --exclude-dir=.git '\b(md1400|r730xd|PM8072|UDR[67])\b' "$WORKDIR"
+check_residual "secret manager URIs"      -r  --exclude-dir=.git 'infisical://' "$WORKDIR"
+check_residual "github identity"          -rw --exclude-dir=.git 'hypnotizedent' "$WORKDIR"
 
 if [[ "$VALIDATION_FAILURES" -gt 0 ]]; then
   log ""
