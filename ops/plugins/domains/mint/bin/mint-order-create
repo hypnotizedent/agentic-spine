@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""
+mint.order.create — Exclusive schema injection gateway.
+
+Accepts parsed intake JSON (from mint.intake.email.parse) and creates
+governed database records. This is the ONLY permitted write path to the
+Mint database. Agents are forbidden from executing INSERT/UPDATE/DELETE
+against the Mint schema outside this capability.
+
+Authority:
+  - Schema: ops/plugins/domains/mint/schema/mint.core.schema.sql
+  - Schema governance: ops/plugins/domains/mint/schema/mint.schema.authority.yaml
+  - Runtime boundary: ops/plugins/domains/mint/contracts/mint.runtime.boundary.yaml
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[5]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.domains.mint.lib.mint_intake_common import (
+    generate_id,
+    get_db_connection,
+    get_db_path,
+    init_db,
+    now_utc,
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Exclusive schema injection gateway for Mint orders"
+    )
+    parser.add_argument("--input-file", help="Path to parsed intake JSON from mint.intake.email.parse")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Validate and show what would be created without writing to DB")
+    parser.add_argument("--json", action="store_true", default=True)
+    return parser.parse_args()
+
+
+def load_intake(args: argparse.Namespace) -> dict[str, Any]:
+    """Load parsed intake JSON from file or stdin."""
+    if args.input_file:
+        with open(args.input_file) as f:
+            return json.load(f)
+    if not sys.stdin.isatty():
+        return json.load(sys.stdin)
+    print("error: provide --input-file or pipe JSON to stdin", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def resolve_or_create_customer(conn: "sqlite3.Connection", customer_data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Find existing customer by email or create a new one.
+    Returns {"customer_id": str, "action": "found"|"created", "identity_state": str}.
+    """
+    import sqlite3
+
+    email = (customer_data.get("email") or {}).get("value", "")
+    name = (customer_data.get("name") or {}).get("value", "")
+    company = (customer_data.get("company") or {}).get("value", "")
+
+    if email:
+        row = conn.execute(
+            "SELECT customer_id, name, identity_state FROM customer WHERE email = ?",
+            (email.lower(),)
+        ).fetchone()
+        if row:
+            return {
+                "customer_id": row["customer_id"],
+                "action": "found",
+                "identity_state": row["identity_state"],
+                "name": row["name"],
+            }
+
+    # Create new customer as provisional
+    customer_id = generate_id()
+    ts = now_utc()
+    conn.execute(
+        """INSERT INTO customer (customer_id, name, email, company, identity_state, source, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'provisional', 'email', ?, ?)""",
+        (customer_id, name, email.lower() if email else None, company or None, ts, ts),
+    )
+    return {
+        "customer_id": customer_id,
+        "action": "created",
+        "identity_state": "provisional",
+        "name": name,
+    }
+
+
+def create_order(conn: "sqlite3.Connection", order_id: str, customer_id: str,
+                 intake: dict[str, Any]) -> dict[str, Any]:
+    """Create the Order record in draft state."""
+    ts = now_utc()
+    subject = (intake.get("source") or {}).get("subject", {}).get("value", "")
+    message_id = (intake.get("source") or {}).get("message_id", "")
+
+    conn.execute(
+        """INSERT INTO "order" (order_id, customer_id, lifecycle_state, payment_state,
+           operator_notes, intake_seed_refs, created_at, updated_at)
+           VALUES (?, ?, 'draft', 'unpaid', ?, ?, ?, ?)""",
+        (order_id, customer_id,
+         f"Intake from email: {subject}" if subject else "Intake from email",
+         json.dumps([message_id]) if message_id else None,
+         ts, ts),
+    )
+    return {"order_id": order_id, "lifecycle_state": "draft", "payment_state": "unpaid"}
+
+
+def create_line_items(conn: "sqlite3.Connection", order_id: str,
+                      line_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Create LineItem records from parsed extraction."""
+    created: list[dict[str, Any]] = []
+    ts = now_utc()
+    revision_id = generate_id()  # first revision
+
+    for item in line_items:
+        line_item_id = generate_id()
+        quantity_val = (item.get("quantity") or {}).get("value")
+        quantity = quantity_val if isinstance(quantity_val, int) and quantity_val > 0 else 1
+
+        # Garment is created as a placeholder if type is detected
+        garment_type = (item.get("garment_type") or {}).get("value")
+        garment_id = generate_id()
+        sizes = (item.get("sizes") or {}).get("value") or []
+        color = (item.get("color") or {}).get("value") or ""
+
+        conn.execute(
+            """INSERT INTO garment (garment_id, style_number, brand, description, color,
+               sizes_available, category, created_at, updated_at)
+               VALUES (?, 'TBD', 'TBD', ?, ?, ?, ?, ?, ?)""",
+            (garment_id,
+             garment_type or "unspecified",
+             color or "unspecified",
+             json.dumps(sizes) if sizes else '["S","M","L","XL"]',
+             garment_type or "other",
+             ts, ts),
+        )
+
+        conn.execute(
+            """INSERT INTO line_item (line_item_id, order_id, order_revision_id, garment_id,
+               quantity, size_breakdown, notes, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (line_item_id, order_id, revision_id, garment_id,
+             quantity,
+             json.dumps({s: 0 for s in sizes}) if sizes else None,
+             f"Parsed from email: {garment_type or 'unspecified'}",
+             ts, ts),
+        )
+
+        created.append({
+            "line_item_id": line_item_id,
+            "garment_id": garment_id,
+            "order_revision_id": revision_id,
+            "quantity": quantity,
+            "garment_type": garment_type,
+        })
+
+    return created
+
+
+def create_artwork_records(conn: "sqlite3.Connection", order_id: str, customer_id: str,
+                           routed_assets: list[dict[str, Any]],
+                           artwork_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Create Artwork records linked to routed hot-storage assets."""
+    created: list[dict[str, Any]] = []
+    ts = now_utc()
+
+    # Process routed assets (attachments that were directed to hot storage)
+    for asset in routed_assets:
+        artwork_id = asset.get("artwork_id") or generate_id()
+        filename = asset.get("filename", "")
+        target_path = asset.get("target_path", "")
+
+        ext = Path(filename).suffix.lstrip(".").lower() if filename else ""
+        file_format = ext if ext in ("ai", "eps", "pdf", "png", "svg", "psd", "jpg", "tiff") else None
+
+        conn.execute(
+            """INSERT INTO artwork (artwork_id, customer_id, filename, file_format,
+               storage_path, storage_tier, version, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'hot', 1, ?, ?)""",
+            (artwork_id, customer_id, filename, file_format, target_path, ts, ts),
+        )
+        created.append({
+            "artwork_id": artwork_id,
+            "filename": filename,
+            "storage_path": target_path,
+            "storage_tier": "hot",
+        })
+
+    # Also record link-type artwork references (not yet downloaded)
+    for ref in artwork_refs:
+        if ref.get("type") != "link":
+            continue
+        url = (ref.get("url") or {}).get("value", "")
+        if not url:
+            continue
+        artwork_id = generate_id()
+        conn.execute(
+            """INSERT INTO artwork (artwork_id, customer_id, filename, storage_path,
+               storage_tier, version, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'hot', 1, ?, ?)""",
+            (artwork_id, customer_id, Path(url).name, url, ts, ts),
+        )
+        created.append({
+            "artwork_id": artwork_id,
+            "filename": Path(url).name,
+            "storage_path": url,
+            "storage_tier": "hot",
+            "source": "link",
+        })
+
+    return created
+
+
+def inject_order(intake: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
+    """
+    Main injection pipeline: resolve customer → create order → create line items → create artwork.
+    """
+    order_id = intake.get("provisional_order_id") or generate_id()
+    customer_data = intake.get("customer") or {}
+    line_items = intake.get("line_items") or []
+    artwork_refs = intake.get("artwork_refs") or []
+    routed_assets = intake.get("routed_assets") or []
+
+    result: dict[str, Any] = {
+        "capability": "mint.order.create",
+        "generated_at": now_utc(),
+        "db_path": str(get_db_path()),
+        "dry_run": dry_run,
+        "order_id": order_id,
+    }
+
+    if dry_run:
+        result["would_create"] = {
+            "customer": "resolve or create from: " + str((customer_data.get("email") or {}).get("value", "unknown")),
+            "order": {"order_id": order_id, "lifecycle_state": "draft"},
+            "line_items": len(line_items),
+            "artwork_records": len(routed_assets) + len([r for r in artwork_refs if r.get("type") == "link"]),
+        }
+        return result
+
+    conn = get_db_connection()
+    try:
+        init_db(conn)
+
+        customer_result = resolve_or_create_customer(conn, customer_data)
+        result["customer"] = customer_result
+
+        order_result = create_order(conn, order_id, customer_result["customer_id"], intake)
+        result["order"] = order_result
+
+        line_item_results = create_line_items(conn, order_id, line_items)
+        result["line_items"] = line_item_results
+
+        artwork_results = create_artwork_records(
+            conn, order_id, customer_result["customer_id"],
+            routed_assets, artwork_refs,
+        )
+        result["artwork"] = artwork_results
+
+        conn.commit()
+        result["status"] = "created"
+        result["records_written"] = (
+            1  # customer (0 if found)
+            + 1  # order
+            + len(line_item_results) * 2  # line_item + garment per item
+            + len(artwork_results)
+        )
+    except Exception as e:
+        conn.rollback()
+        result["status"] = "error"
+        result["error"] = str(e)
+        return result
+    finally:
+        conn.close()
+
+    return result
+
+
+def main() -> int:
+    args = parse_args()
+    intake = load_intake(args)
+    result = inject_order(intake, dry_run=args.dry_run)
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result.get("status") != "error" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
