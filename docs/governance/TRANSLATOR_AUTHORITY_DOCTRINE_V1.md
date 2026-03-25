@@ -1,0 +1,264 @@
+---
+status: authoritative
+owner: "@ronny"
+scope: translator-authority-doctrine
+version: 1.0
+updated: "2026-03-24"
+decision_loop_id: LOOP-TRANSLATOR-DOCTRINE-CONSOLIDATION-20260324
+source_triangulation:
+  - docs/governance/SPINE_V3_BOOTSTRAP.md (Target Node Model, Principles 3/5)
+  - docs/governance/V3_AUTONOMY_DECISIONS.md (Translator Architecture Decision — Option A)
+  - docs/governance/SPINE_V3_CONTINUOUS_SOURCEBOOK.md (synthesized V3 thought)
+  - docs/governance/CONTROL_NODE_REQUIREMENTS.md (Phase 1 supersession)
+  - docs/governance/EXECUTION_NODE_SPEC.md (node 6/7 placement)
+  - ops/bindings/translator.authority.contract.yaml (machine-evaluable boundary)
+enforcement:
+  gate: D422 (translator-authority-isolation-lock)
+  contract: ops/bindings/translator.authority.contract.yaml
+---
+
+# Translator Authority Doctrine v1
+
+**Purpose**: Define the permanent, non-negotiable rules governing the Translator role, the 7-Node execution topology, and the binding "Translator Analysis Framework" that every AI agent session must internalize before executing work.
+
+**Authority**: This doctrine is the canonical source of truth for translator governance, execution-plane separation, and session-entry analysis requirements. The machine-evaluable contract at `ops/bindings/translator.authority.contract.yaml` MUST reference this document as its `doctrine_source`. Gate D422 enforces structural compliance.
+
+**Scope**: Applies to every AI agent session (Claude Code, Codex, ChatGPT, any future surface), every operator console interaction, and every automated pipeline that ingests, normalizes, routes, or renders spine state.
+
+---
+
+## Why This Exists
+
+### The Business Origin
+
+Spine V3 exists because two real operational systems — **Mint Prints order intake** and the **Media Stack pipeline** — required consistent, predictable automation that humans alone could not sustain.
+
+Mint Prints exposed the problem first: customer order intakes arrived from email, Shopify webhooks, phone calls, and walk-ins. Each channel had different formatting, different urgency signals, and different data quality. When a human operator (or an AI session acting as operator) tried to normalize, route, and execute these intakes in a single surface, errors compounded: orders were misclassified, follow-ups were dropped, and the execution surface had no memory of what the translation surface had decided.
+
+The Media Stack exposed the same pattern at infrastructure scale: download queues, library organization, availability tracking, and rename operations all required translation of messy input into structured action — and the translation step kept collapsing into the execution step, producing ungoverned side effects.
+
+The lesson: **when the thing that interprets intent is the same thing that executes action, there is no checkpoint between misunderstanding and consequence.** The Translator Workflow exists to prevent humans (and AI agents) from directly causing chaos in the terminals.
+
+### The Technical Failure
+
+Before V3, the Codex desktop collapsed four roles into one surface:
+
+1. Translator (interpreting what the operator wants)
+2. Coordinator (deciding what to do next)
+3. Verifier (judging whether it worked)
+4. Git agent (publishing the result)
+
+This meant a single prompt misunderstanding could propagate through all four stages without any structural checkpoint. "Floating WIP" — ad-hoc work started without loop registration — was the most common failure mode.
+
+This doctrine exists to ensure that architecture enforces what prompting cannot guarantee.
+
+---
+
+## The 7-Node Model
+
+Spine V3 decomposes operational authority into seven distinct node types. Each node has a narrow responsibility set. No single node may hold translation, execution, and verification authority simultaneously.
+
+### 1. Operator Console
+
+- **Host**: MacBook (confirmed control-plane entry)
+- **Purpose**: inspect, approve, converse, launch, review
+- **Rule**: Should not remain the long-term home of recurring system authority. The operator observes and approves; the spine executes.
+
+### 2. Translator Node
+
+- **Host**: VM 207 (`ai-consolidation`), port 8400 (Decision: Option A, locked)
+- **Purpose**: receive messy input, normalize it, route it, render output
+- **Rule**: The translator is the membrane, not the judge. It may interpret intent, but it must never become the spine seal of success.
+- **See**: [Translator Boundary Rules](#translator-boundary-rules) below
+
+### 3. Control Node
+
+- **Host**: MacBook (Phase 1 decision, confirmed)
+- **Purpose**: broker, routing, loop/request state, packet compilation, attestation authority
+- **Properties**: stable, always-on, infrastructure-grade, not dependent on a user login session
+- **NOT here**: capability execution, verification, natural-language translation, operator console, domain decisions, storage/archive, git write authority
+
+### 4. Execution Nodes
+
+- **Host**: Workers, VMs, containers (replaceable)
+- **Purpose**: task execution, transforms, ingestion, governed capability work
+- **Properties**: replaceable and role-bounded, receive work from task envelopes, emit receipts
+- **Rule**: An execution node never decides what to execute. It receives dispatched work and returns results.
+
+### 5. Verification Node
+
+- **Purpose**: checks, audits, validation, policy gates
+- **Property**: logically isolated from translator authority
+- **Rule**: The verifier judges outcomes. It has no stake in translation or execution.
+
+### 6. Watcher Nodes
+
+- **Purpose**: event and file monitoring only
+- **Properties**: small, disposable, event-driven
+- **Rule**: Watchers observe and emit signals. They do not act.
+
+### 7. Storage and Archive Node
+
+- **Host**: md1400 (NAS), cold storage targets
+- **Purpose**: datasets, evidence, archives, cold history
+- **Rule**: Storage is append-mostly. Deletion requires break-glass.
+
+### Placement Rule
+
+Assign machines by trust boundary, authority set, persistence, and replacement story. Do not assign roles by raw performance alone. **Hardware follows trust, not horsepower.**
+
+---
+
+## Translator Boundary Rules
+
+These rules are non-negotiable. They are enforced structurally by `translator.authority.contract.yaml` and verified by gate D422.
+
+### Allowed Actions
+
+| Action | Description |
+|--------|-------------|
+| Input ingestion | Receive messy human or chat input from any surface |
+| Classification | Classify input into spine vs. domain concern families |
+| Normalization | Normalize input into structured spine requests |
+| Routing | Route normalized requests to the correct execution surface |
+| Status translation | Render attested outputs back to the user in human-readable form |
+| Session continuity | Maintain light session state for multi-turn interpretation |
+| Chat-native ingress | Optional interface layers (e.g., OpenClaw or similar) |
+
+### Forbidden Actions
+
+| Action | Why |
+|--------|-----|
+| Repo mutation | No git add, commit, push, or file writes to governed repos |
+| Execution authority | No capability execution, loop advancement, or lane dispatch |
+| Verification authority | No gate evaluation, verify runs, or attestation issuance |
+| Git authority | No branch creation, merge, rebase, or tag operations |
+| Final success claims | No verdicts, loop closures, or completion attestation |
+
+### The Core Invariant
+
+> **The translator is the membrane, not the judge.**
+> It may interpret intent, but it must never become the spine seal of success.
+> It should be always-on, but never final.
+
+The translator may start a workflow, but it must never be the final judge of success (Principle 5, SPINE_V3_BOOTSTRAP). Translator interprets intent; verifier judges outcomes; git agent publishes (Principle 3).
+
+---
+
+## The Translator Analysis Framework
+
+**This framework is binding governance.** Every AI agent session — regardless of surface, model, or operator — MUST apply these four checks before executing any work. This is not a suggestion. It is a structural requirement that prevents the most common V3 failure modes.
+
+### Part 1: Core Assumptions
+
+The Translator must assume:
+
+- **The MacBook environment is fully healthy.** Do not waste cycles re-verifying the control plane's basic functionality. The session attach capability already validates this.
+- **The Loop Anchorage is NEVER assumed.** Always verify the `LOOP_ID`. A session without a verified loop scope is a session producing floating WIP. The first act of every session is to confirm: *What loop am I operating under?*
+
+**Why this asymmetry exists**: The MacBook is infrastructure — it either works or the session cannot start. The loop scope is context — it changes between sessions, between waves, between operator intents. Assuming the loop is correct is the single most common source of ungoverned drift.
+
+### Part 2: Significant Context Verification
+
+Before routing any work, the Translator must establish three distinctions:
+
+1. **State Mutating vs. Read-Only Fact-Finding**
+   - Is this request going to change files, state, or system configuration? Or is it purely investigative?
+   - Mutating actions require loop scope, governed capabilities, and commit ceremony.
+   - Read-only actions may proceed with lighter governance but still require loop awareness.
+
+2. **Correct Execution Target**
+   - MacBook (control plane): governance operations, verify runs, loop management, local dev
+   - VM 207 (ai-consolidation): translator service, RAG queries, AI-adjacent workloads
+   - VM 106 / domain VMs: infrastructure changes, service operations, domain-specific execution
+   - Remote hosts: SSH-governed capability dispatch per `ssh.targets.yaml`
+
+3. **Capability Bounds**
+   - Does a governed capability already exist for this task? If yes, use it. (Principle 13)
+   - Is the requested action within the current session's authority? Check the entry packet's `forbidden_actions` list.
+   - Would this action collapse translator + executor + verifier into one surface? If yes, stop. That is the anti-pattern.
+
+### Part 3: The Most Common Mistake — Floating WIP
+
+The most critical error in Spine V3 is **floating WIP**: starting ad-hoc work, running raw `git add`, or bypassing `.runtime/spine/state/` without registering a Loop.
+
+**What floating WIP looks like:**
+
+- An agent makes file changes without a `LOOP_ID` in scope
+- An operator asks "just quickly fix this" and the agent complies without loop registration
+- Work products accumulate in the working tree with no traceability to a loop scope, wave, or gap
+- `git add -A` is used instead of scoped, governed staging
+- Commits land without D128 trailers linking them to governance artifacts
+
+**Why it is dangerous:**
+
+- No receipt trail — the work cannot be audited, rolled back, or attributed
+- No verification scope — gates cannot evaluate work that has no loop anchor
+- No completion criteria — "done" has no definition without a loop objective
+- Drift compounds — each ungoverned change makes the next session's context harder to resolve
+
+**The rule**: If work is non-trivial (any file mutation, any state change, any infrastructure action), it MUST have a loop scope. If no loop exists, the first action is to create one or attach to an existing one. `session.v3.attach -- --allow-no-loop` exists for genuine ad-hoc inspection, not as a permanent bypass.
+
+### Part 4: The ONE Universal Gate
+
+Every session, every agent, every operator interaction must begin with this question:
+
+> **"What is the specific Loop objective, gap ID, or execution runway you want us to tackle for this session, and have you verified that `./bin/ops cap run session.v3.attach -- --allow-no-loop` has run successfully?"**
+
+This is not a formality. This question enforces:
+
+1. **Loop anchorage** — work is attached to a governed scope before execution begins
+2. **Session initialization** — the entry packet, policy, and friction snapshot are loaded
+3. **Operator intent clarity** — the human has stated what "done" looks like
+4. **Translator boundary** — the agent is asking, not assuming. Asking is translation. Assuming is execution.
+
+If the operator cannot answer this question, the session should operate in read-only fact-finding mode until a loop scope is established.
+
+---
+
+## Deployment Architecture (Option A — Locked)
+
+The Translator Node will be deployed as an always-on FastAPI service on VM 207:
+
+- **Host**: VM 207 (`ai-consolidation`), Tailscale at `100.71.17.29`
+- **Port**: 8400
+- **Endpoints**: `POST /ingest`, `POST /normalize`, `POST /route`, `GET /status`
+- **Normalization**: Rules-based classifier (v1), optional local model for ambiguous inputs
+- **Session state**: SQLite (light, durable across reboots)
+- **Routing**: Spine concerns → control plane, Domain concerns → domain agents
+- **Fallback**: When classification is uncertain, route to control plane
+
+**What NOT to build (ever):**
+
+- Do not give the translator git access
+- Do not give the translator loop closure authority
+- Do not route translator output directly to execution without a governed capability call
+- Do not add a chat UI to the translator service — chat surfaces remain thin clients calling the translator's HTTP API
+- Do not solve boundary enforcement with prompting when you can solve it with network isolation
+
+**Integration**: The translator normalizes input and produces a structured spine request. That request is handed to `wave.execute.start` or to a direct capability call. The translator does not call wave.execute itself — it emits a structured packet and a human-readable routing suggestion. The operator or an authorized orchestrator session makes the execution call.
+
+This preserves the separation: **translator is the membrane, wave.execute is the execution surface, verification gates are the judges.**
+
+---
+
+## Relationship to Existing Governance
+
+| Document | Relationship |
+|----------|-------------|
+| `SPINE_V3_BOOTSTRAP.md` | Parent architecture. This doctrine elaborates the Target Node Model and Principles 3, 4, 5, 8, 9. |
+| `V3_AUTONOMY_DECISIONS.md` | Decision record. Option A (Translator as Service) is locked. This doctrine codifies the implications. |
+| `SPINE_V3_CONTINUOUS_SOURCEBOOK.md` | Deep reference. Extensive synthesis of translator thought distilled into this doctrine. |
+| `CONTROL_NODE_REQUIREMENTS.md` | Superseded (Phase 1). MacBook stays control plane; VM 207 gets worker roles only. |
+| `EXECUTION_NODE_SPEC.md` | Sibling spec. Execution Node is node 4/7 in this model. |
+| `translator.authority.contract.yaml` | Machine-evaluable enforcement. MUST reference this doctrine as `doctrine_source`. |
+| `D422 gate` | Structural verification of translator isolation. |
+| `SESSION_PROTOCOL.md` | Defines floating WIP and loop scope requirements referenced in Part 3. |
+
+---
+
+## Change Log
+
+| Date | Version | Change |
+|------|---------|--------|
+| 2026-03-24 | 1.0 | Initial doctrine. Triangulated from 6 source documents. 4-Part Analysis Framework codified. |
