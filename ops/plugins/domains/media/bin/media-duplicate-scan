@@ -2,20 +2,20 @@
 # media.duplicate.scan — Detect duplicate movies in the library
 set -euo pipefail
 
-resolve_media_home() {
-  for host in "ubuntu@10.0.0.106" "ubuntu@100.113.72.41"; do
-    if ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" "echo ok" &>/dev/null; then
-      echo "$host"; return
-    fi
-  done
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+RESOLVE_RESULT="$(ssh_resolve_host_with_fallback "media-home" 2>/dev/null || true)"
+RESOLVED_IP="${RESOLVE_RESULT%% *}"
+if [[ -z "$RESOLVED_IP" ]]; then
   echo "ERROR: Cannot reach media-home" >&2; exit 1
-}
+fi
+MEDIA_USER="$(ssh_resolve_user "media-home" "ubuntu" 2>/dev/null || echo "ubuntu")"
+MEDIA_HOME="${MEDIA_USER}@${RESOLVED_IP}"
+MEDIA_IP="$RESOLVED_IP"
 
-MEDIA_HOME=$(resolve_media_home)
-MEDIA_IP=$(echo "$MEDIA_HOME" | cut -d@ -f2)
-
-RADARR_KEY=$(ssh "$MEDIA_HOME" \
-  "sudo sed -n 's/.*<ApiKey>\(.*\)<\/ApiKey>.*/\1/p' /srv/appdata/compose/media-write/volumes/radarr/config/config.xml" 2>/dev/null)
+RADARR_KEY=$("$SPINE_ROOT/ops/plugins/domains/media/bin/media-api-resolve" radarr 2>/dev/null || true)
 
 echo "=== DUPLICATE MOVIE SCAN ==="
 echo "Date: $(date -u +%Y-%m-%dT%H:%MZ)"
