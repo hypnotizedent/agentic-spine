@@ -48,12 +48,12 @@ make_fake_repo() {
 set -euo pipefail
 spine_runtime_resolve_paths() {
   export SPINE_REPO="${SPINE_REPO:-$PWD}"
-  export SPINE_RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-$PWD/.runtime}"
+  export SPINE_RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine}"
   export SPINE_STATE="${SPINE_STATE:-$SPINE_RUNTIME_ROOT/state}"
 }
 spine_resolve_mailroom_path() {
   local rel="${1:?mailroom path required}"
-  printf '%s\n' "${SPINE_RUNTIME_ROOT:-$PWD/.runtime}/${rel}"
+  printf '%s\n' "${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine}/${rel}"
 }
 SH
 

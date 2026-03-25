@@ -44,7 +44,7 @@ make_fake_repo() {
 #!/usr/bin/env bash
 set -euo pipefail
 spine_runtime_resolve_paths() {
-  local runtime_root="${SPINE_RUNTIME_ROOT:-$PWD/.runtime}"
+  local runtime_root="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine}"
   export SPINE_TARGET_REPO="${SPINE_TARGET_REPO:-$PWD}"
   export SPINE_REPO="${SPINE_REPO:-$SPINE_TARGET_REPO}"
   export SPINE_CODE="${SPINE_CODE:-$SPINE_TARGET_REPO}"
