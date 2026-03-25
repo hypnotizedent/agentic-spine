@@ -203,25 +203,56 @@ log "── Phase 4: Validate output ──────────────�
 # Run a lightweight check for remaining sensitive patterns
 VALIDATION_FAILURES=0
 
+# Helper: count grep matches safely (pipefail-safe)
+count_matches() { grep "$@" 2>/dev/null | wc -l | tr -d ' ' || echo 0; }
+
 # Check for remaining hardcoded paths
-REMAINING_PATHS="$(grep -r --exclude-dir=.git '/Users/ronnyworks' "$WORKDIR" 2>/dev/null | wc -l | tr -d ' ')"
-if [[ "$REMAINING_PATHS" -gt 0 ]]; then
-  log "  WARN: $REMAINING_PATHS lines still contain /Users/ronnyworks"
-  (( VALIDATION_FAILURES += REMAINING_PATHS )) || true
+REMAINING="$(count_matches -r --exclude-dir=.git '/Users/ronnyworks' "$WORKDIR")"
+if [[ "$REMAINING" -gt 0 ]]; then
+  log "  WARN: $REMAINING lines still contain /Users/ronnyworks"
+  (( VALIDATION_FAILURES += REMAINING )) || true
 fi
 
 # Check for remaining internal domains
-REMAINING_DOMAINS="$(grep -rE --exclude-dir=.git '\.(ronny\.works|mintprints\.co)' "$WORKDIR" 2>/dev/null | wc -l | tr -d ' ')"
-if [[ "$REMAINING_DOMAINS" -gt 0 ]]; then
-  log "  WARN: $REMAINING_DOMAINS lines still contain internal domains"
-  (( VALIDATION_FAILURES += REMAINING_DOMAINS )) || true
+REMAINING="$(count_matches -rE --exclude-dir=.git '\.(ronny\.works|mintprints\.co)' "$WORKDIR")"
+if [[ "$REMAINING" -gt 0 ]]; then
+  log "  WARN: $REMAINING lines still contain internal domains"
+  (( VALIDATION_FAILURES += REMAINING )) || true
 fi
 
 # Check for remaining Tailscale IPs
-REMAINING_TS="$(grep -rE --exclude-dir=.git '100\.(6[4-9]|[7-9][0-9]|1[0-2][0-9])\.[0-9]+\.[0-9]+' "$WORKDIR" 2>/dev/null | wc -l | tr -d ' ')"
-if [[ "$REMAINING_TS" -gt 0 ]]; then
-  log "  WARN: $REMAINING_TS lines still contain Tailscale IPs"
-  (( VALIDATION_FAILURES += REMAINING_TS )) || true
+REMAINING="$(count_matches -rE --exclude-dir=.git '100\.(6[4-9]|[7-9][0-9]|1[0-2][0-9])\.[0-9]+\.[0-9]+' "$WORKDIR")"
+if [[ "$REMAINING" -gt 0 ]]; then
+  log "  WARN: $REMAINING lines still contain Tailscale IPs"
+  (( VALIDATION_FAILURES += REMAINING )) || true
+fi
+
+# Check for remaining private LAN IPs
+REMAINING="$(count_matches -rE --exclude-dir=.git '192\.168\.[0-9]+\.[0-9]+|10\.(0|10)\.[0-9]+\.[0-9]+' "$WORKDIR")"
+if [[ "$REMAINING" -gt 0 ]]; then
+  log "  WARN: $REMAINING lines still contain private LAN IPs"
+  (( VALIDATION_FAILURES += REMAINING )) || true
+fi
+
+# Check for remaining email addresses
+REMAINING="$(count_matches -rE --exclude-dir=.git 'hypnotizedent@gmail\.com|ronny@[a-z.]+\.(com|works|co)' "$WORKDIR")"
+if [[ "$REMAINING" -gt 0 ]]; then
+  log "  WARN: $REMAINING lines still contain personal email addresses"
+  (( VALIDATION_FAILURES += REMAINING )) || true
+fi
+
+# Check for remaining container registry refs
+REMAINING="$(count_matches -r --exclude-dir=.git 'ghcr.io/hypnotizedent/' "$WORKDIR")"
+if [[ "$REMAINING" -gt 0 ]]; then
+  log "  WARN: $REMAINING lines still contain personal container registry refs"
+  (( VALIDATION_FAILURES += REMAINING )) || true
+fi
+
+# Check for remaining infrastructure hostnames
+REMAINING="$(count_matches -rE --exclude-dir=.git '\b(md1400|r730xd|PM8072|UDR[67])\b' "$WORKDIR")"
+if [[ "$REMAINING" -gt 0 ]]; then
+  log "  WARN: $REMAINING lines still contain infrastructure hostnames"
+  (( VALIDATION_FAILURES += REMAINING )) || true
 fi
 
 if [[ "$VALIDATION_FAILURES" -gt 0 ]]; then
