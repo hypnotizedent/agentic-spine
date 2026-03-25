@@ -292,6 +292,30 @@ if [[ "$ACTIVE_SESSIONS" -gt 1 ]]; then
 "
 fi
 
+# --- Dynamic gate metadata (from gate.registry.yaml summary block) ---
+GATE_REGISTRY="$SPINE_ROOT/ops/bindings/gate.registry.yaml"
+GATE_LINE=""
+if [[ -f "$GATE_REGISTRY" ]]; then
+  GATE_TOTAL="$(awk '/^  total:/{print $2; exit}' "$GATE_REGISTRY" 2>/dev/null)"
+  GATE_ACTIVE="$(awk '/^  active:/{print $2; exit}' "$GATE_REGISTRY" 2>/dev/null)"
+  GATE_RETIRED="$(awk '/^  retired:/{print $2; exit}' "$GATE_REGISTRY" 2>/dev/null)"
+  GATE_LINE="**Gates:** ${GATE_TOTAL:-0} total, ${GATE_ACTIVE:-0} active, ${GATE_RETIRED:-0} retired"
+fi
+
+# --- Friction queue depth ---
+FRICTION_QUEUE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/friction-queue.ndjson"
+FRICTION_LINE=""
+if [[ -f "$FRICTION_QUEUE" ]]; then
+  FRICTION_DEPTH=$(wc -l < "$FRICTION_QUEUE" 2>/dev/null | tr -d ' ')
+  [[ "${FRICTION_DEPTH:-0}" != "0" ]] && FRICTION_LINE="**Friction queue:** ${FRICTION_DEPTH} items"
+fi
+
+# --- Docker context ---
+DOCKER_CTX="(none)"
+if command -v docker >/dev/null 2>&1; then
+  DOCKER_CTX="$(timeout 2 docker context show 2>/dev/null || echo "unavailable")"
+fi
+
 # Read governance brief — prefer spine.context dynamic delivery, fallback to direct file read
 BRIEF_FILE="$SPINE_ROOT/docs/governance/AGENT_GOVERNANCE_BRIEF.md"
 BRIEF_MODE="${SESSION_ENTRY_BRIEF_MODE:-summary}"  # summary|full
@@ -350,16 +374,11 @@ fi
 # Build the system message: dynamic state + canonical brief
 MSG="## SESSION ENTRY PROTOCOL (governance hook)
 
-You are working inside the agentic-spine repo (\`$SPINE_ROOT\`).
-**Branch:** \`${BRANCH}\` | **Active worktrees:** ${WT_COUNT}/2 | **Active sessions:** ${ACTIVE_SESSIONS}
-**Terminal context:** terminal_role=\`${SESSION_TERMINAL_ROLE:-unset}\` | runtime_role=\`${SESSION_RUNTIME_ROLE}\`
-${DIRTY_WARNING}${MULTI_AGENT_WARNING}${PROPOSALS_HEALTH}
-
-### Multi-Agent Write Policy (Default)
-- Agents: read-only on repo; write proposals to \`mailroom/outbox/proposals/\`
-- Operator: apply via \`./bin/ops cap run proposals.apply <CP-...>\` (creates a commit)
-- If you need isolation: \`./bin/ops start loop <LOOP_ID>\` (worktrees optional)
-
+**Branch:** \`${BRANCH}\` | **Worktrees:** ${WT_COUNT}/2 | **Sessions:** ${ACTIVE_SESSIONS} | **Docker:** \`${DOCKER_CTX}\`
+**Terminal:** \`${SESSION_TERMINAL_ROLE:-unset}\` → \`${SESSION_RUNTIME_ROLE}\`
+${GATE_LINE:+${GATE_LINE}
+}${FRICTION_LINE:+${FRICTION_LINE}
+}${DIRTY_WARNING}${MULTI_AGENT_WARNING}${PROPOSALS_HEALTH}
 ### Spine Status
 \`\`\`
 ${LOOPS}

@@ -35,6 +35,13 @@ OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "..."
 OPS_GOVERNED_MAIN_OVERRIDE=1 git push origin main
 ```
 
+## Execution Discipline
+
+1. **Use governed capabilities, not raw shell.** If `./bin/ops cap list` shows a capability, use it. Raw bash/git/ssh is a last resort.
+2. **Mutating work requires a loop.** No loop active for non-trivial changes? Create one with `loops.create` first. No floating WIP.
+3. **Commit ceremony.** All commits on main require `OPS_GOVERNED_MAIN_OVERRIDE=1`. D128 trailers are auto-populated. Stage specific files, never `git add -A`.
+4. **Verify after mutations.** After committing, run `./bin/ops cap run verify.run -- fast` to confirm no gates broke.
+
 ## V3 Operating Model (2026-03-23)
 
 ### Rule 1: Controller Lane
@@ -191,6 +198,35 @@ This prevents worktree accumulation and ensures main checkout sessions start cle
 ```bash
 ./bin/ops cap run verify.run -- fast
 ./bin/ops cap run verify.run -- domain <domain>
+```
+
+## Session Closeout
+
+Run friction capabilities before ending a session with significant work:
+
+```bash
+# Surface friction from this session
+./bin/ops cap run friction.queue.status
+
+# Record failures or workarounds:
+./bin/ops cap run friction.ingest -- \
+  --loop-id LOOP-XXX \
+  --capability <what-failed> \
+  --expected "what should have happened" \
+  --actual "what actually happened" \
+  --severity <low|medium|high> \
+  --auto-reconcile
+```
+
+Loop closeout ceremony:
+```bash
+./bin/ops cap run loop.closeout.finalize -- \
+  --loop-id LOOP-XXX \
+  --acceptance-matrix <path> \
+  --disposition landed \
+  --completion-level loop_complete \
+  --propagation-evidence "..." \
+  --owner "@ronny"
 ```
 
 ## Minimality Rules

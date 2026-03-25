@@ -1,32 +1,14 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-23
 scope: agent-runtime-contract
 ---
 
-# AGENTS.md - Thin Entry Stub
+# AGENTS.md — Thin Entry Stub
 
-Canonical contract: [`docs/governance/SPINE.md`](docs/governance/SPINE.md)
-
-Use this file only as an entry pointer plus generated metadata block.
+Canonical governance: [`docs/governance/SPINE.md`](docs/governance/SPINE.md) | Doctrine: [`TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`](docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md)
 
 <!-- SPINE_STARTUP_BLOCK -->
-## Mandatory Startup Block
-
-```bash
 cd ~/code/agentic-spine
 ./bin/ops cap run session.v3.attach -- --allow-no-loop
-```
 <!-- /SPINE_STARTUP_BLOCK -->
-
-<!-- ENTRY_SURFACE_GATE_METADATA_START -->
-# ENTRY SURFACE GATE METADATA (generated)
-entry_surface_gate_metadata: projection
-source_registry: ops/bindings/gate.registry.yaml
-registry_updated: 2026-03-22
-gate_count_total: 411
-gate_count_active: 111
-gate_count_retired: 300
-max_gate_id: D421
-<!-- ENTRY_SURFACE_GATE_METADATA_END -->
