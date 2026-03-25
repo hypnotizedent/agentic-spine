@@ -20,6 +20,27 @@ cd ~/code/agentic-spine
 3. No inline fixes without gap/loop registration.
 4. Verify before closeout.
 5. Use governed outputs (loop/gap/proposal/handoff contracts).
+6. **ALL execution routes through spine capabilities.** No agent or IDE session executes directly — no raw SSH, no ad-hoc curl, no manual API calls. If a cap doesn't exist, register the gap.
+
+## EXECUTION BOUNDARY — READ THIS FIRST
+
+> **⛔ AGENTS AND IDE SESSIONS MUST NEVER EXECUTE DIRECTLY.**
+>
+> No agent — Cowork, Claude Code, Desktop terminal, mobile, or any other IDE session —
+> is permitted to run commands, SSH into hosts, curl APIs, or mutate infrastructure directly.
+>
+> **ALL execution routes through the spine.**
+>
+> - Need to run a capability? → `mcp__spine__cap_run` or `./bin/ops cap run`
+> - Need to query a service? → Use the governed capability that wraps that service
+> - Need to schedule something? → `host.launchd.scheduler` plane, not raw plist creation
+> - Need to test a change? → Dry-run through the cap (`--dry-run` flag), not ad-hoc shell commands
+> - Need to check queue state? → `media.queue.reconcile` cap with `--json`, not manual API calls
+>
+> **If no capability exists for what you need to do, that is a gap — register it, don't bypass it.**
+>
+> The spine IS the execution layer. Terminals write controller prompts and commit bindings.
+> They do not execute. The caps execute. This is the entire point of V3.
 
 ## Environment Detection (do this first)
 
