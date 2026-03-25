@@ -1,0 +1,80 @@
+template_id: review.context
+version: "1.0"
+type: review
+description: >
+  Structured review template for evaluating code changes, proposals, or
+  contract modifications. Ensures consistent coverage of scope validation,
+  gate compliance, side effects, and rollback considerations.
+
+role_affinity: [controller]
+
+authority_refs:
+  - docs/governance/SPINE.md
+  - ops/bindings/communication.protocol.contract.yaml
+
+# ── Context Dimensions ──────────────────────────────────────────────
+context_dimensions:
+  - id: scope_validation
+    required: true
+    prompt: >
+      Does this change stay within the declared scope of its governing
+      loop? List every file touched and confirm each is within the
+      loop's permissible_scopes. Flag any out-of-scope mutations.
+    evidence_required: true
+    evidence_type: scope_diff
+
+  - id: gate_compliance
+    required: true
+    prompt: >
+      Run the relevant verify pack. Will existing gates pass after this
+      change? If any gate will fail, identify which ones and whether the
+      failure is expected (requires gate update) or a regression.
+    evidence_required: true
+    evidence_type: gate_results
+
+  - id: contract_compliance
+    required: true
+    prompt: >
+      Does this change violate any active contract in ops/bindings/?
+      Check schema conventions, naming rules, and domain boundaries.
+      Reference specific contract clauses if violations are found.
+    evidence_required: true
+    evidence_type: contract_check
+
+  - id: side_effects
+    required: true
+    prompt: >
+      What projections, dashboards, or downstream surfaces need updating
+      after this change? Will the capability map need rebuilding? Are
+      there gate registry entries that need creation or retirement?
+    evidence_required: false
+    evidence_type: impact_list
+
+  - id: rollback
+    required: true
+    prompt: >
+      Is this change reversible? What is the rollback procedure? If the
+      change involves data migration, destructive operations, or external
+      state mutations, document the recovery path.
+    evidence_required: false
+    evidence_type: rollback_plan
+
+  - id: security
+    required: false
+    prompt: >
+      Does this change introduce or modify secret handling? Does it
+      expose internal paths, IPs, or identifiers? Check against the
+      sanitization audit baseline.
+    evidence_required: false
+    evidence_type: security_note
+
+# ── Output Contract ─────────────────────────────────────────────────
+output_contract:
+  format: structured_yaml
+  required_sections:
+    - verdict               # approve | request_changes | reject
+    - dimension_responses   # one entry per dimension
+    - blocking_issues       # issues that must be resolved before merge
+  optional_sections:
+    - advisory_notes        # non-blocking suggestions
+    - gate_evidence         # verify run key and results

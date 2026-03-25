@@ -75,7 +75,7 @@ get_project_id_from_name() {
   case "$1" in
     mint-os-api)    echo "6c67b03e-ed17-4154-9a94-59837738e432" ;;
     mint-os-vault)  echo "66d149d6-f610-4ec3-a400-3ff42ea1aa75" ;;
-    infrastructure) echo "01ddd93a-e0f8-4c7c-ad9f-903d76ef94d9" ;;
+    infrastructure) echo "<INFISICAL_WORKSPACE_ID_REDACTED>" ;;
     n8n)            echo "4b9dfc6d-13e8-43c8-bd84-9beb64eb8e16" ;;
     finance-stack)  echo "4c34714d-6d85-4aa6-b8df-5a9505f3bcef" ;;
     media-stack)    echo "3807f1c4-e354-4aaf-a16f-8567d7f78a7e" ;;

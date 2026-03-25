@@ -1,0 +1,99 @@
+template_id: research.context
+version: "1.0"
+type: research
+description: >
+  Systematic investigation template that enforces coverage of all standard
+  dimensions when researching a domain, service, or stack. Eliminates manual
+  keyword prompting by pre-loading the checklist a terminal must follow.
+
+role_affinity: [controller, translator]
+
+authority_refs:
+  - docs/governance/SPINE.md
+  - ops/bindings/communication.protocol.contract.yaml
+
+# ── Context Dimensions ──────────────────────────────────────────────
+# Each dimension is a structured checklist item. Terminals must address
+# every applicable dimension in their research output. Dimensions marked
+# required: true must be answered; required: false are best-effort.
+context_dimensions:
+  - id: topology
+    required: true
+    prompt: >
+      Where does this run? Map the full execution surface: VMs, containers,
+      hosts, network segments, DNS entries. Identify the canonical SSOT for
+      each layer.
+    evidence_required: true
+    evidence_type: structured_map
+
+  - id: retention
+    required: true
+    prompt: >
+      What data does this store? What is the retention policy? Where is the
+      retention contract defined? Are there legal/compliance constraints on
+      retention duration?
+    evidence_required: true
+    evidence_type: policy_reference
+
+  - id: auth
+    required: true
+    prompt: >
+      How is this authenticated? What secrets does it consume? Where are
+      secrets stored (Infisical path, env var, config file)? What is the
+      auth chain from user to service?
+    evidence_required: true
+    evidence_type: auth_chain_map
+
+  - id: backup
+    required: true
+    prompt: >
+      Is this covered by the backup inventory? What is the backup schedule?
+      Has recovery been tested? What is the RPO/RTO? Reference the backup
+      contract if one exists.
+    evidence_required: true
+    evidence_type: inventory_reference
+
+  - id: dependencies
+    required: true
+    prompt: >
+      What does this depend on? What depends on it? Map upstream and
+      downstream dependencies. Identify single points of failure.
+    evidence_required: false
+    evidence_type: dependency_graph
+
+  - id: contracts
+    required: true
+    prompt: >
+      What spine contracts govern this? What gates verify it? What domain
+      does it belong to in the topology? Is it registered in the capability
+      map?
+    evidence_required: true
+    evidence_type: contract_list
+
+  - id: health
+    required: false
+    prompt: >
+      What health checks exist? Can you probe the service right now? What
+      does the observability surface look like (metrics, logs, traces)?
+    evidence_required: false
+    evidence_type: health_probe_result
+
+  - id: gaps
+    required: false
+    prompt: >
+      Are there open gaps against this surface? What friction items exist?
+      Has prior work been done that is incomplete?
+    evidence_required: false
+    evidence_type: gap_list
+
+# ── Output Contract ─────────────────────────────────────────────────
+output_contract:
+  format: structured_yaml
+  required_sections:
+    - dimension_responses   # one entry per context_dimension addressed
+    - summary               # one-paragraph synthesis
+    - open_questions        # unanswered items requiring Operator input
+    - recommended_actions   # next steps with capability references
+  optional_sections:
+    - evidence_artifacts    # paths to captured evidence
+    - gap_filings           # new gaps discovered during research

@@ -15,7 +15,7 @@
 |-------|-------|
 | provider | infisical |
 | api_url | https://secrets.ronny.works |
-| project | `01ddd93a-e0f8-4c7c-ad9f-903d76ef94d9` |
+| project | `<INFISICAL_WORKSPACE_ID_REDACTED>` |
 | project_name | infrastructure |
 | environment | prod |
 | base_path | /spine |
@@ -50,7 +50,7 @@ Last updated: 2026-03-08
 
 | lifecycle | project_name | project_id | env | keys | notes |
 |---|---|---|---|---|---|
-| **ACTIVE** | **infrastructure** | `01ddd93a-e0f8-4c7c-ad9f-903d76ef94d9` | prod | `208` namespaced keys | **CURRENT SPINE BINDING**. Canonical active authority for Cloudflare, Vaultwarden, Authentik, finance/paperless, and shared infrastructure secrets. |
+| **ACTIVE** | **infrastructure** | `<INFISICAL_WORKSPACE_ID_REDACTED>` | prod | `208` namespaced keys | **CURRENT SPINE BINDING**. Canonical active authority for Cloudflare, Vaultwarden, Authentik, finance/paperless, and shared infrastructure secrets. |
 | OVERLOADED | mint-os-api | `6c67b03e-ed17-4154-9a94-59837738e432` | prod | ~55 | Dashboard API, vendors, payments, Resend, Stripe. Proposed rename to 'mint-os' |
 | OVERLAPS | mint-os-vault | `66d149d6-f610-4ec3-a400-3ff42ea1aa75` | prod | ~8 | Overlaps with mint-os-api; consolidation candidate |
 | DELETE_CANDIDATE | mint-os-portal | `758e5db3-8d00-4ccf-8d91-aeaad0d6ed37` | prod | 0 | Empty project, delete candidate |

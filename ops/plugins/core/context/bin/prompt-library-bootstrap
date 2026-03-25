@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# prompt-library-bootstrap — Seed .runtime/spine/state/prompts/ from canonical templates
+#
+# Usage: prompt-library-bootstrap [--validate-only] [--json]
+#
+# Copies templates from ops/plugins/core/context/templates/ to the runtime
+# prompts directory, validating schema compliance before writing. Templates
+# in the repo are the canonical source; runtime copies are ephemeral.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
+
+TEMPLATES_DIR="$ROOT/ops/plugins/core/context/templates"
+PROMPTS_DIR="$SPINE_STATE/prompts"
+VALIDATE_ONLY=0
+JSON_OUTPUT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --validate-only) VALIDATE_ONLY=1; shift ;;
+    --json)          JSON_OUTPUT=1; shift ;;
+    -h|--help)
+      echo "Usage: prompt-library-bootstrap [--validate-only] [--json]"
+      echo ""
+      echo "Seeds .runtime/spine/state/prompts/ from canonical templates."
+      echo ""
+      echo "Options:"
+      echo "  --validate-only  Validate templates without copying"
+      echo "  --json           Machine-consumable output"
+      exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+# ── Schema validation ───────────────────────────────────────────────
+REQUIRED_FIELDS=(template_id version type description role_affinity context_dimensions output_contract)
+
+validate_template() {
+  local file="$1"
+  local basename
+  basename="$(basename "$file")"
+  local errors=0
+
+  for field in "${REQUIRED_FIELDS[@]}"; do
+    if ! grep -q "^${field}:" "$file" 2>/dev/null; then
+      echo "FAIL: $basename missing required field: $field" >&2
+      (( errors++ )) || true
+    fi
+  done
+
+  # Validate type is one of the allowed values
+  local ttype
+  ttype="$(awk '/^type:/{print $2; exit}' "$file" | tr -d '"' || true)"
+  case "$ttype" in
+    research|review|verification|execution) ;;
+    *) echo "FAIL: $basename has invalid type: '$ttype' (expected: research|review|verification|execution)" >&2
+       (( errors++ )) || true ;;
+  esac
+
+  return "$errors"
+}
+
+# ── Discovery ───────────────────────────────────────────────────────
+if [[ ! -d "$TEMPLATES_DIR" ]]; then
+  echo "FAIL: canonical templates directory not found: $TEMPLATES_DIR" >&2
+  exit 1
+fi
+
+TEMPLATE_FILES=()
+while IFS= read -r f; do
+  TEMPLATE_FILES+=("$f")
+done < <(find "$TEMPLATES_DIR" -name "*.context.yaml" -type f | sort)
+
+if [[ ${#TEMPLATE_FILES[@]} -eq 0 ]]; then
+  echo "FAIL: no templates found in $TEMPLATES_DIR" >&2
+  exit 1
+fi
+
+# ── Validate ────────────────────────────────────────────────────────
+VALID=0
+INVALID=0
+VALIDATED_FILES=()
+
+for tmpl in "${TEMPLATE_FILES[@]}"; do
+  if validate_template "$tmpl"; then
+    (( VALID++ )) || true
+    VALIDATED_FILES+=("$tmpl")
+  else
+    (( INVALID++ )) || true
+  fi
+done
+
+echo "Validated: $VALID valid, $INVALID invalid out of ${#TEMPLATE_FILES[@]} templates" >&2
+
+if [[ "$INVALID" -gt 0 ]]; then
+  echo "FAIL: $INVALID template(s) failed validation. Fix before seeding." >&2
+  exit 1
+fi
+
+if [[ "$VALIDATE_ONLY" -eq 1 ]]; then
+  if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+    printf '{"validated":%d,"valid":%d,"invalid":%d}\n' "${#TEMPLATE_FILES[@]}" "$VALID" "$INVALID"
+  else
+    echo "PASS: all $VALID templates valid (validate-only mode, nothing seeded)"
+  fi
+  exit 0
+fi
+
+# ── Seed runtime ────────────────────────────────────────────────────
+mkdir -p "$PROMPTS_DIR"
+
+SEEDED=0
+for tmpl in "${VALIDATED_FILES[@]}"; do
+  basename="$(basename "$tmpl")"
+  target="$PROMPTS_DIR/$basename"
+
+  # Only copy if source is newer or target doesn't exist
+  if [[ ! -f "$target" ]] || [[ "$tmpl" -nt "$target" ]]; then
+    cp "$tmpl" "$target"
+    (( SEEDED++ )) || true
+    echo "  seeded: $basename" >&2
+  else
+    echo "  current: $basename (unchanged)" >&2
+  fi
+done
+
+# Write manifest
+{
+  echo "# Prompt Library Manifest"
+  echo "# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "# Source: $TEMPLATES_DIR"
+  echo "# Seeded by: prompt.library.bootstrap"
+  echo ""
+  for tmpl in "${VALIDATED_FILES[@]}"; do
+    basename="$(basename "$tmpl")"
+    tid="$(awk '/^template_id:/{print $2; exit}' "$tmpl" | tr -d '"')"
+    tver="$(awk '/^version:/{print $2; exit}' "$tmpl" | tr -d '"')"
+    ttype="$(awk '/^type:/{print $2; exit}' "$tmpl" | tr -d '"')"
+    echo "${tid} v${tver} (${ttype}) — ${basename}"
+  done
+} > "$PROMPTS_DIR/MANIFEST"
+
+if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+  printf '{"templates":%d,"seeded":%d,"target":"%s"}\n' "${#VALIDATED_FILES[@]}" "$SEEDED" "$PROMPTS_DIR"
+else
+  echo ""
+  echo "DONE: ${#VALIDATED_FILES[@]} templates, $SEEDED seeded to $PROMPTS_DIR"
+fi

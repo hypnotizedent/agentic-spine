@@ -1,0 +1,84 @@
+template_id: execution.context
+version: "1.0"
+type: execution
+description: >
+  Structured execution template for governed task execution. Pre-loads the
+  loop context, authority boundaries, scope constraints, and verification
+  requirements so terminals operate within declared limits.
+
+role_affinity: [controller]
+
+authority_refs:
+  - docs/governance/SPINE.md
+  - ops/bindings/governed.task.envelope.contract.yaml
+  - ops/bindings/communication.protocol.contract.yaml
+
+# ── Context Dimensions ──────────────────────────────────────────────
+context_dimensions:
+  - id: loop_context
+    required: true
+    prompt: >
+      What loop governs this task? Read the loop scope file. Identify
+      the current phase, objective, exclusions, and definition of done.
+      Confirm the task aligns with the loop's declared scope.
+    evidence_required: true
+    evidence_type: loop_scope_reference
+
+  - id: authority
+    required: true
+    prompt: >
+      What capabilities are authorized for this task? What mutation
+      classes are allowed? Reference the entry packet or governed task
+      envelope. Do not execute capabilities outside the authorized set.
+    evidence_required: true
+    evidence_type: capability_list
+
+  - id: scope_boundaries
+    required: true
+    prompt: >
+      What files, paths, and surfaces are in scope? What is explicitly
+      excluded? Reference the loop scope exclusions and the envelope's
+      permissible_scopes. Flag any action that would touch out-of-scope
+      surfaces.
+    evidence_required: true
+    evidence_type: path_list
+
+  - id: preconditions
+    required: true
+    prompt: >
+      What must be true before execution begins? Check session state,
+      verify gates, confirm no blocking gaps. Run precondition checks
+      if the capability defines them.
+    evidence_required: false
+    evidence_type: precondition_check
+
+  - id: verification
+    required: true
+    prompt: >
+      What gates must pass after execution? What verify pack should be
+      run? If a new gate is being introduced, what ring does it belong
+      to? Reference gate.registry.yaml.
+    evidence_required: true
+    evidence_type: gate_id_list
+
+  - id: closure_criteria
+    required: true
+    prompt: >
+      What defines "done" for this specific task? Reference the loop's
+      definition of done and the expected_artifact from the envelope.
+      Confirm all closure checklist items are addressable.
+    evidence_required: false
+    evidence_type: checklist
+
+# ── Output Contract ─────────────────────────────────────────────────
+output_contract:
+  format: structured_yaml
+  required_sections:
+    - execution_receipt     # run key, capability, status, commit SHA
+    - scope_compliance      # confirmation that all mutations are in scope
+    - verification_result   # gate run results
+    - closure_assessment    # which DoD items are satisfied
+  optional_sections:
+    - discovered_friction   # new issues found during execution
+    - gap_filings           # new gaps to file
+    - next_actions          # what remains to be done in this loop phase
