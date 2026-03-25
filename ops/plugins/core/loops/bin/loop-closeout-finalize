@@ -25,6 +25,15 @@ Usage:
     [--receipt-path <path>] [--no-close-linked-gaps] \
     [--cleanup-branch <branch-name>]
 
+  Lightweight mode (no acceptance matrix required):
+  loop-closeout-finalize --loop-id LOOP-... --disposition <state> \
+    --lightweight [--reason <text>] [--completion-level <level>] \
+    [--no-close-linked-gaps] [--cleanup-branch <branch-name>]
+
+  --lightweight skips acceptance-matrix, propagation-evidence, and run-key
+  validation. Use for documentation, meta-governance, strategic closures,
+  or single-wave loops without physical domain changes.
+
 Validation:
   - acceptance matrix has PASS state with no FAIL rows/placeholders
   - required run keys exist in acceptance matrix or companion supervisor receipt
@@ -47,6 +56,8 @@ USAGE
 }
 
 SELF_CHECK=0
+LIGHTWEIGHT=0
+REASON=""
 LOOP_ID=""
 ACCEPTANCE_MATRIX=""
 REGRESSION_LOCK_ID=""
@@ -69,6 +80,14 @@ while [[ $# -gt 0 ]]; do
     --self-check)
       SELF_CHECK=1
       shift
+      ;;
+    --lightweight)
+      LIGHTWEIGHT=1
+      shift
+      ;;
+    --reason)
+      REASON="${2:-}"
+      shift 2
       ;;
     --loop-id)
       LOOP_ID="${2:-}"
@@ -151,13 +170,17 @@ if [[ "$SELF_CHECK" -eq 1 ]]; then
 fi
 
 [[ -n "$LOOP_ID" ]] || { echo "loop.closeout.finalize FAIL: --loop-id required" >&2; exit 2; }
-[[ -n "$ACCEPTANCE_MATRIX" ]] || { echo "loop.closeout.finalize FAIL: --acceptance-matrix required" >&2; exit 2; }
 [[ -n "$DISPOSITION" ]] || { echo "loop.closeout.finalize FAIL: --disposition required" >&2; exit 2; }
-
-if [[ "$ACCEPTANCE_MATRIX" != /* ]]; then
-  ACCEPTANCE_MATRIX="$ROOT/$ACCEPTANCE_MATRIX"
+if [[ "$LIGHTWEIGHT" -eq 0 ]]; then
+  [[ -n "$ACCEPTANCE_MATRIX" ]] || { echo "loop.closeout.finalize FAIL: --acceptance-matrix required (use --lightweight to skip)" >&2; exit 2; }
 fi
-[[ -f "$ACCEPTANCE_MATRIX" ]] || { echo "loop.closeout.finalize FAIL: acceptance matrix not found: $ACCEPTANCE_MATRIX" >&2; exit 1; }
+
+if [[ "$LIGHTWEIGHT" -eq 0 ]]; then
+  if [[ "$ACCEPTANCE_MATRIX" != /* ]]; then
+    ACCEPTANCE_MATRIX="$ROOT/$ACCEPTANCE_MATRIX"
+  fi
+  [[ -f "$ACCEPTANCE_MATRIX" ]] || { echo "loop.closeout.finalize FAIL: acceptance matrix not found: $ACCEPTANCE_MATRIX" >&2; exit 1; }
+fi
 
 RUN_KEY_REGEX="$(yq e -r '.validation.run_key_regex // "^(CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"' "$CONTRACT")"
 MIN_RUN_KEYS="$(yq e -r '.validation.min_required_run_keys // 1' "$CONTRACT")"
@@ -193,11 +216,12 @@ fi
 # ── Propagation enforcement gate ──
 # When the closeout contract requires propagation evidence for "landed",
 # block the closeout unless --propagation-evidence is provided.
+# Skipped in --lightweight mode.
 PROPAGATION_REQUIRED="false"
 if [[ -f "$CONTRACT" ]]; then
   PROPAGATION_REQUIRED="$(yq e -r '.propagation.require_for_landed // false' "$CONTRACT")"
 fi
-if [[ "$DISPOSITION" == "landed" && "$PROPAGATION_REQUIRED" == "true" ]]; then
+if [[ "$LIGHTWEIGHT" -eq 0 && "$DISPOSITION" == "landed" && "$PROPAGATION_REQUIRED" == "true" ]]; then
   if [[ -z "$PROPAGATION_EVIDENCE" ]]; then
     echo "loop.closeout.finalize FAIL: disposition 'landed' requires --propagation-evidence" >&2
     echo "" >&2
@@ -220,11 +244,12 @@ fi
 # ── Completion level enforcement gate ──
 # When the disposition contract requires completion_level for "landed",
 # block the closeout unless --completion-level is provided and valid.
+# Skipped in --lightweight mode.
 COMPLETION_LEVEL_REQUIRED="false"
 if [[ -f "$DISPOSITION_CONTRACT" ]]; then
   COMPLETION_LEVEL_REQUIRED="$(yq e -r '.completion_levels.enforcement.require_on_landed // false' "$DISPOSITION_CONTRACT")"
 fi
-if [[ "$DISPOSITION" == "landed" && "$COMPLETION_LEVEL_REQUIRED" == "true" ]]; then
+if [[ "$LIGHTWEIGHT" -eq 0 && "$DISPOSITION" == "landed" && "$COMPLETION_LEVEL_REQUIRED" == "true" ]]; then
   if [[ -z "$COMPLETION_LEVEL" ]]; then
     cl_message="$(yq e -r '.completion_levels.enforcement.message // ""' "$DISPOSITION_CONTRACT" 2>/dev/null || true)"
     echo "loop.closeout.finalize FAIL: ${cl_message:-disposition: landed requires --completion-level}" >&2
@@ -301,6 +326,12 @@ case "$current_status" in
     ;;
 esac
 
+if [[ "$LIGHTWEIGHT" -eq 1 ]]; then
+  # Lightweight mode: skip matrix validation entirely.
+  validation_json='{"decision":"DONE","blocker_count":0,"run_key_count":0,"companion_files":[],"pass_rows":0}'
+  echo "loop.closeout.finalize: lightweight mode — skipping acceptance matrix validation"
+  [[ -n "$REASON" ]] && echo "loop.closeout.finalize: reason=$REASON"
+else
 validation_json="$(python3 - "$ACCEPTANCE_MATRIX" "$RUN_KEY_REGEX" "$MIN_RUN_KEYS" <<'PY'
 import pathlib
 import re
@@ -392,6 +423,7 @@ PY
 if [[ "$REQUIRE_MATRIX_PASS" != "true" ]]; then
   echo "loop.closeout.finalize WARN: contract disables strict acceptance-pass enforcement"
 fi
+fi  # end non-lightweight matrix validation
 
 declare -a LINKED_GAP_IDS=()
 declare -a LINKED_GAP_SEVERITIES=()
@@ -584,7 +616,9 @@ cat > "$RECEIPT_PATH" <<EOF
 - status: closed
 - disposition: $DISPOSITION
 - completion_level: ${COMPLETION_LEVEL:-n/a}
-- acceptance_matrix: $ACCEPTANCE_MATRIX
+- lightweight: $([[ "$LIGHTWEIGHT" -eq 1 ]] && echo "true" || echo "false")
+- reason: ${REASON:-n/a}
+- acceptance_matrix: ${ACCEPTANCE_MATRIX:-n/a}
 - matrix_decision: $matrix_decision
 - matrix_run_key_count: $matrix_run_keys
 - linked_open_gaps_before: $linked_open_count
@@ -688,53 +722,66 @@ GC_PURGED=0
 
 mkdir -p "$GC_PROMPTS_DIR" "$GC_RECEIPTS_DIR" "$GC_WAVES_DIR"
 
-# Archive EXEC_RECEIPT files belonging to this loop
-for f in "$SPINE_STATE"/EXEC_RECEIPT*.yaml; do
-  [[ -f "$f" ]] || continue
+# Archive EXEC_RECEIPT files belonging to this loop (recursive sweep)
+while IFS= read -r -d '' f; do
   if grep -q "loop_id:.*${LOOP_ID}" "$f" 2>/dev/null; then
-    mv "$f" "$GC_RECEIPTS_DIR/"
+    rel_path="${f#$SPINE_STATE/}"
+    dest_dir="$GC_RECEIPTS_DIR/$(dirname "$rel_path")"
+    mkdir -p "$dest_dir"
+    mv "$f" "$dest_dir/"
     GC_MOVED=$((GC_MOVED + 1))
   fi
-done
+done < <(find "$SPINE_STATE" -type f -name 'EXEC_RECEIPT*.yaml' -print0 2>/dev/null)
 
-# Archive controller prompts referencing this loop
-for f in "$SPINE_STATE"/*CONTROLLER_PROMPT*.md; do
-  [[ -f "$f" ]] || continue
+# Archive controller prompts referencing this loop (recursive sweep)
+while IFS= read -r -d '' f; do
   if grep -q "$LOOP_ID" "$f" 2>/dev/null; then
-    mv "$f" "$GC_PROMPTS_DIR/"
+    rel_path="${f#$SPINE_STATE/}"
+    dest_dir="$GC_PROMPTS_DIR/$(dirname "$rel_path")"
+    mkdir -p "$dest_dir"
+    mv "$f" "$dest_dir/"
     GC_MOVED=$((GC_MOVED + 1))
   fi
-done
+done < <(find "$SPINE_STATE" -type f -name '*CONTROLLER_PROMPT*.md' -print0 2>/dev/null)
 
-# Archive wave artifacts referencing this loop
-for f in "$SPINE_STATE"/wave*.md "$SPINE_STATE"/wave*.yaml; do
-  [[ -f "$f" ]] || continue
+# Archive wave artifacts referencing this loop (recursive sweep)
+while IFS= read -r -d '' f; do
   if grep -q "$LOOP_ID" "$f" 2>/dev/null; then
-    mv "$f" "$GC_WAVES_DIR/"
+    rel_path="${f#$SPINE_STATE/}"
+    dest_dir="$GC_WAVES_DIR/$(dirname "$rel_path")"
+    mkdir -p "$dest_dir"
+    mv "$f" "$dest_dir/"
     GC_MOVED=$((GC_MOVED + 1))
   fi
-done
+done < <(find "$SPINE_STATE" -type f \( -name 'wave*.md' -o -name 'wave*.yaml' \) -print0 2>/dev/null)
 
-# Purge orphaned FUSE artifacts (always safe to remove)
+# Purge orphaned FUSE artifacts (always safe to remove - full recursive sweep)
+GC_FUSE_COUNT=0
 while IFS= read -r -d '' orphan; do
-  rm -f "$orphan"
-  GC_PURGED=$((GC_PURGED + 1))
-done < <(find "$SPINE_STATE" -maxdepth 2 -name '.fuse_hidden*' -type f -print0 2>/dev/null)
+  rm -f "$orphan" && GC_FUSE_COUNT=$((GC_FUSE_COUNT + 1))
+done < <(find "$SPINE_STATE" -type f -name '.fuse_hidden*' -print0 2>/dev/null)
+GC_PURGED=$((GC_PURGED + GC_FUSE_COUNT))
 
-# Purge stale PID files (referenced process no longer running)
+# Purge stale PID files (dead process or malformed - full recursive sweep)
+GC_PID_COUNT=0
 while IFS= read -r -d '' pidfile; do
   pid_val="$(head -1 "$pidfile" 2>/dev/null | tr -dc '0-9')"
-  if [[ -n "$pid_val" ]] && ! kill -0 "$pid_val" 2>/dev/null; then
-    rm -f "$pidfile"
-    GC_PURGED=$((GC_PURGED + 1))
+  if [[ -z "$pid_val" ]]; then
+    # Malformed PID file - always purge
+    rm -f "$pidfile" && GC_PID_COUNT=$((GC_PID_COUNT + 1))
+  elif ! kill -0 "$pid_val" 2>/dev/null; then
+    # Process not running - purge
+    rm -f "$pidfile" && GC_PID_COUNT=$((GC_PID_COUNT + 1))
   fi
-done < <(find "$SPINE_STATE" -maxdepth 2 -name '*.pid' -type f -print0 2>/dev/null)
+done < <(find "$SPINE_STATE" -type f -name '*.pid' -print0 2>/dev/null)
+GC_PURGED=$((GC_PURGED + GC_PID_COUNT))
 
-# Purge stale lock files (untouched for over 2 hours)
+# Purge stale lock files (untouched >2hrs - full recursive sweep)
+GC_LOCK_COUNT=0
 while IFS= read -r -d '' lockfile; do
-  rm -f "$lockfile"
-  GC_PURGED=$((GC_PURGED + 1))
-done < <(find "$SPINE_STATE" -maxdepth 2 -name '*.lock' -type f -mmin +120 -print0 2>/dev/null)
+  rm -f "$lockfile" && GC_LOCK_COUNT=$((GC_LOCK_COUNT + 1))
+done < <(find "$SPINE_STATE" -type f -name '*.lock' -mmin +120 -print0 2>/dev/null)
+GC_PURGED=$((GC_PURGED + GC_LOCK_COUNT))
 
 echo "loop.closeout.finalize"
 echo "loop_id=$LOOP_ID"
@@ -749,3 +796,6 @@ echo "branch_cleanup_branch=${CLEANUP_BRANCH:-none}"
 echo "branch_cleanup_reason=$BRANCH_CLEANUP_REASON"
 echo "gc_artifacts_archived=$GC_MOVED"
 echo "gc_orphans_purged=$GC_PURGED"
+echo "gc_fuse_hidden_purged=$GC_FUSE_COUNT"
+echo "gc_stale_pid_purged=$GC_PID_COUNT"
+echo "gc_stale_lock_purged=$GC_LOCK_COUNT"
