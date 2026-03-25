@@ -1,9 +1,9 @@
 """
-Mint Intake Pipeline — Shared Utilities
+Mint Domain — Shared Pipeline Utilities
 
-Asset routing, DB connection, confidence scoring, and extraction helpers
-for the governed intake pipeline. Used by mint.intake.email.parse and
-mint.order.create capabilities.
+DB connection, query helpers, asset routing, confidence scoring, and
+extraction helpers for the governed Mint OS pipeline. Used by intake,
+quoting, history, and outbound capabilities.
 
 Authority:
   - Schema: ops/plugins/domains/mint/schema/mint.core.schema.sql
@@ -280,3 +280,149 @@ def route_asset_to_hot(data: bytes, filename: str, order_id: str, artwork_id: st
     target_file = target_dir / filename
     target_file.write_bytes(data)
     return target_file
+
+
+# ---------------------------------------------------------------------------
+# Database Query Helpers (Read-Only)
+# ---------------------------------------------------------------------------
+
+def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    """Convert a sqlite3.Row to a plain dict."""
+    if row is None:
+        return None
+    return dict(row)
+
+
+def rows_to_list(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    """Convert a list of sqlite3.Row to a list of dicts."""
+    return [dict(r) for r in rows]
+
+
+def get_customer(conn: sqlite3.Connection, customer_id: str) -> dict[str, Any] | None:
+    """Fetch a customer by ID."""
+    return row_to_dict(conn.execute(
+        "SELECT * FROM customer WHERE customer_id = ?", (customer_id,)
+    ).fetchone())
+
+
+def get_customer_by_email(conn: sqlite3.Connection, email: str) -> dict[str, Any] | None:
+    """Fetch a customer by email address."""
+    return row_to_dict(conn.execute(
+        "SELECT * FROM customer WHERE email = ?", (email.lower(),)
+    ).fetchone())
+
+
+def get_customer_orders(conn: sqlite3.Connection, customer_id: str) -> list[dict[str, Any]]:
+    """Fetch all orders for a customer, most recent first."""
+    return rows_to_list(conn.execute(
+        'SELECT * FROM "order" WHERE customer_id = ? ORDER BY created_at DESC',
+        (customer_id,)
+    ).fetchall())
+
+
+def get_order(conn: sqlite3.Connection, order_id: str) -> dict[str, Any] | None:
+    """Fetch a single order by ID."""
+    return row_to_dict(conn.execute(
+        'SELECT * FROM "order" WHERE order_id = ?', (order_id,)
+    ).fetchone())
+
+
+def get_order_line_items(conn: sqlite3.Connection, order_id: str) -> list[dict[str, Any]]:
+    """Fetch line items for an order with garment details joined."""
+    return rows_to_list(conn.execute(
+        """SELECT li.*, g.style_number, g.brand, g.color, g.category,
+                  g.sizes_available, g.unit_cost_cents, g.supplier
+           FROM line_item li
+           JOIN garment g ON li.garment_id = g.garment_id
+           WHERE li.order_id = ?
+           ORDER BY li.created_at""",
+        (order_id,)
+    ).fetchall())
+
+
+def get_line_item_decorations(conn: sqlite3.Connection, line_item_id: str) -> list[dict[str, Any]]:
+    """Fetch decorations for a line item with artwork details joined."""
+    return rows_to_list(conn.execute(
+        """SELECT d.*, a.filename AS artwork_filename, a.file_format,
+                  a.storage_path AS artwork_storage_path, a.storage_tier AS artwork_tier
+           FROM decoration d
+           JOIN artwork a ON d.artwork_id = a.artwork_id
+           WHERE d.line_item_id = ?
+           ORDER BY d.placement""",
+        (line_item_id,)
+    ).fetchall())
+
+
+def get_customer_artwork(conn: sqlite3.Connection, customer_id: str) -> list[dict[str, Any]]:
+    """Fetch artwork library for a customer, most recent first."""
+    return rows_to_list(conn.execute(
+        "SELECT * FROM artwork WHERE customer_id = ? ORDER BY created_at DESC",
+        (customer_id,)
+    ).fetchall())
+
+
+def get_order_mockups(conn: sqlite3.Connection, order_id: str) -> list[dict[str, Any]]:
+    """Fetch all mockups for an order via line items."""
+    return rows_to_list(conn.execute(
+        """SELECT m.*, li.order_id
+           FROM mockup m
+           JOIN line_item li ON m.line_item_id = li.line_item_id
+           WHERE li.order_id = ?
+           ORDER BY m.created_at DESC""",
+        (order_id,)
+    ).fetchall())
+
+
+def get_customer_aggregate(conn: sqlite3.Connection, customer_id: str) -> dict[str, Any]:
+    """Compute aggregate customer stats: order count, lifetime value, preferences."""
+    row = conn.execute(
+        """SELECT
+             COUNT(*) AS total_orders,
+             SUM(CASE WHEN lifecycle_state = 'fulfilled' THEN 1 ELSE 0 END) AS fulfilled_orders,
+             SUM(CASE WHEN lifecycle_state = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_orders,
+             MIN(created_at) AS first_order_at,
+             MAX(created_at) AS last_order_at
+           FROM "order" WHERE customer_id = ?""",
+        (customer_id,)
+    ).fetchone()
+    stats = dict(row) if row else {}
+
+    # Lifetime value from line items
+    value_row = conn.execute(
+        """SELECT COALESCE(SUM(li.line_total_cents), 0) AS lifetime_value_cents
+           FROM line_item li
+           JOIN "order" o ON li.order_id = o.order_id
+           WHERE o.customer_id = ? AND o.lifecycle_state IN ('fulfilled', 'production', 'approved')""",
+        (customer_id,)
+    ).fetchone()
+    stats["lifetime_value_cents"] = dict(value_row)["lifetime_value_cents"] if value_row else 0
+
+    # Preferred garment types
+    pref_rows = conn.execute(
+        """SELECT g.category, g.brand, COUNT(*) AS usage_count
+           FROM line_item li
+           JOIN garment g ON li.garment_id = g.garment_id
+           JOIN "order" o ON li.order_id = o.order_id
+           WHERE o.customer_id = ?
+           GROUP BY g.category, g.brand
+           ORDER BY usage_count DESC
+           LIMIT 5""",
+        (customer_id,)
+    ).fetchall()
+    stats["preferred_garments"] = rows_to_list(pref_rows)
+
+    # Preferred decoration methods
+    dec_rows = conn.execute(
+        """SELECT d.method, COUNT(*) AS usage_count
+           FROM decoration d
+           JOIN line_item li ON d.line_item_id = li.line_item_id
+           JOIN "order" o ON li.order_id = o.order_id
+           WHERE o.customer_id = ?
+           GROUP BY d.method
+           ORDER BY usage_count DESC
+           LIMIT 5""",
+        (customer_id,)
+    ).fetchall()
+    stats["preferred_decoration_methods"] = rows_to_list(dec_rows)
+
+    return stats
