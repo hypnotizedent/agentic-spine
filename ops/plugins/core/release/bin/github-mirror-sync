@@ -123,15 +123,28 @@ while IFS= read -r file; do
   fi
 done < <(yq eval '.excluded_files[].path | select(. != null)' "$EXCLUSIONS_FILE" 2>/dev/null)
 
-# Pattern exclusions
+# Pattern exclusions (supports both name-only and path-based patterns)
 while IFS= read -r pattern; do
   [[ -n "$pattern" && "$pattern" != "null" ]] || continue
-  while IFS= read -r match; do
-    [[ -n "$match" ]] || continue
-    rm -f "$match"
-    (( EXCLUDED_COUNT++ )) || true
-    log "  excluded pattern match: ${match#$WORKDIR/}"
-  done < <(find "$WORKDIR" -name "$pattern" -type f 2>/dev/null)
+  # If pattern contains /, use -path (relative to workdir), else use -name
+  if [[ "$pattern" == */* ]]; then
+    # Path-based pattern: find with -path requires leading ./ for relative match
+    while IFS= read -r match; do
+      [[ -n "$match" ]] || continue
+      fullpath="$WORKDIR/${match#./}"
+      rm -f "$fullpath"
+      (( EXCLUDED_COUNT++ )) || true
+      log "  excluded pattern match: ${match#./}"
+    done < <(cd "$WORKDIR" && find . -path "./$pattern" -type f 2>/dev/null)
+  else
+    # Name-only pattern: use -name for filename matching
+    while IFS= read -r match; do
+      [[ -n "$match" ]] || continue
+      rm -f "$match"
+      (( EXCLUDED_COUNT++ )) || true
+      log "  excluded pattern match: ${match#$WORKDIR/}"
+    done < <(find "$WORKDIR" -name "$pattern" -type f 2>/dev/null)
+  fi
 done < <(yq eval '.excluded_patterns[].pattern | select(. != null)' "$EXCLUSIONS_FILE" 2>/dev/null)
 
 log "  Total exclusions: $EXCLUDED_COUNT"
