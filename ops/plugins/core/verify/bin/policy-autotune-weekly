@@ -39,10 +39,11 @@ if [[ -n "$WINDOW_DAYS_OVERRIDE" ]]; then
   WINDOW_DAYS="$WINDOW_DAYS_OVERRIDE"
 fi
 
-REPORT_DIR_REL="$(yq e -r '.outputs.report_dir // "mailroom/outbox/reports/policy-autotune"' "$CONTRACT" 2>/dev/null || echo "mailroom/outbox/reports/policy-autotune")"
-STATE_PATH_REL="$(yq e -r '.outputs.state_path // "mailroom/state/policy-autotune/state.json"' "$CONTRACT" 2>/dev/null || echo "mailroom/state/policy-autotune/state.json")"
-REPORT_DIR="${ROOT}/${REPORT_DIR_REL}"
-STATE_PATH="${ROOT}/${STATE_PATH_REL}"
+# Resolve output paths from externalized runtime (never repo-local mailroom/).
+REPORT_DIR_SUFFIX="$(yq e -r '.outputs.report_dir_suffix // "policy-autotune/reports"' "$CONTRACT" 2>/dev/null || echo "policy-autotune/reports")"
+STATE_PATH_SUFFIX="$(yq e -r '.outputs.state_path_suffix // "policy-autotune/state.json"' "$CONTRACT" 2>/dev/null || echo "policy-autotune/state.json")"
+REPORT_DIR="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/${REPORT_DIR_SUFFIX}"
+STATE_PATH="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/${STATE_PATH_SUFFIX}"
 STATE_DIR="$(dirname "$STATE_PATH")"
 mkdir -p "$REPORT_DIR" "$STATE_DIR"
 
@@ -85,7 +86,7 @@ state_path = Path(sys.argv[6]).resolve()
 contract = json.loads(os.environ.get("POLICY_AUTOTUNE_CONTRACT_JSON", "{}"))
 
 window_start = now_utc - dt.timedelta(days=window_days)
-receipts_root = root / "receipts" / "sessions"
+receipts_root = Path(os.environ.get("SPINE_EVIDENCE", str(Path.home() / "code" / ".evidence" / "spine"))) / "sessions"
 
 cap_re = re.compile(r"\| Capability \| `([^`]+)` \|")
 start_re = re.compile(r"\| Start \| ([^|]+)\|")
@@ -181,7 +182,7 @@ for cp in proposals_dir.glob("CP-*"):
 
 # Parse top fail gates from existing analyzer (best effort).
 fail_gate_counts = {}
-failure_stats_cmd = [str(root / "ops" / "plugins" / "verify" / "bin" / "drift-gates-failure-stats")]
+failure_stats_cmd = [str(root / "ops" / "plugins" / "core" / "verify" / "bin" / "drift-gates-failure-stats")]
 rc, fs_out, fs_err = run(failure_stats_cmd)
 if rc == 0:
     for line in fs_out.splitlines():
