@@ -34,7 +34,54 @@ mkdir -p "$(dirname "$OUT")"
   fi
   echo ""
 
-  # ── Section 2: Open Loops ──
+  # ── Section 2: Site Topology ──
+  echo "## Site Topology"
+  echo ""
+
+  SITES_FILE="$SP/ops/bindings/topology.sites.yaml"
+  VM_LIFECYCLE="$SP/ops/bindings/vm.lifecycle.yaml"
+  SSH_TARGETS="$SP/ops/bindings/ssh.targets.yaml"
+
+  if [[ -f "$SITES_FILE" ]] && command -v yq >/dev/null 2>&1; then
+    echo "### Sites"
+    yq e '.sites[] | select(.status == "active") | "- **" + .id + "**: " + .lan_cidr + " | proxmox: " + .proxmox_alias + " | VMIDs: " + .vmid_range' "$SITES_FILE" 2>/dev/null || echo "(topology file unavailable)"
+    echo ""
+
+    if [[ -f "$VM_LIFECYCLE" ]]; then
+      echo "### VM → Site Assignments (active)"
+      yq e '.vms[] | select(.status == "active") | .id + "\t" + .hostname + "\t" + (.lan_ip // "none") + "\t" + (.ssh_target // "none") + "\t" + .proxmox_host' "$VM_LIFECYCLE" 2>/dev/null \
+        | sort -n \
+        | while IFS=$'\t' read -r vmid hostname lan_ip ssh_target prox; do
+            [[ -z "$vmid" ]] && continue
+            site="?"
+            if [[ "$prox" == "pve" ]]; then
+              site="shop"
+            elif [[ "$prox" == "proxmox-home" ]]; then
+              site="home"
+            fi
+            echo "- VM $vmid ($hostname): $site | $lan_ip | ssh: $ssh_target"
+          done
+      echo ""
+    fi
+
+    echo "### Critical Routing Rule"
+    echo "- mint domain → shop site → pve (192.168.1.0/24) — NEVER home"
+    echo "- media domain → home site → proxmox-home (10.0.0.0/24) — NEVER shop"
+    echo "- surveillance domain → shop site → pve (192.168.1.0/24) — NEVER home"
+    echo ""
+
+    AGENTS_FILE="$SP/ops/bindings/agents.registry.yaml"
+    if [[ -f "$AGENTS_FILE" ]]; then
+      echo "### Agent Site Requirements"
+      yq e '.agents[] | select(.required_site) | "- **" + .id + "**: required_site = " + .required_site' "$AGENTS_FILE" 2>/dev/null || true
+      echo ""
+    fi
+  else
+    echo "(topology file not found or yq not installed)"
+    echo ""
+  fi
+
+  # ── Section 3: Open Loops ──
   echo "## Open Loops"
   echo ""
   if [[ -x "$SP/bin/ops" ]]; then
@@ -44,7 +91,7 @@ mkdir -p "$(dirname "$OUT")"
   fi
   echo ""
 
-  # ── Section 3: Available CLI Tools ──
+  # ── Section 4: Available CLI Tools ──
   echo "## Available CLI Tools"
   echo ""
   echo "The following tools are installed on this workstation."
@@ -59,7 +106,7 @@ mkdir -p "$(dirname "$OUT")"
   fi
   echo ""
 
-  # ── Section 4: Available Capabilities ──
+  # ── Section 5: Available Capabilities ──
   echo "## Available Capabilities"
   echo ""
   echo "Capabilities are the spine's governed actions (SSOT: \`ops/capabilities.yaml\`)."
@@ -138,7 +185,7 @@ PY
   fi
   echo ""
 
-  # ── Section 5: Available Agents ──
+  # ── Section 6: Available Agents ──
   echo "## Available Agents"
   echo ""
   echo "Domain-specific agents handle application-layer problems."
@@ -162,7 +209,7 @@ PY
   fi
   echo ""
 
-  # ── Section 6: Gate Reference Card ──
+  # ── Section 7: Gate Reference Card ──
   echo "## Gate Reference Card"
   echo ""
   GATE_REGISTRY="$SP/ops/bindings/gate.registry.yaml"
@@ -186,7 +233,7 @@ PY
   fi
   echo ""
 
-  # ── Section 7: Capability Precondition Hints ──
+  # ── Section 8: Capability Precondition Hints ──
   echo "## Capability Precondition Hints"
   echo ""
   echo "Before API work: \`./bin/ops cap run secrets.binding\` then \`./bin/ops cap run secrets.auth.status\`"
@@ -199,7 +246,7 @@ PY
   echo "- Before changes: \`/check\` (proactive gate validation)"
   echo ""
 
-  # ── Section 8: Last Handoff ──
+  # ── Section 9: Last Handoff ──
   if [[ -f "$SP/docs/reference/brain/memory.md" ]]; then
     echo "## Last Handoff"
     echo ""

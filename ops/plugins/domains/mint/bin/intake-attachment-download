@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""
+mint.intake.attachment.download — Automatic attachment routing to Hot storage.
+
+Accepts routed_assets array from mint.intake.email.parse and executes the download
+for each pending_download asset. Downloads via microsoft.mail.attachment.download
+and writes to Hot storage paths per mint.storage.lifecycle.yaml.
+
+Authority:
+  - Storage lifecycle: ops/plugins/domains/mint/storage/mint.storage.lifecycle.yaml
+  - Schema: ops/plugins/domains/mint/schema/mint.core.schema.sql
+  - Data Truth: ops/bindings/mint.data.truth.yaml
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[5]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.domains.mint.lib.mint_intake_common import (
+    now_utc,
+    hot_artwork_path,
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Automatic attachment download to Hot storage"
+    )
+    parser.add_argument("--input-file", help="Path to intake JSON with routed_assets")
+    parser.add_argument("--mailbox", default="team@mintprints.com")
+    parser.add_argument("--message-id", help="Microsoft Graph message ID")
+    parser.add_argument("--json", action="store_true", default=True)
+    return parser.parse_args()
+
+
+def load_intake(args: argparse.Namespace) -> dict[str, Any]:
+    """Load intake JSON from file or stdin."""
+    if args.input_file:
+        with open(args.input_file) as f:
+            return json.load(f)
+    if not sys.stdin.isatty():
+        return json.load(sys.stdin)
+    print("error: provide --input-file or pipe JSON to stdin", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def compute_file_hash(file_path: Path) -> str:
+    """Compute SHA256 hash of file."""
+    sha256 = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+
+def download_attachment(
+    mailbox: str,
+    message_id: str,
+    attachment_id: str,
+    target_path: Path,
+) -> dict[str, Any]:
+    """
+    Download attachment via microsoft.mail.attachment.download capability.
+    Returns {"status": "downloaded"|"failed", "file_hash": str, "size_bytes": int}.
+    """
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Call microsoft.mail.attachment.download
+    cmd = [
+        str(ROOT / "bin" / "ops"),
+        "cap",
+        "run",
+        "microsoft.mail.attachment.download",
+        "--",
+        "--mailbox",
+        mailbox,
+        "--message-id",
+        message_id,
+        "--attachment-id",
+        attachment_id,
+        "--output",
+        str(target_path),
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+
+        if not target_path.exists():
+            return {
+                "status": "failed",
+                "error": "Download succeeded but file not found at target path",
+            }
+
+        file_hash = compute_file_hash(target_path)
+        size_bytes = target_path.stat().st_size
+
+        return {
+            "status": "downloaded",
+            "file_hash": file_hash,
+            "size_bytes": size_bytes,
+        }
+
+    except subprocess.CalledProcessError as e:
+        return {
+            "status": "failed",
+            "error": f"microsoft.mail.attachment.download failed: {e.stderr}",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "failed",
+            "error": "Download timeout (>60s)",
+        }
+    except Exception as e:
+        return {
+            "status": "failed",
+            "error": str(e),
+        }
+
+
+def process_routed_assets(
+    routed_assets: list[dict[str, Any]],
+    mailbox: str,
+    message_id: str,
+) -> dict[str, Any]:
+    """
+    Process all pending_download assets and download them to Hot storage.
+    Returns summary with updated asset statuses.
+    """
+    if not message_id:
+        return {
+            "status": "error",
+            "error": "message_id required for attachment download",
+            "processed": 0,
+        }
+
+    downloaded = 0
+    failed = 0
+    skipped = 0
+    updated_assets = []
+
+    for asset in routed_assets:
+        if asset.get("status") != "pending_download":
+            skipped += 1
+            updated_assets.append(asset)
+            continue
+
+        attachment_id = asset.get("attachment_id")
+        target_path_str = asset.get("target_path")
+
+        if not attachment_id or not target_path_str:
+            failed += 1
+            updated_assets.append({
+                **asset,
+                "status": "failed",
+                "error": "Missing attachment_id or target_path",
+            })
+            continue
+
+        target_path = Path(target_path_str)
+
+        download_result = download_attachment(
+            mailbox=mailbox,
+            message_id=message_id,
+            attachment_id=attachment_id,
+            target_path=target_path,
+        )
+
+        if download_result["status"] == "downloaded":
+            downloaded += 1
+            updated_assets.append({
+                **asset,
+                "status": "downloaded",
+                "file_hash": download_result["file_hash"],
+                "size_bytes": download_result["size_bytes"],
+                "downloaded_at": now_utc(),
+            })
+        else:
+            failed += 1
+            updated_assets.append({
+                **asset,
+                **download_result,
+            })
+
+    return {
+        "capability": "mint.intake.attachment.download",
+        "generated_at": now_utc(),
+        "mailbox": mailbox,
+        "message_id": message_id,
+        "summary": {
+            "total": len(routed_assets),
+            "downloaded": downloaded,
+            "failed": failed,
+            "skipped": skipped,
+        },
+        "routed_assets": updated_assets,
+    }
+
+
+def main() -> int:
+    args = parse_args()
+    intake = load_intake(args)
+
+    routed_assets = intake.get("routed_assets", [])
+    message_id = args.message_id or intake.get("source", {}).get("message_id")
+
+    result = process_routed_assets(
+        routed_assets=routed_assets,
+        mailbox=args.mailbox,
+        message_id=message_id,
+    )
+
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result.get("summary", {}).get("failed", 0) == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
