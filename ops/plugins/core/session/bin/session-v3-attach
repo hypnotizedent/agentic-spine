@@ -294,6 +294,28 @@ def collect_friction_snapshot() -> dict[str, Any]:
     return snapshot
 
 
+def collect_capability_map() -> list[str]:
+    """Extract compact capability name list for agent tooling awareness."""
+    rc, stdout, stderr = run_text_command([str(ROOT / "bin/ops"), "cap", "list"])
+    if rc != 0:
+        return []
+
+    capabilities = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line or line.startswith("===") or line.startswith("---"):
+            continue
+        # Extract capability name (first token before whitespace/bracket)
+        parts = line.split()
+        if parts:
+            cap_name = parts[0].strip()
+            # Filter out noise: must contain a dot (namespace separator) or be all caps
+            if cap_name and not cap_name.startswith("[") and ("." in cap_name or cap_name.isupper()):
+                capabilities.append(cap_name)
+
+    return capabilities
+
+
 def resolve_loop_id(args: argparse.Namespace, broker_script: Path) -> tuple[str, str, dict[str, Any] | None]:
     if args.loop_id:
         return args.loop_id, "explicit", None
@@ -417,6 +439,7 @@ def main() -> int:
         loop_id, loop_resolution, latest_payload = resolve_loop_id(args, broker_script)
         sanitize_payload, sanitized_output_path = maybe_sanitize(args, state_root, sanitize_script, loop_id)
         friction_snapshot = collect_friction_snapshot()
+        capability_map = collect_capability_map()
         if sanitize_payload and sanitize_payload.get("status") == "blocked":
             payload = {
                 "capability": "session.v3.attach",
@@ -433,6 +456,7 @@ def main() -> int:
                     "repo_identity": repo_identity,
                     "sanitize": sanitize_payload,
                     "friction_snapshot": friction_snapshot,
+                    "capability_map": capability_map,
                     "sanitized_output_path": sanitized_output_path,
                     "next_step": "Resolve sanitizer findings before attach can produce an executable packet.",
                 },
@@ -444,6 +468,7 @@ def main() -> int:
                 print("status: blocked")
                 print(f"loop_id: {loop_id or 'none'}")
                 print(f"resolution: {loop_resolution}")
+                print(f"capability_count: {len(capability_map)}")
                 print(f"sanitized_output_path: {sanitized_output_path or 'none'}")
             return 1
 
@@ -477,6 +502,7 @@ def main() -> int:
                     "stale_cleanup": stale_cleanup,
                     "sanitize": sanitize_payload,
                     "friction_snapshot": friction_snapshot,
+                    "capability_map": capability_map,
                     "sanitized_output_path": sanitized_output_path,
                     "entry_packet": entry_data,
                     "exports": exports,
@@ -528,7 +554,13 @@ def main() -> int:
     lifecycle_summary = friction_snapshot.get("lifecycle", {}).get("summary", {}) if isinstance(friction_snapshot.get("lifecycle"), dict) else {}
     print(f"friction_queued: {queue_summary.get('queued', 0)}")
     print(f"lifecycle_issues: {lifecycle_summary.get('issue_count', lifecycle_summary.get('issues', 0))}")
+    print(f"capability_count: {len(capability_map)}")
     print(f"sanitized_output_path: {sanitized_output_path or 'none'}")
+    print("")
+    print("=== AVAILABLE CAPABILITIES ===")
+    for cap in capability_map:
+        print(f"  {cap}")
+    print("")
     print(f"next_step: {packet.get('first_command', '')}")
     return 0
 
