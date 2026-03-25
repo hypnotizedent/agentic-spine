@@ -40,6 +40,9 @@ Behavior:
   - emits a single closeout receipt markdown file
   - if --cleanup-branch is specified: deletes local and remote branch refs
     (only if merged into main and not protected; skips with reason otherwise)
+  - archives loop artifacts (exec receipts, controller prompts, wave files)
+    to $SPINE_STATE/archive/{completed-receipts,completed-prompts,old-waves}/
+  - purges orphaned .fuse_hidden* files and stale .pid/.lock files
 USAGE
 }
 
@@ -675,6 +678,64 @@ if [[ -n "$CLEANUP_BRANCH" ]]; then
   fi
 fi
 
+# ── GC: Archive loop artifacts & purge orphans ──
+GC_ARCHIVE_ROOT="$SPINE_STATE/archive"
+GC_PROMPTS_DIR="$GC_ARCHIVE_ROOT/completed-prompts"
+GC_RECEIPTS_DIR="$GC_ARCHIVE_ROOT/completed-receipts"
+GC_WAVES_DIR="$GC_ARCHIVE_ROOT/old-waves"
+GC_MOVED=0
+GC_PURGED=0
+
+mkdir -p "$GC_PROMPTS_DIR" "$GC_RECEIPTS_DIR" "$GC_WAVES_DIR"
+
+# Archive EXEC_RECEIPT files belonging to this loop
+for f in "$SPINE_STATE"/EXEC_RECEIPT*.yaml; do
+  [[ -f "$f" ]] || continue
+  if grep -q "loop_id:.*${LOOP_ID}" "$f" 2>/dev/null; then
+    mv "$f" "$GC_RECEIPTS_DIR/"
+    GC_MOVED=$((GC_MOVED + 1))
+  fi
+done
+
+# Archive controller prompts referencing this loop
+for f in "$SPINE_STATE"/*CONTROLLER_PROMPT*.md; do
+  [[ -f "$f" ]] || continue
+  if grep -q "$LOOP_ID" "$f" 2>/dev/null; then
+    mv "$f" "$GC_PROMPTS_DIR/"
+    GC_MOVED=$((GC_MOVED + 1))
+  fi
+done
+
+# Archive wave artifacts referencing this loop
+for f in "$SPINE_STATE"/wave*.md "$SPINE_STATE"/wave*.yaml; do
+  [[ -f "$f" ]] || continue
+  if grep -q "$LOOP_ID" "$f" 2>/dev/null; then
+    mv "$f" "$GC_WAVES_DIR/"
+    GC_MOVED=$((GC_MOVED + 1))
+  fi
+done
+
+# Purge orphaned FUSE artifacts (always safe to remove)
+while IFS= read -r -d '' orphan; do
+  rm -f "$orphan"
+  GC_PURGED=$((GC_PURGED + 1))
+done < <(find "$SPINE_STATE" -maxdepth 2 -name '.fuse_hidden*' -type f -print0 2>/dev/null)
+
+# Purge stale PID files (referenced process no longer running)
+while IFS= read -r -d '' pidfile; do
+  pid_val="$(head -1 "$pidfile" 2>/dev/null | tr -dc '0-9')"
+  if [[ -n "$pid_val" ]] && ! kill -0 "$pid_val" 2>/dev/null; then
+    rm -f "$pidfile"
+    GC_PURGED=$((GC_PURGED + 1))
+  fi
+done < <(find "$SPINE_STATE" -maxdepth 2 -name '*.pid' -type f -print0 2>/dev/null)
+
+# Purge stale lock files (untouched for over 2 hours)
+while IFS= read -r -d '' lockfile; do
+  rm -f "$lockfile"
+  GC_PURGED=$((GC_PURGED + 1))
+done < <(find "$SPINE_STATE" -maxdepth 2 -name '*.lock' -type f -mmin +120 -print0 2>/dev/null)
+
 echo "loop.closeout.finalize"
 echo "loop_id=$LOOP_ID"
 echo "acceptance_matrix=$ACCEPTANCE_MATRIX"
@@ -686,3 +747,5 @@ echo "receipt=$RECEIPT_PATH"
 echo "branch_cleanup_status=$BRANCH_CLEANUP_STATUS"
 echo "branch_cleanup_branch=${CLEANUP_BRANCH:-none}"
 echo "branch_cleanup_reason=$BRANCH_CLEANUP_REASON"
+echo "gc_artifacts_archived=$GC_MOVED"
+echo "gc_orphans_purged=$GC_PURGED"
