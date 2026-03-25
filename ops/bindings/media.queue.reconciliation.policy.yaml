@@ -91,12 +91,37 @@ queue_item_classes:
       Check remote path mappings, disk space, and file permissions.
       Do NOT remove until import is attempted or manually resolved.
 
+  - id: QUEUE-C6
+    queue_status: any
+    hasFile: false
+    age_over_threshold: true
+    description: "Stale import failure — stuck on metadata mismatch or repeated import error beyond threshold"
+    reconciliation: auto_remove_and_research
+    confidence: high
+    evidence_required: "hasFile=false AND age > stale_import_threshold_hours AND (trackedDownloadStatus in [warning, importPending] OR errorMessage contains 'match')"
+    risk: low
+    detail: |
+      Items that have been stuck in import-pending or warning state for longer
+      than the stale_import_threshold are not going to self-resolve. The metadata
+      match is too low, the release is wrong, or the import path is broken.
+      Holding them blocks staging space and creates operator noise.
+      Action: remove from queue (with removeFromClient=true to free staging),
+      then trigger a new search for the title. The system gets a fresh attempt
+      with a different release instead of holding dead weight indefinitely.
+      This is the fix for the cyclical "stuck queue" pattern.
+
 # ─────────────────────────────────────────────────────────────────────────
 # Reconciliation Thresholds
 # ─────────────────────────────────────────────────────────────────────────
 
 thresholds:
   stale_threshold_hours: 72
+  stale_import_threshold_hours: 48
+  stale_import_description: |
+    Queue items stuck in import-pending/warning state for longer than this
+    are eligible for QUEUE-C6 treatment: auto-remove + re-search.
+    48h is generous enough to allow slow metadata scrapes and manual
+    intervention, but short enough to prevent indefinite accumulation.
   description: |
     Queue items in warning/stalled state for longer than this threshold
     are flagged for operator review. Items in downloadClientUnavailable
@@ -123,10 +148,25 @@ actions:
     audit_trail: "Log removed item ID, movieId, title, reason, timestamp"
     rollback: "Re-grab title if removal was incorrect (Radarr search command)"
 
+  auto_remove_and_research:
+    description: "Remove stale queue entry and trigger fresh search for the title"
+    api_endpoint: "DELETE /api/v3/queue/{id}?removeFromClient=true&blocklist=false"
+    post_action: "POST /api/v3/command {name: 'MoviesSearch'|'SeriesSearch'|'AlbumSearch', movieIds|seriesId|albumIds: [id]}"
+    preconditions:
+      - "Item matches QUEUE-C6 classification"
+      - "Age exceeds stale_import_threshold_hours"
+      - "hasFile=false confirmed"
+    audit_trail: "Log removed item ID, title, age_hours, reason, re-search triggered"
+    rollback: "Item will be re-grabbed on next search cycle if still wanted"
+    note: |
+      removeFromClient=true clears the staging files to free disk space.
+      The re-search gives the system a fresh chance with a potentially
+      different release. This breaks the cycle of stuck imports.
+
   manual_review:
     description: "Flag queue entry for operator review; do not auto-remove"
     preconditions:
-      - "Item matches QUEUE-C2, QUEUE-C3 (over threshold), or QUEUE-C5"
+      - "Item matches QUEUE-C2, QUEUE-C3 (under threshold), or QUEUE-C5 (under stale_import_threshold)"
     output: "Structured report with item details, classification, and recommended action"
     operator_actions:
       - "Investigate download client history for partial files"
@@ -147,10 +187,11 @@ automation_boundary:
   automated:
     - "QUEUE-C1: auto-remove (hasFile=true + downloadClientUnavailable + filesystem confirmed)"
     - "QUEUE-C4: auto-remove (hasFile=true + completed)"
+    - "QUEUE-C6: auto-remove + re-search (stale import failure beyond 48h threshold)"
   requires_operator:
-    - "QUEUE-C2: manual review (hasFile=false + downloadClientUnavailable)"
+    - "QUEUE-C2: manual review (hasFile=false + downloadClientUnavailable, under threshold)"
     - "QUEUE-C3: manual review after age threshold"
-    - "QUEUE-C5: manual review (import failure investigation)"
+    - "QUEUE-C5: manual review (import failure, under stale_import_threshold)"
   never_automated:
     - "Bulk queue clear (all items)"
     - "Blocklist additions (indexer relationship management)"
@@ -174,6 +215,26 @@ implementation:
   integration:
     - "Output feeds into media E2E verification spec (media.e2e.verification.spec.yaml)"
     - "Reconciliation results should update progression contract stage tracking"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Scheduling — Canonical fix for cyclical queue buildup
+# ─────────────────────────────────────────────────────────────────────────
+
+scheduling:
+  description: |
+    Queue reconciliation MUST run on a scheduled cadence to prevent cyclical
+    buildup. Without scheduling, stuck items accumulate silently until the
+    operator notices and manually triggers a reconcile — this is the pattern
+    that keeps recurring. The fix: run reconcile automatically, nightly.
+  cadence: "daily at 03:00 local"
+  capabilities_to_schedule:
+    - media.queue.reconcile        # Radarr
+    - media.queue.reconcile.sonarr
+    - media.queue.reconcile.lidarr
+  mode: "--apply"
+  implementation: "LaunchAgent plist or cron on macOS host, calling ./bin/ops cap run with --apply"
+  exempt_from_attach: true
+  note: "All three caps added to attach_admission.exempt_capabilities in role.runtime.control.contract.yaml"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Lifecycle
