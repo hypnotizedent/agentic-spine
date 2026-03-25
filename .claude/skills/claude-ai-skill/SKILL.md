@@ -41,6 +41,7 @@ Do not run `./bin/ops` unless step 1 succeeded.
 2. Read `docs/governance/SESSION_PROTOCOL.md` if deeper context is needed.
 3. For deep context, run `docs/brain/generate-context.sh`.
 4. Execute via capabilities; produce receipts.
+5. On session close: run Session Closeout (see below).
 
 ## Bootstrap: Bridge-capable mobile/remote
 
@@ -102,6 +103,17 @@ Never hardcode tokens. Never silently skip auth.
 - Gap filing: `gap.id` uses `GAP-OP-NNN` placeholder if unknown; type + severity + description required.
 - Proposal manifest: canonical fields only.
 - Mobile handoff block: artifacts + blockers + exact next desktop action.
+
+## Session Closeout (ALL environments)
+
+Before ending a session, archive completed state:
+
+1. **Archive completed controller prompts**: Move prompts in `.runtime/spine/state/` whose loop is COMPLETE/CLOSED to `.runtime/spine/state/archive/completed-prompts/`.
+2. **Archive completed receipts**: Move EXEC_RECEIPTs in the state root (not in `domain-state/`) to `.runtime/spine/state/archive/completed-receipts/`.
+3. **Clean stale process artifacts**: Remove `.fuse_hidden*`, stale `.pid`, stale `.lock` files.
+4. **Run nightly.closeout dry-run** (Desktop only): `OPS_GOVERNED_MAIN_OVERRIDE=1 ./bin/ops cap run nightly.closeout -- --mode dry-run`
+
+Create archive dirs if needed: `mkdir -p .runtime/spine/state/archive/{completed-prompts,completed-receipts}`
 
 ## Completion Rule
 
