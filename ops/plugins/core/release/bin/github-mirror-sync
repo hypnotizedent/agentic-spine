@@ -139,60 +139,61 @@ log "  Total exclusions: $EXCLUDED_COUNT"
 # ── Phase 3: Content transformations ───────────────────────────────
 log ""
 log "── Phase 3: Apply content transformations ────────────────"
-TRANSFORM_COUNT=0
 
-# Build sed script from rules (applied in order)
-SED_SCRIPT="$(mktemp)"
-trap '[[ "$KEEP_WORKDIR" -eq 1 ]] || rm -rf "$WORKDIR"; rm -f "$SED_SCRIPT"' EXIT
-
-# Extract rules in order and build sed expressions
-# Using python for reliable YAML parsing → sed script generation
-python3 - "$RULES_FILE" "$SED_SCRIPT" <<'PYEOF'
-import sys, yaml
+# Use Python for content transformation — handles complex regex patterns
+# (alternation groups, word boundaries) that break sed delimiter escaping.
+TRANSFORM_COUNT="$(python3 - "$RULES_FILE" "$WORKDIR" <<'PYEOF'
+import os, re, sys, yaml
 
 rules_file = sys.argv[1]
-sed_file = sys.argv[2]
+workdir = sys.argv[2]
 
 with open(rules_file) as f:
     data = yaml.safe_load(f)
 
-rules = data.get('rules', [])
-with open(sed_file, 'w') as out:
-    for rule in rules:
-        if rule.get('scope') != 'content':
+# Build compiled regex rules in order
+compiled_rules = []
+for rule in data.get('rules', []):
+    if rule.get('scope') != 'content':
+        continue
+    try:
+        compiled_rules.append((re.compile(rule['pattern']), rule['replacement']))
+    except re.error:
+        pass
+
+transform_count = 0
+
+for dirpath, dirnames, filenames in os.walk(workdir):
+    # Skip .git directory
+    dirnames[:] = [d for d in dirnames if d != '.git']
+    for fname in filenames:
+        fpath = os.path.join(dirpath, fname)
+        try:
+            with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+        except (OSError, UnicodeDecodeError):
             continue
-        pattern = rule['pattern']
-        replacement = rule['replacement']
-        # Escape sed special characters in replacement
-        replacement = replacement.replace('&', '\\&')
-        out.write(f's|{pattern}|{replacement}|g\n')
+
+        # Skip likely binary files
+        if '\0' in content[:8192]:
+            continue
+
+        new_content = content
+        for pattern, replacement in compiled_rules:
+            new_content = pattern.sub(replacement, new_content)
+
+        if new_content != content:
+            with open(fpath, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+            transform_count += 1
+
+print(transform_count)
 PYEOF
+)"
 
-RULE_COUNT="$(wc -l < "$SED_SCRIPT" | tr -d ' ')"
-log "  Compiled $RULE_COUNT transformation rules"
-
-# Apply transformations to all text files in the work directory
-while IFS= read -r file; do
-  [[ -f "$file" ]] || continue
-  # Skip binary files
-  if file -b --mime-type "$file" 2>/dev/null | grep -qv '^text/'; then
-    continue
-  fi
-  # Apply sed transformations
-  if sed -E -f "$SED_SCRIPT" "$file" > "${file}.tmp" 2>/dev/null; then
-    if ! cmp -s "$file" "${file}.tmp"; then
-      mv "${file}.tmp" "$file"
-      (( TRANSFORM_COUNT++ )) || true
-    else
-      rm -f "${file}.tmp"
-    fi
-  else
-    rm -f "${file}.tmp"
-  fi
-done < <(find "$WORKDIR" -type f)
-
-FILE_COUNT_AFTER="$(find "$WORKDIR" -type f | wc -l | tr -d ' ')"
 log "  Files transformed: $TRANSFORM_COUNT"
+
+FILE_COUNT_AFTER="$(find "$WORKDIR" -type f ! -path '*/.git/*' | wc -l | tr -d ' ')"
 log "  Files in output: $FILE_COUNT_AFTER"
 
 # ── Phase 4: Validation ────────────────────────────────────────────

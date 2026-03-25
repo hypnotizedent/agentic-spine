@@ -16,7 +16,7 @@ version: "1.1"
 created: "2026-03-24"
 updated_at: "2026-03-24"
 owner: "@ronny"
-reconciliation_trace: "CP-060000 + CP-030000 combined wave — fresh docker ps + ARR API trace"
+reconciliation_trace: "LOOP-PIPELINE-CONTRACT-RECONCILIATION-20260324 — verified against live docker compose ls + docker ps"
 
 pipeline:
   canonical_flow:
@@ -102,17 +102,26 @@ pipeline:
     path: /md1400/stage
     note: "Plumbing stays open. ARR does NOT use this path for new canonical content."
 
-# Container inventory — 16 running + 13 parked on media-home (VM 106)
-# Traced: 2026-03-24T00:00Z via docker ps on ubuntu@10.0.0.106 (ProxyJump via proxmox-home)
-# 3 compose stacks: media-write, media-stack, media-playback
+# Container inventory — 19 running + 10 parked on media-home (VM 106)
+# Traced: 2026-03-24T20:53Z via docker compose ls + docker ps on ubuntu@10.0.0.106
+# 2 active compose projects + 1 volume-only directory
 containers:
   compose_stacks:
-    - path: /srv/appdata/compose/media-write/docker-compose.yml
-      role: "ARR management + download clients + utilities"
     - path: /srv/appdata/compose/media-stack/docker-compose.yml
-      role: "Core media stack services"
+      project_name: media-stack
+      active: true
+      services: 26  # 16 running, 10 parked
+      role: "Main compose project — all core services"
     - path: /srv/appdata/compose/media-playback/docker-compose.yml
-      role: "Streaming/playback services"
+      project_name: media-playback
+      active: true
+      services: 2  # navidrome, spotisub
+      role: "Supplemental streaming services"
+    - path: /srv/appdata/compose/media-write/docker-compose.yml
+      project_name: null  # exists on disk but NOT an active compose project
+      active: false
+      role: "Volume-only directory — config.xml and .env storage. No running containers."
+      note: "API key extraction paths reference this directory — paths are correct."
 
   active:
     # Management (*arr stack)
@@ -121,7 +130,6 @@ containers:
       port: 7878
       status: running
       category: management
-      uptime: "2 days"
       health: healthy
       role: "Movie management. 1 movie tracked."
       dependencies: [prowlarr, sabnzbd, qbittorrent]
@@ -131,7 +139,6 @@ containers:
       port: 8989
       status: running
       category: management
-      uptime: "46 hours"
       health: healthy
       role: "TV management. 130 series, 72 with files, 2686 episodes on disk. Queue 0."
       dependencies: [prowlarr, sabnzbd, qbittorrent]
@@ -141,7 +148,6 @@ containers:
       port: 8686
       status: running
       category: management
-      uptime: "2 days"
       health: healthy
       role: "Music management. 390 artists (219 with tracks, 20419 track files). Tri-source: SABnzbd (usenet), slskd/soularr (Soulseek), qBittorrent (torrent)."
       dependencies: [prowlarr, sabnzbd, qbittorrent]
@@ -155,7 +161,6 @@ containers:
       port: 9696
       status: running
       category: indexing
-      uptime: "2 days"
       health: healthy
       role: "Indexer manager for all *arr services"
 
@@ -165,7 +170,6 @@ containers:
       port: 8080
       status: running
       category: download
-      uptime: "38 hours"
       health: healthy
       role: "Primary usenet downloader"
       ingest_role: primary
@@ -176,7 +180,6 @@ containers:
       port: 8081
       status: running
       category: download
-      uptime: "46 hours"
       health: healthy
       role: "Secondary torrent downloader. VPN-tunneled via gluetun. v5.1.4."
       ingest_role: secondary
@@ -190,17 +193,16 @@ containers:
       port: null
       status: running
       category: utility
-      uptime: "2 hours"
       health: operational
-      role: "Archive extraction. Monitors Sonarr (557 items), queue clean (0 waiting/extracting/failed)."
-      note: "No HTTP port. Health inferred from log output. Last log: 0 retries, 0 finished."
+      compose_project: null  # STANDALONE — not in any compose project
+      role: "Archive extraction. Monitors Radarr/Sonarr/Lidarr queues for completed downloads."
+      note: "No HTTP port. Health inferred from log output."
 
     autopulse:
       vm: media-home
       port: 2875
       status: running
       category: utility
-      uptime: "15 minutes"
       health: healthy
       role: "Library refresh trigger via webhooks to Jellyfin/Navidrome. Actively processing — last log shows files being sent to targets."
       mount: "/srv/appdata/compose/media-write/volumes/autopulse -> /data"
@@ -217,7 +219,6 @@ containers:
       port: 8096
       status: running
       category: streaming
-      uptime: "2 days"
       health: healthy
       role: "Canonical home video streaming. Movies + TV libraries."
       libraries:
@@ -230,8 +231,8 @@ containers:
       port: 4533
       status: running
       category: streaming
-      uptime: "2 days"
       health: healthy
+      compose_project: media-playback
       role: "Canonical home music streaming"
       library_path: /music
 
@@ -241,7 +242,6 @@ containers:
       port: 5055
       status: running
       category: requests
-      uptime: "2 days"
       health: healthy
       role: "Content request management UI"
 
@@ -251,7 +251,6 @@ containers:
       port: 7575
       status: running
       category: dashboard
-      uptime: "3 days"
       health: healthy
       role: "Operator dashboard"
 
@@ -260,7 +259,6 @@ containers:
       port: 5690
       status: running
       category: user-mgmt
-      uptime: "3 days"
       health: healthy
       role: "Media invitation management"
 
