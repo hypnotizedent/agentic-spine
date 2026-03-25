@@ -6,6 +6,7 @@
 - Canonical runtime repo: `~/code/agentic-spine`
 - Governance baseline: `AGENTS.md` + `docs/governance/SESSION_PROTOCOL.md`
 - Output schemas: `docs/governance/OUTPUT_CONTRACTS.md`
+- **State root: `~/code/.runtime/spine/state/`** (ephemeral, NOT inside the repo, local to each machine. In Cowork: `/sessions/*/mnt/code/.runtime/spine/state/`)
 
 <!-- SPINE_STARTUP_BLOCK -->
 cd ~/code/agentic-spine
@@ -42,6 +43,16 @@ Do not run `./bin/ops` unless step 1 succeeded.
 3. For deep context, run `docs/brain/generate-context.sh`.
 4. Execute via capabilities; produce receipts.
 5. On session close: run Session Closeout (see below).
+
+## Bootstrap: Cowork
+
+1. Detect spine repo at `/sessions/*/mnt/code/agentic-spine`.
+2. **Resolve canonical state root**: The state root is `~/code/.runtime/spine/state/`, NOT `~/code/agentic-spine/.runtime/spine/state/`. In Cowork, this maps to `/sessions/*/mnt/code/.runtime/spine/state/`. NEVER write state to the repo-internal `.runtime/` — that's a different tree that Desktop terminals don't read.
+3. Read controller prompts from the canonical state root.
+4. Write controller prompts and evidence to the canonical state root.
+5. Use spine MCP capabilities (`cap_run`) when CLI is unavailable.
+6. On session close: archive completed controller prompts and receipts to `~/code/.runtime/spine/state/archive/`.
+- **CRITICAL PATH**: The canonical `.runtime/` is at `~/code/.runtime/`, NOT at `~/code/agentic-spine/.runtime/`. In Cowork mount terms: `/sessions/*/mnt/code/.runtime/spine/state/` is correct. `/sessions/*/mnt/code/agentic-spine/.runtime/spine/state/` is WRONG — it's a repo-internal gitignored directory that no other terminal reads.
 
 ## Bootstrap: Bridge-capable mobile/remote
 
@@ -108,12 +119,12 @@ Never hardcode tokens. Never silently skip auth.
 
 Before ending a session, archive completed state:
 
-1. **Archive completed controller prompts**: Move prompts in `.runtime/spine/state/` whose loop is COMPLETE/CLOSED to `.runtime/spine/state/archive/completed-prompts/`.
-2. **Archive completed receipts**: Move EXEC_RECEIPTs in the state root (not in `domain-state/`) to `.runtime/spine/state/archive/completed-receipts/`.
+1. **Archive completed controller prompts**: Move prompts in `~/code/.runtime/spine/state/` whose loop is COMPLETE/CLOSED to `~/code/.runtime/spine/state/archive/completed-prompts/`.
+2. **Archive completed receipts**: Move EXEC_RECEIPTs in the state root (not in `domain-state/`) to `~/code/.runtime/spine/state/archive/completed-receipts/`.
 3. **Clean stale process artifacts**: Remove `.fuse_hidden*`, stale `.pid`, stale `.lock` files.
 4. **Run nightly.closeout dry-run** (Desktop only): `OPS_GOVERNED_MAIN_OVERRIDE=1 ./bin/ops cap run nightly.closeout -- --mode dry-run`
 
-Create archive dirs if needed: `mkdir -p .runtime/spine/state/archive/{completed-prompts,completed-receipts}`
+Create archive dirs if needed: `mkdir -p ~/code/.runtime/spine/state/archive/{completed-prompts,completed-receipts}`
 
 ## Completion Rule
 
