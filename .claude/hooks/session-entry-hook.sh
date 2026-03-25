@@ -18,6 +18,8 @@ fi
 
 # Resolve spine root (relative to this script)
 SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$SPINE_ROOT/ops/lib/runtime-paths.sh" || { echo "FATAL: runtime-paths.sh not found" >&2; exit 1; }
+spine_runtime_resolve_paths
 BRANCH=$(git -C "$SPINE_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 TERMINAL_ROLE_CONTRACT="$SPINE_ROOT/ops/bindings/terminal.role.contract.yaml"
 ROLE_RUNTIME_CONTRACT="$SPINE_ROOT/ops/bindings/role.runtime.control.contract.yaml"
@@ -252,7 +254,7 @@ if [[ "${DIRTY_COUNT:-0}" != "0" ]]; then
 fi
 
 # ─── Multi-agent session detection ──────────────────────────
-SESSIONS_DIR="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/sessions"
+SESSIONS_DIR="${SPINE_STATE:?SPINE_STATE must be set}/sessions"
 SESSION_TTL=${SPINE_SESSION_TTL:-14400}  # 4 hours
 ACTIVE_SESSIONS=0
 NOW=$(date +%s)
@@ -303,7 +305,7 @@ if [[ -f "$GATE_REGISTRY" ]]; then
 fi
 
 # --- Friction queue depth ---
-FRICTION_QUEUE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/friction-queue.ndjson"
+FRICTION_QUEUE="${SPINE_STATE:?SPINE_STATE must be set}/friction-queue.ndjson"
 FRICTION_LINE=""
 if [[ -f "$FRICTION_QUEUE" ]]; then
   FRICTION_DEPTH=$(wc -l < "$FRICTION_QUEUE" 2>/dev/null | tr -d ' ')

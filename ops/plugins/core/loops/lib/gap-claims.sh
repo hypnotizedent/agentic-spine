@@ -17,7 +17,7 @@ GAP_CLAIMS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../" && pwd)"
 # Derive the repo root from the library location so clean clones and worktrees
 # do not inherit a different checkout's gap registry through ambient SPINE_REPO.
 SPINE_REPO="$GAP_CLAIMS_ROOT"
-CLAIMS_DIR="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/gaps"
+CLAIMS_DIR="${SPINE_STATE:?SPINE_STATE must be set — source runtime-paths.sh first}/gaps"
 GAPS_FILE="${GAP_CLAIMS_ROOT}/ops/bindings/operational.gaps.yaml"
 GAPS_BRIDGE="${GAP_CLAIMS_ROOT}/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
 

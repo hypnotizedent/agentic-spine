@@ -39,7 +39,7 @@ spine_log_event() {
   done
 
   spine_runtime_resolve_paths
-  local default_logs="${SPINE_LOGS:-$HOME/code/.runtime/spine/logs}"
+  local default_logs="${SPINE_LOGS:?SPINE_LOGS must be set — source runtime-paths.sh first}"
   local log_file="${SPINE_STRUCTURED_LOG:-$default_logs/spine-events.jsonl}"
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

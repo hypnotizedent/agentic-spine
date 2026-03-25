@@ -65,7 +65,10 @@ def dump_yaml(data: Any) -> str:
 def resolve_paths(root: Path) -> tuple[Path, Path]:
     """Return (db_path, gaps_yaml_path) resolved from contract or env."""
     contract_path = root / "ops/bindings/mailroom.runtime.contract.yaml"
-    state_root = root / ".runtime/spine/state"
+    state_root_str = os.environ.get("SPINE_STATE") or ""
+    if not state_root_str or not str(state_root_str).strip():
+        raise RuntimeError("SPINE_STATE must be set — run via ./bin/ops cap run")
+    state_root = Path(state_root_str)
     contract = load_yaml(contract_path)
     if isinstance(contract, dict):
         runtime_root = str(contract.get("runtime_root") or "").strip()

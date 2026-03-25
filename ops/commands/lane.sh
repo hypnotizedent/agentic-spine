@@ -24,7 +24,7 @@
 set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-source "$SPINE_REPO/ops/lib/runtime-paths.sh"
+source "$SPINE_REPO/ops/lib/runtime-paths.sh" || { echo "FATAL: runtime-paths.sh not found" >&2; exit 1; }
 spine_runtime_resolve_paths
 RUNTIME_ROOT="$SPINE_RUNTIME_ROOT"
 LANES_DIR="$RUNTIME_ROOT/lanes"

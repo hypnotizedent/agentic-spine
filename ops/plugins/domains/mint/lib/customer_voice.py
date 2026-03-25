@@ -73,7 +73,10 @@ def deterministic_callback_id(provider_call_id: str, reference_time: str) -> str
 
 def resolve_paths() -> RuntimePaths:
     spine_root = Path(os.environ.get("SPINE_ROOT") or Path(__file__).resolve().parents[5])
-    runtime_root = Path(os.environ.get("SPINE_RUNTIME_ROOT") or spine_root.parent / ".runtime/spine")
+    runtime_root_str = os.environ.get("SPINE_RUNTIME_ROOT") or ""
+    if not runtime_root_str or not Path(runtime_root_str).exists():
+        raise RuntimeError("SPINE_RUNTIME_ROOT must be set — run via ./bin/ops cap run")
+    runtime_root = Path(runtime_root_str)
     state_root = Path(os.environ.get("SPINE_STATE") or runtime_root / "state")
     interactions_root = Path(
         os.environ.get("MINT_CUSTOMER_INTERACTIONS_ROOT") or state_root / "mint" / "customer-interactions"

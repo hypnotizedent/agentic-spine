@@ -480,10 +480,10 @@ def slugify_fragment(raw: str) -> str:
 
 
 def state_root() -> Path:
-    explicit = os.environ.get("SPINE_STATE")
-    if explicit:
-        return Path(explicit).expanduser().resolve()
-    return workspace_root() / ".runtime/spine/state"
+    state = os.environ.get("SPINE_STATE")
+    if not state:
+        raise RuntimeError("SPINE_STATE must be set — run via ./bin/ops cap run")
+    return Path(state).expanduser().resolve()
 
 
 def runtime_record_path(*, category: str, record_id: str, extension: str = "json") -> Path:

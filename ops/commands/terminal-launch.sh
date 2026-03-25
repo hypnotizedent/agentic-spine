@@ -29,8 +29,8 @@ set -euo pipefail
 
 SCRIPT_SPINE_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SPINE_REPO="${SPINE_LAUNCHER_SOURCE_REPO:-$SCRIPT_SPINE_REPO}"
-source "$SCRIPT_SPINE_REPO/ops/lib/launcher-control-worktree.sh"
-source "$SPINE_REPO/ops/lib/spine-paths.sh"
+source "$SCRIPT_SPINE_REPO/ops/lib/launcher-control-worktree.sh" || { echo "FATAL: launcher-control-worktree.sh not found" >&2; exit 1; }
+source "$SPINE_REPO/ops/lib/spine-paths.sh" || { echo "FATAL: spine-paths.sh not found" >&2; exit 1; }
 
 reset_runtime_path_context() {
     unset \

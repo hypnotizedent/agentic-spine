@@ -22,13 +22,12 @@ set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 RUNTIME_PATHS_LIB="$SPINE_REPO/ops/lib/runtime-paths.sh"
-if [[ -f "$RUNTIME_PATHS_LIB" ]]; then
-  source "$RUNTIME_PATHS_LIB"
-  spine_runtime_resolve_paths
-fi
-RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine}"
-SPINE_STATE="${SPINE_STATE:-$RUNTIME_ROOT/state}"
-SPINE_OUTBOX="${SPINE_OUTBOX:-$RUNTIME_ROOT/mailroom/outbox}"
+[[ -f "$RUNTIME_PATHS_LIB" ]] || { echo "FATAL: runtime-paths.sh not found at $RUNTIME_PATHS_LIB" >&2; exit 1; }
+source "$RUNTIME_PATHS_LIB"
+spine_runtime_resolve_paths
+RUNTIME_ROOT="$SPINE_RUNTIME_ROOT"
+SPINE_STATE="$SPINE_STATE"
+SPINE_OUTBOX="$SPINE_OUTBOX"
 WAVES_DIR="$RUNTIME_ROOT/waves"
 LANES_STATE="$RUNTIME_ROOT/lanes/state.json"
 ROLE_RUNTIME_CONTRACT="$SPINE_REPO/ops/bindings/role.runtime.control.contract.yaml"

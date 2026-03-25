@@ -19,7 +19,7 @@ source "$ROOT/ops/lib/runtime-paths.sh"
 export SPINE_CODE="$ROOT"
 spine_runtime_resolve_paths
 
-LOCKS_DIR="${SPINE_LOCKS:-$HOME/code/.runtime/spine/locks}"
+LOCKS_DIR="${SPINE_LOCKS:?SPINE_LOCKS must be set — source runtime-paths.sh first}"
 GIT_LOCK_TTL="${GIT_LOCK_TTL:-300}"
 
 _GIT_LOCK_DIR=""
