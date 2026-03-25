@@ -8,12 +8,8 @@
 - Output schemas: `docs/governance/OUTPUT_CONTRACTS.md`
 
 <!-- SPINE_STARTUP_BLOCK -->
-## Mandatory Startup Block
-
-```bash
 cd ~/code/agentic-spine
 ./bin/ops cap run session.v3.attach -- --allow-no-loop
-```
 <!-- /SPINE_STARTUP_BLOCK -->
 
 ## Non-Negotiable Rules
