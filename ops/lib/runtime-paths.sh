@@ -27,7 +27,7 @@ _spine_guess_workspace_root() {
       return 0
       ;;
     */code/.runtime/spine/tmp/worktrees/*)
-      printf '%s\n' "${code_root%%/.runtime/spine/tmp/worktrees/*}"
+      printf '%s\n' "${code_root%%/.runtime/*}"
       return 0
       ;;
   esac
