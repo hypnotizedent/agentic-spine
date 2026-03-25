@@ -1,0 +1,76 @@
+---
+schema_version: "1.0"
+status: authoritative
+owner: "@ronny"
+updated_at: "2026-03-24"
+scope: github-mirror-governance
+decision_loop_id: LOOP-SPINE-PRODUCTIZATION-20260324
+
+description: >
+  Governs the one-way mirror from canonical Gitea to public GitHub.
+  The mirror pipeline transforms content during sync — replacing sensitive
+  values with safe placeholders — so the canonical branch remains fully
+  functional for local mechanical execution while GitHub gets a clean,
+  white-labeled copy.
+
+contract: github.mirror
+version: "1.0"
+
+# ── Architecture ────────────────────────────────────────────────────
+#
+#  Gitea (origin/main)                 GitHub (github/main)
+#  ┌──────────────────┐                ┌──────────────────┐
+#  │ Canonical SSOT   │   mirror.sync  │ Public mirror    │
+#  │ All paths real   │ ─────────────▶ │ Paths templated  │
+#  │ IPs real         │   transform    │ IPs placeholder  │
+#  │ Domains real     │   + exclude    │ Domains example  │
+#  └──────────────────┘                └──────────────────┘
+#
+architecture:
+  source:
+    remote: origin
+    branch: main
+    authority: canonical
+  target:
+    remote: github
+    branch: main
+    authority: mirror_only
+  direction: one-way
+  trigger: manual
+  transform: content_sanitization
+
+# ── Policy ──────────────────────────────────────────────────────────
+policy:
+  push_requires:
+    - clean_gitea_tree
+    - verify_fast_pass
+    - sanitization_audit_zero_findings_on_output
+  dry_run_default: true
+  force_push_allowed: true
+  force_push_reason: >
+    GitHub mirror is a derived artifact. Force-push is safe because
+    the canonical history lives on Gitea. GitHub consumers should
+    treat the mirror as a snapshot, not a development branch.
+
+# ── Transform Pipeline ──────────────────────────────────────────────
+transform:
+  sanitization_rules: ops/bindings/github.mirror.sanitization.rules.yaml
+  file_exclusions: ops/bindings/github.mirror.file.exclusions.yaml
+  validation: >
+    After transform, run sanitization-audit on the output tree.
+    If any findings remain, abort the sync and report.
+
+# ── Relationship to Share Channel ───────────────────────────────────
+share_channel_relationship: >
+  The share channel (share.publish.*) is a CURATED SUBSET — only
+  explicitly allowlisted files are published. The GitHub mirror is
+  a FULL REPO TRANSFORM — all files are included but sensitive
+  content is replaced with placeholders. These are complementary
+  pipelines, not competing ones.
+
+# ── Related Contracts ───────────────────────────────────────────────
+related:
+  - share.publish.remote.yaml
+  - share.publish.denylist.yaml
+  - share.publish.allowlist.yaml
+  - tenant.profile.yaml

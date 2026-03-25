@@ -1,0 +1,182 @@
+---
+schema_version: "1.0"
+status: authoritative
+owner: "@ronny"
+updated_at: "2026-03-24"
+scope: github-mirror-sanitization-rules
+decision_loop_id: LOOP-SPINE-PRODUCTIZATION-20260324
+
+description: >
+  Content transformation rules for the GitHub mirror sync pipeline.
+  Each rule defines a sed-compatible pattern and its safe replacement.
+  Rules are applied in order during mirror sync. The canonical Gitea
+  branch is NEVER modified — transforms happen on a temporary copy only.
+
+contract: github.mirror.sanitization.rules
+version: "1.0"
+
+# ── Transform Rules ─────────────────────────────────────────────────
+# Each rule has:
+#   id:          unique identifier
+#   category:    maps to sanitization.audit categories
+#   pattern:     sed-compatible extended regex
+#   replacement: safe placeholder value
+#   scope:       files | content (files = exclude entire file, content = line-level replace)
+#   notes:       context for reviewers
+
+rules:
+  # ── Hardcoded paths ───────────────────────────────────────────
+  - id: hardcoded-home-path
+    category: HARDCODED_PATHS
+    pattern: '/Users/ronnyworks/code/agentic-spine'
+    replacement: '$SPINE_ROOT'
+    scope: content
+    notes: "Primary repo path — most common pattern"
+
+  - id: hardcoded-workbench-path
+    category: HARDCODED_PATHS
+    pattern: '/Users/ronnyworks/code/workbench'
+    replacement: '$WORKBENCH_ROOT'
+    scope: content
+    notes: "Workbench repo path"
+
+  - id: hardcoded-runtime-path
+    category: HARDCODED_PATHS
+    pattern: '/Users/ronnyworks/code/.runtime'
+    replacement: '$SPINE_RUNTIME'
+    scope: content
+    notes: "External runtime state root"
+
+  - id: hardcoded-evidence-path
+    category: HARDCODED_PATHS
+    pattern: '/Users/ronnyworks/code/.evidence'
+    replacement: '$SPINE_EVIDENCE'
+    scope: content
+    notes: "Evidence root"
+
+  - id: hardcoded-wt-path
+    category: HARDCODED_PATHS
+    pattern: '/Users/ronnyworks/code/.wt'
+    replacement: '$SPINE_WORKTREES'
+    scope: content
+    notes: "Worktree root"
+
+  - id: hardcoded-home-generic
+    category: HARDCODED_PATHS
+    pattern: '/Users/ronnyworks'
+    replacement: '$HOME'
+    scope: content
+    notes: "Catch-all for remaining home dir refs (applied AFTER specific paths above)"
+
+  # ── Internal domains ──────────────────────────────────────────
+  - id: gitea-domain
+    category: INTERNAL_DOMAINS
+    pattern: 'git\.ronny\.works'
+    replacement: 'git.example.com'
+    scope: content
+
+  - id: secrets-domain
+    category: INTERNAL_DOMAINS
+    pattern: 'secrets\.ronny\.works'
+    replacement: 'secrets.example.com'
+    scope: content
+
+  - id: ronny-works-subdomains
+    category: INTERNAL_DOMAINS
+    pattern: '([a-z0-9-]+)\.ronny\.works'
+    replacement: '\1.example.com'
+    scope: content
+    notes: "Generic catch-all for *.ronny.works subdomains"
+
+  - id: mintprints-subdomains
+    category: INTERNAL_DOMAINS
+    pattern: '([a-z0-9-]+)\.mintprints\.co'
+    replacement: '\1.example-shop.com'
+    scope: content
+    notes: "Generic catch-all for *.mintprints.co subdomains"
+
+  # ── Tailscale IPs ────────────────────────────────────────────
+  - id: tailscale-ips
+    category: TAILSCALE_IPS
+    pattern: '100\.(6[4-9]|[7-9][0-9]|1[0-2][0-9])\.[0-9]+\.[0-9]+'
+    replacement: '100.x.x.x'
+    scope: content
+    notes: "Tailscale CGNAT range (100.64.0.0/10)"
+
+  # ── Private LAN IPs ──────────────────────────────────────────
+  - id: private-lan-192
+    category: PRIVATE_LAN_IPS
+    pattern: '192\.168\.[0-9]+\.[0-9]+'
+    replacement: '192.168.x.x'
+    scope: content
+
+  - id: private-lan-10-home
+    category: PRIVATE_LAN_IPS
+    pattern: '10\.0\.[0-9]+\.[0-9]+'
+    replacement: '10.0.x.x'
+    scope: content
+
+  - id: private-lan-10-shop
+    category: PRIVATE_LAN_IPS
+    pattern: '10\.10\.[0-9]+\.[0-9]+'
+    replacement: '10.10.x.x'
+    scope: content
+
+  # ── Email addresses ───────────────────────────────────────────
+  - id: personal-email
+    category: EMAIL_ADDRESSES
+    pattern: 'hypnotizedent@gmail\.com'
+    replacement: 'user@example.com'
+    scope: content
+
+  - id: ronny-email
+    category: EMAIL_ADDRESSES
+    pattern: 'ronny@[a-z.]+\.(com|works|co)'
+    replacement: 'operator@example.com'
+    scope: content
+
+  # ── Container registry ────────────────────────────────────────
+  - id: ghcr-org
+    category: CONTAINER_REGISTRY_REFS
+    pattern: 'ghcr\.io/hypnotizedent/'
+    replacement: 'ghcr.io/your-org/'
+    scope: content
+
+  # ── GitHub identity ───────────────────────────────────────────
+  - id: github-username
+    category: IDENTITY
+    pattern: 'hypnotizedent'
+    replacement: 'your-github-user'
+    scope: content
+    notes: "Applied after ghcr.io rule to avoid double-replacement"
+
+  # ── Infrastructure identifiers ────────────────────────────────
+  - id: nas-hostname
+    category: INFRASTRUCTURE_IDS
+    pattern: '\bmd1400\b'
+    replacement: 'nas-primary'
+    scope: content
+
+  - id: server-hostname
+    category: INFRASTRUCTURE_IDS
+    pattern: '\br730xd\b'
+    replacement: 'server-primary'
+    scope: content
+
+  - id: network-device
+    category: INFRASTRUCTURE_IDS
+    pattern: '\bPM8072\b'
+    replacement: 'switch-primary'
+    scope: content
+
+  - id: router-device
+    category: INFRASTRUCTURE_IDS
+    pattern: '\bUDR[67]\b'
+    replacement: 'router-primary'
+    scope: content
+
+# ── Application Order ───────────────────────────────────────────────
+# Rules MUST be applied in the order listed above. Specific paths
+# (e.g., /Users/ronnyworks/code/agentic-spine) must be replaced BEFORE
+# generic patterns (e.g., /Users/ronnyworks) to avoid partial matches.
+application_order: sequential_as_listed

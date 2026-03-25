@@ -1,161 +1,201 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-28
+last_verified: 2026-03-24
 scope: repo-readme
 ---
 
-# agentic-spine
+# Agentic Spine
 
-Control-plane only runtime for AOF.
+A governance-first control plane for autonomous AI agent operations. Spine gives you predictable, receipted, drift-proof execution across multiple AI terminals, domains, and infrastructure — without doc sprawl, floating WIP, or runaway context.
 
-## Baseline Lock
+## The Problem
 
-Spine owns:
+When you run autonomous agents against real infrastructure, three failure modes dominate:
 
-- governed entrypoints (`bin/`, `ops/`, `surfaces/`)
-- governance/contracts (`docs/core`, `docs/governance`, `docs/product`)
-- capability registry + verify runtime
-- receipts + mailroom contract surfaces
+1. **Drift** — the declared state and the actual state silently diverge. Configs say one thing, containers do another, and nobody notices until production breaks.
+2. **Doc Sprawl** — every agent session produces more docs, more plans, more contracts. Within weeks you have 400 files and no single source of truth.
+3. **Floating WIP** — work starts in one terminal, context is lost, a new terminal picks it up with stale assumptions. Half-finished changes accumulate across branches and worktrees.
 
-Spine never owns:
+Spine eliminates these by making every agent interaction behave like a governed API call: scoped, receipted, verified, and reversible.
 
-- domain tools/runbooks/workflow JSONs
-- product specs and domain implementation docs
-- HA dashboard assets
-- n8n workflow exports/snapshots
-- host/runtime artifact archives
+## Architecture: The 7-Node Model
 
-Those belong in `/Users/ronnyworks/code/workbench`.
+Spine V3 organizes autonomous operations into seven cooperating nodes:
 
-## Mailroom Model
-
-- Contract and governance remain in spine.
-- Live runtime artifacts are externalized by contract in:
-  `/Users/ronnyworks/code/.runtime/spine`
-- Mailroom runtime subpaths live under:
-  `/Users/ronnyworks/code/.runtime/spine/mailroom`
-- Contract: `/Users/ronnyworks/code/agentic-spine/ops/bindings/mailroom.runtime.contract.yaml`
-
-## Quickstart
-
-```bash
-cd /Users/ronnyworks/code/agentic-spine
-./bin/ops status
-./bin/ops cap list
-./bin/ops cap run stabilization.mode.status
-./bin/ops cap run stability.control.snapshot
-./bin/ops cap run verify.core.run
-./bin/ops cap run verify.route.recommend
-./bin/ops cap run verify.domain.run <domain>
+```
+                    ┌─────────────┐
+                    │  Operator   │  Human: sets direction, accepts results
+                    └──────┬──────┘
+                           │ directive (natural language)
+                    ┌──────▼──────┐
+                    │ Translator  │  Classifies, normalizes, routes
+                    └──────┬──────┘
+                           │ normalized request (structured YAML)
+              ┌────────────┼────────────┐
+              │            │            │
+       ┌──────▼──────┐  ┌─▼──┐  ┌─────▼─────┐
+       │ Controller  │  │Gate│  │  Domain    │
+       │ (Terminal)  │  │Ring│  │  Agents    │
+       └──────┬──────┘  └─┬──┘  └─────┬─────┘
+              │            │            │
+       ┌──────▼────────────▼────────────▼─────┐
+       │            Broker / Runtime           │
+       └──────────────────┬───────────────────┘
+                          │
+                   ┌──────▼──────┐
+                   │  Evidence   │  Receipts, attestations, verify traces
+                   └─────────────┘
 ```
 
-Release/nightly only:
+**Operator** — The human. Provides intent, constraints, and acceptance criteria. Never executes directly.
 
-```bash
-./bin/ops cap run spine.verify
+**Translator** — The membrane between messy human input and structured execution. Classifies signals (spine concern vs. domain concern), normalizes requests, routes to the right execution surface. Never executes, never attests, never claims success.
+
+**Controller** — The execution terminal. Runs governed capabilities, commits code, evaluates gates, produces receipted evidence. Never interprets intent — it receives structured requests only.
+
+**Gate Ring** — 400+ verification gates that detect drift across every governed surface. Gates are the immune system: if declared state and actual state disagree, the gate fails and execution stops.
+
+**Domain Agents** — Specialized execution surfaces for specific domains (media, finance, communications, infrastructure). Each operates within declared scope boundaries.
+
+**Broker / Runtime** — Manages loop state, execution lanes, worktree isolation, and session lifecycle. Ensures no two terminals mutate the same surface.
+
+**Evidence** — Every execution produces a receipt (run key, commit SHA, gate results). The evidence surface is the proof layer — if there's no receipt, it didn't happen.
+
+## The Loop Model
+
+All work in Spine is organized into **loops** — bounded units of work with explicit scope, phases, and closure criteria.
+
+```yaml
+loop_id: LOOP-FEATURE-NAME-20260324
+status: active
+owner: "@operator"
+scope: domain
+objective: "One-line description of what this loop accomplishes."
 ```
 
-## Canonical Flows
+A loop defines:
+- **What** is in scope (and what is explicitly excluded)
+- **How** execution proceeds (phases, success criteria, definition of done)
+- **When** it's finished (runtime, control plane, projections, and residue must all agree)
 
-Daily:
-- `stability.control.snapshot` -> `verify.core.run` -> `verify.route.recommend` -> `verify.domain.run <domain>`
-
-Release/nightly:
-- `spine.verify` (full certification)
-
-Stabilization window (when `stabilization.mode.status` is active):
-- `verify.domain.run` and `verify.release.run` are bypassed by default.
-- Override only when needed: `verify.domain.run <domain> --force` or `verify.release.run --force`.
-- Keep mandatory preflight: `stability.control.snapshot`.
-
-Boundary:
-- `surface.boundary.audit`
-- `surface.boundary.reconcile.plan`
-- `catalog.domain.sync`
-- `schema.conventions.audit`
-
-## CLI Commands (front door)
-
-| Command | Description |
-|---------|-------------|
-| `ops cap <cmd>` | Execute governed capabilities (`list`, `run`, `show`) |
-| `ops run [opts]` | Enqueue work into mailroom (`--file`, `--fixture`, `--inline`) |
-| `ops status` | Unified work status (loops + gaps + inbox + anomalies) |
-| `ops loops <cmd>` | Open Loop Engine (`list`, `collect`, `close`, `summary`) |
-| `ops start <issue>` | Create per-issue worktree + session docs |
-| `ops verify` | Health-check services declared in SERVICE_REGISTRY.yaml |
-| `ops ready` | Run spine gates + secrets checks (API work preflight) |
-| `ops preflight` | Print governance banner + service registry hints |
-| `ops lane <cmd>` | Lane orchestrator (`list`, `open`, `status`, `close`, `check`) |
-| `ops wave <cmd>` | Wave orchestration (`start`, `dispatch`, `ack`, `status`, `close`, `preflight`) |
-| `ops board` | Terminal dashboard (lanes + waves + checks) |
-| `ops pr [...args]` | Stage/commit/push changes and open a PR |
-| `ops close [issue]` | Run verify, confirm PR merged, update state, close issue |
-| `ops ai [--bundle]` | Bundle governance docs for AI agents |
-| `ops agent` | Agent session management |
-| `ops hooks <cmd>` | Git hooks helper (`status`, `install`) |
+Loops prevent floating WIP by making every piece of work explicitly owned, scoped, and closeable. The maximum active WIP cap (default: 5 loops) forces triage instead of accumulation.
 
 ## Capabilities
 
+Everything the spine can do is a **capability** — a registered, governed action with declared safety level, approval requirements, and output contracts.
+
 ```bash
-./bin/ops cap list                    # list all registered capabilities
-./bin/ops cap run <name>              # execute a capability and produce a receipt
-./bin/ops run --inline "..."          # run an inline task
-./bin/ops run --file <path>           # run a task from file
+./bin/ops cap list                        # list all capabilities
+./bin/ops cap run verify.run -- fast      # run verification gates
+./bin/ops cap run session.v3.attach       # start a governed session
 ```
 
-Domain capability catalogs:
+Capabilities are organized into four planes:
 
-- Flat canonical domain docs under `/Users/ronnyworks/code/agentic-spine/docs/governance/domains/*.md`
+| Plane | Purpose | Examples |
+|-------|---------|---------|
+| **Core** | Spine-internal governance | session, verify, loops, context, release |
+| **Infrastructure** | System-level operations | docker, backup, secrets, services, VM lifecycle |
+| **Domain** | Domain-specific execution | media, finance, communications, surveillance |
+| **Provider** | External API integrations | Cloudflare, Tailscale, Git forges |
 
-## Secrets: the gating layer
+Every capability execution produces a **receipt** — a cryptographic record of what ran, what it produced, and whether gates passed. No unreceipted execution.
 
-The spine treats secrets as a core invariant. Every API-facing capability is gated
-by the Infisical surface under `ops/plugins/infra/secrets/bin`, and receipts record the
-status of those gates before any mutating work runs. Follow this flow before you
-run something that touches secrets or external APIs:
+## Verification Gates
 
-1. Source your credentials file so the tokens become available:
+The gate system is Spine's immune system. Each gate is a shell script that checks whether declared state matches actual state:
 
-   ```bash
-   source ~/.config/infisical/credentials
-   ```
+```bash
+./bin/ops cap run verify.run -- fast       # core invariant gates
+./bin/ops cap run verify.run -- domain media  # domain-specific gates
+```
 
-2. Prove the secrets surface is wired in:
+Gates are categorized by concern: path hygiene, git hygiene, secrets hygiene, infrastructure parity, domain parity, and more. When a gate fails, it tells you exactly what's wrong and how to fix it.
 
-   ```bash
-   ./bin/ops cap run secrets.binding
-   ./bin/ops cap run secrets.auth.status
-   ./bin/ops cap run secrets.projects.status
-   ./bin/ops cap run secrets.status
-   ./bin/ops cap run secrets.cli.status
-   ```
+Gates run automatically during session attach, pre-commit, and pre-push — drift is caught before it escapes.
 
-3. When you need to run something that *uses* secrets (runners, webhooks, etc.),
-   do it through `secrets.exec`. That capability injects the env vars without ever
-   writing them to disk.
+## Prompt Library
 
-No API keys are stored in this repo. The credentials file exports values such as
-`ZAI_API_KEY` / `Z_AI_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`,
-`NVIDIA_NIM_API_KEY`, `ANTHROPIC_API_KEY`, and `INFISICAL_TOKEN`; utility
-scripts read them via `secrets.exec`, never via a checked-in file. Set
-`SPINE_ENGINE_PROVIDER=auto` (or a specific provider) in the same shell before you
-invoke `./bin/ops run`. Default provider is `auto`.
+Spine includes a governed prompt library that standardizes terminal behavior. Instead of manually specifying "check topology, check auth, check backup" every time, terminals load structured context templates:
 
-## Engine Providers
+| Template | Purpose |
+|----------|---------|
+| `research.context` | Systematic investigation (topology, retention, auth, backup, dependencies, contracts) |
+| `review.context` | Code/proposal review (scope validation, gate compliance, side effects, rollback) |
+| `verification.context` | Gate execution (gate selection, evidence collection, regression, attestation) |
+| `execution.context` | Governed task execution (loop context, authority, scope, verification, closure) |
 
-Set `SPINE_ENGINE_PROVIDER` to select the AI engine for `ops run`:
+Templates are seeded from canonical sources to the runtime directory:
 
-| Provider | File | Model | Notes |
-|----------|------|-------|-------|
-| `auto` (default) | `ops/plugins/providers/bin/run.sh` | contract-driven | Uses the provider chain from `ops/bindings/provider.orchestration.bundle.yaml` and falls through on runtime failures |
-| `zai` | `ops/plugins/providers/bin/openai.sh` | `glm-5` | OpenAI-compatible routing using the z.ai endpoint |
-| `anthropic` / `claude` | `ops/plugins/providers/bin/claude.sh` | `claude-sonnet-4-5-20250929` | Uses the Anthropic Messages API |
-| `openai` | `ops/plugins/providers/bin/openai.sh` | `gpt-4.1-mini` | OpenAI-compatible routing using OpenAI |
-| `openrouter` | `ops/plugins/providers/bin/openai.sh` | `openai/gpt-4.1-mini` | OpenAI-compatible routing using OpenRouter |
-| `nvidia_nim` | `ops/plugins/providers/bin/openai.sh` | `moonshotai/kimi-k2.5` | OpenAI-compatible routing using NVIDIA NIM |
-| `local_lmstudio` | `ops/plugins/providers/bin/openai.sh` | `qwen3-coder-30b-a3b-instruct` | Local LM Studio server on `127.0.0.1:1234` |
-| `local_echo` | `ops/plugins/providers/bin/local_echo.sh` | — | Echo-back stub for testing (no API call) |
+```bash
+./bin/ops cap run prompt.library.bootstrap   # seed templates
+```
 
-See `ops/plugins/providers/README.md` for the managed surface matrix (`codex`, `opencode`, `claude_code`, `claude_desktop`) and sync/status commands.
+## Directory Structure
+
+```
+agentic-spine/
+├── bin/                    # CLI entry points (./bin/ops is the main dispatcher)
+├── docs/
+│   ├── core/              # Foundational governance docs
+│   ├── governance/        # Canonical operating contract (SPINE.md)
+│   ├── contracts/         # Runtime agreements
+│   └── reference/         # Deep-dive materials
+├── ops/
+│   ├── bindings/          # Machine-evaluable contracts and registries
+│   ├── capabilities.yaml  # Capability registry (800+ capabilities)
+│   └── plugins/
+│       ├── core/          # Spine-internal governance plugins
+│       ├── infra/         # Infrastructure management plugins
+│       ├── domains/       # Domain-specific capability plugins
+│       └── providers/     # External API provider integrations
+├── surfaces/
+│   └── verify/            # 400+ verification gate scripts
+├── SPINE.md               # Minimal operating contract (the single daily reference)
+└── AGENTS.md              # Agent runtime contract
+```
+
+## Quick Start
+
+```bash
+# 1. Clone the repo
+git clone <repo-url> agentic-spine
+cd agentic-spine
+
+# 2. Initialize the runtime
+./bin/ops cap run session.v3.attach -- --allow-no-loop
+
+# 3. Check spine health
+./bin/ops status
+./bin/ops cap run verify.run -- fast
+
+# 4. List available capabilities
+./bin/ops cap list
+```
+
+See [GETTING_STARTED.md](docs/GETTING_STARTED.md) for the full onboarding guide.
+
+## Key Concepts
+
+| Concept | What It Means |
+|---------|---------------|
+| **Governed Execution** | Every mutation goes through a capability, produces a receipt, and is verified by gates |
+| **Receipt-Driven** | If there's no run key, it didn't happen. All evidence is traceable. |
+| **Loop Lifecycle** | Work is bounded, scoped, and explicitly closeable. No indefinite WIP. |
+| **Gate Ring** | Drift is caught by automated verification gates, not by operator memory. |
+| **Boring Main** | The main branch auto-heals on session attach — stale stashes cleaned, generated drift restored. |
+| **Worktree Isolation** | Workers execute in isolated git worktrees with declared, disjoint write scopes. |
+| **Prompt Library** | Standardized execution context templates eliminate manual keyword prompting. |
+
+## Design Principles
+
+1. **One doc per concern** — add sections to existing docs before creating new files.
+2. **One script per concern** — extend existing scripts with flags before creating near-duplicates.
+3. **Delete legacy** — `.legacy` copies are migration debt, not insurance.
+4. **Contracts over docs** — machine-evaluable YAML contracts are the source of truth, not prose.
+5. **Receipt over trust** — every execution must produce verifiable evidence.
+
+## License
+
+See [LICENSE](LICENSE) for details.
