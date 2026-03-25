@@ -142,6 +142,31 @@ while IFS= read -r d411_surface; do
   fi
 done <<< "$D411_SURFACES"
 
+# ─── Guard 8: Mirror sanitization canary ─────────────────
+# Reject commits that introduce redaction placeholders from the mirror pipeline.
+# These belong in the ephemeral mirror payload, NEVER in the canonical tree.
+# Added after b6d55b39 corruption incident (2026-03-25).
+CANARY_PATTERN='<INFISICAL_WORKSPACE_ID_REDACTED>'
+CANARY_DIRS="ops/bindings/ ops/plugins/providers/ docs/core/ docs/governance/"
+canary_hits=""
+for cdir in $CANARY_DIRS; do
+  while IFS= read -r cfile; do
+    [[ -n "$cfile" ]] || continue
+    if git show ":$cfile" 2>/dev/null | grep -qF "$CANARY_PATTERN"; then
+      canary_hits="$canary_hits $cfile"
+    fi
+  done < <(printf '%s\n' "$staged" | grep "^${cdir}" || true)
+done
+if [[ -n "$canary_hits" ]]; then
+  echo "BLOCKED: mirror sanitization placeholder in staged files:" >&2
+  for chit in $canary_hits; do echo "  $chit" >&2; done
+  echo "" >&2
+  echo "  The string '$CANARY_PATTERN' must NEVER be committed to the canonical repo." >&2
+  echo "  This placeholder belongs only in the ephemeral mirror payload." >&2
+  echo "  Incident ref: b6d55b39 (2026-03-25 break-glass recovery)" >&2
+  exit 1
+fi
+
 if [[ "$d411_surface_staged" -eq 1 ]] || printf '%s\n' "$staged" | rg -q '^docs/reference/generated/worker-usage/'; then
   d411_gate="$ROOT/surfaces/verify/d411-terminal-worker-projection-lock.sh"
   if [[ -x "$d411_gate" ]] && ! bash "$d411_gate" > /dev/null 2>&1; then

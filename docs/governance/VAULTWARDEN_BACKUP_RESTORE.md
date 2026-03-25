@@ -131,7 +131,7 @@ TOKEN=$(curl -s -X POST "${INFISICAL_API_URL}/api/v1/auth/universal-auth/login" 
   -d "{\"clientId\": \"$INFISICAL_UNIVERSAL_AUTH_CLIENT_ID\", \"clientSecret\": \"$INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET\"}" \
   | jq -r ".accessToken")
 
-ADMIN_TOKEN=$(curl -s "http://100.92.91.128:8088/api/v3/secrets/raw/VAULTWARDEN_ADMIN_TOKEN?workspaceId=<INFISICAL_WORKSPACE_ID_REDACTED>&environment=prod&secretPath=/spine/vm-infra/vaultwarden" \
+ADMIN_TOKEN=$(curl -s "http://100.92.91.128:8088/api/v3/secrets/raw/VAULTWARDEN_ADMIN_TOKEN?workspaceId=01ddd93a-e0f8-4c7c-ad9f-903d76ef94d9&environment=prod&secretPath=/spine/vm-infra/vaultwarden" \
   -H "Authorization: Bearer $TOKEN" | jq -r ".secret.secretValue")
 
 # Write .env on infra-core
