@@ -12,7 +12,7 @@ That's it. Everything else is mechanism that either serves that purpose or doesn
 Four things. If a capability doesn't serve one of these, it doesn't belong here.
 
 **1. Identity & Access**
-Every device has one name, one way in, one set of credentials. An agent never figures out "how do I reach this machine." It looks up the name. It gets the answer. It connects.
+Every device has one name, one way in, one set of credentials. An agent never figures out "how do I reach this machine." It looks up the name. It gets the answer. It connects. Address resolution goes through `ops/lib/ssh-resolve.sh` (D321). Hardcoded IPs are prohibited — use the hostname, let the spine resolve it.
 
 **2. Network Stability**
 Hostname resolves. Device is reachable. Every time. No stale IPs, no DHCP surprises, no "it worked yesterday." The network is declared, not discovered.

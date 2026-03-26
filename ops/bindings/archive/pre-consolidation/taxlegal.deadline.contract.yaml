@@ -1,0 +1,189 @@
+# Tax-Legal Deadline Contract
+# Status: planned (Wave 1 design-only)
+# Gap: GAP-OP-1431
+# Loop: LOOP-TAXLEGAL-W1-BINDINGS-CONTRACT-PACK-20260303
+# Plan: PLAN-TAX-LEGAL-OPS-WORKER-20260303
+
+contract_id: TAXLEGAL_DEADLINE_V1
+version: "1.0"
+lifecycle: experimental
+created: "2026-03-03"
+owner: "@ronny"
+scope: taxlegal-deadline-model
+
+description: >
+  Deadline model, calendar integration, and escalation windows for tax-legal
+  compliance operations. Tracks filing deadlines from primary source calendars
+  and enforces escalation when deadlines approach without operator action.
+
+authority_references:
+  agent_contract: ops/agents/tax-legal-agent.contract.md
+  case_lifecycle: ops/bindings/taxlegal.case.lifecycle.contract.yaml
+  jurisdiction_profile: ops/bindings/taxlegal.jurisdiction.profile.33441.yaml
+
+# ────────────────────────────────────────────────────────────────────────────
+# DEADLINE MODEL
+# ────────────────────────────────────────────────────────────────────────────
+deadline_schema:
+  required_fields:
+    - deadline_id
+    - case_id
+    - deadline_type
+    - due_date
+    - jurisdiction
+    - agency
+    - filing_requirement
+    - risk_level
+    - escalation_window_days
+  optional_fields:
+    - extension_available
+    - extension_deadline
+    - penalty_description
+    - source_id
+    - calendar_event_id
+    - acknowledged_by
+    - acknowledged_at
+
+# ────────────────────────────────────────────────────────────────────────────
+# DEADLINE TYPES
+# ────────────────────────────────────────────────────────────────────────────
+deadline_types:
+  - id: annual_filing
+    description: "Recurring annual filings (annual reports, tax returns)"
+    default_escalation_window_days: 30
+    example: "Florida Annual Report (due May 1)"
+
+  - id: quarterly_filing
+    description: "Recurring quarterly filings (estimated taxes, sales tax)"
+    default_escalation_window_days: 14
+    example: "FL DR-15 Sales Tax Return"
+
+  - id: one_time_filing
+    description: "Single filing with specific due date"
+    default_escalation_window_days: 14
+    example: "Initial LLC formation Articles of Organization"
+
+  - id: response_deadline
+    description: "Response required to government notice or enforcement action"
+    default_escalation_window_days: 7
+    example: "Code enforcement response within 30 days of notice"
+
+  - id: renewal
+    description: "License or permit renewal deadline"
+    default_escalation_window_days: 30
+    example: "Business Tax Receipt renewal"
+
+  - id: election
+    description: "Tax election or status change deadline"
+    default_escalation_window_days: 14
+    example: "S-Corp election (Form 2553)"
+
+# ────────────────────────────────────────────────────────────────────────────
+# RISK LEVELS
+# ────────────────────────────────────────────────────────────────────────────
+risk_levels:
+  - id: low
+    description: "Deadline missed would cause minor inconvenience, no penalty"
+    color: green
+
+  - id: medium
+    description: "Deadline missed would cause late fees or administrative penalty"
+    color: yellow
+
+  - id: high
+    description: "Deadline missed would cause significant penalty, legal exposure, or entity status risk"
+    color: red
+
+  - id: critical
+    description: "Deadline missed would cause entity dissolution, tax lien, or enforcement action"
+    color: red
+
+# ────────────────────────────────────────────────────────────────────────────
+# ESCALATION WINDOWS
+# ────────────────────────────────────────────────────────────────────────────
+escalation_windows:
+  description: >
+    Escalation triggers at defined intervals before a deadline. Each
+    trigger generates a notification and may block case progression
+    until operator acknowledgment.
+
+  tiers:
+    - tier: early_warning
+      days_before_deadline: 30
+      action: "Add deadline to operator action queue"
+      notification: passive
+      blocks_progression: false
+
+    - tier: active_warning
+      days_before_deadline: 14
+      action: "Operator notification with deadline summary"
+      notification: active
+      blocks_progression: false
+
+    - tier: urgent
+      days_before_deadline: 7
+      action: "Immediate operator notification, case flagged urgent"
+      notification: immediate
+      blocks_progression: true
+
+    - tier: critical
+      days_before_deadline: 3
+      action: "Red-class escalation, manual hold on all related case activity"
+      notification: immediate
+      blocks_progression: true
+
+    - tier: overdue
+      days_before_deadline: 0
+      action: "Incident filed, penalty risk assessment triggered"
+      notification: immediate
+      blocks_progression: true
+
+# ────────────────────────────────────────────────────────────────────────────
+# CALENDAR INTEGRATION (Planned)
+# ────────────────────────────────────────────────────────────────────────────
+calendar_integration:
+  lifecycle: experimental
+  target: microsoft_calendar
+  detail: >
+    When DOMAIN-MICROSOFT-01 runtime role is active, deadline events
+    will be synced to a dedicated tax-legal calendar via Microsoft
+    Graph API. Until then, deadlines are tracked in case artifacts only.
+  sync_direction: spine_to_calendar
+  event_format:
+    title: "[TaxLegal] {filing_requirement} - {jurisdiction}"
+    body: "Case: {case_id}\nDue: {due_date}\nRisk: {risk_level}"
+    reminder_minutes: [1440, 10080]
+
+# ────────────────────────────────────────────────────────────────────────────
+# DEADLINE CAPABILITIES
+# ────────────────────────────────────────────────────────────────────────────
+capabilities:
+  - id: taxlegal.deadlines.refresh
+    safety: mutating
+    approval: auto
+    description: "Recompute due dates and escalation states from source calendars"
+    lifecycle: experimental
+
+  - id: taxlegal.deadlines.status
+    safety: read-only
+    approval: auto
+    description: "Show upcoming deadlines with risk levels and escalation state"
+    lifecycle: experimental
+
+# ────────────────────────────────────────────────────────────────────────────
+# FRESHNESS POLICY
+# ────────────────────────────────────────────────────────────────────────────
+freshness_policy:
+  max_staleness_hours: 24
+  refresh_trigger: "Automatic refresh on case status query if stale"
+  detail: "Deadline snapshots older than 24 hours are considered stale and require refresh"
+
+# ────────────────────────────────────────────────────────────────────────────
+# PLANNED GATES
+# ────────────────────────────────────────────────────────────────────────────
+planned_gates:
+  - id: D338
+    name: taxlegal-deadline-freshness-lock
+    purpose: "Ensure deadline snapshots are refreshed within policy TTL"
+    mode: report
+    promote_after_clean_runs: 3

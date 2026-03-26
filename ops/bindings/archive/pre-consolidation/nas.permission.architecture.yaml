@@ -1,0 +1,152 @@
+# NAS Permission Architecture
+# Status: authoritative
+# Owner: "@ronny"
+# Updated: 2026-03-24
+# Scope: Synology NAS permission model, SSH access, rsync operations
+# Remediation: LOOP-NAS-PERMISSION-REMEDIATION-20260324
+
+version: "2.0"
+created: "2026-03-24"
+owner: "@ronny"
+
+nas_target:
+  model: "Synology DS918+"
+  hostname: synology918
+  lan_ip: 10.0.0.150
+  tailscale_ip: 100.102.199.111
+
+primary_user: ronadmin
+
+nfs_export:
+  path: "/volume1/media-staging"
+  clients:
+    - host: "10.0.0.106"
+      description: "media-home VM 106"
+      options: "rw,async,no_wdelay,crossmnt,insecure,all_squash,anonuid=1024,anongid=100"
+    - host: "10.0.0.179"
+      description: "legacy (download-stack, tombstoned)"
+      options: "rw,async,no_wdelay,crossmnt,insecure,all_squash,anonuid=1024,anongid=100"
+  squash: all_squash
+  anonuid: 1024
+  anongid: 100
+  status: active
+  note: |
+    NFS all_squash maps ALL client UIDs to admin (1024) on the NAS.
+    This means UID 1000 (media-home/ubuntu) appears as UID 1024 on disk.
+    Even 700-permission directories are accessible through NFS because
+    the squashed UID matches the file owner UID.
+
+permission_model:
+  status: remediated
+  remediation_date: "2026-03-24"
+  remediation_loop: "LOOP-NAS-PERMISSION-REMEDIATION-20260324"
+  current_state: |
+    Movies: all dirs 755, files 644 (bulk chmod via NFS from media-home)
+    TV: all dirs 755 (were already clean)
+    Music: dirs 775, files 664 (sudo chmod on NAS — Wave 11, 2026-03-25)
+    Downloads: 755/644 (admin-owned, fixed in bulk chmod)
+    Movies uid-1026 dirs: 775 (sudo chmod on NAS — Wave 11, 2026-03-25)
+    TV uid-1026 dirs: 775 (sudo chmod on NAS — Wave 11, 2026-03-25)
+  ownership:
+    admin_uid_1024: "movies, tv, downloads (majority)"
+    ronadmin_uid_1026: "music, some tv/movie subdirs"
+    shared_gid: 100  # users group
+  access_through_nfs: |
+    All content is accessible through NFS regardless of on-disk permissions
+    because all_squash maps client access to UID 1024 (admin), which owns
+    the majority of content. Even 700-perm dirs are accessible because the
+    squashed identity matches the owner.
+  remaining_issues:
+    - "New rsync transfers preserve source permissions (700/600) — need --chmod flag or periodic cleanup"
+    - "Container UMASK must be 002 (not default 0022) for NFS group-write to work — set in docker-compose Wave 13"
+    - "Lidarr copyUsingHardlinks disabled (hardlinks fail across NFS mounts) — Wave 13"
+
+historical:
+  pre_remediation:
+    issue: "Mixed ownership (admin:users vs ronadmin:users)"
+    root_cause: |
+      admin (UID 1024) created most content with umask 077 → 700 dirs, 600 files
+      ronadmin (UID 1026) created music with umask 000 → 777 dirs, 666 files
+    impact: "93% of movie directories had 700 permissions (265/283 dirs)"
+    observed_failure_rate: "88% (19,233/21,970 files blocked for rsync)"
+    note: |
+      The 700-permission dirs were NOT actually blocking NFS access because
+      all_squash was already configured. The original discovery incorrectly
+      assumed no squash. The chmod was done for defense-in-depth and cleanliness.
+
+ssh_access_matrix:
+  ronadmin:
+    lan:
+      ip: 10.0.0.150
+      status: works
+      keys: configured
+    tailscale:
+      ip: 100.102.199.111
+      status: works
+      keys: configured
+  admin:
+    lan:
+      ip: 10.0.0.150
+      status: no_ssh_keys
+      keys: not_configured
+    tailscale:
+      ip: 100.102.199.111
+      status: no_ssh_keys
+      keys: not_configured
+
+ssh_hardening:
+  password_authentication: "no"
+  deny_users_admin: true
+  backup: "/etc/ssh/sshd_config.bak.20260324"
+  applied: "2026-03-24"
+  applied_by: "LOOP-NAS-PERMISSION-REMEDIATION-20260324"
+  note: "Synology DSM updates may revert sshd_config — monitor after DSM upgrades"
+
+sudoers:
+  ronadmin_nopasswd: true
+  file: "/etc/sudoers"
+  note_path: "Synology DSM has no /etc/sudoers.d/ — rules added directly to /etc/sudoers"
+  commands: ["/bin/chmod", "/bin/chown", "/usr/bin/find", "/bin/ls"]
+  applied: "2026-03-24"
+  applied_by: "LOOP-NAS-PERMISSION-REMEDIATION-20260324"
+
+dsm_update_fragility:
+  risk: "DSM updates may overwrite /etc/ssh/sshd_config and /etc/sudoers"
+  monitoring: "No automated gate yet — manual verification after DSM upgrades"
+  gap_ref: "To be filed if automated monitoring desired"
+
+rsync_contract:
+  canonical_pattern: |
+    The NFS all_squash configuration means rsync through NFS (from media-home)
+    does not have the UID mismatch problem. Files created through NFS are
+    owned by UID 1024 on disk. However, rsync preserves source permissions,
+    so new transfers may create 700/600 files. Use --chmod flag to override:
+
+    rsync -av --chmod=D755,F644 /source/ /srv/media/target/
+
+  direct_nas_rsync: |
+    When running rsync directly ON the NAS (e.g., USB import), the old
+    permission pre-fix is still needed because ronadmin (1026) cannot
+    write to admin-owned (1024) directories without sudo:
+
+    ssh ronadmin@100.102.199.111 "chmod -R u+w /volume1/media-staging/target"
+    ssh ronadmin@100.102.199.111 "rsync -av /source/ /volume1/media-staging/target/"
+
+agent_instructions:
+  before_nfs_rsync:
+    - "Rsync through NFS (from media-home) works without permission fixes"
+    - "Use --chmod=D755,F644 to set clean permissions on new content"
+  before_direct_nas_rsync:
+    - "Read this contract"
+    - "Run permission pre-fix: chmod -R u+w on target directory"
+    - "Execute rsync"
+    - "Verify file count matches expected"
+  do_not:
+    - "Assume NFS has no squash (it has all_squash with anonuid=1024)"
+    - "Use sudo in automated scripts (requires password)"
+    - "Skip permission verification for direct NAS operations"
+
+related_documentation:
+  - ops/bindings/media.path.authority.contract.yaml
+  - ops/bindings/ssh.targets.yaml
+  - ops/bindings/agent.interface.contract.yaml

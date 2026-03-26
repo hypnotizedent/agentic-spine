@@ -1,0 +1,143 @@
+# Surveillance Topology Contract v1.0
+# Authority: LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302
+# Scope: Runtime topology, storage/retention, HA integration authority
+
+contract_id: SURVEILLANCE_TOPOLOGY_CONTRACT_V1
+version: "1.0"
+status: active
+owner: "@ronny"
+created: "2026-03-04"
+last_verified: "2026-03-05"
+parent_loop: LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302
+
+# ─── Canonical Decisions ─────────────────────────────────────────────
+canonical_decisions:
+  ha_instance_policy: single
+  ha_instance_target: home
+  ha_instance_note: "Existing home HA instance (VM 100, proxmox-home) is the sole automation authority. No separate shop-ha VM."
+  deployment_baseline: cpu_first
+  gpu_policy: optional_future
+  gpu_note: "GPU acceleration (Tesla P40, Intel QSV, etc.) is documented as optional future optimization. Never a deployment blocker."
+  vmid_policy: governed_intake
+  vmid_note: "VM IDs allocated exclusively through infra.vm.intake.scaffold + vm.lifecycle.yaml. No hardcoded IDs in planning."
+
+# ─── Runtime Topology ────────────────────────────────────────────────
+runtime:
+  surveillance_stack:
+    hostname: surveillance-stack
+    vm_id: 215
+    lan_ip: "192.168.1.215"
+    tailscale_ip: "100.89.1.111"
+    proxmox_host: pve
+    access_policy: lan_first
+    os: ubuntu-24.04
+    profile: spine-ready-v1
+    services:
+      - name: frigate
+        image: ghcr.io/blakeblackshear/frigate:stable
+        purpose: "NVR replacement + object detection (CPU baseline)"
+        ports:
+          web_ui: 5000
+          rtsp: 8554
+          webrtc: 8555
+        detector: cpu
+        detector_note: "OpenCV CPU detector. GPU passthrough optional future enhancement."
+      - name: go2rtc
+        image: alexxit/go2rtc:latest
+        purpose: "WebRTC/RTSP proxy for low-latency camera viewing"
+        ports:
+          api: 1984
+          rtsp: 8554
+          webrtc: 8555
+        note: "Bundled inside Frigate 0.17+. No standalone container. go2rtc API proxied through Frigate nginx at /api/go2rtc/."
+
+  home_assistant:
+    hostname: homeassistant
+    vm_id: 100
+    proxmox_host: proxmox-home
+    lan_ip: "10.0.0.100"
+    tailscale_ip: "100.67.120.1"
+    integration_type: frigate_mqtt
+    integration_note: "Frigate integration is direct over Tailscale. MQTT broker on home HA is reached at 100.67.120.1:1883 and Frigate integration URL is http://100.89.1.111:5000."
+    mqtt_broker_host: "100.67.120.1"
+    mqtt_broker_port: 1883
+    frigate_integration_url: "http://100.89.1.111:5000"
+    tailscale_addon:
+      networking_mode: kernel
+      userspace_networking: false
+      accept_routes: true
+      accept_dns: true
+    relay_proxy_status: removed
+    relay_proxy_note: "No proxmox-home socat relay is part of the canonical runtime."
+
+# ─── Camera Source ───────────────────────────────────────────────────
+camera_source:
+  nvr_model: "Hikvision ERI-K216-P16"
+  nvr_ip: "192.168.1.216"
+  nvr_ssh_target: nvr-shop
+  channels_configured: 12
+  channels_online: 8
+  channels_offline: 4
+  channels_offline_ids: [2, 3, 4, 5]
+  rtsp_port: 554
+  credential_path: "infrastructure/prod:/spine/shop/nvr/*"
+
+# ─── Storage & Retention ────────────────────────────────────────────
+storage:
+  tier: tank-vms
+  tier_note: "ZFS zvol attached as virtio disk. Recordings and Frigate DB on dedicated non-boot storage."
+  boot_disk_gb: 50
+  data_disk_gb: 100
+  data_mount: /mnt/data
+  frigate_db_path: /mnt/data/frigate/frigate.db
+  recordings_path: /mnt/data/frigate/recordings
+  clips_path: /mnt/data/frigate/clips
+  snapshots_path: /mnt/data/frigate/snapshots
+
+retention:
+  recordings_days: 14
+  clips_days: 30
+  snapshots_days: 30
+  cleanup_policy: automatic
+  cleanup_note: "Frigate built-in retention management. Oldest recordings auto-deleted when storage threshold reached."
+  storage_warning_threshold_pct: 85
+
+# ─── Capabilities ───────────────────────────────────────────────────
+capabilities:
+  - id: surveillance.stack.status
+    safety: read-only
+    purpose: "Frigate health, camera online/offline counts, detector pipeline (CPU), disk pressure"
+  - id: surveillance.event.query
+    safety: read-only
+    purpose: "Query Frigate events by camera/label/time range; return counts + latest matches"
+  - id: ha.surveillance.status
+    safety: read-only
+    purpose: "Home HA integration health for surveillance entities/automations"
+
+# ─── Drift Rules ────────────────────────────────────────────────────
+drift_rules:
+  forbidden_required_references:
+    - "shop-ha"
+    - "VM 211"
+    - "VM 212"
+    - "Tesla P40 required"
+  allowed_historical_only:
+    - pattern: "shop-ha"
+      context: "May appear in historical notes if explicitly marked deprecated/non-authoritative"
+    - pattern: "GPU"
+      context: "May appear as optional future enhancement, never as required dependency"
+
+# ─── Evidence ───────────────────────────────────────────────────────
+evidence:
+  - date: "2026-03-05"
+    source: "WAVE-SURVEILLANCE-VM-E2E-EXEC-20260305"
+    summary: "VM 215 provisioned, Frigate 0.17.0 deployed with 8 cameras at 5fps CPU detector, MQTT enabled, Tailscale enrolled"
+  - date: "2026-03-05"
+    source: "surveillance-canonicalize-20260305"
+    summary: "HA<->Frigate integration normalized to direct Tailscale. MQTT target 100.67.120.1:1883, Frigate URL http://100.89.1.111:5000, no socat relay."
+  - date: "2026-03-04"
+    source: "drift-normalization commit fd719fb"
+    summary: "Removed shop-ha/GPU blockers, aligned to single-HA + CPU-first contract"
+  - date: "2026-03-02"
+    source: "proposal CP-20260302-075509"
+    summary: "Initial planning artifacts created with normalized assumptions"

@@ -1,0 +1,249 @@
+version: "1.1"
+updated: "2026-03-19"
+owner: "@ronny"
+scope: authority-concern-map
+status: authoritative
+
+resolution:
+  path_base: workspace_root
+  workspace_root_env: SPINE_WORKSPACE_ROOT
+  workspace_root_default: sibling_of_spine_repo
+
+migration:
+  supersedes:
+    - ops/bindings/single.authority.contract.yaml
+  compatibility_note: "D275 consumes this contract as canonical authority concern map."
+
+policy:
+  exactly_one_authoritative_source: true
+  required_non_authoritative_states:
+    - projection
+    - tombstoned
+  require_concern_map_update_for_new_authoritative_surface: true
+
+concerns:
+  service_registry_surfaces:
+    description: "Service registry authority across registry, health probes, and compose target projections."
+    sources:
+      - path: agentic-spine/docs/governance/SERVICE_REGISTRY.yaml
+        state: authoritative
+        required_marker: "authority_state: authoritative"
+      - path: agentic-spine/ops/bindings/services.health.yaml
+        state: projection
+        required_marker: "authority_state: projection"
+      - path: agentic-spine/ops/bindings/docker.compose.targets.yaml
+        state: projection
+        required_marker: "authority_state: projection"
+
+  gate_metadata_surfaces:
+    description: "Gate metadata authority lives only in gate.registry; entry surfaces are generated projections."
+    sources:
+      - path: agentic-spine/ops/bindings/gate.registry.yaml
+        state: authoritative
+        required_marker: "gate_metadata_authority: authoritative"
+      - path: agentic-spine/AGENTS.md
+        state: projection
+        required_marker: "entry_surface_gate_metadata: projection"
+      - path: agentic-spine/CLAUDE.md
+        state: projection
+        required_marker: "entry_surface_gate_metadata: projection"
+
+  agents_domains_surfaces:
+    description: "Agents/domains authority lives in agents.registry; terminal roles are generated projections."
+    sources:
+      - path: agentic-spine/ops/bindings/agents.registry.yaml
+        state: authoritative
+        required_marker: "authority_state: authoritative"
+      - path: agentic-spine/ops/bindings/terminal.role.contract.yaml
+        state: projection
+        required_marker: "projection_of: ops/bindings/agents.registry.yaml"
+
+  mcp_config_roots:
+    description: "MCP config root authority is workbench infra/compose/mcpjungle/servers/."
+    sources:
+      - path: workbench/infra/compose/mcpjungle/servers/README.md
+        state: authoritative
+        required_marker: "authority_state: authoritative"
+
+  supplier_decision_versions:
+    description: "Supplier decision authority winner is V3; previous versions are tombstoned."
+    sources:
+      - path: mint-modules/docs/CANONICAL/MINT_SUPPLIER_DECISIONS_V3.yaml
+        state: authoritative
+        required_marker: "authority_state: authoritative"
+      - path: mint-modules/docs/CANONICAL/MINT_SUPPLIER_DECISIONS_V2.yaml
+        state: tombstoned
+        required_marker: "status: tombstoned"
+      - path: mint-modules/docs/CANONICAL/MINT_SUPPLIER_DECISIONS_V1.yaml
+        state: tombstoned
+        required_marker: "status: tombstoned"
+
+  supplier_sync_contract_versions:
+    description: "Supplier sync contract authority winner is latest V2; V1 is tombstoned."
+    sources:
+      - path: mint-modules/docs/CANONICAL/MINT_SUPPLIER_SYNC_CONTRACT_V2.md
+        state: authoritative
+        required_marker: "status: authoritative"
+      - path: mint-modules/docs/CANONICAL/MINT_SUPPLIER_SYNC_CONTRACT_V1.md
+        state: tombstoned
+        required_marker: "status: tombstoned"
+
+  staged_compose_authority:
+    description: "Typed foundation compose authority lives under agentic-foundation/ops/{infra,domains}; root repo README is the authority contract and drained staged material is archived."
+    sources:
+      - path: agentic-foundation/README.md
+        state: authoritative
+        required_marker: "authority_state: authoritative"
+
+  backup_inventory_surfaces:
+    description: "Backup inventory authority with generated posture snapshot projection."
+    sources:
+      - path: agentic-spine/ops/bindings/backup.inventory.yaml
+        state: authoritative
+        required_marker: "authority_state: authoritative"
+      - path: agentic-spine/ops/bindings/backup.posture.snapshot.yaml
+        state: projection
+        required_marker: "authority_state: projection"
+
+  service_lifecycle_retention_surfaces:
+    description: "Time-aware service lifecycle authority across canonical roots, staging/quarantine expiry, archive intent, and retention-capacity honesty projections."
+    rollout_priority: 9
+    blast_radius: 4
+    backfill_frequency: high
+    sources:
+      - path: agentic-spine/ops/bindings/service.data.lifecycle.registry.yaml
+        state: authoritative
+        required_marker: "authority_state: authoritative"
+      - path: agentic-spine/ops/bindings/service.data.lifecycle.projected.yaml
+        state: projection
+        required_marker: "authority_state: projection"
+      - path: agentic-spine/ops/bindings/services.health.yaml
+        state: projection
+        required_marker: "authority_state: projection"
+      - path: agentic-spine/ops/bindings/shop.storage.map.yaml
+        state: projection
+        required_marker: "authority_state: projection"
+      - path: agentic-spine/ops/bindings/home.storage.map.yaml
+        state: projection
+        required_marker: "authority_state: projection"
+      - path: agentic-spine/ops/bindings/backup.posture.snapshot.yaml
+        state: projection
+        required_marker: "authority_state: projection"
+    generator_capability_existing: service.data.lifecycle.projection.build
+    audit_capability_existing: service.data.lifecycle.audit
+    gate_id_existing: D407
+    backlog_status: completed
+    backlog_id: DREAM-027
+
+  content_family_placement_surfaces:
+    description: "Cross-family placement authority that declares hot, stage, hold, archive, rehydration, backup, and decommission dependency truth by family instead of by VM name."
+    rollout_priority: 8
+    blast_radius: 4
+    backfill_frequency: medium
+    sources:
+      - path: agentic-spine/ops/bindings/content.family.placement.policy.yaml
+        state: authoritative
+        required_marker: "authority_state: authoritative"
+      - path: agentic-spine/ops/bindings/content.family.placement.projected.yaml
+        state: projection
+        required_marker: "authority_state: projection"
+      - path: agentic-spine/docs/reference/generated/CONTENT_FAMILY_PLACEMENT_MATRIX.md
+        state: projection
+        current_state: hand_maintained
+
+  content_family_decommission_readiness_surfaces:
+    description: "Executable retirement-readiness truth for residual service planes derived from content families, lifecycle roots, health probes, closure contracts, and VM preconditions."
+    rollout_priority: 8
+    blast_radius: 4
+    backfill_frequency: medium
+    sources:
+      - path: agentic-spine/ops/bindings/content.family.decommission.readiness.projected.yaml
+        state: projection
+        required_marker: "authority_state: projection"
+      - path: agentic-spine/docs/reference/generated/CONTENT_FAMILY_DECOMMISSION_READINESS.md
+        state: projection
+        required_marker: "status: generated"
+    generator_capability_existing: content.family.placement.projection.build
+    audit_capability_existing: content.family.placement.audit
+    gate_id_existing: D420
+    backlog_status: completed
+    backlog_id: DREAM-038
+
+  internet_asset_surfaces:
+    description: "Internet-touching asset authority with generated projection for cross-domain asset tracking."
+    sources:
+      - path: agentic-spine/ops/bindings/internet.asset.registry.yaml
+        state: authoritative
+        required_marker: "authority_state: authoritative"
+      - path: agentic-spine/ops/bindings/internet.asset.registry.projected.yaml
+        state: projection
+        required_marker: "authority_state: projection"
+
+  gate_topology_surfaces:
+    description: "Gate execution topology should derive from gate.registry.yaml; currently hand-maintained."
+    rollout_priority: 1
+    blast_radius: 4
+    backfill_frequency: high
+    sources:
+      - path: agentic-spine/ops/bindings/gate.registry.yaml
+        state: authoritative
+        required_marker: "gate_metadata_authority: authoritative"
+      - path: agentic-spine/ops/bindings/gate.execution.topology.yaml
+        state: projection
+        target_state: projection
+        current_state: hand_maintained
+        required_marker: "authority_state: projection"
+    generator_capability_planned: gate.topology.projection.build
+    gate_id_planned: D401
+    backlog_status: not_started
+    backlog_id: DREAM-001
+
+  capability_map_surfaces:
+    description: "Capability map should derive from capabilities.yaml; currently hand-maintained with D67 convergence verification."
+    rollout_priority: 2
+    blast_radius: 4
+    backfill_frequency: medium
+    sources:
+      - path: agentic-spine/ops/capabilities.yaml
+        state: authoritative
+        required_marker: "authority_state: authoritative"
+      - path: agentic-spine/ops/bindings/capability_map.yaml
+        state: projection
+        target_state: projection
+        current_state: hand_maintained
+        required_marker: "authority_state: projection"
+    generator_capability_planned: capability.map.projection.build
+    gate_id_existing: D67
+    gate_id_planned: D402
+    backlog_status: not_started
+    backlog_id: DREAM-002
+
+  intake_lifecycle_surfaces:
+    description: "Intake lifecycle domain entries should derive from capabilities.yaml domain fields."
+    rollout_priority: 3
+    blast_radius: 3
+    backfill_frequency: high
+    sources:
+      - path: agentic-spine/ops/capabilities.yaml
+        state: authoritative
+        required_marker: "authority_state: authoritative"
+      - path: agentic-spine/ops/bindings/intake.lifecycle.contract.yaml
+        state: projection
+        target_state: projection
+        current_state: partially_hand_maintained
+        required_marker: "authority_state: projection"
+    generator_capability_planned: intake.lifecycle.projection.build
+    gate_id_planned: D403
+    backlog_status: blocked
+    backlog_id: DREAM-003
+    blocker_note: "Blocked 2026-03-18: capabilities.yaml domain taxonomy is not intake-ready yet (caps include none/home-assistant/network/infrastructure while intake/topology still require workbench/hygiene-weekly/proxmox-network)."
+
+  translator_authority_surfaces:
+    description: "Translator authority boundary and routing contract."
+    sources:
+      - path: agentic-spine/ops/bindings/translator.authority.contract.yaml
+        state: authoritative
+        required_marker: "status: authoritative"
+      - path: agentic-spine/docs/governance/SPINE_V3_BOOTSTRAP.md
+        state: projection
+        required_marker: "status: authoritative"

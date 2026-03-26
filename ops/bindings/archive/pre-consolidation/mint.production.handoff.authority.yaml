@@ -1,0 +1,101 @@
+# Mint Production Handoff Authority
+# Status: authoritative
+# Last verified: 2026-03-10
+# Scope: mint-production-handoff-runtime
+
+version: 1
+updated_at: "2026-03-10"
+owner: "@ronny"
+status: authoritative
+scope: mint-production-handoff-runtime
+
+purpose: >
+  Define the minimal governed production handoff record between canonical paid
+  order truth and future machine-package staging. The handoff is an immutable
+  derived snapshot of the current order_revision once production readiness is
+  proven; it is not a new production CRM and it is not the machine queue.
+
+non_goals:
+  - scheduling presses, embroidery heads, or RIP queues
+  - replacing canonical order, order_revision, quote, or artwork_binding truth
+  - inventing a new proof object model
+  - making folders, shared drives, or machine GUIs the source of truth
+  - direct RIP/machine execution
+
+contracts:
+  order_truth_authority: ops/bindings/mint.order.truth.authority.yaml
+  production_readiness_authority: ops/bindings/mint.production.readiness.authority.yaml
+  module_lifecycle_authority: ops/bindings/mint.module.lifecycle.authority.yaml
+
+handoff_record:
+  canonical_input: order_id
+  create_rule: >
+    mint.production.handoff.create must first pass
+    mint.production.readiness.check. If readiness is blocked, handoff creation
+    stops; it does not invent production readiness.
+  identity_rule:
+    stable_key: order_id + current order_revision_id
+    idempotent_create: >
+      Creating a handoff twice for the same current order_revision must reuse
+      the existing record instead of minting a second handoff id.
+    immutability: >
+      The handoff record is immutable after creation because it is a historical
+      production instruction snapshot. If business facts change, create a new
+      order_revision and then a new handoff for that revision.
+  required_snapshot_fields:
+    - production_handoff_id
+    - order_id
+    - order_revision_id
+    - active_quote_id when present
+    - source_quote_packet_id when present
+    - customer_ref
+    - order_state snapshot
+    - delivery_commitment snapshot
+    - target_classes
+    - per-line production handoff entries with artwork_binding_id and production_asset_refs
+    - flattened production_asset_refs
+    - readiness receipt metadata
+  line_item_snapshot_rules:
+    - line items come from canonical order_revision truth, not quote_packet drafts
+    - inferred machine/target class is derived from the readiness authority
+    - production_asset_refs must point to already-approved method-compatible assets
+    - handoff warnings may be preserved, but blocking readiness reasons forbid creation
+
+runtime_surface:
+  create:
+    name: mint.production.handoff.create
+    description: Persist an immutable production handoff snapshot from canonical ready order truth
+    implementation_status: REAL (mutating runtime record derived from order/order_revision/artwork readiness truth)
+    inputs:
+      - order_id (required)
+    storage:
+      handoff_dir: runtime/domain-state/mint/production-handoffs/
+      handoff_index: runtime/domain-state/mint/production-handoffs-index.yaml
+    outputs:
+      - production_handoff_id
+      - handoff_create_state
+      - handoff_state
+      - order_id
+      - order_revision_id
+      - target_classes
+      - production_asset_count
+      - production_handoff_file
+    blockers:
+      - readiness check must report ready
+      - canonical current order_revision must exist
+      - production line snapshot must resolve to method-compatible approved asset refs
+    downstream_boundary:
+      - machine-package staging remains downstream
+      - press scheduling remains manual/external
+      - machine dispatch remains downstream
+
+agent_guidance:
+  sequence_rule: >
+    The canonical post-payment production path is:
+    mint.production.readiness.check -> mint.production.handoff.create ->
+    future machine-package staging. Do not skip straight from paid order truth
+    to machine execution.
+  conservative_rule: >
+    If the current order_revision, artwork bindings, or approved production
+    assets are incomplete, stop and resolve canonical truth first. Do not
+    compensate with operator notes, GUI state, or guessed production files.

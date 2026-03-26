@@ -1,0 +1,140 @@
+# Fabric Boundary Contract
+# Status: authoritative
+# Last verified: 2026-02-16
+# Purpose: enforce lean-spine boundary (fabric governance in spine, domain ops in workbench)
+
+version: 1
+updated_at: "2026-03-21"
+owner: "@ronny"
+scope: aof-fabric-boundary
+
+spine:
+  role: fabric_control_plane
+  canonical_repo: "/Users/ronnyworks/code/agentic-spine"
+  allowed_planes:
+    - fabric
+    - domain_external
+
+workbench:
+  role: domain_implementation_plane
+  canonical_repo: "/Users/ronnyworks/code/workbench"
+  required_agent_path_prefix: "~/code/workbench/agents/"
+
+capability_boundary:
+  core_prefixes:
+    - aof
+    - agent
+    - authority
+    - codex
+    - docs
+    - evidence
+    - gaps
+    - loops
+    - mailroom
+    - maker
+    - monolith
+    - orchestration
+    - policy
+    - proposals
+    - rag
+    - secrets
+    - session
+    - share
+    - spine
+    - surface
+    - tenant
+    - verify
+    - version
+
+  domain_external_prefixes:
+    - backup
+    - microsoft
+    - finance
+    - ha
+    - home
+    - immich
+    - media
+    - n8n
+    - network
+
+domain_external_implementation_boundary:
+  default_allowed_location:
+    id: default:workbench-domain-external
+    repo: workbench
+    allowed_roots:
+      - agents/
+      - docs/infrastructure/domains/
+      - infra/compose/
+    rationale: Domain-external capabilities default to workbench-owned implementation roots.
+  allowed_location_overrides:
+    - id: mint-spine-customer-runtime
+      match:
+        capability_prefixes:
+          - mint.customer.voice.
+          - mint.customer.frontdesk.
+      repo: spine
+      allowed_roots:
+        - ops/plugins/domains/mint/
+      rationale: Mint customer voice/frontdesk runtime remains spine-local because the governed intake, callback queue, and bounded fact surfaces live in spine runtime state.
+    - id: mint-spine-mailbox-runtime
+      match:
+        capability_ids:
+          - mint.customer.inbox.triage
+          - mint.customer.inbox.work_items
+          - mint.customer.thread.delta.capture
+          - mint.customer.reorder.resolve
+          - mint.customer.reply.draft
+          - mint.customer.forwarded.attachment.resolve
+          - mint.customer.artwork.revision.prepare
+          - mint.artwork.place
+          - MINT-MORPHEUS-01.launch
+      repo: spine
+      allowed_roots:
+        - ops/plugins/domains/mint/
+      rationale: Mint customer mailbox and governed artwork handoff runtime remain spine-local because the bounded inbox queue, reply drafting, attachment resolution, launch entrypoint, and artwork placement surfaces depend on spine-owned runtime state, provider seams, and governed receipts.
+    - id: mint-spine-intake-runtime
+      match:
+        capability_ids:
+          - mint.intake.email.parse
+          - mint.order.create
+          - mint.customer.history.compile
+          - mint.quote.generate
+          - mint.outbound.email.draft
+      repo: spine
+      allowed_roots:
+        - ops/plugins/domains/mint/
+      rationale: Mint intake pipeline capabilities remain spine-local because they depend on spine-governed schema authority, runtime boundary contracts, and hot-storage routing defined in the mint domain plugin.
+    - id: mint-spine-operator-runtime
+      match:
+        capability_ids:
+          - mint.operator.storage.status
+          - mint.operator.drop.assist
+          - mint.operator.drop.sync
+      repo: spine
+      allowed_roots:
+        - ops/plugins/domains/mint/
+      rationale: Mint operator storage and assisted-move runtime remain spine-local because they depend on spine-owned contracts, runtime receipts, operator host automation, and governed direct-to-MinIO verification.
+    - id: media-spine-operational-caps
+      match:
+        capability_ids:
+          - media.api.resolve
+          - media.backup.create
+          - media.backup.restore
+          - media.config.restore.drill
+          - media.scene.rename
+      repo: spine
+      allowed_roots:
+        - ops/plugins/domains/media/
+      rationale: Media operational capabilities (key resolution, backup/restore) are spine-local because they depend on spine-owned SSH resolution, binding contracts, and runtime state.
+
+agents_registry_boundary:
+  enforce_active_workbench_agents_under_agents_dir: true
+
+docs_boundary:
+  spine_domain_stub_root: "docs/governance/domains"
+  spine_stub_marker: "spine_pointer_stub: true"
+  routed_doc_source_prefix: "docs/governance/"
+
+balanced_policy:
+  required_preset: balanced
+  required_multi_agent_writes_when_multi_session: proposal-only

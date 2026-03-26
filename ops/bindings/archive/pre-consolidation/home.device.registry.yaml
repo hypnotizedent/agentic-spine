@@ -1,0 +1,486 @@
+# Home Device Registry (SSOT)
+# Canonical source for all devices on the home network (10.0.0.0/24).
+# Status: authoritative
+# Last verified: 2026-03-22
+# Source: UniFi UDR7 client snapshot via network.home.unifi.clients.snapshot
+#
+# Categories:
+#   infrastructure — VMs, hypervisors, storage, workstations
+#   coordinator    — Zigbee/Z-Wave/Matter radio coordinators
+#   iot            — cameras, sensors, smart plugs, appliances
+#   personal       — phones, watches, laptops (DHCP, not managed)
+#   unknown        — visible on network, identity not yet confirmed
+#
+# IP policy: DHCP reservations on UDR7 for stability.
+#            Coordinators use hardcoded static IPs.
+#            Personal devices use DHCP pool (10.0.0.200-254).
+#
+# Static IP ranges:
+#   10.0.0.1-10       gateway + core infra
+#   10.0.0.50-59      IoT coordinators (Zigbee, Z-Wave, Matter)
+#   10.0.0.60-69      Tuya smart bulbs (IoT WiFi, pogodobby-iot SSID)
+#   10.0.0.70-89      WiFi IoT devices (purifiers, cameras, media, smart plugs)
+#   10.0.0.90-99      wired IoT (cameras, sensors, coordinators)
+#   10.0.0.100-199    VMs, NAS, workstations, misc infra
+#   10.0.0.200-254    DHCP pool (personal/guest)
+#
+# UDR reservation/DNS mutations are governed via network.home.* capabilities.
+# This file tracks intended state; UDR is the runtime authority for DHCP leases.
+
+network:
+  subnet: "10.0.0.0/24"
+  gateway: "10.0.0.1"
+  dhcp_range: "10.0.0.200-254"
+  dhcp_dns: "10.0.0.53"
+  wifi_ssid: "pogodobby"
+  iot_wifi_ssid: "pogodobby-iot"
+
+devices:
+
+  # ─── Infrastructure (wired) ────────────────────────────────────────
+
+  - id: udr-home
+    name: "UDR7 Gateway"
+    ip: "10.0.0.1"
+    mac: "8c:30:66:b6:24:bd"
+    category: infrastructure
+    is_wired: true
+    role: "Router, WiFi AP, DHCP server"
+    ha_integration: unifi
+    ha_entities:
+      - "sensor.udr7_cpu_utilization"
+      - "sensor.udr7_memory_utilization"
+      - "sensor.udr7_udr7_cpu_temperature"
+      - "sensor.udr7_clients"
+      - "sensor.udr7_state"
+      - "sensor.udr7_uptime"
+      - "sensor.udr7_google_wan_latency"
+      - "sensor.udr7_cloudflare_wan_latency"
+      - "device_tracker.udr7"
+      - "update.udr7"
+    description: "Ubiquiti UDR7 (UDMA67A). UniFi Network v10.1.84. FW 4.4.11. HA UniFi integration."
+
+  - id: us-8-60w
+    name: "US 8 60W"
+    ip: null  # managed via UniFi, may not have fixed IP
+    mac: "b4:fb:e4:85:8c:38"
+    category: infrastructure
+    is_wired: true
+    role: "8-port PoE switch"
+    ha_integration: unifi
+    ha_entities:
+      - "sensor.us_8_60w_clients"
+      - "sensor.us_8_60w_state"
+      - "sensor.us_8_60w_uptime"
+      - "device_tracker.us_8_60w"
+      - "update.us_8_60w"
+    description: "Ubiquiti US-8-60W (US8P60). 8-port PoE switch. FW 7.1.26. Currently state=pending."
+
+  - id: proxmox-home
+    name: "Beelink Mini (proxmox-home)"
+    ip: "10.0.0.179"
+    mac: "70:70:fc:04:2c:7c"
+    tailscale_ip: "100.103.99.62"
+    category: infrastructure
+    is_wired: true
+    role: "Hypervisor"
+    description: "Proxmox VE host. Runs HA (VM 100), LXCs. VM 102 (vaultwarden) decommissioned 2026-02-16."
+
+  - id: media-home
+    name: "media-home"
+    ip: "10.0.0.106"
+    mac: "bc:24:11:dc:5e:c1"
+    tailscale_ip: "100.113.72.41"
+    category: infrastructure
+    is_wired: true
+    vm_id: 106
+    role: "Active home media/watch VM"
+    description: "Canonical home media plane on proxmox-home. ARR, download, and read/watch services run here; shop media VMs are residual compatibility only."
+
+  - id: homeassistant
+    name: "Home Assistant"
+    ip: "10.0.0.100"
+    mac: "bc:24:11:0c:b0:d3"
+    tailscale_ip: "10.0.0.100"
+    category: infrastructure
+    is_wired: true
+    vm_id: 100
+    role: "Home automation hub"
+    description: "HAOS on proxmox-home. Zigbee, Z-Wave, Matter integrations."
+
+  - id: vaultwarden
+    name: "Vaultwarden"
+    ip: "10.0.0.102"
+    mac: "bc:24:11:bb:cd:e1"
+    tailscale_ip: "100.93.142.63"
+    category: infrastructure
+    is_wired: true
+    vm_id: 102
+    status: decommissioned
+    role: "Password manager"
+    description: "DECOMMISSIONED 2026-02-16. Superseded by infra-core (VM 204)."
+
+  - id: nas
+    name: "Synology NAS 918+"
+    ip: "10.0.0.150"
+    mac: "00:11:32:b4:ad:cd"
+    tailscale_ip: "100.102.199.111"
+    category: infrastructure
+    is_wired: true
+    role: "Storage, backups"
+    description: "Synology DS918+. NFS exports, vzdump targets."
+
+  - id: ronnys-mbp
+    name: "Ronnys-MBP"
+    ip: "10.0.0.229"
+    mac: "b4:e9:b8:67:9a:9f"
+    tailscale_ip: "100.85.186.7"
+    category: infrastructure
+    is_wired: true
+    role: "Primary workstation"
+    description: "MacBook Pro. Wired via Ethernet. Also on Tailscale."
+
+  # ─── IoT Coordinators (wired, static IPs) ──────────────────────────
+
+  - id: slzb-06
+    name: "SM06 (SLZB-06)"
+    ip: "10.0.0.51"
+    mac: "20:43:a8:51:15:e3"
+    category: coordinator
+    is_wired: true
+    protocol: zigbee
+    role: "Primary Zigbee coordinator"
+    description: "SMLIGHT SLZB-06. CC2652P radio. Ethernet mode, USB OFF."
+
+  - id: slzb-06mu
+    name: "SM06MU (SLZB-06MU)"
+    ip: "10.0.0.52"
+    mac: "82:b5:4e:97:b0:28"
+    category: coordinator
+    is_wired: true
+    protocol: matter
+    role: "Matter/Thread coordinator (reserved)"
+    description: "SMLIGHT SLZB-06MU. MultiPAN/RCP firmware. Not active for Zigbee."
+
+  - id: tubeszb
+    name: "tubeszb-2026-zw"
+    ip: "10.0.0.90"
+    mac: "34:5f:45:37:07:a3"
+    category: coordinator
+    is_wired: true
+    protocol: z-wave
+    role: "Z-Wave coordinator"
+    description: "TubesZB with Zooz ZAC93 (800 Series Long Range). Connected via PoE to UniFi switch. ESPHome online."
+
+  # ─── IoT Devices (wifi) ────────────────────────────────────────────
+
+  - id: ring-doorbell
+    name: "RingDoorbell-3e"
+    ip: "10.0.0.162"
+    mac: "9c:76:13:72:55:3e"
+    category: iot
+    is_wired: false
+    role: "Video doorbell"
+    description: "Ring integration in HA."
+
+  - id: roborock-vacuum
+    name: "roborock-vacuum-a246"
+    ip: "10.0.0.96"
+    mac: "24:9e:7d:0e:b4:c4"
+    category: iot
+    is_wired: false
+    role: "Robot vacuum"
+    description: "Roborock integration in HA."
+
+  - id: tplink-c545-1
+    name: "C545"
+    ip: "10.0.0.66"
+    mac: "84:72:07:7c:85:30"
+    category: iot
+    is_wired: false
+    role: "WiFi camera"
+    description: "TP-Link Tapo C545."
+
+  - id: tplink-c545-2
+    name: "C545"
+    ip: "10.0.0.115"
+    mac: "84:72:07:7e:86:75"
+    category: iot
+    is_wired: false
+    role: "WiFi camera"
+    description: "TP-Link Tapo C545 (second unit)."
+
+  - id: tplink-c610-1
+    name: "C610_US"
+    ip: "10.0.0.125"
+    mac: "84:72:07:80:76:3b"
+    category: iot
+    is_wired: false
+    role: "WiFi camera"
+    description: "TP-Link Tapo C610."
+
+  - id: tplink-c610-2
+    name: "C610_US"
+    ip: "10.0.0.131"
+    mac: "84:72:07:80:6b:34"
+    category: iot
+    is_wired: false
+    role: "WiFi camera"
+    description: "TP-Link Tapo C610 (second unit)."
+
+  - id: tplink-ep25
+    name: "EP25"
+    ip: "10.0.0.208"
+    mac: "34:60:f9:23:ae:99"
+    category: iot
+    is_wired: false
+    role: "Smart plug"
+    description: "TP-Link EP25 energy monitoring plug."
+
+  - id: winix-purifier-1
+    name: "LC02032824WF"
+    ip: "10.0.0.55"
+    mac: "04:a1:6f:10:ab:7b"
+    category: iot
+    is_wired: false
+    role: "Air purifier"
+    description: "Winix air purifier. TP-Link IoT chipset. Winix integration in HA."
+
+  - id: winix-purifier-2
+    name: "LC02032824WF"
+    ip: "10.0.0.231"
+    mac: "04:a1:6f:10:ac:bb"
+    category: iot
+    is_wired: false
+    role: "Air purifier"
+    description: "Winix air purifier (second unit). TP-Link IoT chipset."
+
+  - id: apple-tv-office
+    name: "apple-tv-office"
+    ip: "10.0.0.104"
+    mac: "94:ea:32:74:86:d1"
+    category: iot
+    is_wired: false
+    role: "Media streaming + Thread border router"
+    description: "OUI 94:ea:32 = Apple. Apple TV in office. Thread border router for IKEA Matter devices (BILRESA, MYGGSPRAY). Network: MyHome1997395114."
+
+  - id: lwip0-device
+    name: "lwip0"
+    ip: "10.0.0.148"
+    mac: "c0:f8:53:a6:af:61"
+    category: iot
+    is_wired: false
+    role: "IoT device"
+    description: "Lightweight IP stack device. Identity TBD."
+
+  - id: office-button
+    name: "office-button"
+    ip: null  # Matter/Thread device — no LAN IP (routes via Apple TV border router)
+    mac: null
+    category: iot
+    is_wired: false
+    protocol: matter
+    role: "Smart button"
+    ha_entities:
+      - "event.bilresa_dual_button_button_1"
+      - "event.bilresa_dual_button_button_2"
+      - "sensor.bilresa_dual_button_battery"
+      - "sensor.bilresa_dual_button_battery_type"
+      - "sensor.bilresa_dual_button_battery_voltage"
+      - "update.bilresa_dual_button_firmware"
+    controls: "office-desk-bulb"
+    description: "IKEA BILRESA dual button. Matter device via Apple Home. HA entity IDs retain integration default prefix. Friendly name set to 'Office Button' in HA UI."
+
+  - id: office-motion-sensor
+    name: "office-motion-sensor"
+    ip: null  # Matter/Thread device — no LAN IP (routes via Apple TV border router)
+    mac: null
+    category: iot
+    is_wired: false
+    protocol: matter
+    role: "Motion sensor"
+    ha_entities:
+      - "binary_sensor.myggspray_wrlss_mtn_sensor_occupancy"
+      - "sensor.myggspray_wrlss_mtn_sensor_illuminance"
+      - "sensor.myggspray_wrlss_mtn_sensor_battery"
+      - "sensor.myggspray_wrlss_mtn_sensor_battery_type"
+      - "sensor.myggspray_wrlss_mtn_sensor_battery_voltage"
+      - "update.myggspray_wrlss_mtn_sensor_firmware"
+    controls: "office-desk-bulb"
+    description: "IKEA MYGGSPRAY wireless motion sensor. Matter device via Apple Home. Nightlight automation: motion 10pm-6am turns on desk bulb at 1%."
+
+  - id: office-desk-bulb
+    name: "office-desk-bulb"
+    ip: "10.0.0.60"
+    mac: "cc:8c:bf:1a:41:b1"
+    category: iot
+    is_wired: false
+    wifi_ssid: "pogodobby-iot"
+    role: "Smart bulb"
+    ha_entities: ["light.office_desk_bulb"]
+    tuya_name: "Office Desk Bulb"
+    description: "Tuya smart bulb (Smart Life). Office desk lamp. On 2.4GHz IoT SSID."
+
+  - id: guest-room-bulb
+    name: "guest-room-bulb"
+    ip: "10.0.0.61"
+    mac: "cc:8c:bf:1a:5a:a5"
+    category: iot
+    is_wired: false
+    wifi_ssid: "pogodobby-iot"
+    role: "Smart bulb"
+    ha_entities: ["light.guest_room_bulb"]
+    tuya_name: "Guest Room Bulb"
+    description: "Tuya smart bulb (Smart Life). Guest room lamp. On 2.4GHz IoT SSID."
+
+  - id: bedroom-king-bulb
+    name: "bedroom-king-bulb"
+    ip: "10.0.0.63"
+    mac: "cc:8c:bf:1a:2a:f0"
+    category: iot
+    is_wired: false
+    wifi_ssid: "pogodobby-iot"
+    role: "Smart bulb"
+    ha_entities: ["light.bedroom_king_bulb"]
+    tuya_name: "Bedroom King Bulb"
+    description: "Tuya smart bulb (Smart Life). Master bedroom King side. On 2.4GHz IoT SSID."
+
+  - id: bedroom-empress-bulb
+    name: "bedroom-empress-bulb"
+    ip: "10.0.0.64"
+    mac: "cc:8c:bf:1a:3b:89"
+    category: iot
+    is_wired: false
+    wifi_ssid: "pogodobby-iot"
+    role: "Smart bulb"
+    ha_entities: ["light.bedroom_empress_bulb"]
+    tuya_name: "Bedroom Empress Bulb"
+    description: "Tuya smart bulb (Smart Life). Master bedroom Empress side. On 2.4GHz IoT SSID."
+
+  # ─── Pet Care Devices (cloud-connected) ────────────────────────────
+
+  - id: pogo-litter-box
+    name: "pogo-litter-box"
+    ip: null  # Whisker cloud device — no local IP
+    mac: null
+    category: iot
+    is_wired: false
+    protocol: cloud
+    role: "Smart litter box"
+    room: master-bedroom
+    ha_entities:
+      - "sensor.pogo_weight"
+      - "sensor.pogo_visits_today"
+    description: "Litter-Robot (Whisker). Pogo's box in master bedroom. Cloud API via litterrobot integration."
+
+  - id: dobby-litter-box
+    name: "dobby-litter-box"
+    ip: null  # Whisker cloud device — no local IP
+    mac: null
+    category: iot
+    is_wired: false
+    protocol: cloud
+    role: "Smart litter box"
+    room: guest-room
+    ha_entities:
+      - "sensor.dobby_weight"
+      - "sensor.dobby_visits_today"
+    description: "Litter-Robot (Whisker). Dobby's box in guest room. Cloud API via litterrobot integration."
+
+  - id: dobby-feeder
+    name: "dobby-feeder"
+    ip: null  # Tuya cloud device — no local IP reservation
+    mac: null
+    category: iot
+    is_wired: false
+    protocol: cloud
+    role: "Smart pet feeder"
+    room: guest-room
+    ha_entities:
+      - "light.rojeco_2l_pet_feeder_light"
+      - "sensor.rojeco_2l_pet_feeder_battery"
+      - "sensor.rojeco_2l_pet_feeder_last_amount"
+      - "number.rojeco_2l_pet_feeder_feed"
+      - "switch.rojeco_2l_pet_feeder_slow_feed"
+      - "binary_sensor.rojeco_2l_pet_feeder_charging"
+      - "binary_sensor.rojeco_2l_pet_feeder_feeding"
+    description: "ROJECO 2L pet feeder (Tuya). Dobby's feeder in guest room. Entity IDs are product-model-based (integration-assigned, not convention-derived)."
+
+  # ─── Personal Devices (wifi, DHCP, not spine-managed) ──────────────
+
+  - id: iphone-1
+    name: "iPhone"
+    ip: "10.0.0.15"
+    mac: "5a:95:0a:07:be:6f"
+    category: personal
+    is_wired: false
+    description: "Private WiFi address (randomized MAC)."
+
+  - id: iphone-2
+    name: "iPhone"
+    ip: "10.0.0.223"
+    mac: "42:d6:60:df:f3:d0"
+    category: personal
+    is_wired: false
+    description: "Private WiFi address (randomized MAC)."
+
+  - id: iphone-3
+    name: "iPhone"
+    ip: "10.0.0.146"
+    mac: "02:8f:6e:20:78:6d"
+    category: personal
+    is_wired: false
+    description: "Private WiFi address (randomized MAC)."
+
+  - id: apple-watch
+    name: "Watch"
+    ip: "10.0.0.20"
+    mac: "be:22:c7:c9:5a:e4"
+    category: personal
+    is_wired: false
+    description: "Apple Watch."
+
+  - id: mac-wifi
+    name: "Mac"
+    ip: "10.0.0.194"
+    mac: "c2:88:ad:aa:84:2a"
+    category: personal
+    is_wired: false
+    description: "Mac device on WiFi. Private WiFi address."
+
+  # ─── Transient / Identified (previously unknown) ──────────────────
+
+  - id: apple-tv-living
+    name: "Apple TV"
+    ip: "10.0.0.77"
+    mac: "7c:63:05:88:9d:c8"
+    category: iot
+    is_wired: false
+    role: "Media streaming"
+    description: "OUI 7c:63:05 = Apple. Apple TV in living room (matches apple_tv integration)."
+
+  - id: nvidia-shield
+    name: "Nvidia Shield TV"
+    ip: "10.0.0.7"
+    mac: "00:04:4b:cf:c0:4c"
+    category: iot
+    is_wired: false
+    role: "Media streaming"
+    description: "OUI 00:04:4b = Nvidia. Shield TV (Android TV)."
+
+  - id: foxconn-device
+    name: "Network device"
+    ip: "10.0.0.69"
+    mac: "50:c2:e8:15:11:63"
+    category: transient
+    is_wired: false
+    description: "OUI 50:c2:e8 = Cloud Network Technology (Foxconn). Transient or guest device."
+
+  - id: amazon-echo
+    name: "Amazon Echo"
+    ip: "10.0.0.32"
+    mac: "98:cc:f3:e7:80:28"
+    category: iot
+    is_wired: false
+    role: "Smart speaker"
+    description: "OUI 98:cc:f3 = Amazon Technologies. Echo/Alexa device."

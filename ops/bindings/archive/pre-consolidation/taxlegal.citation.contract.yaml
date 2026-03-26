@@ -1,0 +1,150 @@
+# Tax-Legal Citation Strictness Contract
+# Status: planned (Wave 1 design-only)
+# Gap: GAP-OP-1428
+# Loop: LOOP-TAXLEGAL-W1-BINDINGS-CONTRACT-PACK-20260303
+# Plan: PLAN-TAX-LEGAL-OPS-WORKER-20260303
+
+contract_id: TAXLEGAL_CITATION_V1
+version: "1.0"
+lifecycle: experimental
+created: "2026-03-03"
+owner: "@ronny"
+scope: taxlegal-citation-strictness
+
+description: >
+  Citation strictness policy for tax-legal research outputs. Every substantive
+  claim must be backed by an anchor-linked citation to a registered primary
+  source. Claims without sufficient citation confidence must be marked as
+  unknown. This contract enforces the non-advisory boundary by ensuring
+  all outputs are traceable to government authority.
+
+authority_references:
+  agent_contract: ops/agents/tax-legal-agent.contract.md
+  boundary_contract: docs/governance/TAX_LEGAL_AGENT_BOUNDARY.md
+  source_registry: ops/bindings/taxlegal.sources.registry.yaml
+
+# ────────────────────────────────────────────────────────────────────────────
+# CITATION REQUIREMENTS
+# ────────────────────────────────────────────────────────────────────────────
+citation_requirements:
+  every_claim_must_cite: true
+  minimum_citations_per_claim: 1
+  citation_anchor_required: true
+  anchor_types:
+    - section
+    - page
+    - paragraph
+    - url_fragment
+    - form_line
+
+# ────────────────────────────────────────────────────────────────────────────
+# CITATION FORMAT
+# ────────────────────────────────────────────────────────────────────────────
+citation_format:
+  required_fields:
+    - source_id
+    - citation_anchor
+    - retrieved_at
+    - content_sha256
+  optional_fields:
+    - effective_date
+    - version_label
+    - url
+  example:
+    source_id: "IRS-PUB-334-2025"
+    citation_anchor: "Chapter 2, Section 3, Paragraph 1"
+    retrieved_at: "2026-03-01T10:00:00Z"
+    content_sha256: "a1b2c3d4..."
+    effective_date: "2025-01-01"
+    version_label: "Rev. January 2025"
+
+# ────────────────────────────────────────────────────────────────────────────
+# UNKNOWN-STATE ENFORCEMENT
+# ────────────────────────────────────────────────────────────────────────────
+unknown_state:
+  description: >
+    When a claim cannot be backed by sufficient citation evidence,
+    the research output must explicitly mark it as unknown rather
+    than omitting or guessing.
+  required_label: "unknown"
+  required_fields:
+    - claim_text
+    - reason_for_unknown
+    - suggested_sources
+    - escalation_action
+  escalation:
+    - "Claims marked unknown on critical filing requirements trigger human_review_required"
+    - "Accumulation of 3+ unknown claims in a single case triggers yellow risk classification"
+
+# ────────────────────────────────────────────────────────────────────────────
+# CONFLICT HANDLING
+# ────────────────────────────────────────────────────────────────────────────
+conflict_handling:
+  description: >
+    When two or more primary sources provide contradictory guidance
+    on the same claim, the system must not resolve the conflict
+    autonomously. Instead, it must produce a conflict matrix and
+    escalate to human review.
+  required_output: conflict_matrix
+  conflict_matrix_fields:
+    - claim_text
+    - source_a_id
+    - source_a_position
+    - source_a_citation
+    - source_b_id
+    - source_b_position
+    - source_b_citation
+    - conflict_type
+    - recommended_action
+  conflict_types:
+    - direct_contradiction
+    - scope_ambiguity
+    - temporal_overlap
+    - jurisdiction_boundary
+  escalation: "All conflicts trigger human_review_required with explicit open questions"
+
+# ────────────────────────────────────────────────────────────────────────────
+# EXTERNAL AI TRANSCRIPT CITATION POLICY
+# ────────────────────────────────────────────────────────────────────────────
+ai_transcript_policy:
+  citeable: false
+  trust_level: hypothesis
+  claim_states:
+    - unverified
+    - verified
+    - conflicted
+    - rejected
+  verification_path: >
+    All AI transcript claims must be verified against registered primary
+    sources before promotion to case guidance. Unverified claims must
+    carry explicit unverified labels in all outputs.
+
+# ────────────────────────────────────────────────────────────────────────────
+# CITATION QUALITY RULES
+# ────────────────────────────────────────────────────────────────────────────
+quality_rules:
+  - rule: no_stale_citations
+    description: "Citations must reference sources verified within the source class verification_frequency_days"
+    enforcement: planned_gate
+
+  - rule: no_broken_anchors
+    description: "Citation anchors must resolve to content in the referenced source version"
+    enforcement: planned_gate
+
+  - rule: no_self_referencing
+    description: "Case artifacts must not cite other case artifacts as primary authority"
+    enforcement: planned_gate
+
+  - rule: superseded_source_warning
+    description: "Citations to superseded sources must carry a staleness warning"
+    enforcement: planned_gate
+
+# ────────────────────────────────────────────────────────────────────────────
+# PLANNED GATES
+# ────────────────────────────────────────────────────────────────────────────
+planned_gates:
+  - id: D335
+    name: taxlegal-citation-strictness-lock
+    purpose: "Ensure response templates require citation anchors or explicit unknown"
+    mode: report
+    promote_after_clean_runs: 3

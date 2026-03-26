@@ -1,0 +1,298 @@
+# Relocation Closure Contract — Compound closure for service moves
+# Status: authoritative
+# authority_state: authoritative
+# authority_concern: topology_closure_surfaces
+# Last verified: 2026-03-21
+#
+# Purpose: When a service moves from VM-A to VM-B (or site-A to site-B),
+# this contract defines EVERY surface that must change together. A move
+# is not complete until every closure step is satisfied. No more
+# "Ronny remembers to also update the agent registry."
+#
+# Consumer: closure.compiler.status capability, relocation planning loops
+
+version: 1
+updated_at: "2026-03-21"
+owner: "@ronny"
+status: authoritative
+
+# ═══════════════════════════════════════════════════════════════
+# Move Types
+# ═══════════════════════════════════════════════════════════════
+
+move_types:
+  intra_site:
+    description: "Service moves between VMs on the same site (same LAN)"
+    example: "radarr from download-stack (VM 209) to a new VM on shop"
+    closure_scope:
+      - vm_lifecycle
+      - ssh_targets
+      - service_registry
+      - service_health
+      - agent_endpoints
+      - secret_verification
+      - backup_targets
+      - compose_targets
+      - stale_source_demotion
+
+  cross_site:
+    description: "Service moves between sites (different LANs, requires Tailscale)"
+    example: "media services from shop to home (download-stack → media-home)"
+    closure_scope:
+      - vm_lifecycle
+      - ssh_targets
+      - service_registry
+      - service_health
+      - agent_endpoints
+      - secret_verification
+      - backup_targets
+      - backup_locality
+      - compose_targets
+      - domain_routing
+      - data_lifecycle_roots
+      - stale_source_demotion
+      - access_policy_update
+
+  vm_split:
+    description: "Service group splits from one VM into multiple"
+    example: "media-stack (VM 201) split into download-stack (209) + streaming-stack (210)"
+    closure_scope:
+      - vm_lifecycle
+      - ssh_targets
+      - service_registry
+      - service_health
+      - agent_endpoints
+      - secret_verification
+      - backup_targets
+      - compose_targets
+      - dependency_edges
+      - stale_source_demotion
+
+  vm_consolidation:
+    description: "Multiple VMs merge into one"
+    example: "hypothetical: merge finance + communications into one VM"
+    closure_scope:
+      - vm_lifecycle
+      - ssh_targets
+      - service_registry
+      - service_health
+      - agent_endpoints
+      - secret_verification
+      - backup_targets
+      - compose_targets
+      - port_collision_check
+      - stale_source_demotion
+
+# ═══════════════════════════════════════════════════════════════
+# Closure Steps
+# ═══════════════════════════════════════════════════════════════
+#
+# Ordered sequence. Each step has a file to patch, a description
+# of what changes, and whether it's blocking (move cannot complete
+# without it) or advisory (can be deferred with gap filed).
+
+closure_steps:
+  vm_lifecycle:
+    order: 1
+    blocking: true
+    authority: ops/bindings/vm.lifecycle.yaml
+    action: |
+      1. Add new VM entry (if new host) with status: active
+      2. Update services list on new VM
+      3. Remove service from old VM services list
+      4. If old VM has no remaining services, begin decommission lifecycle
+    rollback: "Reverse service list changes; restore old VM services"
+
+  ssh_targets:
+    order: 2
+    blocking: true
+    authority: ops/bindings/ssh.targets.yaml
+    action: |
+      1. Add ssh target for new VM (if new host)
+      2. Set access_policy based on site (lan_first for same-site, tailscale_required for cross-site)
+      3. Old target remains until source VM is decommissioned
+    rollback: "Remove new target entry"
+
+  service_registry:
+    order: 3
+    blocking: true
+    authority: docs/governance/SERVICE_REGISTRY.yaml
+    action: |
+      1. Update service host field to new VM hostname
+      2. Update compose path if different on new VM
+      3. Verify port does not collide with existing services on new VM
+    rollback: "Revert host and compose fields"
+
+  service_health:
+    order: 4
+    blocking: true
+    authority: ops/bindings/services.health.yaml
+    action: |
+      Run service.registry.projection.build to regenerate from SERVICE_REGISTRY.yaml.
+      The projection generator resolves IPs from ssh.targets.yaml.
+    generator: service.registry.projection.build
+    rollback: "Re-run projection from reverted SERVICE_REGISTRY.yaml"
+
+  agent_endpoints:
+    order: 5
+    blocking: true
+    authority: ops/bindings/agents.registry.yaml
+    action: |
+      1. Update endpoint URLs for affected agent health checks
+      2. Future: resolve via endpoint-resolve.sh instead of hardcoded IPs
+    rollback: "Revert endpoint URLs"
+
+  secret_verification:
+    order: 6
+    blocking: false
+    authority: ops/bindings/secrets.bundle.contract.yaml
+    action: |
+      1. Update verify URLs in affected bundles
+      2. Update local_env host references
+      3. Future: resolve via endpoint-resolve.sh
+    rollback: "Revert verify URLs"
+
+  backup_targets:
+    order: 7
+    blocking: true
+    authority: ops/bindings/backup.inventory.yaml
+    action: |
+      1. Add backup target for new VM
+      2. Disable or demote old VM backup target if services are gone
+      3. Verify backup schedule covers new target
+    rollback: "Remove new backup target; re-enable old"
+
+  backup_locality:
+    order: 8
+    blocking: false
+    authority: ops/bindings/backup.locality.contract.yaml
+    action: |
+      Cross-site moves require locality reclassification:
+      1. Verify cold backup destination is reachable from new site
+      2. Update locality class if backup now crosses sites
+      3. Confirm restore drill coverage at new site
+    rollback: "Revert locality assignments"
+
+  compose_targets:
+    order: 9
+    blocking: false
+    authority: ops/bindings/docker.compose.targets.yaml
+    action: |
+      1. Add new VM as compose target
+      2. Remove old VM if no compose stacks remain
+    rollback: "Revert compose targets list"
+
+  domain_routing:
+    order: 10
+    blocking: false
+    authority: ops/bindings/domain.routing.registry.yaml
+    action: |
+      1. Update target_hint if service has public DNS
+      2. Verify CF tunnel route points to new host
+    rollback: "Revert target_hint"
+
+  data_lifecycle_roots:
+    order: 11
+    blocking: false
+    authority: ops/bindings/service.data.lifecycle.registry.yaml
+    action: |
+      1. Update canonical_live_roots host to new VM
+      2. Move old root to allowed_secondary_roots or retired_roots
+      3. Set drain/expiry on old staging/quarantine roots
+    rollback: "Revert root host assignments"
+
+  dependency_edges:
+    order: 12
+    blocking: false
+    authority: ops/bindings/topology.closure.graph.yaml
+    action: |
+      1. Update cross_vm flag if dependency now crosses (or no longer crosses) VMs
+      2. Verify dependent services can reach the moved service at new address
+    rollback: "Revert edge metadata"
+
+  access_policy_update:
+    order: 13
+    blocking: true
+    authority: ops/bindings/ssh.targets.yaml
+    action: |
+      Cross-site only: Change access_policy from lan_first to tailscale_required
+      (or vice versa) on the moved service's ssh target.
+    rollback: "Revert access_policy"
+
+  port_collision_check:
+    order: 14
+    blocking: true
+    authority: docs/governance/SERVICE_REGISTRY.yaml
+    action: |
+      Consolidation only: Verify no two services on the target VM use the same port.
+    rollback: "N/A — check only"
+
+  stale_source_demotion:
+    order: 15
+    blocking: true
+    authority: ops/bindings/vm.lifecycle.yaml
+    action: |
+      1. Mark source VM residual services with status: deprecated or transitional_residue
+      2. If source VM is now empty, set status: decommissioned
+      3. File tombstone if source VM is destroyed
+      4. Update topology.closure.graph.yaml to remove stale endpoints
+    rollback: "Restore service status on source VM"
+
+# ═══════════════════════════════════════════════════════════════
+# Historical Relocations (proof the model works)
+# ═══════════════════════════════════════════════════════════════
+
+historical_relocations:
+  - id: RELOC-001
+    description: "Media stack split: VM 201 → VM 209 (download) + VM 210 (streaming)"
+    type: vm_split
+    when: "2026-02-08"
+    source_vm: media-stack
+    target_vms: [download-stack, streaming-stack]
+    status: done
+    note: "Source VM 201 destroyed 2026-02-12. All closure steps verified retroactively."
+
+  - id: RELOC-002
+    description: "Vaultwarden: home VM 102 → shop infra-core VM 204"
+    type: cross_site
+    when: "2026-02-16"
+    source_vm: vaultwarden
+    target_vms: [infra-core]
+    status: done
+    note: "Source VM 102 decommissioned. Final backup retained."
+
+  - id: RELOC-003
+    description: "Mail-archiver: finance-stack VM 211 → communications-stack VM 214"
+    type: intra_site
+    when: "2026-02-25"
+    source_vm: finance-stack
+    target_vms: [communications-stack]
+    status: done
+    note: "Source instance on VM 211 marked migration_source. LOOP-MAIL-ARCHIVER-COMMS-MIGRATION-20260225."
+
+  - id: RELOC-004
+    description: "Media writer-plane: shop (download/streaming) → home (media-home VM 106)"
+    type: cross_site
+    when: "2026-03-17"
+    source_vm: download-stack
+    target_vms: [media-home]
+    status: active
+    note: "Writer-plane promoted to media-home. download-stack/streaming-stack remain as transitional_shop_residue."
+    open_closure_gaps:
+      - "agent endpoint URLs still reference shop Tailscale IPs"
+      - "secrets.bundle.contract.yaml verify URLs still point to shop"
+      - "domain.routing target_hints contain hardcoded 100.113.72.41"
+
+# ═══════════════════════════════════════════════════════════════
+# Closure Compiler Interface
+# ═══════════════════════════════════════════════════════════════
+
+closure_compiler:
+  capability: closure.compiler.status
+  description: |
+    Future capability that audits whether all closure steps are satisfied
+    for active or recent relocations. Reports:
+    - steps_satisfied / steps_total
+    - blocking_gaps (steps that are blocking and unsatisfied)
+    - advisory_gaps (steps that are advisory and unsatisfied)
+  gate: null  # to be assigned when capability is implemented

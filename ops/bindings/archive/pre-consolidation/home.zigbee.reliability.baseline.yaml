@@ -1,0 +1,144 @@
+inventory: HOME_ZIGBEE_RELIABILITY_BASELINE_V1
+version: "1.0"
+status: authoritative
+generated_at: "2026-03-04T18:29:19Z"
+updated: "2026-03-04"
+mesh_probe_at: "2026-03-04T23:25:00Z"
+authority: HOME_ASSISTANT_RELIABILITY_CONTRACT_V1
+note: "Live Zigbee reliability baseline from Z2M runtime snapshots."
+
+evidence:
+  run_keys:
+    - CAP-20260304-132919__ha.z2m.health__Rjxwb26656
+    - CAP-20260304-132919__ha.z2m.devices.snapshot__Rh2yo26661
+  source_bindings:
+    - ops/bindings/z2m.devices.yaml
+    - docs/governance/HOME_ASSISTANT_RELIABILITY_CONTRACT.yaml
+
+coordinator:
+  id: slzb-06
+  model: "SLZB-06MU"
+  ieee: "0x00124b002f8f7a4e"
+  ip: "10.0.0.52"
+  connection: ethernet
+  bridge_connected: true
+  z2m_version: "2.9.1"
+  firmware: "20241105"
+  core_firmware: "v3.2.4"
+  channel: 11
+  pan_id: 6754
+  transmit_power_dbm: 20
+
+thresholds:
+  battery_warn_percent: 20
+  battery_critical_percent: 10
+  link_quality_minimum: 50
+  staleness_warn_hours: 48
+  staleness_critical_hours: 96
+
+devices:
+  - friendly_name: bedroom_empress_button
+    model: SNZB-01P
+    last_seen: "2026-03-04T17:43:18Z"
+    battery_percent: 100
+    link_quality: 102
+    health: ok
+  - friendly_name: bedroom_king_button
+    model: lumi.remote.b1acn01
+    last_seen: "2026-03-04T18:14:03Z"
+    battery_percent: 100
+    link_quality: 102
+    health: ok
+  - friendly_name: office_button
+    model: TS0041
+    last_seen: "2026-03-04T16:47:51Z"
+    battery_percent: 48
+    link_quality: 149
+    health: warn_battery
+  - friendly_name: laundry_washer_vibration
+    model: lumi.vibration.aq1
+    last_seen: "2026-02-21T17:55:53Z"
+    battery_percent: null
+    link_quality: 178
+    health: stale_exempt_event_only
+  - friendly_name: front_door_sensor
+    model: lumi.sensor_magnet.aq2
+    last_seen: "2026-03-04T17:45:58Z"
+    battery_percent: null
+    link_quality: 185
+    health: ok
+
+mesh_topology:
+  type: star
+  router_count: 0
+  end_device_count: 5
+  active_links: 4
+  assessment: "Pure star topology — all devices connect directly to coordinator. No mains-powered routers. Range and resilience limited."
+  links:
+    - source: bedroom_empress_button
+      target: coordinator
+      live_lqi: 92
+      quality: fair
+    - source: bedroom_king_button
+      target: coordinator
+      live_lqi: 83
+      quality: fair
+    - source: front_door_sensor
+      target: coordinator
+      live_lqi: 33
+      quality: weak
+    - source: office_button
+      target: coordinator
+      live_lqi: 24
+      quality: weak
+  ghost_devices:
+    - friendly_name: living_switch_scene
+      ieee: "0xa4c138615058086b"
+      detail: "In Z2M config but absent from network map, health stats, and HA entities. Effectively offline/unpaired."
+      recommended_action: "Remove from Z2M and re-pair, or delete if device is decommissioned."
+
+mesh_signal_summary:
+  device_count: 5
+  active_in_mesh: 4
+  min_link_quality: 24
+  max_link_quality: 92
+  average_link_quality: 58
+  low_signal_devices:
+    - office_button
+    - front_door_sensor
+
+degraded_conditions:
+  - id: office_button_low_battery
+    condition: battery_percent < 50
+    recommended_action: "Replace battery before dropping below 20%."
+  - id: office_button_weak_signal
+    condition: "live_lqi=24 (threshold 50)"
+    recommended_action: "Add a mains-powered Zigbee router between office and coordinator, or move coordinator closer."
+  - id: front_door_weak_signal
+    condition: "live_lqi=33 (threshold 50)"
+    recommended_action: "Add a mains-powered Zigbee router near front door."
+  - id: living_switch_scene_ghost
+    condition: "Device in Z2M config but not in network map or HA"
+    recommended_action: "Remove from Z2M via force_remove, or re-pair if device is still in use."
+  - id: no_routers_in_mesh
+    condition: "router_count=0, all links are direct to coordinator"
+    recommended_action: "Add 1-2 mains-powered Zigbee routers (e.g. IKEA Tradfri plug) to create mesh redundancy and improve weak-signal devices."
+
+recovery_sop:
+  dead_router_detection:
+    condition: "Coordinator bridge disconnected OR 2+ non-exempt devices stale > 48h"
+    first_response:
+      - "Verify SLZB-06 reachable on 10.0.0.51"
+      - "Verify Z2M bridge status connected"
+      - "Power cycle affected PoE port if coordinator is unresponsive"
+  dead_router_recovery:
+    - "Run ha.z2m.health and ha.z2m.devices.snapshot"
+    - "Re-interview unresponsive end devices"
+    - "Update z2m.naming.yaml if renamed/repaired"
+    - "Re-run verify.run -- domain loop_gap (D118/D119)"
+
+capture_policy:
+  capture_commands:
+    - "./bin/ops cap run ha.z2m.health"
+    - "./bin/ops cap run ha.z2m.devices.snapshot"
+  cadence: "daily or after coordinator/device changes"

@@ -1,0 +1,115 @@
+---
+schema_version: "1.0"
+status: authoritative
+owner: "@ronny"
+updated_at: "2026-03-24"
+scope: controller-boundary
+decision_loop_id: LOOP-SPINE-PRODUCTIZATION-20260324
+
+description: >
+  Machine-evaluable boundary for the Controller role.
+  The Controller is the execution authority — the terminal that performs
+  governed mutations, runs capabilities, evaluates gates, and produces
+  receipted evidence. It operates on structured requests, never raw intent.
+
+contract: controller.boundary
+version: "1.0"
+
+# ── Role Definition ─────────────────────────────────────────────────
+role: controller
+identity: terminal
+position_in_pathway: execution
+
+allowed_actions:
+  - id: capability_execution
+    description: "Run governed capabilities via ./bin/ops cap run."
+  - id: repo_mutation
+    description: "Governed git operations — commit, push, branch, merge."
+  - id: loop_advancement
+    description: "Advance loop state: active → closed, update phase markers."
+  - id: gate_evaluation
+    description: "Run verification gates and produce pass/fail evidence."
+  - id: attestation_issuance
+    description: "Sign receipts and produce attestation envelopes."
+  - id: gap_lifecycle
+    description: "File, claim, close gaps via governed capabilities."
+  - id: worktree_management
+    description: "Create, park, prune execution lane worktrees."
+  - id: evidence_collection
+    description: "Capture run keys, receipts, verification traces."
+  - id: hotspot_mutation
+    description: >
+      Mutate shared authority surfaces (operational.gaps.yaml, loop scopes,
+      friction queue) — controller-only per SPINE.md Rule 4.
+
+forbidden_actions:
+  - id: intent_interpretation
+    description: >
+      Must not interpret raw Operator intent. All input arrives as
+      structured, normalized requests from the Translator. If the
+      request is ambiguous, reject it back to the Translator.
+    enforcement: "entry-packet role constraints"
+  - id: priority_arbitration
+    description: >
+      Must not make priority decisions. Execution order is determined
+      by the Operator (via Translator). Controller executes in the
+      order received.
+    enforcement: "communication protocol contract"
+  - id: scope_expansion
+    description: >
+      Must not expand scope beyond what the governing loop/envelope
+      authorizes. If execution reveals adjacent work, file it as a
+      gap or friction item — do not execute it.
+    enforcement: "governed task envelope permissible_scopes"
+  - id: unreceipted_execution
+    description: >
+      Every mutation must produce a receipt (run key, commit sha,
+      gate result). Unreceipted execution is a governance violation.
+    enforcement: "session.v3.attach receipt enforcement"
+
+# ── Communication Contract ──────────────────────────────────────────
+communication:
+  receives:
+    - type: normalized_request
+      format: structured_yaml
+      source: translator
+      description: >
+        Classified, normalized execution request with explicit scope,
+        authorized capabilities, and expected artifact type.
+    - type: governed_task_envelope
+      format: envelope_schema
+      source: translator
+      description: >
+        Full governed envelope wrapping entry packet, adapter output,
+        and governance constraints for a specific task dispatch.
+
+  emits:
+    - type: execution_receipt
+      format: receipt_yaml
+      destination: translator
+      description: "Run key, commit SHA, gate results, evidence paths."
+    - type: response_envelope
+      format: envelope_schema
+      destination: translator
+      description: "Response envelope with artifact, confidence, attestation."
+    - type: friction_item
+      format: friction_ndjson
+      destination: translator
+      description: "Governance friction discovered during execution."
+    - type: gap_filing
+      format: gap_yaml
+      destination: translator
+      description: "New gaps discovered during execution."
+
+# ── Boundary with Translator ───────────────────────────────────────
+translator_interface:
+  controller_receives:
+    - normalized_request   # what to execute
+    - scope_authorization  # what files/paths/caps are in scope
+    - verification_gates   # what must pass after execution
+    - expected_artifact    # what output is expected
+  controller_returns:
+    - execution_receipt    # proof of execution
+    - verification_result  # gate pass/fail with evidence
+    - attestation          # signed seal of completion
+    - discovered_friction  # side effects or issues found

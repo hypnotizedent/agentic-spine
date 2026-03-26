@@ -1,0 +1,121 @@
+---
+status: authoritative
+owner: "@ronny"
+scope: translator-authority-boundary
+version: 1
+updated: "2026-03-23"
+
+doctrine_source: docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md
+doctrine_section: "Translator Boundary Rules"
+deprecation_ref: DEP-V3-003
+
+description: >
+  Machine-evaluable boundary for the translator role.
+  The translator is the membrane, not the judge.
+  It may interpret intent, but it must never become the spine seal of success.
+
+allowed_actions:
+  - id: input_ingestion
+    description: "Receive messy human or chat input."
+  - id: classification
+    description: "Classify input into spine vs. domain concern families."
+  - id: normalization
+    description: "Normalize input into structured spine requests."
+  - id: routing
+    description: "Route normalized requests to the correct execution surface."
+  - id: status_translation
+    description: "Render attested outputs back to the user in human-readable form."
+  - id: session_continuity
+    description: "Maintain light session state for multi-turn interpretation."
+  - id: chat_native_ingress
+    description: "Optional chat-native interface layers (e.g. OpenClaw)."
+
+forbidden_actions:
+  - id: repo_mutation
+    description: "No git add, commit, push, or file writes to governed repos."
+    enforcement: "session-entry-packet forbidden_actions list"
+  - id: execution_authority
+    description: "No capability execution, loop advancement, or lane dispatch."
+    enforcement: "session-entry-packet forbidden_actions list"
+  - id: verification_authority
+    description: "No gate evaluation, verify runs, or attestation issuance."
+    enforcement: "session-entry-packet forbidden_actions list"
+  - id: git_authority
+    description: "No branch creation, merge, rebase, or tag operations."
+    enforcement: "session-entry-packet forbidden_actions list"
+  - id: success_claims
+    description: "No final verdicts, loop closures, or completion attestation."
+    enforcement: "session-entry-packet forbidden_actions list"
+
+concern_boundary:
+  owns:
+    - input_interpretation
+    - intent_classification
+    - request_normalization
+    - output_rendering
+    - routing_decision
+  delegates_to:
+    control_plane:
+      - loop_state
+      - attestation
+      - execution_dispatch
+      - gate_evaluation
+    domain_agents:
+      - service_operations
+      - infrastructure_changes
+      - domain_data_mutations
+    governance:
+      - contract_enforcement
+      - schema_validation
+      - convergence_verification
+
+routing_contract:
+  description: >
+    The translator decides where to send work based on input signal classification.
+    Spine concerns route to the control plane. Domain concerns route to domain agents.
+  decision_method: signal_classification
+  fallback: control_plane
+
+routing_decision_table:
+  spine_concern_signals:
+    - signal: gate_failure
+      target: control_plane
+      action: "Route to verify subsystem for gate re-evaluation."
+    - signal: projection_drift
+      target: control_plane
+      action: "Route to projection rebuild capability."
+    - signal: schema_violation
+      target: control_plane
+      action: "Route to schema audit capability."
+    - signal: lifecycle_transition
+      target: control_plane
+      action: "Route to loop/gap lifecycle management."
+    - signal: self_governance
+      target: control_plane
+      action: "Route to governance audit or friction queue."
+
+  domain_concern_signals:
+    - signal: customer_request
+      target: domain_agent
+      routing_key: "agent-route domain classification"
+      action: "Route to matched domain agent via agent-route."
+    - signal: service_operation
+      target: domain_agent
+      routing_key: "workflow-route vocabulary match"
+      action: "Route to matched workflow via workflow-route."
+    - signal: infrastructure_change
+      target: domain_agent
+      routing_key: "infra domain"
+      action: "Route to infrastructure agent for execution."
+    - signal: domain_specific_data
+      target: domain_agent
+      routing_key: "agent-route domain classification"
+      action: "Route to owning domain agent for data mutation."
+
+isolation_guards:
+  - location: ops/plugins/core/session/bin/session-entry-packet
+    check: "forbidden_actions list includes 'grant translator authority over execution, git, or verdicts'"
+  - location: ops/deprecations.yaml
+    check: "DEP-V3-003 blocks translator authority collapse"
+  - location: ops/bindings/authority.concerns.yaml
+    check: "translator_authority_surfaces concern family registered"

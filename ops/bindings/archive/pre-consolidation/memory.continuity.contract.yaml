@@ -1,0 +1,98 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-21
+scope: memory-continuity
+version: 1
+updated_at: 2026-03-21
+lifecycle_state: active
+source_of_truth: ops/bindings/memory.continuity.contract.yaml
+introduced_by: LOOP-SPINE-SELF-GOVERNANCE-LIFECYCLE-CANONICALIZATION-20260321
+review_cadence_days: 14
+consumers:
+  - docs/governance/SESSION_PROTOCOL.md
+  - ops/plugins/core/session/bin/session-start
+  - ops/plugins/core/authority/bin/spine-self-governance-projection-build
+  - ops/plugins/core/verify/bin/spine-self-governance-status
+
+contract: MEMORY_CONTINUITY_CONTRACT_V1
+
+objective: >
+  Preserve usable recall when one memory surface is unhealthy or unavailable.
+  AnythingLLM remains a preferred recall surface, but it must not be the only
+  continuity path for governed sessions.
+
+primary_layer:
+  id: anythingllm
+  type: hosted_rag
+  lifecycle_state: governed
+  capability: rag.anythingllm.ask
+  note: Preferred discovery surface when healthy.
+
+fallback_layers:
+  - id: spine_rag_mcp
+    type: mcp
+    lifecycle_state: governed
+    surface: spine-rag
+    note: MCP retrieval path when CLI RAG usage is inconvenient or provider latency differs.
+  - id: receipts_summary
+    type: evidence
+    lifecycle_state: active
+    capability: receipts.summary
+    note: Fast continuity for recent executed work and proofs.
+  - id: active_handoffs
+    type: runtime_state
+    lifecycle_state: active
+    capability: session.handoff.list
+    note: Continuity lane for explicit cross-session context.
+  - id: loop_gap_runtime
+    type: runtime_state
+    lifecycle_state: active
+    capabilities:
+      - loops.status
+      - gaps.status
+    note: Minimal current-work state when richer memory is degraded.
+  - id: direct_file_truth
+    type: local_repo
+    lifecycle_state: active
+    note: Canonical direct file reads remain the first truth layer on desktop surfaces.
+  - id: rg_search
+    type: local_repo
+    lifecycle_state: active
+    command: rg
+    note: Exact-string fallback when structured or semantic recall surfaces are unavailable.
+
+degraded_mode:
+  session_start_mode: degraded
+  minimum_available_layers: 3
+  required_startup_hints:
+    - ./bin/ops cap run session.handoff.list --state active
+    - ./bin/ops cap run receipts.summary -- --domain none --days 7
+    - ./bin/ops cap run loops.status
+    - ./bin/ops cap run gaps.status
+  policy: continue_with_explicit_fallback_chain
+
+environment_fallbacks:
+  desktop:
+    preferred_layers:
+      - direct_file_truth
+      - anythingllm
+      - spine_rag_mcp
+      - receipts_summary
+      - rg_search
+  remote:
+    preferred_layers:
+      - active_handoffs
+      - receipts_summary
+      - spine_rag_mcp
+  mobile:
+    preferred_layers:
+      - active_handoffs
+      - receipts_summary
+    note: Mobile follows SESSION_PROTOCOL output contracts and does not assume filesystem access.
+
+failure_policy:
+  anythingllm_unavailable: continue_with_fallback
+  mcp_unavailable: continue_with_fallback
+  filesystem_unavailable: use_mobile_or_remote_contract
+  no_continuity_layers_remaining: block_mutation_and_surface_gap

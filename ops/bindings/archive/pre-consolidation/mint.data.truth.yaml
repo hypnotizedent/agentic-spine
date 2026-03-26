@@ -1,0 +1,443 @@
+---
+# Mint Data Truth Binding — Definitive Integration Map
+# Loop: LOOP-MINT-CORE-WORKFLOW-BUILD-20260326
+# Wave: 2 (Data Truth Reconciliation)
+# Status: DRAFT (requires operator approval before commit)
+# Generated: 2026-03-25
+---
+
+contract_id: MINT_DATA_TRUTH_BINDING_V1
+status: draft
+owner: "@ronny"
+created: "2026-03-25"
+authority: LOOP-MINT-CORE-WORKFLOW-BUILD-20260326
+
+purpose: >
+  Definitive map of where Mint data lives and what integrations are actually
+  available vs deprecated. No future agent should ever be confused about
+  Printavo API availability, where extracted data resides, or what the canonical
+  database is.
+
+# ==============================================================================
+# PRINTAVO API (DEPRECATED)
+# ==============================================================================
+
+printavo_api:
+  status: DEPRECATED
+  reason: "Subscription downgraded. No API access."
+  deprecation_date: "2026-03-06"  # Estimated from docker-host retirement
+  last_known_api_base: "https://www.printavo.com/api/v1"
+  last_known_account: "mint-prints-4019cb.printavo.com"
+
+  extraction_summary:
+    - Database records extracted from mint_os.orders, customers, line_items, payments
+    - File archive extracted from Printavo-linked mockups and production files
+    - Extraction completed before API downgrade
+
+  historical_references:
+    - "ops/bindings/operational.gaps.yaml (GAP-OP-1546, GAP-OP-1548, GAP-OP-1552)"
+    - "mint-modules/docs/PLANNING/LISA_PEIRCE_ORDER_13833_DATA/"
+    - "mint-modules/docs/CANONICAL/DOCKER_HOST_EXTRACTION_MANIFEST.md"
+
+  agent_guidance: >
+    NEVER attempt to call Printavo API. All historical Printavo data is now
+    static and available via archive extraction and database mirror. If an
+    agent encounters a Printavo URL or invoice reference, treat it as historical
+    read-only metadata, not a live integration endpoint.
+
+# ==============================================================================
+# CANONICAL DATABASE
+# ==============================================================================
+
+canonical_database:
+  engine: PostgreSQL
+  host: mint-data (VM 213)
+  database_name: mint_modules
+  schema_authority: ops/plugins/domains/mint/schema/mint.core.schema.sql
+  schema_governance: ops/plugins/domains/mint/schema/mint.schema.authority.yaml
+
+  status: ACTIVE
+  seeded: partially
+  seed_status:
+    - "7 canonical entities defined (customer, garment, order, artwork, line_item, decoration, mockup)"
+    - "Schema enforced via CHECK constraints and foreign keys"
+    - "Write access ONLY through governed capabilities (mint.order.create)"
+
+  runtime_location:
+    primary: "VM 213 (mint-data) — PostgreSQL container"
+    development: "Local SQLite for testing (mint_intake_common.get_db_connection())"
+
+  backup:
+    schedule: nightly
+    destination: /md1400/backup-cold/apps/mint-data/postgres/
+    retention: 30 days
+
+# ==============================================================================
+# HISTORICAL DATA (PRINTAVO EXTRACTION)
+# ==============================================================================
+
+historical_data:
+  printavo_extraction:
+    archive_name: Printavo-Archive
+    canonical_path: "mint-legacy/Printavo-Archive/ (730XD archive plane)"
+    access_method: "archive-smb LXC (VM 220) at /mnt/archive-smb/mint-legacy/Printavo-Archive/"
+
+    extraction_date: "2026-03-06"
+    extraction_authority: "DOCKER_HOST_EXTRACTION_MANIFEST.md"
+    extraction_receipt: "mint-legacy/_receipts/20260306T222655Z-printavo-archive-copy.md"
+
+    size: 79GB
+    file_count: 37546
+    directory_structure:
+      - production-files/
+      - line-item-mockups/
+      - imprint-mockups/
+      - download-output.log (extraction manifest)
+
+    metadata_fields:
+      - visual_id (Printavo invoice number, e.g., "13833")
+      - filestack_id (file storage identifier)
+      - source_url (original Printavo URL)
+      - original_filename
+
+    format: "Filesystem archive with structured directories"
+
+    verification:
+      parity_check: "2026-03-06"
+      checksum_sample: "download-output.log verified"
+      retirement_status: "Source deleted from docker-host after parity recheck"
+
+    agent_guidance: >
+      This archive is READ-ONLY. Files are organized by Printavo visual_id
+      (invoice number) and contain historical mockups and production files.
+      DO NOT attempt to modify or delete. For Mint orders that reference
+      Printavo invoice numbers, lookup artwork files here by visual_id.
+
+  legacy_database_mirror:
+    database: mint_legacy.legacy_mint_os
+    host: "VM 212 (mint-apps)"
+    extraction_date: "2026-03-06"
+    extraction_authority: "DOCKER_HOST_EXTRACTION_MANIFEST.md"
+
+    tables:
+      - customers (3,338 rows)
+      - orders
+      - line_items
+      - imprints
+      - payments
+      - fees
+      - supplier_products (361,661 rows)
+      - sanmar_products
+
+    status: "Extracted and archived"
+    access: "Read-only legacy pool for historical reconciliation"
+
+    agent_guidance: >
+      Historical Mint orders and customer data extracted from docker-host
+      (VM 200) before retirement. This is NOT the canonical database — it is
+      a legacy snapshot for reference only. New orders MUST use the canonical
+      mint_modules database on VM 213.
+
+  bridge_yamls:
+    path: ".data/mint/printavo-bridges/"
+    status: "DOES NOT EXIST"
+    note: >
+      The wave directive referenced .data/mint/printavo-bridges/ but this
+      directory does not exist in the spine codebase. No YAML bridge files
+      found. Historical Printavo linkage is preserved in the file archive
+      metadata (visual_id, filestack_id) and legacy database mirror.
+
+# ==============================================================================
+# ACTIVE INTEGRATIONS
+# ==============================================================================
+
+active_integrations:
+  microsoft_graph:
+    service: "Email and Calendar"
+    tenant: mintprints.com
+    capabilities:
+      - microsoft.mail.* (list, search, get, draft, send, reply, attachments, export)
+      - microsoft.calendar.* (list, get, create, update, rsvp)
+    status: ACTIVE
+    authentication: "OAuth2 via Infisical-managed tokens"
+
+  stripe:
+    service: "Payment Processing"
+    capabilities:
+      - mint.quote.generate_payment_link (checkout session creation)
+      - mint.quote.reconcile_payment (payment webhook reconciliation)
+      - mint.payment.canary.stripe.test (test-mode canary)
+    status: ACTIVE
+    mode: "Live + Test"
+    authentication: "API keys via Infisical"
+
+  easypost:
+    service: "Shipping Labels"
+    capabilities:
+      - mint.public.providers.reconcile (webhook registration)
+    status: ACTIVE
+    authentication: "API keys via Infisical"
+
+  minio:
+    service: "Object Storage (Hot/Warm tiers)"
+    deployment: "mint-apps stack (VM 212)"
+    capabilities:
+      - mint.operator.drop.assist (upload to operator-drop bucket)
+      - mint.operator.storage.status (storage health)
+    status: ACTIVE
+    buckets:
+      - operator-drop (canonical intake boundary)
+      - client-assets (legacy v1 files preserved)
+    authentication: "S3-compatible credentials via Infisical"
+
+  resend:
+    service: "Email Delivery (Customer Communications)"
+    capabilities:
+      - mint.quote.send (send promoted quotes)
+      - communications.send.execute (governed email send)
+    status: ACTIVE
+    authentication: "API keys via Infisical"
+
+  vapi:
+    service: "Voice Front Desk"
+    capabilities:
+      - mint.customer.voice.intake.capture (end-of-call payload capture)
+      - mint.customer.voice.callback.enqueue (callback request persistence)
+    status: ACTIVE
+    authentication: "Webhook + API keys via Infisical"
+
+# ==============================================================================
+# DEPRECATED INTEGRATIONS
+# ==============================================================================
+
+deprecated_integrations:
+  printavo_api:
+    reason: "Subscription downgraded. No API access."
+    deprecated_date: "2026-03-06"
+    replacement: "Static archive extraction (see historical_data.printavo_extraction)"
+
+  shopify_legacy:
+    reason: "Fresh-slate Mint does not integrate with Shopify (B2B direct-order model)"
+    note: "shopify_order_id and shopify_customer_id fields exist in schema for legacy compatibility"
+    status: "Not actively used; preserved for historical reference"
+
+# ==============================================================================
+# STORAGE TIER ARCHITECTURE
+# ==============================================================================
+
+storage_tiers:
+  hot:
+    description: "Active working storage for current orders"
+    location: "MinIO (mint-apps VM 212) + VM local filesystem"
+    lifecycle: "Current orders, artwork in use, mockups pending approval"
+    retention: "Until order fulfilled + 30 days"
+    backup: "Nightly snapshot to md1400"
+
+    paths:
+      artwork: "runtime/domain-state/mint/hot/artwork/{order_id}/{artwork_id}/"
+      mockups: "runtime/domain-state/mint/hot/mockups/{order_id}/{mockup_id}/"
+      production: "runtime/domain-state/mint/hot/production/{order_id}/"
+
+  warm:
+    description: "Recent fulfilled orders (last 12 months)"
+    location: "MinIO warm tier OR MD1400 transition zone"
+    lifecycle: "Fulfilled orders, occasional customer reorder access"
+    retention: "12 months after fulfillment"
+    backup: "Included in nightly MD1400 sync"
+
+  cold:
+    description: "Long-term archive (>12 months)"
+    location: "MD1400 NAS (SMB/rsync)"
+    root_path: "/mnt/md1400/mint/archive/"
+    lifecycle: "Historical archive, recovery-only access"
+    retention: "Indefinite"
+    backup: "md1400 is the backup destination (no further tier)"
+
+    paths:
+      orders: "/mnt/md1400/mint/archive/{year}/{order_id}/"
+      artwork: "/mnt/md1400/mint/archive/artwork/{customer_id}/{artwork_id}/"
+      customers: "/mnt/md1400/mint/archive/customers/{customer_id}/"
+
+    policy_note: "md1400 is confirmed archive target. NEVER purge — only copy."
+
+# ==============================================================================
+# AGENT GUIDANCE (CRITICAL RULES)
+# ==============================================================================
+
+agent_rules:
+  - rule: "NEVER call Printavo API — it is permanently deprecated"
+    enforcement: "Any agent attempting Printavo API calls will fail"
+
+  - rule: "Historical Printavo data is READ-ONLY"
+    location: "mint-legacy/Printavo-Archive/ on 730XD archive plane"
+    access: "Via archive-smb LXC (VM 220)"
+
+  - rule: "Canonical database is mint_modules on VM 213 (PostgreSQL)"
+    write_path: "ONLY through governed capabilities (mint.order.create)"
+    schema_authority: "ops/plugins/domains/mint/schema/mint.core.schema.sql"
+
+  - rule: "Legacy database mirror is READ-ONLY"
+    location: "mint_legacy.legacy_mint_os on VM 212"
+    use: "Historical reconciliation only, NOT for new orders"
+
+  - rule: "All new Mint data MUST use canonical schema"
+    forbidden: "Ad-hoc CREATE TABLE, direct SQL INSERT outside capabilities"
+    enforcement: "Schema governance (mint.schema.authority.yaml)"
+
+  - rule: "Storage tier lifecycle is automated"
+    hot_to_warm: "30 days after fulfillment (NOT YET IMPLEMENTED)"
+    warm_to_cold: "12 months after fulfillment (NOT YET IMPLEMENTED)"
+    manual_archive: "Operator can trigger early archival via mint.storage.archive (NOT YET IMPLEMENTED)"
+
+# ==============================================================================
+# STALE LOOP/GAP INVENTORY
+# ==============================================================================
+
+stale_references:
+  loop:
+    id: LOOP-MINT-PRINTAVO-BRIDGE-HARDENING-20260313
+    status: planned
+    priority: high
+    horizon: later
+    objective: >
+      Create canonical governed Printavo artifact and artwork-context bridge
+      so fresh-slate seed/order truth can answer whether a quote exists, which
+      files belong to it, and how reuse/color continuity should behave.
+
+    incorrect_assumption: "Assumes Printavo API connectivity for bridge operations"
+
+    recommended_disposition: SUPERSEDE
+    recommended_action: >
+      Reframe loop objective to work with static Printavo archive extraction
+      instead of live API. Bridge should map visual_id (Printavo invoice) to
+      canonical order/artwork records using archived metadata, NOT API calls.
+
+    gaps_filed:
+      - GAP-OP-1546
+      - GAP-OP-1548
+      - GAP-OP-1552
+
+  gaps:
+    - id: GAP-OP-1546
+      title: "mint.customer.forwarded.attachment.resolve — Morpheus still reasons from loose attachments"
+      type: agent-behavior
+      classification: agent-behavior
+      parent_loop: LOOP-MINT-PRINTAVO-BRIDGE-HARDENING-20260313
+      discovered_at: "2026-03-13"
+
+      incorrect_assumption: "References Printavo context that may no longer be API-accessible"
+      recommended_disposition: REVIEW
+      recommended_action: >
+        Verify if gap is about Printavo API access or about general attachment
+        governance. If Printavo-dependent, update to use archive extraction.
+
+    - id: GAP-OP-1548
+      title: "mint.artwork.intelligence.analyze — Cove Brewery artwork reuse reasoning still depends on loose files"
+      type: agent-behavior
+      classification: agent-behavior
+      parent_loop: LOOP-MINT-PRINTAVO-BRIDGE-HARDENING-20260313
+      discovered_at: "2026-03-13"
+
+      incorrect_assumption: "May reference Printavo artwork associations that are now static"
+      recommended_disposition: REVIEW
+      recommended_action: >
+        Update artwork intelligence to use archived Printavo metadata (visual_id,
+        filestack_id) instead of assuming live API lookups.
+
+    - id: GAP-OP-1552
+      title: "mint.printavo.bridge — Current runtime only partially sees printavo_customer_id on fresh customers"
+      type: agent-behavior
+      classification: agent-behavior
+      parent_loop: LOOP-MINT-PRINTAVO-BRIDGE-HARDENING-20260313
+      discovered_at: "2026-03-13"
+
+      incorrect_assumption: "Assumes live Printavo API for customer ID resolution"
+      recommended_disposition: SUPERSEDE
+      recommended_action: >
+        Replace mint.printavo.bridge with mint.printavo.archive.lookup that reads
+        from static archive metadata instead of making API calls. Bridge should
+        map legacy Printavo customer IDs to canonical mint_modules.customers.
+
+# ==============================================================================
+# NEWLY DISCOVERED GAPS
+# ==============================================================================
+
+newly_discovered_gaps:
+  - id: "TBD (to be filed)"
+    title: "Printavo archive metadata schema not documented"
+    type: missing-entry
+    severity: medium
+    description: >
+      The Printavo-Archive contains 37,546 files with metadata (visual_id,
+      filestack_id, source URL, original filename) but no formal schema
+      documentation exists for how this metadata is structured or how agents
+      should query it.
+    recommended_action: >
+      Document Printavo archive metadata schema and create a read-only lookup
+      capability (mint.printavo.archive.lookup) that can resolve visual_id to
+      file paths and metadata.
+
+  - id: "TBD (to be filed)"
+    title: "Storage tier lifecycle automation not implemented"
+    type: missing-entry
+    severity: low
+    description: >
+      Storage tier transitions (Hot → Warm → Cold) are defined in policy but
+      not implemented as automated capabilities. Operators must manually archive
+      old orders.
+    recommended_action: >
+      Defer to Wave 3. Manual archival is acceptable for current order volume.
+
+# ==============================================================================
+# VERIFICATION CHECKLIST
+# ==============================================================================
+
+verification:
+  - item: "Printavo archive exists at mint-legacy/Printavo-Archive/"
+    status: VERIFIED
+    source: "DOCKER_HOST_EXTRACTION_MANIFEST.md"
+
+  - item: "Archive is 79GB with 37,546 files"
+    status: VERIFIED
+    source: "DOCKER_HOST_EXTRACTION_MANIFEST.md line 52"
+
+  - item: "Archive extracted on 2026-03-06"
+    status: VERIFIED
+    source: "Extraction receipt mint-legacy/_receipts/20260306T222655Z-printavo-archive-copy.md"
+
+  - item: "Legacy database mirror exists at mint_legacy.legacy_mint_os"
+    status: VERIFIED
+    source: "DOCKER_HOST_EXTRACTION_MANIFEST.md line 59"
+
+  - item: "Canonical database is mint_modules on VM 213"
+    status: VERIFIED
+    source: "mint.schema.authority.yaml line 19"
+
+  - item: "Active integrations operational (Graph, Stripe, EasyPost, MinIO, Resend, Vapi)"
+    status: VERIFIED
+    source: "74 mint capabilities operational (cap list output)"
+
+  - item: ".data/mint/printavo-bridges/ directory exists"
+    status: NOT FOUND
+    note: "Directory does not exist; bridge truth assumed to be in archive metadata"
+
+# ==============================================================================
+# NEXT ACTIONS (Operator Approval Required)
+# ==============================================================================
+
+next_actions:
+  - action: "Review and approve this binding"
+    owner: "@ronny"
+    blocking: true
+
+  - action: "Commit binding to ops/bindings/mint.data.truth.yaml"
+    depends_on: "Operator approval"
+
+  - action: "Update LOOP-MINT-PRINTAVO-BRIDGE-HARDENING-20260313 scope"
+    recommendation: "Reframe to work with static archive, not API"
+
+  - action: "File newly discovered gaps"
+    recommendation: "Use gaps.file for Printavo archive schema and storage tier automation"
+
+  - action: "Communicate to agents"
+    recommendation: "Add reference to mint.data.truth.yaml in agent CLAUDE.md guidance"

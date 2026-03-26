@@ -1,0 +1,187 @@
+# Stability Control Contract
+# Status: authoritative
+# Last verified: 2026-02-16
+
+version: 2
+updated: "2026-02-21"
+owner: "@ronny"
+scope: blackhole-exit-runtime-reliability
+
+sources:
+  vm_lifecycle: ops/bindings/vm.lifecycle.yaml
+  vm_lifecycle_contract: ops/bindings/vm.lifecycle.contract.yaml
+  ssh_targets: ops/bindings/ssh.targets.yaml
+  automation_latency_slo: ops/bindings/automation.stack.latency.slo.yaml
+  infra_core_slo: ops/bindings/infra.core.slo.yaml
+
+critical_domains:
+  - id: automation-stack
+    description: "Automation VM and n8n lane (VM 202)."
+    vm_hostname: automation-stack
+    incident_key: automation_unreachable
+    threshold_overrides:
+      api_latency_warn_ms: 6000
+      api_latency_incident_ms: 8000
+
+  - id: finance-stack
+    description: "Finance VM and compose lane (VM 211)."
+    vm_hostname: finance-stack
+    incident_key: finance_unreachable
+    threshold_overrides:
+      api_latency_warn_ms: 7000
+      api_latency_incident_ms: 12000
+
+  - id: z2m-bridge
+    description: "HA Zigbee2MQTT bridge availability."
+    vm_hostname: homeassistant
+    incident_key: z2m_bridge_disconnected
+    z2m_addon_slug: 45df7312_zigbee2mqtt
+    threshold_overrides:
+      vm_disk_headroom_min_gb: 10
+      api_latency_warn_ms: 6000
+
+  - id: immich-stack
+    description: "Immich VM runtime + ingest lane health (VM 203)."
+    vm_hostname: immich
+    incident_key: immich_runtime_degraded
+    operating_mode: maintenance
+    threshold_overrides:
+      api_latency_warn_ms: 5000
+      api_latency_incident_ms: 9000
+      heartbeat_stale_warn_minutes: 10080
+      stale_heartbeat_minutes: 20160
+
+  - id: infra-core-stack
+    description: "Core infrastructure services (VM 204). Infisical, Cloudflare, Vaultwarden, Caddy, Pi-hole."
+    vm_hostname: infra-core
+    incident_key: infra_core_unreachable
+    threshold_overrides:
+      api_latency_warn_ms: 5000
+      api_latency_incident_ms: 9000
+
+  - id: observability-stack
+    description: "Monitoring stack (VM 205). Prometheus, Grafana, Loki, Uptime Kuma."
+    vm_hostname: observability
+    incident_key: observability_unreachable
+    threshold_overrides:
+      api_latency_warn_ms: 5000
+      api_latency_incident_ms: 9000
+
+  - id: dev-tools-stack
+    description: "Development tools (VM 206). Gitea canonical origin."
+    vm_hostname: dev-tools
+    incident_key: gitea_unreachable
+    threshold_overrides:
+      api_latency_warn_ms: 3500
+      api_latency_incident_ms: 7000
+
+  - id: mint-stack
+    description: "Mint business stack (VM 212 data + VM 213 apps). PostgreSQL, MinIO, Redis, files-api, order-intake, quote-page."
+    vm_hostname: mint-data
+    incident_key: mint_runtime_degraded
+    threshold_overrides:
+      api_latency_warn_ms: 3000
+      api_latency_incident_ms: 6000
+
+probe_capabilities:
+  automation-stack:
+    - n8n.infra.health.quick
+    - automation.stack.latency.status
+    - services.health.status --host automation-stack
+  finance-stack:
+    - finance.stack.status
+  z2m-bridge:
+    - ha.z2m.health
+  immich-stack:
+    - immich.status
+    - immich.ingest.watch --json
+  infra-core-stack:
+    - infra.core.slo.status
+  observability-stack:
+    - observability.stack.status
+  dev-tools-stack:
+    - gitea.status
+  mint-stack:
+    - mint.modules.health
+
+probe_latency_exemptions:
+  automation-stack:
+    - automation.stack.latency.status
+
+probe_warn_exemptions:
+  immich-stack:
+    - immich.ingest.watch
+
+incident_thresholds:
+  fail_fast_after_checks: 1
+  max_reconcile_domains_per_run: 3
+  stale_heartbeat_minutes: 15
+
+predictive_thresholds:
+  vm_disk_headroom_min_gb: 20
+  vm_disk_headroom_min_percent: 15
+  vm_memory_headroom_min_percent: 20
+  vm_load_per_core_warn: 1.5
+  api_latency_warn_ms: 2000
+  api_latency_incident_ms: 5000
+  heartbeat_stale_warn_minutes: 10
+  pid_file_missing_is_incident: true
+
+warn_treatment:
+  critical_domains: warn
+  non_critical_domains: warn
+
+guided_recovery_commands:
+  automation-stack:
+    - "./bin/ops cap run infra.proxmox.maintenance.precheck --mode precheck --host-id {{proxmox_host}}"
+    - "./bin/ops cap run infra.proxmox.maintenance.startup --mode startup --host-id {{proxmox_host}} --execute"
+    - "ssh root@{{proxmox_host_ip}} \"qm start {{vmid}} && qm status {{vmid}}\""
+    - "./bin/ops cap run docker.compose.up automation-stack automation"
+    - "./bin/ops cap run docker.compose.up automation-stack mcpjungle"
+    - "./bin/ops cap run n8n.infra.health"
+
+  finance-stack:
+    - "./bin/ops cap run infra.proxmox.maintenance.precheck --mode precheck --host-id {{proxmox_host}}"
+    - "ssh root@{{proxmox_host_ip}} \"qm start {{vmid}} && qm status {{vmid}}\""
+    - "./bin/ops cap run docker.compose.up finance-stack finance"
+    - "./bin/ops cap run finance.stack.status"
+
+  z2m-bridge:
+    - "./bin/ops cap run ha.addons.snapshot"
+    - "./bin/ops cap run ha.addon.restart {{z2m_addon_slug}}"
+    - "./bin/ops cap run ha.z2m.health"
+
+  immich-stack:
+    - "./bin/ops cap run docker.compose.status immich immich"
+    - "./bin/ops cap run docker.compose.up immich immich"
+    - "./bin/ops cap run immich.ingest.watch --json"
+    - "./bin/ops cap run immich.status"
+
+  infra-core-stack:
+    - "ssh root@{{proxmox_host_ip}} \"qm start {{vmid}} && qm status {{vmid}}\""
+    - "./bin/ops cap run docker.compose.up infra-core core"
+    - "./bin/ops cap run infra.core.slo.status"
+
+  observability-stack:
+    - "ssh root@{{proxmox_host_ip}} \"qm start {{vmid}} && qm status {{vmid}}\""
+    - "./bin/ops cap run docker.compose.up observability monitoring"
+    - "./bin/ops cap run observability.stack.status"
+
+  dev-tools-stack:
+    - "ssh root@{{proxmox_host_ip}} \"qm start {{vmid}} && qm status {{vmid}}\""
+    - "./bin/ops cap run docker.compose.up dev-tools gitea"
+    - "./bin/ops cap run gitea.status"
+
+  mint-stack:
+    - "ssh root@{{proxmox_host_ip}} \"qm start 212 && qm status 212\""
+    - "ssh root@{{proxmox_host_ip}} \"qm start 213 && qm status 213\""
+    - "./bin/ops cap run docker.compose.up mint-data data"
+    - "./bin/ops cap run docker.compose.up mint-apps apps"
+    - "./bin/ops cap run mint.modules.health"
+
+report_outputs:
+  default_format: markdown
+  supports_json: true
+  include_run_keys: true
+  baseline_report_path: docs/reference/audits/BLACKHOLE_BASELINE_20260216.md
+  recovery_report_path: docs/reference/audits/BLACKHOLE_RECOVERY_CERT_20260226.md

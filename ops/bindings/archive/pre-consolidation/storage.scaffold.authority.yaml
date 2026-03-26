@@ -1,0 +1,253 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-22
+scope: cross-plane-storage-scaffold-authority
+version: 1
+ontology:
+  description: Shared semantic scaffold for boring storage projection across shop and home planes.
+  classes:
+    - scaffold_class: backup_primary
+      meaning: Canonical primary backup or restore authority for an active plane.
+    - scaffold_class: backup_secondary
+      meaning: Declared secondary or offsite backup copy; not the primary authority.
+    - scaffold_class: archive_cold
+      meaning: Canonical cold archive plane for retained payload.
+    - scaffold_class: intake_stage
+      meaning: Controlled staging or reconciliation lane with drain/expiry expectations.
+    - scaffold_class: review_hold
+      meaning: Explicit hold or review lane retained on purpose.
+    - scaffold_class: tombstone_retained
+      meaning: Retired non-canonical residue retained for review, extraction, or evidence.
+    - scaffold_class: personal_live
+      meaning: Active home-personal payload surface that remains canonical.
+    - scaffold_class: review_pending
+      meaning: Durable surface intentionally retained but not yet fully classified for cleanup or canon.
+    - scaffold_class: defect_cruft
+      meaning: Generated clutter or placeholder residue with no canonical authority claim.
+    - scaffold_class: drained_retired
+      meaning: Previously used root that is now intentionally drained and no longer canonical.
+surfaces:
+  - device: pve
+    path: /md1400/backup-cold
+    scaffold_class: backup_primary
+    authority_state: canonical_live
+    retention_state: active
+    canonicality: canonical
+    detail: Canonical shop cold backup plane on md1400.
+    blockers: ""
+    source_refs:
+      - docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+      - ops/bindings/shop.storage.map.yaml
+      - ops/bindings/backup.inventory.yaml
+  - device: pve
+    path: /md1400/backup-cold/apps/media-config
+    scaffold_class: backup_secondary
+    authority_state: declared_secondary_copy
+    retention_state: active
+    canonicality: secondary
+    detail: Secondary/offsite cold copy lane for media-home config archives. Primary authority remains on Synology.
+    blockers: ""
+    source_refs:
+      - ops/bindings/backup.inventory.yaml
+      - ops/bindings/service.data.lifecycle.registry.yaml
+  - device: pve
+    path: /md1400/archive
+    scaffold_class: archive_cold
+    authority_state: canonical_live
+    retention_state: active
+    canonicality: canonical
+    detail: "Canonical shop archive plane. Final home for: email archive (VM 214 Stalwart + mail-archiver), Paperless-NGX documents (VM 214), surveillance recordings (VM 215), media library (movies/TV/music — only copy), and live-share datasets exported by archive-smb."
+    blockers: ""
+    source_refs:
+      - docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+      - ops/bindings/shop.storage.map.yaml
+  - device: pve
+    path: /md1400/archive/games
+    scaffold_class: archive_cold
+    authority_state: canonical_live
+    retention_state: active
+    canonicality: canonical
+    detail: Canonical games installer/ISO/ROM custody archive.
+    blockers: ""
+    source_refs:
+      - docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+      - ops/bindings/content.family.placement.policy.yaml
+  - device: pve
+    path: /md1400/stage
+    scaffold_class: intake_stage
+    authority_state: controlled_stage
+    retention_state: active
+    canonicality: canonical
+    detail: Controlled import, reconciliation, and promotion lane. Payload should drain onward.
+    blockers: ""
+    source_refs:
+      - docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+  - device: pve
+    path: /md1400/stage/games
+    scaffold_class: intake_stage
+    authority_state: controlled_stage
+    retention_state: active
+    canonicality: canonical
+    detail: Intake staging for games preservation payload before archive.
+    blockers: ""
+    source_refs:
+      - docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+      - ops/bindings/content.family.placement.policy.yaml
+  - device: pve
+    path: /md1400/tombstones
+    scaffold_class: tombstone_retained
+    authority_state: retained_noncanonical
+    retention_state: retained
+    canonicality: noncanonical
+    detail: Shop retired-runtime residue and evidence lane. Not an active runtime or backup authority.
+    blockers: ""
+    source_refs:
+      - docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+  - device: pve
+    path: /media
+    scaffold_class: review_pending
+    authority_state: deprecated_compatibility_surface
+    retention_state: review_required
+    canonicality: noncanonical
+    detail: Deprecated shop-side media evacuation pressure lane. Active home media authority is on Synology.
+    blockers: writer_cutover_and_reclaim_policy_still_in_flight
+    source_refs:
+      - ops/bindings/shop.storage.map.yaml
+      - ops/bindings/service.data.lifecycle.registry.yaml
+  - device: synology918
+    path: /volume1/backups/proxmox_backups/dump
+    scaffold_class: backup_primary
+    authority_state: canonical_live
+    retention_state: active
+    canonicality: canonical
+    detail: Canonical home VM/LXC backup lane. Latest vm-100 and vm-106 artifacts landed on 2026-03-21; latest lxc-105 on 2026-03-15.
+    blockers: ""
+    source_refs:
+      - ops/bindings/backup.inventory.yaml
+      - docs/governance/SYNOLOGY_918_STORAGE_MANIFEST_V1.md
+  - device: synology918
+    path: /volume1/backups/apps
+    scaffold_class: review_pending
+    authority_state: parent_contains_live_canonical_subpath
+    retention_state: review_required
+    canonicality: mixed
+    detail: Parent root is not globally cleared; /volume1/backups/apps/media-config remains a live canonical subpath.
+    blockers: root_level_description_must_remain_narrow
+    source_refs:
+      - ops/bindings/synology918.storage.manifest.yaml
+      - ops/bindings/backup.inventory.yaml
+  - device: synology918
+    path: /volume1/backups/apps/media-config
+    scaffold_class: backup_primary
+    authority_state: canonical_live
+    retention_state: active
+    canonicality: canonical
+    detail: Canonical primary config backup plane for media-home. Latest artifact landed 2026-03-21T13:09:32Z.
+    blockers: ""
+    source_refs:
+      - ops/bindings/backup.inventory.yaml
+      - ops/bindings/service.data.lifecycle.registry.yaml
+  - device: synology918
+    path: /volume1/backups/_legacy_tombstones
+    scaffold_class: tombstone_retained
+    authority_state: retained_noncanonical
+    retention_state: retained
+    canonicality: noncanonical
+    detail: Explicit retained tombstone subtree for retired backup lanes. One nested .DS_Store under mint-os-home-residue/configs remained root-owned and blocked from cleanup in this wave.
+    blockers: root_owned_sidecar_under_mint_os_home_residue_configs
+    source_refs:
+      - ops/bindings/backup.inventory.yaml
+      - docs/governance/SYNOLOGY_918_STORAGE_MANIFEST_V1.md
+  - device: synology918
+    path: /volume1/backups/infrastructure
+    scaffold_class: review_pending
+    authority_state: live_unclassified
+    retention_state: review_required
+    canonicality: unknown
+    detail: Fresh live backup payload exists; latest observed write 2026-01-17T02:58:30Z. Keep until a narrow lifecycle contract exists.
+    blockers: no_narrow_lifecycle_binding_for_this_root
+    source_refs:
+      - docs/governance/DREAM_SYSTEM_EXECUTION_BOARD.yaml
+  - device: synology918
+    path: /volume1/backups/devices
+    scaffold_class: review_pending
+    authority_state: hygiene_drift_present
+    retention_state: review_required
+    canonicality: unknown
+    detail: Live residue exists; latest observed write 2026-02-01T09:00:05Z under ronny-macbook/.ssh/sockets. The target is disabled in backup.inventory.
+    blockers: ephemeral_socket_capture_and_disabled_target_drift
+    source_refs:
+      - ops/bindings/backup.inventory.yaml
+  - device: synology918
+    path: /volume1/backups/synoreport
+    scaffold_class: defect_cruft
+    authority_state: generated_residue
+    retention_state: delete_when_allowed
+    canonicality: noncanonical
+    detail: Generated Synology report residue; latest observed payload touch 2025-12-27T03:55:38Z and no 2026 writes observed.
+    blockers: ""
+    source_refs:
+      - docs/governance/SYNOLOGY_918_STORAGE_MANIFEST_V1.md
+  - device: synology918
+    path: /volume1/media-staging
+    scaffold_class: personal_live
+    authority_state: canonical_live
+    retention_state: active
+    canonicality: canonical
+    detail: Canonical active home media surface. The downloads subtree is the declared intake stage and must drain after import.
+    blockers: ""
+    source_refs:
+      - ops/bindings/service.data.lifecycle.registry.yaml
+      - docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+  - device: synology918
+    path: /volume1/media-holds
+    scaffold_class: review_hold
+    authority_state: canonical_live
+    retention_state: active
+    canonicality: canonical
+    detail: Explicit home hold and review share, intentionally separate from the active playback surface.
+    blockers: ""
+    source_refs:
+      - ops/bindings/service.data.lifecycle.registry.yaml
+      - docs/governance/MACHINE_FILESYSTEM_CONTRACT.md
+  - device: synology918
+    path: /volume1/documents
+    scaffold_class: drained_retired
+    authority_state: drained_no_live_authority
+    retention_state: retained_empty
+    canonicality: drained
+    detail: Business payload was rehomed off Synology and the root is now empty as of 2026-03-22.
+    blockers: ""
+    source_refs:
+      - docs/governance/SYNOLOGY_918_STORAGE_MANIFEST_V1.md
+  - device: synology918
+    path: /volume1/homelab
+    scaffold_class: review_pending
+    authority_state: mixed_old_weight
+    retention_state: review_required
+    canonicality: unknown
+    detail: Homelab remains retained but unclassified. This wave did not touch the photo-cleanup subtree.
+    blockers: photo_cleanup_subtree_explicitly_out_of_scope
+    source_refs:
+      - docs/governance/SYNOLOGY_918_STORAGE_MANIFEST_V1.md
+  - device: synology918
+    path: /volume1/homelab/images
+    scaffold_class: review_pending
+    authority_state: stale_durable_weight
+    retention_state: review_required
+    canonicality: unknown
+    detail: Old VM image payload with latest observed touch 2025-07-19T20:55:56Z and no 2026 writes observed.
+    blockers: ownership_and_restore_value_not_yet_reconciled
+    source_refs:
+      - docs/governance/SYNOLOGY_918_STORAGE_MANIFEST_V1.md
+  - device: synology918
+    path: /volume1/homelab/template
+    scaffold_class: review_pending
+    authority_state: stale_durable_weight
+    retention_state: review_required
+    canonicality: unknown
+    detail: Old template lane with latest observed touch 2025-02-16T22:49:40Z and no 2026 writes observed.
+    blockers: ownership_and_restore_value_not_yet_reconciled
+    source_refs:
+      - docs/governance/SYNOLOGY_918_STORAGE_MANIFEST_V1.md

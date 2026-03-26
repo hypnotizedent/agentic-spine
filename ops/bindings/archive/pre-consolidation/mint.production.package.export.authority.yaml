@@ -1,0 +1,231 @@
+# Mint Production Package Export Authority
+# Status: authoritative
+# Last verified: 2026-03-10
+# Scope: mint-production-package-export
+
+version: 1
+updated_at: "2026-03-10"
+owner: "@ronny"
+status: authoritative
+scope: mint-production-package-export
+
+purpose: >
+  Define the minimal governed export/drop runtime between staged production
+  packages and the deterministic operator handoff boundary. An export record
+  is a derived operator handoff artifact, not canonical business truth and
+  not machine execution.
+
+non_goals:
+  - live machine execution or RIP queue injection
+  - hot folder monitoring or automatic job dispatch
+  - GUI automation or machine software control
+  - replacing canonical order, handoff, or package truth
+  - automatic USB mounting or copying to real removable media
+  - treating exports as source of truth
+
+contracts:
+  production_package_authority: ops/bindings/mint.production.package.authority.yaml
+  production_handoff_authority: ops/bindings/mint.production.handoff.authority.yaml
+  production_readiness_authority: ops/bindings/mint.production.readiness.authority.yaml
+  order_truth_authority: ops/bindings/mint.order.truth.authority.yaml
+
+export_record:
+  canonical_input: production_package_id
+  create_rule: >
+    mint.production.package.export reads an existing staged production package,
+    creates a deterministic export bundle for operator pickup, and persists a
+    governed export receipt. It does not execute the job on the machine or
+    inject into live queues.
+  identity_rule:
+    stable_key: production_package_id + export_mode
+    idempotent_create: >
+      Exporting the same package twice with the same export_mode must reuse
+      the existing export record and bundle path instead of creating duplicates.
+    mutability: >
+      The export record is immutable after creation because it is a historical
+      operator handoff snapshot. If business facts change, re-stage the package
+      then export again.
+  required_fields:
+    - production_export_id
+    - production_package_id
+    - production_handoff_id
+    - order_id
+    - order_revision_id
+    - machine_target
+    - export_state
+    - export_mode
+    - source_bundle_refs
+    - export_bundle_path
+    - manifest_path
+    - created_at
+    - created_by
+    - receipt_notes
+
+export_modes:
+  usb_bundle:
+    mode: usb_bundle
+    description: Deterministic bundle ready for manual USB copy
+    bundle_structure: >
+      {export_root}/{order_id}/{machine_target}/manifest.yaml,
+      {export_root}/{order_id}/{machine_target}/files/*.{ext}
+    operator_action: >
+      Operator copies bundle to USB manually. System does not auto-mount or
+      auto-copy to real removable media.
+  shared_folder:
+    mode: shared_folder
+    description: Deterministic drop ready for shared-folder pickup
+    bundle_structure: Same as usb_bundle, but targeted for network share pickup
+    operator_action: >
+      Operator or future adapter reads from export bundle and copies to
+      shared folder. V1 does not auto-copy to live machine paths.
+
+target_scope:
+  supported_targets:
+    barudan:
+      machine_target: barudan
+      accepted_export_modes: [usb_bundle, shared_folder]
+      export_rule: >
+        Export only if staged package has .dst or .u00 assets and package_state
+        is 'staged'. Copy or reference production assets into deterministic
+        bundle structure.
+      blocking_rule: >
+        If staged package is blocked or has no compatible assets, stop export
+        with honest blocking message.
+    screenpro:
+      machine_target: screenpro
+      accepted_export_modes: [usb_bundle, shared_folder]
+      export_rule: >
+        Export only if staged package has .eps (preferred) or .pdf/.ai/.svg
+        assets and package_state is 'staged'. Copy or reference production
+        assets into deterministic bundle structure.
+      blocking_rule: >
+        If staged package is blocked or has no compatible vector assets, stop
+        export with honest blocking message.
+    gtx:
+      machine_target: gtx
+      deferred: true
+      deferral_reason: >
+        GTX export pattern is still unclear; no proven boring boundary exists
+        yet. Agents should not attempt GTX export in v1.
+
+forbidden_shortcuts:
+  no_package_bypass:
+    description: Never export directly from handoff or order truth
+    enforcement: >
+      mint.production.package.export requires an existing staged
+      production_package_id as input. It does not read handoffs or orders
+      directly.
+  no_live_execution:
+    description: Never inject exports into live machine queues or hot folders
+    enforcement: >
+      Export writes to a governed outbox/bundle path only. V1 does not copy
+      to live machine software paths or trigger machine execution.
+  no_gui_automation:
+    description: Never automate machine GUI software
+    enforcement: >
+      Export is a deterministic file drop for operator pickup. It does not
+      control machine software, RIP queues, or GUI automation.
+  no_auto_usb:
+    description: Never auto-mount or auto-copy to real removable media
+    enforcement: >
+      Export creates a bundle ready for manual operator USB copy. It does not
+      mount USB drives or copy to real removable media automatically.
+
+runtime_surface:
+  export:
+    name: mint.production.package.export
+    description: Export a staged production package to a deterministic operator handoff boundary
+    implementation_status: REAL (mutating export record derived from staged package truth)
+    inputs:
+      - production_package_id (required)
+      - optional export_mode override (default: usb_bundle, constrained to accepted modes)
+      - optional export_root override (bounded and deterministic only)
+    storage:
+      exports_dir: runtime/domain-state/mint/production-package-exports/
+      exports_index: runtime/domain-state/mint/production-package-exports-index.yaml
+      export_bundles_root: runtime/domain-state/mint/production-package-exports/bundles/
+    outputs:
+      - production_export_id
+      - export_state (exported | blocked)
+      - machine_target
+      - export_mode
+      - export_bundle_path
+      - manifest_path
+      - source_asset_count
+      - export_file
+      - receipt_notes
+    blockers:
+      - staged package must exist with package_state='staged'
+      - package must have compatible production assets
+      - target must be supported (barudan or screenpro)
+      - no live execution, no GUI automation, no auto-USB
+    downstream_boundary:
+      - operator manual USB copy remains manual
+      - future shared-folder adapter remains future
+      - machine dispatch remains downstream
+
+  show:
+    name: mint.production.package.show
+    description: Read-only inspection of staged production packages
+    implementation_status: REAL (read-only surface over staged package truth)
+    inputs:
+      - production_package_id (required)
+    outputs:
+      - package metadata (id, state, target, handoff ref, order ref)
+      - source asset refs
+      - staged bundle path
+      - manifest path
+      - export history (if exports exist)
+    safety: read-only
+    blockers: none
+
+export_manifest:
+  minimal_fields:
+    - production_export_id
+    - production_package_id
+    - production_handoff_id
+    - order_id
+    - order_revision_id
+    - machine_target
+    - export_mode
+    - exported_at
+    - exported_by
+    - source_asset_refs (from staged package)
+    - exported_files (actual files in export bundle)
+    - export_notes
+
+export_boundary:
+  v1_model: copy_to_governed_outbox
+  explanation: >
+    V1 export copies production asset files from their canonical storage
+    locations into a deterministic governed outbox bundle structure. This
+    creates a clean operator handoff boundary without touching live machine
+    paths or triggering execution.
+  bundle_layout: >
+    {export_bundles_root}/{order_id}/{machine_target}/manifest.yaml
+    {export_bundles_root}/{order_id}/{machine_target}/files/{filename}.{ext}
+  operator_workflow: >
+    Operator inspects export bundle, verifies manifest, then manually copies
+    to USB or shared folder. Future adapters may automate the copy-to-share
+    step, but V1 keeps it manual and safe.
+
+agent_guidance:
+  sequence_rule: >
+    The canonical post-payment production path is:
+    mint.production.readiness.check → mint.production.handoff.create →
+    mint.production.package.stage → mint.production.package.export →
+    operator manual USB copy. Do not skip straight from export to machine
+    execution.
+  conservative_rule: >
+    If the staged package is blocked or has no exportable assets, stop and
+    resolve package truth first. Do not compensate with operator notes or
+    guessed files.
+  idempotency_rule: >
+    Exporting the same package + mode twice must reuse the existing export
+    record and bundle path. Check the exports index before creating new records.
+  no_gtx_rule: >
+    Do not attempt GTX export in v1. If a package is GTX-only, block honestly
+    and recommend manual GTX workflow.
+  read_first_rule: >
+    Use mint.production.package.show to inspect staged packages before
+    exporting. This helps operators verify package state and asset refs.

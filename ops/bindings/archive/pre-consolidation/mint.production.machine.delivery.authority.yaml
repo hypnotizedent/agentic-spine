@@ -1,0 +1,278 @@
+# Mint Production Machine Delivery Authority
+# Status: authoritative
+# Last verified: 2026-03-25
+# Scope: mint-production-machine-delivery
+#
+# This binding defines the last-mile delivery from staged export bundles
+# to production machines. It is transport-agnostic: the contract defines
+# what must happen, not how the bits move.
+
+version: 1
+updated_at: "2026-03-25"
+owner: "@ronny"
+status: authoritative
+scope: mint-production-machine-delivery
+
+purpose: >
+  Define the governed last-mile delivery boundary between exported production
+  packages and physical production machines. A delivery record tracks the
+  actual transfer of design files to a machine, regardless of transport
+  mechanism (USB, DFS, shared folder, future protocol).
+
+non_goals:
+  - machine execution, job start, or production scheduling
+  - monitoring stitch counts, thread breaks, or machine state
+  - replacing canonical order, handoff, package, or export truth
+  - implementing specific transport protocols (DFS, BNET, FTP)
+  - automatic machine firmware updates or configuration changes
+  - treating delivery records as source of truth for business decisions
+
+contracts:
+  production_package_export_authority: ops/bindings/mint.production.package.export.authority.yaml
+  production_package_authority: ops/bindings/mint.production.package.authority.yaml
+  shop_device_registry: ops/bindings/shop.device.registry.yaml
+  vm_lifecycle: ops/bindings/vm.lifecycle.yaml
+
+# ── Delivery Record ───────────────────────────────────────────────────────
+
+delivery_record:
+  canonical_input: production_export_id
+  create_rule: >
+    A delivery record is created when an exported production package is
+    transferred to a target machine via any supported transport. The
+    delivery capability reads the export bundle, transfers it using the
+    configured transport, and persists a governed delivery receipt.
+  identity_rule:
+    stable_key: production_export_id + machine_id + transport
+    idempotent_create: >
+      Delivering the same export to the same machine via the same transport
+      must reuse the existing delivery record instead of creating duplicates.
+    mutability: >
+      Delivery records are immutable after creation. If a re-delivery is
+      needed (e.g., machine lost the file), create a new delivery record
+      referencing the same export.
+  required_fields:
+    - delivery_id
+    - production_export_id
+    - production_package_id
+    - order_id
+    - machine_id
+    - machine_target
+    - transport
+    - delivery_state
+    - source_export_bundle
+    - delivered_files
+    - delivered_at
+    - delivered_by
+    - receipt_notes
+
+# ── Transport Layer ───────────────────────────────────────────────────────
+
+transports:
+  usb_sneakernet:
+    id: usb_sneakernet
+    description: >
+      Operator copies export bundle to USB drive, walks to machine, inserts.
+      Machine reads .dst/.u00 from .TFD folder on USB.
+    status: active
+    automation_level: manual
+    infrastructure:
+      source: export_bundle_path
+      destination: "USB drive (operator physical media)"
+      format_rule: >
+        DST files must be in a folder with .TFD extension on the USB root.
+        U01 files follow same convention.
+    delivery_verification: >
+      Operator confirms files visible on machine display. Delivery record
+      created manually or via operator confirmation capability.
+    constraints:
+      - operator must physically walk media to machine
+      - machine must be powered on with USB port accessible
+
+  dfs_lan:
+    id: dfs_lan
+    description: >
+      Barudan Design File Server (DFS) running on a Windows host pushes
+      or serves designs to the machine over TCP port 8000. Machine connects
+      via LAN using proprietary Barudan protocol.
+    status: planned
+    automation_level: semi_automatic
+    infrastructure:
+      host: dfs-laptop
+      host_ssh_ip: "192.168.1.137 (WiFi, DHCP reserved)"
+      host_dfs_ip: "192.168.1.138 (Ethernet, static, direct cable to Barudan)"
+      host_runtime: "Windows 11 laptop with DFS (DesignFileServer(F).exe v1.76.00)"
+      protocol: "Barudan proprietary TCP:8000"
+      machine_ip: "192.168.1.230"
+      machine_mac: "00:0c:11:80:38:a6"
+      topology: "direct Ethernet cable (laptop USB adapter → Barudan)"
+      source: export_bundle_path
+      destination: "C:\\Design File Server\\DR_DL"
+    delivery_verification: >
+      DFS confirms transfer to machine. Delivery record created when
+      design appears in machine's design list.
+    prerequisites:
+      - DHCP reservation active for DFS laptop WiFi MAC (DONE: 2026-03-25)
+      - DFS installed on laptop (DONE: 2026-02-09, v1.76.00)
+      - Direct Ethernet cable from laptop to Barudan (DONE: 2026-03-25)
+      - Laptop Ethernet static IP 192.168.1.138/24 (DONE: 2026-03-25)
+      - Barudan pingable from laptop (DONE: 2026-03-25, 3/4 pings <1ms)
+      - DFS process running and port 8000 listening (DONE: 2026-03-25)
+      - Barudan registered in DFS with server IP .138 (PENDING: operator config via LEMServer_Config)
+      - Sleep/hibernate disabled, lid close = do nothing (DONE: 2026-03-25)
+    constraints:
+      - DFS LAN mode supports only 1 machine at a time
+      - DFS is GUI-only (no headless mode)
+      - proprietary protocol — no open-source server exists
+    research_ref: docs/research/BARUDAN_DFS_ARCHITECTURE_REPORT.md
+
+  native_protocol:
+    id: native_protocol
+    description: >
+      Custom TCP server on mint-apps speaking the reverse-engineered
+      Barudan DFS protocol. Reads directly from MinIO or export bundles.
+    status: future
+    automation_level: automatic
+    prerequisites:
+      - DFS protocol packet-captured and analyzed
+      - wire format reverse-engineered
+      - native server implemented and tested
+    constraints:
+      - requires successful protocol reverse-engineering
+      - must be validated against real machine before production use
+    research_ref: docs/research/BARUDAN_DFS_ARCHITECTURE_REPORT.md
+
+# ── Target Machines ───────────────────────────────────────────────────────
+
+machines:
+  barudan:
+    machine_id: barudan
+    model: "BEKY-S1506CII"
+    serial: "3130544J20"
+    heads: 6
+    needles: 15
+    accepted_formats: [dst, u00, u01]
+    preferred_format: dst
+    network:
+      ip: "192.168.1.230"
+      mac: "00:0c:11:80:38:a6"
+      dhcp_reservation: true
+      dfs_port: 8000
+    usb_format:
+      folder_extension: ".TFD"
+      root_layout: "/{order_id}.TFD/{design_file}"
+    active_transports: [usb_sneakernet]
+    planned_transports: [dfs_lan]
+    future_transports: [native_protocol]
+    device_registry_ref: "shop.device.registry.yaml#barudan"
+
+# ── Forbidden Shortcuts ───────────────────────────────────────────────────
+
+forbidden_shortcuts:
+  no_export_bypass:
+    description: Never deliver directly from staged packages or handoffs
+    enforcement: >
+      Delivery requires an existing production_export_id. The export
+      authority verifies package state and creates the deterministic
+      bundle. Delivery reads from that bundle only.
+  no_format_synthesis:
+    description: Never convert between formats during delivery
+    enforcement: >
+      Delivery transfers files as-is from the export bundle. Format
+      conversion (e.g., DST to U01) is a separate upstream concern
+      handled during package staging, not during delivery.
+  no_machine_control:
+    description: Never start jobs, change settings, or control the machine
+    enforcement: >
+      Delivery puts files where the machine can read them. The operator
+      selects and runs the design on the machine. No remote execution.
+  no_unverified_transport:
+    description: Never deliver via a transport that hasn't been validated
+    enforcement: >
+      Each transport must have status=active before delivery records can
+      use it. Planned and future transports cannot be used for real
+      deliveries until validated and activated.
+
+# ── Runtime Surface ───────────────────────────────────────────────────────
+
+runtime_surface:
+  deliver:
+    name: mint.production.machine.deliver
+    description: Deliver an exported production package to a target machine
+    implementation_status: PLANNED
+    inputs:
+      - production_export_id (required)
+      - machine_id (required, default from export target)
+      - transport (optional, default from machine active_transports[0])
+    storage:
+      deliveries_dir: runtime/domain-state/mint/production-deliveries/
+      deliveries_index: runtime/domain-state/mint/production-deliveries-index.yaml
+    outputs:
+      - delivery_id
+      - delivery_state (delivered | pending_verification | failed)
+      - transport
+      - machine_id
+      - delivered_files
+      - receipt_notes
+    blockers:
+      - export must exist with export_state='exported'
+      - target machine must be in device registry
+      - transport must have status=active
+      - no format conversion, no machine control
+
+  verify:
+    name: mint.production.machine.delivery.verify
+    description: Verify a pending delivery reached the machine
+    implementation_status: PLANNED
+    inputs:
+      - delivery_id (required)
+    outputs:
+      - verification_state (verified | unverified | failed)
+      - verification_method (operator_confirm | dfs_ack | ping_check)
+      - verified_at
+      - verified_by
+
+# ── Delivery Pipeline (canonical path) ────────────────────────────────────
+
+pipeline:
+  canonical_sequence: >
+    mint.production.readiness.check
+    → mint.production.handoff.create
+    → mint.production.package.stage
+    → mint.production.package.export
+    → mint.production.machine.deliver
+    → mint.production.machine.delivery.verify
+    → operator runs design on machine (manual, out of scope)
+
+  v1_active_path: >
+    package.export (usb_bundle mode) → operator USB sneakernet → machine.
+    Delivery record created via operator confirmation. Fully manual last mile.
+
+  v2_planned_path: >
+    package.export (shared_folder mode) → sync to DFS watched folder →
+    DFS transfers to machine → delivery record from DFS confirmation.
+    Semi-automatic last mile, requires Windows VM.
+
+  v3_future_path: >
+    package.export → native protocol server reads export bundle →
+    serves to machine on TCP:8000 → delivery record from protocol ACK.
+    Fully automatic last mile, requires protocol reverse-engineering.
+
+# ── Agent Guidance ────────────────────────────────────────────────────────
+
+agent_guidance:
+  transport_selection: >
+    Use the first active transport for the target machine. Do not attempt
+    to use planned or future transports. If no active transport exists,
+    fall back to usb_sneakernet and create a manual delivery record.
+  verification_rule: >
+    USB sneakernet deliveries are verified by operator confirmation only.
+    DFS deliveries can be verified by DFS transfer acknowledgment.
+    Do not mark unverified deliveries as verified.
+  conservative_rule: >
+    If the export bundle is missing files or the machine is unreachable,
+    stop and report honestly. Do not compensate with guesses.
+  no_blocking_on_dfs: >
+    Do not block production delivery on DFS availability. The USB
+    sneakernet path is always available as a fallback. DFS is an
+    optimization, not a prerequisite.

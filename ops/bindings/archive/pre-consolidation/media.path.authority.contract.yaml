@@ -1,0 +1,523 @@
+# Status: active
+# Authority: LOOP-MEDIA-RUNTIME-REPAIR-20260303
+# Originally: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
+# Closes: GAP-OP-1404 (when enforced at runtime with drift gate)
+# Addresses: GAP-OP-1387 (Radarr root folder), GAP-OP-1388 (SAB path mapping), GAP-OP-1391 (post-split drift)
+# Evidence: media-container-path-trace-2026-02-25.md (32 containers, 27 healthy, 5 findings)
+# Runtime verification: 2026-03-22 active-plane proof via media-home read-only caps
+# plus direct docker runtime checks on 10.0.0.106. Historical 2026-03-04 shop
+# SSH probes remain useful only as pre-cutover residue evidence.
+
+contract: MEDIA_PATH_AUTHORITY_CONTRACT_V1
+version: "1.7"
+status: active
+created: "2026-03-03"
+updated_at: "2026-03-25"
+owner: "@ronny"
+authority_loop: LOOP-MEDIA-RUNTIME-REPAIR-20260303
+original_skeleton_loop: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
+
+description: |
+  Canonical path authority matrix for the media pipeline.
+  Every service that touches media files must have an explicit 4-way parity
+  tuple: compose_mount, app_root, downloader_path, library_path.
+  Drift between any two members of a tuple is a contract violation.
+
+  Populated from Feb 25 container path trace audit (docker inspect + write tests)
+  and gap trace evidence. TBD fields resolved on 2026-03-04 via SSH runtime API
+  queries to download-stack (VM 209) and streaming-stack (VM 210) over Tailscale.
+
+current_operating_model:
+  canonical_active_plane:
+    host: media-home
+    vm_id: 106
+    library_root: "/srv/media"
+    backing_store: "10.0.0.150:/volume1/media-staging"
+    note: "This is the live watch/download plane. The active library path is the Synology staging tree."
+  canonical_writer_plane:
+    host: media-home
+    vm_id: 106
+    status: active
+    activated_at: "2026-03-21"
+    note: "ARR management services (Radarr/Sonarr/Lidarr/Prowlarr) are active on media-home. Dual-ingest model: SABnzbd primary (usenet), qBittorrent secondary (torrent, VPN-tunneled via gluetun)."
+  canonical_archive_plane:
+    host: pve
+    archive_root: "/md1400/archive/media*"
+    note: "Archive remains shop-owned and is not the default playback surface."
+  transitional_shop_residue:
+    - download-stack
+    - streaming-stack
+  interpretation_rule: |
+    Treat the shop-hosted tuples below as legacy rollback residue where noted.
+    The canonical writer plane is now media-home for ARR management services.
+    Download clients remain intentionally parked and are not active truth.
+
+# NFS mount topology (runtime verified 2026-03-04 shop, 2026-03-24 media-home, classification updated 2026-03-24)
+nfs_mount_topology:
+  media-home:
+    host_path: "/srv/media"
+    nfs_source: "10.0.0.150:/volume1/media-staging"
+    mode: rw
+    nfs_version: "4.1"
+    verified_at: "2026-03-24"
+    verification_method: "mount | grep nfs via SSH -J root@100.103.99.62 ubuntu@10.0.0.106"
+    description: "Canonical NFS mount on VM 106 — NAS direct. All ARR containers read/write media through this mount."
+    classification: "canonical_active"
+  download-stack:
+    host_path: "/mnt/media"
+    nfs_source: "192.168.1.184:/media"
+    mode: rw
+    nfs_version: "4.2"
+    verified_at: "2026-03-04"
+    verification_method: "mount | grep nfs via SSH ubuntu@100.107.36.76"
+    description: "NFS mount on VM 209 for ARR import/download — read-write for import operations"
+    classification: "legacy_residue"
+    residue_note: "Readable only as residual compatibility. NOT active truth. Canonical active plane is media-home VM 106. Shop-side retirement is tracked separately from the completed cutover."
+  streaming-stack:
+    host_path: "/mnt/media"
+    nfs_source: "192.168.1.184:/media"
+    mode: ro
+    nfs_version: "4.2"
+    verified_at: "2026-03-04"
+    verification_method: "mount | grep nfs via SSH ubuntu@100.123.207.64"
+    description: "NFS mount on VM 210 for Jellyfin/Navidrome playback — read-only for streaming"
+    classification: "legacy_residue"
+    residue_note: "Readable only as residual compatibility. NOT active truth. Canonical active plane is media-home VM 106. Shop-side retirement is tracked separately from the completed cutover."
+  docker_volumes:
+    download-stack:
+      host_path: "/mnt/docker"
+      nfs_source: "192.168.1.184:/tank/docker/download-stack"
+      mode: rw
+    streaming-stack:
+      host_path: "/mnt/docker"
+      nfs_source: "192.168.1.184:/tank/docker/streaming-stack"
+      mode: rw
+
+# Path parity tuples — each service's file access paths must be internally consistent
+# Historical shop tuples verified 2026-03-04 via runtime API queries + docker inspect
+# Planned home tuples documented 2026-03-21 for home-first writer promotion
+path_tuples:
+  radarr:
+    planned_vm: media-home
+    planned_status: active
+    planned_canonical_mount: "/srv/media -> /media"
+    planned_app_root: "/media/movies"
+    planned_library_path: "/media/movies"
+    planned_note: "Activated on media-home 2026-03-21. Unified mount migration 2026-03-25 removed all narrow mounts."
+    transitional_shop_vm: download-stack
+    transitional_shop_status: parked_residue
+    compose_mount: "/srv/media -> /media"
+    app_root: "/media/movies"
+    app_root_id: 3
+    app_root_archive: "/media/movies-archive"
+    app_root_archive_id: 2
+    downloader_path: null
+    downloader_path_removed:
+      - host: "sabnzbd"
+        remote: "/downloads/"
+        local: "/media/downloads/"
+        id: 3
+        removed_at: "2026-03-25"
+        reason: "Unified mount migration — RPMs no longer needed with single /media mount"
+      - host: "gluetun"
+        remote: "/downloads/"
+        local: "/media/downloads/"
+        id: 4
+        removed_at: "2026-03-25"
+        reason: "Unified mount migration — RPMs no longer needed with single /media mount"
+    library_path: "/media/movies"
+    verification_status: verified
+    verified_at: "2026-03-25"
+    gap_ref: GAP-OP-1387
+    evidence: |
+      2026-03-21 hardlink topology fix on media-home:
+      - Root folder changed: /movies (id=1, narrow mount) → /media/movies (id=3, broad mount)
+      - Remote path mapping added: host=sabnzbd, /downloads/ → /media/downloads/ (id=3)
+      - All 9556 movies bulk-updated to /media/movies root via PUT /api/v3/movie/editor
+      - Old /movies root folder removed (id=1)
+      - Hardlink probe: ln /media/downloads/test → /media/tv/test succeeded (inode=212350, nlink=2)
+      - Control: ln /downloads/test → /tv/test failed (EXDEV — different mount IDs)
+      - Mount topology: /media (mount 846), /tv (mount 847), /downloads (mount 848)
+      2026-03-25 unified mount migration:
+      - Removed all narrow Docker mounts (/movies, /downloads)
+      - Single mount: /srv/media -> /media (mount ID 1950)
+      - Deleted all RPMs (sabnzbd id=3, gluetun id=4) — no longer needed
+      - Hardlink probe: inode=486446, nlink=2 — SUCCESS (atomic rename enabled)
+      - Download client configs updated: /downloads → /media/downloads
+      - Result: Imports now atomic rename instead of copy+delete
+    runtime_fix_required: false
+    path_parity_status: "CANONICAL — unified /media mount, RPMs removed, atomic imports verified"
+    transition_note: "Unified mount migration completed 2026-03-25. Single /srv/media:/media mount eliminates EXDEV errors."
+
+  sonarr:
+    planned_vm: media-home
+    planned_status: active
+    planned_canonical_mount: "/srv/media -> /media"
+    planned_app_root: "/media/tv"
+    planned_library_path: "/media/tv"
+    planned_note: "Activated on media-home 2026-03-21. Unified mount migration 2026-03-25 removed all narrow mounts."
+    transitional_shop_vm: download-stack
+    transitional_shop_status: parked_residue
+    compose_mount: "/srv/media -> /media"
+    app_root: "/media/tv"
+    app_root_id: 2
+    downloader_path: null
+    downloader_path_removed:
+      - host: "sabnzbd"
+        remote: "/downloads/"
+        local: "/media/downloads/"
+        id: 2
+        removed_at: "2026-03-25"
+        reason: "Unified mount migration — RPMs no longer needed with single /media mount"
+      - host: "gluetun"
+        remote: "/downloads/"
+        local: "/media/downloads/"
+        id: 3
+        removed_at: "2026-03-25"
+        reason: "Unified mount migration — RPMs no longer needed with single /media mount"
+    library_path: "/media/tv"
+    verification_status: verified
+    verified_at: "2026-03-25"
+    evidence: |
+      2026-03-21 hardlink topology fix on media-home:
+      - Root folder changed: /tv (id=1, narrow mount) → /media/tv (id=2, broad mount)
+      - Remote path mapping added: host=sabnzbd, /downloads/ → /media/downloads/ (id=2)
+      - All 72 series bulk-updated to /media/tv root via PUT /api/v3/series/editor
+      - Old /tv root folder removed (id=1)
+      - Episode files confirmed at /media/tv/ paths (97 Cheers episodes verified)
+      - Staging auto-drain observed: 215G → 189G in 10 minutes after fix
+      2026-03-25 unified mount migration:
+      - Removed all narrow Docker mounts (/tv, /downloads)
+      - Single mount: /srv/media -> /media (mount ID 1950)
+      - Deleted all RPMs (sabnzbd id=2, gluetun id=3)
+      - Hardlink probe confirms atomic rename capability
+    path_parity_status: "CANONICAL — unified /media mount, RPMs removed, atomic imports verified"
+    transition_note: "Unified mount migration completed 2026-03-25. Single /srv/media:/media mount eliminates EXDEV errors."
+
+  lidarr:
+    planned_vm: media-home
+    planned_status: active
+    planned_canonical_mount: "/srv/media -> /media"
+    planned_app_root: "/media/music"
+    planned_library_path: "/media/music"
+    planned_note: "Activated on media-home 2026-03-21. Unified mount migration 2026-03-25 removed all narrow mounts."
+    transitional_shop_vm: download-stack
+    transitional_shop_status: parked_residue
+    compose_mount: "/srv/media -> /media"
+    app_root: "/media/music"
+    app_root_id: 2
+    app_root_name: "Music"
+    downloader_path: null
+    downloader_path_removed:
+      - host: "100.125.138.110"
+        id: 1
+        removed_at: "2026-03-22"
+        reason: "Stale mapping to dead LXC 103. Deleted via Lidarr API."
+      - host: "slskd"
+        id: 2
+        removed_at: "2026-03-22"
+        reason: "Slskd parked on download-stack, unreachable. Deleted via Lidarr API."
+      - host: "sabnzbd"
+        remote: "/downloads/"
+        local: "/media/downloads/"
+        id: 3
+        removed_at: "2026-03-25"
+        reason: "Unified mount migration — RPMs no longer needed with single /media mount"
+      - host: "gluetun"
+        remote: "/downloads/"
+        local: "/media/downloads/"
+        id: 4
+        removed_at: "2026-03-25"
+        reason: "Unified mount migration — RPMs no longer needed with single /media mount"
+    download_clients_cleaned:
+      - id: 2
+        name: "SABnzbd-Home"
+        action: deleted
+        reason: "Stale client pointing at dead LXC 103 (100.125.138.110)"
+        deleted_at: "2026-03-22"
+      - id: 3
+        name: "qBittorrent"
+        action: disabled
+        reason: "Container intentionally parked"
+        disabled_at: "2026-03-22"
+    library_path: "/media/music"
+    verification_status: verified
+    verified_at: "2026-03-25"
+    evidence: |
+      2026-03-22 endgame cleanup on media-home:
+      - Stale download client SABnzbd-Home (id=2, host=100.125.138.110) deleted
+      - qBittorrent (id=3) disabled (container parked)
+      - Remote path mapping id=1 (100.125.138.110) deleted
+      - Remote path mapping id=2 (slskd) deleted
+      - Remaining: SABnzbd (id=1, host=sabnzbd:8080, enabled) is sole active client
+      - Zero remote path mappings remain
+      - Root folder: /media/music (id=2, accessible, 14T free)
+      2026-03-24 stabilization RPM restoration:
+      - RPM id=3 added: host=sabnzbd, /downloads/ → /media/downloads/ (enables SABnzbd import)
+      - RPM id=4 added: host=gluetun, /downloads/ → /media/downloads/ (enables qBit import)
+      - qBittorrent (id=3) re-enabled for Lidarr
+      - Result: 27G drained from complete/music, +340 tracks imported, +5 new artist dirs
+      2026-03-25 unified mount migration:
+      - Removed all narrow Docker mounts (/music, /downloads)
+      - Single mount: /srv/media -> /media (mount ID 1950)
+      - Deleted all RPMs (sabnzbd id=3, gluetun id=4)
+      - 22 items in queue (stuck on metadata match issues, not mount issues)
+    path_parity_status: "CANONICAL — unified /media mount, RPMs removed, atomic imports verified"
+    transition_note: "Unified mount migration completed 2026-03-25. Single /srv/media:/media mount eliminates EXDEV errors."
+
+  prowlarr:
+    planned_vm: media-home
+    planned_status: active
+    planned_canonical_mount: "/srv/media -> /media"
+    planned_note: "Indexer manager activated on media-home 2026-03-21 alongside the active home writer-management plane."
+    transitional_shop_vm: download-stack
+    transitional_shop_status: parked_residue
+    app_root: null
+    downloader_path: null
+    library_path: null
+    verification_status: operational
+    verified_at: "2026-03-21"
+    path_parity_status: "No direct media path dependencies — manages indexer integrations only"
+    transition_note: "Now active on media-home. Shop copy is parked rollback residue only."
+
+  sabnzbd:
+    planned_vm: media-home
+    planned_status: canary_active
+    planned_canonical_mount: "/srv/media -> /media"
+    planned_downloader_path: "/media/downloads"
+    planned_note: "Canary-active on media-home. Unified mount migration 2026-03-25 removed narrow /downloads mount."
+    transitional_shop_vm: download-stack
+    transitional_shop_status: parked_residue
+    compose_mount: "/srv/media -> /media"
+    app_root: null
+    downloader_path: "/media/downloads"
+    library_path: null
+    verification_status: verified
+    verified_at: "2026-03-25"
+    gap_ref: GAP-OP-1388
+    evidence: |
+      2026-03-04 runtime verification via SSH (shop residue):
+      - docker inspect: /mnt/media/downloads -> /downloads
+      - Radarr remote path mapping confirms /downloads/complete/ <-> /downloads/complete/
+      - The host path /mnt/media/downloads IS the same NFS mount as /mnt/media (subpath)
+      - Category subdirs are created dynamically by SAB on download completion
+      2026-03-21 canary activation on media-home:
+      - SABnzbd started via docker compose on media-home (v4.5.5, healthy)
+      - Compose path: /srv/appdata/compose/media-stack/
+      - Host mount: /srv/media/downloads -> container /downloads (via /srv/media -> /media broad mount)
+      - Canary download: SVU S27E15 (3.1 GB) landed in /srv/media/downloads/incomplete/ (staging)
+      - NOT in library root: confirmed no SVU file in /srv/media/tv/
+      - queue_limit=3, Sonarr/Radarr rssSyncInterval=0, qBittorrent disabled in ARR
+      2026-03-25 unified mount migration:
+      - Removed narrow mount: /srv/media/downloads -> /downloads
+      - Updated to: /srv/media -> /media (single mount)
+      - Config updated: complete_dir=/media/downloads/complete, download_dir=/media/downloads/incomplete
+      - Container paths now align with ARR containers via single mount point
+    path_parity_status: "CANONICAL — unified /media mount, downloads at /media/downloads"
+    transition_note: "Unified mount migration completed 2026-03-25. Config updated, paths now /media/downloads/*."
+
+  qbittorrent:
+    vm: media-home
+    plane_status: active_home
+    canonical_mount: "/srv/media -> /media"
+    downloader_path: "/media/downloads"
+    category_paths:
+      sonarr: "/media/downloads/complete/sonarr"
+      radarr: "/media/downloads/complete/radarr"
+    library_path: null
+    remote_path_mappings: null
+    remote_path_mappings_removed:
+      sonarr: "host=gluetun, /downloads/ -> /media/downloads/ (id=3) — removed 2026-03-25"
+      radarr: "host=gluetun, /downloads/ -> /media/downloads/ (id=4) — removed 2026-03-25"
+    network_mode: via_tunnel
+    tunnel_service: gluetun
+    arr_host: gluetun
+    ingest_role: secondary
+    enabled_in:
+      - sonarr
+      - radarr
+    verification_status: verified
+    verified_at: "2026-03-25"
+    evidence: |
+      2026-03-22: qBittorrent v5.1.4 active on media-home. Categories sonarr/radarr
+      with save paths /downloads/complete/{sonarr,radarr}. RPMs in place for both
+      Sonarr and Radarr (host=gluetun). Path visibility confirmed from ARR containers.
+      Connectivity test passed. VPN-tunneled via gluetun (Privado, Netherlands).
+      2026-03-25 unified mount migration:
+      - Removed narrow mount: /srv/media/downloads -> /downloads
+      - Updated to: /srv/media -> /media (single mount)
+      - Config updated: SavePath=/media/downloads/, TempPath=/media/downloads/incomplete/
+      - Category paths updated: /media/downloads/complete/{sonarr,radarr}
+      - RPMs removed from Sonarr (id=3) and Radarr (id=4) — no longer needed
+      - Note: gluetun VPN connection issue at migration time (unrelated to mount change)
+    path_parity_status: "CANONICAL — unified /media mount, downloads at /media/downloads, RPMs removed"
+    transition_note: "Unified mount migration completed 2026-03-25. Config and category paths updated to /media/downloads/*."
+
+  jellyfin:
+    vm: media-home
+    plane_status: active_home
+    canonical_mount: "/srv/media -> /media"
+    historical_shop_vm: streaming-stack
+    historical_shop_mount: "/mnt/media -> /media (ro)"
+    app_root: null
+    downloader_path: null
+    library_path: "/media/movies,/media/tv,/media/music"
+    library_path_hidden: []
+    verification_status: verified
+    verified_at: "2026-03-24"
+    evidence: |
+      2026-03-24 stabilization wave on media-home:
+      - Music library added to Jellyfin via API (POST /Library/VirtualFolders, collectionType=music, path=/media/music)
+      - Scan completed: 23,738 songs, 192 artists, 632 albums indexed
+      - Libraries now: Movies (/media/movies), TV Shows (/media/tv), Music (/media/music), Collections — 4 total
+      - Item counts: 31 movies, 97 series, 2724 episodes, 23738 songs
+    path_parity_status: "CONSISTENT — 3 active media libraries + collections, Music now live"
+
+  navidrome:
+    vm: media-home
+    plane_status: active_home
+    canonical_mount: "/srv/media -> /media"
+    historical_shop_vm: streaming-stack
+    historical_shop_mount: "/mnt/media/music -> /music (ro)"
+    app_root: null
+    downloader_path: null
+    library_path: "/media/music"
+    verification_status: verified
+    verified_at: "2026-03-25"
+    evidence: "Feb 25 audit + 2026-03-04: shop docker inspect confirms historical mount. 2026-03-20: canonical runtime now on media-home VM 106. 2026-03-25: unified mount migration — removed narrow /music mount, music now at /media/music via single /media mount (read-only)."
+    path_parity_status: "CANONICAL — unified /media mount (ro)"
+
+  bazarr:
+    vm: media-home
+    plane_status: active_home
+    canonical_mount: "/srv/media -> /media"
+    historical_shop_vm: streaming-stack
+    historical_shop_mount: "/mnt/media -> /media (ro)"
+    app_root: null
+    downloader_path: null
+    library_path: "/media/movies,/media/tv"
+    verification_status: verified
+    verified_at: "2026-03-04"
+    evidence: "Feb 25 audit + 2026-03-04: shop docker inspect confirms historical mount. 2026-03-20: service is defined on media-home VM 106 and intentionally parked."
+    path_parity_status: "CONSISTENT"
+
+# Post-download automation path topology
+# Added 2026-03-24 as part of media E2E canonicalization
+post_download_automation:
+  unpackerr:
+    vm: media-home
+    status: active
+    container_path: /downloads
+    host_path: /srv/media/downloads
+    watch_interval: 1m
+    connected_services: [radarr, sonarr, lidarr]
+    note: "Monitors ARR queues for completed downloads, extracts archives if needed"
+  autopulse:
+    vm: media-home
+    status: active
+    listen_port: 2875
+    trigger: webhook
+    target: jellyfin
+    mount: "/srv/appdata/compose/media-write/volumes/autopulse -> /data"
+    path_rewrites:
+      radarr:
+        from: /media/movies
+        to: /media/movies
+        status: identity
+      sonarr:
+        from: /media/tv
+        to: /media/tv
+        status: identity
+      lidarr:
+        from: /media/music
+        to: /media/music
+        status: identity
+    fixed_at: "2026-03-24"
+    fix_note: |
+      Path rewrites updated from stale narrow-mount era to identity mappings.
+      Container recreated via media-stack compose on media-home.
+      Prior bug: old FROM values (/tv, /movies, /music) caused substring replacement
+      inside broad-mount paths (/media/tv → /media/media/tv). Fixed by setting
+      FROM to match current ARR paths.
+
+# Known findings from Feb 25 audit requiring attention
+known_findings:
+  - id: posterizarr-permissions
+    container: posterizarr
+    finding: "Runs as nobody:65534, mounts owned 1000:1000 — rw mounts NOT_WRITABLE"
+    gap_ref: GAP-OP-911
+    severity: medium
+
+  - id: flaresolverr-anonymous-volume
+    container: flaresolverr
+    finding: "Anonymous volume for /config — fragile on recreate"
+    gap_ref: GAP-OP-912
+    severity: low
+
+  - id: decypharr-anonymous-volume
+    container: decypharr
+    finding: "Anonymous volume for /app — fragile on recreate"
+    gap_ref: GAP-OP-912
+    severity: low
+
+  - id: radarr-unmapped-folders
+    container: radarr
+    finding: "34 unmapped folders in /movies root — _FAILED_*, _UNPACK_*, duplicate release names"
+    severity: low
+    verified_at: "2026-03-04"
+    detail: "Artifacts from failed imports and unpack operations. Not blocking but should be cleaned."
+
+# Agent accessibility policy
+agent_accessibility:
+  policy: "100% CLI/API driven. No web UI dependency."
+  date: "2026-03-24"
+  capabilities_available:
+    - media.queue.reconcile  # Radarr only
+    - media.content.snapshot.refresh
+    - media.content.ledger.reconcile
+    - media.downloads.bloat.status
+    - media.e2e.verify
+    - media.health.check
+    - media.sonarr.policy.parity
+    - media.pipeline.trace
+  capabilities_needed:
+    - {name: media.queue.reconcile.sonarr, priority: high}
+    - {name: media.queue.reconcile.lidarr, priority: high}
+    - {name: media.import.cli, priority: critical}
+    - {name: media.library.untracked.scan, priority: high}
+    - {name: media.duplicate.cleanup, priority: medium}
+    - {name: media.staging.cross.reference, priority: medium}
+  interim_pattern: "Inline API calls in controller prompts until caps are built"
+
+# Enforcement
+drift_gate: D408
+verification_command: "media.path.authority.verify"
+verification_description: |
+  Future capability that SSHes to download-stack and streaming-stack,
+  runs docker inspect on each service container, and compares actual
+  mount paths against this contract. Requires runtime access.
+
+# Migration constraint
+migration_constraint: |
+  When migrating from shop to home, ALL path tuples must be re-verified
+  against the new compose configuration and NFS mount points.
+  See MEDIA-SHOP-HOME-MIGRATION-TRANSACTION-PACKET.md Phase 1.
+
+# Lifecycle
+promotion_lifecycle:
+  current: active
+  promotion_path:
+    - from: active
+      to: enforced
+      requires: "Drift gate created that SSHes and validates all path tuples"
+  blocked_by:
+    - "Drift gate (media.path.authority.verify capability) not yet created"
+    - "GAP-OP-1387 root cause hypothesis was wrong — no fix needed, but gap should be re-evaluated"
+
+# Cross-references
+cross_references:
+  container_path_audit: "docs/reference/audits/media-container-path-trace-2026-02-25.md"
+  availability_contract: "ops/bindings/media.availability.progression.contract.yaml"
+  queue_policy: "ops/bindings/media.queue.reconciliation.policy.yaml"
+  e2e_spec: "ops/bindings/media.e2e.verification.spec.yaml"
+  service_registry: "ops/bindings/media.services.yaml"

@@ -1,0 +1,175 @@
+# Status: authoritative
+# Last verified: 2026-03-19
+
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-19
+scope: mint-customer-mailbox-standard-procedure
+
+version: "1.0"
+updated_at: "2026-03-19"
+
+purpose: |
+  Define the boring operating procedure for Mint customer email so Morpheus,
+  Artie, Fin, Flying Dutchman, and human operators all read the same mailbox
+  truth and do not treat Outlook conversation rollups as transport duplication.
+
+authority:
+  canonical_mailbox: team@mintprints.com
+  ingress_aliases: []
+  executive_safety_copy_mailboxes:
+    - ronny@mintprints.com
+  protected_historical_mailboxes:
+    - info@mintprints.com
+    - info-legacy@mintprints.onmicrosoft.com
+  agent_mutation_mailboxes:
+    - team@mintprints.com
+    - ronny@mintprints.com
+  parked_legacy_mailboxes:
+    - info-legacy@mintprints.onmicrosoft.com
+  system_sender_mailboxes:
+    - no-reply@mintprints.com
+
+standard_procedure:
+  work_queue_truth:
+    authoritative_folder: "team@mintprints.com / Inbox"
+    rule: "Customer-service work starts from team@ Inbox only."
+    non_authoritative_views:
+      - "Outlook conversation rollups across folders"
+      - "All Accounts merged views"
+      - "Sent Items counts"
+  reply_identity:
+    required_mailbox: team@mintprints.com
+    rule: "Customer replies go out from team@ only unless Ronny is intentionally handling an executive-only thread."
+  ingress_handling:
+    info_alias_rule: "info@mintprints.com is a protected historical mailbox. Agents may read it for lineage and context but must not move, draft, update, or reply from it."
+    ronny_rule: "ronny@mintprints.com is executive-only and not part of the normal customer-service queue."
+    ronny_promote_rule: "If a real customer thread lands only in ronny@, promote it into team@ through the governed promote-to-team surface before agent handling."
+    operational_lane_rule: "team@ remains the operational customer-service lane for new agent work, but it must never overwrite or absorb the historical info@ mailbox identity."
+  voice_ingress_handling:
+    canonical_number: "+15619335513"
+    carrier_provider: twilio
+    orchestration_provider: vapi
+    projection_rule: "If the assistant determines human follow-up is required, the governed voice ingest lane sends a structured internal email into team@ so Morpheus works the next step from the canonical mailbox."
+    non_projection_rule: "Calls fully handled by the assistant stay in runtime interaction records and do not spam the mailbox lane."
+  system_sender_handling:
+    no_reply_rule: "no-reply@mintprints.com is a hidden transactional sender only and must not receive shadow copies of human customer mail."
+  duplicate_interpretation:
+    authoritative_test: "Compare folder placement plus internetMessageId before calling something a duplicate."
+    expected_non_bug_patterns:
+      - "One sent copy in ronny@ Sent Items plus one delivered copy in team@ Inbox"
+      - "One sent copy in ronny@ Sent Items plus one delivered copy in ronny@ Inbox"
+    bug_definition: "A real duplicate bug is two or more items in the same authoritative folder with the same internetMessageId."
+
+history_context:
+  rule: "Customer history may be read across the governed Mint mailbox history scope, but queue truth and reply anchors stay on team@ while info@ remains a protected read-only history lane."
+  live_search_capability: communications.mail.search
+  archive_search_capability: communications.mailarchiver.search
+  live_context_mailboxes:
+    - team@mintprints.com
+    - info@mintprints.com
+  archive_context_mailboxes:
+    - team@mintprints.com
+    - info@mintprints.com
+    - info-legacy@mintprints.onmicrosoft.com
+    - ronny@mintprints.com
+  archive_alias_map: {}
+  invariants:
+    - "Auxiliary mailbox history is read-only context, not queue truth."
+    - "Historical info@ context remains attached to the original info@ mailbox identity and must not be remapped into team@."
+    - "Agents may read historical info@ threads but must never mutate the mailbox or change its live identity."
+    - "Executive safety-copy history from ronny@ may inform context but must not replace the team@ reply anchor."
+    - "Cross-mailbox live history is intentionally limited to read-only context on info@ and operational work on team@."
+    - "Ronny-only customer ingress must be promoted into team@ before it becomes agent queue truth."
+
+agent_rules:
+  morpheus:
+    mailbox: team@mintprints.com
+    launch_surface: MINT-MORPHEUS-01.launch
+    start_surface: mint.customer.inbox.triage
+    queue_surface: mint.customer.inbox.work_items
+    reorder_surface: mint.customer.reorder.resolve
+    reply_surface: mint.customer.reply.draft
+    attachment_resolve_surface: mint.customer.forwarded.attachment.resolve
+    revision_prepare_surface: mint.customer.artwork.revision.prepare
+    delta_capture_surface: mint.customer.thread.delta.capture
+    queue_order: oldest_first
+    rule: "Do not triage customer work from ronny@ or from Outlook merged conversation views."
+  artie:
+    mailbox: team@mintprints.com
+    rule: "Use the team@ thread as the customer-facing handoff anchor."
+  fin:
+    mailbox: team@mintprints.com
+    archive_account_contract_id: microsoft-team
+    rule: "Treat account 5 / microsoft-team as the canonical direct-comms history lane."
+  flying_dutchman:
+    rule: "Close loops only when D399 is green and the team archive lane is healthy."
+
+outlook_local_interpretation:
+  compose_default_mailbox: team@mintprints.com
+  ui_warning: |
+    Outlook can show one send plus one delivery as multiple visible rows when
+    conversations span Sent Items and Inbox across Ronny plus shared mailbox
+    surfaces. That view is not authoritative for duplicate diagnosis.
+  operator_check_order:
+    - "Check team@ Inbox first."
+    - "Check ronny@ Inbox only for executive-direct mail."
+    - "Treat Sent Items as expected send trace, not queue truth."
+    - "If still unclear, compare internetMessageId and folder placement with governed Microsoft reads."
+
+boring_invariants:
+  required:
+    - "team@mintprints.com remains the only canonical customer-service mailbox"
+    - "Voice follow-up projections land in team@mintprints.com only"
+    - "info@mintprints.com remains a standalone protected historical mailbox"
+    - "info@mintprints.com is read-only for agents"
+    - "ronny@mintprints.com remains executive/safety-copy only"
+    - "Customer-path duplicates are measured only within team@ Inbox"
+    - "All agent customer triage starts from governed team@ surfaces"
+    - "resolved_name never doubles as the greeting source in customer-facing mail"
+  forbidden:
+    - "Repointing info@ mailbox identity, alias, or anchor onto team@"
+    - "Agent draft/update/move operations against info@mintprints.com or info-legacy@mintprints.onmicrosoft.com"
+    - "Inbox redirect rules from info@ into team@"
+    - "Agents treating Outlook conversation rollups as proof of transport duplication"
+    - "Hidden BCC or shadow-copy drift that sends human customer mail into no-reply@ or any other non-canonical mailbox"
+    - "A separate voice-only queue drifting away from team@ without explicit canon"
+
+receipts_and_controls:
+  rule: "Every Microsoft mailbox mutation must leave a governed receipt with operation, target mailbox, status, and exit code."
+  enforced_by:
+    - ops/plugins/providers/microsoft/bin/microsoft-cap-exec
+  receipt_root: "/Users/ronnyworks/code/.runtime/spine/mailroom/outbox/reports/microsoft-mailbox-op-receipts"
+  required_fields:
+    - timestamp_utc
+    - operation
+    - target_mailbox
+    - mutating
+    - status
+    - exit_code
+    - contract_path
+
+verification:
+  gates:
+    - surfaces/verify/d399-microsoft-mint-customer-mailbox-canonical-lock.sh
+  runtime_checks:
+    - ./bin/ops cap run communications.mailarchiver.mint.team.verify
+    - ./bin/ops cap run mint.customer.inbox.triage
+    - ./bin/ops cap run mint.customer.inbox.work_items
+    - ./bin/ops cap run mint.customer.reorder.resolve -- --help
+    - ./bin/ops cap run mint.customer.reply.draft -- --help
+    - ./bin/ops cap run mint.customer.forwarded.attachment.resolve -- --help
+    - ./bin/ops cap run mint.customer.artwork.revision.prepare -- --help
+    - ./bin/ops cap run MINT-MORPHEUS-01.launch
+  operator_incident_checklist:
+    - "Capture exact subject and mailbox."
+    - "Check team@ Inbox count for the exact subject."
+    - "Compare internetMessageId for every visible copy."
+    - "Separate Sent Items copies from Inbox copies."
+    - "Only escalate as duplication if the same internetMessageId appears twice in team@ Inbox."
+
+references:
+  - ops/bindings/communications.providers.contract.yaml
+  - ops/bindings/mail.archiver.account.linkage.contract.yaml
+  - ops/bindings/mail.archiver.alias.boundary.contract.yaml
+  - docs/governance/domains/microsoft.md

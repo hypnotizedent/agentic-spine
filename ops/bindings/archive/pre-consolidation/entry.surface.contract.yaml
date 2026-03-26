@@ -1,0 +1,63 @@
+# Entry Surface Contract
+# Status: authoritative
+# Last verified: 2026-03-23
+
+version: 3
+updated_at: "2026-03-23"
+owner: "@ronny"
+scope: startup-entry-parity
+
+startup_block:
+  marker_start: "<!-- SPINE_STARTUP_BLOCK -->"
+  marker_end: "<!-- /SPINE_STARTUP_BLOCK -->"
+  required_lines:
+    - "cd ~/code/agentic-spine"
+    - "./bin/ops cap run session.v3.attach -- --allow-no-loop"
+  forbidden_lines:
+    - "./bin/ops cap run session.start"
+    - "./bin/ops cap run session.start full"
+    - "./bin/ops cap run session.start degraded"
+    - "./bin/ops status"
+    - "./bin/ops cap list"
+    - "./bin/ops cap show verify.pack.run"
+    - "./bin/ops cap run stability.control.snapshot"
+    - "./bin/ops cap run verify.route.recommend"
+    - "./bin/ops cap run verify.run -- fast"
+    - "./bin/ops cap run verify.run -- domain <domain>"
+    - "./bin/ops cap run verify.release.run"
+  # Post-work verify (NOT in startup block — runs after domain changes, before commit):
+  #   ./bin/ops cap run verify.run -- fast
+  #   ./bin/ops cap run verify.run -- domain <domain>
+  # Release/nightly only:
+  #   ./bin/ops cap run verify.release.run
+
+surfaces:
+  - id: codex
+    path: AGENTS.md
+  - id: claude_project
+    path: CLAUDE.md
+  - id: opencode
+    path: ~/code/workbench/dotfiles/opencode/OPENCODE.md
+  - id: claude_skill
+    path: .claude/skills/claude-ai-skill/SKILL.md
+    match_mode: contains
+    # Skill file uses prose bootstrap, not marker-delimited block.
+    # D124 should validate that session.v3.attach appears and forbidden lines do not.
+  # claude_home (~/.claude/CLAUDE.md) is a redirect shim only — governed by D46, not D124.
+  # It does not carry the startup block and is not an agent entry surface.
+
+# Gateway-first routing policy (AOF v1.1 Move 1 cutover)
+# All surfaces should declare the spine gateway as primary MCP server.
+# Domain-specific MCP servers (finance-agent, mint-*) are optional supplements.
+# spine-rag is absorbed by the gateway and should not appear as a standalone server.
+routing_policy:
+  model: gateway-first
+  primary_server: spine
+  absorbed_servers:
+    - spine-rag
+  supplemental_servers:
+    - finance-agent
+    - mint-pricing
+    - mint-suppliers
+    - MCP_DOCKER
+    - playwright

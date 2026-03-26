@@ -1,0 +1,166 @@
+# ===============================================================================
+# Stack Discovery Source Registry (SSOT)
+# ===============================================================================
+# External resource catalogs and data sources for the self-hosted tool
+# knowledge base. Adding a new source requires only appending an entry
+# to this file. The pipeline (stack.discovery.refresh) reads this registry
+# to determine what to fetch.
+#
+# Source plan: PLAN-NETWORK-SECURITY-OPS-WORKER-20260303
+# Parent loop: LOOP-NETSEC-W1-STACK-KNOWLEDGE-BASE-20260303
+# Linked gap: GAP-OP-1460 (stack discovery knowledge base)
+# Contract: STACK_DISCOVERY_KNOWLEDGE_V1
+# ===============================================================================
+
+registry_id: STACK_DISCOVERY_SOURCES_V1
+version: "1.0"
+status: active
+created: "2026-03-03"
+owner: "@ronny"
+
+description: >
+  Registry of external catalogs and data sources that feed the
+  stack discovery knowledge base. Each source is independently
+  fetchable. The pipeline processes sources in priority order.
+  Sources can be websites (HTML scrape), GitHub repos (git clone),
+  REST APIs (JSON fetch), or local files.
+
+# ────────────────────────────────────────────────────────────────────────────
+# SOURCE SCHEMA
+# ────────────────────────────────────────────────────────────────────────────
+source_schema:
+  required_fields:
+    - id
+    - name
+    - url
+    - type
+    - fetch_method
+    - format
+    - freshness
+    - priority
+  optional_fields:
+    - detail
+    - schema_fields
+    - auth_required
+    - rate_limit
+
+# ────────────────────────────────────────────────────────────────────────────
+# SOURCES
+# ────────────────────────────────────────────────────────────────────────────
+sources:
+  # ── PRIMARY SOURCES ──────────────────────────────────────────────────────
+
+  - id: awesome-selfhosted
+    name: "Awesome Self-Hosted"
+    url: "https://github.com/awesome-selfhosted/awesome-selfhosted"
+    type: github_repo
+    fetch_method: "git clone --depth 1 / git pull"
+    format: markdown
+    schema_fields: ["name", "description", "url", "license", "language", "category"]
+    freshness: weekly
+    priority: primary
+    auth_required: false
+    detail: >
+      Community-curated list of self-hosted software. 190K+ stars.
+      Primary data file is README.md with structured markdown lists.
+
+  - id: awesome-sysadmin
+    name: "Awesome Sysadmin"
+    url: "https://github.com/awesome-foss/awesome-sysadmin"
+    type: github_repo
+    fetch_method: "git clone --depth 1 / git pull"
+    format: markdown
+    schema_fields: ["name", "description", "url", "license", "category"]
+    freshness: weekly
+    priority: primary
+    auth_required: false
+    detail: >
+      Curated list of open-source sysadmin tools. Covers monitoring,
+      configuration management, DNS, DHCP, LDAP, VPN, and more.
+
+  - id: local-service-registry
+    name: "Spine SERVICE_REGISTRY"
+    url: "local"
+    type: local_file
+    fetch_method: "Read docs/governance/SERVICE_REGISTRY.yaml"
+    format: yaml
+    schema_fields: ["name", "vm", "status", "domain", "health_url"]
+    freshness: "real-time"
+    priority: primary
+    auth_required: false
+    detail: >
+      Cross-reference source. Identifies which tools from external
+      catalogs are already deployed in the local infrastructure.
+      Results include an already_deployed flag based on this source.
+
+  # ── SECONDARY SOURCES ───────────────────────────────────────────────────
+
+  - id: selfh-st
+    name: "selfh.st (Self-Hosted Directory)"
+    url: "https://selfh.st/apps/"
+    type: website
+    fetch_method: "HTTP scrape (HTML parsing)"
+    format: html
+    schema_fields: ["name", "description", "url", "category", "docker_support"]
+    freshness: weekly
+    priority: secondary
+    auth_required: false
+    detail: >
+      Curated directory of self-hosted applications with Docker
+      support indicators and category taxonomy.
+
+  - id: linuxserver-fleet
+    name: "LinuxServer.io Fleet"
+    url: "https://fleet.linuxserver.io/api/v2/images"
+    type: rest_api
+    fetch_method: "HTTP GET (JSON response)"
+    format: json
+    schema_fields: ["name", "image", "description", "pulls", "stars", "category"]
+    freshness: weekly
+    priority: secondary
+    auth_required: false
+    rate_limit: "60 req/min"
+    detail: >
+      LinuxServer.io maintains high-quality Docker images for
+      hundreds of self-hosted applications. Fleet API provides
+      structured metadata including pull counts and categories.
+
+  # ── TERTIARY SOURCES ────────────────────────────────────────────────────
+
+  - id: alternativeto
+    name: "AlternativeTo (self-hosted filter)"
+    url: "https://alternativeto.net/platform/self-hosted/"
+    type: website
+    fetch_method: "HTTP scrape (HTML parsing)"
+    format: html
+    schema_fields: ["name", "description", "url", "alternatives_to", "license"]
+    freshness: monthly
+    priority: tertiary
+    auth_required: false
+    rate_limit: "Be respectful (max 1 req/sec)"
+    detail: >
+      Discovery-oriented. Useful for finding alternatives to specific
+      commercial tools. Monthly refresh is sufficient due to slow churn.
+
+# ────────────────────────────────────────────────────────────────────────────
+# HOW TO ADD A NEW SOURCE
+# ────────────────────────────────────────────────────────────────────────────
+add_source_instructions: >
+  To add a new source:
+  1. Append an entry to the sources list above.
+  2. Include all required fields (id, name, url, type, fetch_method,
+     format, freshness, priority).
+  3. Run `./bin/ops cap run stack.discovery.sources.add` to validate
+     the entry and trigger an initial fetch.
+  4. Alternatively, add manually and run `stack.discovery.refresh`
+     to include the new source in the next pipeline run.
+
+# ────────────────────────────────────────────────────────────────────────────
+# FRESHNESS POLICY
+# ────────────────────────────────────────────────────────────────────────────
+freshness_policy:
+  weekly: "Fetch every 7 days"
+  monthly: "Fetch every 30 days"
+  real_time: "Read from local file on every pipeline run"
+  max_staleness: "36 hours from last successful fetch"
+  success_threshold: "80% of sources must succeed per pipeline run"

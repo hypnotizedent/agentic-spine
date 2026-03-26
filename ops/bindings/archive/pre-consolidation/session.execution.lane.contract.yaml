@@ -1,0 +1,202 @@
+---
+version: "1.1"
+status: authoritative
+owner: "@ronny"
+last_updated: "2026-03-23"
+scope: execution-lane-bootstrap-contract
+authority_state: authoritative
+change_log:
+  - version: "1.1"
+    date: "2026-03-23"
+    changes: "Added auto-cleanup policy for session.v3.attach integration"
+  - version: "1.0"
+    date: "2026-03-19"
+    changes: "Initial execution lane contract"
+
+# Execution Lane Contract
+# Defines lane types, metadata requirements, closeout states, and scanner policy
+
+lane_types:
+  discovery:
+    description: "Read-only exploration, research, analysis"
+    allowed_mutations: []
+    allowed_writes:
+      - "*.md"
+      - ".evidence/**"
+      - "docs/**/*.md"
+    verify_required: false
+    verify_must_pass: false
+    closeout_options:
+      - abandoned
+      - findings-documented
+    default_closeout: findings-documented
+
+  fix:
+    description: "Bounded bug fix or gap closure"
+    allowed_mutations:
+      - code
+      - config
+      - bindings
+    verify_required: true
+    verify_must_pass: false
+    closeout_options:
+      - landed
+      - deferred
+      - blocked
+    default_closeout: landed
+
+  landing:
+    description: "Land approved changes from side branch to main"
+    allowed_mutations:
+      - merge-only
+    verify_required: true
+    verify_must_pass: true
+    closeout_options:
+      - landed
+    default_closeout: landed
+
+  review:
+    description: "Review existing code or proposed changes"
+    allowed_mutations: []
+    allowed_writes:
+      - "*.md"
+      - ".evidence/**"
+    verify_required: false
+    verify_must_pass: false
+    closeout_options:
+      - review-complete
+      - changes-requested
+    default_closeout: review-complete
+
+  hotfix:
+    description: "Emergency fix directly to main"
+    allowed_mutations:
+      - code
+      - config
+    requires_incident_ref: true
+    verify_required: false
+    verify_must_pass: false
+    closeout_options:
+      - landed
+    default_closeout: landed
+
+# ── Fast Lane ────────────────────────────────────────────────────
+# Bounded work mode that collapses ceremony to attach-do-receipt.
+# Triggered via: session.v3.attach --fast-lane
+fast_lane:
+  description: >
+    Reduced-ceremony mode for single-domain patches touching ≤5 files
+    with no shared authority hotspot mutations. Collapses to
+    attach → do → receipt without loop/gap/disposition overhead.
+  criteria:
+    max_files: 5
+    single_domain: true
+    no_hotspot_mutations: true
+    domain_has_verify_coverage: true
+  receipt_schema:
+    required_fields:
+      - session_id
+      - files_touched
+      - domain
+      - verify_result
+      - commit_sha
+    excluded_fields:
+      - loop_id
+      - gap_id
+      - disposition
+  hotspot_surfaces:
+    - ops/bindings/operational.gaps.yaml
+    - ops/bindings/gate-id-reservations.yaml
+    - ops/bindings/path.claims.yaml
+    - friction-queue.ndjson
+
+metadata_schema:
+  required_fields:
+    - lane_id
+    - type
+    - created_at
+    - created_by
+    - branch
+    - worktree_path
+    - origin_commit
+    - status
+  optional_fields:
+    - parent_loop
+    - domain
+    - incident_ref
+    - intended_closeout
+    - write_scope
+    - rollback_plan
+    - deferred_plan_id
+    - deferred_loop_id
+    - deferred_review_date
+    - branch_retention_state
+    - branch_tracking_ref
+    - branch_pr_url
+    - closed_at
+    - closed_by
+    - closeout_reason
+    - landing_commit
+
+allowed_statuses:
+  - active
+  - landed
+  - deferred
+  - abandoned
+  - blocked
+  - findings-documented
+  - review-complete
+  - changes-requested
+  - reverted
+
+stale_detection:
+  active_threshold_days: 14
+  warn_after_days: 7
+  check_frequency: daily
+  scanner_policy: warn_only
+  auto_cleanup_on_session_attach: true
+  auto_cleanup_conditions:
+    - terminal_state_reached  # landed, abandoned, deferred
+    - inactive_threshold_exceeded  # >14 days
+    - branch_deleted
+    - branch_merged_to_main
+
+worktree_conventions:
+  root: "/Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine"
+  naming_pattern: "{lane_type}-{branch_basename}"
+  cleanup_after_closeout: auto
+  cleanup_policy: "session.v3.attach runs worktree-lifecycle-reconcile which auto-cleans terminal-state and stale lanes"
+
+branch_conventions:
+  prefix: "codex/"
+  naming_pattern: "codex/{lane_type}-{description}"
+  tracking_remote: origin
+  base_branch: main
+
+state_storage:
+  root: "/Users/ronnyworks/code/.runtime/spine/state/execution-lanes"
+  format: yaml
+  per_lane_file: true
+  audit_log: "/Users/ronnyworks/code/.runtime/spine/state/execution-lanes/audit.log"
+
+closeout_requirements:
+  discovery:
+    evidence_required: true
+    verify_required: false
+    reason_required: false
+  fix:
+    evidence_required: true
+    verify_required: true
+    reason_required: true
+  landing:
+    evidence_required: true
+    verify_required: true
+    reason_required: false
+  review:
+    evidence_required: true
+    verify_required: false
+    reason_required: true
+  hotfix:
+    evidence_required: true
+    verify_required: false
+    reason_required: true

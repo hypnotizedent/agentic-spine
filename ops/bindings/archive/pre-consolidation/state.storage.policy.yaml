@@ -1,0 +1,89 @@
+# Status: authoritative
+# Last verified: 2026-03-03
+# Scope: universal-yaml-vs-sqlite-state-policy
+
+version: 1
+updated_at: "2026-03-03"
+owner: "@ronny"
+status: authoritative
+scope: universal-yaml-vs-sqlite-state-policy
+
+contracts:
+  intake_lifecycle: ops/bindings/intake.lifecycle.contract.yaml
+  master_registry: ops/bindings/master.inventory.registry.yaml
+  projection_contract: ops/bindings/domain.projection.contract.yaml
+
+policy:
+  default_for_governed_contracts: yaml
+  default_for_high_volume_runtime_state: sqlite
+  require_explicit_justification_for_exceptions: true
+
+yaml_storage:
+  allowed_data_classes:
+    - contracts
+    - normalized_authorities
+    - desired_state_mappings
+    - master_registry_rows
+    - projection_contracts
+  canonical_examples:
+    - ops/bindings/intake.lifecycle.contract.yaml
+    - ops/bindings/intake.envelope.schema.yaml
+    - ops/bindings/master.inventory.registry.yaml
+    - ops/bindings/domain.projection.contract.yaml
+    - ops/bindings/internet.asset.registry.yaml
+    - ops/bindings/hardware.inventory.yaml
+    - ops/bindings/home.device.registry.yaml
+  anti_patterns:
+    - id: yaml-high-volume-events
+      description: "Do not append high-volume telemetry events into YAML bindings."
+    - id: yaml-runtime-queue-state
+      description: "Do not persist queue cursor, worker heartbeats, or ephemeral runtime state in YAML."
+    - id: yaml-probe-history
+      description: "Do not store probe-by-probe runtime histories in YAML."
+
+sqlite_storage:
+  allowed_data_classes:
+    - high_volume_events
+    - telemetry_histories
+    - queue_runtime_state
+    - ephemeral_probe_results
+  canonical_examples:
+    - "mailroom worker/task queue runtime stores (SQLite-backed where implemented)"
+    - "telemetry/event history stores for high-churn probes"
+    - "runtime-local service data stores such as app-local sqlite3 databases"
+  anti_patterns:
+    - id: sqlite-canonical-contracts
+      description: "Do not store canonical contracts or normalized authority maps in SQLite."
+    - id: sqlite-desired-state-authority
+      description: "Do not make SQLite the single source of truth for desired-state mappings."
+
+decision_matrix:
+  - data_class: contracts
+    storage: yaml
+    rationale: "Human-reviewable, versioned, low-churn governance artifacts."
+  - data_class: normalized_authorities
+    storage: yaml
+    rationale: "Deterministic SSOT surfaces and lineage references."
+  - data_class: desired_state_mappings
+    storage: yaml
+    rationale: "Declarative target state for enforcement and projection."
+  - data_class: high_volume_events
+    storage: sqlite
+    rationale: "Append-heavy event streams with query/retention needs."
+  - data_class: telemetry_histories
+    storage: sqlite
+    rationale: "Frequent writes and rolling-window analytics."
+  - data_class: queue_runtime_state
+    storage: sqlite
+    rationale: "Transactional queue semantics and worker cursors."
+  - data_class: ephemeral_probe_results
+    storage: sqlite
+    rationale: "Transient probe signals and high-cardinality observations."
+
+enforcement:
+  verify_gates:
+    - D232
+    - D338
+    - D339
+    - D340
+  fail_on_policy_violation: true

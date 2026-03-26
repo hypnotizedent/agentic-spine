@@ -1,0 +1,196 @@
+# Mint Production Package Authority
+# Status: authoritative
+# Last verified: 2026-03-10
+# Scope: mint-production-package-staging
+
+version: 1
+updated_at: "2026-03-10"
+owner: "@ronny"
+status: authoritative
+scope: mint-production-package-staging
+
+purpose: >
+  Define the minimal governed machine-package staging runtime between immutable
+  production handoff records and the boring filesystem/export boundary. A
+  machine package is a derived staging object, not canonical business truth and
+  not machine execution.
+
+non_goals:
+  - direct machine execution or GUI automation
+  - hot folder monitoring or RIP queue injection
+  - scheduling presses, embroidery heads, or production slots
+  - replacing canonical order, handoff, or artwork_binding truth
+  - inventing a new production CRM or proof object model
+  - treating staged packages as source of truth
+
+contracts:
+  production_handoff_authority: ops/bindings/mint.production.handoff.authority.yaml
+  production_readiness_authority: ops/bindings/mint.production.readiness.authority.yaml
+  order_truth_authority: ops/bindings/mint.order.truth.authority.yaml
+
+package_record:
+  canonical_input: production_handoff_id
+  create_rule: >
+    mint.production.package.stage reads an existing immutable production_handoff
+    record, compiles a machine-package manifest/bundle for a specific target
+    class, and persists a governed staging record plus staged bundle path. It
+    does not execute the job on the machine.
+  identity_rule:
+    stable_key: production_handoff_id + target_machine
+    idempotent_create: >
+      Staging a package twice for the same handoff + target must reuse the
+      existing package record and bundle path instead of minting duplicates.
+    mutability: >
+      The package record is immutable after creation because it is a historical
+      staging snapshot. If business facts change, create a new handoff for the
+      new order_revision, then stage new packages from that handoff.
+  required_fields:
+    - production_package_id
+    - production_handoff_id
+    - order_id
+    - order_revision_id
+    - target_class
+    - machine_target
+    - package_state
+    - source_asset_refs
+    - staged_bundle_path
+    - manifest_path
+    - created_at
+    - created_by
+    - receipt_notes
+
+target_scope:
+  supported_targets:
+    barudan:
+      target_class: embroidery
+      machine_target: barudan
+      accepted_extensions: [dst, u00]
+      near_ready_extensions: [emb, pxf, edr]
+      readiness_rule: >
+        Stage package only if handoff contains at least one line item with
+        method=embroidery and approved production_asset_refs ending in .dst or
+        .u00. Do not synthesize .dst from non-embroidery assets.
+      blocking_rule: >
+        If handoff has embroidery lines but no method-compatible .dst/.u00
+        assets, stop with honest blocking message. Do not guess or convert.
+    screenpro:
+      target_class: screen_print
+      machine_target: screenpro
+      accepted_extensions: [eps, pdf, ai, svg]
+      readiness_rule: >
+        Stage package only if handoff contains at least one line item with
+        method matching screen_print/transfers and approved production_asset_refs
+        ending in .eps (preferred), .pdf, .ai, or .svg. Prefer .eps for
+        screenpro compatibility.
+      blocking_rule: >
+        If handoff has screen-print lines but no method-compatible vector
+        assets, stop with honest blocking message. Do not treat customer proof
+        files as machine-ready production files.
+    gtx:
+      target_class: transfers
+      machine_target: gtx
+      accepted_extensions: [gtpl]
+      deferred: true
+      deferral_reason: >
+        GTX runtime boundary is still unclear; no proven boring export/staging
+        pattern exists yet. Agents should not attempt GTX package staging in v1.
+
+forbidden_shortcuts:
+  no_handoff_bypass:
+    description: Never stage packages directly from paid order truth
+    enforcement: >
+      mint.production.package.stage requires an existing immutable
+      production_handoff_id as input. It does not read orders/order_revisions
+      directly.
+  no_asset_synthesis:
+    description: Never synthesize .dst from non-embroidery assets
+    enforcement: >
+      If handoff has embroidery lines but no .dst/.u00 production assets, block
+      staging with honest message. Do not convert customer proofs or invent
+      machine files.
+  no_proof_promotion:
+    description: Never treat customer proof files as production files
+    enforcement: >
+      Staging reads production_asset_refs from the handoff. If those refs point
+      to proofs instead of production-approved assets, block honestly.
+  no_gui_automation:
+    description: Never automate machine GUI software or watched folders
+    enforcement: >
+      Staging writes to a boring local/runtime staging boundary only. Future
+      adapters may copy from staged bundles to USB/hot folders, but v1 does not
+      execute machine automation.
+
+runtime_surface:
+  stage:
+    name: mint.production.package.stage
+    description: Stage a governed machine package from an immutable production handoff
+    implementation_status: REAL (mutating runtime package derived from production_handoff truth)
+    inputs:
+      - production_handoff_id (required)
+      - optional target override (constrained to supported_targets scope)
+    storage:
+      packages_dir: runtime/domain-state/mint/production-packages/
+      packages_index: runtime/domain-state/mint/production-packages-index.yaml
+      staging_root: runtime/domain-state/mint/production-packages/staged-bundles/
+    outputs:
+      - production_package_id
+      - package_state (staged | blocked)
+      - target_class
+      - machine_target
+      - staged_bundle_path
+      - manifest_path
+      - source_asset_count
+      - package_file
+      - receipt_notes
+    blockers:
+      - production_handoff must exist
+      - handoff must have at least one line matching target method
+      - required method-compatible approved production assets must exist
+      - no synthesis, no GUI automation, no machine dispatch
+    downstream_boundary:
+      - USB/export media copy remains manual/future
+      - press scheduling remains manual/external
+      - machine dispatch remains downstream
+
+package_manifest:
+  minimal_fields:
+    - production_package_id
+    - production_handoff_id
+    - order_id
+    - order_revision_id
+    - target_class
+    - machine_target
+    - staged_at
+    - staged_by
+    - source_asset_refs (list of production file refs from handoff)
+    - staged_files (list of copied/referenced files in bundle)
+    - staging_notes
+
+staging_boundary:
+  v1_model: references_only
+  explanation: >
+    V1 staging creates a manifest referencing production_asset_refs from the
+    handoff without copying files. This avoids accidental file duplication and
+    keeps the staging surface narrow. Future adapters can read the manifest and
+    copy from canonical artwork storage to USB/hot folders.
+  future_copy_model: >
+    If copying becomes safe, create deterministic bundle layout:
+    {staging_root}/{package_id}/manifest.yaml, {staging_root}/{package_id}/files/*.{ext}.
+    But keep V1 narrow; references-only staging is acceptable if copying is risky.
+
+agent_guidance:
+  sequence_rule: >
+    The canonical post-payment production path is:
+    mint.production.readiness.check → mint.production.handoff.create →
+    mint.production.package.stage → future manual USB copy. Do not skip
+    straight from handoff to machine execution.
+  conservative_rule: >
+    If the handoff has no method-compatible production assets, stop and resolve
+    canonical artwork truth first. Do not compensate with operator notes, GUI
+    state, or guessed production files.
+  idempotency_rule: >
+    Staging the same handoff + target twice must reuse the existing package
+    record and bundle path. Check the packages index before creating new records.
+  no_gtx_rule: >
+    Do not attempt GTX package staging in v1. If a handoff has GTX-only lines,
+    block honestly and recommend manual GTX workflow.
