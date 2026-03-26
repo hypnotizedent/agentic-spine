@@ -400,8 +400,17 @@ run_cap() {
       attach_admission_required_env_csv="$(yq e -r '.attach_admission.required_env[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
       attach_admission_exempt_csv="$(yq e -r '.attach_admission.exempt_capabilities[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
     fi
-    [[ -n "$attach_admission_required_safety_csv" ]] || attach_admission_required_safety_csv="mutating,destructive"
+    [[ -n "$attach_admission_required_safety_csv" ]] || attach_admission_required_safety_csv="read-only,mutating,destructive"
     [[ -n "$attach_admission_required_env_csv" ]] || attach_admission_required_env_csv="SPINE_ENTRY_PACKET_PATH,SPINE_ENTRY_PACKET_HASH"
+    # Merge entry gate bypass binding (pre-session diagnostic capabilities)
+    local _entry_gate_bypass_file="$SPINE_CODE/ops/bindings/entry.gate.bypass.yaml"
+    if command -v yq >/dev/null 2>&1 && [[ -f "$_entry_gate_bypass_file" ]]; then
+      local _bypass_csv
+      _bypass_csv="$(yq e -r '.entry_gate_bypass.capabilities[]?' "$_entry_gate_bypass_file" 2>/dev/null | paste -sd, -)"
+      if [[ -n "$_bypass_csv" ]]; then
+        attach_admission_exempt_csv="${attach_admission_exempt_csv:+${attach_admission_exempt_csv},}${_bypass_csv}"
+      fi
+    fi
     [[ "$role_override_cache_ttl_seconds" =~ ^[0-9]+$ ]] || role_override_cache_ttl_seconds="14400"
     local _role_override_cache="$STATE_DIR/$role_override_cache_filename"
 
@@ -1319,6 +1328,16 @@ PY
         echo "STOP: precondition failed: ${precond_name} (exit=$precond_rc)" | tee "$output_file" >/dev/null
         exit_code="$precond_rc"
     else
+        # ── Capability usage telemetry (append-only TSV log) ──
+        local _tel_dir="${SPINE_STATE}/telemetry"
+        mkdir -p "$_tel_dir" 2>/dev/null || true
+        printf '%s\t%s\t%s\t%s\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          "$name" \
+          "$safety" \
+          "${SPINE_SESSION_ID:-nosession}" \
+          >> "$_tel_dir/cap-usage.tsv" 2>/dev/null || true
+
         echo "Executing..."
         echo "────────────────────────────────────────"
 
