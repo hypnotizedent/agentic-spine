@@ -14,7 +14,7 @@ fail() {
 
 required_dirs=(bin docs fixtures ops surfaces)
 allowed_dirs=(.claude .git .gitea .githooks .github .runtime bin docs fixtures ops surfaces)
-allowed_files=(.environment.yaml .git .gitignore .identity.yaml .mcp.json AGENTS.md CLAUDE.md README.md)
+allowed_files=(.environment.yaml .git .gitignore .identity.yaml .mcp.json AGENTS.md CLAUDE.md NORTH_STAR.md README.md)
 
 contains() {
   local needle="$1"

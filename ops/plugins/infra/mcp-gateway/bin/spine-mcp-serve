@@ -65,6 +65,7 @@ SPINE_CONTROL_BIN = os.path.join(
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 RUNTIME_ENV = _normalized_runtime_env(SPINE_ROOT)
 DEFAULT_CAP_RUN_MAX_CHARS = int(os.environ.get("SPINE_MCP_CAP_RUN_MAX_CHARS", "16000"))
+ROLE_PREFIXES: List[str] = []  # set once in main() from mcp.role.scope.yaml
 
 TOOLS = [
     {
@@ -406,6 +407,35 @@ def _bounded_cap_output(stdout: str, stderr: str, *, full_output: bool, max_char
     return "\n".join(parts).strip()
 
 
+def _load_role_prefixes() -> List[str]:
+    """Load allowed capability prefixes for the current runtime role."""
+    scope_file = os.path.join(
+        SPINE_ROOT, "ops", "bindings", "mcp.role.scope.yaml"
+    )
+    if not os.path.isfile(scope_file):
+        return []  # no scope file = no filtering
+    try:
+        code, out, _ = run_cmd(
+            ["yq", "e", "-o=json", ".", scope_file], timeout=10
+        )
+        if code != 0:
+            return []
+        parsed = json.loads(out or "{}")
+        roles = parsed.get("roles", {})
+        role = RUNTIME_ENV.get("SPINE_RUNTIME_ROLE", "researcher")
+        role_def = roles.get(role, roles.get("researcher", {}))
+        return role_def.get("prefixes", [])
+    except Exception:
+        return []  # fail open — no filtering on error
+
+
+def _prefix_allowed(name: str, prefixes: List[str]) -> bool:
+    """Check if a capability name is allowed by the role prefix list."""
+    if not prefixes or "*" in prefixes:
+        return True
+    return any(name.startswith(p) for p in prefixes)
+
+
 def run_capability(
     name: str,
     cap_args: List[str],
@@ -416,6 +446,13 @@ def run_capability(
 ) -> str:
     if not SAFE_NAME.match(name or ""):
         raise RuntimeError("invalid capability name")
+
+    # Role-scope enforcement
+    if not _prefix_allowed(name, ROLE_PREFIXES):
+        raise RuntimeError(
+            f"capability '{name}' is outside your role scope. "
+            f"Your role allows: {', '.join(ROLE_PREFIXES)}"
+        )
 
     capabilities = load_capabilities()
     meta = capabilities.get(name)
@@ -454,6 +491,9 @@ def list_capabilities(filter_text: Optional[str], safety: Optional[str]) -> str:
         if needle and needle not in name.lower():
             continue
         if safety_filter and cap_safety != safety_filter:
+            continue
+        # Role-scope filtering
+        if not _prefix_allowed(name, ROLE_PREFIXES):
             continue
         rows.append({
             "name": name,
@@ -773,6 +813,15 @@ def main() -> int:
     )
 
     bootstrap_session()
+
+    global ROLE_PREFIXES
+    ROLE_PREFIXES = _load_role_prefixes()
+    print(
+        f"[spine-mcp-serve] role_scope: {len(ROLE_PREFIXES)} prefixes "
+        f"for role={runtime_role}"
+        + (f" ({', '.join(ROLE_PREFIXES)})" if ROLE_PREFIXES and "*" not in ROLE_PREFIXES else ""),
+        file=sys.stderr,
+    )
 
     while True:
         msg, eof = read_message()
