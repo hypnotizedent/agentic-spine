@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Spine pre-commit hook (versioned)
+# Canonical versioned pre-commit hook.
 #
-# Guards:
-# 0. Main branch protection (OPS_GOVERNED_MAIN_OVERRIDE=1 to commit on main)
-# 5. Hook-fast AOF hygiene checks (staged only)
-# 6. Gate registry projection advisory (gate.registry.yaml staged)
-#
-# Guards 1-4,7-8 removed — governance ceremony overhead reduction.
-# Guard 0 simplified to single-var override (matching pre-push).
-# See: LOOP-session-git-workflow-simplification
+# Behavioral authority mirrors the currently enforced live gate set:
+# D30, D31, D42, D44, D46, D47, D48 (--lane), D58, D84, D85, D150,
+# D411 staged-projection enforcement, and the mirror-sanitization canary.
+# The only added governance guard here is truthful intentional-main override
+# handling: OPS_GOVERNED_MAIN_OVERRIDE=1 authorizes a controller landing on
+# root main, but it does not bypass D48, D150, or any other gate.
+
+# When git invokes hooks from a worktree, inherited git env vars can cause
+# cross-worktree checks to resolve the wrong repository. Clear them so each
+# gate resolves paths through its own git -C / repo-root logic.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE 2>/dev/null || true
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "${ROOT:-}" ]]; then
+  ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+fi
+if [[ ! -d "${ROOT:-}" ]]; then
   exit 0
 fi
 
@@ -24,160 +30,123 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 current_branch="$(git branch --show-current 2>/dev/null || echo detached)"
+STAGED_FILES="$(git diff --cached --name-only 2>/dev/null || true)"
 
-staged="$(git diff --cached --name-only --diff-filter=ACMRT 2>/dev/null || true)"
+if [[ -n "${STAGED_FILES:-}" && ("$current_branch" == "main" || "$current_branch" == "master") ]]; then
+  override="${OPS_GOVERNED_MAIN_OVERRIDE:-}"
+  override_lc="$(printf '%s' "$override" | tr '[:upper:]' '[:lower:]')"
 
-# ─── Guard 0: Main branch protection ──────────────────────
-# Single-var governed override — prevents accidental main commits from agents.
-# Same pattern as pre-push hook: OPS_GOVERNED_MAIN_OVERRIDE=1 to proceed.
-if [[ -n "${staged:-}" && ("$current_branch" == "main" || "$current_branch" == "master") ]]; then
-  OVERRIDE="${OPS_GOVERNED_MAIN_OVERRIDE:-}"
-  OVERRIDE_LC="$(printf '%s' "$OVERRIDE" | tr '[:upper:]' '[:lower:]')"
-
-  if [[ "$OVERRIDE_LC" == "1" || "$OVERRIDE_LC" == "true" || "$OVERRIDE_LC" == "yes" ]]; then
-    echo "NOTICE: main commit override accepted." >&2
+  if [[ "$override_lc" == "1" || "$override_lc" == "true" || "$override_lc" == "yes" ]]; then
+    echo "NOTICE: main commit override accepted. D48, D150, and the remaining hook gates still enforce." >&2
   else
-    echo "BLOCKED: direct commits on '$current_branch' are fail-closed by default." >&2
+    echo "BLOCKED: root '$current_branch' is integration-only." >&2
     echo "" >&2
     echo "Remediation:" >&2
-    echo "  OPS_GOVERNED_MAIN_OVERRIDE=1 git commit ..." >&2
+    echo "  move broad or concurrent mutation into a managed worktree" >&2
+    echo "  use a bounded staged-only controller landing on root main only for one exact slice" >&2
+    echo "  rerun with: OPS_GOVERNED_MAIN_OVERRIDE=1 git commit ..." >&2
     exit 1
   fi
 fi
 
-# ─── Guard 5: Hook-fast AOF hygiene checks (staged only) ───
-# Keep pre-commit lightweight while catching common AOF drift early.
+SP="$ROOT"
+FAIL=0
+CHECKED=0
+FAILED_GATES=""
 
-if echo "$staged" | rg -q '^ops/bindings/.*\.ya?ml$'; then
-  schema_audit="ops/plugins/core/verify/bin/schema-conventions-audit"
-  if [[ ! -x "$schema_audit" ]]; then
-    echo "STOP: missing schema audit runner: $schema_audit" >&2
-    exit 1
-  fi
-  "$schema_audit" --mode staged
-fi
-
-# ─── Guard 5a: Repo-local mailroom runtime drift ──────────────────────────
-# mailroom runtime is externalized under .runtime/spine. Keep only stub/doc surfaces in repo.
-mailroom_drift="$(printf '%s\n' "$staged" | rg '^mailroom/' || true)"
-if [[ -n "${mailroom_drift:-}" ]]; then
-  disallowed_mailroom=()
-  while IFS= read -r path; do
-    [[ -n "$path" ]] || continue
-    case "$path" in
-      mailroom/.keep|mailroom/README.md|mailroom/templates|mailroom/templates/*) ;;
-      *) disallowed_mailroom+=("$path") ;;
-    esac
-  done <<<"$mailroom_drift"
-
-  if (( ${#disallowed_mailroom[@]} > 0 )); then
-    echo "BLOCKED: repo-local mailroom runtime artifacts are forbidden." >&2
-    printf '  - %s\n' "${disallowed_mailroom[@]}" >&2
-    echo "" >&2
-    echo "Remediation:" >&2
-    echo "  move runtime mailroom content under ~/.runtime/spine/mailroom via the path resolver" >&2
-    exit 1
-  fi
-fi
-
-# ─── Guard 5b: New shell scripts must use canonical path resolver ───────
-added_scripts="$(git diff --cached --name-only --diff-filter=A 2>/dev/null | rg '^(ops/plugins|ops/runtime)/.*\.sh$' || true)"
-if [[ -n "${added_scripts:-}" ]]; then
-  missing_paths=()
-  while IFS= read -r script_path; do
-    [[ -n "$script_path" ]] || continue
-    staged_content="$(git show ":$script_path" 2>/dev/null || true)"
-    if ! printf '%s\n' "$staged_content" | rg -q 'ops/lib/spine-paths\.sh'; then
-      missing_paths+=("$script_path")
+for gate in \
+  "$SP/surfaces/verify/d30-active-config-lock.sh" \
+  "$SP/surfaces/verify/d31-home-output-sink-lock.sh" \
+  "$SP/surfaces/verify/d42-code-path-case-lock.sh" \
+  "$SP/surfaces/verify/d44-cli-tools-discovery-lock.sh" \
+  "$SP/surfaces/verify/d46-claude-instruction-source-lock.sh" \
+  "$SP/surfaces/verify/d47-brain-surface-path-lock.sh" \
+  "$SP/surfaces/verify/d48-codex-worktree-hygiene.sh" \
+  "$SP/surfaces/verify/d58-ssot-freshness-lock.sh" \
+  "$SP/surfaces/verify/d84-docs-index-registration-lock.sh" \
+  "$SP/surfaces/verify/d85-gate-registry-parity-lock.sh" \
+  "$SP/surfaces/verify/d150-code-root-hygiene-lock.sh"; do
+  # NOTE: D62 removed from pre-commit (2026-03-23) because network git fetches
+  # can hang indefinitely. D62 remains in verify.fast.
+  if [[ -x "$gate" ]]; then
+    CHECKED=$((CHECKED + 1))
+    if [[ "$(basename "$gate")" == "d48-codex-worktree-hygiene.sh" ]]; then
+      if ! bash "$gate" --lane; then
+        FAIL=1
+        FAILED_GATES="$FAILED_GATES $(basename "$gate")"
+      fi
+    elif ! bash "$gate" > /dev/null 2>&1; then
+      FAIL=1
+      FAILED_GATES="$FAILED_GATES $(basename "$gate")"
     fi
-  done <<<"$added_scripts"
-
-  if (( ${#missing_paths[@]} > 0 )); then
-    echo "BLOCKED: new shell scripts must source ops/lib/spine-paths.sh" >&2
-    printf '  - %s\n' "${missing_paths[@]}" >&2
-    echo "" >&2
-    echo "Remediation:" >&2
-    echo "  source \"\${SPINE_ROOT}/ops/lib/spine-paths.sh\"" >&2
-    echo "  spine_paths_init" >&2
-    exit 1
   fi
+done
+
+if [[ "$FAIL" -eq 1 ]]; then
+  echo "pre-commit: $CHECKED gates checked, FAILED:$FAILED_GATES"
+  echo "Fix the issue, then commit again."
+  exit 1
 fi
 
-# ─── Guard 6: Gate registry projection advisory (read-only) ──
-# Do not mutate files or run policy-gated capabilities inside pre-commit.
-# Projection/autofix runs are explicit commands outside hook execution.
+# D411 projection enforcement: if any D411 input is staged, require the
+# governed projections to be regenerated in the same commit.
+D411_INPUTS=(
+  "ops/capabilities.yaml"
+  "ops/bindings/capability_map.yaml"
+  "ops/bindings/agents.registry.yaml"
+  "ops/bindings/terminal.role.contract.yaml"
+  "ops/bindings/gate.domain.profiles.yaml"
+  "ops/bindings/gate.agent.profiles.yaml"
+  "ops/bindings/service.endpoint.catalog.yaml"
+  "ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py"
+)
 
-if echo "$staged" | grep -qx 'ops/bindings/gate.registry.yaml'; then
-  echo "NOTICE: gate.registry.yaml staged." >&2
-  echo "NOTICE: projection sync is explicit (not run by pre-commit)." >&2
-  echo "NOTICE: run './ops/plugins/core/docs/bin/docs-projection-sync' and stage projection files before push." >&2
-fi
-
-# ─── Guard 7: D411 terminal-worker projection convergence ──
-# Any staged D411 authority, wrapper, or generated projection surface must be
-# checked in the same commit. This blocks silent landing of stale projections.
-D411_SURFACES="ops/capabilities.yaml
-ops/bindings/capability_map.yaml
-ops/bindings/agents.registry.yaml
-ops/bindings/terminal.role.contract.yaml
-ops/bindings/gate.domain.profiles.yaml
-ops/bindings/gate.agent.profiles.yaml
-ops/bindings/service.endpoint.catalog.yaml
-ops/bindings/terminal.worker.projection.contract.yaml
-ops/bindings/terminal.worker.catalog.yaml
-ops/bindings/routing.dispatch.yaml
-ops/bindings/terminal.launcher.view.yaml
-ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py
-ops/plugins/core/ops/bin/gen-worker-catalog.sh
-ops/plugins/core/ops/bin/gen-routing-dispatch.sh
-ops/plugins/core/ops/bin/gen-launcher-view.sh
-ops/plugins/core/ops/bin/gen-worker-usage-docs.sh"
-
-d411_surface_staged=0
-while IFS= read -r d411_surface; do
-  [[ -n "$d411_surface" ]] || continue
-  if printf '%s\n' "$staged" | grep -Fxq "$d411_surface"; then
-    d411_surface_staged=1
+D411_INPUT_STAGED=0
+for input_file in "${D411_INPUTS[@]}"; do
+  if printf '%s\n' "$STAGED_FILES" | grep -Fxq "$input_file"; then
+    D411_INPUT_STAGED=1
     break
   fi
-done <<< "$D411_SURFACES"
+done
 
-# ─── Guard 8: Mirror sanitization canary ─────────────────
-# Reject commits that introduce redaction placeholders from the mirror pipeline.
-# These belong in the ephemeral mirror payload, NEVER in the canonical tree.
-# Added after b6d55b39 corruption incident (2026-03-25).
+if [[ "$D411_INPUT_STAGED" -eq 1 ]]; then
+  CHECKED=$((CHECKED + 1))
+  if ! bash "$SP/surfaces/verify/d411-terminal-worker-projection-lock.sh" > /dev/null 2>&1; then
+    echo "pre-commit: D411 input file staged but governed projections are stale."
+    echo "  Run these to regenerate, then stage the output files:"
+    echo "    bash ops/plugins/core/ops/bin/gen-worker-catalog.sh --apply"
+    echo "    bash ops/plugins/core/ops/bin/gen-routing-dispatch.sh --apply"
+    echo "    bash ops/plugins/core/ops/bin/gen-launcher-view.sh --apply"
+    echo "    bash ops/plugins/core/ops/bin/gen-worker-usage-docs.sh --apply"
+    echo "  Then: git add ops/bindings/terminal.worker.catalog.yaml ops/bindings/routing.dispatch.yaml ops/bindings/terminal.launcher.view.yaml docs/reference/generated/worker-usage/"
+    exit 1
+  fi
+fi
+
+# Mirror-sanitization canary: reject redaction placeholders from the mirror
+# pipeline. They belong only in the ephemeral mirror payload.
 CANARY_PATTERN='<INFISICAL_WORKSPACE_ID_REDACTED>'
 CANARY_DIRS="ops/bindings/ ops/plugins/providers/ docs/core/ docs/governance/"
-canary_hits=""
+CANARY_HITS=""
 for cdir in $CANARY_DIRS; do
   while IFS= read -r cfile; do
     [[ -n "$cfile" ]] || continue
     if git show ":$cfile" 2>/dev/null | grep -qF "$CANARY_PATTERN"; then
-      canary_hits="$canary_hits $cfile"
+      CANARY_HITS="$CANARY_HITS $cfile"
     fi
-  done < <(printf '%s\n' "$staged" | grep "^${cdir}" || true)
+  done < <(printf '%s\n' "$STAGED_FILES" | grep "^${cdir}" || true)
 done
-if [[ -n "$canary_hits" ]]; then
-  echo "BLOCKED: mirror sanitization placeholder in staged files:" >&2
-  for chit in $canary_hits; do echo "  $chit" >&2; done
-  echo "" >&2
-  echo "  The string '$CANARY_PATTERN' must NEVER be committed to the canonical repo." >&2
-  echo "  This placeholder belongs only in the ephemeral mirror payload." >&2
-  echo "  Incident ref: b6d55b39 (2026-03-25 break-glass recovery)" >&2
+
+if [[ -n "$CANARY_HITS" ]]; then
+  echo "pre-commit: BLOCKED - mirror sanitization placeholder in staged files:"
+  for chit in $CANARY_HITS; do
+    echo "  $chit"
+  done
+  echo "  The string '$CANARY_PATTERN' must NEVER be committed to the canonical repo."
+  echo "  This placeholder belongs only in the ephemeral mirror payload."
+  echo "  Incident ref: b6d55b39 (2026-03-25 break-glass recovery)"
   exit 1
 fi
 
-if [[ "$d411_surface_staged" -eq 1 ]] || printf '%s\n' "$staged" | rg -q '^docs/reference/generated/worker-usage/'; then
-  d411_gate="$ROOT/surfaces/verify/d411-terminal-worker-projection-lock.sh"
-  if [[ -x "$d411_gate" ]] && ! bash "$d411_gate" > /dev/null 2>&1; then
-    echo "BLOCKED: D411 projection surface staged but governed projections are stale." >&2
-    echo "" >&2
-    echo "Remediation:" >&2
-    echo "  bash ops/plugins/core/ops/bin/gen-worker-catalog.sh --apply" >&2
-    echo "  bash ops/plugins/core/ops/bin/gen-routing-dispatch.sh --apply" >&2
-    echo "  bash ops/plugins/core/ops/bin/gen-launcher-view.sh --apply" >&2
-    echo "  bash ops/plugins/core/ops/bin/gen-worker-usage-docs.sh --apply" >&2
-    echo "  git add ops/bindings/terminal.worker.projection.contract.yaml ops/bindings/terminal.worker.catalog.yaml ops/bindings/routing.dispatch.yaml ops/bindings/terminal.launcher.view.yaml docs/reference/generated/worker-usage/" >&2
-    exit 1
-  fi
-fi
+echo "pre-commit: $CHECKED gates passed"
+exit 0

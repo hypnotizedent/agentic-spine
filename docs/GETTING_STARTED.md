@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-24
+last_verified: 2026-03-27
 scope: getting-started-guide
 ---
 
@@ -28,11 +28,11 @@ Optional (for full domain operations):
 git clone <repo-url> agentic-spine
 cd agentic-spine
 
-# Install git hooks (governance admission control)
+# Install versioned git hooks (governance admission control)
 ./bin/ops hooks install
 ```
 
-The git hooks enforce governance at commit and push time — schema validation, hotspot mutation guards, and gate checks.
+The versioned hook authority lives in `.githooks/`. Local git must point `core.hooksPath` there so commits and pushes run the tracked governance hooks instead of checkout-local drift.
 
 ## 2. Understand the Runtime Model
 
@@ -48,6 +48,16 @@ The repo contains the **governance kernel**. Runtime state is externalized so th
 - The repo stays clean and deterministic
 - Multiple terminals can share state without merge conflicts
 - Evidence accumulates without bloating the repo
+
+### Workflow Lanes
+
+- Root `main` is integration-only. It is not the normal mutation lane.
+- Broad or concurrent work belongs in managed worktrees.
+- The only allowed dirty state on root `main` is an explicit controller-owned `staged_only` landing window for one exact slice.
+- `OPS_GOVERNED_MAIN_OVERRIDE=1` is only intentional-main override. It does not bypass D48 or D150.
+- Multiple terminals sharing the same root checkout, git index, or protected hotspot surfaces are blocking contention, not parallel work.
+- Separate managed worktrees are the normal parallel model.
+- Downstream runtime extraction remains future work and does not change this workflow rule.
 
 ### Set Up External State
 
@@ -74,6 +84,7 @@ This is the **mandatory entry point** for every terminal session. It:
 5. Emits session exports (`SPINE_SESSION_ID`, etc.)
 
 The `--allow-no-loop` flag permits adhoc work without a governing loop. For production use, every session should be bound to a loop.
+Session attach does not make direct mutation on root `main` the default path; it bootstraps the governed context that decides whether you stay on the clean integration checkout or move into a managed worktree.
 
 ## 4. Run Verification
 
@@ -225,25 +236,25 @@ Secrets are injected at runtime through `secrets.exec`, which reads from your co
 # Start session
 ./bin/ops cap run session.v3.attach -- --allow-no-loop
 
-# Check status
-./bin/ops status
+# Bootstrap a managed mutation lane for broad or concurrent work
+./bin/ops cap run session.execution.lane.bootstrap \
+  --type fix \
+  --branch <branch-name> \
+  --parent-loop <LOOP-ID>
 
 # Run verification
 ./bin/ops cap run verify.run -- fast
 
-# Do governed work
-./bin/ops cap run <capability>
-
-# Commit (on main, with governance override)
+# Controller-only exception on root main: one exact staged landing slice
+git add <exact-files>
 OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "feat(domain): description"
-
-# Push
-OPS_GOVERNED_MAIN_OVERRIDE=1 git push origin main
 ```
+
+`OPS_GOVERNED_MAIN_OVERRIDE=1` marks intentional controller landing on `main`. It is not a D48 bypass and it is not the standard path for day-to-day mutation.
 
 ## Next Steps
 
-- Read [SPINE.md](governance/SPINE.md) — the minimal operating contract (6 rules)
+- Read [SPINE.md](governance/SPINE.md) — the minimal operating contract for the integration-only root-main workflow
 - Explore `ops/bindings/` — the machine-evaluable contract surface
 - Run `./bin/ops cap list` — discover the full capability inventory
 - Check `surfaces/verify/` — understand the gate verification system

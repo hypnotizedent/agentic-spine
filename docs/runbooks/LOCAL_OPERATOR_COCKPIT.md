@@ -1,13 +1,13 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-22
+last_verified: 2026-03-27
 scope: local-operator-daily-standard
 ---
 
 # Local Operator Cockpit
 
-How to operate from the Mac day-to-day without creating local drift.
+How to operate from the Mac day-to-day without turning root `main` into a general mutation lane.
 
 ## Start of Day
 
@@ -17,45 +17,63 @@ git status                              # Must be: main, clean
 ./bin/ops cap run session.v3.attach -- --allow-no-loop
 ```
 
-If `git status` shows you're not on main or not clean:
+If `git status` is not `main` + clean, stop and classify before mutating:
+
 ```bash
-git stash                               # Or: git checkout -- <files>
+./bin/ops cap run worktree.lifecycle.reconcile -- --json
 git checkout main
-git pull origin main
+git pull --ff-only origin main
 ```
+
+Root `main` is integration-only. It should not accumulate normal work-in-progress.
+
+## Parallel Work Model
+
+- Broad or concurrent work belongs in managed worktrees.
+- Separate managed worktrees are the normal parallel model.
+- Multiple terminals sharing the same root checkout, git index, or protected hotspot surfaces are blocking contention, not parallel work.
 
 ## Running a Wave
 
-Always use a managed worktree, never the primary checkout:
+Always use a managed worktree for real mutation work:
 
 ```bash
-# Worktrees are created by the system under:
-# .runtime/spine/tmp/worktrees/{repo}/{branch-slug}
+./bin/ops cap run session.execution.lane.bootstrap \
+  --type fix \
+  --branch <branch-name> \
+  --parent-loop <LOOP-ID>
 ```
 
-After a wave merges to main:
+Worktrees are created under `.runtime/spine/tmp/worktrees/{repo}/{branch-slug}`.
+
+After a wave lands:
+
 ```bash
 git worktree remove <path>
 git branch -d <branch>
 ```
 
-## Committing to Main
+## Controller Landing On Root Main
+
+Root `main` may be dirty only during an explicit controller-owned `staged_only` landing window for one exact slice:
 
 ```bash
+git add <exact-files>
 OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "type(scope): message"
-OPS_GOVERNED_MAIN_OVERRIDE=1 git push origin main
 ```
+
+`OPS_GOVERNED_MAIN_OVERRIDE=1` marks intentional main landing only. It does not bypass D48 or D150, and it does not make root `main` a normal mutation lane.
 
 ## Snapshot Drift
 
-Automated snapshot files (`backup.posture.snapshot.yaml`, `home.dhcp.audit.yaml`, etc.) change on cap runs. Handle them at session boundaries:
+Automated snapshot files (`backup.posture.snapshot.yaml`, `home.dhcp.audit.yaml`, etc.) are not normal root-main WIP. Either discard them or land them as one exact controller slice:
 
 ```bash
-# Option A: Commit as sync
+# Land one exact refresh slice
 git add ops/bindings/*.snapshot.yaml
 OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "sync: weekly baseline refresh"
 
-# Option B: Discard
+# Or discard if the refresh is not intended
 git checkout -- ops/bindings/*.snapshot.yaml
 ```
 
@@ -75,7 +93,8 @@ git checkout -- ops/bindings/*.snapshot.yaml
 
 | Trap | Fix |
 |------|-----|
-| Primary checkout on feature branch | Switch to main before daily work |
+| Treating root `main` as a normal work lane | Move broad or concurrent mutation into a managed worktree |
+| Multiple terminals touching the same root checkout/index | Stop and separate the work into managed worktrees or one controller landing lane |
 | Recovery state dirs in git status | Add `ops/plugins/core/recovery/state/` to `.gitignore` |
 | Merged worktrees accumulating | Prune after confirming clean + merged |
 | 68K+ session receipts | Prune receipts older than 30 days monthly |
@@ -86,13 +105,13 @@ git checkout -- ops/bindings/*.snapshot.yaml
 ```bash
 cd ~/code/agentic-spine
 
-# Should show: main, clean, 0/0 ahead/behind
+# Should show: main, clean
 git status && git log --oneline -1
 
-# Should show: no merged worktrees lingering
+# Should show: managed worktrees only, no stale residue
 git worktree list
 
-# Should show: all repos clean on main
+# Should show: sibling repos clean before shared operator work
 for repo in mint-modules ronny-products agentic-foundation; do
   echo "=== $repo ===" && cd ~/code/$repo && git status --short && cd ~/code/agentic-spine
 done

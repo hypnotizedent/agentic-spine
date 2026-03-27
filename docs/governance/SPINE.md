@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-23
+last_verified: 2026-03-27
 scope: spine-minimal-operating-contract
 ---
 
@@ -28,36 +28,53 @@ cd ~/code/agentic-spine
 ## Daily Workflow
 
 ```bash
-# Commit on main (intentional only)
-OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "..."
+# Root main stays clean and integration-only.
+./bin/ops cap run session.v3.attach -- --allow-no-loop
 
-# Push on main (intentional only)
-OPS_GOVERNED_MAIN_OVERRIDE=1 git push origin main
+# Broad or concurrent mutation belongs in a managed worktree.
+./bin/ops cap run session.execution.lane.bootstrap \
+  --type fix \
+  --branch <branch-name> \
+  --parent-loop <LOOP-ID>
+
+# Controller-only exception on root main: one exact staged slice.
+git add <exact-files>
+OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "..."
 ```
 
 ## Execution Discipline
 
 1. **Use governed capabilities, not raw shell.** If `./bin/ops cap list` shows a capability, use it. Raw bash/git/ssh is a last resort.
 2. **Mutating work requires a loop.** No loop active for non-trivial changes? Create one with `loops.create` first. No floating WIP.
-3. **Commit ceremony.** All commits on main require `OPS_GOVERNED_MAIN_OVERRIDE=1`. D128 trailers are auto-populated. Stage specific files, never `git add -A`.
-4. **Verify after mutations.** After committing, run `./bin/ops cap run verify.run -- fast` to confirm no gates broke.
+3. **Root `main` is integration-only.** Root `main` is not a general mutation lane. Broad or concurrent work belongs in managed worktrees.
+4. **Bounded controller landing is the only root-main exception.** The only allowed dirty state on root `main` is a governed controller-owned `staged_only` landing window for one exact slice.
+5. **`OPS_GOVERNED_MAIN_OVERRIDE=1` is not a D48 bypass.** It authorizes intentional main commits only. D48, D150, and the rest of the hook/verify gates still enforce.
+6. **Shared root-lane mutation is blocking contention.** Multiple terminals are independent only when they do not share the same root checkout, git index, or protected hotspot surfaces. Separate managed worktrees are the normal parallel model.
+7. **Verify after mutations.** After committing, run `./bin/ops cap run verify.run -- fast` to confirm no gates broke.
 
-## V3 Operating Model (2026-03-23)
+## V3 Operating Model (2026-03-27)
 
-### Rule 1: Controller Lane
-One controller terminal operates on `main`. The controller owns all shared authority surface mutations, loop lifecycle transitions, closeout propagation, worktree creation/pruning, and landing of worker branches. No other terminal may mutate shared authority surfaces directly.
+### Rule 1: Root Main Role
+Root `main` is the controller-owned integration lane. It is for attach, review, exact-slice landings, loop lifecycle transitions, closeout propagation, worktree creation/pruning, and other protected hotspot actions. Root `main` is not a general mutation lane.
 
-The controller may use a governed worktree for large structural slices, then land back to `main`. The constraint is one owner, one integration lane, no parallel hotspot mutation.
+### Rule 2: Managed Mutation Lanes
+Broad work, concurrent work, and anything that cannot be landed as one exact controller slice belong in managed worktrees. Separate managed worktrees are the normal parallel work model.
 
-### Rule 2: Worker Scope
-Workers execute in worktrees or on remote systems with a declared, disjoint write scope. Workers must not touch shared hotspot surfaces. If a worker needs a hotspot mutation, it files a request back to the controller. Workers may be terminated or parked without data loss.
+### Rule 3: Bounded Controller Landing
+The only allowed dirty state on root `main` is a governed controller-owned `staged_only` landing window for one exact slice. Enter from a clean root checkout, stage only the intended slice, land it, and return root `main` to clean state.
 
-**Worker worktree sessions:** Worker worktrees should start through `session.v3.attach` as well. The attach surface resolves the active worktree, compiles the governed entry packet, and enforces the declared write scope. The "boring main" auto-heal behavior is for controller terminals on the primary checkout; worker lanes remain isolated in their own worktree write scope.
+### Rule 4: Blocking Shared-Lane Contention
+Multiple terminals are independent only when they do not share the same root checkout, git index, or protected hotspot surfaces. Shared root-checkout or shared-index mutation is blocking contention, not parallel work.
 
-### Rule 3: Active WIP Cap
+### Rule 5: Worker Scope
+Workers execute in managed worktrees or on remote systems with a declared, disjoint write scope. Workers must not touch shared hotspot surfaces directly. If a worker needs a hotspot mutation, it files the request back to the controller. Workers may be terminated or parked without data loss.
+
+**Worker worktree sessions:** Worker worktrees should start through `session.v3.attach` as well. The attach surface resolves the active worktree, compiles the governed entry packet, and enforces the declared write scope. Downstream runtime extraction remains future work and is unrelated to this workflow rule.
+
+### Rule 6: Active WIP Cap
 **Maximum 5 active loops.** When above cap: close, supersede, defer, or consolidate. "Open because nobody decided" is a policy violation. Planned loops older than 14 days without activity must be triaged.
 
-### Rule 4: Shared Authority Hotspots (Controller-Only)
+### Rule 7: Shared Authority Hotspots (Controller-Only)
 | Surface | Rule |
 |---------|------|
 | `ops/bindings/operational.gaps.yaml` | Controller-only. Future: migrate to SQLite. |
@@ -66,11 +83,11 @@ Workers execute in worktrees or on remote systems with a declared, disjoint writ
 | `gate-id-reservations.yaml` | Controller-only. |
 | `path.claims.yaml` | Controller-only. |
 
-### Rule 5: Closure
+### Rule 8: Closure
 Work is done when runtime, control plane, bindings/projections, and residue all agree. Missing propagation must fail loudly (gate failure, verify failure, session attach block) instead of relying on operator memory.
 
-### Rule 6: Boring Main (Context-Aware)
-`session.v3.attach` is the only entry. It enforces a "boring main" policy with context-aware auto-healing:
+### Rule 9: Root Main Cleanliness At Attach
+`session.v3.attach` is the only entry. It can auto-heal governed generated drift, stale cleanup-candidate stashes, fast-forward-safe main drift, and floating worktree residue. That startup behavior does not turn root `main` into a general mutation lane.
 
 **Auto-healed on attach:**
 - Governed generated drift (docs projections, gate metadata) → restored from HEAD
@@ -84,16 +101,16 @@ Work is done when runtime, control plane, bindings/projections, and residue all 
 - Non-fast-forward divergence from origin/main
 - Dirty files in session bootstrap paths (ops/plugins/core/session/, ops/lib/, bin/ops)
 
-**Allowed during attach (hotspot zones):**
+**Attach can tolerate governed hotspot recovery context while classifying work:**
 - Dirty files in ops/bindings/*.yaml (contracts, gaps, registries)
 - Dirty files in ops/commands/tests/*.sh (test files)
 - Dirty files in ops/plugins/core/ops/bin/* (lifecycle scripts)
 - Dirty files in ops/plugins/core/ops/tests/* (lifecycle tests)
 - Dirty files in surfaces/verify/*.sh (gates)
 
-This context-awareness allows controller terminals to attach without clearing active work-in-progress from governed operations in other terminals.
+That tolerance is not landing authority. Root `main` still returns to clean state unless the controller is in an explicit `staged_only` landing window for one exact slice.
 
-## Bounded Work Fast Lane (Rule 7)
+## Bounded Work Fast Lane
 
 Single-domain patches that meet all of the following criteria qualify for fast-lane mode,
 which collapses ceremony to attach → do → receipt without loop/gap/disposition overhead:
@@ -101,7 +118,7 @@ which collapses ceremony to attach → do → receipt without loop/gap/dispositi
 **Criteria** (all must hold):
 - Patches touch **≤ 5 files**
 - All files are within **one domain**
-- No shared authority hotspot mutations (Rule 4 surfaces: operational.gaps.yaml, loop scopes, friction-queue.ndjson, gate-id-reservations.yaml, path.claims.yaml)
+- No shared authority hotspot mutations (Rule 7 surfaces: operational.gaps.yaml, loop scopes, friction-queue.ndjson, gate-id-reservations.yaml, path.claims.yaml)
 - Domain already has CI governance (verify gate coverage)
 
 **Usage**:
@@ -123,8 +140,10 @@ which collapses ceremony to attach → do → receipt without loop/gap/dispositi
 - Disposition ceremony
 - Wave orchestration
 
-**Hotspot guard**: If a fast-lane commit touches any Rule 4 surface, the commit is
+**Hotspot guard**: If a fast-lane commit touches any Rule 7 surface, the commit is
 rejected and the session must be re-attached with full ceremony (loop required).
+
+Fast-lane reduces loop/gap ceremony. It does not make root `main` a general mutation lane, it does not make worktrees optional for broad or concurrent work, and it does not bypass D48 or D150.
 
 ## Execution Lane Bootstrap (Phase 2)
 
@@ -234,7 +253,7 @@ Loop closeout ceremony:
 1. One doc per concern: add sections to an existing canonical doc before creating a new file.
 2. One script per concern: extend existing scripts with flags/subcommands instead of creating near-duplicates.
 3. Delete legacy: `.legacy` copies are migration debt and must be removed once active scripts are in place.
-4. One override path: use `OPS_GOVERNED_MAIN_OVERRIDE=1`; do not require multi-var metadata ceremony for routine local work.
+4. One override path: use `OPS_GOVERNED_MAIN_OVERRIDE=1` for intentional controller landings on `main`; it is not a D48 or D150 bypass.
 5. One daily remote: `origin` is canonical for day-to-day workflow.
 
 ## Consolidated Authority Notes

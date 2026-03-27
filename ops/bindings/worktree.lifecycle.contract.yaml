@@ -3,8 +3,8 @@
 # Last verified: 2026-03-22
 # Scope: D48 lifecycle-aware worktree hygiene for multi-terminal wave/loop runtime
 
-version: "1.5"
-updated: "2026-03-23"
+version: "1.6"
+updated: "2026-03-27"
 owner: "@ronny"
 scope: worktree-lifecycle
 
@@ -22,6 +22,14 @@ policy:
   launcher_control_worktree_path: "/Users/ronnyworks/code/agentic-spine"
   launcher_control_worktree_branch: "main"
   launcher_control_worktree_base_ref: "origin/main"
+  root_checkout_role: "integration_only"
+  managed_worktrees_are_default_mutation_surface: true
+  root_general_mutation_forbidden: true
+  controller_root_main_landing_mode: "staged_only_single_exact_slice"
+  shared_root_checkout_mutation_is_blocking_contention: true
+  shared_git_index_mutation_is_blocking_contention: true
+  protected_hotspot_shared_mutation_is_blocking_contention: true
+  parallel_mutation_model: "separate_managed_worktrees"
   canonical_worktree_layout: "<root>/agentic-spine/<wave>"
   lease_filename: ".spine-lane-lease.yaml"
   lease_ttl_hours_default: 24
@@ -54,7 +62,7 @@ policy:
 
 enforcement_tiers:
   lane:
-    description: "Worker commit-time enforcement. Only current-lane safety issues block."
+    description: "Commit-time/root-lane enforcement. Root main is integration-only; only explicit controller staged-only landing is tolerated, and only current-lane safety issues block."
     mode_flag: "--lane"
     blocks_on:
       - "current worktree: detached_head"
@@ -117,5 +125,7 @@ runtime:
   loops_scope_dir: "/Users/ronnyworks/code/.runtime/spine/state/loop-scopes"
 
 messages:
-  remediation: "Use `./bin/ops wave start <WAVE_ID> --objective \"...\" --repo /Users/ronnyworks/code/agentic-spine` to provision `/Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine/<WAVE_ID>`, or `./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo /Users/ronnyworks/code/agentic-spine`."
-  gate_summary: "D48 enforces lifecycle violations across governed worktrees, repo-scoped temp clones, boring-root normalization, and retained stashes (closed-owner zombies, detached heads, stale temp clones, non-main root checkouts, aged main stashes, and auto-healable generated root drift)."
+  remediation: "Use `./bin/ops wave start <WAVE_ID> --objective \"...\" --repo /Users/ronnyworks/code/agentic-spine` to provision `/Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine/<WAVE_ID>`, or `./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo /Users/ronnyworks/code/agentic-spine`. Root main is integration-only; normal mutation belongs in managed worktrees. Root dirty main is forbidden except for an explicit controller-owned staged-only landing window for one exact slice."
+  gate_summary: "D48 enforces lifecycle violations across governed worktrees, repo-scoped temp clones, boring-root normalization, and retained stashes. Root main is integration-only, managed worktrees are the normal mutation surface, shared root checkout or git-index mutation is blocking contention, and only an explicit controller-owned staged-only landing window is tolerated on root main."
+  root_lane_rule: "Root checkout role is integration-only. Root main is not a general mutation lane. Only one exact controller-owned staged-only landing slice is allowed."
+  contention_rule: "Shared root checkout, shared git index, or protected hotspot mutation across terminals is blocking contention. Unrelated managed worktrees are allowed."
