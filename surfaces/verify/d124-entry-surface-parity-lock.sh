@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# TRIAGE: Keep startup block identical across governed entry surfaces and block heavy startup drift.
+# D124: Entry surface thin-pointer integrity.
+# Verifies entry stubs remain thin pointers with no inline governance or startup blocks.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,34 +16,27 @@ command -v yq >/dev/null 2>&1 || fail "required tool missing: yq"
 [[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
 yq e '.' "$CONTRACT" >/dev/null 2>&1 || fail "invalid YAML: $CONTRACT"
 
-marker_start="$(yq e -r '.startup_block.marker_start // ""' "$CONTRACT")"
-marker_end="$(yq e -r '.startup_block.marker_end // ""' "$CONTRACT")"
-[[ -n "$marker_start" ]] || fail "missing startup_block.marker_start"
-[[ -n "$marker_end" ]] || fail "missing startup_block.marker_end"
-
-canonical_block=""
 errors=0
 err() {
   echo "  FAIL: $*" >&2
   errors=$((errors + 1))
 }
 
-extract_block() {
-  local file="$1"
-  local start="$2"
-  local stop="$3"
-  awk -v s="$start" -v e="$stop" '
-    $0 == s {capture=1; next}
-    $0 == e {capture=0; next}
-    capture {print}
-  ' "$file"
-}
+# Verify entry model is thin-pointer
+entry_model="$(yq e -r '.entry_model // ""' "$CONTRACT")"
+[[ "$entry_model" == "thin-pointer" ]] || fail "entry_model is '$entry_model', expected 'thin-pointer'"
 
-while IFS=$'\t' read -r sid path; do
+# Read prohibited patterns from contract
+prohibited_patterns=()
+while IFS= read -r pat; do
+  [[ -n "$pat" ]] && prohibited_patterns+=("$pat")
+done < <(yq e -r '.prohibited_in_stubs[]?' "$CONTRACT" 2>/dev/null || true)
+
+# Check each surface
+while IFS=$'\t' read -r sid path role; do
   [[ -z "$sid" || -z "$path" ]] && continue
 
   abs="$path"
-  # Expand leading tilde to $HOME
   if [[ "$abs" == "~/"* ]]; then
     abs="$HOME/${abs#\~/}"
   elif [[ "$abs" != /* ]]; then
@@ -54,39 +48,28 @@ while IFS=$'\t' read -r sid path; do
     continue
   }
 
-  grep -qF "$marker_start" "$abs" || { err "surface '$sid' missing marker_start"; continue; }
-  grep -qF "$marker_end" "$abs" || { err "surface '$sid' missing marker_end"; continue; }
-
-  block="$(extract_block "$abs" "$marker_start" "$marker_end")"
-  [[ -n "$block" ]] || {
-    err "surface '$sid' startup block is empty"
-    continue
-  }
-
-  while IFS= read -r required; do
-    [[ -z "$required" ]] && continue
-    if ! printf '%s\n' "$block" | grep -Fq "$required"; then
-      err "surface '$sid' missing required startup line: $required"
-    fi
-  done < <(yq e -r '.startup_block.required_lines[]?' "$CONTRACT" 2>/dev/null || true)
-
-  while IFS= read -r forbidden; do
-    [[ -z "$forbidden" ]] && continue
-    if printf '%s\n' "$block" | grep -Fq "$forbidden"; then
-      err "surface '$sid' contains forbidden startup line: $forbidden"
-    fi
-  done < <(yq e -r '.startup_block.forbidden_lines[]?' "$CONTRACT" 2>/dev/null || true)
-
-  if [[ -z "$canonical_block" ]]; then
-    canonical_block="$block"
-  elif [[ "$block" != "$canonical_block" ]]; then
-    err "surface '$sid' startup block differs from canonical block"
+  # All surfaces: must not contain SPINE_STARTUP_BLOCK markers
+  if grep -qF 'SPINE_STARTUP_BLOCK' "$abs"; then
+    err "surface '$sid' contains prohibited SPINE_STARTUP_BLOCK marker"
   fi
 
-done < <(yq e -r '.surfaces[] | [.id, .path] | @tsv' "$CONTRACT" 2>/dev/null)
+  # Thin-pointer surfaces: must not contain inline startup commands
+  if [[ "$role" == "thin-pointer" ]]; then
+    # Check for inline startup block patterns (marker-delimited blocks)
+    if grep -qF '<!-- SPINE_STARTUP_BLOCK -->' "$abs"; then
+      err "surface '$sid' (thin-pointer) contains startup block delimiters"
+    fi
+    # Check line count — thin pointers should be compact (< 30 lines)
+    line_count=$(wc -l < "$abs" | tr -d ' ')
+    if [[ "$line_count" -gt 30 ]]; then
+      echo "  WARN: surface '$sid' (thin-pointer) has $line_count lines — may contain inline governance" >&2
+    fi
+  fi
+
+done < <(yq e -r '.surfaces[] | [.id, .path, (.role // "unknown")] | @tsv' "$CONTRACT" 2>/dev/null)
 
 if [[ "$errors" -gt 0 ]]; then
-  fail "$errors parity issue(s) detected"
+  fail "$errors thin-pointer integrity issue(s) detected"
 fi
 
-echo "D124 PASS: entry surface startup parity enforced"
+echo "D124 PASS: entry surface thin-pointer integrity verified"
