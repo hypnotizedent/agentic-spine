@@ -10,7 +10,7 @@ Claude Code receives governance injection through two paths:
 1. **Hook-based** (canonical): `.claude/settings.json` -> `.claude/hooks/session-entry-hook.sh` -> live governance brief + dynamic context into session on first `UserPromptSubmit`
 2. **Static stub** (decorative): `CLAUDE.md` project instructions loaded by Claude Code on directory open
 
-The hook is the real governance pathway. It reads SPINE.md and SESSION_PROTOCOL.md live, resolves terminal role, gathers dynamic context (open loops, proposals, worktrees, friction, Docker), and emits a systemMessage JSON blob.
+The hook is the real governance pathway. It reads SPINE.md and SESSION_PROTOCOL.md live, resolves terminal role and write scope, gathers dynamic context (open loops, proposals, worktrees, friction, Docker), and emits a systemMessage JSON blob with a behaviorally binding terminal authority block.
 
 ## Session Entry
 

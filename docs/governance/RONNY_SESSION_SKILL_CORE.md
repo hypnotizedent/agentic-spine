@@ -130,6 +130,16 @@ This core contains what every tool-native adapter shares. Adapters add only:
 
 Adapters must not carry independent copies of the taxonomy, rules, or doctrine above. They reference this core.
 
+## Terminal-Scoped Authority
+
+When a session carries terminal-scoped identity (via `OPS_TERMINAL_ROLE`), the terminal's write scope from `ops/bindings/terminal.role.contract.yaml` is a **hard behavioral boundary**.
+
+- Do not edit files outside the terminal's declared write scope.
+- If requested work falls outside scope, stop and state which terminal owns it.
+- Unscoped/default sessions (no terminal identity) must not claim scoped write authority they do not have.
+
+This is enforced at the agent decision boundary (hook injection), not only at pre-commit.
+
 ## Root and Tool Authority
 
 Root authority is governed by `ops/bindings/root.authority.contract.yaml`.

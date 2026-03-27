@@ -41,6 +41,16 @@ if [[ -z "$SESSION_RUNTIME_ROLE" ]] && command -v yq >/dev/null 2>&1 && [[ -f "$
 fi
 [[ -n "$SESSION_RUNTIME_ROLE" && "$SESSION_RUNTIME_ROLE" != "null" ]] || SESSION_RUNTIME_ROLE="researcher"
 
+# --- Terminal write scope resolution ---
+TERMINAL_WRITE_SCOPE=""
+TERMINAL_TYPE=""
+if [[ -n "$SESSION_TERMINAL_ROLE" ]] && command -v yq >/dev/null 2>&1 && [[ -f "$TERMINAL_ROLE_CONTRACT" ]]; then
+  TERMINAL_TYPE="$(yq e -r ".roles[]? | select(.id == \"${SESSION_TERMINAL_ROLE}\") | .type" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null | head -n1 || true)"
+  [[ -n "$TERMINAL_TYPE" && "$TERMINAL_TYPE" != "null" ]] || TERMINAL_TYPE=""
+  TERMINAL_WRITE_SCOPE="$(yq e -r ".roles[]? | select(.id == \"${SESSION_TERMINAL_ROLE}\") | .write_scope[]?" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g' || true)"
+  [[ -n "$TERMINAL_WRITE_SCOPE" && "$TERMINAL_WRITE_SCOPE" != "null" ]] || TERMINAL_WRITE_SCOPE=""
+fi
+
 parse_epoch_utc() {
   local ts="${1:-}"
   [[ -n "$ts" ]] || { echo 0; return; }
@@ -397,6 +407,18 @@ else
 > Full authority: \`docs/governance/SPINE.md\` + \`docs/governance/SESSION_PROTOCOL.md\` (set \`SESSION_ENTRY_BRIEF_MODE=full\` to inject full text)."
 fi
 
+# --- Terminal authority block ---
+if [[ -n "$SESSION_TERMINAL_ROLE" && -n "$TERMINAL_WRITE_SCOPE" ]]; then
+  TERMINAL_AUTHORITY="### Terminal Authority
+**ID:** \`${SESSION_TERMINAL_ROLE}\` | **Type:** ${TERMINAL_TYPE:-unknown} | **Role:** \`${SESSION_RUNTIME_ROLE}\`
+**Write scope:** ${TERMINAL_WRITE_SCOPE}
+**Boundary:** Do not edit files outside this write scope. If work exceeds scope, stop and state which terminal owns it."
+else
+  TERMINAL_AUTHORITY="### Terminal Authority
+**Posture:** unscoped/default | **Role:** \`${SESSION_RUNTIME_ROLE}\`
+**Boundary:** No terminal-scoped write authority. Do not claim scoped write access."
+fi
+
 # Build the system message: dynamic state + canonical brief
 MSG="## SESSION ENTRY PROTOCOL (governance hook)
 
@@ -405,6 +427,8 @@ MSG="## SESSION ENTRY PROTOCOL (governance hook)
 ${GATE_LINE:+${GATE_LINE}
 }${FRICTION_LINE:+${FRICTION_LINE}
 }${DIRTY_WARNING}${MULTI_AGENT_WARNING}${PROPOSALS_HEALTH}
+${TERMINAL_AUTHORITY}
+
 ### Spine Status
 \`\`\`
 ${LOOPS}
