@@ -12,13 +12,13 @@ Minimal landing page for live docs after the lean reset.
 ## Read First
 
 - [governance/SPINE.md](governance/SPINE.md) - single canonical governance contract
-- [governance/SPINE_V3_BOOTSTRAP.md](governance/SPINE_V3_BOOTSTRAP.md) - canonical V3 bootstrap seed for translator, broker, attestation, and node-role separation
+- [governance/FINAL_SURFACES_CLOSURE_BRIEF_20260326.md](governance/FINAL_SURFACES_CLOSURE_BRIEF_20260326.md) - current layer, end-state, and wave contract
 - [governance/SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) - session entry and closeout rules
 - [core/SPINE_STATE.md](core/SPINE_STATE.md) - what belongs in the repo and what does not
 
 ## Canonical Governance
 
-- [governance/AGENT_GOVERNANCE_BRIEF.md](governance/AGENT_GOVERNANCE_BRIEF.md)
+- [governance/LOCAL_CONTROL_PLANE_CONTRACT.md](governance/LOCAL_CONTROL_PLANE_CONTRACT.md)
 - [governance/STACK_REGISTRY.yaml](governance/STACK_REGISTRY.yaml)
 - [governance/SERVICE_REGISTRY.yaml](governance/SERVICE_REGISTRY.yaml)
 - [governance/DEVICE_IDENTITY_SSOT.md](governance/DEVICE_IDENTITY_SSOT.md)

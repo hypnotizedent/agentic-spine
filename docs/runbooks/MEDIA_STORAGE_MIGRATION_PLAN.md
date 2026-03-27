@@ -61,7 +61,7 @@ This runbook is retained as split-era cutover history only. Do not use it as the
 - [x] Add media-home VM 106 to backup.inventory.yaml
 - [x] Create media.quarantine.review capability
 - [x] Create media.downloads.bloat.status capability
-- [x] Update DREAM_SYSTEM_EXECUTION_BOARD.yaml
+- [x] Historical note recorded for the retired execution-board backlog surface
 
 **Duration**: 1 session (2026-03-19)
 **Risk**: None (documentation only)

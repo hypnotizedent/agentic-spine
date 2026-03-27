@@ -2,9 +2,42 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
-CONTRACT="${ROOT}/ops/bindings/lean.budget.contract.yaml"
 REGISTRY="${ROOT}/ops/bindings/gate.registry.yaml"
 TOPOLOGY="${ROOT}/ops/bindings/gate.execution.topology.yaml"
+ACTIVE_GATES_MAX=120
+BLOCKING_FAST_MAX=25
+VERIFY_FILES_MAX=80
+BINDINGS_FILES_MAX=180
+GOV_DOCS_MAX=35
+LEGACY_MAX=0
+ROOT_DOC="docs/governance/SPINE.md"
+VERIFY_MAX_NET=0
+GOV_MAX_NET=0
+BINDINGS_MAX_NET=0
+GATE_ADD_REQUIRES_RETIRE_RATIO=2
+REQUIRED_DOMAINS=(
+  aof
+  backup
+  communications
+  core
+  finance
+  home
+  hygiene-weekly
+  immich
+  infra
+  loop_gap
+  media
+  microsoft
+  mint
+  n8n
+  observability
+  proxmox-network
+  rag
+  secrets
+  surveillance
+  tax-legal
+  workbench
+)
 
 json_mode=0
 report_only=0
@@ -39,16 +72,8 @@ need_file() { [[ -f "$1" ]] || { echo "lean-budget-check: missing file $1" >&2; 
 need_cmd yq
 need_cmd jq
 need_cmd git
-need_file "$CONTRACT"
 need_file "$REGISTRY"
 need_file "$TOPOLOGY"
-
-active_gates_max="$(yq e -r '.thresholds.active_gates_max' "$CONTRACT")"
-blocking_fast_max="$(yq e -r '.thresholds.blocking_fast_gates_max' "$CONTRACT")"
-verify_files_max="$(yq e -r '.thresholds.verify_files_max' "$CONTRACT")"
-bindings_files_max="$(yq e -r '.thresholds.bindings_files_max' "$CONTRACT")"
-gov_docs_max="$(yq e -r '.thresholds.governance_docs_max' "$CONTRACT")"
-legacy_max="$(yq e -r '.thresholds.legacy_scripts_max' "$CONTRACT")"
 
 active_gates="$(yq e '[.gates[] | select((.retired // false) == false)] | length' "$REGISTRY")"
 
@@ -73,18 +98,17 @@ legacy_files="$(find "${ROOT}/ops/plugins" -type f -name '*.legacy' 2>/dev/null 
 violations=()
 warnings=()
 
-[[ "$active_gates" -le "$active_gates_max" ]] || violations+=("active_gates:${active_gates}>${active_gates_max}")
-[[ "$blocking_fast" -le "$blocking_fast_max" ]] || violations+=("blocking_fast_gates:${blocking_fast}>${blocking_fast_max}")
-[[ "$verify_files" -le "$verify_files_max" ]] || violations+=("verify_files:${verify_files}>${verify_files_max}")
-[[ "$bindings_files" -le "$bindings_files_max" ]] || violations+=("bindings_files:${bindings_files}>${bindings_files_max}")
-[[ "$gov_docs" -le "$gov_docs_max" ]] || violations+=("governance_docs:${gov_docs}>${gov_docs_max}")
-[[ "$legacy_files" -le "$legacy_max" ]] || violations+=("legacy_scripts:${legacy_files}>${legacy_max}")
+[[ "$active_gates" -le "$ACTIVE_GATES_MAX" ]] || violations+=("active_gates:${active_gates}>${ACTIVE_GATES_MAX}")
+[[ "$blocking_fast" -le "$BLOCKING_FAST_MAX" ]] || violations+=("blocking_fast_gates:${blocking_fast}>${BLOCKING_FAST_MAX}")
+[[ "$verify_files" -le "$VERIFY_FILES_MAX" ]] || violations+=("verify_files:${verify_files}>${VERIFY_FILES_MAX}")
+[[ "$bindings_files" -le "$BINDINGS_FILES_MAX" ]] || violations+=("bindings_files:${bindings_files}>${BINDINGS_FILES_MAX}")
+[[ "$gov_docs" -le "$GOV_DOCS_MAX" ]] || violations+=("governance_docs:${gov_docs}>${GOV_DOCS_MAX}")
+[[ "$legacy_files" -le "$LEGACY_MAX" ]] || violations+=("legacy_scripts:${legacy_files}>${LEGACY_MAX}")
 
-root_doc="$(yq e -r '.canonical_docs.root' "$CONTRACT")"
+root_doc="$ROOT_DOC"
 [[ -f "${ROOT}/${root_doc}" ]] || violations+=("missing_root_doc:${root_doc}")
 
-mapfile -t domains < <(yq e -r '.canonical_docs.required_domains[]' "$CONTRACT")
-for d in "${domains[@]:-}"; do
+for d in "${REQUIRED_DOMAINS[@]}"; do
   [[ -n "$d" ]] || continue
   doc="docs/governance/domains/${d}.md"
   bundle="ops/bindings/domains/${d}.bundle.yaml"
@@ -113,14 +137,10 @@ if git -C "$ROOT" rev-parse --verify "$base_ref" >/dev/null 2>&1; then
   read -r _ _ gov_net gov_added gov_removed < <(class_count_delta "docs/governance")
   read -r _ _ bindings_net bindings_added bindings_removed < <(class_count_delta "ops/bindings")
 
-  verify_max_net="$(yq e -r '.change_budget.file_classes[] | select(.class == "verify") | (.max_net_new // 0)' "$CONTRACT")"
-  gov_max_net="$(yq e -r '.change_budget.file_classes[] | select(.class == "governance") | (.max_net_new // 0)' "$CONTRACT")"
-  bindings_max_net="$(yq e -r '.change_budget.file_classes[] | select(.class == "bindings") | (.max_net_new // 0)' "$CONTRACT")"
-
   change_json="$(jq -cn \
-    --argjson va "$verify_added" --argjson vr "$verify_removed" --argjson vn "$verify_net" --argjson vm "$verify_max_net" \
-    --argjson ga "$gov_added" --argjson gr "$gov_removed" --argjson gn "$gov_net" --argjson gm "$gov_max_net" \
-    --argjson ba "$bindings_added" --argjson br "$bindings_removed" --argjson bn "$bindings_net" --argjson bm "$bindings_max_net" \
+    --argjson va "$verify_added" --argjson vr "$verify_removed" --argjson vn "$verify_net" --argjson vm "$VERIFY_MAX_NET" \
+    --argjson ga "$gov_added" --argjson gr "$gov_removed" --argjson gn "$gov_net" --argjson gm "$GOV_MAX_NET" \
+    --argjson ba "$bindings_added" --argjson br "$bindings_removed" --argjson bn "$bindings_net" --argjson bm "$BINDINGS_MAX_NET" \
     '[
       {class:"verify",added:$va,removed:$vr,net_new:$vn,max_net_new:$vm,ok:($vn <= $vm)},
       {class:"governance",added:$ga,removed:$gr,net_new:$gn,max_net_new:$gm,ok:($gn <= $gm)},
@@ -150,7 +170,7 @@ if git -C "$ROOT" rev-parse --verify "$base_ref" >/dev/null 2>&1; then
 
     new_active_count="$(comm -23 "$new_active_ids" "$base_ids" | wc -l | tr -d ' ')"
     newly_retired_count="$(comm -12 "$base_active_ids" "$head_retired_ids" | wc -l | tr -d ' ')"
-    ratio_required=$(( new_active_count * $(yq e -r '.change_budget.gate_add_requires_retire_ratio' "$CONTRACT") ))
+    ratio_required=$(( new_active_count * GATE_ADD_REQUIRES_RETIRE_RATIO ))
     ratio_ok=true
     if [[ "$new_active_count" -gt 0 && "$newly_retired_count" -lt "$ratio_required" ]]; then
       ratio_ok=false
@@ -177,6 +197,23 @@ if [[ "${#warnings[@]}" -gt 0 ]]; then
   warnings_json="$(printf '%s\n' "${warnings[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')"
 fi
 
+thresholds_json="$(jq -cn \
+  --argjson active "$ACTIVE_GATES_MAX" \
+  --argjson blocking "$BLOCKING_FAST_MAX" \
+  --argjson verify "$VERIFY_FILES_MAX" \
+  --argjson bindings "$BINDINGS_FILES_MAX" \
+  --argjson gov "$GOV_DOCS_MAX" \
+  --argjson legacy "$LEGACY_MAX" \
+  '{
+    active_gates_max: $active,
+    blocking_fast_gates_max: $blocking,
+    verify_files_max: $verify,
+    bindings_files_max: $bindings,
+    governance_docs_max: $gov,
+    legacy_scripts_max: $legacy
+  }'
+)"
+
 result_json="$(jq -cn \
   --argjson active_gates "$active_gates" \
   --argjson blocking_fast "$blocking_fast" \
@@ -184,7 +221,7 @@ result_json="$(jq -cn \
   --argjson bindings_files "$bindings_files" \
   --argjson governance_docs "$gov_docs" \
   --argjson legacy_files "$legacy_files" \
-  --argjson thresholds "$(yq e -o=json '.thresholds' "$CONTRACT")" \
+  --argjson thresholds "$thresholds_json" \
   --argjson change_budget "$change_json" \
   --argjson gate_ratio "$ratio_status" \
   --argjson violations "$violations_json" \

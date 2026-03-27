@@ -4,8 +4,11 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
-CONTRACT="${ROOT}/ops/bindings/policy.autotune.contract.yaml"
 EMAIL_INTENT_DIR="${SPINE_OUTBOX}/alerts/email-intents"
+REPORT_DIR="${SPINE_OUTBOX}/reports/policy-autotune"
+PROPOSAL_DESC_PREFIX="policy-autotune-weekly"
+PROPOSAL_LOOP_ID="LOOP-INFRA-HARDWARE-PLANE-AUDIT-20260227"
+AUTO_PROPOSE_ENABLED="true"
 
 DRY_RUN=0
 REPORT_JSON=""
@@ -26,16 +29,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-if [[ ! -f "$CONTRACT" ]]; then
-  echo "STOP (2): missing contract: $CONTRACT" >&2
-  exit 2
-fi
-
-if ! command -v yq >/dev/null 2>&1; then
-  echo "STOP (2): yq required for contract parsing" >&2
-  exit 2
-fi
 
 enqueue_email_intent() {
   local severity="$1"
@@ -102,9 +95,6 @@ resolve_fallback_loop_id() {
   return 1
 }
 
-REPORT_DIR_REL="$(yq e -r '.outputs.report_dir // "$SPINE_OUTBOX/reports/policy-autotune"' "$CONTRACT" 2>/dev/null || echo '$SPINE_OUTBOX/reports/policy-autotune')"
-REPORT_DIR="${REPORT_DIR_REL//\$SPINE_OUTBOX/$SPINE_OUTBOX}"
-
 if [[ -z "$REPORT_JSON" ]]; then
   REPORT_JSON="$(ls -1t "${REPORT_DIR}"/policy-autotune-weekly-*.json 2>/dev/null | head -n1 || true)"
 fi
@@ -114,13 +104,9 @@ if [[ -z "$REPORT_JSON" || ! -f "$REPORT_JSON" ]]; then
   exit 2
 fi
 
-PROPOSAL_DESC_PREFIX="$(yq e -r '.proposal.description_prefix // "policy-autotune-weekly"' "$CONTRACT" 2>/dev/null || echo "policy-autotune-weekly")"
-PROPOSAL_LOOP_ID="$(yq e -r '.proposal.loop_id // "null"' "$CONTRACT" 2>/dev/null || echo "null")"
-AUTO_PROPOSE_ENABLED="$(yq e -r '.guardrails.auto_propose_enabled // true' "$CONTRACT" 2>/dev/null || echo true)"
-
 if [[ "$AUTO_PROPOSE_ENABLED" != "true" ]]; then
   echo "policy.autotune.propose"
-  echo "autotune auto_propose_enabled=false (contract); exiting without submit."
+  echo "autotune auto_propose_enabled=false (SPINE authority); exiting without submit."
   exit 0
 fi
 

@@ -6,10 +6,10 @@ version: 1.0
 updated: "2026-03-24"
 decision_loop_id: LOOP-TRANSLATOR-DOCTRINE-CONSOLIDATION-20260324
 source_triangulation:
-  - docs/governance/SPINE_V3_BOOTSTRAP.md (Target Node Model, Principles 3/5)
-  - docs/governance/V3_AUTONOMY_DECISIONS.md (Translator Architecture Decision — Option A)
-  - docs/governance/SPINE_V3_CONTINUOUS_SOURCEBOOK.md (synthesized V3 thought)
-  - docs/governance/CONTROL_NODE_REQUIREMENTS.md (Phase 1 supersession)
+  - docs/governance/SPINE.md (controller lane, closure, and verify discipline)
+  - docs/governance/SESSION_PROTOCOL.md (loop anchorage and floating-WIP prevention)
+  - docs/governance/FINAL_SURFACES_CLOSURE_BRIEF_20260326.md (layer and end-state contract)
+  - docs/governance/LOCAL_CONTROL_PLANE_CONTRACT.md (control-plane placement and entry surface)
   - docs/governance/EXECUTION_NODE_SPEC.md (node 6/7 placement)
   - ops/bindings/translator.authority.contract.yaml (machine-evaluable boundary)
 enforcement:
@@ -141,7 +141,7 @@ These rules are non-negotiable. They are enforced structurally by `translator.au
 > It may interpret intent, but it must never become the spine seal of success.
 > It should be always-on, but never final.
 
-The translator may start a workflow, but it must never be the final judge of success (Principle 5, SPINE_V3_BOOTSTRAP). Translator interprets intent; verifier judges outcomes; git agent publishes (Principle 3).
+The translator may start a workflow, but it must never be the final judge of success under the current spine operating contract. Translator interprets intent; verifier judges outcomes; git agent publishes.
 
 ---
 
@@ -246,14 +246,13 @@ This preserves the separation: **translator is the membrane, wave.execute is the
 
 | Document | Relationship |
 |----------|-------------|
-| `SPINE_V3_BOOTSTRAP.md` | Parent architecture. This doctrine elaborates the Target Node Model and Principles 3, 4, 5, 8, 9. |
-| `V3_AUTONOMY_DECISIONS.md` | Decision record. Option A (Translator as Service) is locked. This doctrine codifies the implications. |
-| `SPINE_V3_CONTINUOUS_SOURCEBOOK.md` | Deep reference. Extensive synthesis of translator thought distilled into this doctrine. |
-| `CONTROL_NODE_REQUIREMENTS.md` | Superseded (Phase 1). MacBook stays control plane; VM 207 gets worker roles only. |
+| `SPINE.md` | Parent operating contract. This doctrine inherits controller-lane, closure, and verification discipline from the spine operating contract. |
+| `SESSION_PROTOCOL.md` | Defines loop anchorage and floating-WIP requirements referenced in this doctrine. |
+| `FINAL_SURFACES_CLOSURE_BRIEF_20260326.md` | Current layer and end-state contract for the spine execution boundary. |
+| `LOCAL_CONTROL_PLANE_CONTRACT.md` | Current control-plane placement and workstation entry-surface authority. |
 | `EXECUTION_NODE_SPEC.md` | Sibling spec. Execution Node is node 4/7 in this model. |
 | `translator.authority.contract.yaml` | Machine-evaluable enforcement. MUST reference this doctrine as `doctrine_source`. |
 | `D422 gate` | Structural verification of translator isolation. |
-| `SESSION_PROTOCOL.md` | Defines floating WIP and loop scope requirements referenced in Part 3. |
 
 ---
 

@@ -161,7 +161,7 @@ Create governed execution lanes instead of manual worktree setup:
 - Closeout checklist generated
 - State tracked in `~/.runtime/spine/state/execution-lanes/`
 
-See: `docs/governance/AGENT_EXECUTION_LANE_AUDIT_RECEIPT_20260319.md` for background.
+Historical note: the initial execution-lane rollout audit is retired from the active governance surface; this section is the current operating authority.
 
 ### Worktree Lifecycle Auto-Cleanup (Phase 3)
 
@@ -237,6 +237,71 @@ Loop closeout ceremony:
 4. One override path: use `OPS_GOVERNED_MAIN_OVERRIDE=1`; do not require multi-var metadata ceremony for routine local work.
 5. One daily remote: `origin` is canonical for day-to-day workflow.
 
+## Consolidated Authority Notes
+
+### Deprecated Terms
+
+- Deprecated-term enforcement is folded into this file.
+- Legacy repo token for drift and docs checks: `legacy-repo`.
+- Deprecated-term mentions are non-blocking only in archive, certification, and explicit historical/planning surfaces.
+
+### Domain Hygiene Weekly
+
+- `docs/governance/domains/hygiene-weekly.md` is the surviving domain note.
+- Verification entrypoint remains `./bin/ops cap run verify.run -- domain hygiene-weekly`.
+- No separate live bundle binding is required for this domain note.
+
+### Lean Budget
+
+- Thresholds:
+  - `active_gates_max=120`
+  - `blocking_fast_gates_max=25`
+  - `verify_files_max=80`
+  - `bindings_files_max=180`
+  - `governance_docs_max=35`
+  - `legacy_scripts_max=0`
+- Required domain docs:
+  - `aof`, `backup`, `communications`, `core`, `finance`, `home`, `hygiene-weekly`, `immich`, `infra`, `loop_gap`, `media`, `microsoft`, `mint`, `n8n`, `observability`, `proxmox-network`, `rag`, `secrets`, `surveillance`, `tax-legal`, `workbench`
+- Change budget:
+  - `verify max_net_new=0`
+  - `governance max_net_new=0`
+  - `bindings max_net_new=0`
+  - `gate_add_requires_retire_ratio=2`
+
+### Policy Autotune
+
+- Weekly cadence: Monday `09:10` in `America/New_York`.
+- Rolling analysis window: `7` days.
+- Guardrails:
+  - `no_touch_gate_ids=D3,D62,D63,D124,D126,D127,D140`
+  - `max_recommendations_per_week=2`
+  - `max_policy_edits_per_week=2`
+  - `require_human_apply=true`
+  - `auto_propose_enabled=true`
+- Tune targets:
+  - `d48_behavior`
+  - `core_mode_gate_membership`
+  - `verify_route_domain_routing`
+  - `check_cadence_friction`
+- Proposal defaults:
+  - `description_prefix=policy-autotune-weekly`
+  - `loop_id=LOOP-INFRA-HARDWARE-PLANE-AUDIT-20260227`
+  - reports under `$SPINE_STATE/policy-autotune/` and `$SPINE_OUTBOX/reports/policy-autotune/`
+- Advisory thresholds:
+  - `verify.core.run soak warn=180 minutes`
+  - `stability.control.snapshot soak warn=120 minutes`
+  - `rerun_per_commit_ratio warn=4.0`
+  - `release_fail_rate_pct warn=20.0`
+  - `queue_pending_warn=8`
+  - `queue_pending_critical=12`
+  - `pending_age_days_warn=7`
+  - `pending_age_days_critical=14`
+- AOF thresholds:
+  - `gate_count warn=150 critical=200`
+  - `cap_count warn=400 critical=600`
+  - `open_gaps warn=5 critical=10`
+  - `verify_pass_rate healthy_min_pct=90 min_sample_size=5`
+
 ## Mailroom Boundary
 
 Mailroom runtime state is **externalized** to `$SPINE_STATE` (canonical: `~/code/.runtime/spine/state/`).
@@ -258,14 +323,14 @@ Every agent that starts a Claude Code session in this repo is automatically enro
 - Dynamic governance brief: delivers current governance context
 - Proposal queue gating: alerts if >5 pending proposals
 
-This is the **first line of agent governance**. See: `docs/governance/DREAM_SYSTEM.md` for details.
+This is the **first line of agent governance**. Current authority stays in this contract and [FINAL_SURFACES_CLOSURE_BRIEF_20260326.md](/Users/ronnyworks/code/agentic-spine/docs/governance/FINAL_SURFACES_CLOSURE_BRIEF_20260326.md).
 
 ### D399: Live External-State Enforcement
 **Path**: `surfaces/verify/d399-microsoft-mint-customer-mailbox-canonical-lock.sh` (560 lines)
 
 Unlike file-check gates, D399 makes **LIVE API calls to Microsoft** for a Mint-domain contract. It performs 14 live checks against Microsoft Exchange/Graph API to enforce consistency between declared contracts (`communications.providers.contract.yaml`) and live production state.
 
-This is the current frontier of spine enforcement for domain-scoped live checks. It should run from Mint-domain verification and Mint-repo push paths, not as a Spine-global pre-push requirement on unrelated `agentic-spine` changes. See: `docs/governance/DREAM_SYSTEM.md` for details.
+This is the current frontier of spine enforcement for domain-scoped live checks. It should run from Mint-domain verification and Mint-repo push paths, not as a Spine-global pre-push requirement on unrelated `agentic-spine` changes. Historical deep-dive material is retired from the active governance surface.
 
 ## Projection Metadata
 

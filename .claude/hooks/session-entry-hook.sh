@@ -318,13 +318,37 @@ if command -v docker >/dev/null 2>&1; then
   DOCKER_CTX="$(timeout 2 docker context show 2>/dev/null || echo "unavailable")"
 fi
 
-# Read governance brief — prefer spine.context dynamic delivery, fallback to direct file read
-BRIEF_FILE="$SPINE_ROOT/docs/governance/AGENT_GOVERNANCE_BRIEF.md"
+# Read governance brief — prefer spine.context dynamic delivery, fallback to surviving authority docs
+BRIEF_FILES=(
+  "$SPINE_ROOT/docs/governance/SPINE.md"
+  "$SPINE_ROOT/docs/governance/SESSION_PROTOCOL.md"
+)
 BRIEF_MODE="${SESSION_ENTRY_BRIEF_MODE:-summary}"  # summary|full
 if [[ -x "$CONTEXT_SCRIPT" ]]; then
-  BRIEF_FULL=$("$CONTEXT_SCRIPT" --section brief 2>/dev/null || cat "$BRIEF_FILE" 2>/dev/null || echo "(governance brief unavailable)")
+  BRIEF_FULL=$("$CONTEXT_SCRIPT" --section brief 2>/dev/null || true)
 else
-  BRIEF_FULL=$(cat "$BRIEF_FILE" 2>/dev/null || echo "(governance brief unavailable — expected at $BRIEF_FILE)")
+  BRIEF_FULL=""
+fi
+
+if [[ -z "$BRIEF_FULL" ]]; then
+  BRIEF_FULL="$(
+    {
+      emitted=0
+      for brief_file in "${BRIEF_FILES[@]}"; do
+        [[ -f "$brief_file" ]] || continue
+        if (( emitted > 0 )); then
+          echo ""
+          echo "---"
+          echo ""
+        fi
+        cat "$brief_file"
+        emitted=$((emitted + 1))
+      done
+      if (( emitted == 0 )); then
+        echo "(governance brief unavailable — expected docs/governance/SPINE.md and docs/governance/SESSION_PROTOCOL.md)"
+      fi
+    }
+  )"
 fi
 
 summarize_brief() {
@@ -370,7 +394,7 @@ else
   fi
   BRIEF_RENDERED="$BRIEF_SUMMARY
 
-> Full brief: \`docs/governance/AGENT_GOVERNANCE_BRIEF.md\` (set \`SESSION_ENTRY_BRIEF_MODE=full\` to inject full text)."
+> Full authority: \`docs/governance/SPINE.md\` + \`docs/governance/SESSION_PROTOCOL.md\` (set \`SESSION_ENTRY_BRIEF_MODE=full\` to inject full text)."
 fi
 
 # Build the system message: dynamic state + canonical brief

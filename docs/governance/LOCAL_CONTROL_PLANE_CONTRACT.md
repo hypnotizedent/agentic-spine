@@ -93,3 +93,124 @@ Naming: directory name matches the branch name with `/` replaced by `-`.
 | Verify reports | `.evidence/spine/verify/` | Indefinite (they document system state at points in time) |
 | Loop closeouts | `.evidence/spine/loop-closeouts/` | Indefinite |
 | Domain evidence | `.evidence/spine/verify/{domain}/` | Indefinite |
+
+## Claude Redirect Surface
+
+`~/.claude/CLAUDE.md` is a redirect surface only. It must not become a second governance system.
+
+- Point operators back to the spine repo governance docs.
+- Use one public entry command:
+
+```bash
+cd ~/code/agentic-spine
+./bin/ops cap run session.v3.attach -- --allow-no-loop
+```
+
+- Treat `session.start` as the bootstrap subroutine beneath attach and launcher flows, not a second human-facing workflow.
+- Never tell operators to run `session.start` and then separately run `session.v3.attach`.
+- Keep path references lowercase under `~/code/...`.
+
+The shim should direct operators to:
+
+1. `AGENTS.md` for the thin entry stub.
+2. `docs/governance/SPINE.md` for the minimal operating contract.
+3. `docs/governance/SESSION_PROTOCOL.md` when deeper session behavior is needed.
+
+## Managed Machine Filesystem Contract
+
+Purpose: make every managed machine boring to read. A path must tell the operator what kind of thing it is, whether it is active, and whether it is safe to clean up.
+
+### Core Rules
+
+1. One path class per directory. Config, data, runtime, logs, cache, backup, archive, and tombstone surfaces must not be mixed.
+2. Unknown durable path equals defect. If a kept directory does not fit this contract, it must either be documented as a temporary exception or removed.
+3. Active stack roots belong under `/opt/stacks/<stack>` on managed Linux guests.
+4. Home-directory stack roots are transitional exceptions only and must carry an exit criterion.
+5. Downloads are staging, not residence. Any long-lived payload under a downloads path is contract drift.
+6. Every non-trivial bind mount must declare owner, purpose, backup story, and a source path that belongs to a declared class.
+7. Retired systems keep one restore story, not a shadow runtime. Tombstones must not appear in startup, deploy, or green-health surfaces.
+
+### Path Classes
+
+- Config: declarative stack inputs, service config, environment files, and small static assets. Canonical roots: `/etc/...`, `/opt/stacks/<stack>/...`, `/srv/config/<stack>/...`.
+- Data: durable mutable runtime state. Canonical roots: `/srv/data/<stack>/...`, `pve:/tank/docker/<stack>/...`, `synology918:/volume1/...` when the NAS is the declared authority plane.
+- Runtime: live process state, sockets, PID files, and container runtime internals. Canonical roots: `/run/...`, `/var/lib/docker/...`, `/var/lib/containers/...`.
+- Logs: operator-readable history and service diagnostics. Canonical roots: `/var/log/...` and journald.
+- Cache / Tmp: disposable acceleration surfaces. Canonical roots: `/var/cache/...`, `/tmp/...`, `/var/tmp/...`.
+- Backup: recoverable copies of canonical state. Canonical roots: `/srv/backups/<stack>/...`, `pve:/md1400/backup-cold/...`, `synology918:/volume1/backups/...`.
+- Archive: retained cold payload not needed for normal runtime. Canonical roots: `pve:/md1400/archive/...`, `/srv/archive/<stack>/...` when no shared archive plane exists.
+- Tombstone / Retired: dead runtime kept only for recovery, extraction, or evidence. Canonical roots: `pve:/md1400/tombstones/...` and documented cold restore artifacts such as `vm-200-docker-host-primary`.
+
+### Shared Storage Scaffold Classes
+
+Every cross-device storage map should project durable roots into the same small scaffold model so agents see semantic symmetry even when literal directory names differ.
+
+- `backup_primary`: canonical primary backup or restore authority for an active plane.
+- `backup_secondary`: declared secondary or offsite copy, not the primary authority.
+- `archive_cold`: canonical cold archive plane for retained payload.
+- `intake_stage`: controlled staging or reconciliation lane with drain and expiry expectations.
+- `review_hold`: explicit hold or review lane retained on purpose.
+- `tombstone_retained`: retired non-canonical residue kept for review, extraction, or evidence.
+- `personal_live`: active home-personal payload surface that remains canonical.
+- `review_pending`: durable surface intentionally retained but not yet fully classified for cleanup or canon.
+- `defect_cruft`: generated clutter or placeholder residue with no canonical authority claim.
+- `drained_retired`: previously used root that is now intentionally drained and no longer canonical.
+
+The authoritative machine-readable projection for these classes is `ops/bindings/storage.scaffold.authority.yaml`.
+
+### Active, Parked, Retired
+
+- Active: runtime is intended to exist now, stack roots and data paths are declared, and backup admission plus health posture are explicit.
+- Parked: runtime is intentionally stopped, data and config may remain, and the host must not be confused with a live surface.
+- Retired / Tombstoned: runtime is dead by policy, files may remain only for restore or extraction, and any surface that makes it look startable by default is a defect.
+
+### Stack Root Rules
+
+- Canonical active stack root on guests: `/opt/stacks/<stack>`.
+- `/opt/stacks/<stack>` may be a thin entrypoint symlink to `/srv/config/<stack>` when the guest is normalized into `/srv/config|data|runtime/<stack>`.
+- A stack root contains stack config and small stack-local assets, not the whole payload archive.
+- Durable payload belongs on declared data planes and then bind-mounts into the stack.
+- Stack names must match repo truth. If the machine path and repo stack id disagree, repo truth is wrong or runtime is wrong.
+
+### Bind-Mount Discipline
+
+- Every bind mount must answer four questions: source path, source-path class, consuming stack or service, and backup or archive contract.
+- Bind mounts must not hop between ambiguous or unnamed roots.
+- Canonical examples:
+  - `pve:/tank/docker/download-stack` -> `download-stack` VM
+  - `pve:/tank/docker/streaming-stack` -> `streaming-stack` VM
+  - `pve:/md1400/archive/live-share/ronny-projects` -> `archive-smb` LXC
+  - `pve:/md1400/archive/live-share/mint-legacy` -> `archive-smb` LXC
+  - `synology918:/volume1/media-staging` -> `media-home` VM
+
+### Machine-Specific Canonical Roots
+
+#### `pve` / 730XD
+
+- `/tank/docker/<stack>` = active externalized shop runtime state
+- `/media` = legacy warm payload or pressure lane, not the long-term watch authority
+- `/md1400/backup-cold` = canonical shop cold backup plane
+- `/md1400/archive` = canonical shop cold archive plane
+- `/md1400/stage` = controlled staging, import, and reconciliation lane
+- `/md1400/tombstones` = retired runtime residue and post-cleanup evidence lane
+
+#### `proxmox-home`
+
+- `local-lvm` = boot and root disks for home VMs and LXCs
+- Hypervisor local disks are not the canonical payload archive
+- No mystery durable app piles should accumulate directly on the hypervisor filesystem
+
+#### `synology918`
+
+- `/volume1/backups/proxmox_backups/dump` = canonical home VM/LXC backup lane
+- `/volume1/backups/apps/media-config` = canonical primary media-home config backup lane
+- `/volume1/backups/_legacy_tombstones` = explicit retired backup subtree
+- `/volume1/media-staging/...` = canonical active home media import surface and the only live share currently consumed by `media-home` VM 106
+- `/volume1/media-holds/...` = canonical hold or review lane, not the primary playback library
+- `/volume1/documents` = drained retired root; no longer a canonical business payload surface
+- `/volume1/homelab` = review-pending durable residue; not implicitly canonical
+- Empty placeholder names such as `/volume1/media-home`, `/volume1/media`, `/volume1/hot-media`, `/volume1/live-library`, and `/volume1/library-home` are defects, not canonical roots
+
+### Operator Rule
+
+When a directory cannot be explained in one sentence using this contract, it is not boring enough yet.

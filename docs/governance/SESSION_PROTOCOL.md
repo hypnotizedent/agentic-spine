@@ -44,7 +44,7 @@ Full spine access. Follow all sections below in order.
 ### Before you run anything
 
 1. Confirm you are in the spine repo (`cd ~/code/agentic-spine`).
-2. Read `docs/governance/AGENT_GOVERNANCE_BRIEF.md` for the governance contract.
+2. Read `docs/governance/SPINE.md` for the minimal operating contract. This file carries the session-entry and environment-specific behavior.
 3. For cross-repo parallel work, read `docs/governance/RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md`.
 
 ### Session steps

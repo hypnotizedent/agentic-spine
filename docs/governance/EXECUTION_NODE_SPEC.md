@@ -4,7 +4,7 @@ owner: "@ronny"
 created_at: "2026-03-24"
 scope: v3-execution-node-spec
 node_id: 6
-related_arch: docs/governance/SPINE_V3_BOOTSTRAP.md
+related_arch: docs/governance/FINAL_SURFACES_CLOSURE_BRIEF_20260326.md
 ---
 
 # Execution Node — V3 Node 6/7

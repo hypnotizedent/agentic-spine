@@ -7,9 +7,9 @@ scope: agent-governance-brief
 
 # Agent Governance Brief
 
-> Canonical source for all agent governance constraints.
+> Compatibility surface. Canonical authority now lives in `docs/governance/SPINE.md` and `docs/governance/SESSION_PROTOCOL.md`.
 > Consumed by: session-entry surfaces via `spine.context`.
-> `ops/hooks/sync-agent-surfaces.sh` has been retired and removed. Update this file as the source of truth.
+> `ops/hooks/sync-agent-surfaces.sh` has been retired and removed. Update the surviving authority surfaces instead of reintroducing sync.
 
 ## Commit & Branch Rules
 

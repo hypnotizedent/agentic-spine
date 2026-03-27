@@ -10,12 +10,12 @@ set -euo pipefail
 #   T4: document_metadata tags stripped from answer text
 #   T5: Retrieve output sources are clean filenames (no hotdir prefix)
 #   T6: /rag/ask response includes mode field
-#   T7: MAILROOM_BRIDGE.md documents /rag/ask output contract
+#   T7: mailroom bridge authority doc documents /rag/ask output contract
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 BRIDGE="$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-serve"
 RAG_CLI="$ROOT/ops/plugins/infra/rag/bin/rag"
-DOC="$ROOT/docs/governance/MAILROOM_BRIDGE.md"
+DOC="$ROOT/docs/governance/NETWORK_AND_REACHABILITY_MAILROOM_BRIDGE.md"
 
 PASS=0
 FAIL=0
@@ -102,7 +102,7 @@ assert 'actual_mode' in code, 'actual_mode tracking not found'
 
 # ── T7: Doc covers output contract ──
 echo ""
-echo "T7: MAILROOM_BRIDGE.md documents /rag/ask output contract"
+echo "T7: mailroom bridge authority doc documents /rag/ask output contract"
 (
   python3 -c "
 with open('$DOC') as f:

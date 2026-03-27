@@ -2,7 +2,12 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-CONTRACT="${ROOT}/ops/bindings/policy.autotune.contract.yaml"
+AUTHORITY_DOC="${ROOT}/docs/governance/SPINE.md"
+WINDOW_DAYS_DEFAULT=7
+REPORT_DIR_SUFFIX="policy-autotune/reports"
+STATE_PATH_SUFFIX="policy-autotune/state.json"
+GUARDRAILS_JSON='{"no_touch_gate_ids":["D3","D62","D63","D124","D126","D127","D140"],"max_recommendations_per_week":2,"require_human_apply":true}'
+THRESHOLDS_JSON='{"soak_minutes_by_cap":{"verify.core.run":180,"stability.control.snapshot":120},"rerun_per_commit_ratio":4.0,"release_fail_rate_pct":20.0,"queue_pending_warn":8,"queue_pending_critical":12,"pending_age_days_warn":7,"pending_age_days_critical":14}'
 
 JSON_OUT=0
 WINDOW_DAYS_OVERRIDE=""
@@ -24,36 +29,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ ! -f "$CONTRACT" ]]; then
-  echo "STOP (2): missing contract: $CONTRACT" >&2
-  exit 2
-fi
-
-if ! command -v yq >/dev/null 2>&1; then
-  echo "STOP (2): yq required for contract parsing" >&2
-  exit 2
-fi
-
-WINDOW_DAYS="$(yq e -r '.window.days // 7' "$CONTRACT" 2>/dev/null || echo 7)"
+WINDOW_DAYS="$WINDOW_DAYS_DEFAULT"
 if [[ -n "$WINDOW_DAYS_OVERRIDE" ]]; then
   WINDOW_DAYS="$WINDOW_DAYS_OVERRIDE"
 fi
 
 # Resolve output paths from externalized runtime (never repo-local mailroom/).
-REPORT_DIR_SUFFIX="$(yq e -r '.outputs.report_dir_suffix // "policy-autotune/reports"' "$CONTRACT" 2>/dev/null || echo "policy-autotune/reports")"
-STATE_PATH_SUFFIX="$(yq e -r '.outputs.state_path_suffix // "policy-autotune/state.json"' "$CONTRACT" 2>/dev/null || echo "policy-autotune/state.json")"
 REPORT_DIR="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/${REPORT_DIR_SUFFIX}"
 STATE_PATH="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/${STATE_PATH_SUFFIX}"
 STATE_DIR="$(dirname "$STATE_PATH")"
 mkdir -p "$REPORT_DIR" "$STATE_DIR"
 
-CONTRACT_JSON="$(yq -o=json '.' "$CONTRACT")"
 NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 REPORT_JSON="${REPORT_DIR}/policy-autotune-weekly-${STAMP}.json"
 REPORT_MD="${REPORT_DIR}/policy-autotune-weekly-${STAMP}.md"
 
-export POLICY_AUTOTUNE_CONTRACT_JSON="$CONTRACT_JSON"
+export POLICY_AUTOTUNE_AUTHORITY_DOC="$AUTHORITY_DOC"
+export POLICY_AUTOTUNE_GUARDRAILS_JSON="$GUARDRAILS_JSON"
+export POLICY_AUTOTUNE_THRESHOLDS_JSON="$THRESHOLDS_JSON"
 export POLICY_AUTOTUNE_JSON_OUT="$JSON_OUT"
 python3 - "$ROOT" "$WINDOW_DAYS" "$NOW_UTC" "$REPORT_JSON" "$REPORT_MD" "$STATE_PATH" <<'PY'
 import datetime as dt
@@ -83,7 +77,9 @@ now_utc = iso_to_dt(sys.argv[3])
 report_json = Path(sys.argv[4]).resolve()
 report_md = Path(sys.argv[5]).resolve()
 state_path = Path(sys.argv[6]).resolve()
-contract = json.loads(os.environ.get("POLICY_AUTOTUNE_CONTRACT_JSON", "{}"))
+authority_doc = Path(os.environ["POLICY_AUTOTUNE_AUTHORITY_DOC"]).resolve()
+guardrails = json.loads(os.environ["POLICY_AUTOTUNE_GUARDRAILS_JSON"])
+thresholds = json.loads(os.environ["POLICY_AUTOTUNE_THRESHOLDS_JSON"])
 
 window_start = now_utc - dt.timedelta(days=window_days)
 receipts_root = Path(os.environ.get("SPINE_EVIDENCE", str(Path.home() / "code" / ".evidence" / "spine"))) / "sessions"
@@ -190,8 +186,6 @@ if rc == 0:
         if m:
             fail_gate_counts[m.group(1)] = int(m.group(2))
 
-guardrails = contract.get("guardrails", {})
-thresholds = contract.get("thresholds", {})
 no_touch = set(guardrails.get("no_touch_gate_ids", []))
 max_recs = int(guardrails.get("max_recommendations_per_week", 2))
 
@@ -252,7 +246,7 @@ report = {
     "window_days": window_days,
     "window_start": window_start.isoformat().replace("+00:00", "Z"),
     "window_end": now_utc.isoformat().replace("+00:00", "Z"),
-    "contract_path": str(root / "ops" / "bindings" / "policy.autotune.contract.yaml"),
+    "contract_path": str(authority_doc),
     "guardrails": {
         "no_touch_gate_ids": sorted(no_touch),
         "max_recommendations_per_week": max_recs,

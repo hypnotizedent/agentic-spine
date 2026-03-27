@@ -4,7 +4,7 @@ set -euo pipefail
 # spine-context — Dynamic governance context delivery
 # Outputs governance brief + live spine state as structured markdown.
 # Replaces inline brief reading in session-entry-hook.sh.
-# Source of truth: docs/governance/AGENT_GOVERNANCE_BRIEF.md
+# Governance authority: docs/governance/SPINE.md + docs/governance/SESSION_PROTOCOL.md
 #
 # Usage: spine-context [--format markdown|yaml] [--section brief|status|agents|all]
 # Default: --format markdown --section all
@@ -24,11 +24,38 @@ done
 
 # ── Brief section ──────────────────────────────────────────
 emit_brief() {
-  local brief_file="$SPINE_ROOT/docs/governance/AGENT_GOVERNANCE_BRIEF.md"
-  if [[ -f "$brief_file" ]]; then
-    cat "$brief_file"
-  else
-    echo "(governance brief unavailable — expected at $brief_file)"
+  local read_surface_binding="$SPINE_ROOT/ops/bindings/agent.read.surface.yaml"
+  local rel emitted=0
+
+  if command -v yq >/dev/null 2>&1 && [[ -f "$read_surface_binding" ]]; then
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] || continue
+      [[ -f "$SPINE_ROOT/$rel" ]] || continue
+      if (( emitted > 0 )); then
+        echo ""
+        echo "---"
+        echo ""
+      fi
+      cat "$SPINE_ROOT/$rel"
+      emitted=$((emitted + 1))
+    done < <(yq -r '.startup_read_surface[]?' "$read_surface_binding" 2>/dev/null || true)
+  fi
+
+  if (( emitted == 0 )); then
+    for rel in "docs/governance/SPINE.md" "docs/governance/SESSION_PROTOCOL.md"; do
+      [[ -f "$SPINE_ROOT/$rel" ]] || continue
+      if (( emitted > 0 )); then
+        echo ""
+        echo "---"
+        echo ""
+      fi
+      cat "$SPINE_ROOT/$rel"
+      emitted=$((emitted + 1))
+    done
+  fi
+
+  if (( emitted == 0 )); then
+    echo "(governance brief unavailable — expected startup read surfaces under $read_surface_binding)"
   fi
 }
 

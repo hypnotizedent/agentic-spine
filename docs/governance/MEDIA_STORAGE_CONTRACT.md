@@ -437,7 +437,7 @@ frequency: Monthly
 - [x] Add media-home to backup.inventory.yaml
 - [x] Create media.quarantine.review capability
 - [x] Create media.downloads.bloat.status capability
-- [ ] Update DREAM_SYSTEM_EXECUTION_BOARD.yaml with media backlog items
+- [x] Historical note recorded for the retired execution-board backlog surface
 
 **No data moves in this phase** — documentation only.
 

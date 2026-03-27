@@ -22,7 +22,7 @@ The spine's authority chain and contract surface:
 | Governance entry point | [SPINE.md](../governance/SPINE.md) |
 | Session operating contract | [SESSION_PROTOCOL.md](../governance/SESSION_PROTOCOL.md) |
 | Agent contract | [AGENT_CONTRACT.md](AGENT_CONTRACT.md) |
-| Operator brief | [AGENT_GOVERNANCE_BRIEF.md](../governance/AGENT_GOVERNANCE_BRIEF.md) |
+| Operator governance | [SPINE.md](../governance/SPINE.md) + [SESSION_PROTOCOL.md](../governance/SESSION_PROTOCOL.md) |
 
 ---
 
