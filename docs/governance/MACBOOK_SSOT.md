@@ -59,7 +59,7 @@ Direct ad hoc launcher hotkeys are retired.
 
 All operator entry surfaces resolve the spine ops binary through the governed
 launcher contract. The canonical model no longer depends on a permanent
-`~/.wt/agentic-spine/control-plane` checkout.
+a permanent dedicated control-plane checkout.
 
 Resolution order (same in all surfaces):
 1. `$SPINE_ROOT/bin/ops` — explicit override

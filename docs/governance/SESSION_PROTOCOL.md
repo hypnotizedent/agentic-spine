@@ -339,7 +339,7 @@ Every open gap in `operational.gaps.yaml` must be linked to an active loop (`par
 
 When using managed worktrees:
 
-1. **Create** — default lane flow is `ops wave start <WAVE_ID> --objective "..."` with auto workspace provisioning (`~/.wt/<repo>/<WAVE_ID>`, branch `codex/<WAVE_ID>`). Manual `git worktree add` is fallback only.
+1. **Create** — default lane flow is `ops wave start <WAVE_ID> --objective "..."` with auto workspace provisioning (`~/code/.runtime/spine/tmp/worktrees/<repo>/<WAVE_ID>`, branch `codex/<WAVE_ID>`). Manual `git worktree add` is fallback only.
 2. **Base** — branch from `origin/main` (fetch first) when provisioning manual branches; never stack codex branches without explicit base intent.
 3. **Classify before cleanup** — run `./bin/ops cap run worktree.lifecycle.reconcile -- --json` to see owner/state (`wave`, `loop`, `none`) and stale candidates.
 4. **Retire explicitly** — lifecycle closeout first (`ops wave close`, `ops loops close`), then optional git cleanup. D48 now enforces lifecycle violations plus the integration-only root-main rule.

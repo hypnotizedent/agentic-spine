@@ -1,0 +1,160 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-27
+scope: root-authority-taxonomy
+version: 1
+updated_at: "2026-03-27"
+
+# Root Authority Contract
+# Establishes the canonical root taxonomy for the spine platform.
+# Defines the authoritative path hierarchy, tool-adapter policy,
+# and residue classification for competing roots.
+
+taxonomy:
+  home:
+    path: /Users/ronnyworks
+    role: adapter_and_install_target_only
+    policy: never_canonical_machine_truth
+    note: >
+      Home directory is the install target for tool adapters (Claude config,
+      Codex skills, Hammerspoon, brew, etc). It is never the source of truth
+      for spine state, evidence, or runtime.
+
+  platform:
+    path: /Users/ronnyworks/code
+    role: single_platform_root
+    policy: only_versioned_repos_and_governed_runtime
+    note: >
+      All versioned repos, runtime state, and evidence live under this root.
+      No repo or state surface may be rooted outside this path.
+
+  runtime:
+    path: /Users/ronnyworks/code/.runtime/spine
+    role: canonical_runtime_state
+    subpaths:
+      state: /Users/ronnyworks/code/.runtime/spine/state
+      mailroom: /Users/ronnyworks/code/.runtime/spine/mailroom
+      locks: /Users/ronnyworks/code/.runtime/spine/locks
+      logs: /Users/ronnyworks/code/.runtime/spine/logs
+      tmp: /Users/ronnyworks/code/.runtime/spine/tmp
+    note: >
+      Externalized runtime state for the spine. Local-only, not inside any
+      versioned repo. Source contract: ops/bindings/mailroom.runtime.contract.yaml.
+
+  evidence:
+    path: /Users/ronnyworks/code/.evidence/spine
+    role: canonical_evidence_trail
+    subpaths:
+      sessions: /Users/ronnyworks/code/.evidence/spine/sessions
+      verify: /Users/ronnyworks/code/.evidence/spine/verify
+      reports: /Users/ronnyworks/code/.evidence/spine/reports
+      cap_runs: /Users/ronnyworks/code/.evidence/spine/cap-runs
+    note: >
+      Governed evidence trail. Receipts, verify reports, and cap run logs.
+
+  worktrees:
+    path: /Users/ronnyworks/code/.runtime/spine/tmp/worktrees
+    role: canonical_worktree_root
+    layout: "<root>/agentic-spine/<WAVE_ID>"
+    note: >
+      All managed worktrees are provisioned under this root.
+      Source contract: ops/bindings/worktree.lifecycle.contract.yaml.
+
+  repos:
+    path: /Users/ronnyworks/code/*
+    role: versioned_repos_only
+    note: >
+      Only versioned git repos live directly under the platform root.
+      Runtime state, evidence, and worktrees use governed dotfile roots.
+
+tool_adapter_policy:
+  principle: >
+    Home-level tool paths are adapter or deploy targets only.
+    Authoritative tool behavior must resolve through repo-owned
+    wrappers, contracts, and capabilities.
+  examples:
+    - path: ~/.claude/
+      role: Claude Code adapter config (install target)
+    - path: ~/.codex/skills/
+      role: Codex skill install target (thin adapter)
+    - path: ~/.config/opencode/
+      role: OpenCode config (install target)
+    - path: ~/.local/bin/
+      role: pipx/brew deploy target for CLI tools
+  enforcement: >
+    No spine contract may declare a home-level path as authoritative truth.
+    Repo-owned wrappers (ops/commands/cap.sh, ops/plugins/*/bin/*)
+    are the authority layer. Home-level tool configs are consumers.
+
+residue:
+  - path: /Users/ronnyworks/.runtime
+    status: orphan
+    disposition: requires_migration_or_removal
+    note: >
+      Legacy home-level runtime root. Superseded by
+      /Users/ronnyworks/code/.runtime. Must not be used by any live surface.
+
+  - path: /Users/ronnyworks/.wt
+    status: orphan
+    disposition: requires_workbench_worktree_migration
+    note: >
+      Legacy home-level worktree root. Superseded by
+      /Users/ronnyworks/code/.runtime/spine/tmp/worktrees.
+      Workbench operator-storage-runtime still lives here and requires
+      a separate workbench worktree migration pass.
+
+  - path: /Users/ronnyworks/.worktrees
+    status: orphan
+    disposition: requires_removal
+    note: >
+      Deprecated worktree root predating both ~/.wt and the canonical root.
+
+  - path: /Users/ronnyworks/code/.wt
+    status: transitional
+    disposition: requires_migration_to_canonical_worktree_root
+    note: >
+      Intermediate worktree root used between ~/.wt and the canonical root.
+      Live spine-core scripts patched in H2-A to use canonical root.
+      Remaining references in operator-storage and launchd plist templates
+      require a workbench worktree migration pass.
+
+exception_policy:
+  allowed_scope: /Users/ronnyworks/code
+  home_root_exceptions: forbidden
+  note: >
+    Any legitimate operational exception must remain under ~/code.
+    Home-root exceptions are never allowed. If a path cannot be resolved
+    under ~/code in this pass, it must be classified explicitly and
+    scheduled for a migration pass.
+
+damage_model:
+  wrong_root_write:
+    description: >
+      Terminal resolves the wrong root and writes state into a non-canonical
+      location. Result: state is invisible to governed surfaces, causing
+      continuity breaks.
+    examples:
+      - writing to ~/.runtime instead of ~/code/.runtime
+      - creating worktrees under ~/.wt instead of canonical root
+    mitigation: root.authority.contract.yaml + binding calibration
+
+  dirty_governed_path:
+    description: >
+      A governed repo path accumulates runtime state that should be
+      externalized. Result: git status noise, accidental commits of
+      ephemeral state, verify failures.
+    mitigation: mailroom.runtime.contract.yaml externalization
+
+  split_brain_state:
+    description: >
+      Two roots exist for the same purpose (e.g. ~/.runtime and
+      ~/code/.runtime both active). Result: different terminals see
+      different state, causing conflicting decisions.
+    mitigation: single canonical root per concern, residue retirement
+
+  broken_continuity:
+    description: >
+      Session A writes to root X, session B reads from root Y.
+      State from session A is invisible to session B.
+    mitigation: all sessions resolve paths through the same contract chain

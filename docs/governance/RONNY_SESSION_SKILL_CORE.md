@@ -129,3 +129,14 @@ This core contains what every tool-native adapter shares. Adapters add only:
 - Environment-specific connection details (URLs, auth flows)
 
 Adapters must not carry independent copies of the taxonomy, rules, or doctrine above. They reference this core.
+
+## Root and Tool Authority
+
+Root authority is governed by `ops/bindings/root.authority.contract.yaml`.
+
+- `~/code` is the single platform root
+- `~/code/.runtime/spine` is canonical runtime state
+- `~/code/.evidence/spine` is canonical evidence
+- `~/code/.runtime/spine/tmp/worktrees` is the canonical worktree root
+- Home-level tool locations (`~/.claude/`, `~/.codex/`, `~/.local/bin/`) are adapter or deploy targets, not authority
+- Authoritative tool behavior resolves through repo-owned wrappers and contracts

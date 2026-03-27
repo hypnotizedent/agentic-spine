@@ -184,7 +184,7 @@ Create governed execution lanes instead of manual worktree setup:
 - Clean branch (no collision with existing branches)
 - Lane metadata stamped (type, created_at, status)
 - Closeout checklist generated
-- State tracked in `~/.runtime/spine/state/execution-lanes/`
+- State tracked in `~/code/.runtime/spine/state/execution-lanes/`
 
 Historical note: the initial execution-lane rollout audit is retired from the active governance surface; this section is the current operating authority.
 
@@ -199,7 +199,7 @@ Session attach (`session.v3.attach`) automatically detects and cleans up floatin
 - Branch has been merged to main
 
 **Cleanup actions:**
-- Archive worktree metadata to `~/.runtime/spine/state/execution-lanes/archive/`
+- Archive worktree metadata to `~/code/.runtime/spine/state/execution-lanes/archive/`
 - Remove worktree directory (if safe - no uncommitted work)
 - Remove branch (if merged or explicitly abandoned)
 - Update lane state to include cleanup timestamp
