@@ -1,0 +1,369 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-28
+scope: physical-node-machine-role-authority
+version: 1
+updated_at: "2026-03-28"
+subordinate_to: ops/bindings/root.authority.contract.yaml
+
+related_contracts:
+  - contract: ops/bindings/terminal.role.contract.yaml
+    relationship: "Peer contract for terminal/software-role authority."
+  - contract: ops/bindings/topology.workstations.yaml
+    relationship: "Inventory/bootstrap surface for workstation identities; it does not assign node roles."
+  - contract: ops/bindings/launchd.runtime.contract.yaml
+    relationship: "Execution-host scheduler behavior; this contract does not activate or redistribute it."
+  - contract: ops/bindings/mailroom.runtime.contract.yaml
+    relationship: "Canonical runtime/mailroom namespace governed by node-type state access."
+  - contract: ops/bindings/translator.authority.contract.yaml
+    relationship: "Translator-node membrane rules remain software-role authority."
+
+source_election:
+  packet: /Users/ronnyworks/code/.runtime/spine/state/domain-state/spine/execution-packets-20260326/PHYSICAL_NODE_MACHINE_ROLE_OPERATOR_ELECTION_PACKET_20260328.md
+  status: /Users/ronnyworks/code/.runtime/spine/state/domain-state/spine/execution-packets-20260326/PHYSICAL_NODE_MACHINE_ROLE_OPERATOR_ELECTION_STATUS_20260328.md
+  decision_packet: /Users/ronnyworks/code/.runtime/spine/state/domain-state/spine/execution-packets-20260326/PHYSICAL_NODE_MACHINE_ROLE_DECISION_PACKET_20260328.md
+  trace_packet: /Users/ronnyworks/code/.runtime/spine/state/domain-state/spine/execution-packets-20260326/PHYSICAL_NODE_MACHINE_ROLE_TRACE_PACKET_20260328.md
+
+# Node Role Contract
+# Governs the physical-node / machine-role taxonomy, authority, state access,
+# failure expectations, replacement posture, and external observation model.
+# Device-agnostic only. No deployment or machine assignment is activated here.
+
+node_types:
+  operator_console:
+    description: "Interactive operator sessions, manual override, and direct governed git/capability work."
+    multiple_instances_allowed: true
+    colocation_allowed: true
+    physical_separation_posture:
+      execution_host: preferred
+      translator_node: permitted_no_preference
+      verification_node: permitted_no_preference
+      storage_evidence_node: preferred
+      watcher_node: required
+
+  execution_host:
+    description: "Always-on autonomous execution surface for launchd scheduling, workers, control cycles, and headless capabilities."
+    multiple_instances_allowed: false
+    colocation_allowed: true
+    physical_separation_posture:
+      operator_console: preferred
+      translator_node: permitted_no_preference
+      verification_node: permitted_no_preference
+      storage_evidence_node: preferred
+      watcher_node: required
+
+  translator_node:
+    description: "Translator membrane for ingestion, classification, normalization, and routing only."
+    multiple_instances_allowed: true
+    colocation_allowed: true
+    physical_separation_posture:
+      operator_console: permitted_no_preference
+      execution_host: permitted_no_preference
+      verification_node: permitted_no_preference
+      storage_evidence_node: permitted_no_preference
+      watcher_node: permitted_no_preference
+
+  verification_node:
+    description: "Read-heavy verification and attestation surface for verify runs and gate evaluation."
+    multiple_instances_allowed: true
+    colocation_allowed: true
+    physical_separation_posture:
+      operator_console: permitted_no_preference
+      execution_host: permitted_no_preference
+      translator_node: permitted_no_preference
+      storage_evidence_node: preferred
+      watcher_node: permitted_no_preference
+
+  storage_evidence_node:
+    description: "Canonical durable owner of governed runtime state, evidence trail, receipts archive, and domain state."
+    multiple_instances_allowed: false
+    colocation_allowed: true
+    physical_separation_posture:
+      operator_console: preferred
+      execution_host: preferred
+      translator_node: permitted_no_preference
+      verification_node: preferred
+      watcher_node: required
+
+  watcher_node:
+    description: "External liveness observer for heartbeats and escalation; it must outlive any single watched node failure."
+    multiple_instances_allowed: true
+    colocation_allowed: true
+    physical_separation_posture:
+      operator_console: required
+      execution_host: required
+      translator_node: permitted_no_preference
+      verification_node: permitted_no_preference
+      storage_evidence_node: required
+
+authority_matrix:
+  operator_console:
+    interactive_session_attach: allowed
+    headless_execution: forbidden
+    git_mutation: allowed
+    capability_execution: allowed
+    verification_gate_evaluation: allowed
+    state_mutation: allowed
+    state_read: allowed
+    routing_dispatch: allowed
+    heartbeat_emission: allowed
+    heartbeat_observation: forbidden
+    external_escalation: forbidden
+
+  execution_host:
+    interactive_session_attach: forbidden
+    headless_execution: allowed
+    git_mutation: allowed
+    capability_execution: allowed
+    verification_gate_evaluation: allowed
+    state_mutation: allowed
+    state_read: allowed
+    routing_dispatch: allowed
+    heartbeat_emission: allowed
+    heartbeat_observation: forbidden
+    external_escalation: forbidden
+
+  translator_node:
+    interactive_session_attach: forbidden
+    headless_execution: forbidden
+    git_mutation: forbidden
+    capability_execution: forbidden
+    verification_gate_evaluation: forbidden
+    state_mutation: forbidden
+    state_read: allowed
+    routing_dispatch: allowed
+    heartbeat_emission: allowed
+    heartbeat_observation: forbidden
+    external_escalation: forbidden
+
+  verification_node:
+    interactive_session_attach: forbidden
+    headless_execution: forbidden
+    git_mutation: forbidden
+    capability_execution: forbidden
+    verification_gate_evaluation: allowed
+    state_mutation: forbidden
+    state_read: allowed
+    routing_dispatch: forbidden
+    heartbeat_emission: allowed
+    heartbeat_observation: forbidden
+    external_escalation: forbidden
+
+  storage_evidence_node:
+    interactive_session_attach: forbidden
+    headless_execution: forbidden
+    git_mutation: forbidden
+    capability_execution: forbidden
+    verification_gate_evaluation: forbidden
+    state_mutation: allowed
+    state_read: allowed
+    routing_dispatch: forbidden
+    heartbeat_emission: allowed
+    heartbeat_observation: forbidden
+    external_escalation: forbidden
+
+  watcher_node:
+    interactive_session_attach: forbidden
+    headless_execution: forbidden
+    git_mutation: forbidden
+    capability_execution: forbidden
+    verification_gate_evaluation: forbidden
+    state_mutation: forbidden
+    state_read: allowed
+    routing_dispatch: forbidden
+    heartbeat_emission: forbidden
+    heartbeat_observation: allowed
+    external_escalation: allowed
+
+authority_constraints:
+  execution_host:
+    git_mutation: "Only under governed-main-override and existing git guardrails."
+  verification_node:
+    verification_gate_evaluation: "Verification authority only; no execution or git mutation."
+  storage_evidence_node:
+    state_mutation: "Canonical owner of governed runtime, evidence, and mailroom state."
+  watcher_node:
+    state_read: "Limited to heartbeat and liveness observation surfaces."
+    heartbeat_observation: "Observation-only; watcher does not itself emit governed heartbeats."
+
+state_access_model:
+  operator_console:
+    state_access: "full read-write"
+    evidence_access: "full read-write"
+    mailroom_access: "full read-write"
+    path_authority_relationship: "Reads and mutates governed repo/runtime/evidence paths under root.authority.contract.yaml during operator-directed work."
+
+  execution_host:
+    state_access: "full read-write"
+    evidence_access: "full read-write"
+    mailroom_access: "full read-write"
+    path_authority_relationship: "Executes against canonical runtime, evidence, and mailroom roots; physical authority complements launchd.runtime.contract.yaml and mailroom.runtime.contract.yaml."
+
+  translator_node:
+    state_access: "read-only"
+    evidence_access: "none"
+    mailroom_access: "read-only"
+    path_authority_relationship: "May resolve canonical roots for classification and queue visibility only. No state or evidence mutation."
+
+  verification_node:
+    state_access: "read-only"
+    evidence_access: "read-write verify-only"
+    mailroom_access: "none"
+    path_authority_relationship: "May read canonical state and write verify reports or attestations only."
+
+  storage_evidence_node:
+    state_access: "full read-write"
+    evidence_access: "full read-write"
+    mailroom_access: "full read-write"
+    path_authority_relationship: "Canonical owner for governed runtime, evidence, and mailroom paths."
+
+  watcher_node:
+    state_access: "read-only"
+    evidence_access: "none"
+    mailroom_access: "none"
+    path_authority_relationship: "Read-only access is limited to heartbeat and liveness observation surfaces; no general state ownership."
+
+connectivity_requirements:
+  principle: "Relationships are device-agnostic L1 reachability requirements only. No hostnames, machine ids, or deployment topology are assigned here."
+  links:
+    - from: operator_console
+      to: execution_host
+      required: true
+      purpose: "Session attach, manual override, and governed interactive control."
+    - from: execution_host
+      to: storage_evidence_node
+      required: true
+      purpose: "Canonical runtime, evidence, and mailroom I/O."
+    - from: translator_node
+      to: execution_host
+      required: true
+      purpose: "Route normalized requests without taking execution authority."
+    - from: verification_node
+      to: storage_evidence_node
+      required: true
+      purpose: "Read governed state and write verify reports or attestations."
+    - from: watcher_node
+      to: watched_nodes
+      required: true
+      purpose: "Observe heartbeats and liveness from watched runtime nodes."
+      watched_node_types:
+        - operator_console
+        - execution_host
+        - storage_evidence_node
+    - from: watcher_node
+      to: external_escalation_target
+      required: true
+      purpose: "Escalate when a watched node becomes unreachable."
+
+failure_model:
+  operator_console_loss:
+    degraded_capabilities:
+      - interactive_session_attach
+      - manual_override
+      - prompt_driven_operator_work
+    hard_stop_capabilities: []
+    expected_escalation_behavior: "Operator reconnect or replacement console attach. Autonomous execution may continue when execution_host is separate."
+    replacement_possible_without_state_movement: yes
+    replacement_depends_on_future_replication_work: no
+
+  execution_host_loss:
+    degraded_capabilities:
+      - scheduled_execution
+      - autonomous_control_cycles
+      - mailroom_worker_progress
+    hard_stop_capabilities:
+      - headless_execution
+      - launchd_scheduling
+      - autonomous_receipt_generation
+    expected_escalation_behavior: "A separate watcher_node should escalate externally. State remains on storage_evidence_node when storage remains reachable."
+    replacement_possible_without_state_movement: conditional_on_storage_evidence_node_remaining_reachable
+    replacement_depends_on_future_replication_work: no
+
+  combined_operator_console_and_execution_host_loss:
+    degraded_capabilities:
+      - interactive_session_attach
+      - manual_override
+      - watched_runtime_visibility_when_watcher_is_colocated
+    hard_stop_capabilities:
+      - headless_execution
+      - scheduled_execution
+      - prompt_driven_operator_work
+    expected_escalation_behavior: "No governed recovery path exists today when these roles disappear together on the same machine."
+    replacement_possible_without_state_movement: no
+    replacement_depends_on_future_replication_work: no_current_governed_recovery_path
+
+  storage_evidence_node_loss:
+    degraded_capabilities:
+      - state_read_across_other_nodes
+      - evidence_access
+    hard_stop_capabilities:
+      - governed_state_mutation
+      - verification_against_canonical_state
+      - mailroom_persistence
+    expected_escalation_behavior: "Execution and verification halt until canonical state and evidence become reachable again."
+    replacement_possible_without_state_movement: no
+    replacement_depends_on_future_replication_work: yes
+
+  watcher_node_loss:
+    degraded_capabilities:
+      - external_observation
+      - heartbeat_escalation
+    hard_stop_capabilities: []
+    expected_escalation_behavior: "Other node types continue. Replace watcher without data movement."
+    replacement_possible_without_state_movement: yes
+    replacement_depends_on_future_replication_work: no
+
+  translator_node_loss:
+    degraded_capabilities:
+      - external_ingress_normalization
+      - routed_dispatch_from_external_surfaces
+    hard_stop_capabilities: []
+    expected_escalation_behavior: "Operator may continue direct console use while translator service is replaced."
+    replacement_possible_without_state_movement: yes
+    replacement_depends_on_future_replication_work: no
+
+replacement_takeover_policy:
+  simultaneous_instance_policy:
+    operator_console: multiple_simultaneous_instances_allowed
+    execution_host: singleton_by_default_today
+    translator_node: multiple_simultaneous_instances_allowed
+    verification_node: multiple_simultaneous_instances_allowed
+    storage_evidence_node: singleton_by_default_today
+    watcher_node: multiple_simultaneous_instances_allowed
+  authority_transfer_requires:
+    operator_console: "Explicit operator-controlled attach under existing session admission and terminal authority contracts."
+    execution_host: "Explicit operator designation of the replacement execution surface; no implicit authority transfer."
+    translator_node: "Explicit operator designation plus continued enforcement of translator.authority.contract.yaml."
+    verification_node: "Explicit operator designation plus verify-only evidence write scope."
+    storage_evidence_node: "Explicit operator designation plus a future governed state replication or movement story."
+    watcher_node: "Explicit operator designation, external escalation reachability, and required physical separation from watched nodes."
+  blocked_until_later_implementation:
+    - machine assignment of any node role
+    - runtime-state movement
+    - launchd redistribution
+    - heartbeat delivery activation
+    - watcher deployment
+    - translator-node deployment
+    - replication or backup rollout for canonical non-git state
+
+external_observation:
+  watcher_node_requirement: "L1 required"
+  watched_runtime_nodes:
+    - operator_console
+    - execution_host
+    - storage_evidence_node
+  colocated_watcher_assessment: "Watcher colocated with a watched surface is structurally weak."
+  delivery_status: "Required by the model but not yet delivered."
+  current_gap: "Heartbeat mechanism exists in contract, but external watcher deployment and delivery remain inactive."
+
+non_activation:
+  statement: "This contract records governed physical-node truth only and does not activate operational rollout."
+  does_not_activate:
+    - deployment
+    - machine assignment
+    - runtime-state movement
+    - launchd redistribution
+    - heartbeat rollout
+    - watcher deployment
+    - translator-node deployment
