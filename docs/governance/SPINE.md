@@ -37,7 +37,13 @@ cd ~/code/agentic-spine
   --branch <branch-name> \
   --parent-loop <LOOP-ID>
 
-# Controller-only exception on root main: one exact staged slice.
+# Controller-only exception on root main: clean-entry exact landing.
+./ops/plugins/core/ops/bin/git-stage-commit-scoped \
+  --source-treeish <treeish-or-stash-ref> \
+  --path <exact-file> \
+  --message "..."
+
+# Local exact-slice landing is still allowed only from a clean-entry root-main flow.
 git add <exact-files>
 OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "..."
 ```
@@ -254,7 +260,7 @@ Loop closeout ceremony:
 2. One script per concern: extend existing scripts with flags/subcommands instead of creating near-duplicates.
 3. Delete legacy: `.legacy` copies are migration debt and must be removed once active scripts are in place.
 4. One override path: use `OPS_GOVERNED_MAIN_OVERRIDE=1` for intentional controller landings on `main`; it is not a D48 or D150 bypass.
-5. One daily remote: `origin` is canonical for day-to-day workflow.
+5. One daily remote: `origin` (Gitea) is canonical operational truth; `github` is publication-only.
 
 ## Consolidated Authority Notes
 

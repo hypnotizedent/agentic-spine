@@ -76,7 +76,7 @@ Full spine access. Follow all sections below in order.
    - **Bounded controller landing is the only root-main exception.** The only governed dirty root-main state is an explicit controller-owned `staged_only` landing window for one exact slice.
    - **`OPS_GOVERNED_MAIN_OVERRIDE=1` is only intentional-main override.** It does not bypass D48 or D150.
    - **Shared root-lane mutation is blocking contention.** Multiple terminals are independent only when they do not share the same root checkout, git index, or protected hotspot surfaces. Separate managed worktrees are the normal parallel model.
-   - **Git authority:** Gitea (`origin`) is canonical; GitHub is mirror-only.
+   - **Git authority:** Gitea (`origin`) is canonical operational truth; GitHub is publication-only.
    - **Downstream runtime extraction remains future work.** It is unrelated to this workflow rule.
    - **Impact-scoped docs:** for domain work, update only the domain runbook and create a receipt note with `./bin/ops cap run docs.impact.note <domain> <receipt_run_key>`.
 
@@ -298,7 +298,7 @@ All loop scope files in `$SPINE_STATE/loop-scopes/` (externalized runtime) MUST 
   - D34 loop ledger integrity (catches loop state inconsistencies).
   - D10/D31 logs/output sink locks (keeps output under mailroom, prevents home-root sinks).
   - D61 session-loop traceability freshness (forces periodic closeout discipline via `agent.session.closeout`).
-  - D62 git remote authority (origin canonical; mirror drift is non-blocking).
+  - D62 git remote authority (origin canonical operational truth; GitHub drift is informational outside publication).
 
 ## Proposal Queue Hygiene
 
@@ -331,7 +331,7 @@ Every open gap in `operational.gaps.yaml` must be linked to an active loop (`par
 
 - Work started without any loop anchor or managed worktree. Root `main` is integration-only, so normal mutation belongs in managed worktrees and every non-trivial change should still have a loop scope for traceability. Without one you get floating WIP: no scope anchor, no session log, and no governed mutation lane.
 - Multiple terminals touched the same root checkout, git index, or protected hotspot surfaces. That is blocking contention, not parallel work. Separate managed worktrees are fine; shared root-lane mutation is not.
-- Optional mirror drift (`origin` vs `github`) during non-release work. Canonical authority remains `origin`; mirror drift is tolerated and repaired only for explicit release publishing.
+- Optional GitHub drift (`origin` vs `github`) during non-release work. Canonical operational authority remains `origin`; GitHub drift is tolerated and repaired only for explicit publication.
 - Loop closeout not consistently done. Without updating the loop scope with receipts and closing it, the next agent can't tell what's already proven and repeats work. D61 + `agent.session.closeout` is the mechanism meant to prevent this.
 - Two repos, two contracts (`agentic-spine` vs `workbench`). If workbench changes aren't tied back to a spine loop (or vice versa), you get coordination gaps even when each repo is individually clean. Use `RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md` to declare write ownership and repo sequence up front.
 

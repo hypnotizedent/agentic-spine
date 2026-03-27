@@ -428,6 +428,36 @@ def git_origin_url(path: Path):
     return (out or "").strip() if rc == 0 else ""
 
 
+def git_common_dir(path: Path):
+    rc, out = sh(["git", "-C", str(path), "rev-parse", "--git-common-dir"], check=False)
+    if rc != 0:
+        return ""
+    raw = (out or "").strip()
+    if not raw:
+        return ""
+    git_dir = Path(raw)
+    if not git_dir.is_absolute():
+        git_dir = (path / git_dir).resolve()
+    else:
+        git_dir = git_dir.resolve()
+    return str(git_dir)
+
+
+def git_index_path(path: Path):
+    rc, out = sh(["git", "-C", str(path), "rev-parse", "--git-path", "index"], check=False)
+    if rc != 0:
+        return ""
+    raw = (out or "").strip()
+    if not raw:
+        return ""
+    index_path = Path(raw)
+    if not index_path.is_absolute():
+        index_path = (path / index_path).resolve()
+    else:
+        index_path = index_path.resolve()
+    return str(index_path)
+
+
 def normalize_remote_url(raw: str, cwd: Path):
     text = (raw or "").strip()
     if not text:
@@ -522,11 +552,142 @@ def parse_stash_subject(subject: str):
     return "", text
 
 
+def lane_type_for(checkout_root: Path, branch: str):
+    resolved = checkout_root.resolve()
+    if resolved == main_checkout_path:
+        if branch == "<detached>":
+            return "root_checkout_detached"
+        if branch == main_branch:
+            return "root_main_integration"
+        return "root_checkout_non_main"
+    return "managed_worktree"
+
+
+def root_lane_status_for(root_row: dict):
+    if not root_row.get("checked"):
+        return "not_applicable"
+    if "root_checkout_detached" in root_row.get("issues", []):
+        return "integration_lane_violation_detached"
+    if any(code in root_row.get("issues", []) for code in {"root_checkout_not_main", "root_checkout_matches_main_but_branch_not_main"}):
+        return "integration_lane_violation_non_main"
+    if "root_checkout_dirty" in root_row.get("issues", []):
+        return "integration_lane_violation_dirty"
+    if root_row.get("dirty_mode") == "staged_only":
+        return "controller_staged_only_landing_window"
+    return "integration_only_clean"
+
+
+def normalize_scope_entry(raw: str):
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered in protected_hotspot_tokens:
+        return lowered
+    if lowered in {"operational.gaps.yaml", "ops/bindings/operational.gaps.yaml"}:
+        return "hotspot:operational-gaps"
+    if "loop-scopes" in lowered:
+        return "hotspot:loop-scopes"
+    if "friction-queue" in lowered:
+        return "hotspot:friction-queue"
+    if "gate-id-reservations" in lowered:
+        return "hotspot:gate-id-reservations"
+    if "path.claims" in lowered or "path-claims" in lowered:
+        return "hotspot:path-claims"
+    return text
+
+
+def parse_scope_list(raw):
+    if isinstance(raw, list):
+        items = raw
+    else:
+        items = str(raw or "").split(",")
+    normalized = []
+    for item in items:
+        value = normalize_scope_entry(item)
+        if value:
+            normalized.append(value)
+    deduped = []
+    seen = set()
+    for item in normalized:
+        if item in seen:
+            continue
+        deduped.append(item)
+        seen.add(item)
+    return deduped
+
+
+def extract_hotspot_tokens(raw):
+    return [item for item in parse_scope_list(raw) if item in protected_hotspot_tokens]
+
+
+def load_active_heartbeats(current_terminal_id: str):
+    state_root = os.environ.get("SPINE_STATE", "").strip()
+    if not state_root:
+        return []
+    heartbeat_dir = Path(os.path.expanduser(state_root)) / "terminal-heartbeats"
+    if not heartbeat_dir.exists():
+        return []
+
+    active = []
+    for hb_file in sorted(heartbeat_dir.glob("*.yaml")):
+        hb = load_yaml(hb_file)
+        if not isinstance(hb, dict):
+            continue
+        terminal_id = str(hb.get("terminal_id") or hb_file.stem).strip()
+        if current_terminal_id and terminal_id == current_terminal_id:
+            continue
+        status = str(hb.get("status") or "active").strip().lower() or "active"
+        expires_epoch = parse_iso_epoch(hb.get("expires_at"))
+        if status != "active":
+            continue
+        if expires_epoch is not None and expires_epoch < now_epoch:
+            continue
+
+        repo_root_raw = str(hb.get("repo_root") or "").strip()
+        repo_root_path = Path(repo_root_raw).expanduser().resolve() if repo_root_raw else None
+        checkout_root_raw = str(hb.get("checkout_root") or repo_root_raw or "").strip()
+        checkout_root_path = Path(checkout_root_raw).expanduser().resolve() if checkout_root_raw else None
+        branch = str(hb.get("branch") or "").strip() or "<unknown>"
+        common_dir = str(hb.get("git_common_dir") or "").strip()
+        index_path = str(hb.get("git_index_path") or "").strip()
+        if repo_root_path and not common_dir and path_is_git_repo(repo_root_path):
+            common_dir = git_common_dir(repo_root_path)
+        if repo_root_path and not index_path and path_is_git_repo(repo_root_path):
+            index_path = git_index_path(repo_root_path)
+        lane_type = str(hb.get("lane_type") or "").strip() or (
+            lane_type_for(checkout_root_path, branch) if checkout_root_path else "unknown"
+        )
+        normalized_scope = parse_scope_list(hb.get("normalized_scope") or hb.get("scope") or "")
+        protected_scope = extract_hotspot_tokens(hb.get("protected_hotspot_scope") or normalized_scope)
+
+        active.append(
+            {
+                "terminal_id": terminal_id,
+                "role": str(hb.get("role") or "").strip(),
+                "repo_root": str(repo_root_path) if repo_root_path else repo_root_raw,
+                "checkout_root": str(checkout_root_path) if checkout_root_path else checkout_root_raw,
+                "branch": branch,
+                "lane_type": lane_type,
+                "git_common_dir": common_dir,
+                "git_index_path": index_path,
+                "scope": str(hb.get("scope") or "").strip(),
+                "normalized_scope": normalized_scope,
+                "protected_hotspot_scope": protected_scope,
+                "heartbeat_file": str(hb_file),
+            }
+        )
+    return active
+
+
 repo_root = Path(subprocess.check_output(["git", "-C", str(root), "rev-parse", "--show-toplevel"], text=True, env=_clean_git_env()).strip()).resolve()
 _all_wt_entries = parse_worktrees(repo_root)
 main_checkout_path = _all_wt_entries[0][0] if _all_wt_entries else repo_root
 is_root_context = (repo_root == main_checkout_path)
 current_branch = git_branch(repo_root)
+current_lane_type = lane_type_for(repo_root, current_branch)
+current_git_common_dir = git_common_dir(repo_root)
+current_git_index_path = git_index_path(repo_root)
 repo_origin = normalize_remote_url(git_origin_url(repo_root), repo_root)
 repo_identity = {str(repo_root)}
 if repo_origin:
@@ -540,6 +701,9 @@ _all_wt_entries = parse_worktrees(repo_root)
 main_checkout_path = _all_wt_entries[0][0] if _all_wt_entries else repo_root
 is_root_context = (repo_root == main_checkout_path)
 current_branch = git_branch(repo_root)
+current_lane_type = lane_type_for(repo_root, current_branch)
+current_git_common_dir = git_common_dir(repo_root)
+current_git_index_path = git_index_path(repo_root)
 
 # Loop scopes (authoritative owner state)
 loop_scopes = {}
@@ -560,6 +724,13 @@ contract_doc = load_yaml(repo_root / "ops/bindings/worktree.lifecycle.contract.y
 policy_doc = contract_doc.get("policy") if isinstance(contract_doc, dict) else {}
 plan_linkage_required = True
 branch_memory_terminal_statuses = {"retired", "canceled"}
+protected_hotspot_tokens = {
+    "hotspot:operational-gaps",
+    "hotspot:loop-scopes",
+    "hotspot:friction-queue",
+    "hotspot:gate-id-reservations",
+    "hotspot:path-claims",
+}
 if isinstance(policy_doc, dict):
     raw_required = policy_doc.get("require_plan_linkage_for_unmerged_nonactive_local_branches")
     if raw_required is not None:
@@ -567,6 +738,11 @@ if isinstance(policy_doc, dict):
     raw_terminal = policy_doc.get("branch_memory_terminal_statuses")
     if isinstance(raw_terminal, list):
         branch_memory_terminal_statuses = {str(v).strip().lower() for v in raw_terminal if str(v).strip()}
+    raw_hotspots = policy_doc.get("protected_hotspot_tokens")
+    if isinstance(raw_hotspots, list):
+        parsed_hotspots = {str(v).strip().lower() for v in raw_hotspots if str(v).strip()}
+        if parsed_hotspots:
+            protected_hotspot_tokens = parsed_hotspots
 
 plans_index_path = loops_scope_dir.parent / "plans/index.yaml"
 branch_plan_index = {}
@@ -1086,6 +1262,117 @@ if not path_under(main_checkout_path, canonical_worktree_root) and not path_unde
             "owner_state": "n/a",
         })
 
+root_lane_status = root_lane_status_for(root_checkout)
+controller_root_main_staged_only_window_allowed = root_lane_status == "controller_staged_only_landing_window"
+
+current_terminal_id = (
+    os.environ.get("SPINE_TERMINAL_ID")
+    or os.environ.get("OPS_TERMINAL_ROLE")
+    or os.environ.get("SPINE_TERMINAL_NAME")
+    or ""
+).strip()
+current_scope_tokens = parse_scope_list(os.environ.get("SPINE_TERMINAL_SCOPE", ""))
+current_hotspot_scope = (
+    sorted(protected_hotspot_tokens)
+    if current_lane_type == "root_main_integration"
+    else sorted({item for item in current_scope_tokens if item in protected_hotspot_tokens})
+)
+active_heartbeats = load_active_heartbeats(current_terminal_id)
+blocking_terminal_contentions = []
+non_blocking_terminal_coexistence = []
+seen_contention_keys = set()
+
+for hb in active_heartbeats:
+    same_repo_family = False
+    if current_git_common_dir and hb.get("git_common_dir"):
+        same_repo_family = hb["git_common_dir"] == current_git_common_dir
+    elif hb.get("repo_root"):
+        same_repo_family = hb["repo_root"] in repo_identity
+    if not same_repo_family:
+        continue
+
+    same_checkout = bool(hb.get("checkout_root")) and hb["checkout_root"] == str(repo_root)
+    same_index = bool(hb.get("git_index_path")) and hb["git_index_path"] == current_git_index_path
+    hotspot_overlap = sorted(set(current_hotspot_scope) & set(hb.get("protected_hotspot_scope") or []))
+
+    if same_checkout or same_index or hotspot_overlap:
+        contention_rows = []
+        if same_checkout:
+            contention_rows.append(
+                {
+                    "code": "shared_root_checkout_contention",
+                    "scope": "lane",
+                    "terminal_id": hb["terminal_id"],
+                    "terminal_role": hb.get("role") or "",
+                    "other_lane_type": hb.get("lane_type") or "unknown",
+                    "other_checkout_root": hb.get("checkout_root") or "",
+                    "other_branch": hb.get("branch") or "",
+                    "overlap_tokens": [],
+                }
+            )
+        if same_index:
+            contention_rows.append(
+                {
+                    "code": "shared_git_index_contention",
+                    "scope": "lane",
+                    "terminal_id": hb["terminal_id"],
+                    "terminal_role": hb.get("role") or "",
+                    "other_lane_type": hb.get("lane_type") or "unknown",
+                    "other_checkout_root": hb.get("checkout_root") or "",
+                    "other_branch": hb.get("branch") or "",
+                    "overlap_tokens": [],
+                }
+            )
+        if hotspot_overlap:
+            contention_rows.append(
+                {
+                    "code": "protected_hotspot_contention",
+                    "scope": "lane",
+                    "terminal_id": hb["terminal_id"],
+                    "terminal_role": hb.get("role") or "",
+                    "other_lane_type": hb.get("lane_type") or "unknown",
+                    "other_checkout_root": hb.get("checkout_root") or "",
+                    "other_branch": hb.get("branch") or "",
+                    "overlap_tokens": hotspot_overlap,
+                }
+            )
+
+        for row in contention_rows:
+            key = (row["code"], row["terminal_id"], row["other_checkout_root"], tuple(row["overlap_tokens"]))
+            if key in seen_contention_keys:
+                continue
+            seen_contention_keys.add(key)
+            blocking_terminal_contentions.append(row)
+            issues.append(
+                {
+                    "kind": "terminal_contention",
+                    "path": str(repo_root),
+                    "branch": current_branch,
+                    "code": row["code"],
+                    "owner_type": "terminal",
+                    "owner_id": row["terminal_id"],
+                    "owner_state": "active",
+                    "scope": row["scope"],
+                    "current_lane_type": current_lane_type,
+                    "other_lane_type": row["other_lane_type"],
+                    "other_checkout_root": row["other_checkout_root"],
+                    "other_branch": row["other_branch"],
+                    "overlap_tokens": row["overlap_tokens"],
+                }
+            )
+        continue
+
+    if hb.get("checkout_root") and hb["checkout_root"] != str(repo_root):
+        non_blocking_terminal_coexistence.append(
+            {
+                "terminal_id": hb["terminal_id"],
+                "terminal_role": hb.get("role") or "",
+                "other_lane_type": hb.get("lane_type") or "unknown",
+                "other_checkout_root": hb.get("checkout_root") or "",
+                "other_branch": hb.get("branch") or "",
+            }
+        )
+
 # Stash audit
 stash_rows = []
 stash_issues = []
@@ -1169,30 +1456,8 @@ def _issue_scope(item):
     branch = item.get("branch", "")
     if kind == "root_checkout":
         return "lane" if is_root_context else "global"
-    if kind == "worktree":
-        return "lane" if path == str(repo_root) else "global"
-    if kind == "local_branch":
-        return "lane" if branch == current_branch else "global"
-    return "global"  # temp_clone and anything else
-
-lane_issues = [i for i in issues if _issue_scope(i) == "lane"]
-global_issues = [i for i in issues if _issue_scope(i) == "global"]
-lane_warnings = [w for w in warnings if _issue_scope(w) == "lane"]
-global_warnings = [w for w in warnings if _issue_scope(w) == "global"]
-# Stash issues are always global (never block a lane commit).
-lane_issue_count = len(lane_issues)
-global_issue_count = len(global_issues) + len(stash_issues)
-
-# ── Lane-vs-global scope classification ──────────────────────────────
-# Each issue is classified as "lane" (blocks current worker commit) or
-# "global" (blocks controller/root operations, informational for workers).
-
-def _issue_scope(item):
-    kind = item.get("kind", "")
-    path = item.get("path", "")
-    branch = item.get("branch", "")
-    if kind == "root_checkout":
-        return "lane" if is_root_context else "global"
+    if kind == "terminal_contention":
+        return item.get("scope") or "lane"
     if kind == "worktree":
         return "lane" if path == str(repo_root) else "global"
     if kind == "local_branch":
@@ -1209,10 +1474,15 @@ global_issue_count = len(global_issues) + len(stash_issues)
 
 summary = {
     "repo": str(repo_root),
+    "current_lane_type": current_lane_type,
+    "root_lane_status": root_lane_status,
+    "controller_root_main_staged_only_window_allowed": controller_root_main_staged_only_window_allowed,
     "checked_worktrees": len(worktree_rows),
     "checked_local_branches": len(local_branch_rows),
     "checked_temp_clones": len(temp_clone_rows),
     "checked_root_checkout": 1 if root_checkout["checked"] else 0,
+    "blocking_terminal_contention_count": len(blocking_terminal_contentions),
+    "non_blocking_terminal_coexistence_count": len(non_blocking_terminal_coexistence),
     "worktree_issue_count": len(issues),
     "worktree_warning_count": len(warnings),
     "stash_count": len(stash_lines),
@@ -1237,6 +1507,7 @@ summary = {
         "temp_clone_grace_hours": temp_clone_grace_h,
         "main_stash_warn_hours": main_stash_warn_h,
         "main_stash_fail_hours": main_stash_fail_h,
+        "protected_hotspot_tokens": sorted(protected_hotspot_tokens),
     },
 }
 
@@ -1250,6 +1521,17 @@ payload = {
     "warnings": warnings,
     "lane_issues": lane_issues,
     "global_issues": global_issues,
+    "lane_warnings": lane_warnings,
+    "global_warnings": global_warnings,
+    "terminal_runtime": {
+        "current_lane_type": current_lane_type,
+        "current_checkout_root": str(repo_root),
+        "current_git_index_path": current_git_index_path,
+        "current_hotspot_scope": current_hotspot_scope,
+        "active_heartbeats": active_heartbeats,
+        "blocking_contentions": blocking_terminal_contentions,
+        "non_blocking_coexistence": non_blocking_terminal_coexistence,
+    },
     "stashes": stash_rows,
     "stash_issues": stash_issues,
     "stash_warnings": stash_warnings,
@@ -1260,6 +1542,16 @@ def format_item(item):
     path = item.get("path") or "<unknown>"
     branch = item.get("branch") or "<unknown>"
     code = item.get("code") or "unknown"
+    if kind == "terminal_contention":
+        overlap = ",".join(item.get("overlap_tokens") or [])
+        overlap_fragment = f" overlap={overlap}" if overlap else ""
+        return (
+            f"terminal {item.get('owner_id') or 'unknown'} -> {code} "
+            f"(current_lane={item.get('current_lane_type') or 'unknown'} "
+            f"other_lane={item.get('other_lane_type') or 'unknown'} "
+            f"other_checkout={item.get('other_checkout_root') or 'unknown'} "
+            f"other_branch={item.get('other_branch') or 'unknown'}{overlap_fragment})"
+        )
     if kind == "worktree":
         owner = item.get("owner_id") or "none"
         disposition = item.get("owner_disposition") or "n/a"
@@ -1282,7 +1574,9 @@ else:
         print(
             f"{status} issues={summary['total_issue_count']} warnings={summary['total_warning_count']} "
             f"worktrees={summary['checked_worktrees']} temp_clones={summary['checked_temp_clones']} "
-            f"root={summary['checked_root_checkout']} stashes={summary['stash_count']}"
+            f"root={summary['checked_root_checkout']} stashes={summary['stash_count']} "
+            f"lane={summary['current_lane_type']} root_lane_status={summary['root_lane_status']} "
+            f"blocking_contention={summary['blocking_terminal_contention_count']}"
         )
     elif mode == "gate":
         if summary["total_issue_count"] > 0:
@@ -1302,8 +1596,9 @@ else:
             print(
                 "D48 PASS: lifecycle clean "
                 f"(worktrees={summary['checked_worktrees']} temp_clones={summary['checked_temp_clones']} "
-                f"root={summary['checked_root_checkout']} warnings={summary['total_warning_count']} "
-                f"stashes={summary['stash_count']})"
+                f"root={summary['checked_root_checkout']} root_lane_status={summary['root_lane_status']} "
+                f"warnings={summary['total_warning_count']} stashes={summary['stash_count']} "
+                f"blocking_contention={summary['blocking_terminal_contention_count']})"
             )
     elif mode == "lane":
         if lane_issue_count > 0:
@@ -1323,36 +1618,20 @@ else:
         else:
             print(
                 f"D48 PASS (lane): current lane clean "
-                f"(global_issues={global_issue_count} warnings={summary['total_warning_count']} "
-                f"stashes={summary['stash_count']})"
-            )
-    elif mode == "lane":
-        if lane_issue_count > 0:
-            print("D48 FAIL (lane): current lane has lifecycle issues")
-            for item in lane_issues:
-                print(f"  - {format_item(item)}")
-            if global_issues or stash_issues:
-                print("  GLOBAL (non-blocking):")
-                for item in global_issues:
-                    print(f"    - {format_item(item)}")
-                for item in stash_issues:
-                    print(f"    - {format_stash_item(item)}")
-            if lane_warnings:
-                print("  WARNINGS (lane):")
-                for item in lane_warnings:
-                    print(f"    - {format_item(item)}")
-        else:
-            print(
-                f"D48 PASS (lane): current lane clean "
-                f"(global_issues={global_issue_count} warnings={summary['total_warning_count']} "
-                f"stashes={summary['stash_count']})"
+                f"(lane={summary['current_lane_type']} root_lane_status={summary['root_lane_status']} "
+                f"global_issues={global_issue_count} warnings={summary['total_warning_count']} "
+                f"stashes={summary['stash_count']} blocking_contention={summary['blocking_terminal_contention_count']})"
             )
     else:
         print("worktree.lifecycle.reconcile")
         print(f"repo: {summary['repo']}")
+        print(f"current_lane_type: {summary['current_lane_type']}")
+        print(f"root_lane_status: {summary['root_lane_status']}")
         print(f"checked_worktrees: {summary['checked_worktrees']}")
         print(f"checked_temp_clones: {summary['checked_temp_clones']}")
         print(f"checked_root_checkout: {summary['checked_root_checkout']}")
+        print(f"blocking_terminal_contention_count: {summary['blocking_terminal_contention_count']}")
+        print(f"non_blocking_terminal_coexistence_count: {summary['non_blocking_terminal_coexistence_count']}")
         print(f"issues: {summary['total_issue_count']}")
         print(f"warnings: {summary['total_warning_count']}")
         print(f"stashes: {summary['stash_count']}")

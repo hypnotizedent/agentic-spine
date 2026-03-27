@@ -98,6 +98,9 @@ echo "════════════════════════�
 
 TMPDIR_BASE="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BASE"' EXIT
+STATE_ROOT="$TMPDIR_BASE/state"
+mkdir -p "$STATE_ROOT"
+export SPINE_STATE="$STATE_ROOT"
 
 TARGET="$TMPDIR_BASE/target"
 OTHER="$TMPDIR_BASE/other"
@@ -167,6 +170,7 @@ assert_eq "$(json_eval "$RECONCILE_JSON" 'sum(1 for row in payload["stashes"] if
 
 echo ""
 echo "── T1b: root checkout staged-only changes warn but do not fail ──"
+git -C "$TARGET" switch main >/dev/null
 printf 'staged-only\n' >> "$TARGET/file.txt"
 git -C "$TARGET" add file.txt
 STAGED_JSON="$TMPDIR_BASE/reconcile-staged.json"
@@ -181,6 +185,8 @@ STAGED_JSON="$TMPDIR_BASE/reconcile-staged.json"
 assert_eq "$(json_eval "$STAGED_JSON" 'payload["root_checkout"]["dirty_mode"]')" "staged_only" "root checkout classifies staged-only state"
 assert_eq "$(json_eval "$STAGED_JSON" '"root_checkout_dirty" in payload["root_checkout"]["issues"]')" "False" "staged-only root does not fail as dirty drift"
 assert_eq "$(json_eval "$STAGED_JSON" '"root_checkout_staged_only" in payload["root_checkout"]["warnings"]')" "True" "staged-only root emits commit-in-progress warning"
+assert_eq "$(json_eval "$STAGED_JSON" 'payload["summary"]["root_lane_status"]')" "controller_staged_only_landing_window" "staged-only root is summarized as the allowed controller landing window"
+assert_eq "$(json_eval "$STAGED_JSON" 'payload["summary"]["controller_root_main_staged_only_window_allowed"]')" "True" "summary marks staged-only controller landing window as allowed"
 
 echo ""
 echo "── T1c: root checkout unstaged and mixed changes still fail ──"
@@ -212,6 +218,7 @@ MIXED_JSON="$TMPDIR_BASE/reconcile-mixed.json"
 assert_eq "$(json_eval "$MIXED_JSON" 'payload["root_checkout"]["dirty_mode"]')" "mixed" "root checkout classifies mixed state"
 assert_eq "$(json_eval "$MIXED_JSON" '"root_checkout_dirty" in payload["root_checkout"]["issues"]')" "True" "mixed root still fails as drift"
 git -C "$TARGET" reset --hard HEAD >/dev/null
+git -C "$TARGET" switch feature/root-parking >/dev/null
 
 echo ""
 echo "── T2: cleanup report classifies clone candidates and root action ──"

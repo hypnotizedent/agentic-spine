@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'USAGE'
@@ -9,14 +10,15 @@ git-stage-commit-scoped
 
 Usage:
   git-stage-commit-scoped --path <file> [--path <file> ...] \
-    --message "commit subject" [--body "line"] [--dry-run]
+    --message "commit subject" [--body "line"] [--source-treeish <treeish>] [--dry-run]
 
   git-stage-commit-scoped --allowlist-file /path/to/list.txt \
-    --message "commit subject" [--body "line"] [--dry-run]
+    --message "commit subject" [--body "line"] [--source-treeish <treeish>] [--dry-run]
 
 Rules:
-  - Stages only the explicit allowlist paths.
-  - Hard-fails when any staged file is outside allowlist.
+  - stages only the explicit allowlist paths
+  - hard-fails when any staged file is outside allowlist
+  - immutable-source landing (`--source-treeish`) is root-main-only and requires clean entry
 USAGE
 }
 
@@ -25,17 +27,161 @@ fail() {
   exit 1
 }
 
+bool_true() {
+  local raw="${1:-}"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  [[ "$raw" == "1" || "$raw" == "true" || "$raw" == "yes" ]]
+}
+
+normalize_relpath() {
+  local raw="${1:-}"
+  raw="${raw#./}"
+  raw="${raw%/}"
+  printf '%s\n' "$raw"
+}
+
+git_main_checkout_path() {
+  git worktree list --porcelain | awk '
+    $1 == "worktree" { print $2; exit }
+  '
+}
+
+git_current_branch() {
+  git symbolic-ref --quiet --short HEAD 2>/dev/null || printf '<detached>\n'
+}
+
+git_status_mode() {
+  local lines has_staged=0 has_unstaged=0 line x y
+  lines="$(git status --porcelain --untracked-files=all)"
+  if [[ -z "$lines" ]]; then
+    printf 'clean\n'
+    return 0
+  fi
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    x="${line:0:1}"
+    y="${line:1:1}"
+    if [[ "$x" != " " && "$x" != "?" ]]; then
+      has_staged=1
+    fi
+    if [[ "$y" != " " || "$x$y" == "??" ]]; then
+      has_unstaged=1
+    fi
+  done <<< "$lines"
+
+  if [[ "$has_staged" -eq 1 && "$has_unstaged" -eq 1 ]]; then
+    printf 'mixed\n'
+  elif [[ "$has_staged" -eq 1 ]]; then
+    printf 'staged_only\n'
+  else
+    printf 'unstaged_only\n'
+  fi
+}
+
+collect_changed_paths() {
+  {
+    git diff --name-only
+    git diff --cached --name-only
+    git ls-files --others --exclude-standard
+  } | awk 'NF' | sort -u
+}
+
+relpath_in_allowlist() {
+  local relpath="${1:-}"
+  [[ -n "${ALLOWED[$relpath]:-}" ]]
+}
+
+current_lane_type() {
+  local branch="$1"
+  local current_root="$2"
+  local main_root="$3"
+
+  if [[ "$current_root" == "$main_root" ]]; then
+    if [[ "$branch" == "<detached>" ]]; then
+      printf 'root_checkout_detached\n'
+    elif [[ "$branch" == "main" ]]; then
+      printf 'root_main_integration\n'
+    else
+      printf 'root_checkout_non_main\n'
+    fi
+    return 0
+  fi
+
+  printf 'managed_worktree_or_branch\n'
+}
+
+print_receipt() {
+  local status="$1"
+  local pre_state="$2"
+  local post_state="$3"
+  local staged_mode="$4"
+  local source_treeish="${5:-}"
+  local recovery_guidance="${6:-}"
+
+  echo "git.stage.commit.scoped"
+  echo "status: $status"
+  echo "lane_type: $LANE_TYPE"
+  echo "source_treeish: ${source_treeish:-none}"
+  echo "pre_lifecycle_state: $pre_state"
+  echo "post_lifecycle_state: $post_state"
+  echo "landing_window_state: $staged_mode"
+  echo "staged_count: ${#STAGED[@]}"
+  echo "staged_files:"
+  printf '  - %s\n' "${STAGED[@]}"
+  echo "recovery_guidance: $recovery_guidance"
+}
+
+restore_from_treeish() {
+  local treeish="$1" relpath="$2"
+  if git cat-file -e "${treeish}:${relpath}" 2>/dev/null; then
+    mkdir -p "$(dirname "$relpath")"
+    git checkout "$treeish" -- "$relpath"
+    return 0
+  fi
+
+  rm -rf -- "$relpath"
+  git add -A -- "$relpath"
+}
+
+check_root_main_contention() {
+  local reconcile_script="$SCRIPT_DIR/worktree-lifecycle-reconcile"
+  [[ -x "$reconcile_script" ]] || return 0
+
+  local reconcile_json
+  reconcile_json="$(SPINE_TARGET_REPO="$ROOT" "$reconcile_script" --json 2>/dev/null || true)"
+  [[ -n "$reconcile_json" ]] || return 0
+
+  local blocking_codes
+  blocking_codes="$(python3 - <<'PY' "$reconcile_json"
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+codes = []
+for item in payload.get("terminal_runtime", {}).get("blocking_contentions", []):
+    code = str(item.get("code", "")).strip()
+    if code:
+        codes.append(code)
+print(",".join(codes))
+PY
+)"
+
+  [[ -z "$blocking_codes" ]] || fail "root main landing is blocked by active shared-lane contention (${blocking_codes}). Resolve the other active terminal or move this work to a managed worktree."
+}
+
 PATHS=()
 ALLOWLIST_FILE=""
 MESSAGE=""
 BODY=""
 DRY_RUN=false
+SOURCE_TREEISH=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --path)
       [[ $# -ge 2 ]] || fail "--path requires value"
-      PATHS+=("$2")
+      PATHS+=("$(normalize_relpath "$2")")
       shift 2
       ;;
     --allowlist-file)
@@ -51,6 +197,11 @@ while [[ $# -gt 0 ]]; do
     --body)
       [[ $# -ge 2 ]] || fail "--body requires value"
       BODY="$2"
+      shift 2
+      ;;
+    --source-treeish)
+      [[ $# -ge 2 ]] || fail "--source-treeish requires value"
+      SOURCE_TREEISH="$2"
       shift 2
       ;;
     --dry-run)
@@ -72,8 +223,7 @@ done
 if [[ -n "$ALLOWLIST_FILE" ]]; then
   [[ -f "$ALLOWLIST_FILE" ]] || fail "allowlist file not found: $ALLOWLIST_FILE"
   while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line## }"
-    line="${line%% }"
+    line="$(normalize_relpath "$line")"
     [[ -z "$line" || "$line" == \#* ]] && continue
     PATHS+=("$line")
   done < "$ALLOWLIST_FILE"
@@ -84,23 +234,77 @@ fi
 cd "$ROOT"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "not a git worktree: $ROOT"
 
-# Stage explicit allowlist only.
+declare -A ALLOWED=()
+NORMALIZED_PATHS=()
 for p in "${PATHS[@]}"; do
-  git add -- "$p"
+  p="$(normalize_relpath "$p")"
+  [[ -n "$p" ]] || continue
+  if [[ -z "${ALLOWED[$p]:-}" ]]; then
+    ALLOWED["$p"]=1
+    NORMALIZED_PATHS+=("$p")
+  fi
 done
+PATHS=("${NORMALIZED_PATHS[@]}")
+((${#PATHS[@]} > 0)) || fail "no allowlist paths provided"
 
-# Verify staged set is a subset of allowlist.
+CURRENT_ROOT="$(pwd -P)"
+MAIN_CHECKOUT_PATH="$(git_main_checkout_path)"
+[[ -n "$MAIN_CHECKOUT_PATH" ]] || MAIN_CHECKOUT_PATH="$CURRENT_ROOT"
+BRANCH="$(git_current_branch)"
+LANE_TYPE="$(current_lane_type "$BRANCH" "$CURRENT_ROOT" "$MAIN_CHECKOUT_PATH")"
+PRE_STATE="$(git_status_mode)"
+
+REMEDIATION_MANAGED="Use a managed worktree for broad or concurrent mutation."
+REMEDIATION_IMMUTABLE="For governed root-main landing, start from a clean root checkout and use --source-treeish <treeish>."
+
+case "$LANE_TYPE" in
+  root_checkout_detached)
+    fail "root checkout is detached. ${REMEDIATION_MANAGED}"
+    ;;
+  root_checkout_non_main)
+    fail "root checkout is not on main. ${REMEDIATION_MANAGED}"
+    ;;
+esac
+
+if [[ "$LANE_TYPE" == "root_main_integration" ]]; then
+  check_root_main_contention
+fi
+
+if [[ -n "$SOURCE_TREEISH" ]]; then
+  [[ "$LANE_TYPE" == "root_main_integration" ]] || fail "immutable-source landing is only supported from root main. ${REMEDIATION_MANAGED}"
+  [[ "$PRE_STATE" == "clean" ]] || fail "immutable-source landing requires clean entry on root main. ${REMEDIATION_IMMUTABLE}"
+  git rev-parse --verify --quiet "${SOURCE_TREEISH}^{tree}" >/dev/null 2>&1 || fail "source treeish not found: $SOURCE_TREEISH"
+
+  for p in "${PATHS[@]}"; do
+    restore_from_treeish "$SOURCE_TREEISH" "$p"
+  done
+else
+  if [[ "$LANE_TYPE" == "root_main_integration" && "$PRE_STATE" != "clean" ]]; then
+    mapfile -t CHANGED_PATHS < <(collect_changed_paths)
+    OUTSIDE=()
+    for changed in "${CHANGED_PATHS[@]}"; do
+      if ! relpath_in_allowlist "$changed"; then
+        OUTSIDE+=("$changed")
+      fi
+    done
+    if ((${#OUTSIDE[@]} > 0)); then
+      echo "changed paths outside allowlist:" >&2
+      printf '  - %s\n' "${OUTSIDE[@]}" >&2
+      fail "root main would enter mixed or unrelated dirty state. ${REMEDIATION_MANAGED} ${REMEDIATION_IMMUTABLE}"
+    fi
+  fi
+
+  for p in "${PATHS[@]}"; do
+    git add -- "$p"
+  done
+fi
+
 mapfile -t STAGED < <(git diff --cached --name-only | awk 'NF')
 ((${#STAGED[@]} > 0)) || fail "no staged changes after allowlist stage"
 
-declare -A ALLOWED=()
-for p in "${PATHS[@]}"; do
-  ALLOWED["$p"]=1
-done
-
 OUTSIDE=()
 for s in "${STAGED[@]}"; do
-  if [[ -z "${ALLOWED[$s]:-}" ]]; then
+  if ! relpath_in_allowlist "$s"; then
     OUTSIDE+=("$s")
   fi
 done
@@ -113,23 +317,31 @@ if ((${#OUTSIDE[@]} > 0)); then
   fail "staged file(s) outside allowlist: ${OUTSIDE[*]}"
 fi
 
+STAGED_STATE="$(git_status_mode)"
+if [[ "$LANE_TYPE" == "root_main_integration" && "$STAGED_STATE" != "staged_only" ]]; then
+  fail "root main landing must use an exact staged-only window (observed=${STAGED_STATE}). ${REMEDIATION_MANAGED} ${REMEDIATION_IMMUTABLE}"
+fi
+
+RECOVERY_GUIDANCE="If interrupted before commit, inspect 'git diff --cached --name-only'. Finish the commit, or return to clean state with 'git restore --staged --worktree --source=HEAD -- <paths>'."
+
 if [[ "$DRY_RUN" == "true" ]]; then
-  echo "git.stage.commit.scoped"
-  echo "status: dry-run"
-  echo "staged_count: ${#STAGED[@]}"
-  echo "staged_files:"
-  printf '  - %s\n' "${STAGED[@]}"
+  print_receipt "dry-run" "$PRE_STATE" "$STAGED_STATE" "$STAGED_STATE" "$SOURCE_TREEISH" "$RECOVERY_GUIDANCE"
   exit 0
 fi
 
 if [[ -n "$BODY" ]]; then
-  git commit -m "$MESSAGE" -m "$BODY"
+  git commit -m "$MESSAGE" -m "$BODY" || {
+    POST_FAILURE_STATE="$(git_status_mode)"
+    print_receipt "commit-failed" "$PRE_STATE" "$POST_FAILURE_STATE" "$STAGED_STATE" "$SOURCE_TREEISH" "$RECOVERY_GUIDANCE"
+    exit 1
+  }
 else
-  git commit -m "$MESSAGE"
+  git commit -m "$MESSAGE" || {
+    POST_FAILURE_STATE="$(git_status_mode)"
+    print_receipt "commit-failed" "$PRE_STATE" "$POST_FAILURE_STATE" "$STAGED_STATE" "$SOURCE_TREEISH" "$RECOVERY_GUIDANCE"
+    exit 1
+  }
 fi
 
-echo "git.stage.commit.scoped"
-echo "status: committed"
-echo "staged_count: ${#STAGED[@]}"
-echo "staged_files:"
-printf '  - %s\n' "${STAGED[@]}"
+POST_STATE="$(git_status_mode)"
+print_receipt "committed" "$PRE_STATE" "$POST_STATE" "$STAGED_STATE" "$SOURCE_TREEISH" "$RECOVERY_GUIDANCE"

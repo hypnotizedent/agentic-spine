@@ -6,6 +6,7 @@ SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
 source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
 RECONCILE="$ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-reconcile"
+HEARTBEAT_POST="$ROOT/ops/plugins/core/session/bin/terminal-heartbeat-post"
 
 PASS=0
 FAIL=0
@@ -57,6 +58,9 @@ echo "════════════════════════�
 
 TMPDIR_BASE="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BASE"' EXIT
+STATE_ROOT="$TMPDIR_BASE/state"
+mkdir -p "$STATE_ROOT"
+export SPINE_STATE="$STATE_ROOT"
 
 # ── Set up a bare repo to serve as origin ────────────────────────
 BARE="$TMPDIR_BASE/bare.git"
@@ -203,6 +207,31 @@ assert_eq "$(python3 -c "print(1 if int('$EXIT_CODE') > 0 else 0)")" "1" \
 
 # Clean root
 git -C "$MAIN_CHECKOUT" checkout -- file.txt 2>/dev/null
+
+# ── T8: Shared root lane contention is blocking ──────────────────
+echo ""
+echo "── T8: Shared root-lane contention blocks ──"
+
+env SPINE_STATE="$STATE_ROOT" "$HEARTBEAT_POST" \
+  --terminal-id SPINE-CONTROL-99 \
+  --role control-plane \
+  --scope hotspot:operational-gaps \
+  --repo-root "$MAIN_CHECKOUT" \
+  --branch main >/dev/null
+
+OUT="$TMPDIR_BASE/t8.json"
+env "${COMMON_ENV[@]}" bash "$RECONCILE" --lane --json > "$OUT" 2>/dev/null || true
+
+CONTENTIONS=$(json_eval "$OUT" "payload['summary']['blocking_terminal_contention_count']")
+assert_eq "$(python3 -c "print(1 if int('$CONTENTIONS') >= 1 else 0)")" "1" \
+  "T8.1: blocking terminal contention is counted"
+
+LANE_CODES=$(json_eval "$OUT" "','.join(i.get('code','') for i in payload['lane_issues'])")
+if echo "$LANE_CODES" | grep -Eq 'shared_root_checkout_contention|shared_git_index_contention'; then
+  pass "T8.2: shared root lane contention blocks lane mode"
+else
+  fail "T8.2: shared root lane contention blocks lane mode (expected shared_root_checkout_contention or shared_git_index_contention)"
+fi
 
 # ── T7: Lane mode passes when only global issues exist ───────────
 echo ""

@@ -294,6 +294,86 @@ def collect_friction_snapshot() -> dict[str, Any]:
     return snapshot
 
 
+def collect_attach_preflight() -> dict[str, Any]:
+    lifecycle_script = ROOT / "ops/plugins/core/ops/bin/worktree-lifecycle-reconcile"
+    d150_script = ROOT / "surfaces/verify/d150-code-root-hygiene-lock.sh"
+    policy = (
+        "Root main is integration-only; managed worktrees are the default mutation surface. "
+        "Only one exact staged-only controller landing window is allowed on root main."
+    )
+
+    lifecycle: dict[str, Any] = {}
+    if lifecycle_script.exists():
+        rc, payload, stderr = run_json_command([str(lifecycle_script), "--json"])
+        if rc not in (0, 1):
+            raise RuntimeError(f"attach preflight lifecycle failed: {stderr or 'unknown error'}")
+        lifecycle = payload
+
+    d150 = {
+        "status": "skipped",
+        "blocking_at_commit": False,
+        "violations": [],
+        "message": "D150 preflight unavailable",
+    }
+    if d150_script.exists():
+        rc, stdout, stderr = run_text_command([str(d150_script)])
+        if rc == 0:
+            d150 = {
+                "status": "pass",
+                "blocking_at_commit": False,
+                "violations": [],
+                "message": stdout or "D150 clean",
+            }
+        else:
+            violations = []
+            for line in (stderr or stdout).splitlines():
+                text = line.strip()
+                if text.startswith("- "):
+                    violations.append(text[2:])
+            d150 = {
+                "status": "warn",
+                "blocking_at_commit": True,
+                "violations": violations,
+                "message": stderr or stdout or "D150 would block commit until loose ~/code files are removed",
+            }
+
+    summary = lifecycle.get("summary", {})
+    lane_issues = lifecycle.get("lane_issues", [])
+    global_issues = lifecycle.get("global_issues", [])
+    lane_warnings = lifecycle.get("lane_warnings", [])
+    global_warnings = lifecycle.get("global_warnings", [])
+    blocking_codes = [str(item.get("code", "")) for item in lane_issues if item.get("code")]
+    warning_codes = [str(item.get("code", "")) for item in lane_warnings + global_warnings if item.get("code")]
+    global_issue_codes = [str(item.get("code", "")) for item in global_issues if item.get("code")]
+
+    status = "pass"
+    if blocking_codes:
+        status = "blocked"
+    elif warning_codes or global_issue_codes or d150["status"] == "warn":
+        status = "warn"
+
+    return {
+        "status": status,
+        "policy": policy,
+        "current_lane_type": summary.get("current_lane_type", ""),
+        "root_lane_status": summary.get("root_lane_status", ""),
+        "controller_root_main_staged_only_window_allowed": bool(
+            summary.get("controller_root_main_staged_only_window_allowed")
+        ),
+        "blocking_codes": blocking_codes,
+        "warning_codes": warning_codes,
+        "global_issue_codes": global_issue_codes,
+        "lifecycle": lifecycle,
+        "shared_lane_contention": {
+            "blocking_count": summary.get("blocking_terminal_contention_count", 0),
+            "non_blocking_count": summary.get("non_blocking_terminal_coexistence_count", 0),
+            "blocking": lifecycle.get("terminal_runtime", {}).get("blocking_contentions", []),
+            "non_blocking": lifecycle.get("terminal_runtime", {}).get("non_blocking_coexistence", []),
+        },
+        "d150": d150,
+    }
+
+
 def collect_capability_map() -> list[str]:
     """Extract compact capability name list for agent tooling awareness."""
     rc, stdout, stderr = run_text_command([str(ROOT / "bin/ops"), "cap", "list"])
@@ -436,10 +516,45 @@ def main() -> int:
             args.terminal_name = str(startup_exports.get("OPS_TERMINAL_ROLE", ""))
         if (not args.runtime_role or args.runtime_role == "unknown") and startup_exports.get("SPINE_RUNTIME_ROLE"):
             args.runtime_role = str(startup_exports.get("SPINE_RUNTIME_ROLE", ""))
+        preflight = collect_attach_preflight()
         loop_id, loop_resolution, latest_payload = resolve_loop_id(args, broker_script)
         sanitize_payload, sanitized_output_path = maybe_sanitize(args, state_root, sanitize_script, loop_id)
         friction_snapshot = collect_friction_snapshot()
         capability_map = collect_capability_map()
+        if preflight.get("status") == "blocked":
+            payload = {
+                "capability": "session.v3.attach",
+                "schema_version": "1.0",
+                "status": "blocked",
+                "generated_at": utc_now(),
+                "data": {
+                    "loop": {
+                        "loop_id": loop_id,
+                        "resolution": loop_resolution,
+                        "latest_loop": latest_payload,
+                    },
+                    "startup": startup,
+                    "repo_identity": repo_identity,
+                    "stale_cleanup": stale_cleanup,
+                    "preflight": preflight,
+                    "friction_snapshot": friction_snapshot,
+                    "capability_map": capability_map,
+                    "next_step": "Resolve attach preflight blockers before starting work.",
+                },
+            }
+            if args.json:
+                print(json.dumps(payload, indent=2))
+            else:
+                print("session.v3.attach")
+                print("status: blocked")
+                print(f"policy: {preflight.get('policy', '')}")
+                print(f"lane_type: {preflight.get('current_lane_type', 'unknown')}")
+                print(f"root_lane_status: {preflight.get('root_lane_status', 'unknown')}")
+                if preflight.get("blocking_codes"):
+                    print("blocking_codes:")
+                    for code in preflight["blocking_codes"]:
+                        print(f"  - {code}")
+            return 1
         if sanitize_payload and sanitize_payload.get("status") == "blocked":
             payload = {
                 "capability": "session.v3.attach",
@@ -454,6 +569,7 @@ def main() -> int:
                     },
                     "startup": startup,
                     "repo_identity": repo_identity,
+                    "preflight": preflight,
                     "sanitize": sanitize_payload,
                     "friction_snapshot": friction_snapshot,
                     "capability_map": capability_map,
@@ -466,8 +582,11 @@ def main() -> int:
             else:
                 print("session.v3.attach")
                 print("status: blocked")
+                print(f"policy: {preflight.get('policy', '')}")
                 print(f"loop_id: {loop_id or 'none'}")
                 print(f"resolution: {loop_resolution}")
+                print(f"lane_type: {preflight.get('current_lane_type', 'unknown')}")
+                print(f"root_lane_status: {preflight.get('root_lane_status', 'unknown')}")
                 print(f"capability_count: {len(capability_map)}")
                 print(f"sanitized_output_path: {sanitized_output_path or 'none'}")
             return 1
@@ -500,6 +619,7 @@ def main() -> int:
                     "startup": startup,
                     "repo_identity": repo_identity,
                     "stale_cleanup": stale_cleanup,
+                    "preflight": preflight,
                     "sanitize": sanitize_payload,
                     "friction_snapshot": friction_snapshot,
                     "capability_map": capability_map,
@@ -541,6 +661,10 @@ def main() -> int:
         print("mode: fast-lane")
     print(f"session_id: {startup_exports.get('SPINE_SESSION_ID', 'none')}")
     print(f"startup_lane: {startup.get('lane', 'none')}")
+    print(f"policy: {preflight.get('policy', '')}")
+    print(f"preflight_status: {preflight.get('status', 'unknown')}")
+    print(f"lane_type: {preflight.get('current_lane_type', 'unknown')}")
+    print(f"root_lane_status: {preflight.get('root_lane_status', 'unknown')}")
     stale_cleaned = stale_cleanup.get('cleaned', 0) if isinstance(stale_cleanup, dict) else 0
     if stale_cleaned > 0:
         print(f"stale_cleanup: {stale_cleaned} worktree(s) removed")

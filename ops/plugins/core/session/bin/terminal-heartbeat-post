@@ -27,6 +27,20 @@ Options:
 EOF
 }
 
+canonical_path() {
+  python3 - "$1" <<'PY'
+from pathlib import Path
+import sys
+
+raw = sys.argv[1]
+path = Path(raw).expanduser()
+try:
+    print(path.resolve(strict=False))
+except Exception:
+    print(path.absolute())
+PY
+}
+
 iso_in_minutes() {
   local minutes="${1:-45}"
   python3 - "$minutes" <<'PY'
@@ -40,6 +54,75 @@ PY
 
 repo_root_default() {
   git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || pwd
+}
+
+git_resolve_path() {
+  local repo="$1" raw="$2"
+  python3 - "$repo" "$raw" <<'PY'
+from pathlib import Path
+import sys
+
+repo = Path(sys.argv[1]).expanduser().resolve()
+raw = sys.argv[2]
+path = Path(raw)
+if not path.is_absolute():
+    path = (repo / path).resolve()
+else:
+    path = path.resolve()
+print(path)
+PY
+}
+
+scope_csv_normalize() {
+  local raw="${1:-}"
+  python3 - "$raw" <<'PY'
+import sys
+
+raw = sys.argv[1]
+items = []
+for part in raw.split(","):
+    text = part.strip()
+    if not text:
+        continue
+    lowered = text.lower()
+    if lowered in {"ops/bindings/operational.gaps.yaml", "operational.gaps.yaml"}:
+        items.append("hotspot:operational-gaps")
+    elif "loop-scopes" in lowered:
+        items.append("hotspot:loop-scopes")
+    elif "friction-queue" in lowered:
+        items.append("hotspot:friction-queue")
+    elif "gate-id-reservations" in lowered:
+        items.append("hotspot:gate-id-reservations")
+    elif "path.claims" in lowered or "path-claims" in lowered:
+        items.append("hotspot:path-claims")
+    else:
+        items.append(text)
+deduped = []
+seen = set()
+for item in items:
+    if item in seen:
+        continue
+    deduped.append(item)
+    seen.add(item)
+print(",".join(deduped))
+PY
+}
+
+extract_hotspot_scope() {
+  local raw="${1:-}"
+  python3 - "$raw" <<'PY'
+import sys
+
+tokens = [item.strip() for item in sys.argv[1].split(",") if item.strip()]
+allowed = {
+    "hotspot:operational-gaps",
+    "hotspot:loop-scopes",
+    "hotspot:friction-queue",
+    "hotspot:gate-id-reservations",
+    "hotspot:path-claims",
+}
+print(",".join([token for token in tokens if token in allowed]))
+PY
 }
 
 terminal_id="${SPINE_TERMINAL_ID:-}"
@@ -67,6 +150,39 @@ while [[ $# -gt 0 ]]; do
     *) echo "FAIL: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+repo_root="$(canonical_path "$repo_root")"
+if [[ "$branch" == "HEAD" ]]; then
+  branch="detached"
+fi
+main_checkout_path="$(git -C "$repo_root" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+[[ -n "$main_checkout_path" ]] || main_checkout_path="$repo_root"
+main_checkout_path="$(canonical_path "$main_checkout_path")"
+
+git_common_dir_raw="$(git -C "$repo_root" rev-parse --git-common-dir 2>/dev/null || true)"
+git_index_path_raw="$(git -C "$repo_root" rev-parse --git-path index 2>/dev/null || true)"
+git_common_dir=""
+git_index_path=""
+if [[ -n "$git_common_dir_raw" ]]; then
+  git_common_dir="$(git_resolve_path "$repo_root" "$git_common_dir_raw")"
+fi
+if [[ -n "$git_index_path_raw" ]]; then
+  git_index_path="$(git_resolve_path "$repo_root" "$git_index_path_raw")"
+fi
+
+lane_type="managed_worktree"
+if [[ "$repo_root" == "$main_checkout_path" ]]; then
+  if [[ "$branch" == "main" ]]; then
+    lane_type="root_main_integration"
+  elif [[ "$branch" == "detached" ]]; then
+    lane_type="root_checkout_detached"
+  else
+    lane_type="root_checkout_non_main"
+  fi
+fi
+
+normalized_scope="$(scope_csv_normalize "$scope")"
+protected_hotspot_scope="$(extract_hotspot_scope "$normalized_scope")"
 
 if [[ -z "$ttl_minutes" ]]; then
   ttl_minutes="$(yq e -r '.terminal_contract.heartbeat_ttl_minutes // 45' "$CONTRACT" 2>/dev/null || echo 45)"
@@ -102,9 +218,15 @@ version: 1
 terminal_id: "$terminal_id"
 role: "$role"
 scope: "$scope"
+normalized_scope: "$normalized_scope"
+protected_hotspot_scope: "$protected_hotspot_scope"
 loop_id: "${loop_id}"
 repo_root: "$repo_root"
+checkout_root: "$repo_root"
 branch: "$branch"
+lane_type: "$lane_type"
+git_common_dir: "$git_common_dir"
+git_index_path: "$git_index_path"
 status: "$status"
 pid: $$
 hostname: "$host_name"
@@ -143,7 +265,13 @@ if [[ "$json_mode" -eq 1 ]]; then
     --arg scope "$scope" \
     --arg loop_id "$loop_id" \
     --arg repo_root "$repo_root" \
+    --arg checkout_root "$repo_root" \
     --arg branch "$branch" \
+    --arg lane_type "$lane_type" \
+    --arg git_common_dir "$git_common_dir" \
+    --arg git_index_path "$git_index_path" \
+    --arg normalized_scope "$normalized_scope" \
+    --arg protected_hotspot_scope "$protected_hotspot_scope" \
     --arg status "$status" \
     --arg heartbeat_at "$heartbeat_at" \
     --arg expires_at "$expires_at" \
@@ -155,7 +283,13 @@ if [[ "$json_mode" -eq 1 ]]; then
       scope: $scope,
       loop_id: $loop_id,
       repo_root: $repo_root,
+      checkout_root: $checkout_root,
       branch: $branch,
+      lane_type: $lane_type,
+      git_common_dir: $git_common_dir,
+      git_index_path: $git_index_path,
+      normalized_scope: $normalized_scope,
+      protected_hotspot_scope: $protected_hotspot_scope,
       status: $status,
       heartbeat_at: $heartbeat_at,
       expires_at: $expires_at,
@@ -169,9 +303,15 @@ echo "terminal.heartbeat.post"
 echo "terminal_id: $terminal_id"
 echo "role: $role"
 echo "scope: $scope"
+echo "normalized_scope: ${normalized_scope:-none}"
+echo "protected_hotspot_scope: ${protected_hotspot_scope:-none}"
 echo "loop_id: ${loop_id:-none}"
 echo "repo_root: $repo_root"
+echo "checkout_root: $repo_root"
 echo "branch: $branch"
+echo "lane_type: $lane_type"
+echo "git_common_dir: ${git_common_dir:-none}"
+echo "git_index_path: ${git_index_path:-none}"
 echo "status: $status"
 echo "heartbeat_at: $heartbeat_at"
 echo "expires_at: $expires_at"
