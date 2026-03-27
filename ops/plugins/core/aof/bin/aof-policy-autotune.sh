@@ -8,12 +8,15 @@
 # Usage: aof-policy-autotune.sh [--json]
 set -euo pipefail
 
-SP="${SPINE_ROOT:-${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SP_DEFAULT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/../../../../.." && pwd))"
+SP="${SPINE_ROOT:-${SPINE_CODE:-$SP_DEFAULT}}"
 SCHEMA_VERSION="1.0.0"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 JSON_MODE=0
 source "$SP/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
+SP="$(spine_resolve_target_repo)"
 
 if [[ "${1:-}" == "--json" ]]; then
   JSON_MODE=1
@@ -33,7 +36,6 @@ active_preset="${RESOLVED_POLICY_PRESET:-balanced}"
 GATE_REGISTRY="$SP/ops/bindings/gate.registry.yaml"
 CAP_FILE="$SP/ops/capabilities.yaml"
 GAP_FILE="$SP/ops/bindings/operational.gaps.yaml"
-RULES_FILE="$SP/ops/bindings/policy.autotune.rules.yaml"
 
 gate_count=0
 if [[ -f "$GATE_REGISTRY" ]]; then
@@ -87,15 +89,6 @@ cap_warn_threshold=400
 cap_critical_threshold=600
 gap_backlog_warn=5
 gap_backlog_critical=10
-
-if [[ -f "$RULES_FILE" ]]; then
-  gate_warn_threshold="$(yq e '.thresholds.gate_count.warn // 150' "$RULES_FILE" 2>/dev/null || echo 150)"
-  gate_critical_threshold="$(yq e '.thresholds.gate_count.critical // 200' "$RULES_FILE" 2>/dev/null || echo 200)"
-  cap_warn_threshold="$(yq e '.thresholds.cap_count.warn // 400' "$RULES_FILE" 2>/dev/null || echo 400)"
-  cap_critical_threshold="$(yq e '.thresholds.cap_count.critical // 600' "$RULES_FILE" 2>/dev/null || echo 600)"
-  gap_backlog_warn="$(yq e '.thresholds.open_gaps.warn // 5' "$RULES_FILE" 2>/dev/null || echo 5)"
-  gap_backlog_critical="$(yq e '.thresholds.open_gaps.critical // 10' "$RULES_FILE" 2>/dev/null || echo 10)"
-fi
 
 # ── Generate recommendations ──
 recommendations=()

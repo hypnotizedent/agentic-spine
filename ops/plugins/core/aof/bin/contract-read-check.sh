@@ -2,9 +2,13 @@
 # contract-read-check — Enforce/inspect environment contract acknowledgement.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DEFAULT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/../../../../.." && pwd))"
+ROOT="${SPINE_ROOT:-${SPINE_CODE:-$ROOT_DEFAULT}}"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
+ROOT="$(spine_resolve_target_repo)"
+SELF_SCRIPT="$SCRIPT_DIR/contract-read-check.sh"
 
 CONTRACT_FILE="${CONTRACT_FILE:-.environment.yaml}"
 STATUS_ONLY=0
@@ -84,7 +88,7 @@ cat "$CONTRACT_FILE"
 echo ""
 echo "Tier: $TIER"
 echo "To acknowledge:"
-echo "  ./ops/plugins/core/aof/bin/contract-read-check.sh --ack"
+echo "  $SELF_SCRIPT --ack"
 echo ""
 echo "Mutating actions should be blocked until acknowledged."
 exit 2

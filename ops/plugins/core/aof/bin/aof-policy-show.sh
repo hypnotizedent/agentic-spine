@@ -2,7 +2,9 @@
 # aof-policy-show — Show current policy preset with all 11 knob values.
 set -euo pipefail
 
-SP="${SPINE_ROOT:-${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SP_DEFAULT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/../../../../.." && pwd))"
+SP="${SPINE_ROOT:-${SPINE_CODE:-$SP_DEFAULT}}"
 SCHEMA_VERSION="1.1.0"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 JSON_MODE=0

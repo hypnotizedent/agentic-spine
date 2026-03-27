@@ -2,8 +2,11 @@
 # aof.bootstrap — Seed environment + identity contracts from AOF profiles.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DEFAULT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/../../../../.." && pwd))"
+ROOT="${SPINE_ROOT:-${SPINE_CODE:-$ROOT_DEFAULT}}"
 PROFILE_DIR="$ROOT/ops/profiles"
+VALIDATE_SCRIPT="$SCRIPT_DIR/validate-environment.sh"
 
 ENV_NAME=""
 PROFILE="minimal"
@@ -100,5 +103,5 @@ echo "  environment: $ENV_FILE"
 echo "  identity:    $IDENTITY_FILE"
 echo ""
 echo "Next:"
-echo "  1. ./ops/plugins/core/aof/bin/validate-environment.sh --environment-file \"$ENV_FILE\" --identity-file \"$IDENTITY_FILE\""
+echo "  1. $VALIDATE_SCRIPT --environment-file \"$ENV_FILE\" --identity-file \"$IDENTITY_FILE\""
 echo "  2. ./bin/ops cap run aof.contract.status"
