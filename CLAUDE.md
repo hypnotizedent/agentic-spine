@@ -1,12 +1,12 @@
 # Claude Entry Stub
 
-Canonical governance: [`docs/governance/SPINE.md`](docs/governance/SPINE.md)
-Translator doctrine: [`docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`](docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md)
+Governance is injected by hook via `.claude/settings.json` and `.claude/hooks/session-entry-hook.sh`.
+This file is a thin pointer only. Do not duplicate governance here.
 
-<!-- SPINE_STARTUP_BLOCK -->
-cd ~/code/agentic-spine
-./bin/ops cap run session.v3.attach -- --allow-no-loop
-<!-- /SPINE_STARTUP_BLOCK -->
+- Shared governance core: [`docs/governance/RONNY_SESSION_SKILL_CORE.md`](docs/governance/RONNY_SESSION_SKILL_CORE.md)
+- Operating contract: [`docs/governance/SPINE.md`](docs/governance/SPINE.md)
+- Translator doctrine: [`docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`](docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md)
+- Root authority: [`ops/bindings/root.authority.contract.yaml`](ops/bindings/root.authority.contract.yaml)
 
 ## Quick Reference
 - Primary: `~/code/agentic-spine` | Workbench: `~/code/workbench`
