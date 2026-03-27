@@ -40,6 +40,7 @@ source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
 
 run_cap() {
   env \
+    OPS_GOVERNED_MAIN_OVERRIDE=1 \
     SPINE_TARGET_REPO="${SPINE_ROOT}" \
     SPINE_ROOT="${SPINE_ROOT}" \
     SPINE_REPO="${SPINE_ROOT}" \
