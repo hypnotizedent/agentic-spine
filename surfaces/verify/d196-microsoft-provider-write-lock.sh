@@ -5,8 +5,8 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 CAPS="$ROOT/ops/capabilities.yaml"
-PROVIDERS="$ROOT/ops/bindings/communications.providers.contract.yaml"
-CAL_SYNC="$ROOT/ops/bindings/calendar.sync.contract.yaml"
+PROVIDERS="$ROOT/ops/bindings/domains/communications/communications.providers.contract.yaml"
+CAL_SYNC="$ROOT/ops/bindings/domains/calendar/calendar.sync.contract.yaml"
 TERMINAL_ROLES="$ROOT/ops/bindings/terminal.role.contract.yaml"
 WORKER_CATALOG="$ROOT/ops/bindings/terminal.worker.catalog.yaml"
 

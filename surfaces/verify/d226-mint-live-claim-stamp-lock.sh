@@ -10,7 +10,7 @@ MINT_ROOT="${MINT_MODULES_ROOT:-$HOME/code/mint-modules}"
 TRANSITION_DOC="$MINT_ROOT/docs/ARCHITECTURE/MINT_TRANSITION_STATE.md"
 ROADMAP_DOC="$MINT_ROOT/docs/PLANNING/MINT_ORDER_AGENT_ROADMAP_SSOT.md"
 QUEUE_DOC="$MINT_ROOT/docs/PLANNING/MINT_MODULE_EXECUTION_QUEUE.md"
-LIFECYCLE_REGISTRY="$ROOT/ops/bindings/mint.module.lifecycle.authority.yaml"
+LIFECYCLE_REGISTRY="$ROOT/ops/bindings/domains/mint/mint.module.lifecycle.authority.yaml"
 
 fail() {
   echo "D226 FAIL: $*" >&2

@@ -2,7 +2,7 @@
 # TRIAGE: z2m.devices.yaml must exist, be non-empty, and fresh (<14 days). Run ha.z2m.devices.snapshot to regenerate.
 set -euo pipefail
 
-BINDING="$SPINE_ROOT/ops/bindings/z2m.devices.yaml"
+BINDING="$SPINE_ROOT/ops/bindings/domains/ha/z2m.devices.yaml"
 MAX_AGE_DAYS=14
 
 # Check file exists

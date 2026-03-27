@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
-CONTRACT="$ROOT/ops/bindings/surveillance.topology.contract.yaml"
+CONTRACT="$ROOT/ops/bindings/domains/surveillance/surveillance.topology.contract.yaml"
 SSOT="$ROOT/docs/core/SURVEILLANCE_PLATFORM_SSOT.md"
 ROLES="$ROOT/docs/governance/SURVEILLANCE_ROLES.md"
 CAPABILITIES="$ROOT/ops/capabilities.yaml"

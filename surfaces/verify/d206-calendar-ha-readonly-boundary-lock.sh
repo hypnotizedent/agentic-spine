@@ -4,9 +4,9 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-HA_CONTRACT="$ROOT/ops/bindings/calendar.ha.ingest.contract.yaml"
-HOME_CONTRACT="$ROOT/ops/bindings/calendar.home.contract.yaml"
-SYNC_CONTRACT="$ROOT/ops/bindings/calendar.sync.contract.yaml"
+HA_CONTRACT="$ROOT/ops/bindings/domains/calendar/calendar.ha.ingest.contract.yaml"
+HOME_CONTRACT="$ROOT/ops/bindings/domains/calendar/calendar.home.contract.yaml"
+SYNC_CONTRACT="$ROOT/ops/bindings/domains/calendar/calendar.sync.contract.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
 
 fail() {
@@ -70,13 +70,13 @@ if provider_mode.get("writeback_enabled") is not False:
 home_ha = home_contract.get("home_assistant_ingest") if isinstance(home_contract.get("home_assistant_ingest"), dict) else {}
 if home_ha.get("mode") != "read-only":
     violations.append("calendar.home.contract home_assistant_ingest.mode must be read-only")
-if home_ha.get("contract_ref") != "ops/bindings/calendar.ha.ingest.contract.yaml":
+if home_ha.get("contract_ref") != "ops/bindings/domains/calendar/calendar.ha.ingest.contract.yaml":
     violations.append("calendar.home.contract home_assistant_ingest.contract_ref mismatch")
 
 sync_ha = sync_contract.get("ha_ingest_contract") if isinstance(sync_contract.get("ha_ingest_contract"), dict) else {}
 if sync_ha.get("mode") != "read-only":
     violations.append("calendar.sync.contract ha_ingest_contract.mode must be read-only")
-if sync_ha.get("contract_ref") != "ops/bindings/calendar.ha.ingest.contract.yaml":
+if sync_ha.get("contract_ref") != "ops/bindings/domains/calendar/calendar.ha.ingest.contract.yaml":
     violations.append("calendar.sync.contract ha_ingest_contract.contract_ref mismatch")
 
 sync_push = (

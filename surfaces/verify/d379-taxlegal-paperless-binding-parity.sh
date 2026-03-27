@@ -16,11 +16,11 @@ pass() {
 }
 
 # ── Check 1: Binding contract exists ─────────────────────────────────────
-CONTRACT="$ROOT/ops/bindings/taxlegal.paperless.binding.contract.yaml"
+CONTRACT="$ROOT/ops/bindings/domains/taxlegal/taxlegal.paperless.binding.contract.yaml"
 if [[ -f "$CONTRACT" ]]; then
   pass
 else
-  err "binding contract missing: ops/bindings/taxlegal.paperless.binding.contract.yaml"
+  err "binding contract missing: ops/bindings/domains/taxlegal/taxlegal.paperless.binding.contract.yaml"
 fi
 
 # ── Check 2: Ingest capability registered in capabilities.yaml ───────────
@@ -70,7 +70,7 @@ else
 fi
 
 # ── Check 8: Source lock entries have required fields ────────────────────
-CASE_CONTRACT="$ROOT/ops/bindings/taxlegal.case.lifecycle.contract.yaml"
+CASE_CONTRACT="$ROOT/ops/bindings/domains/taxlegal/taxlegal.case.lifecycle.contract.yaml"
 CASE_BASE="$(spine_resolve_domain_state 'taxlegal/cases')"
 if command -v yq >/dev/null 2>&1 && [[ -f "$CASE_CONTRACT" ]]; then
   case_root="$(yq -r '.case_pathing.root // ""' "$CASE_CONTRACT" 2>/dev/null || true)"

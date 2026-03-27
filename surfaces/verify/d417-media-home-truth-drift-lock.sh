@@ -6,9 +6,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SERVICES="$ROOT/ops/bindings/media.services.yaml"
-PATH_AUTH="$ROOT/ops/bindings/media.path.authority.contract.yaml"
-CONVERGENCE="$ROOT/ops/bindings/media.convergence.audit.yaml"
+SERVICES="$ROOT/ops/bindings/domains/media/media.services.yaml"
+PATH_AUTH="$ROOT/ops/bindings/domains/media/media.path.authority.contract.yaml"
+CONVERGENCE="$ROOT/ops/bindings/domains/media/media.convergence.audit.yaml"
 
 ERRORS=0
 err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }

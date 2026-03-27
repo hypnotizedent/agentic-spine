@@ -10,9 +10,9 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$ROOT"
 
-NORMALIZATION_CONTRACT="ops/bindings/mint.quote.line_item.normalization.contract.yaml"
-PAYMENT_BRIDGE="ops/bindings/mint.quote.payment_bridge.authority.yaml"
-QUOTE_PACKET_AUTHORITY="ops/bindings/mint.quote.packet.authority.yaml"
+NORMALIZATION_CONTRACT="ops/bindings/domains/mint/mint.quote.line_item.normalization.contract.yaml"
+PAYMENT_BRIDGE="ops/bindings/domains/mint/mint.quote.payment_bridge.authority.yaml"
+QUOTE_PACKET_AUTHORITY="ops/bindings/domains/mint/mint.quote.packet.authority.yaml"
 MINT_AGENT_CONTRACT="../agentic-foundation/docs/agents/mint-agent.contract.md"
 CAPABILITIES="ops/capabilities.yaml"
 CAPABILITY_MAP="ops/bindings/capability_map.yaml"

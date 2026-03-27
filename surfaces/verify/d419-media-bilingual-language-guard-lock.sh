@@ -8,8 +8,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TV_POLICY="$ROOT/ops/bindings/media.tv.acquisition.policy.yaml"
-QUALITY_POLICY="$ROOT/ops/bindings/media.quality.policy.yaml"
+TV_POLICY="$ROOT/ops/bindings/domains/media/media.tv.acquisition.policy.yaml"
+QUALITY_POLICY="$ROOT/ops/bindings/domains/media/media.quality.policy.yaml"
 
 ERRORS=0
 err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }

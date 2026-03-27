@@ -20,7 +20,7 @@ root = Path(sys.argv[1])
 scan_roots = ("bin", "ops", "surfaces", "docs", "fixtures")
 skip_prefixes = ("ops/archive/",)
 historical_exceptions = {
-    "ops/bindings/audits.migration.plan.yaml",
+    "ops/bindings/archive/pre-consolidation/audits.migration.plan.yaml",
     "ops/bindings/operational.gaps.yaml",
     "docs/reference/brain/memory.md",
     "docs/reference/jd/00.00-index.md",

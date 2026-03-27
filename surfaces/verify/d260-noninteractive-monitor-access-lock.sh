@@ -7,7 +7,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LIFECYCLE_CONTRACT="$ROOT/ops/bindings/tailscale.ssh.lifecycle.contract.yaml"
-STACK_CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
+STACK_CONTRACT="$ROOT/ops/bindings/domains/communications/communications.stack.contract.yaml"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
 
 fail=0

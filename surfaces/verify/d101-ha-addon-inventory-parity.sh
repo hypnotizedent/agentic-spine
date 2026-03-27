@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# TRIAGE: HA add-on inventory missing or stale — run ha.addons.snapshot to regenerate ops/bindings/ha.addons.yaml
+# TRIAGE: HA add-on inventory missing or stale — run ha.addons.snapshot to regenerate ops/bindings/domains/ha/ha.addons.yaml
 # D101: ha-addon-inventory-parity
 # Enforces: ha.addons.yaml exists, has addon_count > 0, freshness < 14 days
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-BINDING="$ROOT/ops/bindings/ha.addons.yaml"
+BINDING="$ROOT/ops/bindings/domains/ha/ha.addons.yaml"
 
 if [[ ! -f "$BINDING" ]]; then
   echo "D101 FAIL: ha.addons.yaml does not exist"

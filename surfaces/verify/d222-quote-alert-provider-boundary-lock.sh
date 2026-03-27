@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-PROVIDERS="$ROOT/ops/bindings/communications.providers.contract.yaml"
+PROVIDERS="$ROOT/ops/bindings/domains/communications/communications.providers.contract.yaml"
 MINT_MODULES_ROOT="${MINT_MODULES_ROOT:-$HOME/code/mint-modules}"
 QUOTE_CONFIG="$MINT_MODULES_ROOT/quote-page/src/config.ts"
 

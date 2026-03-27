@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-CONTRACT="$ROOT/ops/bindings/finance.cc-benefits.runtime.contract.yaml"
+CONTRACT="$ROOT/ops/bindings/domains/finance/finance.cc-benefits.runtime.contract.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
 MAP="$ROOT/ops/bindings/capability_map.yaml"
 REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"

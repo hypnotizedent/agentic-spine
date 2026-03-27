@@ -9,7 +9,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-CONTRACT="$ROOT/ops/bindings/mint.module.sequence.contract.yaml"
+CONTRACT="$ROOT/ops/bindings/domains/mint/mint.module.sequence.contract.yaml"
 STATUS_SURFACE="$ROOT/ops/plugins/domains/mint/bin/mint-live-baseline-status"
 
 fail() {

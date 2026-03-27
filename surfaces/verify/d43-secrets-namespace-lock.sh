@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Use governed namespace for secrets. Check ops/bindings/secrets.namespace.yaml.
+# TRIAGE: Use governed namespace for secrets. Check ops/bindings/secrets.namespace.policy.yaml.
 # D43: Secrets namespace governance lock (policy + capability wiring)
 set -euo pipefail
 

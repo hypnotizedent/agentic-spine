@@ -7,8 +7,8 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 CAPS="$ROOT/ops/capabilities.yaml"
 ROLES="$ROOT/ops/bindings/terminal.role.contract.yaml"
 WORKERS="$ROOT/ops/bindings/terminal.worker.catalog.yaml"
-CONTRACT="$ROOT/ops/bindings/calendar.external.providers.contract.yaml"
-SYNC_CONTRACT="$ROOT/ops/bindings/calendar.sync.contract.yaml"
+CONTRACT="$ROOT/ops/bindings/domains/calendar/calendar.external.providers.contract.yaml"
+SYNC_CONTRACT="$ROOT/ops/bindings/domains/calendar/calendar.sync.contract.yaml"
 
 fail() {
   echo "D203 FAIL: $*" >&2

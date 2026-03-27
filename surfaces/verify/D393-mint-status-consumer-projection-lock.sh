@@ -33,7 +33,7 @@ echo "════════════════════════�
 echo
 
 # Check 1: Projection file exists and is authoritative
-check "projection exists" "[[ -f '$ROOT/ops/bindings/mint.module.status.projected.yaml' ]]"
+check "projection exists" "[[ -f '$ROOT/ops/bindings/domains/mint/mint.module.status.projected.yaml' ]]"
 
 # Check 2: mint.module.status.show capability exists
 check "show capability exists" "grep -q 'mint.module.status.show:' '$ROOT/ops/capabilities.yaml'"
@@ -48,10 +48,10 @@ check "flying-dutchman.sh uses projection" "grep -q 'mint.module.status.show' '$
 check "domain doc cites projection" "grep -q 'mint.module.status.projected.yaml' '$ROOT/docs/governance/domains/mint.md'"
 
 # Check 6: Authority contract exists and is valid
-check "authority contract exists" "[[ -f '$ROOT/ops/bindings/mint.module.status.authority.contract.yaml' ]]"
+check "authority contract exists" "[[ -f '$ROOT/ops/bindings/domains/mint/mint.module.status.authority.contract.yaml' ]]"
 
 # Check 7: Authority contract marks planning docs as non-authoritative
-check "authority forbids planning docs" "grep -q 'do_not_use_for_operational_truth' '$ROOT/ops/bindings/mint.module.status.authority.contract.yaml'"
+check "authority forbids planning docs" "grep -q 'do_not_use_for_operational_truth' '$ROOT/ops/bindings/domains/mint/mint.module.status.authority.contract.yaml'"
 
 # Check 8: mint-modules-ops.sh does NOT call mint.runtime.proof in status command
 check "mint-modules-ops.sh status avoids proof" "! grep -A5 'cmd_status()' '$WORKBENCH/scripts/root/operator/mint-modules-ops.sh' | grep -q 'mint.runtime.proof'"

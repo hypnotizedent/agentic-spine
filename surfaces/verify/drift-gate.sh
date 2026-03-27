@@ -351,48 +351,6 @@ if [[ -x "$SP/surfaces/verify/api-preconditions.sh" ]]; then
 else
   warn "api-preconditions verifier not present"
 fi
-
-# D14: Cloudflare surface drift gate (no legacy smells, read-only)
-echo -n "D14 cloudflare drift gate... "
-if [[ -x "$SP/surfaces/verify/cloudflare-drift-gate.sh" ]]; then
-  gate_script "$SP/surfaces/verify/cloudflare-drift-gate.sh" "D14"
-else
-  warn "cloudflare drift gate not present"
-fi
-
-# D15: GitHub Actions surface drift gate (no legacy smells, read-only, no leak fields)
-echo -n "D15 github actions drift gate... "
-if [[ -x "$SP/surfaces/verify/github-actions-gate.sh" ]]; then
-  gate_script "$SP/surfaces/verify/github-actions-gate.sh" "D15"
-else
-  warn "github actions drift gate not present"
-fi
-
-# D16: Canonical docs quarantine (no competing truths)
-echo -n "D16 docs quarantine... "
-if [[ -x "$SP/surfaces/verify/d16-docs-quarantine.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d16-docs-quarantine.sh"
-else
-  warn "docs quarantine gate not present"
-fi
-
-# D17: Root allowlist (no agents/, _imports/, or other drift magnets at root)
-echo -n "D17 root allowlist... "
-if [[ -x "$SP/surfaces/verify/d17-root-allowlist.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d17-root-allowlist.sh"
-else
-  warn "root allowlist gate not present"
-fi
-
-# D18: Docker compose surface drift gate (read-only, no legacy smells)
-echo -n "D18 docker compose drift gate... "
-if [[ -x "$SP/surfaces/verify/d18-docker-compose-drift.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d18-docker-compose-drift.sh"
-else
-  warn "docker compose drift gate not present"
-fi
-
-# D19: Backup surface drift gate (read-only inventory, no legacy smells, no secret printing)
 echo -n "D19 backup drift gate... "
 if [[ -x "$SP/surfaces/verify/d19-backup-drift.sh" ]]; then
   gate_script "$SP/surfaces/verify/d19-backup-drift.sh"
@@ -417,32 +375,6 @@ else
   fi
 fi
 
-# D21: Reserved (retired — was agent-entry-surface-lock, merged into D56)
-
-# D22: Nodes surface drift gate (read-only SSH, no credentials, no mutations)
-echo -n "D22 nodes drift gate... "
-if [[ -x "$SP/surfaces/verify/d22-nodes-drift.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d22-nodes-drift.sh"
-else
-  warn "nodes drift gate not present"
-fi
-
-# D23: Services health surface drift gate (no verbose curl, no auth printing)
-echo -n "D23 health drift gate... "
-if [[ -x "$SP/surfaces/verify/d23-health-drift.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d23-health-drift.sh" "D23"
-else
-  warn "health drift gate not present"
-fi
-
-# D24: GitHub labels drift gate
-echo -n "D24 github labels drift gate... "
-if [[ -x "$SP/surfaces/verify/d24-github-labels-drift.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d24-github-labels-drift.sh"
-else
-  warn "github labels drift gate not present"
-fi
-
 # D25: Secrets CLI canonical lock (verbose only; default runs via D55 composite)
 if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
   echo -n "D25 secrets cli canonical lock... "
@@ -451,81 +383,6 @@ if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
   else
     warn "secrets cli canonical lock gate not present"
   fi
-fi
-
-# D26 / D56: Agent entry surfaces (verbose runs subchecks; default runs composite)
-if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
-  echo -n "D26 agent read surface drift... "
-  if [[ -x "$SP/surfaces/verify/d26-agent-read-surface.sh" ]]; then
-    gate_script "$SP/surfaces/verify/d26-agent-read-surface.sh"
-  else
-    warn "agent read surface drift gate not present"
-  fi
-else
-  echo -n "D56 agent entry surface lock... "
-  if [[ -x "$SP/surfaces/verify/d56-agent-entry-surface-lock.sh" ]]; then
-    gate_script "$SP/surfaces/verify/d56-agent-entry-surface-lock.sh"
-  else
-    warn "agent entry surface lock gate not present"
-  fi
-fi
-
-# D27: Fact duplication lock for startup/governance read surfaces
-echo -n "D27 fact duplication lock... "
-if [[ -x "$SP/surfaces/verify/d27-fact-duplication-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d27-fact-duplication-lock.sh"
-else
-  warn "fact duplication drift gate not present"
-fi
-
-# D28: Archive runway lock (active legacy absolute paths + extraction queue contract)
-echo -n "D28 archive runway lock... "
-if [[ -x "$SP/surfaces/verify/d28-legacy-path-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d28-legacy-path-lock.sh"
-else
-  warn "archive runway lock gate not present"
-fi
-
-# D29: Active entrypoint lock (launchd/cron in /Code must not execute from ronny-ops)
-echo -n "D29 active entrypoint lock... "
-if [[ -x "$SP/surfaces/verify/d29-active-entrypoint-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d29-active-entrypoint-lock.sh"
-else
-  warn "active entrypoint lock gate not present"
-fi
-
-# D30: Active config lock (legacy refs + plaintext token patterns)
-echo -n "D30 active config lock... "
-if [[ -x "$SP/surfaces/verify/d30-active-config-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d30-active-config-lock.sh"
-else
-  warn "active config lock gate not present"
-fi
-
-# D31: Home output sink lock (home-root logs/out/err not allowlisted)
-echo -n "D31 home output sink lock... "
-if [[ -x "$SP/surfaces/verify/d31-home-output-sink-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d31-home-output-sink-lock.sh"
-else
-  warn "home output sink lock gate not present"
-fi
-
-# D32: Codex instruction source lock (verbose only; default runs via D56 composite)
-if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
-  echo -n "D32 codex instruction source lock... "
-  if [[ -x "$SP/surfaces/verify/d32-codex-instruction-source-lock.sh" ]]; then
-    gate_script "$SP/surfaces/verify/d32-codex-instruction-source-lock.sh"
-  else
-    warn "codex instruction source lock gate not present"
-  fi
-fi
-
-# D33: Extraction pause lock (must stay paused during stabilization)
-echo -n "D33 extraction pause lock... "
-if [[ -x "$SP/surfaces/verify/d33-extraction-pause-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d33-extraction-pause-lock.sh"
-else
-  warn "extraction pause lock gate not present"
 fi
 
 # D34: Loop ledger integrity lock (summary must match deduped counts)
@@ -543,165 +400,18 @@ if [[ -x "$SP/surfaces/verify/d35-infra-relocation-parity-lock.sh" ]]; then
 else
   warn "infra relocation parity lock gate not present"
 fi
-
-# D36: Legacy exception hygiene lock (stale/near-expiry exceptions)
-echo -n "D36 legacy exception hygiene lock... "
-if [[ -x "$SP/surfaces/verify/d36-legacy-exception-hygiene-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d36-legacy-exception-hygiene-lock.sh"
-else
-  warn "legacy exception hygiene lock gate not present"
-fi
-
-# D37 / D57: Infra identity cohesion (verbose runs subchecks; default runs composite)
-if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
-  echo -n "D37 infra placement policy lock... "
-  if [[ -x "$SP/surfaces/verify/d37-infra-placement-policy-lock.sh" ]]; then
-    gate_script "$SP/surfaces/verify/d37-infra-placement-policy-lock.sh"
-  else
-    warn "infra placement policy lock gate not present"
-  fi
-else
-  echo -n "D57 infra identity cohesion lock... "
-  if [[ -x "$SP/surfaces/verify/d57-infra-identity-cohesion-lock.sh" ]]; then
-    gate_script "$SP/surfaces/verify/d57-infra-identity-cohesion-lock.sh"
-  else
-    warn "infra identity cohesion lock gate not present"
-  fi
-fi
-
-# D38: Service extraction hygiene lock (EXTRACTION_PROTOCOL.md enforcement)
-echo -n "D38 extraction hygiene lock... "
-if [[ -x "$SP/surfaces/verify/d38-extraction-hygiene-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d38-extraction-hygiene-lock.sh"
-else
-  warn "extraction hygiene lock gate not present"
-fi
-
-# D39: Hypervisor identity lock (verbose only; default runs via D57 composite)
-if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
-  echo -n "D39 infra hypervisor identity lock... "
-  if [[ -x "$SP/surfaces/verify/d39-infra-hypervisor-identity-lock.sh" ]]; then
-    gate_script "$SP/surfaces/verify/d39-infra-hypervisor-identity-lock.sh"
-  else
-    warn "infra hypervisor identity lock gate not present"
-  fi
-fi
-
-# D40: Maker tools drift gate (binding validity, script hygiene)
-echo -n "D40 maker tools drift gate... "
-if [[ -x "$SP/surfaces/verify/d40-maker-tools-drift.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d40-maker-tools-drift.sh"
-else
-  warn "maker tools drift gate not present"
-fi
-
-# D41: Hidden-root governance lock (home-root inventory + forbidden pattern enforcement)
-echo -n "D41 hidden-root governance lock... "
-if [[ -x "$SP/surfaces/verify/d41-hidden-root-governance-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d41-hidden-root-governance-lock.sh"
-else
-  warn "hidden-root governance lock gate not present"
-fi
-
-# D42: Code path case lock (runtime scripts must use lowercase code path)
-echo -n "D42 code path case lock... "
-if [[ -x "$SP/surfaces/verify/d42-code-path-case-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d42-code-path-case-lock.sh"
-else
-  warn "code path case lock gate not present"
-fi
-
-# D43: Secrets namespace policy lock (policy + capability wiring)
 echo -n "D43 secrets namespace lock... "
 if [[ -x "$SP/surfaces/verify/d43-secrets-namespace-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d43-secrets-namespace-lock.sh"
 else
   warn "secrets namespace lock gate not present"
 fi
-
-# D44: CLI tools discovery lock (inventory + cross-refs + probes)
-echo -n "D44 cli tools discovery lock... "
-if [[ -x "$SP/surfaces/verify/d44-cli-tools-discovery-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d44-cli-tools-discovery-lock.sh"
-else
-  warn "cli tools discovery lock gate not present"
-fi
-
-# D45: Naming consistency lock (cross-file identity surface verification)
-echo -n "D45 naming consistency lock... "
-if [[ -x "$SP/surfaces/verify/d45-naming-consistency-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d45-naming-consistency-lock.sh"
-else
-  warn "naming consistency lock gate not present"
-fi
-
-# D46: Claude instruction source lock (verbose only; default runs via D56 composite)
-if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
-  echo -n "D46 claude instruction source lock... "
-  if [[ -x "$SP/surfaces/verify/d46-claude-instruction-source-lock.sh" ]]; then
-    gate_script "$SP/surfaces/verify/d46-claude-instruction-source-lock.sh"
-  else
-    warn "claude instruction source lock gate not present"
-  fi
-fi
-
-# D47: Brain surface path lock (no .brain/ in runtime scripts)
-echo -n "D47 brain surface path lock... "
-if [[ -x "$SP/surfaces/verify/d47-brain-surface-path-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d47-brain-surface-path-lock.sh"
-else
-  warn "brain surface path lock gate not present"
-fi
-
-# D48: Codex worktree hygiene (codex/.worktrees)
 echo -n "D48 codex worktree hygiene... "
 if [[ -x "$SP/surfaces/verify/d48-codex-worktree-hygiene.sh" ]]; then
   gate_script "$SP/surfaces/verify/d48-codex-worktree-hygiene.sh"
 else
   warn "codex worktree hygiene gate not present"
 fi
-
-# D49: Agent discovery lock (agents.registry.yaml + contracts)
-echo -n "D49 agent discovery lock... "
-if [[ -x "$SP/surfaces/verify/d49-agent-discovery-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d49-agent-discovery-lock.sh"
-else
-  warn "agent discovery lock gate not present"
-fi
-
-# D50: Gitea CI workflow lock (workflow file + drift-gate reference)
-echo -n "D50 gitea ci workflow lock... "
-if [[ -x "$SP/surfaces/verify/d50-gitea-ci-workflow-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d50-gitea-ci-workflow-lock.sh"
-else
-  warn "gitea ci workflow lock gate not present"
-fi
-
-# D51: Caddy proto lock (X-Forwarded-Proto on all Authentik upstreams)
-echo -n "D51 caddy proto lock... "
-if [[ -x "$SP/surfaces/verify/d51-caddy-proto-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d51-caddy-proto-lock.sh"
-else
-  warn "caddy proto lock gate not present"
-fi
-
-# D52: UDR6 gateway assertion (shop SSOT docs reference 192.168.1.0/24)
-echo -n "D52 udr6 gateway assertion... "
-if [[ -x "$SP/surfaces/verify/d52-udr6-gateway-assertion.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d52-udr6-gateway-assertion.sh"
-else
-  warn "udr6 gateway assertion gate not present"
-fi
-
-# D53: Change pack integrity lock (template + sequencing + companion files)
-echo -n "D53 change pack integrity lock... "
-if [[ -x "$SP/surfaces/verify/d53-change-pack-integrity-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d53-change-pack-integrity-lock.sh"
-else
-  warn "change pack integrity lock gate not present"
-fi
-
-# D54: SSOT IP parity lock (device identity ↔ shop server ↔ bindings)
 echo -n "D54 ssot ip parity lock... "
 if [[ -x "$SP/surfaces/verify/d54-ssot-ip-parity-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d54-ssot-ip-parity-lock.sh" "D54"
@@ -712,40 +422,6 @@ fi
 # D58: SSOT freshness lock (last_reviewed date enforcement)
 # Wire stale_ssot_max_days from policy preset (env var override still takes precedence)
 export SSOT_FRESHNESS_DAYS="${SSOT_FRESHNESS_DAYS:-$RESOLVED_STALE_SSOT_MAX_DAYS}"
-echo -n "D58 ssot freshness lock... "
-if [[ -x "$SP/surfaces/verify/d58-ssot-freshness-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d58-ssot-freshness-lock.sh"
-else
-  warn "ssot freshness lock gate not present"
-fi
-
-# D59: Cross-registry completeness lock (bidirectional host coverage)
-echo -n "D59 cross-registry completeness lock... "
-if [[ -x "$SP/surfaces/verify/d59-cross-registry-completeness-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d59-cross-registry-completeness-lock.sh" "D59"
-else
-  warn "cross-registry completeness lock gate not present"
-fi
-
-# D60: Deprecation sweeper (known deprecated terms in governance docs)
-echo -n "D60 deprecation sweeper... "
-if [[ -x "$SP/surfaces/verify/d60-deprecation-sweeper.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d60-deprecation-sweeper.sh"
-else
-  warn "deprecation sweeper gate not present"
-fi
-
-# D61: Session-loop traceability lock (closeout freshness)
-# Wire session closeout SLA from policy preset (env var override still takes precedence)
-export SESSION_CLOSEOUT_FRESHNESS_HOURS="${SESSION_CLOSEOUT_FRESHNESS_HOURS:-$RESOLVED_SESSION_CLOSEOUT_SLA_HOURS}"
-echo -n "D61 session-loop traceability lock... "
-if [[ -x "$SP/surfaces/verify/d61-session-loop-traceability-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d61-session-loop-traceability-lock.sh" "D61"
-else
-  warn "session-loop traceability lock gate not present"
-fi
-
-# D62: Git remote authority lock (origin canonical, GitHub mirror warn-only)
 echo -n "D62 git remote authority lock... "
 if [[ -x "$SP/surfaces/verify/d62-git-remote-parity-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d62-git-remote-parity-lock.sh"
@@ -760,112 +436,24 @@ if [[ -x "$SP/surfaces/verify/d63-capabilities-metadata-lock.sh" ]]; then
 else
   warn "capabilities metadata lock gate not present"
 fi
-
-# D64: Git remote authority warn (GitHub merges/PRs)
-echo -n "D64 git remote authority warn... "
-if [[ -x "$SP/surfaces/verify/d64-git-remote-authority-warn.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d64-git-remote-authority-warn.sh"
-else
-  warn "git remote authority warn gate not present"
-fi
-
-# D65: Agent briefing sync lock (AGENTS.md + CLAUDE.md match canonical brief)
-echo -n "D65 agent briefing sync lock... "
-if [[ -x "$SP/surfaces/verify/d65-agent-briefing-sync-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d65-agent-briefing-sync-lock.sh" "D65"
-else
-  warn "agent briefing sync lock gate not present"
-fi
-
-# D66: MCP server parity gate (local agents vs MCPJungle copies)
-echo -n "D66 MCP server parity gate... "
-if [[ -x "$SP/surfaces/verify/d66-mcp-parity-gate.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d66-mcp-parity-gate.sh"
-else
-  warn "MCP parity gate not present"
-fi
-
-# D67: Capability map lock (map covers all capabilities in registry)
 echo -n "D67 capability map lock... "
 if [[ -x "$SP/surfaces/verify/d67-capability-map-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d67-capability-map-lock.sh"
 else
   warn "capability map lock not present"
 fi
-
-# D68: RAG canonical-only gate (manifest excludes _audits/, _archived/, _imported/, legacy/)
-echo -n "D68 RAG canonical-only gate... "
-if [[ -x "$SP/surfaces/verify/d68-rag-canonical-only-gate.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d68-rag-canonical-only-gate.sh"
-else
-  warn "RAG canonical-only gate not present"
-fi
-
-# D69: VM creation governance lock (lifecycle -> ssh/svc/backup/health parity)
 echo -n "D69 VM creation governance lock... "
 if [[ -x "$SP/surfaces/verify/d69-vm-creation-governance-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d69-vm-creation-governance-lock.sh"
 else
   warn "VM creation governance lock gate not present"
 fi
-
-# D70: Secrets deprecated-alias lock (deprecated project write protection)
-echo -n "D70 secrets deprecated alias lock... "
-if [[ -x "$SP/surfaces/verify/d70-secrets-deprecated-alias-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d70-secrets-deprecated-alias-lock.sh"
-else
-  warn "secrets deprecated alias lock gate not present"
-fi
-
-# D71: Deprecated reference allowlist lock (workbench scripts vs allowlist)
-echo -n "D71 deprecated ref allowlist lock... "
-if [[ -x "$SP/surfaces/verify/d71-deprecated-ref-allowlist-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d71-deprecated-ref-allowlist-lock.sh"
-else
-  warn "deprecated ref allowlist lock gate not present"
-fi
-
-# D72: MacBook hotkey SSOT lock (workbench launcher surfaces ↔ spine MACBOOK_SSOT AUTO blocks)
-echo -n "D72 MacBook hotkey SSOT lock... "
-if [[ -x "$SP/surfaces/verify/d72-macbook-hotkey-ssot-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d72-macbook-hotkey-ssot-lock.sh"
-else
-  warn "MacBook hotkey SSOT lock gate not present"
-fi
-
-# D73: OpenCode governed entry lock (launcher path + model/provider contract)
-echo -n "D73 OpenCode governed entry lock... "
-if [[ -x "$SP/surfaces/verify/d73-opencode-governed-entry-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d73-opencode-governed-entry-lock.sh"
-else
-  warn "OpenCode governed entry lock gate not present"
-fi
-
-# D74: Billing/provider lane lock (background defaults + launchd template invariants)
-echo -n "D74 billing/provider lane lock... "
-if [[ -x "$SP/surfaces/verify/d74-billing-provider-lane-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d74-billing-provider-lane-lock.sh"
-else
-  warn "Billing/provider lane lock gate not present"
-fi
-
-# D75: Gap registry mutation lock (capability-only evidence for operational.gaps.yaml)
 echo -n "D75 gap registry mutation lock... "
 if [[ -x "$SP/surfaces/verify/d75-gap-registry-mutation-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d75-gap-registry-mutation-lock.sh"
 else
   warn "Gap registry mutation lock gate not present"
 fi
-
-# D76: Home-surface hygiene lock (home directory drift prevention)
-echo -n "D76 home-surface hygiene lock... "
-if [[ -x "$SP/surfaces/verify/d76-home-surface-hygiene-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d76-home-surface-hygiene-lock.sh"
-else
-  warn "home-surface hygiene lock gate not present"
-fi
-
-# D77: Workbench contract lock (plist/runtime/bare-exec enforcement)
 echo -n "D77 workbench contract lock... "
 if [[ -x "$SP/surfaces/verify/d77-workbench-contract-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d77-workbench-contract-lock.sh"
@@ -888,96 +476,18 @@ if [[ -x "$SP/surfaces/verify/d79-workbench-script-allowlist-lock.sh" ]]; then
 else
   warn "workbench script allowlist lock gate not present"
 fi
-
-# D80: Workbench authority-trace lock (legacy naming violations)
-echo -n "D80 workbench authority-trace lock... "
-if [[ -x "$SP/surfaces/verify/d80-workbench-authority-trace-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d80-workbench-authority-trace-lock.sh"
-else
-  warn "workbench authority-trace lock gate not present"
-fi
-
-# D81: Plugin test regression lock (new plugins must have tests or exemption)
-echo -n "D81 plugin test regression lock... "
-if [[ -x "$SP/surfaces/verify/d81-plugin-test-regression-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d81-plugin-test-regression-lock.sh"
-else
-  warn "plugin test regression lock gate not present"
-fi
-
-# D82: Share publish governance lock (allowlist+denylist+capability wiring)
-echo -n "D82 share publish governance lock... "
-if [[ -x "$SP/surfaces/verify/d82-share-publish-governance-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d82-share-publish-governance-lock.sh"
-else
-  warn "share publish governance lock gate not present"
-fi
-
-# D83: Proposal queue health lock (manifest+fields+SLA+parity)
 echo -n "D83 proposal queue health lock... "
 if [[ -x "$SP/surfaces/verify/d83-proposal-queue-health-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d83-proposal-queue-health-lock.sh"
 else
   warn "proposal queue health lock gate not present"
 fi
-
-# D84: Docs index registration lock (every governance .md must be in _index.yaml)
-echo -n "D84 docs index registration lock... "
-if [[ -x "$SP/surfaces/verify/d84-docs-index-registration-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d84-docs-index-registration-lock.sh"
-else
-  warn "docs index registration lock gate not present"
-fi
-
-# D85: Gate registry parity lock (registry ↔ gate script parity)
-echo -n "D85 gate registry parity lock... "
-if [[ -x "$SP/surfaces/verify/d85-gate-registry-parity-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d85-gate-registry-parity-lock.sh"
-else
-  warn "gate registry parity lock gate not present"
-fi
-
-# D86: VM operating profile parity lock
-echo -n "D86 VM operating profile parity lock... "
-if [[ -x "$SP/surfaces/verify/d86-vm-operating-profile-parity-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d86-vm-operating-profile-parity-lock.sh"
-else
-  warn "VM operating profile parity lock gate not present"
-fi
-
-# D87: RAG workspace contract lock
-echo -n "D87 RAG workspace contract lock... "
-if [[ -x "$SP/surfaces/verify/d87-rag-workspace-contract-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d87-rag-workspace-contract-lock.sh"
-else
-  warn "RAG workspace contract lock gate not present"
-fi
-
-# D88: RAG remote reindex governance lock
 echo -n "D88 RAG remote reindex governance lock... "
 if [[ -x "$SP/surfaces/verify/d88-rag-remote-reindex-governance-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d88-rag-remote-reindex-governance-lock.sh"
 else
   warn "RAG remote reindex governance lock gate not present"
 fi
-
-# D89: RAG reindex quality contract lock
-echo -n "D89 RAG reindex quality contract lock... "
-if [[ -x "$SP/surfaces/verify/d89-rag-reindex-quality-contract-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d89-rag-reindex-quality-contract-lock.sh"
-else
-  warn "RAG reindex quality contract lock gate not present"
-fi
-
-# D90: RAG reindex runtime quality gate
-echo -n "D90 RAG reindex runtime quality gate... "
-if [[ -x "$SP/surfaces/verify/d90-rag-reindex-runtime-quality-gate.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d90-rag-reindex-runtime-quality-gate.sh"
-else
-  warn "RAG reindex runtime quality gate not present"
-fi
-
-# D91: AOF product foundation lock
 echo -n "D91 AOF product foundation lock... "
 if [[ -x "$SP/surfaces/verify/d91-aof-product-foundation-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d91-aof-product-foundation-lock.sh"
@@ -1000,56 +510,12 @@ if [[ -x "$SP/surfaces/verify/d93-tenant-storage-boundary-lock.sh" ]]; then
 else
   warn "tenant storage boundary lock gate not present"
 fi
-
-# D94: Policy runtime enforcement lock
-echo -n "D94 policy runtime enforcement lock... "
-if [[ -x "$SP/surfaces/verify/d94-policy-runtime-enforcement-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d94-policy-runtime-enforcement-lock.sh"
-else
-  warn "policy runtime enforcement lock gate not present"
-fi
-
-# D95: Version compat matrix lock
-echo -n "D95 version compat matrix lock... "
-if [[ -x "$SP/surfaces/verify/d95-version-compat-matrix-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d95-version-compat-matrix-lock.sh"
-else
-  warn "version compat matrix lock gate not present"
-fi
-
-# D96: Evidence retention policy lock
-echo -n "D96 evidence retention policy lock... "
-if [[ -x "$SP/surfaces/verify/d96-evidence-retention-policy-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d96-evidence-retention-policy-lock.sh"
-else
-  warn "evidence retention policy lock gate not present"
-fi
-
-# D97: Surface readonly contract lock
-echo -n "D97 surface readonly contract lock... "
-if [[ -x "$SP/surfaces/verify/d97-surface-readonly-contract-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d97-surface-readonly-contract-lock.sh"
-else
-  warn "surface readonly contract lock gate not present"
-fi
-
-# D98: Z2M device parity
 echo -n "D98 Z2M device parity... "
 if [[ -x "$SP/surfaces/verify/d98-z2m-device-parity.sh" ]]; then
   gate_script "$SP/surfaces/verify/d98-z2m-device-parity.sh"
 else
   warn "Z2M device parity gate not present"
 fi
-
-# D99: HA token freshness
-echo -n "D99 HA token freshness... "
-if [[ -x "$SP/surfaces/verify/d99-ha-token-freshness.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d99-ha-token-freshness.sh"
-else
-  warn "HA token freshness gate not present"
-fi
-
-# D100: VM IP parity lock
 echo -n "D100 VM IP parity lock... "
 if [[ -x "$SP/surfaces/verify/d100-vm-ip-parity-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d100-vm-ip-parity-lock.sh"
@@ -1064,30 +530,6 @@ if [[ -x "$SP/surfaces/verify/d101-ha-addon-inventory-parity.sh" ]]; then
 else
   warn "HA addon inventory gate not present"
 fi
-
-# D102: HA device map freshness
-echo -n "D102 HA device map freshness... "
-if [[ -x "$SP/surfaces/verify/d102-ha-device-map-freshness.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d102-ha-device-map-freshness.sh"
-else
-  warn "HA device map gate not present"
-fi
-
-# D104: Home DHCP audit freshness
-echo -n "D104 Home DHCP audit freshness... "
-if [[ -x "$SP/surfaces/verify/d104-home-dhcp-audit-freshness.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d104-home-dhcp-audit-freshness.sh"
-else
-  warn "DHCP audit freshness gate not present"
-fi
-
-echo -n "D105 HA MCP governance lock... "
-if [[ -x "$SP/surfaces/verify/d105-ha-mcp-governance-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d105-ha-mcp-governance-lock.sh"
-else
-  warn "HA MCP governance lock gate not present"
-fi
-
 echo -n "D106 Media port collision lock... "
 if [[ -x "$SP/surfaces/verify/d106-media-port-collision-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d106-media-port-collision-lock.sh"
@@ -1101,98 +543,24 @@ if [[ -x "$SP/surfaces/verify/d107-media-nfs-mount-lock.sh" ]]; then
 else
   warn "Media NFS mount lock gate not present"
 fi
-
-echo -n "D108 Media health endpoint parity... "
-if [[ -x "$SP/surfaces/verify/d108-media-health-endpoint-parity-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d108-media-health-endpoint-parity-lock.sh"
-else
-  warn "Media health endpoint parity gate not present"
-fi
-
-echo -n "D109 Media compose config match... "
-if [[ -x "$SP/surfaces/verify/d109-media-compose-config-match-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d109-media-compose-config-match-lock.sh"
-else
-  warn "Media compose config match gate not present"
-fi
-
-echo -n "D110 Media HA duplicate audit... "
-if [[ -x "$SP/surfaces/verify/d110-media-ha-duplicate-audit-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d110-media-ha-duplicate-audit-lock.sh"
-else
-  warn "Media HA duplicate audit gate not present"
-fi
-
-echo -n "D111 RAG embedding smoke preflight... "
-if [[ -x "$SP/surfaces/verify/d111-rag-embedding-smoke-preflight.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d111-rag-embedding-smoke-preflight.sh" "D111"
-else
-  warn "RAG embedding smoke preflight gate not present"
-fi
-
-echo -n "D113 Coordinator health probe... "
-gate_script "$SP/surfaces/verify/d113-coordinator-health-probe.sh" "D113"
-
-echo -n "D114 HA automation stability... "
-gate_script "$SP/surfaces/verify/d114-ha-automation-stability.sh" "D114"
-
-echo -n "D115 HA SSOT baseline freshness... "
-gate_script "$SP/surfaces/verify/d115-ha-ssot-baseline-freshness.sh" "D115"
-
 echo -n "D116 Mailroom bridge consumers registry... "
 if [[ -x "$SP/surfaces/verify/d116-mailroom-bridge-consumers-registry-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d116-mailroom-bridge-consumers-registry-lock.sh" "D116"
 else
   warn "mailroom bridge consumers registry gate not present"
 fi
-
-echo -n "D117 IoT device naming parity... "
-gate_script "$SP/surfaces/verify/d117-iot-device-naming-parity.sh" "D117"
-
-echo -n "D118 Z2M device health... "
-gate_script "$SP/surfaces/verify/d118-z2m-device-health.sh" "D118"
-
-echo -n "D119 Z2M naming parity... "
-gate_script "$SP/surfaces/verify/d119-z2m-naming-parity.sh" "D119"
-
-echo -n "D120 HA area parity... "
-gate_script "$SP/surfaces/verify/d120-ha-area-parity.sh" "D120"
-
 echo -n "D121 Fabric boundary lock... "
 if [[ -x "$SP/surfaces/verify/d121-fabric-boundary-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d121-fabric-boundary-lock.sh" "D121"
 else
   warn "fabric boundary lock gate not present"
 fi
-
-echo -n "D122 Domain docs route lock... "
-if [[ -x "$SP/surfaces/verify/d122-domain-doc-route-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d122-domain-doc-route-lock.sh" "D122"
-else
-  warn "domain docs route lock gate not present"
-fi
-
-echo -n "D123 Balanced policy safety lock... "
-if [[ -x "$SP/surfaces/verify/d123-strict-migration-policy-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d123-strict-migration-policy-lock.sh" "D123"
-else
-  warn "balanced policy safety lock gate not present"
-fi
-
 echo -n "D124 Entry surface parity lock... "
 if [[ -x "$SP/surfaces/verify/d124-entry-surface-parity-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d124-entry-surface-parity-lock.sh" "D124"
 else
   warn "entry surface parity lock gate not present"
 fi
-
-echo -n "D125 MCP runtime parity lock... "
-if [[ -x "$SP/surfaces/verify/d125-mcp-runtime-parity-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d125-mcp-runtime-parity-lock.sh" "D125"
-else
-  warn "mcp runtime parity lock gate not present"
-fi
-
 echo -n "D126 Workbench implementation path lock... "
 if [[ -x "$SP/surfaces/verify/d126-workbench-implementation-path-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d126-workbench-implementation-path-lock.sh" "D126"
@@ -1206,70 +574,6 @@ if [[ -x "$SP/surfaces/verify/d127-domain-assignment-drift-lock.sh" ]]; then
 else
   warn "domain assignment drift lock gate not present"
 fi
-
-echo -n "D128 Gate registration contract lock... "
-if [[ -x "$SP/surfaces/verify/d128-gate-registration-contract-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d128-gate-registration-contract-lock.sh" "D128"
-else
-  warn "gate registration contract lock gate not present"
-fi
-
-echo -n "D129 Spine schema conventions lock... "
-if [[ -x "$SP/surfaces/verify/d129-spine-schema-conventions-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d129-spine-schema-conventions-lock.sh" "D129"
-else
-  warn "spine schema conventions lock gate not present"
-fi
-
-echo -n "D130 Boundary authority lock... "
-if [[ -x "$SP/surfaces/verify/d130-boundary-authority-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d130-boundary-authority-lock.sh" "D130"
-else
-  warn "boundary authority lock gate not present"
-fi
-
-echo -n "D131 Catalog freshness lock... "
-if [[ -x "$SP/surfaces/verify/d131-catalog-freshness-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d131-catalog-freshness-lock.sh" "D131"
-else
-  warn "catalog freshness lock gate not present"
-fi
-
-echo -n "D132 Mutation atomicity lock... "
-if [[ -x "$SP/surfaces/verify/d132-mutation-atomicity-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d132-mutation-atomicity-lock.sh" "D132"
-else
-  warn "mutation atomicity lock gate not present"
-fi
-
-echo -n "D133 Output vocabulary lock... "
-if [[ -x "$SP/surfaces/verify/d133-output-vocabulary-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d133-output-vocabulary-lock.sh" "D133"
-else
-  warn "output vocabulary lock gate not present"
-fi
-
-echo -n "D134 Topology metadata quality lock... "
-if [[ -x "$SP/surfaces/verify/d134-topology-metadata-quality-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d134-topology-metadata-quality-lock.sh" "D134"
-else
-  warn "topology metadata quality lock gate not present"
-fi
-
-echo -n "D135 Terminal scope lock... "
-if [[ -x "$SP/surfaces/verify/d135-terminal-scope-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d135-terminal-scope-lock.sh" "D135"
-else
-  warn "terminal scope lock gate not present"
-fi
-
-echo -n "D152 Terminal role capability parity... "
-if [[ -x "$SP/surfaces/verify/d152-terminal-role-capability-parity.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d152-terminal-role-capability-parity.sh" "D152"
-else
-  warn "terminal role capability parity gate not present"
-fi
-
 echo -n "D398 Repo-local evidence write target lock... "
 if [[ -x "$SP/surfaces/verify/d398-repo-local-evidence-write-target-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d398-repo-local-evidence-write-target-lock.sh" "D398"

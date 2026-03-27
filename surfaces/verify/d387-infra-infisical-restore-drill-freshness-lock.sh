@@ -5,8 +5,8 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
-CONTRACT="$ROOT/ops/bindings/infisical.backup.contract.yaml"
-SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
+CONTRACT="$ROOT/ops/bindings/domains/backup/infisical.backup.contract.yaml"
+SCHEDULE="$ROOT/ops/bindings/domains/backup/backup.schedule.yaml"
 CAPABILITIES="$ROOT/ops/capabilities.yaml"
 CAP_MAP="$ROOT/ops/bindings/capability_map.yaml"
 ROUTING="$ROOT/ops/bindings/routing.dispatch.yaml"

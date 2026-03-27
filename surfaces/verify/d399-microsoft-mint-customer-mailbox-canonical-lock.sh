@@ -5,8 +5,8 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
 TOKEN_EXEC="$ROOT/ops/plugins/providers/microsoft/bin/microsoft-token-exec"
-PROVIDERS_CONTRACT="$ROOT/ops/bindings/communications.providers.contract.yaml"
-MAILBOX_CONTRACT="$ROOT/ops/bindings/mint.customer.mailbox.standard.contract.yaml"
+PROVIDERS_CONTRACT="$ROOT/ops/bindings/domains/communications/communications.providers.contract.yaml"
+MAILBOX_CONTRACT="$ROOT/ops/bindings/domains/mint/mint.customer.mailbox.standard.contract.yaml"
 CAP_EXEC="$ROOT/ops/plugins/providers/microsoft/bin/microsoft-cap-exec"
 CAPABILITIES_CONTRACT="$ROOT/ops/capabilities.yaml"
 
@@ -108,10 +108,10 @@ from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 allowed_break_glass = {
     Path("ops/plugins/domains/mint/bin/customer-inbox-history-materialize"): Path(
-        "ops/bindings/mint.customer.inbox.history.materialize.contract.yaml"
+        "ops/bindings/domains/mint/mint.customer.inbox.history.materialize.contract.yaml"
     ),
     Path("ops/plugins/domains/mint/bin/customer-inbox-history-restore"): Path(
-        "ops/bindings/mint.customer.inbox.history.restore.contract.yaml"
+        "ops/bindings/domains/mint/mint.customer.inbox.history.restore.contract.yaml"
     ),
 }
 skip_prefixes = (

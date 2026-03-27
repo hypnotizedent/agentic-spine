@@ -6,8 +6,8 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 MINT_ROOT="${MINT_MODULES_ROOT:-$HOME/code/mint-modules}"
-ORDER_TRUTH_AUTHORITY="$ROOT/ops/bindings/mint.order.truth.authority.yaml"
-LIFECYCLE_AUTHORITY="$ROOT/ops/bindings/mint.module.lifecycle.authority.yaml"
+ORDER_TRUTH_AUTHORITY="$ROOT/ops/bindings/domains/mint/mint.order.truth.authority.yaml"
+LIFECYCLE_AUTHORITY="$ROOT/ops/bindings/domains/mint/mint.module.lifecycle.authority.yaml"
 
 fail() {
   echo "D394 FAIL: $*" >&2

@@ -3,8 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
-INVENTORY="$ROOT/ops/bindings/backup.inventory.yaml"
+SCHEDULE="$ROOT/ops/bindings/domains/backup/backup.schedule.yaml"
+INVENTORY="$ROOT/ops/bindings/domains/backup/backup.inventory.yaml"
 SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
 SSH_RESOLVE="$ROOT/ops/lib/ssh-resolve.sh"
 TEMPLATE="$ROOT/ops/plugins/domains/media/bin/media-config-backup.sh"

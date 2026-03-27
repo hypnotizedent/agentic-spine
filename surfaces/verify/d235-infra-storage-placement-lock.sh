@@ -10,8 +10,8 @@ require_tailscale_for "mint-data"
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
 STORAGE_POLICY="$ROOT/ops/bindings/infra.storage.placement.policy.yaml"
-MAP_FILE="$ROOT/ops/bindings/mint.storage.findings.map.yaml"
-GUARD_POLICY="$ROOT/ops/bindings/mint.storage.guard.policy.yaml"
+MAP_FILE="$ROOT/ops/bindings/domains/mint/mint.storage.findings.map.yaml"
+GUARD_POLICY="$ROOT/ops/bindings/domains/mint/mint.storage.guard.policy.yaml"
 
 MODE=""
 while [[ $# -gt 0 ]]; do

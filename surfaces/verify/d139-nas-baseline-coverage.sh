@@ -16,7 +16,7 @@ else
   ROOT="$ROOT_DEFAULT"
 fi
 DEVICE_REG="$ROOT/ops/bindings/home.device.registry.yaml"
-BACKUP_INV="$ROOT/ops/bindings/backup.inventory.yaml"
+BACKUP_INV="$ROOT/ops/bindings/domains/backup/backup.inventory.yaml"
 
 ERRORS=0
 err() { echo "  FAIL: $*"; ERRORS=$((ERRORS + 1)); }

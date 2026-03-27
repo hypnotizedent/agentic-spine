@@ -11,7 +11,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
-BINDING="$ROOT/ops/bindings/rag.remote.runner.yaml"
+BINDING="$ROOT/ops/bindings/domains/rag/rag.remote.runner.yaml"
 SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
 CAP_MAP="$ROOT/ops/bindings/capability_map.yaml"

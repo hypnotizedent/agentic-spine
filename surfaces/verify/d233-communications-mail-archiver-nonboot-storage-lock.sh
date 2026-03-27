@@ -8,7 +8,7 @@ source "$ROOT/surfaces/verify/lib/tailscale-guard.sh"
 require_tailscale_for "communications-stack"
 
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
-COMMS_CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
+COMMS_CONTRACT="$ROOT/ops/bindings/domains/communications/communications.stack.contract.yaml"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
 
 ERRORS=0

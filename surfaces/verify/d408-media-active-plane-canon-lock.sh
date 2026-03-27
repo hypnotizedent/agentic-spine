@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BINDING="$ROOT/ops/bindings/media.services.yaml"
+BINDING="$ROOT/ops/bindings/domains/media/media.services.yaml"
 
 ERRORS=0
 err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }

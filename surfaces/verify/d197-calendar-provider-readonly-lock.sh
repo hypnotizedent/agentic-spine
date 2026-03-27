@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-CONTRACT="$ROOT/ops/bindings/calendar.sync.contract.yaml"
+CONTRACT="$ROOT/ops/bindings/domains/calendar/calendar.sync.contract.yaml"
 
 fail() {
   echo "D197 FAIL: $*" >&2

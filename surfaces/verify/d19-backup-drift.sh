@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CAP_SCRIPT="$ROOT/ops/plugins/infra/backup/bin/backup-status"
-BINDING_FILE="$ROOT/ops/bindings/backup.inventory.yaml"
+BINDING_FILE="$ROOT/ops/bindings/domains/backup/backup.inventory.yaml"
 
 resolve_capability_script_path() {
   local capability_id="$1"
@@ -35,7 +35,7 @@ resolve_family_lib_path() {
 
 SNAPSHOT_SURFACE_LIB="$(resolve_family_lib_path "snapshot.projection.apply" "./ops/plugins/core/kernel/snapshot/bin/snapshot-projection-apply" "snapshot-surface-common.sh")"
 source "$SNAPSHOT_SURFACE_LIB"
-POSTURE_FILE="$(snapshot_surface_resolve_source_path "$ROOT" "ops/bindings/backup.posture.snapshot.yaml")"
+POSTURE_FILE="$(snapshot_surface_resolve_source_path "$ROOT" "ops/bindings/domains/backup/backup.posture.snapshot.yaml")"
 
 fail(){ echo "D19 FAIL: $*" >&2; exit 1; }
 

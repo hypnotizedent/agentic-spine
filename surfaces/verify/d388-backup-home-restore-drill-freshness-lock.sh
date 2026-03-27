@@ -5,10 +5,10 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
-SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
+SCHEDULE="$ROOT/ops/bindings/domains/backup/backup.schedule.yaml"
 CAPABILITIES="$ROOT/ops/capabilities.yaml"
 CAP_MAP="$ROOT/ops/bindings/capability_map.yaml"
-INVENTORY="$ROOT/ops/bindings/backup.inventory.yaml"
+INVENTORY="$ROOT/ops/bindings/domains/backup/backup.inventory.yaml"
 
 ERRORS=0
 err() {

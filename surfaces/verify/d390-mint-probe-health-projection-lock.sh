@@ -12,7 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-MINT_BINDING="$ROOT/ops/bindings/mint.probe.targets.yaml"
+MINT_BINDING="$ROOT/ops/bindings/domains/mint/mint.probe.targets.yaml"
 SERVICES_BINDING="$ROOT/ops/bindings/services.health.yaml"
 HELPER="$ROOT/ops/lib/mint-health-surface.sh"
 
