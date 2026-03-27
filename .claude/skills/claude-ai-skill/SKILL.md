@@ -1,152 +1,85 @@
-# Ronny Session Bootloader (Spine)
+# Ronny Session Bootloader (Spine) — Claude Code Adapter
 
-## Identity
+> **Shared core**: `docs/governance/RONNY_SESSION_SKILL_CORE.md`
+> This adapter adds Claude Code-specific behavior only.
+> Do not duplicate core doctrine here — read the core for identity, rules, execution boundary, taxonomy, and domain routing.
 
-- Operator: Ronny (`@ronny`)
-- Canonical runtime repo: `~/code/agentic-spine`
-- Governance baseline: `AGENTS.md` + `docs/governance/SESSION_PROTOCOL.md`
-- Output schemas: `docs/governance/OUTPUT_CONTRACTS.md`
-- **State root: `~/code/.runtime/spine/state/`** (ephemeral, NOT inside the repo, local to each machine. In Cowork: `/sessions/*/mnt/code/.runtime/spine/state/`)
+## Claude Code Session Mechanics
 
-<!-- SPINE_STARTUP_BLOCK -->
+Claude Code receives governance injection through two paths:
+1. **Hook-based** (canonical): `.claude/settings.json` -> `.claude/hooks/session-entry-hook.sh` -> live governance brief + dynamic context into session on first `UserPromptSubmit`
+2. **Static stub** (decorative): `CLAUDE.md` project instructions loaded by Claude Code on directory open
+
+The hook is the real governance pathway. It reads SPINE.md and SESSION_PROTOCOL.md live, resolves terminal role, gathers dynamic context (open loops, proposals, worktrees, friction, Docker), and emits a systemMessage JSON blob.
+
+## Session Entry
+
+```bash
 cd ~/code/agentic-spine
 ./bin/ops cap run session.v3.attach -- --allow-no-loop
-<!-- /SPINE_STARTUP_BLOCK -->
+```
 
-## Non-Negotiable Rules
+## Environment Detection
 
-1. No unregistered work: discover -> register -> fix -> receipt.
-2. No guessing: direct file read -> RAG -> grep fallback.
-3. No inline fixes without gap/loop registration.
-4. Verify before closeout.
-5. Use governed outputs (loop/gap/proposal/handoff contracts).
-6. **ALL execution routes through spine capabilities.** No agent or IDE session executes directly — no raw SSH, no ad-hoc curl, no manual API calls. If a cap doesn't exist, register the gap.
+Never classify environment by tool names alone. Use this detection order:
 
-## EXECUTION BOUNDARY — READ THIS FIRST
+1. Try to read `~/code/agentic-spine/docs/governance/SESSION_PROTOCOL.md`
+2. Success + shell works -> **Desktop**
+3. Failure + HTTP fetch exists -> **Bridge-capable mobile/remote**
+4. Neither -> **Offline mobile**
 
-> **⛔ AGENTS AND IDE SESSIONS MUST NEVER EXECUTE DIRECTLY.**
->
-> No agent — Cowork, Claude Code, Desktop terminal, mobile, or any other IDE session —
-> is permitted to run commands, SSH into hosts, curl APIs, or mutate infrastructure directly.
->
-> **ALL execution routes through the spine.**
->
-> - Need to run a capability? → `mcp__spine__cap_run` or `./bin/ops cap run`
-> - Need to query a service? → Use the governed capability that wraps that service
-> - Need to schedule something? → `host.launchd.scheduler` plane, not raw plist creation
-> - Need to test a change? → Dry-run through the cap (`--dry-run` flag), not ad-hoc shell commands
-> - Need to check queue state? → `media.queue.reconcile` cap with `--json`, not manual API calls
->
-> **If no capability exists for what you need to do, that is a gap — register it, don't bypass it.**
->
-> The spine IS the execution layer. Terminals write controller prompts and commit bindings.
-> They do not execute. The caps execute. This is the entire point of V3.
-
-## Environment Detection (do this first)
-
-Never classify environment by tool names alone.
-Hosted runtimes can expose `bash_tool`/`view` names but still lack access to Ronny's Mac filesystem and tailnet.
-
-Use this detection order:
-
-1. Try to read `~/code/agentic-spine/docs/governance/SESSION_PROTOCOL.md`.
-2. If that read succeeds and shell commands work, you are **Desktop**.
-3. If that read fails but HTTP fetch tooling exists, you are **Bridge-capable mobile/remote**.
-4. If neither filesystem nor HTTP fetch works, you are **Offline mobile**.
-
-If unsure, assume Bridge-capable (not Desktop).
-Do not run `./bin/ops` unless step 1 succeeded.
+If unsure, assume Bridge-capable. Do not run `./bin/ops` unless step 1 succeeded.
 
 ## Bootstrap: Desktop
 
-1. Run `./bin/ops cap run session.v3.attach -- --allow-no-loop`.
-2. Read `docs/governance/SESSION_PROTOCOL.md` if deeper context is needed.
-3. For deep context, run `docs/brain/generate-context.sh`.
-4. Execute via capabilities; produce receipts.
-5. On session close: run Session Closeout (see below).
+1. Run `./bin/ops cap run session.v3.attach -- --allow-no-loop`
+2. Read `docs/governance/SESSION_PROTOCOL.md` if deeper context is needed
+3. For deep context, run `docs/brain/generate-context.sh`
+4. Execute via capabilities; produce receipts
+5. On session close: run Session Closeout (see below)
 
 ## Bootstrap: Cowork
 
-1. Detect spine repo at `/sessions/*/mnt/code/agentic-spine`.
-2. **Resolve canonical state root**: The state root is `~/code/.runtime/spine/state/`, NOT `~/code/agentic-spine/.runtime/spine/state/`. In Cowork, this maps to `/sessions/*/mnt/code/.runtime/spine/state/`. NEVER write state to the repo-internal `.runtime/` — that's a different tree that Desktop terminals don't read.
-3. Read controller prompts from the canonical state root.
-4. Write controller prompts and evidence to the canonical state root.
-5. Use spine MCP capabilities (`cap_run`) when CLI is unavailable.
-6. On session close: archive completed controller prompts and receipts to `~/code/.runtime/spine/state/archive/`.
-- **CRITICAL PATH**: The canonical `.runtime/` is at `~/code/.runtime/`, NOT at `~/code/agentic-spine/.runtime/`. In Cowork mount terms: `/sessions/*/mnt/code/.runtime/spine/state/` is correct. `/sessions/*/mnt/code/agentic-spine/.runtime/spine/state/` is WRONG — it's a repo-internal gitignored directory that no other terminal reads.
+1. Detect spine repo at `/sessions/*/mnt/code/agentic-spine`
+2. **Canonical state root**: `~/code/.runtime/spine/state/` — in Cowork: `/sessions/*/mnt/code/.runtime/spine/state/`. NEVER write to repo-internal `.runtime/`
+3. Read/write controller prompts and evidence via the canonical state root
+4. Use spine MCP capabilities (`cap_run`) when CLI is unavailable
+5. On session close: archive completed controller prompts and receipts
 
 ## Bootstrap: Bridge-capable mobile/remote
 
 Remote URL strategy:
-- Primary: `https://spine.ronny.works` (hosted runtime compatible)
-- Secondary: `http://macbook.taile9480.ts.net` (tailnet)
+- Primary: `https://spine.ronny.works` (CF Access headers required)
+- Secondary: `http://macbook.taile9480.ts.net` (tailnet, no CF headers)
 
-Hosted runtime egress allowlist:
-- If a request fails with headers like `x-deny-reason: host_not_allowed`, the runtime is blocking outbound traffic to the hostname.
-- Action: tell the operator to add `spine.ronny.works` to the runtime/network egress allowlist (do not assume allowing `ronny.works` includes subdomains).
-
-1. Health check order:
-   - First try public: `GET https://spine.ronny.works/health` with CF Access headers (`CF-Access-Client-Id` + `CF-Access-Client-Secret` from step 3).
-   - Then try tailnet: `GET http://macbook.taile9480.ts.net/health` (no CF headers needed).
-2. If both health checks fail due DNS/network/timeout:
-   - Say: `Bridge unreachable from this runtime (likely DNS/egress limit). Spine may still be healthy.`
-   - Do **not** say "spine unavailable".
-   - Continue with offline artifact mode, OR ask for:
-     - a valid public HTTPS bridge URL, or
-     - pasted output from a trusted-device request to `/loops/open`.
-3. If either health check succeeds, authenticate:
-   - **Preferred (public HTTPS):** include `CF-Access-Client-Id` + `CF-Access-Client-Secret` headers.
-     When these are present, no `MAILROOM_BRIDGE_TOKEN` is needed — Cloudflare validates at the edge.
-   - **Fallback (tailnet / no CF Access):** `X-Spine-Token: <token>` or `Authorization: Bearer <token>`.
-     Operator stores token in Vaultwarden; paste from password manager when prompted.
-   - Once authenticated, use the same auth for all requests this session.
-4. Use the healthy base URL for all calls in this session.
-5. Read open loops:
-   - `GET <base>/loops/open` (with auth header)
-6. Ask governance questions:
-   - `POST <base>/rag/ask`
-   - JSON body: `{"question":"<question>"}`
-7. Run allowlisted read-only caps:
-   - `POST <base>/cap/run`
-   - JSON body: `{"capability":"gaps.status"}`
-   - AOF status: `{"capability":"aof.status","args":["--json"]}`
-   - AOF verify: `{"capability":"aof.verify","args":["--json"]}`
-   - Response schema: `{"capability":"...","status":"done","exit_code":0,"output":"...","receipt":"...","run_key":"..."}`
-   - AOF `output` field is a JSON envelope: `{"capability":"...","schema_version":"...","status":"...","data":{...}}`
-8. RBAC: operator token gets all caps, monitor token gets status/version only.
-9. For mutations, draft governed artifacts and hand off to Desktop.
+1. Health check: `GET <url>/health`
+2. If both fail: "Bridge unreachable from this runtime." Continue offline or ask for URL/pasted output.
+3. Auth: CF Access headers (public HTTPS) or `X-Spine-Token` / `Authorization: Bearer` (tailnet)
+4. Read open loops: `GET <base>/loops/open`
+5. RAG: `POST <base>/rag/ask` with `{"question":"..."}`
+6. Read-only caps: `POST <base>/cap/run` with `{"capability":"gaps.status"}`
+7. Mutations: draft governed artifacts, hand off to Desktop
 
 Never hardcode tokens. Never silently skip auth.
 
 ## Bootstrap: Offline mobile
 
-1. State constraints clearly: no filesystem, no CLI, no bridge reachability.
-2. Produce only governed YAML/markdown handoff artifacts.
-3. Never claim fixes are complete without receipts from Desktop.
-
-## Mobile UX Modes
-
-- Tailnet-only bridge: works from trusted devices on tailnet, may fail in hosted cloud runtimes.
-- Public HTTPS bridge: required for seamless cloud-mobile use (Claude iOS/claude.ai) with strict auth.
+1. State constraints clearly: no filesystem, no CLI, no bridge
+2. Produce only governed YAML/markdown handoff artifacts
+3. Never claim fixes are complete without Desktop receipts
 
 ## Output Contract Requirements
 
-- Loop scope: canonical frontmatter (`loop_id`, `status`, `severity`, `owner`) + required sections.
-- Gap filing: `gap.id` uses `GAP-OP-NNN` placeholder if unknown; type + severity + description required.
-- Proposal manifest: canonical fields only.
-- Mobile handoff block: artifacts + blockers + exact next desktop action.
+- Loop scope: canonical frontmatter (`loop_id`, `status`, `severity`, `owner`) + required sections
+- Gap filing: `gap.id` uses `GAP-OP-NNN` placeholder if unknown; type + severity + description required
+- Proposal manifest: canonical fields only
+- Mobile handoff block: artifacts + blockers + exact next desktop action
 
 ## Session Closeout (ALL environments)
 
-Before ending a session, archive completed state:
-
-1. **Archive completed controller prompts**: Move prompts in `~/code/.runtime/spine/state/` whose loop is COMPLETE/CLOSED to `~/code/.runtime/spine/state/archive/completed-prompts/`.
-2. **Archive completed receipts**: Move EXEC_RECEIPTs in the state root (not in `domain-state/`) to `~/code/.runtime/spine/state/archive/completed-receipts/`.
-3. **Clean stale process artifacts**: Remove `.fuse_hidden*`, stale `.pid`, stale `.lock` files.
-4. **Run nightly.closeout dry-run** (Desktop only): `OPS_GOVERNED_MAIN_OVERRIDE=1 ./bin/ops cap run nightly.closeout -- --mode dry-run`
+1. Archive completed controller prompts to `~/code/.runtime/spine/state/archive/completed-prompts/`
+2. Archive completed receipts to `~/code/.runtime/spine/state/archive/completed-receipts/`
+3. Clean stale process artifacts (`.fuse_hidden*`, stale `.pid`, `.lock`)
+4. Desktop only: `OPS_GOVERNED_MAIN_OVERRIDE=1 ./bin/ops cap run nightly.closeout -- --mode dry-run`
 
 Create archive dirs if needed: `mkdir -p ~/code/.runtime/spine/state/archive/{completed-prompts,completed-receipts}`
-
-## Completion Rule
-
-Never declare done without evidence (run key, receipt path, or commit SHA).

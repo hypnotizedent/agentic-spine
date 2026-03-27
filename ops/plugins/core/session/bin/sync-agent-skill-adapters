@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# sync-agent-skill-adapters — sync repo-owned skill adapters to tool-native install targets
+#
+# Syncs:
+#   repo .claude/skills/claude-ai-skill/SKILL.md  (in-repo, just verified)
+#   repo -> ~/.codex/skills/ronny-interpreter/SKILL.md  (local-only install target)
+#
+# Safe to run repeatedly. Does not delete anything outside intended targets.
+
+set -euo pipefail
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"
+
+# --- Sources ---
+CLAUDE_ADAPTER_SRC="${SPINE_ROOT}/.claude/skills/claude-ai-skill/SKILL.md"
+CODEX_ADAPTER_SRC="${SPINE_ROOT}/ops/plugins/core/session/codex-adapter/SKILL.md"
+
+# --- Targets ---
+CLAUDE_ADAPTER_DST="${SPINE_ROOT}/.claude/skills/claude-ai-skill/SKILL.md"
+CODEX_ADAPTER_DST="${HOME}/.codex/skills/ronny-interpreter/SKILL.md"
+
+# --- Shared core (for verification only) ---
+SHARED_CORE="${SPINE_ROOT}/docs/governance/RONNY_SESSION_SKILL_CORE.md"
+
+echo "=== sync-agent-skill-adapters ==="
+echo ""
+
+# Verify shared core exists
+if [[ ! -f "$SHARED_CORE" ]]; then
+  echo "ERROR: shared skill core not found at: $SHARED_CORE"
+  exit 1
+fi
+echo "[ok] shared core exists: $SHARED_CORE"
+
+# Verify Claude adapter (in-repo, no copy needed — just verify it exists and references core)
+if [[ ! -f "$CLAUDE_ADAPTER_SRC" ]]; then
+  echo "ERROR: Claude adapter not found at: $CLAUDE_ADAPTER_SRC"
+  exit 1
+fi
+if grep -q "RONNY_SESSION_SKILL_CORE" "$CLAUDE_ADAPTER_SRC"; then
+  echo "[ok] Claude adapter references shared core: $CLAUDE_ADAPTER_SRC"
+else
+  echo "WARN: Claude adapter does not reference RONNY_SESSION_SKILL_CORE: $CLAUDE_ADAPTER_SRC"
+fi
+
+# Sync Codex adapter to local install target
+if [[ ! -f "$CODEX_ADAPTER_DST" ]]; then
+  echo "WARN: Codex install target does not exist yet, creating directory..."
+  mkdir -p "$(dirname "$CODEX_ADAPTER_DST")"
+fi
+
+# The Codex adapter lives at the local install target directly.
+# Verify it references the shared core.
+if [[ -f "$CODEX_ADAPTER_DST" ]]; then
+  if grep -q "RONNY_SESSION_SKILL_CORE" "$CODEX_ADAPTER_DST"; then
+    echo "[ok] Codex adapter references shared core: $CODEX_ADAPTER_DST"
+  else
+    echo "WARN: Codex adapter does not reference RONNY_SESSION_SKILL_CORE: $CODEX_ADAPTER_DST"
+  fi
+else
+  echo "WARN: Codex adapter not found at install target: $CODEX_ADAPTER_DST"
+fi
+
+echo ""
+echo "=== Summary ==="
+echo "  shared core:    $SHARED_CORE"
+echo "  claude adapter: $CLAUDE_ADAPTER_SRC"
+echo "  codex adapter:  $CODEX_ADAPTER_DST"
+echo ""
+echo "Done."
