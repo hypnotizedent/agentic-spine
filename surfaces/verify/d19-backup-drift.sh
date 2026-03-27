@@ -33,7 +33,7 @@ resolve_family_lib_path() {
   printf '%s\n' "$(dirname "$(dirname "$script_path")")/lib/$lib_name"
 }
 
-SNAPSHOT_SURFACE_LIB="$(resolve_family_lib_path "snapshot.projection.apply" "./ops/plugins/core/snapshot/bin/snapshot-projection-apply" "snapshot-surface-common.sh")"
+SNAPSHOT_SURFACE_LIB="$(resolve_family_lib_path "snapshot.projection.apply" "./ops/plugins/core/kernel/snapshot/bin/snapshot-projection-apply" "snapshot-surface-common.sh")"
 source "$SNAPSHOT_SURFACE_LIB"
 POSTURE_FILE="$(snapshot_surface_resolve_source_path "$ROOT" "ops/bindings/backup.posture.snapshot.yaml")"
 

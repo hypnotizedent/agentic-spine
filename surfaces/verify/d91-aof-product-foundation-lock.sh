@@ -143,7 +143,7 @@ else
 fi
 
 # ── 5. Root AOF environment contract validation ──
-AOF_VALIDATE_SCRIPT="$(resolve_capability_script_path "aof.validate" "./ops/plugins/core/aof/bin/validate-environment.sh")"
+AOF_VALIDATE_SCRIPT="$(resolve_capability_script_path "aof.validate" "./ops/plugins/core/kernel/aof/bin/validate-environment.sh")"
 ENV_CONTRACT="$ROOT/.environment.yaml"
 IDENTITY_CONTRACT="$ROOT/.identity.yaml"
 

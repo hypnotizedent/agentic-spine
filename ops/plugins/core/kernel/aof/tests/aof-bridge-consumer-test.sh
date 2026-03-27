@@ -80,11 +80,11 @@ echo "T5: RBAC monitor excludes aof.policy.show, aof.tenant.show, aof.verify"
 
 # ── T6-T10: Each aof.* cap returns valid JSON envelope + receipt via cap run ──
 cap_scripts=(
-  "aof.status:$SP/ops/plugins/core/aof/bin/aof-status.sh"
-  "aof.version:$SP/ops/plugins/core/aof/bin/aof-version.sh"
-  "aof.policy.show:$SP/ops/plugins/core/aof/bin/aof-policy-show.sh"
-  "aof.tenant.show:$SP/ops/plugins/core/aof/bin/aof-tenant-show.sh"
-  "aof.verify:$SP/ops/plugins/core/aof/bin/aof-verify.sh"
+  "aof.status:$SP/ops/plugins/core/kernel/aof/bin/aof-status.sh"
+  "aof.version:$SP/ops/plugins/core/kernel/aof/bin/aof-version.sh"
+  "aof.policy.show:$SP/ops/plugins/core/kernel/aof/bin/aof-policy-show.sh"
+  "aof.tenant.show:$SP/ops/plugins/core/kernel/aof/bin/aof-tenant-show.sh"
+  "aof.verify:$SP/ops/plugins/core/kernel/aof/bin/aof-verify.sh"
 )
 
 for entry in "${cap_scripts[@]}"; do

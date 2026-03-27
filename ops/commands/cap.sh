@@ -1258,16 +1258,16 @@ PY
       if [[ -f "$env_contract" ]]; then
         local ack_check
         set +e
-        ack_check="$(CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/core/aof/bin/contract-read-check.sh" 2>&1)"
+        ack_check="$(CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/core/kernel/aof/bin/contract-read-check.sh" 2>&1)"
         local ack_rc=$?
         set -e
         if [[ "$ack_rc" -eq 2 ]]; then
           # Auto-acknowledge when a governed role override is active.
           if [[ "$governed_override_active" -eq 1 ]]; then
-            CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/core/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
+            CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/core/kernel/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
             echo "AOF auto-acknowledged via OPS_GOVERNED_MAIN_OVERRIDE=1"
           elif [[ -n "$role_policy_override_ref" && -n "$role_policy_override_reason" ]]; then
-            CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/core/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
+            CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/core/kernel/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
             echo "AOF auto-acknowledged (governed role override active: ref=$role_policy_override_ref)"
           else
             echo "BLOCKED: AOF contract acknowledgment required"

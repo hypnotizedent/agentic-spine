@@ -27,7 +27,7 @@ The normalization kernel exists to break this coupling. Waves must converge towa
 
 ## Why AOF Dies As A Plugin Family But Survives As Normalization Law
 
-AOF (`ops/plugins/core/aof/`) was the original bootstrap and policy surface. It seeded the environment contract, identity contract, policy presets, tenant profiles, and contract acknowledgement ceremony.
+AOF (`ops/plugins/core/kernel/aof/`) was the original bootstrap and policy surface. It seeded the environment contract, identity contract, policy presets, tenant profiles, and contract acknowledgement ceremony.
 
 The capabilities AOF provides are real and must survive:
 - Environment and identity validation (`aof.validate`)

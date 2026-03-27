@@ -4,9 +4,9 @@
 set -euo pipefail
 
 SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-BOOTSTRAP="$SP/ops/plugins/core/aof/bin/bootstrap-spine.sh"
-VALIDATE="$SP/ops/plugins/core/aof/bin/validate-environment.sh"
-READCHECK="$SP/ops/plugins/core/aof/bin/contract-read-check.sh"
+BOOTSTRAP="$SP/ops/plugins/core/kernel/aof/bin/bootstrap-spine.sh"
+VALIDATE="$SP/ops/plugins/core/kernel/aof/bin/validate-environment.sh"
+READCHECK="$SP/ops/plugins/core/kernel/aof/bin/contract-read-check.sh"
 
 PASS=0
 FAIL=0

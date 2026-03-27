@@ -32,7 +32,7 @@ resolve_capability_script_path() {
   printf '%s\n' "$ROOT/$script_rel"
 }
 
-SNAPSHOT_APPLY="$(resolve_capability_script_path "snapshot.projection.apply" "./ops/plugins/core/snapshot/bin/snapshot-projection-apply")"
+SNAPSHOT_APPLY="$(resolve_capability_script_path "snapshot.projection.apply" "./ops/plugins/core/kernel/snapshot/bin/snapshot-projection-apply")"
 
 PASS=0
 FAIL=0

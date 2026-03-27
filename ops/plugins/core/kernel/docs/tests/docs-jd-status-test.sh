@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
-JD_STATUS="$SPINE_ROOT/ops/plugins/core/docs/bin/docs-jd-status"
+JD_STATUS="$SPINE_ROOT/ops/plugins/core/kernel/docs/bin/docs-jd-status"
 
 echo "=== docs.jd.status smoke test ==="
 

@@ -28,7 +28,7 @@ resolve_capability_script_path() {
   printf '%s\n' "$RUNTIME_ROOT/$script_rel"
 }
 
-PROJECTION_RECONCILE_CMD="$(resolve_capability_script_path "projection.reconcile" "./ops/plugins/core/docs/bin/projection-reconcile")"
+PROJECTION_RECONCILE_CMD="$(resolve_capability_script_path "projection.reconcile" "./ops/plugins/core/kernel/docs/bin/projection-reconcile")"
 source "${RUNTIME_ROOT}/ops/lib/job-wrapper.sh"
 
 echo "[projection-reconcile] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
