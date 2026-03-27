@@ -67,6 +67,24 @@ check_file() {
   fi
 }
 
+resolve_capability_script_path() {
+  local capability_id="$1"
+  local fallback_rel="$2"
+  local script_rel=""
+  if [[ -f "$ROOT/ops/capabilities.yaml" ]]; then
+    script_rel="$(
+      awk -v cap="$capability_id" '
+        $0 == "  " cap ":" { in_cap=1; next }
+        in_cap && $0 ~ /^  [^[:space:]][^:]*:/ { exit }
+        in_cap && $1 == "script_path:" { print $2; exit }
+      ' "$ROOT/ops/capabilities.yaml"
+    )"
+  fi
+  [[ -n "$script_rel" && "$script_rel" != "null" ]] || script_rel="$fallback_rel"
+  script_rel="${script_rel#./}"
+  printf '%s\n' "$ROOT/$script_rel"
+}
+
 if [[ "$JSON_MODE" -eq 0 ]]; then
   echo "spine.doctor"
   echo "root: $ROOT"
@@ -84,6 +102,9 @@ check_file "$BOOTSTRAP_CONTRACT"
 check_file "$PATH_BASELINE"
 check_file "$TENANT_PROFILE"
 check_file "$TENANT_SCHEMA"
+
+VALIDATE_SCRIPT="$(resolve_capability_script_path "aof.validate" "./ops/plugins/core/aof/bin/validate-environment.sh")"
+CONTRACT_SCRIPT="$(resolve_capability_script_path "aof.contract.status" "./ops/plugins/core/aof/bin/contract-read-check.sh")"
 
 tenant_status="fail"
 if [[ -f "$TENANT_PROFILE" && -f "$TENANT_SCHEMA" ]]; then
@@ -105,7 +126,7 @@ fi
 
 env_status="missing"
 if [[ -f "$ENV_FILE" && -f "$IDENTITY_FILE" ]]; then
-  if "$ROOT/ops/plugins/core/aof/bin/validate-environment.sh" \
+  if "$VALIDATE_SCRIPT" \
       --environment-file "$ENV_FILE" \
       --identity-file "$IDENTITY_FILE" >/dev/null 2>&1; then
     env_status="ok"
@@ -124,7 +145,7 @@ fi
 
 ack_state="unknown"
 if [[ -f "$ENV_FILE" ]]; then
-  ack_output="$("$ROOT/ops/plugins/core/aof/bin/contract-read-check.sh" --status --contract-file "$ENV_FILE" 2>/dev/null || true)"
+  ack_output="$("$CONTRACT_SCRIPT" --status --contract-file "$ENV_FILE" 2>/dev/null || true)"
   ack_state="$(printf '%s\n' "$ack_output" | awk -F': *' '/marker_state/ {print $2}' | tail -1)"
   ack_state="${ack_state:-unknown}"
   case "$ack_state" in

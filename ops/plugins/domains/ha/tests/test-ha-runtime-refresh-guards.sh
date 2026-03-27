@@ -12,8 +12,27 @@ HA_REFRESH="$ROOT/ops/plugins/domains/ha/bin/ha-refresh"
 SYNC_AGENT="$ROOT/ops/plugins/domains/ha/bin/ha-sync-agent"
 SYNC_CONFIG="$ROOT/ops/bindings/ha.sync.config.yaml"
 HA_BASELINE_PLIST="$ROOT/ops/plugins/infra/host/launchd/com.ronny.ha-baseline-refresh.plist"
-SNAPSHOT_APPLY="$ROOT/ops/plugins/core/snapshot/bin/snapshot-projection-apply"
 SNAPSHOT_CONTRACT="$ROOT/ops/bindings/snapshot.surface.contract.yaml"
+
+resolve_capability_script_path() {
+  local capability_id="$1"
+  local fallback_rel="$2"
+  local script_rel=""
+  if [[ -f "$ROOT/ops/capabilities.yaml" ]]; then
+    script_rel="$(
+      awk -v cap="$capability_id" '
+        $0 == "  " cap ":" { in_cap=1; next }
+        in_cap && $0 ~ /^  [^[:space:]][^:]*:/ { exit }
+        in_cap && $1 == "script_path:" { print $2; exit }
+      ' "$ROOT/ops/capabilities.yaml"
+    )"
+  fi
+  [[ -n "$script_rel" && "$script_rel" != "null" ]] || script_rel="$fallback_rel"
+  script_rel="${script_rel#./}"
+  printf '%s\n' "$ROOT/$script_rel"
+}
+
+SNAPSHOT_APPLY="$(resolve_capability_script_path "snapshot.projection.apply" "./ops/plugins/core/snapshot/bin/snapshot-projection-apply")"
 
 PASS=0
 FAIL=0

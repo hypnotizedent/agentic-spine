@@ -15,6 +15,24 @@ ERRORS=0
 err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }
 ok() { [[ "${DRIFT_VERBOSE:-0}" == "1" ]] && echo "  OK: $*" || true; }
 
+resolve_capability_script_path() {
+  local capability_id="$1"
+  local fallback_rel="$2"
+  local script_rel=""
+  if [[ -f "$ROOT/ops/capabilities.yaml" ]]; then
+    script_rel="$(
+      awk -v cap="$capability_id" '
+        $0 == "  " cap ":" { in_cap=1; next }
+        in_cap && $0 ~ /^  [^[:space:]][^:]*:/ { exit }
+        in_cap && $1 == "script_path:" { print $2; exit }
+      ' "$ROOT/ops/capabilities.yaml"
+    )"
+  fi
+  [[ -n "$script_rel" && "$script_rel" != "null" ]] || script_rel="$fallback_rel"
+  script_rel="${script_rel#./}"
+  printf '%s\n' "$ROOT/$script_rel"
+}
+
 # ── 1. Required product docs ──
 PRODUCT_DOCS=(
   "$FOUNDATION_ROOT/docs/product/AOF_PRODUCT_CONTRACT.md"
@@ -125,14 +143,14 @@ else
 fi
 
 # ── 5. Root AOF environment contract validation ──
-AOF_VALIDATE_SCRIPT="$ROOT/ops/plugins/core/aof/bin/validate-environment.sh"
+AOF_VALIDATE_SCRIPT="$(resolve_capability_script_path "aof.validate" "./ops/plugins/core/aof/bin/validate-environment.sh")"
 ENV_CONTRACT="$ROOT/.environment.yaml"
 IDENTITY_CONTRACT="$ROOT/.identity.yaml"
 
 if [[ -x "$AOF_VALIDATE_SCRIPT" ]]; then
   ok "aof.validate script exists"
 else
-  err "ops/plugins/core/aof/bin/validate-environment.sh is not executable or does not exist"
+  err "${AOF_VALIDATE_SCRIPT#$ROOT/} is not executable or does not exist"
 fi
 
 if [[ -f "$ENV_CONTRACT" ]]; then

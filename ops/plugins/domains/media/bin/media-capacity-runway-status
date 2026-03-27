@@ -2,7 +2,36 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../../../" && pwd)"
-source "$ROOT/ops/plugins/core/snapshot/lib/snapshot-surface-common.sh"
+
+resolve_capability_script_path() {
+  local capability_id="$1"
+  local fallback_rel="$2"
+  local script_rel=""
+  if [[ -f "$ROOT/ops/capabilities.yaml" ]]; then
+    script_rel="$(
+      awk -v cap="$capability_id" '
+        $0 == "  " cap ":" { in_cap=1; next }
+        in_cap && $0 ~ /^  [^[:space:]][^:]*:/ { exit }
+        in_cap && $1 == "script_path:" { print $2; exit }
+      ' "$ROOT/ops/capabilities.yaml"
+    )"
+  fi
+  [[ -n "$script_rel" && "$script_rel" != "null" ]] || script_rel="$fallback_rel"
+  script_rel="${script_rel#./}"
+  printf '%s\n' "$ROOT/$script_rel"
+}
+
+resolve_family_lib_path() {
+  local capability_id="$1"
+  local fallback_script_rel="$2"
+  local lib_name="$3"
+  local script_path
+  script_path="$(resolve_capability_script_path "$capability_id" "$fallback_script_rel")"
+  printf '%s\n' "$(dirname "$(dirname "$script_path")")/lib/$lib_name"
+}
+
+SNAPSHOT_SURFACE_LIB="$(resolve_family_lib_path "snapshot.projection.apply" "./ops/plugins/core/snapshot/bin/snapshot-projection-apply" "snapshot-surface-common.sh")"
+source "$SNAPSHOT_SURFACE_LIB"
 POLICY_FILE="$ROOT/ops/bindings/infra.capacity.guard.policy.yaml"
 
 JSON_MODE=0

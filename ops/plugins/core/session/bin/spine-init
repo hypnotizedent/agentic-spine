@@ -63,10 +63,32 @@ need_file() {
   }
 }
 
+resolve_capability_script_path() {
+  local capability_id="$1"
+  local fallback_rel="$2"
+  local script_rel=""
+  if [[ -f "$ROOT/ops/capabilities.yaml" ]]; then
+    script_rel="$(
+      awk -v cap="$capability_id" '
+        $0 == "  " cap ":" { in_cap=1; next }
+        in_cap && $0 ~ /^  [^[:space:]][^:]*:/ { exit }
+        in_cap && $1 == "script_path:" { print $2; exit }
+      ' "$ROOT/ops/capabilities.yaml"
+    )"
+  fi
+  [[ -n "$script_rel" && "$script_rel" != "null" ]] || script_rel="$fallback_rel"
+  script_rel="${script_rel#./}"
+  printf '%s\n' "$ROOT/$script_rel"
+}
+
 need_tool jq
 need_tool yq
 need_file "$BOOTSTRAP_CONTRACT"
 need_file "$TENANT_PROFILE"
+
+BOOTSTRAP_SCRIPT="$(resolve_capability_script_path "aof.bootstrap" "./ops/plugins/core/aof/bin/bootstrap-spine.sh")"
+VALIDATE_SCRIPT="$(resolve_capability_script_path "aof.validate" "./ops/plugins/core/aof/bin/validate-environment.sh")"
+CONTRACT_SCRIPT="$(resolve_capability_script_path "aof.contract.status" "./ops/plugins/core/aof/bin/contract-read-check.sh")"
 
 cd "$ROOT"
 
@@ -100,7 +122,7 @@ fi
 
 if [[ "$DRY_RUN" -eq 0 && "$bootstrap_action" != "reuse_existing" ]]; then
   cmd=(
-    "$ROOT/ops/plugins/core/aof/bin/bootstrap-spine.sh"
+    "$BOOTSTRAP_SCRIPT"
     --environment-name "$ENV_NAME"
     --profile "$PROFILE"
     --target "$ROOT"
@@ -113,7 +135,7 @@ fi
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
   "$ROOT/ops/plugins/core/tenant/bin/tenant-profile-validate" --profile "$TENANT_PROFILE" >/dev/null
-  "$ROOT/ops/plugins/core/aof/bin/validate-environment.sh" \
+  "$VALIDATE_SCRIPT" \
     --environment-file "$ENV_FILE" \
     --identity-file "$IDENTITY_FILE" \
     >/dev/null
@@ -132,7 +154,7 @@ elif [[ "$DRY_RUN" -eq 1 ]]; then
 elif [[ -f "$today_marker" ]]; then
   ack_state="current"
 else
-  "$ROOT/ops/plugins/core/aof/bin/contract-read-check.sh" --ack >/dev/null
+  "$CONTRACT_SCRIPT" --ack >/dev/null
   ack_state="acknowledged"
 fi
 

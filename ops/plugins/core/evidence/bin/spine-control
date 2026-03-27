@@ -108,6 +108,18 @@ def load_yaml(path: Path, default: Any) -> Any:
     return default if loaded is None else loaded
 
 
+def capability_script_path(capability_id: str, fallback_rel: str) -> Path:
+    fallback = ROOT / fallback_rel
+    caps_doc = load_yaml(ROOT / "ops/capabilities.yaml", {})
+    capabilities = caps_doc.get("capabilities") if isinstance(caps_doc, dict) else {}
+    row = capabilities.get(capability_id) if isinstance(capabilities, dict) else None
+    if isinstance(row, dict):
+        script_rel = str(row.get("script_path") or "").strip()
+        if script_rel:
+            return ROOT / script_rel.removeprefix("./")
+    return fallback
+
+
 def render_path_for_payload(path: Path) -> str:
     try:
         return str(path.relative_to(ROOT))
@@ -725,7 +737,7 @@ def collect_forge_pull_requests() -> dict[str, Any]:
 
 
 def collect_aof_contract_status() -> dict[str, Any]:
-    script = ROOT / "ops/plugins/core/aof/bin/contract-read-check.sh"
+    script = capability_script_path("aof.contract.status", "ops/plugins/core/aof/bin/contract-read-check.sh")
     if not script.exists():
         return {
             "status": "unavailable",
