@@ -419,6 +419,15 @@ else
 **Boundary:** No terminal-scoped write authority. Do not claim scoped write access."
 fi
 
+IDENTITY_BLOCK="### Platform Identity
+The spine is a production-grade agentic execution system and governance-first control plane for repeatable, unattended, recoverable work across models, tools, terminals, and nodes.
+**Not:** a homelab/domain workload manager; infrastructure, media, Home Assistant, finance, and similar systems are workloads the platform runs, not the platform identity."
+
+POSTURE_BLOCK="### Lane Posture
+**Current posture:** \`full_governance\`
+**Meaning:** live governed hook context, role/write-scope enforcement, and receipts required.
+Cowork remains out-of-scope for governed mutation until a governed adapter exists."
+
 # Build the system message: dynamic state + canonical brief
 MSG="## SESSION ENTRY PROTOCOL (governance hook)
 
@@ -427,6 +436,10 @@ MSG="## SESSION ENTRY PROTOCOL (governance hook)
 ${GATE_LINE:+${GATE_LINE}
 }${FRICTION_LINE:+${FRICTION_LINE}
 }${DIRTY_WARNING}${MULTI_AGENT_WARNING}${PROPOSALS_HEALTH}
+${IDENTITY_BLOCK}
+
+${POSTURE_BLOCK}
+
 ${TERMINAL_AUTHORITY}
 
 ### Spine Status

@@ -1,81 +1,59 @@
 # What The Spine Is
 
-The spine is shared memory for stateless agents working on Ronny's infrastructure.
+The spine is a production-grade agentic execution system and governance-first
+control plane.
 
-Monday's agent doesn't know what Thursday's agent did. Without the spine, they break things. With it, they read state, execute against declared truth, and leave a receipt so the next agent picks up where they left off.
+It exists to make repeatable, unattended, recoverable work possible across
+models, tools, terminals, and nodes without depending on chat memory, a single
+vendor surface, or one machine staying special forever.
 
-That's it. Everything else is mechanism that either serves that purpose or doesn't.
+It provides governed entry, explicit role and write-scope boundaries, canonical
+runtime and evidence roots, receipted execution, and verification that survives
+session loss, tool changes, and operator handoff.
 
+Model independence, tool independence, node portability, and local or
+self-hosted AI are part of the platform identity now, not future aspirations.
 
-# What The Spine Solves
+## What It Is Not
 
-Four things. If a capability doesn't serve one of these, it doesn't belong here.
+- Not shared memory for stateless agents
+- Not a homelab-only control surface
+- Not a bucket of domain apps
+- Not a platform whose purpose is exhausted by four infrastructure concerns
 
-**1. Identity & Access**
-Every device has one name, one way in, one set of credentials. An agent never figures out "how do I reach this machine." It looks up the name. It gets the answer. It connects. Address resolution goes through `ops/lib/ssh-resolve.sh` (D321). Hardcoded IPs are prohibited — use the hostname, let the spine resolve it.
+## Platform vs Workloads
 
-**2. Network Stability**
-Hostname resolves. Device is reachable. Every time. No stale IPs, no DHCP surprises, no "it worked yesterday." The network is declared, not discovered.
+Infrastructure, media, Home Assistant, finance, and future systems are
+workloads the platform runs or governs. They are not the platform identity.
 
-**3. Configuration Management**
-A VM is what its declaration says it is. Run the config once, the VM matches. Run it a hundred times, nothing changes. No imperative SSH sessions. No "one agent configured it this way, another configured it that way." Declared state, enforced state.
+The platform is the governed execution system itself. Workloads attach to it,
+route through it, and leave evidence through it.
 
-**4. Golden Images & Templates**
-A VM is born correct. Not "born base, then manually configured, then drifts for 3 weeks." A fileserver template IS a fileserver. Clone it, name it, done. Post-provisioning configuration is zero or near-zero.
+## The First Workload Family
 
+The first workload family is infrastructure:
 
-# What The Spine Does NOT Solve
+1. **Identity & Access**: every device has one name, one path in, and one
+   governed credential story.
+2. **Network Stability**: hostname resolution and reachability are declared, not
+   rediscovered every session.
+3. **Configuration Management**: a machine converges to declared state
+   repeatably and idempotently.
+4. **Golden Images & Templates**: systems are born close to correct instead of
+   depending on long post-provisioning drift repair.
 
-The spine is not a business application platform. It is not a media manager. It is not a home automation controller. It is not a CRM.
+These four concerns matter because they are the first governed workload family,
+not because they define the total purpose of the spine.
 
-Mint, media, Home Assistant, finance — these are domains that USE the spine's infrastructure. They don't live inside it. When Mint needs a database, it asks the spine to provision a VM. Mint never touches SSH configs, never creates DHCP reservations, never manages NFS mounts. The spine handles that. Mint handles orders.
+## The Rule
 
+If you are adding a capability, binding, adapter, or doctrine surface, ask two
+questions:
 
-# How It's Sliced
+1. Does this strengthen the platform as a governed execution system?
+2. Does this serve a governed workload that runs on the platform?
 
-**Layer 1 — The Framework (open source, GitHub)**
-The pattern. Session lifecycle, capability dispatch, receipt system, entry gate, loop model. No infrastructure knowledge. No IPs. No credentials. Someone clones it and gets a working governance skeleton with example capabilities.
+If the answer to both is no, it does not belong here.
 
-**Layer 2 — The Infrastructure (Ronny's spine, Gittea)**
-The machines. SERVICE_REGISTRY, ssh.targets, DHCP bindings, VM profiles, DNS authority, templates. This is where the four pain points live. An agent working here knows what machines exist, how to reach them, and what they should look like. This layer has maybe 100-170 capabilities. Not 808.
-
-**Layer 3 — The Domains (separate runtimes)**
-The businesses. Mint has its own repo, its own MCP server, its own capabilities. Media has its own. HA has its own. Finance has its own. Each domain connects to the spine for infrastructure but owns its own logic. An agent working on Mint sees Mint capabilities. Not 808 things it doesn't need.
-
-
-# How Agents Use The Spine
-
-**The 30-second version:**
-
-You are a stateless agent. You don't remember previous sessions. The spine is how you know what's true.
-
-1. You attach (`session.v3.attach`). This gives you context — what exists, what's running, what was done before you.
-2. You receive a controller prompt. It tells you what to do. It was compiled by a translator that already understands the system. Trust it.
-3. You execute the prompt. Read what it says to read. Create what it says to create. Don't explore. Don't orient. Don't launch discovery agents.
-4. You emit a receipt. What you did, what changed, what's still broken. The next agent reads this.
-
-If the prompt is wrong, file a blocker. Don't freelance.
-
-If you don't have a controller prompt and you're working directly with the operator, your job is to: check state → propose a change → get approval → make the change → verify → receipt. One thing at a time.
-
-**What you never do:**
-- Assume. Read the binding. If the binding doesn't exist, ask.
-- Explore for orientation. The spine has 800+ files. You will burn your context window and deliver nothing. Read only what your task requires.
-- Create documentation unless explicitly asked. Doc sprawl is how the last system died.
-- Touch domains outside your scope. If you're working on network, you don't touch Mint. If you're working on Mint, you don't touch network.
-
-
-# The History (Why This Exists)
-
-ronny-ops was 58 files. Nineteen scripts that synced secrets, checked health, and managed DNS. It worked until it didn't — 19 VMs, distributed stacks, mounts breaking, credentials drifting. The scripts couldn't keep up.
-
-The spine was built to govern what scripts couldn't. But agents built the governance, and agents optimize for what agents like: structure, contracts, gates, registries, schemas. The governance grew to 808 capabilities, 451 bindings, 412 drift gates. The system that was supposed to prevent chaos became its own source of chaos.
-
-This document is the correction. The spine goes back to solving four problems. Everything that doesn't serve identity, network, configuration, or templates gets extracted into its own domain or deprecated.
-
-
-# The Rule
-
-If you're an agent reading this and you're about to add a new capability, binding, drift gate, governance doc, or contract — stop. Ask: does this serve one of the four things above? If the answer is no, it doesn't go in the spine. Put it in the domain it belongs to.
-
-The spine's job is to shrink, not grow.
+If it is workload-specific but not platform-specific, put it in the runtime or
+domain that owns that workload.

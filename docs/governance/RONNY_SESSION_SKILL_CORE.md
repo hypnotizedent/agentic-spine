@@ -21,6 +21,18 @@ reference this core and add only their tool-native wrapper behavior.
 - Workbench (supporting/reference): `~/code/workbench`
 - State root: `~/code/.runtime/spine/state/` (local-only, NOT inside the repo)
 
+## Platform Identity
+
+The spine is a production-grade agentic execution system and governance-first
+control plane for repeatable, unattended, recoverable work across models,
+tools, terminals, and nodes.
+
+Infrastructure, media, Home Assistant, finance, and similar systems are
+workloads routed through the platform, not the platform's identity.
+
+Model/tool independence, node portability, and local or self-hosted AI are core
+platform properties now.
+
 ## Governance Authorities
 
 | Authority | Path |
@@ -67,14 +79,18 @@ Agents and IDE sessions must never execute directly. No raw SSH, no ad-hoc curl,
 
 The spine IS the execution layer. Terminals write controller prompts and commit bindings. They do not execute. The caps execute.
 
-## Spine's 4 Concerns
+## First Workload Family
+
+The current first workload family is infrastructure:
 
 1. **Identity & Access** — every device has one name, one way in, one set of credentials
 2. **Network Stability** — hostname resolves, device is reachable, every time. Declared, not discovered
 3. **Configuration Management** — a VM is what its declaration says. Idempotent
 4. **Golden Images & Templates** — a VM is born correct. Clone, name, done
 
-Requests that don't serve these 4 belong in a domain runtime (mint, media, HA, finance), not the spine.
+Requests that do not fit this workload family are not automatically outside the
+spine's purpose. They are either platform architecture/governance work or
+domain workload work routed to the owning runtime.
 
 ## Role Taxonomy
 
@@ -112,6 +128,9 @@ Sessions operate in one of four modes, detected at entry:
 2. **Cowork** — mounted filesystem, session-local membrane. State root at `/sessions/*/mnt/code/.runtime/spine/state/`.
 3. **Bridge-capable** — no local filesystem; HTTP bridge to spine API. Read-only governance + handoff artifacts.
 4. **Offline** — no filesystem, no bridge. Governed YAML/markdown artifacts only.
+
+Cowork posture for governed mutation is `out_of_scope_until_governed_adapter_exists`.
+Until that adapter exists, Cowork is read/draft only.
 
 Detection: try reading `~/code/agentic-spine/docs/governance/SESSION_PROTOCOL.md`. Success = Desktop. Failure + HTTP = Bridge. Neither = Offline.
 

@@ -1,13 +1,13 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-24
+last_verified: 2026-03-28
 scope: repo-readme
 ---
 
 # Agentic Spine
 
-A governance-first control plane for autonomous AI agent operations. Spine gives you predictable, receipted, drift-proof execution across multiple AI terminals, domains, and infrastructure — without doc sprawl, floating WIP, or runaway context.
+A governance-first control plane and production-grade agentic execution system for autonomous AI operations. Spine gives you predictable, receipted, drift-proof execution across models, tools, terminals, nodes, and infrastructure, with local/self-hosted AI portability and without doc sprawl, floating WIP, or runaway context.
 
 ## The Problem
 

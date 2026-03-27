@@ -10,7 +10,11 @@ Claude Code receives governance injection through two paths:
 1. **Hook-based** (canonical): `.claude/settings.json` -> `.claude/hooks/session-entry-hook.sh` -> live governance brief + dynamic context into session on first `UserPromptSubmit`
 2. **Static stub** (decorative): `CLAUDE.md` project instructions loaded by Claude Code on directory open
 
-The hook is the real governance pathway. It reads SPINE.md and SESSION_PROTOCOL.md live, resolves terminal role and write scope, gathers dynamic context (open loops, proposals, worktrees, friction, Docker), and emits a systemMessage JSON blob with a behaviorally binding terminal authority block.
+The hook is the canonical live governance injector. It is the real governance
+pathway for elected platform identity, current lane posture, terminal role and
+write scope, and bounded dynamic context. It reads SPINE.md and
+SESSION_PROTOCOL.md live, gathers runtime state, and emits a systemMessage JSON
+blob with behaviorally binding terminal authority.
 
 ## Session Entry
 
@@ -41,10 +45,12 @@ If unsure, assume Bridge-capable. Do not run `./bin/ops` unless step 1 succeeded
 ## Bootstrap: Cowork
 
 1. Detect spine repo at `/sessions/*/mnt/code/agentic-spine`
-2. **Canonical state root**: `~/code/.runtime/spine/state/` — in Cowork: `/sessions/*/mnt/code/.runtime/spine/state/`. NEVER write to repo-internal `.runtime/`
-3. Read/write controller prompts and evidence via the canonical state root
-4. Use spine MCP capabilities (`cap_run`) when CLI is unavailable
-5. On session close: archive completed controller prompts and receipts
+2. Cowork posture is `out_of_scope_until_governed_adapter_exists` for governed mutation
+3. Allowed actions: translation, read-only discovery, drafting prompts/packets/reviews
+4. Forbidden actions: governed repo mutation, governed state mutation, parity claims with the full-governance lane
+5. **Canonical state root for reference only**: `~/code/.runtime/spine/state/` — in Cowork: `/sessions/*/mnt/code/.runtime/spine/state/`. NEVER write to repo-internal `.runtime/`
+6. Use spine MCP capabilities (`cap_run`) only for read-only discovery when CLI is unavailable
+7. Hand mutation work back to a governed desktop lane
 
 ## Bootstrap: Bridge-capable mobile/remote
 
