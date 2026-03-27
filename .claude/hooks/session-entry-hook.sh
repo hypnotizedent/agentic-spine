@@ -81,6 +81,10 @@ resolve_governance_profile() {
 
 resolve_governance_profile || true
 
+# --- Session admission resolution ---
+source "$SPINE_ROOT/ops/lib/session-admission.sh" 2>/dev/null || true
+spine_resolve_admission "$GOVERNANCE_PROFILE_LANE" 2>/dev/null || true
+
 # --- Terminal write scope resolution ---
 TERMINAL_WRITE_SCOPE=""
 TERMINAL_TYPE=""
@@ -463,10 +467,10 @@ IDENTITY_BLOCK="### Platform Identity
 The spine is a production-grade agentic execution system and governance-first control plane for repeatable, unattended, recoverable work across models, tools, terminals, and nodes.
 **Not:** a homelab/domain workload manager; infrastructure, media, Home Assistant, finance, and similar systems are workloads the platform runs, not the platform identity."
 
-POSTURE_BLOCK="### Lane Posture
-**Current posture:** \`${CURRENT_GOVERNANCE_PROFILE}\`
+ADMISSION_BLOCK="### Session Admission
+**Lane:** \`${GOVERNANCE_PROFILE_LANE}\` | **Profile:** \`${CURRENT_GOVERNANCE_PROFILE}\` | **Parity:** \`${SA_PARITY_STATUS:-degraded}\`
+**Admission:** \`${SA_ADMISSION_DELIVERY:-none}\` | **Mutation:** \`${SA_MUTATION_POSTURE:-no_governed_mutation}\`
 **Resolution:** ${GOVERNANCE_PROFILE_RESOLUTION}
-**Meaning:** ${GOVERNANCE_PROFILE_DESCRIPTION}
 Cowork remains out-of-scope for governed mutation until a governed adapter exists."
 
 # Build the system message: dynamic state + canonical brief
@@ -479,7 +483,7 @@ ${GATE_LINE:+${GATE_LINE}
 }${DIRTY_WARNING}${MULTI_AGENT_WARNING}${PROPOSALS_HEALTH}
 ${IDENTITY_BLOCK}
 
-${POSTURE_BLOCK}
+${ADMISSION_BLOCK}
 
 ${TERMINAL_AUTHORITY}
 

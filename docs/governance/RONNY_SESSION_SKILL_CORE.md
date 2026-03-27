@@ -6,6 +6,8 @@ scope: shared-skill-core
 consumers:
   - .claude/skills/claude-ai-skill/SKILL.md
   - ~/.codex/skills/ronny-interpreter/SKILL.md
+related:
+  - ops/bindings/session.admission.contract.yaml
 ---
 
 # Ronny Session Skill Core

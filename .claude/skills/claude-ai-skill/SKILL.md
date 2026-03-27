@@ -2,6 +2,7 @@
 
 > **Shared core**: `docs/governance/RONNY_SESSION_SKILL_CORE.md`
 > **Governance profile contract**: `ops/bindings/governance.profile.contract.yaml`
+> **Session admission contract**: `ops/bindings/session.admission.contract.yaml`
 > This adapter adds Claude Code-specific behavior only.
 > Do not duplicate core doctrine here — read the core for identity, rules, execution boundary, taxonomy, and domain routing.
 

@@ -17,6 +17,7 @@ description: >
 
 > **Shared core**: `~/code/agentic-spine/docs/governance/RONNY_SESSION_SKILL_CORE.md`
 > **Governance profile contract**: `~/code/agentic-spine/ops/bindings/governance.profile.contract.yaml`
+> **Session admission contract**: `~/code/agentic-spine/ops/bindings/session.admission.contract.yaml`
 > This adapter adds Codex translator-membrane behavior only.
 > Do not duplicate core doctrine here — read the core for identity, rules, execution boundary, taxonomy, and domain routing.
 
@@ -30,15 +31,16 @@ to the right place. That's it.
 
 When this session carries terminal-scoped identity (via `OPS_TERMINAL_ROLE`), the terminal's write scope from `ops/bindings/terminal.role.contract.yaml` is a hard boundary. Do not produce prompts or route work that exceeds the terminal's declared write scope. If no terminal identity is present, do not claim scoped write authority.
 
-## Governance Profile
+## Session Admission
 
-Codex currently runs as `minimal_governance` per
-`~/code/agentic-spine/ops/bindings/governance.profile.contract.yaml`.
+Codex lane admission per `session.admission.contract.yaml`:
 
-- Attach first through `session.v3.attach`
-- Stay on the thin adapter and read canonical docs/state on demand
-- Use an explicit controller prompt or bounded task scope
-- Receipts are still required for governed mutation
+- **Profile:** `minimal_governance`
+- **Admission:** `thin_adapter_plus_governed_attach` — attach first, adapter second
+- **Context delivery:** `on_demand_bounded` — no live-hook parity; read canonical docs/state on demand
+- **Mutation:** `governed_mutation_within_elected_scope_after_attach` — only inside scope, only with receipts
+- **Identity:** `adapter_mediated_scoped_authority` — terminal role rules from adapter, not live hook
+- **Parity:** `partial` — real but not equivalent to the full-governance lane
 - Cowork remains an external out-of-scope posture, not a governance-profile lane
 
 ## What You Own
