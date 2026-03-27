@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-26
+last_verified: 2026-03-28
 scope: layer-and-endstate-wave-contract
 depends_on:
   - NORTH_STAR.md
@@ -12,6 +12,9 @@ source_authority:
   - docs/governance/SPINE.md
   - docs/governance/SPINE_PRODUCTS_AND_RUNTIME_DESTINATIONS_20260326.md
 transition_note: authoritative wave-execution contract for 2026-03-26 closure work; keep this file narrow and authoritative
+subordinate_to_for_identity: NORTH_STAR.md
+subordinate_to_for_governance_profiles: ops/bindings/governance.profile.contract.yaml
+note: "Scoped authority for wave-execution and three-layer contract. Current platform identity is defined in NORTH_STAR.md. Current governance profiles are defined in governance.profile.contract.yaml."
 ---
 
 # Final Surfaces Closure Brief - Wave Execution Authority

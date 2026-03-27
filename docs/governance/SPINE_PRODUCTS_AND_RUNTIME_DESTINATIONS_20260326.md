@@ -1,10 +1,14 @@
 ---
-status: draft
+status: subordinate_reference
 owner: "@ronny"
-last_verified: 2026-03-26
+last_verified: 2026-03-28
 scope: spine-products-and-runtime-destinations
 source_baseline: /Users/ronnyworks/code/agentic-spine/docs/governance/CAPABILITY_LAYER_VISIBILITY_CLASSIFICATION_20260326.md
 runtime_artifact: /Users/ronnyworks/code/.runtime/spine/state/domain-state/spine/runtime-destinations-20260326/extract-runtime-map.csv
+subordinate_to:
+  - NORTH_STAR.md
+  - ops/bindings/governance.profile.contract.yaml
+note: "Scoped reference for runtime taxonomy and extraction destinations. Current platform identity and architecture are defined in NORTH_STAR.md and the elected operator election packets."
 ---
 
 # Spine Products And Runtime Destinations 2026-03-26
@@ -62,7 +66,7 @@ The current ambiguity around `spine.*` is resolved here.
 | `TaxLegal` | `standalone_domain_runtime` | Owns tax and legal case behavior, deadlines, research, and packet generation. |
 | `ContentArchive` | `standalone_domain_runtime` | Owns archive placement and content-family lifecycle behavior. |
 | `Microsoft` | `provider_runtime` | Provides Microsoft Graph and mailbox adapter behavior consumed by downstream runtimes. |
-| `PlatformProvider` | `provider_runtime` | Provides platform, forge, publication, and curated share-channel adapters that are not one of the spine four concerns. |
+| `PlatformProvider` | `provider_runtime` | Provides platform, forge, publication, and curated share-channel adapters outside the first workload family. |
 
 ## Destination Contracts
 
@@ -79,7 +83,7 @@ The current ambiguity around `spine.*` is resolved here.
 | `n8n` | Workflow definitions, execution triage, export and import discipline, automation behavior | Identity, network, compute, storage, verification, control-plane views | Workflow state, execution triage, automation receipts | Deployment authority, DNS, backup policy, secrets policy | n8n tools and workflow operator surfaces | Workflow and execution receipts | The spine stays out of workflow semantics and only attests runtime substrate. |
 | `TaxLegal` | Case logic, deadlines, research, filing packets, compliance workflow behavior | Identity, storage, verification, operator surfaces | Case state, deadline state, research answers, filing packets | Paperless infra, provider secrets policy, VM placement, DNS authority | Tax and legal operator surfaces | Case and filing receipts | Tax and legal semantics remain downstream domain behavior. |
 | `ContentArchive` | Archive placement, content-family lifecycle behavior, archive intake semantics | Identity, storage, operator surfaces, verification, control-plane views | Archive placement state, content lifecycle state, archive receipts | Mount truth, backup policy, VM placement, network authority | Archive and content operator surfaces | Placement and archive intake receipts | The spine exposes storage and posture facts while archive behavior stays outside it. |
-| `PlatformProvider` | Platform, forge, publication adapter behavior, and curated share-channel publishing outside the spine four concerns | Identity, network, verification, operator surfaces | Provider results, forge receipts, publication artifacts, share-channel artifacts, platform intake state | DNS authority, tunnel authority, registrar authority, spine governance policy | Provider, forge, and curated publication tooling | Provider, publication, and share-channel receipts | External adapter behavior stays out of spine-owned DNS and infra truth even when it publishes curated downstream artifacts. |
+| `PlatformProvider` | Platform, forge, publication adapter behavior, and curated share-channel publishing outside the first workload family | Identity, network, verification, operator surfaces | Provider results, forge receipts, publication artifacts, share-channel artifacts, platform intake state | DNS authority, tunnel authority, registrar authority, spine governance policy | Provider, forge, and curated publication tooling | Provider, publication, and share-channel receipts | External adapter behavior stays out of spine-owned DNS and infra truth even when it publishes curated downstream artifacts. |
 
 ## Future-Domain Rule
 

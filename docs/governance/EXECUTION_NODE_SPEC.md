@@ -1,10 +1,11 @@
 ---
-status: draft
+status: historical_non_authoritative
 owner: "@ronny"
 created_at: "2026-03-24"
 scope: v3-execution-node-spec
 node_id: 6
 related_arch: docs/governance/FINAL_SURFACES_CLOSURE_BRIEF_20260326.md
+note: "Historical draft reference. Current system architecture is defined in the elected operator election packets. This spec describes aspirational V3 node design that has not been implemented."
 ---
 
 # Execution Node — V3 Node 6/7
