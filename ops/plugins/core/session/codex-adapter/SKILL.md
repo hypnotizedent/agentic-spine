@@ -16,6 +16,7 @@ description: >
 # Ronny Interpreter — Codex Adapter
 
 > **Shared core**: `~/code/agentic-spine/docs/governance/RONNY_SESSION_SKILL_CORE.md`
+> **Governance profile contract**: `~/code/agentic-spine/ops/bindings/governance.profile.contract.yaml`
 > This adapter adds Codex translator-membrane behavior only.
 > Do not duplicate core doctrine here — read the core for identity, rules, execution boundary, taxonomy, and domain routing.
 
@@ -28,6 +29,17 @@ to the right place. That's it.
 ## Terminal-Scoped Authority
 
 When this session carries terminal-scoped identity (via `OPS_TERMINAL_ROLE`), the terminal's write scope from `ops/bindings/terminal.role.contract.yaml` is a hard boundary. Do not produce prompts or route work that exceeds the terminal's declared write scope. If no terminal identity is present, do not claim scoped write authority.
+
+## Governance Profile
+
+Codex currently runs as `minimal_governance` per
+`~/code/agentic-spine/ops/bindings/governance.profile.contract.yaml`.
+
+- Attach first through `session.v3.attach`
+- Stay on the thin adapter and read canonical docs/state on demand
+- Use an explicit controller prompt or bounded task scope
+- Receipts are still required for governed mutation
+- Cowork remains an external out-of-scope posture, not a governance-profile lane
 
 ## What You Own
 

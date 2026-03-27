@@ -23,6 +23,8 @@ spine_runtime_resolve_paths
 BRANCH=$(git -C "$SPINE_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 TERMINAL_ROLE_CONTRACT="$SPINE_ROOT/ops/bindings/terminal.role.contract.yaml"
 ROLE_RUNTIME_CONTRACT="$SPINE_ROOT/ops/bindings/role.runtime.control.contract.yaml"
+GOVERNANCE_PROFILE_CONTRACT="${SPINE_GOVERNANCE_PROFILE_CONTRACT_PATH:-$SPINE_ROOT/ops/bindings/governance.profile.contract.yaml}"
+GOVERNANCE_PROFILE_LANE="${SPINE_GOVERNANCE_PROFILE_LANE:-claude_code}"
 SESSION_TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-}}}}"
 SESSION_RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-}"
 
@@ -40,6 +42,44 @@ if [[ -z "$SESSION_RUNTIME_ROLE" ]] && command -v yq >/dev/null 2>&1 && [[ -f "$
   SESSION_RUNTIME_ROLE="$(yq e -r '.runtime_roles.default_role // ""' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || true)"
 fi
 [[ -n "$SESSION_RUNTIME_ROLE" && "$SESSION_RUNTIME_ROLE" != "null" ]] || SESSION_RUNTIME_ROLE="researcher"
+
+CURRENT_GOVERNANCE_PROFILE="full_governance"
+GOVERNANCE_PROFILE_DESCRIPTION="Live governed hook/attach context with dynamic runtime injection, role/write-scope enforcement, receipts required for mutations, and verification posture enforced."
+GOVERNANCE_PROFILE_RESOLUTION="fallback to \`full_governance\` (contract not resolved yet)"
+
+resolve_governance_profile() {
+  local resolved_profile=""
+  local resolved_description=""
+  local fallback_reason=""
+
+  if ! command -v yq >/dev/null 2>&1; then
+    fallback_reason="yq unavailable"
+  elif [[ ! -r "$GOVERNANCE_PROFILE_CONTRACT" ]]; then
+    fallback_reason="contract missing or unreadable at \`${GOVERNANCE_PROFILE_CONTRACT}\`"
+  else
+    resolved_profile="$(yq e -r ".lane_assignments.\"${GOVERNANCE_PROFILE_LANE}\" // \"\"" "$GOVERNANCE_PROFILE_CONTRACT" 2>/dev/null || true)"
+    if [[ -z "$resolved_profile" || "$resolved_profile" == "null" ]]; then
+      fallback_reason="lane \`${GOVERNANCE_PROFILE_LANE}\` missing from contract"
+    else
+      resolved_description="$(yq e -r ".profiles.\"${resolved_profile}\".description // \"\"" "$GOVERNANCE_PROFILE_CONTRACT" 2>/dev/null || true)"
+      if [[ -z "$resolved_description" || "$resolved_description" == "null" ]]; then
+        fallback_reason="profile \`${resolved_profile}\` missing description in contract"
+      fi
+    fi
+  fi
+
+  if [[ -n "$fallback_reason" ]]; then
+    GOVERNANCE_PROFILE_RESOLUTION="fallback to \`full_governance\` (${fallback_reason})"
+    return 1
+  fi
+
+  CURRENT_GOVERNANCE_PROFILE="$resolved_profile"
+  GOVERNANCE_PROFILE_DESCRIPTION="$resolved_description"
+  GOVERNANCE_PROFILE_RESOLUTION="resolved from \`ops/bindings/governance.profile.contract.yaml\` for lane \`${GOVERNANCE_PROFILE_LANE}\`"
+  return 0
+}
+
+resolve_governance_profile || true
 
 # --- Terminal write scope resolution ---
 TERMINAL_WRITE_SCOPE=""
@@ -424,8 +464,9 @@ The spine is a production-grade agentic execution system and governance-first co
 **Not:** a homelab/domain workload manager; infrastructure, media, Home Assistant, finance, and similar systems are workloads the platform runs, not the platform identity."
 
 POSTURE_BLOCK="### Lane Posture
-**Current posture:** \`full_governance\`
-**Meaning:** live governed hook context, role/write-scope enforcement, and receipts required.
+**Current posture:** \`${CURRENT_GOVERNANCE_PROFILE}\`
+**Resolution:** ${GOVERNANCE_PROFILE_RESOLUTION}
+**Meaning:** ${GOVERNANCE_PROFILE_DESCRIPTION}
 Cowork remains out-of-scope for governed mutation until a governed adapter exists."
 
 # Build the system message: dynamic state + canonical brief

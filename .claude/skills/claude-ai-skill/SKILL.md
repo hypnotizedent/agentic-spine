@@ -1,6 +1,7 @@
 # Ronny Session Bootloader (Spine) — Claude Code Adapter
 
 > **Shared core**: `docs/governance/RONNY_SESSION_SKILL_CORE.md`
+> **Governance profile contract**: `ops/bindings/governance.profile.contract.yaml`
 > This adapter adds Claude Code-specific behavior only.
 > Do not duplicate core doctrine here — read the core for identity, rules, execution boundary, taxonomy, and domain routing.
 
@@ -15,6 +16,9 @@ pathway for elected platform identity, current lane posture, terminal role and
 write scope, and bounded dynamic context. It reads SPINE.md and
 SESSION_PROTOCOL.md live, gathers runtime state, and emits a systemMessage JSON
 blob with behaviorally binding terminal authority.
+
+Claude Code currently resolves to the `full_governance` lane through
+`ops/bindings/governance.profile.contract.yaml`.
 
 ## Session Entry
 

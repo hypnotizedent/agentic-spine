@@ -39,8 +39,20 @@ platform properties now.
 |---|---|
 | Minimal operating contract | `docs/governance/SPINE.md` |
 | Session protocol | `docs/governance/SESSION_PROTOCOL.md` |
+| Governance profiles | `ops/bindings/governance.profile.contract.yaml` |
 | Translator doctrine | `docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md` |
 | Output contracts | `docs/governance/OUTPUT_CONTRACTS.md` |
+
+## Governance Profiles
+
+Profile contract: `ops/bindings/governance.profile.contract.yaml`
+
+- `full_governance` — live governed hook/attach context with dynamic runtime injection and enforced mutation discipline
+- `minimal_governance` — governed attach first, then a thin authoritative adapter with bounded scope and on-demand canonical reads
+- `lightweight_degraded` — truthful read/draft-only posture without full or minimal governance parity
+
+Cowork is not a governance-profile lane in this pass. It remains
+`out_of_scope_until_governed_adapter_exists`.
 
 ## Session Entry
 
