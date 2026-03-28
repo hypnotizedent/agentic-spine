@@ -1,5 +1,5 @@
 template_id: verification.context
-version: "1.0"
+version: "1.1"
 type: verification
 description: >
   Structured verification template for gate execution, evidence collection,
@@ -60,14 +60,48 @@ context_dimensions:
     evidence_required: true
     evidence_type: confidence_declaration
 
-# ── Output Contract ─────────────────────────────────────────────────
+# ── Output Contract ────────────────────────────────────��────────────
+# Verification must produce two distinct output surfaces:
+#   1. human_summary — operator-readable completion
+#   2. attestation_envelope — machine-readable proof
+# Both are required. The attestation envelope aligns with the existing
+# broker/request-attestation model (spine-control request-attestation).
 output_contract:
-  format: structured_yaml
+  format: dual_output
   required_sections:
+    - human_summary         # 4-field operator-readable completion
+    - attestation_envelope  # machine-readable proof envelope
     - verify_run_key        # the CAP-* run key from the verify execution
     - gate_summary          # total/passed/failed/skipped counts
     - failing_gates         # list of gate IDs that failed, with diagnostics
-    - attestation           # confidence level + justification
   optional_sections:
     - regression_notes      # cross-reference with known gaps
     - remediation_plan      # for failing gates: what needs to happen
+
+  human_summary:
+    description: >
+      Operator-readable completion surface. Always present, always these
+      four fields. Do not embed machine proof here.
+    required_fields:
+      - what_changed
+      - where_it_lives
+      - what_remains_open
+      - whether_verification_ran
+
+  attestation_envelope:
+    description: >
+      Machine-readable proof surface aligned with the existing
+      broker/request-attestation model. For verification, the verdict
+      reflects the gate pass/fail outcome. Confidence level and
+      justification belong here, not in a separate attestation section.
+    required_fields:
+      - request_id
+      - loop_id
+      - entry_packet_hash
+      - governance_version
+      - execution_host
+      - execution_mode
+      - checks_passed
+      - receipts
+      - verdict
+    authority: spine-control request-attestation
