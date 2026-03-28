@@ -18,6 +18,7 @@ Options:
   --terminal-id <id>     Canonical terminal id (e.g. SPINE-CONTROL-01)
   --role <role>          Terminal role (default: unassigned)
   --runtime-role <role>  Runtime role resolved for the attached session (default: unknown)
+  --owner-pid <pid>      Owning interactive shell/session pid (default: parent pid)
   --scope <scope_csv>    Comma-separated write scope labels/paths
   --loop-id <loop_id>    Active loop/task id
   --repo-root <path>     Repo root path (default: current git root or pwd)
@@ -129,6 +130,7 @@ PY
 terminal_id="${SPINE_TERMINAL_ID:-}"
 role="${SPINE_TERMINAL_ROLE:-unassigned}"
 runtime_role="${SPINE_RUNTIME_ROLE:-unknown}"
+owner_pid="${SPINE_TERMINAL_OWNER_PID:-${PPID:-}}"
 scope="${SPINE_TERMINAL_SCOPE:-unspecified}"
 loop_id="${SPINE_LOOP_ID:-}"
 repo_root="$(repo_root_default)"
@@ -142,6 +144,7 @@ while [[ $# -gt 0 ]]; do
     --terminal-id) terminal_id="${2:-}"; shift 2 ;;
     --role) role="${2:-}"; shift 2 ;;
     --runtime-role) runtime_role="${2:-}"; shift 2 ;;
+    --owner-pid) owner_pid="${2:-}"; shift 2 ;;
     --scope) scope="${2:-}"; shift 2 ;;
     --loop-id) loop_id="${2:-}"; shift 2 ;;
     --repo-root) repo_root="${2:-}"; shift 2 ;;
@@ -194,6 +197,10 @@ fi
 if [[ -z "$terminal_id" ]]; then
   terminal_id="$(hostname -s | tr '[:lower:]' '[:upper:]')-LOCAL-01"
 fi
+if [[ ! "$owner_pid" =~ ^[0-9]+$ ]] || [[ "$owner_pid" == "0" ]]; then
+  echo "FAIL: owner pid must be a positive integer" >&2
+  exit 2
+fi
 
 mkdir -p "$HEARTBEAT_DIR"
 
@@ -232,7 +239,7 @@ lane_type: "$lane_type"
 git_common_dir: "$git_common_dir"
 git_index_path: "$git_index_path"
 status: "$status"
-pid: $$
+pid: $owner_pid
 hostname: "$host_name"
 heartbeat_at: "$heartbeat_at"
 expires_at: "$expires_at"
@@ -278,6 +285,7 @@ if [[ "$json_mode" -eq 1 ]]; then
     --arg normalized_scope "$normalized_scope" \
     --arg protected_hotspot_scope "$protected_hotspot_scope" \
     --arg status "$status" \
+    --argjson pid "$owner_pid" \
     --arg heartbeat_at "$heartbeat_at" \
     --arg expires_at "$expires_at" \
     --arg heartbeat_file "$heartbeat_file" \
@@ -297,6 +305,7 @@ if [[ "$json_mode" -eq 1 ]]; then
       normalized_scope: $normalized_scope,
       protected_hotspot_scope: $protected_hotspot_scope,
       status: $status,
+      pid: $pid,
       heartbeat_at: $heartbeat_at,
       expires_at: $expires_at,
       heartbeat_file: $heartbeat_file,
@@ -320,6 +329,7 @@ echo "lane_type: $lane_type"
 echo "git_common_dir: ${git_common_dir:-none}"
 echo "git_index_path: ${git_index_path:-none}"
 echo "status: $status"
+echo "pid: $owner_pid"
 echo "heartbeat_at: $heartbeat_at"
 echo "expires_at: $expires_at"
 echo "heartbeat_file: $heartbeat_file"

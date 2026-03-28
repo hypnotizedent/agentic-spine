@@ -233,6 +233,83 @@ else
   fail "T8.2: shared root lane contention blocks lane mode (expected shared_root_checkout_contention or shared_git_index_contention)"
 fi
 
+live_scope_json="$(env SPINE_STATE="$STATE_ROOT" "$ROOT/ops/plugins/core/session/bin/terminal-scope-status" --json)"
+assert_eq "$(python3 - <<'PY' "$live_scope_json"
+import json, sys
+payload = json.loads(sys.argv[1])
+print(payload["active_count"])
+PY
+)" "1" "T8.3: live heartbeat remains active in terminal scope status"
+
+# ── T9: Dead-pid heartbeat no longer blocks ──────────────────────
+echo ""
+echo "── T9: Dead-pid heartbeat is ignored ──"
+
+dead_pid="$(
+  python3 - <<'PY'
+import subprocess
+p = subprocess.Popen(["sleep", "0.01"])
+pid = p.pid
+p.wait()
+print(pid)
+PY
+)"
+
+python3 - <<'PY' "$STATE_ROOT/terminal-heartbeats/SPINE-CONTROL-99.yaml" "$dead_pid"
+from pathlib import Path
+import sys
+import yaml
+
+path = Path(sys.argv[1])
+payload = yaml.safe_load(path.read_text()) or {}
+payload["pid"] = int(sys.argv[2])
+path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+PY
+
+OUT="$TMPDIR_BASE/t9.json"
+env "${COMMON_ENV[@]}" bash "$RECONCILE" --lane --json > "$OUT" 2>/dev/null || true
+
+CONTENTIONS=$(json_eval "$OUT" "payload['summary']['blocking_terminal_contention_count']")
+assert_eq "$CONTENTIONS" "0" "T9.1: dead-pid heartbeat no longer counts as blocking contention"
+
+LANE_COUNT=$(json_eval "$OUT" "payload['summary']['lane_issue_count']")
+assert_eq "$LANE_COUNT" "0" "T9.2: dead-pid heartbeat does not create lane issues"
+
+dead_scope_json="$(env SPINE_STATE="$STATE_ROOT" "$ROOT/ops/plugins/core/session/bin/terminal-scope-status" --json)"
+assert_eq "$(python3 - <<'PY' "$dead_scope_json"
+import json, sys
+payload = json.loads(sys.argv[1])
+print(payload["active_count"])
+PY
+)" "0" "T9.3: dead-pid heartbeat is not active in terminal scope status"
+
+# ── T10: Expired heartbeat does not block ────────────────────────
+echo ""
+echo "── T10: Expired heartbeat is ignored ──"
+
+rm -f "$STATE_ROOT/terminal-heartbeats"/*.yaml
+env SPINE_STATE="$STATE_ROOT" "$HEARTBEAT_POST" \
+  --terminal-id SPINE-CONTROL-98 \
+  --role control-plane \
+  --scope hotspot:operational-gaps \
+  --repo-root "$MAIN_CHECKOUT" \
+  --branch main \
+  --ttl-minutes -1 >/dev/null
+
+OUT="$TMPDIR_BASE/t10.json"
+env "${COMMON_ENV[@]}" bash "$RECONCILE" --lane --json > "$OUT" 2>/dev/null || true
+
+CONTENTIONS=$(json_eval "$OUT" "payload['summary']['blocking_terminal_contention_count']")
+assert_eq "$CONTENTIONS" "0" "T10.1: expired heartbeat does not count as blocking contention"
+
+expired_scope_json="$(env SPINE_STATE="$STATE_ROOT" "$ROOT/ops/plugins/core/session/bin/terminal-scope-status" --json)"
+assert_eq "$(python3 - <<'PY' "$expired_scope_json"
+import json, sys
+payload = json.loads(sys.argv[1])
+print(payload["active_count"])
+PY
+)" "0" "T10.2: expired heartbeat is not active in terminal scope status"
+
 # ── T7: Lane mode passes when only global issues exist ───────────
 echo ""
 echo "── T7: Lane mode passes with only global issues ──"

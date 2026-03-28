@@ -186,6 +186,56 @@ assert "shared_root_checkout_contention" in codes or "shared_git_index_contentio
 assert payload["data"]["preflight"]["shared_lane_contention"]["blocking_count"] >= 1
 PY
 
+dead_pid="$(
+  python3 - <<'PY'
+import subprocess
+p = subprocess.Popen(["sleep", "0.01"])
+pid = p.pid
+p.wait()
+print(pid)
+PY
+)"
+
+python3 - <<'PY' "$state_root/terminal-heartbeats/SPINE-CONTROL-99.yaml" "$dead_pid"
+from pathlib import Path
+import sys
+import yaml
+
+path = Path(sys.argv[1])
+payload = yaml.safe_load(path.read_text()) or {}
+payload["pid"] = int(sys.argv[2])
+path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+PY
+
+dead_scope_status_json="$(
+  env SPINE_STATE="$state_root" "$HEARTBEAT_STATUS" --json
+)"
+
+python3 - <<'PY' "$dead_scope_status_json"
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["active_count"] == 0
+assert payload["stale_count"] >= 1
+PY
+
+dead_contention_json="$(
+  cd "$contention_checkout" && \
+  env SPINE_STATE="$state_root" "$SCRIPT" --skip-session-bootstrap --allow-no-loop --json
+)"
+
+python3 - <<'PY' "$dead_contention_json"
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["status"] == "done"
+assert payload["data"]["preflight"]["shared_lane_contention"]["blocking_count"] == 0
+assert "shared_root_checkout_contention" not in payload["data"]["preflight"]["blocking_codes"]
+assert "shared_git_index_contention" not in payload["data"]["preflight"]["blocking_codes"]
+PY
+
 rm -f "$state_root/terminal-heartbeats"/*.yaml
 
 bootstrap_env="$tmpdir/bootstrap.env.sh"

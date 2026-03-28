@@ -245,6 +245,22 @@ def parse_iso_epoch(value):
     return dt.timestamp()
 
 
+def heartbeat_pid_is_live(value):
+    text = str(value or "").strip()
+    if not text.isdigit():
+        return False
+    pid = int(text)
+    if pid <= 0:
+        return False
+    proc = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "pid="],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return bool(proc.stdout.strip())
+
+
 def parse_frontmatter(path: Path):
     data = {}
     try:
@@ -643,6 +659,8 @@ def load_active_heartbeats(current_terminal_id: str):
             continue
         if expires_epoch is not None and expires_epoch < now_epoch:
             continue
+        if not heartbeat_pid_is_live(hb.get("pid")):
+            continue
 
         repo_root_raw = str(hb.get("repo_root") or "").strip()
         repo_root_path = Path(repo_root_raw).expanduser().resolve() if repo_root_raw else None
@@ -674,6 +692,7 @@ def load_active_heartbeats(current_terminal_id: str):
                 "scope": str(hb.get("scope") or "").strip(),
                 "normalized_scope": normalized_scope,
                 "protected_hotspot_scope": protected_scope,
+                "pid": int(str(hb.get("pid")).strip()),
                 "heartbeat_file": str(hb_file),
             }
         )

@@ -36,6 +36,15 @@ print(int(dt.timestamp()))
 PY
 }
 
+pid_is_live() {
+  local raw="${1:-}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || return 1
+  [[ "$raw" != "0" ]] || return 1
+  local out
+  out="$(ps -p "$raw" -o pid= 2>/dev/null || true)"
+  [[ -n "${out//[[:space:]]/}" ]]
+}
+
 normalize_tokens() {
   local raw="${1:-}"
   echo "$raw" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d'
@@ -112,10 +121,15 @@ for hb_file in "$HEARTBEAT_DIR"/*.yaml; do
   repo_root="$(yq e -r '.repo_root // ""' "$hb_file" 2>/dev/null || true)"
   branch="$(yq e -r '.branch // ""' "$hb_file" 2>/dev/null || true)"
   status="$(yq e -r '.status // "active"' "$hb_file" 2>/dev/null || echo active)"
+  pid="$(yq e -r '.pid // ""' "$hb_file" 2>/dev/null || true)"
   expires_at="$(yq e -r '.expires_at // ""' "$hb_file" 2>/dev/null || true)"
 
   expires_epoch="$(iso_to_epoch "$expires_at")"
   if [[ "$status" != "active" || "$expires_epoch" -lt "$now_epoch" ]]; then
+    stale_count=$((stale_count + 1))
+    continue
+  fi
+  if ! pid_is_live "$pid"; then
     stale_count=$((stale_count + 1))
     continue
   fi
