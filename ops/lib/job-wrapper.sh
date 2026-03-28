@@ -65,9 +65,9 @@ export SPINE_RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-worker}"
 # indefinitely. Auto-approve capabilities that require manual consent.
 export OPS_CAP_AUTO_APPROVE="${OPS_CAP_AUTO_APPROVE:-yes}"
 
-RUNTIME_JOB_LOG="${SPINE_RUNTIME_JOB_LOG:-${SPINE_LOGS:-$SPINE_ROOT/mailroom/logs}/runtime-jobs.ndjson}"
+RUNTIME_JOB_LOG="${SPINE_RUNTIME_JOB_LOG:-${SPINE_LOGS:-$HOME/code/.runtime/spine/logs}/runtime-jobs.ndjson}"
 RUNTIME_JOB_LOG_KEEP_DAYS="${SPINE_RUNTIME_JOB_LOG_KEEP_DAYS:-14}"
-EMAIL_INTENT_DIR="${SPINE_OUTBOX:-$SPINE_ROOT/mailroom/outbox}/alerts/email-intents"
+EMAIL_INTENT_DIR="${SPINE_OUTBOX:-$HOME/code/.runtime/spine/mailroom/outbox}/alerts/email-intents"
 
 spine_enqueue_email_intent() {
   local domain_id="$1"

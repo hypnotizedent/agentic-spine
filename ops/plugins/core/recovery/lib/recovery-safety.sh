@@ -7,7 +7,7 @@ RECOVERY_ROOT="${SPINE_ROOT:-$(cd "$RECOVERY_LIB_DIR/../../../../.." && pwd)}"
 RECOVERY_STATE_ROOT="${RECOVERY_STATE_ROOT:-$RECOVERY_ROOT/ops/plugins/core/recovery/state}"
 RECOVERY_COOLDOWN_DIR="${RECOVERY_COOLDOWN_DIR:-$RECOVERY_STATE_ROOT/cooldown}"
 RECOVERY_ATTEMPTS_DIR="${RECOVERY_ATTEMPTS_DIR:-$RECOVERY_STATE_ROOT/attempts}"
-RECOVERY_AUDIT_LOG="${RECOVERY_AUDIT_LOG:-$RECOVERY_ROOT/mailroom/logs/recovery-dispatch.ndjson}"
+RECOVERY_AUDIT_LOG="${RECOVERY_AUDIT_LOG:-${SPINE_LOGS:-$HOME/code/.runtime/spine/logs}/recovery-dispatch.ndjson}"
 
 recovery_now_epoch() {
   date +%s
