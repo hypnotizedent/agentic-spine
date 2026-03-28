@@ -42,12 +42,14 @@ def ensure_contains(output: str, needle: str, case: str) -> None:
 
 def create_fixture(real_root: Path, fixture_root: Path) -> None:
     (fixture_root / "ops" / "bindings").mkdir(parents=True, exist_ok=True)
+    (fixture_root / "ops" / "lib").mkdir(parents=True, exist_ok=True)
     (fixture_root / "mailroom" / "state").mkdir(parents=True, exist_ok=True)
 
     for rel in [
         "ops/bindings/role.runtime.control.contract.yaml",
         "ops/bindings/terminal.role.contract.yaml",
         "ops/bindings/worktree.lifecycle.contract.yaml",
+        "ops/lib/runtime-paths.sh",
     ]:
         src = real_root / rel
         dst = fixture_root / rel
