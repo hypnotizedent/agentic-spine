@@ -4,7 +4,7 @@ authority_state: projection
 projection_of:
   - ops/bindings/terminal.worker.catalog.yaml
 owner: "@ronny"
-last_verified: 2026-03-24
+last_verified: 2026-03-28
 scope: worker-usage-spine-watcher-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -26,7 +26,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `spine.watcher.restart`
 - `spine.watcher.status`
 
-## Gates (16)
+## Gates (19)
 - `D124`
 - `D126`
 - `D127`
@@ -41,6 +41,9 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D415`
 - `D416`
 - `D418`
+- `D423`
+- `D48`
+- `D62`
 - `D63`
 - `D67`
 

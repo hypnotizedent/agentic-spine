@@ -93,9 +93,17 @@ done
 [[ -n "$GATE_ID" ]] || fail "--gate-id is required"
 [[ -n "$PRIMARY_DOMAIN" ]] || fail "--primary-domain is required"
 
-yq e -r ".gates[] | select(.id == \"$GATE_ID\") | .id" "$REGISTRY" | grep -q "$GATE_ID" || fail "gate id '$GATE_ID' not found in registry"
-yq e -r ".domain_metadata[] | select(.domain_id == \"$PRIMARY_DOMAIN\") | .domain_id" "$TOPOLOGY" | grep -q "$PRIMARY_DOMAIN" || fail "domain '$PRIMARY_DOMAIN' not found in topology"
-yq e -r ".domains | keys | .[]" "$DOMAIN_PROFILES" | grep -q "^${PRIMARY_DOMAIN}$" || fail "domain '$PRIMARY_DOMAIN' not found in domain profiles"
+# Validate gate exists in registry (capture to avoid SIGPIPE with pipefail+grep -q)
+registry_gates="$(yq e -r ".gates[] | select(.id == \"$GATE_ID\") | .id" "$REGISTRY")"
+echo "$registry_gates" | grep -q "$GATE_ID" || fail "gate id '$GATE_ID' not found in registry"
+
+# Validate domain exists in topology
+topology_domains="$(yq e -r ".domain_metadata[] | select(.domain_id == \"$PRIMARY_DOMAIN\") | .domain_id" "$TOPOLOGY")"
+echo "$topology_domains" | grep -q "$PRIMARY_DOMAIN" || fail "domain '$PRIMARY_DOMAIN' not found in topology"
+
+# Validate domain exists in profiles
+profile_domains="$(yq e -r ".domains | keys | .[]" "$DOMAIN_PROFILES")"
+echo "$profile_domains" | grep -q "^${PRIMARY_DOMAIN}$" || fail "domain '$PRIMARY_DOMAIN' not found in domain profiles"
 
 SECONDARY_JSON='[]'
 if [[ -n "$SECONDARY_DOMAINS" ]]; then
