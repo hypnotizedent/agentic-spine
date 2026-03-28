@@ -41,4 +41,18 @@ jq -e '.capability=="spine.control.cycle"' <<<"$cycle_json" >/dev/null || fail "
 jq -e '(.data.selected_action_ids | type)=="array"' <<<"$cycle_json" >/dev/null || fail "cycle selected actions array"
 pass "cycle dry-run envelope is valid"
 
+# Verify nested capability context propagation (OPS_CAP_STACK).
+# Child capabilities launched by spine.control.cycle with OPS_CAP_STACK should
+# execute as governed nested actions. This marker allows read-only caps to bypass
+# attach admission when launched from within a governed parent execution context.
+# The runtime_env() function in spine-control now sets OPS_CAP_STACK for all
+# child capability launches via run_capability_action().
+set +e
+with_stack_out="$(OPS_CAP_STACK=,spine.control.cycle, "$ROOT/bin/ops" cap run verify.pack.run loop_gap 2>&1)"
+with_stack_rc=$?
+set -e
+[[ "$with_stack_rc" -eq 0 ]] || fail "verify.pack.run should succeed with OPS_CAP_STACK (exit $with_stack_rc)"
+[[ "$with_stack_out" != *"attach admission required"* ]] || fail "nested execution should bypass attach admission"
+pass "nested execution context propagation"
+
 echo "spine-control smoke tests"
