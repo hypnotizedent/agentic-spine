@@ -442,6 +442,32 @@ def collect_friction_snapshot() -> dict[str, Any]:
     return snapshot
 
 
+def collect_dirty_context(repo_path: str) -> dict[str, Any]:
+    checker_script = ROOT / "ops/plugins/core/session/bin/session-context-aware-dirty-check"
+    if not checker_script.exists():
+        return {
+            "status": "unavailable",
+            "safe_to_proceed": False,
+            "reason": "checker_missing",
+            "context": {},
+        }
+
+    rc, payload, stderr = run_json_command(
+        [str(checker_script), "--json", "--repo-path", repo_path]
+    )
+    if rc not in (0, 1):
+        return {
+            "status": "failed",
+            "safe_to_proceed": False,
+            "reason": "checker_failed",
+            "message": stderr or "dirty context check failed",
+            "context": {},
+        }
+
+    payload["status"] = "pass" if payload.get("safe_to_proceed") else "blocked"
+    return payload
+
+
 def collect_attach_preflight() -> dict[str, Any]:
     lifecycle_script = ROOT / "ops/plugins/core/ops/bin/worktree-lifecycle-reconcile"
     d150_script = ROOT / "surfaces/verify/d150-code-root-hygiene-lock.sh"
@@ -493,6 +519,20 @@ def collect_attach_preflight() -> dict[str, Any]:
     blocking_codes = [str(item.get("code", "")) for item in lane_issues if item.get("code")]
     warning_codes = [str(item.get("code", "")) for item in lane_warnings + global_warnings if item.get("code")]
     global_issue_codes = [str(item.get("code", "")) for item in global_issues if item.get("code")]
+    dirty_context: dict[str, Any] = {}
+
+    if "root_checkout_dirty" in blocking_codes:
+        repo_path = str(summary.get("repo") or ROOT)
+        dirty_context = collect_dirty_context(repo_path)
+        if (
+            dirty_context.get("status") == "pass"
+            and dirty_context.get("safe_to_proceed") is True
+            and dirty_context.get("reason") == "governed_operation_hotspots"
+        ):
+            blocking_codes = [code for code in blocking_codes if code != "root_checkout_dirty"]
+            if "root_checkout_dirty_governed_hotspots" not in warning_codes:
+                warning_codes.append("root_checkout_dirty_governed_hotspots")
+            dirty_context["root_checkout_dirty_downgraded"] = True
 
     status = "pass"
     if blocking_codes:
@@ -511,6 +551,7 @@ def collect_attach_preflight() -> dict[str, Any]:
         "blocking_codes": blocking_codes,
         "warning_codes": warning_codes,
         "global_issue_codes": global_issue_codes,
+        "dirty_context": dirty_context,
         "lifecycle": lifecycle,
         "shared_lane_contention": {
             "blocking_count": summary.get("blocking_terminal_contention_count", 0),

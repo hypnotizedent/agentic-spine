@@ -24,12 +24,14 @@ make_checkout() {
 loop_checkout="$tmpdir/attach-clone-loop"
 clean_env_checkout="$tmpdir/attach-clone-clean-env"
 dirty_checkout="$tmpdir/attach-clone-dirty"
+hotspot_checkout="$tmpdir/attach-clone-hotspot"
 contention_checkout="$tmpdir/attach-clone-contention"
 bootstrap_checkout="$tmpdir/attach-clone-bootstrap"
 fail_checkout="$tmpdir/attach-clone-fail"
 make_checkout "$loop_checkout"
 make_checkout "$clean_env_checkout"
 make_checkout "$dirty_checkout"
+make_checkout "$hotspot_checkout"
 make_checkout "$contention_checkout"
 make_checkout "$bootstrap_checkout"
 make_checkout "$fail_checkout"
@@ -162,6 +164,33 @@ assert not (state_root / "terminal-heartbeats").exists() or not list((state_root
 assert not (state_root / "loop-heartbeats").exists() or not list((state_root / "loop-heartbeats").glob("*.yaml"))
 PY
 
+rm -f "$state_root/terminal-heartbeats"/*.yaml 2>/dev/null || true
+rm -rf "$state_root/loop-heartbeats"
+printf '# governed hotspot projection churn\n' >> "$hotspot_checkout/ops/bindings/network.unifi.shop.clients.observed.yaml"
+printf '# governed hotspot archive churn\n' >> "$hotspot_checkout/ops/archive/operational.gaps.archive.yaml"
+hotspot_json="$(
+  cd "$hotspot_checkout" && \
+  env OPS_TERMINAL_ROLE="SPINE-EXECUTION-01" SPINE_RUNTIME_ROLE="worker" SPINE_STATE="$state_root" "$SCRIPT" --skip-session-bootstrap --allow-no-loop --json
+)"
+
+python3 - <<'PY' "$hotspot_json"
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["status"] == "done"
+preflight = payload["data"]["preflight"]
+assert preflight["status"] == "warn"
+assert "root_checkout_dirty" not in preflight["blocking_codes"]
+assert "root_checkout_dirty_governed_hotspots" in preflight["warning_codes"]
+assert preflight["dirty_context"]["safe_to_proceed"] is True
+assert preflight["dirty_context"]["reason"] == "governed_operation_hotspots"
+assert preflight["dirty_context"]["root_checkout_dirty_downgraded"] is True
+PY
+
+rm -f "$state_root/terminal-heartbeats"/*.yaml 2>/dev/null || true
+rm -rf "$state_root/loop-heartbeats"
+
 env SPINE_STATE="$state_root" "$HEARTBEAT_POST" \
   --terminal-id SPINE-CONTROL-99 \
   --role control-plane \
@@ -171,7 +200,7 @@ env SPINE_STATE="$state_root" "$HEARTBEAT_POST" \
 
 contention_json="$(
   cd "$contention_checkout" && \
-  env SPINE_STATE="$state_root" "$SCRIPT" --skip-session-bootstrap --allow-no-loop --json || true
+  env OPS_TERMINAL_ROLE="SPINE-EXECUTION-01" SPINE_RUNTIME_ROLE="worker" SPINE_STATE="$state_root" "$SCRIPT" --skip-session-bootstrap --allow-no-loop --json || true
 )"
 
 python3 - <<'PY' "$contention_json"
@@ -222,7 +251,7 @@ PY
 
 dead_contention_json="$(
   cd "$contention_checkout" && \
-  env SPINE_STATE="$state_root" "$SCRIPT" --skip-session-bootstrap --allow-no-loop --json
+  env OPS_TERMINAL_ROLE="SPINE-EXECUTION-01" SPINE_RUNTIME_ROLE="worker" SPINE_STATE="$state_root" "$SCRIPT" --skip-session-bootstrap --allow-no-loop --json
 )"
 
 python3 - <<'PY' "$dead_contention_json"

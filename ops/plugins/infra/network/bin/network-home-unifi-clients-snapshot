@@ -2,23 +2,102 @@
 set -euo pipefail
 
 # network.home.unifi.clients.snapshot — wrapper for unifi-home-agent.sh clients
-# Mirrors network-unifi-clients-snapshot (shop) for home network.
+# Read-only by default: write runtime snapshot freshness only; tracked binding
+# promotion remains explicit via --apply.
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-AGENT="$SPINE_ROOT/ops/plugins/providers/bin/unifi-home-agent.sh"
-OBSERVED_BINDING="$SPINE_ROOT/ops/bindings/network.unifi.home.clients.observed.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONTROL_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
+TARGET_ROOT="${SPINE_ROOT:-${SPINE_TARGET_REPO:-$CONTROL_ROOT}}"
+source "$CONTROL_ROOT/ops/lib/spine-paths.sh"
+export SPINE_TARGET_REPO="$TARGET_ROOT"
+spine_paths_init >/dev/null 2>&1 || true
+
+OBSERVED_REL="ops/bindings/network.unifi.home.clients.observed.yaml"
+OBSERVED_BINDING="$TARGET_ROOT/$OBSERVED_REL"
+AGENT="${UNIFI_HOME_AGENT_BIN:-$TARGET_ROOT/ops/plugins/providers/bin/unifi-home-agent.sh}"
+MODE="check"
+OUTPUT_PATH=""
+AGENT_ARGS=()
+TMPDIR_WORK="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR_WORK"' EXIT
+
+usage() {
+  cat <<'USAGE'
+network-home-unifi-clients-snapshot
+
+Usage:
+  ./bin/ops cap run network.home.unifi.clients.snapshot
+  ./bin/ops cap run network.home.unifi.clients.snapshot -- --apply
+
+Flags:
+  --apply               Write tracked observed binding.
+  --check               Read-only mode (default): write runtime state only.
+  --state-path <path>   Override output path (defaults to runtime state path).
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --apply)
+      MODE="apply"
+      shift
+      ;;
+    --check)
+      MODE="check"
+      shift
+      ;;
+    --state-path|--output)
+      OUTPUT_PATH="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      AGENT_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ "$MODE" == "apply" ]]; then
+  OUTPUT_PATH="$OBSERVED_BINDING"
+elif [[ -z "$OUTPUT_PATH" ]]; then
+  OUTPUT_PATH="$(spine_resolve_domain_state "snapshots/$(basename "$OBSERVED_REL")")"
+fi
+
+[[ -n "$OUTPUT_PATH" ]] || { echo "FAIL: output path cannot be empty"; exit 1; }
+mkdir -p "$(dirname "$OUTPUT_PATH")"
 
 [[ -x "$AGENT" ]] || { echo "STOP (2): missing unifi-home-agent.sh"; exit 2; }
 [[ -f "$OBSERVED_BINDING" ]] || { echo "STOP (2): missing observed binding: $OBSERVED_BINDING"; exit 2; }
 command -v yq >/dev/null 2>&1 || { echo "STOP (2): missing dependency: yq"; exit 2; }
+TRACKED_HASH_BEFORE="$(shasum -a 256 "$OBSERVED_BINDING" | awk '{print $1}')"
 
 echo "network.home.unifi.clients.snapshot"
 echo
 
-"$AGENT" clients "$@"
+"$AGENT" clients "${AGENT_ARGS[@]}"
 
 NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TODAY_UTC="$(date -u +%Y-%m-%d)"
+STAGED_OUTPUT="$TMPDIR_WORK/network.unifi.home.clients.observed.yaml"
+cp "$OBSERVED_BINDING" "$STAGED_OUTPUT"
 yq -i \
   ".generated_at = \"$NOW_UTC\" | .updated_at = \"$TODAY_UTC\" | .last_verified = \"$TODAY_UTC\"" \
-  "$OBSERVED_BINDING"
+  "$STAGED_OUTPUT"
+
+cp "$STAGED_OUTPUT" "$OUTPUT_PATH"
+if [[ "$MODE" == "check" ]]; then
+  TRACKED_HASH_AFTER="$(shasum -a 256 "$OBSERVED_BINDING" | awk '{print $1}')"
+  [[ "$TRACKED_HASH_BEFORE" == "$TRACKED_HASH_AFTER" ]] || {
+    echo "FAIL: tracked binding mutated in check mode: $OBSERVED_BINDING" >&2
+    exit 1
+  }
+fi
+
+echo "mode: $MODE"
+echo "tracked_binding: $OBSERVED_BINDING"
+echo "output_path: $OUTPUT_PATH"
+echo "final_action: wrote"
