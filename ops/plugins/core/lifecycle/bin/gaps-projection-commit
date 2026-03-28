@@ -31,6 +31,8 @@ source "$ROOT/ops/lib/git-lock.sh"
 GAPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
 GAPS_FILE_REL="ops/bindings/operational.gaps.yaml"
 GAPS_FILE="$ROOT/$GAPS_FILE_REL"
+ARCHIVE_FILE_REL="ops/archive/operational.gaps.archive.yaml"
+ARCHIVE_FILE="$ROOT/$ARCHIVE_FILE_REL"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -63,22 +65,42 @@ project_output="$(python3 "$GAPS_BRIDGE" project 2>&1)" || fail "projection fail
 echo "$project_output" >&2
 
 # ── Step 2: Check for changes ──
-if git -C "$ROOT" diff --quiet -- "$GAPS_FILE_REL" 2>/dev/null; then
+gaps_changed=0
+archive_changed=0
+
+# Check active projection for modifications
+git -C "$ROOT" diff --quiet -- "$GAPS_FILE_REL" 2>/dev/null || gaps_changed=1
+
+# Check archive projection for modifications OR untracked status
+if [[ -f "$ARCHIVE_FILE" ]]; then
+  if git -C "$ROOT" ls-files --error-unmatch "$ARCHIVE_FILE_REL" >/dev/null 2>&1; then
+    # Archive is tracked, check if modified
+    git -C "$ROOT" diff --quiet -- "$ARCHIVE_FILE_REL" 2>/dev/null || archive_changed=1
+  else
+    # Archive is untracked (newly created)
+    archive_changed=1
+  fi
+fi
+
+if [[ "$gaps_changed" -eq 0 && "$archive_changed" -eq 0 ]]; then
   echo "gaps.projection.commit: no drift — YAML already matches SQLite authority"
   exit 0
 fi
 
-echo "Drift detected in $GAPS_FILE_REL" >&2
+changed_files=()
+[[ "$gaps_changed" -eq 1 ]] && changed_files+=("$GAPS_FILE_REL")
+[[ "$archive_changed" -eq 1 ]] && changed_files+=("$ARCHIVE_FILE_REL")
+echo "Drift detected in: ${changed_files[*]}" >&2
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "gaps.projection.commit: DRY_RUN — would commit the following changes:" >&2
-  git -C "$ROOT" diff --stat -- "$GAPS_FILE_REL"
+  git -C "$ROOT" diff --stat -- "${changed_files[@]}"
   exit 0
 fi
 
 # ── Step 3: Preflight — no unrelated changes ──
 porcelain="$(git -C "$ROOT" status --porcelain 2>/dev/null || true)"
-unrelated="$(printf '%s\n' "$porcelain" | grep -v "^ M $GAPS_FILE_REL" | grep -v "^$" || true)"
+unrelated="$(printf '%s\n' "$porcelain" | grep -v "^ M $GAPS_FILE_REL" | grep -v "^ M $ARCHIVE_FILE_REL" | grep -v "^?? $ARCHIVE_FILE_REL" | grep -v "^$" || true)"
 if [[ -n "$unrelated" ]]; then
   fail "working tree has unrelated changes — commit or stash first:
 $unrelated"
@@ -91,13 +113,17 @@ trap 'release_git_lock' EXIT INT TERM
 RUN_KEY="${SPINE_CAP_RUN_KEY:-CAP-projection-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-git -C "$ROOT" add "$GAPS_FILE_REL"
+# Stage both projection files (active + archive)
+for file in "${changed_files[@]}"; do
+  git -C "$ROOT" add "$file"
+done
 
 OPS_GOVERNED_MAIN_OVERRIDE="${OPS_GOVERNED_MAIN_OVERRIDE:-1}" \
   git -C "$ROOT" commit -m "$(cat <<EOF
 chore(gaps): project SQLite authority to YAML
 
-Regenerate $GAPS_FILE_REL from SQLite gap authority.
+Regenerate gaps projection (active + archive) from SQLite authority.
+Files: ${changed_files[*]}
 Projected at $TIMESTAMP.
 
 Gap-Mutation: projection
