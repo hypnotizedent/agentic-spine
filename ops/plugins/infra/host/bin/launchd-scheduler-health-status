@@ -230,6 +230,67 @@ def launchctl_last_exit_code(label: str) -> int | None:
     return None
 
 
+def read_recent_text(path: Path, max_bytes: int = 65536) -> str:
+    if not path.exists():
+        return ""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(size - max_bytes, 0))
+            data = handle.read()
+    except OSError:
+        return ""
+    return data.decode("utf-8", errors="replace")
+
+
+def classify_incident_monitor_status(
+    expectation: dict[str, Any],
+    plist_payload: dict[str, Any],
+    exit_code: int | None,
+) -> str | None:
+    if exit_code is None:
+        return None
+
+    incident_monitor = expectation.get("incident_monitor")
+    if not isinstance(incident_monitor, dict):
+        return None
+
+    allowed_exit_codes: set[int] = set()
+    for raw in incident_monitor.get("allowed_exit_codes", []) or []:
+        try:
+            allowed_exit_codes.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    if exit_code not in allowed_exit_codes:
+        return None
+
+    required_markers = [
+        str(marker).strip()
+        for marker in (incident_monitor.get("required_stdout_markers", []) or [])
+        if str(marker).strip()
+    ]
+    if not required_markers:
+        return None
+
+    stdout_path = Path(str(plist_payload.get("StandardOutPath", "") or "")).expanduser()
+    recent_output = read_recent_text(stdout_path)
+    if not recent_output:
+        return None
+
+    run_start_marker = str(incident_monitor.get("stdout_run_start_marker", "") or "").strip()
+    if run_start_marker:
+        start_idx = recent_output.rfind(run_start_marker)
+        if start_idx != -1:
+            recent_output = recent_output[start_idx:]
+
+    if not all(marker in recent_output for marker in required_markers):
+        return None
+
+    status = str(incident_monitor.get("status", "allowed_nonzero") or "").strip()
+    return status or "allowed_nonzero"
+
+
 def classify_status(now: datetime, evidence: JobEvidence, cadence_seconds: int) -> tuple[str, int | None, int]:
     threshold = max(int(cadence_seconds * 2 + 600), 1800)
     if evidence.timestamp is None:
@@ -253,6 +314,7 @@ def build_payload(root: Path) -> dict[str, Any]:
     contract = load_yaml(contract_path)
     schedule_timezone = str(registry.get("schedule_timezone", "") or contract.get("schedule_timezone", "") or "")
     recency_cfg = contract.get("recency", {}) if isinstance(contract, dict) else {}
+    scheduler_expectations = contract.get("scheduler_expectations", {}) if isinstance(contract, dict) else {}
     exempt_labels = set(recency_cfg.get("exempt_labels", []) or [])
     allow_nonzero_exit_labels = set(recency_cfg.get("allow_nonzero_exit_labels", []) or [])
     labels = registry.get("labels", []) if isinstance(registry.get("labels"), list) else []
@@ -301,10 +363,19 @@ def build_payload(root: Path) -> dict[str, Any]:
             )
 
         status, age_seconds, stale_threshold = classify_status(now, evidence, cadence_seconds)
+        expectation = scheduler_expectations.get(label, {}) if isinstance(scheduler_expectations, dict) else {}
         if label in exempt_labels and status in {"stale", "failed"}:
             status = "exempt"
-        elif label in allow_nonzero_exit_labels and status == "failed":
-            status = "allowed_nonzero"
+        elif status == "failed":
+            incident_monitor_status = classify_incident_monitor_status(
+                expectation if isinstance(expectation, dict) else {},
+                plist_payload,
+                evidence.exit_code,
+            )
+            if incident_monitor_status:
+                status = incident_monitor_status
+            elif label in allow_nonzero_exit_labels:
+                status = "allowed_nonzero"
 
         rows.append(
             {
