@@ -31,6 +31,13 @@ SCHEMA_VERSION = "1.0"
 VERIFY_PASS_STATUSES = {"done", "pass", "passed", "ok", "healthy", "success"}
 VERIFY_FAIL_STATUSES = {"failed", "fail", "error", "incident", "critical"}
 
+# Observability capabilities that report incident state via exit 1 (not execution failure)
+OBSERVABILITY_CAPABILITIES = {
+    "stability.control.snapshot",
+    "infra.core.slo.status",
+    "observability.stack.status",
+}
+
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1531,6 +1538,11 @@ def run_agent_health_preflight(agent_id: str, *, strict_agent_health: bool) -> t
     return True, {"health": payload}
 
 
+def is_observability_capability(capability: str) -> bool:
+    """Check if a capability is read-only observability that reports incidents via exit 1."""
+    return capability in OBSERVABILITY_CAPABILITIES
+
+
 def run_capability_action(capability: str, args: list[str], *, confirm: bool, dry_run: bool) -> dict[str, Any]:
     cmd = [str(ROOT / "bin/ops"), "cap", "run", capability] + args
     if dry_run:
@@ -1539,8 +1551,18 @@ def run_capability_action(capability: str, args: list[str], *, confirm: bool, dr
     input_text = "yes\n" if confirm else None
     rc, out, err = run_cmd(cmd, cwd=ROOT, input_text=input_text)
     combined = (out or "") + ("\n" + err if err else "")
+
+    # Determine status: distinguish observability incident reports from execution failures
+    if rc == 0:
+        status = "done"
+    elif rc == 1 and is_observability_capability(capability):
+        # Observability capabilities use exit 1 to signal incident state (not execution failure)
+        status = "incident"
+    else:
+        status = "failed"
+
     return {
-        "status": "done" if rc == 0 else "failed",
+        "status": status,
         "exit_code": rc,
         "command": cmd,
         "run_key": extract_run_key(combined),
@@ -1701,8 +1723,11 @@ def execute_plan_actions(
                 "route_target": route,
                 **run_data,
             }
+            # Count execution failures, but not incident reports from observability capabilities
             if row.get("status") in {"failed", "error"}:
                 fail_count += 1
+            # Note: "incident" status (observability capability reporting degraded infrastructure)
+            # does not increment fail_count, as it represents successful execution with incident signal
             results.append(row)
             continue
 

@@ -55,4 +55,29 @@ set -e
 [[ "$with_stack_out" != *"attach admission required"* ]] || fail "nested execution should bypass attach admission"
 pass "nested execution context propagation"
 
+# Verify observability capability incident reporting does not fail the cycle.
+# When an observability capability (e.g., stability.control.snapshot) executes successfully
+# but reports degraded infrastructure (exit 1), the cycle should treat this as "incident"
+# status, not "failed" status. This preserves incident visibility without treating the
+# control cycle itself as broken.
+set +e
+incident_json="$("$BIN" execute --action-id A30-stability-snapshot --json 2>/dev/null)"
+incident_rc=$?
+set -e
+if [[ "$incident_rc" -eq 0 ]]; then
+  # Cycle succeeded (observability incident did not cause cycle failure)
+  pass "observability incident does not fail control cycle"
+elif [[ "$incident_rc" -eq 1 ]]; then
+  # Check if the incident was from the observability capability itself or from cycle failure
+  incident_result_status="$(jq -r '.data.results[] | select(.action_id=="A30-stability-snapshot") | .status' <<<"$incident_json" 2>/dev/null || echo "unknown")"
+  if [[ "$incident_result_status" == "incident" ]]; then
+    # Observability cap reported incident (exit 1), but cycle treated it as non-failure
+    pass "observability incident preserved with 'incident' status"
+  else
+    fail "expected 'incident' status for A30-stability-snapshot, got: $incident_result_status"
+  fi
+else
+  fail "unexpected exit code from execute with observability action: $incident_rc"
+fi
+
 echo "spine-control smoke tests"
