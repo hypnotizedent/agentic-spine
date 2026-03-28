@@ -2,7 +2,7 @@
 
 _SNAPSHOT_SURFACE_LIB_DIR="${BASH_SOURCE%/*}"
 [[ "$_SNAPSHOT_SURFACE_LIB_DIR" == "${BASH_SOURCE}" ]] && _SNAPSHOT_SURFACE_LIB_DIR="$(pwd)"
-_SNAPSHOT_SURFACE_CONTROL_ROOT="$(cd "$_SNAPSHOT_SURFACE_LIB_DIR/../../../../.." && pwd)"
+_SNAPSHOT_SURFACE_CONTROL_ROOT="$(cd "$_SNAPSHOT_SURFACE_LIB_DIR/../../../../../.." && pwd)"
 source "$_SNAPSHOT_SURFACE_CONTROL_ROOT/ops/lib/spine-paths.sh"
 spine_paths_init >/dev/null 2>&1 || true
 
