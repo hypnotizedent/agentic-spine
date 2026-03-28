@@ -340,6 +340,7 @@ run_cap() {
     fi
     local role_runtime_contract="$SPINE_CODE/ops/bindings/role.runtime.control.contract.yaml"
     local terminal_role_contract="$SPINE_CODE/ops/bindings/terminal.role.contract.yaml"
+    local launchd_runtime_contract="$SPINE_CODE/ops/bindings/launchd.runtime.contract.yaml"
     local runtime_role="${SPINE_RUNTIME_ROLE:-}"
     local role_policy_enforced="false"
     local role_policy_override_used="false"
@@ -394,14 +395,79 @@ run_cap() {
     local attach_admission_required_safety_csv="mutating,destructive"
     local attach_admission_required_env_csv="SPINE_ENTRY_PACKET_PATH,SPINE_ENTRY_PACKET_HASH"
     local attach_admission_exempt_csv="session.start,session.v3.attach,session.role.override,aof.contract.acknowledge,friction.ingest,friction.reconcile,friction.baseline.capture,worktree.lifecycle.rehydrate,worktree.lifecycle.managed.sync,session.execution.lane.bootstrap,session.execution.lane.closeout,session.execution.lane.scan"
+    local autonomous_scheduler_enabled="false"
+    local autonomous_context_env="SPINE_AUTONOMOUS_EXECUTION_CONTEXT"
+    local autonomous_source_env="SPINE_AUTONOMOUS_SOURCE"
+    local autonomous_label_env="SPINE_SCHEDULER_LABEL"
+    local autonomous_parent_process_env="SPINE_AUTONOMOUS_PARENT_PROCESS"
+    local autonomous_ancestry_confirmed_env="SPINE_AUTONOMOUS_ANCESTRY_CONFIRMED"
+    local autonomous_required_context="launchd_scheduler"
+    local autonomous_required_source="governed_job_wrapper"
+    local autonomous_required_parent_process="launchd"
+    local autonomous_require_launchd_ancestry="true"
+    local autonomous_launchd_ancestry_depth="3"
+    local autonomous_required_registry_state="active"
+    local autonomous_required_registry_mode="scheduled"
+    local autonomous_required_template_source="spine"
+    local autonomous_require_scheduler_execution_membership="true"
+    local autonomous_scheduler_registry="$SPINE_CODE/ops/bindings/launchd.scheduler.registry.yaml"
+    local autonomous_ancestry_confirmed_lc=""
+    local autonomous_require_launchd_ancestry_lc
+    local autonomous_require_scheduler_execution_membership_lc
     if command -v yq >/dev/null 2>&1 && [[ -f "$role_runtime_contract" ]]; then
       attach_admission_enabled="$(yq e -r '.attach_admission.enforce_top_level // true' "$role_runtime_contract" 2>/dev/null || echo true)"
       attach_admission_required_safety_csv="$(yq e -r '.attach_admission.required_safety[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
       attach_admission_required_env_csv="$(yq e -r '.attach_admission.required_env[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
       attach_admission_exempt_csv="$(yq e -r '.attach_admission.exempt_capabilities[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
     fi
+    if command -v yq >/dev/null 2>&1 && [[ -f "$launchd_runtime_contract" ]]; then
+      autonomous_scheduler_enabled="$(yq e -r '.autonomous_admission.enabled // false' "$launchd_runtime_contract" 2>/dev/null || echo false)"
+      autonomous_context_env="$(yq e -r '.autonomous_admission.marker_env.context // "SPINE_AUTONOMOUS_EXECUTION_CONTEXT"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_context_env")"
+      autonomous_source_env="$(yq e -r '.autonomous_admission.marker_env.source // "SPINE_AUTONOMOUS_SOURCE"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_source_env")"
+      autonomous_label_env="$(yq e -r '.autonomous_admission.marker_env.label // "SPINE_SCHEDULER_LABEL"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_label_env")"
+      autonomous_parent_process_env="$(yq e -r '.autonomous_admission.marker_env.parent_process // "SPINE_AUTONOMOUS_PARENT_PROCESS"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_parent_process_env")"
+      autonomous_ancestry_confirmed_env="$(yq e -r '.autonomous_admission.marker_env.ancestry_confirmed // "SPINE_AUTONOMOUS_ANCESTRY_CONFIRMED"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_ancestry_confirmed_env")"
+      autonomous_required_context="$(yq e -r '.autonomous_admission.required_context // "launchd_scheduler"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_required_context")"
+      autonomous_required_source="$(yq e -r '.autonomous_admission.required_source // "governed_job_wrapper"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_required_source")"
+      autonomous_required_parent_process="$(yq e -r '.autonomous_admission.required_parent_process // "launchd"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_required_parent_process")"
+      autonomous_require_launchd_ancestry="$(yq e -r '.autonomous_admission.validation.require_launchd_ancestry // true' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_require_launchd_ancestry")"
+      autonomous_launchd_ancestry_depth="$(yq e -r '.autonomous_admission.validation.launchd_ancestry_depth // 3' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_launchd_ancestry_depth")"
+      autonomous_required_registry_state="$(yq e -r '.autonomous_admission.validation.required_registry_state // "active"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_required_registry_state")"
+      autonomous_required_registry_mode="$(yq e -r '.autonomous_admission.validation.required_registry_mode // "scheduled"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_required_registry_mode")"
+      autonomous_required_template_source="$(yq e -r '.autonomous_admission.validation.required_template_source // "spine"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_required_template_source")"
+      autonomous_require_scheduler_execution_membership="$(yq e -r '.autonomous_admission.validation.require_scheduler_execution_membership // true' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_require_scheduler_execution_membership")"
+      autonomous_scheduler_registry="$(yq e -r '.paths.scheduler_registry // "ops/bindings/launchd.scheduler.registry.yaml"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_scheduler_registry")"
+    fi
+    if [[ "$autonomous_scheduler_registry" != /* ]]; then
+      autonomous_scheduler_registry="$SPINE_CODE/$autonomous_scheduler_registry"
+    fi
     [[ -n "$attach_admission_required_safety_csv" ]] || attach_admission_required_safety_csv="read-only,mutating,destructive"
     [[ -n "$attach_admission_required_env_csv" ]] || attach_admission_required_env_csv="SPINE_ENTRY_PACKET_PATH,SPINE_ENTRY_PACKET_HASH"
+    [[ "$autonomous_launchd_ancestry_depth" =~ ^[0-9]+$ ]] || autonomous_launchd_ancestry_depth="3"
+    autonomous_require_launchd_ancestry_lc="$(printf '%s' "$autonomous_require_launchd_ancestry" | tr '[:upper:]' '[:lower:]')"
+    autonomous_require_scheduler_execution_membership_lc="$(printf '%s' "$autonomous_require_scheduler_execution_membership" | tr '[:upper:]' '[:lower:]')"
+    _cap_proc_comm_for_pid() {
+      local _pid="${1:-}"
+      [[ -n "$_pid" ]] || return 1
+      ps -o comm= -p "$_pid" 2>/dev/null | awk 'NR==1 {print $1}' | xargs basename
+    }
+    _cap_launchd_ancestry_valid() {
+      local _depth="${1:-3}"
+      local _pid="${PPID:-}"
+      local _ppid _comm
+      local _hop=0
+      while [[ "$_hop" -lt "$_depth" && "$_pid" =~ ^[0-9]+$ && "$_pid" -gt 1 ]]; do
+        _comm="$(_cap_proc_comm_for_pid "$_pid" || true)"
+        if [[ "$_comm" == "launchd" ]]; then
+          return 0
+        fi
+        _ppid="$(ps -o ppid= -p "$_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+        [[ -n "$_ppid" ]] || break
+        _pid="$_ppid"
+        _hop=$((_hop + 1))
+      done
+      return 1
+    }
     # Merge entry gate bypass binding (pre-session diagnostic capabilities)
     local _entry_gate_bypass_file="$SPINE_CODE/ops/bindings/entry.gate.bypass.yaml"
     if command -v yq >/dev/null 2>&1 && [[ -f "$_entry_gate_bypass_file" ]]; then
@@ -554,6 +620,11 @@ run_cap() {
       local attach_guard_applies=0
       local attach_guard_exempt=0
       local attach_key attach_value attach_entry_packet_path attach_entry_packet_hash attach_actual_hash
+      local autonomous_context autonomous_source autonomous_label autonomous_parent_process
+      local autonomous_ancestry_confirmed
+      local autonomous_marker_present=0
+      local autonomous_marker_valid=0
+      local autonomous_invalid_reason=""
       local -a attach_required_env=()
       local -a attach_missing_env=()
 
@@ -595,18 +666,74 @@ run_cap() {
 
           attach_entry_packet_path="${SPINE_ENTRY_PACKET_PATH:-}"
           attach_entry_packet_hash="${SPINE_ENTRY_PACKET_HASH:-}"
+          autonomous_context="${!autonomous_context_env:-}"
+          autonomous_source="${!autonomous_source_env:-}"
+          autonomous_label="${!autonomous_label_env:-}"
+          autonomous_parent_process="${!autonomous_parent_process_env:-}"
+          autonomous_ancestry_confirmed="${!autonomous_ancestry_confirmed_env:-}"
+          autonomous_ancestry_confirmed_lc="$(printf '%s' "$autonomous_ancestry_confirmed" | tr '[:upper:]' '[:lower:]')"
 
           if (( ${#attach_missing_env[@]} > 0 )); then
-            echo "BLOCKED: attach admission required"
-            echo "Capability: $name ($safety)"
-            echo "Reason: top-level mutating/destructive execution requires a V3 attach packet in the current terminal."
-            echo "Missing env: ${attach_missing_env[*]}"
-            echo ""
-            echo "Remediation:"
-            echo "  ./bin/ops cap run session.v3.attach -- --allow-no-loop"
-            echo "  # Or use the governed terminal-launch wrapper, which resolves into session.v3.attach automatically."
-            blocked_reason="attach_admission_required:${name}"
-            exit_code=7
+            if [[ "$autonomous_scheduler_enabled" == "true" && ( -n "$autonomous_context" || -n "$autonomous_source" || -n "$autonomous_label" || -n "$autonomous_parent_process" ) ]]; then
+              autonomous_marker_present=1
+              if [[ "$autonomous_context" != "$autonomous_required_context" ]]; then
+                autonomous_invalid_reason="autonomous_context_mismatch"
+              elif [[ "$autonomous_source" != "$autonomous_required_source" ]]; then
+                autonomous_invalid_reason="autonomous_source_mismatch"
+              elif [[ -z "$autonomous_label" ]]; then
+                autonomous_invalid_reason="scheduler_label_missing"
+              elif [[ "$autonomous_parent_process" != "$autonomous_required_parent_process" ]]; then
+                autonomous_invalid_reason="autonomous_parent_process_mismatch"
+              elif [[ ! -f "$autonomous_scheduler_registry" ]]; then
+                autonomous_invalid_reason="scheduler_registry_missing"
+              elif [[ "$autonomous_require_launchd_ancestry_lc" == "1" || "$autonomous_require_launchd_ancestry_lc" == "true" || "$autonomous_require_launchd_ancestry_lc" == "yes" ]] && [[ "$autonomous_ancestry_confirmed_lc" != "1" && "$autonomous_ancestry_confirmed_lc" != "true" && "$autonomous_ancestry_confirmed_lc" != "yes" ]] && ! _cap_launchd_ancestry_valid "$autonomous_launchd_ancestry_depth"; then
+                autonomous_invalid_reason="launchd_ancestry_missing"
+              else
+                local autonomous_registry_state autonomous_registry_mode autonomous_registry_template_source
+                local autonomous_scheduler_member
+                autonomous_registry_state="$(yq e -r ".labels[]? | select(.label == \"$autonomous_label\") | .state" "$autonomous_scheduler_registry" 2>/dev/null | head -n1 || true)"
+                autonomous_registry_mode="$(yq e -r ".labels[]? | select(.label == \"$autonomous_label\") | .mode" "$autonomous_scheduler_registry" 2>/dev/null | head -n1 || true)"
+                autonomous_registry_template_source="$(yq e -r ".labels[]? | select(.label == \"$autonomous_label\") | .template_source" "$autonomous_scheduler_registry" 2>/dev/null | head -n1 || true)"
+                autonomous_scheduler_member="$(yq e -r ".scheduler_execution.labels[]? | select(. == \"$autonomous_label\")" "$launchd_runtime_contract" 2>/dev/null | head -n1 || true)"
+                if [[ "$autonomous_registry_state" != "$autonomous_required_registry_state" ]]; then
+                  autonomous_invalid_reason="scheduler_registry_state_mismatch"
+                elif [[ "$autonomous_registry_mode" != "$autonomous_required_registry_mode" ]]; then
+                  autonomous_invalid_reason="scheduler_registry_mode_mismatch"
+                elif [[ "$autonomous_registry_template_source" != "$autonomous_required_template_source" ]]; then
+                  autonomous_invalid_reason="scheduler_registry_template_source_mismatch"
+                elif [[ ( "$autonomous_require_scheduler_execution_membership_lc" == "1" || "$autonomous_require_scheduler_execution_membership_lc" == "true" || "$autonomous_require_scheduler_execution_membership_lc" == "yes" ) && "$autonomous_scheduler_member" != "$autonomous_label" ]]; then
+                  autonomous_invalid_reason="scheduler_execution_membership_missing"
+                else
+                  autonomous_marker_valid=1
+                fi
+              fi
+            fi
+
+            if [[ "$autonomous_marker_valid" -eq 1 ]]; then
+              echo "ATTACH ADMISSION: governed autonomous scheduler label '$autonomous_label' validated"
+            elif [[ "$autonomous_marker_present" -eq 1 ]]; then
+              echo "BLOCKED: autonomous scheduler admission invalid"
+              echo "Capability: $name ($safety)"
+              echo "Scheduler label: ${autonomous_label:-missing}"
+              echo "Reason: ${autonomous_invalid_reason:-unknown}"
+              echo ""
+              echo "Remediation:"
+              echo "  Use the governed LaunchAgent wrapper path for scheduled execution."
+              echo "  For terminal execution, attach first: ./bin/ops cap run session.v3.attach -- --allow-no-loop"
+              blocked_reason="autonomous_scheduler_admission_invalid:${name}"
+              exit_code=7
+            else
+              echo "BLOCKED: attach admission required"
+              echo "Capability: $name ($safety)"
+              echo "Reason: top-level mutating/destructive execution requires a V3 attach packet in the current terminal."
+              echo "Missing env: ${attach_missing_env[*]}"
+              echo ""
+              echo "Remediation:"
+              echo "  ./bin/ops cap run session.v3.attach -- --allow-no-loop"
+              echo "  # Or use the governed terminal-launch wrapper, which resolves into session.v3.attach automatically."
+              blocked_reason="attach_admission_required:${name}"
+              exit_code=7
+            fi
           elif [[ ! -f "$attach_entry_packet_path" ]]; then
             echo "BLOCKED: attach admission packet missing"
             echo "Capability: $name ($safety)"

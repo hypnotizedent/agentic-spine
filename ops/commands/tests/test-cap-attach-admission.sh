@@ -124,6 +124,7 @@ runtime_roles:
 attach_admission:
   enforce_top_level: true
   required_safety: [mutating, destructive]
+  autonomous_scheduler_contract: ops/bindings/launchd.runtime.contract.yaml
   required_env:
     - SPINE_ENTRY_PACKET_PATH
     - SPINE_ENTRY_PACKET_HASH
@@ -132,6 +133,43 @@ attach_admission:
     - session.v3.attach
     - session.role.override
     - aof.contract.acknowledge
+YAML
+
+  cat > "$repo/ops/bindings/launchd.runtime.contract.yaml" <<'YAML'
+paths:
+  scheduler_registry: ops/bindings/launchd.scheduler.registry.yaml
+scheduler_execution:
+  labels:
+    - com.ronny.demo-autonomous
+autonomous_admission:
+  enabled: true
+  marker_env:
+    context: SPINE_AUTONOMOUS_EXECUTION_CONTEXT
+    source: SPINE_AUTONOMOUS_SOURCE
+    label: SPINE_SCHEDULER_LABEL
+    parent_process: SPINE_AUTONOMOUS_PARENT_PROCESS
+    ancestry_confirmed: SPINE_AUTONOMOUS_ANCESTRY_CONFIRMED
+  required_context: launchd_scheduler
+  required_source: governed_job_wrapper
+  required_parent_process: launchd
+  validation:
+    require_launchd_ancestry: false
+    launchd_ancestry_depth: 3
+    required_registry_state: active
+    required_registry_mode: scheduled
+    required_template_source: spine
+    require_scheduler_execution_membership: true
+YAML
+
+  cat > "$repo/ops/bindings/launchd.scheduler.registry.yaml" <<'YAML'
+labels:
+  - label: com.ronny.demo-autonomous
+    state: active
+    mode: scheduled
+    template_source: spine
+    template_path: ops/plugins/infra/host/launchd/com.ronny.demo-autonomous.plist
+    contract_required: true
+    monitor: true
 YAML
 
   cat > "$repo/ops/bindings/terminal.role.contract.yaml" <<'YAML'
@@ -205,6 +243,49 @@ else
 fi
 assert_contains "$out_block" "BLOCKED: attach admission required" "missing attach env is reported"
 assert_contains "$out_block" "session.v3.attach -- --allow-no-loop" "attach remediation is printed"
+
+out_autonomous_pass="$(
+  cd "$repo" && \
+  env -u SPINE_ENTRY_PACKET_PATH -u SPINE_ENTRY_PACKET_HASH \
+    SPINE_RUNTIME_ROLE="worker" \
+    SPINE_AUTONOMOUS_EXECUTION_CONTEXT="launchd_scheduler" \
+    SPINE_AUTONOMOUS_SOURCE="governed_job_wrapper" \
+    SPINE_AUTONOMOUS_PARENT_PROCESS="launchd" \
+    SPINE_AUTONOMOUS_ANCESTRY_CONFIRMED="true" \
+    SPINE_SCHEDULER_LABEL="com.ronny.demo-autonomous" \
+    SPINE_TARGET_REPO="$repo" \
+    SPINE_REPO="$repo" \
+    SPINE_CODE="$repo" \
+    bash ops/commands/cap.sh run demo.write 2>&1
+)"
+assert_contains "$out_autonomous_pass" "ATTACH ADMISSION: governed autonomous scheduler label 'com.ronny.demo-autonomous' validated" "governed autonomous scheduler context clears attach admission"
+assert_contains "$out_autonomous_pass" "demo-write-ok" "governed autonomous scheduler context executes capability"
+assert_not_contains "$out_autonomous_pass" "BLOCKED: attach admission" "governed autonomous scheduler context does not require attach packet"
+
+set +e
+out_autonomous_invalid="$(
+  cd "$repo" && \
+  env -u SPINE_ENTRY_PACKET_PATH -u SPINE_ENTRY_PACKET_HASH \
+    SPINE_RUNTIME_ROLE="worker" \
+    SPINE_AUTONOMOUS_EXECUTION_CONTEXT="launchd_scheduler" \
+    SPINE_AUTONOMOUS_SOURCE="governed_job_wrapper" \
+    SPINE_AUTONOMOUS_PARENT_PROCESS="launchd" \
+    SPINE_AUTONOMOUS_ANCESTRY_CONFIRMED="true" \
+    SPINE_SCHEDULER_LABEL="com.ronny.invalid-autonomous" \
+    SPINE_TARGET_REPO="$repo" \
+    SPINE_REPO="$repo" \
+    SPINE_CODE="$repo" \
+    bash ops/commands/cap.sh run demo.write 2>&1
+)"
+rc_autonomous_invalid=$?
+set -e
+if [[ "$rc_autonomous_invalid" -ne 0 ]]; then
+  pass "invalid scheduler identity blocks autonomous admission"
+else
+  fail "invalid scheduler identity blocks autonomous admission"
+fi
+assert_contains "$out_autonomous_invalid" "BLOCKED: autonomous scheduler admission invalid" "invalid scheduler identity is reported"
+assert_contains "$out_autonomous_invalid" "Scheduler label: com.ronny.invalid-autonomous" "invalid autonomous label is surfaced"
 
 set +e
 out_wave_block="$(
