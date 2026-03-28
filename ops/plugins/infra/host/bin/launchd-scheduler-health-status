@@ -39,6 +39,7 @@ class JobEvidence:
     timestamp: datetime | None
     exit_code: int | None
     source: str
+    execution_source: str = "unknown"
 
 
 def parse_args() -> argparse.Namespace:
@@ -115,10 +116,11 @@ def load_runtime_job_index(path: Path) -> dict[str, JobEvidence]:
                 exit_code = int(exit_code_val) if exit_code_val is not None else None
             except (TypeError, ValueError):
                 exit_code = None
+            execution_source = str(row.get("execution_source", "unknown")).strip()
 
             current = index.get(prefix)
             if current is None or (current.timestamp and started_at > current.timestamp) or current.timestamp is None:
-                index[prefix] = JobEvidence(timestamp=started_at, exit_code=exit_code, source="runtime-jobs")
+                index[prefix] = JobEvidence(timestamp=started_at, exit_code=exit_code, source="runtime-jobs", execution_source=execution_source)
     return index
 
 
@@ -189,11 +191,11 @@ def mtime_evidence(paths: list[str]) -> JobEvidence:
         ts = datetime.fromtimestamp(candidate.stat().st_mtime, tz=timezone.utc)
         if newest_ts is None or ts > newest_ts:
             newest_ts = ts
-    return JobEvidence(timestamp=newest_ts, exit_code=None, source="log-mtime" if newest_ts else "none")
+    return JobEvidence(timestamp=newest_ts, exit_code=None, source="log-mtime" if newest_ts else "none", execution_source="unknown")
 
 
 def choose_evidence(*evidences: JobEvidence) -> JobEvidence:
-    chosen = JobEvidence(timestamp=None, exit_code=None, source="none")
+    chosen = JobEvidence(timestamp=None, exit_code=None, source="none", execution_source="unknown")
     for evidence in evidences:
         if evidence.timestamp is None:
             continue
@@ -278,6 +280,11 @@ def build_payload(root: Path) -> dict[str, Any]:
         job_name = label.replace("com.ronny.", "", 1)
 
         runtime_evidence = runtime_index.get(job_name) or JobEvidence(timestamp=None, exit_code=None, source="none")
+        # Only use runtime-jobs evidence if it's from a scheduled launchd execution
+        runtime_is_scheduled = "launchd" in runtime_evidence.execution_source
+        if not runtime_is_scheduled and runtime_evidence.source == "runtime-jobs":
+            runtime_evidence = JobEvidence(timestamp=None, exit_code=None, source="none")
+
         log_paths = [
             str(plist_payload.get("StandardOutPath", "") or ""),
             str(plist_payload.get("StandardErrorPath", "") or ""),
@@ -290,6 +297,7 @@ def build_payload(root: Path) -> dict[str, Any]:
                 timestamp=evidence.timestamp,
                 exit_code=launchctl_exit,
                 source=evidence.source if evidence.source != "none" else "launchctl",
+                execution_source=evidence.execution_source,
             )
 
         status, age_seconds, stale_threshold = classify_status(now, evidence, cadence_seconds)

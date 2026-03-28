@@ -116,9 +116,10 @@ spine_job_run() {
   mkdir -p "$(dirname "$RUNTIME_JOB_LOG")"
   spine_rotate_runtime_job_log
 
-  local status_text
+  local status_text execution_source
   status_text="done"
   [[ "$rc" -eq 0 ]] || status_text="failed"
+  execution_source="${SPINE_AUTONOMOUS_EXECUTION_CONTEXT:-manual}"
 
   if command -v jq >/dev/null 2>&1; then
     jq -cn \
@@ -128,10 +129,11 @@ spine_job_run() {
       --argjson duration_s "$duration_s" \
       --argjson exit_code "$rc" \
       --arg status "$status_text" \
-      '{job_name:$job_name,started_at:$started_at,ended_at:$ended_at,duration_s:$duration_s,exit_code:$exit_code,status:$status}' >> "$RUNTIME_JOB_LOG"
+      --arg execution_source "$execution_source" \
+      '{job_name:$job_name,started_at:$started_at,ended_at:$ended_at,duration_s:$duration_s,exit_code:$exit_code,status:$status,execution_source:$execution_source}' >> "$RUNTIME_JOB_LOG"
   else
-    printf '{"job_name":"%s","started_at":"%s","ended_at":"%s","duration_s":%s,"exit_code":%s,"status":"%s"}\n' \
-      "$job_name" "$started_at" "$ended_at" "$duration_s" "$rc" "$status_text" >> "$RUNTIME_JOB_LOG"
+    printf '{"job_name":"%s","started_at":"%s","ended_at":"%s","duration_s":%s,"exit_code":%s,"status":"%s","execution_source":"%s"}\n' \
+      "$job_name" "$started_at" "$ended_at" "$duration_s" "$rc" "$status_text" "$execution_source" >> "$RUNTIME_JOB_LOG"
   fi
 
   if command -v spine_log_event >/dev/null 2>&1; then
