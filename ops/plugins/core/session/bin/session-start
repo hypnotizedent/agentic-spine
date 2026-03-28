@@ -40,6 +40,12 @@ MEMORY_CONTINUITY_CONTRACT="$ROOT/ops/bindings/memory.continuity.contract.yaml"
 SESSIONS_DIR="$SPINE_STATE/sessions"
 ARCHIVE_DIR="$SESSIONS_DIR/.archive"
 SESSION_TTL=${SPINE_SESSION_TTL:-14400}  # 4 hours default
+HEARTBEAT_POST_BIN="$ROOT/ops/plugins/core/session/bin/terminal-heartbeat-post"
+HEARTBEAT_REFRESH_INTERVAL_MINUTES="$(yq e -r '.heartbeat.interval_minutes // 30' "$TERMINAL_ROLE_CONTRACT" 2>/dev/null || echo 30)"
+if ! [[ "$HEARTBEAT_REFRESH_INTERVAL_MINUTES" =~ ^[0-9]+$ ]]; then
+  HEARTBEAT_REFRESH_INTERVAL_MINUTES=30
+fi
+HEARTBEAT_REFRESH_INTERVAL_SECONDS=$((HEARTBEAT_REFRESH_INTERVAL_MINUTES * 60))
 
 parse_epoch_utc() {
   local ts="${1:-}"
@@ -83,10 +89,12 @@ PY
 }
 
 resolve_terminal_context() {
-  local terminal_id label runtime_role role_type
+  local terminal_id label runtime_role role_type terminal_scope
   terminal_id="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-}}}}"
   label="${SPINE_TERMINAL_LABEL:-}"
   runtime_role="${SPINE_RUNTIME_ROLE:-}"
+  role_type="${SPINE_TERMINAL_TYPE:-}"
+  terminal_scope="${SPINE_TERMINAL_SCOPE:-}"
 
   if [[ -n "$terminal_id" && -z "$label" && -f "$TERMINAL_LAUNCHER_VIEW" ]] && command -v yq >/dev/null 2>&1; then
     label="$(yq e -r ".terminals.\"${terminal_id}\".label // \"\"" "$TERMINAL_LAUNCHER_VIEW" 2>/dev/null || true)"
@@ -96,6 +104,15 @@ resolve_terminal_context() {
   fi
   if [[ -z "$label" ]]; then
     label="Spine Session"
+  fi
+
+  if [[ -n "$terminal_id" && -f "$TERMINAL_ROLE_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+    if [[ -z "$role_type" || "$role_type" == "null" ]]; then
+      role_type="$(yq e -r ".roles[]? | select(.id == \"${terminal_id}\") | .type // \"\"" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null | head -n1 || true)"
+    fi
+    if [[ -z "$terminal_scope" || "$terminal_scope" == "null" ]]; then
+      terminal_scope="$(yq e -r ".roles[]? | select(.id == \"${terminal_id}\") | .write_scope[]?" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null | paste -sd, - || true)"
+    fi
   fi
 
   if [[ -z "$runtime_role" && -n "$terminal_id" && -f "$TERMINAL_ROLE_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
@@ -113,23 +130,35 @@ resolve_terminal_context() {
   if [[ -z "$runtime_role" || "$runtime_role" == "null" ]]; then
     runtime_role="researcher"
   fi
+  if [[ -z "$role_type" || "$role_type" == "null" ]]; then
+    role_type="unknown"
+  fi
+  if [[ -z "$terminal_scope" || "$terminal_scope" == "null" ]]; then
+    terminal_scope="unspecified"
+  fi
 
-  printf '%s|%s|%s' "$terminal_id" "$label" "$runtime_role"
+  printf '%s|%s|%s|%s|%s' "$terminal_id" "$label" "$runtime_role" "$role_type" "$terminal_scope"
 }
 
 emit_terminal_title_contract() {
-  local ctx terminal_id label runtime_role terminal_title
+  local ctx terminal_id label runtime_role terminal_type terminal_scope terminal_title
   ctx="$(resolve_terminal_context)"
   terminal_id="${ctx%%|*}"
   ctx="${ctx#*|}"
   label="${ctx%%|*}"
-  runtime_role="${ctx#*|}"
+  ctx="${ctx#*|}"
+  runtime_role="${ctx%%|*}"
+  ctx="${ctx#*|}"
+  terminal_type="${ctx%%|*}"
+  terminal_scope="${ctx#*|}"
   terminal_title="${label} [${runtime_role}]"
 
   export SPINE_TERMINAL_NAME="${SPINE_TERMINAL_NAME:-$terminal_id}"
   export OPS_TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-$terminal_id}"
   export SPINE_TERMINAL_LABEL="${SPINE_TERMINAL_LABEL:-$label}"
   export SPINE_RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-$runtime_role}"
+  export SPINE_TERMINAL_TYPE="${SPINE_TERMINAL_TYPE:-$terminal_type}"
+  export SPINE_TERMINAL_SCOPE="${SPINE_TERMINAL_SCOPE:-$terminal_scope}"
   export SPINE_TERMINAL_TITLE="$terminal_title"
 
   # OSC title sequence; safe no-op on terminals that do not support title updates.
@@ -673,6 +702,8 @@ if [[ "$skip_managed_worktree_sync" != "true" ]]; then
   run_managed_worktree_sync "session.start.lane.${LANE}" || exit 1
 fi
 
+SESSION_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")"
+
 # ─── Session pruning + liveness ─────────────────────────────
 # Archive stale sessions: PID dead (immediate); also archive TTL-expired sessions.
 # Returns active session count via stdout when called as subshell.
@@ -828,6 +859,8 @@ cat > "$ENV_FILE" <<SH
 export SPINE_SESSION_ID="$SESSION_ID"
 export SPINE_LANE="$LANE"
 export SPINE_SESSION_DIR="$SESSION_DIR"
+export SPINE_STATE="$SPINE_STATE"
+export SPINE_TARGET_REPO="$SESSION_REPO_ROOT"
 export SPINE_ACTIVE_SESSION_COUNT=$ACTIVE_COUNT
 export SPINE_MULTI_AGENT=$MULTI_AGENT
 export SPINE_OPERATOR_TZ="$SPINE_OPERATOR_TZ"
@@ -835,6 +868,8 @@ export SPINE_TERMINAL_NAME="${SPINE_TERMINAL_NAME:-}"
 export OPS_TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-}"
 export SPINE_TERMINAL_LABEL="${SPINE_TERMINAL_LABEL:-}"
 export SPINE_RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-}"
+export SPINE_TERMINAL_TYPE="${SPINE_TERMINAL_TYPE:-}"
+export SPINE_TERMINAL_SCOPE="${SPINE_TERMINAL_SCOPE:-}"
 export SPINE_TERMINAL_TITLE="${SPINE_TERMINAL_TITLE:-}"
 SH
 
@@ -845,14 +880,56 @@ echo ""
 
 # Preexec hook snippet (P3)
 PREEXEC_FILE="$SESSION_DIR/preexec-hook.zsh"
-cat > "$PREEXEC_FILE" <<'ZSH'
+cat > "$PREEXEC_FILE" <<ZSH
 # Spine session command telemetry — source this in your zsh session
 # Usage: source <session-dir>/preexec-hook.zsh
+_SPINE_HEARTBEAT_POST_BIN="$HEARTBEAT_POST_BIN"
+_SPINE_HEARTBEAT_REFRESH_SECONDS=$HEARTBEAT_REFRESH_INTERVAL_SECONDS
+
+_spine_maybe_refresh_heartbeat() {
+  [[ -n "\${SPINE_SESSION_DIR:-}" ]] || return
+  [[ -x "\$_SPINE_HEARTBEAT_POST_BIN" ]] || return
+
+  local terminal_id="\${OPS_TERMINAL_ROLE:-\${SPINE_TERMINAL_NAME:-}}"
+  [[ -n "\$terminal_id" ]] || return
+
+  local stamp_file="\${SPINE_SESSION_DIR}/terminal-heartbeat-refresh.epoch"
+  local refresh_log="\${SPINE_SESSION_DIR}/heartbeat-refresh.log"
+  local now last=0
+  now=\$(date +%s)
+  if [[ -f "\$stamp_file" ]]; then
+    last="\$(<"\$stamp_file")"
+  fi
+  [[ "\$last" =~ ^[0-9]+$ ]] || last=0
+
+  # Keep interactive refresh bounded to the configured heartbeat interval.
+  if (( last > 0 && now - last < _SPINE_HEARTBEAT_REFRESH_SECONDS )); then
+    return
+  fi
+
+  local heartbeat_args=(
+    --terminal-id "\$terminal_id"
+    --role "\${SPINE_TERMINAL_TYPE:-unknown}"
+    --runtime-role "\${SPINE_RUNTIME_ROLE:-unknown}"
+    --scope "\${SPINE_TERMINAL_SCOPE:-unspecified}"
+    --repo-root "$SESSION_REPO_ROOT"
+    --status active
+  )
+  if [[ -n "\${SPINE_LOOP_ID:-}" ]]; then
+    heartbeat_args+=(--loop-id "\${SPINE_LOOP_ID}")
+  fi
+
+  if "\$_SPINE_HEARTBEAT_POST_BIN" "\${heartbeat_args[@]}" >/dev/null 2>>"\$refresh_log"; then
+    printf '%s\n' "\$now" > "\$stamp_file"
+  fi
+}
+
 _spine_preexec() {
-  local cmd="$1"
-  local log="${SPINE_SESSION_DIR}/commands.log"
-  [[ -n "${SPINE_SESSION_DIR:-}" ]] || return
-  printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(pwd)" "$cmd" >> "$log"
+  local cmd="\$1"
+  local log="\${SPINE_SESSION_DIR}/commands.log"
+  [[ -n "\${SPINE_SESSION_DIR:-}" ]] || return
+  printf '%s\t%s\t%s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$(pwd)" "\$cmd" >> "\$log"
+  _spine_maybe_refresh_heartbeat
 }
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec _spine_preexec

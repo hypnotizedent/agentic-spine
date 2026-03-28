@@ -21,6 +21,7 @@ import datetime as dt
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -215,6 +216,32 @@ def parse_env_file(path: Path) -> dict[str, str]:
     return exports
 
 
+def shell_export_line(key: str, value: str) -> str:
+    return f"export {key}={shlex.quote(str(value))}"
+
+
+def merge_env_exports(path: str, exports: dict[str, str]) -> None:
+    if not path:
+        return
+    env_path = Path(path)
+    if not env_path.exists():
+        return
+    existing_lines = env_path.read_text(encoding="utf-8").splitlines()
+    managed_keys = {key for key in exports if key}
+    filtered_lines: list[str] = []
+    for raw in existing_lines:
+        stripped = raw.strip()
+        if stripped.startswith("export ") and "=" in stripped:
+            key = stripped[len("export ") :].split("=", 1)[0].strip()
+            if key in managed_keys:
+                continue
+        filtered_lines.append(raw)
+    for key, value in exports.items():
+        if key:
+            filtered_lines.append(shell_export_line(key, value))
+    env_path.write_text("\n".join(filtered_lines).rstrip() + "\n", encoding="utf-8")
+
+
 def run_session_bootstrap(args: argparse.Namespace, session_start_script: Path) -> dict[str, Any]:
     if args.skip_session_bootstrap:
         return {
@@ -261,6 +288,125 @@ def run_session_bootstrap(args: argparse.Namespace, session_start_script: Path) 
         "session_env_file": env_file,
         "exports": exports,
     }
+
+
+def resolve_terminal_contract_context(terminal_id: str) -> dict[str, str]:
+    contract = load_yaml(ROOT / "ops/bindings/terminal.role.contract.yaml", {})
+    for entry in contract.get("roles", []) or []:
+        if str(entry.get("id", "")).strip() != terminal_id:
+            continue
+        write_scope = [str(item).strip() for item in (entry.get("write_scope") or []) if str(item).strip()]
+        return {
+            "terminal_type": str(entry.get("type", "")).strip(),
+            "scope": ",".join(write_scope),
+        }
+    return {
+        "terminal_type": "",
+        "scope": "",
+    }
+
+
+def resolve_attach_heartbeat_context(args: argparse.Namespace, startup_exports: dict[str, str]) -> dict[str, str]:
+    terminal_id = str(
+        startup_exports.get("OPS_TERMINAL_ROLE")
+        or startup_exports.get("SPINE_TERMINAL_NAME")
+        or args.terminal_name
+        or ""
+    ).strip()
+    if not terminal_id:
+        raise RuntimeError("attach heartbeat failed: terminal identity unresolved after attach/bootstrap")
+
+    runtime_role = str(startup_exports.get("SPINE_RUNTIME_ROLE") or args.runtime_role or "unknown").strip() or "unknown"
+    terminal_type = str(startup_exports.get("SPINE_TERMINAL_TYPE") or "").strip()
+    scope = str(startup_exports.get("SPINE_TERMINAL_SCOPE") or os.environ.get("SPINE_TERMINAL_SCOPE") or "").strip()
+    scope_source = ""
+    terminal_type_source = ""
+
+    contract_context = resolve_terminal_contract_context(terminal_id)
+    if terminal_type:
+        terminal_type_source = "session_start_export"
+    elif contract_context.get("terminal_type"):
+        terminal_type = contract_context["terminal_type"]
+        terminal_type_source = "terminal.role.contract"
+    else:
+        terminal_type = "unknown"
+        terminal_type_source = "fallback_unknown"
+
+    if scope:
+        scope_source = "session_start_export"
+    elif contract_context.get("scope"):
+        scope = contract_context["scope"]
+        scope_source = "terminal.role.contract"
+    else:
+        scope = "unspecified"
+        scope_source = "fallback_unspecified"
+
+    runtime_role_source = "session_start_export" if startup_exports.get("SPINE_RUNTIME_ROLE") else "attach_context"
+    terminal_id_source = "session_start_export" if startup_exports.get("OPS_TERMINAL_ROLE") else "attach_context"
+    return {
+        "terminal_id": terminal_id,
+        "terminal_type": terminal_type,
+        "runtime_role": runtime_role,
+        "scope": scope,
+        "scope_source": scope_source,
+        "terminal_type_source": terminal_type_source,
+        "runtime_role_source": runtime_role_source,
+        "terminal_id_source": terminal_id_source,
+    }
+
+
+def write_heartbeat_refresh_stamp(startup_exports: dict[str, str], heartbeat_at: str) -> str:
+    session_dir = str(startup_exports.get("SPINE_SESSION_DIR", "")).strip()
+    if not session_dir:
+        return ""
+    try:
+        heartbeat_dt = dt.datetime.fromisoformat(heartbeat_at.replace("Z", "+00:00"))
+    except ValueError:
+        heartbeat_dt = dt.datetime.now(dt.timezone.utc)
+    stamp_path = Path(session_dir) / "terminal-heartbeat-refresh.epoch"
+    stamp_path.write_text(str(int(heartbeat_dt.timestamp())), encoding="utf-8")
+    return str(stamp_path)
+
+
+def post_attach_heartbeat(args: argparse.Namespace, startup_exports: dict[str, str], loop_id: str) -> dict[str, Any]:
+    heartbeat_script = ROOT / "ops/plugins/core/session/bin/terminal-heartbeat-post"
+    if not heartbeat_script.exists():
+        raise RuntimeError("attach heartbeat failed: terminal-heartbeat-post is unavailable")
+
+    context = resolve_attach_heartbeat_context(args, startup_exports)
+    cmd = [
+        str(heartbeat_script),
+        "--terminal-id",
+        context["terminal_id"],
+        "--role",
+        context["terminal_type"],
+        "--runtime-role",
+        context["runtime_role"],
+        "--scope",
+        context["scope"],
+        "--repo-root",
+        args.repo_root,
+        "--status",
+        "active",
+        "--json",
+    ]
+    if loop_id:
+        cmd.extend(["--loop-id", loop_id])
+
+    rc, payload, stderr = run_json_command(cmd)
+    if rc != 0:
+        raise RuntimeError(f"attach heartbeat failed: {stderr or 'terminal-heartbeat-post returned non-zero'}")
+
+    payload.update(
+        {
+            "status": "done",
+            "scope_source": context["scope_source"],
+            "terminal_type_source": context["terminal_type_source"],
+            "runtime_role_source": context["runtime_role_source"],
+            "terminal_id_source": context["terminal_id_source"],
+        }
+    )
+    return payload
 
 
 def run_stale_cleanup() -> dict[str, Any]:
@@ -594,6 +740,8 @@ def main() -> int:
         entry_payload = compile_entry_packet(args, entry_script, loop_id)
         entry_data = entry_payload.get("data", {})
         packet = entry_data.get("packet", {})
+        heartbeat = post_attach_heartbeat(args, startup_exports, loop_id)
+        heartbeat_stamp_file = write_heartbeat_refresh_stamp(startup_exports, str(heartbeat.get("heartbeat_at", "")))
         exports = {
             "SPINE_LOOP_ID": loop_id,
             "SPINE_ENTRY_PACKET_PATH": entry_data.get("packet_path", ""),
@@ -601,10 +749,26 @@ def main() -> int:
             "SPINE_EXECUTION_MODE": packet.get("execution_mode", ""),
             "SPINE_V3_ATTACH_RESOLUTION": loop_resolution,
             "SPINE_V3_SANITIZED_OUTPUT_PATH": sanitized_output_path,
+            "SPINE_HEARTBEAT_FILE": str(heartbeat.get("heartbeat_file", "")),
+            "SPINE_LOOP_HEARTBEAT_FILE": str(heartbeat.get("loop_heartbeat_file", "")),
         }
         if args.fast_lane:
             exports["SPINE_FAST_LANE"] = "1"
         exports.update({k: v for k, v in startup_exports.items() if k})
+        if startup.get("session_env_file"):
+            merge_env_exports(
+                str(startup.get("session_env_file", "")),
+                {
+                    "SPINE_LOOP_ID": loop_id,
+                    "SPINE_ENTRY_PACKET_PATH": entry_data.get("packet_path", ""),
+                    "SPINE_ENTRY_PACKET_HASH": entry_data.get("packet_hash", ""),
+                    "SPINE_EXECUTION_MODE": packet.get("execution_mode", ""),
+                    "SPINE_V3_ATTACH_RESOLUTION": loop_resolution,
+                    "SPINE_V3_SANITIZED_OUTPUT_PATH": sanitized_output_path,
+                    "SPINE_HEARTBEAT_FILE": str(heartbeat.get("heartbeat_file", "")),
+                    "SPINE_LOOP_HEARTBEAT_FILE": str(heartbeat.get("loop_heartbeat_file", "")),
+                },
+            )
         payload = {
             "capability": "session.v3.attach",
             "schema_version": "1.0",
@@ -625,6 +789,8 @@ def main() -> int:
                     "capability_map": capability_map,
                     "sanitized_output_path": sanitized_output_path,
                     "entry_packet": entry_data,
+                    "heartbeat": heartbeat,
+                    "heartbeat_refresh_stamp_file": heartbeat_stamp_file,
                     "exports": exports,
                     "next_step": packet.get("first_command", ""),
                 },
@@ -674,6 +840,9 @@ def main() -> int:
     print(f"packet_hash: {entry_data.get('packet_hash', '')}")
     print(f"execution_mode: {packet.get('execution_mode', '')}")
     print(f"transport: {packet.get('transport', '')}")
+    print(f"heartbeat_file: {payload['data']['heartbeat'].get('heartbeat_file', '')}")
+    print(f"loop_heartbeat_file: {payload['data']['heartbeat'].get('loop_heartbeat_file', 'none') or 'none'}")
+    print(f"heartbeat_scope_source: {payload['data']['heartbeat'].get('scope_source', 'unknown')}")
     queue_summary = friction_snapshot.get("friction_queue", {}).get("summary", {}) if isinstance(friction_snapshot.get("friction_queue"), dict) else {}
     lifecycle_summary = friction_snapshot.get("lifecycle", {}).get("summary", {}) if isinstance(friction_snapshot.get("lifecycle"), dict) else {}
     print(f"friction_queued: {queue_summary.get('queued', 0)}")
