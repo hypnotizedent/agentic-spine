@@ -10,5 +10,8 @@ Canonical domain policy for `core`.
 ## Capability Catalog
 Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 
-_No domain-external capabilities currently map to `core`._
+| Capability |
+|---|
+| `translator.ingest` |
+| `translator.status` |
 <!-- DOMAIN_CAPABILITY_CATALOG_END -->

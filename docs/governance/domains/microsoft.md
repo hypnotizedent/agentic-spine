@@ -54,6 +54,7 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 | `microsoft.calendar.list` |
 | `microsoft.calendar.rsvp` |
 | `microsoft.calendar.update` |
+| `microsoft.mail.attachment.add` |
 | `microsoft.mail.attachment.download` |
 | `microsoft.mail.attachments.list` |
 | `microsoft.mail.draft.create` |
@@ -61,6 +62,7 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 | `microsoft.mail.export.mime` |
 | `microsoft.mail.get` |
 | `microsoft.mail.list.all` |
+| `microsoft.mail.reply.draft` |
 | `microsoft.mail.search` |
 | `microsoft.mail.send` |
 <!-- DOMAIN_CAPABILITY_CATALOG_END -->

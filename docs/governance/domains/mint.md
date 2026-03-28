@@ -39,14 +39,33 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 
 | Capability |
 |---|
+| `MINT-MORPHEUS-01.launch` |
+| `mint.artwork.place` |
+| `mint.customer.artwork.revision.prepare` |
+| `mint.customer.forwarded.attachment.resolve` |
+| `mint.customer.frontdesk.facts.get` |
+| `mint.customer.history.compile` |
+| `mint.customer.inbox.triage` |
+| `mint.customer.inbox.work_items` |
+| `mint.customer.reorder.resolve` |
+| `mint.customer.reply.draft` |
+| `mint.customer.thread.delta.capture` |
+| `mint.customer.voice.callback.enqueue` |
+| `mint.customer.voice.intake.capture` |
 | `mint.deploy.status` |
 | `mint.deploy.sync` |
+| `mint.intake.email.parse` |
 | `mint.intake.validate` |
 | `mint.live.baseline.status` |
 | `mint.loop.daily` |
 | `mint.migrate.dryrun` |
 | `mint.module.status.projection.build` |
 | `mint.modules.health` |
+| `mint.operator.drop.assist` |
+| `mint.operator.storage.status` |
+| `mint.order.create` |
+| `mint.outbound.email.draft` |
+| `mint.quote.generate` |
 | `mint.runtime.proof` |
 | `mint.seeds.query` |
 <!-- DOMAIN_CAPABILITY_CATALOG_END -->

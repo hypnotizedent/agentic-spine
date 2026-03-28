@@ -10,7 +10,5 @@ Canonical domain policy for `communications`.
 ## Capability Catalog
 Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 
-| Capability |
-|---|
-| `inbox-shield.status` |
+_No domain-external capabilities currently map to `communications`._
 <!-- DOMAIN_CAPABILITY_CATALOG_END -->
