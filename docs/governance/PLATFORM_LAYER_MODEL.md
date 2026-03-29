@@ -38,6 +38,39 @@ This document answers a different question:
 > When a capability exists, is its primitive function part of the engine, the
 > shared infrastructure substrate, or a product runtime?
 
+## Platform Philosophy
+
+The platform exists to let multiple products inherit consistent operational
+primitives by default instead of rebuilding them ad hoc each time.
+
+The target products are not theoretical. The current live direction already
+includes:
+- an automated home
+- a print shop business tool
+- a media pipeline
+
+This layer model exists so those runtimes stay symbiotic instead of diverging
+into three incompatible stacks.
+
+The governing philosophy behind the layer model is:
+- customization where product behavior must differ
+- cost efficiency through shared substrate
+- performance through local and workload-appropriate execution
+- independence from any single vendor, machine, or chat surface
+- retained operational know-how inside the repo
+- reliability through governed execution and verification
+- documentation as truth, not as commentary
+- declarative state where truth can be compared to runtime
+- idempotency as a required property, not a nice-to-have
+- golden images and close-to-correct births over endless drift repair
+- automation that survives session loss and operator handoff
+- maintenance that gets easier as shared primitives become explicit
+
+At the layer level, that means:
+- L1 makes governed execution possible
+- L2 normalizes repeated operational variables so products inherit consistency
+- L3 delivers product-specific behavior on top of those normalized primitives
+
 ## The Three Layers
 
 ### L1: Engine
@@ -79,6 +112,10 @@ L2 owns primitives like:
 L2 is where the spine turns repeated operational variables into consistent
 platform behavior.
 
+The purpose of L2 is normalization of shared primitives so L3 products are
+consistent by default. It is not "Ronny's framework" as a personal abstraction.
+It is the spine's reusable operational substrate.
+
 Typical current families:
 - `infra`
 - `network`
@@ -110,6 +147,87 @@ Typical current families:
 Provider-facing or app-specific clusters such as `microsoft`, `n8n`, and some
 parts of `communications` may attach to L3 directly or straddle L2/L3 depending
 on whether they provide shared substrate or product-local behavior.
+
+## Decision Tests
+
+The layer model should be applied using explicit tests, in this order.
+
+### L1 Test
+
+A capability is L1 if its primitive powers the spine engine itself.
+
+Use this test:
+- would removing this capability break governed execute, verify, receipt,
+  routing, attestation, loop control, or control-plane self-observation even if
+  no product runtimes were active?
+- does it primarily exist to operate the spine rather than a workload run on
+  the spine?
+
+If yes, classify it as `L1_engine`.
+
+Typical examples:
+- `spine.*`
+- `verify.*`
+- `loops.*`
+- `gaps.*`
+- major parts of `loop_gap`, `aof`, and `core`
+
+### L2 Test
+
+A capability is L2 if its primitive provides shared infrastructure that more
+than one L3 product already consumes, or would predictably need to consume.
+
+Use this test:
+- if this capability did not exist as shared infrastructure, would multiple
+  product runtimes have to reinvent the same primitive?
+- is the primitive about normalization of shared variables such as reachability,
+  identity, secrets, backup, communication, scheduling, health, or recovery?
+- does the current repo show multiple runtimes depending on the same scripts,
+  libs, bindings, policies, or provider rails underneath this capability family?
+
+If yes, classify it as `L2_shared_infrastructure`.
+
+Typical examples:
+- `secrets.*`
+- `network.*`
+- `backup.*`
+- much of `infra.*`
+
+### L3 Test
+
+A capability is L3 if its primitive is specific to one product runtime.
+
+Use this test:
+- would removing this capability affect only one product or workload family?
+- is the behavior specific to that runtime's business logic, automation model,
+  operator surface, or domain semantics?
+- would other products not reasonably inherit this capability unchanged?
+
+If yes, classify it as `L3_product_runtime`.
+
+Typical examples:
+- `mint.*`
+- `media.*`
+- `ha.*`
+- `finance.*`
+- `taxlegal.*`
+
+### Mixed And Edge Cases
+
+Some families are mixed and must be classified below the top-level domain label.
+
+Use this rule:
+- if one part of a family is a shared primitive and another part is product- or
+  provider-local behavior, do not force the whole family into one layer
+
+Known mixed examples:
+- `communications`
+  - shared alerts, delivery, and notification rails lean L2
+  - product- or stack-specific mail/archive behavior may remain L3
+- `microsoft`
+  - provider surface, not automatically a layer
+- `n8n`
+  - may be a product runtime in some cases and shared substrate in others
 
 ## The Critical Distinction
 
@@ -179,6 +297,22 @@ Representative evidence:
 - [`communications-mail-archiver-backup-status`](../../ops/plugins/domains/communications/bin/communications-mail-archiver-backup-status)
 - [`calendar-home-publish`](../../ops/plugins/domains/calendar/bin/calendar-home-publish)
 - [`n8n-infra-health`](../../ops/plugins/domains/n8n/bin/n8n-infra-health)
+
+## Known L2 Primitive Candidates
+
+The following primitive families should be treated as explicit L2 candidates for
+the later primitive-function pass:
+- reachability and identity resolution
+- secrets and credential handling
+- network and connectivity policy
+- backup and data protection
+- communication and notification rails
+- scheduling and recurring execution posture
+- observability, health, and runtime status
+- recovery, rollback, and disaster recovery
+- dry-run, planning, and deployment strategy surfaces
+- state inspection and current-vs-desired comparison
+- blast-radius control and safe rollout posture
 
 ## What The Current Capability Map Reveals
 
