@@ -1,3 +1,8 @@
+---
+subordinate_of: AGENTS.md
+scope: claude-session-entry
+---
+
 # Claude Entry Stub
 
 Governance is injected by hook via `.claude/settings.json` and `.claude/hooks/session-entry-hook.sh`.
