@@ -225,6 +225,16 @@ This prevents worktree accumulation and ensures main checkout sessions start cle
 ./bin/ops cap run verify.run -- domain <domain>
 ```
 
+## Remote Sync
+
+- If a repo-owned implementation pass lands cleanly and verification is green,
+  push it before starting the next implementation pass.
+- If a session ends with local commits ahead of `origin/main`, push them or
+  record the blocker explicitly.
+- `new_truth` work should prefer a reviewable branch/worktree posture unless an
+  exact bounded direct landing is explicitly chosen.
+- Detailed policy: [`GIT_WORKFLOW_DISCIPLINE.md`](GIT_WORKFLOW_DISCIPLINE.md)
+
 ## Session Closeout
 
 Run friction capabilities before ending a session with significant work:
