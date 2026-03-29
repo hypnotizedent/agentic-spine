@@ -8,10 +8,10 @@ Canonical domain policy for `core`.
 
 ## Governed Capability Membership
 
-- Total governed capabilities with `domain: core`: `81`
-- `79` are `plane: fabric` capabilities
+- Total governed capabilities with `domain: core`: `92`
+- `90` are `plane: fabric` capabilities
 - `2` are `plane: domain_external` capabilities listed in the catalog block below: `translator.ingest`, `translator.status`
-- The catalog view shows only the `domain_external` capabilities; the `79` fabric capabilities are engine-internal
+- The catalog view shows only the `domain_external` capabilities; the `90` fabric capabilities are engine-internal
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog

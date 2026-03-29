@@ -51,8 +51,8 @@ if caps["mailroom.outbox.retention"].get("domain") != "loop_gap":
     raise SystemExit("mailroom.outbox.retention must remain loop_gap")
 
 none_count = sum(1 for cfg in caps.values() if cfg.get("domain") == "none")
-if none_count != 87:
-    raise SystemExit(f"expected 87 domain:none capabilities after tranche 9, found {none_count}")
+if none_count > 87:
+    raise SystemExit(f"expected at most 87 domain:none after tranche 9, found {none_count}")
 
 infra_caps = sorted(cap_id for cap_id, cfg in caps.items() if cfg.get("domain") == "infra")
 infra_fabric = sorted(

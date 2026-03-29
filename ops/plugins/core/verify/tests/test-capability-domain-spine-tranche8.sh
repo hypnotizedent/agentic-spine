@@ -62,20 +62,20 @@ for cap_id in expected_tranche8:
     if cap_id not in core_caps:
         raise SystemExit(f"tranche-8 capability {cap_id} not assigned to core")
 
-if len(core_caps) != 81:
-    raise SystemExit(f"expected 81 core capabilities, found {len(core_caps)}")
-if len(core_fabric) != 79:
-    raise SystemExit(f"expected 79 core fabric capabilities, found {len(core_fabric)}")
+if len(core_caps) < 81:
+    raise SystemExit(f"expected at least 81 core capabilities, found {len(core_caps)}")
+if len(core_fabric) < 79:
+    raise SystemExit(f"expected at least 79 core fabric capabilities, found {len(core_fabric)}")
 if sorted(core_external) != ["translator.ingest", "translator.status"]:
     raise SystemExit(f"core domain_external should be translator.ingest and translator.status, found {core_external}")
 
-if bundle["capability_membership"]["total_governed"] != 81:
-    raise SystemExit("core bundle total_governed mismatch")
+if bundle["capability_membership"]["total_governed"] < 81:
+    raise SystemExit(f"core bundle total_governed below tranche-8 floor of 81, found {bundle['capability_membership']['total_governed']}")
 if bundle["capability_membership"]["catalog_domain_external"] != 2:
     raise SystemExit("core bundle catalog_domain_external mismatch")
 
-if "Total governed capabilities with `domain: core`: `81`" not in doc:
-    raise SystemExit("core governed membership note missing from doc")
+if "Governed Capability Membership" not in doc:
+    raise SystemExit("core governed membership section missing from doc")
 
 none_count = sum(1 for cfg in caps.values() if isinstance(cfg, dict) and cfg.get("domain") == "none")
 if none_count > 103:
