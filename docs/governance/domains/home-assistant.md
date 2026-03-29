@@ -7,6 +7,12 @@ Canonical domain policy for `home-assistant`.
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain home-assistant`
 - Runtime namespace: capability ids remain `ha.*` or `ha-inventory-*`; live runtime paths remain `ops/plugins/domains/ha/` and `ops/bindings/domains/ha/`.
 
+## Governed Capability Membership
+
+- Total governed capabilities with `domain: home-assistant`: `39`
+- `domain_external` capabilities listed in the catalog block below: `38`
+- Fabric capability kept outside the domain-external catalog: `ha.identity.mutation.contract.status`
+
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog
 Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
