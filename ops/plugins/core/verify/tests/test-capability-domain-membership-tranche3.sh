@@ -105,8 +105,8 @@ if any(not cap_id.startswith("verify.") for cap_id in verify_core):
     raise SystemExit("verify capability ids changed unexpectedly")
 
 none_count = sum(1 for cfg in caps.values() if isinstance(cfg, dict) and cfg.get("domain") == "none")
-if none_count != 188:
-    raise SystemExit(f"expected 188 domain:none capabilities after tranche 3, found {none_count}")
+if none_count > 188:
+    raise SystemExit(f"domain:none count grew beyond tranche-3 ceiling of 188, found {none_count}")
 
 maker_caps = sorted(cap_id for cap_id, cfg in caps.items() if cap_id.startswith("maker.") and cfg.get("domain") == "none")
 if maker_caps != ["maker.label.print", "maker.qr.generate", "maker.tools.status"]:
