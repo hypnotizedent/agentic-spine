@@ -4,7 +4,7 @@ authority_state: projection
 projection_of:
   - ops/bindings/terminal.worker.catalog.yaml
 owner: "@ronny"
-last_verified: 2026-03-28
+last_verified: 2026-03-29
 scope: worker-usage-spine-execution-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -28,7 +28,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `spine.control.plan`
 - `spine.control.tick`
 
-## Gates (19)
+## Gates (20)
 - `D124`
 - `D126`
 - `D127`
@@ -44,6 +44,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D416`
 - `D418`
 - `D423`
+- `D425`
 - `D48`
 - `D62`
 - `D63`
