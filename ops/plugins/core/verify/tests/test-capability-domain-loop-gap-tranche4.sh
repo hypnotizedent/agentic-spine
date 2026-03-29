@@ -70,8 +70,8 @@ if "Total governed capabilities with `domain: loop_gap`: `95`" not in doc:
     raise SystemExit("loop_gap governed membership note missing from doc")
 
 none_count = sum(1 for cfg in caps.values() if isinstance(cfg, dict) and cfg.get("domain") == "none")
-if none_count != 165:
-    raise SystemExit(f"expected 165 domain:none after tranche 4, found {none_count}")
+if none_count > 165:
+    raise SystemExit(f"domain:none count grew beyond tranche-4 ceiling of 165, found {none_count}")
 
 for cap_id in expected_tranche4:
     cfg = caps[cap_id]
