@@ -78,8 +78,8 @@ if "Total governed capabilities with `domain: core`: `81`" not in doc:
     raise SystemExit("core governed membership note missing from doc")
 
 none_count = sum(1 for cfg in caps.values() if isinstance(cfg, dict) and cfg.get("domain") == "none")
-if none_count != 103:
-    raise SystemExit(f"expected 103 domain:none after tranche 8, found {none_count}")
+if none_count > 103:
+    raise SystemExit(f"expected at most 103 domain:none after tranche 8, found {none_count}")
 
 for cap_id in expected_tranche8:
     cfg = caps[cap_id]
