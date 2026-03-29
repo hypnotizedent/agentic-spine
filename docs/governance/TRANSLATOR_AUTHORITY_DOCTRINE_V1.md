@@ -2,8 +2,8 @@
 status: authoritative
 owner: "@ronny"
 scope: translator-authority-doctrine
-version: 1.0
-updated: "2026-03-24"
+version: 1.1
+updated: "2026-03-29"
 decision_loop_id: LOOP-TRANSLATOR-DOCTRINE-CONSOLIDATION-20260324
 source_triangulation:
   - docs/governance/SPINE.md (controller lane, closure, and verify discipline)
@@ -12,18 +12,54 @@ source_triangulation:
   - docs/governance/LOCAL_CONTROL_PLANE_CONTRACT.md (control-plane placement and entry surface)
   - docs/governance/EXECUTION_NODE_SPEC.md (node 6/7 placement)
   - ops/bindings/translator.authority.contract.yaml (machine-evaluable boundary)
+  - docs/governance/TRANSLATOR_AUTHORITY_UNIFICATION_DECISION.md (canonical-authority boundary)
+  - docs/governance/TRANSLATOR_AUTHORITY_UNIFICATION_ELECTION.md (authorized implementation scope)
 enforcement:
   gate: D422 (translator-authority-isolation-lock)
   contract: ops/bindings/translator.authority.contract.yaml
 ---
 
-# Translator Authority Doctrine v1
+# Translator Authority Doctrine v1.1
 
 **Purpose**: Define the permanent, non-negotiable rules governing the Translator role, the 7-Node execution topology, and the binding "Translator Analysis Framework" that every AI agent session must internalize before executing work.
 
-**Authority**: This doctrine is the canonical source of truth for translator governance, execution-plane separation, and session-entry analysis requirements. The machine-evaluable contract at `ops/bindings/translator.authority.contract.yaml` MUST reference this document as its `doctrine_source`. Gate D422 enforces structural compliance.
+**Authority**: This doctrine is the canonical source of truth for translator governance, execution-plane separation, and session-entry analysis requirements. The machine-evaluable contract at `ops/bindings/translator.authority.contract.yaml` MUST reference this document as its `doctrine_source`. Gate D422 enforces structural compliance. The repo-owned translator stack is the single translator authority; tool-local or home-level adapters are deploy targets only and must remain thin wrappers around repo-owned truth.
 
 **Scope**: Applies to every AI agent session (Claude Code, Codex, ChatGPT, any future surface), every operator console interaction, and every automated pipeline that ingests, normalizes, routes, or renders spine state.
+
+---
+
+## Canonical Authority Surface
+
+Translator authority lives in the repo-owned translator stack:
+
+- `ops/bindings/translator.authority.contract.yaml`
+- `docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`
+- `ops/bindings/communication.protocol.contract.yaml`
+- `ops/bindings/prompt.registry.yaml`
+- `ops/bindings/prompt.library.contract.yaml`
+- `ops/plugins/core/context/templates/`
+
+Tool-local or home-level adapters may package tool-native behavior, but they do
+not own translator meaning, routing truth, forbidden-action rules, or runtime
+authority.
+
+## Thin Adapter Boundary
+
+Adapters may carry only:
+
+- tool-specific bootstrap mechanics
+- tool-native UX guidance for restating intent
+- bounded prompt-formatting help
+- status-rendering conventions
+- environment connection details
+
+Adapters must not carry:
+
+- a parallel translator authority definition
+- a parallel routing taxonomy treated as source-of-truth
+- duplicated boundary rules or forbidden-action rules
+- runtime authority claims over execution, verification, git, or verdicts
 
 ---
 
@@ -118,12 +154,25 @@ These rules are non-negotiable. They are enforced structurally by `translator.au
 | Action | Description |
 |--------|-------------|
 | Input ingestion | Receive messy human or chat input from any surface |
-| Classification | Classify input into spine vs. domain concern families |
+| Classification | Classify input using the canonical concern classes and signal routing surfaces |
 | Normalization | Normalize input into structured spine requests |
 | Routing | Route normalized requests to the correct execution surface |
 | Status translation | Render attested outputs back to the user in human-readable form |
 | Session continuity | Maintain light session state for multi-turn interpretation |
 | Chat-native ingress | Optional interface layers (e.g., OpenClaw or similar) |
+
+### Canonical Concern Classes
+
+These classes are canonical translator vocabulary and are upstreamed in
+`ops/bindings/translator.authority.contract.yaml` as a supplement to the
+existing signal table, not a replacement for it.
+
+| Class | Primary Target | Meaning |
+|--------|----------------|---------|
+| `platform_architecture_or_governance` | control plane | identity, workflow, runtime, doctrine, bindings, gates, and control-plane behavior |
+| `platform_workload` | control plane | platform-owned workload families routed through the spine runtime |
+| `domain_workload` | domain agents | domain-specific runtimes such as media, Home Assistant, finance, mint, and communications |
+| `external_membrane_or_operator_rail` | control plane | external or operator-rail surfaces that remain read/draft only until a governed adapter exists |
 
 ### Forbidden Actions
 
@@ -253,6 +302,9 @@ This preserves the separation: **translator is the membrane, wave.execute is the
 | `EXECUTION_NODE_SPEC.md` | Sibling spec. Execution Node is node 4/7 in this model. |
 | `translator.authority.contract.yaml` | Machine-evaluable enforcement. MUST reference this doctrine as `doctrine_source`. |
 | `D422 gate` | Structural verification of translator isolation. |
+
+Tool-local or home-level adapters may reference these authorities, but they do
+not replace them.
 
 ---
 
