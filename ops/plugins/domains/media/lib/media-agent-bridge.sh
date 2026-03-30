@@ -52,28 +52,7 @@ if not data:
     print(json.dumps({"bridge_error": True, "message": f"no output (exit={proc.returncode})", "stderr": stderr_tail}))
     sys.exit(1)
 
-parts = re.split(r'Content-Length:\s*\d+\r?\n\r?\n', data)
-for part in parts:
-    part = part.strip()
-    if not part:
-        continue
-    # Handle potential trailing data after JSON
-    brace_depth = 0
-    end = 0
-    for i, ch in enumerate(part):
-        if ch == '{': brace_depth += 1
-        elif ch == '}': brace_depth -= 1
-        if brace_depth == 0 and i > 0:
-            end = i + 1
-            break
-    if end > 0:
-        part = part[:end]
-    try:
-        obj = json.loads(part)
-    except json.JSONDecodeError:
-        continue
-    if obj.get('id') != 1:
-        continue
+def extract_response(obj):
     if 'error' in obj:
         err = obj['error']
         print(json.dumps({"bridge_error": True, "code": err.get("code"), "message": err.get("message", "unknown")}))
@@ -91,6 +70,43 @@ for part in parts:
         sys.exit(1)
     print(text)
     sys.exit(0)
+
+# Strategy 1: line-delimited JSON (most MCP servers)
+for line in data.split('\n'):
+    line = line.strip()
+    if not line or not line.startswith('{'):
+        continue
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if obj.get('id') == 1:
+        extract_response(obj)
+
+# Strategy 2: Content-Length framing (LSP-style)
+parts = re.split(r'Content-Length:\s*\d+\r?\n\r?\n', data)
+for part in parts:
+    part = part.strip()
+    if not part:
+        continue
+    brace_depth = 0
+    end = 0
+    for i, ch in enumerate(part):
+        if ch == '{':
+            brace_depth += 1
+        elif ch == '}':
+            brace_depth -= 1
+        if brace_depth == 0 and i > 0:
+            end = i + 1
+            break
+    if end > 0:
+        part = part[:end]
+    try:
+        obj = json.loads(part)
+    except json.JSONDecodeError:
+        continue
+    if obj.get('id') == 1:
+        extract_response(obj)
 
 print(json.dumps({"bridge_error": True, "message": "no response with id=1 in output"}))
 sys.exit(1)
