@@ -156,15 +156,18 @@ Current counted workbench block:
 - Budget: `1 session`
 - Output artifact: `.evidence/spine/reports/finalization/SPINE_V3_PLANNER_AND_OBSERVATION_WIRING_20260330.md`
 - Target file: `/Users/ronnyworks/code/agentic-spine/ops/plugins/core/evidence/bin/spine-control`
+- Co-authority file: `/Users/ronnyworks/code/agentic-spine/docs/governance/SPINE_NORMALIZATION_KERNEL_20260326.md`
 
 Exact seam:
 
+- `SPINE_NORMALIZATION_KERNEL_20260326.md` surviving-set landing
 - `build_plan_payload()`
 - `derive_route_hint()`
 - `run_control_cycle()`
 
 Required change shape:
 
+- land the kernel surviving-set reduction as live authority, not as chat residue
 - use loop priority and age instead of naive ordering
 - route spine/platform work explicitly
 - consume live observation signals instead of collecting them and ignoring them
