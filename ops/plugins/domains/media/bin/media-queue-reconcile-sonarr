@@ -171,6 +171,8 @@ STALE_IMPORT_THRESHOLD_HOURS=48
 
 # Classify each queue item per policy
 CLASSIFICATIONS="$(echo "$QUEUE_JSON" | jq --argjson batch "$BATCH_SIZE" --argjson now "$NOW_EPOCH" --argjson stale_h "$STALE_IMPORT_THRESHOLD_HOURS" '
+  def parse_added_utc:
+    (sub("Z$"; "") | split(".")[0] + "Z" | fromdateiso8601);
   [.records[:$batch][] | {
     queue_id: .id,
     series_id: (.seriesId // null),
@@ -186,7 +188,7 @@ CLASSIFICATIONS="$(echo "$QUEUE_JSON" | jq --argjson batch "$BATCH_SIZE" --argjs
     has_file: (.episode.hasFile // false),
     error_message: (.errorMessage // null),
     added: (.added // null),
-    age_hours: (if .added then (($now - (.added | split(".")[0] + "Z" | fromdateiso8601)) / 3600 | floor) else null end)
+    age_hours: (if .added then (($now - (.added | parse_added_utc)) / 3600 | floor) else null end)
   } | . + {
     classification: (
       if (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and .has_file then "QUEUE-C1"
