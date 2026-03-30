@@ -1,20 +1,40 @@
 # media
 
-Canonical domain policy for `media`.
+Canonical domain pointer for `media`.
 
-- Authority: `docs/governance/SPINE.md`
-- Placement/lifecycle authority: `docs/governance/MEDIA_STORAGE_CONTRACT.md`
-- Short lifecycle rules: `docs/governance/MEDIA_STORAGE_LIFECYCLE.md`
-- Quality/acquisition authority: `ops/bindings/media.quality.policy.yaml`
-- Runtime contracts: `ops/bindings/domains/media.bundle.yaml`
+## Canonical Product Authority Home
+
+**`~/code/workbench/agents/media/`**
+
+As of 2026-03-30, canonical L3 media product authority lives in the workbench media home.
+Spine retains engine-facing registrations, routing, gates, and compatibility projections only.
+
+Relocation: `MEDIA_WORKBENCH_HOME_RELOCATION` (new_truth, ratified 2026-03-30)
+Parent loop: `LOOP-MEDIA-SPLIT-AUTHORITY-CANONICALIZATION-20260322`
+
+## Authority Surfaces (workbench canonical)
+
+- Product bindings: `~/code/workbench/agents/media/bindings/` (20 files)
+- Product archive: `~/code/workbench/agents/media/archive/` (3 files)
+- Runtime-first truth: `~/code/workbench/agents/media/docs/runtime/`
+- Compose/deploy: `~/code/workbench/infra/compose/media-stack/docker-compose.yml`
+- Agent contract: `~/code/workbench/agents/media/AGENT.md`
+- Boundary: `~/code/workbench/agents/media/docs/BOUNDARY.md`
+
+## Spine Engine-Facing Surfaces (retained)
+
+- Capability registrations: `ops/capabilities.yaml` (all `media.*` IDs)
+- Routing: `ops/bindings/routing.dispatch.yaml`
+- Compatibility projections: `ops/bindings/domains/media/` (23 files, marked do-not-edit-here)
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain media`
 
-Minimal agent reading order:
-1. `MEDIA_STORAGE_CONTRACT.md`
-2. `MEDIA_STORAGE_LIFECYCLE.md`
-3. `ops/bindings/media.quality.policy.yaml`
-4. `ops/bindings/media.services.yaml`
-5. `ops/bindings/media.path.authority.contract.yaml`
+## Governance Contracts (spine-owned)
+
+- Placement/lifecycle: `docs/governance/MEDIA_STORAGE_CONTRACT.md`
+- Short lifecycle rules: `docs/governance/MEDIA_STORAGE_LIFECYCLE.md`
+- Relocation discovery: `docs/governance/MEDIA_WORKBENCH_HOME_RELOCATION_DISCOVERY.md`
+- Relocation decision: `docs/governance/MEDIA_WORKBENCH_HOME_RELOCATION_DECISION.md`
+- Relocation election: `docs/governance/MEDIA_WORKBENCH_HOME_RELOCATION_ELECTION.md`
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog
