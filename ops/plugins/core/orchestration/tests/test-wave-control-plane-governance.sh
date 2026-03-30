@@ -275,7 +275,7 @@ set -euo pipefail
 cmd="$1"; shift
 case "$cmd" in
   collect) exit 0 ;;
-  close) echo "closed $1"; exit 0 ;;
+  close) printf '%s\n' "$@" > "${SPINE_RUNTIME_ROOT}/close.args"; echo "closed $1"; exit 0 ;;
   *) echo "unsupported" >&2; exit 1 ;;
 esac
 EOF
@@ -299,16 +299,205 @@ EOF
 
 if env SPINE_ROOT="$T3_REPO" SPINE_RUNTIME_ROOT="$T3_RUNTIME" SPINE_STATE="$T3_RUNTIME/state" \
   bash "$T3_REPO/ops/plugins/core/orchestration/bin/wave-execute" \
-    close --wave-id WAVE-20260323-01 --disposition deferred > "$T3_ROOT/out.txt"; then
+    close --wave-id WAVE-20260323-01 --disposition landed --completion-level slice > "$T3_ROOT/out.txt"; then
   pass "wave-execute close succeeds when auto-running wave-finish"
 else
   fail "wave-execute close succeeds when auto-running wave-finish"
 fi
 
+assert_file_contains "$T3_RUNTIME/close.args" "--disposition" "wave-execute forwards disposition to wave.sh close"
+assert_file_contains "$T3_RUNTIME/close.args" "landed" "wave-execute forwards landed disposition value"
 assert_file_contains "$T3_RUNTIME/finish.args" "--loop-id" "wave-execute passes loop-id to wave-finish"
 assert_file_contains "$T3_RUNTIME/finish.args" "LOOP-T-CLOSE" "wave-execute passes resolved loop-id to wave-finish"
 assert_file_contains "$T3_RUNTIME/finish.args" "WAVE-20260323-01" "wave-execute passes wave-id to wave-finish"
+assert_file_contains "$T3_RUNTIME/finish.args" "slice_complete" "wave-execute normalizes completion-level aliases for wave-finish"
 assert_file_contains "$T3_ROOT/out.txt" "Running wave.finish" "wave-execute announces auto-finish"
+
+echo ""
+echo "── T4: wave-execute start fallback rehydrates workspace metadata for dispatch ──"
+T4_ROOT="$(make_tmpdir)"
+T4_REPO="$T4_ROOT/repo"
+T4_RUNTIME="$T4_REPO/runtime"
+mkdir -p \
+  "$T4_REPO/ops/plugins/core/orchestration/bin" \
+  "$T4_REPO/ops/plugins/core/ops/bin" \
+  "$T4_REPO/ops/commands" \
+  "$T4_RUNTIME"
+copy_runtime_libs "$T4_REPO"
+cp "$ROOT/ops/plugins/core/orchestration/bin/wave-execute" "$T4_REPO/ops/plugins/core/orchestration/bin/"
+chmod +x "$T4_REPO/ops/plugins/core/orchestration/bin/wave-execute"
+
+cat > "$T4_REPO/ops/plugins/core/orchestration/bin/authority-resolve" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat <<'JSON'
+{"loop_id":"LOOP-T-DISPATCH","status":"active","owner":"@test","execution_mode":"single_worker","objective":"fixture dispatch","ready_for_dispatch": true,"blockers":[],"linked_gaps":[]}
+JSON
+EOF
+chmod +x "$T4_REPO/ops/plugins/core/orchestration/bin/authority-resolve"
+
+cat > "$T4_REPO/ops/plugins/core/ops/bin/worktree-lifecycle-rehydrate" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+branch=""
+lane=""
+repo=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --branch) branch="$2"; shift 2 ;;
+    --lane) lane="$2"; shift 2 ;;
+    --repo) repo="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+target="$repo/.wt/$lane"
+mkdir -p "$target"
+printf 'worktree.lifecycle.rehydrate done\n'
+printf 'repo=%s\n' "$repo"
+printf 'branch=%s\n' "$branch"
+printf 'lane=%s\n' "$lane"
+printf 'worktree=%s\n' "$target"
+EOF
+chmod +x "$T4_REPO/ops/plugins/core/ops/bin/worktree-lifecycle-rehydrate"
+
+cat > "$T4_REPO/ops/commands/wave.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cmd="$1"; shift
+case "$cmd" in
+  start)
+    wave_id="$1"; shift
+    loop_id=""
+    objective=""
+    worktree_mode="auto"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --loop-id) loop_id="$2"; shift 2 ;;
+        --objective) objective="$2"; shift 2 ;;
+        --worktree) worktree_mode="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [[ "$worktree_mode" != "off" ]]; then
+      echo "WORKTREE PATH POLICY BLOCK: target '/tmp/forbidden' is outside enforced prefix '/tmp/allowed'" >&2
+      exit 1
+    fi
+    wave_dir="$SPINE_RUNTIME_ROOT/waves/$wave_id"
+    mkdir -p "$wave_dir"
+    cat > "$wave_dir/state.json" <<JSON
+{
+  "wave_id": "$wave_id",
+  "status": "active",
+  "lifecycle_state": "active",
+  "objective": "$objective",
+  "dispatches": [],
+  "watcher_checks": [],
+  "preflight": null,
+  "results": [],
+  "workspace": {
+    "enabled": false,
+    "repo": null,
+    "worktree": null,
+    "branch": null,
+    "lifecycle_state": "disabled",
+    "note": "worktree auto-provision disabled (--worktree off)"
+  },
+  "packet": {
+    "wave_id": "$wave_id",
+    "loop_id": "$loop_id",
+    "current_role": "researcher",
+    "next_role": "worker",
+    "cross_repo_pushability_gate": {
+      "status": "PENDING",
+      "repo": "",
+      "branch": "",
+      "failure": ""
+    }
+  },
+  "wave_packet": {
+    "wave_id": "$wave_id",
+    "loop_id": "$loop_id",
+    "current_role": "researcher",
+    "next_role": "worker",
+    "cross_repo_pushability_gate": {
+      "status": "PENDING",
+      "repo": "",
+      "branch": "",
+      "failure": ""
+    }
+  }
+}
+JSON
+    echo "Wave '$wave_id' created."
+    ;;
+  dispatch)
+    wave_id="$1"; shift
+    state_file="$SPINE_RUNTIME_ROOT/waves/$wave_id/state.json"
+    python3 - <<'PY' "$state_file"
+import json
+import sys
+
+state = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+workspace = state["workspace"]
+packet = state["packet"]
+assert workspace["enabled"] is True, workspace
+assert workspace["repo"], workspace
+assert workspace["branch"], workspace
+assert workspace["worktree"], workspace
+assert packet["execution_mode"] == "single_worker", packet
+assert packet["transport"] == "git", packet
+PY
+    printf '%s\n' "$@" > "${SPINE_RUNTIME_ROOT}/dispatch.args"
+    exit 0
+    ;;
+  collect|close|status) exit 0 ;;
+  *) echo "unsupported" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$T4_REPO/ops/commands/wave.sh"
+init_fixture_repo "$T4_REPO"
+
+if env SPINE_ROOT="$T4_REPO" SPINE_RUNTIME_ROOT="$T4_RUNTIME" SPINE_STATE="$T4_RUNTIME/state" \
+  bash "$T4_REPO/ops/plugins/core/orchestration/bin/wave-execute" \
+    start --loop-id LOOP-T-DISPATCH --wave-id WAVE-20260329-77 --objective "fixture fallback start" > "$T4_ROOT/start.out"; then
+  pass "wave-execute start succeeds via wrapper-managed fallback"
+else
+  fail "wave-execute start succeeds via wrapper-managed fallback"
+fi
+
+assert_file_contains "$T4_ROOT/start.out" "wrapper-managed worktree rehydrate" "wave-execute reports wrapper-managed start fallback"
+
+python3 - <<'PY' "$T4_RUNTIME/waves/WAVE-20260329-77/state.json" "$T4_REPO"
+import json
+import sys
+from pathlib import Path
+
+state = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+repo = Path(sys.argv[2]).resolve()
+workspace = state["workspace"]
+packet = state["packet"]
+
+assert workspace["enabled"] is True, workspace
+assert Path(workspace["repo"]).resolve() == repo, workspace
+assert workspace["branch"] == "codex/WAVE-20260329-77", workspace
+assert Path(workspace["worktree"]).resolve() == (repo / ".wt" / "WAVE-20260329-77").resolve(), workspace
+assert packet["execution_mode"] == "single_worker", packet
+assert packet["transport"] == "git", packet
+assert state["execution_mode"] == "single_worker", state
+assert state["transport"] == "git", state
+PY
+pass "wave-execute fallback start stamps workspace and packet metadata"
+
+if env SPINE_ROOT="$T4_REPO" SPINE_RUNTIME_ROOT="$T4_RUNTIME" SPINE_STATE="$T4_RUNTIME/state" \
+  bash "$T4_REPO/ops/plugins/core/orchestration/bin/wave-execute" \
+    dispatch --wave-id WAVE-20260329-77 --lane execution --task "repair fixture" > "$T4_ROOT/dispatch.out"; then
+  pass "wave-execute dispatch succeeds after wrapper metadata sync"
+else
+  fail "wave-execute dispatch succeeds after wrapper metadata sync"
+fi
+
+assert_file_contains "$T4_RUNTIME/dispatch.args" "--lane" "wave-execute forwards lane to dispatch"
+assert_file_contains "$T4_ROOT/dispatch.out" "DISPATCH RECORDED" "wave-execute reports successful dispatch after fallback"
 
 echo ""
 echo "────────────────────────────────────────"

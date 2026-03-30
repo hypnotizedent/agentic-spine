@@ -31,6 +31,8 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[5]
+PROMPT_REGISTRY_PATH = ROOT / "ops/bindings/prompt.registry.yaml"
+PROMPT_LIBRARY_BOOTSTRAP = ROOT / "ops/plugins/core/context/bin/prompt-library-bootstrap"
 
 
 def canonical_path(raw: str | None) -> Path:
@@ -81,6 +83,80 @@ def resolve_state_root() -> Path:
             return Path(state_root)
         return Path(runtime_root) / "state"
     return ROOT / "mailroom" / "state"
+
+
+def resolve_role_prompt_set(role: str) -> dict[str, Any] | None:
+    registry = load_yaml(PROMPT_REGISTRY_PATH, {})
+    role_sets = registry.get("role_prompt_sets") if isinstance(registry, dict) else {}
+    prompt_set = role_sets.get(role) if isinstance(role_sets, dict) else None
+    if not isinstance(prompt_set, dict):
+        return None
+    source_refs = [
+        str(ref).strip()
+        for ref in (prompt_set.get("source_refs") or [])
+        if str(ref).strip()
+    ]
+    template_refs = [ref for ref in source_refs if Path(ref).name.endswith(".context.yaml")]
+    return {
+        "prompt_set_id": str(prompt_set.get("prompt_set_id", "")).strip(),
+        "version": str(prompt_set.get("version", "")).strip(),
+        "description": str(prompt_set.get("description", "")).strip(),
+        "source_refs": source_refs,
+        "template_refs": template_refs,
+        "registry_path": str(PROMPT_REGISTRY_PATH),
+    }
+
+
+def ensure_runtime_prompt_context(role: str, state_root: Path) -> dict[str, Any]:
+    prompt_set = resolve_role_prompt_set(role)
+    if not prompt_set:
+        return {
+            "status": "unregistered",
+            "prompt_set_id": "",
+            "version": "",
+            "registry_path": str(PROMPT_REGISTRY_PATH),
+            "runtime_prompts_dir": str(state_root / "prompts"),
+            "refreshed": False,
+            "required_runtime_refs": [],
+        }
+
+    required_runtime_refs = [state_root / "prompts" / Path(ref).name for ref in prompt_set["template_refs"]]
+    needs_refresh = False
+    for template_ref in prompt_set["template_refs"]:
+        template_path = ROOT / template_ref
+        runtime_path = state_root / "prompts" / template_path.name
+        if not runtime_path.exists():
+            needs_refresh = True
+            break
+        if template_path.exists() and template_path.stat().st_mtime > runtime_path.stat().st_mtime:
+            needs_refresh = True
+            break
+
+    if needs_refresh:
+        cmd = [str(PROMPT_LIBRARY_BOOTSTRAP), "--json"]
+        rc, payload, stderr = run_json_command(cmd)
+        if rc != 0:
+            raise RuntimeError(f"prompt library bootstrap failed: {stderr or 'unknown error'}")
+        return {
+            "status": "refreshed",
+            "prompt_set_id": prompt_set["prompt_set_id"],
+            "version": prompt_set["version"],
+            "registry_path": prompt_set["registry_path"],
+            "runtime_prompts_dir": str(state_root / "prompts"),
+            "refreshed": True,
+            "bootstrap": payload,
+            "required_runtime_refs": [str(path) for path in required_runtime_refs],
+        }
+
+    return {
+        "status": "current",
+        "prompt_set_id": prompt_set["prompt_set_id"],
+        "version": prompt_set["version"],
+        "registry_path": prompt_set["registry_path"],
+        "runtime_prompts_dir": str(state_root / "prompts"),
+        "refreshed": False,
+        "required_runtime_refs": [str(path) for path in required_runtime_refs],
+    }
 
 
 def run_json_command(cmd: list[str], *, input_text: str | None = None) -> tuple[int, dict[str, Any], str]:
@@ -708,6 +784,7 @@ def main() -> int:
         preflight = collect_attach_preflight()
         loop_id, loop_resolution, latest_payload = resolve_loop_id(args, broker_script)
         sanitize_payload, sanitized_output_path = maybe_sanitize(args, state_root, sanitize_script, loop_id)
+        prompt_library = ensure_runtime_prompt_context(str(args.role).strip().lower(), state_root)
         friction_snapshot = collect_friction_snapshot()
         capability_map = collect_capability_map()
         if preflight.get("status") == "blocked":
@@ -726,6 +803,7 @@ def main() -> int:
                     "repo_identity": repo_identity,
                     "stale_cleanup": stale_cleanup,
                     "preflight": preflight,
+                    "prompt_library": prompt_library,
                     "friction_snapshot": friction_snapshot,
                     "capability_map": capability_map,
                     "next_step": "Resolve attach preflight blockers before starting work.",
@@ -760,6 +838,7 @@ def main() -> int:
                     "repo_identity": repo_identity,
                     "preflight": preflight,
                     "sanitize": sanitize_payload,
+                    "prompt_library": prompt_library,
                     "friction_snapshot": friction_snapshot,
                     "capability_map": capability_map,
                     "sanitized_output_path": sanitized_output_path,
@@ -795,6 +874,17 @@ def main() -> int:
             "SPINE_HEARTBEAT_FILE": str(heartbeat.get("heartbeat_file", "")),
             "SPINE_LOOP_HEARTBEAT_FILE": str(heartbeat.get("loop_heartbeat_file", "")),
         }
+        prompt_context = packet.get("prompt_context") if isinstance(packet.get("prompt_context"), dict) else {}
+        if prompt_context:
+            exports.update(
+                {
+                    "SPINE_PROMPT_SET_ID": str(prompt_context.get("prompt_set_id", "")),
+                    "SPINE_PROMPT_SET_VERSION": str(prompt_context.get("version", "")),
+                    "SPINE_PROMPT_REGISTRY_PATH": str(prompt_context.get("registry_path", "")),
+                    "SPINE_PROMPT_SOURCE_REFS_JSON": json.dumps(prompt_context.get("source_refs", [])),
+                    "SPINE_PROMPT_RUNTIME_REFS_JSON": json.dumps(prompt_context.get("runtime_prompt_refs", [])),
+                }
+            )
         if args.fast_lane:
             exports["SPINE_FAST_LANE"] = "1"
         exports.update({k: v for k, v in startup_exports.items() if k})
@@ -828,6 +918,7 @@ def main() -> int:
                     "stale_cleanup": stale_cleanup,
                     "preflight": preflight,
                     "sanitize": sanitize_payload,
+                    "prompt_library": prompt_library,
                     "friction_snapshot": friction_snapshot,
                     "capability_map": capability_map,
                     "sanitized_output_path": sanitized_output_path,

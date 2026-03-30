@@ -28,6 +28,7 @@ hotspot_checkout="$tmpdir/attach-clone-hotspot"
 contention_checkout="$tmpdir/attach-clone-contention"
 bootstrap_checkout="$tmpdir/attach-clone-bootstrap"
 fail_checkout="$tmpdir/attach-clone-fail"
+controller_checkout="$tmpdir/attach-clone-controller"
 make_checkout "$loop_checkout"
 make_checkout "$clean_env_checkout"
 make_checkout "$dirty_checkout"
@@ -35,6 +36,7 @@ make_checkout "$hotspot_checkout"
 make_checkout "$contention_checkout"
 make_checkout "$bootstrap_checkout"
 make_checkout "$fail_checkout"
+make_checkout "$controller_checkout"
 
 cat > "$state_root/loop-scopes/LOOP-TEST-ATTACH-20260322.scope.md" <<'EOF_SCOPE'
 ---
@@ -97,6 +99,43 @@ assert Path(heartbeat["loop_heartbeat_file"]).exists()
 assert len(list((state_root / "terminal-heartbeats").glob("*.yaml"))) == 1
 assert len(list((state_root / "loop-heartbeats").glob("*.yaml"))) == 1
 assert "friction_queue" in payload["data"]["friction_snapshot"]
+PY
+
+controller_json="$(
+  cd "$controller_checkout" && \
+  env -u SPINE_ROOT -u SPINE_REPO -u SPINE_TARGET_REPO -u SPINE_CODE \
+    OPS_TERMINAL_ROLE="SPINE-CONTROL-01" \
+    SPINE_RUNTIME_ROLE="controller" \
+    SPINE_STATE="$state_root" \
+    "$SCRIPT" --skip-session-bootstrap --latest-loop --role controller --lane C --json
+)"
+
+python3 - <<'PY' "$controller_json" "$state_root"
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(sys.argv[1])
+state_root = Path(sys.argv[2])
+packet = payload["data"]["entry_packet"]["packet"]
+prompt_context = packet["prompt_context"]
+exports = payload["data"]["exports"]
+prompt_library = payload["data"]["prompt_library"]
+
+assert payload["status"] == "done"
+assert prompt_context["prompt_set_id"] == "spine-controller-context"
+assert prompt_context["version"] == "2026-03-24.1"
+assert any(ref.endswith("ops/plugins/core/context/templates/execution.context.yaml") for ref in prompt_context["source_refs"])
+assert any(ref.endswith("ops/plugins/core/context/templates/verification.context.yaml") for ref in prompt_context["source_refs"])
+assert str(state_root / "prompts" / "execution.context.yaml") in prompt_context["runtime_prompt_refs"]
+assert str(state_root / "prompts" / "verification.context.yaml") in prompt_context["runtime_prompt_refs"]
+assert (state_root / "prompts" / "execution.context.yaml").exists()
+assert (state_root / "prompts" / "verification.context.yaml").exists()
+assert prompt_library["prompt_set_id"] == "spine-controller-context"
+assert prompt_library["status"] in {"refreshed", "current"}
+assert exports["SPINE_PROMPT_SET_ID"] == "spine-controller-context"
+assert exports["SPINE_PROMPT_SET_VERSION"] == "2026-03-24.1"
+assert json.loads(exports["SPINE_PROMPT_RUNTIME_REFS_JSON"]) == prompt_context["runtime_prompt_refs"]
 PY
 
 scope_status_json="$(

@@ -18,6 +18,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[5]
+PROMPT_REGISTRY_PATH = ROOT / "ops/bindings/prompt.registry.yaml"
 
 
 def utc_now() -> str:
@@ -66,6 +67,53 @@ def resolve_state_root() -> Path:
 
 def loop_scope_path(loop_id: str, state_root: Path) -> Path:
     return state_root / "loop-scopes" / f"{loop_id}.scope.md"
+
+
+def absolute_repo_ref(ref: str) -> str:
+    return str((ROOT / ref).resolve())
+
+
+def runtime_prompt_path_for_source(ref: str, state_root: Path) -> Path | None:
+    path = Path(ref)
+    if not path.name.endswith(".context.yaml"):
+        return None
+    return state_root / "prompts" / path.name
+
+
+def resolve_prompt_context(role: str, state_root: Path) -> dict[str, Any] | None:
+    registry = load_yaml(PROMPT_REGISTRY_PATH, {})
+    role_sets = registry.get("role_prompt_sets") if isinstance(registry, dict) else {}
+    prompt_set = role_sets.get(role) if isinstance(role_sets, dict) else None
+    if not isinstance(prompt_set, dict):
+        return None
+
+    raw_source_refs = [
+        str(ref).strip()
+        for ref in (prompt_set.get("source_refs") or [])
+        if str(ref).strip()
+    ]
+    source_refs = [absolute_repo_ref(ref) for ref in raw_source_refs]
+    runtime_prompt_refs = []
+    missing_runtime_prompt_refs = []
+    for ref in raw_source_refs:
+        runtime_path = runtime_prompt_path_for_source(ref, state_root)
+        if runtime_path is None:
+            continue
+        rendered = str(runtime_path)
+        runtime_prompt_refs.append(rendered)
+        if not runtime_path.exists():
+            missing_runtime_prompt_refs.append(rendered)
+
+    return {
+        "role": role,
+        "prompt_set_id": str(prompt_set.get("prompt_set_id", "")).strip(),
+        "version": str(prompt_set.get("version", "")).strip(),
+        "description": str(prompt_set.get("description", "")).strip(),
+        "registry_path": str(PROMPT_REGISTRY_PATH),
+        "source_refs": source_refs,
+        "runtime_prompt_refs": runtime_prompt_refs,
+        "missing_runtime_prompt_refs": missing_runtime_prompt_refs,
+    }
 
 
 def infer_execution_mode(frontmatter: dict[str, str], requested: str | None) -> str:
@@ -178,6 +226,21 @@ def main() -> int:
         "request attestation envelope",
     ]
 
+    prompt_context = resolve_prompt_context(role, state_root)
+    source_refs = [
+        p
+        for p in [
+            str(scope_path) if scope_path and scope_path.exists() else "",
+            str(ROOT / "docs/governance/SPINE.md"),
+            str(ROOT / "docs/governance/SESSION_PROTOCOL.md"),
+        ]
+        if p
+    ]
+    if prompt_context:
+        for ref in prompt_context["source_refs"] + prompt_context["runtime_prompt_refs"]:
+            if ref not in source_refs:
+                source_refs.append(ref)
+
     packet = {
         "schema_version": "1.0",
         "generated_at_utc": utc_now(),
@@ -199,8 +262,10 @@ def main() -> int:
             "terminal_name": args.terminal_name,
             "runtime_role": args.runtime_role,
         },
-        "source_refs": [p for p in [str(scope_path) if scope_path and scope_path.exists() else "", str(ROOT / "docs/governance/SPINE.md"), str(ROOT / "docs/governance/SESSION_PROTOCOL.md")] if p],
+        "source_refs": source_refs,
     }
+    if prompt_context:
+        packet["prompt_context"] = prompt_context
 
     packet_root = state_root / "entry-packets"
     packet_root.mkdir(parents=True, exist_ok=True)

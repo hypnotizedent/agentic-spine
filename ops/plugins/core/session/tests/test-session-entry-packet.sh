@@ -41,3 +41,30 @@ assert payload["data"]["packet_hash"]
 PY
 
 echo "PASS: session-entry-packet compiles deterministic packet"
+
+controller_json="$(SPINE_STATE="$state_root" "$SCRIPT" --loop-id LOOP-TEST-ENTRY-20260322 --role controller --lane A --json)"
+
+python3 - <<'PY' "$controller_json" "$state_root"
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(sys.argv[1])
+state_root = Path(sys.argv[2])
+packet = payload["data"]["packet"]
+prompt_context = packet["prompt_context"]
+
+assert prompt_context["prompt_set_id"] == "spine-controller-context"
+assert prompt_context["version"] == "2026-03-24.1"
+assert prompt_context["registry_path"].endswith("ops/bindings/prompt.registry.yaml")
+assert any(ref.endswith("ops/plugins/core/context/templates/execution.context.yaml") for ref in prompt_context["source_refs"])
+assert any(ref.endswith("ops/plugins/core/context/templates/verification.context.yaml") for ref in prompt_context["source_refs"])
+assert str(state_root / "prompts" / "execution.context.yaml") in prompt_context["runtime_prompt_refs"]
+assert str(state_root / "prompts" / "verification.context.yaml") in prompt_context["runtime_prompt_refs"]
+assert str(state_root / "prompts" / "execution.context.yaml") in prompt_context["missing_runtime_prompt_refs"]
+assert str(state_root / "prompts" / "verification.context.yaml") in prompt_context["missing_runtime_prompt_refs"]
+assert any(ref.endswith("execution.context.yaml") for ref in packet["source_refs"])
+assert any(ref.endswith("verification.context.yaml") for ref in packet["source_refs"])
+PY
+
+echo "PASS: controller entry packet carries declared prompt context refs"

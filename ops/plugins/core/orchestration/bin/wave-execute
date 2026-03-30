@@ -32,6 +32,7 @@ WAVES_DIR="$RUNTIME_ROOT/waves"
 WAVE_SH="$SP/ops/commands/wave.sh"
 AUTHORITY_RESOLVE="$SP/ops/plugins/core/orchestration/bin/authority-resolve"
 WAVE_FINISH="$SP/ops/plugins/core/orchestration/bin/wave-finish"
+WORKTREE_REHYDRATE="$SP/ops/plugins/core/ops/bin/worktree-lifecycle-rehydrate"
 
 mkdir -p "$WAVES_DIR"
 
@@ -119,6 +120,223 @@ _auth_field() {
   echo "$auth_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('$field',''))" 2>/dev/null || echo ""
 }
 
+_auth_execution_mode() {
+  local auth_json="$1"
+  local exec_mode
+  exec_mode="$(printf '%s' "$(_auth_field "$auth_json" "execution_mode")" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "$exec_mode" ]]; then
+    exec_mode="code"
+  fi
+  printf '%s\n' "$exec_mode"
+}
+
+_infer_transport_for_execution_mode() {
+  local execution_mode="${1:-code}"
+  case "$execution_mode" in
+    operational) printf 'mailroom\n' ;;
+    *) printf 'git\n' ;;
+  esac
+}
+
+_has_passthrough_flag() {
+  local needle="$1"
+  shift
+  local arg=""
+  for arg in "$@"; do
+    if [[ "$arg" == "$needle" || "$arg" == "$needle="* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+_current_checkout_repo() {
+  git -C "$SP" rev-parse --show-toplevel 2>/dev/null || true
+}
+
+_current_checkout_branch() {
+  git -C "$SP" rev-parse --abbrev-ref HEAD 2>/dev/null || true
+}
+
+_current_checkout_worktree() {
+  _current_checkout_repo
+}
+
+_ensure_wave_branch() {
+  local repo_root="${1:?repo root required}"
+  local wave_id="${2:?wave id required}"
+  local target_branch="codex/$wave_id"
+  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$target_branch"; then
+    printf '%s\n' "$target_branch"
+    return 0
+  fi
+
+  local base_branch
+  base_branch="$(_current_checkout_branch)"
+  if [[ -z "$base_branch" || "$base_branch" == "HEAD" ]]; then
+    base_branch="main"
+  fi
+
+  if git -C "$repo_root" show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
+    git -C "$repo_root" branch "$target_branch" "origin/$base_branch" >/dev/null
+  else
+    git -C "$repo_root" branch "$target_branch" "$base_branch" >/dev/null
+  fi
+
+  printf '%s\n' "$target_branch"
+}
+
+_provision_wrapper_managed_workspace() {
+  local wave_id="${1:?wave id required}"
+  local repo_root
+  repo_root="$(_current_checkout_repo)"
+  [[ -n "$repo_root" ]] || _fail "unable to resolve current checkout root for wrapper-managed workspace"
+  [[ -x "$WORKTREE_REHYDRATE" ]] || _fail "worktree-lifecycle-rehydrate unavailable at $WORKTREE_REHYDRATE"
+
+  local branch
+  branch="$(_ensure_wave_branch "$repo_root" "$wave_id")" || _fail "unable to materialize codex/$wave_id branch"
+
+  local helper_output
+  helper_output="$("$WORKTREE_REHYDRATE" --branch "$branch" --lane "$wave_id" --repo "$repo_root" 2>&1)" || {
+    echo "$helper_output"
+    _fail "wrapper-managed worktree rehydrate failed for $wave_id"
+  }
+
+  local resolved_repo="" resolved_branch="" resolved_worktree=""
+  while IFS='=' read -r key value; do
+    case "$key" in
+      repo) resolved_repo="$value" ;;
+      branch) resolved_branch="$value" ;;
+      worktree) resolved_worktree="$value" ;;
+    esac
+  done <<< "$helper_output"
+
+  [[ -n "$resolved_repo" ]] || resolved_repo="$repo_root"
+  [[ -n "$resolved_branch" ]] || resolved_branch="$branch"
+  [[ -n "$resolved_worktree" ]] || _fail "wrapper-managed worktree rehydrate did not report a worktree path"
+
+  printf '%s|%s|%s|%s\n' \
+    "$resolved_repo" \
+    "$resolved_branch" \
+    "$resolved_worktree" \
+    "wrapper-managed worktree rehydrate after wave.sh path-policy block"
+}
+
+_sync_wave_runtime_state() {
+  local wave_id="${1:?wave id required}"
+  local auth_json="${2:?authority json required}"
+  local fallback_repo="${3:-}"
+  local fallback_worktree="${4:-}"
+  local fallback_branch="${5:-}"
+  local workspace_note="${6:-}"
+  local state_file="$WAVES_DIR/$wave_id/state.json"
+  [[ -f "$state_file" ]] || return 0
+
+  local execution_mode
+  execution_mode="$(_auth_execution_mode "$auth_json")"
+  local transport
+  transport="$(_infer_transport_for_execution_mode "$execution_mode")"
+
+  python3 - "$state_file" "$fallback_repo" "$fallback_worktree" "$fallback_branch" "$execution_mode" "$transport" "$workspace_note" <<'PYSYNC'
+import json
+import sys
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+fallback_repo = sys.argv[2]
+fallback_worktree = sys.argv[3]
+fallback_branch = sys.argv[4]
+execution_mode = sys.argv[5]
+transport = sys.argv[6]
+workspace_note = sys.argv[7]
+
+state = json.loads(state_path.read_text(encoding="utf-8"))
+workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
+packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+if not packet and isinstance(state.get("wave_packet"), dict):
+    packet = state["wave_packet"]
+
+changed = False
+
+repo = str(workspace.get("repo") or "").strip()
+worktree = str(workspace.get("worktree") or "").strip()
+branch = str(workspace.get("branch") or "").strip()
+lifecycle_state = str(workspace.get("lifecycle_state") or "").strip()
+
+if not repo and fallback_repo:
+    workspace["repo"] = fallback_repo
+    repo = fallback_repo
+    changed = True
+if not worktree and fallback_worktree:
+    workspace["worktree"] = fallback_worktree
+    worktree = fallback_worktree
+    changed = True
+if not branch and fallback_branch:
+    workspace["branch"] = fallback_branch
+    branch = fallback_branch
+    changed = True
+
+if repo or worktree or branch:
+    if not bool(workspace.get("enabled")):
+        workspace["enabled"] = True
+        changed = True
+    if lifecycle_state in {"", "disabled"}:
+        workspace["lifecycle_state"] = "active"
+        changed = True
+    if workspace_note:
+        current_note = str(workspace.get("note") or "").strip()
+        if not current_note or current_note == "worktree auto-provision disabled (--worktree off)":
+            workspace["note"] = workspace_note
+            changed = True
+
+packet_execution_mode = str(packet.get("execution_mode") or "").strip().lower()
+packet_transport = str(packet.get("transport") or "").strip().lower()
+if not packet_execution_mode and execution_mode:
+    packet["execution_mode"] = execution_mode
+    changed = True
+if not packet_transport and transport:
+    packet["transport"] = transport
+    changed = True
+
+if not str(state.get("execution_mode") or "").strip() and execution_mode:
+    state["execution_mode"] = execution_mode
+    changed = True
+if not str(state.get("transport") or "").strip() and transport:
+    state["transport"] = transport
+    changed = True
+
+gate = packet.get("cross_repo_pushability_gate")
+if isinstance(gate, dict):
+    if repo and not str(gate.get("repo") or "").strip():
+        gate["repo"] = repo
+        changed = True
+    if branch and not str(gate.get("branch") or "").strip():
+        gate["branch"] = branch
+        changed = True
+    packet["cross_repo_pushability_gate"] = gate
+
+state["workspace"] = workspace
+state["packet"] = packet
+state["wave_packet"] = packet
+
+if changed:
+    state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+PYSYNC
+}
+
+_normalize_completion_level() {
+  local completion_level="${1:-}"
+  case "$completion_level" in
+    "" ) printf '\n' ;;
+    slice) printf 'slice_complete\n' ;;
+    loop) printf 'loop_complete\n' ;;
+    domain) printf 'domain_complete\n' ;;
+    estate) printf 'estate_complete\n' ;;
+    readiness) printf 'readiness_complete\n' ;;
+    *) printf '%s\n' "$completion_level" ;;
+  esac
+}
+
 # ── Subcommand: start ────────────────────────────────────────────
 cmd_start() {
   local loop_id=""
@@ -191,10 +409,47 @@ for b in d.get('blockers',[]):
     wave_start_args+=("${passthrough_args[@]}")
   fi
 
+  local explicit_worktree_flag=0
+  if _has_passthrough_flag "--worktree" "${passthrough_args[@]+"${passthrough_args[@]}"}"; then
+    explicit_worktree_flag=1
+  fi
+
   echo "Starting wave $wave_id..."
-  bash "$WAVE_SH" start "${wave_start_args[@]}" || {
-    _fail "wave.sh start failed for $wave_id"
-  }
+  local start_rc=0
+  local start_output=""
+  local provision_repo=""
+  local provision_branch=""
+  local provision_worktree=""
+  local provision_note=""
+  start_output="$(bash "$WAVE_SH" start "${wave_start_args[@]}" 2>&1)" || start_rc=$?
+
+  if [[ "$start_rc" -ne 0 ]]; then
+    if [[ "$explicit_worktree_flag" -eq 0 && "$start_output" == *"WORKTREE PATH POLICY BLOCK:"* ]]; then
+      echo "$start_output"
+      echo "wave.execute: retrying start with wrapper-managed worktree rehydrate..."
+
+      local -a fallback_args=("$wave_id" --loop-id "$loop_id" --worktree off)
+      if [[ -n "$objective" ]]; then
+        fallback_args+=(--objective "$objective")
+      fi
+      if [[ ${#passthrough_args[@]} -gt 0 ]]; then
+        fallback_args+=("${passthrough_args[@]}")
+      fi
+
+      start_output="$(bash "$WAVE_SH" start "${fallback_args[@]}" 2>&1)" || {
+        echo "$start_output"
+        _fail "wave.sh start failed for $wave_id"
+      }
+
+      local provisioned
+      provisioned="$(_provision_wrapper_managed_workspace "$wave_id")"
+      IFS='|' read -r provision_repo provision_branch provision_worktree provision_note <<< "$provisioned"
+    else
+      echo "$start_output"
+      _fail "wave.sh start failed for $wave_id"
+    fi
+  fi
+  echo "$start_output"
 
   # Step 4: Write authority binding
   local wave_dir="$WAVES_DIR/$wave_id"
@@ -215,9 +470,11 @@ with open(sys.argv[5], 'w') as f:
     f.write('\n')
 " "$auth_json" "$wave_id" "$started_at" "${SPINE_CAP_RUN_KEY:-manual}" "$wave_dir/authority.json"
 
+  _sync_wave_runtime_state "$wave_id" "$auth_json" "$provision_repo" "$provision_worktree" "$provision_branch" "$provision_note"
+
   # Step 5: Print summary
   local exec_mode
-  exec_mode="$(_auth_field "$auth_json" "execution_mode")"
+  exec_mode="$(_auth_execution_mode "$auth_json")"
   local owner
   owner="$(_auth_field "$auth_json" "owner")"
   local loop_objective
@@ -303,6 +560,20 @@ cmd_dispatch() {
     printf "Gap IDs:   %s\n" "$gap_ids"
   fi
   echo ""
+
+  local checkout_repo=""
+  local checkout_worktree=""
+  local checkout_branch=""
+  checkout_repo="$(_current_checkout_repo)"
+  checkout_worktree="$(_current_checkout_worktree)"
+  checkout_branch="$(_current_checkout_branch)"
+  _sync_wave_runtime_state \
+    "$wave_id" \
+    "$auth_json" \
+    "$checkout_repo" \
+    "$checkout_worktree" \
+    "$checkout_branch" \
+    "wave-execute adopted current checkout metadata for dispatch"
 
   # Step 3: Delegate to wave.sh dispatch
   local dispatch_args=("$wave_id" --lane "$lane" --task "$task")
@@ -559,6 +830,8 @@ cmd_close() {
 
   [[ -n "$wave_id" ]] || _fail_args "--wave-id required"
 
+  completion_level="$(_normalize_completion_level "$completion_level")"
+
   _header "close"
 
   # Step 1: Read authority binding
@@ -620,6 +893,9 @@ for p in pending:
 
   # Step 4: Delegate to wave.sh close
   local close_args=("$wave_id")
+  if [[ -n "$disposition" ]]; then
+    close_args+=(--disposition "$disposition")
+  fi
   if [[ ${#passthrough_args[@]} -gt 0 ]]; then
     close_args+=("${passthrough_args[@]}")
   fi
