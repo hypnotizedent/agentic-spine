@@ -1477,6 +1477,15 @@ if errors:
 
 state["packet"] = packet
 state["wave_packet"] = packet
+state["preflight"] = {
+    "domain": "dispatch-pushability",
+    "started_at": now,
+    "finished_at": now,
+    "duration_s": 0,
+    "verdict": "go",
+    "blockers": [],
+    "next_action": "Proceed with dispatch.",
+}
 with open(sf, "w", encoding="utf-8") as f:
     json.dump(state, f, indent=2)
     f.write("\n")
@@ -3827,7 +3836,7 @@ else:
             errors.append(f"evidence_refs.blocker_class invalid: {blocker_class}")
 
 # additionalProperties check
-allowed_keys = set(required + ["wave_id", "commit_hashes", "loop_id", "gap_ids", "evidence_refs"])
+allowed_keys = set(required + ["wave_id", "commit_hashes", "loop_id", "gap_ids", "evidence_refs", "completion_level", "prompt_lineage"])
 for k in receipt.keys():
     if k not in allowed_keys:
         errors.append(f"Unknown field: '{k}' (additionalProperties not allowed)")
@@ -3971,7 +3980,7 @@ def _validate_receipt(receipt):
             elif blocker_class not in allowed_blocker_classes:
                 errors.append(f"bad evidence blocker_class: {blocker_class}")
 
-    allowed = set(required + ["wave_id", "commit_hashes", "loop_id", "gap_ids", "evidence_refs"])
+    allowed = set(required + ["wave_id", "commit_hashes", "loop_id", "gap_ids", "evidence_refs", "completion_level", "prompt_lineage"])
     for k in receipt.keys():
         if k not in allowed:
             errors.append(f"unknown field: {k}")
@@ -4724,6 +4733,7 @@ try:
         infra_violations.append(f"wave packet missing required field(s): {', '.join(packet_missing)}")
 
     # 5. Receipt validation: all receipt files must satisfy EXEC_RECEIPT contract
+    schema_path = os.path.join(spine_repo, "ops", "bindings", "orchestration.exec_receipt.schema.json")
     invalid_receipts = []
     valid_receipt_count = 0
     valid_receipts = []
@@ -4824,13 +4834,14 @@ try:
                 elif blocker_class not in allowed_blocker_classes:
                     errors.append(f"bad evidence blocker_class: {blocker_class}")
 
-        allowed = set(required_fields + ["wave_id", "commit_hashes", "loop_id", "gap_ids", "evidence_refs"])
+        allowed = set(required_fields + ["wave_id", "commit_hashes", "loop_id", "gap_ids", "evidence_refs", "completion_level", "prompt_lineage"])
         for key in receipt.keys():
             if key not in allowed:
                 errors.append(f"unknown field: {key}")
 
         return errors
 
+    receipts_dir = os.path.join(sd, "evidence")
     if os.path.isdir(receipts_dir):
         for fn in sorted(os.listdir(receipts_dir)):
             if not fn.endswith(".json"):

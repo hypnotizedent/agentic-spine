@@ -192,6 +192,55 @@ assert state["packet"]["lane_outcomes"][0]["lane_status"] == "BLOCKED", state["p
 PY
 pass "code/git mode preserves existing blocking behavior"
 
+bare_remote="$tmpdir/remote.git"
+git init --bare "$bare_remote" >/dev/null
+git -C "$controller_root" init >/dev/null
+git -C "$controller_root" config user.name "Test User"
+git -C "$controller_root" config user.email "test@example.com"
+printf 'seed\n' > "$controller_root/README.md"
+git -C "$controller_root" add README.md
+git -C "$controller_root" commit -m "seed" >/dev/null
+git -C "$controller_root" branch -M main >/dev/null
+git -C "$controller_root" remote add origin "$bare_remote"
+git -C "$controller_root" push -u origin main >/dev/null
+git -C "$controller_root" branch codex/WAVE-PASS-TEST >/dev/null
+
+runtime_pass="$tmpdir/runtime-pass"
+mkdir -p "$runtime_pass/state"
+pass_state="$runtime_pass/pass-state.json"
+cat > "$pass_state" <<EOF
+{
+  "wave_id": "WAVE-PASS-TEST",
+  "packet": {
+    "loop_id": "LOOP-PASS-TEST",
+    "owner_terminal": "SPINE-CONTROL-01",
+    "execution_mode": "code",
+    "transport": "git",
+    "stub_matrix": [],
+    "lane_outcomes": []
+  },
+  "workspace": {
+    "repo": "$controller_root",
+    "branch": "codex/WAVE-PASS-TEST"
+  }
+}
+EOF
+pass_out="$(
+  invoke_preflight "$func_file" "$pass_state" "execution" "$controller_root" "$runtime_pass/state" 2>&1
+)"
+assert_contains "$pass_out" "dispatch pushability preflight: PASS" "git mode pass emits pass output"
+python3 - <<'PY' "$pass_state"
+import json, sys
+state = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+gate = state["packet"]["cross_repo_pushability_gate"]
+assert gate["status"] == "PASS", gate
+preflight = state["preflight"]
+assert preflight["verdict"] == "go", preflight
+assert preflight["blockers"] == [], preflight
+assert preflight["domain"] == "dispatch-pushability", preflight
+PY
+pass "git mode pass writes a recognized go preflight record"
+
 echo "════════════════════════════════════════"
 echo "PASS: $PASS"
 echo "FAIL: $FAIL"

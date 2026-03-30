@@ -281,13 +281,24 @@ esac
 EOF
 chmod +x "$T3_REPO/ops/commands/wave.sh"
 
-cat > "$T3_REPO/ops/plugins/core/orchestration/bin/wave-finish" <<'EOF'
+cat > "$T3_REPO/ops/commands/cap.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+cmd="$1"; shift
+if [[ "$cmd" != "run" ]]; then
+  echo "unsupported" >&2
+  exit 1
+fi
+cap="$1"; shift
+if [[ "$cap" != "wave.finish" ]]; then
+  echo "unsupported cap" >&2
+  exit 1
+fi
+printf '%s\n' "${OPS_CAP_AUTO_APPROVE:-missing}" > "${SPINE_RUNTIME_ROOT}/finish.auto_approve"
 printf '%s\n' "$@" > "${SPINE_RUNTIME_ROOT}/finish.args"
 echo "wave.finish stub"
 EOF
-chmod +x "$T3_REPO/ops/plugins/core/orchestration/bin/wave-finish"
+chmod +x "$T3_REPO/ops/commands/cap.sh"
 
 cat > "$T3_RUNTIME/waves/WAVE-20260323-01/authority.json" <<'EOF'
 {"loop_id":"LOOP-T-CLOSE","execution_mode":"orchestrator_subagents"}
@@ -311,6 +322,7 @@ assert_file_contains "$T3_RUNTIME/finish.args" "--loop-id" "wave-execute passes 
 assert_file_contains "$T3_RUNTIME/finish.args" "LOOP-T-CLOSE" "wave-execute passes resolved loop-id to wave-finish"
 assert_file_contains "$T3_RUNTIME/finish.args" "WAVE-20260323-01" "wave-execute passes wave-id to wave-finish"
 assert_file_contains "$T3_RUNTIME/finish.args" "slice_complete" "wave-execute normalizes completion-level aliases for wave-finish"
+assert_file_contains "$T3_RUNTIME/finish.auto_approve" "yes" "wave-execute auto-approves governed wave-finish in agent batches"
 assert_file_contains "$T3_ROOT/out.txt" "Running wave.finish" "wave-execute announces auto-finish"
 
 echo ""
