@@ -9,6 +9,10 @@
 MEDIA_AGENT_LAUNCHER="${MEDIA_AGENT_LAUNCHER:-/Users/ronnyworks/code/workbench/agents/media/tools/run.sh}"
 MEDIA_AGENT_TIMEOUT="${MEDIA_AGENT_TIMEOUT:-90}"
 
+# Governed bridge context: allows mutating tools through the MCP governance gate.
+# Only the spine bridge helper sets this; ad hoc MCP callers remain blocked.
+export SPINE_GOVERNED_BRIDGE=1
+
 # Media-home Tailscale IP fallback for spine→workbench bridge calls.
 # The MCP server defaults to LAN 10.0.0.106 which is unreachable from
 # the Mac. Export Tailscale IPs only if not already set.
