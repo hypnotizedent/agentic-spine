@@ -23,6 +23,15 @@ Lean correction:
 - The existing spine closure parent remains the single active parent authority.
 - V3 finalization now becomes its canonical next phase.
 
+## Supporting Boundaries
+
+The following files are relevant to this program, but they are not equal in authority:
+
+- `/Users/ronnyworks/code/agentic-spine/ops/bindings/node.role.contract.yaml` is the live node-boundary authority for physical-node taxonomy and role semantics.
+- `/Users/ronnyworks/code/agentic-spine/docs/governance/LOCAL_CONTROL_PLANE_CONTRACT.md` is current authority for local node and filesystem reality on the operator workstation.
+- `/Users/ronnyworks/code/agentic-spine/docs/governance/EXECUTION_NODE_SPEC.md` is explicitly historical and non-authoritative. It may inform archive or future design work, but it does not define the live V3 boundary.
+- The engine-map visual at `/Users/ronnyworks/code/agentic-spine/ops/archive/pre-2026-04-01-spine/visuals/SPINE_V3_FINALIZATION_ENGINE_MAP_20260330.html` is support material only. It is useful for operator orientation, but it is not a governing contract.
+
 ## Purpose
 
 Finish V3 as a usable governed autonomous execution system, stop the endless overhaul cycle, and move the spine from being worked on to being used.
@@ -184,13 +193,19 @@ Live canon target:
 - `/Users/ronnyworks/code/agentic-spine/docs/governance/SPINE_NORMALIZATION_KERNEL_20260326.md`
 - `/Users/ronnyworks/code/agentic-spine/docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`
 - `/Users/ronnyworks/code/agentic-spine/docs/governance/LOCAL_CONTROL_PLANE_CONTRACT.md`
-- `/Users/ronnyworks/code/agentic-spine/docs/governance/EXECUTION_NODE_SPEC.md` only if still operational
+- `/Users/ronnyworks/code/agentic-spine/docs/governance/EXECUTION_NODE_SPEC.md` only if it is rewritten and re-elected as live authority; until then it remains historical and outside the minimum canon
 - `/Users/ronnyworks/code/agentic-spine/docs/governance/GIT_WORKFLOW_DISCIPLINE.md` only if enforced
 
 Governance doc budget:
 
 - `8` mandatory
 - `10` max live canon
+
+Node-boundary correction:
+
+- node truth is not required to live as a prose doc if the binding authority is stronger
+- the live node-boundary authority is `/Users/ronnyworks/code/agentic-spine/ops/bindings/node.role.contract.yaml`
+- `EXECUTION_NODE_SPEC.md` is not part of live canon unless re-elected from scratch
 
 ### 6. Self-Orchestrated Finalization Proof
 
@@ -258,6 +273,7 @@ V3 is complete only when:
 - the starting lineup is elected
 - the workbench boundary is settled
 - the planner uses observation signals
+- the node boundary is represented by live authority files instead of historical aspirational drafts
 - the archive boundary is real
 - the docs canon is cut to minimum
 - the spine proves it can orchestrate its own finishing move

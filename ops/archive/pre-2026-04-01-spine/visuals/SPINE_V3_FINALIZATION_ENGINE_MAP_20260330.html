@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spine V3 — Final Engine Map</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; background: #0a0a0f; color: #c8c8d0; min-height: 100vh; padding: 24px; }
+
+  h1 { font-size: 20px; color: #e0e0e8; margin-bottom: 4px; letter-spacing: -0.5px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 32px; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 1200px; margin: 0 auto 32px; }
+  .grid.triple { grid-template-columns: 1fr 1fr 1fr; }
+  .grid.full { grid-template-columns: 1fr; }
+
+  .card { background: #12121a; border: 1px solid #1e1e2e; border-radius: 8px; padding: 16px; }
+  .card.engine { border-left: 3px solid #3b82f6; }
+  .card.observation { border-left: 3px solid #10b981; }
+  .card.missing { border-left: 3px solid #ef4444; background: #1a0a0a; }
+  .card.archive { border-left: 3px solid #6b7280; opacity: 0.7; }
+  .card.meta { border-left: 3px solid #f59e0b; }
+
+  .card-title { font-size: 14px; font-weight: 600; color: #e0e0e8; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .card-title .badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 400; }
+  .badge.l1 { background: #1e3a5f; color: #60a5fa; }
+  .badge.gap { background: #5f1e1e; color: #f87171; }
+  .badge.built { background: #1e5f3a; color: #6ee7b7; }
+  .badge.dead { background: #3a3a3a; color: #9a9a9a; }
+
+  .cap-list { list-style: none; padding: 0; }
+  .cap-list li { font-size: 11px; padding: 3px 0; color: #8888a0; border-bottom: 1px solid #1a1a24; }
+  .cap-list li:last-child { border-bottom: none; }
+  .cap-list li code { color: #a78bfa; font-size: 11px; }
+  .cap-list li .status { float: right; font-size: 10px; }
+  .cap-list li .status.live { color: #10b981; }
+  .cap-list li .status.built { color: #f59e0b; }
+  .cap-list li .status.dead { color: #ef4444; }
+
+  .section-header { font-size: 16px; color: #e0e0e8; margin: 32px 0 12px; padding-bottom: 8px; border-bottom: 1px solid #1e1e2e; }
+  .section-desc { font-size: 12px; color: #666; margin-bottom: 16px; }
+
+  .stats-bar { display: flex; gap: 24px; margin-bottom: 32px; flex-wrap: wrap; }
+  .stat { text-align: center; }
+  .stat .num { font-size: 28px; font-weight: 700; color: #e0e0e8; }
+  .stat .label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 1px; }
+  .stat.red .num { color: #ef4444; }
+  .stat.green .num { color: #10b981; }
+  .stat.blue .num { color: #3b82f6; }
+  .stat.yellow .num { color: #f59e0b; }
+
+  .flow-diagram { background: #0f0f18; border: 1px solid #1e1e2e; border-radius: 8px; padding: 24px; margin-bottom: 32px; overflow-x: auto; }
+  .flow-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .flow-node { background: #1a1a2e; border: 1px solid #2a2a3e; border-radius: 6px; padding: 8px 12px; font-size: 11px; color: #c8c8d0; white-space: nowrap; }
+  .flow-node.active { border-color: #3b82f6; color: #93c5fd; }
+  .flow-node.observation { border-color: #10b981; color: #6ee7b7; }
+  .flow-node.missing { border-color: #ef4444; color: #fca5a5; background: #1a0a0a; }
+  .flow-arrow { color: #444; font-size: 16px; }
+  .flow-label { font-size: 10px; color: #666; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }
+
+  .comparison-table { width: 100%; border-collapse: collapse; margin-bottom: 32px; }
+  .comparison-table th { text-align: left; font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 1px; padding: 8px; border-bottom: 2px solid #1e1e2e; }
+  .comparison-table td { font-size: 12px; padding: 8px; border-bottom: 1px solid #1a1a24; }
+  .comparison-table td:first-child { color: #a78bfa; font-weight: 500; }
+  .comparison-table tr:hover { background: #14141e; }
+
+  .gap-callout { background: #1a0a0a; border: 1px solid #3a1a1a; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .gap-callout .title { color: #f87171; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  .gap-callout .desc { color: #9a7070; font-size: 12px; line-height: 1.5; }
+
+  .timeline { position: relative; padding-left: 24px; margin-bottom: 32px; }
+  .timeline::before { content: ''; position: absolute; left: 8px; top: 0; bottom: 0; width: 2px; background: #1e1e2e; }
+  .timeline-item { position: relative; margin-bottom: 16px; }
+  .timeline-item::before { content: ''; position: absolute; left: -20px; top: 6px; width: 10px; height: 10px; border-radius: 50%; border: 2px solid #3b82f6; background: #0a0a0f; }
+  .timeline-item.red::before { border-color: #ef4444; }
+  .timeline-item.green::before { border-color: #10b981; }
+  .timeline-item.yellow::before { border-color: #f59e0b; }
+  .timeline-item .date { font-size: 10px; color: #666; }
+  .timeline-item .event { font-size: 12px; color: #c8c8d0; }
+  .timeline-item .detail { font-size: 11px; color: #888; margin-top: 2px; }
+</style>
+</head>
+<body>
+
+<h1>Spine V3 Finalization: Engine Map</h1>
+<p class="subtitle">What Codex proposed vs what's actually in the repo. Generated 2026-03-30.</p>
+
+<div class="stats-bar">
+  <div class="stat blue"><div class="num">7</div><div class="label">Engine Pieces</div></div>
+  <div class="stat green"><div class="num">60+</div><div class="label">Scripts Built</div></div>
+  <div class="stat red"><div class="num">8</div><div class="label">Planner If-Stmts</div></div>
+  <div class="stat yellow"><div class="num">0</div><div class="label">Observation Inputs<br>to Planner</div></div>
+</div>
+
+<!-- THE CORE PROBLEM DIAGRAM -->
+<div class="section-header">The Core Problem: Observation Feeds Nothing</div>
+<p class="section-desc">spine-control collects rich signals, then build_plan_payload() makes decisions using none of them.</p>
+
+<div class="flow-diagram">
+  <div class="flow-label">Tick Phase (data collection) — All working</div>
+  <div class="flow-row">
+    <div class="flow-node observation">collect_timeline()</div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-node observation">collect_graph_summary()</div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-node observation">collect_open_loops()</div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-node observation">collect_open_gaps()</div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-node observation">collect_friction_queue()</div>
+  </div>
+
+  <div class="flow-label" style="margin-top: 16px;">Plan Phase (decision making) — Ignores collected data</div>
+  <div class="flow-row">
+    <div class="flow-node missing">build_plan_payload()</div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-node" style="border-color: #444;">gaps exist? &rarr; verify</div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-node" style="border-color: #444;">AOF stale? &rarr; refresh</div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-node" style="border-color: #444;">PR ready? &rarr; merge</div>
+    <div class="flow-arrow">&rarr;</div>
+    <div class="flow-node" style="border-color: #444;">loops[:3] &rarr; progress</div>
+  </div>
+
+  <div class="flow-label" style="margin-top: 16px;">What build_plan_payload() SHOULD consume but doesn't</div>
+  <div class="flow-row">
+    <div class="flow-node missing">timeline.events (age/staleness)</div>
+    <div class="flow-node missing">graph.edges (topology gaps)</div>
+    <div class="flow-node missing">loop.priority (from frontmatter)</div>
+    <div class="flow-node missing">gate_quality (flaky gates)</div>
+    <div class="flow-node missing">telemetry (dormant surfaces)</div>
+  </div>
+</div>
+
+<!-- CODEX STARTING LINEUP vs FULL ENGINE -->
+<div class="section-header">Starting Lineup: Codex's 6 vs The Actual 7</div>
+<p class="section-desc">Codex defined 6 engine pieces. The observation layer is the missing 7th.</p>
+
+<div class="grid">
+  <div class="card engine">
+    <div class="card-title">1. Session Entry <span class="badge l1">L1</span> <span class="badge built">IN CODEX PLAN</span></div>
+    <ul class="cap-list">
+      <li><code>session.v3.attach</code> — 996-line bootstrap <span class="status live">LIVE</span></li>
+      <li><code>session.start</code> — entry packet generation <span class="status live">LIVE</span></li>
+      <li><code>prompt-library-bootstrap</code> — context loading <span class="status live">LIVE</span></li>
+      <li><code>spine-context</code> — runtime context <span class="status live">LIVE</span></li>
+    </ul>
+  </div>
+
+  <div class="card engine">
+    <div class="card-title">2. Planner/Control Loop <span class="badge l1">L1</span> <span class="badge built">IN CODEX PLAN</span></div>
+    <ul class="cap-list">
+      <li><code>spine.control.tick</code> — signal aggregation <span class="status live">LIVE</span></li>
+      <li><code>spine.control.plan</code> — next-action queue <span class="status live">LIVE</span></li>
+      <li><code>spine.control.execute</code> — action dispatch <span class="status live">LIVE</span></li>
+      <li><code>spine.control.cycle</code> — autonomous loop <span class="status live">LIVE</span></li>
+      <li><code>derive_route_hint()</code> — domain routing <span class="status dead">BROKEN: no spine route</span></li>
+      <li><code>build_plan_payload()</code> — selection logic <span class="status dead">BROKEN: ignores data</span></li>
+    </ul>
+  </div>
+
+  <div class="card engine">
+    <div class="card-title">3. Orchestration <span class="badge l1">L1</span> <span class="badge built">IN CODEX PLAN</span></div>
+    <ul class="cap-list">
+      <li><code>orchestration.loop.open/close</code> <span class="status live">LIVE</span></li>
+      <li><code>orchestration.wave.*</code> — 9 subcapabilities <span class="status built">RESTORED 6d61808d</span></li>
+      <li><code>wave.execute</code> — governed dispatch <span class="status built">RESTORED 8adbf9a5</span></li>
+      <li><code>orchestration.lane.*</code> — lane management <span class="status live">LIVE</span></li>
+      <li><code>session.execution.lane.*</code> — lane lifecycle <span class="status live">LIVE</span></li>
+      <li><code>orchestration.handoff.validate</code> <span class="status live">LIVE</span></li>
+    </ul>
+  </div>
+
+  <div class="card engine">
+    <div class="card-title">4. Continuity <span class="badge l1">L1</span> <span class="badge built">IN CODEX PLAN</span></div>
+    <ul class="cap-list">
+      <li><code>loops.continuity.update</code> <span class="status live">LIVE</span></li>
+      <li><code>friction.*</code> — friction capture/query <span class="status live">LIVE</span></li>
+      <li><code>receipts.exec.emit</code> — attestation <span class="status live">LIVE</span></li>
+      <li><code>session.handoff.*</code> — 6 handoff caps <span class="status built">BUILT, 1 RECORD</span></li>
+      <li><code>state.shared.reconcile</code> — state consistency <span class="status built">BUILT</span></li>
+    </ul>
+  </div>
+
+  <div class="card engine">
+    <div class="card-title">5. Verification <span class="badge l1">L1</span> <span class="badge built">IN CODEX PLAN</span></div>
+    <ul class="cap-list">
+      <li><code>verify.core.run</code> — Core-8 gates <span class="status live">LIVE</span></li>
+      <li><code>verify.pack.run</code> — extended verify <span class="status live">LIVE</span></li>
+      <li><code>verify.domain.run</code> — integration/debug <span class="status built">BUILT</span></li>
+      <li><code>verify.release.run</code> — full certification <span class="status built">BUILT</span></li>
+      <li>116 active gate scripts <span class="status live">LIVE</span></li>
+    </ul>
+  </div>
+
+  <div class="card engine">
+    <div class="card-title">6. Translator Membrane <span class="badge l1">L1</span> <span class="badge built">IN CODEX PLAN</span></div>
+    <ul class="cap-list">
+      <li><code>translator.authority.contract.yaml</code> <span class="status live">LIVE</span></li>
+      <li>Interpretation boundary only <span class="status live">ENFORCED</span></li>
+      <li>No execution authority <span class="status live">ENFORCED</span></li>
+      <li>No verdict authority <span class="status live">ENFORCED</span></li>
+    </ul>
+  </div>
+</div>
+
+<!-- THE MISSING 7TH PIECE -->
+<div class="grid full">
+  <div class="card missing">
+    <div class="card-title">7. Observation & Telemetry <span class="badge l1">L1</span> <span class="badge gap">MISSING FROM CODEX PLAN</span></div>
+    <p style="font-size: 12px; color: #9a7070; margin-bottom: 12px;">This is the homegrown LangSmith + LangGraph + LangFuse layer. 60+ scripts, all built, all registered. The planner ignores all of it.</p>
+    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;">
+      <div>
+        <div style="font-size: 11px; color: #f87171; margin-bottom: 6px; font-weight: 600;">Tracing (LangSmith equivalent)</div>
+        <ul class="cap-list">
+          <li><code>receipts.exec.emit</code> <span class="status live">LIVE</span></li>
+          <li><code>receipts.index.build</code> <span class="status built">BUILT</span></li>
+          <li><code>receipts.search</code> <span class="status built">BUILT</span></li>
+          <li><code>receipts.summary</code> <span class="status built">BUILT</span></li>
+          <li><code>receipts.trends</code> <span class="status built">BUILT</span></li>
+          <li><code>spine.timeline.query</code> <span class="status built">BUILT</span></li>
+          <li><code>spine.timeline.report</code> <span class="status built">BUILT</span></li>
+          <li><code>spine.surface.usage.telemetry</code> <span class="status built">BUILT</span></li>
+          <li><code>weekly-execution-telemetry</code> <span class="status built">BUILT</span></li>
+          <li><code>spine.experiment.compare</code> <span class="status built">BUILT</span></li>
+          <li><code>spine-log-query</code> <span class="status built">BUILT</span></li>
+        </ul>
+      </div>
+      <div>
+        <div style="font-size: 11px; color: #f87171; margin-bottom: 6px; font-weight: 600;">Graph / DAG (LangGraph equivalent)</div>
+        <ul class="cap-list">
+          <li><code>spine.graph.show</code> <span class="status built">BUILT</span></li>
+          <li><code>spine.execution.graph.yaml</code> <span class="status built">BUILT</span></li>
+          <li><code>agent.route</code> <span class="status built">BUILT</span></li>
+          <li><code>agent.status</code> <span class="status built">BUILT</span></li>
+          <li><code>agent.watchdog</code> <span class="status built">BUILT</span></li>
+          <li><code>orchestration.watcher.*</code> <span class="status built">BUILT</span></li>
+          <li><code>terminal-heartbeat-post</code> <span class="status built">BUILT</span></li>
+          <li><code>orchestration.launcher.*</code> <span class="status built">BUILT</span></li>
+        </ul>
+      </div>
+      <div>
+        <div style="font-size: 11px; color: #f87171; margin-bottom: 6px; font-weight: 600;">Evaluation (LangFuse equivalent)</div>
+        <ul class="cap-list">
+          <li><code>gate-quality-scorecard</code> <span class="status built">BUILT</span></li>
+          <li><code>drift-gates-failure-stats</code> <span class="status built">BUILT</span></li>
+          <li><code>verify.failure.classify</code> <span class="status built">BUILT</span></li>
+          <li><code>verify.response.loop</code> <span class="status built">BUILT</span></li>
+          <li><code>slo-report</code> <span class="status built">BUILT</span></li>
+          <li><code>outcome-slo-report</code> <span class="status built">BUILT</span></li>
+          <li><code>lean-scorecard</code> <span class="status built">BUILT</span></li>
+          <li><code>policy-autotune-propose</code> <span class="status built">BUILT</span></li>
+          <li><code>certification-manifest-*</code> <span class="status built">BUILT</span></li>
+          <li><code>prompt.registry.status</code> <span class="status built">BUILT</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MAILROOM / EVIDENCE -->
+<div class="grid full">
+  <div class="card missing">
+    <div class="card-title">8. Mailroom & Evidence Backbone <span class="badge l1">L1</span> <span class="badge gap">UNCLASSIFIED IN CODEX PLAN</span></div>
+    <p style="font-size: 12px; color: #9a7070; margin-bottom: 12px;">16 mailroom scripts + 18 evidence scripts. Task dispatch backbone + persistence layer. Externalized at da197ef5 (March 10). Neither "in" nor "out" in the finalization program.</p>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+      <div>
+        <div style="font-size: 11px; color: #f87171; margin-bottom: 6px; font-weight: 600;">Mailroom Bridge (16 scripts, 9 caps)</div>
+        <ul class="cap-list">
+          <li><code>mailroom.ingest</code> — task intake <span class="status built">BUILT</span></li>
+          <li><code>mailroom.route</code> — task routing <span class="status built">BUILT</span></li>
+          <li><code>mailroom.deliver</code> — task dispatch <span class="status built">BUILT</span></li>
+          <li><code>mailroom.status</code> — queue status <span class="status built">BUILT</span></li>
+          <li>+ 5 more capabilities <span class="status built">BUILT</span></li>
+        </ul>
+      </div>
+      <div>
+        <div style="font-size: 11px; color: #f87171; margin-bottom: 6px; font-weight: 600;">Evidence System (18 scripts)</div>
+        <ul class="cap-list">
+          <li>87,061 session evidence files <span class="status live">LIVE</span></li>
+          <li>765 verify evidence files <span class="status live">LIVE</span></li>
+          <li>33 lane closeout records <span class="status live">LIVE</span></li>
+          <li>25 loop closeout records <span class="status live">LIVE</span></li>
+          <li><code>enqueue_delegated_agent_task()</code> in spine-control <span class="status built">BUILT</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- GAP CALLOUTS -->
+<div class="section-header">Specific Gaps in Codex's Finalization Program</div>
+
+<div class="gap-callout">
+  <div class="title">Gap 1: Subloop 1 should run telemetry, not do manual classification</div>
+  <div class="desc">spine-surface-usage-telemetry with its 30-day dormancy window + the metabolism registry (19% machine-enforced, 50% operationally consumed, 38% declarative-only, 12% dormant) already answers "what survives." Run it. Don't classify by hand again.</div>
+</div>
+
+<div class="gap-callout">
+  <div class="title">Gap 2: Subloop 2 needs specific code references, not abstract goals</div>
+  <div class="desc">build_plan_payload() at lines ~1263-1413 of spine-control. derive_route_hint() at ~line 1190. loops[:3] at ~line 1340. collect_open_loops() priority extraction at line 216. These are the 4 code locations that need ~50 lines of changes total.</div>
+</div>
+
+<div class="gap-callout">
+  <div class="title">Gap 3: The finalization program itself should be a spine wave, not manual work</div>
+  <div class="desc">If the spine can't orchestrate LOOP-SPINE-V3-FINALIZATION-20260330 through its own wave-execute / orchestration-loop / lane system, then V3 isn't done regardless of what else you archive. The proof run IS the finalization.</div>
+</div>
+
+<div class="gap-callout">
+  <div class="title">Gap 4: Mailroom + evidence = unclassified in the starting lineup</div>
+  <div class="desc">16 mailroom scripts (task dispatch backbone) and 18 evidence scripts (persistence layer) are not mentioned. spine-control already has enqueue_delegated_agent_task() at line ~1350. These belong explicitly in the starting lineup.</div>
+</div>
+
+<div class="gap-callout">
+  <div class="title">Gap 5: 853 bindings — "cut 60-75%" needs a method, not a target</div>
+  <div class="desc">The metabolism registry already classified all bindings. The "archive/legacy" and "external/workbench residue" categories are the cut list. Run the classification that already exists.</div>
+</div>
+
+<div class="gap-callout">
+  <div class="title">Gap 6: No "spine" route in derive_route_hint()</div>
+  <div class="desc">The routing function only knows domain keywords (finance, identity, automation, home-automation, photos, mint, media). Spine-internal work defaults to "automation." The planner literally cannot route platform work to platform tools. 1-line fix.</div>
+</div>
+
+<!-- THE PLANNER FIX SPEC -->
+<div class="section-header">Planner Fix: Exact Specification</div>
+<p class="section-desc">~50 lines of Python changes across 4 locations in spine-control</p>
+
+<table class="comparison-table">
+  <tr>
+    <th>Location</th>
+    <th>Current Behavior</th>
+    <th>Required Change</th>
+    <th>Effort</th>
+  </tr>
+  <tr>
+    <td>build_plan_payload()<br>~line 1340</td>
+    <td>loops[:3] — first 3 by file order</td>
+    <td>Sort by priority field (already extracted at line 216) + age. Select top 3 by urgency.</td>
+    <td>~10 lines</td>
+  </tr>
+  <tr>
+    <td>build_plan_payload()<br>~line 1366</td>
+    <td>Only reads core_verify_needs_attention from timeline</td>
+    <td>Read timeline.events age to detect loops >48hrs without progress. Add P-closure tier.</td>
+    <td>~15 lines</td>
+  </tr>
+  <tr>
+    <td>derive_route_hint()<br>~line 1190</td>
+    <td>Keyword matching: finance, identity, automation, home-automation, photos, mint, media. Default: "automation"</td>
+    <td>Add "spine", "platform", "engine", "kernel" keywords. Route to spine-internal tools.</td>
+    <td>~5 lines</td>
+  </tr>
+  <tr>
+    <td>build_plan_payload()<br>new addition</td>
+    <td>No graph/telemetry consumption</td>
+    <td>Read graph.edges for disconnected subgraphs. Read telemetry for stale surfaces. Feed into selection.</td>
+    <td>~20 lines</td>
+  </tr>
+</table>
+
+<!-- WEEK-BY-WEEK VELOCITY -->
+<div class="section-header">March Velocity Timeline</div>
+<p class="section-desc">What the repo history actually shows, week by week</p>
+
+<div class="timeline">
+  <div class="timeline-item green">
+    <div class="date">March 1-7</div>
+    <div class="event">667 commits — Domain execution through the spine</div>
+    <div class="detail">Backup consolidation, auth hardening, 730XD, Infisical, gap closure. Spine was a tool being used.</div>
+  </div>
+  <div class="timeline-item red">
+    <div class="date">March 8-15 (da197ef5 on March 10)</div>
+    <div class="event">144 commits — Mailroom externalization. Velocity dropped 78%.</div>
+    <div class="detail">Right architectural move. But spine became a thing to work on, not a tool for doing work.</div>
+  </div>
+  <div class="timeline-item yellow">
+    <div class="date">March 15-22</div>
+    <div class="event">190 commits — Mixed. Governance creep starts.</div>
+    <div class="detail">Agent execution lanes, operating models, governance profiles alongside real service work.</div>
+  </div>
+  <div class="timeline-item green">
+    <div class="date">March 27, 00:02-01:23</div>
+    <div class="event">3 commits in 83 minutes — H2 kernel reduction. Golden age.</div>
+    <div class="detail">c923b360 through 375b051f. Reduction by essence, not classification. 59 files rehomed.</div>
+  </div>
+  <div class="timeline-item red">
+    <div class="date">March 28-30</div>
+    <div class="event">91 commits — Governance cascade. Classification, not reduction.</div>
+    <div class="detail">Layer classification, persistence gates, translator unification, metabolism registry. Expanding, not finishing.</div>
+  </div>
+</div>
+
+<!-- WHAT CODEX SHOULD ADD -->
+<div class="section-header">Recommended Additions to Codex's Program</div>
+
+<div class="grid">
+  <div class="card meta">
+    <div class="card-title">Add to Starting Lineup</div>
+    <ul class="cap-list">
+      <li>7th piece: Observation & Telemetry (receipts, timeline, telemetry, graph, scorecards)</li>
+      <li>8th piece: Mailroom & Evidence (task dispatch + persistence backbone)</li>
+      <li>Explicit "in/out" for every script family, not just the action layer</li>
+    </ul>
+  </div>
+  <div class="card meta">
+    <div class="card-title">Add to Subloop 1 (Surviving Set)</div>
+    <ul class="cap-list">
+      <li>Run spine-surface-usage-telemetry to identify dormant surfaces</li>
+      <li>Read metabolism registry classifications as input</li>
+      <li>Automate the sieve using built tools, not manual binary classification</li>
+    </ul>
+  </div>
+  <div class="card meta">
+    <div class="card-title">Add to Subloop 2 (Planner Fix)</div>
+    <ul class="cap-list">
+      <li>Specific code references: lines 1190, 1263-1413, 1340, 1366</li>
+      <li>4 changes totaling ~50 lines of Python</li>
+      <li>Wire timeline, graph, priority, and telemetry into selection</li>
+    </ul>
+  </div>
+  <div class="card meta">
+    <div class="card-title">Add Meta-Rule</div>
+    <ul class="cap-list">
+      <li>The finalization program itself runs through spine orchestration</li>
+      <li>If the spine can't orchestrate its own finalization, V3 isn't done</li>
+      <li>This IS the proof run</li>
+    </ul>
+  </div>
+</div>
+
+<div style="margin-top: 40px; padding-top: 16px; border-top: 1px solid #1e1e2e; font-size: 10px; color: #444;">
+  Generated by translator membrane. repo: agentic-spine @ 008d65bc. No repo writes. Read-only analysis.
+</div>
+
+</body>
+</html>
