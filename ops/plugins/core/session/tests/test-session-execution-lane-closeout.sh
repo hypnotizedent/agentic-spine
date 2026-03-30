@@ -107,6 +107,7 @@ make_fake_friction_ingest() {
   local log_path="$2"
   cat > "$stub_path" <<'PY'
 #!/usr/bin/env python3
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -116,18 +117,26 @@ from pathlib import Path
 queue_path = Path(os.environ["SPINE_STATE"]) / "friction-queue.ndjson"
 log_path = Path(os.environ["FRICTION_CALL_LOG"])
 
-item_json = ""
 source = "manual"
 auto_reconcile = False
 loop_id = ""
 want_json = False
+items = []
 
 argv = sys.argv[1:]
 i = 0
 while i < len(argv):
     arg = argv[i]
     if arg == "--item-json":
-        item_json = argv[i + 1]
+        items.append(json.loads(argv[i + 1]))
+        i += 2
+    elif arg == "--input":
+        with open(argv[i + 1], encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line:
+                    continue
+                items.append(json.loads(line))
         i += 2
     elif arg == "--source":
         source = argv[i + 1]
@@ -144,29 +153,12 @@ while i < len(argv):
     else:
         i += 1
 
-if not item_json:
-    print("missing --item-json", file=sys.stderr)
+if not items:
+    print("missing friction input", file=sys.stderr)
     raise SystemExit(1)
-
-item = json.loads(item_json)
 
 def normalize_space(value):
     return " ".join(str(value or "").strip().split())
-
-severity = normalize_space(item.get("severity", "medium")).lower() or "medium"
-if severity not in {"low", "medium", "high", "critical"}:
-    severity = "medium"
-
-canonical = {
-    "capability": normalize_space(item.get("capability", "")),
-    "expected": normalize_space(item.get("expected", "")),
-    "actual": normalize_space(item.get("actual", "")),
-    "severity": severity,
-    "source": normalize_space(source) or "manual",
-}
-fingerprint = hashlib.sha256(
-    json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
-).hexdigest()
 
 rows = []
 if queue_path.exists():
@@ -176,28 +168,67 @@ if queue_path.exists():
             continue
         rows.append(json.loads(line))
 
-match = None
-for row in rows:
-    if str(row.get("fingerprint", "")) == fingerprint:
-        match = row
-        break
-
 created = 0
 deduped = 0
-if match is None:
-    match = {
-        "friction_id": f"FR-STUB-{len(rows) + 1:04d}",
-        "fingerprint": fingerprint,
-        "capability": canonical["capability"],
-        "expected": canonical["expected"],
-        "actual": canonical["actual"],
-        "severity": canonical["severity"],
-        "status": "queued",
+call_id = f"CALL-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')}"
+stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+created_index = 0
+logged_rows = []
+
+for item in items:
+    severity = normalize_space(item.get("severity", "medium")).lower() or "medium"
+    if severity not in {"low", "medium", "high", "critical"}:
+        severity = "medium"
+
+    canonical = {
+        "capability": normalize_space(item.get("capability", "")),
+        "expected": normalize_space(item.get("expected", "")),
+        "actual": normalize_space(item.get("actual", "")),
+        "severity": severity,
+        "source": normalize_space(source) or "manual",
     }
-    rows.append(match)
-    created = 1
-else:
-    deduped = 1
+    fingerprint = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    match = None
+    for row in rows:
+        if str(row.get("fingerprint", "")) == fingerprint:
+            match = row
+            break
+
+    created_item = False
+    deduped_item = False
+    if match is None:
+        created_index += 1
+        match = {
+            "friction_id": f"FR-STUB-{stamp}-{created_index:04d}",
+            "fingerprint": fingerprint,
+            "capability": canonical["capability"],
+            "expected": canonical["expected"],
+            "actual": canonical["actual"],
+            "severity": canonical["severity"],
+            "status": "queued",
+        }
+        rows.append(match)
+        created += 1
+        created_item = True
+    else:
+        deduped += 1
+        deduped_item = True
+
+    logged_rows.append(
+        {
+            "call_id": call_id,
+            "capability": canonical["capability"],
+            "source": canonical["source"],
+            "loop_id": loop_id,
+            "requested_auto_reconcile": auto_reconcile,
+            "created": created_item,
+            "deduped": deduped_item,
+            "friction_id": match["friction_id"],
+        }
+    )
 
 queue_path.parent.mkdir(parents=True, exist_ok=True)
 with open(queue_path, "w", encoding="utf-8") as fh:
@@ -207,21 +238,9 @@ with open(queue_path, "w", encoding="utf-8") as fh:
 
 log_path.parent.mkdir(parents=True, exist_ok=True)
 with open(log_path, "a", encoding="utf-8") as fh:
-    fh.write(
-        json.dumps(
-            {
-                "capability": canonical["capability"],
-                "source": canonical["source"],
-                "loop_id": loop_id,
-                "requested_auto_reconcile": auto_reconcile,
-                "created": bool(created),
-                "deduped": bool(deduped),
-                "friction_id": match["friction_id"],
-            },
-            sort_keys=True,
-        )
-    )
-    fh.write("\n")
+    for row in logged_rows:
+        fh.write(json.dumps(row, sort_keys=True))
+        fh.write("\n")
 
 payload = {
     "capability": "friction.ingest",
@@ -361,7 +380,8 @@ assert_eq "$(json_eval "$T2_JSON" "payload['friction_ingest']['items'][1]['auto_
 assert_eq "$(yaml_eval "$T2_RECEIPT" "payload['friction_ingest']['created']")" "2" "receipt stores created friction count"
 assert_eq "$(yaml_eval "$T2_RECEIPT" "len(payload['friction_ingest']['deduped_ids'])")" "1" "receipt stores deduped friction ids"
 assert_eq "$(yaml_eval "$T2_RECEIPT" "len(payload['friction_ingest']['auto_reconcile_ids'])")" "1" "receipt stores auto-reconcile friction ids"
-assert_eq "$(jsonl_eval "$FRICTION_CALL_LOG" "len(rows)")" "3" "closeout calls friction ingest once per item"
+assert_eq "$(jsonl_eval "$FRICTION_CALL_LOG" "len(rows)")" "3" "closeout hands all three items to friction ingest"
+assert_eq "$(jsonl_eval "$FRICTION_CALL_LOG" "len({row['call_id'] for row in rows})")" "2" "closeout batches compatible friction items into two ingest calls"
 assert_eq "$(jsonl_eval "$FRICTION_CALL_LOG" "sum(1 for row in rows if row['requested_auto_reconcile'])")" "1" "exactly one ingest call requests auto-reconcile"
 assert_eq "$(jsonl_eval "$FRICTION_CALL_LOG" "next(row['loop_id'] for row in rows if row['capability'] == 'wave.execute.close')")" "LOOP-TEST-FRICTION" "auto-reconcile item reuses lane parent loop"
 assert_true "$(jsonl_eval "$FRICTION_CALL_LOG" "next(row['deduped'] for row in rows if row['capability'] == 'media.health.check')")" "preseeded residue dedupes instead of creating a duplicate"

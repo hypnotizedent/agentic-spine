@@ -237,9 +237,13 @@ ingest_discovered_friction() {
   results_file="$(mktemp)"
   register_tmp_file "$results_file"
 
+  local -a group_keys=()
+  declare -A group_files=()
+  declare -A group_sources=()
+  declare -A group_auto=()
+
   local item_json item_source auto_reconcile evidence_ref ingest_item
-  local ingest_output created_json deduped_json reconcile_json
-  local resolved_json friction_id capability result_json
+  local resolved_json existing_id capability group_key enriched_json
   while IFS= read -r item_json; do
     [[ -n "$item_json" ]] || continue
 
@@ -254,41 +258,85 @@ ingest_discovered_friction() {
     fi
 
     ingest_item="$(printf '%s\n' "$item_json" | jq -c '{capability, expected, actual, severity}')"
-    local -a ingest_cmd=("$FRICTION_INGEST_BIN" --item-json "$ingest_item" --source "$item_source" --json)
+    resolved_json="$(resolve_friction_id "$ingest_item" "$item_source")"
+    existing_id="$(printf '%s\n' "$resolved_json" | jq -r '.friction_id // empty')"
+
+    group_key="$(printf '%s|%s\n' "$item_source" "$auto_reconcile" | shasum -a 256 | awk '{print $1}')"
+    if [[ -z "${group_files[$group_key]:-}" ]]; then
+      group_files[$group_key]="$(mktemp)"
+      register_tmp_file "${group_files[$group_key]}"
+      group_sources[$group_key]="$item_source"
+      group_auto[$group_key]="$auto_reconcile"
+      group_keys+=("$group_key")
+    fi
+
+    enriched_json="$(printf '%s\n' "$item_json" | jq -c --arg existing_id "$existing_id" '
+      . + {
+        existing_id: (if $existing_id == "" then null else $existing_id end)
+      }')"
+    printf '%s\n' "$enriched_json" >> "${group_files[$group_key]}"
+  done < "$normalized_input"
+
+  local group_index=0
+  local total_groups="${#group_keys[@]}"
+  local ingest_output created_count reconcile_json friction_id result_json created_json deduped_json
+  for group_key in "${group_keys[@]}"; do
+    group_index=$((group_index + 1))
+    item_source="${group_sources[$group_key]}"
+    auto_reconcile="${group_auto[$group_key]}"
+    local -a ingest_cmd=(
+      "$FRICTION_INGEST_BIN"
+      --input "${group_files[$group_key]}"
+      --source "$item_source"
+      --json
+    )
     if [[ "$auto_reconcile" == "true" ]]; then
       ingest_cmd+=(--auto-reconcile --loop-id "$PARENT_LOOP")
     fi
-    ingest_output="$("${ingest_cmd[@]}")" || fail "friction ingest failed for capability '$capability'"
-
-    resolved_json="$(resolve_friction_id "$ingest_item" "$item_source")"
-    friction_id="$(printf '%s\n' "$resolved_json" | jq -r '.friction_id // empty')"
-    [[ -n "$friction_id" ]] || fail "unable to resolve friction_id after ingest for capability '$capability'"
-
-    created_json="$(printf '%s\n' "$ingest_output" | jq '(.created // 0) > 0')"
-    deduped_json="$(printf '%s\n' "$ingest_output" | jq '(.deduped // 0) > 0')"
+    ingest_output="$("${ingest_cmd[@]}")" || fail "friction ingest failed for source '$item_source'"
+    created_count="$(printf '%s\n' "$ingest_output" | jq -r '.created // 0')"
     reconcile_json="$(printf '%s\n' "$ingest_output" | jq -c '.reconcile // null')"
 
-    result_json="$(jq -cn \
-      --arg capability "$capability" \
-      --arg source "$item_source" \
-      --arg evidence_ref "$evidence_ref" \
-      --arg friction_id "$friction_id" \
-      --argjson auto_reconcile "$auto_reconcile" \
-      --argjson created "$created_json" \
-      --argjson deduped "$deduped_json" \
-      --argjson reconcile "$reconcile_json" \
-      '{
-        capability: $capability,
-        source: $source,
-        evidence_ref: (if $evidence_ref == "" then null else $evidence_ref end),
-        friction_id: $friction_id,
-        auto_reconcile: $auto_reconcile,
-        created: $created,
-        deduped: $deduped,
-        reconcile: $reconcile
-      }')"
-    printf '%s\n' "$result_json" >> "$results_file"
-  done < "$normalized_input"
+    while IFS= read -r item_json; do
+      [[ -n "$item_json" ]] || continue
+      capability="$(printf '%s\n' "$item_json" | jq -r '.capability')"
+      evidence_ref="$(printf '%s\n' "$item_json" | jq -r '.evidence_ref // empty')"
+      ingest_item="$(printf '%s\n' "$item_json" | jq -c '{capability, expected, actual, severity}')"
+      resolved_json="$(resolve_friction_id "$ingest_item" "$item_source")"
+      friction_id="$(printf '%s\n' "$resolved_json" | jq -r '.friction_id // empty')"
+      [[ -n "$friction_id" ]] || fail "unable to resolve friction_id after ingest for capability '$capability'"
+
+      created_json="$(printf '%s\n' "$item_json" | jq '(.existing_id // null) == null')"
+      deduped_json="$(printf '%s\n' "$item_json" | jq '(.existing_id // null) != null')"
+      result_json="$(jq -cn \
+        --arg capability "$capability" \
+        --arg source "$item_source" \
+        --arg evidence_ref "$evidence_ref" \
+        --arg friction_id "$friction_id" \
+        --argjson auto_reconcile "$auto_reconcile" \
+        --argjson created "$created_json" \
+        --argjson deduped "$deduped_json" \
+        --argjson reconcile "$reconcile_json" \
+        '{
+          capability: $capability,
+          source: $source,
+          evidence_ref: (if $evidence_ref == "" then null else $evidence_ref end),
+          friction_id: $friction_id,
+          auto_reconcile: $auto_reconcile,
+          created: $created,
+          deduped: $deduped,
+          reconcile: $reconcile
+        }')"
+      printf '%s\n' "$result_json" >> "$results_file"
+    done < "${group_files[$group_key]}"
+
+    # friction.ingest allocates FR ids per invocation starting at 0001. Keep
+    # created groups on separate second boundaries so different source groups do
+    # not collide when the authority surface is reused unchanged.
+    if [[ "$created_count" != "0" && "$group_index" -lt "$total_groups" ]]; then
+      sleep 1
+    fi
+  done
 
   FRICTION_SUMMARY_OUTPUT_JSON="$(jq -cs '{
       provided: length,
