@@ -45,7 +45,7 @@ PY
 
 make_fixture_tree() {
   local root="$1"
-  mkdir -p "$root/ops/bindings" "$root/bin" "$root/fake-bin"
+  mkdir -p "$root/ops/bindings" "$root/ops/bindings/domains/media" "$root/bin" "$root/fake-bin"
 
   cat > "$root/ops/bindings/service.closure.contract.yaml" <<YAML
 version: 1
@@ -66,7 +66,7 @@ closures:
     domain: media
     refs:
       ingress_projection: "$root/ops/bindings/home.ingress.map.yaml"
-      runtime_services: "$root/ops/bindings/media.services.yaml"
+      runtime_services: "$root/ops/bindings/domains/media/media.services.yaml"
     active_plane:
       host: media-home
       current_vm: media-home
@@ -389,7 +389,7 @@ services:
       agent_health_url: http://100.113.72.41:5055/api/v1/status
 YAML
 
-  cat > "$root/ops/bindings/media.services.yaml" <<'YAML'
+  cat > "$root/ops/bindings/domains/media/media.services.yaml" <<'YAML'
 services:
   radarr:
     vm: media-home
@@ -563,10 +563,10 @@ for row in health["endpoints"]:
     row["url"] = row["url"].replace("100.113.72.41", "100.123.207.64")
 (root / "ops/bindings/services.health.yaml").write_text(yaml.safe_dump(health, sort_keys=False), encoding="utf-8")
 
-runtime = yaml.safe_load((root / "ops/bindings/media.services.yaml").read_text()) or {}
+runtime = yaml.safe_load((root / "ops/bindings/domains/media/media.services.yaml").read_text()) or {}
 runtime["services"]["jellyfin"]["vm"] = "streaming-stack"
 runtime["services"]["jellyseerr"]["target_vm"] = "streaming-stack"
-(root / "ops/bindings/media.services.yaml").write_text(yaml.safe_dump(runtime, sort_keys=False), encoding="utf-8")
+(root / "ops/bindings/domains/media/media.services.yaml").write_text(yaml.safe_dump(runtime, sort_keys=False), encoding="utf-8")
 
 agents = yaml.safe_load((root / "ops/bindings/agents.registry.yaml").read_text()) or {}
 agents["agents"][0]["endpoints"]["jellyseerr"]["url"] = "http://100.123.207.64:5055"

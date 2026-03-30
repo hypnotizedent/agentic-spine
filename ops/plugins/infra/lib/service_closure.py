@@ -26,7 +26,8 @@ DEFAULT_AGENTS_REGISTRY = ROOT / "ops/bindings/agents.registry.yaml"
 DEFAULT_WORKER_CATALOG = ROOT / "ops/bindings/terminal.worker.catalog.yaml"
 DEFAULT_SECRETS_BUNDLE_CONTRACT = ROOT / "ops/bindings/secrets.bundle.contract.yaml"
 DEFAULT_SERVICE_ENDPOINT_CATALOG = ROOT / "ops/bindings/service.endpoint.catalog.yaml"
-DEFAULT_RUNTIME_SERVICES = ROOT / "ops/bindings/media.services.yaml"
+MEDIA_BINDINGS_HOME = Path(os.environ.get("MEDIA_BINDINGS_HOME", str(Path.home() / "code/workbench/agents/media/bindings")))
+DEFAULT_RUNTIME_SERVICES = MEDIA_BINDINGS_HOME / "media.services.yaml"
 DEFAULT_CF_INGRESS_SCRIPT = ROOT / "ops/plugins/providers/cloudflare/bin/cloudflare-tunnel-ingress-status"
 DEFAULT_SSH_RESOLVE_PATH = ROOT / "ops/lib/ssh-resolve.sh"
 

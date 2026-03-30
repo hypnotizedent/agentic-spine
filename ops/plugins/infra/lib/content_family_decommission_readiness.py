@@ -24,13 +24,13 @@ ROOT_SECTION_KEYS = [
 
 def source_paths(root: Path) -> list[Path]:
     return [
-        root / "ops/bindings/content.family.placement.policy.yaml",
+        root / "ops/bindings/domains/media/content.family.placement.policy.yaml",
         root / "ops/bindings/service.data.lifecycle.registry.yaml",
         root / "ops/bindings/services.health.yaml",
         root / "ops/bindings/vm.lifecycle.yaml",
         root / "ops/bindings/service.closure.contract.yaml",
         root / "ops/bindings/relocation.closure.contract.yaml",
-        root / "ops/bindings/media.services.yaml",
+        root / "ops/bindings/domains/media/media.services.yaml",
     ]
 
 
@@ -175,7 +175,7 @@ def evaluate_readiness(root: Path, policy: dict[str, Any]) -> dict[str, Any]:
     vm_lifecycle = load_yaml(root / "ops/bindings/vm.lifecycle.yaml")
     service_closure = load_yaml(root / "ops/bindings/service.closure.contract.yaml")
     relocation_contract = load_yaml(root / "ops/bindings/relocation.closure.contract.yaml")
-    media_services = load_yaml(root / "ops/bindings/media.services.yaml")
+    media_services = load_yaml(root / "ops/bindings/domains/media/media.services.yaml")
 
     service_planes = ensure_dict(policy.get("service_planes"))
     rows: list[dict[str, Any]] = []
@@ -304,7 +304,7 @@ def build_projection(
         "version": 1,
         "status": "projection",
         "authority_state": "projection",
-        "projection_of": "ops/bindings/content.family.placement.policy.yaml",
+        "projection_of": "ops/bindings/domains/media/content.family.placement.policy.yaml",
         "source_capability": "content.family.decommission.readiness.build",
         "supporting_sources": [
             rel(root, path)
@@ -327,7 +327,7 @@ def render_markdown(projection: dict[str, Any]) -> str:
         "",
         "# Content Family Decommission Readiness",
         "",
-        "Generated from `ops/bindings/content.family.placement.policy.yaml` and the linked lifecycle/closure surfaces.",
+        "Generated from `ops/bindings/domains/media/content.family.placement.policy.yaml` and the linked lifecycle/closure surfaces.",
         "",
         "| Plane | Type | Required By | Optional Only | Planned Only | Residual Only | Safe Now? | Blocking Dependencies | Required Preconditions |",
         "|---|---|---|---|---|---|---|---|---|",

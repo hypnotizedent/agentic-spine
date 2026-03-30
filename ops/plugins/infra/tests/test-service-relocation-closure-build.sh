@@ -58,7 +58,7 @@ relocations:
     domain: media
     refs:
       ingress_projection: ops/bindings/home.ingress.map.yaml
-      runtime_services: ops/bindings/media.services.yaml
+      runtime_services: ops/bindings/domains/media/media.services.yaml
     active_plane:
       site: home
       host: media-home

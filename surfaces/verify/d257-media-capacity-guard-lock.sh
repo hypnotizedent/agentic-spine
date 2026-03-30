@@ -67,14 +67,14 @@ command -v python3 >/dev/null 2>&1 || { echo "D257 FAIL: python3 missing"; [[ "$
 [[ -f "$POLICY_FILE" ]] || { echo "D257 FAIL: missing $POLICY_FILE"; [[ "$POLICY_MODE" == "enforce" ]] && exit 1 || exit 0; }
 [[ -f "$GAPS_FILE" ]] || { echo "D257 FAIL: missing $GAPS_FILE"; [[ "$POLICY_MODE" == "enforce" ]] && exit 1 || exit 0; }
 
-SNAPSHOT_REL="$(yq -r '.runway.snapshot_path // "ops/bindings/media.capacity.snapshot.yaml"' "$POLICY_FILE" 2>/dev/null || echo "ops/bindings/media.capacity.snapshot.yaml")"
+SNAPSHOT_REL="$(yq -r '.runway.snapshot_path // "ops/bindings/domains/media/media.capacity.snapshot.yaml"' "$POLICY_FILE" 2>/dev/null || echo "ops/bindings/domains/media/media.capacity.snapshot.yaml")"
 SNAPSHOT_PATH="$(snapshot_surface_resolve_source_path "$ROOT" "$SNAPSHOT_REL")"
 STORAGE_HOST_ID="$(yq -r '.target.storage_host_id // "pve"' "$POLICY_FILE" 2>/dev/null || echo pve)"
 USE_SNAPSHOT_ONLY=0
 
 if [[ "$STORAGE_HOST_ID" == "media-home" ]]; then
   USE_SNAPSHOT_ONLY=1
-  SNAPSHOT_PATH="$ROOT/ops/bindings/media.capacity.snapshot.yaml"
+  SNAPSHOT_PATH="$ROOT/ops/bindings/domains/media/media.capacity.snapshot.yaml"
 fi
 
 WARN_PCT="$(yq -r '.thresholds.media_warn_pct // 80' "$POLICY_FILE" 2>/dev/null || echo 80)"

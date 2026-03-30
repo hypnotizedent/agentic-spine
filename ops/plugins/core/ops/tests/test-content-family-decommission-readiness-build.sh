@@ -27,7 +27,7 @@ echo "════════════════════════�
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-mkdir -p "$tmpdir/ops/bindings" "$tmpdir/docs/reference/generated" "$tmpdir/docs/governance"
+mkdir -p "$tmpdir/ops/bindings" "$tmpdir/ops/bindings/domains/media" "$tmpdir/docs/reference/generated" "$tmpdir/docs/governance"
 
 cat > "$tmpdir/ops/bindings/content.family.placement.policy.yaml" <<'YAML'
 version: 1
@@ -195,7 +195,7 @@ relocations:
       - domain routing still references shop
 YAML
 
-cat > "$tmpdir/ops/bindings/media.services.yaml" <<'YAML'
+cat > "$tmpdir/ops/bindings/domains/media/media.services.yaml" <<'YAML'
 version: 1
 services:
   watchtower-download:

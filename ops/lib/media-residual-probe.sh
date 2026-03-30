@@ -3,7 +3,8 @@
 # Shared SSH resolution + parked-service helpers for residual media probes.
 
 _MEDIA_RESIDUAL_ROOT="${MEDIA_RESIDUAL_PROBE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-_MEDIA_RESIDUAL_SERVICES_BINDING="${MEDIA_RESIDUAL_PROBE_SERVICES_BINDING:-${_MEDIA_RESIDUAL_ROOT}/ops/bindings/media.services.yaml}"
+_MEDIA_BINDINGS_HOME="${MEDIA_BINDINGS_HOME:-$HOME/code/workbench/agents/media/bindings}"
+_MEDIA_RESIDUAL_SERVICES_BINDING="${MEDIA_RESIDUAL_PROBE_SERVICES_BINDING:-${_MEDIA_BINDINGS_HOME}/media.services.yaml}"
 
 # shellcheck source=/dev/null
 source "${_MEDIA_RESIDUAL_ROOT}/ops/lib/ssh-resolve.sh"
