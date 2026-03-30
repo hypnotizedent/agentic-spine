@@ -30,6 +30,7 @@ STATE_ROOT="$SPINE_STATE/execution-lanes"
 RECEIPT_ROOT="$SPINE_EVIDENCE_ROOT/execution-lanes"
 PLAN_CREATE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-create"
 LOOPS_CREATE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/loops-create"
+LOOPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
 FRICTION_INGEST_BIN="${SPINE_FRICTION_INGEST_BIN:-$ROOT/ops/plugins/core/lifecycle/bin/friction-ingest}"
 FRICTION_QUEUE_FILE="${SPINE_FRICTION_QUEUE_FILE:-$SPINE_STATE/friction-queue.ndjson}"
 
@@ -48,6 +49,9 @@ FRICTION_INPUT=""
 JSON_OUTPUT=false
 FRICTION_SUMMARY_OUTPUT_JSON=""
 FRICTION_RECEIPT_SUMMARY_JSON=""
+LOOP_CONTINUITY_NEXT_ACTION=""
+LOOP_CONTINUITY_RESULT_JSON=""
+declare -a LOOP_CONTINUITY_EVIDENCE_REFS=()
 
 TMP_FILES=()
 
@@ -88,6 +92,21 @@ default_review_date() {
   python3 - <<'PY'
 from datetime import datetime, timedelta, timezone
 print((datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%d"))
+PY
+}
+
+json_array_from_values() {
+  if [[ "$#" -eq 0 ]]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  python3 - "$@" <<'PY'
+import json
+import sys
+
+items = [arg.strip() for arg in sys.argv[1:] if arg.strip()]
+print(json.dumps(items))
 PY
 }
 
@@ -352,6 +371,37 @@ ingest_discovered_friction() {
   FRICTION_RECEIPT_SUMMARY_JSON="$(printf '%s\n' "$FRICTION_SUMMARY_OUTPUT_JSON" | jq 'del(.items)')"
 }
 
+persist_parent_loop_continuity() {
+  local continuity_requested=0
+  local evidence_json=""
+  local -a continuity_cmd=()
+
+  if [[ -n "$LOOP_CONTINUITY_NEXT_ACTION" || "${#LOOP_CONTINUITY_EVIDENCE_REFS[@]}" -gt 0 ]]; then
+    continuity_requested=1
+  fi
+  [[ "$continuity_requested" -eq 1 ]] || return 0
+
+  [[ -n "$PARENT_LOOP" ]] || fail "loop continuity update requested, but lane '$LANE_ID' has no parent_loop"
+  [[ -x "$LOOPS_BRIDGE" ]] || fail "loops authority bridge unavailable at $LOOPS_BRIDGE"
+
+  evidence_json="$(json_array_from_values "${LOOP_CONTINUITY_EVIDENCE_REFS[@]}")"
+  continuity_cmd=(
+    python3 "$LOOPS_BRIDGE" continuity
+    --id "$PARENT_LOOP"
+    --actor "session.execution.lane.closeout"
+    --reason "Persisted lane closeout continuity from ${LANE_ID}"
+    --append-evidence-refs
+  )
+  if [[ -n "$LOOP_CONTINUITY_NEXT_ACTION" ]]; then
+    continuity_cmd+=(--next-action "$LOOP_CONTINUITY_NEXT_ACTION")
+  fi
+  if [[ "$evidence_json" != "[]" ]]; then
+    continuity_cmd+=(--evidence-refs-json "$evidence_json")
+  fi
+
+  LOOP_CONTINUITY_RESULT_JSON="$("${continuity_cmd[@]}")" || fail "failed to persist parent loop continuity for $PARENT_LOOP"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --lane-id)
@@ -396,6 +446,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --friction-input)
       FRICTION_INPUT="${2:-}"
+      shift 2
+      ;;
+    --loop-next-action)
+      LOOP_CONTINUITY_NEXT_ACTION="${2:-}"
+      shift 2
+      ;;
+    --loop-evidence-ref)
+      LOOP_CONTINUITY_EVIDENCE_REFS+=("${2:-}")
       shift 2
       ;;
     --json)
@@ -446,6 +504,10 @@ fi
 if [[ "$CURRENT_STATUS" != "active" ]]; then
   echo "ERROR: Lane $LANE_ID is already closed (status: $CURRENT_STATUS)" >&2
   exit 1
+fi
+
+if [[ -n "$LOOP_CONTINUITY_NEXT_ACTION" || "${#LOOP_CONTINUITY_EVIDENCE_REFS[@]}" -gt 0 ]]; then
+  [[ -n "$PARENT_LOOP" ]] || fail "loop continuity update requested, but lane '$LANE_ID' has no parent_loop"
 fi
 
 # Validate status is allowed for this lane type
@@ -594,35 +656,49 @@ with open(receipt_path, "w", encoding="utf-8") as fh:
 PY
 fi
 
+if [[ -n "$LOOP_CONTINUITY_NEXT_ACTION" || "${#LOOP_CONTINUITY_EVIDENCE_REFS[@]}" -gt 0 ]]; then
+  LOOP_CONTINUITY_EVIDENCE_REFS+=("$RECEIPT_FILE")
+  if [[ -n "${PLAN_SCOPE_FILE:-}" ]]; then
+    LOOP_CONTINUITY_EVIDENCE_REFS+=("$PLAN_SCOPE_FILE")
+  fi
+  persist_parent_loop_continuity
+  python3 - "$RECEIPT_FILE" "$LOOP_CONTINUITY_RESULT_JSON" <<'PY'
+import json
+import sys
+import yaml
+
+receipt_path = sys.argv[1]
+continuity = json.loads(sys.argv[2])
+doc = yaml.safe_load(open(receipt_path, encoding="utf-8")) or {}
+doc["loop_continuity"] = {
+    "loop_id": continuity.get("loop_id", ""),
+    "next_action": continuity.get("next_action", ""),
+    "evidence_refs": continuity.get("evidence_refs", []),
+}
+with open(receipt_path, "w", encoding="utf-8") as fh:
+    yaml.safe_dump(doc, fh, sort_keys=False)
+PY
+fi
+
 # Log to audit trail
 AUDIT_LOG="$STATE_ROOT/audit.log"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|closeout|$LANE_ID|$LANE_TYPE|$STATUS|$REASON" >> "$AUDIT_LOG"
 
 # Output
 if [[ "$JSON_OUTPUT" == "true" ]]; then
-  if [[ -n "$FRICTION_SUMMARY_OUTPUT_JSON" ]]; then
-    jq -n \
-      --arg lane_id "$LANE_ID" \
-      --arg status "$STATUS" \
-      --arg receipt "$RECEIPT_FILE" \
-      --argjson friction_ingest "$FRICTION_SUMMARY_OUTPUT_JSON" \
-      '{
-        lane_id: $lane_id,
-        status: $status,
-        receipt: $receipt,
-        friction_ingest: $friction_ingest
-      }'
-  else
-    jq -n \
-      --arg lane_id "$LANE_ID" \
-      --arg status "$STATUS" \
-      --arg receipt "$RECEIPT_FILE" \
-      '{
-        lane_id: $lane_id,
-        status: $status,
-        receipt: $receipt
-      }'
-  fi
+  jq -n \
+    --arg lane_id "$LANE_ID" \
+    --arg status "$STATUS" \
+    --arg receipt "$RECEIPT_FILE" \
+    --argjson friction_ingest "${FRICTION_SUMMARY_OUTPUT_JSON:-null}" \
+    --argjson loop_continuity "${LOOP_CONTINUITY_RESULT_JSON:-null}" \
+    '{
+      lane_id: $lane_id,
+      status: $status,
+      receipt: $receipt
+    }
+    + (if $friction_ingest == null then {} else {friction_ingest: $friction_ingest} end)
+    + (if $loop_continuity == null then {} else {loop_continuity: $loop_continuity} end)'
 else
   echo "════════════════════════════════════════════════════════════"
   echo "LANE CLOSED"
@@ -655,6 +731,12 @@ else
     echo "  Provided: $(printf '%s\n' "$FRICTION_SUMMARY_OUTPUT_JSON" | jq -r '.provided')"
     echo "  Created:  $(printf '%s\n' "$FRICTION_SUMMARY_OUTPUT_JSON" | jq -r '.created')"
     echo "  Deduped:  $(printf '%s\n' "$FRICTION_SUMMARY_OUTPUT_JSON" | jq -r '.deduped')"
+  fi
+  if [[ -n "$LOOP_CONTINUITY_RESULT_JSON" ]]; then
+    echo ""
+    echo "Loop continuity:"
+    echo "  Loop: $(printf '%s\n' "$LOOP_CONTINUITY_RESULT_JSON" | jq -r '.loop_id')"
+    echo "  Next: $(printf '%s\n' "$LOOP_CONTINUITY_RESULT_JSON" | jq -r '.next_action // \"\"')"
   fi
   echo "════════════════════════════════════════════════════════════"
 fi

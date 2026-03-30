@@ -64,6 +64,29 @@ print(eval(expr, {"payload": payload}))
 PY
 }
 
+scope_frontmatter_eval() {
+  local scope_file="$1" expr="$2"
+  python3 - "$scope_file" "$expr" <<'PY'
+import sys
+import yaml
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+lines = text.splitlines()
+payload = {}
+if lines and lines[0].strip() == "---":
+    end_idx = None
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            end_idx = idx
+            break
+    if end_idx is not None:
+        payload = yaml.safe_load("\n".join(lines[1:end_idx])) or {}
+expr = sys.argv[2]
+print(eval(expr, {"payload": payload}))
+PY
+}
+
 jsonl_eval() {
   local jsonl_file="$1" expr="$2"
   python3 - "$jsonl_file" "$expr" <<'PY'
@@ -440,6 +463,50 @@ else
   assert_contains "$(cat "$T4_STDERR")" "has no parent_loop" "missing parent loop fails truthfully"
   assert_true "$(yaml_eval "$T4_STATE/execution-lanes/LANE-NO-LOOP.yaml" "payload['status'] == 'active'")" "missing parent loop does not mutate lane state"
 fi
+
+echo "── T5: closeout persists parent loop continuity when requested ──"
+T5_STATE="$TMPDIR_BASE/t5-state"
+T5_EVIDENCE="$TMPDIR_BASE/t5-evidence"
+mkdir -p "$T5_STATE/execution-lanes" "$T5_EVIDENCE" "$T5_STATE/loop-scopes"
+write_lane_state "$T5_STATE/execution-lanes/LANE-CONTINUITY.yaml" "LANE-CONTINUITY" "fix" "codex/continuity-proof" "/tmp/continuity-proof-worktree" "LOOP-TEST-CONTINUITY"
+cat > "$T5_STATE/loop-scopes/LOOP-TEST-CONTINUITY.scope.md" <<'EOF'
+---
+loop_id: LOOP-TEST-CONTINUITY
+created: 2026-03-30
+status: active
+owner: "@ronny"
+scope: spine
+priority: medium
+horizon: now
+execution_readiness: runnable
+execution_mode: orchestrator_subagents
+objective: Preserve live next_action and evidence refs.
+next_action: ""
+evidence_refs: []
+---
+
+# Loop Scope: LOOP-TEST-CONTINUITY
+EOF
+T5_JSON="$TMPDIR_BASE/t5-closeout.json"
+env -u SPINE_TARGET_REPO -u SPINE_REPO -u SPINE_CODE \
+  SPINE_STATE="$T5_STATE" \
+  SPINE_EVIDENCE_ROOT="$T5_EVIDENCE" \
+  SPINE_CAP_RUN_KEY="CAP-20260330-TEST__session.execution.lane.closeout__Rclose123" \
+  OPS_TERMINAL_ROLE="SPINE-CONTROL-01" \
+  "$SCRIPT" \
+    --lane-id LANE-CONTINUITY \
+    --status blocked \
+    --reason "Need resumed control-plane repair." \
+    --loop-next-action "Resume Track C from the lane closeout receipt." \
+    --loop-evidence-ref /tmp/preexisting-proof.md \
+    --json > "$T5_JSON"
+T5_RECEIPT="$(json_eval "$T5_JSON" "payload['receipt']")"
+assert_eq "$(json_eval "$T5_JSON" "payload['loop_continuity']['loop_id']")" "LOOP-TEST-CONTINUITY" "loop continuity output includes parent loop id"
+assert_eq "$(json_eval "$T5_JSON" "payload['loop_continuity']['next_action']")" "Resume Track C from the lane closeout receipt." "loop continuity output records next action"
+assert_true "$(scope_frontmatter_eval "$T5_STATE/loop-scopes/LOOP-TEST-CONTINUITY.scope.md" "payload['next_action'] == 'Resume Track C from the lane closeout receipt.'")" "parent loop scope stores updated next_action"
+assert_true "$(scope_frontmatter_eval "$T5_STATE/loop-scopes/LOOP-TEST-CONTINUITY.scope.md" "'/tmp/preexisting-proof.md' in payload['evidence_refs']")" "parent loop scope keeps provided evidence ref"
+assert_true "$(scope_frontmatter_eval "$T5_STATE/loop-scopes/LOOP-TEST-CONTINUITY.scope.md" "any(ref.endswith('.yaml') for ref in payload['evidence_refs'])")" "parent loop scope records closeout receipt reference"
+assert_eq "$(yaml_eval "$T5_RECEIPT" "payload['loop_continuity']['loop_id']")" "LOOP-TEST-CONTINUITY" "receipt stores loop continuity block"
 
 echo ""
 echo "────────────────────────────────────────"

@@ -32,7 +32,6 @@ WAVES_DIR="$RUNTIME_ROOT/waves"
 LANES_STATE="$RUNTIME_ROOT/lanes/state.json"
 ROLE_RUNTIME_CONTRACT="$SPINE_REPO/ops/bindings/role.runtime.control.contract.yaml"
 DISPOSITION_CONTRACT="$SPINE_REPO/ops/bindings/closeout.disposition.contract.yaml"
-ENFORCED_WAVE_WORKTREE_PREFIX="${HOME}/code/.wt/agentic-spine/"
 source "$SPINE_REPO/ops/lib/git-lock.sh" 2>/dev/null || true
 
 mkdir -p "$WAVES_DIR"
@@ -77,6 +76,59 @@ _repo_abs_path() {
 
 resolve_wave_owner_terminal() {
   printf '%s\n' "${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-${USER:-unknown}}}}}"
+}
+
+resolve_wave_worktree_prefix() {
+  local repo_path="${1:-$SPINE_REPO}"
+  local lifecycle_contract="$SPINE_REPO/ops/bindings/worktree.lifecycle.contract.yaml"
+  local canonical_root="/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"
+  local repo_root=""
+  local repo_name=""
+
+  repo_root="$(git -C "$repo_path" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$repo_root" ]] || repo_root="$SPINE_REPO"
+  repo_name="$(basename "$repo_root")"
+  [[ -n "$repo_name" ]] || repo_name="agentic-spine"
+
+  if command -v yq >/dev/null 2>&1 && [[ -f "$lifecycle_contract" ]]; then
+    canonical_root="$(yq e -r '.policy.canonical_worktree_root // "/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"' "$lifecycle_contract" 2>/dev/null || echo "$canonical_root")"
+  fi
+  if [[ "$canonical_root" == "~/"* ]]; then
+    canonical_root="$HOME/${canonical_root#~/}"
+  fi
+
+  printf '%s/%s/\n' "${canonical_root%/}" "$repo_name"
+}
+
+wave_allowed_lanes_csv() {
+  local csv="control,execution,audit,watcher"
+  local parsed=""
+
+  if command -v yq >/dev/null 2>&1 && [[ -f "$ROLE_RUNTIME_CONTRACT" ]]; then
+    parsed="$(yq e -r '.lane_role_compatibility.allowed_runtime_roles_by_lane | keys | .[]' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null | paste -sd, -)"
+    [[ -n "$parsed" ]] && csv="$parsed"
+  fi
+
+  printf '%s\n' "$csv"
+}
+
+wave_allowed_lanes_display() {
+  wave_allowed_lanes_csv | tr ',' '|'
+}
+
+wave_require_valid_lane() {
+  local lane="${1:-}"
+  local allowed_csv=""
+  local allowed_lane=""
+
+  allowed_csv="$(wave_allowed_lanes_csv)"
+  IFS=',' read -r -a allowed_lanes <<< "$allowed_csv"
+  for allowed_lane in "${allowed_lanes[@]:-}"; do
+    [[ "$lane" == "$allowed_lane" ]] && return 0
+  done
+
+  echo "FAIL: invalid wave lane '$lane' (allowed: $(wave_allowed_lanes_display))" >&2
+  exit 1
 }
 
 resolve_wave_claimed_paths() {
@@ -672,12 +724,14 @@ ts_now() {
 
 wave_path_policy_block() {
   local detail="${1:-unknown path policy violation}"
+  local allowed_prefix=""
+  allowed_prefix="$(resolve_wave_worktree_prefix "$SPINE_REPO")"
   cat >&2 <<EOF
 WORKTREE PATH POLICY BLOCK: $detail
-Allowed wave worktree path: ${ENFORCED_WAVE_WORKTREE_PREFIX}<WAVE_ID>
+Allowed wave worktree path: ${allowed_prefix}<WAVE_ID>
 Remediation:
-  ./bin/ops wave start <WAVE_ID> --objective "<objective>" --repo ~/code/agentic-spine
-  ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo ~/code/agentic-spine
+  ./bin/ops wave start <WAVE_ID> --objective "<objective>" --repo ${SPINE_REPO}
+  ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo ${SPINE_REPO}
 EOF
   exit 1
 }
@@ -870,11 +924,13 @@ PYDEADLINE
     git -C "$workspace_repo" fetch --prune origin "$default_branch" >/dev/null 2>&1 || true
     workspace_branch="codex/${wave_id}"
     local repo_name
+    local enforced_worktree_prefix
     repo_name="$(basename "$workspace_repo")"
+    enforced_worktree_prefix="$(resolve_wave_worktree_prefix "$workspace_repo")"
     workspace_worktree="$canonical_root/$repo_name/${wave_id}"
     [[ "$workspace_worktree" != *"/.worktrees/"* ]] || wave_path_policy_block "legacy .worktrees target denied: $workspace_worktree"
     [[ "$workspace_worktree" != "$workspace_repo" && "$workspace_worktree" != "$workspace_repo/"* ]] || wave_path_policy_block "main checkout target denied: $workspace_worktree"
-    [[ "$workspace_worktree" == "${ENFORCED_WAVE_WORKTREE_PREFIX}"* ]] || wave_path_policy_block "target '$workspace_worktree' is outside enforced prefix '$ENFORCED_WAVE_WORKTREE_PREFIX'"
+    [[ "$workspace_worktree" == "${enforced_worktree_prefix}"* ]] || wave_path_policy_block "target '$workspace_worktree' is outside enforced prefix '$enforced_worktree_prefix'"
     [[ "$(basename "$workspace_worktree")" =~ ^WAVE-[A-Z0-9._-]+$ ]] || wave_path_policy_block "wave id '$wave_id' must match WAVE-... for managed worktree path"
 
     if ! git -C "$workspace_repo" show-ref --verify --quiet "refs/heads/$workspace_branch"; then
@@ -1825,6 +1881,8 @@ cmd_dispatch() {
     echo "Usage: ops wave dispatch <WAVE_ID> --lane <lane> --task \"<text>\" [--from-role <role>] [--to-role <role>] [--input-refs \"k=v,...\"] [--output-refs \"k=v,...\"] [--lock-override \"<reason>\"]" >&2
     exit 1
   fi
+
+  wave_require_valid_lane "$lane"
 
   ensure_wave_exists "$wave_id"
   wave_lock_guard "$wave_id" "dispatch" "$lock_override_reason"
@@ -3655,12 +3713,18 @@ cmd_receipt_validate() {
 
   local schema_path="$SPINE_REPO/ops/bindings/orchestration.exec_receipt.schema.json"
 
-  python3 - "$receipt_path" "$schema_path" "$ROLE_RUNTIME_CONTRACT" <<'PYVALIDATE'
+  python3 - "$receipt_path" "$schema_path" "$ROLE_RUNTIME_CONTRACT" "$(wave_allowed_lanes_csv)" <<'PYVALIDATE'
 import json, sys, re, os
 
 receipt_path = sys.argv[1]
 schema_path = sys.argv[2]
 role_runtime_contract = sys.argv[3] if len(sys.argv) > 3 else ""
+allowed_lanes_csv = sys.argv[4] if len(sys.argv) > 4 else "control,execution,audit,watcher"
+allowed_lanes = {
+    item.strip()
+    for item in allowed_lanes_csv.split(",")
+    if item.strip()
+} or {"control", "execution", "audit", "watcher"}
 
 errors = []
 run_key_pattern_texts = [r"^(CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"]
@@ -3747,8 +3811,10 @@ if "ready_for_verify" in receipt and not isinstance(receipt["ready_for_verify"],
     errors.append(f"Field 'ready_for_verify' must be a boolean")
 
 # Enum checks
-if receipt.get("lane") and receipt["lane"] not in ("control", "execution", "audit", "watcher"):
-    errors.append(f"Invalid lane: '{receipt['lane']}' (must be control|execution|audit|watcher)")
+if receipt.get("lane") and receipt["lane"] not in allowed_lanes:
+    errors.append(
+        f"Invalid lane: '{receipt['lane']}' (must be {'|'.join(sorted(allowed_lanes))})"
+    )
 
 if receipt.get("status") and receipt["status"] not in ("done", "failed", "blocked"):
     errors.append(f"Invalid status: '{receipt['status']}' (must be done|failed|blocked)")
@@ -3881,7 +3947,7 @@ cmd_collect_v2() {
   local receipts_dir="$sd/evidence"
   local schema_path="$SPINE_REPO/ops/bindings/orchestration.exec_receipt.schema.json"
 
-  python3 - "$sf" "$sd" "$receipts_dir" "$SPINE_STATE/agent-tasks" "$schema_path" "$sync_roadmap" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" <<'PYCOLLECT2'
+  python3 - "$sf" "$sd" "$receipts_dir" "$SPINE_STATE/agent-tasks" "$schema_path" "$sync_roadmap" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" "$(wave_allowed_lanes_csv)" <<'PYCOLLECT2'
 import json, sys, os, re, glob, fcntl, yaml
 from datetime import datetime, timezone
 
@@ -3890,6 +3956,11 @@ commit_ref_pattern = r"^[0-9a-f]{7,40}$"
 allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
 required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]
 close_aliases = {"close", "librarian"}
+allowed_lanes = {
+    item.strip()
+    for item in (sys.argv[9] if len(sys.argv) > 9 else "control,execution,audit,watcher").split(",")
+    if item.strip()
+} or {"control", "execution", "audit", "watcher"}
 
 def _compile_run_key_patterns(patterns_text):
     compiled = []
@@ -3925,7 +3996,7 @@ def _validate_receipt(receipt):
             errors.append(f"{f} not array")
     if "ready_for_verify" in receipt and not isinstance(receipt["ready_for_verify"], bool):
         errors.append("ready_for_verify not bool")
-    if receipt.get("lane") and receipt["lane"] not in ("control", "execution", "audit", "watcher"):
+    if receipt.get("lane") and receipt["lane"] not in allowed_lanes:
         errors.append(f"bad lane: {receipt['lane']}")
     if receipt.get("status") and receipt["status"] not in ("done", "failed", "blocked"):
         errors.append(f"bad status: {receipt['status']}")
@@ -4540,7 +4611,7 @@ cmd_close_v2() {
   local sd
   sd="$(wave_state_dir "$wave_id")"
 
-  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" "$dod_override_reason" "$lock_override_reason" "$disposition" "$allowed_dispositions_csv" <<'PYCLOSE2'
+  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" "$dod_override_reason" "$lock_override_reason" "$disposition" "$allowed_dispositions_csv" "$(wave_allowed_lanes_csv)" <<'PYCLOSE2'
 import json, sys, os, re, fcntl
 from datetime import datetime, timezone
 
@@ -4553,6 +4624,11 @@ dod_override_reason = (sys.argv[6] if len(sys.argv) > 6 else "").strip()
 lock_override_reason = (sys.argv[7] if len(sys.argv) > 7 else "").strip()
 disposition = (sys.argv[8] if len(sys.argv) > 8 else "").strip()
 allowed_dispositions = {item.strip() for item in (sys.argv[9] if len(sys.argv) > 9 else "").split(",") if item.strip()}
+allowed_lanes = {
+    item.strip()
+    for item in (sys.argv[10] if len(sys.argv) > 10 else "control,execution,audit,watcher").split(",")
+    if item.strip()
+} or {"control", "execution", "audit", "watcher"}
 lock_file = sf + ".lock"
 receipts_dir = os.path.join(sd, "receipts")
 
@@ -4759,7 +4835,7 @@ try:
         if "ready_for_verify" in receipt and not isinstance(receipt["ready_for_verify"], bool):
             errors.append("ready_for_verify not bool")
 
-        if receipt.get("lane") and receipt["lane"] not in ("control", "execution", "audit", "watcher"):
+        if receipt.get("lane") and receipt["lane"] not in allowed_lanes:
             errors.append(f"bad lane: {receipt['lane']}")
 
         if receipt.get("status") and receipt["status"] not in ("done", "failed", "blocked"):

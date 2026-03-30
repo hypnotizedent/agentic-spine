@@ -358,20 +358,40 @@ close_loop() {
         exit 1
     fi
 
+    local LOOPS_BRIDGE="$SPINE_REPO/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
+    [[ -x "$LOOPS_BRIDGE" ]] || {
+        echo "ERROR: loops-authority-bridge not found: $LOOPS_BRIDGE" >&2
+        exit 1
+    }
+
     acquire_git_lock gaps || exit 1
     tmp_file="$(mktemp "${scope_file}.tmp.XXXXXX")"
     trap 'rm -f "$tmp_file" 2>/dev/null || true; release_git_lock' EXIT INT TERM
 
-    if ! python3 - "$scope_file" "$tmp_file" "$disposition" "$close_summary" <<'PY'
+    local bridge_reason="Closed via ops loops close"
+    [[ -n "${close_summary:-}" ]] && bridge_reason="${bridge_reason}: $close_summary"
+    bridge_close_args=("close" "--id" "$loop_id" "--status" "closed"
+        "--disposition" "$disposition"
+        "--actor" "loops.close"
+        "--reason" "$bridge_reason"
+    )
+    if [[ -z "${SPINE_CAP_RUN_KEY:-}" ]]; then
+        bridge_close_args+=("--ungoverned-override")
+    fi
+
+    if ! python3 "$LOOPS_BRIDGE" "${bridge_close_args[@]}" >/dev/null; then
+        echo "ERROR: loops-authority-bridge failed to close $loop_id" >&2
+        exit 1
+    fi
+
+    if [[ -n "${close_summary:-}" ]]; then
+        if ! python3 - "$scope_file" "$tmp_file" "$close_summary" <<'PY'
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 scope_path = Path(sys.argv[1])
 tmp_path = Path(sys.argv[2])
-disposition = sys.argv[3].strip()
-close_summary = sys.argv[4]
-now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+close_summary = sys.argv[3]
 
 lines = scope_path.read_text(encoding="utf-8").splitlines()
 if not lines or lines[0].strip() != "---":
@@ -395,52 +415,26 @@ for idx, line in enumerate(frontmatter):
     if key and key not in indices:
         indices[key] = idx
 
-updates = {
-    "status": "status: closed",
-    "closed_at": f'closed_at: "{now}"',
-    "disposition": f"disposition: {disposition}",
-}
-if close_summary.strip():
-    escaped = close_summary.replace("\\", "\\\\").replace('"', '\\"')
-    updates["close_summary"] = f'close_summary: "{escaped}"'
+escaped = close_summary.replace("\\", "\\\\").replace('"', '\\"')
+line = f'close_summary: "{escaped}"'
+if "close_summary" in indices:
+    frontmatter[indices["close_summary"]] = line
+else:
+    frontmatter.append(line)
 
-for key, line in updates.items():
-    if key in indices:
-        frontmatter[indices[key]] = line
-    else:
-        frontmatter.append(line)
-
-output = ["---", *frontmatter, "---", *rest]
-tmp_path.write_text("\n".join(output) + "\n", encoding="utf-8")
+tmp_path.write_text("\n".join(["---", *frontmatter, "---", *rest]) + "\n", encoding="utf-8")
 PY
-    then
-        echo "ERROR: Failed to update frontmatter status in $scope_file" >&2
-        exit 1
+        then
+            echo "ERROR: Failed to write close_summary into $scope_file" >&2
+            exit 1
+        fi
+        mv "$tmp_file" "$scope_file"
     fi
 
-    mv "$tmp_file" "$scope_file"
     trap - EXIT INT TERM
     release_git_lock
 
-    echo "CLOSED: $loop_id disposition=$disposition (updated $scope_file)"
-
-    # ── SQLite authority bridge: record close in shared_authority.db ──
-    # TODO: make authoritative once bridge is proven; non-fatal during transition.
-    # Scope file write already succeeded above; bridge failure does not block close.
-    local LOOPS_BRIDGE="$SPINE_REPO/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
-    if [[ -x "$LOOPS_BRIDGE" ]]; then
-        bridge_close_args=("close" "--id" "$loop_id" "--status" "closed"
-            "--disposition" "$disposition"
-            "--actor" "loops.close"
-            "--reason" "Closed via ops loops close"
-        )
-        [[ -n "${close_summary:-}" ]] && bridge_close_args+=("--reason" "Closed via ops loops close: $close_summary")
-        if python3 "$LOOPS_BRIDGE" "${bridge_close_args[@]}" 2>/dev/null; then
-            echo "loops-authority-bridge: recorded close for $loop_id in shared_authority.db" >&2
-        else
-            echo "loops-authority-bridge: close failed (non-fatal, scope file is primary)" >&2
-        fi
-    fi
+    echo "CLOSED: $loop_id disposition=$disposition (projected $scope_file)"
 }
 
 # ── Summary ───────────────────────────────────────────────────────────────

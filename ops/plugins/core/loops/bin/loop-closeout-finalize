@@ -519,80 +519,20 @@ if [[ "$CLOSE_LINKED_GAPS" -eq 1 ]]; then
   done
 fi
 
-# Atomic frontmatter status mutation.
-tmp_file="$(mktemp "${SCOPE_FILE}.tmp.XXXXXX")"
-if ! python3 - "$SCOPE_FILE" "$tmp_file" "$DISPOSITION" "$timestamp" "$COMPLETION_LEVEL" <<'PY'
-import sys
-from pathlib import Path
-
-scope_path = Path(sys.argv[1])
-tmp_path = Path(sys.argv[2])
-disposition = sys.argv[3].strip()
-timestamp = sys.argv[4].strip()
-completion_level = sys.argv[5].strip() if len(sys.argv) > 5 else ""
-
-lines = scope_path.read_text(encoding="utf-8").splitlines()
-if not lines or lines[0].strip() != "---":
-    raise SystemExit(2)
-
-end_idx = None
-for idx in range(1, len(lines)):
-    if lines[idx].strip() == "---":
-        end_idx = idx
-        break
-if end_idx is None:
-    raise SystemExit(2)
-
-frontmatter = lines[1:end_idx]
-rest = lines[end_idx + 1 :]
-indices = {}
-for idx, line in enumerate(frontmatter):
-    if ":" not in line:
-        continue
-    key = line.split(":", 1)[0].strip()
-    if key and key not in indices:
-        indices[key] = idx
-
-updates = {
-    "status": "status: closed",
-    "closed_at": f'closed_at: "{timestamp}"',
-    "disposition": f"disposition: {disposition}",
-}
-if completion_level:
-    updates["completion_level"] = f"completion_level: {completion_level}"
-
-for key, line in updates.items():
-    if key in indices:
-        frontmatter[indices[key]] = line
-    else:
-        frontmatter.append(line)
-
-output = ["---", *frontmatter, "---", *rest]
-tmp_path.write_text("\n".join(output) + "\n", encoding="utf-8")
-PY
-then
-  rm -f "$tmp_file"
-  echo "loop.closeout.finalize FAIL: unable to update loop status in $SCOPE_FILE" >&2
-  exit 1
-fi
-mv "$tmp_file" "$SCOPE_FILE"
-
-# ── SQLite authority bridge: record close in shared_authority.db ──
-# TODO: make authoritative once bridge is proven; non-fatal during transition.
-# Scope file write already succeeded above; bridge failure does not block closeout.
 LOOPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
-if [[ -x "$LOOPS_BRIDGE" ]]; then
-  bridge_close_args=("close" "--id" "$LOOP_ID" "--status" "closed"
-    "--disposition" "$DISPOSITION"
-    "--actor" "loop.closeout.finalize"
-    "--reason" "Closed via loop.closeout.finalize (run_key=${SPINE_CAP_RUN_KEY:-manual})"
-  )
-  [[ -n "$COMPLETION_LEVEL" ]] && bridge_close_args+=("--completion-level" "$COMPLETION_LEVEL")
-  if python3 "$LOOPS_BRIDGE" "${bridge_close_args[@]}" 2>/dev/null; then
-    echo "loops-authority-bridge: recorded close for $LOOP_ID in shared_authority.db" >&2
-  else
-    echo "loops-authority-bridge: close failed (non-fatal, scope file is primary)" >&2
-  fi
+[[ -x "$LOOPS_BRIDGE" ]] || {
+  echo "loop.closeout.finalize FAIL: loops-authority-bridge not found: $LOOPS_BRIDGE" >&2
+  exit 1
+}
+bridge_close_args=("close" "--id" "$LOOP_ID" "--status" "closed"
+  "--disposition" "$DISPOSITION"
+  "--actor" "loop.closeout.finalize"
+  "--reason" "Closed via loop.closeout.finalize (run_key=${SPINE_CAP_RUN_KEY:-manual})"
+)
+[[ -n "$COMPLETION_LEVEL" ]] && bridge_close_args+=("--completion-level" "$COMPLETION_LEVEL")
+if ! python3 "$LOOPS_BRIDGE" "${bridge_close_args[@]}" >/dev/null; then
+  echo "loop.closeout.finalize FAIL: loops-authority-bridge failed to close $LOOP_ID" >&2
+  exit 1
 fi
 
 if [[ -z "$RECEIPT_PATH" ]]; then

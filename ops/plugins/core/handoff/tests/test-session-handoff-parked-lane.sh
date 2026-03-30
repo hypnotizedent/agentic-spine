@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 CREATE="$ROOT/ops/plugins/core/handoff/bin/session-handoff-create"
+GET="$ROOT/ops/plugins/core/handoff/bin/session-handoff-get"
 LIST="$ROOT/ops/plugins/core/handoff/bin/session-handoff-list"
 STATUS="$ROOT/ops/plugins/core/handoff/bin/session-handoff-status"
 CLOSE="$ROOT/ops/plugins/core/handoff/bin/session-handoff-close"
@@ -35,16 +36,59 @@ print(eval(expr, {"payload": payload}))
 PY
 }
 
+scope_frontmatter_eval() {
+  local scope_file="$1" expr="$2"
+  python3 - "$scope_file" "$expr" <<'PY'
+import sys
+import yaml
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+lines = text.splitlines()
+payload = {}
+if lines and lines[0].strip() == "---":
+    end_idx = None
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            end_idx = idx
+            break
+    if end_idx is not None:
+        payload = yaml.safe_load("\n".join(lines[1:end_idx])) or {}
+expr = sys.argv[2]
+print(eval(expr, {"payload": payload}))
+PY
+}
+
 echo "session handoff parked lane tests"
 echo "════════════════════════════════════════"
 
 TMPDIR_BASE="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BASE"' EXIT
 STATE="$TMPDIR_BASE/state"
-mkdir -p "$STATE"
+mkdir -p "$STATE" "$STATE/loop-scopes"
+cat > "$STATE/loop-scopes/LOOP-SPINE-V3-CONVERGENCE-HARDENING-20260323.scope.md" <<'EOF'
+---
+loop_id: LOOP-SPINE-V3-CONVERGENCE-HARDENING-20260323
+created: 2026-03-23
+status: active
+owner: "@ronny"
+scope: spine
+priority: high
+horizon: now
+execution_readiness: runnable
+execution_mode: orchestrator_subagents
+objective: Preserve parked lane memory durably.
+next_action: ""
+evidence_refs: []
+---
+
+# Loop Scope: LOOP-SPINE-V3-CONVERGENCE-HARDENING-20260323
+EOF
 
 CREATE_JSON="$TMPDIR_BASE/create.json"
 SPINE_STATE="$STATE" \
+SPINE_CAP_RUN_KEY="CAP-20260330-TEST__session.handoff.create__Rhandoff123" \
+OPS_TERMINAL_ROLE="SPINE-CONTROL-01" \
 "$CREATE" \
   --summary "Park preserved branch memory in mailroom state." \
   --loops LOOP-SPINE-V3-CONVERGENCE-HARDENING-20260323 \
@@ -56,6 +100,8 @@ SPINE_STATE="$STATE" \
   --preserved-commits deadbeef \
   --file-refs ops/bindings/example.yaml,ops/plugins/example.sh \
   --plan-refs PLAN-PRESERVE-EXAMPLE \
+  --loop-next-action "Resume parked lane from governed handoff memory." \
+  --loop-evidence-ref /tmp/parked-proof.md \
   --json > "$CREATE_JSON"
 
 HANDOFF_ID="$(json_eval "$CREATE_JSON" "payload['id']")"
@@ -71,6 +117,14 @@ doc = yaml.safe_load(Path(sys.argv[1]).read_text())
 print(doc['parking']['review_date'])
 PY
 )" "2026-03-30" "handoff file stores review date"
+assert_eq "$(json_eval "$CREATE_JSON" "payload['continuity']['updates'][0]['loop_id']")" "LOOP-SPINE-V3-CONVERGENCE-HARDENING-20260323" "create reports loop continuity update"
+HANDOFF_SCOPE_NEXT_ACTION_OK="$(scope_frontmatter_eval "$STATE/loop-scopes/LOOP-SPINE-V3-CONVERGENCE-HARDENING-20260323.scope.md" "payload['next_action'] == 'Resume parked lane from governed handoff memory.'")"
+assert_eq "$HANDOFF_SCOPE_NEXT_ACTION_OK" "True" "parent loop scope stores handoff next_action"
+assert_eq "$(scope_frontmatter_eval "$STATE/loop-scopes/LOOP-SPINE-V3-CONVERGENCE-HARDENING-20260323.scope.md" "'/tmp/parked-proof.md' in payload['evidence_refs']")" "True" "parent loop scope stores provided handoff evidence ref"
+
+GET_JSON="$TMPDIR_BASE/get.json"
+SPINE_STATE="$STATE" "$GET" --id "$HANDOFF_ID" --json > "$GET_JSON"
+assert_eq "$(json_eval "$GET_JSON" "payload['continuity']['next_action']")" "Resume parked lane from governed handoff memory." "handoff.get returns continuity block"
 
 LIST_JSON="$TMPDIR_BASE/list.json"
 SPINE_STATE="$STATE" "$LIST" --state parked --json > "$LIST_JSON"

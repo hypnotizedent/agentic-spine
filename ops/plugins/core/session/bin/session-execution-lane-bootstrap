@@ -26,8 +26,48 @@ source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 
 CONTRACT_FILE="$ROOT/ops/bindings/session.execution.lane.contract.yaml"
+WORKTREE_LIFECYCLE_CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
 STATE_ROOT="$SPINE_STATE/execution-lanes"
-WORKTREE_ROOT="/Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine"
+
+resolve_lane_worktree_root() {
+  local canonical_root="/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"
+  local repo_root=""
+  local repo_name=""
+  local legacy_root=""
+
+  repo_root="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$repo_root" ]] || repo_root="$ROOT"
+  repo_name="$(basename "$repo_root")"
+  [[ -n "$repo_name" ]] || repo_name="agentic-spine"
+
+  if command -v yq >/dev/null 2>&1; then
+    if [[ -f "$WORKTREE_LIFECYCLE_CONTRACT" ]]; then
+      canonical_root="$(yq e -r '.policy.canonical_worktree_root // "/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"' "$WORKTREE_LIFECYCLE_CONTRACT" 2>/dev/null || echo "$canonical_root")"
+    fi
+    if [[ -f "$CONTRACT_FILE" ]]; then
+      legacy_root="$(yq e -r '.worktree_conventions.root // ""' "$CONTRACT_FILE" 2>/dev/null || true)"
+    fi
+  fi
+
+  if [[ "$canonical_root" == "~/"* ]]; then
+    canonical_root="$HOME/${canonical_root#~/}"
+  fi
+
+  local derived_root="${canonical_root%/}/$repo_name"
+  if [[ -n "$legacy_root" && "$legacy_root" != "null" ]]; then
+    if [[ "$legacy_root" == "~/"* ]]; then
+      legacy_root="$HOME/${legacy_root#~/}"
+    fi
+    if [[ "$legacy_root" == "$derived_root" ]]; then
+      printf '%s\n' "$legacy_root"
+      return 0
+    fi
+  fi
+
+  printf '%s\n' "$derived_root"
+}
+
+WORKTREE_ROOT="$(resolve_lane_worktree_root)"
 
 # Args
 LANE_TYPE=""

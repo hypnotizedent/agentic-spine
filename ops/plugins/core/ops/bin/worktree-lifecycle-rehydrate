@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
-ENFORCED_PREFIX="/Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine/"
 
 REPO_PATH="$ROOT"
 BRANCH=""
@@ -11,11 +10,34 @@ LANE=""
 OWNER="${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}"
 FORCE=0
 
+resolve_enforced_prefix() {
+  local repo_path="${1:-$ROOT}"
+  local canonical_root="/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"
+  local repo_root=""
+  local repo_name=""
+
+  repo_root="$(git -C "$repo_path" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$repo_root" ]] || repo_root="$ROOT"
+  repo_name="$(basename "$repo_root")"
+  [[ -n "$repo_name" ]] || repo_name="agentic-spine"
+
+  if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
+    canonical_root="$(yq e -r '.policy.canonical_worktree_root // "/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"' "$CONTRACT" 2>/dev/null || echo "$canonical_root")"
+  fi
+  if [[ "$canonical_root" == "~/"* ]]; then
+    canonical_root="$HOME/${canonical_root#~/}"
+  fi
+
+  printf '%s/%s/\n' "${canonical_root%/}" "$repo_name"
+}
+
 path_policy_block() {
   local detail="${1:-unknown path policy violation}"
+  local allowed_prefix=""
+  allowed_prefix="$(resolve_enforced_prefix "$REPO_PATH")"
   cat >&2 <<EOF
 WORKTREE PATH POLICY BLOCK: $detail
-Allowed worktree path: ${ENFORCED_PREFIX}<WAVE_ID>
+Allowed worktree path: ${allowed_prefix}<WAVE_ID>
 Remediation:
   ./bin/ops wave start <WAVE_ID> --objective "<objective>" --repo /Users/ronnyworks/code/agentic-spine
   ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo /Users/ronnyworks/code/agentic-spine
@@ -90,6 +112,7 @@ fi
 
 REPO_NAME="$(basename "$REPO_ROOT")"
 TARGET_WT="$CANONICAL_ROOT/$REPO_NAME/$LANE"
+ENFORCED_PREFIX="$(resolve_enforced_prefix "$REPO_ROOT")"
 NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 [[ "$TARGET_WT" != *"/.worktrees/"* ]] || path_policy_block "legacy .worktrees target denied: $TARGET_WT"

@@ -8,6 +8,7 @@ source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 
 CONFIG="$ROOT/ops/bindings/handoff.config.yaml"
+LOOPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
 SUMMARY=""
 LOOPS_RAW=""
 ACTIONS_RAW=""
@@ -25,7 +26,10 @@ WORKTREE_PATHS_RAW=""
 PRESERVED_COMMITS_RAW=""
 FILE_REFS_RAW=""
 PLAN_REFS_RAW=""
+CONTINUITY_NEXT_ACTION=""
 JSON_MODE=0
+CONTINUITY_RESULT_JSON=""
+declare -a CONTINUITY_EVIDENCE_REFS=()
 
 usage() {
   cat <<'USAGE'
@@ -42,6 +46,21 @@ import json
 import sys
 
 items = [x.strip() for x in sys.argv[1].split(',') if x.strip()]
+print(json.dumps(items))
+PY
+}
+
+json_array_from_values() {
+  if [[ "$#" -eq 0 ]]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  python3 - "$@" <<'PY'
+import json
+import sys
+
+items = [arg.strip() for arg in sys.argv[1:] if arg.strip()]
 print(json.dumps(items))
 PY
 }
@@ -114,6 +133,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --plan-refs)
       PLAN_REFS_RAW="${2:-}"
+      shift 2
+      ;;
+    --loop-next-action)
+      CONTINUITY_NEXT_ACTION="${2:-}"
+      shift 2
+      ;;
+    --loop-evidence-ref)
+      CONTINUITY_EVIDENCE_REFS+=("${2:-}")
       shift 2
       ;;
     --json)
@@ -313,6 +340,17 @@ if [[ "$role_io_enabled" == "true" && "$KIND" == "session" ]]; then
   fi
 fi
 
+if [[ -n "$CONTINUITY_NEXT_ACTION" || "${#CONTINUITY_EVIDENCE_REFS[@]}" -gt 0 ]]; then
+  if [[ "$(jq -r 'length' <<<"$loops_yaml")" == "0" ]]; then
+    echo "FAIL: loop continuity handoff requires at least one --loops entry" >&2
+    exit 2
+  fi
+  [[ -x "$LOOPS_BRIDGE" ]] || {
+    echo "FAIL: loops-authority-bridge not found: $LOOPS_BRIDGE" >&2
+    exit 1
+  }
+fi
+
 jq -n \
   --arg id "$id" \
   --arg owner "$OWNER" \
@@ -366,8 +404,68 @@ jq -n \
       } else {} end)' \
   | yq -P '.' >"$file"
 
+if [[ -n "$CONTINUITY_NEXT_ACTION" || "${#CONTINUITY_EVIDENCE_REFS[@]}" -gt 0 ]]; then
+  CONTINUITY_EVIDENCE_REFS+=("$file")
+  continuity_evidence_json="$(json_array_from_values "${CONTINUITY_EVIDENCE_REFS[@]}")"
+  continuity_updates_file="$(mktemp)"
+  while IFS= read -r loop_id; do
+    [[ -n "$loop_id" ]] || continue
+    continuity_cmd=(
+      python3 "$LOOPS_BRIDGE" continuity
+      --id "$loop_id"
+      --actor "session.handoff.create"
+      --reason "Persisted handoff continuity from $id"
+      --append-evidence-refs
+    )
+    if [[ -n "$CONTINUITY_NEXT_ACTION" ]]; then
+      continuity_cmd+=(--next-action "$CONTINUITY_NEXT_ACTION")
+    fi
+    if [[ "$continuity_evidence_json" != "[]" ]]; then
+      continuity_cmd+=(--evidence-refs-json "$continuity_evidence_json")
+    fi
+    continuity_output="$("${continuity_cmd[@]}")" || {
+      rm -f "$continuity_updates_file"
+      echo "FAIL: unable to persist loop continuity for $loop_id" >&2
+      exit 1
+    }
+    printf '%s\n' "$continuity_output" >> "$continuity_updates_file"
+  done < <(python3 - "$loops_yaml" <<'PY'
+import json
+import sys
+
+for item in json.loads(sys.argv[1]):
+    text = str(item or "").strip()
+    if text:
+        print(text)
+PY
+)
+
+  CONTINUITY_RESULT_JSON="$(jq -cs \
+    --arg next_action "$CONTINUITY_NEXT_ACTION" \
+    --argjson evidence_refs "$continuity_evidence_json" \
+    '{
+      next_action: (if $next_action == "" then null else $next_action end),
+      evidence_refs: $evidence_refs,
+      updates: .
+    }' "$continuity_updates_file")"
+  rm -f "$continuity_updates_file"
+
+  python3 - "$file" "$CONTINUITY_RESULT_JSON" <<'PY'
+import json
+import sys
+import yaml
+
+handoff_path = sys.argv[1]
+continuity = json.loads(sys.argv[2])
+doc = yaml.safe_load(open(handoff_path, encoding="utf-8")) or {}
+doc["continuity"] = continuity
+with open(handoff_path, "w", encoding="utf-8") as fh:
+    yaml.safe_dump(doc, fh, sort_keys=False)
+PY
+fi
+
 if [[ "$JSON_MODE" -eq 1 ]]; then
-  jq -n --arg capability "session.handoff.create" --arg id "$id" --arg kind "$KIND" --arg state "$state" --arg file "$file" --arg created_at_utc "$created_at" --arg expires_at_utc "$expires_at" --arg from_role "$FROM_ROLE" --arg to_role "$TO_ROLE" --arg transition_gate "$TRANSITION_GATE" '{capability:$capability,id:$id,kind:$kind,state:$state,file:$file,created_at_utc:$created_at_utc,expires_at_utc:$expires_at_utc,from_role:$from_role,to_role:$to_role,transition_gate:$transition_gate}'
+  jq -n --arg capability "session.handoff.create" --arg id "$id" --arg kind "$KIND" --arg state "$state" --arg file "$file" --arg created_at_utc "$created_at" --arg expires_at_utc "$expires_at" --arg from_role "$FROM_ROLE" --arg to_role "$TO_ROLE" --arg transition_gate "$TRANSITION_GATE" --argjson continuity "${CONTINUITY_RESULT_JSON:-null}" '{capability:$capability,id:$id,kind:$kind,state:$state,file:$file,created_at_utc:$created_at_utc,expires_at_utc:$expires_at_utc,from_role:$from_role,to_role:$to_role,transition_gate:$transition_gate} + (if $continuity == null then {} else {continuity:$continuity} end)'
   exit 0
 fi
 
@@ -382,4 +480,7 @@ if [[ -n "$FROM_ROLE" || -n "$TO_ROLE" ]]; then
   echo "from_role: ${FROM_ROLE:-}"
   echo "to_role: ${TO_ROLE:-}"
   echo "transition_gate: ${TRANSITION_GATE:-}"
+fi
+if [[ -n "$CONTINUITY_RESULT_JSON" ]]; then
+  echo "continuity_next_action: $(printf '%s\n' "$CONTINUITY_RESULT_JSON" | jq -r '.next_action // ""')"
 fi

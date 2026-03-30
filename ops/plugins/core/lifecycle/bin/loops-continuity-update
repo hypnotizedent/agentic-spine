@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
+
+LOOP_ID=""
+NEXT_ACTION=""
+REASON=""
+APPEND_EVIDENCE_REFS=0
+JSON_OUTPUT=0
+declare -a EVIDENCE_REFS=()
+
+usage() {
+  cat <<'USAGE'
+loops-continuity-update
+
+Usage:
+  loops-continuity-update --loop-id LOOP-... [--next-action "..."] [--evidence-ref <ref>]... [--append-evidence-refs] [--reason "..."] [--json]
+
+Updates the governed live continuity for an open loop. At least one of
+--next-action or --evidence-ref is required.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --loop-id)
+      LOOP_ID="${2:-}"
+      shift 2
+      ;;
+    --next-action)
+      NEXT_ACTION="${2:-}"
+      shift 2
+      ;;
+    --evidence-ref)
+      EVIDENCE_REFS+=("${2:-}")
+      shift 2
+      ;;
+    --append-evidence-refs)
+      APPEND_EVIDENCE_REFS=1
+      shift
+      ;;
+    --reason)
+      REASON="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_OUTPUT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+[[ -n "$LOOP_ID" ]] || { echo "FAIL: --loop-id is required" >&2; exit 2; }
+if [[ -z "$NEXT_ACTION" && "${#EVIDENCE_REFS[@]}" -eq 0 ]]; then
+  echo "FAIL: provide --next-action and/or at least one --evidence-ref" >&2
+  exit 2
+fi
+[[ -x "$BRIDGE" ]] || { echo "FAIL: loops-authority-bridge not found: $BRIDGE" >&2; exit 1; }
+
+EVIDENCE_JSON=""
+if [[ "${#EVIDENCE_REFS[@]}" -gt 0 ]]; then
+  EVIDENCE_JSON="$(python3 - "${EVIDENCE_REFS[@]}" <<'PY'
+import json
+import sys
+
+items = [arg.strip() for arg in sys.argv[1:] if arg.strip()]
+print(json.dumps(items))
+PY
+)"
+fi
+
+cmd=(python3 "$BRIDGE" continuity --id "$LOOP_ID" --actor "loops.continuity.update")
+if [[ -n "$NEXT_ACTION" ]]; then
+  cmd+=(--next-action "$NEXT_ACTION")
+fi
+if [[ -n "$EVIDENCE_JSON" ]]; then
+  cmd+=(--evidence-refs-json "$EVIDENCE_JSON")
+fi
+if [[ "$APPEND_EVIDENCE_REFS" -eq 1 ]]; then
+  cmd+=(--append-evidence-refs)
+fi
+if [[ -n "$REASON" ]]; then
+  cmd+=(--reason "$REASON")
+fi
+
+output="$("${cmd[@]}")"
+
+if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+  printf '%s\n' "$output"
+else
+  python3 - "$output" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+if not payload.get("ok", False):
+    print(f"FAIL: {payload.get('error', 'unknown error')}")
+    raise SystemExit(1)
+
+print("loops.continuity.update")
+print(f"loop_id: {payload.get('loop_id', '')}")
+print(f"next_action: {payload.get('next_action', '')}")
+print(f"evidence_refs: {len(payload.get('evidence_refs', []))}")
+for ref in payload.get("evidence_refs", []):
+    print(f"  - {ref}")
+PY
+fi

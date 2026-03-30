@@ -3,11 +3,9 @@
 
 Shell scripts (loops-create, loop-closeout-finalize) call this instead of
 mutating .scope.md files directly. This script:
-  1. Performs the SQLite mutation (upsert/close)
-  2. Returns status to the calling shell script
-
-Scope-file projection is NOT triggered on mutation. Refresh on demand:
-  loops-authority-bridge project
+  1. Performs the SQLite mutation
+  2. Projects the authoritative state back to the loop scope files
+  3. Returns status to the calling shell script
 
 This bridge governs capability-mediated mutation only. Raw file writes to
 externalized runtime state files remain outside its enforcement envelope and
@@ -16,6 +14,7 @@ must be handled by the separate read-only / write-scope controls.
 Usage:
   loops-authority-bridge upsert --json '{"loop_id":"LOOP-...",...}'
   loops-authority-bridge close --id LOOP-... --status closed [--completion-level ...] [--disposition ...]
+  loops-authority-bridge continuity --id LOOP-... [--next-action "..."] [--evidence-refs-json '["..."]'] [--append-evidence-refs]
   loops-authority-bridge query --id LOOP-...
   loops-authority-bridge list [--status active|closed|all]
   loops-authority-bridge bootstrap
@@ -42,7 +41,7 @@ import loops_sql_authority as lsa
 # Write operations require governed execution (SPINE_CAP_RUN_KEY set by cap.sh).
 # Read operations are always allowed.
 
-MUTATING_COMMANDS = frozenset({"upsert", "close"})
+MUTATING_COMMANDS = frozenset({"upsert", "close", "continuity"})
 READ_COMMANDS = frozenset({"query", "list", "bootstrap", "project", "parity"})
 CONTROL_TERMINAL_ROLE = "SPINE-CONTROL-01"
 
@@ -144,12 +143,14 @@ def cmd_upsert(args: argparse.Namespace) -> None:
         run_key=run_key,
         mutation_source=mutation_source,
     )
+    projection = lsa.project_to_scope_files(conn, scopes_dir)
     conn.commit()
     conn.close()
-    print(json.dumps({"ok": True, "loop_id": loop_id}), file=sys.stdout)
     print(
-        "Scope-file projection skipped (on-demand only via 'project' subcommand)",
-        file=sys.stderr,
+        json.dumps(
+            {"ok": True, "loop_id": loop_id, "projection": projection}
+        ),
+        file=sys.stdout,
     )
 
 
@@ -177,15 +178,79 @@ def cmd_close(args: argparse.Namespace) -> None:
         print(json.dumps({"ok": False, "error": f"{args.id} not found"}))
         sys.exit(1)
 
+    projection = lsa.project_to_scope_files(conn, scopes_dir)
     conn.commit()
     conn.close()
     print(
-        json.dumps({"ok": True, "loop_id": args.id, "status": args.status}),
+        json.dumps(
+            {
+                "ok": True,
+                "loop_id": args.id,
+                "status": args.status,
+                "projection": projection,
+            }
+        ),
         file=sys.stdout,
     )
+
+
+def cmd_continuity(args: argparse.Namespace) -> None:
+    run_key, mutation_source = check_mutation_ceremony("continuity", args)
+
+    if args.next_action is None and args.evidence_refs_json is None:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": "continuity update requires --next-action and/or --evidence-refs-json",
+                }
+            )
+        )
+        sys.exit(1)
+
+    root = resolve_root()
+    db_path, scopes_dir = lsa.resolve_paths(root)
+    conn = lsa.connect(db_path)
+    lsa.ensure_schema(conn)
+    lsa.bootstrap_from_scope_files(conn, scopes_dir)
+
+    evidence_refs = None
+    if args.evidence_refs_json is not None:
+        evidence_refs = json.loads(args.evidence_refs_json)
+
+    try:
+        loop = lsa.update_loop_continuity(
+            conn,
+            args.id,
+            next_action=args.next_action,
+            evidence_refs=evidence_refs,
+            append_evidence_refs=bool(args.append_evidence_refs),
+            actor=args.actor or "loops.continuity.update",
+            reason=args.reason,
+            run_key=run_key,
+            mutation_source=mutation_source,
+        )
+    except RuntimeError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        sys.exit(1)
+
+    if loop is None:
+        print(json.dumps({"ok": False, "error": f"{args.id} not found"}))
+        sys.exit(1)
+
+    projection = lsa.project_to_scope_files(conn, scopes_dir)
+    conn.commit()
+    conn.close()
     print(
-        "Scope-file projection skipped (on-demand only via 'project' subcommand)",
-        file=sys.stderr,
+        json.dumps(
+            {
+                "ok": True,
+                "loop_id": args.id,
+                "next_action": loop.get("next_action"),
+                "evidence_refs": loop.get("evidence_refs", []),
+                "projection": projection,
+            }
+        )
     )
 
 
@@ -213,6 +278,8 @@ def cmd_query(args: argparse.Namespace) -> None:
                     "owner": loop.get("owner", ""),
                     "objective": loop.get("objective", ""),
                     "scope": loop.get("scope", ""),
+                    "next_action": loop.get("next_action", ""),
+                    "evidence_refs": loop.get("evidence_refs", []),
                 }
             )
         )
@@ -316,6 +383,15 @@ def main() -> None:
     p_close.add_argument("--actor", default="")
     add_mutation_override_flags(p_close)
 
+    p_continuity = sub.add_parser("continuity")
+    p_continuity.add_argument("--id", required=True)
+    p_continuity.add_argument("--next-action", default=None)
+    p_continuity.add_argument("--evidence-refs-json", default=None)
+    p_continuity.add_argument("--append-evidence-refs", action="store_true", default=False)
+    p_continuity.add_argument("--reason", default=None)
+    p_continuity.add_argument("--actor", default="")
+    add_mutation_override_flags(p_continuity)
+
     p_query = sub.add_parser("query")
     p_query.add_argument("--id", required=True)
 
@@ -330,6 +406,7 @@ def main() -> None:
     cmd_map = {
         "upsert": cmd_upsert,
         "close": cmd_close,
+        "continuity": cmd_continuity,
         "query": cmd_query,
         "list": cmd_list,
         "bootstrap": cmd_bootstrap,

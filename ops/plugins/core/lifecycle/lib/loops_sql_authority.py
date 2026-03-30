@@ -26,7 +26,7 @@ from typing import Any
 import yaml
 
 
-SCHEMA_MIGRATION_ID = "20260323_loops_authority_v1"
+SCHEMA_MIGRATION_ID = "20260330_loops_authority_v2"
 ENV_DB_PATH = "LOOPS_DB_PATH"
 ENV_SCOPES_DIR = "LOOPS_SCOPES_DIR"
 DEFAULT_SCOPES_DIR_REL = "loop-scopes"
@@ -73,18 +73,27 @@ def resolve_paths(root: Path) -> tuple[Path, Path]:
     contract_path = root / "ops/bindings/mailroom.runtime.contract.yaml"
     state_root_str = os.environ.get("SPINE_STATE") or ""
     if not state_root_str or not str(state_root_str).strip():
-        raise RuntimeError("SPINE_STATE must be set — run via ./bin/ops cap run")
-    state_root = Path(state_root_str)
-    contract = load_yaml(contract_path)
-    if isinstance(contract, dict):
-        runtime_root = str(contract.get("runtime_root") or "").strip()
-        roots = contract.get("roots") if isinstance(contract.get("roots"), dict) else {}
-        state_dir = str(roots.get("state") or "").strip() if isinstance(roots, dict) else ""
-        if runtime_root:
+        contract = load_yaml(contract_path)
+        if not isinstance(contract, dict):
+            raise RuntimeError("SPINE_STATE must be set — run via ./bin/ops cap run")
+
+        state_root_text = str(contract.get("state_root") or "").strip()
+        if state_root_text:
+            state_root = Path(os.path.expanduser(state_root_text))
+            if not state_root.is_absolute():
+                state_root = root / state_root
+        else:
+            runtime_root = str(contract.get("runtime_root") or "").strip()
+            roots = contract.get("roots") if isinstance(contract.get("roots"), dict) else {}
+            state_dir = str(roots.get("state") or "").strip() if isinstance(roots, dict) else ""
+            if not runtime_root:
+                raise RuntimeError("SPINE_STATE must be set — run via ./bin/ops cap run")
             runtime_root_path = Path(os.path.expanduser(runtime_root))
             if not runtime_root_path.is_absolute():
                 runtime_root_path = root / runtime_root_path
             state_root = runtime_root_path / (state_dir or "state")
+    else:
+        state_root = Path(state_root_str).expanduser()
 
     db_path = Path(
         os.environ.get(ENV_DB_PATH, str(state_root / "shared_authority.db"))
@@ -132,6 +141,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           objective TEXT,
           blocked_by TEXT,
           next_action TEXT,
+          evidence_refs TEXT,
           linked_gaps TEXT,
           data_json TEXT,
           created_at_utc TEXT NOT NULL,
@@ -171,6 +181,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO schema_migrations(id, applied_at_utc) VALUES (?, ?)",
         (SCHEMA_MIGRATION_ID, utc_now_text()),
     )
+    columns = {
+        str(row["name"]).strip()
+        for row in conn.execute("PRAGMA table_info(loops)").fetchall()
+    }
+    if "evidence_refs" not in columns:
+        conn.execute("ALTER TABLE loops ADD COLUMN evidence_refs TEXT")
     conn.commit()
 
 
@@ -194,10 +210,33 @@ def _json_list_or_none(val: Any) -> str | None:
     return json.dumps(val, sort_keys=True)
 
 
+def _normalize_string_list(values: Any) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        try:
+            parsed = json.loads(values)
+        except Exception:
+            parsed = [values]
+        values = parsed
+    if not isinstance(values, list):
+        values = [values]
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        normalized.append(text)
+        seen.add(text)
+    return normalized
+
+
 COLUMN_NAMES = (
     "status", "owner", "created", "scope", "priority", "horizon",
     "execution_readiness", "execution_mode", "objective",
-    "blocked_by", "next_action", "linked_gaps",
+    "blocked_by", "next_action", "evidence_refs", "linked_gaps",
 )
 
 
@@ -217,7 +256,7 @@ def loop_from_row(row: sqlite3.Row) -> dict[str, Any]:
         val = row[col]
         if val is not None:
             # Decode JSON-array columns back to lists.
-            if col in ("blocked_by", "linked_gaps"):
+            if col in ("blocked_by", "evidence_refs", "linked_gaps"):
                 try:
                     data[col] = json.loads(val)
                 except (json.JSONDecodeError, TypeError):
@@ -233,7 +272,7 @@ def loop_to_frontmatter(loop: dict[str, Any]) -> dict[str, Any]:
     ordered_keys = [
         "loop_id", "created", "status", "owner", "scope", "priority",
         "horizon", "execution_readiness", "execution_mode", "objective",
-        "blocked_by", "next_action", "linked_gaps",
+        "blocked_by", "next_action", "evidence_refs", "linked_gaps",
     ]
     entry: dict[str, Any] = {}
     for k in ordered_keys:
@@ -305,9 +344,9 @@ def upsert_loop(conn: sqlite3.Connection, loop: dict[str, Any]) -> None:
         INSERT INTO loops(
           loop_id, status, owner, created, scope, priority, horizon,
           execution_readiness, execution_mode, objective,
-          blocked_by, next_action, linked_gaps,
+          blocked_by, next_action, evidence_refs, linked_gaps,
           data_json, created_at_utc, updated_at_utc
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(loop_id) DO UPDATE SET
           status = excluded.status,
           owner = excluded.owner,
@@ -320,6 +359,7 @@ def upsert_loop(conn: sqlite3.Connection, loop: dict[str, Any]) -> None:
           objective = excluded.objective,
           blocked_by = excluded.blocked_by,
           next_action = excluded.next_action,
+          evidence_refs = excluded.evidence_refs,
           linked_gaps = excluded.linked_gaps,
           data_json = excluded.data_json,
           updated_at_utc = excluded.updated_at_utc
@@ -337,12 +377,68 @@ def upsert_loop(conn: sqlite3.Connection, loop: dict[str, Any]) -> None:
             _str_or_none(loop.get("objective")),
             _json_list_or_none(loop.get("blocked_by")),
             _str_or_none(loop.get("next_action")),
+            _json_list_or_none(loop.get("evidence_refs")),
             _json_list_or_none(loop.get("linked_gaps")),
             json.dumps(loop, sort_keys=True, default=str),
             created_at,
             now,
         ),
     )
+
+
+def update_loop_continuity(
+    conn: sqlite3.Connection,
+    loop_id: str,
+    *,
+    next_action: str | None = None,
+    evidence_refs: list[str] | None = None,
+    append_evidence_refs: bool = False,
+    actor: str | None = None,
+    reason: str | None = None,
+    run_key: str | None = None,
+    mutation_source: str = "legacy",
+) -> dict[str, Any] | None:
+    loop = get_loop(conn, loop_id)
+    if loop is None:
+        return None
+
+    status = str(loop.get("status") or "").strip().lower()
+    if status == "closed":
+        raise RuntimeError(f"loop {loop_id} is closed")
+
+    previous_next_action = str(loop.get("next_action") or "").strip()
+    previous_refs = _normalize_string_list(loop.get("evidence_refs"))
+
+    if next_action is not None:
+        loop["next_action"] = str(next_action).strip()
+
+    if evidence_refs is not None:
+        incoming_refs = _normalize_string_list(evidence_refs)
+        if append_evidence_refs:
+            loop["evidence_refs"] = _normalize_string_list(previous_refs + incoming_refs)
+        else:
+            loop["evidence_refs"] = incoming_refs
+
+    upsert_loop(conn, loop)
+    insert_event(
+        conn,
+        loop_id=loop_id,
+        event_type="continuity_update",
+        from_status=loop.get("status"),
+        to_status=loop.get("status"),
+        reason=reason,
+        actor=actor,
+        run_key=run_key,
+        mutation_source=mutation_source,
+        payload={
+            "previous_next_action": previous_next_action,
+            "next_action": loop.get("next_action"),
+            "previous_evidence_refs": previous_refs,
+            "evidence_refs": _normalize_string_list(loop.get("evidence_refs")),
+            "append_evidence_refs": append_evidence_refs,
+        },
+    )
+    return loop
 
 
 def close_loop(
@@ -528,22 +624,23 @@ def bootstrap_from_scope_files(conn: sqlite3.Connection, scopes_dir: Path) -> in
     combined_hash = sha256_text(combined_text)
 
     count = loop_count(conn)
-    if count > 0:
-        wm_row = conn.execute(
-            "SELECT sha256 FROM loops_projection_watermarks WHERE surface = 'scope_files'"
-        ).fetchone()
-        if wm_row is not None and wm_row["sha256"] == combined_hash:
-            return 0  # DB and scope files in sync.
-        # Scope files changed externally -- re-sync from files.
-        conn.execute("DELETE FROM loops")
-        conn.execute("DELETE FROM loop_events")
-        conn.execute("DELETE FROM loops_projection_watermarks")
-        conn.commit()
+    wm_row = conn.execute(
+        "SELECT sha256 FROM loops_projection_watermarks WHERE surface = 'scope_files'"
+    ).fetchone()
+    if count > 0 and wm_row is not None and wm_row["sha256"] == combined_hash:
+        return 0
+
+    existing_ids = {
+        str(row["loop_id"]).strip()
+        for row in conn.execute("SELECT loop_id FROM loops").fetchall()
+    }
 
     imported = 0
     for sf, fm in parsed:
         loop_id = str(fm.get("loop_id", "")).strip()
         if not loop_id:
+            continue
+        if loop_id in existing_ids:
             continue
         upsert_loop(conn, fm)
         insert_event(
