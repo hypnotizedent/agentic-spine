@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# media-radarr-remove — Remove a movie from Radarr (destructive bridge)
+# Delegates to workbench media-agent tool: remove_movie
+# Default: preview mode. Use --apply to execute.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/media-agent-bridge.sh"
+
+usage() {
+  echo "Usage: media-radarr-remove --movie-id <id> [--delete-files] [--apply] [--json]"
+  echo ""
+  echo "Options:"
+  echo "  --movie-id <id>  Radarr movie ID (required)"
+  echo "  --delete-files   Also delete movie files from disk (default: false)"
+  echo "  --apply          Execute the removal (default: preview only)"
+  echo "  --json           Output structured JSON"
+}
+
+MOVIE_ID=""
+DELETE_FILES=false
+APPLY=false
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --movie-id) MOVIE_ID="$2"; shift 2 ;;
+    --delete-files) DELETE_FILES=true; shift ;;
+    --apply) APPLY=true; shift ;;
+    --json) JSON_MODE=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$MOVIE_ID" ]]; then
+  echo "ERROR: --movie-id is required" >&2
+  exit 1
+fi
+
+MODE="preview"
+[[ "$APPLY" == "true" ]] && MODE="apply"
+
+DELETE_FILES_BOOL="false"
+[[ "$DELETE_FILES" == "true" ]] && DELETE_FILES_BOOL="true"
+
+if [[ "$MODE" == "preview" ]]; then
+  if [[ "$JSON_MODE" == "true" ]]; then
+    python3 -c "
+import json, sys
+print(json.dumps({
+    'capability': 'media.radarr.remove',
+    'tool': 'remove_movie',
+    'movie_id': int(sys.argv[1]),
+    'delete_files': sys.argv[2] == 'true',
+    'add_import_exclusion': True,
+    'mode': 'preview',
+    'text': 'Preview: would remove movie ID ' + sys.argv[1] + ' (deleteFiles=' + sys.argv[2] + ', addImportExclusion=true)',
+    'applied': False,
+}, indent=2))
+" "$MOVIE_ID" "$DELETE_FILES_BOOL"
+  else
+    echo "=== PREVIEW: media.radarr.remove ==="
+    echo "Mode:                  preview (use --apply to execute)"
+    echo "Movie ID:              $MOVIE_ID"
+    echo "Delete Files:          $DELETE_FILES"
+    echo "Add Import Exclusion:  true"
+    echo "Target Tool:           remove_movie"
+  fi
+  exit 0
+fi
+
+# Apply mode
+ARGS_JSON=$(python3 -c "
+import json, sys
+args = {
+    'movieId': int(sys.argv[1]),
+    'deleteFiles': sys.argv[2] == 'true',
+    'addImportExclusion': True,
+}
+print(json.dumps(args))
+" "$MOVIE_ID" "$DELETE_FILES_BOOL")
+
+RESULT=$(media_agent_call "remove_movie" "$ARGS_JSON") || {
+  echo "FAIL: bridge call failed" >&2
+  [[ -n "${RESULT:-}" ]] && echo "$RESULT" >&2
+  exit 1
+}
+
+if [[ "$JSON_MODE" == "true" ]]; then
+  python3 -c "
+import json, sys
+text = sys.stdin.read().strip()
+print(json.dumps({
+    'capability': 'media.radarr.remove',
+    'tool': 'remove_movie',
+    'movie_id': int(sys.argv[1]),
+    'delete_files': sys.argv[2] == 'true',
+    'add_import_exclusion': True,
+    'mode': 'apply',
+    'text': text,
+    'applied': True,
+}, indent=2))
+" "$MOVIE_ID" "$DELETE_FILES_BOOL" <<< "$RESULT"
+else
+  echo "=== APPLIED: media.radarr.remove ==="
+  echo "$RESULT"
+fi
