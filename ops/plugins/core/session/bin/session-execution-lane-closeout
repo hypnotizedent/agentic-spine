@@ -13,6 +13,7 @@ set -euo pipefail
 # Optional:
 #   --reason "<reason>"         # Required for some statuses
 #   --landing-commit <sha>      # SHA if landed
+#   --friction-input <file>     # JSONL file of discovered friction items
 #   --json                      # Machine-readable output
 #
 # Returns:
@@ -29,6 +30,8 @@ STATE_ROOT="$SPINE_STATE/execution-lanes"
 RECEIPT_ROOT="$SPINE_EVIDENCE_ROOT/execution-lanes"
 PLAN_CREATE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-create"
 LOOPS_CREATE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/loops-create"
+FRICTION_INGEST_BIN="${SPINE_FRICTION_INGEST_BIN:-$ROOT/ops/plugins/core/lifecycle/bin/friction-ingest}"
+FRICTION_QUEUE_FILE="${SPINE_FRICTION_QUEUE_FILE:-$SPINE_STATE/friction-queue.ndjson}"
 
 # Args
 LANE_ID=""
@@ -41,12 +44,33 @@ PLAN_DESCRIPTION=""
 PLAN_LOOP_ID=""
 PLAN_BRANCH_RETENTION_STATE=""
 PLAN_PR_URL=""
+FRICTION_INPUT=""
 JSON_OUTPUT=false
+FRICTION_SUMMARY_OUTPUT_JSON=""
+FRICTION_RECEIPT_SUMMARY_JSON=""
+
+TMP_FILES=()
 
 fail() {
   echo "ERROR: $*" >&2
   exit 1
 }
+
+cleanup_tmp_files() {
+  local path
+  for path in "${TMP_FILES[@]:-}"; do
+    [[ -n "$path" && -e "$path" ]] && rm -f "$path"
+  done
+  return 0
+}
+
+register_tmp_file() {
+  local path="$1"
+  [[ -n "$path" ]] || return 0
+  TMP_FILES+=("$path")
+}
+
+trap cleanup_tmp_files EXIT
 
 normalize_branch_token() {
   local raw="$1"
@@ -65,6 +89,219 @@ default_review_date() {
 from datetime import datetime, timedelta, timezone
 print((datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%d"))
 PY
+}
+
+normalize_friction_input_file() {
+  local input_file="$1"
+  local output_file="$2"
+  python3 - "$input_file" "$output_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+VALID_SEVERITIES = {"low", "medium", "high", "critical"}
+
+
+def normalize_space(value: str) -> str:
+    return " ".join((value or "").strip().split())
+
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+
+rows = []
+for idx, raw in enumerate(src.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+    line = raw.strip()
+    if not line:
+        continue
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"malformed friction input line {idx}: {exc.msg}") from exc
+    if not isinstance(obj, dict):
+        raise SystemExit(f"malformed friction input line {idx}: JSON value must be an object")
+
+    capability = normalize_space(str(obj.get("capability", "")))
+    expected = normalize_space(str(obj.get("expected", "")))
+    actual = normalize_space(str(obj.get("actual", "")))
+    if not capability or not expected or not actual:
+        raise SystemExit(f"malformed friction input line {idx}: item requires capability, expected, actual")
+
+    severity = normalize_space(str(obj.get("severity", "medium")).lower())
+    if severity not in VALID_SEVERITIES:
+        severity = "medium"
+
+    auto_reconcile = obj.get("auto_reconcile", False)
+    if not isinstance(auto_reconcile, bool):
+        raise SystemExit(f"malformed friction input line {idx}: auto_reconcile must be true or false")
+
+    evidence_ref = obj.get("evidence_ref", "")
+    if evidence_ref is None:
+        evidence_ref = ""
+    elif not isinstance(evidence_ref, str):
+        raise SystemExit(f"malformed friction input line {idx}: evidence_ref must be a string when provided")
+
+    source = obj.get("source", "")
+    if source is None:
+        source = ""
+    elif not isinstance(source, str):
+        raise SystemExit(f"malformed friction input line {idx}: source must be a string when provided")
+
+    rows.append(
+        {
+            "capability": capability,
+            "expected": expected,
+            "actual": actual,
+            "severity": severity,
+            "source": normalize_space(source),
+            "auto_reconcile": auto_reconcile,
+            "evidence_ref": normalize_space(evidence_ref),
+        }
+    )
+
+if not rows:
+    raise SystemExit("friction input file contains no valid items")
+
+with dst.open("w", encoding="utf-8") as fh:
+    for row in rows:
+        fh.write(json.dumps(row, separators=(",", ":")))
+        fh.write("\n")
+PY
+}
+
+resolve_friction_id() {
+  local item_json="$1"
+  local source="$2"
+  python3 - "$FRICTION_QUEUE_FILE" "$item_json" "$source" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+VALID_SEVERITIES = {"low", "medium", "high", "critical"}
+
+
+def normalize_space(value: str) -> str:
+    return " ".join((value or "").strip().split())
+
+
+queue_path = Path(sys.argv[1])
+item = json.loads(sys.argv[2])
+source = normalize_space(sys.argv[3]) or "manual"
+severity = normalize_space(str(item.get("severity", "medium")).lower())
+if severity not in VALID_SEVERITIES:
+    severity = "medium"
+
+canonical = {
+    "capability": normalize_space(str(item.get("capability", ""))),
+    "expected": normalize_space(str(item.get("expected", ""))),
+    "actual": normalize_space(str(item.get("actual", ""))),
+    "severity": severity,
+    "source": source,
+}
+fingerprint = hashlib.sha256(
+    json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+
+friction_id = ""
+if queue_path.exists():
+    for raw in queue_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and str(obj.get("fingerprint", "")) == fingerprint:
+            friction_id = str(obj.get("friction_id", "")).strip()
+            if friction_id:
+                break
+
+print(json.dumps({"friction_id": friction_id, "fingerprint": fingerprint}))
+PY
+}
+
+ingest_discovered_friction() {
+  [[ -x "$FRICTION_INGEST_BIN" ]] || fail "friction ingest unavailable at $FRICTION_INGEST_BIN"
+
+  local normalized_input
+  normalized_input="$(mktemp)"
+  register_tmp_file "$normalized_input"
+  local normalize_error=""
+  if ! normalize_error="$(normalize_friction_input_file "$FRICTION_INPUT" "$normalized_input" 2>&1)"; then
+    fail "$normalize_error"
+  fi
+
+  local results_file
+  results_file="$(mktemp)"
+  register_tmp_file "$results_file"
+
+  local item_json item_source auto_reconcile evidence_ref ingest_item
+  local ingest_output created_json deduped_json reconcile_json
+  local resolved_json friction_id capability result_json
+  while IFS= read -r item_json; do
+    [[ -n "$item_json" ]] || continue
+
+    item_source="$(printf '%s\n' "$item_json" | jq -r '.source // empty')"
+    [[ -n "$item_source" ]] || item_source="session.execution.lane.closeout"
+    auto_reconcile="$(printf '%s\n' "$item_json" | jq -r '.auto_reconcile')"
+    evidence_ref="$(printf '%s\n' "$item_json" | jq -r '.evidence_ref // empty')"
+    capability="$(printf '%s\n' "$item_json" | jq -r '.capability')"
+
+    if [[ "$auto_reconcile" == "true" ]] && [[ -z "$PARENT_LOOP" ]]; then
+      fail "--friction-input item for capability '$capability' requested auto_reconcile, but lane '$LANE_ID' has no parent_loop"
+    fi
+
+    ingest_item="$(printf '%s\n' "$item_json" | jq -c '{capability, expected, actual, severity}')"
+    local -a ingest_cmd=("$FRICTION_INGEST_BIN" --item-json "$ingest_item" --source "$item_source" --json)
+    if [[ "$auto_reconcile" == "true" ]]; then
+      ingest_cmd+=(--auto-reconcile --loop-id "$PARENT_LOOP")
+    fi
+    ingest_output="$("${ingest_cmd[@]}")" || fail "friction ingest failed for capability '$capability'"
+
+    resolved_json="$(resolve_friction_id "$ingest_item" "$item_source")"
+    friction_id="$(printf '%s\n' "$resolved_json" | jq -r '.friction_id // empty')"
+    [[ -n "$friction_id" ]] || fail "unable to resolve friction_id after ingest for capability '$capability'"
+
+    created_json="$(printf '%s\n' "$ingest_output" | jq '(.created // 0) > 0')"
+    deduped_json="$(printf '%s\n' "$ingest_output" | jq '(.deduped // 0) > 0')"
+    reconcile_json="$(printf '%s\n' "$ingest_output" | jq -c '.reconcile // null')"
+
+    result_json="$(jq -cn \
+      --arg capability "$capability" \
+      --arg source "$item_source" \
+      --arg evidence_ref "$evidence_ref" \
+      --arg friction_id "$friction_id" \
+      --argjson auto_reconcile "$auto_reconcile" \
+      --argjson created "$created_json" \
+      --argjson deduped "$deduped_json" \
+      --argjson reconcile "$reconcile_json" \
+      '{
+        capability: $capability,
+        source: $source,
+        evidence_ref: (if $evidence_ref == "" then null else $evidence_ref end),
+        friction_id: $friction_id,
+        auto_reconcile: $auto_reconcile,
+        created: $created,
+        deduped: $deduped,
+        reconcile: $reconcile
+      }')"
+    printf '%s\n' "$result_json" >> "$results_file"
+  done < "$normalized_input"
+
+  FRICTION_SUMMARY_OUTPUT_JSON="$(jq -cs '{
+      provided: length,
+      created: (map(if .created then 1 else 0 end) | add // 0),
+      deduped: (map(if .deduped then 1 else 0 end) | add // 0),
+      auto_reconcile_items: (map(select(.auto_reconcile == true)) | length),
+      friction_ids: ([ .[] | .friction_id ] | unique),
+      created_ids: ([ .[] | select(.created == true) | .friction_id ] | unique),
+      deduped_ids: ([ .[] | select(.deduped == true) | .friction_id ] | unique),
+      auto_reconcile_ids: ([ .[] | select(.auto_reconcile == true) | .friction_id ] | unique),
+      items: .
+    }' "$results_file")"
+  FRICTION_RECEIPT_SUMMARY_JSON="$(printf '%s\n' "$FRICTION_SUMMARY_OUTPUT_JSON" | jq 'del(.items)')"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -107,6 +344,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --pr-url)
       PLAN_PR_URL="${2:-}"
+      shift 2
+      ;;
+    --friction-input)
+      FRICTION_INPUT="${2:-}"
       shift 2
       ;;
     --json)
@@ -172,6 +413,11 @@ REASON_REQUIRED=$(yq e ".closeout_requirements.${LANE_TYPE}.reason_required // f
 if [[ "$REASON_REQUIRED" == "true" ]] && [[ -z "$REASON" ]]; then
   echo "ERROR: --reason required for $LANE_TYPE lane closeout" >&2
   exit 1
+fi
+
+if [[ -n "$FRICTION_INPUT" ]]; then
+  [[ -f "$FRICTION_INPUT" ]] || fail "--friction-input file not found: $FRICTION_INPUT"
+  ingest_discovered_friction
 fi
 
 if [[ "$STATUS" == "deferred" ]]; then
@@ -285,21 +531,50 @@ branch_retention_state: "${PLAN_BRANCH_RETENTION_STATE:-}"
 branch_pr_url: "${PLAN_PR_URL:-}"
 YAML
 
+if [[ -n "$FRICTION_RECEIPT_SUMMARY_JSON" ]]; then
+  python3 - "$RECEIPT_FILE" "$FRICTION_RECEIPT_SUMMARY_JSON" <<'PY'
+import json
+import sys
+import yaml
+
+receipt_path = sys.argv[1]
+summary = json.loads(sys.argv[2])
+doc = yaml.safe_load(open(receipt_path, encoding="utf-8")) or {}
+doc["friction_ingest"] = summary
+with open(receipt_path, "w", encoding="utf-8") as fh:
+    yaml.safe_dump(doc, fh, sort_keys=False)
+PY
+fi
+
 # Log to audit trail
 AUDIT_LOG="$STATE_ROOT/audit.log"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|closeout|$LANE_ID|$LANE_TYPE|$STATUS|$REASON" >> "$AUDIT_LOG"
 
 # Output
 if [[ "$JSON_OUTPUT" == "true" ]]; then
-  jq -n \
-    --arg lane_id "$LANE_ID" \
-    --arg status "$STATUS" \
-    --arg receipt "$RECEIPT_FILE" \
-    '{
-      lane_id: $lane_id,
-      status: $status,
-      receipt: $receipt
-    }'
+  if [[ -n "$FRICTION_SUMMARY_OUTPUT_JSON" ]]; then
+    jq -n \
+      --arg lane_id "$LANE_ID" \
+      --arg status "$STATUS" \
+      --arg receipt "$RECEIPT_FILE" \
+      --argjson friction_ingest "$FRICTION_SUMMARY_OUTPUT_JSON" \
+      '{
+        lane_id: $lane_id,
+        status: $status,
+        receipt: $receipt,
+        friction_ingest: $friction_ingest
+      }'
+  else
+    jq -n \
+      --arg lane_id "$LANE_ID" \
+      --arg status "$STATUS" \
+      --arg receipt "$RECEIPT_FILE" \
+      '{
+        lane_id: $lane_id,
+        status: $status,
+        receipt: $receipt
+      }'
+  fi
 else
   echo "════════════════════════════════════════════════════════════"
   echo "LANE CLOSED"
@@ -325,6 +600,13 @@ else
     echo "Deferred loop: $PLAN_LOOP_ID"
     echo "Review date:   $PLAN_REVIEW_DATE"
     echo "To resume: promote the plan/loop first, then re-enter execution"
+  fi
+  if [[ -n "$FRICTION_SUMMARY_OUTPUT_JSON" ]]; then
+    echo ""
+    echo "Friction ingest:"
+    echo "  Provided: $(printf '%s\n' "$FRICTION_SUMMARY_OUTPUT_JSON" | jq -r '.provided')"
+    echo "  Created:  $(printf '%s\n' "$FRICTION_SUMMARY_OUTPUT_JSON" | jq -r '.created')"
+    echo "  Deduped:  $(printf '%s\n' "$FRICTION_SUMMARY_OUTPUT_JSON" | jq -r '.deduped')"
   fi
   echo "════════════════════════════════════════════════════════════"
 fi
