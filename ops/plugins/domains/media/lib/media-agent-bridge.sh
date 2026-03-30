@@ -9,6 +9,13 @@
 MEDIA_AGENT_LAUNCHER="${MEDIA_AGENT_LAUNCHER:-/Users/ronnyworks/code/workbench/agents/media/tools/run.sh}"
 MEDIA_AGENT_TIMEOUT="${MEDIA_AGENT_TIMEOUT:-90}"
 
+# Media-home Tailscale IP fallback for spine→workbench bridge calls.
+# The MCP server defaults to LAN 10.0.0.106 which is unreachable from
+# the Mac. Export Tailscale IPs only if not already set.
+export RADARR_URL="${RADARR_URL:-http://100.113.72.41:7878}"
+export SONARR_URL="${SONARR_URL:-http://100.113.72.41:8989}"
+export LIDARR_URL="${LIDARR_URL:-http://100.113.72.41:8686}"
+
 media_agent_call() {
   local tool_name="$1"
   local arguments_json="$2"
@@ -31,24 +38,55 @@ except json.JSONDecodeError:
 launcher = sys.argv[3]
 timeout = int(sys.argv[4])
 
-messages = "\n".join([
+msgs = [
     json.dumps({"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"spine-bridge","version":"1.0.0"}},"id":0}),
     json.dumps({"jsonrpc":"2.0","method":"notifications/initialized"}),
     json.dumps({"jsonrpc":"2.0","method":"tools/call","params":{"name":tool_name,"arguments":arguments},"id":1}),
-])
+]
+
+import threading, time
 
 try:
-    proc = subprocess.run([launcher], input=messages, capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.Popen([launcher], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 except FileNotFoundError:
     print(json.dumps({"bridge_error": True, "message": f"launcher not found: {launcher}"}))
     sys.exit(1)
+
+collected = {"stdout": "", "stderr": ""}
+
+def read_stdout():
+    collected["stdout"] = proc.stdout.read()
+
+def read_stderr():
+    collected["stderr"] = proc.stderr.read()
+
+t_out = threading.Thread(target=read_stdout, daemon=True)
+t_err = threading.Thread(target=read_stderr, daemon=True)
+t_out.start()
+t_err.start()
+
+try:
+    for msg in msgs:
+        proc.stdin.write(msg + "\n")
+        proc.stdin.flush()
+        time.sleep(0.05)
+    # Give server time to process tools/call before closing stdin
+    time.sleep(1.0)
+    proc.stdin.close()
+    proc.wait(timeout=timeout)
 except subprocess.TimeoutExpired:
+    proc.kill()
     print(json.dumps({"bridge_error": True, "message": f"launcher timed out after {timeout}s"}))
     sys.exit(1)
+except BrokenPipeError:
+    pass
 
-data = proc.stdout
+t_out.join(timeout=5)
+t_err.join(timeout=5)
+
+data = collected["stdout"]
 if not data:
-    stderr_tail = (proc.stderr or "")[-500:]
+    stderr_tail = collected["stderr"][-500:]
     print(json.dumps({"bridge_error": True, "message": f"no output (exit={proc.returncode})", "stderr": stderr_tail}))
     sys.exit(1)
 
