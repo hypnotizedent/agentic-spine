@@ -904,8 +904,13 @@ PYDEADLINE
     fi
 
     local default_branch
+    local source_ref
     default_branch="$(git -C "$workspace_repo" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@')"
     default_branch="${default_branch:-main}"
+    source_ref="$(git -C "$workspace_repo" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+    if [[ -z "$source_ref" || "$source_ref" == "HEAD" ]]; then
+      source_ref="$(git -C "$workspace_repo" rev-parse HEAD 2>/dev/null || echo "$default_branch")"
+    fi
 
     local lifecycle_contract="$SPINE_REPO/ops/bindings/worktree.lifecycle.contract.yaml"
     local canonical_root="$HOME/.wt"
@@ -934,11 +939,7 @@ PYDEADLINE
     [[ "$(basename "$workspace_worktree")" =~ ^WAVE-[A-Z0-9._-]+$ ]] || wave_path_policy_block "wave id '$wave_id' must match WAVE-... for managed worktree path"
 
     if ! git -C "$workspace_repo" show-ref --verify --quiet "refs/heads/$workspace_branch"; then
-      if git -C "$workspace_repo" show-ref --verify --quiet "refs/remotes/origin/$default_branch"; then
-        git -C "$workspace_repo" branch "$workspace_branch" "origin/$default_branch" >/dev/null
-      else
-        git -C "$workspace_repo" branch "$workspace_branch" "$default_branch" >/dev/null
-      fi
+      git -C "$workspace_repo" branch "$workspace_branch" "$source_ref" >/dev/null
       WAVE_START_CREATED_BRANCH="$workspace_branch"
       WAVE_START_CREATED_REPO="$workspace_repo"
     fi

@@ -1040,6 +1040,7 @@ cmd_land() {
   local files_arg=""
   local summary=""
   local dry_run=0
+  local state_file=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1068,6 +1069,7 @@ cmd_land() {
   auth_json="$(_read_authority "$wave_id")"
   local loop_id
   loop_id="$(_auth_field "$auth_json" "loop_id")"
+  state_file="$WAVES_DIR/$wave_id/state.json"
   printf "Loop:    %s\n" "$loop_id"
   echo ""
 
@@ -1090,11 +1092,42 @@ cmd_land() {
   done
   echo ""
 
+  local land_checkout="$SP"
+  land_checkout="$(python3 - "$state_file" "$SP" <<'PY'
+import json
+import sys
+
+state_file = sys.argv[1]
+fallback = sys.argv[2]
+
+try:
+    with open(state_file) as f:
+        state = json.load(f)
+except Exception:
+    print(fallback)
+    raise SystemExit(0)
+
+workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
+worktree = str(workspace.get("worktree") or "").strip()
+repo = str(workspace.get("repo") or "").strip()
+
+if worktree:
+    print(worktree)
+elif repo:
+    print(repo)
+else:
+    print(fallback)
+PY
+)"
+  [[ -n "$land_checkout" ]] || _fail "unable to resolve land checkout for $wave_id"
+  printf "Checkout: %s\n" "$land_checkout"
+  echo ""
+
   # ── Step 3: Run verify.fast — abort if any gate fails ────────
   echo "Running verify.fast..."
   local verify_rc=0
   local verify_output
-  verify_output="$("$SP/ops/plugins/core/verify/bin/verify-run" fast 2>&1)" || verify_rc=$?
+  verify_output="$(cd "$land_checkout" && "$SP/ops/plugins/core/verify/bin/verify-run" fast 2>&1)" || verify_rc=$?
 
   # Extract pass/fail summary line from output
   local verify_summary
@@ -1126,12 +1159,17 @@ cmd_land() {
 
   # ── Step 4: Stage allowlisted files ──────────────────────────
   echo "Staging allowlisted files..."
-  cd "$SP"
+  cd "$land_checkout"
 
   for f in "${allowlist[@]}"; do
     # Use -A so tracked deletions in the allowlist stage cleanly instead of
     # failing on a missing pathspec.
-    git add -A -- "$f" || _fail "git add failed for: $f"
+    if ! git add -A -- "$f" 2>/dev/null; then
+      if git diff --cached --name-only -- "$f" | grep -Fxq "$f"; then
+        continue
+      fi
+      _fail "git add failed for: $f"
+    fi
   done
 
   # Verify staged set is a subset of allowlist (mirrors git-stage-commit-scoped safety check)
