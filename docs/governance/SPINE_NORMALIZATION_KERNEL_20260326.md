@@ -2,7 +2,7 @@
 status: authoritative
 owner: "@ronny"
 created: 2026-03-26
-last_verified: 2026-03-26
+last_verified: 2026-03-30
 scope: normalization-kernel-governance
 depends_on:
   - docs/governance/SPINE.md
@@ -138,6 +138,43 @@ These families enforce normalization laws but do not own independent behavioral 
 Waves must converge toward the six normalization laws. A wave that preserves a historical folder shape without advancing law enforcement is not valid. A wave that moves files without declaring which law the move serves is not valid.
 
 This does not mean every wave must touch all six laws. It means every wave must name which law it advances and must not create new surfaces that no law governs.
+
+## L1 Surviving Set Reduction (2026-03-30)
+
+This reduction pass applies the `PLATFORM_LAYER_MODEL.md` L1 test directly to
+the live control-plane surfaces. The question is binary:
+
+> Is this surface part of the core governed execution framework even if no
+> product runtime is active?
+
+### Binary L1 Sieve
+
+| Surface Candidate | L1 Core Framework | Why |
+| --- | --- | --- |
+| `spine.control.*` | `yes` | Operator-facing control loop for observe, plan, route, and execute on the spine itself. |
+| `wave.*` | `yes` | Governs wave execution, finish, and closeout of the control plane. |
+| `loops.*` | `yes` | Canonical loop control and continuity surface. |
+| `gaps.*` | `yes` | Governed closure register tied directly to loop control and defect retirement. |
+| `friction.*` | `yes` | Control-plane self-observation and governed intake for controller/runtime failure evidence. |
+| `mailroom.*` | `no` | Transport/runtime implementation detail. Survives only folded under route and continuity surfaces; the family name is not durable architecture. |
+| receipt / attestation surfaces (`receipts.*`, broker attestation reads) | `yes` | Core continuity and attestation primitive. |
+| session bootstrap / execution-lane surfaces (`session.v3.attach`, `session.execution.lane.*`) | `yes` | Governed entry, authority resolution, and bounded execution-lane control. |
+| control-plane verification / recovery / observability surfaces (`verify.*`, `recovery.*`, control-plane observability status) | `yes` | Verify, incident response, and self-observation primitives of the spine engine. |
+
+### Surviving L1 Set Matrix
+
+| Law | Primitive Function | Surviving Governed Surface | Top-of-Stack Consumer | What Folds Under |
+| --- | --- | --- | --- | --- |
+| Authority | `govern` | `session.v3.attach`, `session.execution.lane.*` | controller session entry | entry packets, terminal identity resolution, lane bootstrap, role and write-scope enforcement |
+| Boundary | `execute + route` | `spine.control.*` | controller/operator control loop | broker reads, route hints, delegated task transport, control-plane latest artifact plumbing |
+| Promotion | `loop and wave control` | `wave.*`, `loops.*` | wave/controller owner | orchestration manifests, lane tickets, closeout glue, internal lifecycle helpers |
+| Policy | `verify` | `verify.*` | verifier/controller | gate topology, verify packs, ring policy, core/domain dispatch plumbing |
+| Incident | `self-observation + recovery` | `gaps.*`, `friction.*`, `recovery.*`, control-plane observability status surfaces | controller / incident operator | scheduler-health sampling, friction queue internals, recovery adapters, degraded-state probes |
+| Continuity | `receipt / attestation + continuity` | `receipts.*`, `spine.broker.get_request_attestation`, `loops.continuity.update` | operator handoff / broker consumer | mailroom runtime roots, receipt indexes, evidence exports, control-plane latest projections |
+
+The surviving set is intentionally surface-first. Folder names, plugin-family
+labels, and transport roots do not survive as architecture unless they remain
+the operator-facing governed surface.
 
 ## Explicit Non-Goals
 
