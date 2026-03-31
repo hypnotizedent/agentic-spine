@@ -2,7 +2,7 @@
 status: authoritative
 owner: "@ronny"
 scope: spine-v3-finalization-program
-updated_at: 2026-03-30
+updated_at: 2026-03-31
 ---
 
 # Spine V3 Finalization Program 2026-03-30
@@ -187,7 +187,7 @@ Required change shape:
 - Budget: `1 session`
 - Output artifact: `.evidence/spine/reports/finalization/SPINE_V3_DOCS_MINIMUM_CANON_20260330.md`
 
-Live canon target:
+Mandatory live canon is elected as:
 
 - `/Users/ronnyworks/code/agentic-spine/NORTH_STAR.md`
 - `/Users/ronnyworks/code/agentic-spine/docs/governance/SPINE.md`
@@ -209,6 +209,15 @@ Node-boundary correction:
 - node truth is not required to live as a prose doc if the binding authority is stronger
 - the live node-boundary authority is `/Users/ronnyworks/code/agentic-spine/ops/bindings/node.role.contract.yaml`
 - `EXECUTION_NODE_SPEC.md` is not part of live canon unless re-elected from scratch
+
+First safe docs archive slice:
+
+- source: `/Users/ronnyworks/code/agentic-spine/docs/governance/EXECUTION_NODE_SPEC.md`
+- destination: `/Users/ronnyworks/code/agentic-spine/ops/archive/pre-2026-04-01-spine/docs/governance/EXECUTION_NODE_SPEC.md`
+- treatment:
+  - historical
+  - non-authoritative
+  - archive through the docs loop wave path, not by ad hoc file movement
 
 ### 6. Self-Orchestrated Finalization Proof
 
