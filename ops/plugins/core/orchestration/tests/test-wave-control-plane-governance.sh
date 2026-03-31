@@ -512,6 +512,60 @@ assert_file_contains "$T4_RUNTIME/dispatch.args" "--lane" "wave-execute forwards
 assert_file_contains "$T4_ROOT/dispatch.out" "DISPATCH RECORDED" "wave-execute reports successful dispatch after fallback"
 
 echo ""
+echo "── T5: wave-execute land stages deleted allowlisted files ──"
+T5_ROOT="$(make_tmpdir)"
+T5_REMOTE="$T5_ROOT/remote.git"
+T5_REPO="$T5_ROOT/repo"
+T5_RUNTIME="$T5_REPO/runtime"
+mkdir -p \
+  "$T5_REPO/ops/plugins/core/orchestration/bin" \
+  "$T5_REPO/ops/plugins/core/verify/bin" \
+  "$T5_RUNTIME/waves/WAVE-20260331-02"
+copy_runtime_libs "$T5_REPO"
+cp "$ROOT/ops/plugins/core/orchestration/bin/wave-execute" "$T5_REPO/ops/plugins/core/orchestration/bin/"
+chmod +x "$T5_REPO/ops/plugins/core/orchestration/bin/wave-execute"
+
+git init -q --bare "$T5_REMOTE"
+git init -q -b main "$T5_REPO"
+git -C "$T5_REPO" config user.name "Test User"
+git -C "$T5_REPO" config user.email "test@example.com"
+git -C "$T5_REPO" remote add origin "$T5_REMOTE"
+
+cat > "$T5_REPO/ops/plugins/core/verify/bin/verify-run" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "wrapper: pass=1 fail=0 warn=0"
+EOF
+chmod +x "$T5_REPO/ops/plugins/core/verify/bin/verify-run"
+
+printf 'keep\n' > "$T5_REPO/README.md"
+mkdir -p "$T5_REPO/ops/plugins/core/conflicts"
+printf 'legacy\n' > "$T5_REPO/ops/plugins/core/conflicts/README.md"
+git -C "$T5_REPO" add .
+git -C "$T5_REPO" commit -q -m "init"
+git -C "$T5_REPO" push -q -u origin main
+
+cat > "$T5_RUNTIME/waves/WAVE-20260331-02/authority.json" <<'EOF'
+{"loop_id":"LOOP-T-LAND","execution_mode":"orchestrator_subagents"}
+EOF
+
+rm "$T5_REPO/ops/plugins/core/conflicts/README.md"
+
+if env SPINE_ROOT="$T5_REPO" SPINE_RUNTIME_ROOT="$T5_RUNTIME" SPINE_STATE="$T5_RUNTIME/state" OPS_GOVERNED_MAIN_OVERRIDE=1 \
+  bash "$T5_REPO/ops/plugins/core/orchestration/bin/wave-execute" \
+    land --wave-id WAVE-20260331-02 \
+    --files ops/plugins/core/conflicts/README.md \
+    --summary "remove dormant conflicts fixture" > "$T5_ROOT/land.out"; then
+  pass "wave-execute land accepts deleted allowlisted file"
+else
+  fail "wave-execute land accepts deleted allowlisted file"
+fi
+
+assert_file_contains "$T5_ROOT/land.out" "Staged 1 file(s)" "wave-execute land stages deleted allowlisted file"
+git -C "$T5_REPO" show --pretty=format: --name-status HEAD > "$T5_ROOT/show.txt"
+assert_file_contains "$T5_ROOT/show.txt" $'D\tops/plugins/core/conflicts/README.md' "wave-execute land commit records deleted file only"
+
+echo ""
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"
 exit "$FAIL"
