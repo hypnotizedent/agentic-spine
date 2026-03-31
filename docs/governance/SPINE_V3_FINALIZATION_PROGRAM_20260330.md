@@ -213,7 +213,7 @@ Mandatory live canon is elected as:
 - `/Users/ronnyworks/code/agentic-spine/docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`
 - `/Users/ronnyworks/code/agentic-spine/docs/governance/LOCAL_CONTROL_PLANE_CONTRACT.md`
 - `/Users/ronnyworks/code/agentic-spine/docs/governance/EXECUTION_NODE_SPEC.md` only if it is rewritten and re-elected as live authority; until then it remains historical and outside the minimum canon
-- `/Users/ronnyworks/code/agentic-spine/docs/governance/GIT_WORKFLOW_DISCIPLINE.md` only if enforced
+- historical workflow-discipline writeups stay archived unless re-elected into the live canon
 
 Governance doc budget:
 

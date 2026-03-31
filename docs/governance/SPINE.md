@@ -233,7 +233,7 @@ This prevents worktree accumulation and ensures main checkout sessions start cle
   record the blocker explicitly.
 - `new_truth` work should prefer a reviewable branch/worktree posture unless an
   exact bounded direct landing is explicitly chosen.
-- Detailed policy: [`GIT_WORKFLOW_DISCIPLINE.md`](GIT_WORKFLOW_DISCIPLINE.md)
+- Workflow discipline is enforced by the governed session, worktree, and verify surfaces named in this contract. Historical workflow-policy writeups now live under the archive boundary.
 
 ## Session Closeout
 
@@ -279,12 +279,6 @@ Loop closeout ceremony:
 - Deprecated-term enforcement is folded into this file.
 - Legacy repo token for drift and docs checks: `legacy-repo`.
 - Deprecated-term mentions are non-blocking only in archive, certification, and explicit historical/planning surfaces.
-
-### Domain Hygiene Weekly
-
-- `docs/governance/domains/hygiene-weekly.md` is the surviving domain note.
-- Verification entrypoint remains `./bin/ops cap run verify.run -- domain hygiene-weekly`.
-- No separate live bundle binding is required for this domain note.
 
 ### Lean Budget
 
@@ -358,7 +352,7 @@ Every agent that starts a Claude Code session in this repo is automatically enro
 - Dynamic governance brief: delivers current governance context
 - Proposal queue gating: alerts if >5 pending proposals
 
-This is the **first line of agent governance**. Current authority stays in this contract and [FINAL_SURFACES_CLOSURE_BRIEF_20260326.md](/Users/ronnyworks/code/agentic-spine/docs/governance/FINAL_SURFACES_CLOSURE_BRIEF_20260326.md).
+This is the **first line of agent governance**. Current first-string and archive-boundary authority stays in this contract and [SPINE_V3_FINALIZATION_PROGRAM_20260330.md](/Users/ronnyworks/code/agentic-spine/docs/governance/SPINE_V3_FINALIZATION_PROGRAM_20260330.md).
 
 ### D399: Live External-State Enforcement
 **Path**: `surfaces/verify/d399-microsoft-mint-customer-mailbox-canonical-lock.sh` (560 lines)

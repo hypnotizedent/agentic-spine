@@ -6,8 +6,8 @@ last_verified: 2026-03-30
 scope: normalization-kernel-governance
 depends_on:
   - docs/governance/SPINE.md
-  - docs/governance/FINAL_SURFACES_CLOSURE_BRIEF_20260326.md
-  - docs/governance/SPINE_PRODUCTS_AND_RUNTIME_DESTINATIONS_20260326.md
+  - docs/governance/PLATFORM_LAYER_MODEL.md
+  - docs/governance/SPINE_V3_FINALIZATION_PROGRAM_20260330.md
 ---
 
 # Spine Normalization Kernel

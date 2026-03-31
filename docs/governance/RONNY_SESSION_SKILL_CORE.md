@@ -43,7 +43,7 @@ platform properties now.
 | Session protocol | `docs/governance/SESSION_PROTOCOL.md` |
 | Governance profiles | `ops/bindings/governance.profile.contract.yaml` |
 | Translator doctrine | `docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md` |
-| Output contracts | `docs/governance/OUTPUT_CONTRACTS.md` |
+| Output contracts | `docs/governance/SESSION_PROTOCOL.md` + machine contracts under `ops/bindings/` |
 
 ## Governance Profiles
 

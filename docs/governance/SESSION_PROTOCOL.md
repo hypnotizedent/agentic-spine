@@ -10,7 +10,7 @@ scope: session-entry
 > **Purpose:** Entry point for every agent working with the agentic-spine,
 > regardless of device or surface (desktop CLI, mobile, remote/tailnet).
 >
-> **Canonical output schemas:** `docs/governance/OUTPUT_CONTRACTS.md`
+> **Canonical output schemas:** this document's Output Contracts section plus the machine contracts named there.
 
 ---
 
@@ -45,7 +45,7 @@ Full spine access. Follow all sections below in order.
 
 1. Confirm you are in the spine repo (`cd ~/code/agentic-spine`).
 2. Read `docs/governance/SPINE.md` for the minimal operating contract. This file carries the session-entry and environment-specific behavior.
-3. For cross-repo parallel work, read `docs/governance/RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md`.
+3. For cross-repo parallel work, declare write ownership and repo sequence in the active loop scope before mutation.
 
 ### Session steps
 
@@ -204,7 +204,7 @@ Cannot confirm filesystem, CLI, bridge, or MCP access.
 
 ## Output Contracts
 
-**Canonical source:** `docs/governance/OUTPUT_CONTRACTS.md`
+**Canonical source:** this section and the machine contracts it names.
 
 All spine artifacts must conform to these schemas regardless of environment.
 Desktop sessions write directly to the repo. Mobile and remote sessions produce
@@ -225,7 +225,7 @@ objective: One-line description of the goal
 
 Required sections: `## Problem Statement`, `## Deliverables`, `## Acceptance Criteria`, `## Constraints`.
 
-Full schema: `docs/governance/OUTPUT_CONTRACTS.md` section 1.
+This inline schema is the canonical human contract for loop scope frontmatter.
 
 ### Gap Filing
 
@@ -241,7 +241,7 @@ gap:
   parent_loop: "LOOP-NAME"
 ```
 
-Machine contract: `ops/bindings/gap.schema.yaml`. Full schema: `docs/governance/OUTPUT_CONTRACTS.md` section 2.
+Machine contract: `ops/bindings/gap.schema.yaml`.
 
 ### Proposal Manifest
 
@@ -257,7 +257,7 @@ changes:
     reason: "Why"
 ```
 
-Machine contract: `ops/bindings/proposals.lifecycle.yaml`. Full schema: `docs/governance/OUTPUT_CONTRACTS.md` section 3.
+Machine contract: `ops/bindings/proposals.lifecycle.yaml`.
 
 ### Agent Result Block
 
@@ -302,7 +302,7 @@ All loop scope files in `$SPINE_STATE/loop-scopes/` (externalized runtime) MUST 
 
 ## Proposal Queue Hygiene
 
-Change proposals (`mailroom/outbox/proposals/CP-*`) follow a governed lifecycle defined in `ops/bindings/proposals.lifecycle.yaml`. For the complete lifecycle reference, see `docs/governance/PROPOSAL_LIFECYCLE_REFERENCE.md`.
+Change proposals (`mailroom/outbox/proposals/CP-*`) follow the governed lifecycle defined in `ops/bindings/proposals.lifecycle.yaml`.
 
 **Before submitting:** Run `./bin/ops cap run proposals.list` to check for existing proposals. Avoid duplicate work.
 
@@ -333,7 +333,7 @@ Every open gap in `operational.gaps.yaml` must be linked to an active loop (`par
 - Multiple terminals touched the same root checkout, git index, or protected hotspot surfaces. That is blocking contention, not parallel work. Separate managed worktrees are fine; shared root-lane mutation is not.
 - Optional GitHub drift (`origin` vs `github`) during non-release work. Canonical operational authority remains `origin`; GitHub drift is tolerated and repaired only for explicit publication.
 - Loop closeout not consistently done. Without updating the loop scope with receipts and closing it, the next agent can't tell what's already proven and repeats work. D61 + `agent.session.closeout` is the mechanism meant to prevent this.
-- Two repos, two contracts (`agentic-spine` vs `workbench`). If workbench changes aren't tied back to a spine loop (or vice versa), you get coordination gaps even when each repo is individually clean. Use `RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md` to declare write ownership and repo sequence up front.
+- Two repos, two contracts (`agentic-spine` vs `workbench`). If workbench changes aren't tied back to a spine loop (or vice versa), you get coordination gaps even when each repo is individually clean. Declare write ownership and repo sequence in the active loop scope up front.
 
 ### Managed Worktree Hygiene
 

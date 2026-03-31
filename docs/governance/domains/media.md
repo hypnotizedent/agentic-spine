@@ -32,9 +32,7 @@ Parent loop: `LOOP-MEDIA-SPLIT-AUTHORITY-CANONICALIZATION-20260322`
 
 - Placement/lifecycle: `docs/governance/MEDIA_STORAGE_CONTRACT.md`
 - Short lifecycle rules: `docs/governance/MEDIA_STORAGE_LIFECYCLE.md`
-- Relocation discovery: `docs/governance/MEDIA_WORKBENCH_HOME_RELOCATION_DISCOVERY.md`
-- Relocation decision: `docs/governance/MEDIA_WORKBENCH_HOME_RELOCATION_DECISION.md`
-- Relocation election: `docs/governance/MEDIA_WORKBENCH_HOME_RELOCATION_ELECTION.md`
+- Relocation packets for the workbench-home move are historical and now live under the pre-2026-04-01 archive boundary.
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog
