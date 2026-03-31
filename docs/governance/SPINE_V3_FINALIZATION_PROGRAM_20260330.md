@@ -118,6 +118,22 @@ The continuity artifacts live under:
 
 The next subloop may use the repo and runtime state, but it must not depend on chat reconstruction.
 
+## Execution Discipline Correction
+
+Remaining finalization slices must not repeat the sloppy pattern of governed wave state wrapped around single-terminal manual execution.
+
+Correction rules:
+
+- every wave must declare whether it is genuinely delegated or explicitly `single_terminal_mode`
+- `single_terminal_mode` is an exception, not the default
+- execution and audit ownership must be assigned before the next reduction slice starts
+- manual wave-adoption fallback must be declared as residue up front if no governed adoption surface exists
+- if a required orchestration surface is missing, stop and fix the surface or cut scope; do not silently continue as if the engine already supports the step
+
+Trace authority for this correction:
+
+- `/Users/ronnyworks/code/.evidence/spine/reports/finalization/SPINE_V3_EXECUTION_DISCIPLINE_AND_SUBAGENT_ORCHESTRATION_TRACE_20260331.md`
+
 ## Program Subloops
 
 ### 1. Prefight And Election
