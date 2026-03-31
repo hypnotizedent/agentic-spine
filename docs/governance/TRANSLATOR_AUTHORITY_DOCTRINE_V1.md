@@ -3,14 +3,14 @@ status: authoritative
 owner: "@ronny"
 scope: translator-authority-doctrine
 version: 1.1
-updated: "2026-03-29"
+updated: "2026-03-31"
 decision_loop_id: LOOP-TRANSLATOR-DOCTRINE-CONSOLIDATION-20260324
 source_triangulation:
   - docs/governance/SPINE.md (controller lane, closure, and verify discipline)
   - docs/governance/SESSION_PROTOCOL.md (loop anchorage and floating-WIP prevention)
   - docs/governance/FINAL_SURFACES_CLOSURE_BRIEF_20260326.md (layer and end-state contract)
   - docs/governance/LOCAL_CONTROL_PLANE_CONTRACT.md (control-plane placement and entry surface)
-  - docs/governance/EXECUTION_NODE_SPEC.md (node 6/7 placement)
+  - ops/bindings/node.role.contract.yaml (live physical-node taxonomy and role semantics)
   - ops/bindings/translator.authority.contract.yaml (machine-evaluable boundary)
   - docs/governance/TRANSLATOR_AUTHORITY_UNIFICATION_DECISION.md (canonical-authority boundary)
   - docs/governance/TRANSLATOR_AUTHORITY_UNIFICATION_ELECTION.md (authorized implementation scope)
@@ -299,7 +299,8 @@ This preserves the separation: **translator is the membrane, wave.execute is the
 | `SESSION_PROTOCOL.md` | Defines loop anchorage and floating-WIP requirements referenced in this doctrine. |
 | `FINAL_SURFACES_CLOSURE_BRIEF_20260326.md` | Current layer and end-state contract for the spine execution boundary. |
 | `LOCAL_CONTROL_PLANE_CONTRACT.md` | Current control-plane placement and workstation entry-surface authority. |
-| `EXECUTION_NODE_SPEC.md` | Sibling spec. Execution Node is node 4/7 in this model. |
+| `ops/bindings/node.role.contract.yaml` | Current node taxonomy and role-semantics authority. |
+| `EXECUTION_NODE_SPEC.md` | Archived historical draft only. Not part of the live authority stack. |
 | `translator.authority.contract.yaml` | Machine-evaluable enforcement. MUST reference this doctrine as `doctrine_source`. |
 | `D422 gate` | Structural verification of translator isolation. |
 
