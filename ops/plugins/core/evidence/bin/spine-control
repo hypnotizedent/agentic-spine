@@ -38,6 +38,22 @@ OBSERVABILITY_CAPABILITIES = {
     "infra.core.slo.status",
     "observability.stack.status",
 }
+TRUST_CRITICAL_LOOP_PATTERNS: tuple[tuple[str, int], ...] = (
+    (r"\btrust[- ]critical\b", 8),
+    (r"\bclosure\b", 7),
+    (r"\breduc(?:e|tion|tive)\b", 7),
+    (r"\bsurviving\b", 6),
+    (r"\bplanner\b", 6),
+    (r"\bcontrol[- ]plane\b", 5),
+    (r"\bgovernance\b", 4),
+    (r"\bcontinuity\b", 4),
+    (r"\battestation\b", 4),
+    (r"\breceipt(?:s)?\b", 3),
+    (r"\bengine\b", 4),
+    (r"\bcanonical\b", 3),
+    (r"\bkernel\b", 3),
+    (r"\bl1\b", 6),
+)
 
 
 def utc_now() -> str:
@@ -197,6 +213,61 @@ def gap_numeric_id(value: str) -> int:
     return int(m.group(1)) if m else 999_999
 
 
+def loop_priority_rank(value: str) -> int:
+    return {"high": 0, "medium": 1, "low": 2}.get((value or "").strip().lower(), 9)
+
+
+def loop_signal_text(loop: dict[str, Any]) -> str:
+    parts = [
+        str(loop.get("loop_id", "")),
+        str(loop.get("scope", "")),
+        str(loop.get("objective", "")),
+        str(loop.get("next_action", "")),
+    ]
+    return " ".join(parts).strip().lower()
+
+
+def loop_planning_score(loop: dict[str, Any]) -> int:
+    score = 0
+    loop_id = str(loop.get("loop_id", "")).strip().upper()
+    scope = str(loop.get("scope", "")).strip().lower()
+    text = loop_signal_text(loop)
+
+    if loop_id.startswith("LOOP-SPINE-"):
+        score += 8
+    if scope == "spine":
+        score += 4
+    if str(loop.get("priority", "")).strip().lower() == "high":
+        score += 2
+
+    for pattern, weight in TRUST_CRITICAL_LOOP_PATTERNS:
+        if re.search(pattern, text):
+            score += weight
+
+    return score
+
+
+def is_trust_critical_loop(loop: dict[str, Any]) -> bool:
+    loop_id = str(loop.get("loop_id", "")).strip().upper()
+    scope = str(loop.get("scope", "")).strip().lower()
+    if not (loop_id.startswith("LOOP-SPINE-") or scope == "spine"):
+        return False
+    return loop_planning_score(loop) >= 12
+
+
+def sort_loops_for_planning(loops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        loops,
+        key=lambda loop: (
+            0 if is_trust_critical_loop(loop) else 1,
+            -loop_planning_score(loop),
+            loop_priority_rank(str(loop.get("priority", ""))),
+            str(loop.get("created_at_utc", "")),
+            str(loop.get("loop_id", "")),
+        ),
+    )
+
+
 def collect_open_loops() -> list[dict[str, Any]]:
     rc, out, _ = run_cmd([str(ROOT / "bin/ops"), "loops", "list", "--open"], cwd=ROOT)
     if rc != 0:
@@ -213,13 +284,17 @@ def collect_open_loops() -> list[dict[str, Any]]:
     for loop_id in open_ids:
         path = loop_dir / f"{loop_id}.scope.md"
         front = parse_frontmatter(path) if path.exists() else {}
+        created_at = parse_created_at(front, path).strftime("%Y-%m-%dT%H:%M:%SZ") if path.exists() else ""
         rows.append(
             {
                 "loop_id": loop_id,
                 "status": (front.get("status") or "open").strip().lower(),
                 "owner": front.get("owner", ""),
                 "priority": front.get("priority", ""),
+                "scope": front.get("scope", ""),
                 "objective": front.get("objective", ""),
+                "next_action": front.get("next_action", ""),
+                "created_at_utc": created_at,
                 "path": render_path_for_payload(path) if path.exists() else "",
             }
         )
@@ -1237,11 +1312,21 @@ def collect_tick_data(window_hours: int, fast_mode: bool = False) -> dict[str, A
 
 
 def derive_route_hint(loops: list[dict[str, Any]], gaps: list[dict[str, Any]]) -> tuple[str, str]:
+    if any(is_trust_critical_loop(loop) for loop in loops):
+        return "workbench", "control_plane_keyword"
+
     corpus_parts: list[str] = []
     for row in gaps:
         corpus_parts.extend([str(row.get("description", "")), str(row.get("parent_loop", "")), str(row.get("doc", ""))])
     for row in loops:
-        corpus_parts.extend([str(row.get("objective", "")), str(row.get("loop_id", ""))])
+        corpus_parts.extend(
+            [
+                str(row.get("objective", "")),
+                str(row.get("next_action", "")),
+                str(row.get("scope", "")),
+                str(row.get("loop_id", "")),
+            ]
+        )
     corpus = " ".join(corpus_parts).lower()
 
     matchers: list[tuple[str, str, str]] = [
@@ -1270,6 +1355,7 @@ def build_plan_payload(tick_payload: dict[str, Any]) -> dict[str, Any]:
     forge = data.get("forge", {})
     proposals = data.get("proposals", {})
     timeline = data.get("timeline", {})
+    planned_loops = sort_loops_for_planning(loops)
 
     actions: list[dict[str, Any]] = []
 
@@ -1290,6 +1376,22 @@ def build_plan_payload(tick_payload: dict[str, Any]) -> dict[str, Any]:
                 "route_target": route_target,
                 "execution_mode": "automated" if route_target.get("type") == "capability" else "delegated",
             }
+        )
+
+    focus_loop = next((loop for loop in planned_loops if is_trust_critical_loop(loop)), None)
+    if focus_loop:
+        loop_id = str(focus_loop.get("loop_id", "")).strip()
+        next_action = str(focus_loop.get("next_action", "")).strip()
+        next_action_note = f" Next action: {next_action}." if next_action else ""
+        add_action(
+            action_id=f"A00-loop-progress-{loop_id.lower()}",
+            priority="P0",
+            title=f"Advance trust-critical loop: {loop_id}",
+            reason=(
+                "Spine-scoped closure/reduction work is present and should outrank generic verify/progress churn."
+                f"{next_action_note}"
+            ),
+            route_target={"type": "capability", "capability": "loops.progress", "args": ["--loop", loop_id]},
         )
 
     if summary.get("open_gaps", 0) > 0:
@@ -1334,7 +1436,12 @@ def build_plan_payload(tick_payload: dict[str, Any]) -> dict[str, Any]:
                 },
             )
 
-    for idx, loop in enumerate(loops[:3], start=1):
+    loop_progress_candidates = [
+        loop
+        for loop in planned_loops
+        if str(loop.get("loop_id", "")).strip() != str((focus_loop or {}).get("loop_id", "")).strip()
+    ]
+    for idx, loop in enumerate(loop_progress_candidates[:3], start=1):
         loop_id = loop.get("loop_id", "")
         add_action(
             action_id=f"A1{idx}-loop-progress-{loop_id.lower()}",
@@ -1477,6 +1584,13 @@ def write_control_artifact(payload: dict[str, Any]) -> dict[str, str]:
 
 def priority_rank(priority: str) -> int:
     return {"P0": 0, "P1": 1, "P2": 2}.get((priority or "").strip().upper(), 9)
+
+
+def action_sort_key(row: dict[str, Any]) -> tuple[int, str]:
+    return (
+        priority_rank(str(row.get("priority", ""))),
+        str(row.get("action_id", "")),
+    )
 
 
 def generate_task_id() -> str:
@@ -1805,10 +1919,15 @@ def run_control_cycle(
     actions = plan_payload.get("data", {}).get("actions", [])
     max_priority_rank = priority_rank(max_priority)
 
-    selected = [
-        row.get("action_id", "")
+    eligible_actions = [
+        row
         for row in actions
         if priority_rank(str(row.get("priority", ""))) <= max_priority_rank
+    ]
+    eligible_actions.sort(key=action_sort_key)
+    selected = [
+        str(row.get("action_id", "")).strip()
+        for row in eligible_actions
     ]
     selected = [x for x in selected if x][: max(1, max_actions)]
 
