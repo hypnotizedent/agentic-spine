@@ -128,6 +128,18 @@ env SPINE_STATE="$STATE" python3 "$BRIDGE" query --id LOOP-TEST-CONTINUITY-20260
 assert_eq "$(json_eval "$QUERY_JSON" "payload['next_action']")" "Resume the proof from loop continuity, not chat memory." "bootstrap preserves existing continuity state"
 assert_eq "$(json_eval "$QUERY_JSON" "'/tmp/continuity-proof.md' in payload['evidence_refs']")" "True" "bootstrap preserves existing evidence refs"
 
+FALLBACK_JSON="$TMPDIR_BASE/fallback.json"
+env \
+  SPINE_STATE="$STATE" \
+  SPINE_CAP_RUN_KEY="CAP-20260330-TEST__loops.continuity.update__Rloop456" \
+  "$UPDATE" \
+    --loop-id LOOP-TEST-CONTINUITY-20260330 \
+    --next-action "Fallback controller role still allows governed continuity." \
+    --json > "$FALLBACK_JSON"
+
+assert_eq "$(json_eval "$FALLBACK_JSON" "payload['loop_id']")" "LOOP-TEST-CONTINUITY-20260330" "continuity update succeeds with controller-role fallback"
+assert_eq "$(json_eval "$FALLBACK_JSON" "payload['next_action']")" "Fallback controller role still allows governed continuity." "controller-role fallback preserves continuity mutation"
+
 echo ""
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"

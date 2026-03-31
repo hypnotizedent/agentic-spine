@@ -29,6 +29,7 @@ import json
 import os
 import sys
 from pathlib import Path
+import yaml
 
 # Resolve lib path relative to this script.
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -44,6 +45,31 @@ import loops_sql_authority as lsa
 MUTATING_COMMANDS = frozenset({"upsert", "close", "continuity"})
 READ_COMMANDS = frozenset({"query", "list", "bootstrap", "project", "parity"})
 CONTROL_TERMINAL_ROLE = "SPINE-CONTROL-01"
+
+
+def resolve_controller_terminal_role() -> str:
+    contract_path = resolve_root() / "ops" / "bindings" / "terminal.role.contract.yaml"
+    if contract_path.exists():
+        try:
+            contract = yaml.safe_load(contract_path.read_text(encoding="utf-8")) or {}
+            roles = contract.get("roles") or []
+            for entry in roles:
+                if not isinstance(entry, dict):
+                    continue
+                if str(entry.get("id", "")).strip() == CONTROL_TERMINAL_ROLE:
+                    return CONTROL_TERMINAL_ROLE
+            control_roles = [
+                entry for entry in roles
+                if isinstance(entry, dict) and str(entry.get("type", "")).strip() == "control-plane"
+            ]
+            control_roles.sort(key=lambda item: int(item.get("sort_order", 999999)))
+            if control_roles:
+                fallback_id = str(control_roles[0].get("id", "")).strip()
+                if fallback_id:
+                    return fallback_id
+        except Exception:
+            pass
+    return CONTROL_TERMINAL_ROLE
 
 
 def check_mutation_ceremony(
@@ -95,10 +121,17 @@ def check_mutation_ceremony(
         os.environ.get("OPS_TERMINAL_ROLE", "").strip()
         or os.environ.get("SPINE_TERMINAL_ROLE", "").strip()
     )
-    if terminal_role != CONTROL_TERMINAL_ROLE:
+    controller_role = resolve_controller_terminal_role()
+    if not terminal_role and run_key:
+        terminal_role = controller_role
+        print(
+            f"mutation-ceremony: terminal-role fallback ({terminal_role})",
+            file=sys.stderr,
+        )
+    if terminal_role != controller_role:
         print(
             "MUTATION BLOCKED: loops-authority-bridge requires controller terminal "
-            f"role {CONTROL_TERMINAL_ROLE} for mutating commands "
+            f"role {controller_role} for mutating commands "
             f"(got {terminal_role or 'unset'})",
             file=sys.stderr,
         )

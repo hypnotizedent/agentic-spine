@@ -596,7 +596,26 @@ def _parse_scope_frontmatter(text: str) -> dict[str, Any] | None:
     try:
         return yaml.safe_load(frontmatter_text)
     except yaml.YAMLError:
-        return None
+        fallback: dict[str, Any] = {}
+        for raw_line in frontmatter_text.splitlines():
+            line = raw_line.rstrip()
+            if not line or line.lstrip().startswith("#"):
+                continue
+            key, sep, value = line.partition(":")
+            if not sep:
+                return None
+            key = key.strip()
+            if not key:
+                return None
+            value_text = value.strip()
+            if not value_text:
+                fallback[key] = ""
+                continue
+            try:
+                fallback[key] = yaml.safe_load(value_text)
+            except yaml.YAMLError:
+                fallback[key] = value_text
+        return fallback or None
 
 
 def bootstrap_from_scope_files(conn: sqlite3.Connection, scopes_dir: Path) -> int:
@@ -627,13 +646,23 @@ def bootstrap_from_scope_files(conn: sqlite3.Connection, scopes_dir: Path) -> in
     wm_row = conn.execute(
         "SELECT sha256 FROM loops_projection_watermarks WHERE surface = 'scope_files'"
     ).fetchone()
-    if count > 0 and wm_row is not None and wm_row["sha256"] == combined_hash:
-        return 0
-
     existing_ids = {
         str(row["loop_id"]).strip()
         for row in conn.execute("SELECT loop_id FROM loops").fetchall()
     }
+    parsed_ids = {
+        str(fm.get("loop_id", "")).strip()
+        for _, fm in parsed
+        if str(fm.get("loop_id", "")).strip()
+    }
+
+    if (
+        count > 0
+        and wm_row is not None
+        and wm_row["sha256"] == combined_hash
+        and parsed_ids.issubset(existing_ids)
+    ):
+        return 0
 
     imported = 0
     for sf, fm in parsed:
@@ -653,6 +682,7 @@ def bootstrap_from_scope_files(conn: sqlite3.Connection, scopes_dir: Path) -> in
             actor="loops.authority.bootstrap",
             payload={"source": str(sf)},
         )
+        existing_ids.add(loop_id)
         imported += 1
 
     update_watermark(conn, "scope_files", combined_hash)
