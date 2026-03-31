@@ -4957,6 +4957,17 @@ try:
         for rk in evidence_refs.get("run_key_refs", []) if isinstance(evidence_refs.get("run_key_refs"), list) else []:
             if isinstance(rk, str) and rk:
                 verify_results.append(rk)
+    for d in dispatches:
+        if not isinstance(d, dict):
+            continue
+        expected = d.get("expected_output_refs") if isinstance(d.get("expected_output_refs"), dict) else {}
+        verify_ref = str(expected.get("verify_ref", "")).strip() if expected else ""
+        if verify_ref and _run_key_matches(verify_ref):
+            verify_results.append(verify_ref)
+        if str(d.get("lane", "")).strip() == "audit":
+            rk = d.get("run_key")
+            if isinstance(rk, str) and rk and _run_key_matches(rk):
+                verify_results.append(rk)
     if not verify_results:
         dod_violations.append("DoD missing verify results (no run keys in watcher checks or receipts)")
 
