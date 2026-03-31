@@ -14,7 +14,7 @@ It exists so the system can read, interpret, and execute the V3 shift without re
 All Desktop note folders imported on 2026-03-22 are consolidated here so other agents can use one canonical source instead of reading separate note dumps.
 This file was rechecked against all 16 Desktop note folders on 2026-03-22 so late-arriving constraints and packet details do not remain stranded outside the spine.
 
-Derived execution audit: [../reference/audits/SPINE_V3_BOOTSTRAP_ALIGNMENT_AUDIT_20260322.md](../reference/audits/SPINE_V3_BOOTSTRAP_ALIGNMENT_AUDIT_20260322.md)
+Derived execution audit: [../../audits/SPINE_V3_BOOTSTRAP_ALIGNMENT_AUDIT_20260322.md](../../audits/SPINE_V3_BOOTSTRAP_ALIGNMENT_AUDIT_20260322.md)
 
 ## Canonical Correction
 
