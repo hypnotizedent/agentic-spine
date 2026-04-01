@@ -1,19 +1,22 @@
 ---
-status: authoritative
+status: historical_non_authoritative
 owner: "@ronny"
 last_verified: 2026-03-23
 verification_method: governed launcher contract + worktree lifecycle audit
 scope: macbook-control-plane
+note: "Historical compatibility surface. Device identity remains canonical in docs/governance/DEVICE_IDENTITY_SSOT.md; deeper workstation mechanics live in /Users/ronnyworks/code/workbench/dotfiles/macbook/README.md."
 ---
 
 # MACBOOK SSOT
+
+> Historical compatibility surface. Device identity remains canonical in `docs/governance/DEVICE_IDENTITY_SSOT.md`. Deeper workstation mechanics live in `/Users/ronnyworks/code/workbench/dotfiles/macbook/README.md`.
 
 This is the spine-facing fact surface for the operator MacBook.
 
 Authority boundary:
 - Identity, host naming, and Tailscale address remain canonical in `docs/governance/DEVICE_IDENTITY_SSOT.md`.
 - Managed desktop configs and deeper operator mechanics live in `/Users/ronnyworks/code/workbench/dotfiles/macbook/README.md`.
-- This spine doc exists so agent read surfaces and fact locks point at a real governed file instead of a dead path.
+- This spine doc is retained only as a historical compatibility note. Live identity truth remains in `docs/governance/DEVICE_IDENTITY_SSOT.md`, and deeper workstation mechanics live in `/Users/ronnyworks/code/workbench/dotfiles/macbook/README.md`.
 
 ## Canonical Facts
 
