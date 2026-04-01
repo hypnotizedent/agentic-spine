@@ -1,11 +1,13 @@
 ---
-status: authoritative
+status: historical
 owner: "@ronny"
 last_verified: 2026-03-23
 scope: agent-governance-brief
 ---
 
 # Agent Governance Brief
+
+Historical only. Live agent-entry authority is `docs/governance/SPINE.md` plus `docs/governance/SESSION_PROTOCOL.md`.
 
 > Compatibility surface. Canonical authority now lives in `docs/governance/SPINE.md` and `docs/governance/SESSION_PROTOCOL.md`.
 > Consumed by: session-entry surfaces via `spine.context`.

@@ -1,5 +1,5 @@
 ---
-status: draft
+status: historical
 owner: "@ronny"
 last_verified: 2026-03-26
 scope: capability-layer-visibility-classification
@@ -8,6 +8,8 @@ runtime_artifact: /Users/ronnyworks/code/.runtime/spine/state/domain-state/spine
 ---
 
 # Capability Layer And Visibility Classification 2026-03-26
+
+Historical planning snapshot only. It records the 2026-03-26 classification lens and does not define current live authority.
 
 This document defines the destination lens for the current registry. It does not mutate the registry. It does not approve deletions. It defines where authority belongs and what agents should be allowed to discover.
 

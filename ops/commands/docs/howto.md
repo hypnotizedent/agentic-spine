@@ -39,7 +39,7 @@ Route "I need to..." questions to the correct workflow.
 4. Run `/verify` to confirm
 
 ### "I need to modify a governance doc"
-1. Check if D65 sync is needed (AGENT_GOVERNANCE_BRIEF.md → AGENTS.md/CLAUDE.md)
+1. Check D65 parity for agent entry surfaces, but treat `docs/governance/SPINE.md` and `docs/governance/SESSION_PROTOCOL.md` as the live authority; `AGENT_GOVERNANCE_BRIEF.md` is historical compatibility only
 2. Check D58 freshness (update `last_verified` dates)
 3. Check D84 index (register in `docs/governance/_index.yaml`)
 4. Run `/verify` to confirm

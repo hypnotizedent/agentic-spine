@@ -1,11 +1,13 @@
 ---
-status: authoritative
+status: historical
 owner: "@ronny"
 last_verified: 2026-03-19
 scope: docker-control-plane-posture
 ---
 
 # Docker Control Plane Decision
+
+Historical only. This records a deferred control-plane decision and is not a live authority surface for current Docker runtime operation.
 
 Purpose: freeze the estate Docker control-plane posture so the future target is explicit without pretending adoption already happened.
 
