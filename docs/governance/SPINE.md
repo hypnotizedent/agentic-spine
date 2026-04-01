@@ -290,7 +290,7 @@ Loop closeout ceremony:
   - `governance_docs_max=35`
   - `legacy_scripts_max=0`
 - Required domain docs:
-  - `aof`, `backup`, `communications`, `core`, `finance`, `home`, `hygiene-weekly`, `immich`, `infra`, `loop_gap`, `media`, `microsoft`, `mint`, `n8n`, `observability`, `proxmox-network`, `rag`, `secrets`, `surveillance`, `tax-legal`, `workbench`
+  - `aof`, `backup`, `communications`, `core`, `finance`, `home`, `immich`, `infra`, `loop_gap`, `media`, `microsoft`, `mint`, `n8n`, `observability`, `proxmox-network`, `rag`, `secrets`, `surveillance`, `tax-legal`, `workbench`
 - Change budget:
   - `verify max_net_new=0`
   - `governance max_net_new=0`
