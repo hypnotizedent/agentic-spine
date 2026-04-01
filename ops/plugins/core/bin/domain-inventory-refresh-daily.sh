@@ -20,7 +20,7 @@ echo "[domain-inventory-refresh-daily] worktree_identity=${OPS_WORKTREE_IDENTITY
 
 spine_job_run \
   "domain-inventory-refresh-daily:domain-inventory-refresh" \
-  "$REFRESH_CMD" --once --apply
+  "$REFRESH_CMD" --once --check
 
 echo "[domain-inventory-refresh-daily] autonomous ledger reconcile enabled (media/ha/network)"
 
