@@ -18,6 +18,10 @@ Usage:
     [--base-sha <sha>] \
     [--lanes <lane1,lane2,...>] \
     [--sequence <lane1,lane2,...>] \
+    [--lane-agent <lane:value>]... \
+    [--lane-worker <lane:value>]... \
+    [--lane-route-target <lane:value>]... \
+    [--lane-branch <lane:value>]... \
     [--allow <lane:glob>]... \
     [--forbid <glob>]... \
     [--check <lane:command>]... \
@@ -39,6 +43,10 @@ allow_items=()
 forbid_items=()
 check_items=()
 related_repos=()
+lane_agent_items=()
+lane_worker_items=()
+lane_route_target_items=()
+lane_branch_items=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -50,6 +58,10 @@ while [[ $# -gt 0 ]]; do
     --lanes) LANES_CSV="${2:-}"; shift 2 ;;
     --sequence) SEQUENCE_CSV="${2:-}"; shift 2 ;;
     --sequence-mode) SEQUENCE_MODE="${2:-strict}"; shift 2 ;;
+    --lane-agent) lane_agent_items+=("${2:-}"); shift 2 ;;
+    --lane-worker) lane_worker_items+=("${2:-}"); shift 2 ;;
+    --lane-route-target) lane_route_target_items+=("${2:-}"); shift 2 ;;
+    --lane-branch) lane_branch_items+=("${2:-}"); shift 2 ;;
     --allow) allow_items+=("${2:-}"); shift 2 ;;
     --forbid) forbid_items+=("${2:-}"); shift 2 ;;
     --check) check_items+=("${2:-}"); shift 2 ;;
@@ -127,6 +139,8 @@ for lane in "${lanes[@]:-}"; do
   yq e -i ".lanes.\"$lane\".id = \"$lane\"" "$manifest"
   yq e -i ".lanes.\"$lane\".status = \"open\"" "$manifest"
   yq e -i ".lanes.\"$lane\".depends_on = (.lanes.\"$lane\".depends_on // [])" "$manifest"
+  yq e -i ".lanes.\"$lane\".worker = (.lanes.\"$lane\".worker // \"\")" "$manifest"
+  yq e -i ".lanes.\"$lane\".branch = (.lanes.\"$lane\".branch // \"\")" "$manifest"
   yq e -i ".lanes.\"$lane\".agent = (.lanes.\"$lane\".agent // \"\")" "$manifest"
   yq e -i ".lanes.\"$lane\".route_target = (.lanes.\"$lane\".route_target // \"\")" "$manifest"
   yq e -i ".lanes.\"$lane\".produces = (.lanes.\"$lane\".produces // [])" "$manifest"
@@ -150,6 +164,42 @@ elif [[ -n "$LANES_CSV" ]]; then
     yq e -i ".sequence += [\"$lane\"]" "$manifest"
   done
 fi
+
+for item in "${lane_agent_items[@]}"; do
+  lane="${item%%:*}"
+  value="${item#*:}"
+  [[ -n "$lane" && -n "$value" && "$lane" != "$value" ]] || orchestration_fail "--lane-agent must be lane:value"
+  orchestration_assert_id "$lane" "lane-agent lane"
+  yq e -e ".lanes | has(\"$lane\")" "$manifest" >/dev/null || orchestration_fail "lane-agent references unknown lane: $lane"
+  LANE_KEY="$lane" VALUE="$value" yq e -i '.lanes[strenv(LANE_KEY)].agent = strenv(VALUE)' "$manifest"
+done
+
+for item in "${lane_worker_items[@]}"; do
+  lane="${item%%:*}"
+  value="${item#*:}"
+  [[ -n "$lane" && -n "$value" && "$lane" != "$value" ]] || orchestration_fail "--lane-worker must be lane:value"
+  orchestration_assert_id "$lane" "lane-worker lane"
+  yq e -e ".lanes | has(\"$lane\")" "$manifest" >/dev/null || orchestration_fail "lane-worker references unknown lane: $lane"
+  LANE_KEY="$lane" VALUE="$value" yq e -i '.lanes[strenv(LANE_KEY)].worker = strenv(VALUE)' "$manifest"
+done
+
+for item in "${lane_route_target_items[@]}"; do
+  lane="${item%%:*}"
+  value="${item#*:}"
+  [[ -n "$lane" && -n "$value" && "$lane" != "$value" ]] || orchestration_fail "--lane-route-target must be lane:value"
+  orchestration_assert_id "$lane" "lane-route-target lane"
+  yq e -e ".lanes | has(\"$lane\")" "$manifest" >/dev/null || orchestration_fail "lane-route-target references unknown lane: $lane"
+  LANE_KEY="$lane" VALUE="$value" yq e -i '.lanes[strenv(LANE_KEY)].route_target = strenv(VALUE)' "$manifest"
+done
+
+for item in "${lane_branch_items[@]}"; do
+  lane="${item%%:*}"
+  value="${item#*:}"
+  [[ -n "$lane" && -n "$value" && "$lane" != "$value" ]] || orchestration_fail "--lane-branch must be lane:value"
+  orchestration_assert_id "$lane" "lane-branch lane"
+  yq e -e ".lanes | has(\"$lane\")" "$manifest" >/dev/null || orchestration_fail "lane-branch references unknown lane: $lane"
+  LANE_KEY="$lane" VALUE="$value" yq e -i '.lanes[strenv(LANE_KEY)].branch = strenv(VALUE)' "$manifest"
+done
 
 for item in "${allow_items[@]}"; do
   lane="${item%%:*}"

@@ -139,6 +139,41 @@ _set_fm_field() {
   mv "$tmp_file" "$file"
 }
 
+_scope_file_to_json() {
+  local file="$1"
+  python3 - "$file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+parts = text.split("---", 2)
+if len(parts) < 3:
+    raise SystemExit(f"frontmatter missing in {path}")
+frontmatter = yaml.safe_load(parts[1]) or {}
+print(json.dumps(frontmatter, separators=(",", ":")))
+PY
+}
+
+_sync_shared_authority() {
+  local file="$1"
+  if [[ -z "${SPINE_CAP_RUN_KEY:-}" ]]; then
+    echo "  shared_authority: skipped (no governed run key)" >&2
+    return 0
+  fi
+
+  local loop_json
+  loop_json="$(_scope_file_to_json "$file")"
+  "$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge" upsert \
+    --json "$loop_json" \
+    --actor "planning.horizon.set" \
+    --reason "Sync planning.horizon.set loop status/horizon/readiness into SQLite authority." \
+    >/dev/null
+}
+
 # Boundary model normalization:
 # - deferred horizons must not remain status=active/open
 # - horizon=now promotes planned -> active
@@ -208,6 +243,8 @@ if [[ -n "$DEPENDS_ON" ]]; then
   _set_fm_field "$SCOPE_FILE" "depends_on_loop" "$DEPENDS_ON"
 fi
 
+_sync_shared_authority "$SCOPE_FILE"
+
 echo "UPDATED: $LOOP_ID"
 echo "  status: $normalized_status"
 echo "  horizon: $HORIZON"
@@ -217,5 +254,8 @@ echo "  horizon: $HORIZON"
 [[ -n "$DEPENDS_ON" ]] && echo "  depends_on_loop: $DEPENDS_ON"
 if [[ "$stale_closed_promoted" -eq 1 ]]; then
   echo "  stale_closed_promoted: true"
+fi
+if [[ -n "${SPINE_CAP_RUN_KEY:-}" ]]; then
+  echo "  shared_authority: synced"
 fi
 echo "File: $SCOPE_FILE"

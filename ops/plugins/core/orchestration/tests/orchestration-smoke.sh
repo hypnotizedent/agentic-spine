@@ -490,6 +490,58 @@ case_manifest_lane_status_fallback() {
   pass_case "manifest lane status fallback (no artifacts)"
 }
 
+case_lane_assignment_manifest_fields() {
+  local repo base manifest
+  repo="$(make_repo)"
+  base="$(git -C "$repo" rev-parse HEAD)"
+
+  run_cap "$repo" "$BIN_DIR/orchestration-loop-open" \
+    --loop-id LOOP-T-LANE-ASSIGN \
+    --apply-owner "$USER" \
+    --repo "$repo" \
+    --base-sha "$base" \
+    --lanes execution,audit,control \
+    --sequence execution,audit,control \
+    --lane-agent "execution:agent-exec" \
+    --lane-worker "execution:terminal-exec" \
+    --lane-route-target "execution:existing-agent:exec-id" \
+    --lane-branch "execution:LOOP-T-LANE-ASSIGN/execution" \
+    --lane-agent "audit:agent-audit" \
+    --lane-worker "audit:terminal-audit" \
+    --lane-route-target "audit:existing-agent:audit-id" \
+    --lane-agent "control:agent-control" \
+    --lane-worker "control:terminal-control" >/dev/null
+
+  manifest="$repo/mailroom/state/orchestration/LOOP-T-LANE-ASSIGN/manifest.yaml"
+
+  [[ "$(yq e -r '.lanes.execution.agent' "$manifest")" == "agent-exec" ]] || {
+    fail_case "lane assignment manifest fields" "execution.agent missing"
+    return 1
+  }
+  [[ "$(yq e -r '.lanes.execution.worker' "$manifest")" == "terminal-exec" ]] || {
+    fail_case "lane assignment manifest fields" "execution.worker missing"
+    return 1
+  }
+  [[ "$(yq e -r '.lanes.execution.route_target' "$manifest")" == "existing-agent:exec-id" ]] || {
+    fail_case "lane assignment manifest fields" "execution.route_target missing"
+    return 1
+  }
+  [[ "$(yq e -r '.lanes.execution.branch' "$manifest")" == "LOOP-T-LANE-ASSIGN/execution" ]] || {
+    fail_case "lane assignment manifest fields" "execution.branch missing"
+    return 1
+  }
+  [[ "$(yq e -r '.lanes.audit.agent' "$manifest")" == "agent-audit" ]] || {
+    fail_case "lane assignment manifest fields" "audit.agent missing"
+    return 1
+  }
+  [[ "$(yq e -r '.lanes.control.worker' "$manifest")" == "terminal-control" ]] || {
+    fail_case "lane assignment manifest fields" "control.worker missing"
+    return 1
+  }
+
+  pass_case "lane assignment manifest fields"
+}
+
 case_wrong_branch_rejected
 case_base_sha_mismatch_rejected
 case_forbidden_file_rejected
@@ -500,6 +552,7 @@ case_happy_path_validate_integrate
 case_related_repo_dirty_blocks_integrate
 case_related_repo_clean_integrate_passes
 case_manifest_lane_status_fallback
+case_lane_assignment_manifest_fields
 
 echo ""
 echo "tests_passed: $pass_count"

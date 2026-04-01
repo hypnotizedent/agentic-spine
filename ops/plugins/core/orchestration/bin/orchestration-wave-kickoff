@@ -139,12 +139,28 @@ created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 declare -a lane_agents=()
 declare -a lane_branches=()
 declare -a lane_worktrees=()
+declare -a lane_workers=()
+declare -a lane_route_targets=()
 
 for lane in "${lanes[@]}"; do
   lane_lower="$(printf '%s' "$lane" | tr '[:upper:]' '[:lower:]')"
-  branch="$LOOP_ID/$lane_lower"
-  lane_agent="lane-$lane_lower"
+  branch="$(yq e -r ".lanes.\"$lane\".branch // \"\"" "$manifest")"
+  [[ "$branch" == "null" ]] && branch=""
+  [[ -n "$branch" ]] || branch="$LOOP_ID/$lane_lower"
+  lane_agent="$(yq e -r ".lanes.\"$lane\".agent // \"\"" "$manifest")"
+  [[ "$lane_agent" == "null" ]] && lane_agent=""
+  [[ -n "$lane_agent" ]] || lane_agent="lane-$lane_lower"
+  lane_worker="$(yq e -r ".lanes.\"$lane\".worker // \"\"" "$manifest")"
+  [[ "$lane_worker" == "null" ]] && lane_worker=""
+  [[ -n "$lane_worker" ]] || lane_worker="$OWNER_TERMINAL"
+  lane_route_target="$(yq e -r ".lanes.\"$lane\".route_target // \"\"" "$manifest")"
+  [[ "$lane_route_target" == "null" ]] && lane_route_target=""
   worktree="${ENFORCED_PREFIX}${wave_leaf}-${lane}"
+
+  yq e -i ".lanes.\"$lane\".branch = \"$branch\"" "$manifest"
+  yq e -i ".lanes.\"$lane\".agent = \"$lane_agent\"" "$manifest"
+  yq e -i ".lanes.\"$lane\".worker = \"$lane_worker\"" "$manifest"
+  yq e -i ".lanes.\"$lane\".route_target = \"$lane_route_target\"" "$manifest"
 
   if ! git -C "$REPO_PATH" show-ref --verify --quiet "refs/heads/$branch"; then
     git -C "$REPO_PATH" branch "$branch" "$BASE_BRANCH"
@@ -154,7 +170,7 @@ for lane in "${lanes[@]}"; do
     --loop-id "$LOOP_ID" \
     --lane "$lane" \
     --branch "$branch" \
-    --worker "$OWNER_TERMINAL" \
+    --worker "$lane_worker" \
     --note "kickoff-generated" >/dev/null
 
   terminal_entry_args=(
@@ -173,6 +189,8 @@ for lane in "${lanes[@]}"; do
   lane_agents+=("$lane_agent")
   lane_branches+=("$branch")
   lane_worktrees+=("$worktree")
+  lane_workers+=("$lane_worker")
+  lane_route_targets+=("$lane_route_target")
 done
 
 # Coordinator lock claim (main branch owner) for orchestration control-plane operations.
@@ -202,12 +220,18 @@ YAML
 for i in "${!lanes[@]}"; do
   lane="${lanes[$i]}"
   lane_agent="${lane_agents[$i]}"
+  lane_route_target="${lane_route_targets[$i]}"
   cat >> "$packet_file" <<YAML
   - wave_id: "W1-$lane"
     objective: "Execute lane $lane deliverable for $LOOP_ID"
     subagents: ["$lane_agent"]
     depends_on: []
 YAML
+  if [[ -n "$lane_route_target" ]]; then
+    cat >> "$packet_file" <<YAML
+    route_target: "$lane_route_target"
+YAML
+  fi
 done
 
 cat >> "$packet_file" <<'YAML'
@@ -216,11 +240,12 @@ subagent_allocation:
 YAML
 
 for i in "${!lanes[@]}"; do
+  lane="${lanes[$i]}"
   lane_agent="${lane_agents[$i]}"
   branch="${lane_branches[$i]}"
   cat >> "$packet_file" <<YAML
   - agent_id: "$lane_agent"
-    role: "$lane_agent"
+    role: "${lane,,}"
     assigned_gaps: []
     worktree_branch: "$branch"
 YAML
@@ -279,9 +304,10 @@ YAML
 
 for i in "${!lanes[@]}"; do
   lane="${lanes[$i]}"
+  lane_worker="${lane_workers[$i]}"
   cat >> "$packet_file" <<YAML
   - lane_id: "$lane"
-    owner_terminal: "$OWNER_TERMINAL"
+    owner_terminal: "$lane_worker"
     lane_status: DISPATCHED
     stub_evidence_ref: ""
     updated_at_utc: "$created_at"
@@ -315,6 +341,8 @@ for i in "${!lanes[@]}"; do
   lane_agent="${lane_agents[$i]}"
   branch="${lane_branches[$i]}"
   worktree="${lane_worktrees[$i]}"
+  lane_worker="${lane_workers[$i]}"
+  lane_route_target="${lane_route_targets[$i]}"
   prompt_file="$prompts_dir/${lane}.prompt.md"
 
   cat > "$prompt_file" <<PROMPT
@@ -337,10 +365,18 @@ git status --short --branch
 
 - lane: $lane
 - agent_id: $lane_agent
+- owner: $lane_worker
 - branch: $branch
 - worktree: $worktree
 - packet: $packet_file
 - lock_claim: $loop_dir/locks/$lane.lock
+PROMPT
+  if [[ -n "$lane_route_target" ]]; then
+    cat >> "$prompt_file" <<PROMPT
+- route_target: $lane_route_target
+PROMPT
+  fi
+  cat >> "$prompt_file" <<'PROMPT'
 
 Execute only within this lane worktree/branch. Report receipt run keys and changed file list for integration sequencing.
 PROMPT
