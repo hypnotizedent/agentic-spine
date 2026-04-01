@@ -1,13 +1,16 @@
 ---
-status: authoritative
+status: historical_non_authoritative
 owner: "@ronny"
 last_verified: 2026-03-22
 scope: synology-storage-audit
 version: 1.4
 loop: LOOP-STORAGE-SCAFFOLD-CANONICALIZATION-20260322
+note: "Historical compatibility narrative only. Current machine authority lives in ops/bindings/synology918.storage.manifest.yaml, with supporting live bindings in ops/bindings/storage.scaffold.authority.yaml and ops/bindings/home.storage.map.yaml."
 ---
 
 # Synology DS918+ Storage Manifest v1
+
+> Historical compatibility narrative only. Current machine authority lives in `ops/bindings/synology918.storage.manifest.yaml`, with supporting live bindings in `ops/bindings/storage.scaffold.authority.yaml` and `ops/bindings/home.storage.map.yaml`.
 
 **Purpose**: describe the Synology home plane through the same boring storage scaffold semantics used for md1400, so agents do not rediscover stale backup or personal-data assumptions.
 
