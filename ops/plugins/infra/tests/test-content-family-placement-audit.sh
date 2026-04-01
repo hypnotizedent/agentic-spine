@@ -166,7 +166,8 @@ lifecycle_bindings:
           - pve:/md1400/archive/media (canonical cold archive root)
 YAML
 
-cat > "$tmpdir/docs/governance/MEDIA_STORAGE_CONTRACT.md" <<'MD'
+mkdir -p "$tmpdir/ops/archive/pre-2026-04-01-spine/docs/governance"
+cat > "$tmpdir/ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_CONTRACT.md" <<'MD'
 # Media Storage Contract
 
 Canonical archive roots:

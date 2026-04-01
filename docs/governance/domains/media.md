@@ -30,9 +30,9 @@ Parent loop: `LOOP-MEDIA-SPLIT-AUTHORITY-CANONICALIZATION-20260322`
 
 ## Governance Contracts (spine-owned)
 
-- Placement/lifecycle: `docs/governance/MEDIA_STORAGE_CONTRACT.md`
-- Short lifecycle rules: `docs/governance/MEDIA_STORAGE_LIFECYCLE.md`
-- Relocation packets for the workbench-home move are historical and now live under the pre-2026-04-01 archive boundary.
+- Current placement authority: `ops/bindings/domains/media/media.path.authority.contract.yaml`
+- Current quality/policy authority: `ops/bindings/domains/media/media.quality.policy.yaml`
+- Historical placement/lifecycle docs: `ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_CONTRACT.md` and `ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_LIFECYCLE.md`
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog

@@ -1,5 +1,5 @@
 ---
-status: authoritative
+status: superseded_historical
 owner: "@ronny"
 last_verified: 2026-02-25
 scope: secrets-boundary

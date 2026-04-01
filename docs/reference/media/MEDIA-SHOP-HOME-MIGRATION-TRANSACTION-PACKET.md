@@ -2,8 +2,8 @@
 status: superseded_historical
 last_verified: 2026-03-20
 superseded_by:
-  - docs/governance/MEDIA_STORAGE_CONTRACT.md
-  - docs/governance/MEDIA_STORAGE_LIFECYCLE.md
+  - ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_CONTRACT.md
+  - ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_LIFECYCLE.md
 ---
 
 # Media Shop-to-Home Migration Transaction Packet

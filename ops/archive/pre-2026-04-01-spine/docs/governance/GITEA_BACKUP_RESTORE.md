@@ -1,8 +1,10 @@
 ---
-status: authoritative
+status: historical_non_authoritative
 owner: "@ronny"
-last_verified: 2026-03-08
+last_verified: 2026-04-01
 scope: app-backup-restore
+archived_from: docs/governance/GITEA_BACKUP_RESTORE.md
+note: Historical copy retained after archiving. This file is non-live.
 ---
 
 # Gitea Backup + Restore (App-Level)

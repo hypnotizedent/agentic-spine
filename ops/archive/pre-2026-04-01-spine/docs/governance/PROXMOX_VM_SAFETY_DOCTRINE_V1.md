@@ -1,7 +1,9 @@
 ---
-status: authoritative
+status: historical_non_authoritative
 owner: "@ronny"
-last_verified: 2026-03-08
+last_verified: 2026-04-01
+archived_from: docs/governance/PROXMOX_VM_SAFETY_DOCTRINE_V1.md
+note: Historical copy retained after archiving. This file is non-live.
 scope: proxmox-vm-safety-doctrine
 version: 1.0
 ---
@@ -57,7 +59,7 @@ This doctrine exists to stop that drift class.
 
 ### 4. Operator Workflow Authority
 
-- This doctrine and `docs/governance/PROXMOX_VM_OPERATOR_CHECKLIST.md` are the canonical operator surfaces.
+- This doctrine and `ops/archive/pre-2026-04-01-spine/docs/governance/PROXMOX_VM_OPERATOR_CHECKLIST.md` are the historical operator surfaces.
 - Thin domain pages and workbench scripts are reference only unless they explicitly defer to this doctrine.
 
 ---
@@ -311,7 +313,7 @@ An exception is a deliberate deviation from the default path.
 
 ## Operator Checklist
 
-See companion document: `docs/governance/PROXMOX_VM_OPERATOR_CHECKLIST.md`
+See companion document: `ops/archive/pre-2026-04-01-spine/docs/governance/PROXMOX_VM_OPERATOR_CHECKLIST.md`
 
 ---
 
@@ -330,8 +332,8 @@ See companion document: `docs/governance/PROXMOX_VM_OPERATOR_CHECKLIST.md`
 
 ## Governance State
 
-- **Canonical Home**: `docs/governance/PROXMOX_VM_SAFETY_DOCTRINE_V1.md`
-- **Operator Workflow**: `docs/governance/PROXMOX_VM_OPERATOR_CHECKLIST.md`
+- **Historical Home**: `ops/archive/pre-2026-04-01-spine/docs/governance/PROXMOX_VM_SAFETY_DOCTRINE_V1.md`
+- **Operator Workflow**: `ops/archive/pre-2026-04-01-spine/docs/governance/PROXMOX_VM_OPERATOR_CHECKLIST.md`
 - **Inventory Authority**: `ops/bindings/vm.lifecycle.yaml`
 - **Backup Authority**: `ops/bindings/backup.inventory.yaml`
 - **Context Authority**: `docs/governance/STACK_REGISTRY.yaml`, `docs/governance/SERVICE_REGISTRY.yaml`

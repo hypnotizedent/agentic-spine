@@ -9,7 +9,7 @@ Primary recovery flow for domain `media`.
 
 ## Diagnose
 1. Review latest failing run key receipt in `~/code/.evidence/spine/sessions/`.
-2. Review `docs/governance/MEDIA_STORAGE_CONTRACT.md`, `docs/governance/MEDIA_STORAGE_LIFECYCLE.md`, and `ops/bindings/media.quality.policy.yaml` before touching any historical migration packet or profile policy.
+2. Review `ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_CONTRACT.md`, `ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_LIFECYCLE.md`, and `ops/bindings/media.quality.policy.yaml` before touching any historical migration packet or profile policy.
 3. Review domain contract and plugin scripts for the failing surface.
 4. Confirm runtime path usage resolves through `ops/lib/spine-paths.sh`.
 

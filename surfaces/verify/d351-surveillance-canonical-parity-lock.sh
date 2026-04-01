@@ -8,7 +8,7 @@ source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
 CONTRACT="$ROOT/ops/bindings/domains/surveillance/surveillance.topology.contract.yaml"
 SSOT="$ROOT/docs/core/SURVEILLANCE_PLATFORM_SSOT.md"
-ROLES="$ROOT/docs/governance/SURVEILLANCE_ROLES.md"
+ROLES="$ROOT/ops/archive/pre-2026-04-01-spine/docs/governance/SURVEILLANCE_ROLES.md"
 CAPABILITIES="$ROOT/ops/capabilities.yaml"
 CAP_MAP="$ROOT/ops/bindings/capability_map.yaml"
 DISPATCH="$ROOT/ops/bindings/routing.dispatch.yaml"

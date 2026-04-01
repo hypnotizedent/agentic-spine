@@ -1,14 +1,16 @@
 ---
-status: authoritative
+status: historical_non_authoritative
 owner: "@ronny"
-last_verified: 2026-03-08
+last_verified: 2026-04-01
 scope: app-backup-restore
-canonical_doctrine: docs/governance/FINANCE_STACK_DOCTRINE_V1.md
+canonical_doctrine: ops/archive/pre-2026-04-01-spine/docs/governance/FINANCE_STACK_DOCTRINE_V1.md
+archived_from: docs/governance/FINANCE_STACK_BACKUP_RESTORE.md
+note: Historical copy retained after archiving. This file is non-live.
 ---
 
 # Finance Stack Backup + Restore (App-Level)
 
-**Canonical Doctrine**: See `docs/governance/FINANCE_STACK_DOCTRINE_V1.md` for non-negotiable finance stack governance rules.
+**Historical Doctrine**: See `ops/archive/pre-2026-04-01-spine/docs/governance/FINANCE_STACK_DOCTRINE_V1.md` for the archived finance stack governance rules.
 
 Purpose: define the authoritative backup, restore, and destructive-safety
 contract for finance-stack (VM 211) services: Firefly III, Ghostfolio, and

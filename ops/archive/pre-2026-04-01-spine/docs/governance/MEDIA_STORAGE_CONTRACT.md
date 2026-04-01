@@ -1,5 +1,5 @@
 ---
-status: authoritative
+status: superseded_historical
 owner: "@ronny"
 version: "1.2"
 last_verified: "2026-03-20"

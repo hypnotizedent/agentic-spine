@@ -1,10 +1,12 @@
 ---
-status: authoritative
+status: historical_non_authoritative
 owner: "@ronny"
-last_verified: 2026-03-08
+last_verified: 2026-04-01
+archived_from: docs/governance/PROXMOX_VM_OPERATOR_CHECKLIST.md
+note: Historical copy retained after archiving. This file is non-live.
 scope: proxmox-vm-operator-checklist
 version: 1.0
-companion_to: docs/governance/PROXMOX_VM_SAFETY_DOCTRINE_V1.md
+companion_to: ops/archive/pre-2026-04-01-spine/docs/governance/PROXMOX_VM_SAFETY_DOCTRINE_V1.md
 ---
 
 # Proxmox VM Operator Checklist
@@ -18,7 +20,7 @@ companion_to: docs/governance/PROXMOX_VM_SAFETY_DOCTRINE_V1.md
 ## Before Changing a VM or LXC
 
 - [ ] Link the work to an active loop or gap
-- [ ] Read `docs/governance/PROXMOX_VM_SAFETY_DOCTRINE_V1.md` if the protection class is unclear
+- [ ] Read `ops/archive/pre-2026-04-01-spine/docs/governance/PROXMOX_VM_SAFETY_DOCTRINE_V1.md` if the protection class is unclear
 - [ ] Confirm the guest exists and is active in `ops/bindings/vm.lifecycle.yaml`
 - [ ] Confirm the guest backup and restore class in `ops/bindings/backup.inventory.yaml`
 - [ ] Identify the hosted stacks and services in `docs/governance/STACK_REGISTRY.yaml` and `docs/governance/SERVICE_REGISTRY.yaml`
@@ -134,7 +136,7 @@ Run quarterly:
 
 ## Quick Reference
 
-- **Doctrine**: `docs/governance/PROXMOX_VM_SAFETY_DOCTRINE_V1.md`
+- **Doctrine**: `ops/archive/pre-2026-04-01-spine/docs/governance/PROXMOX_VM_SAFETY_DOCTRINE_V1.md`
 - **Inventory**: `ops/bindings/vm.lifecycle.yaml`
 - **Backup Policy**: `ops/bindings/backup.inventory.yaml`
 - **Home Site Context**: `docs/governance/MINILAB_SSOT.md`

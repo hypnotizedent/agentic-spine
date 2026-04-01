@@ -1,19 +1,21 @@
 ---
-status: authoritative
+status: historical_non_authoritative
 owner: "@ronny"
-last_verified: 2026-03-02
+last_verified: 2026-04-01
+archived_from: docs/governance/INFISICAL_RESTORE_DRILL.md
+note: Historical copy retained after archiving. This file is non-live.
 scope: infisical-restore-drill
 ---
 
 # Infisical Restore Drill Procedure
 
 Purpose: executable quarterly restore test for Infisical. Run this procedure to
-validate that INFISICAL_BACKUP_RESTORE.md is accurate, backups are restorable,
+validate that the archived INFISICAL_BACKUP_RESTORE.md is accurate, backups are restorable,
 and RTO/RPO targets (2h/24h) are achievable.
 
 Cadence: **quarterly** or after any major Infisical upgrade.
 
-Reference: `INFISICAL_BACKUP_RESTORE.md` (app-level backup/restore),
+Reference: `ops/archive/pre-2026-04-01-spine/docs/governance/INFISICAL_BACKUP_RESTORE.md` (archived app-level backup/restore),
 `DR_RUNBOOK.md` (Scenario 4), `RTO_RPO.md` (Tier 1 objectives).
 
 ## Pre-Drill Checklist

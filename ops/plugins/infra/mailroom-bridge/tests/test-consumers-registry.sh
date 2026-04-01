@@ -3,7 +3,7 @@
 #
 # Verifies:
 # - SSOT registry matches ops/bindings/mailroom.bridge.yaml (allowlist + roles)
-# - SSOT registry matches docs/governance/NETWORK_AND_REACHABILITY_MAILROOM_BRIDGE.md (consumer table)
+# - SSOT registry matches ops/archive/pre-2026-04-01-spine/docs/governance/NETWORK_AND_REACHABILITY_MAILROOM_BRIDGE.md (consumer table)
 # - All json_contract.caps emit stable JSON envelope with required keys
 set -euo pipefail
 
@@ -11,7 +11,7 @@ SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 
 REGISTRY="$SP/ops/bindings/mailroom.bridge.consumers.yaml"
 BRIDGE_BINDING="$SP/ops/bindings/mailroom.bridge.yaml"
-DOC="$SP/docs/governance/NETWORK_AND_REACHABILITY_MAILROOM_BRIDGE.md"
+DOC="$SP/ops/archive/pre-2026-04-01-spine/docs/governance/NETWORK_AND_REACHABILITY_MAILROOM_BRIDGE.md"
 CAPS="$SP/ops/capabilities.yaml"
 
 PASS=0

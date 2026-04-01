@@ -135,7 +135,7 @@ Pause and investigate if any condition is true:
 
 ## Rollback
 
-- Immediate rollback for Vault data uses `docs/governance/VAULTWARDEN_BACKUP_RESTORE.md`.
+- Immediate rollback for Vault data uses `ops/archive/pre-2026-04-01-spine/docs/governance/VAULTWARDEN_BACKUP_RESTORE.md`.
 - Restore from latest pre-change backup tarball before retrying apply.
 - Keep reconcile apply receipts for before/after comparison.
 

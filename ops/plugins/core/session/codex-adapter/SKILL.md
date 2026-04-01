@@ -15,7 +15,7 @@ description: >
 
 # Ronny Interpreter — Codex Adapter
 
-> **Shared core**: `~/code/agentic-spine/docs/governance/RONNY_SESSION_SKILL_CORE.md`
+> **Shared core**: `~/code/agentic-spine/ops/archive/pre-2026-04-01-spine/docs/governance/RONNY_SESSION_SKILL_CORE.md`
 > **Governance profile contract**: `~/code/agentic-spine/ops/bindings/governance.profile.contract.yaml`
 > **Session admission contract**: `~/code/agentic-spine/ops/bindings/session.admission.contract.yaml`
 > This adapter adds Codex translator-membrane behavior only.

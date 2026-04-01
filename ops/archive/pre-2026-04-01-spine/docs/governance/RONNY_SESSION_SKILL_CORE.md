@@ -1,5 +1,5 @@
 ---
-status: authoritative
+status: superseded_historical
 owner: "@ronny"
 created: 2026-03-27
 scope: shared-skill-core

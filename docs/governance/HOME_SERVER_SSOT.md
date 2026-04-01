@@ -14,7 +14,7 @@ Authority boundary:
 - Canonical home domain contract lives in `ops/bindings/home.authority.contract.yaml`.
 - Detailed device/runtime/network/storage inventories live in the `ops/bindings/home.*` bindings plus `ops/bindings/synology918.storage.manifest.yaml`.
 - Machine path rules live in `docs/governance/LOCAL_CONTROL_PLANE_CONTRACT.md`.
-- Media placement and archive rules live in `docs/governance/MEDIA_STORAGE_LIFECYCLE.md`.
+- Media placement and archive rules live in `ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_LIFECYCLE.md`.
 - This doc keeps the boring target model, generated projections, and current closure blockers in one governed surface.
 
 ## Managed Home Endpoints

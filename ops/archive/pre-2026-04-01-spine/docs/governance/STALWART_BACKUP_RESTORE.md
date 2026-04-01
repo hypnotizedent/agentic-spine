@@ -1,8 +1,10 @@
 ---
-status: authoritative
+status: historical_non_authoritative
 owner: "@ronny"
-last_verified: 2026-02-25
+last_verified: 2026-04-01
 scope: app-backup-restore
+archived_from: docs/governance/STALWART_BACKUP_RESTORE.md
+note: Historical copy retained after archiving. This file is non-live.
 ---
 
 # Stalwart Backup + Restore (App-Level)

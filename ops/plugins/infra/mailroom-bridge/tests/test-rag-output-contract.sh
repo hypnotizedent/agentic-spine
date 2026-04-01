@@ -15,7 +15,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 BRIDGE="$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-serve"
 RAG_CLI="$ROOT/ops/plugins/infra/rag/bin/rag"
-DOC="$ROOT/docs/governance/NETWORK_AND_REACHABILITY_MAILROOM_BRIDGE.md"
+DOC="$ROOT/ops/archive/pre-2026-04-01-spine/docs/governance/NETWORK_AND_REACHABILITY_MAILROOM_BRIDGE.md"
 
 PASS=0
 FAIL=0

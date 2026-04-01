@@ -4,10 +4,10 @@ owner: "@ronny"
 version: "1.1"
 last_verified: "2026-03-20"
 scope: media-storage-migration-execution
-parent_contract: docs/governance/MEDIA_STORAGE_CONTRACT.md
+parent_contract: ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_CONTRACT.md
 superseded_by:
-  - docs/governance/MEDIA_STORAGE_CONTRACT.md
-  - docs/governance/MEDIA_STORAGE_LIFECYCLE.md
+  - ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_CONTRACT.md
+  - ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_LIFECYCLE.md
 ---
 
 # Media Storage Migration Plan
@@ -15,7 +15,7 @@ superseded_by:
 **Status**: SUPERSEDED_HISTORICAL
 **Version**: 1.1
 **Last Verified**: 2026-03-19
-**Parent Contract**: `docs/governance/MEDIA_STORAGE_CONTRACT.md`
+**Parent Contract**: `ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_CONTRACT.md`
 
 ## Purpose
 
@@ -895,7 +895,7 @@ ssh streaming-stack "df -h /mnt/media && ls -lh /mnt/media/movies | head"
 
 ## Related Documents
 
-- Parent contract: `docs/governance/MEDIA_STORAGE_CONTRACT.md`
+- Parent contract: `ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_CONTRACT.md`
 - Hardware inventory: `ops/bindings/hardware.inventory.yaml`
 - Backup inventory: `ops/bindings/backup.inventory.yaml`
 - VM lifecycle: `ops/bindings/vm.lifecycle.yaml`

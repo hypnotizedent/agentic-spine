@@ -490,7 +490,7 @@ def validate_cross_surface_policy(root: Path, policy: dict[str, Any]) -> list[Is
                             )
                         )
 
-    media_contract_path = root / "docs/governance/MEDIA_STORAGE_CONTRACT.md"
+    media_contract_path = root / "ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_CONTRACT.md"
     if not media_contract_path.is_file():
         issues.append(Issue("error", "MEDIA_STORAGE_CONTRACT.md missing for cross-surface archive validation"))
         return issues

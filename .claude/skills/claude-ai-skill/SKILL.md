@@ -1,6 +1,6 @@
 # Ronny Session Bootloader (Spine) — Claude Code Adapter
 
-> **Shared core**: `docs/governance/RONNY_SESSION_SKILL_CORE.md`
+> **Shared core**: `ops/archive/pre-2026-04-01-spine/docs/governance/RONNY_SESSION_SKILL_CORE.md`
 > **Governance profile contract**: `ops/bindings/governance.profile.contract.yaml`
 > **Session admission contract**: `ops/bindings/session.admission.contract.yaml`
 > This adapter adds Claude Code-specific behavior only.

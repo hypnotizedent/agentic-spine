@@ -1,5 +1,5 @@
 ---
-status: authoritative
+status: superseded_historical
 owner: "@ronny"
 last_verified: 2026-03-20
 scope: media-storage-lifecycle-contract

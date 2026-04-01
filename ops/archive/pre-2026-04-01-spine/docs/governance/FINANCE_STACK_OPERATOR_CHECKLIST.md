@@ -1,10 +1,12 @@
 ---
-status: authoritative
+status: historical_non_authoritative
 owner: "@ronny"
-last_verified: 2026-03-08
+last_verified: 2026-04-01
 scope: finance-stack-operator-checklist
 version: 1.0
-companion_to: docs/governance/FINANCE_STACK_DOCTRINE_V1.md
+companion_to: ops/archive/pre-2026-04-01-spine/docs/governance/FINANCE_STACK_DOCTRINE_V1.md
+archived_from: docs/governance/FINANCE_STACK_OPERATOR_CHECKLIST.md
+note: Historical copy retained after archiving. This file is non-live.
 ---
 
 # Finance Stack Operator Checklist
@@ -18,7 +20,7 @@ companion_to: docs/governance/FINANCE_STACK_DOCTRINE_V1.md
 ## Pre-Flight: Before Any Finance Operation
 
 - [ ] **Active Loop**: Open a loop scope for this work or link to existing parent loop
-- [ ] **Doctrine Compliance**: Read `docs/governance/FINANCE_STACK_DOCTRINE_V1.md` if unfamiliar
+- [ ] **Doctrine Compliance**: Read `ops/archive/pre-2026-04-01-spine/docs/governance/FINANCE_STACK_DOCTRINE_V1.md` if unfamiliar
 - [ ] **Backup Status**: Run `./bin/ops cap run backup.status` — verify finance targets are not degraded
 - [ ] **Finance Health**: Run `./bin/ops cap run finance.stack.status` — verify all services are healthy
 - [ ] **Verify Gates**: Run `./bin/ops cap run verify.run -- domain finance` — ensure no gate failures
@@ -71,7 +73,7 @@ ssh finance-stack 'sudo /usr/local/bin/finance-stack-backup.sh'
 
 ### Before Restore Drill
 
-- [ ] **Restore Authority**: Confirm restore runbook exists at `docs/governance/FINANCE_STACK_BACKUP_RESTORE.md`
+- [ ] **Restore Authority**: Confirm restore runbook exists at `ops/archive/pre-2026-04-01-spine/docs/governance/FINANCE_STACK_BACKUP_RESTORE.md`
 - [ ] **Restore Point**: Identify exact backup artifact to restore (timestamp, 730XD path)
 - [ ] **Target Environment**: Confirm restore target (production VM 211 or test environment)
 - [ ] **Approval**: Get explicit operator approval for production restore
@@ -79,7 +81,7 @@ ssh finance-stack 'sudo /usr/local/bin/finance-stack-backup.sh'
 
 ### Restore Execution
 
-Follow exact commands in `docs/governance/FINANCE_STACK_BACKUP_RESTORE.md`:
+Follow exact commands in `ops/archive/pre-2026-04-01-spine/docs/governance/FINANCE_STACK_BACKUP_RESTORE.md`:
 
 1. **Stop services**: `ssh finance-stack 'cd /opt/stacks/finance && docker-compose stop {service}'`
 2. **Copy artifacts**: `scp pve:/md1400/backup-cold/apps/finance/{service}/{artifact} /tmp/`
@@ -306,8 +308,8 @@ STATEFUL_BREAK_GLASS_ACK_20260308=1 ./bin/ops cap run docker.compose.down -- fin
 
 ## Emergency Contacts
 
-- **Doctrine**: `docs/governance/FINANCE_STACK_DOCTRINE_V1.md`
-- **Backup Runbook**: `docs/governance/FINANCE_STACK_BACKUP_RESTORE.md`
+- **Doctrine**: `ops/archive/pre-2026-04-01-spine/docs/governance/FINANCE_STACK_DOCTRINE_V1.md`
+- **Backup Runbook**: `ops/archive/pre-2026-04-01-spine/docs/governance/FINANCE_STACK_BACKUP_RESTORE.md`
 - **Incident Receipt**: `$SPINE_STATE/paperless-backup-incident/root-cause-receipt-20260308.md`
 - **Stateful Service Matrix**: `$SPINE_STATE/paperless-backup-incident/stateful-service-matrix-20260308.yaml`
 - **Gap Filing**: `./bin/ops skill gaps.file -- --parent-loop LOOP-{CURRENT}`

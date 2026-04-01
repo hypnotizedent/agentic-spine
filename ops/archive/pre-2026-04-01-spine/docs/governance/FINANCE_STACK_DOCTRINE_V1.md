@@ -1,7 +1,9 @@
 ---
-status: authoritative
+status: historical_non_authoritative
 owner: "@ronny"
-last_verified: 2026-03-08
+last_verified: 2026-04-01
+archived_from: docs/governance/FINANCE_STACK_DOCTRINE_V1.md
+note: Historical copy retained after archiving. This file is non-live.
 scope: finance-stack-doctrine
 version: 1.0
 ---
@@ -192,7 +194,7 @@ For every critical finance service, Spine must be able to answer:
 
 ## Operator Checklist
 
-See companion document: `docs/governance/FINANCE_STACK_OPERATOR_CHECKLIST.md`
+See companion document: `ops/archive/pre-2026-04-01-spine/docs/governance/FINANCE_STACK_OPERATOR_CHECKLIST.md`
 
 ---
 
@@ -209,7 +211,7 @@ See companion document: `docs/governance/FINANCE_STACK_OPERATOR_CHECKLIST.md`
 
 ## Governance State
 
-- **Canonical Home**: `docs/governance/FINANCE_STACK_DOCTRINE_V1.md`
+- **Historical Home**: `ops/archive/pre-2026-04-01-spine/docs/governance/FINANCE_STACK_DOCTRINE_V1.md`
 - **Enforcement Surfaces**: `backup.inventory.yaml`, `stateful.compose.guard.yaml`, `finance-stack-backup.sh`
 - **Verification Gates**: D-series gates for backup/finance domains (see `ops/bindings/gate.registry.yaml`)
 - **Incident Receipt**: `$SPINE_STATE/paperless-backup-incident/root-cause-receipt-20260308.md`

@@ -1,7 +1,9 @@
 ---
-status: authoritative
+status: historical_non_authoritative
 owner: "@ronny"
-last_verified: 2026-02-26
+last_verified: 2026-04-01
+archived_from: docs/governance/VAULTWARDEN_BACKUP_RESTORE.md
+note: Historical copy retained after archiving. This file is non-live.
 scope: app-backup-restore
 ---
 
