@@ -7,10 +7,8 @@
 #   1. No uncommitted changes to the gap registry file.
 #   2. No direct repo-side writers remain outside the SQLite authority projector.
 #   3. SQLite authority parity matches the YAML projection.
-#   4. Recent commits touching the file (post-enforcement) carry required trailers:
-#        Gap-Mutation: capability
-#        Gap-Capability: gaps.file|gaps.close
-#        Gap-Run-Key: CAP-...
+#   4. Recent commits touching the file (post-enforcement) carry the required
+#      trailer schema defined in shared-authority.mutation.contract.yaml.
 #
 # Limitation: governance evidence only, not cryptographic tamper-proofing.
 # A determined actor with direct git access can forge trailers.
@@ -19,7 +17,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-POLICY_FILE="$ROOT/ops/bindings/d75-gap-mutation-policy.yaml"
+CONTRACT_FILE="$ROOT/ops/bindings/shared-authority.mutation.contract.yaml"
 GAPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
 
 fail() {
@@ -30,15 +28,19 @@ fail() {
 command -v yq >/dev/null 2>&1 || fail "yq required"
 command -v python3 >/dev/null 2>&1 || fail "python3 required"
 
-[[ -f "$POLICY_FILE" ]] || fail "policy file missing: $POLICY_FILE"
+[[ -f "$CONTRACT_FILE" ]] || fail "shared-authority mutation contract missing: $CONTRACT_FILE"
 [[ -x "$GAPS_BRIDGE" ]] || fail "gaps authority bridge missing: $GAPS_BRIDGE"
 
-# Load policy
-GAPS_FILE_REL="$(yq e '.file' "$POLICY_FILE")"
+GAPS_FILE_REL="$(yq e -r '.gap_projection_enforcement.active_projection // ""' "$CONTRACT_FILE")"
 GAPS_FILE="$ROOT/$GAPS_FILE_REL"
-WINDOW="$(yq e '.window' "$POLICY_FILE")"
-ENFORCEMENT_SHA="$(yq e '.enforcement_after_sha' "$POLICY_FILE")"
+WINDOW="$(yq e -r '.gap_projection_enforcement.window // ""' "$CONTRACT_FILE")"
+ENFORCEMENT_SHA="$(yq e -r '.gap_projection_enforcement.enforcement_after_sha // ""' "$CONTRACT_FILE")"
+mapfile -t REQUIRED_TRAILERS < <(yq e -r '.gap_projection_enforcement.required_trailers[] // ""' "$CONTRACT_FILE" 2>/dev/null || true)
 
+[[ -n "$GAPS_FILE_REL" ]] || fail "gap projection path missing in contract"
+[[ -n "$WINDOW" ]] || fail "gap projection window missing in contract"
+[[ -n "$ENFORCEMENT_SHA" ]] || fail "gap projection enforcement SHA missing in contract"
+[[ "${#REQUIRED_TRAILERS[@]}" -gt 0 ]] || fail "required D75 trailers missing in contract"
 [[ -f "$GAPS_FILE" ]] || fail "gap registry not found: $GAPS_FILE"
 
 # ── Check 1: No uncommitted changes to gap registry ──
@@ -86,15 +88,12 @@ while IFS= read -r sha; do
   msg="$(git -C "$ROOT" log -1 --format="%B" "$sha")"
 
   missing=()
-  if ! echo "$msg" | grep -q "^Gap-Mutation:"; then
-    missing+=("Gap-Mutation")
-  fi
-  if ! echo "$msg" | grep -q "^Gap-Capability:"; then
-    missing+=("Gap-Capability")
-  fi
-  if ! echo "$msg" | grep -q "^Gap-Run-Key:"; then
-    missing+=("Gap-Run-Key")
-  fi
+  for trailer in "${REQUIRED_TRAILERS[@]}"; do
+    [[ -n "$trailer" ]] || continue
+    if ! echo "$msg" | grep -q "^${trailer}:"; then
+      missing+=("$trailer")
+    fi
+  done
 
   if [[ ${#missing[@]} -gt 0 ]]; then
     short="$(git -C "$ROOT" log -1 --format="%h %s" "$sha")"
