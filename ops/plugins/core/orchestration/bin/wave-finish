@@ -19,6 +19,8 @@ spine_paths_init
 GAPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
 GAPS_SQL_LIB="$ROOT/ops/plugins/core/lifecycle/lib"
 CLOSEOUT_BIN="$ROOT/ops/plugins/core/loops/bin/loop-closeout-finalize"
+WORKTREE_CLEANUP_BIN="$ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-cleanup"
+WORKTREE_LIFECYCLE_CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
 SCOPES_DIR="$SPINE_STATE/loop-scopes"
 
 # ── Usage ────────────────────────────────────────────────────────
@@ -48,6 +50,83 @@ Exit codes:
   2  invalid args or loop not found
   3  dry-run completed (no mutations made)
 USAGE
+}
+
+resolve_worktree_cleanup_token() {
+  local token_env="OPS_WORKTREE_DELETE_TOKEN"
+  local token_value="RELEASE_MAIN_CLEANUP_WINDOW"
+
+  if command -v yq >/dev/null 2>&1 && [[ -f "$WORKTREE_LIFECYCLE_CONTRACT" ]]; then
+    token_env="$(yq e -r '.cleanup.delete_token_env_var // "OPS_WORKTREE_DELETE_TOKEN"' "$WORKTREE_LIFECYCLE_CONTRACT" 2>/dev/null || echo "$token_env")"
+    token_value="$(yq e -r '.cleanup.delete_token_value // "RELEASE_MAIN_CLEANUP_WINDOW"' "$WORKTREE_LIFECYCLE_CONTRACT" 2>/dev/null || echo "$token_value")"
+  fi
+
+  printf '%s\n%s\n' "$token_env" "$token_value"
+}
+
+RESIDUE_CLEANUP_NOTE=""
+
+maybe_consume_worktree_cleanup_candidates() {
+  [[ "$SKIP_RESIDUE" -eq 0 ]] || return 0
+  [[ -x "$WORKTREE_CLEANUP_BIN" ]] || return 0
+
+  local report_json delete_candidates root_candidate cleanup_tokens cleanup_token_env cleanup_token_value
+  local archive_out manifest_path delete_out
+
+  report_json="$(mktemp "${SPINE_TMP:-/tmp}/wave-finish-cleanup-report.XXXXXX.json")"
+  if ! "$WORKTREE_CLEANUP_BIN" --mode report-only --json > "$report_json" 2>/dev/null; then
+    rm -f "$report_json"
+    return 0
+  fi
+
+  delete_candidates="$(python3 - "$report_json" <<'PY'
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+print(len(data.get("delete_candidates", [])))
+PY
+)"
+  root_candidate="$(python3 - "$report_json" <<'PY'
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+root = data.get("root_normalization") or {}
+print(1 if root.get("candidate") else 0)
+PY
+)"
+
+  if [[ "$delete_candidates" -eq 0 && "$root_candidate" -eq 0 ]]; then
+    rm -f "$report_json"
+    return 0
+  fi
+
+  echo "Residue cleanup: consuming $delete_candidates safe delete candidate(s) before residue evaluation..."
+  cleanup_tokens="$(resolve_worktree_cleanup_token)"
+  cleanup_token_env="$(printf '%s\n' "$cleanup_tokens" | sed -n '1p')"
+  cleanup_token_value="$(printf '%s\n' "$cleanup_tokens" | sed -n '2p')"
+
+  if ! archive_out="$("$WORKTREE_CLEANUP_BIN" --mode archive-only 2>&1)"; then
+    echo "wave.finish WARN: lifecycle archive-only cleanup failed; residue check remains authoritative" >&2
+    rm -f "$report_json"
+    return 0
+  fi
+  manifest_path="$(printf '%s\n' "$archive_out" | sed -n 's/^artifact\.archive_manifest=//p' | tail -1)"
+  if [[ -z "$manifest_path" || ! -f "$manifest_path" ]]; then
+    echo "wave.finish WARN: lifecycle cleanup did not produce an archive manifest; residue check remains authoritative" >&2
+    rm -f "$report_json"
+    return 0
+  fi
+
+  if ! delete_out="$(env "$cleanup_token_env=$cleanup_token_value" "$WORKTREE_CLEANUP_BIN" --mode delete --manifest "$manifest_path" 2>&1)"; then
+    echo "wave.finish WARN: lifecycle delete cleanup failed; residue check remains authoritative" >&2
+    rm -f "$report_json"
+    return 0
+  fi
+
+  RESIDUE_CLEANUP_NOTE="auto-cleaned $delete_candidates lifecycle candidate(s)"
+  rm -f "$report_json"
 }
 
 # ── Parse args ───────────────────────────────────────────────────
@@ -323,6 +402,8 @@ fi
 
 # Surface 4: Residue Check
 if [[ "$SKIP_RESIDUE" -eq 0 ]]; then
+  maybe_consume_worktree_cleanup_candidates
+
   # Check worktrees mentioning this loop or related branches.
   loop_lower="$(echo "$LOOP_ID" | tr '[:upper:]' '[:lower:]')"
   worktree_residue="$(git -C "$ROOT" worktree list 2>/dev/null | grep -i "$loop_lower" || true)"
@@ -337,9 +418,15 @@ if [[ "$SKIP_RESIDUE" -eq 0 ]]; then
       residue_items+="branches found"
     }
     surface_residue_note="$residue_items"
+    if [[ -n "$RESIDUE_CLEANUP_NOTE" ]]; then
+      surface_residue_note="$surface_residue_note after $RESIDUE_CLEANUP_NOTE"
+    fi
   else
     surface_residue="PASS"
     surface_residue_note="no orphan worktrees or branches"
+    if [[ -n "$RESIDUE_CLEANUP_NOTE" ]]; then
+      surface_residue_note="$surface_residue_note after $RESIDUE_CLEANUP_NOTE"
+    fi
   fi
 else
   surface_residue="PASS"

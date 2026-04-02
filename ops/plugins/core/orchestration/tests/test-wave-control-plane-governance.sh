@@ -257,6 +257,184 @@ fi
 assert_file_contains "$T2_ROOT/landed.out" "requires PASS on all four surfaces" "wave-finish explains landed overclaim block"
 
 echo ""
+echo "── T2b: wave-finish auto-cleans safe residue before landed finish ──"
+T2B_ROOT="$(make_tmpdir)"
+T2B_REPO="$T2B_ROOT/repo"
+T2B_STATE="$T2B_REPO/state"
+mkdir -p \
+  "$T2B_REPO/ops/plugins/core/orchestration/bin" \
+  "$T2B_REPO/ops/plugins/core/loops/bin" \
+  "$T2B_REPO/ops/plugins/core/lifecycle/bin" \
+  "$T2B_REPO/ops/plugins/core/lifecycle/lib" \
+  "$T2B_REPO/ops/plugins/core/ops/bin" \
+  "$T2B_REPO/ops/bindings" \
+  "$T2B_STATE/loop-scopes"
+copy_runtime_libs "$T2B_REPO"
+cp "$ROOT/ops/plugins/core/orchestration/bin/wave-finish" "$T2B_REPO/ops/plugins/core/orchestration/bin/"
+chmod +x "$T2B_REPO/ops/plugins/core/orchestration/bin/wave-finish"
+
+cat > "$T2B_REPO/ops/plugins/core/loops/bin/loop-closeout-finalize" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+matrix=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --acceptance-matrix) matrix="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cp "$matrix" "${SPINE_ROOT}/captured-matrix.md"
+printf 'loop.closeout.finalize stub\n'
+EOF
+chmod +x "$T2B_REPO/ops/plugins/core/loops/bin/loop-closeout-finalize"
+
+cat > "$T2B_REPO/ops/plugins/core/lifecycle/bin/gaps-authority-bridge" <<'EOF'
+#!/usr/bin/env python3
+print("ok")
+EOF
+chmod +x "$T2B_REPO/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
+
+cat > "$T2B_REPO/ops/plugins/core/lifecycle/lib/gaps_sql_authority.py" <<'EOF'
+from pathlib import Path
+
+
+class Conn:
+    def close(self):
+        pass
+
+
+def resolve_paths(root):
+    root = Path(root)
+    return root / "state" / "shared_authority.db", root / "ops" / "bindings" / "operational.gaps.yaml"
+
+
+def connect(db):
+    return Conn()
+
+
+def ensure_schema(conn):
+    return None
+
+
+def bootstrap_from_yaml(conn, gaps_yaml):
+    return None
+
+
+def fetch_gaps(conn):
+    return []
+
+
+def gap_count(conn):
+    return 1
+
+
+def load_yaml(path):
+    return {"gaps": [{"id": "only-one"}]}
+EOF
+
+cat > "$T2B_REPO/ops/bindings/operational.gaps.yaml" <<'EOF'
+gaps:
+  - id: only-one
+EOF
+
+cat > "$T2B_STATE/loop-scopes/LOOP-T-CLEAN.scope.md" <<'EOF'
+---
+loop_id: LOOP-T-CLEAN
+status: active
+owner: '@test'
+execution_mode: orchestrator_subagents
+execution_readiness: runnable
+objective: fixture residue cleanup
+---
+EOF
+
+cat > "$T2B_REPO/ops/plugins/core/ops/bin/worktree-lifecycle-cleanup" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+mode="report-only"
+manifest=""
+json_mode=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode) mode="$2"; shift 2 ;;
+    --manifest) manifest="$2"; shift 2 ;;
+    --json) json_mode=1; shift ;;
+    *) shift ;;
+  esac
+done
+
+log="${SPINE_ROOT}/cleanup.log"
+touch "$log"
+echo "$mode" >> "$log"
+
+case "$mode" in
+  report-only)
+    if [[ "$json_mode" -eq 1 ]]; then
+      cat <<JSON
+{
+  "delete_candidates": [
+    {"path": "${SPINE_ROOT}/fake-worktree", "branch": "keep-LOOP-T-CLEAN-residue"}
+  ],
+  "blocked": [],
+  "temp_clone_delete_candidates": [],
+  "temp_clone_blocked": [],
+  "stash_delete_candidates": [],
+  "stash_blocked": [],
+  "root_normalization": {"candidate": null, "blocked": null},
+  "summary": {
+    "delete_candidate_count": 1,
+    "blocked_count": 0,
+    "temp_clone_delete_candidate_count": 0,
+    "temp_clone_blocked_count": 0,
+    "stash_delete_candidate_count": 0,
+    "stash_blocked_count": 0
+  }
+}
+JSON
+    else
+      echo "artifact.report_json=${SPINE_ROOT}/cleanup-report.json"
+    fi
+    ;;
+  archive-only)
+    manifest="${SPINE_ROOT}/cleanup-manifest.json"
+    printf '{\"items\":[]}\n' > "$manifest"
+    echo "artifact.archive_manifest=$manifest"
+    ;;
+  delete)
+    [[ "${OPS_WORKTREE_DELETE_TOKEN:-}" == "RELEASE_MAIN_CLEANUP_WINDOW" ]]
+    git -C "$SPINE_ROOT" branch -D keep-LOOP-T-CLEAN-residue >/dev/null 2>&1 || true
+    echo "artifact.actions=${SPINE_ROOT}/cleanup-actions.log"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$T2B_REPO/ops/plugins/core/ops/bin/worktree-lifecycle-cleanup"
+
+init_fixture_repo "$T2B_REPO"
+git -C "$T2B_REPO" branch keep-LOOP-T-CLEAN-residue >/dev/null
+
+if env SPINE_ROOT="$T2B_REPO" SPINE_STATE="$T2B_STATE" \
+  bash "$T2B_REPO/ops/plugins/core/orchestration/bin/wave-finish" \
+    --loop-id LOOP-T-CLEAN --disposition landed --completion-level slice_complete > "$T2B_ROOT/landed.out"; then
+  pass "wave-finish lands after auto-cleaning safe residue"
+else
+  fail "wave-finish lands after auto-cleaning safe residue"
+fi
+
+assert_file_contains "$T2B_REPO/captured-matrix.md" "| residue_check | residue | PASS |" "wave-finish matrix records residue PASS after auto-cleanup"
+assert_file_contains "$T2B_ROOT/landed.out" "auto-cleaned 1 lifecycle candidate" "wave-finish reports residue auto-cleanup"
+assert_file_contains "$T2B_REPO/cleanup.log" "report-only" "wave-finish requests cleanup classification"
+assert_file_contains "$T2B_REPO/cleanup.log" "archive-only" "wave-finish archives cleanup candidates before delete"
+assert_file_contains "$T2B_REPO/cleanup.log" "delete" "wave-finish deletes cleanup candidates after archive"
+if git -C "$T2B_REPO" branch --list "keep-LOOP-T-CLEAN-residue" | grep -q .; then
+  fail "cleanup stub removes loop residue branch"
+else
+  pass "cleanup stub removes loop residue branch"
+fi
+
+echo ""
 echo "── T3: wave-execute close auto-runs wave-finish ──"
 T3_ROOT="$(make_tmpdir)"
 T3_REPO="$T3_ROOT/repo"
