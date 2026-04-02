@@ -128,7 +128,6 @@ All must PASS for core to be healthy.
 | D79 | Workbench script allowlist lock |
 | D80 | Workbench authority-trace lock |
 | D81 | Plugin test regression lock |
-| D82 | Share publish governance lock |
 | D83 | Proposal queue health lock |
 | D84 | Docs index registration lock (every governance .md must be in _index.yaml) |
 
