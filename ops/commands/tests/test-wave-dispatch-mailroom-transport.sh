@@ -196,6 +196,122 @@ status_out="$(
 )"
 assert_contains "$status_out" "mailroom:" "wave status surfaces queued mailroom task identity"
 
+runtime_audit="$tmpdir/runtime-audit"
+mkdir -p "$runtime_audit/state" "$runtime_audit/waves/WAVE-DISPATCH-AUDIT"
+cat > "$runtime_audit/waves/WAVE-DISPATCH-AUDIT/state.json" <<'JSON'
+{
+  "wave_id": "WAVE-DISPATCH-AUDIT",
+  "status": "active",
+  "objective": "audit dispatch resolves researcher to qc",
+  "created_at": "2026-03-23T00:00:00Z",
+  "dispatches": [],
+  "packet": {
+    "wave_id": "WAVE-DISPATCH-AUDIT",
+    "loop_id": "LOOP-DISPATCH-AUDIT",
+    "owner_terminal": "SPINE-CONTROL-01",
+    "current_role": "researcher",
+    "next_role": "worker",
+    "deadline_utc": "2099-01-01T00:00:00Z",
+    "horizon": "now",
+    "execution_readiness": "runnable",
+    "claimed_paths": ["ops/commands/wave.sh"],
+    "execution_mode": "operational",
+    "transport": "mailroom",
+    "stub_matrix": [],
+    "lane_outcomes": []
+  },
+  "wave_packet": {
+    "wave_id": "WAVE-DISPATCH-AUDIT",
+    "loop_id": "LOOP-DISPATCH-AUDIT",
+    "owner_terminal": "SPINE-CONTROL-01",
+    "current_role": "researcher",
+    "next_role": "worker",
+    "deadline_utc": "2099-01-01T00:00:00Z",
+    "horizon": "now",
+    "execution_readiness": "runnable",
+    "claimed_paths": ["ops/commands/wave.sh"],
+    "execution_mode": "operational",
+    "transport": "mailroom",
+    "stub_matrix": [],
+    "lane_outcomes": []
+  },
+  "role_flow": {
+    "current_role": "researcher",
+    "next_role": "worker"
+  },
+  "workspace": {}
+}
+JSON
+
+audit_out="$(
+  env \
+    SPINE_REPO="$ROOT" \
+    SPINE_RUNTIME_ROOT="$runtime_audit" \
+    SPINE_STATE="$runtime_audit/state" \
+    bash "$WAVE_SCRIPT" dispatch WAVE-DISPATCH-AUDIT \
+      --lane audit \
+      --task "review queued audit findings" \
+      --input-refs "research_brief_ref=$brief_ref,scope_ref=$scope_ref" \
+      --output-refs "execution_plan_ref=$plan_ref,acceptance_criteria_ref=$accept_ref" 2>&1
+)"
+assert_contains "$audit_out" "Transport: mailroom" "audit dispatch reports mailroom transport"
+assert_contains "$audit_out" "Mailroom Task:" "audit dispatch reports queued task identity"
+
+audit_queue_dir="$runtime_audit/state/agent-tasks/queued"
+queued_audit_file="$(find "$audit_queue_dir" -name '*.yaml' | head -n1)"
+if [[ -n "$queued_audit_file" && -f "$queued_audit_file" ]]; then
+  pass "audit dispatch enqueues a real mailroom task"
+else
+  fail "audit dispatch enqueues a real mailroom task"
+fi
+
+python3 - <<'PY' "$queued_audit_file" "$runtime_audit/waves/WAVE-DISPATCH-AUDIT/state.json" "$brief_ref" "$scope_ref" "$plan_ref" "$accept_ref"
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+queue_file, state_file, brief_ref, scope_ref, plan_ref, accept_ref = sys.argv[1:7]
+queue = json.loads(subprocess.check_output(["yq", "e", "-o=json", ".", queue_file], text=True))
+payload = json.loads(queue["payload"])
+state = json.loads(Path(state_file).read_text())
+dispatch = state["dispatches"][0]
+lane = state["packet"]["lane_outcomes"][0]
+role_flow = state["role_flow"]
+pending = role_flow["pending_transition"]
+
+assert payload["wave_id"] == "WAVE-DISPATCH-AUDIT", payload
+assert payload["loop_id"] == "LOOP-DISPATCH-AUDIT", payload
+assert payload["lane"] == "audit", payload
+assert payload["owner_terminal"] == "SPINE-CONTROL-01", payload
+assert payload["from_role"] == "researcher", payload
+assert payload["to_role"] == "qc", payload
+assert payload["transition_gate"] == "researcher_to_qc", payload
+assert payload["input_refs"]["research_brief_ref"] == brief_ref, payload
+assert payload["input_refs"]["scope_ref"] == scope_ref, payload
+assert payload["expected_output_refs"]["execution_plan_ref"] == plan_ref, payload
+assert payload["expected_output_refs"]["acceptance_criteria_ref"] == accept_ref, payload
+assert "verify_ref" not in payload.get("input_refs", {}), payload
+assert "verify_ref" not in payload.get("expected_output_refs", {}), payload
+
+assert dispatch["status"] == "dispatched", dispatch
+assert dispatch["dispatch_transport"] == "mailroom", dispatch
+assert dispatch["mailroom_task_id"] == queue["task_id"], dispatch
+assert dispatch["mailroom_task_state"] == "queued", dispatch
+
+assert lane["lane_status"] == "DISPATCHED", lane
+assert lane["dispatch_transport"] == "mailroom", lane
+assert lane["mailroom_task_id"] == queue["task_id"], lane
+
+assert role_flow["current_role"] == "researcher", role_flow
+assert role_flow["next_role"] == "qc", role_flow
+assert pending["from_role"] == "researcher", pending
+assert pending["to_role"] == "qc", pending
+assert pending["gate"] == "researcher_to_qc", pending
+assert state["preflight"]["verdict"] == "go", state["preflight"]
+PY
+pass "audit dispatch resolves researcher to qc without future-only refs"
+
 worker_contract="$tmpdir/mailroom-worker.contract.yaml"
 cat > "$worker_contract" <<'YAML'
 runtime:

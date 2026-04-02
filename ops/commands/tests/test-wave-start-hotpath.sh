@@ -50,6 +50,7 @@ spine_runtime_resolve_paths() {
   export SPINE_REPO="${SPINE_REPO:-$PWD}"
   export SPINE_RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine}"
   export SPINE_STATE="${SPINE_STATE:-$SPINE_RUNTIME_ROOT/state}"
+  export SPINE_OUTBOX="${SPINE_OUTBOX:-$SPINE_RUNTIME_ROOT/outbox}"
 }
 spine_resolve_mailroom_path() {
   local rel="${1:?mailroom path required}"
@@ -77,6 +78,8 @@ promotion_gates:
   transitions:
     - from: researcher
       to: worker
+    - from: researcher
+      to: qc
 path_claims:
   state_file: mailroom/state/path.claims.yaml
   default_ttl_minutes: 180
@@ -135,9 +138,11 @@ import json, sys
 from pathlib import Path
 state = json.loads(Path(sys.argv[1]).read_text())
 assert state["packet"]["owner_terminal"] == "SPINE-CONTROL-01"
+assert state["packet"]["next_role"] == "worker"
+assert state["role_flow"]["next_role"] == "worker"
 assert state["packet"]["claimed_paths"] == ["ops/", "docs/governance/"]
 PY
-pass "known terminal resolves contract write scope"
+pass "known terminal resolves contract write scope and keeps worker as default next role"
 
 runtime_two="$tmpdir/runtime-two"
 set +e
