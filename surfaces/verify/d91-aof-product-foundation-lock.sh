@@ -105,19 +105,19 @@ for cap in "tenant.profile.validate" "tenant.provision.dry-run"; do
 done
 
 # Check scripts are executable
-VALIDATE_SCRIPT="$ROOT/ops/plugins/core/tenant/bin/tenant-profile-validate"
-DRYRUN_SCRIPT="$ROOT/ops/plugins/core/tenant/bin/tenant-provision-dry-run"
+VALIDATE_SCRIPT="$ROOT/ops/plugins/core/authority/bin/tenant-profile-validate"
+DRYRUN_SCRIPT="$ROOT/ops/plugins/core/authority/bin/tenant-provision-dry-run"
 
 if [[ -x "$VALIDATE_SCRIPT" ]]; then
   ok "tenant-profile-validate is executable"
 else
-  err "ops/plugins/core/tenant/bin/tenant-profile-validate is not executable or does not exist"
+  err "ops/plugins/core/authority/bin/tenant-profile-validate is not executable or does not exist"
 fi
 
 if [[ -x "$DRYRUN_SCRIPT" ]]; then
   ok "tenant-provision-dry-run is executable"
 else
-  err "ops/plugins/core/tenant/bin/tenant-provision-dry-run is not executable or does not exist"
+  err "ops/plugins/core/authority/bin/tenant-provision-dry-run is not executable or does not exist"
 fi
 
 # Check MANIFEST.yaml has tenant plugin

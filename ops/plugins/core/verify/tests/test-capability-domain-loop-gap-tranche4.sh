@@ -54,19 +54,19 @@ for cap_id in expected_tranche4:
     if cap_id not in loop_gap_caps:
         raise SystemExit(f"tranche-4 capability {cap_id} not assigned to loop_gap")
 
-if len(loop_gap_caps) != 95:
-    raise SystemExit(f"expected 95 loop_gap capabilities, found {len(loop_gap_caps)}")
+if len(loop_gap_caps) != 96:
+    raise SystemExit(f"expected 96 loop_gap capabilities, found {len(loop_gap_caps)}")
 if loop_gap_external:
     raise SystemExit(f"loop_gap should have no domain_external capabilities, found {loop_gap_external}")
-if len(loop_gap_fabric) != 95:
-    raise SystemExit(f"expected all 95 loop_gap capabilities to be fabric, found {len(loop_gap_fabric)}")
+if len(loop_gap_fabric) != 96:
+    raise SystemExit(f"expected all 96 loop_gap capabilities to be fabric, found {len(loop_gap_fabric)}")
 
-if bundle["capability_membership"]["total_governed"] != 95:
+if bundle["capability_membership"]["total_governed"] != 96:
     raise SystemExit("loop_gap bundle total_governed mismatch")
 if bundle["capability_membership"]["catalog_domain_external"] != 0:
     raise SystemExit("loop_gap bundle catalog_domain_external mismatch")
 
-if "Total governed capabilities with `domain: loop_gap`: `95`" not in doc:
+if "Total governed capabilities with `domain: loop_gap`: `96`" not in doc:
     raise SystemExit("loop_gap governed membership note missing from doc")
 
 none_count = sum(1 for cfg in caps.values() if isinstance(cfg, dict) and cfg.get("domain") == "none")
@@ -79,7 +79,7 @@ for cap_id in expected_tranche4:
         raise SystemExit(f"{cap_id} lifecycle changed from ready to {cfg.get('lifecycle')}")
 
 print("PASS: 23 tranche-4 capabilities assigned to loop_gap")
-print("PASS: loop_gap total governed = 95, all fabric, catalog empty")
+print("PASS: loop_gap total governed = 96, all fabric, catalog empty")
 print("PASS: loop_gap bundle and doc membership semantics explicit")
 print(f"PASS: domain:none count = {none_count}")
 PY

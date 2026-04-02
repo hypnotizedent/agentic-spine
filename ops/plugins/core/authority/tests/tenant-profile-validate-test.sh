@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-SCRIPT="$SP/ops/plugins/core/tenant/bin/tenant-profile-validate"
+SCRIPT="$SP/ops/plugins/core/authority/bin/tenant-profile-validate"
 FIXTURE="$SP/fixtures/tenant.sample.yaml"
 
 PASS=0; FAIL_COUNT=0

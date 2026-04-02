@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init >/dev/null 2>&1 || true
-PROFILE_VALIDATE="$ROOT/ops/plugins/core/tenant/bin/tenant-profile-validate"
-STORAGE_AUDIT="$ROOT/ops/plugins/core/tenant/bin/tenant-storage-audit"
+PROFILE_VALIDATE="$ROOT/ops/plugins/core/authority/bin/tenant-profile-validate"
+STORAGE_AUDIT="$ROOT/ops/plugins/core/authority/bin/tenant-storage-audit"
 
 PASS=0
 FAIL=0

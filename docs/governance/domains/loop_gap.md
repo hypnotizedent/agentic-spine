@@ -8,8 +8,8 @@ Canonical domain policy for `loop_gap`.
 
 ## Governed Capability Membership
 
-- Total governed capabilities with `domain: loop_gap`: `95`
-- All `95` are `plane: fabric` capabilities
+- Total governed capabilities with `domain: loop_gap`: `96`
+- All `96` are `plane: fabric` capabilities
 - `domain_external` capabilities listed in the catalog block below: `0`
 - The catalog view is intentionally empty because `loop_gap` capabilities are engine-internal fabric, not domain-external surfaces
 

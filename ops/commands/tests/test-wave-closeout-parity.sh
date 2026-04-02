@@ -154,9 +154,9 @@ env SPINE_REPO="$repo" SPINE_RUNTIME_ROOT="$runtime" SPINE_STATE="$runtime/state
     --commit-hashes "abcdef1" \
     --prompt-set-id spine-controller-context \
     --prompt-version "2026-03-24.1" \
-    --prompt-source-refs "ops/bindings/controller.boundary.contract.yaml,ops/plugins/core/context/templates/execution.context.yaml" \
+    --prompt-source-refs "ops/bindings/controller.boundary.contract.yaml,ops/plugins/core/session/templates/execution.context.yaml" \
     --prompt-source-hash none \
-    --prompt-source-hashes "ops/bindings/controller.boundary.contract.yaml=missing,ops/plugins/core/context/templates/execution.context.yaml=missing" \
+    --prompt-source-hashes "ops/bindings/controller.boundary.contract.yaml=missing,ops/plugins/core/session/templates/execution.context.yaml=missing" \
     --prompt-registry-path ops/bindings/prompt.registry.yaml \
     --prompt-resolution defaults \
     --json-out "$receipt_path" >/dev/null
@@ -244,9 +244,9 @@ env SPINE_REPO="$repo" SPINE_RUNTIME_ROOT="$runtime" SPINE_STATE="$runtime/state
     --commit-hashes "abcdef1" \
     --prompt-set-id spine-controller-context \
     --prompt-version "2026-03-24.1" \
-    --prompt-source-refs "ops/bindings/controller.boundary.contract.yaml,ops/plugins/core/context/templates/verification.context.yaml" \
+    --prompt-source-refs "ops/bindings/controller.boundary.contract.yaml,ops/plugins/core/session/templates/verification.context.yaml" \
     --prompt-source-hash none \
-    --prompt-source-hashes "ops/bindings/controller.boundary.contract.yaml=missing,ops/plugins/core/context/templates/verification.context.yaml=missing" \
+    --prompt-source-hashes "ops/bindings/controller.boundary.contract.yaml=missing,ops/plugins/core/session/templates/verification.context.yaml=missing" \
     --prompt-registry-path ops/bindings/prompt.registry.yaml \
     --prompt-resolution defaults \
     --json-out "$close_receipt_path" >/dev/null

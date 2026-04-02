@@ -36,7 +36,7 @@ Translator authority lives in the repo-owned translator stack:
 - `ops/bindings/communication.protocol.contract.yaml`
 - `ops/bindings/prompt.registry.yaml`
 - `ops/bindings/prompt.library.contract.yaml`
-- `ops/plugins/core/context/templates/`
+- `ops/plugins/core/session/templates/`
 
 Tool-local or home-level adapters may package tool-native behavior, but they do
 not own translator meaning, routing truth, forbidden-action rules, or runtime

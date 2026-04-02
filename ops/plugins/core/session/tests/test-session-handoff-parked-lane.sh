@@ -2,12 +2,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-CREATE="$ROOT/ops/plugins/core/handoff/bin/session-handoff-create"
-GET="$ROOT/ops/plugins/core/handoff/bin/session-handoff-get"
-LIST="$ROOT/ops/plugins/core/handoff/bin/session-handoff-list"
-STATUS="$ROOT/ops/plugins/core/handoff/bin/session-handoff-status"
-CLOSE="$ROOT/ops/plugins/core/handoff/bin/session-handoff-close"
-EXPIRE="$ROOT/ops/plugins/core/handoff/bin/session-handoff-expire"
+CREATE="$ROOT/ops/plugins/core/session/bin/session-handoff-create"
+GET="$ROOT/ops/plugins/core/session/bin/session-handoff-get"
+LIST="$ROOT/ops/plugins/core/session/bin/session-handoff-list"
+STATUS="$ROOT/ops/plugins/core/session/bin/session-handoff-status"
+CLOSE="$ROOT/ops/plugins/core/session/bin/session-handoff-close"
+EXPIRE="$ROOT/ops/plugins/core/session/bin/session-handoff-expire"
 
 PASS=0
 FAIL=0

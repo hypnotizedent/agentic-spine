@@ -9,7 +9,7 @@ RECONCILE="$ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-reconcile"
 PLANS_CREATE="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-create"
 PLANS_RECONCILE="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-reconcile"
 LOOPS_CREATE="$ROOT/ops/plugins/core/lifecycle/bin/loops-create"
-HANDOFF_CREATE="$ROOT/ops/plugins/core/handoff/bin/session-handoff-create"
+HANDOFF_CREATE="$ROOT/ops/plugins/core/session/bin/session-handoff-create"
 
 PASS=0
 FAIL=0

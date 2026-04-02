@@ -125,8 +125,8 @@ prompt_library = payload["data"]["prompt_library"]
 assert payload["status"] == "done"
 assert prompt_context["prompt_set_id"] == "spine-controller-context"
 assert prompt_context["version"] == "2026-03-24.1"
-assert any(ref.endswith("ops/plugins/core/context/templates/execution.context.yaml") for ref in prompt_context["source_refs"])
-assert any(ref.endswith("ops/plugins/core/context/templates/verification.context.yaml") for ref in prompt_context["source_refs"])
+assert any(ref.endswith("ops/plugins/core/session/templates/execution.context.yaml") for ref in prompt_context["source_refs"])
+assert any(ref.endswith("ops/plugins/core/session/templates/verification.context.yaml") for ref in prompt_context["source_refs"])
 assert str(state_root / "prompts" / "execution.context.yaml") in prompt_context["runtime_prompt_refs"]
 assert str(state_root / "prompts" / "verification.context.yaml") in prompt_context["runtime_prompt_refs"]
 assert (state_root / "prompts" / "execution.context.yaml").exists()
