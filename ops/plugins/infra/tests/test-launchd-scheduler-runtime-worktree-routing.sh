@@ -88,7 +88,6 @@ for script in \
   "$ROOT/ops/plugins/core/bin/projection-reconcile.sh" \
   "$ROOT/ops/plugins/core/bin/state-shared-reconcile.sh" \
   "$ROOT/ops/plugins/core/bin/domain-inventory-refresh-daily.sh" \
-  "$ROOT/ops/plugins/core/bin/extension-index-refresh-daily.sh" \
   "$ROOT/ops/plugins/core/bin/freshness-critical-daily.sh" \
   "$ROOT/ops/plugins/core/bin/operator-hygiene-daily.sh" \
   "$ROOT/ops/plugins/core/bin/receipts-archive-reconcile-daily.sh" \
@@ -113,7 +112,6 @@ for label in \
   "com.ronny.projection-reconcile" \
   "com.ronny.state-shared-reconcile" \
   "com.ronny.domain-inventory-refresh-daily" \
-  "com.ronny.extension-index-refresh-daily" \
   "com.ronny.freshness-critical-daily" \
   "com.ronny.operator-hygiene-daily" \
   "com.ronny.receipts-archive-reconcile-daily" \
@@ -128,7 +126,6 @@ done
 echo ""
 echo "── T4: matching launchd templates stay on control root only ──"
 assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.domain-inventory-refresh-daily.plist" "domain-inventory plist"
-assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.extension-index-refresh-daily.plist" "extension-index plist"
 assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.freshness-critical-daily.plist" "freshness-critical plist"
 assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.operator-hygiene-daily.plist" "operator-hygiene plist"
 assert_plist_scheduler_env "$ROOT/ops/plugins/infra/host/launchd/com.ronny.receipts-archive-reconcile-daily.plist" "receipts-archive plist"

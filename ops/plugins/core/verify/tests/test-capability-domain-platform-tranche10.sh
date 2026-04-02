@@ -23,14 +23,6 @@ core_fabric = sorted(
 expected_tranche10 = [
     "platform.control.surface.reconcile",
     "platform.control.surface.status",
-    "platform.extension.bind",
-    "platform.extension.index.build",
-    "platform.extension.lint",
-    "platform.extension.plan",
-    "platform.extension.preflight",
-    "platform.extension.scaffold",
-    "platform.extension.status",
-    "platform.extension.transition",
     "platform.inventory.intake",
 ]
 
@@ -62,7 +54,7 @@ for cap_id in expected_tranche10:
     if cfg.get("plane") != "fabric":
         raise SystemExit(f"{cap_id} plane changed from fabric to {cfg.get('plane')}")
 
-print("PASS: 11 tranche-10 platform authority capabilities assigned to core")
+print("PASS: retained platform authority capabilities remain assigned to core")
 print("PASS: core total governed >= 92, fabric >= 90, 2 domain_external")
 print("PASS: core bundle and doc membership semantics updated")
 print(f"PASS: domain:none count = {none_count}")
