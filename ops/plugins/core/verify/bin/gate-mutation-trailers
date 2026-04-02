@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
-POLICY="$ROOT/ops/bindings/d128-gate-mutation-policy.yaml"
+ROUTING_DISPATCH="$ROOT/ops/bindings/routing.dispatch.yaml"
+CAPABILITY_MAP="$ROOT/ops/bindings/capability_map.yaml"
 
 usage() {
   cat <<'USAGE'
@@ -10,7 +11,7 @@ gate-mutation-trailers
 
 Usage:
   gate-mutation-trailers \
-    --capability <gate.registry.add|gate.registry.update|gate.topology.assign|gate.topology.validate|domain.onboard.new> \
+    --capability <gate.registry.add|gate.registry.update|gate.topology.assign|gate.topology.validate|domain.onboard.new|projection.reconcile> \
     [--mutation <text>] \
     [--run-key <CAP-...>] \
     [--json]
@@ -31,8 +32,10 @@ fail() {
 }
 
 command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
-[[ -f "$POLICY" ]] || fail "missing policy file: $POLICY"
-yq e '.' "$POLICY" >/dev/null 2>&1 || fail "invalid YAML: $POLICY"
+[[ -f "$ROUTING_DISPATCH" ]] || fail "missing routing authority: $ROUTING_DISPATCH"
+[[ -f "$CAPABILITY_MAP" ]] || fail "missing capability authority: $CAPABILITY_MAP"
+yq e '.' "$ROUTING_DISPATCH" >/dev/null 2>&1 || fail "invalid YAML: $ROUTING_DISPATCH"
+yq e '.' "$CAPABILITY_MAP" >/dev/null 2>&1 || fail "invalid YAML: $CAPABILITY_MAP"
 
 CAPABILITY=""
 MUTATION="capability"
@@ -75,6 +78,31 @@ infer_capability_from_staged() {
   echo ""
 }
 
+script_allowed_for_d128() {
+  case "$1" in
+    gate-registry-add|gate-registry-update|gate-topology-assign|gate-topology-validate|domain-onboard-new|projection-reconcile)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+capability_allowed() {
+  local capability="$1"
+  local routing_script=""
+  routing_script="$(yq e -r ".\"$capability\".target.script // \"\"" "$ROUTING_DISPATCH" 2>/dev/null || true)"
+  [[ -n "$routing_script" ]] || return 1
+  script_allowed_for_d128 "$routing_script" || return 1
+
+  local map_type=""
+  map_type="$(yq e -r ".\"$capability\" | type" "$CAPABILITY_MAP" 2>/dev/null || true)"
+  [[ "$map_type" == "!!map" ]] || return 1
+
+  return 0
+}
+
 if [[ "$AUTO_MODE" == "true" ]]; then
   CAPABILITY="$(infer_capability_from_staged)"
   [[ -n "$CAPABILITY" ]] || fail "--auto could not infer capability from staged gate files"
@@ -84,9 +112,8 @@ fi
 [[ -n "$MUTATION" ]] || fail "--mutation requires a value"
 [[ -n "$RUN_KEY" ]] || fail "--run-key requires a value"
 
-allowed_cap="$(yq e -r ".allowed_capabilities[] | select(. == \"$CAPABILITY\")" "$POLICY" | head -n1 || true)"
-if [[ -z "$allowed_cap" ]]; then
-  fail "capability '$CAPABILITY' is not in d128 allowed_capabilities"
+if ! capability_allowed "$CAPABILITY"; then
+  fail "capability '$CAPABILITY' is not allowed by live routing/capability authorities"
 fi
 
 if [[ "$JSON_MODE" == "true" ]]; then
