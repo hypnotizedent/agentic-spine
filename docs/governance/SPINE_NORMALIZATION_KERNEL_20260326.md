@@ -119,13 +119,13 @@ These families enforce normalization laws but do not own independent behavioral 
 | Family | Reason For Hold |
 | --- | --- |
 | `tenant` | Tenant provisioning may be a first-class subsystem or may fold into authority law. Depends on whether multi-tenant becomes a durable operating concern or remains single-operator. |
-| `release` | Release zip and mirror sync may be a first-class subsystem or may rehome to a CI/CD surface. Depends on whether release ceremony stays in-spine or moves to pipeline. |
 
 ### Category Error — Rehome Out Of Core
 
 | Family | Target |
 | --- | --- |
 | `share` | `PlatformProvider` runtime. One-way publication to external share channels is provider adapter behavior, not spine normalization. |
+| `release` | `CI/CD` or publication runtime. Mirror sync, sanitization audit, and zip packaging are release/publication concerns, not core normalization. |
 
 ### Delete-Later Candidates
 

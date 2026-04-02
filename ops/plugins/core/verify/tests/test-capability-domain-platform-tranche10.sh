@@ -30,13 +30,13 @@ for cap_id in expected_tranche10:
     if cap_id not in core_caps:
         raise SystemExit(f"tranche-10 capability {cap_id} not assigned to core")
 
-if len(core_caps) < 92:
-    raise SystemExit(f"expected at least 92 core capabilities, found {len(core_caps)}")
-if len(core_fabric) < 90:
-    raise SystemExit(f"expected at least 90 core fabric capabilities, found {len(core_fabric)}")
+if len(core_caps) < 91:
+    raise SystemExit(f"expected at least 91 core capabilities, found {len(core_caps)}")
+if len(core_fabric) < 89:
+    raise SystemExit(f"expected at least 89 core fabric capabilities, found {len(core_fabric)}")
 
-if bundle["capability_membership"]["total_governed"] < 92:
-    raise SystemExit(f"core bundle total_governed below tranche-10 floor of 92, found {bundle['capability_membership']['total_governed']}")
+if bundle["capability_membership"]["total_governed"] < 91:
+    raise SystemExit(f"core bundle total_governed below tranche-10 floor of 91, found {bundle['capability_membership']['total_governed']}")
 if bundle["capability_membership"]["catalog_domain_external"] != 2:
     raise SystemExit("core bundle catalog_domain_external mismatch")
 
@@ -55,7 +55,7 @@ for cap_id in expected_tranche10:
         raise SystemExit(f"{cap_id} plane changed from fabric to {cfg.get('plane')}")
 
 print("PASS: retained platform authority capabilities remain assigned to core")
-print("PASS: core total governed >= 92, fabric >= 90, 2 domain_external")
+print("PASS: core total governed >= 91, fabric >= 89, 2 domain_external")
 print("PASS: core bundle and doc membership semantics updated")
 print(f"PASS: domain:none count = {none_count}")
 PY

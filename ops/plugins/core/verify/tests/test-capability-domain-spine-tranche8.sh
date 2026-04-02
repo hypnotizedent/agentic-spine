@@ -42,7 +42,6 @@ expected_tranche8 = [
     "spine.init",
     "spine.log.query",
     "spine.mcp.serve",
-    "spine.release.zip",
     "spine.replay",
     "spine.ripple.check",
     "spine.self-governance.projection.build",
@@ -86,7 +85,7 @@ for cap_id in expected_tranche8:
     if cfg.get("lifecycle") != "ready":
         raise SystemExit(f"{cap_id} lifecycle changed from ready to {cfg.get('lifecycle')}")
 
-print("PASS: 31 tranche-8 capabilities assigned to core")
+print("PASS: 30 tranche-8 capabilities assigned to core")
 print("PASS: core total governed = 81, 79 fabric, 2 domain_external")
 print("PASS: core bundle and doc membership semantics explicit")
 print(f"PASS: domain:none count = {none_count}")

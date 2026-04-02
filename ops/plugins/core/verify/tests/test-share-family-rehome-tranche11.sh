@@ -16,7 +16,8 @@ cap_map = (root / "ops/bindings/capability_map.yaml").read_text()
 manifest = (root / "ops/plugins/MANIFEST.yaml").read_text()
 gate_registry = (root / "ops/bindings/gate.registry.yaml").read_text()
 core_lock = (root / "docs/core/CORE_LOCK.md").read_text()
-mirror_contract = (root / "ops/bindings/github.mirror.contract.yaml").read_text()
+mirror_contract_path = root / "ops/bindings/github.mirror.contract.yaml"
+mirror_contract = mirror_contract_path.read_text() if mirror_contract_path.exists() else ""
 cert_manifest = (root / "docs/reference/generated/certification/CERTIFICATION_MANIFEST_20260323.yaml").read_text()
 
 share_caps = [
