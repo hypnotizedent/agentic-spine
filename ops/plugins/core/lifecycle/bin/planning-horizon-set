@@ -139,6 +139,28 @@ _set_fm_field() {
   mv "$tmp_file" "$file"
 }
 
+_unset_fm_field() {
+  local file="$1" field="$2"
+  local tmp_file
+  tmp_file="$(mktemp "${file}.tmp.XXXXXX")"
+
+  awk -v field="$field" '
+    BEGIN { in_fm=0 }
+    {
+      if ($0 == "---") {
+        if (in_fm == 0) { in_fm=1; print; next }
+        if (in_fm == 1) { in_fm=2; print; next }
+      }
+      if (in_fm == 1 && index($0, field ":") == 1) {
+        next
+      }
+      print
+    }
+  ' "$file" > "$tmp_file"
+
+  mv "$tmp_file" "$file"
+}
+
 _scope_file_to_json() {
   local file="$1"
   python3 - "$file" <<'PY'
@@ -222,6 +244,11 @@ fi
 # Apply horizon
 _set_fm_field "$SCOPE_FILE" "horizon" "$HORIZON"
 _set_fm_field "$SCOPE_FILE" "status" "$normalized_status"
+if [[ "$stale_closed_promoted" -eq 1 ]]; then
+  _unset_fm_field "$SCOPE_FILE" "closed_at"
+  _unset_fm_field "$SCOPE_FILE" "disposition"
+  _unset_fm_field "$SCOPE_FILE" "completion_level"
+fi
 
 # Apply readiness if specified
 if [[ -n "$READINESS" ]]; then

@@ -332,6 +332,11 @@ def upsert_loop(conn: sqlite3.Connection, loop: dict[str, Any]) -> None:
 
     raw_st = loop.get("status")
     status = str(raw_st).strip() if raw_st else "active"
+    reopened_statuses = {"active", "planned"}
+    close_keys = ("closed_at", "disposition", "completion_level")
+    if status in reopened_statuses:
+        for key in close_keys:
+            loop.pop(key, None)
 
     now = utc_now_text()
     existing = conn.execute(
