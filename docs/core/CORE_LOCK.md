@@ -47,7 +47,7 @@ This key is used everywhere:
 | Terminal entry | `./bin/ops cap run session.v3.attach -- --allow-no-loop` | Canonical public terminal startup |
 | Session start (internal) | `./bin/ops cap run session.start` | Bootstrap subroutine; not public entry |
 | Verify | `./bin/ops cap run verify.run -- fast` | Canonical drift gate entrypoint |
-| Worktree lifecycle | `ops/plugins/core/ops/bin/worktree-lifecycle-*` | Workspace/worktree control surfaces |
+| Worktree lifecycle | `ops/plugins/core/lifecycle/bin/worktree-lifecycle-*` | Workspace/worktree control surfaces |
 | Repo bootstrap | `ops/plugins/core/authority/bin/project-governance-bootstrap` | API-first Gitea repo ensure + remote alignment |
 
 ## Drift Gates

@@ -6,8 +6,8 @@ SPINE_ROOT="$ROOT"
 source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
 
-GEN_WORKER="$ROOT/ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py"
-GEN_BOOT="$ROOT/ops/plugins/core/ops/bin/gen-boot-entry-surface.sh"
+GEN_WORKER="$ROOT/ops/plugins/core/authority/bin/gen-terminal-worker-runtime-v2.py"
+GEN_BOOT="$ROOT/ops/plugins/core/authority/bin/gen-boot-entry-surface.sh"
 
 PASS=0
 FAIL=0

@@ -3,7 +3,7 @@
 # generate-scaffold.sh — Auto-generates SPINE_SCAFFOLD.md from live contracts
 #
 # Usage:
-#   ./ops/plugins/core/ops/bin/generate-scaffold.sh > SPINE_SCAFFOLD.md
+#   ./ops/plugins/core/authority/bin/generate-scaffold.sh > SPINE_SCAFFOLD.md
 #
 # Requirements: bash, grep, awk, wc, date
 # No external dependencies (yq, python, etc.)

@@ -51,7 +51,7 @@ if [[ "$APPLY_MODE" -eq 1 ]]; then
   spine_tx_track "$ROOT/ops/bindings/routing.dispatch.yaml"
 fi
 
-CMD=(python3 "$ROOT/ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py" --root "$ROOT" --target dispatch)
+CMD=(python3 "$ROOT/ops/plugins/core/authority/bin/gen-terminal-worker-runtime-v2.py" --root "$ROOT" --target dispatch)
 if [[ "$APPLY_MODE" -eq 1 ]]; then
   CMD+=(--apply)
 else

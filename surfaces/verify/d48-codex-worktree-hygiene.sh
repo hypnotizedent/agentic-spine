@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-SCRIPT="$SPINE_CODE/ops/plugins/core/ops/bin/worktree-lifecycle-reconcile"
+SCRIPT="$SPINE_CODE/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile"
 
 if [[ ! -x "$SCRIPT" ]]; then
   echo "D48 FAIL: missing lifecycle reconcile script: $SCRIPT" >&2

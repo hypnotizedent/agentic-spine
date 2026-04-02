@@ -13,7 +13,7 @@ root = Path(sys.argv[1])
 caps = yaml.safe_load((root / "ops/capabilities.yaml").read_text())["capabilities"]
 manifest = (root / "ops/plugins/MANIFEST.yaml").read_text()
 legacy_path = root / "ops/plugins/core/translator/bin/deploy-translator-service"
-rehomed_path = root / "ops/plugins/core/ops/bin/deploy-translator-service"
+rehomed_path = root / "ops/plugins/core/authority/bin/deploy-translator-service"
 
 if not rehomed_path.exists():
     raise SystemExit("rehomed translator deploy shim missing under ops")

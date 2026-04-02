@@ -51,7 +51,7 @@ if [[ "$APPLY_MODE" -eq 1 ]]; then
   spine_tx_track "$ROOT/ops/bindings/terminal.launcher.view.yaml"
 fi
 
-CMD=(python3 "$ROOT/ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py" --root "$ROOT" --target launcher)
+CMD=(python3 "$ROOT/ops/plugins/core/authority/bin/gen-terminal-worker-runtime-v2.py" --root "$ROOT" --target launcher)
 if [[ "$APPLY_MODE" -eq 1 ]]; then
   CMD+=(--apply)
 else

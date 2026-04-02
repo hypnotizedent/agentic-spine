@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-STATUS_SCRIPT="$ROOT/ops/plugins/core/ops/bin/worktree-session-status"
+STATUS_SCRIPT="$ROOT/ops/plugins/core/lifecycle/bin/worktree-session-status"
 CONTRACT="$ROOT/ops/bindings/worktree.session.isolation.yaml"
 
 if [[ ! -f "$CONTRACT" ]]; then

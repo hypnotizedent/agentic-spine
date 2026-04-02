@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
 source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
-RUNNER="$ROOT/ops/plugins/core/ops/bin/operator-hygiene-reconcile"
+RUNNER="$ROOT/ops/plugins/core/lifecycle/bin/operator-hygiene-reconcile"
 
 PASS=0
 FAIL=0

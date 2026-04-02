@@ -38,7 +38,7 @@ cd ~/code/agentic-spine
   --parent-loop <LOOP-ID>
 
 # Controller-only exception on root main: clean-entry exact landing.
-./ops/plugins/core/ops/bin/git-stage-commit-scoped \
+./ops/plugins/core/lifecycle/bin/git-stage-commit-scoped \
   --source-treeish <treeish-or-stash-ref> \
   --path <exact-file> \
   --message "..."
@@ -110,8 +110,8 @@ Work is done when runtime, control plane, bindings/projections, and residue all 
 **Attach can tolerate governed hotspot recovery context while classifying work:**
 - Dirty files in ops/bindings/*.yaml (contracts, gaps, registries)
 - Dirty files in ops/commands/tests/*.sh (test files)
-- Dirty files in ops/plugins/core/ops/bin/* (lifecycle scripts)
-- Dirty files in ops/plugins/core/ops/tests/* (lifecycle tests)
+- Dirty files in ops/plugins/core/lifecycle/bin/* (lifecycle scripts)
+- Dirty files in ops/plugins/core/lifecycle/tests/* (lifecycle tests)
 - Dirty files in surfaces/verify/*.sh (gates)
 
 That tolerance is not landing authority. Root `main` still returns to clean state unless the controller is in an explicit `staged_only` landing window for one exact slice.

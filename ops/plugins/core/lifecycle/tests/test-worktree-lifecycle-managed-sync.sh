@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
 source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
-SYNC="$ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-managed-sync"
+SYNC="$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-managed-sync"
 
 PASS=0
 FAIL=0

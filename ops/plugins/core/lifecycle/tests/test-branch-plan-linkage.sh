@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
 source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
-RECONCILE="$ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-reconcile"
+RECONCILE="$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile"
 PLANS_CREATE="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-create"
 PLANS_RECONCILE="$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-reconcile"
 LOOPS_CREATE="$ROOT/ops/plugins/core/lifecycle/bin/loops-create"

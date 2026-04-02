@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
 source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
-ROUTE="$ROOT/ops/plugins/core/ops/bin/workflow-route"
+ROUTE="$ROOT/ops/plugins/core/orchestration/bin/workflow-route"
 
 PASS=0
 FAIL=0

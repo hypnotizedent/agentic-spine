@@ -32,8 +32,12 @@ for arg in "$@"; do
 done
 
 if [[ "$APPLY_MODE" -eq 1 && "$CHECK_MODE" -eq 1 ]]; then
-  echo "gen-worker-usage-docs FAIL: --apply and --check are mutually exclusive" >&2
+  echo "gen-worker-catalog FAIL: --apply and --check are mutually exclusive" >&2
   exit 1
+fi
+
+if [[ "$APPLY_MODE" -eq 0 ]]; then
+  CHECK_MODE=1
 fi
 
 if [[ "$APPLY_MODE" -eq 1 ]]; then
@@ -44,13 +48,14 @@ if [[ "$APPLY_MODE" -eq 1 ]]; then
   fi
 
   spine_tx_init
+  spine_tx_track "$ROOT/ops/bindings/terminal.worker.catalog.yaml"
   spine_tx_track "$ROOT/docs/reference/generated/worker-usage"
 fi
 
-CMD=(python3 "$ROOT/ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py" --root "$ROOT" --target usage)
+CMD=(python3 "$ROOT/ops/plugins/core/authority/bin/gen-terminal-worker-runtime-v2.py" --root "$ROOT" --target catalog --target usage)
 if [[ "$APPLY_MODE" -eq 1 ]]; then
   CMD+=(--apply)
-elif [[ "$CHECK_MODE" -eq 1 ]]; then
+else
   CMD+=(--check)
 fi
 CMD+=("${EXTRA_ARGS[@]}")

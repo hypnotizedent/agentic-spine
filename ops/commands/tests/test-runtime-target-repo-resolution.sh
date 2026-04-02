@@ -224,7 +224,7 @@ TARGET_DEBUG_CANON="$(cd "$TARGET" && cd debug && pwd -P)"
 (
   cd "$TARGET"
   env -u SPINE_TARGET_REPO SPINE_ROOT="$ROOT" SPINE_REPO="$ROOT" SPINE_CODE="$ROOT" \
-    "$ROOT/ops/plugins/core/ops/bin/operator-hygiene-reconcile" --json > "$t5_json"
+    "$ROOT/ops/plugins/core/lifecycle/bin/operator-hygiene-reconcile" --json > "$t5_json"
 )
 assert_eq "$(python3 - <<'PY' "$t5_json"
 import json, sys
@@ -294,7 +294,7 @@ ROOT_USAGE_HASH_BEFORE="$(shasum -a 256 "$ROOT/docs/reference/generated/worker-u
 (
   cd "$WORKER_FIXTURE"
   env -u SPINE_TARGET_REPO SPINE_ROOT="$ROOT" SPINE_REPO="$ROOT" SPINE_CODE="$ROOT" \
-    python3 "$ROOT/ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py" --target usage >/dev/null
+    python3 "$ROOT/ops/plugins/core/authority/bin/gen-terminal-worker-runtime-v2.py" --target usage >/dev/null
 )
 ROOT_CATALOG_HASH_AFTER="$(shasum -a 256 "$ROOT/ops/bindings/terminal.worker.catalog.yaml" | awk '{print $1}')"
 ROOT_USAGE_HASH_AFTER="$(shasum -a 256 "$ROOT/docs/reference/generated/worker-usage/README.md" | awk '{print $1}')"

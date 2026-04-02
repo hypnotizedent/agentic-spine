@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$ROOT}"
 source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
 spine_paths_init
-NORMALIZE="$ROOT/ops/plugins/core/ops/bin/worktree-lifecycle-root-normalize"
+NORMALIZE="$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-root-normalize"
 
 PASS=0
 FAIL=0

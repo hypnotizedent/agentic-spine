@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-SCRIPT="$ROOT/ops/plugins/core/ops/bin/git-stage-commit-scoped"
+SCRIPT="$ROOT/ops/plugins/core/lifecycle/bin/git-stage-commit-scoped"
 
 PASS=0
 FAIL=0

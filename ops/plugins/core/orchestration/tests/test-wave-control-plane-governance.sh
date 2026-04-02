@@ -266,7 +266,6 @@ mkdir -p \
   "$T2B_REPO/ops/plugins/core/loops/bin" \
   "$T2B_REPO/ops/plugins/core/lifecycle/bin" \
   "$T2B_REPO/ops/plugins/core/lifecycle/lib" \
-  "$T2B_REPO/ops/plugins/core/ops/bin" \
   "$T2B_REPO/ops/bindings" \
   "$T2B_STATE/loop-scopes"
 copy_runtime_libs "$T2B_REPO"
@@ -348,7 +347,7 @@ objective: fixture residue cleanup
 ---
 EOF
 
-cat > "$T2B_REPO/ops/plugins/core/ops/bin/worktree-lifecycle-cleanup" <<'EOF'
+cat > "$T2B_REPO/ops/plugins/core/lifecycle/bin/worktree-lifecycle-cleanup" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 mode="report-only"
@@ -410,7 +409,7 @@ JSON
     ;;
 esac
 EOF
-chmod +x "$T2B_REPO/ops/plugins/core/ops/bin/worktree-lifecycle-cleanup"
+chmod +x "$T2B_REPO/ops/plugins/core/lifecycle/bin/worktree-lifecycle-cleanup"
 
 init_fixture_repo "$T2B_REPO"
 git -C "$T2B_REPO" branch keep-LOOP-T-CLEAN-residue >/dev/null
@@ -510,7 +509,7 @@ T4_REPO="$T4_ROOT/repo"
 T4_RUNTIME="$T4_REPO/runtime"
 mkdir -p \
   "$T4_REPO/ops/plugins/core/orchestration/bin" \
-  "$T4_REPO/ops/plugins/core/ops/bin" \
+  "$T4_REPO/ops/plugins/core/lifecycle/bin" \
   "$T4_REPO/ops/commands" \
   "$T4_RUNTIME"
 copy_runtime_libs "$T4_REPO"
@@ -526,7 +525,7 @@ JSON
 EOF
 chmod +x "$T4_REPO/ops/plugins/core/orchestration/bin/authority-resolve"
 
-cat > "$T4_REPO/ops/plugins/core/ops/bin/worktree-lifecycle-rehydrate" <<'EOF'
+cat > "$T4_REPO/ops/plugins/core/lifecycle/bin/worktree-lifecycle-rehydrate" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 branch=""
@@ -548,7 +547,7 @@ printf 'branch=%s\n' "$branch"
 printf 'lane=%s\n' "$lane"
 printf 'worktree=%s\n' "$target"
 EOF
-chmod +x "$T4_REPO/ops/plugins/core/ops/bin/worktree-lifecycle-rehydrate"
+chmod +x "$T4_REPO/ops/plugins/core/lifecycle/bin/worktree-lifecycle-rehydrate"
 
 cat > "$T4_REPO/ops/commands/wave.sh" <<'EOF'
 #!/usr/bin/env bash

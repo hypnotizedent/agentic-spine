@@ -17,7 +17,7 @@ fixture_root() {
   local dir="$1"
   mkdir -p \
     "$dir/ops/bindings" \
-    "$dir/ops/plugins/core/ops/bin" \
+    "$dir/ops/plugins/core/authority/bin" \
     "$dir/docs/reference/generated/worker-usage"
   cat > "$dir/ops/bindings/terminal.worker.projection.contract.yaml" <<'YAML'
 status: authoritative
@@ -31,19 +31,19 @@ policy:
   tracked_usage_root: docs/reference/generated/worker-usage
   runtime_usage_root: runtime/domain-state/projections/worker-usage
 generator:
-  path: ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py
+  path: ops/plugins/core/authority/bin/gen-terminal-worker-runtime-v2.py
 governed_surfaces:
   - target: catalog
-    wrapper: ops/plugins/core/ops/bin/gen-worker-catalog.sh
+    wrapper: ops/plugins/core/authority/bin/gen-worker-catalog.sh
     tracked_output: ops/bindings/terminal.worker.catalog.yaml
   - target: dispatch
-    wrapper: ops/plugins/core/ops/bin/gen-routing-dispatch.sh
+    wrapper: ops/plugins/core/authority/bin/gen-routing-dispatch.sh
     tracked_output: ops/bindings/routing.dispatch.yaml
   - target: launcher
-    wrapper: ops/plugins/core/ops/bin/gen-launcher-view.sh
+    wrapper: ops/plugins/core/authority/bin/gen-launcher-view.sh
     tracked_output: ops/bindings/terminal.launcher.view.yaml
   - target: usage
-    wrapper: ops/plugins/core/ops/bin/gen-worker-usage-docs.sh
+    wrapper: ops/plugins/core/authority/bin/gen-worker-usage-docs.sh
     tracked_output: docs/reference/generated/worker-usage
     runtime_output: runtime/domain-state/projections/worker-usage
 YAML
@@ -58,7 +58,7 @@ MD
 write_pass_fixture() {
   local dir="$1"
   fixture_root "$dir"
-  cat > "$dir/ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py" <<'PY'
+  cat > "$dir/ops/plugins/core/authority/bin/gen-terminal-worker-runtime-v2.py" <<'PY'
 #!/usr/bin/env python3
 WORKER_USAGE_RUNTIME_REL = "runtime/domain-state/projections/worker-usage"
 def _resolve_root(value): return value
@@ -66,25 +66,25 @@ def _semantic_equal(kind, current, incoming): return current == incoming
 if __name__ == "__main__":
     print("--apply")
 PY
-  cat > "$dir/ops/plugins/core/ops/bin/gen-worker-catalog.sh" <<'SH'
+  cat > "$dir/ops/plugins/core/authority/bin/gen-worker-catalog.sh" <<'SH'
 #!/usr/bin/env bash
 spine_paths_init
 echo --root "$ROOT" --apply --check >/dev/null
 exit 0
 SH
-  cat > "$dir/ops/plugins/core/ops/bin/gen-routing-dispatch.sh" <<'SH'
+  cat > "$dir/ops/plugins/core/authority/bin/gen-routing-dispatch.sh" <<'SH'
 #!/usr/bin/env bash
 spine_paths_init
 echo --root "$ROOT" --apply --check >/dev/null
 exit 0
 SH
-  cat > "$dir/ops/plugins/core/ops/bin/gen-launcher-view.sh" <<'SH'
+  cat > "$dir/ops/plugins/core/authority/bin/gen-launcher-view.sh" <<'SH'
 #!/usr/bin/env bash
 spine_paths_init
 echo --root "$ROOT" --apply --check >/dev/null
 exit 0
 SH
-  cat > "$dir/ops/plugins/core/ops/bin/gen-worker-usage-docs.sh" <<'SH'
+  cat > "$dir/ops/plugins/core/authority/bin/gen-worker-usage-docs.sh" <<'SH'
 #!/usr/bin/env bash
 spine_paths_init
 echo --root "$ROOT" --apply --check >/dev/null
@@ -100,33 +100,33 @@ for arg in "$@"; do
 done
 exit 0
 SH
-  chmod +x "$dir"/ops/plugins/core/ops/bin/*
+  chmod +x "$dir"/ops/plugins/core/authority/bin/*
 }
 
 write_fail_fixture() {
   local dir="$1"
   fixture_root "$dir"
-  cat > "$dir/ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py" <<'PY'
+  cat > "$dir/ops/plugins/core/authority/bin/gen-terminal-worker-runtime-v2.py" <<'PY'
 #!/usr/bin/env python3
 print("bad")
 PY
-  cat > "$dir/ops/plugins/core/ops/bin/gen-worker-catalog.sh" <<'SH'
+  cat > "$dir/ops/plugins/core/authority/bin/gen-worker-catalog.sh" <<'SH'
 #!/usr/bin/env bash
 exit 1
 SH
-  cat > "$dir/ops/plugins/core/ops/bin/gen-routing-dispatch.sh" <<'SH'
+  cat > "$dir/ops/plugins/core/authority/bin/gen-routing-dispatch.sh" <<'SH'
 #!/usr/bin/env bash
 exit 1
 SH
-  cat > "$dir/ops/plugins/core/ops/bin/gen-launcher-view.sh" <<'SH'
+  cat > "$dir/ops/plugins/core/authority/bin/gen-launcher-view.sh" <<'SH'
 #!/usr/bin/env bash
 exit 1
 SH
-  cat > "$dir/ops/plugins/core/ops/bin/gen-worker-usage-docs.sh" <<'SH'
+  cat > "$dir/ops/plugins/core/authority/bin/gen-worker-usage-docs.sh" <<'SH'
 #!/usr/bin/env bash
 exit 1
 SH
-  chmod +x "$dir"/ops/plugins/core/ops/bin/*
+  chmod +x "$dir"/ops/plugins/core/authority/bin/*
 }
 
 echo "worker-projection-audit tests"
