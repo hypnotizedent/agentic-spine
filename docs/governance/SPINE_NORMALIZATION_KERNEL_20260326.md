@@ -89,9 +89,16 @@ These families own distinct behavioral loops that cannot be reduced to normaliza
 | Family | Reason |
 | --- | --- |
 | `alerting` | Owns probe → dispatch → cooldown loop. Behavioral, not normalization. |
+| `briefing` | Owns the scheduled daily spine briefing assembly loop and its modular section runners. This is an operator-facing workload, not a normalization helper. |
+| `proposals` | Owns the governed change packet lifecycle (`submit` / `list` / `apply`) and remains the mailroom-gated write path for multi-surface mutations. |
 | `recovery` | Owns failure → match → action → escalation loop. Behavioral, not normalization. |
 | `work-index` | Owns unified work visibility aggregation. Operational surface, not normalization. |
 | `ops/plugins/infra/observability/bin` | Owns live infrastructure probing across 15+ endpoints. Behavioral, not normalization. |
+
+Subloop 4 keep-set lock as of `2026-04-02`:
+`alerting`, `briefing`, `proposals`, and `work-index` are removed from the
+active fold queue. They remain live first-string operating subsystems while the
+bindings reduction continues.
 
 ### Folded Into The Normalization Kernel
 
