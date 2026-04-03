@@ -292,16 +292,9 @@ closed_gaps = [g for g in linked if g.get("status") in ("fixed", "closed", "wont
 result = {
     "open": [{"gap_id": g["id"], "severity": g.get("severity", "medium"), "regression_lock_id": g.get("regression_lock_id", "")} for g in open_gaps],
     "closed": [{"gap_id": g["id"], "severity": g.get("severity", "medium")} for g in closed_gaps],
-    "total_db_count": gsa.gap_count(conn),
+    "parity": gsa.db_parity_snapshot(conn, gaps_yaml),
 }
-
-# Also get YAML gap count for projection agreement check.
-yaml_doc = gsa.load_yaml(gaps_yaml)
-if isinstance(yaml_doc, dict):
-    yaml_gaps = yaml_doc.get("gaps", [])
-    result["yaml_count"] = len(yaml_gaps) if isinstance(yaml_gaps, list) else 0
-else:
-    result["yaml_count"] = 0
+result["total_db_count"] = gsa.gap_count(conn)
 
 conn.close()
 print(json.dumps(result))
@@ -314,8 +307,13 @@ PY
 # Parse gap query result.
 open_gap_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d['open']))" "$gap_query_result")"
 closed_gap_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d['closed']))" "$gap_query_result")"
-total_db_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['total_db_count'])" "$gap_query_result")"
-yaml_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['yaml_count'])" "$gap_query_result")"
+parity_match="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print('1' if d['parity'].get('match') else '0')" "$gap_query_result")"
+parity_db_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['parity'].get('db_count', 0))" "$gap_query_result")"
+parity_yaml_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['parity'].get('yaml_count', 0))" "$gap_query_result")"
+parity_db_only_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d['parity'].get('in_db_not_yaml', [])))" "$gap_query_result")"
+parity_yaml_only_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d['parity'].get('in_yaml_not_db', [])))" "$gap_query_result")"
+parity_archived_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['parity'].get('archived_in_db', 0))" "$gap_query_result")"
+parity_archive_ref="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['parity'].get('archive_ref', ''))" "$gap_query_result")"
 
 # Slice completion means one bounded wave slice is done, not that the parent loop
 # is complete. Preserve loop continuity and leave loop-linked gaps untouched.
@@ -396,19 +394,16 @@ else
 fi
 
 # Surface 3: Projection Agreement
-if [[ "$total_db_count" -gt 0 && "$yaml_count" -gt 0 ]]; then
-  gap_divergence=$(( total_db_count - yaml_count ))
-  [[ "$gap_divergence" -lt 0 ]] && gap_divergence=$(( -gap_divergence ))
-  if [[ "$gap_divergence" -gt 5 ]]; then
-    surface_projection="WARN"
-    surface_projection_note="YAML stale by $gap_divergence gaps (run: gaps-authority-bridge project)"
+if [[ "$parity_match" == "1" ]]; then
+  surface_projection="PASS"
+  if [[ -n "$parity_archive_ref" ]]; then
+    surface_projection_note="YAML and SQLite aligned (active=$parity_db_count archived=$parity_archived_count split=$parity_archive_ref)"
   else
-    surface_projection="PASS"
-    surface_projection_note="YAML and SQLite aligned"
+    surface_projection_note="YAML and SQLite aligned (db=$parity_db_count yaml=$parity_yaml_count)"
   fi
 else
-  surface_projection="PASS"
-  surface_projection_note="gap count check passed (db=$total_db_count yaml=$yaml_count)"
+  surface_projection="WARN"
+  surface_projection_note="projection mismatch (db_only=$parity_db_only_count yaml_only=$parity_yaml_only_count active_db=$parity_db_count yaml=$parity_yaml_count; run: gaps-authority-bridge project)"
 fi
 
 # Surface 4: Residue Check

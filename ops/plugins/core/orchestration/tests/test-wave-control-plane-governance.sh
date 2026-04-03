@@ -201,6 +201,16 @@ def gap_count(conn):
     return 20
 
 
+def db_parity_snapshot(conn, gaps_yaml):
+    return {
+        "match": False,
+        "db_count": 20,
+        "yaml_count": 1,
+        "in_db_not_yaml": ["GAP-OPEN-1"],
+        "in_yaml_not_db": [],
+    }
+
+
 def load_yaml(path):
     return {"gaps": [{"id": "only-one"}]}
 EOF
@@ -327,6 +337,16 @@ def gap_count(conn):
     return 1
 
 
+def db_parity_snapshot(conn, gaps_yaml):
+    return {
+        "match": True,
+        "db_count": 1,
+        "yaml_count": 1,
+        "in_db_not_yaml": [],
+        "in_yaml_not_db": [],
+    }
+
+
 def load_yaml(path):
     return {"gaps": [{"id": "only-one"}]}
 EOF
@@ -438,6 +458,127 @@ if git -C "$T2B_REPO" branch --list "keep-LOOP-T-CLEAN-residue" | grep -q .; the
 else
   pass "cleanup stub removes loop residue branch"
 fi
+
+echo ""
+echo "── T2c: wave-finish accepts archive-split gap projection parity ──"
+T2C_ROOT="$(make_tmpdir)"
+T2C_REPO="$T2C_ROOT/repo"
+T2C_STATE="$T2C_REPO/state"
+mkdir -p \
+  "$T2C_REPO/ops/plugins/core/orchestration/bin" \
+  "$T2C_REPO/ops/plugins/core/loops/bin" \
+  "$T2C_REPO/ops/plugins/core/lifecycle/bin" \
+  "$T2C_REPO/ops/plugins/core/lifecycle/lib" \
+  "$T2C_REPO/ops/bindings" \
+  "$T2C_REPO/ops/archive" \
+  "$T2C_STATE/loop-scopes"
+copy_runtime_libs "$T2C_REPO"
+cp "$ROOT/ops/plugins/core/orchestration/bin/wave-finish" "$T2C_REPO/ops/plugins/core/orchestration/bin/"
+chmod +x "$T2C_REPO/ops/plugins/core/orchestration/bin/wave-finish"
+
+cat > "$T2C_REPO/ops/plugins/core/loops/bin/loop-closeout-finalize" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+matrix=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --acceptance-matrix) matrix="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cp "$matrix" "${SPINE_ROOT}/captured-matrix.md"
+printf 'loop.closeout.finalize stub\n'
+EOF
+chmod +x "$T2C_REPO/ops/plugins/core/loops/bin/loop-closeout-finalize"
+
+cat > "$T2C_REPO/ops/plugins/core/lifecycle/bin/gaps-authority-bridge" <<'EOF'
+#!/usr/bin/env python3
+print("ok")
+EOF
+chmod +x "$T2C_REPO/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
+
+cat > "$T2C_REPO/ops/plugins/core/lifecycle/lib/gaps_sql_authority.py" <<'EOF'
+from pathlib import Path
+
+
+class Conn:
+    def close(self):
+        pass
+
+
+def resolve_paths(root):
+    root = Path(root)
+    return root / "state" / "shared_authority.db", root / "ops" / "bindings" / "operational.gaps.yaml"
+
+
+def connect(db):
+    return Conn()
+
+
+def ensure_schema(conn):
+    return None
+
+
+def bootstrap_from_yaml(conn, gaps_yaml):
+    return None
+
+
+def fetch_gaps(conn):
+    return []
+
+
+def gap_count(conn):
+    return 6
+
+
+def db_parity_snapshot(conn, gaps_yaml):
+    return {
+        "match": True,
+        "db_count": 1,
+        "yaml_count": 1,
+        "in_db_not_yaml": [],
+        "in_yaml_not_db": [],
+        "archive_ref": "ops/archive/operational.gaps.archive.yaml",
+        "archived_in_db": 5,
+    }
+
+
+def load_yaml(path):
+    return {
+        "archive_ref": "ops/archive/operational.gaps.archive.yaml",
+        "gaps": [{"id": "GAP-ACTIVE-1"}],
+    }
+EOF
+
+cat > "$T2C_REPO/ops/bindings/operational.gaps.yaml" <<'EOF'
+archive_ref: ops/archive/operational.gaps.archive.yaml
+gaps:
+  - id: GAP-ACTIVE-1
+EOF
+
+cat > "$T2C_STATE/loop-scopes/LOOP-T-ARCHIVE.scope.md" <<'EOF'
+---
+loop_id: LOOP-T-ARCHIVE
+status: active
+owner: '@test'
+execution_mode: orchestrator_subagents
+execution_readiness: runnable
+objective: fixture archive split
+---
+EOF
+
+init_fixture_repo "$T2C_REPO"
+
+if env SPINE_ROOT="$T2C_REPO" SPINE_STATE="$T2C_STATE" \
+  bash "$T2C_REPO/ops/plugins/core/orchestration/bin/wave-finish" \
+    --loop-id LOOP-T-ARCHIVE --disposition landed --completion-level slice_complete > "$T2C_ROOT/landed.out"; then
+  pass "wave-finish lands when archive-split parity matches"
+else
+  fail "wave-finish lands when archive-split parity matches"
+fi
+
+assert_file_contains "$T2C_ROOT/landed.out" "Projections:    PASS" "wave-finish reports PASS for archive-split projection parity"
+assert_file_contains "$T2C_ROOT/landed.out" "split=ops/archive/operational.gaps.archive.yaml" "wave-finish explains archive-split parity source"
 
 echo ""
 echo "── T3: wave-execute close auto-runs wave-finish ──"
