@@ -55,6 +55,36 @@ print(eval(expr, {"payload": payload}))
 PY
 }
 
+scope_current_state_eval() {
+  local scope_file="$1" expr="$2"
+  python3 - "$scope_file" "$expr" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(r"(?ms)^## Current State\s*\n+(?P<section>.*?)(?=^## |\Z)", text)
+payload = {}
+if match:
+    labels = {
+        "- Blocker:": "blocker",
+        "- Next action:": "next_action",
+        "- Time budget:": "time_budget",
+        "- Required continuity output:": "required_continuity_output",
+    }
+    for raw_line in match.group("section").splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        for prefix, key in labels.items():
+            if stripped.startswith(prefix):
+                payload[key] = stripped[len(prefix):].strip()
+                break
+expr = sys.argv[2]
+print(eval(expr, {"payload": payload}))
+PY
+}
+
 echo "loop continuity update tests"
 echo "════════════════════════════"
 
@@ -80,6 +110,17 @@ evidence_refs: []
 ---
 
 # Loop Scope: LOOP-TEST-CONTINUITY-20260330
+
+## Objective
+
+Preserve continuity on an active loop.
+
+## Current State
+
+- Blocker: none.
+- Next action: `stale_continuity_pointer`
+- Time budget: `1 session`
+- Required continuity output: `.evidence/spine/reports/finalization/fixture.md`
 EOF
 
 cat > "$STATE/loop-scopes/LOOP-TEST-MALFORMED-20260330.scope.md" <<'EOF'
@@ -116,6 +157,9 @@ assert_eq "$(json_eval "$UPDATE_JSON" "payload['loop_id']")" "LOOP-TEST-CONTINUI
 assert_eq "$(json_eval "$UPDATE_JSON" "payload['next_action']")" "Resume the proof from loop continuity, not chat memory." "continuity update returns next_action"
 assert_eq "$(scope_frontmatter_eval "$STATE/loop-scopes/LOOP-TEST-CONTINUITY-20260330.scope.md" "payload['next_action']")" "Resume the proof from loop continuity, not chat memory." "projected scope stores next_action"
 assert_eq "$(scope_frontmatter_eval "$STATE/loop-scopes/LOOP-TEST-CONTINUITY-20260330.scope.md" "'/tmp/continuity-proof.md' in payload['evidence_refs']")" "True" "projected scope stores evidence ref"
+assert_eq "$(scope_current_state_eval "$STATE/loop-scopes/LOOP-TEST-CONTINUITY-20260330.scope.md" "payload['next_action']")" '`Resume the proof from loop continuity, not chat memory.`' "projected scope body updates Current State next_action"
+assert_eq "$(scope_current_state_eval "$STATE/loop-scopes/LOOP-TEST-CONTINUITY-20260330.scope.md" "payload['time_budget']")" '`1 session`' "projected scope body preserves Current State time budget"
+assert_eq "$(scope_current_state_eval "$STATE/loop-scopes/LOOP-TEST-CONTINUITY-20260330.scope.md" "payload['required_continuity_output']")" '`.evidence/spine/reports/finalization/fixture.md`' "projected scope body preserves continuity output"
 
 printf 'malformed scope payload\n' > "$STATE/loop-scopes/LOOP-TEST-MALFORMED-20260330.scope.md"
 

@@ -710,10 +710,10 @@ def _render_scope_file(loop: dict[str, Any]) -> str:
     loop_id = loop.get("loop_id", "UNKNOWN")
     objective = loop.get("objective", "")
 
-    body = (
+    base_body = (
         "<!-- Authority: loop scope files are projections of shared_authority.db.\n"
         "     Runtime location: $SPINE_STATE/loop-scopes/ (externalized from repo).\n"
-        "     Mutation paths: loops-authority-bridge upsert/close. -->\n"
+        "     Mutation paths: loops-authority-bridge upsert/close/continuity. -->\n"
         "\n"
         f"# Loop Scope: {loop_id}\n"
         "\n"
@@ -722,7 +722,126 @@ def _render_scope_file(loop: dict[str, Any]) -> str:
         f"{objective}\n"
     )
 
+    body = _sync_current_state_section(base_body, loop)
     return f"---\n{fm_text}\n---\n{body}"
+
+
+CURRENT_STATE_SECTION_RE = re.compile(
+    r"(?ms)^## Current State\s*\n+(?P<section>.*?)(?=^## |\Z)"
+)
+OBJECTIVE_SECTION_RE = re.compile(r"(?ms)^## Objective\s*\n+.*?(?=^## |\Z)")
+
+
+def _extract_current_state_fields(body: str) -> tuple[dict[str, str], list[str]]:
+    fields: dict[str, str] = {}
+    extras: list[str] = []
+    match = CURRENT_STATE_SECTION_RE.search(body)
+    if not match:
+        return fields, extras
+
+    labels = {
+        "- Blocker:": "blocker",
+        "- Next action:": "next_action",
+        "- Time budget:": "time_budget",
+        "- Required continuity output:": "required_continuity_output",
+    }
+    for raw_line in match.group("section").splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+        matched = False
+        for prefix, key in labels.items():
+            if stripped.startswith(prefix):
+                fields[key] = stripped[len(prefix) :].strip()
+                matched = True
+                break
+        if not matched:
+            extras.append(line)
+    return fields, extras
+
+
+def _render_current_state_section(
+    loop: dict[str, Any],
+    *,
+    preserved_fields: dict[str, str] | None = None,
+    preserved_extras: list[str] | None = None,
+) -> str:
+    preserved_fields = preserved_fields or {}
+    preserved_extras = preserved_extras or []
+
+    status = str(loop.get("status") or "").strip().lower()
+    blocked_by = _normalize_string_list(loop.get("blocked_by"))
+    next_action = str(loop.get("next_action") or "").strip()
+
+    if status == "closed":
+        disposition = str(loop.get("disposition") or "closed").strip()
+        completion_level = str(loop.get("completion_level") or "").strip()
+        closed_note = f"Loop is closed ({disposition}"
+        if completion_level:
+            closed_note += f", {completion_level}"
+        closed_note += ")."
+        blocker_value = f"none. {closed_note}"
+    elif preserved_fields.get("blocker"):
+        blocker_value = preserved_fields["blocker"]
+    elif blocked_by:
+        blocker_value = ", ".join(f"`{item}`" for item in blocked_by)
+    else:
+        blocker_value = "none recorded in authority."
+
+    lines = [
+        "## Current State",
+        "",
+        f"- Blocker: {blocker_value}",
+    ]
+
+    if next_action:
+        lines.append(f"- Next action: `{next_action}`")
+    else:
+        lines.append("- Next action: none recorded in authority.")
+
+    time_budget = preserved_fields.get("time_budget", "").strip()
+    if time_budget:
+        lines.append(f"- Time budget: {time_budget}")
+
+    continuity_output = preserved_fields.get("required_continuity_output", "").strip()
+    if continuity_output:
+        lines.append(f"- Required continuity output: {continuity_output}")
+
+    for extra in preserved_extras:
+        if extra.strip():
+            lines.append(extra.rstrip())
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _sync_current_state_section(body: str, loop: dict[str, Any]) -> str:
+    preserved_fields, preserved_extras = _extract_current_state_fields(body)
+    rendered_section = _render_current_state_section(
+        loop,
+        preserved_fields=preserved_fields,
+        preserved_extras=preserved_extras,
+    )
+
+    if CURRENT_STATE_SECTION_RE.search(body):
+        updated = CURRENT_STATE_SECTION_RE.sub(rendered_section, body, count=1)
+    else:
+        objective_match = OBJECTIVE_SECTION_RE.search(body)
+        if objective_match:
+            prefix = body[: objective_match.end()].rstrip("\n")
+            suffix = body[objective_match.end() :].lstrip("\n")
+            updated = prefix + "\n\n" + rendered_section
+            if suffix:
+                updated += "\n" + suffix
+        else:
+            updated = body.rstrip("\n")
+            if updated:
+                updated += "\n\n"
+            updated += rendered_section
+
+    if not updated.endswith("\n"):
+        updated += "\n"
+    return updated
 
 
 def project_to_scope_files(
@@ -763,7 +882,8 @@ def project_to_scope_files(
                         if extra_key in loop and loop[extra_key] is not None:
                             new_fm[extra_key] = loop[extra_key]
                     fm_text = yaml.safe_dump(new_fm, sort_keys=False, allow_unicode=False).rstrip("\n")
-                    new_text = "---\n" + fm_text + "\n---\n" + "\n".join(body_lines)
+                    synced_body = _sync_current_state_section("\n".join(body_lines), loop)
+                    new_text = "---\n" + fm_text + "\n---\n" + synced_body
                     if not new_text.endswith("\n"):
                         new_text += "\n"
                     scope_path.write_text(new_text, encoding="utf-8")

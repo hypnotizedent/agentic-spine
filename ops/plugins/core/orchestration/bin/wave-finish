@@ -66,6 +66,29 @@ resolve_worktree_cleanup_token() {
 
 RESIDUE_CLEANUP_NOTE=""
 
+verify_orchestration_terminal_parity() {
+  local loop_id="$1"
+  local manifest="$SPINE_STATE/orchestration/$loop_id/manifest.yaml"
+  [[ -f "$manifest" ]] || return 0
+
+  local manifest_status
+  manifest_status="$(yq e -r '.status // ""' "$manifest" 2>/dev/null || echo "")"
+  [[ "$manifest_status" == "closed" ]] || {
+    echo "manifest status is '$manifest_status' (expected closed)"
+    return 1
+  }
+
+  local bad_lane_count
+  bad_lane_count="$(yq e -r '[.lanes[] | select((.status // "open") == "open" or (.status // "open") == "ticket-issued" or (.status // "open") == "entry-ready" or (.status // "open") == "validated")] | length' "$manifest" 2>/dev/null || echo "0")"
+  [[ "$bad_lane_count" =~ ^[0-9]+$ ]] || bad_lane_count=0
+  if [[ "$bad_lane_count" -gt 0 ]]; then
+    echo "$bad_lane_count orchestration lane(s) remain non-terminal in $manifest"
+    return 1
+  fi
+
+  echo "orchestration manifest closed with terminal lane state"
+}
+
 maybe_consume_worktree_cleanup_candidates() {
   [[ "$SKIP_RESIDUE" -eq 0 ]] || return 0
   [[ -x "$WORKTREE_CLEANUP_BIN" ]] || return 0
@@ -635,6 +658,7 @@ EOF
 # ── 4c: Close loop via loop-closeout-finalize ────────────────────
 
 loop_status_summary="closed ($DISPOSITION, ${COMPLETION_LEVEL:-n/a})"
+orchestration_status_summary="n/a"
 if [[ "$PRESERVE_PARENT_LOOP" -eq 1 ]]; then
   echo "Preserving parent loop continuity: completion_level=slice_complete (loop remains active)"
   echo ""
@@ -673,6 +697,12 @@ else
 
   echo "$closeout_output"
   echo ""
+
+  if ! orchestration_status_summary="$(verify_orchestration_terminal_parity "$LOOP_ID")"; then
+    echo "wave.finish FAIL: orchestration terminal parity check failed" >&2
+    echo "  - $orchestration_status_summary" >&2
+    exit 1
+  fi
 fi
 
 # ── Step 5: Emit summary ────────────────────────────────────────
@@ -698,6 +728,7 @@ echo "  Projections:    $surface_projection"
 echo "  Residue:        $surface_residue"
 echo ""
 echo "Loop Status:      $loop_status_summary"
+echo "Orchestration:    $orchestration_status_summary"
 echo ""
 echo "================================================================="
 echo "WAVE FINISH COMPLETE"

@@ -11,6 +11,7 @@ source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 source "$ROOT/ops/lib/git-lock.sh"
 SCOPES_DIR="$SPINE_STATE/loop-scopes"
+ORCHESTRATION_STATE_DIR="$SPINE_STATE/orchestration"
 
 usage() {
   cat <<'USAGE'
@@ -53,6 +54,70 @@ Behavior:
     to $SPINE_STATE/archive/{completed-receipts,completed-prompts,old-waves}/
   - purges orphaned .fuse_hidden* files and stale .pid/.lock files
 USAGE
+}
+
+sync_orchestration_manifest_closeout() {
+  local loop_id="$1"
+  local disposition="$2"
+  local completion_level="$3"
+  local closed_at="$4"
+  local loop_dir="$ORCHESTRATION_STATE_DIR/$loop_id"
+  local manifest="$loop_dir/manifest.yaml"
+
+  [[ -f "$manifest" ]] || return 0
+
+  mkdir -p "$loop_dir"
+
+  local -a lane_ids=()
+  local -a missing_lanes=()
+  local lane=""
+
+  mapfile -t lane_ids < <(yq e -r '.lanes | keys | .[]' "$manifest" 2>/dev/null | sed '/^$/d' || true)
+  for lane in "${lane_ids[@]:-}"; do
+    local lane_status
+    lane_status="$(yq e -r ".lanes.\"$lane\".status // \"open\"" "$manifest" 2>/dev/null || echo "open")"
+    if [[ "$lane_status" != "integrated" && "$lane_status" != "closed" ]]; then
+      missing_lanes+=("$lane")
+      yq e -i ".lanes.\"$lane\".closed_from_status = \"$lane_status\"" "$manifest"
+      yq e -i ".lanes.\"$lane\".status = \"closed\"" "$manifest"
+      yq e -i ".lanes.\"$lane\".closed_at = \"$closed_at\"" "$manifest"
+      yq e -i ".lanes.\"$lane\".closed_reason = \"loop_closeout_finalize\"" "$manifest"
+    fi
+  done
+
+  yq e -i '.status = "closed"' "$manifest"
+  yq e -i ".updated_at = \"$closed_at\"" "$manifest"
+  yq e -i ".closed_at = \"$closed_at\"" "$manifest"
+  yq e -i '.closed_by = "loop.closeout.finalize"' "$manifest"
+  yq e -i ".disposition = \"$disposition\"" "$manifest"
+  if [[ -n "$completion_level" ]]; then
+    yq e -i ".completion_level = \"$completion_level\"" "$manifest"
+  fi
+
+  local closed_file="$loop_dir/closed.yaml"
+  {
+    echo "loop_id: $loop_id"
+    echo "status: closed"
+    echo "closed_at: $closed_at"
+    echo 'closed_by: "loop.closeout.finalize"'
+    if ((${#missing_lanes[@]} > 0)); then
+      echo "forced: true"
+    else
+      echo "forced: false"
+    fi
+    echo "missing_lanes:"
+    if ((${#missing_lanes[@]} > 0)); then
+      for lane in "${missing_lanes[@]}"; do
+        echo "  - \"$lane\""
+      done
+    else
+      echo '  - "none"'
+    fi
+  } > "$closed_file"
+
+  echo "orchestration_manifest=$manifest"
+  echo "orchestration_closed_file=$closed_file"
+  echo "orchestration_missing_lanes=${#missing_lanes[@]}"
 }
 
 SELF_CHECK=0
@@ -535,6 +600,19 @@ if ! python3 "$LOOPS_BRIDGE" "${bridge_close_args[@]}" >/dev/null; then
   exit 1
 fi
 
+ORCHESTRATION_MANIFEST_PATH=""
+ORCHESTRATION_CLOSED_FILE=""
+ORCHESTRATION_MISSING_LANES=0
+orch_sync_output="$(sync_orchestration_manifest_closeout "$LOOP_ID" "$DISPOSITION" "$COMPLETION_LEVEL" "$timestamp")" || {
+  echo "loop.closeout.finalize FAIL: failed to synchronize orchestration manifest closeout for $LOOP_ID" >&2
+  exit 1
+}
+if [[ -n "$orch_sync_output" ]]; then
+  ORCHESTRATION_MANIFEST_PATH="$(printf '%s\n' "$orch_sync_output" | sed -n 's/^orchestration_manifest=//p' | tail -1)"
+  ORCHESTRATION_CLOSED_FILE="$(printf '%s\n' "$orch_sync_output" | sed -n 's/^orchestration_closed_file=//p' | tail -1)"
+  ORCHESTRATION_MISSING_LANES="$(printf '%s\n' "$orch_sync_output" | sed -n 's/^orchestration_missing_lanes=//p' | tail -1)"
+fi
+
 if [[ -z "$RECEIPT_PATH" ]]; then
   if [[ "$RECEIPT_DIR_REL" == /* ]]; then
     RECEIPT_PATH="$RECEIPT_DIR_REL/${LOOP_ID}.closeout.md"
@@ -568,6 +646,9 @@ cat > "$RECEIPT_PATH" <<EOF
 - evidence_reference: ${EVIDENCE:-n/a}
 - propagation_evidence: ${PROPAGATION_EVIDENCE:-n/a}
 - propagation_required: $PROPAGATION_REQUIRED
+- orchestration_manifest: ${ORCHESTRATION_MANIFEST_PATH:-n/a}
+- orchestration_closed_file: ${ORCHESTRATION_CLOSED_FILE:-n/a}
+- orchestration_missing_lanes: ${ORCHESTRATION_MISSING_LANES:-0}
 - closeout_gate: D289 loop-closeout-completeness-lock
 - capability: loop.closeout.finalize
 - run_key: ${SPINE_CAP_RUN_KEY:-manual}
@@ -731,6 +812,9 @@ echo "completion_level=${COMPLETION_LEVEL:-n/a}"
 echo "linked_open_gaps_before=$linked_open_count"
 echo "linked_gaps_closed=$closed_gap_count"
 echo "receipt=$RECEIPT_PATH"
+echo "orchestration_manifest=${ORCHESTRATION_MANIFEST_PATH:-n/a}"
+echo "orchestration_closed_file=${ORCHESTRATION_CLOSED_FILE:-n/a}"
+echo "orchestration_missing_lanes=${ORCHESTRATION_MISSING_LANES:-0}"
 echo "branch_cleanup_status=$BRANCH_CLEANUP_STATUS"
 echo "branch_cleanup_branch=${CLEANUP_BRANCH:-none}"
 echo "branch_cleanup_reason=$BRANCH_CLEANUP_REASON"

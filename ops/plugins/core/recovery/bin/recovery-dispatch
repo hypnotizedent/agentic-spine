@@ -74,22 +74,48 @@ validate_action_types
 
 recovery_init_state
 
-mapfile -t match_indices < <(
-  GATE_ID="$GATE_ID" FAILURE_CLASS="$FAILURE_CLASS" yq e -r '
-    .actions
-    | to_entries
-    | map(
-        select(
-          ((.value.trigger.failure_class // "deterministic") == strenv(FAILURE_CLASS)) and
-          (
-            ((.value.trigger.gate_ids // []) | length == 0) or
+select_match_indices() {
+  local binding_file="$1"
+  local gate_id="$2"
+  local failure_class="$3"
+  local exact_json fallback_json
+
+  exact_json="$(
+    GATE_ID="$gate_id" FAILURE_CLASS="$failure_class" yq e -o=json '
+      .actions
+      | to_entries
+      | map(
+          select(
+            ((.value.trigger.failure_class // "deterministic") == strenv(FAILURE_CLASS)) and
             ((.value.trigger.gate_ids // []) | contains([strenv(GATE_ID)]))
           )
         )
-      )
-    | .[].key
-  ' "$BINDING_FILE" 2>/dev/null || true
-)
+      | map(.key)
+    ' "$binding_file" 2>/dev/null || echo "[]"
+  )"
+  if [[ "$(jq -r 'length' <<<"$exact_json" 2>/dev/null || echo 0)" -gt 0 ]]; then
+    jq -r '.[]' <<<"$exact_json"
+    return 0
+  fi
+
+  fallback_json="$(
+    FAILURE_CLASS="$failure_class" yq e -o=json '
+      .actions
+      | to_entries
+      | map(
+          select(
+            ((.value.trigger.failure_class // "deterministic") == strenv(FAILURE_CLASS)) and
+            (((.value.trigger.gate_ids // []) | length) == 0) and
+            ((.value.trigger.fallback // false) == true)
+          )
+        )
+      | map(.key)
+    ' "$binding_file" 2>/dev/null || echo "[]"
+  )"
+  jq -r '.[]' <<<"$fallback_json"
+}
+
+mapfile -t match_indices < <(select_match_indices "$BINDING_FILE" "$GATE_ID" "$FAILURE_CLASS")
 
 emit_result() {
   local matched="$1"
