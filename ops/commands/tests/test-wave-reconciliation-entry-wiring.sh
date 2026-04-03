@@ -313,6 +313,114 @@ close_out="$(
 )"
 assert_contains "$close_out" "Wave '$close_wave' closed." "close succeeds from implemented state when role is close"
 
+collect_wave="WAVE-20260402-93"
+mkdir -p "$runtime/waves/$collect_wave"
+cat > "$runtime/waves/$collect_wave/state.json" <<EOF
+{
+  "wave_id": "$collect_wave",
+  "status": "active",
+  "created_at": "2026-04-02T12:20:00Z",
+  "objective": "collect close-role precedence fixture",
+  "lifecycle_state": "validated",
+  "workspace": {
+    "repo": "$repo",
+    "branch": "main",
+    "worktree": "$repo"
+  },
+  "packet": {
+    "wave_id": "$collect_wave",
+    "loop_id": "LOOP-RECON",
+    "owner_terminal": "SPINE-CONTROL-01",
+    "current_role": "worker",
+    "next_role": "close",
+    "deadline_utc": "2026-04-03T12:20:00Z",
+    "horizon": "now",
+    "execution_readiness": "runnable",
+    "claimed_paths": ["ops/commands/wave.sh"],
+    "lane_outcomes": []
+  },
+  "role_flow": {
+    "current_role": "qc",
+    "next_role": "close",
+    "last_transition": {
+      "task_id": "D3",
+      "from_role": "worker",
+      "to_role": "qc",
+      "completed_at": "2026-04-02T12:20:03Z",
+      "run_key": "CAP-20260402-120003__receipts.search__Rfixture03"
+    }
+  },
+  "dispatches": [
+    {
+      "task_id": "D1",
+      "lane": "execution",
+      "task": "fixture execution",
+      "status": "done",
+      "from_role": "researcher",
+      "to_role": "worker",
+      "run_key": "$execution_run_key",
+      "completed_at": "2026-04-02T12:20:01Z"
+    },
+    {
+      "task_id": "D2",
+      "lane": "control",
+      "task": "fixture control",
+      "status": "done",
+      "from_role": "worker",
+      "to_role": "close",
+      "run_key": "CAP-20260402-120002__lifecycle.health__Rfixture02",
+      "completed_at": "2026-04-02T12:20:02Z",
+      "expected_output_refs": {
+        "verify_ref": "$execution_run_key",
+        "cleanup_ref": "$cleanup_ref",
+        "closeout_ref": "$runtime/closeout-race.md",
+        "linkage_ref": "$runtime/linkage-race.md"
+      }
+    },
+    {
+      "task_id": "D3",
+      "lane": "audit",
+      "task": "fixture audit",
+      "status": "done",
+      "from_role": "worker",
+      "to_role": "qc",
+      "run_key": "CAP-20260402-120003__receipts.search__Rfixture03",
+      "completed_at": "2026-04-02T12:20:03Z"
+    }
+  ],
+  "watcher_checks": [],
+  "preflight": {
+    "domain": "dispatch-pushability",
+    "started_at": "2026-04-02T12:20:01Z",
+    "finished_at": "2026-04-02T12:20:01Z",
+    "duration_s": 0,
+    "verdict": "go",
+    "blockers": [],
+    "next_action": "Proceed with dispatch."
+  }
+}
+EOF
+
+collect_out="$(
+  env HOME="$tmpdir" SPINE_REPO="$repo" SPINE_RUNTIME_ROOT="$runtime" SPINE_STATE="$state_root" \
+    bash "$repo/ops/commands/wave.sh" collect "$collect_wave" 2>&1
+)"
+assert_contains "$collect_out" "WAVE COLLECT" "collect succeeds on close-role precedence fixture"
+python3 - <<'PY' "$runtime/waves/$collect_wave/state.json"
+import json, sys
+state = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+role_flow = state.get("role_flow") or {}
+assert role_flow.get("current_role") == "close", role_flow
+assert role_flow.get("next_role", "") in ("", None), role_flow
+PY
+pass "collect preserves completed close handoff over later audit ack"
+
+close_race_out="$(
+  env HOME="$tmpdir" SPINE_REPO="$repo" SPINE_RUNTIME_ROOT="$runtime" SPINE_STATE="$state_root" \
+    bash "$repo/ops/commands/wave.sh" close "$collect_wave" --disposition deferred 2>&1
+)"
+assert_contains "$close_race_out" "Wave '$collect_wave' closed." "close succeeds after collect normalizes close-role precedence"
+
 echo "════════════════════════════════════════"
 echo "PASS: $PASS"
 echo "FAIL: $FAIL"

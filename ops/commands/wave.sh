@@ -4461,6 +4461,13 @@ if completed:
         return 0
     completed.sort(key=lambda d: (_dispatch_order(d), str(d.get("completed_at") or d.get("dispatched_at") or "")))
     last_done = completed[-1]
+    close_done = [
+        d for d in completed
+        if str(d.get("to_role", "")).strip() in close_aliases
+    ]
+    if close_done:
+        close_done.sort(key=lambda d: (_dispatch_order(d), str(d.get("completed_at") or d.get("dispatched_at") or "")))
+        last_done = close_done[-1]
     last_to_role = str(last_done.get("to_role", "")).strip()
     last_from_role = str(last_done.get("from_role", "")).strip()
     promotion_next = promotion_next_by_role.get(last_to_role, "")
@@ -5162,6 +5169,33 @@ try:
 
     role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
     current_role = str(role_flow.get("current_role", "")).strip()
+    completed_close_dispatches = [
+        d for d in dispatches
+        if isinstance(d, dict)
+        and str(d.get("status", "")).strip() == "done"
+        and str(d.get("to_role", "")).strip() in close_aliases
+    ]
+    if completed_close_dispatches and current_role not in close_aliases:
+        def _dispatch_order(dispatch):
+            task_id = str(dispatch.get("task_id", "")).strip()
+            if task_id.startswith("D") and task_id[1:].isdigit():
+                return int(task_id[1:])
+            return 0
+        completed_close_dispatches.sort(
+            key=lambda d: (_dispatch_order(d), str(d.get("completed_at") or d.get("dispatched_at") or ""))
+        )
+        authoritative_close = completed_close_dispatches[-1]
+        current_role = str(authoritative_close.get("to_role", "")).strip()
+        role_flow["current_role"] = current_role
+        role_flow["next_role"] = ""
+        role_flow["last_transition"] = {
+            "task_id": authoritative_close.get("task_id"),
+            "from_role": str(authoritative_close.get("from_role", "")).strip(),
+            "to_role": current_role,
+            "completed_at": authoritative_close.get("completed_at"),
+            "run_key": authoritative_close.get("run_key"),
+        }
+        state["role_flow"] = role_flow
     if close_aliases and current_role and current_role not in close_aliases:
         infra_violations.append(
             f"role flow blocked close: current_role={current_role} expected one of {sorted(close_aliases)}"
