@@ -11,6 +11,7 @@ source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 source "$ROOT/ops/lib/git-lock.sh"
 SCOPES_DIR="$SPINE_STATE/loop-scopes"
+SCOPES_ARCHIVE_DIR="$SPINE_STATE/archive/closed-loop-scopes"
 ORCHESTRATION_STATE_DIR="$SPINE_STATE/orchestration"
 
 usage() {
@@ -646,6 +647,16 @@ if ! python3 "$LOOPS_BRIDGE" "${bridge_close_args[@]}" >/dev/null; then
   exit 1
 fi
 
+ARCHIVED_SCOPE_FILE="$SCOPES_ARCHIVE_DIR/${LOOP_ID}.scope.md"
+mkdir -p "$SCOPES_ARCHIVE_DIR"
+if [[ -f "$SCOPE_FILE" ]]; then
+  mv -f "$SCOPE_FILE" "$ARCHIVED_SCOPE_FILE"
+fi
+if [[ ! -f "$ARCHIVED_SCOPE_FILE" ]]; then
+  echo "loop.closeout.finalize FAIL: archived scope file missing after closeout: $ARCHIVED_SCOPE_FILE" >&2
+  exit 1
+fi
+
 ORCHESTRATION_MANIFEST_PATH=""
 ORCHESTRATION_CLOSED_FILE=""
 ORCHESTRATION_MISSING_LANES=0
@@ -695,6 +706,8 @@ cat > "$RECEIPT_PATH" <<EOF
 - orchestration_manifest: ${ORCHESTRATION_MANIFEST_PATH:-n/a}
 - orchestration_closed_file: ${ORCHESTRATION_CLOSED_FILE:-n/a}
 - orchestration_missing_lanes: ${ORCHESTRATION_MISSING_LANES:-0}
+- scope_archive_dir: $SCOPES_ARCHIVE_DIR
+- archived_scope_file: $ARCHIVED_SCOPE_FILE
 - closeout_gate: D289 loop-closeout-completeness-lock
 - capability: loop.closeout.finalize
 - run_key: ${SPINE_CAP_RUN_KEY:-manual}
@@ -858,6 +871,8 @@ echo "completion_level=${COMPLETION_LEVEL:-n/a}"
 echo "linked_open_gaps_before=$linked_open_count"
 echo "linked_gaps_closed=$closed_gap_count"
 echo "receipt=$RECEIPT_PATH"
+echo "scope_archive_dir=$SCOPES_ARCHIVE_DIR"
+echo "archived_scope_file=$ARCHIVED_SCOPE_FILE"
 echo "orchestration_manifest=${ORCHESTRATION_MANIFEST_PATH:-n/a}"
 echo "orchestration_closed_file=${ORCHESTRATION_CLOSED_FILE:-n/a}"
 echo "orchestration_missing_lanes=${ORCHESTRATION_MISSING_LANES:-0}"

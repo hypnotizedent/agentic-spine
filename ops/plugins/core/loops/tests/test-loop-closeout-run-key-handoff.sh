@@ -19,6 +19,7 @@ mkdir -p "$scope_dir"
 
 loop_id="LOOP-CLOSEOUT-RUNKEY-HANDOFF-TEST"
 scope_file="$scope_dir/${loop_id}.scope.md"
+archived_scope_file="$runtime/state/archive/closed-loop-scopes/${loop_id}.scope.md"
 matrix_file="$tmpdir/ACCEPTANCE_MATRIX.md"
 receipt_file="$tmpdir/closeout-receipt.md"
 run_key="CAP-20260330-023900__wave.finish__Rfixture01"
@@ -56,6 +57,7 @@ EOF
 
 output="$(
   env SPINE_RUNTIME_ROOT="$runtime" SPINE_STATE="$runtime/state" \
+    SPINE_CAP_RUN_KEY="$run_key" OPS_TERMINAL_ROLE="SPINE-CONTROL-01" \
     bash "$SCRIPT" \
       --loop-id "$loop_id" \
       --acceptance-matrix "$matrix_file" \
@@ -73,16 +75,19 @@ output="$(
 
 pass "loop-closeout-finalize accepts wave-finish run-key handoff"
 
-python3 - <<'PY' "$receipt_file" "$scope_file"
+python3 - <<'PY' "$receipt_file" "$scope_file" "$archived_scope_file"
 import pathlib
 import sys
 
 receipt = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-scope = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+active_scope = pathlib.Path(sys.argv[2])
+archived_scope = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 assert "- matrix_run_key_count: 1" in receipt, receipt
-assert "status: closed" in scope, scope
+assert not active_scope.exists(), active_scope
+assert "status: closed" in archived_scope, archived_scope
+assert "archived_scope_file:" in receipt, receipt
 PY
-pass "closeout receipt records one accepted run key and loop closes"
+pass "closeout receipt records one accepted run key and loop archives"
 
 echo "PASS: $PASS"
 echo "FAIL: $FAIL"

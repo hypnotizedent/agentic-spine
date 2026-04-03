@@ -9,7 +9,8 @@ SQLite only. The scope-file projection is refreshed on demand via
 project_to_scope_files().
 
 Authority: SQLite (WAL mode, shared_authority.db -- same DB as gaps)
-Projection: .scope.md files in $SPINE_STATE/loop-scopes/ (on-demand)
+Projection: live .scope.md files in $SPINE_STATE/loop-scopes/ and archived
+closed scopes in $SPINE_STATE/archive/closed-loop-scopes/ (on-demand)
 """
 
 from __future__ import annotations
@@ -30,6 +31,16 @@ SCHEMA_MIGRATION_ID = "20260330_loops_authority_v2"
 ENV_DB_PATH = "LOOPS_DB_PATH"
 ENV_SCOPES_DIR = "LOOPS_SCOPES_DIR"
 DEFAULT_SCOPES_DIR_REL = "loop-scopes"
+DEFAULT_SCOPES_ARCHIVE_DIR_REL = "archive/closed-loop-scopes"
+LIVE_SCOPE_STATUSES = {"active", "planned", "draft", "open"}
+ARCHIVED_SCOPE_STATUSES = {
+    "closed",
+    "completed",
+    "deferred",
+    "superseded",
+    "abandoned",
+    "landed",
+}
 
 
 def utc_now() -> datetime:
@@ -102,6 +113,35 @@ def resolve_paths(root: Path) -> tuple[Path, Path]:
         os.environ.get(ENV_SCOPES_DIR, str(state_root / DEFAULT_SCOPES_DIR_REL))
     ).expanduser()
     return db_path, scopes_dir
+
+
+def resolve_scope_archive_dir(scopes_dir: Path) -> Path:
+    return scopes_dir.parent / DEFAULT_SCOPES_ARCHIVE_DIR_REL
+
+
+def iter_scope_projection_files(scopes_dir: Path) -> list[Path]:
+    files: list[Path] = []
+    if scopes_dir.exists():
+        files.extend(sorted(scopes_dir.glob("LOOP-*.scope.md")))
+    archive_dir = resolve_scope_archive_dir(scopes_dir)
+    if archive_dir.exists():
+        files.extend(sorted(archive_dir.glob("LOOP-*.scope.md")))
+    return files
+
+
+def is_live_scope_status(status: str | None) -> bool:
+    return str(status or "").strip().lower() in LIVE_SCOPE_STATUSES
+
+
+def is_archived_scope_status(status: str | None) -> bool:
+    return str(status or "").strip().lower() in ARCHIVED_SCOPE_STATUSES
+
+
+def _select_existing_scope_text(candidates: list[Path]) -> str | None:
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.read_text(encoding="utf-8")
+    return None
 
 
 # -- Connection ----------------------------------------------------------------
@@ -624,11 +664,8 @@ def _parse_scope_frontmatter(text: str) -> dict[str, Any] | None:
 
 
 def bootstrap_from_scope_files(conn: sqlite3.Connection, scopes_dir: Path) -> int:
-    """Import .scope.md files from the loop-scopes directory into SQLite."""
-    if not scopes_dir.exists():
-        return 0
-
-    scope_files = sorted(scopes_dir.glob("LOOP-*.scope.md"))
+    """Import projected .scope.md files from the live + archive scope surfaces."""
+    scope_files = iter_scope_projection_files(scopes_dir)
     if not scope_files:
         return 0
 
@@ -850,22 +887,31 @@ def project_to_scope_files(
 ) -> dict[str, Any]:
     """Write SQLite loop rows back to .scope.md files as projections.
 
-    Only active/planned loops get projected. Closed loops are not re-projected
-    unless they already have a scope file on disk (preserving existing content).
+    Live loops project into $SPINE_STATE/loop-scopes/. Non-live loops project
+    into $SPINE_STATE/archive/closed-loop-scopes/ and are removed from the live
+    scope directory so later projections do not resurrect closed residue.
     """
     all_loops = list_loops(conn)
     scopes_dir.mkdir(parents=True, exist_ok=True)
 
     projected = 0
+    archived_projected = 0
+    archive_dir = resolve_scope_archive_dir(scopes_dir)
+    archive_dir.mkdir(parents=True, exist_ok=True)
     for loop in all_loops:
         loop_id = loop.get("loop_id", "")
         if not loop_id:
             continue
-        scope_path = scopes_dir / f"{loop_id}.scope.md"
 
-        # For existing files, only update the frontmatter (preserve body).
-        if scope_path.exists():
-            existing_text = scope_path.read_text(encoding="utf-8")
+        scope_path = scopes_dir / f"{loop_id}.scope.md"
+        archive_path = archive_dir / f"{loop_id}.scope.md"
+        status = str(loop.get("status") or "").strip().lower()
+        is_archived = is_archived_scope_status(status)
+        target_path = archive_path if is_archived else scope_path
+        stale_path = scope_path if is_archived else archive_path
+
+        existing_text = _select_existing_scope_text([scope_path, archive_path])
+        if existing_text is not None:
             fm = _parse_scope_frontmatter(existing_text)
             if fm is not None:
                 # Replace frontmatter, keep body.
@@ -886,18 +932,28 @@ def project_to_scope_files(
                     new_text = "---\n" + fm_text + "\n---\n" + synced_body
                     if not new_text.endswith("\n"):
                         new_text += "\n"
-                    scope_path.write_text(new_text, encoding="utf-8")
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path.write_text(new_text, encoding="utf-8")
+                    if stale_path.exists():
+                        stale_path.unlink()
                     projected += 1
+                    if is_archived:
+                        archived_projected += 1
                     continue
 
         # For new files (or files without valid frontmatter), render from scratch.
         rendered = _render_scope_file(loop)
-        scope_path.write_text(rendered, encoding="utf-8")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(rendered, encoding="utf-8")
+        if stale_path.exists():
+            stale_path.unlink()
         projected += 1
+        if is_archived:
+            archived_projected += 1
 
     # Compute combined hash for watermark.
     combined_text = ""
-    for sf in sorted(scopes_dir.glob("LOOP-*.scope.md")):
+    for sf in iter_scope_projection_files(scopes_dir):
         try:
             combined_text += sf.read_text(encoding="utf-8")
         except Exception:
@@ -906,14 +962,16 @@ def project_to_scope_files(
     update_watermark(conn, "scope_files", combined_hash)
     conn.commit()
 
-    active_count = sum(1 for l in all_loops if l.get("status") in ("active", "planned"))
-    closed_count = sum(1 for l in all_loops if l.get("status") in ("closed", "landed"))
+    active_count = sum(1 for l in all_loops if is_live_scope_status(l.get("status")))
+    closed_count = sum(1 for l in all_loops if is_archived_scope_status(l.get("status")))
 
     return {
         "total": len(all_loops),
         "active": active_count,
         "closed": closed_count,
         "projected": projected,
+        "archived_projected": archived_projected,
+        "archive_dir": str(archive_dir),
         "scope_files_hash": combined_hash,
     }
 
@@ -932,16 +990,15 @@ def db_parity_snapshot(
     # Read scope files from filesystem.
     fs_loops: list[dict[str, Any]] = []
     fs_ids: set[str] = set()
-    if scopes_dir.exists():
-        for sf in sorted(scopes_dir.glob("LOOP-*.scope.md")):
-            try:
-                text = sf.read_text(encoding="utf-8")
-            except Exception:
-                continue
-            fm = _parse_scope_frontmatter(text)
-            if fm and isinstance(fm, dict) and fm.get("loop_id"):
-                fs_loops.append(loop_to_frontmatter(fm))
-                fs_ids.add(str(fm["loop_id"]))
+    for sf in iter_scope_projection_files(scopes_dir):
+        try:
+            text = sf.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        fm = _parse_scope_frontmatter(text)
+        if fm and isinstance(fm, dict) and fm.get("loop_id"):
+            fs_loops.append(loop_to_frontmatter(fm))
+            fs_ids.add(str(fm["loop_id"]))
 
     fs_json = json.dumps(fs_loops, sort_keys=True, default=str)
     db_ids = {l.get("loop_id", "") for l in db_entries}
@@ -958,6 +1015,7 @@ def db_parity_snapshot(
         "fs_count": len(fs_loops),
         "in_db_not_fs": sorted(db_ids - fs_ids),
         "in_fs_not_db": sorted(fs_ids - db_ids),
+        "archive_dir": str(resolve_scope_archive_dir(scopes_dir)),
         "watermark_hash": wm_row["sha256"] if wm_row else None,
         "watermark_version": int(wm_row["version"]) if wm_row else 0,
     }

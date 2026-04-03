@@ -10,7 +10,8 @@
 #   ops loops summary                         Show loop counts by status/severity
 #   ops loops collect                         (deprecated) Legacy receipt scanner
 #
-# Canonical: loop-scopes/*.scope.md are the SSOT for open work.
+# Canonical: loop-scopes/*.scope.md are the SSOT for open work; closed scope
+# history drains to archive/closed-loop-scopes/.
 # See: LOOP-MAILROOM-CONSOLIDATION-20260210 for the migration rationale.
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -21,6 +22,7 @@ spine_runtime_resolve_paths
 
 STATE_DIR="$SPINE_STATE"
 SCOPES_DIR="$STATE_DIR/loop-scopes"
+SCOPES_ARCHIVE_DIR="$STATE_DIR/archive/closed-loop-scopes"
 source "$SPINE_REPO/ops/lib/git-lock.sh"
 
 RECEIPTS_DIR="$SPINE_RECEIPTS"
@@ -41,7 +43,9 @@ Usage:
 Deprecated:
   ops loops collect                         Legacy receipt scanner (writes JSONL)
 
-Canonical source: .runtime/spine/state/loop-scopes/*.scope.md
+Canonical source:
+  - live: .runtime/spine/state/loop-scopes/*.scope.md
+  - archived closed: .runtime/spine/state/archive/closed-loop-scopes/*.scope.md
 EOF
 }
 
@@ -124,6 +128,13 @@ _is_open_status() {
     esac
 }
 
+_is_closed_status() {
+    case "$1" in
+        closed|completed|deferred|superseded|abandoned|landed) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Return pending proposal count for a loop and emit matching proposal ids.
 # Output format:
 #   line 1: numeric pending count
@@ -176,110 +187,150 @@ list_loops() {
     echo "=== $label ==="
     echo ""
 
-    if [[ ! -d "$SCOPES_DIR" ]]; then
+    if [[ ! -d "$SCOPES_DIR" && ! -d "$SCOPES_ARCHIVE_DIR" ]]; then
         echo "(no loops — $SCOPES_DIR not found)"
         return 0
     fi
+    python3 - "$SCOPES_DIR" "$SCOPES_ARCHIVE_DIR" "$filter" <<'PY'
+import re
+import sys
+from pathlib import Path
 
-    local has_scopes=false
-    for f in "$SCOPES_DIR"/*.scope.md; do
-        [[ -f "$f" ]] && has_scopes=true && break
-    done
-    if [[ "$has_scopes" == "false" ]]; then
-        echo "(no loops)"
-        return 0
-    fi
+scopes_dir = Path(sys.argv[1])
+archive_dir = Path(sys.argv[2])
+filter_mode = sys.argv[3]
 
-    local count=0
-    for scope_file in "$SCOPES_DIR"/*.scope.md; do
-        [[ -f "$scope_file" ]] || continue
+live_statuses = {"active", "draft", "open", "planned"}
+closed_statuses = {"closed", "completed", "deferred", "superseded", "abandoned", "landed"}
+valid_statuses = live_statuses | closed_statuses
+fm_re = re.compile(r"^---\s*$")
 
-        local loop_id status severity owner title execution_mode active_terminal blocked_by
-        local display_title="" state_tags="" detail=""
-        loop_id="$(_fm_field "$scope_file" "loop_id")"
-        [[ -z "$loop_id" ]] && continue
 
-        status="$(_fm_field "$scope_file" "status")"
-        severity="$(_fm_field "$scope_file" "severity")"
-        owner="$(_fm_field "$scope_file" "owner")"
-        title="$(_scope_title "$scope_file")"
-        execution_mode="$(_fm_field "$scope_file" "execution_mode")"
-        active_terminal="$(_fm_field "$scope_file" "active_terminal")"
-        blocked_by="$(_fm_field "$scope_file" "blocked_by")"
-        local horizon execution_readiness
-        horizon="$(_fm_field "$scope_file" "horizon")"
-        execution_readiness="$(_fm_field "$scope_file" "execution_readiness")"
+def parse_scope(path: Path) -> dict[str, str]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    fm = {}
+    in_fm = False
+    for line in lines:
+        if fm_re.match(line):
+            if in_fm:
+                break
+            in_fm = True
+            continue
+        if in_fm and ":" in line:
+            key, _, val = line.partition(":")
+            fm[key.strip()] = val.strip().strip('"')
 
-        # Normalize missing fields
-        [[ -z "$status" ]] && status="unknown"
-        [[ -z "$severity" ]] && severity="-"
-        [[ -z "$owner" ]] && owner="unassigned"
+    fm_count = 0
+    for line in lines:
+        if fm_re.match(line):
+            fm_count += 1
+            continue
+        if fm_count >= 2 and line.startswith("#"):
+            fm["_title"] = re.sub(r"^Loop Scope:\s*", "", re.sub(r"^#+\s*", "", line))
+            break
+    return fm
 
-        # Skip non-loop scope files (e.g. status: authoritative)
-        case "$status" in
-            active|draft|open|closed|planned) ;;
-            *) continue ;;
-        esac
 
-        # Only show title if it differs from loop_id
-        [[ "$title" != "$loop_id" ]] && display_title="$title"
+roots = [scopes_dir]
+if filter_mode != "--open":
+    roots.append(archive_dir)
 
-        [[ "$execution_mode" == "background" ]] && state_tags="${state_tags} [background]"
-        if [[ -n "$blocked_by" && "$blocked_by" != "none" ]]; then
-            state_tags="${state_tags} [blocked]"
-        fi
-        # Show horizon tag for non-now items
-        if [[ -n "$horizon" && "$horizon" != "now" ]]; then
-            state_tags="${state_tags} [${horizon}]"
-        fi
-        if [[ -n "$execution_readiness" && "$execution_readiness" == "blocked" ]]; then
-            state_tags="${state_tags} [not-runnable]"
-        fi
+entries = []
+seen = set()
+for root in roots:
+    if not root.is_dir():
+        continue
+    for path in sorted(root.glob("*.scope.md")):
+        fm = parse_scope(path)
+        loop_id = (fm.get("loop_id") or path.stem).strip()
+        status = (fm.get("status") or "").strip().lower()
+        if not loop_id or status not in valid_statuses or loop_id in seen:
+            continue
+        seen.add(loop_id)
 
-        case "$filter" in
-            --open)
-                _is_open_status "$status" || continue
-                printf "  [%-8s] %-15s %s%s" "$severity" "$owner" "$loop_id" "$state_tags"
-                [[ -n "$display_title" ]] && printf "  %s" "$display_title"
-                printf "\n"
-                detail=""
-                if [[ "$execution_mode" == "background" ]]; then
-                    detail="execution=background"
-                    [[ -n "$active_terminal" ]] && detail="${detail}; terminal=${active_terminal}"
-                fi
-                if [[ -n "$blocked_by" && "$blocked_by" != "none" ]]; then
-                    [[ -n "$detail" ]] && detail="${detail}; "
-                    detail="${detail}blocked_by=${blocked_by}"
-                fi
-                [[ -n "$detail" ]] && printf "  %-10s %-15s %s\n" "" "" "$detail"
-                ;;
-            --closed)
-                _is_open_status "$status" && continue
-                printf "  [%-8s] %-15s %s%s" "$severity" "$owner" "$loop_id" "$state_tags"
-                [[ -n "$display_title" ]] && printf "  %s" "$display_title"
-                printf "\n"
-                ;;
-            --all)
-                printf "  [%-8s] %-8s %-15s %s%s" "$severity" "$status" "$owner" "$loop_id" "$state_tags"
-                [[ -n "$display_title" ]] && printf "  %s" "$display_title"
-                printf "\n"
-                ;;
-        esac
-        count=$((count + 1))
-    done
+        if filter_mode == "--open" and status not in {"active", "draft", "open"}:
+            continue
+        if filter_mode == "--closed" and status not in closed_statuses:
+            continue
 
-    echo ""
-    if [[ "$filter" == "--open" ]]; then
-        echo "Open loops: $count"
-    else
-        echo "Loops shown: $count"
-    fi
+        entries.append(
+            {
+                "loop_id": loop_id,
+                "status": status,
+                "severity": (fm.get("severity") or "-").strip() or "-",
+                "owner": (fm.get("owner") or "unassigned").strip() or "unassigned",
+                "title": (fm.get("_title") or path.stem).strip() or path.stem,
+                "execution_mode": (fm.get("execution_mode") or "").strip(),
+                "active_terminal": (fm.get("active_terminal") or "").strip(),
+                "blocked_by": (fm.get("blocked_by") or "").strip(),
+                "horizon": (fm.get("horizon") or "").strip(),
+                "execution_readiness": (fm.get("execution_readiness") or "").strip(),
+            }
+        )
+
+if not entries:
+    print("(no loops)")
+    print()
+    if filter_mode == "--open":
+        print("Open loops: 0")
+    else:
+        print("Loops shown: 0")
+    raise SystemExit(0)
+
+for entry in entries:
+    state_tags = ""
+    if entry["execution_mode"] == "background":
+        state_tags += " [background]"
+    if entry["blocked_by"] and entry["blocked_by"] != "none":
+        state_tags += " [blocked]"
+    if entry["horizon"] and entry["horizon"] != "now":
+        state_tags += f" [{entry['horizon']}]"
+    if entry["execution_readiness"] == "blocked":
+        state_tags += " [not-runnable]"
+    display_title = entry["title"] if entry["title"] != entry["loop_id"] else ""
+
+    if filter_mode == "--open":
+        print(f"  [{entry['severity']:<8}] {entry['owner']:<15} {entry['loop_id']}{state_tags}", end="")
+        if display_title:
+            print(f"  {display_title}", end="")
+        print()
+        detail = ""
+        if entry["execution_mode"] == "background":
+            detail = "execution=background"
+            if entry["active_terminal"]:
+                detail = f"{detail}; terminal={entry['active_terminal']}"
+        if entry["blocked_by"] and entry["blocked_by"] != "none":
+            detail = f"{detail}; blocked_by={entry['blocked_by']}" if detail else f"blocked_by={entry['blocked_by']}"
+        if detail:
+            print(f"  {'':<10} {'':<15} {detail}")
+    elif filter_mode == "--closed":
+        print(f"  [{entry['severity']:<8}] {entry['owner']:<15} {entry['loop_id']}{state_tags}", end="")
+        if display_title:
+            print(f"  {display_title}", end="")
+        print()
+    else:
+        print(f"  [{entry['severity']:<8}] {entry['status']:<8} {entry['owner']:<15} {entry['loop_id']}{state_tags}", end="")
+        if display_title:
+            print(f"  {display_title}", end="")
+        print()
+
+print()
+if filter_mode == "--open":
+    print(f"Open loops: {len(entries)}")
+else:
+    print(f"Loops shown: {len(entries)}")
+PY
 }
 
 # ── Show loop ─────────────────────────────────────────────────────────────
 show_loop() {
     local loop_id="$1"
     local scope_file="$SCOPES_DIR/${loop_id}.scope.md"
+    local archived_scope_file="$SCOPES_ARCHIVE_DIR/${loop_id}.scope.md"
+
+    if [[ ! -f "$scope_file" && -f "$archived_scope_file" ]]; then
+        scope_file="$archived_scope_file"
+    fi
 
     if [[ ! -f "$scope_file" ]]; then
         echo "ERROR: Scope file not found: $scope_file" >&2
@@ -336,6 +387,7 @@ close_loop() {
     _require_close_disposition "$disposition" "$dispositions_csv"
 
     scope_file="$SCOPES_DIR/${loop_id}.scope.md"
+    local archived_scope_file="$SCOPES_ARCHIVE_DIR/${loop_id}.scope.md"
 
     if [[ ! -f "$scope_file" ]]; then
         echo "ERROR: Scope file not found: $scope_file" >&2
@@ -382,6 +434,10 @@ close_loop() {
     if ! python3 "$LOOPS_BRIDGE" "${bridge_close_args[@]}" >/dev/null; then
         echo "ERROR: loops-authority-bridge failed to close $loop_id" >&2
         exit 1
+    fi
+
+    if [[ ! -f "$scope_file" && -f "$archived_scope_file" ]]; then
+        scope_file="$archived_scope_file"
     fi
 
     if [[ -n "${close_summary:-}" ]]; then
@@ -442,7 +498,7 @@ summary() {
     echo "=== LOOP SUMMARY ==="
     echo ""
 
-    if [[ ! -d "$SCOPES_DIR" ]]; then
+    if [[ ! -d "$SCOPES_DIR" && ! -d "$SCOPES_ARCHIVE_DIR" ]]; then
         echo "Open: 0"
         echo "Closed: 0"
         echo "Total: 0"
@@ -450,15 +506,15 @@ summary() {
     fi
 
     # Python for reliable counting (associative arrays need bash 4+, macOS ships bash 3)
-    python3 - "$SCOPES_DIR" <<'PY'
-import os
+    python3 - "$SCOPES_DIR" "$SCOPES_ARCHIVE_DIR" <<'PY'
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 
 scopes_dir = Path(sys.argv[1])
-if not scopes_dir.is_dir():
+archive_dir = Path(sys.argv[2])
+if not scopes_dir.is_dir() and not archive_dir.is_dir():
     print("Open: 0\nClosed: 0\nTotal: 0")
     sys.exit(0)
 
@@ -471,39 +527,48 @@ owner_counts = Counter()
 background_open = []
 
 FM_RE = re.compile(r'^---\s*$')
+closed_statuses = {"closed", "completed", "deferred", "superseded", "abandoned", "landed"}
+seen_loop_ids = set()
 
-for f in sorted(scopes_dir.glob("*.scope.md")):
-    lines = f.read_text().splitlines()
-    in_fm = False
-    fm = {}
-    for line in lines:
-        if FM_RE.match(line):
-            if in_fm:
-                break
-            in_fm = True
-            continue
-        if in_fm and ':' in line:
-            key, _, val = line.partition(':')
-            fm[key.strip()] = val.strip().strip('"')
-
-    status = fm.get("status", "")
-    if status not in ("active", "draft", "open", "closed", "planned"):
+for root in (scopes_dir, archive_dir):
+    if not root.is_dir():
         continue
+    for f in sorted(root.glob("*.scope.md")):
+        lines = f.read_text().splitlines()
+        in_fm = False
+        fm = {}
+        for line in lines:
+            if FM_RE.match(line):
+                if in_fm:
+                    break
+                in_fm = True
+                continue
+            if in_fm and ':' in line:
+                key, _, val = line.partition(':')
+                fm[key.strip()] = val.strip().strip('"')
 
-    total += 1
-    severity = fm.get("severity", "unknown")
-    owner = fm.get("owner", "unassigned")
+        status = fm.get("status", "")
+        loop_id = fm.get("loop_id", f.stem)
+        if status not in ("active", "draft", "open", "planned") and status not in closed_statuses:
+            continue
+        if loop_id in seen_loop_ids:
+            continue
+        seen_loop_ids.add(loop_id)
 
-    if status in ("active", "draft", "open"):
-        open_count += 1
-        severity_counts[severity] += 1
-        owner_counts[owner] += 1
-        if fm.get("execution_mode", "") == "background":
-            background_open.append(fm.get("loop_id", f.stem))
-    elif status == "planned":
-        planned_count += 1
-    elif status == "closed":
-        closed_count += 1
+        total += 1
+        severity = fm.get("severity", "unknown")
+        owner = fm.get("owner", "unassigned")
+
+        if status in ("active", "draft", "open"):
+            open_count += 1
+            severity_counts[severity] += 1
+            owner_counts[owner] += 1
+            if fm.get("execution_mode", "") == "background":
+                background_open.append(loop_id)
+        elif status == "planned":
+            planned_count += 1
+        else:
+            closed_count += 1
 
 print("By Status:")
 print(f"  Open:    {open_count}")

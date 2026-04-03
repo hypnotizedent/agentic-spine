@@ -28,6 +28,15 @@ assert_file_contains() {
   fi
 }
 
+assert_not_exists() {
+  local file="$1" label="$2"
+  if [[ ! -e "$file" ]]; then
+    pass "$label"
+  else
+    fail "$label"
+  fi
+}
+
 scope_frontmatter_eval() {
   local scope_file="$1" expr="$2"
   python3 - "$scope_file" "$expr" <<'PY'
@@ -94,6 +103,7 @@ STATE="$TMPDIR_BASE/state"
 RUNTIME="$TMPDIR_BASE/runtime"
 LOOP_ID="LOOP-TEST-MANIFEST-PARITY-20260403"
 SCOPE_FILE="$STATE/loop-scopes/${LOOP_ID}.scope.md"
+ARCHIVED_SCOPE_FILE="$STATE/archive/closed-loop-scopes/${LOOP_ID}.scope.md"
 MANIFEST_DIR="$STATE/orchestration/$LOOP_ID"
 MANIFEST_FILE="$MANIFEST_DIR/manifest.yaml"
 RECEIPT_FILE="$TMPDIR_BASE/closeout.md"
@@ -185,15 +195,18 @@ else
   fail "loop-closeout-finalize closes active loop with manifest parity fixture"
 fi
 
-assert_eq "$(scope_frontmatter_eval "$SCOPE_FILE" "payload['status']")" "closed" "scope frontmatter moves to closed"
-assert_eq "$(scope_current_state_eval "$SCOPE_FILE" "payload['next_action']")" '`start_day6_operator_offload_drill`' "scope body Current State next_action follows authority"
-assert_file_contains "$SCOPE_FILE" "Loop is closed (landed, loop_complete)." "scope body states terminal closure"
+assert_not_exists "$SCOPE_FILE" "active scope projection is drained after closeout"
+assert_eq "$(scope_frontmatter_eval "$ARCHIVED_SCOPE_FILE" "payload['status']")" "closed" "archived scope frontmatter moves to closed"
+assert_eq "$(scope_current_state_eval "$ARCHIVED_SCOPE_FILE" "payload['next_action']")" '`start_day6_operator_offload_drill`' "archived scope body Current State next_action follows authority"
+assert_file_contains "$ARCHIVED_SCOPE_FILE" "Loop is closed (landed, loop_complete)." "archived scope body states terminal closure"
 assert_eq "$(yq_eval "$MANIFEST_FILE" '.status')" "closed" "manifest status moves to closed"
 assert_eq "$(yq_eval "$MANIFEST_FILE" '.lanes.EXECUTION.status')" "closed" "non-terminal manifest lane is closed"
 assert_eq "$(yq_eval "$MANIFEST_FILE" '.lanes.AUDIT.status')" "integrated" "integrated manifest lane remains integrated"
 assert_file_contains "$MANIFEST_DIR/closed.yaml" 'status: closed' "orchestration closed marker is written"
 assert_file_contains "$MANIFEST_DIR/closed.yaml" '"EXECUTION"' "orchestration closed marker records missing non-integrated lane"
 assert_file_contains "$RECEIPT_FILE" "orchestration_manifest:" "closeout receipt records orchestration manifest path"
+assert_file_contains "$RECEIPT_FILE" "scope_archive_dir:" "closeout receipt records scope archive dir"
+assert_file_contains "$RECEIPT_FILE" "archived_scope_file:" "closeout receipt records archived scope file"
 
 echo ""
 echo "────────────────────────────────────────"

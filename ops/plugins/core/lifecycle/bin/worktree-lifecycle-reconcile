@@ -727,11 +727,17 @@ current_git_index_path = git_index_path(repo_root)
 # Loop scopes (authoritative owner state)
 loop_scopes = {}
 loops_scope_dir = (repo_root / loops_scope_rel).resolve()
-if loops_scope_dir.exists():
-    for scope in loops_scope_dir.glob("*.scope.md"):
+loop_scope_archive_dir = loops_scope_dir.parent / "archive" / "closed-loop-scopes"
+terminal_scope_statuses = {"closed", "completed", "deferred", "superseded", "abandoned", "landed"}
+for scope_root in (loops_scope_dir, loop_scope_archive_dir):
+    if not scope_root.exists():
+        continue
+    for scope in scope_root.glob("*.scope.md"):
         fm = parse_frontmatter(scope)
         loop_id = (fm.get("loop_id") or scope.name.replace(".scope.md", "")).strip()
         status = (fm.get("status") or "").strip().lower()
+        if not loop_id or loop_id in loop_scopes:
+            continue
         loop_scopes[loop_id] = {
             "status": status,
             "disposition": (fm.get("disposition") or "").strip().lower(),
@@ -960,7 +966,7 @@ for wt, raw_branch in parse_worktrees(repo_root):
             if scope:
                 status = scope.get("status") or "unknown"
                 row["owner_disposition"] = (scope.get("disposition") or "").strip().lower() or None
-                if status == "closed":
+                if status in terminal_scope_statuses:
                     row["owner_state"] = "closed"
                     row["owner_age_hours"] = max(0.0, (now_epoch - scope["mtime"]) / 3600.0)
                 elif status in {"active", "planned", "draft", "open"}:
