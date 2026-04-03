@@ -2052,22 +2052,96 @@ PYROLE
     required_inputs_json="$(yq -o=json ".handoff_boundaries.\"$transition_gate\".required_input_refs // []" "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo '[]')"
     required_outputs_json="$(yq -o=json ".handoff_boundaries.\"$transition_gate\".required_output_refs // []" "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo '[]')"
 
-    # Auto-populate required refs from wave packet/scope context when not
-    # explicitly provided.  Orchestrator-generated dispatches should not fail
-    # for refs that can be derived from the loop scope (GAP-OP-1488/1489).
-    input_refs_json="$(python3 - "$sf" "$input_refs_json" "$required_inputs_json" <<'PYAUTOREFS'
+    # Auto-populate required refs from wave packet/scope context and prior done
+    # dispatches when not explicitly provided. Orchestrator-generated dispatches
+    # should not require manual ref injection when the evidence already exists
+    # in the wave state (GAP-OP-1488/1489 and reconciliation-entry smoke seam).
+    input_refs_json="$(python3 - "$sf" "$input_refs_json" "$required_inputs_json" "$lane" "$transition_gate" <<'PYAUTOREFS'
 import json, sys
+import os
+
 state = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 refs = json.loads(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else {}
 required = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else []
+lane = sys.argv[4] if len(sys.argv) > 4 else ""
+transition_gate = sys.argv[5] if len(sys.argv) > 5 else ""
 packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
 loop_id = str(packet.get("loop_id") or state.get("wave_id") or "").strip()
-import os
 state_root = os.environ.get("SPINE_STATE", os.path.join(os.environ.get("HOME", ""), "code", ".runtime", "spine", "state"))
 scope_path = f"{state_root}/loop-scopes/{loop_id}.scope.md" if loop_id else ""
+workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(state_root)))
+evidence_root = os.path.join(workspace_root, ".evidence", "spine")
+wave_id = str(state.get("wave_id") or "").strip()
+artifacts_dir = os.path.join(state_root, "orchestration", loop_id, "artifacts") if loop_id else ""
+wave_dir = os.path.dirname(sys.argv[1])
+dispatches = state.get("dispatches") if isinstance(state.get("dispatches"), list) else []
+
+def dispatch_order(dispatch):
+    task_id = str(dispatch.get("task_id", "")).strip()
+    if task_id.startswith("D") and task_id[1:].isdigit():
+        return int(task_id[1:])
+    return 0
+
+def latest_done(*lanes):
+    rows = [
+        d for d in dispatches
+        if isinstance(d, dict) and str(d.get("status", "")).strip() == "done"
+    ]
+    if lanes:
+        allowed = {lane_id for lane_id in lanes if lane_id}
+        rows = [d for d in rows if str(d.get("lane", "")).strip() in allowed]
+    rows.sort(key=lambda d: (dispatch_order(d), str(d.get("completed_at") or d.get("dispatched_at") or "")))
+    return rows[-1] if rows else {}
+
+def expected(dispatch, key):
+    if not isinstance(dispatch, dict):
+        return ""
+    expected_output_refs = dispatch.get("expected_output_refs")
+    if not isinstance(expected_output_refs, dict):
+        return ""
+    return str(expected_output_refs.get(key) or "").strip()
+
+def run_key_to_receipt(run_key):
+    rk = str(run_key or "").strip()
+    if not rk:
+        return ""
+    return os.path.join(evidence_root, "sessions", f"R{rk}", "receipt.md")
+
+def artifact(name):
+    if artifacts_dir:
+        return os.path.join(artifacts_dir, f"{wave_id}_{name}.md")
+    return os.path.join(wave_dir, f"{name.lower().replace('_', '-')}.md")
+
+execution_dispatch = latest_done("execution")
+audit_dispatch = latest_done("audit")
+
+latest_verify_run = (
+    expected(audit_dispatch, "verify_ref")
+    or str(audit_dispatch.get("run_key") or "").strip()
+    or str(execution_dispatch.get("run_key") or "").strip()
+)
+acceptance_ref = (
+    run_key_to_receipt(str(execution_dispatch.get("run_key") or "").strip())
+    or expected(execution_dispatch, "acceptance_criteria_ref")
+    or scope_path
+)
+implementation_ref = (
+    expected(audit_dispatch, "implementation_ref")
+    or expected(execution_dispatch, "implementation_ref")
+    or artifact("AUDIT" if lane == "control" and audit_dispatch else "EXECUTION")
+)
+cleanup_ref = (
+    expected(audit_dispatch, "cleanup_ref")
+    or artifact("CLEANUP")
+)
 auto_map = {
     "research_brief_ref": scope_path,
     "scope_ref": scope_path,
+    "execution_plan_ref": expected(execution_dispatch, "execution_plan_ref") or scope_path,
+    "acceptance_criteria_ref": acceptance_ref,
+    "implementation_ref": implementation_ref,
+    "verify_ref": latest_verify_run,
+    "cleanup_ref": cleanup_ref,
 }
 for key in required:
     k = str(key).strip()
@@ -2076,19 +2150,66 @@ for key in required:
 print(json.dumps(refs))
 PYAUTOREFS
 )"
-    output_refs_json="$(python3 - "$sf" "$output_refs_json" "$required_outputs_json" <<'PYAUTOOUTREFS'
+    output_refs_json="$(python3 - "$sf" "$output_refs_json" "$required_outputs_json" "$lane" "$transition_gate" <<'PYAUTOOUTREFS'
 import json, sys
+import os
+
 state = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 refs = json.loads(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else {}
 required = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else []
+lane = sys.argv[4] if len(sys.argv) > 4 else ""
+transition_gate = sys.argv[5] if len(sys.argv) > 5 else ""
 packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
 loop_id = str(packet.get("loop_id") or state.get("wave_id") or "").strip()
-import os
 state_root = os.environ.get("SPINE_STATE", os.path.join(os.environ.get("HOME", ""), "code", ".runtime", "spine", "state"))
 scope_path = f"{state_root}/loop-scopes/{loop_id}.scope.md" if loop_id else ""
+workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(state_root)))
+evidence_root = os.path.join(workspace_root, ".evidence", "spine")
+wave_id = str(state.get("wave_id") or "").strip()
+artifacts_dir = os.path.join(state_root, "orchestration", loop_id, "artifacts") if loop_id else ""
+wave_dir = os.path.dirname(sys.argv[1])
+dispatches = state.get("dispatches") if isinstance(state.get("dispatches"), list) else []
+
+def dispatch_order(dispatch):
+    task_id = str(dispatch.get("task_id", "")).strip()
+    if task_id.startswith("D") and task_id[1:].isdigit():
+        return int(task_id[1:])
+    return 0
+
+def latest_done(*lanes):
+    rows = [
+        d for d in dispatches
+        if isinstance(d, dict) and str(d.get("status", "")).strip() == "done"
+    ]
+    if lanes:
+        allowed = {lane_id for lane_id in lanes if lane_id}
+        rows = [d for d in rows if str(d.get("lane", "")).strip() in allowed]
+    rows.sort(key=lambda d: (dispatch_order(d), str(d.get("completed_at") or d.get("dispatched_at") or "")))
+    return rows[-1] if rows else {}
+
+def run_key_to_receipt(run_key):
+    rk = str(run_key or "").strip()
+    if not rk:
+        return ""
+    return os.path.join(evidence_root, "sessions", f"R{rk}", "receipt.md")
+
+def artifact(name):
+    if artifacts_dir:
+        return os.path.join(artifacts_dir, f"{wave_id}_{name}.md")
+    return os.path.join(wave_dir, f"{name.lower().replace('_', '-')}.md")
+
+execution_dispatch = latest_done("execution")
+latest_verify_run = str(execution_dispatch.get("run_key") or "").strip()
+acceptance_ref = run_key_to_receipt(latest_verify_run) or scope_path
+implementation_output = artifact("AUDIT" if lane == "audit" else "EXECUTION")
 auto_map = {
     "execution_plan_ref": scope_path,
-    "acceptance_criteria_ref": scope_path,
+    "acceptance_criteria_ref": acceptance_ref,
+    "implementation_ref": implementation_output,
+    "verify_ref": latest_verify_run,
+    "cleanup_ref": artifact("CLEANUP"),
+    "closeout_ref": artifact("CLOSEOUT"),
+    "linkage_ref": artifact("LINKAGE"),
 }
 for key in required:
     k = str(key).strip()
