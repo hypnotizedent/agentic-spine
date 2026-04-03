@@ -241,6 +241,32 @@ assert_eq "$(json_eval "$CLEANUP_JSON" 'payload["temp_clone_delete_candidates"][
 assert_eq "$(json_eval "$CLEANUP_JSON" 'sorted(item["subject"] for item in payload["stash_delete_candidates"])')" "['On main: aging main stash', 'On main: ancient main stash']" "cleanup candidates preserve stash identity"
 
 echo ""
+echo "── T2b: lease-only residue does not block stale worktree cleanup ──"
+LEASE_ONLY_WORKTREE="$TMPDIR_BASE/lease-only-worktree"
+git -C "$TARGET" worktree add -b feature/lease-only-residue "$LEASE_ONLY_WORKTREE" main >/dev/null 2>&1
+cat > "$LEASE_ONLY_WORKTREE/.spine-lane-lease.yaml" <<EOF
+status: pending_close
+owner: TEST
+loop_or_wave_id: WAVE-TEST-LEASE
+heartbeat_at: $(hours_ago_iso 72)
+ttl_hours: 24
+EOF
+LEASE_ONLY_JSON="$TMPDIR_BASE/cleanup-lease-only.json"
+(
+  cd "$TARGET"
+  env -u SPINE_TARGET_REPO -u SPINE_REPO -u SPINE_CODE \
+    SPINE_TMP="$TMP_ROOT" \
+    SPINE_WORKTREE_LIFECYCLE_WORKTREE_ROOT="$TMPDIR_BASE" \
+    SPINE_WORKTREE_LIFECYCLE_TEMP_CLONE_ROOT="$CLONE_ROOT" \
+    SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS="$MANAGED_WORKTREE" \
+    OPS_WORKTREE_DELETE_TOKEN=RELEASE_MAIN_CLEANUP_WINDOW \
+    "$CLEANUP" --mode report-only --json > "$LEASE_ONLY_JSON"
+)
+assert_eq "$(json_eval "$LEASE_ONLY_JSON" 'any(item["path"].endswith("lease-only-worktree") for item in payload["delete_candidates"])')" "True" "lease-only residue worktree becomes delete candidate with explicit token"
+assert_eq "$(json_eval "$LEASE_ONLY_JSON" 'any(row["path"].endswith("lease-only-worktree") and row.get("cleanup_lease_only_residue") for row in payload["worktrees"])')" "True" "lease-only residue is surfaced for audit"
+assert_eq "$(json_eval "$LEASE_ONLY_JSON" 'any(item["path"].endswith("lease-only-worktree") and "dirty_worktree" in item["reasons"] for item in payload["blocked"])')" "False" "lease-only residue no longer blocks stale cleanup as dirty worktree"
+
+echo ""
 echo "── T3: archive/delete removes clean stale clone and normalizes root ──"
 archive_out="$(
   cd "$TARGET" && \

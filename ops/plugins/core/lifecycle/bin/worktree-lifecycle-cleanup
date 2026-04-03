@@ -132,7 +132,7 @@ ACTIONS_LOG="$ARTIFACT_DIR/actions.log"
 SPINE_TARGET_REPO="$TARGET_ROOT" "$RECONCILE_SCRIPT" --json > "$REPORT_JSON"
 
 python3 - "$REPORT_JSON" "$REPORT_MD" "$MODE" "$BLOCK_ACTIVE_LEASE" "$REQUIRE_MERGED_OR_TOKEN" "$EXPLICIT_TOKEN" "$REQUIRE_CLEAN_WORKTREE_DELETE" "$REQUIRE_CLEAN_TEMP_CLONE_DELETE" "$TEMP_CLONE_GRACE_HOURS" "$NORMALIZE_ROOT_WHEN_HEAD_MATCHES_MAIN" <<'PY'
-import json, sys
+import json, subprocess, sys
 from pathlib import Path
 
 report = json.loads(Path(sys.argv[1]).read_text())
@@ -160,6 +160,26 @@ stash_blocked = []
 stash_delete_candidates = []
 root_normalization = {"candidate": None, "blocked": None}
 
+
+def lease_only_dirty(row):
+    lease = row.get("lease") or {}
+    if lease.get("active"):
+        return False
+    if row.get("owner_type") in {"loop", "wave"} and row.get("owner_state") == "active":
+        return False
+    wt = row.get("path")
+    if not wt or not Path(wt).exists():
+        return False
+    proc = subprocess.run(
+        ["git", "-C", wt, "status", "--porcelain", "--untracked-files=all"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return False
+    lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    return bool(lines) and all(line == "?? .spine-lane-lease.yaml" for line in lines)
+
 for row in rows:
     reasons = []
     lease = row.get("lease") or {}
@@ -172,8 +192,11 @@ for row in rows:
         reasons.append("active_lease")
     if require_merged_or_token and not row.get("merged_into_main", False) and not explicit_token:
         reasons.append("not_merged_no_token")
+    row["cleanup_lease_only_residue"] = False
     if require_clean_delete and row.get("dirty", False):
-        reasons.append("dirty_worktree")
+        row["cleanup_lease_only_residue"] = lease_only_dirty(row)
+        if not row["cleanup_lease_only_residue"]:
+            reasons.append("dirty_worktree")
 
     if reasons:
         blocked.append({"path": row["path"], "branch": row["branch"], "reasons": reasons})
@@ -484,6 +507,18 @@ def current_stash_refs(repo_root: Path):
         mapping[commit.strip()] = ref.strip()
     return mapping
 
+
+def lease_only_dirty(path: str):
+    proc = subprocess.run(
+        ["git", "-C", path, "status", "--porcelain", "--untracked-files=all"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    return bool(lines) and all(line == "?? .spine-lane-lease.yaml" for line in lines)
+
 with actions.open("a", encoding="utf-8") as log:
     for item in report.get("delete_candidates", []):
         wt = item["path"]
@@ -493,13 +528,23 @@ with actions.open("a", encoding="utf-8") as log:
             continue
 
         if require_clean:
-            st = subprocess.run(["git", "-C", wt, "status", "--porcelain"], text=True, capture_output=True)
+            st = subprocess.run(
+                ["git", "-C", wt, "status", "--porcelain", "--untracked-files=all"],
+                text=True,
+                capture_output=True,
+            )
             if st.returncode != 0:
                 log.write(f"skip={wt}|status_check_failed|{(st.stderr or st.stdout).strip()}\n")
                 continue
             if (st.stdout or "").strip():
-                log.write(f"skip={wt}|dirty_worktree\n")
-                continue
+                lease_only = lease_only_dirty(wt)
+                if lease_only is None:
+                    log.write(f"skip={wt}|status_check_failed|lease_only_probe_failed\n")
+                    continue
+                if not lease_only:
+                    log.write(f"skip={wt}|dirty_worktree\n")
+                    continue
+                log.write(f"allow={wt}|lease_only_residue\n")
 
         rm = subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", wt], text=True, capture_output=True)
         if rm.returncode != 0:
