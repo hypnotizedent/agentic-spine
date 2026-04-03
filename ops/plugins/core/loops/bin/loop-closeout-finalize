@@ -29,11 +29,16 @@ Usage:
   Lightweight mode (no acceptance matrix required):
   loop-closeout-finalize --loop-id LOOP-... --disposition <state> \
     --lightweight [--reason <text>] [--completion-level <level>] \
+    [--close-gaps GAP-OP-XXXX,GAP-OP-YYYY] \
     [--no-close-linked-gaps] [--cleanup-branch <branch-name>]
 
   --lightweight skips acceptance-matrix, propagation-evidence, and run-key
   validation. Use for documentation, meta-governance, strategic closures,
   or single-wave loops without physical domain changes.
+
+  --close-gaps accepts comma-separated gap IDs to close atomically with loop.
+  Gaps are closed in SQLite, then projected to YAML automatically.
+  Combines gap closure + projection + loop closure into one operation.
 
 Validation:
   - acceptance matrix has PASS state with no FAIL rows/placeholders
@@ -136,6 +141,7 @@ CLOSE_LINKED_GAPS=1
 CLEANUP_BRANCH=""
 DISPOSITION=""
 COMPLETION_LEVEL=""
+EXPLICIT_CLOSE_GAPS=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -201,6 +207,10 @@ while [[ $# -gt 0 ]]; do
     --no-close-linked-gaps)
       CLOSE_LINKED_GAPS=0
       shift
+      ;;
+    --close-gaps)
+      EXPLICIT_CLOSE_GAPS="${2:-}"
+      shift 2
       ;;
     --cleanup-branch)
       CLEANUP_BRANCH="${2:-}"
@@ -498,6 +508,29 @@ while IFS=$'\t' read -r gid sev; do
   LINKED_GAP_SEVERITIES+=("${sev,,}")
 done < <(yq e -r ".gaps[] | select((.parent_loop // \"\") == \"$LOOP_ID\" and .status == \"open\") | [.id, (.severity // \"\")] | @tsv" "$GAPS_FILE")
 
+# Add explicitly specified gaps from --close-gaps
+if [[ -n "$EXPLICIT_CLOSE_GAPS" ]]; then
+  IFS=',' read -ra EXPLICIT_GAP_LIST <<< "$EXPLICIT_CLOSE_GAPS"
+  for explicit_gid in "${EXPLICIT_GAP_LIST[@]}"; do
+    explicit_gid="$(echo "$explicit_gid" | xargs)"  # trim whitespace
+    [[ -z "$explicit_gid" ]] && continue
+
+    # Check if gap already in linked list
+    already_linked=0
+    for existing_gid in "${LINKED_GAP_IDS[@]}"; do
+      [[ "$existing_gid" == "$explicit_gid" ]] && { already_linked=1; break; }
+    done
+    [[ "$already_linked" -eq 1 ]] && continue
+
+    # Fetch gap severity from YAML
+    gap_sev="$(yq e -r ".gaps[] | select(.id == \"$explicit_gid\") | .severity // \"medium\"" "$GAPS_FILE" 2>/dev/null || echo "medium")"
+    [[ "$gap_sev" == "null" ]] && gap_sev="medium"
+
+    LINKED_GAP_IDS+=("$explicit_gid")
+    LINKED_GAP_SEVERITIES+=("${gap_sev,,}")
+  done
+fi
+
 linked_open_count="${#LINKED_GAP_IDS[@]}"
 closed_gap_count=0
 blocked_gap_count=0
@@ -582,6 +615,19 @@ if [[ "$CLOSE_LINKED_GAPS" -eq 1 ]]; then
 
     closed_gap_count=$((closed_gap_count + 1))
   done
+
+  # Project gap state to YAML atomically after all gaps closed
+  if [[ "$closed_gap_count" -gt 0 ]]; then
+    GAPS_PROJECTION_BIN="$ROOT/ops/plugins/core/lifecycle/bin/gaps-projection-commit"
+    if [[ -x "$GAPS_PROJECTION_BIN" ]]; then
+      echo "loop.closeout.finalize: projecting $closed_gap_count closed gap(s) to YAML..."
+      if ! "$GAPS_PROJECTION_BIN" >/dev/null 2>&1; then
+        echo "loop.closeout.finalize WARN: gap projection failed (non-fatal, SQLite is authoritative)" >&2
+      fi
+    else
+      echo "loop.closeout.finalize WARN: gaps-projection-commit not found, skipping YAML projection" >&2
+    fi
+  fi
 fi
 
 LOOPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
