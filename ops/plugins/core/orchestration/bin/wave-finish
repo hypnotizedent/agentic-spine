@@ -74,6 +74,43 @@ resolve_worktree_cleanup_token() {
   printf '%s\n%s\n' "$token_env" "$token_value"
 }
 
+worktree_cleanup_delete_candidate_count() {
+  [[ -x "$WORKTREE_CLEANUP_BIN" ]] || {
+    printf '0\n'
+    return 0
+  }
+
+  local report_json="" cleanup_count=""
+  report_json="$(mktemp "${SPINE_TMP:-/tmp}/wave-finish-cleanup-count.XXXXXX.json")"
+
+  if "$WORKTREE_CLEANUP_BIN" --mode report-only --json > "$report_json" 2>/dev/null; then
+    cleanup_count="$(python3 - "$report_json" <<'PY'
+import json
+import sys
+
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    print("0")
+    raise SystemExit(0)
+
+summary = data.get("summary") or {}
+count = summary.get("delete_candidate_count")
+if count is None:
+    count = len(data.get("delete_candidates") or [])
+
+print(count if isinstance(count, int) else 0)
+PY
+)"
+  else
+    cleanup_count="$("$WORKTREE_CLEANUP_BIN" --mode report-only 2>/dev/null | sed -n 's/^delete_candidates=//p' | tail -1)"
+  fi
+
+  rm -f "$report_json"
+  [[ "$cleanup_count" =~ ^[0-9]+$ ]] || cleanup_count=0
+  printf '%s\n' "$cleanup_count"
+}
+
 RESIDUE_CLEANUP_NOTE=""
 CONTROLLER_PROOF_PATH=""
 
@@ -347,8 +384,7 @@ if [[ "$CHECK_ELIGIBILITY" -eq 1 ]]; then
 
   # Check 4: Worktree cleanup pending
   if [[ -x "$WORKTREE_CLEANUP_BIN" ]]; then
-    pending_cleanup=$("$WORKTREE_CLEANUP_BIN" --mode report-only 2>/dev/null | grep -c "delete_candidates" || echo "0")
-    pending_cleanup=$(echo "$pending_cleanup" | head -1 | tr -d '\n')  # clean up output
+    pending_cleanup="$(worktree_cleanup_delete_candidate_count)"
     if [[ -n "$pending_cleanup" ]] && [[ "$pending_cleanup" -gt 0 ]]; then
       echo "⚠️  Worktree cleanup: $pending_cleanup candidate(s) pending (will be skipped)"
     else
@@ -421,7 +457,7 @@ if [[ "$CONTROLLER_ONLY" -eq 1 ]]; then
 
   # Check 3: No pending worktree cleanup (simplified check)
   if [[ -x "$WORKTREE_CLEANUP_BIN" ]]; then
-    pending_cleanup=$("$WORKTREE_CLEANUP_BIN" --mode report-only 2>/dev/null | grep -c "delete_candidates" || echo "0")
+    pending_cleanup="$(worktree_cleanup_delete_candidate_count)"
     if [[ "$pending_cleanup" -gt 0 ]]; then
       echo "  ⚠️  WARN: worktree cleanup candidates exist (will be skipped in controller-only mode)"
     else

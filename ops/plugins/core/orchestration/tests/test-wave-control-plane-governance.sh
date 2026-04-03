@@ -581,6 +581,166 @@ assert_file_contains "$T2C_ROOT/landed.out" "Projections:    PASS" "wave-finish 
 assert_file_contains "$T2C_ROOT/landed.out" "split=ops/archive/operational.gaps.archive.yaml" "wave-finish explains archive-split parity source"
 
 echo ""
+echo "── T2d: wave-finish controller-only tolerates zero cleanup candidates cleanly ──"
+T2D_ROOT="$(make_tmpdir)"
+T2D_REPO="$T2D_ROOT/repo"
+T2D_STATE="$T2D_REPO/state"
+mkdir -p \
+  "$T2D_REPO/ops/plugins/core/orchestration/bin" \
+  "$T2D_REPO/ops/plugins/core/loops/bin" \
+  "$T2D_REPO/ops/plugins/core/lifecycle/bin" \
+  "$T2D_REPO/ops/plugins/core/lifecycle/lib" \
+  "$T2D_REPO/ops/bindings" \
+  "$T2D_STATE/loop-scopes"
+copy_runtime_libs "$T2D_REPO"
+cp "$ROOT/ops/plugins/core/orchestration/bin/wave-finish" "$T2D_REPO/ops/plugins/core/orchestration/bin/"
+chmod +x "$T2D_REPO/ops/plugins/core/orchestration/bin/wave-finish"
+
+cat > "$T2D_REPO/ops/plugins/core/loops/bin/loop-closeout-finalize" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "loop.closeout.finalize stub"
+EOF
+chmod +x "$T2D_REPO/ops/plugins/core/loops/bin/loop-closeout-finalize"
+
+cat > "$T2D_REPO/ops/plugins/core/lifecycle/bin/gaps-authority-bridge" <<'EOF'
+#!/usr/bin/env python3
+print("ok")
+EOF
+chmod +x "$T2D_REPO/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
+
+cat > "$T2D_REPO/ops/plugins/core/lifecycle/lib/gaps_sql_authority.py" <<'EOF'
+from pathlib import Path
+
+
+class Conn:
+    def close(self):
+        pass
+
+
+def resolve_paths(root):
+    root = Path(root)
+    return root / "state" / "shared_authority.db", root / "ops" / "bindings" / "operational.gaps.yaml"
+
+
+def connect(db):
+    return Conn()
+
+
+def ensure_schema(conn):
+    return None
+
+
+def bootstrap_from_yaml(conn, gaps_yaml):
+    return None
+
+
+def fetch_gaps(conn):
+    return []
+
+
+def gap_count(conn):
+    return 0
+
+
+def db_parity_snapshot(conn, gaps_yaml):
+    return {
+        "match": True,
+        "db_count": 0,
+        "yaml_count": 0,
+        "in_db_not_yaml": [],
+        "in_yaml_not_db": [],
+    }
+
+
+def load_yaml(path):
+    return {"gaps": []}
+EOF
+
+cat > "$T2D_REPO/ops/bindings/operational.gaps.yaml" <<'EOF'
+gaps: []
+EOF
+
+cat > "$T2D_STATE/loop-scopes/LOOP-T-CONTROLLER-FINISH.scope.md" <<'EOF'
+---
+loop_id: LOOP-T-CONTROLLER-FINISH
+status: active
+owner: '@test'
+execution_mode: single_worker
+execution_readiness: runnable
+objective: fixture controller-only finish
+---
+EOF
+
+cat > "$T2D_REPO/ops/plugins/core/lifecycle/bin/worktree-lifecycle-cleanup" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+mode="report-only"
+json_mode=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode) mode="$2"; shift 2 ;;
+    --json) json_mode=1; shift ;;
+    *) shift ;;
+  esac
+done
+
+if [[ "$mode" != "report-only" ]]; then
+  exit 1
+fi
+
+if [[ "$json_mode" -eq 1 ]]; then
+  cat <<'JSON'
+{
+  "delete_candidates": [],
+  "blocked": [],
+  "temp_clone_delete_candidates": [],
+  "temp_clone_blocked": [],
+  "stash_delete_candidates": [],
+  "stash_blocked": [],
+  "root_normalization": {"candidate": null, "blocked": null},
+  "summary": {
+    "delete_candidate_count": 0,
+    "blocked_count": 0,
+    "temp_clone_delete_candidate_count": 0,
+    "temp_clone_blocked_count": 0,
+    "stash_delete_candidate_count": 0,
+    "stash_blocked_count": 0
+  }
+}
+JSON
+else
+  cat <<'OUT'
+worktree.lifecycle.cleanup
+mode=report-only
+artifact.report_json=/tmp/fake-report.json
+OUT
+fi
+EOF
+chmod +x "$T2D_REPO/ops/plugins/core/lifecycle/bin/worktree-lifecycle-cleanup"
+
+init_fixture_repo "$T2D_REPO"
+
+if (
+  cd "$T2D_REPO"
+  env SPINE_ROOT="$T2D_REPO" SPINE_STATE="$T2D_STATE" \
+    bash "$T2D_REPO/ops/plugins/core/orchestration/bin/wave-finish" \
+      --loop-id LOOP-T-CONTROLLER-FINISH --disposition landed \
+      --completion-level slice_complete --controller-only > "$T2D_ROOT/out.txt" 2>&1
+); then
+  pass "wave-finish controller-only succeeds when cleanup count is zero"
+else
+  fail "wave-finish controller-only succeeds when cleanup count is zero"
+fi
+
+assert_file_contains "$T2D_ROOT/out.txt" "No pending worktree cleanup" "wave-finish controller-only reports clean cleanup state"
+if rg -Fq -- "arithmetic syntax error" "$T2D_ROOT/out.txt"; then
+  fail "wave-finish controller-only avoids arithmetic syntax error when cleanup count is zero"
+else
+  pass "wave-finish controller-only avoids arithmetic syntax error when cleanup count is zero"
+fi
+
+echo ""
 echo "── T3: wave-execute close auto-runs wave-finish ──"
 T3_ROOT="$(make_tmpdir)"
 T3_REPO="$T3_ROOT/repo"
@@ -590,6 +750,7 @@ mkdir -p \
   "$T3_REPO/ops/commands" \
   "$T3_RUNTIME/waves/WAVE-20260323-01"
 copy_runtime_libs "$T3_REPO"
+init_fixture_repo "$T3_REPO"
 cp "$ROOT/ops/plugins/core/orchestration/bin/wave-execute" "$T3_REPO/ops/plugins/core/orchestration/bin/"
 chmod +x "$T3_REPO/ops/plugins/core/orchestration/bin/wave-execute"
 
@@ -619,6 +780,7 @@ if [[ "$cap" != "wave.finish" ]]; then
   exit 1
 fi
 printf '%s\n' "${OPS_CAP_AUTO_APPROVE:-missing}" > "${SPINE_RUNTIME_ROOT}/finish.auto_approve"
+printf '%s\n' "${OPS_GOVERNED_MAIN_OVERRIDE:-missing}" > "${SPINE_RUNTIME_ROOT}/finish.main_override"
 printf '%s\n' "$@" > "${SPINE_RUNTIME_ROOT}/finish.args"
 echo "wave.finish stub"
 EOF
@@ -652,6 +814,7 @@ assert_file_contains "$T3_RUNTIME/close.args" "--verify-receipt" "wave-execute f
 assert_file_contains "$T3_RUNTIME/close.args" "--controller-only" "wave-execute forwards controller-only to wave.sh close"
 assert_file_contains "$T3_RUNTIME/finish.args" "--controller-only" "wave-execute forwards controller-only to wave-finish"
 assert_file_contains "$T3_RUNTIME/finish.auto_approve" "yes" "wave-execute auto-approves governed wave-finish in agent batches"
+assert_file_contains "$T3_RUNTIME/finish.main_override" "1" "wave-execute auto-sets governed main override for controller-only auto-finish on main"
 assert_file_contains "$T3_ROOT/out.txt" "Running wave.finish" "wave-execute announces auto-finish"
 
 echo ""

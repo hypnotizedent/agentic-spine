@@ -922,7 +922,12 @@ for p in pending:
 
   # Step 5: Propagate closure with wave.finish unless explicitly deferred.
   if [[ -n "$disposition" ]]; then
-    local finish_cmd="  ./bin/ops cap run wave.finish -- \\"
+    local finish_main_override=""
+    if [[ "$controller_only" -eq 1 && "$(_current_checkout_branch)" == "main" ]]; then
+      finish_main_override="OPS_GOVERNED_MAIN_OVERRIDE=1 "
+    fi
+
+    local finish_cmd="  ${finish_main_override}./bin/ops cap run wave.finish -- \\"
     finish_cmd+="\n    --loop-id $loop_id \\"
     finish_cmd+="\n    --disposition $disposition"
     if [[ -n "$completion_level" ]]; then
@@ -965,9 +970,13 @@ for p in pending:
       fi
 
       echo "Running wave.finish..."
+      local -a finish_env=("SPINE_TARGET_REPO=$SP" "OPS_CAP_AUTO_APPROVE=yes")
+      if [[ -n "$finish_main_override" ]]; then
+        finish_env+=("OPS_GOVERNED_MAIN_OVERRIDE=1")
+      fi
       (
         cd "$SP"
-        env SPINE_TARGET_REPO="$SP" OPS_CAP_AUTO_APPROVE=yes \
+        env "${finish_env[@]}" \
           bash "$CAP_SH" run wave.finish -- "${finish_args[@]}"
       ) || {
         _fail "wave.finish failed"
