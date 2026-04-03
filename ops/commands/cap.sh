@@ -942,6 +942,11 @@ run_cap() {
       else
         if [[ "$governed_override_active" -eq 1 ]]; then
           echo "WORKTREE ISOLATION OVERRIDE: OPS_GOVERNED_MAIN_OVERRIDE=1"
+          # Auto-file passive friction for ceremony override usage
+          if [[ -f "$ROOT/ops/lib/passive-friction-capture.sh" ]]; then
+            source "$ROOT/ops/lib/passive-friction-capture.sh"
+            auto_file_ceremony_override "main_mutation" "$name on $caller_branch with OPS_GOVERNED_MAIN_OVERRIDE=1" || true
+          fi
         elif [[ "$wt_bypass_lc" == "1" || "$wt_bypass_lc" == "true" || "$wt_bypass_lc" == "yes" ]]; then
           if [[ -z "$wt_bypass_ref" && -z "$wt_bypass_friction_ref" && -z "$wt_bypass_reason" ]]; then
             echo "BLOCKED: worktree isolation bypass missing packet ref, friction ref, and reason"

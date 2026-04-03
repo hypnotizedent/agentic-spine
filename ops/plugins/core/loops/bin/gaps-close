@@ -22,6 +22,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/git-lock.sh"
 source "$ROOT/ops/plugins/core/loops/lib/gap-claims.sh"
+source "$ROOT/ops/lib/passive-friction-capture.sh"
 GAPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
 
 usage() {
@@ -320,8 +321,18 @@ close_single() {
   timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   apply_gap_update "$id" "$status" "$fixed_in" "$notes" "$reg_lock" "$timestamp"
 
-  # Mutation is SQLite-only. YAML projection is on-demand (gaps-authority-bridge project).
-  # No git add/commit needed — the YAML file is not modified during mutation.
+  # Auto-project to YAML (atomicity: close + project in one ceremony)
+  echo "INFO: projecting SQLite → YAML..." >&2
+  local project_result
+  project_result="$(python3 "$GAPS_BRIDGE" project 2>&1)" || {
+    echo "WARN: auto-projection failed (gap closed in SQLite but YAML stale)" >&2
+    echo "  Partial state: SQLite updated, YAML projection pending" >&2
+    echo "  Remediation: run 'ops cap run gaps.authority.bridge -- project' to sync" >&2
+    echo "$project_result" | sed 's/^/  /' >&2
+    # Auto-file friction for projection failure
+    auto_file_gap_projection_partial
+    # Continue despite projection failure — gap is closed in authority
+  }
 
   local_claim="$(claim_file "$id")"
   if [[ -f "$local_claim" ]]; then
@@ -386,8 +397,18 @@ close_batch() {
     apply_gap_update "${ids[$i]}" "${statuses[$i]}" "${fixed_ins[$i]}" "${notes[$i]}" "${reg_locks[$i]}" "$timestamp"
   done
 
-  # Mutation is SQLite-only. YAML projection is on-demand (gaps-authority-bridge project).
-  # No git add/commit needed — the YAML file is not modified during mutation.
+  # Auto-project to YAML (atomicity: close + project in one ceremony)
+  echo "INFO: projecting SQLite → YAML..." >&2
+  local project_result
+  project_result="$(python3 "$GAPS_BRIDGE" project 2>&1)" || {
+    echo "WARN: auto-projection failed (gaps closed in SQLite but YAML stale)" >&2
+    echo "  Partial state: SQLite updated, YAML projection pending" >&2
+    echo "  Remediation: run 'ops cap run gaps.authority.bridge -- project' to sync" >&2
+    echo "$project_result" | sed 's/^/  /' >&2
+    # Auto-file friction for projection failure
+    auto_file_gap_projection_partial
+    # Continue despite projection failure — gaps are closed in authority
+  }
 
   local -a closed_ids=()
   for i in "${valid_indices[@]}"; do
