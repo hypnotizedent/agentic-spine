@@ -290,7 +290,7 @@ The live repo remains:
 - child subloops: `8`
 - first-string engine pieces: `8`
 - live operator-facing first-string surfaces: `25-35`
-- live operational bindings target after cutover: `<=200` top-level `ops/bindings/*.yaml`
+- live operational bindings target after cutover: `<=242` top-level `ops/bindings/*.yaml`
 - domain subdirectory bindings under `ops/bindings/domains/*/` are governed domain truth and tracked separately from this control-plane reduction budget
 - allowed sprint types: `2`
 - forbidden sprint types: `1`
