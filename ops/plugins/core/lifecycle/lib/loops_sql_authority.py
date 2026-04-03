@@ -32,6 +32,7 @@ ENV_DB_PATH = "LOOPS_DB_PATH"
 ENV_SCOPES_DIR = "LOOPS_SCOPES_DIR"
 DEFAULT_SCOPES_DIR_REL = "loop-scopes"
 DEFAULT_SCOPES_ARCHIVE_DIR_REL = "archive/closed-loop-scopes"
+DEFAULT_SCOPES_QUARANTINE_DIR_REL = "quarantine/loop-scopes"
 LIVE_SCOPE_STATUSES = {"active", "planned", "draft", "open"}
 ARCHIVED_SCOPE_STATUSES = {
     "closed",
@@ -41,6 +42,9 @@ ARCHIVED_SCOPE_STATUSES = {
     "abandoned",
     "landed",
 }
+VALID_SCOPE_STATUSES = LIVE_SCOPE_STATUSES | ARCHIVED_SCOPE_STATUSES
+LOOP_ID_RE = re.compile(r"^LOOP-[A-Z0-9][A-Z0-9-]*$")
+SECTION_RE = re.compile(r"(?ms)^##+\s+(?P<title>[^\n]+)\n+(?P<body>.*?)(?=^##+\s+|\Z)")
 
 
 def utc_now() -> datetime:
@@ -119,6 +123,10 @@ def resolve_scope_archive_dir(scopes_dir: Path) -> Path:
     return scopes_dir.parent / DEFAULT_SCOPES_ARCHIVE_DIR_REL
 
 
+def resolve_scope_quarantine_dir(scopes_dir: Path) -> Path:
+    return scopes_dir.parent / DEFAULT_SCOPES_QUARANTINE_DIR_REL
+
+
 def iter_scope_projection_files(scopes_dir: Path) -> list[Path]:
     files: list[Path] = []
     if scopes_dir.exists():
@@ -137,11 +145,382 @@ def is_archived_scope_status(status: str | None) -> bool:
     return str(status or "").strip().lower() in ARCHIVED_SCOPE_STATUSES
 
 
+def is_valid_loop_id(loop_id: str | None) -> bool:
+    return bool(LOOP_ID_RE.match(str(loop_id or "").strip()))
+
+
+def is_valid_scope_status(status: str | None) -> bool:
+    return str(status or "").strip().lower() in VALID_SCOPE_STATUSES
+
+
 def _select_existing_scope_text(candidates: list[Path]) -> str | None:
     for candidate in candidates:
         if candidate.exists():
             return candidate.read_text(encoding="utf-8")
     return None
+
+
+def _scope_name_to_loop_id(path: Path) -> str:
+    name = path.name
+    if name.endswith(".scope.md"):
+        return name[: -len(".scope.md")]
+    return path.stem
+
+
+def _clean_inline_text(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"`+", "", text)
+    text = re.sub(r"^\*+|\*+$", "", text)
+    text = re.sub(r"^_+|_+$", "", text)
+    return " ".join(text.split())
+
+
+def _normalize_metadata_key(label: str) -> str:
+    text = _clean_inline_text(label).lower()
+    text = text.replace("(", " ").replace(")", " ")
+    text = text.replace("/", " ")
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
+
+
+def _normalize_date_text(raw: str) -> str | None:
+    text = _clean_inline_text(raw)
+    if not text:
+        return None
+    match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+    if match:
+        return match.group(1)
+    match = re.search(r"\b(\d{8})\b", text)
+    if match:
+        digits = match.group(1)
+        return f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}"
+    return None
+
+
+def _derive_created_from_loop_id(loop_id: str) -> str | None:
+    match = re.search(r"-(\d{8}|\d{4}-\d{2}-\d{2})$", loop_id)
+    if not match:
+        return None
+    return _normalize_date_text(match.group(1))
+
+
+def _normalize_priority(raw_priority: str | None, raw_severity: str | None) -> str:
+    priority = _clean_inline_text(raw_priority or "").lower()
+    if priority in {"high", "medium", "low"}:
+        return priority
+    severity = _clean_inline_text(raw_severity or "").lower()
+    if severity in {"critical", "high"}:
+        return "high"
+    if severity == "low":
+        return "low"
+    return "medium"
+
+
+def _normalize_status_token(raw_status: str | None) -> tuple[str | None, str | None]:
+    text = _clean_inline_text(raw_status or "").lower()
+    if not text:
+        return None, None
+    if "superseded" in text:
+        return "superseded", "superseded"
+    if "abandoned" in text:
+        return "abandoned", "abandoned"
+    if any(token in text for token in ("closed", "complete", "completed", "done", "landed", "fixed")):
+        return "closed", None
+    if "deferred" in text:
+        return "deferred", "deferred"
+    if "planned" in text or "draft" in text or "future" in text:
+        return "planned", None
+    if any(token in text for token in ("executing", "in progress", "in_progress", "active", "open")):
+        return "active", None
+    return None, None
+
+
+def _section_map(text: str) -> dict[str, str]:
+    sections: dict[str, str] = {}
+    for match in SECTION_RE.finditer(text):
+        title = _normalize_metadata_key(match.group("title"))
+        body = match.group("body").strip()
+        if title and body and title not in sections:
+            sections[title] = body
+    return sections
+
+
+def _extract_metadata_lines(text: str) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        table_match = re.match(r"^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|$", line)
+        if table_match:
+            key = _normalize_metadata_key(table_match.group(1))
+            value = _clean_inline_text(table_match.group(2))
+            if key and value and key not in metadata:
+                metadata[key] = value
+            continue
+
+        heading_match = re.match(r"^##+\s*([^:]+?)\s*:\s*(.+)$", line)
+        if heading_match:
+            key = _normalize_metadata_key(heading_match.group(1))
+            value = _clean_inline_text(heading_match.group(2))
+            if key and value and key not in metadata:
+                metadata[key] = value
+            continue
+
+        stripped = re.sub(r"^[>\-\*\s]+", "", line).strip()
+        stripped = stripped.replace("**", "").replace("__", "")
+        pair_match = re.match(r"^([^:]+?)\s*:\s*(.+)$", stripped)
+        if pair_match:
+            key = _normalize_metadata_key(pair_match.group(1))
+            value = _clean_inline_text(pair_match.group(2))
+            if key and value and key not in metadata:
+                metadata[key] = value
+    return metadata
+
+
+def _extract_first_paragraph(section_body: str) -> str | None:
+    for block in re.split(r"\n\s*\n", section_body.strip()):
+        candidate = _clean_inline_text(block)
+        if candidate:
+            return candidate
+    return None
+
+
+def _infer_legacy_status(metadata: dict[str, str], sections: dict[str, str], text: str) -> tuple[str | None, str | None]:
+    for key in ("status",):
+        status, disposition = _normalize_status_token(metadata.get(key))
+        if status:
+            return status, disposition
+    section_status = sections.get("status")
+    if section_status:
+        first_line = next((line.strip() for line in section_status.splitlines() if line.strip()), "")
+        status, disposition = _normalize_status_token(first_line)
+        if status:
+            return status, disposition
+    lowered = text.lower()
+    if re.search(r"\b(loop closed|now closed|this loop is closed)\b", lowered):
+        return "closed", None
+    if "superseded by" in lowered:
+        return "superseded", "superseded"
+    return None, None
+
+
+def _extract_legacy_objective(metadata: dict[str, str], sections: dict[str, str]) -> str | None:
+    for key in ("objective", "goal", "summary", "note", "scope"):
+        value = _clean_inline_text(metadata.get(key, ""))
+        if value:
+            return value
+    for key in ("objective", "goal", "summary", "problem", "problem_statement", "executive_summary", "scope", "current_state"):
+        section_body = sections.get(key, "")
+        paragraph = _extract_first_paragraph(section_body)
+        if paragraph:
+            return paragraph
+    return None
+
+
+def _extract_next_action(metadata: dict[str, str], sections: dict[str, str]) -> str:
+    value = _clean_inline_text(metadata.get("next_action", ""))
+    if value:
+        return value
+    section_body = sections.get("next_action", "")
+    paragraph = _extract_first_paragraph(section_body)
+    return paragraph or ""
+
+
+def _render_preserved_body_scope(loop: dict[str, Any], body: str) -> str:
+    fm = loop_to_frontmatter(loop)
+    for extra_key in ("closed_at", "disposition", "completion_level", "exclusions", "supersedes"):
+        if extra_key in loop and loop[extra_key] is not None:
+            fm[extra_key] = loop[extra_key]
+    fm_text = yaml.safe_dump(fm, sort_keys=False, allow_unicode=False).rstrip("\n")
+    preserved_body = body.rstrip("\n")
+    rendered = f"---\n{fm_text}\n---\n"
+    if preserved_body:
+        rendered += preserved_body + "\n"
+    return rendered
+
+
+def _validate_scope_frontmatter(fm: dict[str, Any], source_path: Path) -> tuple[bool, str | None]:
+    loop_id = str(fm.get("loop_id") or "").strip()
+    status = str(fm.get("status") or "").strip()
+    if not is_valid_loop_id(loop_id):
+        return False, f"frontmatter loop_id is not canonical: {loop_id or 'missing'}"
+    if not is_valid_scope_status(status):
+        return False, f"frontmatter status is not a valid loop status: {status or 'missing'}"
+    expected_loop_id = _scope_name_to_loop_id(source_path)
+    if expected_loop_id and loop_id and expected_loop_id != loop_id:
+        return False, f"frontmatter loop_id does not match scope filename: {loop_id} != {expected_loop_id}"
+    return True, None
+
+
+def _repair_legacy_scope_doc(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    text = path.read_text(encoding="utf-8")
+    metadata = _extract_metadata_lines(text)
+    sections = _section_map(text)
+    loop_id = _scope_name_to_loop_id(path)
+    if not is_valid_loop_id(loop_id):
+        return None, "scope filename does not resolve to a canonical LOOP-* id"
+
+    status, disposition = _infer_legacy_status(metadata, sections, text)
+    if status is None:
+        return None, "legacy scope does not expose a repairable loop status"
+
+    next_action = _extract_next_action(metadata, sections)
+    if status in LIVE_SCOPE_STATUSES and not next_action:
+        return None, "legacy live-status scope has no canonical next action"
+
+    objective = _extract_legacy_objective(metadata, sections)
+    if not objective:
+        return None, "legacy scope does not expose a repairable objective"
+
+    created = (
+        _normalize_date_text(metadata.get("created", ""))
+        or _normalize_date_text(metadata.get("opened", ""))
+        or _normalize_date_text(metadata.get("opened_at", ""))
+        or _derive_created_from_loop_id(loop_id)
+    )
+    if not created:
+        return None, "legacy scope does not expose a repairable created date"
+
+    blocked_by = _clean_inline_text(metadata.get("blocked_by", ""))
+    loop: dict[str, Any] = {
+        "loop_id": loop_id,
+        "created": created,
+        "status": status,
+        "owner": _clean_inline_text(metadata.get("owner", "")) or "@ronny",
+        "scope": _clean_inline_text(metadata.get("scope", "")) or loop_id.removeprefix("LOOP-").split("-", 1)[0].lower(),
+        "priority": _normalize_priority(metadata.get("priority"), metadata.get("severity")),
+        "horizon": _clean_inline_text(metadata.get("horizon", "")) or "now",
+        "execution_readiness": _clean_inline_text(metadata.get("execution_readiness", "") or metadata.get("readiness", "")) or ("blocked" if blocked_by and blocked_by.lower() != "none" else "runnable"),
+        "execution_mode": _clean_inline_text(metadata.get("execution_mode", "")) or "single_worker",
+        "objective": objective,
+        "next_action": next_action,
+        "evidence_refs": [],
+        "linked_gaps": [],
+    }
+    if blocked_by and blocked_by.lower() != "none":
+        loop["blocked_by"] = [blocked_by]
+    closed_at = _normalize_date_text(metadata.get("closed", "")) or _normalize_date_text(metadata.get("closed_at", ""))
+    if closed_at:
+        loop["closed_at"] = f"{closed_at}T00:00:00Z"
+    if disposition:
+        loop["disposition"] = disposition
+    return loop, None
+
+
+def delete_loop(conn: sqlite3.Connection, loop_id: str) -> None:
+    conn.execute("DELETE FROM loops WHERE loop_id = ?", (loop_id,))
+
+
+def repair_live_scope_residue(
+    conn: sqlite3.Connection,
+    scopes_dir: Path,
+) -> dict[str, Any]:
+    scopes_dir.mkdir(parents=True, exist_ok=True)
+    archive_dir = resolve_scope_archive_dir(scopes_dir)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    quarantine_dir = resolve_scope_quarantine_dir(scopes_dir)
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+
+    summary: dict[str, Any] = {
+        "detected": 0,
+        "repaired_live": 0,
+        "repaired_archived": 0,
+        "quarantined": 0,
+        "items": [],
+        "quarantine_dir": str(quarantine_dir),
+    }
+
+    for scope_path in sorted(scopes_dir.glob("LOOP-*.scope.md")):
+        text = scope_path.read_text(encoding="utf-8")
+        fm = _parse_scope_frontmatter(text)
+        if isinstance(fm, dict):
+            frontmatter_ok, frontmatter_reason = _validate_scope_frontmatter(fm, scope_path)
+            if frontmatter_ok:
+                continue
+            summary["detected"] += 1
+            quarantine_target = quarantine_dir / scope_path.name
+            quarantine_reason = quarantine_dir / f"{scope_path.name}.reason.yaml"
+            quarantine_target.write_text(text, encoding="utf-8")
+            scope_path.unlink()
+
+            loop_id = str(fm.get("loop_id") or "").strip()
+            if loop_id:
+                delete_loop(conn, loop_id)
+
+            reason_payload = {
+                "classification": "quarantine_manual_review",
+                "source_file": str(scope_path),
+                "loop_id": loop_id or _scope_name_to_loop_id(scope_path),
+                "reason": frontmatter_reason,
+                "quarantined_at_utc": utc_now_text(),
+            }
+            quarantine_reason.write_text(dump_yaml(reason_payload), encoding="utf-8")
+            summary["quarantined"] += 1
+            summary["items"].append(
+                {
+                    "file": scope_path.name,
+                    "loop_id": reason_payload["loop_id"],
+                    "classification": "quarantine_manual_review",
+                    "reason": frontmatter_reason,
+                    "target_path": str(quarantine_target),
+                }
+            )
+            continue
+
+        summary["detected"] += 1
+        repaired_loop, repair_error = _repair_legacy_scope_doc(scope_path)
+        if repaired_loop is None:
+            quarantine_target = quarantine_dir / scope_path.name
+            quarantine_reason = quarantine_dir / f"{scope_path.name}.reason.yaml"
+            quarantine_target.write_text(text, encoding="utf-8")
+            scope_path.unlink()
+            reason_payload = {
+                "classification": "quarantine_manual_review",
+                "source_file": str(scope_path),
+                "loop_id": _scope_name_to_loop_id(scope_path),
+                "reason": repair_error,
+                "quarantined_at_utc": utc_now_text(),
+            }
+            quarantine_reason.write_text(dump_yaml(reason_payload), encoding="utf-8")
+            summary["quarantined"] += 1
+            summary["items"].append(
+                {
+                    "file": scope_path.name,
+                    "loop_id": reason_payload["loop_id"],
+                    "classification": "quarantine_manual_review",
+                    "reason": repair_error,
+                    "target_path": str(quarantine_target),
+                }
+            )
+            continue
+
+        classification = "repair_active_keep" if is_live_scope_status(repaired_loop.get("status")) else "repair_then_archive"
+        target_dir = scopes_dir if classification == "repair_active_keep" else archive_dir
+        target_path = target_dir / scope_path.name
+        target_text = _render_preserved_body_scope(repaired_loop, text)
+        target_path.write_text(target_text, encoding="utf-8")
+        if target_path != scope_path and scope_path.exists():
+            scope_path.unlink()
+
+        upsert_loop(conn, repaired_loop)
+        if classification == "repair_active_keep":
+            summary["repaired_live"] += 1
+        else:
+            summary["repaired_archived"] += 1
+        summary["items"].append(
+            {
+                "file": scope_path.name,
+                "loop_id": repaired_loop["loop_id"],
+                "classification": classification,
+                "reason": f"legacy scope normalized from markdown metadata ({repaired_loop['status']})",
+                "target_path": str(target_path),
+            }
+        )
+
+    return summary
 
 
 # -- Connection ----------------------------------------------------------------
@@ -679,8 +1058,17 @@ def bootstrap_from_scope_files(conn: sqlite3.Connection, scopes_dir: Path) -> in
             continue
         combined_text += file_text
         fm = _parse_scope_frontmatter(file_text)
+        if fm and isinstance(fm, dict):
+            valid_frontmatter, _ = _validate_scope_frontmatter(fm, sf)
+            if valid_frontmatter:
+                parsed.append((sf, fm))
+                continue
         if fm and isinstance(fm, dict) and fm.get("loop_id"):
-            parsed.append((sf, fm))
+            continue
+        if sf.parent == scopes_dir:
+            repaired_loop, _ = _repair_legacy_scope_doc(sf)
+            if repaired_loop is not None:
+                parsed.append((sf, repaired_loop))
 
     combined_hash = sha256_text(combined_text)
 
@@ -891,6 +1279,7 @@ def project_to_scope_files(
     into $SPINE_STATE/archive/closed-loop-scopes/ and are removed from the live
     scope directory so later projections do not resurrect closed residue.
     """
+    residue_repair = repair_live_scope_residue(conn, scopes_dir)
     all_loops = list_loops(conn)
     scopes_dir.mkdir(parents=True, exist_ok=True)
 
@@ -972,6 +1361,7 @@ def project_to_scope_files(
         "projected": projected,
         "archived_projected": archived_projected,
         "archive_dir": str(archive_dir),
+        "residue_repair": residue_repair,
         "scope_files_hash": combined_hash,
     }
 
@@ -984,7 +1374,10 @@ def db_parity_snapshot(
 ) -> dict[str, Any]:
     """Compare SQLite loops against filesystem scope files."""
     db_loops = list_loops(conn)
-    db_entries = [loop_to_frontmatter(l) for l in db_loops]
+    db_entries = sorted(
+        (loop_to_frontmatter(l) for l in db_loops),
+        key=lambda item: str(item.get("loop_id", "")),
+    )
     db_json = json.dumps(db_entries, sort_keys=True, default=str)
 
     # Read scope files from filesystem.
@@ -996,9 +1389,13 @@ def db_parity_snapshot(
         except Exception:
             continue
         fm = _parse_scope_frontmatter(text)
-        if fm and isinstance(fm, dict) and fm.get("loop_id"):
+        if fm and isinstance(fm, dict):
+            valid_frontmatter, _ = _validate_scope_frontmatter(fm, sf)
+            if not valid_frontmatter:
+                continue
             fs_loops.append(loop_to_frontmatter(fm))
             fs_ids.add(str(fm["loop_id"]))
+    fs_loops.sort(key=lambda item: str(item.get("loop_id", "")))
 
     fs_json = json.dumps(fs_loops, sort_keys=True, default=str)
     db_ids = {l.get("loop_id", "") for l in db_entries}
