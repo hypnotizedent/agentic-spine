@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# media-sonarr-request — Request (add) a TV show to Sonarr (mutating bridge)
+# Delegates to workbench media-agent tool: request_show
+# Default: preview mode. Use --apply to execute.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/media-agent-bridge.sh"
+
+usage() {
+  echo "Usage: media-sonarr-request --tvdb-id <id> [--quality-profile-id <id>] [--apply] [--json]"
+  echo ""
+  echo "Options:"
+  echo "  --tvdb-id <id>             TVDB show ID (required)"
+  echo "  --quality-profile-id <id>  Quality profile ID (default: product default)"
+  echo "  --apply                    Execute the request (default: preview only)"
+  echo "  --json                     Output structured JSON"
+}
+
+TVDB_ID=""
+QUALITY_PROFILE_ID=""
+APPLY=false
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tvdb-id) TVDB_ID="$2"; shift 2 ;;
+    --quality-profile-id) QUALITY_PROFILE_ID="$2"; shift 2 ;;
+    --apply) APPLY=true; shift ;;
+    --json) JSON_MODE=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$TVDB_ID" ]]; then
+  echo "ERROR: --tvdb-id is required" >&2
+  exit 1
+fi
+
+MODE="preview"
+[[ "$APPLY" == "true" ]] && MODE="apply"
+
+QP_DISPLAY="${QUALITY_PROFILE_ID:-1 (product default)}"
+
+if [[ "$MODE" == "preview" ]]; then
+  if [[ "$JSON_MODE" == "true" ]]; then
+    python3 -c "
+import json, sys
+obj = {
+    'capability': 'media.sonarr.request',
+    'tool': 'request_show',
+    'tvdb_id': int(sys.argv[1]),
+    'quality_profile_id': int(sys.argv[2]) if sys.argv[2] else 1,
+    'mode': 'preview',
+    'root_folder_path': '/media/tv',
+    'search_for_missing_episodes': True,
+    'text': 'Preview: would call request_show to add TVDB ' + sys.argv[1] + ' to Sonarr',
+    'applied': False,
+}
+print(json.dumps(obj, indent=2))
+" "$TVDB_ID" "$QUALITY_PROFILE_ID"
+  else
+    echo "=== PREVIEW: media.sonarr.request ==="
+    echo "Mode:                       preview (use --apply to execute)"
+    echo "TVDB ID:                    $TVDB_ID"
+    echo "Quality Profile:            $QP_DISPLAY"
+    echo "Root Folder:                /media/tv"
+    echo "Search for Missing Eps:     true"
+    echo "Target Tool:                request_show"
+  fi
+  exit 0
+fi
+
+# Apply mode
+ARGS_JSON=$(python3 -c "
+import json, sys
+args = {'tvdbId': int(sys.argv[1])}
+if sys.argv[2]:
+    args['qualityProfileId'] = int(sys.argv[2])
+print(json.dumps(args))
+" "$TVDB_ID" "$QUALITY_PROFILE_ID")
+
+RESULT=$(media_agent_call "request_show" "$ARGS_JSON") || {
+  echo "FAIL: bridge call failed" >&2
+  [[ -n "${RESULT:-}" ]] && echo "$RESULT" >&2
+  exit 1
+}
+
+if [[ "$JSON_MODE" == "true" ]]; then
+  python3 -c "
+import json, sys
+text = sys.stdin.read().strip()
+obj = {
+    'capability': 'media.sonarr.request',
+    'tool': 'request_show',
+    'tvdb_id': int(sys.argv[1]),
+    'quality_profile_id': int(sys.argv[2]) if sys.argv[2] else 1,
+    'mode': 'apply',
+    'text': text,
+    'applied': True,
+}
+print(json.dumps(obj, indent=2))
+" "$TVDB_ID" "$QUALITY_PROFILE_ID" <<< "$RESULT"
+else
+  echo "=== APPLIED: media.sonarr.request ==="
+  echo "$RESULT"
+fi

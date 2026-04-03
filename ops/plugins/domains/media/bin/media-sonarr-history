@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# media-sonarr-history — Get episode history from Sonarr (read-only bridge)
+# Delegates to workbench media-agent tool: get_episode_history
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/media-agent-bridge.sh"
+
+usage() {
+  echo "Usage: media-sonarr-history --series-id <id> [--limit <n>] [--json]"
+  echo ""
+  echo "Options:"
+  echo "  --series-id <id>  Sonarr series ID (required)"
+  echo "  --limit <n>       Max history events (default: 20)"
+  echo "  --json            Output structured JSON"
+}
+
+SERIES_ID=""
+LIMIT=""
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --series-id) SERIES_ID="$2"; shift 2 ;;
+    --limit) LIMIT="$2"; shift 2 ;;
+    --json) JSON_MODE=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$SERIES_ID" ]]; then
+  echo "ERROR: --series-id is required" >&2
+  exit 1
+fi
+
+ARGS_JSON=$(python3 -c "
+import json, sys
+args = {'seriesId': int(sys.argv[1])}
+if sys.argv[2]:
+    args['limit'] = int(sys.argv[2])
+print(json.dumps(args))
+" "$SERIES_ID" "$LIMIT")
+
+RESULT=$(media_agent_call "get_episode_history" "$ARGS_JSON") || {
+  echo "FAIL: bridge call failed" >&2
+  [[ -n "${RESULT:-}" ]] && echo "$RESULT" >&2
+  exit 1
+}
+
+if [[ "$JSON_MODE" == "true" ]]; then
+  python3 -c "
+import json, sys
+text = sys.stdin.read().strip()
+obj = {
+    'capability': 'media.sonarr.history',
+    'tool': 'get_episode_history',
+    'series_id': int(sys.argv[1]),
+    'text': text,
+}
+if sys.argv[2]:
+    obj['limit'] = int(sys.argv[2])
+print(json.dumps(obj, indent=2))
+" "$SERIES_ID" "$LIMIT" <<< "$RESULT"
+else
+  echo "$RESULT"
+fi

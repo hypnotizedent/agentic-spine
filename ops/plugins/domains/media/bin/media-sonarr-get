@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# media-sonarr-get — Get TV show details from Sonarr (read-only bridge)
+# Delegates to workbench media-agent tool: get_show_details
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/media-agent-bridge.sh"
+
+usage() {
+  echo "Usage: media-sonarr-get (--series-id <id> | --title <text>) [--json]"
+  echo ""
+  echo "Options:"
+  echo "  --series-id <id>  Sonarr series ID"
+  echo "  --title <text>    Show title to search for"
+  echo "  --json            Output structured JSON"
+}
+
+SERIES_ID=""
+TITLE=""
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --series-id) SERIES_ID="$2"; shift 2 ;;
+    --title) TITLE="$2"; shift 2 ;;
+    --json) JSON_MODE=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$SERIES_ID" && -z "$TITLE" ]]; then
+  echo "ERROR: --series-id or --title is required" >&2
+  exit 1
+fi
+
+if [[ -n "$SERIES_ID" ]]; then
+  ARGS_JSON=$(python3 -c "import json,sys; print(json.dumps({'seriesId': int(sys.argv[1])}))" "$SERIES_ID")
+else
+  ARGS_JSON=$(python3 -c "import json,sys; print(json.dumps({'title': sys.argv[1]}))" "$TITLE")
+fi
+
+RESULT=$(media_agent_call "get_show_details" "$ARGS_JSON") || {
+  echo "FAIL: bridge call failed" >&2
+  [[ -n "${RESULT:-}" ]] && echo "$RESULT" >&2
+  exit 1
+}
+
+if [[ "$JSON_MODE" == "true" ]]; then
+  python3 -c "
+import json, sys
+text = sys.stdin.read().strip()
+args = {}
+if sys.argv[1]: args['seriesId'] = int(sys.argv[1])
+if sys.argv[2]: args['title'] = sys.argv[2]
+print(json.dumps({
+    'capability': 'media.sonarr.get',
+    'tool': 'get_show_details',
+    'arguments': args,
+    'text': text,
+}, indent=2))
+" "$SERIES_ID" "$TITLE" <<< "$RESULT"
+else
+  echo "$RESULT"
+fi

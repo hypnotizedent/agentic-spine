@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# media-sonarr-search — Search for TV shows via Sonarr (read-only bridge)
+# Delegates to workbench media-agent tool: search_content
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/media-agent-bridge.sh"
+
+usage() {
+  echo "Usage: media-sonarr-search --query <text> [--json]"
+  echo ""
+  echo "Options:"
+  echo "  --query <text>   Search query (required)"
+  echo "  --json           Output structured JSON"
+}
+
+QUERY=""
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --query) QUERY="$2"; shift 2 ;;
+    --json) JSON_MODE=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$QUERY" ]]; then
+  echo "ERROR: --query is required" >&2
+  exit 1
+fi
+
+ARGS_JSON=$(python3 -c "import json,sys; print(json.dumps({'query': sys.argv[1], 'type': 'tv'}))" "$QUERY")
+
+RESULT=$(media_agent_call "search_content" "$ARGS_JSON") || {
+  echo "FAIL: bridge call failed" >&2
+  [[ -n "${RESULT:-}" ]] && echo "$RESULT" >&2
+  exit 1
+}
+
+if [[ "$JSON_MODE" == "true" ]]; then
+  python3 -c "
+import json, sys
+text = sys.stdin.read().strip()
+print(json.dumps({
+    'capability': 'media.sonarr.search',
+    'tool': 'search_content',
+    'query': sys.argv[1],
+    'type': 'tv',
+    'text': text,
+}, indent=2))
+" "$QUERY" <<< "$RESULT"
+else
+  echo "$RESULT"
+fi
