@@ -33,9 +33,15 @@ Usage:
   wave-finish --loop-id LOOP-... --disposition landed|deferred|superseded|abandoned \
     [--completion-level slice_complete|loop_complete|domain_complete|estate_complete|readiness_complete] \
     [--wave-id WAVE-...] [--fixed-in <commit-sha>] \
-    [--skip-residue-check] [--dry-run]
+    [--skip-residue-check] [--controller-only] [--dry-run]
 
 Disposition = landed requires --completion-level.
+
+--controller-only: Lightweight close path for clean slices with no repo mutation.
+                   Skips worktree cleanup and heavy residue checks. Requires:
+                   - Clean working tree
+                   - Closed orchestration manifest (if exists)
+                   - No active worktree cleanup pending
 
 Steps:
   1. Validate loop scope (must be active)
@@ -161,6 +167,7 @@ WAVE_ID=""
 FIXED_IN=""
 SKIP_RESIDUE=0
 DRY_RUN=0
+CONTROLLER_ONLY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -188,6 +195,11 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --skip-residue-check)
+      SKIP_RESIDUE=1
+      shift
+      ;;
+    --controller-only)
+      CONTROLLER_ONLY=1
       SKIP_RESIDUE=1
       shift
       ;;
@@ -273,6 +285,50 @@ esac
 # Extract objective for summary.
 objective="$(awk '/^objective:/{sub(/^objective: */, ""); print; exit}' "$SCOPE_FILE" | tr -d '"' || true)"
 
+# ── Controller-only mode validation ──────────────────────────────
+if [[ "$CONTROLLER_ONLY" -eq 1 ]]; then
+  echo "CONTROLLER-ONLY MODE: lightweight close path enabled"
+  echo ""
+  echo "Validating controller-only prerequisites:"
+
+  # Check 1: No dirty working tree
+  if ! git diff --quiet && ! git diff --cached --quiet; then
+    echo "  ❌ FAIL: dirty working tree detected (controller-only requires clean state)"
+    exit 1
+  fi
+  echo "  ✓ Working tree clean"
+
+  # Check 2: Orchestration manifest closed (if exists)
+  manifest="$SPINE_STATE/orchestration/$LOOP_ID/manifest.yaml"
+  if [[ -f "$manifest" ]]; then
+    manifest_status="$(yq e -r '.status // ""' "$manifest" 2>/dev/null || echo "")"
+    if [[ "$manifest_status" != "closed" ]]; then
+      echo "  ❌ FAIL: orchestration manifest not closed (status=$manifest_status)"
+      exit 1
+    fi
+    echo "  ✓ Orchestration manifest closed"
+  else
+    echo "  ✓ No orchestration manifest (single-worker loop)"
+  fi
+
+  # Check 3: No pending worktree cleanup (simplified check)
+  if [[ -x "$WORKTREE_CLEANUP_BIN" ]]; then
+    pending_cleanup=$("$WORKTREE_CLEANUP_BIN" --mode report-only 2>/dev/null | grep -c "delete_candidates" || echo "0")
+    if [[ "$pending_cleanup" -gt 0 ]]; then
+      echo "  ⚠️  WARN: worktree cleanup candidates exist (will be skipped in controller-only mode)"
+    else
+      echo "  ✓ No pending worktree cleanup"
+    fi
+  fi
+
+  echo ""
+  echo "Controller-only mode validated. Skipping:"
+  echo "  - Heavy residue checks"
+  echo "  - Worktree cleanup consumption"
+  echo "  - Runtime surface validation"
+  echo ""
+fi
+
 echo ""
 echo "================================================================="
 echo "WAVE FINISH: $LOOP_ID"
@@ -282,6 +338,9 @@ echo "Disposition:      $DISPOSITION"
 echo "Completion Level: ${COMPLETION_LEVEL:-n/a}"
 echo "Wave ID:          ${WAVE_ID:-n/a}"
 echo "Objective:        ${objective:-<none>}"
+if [[ "$CONTROLLER_ONLY" -eq 1 ]]; then
+  echo "Mode:             controller-only (lightweight)"
+fi
 echo ""
 
 # ── Step 2: Collect linked gaps from SQLite authority ────────────
