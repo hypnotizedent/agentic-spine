@@ -43,6 +43,10 @@ Disposition = landed requires --completion-level.
                    - Closed orchestration manifest (if exists)
                    - No active worktree cleanup pending
 
+--check-eligibility: Check if wave is eligible for controller-only mode without
+                     closing. Reports blockers and remediation if ineligible.
+                     Exit 0 always (check-only mode).
+
 Steps:
   1. Validate loop scope (must be active)
   2. Collect linked gaps from SQLite authority
@@ -168,6 +172,7 @@ FIXED_IN=""
 SKIP_RESIDUE=0
 DRY_RUN=0
 CONTROLLER_ONLY=0
+CHECK_ELIGIBILITY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -203,6 +208,10 @@ while [[ $# -gt 0 ]]; do
       SKIP_RESIDUE=1
       shift
       ;;
+    --check-eligibility)
+      CHECK_ELIGIBILITY=1
+      shift
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -232,21 +241,25 @@ done
 # ── Validate required args ───────────────────────────────────────
 
 [[ -n "$LOOP_ID" ]] || { echo "wave.finish FAIL: --loop-id required" >&2; exit 2; }
-[[ -n "$DISPOSITION" ]] || { echo "wave.finish FAIL: --disposition required" >&2; exit 2; }
 
-ALLOWED_DISPOSITIONS="landed deferred superseded abandoned"
-disposition_ok=0
-for d in $ALLOWED_DISPOSITIONS; do
-  [[ "$DISPOSITION" == "$d" ]] && { disposition_ok=1; break; }
-done
-[[ "$disposition_ok" -eq 1 ]] || {
-  echo "wave.finish FAIL: invalid disposition '$DISPOSITION' (allowed: landed|deferred|superseded|abandoned)" >&2
-  exit 2
-}
+# Skip disposition validation for check-eligibility mode (read-only)
+if [[ "$CHECK_ELIGIBILITY" -eq 0 ]]; then
+  [[ -n "$DISPOSITION" ]] || { echo "wave.finish FAIL: --disposition required" >&2; exit 2; }
 
-if [[ "$DISPOSITION" == "landed" && -z "$COMPLETION_LEVEL" ]]; then
-  echo "wave.finish FAIL: --completion-level required when disposition=landed" >&2
-  exit 2
+  ALLOWED_DISPOSITIONS="landed deferred superseded abandoned"
+  disposition_ok=0
+  for d in $ALLOWED_DISPOSITIONS; do
+    [[ "$DISPOSITION" == "$d" ]] && { disposition_ok=1; break; }
+  done
+  [[ "$disposition_ok" -eq 1 ]] || {
+    echo "wave.finish FAIL: invalid disposition '$DISPOSITION' (allowed: landed|deferred|superseded|abandoned)" >&2
+    exit 2
+  }
+
+  if [[ "$DISPOSITION" == "landed" && -z "$COMPLETION_LEVEL" ]]; then
+    echo "wave.finish FAIL: --completion-level required when disposition=landed" >&2
+    exit 2
+  fi
 fi
 
 if [[ -n "$COMPLETION_LEVEL" ]]; then
@@ -284,6 +297,92 @@ esac
 
 # Extract objective for summary.
 objective="$(awk '/^objective:/{sub(/^objective: */, ""); print; exit}' "$SCOPE_FILE" | tr -d '"' || true)"
+
+# ── Controller-only eligibility check ────────────────────────────
+if [[ "$CHECK_ELIGIBILITY" -eq 1 ]]; then
+  echo ""
+  echo "================================================================="
+  echo "CONTROLLER-ONLY ELIGIBILITY CHECK: $LOOP_ID"
+  echo "================================================================="
+  echo ""
+
+  ELIGIBLE=1
+  declare -a BLOCKERS=()
+
+  # Check 1: Working tree clean
+  if ! git diff --quiet || ! git diff --cached --quiet; then
+    ELIGIBLE=0
+    BLOCKERS+=("dirty working tree detected")
+    echo "❌ Working tree: dirty (staged or unstaged changes present)"
+  else
+    echo "✓ Working tree: clean"
+  fi
+
+  # Check 2: Orchestration manifest closed (if exists)
+  manifest="$SPINE_STATE/orchestration/$LOOP_ID/manifest.yaml"
+  if [[ -f "$manifest" ]]; then
+    manifest_status="$(yq e -r '.status // ""' "$manifest" 2>/dev/null || echo "")"
+    if [[ "$manifest_status" != "closed" ]]; then
+      ELIGIBLE=0
+      BLOCKERS+=("orchestration manifest not closed (status=$manifest_status)")
+      echo "❌ Orchestration manifest: not closed (status=$manifest_status)"
+    else
+      echo "✓ Orchestration manifest: closed"
+    fi
+  else
+    echo "✓ Orchestration manifest: n/a (single-worker loop)"
+  fi
+
+  # Check 3: Projection parity
+  # Simplified check: look for recent projection receipts
+  recent_projection=$(find "$SPINE_STATE/../.evidence/spine/sessions" -type f -name "receipt.md" -mtime -1 2>/dev/null \
+    | xargs grep -l "gaps.projection.commit\|state.shared.reconcile" 2>/dev/null \
+    | head -1 || true)
+  if [[ -n "$recent_projection" ]]; then
+    echo "✓ Projection parity: recent projection found"
+  else
+    echo "⚠️  Projection parity: no recent projection (consider running gaps.projection.commit)"
+  fi
+
+  # Check 4: Worktree cleanup pending
+  if [[ -x "$WORKTREE_CLEANUP_BIN" ]]; then
+    pending_cleanup=$("$WORKTREE_CLEANUP_BIN" --mode report-only 2>/dev/null | grep -c "delete_candidates" || echo "0")
+    pending_cleanup=$(echo "$pending_cleanup" | head -1 | tr -d '\n')  # clean up output
+    if [[ -n "$pending_cleanup" ]] && [[ "$pending_cleanup" -gt 0 ]]; then
+      echo "⚠️  Worktree cleanup: $pending_cleanup candidate(s) pending (will be skipped)"
+    else
+      echo "✓ Worktree cleanup: no candidates pending"
+    fi
+  else
+    echo "✓ Worktree cleanup: check unavailable (assumed clean)"
+  fi
+
+  echo ""
+  echo "================================================================="
+  if [[ "$ELIGIBLE" -eq 1 ]]; then
+    echo "VERDICT: controller-only eligible ✓"
+    echo ""
+    echo "This wave can be closed with:"
+    echo "  wave.finish --loop-id $LOOP_ID --disposition landed \\"
+    echo "    --completion-level slice_complete --controller-only"
+  else
+    echo "VERDICT: requires full ceremony ❌"
+    echo ""
+    echo "Blocking reasons:"
+    for blocker in "${BLOCKERS[@]}"; do
+      echo "  - $blocker"
+    done
+    echo ""
+    echo "Remediation:"
+    echo "  - Commit or stash changes for clean working tree"
+    echo "  - Close orchestration manifest if wave was orchestrated"
+    echo "  - Run gaps.projection.commit to sync gap state"
+  fi
+  echo "================================================================="
+  echo ""
+
+  exit 0
+fi
 
 # ── Controller-only mode validation ──────────────────────────────
 if [[ "$CONTROLLER_ONLY" -eq 1 ]]; then
