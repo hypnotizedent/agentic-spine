@@ -1,5 +1,5 @@
 version: 1
-updated: '2026-04-03T15:13:15Z'
+updated: '2026-04-03T22:16:24Z'
 archive_ref: ops/archive/operational.gaps.archive.yaml
 gaps:
 - id: GAP-OP-054
@@ -386,40 +386,51 @@ gaps:
   notes: Filed via gaps.file at 2026-03-23T16:09:42Z
   parent_loop: LOOP-SPINE-POST-V3-HYGIENE-20260403
 - id: GAP-OP-1638
-  title: "loop.scope \u2014 LOOP-SPINE-RUNTIME-ROOT-CANONICALIZATION-20260323 scope\
-    \ still claimed remote landing confirmat..."
+  title: "D423 runtime path pollution lock failing \u2014 repo-local .runtime directory\
+    \ contains domain state"
   discovered_by: LOOP-SPINE-SELF-GOVERNANCE-LIFECYCLE-CANONICALIZATION-20260321
   discovered_at: '2026-03-23'
-  type: agent-behavior
-  classification: agent-behavior
-  doc: mailroom/state/friction-queue.ndjson
-  description: 'Agent friction intake item:
+  type: runtime-bug
+  classification: runtime-bug
+  doc: surfaces/verify/d423-runtime-path-pollution-lock.sh
+  description: 'Gate D423 (runtime path pollution lock) failing due to repo-local
+    .runtime pollution.
 
-    friction_id: FR-20260323T160056Z-0001
 
-    capability: loop.scope
+    Current state (2026-04-03):
 
-    expected: runtime-root loop scope should reflect current transport truth and latest
-    landed slice
+    - Repo-local .runtime directory exists at $SPINE_REPO/.runtime/
 
-    actual: LOOP-SPINE-RUNTIME-ROOT-CANONICALIZATION-20260323 scope still claimed
-    remote landing confirmation was blocked by transport after fetch/ls-remote worked
-    and the taxlegal slice later landed on origin/main
+    - 9 domain-state files exist in repo-local .runtime/spine/state/domain-state/
+    (mint, infra, spine domains)
 
-    severity: medium
+    - All runtime state must live in workspace canonical paths: $SPINE_STATE (~/code/.runtime/spine/state)
 
-    fingerprint: cf24ab7bae14096930979a0107b9ab83dbc9f2b8f276fde518ce23c2c7c23bf4
 
-    first_seen_utc: 2026-03-23T16:00:56Z
+    Root cause:
 
-    hit_count: 1
+    - Worktree workspace root extraction bug (fixed 2026-03-25 in 7c693b59)
+
+    - Bug caused worktree processes to write state to repo-local paths instead of
+    canonical workspace paths
+
+    - Legacy pollution artifacts remain and block D423 gate
+
+
+    Closure condition:
+
+    - Clean up repo-local .runtime pollution
+
+    - Verify D423 passes cleanly for 7 consecutive days
 
     '
   severity: high
   status: open
-  notes: 'Filed via gaps.file at 2026-03-23T16:09:42Z. REOPENED 2026-03-25: worktree
-    bug caused split-brain state writes.'
-  parent_loop: LOOP-SPINE-POST-V3-HYGIENE-20260403
+  notes: 'NARROWED 2026-04-03: Updated to reflect current truth. Original description
+    referenced non-existent LOOP-SPINE-RUNTIME-ROOT-CANONICALIZATION-20260323. Root
+    workspace bug was fixed 2026-03-25 (7c693b59), D423 gate added (ecad90c4), but
+    legacy pollution artifacts remain.'
+  parent_loop: LOOP-SPINE-POST-V3-ENGINE-COHERENCE-20260403
   fixed_in: 7c693b59
   fixed_at: '2026-03-25'
 - id: GAP-OP-1642
@@ -456,39 +467,53 @@ gaps:
   notes: Filed via gaps.file at 2026-03-23T16:10:04Z
   parent_loop: LOOP-SPINE-POST-V3-HYGIENE-20260403
 - id: GAP-OP-1657
-  title: "operating.model.join-table \u2014 Operator is still the implicit join table.\
-    \ 13 active loops, 70 open gaps in a ..."
+  title: "operating.model.join-table \u2014 Operator still acts as implicit join table\
+    \ for coordination"
   discovered_by: LOOP-SPINE-V3-CONVERGENCE-HARDENING-20260323
   discovered_at: '2026-03-23'
   type: agent-behavior
   classification: agent-behavior
-  doc: mailroom/state/friction-queue.ndjson
-  description: 'Agent friction intake item:
+  doc: docs/governance/SPINE.md
+  description: 'System lacks mechanical coordination layer for shared authority surfaces.
 
-    friction_id: FR-20260323T171435Z-0001
 
-    capability: operating.model.join-table
+    Current state (2026-04-03):
 
-    expected: System reconciles shared authority surfaces mechanically without operator
-    acting as implicit join table between runtime, control plane, loops, gaps, friction,
-    docs, worktrees, and closeout
+    - 4 active loops (down from 13 on 2026-03-23)
 
-    actual: Operator is still the implicit join table. 13 active loops, 70 open gaps
-    in a single YAML hotspot, 205 friction entries with no auto-triage, 25 dirty files
-    blocking session attach. Every reconciliation pass requires operator memory.
+    - 12 open gaps (down from 70)
 
-    severity: high
+    - 0 friction queue entries (friction.reconcile operational, queue drained)
 
-    fingerprint: 9f3ae451b73f31e54dcd3f8b7ea38f5c0429363c8647d4b23fc5f735767796d3
+    - 1 blocked worktree (down from 25+ dirty files)
 
-    first_seen_utc: 2026-03-23T17:14:35Z
+    - 7 active waves
 
-    hit_count: 1
+
+    Core architectural concern remains:
+
+    Operator still acts as implicit join table between runtime state, control plane
+    coordination, loop lifecycle, gap registry, worktree management, and closeout
+    finalization. While V3 finalization reduced volume dramatically, mechanical reconciliation
+    primitives for coordinating these surfaces without operator memory are still missing.
+
+
+    Examples of manual coordination still required:
+
+    - Wave-to-loop ownership mapping
+
+    - Worktree lease coordination with active loop state
+
+    - Gap-to-loop reparenting when loops close
+
+    - Handoff expiration reconciliation with loop/wave state
 
     '
   severity: high
   status: open
-  notes: Filed via gaps.file at 2026-03-23T17:14:36Z
+  notes: 'NARROWED 2026-04-03: Updated numbers to reflect post-V3 reality. Volume
+    reduced dramatically (4 loops, 12 gaps, 0 friction queue) but architectural concern
+    about mechanical coordination layer remains valid.'
   parent_loop: LOOP-SPINE-POST-V3-HYGIENE-20260403
 - id: GAP-OP-1671
   title: "worktree.lifecycle.reconcile \u2014 The storage-preservation flow left a\
