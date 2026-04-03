@@ -1,0 +1,689 @@
+#!/usr/bin/env python3
+"""Synthesize a canonical joined runtime view for live spine operations."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+OPEN_LOOP_STATUSES = {"active", "open", "draft"}
+TERMINAL_LOOP_STATUSES = {"closed", "superseded", "abandoned", "deferred"}
+ACTIVE_HANDOFF_STATES = {"active", "parked"}
+VERIFY_PASS_STATUSES = {"done", "pass", "passed", "ok", "healthy", "success"}
+RECENT_SIGNAL_WINDOW_HOURS = 24 * 7
+ENGINE_COHERENCE_GAP_IDS = {
+    "GAP-OP-1636",
+    "GAP-OP-1637",
+    "GAP-OP-1638",
+    "GAP-OP-1639",
+    "GAP-OP-1642",
+    "GAP-OP-1657",
+    "GAP-OP-1671",
+    "GAP-OP-1674",
+    "GAP-OP-1702",
+}
+MAIN_OVERRIDE_PATTERNS = (
+    "OPS_GOVERNED_MAIN_OVERRIDE=1",
+    "MAIN MUTATION OVERRIDE",
+    "WORKTREE ISOLATION OVERRIDE",
+    "ORCHESTRATOR GUARD OVERRIDE",
+    "PROACTIVE GUARD OVERRIDE",
+)
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def resolve_root() -> Path:
+    return Path(__file__).resolve().parents[5]
+
+
+def load_yaml(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    with path.open("r", encoding="utf-8") as handle:
+        loaded = yaml.safe_load(handle)
+    return default if loaded is None else loaded
+
+
+def load_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def parse_frontmatter(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if not text.startswith("---\n"):
+        return {}
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    payload = yaml.safe_load(parts[1]) or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def parse_iso(value: Any) -> dt.datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def render_dt(value: dt.datetime | None) -> str:
+    if value is None:
+        return ""
+    return value.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def hours_since(value: dt.datetime | None) -> float | None:
+    if value is None:
+        return None
+    delta = dt.datetime.now(dt.timezone.utc) - value.astimezone(dt.timezone.utc)
+    return round(delta.total_seconds() / 3600.0, 2)
+
+
+def run_cmd(cmd: list[str], *, cwd: Path) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def resolve_paths(root: Path) -> dict[str, Path]:
+    state_root = Path(
+        os.environ.get("SPINE_STATE")
+        or str(root.parent / ".runtime" / "spine" / "state")
+    )
+    runtime_root = Path(
+        os.environ.get("SPINE_RUNTIME_ROOT")
+        or str(state_root.parent)
+    )
+    workspace_root = Path(
+        os.environ.get("SPINE_WORKSPACE_ROOT")
+        or str(root.parent)
+    )
+    receipts_root = Path(
+        os.environ.get("SPINE_RECEIPTS")
+        or str(workspace_root / ".evidence" / "spine" / "sessions")
+    )
+    gaps_file = Path(
+        os.environ.get("SPINE_GAPS_FILE")
+        or str(root / "ops" / "bindings" / "operational.gaps.yaml")
+    )
+    joined_state_path = Path(
+        os.environ.get("SPINE_ENGINE_JOINED_STATE_PATH")
+        or str(state_root / "domain-state" / "spine" / "SPINE_ENGINE_JOINED_STATE.yaml")
+    )
+    return {
+        "root": root,
+        "workspace_root": workspace_root,
+        "runtime_root": runtime_root,
+        "state_root": state_root,
+        "scopes_dir": state_root / "loop-scopes",
+        "handoffs_dir": state_root / "handoffs",
+        "waves_dir": runtime_root / "waves",
+        "receipts_root": receipts_root,
+        "gaps_file": gaps_file,
+        "joined_state_path": joined_state_path,
+    }
+
+
+def collect_loop_rows(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    rows: list[dict[str, Any]] = []
+    status_index: dict[str, str] = {}
+    scopes_dir = paths["scopes_dir"]
+    if not scopes_dir.exists():
+        return rows, status_index
+
+    for path in sorted(scopes_dir.glob("*.scope.md")):
+        front = parse_frontmatter(path)
+        loop_id = str(front.get("loop_id") or path.stem.replace(".scope", "")).strip()
+        if not loop_id.startswith("LOOP-"):
+            continue
+        status = str(front.get("status") or "unknown").strip().lower()
+        created_dt = parse_iso(front.get("created")) or dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
+        row = {
+            "loop_id": loop_id,
+            "status": status,
+            "owner": str(front.get("owner") or "").strip(),
+            "scope": str(front.get("scope") or "").strip(),
+            "priority": str(front.get("priority") or "").strip(),
+            "objective": str(front.get("objective") or "").strip(),
+            "next_action": str(front.get("next_action") or "").strip(),
+            "created_at_utc": render_dt(created_dt),
+            "updated_at_utc": render_dt(dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)),
+            "path": str(path),
+        }
+        status_index[loop_id] = status
+        if status in OPEN_LOOP_STATUSES:
+            rows.append(row)
+
+    rows.sort(key=lambda row: (row.get("created_at_utc", ""), row.get("loop_id", "")), reverse=True)
+    return rows, status_index
+
+
+def normalize_gap_row(item: dict[str, Any]) -> dict[str, Any]:
+    description = re.sub(r"\s+", " ", str(item.get("description") or "").strip())
+    return {
+        "id": str(item.get("id") or "").strip(),
+        "title": str(item.get("title") or "").strip(),
+        "severity": str(item.get("severity") or "medium").strip(),
+        "status": str(item.get("status") or "").strip().lower(),
+        "parent_loop": str(item.get("parent_loop") or "").strip(),
+        "description": description,
+        "doc": str(item.get("doc") or "").strip(),
+        "owner": str(item.get("owner") or item.get("discovered_by") or "").strip(),
+        "discovered_at": str(item.get("discovered_at") or "").strip(),
+    }
+
+
+def collect_gap_rows(paths: dict[str, Path], loop_status_index: dict[str, str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    data = load_yaml(paths["gaps_file"], {})
+    gaps = data.get("gaps", []) if isinstance(data, dict) else []
+    open_rows: list[dict[str, Any]] = []
+    orphaned_rows: list[dict[str, Any]] = []
+
+    for raw_item in gaps:
+        if not isinstance(raw_item, dict):
+            continue
+        row = normalize_gap_row(raw_item)
+        if row["status"] not in {"open", "active"}:
+            continue
+        open_rows.append(row)
+        parent_loop = row.get("parent_loop", "")
+        parent_status = loop_status_index.get(parent_loop, "")
+        if parent_loop and parent_status in TERMINAL_LOOP_STATUSES:
+            orphan = dict(row)
+            orphan["parent_loop_status"] = parent_status
+            orphaned_rows.append(orphan)
+
+    open_rows.sort(key=lambda row: (row.get("severity", ""), row.get("id", "")))
+    orphaned_rows.sort(key=lambda row: (row.get("parent_loop_status", ""), row.get("id", "")))
+    return open_rows, orphaned_rows
+
+
+def collect_handoffs(paths: dict[str, Path]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    handoffs_dir = paths["handoffs_dir"]
+    if not handoffs_dir.exists():
+        return rows
+
+    for path in sorted(handoffs_dir.glob("*.yaml")):
+        payload = load_yaml(path, {})
+        state = str(payload.get("state") or "").strip().lower()
+        if state not in ACTIVE_HANDOFF_STATES:
+            continue
+        expires_dt = parse_iso(payload.get("expires_at_utc"))
+        rows.append(
+            {
+                "id": path.stem,
+                "state": state,
+                "path": str(path),
+                "owner": str(payload.get("owner") or "").strip(),
+                "loop_id": str(payload.get("loop_id") or "").strip(),
+                "wave_id": str(payload.get("wave_id") or "").strip(),
+                "expires_at_utc": render_dt(expires_dt),
+                "expires_in_hours": hours_since(expires_dt) * -1 if expires_dt else None,
+            }
+        )
+
+    rows.sort(key=lambda row: (row.get("expires_at_utc", ""), row.get("id", "")))
+    return rows
+
+
+def collect_worktree_state(paths: dict[str, Path]) -> dict[str, Any]:
+    script = paths["root"] / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "worktree-lifecycle-reconcile"
+    if not script.exists():
+        return {"summary": {}, "blocked": [], "raw": {}}
+
+    rc, out, err = run_cmd([str(script), "--json"], cwd=paths["root"])
+    text = out.strip() or err.strip()
+    if rc != 0 or not text:
+        return {"summary": {}, "blocked": [], "raw": {"error": text}}
+
+    payload = json.loads(text)
+    blocked: list[dict[str, Any]] = []
+    for section in ("worktrees", "local_branches", "temp_clones", "stashes"):
+        for raw_row in payload.get(section, []) or []:
+            issues = [str(item).strip() for item in (raw_row.get("issues") or []) if str(item).strip()]
+            if not issues:
+                continue
+            blocked.append(
+                {
+                    "category": section,
+                    "path": str(raw_row.get("path") or "").strip(),
+                    "branch": str(raw_row.get("branch") or "").strip(),
+                    "owner_type": str(raw_row.get("owner_type") or "").strip(),
+                    "owner_id": str(raw_row.get("owner_id") or "").strip(),
+                    "owner_state": str(raw_row.get("owner_state") or "").strip(),
+                    "owner_disposition": str(raw_row.get("owner_disposition") or "").strip(),
+                    "issues": issues,
+                    "warnings": [str(item).strip() for item in (raw_row.get("warnings") or []) if str(item).strip()],
+                }
+            )
+
+    root_checkout = payload.get("root_checkout") if isinstance(payload.get("root_checkout"), dict) else {}
+    root_issues = [str(item).strip() for item in (root_checkout.get("issues") or []) if str(item).strip()]
+    if root_issues:
+        blocked.append(
+            {
+                "category": "root_checkout",
+                "path": str(root_issues),
+                "branch": str(root_checkout.get("branch") or "").strip(),
+                "owner_type": "root_checkout",
+                "owner_id": "root_checkout",
+                "owner_state": str(root_checkout.get("lane_type") or "").strip(),
+                "owner_disposition": "",
+                "issues": root_issues,
+                "warnings": [str(item).strip() for item in (root_checkout.get("warnings") or []) if str(item).strip()],
+            }
+        )
+
+    return {
+        "summary": payload.get("summary", {}) if isinstance(payload, dict) else {},
+        "blocked": blocked,
+        "raw": payload,
+    }
+
+
+def collect_wave_state(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    active_rows: list[dict[str, Any]] = []
+    force_close_rows: list[dict[str, Any]] = []
+    dod_override_rows: list[dict[str, Any]] = []
+    waves_dir = paths["waves_dir"]
+    now = dt.datetime.now(dt.timezone.utc)
+
+    if not waves_dir.exists():
+        return active_rows, {"force_close": force_close_rows, "dod_override": dod_override_rows}
+
+    for state_path in sorted(waves_dir.glob("WAVE-*/state.json")):
+        payload = load_json(state_path, {})
+        if not isinstance(payload, dict):
+            continue
+        packet = payload.get("packet") if isinstance(payload.get("packet"), dict) else {}
+        if not packet and isinstance(payload.get("wave_packet"), dict):
+            packet = payload["wave_packet"]
+        role_flow = payload.get("role_flow") if isinstance(payload.get("role_flow"), dict) else {}
+        workspace = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
+        created_dt = parse_iso(payload.get("created_at"))
+        closed_dt = parse_iso(payload.get("closed_at"))
+        row = {
+            "wave_id": str(payload.get("wave_id") or state_path.parent.name).strip(),
+            "status": str(payload.get("status") or "").strip().lower(),
+            "lifecycle_state": str(payload.get("lifecycle_state") or "").strip().lower(),
+            "loop_id": str(packet.get("loop_id") or "").strip(),
+            "objective": str(payload.get("objective") or "").strip(),
+            "dispatch_count": len(payload.get("dispatches", []) or []),
+            "watcher_check_count": len(payload.get("watcher_checks", []) or []),
+            "current_role": str(role_flow.get("current_role") or packet.get("current_role") or "").strip(),
+            "next_role": str(role_flow.get("next_role") or packet.get("next_role") or "").strip(),
+            "workspace_enabled": bool(workspace.get("enabled")),
+            "workspace_branch": str(workspace.get("branch") or "").strip(),
+            "workspace_path": str(workspace.get("worktree") or "").strip(),
+            "created_at_utc": render_dt(created_dt),
+            "closed_at_utc": render_dt(closed_dt),
+            "force_closed": bool(payload.get("force_closed")),
+            "dod_overridden": bool(payload.get("dod_overridden")),
+            "state_path": str(state_path),
+            "controller_only_candidate": len(payload.get("dispatches", []) or []) == 0,
+            "controller_precheck_path": str(state_path.parent / "controller-close-precheck.json"),
+        }
+
+        if row["status"] != "closed":
+            active_rows.append(row)
+
+        age_ok = True
+        timestamp = closed_dt or created_dt
+        if timestamp is not None:
+            age_ok = (now - timestamp).total_seconds() <= RECENT_SIGNAL_WINDOW_HOURS * 3600
+
+        if age_ok and row["force_closed"]:
+            force_close_rows.append(
+                {
+                    "wave_id": row["wave_id"],
+                    "loop_id": row["loop_id"],
+                    "objective": row["objective"],
+                    "closed_at_utc": row["closed_at_utc"],
+                    "path": str(state_path.parent / "close-receipt.json"),
+                }
+            )
+        if age_ok and row["dod_overridden"]:
+            dod_override_rows.append(
+                {
+                    "wave_id": row["wave_id"],
+                    "loop_id": row["loop_id"],
+                    "objective": row["objective"],
+                    "closed_at_utc": row["closed_at_utc"],
+                    "path": str(state_path.parent / "close-receipt.json"),
+                    "reason": str(payload.get("dod_override_reason") or "").strip(),
+                }
+            )
+
+    active_rows.sort(key=lambda row: (row.get("created_at_utc", ""), row.get("wave_id", "")), reverse=True)
+    force_close_rows.sort(key=lambda row: (row.get("closed_at_utc", ""), row.get("wave_id", "")), reverse=True)
+    dod_override_rows.sort(key=lambda row: (row.get("closed_at_utc", ""), row.get("wave_id", "")), reverse=True)
+    return active_rows, {"force_close": force_close_rows, "dod_override": dod_override_rows}
+
+
+def receipt_dirs(paths: dict[str, Path]) -> list[Path]:
+    root = paths["receipts_root"]
+    if not root.exists():
+        return []
+    rows = sorted(
+        [path for path in root.glob("RCAP-*") if path.is_dir()],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return rows[:400]
+
+
+def collect_main_override_signals(paths: dict[str, Path]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    now = dt.datetime.now(dt.timezone.utc)
+    for receipt_dir in receipt_dirs(paths):
+        output_path = receipt_dir / "output.txt"
+        receipt_path = receipt_dir / "receipt.md"
+        if not output_path.exists():
+            continue
+        mtime = dt.datetime.fromtimestamp(output_path.stat().st_mtime, tz=dt.timezone.utc)
+        if (now - mtime).total_seconds() > RECENT_SIGNAL_WINDOW_HOURS * 3600:
+            continue
+        text = output_path.read_text(encoding="utf-8", errors="replace")
+        matched = next((pattern for pattern in MAIN_OVERRIDE_PATTERNS if pattern in text), "")
+        if not matched:
+            continue
+        capability = ""
+        if receipt_path.exists():
+            receipt_text = receipt_path.read_text(encoding="utf-8", errors="replace")
+            match = re.search(r"\|\s*Capability\s*\|\s*`?([^`|]+)`?\s*\|", receipt_text)
+            if match:
+                capability = match.group(1).strip()
+        rows.append(
+            {
+                "receipt_path": str(receipt_path),
+                "output_path": str(output_path),
+                "capability": capability,
+                "generated_at_utc": render_dt(mtime),
+                "signal": matched,
+            }
+        )
+    return rows[:20]
+
+
+def parse_verify_output(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="replace").strip()
+    payload = json.loads(text)
+    wrapper = payload.get("wrapper", {}) if isinstance(payload.get("wrapper"), dict) else {}
+    blocking = payload.get("blocking_fail_ids", []) if isinstance(payload.get("blocking_fail_ids"), list) else []
+    status = "unknown"
+    if int(wrapper.get("fail", 0) or 0) == 0 and not blocking:
+        status = "pass"
+    elif not blocking and int(wrapper.get("warn", 0) or 0) > 0:
+        status = "warn"
+    elif blocking:
+        status = "failed"
+    return {
+        "status": status,
+        "scope": str(payload.get("scope") or "").strip(),
+        "wrapper_total": int(wrapper.get("total", 0) or 0),
+        "wrapper_pass": int(wrapper.get("pass", 0) or 0),
+        "wrapper_fail": int(wrapper.get("fail", 0) or 0),
+        "wrapper_warn": int(wrapper.get("warn", 0) or 0),
+        "blocking_fail_ids": blocking,
+        "warning_ids": payload.get("warning_gate_ids", []) if isinstance(payload.get("warning_gate_ids"), list) else [],
+    }
+
+
+def collect_latest_fast_verify(paths: dict[str, Path]) -> dict[str, Any]:
+    for receipt_dir in receipt_dirs(paths):
+        if "__verify.run__" not in receipt_dir.name:
+            continue
+        output_path = receipt_dir / "output.txt"
+        exec_path = receipt_dir / "receipt.exec.json"
+        receipt_path = receipt_dir / "receipt.md"
+        if not output_path.exists():
+            continue
+        try:
+            summary = parse_verify_output(output_path)
+        except Exception:
+            continue
+        if summary.get("scope") != "fast":
+            continue
+        exec_payload = load_json(exec_path, {}) if exec_path.exists() else {}
+        run_keys = exec_payload.get("run_keys", []) if isinstance(exec_payload, dict) else []
+        return {
+            "status": summary.get("status", "unknown"),
+            "generated_at_utc": render_dt(dt.datetime.fromtimestamp(output_path.stat().st_mtime, tz=dt.timezone.utc)),
+            "receipt_path": str(receipt_path),
+            "output_path": str(output_path),
+            "run_key": str(run_keys[0]).strip() if run_keys else "",
+            "wrapper_total": summary.get("wrapper_total", 0),
+            "wrapper_pass": summary.get("wrapper_pass", 0),
+            "wrapper_fail": summary.get("wrapper_fail", 0),
+            "wrapper_warn": summary.get("wrapper_warn", 0),
+            "blocking_fail_ids": summary.get("blocking_fail_ids", []),
+            "warning_ids": summary.get("warning_ids", []),
+        }
+    return {
+        "status": "unknown",
+        "generated_at_utc": "",
+        "receipt_path": "",
+        "output_path": "",
+        "run_key": "",
+        "wrapper_total": 0,
+        "wrapper_pass": 0,
+        "wrapper_fail": 0,
+        "wrapper_warn": 0,
+        "blocking_fail_ids": [],
+        "warning_ids": [],
+    }
+
+
+def build_engine_coherence_summary(
+    open_gaps: list[dict[str, Any]],
+    override_signals: dict[str, list[dict[str, Any]]],
+    main_override_signals: list[dict[str, Any]],
+) -> dict[str, Any]:
+    signal_rows = [row for row in open_gaps if row.get("id") in ENGINE_COHERENCE_GAP_IDS]
+    return {
+        "signal_gap_ids": sorted(ENGINE_COHERENCE_GAP_IDS),
+        "open_gap_signals": signal_rows,
+        "open_gap_signal_ids": [row.get("id", "") for row in signal_rows],
+        "recent_force_close_count": len(override_signals.get("force_close", [])),
+        "recent_dod_override_count": len(override_signals.get("dod_override", [])),
+        "recent_main_override_count": len(main_override_signals),
+        "needs_attention": bool(signal_rows or override_signals.get("force_close") or override_signals.get("dod_override")),
+    }
+
+
+def loop_focus_context(
+    loop_id: str,
+    joined_state_path: Path,
+    open_gaps: list[dict[str, Any]],
+    active_waves: list[dict[str, Any]],
+    blocked_worktrees: list[dict[str, Any]],
+    override_signals: dict[str, list[dict[str, Any]]],
+    latest_fast_verify: dict[str, Any],
+    paths: dict[str, Path],
+) -> dict[str, Any]:
+    gap_rows = [row for row in open_gaps if row.get("parent_loop") == loop_id]
+    wave_rows = [row for row in active_waves if row.get("loop_id") == loop_id]
+    override_rows = [
+        row
+        for bucket in ("force_close", "dod_override")
+        for row in override_signals.get(bucket, [])
+        if row.get("loop_id") == loop_id
+    ]
+    worktree_rows = []
+    for row in blocked_worktrees:
+        owner_id = str(row.get("owner_id") or "").strip()
+        branch = str(row.get("branch") or "").strip()
+        path = str(row.get("path") or "").strip()
+        if owner_id == loop_id or loop_id in branch or loop_id in path:
+            worktree_rows.append(row)
+
+    scope_path = paths["scopes_dir"] / f"{loop_id}.scope.md"
+    evidence_refs = [str(joined_state_path)]
+    if scope_path.exists():
+        evidence_refs.append(str(scope_path))
+    if latest_fast_verify.get("receipt_path"):
+        evidence_refs.append(str(latest_fast_verify["receipt_path"]))
+    for row in override_rows:
+        if row.get("path"):
+            evidence_refs.append(str(row["path"]))
+
+    evidence_refs = sorted(dict.fromkeys(ref for ref in evidence_refs if ref))
+    summary = {
+        "open_gap_count": len(gap_rows),
+        "active_wave_count": len(wave_rows),
+        "blocked_worktree_count": len(worktree_rows),
+        "recent_override_count": len(override_rows),
+    }
+    return {
+        "loop_id": loop_id,
+        "summary": summary,
+        "open_gaps": gap_rows,
+        "active_waves": wave_rows,
+        "blocked_worktrees": worktree_rows,
+        "recent_override_signals": override_rows,
+        "evidence_refs": evidence_refs,
+        "next_action_hint": (
+            f"Resume from joined state for {loop_id}: "
+            f"{summary['open_gap_count']} open gap(s), "
+            f"{summary['active_wave_count']} active wave(s), "
+            f"{summary['blocked_worktree_count']} blocked worktree item(s), "
+            f"{summary['recent_override_count']} recent override signal(s)."
+        ),
+    }
+
+
+def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str, Any]:
+    paths = resolve_paths(root)
+    open_loops, loop_status_index = collect_loop_rows(paths)
+    open_gaps, orphaned_gaps = collect_gap_rows(paths, loop_status_index)
+    handoffs = collect_handoffs(paths)
+    worktrees = collect_worktree_state(paths)
+    active_waves, override_signals = collect_wave_state(paths)
+    main_override_signals = collect_main_override_signals(paths)
+    latest_fast_verify = collect_latest_fast_verify(paths)
+    engine_coherence = build_engine_coherence_summary(open_gaps, override_signals, main_override_signals)
+
+    payload: dict[str, Any] = {
+        "schema_version": "1.0",
+        "generated_at_utc": utc_now(),
+        "paths": {
+            "root": str(paths["root"]),
+            "workspace_root": str(paths["workspace_root"]),
+            "runtime_root": str(paths["runtime_root"]),
+            "state_root": str(paths["state_root"]),
+            "gaps_file": str(paths["gaps_file"]),
+            "receipts_root": str(paths["receipts_root"]),
+            "joined_state_path": str(paths["joined_state_path"]),
+        },
+        "summary": {
+            "open_loops": len(open_loops),
+            "open_gaps": len(open_gaps),
+            "orphaned_gaps": len(orphaned_gaps),
+            "active_handoffs": len(handoffs),
+            "blocked_worktrees": len(worktrees.get("blocked", [])),
+            "active_waves": len(active_waves),
+            "recent_force_closes": len(override_signals.get("force_close", [])),
+            "recent_dod_overrides": len(override_signals.get("dod_override", [])),
+            "recent_main_overrides": len(main_override_signals),
+            "latest_fast_verify_status": latest_fast_verify.get("status", "unknown"),
+            "engine_coherence_needs_attention": engine_coherence.get("needs_attention", False),
+        },
+        "loops": {"open": open_loops},
+        "gaps": {"open": open_gaps, "orphaned": orphaned_gaps},
+        "handoffs": {"active": handoffs},
+        "worktrees": {
+            "summary": worktrees.get("summary", {}),
+            "blocked": worktrees.get("blocked", []),
+        },
+        "waves": {"active": active_waves},
+        "override_signals": {
+            "recent_window_hours": RECENT_SIGNAL_WINDOW_HOURS,
+            "force_close": override_signals.get("force_close", []),
+            "dod_override": override_signals.get("dod_override", []),
+            "main_override": main_override_signals,
+        },
+        "verify": {"latest_fast": latest_fast_verify},
+        "engine_coherence": engine_coherence,
+    }
+
+    if loop_id:
+        payload["loop_context"] = loop_focus_context(
+            loop_id,
+            paths["joined_state_path"],
+            open_gaps,
+            active_waves,
+            worktrees.get("blocked", []),
+            override_signals,
+            latest_fast_verify,
+            paths,
+        )
+
+    if write:
+        joined_state_path = paths["joined_state_path"]
+        joined_state_path.parent.mkdir(parents=True, exist_ok=True)
+        joined_state_path.write_text(
+            yaml.safe_dump(payload, sort_keys=False, allow_unicode=False),
+            encoding="utf-8",
+        )
+
+    return payload
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Build the canonical spine engine joined-state runtime surface.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of a human summary")
+    parser.add_argument("--loop-id", default="", help="Include loop-scoped residue and evidence context")
+    parser.add_argument("--no-write", action="store_true", help="Do not write the YAML joined-state file")
+    args = parser.parse_args()
+
+    payload = synthesize(resolve_root(), loop_id=str(args.loop_id or "").strip(), write=not args.no_write)
+    if args.json:
+        json.dump(payload, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    summary = payload.get("summary", {})
+    print("spine.engine.joined_state")
+    print(f"path: {payload['paths']['joined_state_path']}")
+    print(f"open_loops: {summary.get('open_loops', 0)}")
+    print(f"open_gaps: {summary.get('open_gaps', 0)}")
+    print(f"orphaned_gaps: {summary.get('orphaned_gaps', 0)}")
+    print(f"blocked_worktrees: {summary.get('blocked_worktrees', 0)}")
+    print(f"active_waves: {summary.get('active_waves', 0)}")
+    print(f"recent_force_closes: {summary.get('recent_force_closes', 0)}")
+    print(f"recent_dod_overrides: {summary.get('recent_dod_overrides', 0)}")
+    print(f"recent_main_overrides: {summary.get('recent_main_overrides', 0)}")
+    print(f"latest_fast_verify_status: {summary.get('latest_fast_verify_status', 'unknown')}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

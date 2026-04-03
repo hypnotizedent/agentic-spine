@@ -1,309 +1,135 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# lifecycle.health — Composite lifecycle dashboard
-#
-# Usage: lifecycle-health
-#
-# Shows: gap summary counts, aging report, open loop progress, orphan check.
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
-SCOPES_DIR="$SPINE_STATE/loop-scopes"
-GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
-
 source "$ROOT/ops/plugins/core/lifecycle/lib/lifecycle-rules.sh"
 
-# Frontmatter field extractor (POSIX-compatible)
-_fm_field() {
-  local file="$1" field="$2"
-  awk '/^---$/{n++; next} n==1{print} n>=2{exit}' "$file" \
-    | { grep "^${field}:" || true; } \
-    | sed "s/^${field}: *//" \
-    | tr -d '"' \
-    | head -1
+JOINED_STATE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/spine-engine-joined-state"
+[[ -x "$JOINED_STATE_BIN" ]] || {
+  echo "FAIL: joined-state surface unavailable: $JOINED_STATE_BIN" >&2
+  exit 1
 }
+
+JOINED_JSON="$(mktemp "${SPINE_TMP:-/tmp}/lifecycle-health-joined.XXXXXX.json")"
+trap 'rm -f "$JOINED_JSON"' EXIT
+"$JOINED_STATE_BIN" --json > "$JOINED_JSON"
 
 echo "=== LIFECYCLE HEALTH DASHBOARD ==="
 echo ""
-
-# ── 1. Gap summary counts (enhanced with owner distribution and age) ──
-echo "--- Gap Summary ---"
-python3 - "$GAPS_FILE" <<'PY'
+python3 - "$JOINED_JSON" "$(health_orphan_check)" <<'PY'
 import json
-import subprocess
 import sys
-from datetime import datetime, timezone
 
-gaps_file = sys.argv[1]
-try:
-    result = subprocess.run(
-        ["yq", "e", "-o=json", ".", gaps_file],
-        capture_output=True, text=True, check=True
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+show_orphans = sys.argv[2].strip().lower() == "true"
+
+summary = payload.get("summary", {})
+loops = payload.get("loops", {}).get("open", [])
+gaps = payload.get("gaps", {}).get("open", [])
+orphans = payload.get("gaps", {}).get("orphaned", [])
+handoffs = payload.get("handoffs", {}).get("active", [])
+blocked_worktrees = payload.get("worktrees", {}).get("blocked", [])
+waves = payload.get("waves", {}).get("active", [])
+overrides = payload.get("override_signals", {})
+verify = payload.get("verify", {}).get("latest_fast", {})
+engine = payload.get("engine_coherence", {})
+
+print("--- Joined State Surface ---")
+print(f"path: {payload.get('paths', {}).get('joined_state_path', '')}")
+print(f"generated: {payload.get('generated_at_utc', '')}")
+print("")
+
+print("--- Gap Summary ---")
+print(f"Open gaps: {summary.get('open_gaps', 0)}")
+print(f"Orphaned gaps: {summary.get('orphaned_gaps', 0)}")
+for row in gaps[:5]:
+    desc = row.get("description", "")
+    suffix = f" — {desc}" if desc else ""
+    print(f"  {row.get('id', '')} [{row.get('severity', 'medium')}]{suffix}")
+print("")
+
+print("--- Open Loops ---")
+for row in loops:
+    next_action = row.get("next_action", "")
+    suffix = f" next={next_action}" if next_action else ""
+    print(f"  {row.get('loop_id', '')} [{row.get('priority', 'n/a')}] scope={row.get('scope', '')}{suffix}")
+print(f"Count: {summary.get('open_loops', 0)}")
+print("")
+
+print("--- Active Handoffs ---")
+for row in handoffs[:8]:
+    expires = row.get("expires_at_utc", "")
+    suffix = f" expires={expires}" if expires else ""
+    print(f"  {row.get('id', '')} [{row.get('state', '')}]{suffix}")
+print(f"Count: {summary.get('active_handoffs', 0)}")
+print("")
+
+print("--- Worktree Status ---")
+print(f"Blocked: {summary.get('blocked_worktrees', 0)}")
+if blocked_worktrees:
+    reasons = {}
+    for row in blocked_worktrees:
+        for issue in row.get("issues", []):
+            reasons[issue] = reasons.get(issue, 0) + 1
+    for issue, count in sorted(reasons.items(), key=lambda item: (-item[1], item[0])):
+        print(f"  {issue}: {count}")
+print("")
+
+print("--- Wave Status ---")
+for row in waves:
+    print(
+        "  "
+        + f"{row.get('wave_id', '')} loop={row.get('loop_id', '')} "
+        + f"role={row.get('current_role', '')} dispatches={row.get('dispatch_count', 0)}"
     )
-    data = json.loads(result.stdout)
-except Exception as e:
-    print(f"ERROR: {e}", file=sys.stderr)
-    sys.exit(1)
+print(f"Active: {summary.get('active_waves', 0)}")
+print("")
 
-gaps = data.get("gaps", [])
-total = len(gaps)
-by_status = {}
-by_owner = {}
-stale_count = 0
-critical_count = 0
-now = datetime.now(timezone.utc)
+print("--- Override Signals (7d) ---")
+print(f"Force-close: {summary.get('recent_force_closes', 0)}")
+print(f"DoD override: {summary.get('recent_dod_overrides', 0)}")
+print(f"Main override: {summary.get('recent_main_overrides', 0)}")
+for row in (overrides.get("force_close", []) or [])[:3]:
+    print(f"  force_close: {row.get('wave_id', '')} -> {row.get('path', '')}")
+for row in (overrides.get("dod_override", []) or [])[:3]:
+    print(f"  dod_override: {row.get('wave_id', '')} -> {row.get('path', '')}")
+for row in (overrides.get("main_override", []) or [])[:3]:
+    print(f"  main_override: {row.get('capability', '')} -> {row.get('receipt_path', '')}")
+print("")
 
-for g in gaps:
-    s = g.get("status", "unknown")
-    by_status[s] = by_status.get(s, 0) + 1
+print("--- Fast Verify ---")
+print(
+    f"Latest fast verify: {verify.get('status', 'unknown')} "
+    + f"(pass={verify.get('wrapper_pass', 0)} fail={verify.get('wrapper_fail', 0)} warn={verify.get('wrapper_warn', 0)})"
+)
+if verify.get("receipt_path"):
+    print(f"Receipt: {verify.get('receipt_path', '')}")
+print("")
 
-    # Owner distribution (open gaps only)
-    if s == "open":
-        owner = g.get("owner", g.get("discovered_by", "unassigned"))
-        by_owner[owner] = by_owner.get(owner, 0) + 1
+print("--- Engine Coherence ---")
+print(f"Needs attention: {engine.get('needs_attention', False)}")
+print(f"Signal gaps: {len(engine.get('open_gap_signals', []))}")
+print(f"Recent force-close: {engine.get('recent_force_close_count', 0)}")
+print(f"Recent DoD override: {engine.get('recent_dod_override_count', 0)}")
+print("")
 
-        # Age check (stale > 7d, critical > 14d)
-        discovered = g.get("discovered_at", "")
-        if discovered:
-            try:
-                disc_date = datetime.fromisoformat(discovered.replace("Z", "+00:00"))
-                age_days = (now - disc_date).days
-                if age_days > 14:
-                    critical_count += 1
-                elif age_days > 7:
-                    stale_count += 1
-            except:
-                pass
-
-print(f"Total gaps: {total}")
-for status in ("open", "fixed", "closed"):
-    print(f"  {status:10s} {by_status.get(status, 0)}")
-
-open_count = by_status.get("open", 0)
-if open_count > 0:
-    print(f"\nOpen gap age: {stale_count} stale (>7d), {critical_count} critical (>14d)")
-    if by_owner:
-        print("Owner distribution:")
-        for owner, count in sorted(by_owner.items(), key=lambda x: -x[1])[:5]:
-            print(f"  {owner}: {count}")
+if show_orphans:
+    print("--- Orphan Check ---")
+    if orphans:
+        for row in orphans:
+            print(
+                f"  {row.get('id', '')} parent={row.get('parent_loop', '')} "
+                + f"status={row.get('parent_loop_status', '')}"
+            )
+    else:
+        print("  None")
+    print("")
 PY
-echo ""
 
-# ── 2. Aging advisory ──
 if [[ "$(health_aging_advisory)" == "true" ]]; then
   echo "--- Aging Advisory ---"
   "$ROOT/ops/plugins/core/lifecycle/bin/gaps-aging" 2>/dev/null || echo "  (aging check unavailable)"
   echo ""
 fi
-
-# ── 3. Open loop progress (enhanced with coordination details) ──
-echo "--- Open Loops ---"
-open_loops=0
-for scope_file in "$SCOPES_DIR"/*.scope.md; do
-  [[ -f "$scope_file" ]] || continue
-  local_status="$(_fm_field "$scope_file" "status")"
-  case "$local_status" in
-    active|draft|open) ;;
-    *) continue ;;
-  esac
-  loop_id="$(_fm_field "$scope_file" "loop_id")"
-  [[ -z "$loop_id" ]] && continue
-
-  # Calculate age (use Python for reliable cross-platform date parsing)
-  created="$(_fm_field "$scope_file" "created")"
-  if [[ -n "$created" ]]; then
-    age_days=$(python3 - "$created" <<'PY'
-import sys
-from datetime import datetime, timezone
-try:
-    created_str = sys.argv[1].strip().strip("'\"")
-    created = datetime.fromisoformat(created_str)
-    if created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
-    print((now - created).days)
-except Exception:
-    print("?")
-PY
-)
-  else
-    age_days="?"
-  fi
-
-  # Find most recent receipt for this loop (simplified to avoid hanging)
-  last_receipt="none"
-  if [[ -d "/Users/ronnyworks/code/.evidence/spine/sessions" ]]; then
-    # Use a timeout-safe approach: limit find to recent files
-    recent_receipts=$(find "/Users/ronnyworks/code/.evidence/spine/sessions" -type f -name "receipt.md" -mtime -7 2>/dev/null | head -100 || true)
-    if [[ -n "$recent_receipts" ]]; then
-      latest=$(echo "$recent_receipts" | xargs grep -l "$loop_id" 2>/dev/null | head -1 || true)
-      if [[ -n "$latest" ]]; then
-        last_receipt=$(stat -f "%Sm" -t "%Y-%m-%d" "$latest" 2>/dev/null || echo "recent")
-      fi
-    fi
-  fi
-
-  echo "  $loop_id (age: ${age_days}d, last: $last_receipt)"
-  open_loops=$((open_loops + 1))
-done
-
-echo "Count: $open_loops"
-echo ""
-
-# ── 4. Active handoffs ──
-echo "--- Active Handoffs ---"
-HANDOFFS_DIR="$SPINE_STATE/handoffs"
-if [[ -d "$HANDOFFS_DIR" ]]; then
-  active_handoffs=0
-  near_expiry=0
-  expired=0
-  now_ts=$(date -u +%s)
-  for hf in "$HANDOFFS_DIR"/*.yaml; do
-    [[ -f "$hf" ]] || continue
-    state=$(yq e '.state' "$hf" 2>/dev/null || echo "unknown")
-    [[ "$state" == "active" || "$state" == "parked" ]] || continue
-    active_handoffs=$((active_handoffs + 1))
-
-    expires=$(yq e '.expires_at_utc' "$hf" 2>/dev/null || echo "")
-    if [[ -n "$expires" ]]; then
-      exp_ts=$(TZ=UTC date -jf "%Y-%m-%dT%H:%M:%SZ" "$expires" "+%s" 2>/dev/null || echo "0")
-      if [[ "$exp_ts" -lt "$now_ts" ]]; then
-        expired=$((expired + 1))
-      elif [[ $(( exp_ts - now_ts )) -lt 21600 ]]; then  # 6 hours
-        near_expiry=$((near_expiry + 1))
-      fi
-    fi
-  done
-  echo "Count: $active_handoffs (expired: $expired, near-expiry: $near_expiry)"
-else
-  echo "Count: 0 (handoffs directory not found)"
-fi
-echo ""
-
-# ── 5. Worktree status summary ──
-echo "--- Worktree Status ---"
-if [[ -x "$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile" ]]; then
-  wt_summary=$("$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile" --gate 2>&1 || true)
-  blocked_count=$(echo "$wt_summary" | grep -c "^  -" || echo "0")
-  warn_count=$(echo "$wt_summary" | grep -c "WARNINGS:" -A 999 | tail -n +2 | grep -c "^    -" || echo "0")
-
-  if [[ "$blocked_count" -gt 0 || "$warn_count" -gt 0 ]]; then
-    echo "Blocked: $blocked_count, Warnings: $warn_count"
-    # Show blocking reasons distribution
-    if [[ "$blocked_count" -gt 0 ]]; then
-      echo "Blocking reasons:"
-      echo "$wt_summary" | grep -E "^\s+-" | sed 's/.*-> //' | sort | uniq -c | sed 's/^/  /'
-    fi
-  else
-    echo "Clean: 0 blocked, 0 warnings"
-  fi
-else
-  echo "Status: unknown (reconcile tool not found)"
-fi
-echo ""
-
-# ── 6. Active wave status ──
-echo "--- Wave Status ---"
-if [[ -x "$ROOT/ops/plugins/core/orchestration/bin/orchestration-status" ]]; then
-  active_waves=$("$ROOT/ops/plugins/core/orchestration/bin/orchestration-status" 2>/dev/null \
-    | grep "status: open" -B 1 \
-    | grep "loop_id:" \
-    | sed 's/loop_id: //' \
-    | tr '\n' ',' \
-    | sed 's/,$//')
-
-  if [[ -n "$active_waves" ]]; then
-    wave_count=$(echo "$active_waves" | tr ',' '\n' | wc -l | tr -d ' ')
-    echo "Active: $wave_count"
-    echo "$active_waves" | tr ',' '\n' | sed 's/^/  /'
-  else
-    echo "Active: 0"
-  fi
-else
-  echo "Active: unknown (orchestration-status not found)"
-fi
-echo ""
-
-# ── 7. Force-close / override signals (last 24h) ──
-echo "--- Override Signals (24h) ---"
-EVIDENCE_DIR="/Users/ronnyworks/code/.evidence/spine/sessions"
-if [[ -d "$EVIDENCE_DIR" ]]; then
-  override_count=$(find "$EVIDENCE_DIR" -type f -name "receipt.md" -mtime -1 \
-    -exec grep -l "OVERRIDE\|FORCE\|force-close" {} \; 2>/dev/null \
-    | wc -l | tr -d ' ')
-  echo "Count: $override_count"
-  if [[ "$override_count" -gt 0 ]]; then
-    find "$EVIDENCE_DIR" -type f -name "receipt.md" -mtime -1 \
-      -exec grep -l "OVERRIDE\|FORCE\|force-close" {} \; 2>/dev/null \
-      | head -5 \
-      | while read -r receipt; do
-          cap_name=$(basename "$(dirname "$receipt")" | sed 's/^RCAP-[0-9-]*__//' | sed 's/__.*$//')
-          echo "  - $cap_name"
-        done
-  fi
-else
-  echo "Count: 0 (evidence directory not found)"
-fi
-echo ""
-
-# ── 8. Orphan check ──
-if [[ "$(health_orphan_check)" == "true" ]]; then
-  echo "--- Orphan Check ---"
-
-  # Build set of closed loop IDs
-  CLOSED_LOOPS=""
-  for scope_file in "$SCOPES_DIR"/*.scope.md; do
-    [[ -f "$scope_file" ]] || continue
-    local_status="$(_fm_field "$scope_file" "status")"
-    if [[ "$local_status" == "closed" ]]; then
-      lid="$(_fm_field "$scope_file" "loop_id")"
-      [[ -n "$lid" ]] && CLOSED_LOOPS="${CLOSED_LOOPS}${lid}\n"
-    fi
-  done
-
-  # Find open gaps whose parent_loop is in a closed scope
-  orphan_count=0
-  python3 - "$GAPS_FILE" "$CLOSED_LOOPS" <<'PY'
-import json
-import subprocess
-import sys
-
-gaps_file = sys.argv[1]
-closed_raw = sys.argv[2] if len(sys.argv) > 2 else ""
-closed_loops = set(l.strip() for l in closed_raw.split("\\n") if l.strip())
-
-try:
-    result = subprocess.run(
-        ["yq", "e", "-o=json", ".", gaps_file],
-        capture_output=True, text=True, check=True
-    )
-    data = json.loads(result.stdout)
-except Exception as e:
-    print(f"ERROR: {e}", file=sys.stderr)
-    sys.exit(1)
-
-gaps = data.get("gaps", [])
-orphans = []
-for g in gaps:
-    if g.get("status") != "open":
-        continue
-    # Cross-repo deferred gaps are intentionally open while the source repo closes them.
-    if str(g.get("deferred_to_repo", "")).strip():
-        continue
-    pl = g.get("parent_loop", "")
-    if pl and pl in closed_loops:
-        orphans.append(g)
-
-if orphans:
-    print(f"WARN: {len(orphans)} orphaned gaps (open gap linked to closed loop):")
-    for g in orphans:
-        print(f"  {g['id']} -> {g.get('parent_loop', '?')}")
-else:
-    print("No orphaned gaps found.")
-PY
-fi
-
-echo ""
-echo "=== END LIFECYCLE HEALTH ==="

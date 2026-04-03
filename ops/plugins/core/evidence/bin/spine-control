@@ -28,6 +28,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[5]
 MEDIA_BINDINGS_HOME = Path(os.environ.get("MEDIA_BINDINGS_HOME", str(Path.home() / "code/workbench/agents/media/bindings")))
+JOINED_STATE_SCRIPT = ROOT / "ops/plugins/core/lifecycle/bin/spine-engine-joined-state"
 SCHEMA_VERSION = "1.0"
 VERIFY_PASS_STATUSES = {"done", "pass", "passed", "ok", "healthy", "success"}
 VERIFY_FAIL_STATUSES = {"failed", "fail", "error", "incident", "critical"}
@@ -390,6 +391,13 @@ def collect_open_gaps() -> list[dict[str, Any]]:
         )
     rows.sort(key=lambda r: (severity_rank(r.get("severity", "")), gap_numeric_id(r.get("id", ""))))
     return rows
+
+
+def collect_joined_state() -> dict[str, Any]:
+    if not JOINED_STATE_SCRIPT.exists():
+        return {}
+    _, payload = parse_json_output(JOINED_STATE_SCRIPT, ["--json"])
+    return payload if isinstance(payload, dict) else {}
 
 
 def collect_loop_gap_progress(loop_id: str) -> dict[str, Any]:
@@ -1189,9 +1197,16 @@ def collect_media_capacity_runway() -> dict[str, Any]:
 
 
 def collect_tick_data(window_hours: int, fast_mode: bool = False) -> dict[str, Any]:
-    loops = collect_open_loops()
-    gaps = collect_open_gaps()
+    joined_state = collect_joined_state()
+    loops = joined_state.get("loops", {}).get("open", []) if isinstance(joined_state, dict) else []
+    gaps = joined_state.get("gaps", {}).get("open", []) if isinstance(joined_state, dict) else []
+    if not isinstance(loops, list) or not loops:
+        loops = collect_open_loops()
+    if not isinstance(gaps, list) or not gaps:
+        gaps = collect_open_gaps()
     proposals = parse_proposals_summary()
+    joined_summary = joined_state.get("summary", {}) if isinstance(joined_state, dict) else {}
+    joined_verify = joined_state.get("verify", {}).get("latest_fast", {}) if isinstance(joined_state, dict) else {}
 
     if fast_mode:
         # Fast path: skip expensive aggregations for mobile UX (<10s)
@@ -1219,9 +1234,20 @@ def collect_tick_data(window_hours: int, fast_mode: bool = False) -> dict[str, A
         friction = collect_friction_queue_status()
         media_capacity_runway = collect_media_capacity_runway()
 
+    if isinstance(joined_state, dict):
+        handoffs["active"] = int(joined_summary.get("active_handoffs", handoffs.get("active", 0)) or 0)
+        handoffs["joined_rows"] = joined_state.get("handoffs", {}).get("active", [])
+
     summary = {
         "open_loops": len(loops),
         "open_gaps": len(gaps),
+        "orphaned_gaps": int(joined_summary.get("orphaned_gaps", 0) or 0),
+        "blocked_worktrees": int(joined_summary.get("blocked_worktrees", 0) or 0),
+        "active_waves": int(joined_summary.get("active_waves", 0) or 0),
+        "recent_force_closes": int(joined_summary.get("recent_force_closes", 0) or 0),
+        "recent_dod_overrides": int(joined_summary.get("recent_dod_overrides", 0) or 0),
+        "recent_main_overrides": int(joined_summary.get("recent_main_overrides", 0) or 0),
+        "engine_coherence_needs_attention": bool(joined_summary.get("engine_coherence_needs_attention", False)),
         "pending_proposals": proposals.get("pending", 0),
         "active_alerts": alerts.get("active_alerts", 0),
         "active_incident_alerts": alerts.get("active_incident_alerts", 0),
@@ -1237,6 +1263,7 @@ def collect_tick_data(window_hours: int, fast_mode: bool = False) -> dict[str, A
         "verify_failed_runs": timeline.get("verify_failed_runs", 0),
         "verify_current_failed_runs": timeline.get("verify_current_failed_runs", 0),
         "core_verify_latest_status": timeline.get("core_verify_latest_status", "unknown"),
+        "latest_fast_verify_status": joined_verify.get("status", "unknown"),
         "graph_nodes": graph.get("node_count", 0),
         "graph_edges": graph.get("edge_count", 0),
         "comms_queue_slo_status": comms_queue.get("slo_status", "unknown"),
@@ -1282,6 +1309,7 @@ def collect_tick_data(window_hours: int, fast_mode: bool = False) -> dict[str, A
         or friction.get("status") == "warn"
         or media_capacity_runway.get("status") in {"warn", "stale", "unknown"}
         or media_capacity_runway.get("policy_compliant") is False
+        or summary["engine_coherence_needs_attention"]
     ):
         status = "warn"
 
@@ -1295,6 +1323,7 @@ def collect_tick_data(window_hours: int, fast_mode: bool = False) -> dict[str, A
             "summary": summary,
             "loops": loops,
             "gaps": gaps,
+            "joined_state": joined_state,
             "proposals": proposals,
             "calendar": calendar,
             "alerts": alerts,
@@ -1350,6 +1379,8 @@ def build_plan_payload(tick_payload: dict[str, Any]) -> dict[str, Any]:
     summary = data.get("summary", {})
     loops = data.get("loops", [])
     gaps = data.get("gaps", [])
+    joined_state = data.get("joined_state", {}) if isinstance(data.get("joined_state"), dict) else {}
+    engine_coherence = joined_state.get("engine_coherence", {}) if isinstance(joined_state, dict) else {}
     alerts = data.get("alerts", {})
     aof_contract = data.get("aof_contract", {})
     forge = data.get("forge", {})
@@ -1378,7 +1409,33 @@ def build_plan_payload(tick_payload: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    focus_loop = next((loop for loop in planned_loops if is_trust_critical_loop(loop)), None)
+    focus_loop: dict[str, Any] | None = None
+    focus_loop_reason = ""
+    if engine_coherence.get("needs_attention"):
+        patterns = (
+            r"\bengine[- ]coherence\b",
+            r"\bjoined[- ]state\b",
+            r"\bjoin[- ]table\b",
+            r"\bmemory bus\b",
+            r"\bcontroller[- ]only\b",
+            r"\bpost[- ]v3\b",
+        )
+        for loop in planned_loops:
+            text = loop_signal_text(loop)
+            if any(re.search(pattern, text) for pattern in patterns):
+                focus_loop = loop
+                focus_loop_reason = (
+                    "Joined-state residue indicates active engine-coherence debt "
+                    f"({len(engine_coherence.get('open_gap_signals', []))} signal gap(s), "
+                    f"{engine_coherence.get('recent_force_close_count', 0)} force-close signal(s))."
+                )
+                break
+
+    if focus_loop is None:
+        focus_loop = next((loop for loop in planned_loops if is_trust_critical_loop(loop)), None)
+        if focus_loop is not None:
+            focus_loop_reason = "Spine-scoped closure/reduction work is present and should outrank generic verify/progress churn."
+
     if focus_loop:
         loop_id = str(focus_loop.get("loop_id", "")).strip()
         next_action = str(focus_loop.get("next_action", "")).strip()
@@ -1387,10 +1444,7 @@ def build_plan_payload(tick_payload: dict[str, Any]) -> dict[str, Any]:
             action_id=f"A00-loop-progress-{loop_id.lower()}",
             priority="P0",
             title=f"Advance trust-critical loop: {loop_id}",
-            reason=(
-                "Spine-scoped closure/reduction work is present and should outrank generic verify/progress churn."
-                f"{next_action_note}"
-            ),
+            reason=f"{focus_loop_reason}{next_action_note}",
             route_target={"type": "capability", "capability": "loops.progress", "args": ["--loop", loop_id]},
         )
 

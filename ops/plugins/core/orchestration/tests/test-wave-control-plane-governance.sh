@@ -634,7 +634,8 @@ EOF
 
 if env SPINE_ROOT="$T3_REPO" SPINE_RUNTIME_ROOT="$T3_RUNTIME" SPINE_STATE="$T3_RUNTIME/state" \
   bash "$T3_REPO/ops/plugins/core/orchestration/bin/wave-execute" \
-    close --wave-id WAVE-20260323-01 --disposition landed --completion-level slice > "$T3_ROOT/out.txt"; then
+    close --wave-id WAVE-20260323-01 --disposition landed --completion-level slice \
+      --fixed-in abc1234 --verify-receipt /tmp/controller-verify.md --controller-only > "$T3_ROOT/out.txt"; then
   pass "wave-execute close succeeds when auto-running wave-finish"
 else
   fail "wave-execute close succeeds when auto-running wave-finish"
@@ -646,8 +647,245 @@ assert_file_contains "$T3_RUNTIME/finish.args" "--loop-id" "wave-execute passes 
 assert_file_contains "$T3_RUNTIME/finish.args" "LOOP-T-CLOSE" "wave-execute passes resolved loop-id to wave-finish"
 assert_file_contains "$T3_RUNTIME/finish.args" "WAVE-20260323-01" "wave-execute passes wave-id to wave-finish"
 assert_file_contains "$T3_RUNTIME/finish.args" "slice_complete" "wave-execute normalizes completion-level aliases for wave-finish"
+assert_file_contains "$T3_RUNTIME/close.args" "--fixed-in" "wave-execute forwards fixed-in to wave.sh close"
+assert_file_contains "$T3_RUNTIME/close.args" "--verify-receipt" "wave-execute forwards verify receipt to wave.sh close"
+assert_file_contains "$T3_RUNTIME/close.args" "--controller-only" "wave-execute forwards controller-only to wave.sh close"
+assert_file_contains "$T3_RUNTIME/finish.args" "--controller-only" "wave-execute forwards controller-only to wave-finish"
 assert_file_contains "$T3_RUNTIME/finish.auto_approve" "yes" "wave-execute auto-approves governed wave-finish in agent batches"
 assert_file_contains "$T3_ROOT/out.txt" "Running wave.finish" "wave-execute announces auto-finish"
+
+echo ""
+echo "── T3b: wave close accepts controller-only proof without force ──"
+T3B_ROOT="$(make_tmpdir)"
+T3B_REPO="$T3B_ROOT/repo"
+T3B_RUNTIME="$T3B_ROOT/runtime"
+T3B_STATE="$T3B_ROOT/state"
+T3B_RECEIPTS="$T3B_ROOT/receipts"
+mkdir -p \
+  "$T3B_REPO/ops/lib" \
+  "$T3B_REPO/ops/plugins/core/lifecycle/bin" \
+  "$T3B_STATE" \
+  "$T3B_RUNTIME/waves/WAVE-TEST-CTRL-01" \
+  "$T3B_RECEIPTS/RCAP-20260403-TEST__verify.run__Rctrl123"
+copy_runtime_libs "$T3B_REPO"
+init_fixture_repo "$T3B_REPO"
+
+cat > "$T3B_REPO/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat <<'JSON'
+{
+  "summary": {},
+  "worktrees": [],
+  "local_branches": [],
+  "temp_clones": [],
+  "stashes": [],
+  "root_checkout": {
+    "issues": []
+  }
+}
+JSON
+EOF
+chmod +x "$T3B_REPO/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile"
+
+cat > "$T3B_RUNTIME/waves/WAVE-TEST-CTRL-01/state.json" <<EOF
+{
+  "wave_id": "WAVE-TEST-CTRL-01",
+  "status": "active",
+  "lifecycle_state": "active",
+  "objective": "controller-only close proof",
+  "created_at": "2026-04-03T12:00:00Z",
+  "dispatches": [],
+  "watcher_checks": [],
+  "preflight": null,
+  "results": [],
+  "workspace": {
+    "enabled": true,
+    "repo": "$T3B_REPO",
+    "worktree": "$T3B_ROOT/current-wave",
+    "branch": "codex/WAVE-TEST-CTRL-01",
+    "lifecycle_state": "active"
+  },
+  "role_flow": {
+    "current_role": "researcher",
+    "next_role": "worker",
+    "last_transition": null
+  },
+  "packet": {
+    "schema_version": "1.0",
+    "wave_id": "WAVE-TEST-CTRL-01",
+    "loop_id": "LOOP-T-CONTROLLER",
+    "owner_terminal": "SPINE-CONTROL-01",
+    "current_role": "researcher",
+    "next_role": "worker",
+    "deadline_utc": "2026-04-04T12:00:00Z",
+    "horizon": "now",
+    "execution_readiness": "runnable",
+    "claimed_paths": ["ops/"],
+    "lane_outcomes": []
+  }
+}
+EOF
+
+CTRL_SHA="$(git -C "$T3B_REPO" rev-parse --short HEAD)"
+
+cat > "$T3B_RECEIPTS/RCAP-20260403-TEST__verify.run__Rctrl123/receipt.exec.json" <<'EOF'
+{
+  "task_id": "verify.run",
+  "status": "done",
+  "run_keys": [
+    "CAP-20260403-120000__verify.run__Rctrl123"
+  ]
+}
+EOF
+
+cat > "$T3B_RECEIPTS/RCAP-20260403-TEST__verify.run__Rctrl123/output.txt" <<'EOF'
+{
+  "scope": "fast",
+  "wrapper": {
+    "total": 3,
+    "pass": 3,
+    "fail": 0,
+    "warn": 0
+  },
+  "blocking_fail_ids": [],
+  "warning_gate_ids": []
+}
+EOF
+
+cat > "$T3B_RECEIPTS/RCAP-20260403-TEST__verify.run__Rctrl123/receipt.md" <<'EOF'
+# Receipt: CAP-20260403-TEST__verify.run__Rctrl123
+
+| Field | Value |
+|-------|-------|
+| Capability | `verify.run` |
+EOF
+
+if env \
+  SPINE_TARGET_REPO="$T3B_REPO" \
+  SPINE_CODE="$T3B_REPO" \
+  SPINE_REPO="$T3B_REPO" \
+  SPINE_RUNTIME_ROOT="$T3B_RUNTIME" \
+  SPINE_STATE="$T3B_STATE" \
+  SPINE_RECEIPTS="$T3B_RECEIPTS" \
+  bash "$ROOT/ops/commands/wave.sh" \
+    close WAVE-TEST-CTRL-01 --disposition landed --controller-only \
+    --fixed-in "$CTRL_SHA" \
+    --verify-receipt "$T3B_RECEIPTS/RCAP-20260403-TEST__verify.run__Rctrl123/receipt.md" \
+    > "$T3B_ROOT/out.txt"; then
+  pass "wave close accepts controller-only proof without force"
+else
+  fail "wave close accepts controller-only proof without force"
+fi
+
+assert_file_contains "$T3B_ROOT/out.txt" "Wave 'WAVE-TEST-CTRL-01' closed." "wave close reports landed controller-only close"
+assert_file_contains "$T3B_RUNTIME/waves/WAVE-TEST-CTRL-01/close-receipt.json" "\"controller_only\": true" "controller-only close receipt records lightweight mode"
+assert_file_contains "$T3B_RUNTIME/waves/WAVE-TEST-CTRL-01/close-receipt.json" "\"force_closed\": false" "controller-only close avoids force-close"
+assert_file_contains "$T3B_RUNTIME/waves/WAVE-TEST-CTRL-01/close-receipt.json" "\"dod_overridden\": false" "controller-only close avoids DoD override"
+assert_file_contains "$T3B_RUNTIME/waves/WAVE-TEST-CTRL-01/controller-close-precheck.json" "\"eligible\": true" "controller-only close writes passing precheck proof"
+
+echo ""
+echo "── T3c: wave close still blocks controller-only slices missing proof ──"
+T3C_ROOT="$(make_tmpdir)"
+T3C_REPO="$T3C_ROOT/repo"
+T3C_RUNTIME="$T3C_ROOT/runtime"
+T3C_STATE="$T3C_ROOT/state"
+mkdir -p \
+  "$T3C_REPO/ops/lib" \
+  "$T3C_REPO/ops/plugins/core/lifecycle/bin" \
+  "$T3C_STATE" \
+  "$T3C_RUNTIME/waves/WAVE-TEST-CTRL-02"
+copy_runtime_libs "$T3C_REPO"
+init_fixture_repo "$T3C_REPO"
+
+cat > "$T3C_REPO/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat <<'JSON'
+{
+  "summary": {},
+  "worktrees": [
+    {
+      "path": "/tmp/fixture-wave",
+      "branch": "codex/WAVE-TEST-CTRL-02",
+      "owner_id": "",
+      "issues": [
+        "merged_branch_past_grace"
+      ]
+    }
+  ],
+  "local_branches": [],
+  "temp_clones": [],
+  "stashes": [],
+  "root_checkout": {
+    "issues": []
+  }
+}
+JSON
+EOF
+chmod +x "$T3C_REPO/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile"
+
+cat > "$T3C_RUNTIME/waves/WAVE-TEST-CTRL-02/state.json" <<EOF
+{
+  "wave_id": "WAVE-TEST-CTRL-02",
+  "status": "active",
+  "lifecycle_state": "active",
+  "objective": "controller-only close should block honestly",
+  "created_at": "2026-04-03T12:00:00Z",
+  "dispatches": [],
+  "watcher_checks": [],
+  "preflight": null,
+  "results": [],
+  "workspace": {
+    "enabled": true,
+    "repo": "$T3C_REPO",
+    "worktree": "/tmp/fixture-wave",
+    "branch": "codex/WAVE-TEST-CTRL-02",
+    "lifecycle_state": "active"
+  },
+  "role_flow": {
+    "current_role": "researcher",
+    "next_role": "worker",
+    "last_transition": null
+  },
+  "packet": {
+    "schema_version": "1.0",
+    "wave_id": "WAVE-TEST-CTRL-02",
+    "loop_id": "LOOP-T-CONTROLLER",
+    "owner_terminal": "SPINE-CONTROL-01",
+    "current_role": "researcher",
+    "next_role": "worker",
+    "deadline_utc": "2026-04-04T12:00:00Z",
+    "horizon": "now",
+    "execution_readiness": "runnable",
+    "claimed_paths": ["ops/"],
+    "lane_outcomes": []
+  }
+}
+EOF
+
+CTRL_SHA_MISSING="$(git -C "$T3C_REPO" rev-parse --short HEAD)"
+
+set +e
+env \
+  SPINE_TARGET_REPO="$T3C_REPO" \
+  SPINE_CODE="$T3C_REPO" \
+  SPINE_REPO="$T3C_REPO" \
+  SPINE_RUNTIME_ROOT="$T3C_RUNTIME" \
+  SPINE_STATE="$T3C_STATE" \
+  bash "$ROOT/ops/commands/wave.sh" \
+    close WAVE-TEST-CTRL-02 --disposition landed --controller-only --fixed-in "$CTRL_SHA_MISSING" \
+    > "$T3C_ROOT/out.txt" 2>&1
+T3C_RC=$?
+set -e
+
+if [[ "$T3C_RC" -ne 0 ]]; then
+  pass "wave close blocks controller-only when verify/cleanup proof is missing"
+else
+  fail "wave close blocks controller-only when verify/cleanup proof is missing"
+fi
+assert_file_contains "$T3C_ROOT/out.txt" "controller-only requires --verify-receipt" "controller-only close explains missing verify proof"
+assert_file_contains "$T3C_ROOT/out.txt" "controller-only cleanup residue unresolved" "controller-only close explains cleanup residue block"
 
 echo ""
 echo "── T4: wave-execute start fallback rehydrates workspace metadata for dispatch ──"

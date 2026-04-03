@@ -3,23 +3,28 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
+JOINED_STATE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/spine-engine-joined-state"
 
 LOOP_ID=""
 NEXT_ACTION=""
 REASON=""
 APPEND_EVIDENCE_REFS=0
 JSON_OUTPUT=0
+NO_JOINED_STATE=0
+JOINED_STATE_PATH=""
+JOINED_STATE_SUMMARY_JSON="{}"
 declare -a EVIDENCE_REFS=()
+declare -a JOINED_STATE_EVIDENCE_REFS=()
 
 usage() {
   cat <<'USAGE'
 loops-continuity-update
 
 Usage:
-  loops-continuity-update --loop-id LOOP-... [--next-action "..."] [--evidence-ref <ref>]... [--append-evidence-refs] [--reason "..."] [--json]
+  loops-continuity-update --loop-id LOOP-... [--next-action "..."] [--evidence-ref <ref>]... [--append-evidence-refs] [--reason "..."] [--no-joined-state] [--json]
 
-Updates the governed live continuity for an open loop. At least one of
---next-action or --evidence-ref is required.
+Updates the governed live continuity for an open loop. Explicit evidence refs
+and the joined operational state are both valid continuity context inputs.
 USAGE
 }
 
@@ -48,6 +53,10 @@ while [[ $# -gt 0 ]]; do
       REASON="${2:-}"
       shift 2
       ;;
+    --no-joined-state)
+      NO_JOINED_STATE=1
+      shift
+      ;;
     --json)
       JSON_OUTPUT=1
       shift
@@ -65,30 +74,77 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$LOOP_ID" ]] || { echo "FAIL: --loop-id is required" >&2; exit 2; }
-if [[ -z "$NEXT_ACTION" && "${#EVIDENCE_REFS[@]}" -eq 0 ]]; then
-  echo "FAIL: provide --next-action and/or at least one --evidence-ref" >&2
-  exit 2
-fi
 [[ -x "$BRIDGE" ]] || { echo "FAIL: loops-authority-bridge not found: $BRIDGE" >&2; exit 1; }
 
-EVIDENCE_JSON=""
-if [[ "${#EVIDENCE_REFS[@]}" -gt 0 ]]; then
-  EVIDENCE_JSON="$(python3 - "${EVIDENCE_REFS[@]}" <<'PY'
+if [[ "$NO_JOINED_STATE" -eq 0 && -x "$JOINED_STATE_BIN" ]]; then
+  JOINED_STATE_JSON="$(mktemp "${TMPDIR:-/tmp}/loops-continuity-joined.XXXXXX.json")"
+  trap 'rm -f "$JOINED_STATE_JSON"' EXIT
+  "$JOINED_STATE_BIN" --json --loop-id "$LOOP_ID" > "$JOINED_STATE_JSON"
+  mapfile -t JOINED_META < <(python3 - "$JOINED_STATE_JSON" <<'PY'
 import json
 import sys
 
-items = [arg.strip() for arg in sys.argv[1:] if arg.strip()]
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+ctx = payload.get("loop_context", {}) if isinstance(payload, dict) else {}
+summary = ctx.get("summary", {}) if isinstance(ctx, dict) else {}
+print(payload.get("paths", {}).get("joined_state_path", ""))
+print(json.dumps(summary, separators=(",", ":")))
+for ref in ctx.get("evidence_refs", []) if isinstance(ctx, dict) else []:
+    print(f"REF::{ref}")
+PY
+)
+  JOINED_STATE_PATH="${JOINED_META[0]:-}"
+  JOINED_STATE_SUMMARY_JSON="{}"
+  if [[ "${#JOINED_META[@]}" -gt 1 && -n "${JOINED_META[1]:-}" ]]; then
+    JOINED_STATE_SUMMARY_JSON="${JOINED_META[1]}"
+  fi
+  if [[ "${#JOINED_META[@]}" -gt 2 ]]; then
+    for item in "${JOINED_META[@]:2}"; do
+      [[ "$item" == REF::* ]] || continue
+      JOINED_STATE_EVIDENCE_REFS+=("${item#REF::}")
+    done
+  fi
+fi
+
+ALL_EVIDENCE_JSON="$(python3 - "${EVIDENCE_REFS[@]}" -- "${JOINED_STATE_EVIDENCE_REFS[@]}" <<'PY'
+import json
+import sys
+
+argv = sys.argv[1:]
+split = argv.index("--") if "--" in argv else len(argv)
+explicit = argv[:split]
+joined = argv[split + 1 :] if split < len(argv) else []
+items = []
+seen = set()
+for raw in explicit + joined:
+    value = str(raw or "").strip()
+    if not value or value in seen:
+        continue
+    seen.add(value)
+    items.append(value)
 print(json.dumps(items))
 PY
 )"
+
+TOTAL_EVIDENCE_COUNT="$(python3 - "$ALL_EVIDENCE_JSON" <<'PY'
+import json
+import sys
+
+print(len(json.loads(sys.argv[1])))
+PY
+)"
+
+if [[ -z "$NEXT_ACTION" && "$TOTAL_EVIDENCE_COUNT" -eq 0 ]]; then
+  echo "FAIL: provide --next-action and/or evidence context (explicit or joined state)" >&2
+  exit 2
 fi
 
 cmd=(python3 "$BRIDGE" continuity --id "$LOOP_ID" --actor "loops.continuity.update")
 if [[ -n "$NEXT_ACTION" ]]; then
   cmd+=(--next-action "$NEXT_ACTION")
 fi
-if [[ -n "$EVIDENCE_JSON" ]]; then
-  cmd+=(--evidence-refs-json "$EVIDENCE_JSON")
+if [[ "$TOTAL_EVIDENCE_COUNT" -gt 0 ]]; then
+  cmd+=(--evidence-refs-json "$ALL_EVIDENCE_JSON")
 fi
 if [[ "$APPEND_EVIDENCE_REFS" -eq 1 ]]; then
   cmd+=(--append-evidence-refs)
@@ -100,9 +156,20 @@ fi
 output="$("${cmd[@]}")"
 
 if [[ "$JSON_OUTPUT" -eq 1 ]]; then
-  printf '%s\n' "$output"
+  python3 - "$output" "$JOINED_STATE_PATH" "$JOINED_STATE_SUMMARY_JSON" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+payload["joined_state_path"] = sys.argv[2]
+try:
+    payload["joined_state_summary"] = json.loads(sys.argv[3])
+except json.JSONDecodeError:
+    payload["joined_state_summary"] = {}
+print(json.dumps(payload, indent=2))
+PY
 else
-  python3 - "$output" <<'PY'
+  python3 - "$output" "$JOINED_STATE_PATH" "$JOINED_STATE_SUMMARY_JSON" <<'PY'
 import json
 import sys
 
@@ -117,5 +184,21 @@ print(f"next_action: {payload.get('next_action', '')}")
 print(f"evidence_refs: {len(payload.get('evidence_refs', []))}")
 for ref in payload.get("evidence_refs", []):
     print(f"  - {ref}")
+
+joined_state_path = sys.argv[2]
+if joined_state_path:
+    print(f"joined_state_path: {joined_state_path}")
+try:
+    summary = json.loads(sys.argv[3])
+except json.JSONDecodeError:
+    summary = {}
+if summary:
+    print(
+        "joined_state_summary: "
+        + f"open_gaps={summary.get('open_gap_count', 0)} "
+        + f"active_waves={summary.get('active_wave_count', 0)} "
+        + f"blocked_worktrees={summary.get('blocked_worktree_count', 0)} "
+        + f"recent_overrides={summary.get('recent_override_count', 0)}"
+    )
 PY
 fi

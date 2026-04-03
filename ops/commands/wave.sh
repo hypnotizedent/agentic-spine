@@ -4688,6 +4688,9 @@ PYCOLLECT2
 cmd_close_v2() {
   local wave_id=""
   local force=false
+  local controller_only=false
+  local controller_verify_receipt=""
+  local fixed_in=""
   local dod_override_reason=""
   local lock_override_reason=""
   local disposition=""
@@ -4697,6 +4700,26 @@ cmd_close_v2() {
     case "$1" in
       --) shift ;;
       --force) force=true; shift ;;
+      --controller-only)
+        controller_only=true
+        shift
+        ;;
+      --verify-receipt)
+        if [[ $# -lt 2 || -z "${2:-}" ]]; then
+          echo "ERROR: --verify-receipt requires a non-empty value" >&2
+          exit 1
+        fi
+        controller_verify_receipt="${2:-}"
+        shift 2
+        ;;
+      --fixed-in)
+        if [[ $# -lt 2 || -z "${2:-}" ]]; then
+          echo "ERROR: --fixed-in requires a non-empty value" >&2
+          exit 1
+        fi
+        fixed_in="${2:-}"
+        shift 2
+        ;;
       --disposition)
         if [[ $# -lt 2 || -z "${2:-}" ]]; then
           echo "ERROR: --disposition requires a non-empty value" >&2
@@ -4727,7 +4750,7 @@ cmd_close_v2() {
   done
 
   if [[ -z "$wave_id" ]]; then
-    echo "Usage: ops wave close <WAVE_ID> --disposition <state> [--force] [--dod-override \"<reason>\"] [--lock-override \"<reason>\"]" >&2
+    echo "Usage: ops wave close <WAVE_ID> --disposition <state> [--force] [--controller-only --verify-receipt <receipt> --fixed-in <sha>] [--dod-override \"<reason>\"] [--lock-override \"<reason>\"]" >&2
     exit 1
   fi
   allowed_dispositions_csv="$(close_dispositions_csv)"
@@ -4740,8 +4763,11 @@ cmd_close_v2() {
   local sd
   sd="$(wave_state_dir "$wave_id")"
 
+  WAVE_CLOSE_CONTROLLER_ONLY="$controller_only" \
+  WAVE_CLOSE_VERIFY_RECEIPT="$controller_verify_receipt" \
+  WAVE_CLOSE_FIXED_IN="$fixed_in" \
   python3 - "$sf" "$sd" "$force" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" "$dod_override_reason" "$lock_override_reason" "$disposition" "$allowed_dispositions_csv" "$(wave_allowed_lanes_csv)" <<'PYCLOSE2'
-import json, sys, os, re, fcntl
+import json, sys, os, re, fcntl, subprocess
 from datetime import datetime, timezone
 
 sf = sys.argv[1]
@@ -4758,14 +4784,19 @@ allowed_lanes = {
     for item in (sys.argv[10] if len(sys.argv) > 10 else "control,execution,audit,watcher").split(",")
     if item.strip()
 } or {"control", "execution", "audit", "watcher"}
+controller_only = os.environ.get("WAVE_CLOSE_CONTROLLER_ONLY", "").strip().lower() == "true"
+controller_verify_receipt = os.environ.get("WAVE_CLOSE_VERIFY_RECEIPT", "").strip()
+fixed_in = os.environ.get("WAVE_CLOSE_FIXED_IN", "").strip()
 lock_file = sf + ".lock"
 receipts_dir = os.path.join(sd, "receipts")
+controller_precheck_path = os.path.join(sd, "controller-close-precheck.json")
 
 run_key_patterns_text = [r"^(CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"]
 commit_ref_pattern = r"^[0-9a-f]{7,40}$"
 allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
 required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]
 state_field = "lifecycle_state"
+VERIFY_PASS_STATUSES = {"done", "pass", "passed", "ok", "healthy", "success"}
 state_transitions = {
     "active": {"implemented"},
     "implemented": {"validated"},
@@ -4789,6 +4820,188 @@ run_key_patterns = _compile_run_key_patterns(run_key_patterns_text)
 
 def _run_key_matches(value):
     return any(pat.match(value) for pat in run_key_patterns)
+
+
+def _resolve_ref_path(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if os.path.isabs(text):
+        return text
+    if spine_repo:
+        return os.path.join(spine_repo, text)
+    return text
+
+
+def _load_json(path: str):
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _git(args):
+    return subprocess.run(
+        ["git", "-C", spine_repo] + args,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _commit_on_main(commit_sha: str) -> bool:
+    commit = str(commit_sha or "").strip()
+    if not commit or not spine_repo:
+        return False
+    if _git(["rev-parse", "--verify", f"{commit}^{{commit}}"]).returncode != 0:
+        return False
+    if _git(["rev-parse", "--verify", "main^{commit}"]).returncode != 0:
+        return False
+    return _git(["merge-base", "--is-ancestor", commit, "main"]).returncode == 0
+
+
+def _validate_verify_receipt(path_value: str):
+    resolved = _resolve_ref_path(path_value)
+    if not resolved:
+        return None, "controller-only requires --verify-receipt"
+    if not os.path.exists(resolved):
+        return None, f"controller-only verify receipt not found: {resolved}"
+
+    receipt_dir = os.path.dirname(resolved)
+    exec_path = os.path.join(receipt_dir, "receipt.exec.json")
+    output_path = os.path.join(receipt_dir, "output.txt")
+    receipt_exec = _load_json(exec_path)
+    if str(receipt_exec.get("task_id", "")).strip() != "verify.run":
+        return None, f"controller-only verify receipt is not verify.run: {resolved}"
+    if str(receipt_exec.get("status", "")).strip().lower() not in VERIFY_PASS_STATUSES:
+        return None, f"controller-only verify receipt not done: {resolved}"
+    if not os.path.exists(output_path):
+        return None, f"controller-only verify output missing: {output_path}"
+
+    try:
+        verify_payload = _load_json(output_path)
+    except Exception as exc:
+        return None, f"controller-only verify output unreadable: {exc}"
+
+    wrapper = verify_payload.get("wrapper") if isinstance(verify_payload.get("wrapper"), dict) else {}
+    blocking = verify_payload.get("blocking_fail_ids") if isinstance(verify_payload.get("blocking_fail_ids"), list) else []
+    scope = str(verify_payload.get("scope", "")).strip()
+    fail_count = int(wrapper.get("fail", 0) or 0)
+    if scope != "fast":
+        return None, f"controller-only verify receipt must be fast scope: {resolved}"
+    if fail_count > 0 or blocking:
+        return None, f"controller-only verify receipt has blocking failures: {resolved}"
+
+    run_keys = receipt_exec.get("run_keys") if isinstance(receipt_exec.get("run_keys"), list) else []
+    run_key = ""
+    for value in run_keys:
+        candidate = str(value or "").strip()
+        if candidate and _run_key_matches(candidate):
+            run_key = candidate
+            break
+    if not run_key:
+        return None, f"controller-only verify receipt missing run key: {resolved}"
+
+    return {
+        "receipt_path": resolved,
+        "output_path": output_path,
+        "run_key": run_key,
+        "wrapper": {
+            "total": int(wrapper.get("total", 0) or 0),
+            "pass": int(wrapper.get("pass", 0) or 0),
+            "fail": fail_count,
+            "warn": int(wrapper.get("warn", 0) or 0),
+        },
+    }, None
+
+
+def _worktree_cleanup_blockers(wave_id: str, workspace: dict):
+    script = os.path.join(spine_repo, "ops", "plugins", "core", "lifecycle", "bin", "worktree-lifecycle-reconcile")
+    if not os.path.exists(script):
+        return {
+            "error": f"cleanup classifier not found: {script}",
+            "global_blocked_count": 0,
+            "blocking_rows": [],
+            "raw_summary": {},
+        }
+
+    proc = subprocess.run(
+        [script, "--json"],
+        text=True,
+        capture_output=True,
+        check=False,
+        cwd=spine_repo,
+    )
+    text = proc.stdout.strip() or proc.stderr.strip()
+    if proc.returncode != 0 or not text:
+        return {
+            "error": text or "cleanup classifier failed",
+            "global_blocked_count": 0,
+            "blocking_rows": [],
+            "raw_summary": {},
+        }
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return {
+            "error": f"cleanup classifier returned invalid json: {exc}",
+            "global_blocked_count": 0,
+            "blocking_rows": [],
+            "raw_summary": {},
+        }
+
+    workspace_path = str(workspace.get("worktree", "")).strip()
+    workspace_branch = str(workspace.get("branch", "")).strip()
+    blocking_rows = []
+    global_blocked_count = 0
+    for section in ("worktrees", "local_branches", "temp_clones", "stashes"):
+        for row in payload.get(section, []) or []:
+            issues = [str(item).strip() for item in (row.get("issues") or []) if str(item).strip()]
+            if not issues:
+                continue
+            global_blocked_count += 1
+            row_path = str(row.get("path", "")).strip()
+            branch = str(row.get("branch", "")).strip()
+            owner_id = str(row.get("owner_id", "")).strip()
+            is_current = (
+                owner_id == wave_id
+                or (workspace_branch and branch == workspace_branch)
+                or (workspace_path and row_path == workspace_path)
+                or (workspace_path and row_path.startswith(workspace_path + os.sep))
+            )
+            if not is_current:
+                continue
+            blocking_rows.append(
+                {
+                    "category": section,
+                    "path": row_path,
+                    "branch": branch,
+                    "owner_id": owner_id,
+                    "issues": issues,
+                }
+            )
+
+    root_checkout = payload.get("root_checkout") if isinstance(payload.get("root_checkout"), dict) else {}
+    root_issues = [str(item).strip() for item in (root_checkout.get("issues") or []) if str(item).strip()]
+    if root_issues:
+        global_blocked_count += 1
+        blocking_rows.append(
+            {
+                "category": "root_checkout",
+                "path": str(root_checkout.get("path", "")).strip(),
+                "branch": str(root_checkout.get("branch", "")).strip(),
+                "owner_id": "root_checkout",
+                "issues": root_issues,
+            }
+        )
+
+    return {
+        "error": "",
+        "global_blocked_count": global_blocked_count,
+        "blocking_rows": blocking_rows,
+        "raw_summary": payload.get("summary", {}) if isinstance(payload, dict) else {},
+    }
 
 if role_runtime_contract and os.path.exists(role_runtime_contract):
     try:
@@ -4862,6 +5075,93 @@ try:
     packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
     infra_violations = []
     dod_violations = []
+    controller_context = {
+        "requested": controller_only,
+        "eligible": False,
+        "fixed_in": "",
+        "verify_run_key": "",
+        "verify_receipt_path": "",
+        "cleanup_ref": "",
+        "cleanup_error": "",
+        "cleanup_blocking_rows": [],
+        "cleanup_global_blocked_count": 0,
+        "controller_infra_violations": [],
+        "controller_dod_violations": [],
+    }
+    workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
+
+    if controller_only:
+        if dispatches:
+            controller_context["controller_infra_violations"].append(
+                "controller-only close requires zero dispatches"
+            )
+
+        push_receipt_path = os.path.join(sd, "push.receipt.json")
+        push_receipt = _load_json(push_receipt_path) if os.path.exists(push_receipt_path) else {}
+        fixed_commit = fixed_in or str(push_receipt.get("commit_sha", "")).strip()
+        controller_context["fixed_in"] = fixed_commit
+
+        if push_receipt and str(push_receipt.get("push_result", "")).strip() not in {"", "success"}:
+            controller_context["controller_infra_violations"].append(
+                f"controller-only push receipt is not successful: {push_receipt.get('push_result')}"
+            )
+
+        if not fixed_commit:
+            controller_context["controller_dod_violations"].append(
+                "controller-only close requires landed commit proof (--fixed-in or push.receipt.json)"
+            )
+        elif not _commit_on_main(fixed_commit):
+            controller_context["controller_infra_violations"].append(
+                f"controller-only fixed commit not present on main: {fixed_commit}"
+            )
+
+        verify_info, verify_error = _validate_verify_receipt(controller_verify_receipt)
+        if verify_error:
+            controller_context["controller_dod_violations"].append(verify_error)
+        else:
+            controller_context["verify_run_key"] = verify_info["run_key"]
+            controller_context["verify_receipt_path"] = verify_info["receipt_path"]
+
+        cleanup_check = _worktree_cleanup_blockers(state.get("wave_id", ""), workspace)
+        controller_context["cleanup_error"] = cleanup_check.get("error", "")
+        controller_context["cleanup_blocking_rows"] = cleanup_check.get("blocking_rows", [])
+        controller_context["cleanup_global_blocked_count"] = cleanup_check.get("global_blocked_count", 0)
+        if cleanup_check.get("error"):
+            controller_context["controller_infra_violations"].append(
+                f"controller-only cleanup classifier failed: {cleanup_check['error']}"
+            )
+        elif cleanup_check.get("blocking_rows"):
+            details = []
+            for row in cleanup_check.get("blocking_rows", []):
+                issue_text = ",".join(row.get("issues", []))
+                label = row.get("path") or row.get("branch") or row.get("category") or "unknown"
+                details.append(f"{label} [{issue_text}]")
+            controller_context["controller_dod_violations"].append(
+                "controller-only cleanup residue unresolved: " + "; ".join(details)
+            )
+        else:
+            controller_context["cleanup_ref"] = controller_precheck_path
+
+        controller_context["eligible"] = not controller_context["controller_infra_violations"] and not controller_context["controller_dod_violations"]
+        with open(controller_precheck_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "wave_id": state.get("wave_id", ""),
+                    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "mode": "controller_only_close_precheck",
+                    "eligible": controller_context["eligible"],
+                    "fixed_in": controller_context["fixed_in"],
+                    "verify_receipt_path": controller_context["verify_receipt_path"],
+                    "verify_run_key": controller_context["verify_run_key"],
+                    "cleanup_global_blocked_count": controller_context["cleanup_global_blocked_count"],
+                    "cleanup_blocking_rows": controller_context["cleanup_blocking_rows"],
+                    "controller_infra_violations": controller_context["controller_infra_violations"],
+                    "controller_dod_violations": controller_context["controller_dod_violations"],
+                },
+                handle,
+                indent=2,
+            )
+            handle.write("\n")
 
     # 1. Watcher checks must be done/failed
     running = [c for c in checks if c["status"] in ("queued", "running")]
@@ -4870,7 +5170,7 @@ try:
         infra_violations.append(f"{len(running)} watcher check(s) still {statuses}")
 
     # 2. Preflight required
-    if not pf:
+    if not pf and not controller_context["eligible"]:
         infra_violations.append("Preflight has not been run (required by wave.lifecycle contract)")
 
     # 3. Pending dispatch force-close guard.
@@ -5097,6 +5397,8 @@ try:
             rk = d.get("run_key")
             if isinstance(rk, str) and rk and _run_key_matches(rk):
                 verify_results.append(rk)
+    if controller_context.get("verify_run_key"):
+        verify_results.append(controller_context["verify_run_key"])
     if not verify_results:
         dod_violations.append("DoD missing verify results (no run keys in watcher checks or receipts)")
 
@@ -5136,6 +5438,8 @@ try:
         cleanup_ref = str(expected.get("cleanup_ref", "")).strip() if expected else ""
         if cleanup_ref:
             cleanup_proof.append(cleanup_ref)
+    if controller_context.get("cleanup_ref"):
+        cleanup_proof.append(controller_context["cleanup_ref"])
 
     if blocked_or_failed and not blocker_classes:
         dod_violations.append("DoD missing blocker classification for blocked/failed dispatches")
@@ -5162,7 +5466,7 @@ try:
     lifecycle_state = str(state.get(state_field, state.get("lifecycle_state", "active"))).strip() or "active"
     if lifecycle_state not in state_transitions:
         infra_violations.append(f"state machine unknown state '{lifecycle_state}'")
-    else:
+    elif not controller_context["eligible"]:
         allowed = state_transitions.get(lifecycle_state, set())
         if "closed" not in allowed:
             infra_violations.append(f"state machine blocked: {lifecycle_state} -> closed not allowed")
@@ -5196,10 +5500,14 @@ try:
             "run_key": authoritative_close.get("run_key"),
         }
         state["role_flow"] = role_flow
-    if close_aliases and current_role and current_role not in close_aliases:
+    if close_aliases and current_role and current_role not in close_aliases and not controller_context["eligible"]:
         infra_violations.append(
             f"role flow blocked close: current_role={current_role} expected one of {sorted(close_aliases)}"
         )
+
+    if controller_only and not controller_context["eligible"]:
+        infra_violations.extend(controller_context.get("controller_infra_violations", []))
+        dod_violations.extend(controller_context.get("controller_dod_violations", []))
 
     # ── Gate decision ──
     infra_blocked = bool(infra_violations) and not force
@@ -5254,6 +5562,8 @@ try:
     state["dod_override_reason"] = dod_override_reason if dod_violations else ""
     state["lock_overridden"] = bool(lock_override_reason)
     state["lock_override_reason"] = lock_override_reason
+    state["controller_only"] = bool(controller_only)
+    state["controller_precheck_path"] = controller_precheck_path if controller_only else ""
     state[state_field] = "closed"
     state["lifecycle_state"] = "closed"
     workspace = state.get("workspace")
@@ -5306,6 +5616,10 @@ close_receipt = {
     "force_closed": bool(infra_violations),
     "dod_overridden": bool(dod_violations),
     "dod_override_reason": dod_override_reason if dod_violations else "",
+    "controller_only": bool(controller_only),
+    "controller_precheck_path": controller_precheck_path if controller_only else "",
+    "fixed_in": controller_context.get("fixed_in", ""),
+    "verify_receipt_path": controller_context.get("verify_receipt_path", ""),
     "lock_overridden": bool(lock_override_reason),
     "lock_override_reason": lock_override_reason,
     "dispatches": len(dispatches),

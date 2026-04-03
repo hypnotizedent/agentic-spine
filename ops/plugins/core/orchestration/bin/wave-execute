@@ -12,7 +12,7 @@
 #   start    --loop-id LOOP-... [--wave-id WAVE-...] [--objective "..."] [wave.sh start flags...]
 #   dispatch --wave-id WAVE-... --lane <lane> --task "desc" [--gap-ids GAP-OP-1234,GAP-OP-1235]
 #   collect  --wave-id WAVE-...
-#   close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate] [--fixed-in <sha>] [--skip-residue-check] [--no-finish]
+#   close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate] [--fixed-in <sha>] [--verify-receipt <path>] [--controller-only] [--skip-residue-check] [--no-finish]
 #   status   --wave-id WAVE-...
 #   land     --wave-id WAVE-... --files "path1,path2,..." --summary "description" [--dry-run]
 #
@@ -46,7 +46,7 @@ Usage:
   wave-execute start    --loop-id LOOP-... [--wave-id WAVE-...] [--objective "..."]
   wave-execute dispatch --wave-id WAVE-... --lane <lane> --task "desc" [--gap-ids GAP-OP-1234,GAP-OP-1235]
   wave-execute collect  --wave-id WAVE-...
-  wave-execute close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate] [--fixed-in <sha>] [--skip-residue-check] [--no-finish]
+  wave-execute close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate] [--fixed-in <sha>] [--verify-receipt <path>] [--controller-only] [--skip-residue-check] [--no-finish]
   wave-execute status   --wave-id WAVE-...
   wave-execute land     --wave-id WAVE-... --files "path1,path2,..." --summary "description" [--dry-run]
 
@@ -811,6 +811,8 @@ cmd_close() {
   local disposition=""
   local completion_level=""
   local fixed_in=""
+  local verify_receipt=""
+  local controller_only=0
   local skip_residue_check=0
   local no_finish=0
   local -a passthrough_args=()
@@ -822,6 +824,8 @@ cmd_close() {
       --disposition)        disposition="${2:?--disposition requires a value}"; shift 2 ;;
       --completion-level)   completion_level="${2:?--completion-level requires a value}"; shift 2 ;;
       --fixed-in)           fixed_in="${2:?--fixed-in requires a value}"; shift 2 ;;
+      --verify-receipt)     verify_receipt="${2:?--verify-receipt requires a value}"; shift 2 ;;
+      --controller-only)    controller_only=1; shift ;;
       --skip-residue-check) skip_residue_check=1; shift ;;
       --no-finish)          no_finish=1; shift ;;
       -h|--help)            usage; exit 0 ;;
@@ -897,6 +901,15 @@ for p in pending:
   if [[ -n "$disposition" ]]; then
     close_args+=(--disposition "$disposition")
   fi
+  if [[ -n "$fixed_in" ]]; then
+    close_args+=(--fixed-in "$fixed_in")
+  fi
+  if [[ -n "$verify_receipt" ]]; then
+    close_args+=(--verify-receipt "$verify_receipt")
+  fi
+  if [[ "$controller_only" -eq 1 ]]; then
+    close_args+=(--controller-only)
+  fi
   if [[ ${#passthrough_args[@]} -gt 0 ]]; then
     close_args+=("${passthrough_args[@]}")
   fi
@@ -917,6 +930,9 @@ for p in pending:
     fi
     if [[ -n "$fixed_in" ]]; then
       finish_cmd+=" \\\\\n    --fixed-in $fixed_in"
+    fi
+    if [[ "$controller_only" -eq 1 ]]; then
+      finish_cmd+=" \\\\\n    --controller-only"
     fi
     if [[ "$skip_residue_check" -eq 1 ]]; then
       finish_cmd+=" \\\\\n    --skip-residue-check"
@@ -940,6 +956,9 @@ for p in pending:
       fi
       if [[ -n "$fixed_in" ]]; then
         finish_args+=(--fixed-in "$fixed_in")
+      fi
+      if [[ "$controller_only" -eq 1 ]]; then
+        finish_args+=(--controller-only)
       fi
       if [[ "$skip_residue_check" -eq 1 ]]; then
         finish_args+=(--skip-residue-check)
