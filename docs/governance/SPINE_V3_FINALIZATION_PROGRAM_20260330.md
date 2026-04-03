@@ -1,17 +1,20 @@
 ---
-status: authoritative
+status: superseded_historical
 owner: "@ronny"
 scope: spine-v3-finalization-program
-updated_at: 2026-03-31
+updated_at: 2026-04-03
+superseded_by: /Users/ronnyworks/code/agentic-spine/docs/governance/SPINE_V3_COMPLETION_DECLARATION_20260403.md
 ---
 
 # Spine V3 Finalization Program 2026-03-30
 
 ## Canonical Status
 
-This document is the elected authority for finishing the current V3 spine overhaul.
+This program is complete.
 
-It exists to end the open-ended overhaul pattern and replace it with one bounded close-condition program. V3 is complete when this program is complete. Until then, the spine is still in finalization.
+As of `2026-04-03`, `/Users/ronnyworks/code/agentic-spine/docs/governance/SPINE_V3_COMPLETION_DECLARATION_20260403.md` supersedes this file as the live operating authority for V3 completion state. This program remains repo-tracked historical program evidence for how the bounded finalization was elected and finished.
+
+It existed to end the open-ended overhaul pattern and replace it with one bounded close-condition program. That condition is now met: V3 is complete, the reconciliation loop passed with `GO`, and the spine moves from finalization into operational use.
 
 ## Canonical Parent Loop
 
@@ -219,6 +222,8 @@ Governance doc budget:
 
 - `8` mandatory
 - `10` max live canon
+- `10` live authoritative governance docs after declaration lands
+- `11` top-level `docs/governance/*.md` files remain on disk after declaration lands because the declaration is added while this completed program remains repo-tracked historical evidence
 
 Node-boundary correction:
 
@@ -250,6 +255,11 @@ This is the non-negotiable proof:
 - Loop: `LOOP-SPINE-V3-7DAY-RECONCILIATION-20260330`
 - Budget: `7 days`
 - Output artifact: `.evidence/spine/reports/finalization/SPINE_V3_7DAY_RECONCILIATION_20260330_TO_20260405.md`
+- Status: complete (`2026-04-03`)
+- Rolling ledger: `/Users/ronnyworks/code/.evidence/spine/reports/finalization/SPINE_V3_7DAY_RECONCILIATION_20260402_TO_20260409.md`
+- Final verdict: `/Users/ronnyworks/code/.evidence/spine/reports/finalization/SPINE_V3_7DAY_RECONCILIATION_FINAL_VERDICT_20260403.md`
+- Final finish receipt: `/Users/ronnyworks/code/.evidence/spine/sessions/RCAP-20260403-090044__wave.finish__Rywp830923/receipt.md`
+- Loop closeout: `/Users/ronnyworks/code/.evidence/spine/loop-closeouts/LOOP-SPINE-V3-7DAY-RECONCILIATION-20260330.closeout.md`
 
 Daily shape:
 
@@ -266,6 +276,9 @@ Daily shape:
 - Loop: `LOOP-SPINE-V3-COMPLETION-DECLARATION-20260330`
 - Budget: `1 session`
 - Output artifact: `.evidence/spine/reports/finalization/SPINE_V3_COMPLETION_DECLARATION_20260330.md`
+- Status: complete (`2026-04-03`)
+- Repo-tracked declaration: `/Users/ronnyworks/code/agentic-spine/docs/governance/SPINE_V3_COMPLETION_DECLARATION_20260403.md`
+- Live authority note: the declaration above supersedes this program as live operating authority while this file remains repo-tracked historical evidence
 
 ## Final Folder Shape
 
@@ -308,3 +321,12 @@ V3 is complete only when:
 - the spine proves it can orchestrate its own finishing move
 - the seven-day reconciliation passes
 - and the next session uses the spine instead of reopening “what is V3?”
+
+## Completion Result
+
+All completion gates above are now satisfied.
+
+- Subloop 7 is complete with final verdict `GO`.
+- Subloop 8 is complete with the repo-tracked declaration landed at `/Users/ronnyworks/code/agentic-spine/docs/governance/SPINE_V3_COMPLETION_DECLARATION_20260403.md`.
+- The declaration supersedes this file as live operating authority for completion state.
+- Live authoritative governance-doc count remains `10`; on-disk top-level `docs/governance` markdown file count is `11`.
