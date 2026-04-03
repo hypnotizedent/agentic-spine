@@ -39,6 +39,17 @@ scopes_dir = state_root / "loop-scopes"
 orch_dir = state_root / "orchestration"
 gaps_file = spine / "ops" / "bindings" / "operational.gaps.yaml"
 loop_heartbeat_dir = state_root / "loop-heartbeats"
+gaps_lib_dir = spine / "ops" / "plugins" / "core" / "lifecycle" / "lib"
+
+if str(gaps_lib_dir) not in sys.path:
+    sys.path.insert(0, str(gaps_lib_dir))
+
+gaps_authority = None
+gaps_authority_import_error = None
+try:
+    import gaps_sql_authority as gaps_authority
+except Exception as exc:  # pragma: no cover - exercised via degraded status surface
+    gaps_authority_import_error = exc
 
 FM_RE = re.compile(r"^---\s*$")
 
@@ -221,43 +232,93 @@ for loop in open_loops:
     if hb.get("terminal_id"):
         loop["active_terminal"] = hb["terminal_id"]
 
-# ── Parse gaps ────────────────────────────────────────────────────────────
+# ── Parse gaps via shared authority ───────────────────────────────────────
 
-open_gaps = []
-linked_gaps = []
-unlinked_gaps = []
+def normalize_gap_entry(gap):
+    parent_loop = str(gap.get("parent_loop") or "").strip()
+    return {
+        "id": str(gap.get("id") or "?"),
+        "severity": str(gap.get("severity") or "?"),
+        "parent_loop": parent_loop,
+        "description": str(gap.get("description") or "").strip(),
+    }
 
-if gaps_file.exists():
-    # Simple YAML parsing for gaps (avoids yq/pyyaml dependency)
-    content = gaps_file.read_text()
-    # Split on gap entries
-    gap_blocks = re.split(r"\n  - id: ", content)
-    for i, block in enumerate(gap_blocks):
-        if i == 0:
-            continue  # header
-        block = "id: " + block
-        lines_dict = {}
-        for line in block.splitlines():
-            line = line.strip()
-            if ":" in line and not line.startswith("#") and not line.startswith("-"):
-                key, _, val = line.partition(":")
-                key = key.strip()
-                val = val.strip().strip('"')
-                if key in ("id", "status", "severity", "description", "parent_loop", "discovered_by"):
-                    lines_dict[key] = val
 
-        if lines_dict.get("status") == "open":
-            gap = {
-                "id": lines_dict.get("id", "?"),
-                "severity": lines_dict.get("severity", "?"),
-                "parent_loop": lines_dict.get("parent_loop", ""),
-                "description": lines_dict.get("description", "").rstrip("|").strip(),
-            }
-            open_gaps.append(gap)
-            if gap["parent_loop"] and gap["parent_loop"] != "null":
-                linked_gaps.append(gap)
+def collect_gap_state():
+    state = {
+        "status": "degraded",
+        "source": "gaps_sql_authority",
+        "message": "",
+        "db_path": "",
+        "gaps_yaml": str(gaps_file),
+        "open_gaps": [],
+        "linked_gaps": [],
+        "unlinked_gaps": [],
+    }
+
+    if gaps_authority is None:
+        state["message"] = f"shared gaps authority import failed: {gaps_authority_import_error or 'unknown error'}"
+        return state
+
+    prior_spine_state = os.environ.get("SPINE_STATE")
+    conn = None
+    try:
+        os.environ["SPINE_STATE"] = str(state_root)
+        db_path, resolved_gaps_yaml = gaps_authority.resolve_paths(spine)
+        state["db_path"] = str(db_path)
+        state["gaps_yaml"] = str(resolved_gaps_yaml)
+
+        conn = gaps_authority.connect(db_path)
+        gaps_authority.ensure_schema(conn)
+        gaps_authority.bootstrap_from_yaml(conn, resolved_gaps_yaml)
+        total_rows = gaps_authority.gap_count(conn)
+        if total_rows == 0:
+            if resolved_gaps_yaml.exists():
+                doc = gaps_authority.load_yaml(resolved_gaps_yaml)
+                if not isinstance(doc, dict) or not isinstance(doc.get("gaps"), list):
+                    raise RuntimeError(f"gaps projection is unreadable or malformed: {resolved_gaps_yaml}")
             else:
-                unlinked_gaps.append(gap)
+                raise RuntimeError(
+                    f"gaps authority unavailable: no SQLite rows and no projection at {resolved_gaps_yaml}"
+                )
+
+        gap_rows = gaps_authority.fetch_gaps(conn, status="open")
+    except Exception as exc:
+        state["message"] = str(exc)
+        return state
+    finally:
+        if conn is not None:
+            conn.close()
+        if prior_spine_state is None:
+            os.environ.pop("SPINE_STATE", None)
+        else:
+            os.environ["SPINE_STATE"] = prior_spine_state
+
+    linked = []
+    unlinked = []
+    for gap in gap_rows:
+        entry = normalize_gap_entry(gap)
+        if entry["parent_loop"] and entry["parent_loop"] != "null":
+            linked.append(entry)
+        else:
+            unlinked.append(entry)
+
+    state["status"] = "ok"
+    state["message"] = ""
+    state["linked_gaps"] = linked
+    state["unlinked_gaps"] = unlinked
+    state["open_gaps"] = linked + unlinked
+    return state
+
+
+gap_state = collect_gap_state()
+gaps_available = gap_state.get("status") == "ok"
+open_gaps = gap_state.get("open_gaps", []) if gaps_available else []
+linked_gaps = gap_state.get("linked_gaps", []) if gaps_available else []
+unlinked_gaps = gap_state.get("unlinked_gaps", []) if gaps_available else []
+open_gap_count = len(open_gaps) if gaps_available else None
+linked_gap_count = len(linked_gaps) if gaps_available else None
+unlinked_gap_count = len(unlinked_gaps) if gaps_available else None
 
 # ── Parse inbox lanes ─────────────────────────────────────────────────────
 
@@ -338,8 +399,11 @@ if comms_status_bin.exists() and os.access(str(comms_status_bin), os.X_OK):
 # ── Anomaly detection ─────────────────────────────────────────────────────
 
 # Check for unlinked gaps
-for gap in unlinked_gaps:
-    anomalies.append(f"UNLINKED GAP: {gap['id']} ({gap['severity']}) has no parent_loop")
+if gaps_available:
+    for gap in unlinked_gaps:
+        anomalies.append(f"UNLINKED GAP: {gap['id']} ({gap['severity']}) has no parent_loop")
+else:
+    anomalies.append(f"GAP STATE DEGRADED: {gap_state.get('message') or 'shared gaps authority unavailable'}")
 
 # Check for active inbox items (queued or running)
 if inbox_active > 0:
@@ -405,6 +469,16 @@ if mode == "--json":
         "open_loops": open_loops,
         "planned_loops": planned_loops,
         "open_gaps": open_gaps,
+        "gap_state": {
+            "status": gap_state.get("status", "degraded"),
+            "source": gap_state.get("source", "unknown"),
+            "message": gap_state.get("message", ""),
+            "db_path": gap_state.get("db_path", ""),
+            "gaps_yaml": gap_state.get("gaps_yaml", ""),
+            "open_count": open_gap_count,
+            "linked_count": linked_gap_count,
+            "unlinked_count": unlinked_gap_count,
+        },
         "inbox_lanes": inbox_lanes,
         "inbox_active": inbox_active,
         "inbox_total": inbox_total,
@@ -426,9 +500,9 @@ if mode == "--json":
             "horizon_now": sum(1 for loop in open_loops if loop.get("horizon", "now") == "now"),
             "horizon_later": sum(1 for loop in open_loops if loop.get("horizon", "now") == "later"),
             "horizon_future": sum(1 for loop in open_loops if loop.get("horizon", "now") == "future"),
-            "open_gaps": len(open_gaps),
-            "linked_gaps": len(linked_gaps),
-            "unlinked_gaps": len(unlinked_gaps),
+            "open_gaps": open_gap_count,
+            "linked_gaps": linked_gap_count,
+            "unlinked_gaps": unlinked_gap_count,
             "inbox_active": inbox_active,
             "inbox_total": inbox_total,
             "proposals_total": proposal_total,
@@ -459,7 +533,10 @@ if mode == "--brief":
     parts = [loop_part]
     if planned_loops:
         parts[0] += f" + {len(planned_loops)} planned"
-    parts.append(f"Gaps: {len(open_gaps)} open ({len(unlinked_gaps)} unlinked)")
+    if gaps_available:
+        parts.append(f"Gaps: {open_gap_count} open ({unlinked_gap_count} unlinked)")
+    else:
+        parts.append("Gaps: unknown (authority degraded)")
     parts.append(f"Proposals: {proposal_counts.get('pending', 0)} pending / {proposal_counts.get('draft_hold', 0)} held")
     parts.append(f"Inbox: {inbox_active} active / {inbox_total} total")
     if comms_oneliner:
@@ -544,9 +621,15 @@ if planned_loops:
     print()
 
 # ── Open Gaps ──
-print(f"OPEN GAPS ({len(open_gaps)})")
+gap_heading = str(open_gap_count) if gaps_available else "unknown"
+print(f"OPEN GAPS ({gap_heading})")
 print("-" * 72)
-if not open_gaps:
+if not gaps_available:
+    print(f"  authority: {gap_state.get('status', 'degraded')}")
+    print(f"  source: {gap_state.get('source', 'unknown')}")
+    if gap_state.get("message"):
+        print(f"  reason: {gap_state['message']}")
+elif not open_gaps:
     print("  (none)")
 else:
     for gap in open_gaps:
@@ -596,8 +679,10 @@ print("=" * 72)
 parts = [f"{len(open_loops)} loops"]
 if planned_loops:
     parts.append(f"{len(planned_loops)} planned")
-if open_gaps:
-    parts.append(f"{len(open_gaps)} gaps")
+if gaps_available and open_gap_count:
+    parts.append(f"{open_gap_count} gaps")
+elif not gaps_available:
+    parts.append("gaps unknown")
 if stale_background_count:
     parts.append(f"{stale_background_count} stale background")
 pending_count = proposal_counts.get("pending", 0)
