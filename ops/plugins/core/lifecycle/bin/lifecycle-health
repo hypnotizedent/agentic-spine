@@ -111,12 +111,23 @@ for scope_file in "$SCOPES_DIR"/*.scope.md; do
   loop_id="$(_fm_field "$scope_file" "loop_id")"
   [[ -z "$loop_id" ]] && continue
 
-  # Calculate age
+  # Calculate age (use Python for reliable cross-platform date parsing)
   created="$(_fm_field "$scope_file" "created")"
   if [[ -n "$created" ]]; then
-    created_ts=$(TZ=UTC date -jf "%Y-%m-%d" "$created" "+%s" 2>/dev/null || echo "0")
-    now_ts=$(date -u +%s)
-    age_days=$(( (now_ts - created_ts) / 86400 ))
+    age_days=$(python3 - "$created" <<'PY'
+import sys
+from datetime import datetime, timezone
+try:
+    created_str = sys.argv[1].strip().strip("'\"")
+    created = datetime.fromisoformat(created_str)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    print((now - created).days)
+except Exception:
+    print("?")
+PY
+)
   else
     age_days="?"
   fi
