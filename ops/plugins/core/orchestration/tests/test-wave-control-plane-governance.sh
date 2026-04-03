@@ -422,11 +422,17 @@ else
   fail "wave-finish lands after auto-cleaning safe residue"
 fi
 
-assert_file_contains "$T2B_REPO/captured-matrix.md" "| residue_check | residue | PASS |" "wave-finish matrix records residue PASS after auto-cleanup"
 assert_file_contains "$T2B_ROOT/landed.out" "auto-cleaned 1 lifecycle candidate" "wave-finish reports residue auto-cleanup"
+assert_file_contains "$T2B_ROOT/landed.out" "Preserving parent loop continuity" "wave-finish keeps slice_complete parent loop active"
+assert_file_contains "$T2B_ROOT/landed.out" "Loop Status:      active (slice_complete retains parent loop)" "wave-finish summary reports active parent loop for slice_complete"
 assert_file_contains "$T2B_REPO/cleanup.log" "report-only" "wave-finish requests cleanup classification"
 assert_file_contains "$T2B_REPO/cleanup.log" "archive-only" "wave-finish archives cleanup candidates before delete"
 assert_file_contains "$T2B_REPO/cleanup.log" "delete" "wave-finish deletes cleanup candidates after archive"
+if [[ -f "$T2B_REPO/captured-matrix.md" ]]; then
+  fail "wave-finish does not invoke loop-closeout-finalize for slice_complete"
+else
+  pass "wave-finish skips loop-closeout-finalize for slice_complete"
+fi
 if git -C "$T2B_REPO" branch --list "keep-LOOP-T-CLEAN-residue" | grep -q .; then
   fail "cleanup stub removes loop residue branch"
 else

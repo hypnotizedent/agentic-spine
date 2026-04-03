@@ -317,20 +317,31 @@ closed_gap_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); prin
 total_db_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['total_db_count'])" "$gap_query_result")"
 yaml_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['yaml_count'])" "$gap_query_result")"
 
+# Slice completion means one bounded wave slice is done, not that the parent loop
+# is complete. Preserve loop continuity and leave loop-linked gaps untouched.
+PRESERVE_PARENT_LOOP=0
+if [[ "${COMPLETION_LEVEL:-}" == "slice_complete" ]]; then
+  PRESERVE_PARENT_LOOP=1
+fi
+
 # Determine gap closure behavior per disposition.
 GAP_CLOSE_STATUS=""
-case "$DISPOSITION" in
-  landed)     GAP_CLOSE_STATUS="fixed" ;;
-  abandoned)  GAP_CLOSE_STATUS="wontfix" ;;
-  deferred)   GAP_CLOSE_STATUS="" ;;  # open gaps stay open
-  superseded) GAP_CLOSE_STATUS="" ;;  # open gaps stay open (reparent manually if needed)
-esac
+if [[ "$PRESERVE_PARENT_LOOP" -eq 0 ]]; then
+  case "$DISPOSITION" in
+    landed)     GAP_CLOSE_STATUS="fixed" ;;
+    abandoned)  GAP_CLOSE_STATUS="wontfix" ;;
+    deferred)   GAP_CLOSE_STATUS="" ;;  # open gaps stay open
+    superseded) GAP_CLOSE_STATUS="" ;;  # open gaps stay open (reparent manually if needed)
+  esac
+fi
 
 echo "Gap Inventory:"
 echo "  Open:           $open_gap_count"
 echo "  Already closed: $closed_gap_count"
 if [[ -n "$GAP_CLOSE_STATUS" ]]; then
   echo "  Action:         close as $GAP_CLOSE_STATUS"
+elif [[ "$PRESERVE_PARENT_LOOP" -eq 1 ]]; then
+  echo "  Action:         no closure (slice_complete retains parent loop continuity)"
 else
   echo "  Action:         no closure (disposition=$DISPOSITION)"
 fi
@@ -500,6 +511,9 @@ for g in d['open']:
 " "$gap_query_result"
   fi
   echo "Would close loop $LOOP_ID with disposition=$DISPOSITION"
+  if [[ "$PRESERVE_PARENT_LOOP" -eq 1 ]]; then
+    echo "Would keep parent loop active because completion_level=slice_complete"
+  fi
   echo ""
   echo "================================================================="
   echo "WAVE FINISH DRY RUN COMPLETE"
@@ -625,39 +639,46 @@ EOF
 
 # ── 4c: Close loop via loop-closeout-finalize ────────────────────
 
-echo "Closing loop: $LOOP_ID"
+loop_status_summary="closed ($DISPOSITION, ${COMPLETION_LEVEL:-n/a})"
+if [[ "$PRESERVE_PARENT_LOOP" -eq 1 ]]; then
+  echo "Preserving parent loop continuity: completion_level=slice_complete (loop remains active)"
+  echo ""
+  loop_status_summary="active (slice_complete retains parent loop)"
+else
+  echo "Closing loop: $LOOP_ID"
 
-closeout_args=(
-  "--loop-id" "$LOOP_ID"
-  "--disposition" "$DISPOSITION"
-  "--acceptance-matrix" "$MATRIX_FILE"
-  "--no-close-linked-gaps"
-)
+  closeout_args=(
+    "--loop-id" "$LOOP_ID"
+    "--disposition" "$DISPOSITION"
+    "--acceptance-matrix" "$MATRIX_FILE"
+    "--no-close-linked-gaps"
+  )
 
-if [[ -n "$COMPLETION_LEVEL" ]]; then
-  closeout_args+=("--completion-level" "$COMPLETION_LEVEL")
+  if [[ -n "$COMPLETION_LEVEL" ]]; then
+    closeout_args+=("--completion-level" "$COMPLETION_LEVEL")
+  fi
+
+  # Propagation evidence: build from surface agreement results.
+  prop_evidence="wave.finish 4-surface check: runtime=$surface_runtime, control-plane=$surface_control, projections=$surface_projection, residue=$surface_residue"
+  closeout_args+=("--propagation-evidence" "$prop_evidence")
+
+  # For high-severity gap fix-to-lock, pass the loop_id as regression lock.
+  closeout_args+=("--regression-lock-id" "$LOOP_ID")
+  closeout_args+=("--evidence" "wave.finish run_key=${SPINE_CAP_RUN_KEY:-manual}")
+
+  closeout_output="$("$CLOSEOUT_BIN" "${closeout_args[@]}" 2>&1)" || {
+    closeout_rc=$?
+    echo "wave.finish FAIL: loop-closeout-finalize exited $closeout_rc" >&2
+    echo "$closeout_output" >&2
+    echo "" >&2
+    echo "CRITICAL: $gaps_closed gaps were already closed but loop remains open." >&2
+    echo "Manual intervention required: re-run wave.finish or close loop manually." >&2
+    exit 1
+  }
+
+  echo "$closeout_output"
+  echo ""
 fi
-
-# Propagation evidence: build from surface agreement results.
-prop_evidence="wave.finish 4-surface check: runtime=$surface_runtime, control-plane=$surface_control, projections=$surface_projection, residue=$surface_residue"
-closeout_args+=("--propagation-evidence" "$prop_evidence")
-
-# For high-severity gap fix-to-lock, pass the loop_id as regression lock.
-closeout_args+=("--regression-lock-id" "$LOOP_ID")
-closeout_args+=("--evidence" "wave.finish run_key=${SPINE_CAP_RUN_KEY:-manual}")
-
-closeout_output="$("$CLOSEOUT_BIN" "${closeout_args[@]}" 2>&1)" || {
-  closeout_rc=$?
-  echo "wave.finish FAIL: loop-closeout-finalize exited $closeout_rc" >&2
-  echo "$closeout_output" >&2
-  echo "" >&2
-  echo "CRITICAL: $gaps_closed gaps were already closed but loop remains open." >&2
-  echo "Manual intervention required: re-run wave.finish or close loop manually." >&2
-  exit 1
-}
-
-echo "$closeout_output"
-echo ""
 
 # ── Step 5: Emit summary ────────────────────────────────────────
 
@@ -681,7 +702,7 @@ echo "  Control-Plane:  $surface_control"
 echo "  Projections:    $surface_projection"
 echo "  Residue:        $surface_residue"
 echo ""
-echo "Loop Status:      closed ($DISPOSITION, ${COMPLETION_LEVEL:-n/a})"
+echo "Loop Status:      $loop_status_summary"
 echo ""
 echo "================================================================="
 echo "WAVE FINISH COMPLETE"
