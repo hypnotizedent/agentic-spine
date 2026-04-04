@@ -27,8 +27,11 @@ show_orphans = sys.argv[2].strip().lower() == "true"
 
 summary = payload.get("summary", {})
 loops = payload.get("loops", {}).get("open", [])
-gaps = payload.get("gaps", {}).get("open", [])
-orphans = payload.get("gaps", {}).get("orphaned", [])
+gaps_payload = payload.get("gaps", {}) if isinstance(payload.get("gaps"), dict) else {}
+gaps = gaps_payload.get("open", []) if isinstance(gaps_payload.get("open"), list) else []
+orphans = gaps_payload.get("orphaned", []) if isinstance(gaps_payload.get("orphaned"), list) else []
+gap_authority_status = str(gaps_payload.get("status") or summary.get("gap_authority_status") or "ok").strip().lower()
+gap_authority_message = str(gaps_payload.get("message") or "").strip()
 handoffs = payload.get("handoffs", {}).get("active", [])
 blocked_worktrees = payload.get("worktrees", {}).get("blocked", [])
 waves = payload.get("waves", {}).get("active", [])
@@ -42,12 +45,18 @@ print(f"generated: {payload.get('generated_at_utc', '')}")
 print("")
 
 print("--- Gap Summary ---")
-print(f"Open gaps: {summary.get('open_gaps', 0)}")
-print(f"Orphaned gaps: {summary.get('orphaned_gaps', 0)}")
-for row in gaps[:5]:
-    desc = row.get("description", "")
-    suffix = f" — {desc}" if desc else ""
-    print(f"  {row.get('id', '')} [{row.get('severity', 'medium')}]{suffix}")
+if gap_authority_status == "ok" and summary.get("open_gaps") is not None:
+    print(f"Open gaps: {summary.get('open_gaps', 0)}")
+    print(f"Orphaned gaps: {summary.get('orphaned_gaps', 0)}")
+    for row in gaps[:5]:
+        desc = row.get("description", "")
+        suffix = f" - {desc}" if desc else ""
+        print(f"  {row.get('id', '')} [{row.get('severity', 'medium')}]{suffix}")
+else:
+    print("Open gaps: unknown (authority degraded)")
+    print("Orphaned gaps: unknown")
+    if gap_authority_message:
+        print(f"Gap authority: degraded - {gap_authority_message}")
 print("")
 
 print("--- Open Loops ---")
@@ -117,7 +126,9 @@ print("")
 
 if show_orphans:
     print("--- Orphan Check ---")
-    if orphans:
+    if gap_authority_status != "ok":
+        print("  Unknown (gap authority degraded)")
+    elif orphans:
         for row in orphans:
             print(
                 f"  {row.get('id', '')} parent={row.get('parent_loop', '')} "

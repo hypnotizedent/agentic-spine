@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/launcher-control-worktree.sh"
+source "$ROOT/ops/lib/orchestration-remedy.sh"
 
 ROLE="solo"
 LOOP_ID=""
@@ -556,9 +557,7 @@ if [[ -n "${SPINE_LOOP_ID:-}" && "$SPINE_LOOP_ID" != "none" ]]; then
       ORCHESTRATION_STATE="available_not_entered"
       echo "ORCHESTRATION: available but not entered" >&2
       echo "" >&2
-      echo "⚠️  This loop uses orchestrator_subagents mode." >&2
-      echo "   To enter a worker lane, open a new terminal:" >&2
-      echo "   ./bin/ops terminal launch --loop ${SPINE_LOOP_ID} --role lane-worker --lane D --tool claude" >&2
+      orchestration_remedy_compact "${SPINE_LOOP_ID}" "$TOOL" >&2
     fi
   elif [[ "$LOOP_EXECUTION_MODE" == "single_worker" ]]; then
     ORCHESTRATION_STATE="not_applicable"
@@ -574,9 +573,13 @@ JOINED_STATE_FILE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/domain-state/
 if [[ -f "$JOINED_STATE_FILE" ]] && command -v yq >/dev/null 2>&1; then
   OPEN_LOOPS=$(yq e -r '.summary.open_loops // "?"' "$JOINED_STATE_FILE" 2>/dev/null || echo "?")
   OPEN_GAPS=$(yq e -r '.summary.open_gaps // "?"' "$JOINED_STATE_FILE" 2>/dev/null || echo "?")
+  GAP_AUTHORITY_STATUS=$(yq e -r '.summary.gap_authority_status // "ok"' "$JOINED_STATE_FILE" 2>/dev/null || echo "ok")
   BLOCKED_WORKTREES=$(yq e -r '.summary.blocked_worktrees // "?"' "$JOINED_STATE_FILE" 2>/dev/null || echo "?")
   ACTIVE_WAVES=$(yq e -r '.summary.active_waves // "?"' "$JOINED_STATE_FILE" 2>/dev/null || echo "?")
   ENGINE_COHERENCE=$(yq e -r '.summary.engine_coherence_needs_attention // false' "$JOINED_STATE_FILE" 2>/dev/null || echo "false")
+  if [[ "$GAP_AUTHORITY_STATUS" != "ok" ]]; then
+    OPEN_GAPS="unknown"
+  fi
 
   echo "ENGINE TELEMETRY:" >&2
   echo "  Loops: ${OPEN_LOOPS} open | Gaps: ${OPEN_GAPS} open" >&2

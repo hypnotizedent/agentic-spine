@@ -131,6 +131,7 @@ env \
   SPINE_RUNTIME_ROOT="$RUNTIME" \
   SPINE_RECEIPTS="$RECEIPTS" \
   SPINE_GAPS_FILE="$GAPS_FILE" \
+  GAPS_YAML_PATH="$GAPS_FILE" \
   "$BIN" > "$OUT"
 
 assert_contains "$OUT" "SPINE_ENGINE_JOINED_STATE.yaml" "lifecycle-health reports joined-state surface path"
@@ -144,6 +145,27 @@ if [[ -f "$STATE/domain-state/spine/SPINE_ENGINE_JOINED_STATE.yaml" ]]; then
 else
   fail "lifecycle-health writes joined-state runtime surface"
 fi
+
+DEGRADED_STATE="$TMPDIR_BASE/degraded-state"
+DEGRADED_RUNTIME="$TMPDIR_BASE/degraded-runtime"
+DEGRADED_RECEIPTS="$TMPDIR_BASE/degraded-receipts"
+DEGRADED_OUT="$TMPDIR_BASE/degraded-out.txt"
+mkdir -p \
+  "$DEGRADED_STATE/loop-scopes" \
+  "$DEGRADED_RUNTIME/waves" \
+  "$DEGRADED_RECEIPTS"
+
+env \
+  SPINE_STATE="$DEGRADED_STATE" \
+  SPINE_RUNTIME_ROOT="$DEGRADED_RUNTIME" \
+  SPINE_RECEIPTS="$DEGRADED_RECEIPTS" \
+  GAPS_DB_PATH="$TMPDIR_BASE/degraded.db" \
+  GAPS_YAML_PATH="$TMPDIR_BASE/missing.gaps.yaml" \
+  "$BIN" > "$DEGRADED_OUT"
+
+assert_contains "$DEGRADED_OUT" "Open gaps: unknown (authority degraded)" "lifecycle-health reports unknown when gap authority is degraded"
+assert_contains "$DEGRADED_OUT" "Gap authority: degraded -" "lifecycle-health surfaces the degradation reason"
+assert_contains "$DEGRADED_OUT" "Summary: unknown (authority degraded)" "aging advisory degrades to unknown instead of conflicting count"
 
 echo ""
 echo "────────────────────────────────────────"

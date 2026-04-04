@@ -9,7 +9,9 @@ set -euo pipefail
 # Buckets: CRITICAL (>critical_days), WARNING (>warning_days)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+GAPS_FILE="${GAPS_YAML_PATH:-$ROOT/ops/bindings/operational.gaps.yaml}"
 
 source "$ROOT/ops/plugins/core/lifecycle/lib/lifecycle-rules.sh"
 
@@ -40,29 +42,57 @@ echo "Warning threshold: ${WARN_DAYS} days"
 echo "Critical threshold: ${CRIT_DAYS} days"
 echo ""
 
-python3 - "$GAPS_FILE" "$WARN_DAYS" "$CRIT_DAYS" <<'PY'
-import json
-import subprocess
+python3 - "$ROOT" "$SPINE_STATE" "$GAPS_FILE" "$WARN_DAYS" "$CRIT_DAYS" <<'PY'
+import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
-gaps_file = sys.argv[1]
-warn_days = int(sys.argv[2])
-crit_days = int(sys.argv[3])
+root = Path(sys.argv[1])
+state_root = sys.argv[2]
+gaps_file = Path(sys.argv[3])
+warn_days = int(sys.argv[4])
+crit_days = int(sys.argv[5])
 
 try:
-    result = subprocess.run(
-        ["yq", "e", "-o=json", ".", gaps_file],
-        capture_output=True, text=True, check=True
-    )
-    data = json.loads(result.stdout)
-except Exception as e:
-    print(f"ERROR: Failed to read gaps: {e}", file=sys.stderr)
-    sys.exit(1)
+    sys.path.insert(0, str(root / "ops/plugins/core/lifecycle/lib"))
+    import gaps_sql_authority as gsa  # type: ignore
+except Exception as exc:
+    print("Summary: unknown (authority degraded)")
+    print(f"Reason: {exc}")
+    sys.exit(0)
 
 now = datetime.now(timezone.utc)
-gaps = data.get("gaps", [])
-open_gaps = [g for g in gaps if g.get("status") == "open"]
+prior_spine_state = os.environ.get("SPINE_STATE")
+conn = None
+try:
+    os.environ["SPINE_STATE"] = state_root
+    db_path, resolved_gaps_yaml = gsa.resolve_paths(root)
+    conn = gsa.connect(db_path)
+    gsa.ensure_schema(conn)
+    gsa.bootstrap_from_yaml(conn, resolved_gaps_yaml if resolved_gaps_yaml else gaps_file)
+    total_rows = gsa.gap_count(conn)
+    if total_rows == 0:
+        if resolved_gaps_yaml.exists():
+            doc = gsa.load_yaml(resolved_gaps_yaml)
+            if not isinstance(doc, dict) or not isinstance(doc.get("gaps"), list):
+                raise RuntimeError(f"gaps projection is unreadable or malformed: {resolved_gaps_yaml}")
+        else:
+            raise RuntimeError(
+                f"gaps authority unavailable: no SQLite rows and no projection at {resolved_gaps_yaml}"
+            )
+    open_gaps = [gap for gap in gsa.fetch_gaps(conn, status="open") if isinstance(gap, dict)]
+except Exception as exc:
+    print("Summary: unknown (authority degraded)")
+    print(f"Reason: {exc}")
+    sys.exit(0)
+finally:
+    if conn is not None:
+        conn.close()
+    if prior_spine_state is None:
+        os.environ.pop("SPINE_STATE", None)
+    else:
+        os.environ["SPINE_STATE"] = prior_spine_state
 
 critical = []
 warning = []

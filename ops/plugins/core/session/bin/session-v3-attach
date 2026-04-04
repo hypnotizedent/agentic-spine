@@ -1017,7 +1017,14 @@ def main() -> int:
             orchestration_lane_role = os.environ.get("SPINE_LANE_ROLE", "unknown")
         else:
             orchestration_state = "available_not_entered"
-            orchestration_remedy = f"./bin/ops terminal launch --loop {loop_id} --role lane-worker --lane D --tool claude"
+            # Use shared remedy generator (single source of truth)
+            remedy_result = subprocess.run(
+                ["bash", "-c", f"source {ROOT}/ops/lib/orchestration-remedy.sh && orchestration_remedy_worker_lane_entry '{loop_id}' 'claude'"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            orchestration_remedy = remedy_result.stdout.strip() if remedy_result.returncode == 0 else f"./bin/ops terminal launch --loop {loop_id} --role lane-worker --lane D --tool claude"
     elif loop_execution_mode == "single_worker":
         orchestration_state = "not_applicable"
 
@@ -1055,9 +1062,13 @@ def main() -> int:
     joined_state = load_yaml(joined_state_path, {})
     if isinstance(joined_state, dict) and "summary" in joined_state:
         summary = joined_state["summary"]
+        gap_authority_status = str(summary.get("gap_authority_status", "ok")).strip().lower()
+        open_gaps = summary.get("open_gaps", "?")
+        if gap_authority_status != "ok":
+            open_gaps = "unknown"
         print("## Joined Engine Telemetry")
         print(f"open_loops: {summary.get('open_loops', '?')}")
-        print(f"open_gaps: {summary.get('open_gaps', '?')}")
+        print(f"open_gaps: {open_gaps}")
         print(f"blocked_worktrees: {summary.get('blocked_worktrees', '?')}")
         print(f"active_waves: {summary.get('active_waves', '?')}")
         print(f"recent_force_closes: {summary.get('recent_force_closes', 0)} (7d window)")
