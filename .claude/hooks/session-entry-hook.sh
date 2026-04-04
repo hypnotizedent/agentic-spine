@@ -20,6 +20,7 @@ fi
 SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$SPINE_ROOT/ops/lib/runtime-paths.sh" || { echo "FATAL: runtime-paths.sh not found" >&2; exit 1; }
 spine_runtime_resolve_paths
+source "$SPINE_ROOT/ops/lib/orchestration-remedy.sh" || { echo "FATAL: orchestration-remedy.sh not found" >&2; exit 1; }
 BRANCH=$(git -C "$SPINE_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 TERMINAL_ROLE_CONTRACT="$SPINE_ROOT/ops/bindings/terminal.role.contract.yaml"
 ROLE_RUNTIME_CONTRACT="$SPINE_ROOT/ops/bindings/role.runtime.control.contract.yaml"
@@ -293,7 +294,7 @@ if [[ -n "$LOOP_ID_RESOLVED" ]]; then
       ORCHESTRATION_LANE_ROLE="${SPINE_LANE_ROLE:-unknown}"
     else
       ORCHESTRATION_STATE="available_not_entered"
-      ORCHESTRATION_REMEDY="./bin/ops terminal launch --loop $LOOP_ID_RESOLVED --role lane-worker --lane D --tool claude"
+      ORCHESTRATION_REMEDY="$(orchestration_remedy_worker_lane_entry "$LOOP_ID_RESOLVED" "claude")"
     fi
   elif [[ "$LOOP_EXECUTION_MODE" == "single_worker" ]]; then
     ORCHESTRATION_STATE="not_applicable"

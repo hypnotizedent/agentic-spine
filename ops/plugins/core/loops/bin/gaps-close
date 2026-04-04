@@ -205,13 +205,14 @@ apply_gap_update() {
   local stdout_file stderr_file result rc
   stdout_file="$(mktemp)"
   stderr_file="$(mktemp)"
-  set +e
-  python3 "$GAPS_BRIDGE" "${bridge_args[@]}" >"$stdout_file" 2>"$stderr_file"
-  rc=$?
-  set -e
+  if python3 "$GAPS_BRIDGE" "${bridge_args[@]}" >"$stdout_file" 2>"$stderr_file"; then
+    rc=0
+  else
+    rc=$?
+  fi
   result="$(cat "$stdout_file")"
   GAPS_CLOSE_LAST_BRIDGE_STDERR="$(cat "$stderr_file")"
-  rm -f "$stdout_file" "$stderr_file"
+  rm -rf "$stdout_file" "$stderr_file"
 
   GAPS_CLOSE_LAST_BRIDGE_STDOUT="$result"
   GAPS_CLOSE_LAST_BRIDGE_RC="$rc"
@@ -248,13 +249,14 @@ sync_gap_updates() {
 
   stdout_file="$(mktemp)"
   stderr_file="$(mktemp)"
-  set +e
-  python3 "$GAPS_BRIDGE" "${bridge_args[@]}" >"$stdout_file" 2>"$stderr_file"
-  rc=$?
-  set -e
+  if python3 "$GAPS_BRIDGE" "${bridge_args[@]}" >"$stdout_file" 2>"$stderr_file"; then
+    rc=0
+  else
+    rc=$?
+  fi
   result="$(cat "$stdout_file")"
   GAPS_CLOSE_LAST_BRIDGE_STDERR="$(cat "$stderr_file")"
-  rm -f "$stdout_file" "$stderr_file"
+  rm -rf "$stdout_file" "$stderr_file"
 
   GAPS_CLOSE_LAST_BRIDGE_STDOUT="$result"
   GAPS_CLOSE_LAST_BRIDGE_RC="$rc"
@@ -406,8 +408,12 @@ close_single() {
   fi
 
   timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  if ! apply_gap_update "$id" "$status" "$fixed_in" "$notes" "$reg_lock" "$timestamp" 0; then
-    local rc=$?
+  local rc=0
+  set +e
+  apply_gap_update "$id" "$status" "$fixed_in" "$notes" "$reg_lock" "$timestamp" 0
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
     cleanup_claim_if_present "$id"
     if [[ "$rc" -eq 3 ]]; then
       emit_partial_state "$GAPS_CLOSE_LAST_PARTIAL_PAYLOAD"
@@ -472,8 +478,12 @@ close_batch() {
   timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local -a closed_ids=()
   for i in "${valid_indices[@]}"; do
-    if ! apply_gap_update "${ids[$i]}" "${statuses[$i]}" "${fixed_ins[$i]}" "${notes[$i]}" "${reg_locks[$i]}" "$timestamp" 1; then
-      local rc=$?
+    local rc=0
+    set +e
+    apply_gap_update "${ids[$i]}" "${statuses[$i]}" "${fixed_ins[$i]}" "${notes[$i]}" "${reg_locks[$i]}" "$timestamp" 1
+    rc=$?
+    set -e
+    if [[ "$rc" -ne 0 ]]; then
       for id in "${closed_ids[@]}"; do
         cleanup_claim_if_present "$id"
       done
@@ -486,16 +496,20 @@ close_batch() {
     closed_ids+=("${ids[$i]}")
   done
 
-  if ! sync_gap_updates "${closed_ids[@]}"; then
-    local rc=$?
+  local sync_rc=0
+  set +e
+  sync_gap_updates "${closed_ids[@]}"
+  sync_rc=$?
+  set -e
+  if [[ "$sync_rc" -ne 0 ]]; then
     for id in "${closed_ids[@]}"; do
       cleanup_claim_if_present "$id"
     done
-    if [[ "$rc" -eq 3 ]]; then
+    if [[ "$sync_rc" -eq 3 ]]; then
       emit_partial_state "$GAPS_CLOSE_LAST_PARTIAL_PAYLOAD"
       exit 3
     fi
-    exit "$rc"
+    exit "$sync_rc"
   fi
 
   for id in "${closed_ids[@]}"; do

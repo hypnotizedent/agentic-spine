@@ -197,10 +197,53 @@ list_caps() {
     echo "Run: ops cap run <name> [args...]"
 }
 
+# Check for common capability name mistakes and suggest corrections
+check_capability_alias() {
+    local name="$1"
+
+    # Common wrong names -> correct names mapping
+    case "$name" in
+        loop.open)
+            echo "HINT: Did you mean one of these?" >&2
+            echo "  - loops.create         (create a new loop scope file)" >&2
+            echo "  - orchestration.loop.open  (create orchestration manifest for a loop)" >&2
+            echo "" >&2
+            echo "Run 'ops cap list | grep loop' to see all loop-related capabilities." >&2
+            return 1
+            ;;
+        loop.create)
+            echo "HINT: The correct capability is 'loops.create' (note the 's')" >&2
+            echo "  ops cap run loops.create -- --loop-id YOUR-LOOP-ID" >&2
+            return 1
+            ;;
+        lane.enter)
+            echo "HINT: There is no 'lane.enter' capability." >&2
+            echo "To enter an orchestration worker lane, use:" >&2
+            echo "  ops terminal launch --loop LOOP-ID --role lane-worker --lane D --tool claude" >&2
+            echo "" >&2
+            echo "See 'ops terminal --help' for more options." >&2
+            return 1
+            ;;
+        orchestration.enter|orchestration.lane.enter)
+            echo "HINT: Did you mean 'orchestration.lane.open'?" >&2
+            echo "  ops cap run orchestration.lane.open -- --profile PROFILE" >&2
+            return 1
+            ;;
+        *)
+            return 0  # No alias match, continue with normal error
+            ;;
+    esac
+}
+
 show_cap() {
     local name="$1"
 
     if ! yaml_query -e "$CAP_FILE" ".capabilities.\"$name\"" 2>/dev/null; then
+        # Check for common mistakes first
+        if ! check_capability_alias "$name"; then
+            exit 1
+        fi
+
         echo "ERROR: Unknown capability: $name"
         echo "Run 'ops cap list' to see available capabilities."
         exit 1
@@ -231,6 +274,11 @@ run_cap() {
 
     # ── Config extraction & validation ──
     if ! yaml_query -e "$CAP_FILE" ".capabilities.\"$name\"" 2>/dev/null; then
+        # Check for common mistakes first
+        if ! check_capability_alias "$name"; then
+            exit 1
+        fi
+
         echo "ERROR: Unknown capability: $name"
         echo "Run 'ops cap list' to see available capabilities."
         exit 1

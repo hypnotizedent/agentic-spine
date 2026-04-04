@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+make_checkout() {
+  local path="$1"
+  git clone "$ROOT" "$path" >/dev/null 2>&1
+  git -C "$path" config user.name "Test User"
+  git -C "$path" config user.email "test@example.com"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete --exclude '.git' "$ROOT/" "$path/" >/dev/null 2>&1
+  else
+    (
+      cd "$ROOT"
+      tar --exclude='.git' -cf - .
+    ) | (
+      cd "$path"
+      tar -xf -
+    )
+  fi
+  if [[ -n "$(git -C "$path" status --porcelain)" ]]; then
+    git -C "$path" add -A
+    git -C "$path" commit -m "test overlay" >/dev/null 2>&1
+  fi
+}
+
+write_loop_scope() {
+  local state_root="$1"
+  local loop_id="$2"
+  mkdir -p "$state_root/loop-scopes"
+  cat > "$state_root/loop-scopes/${loop_id}.scope.md" <<EOF_SCOPE
+---
+loop_id: $loop_id
+created: 2026-04-03
+status: active
+owner: "@ronny"
+scope: spine
+objective: gaps.close atomic sync fixture
+execution_mode: operational
+---
+EOF_SCOPE
+}
+
+write_gaps_yaml() {
+  local gaps_yaml="$1"
+  local loop_id="$2"
+  local gap_id="$3"
+  mkdir -p "$(dirname "$gaps_yaml")"
+  cat > "$gaps_yaml" <<EOF_GAPS
+version: 1
+updated: '2026-04-03T00:00:00Z'
+archive_ref: ops/archive/operational.gaps.archive.yaml
+gaps:
+- id: $gap_id
+  discovered_by: test-harness
+  discovered_at: '2026-04-03'
+  type: runtime-bug
+  description: gaps.close should sync lifecycle surfaces atomically.
+  severity: medium
+  status: open
+  parent_loop: $loop_id
+EOF_GAPS
+}
+
+wait_for_friction_capability() {
+  local checkout="$1"
+  local state_root="$2"
+  local runtime_root="$3"
+  local gaps_yaml="$4"
+  local db_path="$5"
+  local capability="$6"
+  local attempt output
+
+  for attempt in {1..20}; do
+    output="$(
+      cd "$checkout" && \
+      env \
+        SPINE_STATE="$state_root" \
+        SPINE_RUNTIME_ROOT="$runtime_root" \
+        GAPS_DB_PATH="$db_path" \
+        GAPS_YAML_PATH="$gaps_yaml" \
+        SPINE_GAPS_FILE="$gaps_yaml" \
+        python3 ops/plugins/core/lifecycle/bin/friction-authority-bridge list --status queued
+    )"
+    if python3 - "$output" "$capability" <<'PY'
+import json
+import sys
+
+rows = json.loads(sys.argv[1])
+capability = sys.argv[2]
+assert any(str(row.get("capability") or "") == capability for row in rows)
+PY
+    then
+      return 0
+    fi
+    sleep 0.25
+  done
+
+  echo "FAIL: friction capability '$capability' not observed" >&2
+  echo "$output" >&2
+  return 1
+}
+
+echo "== gaps.close atomic sync and partial-state tests =="
+
+SUCCESS_CHECKOUT="$tmpdir/success-checkout"
+SUCCESS_RUNTIME="$tmpdir/success-runtime"
+SUCCESS_STATE="$SUCCESS_RUNTIME/state"
+SUCCESS_GAPS="$tmpdir/success/ops/bindings/operational.gaps.yaml"
+SUCCESS_DB="$SUCCESS_STATE/shared_authority.db"
+SUCCESS_LOOP="LOOP-TEST-GAPS-CLOSE-ATOMIC-20260403"
+SUCCESS_GAP="GAP-TEST-GAPS-CLOSE-ATOMIC-0001"
+
+make_checkout "$SUCCESS_CHECKOUT"
+mkdir -p "$SUCCESS_STATE" "$SUCCESS_RUNTIME"
+write_loop_scope "$SUCCESS_STATE" "$SUCCESS_LOOP"
+write_gaps_yaml "$SUCCESS_GAPS" "$SUCCESS_LOOP" "$SUCCESS_GAP"
+
+success_output="$(
+  cd "$SUCCESS_CHECKOUT" && \
+  env \
+    SPINE_STATE="$SUCCESS_STATE" \
+    SPINE_RUNTIME_ROOT="$SUCCESS_RUNTIME" \
+    GAPS_DB_PATH="$SUCCESS_DB" \
+    GAPS_YAML_PATH="$SUCCESS_GAPS" \
+    SPINE_GAPS_FILE="$SUCCESS_GAPS" \
+    OPS_TERMINAL_ROLE="SPINE-CONTROL-01" \
+    SPINE_CAP_RUN_KEY="CAP-20260403-TEST__gaps.close__Ratomic01" \
+    ops/plugins/core/loops/bin/gaps-close --id "$SUCCESS_GAP" --status fixed 2>&1
+)"
+
+if [[ "$success_output" != *"CLOSED: $SUCCESS_GAP"* ]]; then
+  echo "FAIL: gaps.close success path did not report closure" >&2
+  echo "$success_output" >&2
+  exit 1
+fi
+if [[ "$success_output" == *"PARTIAL STATE:"* ]]; then
+  echo "FAIL: gaps.close success path reported partial state" >&2
+  echo "$success_output" >&2
+  exit 1
+fi
+
+python3 - <<'PY' "$SUCCESS_GAPS" "$SUCCESS_RUNTIME" "$SUCCESS_GAP"
+from pathlib import Path
+import sys
+import yaml
+
+gaps_path = Path(sys.argv[1])
+runtime_root = Path(sys.argv[2])
+gap_id = sys.argv[3]
+
+doc = yaml.safe_load(gaps_path.read_text(encoding="utf-8")) or {}
+assert doc.get("gaps") == [], doc
+
+archive_path = gaps_path.parent.parent / "archive" / "operational.gaps.archive.yaml"
+archive = yaml.safe_load(archive_path.read_text(encoding="utf-8")) or {}
+archive_rows = {row["id"]: row for row in archive.get("gaps", [])}
+assert archive_rows[gap_id]["status"] == "fixed"
+assert archive_rows[gap_id]["closed_at"]
+
+joined_state_path = runtime_root / "state" / "domain-state" / "spine" / "SPINE_ENGINE_JOINED_STATE.yaml"
+joined_state = yaml.safe_load(joined_state_path.read_text(encoding="utf-8")) or {}
+assert joined_state["summary"]["open_gaps"] == 0, joined_state["summary"]
+assert joined_state["gaps"]["open"] == [], joined_state["gaps"]
+PY
+
+PARTIAL_CHECKOUT="$tmpdir/partial-checkout"
+PARTIAL_RUNTIME="$tmpdir/partial-runtime"
+PARTIAL_STATE="$PARTIAL_RUNTIME/state"
+PARTIAL_GAPS="$tmpdir/partial/ops/bindings/operational.gaps.yaml"
+PARTIAL_DB="$PARTIAL_STATE/shared_authority.db"
+PARTIAL_LOOP="LOOP-TEST-GAPS-CLOSE-PARTIAL-20260403"
+PARTIAL_GAP="GAP-TEST-GAPS-CLOSE-PARTIAL-0001"
+BLOCKED_JOINED_PARENT="$tmpdir/blocked-joined-state-parent"
+PARTIAL_JOINED_PATH="$BLOCKED_JOINED_PARENT/SPINE_ENGINE_JOINED_STATE.yaml"
+
+make_checkout "$PARTIAL_CHECKOUT"
+mkdir -p "$PARTIAL_STATE" "$PARTIAL_RUNTIME"
+write_loop_scope "$PARTIAL_STATE" "$PARTIAL_LOOP"
+write_gaps_yaml "$PARTIAL_GAPS" "$PARTIAL_LOOP" "$PARTIAL_GAP"
+printf 'not a directory\n' > "$BLOCKED_JOINED_PARENT"
+
+set +e
+partial_output="$(
+  cd "$PARTIAL_CHECKOUT" && \
+  env \
+    SPINE_STATE="$PARTIAL_STATE" \
+    SPINE_RUNTIME_ROOT="$PARTIAL_RUNTIME" \
+    SPINE_ENGINE_JOINED_STATE_PATH="$PARTIAL_JOINED_PATH" \
+    GAPS_DB_PATH="$PARTIAL_DB" \
+    GAPS_YAML_PATH="$PARTIAL_GAPS" \
+    SPINE_GAPS_FILE="$PARTIAL_GAPS" \
+    OPS_TERMINAL_ROLE="SPINE-CONTROL-01" \
+    SPINE_CAP_RUN_KEY="CAP-20260403-TEST__gaps.close__Rpartial01" \
+    ops/plugins/core/loops/bin/gaps-close --id "$PARTIAL_GAP" --status fixed 2>&1
+)"
+partial_status=$?
+set -e
+
+if [[ "$partial_status" -ne 3 ]]; then
+  echo "FAIL: partial gaps.close path should exit 3" >&2
+  echo "$partial_output" >&2
+  exit 1
+fi
+if [[ "$partial_output" != *"PARTIAL STATE: gap_sync_partial"* ]]; then
+  echo "FAIL: partial gaps.close path did not print machine-readable marker" >&2
+  echo "$partial_output" >&2
+  exit 1
+fi
+if [[ "$partial_output" != *"reason=joined-state refresh failed:"* ]]; then
+  echo "FAIL: partial gaps.close path did not print exact reason" >&2
+  echo "$partial_output" >&2
+  exit 1
+fi
+if [[ "$partial_output" != *"next_step=./bin/ops cap run lifecycle.health"* ]]; then
+  echo "FAIL: partial gaps.close path did not print exact next step" >&2
+  echo "$partial_output" >&2
+  exit 1
+fi
+
+python3 - <<'PY' "$PARTIAL_GAPS" "$PARTIAL_GAP" "$PARTIAL_JOINED_PATH"
+from pathlib import Path
+import sys
+import yaml
+
+gaps_path = Path(sys.argv[1])
+gap_id = sys.argv[2]
+joined_state_path = Path(sys.argv[3])
+
+doc = yaml.safe_load(gaps_path.read_text(encoding="utf-8")) or {}
+assert doc.get("gaps") == [], doc
+
+archive_path = gaps_path.parent.parent / "archive" / "operational.gaps.archive.yaml"
+archive = yaml.safe_load(archive_path.read_text(encoding="utf-8")) or {}
+archive_rows = {row["id"]: row for row in archive.get("gaps", [])}
+assert archive_rows[gap_id]["status"] == "fixed"
+assert not joined_state_path.exists()
+PY
+
+wait_for_friction_capability \
+  "$PARTIAL_CHECKOUT" \
+  "$PARTIAL_STATE" \
+  "$PARTIAL_RUNTIME" \
+  "$PARTIAL_GAPS" \
+  "$PARTIAL_DB" \
+  "gaps.close.partial_state"
+
+echo "PASS: gaps.close syncs lifecycle surfaces and partial-state exits file automatic friction"
