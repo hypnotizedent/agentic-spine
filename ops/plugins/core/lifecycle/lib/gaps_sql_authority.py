@@ -66,9 +66,7 @@ def resolve_paths(root: Path) -> tuple[Path, Path]:
     """Return (db_path, gaps_yaml_path) resolved from contract or env."""
     contract_path = root / "ops/bindings/mailroom.runtime.contract.yaml"
     state_root_str = os.environ.get("SPINE_STATE") or ""
-    if not state_root_str or not str(state_root_str).strip():
-        raise RuntimeError("SPINE_STATE must be set — run via ./bin/ops cap run")
-    state_root = Path(state_root_str)
+    state_root = Path(state_root_str).expanduser() if str(state_root_str).strip() else None
     contract = load_yaml(contract_path)
     if isinstance(contract, dict):
         runtime_root = str(contract.get("runtime_root") or "").strip()
@@ -79,6 +77,10 @@ def resolve_paths(root: Path) -> tuple[Path, Path]:
             if not runtime_root_path.is_absolute():
                 runtime_root_path = root / runtime_root_path
             state_root = runtime_root_path / (state_dir or "state")
+    if state_root is None:
+        raise RuntimeError(
+            "Unable to resolve SPINE_STATE from env or mailroom.runtime.contract.yaml"
+        )
     db_path = Path(os.environ.get(ENV_DB_PATH, str(state_root / "shared_authority.db"))).expanduser()
     gaps_yaml = Path(os.environ.get(ENV_GAPS_YAML, str(root / DEFAULT_GAPS_YAML_REL))).expanduser()
     return db_path, gaps_yaml
