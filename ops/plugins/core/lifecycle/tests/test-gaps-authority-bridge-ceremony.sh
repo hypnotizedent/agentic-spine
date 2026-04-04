@@ -57,6 +57,8 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 export GAPS_DB_PATH="$TEST_DIR/test_authority.db"
 export GAPS_YAML_PATH="$TEST_DIR/test_gaps.yaml"
 export SPINE_ROOT="$ROOT"
+export SPINE_STATE="$TEST_DIR/state"
+mkdir -p "$SPINE_STATE/loop-scopes" "$SPINE_STATE/domain-state/spine"
 
 # Create a minimal gaps YAML for bootstrap
 cat > "$GAPS_YAML_PATH" <<'YAML'

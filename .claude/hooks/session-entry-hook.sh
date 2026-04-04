@@ -266,6 +266,95 @@ if [[ -x "$SPINE_ROOT/bin/ops" ]]; then
   LOOPS=$(timeout 10 "$SPINE_ROOT/bin/ops" status --brief 2>/dev/null || echo "(unavailable)")
 fi
 
+# --- Orchestration state and joined telemetry (parity with session-v3-attach) ---
+LOOP_ID_RESOLVED="${SPINE_LOOP_ID:-${LOOP_ID:-}}"
+LOOP_EXECUTION_MODE="unknown"
+ORCHESTRATION_STATE="unknown"
+ORCHESTRATION_LANE_ROLE=""
+ORCHESTRATION_REMEDY=""
+ORCHESTRATION_BLOCK=""
+
+if [[ -n "$LOOP_ID_RESOLVED" ]]; then
+  LOOP_SCOPE_PATH="${SPINE_STATE}/loop-scopes/${LOOP_ID_RESOLVED}.scope.md"
+  if [[ -f "$LOOP_SCOPE_PATH" ]] && command -v yq >/dev/null 2>&1; then
+    # Extract execution_mode from frontmatter
+    LOOP_EXECUTION_MODE=$(awk '
+      BEGIN { in_fm = 0; mode = "single_worker" }
+      /^---$/ { in_fm = !in_fm; next }
+      in_fm && /^execution_mode:/ { gsub(/^execution_mode: */, ""); gsub(/"/, ""); mode = $0 }
+      END { print mode }
+    ' "$LOOP_SCOPE_PATH" 2>/dev/null || echo "single_worker")
+  fi
+
+  # Derive orchestration_state
+  if [[ "$LOOP_EXECUTION_MODE" == "orchestrator_subagents" ]]; then
+    if [[ -n "${SPINE_ORCHESTRATION_CONTEXT:-}" ]]; then
+      ORCHESTRATION_STATE="active"
+      ORCHESTRATION_LANE_ROLE="${SPINE_LANE_ROLE:-unknown}"
+    else
+      ORCHESTRATION_STATE="available_not_entered"
+      ORCHESTRATION_REMEDY="./bin/ops lane enter --loop-id $LOOP_ID_RESOLVED --role worker"
+    fi
+  elif [[ "$LOOP_EXECUTION_MODE" == "single_worker" ]]; then
+    ORCHESTRATION_STATE="not_applicable"
+  fi
+fi
+
+# Build orchestration block
+if [[ -n "$LOOP_ID_RESOLVED" ]]; then
+  ORCHESTRATION_BLOCK="### Active Loop And Orchestration State
+**Loop ID:** ${LOOP_ID_RESOLVED}
+**Execution mode:** ${LOOP_EXECUTION_MODE}
+**Orchestration state:** ${ORCHESTRATION_STATE}"
+
+  if [[ -n "$ORCHESTRATION_LANE_ROLE" ]]; then
+    ORCHESTRATION_BLOCK="${ORCHESTRATION_BLOCK}
+**Orchestration lane role:** ${ORCHESTRATION_LANE_ROLE}"
+  fi
+
+  if [[ -n "$ORCHESTRATION_REMEDY" ]]; then
+    ORCHESTRATION_BLOCK="${ORCHESTRATION_BLOCK}
+**Orchestration remedy:** ${ORCHESTRATION_REMEDY}
+
+⚠️  This loop uses orchestrator_subagents mode but terminal is not in orchestration lane.
+   Enter lane: ${ORCHESTRATION_REMEDY}"
+  fi
+
+  ORCHESTRATION_BLOCK="${ORCHESTRATION_BLOCK}
+"
+fi
+
+# Joined engine telemetry (parity with session-v3-attach)
+JOINED_TELEMETRY_BLOCK=""
+JOINED_STATE_FILE="${SPINE_STATE}/domain-state/spine/SPINE_ENGINE_JOINED_STATE.yaml"
+if [[ -f "$JOINED_STATE_FILE" ]] && command -v yq >/dev/null 2>&1; then
+  OPEN_LOOPS=$(yq e -r '.summary.open_loops // "?"' "$JOINED_STATE_FILE" 2>/dev/null || echo "?")
+  OPEN_GAPS=$(yq e -r '.summary.open_gaps // "?"' "$JOINED_STATE_FILE" 2>/dev/null || echo "?")
+  BLOCKED_WORKTREES=$(yq e -r '.summary.blocked_worktrees // "?"' "$JOINED_STATE_FILE" 2>/dev/null || echo "?")
+  ACTIVE_WAVES=$(yq e -r '.summary.active_waves // "?"' "$JOINED_STATE_FILE" 2>/dev/null || echo "?")
+  RECENT_FORCE_CLOSES=$(yq e -r '.summary.recent_force_closes // 0' "$JOINED_STATE_FILE" 2>/dev/null || echo "0")
+  RECENT_DOD_OVERRIDES=$(yq e -r '.summary.recent_dod_overrides // 0' "$JOINED_STATE_FILE" 2>/dev/null || echo "0")
+  ENGINE_COHERENCE_ATTENTION=$(yq e -r '.summary.engine_coherence_needs_attention // false' "$JOINED_STATE_FILE" 2>/dev/null || echo "false")
+
+  JOINED_TELEMETRY_BLOCK="### Joined Engine Telemetry
+**Open loops:** ${OPEN_LOOPS}
+**Open gaps:** ${OPEN_GAPS}
+**Blocked worktrees:** ${BLOCKED_WORKTREES}
+**Active waves:** ${ACTIVE_WAVES}
+**Recent force-closes:** ${RECENT_FORCE_CLOSES} (7d window)
+**Recent DoD overrides:** ${RECENT_DOD_OVERRIDES} (7d window)
+**Engine coherence needs attention:** ${ENGINE_COHERENCE_ATTENTION}"
+
+  if [[ "$ENGINE_COHERENCE_ATTENTION" == "true" ]]; then
+    JOINED_TELEMETRY_BLOCK="${JOINED_TELEMETRY_BLOCK}
+
+⚠️  Engine coherence needs attention - run 'ops cap run lifecycle.health' for details"
+  fi
+
+  JOINED_TELEMETRY_BLOCK="${JOINED_TELEMETRY_BLOCK}
+"
+fi
+
 # Proposal queue health (lightweight: count pending proposals)
 PROPOSALS_HEALTH=""
 PROPOSALS_DIR="$SPINE_ROOT/mailroom/outbox/proposals"
@@ -487,12 +576,12 @@ ${ADMISSION_BLOCK}
 
 ${TERMINAL_AUTHORITY}
 
-### Spine Status
+${ORCHESTRATION_BLOCK:+${ORCHESTRATION_BLOCK}}### Spine Status
 \`\`\`
 ${LOOPS}
 \`\`\`
 
-${BRIEF_RENDERED}"
+${JOINED_TELEMETRY_BLOCK:+${JOINED_TELEMETRY_BLOCK}}${BRIEF_RENDERED}"
 
 # Output JSON with systemMessage
 jq -n --arg msg "$MSG" '{"systemMessage": $msg}'

@@ -4,10 +4,14 @@
 Shell scripts (gaps-file, gaps-close, gaps-reparent) call this instead of
 mutating operational.gaps.yaml directly with yq. This script:
   1. Performs the SQLite mutation (upsert/close/reparent)
-  2. Returns status to the calling shell script
+  2. Projects runtime state when required by the mutation path
+  3. Returns structured status to the calling shell script
 
-YAML projection is NOT triggered on mutation. Refresh on demand:
-  gaps-authority-bridge project
+Close now auto-syncs the live lifecycle surfaces by default:
+  SQLite authority -> operational.gaps.yaml -> joined-state runtime surface
+
+When sync cannot complete, the command exits nonzero with a structured
+partial-state payload instead of silently drifting.
 
 This bridge governs capability-mediated mutation only. Raw file writes to
 externalized runtime state files remain outside its enforcement envelope and
@@ -19,6 +23,7 @@ Usage:
   gaps-authority-bridge reparent --id GAP-OP-1234 --parent-loop LOOP-NEW
   gaps-authority-bridge bootstrap
   gaps-authority-bridge project
+  gaps-authority-bridge sync [--context gaps.close.batch] [--expect-closed GAP-OP-1234 ...]
   gaps-authority-bridge next-id
   gaps-authority-bridge parity
 """
@@ -28,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 import yaml
@@ -43,9 +49,10 @@ import gaps_sql_authority as gsa
 # Write operations require governed execution (SPINE_CAP_RUN_KEY set by cap.sh).
 # Read operations are always allowed.
 
-MUTATING_COMMANDS = frozenset({"upsert", "close", "reparent"})
+MUTATING_COMMANDS = frozenset({"upsert", "close", "reparent", "sync"})
 READ_COMMANDS = frozenset({"query", "bootstrap", "project", "next-id", "parity"})
 CONTROL_TERMINAL_ROLE = "SPINE-CONTROL-01"
+PARTIAL_EXIT_CODE = 3
 
 
 def resolve_controller_terminal_role() -> str:
@@ -150,6 +157,247 @@ def resolve_root() -> Path:
     raise RuntimeError("Cannot resolve SPINE_ROOT")
 
 
+def resolve_joined_state_path(root: Path) -> Path:
+    state_root = Path(
+        os.environ.get("SPINE_STATE")
+        or str(root.parent / ".runtime" / "spine" / "state")
+    )
+    return Path(
+        os.environ.get("SPINE_ENGINE_JOINED_STATE_PATH")
+        or str(state_root / "domain-state" / "spine" / "SPINE_ENGINE_JOINED_STATE.yaml")
+    )
+
+
+def passive_friction_enabled() -> bool:
+    disabled = os.environ.get("OPS_PASSIVE_FRICTION_DISABLED", "").strip().lower()
+    return disabled not in {"1", "true", "yes", "on"} and not os.environ.get("OPS_TEST_MODE") and not os.environ.get("CI")
+
+
+def auto_file_passive_friction(
+    root: Path,
+    *,
+    capability: str,
+    expected: str,
+    actual: str,
+    severity: str = "medium",
+) -> None:
+    if not passive_friction_enabled():
+        return
+    friction_ingest = root / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "friction-ingest"
+    if not friction_ingest.exists():
+        return
+    try:
+        subprocess.Popen(
+            [
+                str(friction_ingest),
+                "--capability",
+                capability,
+                "--expected",
+                expected,
+                "--actual",
+                actual,
+                "--severity",
+                severity,
+                "--source",
+                "passive_capture",
+                "--auto-reconcile",
+                "--json",
+            ],
+            cwd=str(root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return
+
+
+def projection_deferred_notice(root: Path, *, command: str) -> str:
+    next_step = "./bin/ops cap run state.shared.reconcile -- --fix && ./bin/ops cap run lifecycle.health"
+    actual = (
+        f"{command} updated SQLite authority but deferred YAML/joined-state sync; "
+        f"operator must run {next_step}"
+    )
+    auto_file_passive_friction(
+        root,
+        capability="gaps.authority.projection.deferred",
+        expected="shared-authority mutations should either sync lifecycle surfaces immediately or expose an explicit governed remedy",
+        actual=actual,
+        severity="low",
+    )
+    return next_step
+
+
+def refresh_joined_state(root: Path, gaps_yaml: Path) -> tuple[bool, dict[str, Any] | None, str]:
+    script = root / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "spine-engine-joined-state"
+    env = os.environ.copy()
+    env["SPINE_GAPS_FILE"] = str(gaps_yaml)
+    proc = subprocess.run(
+        [str(script), "--json"],
+        cwd=str(root),
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+    text = proc.stdout.strip() or proc.stderr.strip()
+    if proc.returncode != 0:
+        return False, None, text or f"joined-state refresh failed with rc={proc.returncode}"
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return False, None, f"joined-state refresh returned invalid json: {exc}"
+    return True, payload, ""
+
+
+def partial_sync_payload(
+    *,
+    context: str,
+    stage: str,
+    reason: str,
+    next_step: str,
+    expected_closed_gap_ids: list[str],
+    gaps_yaml: Path,
+    joined_state_path: Path,
+    projection: dict[str, Any] | None = None,
+    joined_state_payload: dict[str, Any] | None = None,
+    contradicting_gap_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    joined_summary = {}
+    if isinstance(joined_state_payload, dict):
+        joined_summary = joined_state_payload.get("summary", {}) if isinstance(joined_state_payload.get("summary"), dict) else {}
+    return {
+        "ok": False,
+        "status": "partial",
+        "partial_state": {
+            "marker": "gap_sync_partial",
+            "context": context,
+            "stage": stage,
+            "reason": reason,
+            "next_step": next_step,
+            "expected_closed_gap_ids": expected_closed_gap_ids,
+            "contradicting_gap_ids": contradicting_gap_ids or [],
+            "authority_committed": True,
+            "projection_completed": projection is not None,
+            "joined_state_refreshed": joined_state_payload is not None,
+        },
+        "sync": {
+            "status": "partial",
+            "context": context,
+            "gaps_yaml_path": str(gaps_yaml),
+            "joined_state_path": str(joined_state_path),
+            "projection": projection or {},
+            "joined_state_summary": joined_summary,
+        },
+    }
+
+
+def sync_gap_runtime(
+    conn,
+    *,
+    root: Path,
+    gaps_yaml: Path,
+    context: str,
+    expected_closed_gap_ids: list[str],
+) -> dict[str, Any]:
+    joined_state_path = resolve_joined_state_path(root)
+    try:
+        projection = gsa.project_to_yaml(conn, gaps_yaml)
+    except Exception as exc:
+        next_step = "./bin/ops cap run state.shared.reconcile -- --fix && ./bin/ops cap run lifecycle.health"
+        reason = f"gap projection failed: {exc}"
+        auto_file_passive_friction(
+            root,
+            capability="gaps.close.partial_state",
+            expected="gap close should complete authority, projection, and joined-state refresh in one governed command",
+            actual=reason,
+            severity="medium",
+        )
+        return partial_sync_payload(
+            context=context,
+            stage="projection",
+            reason=reason,
+            next_step=next_step,
+            expected_closed_gap_ids=expected_closed_gap_ids,
+            gaps_yaml=gaps_yaml,
+            joined_state_path=joined_state_path,
+        )
+
+    joined_ok, joined_payload, joined_reason = refresh_joined_state(root, gaps_yaml)
+    if not joined_ok:
+        next_step = "./bin/ops cap run lifecycle.health"
+        reason = f"joined-state refresh failed: {joined_reason}"
+        auto_file_passive_friction(
+            root,
+            capability="gaps.close.partial_state",
+            expected="gap close should complete authority, projection, and joined-state refresh in one governed command",
+            actual=reason,
+            severity="medium",
+        )
+        return partial_sync_payload(
+            context=context,
+            stage="joined_state_refresh",
+            reason=reason,
+            next_step=next_step,
+            expected_closed_gap_ids=expected_closed_gap_ids,
+            gaps_yaml=gaps_yaml,
+            joined_state_path=joined_state_path,
+            projection=projection,
+        )
+
+    open_rows = joined_payload.get("gaps", {}).get("open", []) if isinstance(joined_payload.get("gaps"), dict) else []
+    open_gap_ids = {
+        str(row.get("id") or "").strip()
+        for row in open_rows
+        if isinstance(row, dict) and str(row.get("id") or "").strip()
+    }
+    contradicting_gap_ids = sorted(set(expected_closed_gap_ids) & open_gap_ids)
+    if contradicting_gap_ids:
+        next_step = "./bin/ops cap run lifecycle.health"
+        reason = (
+            "joined-state still reports recently closed gap(s) as open: "
+            + ", ".join(contradicting_gap_ids)
+        )
+        auto_file_passive_friction(
+            root,
+            capability="gaps.close.partial_state",
+            expected="gap close should complete authority, projection, and joined-state refresh in one governed command",
+            actual=reason,
+            severity="medium",
+        )
+        auto_file_passive_friction(
+            root,
+            capability="gaps.close.staleness",
+            expected="lifecycle queries should reflect recent gap mutations within the same command window",
+            actual=reason,
+            severity="low",
+        )
+        return partial_sync_payload(
+            context=context,
+            stage="joined_state_contradiction",
+            reason=reason,
+            next_step=next_step,
+            expected_closed_gap_ids=expected_closed_gap_ids,
+            gaps_yaml=gaps_yaml,
+            joined_state_path=joined_state_path,
+            projection=projection,
+            joined_state_payload=joined_payload,
+            contradicting_gap_ids=contradicting_gap_ids,
+        )
+
+    return {
+        "ok": True,
+        "status": "ok",
+        "sync": {
+            "status": "ok",
+            "context": context,
+            "gaps_yaml_path": str(gaps_yaml),
+            "joined_state_path": str(joined_state_path),
+            "projection": projection,
+            "joined_state_summary": joined_payload.get("summary", {}) if isinstance(joined_payload.get("summary"), dict) else {},
+        },
+    }
+
+
 def cmd_upsert(args: argparse.Namespace) -> None:
     run_key, mutation_source = check_mutation_ceremony("upsert", args)
 
@@ -178,7 +426,12 @@ def cmd_upsert(args: argparse.Namespace) -> None:
     conn.commit()
     conn.close()
     print(json.dumps({"ok": True, "gap_id": gap_id}), file=sys.stdout)
-    print("YAML projection skipped (on-demand only via 'project' subcommand)", file=sys.stderr)
+    next_step = projection_deferred_notice(root, command="gaps-authority-bridge upsert")
+    print(
+        "YAML projection deferred (SQLite authority updated only). "
+        f"Next step: {next_step}",
+        file=sys.stderr,
+    )
 
 
 def cmd_close(args: argparse.Namespace) -> None:
@@ -236,9 +489,61 @@ def cmd_close(args: argparse.Namespace) -> None:
         gsa.upsert_gap(conn, gap)
 
     conn.commit()
+
+    if getattr(args, "defer_sync", False):
+        next_step = projection_deferred_notice(root, command="gaps-authority-bridge close --defer-sync")
+        conn.close()
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "gap_id": args.id,
+                    "status": args.status,
+                    "sync": {
+                        "status": "deferred",
+                        "context": "gaps.authority.close",
+                        "next_step": next_step,
+                    },
+                }
+            ),
+            file=sys.stdout,
+        )
+        print(
+            "YAML/joined-state sync deferred by request. "
+            f"Next step: {next_step}",
+            file=sys.stderr,
+        )
+        return
+
+    sync_result = sync_gap_runtime(
+        conn,
+        root=root,
+        gaps_yaml=gaps_yaml,
+        context="gaps.authority.close",
+        expected_closed_gap_ids=[args.id],
+    )
     conn.close()
-    print(json.dumps({"ok": True, "gap_id": args.id, "status": args.status}), file=sys.stdout)
-    print("YAML projection skipped (on-demand only via 'project' subcommand)", file=sys.stderr)
+    if not sync_result.get("ok"):
+        payload = {
+            "ok": False,
+            "gap_id": args.id,
+            "gap_status": args.status,
+            **sync_result,
+        }
+        print(json.dumps(payload), file=sys.stdout)
+        sys.exit(PARTIAL_EXIT_CODE)
+
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "gap_id": args.id,
+                "status": args.status,
+                "sync": sync_result.get("sync", {}),
+            }
+        ),
+        file=sys.stdout,
+    )
 
 
 def cmd_reparent(args: argparse.Namespace) -> None:
@@ -272,7 +577,12 @@ def cmd_reparent(args: argparse.Namespace) -> None:
     conn.commit()
     conn.close()
     print(json.dumps({"ok": True, "gap_id": args.id, "old_parent": old_parent, "new_parent": args.parent_loop}), file=sys.stdout)
-    print("YAML projection skipped (on-demand only via 'project' subcommand)", file=sys.stderr)
+    next_step = projection_deferred_notice(root, command="gaps-authority-bridge reparent")
+    print(
+        "YAML projection deferred (SQLite authority updated only). "
+        f"Next step: {next_step}",
+        file=sys.stderr,
+    )
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> None:
@@ -300,6 +610,27 @@ def cmd_project(args: argparse.Namespace) -> None:
     result = gsa.project_to_yaml(conn, gaps_yaml, archive_closed=archive_closed, archive_path=archive_path)
     conn.close()
     print(json.dumps({"ok": True, "projection": result}))
+
+
+def cmd_sync(args: argparse.Namespace) -> None:
+    check_mutation_ceremony("sync", args)
+
+    root = resolve_root()
+    db_path, gaps_yaml = gsa.resolve_paths(root)
+    conn = gsa.connect(db_path)
+    gsa.ensure_schema(conn)
+    gsa.bootstrap_from_yaml(conn, gaps_yaml)
+    result = sync_gap_runtime(
+        conn,
+        root=root,
+        gaps_yaml=gaps_yaml,
+        context=str(args.context or "gaps.authority.sync").strip() or "gaps.authority.sync",
+        expected_closed_gap_ids=[str(item).strip() for item in (args.expect_closed or []) if str(item).strip()],
+    )
+    conn.close()
+    print(json.dumps(result), file=sys.stdout)
+    if not result.get("ok"):
+        sys.exit(PARTIAL_EXIT_CODE)
 
 
 def cmd_next_id(args: argparse.Namespace) -> None:
@@ -380,6 +711,12 @@ def main() -> None:
     p_close.add_argument("--root-cause", default=None)
     p_close.add_argument("--reason", default=None)
     p_close.add_argument("--actor", default="")
+    p_close.add_argument(
+        "--defer-sync",
+        action="store_true",
+        default=False,
+        help="Internal: commit authority close but defer YAML/joined-state sync to a later governed sync step.",
+    )
     add_mutation_override_flags(p_close)
 
     p_reparent = sub.add_parser("reparent")
@@ -407,6 +744,15 @@ def main() -> None:
     )
     sub.add_parser("next-id")
     sub.add_parser("parity")
+    p_sync = sub.add_parser("sync")
+    p_sync.add_argument("--context", default="gaps.authority.sync")
+    p_sync.add_argument(
+        "--expect-closed",
+        action="append",
+        default=[],
+        help="Gap IDs that must not remain open in the refreshed joined-state surface.",
+    )
+    add_mutation_override_flags(p_sync)
 
     args = parser.parse_args()
     cmd_map = {
@@ -416,6 +762,7 @@ def main() -> None:
         "query": cmd_query,
         "bootstrap": cmd_bootstrap,
         "project": cmd_project,
+        "sync": cmd_sync,
         "next-id": cmd_next_id,
         "parity": cmd_parity,
     }

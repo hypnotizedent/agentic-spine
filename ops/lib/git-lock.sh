@@ -18,6 +18,9 @@ source "$ROOT/ops/lib/runtime-paths.sh"
 # Set SPINE_CODE explicitly before calling resolve, so it uses script-derived root
 export SPINE_CODE="$ROOT"
 spine_runtime_resolve_paths
+if [[ -f "$ROOT/ops/lib/passive-friction-capture.sh" ]]; then
+  source "$ROOT/ops/lib/passive-friction-capture.sh"
+fi
 
 LOCKS_DIR="${SPINE_LOCKS:?SPINE_LOCKS must be set — source runtime-paths.sh first}"
 GIT_LOCK_TTL="${GIT_LOCK_TTL:-300}"
@@ -77,11 +80,15 @@ acquire_git_lock() {
   fi
 
   if (( owner_alive == 1 )); then
+    auto_file_lock_retry "$lock_name" || true
     echo "STOP: Another git-mutating ops command is running (lock: ${lock_name} pid=$old_pid age=${age}s)" >&2
+    echo "Remedy: retry after the live owner exits; inspect it with: ps -p $old_pid -o pid=,etime=,command=" >&2
     return 1
   fi
 
+  auto_file_lock_retry "$lock_name" || true
   echo "STOP: Unable to acquire ${lock_name}" >&2
+  echo "Remedy: rerun the same governed command; if the prior owner is gone, stale-lock recovery will reclaim it automatically." >&2
   return 1
 }
 

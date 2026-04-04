@@ -39,6 +39,11 @@ fail() {
   exit 1
 }
 
+GAPS_CLOSE_LAST_BRIDGE_STDOUT=""
+GAPS_CLOSE_LAST_BRIDGE_STDERR=""
+GAPS_CLOSE_LAST_BRIDGE_RC=0
+GAPS_CLOSE_LAST_PARTIAL_PAYLOAD=""
+
 GAP_ID=""
 BATCH_FILE=""
 STATUS=""
@@ -188,25 +193,107 @@ apply_gap_update() {
   local notes="$4"
   local reg_lock="$5"
   local updated_at="$6"
+  local defer_sync="${7:-0}"
 
-  # Delegate mutation to SQLite authority bridge (writes SQLite, projects to YAML).
+  # Delegate mutation to SQLite authority bridge.
   local bridge_args=("close" "--id" "$id" "--status" "$status")
   [[ -n "$fixed_in" ]] && bridge_args+=("--fixed-in" "$fixed_in")
   [[ -n "$notes" ]] && bridge_args+=("--notes" "$notes")
   [[ -n "$reg_lock" ]] && bridge_args+=("--regression-lock-id" "$reg_lock")
+  [[ "$defer_sync" -eq 1 ]] && bridge_args+=("--defer-sync")
 
-  local result
-  result="$(python3 "$GAPS_BRIDGE" "${bridge_args[@]}")" || {
-    fail "SQLite authority close failed for $id"
-  }
+  local stdout_file stderr_file result rc
+  stdout_file="$(mktemp)"
+  stderr_file="$(mktemp)"
+  set +e
+  python3 "$GAPS_BRIDGE" "${bridge_args[@]}" >"$stdout_file" 2>"$stderr_file"
+  rc=$?
+  set -e
+  result="$(cat "$stdout_file")"
+  GAPS_CLOSE_LAST_BRIDGE_STDERR="$(cat "$stderr_file")"
+  rm -f "$stdout_file" "$stderr_file"
+
+  GAPS_CLOSE_LAST_BRIDGE_STDOUT="$result"
+  GAPS_CLOSE_LAST_BRIDGE_RC="$rc"
+  [[ -n "$GAPS_CLOSE_LAST_BRIDGE_STDERR" ]] && printf '%s\n' "$GAPS_CLOSE_LAST_BRIDGE_STDERR" >&2
 
   local ok
   ok="$(printf '%s' "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))" 2>/dev/null || echo "False")"
+  if [[ "$rc" -ne 0 ]]; then
+    local bridge_status
+    bridge_status="$(printf '%s' "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || echo "")"
+    if [[ "$bridge_status" == "partial" ]]; then
+      GAPS_CLOSE_LAST_PARTIAL_PAYLOAD="$result"
+      return 3
+    fi
+    local err
+    err="$(printf '%s' "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error','unknown'))" 2>/dev/null || echo "bridge error")"
+    fail "authority bridge close failed for $id: $err"
+  fi
   if [[ "$ok" != "True" ]]; then
     local err
     err="$(printf '%s' "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error','unknown'))" 2>/dev/null || echo "bridge error")"
     fail "authority bridge close failed for $id: $err"
   fi
+}
+
+sync_gap_updates() {
+  local -a closed_ids=("$@")
+  local -a bridge_args=("sync" "--context" "gaps.close.batch")
+  local id stdout_file stderr_file result rc
+
+  for id in "${closed_ids[@]}"; do
+    [[ -n "$id" ]] && bridge_args+=("--expect-closed" "$id")
+  done
+
+  stdout_file="$(mktemp)"
+  stderr_file="$(mktemp)"
+  set +e
+  python3 "$GAPS_BRIDGE" "${bridge_args[@]}" >"$stdout_file" 2>"$stderr_file"
+  rc=$?
+  set -e
+  result="$(cat "$stdout_file")"
+  GAPS_CLOSE_LAST_BRIDGE_STDERR="$(cat "$stderr_file")"
+  rm -f "$stdout_file" "$stderr_file"
+
+  GAPS_CLOSE_LAST_BRIDGE_STDOUT="$result"
+  GAPS_CLOSE_LAST_BRIDGE_RC="$rc"
+  [[ -n "$GAPS_CLOSE_LAST_BRIDGE_STDERR" ]] && printf '%s\n' "$GAPS_CLOSE_LAST_BRIDGE_STDERR" >&2
+
+  if [[ "$rc" -ne 0 ]]; then
+    local bridge_status
+    bridge_status="$(printf '%s' "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || echo "")"
+    if [[ "$bridge_status" == "partial" ]]; then
+      GAPS_CLOSE_LAST_PARTIAL_PAYLOAD="$result"
+      return 3
+    fi
+    local err
+    err="$(printf '%s' "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error','unknown'))" 2>/dev/null || echo "bridge error")"
+    fail "authority bridge sync failed: $err"
+  fi
+  return 0
+}
+
+cleanup_claim_if_present() {
+  local id="$1"
+  local local_claim
+  local_claim="$(claim_file "$id")"
+  if [[ -f "$local_claim" ]]; then
+    rm -f "$local_claim"
+    echo "Claim cleaned up for $id"
+  fi
+}
+
+emit_partial_state() {
+  local payload="$1"
+  local marker reason next_step
+  marker="$(printf '%s' "$payload" | python3 -c "import sys,json; print(json.load(sys.stdin).get('partial_state',{}).get('marker','partial'))" 2>/dev/null || echo "partial")"
+  reason="$(printf '%s' "$payload" | python3 -c "import sys,json; print(json.load(sys.stdin).get('partial_state',{}).get('reason',''))" 2>/dev/null || echo "")"
+  next_step="$(printf '%s' "$payload" | python3 -c "import sys,json; print(json.load(sys.stdin).get('partial_state',{}).get('next_step',''))" 2>/dev/null || echo "")"
+  echo "PARTIAL STATE: $marker" >&2
+  [[ -n "$reason" ]] && echo "reason=$reason" >&2
+  [[ -n "$next_step" ]] && echo "next_step=$next_step" >&2
+  echo "partial_state_json=$payload" >&2
 }
 
 parse_batch_file() {
@@ -302,7 +389,7 @@ PY
 
 close_single() {
   local id="$1" status="$2" fixed_in="$3" notes="$4" reg_lock="$5"
-  local timestamp local_claim
+  local timestamp
 
   acquire_git_lock gaps || exit 1
   trap 'release_git_lock' EXIT INT TERM
@@ -319,26 +406,16 @@ close_single() {
   fi
 
   timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  apply_gap_update "$id" "$status" "$fixed_in" "$notes" "$reg_lock" "$timestamp"
-
-  # Auto-project to YAML (atomicity: close + project in one ceremony)
-  echo "INFO: projecting SQLite → YAML..." >&2
-  local project_result
-  project_result="$(python3 "$GAPS_BRIDGE" project 2>&1)" || {
-    echo "WARN: auto-projection failed (gap closed in SQLite but YAML stale)" >&2
-    echo "  Partial state: SQLite updated, YAML projection pending" >&2
-    echo "  Remediation: run 'ops cap run gaps.authority.bridge -- project' to sync" >&2
-    echo "$project_result" | sed 's/^/  /' >&2
-    # Auto-file friction for projection failure
-    auto_file_gap_projection_partial
-    # Continue despite projection failure — gap is closed in authority
-  }
-
-  local_claim="$(claim_file "$id")"
-  if [[ -f "$local_claim" ]]; then
-    rm -f "$local_claim"
-    echo "Claim cleaned up for $id"
+  if ! apply_gap_update "$id" "$status" "$fixed_in" "$notes" "$reg_lock" "$timestamp" 0; then
+    local rc=$?
+    cleanup_claim_if_present "$id"
+    if [[ "$rc" -eq 3 ]]; then
+      emit_partial_state "$GAPS_CLOSE_LAST_PARTIAL_PAYLOAD"
+      exit 3
+    fi
+    exit "$rc"
   fi
+  cleanup_claim_if_present "$id"
 
   echo "CLOSED: $id (status=$status${fixed_in:+, fixed_in=$fixed_in})"
 }
@@ -393,34 +470,36 @@ close_batch() {
   fi
 
   timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  for i in "${valid_indices[@]}"; do
-    apply_gap_update "${ids[$i]}" "${statuses[$i]}" "${fixed_ins[$i]}" "${notes[$i]}" "${reg_locks[$i]}" "$timestamp"
-  done
-
-  # Auto-project to YAML (atomicity: close + project in one ceremony)
-  echo "INFO: projecting SQLite → YAML..." >&2
-  local project_result
-  project_result="$(python3 "$GAPS_BRIDGE" project 2>&1)" || {
-    echo "WARN: auto-projection failed (gaps closed in SQLite but YAML stale)" >&2
-    echo "  Partial state: SQLite updated, YAML projection pending" >&2
-    echo "  Remediation: run 'ops cap run gaps.authority.bridge -- project' to sync" >&2
-    echo "$project_result" | sed 's/^/  /' >&2
-    # Auto-file friction for projection failure
-    auto_file_gap_projection_partial
-    # Continue despite projection failure — gaps are closed in authority
-  }
-
   local -a closed_ids=()
   for i in "${valid_indices[@]}"; do
+    if ! apply_gap_update "${ids[$i]}" "${statuses[$i]}" "${fixed_ins[$i]}" "${notes[$i]}" "${reg_locks[$i]}" "$timestamp" 1; then
+      local rc=$?
+      for id in "${closed_ids[@]}"; do
+        cleanup_claim_if_present "$id"
+      done
+      if [[ "$rc" -eq 3 ]]; then
+        emit_partial_state "$GAPS_CLOSE_LAST_PARTIAL_PAYLOAD"
+        exit 3
+      fi
+      exit "$rc"
+    fi
     closed_ids+=("${ids[$i]}")
   done
 
-  for id in "${closed_ids[@]}"; do
-    local_claim="$(claim_file "$id")"
-    if [[ -f "$local_claim" ]]; then
-      rm -f "$local_claim"
-      echo "Claim cleaned up for $id"
+  if ! sync_gap_updates "${closed_ids[@]}"; then
+    local rc=$?
+    for id in "${closed_ids[@]}"; do
+      cleanup_claim_if_present "$id"
+    done
+    if [[ "$rc" -eq 3 ]]; then
+      emit_partial_state "$GAPS_CLOSE_LAST_PARTIAL_PAYLOAD"
+      exit 3
     fi
+    exit "$rc"
+  fi
+
+  for id in "${closed_ids[@]}"; do
+    cleanup_claim_if_present "$id"
   done
 
   for i in "${valid_indices[@]}"; do
