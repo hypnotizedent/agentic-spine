@@ -94,6 +94,18 @@ capabilities:
     approval: automatic
     command: ./ops/plugins/demo/bin/demo-write
     cwd: $SPINE_TARGET_REPO
+  gaps.close:
+    description: Demo maintenance close capability
+    safety: destructive
+    approval: manual
+    command: ./ops/plugins/demo/bin/demo-gaps-close
+    cwd: $SPINE_TARGET_REPO
+  demo.manual:
+    description: Demo manual destructive capability
+    safety: destructive
+    approval: manual
+    command: ./ops/plugins/demo/bin/demo-manual
+    cwd: $SPINE_TARGET_REPO
   orchestration.wave.start:
     description: Demo wave start alias
     safety: mutating
@@ -191,6 +203,18 @@ set -euo pipefail
 echo "demo-wave-start-ok"
 SH
 
+  cat > "$repo/ops/plugins/demo/bin/demo-gaps-close" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "demo-gaps-close-ok"
+SH
+
+  cat > "$repo/ops/plugins/demo/bin/demo-manual" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "demo-manual-ok"
+SH
+
   cat > "$repo/ops/plugins/demo/bin/demo-session-start" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -205,6 +229,8 @@ SH
     "$repo/ops/lib/resolve-policy.sh" \
     "$repo/ops/plugins/demo/bin/demo-write" \
     "$repo/ops/plugins/demo/bin/demo-wave-start" \
+    "$repo/ops/plugins/demo/bin/demo-gaps-close" \
+    "$repo/ops/plugins/demo/bin/demo-manual" \
     "$repo/ops/plugins/demo/bin/demo-session-start"
 
   git init "$repo" >/dev/null
@@ -333,6 +359,40 @@ out_pass="$(
 )"
 assert_contains "$out_pass" "demo-write-ok" "mutating capability runs with valid attach packet"
 assert_not_contains "$out_pass" "BLOCKED: attach admission" "valid attach packet clears admission guard"
+
+out_maintenance_auto="$(
+  cd "$repo" && \
+  env SPINE_ENTRY_PACKET_PATH="$packet" SPINE_ENTRY_PACKET_HASH="$packet_hash" \
+    SPINE_RUNTIME_ROLE="worker" \
+    OPS_TERMINAL_ROLE="SPINE-CONTROL-01" \
+    SPINE_TARGET_REPO="$repo" \
+    SPINE_REPO="$repo" \
+    SPINE_CODE="$repo" \
+    bash ops/commands/cap.sh run gaps.close 2>&1
+)"
+assert_contains "$out_maintenance_auto" "MANUAL APPROVAL: auto-approved for maintenance capability in non-interactive governed context" "maintenance manual approval auto-bypasses in non-interactive governed context"
+assert_contains "$out_maintenance_auto" "demo-gaps-close-ok" "maintenance capability still executes"
+
+set +e
+out_manual_block="$(
+  cd "$repo" && \
+  env SPINE_ENTRY_PACKET_PATH="$packet" SPINE_ENTRY_PACKET_HASH="$packet_hash" \
+    SPINE_RUNTIME_ROLE="worker" \
+    OPS_TERMINAL_ROLE="SPINE-CONTROL-01" \
+    SPINE_TARGET_REPO="$repo" \
+    SPINE_REPO="$repo" \
+    SPINE_CODE="$repo" \
+    bash ops/commands/cap.sh run demo.manual 2>&1
+)"
+rc_manual_block=$?
+set -e
+if [[ "$rc_manual_block" -ne 0 ]]; then
+  pass "non-maintenance manual capability still blocks without explicit approval"
+else
+  fail "non-maintenance manual capability still blocks without explicit approval"
+fi
+assert_contains "$out_manual_block" "This capability requires manual approval." "non-maintenance manual prompt still appears"
+assert_contains "$out_manual_block" "ABORTED" "non-maintenance manual capability aborts without confirmation"
 
 set +e
 out_hash_block="$(

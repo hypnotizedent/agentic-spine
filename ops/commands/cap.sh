@@ -391,6 +391,17 @@ run_cap() {
       return 1
     }
 
+    _is_noninteractive_governed_maintenance_context() {
+      local _cap="$1"
+      local _runtime_role="${SPINE_RUNTIME_ROLE:-}"
+      local _terminal_binding="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-}}}}"
+      _is_maintenance_cap "$_cap" || return 1
+      [[ -t 0 ]] && return 1
+      [[ -n "$_runtime_role" ]] || return 1
+      [[ -n "$_terminal_binding" ]] || return 1
+      return 0
+    }
+
     local attach_admission_enabled="true"
     local attach_admission_required_safety_csv="mutating,destructive"
     local attach_admission_required_env_csv="SPINE_ENTRY_PACKET_PATH,SPINE_ENTRY_PACKET_HASH"
@@ -797,6 +808,8 @@ run_cap() {
             # Active session role override implies governed execution context — auto-approve
             if [[ -n "$role_policy_override_ref" && -n "${role_policy_override_reason:-}" ]]; then
               echo "MANUAL APPROVAL: auto-approved via active role override (ref=$role_policy_override_ref)"
+            elif _is_noninteractive_governed_maintenance_context "$name"; then
+              echo "MANUAL APPROVAL: auto-approved for maintenance capability in non-interactive governed context"
             elif [[ "$governed_override_active" -eq 1 ]]; then
               echo "MANUAL APPROVAL: auto-approved via OPS_GOVERNED_MAIN_OVERRIDE=1"
             else

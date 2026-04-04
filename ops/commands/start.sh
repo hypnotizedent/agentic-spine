@@ -197,6 +197,11 @@ ${ISSUE_TITLE}
 ISSUE
 fi
 
+ATTACH_ARGS="--allow-no-loop"
+if (( is_loop == 1 )); then
+  ATTACH_ARGS="--loop-id ${LOOP_ID}"
+fi
+
 cat <<BOX
 
 ╔═══════════════════════════════════════════════════════════╗
@@ -205,5 +210,5 @@ cat <<BOX
 ║ Session:  ${SESSION_DIR}                                   ║
 ╚═══════════════════════════════════════════════════════════╝
 
-Next: cd ${WORKTREE_DIR} && ./bin/ops cap run session.v3.attach -- --allow-no-loop
+Next: cd ${WORKTREE_DIR} && ./bin/ops cap run session.v3.attach -- ${ATTACH_ARGS}
 BOX

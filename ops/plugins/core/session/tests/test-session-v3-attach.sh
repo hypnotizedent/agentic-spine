@@ -16,7 +16,7 @@ mkdir -p "$state_root/loop-scopes"
 
 make_checkout() {
   local path="$1"
-  git clone "$ROOT" "$path" >/dev/null 2>&1
+  git clone --branch main --single-branch "$ROOT" "$path" >/dev/null 2>&1
   git -C "$path" config user.name "Test User"
   git -C "$path" config user.email "test@example.com"
 }
@@ -349,6 +349,45 @@ assert "--skip-managed-worktree-sync" in args
 assert "--allow-dirty" in args
 assert "--allow-main-divergence" in args
 assert payload["data"]["heartbeat"]["terminal_id"] == "SPINE-EXECUTION-01"
+PY
+
+missing_session_env="$tmpdir/bootstrap-missing-session.env.sh"
+missing_session_dir="$tmpdir/missing-sessions/SES-TEST-ATTACH-20260404"
+cat > "$missing_session_env" <<EOF_BOOTSTRAP_MISSING
+export OPS_TERMINAL_ROLE='SPINE-EXECUTION-02'
+export SPINE_TERMINAL_NAME='SPINE-EXECUTION-02'
+export SPINE_RUNTIME_ROLE='worker'
+export SPINE_TERMINAL_TYPE='control-plane'
+export SPINE_TERMINAL_SCOPE='ops/,surfaces/'
+export SPINE_SESSION_DIR='$missing_session_dir'
+EOF_BOOTSTRAP_MISSING
+
+missing_session_checkout="$tmpdir/attach-clone-missing-session-dir"
+make_checkout "$missing_session_checkout"
+
+missing_session_json="$(
+  cd "$missing_session_checkout" && \
+  env -u SPINE_ROOT -u SPINE_REPO -u SPINE_TARGET_REPO -u SPINE_CODE \
+    SPINE_STATE="$state_root" \
+    SPINE_SESSION_START_BIN="$bootstrap_stub" \
+    BOOTSTRAP_LOG="$bootstrap_log" \
+    BOOTSTRAP_ENV="$missing_session_env" \
+    "$SCRIPT" --allow-no-loop --json
+)"
+
+python3 - <<'PY' "$missing_session_json" "$missing_session_dir"
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(sys.argv[1])
+session_dir = Path(sys.argv[2])
+
+assert payload["status"] == "done"
+assert payload["data"]["heartbeat"]["terminal_id"] == "SPINE-EXECUTION-02"
+stamp_path = session_dir / "terminal-heartbeat-refresh.epoch"
+assert stamp_path.exists()
+assert stamp_path.read_text(encoding="utf-8").strip().isdigit()
 PY
 
 fail_json="$(

@@ -35,7 +35,10 @@ GAPS_FILE_REL="$(yq e -r '.gap_projection_enforcement.active_projection // ""' "
 GAPS_FILE="$ROOT/$GAPS_FILE_REL"
 WINDOW="$(yq e -r '.gap_projection_enforcement.window // ""' "$CONTRACT_FILE")"
 ENFORCEMENT_SHA="$(yq e -r '.gap_projection_enforcement.enforcement_after_sha // ""' "$CONTRACT_FILE")"
-mapfile -t REQUIRED_TRAILERS < <(yq e -r '.gap_projection_enforcement.required_trailers[] // ""' "$CONTRACT_FILE" 2>/dev/null || true)
+REQUIRED_TRAILERS=()
+while IFS= read -r trailer; do
+  [[ -n "$trailer" ]] && REQUIRED_TRAILERS+=("$trailer")
+done < <(yq e -r '.gap_projection_enforcement.required_trailers[] // ""' "$CONTRACT_FILE" 2>/dev/null || true)
 
 [[ -n "$GAPS_FILE_REL" ]] || fail "gap projection path missing in contract"
 [[ -n "$WINDOW" ]] || fail "gap projection window missing in contract"

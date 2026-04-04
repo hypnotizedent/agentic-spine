@@ -118,8 +118,22 @@ fi
 # ── Step 4: Acquire lock, stage, commit with trailers ──
 if [[ "${GAPS_PROJECTION_COMMIT_SKIP_LOCK:-0}" != "1" ]]; then
   acquire_git_lock gaps || fail "unable to acquire git.gaps.lock"
-  trap 'release_git_lock' EXIT INT TERM
 fi
+
+staged_projection=0
+projection_commit_completed=0
+cleanup_projection_commit() {
+  local rc=$?
+  if [[ "$staged_projection" -eq 1 && "$projection_commit_completed" -ne 1 ]]; then
+    git -C "$ROOT" restore --staged -- "${changed_files[@]}" >/dev/null 2>&1 || \
+      git -C "$ROOT" reset -q HEAD -- "${changed_files[@]}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${GAPS_PROJECTION_COMMIT_SKIP_LOCK:-0}" != "1" ]]; then
+    release_git_lock
+  fi
+  exit "$rc"
+}
+trap cleanup_projection_commit EXIT INT TERM
 
 RUN_KEY="${SPINE_CAP_RUN_KEY:-CAP-projection-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -128,6 +142,7 @@ TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 for file in "${changed_files[@]}"; do
   git -C "$ROOT" add "$file"
 done
+staged_projection=1
 
 OPS_GOVERNED_MAIN_OVERRIDE="${OPS_GOVERNED_MAIN_OVERRIDE:-1}" \
   git -C "$ROOT" commit -m "$(cat <<EOF
@@ -142,5 +157,6 @@ Gap-Capability: $PROJECTION_CAPABILITY
 Gap-Run-Key: $RUN_KEY
 EOF
 )"
+projection_commit_completed=1
 
 echo "gaps.projection.commit: committed projection (run_key=$RUN_KEY)"
