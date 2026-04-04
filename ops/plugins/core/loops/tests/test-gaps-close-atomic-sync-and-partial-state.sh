@@ -66,6 +66,13 @@ gaps:
 EOF_GAPS
 }
 
+commit_fixture_state() {
+  local checkout="$1"
+  local path="$2"
+  git -C "$checkout" add "$path"
+  git -C "$checkout" commit -m "test gaps fixture" >/dev/null 2>&1
+}
+
 wait_for_friction_capability() {
   local checkout="$1"
   local state_root="$2"
@@ -110,7 +117,7 @@ echo "== gaps.close atomic sync and partial-state tests =="
 SUCCESS_CHECKOUT="$tmpdir/success-checkout"
 SUCCESS_RUNTIME="$tmpdir/success-runtime"
 SUCCESS_STATE="$SUCCESS_RUNTIME/state"
-SUCCESS_GAPS="$tmpdir/success/ops/bindings/operational.gaps.yaml"
+SUCCESS_GAPS="$SUCCESS_CHECKOUT/ops/bindings/operational.gaps.yaml"
 SUCCESS_DB="$SUCCESS_STATE/shared_authority.db"
 SUCCESS_LOOP="LOOP-TEST-GAPS-CLOSE-ATOMIC-20260403"
 SUCCESS_GAP="GAP-TEST-GAPS-CLOSE-ATOMIC-0001"
@@ -119,6 +126,7 @@ make_checkout "$SUCCESS_CHECKOUT"
 mkdir -p "$SUCCESS_STATE" "$SUCCESS_RUNTIME"
 write_loop_scope "$SUCCESS_STATE" "$SUCCESS_LOOP"
 write_gaps_yaml "$SUCCESS_GAPS" "$SUCCESS_LOOP" "$SUCCESS_GAP"
+commit_fixture_state "$SUCCESS_CHECKOUT" "ops/bindings/operational.gaps.yaml"
 
 success_output="$(
   cd "$SUCCESS_CHECKOUT" && \
@@ -168,10 +176,33 @@ assert joined_state["summary"]["open_gaps"] == 0, joined_state["summary"]
 assert joined_state["gaps"]["open"] == [], joined_state["gaps"]
 PY
 
+if [[ -n "$(git -C "$SUCCESS_CHECKOUT" status --porcelain)" ]]; then
+  echo "FAIL: gaps.close success path left working tree dirty" >&2
+  git -C "$SUCCESS_CHECKOUT" status --short >&2
+  exit 1
+fi
+
+success_commit_msg="$(git -C "$SUCCESS_CHECKOUT" log -1 --format=%B)"
+if [[ "$success_commit_msg" != *"Gap-Mutation: projection"* ]]; then
+  echo "FAIL: gaps.close success path did not create projection commit with Gap-Mutation trailer" >&2
+  echo "$success_commit_msg" >&2
+  exit 1
+fi
+if [[ "$success_commit_msg" != *"Gap-Capability: gaps.projection.commit"* ]]; then
+  echo "FAIL: gaps.close success path did not create projection commit with Gap-Capability trailer" >&2
+  echo "$success_commit_msg" >&2
+  exit 1
+fi
+if [[ "$success_commit_msg" != *"Gap-Run-Key: CAP-20260403-TEST__gaps.close__Ratomic01"* ]]; then
+  echo "FAIL: gaps.close success path did not propagate Gap-Run-Key trailer" >&2
+  echo "$success_commit_msg" >&2
+  exit 1
+fi
+
 PARTIAL_CHECKOUT="$tmpdir/partial-checkout"
 PARTIAL_RUNTIME="$tmpdir/partial-runtime"
 PARTIAL_STATE="$PARTIAL_RUNTIME/state"
-PARTIAL_GAPS="$tmpdir/partial/ops/bindings/operational.gaps.yaml"
+PARTIAL_GAPS="$PARTIAL_CHECKOUT/ops/bindings/operational.gaps.yaml"
 PARTIAL_DB="$PARTIAL_STATE/shared_authority.db"
 PARTIAL_LOOP="LOOP-TEST-GAPS-CLOSE-PARTIAL-20260403"
 PARTIAL_GAP="GAP-TEST-GAPS-CLOSE-PARTIAL-0001"
@@ -182,6 +213,7 @@ make_checkout "$PARTIAL_CHECKOUT"
 mkdir -p "$PARTIAL_STATE" "$PARTIAL_RUNTIME"
 write_loop_scope "$PARTIAL_STATE" "$PARTIAL_LOOP"
 write_gaps_yaml "$PARTIAL_GAPS" "$PARTIAL_LOOP" "$PARTIAL_GAP"
+commit_fixture_state "$PARTIAL_CHECKOUT" "ops/bindings/operational.gaps.yaml"
 printf 'not a directory\n' > "$BLOCKED_JOINED_PARENT"
 
 set +e

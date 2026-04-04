@@ -24,6 +24,8 @@ source "$ROOT/ops/lib/git-lock.sh"
 source "$ROOT/ops/plugins/core/loops/lib/gap-claims.sh"
 source "$ROOT/ops/lib/passive-friction-capture.sh"
 GAPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
+PROJECTION_COMMIT="$ROOT/ops/plugins/core/lifecycle/bin/gaps-projection-commit"
+SHARED_AUTHORITY_CONTRACT="$ROOT/ops/bindings/shared-authority.mutation.contract.yaml"
 
 usage() {
   cat <<'USAGE'
@@ -298,6 +300,92 @@ emit_partial_state() {
   echo "partial_state_json=$payload" >&2
 }
 
+projection_paths() {
+  command -v yq >/dev/null 2>&1 || fail "yq required"
+  local active archive
+  active="$(yq e -r '.gap_projection_enforcement.active_projection // ""' "$SHARED_AUTHORITY_CONTRACT")"
+  archive="$(yq e -r '.gap_projection_enforcement.archive_projection // ""' "$SHARED_AUTHORITY_CONTRACT")"
+  [[ -n "$active" ]] || fail "active gap projection path missing in contract"
+  [[ -n "$archive" ]] || fail "archive gap projection path missing in contract"
+  printf '%s\n%s\n' "$active" "$archive"
+}
+
+projection_commit_required() {
+  local active archive paths
+  paths="$(projection_paths)"
+  active="${paths%%$'\n'*}"
+  archive="${paths#*$'\n'}"
+
+  if ! git -C "$ROOT" diff --quiet -- "$active" 2>/dev/null; then
+    return 0
+  fi
+  if ! git -C "$ROOT" diff --cached --quiet -- "$active" 2>/dev/null; then
+    return 0
+  fi
+  if [[ -f "$ROOT/$archive" ]]; then
+    if git -C "$ROOT" ls-files --error-unmatch "$archive" >/dev/null 2>&1; then
+      if ! git -C "$ROOT" diff --quiet -- "$archive" 2>/dev/null; then
+        return 0
+      fi
+      if ! git -C "$ROOT" diff --cached --quiet -- "$archive" 2>/dev/null; then
+        return 0
+      fi
+    else
+      return 0
+    fi
+  fi
+  return 1
+}
+
+commit_gap_projection_or_partial() {
+  [[ -x "$PROJECTION_COMMIT" ]] || fail "gaps projection commit surface missing: $PROJECTION_COMMIT"
+
+  if ! projection_commit_required; then
+    return 0
+  fi
+
+  local projection_output rc=0
+  set +e
+  projection_output="$(
+    GAPS_PROJECTION_COMMIT_SKIP_LOCK=1 \
+      "$PROJECTION_COMMIT" 2>&1
+  )"
+  rc=$?
+  set -e
+  [[ -n "$projection_output" ]] && printf '%s\n' "$projection_output" >&2
+
+  if [[ "$rc" -eq 0 ]]; then
+    return 0
+  fi
+
+  local reason next_step payload
+  reason="projection commit failed: $(printf '%s' "$projection_output" | tail -n 1)"
+  next_step="./bin/ops cap run gaps.projection.commit"
+  auto_file_friction \
+    "gaps.close.partial_state" \
+    "gap close should complete authority, projection, and durable git commit in one governed command" \
+    "$reason" \
+    "medium" || true
+  payload="$(python3 - <<'PY' "$reason" "$next_step"
+import json, sys
+reason = sys.argv[1]
+next_step = sys.argv[2]
+print(json.dumps({
+    "partial_state": {
+        "marker": "gap_projection_commit_partial",
+        "reason": reason,
+        "next_step": next_step,
+        "authority_committed": True,
+        "projection_completed": True,
+        "projection_commit_completed": False,
+    }
+}))
+PY
+)"
+  emit_partial_state "$payload"
+  exit 3
+}
+
 parse_batch_file() {
   local batch_file="$1"
   local default_status="$2"
@@ -422,6 +510,7 @@ close_single() {
     exit "$rc"
   fi
   cleanup_claim_if_present "$id"
+  commit_gap_projection_or_partial
 
   echo "CLOSED: $id (status=$status${fixed_in:+, fixed_in=$fixed_in})"
 }
@@ -515,6 +604,7 @@ close_batch() {
   for id in "${closed_ids[@]}"; do
     cleanup_claim_if_present "$id"
   done
+  commit_gap_projection_or_partial
 
   for i in "${valid_indices[@]}"; do
     echo "CLOSED: ${ids[$i]} (status=${statuses[$i]}${fixed_ins[$i]:+, fixed_in=${fixed_ins[$i]}})"
