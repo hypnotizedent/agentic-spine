@@ -293,7 +293,7 @@ if [[ -n "$LOOP_ID_RESOLVED" ]]; then
       ORCHESTRATION_LANE_ROLE="${SPINE_LANE_ROLE:-unknown}"
     else
       ORCHESTRATION_STATE="available_not_entered"
-      ORCHESTRATION_REMEDY="./bin/ops lane enter --loop-id $LOOP_ID_RESOLVED --role worker"
+      ORCHESTRATION_REMEDY="./bin/ops terminal launch --loop $LOOP_ID_RESOLVED --role lane-worker --lane D --tool claude"
     fi
   elif [[ "$LOOP_EXECUTION_MODE" == "single_worker" ]]; then
     ORCHESTRATION_STATE="not_applicable"
@@ -317,7 +317,7 @@ if [[ -n "$LOOP_ID_RESOLVED" ]]; then
 **Orchestration remedy:** ${ORCHESTRATION_REMEDY}
 
 ⚠️  This loop uses orchestrator_subagents mode but terminal is not in orchestration lane.
-   Enter lane: ${ORCHESTRATION_REMEDY}"
+   Open worker terminal: ${ORCHESTRATION_REMEDY}"
   fi
 
   ORCHESTRATION_BLOCK="${ORCHESTRATION_BLOCK}

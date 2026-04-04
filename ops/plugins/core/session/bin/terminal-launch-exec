@@ -512,9 +512,83 @@ attach_exports="$("${attach_cmd[@]}" 2>/dev/null)" || fail "V3 attach failed for
 [[ -n "$attach_exports" ]] || fail "V3 attach returned no exports"
 eval "$attach_exports"
 export SPINE_LOOP_ID SPINE_ENTRY_PACKET_PATH SPINE_ENTRY_PACKET_HASH SPINE_EXECUTION_MODE SPINE_V3_ATTACH_RESOLUTION SPINE_V3_SANITIZED_OUTPUT_PATH
-echo "V3 ATTACH READY: loop=${SPINE_LOOP_ID:-none} resolution=${SPINE_V3_ATTACH_RESOLUTION:-unset} path=${SPINE_ENTRY_PACKET_PATH:-unset} hash=${SPINE_ENTRY_PACKET_HASH:-unset} mode=${SPINE_EXECUTION_MODE:-unset} sanitize=${SPINE_V3_SANITIZED_OUTPUT_PATH:-none}" >&2
 
-echo "ENTRY READY: role=$ROLE tool=$TOOL terminal=${TERMINAL_NAME:-unset} terminal_role=${OPS_TERMINAL_ROLE:-unset} runtime_role=${SPINE_RUNTIME_ROLE:-unset} loop=${SPINE_LOOP_ID:-${LOOP_ID:-none}} lane=${LANE:-none} repo=${SPINE_TARGET_REPO:-$SPINE_ROOT} worktree=$LAUNCH_CWD" >&2
+# --- Shell-level orchestration visibility (parity with session-v3-attach) ---
+echo "════════════════════════════════════════════════════════════════════════" >&2
+echo "  SPINE TERMINAL ENTRY" >&2
+echo "════════════════════════════════════════════════════════════════════════" >&2
+echo "" >&2
+
+# V3 attach status
+echo "V3 ATTACH: loop=${SPINE_LOOP_ID:-none} resolution=${SPINE_V3_ATTACH_RESOLUTION:-unset}" >&2
+echo "           mode=${SPINE_EXECUTION_MODE:-unset}" >&2
+echo "" >&2
+
+# Terminal identity
+echo "TERMINAL: ${TERMINAL_NAME:-unset} (role=${SPINE_RUNTIME_ROLE:-unset})" >&2
+echo "WORKTREE: $LAUNCH_CWD" >&2
+echo "TOOL:     $TOOL" >&2
+echo "" >&2
+
+# Orchestration state (read from loop scope if present)
+if [[ -n "${SPINE_LOOP_ID:-}" && "$SPINE_LOOP_ID" != "none" ]]; then
+  LOOP_SCOPE_PATH="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/loop-scopes/${SPINE_LOOP_ID}.scope.md"
+  LOOP_EXECUTION_MODE="unknown"
+  ORCHESTRATION_STATE="unknown"
+  ORCHESTRATION_REMEDY=""
+
+  if [[ -f "$LOOP_SCOPE_PATH" ]] && command -v awk >/dev/null 2>&1; then
+    # Extract execution_mode from frontmatter
+    LOOP_EXECUTION_MODE=$(awk '
+      BEGIN { in_fm = 0; mode = "single_worker" }
+      /^---$/ { in_fm = !in_fm; next }
+      in_fm && /^execution_mode:/ { gsub(/^execution_mode: */, ""); gsub(/"/, ""); mode = $0 }
+      END { print mode }
+    ' "$LOOP_SCOPE_PATH" 2>/dev/null || echo "single_worker")
+  fi
+
+  # Derive orchestration_state
+  if [[ "$LOOP_EXECUTION_MODE" == "orchestrator_subagents" ]]; then
+    if [[ -n "${SPINE_ORCHESTRATION_CONTEXT:-}" ]]; then
+      ORCHESTRATION_STATE="active"
+      echo "ORCHESTRATION: active (role=${SPINE_LANE_ROLE:-unknown})" >&2
+    else
+      ORCHESTRATION_STATE="available_not_entered"
+      echo "ORCHESTRATION: available but not entered" >&2
+      echo "" >&2
+      echo "⚠️  This loop uses orchestrator_subagents mode." >&2
+      echo "   To enter a worker lane, open a new terminal:" >&2
+      echo "   ./bin/ops terminal launch --loop ${SPINE_LOOP_ID} --role lane-worker --lane D --tool claude" >&2
+    fi
+  elif [[ "$LOOP_EXECUTION_MODE" == "single_worker" ]]; then
+    ORCHESTRATION_STATE="not_applicable"
+    echo "ORCHESTRATION: not applicable (single_worker mode)" >&2
+  else
+    echo "ORCHESTRATION: unknown" >&2
+  fi
+  echo "" >&2
+fi
+
+# Joined engine telemetry (if available)
+JOINED_STATE_FILE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/domain-state/spine/SPINE_ENGINE_JOINED_STATE.yaml"
+if [[ -f "$JOINED_STATE_FILE" ]] && command -v yq >/dev/null 2>&1; then
+  OPEN_LOOPS=$(yq e -r '.summary.open_loops // "?"' "$JOINED_STATE_FILE" 2>/dev/null || echo "?")
+  OPEN_GAPS=$(yq e -r '.summary.open_gaps // "?"' "$JOINED_STATE_FILE" 2>/dev/null || echo "?")
+  BLOCKED_WORKTREES=$(yq e -r '.summary.blocked_worktrees // "?"' "$JOINED_STATE_FILE" 2>/dev/null || echo "?")
+  ACTIVE_WAVES=$(yq e -r '.summary.active_waves // "?"' "$JOINED_STATE_FILE" 2>/dev/null || echo "?")
+  ENGINE_COHERENCE=$(yq e -r '.summary.engine_coherence_needs_attention // false' "$JOINED_STATE_FILE" 2>/dev/null || echo "false")
+
+  echo "ENGINE TELEMETRY:" >&2
+  echo "  Loops: ${OPEN_LOOPS} open | Gaps: ${OPEN_GAPS} open" >&2
+  echo "  Waves: ${ACTIVE_WAVES} active | Worktrees: ${BLOCKED_WORKTREES} blocked" >&2
+  if [[ "$ENGINE_COHERENCE" == "true" ]]; then
+    echo "  ⚠️  Coherence needs attention - run 'ops cap run lifecycle.health'" >&2
+  fi
+  echo "" >&2
+fi
+
+echo "════════════════════════════════════════════════════════════════════════" >&2
+echo "" >&2
 
 if [[ "${SPINE_STARTUP_STRICT:-0}" == "1" ]]; then
   startup_contract_check
