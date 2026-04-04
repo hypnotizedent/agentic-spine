@@ -344,11 +344,6 @@ Examples:
   ops terminal-launch launch --lane control --tool codex --terminal SPINE-CONTROL-01
   ops terminal-launch launch --lane execution --loop LOOP-MINT-AUTH-20260222 --tool opencode
   ops terminal-launch exec --role solo --tool codex --terminal SPINE-CONTROL-01 --dry-run
-
-Testing/Verification:
-  Use --dry-run to verify launcher configuration without opening iTerm:
-    ops terminal-launch launch --loop LOOP-ID --role lane-worker --lane D --tool claude --dry-run
-  This shows the exact shell command, environment, and worktree that would be used.
 EOF
 }
 
