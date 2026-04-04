@@ -996,9 +996,17 @@ def main() -> int:
     if loop_id:
         loop_scope_path = state_root / "loop-scopes" / f"{loop_id}.scope.md"
         if loop_scope_path.exists():
-            scope_yaml = load_yaml(loop_scope_path, {})
-            if isinstance(scope_yaml, dict):
-                loop_execution_mode = scope_yaml.get("execution_mode", "single_worker")
+            # Parse frontmatter only (between first two --- delimiters)
+            try:
+                content = loop_scope_path.read_text()
+                parts = content.split("---", 2)
+                if len(parts) >= 3:
+                    frontmatter_text = parts[1].strip()
+                    scope_yaml = yaml.safe_load(frontmatter_text)
+                    if isinstance(scope_yaml, dict):
+                        loop_execution_mode = scope_yaml.get("execution_mode", "single_worker")
+            except Exception:
+                pass  # Gracefully degrade if scope parsing fails
 
     # Check for orchestration lane evidence
     if loop_execution_mode == "orchestrator_subagents":
