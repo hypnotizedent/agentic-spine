@@ -986,14 +986,52 @@ def main() -> int:
     print("")
     print("=== DYNAMIC GOVERNANCE CONTEXT ===")
     print("")
-    print("## Active Loop Context")
+
+    # Orchestration and execution mode visibility
+    loop_execution_mode = "unknown"
+    orchestration_state = "unknown"
+    orchestration_lane_role = None
+    orchestration_remedy = None
+
+    if loop_id:
+        loop_scope_path = state_root / "loop-scopes" / f"{loop_id}.scope.md"
+        if loop_scope_path.exists():
+            scope_yaml = load_yaml(loop_scope_path, {})
+            if isinstance(scope_yaml, dict):
+                loop_execution_mode = scope_yaml.get("execution_mode", "single_worker")
+
+    # Check for orchestration lane evidence
+    if loop_execution_mode == "orchestrator_subagents":
+        # Check if terminal has valid orchestration context
+        orch_context_env = os.environ.get("SPINE_ORCHESTRATION_CONTEXT")
+        if orch_context_env:
+            orchestration_state = "active"
+            orchestration_lane_role = os.environ.get("SPINE_LANE_ROLE", "unknown")
+        else:
+            orchestration_state = "available_not_entered"
+            orchestration_remedy = f"./bin/ops lane enter --loop-id {loop_id} --role worker"
+    elif loop_execution_mode == "single_worker":
+        orchestration_state = "not_applicable"
+
+    print("## Active Loop And Orchestration State")
     print(f"loop_id: {loop_id or 'ADHOC (no loop active)'}")
     print(f"resolution: {loop_resolution}")
+    print(f"execution_mode: {loop_execution_mode}")
+    print(f"orchestration_state: {orchestration_state}")
+    if orchestration_lane_role:
+        print(f"orchestration_lane_role: {orchestration_lane_role}")
+    if orchestration_remedy:
+        print(f"orchestration_remedy: {orchestration_remedy}")
     if loop_id:
         loop_scope_path = state_root / "loop-scopes" / f"{loop_id}.scope.md"
         if loop_scope_path.exists():
             print(f"scope_file: {loop_scope_path}")
-        print("action: read the loop scope before starting mutations")
+        if loop_execution_mode == "orchestrator_subagents" and orchestration_state == "available_not_entered":
+            print("")
+            print("⚠️  This loop uses orchestrator_subagents mode but terminal is not in orchestration lane.")
+            print(f"   Enter lane: {orchestration_remedy}")
+        else:
+            print("action: read the loop scope before starting mutations")
     else:
         print("action: create a loop or bootstrap a governed execution lane for non-trivial mutation")
     print("")
@@ -1003,6 +1041,25 @@ def main() -> int:
     print(f"friction_matched: {queue_summary.get('matched', 0)}")
     print(f"lifecycle_issues: {lifecycle_summary.get('issue_count', lifecycle_summary.get('issues', 0))}")
     print("")
+
+    # Joined telemetry summary
+    joined_state_path = state_root / "domain-state" / "spine" / "SPINE_ENGINE_JOINED_STATE.yaml"
+    joined_state = load_yaml(joined_state_path, {})
+    if isinstance(joined_state, dict) and "summary" in joined_state:
+        summary = joined_state["summary"]
+        print("## Joined Engine Telemetry")
+        print(f"open_loops: {summary.get('open_loops', '?')}")
+        print(f"open_gaps: {summary.get('open_gaps', '?')}")
+        print(f"blocked_worktrees: {summary.get('blocked_worktrees', '?')}")
+        print(f"active_waves: {summary.get('active_waves', '?')}")
+        print(f"recent_force_closes: {summary.get('recent_force_closes', 0)} (7d window)")
+        print(f"recent_dod_overrides: {summary.get('recent_dod_overrides', 0)} (7d window)")
+        coherence_needs_attention = summary.get('engine_coherence_needs_attention', False)
+        print(f"engine_coherence_needs_attention: {coherence_needs_attention}")
+        if coherence_needs_attention:
+            print("⚠️  Engine coherence needs attention - run 'ops cap run lifecycle.health' for details")
+        print("")
+
     print("## Governance Reminders")
     if preflight.get("current_lane_type") == "root_main_integration":
         print("- Root main is integration-only; broad mutation belongs in a governed execution lane.")
