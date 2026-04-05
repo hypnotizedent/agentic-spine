@@ -122,11 +122,63 @@ fi
 
 # Check MANIFEST.yaml has tenant plugin
 MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
-if grep -q 'name: tenant' "$MANIFEST" 2>/dev/null; then
-  ok "tenant plugin registered in MANIFEST.yaml"
-else
-  err "tenant plugin not registered in MANIFEST.yaml"
-fi
+manifest_tenant_status="$(
+  python3 - "$MANIFEST" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import yaml
+
+manifest_path = Path(sys.argv[1])
+if not manifest_path.is_file():
+    print("missing_manifest")
+    raise SystemExit(0)
+
+data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+plugins = data.get("plugins", []) or []
+
+for plugin in plugins:
+    if plugin.get("name") == "tenant":
+        print("tenant_plugin")
+        raise SystemExit(0)
+
+required_scripts = {
+    "bin/tenant-profile-validate",
+    "bin/tenant-provision-dry-run",
+}
+required_capabilities = {
+    "tenant.profile.validate",
+    "tenant.provision.dry-run",
+}
+
+for plugin in plugins:
+    if plugin.get("name") != "authority":
+        continue
+    scripts = set(plugin.get("scripts", []) or [])
+    capabilities = set(plugin.get("capabilities", []) or [])
+    if required_scripts.issubset(scripts) and required_capabilities.issubset(capabilities):
+        print("authority_hosts_tenant_surfaces")
+        raise SystemExit(0)
+
+print("tenant_surfaces_missing")
+PY
+)"
+case "$manifest_tenant_status" in
+  tenant_plugin)
+    ok "tenant plugin registered in MANIFEST.yaml"
+    ;;
+  authority_hosts_tenant_surfaces)
+    ok "MANIFEST.yaml registers tenant surfaces under the authority plugin"
+    ;;
+  missing_manifest)
+    err "ops/plugins/MANIFEST.yaml does not exist"
+    ;;
+  *)
+    err "MANIFEST.yaml does not register tenant surfaces under tenant or authority"
+    ;;
+esac
 
 # ── 4. Docs discoverability ──
 DOCS_README="$ROOT/docs/README.md"

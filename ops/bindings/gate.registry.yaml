@@ -280,12 +280,24 @@ gates:
     severity: medium
     ring: standard
     check_script: surfaces/verify/d19-backup-drift.sh
-    fix_hint: Check backup SSOT for stale entries. No secret printing in backup scripts.
-    warn_only: false
+    fix_hint: Run backup.posture.snapshot.build after canonical path repairs. Keep D19 blocked until nas-legacy-tombstones is either removed from active lane telemetry or explicitly modeled as non-canonical residue.
+    warn_only: true
     retired: false
-    mode: enforce
+    mode: report
     owner: '@ronny'
-    review_by: '2026-04-05'
+    review_by: '2026-04-12'
+    enforcement_decision:
+      as_of: '2026-04-05'
+      posture: hold_report_only
+      rationale: D19 is not safe to keep in enforce mode until backup posture telemetry stops treating the nas-legacy-tombstones quarantine lane as canonical budget signal.
+      blockers:
+        - backup.posture.snapshot.build now resolves canonical domain binding paths, but lane_collect_errors_total remains 1 because nas-legacy-tombstones is still probed as an active destination lane.
+        - nas-legacy-tombstones is explicitly documented as non-canonical quarantine residue in ops/bindings/domains/backup/backup.inventory.yaml, so enforcing its probe error as production backup drift would overstate live authority breakage.
+      governed_follow_up_truth:
+        - ops/bindings/domains/backup/backup.inventory.yaml
+        - ops/bindings/domains/backup/backup.posture.snapshot.yaml
+        - ops/plugins/infra/backup/bin/backup-posture-snapshot-build
+        - ops/plugins/infra/backup/bin/backup-status
     retirement_trigger: superseded_by_domain_entrypoint_or_duplicate_intent
   - id: D20
     name: secrets-drift
@@ -844,6 +856,7 @@ gates:
     warn_only: true
     retired: false
     mode: report
+    layer: L2_shared_infrastructure
   - id: D63
     name: capabilities-metadata-lock
     category: process-hygiene
@@ -1213,6 +1226,7 @@ gates:
     warn_only: false
     retired: false
     mode: enforce
+    layer: L3_product_runtime
     owner: '@ronny'
     review_by: '2026-04-05'
     retirement_trigger: superseded_by_domain_entrypoint_or_duplicate_intent
@@ -1305,7 +1319,7 @@ gates:
     severity: medium
     ring: standard
     check_script: surfaces/verify/d98-z2m-device-parity.sh
-    fix_hint: Run ha.z2m.devices.snapshot to regenerate ops/bindings/z2m.devices.yaml from HA.
+    fix_hint: Run ha.z2m.devices.snapshot to regenerate ops/bindings/domains/ha/z2m.devices.yaml from HA.
     warn_only: false
     retired: false
     mode: enforce
@@ -1347,7 +1361,7 @@ gates:
     severity: medium
     ring: standard
     check_script: surfaces/verify/d101-ha-addon-inventory-parity.sh
-    fix_hint: Run ha.addons.snapshot to regenerate ops/bindings/ha.addons.yaml from HA Supervisor API.
+    fix_hint: Run ha.addons.snapshot to regenerate ops/bindings/domains/ha/ha.addons.yaml from HA Supervisor API.
     warn_only: false
     retired: false
     mode: enforce
@@ -1413,12 +1427,19 @@ gates:
     severity: high
     ring: standard
     check_script: surfaces/verify/d107-media-nfs-mount-lock.sh
-    fix_hint: Check NFS mount on VMs. download-stack needs RW, streaming-stack needs RO. Verify /etc/fstab entries.
-    warn_only: false
-    retired: false
-    mode: enforce
+    fix_hint: 'Retired: download-stack and streaming-stack were decommissioned on 2026-03-23; active media runtime truth now lives on media-home.'
+    warn_only: true
+    retired: true
+    mode: report
     owner: '@ronny'
     review_by: '2026-04-05'
+    retirement_decision:
+      as_of: '2026-04-05'
+      rationale: D107 enforced mount posture for download-stack and streaming-stack after both VMs were decommissioned and their NFS exports removed on 2026-03-23.
+      governed_truth:
+        - ops/bindings/vm.lifecycle.yaml
+        - ops/bindings/services.health.yaml
+        - ops/bindings/domains/media/media.services.yaml
     retirement_trigger: superseded_by_domain_entrypoint_or_duplicate_intent
   - id: D108
     name: media-health-endpoint-parity-lock

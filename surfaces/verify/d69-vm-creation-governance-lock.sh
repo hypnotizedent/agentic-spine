@@ -40,6 +40,8 @@ for ((i=0; i<vm_count; i++)); do
   site_scope=$(yq -r ".vms[$i].site_scope // \"shop\"" "$LIFECYCLE")
   vmid=$(yq -r ".vms[$i] | (.id // .vmid)" "$LIFECYCLE")
   hostname=$(yq -r ".vms[$i].hostname" "$LIFECYCLE")
+  vm_type=$(yq -r ".vms[$i].vm_type // \"qemu\"" "$LIFECYCLE")
+  backup_target=$(yq -r ".vms[$i].backup_target // \"\"" "$LIFECYCLE")
   ts_ip=$(yq -r ".vms[$i].tailscale_ip // \"\"" "$LIFECYCLE")
   lan_ip=$(yq -r ".vms[$i].lan_ip // \"\"" "$LIFECYCLE")
 
@@ -94,13 +96,23 @@ for ((i=0; i<vm_count; i++)); do
   fi
 
   # ── Check 4: backup.inventory.yaml vzdump target ──────────────────────
-  backup_match=$(yq -r ".targets[] | select(.glob == \"vzdump-qemu-${vmid}-*.vma.zst\") | .name" "$BACKUP_INV")
+  backup_match=""
+  if [[ -n "$backup_target" && "$backup_target" != "null" ]]; then
+    backup_match=$(yq -r ".targets[] | select(.name == \"$backup_target\") | .name" "$BACKUP_INV" 2>/dev/null || true)
+  fi
+  if [[ -z "$backup_match" || "$backup_match" == "null" ]]; then
+    backup_glob="vzdump-qemu-${vmid}-*.vma.zst"
+    if [[ "$vm_type" == "lxc" ]]; then
+      backup_glob="vzdump-lxc-${vmid}-*.tar.zst"
+    fi
+    backup_match=$(yq -r ".targets[] | select(.glob == \"$backup_glob\") | .name" "$BACKUP_INV" 2>/dev/null || true)
+  fi
   if [[ -z "$backup_match" || "$backup_match" == "null" ]]; then
     err "VM $vmid ($hostname): no vzdump target in backup.inventory.yaml matching vmid $vmid"
   fi
 
   # ── Check 4b: systemic backup model metadata ──────────────────────────
-  model_match="$(yq -r "[.runtime_units[]? | select(.kind == \"vm\" and .hostname == \"$hostname\" and (.backup_profile // \"\") != \"\" and (.data_class // \"\") != \"\" and (.destination_lane // \"\") != \"\" and (.schedule_class // \"\") != \"\" and (.restore_class // \"\") != \"\")] | length" "$BACKUP_INV" 2>/dev/null || echo 0)"
+  model_match="$(yq -r "[.runtime_units[]? | select(.hostname == \"$hostname\" and (.backup_profile // \"\") != \"\" and (.data_class // \"\") != \"\" and (.destination_lane // \"\") != \"\" and (.schedule_class // \"\") != \"\" and (.restore_class // \"\") != \"\")] | length" "$BACKUP_INV" 2>/dev/null || echo 0)"
   [[ "$model_match" =~ ^[0-9]+$ ]] || model_match=0
   if [[ "$model_match" -eq 0 ]]; then
     err "VM $vmid ($hostname): missing runtime_units backup metadata (backup_profile/data_class/destination_lane/schedule_class/restore_class)"
@@ -116,9 +128,12 @@ for ((i=0; i<vm_count; i++)); do
   # ── Check 5: services.health.yaml coverage ────────────────────────────
   # At least one enabled probe must reference this hostname, OR the VM
   # must have has_docker: false (no services to probe).
-  has_docker=$(yq -r ".vms[$i].has_docker // true" "$LIFECYCLE")
+  has_docker=$(yq -r ".vms[$i].has_docker" "$LIFECYCLE" 2>/dev/null || echo "null")
+  if [[ -z "$has_docker" || "$has_docker" == "null" ]]; then
+    has_docker="true"
+  fi
   if [[ "$has_docker" == "true" ]]; then
-    health_count=$(yq -r "[.endpoints[] | select(.host == \"$hostname\")] | length" "$HEALTH_BIND")
+    health_count=$(yq -r "[.endpoints[] | select(.host == \"$hostname\" and (.enabled // true) == true)] | length" "$HEALTH_BIND")
     if [[ "$health_count" -eq 0 || "$health_count" == "null" ]]; then
       err "VM $vmid ($hostname): zero health probe entries in services.health.yaml"
     fi

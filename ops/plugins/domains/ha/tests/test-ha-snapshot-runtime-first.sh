@@ -67,7 +67,7 @@ t1_output="${t1_rest%%|*}"
 t1_tracked="${t1_rest##*|}"
 assert_eq "$t1_root" "$TARGET_CANON" "snapshot helper resolves target repo from current checkout"
 assert_eq "$t1_output" "$TARGET_CANON/runtime/domain-state/snapshots/ha.addons.yaml" "snapshot helper defaults to runtime output"
-assert_eq "$t1_tracked" "$TARGET_CANON/ops/bindings/ha.addons.yaml" "snapshot helper tracks the canonical binding path separately"
+assert_eq "$t1_tracked" "$TARGET_CANON/ops/bindings/domains/ha/ha.addons.yaml" "snapshot helper tracks the canonical binding path separately"
 
 echo ""
 echo "── T2: explicit SPINE_TARGET_REPO overrides inherited roots ──"
@@ -86,9 +86,9 @@ assert_eq "$t2_output" "$INHERITED_CANON/runtime/domain-state/snapshots/ha.addon
 
 echo ""
 echo "── T3: runtime source resolution prefers fresh runtime snapshots ──"
-mkdir -p "$TARGET/runtime/domain-state/snapshots" "$TARGET/ops/bindings"
+mkdir -p "$TARGET/runtime/domain-state/snapshots" "$TARGET/ops/bindings/domains/ha"
 printf 'runtime\n' > "$TARGET/runtime/domain-state/snapshots/z2m.devices.yaml"
-printf 'tracked\n' > "$TARGET/ops/bindings/z2m.devices.yaml"
+printf 'tracked\n' > "$TARGET/ops/bindings/domains/ha/z2m.devices.yaml"
 t3_out="$(
   cd "$TARGET"
   env -u SPINE_TARGET_REPO SPINE_ROOT="$INHERITED" SPINE_REPO="$INHERITED" SPINE_CODE="$ROOT" SPINE_DOMAIN_STATE="$TARGET_DOMAIN_STATE" bash -lc '
@@ -100,8 +100,8 @@ assert_eq "$t3_out" "$TARGET_CANON/runtime/domain-state/snapshots/z2m.devices.ya
 
 echo ""
 echo "── T4: semantic no-op apply ignores volatile timestamp fields ──"
-mkdir -p "$TARGET/ops/bindings"
-cat > "$TARGET/ops/bindings/ha.addons.yaml" <<'YAML'
+mkdir -p "$TARGET/ops/bindings/domains/ha"
+cat > "$TARGET/ops/bindings/domains/ha/ha.addons.yaml" <<'YAML'
 schema_version: "1.0"
 generated: "2026-03-20T00:00:00Z"
 source: ha.addons.snapshot
@@ -121,13 +121,13 @@ t4_action="$(
   env bash -lc '
     source "'"$HELPER"'"
     HA_SNAPSHOT_MODE="apply"
-    HA_SNAPSHOT_OUTPUT="'"$TARGET_CANON"'/ops/bindings/ha.addons.yaml"
+    HA_SNAPSHOT_OUTPUT="'"$TARGET_CANON"'/ops/bindings/domains/ha/ha.addons.yaml"
     HA_SNAPSHOT_TRACKED_OUTPUT="$HA_SNAPSHOT_OUTPUT"
     ha_snapshot_finalize "'"$TMPDIR_BASE"'/ha.addons.candidate.yaml"
     printf "%s\n" "$HA_SNAPSHOT_FINAL_ACTION"
   '
 )"
-t4_generated="$(grep '^generated:' "$TARGET/ops/bindings/ha.addons.yaml")"
+t4_generated="$(grep '^generated:' "$TARGET/ops/bindings/domains/ha/ha.addons.yaml")"
 assert_eq "$t4_action" "semantic-noop" "apply mode skips timestamp-only churn"
 assert_eq "$t4_generated" 'generated: "2026-03-20T00:00:00Z"' "tracked file stays unchanged on semantic no-op"
 
@@ -145,13 +145,13 @@ t5_action="$(
   env bash -lc '
     source "'"$HELPER"'"
     HA_SNAPSHOT_MODE="apply"
-    HA_SNAPSHOT_OUTPUT="'"$TARGET_CANON"'/ops/bindings/ha.addons.yaml"
+    HA_SNAPSHOT_OUTPUT="'"$TARGET_CANON"'/ops/bindings/domains/ha/ha.addons.yaml"
     HA_SNAPSHOT_TRACKED_OUTPUT="$HA_SNAPSHOT_OUTPUT"
     ha_snapshot_finalize "'"$TMPDIR_BASE"'/ha.addons.changed.yaml"
     printf "%s\n" "$HA_SNAPSHOT_FINAL_ACTION"
   '
 )"
-t5_state="$(grep 'state:' "$TARGET/ops/bindings/ha.addons.yaml" | head -1 | xargs)"
+t5_state="$(grep 'state:' "$TARGET/ops/bindings/domains/ha/ha.addons.yaml" | head -1 | xargs)"
 assert_eq "$t5_action" "wrote" "apply mode writes real content changes"
 assert_eq "$t5_state" "state: stopped" "tracked binding updates when semantic content changes"
 

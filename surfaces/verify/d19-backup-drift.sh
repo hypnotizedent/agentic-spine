@@ -68,8 +68,12 @@ missing_required_count="$(yq e -r '[.runtime_units[] | select((.unit_id // "") =
 invalid_admission_count="$(yq e -r '[.runtime_units[] | select((.backup_admission_state // "") != "planned" and (.backup_admission_state // "") != "production_ready")] | length' "$BINDING_FILE" 2>/dev/null || echo 999)"
 [[ "$invalid_admission_count" == "0" ]] || fail "runtime_units contain invalid backup_admission_state values"
 
-media_exclusion_count="$(yq e -r '.runtime_units[] | select(.hostname == "download-stack" or .hostname == "streaming-stack") | (.exclude_paths // [])[]?' "$BINDING_FILE" 2>/dev/null | grep -Ec '^/mnt/media(/|$)' || true)"
-[[ "$media_exclusion_count" -ge 2 ]] || fail "media runtime units must explicitly exclude /mnt/media payload lane"
+media_runtime_units_count="$(yq e -r '[.runtime_units[] | select(.hostname == "download-stack" or .hostname == "streaming-stack")] | length' "$BINDING_FILE" 2>/dev/null || echo 0)"
+[[ "$media_runtime_units_count" =~ ^[0-9]+$ ]] || media_runtime_units_count=0
+if [[ "$media_runtime_units_count" -gt 0 ]]; then
+  media_exclusion_count="$(yq e -r '.runtime_units[] | select(.hostname == "download-stack" or .hostname == "streaming-stack") | (.exclude_paths // [])[]?' "$BINDING_FILE" 2>/dev/null | grep -Ec '^/mnt/media(/|$)' || true)"
+  [[ "$media_exclusion_count" -ge 2 ]] || fail "media runtime units must explicitly exclude /mnt/media payload lane"
+fi
 
 # 2d) Destination lanes must carry budget guardrails
 lanes_with_budget_missing="$(yq e -r '[.model.destination_lanes[] | select((.max_total_gb // null) == null or (.max_file_count // null) == null)] | length' "$BINDING_FILE" 2>/dev/null || echo 999)"

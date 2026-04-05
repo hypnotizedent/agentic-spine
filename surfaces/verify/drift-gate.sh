@@ -34,6 +34,7 @@ resolve_policy_knobs
 # ── Retired gate skip (registry-driven) ──
 # Build set of retired gate IDs at startup. Gates in this set are skipped entirely.
 REGISTRY="$SP/ops/bindings/gate.registry.yaml"
+TOPOLOGY="$SP/ops/bindings/gate.execution.topology.yaml"
 RETIRED_GATES=" "
 RETIRED_SKIP_COUNT=0
 if [[ -f "$REGISTRY" ]] && command -v yq >/dev/null 2>&1; then
@@ -48,10 +49,156 @@ is_retired() {
 
 FAIL=0
 WARN_COUNT=0
+CURRENT_GATE=""
+L1_FAIL_IDS=" "
+L1_WARN_IDS=" "
+L2_FAIL_IDS=" "
+L2_WARN_IDS=" "
+L3_FAIL_IDS=" "
+L3_WARN_IDS=" "
+
+append_gate_id() {
+  local var_name="$1"
+  local gate_id="$2"
+  local current
+  eval "current=\"\${$var_name}\""
+  if [[ "$current" != *" $gate_id "* ]]; then
+    eval "$var_name=\"${current}${gate_id} \""
+  fi
+}
+
+remove_gate_id() {
+  local var_name="$1"
+  local gate_id="$2"
+  local current
+  eval "current=\"\${$var_name}\""
+  current="${current// $gate_id / }"
+  eval "$var_name=\"${current}\""
+}
+
+trim_gate_ids() {
+  local values="$1"
+  values="${values# }"
+  values="${values% }"
+  printf '%s\n' "${values// /, }"
+}
+
+resolve_gate_layer() {
+  local gate_id="$1"
+  local layer="" primary_domain=""
+
+  if [[ -f "$REGISTRY" ]] && command -v yq >/dev/null 2>&1; then
+    layer="$(yq e -r ".gates[] | select(.id == \"$gate_id\") | .layer // \"\"" "$REGISTRY" 2>/dev/null || true)"
+    if [[ -n "$layer" && "$layer" != "null" ]]; then
+      printf '%s\n' "$layer"
+      return 0
+    fi
+  fi
+
+  if [[ -f "$TOPOLOGY" ]] && command -v yq >/dev/null 2>&1; then
+    if yq e -r '.core_mode.core_gate_ids[]?' "$TOPOLOGY" 2>/dev/null | grep -qx "$gate_id"; then
+      printf '%s\n' "L1_engine"
+      return 0
+    fi
+    primary_domain="$(yq e -r ".gate_assignments[] | select(.gate_id == \"$gate_id\") | .primary_domain // \"\"" "$TOPOLOGY" 2>/dev/null || true)"
+    if [[ -n "$primary_domain" && "$primary_domain" != "null" ]]; then
+      layer="$(yq e -r ".domain_metadata[] | select(.domain_id == \"$primary_domain\") | .layer // \"\"" "$TOPOLOGY" 2>/dev/null || true)"
+      if [[ -n "$layer" && "$layer" != "null" ]]; then
+        printf '%s\n' "$layer"
+        return 0
+      fi
+    fi
+  fi
+
+  printf '%s\n' "L2_shared_infrastructure"
+}
+
+record_gate_result() {
+  local gate_id="$1"
+  local severity="$2"
+  local layer fail_var warn_var fail_ids
+
+  [[ -n "$gate_id" ]] || return 0
+  layer="$(resolve_gate_layer "$gate_id")"
+  case "$layer" in
+    L1_engine)
+      fail_var="L1_FAIL_IDS"
+      warn_var="L1_WARN_IDS"
+      ;;
+    L3_product_runtime)
+      fail_var="L3_FAIL_IDS"
+      warn_var="L3_WARN_IDS"
+      ;;
+    *)
+      fail_var="L2_FAIL_IDS"
+      warn_var="L2_WARN_IDS"
+      ;;
+  esac
+
+  eval "fail_ids=\"\${$fail_var}\""
+  if [[ "$severity" == "fail" ]]; then
+    append_gate_id "$fail_var" "$gate_id"
+    remove_gate_id "$warn_var" "$gate_id"
+    return 0
+  fi
+
+  if [[ "$fail_ids" != *" $gate_id "* ]]; then
+    append_gate_id "$warn_var" "$gate_id"
+  fi
+}
+
+resolve_gate_hold_posture() {
+  local gate_id="$1"
+  if [[ ! -f "$REGISTRY" ]] || ! command -v yq >/dev/null 2>&1; then
+    return 0
+  fi
+  yq e -r ".gates[] | select(.id == \"$gate_id\") | .enforcement_decision.posture // \"\"" "$REGISTRY" 2>/dev/null || true
+}
+
+resolve_gate_hold_as_of() {
+  local gate_id="$1"
+  if [[ ! -f "$REGISTRY" ]] || ! command -v yq >/dev/null 2>&1; then
+    return 0
+  fi
+  yq e -r ".gates[] | select(.id == \"$gate_id\") | .enforcement_decision.as_of // \"\"" "$REGISTRY" 2>/dev/null || true
+}
+
+print_layer_status() {
+  local layer="$1"
+  local fail_var warn_var fail_ids warn_ids
+
+  case "$layer" in
+    L1_engine)
+      fail_var="L1_FAIL_IDS"
+      warn_var="L1_WARN_IDS"
+      ;;
+    L2_shared_infrastructure)
+      fail_var="L2_FAIL_IDS"
+      warn_var="L2_WARN_IDS"
+      ;;
+    *)
+      fail_var="L3_FAIL_IDS"
+      warn_var="L3_WARN_IDS"
+      ;;
+  esac
+
+  eval "fail_ids=\"\${$fail_var}\""
+  eval "warn_ids=\"\${$warn_var}\""
+  fail_ids="$(trim_gate_ids "$fail_ids")"
+  warn_ids="$(trim_gate_ids "$warn_ids")"
+
+  if [[ -n "$fail_ids" ]]; then
+    echo "  $layer: RESIDUE (fail: $fail_ids)"
+  elif [[ -n "$warn_ids" ]]; then
+    echo "  $layer: RESIDUE (warn: $warn_ids)"
+  else
+    echo "  $layer: CLEAN"
+  fi
+}
 
 pass(){ echo "PASS"; }
-fail(){ echo "FAIL $*"; FAIL=1; }
-warn(){ echo "WARN $*"; WARN_COUNT=$((WARN_COUNT + 1)); }
+fail(){ echo "FAIL $*"; FAIL=1; record_gate_result "${CURRENT_GATE:-}" "fail"; }
+warn(){ echo "WARN $*"; WARN_COUNT=$((WARN_COUNT + 1)); record_gate_result "${CURRENT_GATE:-}" "warn"; }
 
 # ── AOF scoped gate enforcement (v0.2) ──
 # When .environment.yaml exists, read the tier and only enforce gate categories
@@ -146,10 +293,17 @@ gate_script() {
     pass
     # Preserve advisory WARN lines (if any), but drop PASS noise from scripts.
     if grep -q '^WARN' "$tmp" 2>/dev/null; then
+      WARN_COUNT=$((WARN_COUNT + 1))
+      record_gate_result "$gate_id" "warn"
       grep '^WARN' "$tmp" 2>/dev/null || true
     fi
   else
-    if [[ "${RESOLVED_DRIFT_GATE_MODE:-fail}" == "warn" ]]; then
+    local hold_posture hold_as_of
+    hold_posture="$(resolve_gate_hold_posture "$gate_id")"
+    hold_as_of="$(resolve_gate_hold_as_of "$gate_id")"
+    if [[ "$hold_posture" == "hold_report_only" ]]; then
+      warn "$(basename "$script") failed (rc=$rc) [governed hold${hold_as_of:+ as_of=$hold_as_of}]"
+    elif [[ "${RESOLVED_DRIFT_GATE_MODE:-fail}" == "warn" ]]; then
       warn "$(basename "$script") failed (rc=$rc) [downgraded by drift_gate_mode=warn]"
     elif [[ "$AOF_FAIL_ACTION" == "warn" ]]; then
       warn "$(basename "$script") failed (rc=$rc) [downgraded by fail_action=warn for tier=$AOF_TIER]"
@@ -176,6 +330,7 @@ echo "=== DRIFT GATE (v3.0) ==="
 
 # D1: Top-level directory policy
 if ! is_retired D1; then
+CURRENT_GATE="D1"
 echo -n "D1 top-level dirs... "
 EXTRA="$(ls -1d */ 2>/dev/null | rg -v '^(bin|docs|fixtures|ops|surfaces)/$' || true)"
 if [[ -z "$EXTRA" ]]; then pass; else scoped_fail D1 "extra dirs: $(echo "$EXTRA" | tr '\n' ' ')"; fi
@@ -183,12 +338,14 @@ else echo "D1 top-level dirs... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_S
 
 # D2: No runs/ trace
 if ! is_retired D2; then
+CURRENT_GATE="D2"
 echo -n "D2 one trace (no runs/)... "
 if [[ ! -d runs ]]; then pass; else scoped_fail D2 "runs/ exists"; fi
 else echo "D2 one trace (no runs/)... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D3: Entrypoint smoke
 # TRIAGE: bin/ops preflight must succeed. Check bin/ops exists and is executable.
+CURRENT_GATE="D3"
 echo -n "D3 entrypoint smoke... "
 if [[ -x "$SP/surfaces/verify/d3-entrypoint-smoke.sh" ]]; then
   gate_script "$SP/surfaces/verify/d3-entrypoint-smoke.sh" "D3"
@@ -198,6 +355,7 @@ fi
 
 # D4: Watcher (launchd canonical; warn only, no fail)
 if ! is_retired D4; then
+CURRENT_GATE="D4"
 echo -n "D4 watcher... "
 WATCHER_PRINT="$(launchctl print "gui/$(id -u)/com.ronny.agent-inbox" 2>/dev/null || true)"
 if [[ -n "$WATCHER_PRINT" ]]; then
@@ -225,6 +383,7 @@ else echo "D4 watcher... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COU
 
 # D5: No executable ~/agent coupling
 if ! is_retired D5; then
+CURRENT_GATE="D5"
 echo -n "D5 no legacy coupling... "
 COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/plugins/core/agent/bin surfaces/verify 2>/dev/null \
   | rg -v '^[[:space:]]*#' \
@@ -244,6 +403,7 @@ else echo "D5 no legacy coupling... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIR
 
 # D6: Receipts exist (latest 5 have receipt.md)
 if ! is_retired D6; then
+CURRENT_GATE="D6"
 echo -n "D6 receipts exist... "
 MISSING=0
 COUNT=0
@@ -257,6 +417,7 @@ else echo "D6 receipts exist... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_S
 
 # D7: Executables only in four zones
 if ! is_retired D7; then
+CURRENT_GATE="D7"
 echo -n "D7 executables bounded... "
 BAD="$(find . -type f -name "*.sh" \
   | rg -v '^\./(bin/|ops/|surfaces/verify/)' \
@@ -266,6 +427,7 @@ else echo "D7 executables bounded... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETI
 
 # D8: No backup clutter (recursive — .bak and fix_bak anywhere in live surfaces)
 if ! is_retired D8; then
+CURRENT_GATE="D8"
 echo -n "D8 no backup clutter... "
 BK="$(find bin ops -type f 2>/dev/null | rg '\.bak$|fix_bak' || true)"
 if [[ -z "$BK" ]]; then pass; else fail "backup files in live surfaces: $(echo "$BK" | tr '\n' ' ')"; fi
@@ -273,6 +435,7 @@ else echo "D8 no backup clutter... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRE
 
 # D10: No spurious top-level logs (must be under mailroom/)
 if ! is_retired D10; then
+CURRENT_GATE="D10"
 echo -n "D10 logs under mailroom... "
 if [[ -d "$SP/logs" ]]; then
   fail "spurious \$SPINE/logs exists (should be mailroom/logs)"
@@ -283,6 +446,7 @@ else echo "D10 logs under mailroom... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RET
 
 # D11: ~/agent must be symlink to mailroom (if exists)
 if ! is_retired D11; then
+CURRENT_GATE="D11"
 echo -n "D11 home surface... "
 if [[ -e "$HOME/agent" ]]; then
   if [[ -L "$HOME/agent" ]]; then
@@ -302,12 +466,14 @@ else echo "D11 home surface... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SK
 
 # D12: CORE_LOCK.md must exist (repo validity marker)
 if ! is_retired D12; then
+CURRENT_GATE="D12"
 echo -n "D12 core lock exists... "
 if [[ -f "$SP/docs/core/CORE_LOCK.md" ]]; then pass; else scoped_fail D12 "docs/core/CORE_LOCK.md missing"; fi
 else echo "D12 core lock exists... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D9: Receipt stamps (STRICT - required fields for all new receipts)
 if ! is_retired D9; then
+CURRENT_GATE="D9"
 echo -n "D9 receipt stamps... "
 LATEST=""
 for s in $(ls -1t "$RECEIPTS_ROOT" 2>/dev/null); do
@@ -345,12 +511,14 @@ fi
 else echo "D9 receipt stamps... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D13: API capability secrets preconditions (locked rule)
+CURRENT_GATE="D13"
 echo -n "D13 api capability preconditions... "
 if [[ -x "$SP/surfaces/verify/api-preconditions.sh" ]]; then
   gate_script "$SP/surfaces/verify/api-preconditions.sh" "D13"
 else
   warn "api-preconditions verifier not present"
 fi
+CURRENT_GATE="D19"
 echo -n "D19 backup drift gate... "
 if [[ -x "$SP/surfaces/verify/d19-backup-drift.sh" ]]; then
   gate_script "$SP/surfaces/verify/d19-backup-drift.sh"
@@ -360,6 +528,7 @@ fi
 
 # D20 / D55: Secrets readiness (verbose runs subchecks; default runs composite)
 if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
+  CURRENT_GATE="D20"
   echo -n "D20 secrets drift gate... "
   if [[ -x "$SP/surfaces/verify/d20-secrets-drift.sh" ]]; then
     gate_script "$SP/surfaces/verify/d20-secrets-drift.sh"
@@ -367,6 +536,7 @@ if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
     warn "secrets drift gate not present"
   fi
 else
+  CURRENT_GATE="D55"
   echo -n "D55 secrets runtime readiness lock... "
   if [[ -x "$SP/surfaces/verify/d55-secrets-runtime-readiness-lock.sh" ]]; then
     gate_script "$SP/surfaces/verify/d55-secrets-runtime-readiness-lock.sh"
@@ -377,6 +547,7 @@ fi
 
 # D25: Secrets CLI canonical lock (verbose only; default runs via D55 composite)
 if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
+  CURRENT_GATE="D25"
   echo -n "D25 secrets cli canonical lock... "
   if [[ -x "$SP/surfaces/verify/d25-secrets-cli-canonical-lock.sh" ]]; then
     gate_script "$SP/surfaces/verify/d25-secrets-cli-canonical-lock.sh"
@@ -386,6 +557,7 @@ if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
 fi
 
 # D34: Loop ledger integrity lock (summary must match deduped counts)
+CURRENT_GATE="D34"
 echo -n "D34 loop ledger integrity lock... "
 if [[ -x "$SP/surfaces/verify/d34-loop-ledger-integrity-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d34-loop-ledger-integrity-lock.sh" "D34"
@@ -394,24 +566,28 @@ else
 fi
 
 # D35: Infra relocation parity lock (cross-SSOT consistency for service moves)
+CURRENT_GATE="D35"
 echo -n "D35 infra relocation parity lock... "
 if [[ -x "$SP/surfaces/verify/d35-infra-relocation-parity-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d35-infra-relocation-parity-lock.sh"
 else
   warn "infra relocation parity lock gate not present"
 fi
+CURRENT_GATE="D43"
 echo -n "D43 secrets namespace lock... "
 if [[ -x "$SP/surfaces/verify/d43-secrets-namespace-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d43-secrets-namespace-lock.sh"
 else
   warn "secrets namespace lock gate not present"
 fi
+CURRENT_GATE="D48"
 echo -n "D48 codex worktree hygiene... "
 if [[ -x "$SP/surfaces/verify/d48-codex-worktree-hygiene.sh" ]]; then
   gate_script "$SP/surfaces/verify/d48-codex-worktree-hygiene.sh"
 else
   warn "codex worktree hygiene gate not present"
 fi
+CURRENT_GATE="D54"
 echo -n "D54 ssot ip parity lock... "
 if [[ -x "$SP/surfaces/verify/d54-ssot-ip-parity-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d54-ssot-ip-parity-lock.sh" "D54"
@@ -422,6 +598,7 @@ fi
 # D58: SSOT freshness lock (last_reviewed date enforcement)
 # Wire stale_ssot_max_days from policy preset (env var override still takes precedence)
 export SSOT_FRESHNESS_DAYS="${SSOT_FRESHNESS_DAYS:-$RESOLVED_STALE_SSOT_MAX_DAYS}"
+CURRENT_GATE="D62"
 echo -n "D62 git remote authority lock... "
 if [[ -x "$SP/surfaces/verify/d62-git-remote-parity-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d62-git-remote-parity-lock.sh"
@@ -430,30 +607,35 @@ else
 fi
 
 # D63: Capabilities metadata lock (registry integrity)
+CURRENT_GATE="D63"
 echo -n "D63 capabilities metadata lock... "
 if [[ -x "$SP/surfaces/verify/d63-capabilities-metadata-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d63-capabilities-metadata-lock.sh" "D63"
 else
   warn "capabilities metadata lock gate not present"
 fi
+CURRENT_GATE="D67"
 echo -n "D67 capability map lock... "
 if [[ -x "$SP/surfaces/verify/d67-capability-map-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d67-capability-map-lock.sh"
 else
   warn "capability map lock not present"
 fi
+CURRENT_GATE="D69"
 echo -n "D69 VM creation governance lock... "
 if [[ -x "$SP/surfaces/verify/d69-vm-creation-governance-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d69-vm-creation-governance-lock.sh"
 else
   warn "VM creation governance lock gate not present"
 fi
+CURRENT_GATE="D75"
 echo -n "D75 gap registry mutation lock... "
 if [[ -x "$SP/surfaces/verify/d75-gap-registry-mutation-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d75-gap-registry-mutation-lock.sh"
 else
   warn "Gap registry mutation lock gate not present"
 fi
+CURRENT_GATE="D77"
 echo -n "D77 workbench contract lock... "
 if [[ -x "$SP/surfaces/verify/d77-workbench-contract-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d77-workbench-contract-lock.sh"
@@ -462,6 +644,7 @@ else
 fi
 
 # D78: Workbench path lock (uppercase /Code/ + ronny-ops drift)
+CURRENT_GATE="D78"
 echo -n "D78 workbench path lock... "
 if [[ -x "$SP/surfaces/verify/d78-workbench-path-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d78-workbench-path-lock.sh"
@@ -470,24 +653,28 @@ else
 fi
 
 # D79: Workbench script allowlist lock (governed script surface)
+CURRENT_GATE="D79"
 echo -n "D79 workbench script allowlist lock... "
 if [[ -x "$SP/surfaces/verify/d79-workbench-script-allowlist-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d79-workbench-script-allowlist-lock.sh"
 else
   warn "workbench script allowlist lock gate not present"
 fi
+CURRENT_GATE="D83"
 echo -n "D83 proposal queue health lock... "
 if [[ -x "$SP/surfaces/verify/d83-proposal-queue-health-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d83-proposal-queue-health-lock.sh"
 else
   warn "proposal queue health lock gate not present"
 fi
+CURRENT_GATE="D88"
 echo -n "D88 RAG remote reindex governance lock... "
 if [[ -x "$SP/surfaces/verify/d88-rag-remote-reindex-governance-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d88-rag-remote-reindex-governance-lock.sh"
 else
   warn "RAG remote reindex governance lock gate not present"
 fi
+CURRENT_GATE="D91"
 echo -n "D91 AOF product foundation lock... "
 if [[ -x "$SP/surfaces/verify/d91-aof-product-foundation-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d91-aof-product-foundation-lock.sh"
@@ -496,6 +683,7 @@ else
 fi
 
 # D92: HA config version control
+CURRENT_GATE="D92"
 echo -n "D92 HA config version control... "
 if [[ -x "$SP/surfaces/verify/d92-ha-config-version-control.sh" ]]; then
   gate_script "$SP/surfaces/verify/d92-ha-config-version-control.sh"
@@ -504,18 +692,21 @@ else
 fi
 
 # D93: Tenant storage boundary lock
+CURRENT_GATE="D93"
 echo -n "D93 tenant storage boundary lock... "
 if [[ -x "$SP/surfaces/verify/d93-tenant-storage-boundary-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d93-tenant-storage-boundary-lock.sh"
 else
   warn "tenant storage boundary lock gate not present"
 fi
+CURRENT_GATE="D98"
 echo -n "D98 Z2M device parity... "
 if [[ -x "$SP/surfaces/verify/d98-z2m-device-parity.sh" ]]; then
   gate_script "$SP/surfaces/verify/d98-z2m-device-parity.sh"
 else
   warn "Z2M device parity gate not present"
 fi
+CURRENT_GATE="D100"
 echo -n "D100 VM IP parity lock... "
 if [[ -x "$SP/surfaces/verify/d100-vm-ip-parity-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d100-vm-ip-parity-lock.sh"
@@ -524,12 +715,14 @@ else
 fi
 
 # D101: HA addon inventory parity
+CURRENT_GATE="D101"
 echo -n "D101 HA addon inventory parity... "
 if [[ -x "$SP/surfaces/verify/d101-ha-addon-inventory-parity.sh" ]]; then
   gate_script "$SP/surfaces/verify/d101-ha-addon-inventory-parity.sh"
 else
   warn "HA addon inventory gate not present"
 fi
+CURRENT_GATE="D106"
 echo -n "D106 Media port collision lock... "
 if [[ -x "$SP/surfaces/verify/d106-media-port-collision-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d106-media-port-collision-lock.sh"
@@ -537,30 +730,35 @@ else
   warn "Media port collision lock gate not present"
 fi
 
+CURRENT_GATE="D107"
 echo -n "D107 Media NFS mount lock... "
 if [[ -x "$SP/surfaces/verify/d107-media-nfs-mount-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d107-media-nfs-mount-lock.sh"
 else
   warn "Media NFS mount lock gate not present"
 fi
+CURRENT_GATE="D116"
 echo -n "D116 Mailroom bridge consumers registry... "
 if [[ -x "$SP/surfaces/verify/d116-mailroom-bridge-consumers-registry-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d116-mailroom-bridge-consumers-registry-lock.sh" "D116"
 else
   warn "mailroom bridge consumers registry gate not present"
 fi
+CURRENT_GATE="D121"
 echo -n "D121 Fabric boundary lock... "
 if [[ -x "$SP/surfaces/verify/d121-fabric-boundary-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d121-fabric-boundary-lock.sh" "D121"
 else
   warn "fabric boundary lock gate not present"
 fi
+CURRENT_GATE="D124"
 echo -n "D124 Entry surface parity lock... "
 if [[ -x "$SP/surfaces/verify/d124-entry-surface-parity-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d124-entry-surface-parity-lock.sh" "D124"
 else
   warn "entry surface parity lock gate not present"
 fi
+CURRENT_GATE="D126"
 echo -n "D126 Workbench implementation path lock... "
 if [[ -x "$SP/surfaces/verify/d126-workbench-implementation-path-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d126-workbench-implementation-path-lock.sh" "D126"
@@ -568,12 +766,14 @@ else
   warn "workbench implementation path lock gate not present"
 fi
 
+CURRENT_GATE="D127"
 echo -n "D127 Domain assignment drift lock... "
 if [[ -x "$SP/surfaces/verify/d127-domain-assignment-drift-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d127-domain-assignment-drift-lock.sh" "D127"
 else
   warn "domain assignment drift lock gate not present"
 fi
+CURRENT_GATE="D398"
 echo -n "D398 Repo-local evidence write target lock... "
 if [[ -x "$SP/surfaces/verify/d398-repo-local-evidence-write-target-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d398-repo-local-evidence-write-target-lock.sh" "D398"
@@ -585,6 +785,11 @@ echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1
 fi
+echo "LAYER SUMMARY:"
+print_layer_status "L1_engine"
+print_layer_status "L2_shared_infrastructure"
+print_layer_status "L3_product_runtime"
+echo
 if [[ "$FAIL" -eq 0 ]]; then
   if [[ "$WARN_COUNT" -gt 0 ]]; then
     echo "DRIFT GATE: PASS ($WARN_COUNT warning(s) — review WARN lines above)"

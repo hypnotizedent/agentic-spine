@@ -28,6 +28,23 @@ ha_snapshot_resolve_root() {
   spine_resolve_target_repo
 }
 
+ha_snapshot_normalize_tracked_rel() {
+  local tracked_rel="$1"
+  if [[ "$tracked_rel" == *"/"* ]]; then
+    if [[ "$tracked_rel" == ops/bindings/domains/ha/* ]]; then
+      printf '%s\n' "$tracked_rel"
+      return 0
+    fi
+    if [[ "$tracked_rel" == ops/bindings/* ]]; then
+      printf 'ops/bindings/domains/ha/%s\n' "${tracked_rel#ops/bindings/}"
+      return 0
+    fi
+    printf '%s\n' "$tracked_rel"
+    return 0
+  fi
+  printf 'ops/bindings/domains/ha/%s\n' "$tracked_rel"
+}
+
 ha_snapshot_runtime_output_path() {
   local root="$1"
   local tracked_rel="$2"
@@ -37,22 +54,26 @@ ha_snapshot_runtime_output_path() {
 ha_snapshot_resolve_source_path() {
   local root="$1"
   local tracked_rel="$2"
+  local normalized_tracked_rel
+  normalized_tracked_rel="$(ha_snapshot_normalize_tracked_rel "$tracked_rel")"
   local runtime_path
-  runtime_path="$(ha_snapshot_runtime_output_path "$root" "$tracked_rel")"
+  runtime_path="$(ha_snapshot_runtime_output_path "$root" "$normalized_tracked_rel")"
   if [[ -f "$runtime_path" ]]; then
     printf '%s\n' "$runtime_path"
     return 0
   fi
-  printf '%s/%s\n' "$root" "$tracked_rel"
+  printf '%s/%s\n' "$root" "$normalized_tracked_rel"
 }
 
 ha_snapshot_parse_common_args() {
   local tracked_rel="$1"
   shift
+  local normalized_tracked_rel
+  normalized_tracked_rel="$(ha_snapshot_normalize_tracked_rel "$tracked_rel")"
 
   HA_SNAPSHOT_MODE="check"
-  HA_SNAPSHOT_TRACKED_OUTPUT="$HA_SNAPSHOT_ROOT/ops/bindings/$tracked_rel"
-  HA_SNAPSHOT_RUNTIME_OUTPUT_DEFAULT="$(ha_snapshot_runtime_output_path "$HA_SNAPSHOT_ROOT" "$tracked_rel")"
+  HA_SNAPSHOT_TRACKED_OUTPUT="$HA_SNAPSHOT_ROOT/$normalized_tracked_rel"
+  HA_SNAPSHOT_RUNTIME_OUTPUT_DEFAULT="$(ha_snapshot_runtime_output_path "$HA_SNAPSHOT_ROOT" "$normalized_tracked_rel")"
   HA_SNAPSHOT_OUTPUT="$HA_SNAPSHOT_RUNTIME_OUTPUT_DEFAULT"
 
   if [[ "${1:-}" == "--" ]]; then
