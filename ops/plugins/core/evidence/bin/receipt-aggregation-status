@@ -215,6 +215,316 @@ def save_completion(completion_data: dict, completion_dir: Path = None):
     save_yaml(completion_file, completion_data)
 
 
+# ── Wave Aggregation ─────────────────────────────────────────────────────────
+
+def load_orchestration_packet(loop_id: str, state_dir: Path = None) -> Optional[dict]:
+    """Load orchestration packet for loop"""
+    spine_state = state_dir or SPINE_STATE
+    packet_file = spine_state / "orchestration" / loop_id / "packet.yaml"
+    return load_yaml(packet_file) if packet_file.exists() else None
+
+
+def determine_wave_aggregation_status(
+    wave_id: str,
+    lane_statuses: List[dict],
+    timeout_utc: Optional[str] = None
+) -> dict:
+    """
+    Determine wave aggregation status from lane completion states.
+
+    Returns dict with:
+      - aggregation_status: incomplete | complete | blocked | partial
+      - lane_count: total lanes
+      - lanes_complete: count of completed lanes
+      - lanes_blocked: count of blocked lanes
+      - timeout_exceeded: bool
+    """
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    now_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Count lane states
+    total_lanes = len(lane_statuses)
+    lanes_complete = 0
+    lanes_blocked = 0
+    lanes_incomplete = 0
+
+    # Terminal states from orchestration: CLOSED, FAILED, REJECTED
+    # Non-terminal: DISPATCHED, EXECUTING, VALIDATED, TICKET_ISSUED, ENTRY_READY
+    terminal_complete_states = ["CLOSED", "closed"]
+    terminal_failed_states = ["FAILED", "failed", "REJECTED", "rejected", "BLOCKED", "blocked"]
+    non_terminal_states = ["DISPATCHED", "dispatched", "EXECUTING", "executing",
+                          "VALIDATED", "validated", "TICKET_ISSUED", "ticket-issued",
+                          "ENTRY_READY", "entry-ready", "open"]
+
+    for lane in lane_statuses:
+        status = lane.get("lane_status", "unknown")
+        if status in terminal_complete_states:
+            lanes_complete += 1
+        elif status in terminal_failed_states:
+            lanes_blocked += 1
+        else:
+            lanes_incomplete += 1
+
+    # Check timeout
+    timeout_exceeded = False
+    if timeout_utc:
+        try:
+            timeout_dt = dt.datetime.fromisoformat(timeout_utc.replace("Z", "+00:00"))
+            timeout_exceeded = now_utc > timeout_dt
+        except Exception:
+            pass
+
+    # Determine aggregation status per role.runtime.control.contract.yaml
+    if lanes_complete == total_lanes:
+        aggregation_status = "complete"
+    elif lanes_blocked > 0:
+        aggregation_status = "blocked"
+    elif timeout_exceeded and lanes_incomplete > 0:
+        aggregation_status = "partial"
+    else:
+        aggregation_status = "incomplete"
+
+    return {
+        "wave_id": wave_id,
+        "aggregation_status": aggregation_status,
+        "total_lanes": total_lanes,
+        "lanes_complete": lanes_complete,
+        "lanes_blocked": lanes_blocked,
+        "lanes_incomplete": lanes_incomplete,
+        "timeout_exceeded": timeout_exceeded,
+        "aggregation_determined_at_utc": now_iso,
+    }
+
+
+def save_aggregation(aggregation_data: dict, aggregation_dir: Path = None):
+    """Save wave or loop aggregation artifact"""
+    agg_dir = aggregation_dir or DISPATCH_AGGREGATION_DIR
+    wave_or_loop_id = aggregation_data.get("wave_id") or aggregation_data.get("loop_id")
+    aggregation_file = agg_dir / f"{wave_or_loop_id}.aggregation.yaml"
+    save_yaml(aggregation_file, aggregation_data)
+
+
+def query_wave_aggregation(
+    wave_id: str,
+    loop_id: Optional[str] = None,
+    json_output: bool = False,
+    state_dir: Path = None,
+    aggregation_dir: Path = None
+) -> dict:
+    """
+    Query wave aggregation status.
+
+    Reads orchestration packet to find wave lane statuses,
+    derives aggregation verdict, and saves artifact.
+    """
+    spine_state = state_dir or SPINE_STATE
+
+    # If loop_id provided, load packet directly
+    if loop_id:
+        packet = load_orchestration_packet(loop_id, spine_state)
+        if not packet:
+            result = {
+                "wave_id": wave_id,
+                "loop_id": loop_id,
+                "packet_found": False,
+                "aggregation_status": "unknown",
+                "message": f"No orchestration packet found for loop {loop_id}",
+            }
+            if json_output:
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"wave_id: {wave_id}")
+                print(f"loop_id: {loop_id}")
+                print(f"packet_found: False")
+                print(f"message: {result['message']}")
+            return result
+
+        # Find wave in packet
+        wave_plan = packet.get("wave_plan", [])
+        wave_entry = None
+        for wave in wave_plan:
+            if wave.get("wave_id") == wave_id:
+                wave_entry = wave
+                break
+
+        if not wave_entry:
+            result = {
+                "wave_id": wave_id,
+                "loop_id": loop_id,
+                "wave_found": False,
+                "aggregation_status": "unknown",
+                "message": f"Wave {wave_id} not found in loop {loop_id} packet",
+            }
+            if json_output:
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"wave_id: {wave_id}")
+                print(f"message: {result['message']}")
+            return result
+
+        # Get lane outcomes
+        lane_outcomes = packet.get("lane_outcomes", [])
+        timeout_utc = packet.get("deadline_utc") or packet.get("timeout_utc")
+
+        aggregation = determine_wave_aggregation_status(wave_id, lane_outcomes, timeout_utc)
+        aggregation["loop_id"] = loop_id
+        aggregation["aggregation_type"] = "wave"
+        aggregation["lane_statuses"] = lane_outcomes
+
+        # Save aggregation artifact
+        save_aggregation(aggregation, aggregation_dir)
+
+        result = {
+            "wave_id": wave_id,
+            "loop_id": loop_id,
+            "packet_found": True,
+            **aggregation
+        }
+    else:
+        # No loop_id: try to find wave in any orchestration packet
+        result = {
+            "wave_id": wave_id,
+            "aggregation_status": "unknown",
+            "message": "Wave aggregation requires --loop-id parameter (wave lookup across loops not yet implemented)",
+        }
+
+    if json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"wave_id: {result['wave_id']}")
+        if result.get("packet_found"):
+            print(f"loop_id: {result['loop_id']}")
+            print(f"aggregation_status: {result['aggregation_status']}")
+            print(f"total_lanes: {result['total_lanes']}")
+            print(f"lanes_complete: {result['lanes_complete']}")
+            print(f"lanes_blocked: {result['lanes_blocked']}")
+            print(f"lanes_incomplete: {result['lanes_incomplete']}")
+        else:
+            print(f"message: {result.get('message', 'unknown')}")
+
+    return result
+
+
+# ── Loop Aggregation ─────────────────────────────────────────────────────────
+
+def determine_loop_aggregation_status(
+    loop_id: str,
+    wave_statuses: List[dict]
+) -> dict:
+    """
+    Determine loop aggregation status from wave aggregation states.
+
+    Returns dict with:
+      - loop_aggregation_status: in_progress | complete | blocked
+      - total_waves: count
+      - waves_complete: count
+      - waves_blocked: count
+    """
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    now_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    total_waves = len(wave_statuses)
+    waves_complete = 0
+    waves_blocked = 0
+    waves_incomplete = 0
+
+    for wave in wave_statuses:
+        status = wave.get("aggregation_status", "unknown")
+        if status == "complete":
+            waves_complete += 1
+        elif status in ["blocked", "partial"]:
+            waves_blocked += 1
+        else:
+            waves_incomplete += 1
+
+    # Determine loop status per role.runtime.control.contract.yaml
+    if waves_complete == total_waves:
+        loop_aggregation_status = "complete"
+    elif waves_blocked > 0:
+        loop_aggregation_status = "blocked"
+    else:
+        loop_aggregation_status = "in_progress"
+
+    return {
+        "loop_id": loop_id,
+        "loop_aggregation_status": loop_aggregation_status,
+        "total_waves": total_waves,
+        "waves_complete": waves_complete,
+        "waves_blocked": waves_blocked,
+        "waves_incomplete": waves_incomplete,
+        "aggregation_determined_at_utc": now_iso,
+    }
+
+
+def query_loop_aggregation(
+    loop_id: str,
+    json_output: bool = False,
+    state_dir: Path = None,
+    aggregation_dir: Path = None
+) -> dict:
+    """
+    Query loop aggregation status.
+
+    Reads orchestration packet to find all waves,
+    aggregates wave statuses to loop verdict.
+    """
+    spine_state = state_dir or SPINE_STATE
+    packet = load_orchestration_packet(loop_id, spine_state)
+
+    if not packet:
+        result = {
+            "loop_id": loop_id,
+            "packet_found": False,
+            "loop_aggregation_status": "unknown",
+            "message": f"No orchestration packet found for loop {loop_id}",
+        }
+        if json_output:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"loop_id: {loop_id}")
+            print(f"packet_found: False")
+            print(f"message: {result['message']}")
+        return result
+
+    wave_plan = packet.get("wave_plan", [])
+
+    # Aggregate wave statuses
+    wave_statuses = []
+    for wave_entry in wave_plan:
+        wave_id = wave_entry.get("wave_id")
+        # Determine wave status from lane_outcomes
+        lane_outcomes = packet.get("lane_outcomes", [])
+        timeout_utc = packet.get("deadline_utc") or packet.get("timeout_utc")
+        wave_agg = determine_wave_aggregation_status(wave_id, lane_outcomes, timeout_utc)
+        wave_statuses.append(wave_agg)
+
+    # Determine loop status
+    loop_agg = determine_loop_aggregation_status(loop_id, wave_statuses)
+    loop_agg["aggregation_type"] = "loop"
+    loop_agg["wave_statuses"] = wave_statuses
+
+    # Save aggregation artifact
+    save_aggregation(loop_agg, aggregation_dir)
+
+    result = {
+        "loop_id": loop_id,
+        "packet_found": True,
+        **loop_agg
+    }
+
+    if json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"loop_id: {result['loop_id']}")
+        print(f"loop_aggregation_status: {result['loop_aggregation_status']}")
+        print(f"total_waves: {result['total_waves']}")
+        print(f"waves_complete: {result['waves_complete']}")
+        print(f"waves_blocked: {result['waves_blocked']}")
+        print(f"waves_incomplete: {result['waves_incomplete']}")
+
+    return result
+
+
 # ── Query Commands ───────────────────────────────────────────────────────────
 
 def query_parent_completion(
@@ -351,13 +661,15 @@ def main():
         description="Receipt aggregation status - mechanical completion determination for delegated work"
     )
     parser.add_argument("--parent-run-key", help="Query completion status for parent run key (CAP-* or S-*)")
-    parser.add_argument("--wave-id", help="Query aggregation status for wave (NOT IMPLEMENTED YET)")
-    parser.add_argument("--loop-id", help="Query aggregation status for loop (NOT IMPLEMENTED YET)")
+    parser.add_argument("--wave-id", help="Query aggregation status for wave")
+    parser.add_argument("--loop-id", help="Query aggregation status for loop (required with --wave-id for wave queries)")
     parser.add_argument("--list-delegated", action="store_true", help="List all delegated work items")
     parser.add_argument("--json", action="store_true", help="Output JSON format")
     parser.add_argument("--receipt-index", help="Override receipt index path (for testing)")
     parser.add_argument("--linkage-dir", help="Override linkage directory path (for testing)")
     parser.add_argument("--completion-dir", help="Override completion directory path (for testing)")
+    parser.add_argument("--state-dir", help="Override SPINE_STATE directory (for testing)")
+    parser.add_argument("--aggregation-dir", help="Override aggregation directory path (for testing)")
 
     args = parser.parse_args()
 
@@ -368,6 +680,10 @@ def main():
         DISPATCH_LINKAGE_DIR = Path(args.linkage_dir)
     if args.completion_dir:
         DISPATCH_COMPLETION_DIR = Path(args.completion_dir)
+    if args.state_dir:
+        SPINE_STATE = Path(args.state_dir)
+    if args.aggregation_dir:
+        DISPATCH_AGGREGATION_DIR = Path(args.aggregation_dir)
 
     if not any([args.parent_run_key, args.wave_id, args.loop_id, args.list_delegated]):
         parser.print_help()
@@ -387,10 +703,27 @@ def main():
         )
         return
 
-    if args.wave_id or args.loop_id:
-        print("ERROR: Wave and loop aggregation not yet implemented", file=sys.stderr)
-        print("Current scope: delegated completion determination only", file=sys.stderr)
-        sys.exit(1)
+    if args.wave_id:
+        if not args.loop_id:
+            print("ERROR: --wave-id requires --loop-id parameter", file=sys.stderr)
+            sys.exit(2)
+        query_wave_aggregation(
+            args.wave_id,
+            args.loop_id,
+            args.json,
+            SPINE_STATE,
+            DISPATCH_AGGREGATION_DIR
+        )
+        return
+
+    if args.loop_id:
+        query_loop_aggregation(
+            args.loop_id,
+            args.json,
+            SPINE_STATE,
+            DISPATCH_AGGREGATION_DIR
+        )
+        return
 
 
 if __name__ == "__main__":
