@@ -169,8 +169,24 @@ assert payload["route_target"]["type"] == "agent_tool", payload
 assert payload["route_target"]["tool"] == "route_resolve", payload
 assert payload["route_target"]["input"] == "automation", payload
 
+# ── Dispatch Envelope (dispatch.envelope.contract.yaml) ──
+envelope = payload.get("dispatch_envelope", {})
+assert envelope, f"dispatch_envelope missing from payload: {list(payload.keys())}"
+assert envelope["envelope_id"].startswith("ENV-"), envelope
+assert envelope["sender_node"] == "control", envelope
+assert envelope["target_node"] == "execution", envelope
+assert envelope["work_scope"]["work_type"] == "capability_execution", envelope
+assert envelope["work_scope"]["loop_id"] == "LOOP-DISPATCH-OP", envelope
+assert envelope["work_scope"]["wave_id"] == "WAVE-DISPATCH-OP", envelope
+assert envelope["work_scope"]["execution_mode"] == "operational", envelope
+assert envelope["transport_mode"] == "mailroom", envelope
+assert envelope["receipt_expectation"]["expected_receipt_type"] == "run_key", envelope
+assert envelope["receipt_expectation"]["completion_criteria"] == "single_receipt", envelope
+
 assert dispatch["status"] == "dispatched", dispatch
 assert dispatch["dispatch_transport"] == "mailroom", dispatch
+assert dispatch["envelope_id"].startswith("ENV-"), dispatch
+assert dispatch["envelope_id"] == envelope["envelope_id"], dispatch
 assert dispatch["mailroom_task_id"] == queue["task_id"], dispatch
 assert dispatch["mailroom_task_file"] == queue_file, dispatch
 assert dispatch["mailroom_task_state"] == "queued", dispatch
@@ -294,8 +310,19 @@ assert payload["expected_output_refs"]["acceptance_criteria_ref"] == accept_ref,
 assert "verify_ref" not in payload.get("input_refs", {}), payload
 assert "verify_ref" not in payload.get("expected_output_refs", {}), payload
 
+# ── Audit dispatch envelope fields ──
+envelope = payload.get("dispatch_envelope", {})
+assert envelope, f"audit dispatch_envelope missing: {list(payload.keys())}"
+assert envelope["envelope_id"].startswith("ENV-"), envelope
+assert envelope["sender_node"] == "control", envelope
+assert envelope["target_node"] == "audit", envelope
+assert envelope["work_scope"]["work_type"] == "verification", envelope
+assert envelope["work_scope"]["execution_mode"] == "operational", envelope
+assert envelope["transport_mode"] == "mailroom", envelope
+
 assert dispatch["status"] == "dispatched", dispatch
 assert dispatch["dispatch_transport"] == "mailroom", dispatch
+assert dispatch["envelope_id"].startswith("ENV-"), dispatch
 assert dispatch["mailroom_task_id"] == queue["task_id"], dispatch
 assert dispatch["mailroom_task_state"] == "queued", dispatch
 
@@ -363,12 +390,13 @@ else
   fail "operational dispatch task reaches done lane"
 fi
 
-python3 - <<'PY' "$runtime_op/waves/WAVE-DISPATCH-OP/state.json"
+python3 - <<'PY' "$runtime_op/waves/WAVE-DISPATCH-OP/state.json" "$runtime_op/state"
 import json
 import sys
 from pathlib import Path
 
 state = json.loads(Path(sys.argv[1]).read_text())
+spine_state = sys.argv[2]
 dispatch = state["dispatches"][0]
 lane = state["packet"]["lane_outcomes"][0]
 role_flow = state["role_flow"]
@@ -379,6 +407,21 @@ assert dispatch["mailroom_task_state"] == "done", dispatch
 assert dispatch["dispatch_transport"] == "mailroom", dispatch
 assert dispatch["run_key"], dispatch
 assert dispatch["result"].startswith("Mailroom: "), dispatch
+
+# ── Dispatch envelope identity survives end-to-end ──
+envelope_id = dispatch.get("envelope_id", "")
+assert envelope_id.startswith("ENV-"), f"envelope_id missing or invalid after collect: {dispatch}"
+
+# ── Completion artifact written by collect ──
+comp_dir = Path(spine_state) / "dispatch" / "completion"
+comp_file = comp_dir / f"{envelope_id}.completion.json"
+assert comp_file.exists(), f"completion artifact missing: {comp_file}"
+comp = json.loads(comp_file.read_text())
+assert comp["envelope_id"] == envelope_id, comp
+assert comp["completion_status"] == "complete", comp
+assert comp["wave_id"] == "WAVE-DISPATCH-OP", comp
+assert comp["transport_mode"] == "mailroom", comp
+assert comp["run_key"], comp
 
 assert lane["lane_status"] == "DONE", lane
 assert lane["dispatch_transport"] == "mailroom", lane

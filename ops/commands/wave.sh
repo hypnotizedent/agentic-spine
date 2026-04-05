@@ -1573,9 +1573,11 @@ _dispatch_operational_mailroom() {
 
   local dispatch_ctx_json=""
   dispatch_ctx_json="$(python3 - "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json" <<'PYMAILROOMCTX'
+import hashlib
 import json
 import re
 import sys
+from datetime import datetime, timezone
 
 sf = sys.argv[1]
 lane = sys.argv[2]
@@ -1644,6 +1646,41 @@ payload = {
     "routing_status": "pending_resolution",
 }
 
+# ── Dispatch Envelope (dispatch.envelope.contract.yaml) ──
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+_route_to_domain = {
+    "finance": "finance", "mint": "mint", "media": "media",
+    "home-automation": "ha", "photos": "media",
+    "identity": "core", "automation": "core",
+}
+_work_type_by_lane = {
+    "execution": "capability_execution", "audit": "verification",
+    "watcher": "observation", "control": "wave_orchestration",
+}
+_ts_compact = now[:10].replace("-", "") + "-" + now[11:19].replace(":", "")
+_envelope_hash = hashlib.sha256(f"{wave_id}-{lane}-{now}".encode()).hexdigest()[:8]
+envelope_id = f"ENV-{_ts_compact}-{_envelope_hash}"
+
+payload["dispatch_envelope"] = {
+    "envelope_id": envelope_id,
+    "sender_node": "control",
+    "target_node": lane if lane in ("execution", "audit", "watcher") else "execution",
+    "work_scope": {
+        "work_type": _work_type_by_lane.get(lane, "capability_execution"),
+        "domain": _route_to_domain.get(route_input, "core"),
+        "loop_id": loop_id,
+        "wave_id": wave_id,
+        "safety_level": "mutating" if to_role == "worker" else "read-only",
+        "execution_mode": "operational",
+    },
+    "transport_mode": "mailroom",
+    "receipt_expectation": {
+        "expected_receipt_type": "run_key",
+        "completion_criteria": "single_receipt",
+    },
+    "created_at_utc": now,
+}
+
 summary = " ".join(f"{wave_id} [{lane}] {task}".split())
 if len(summary) > 180:
     summary = summary[:177] + "..."
@@ -1699,6 +1736,8 @@ expected_output_refs = json.loads(sys.argv[8]) if len(sys.argv) > 8 and sys.argv
 ctx = json.loads(sys.argv[9]) if len(sys.argv) > 9 and sys.argv[9] else {}
 enqueue = json.loads(sys.argv[10]) if len(sys.argv) > 10 and sys.argv[10] else {}
 queue_data = enqueue.get("data") if isinstance(enqueue.get("data"), dict) else {}
+ctx_payload = ctx.get("payload") if isinstance(ctx.get("payload"), dict) else {}
+ctx_envelope = ctx_payload.get("dispatch_envelope") if isinstance(ctx_payload.get("dispatch_envelope"), dict) else {}
 lock_file = sf + ".lock"
 now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -1732,6 +1771,7 @@ try:
         "run_key": None,
         "receipt_validated": False,
         "dispatch_transport": "mailroom",
+        "envelope_id": str(ctx_envelope.get("envelope_id") or ""),
         "wave_execution_mode": str(ctx.get("execution_mode") or ""),
         "wave_transport": str(ctx.get("transport") or ""),
         "mailroom_task_id": str(queue_data.get("task_id") or ""),
@@ -4440,6 +4480,26 @@ for i, d in enumerate(dispatches):
         _upsert_lane_outcome(d, "DONE", completed_at=task_completed_at, run_key=task_run_key)
         matched += 1
         mailroom_matched += 1
+        # Write dispatch completion artifact (dispatch.envelope.contract.yaml)
+        _envelope_id = str(d.get("envelope_id") or "").strip()
+        if _envelope_id:
+            _spine_state = os.environ.get("SPINE_STATE", "")
+            if _spine_state:
+                _comp_dir = os.path.join(_spine_state, "dispatch", "completion")
+                os.makedirs(_comp_dir, exist_ok=True)
+                _comp = {
+                    "envelope_id": _envelope_id,
+                    "completion_status": "complete",
+                    "wave_id": str(state.get("wave_id") or ""),
+                    "run_key": task_run_key or "",
+                    "mailroom_task_id": mailroom_task_id,
+                    "completed_at_utc": task_completed_at,
+                    "transport_mode": "mailroom",
+                }
+                _comp_file = os.path.join(_comp_dir, f"{_envelope_id}.completion.json")
+                with open(_comp_file, "w", encoding="utf-8") as _cf:
+                    json.dump(_comp, _cf, indent=2)
+                    _cf.write("\n")
     elif task_status == "failed":
         blocker = task_failure or "mailroom task failed"
         d["status"] = "failed"
@@ -4448,6 +4508,27 @@ for i, d in enumerate(dispatches):
         _upsert_lane_outcome(d, "BLOCKED", completed_at=task_completed_at, blocker=blocker)
         matched += 1
         mailroom_matched += 1
+        # Write dispatch completion artifact for failure
+        _envelope_id = str(d.get("envelope_id") or "").strip()
+        if _envelope_id:
+            _spine_state = os.environ.get("SPINE_STATE", "")
+            if _spine_state:
+                _comp_dir = os.path.join(_spine_state, "dispatch", "completion")
+                os.makedirs(_comp_dir, exist_ok=True)
+                _comp = {
+                    "envelope_id": _envelope_id,
+                    "completion_status": "blocked_delegated",
+                    "wave_id": str(state.get("wave_id") or ""),
+                    "run_key": "",
+                    "mailroom_task_id": mailroom_task_id,
+                    "completed_at_utc": task_completed_at,
+                    "transport_mode": "mailroom",
+                    "failure_reason": blocker,
+                }
+                _comp_file = os.path.join(_comp_dir, f"{_envelope_id}.completion.json")
+                with open(_comp_file, "w", encoding="utf-8") as _cf:
+                    json.dump(_comp, _cf, indent=2)
+                    _cf.write("\n")
 
 # Promote role/lifecycle state deterministically from completed dispatches.
 role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}

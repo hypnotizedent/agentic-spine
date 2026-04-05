@@ -339,12 +339,41 @@ envelope_lifecycle:
 # ── Current Operational Posture ──────────────────────────────────────────────
 
 current_posture:
-  transport_mode: operator_relay
+  default_transport_mode: operator_relay
+
+  active_transports:
+    mailroom:
+      status: operational
+      scope: "execution_mode: operational only (headless autonomous execution)"
+      activated_at: "2026-04-05"
+      activation_surface: "ops/commands/wave.sh (_dispatch_operational_mailroom)"
+      description: >
+        Operational dispatches (execution_mode: operational or transport: mailroom)
+        are serialized into the canonical mailroom task queue via wave dispatch.
+        The mailroom task worker claims, executes, and produces receipted completion.
+        Wave collect reconciles mailroom task state with dispatch/wave state
+        and writes completion artifacts to $SPINE_STATE/dispatch/completion/.
+      what_disappears:
+        - "Operator reads envelope from control terminal"
+        - "Operator switches to target terminal"
+        - "Operator initiates work in target terminal"
+        - "Operator carries receipt back to control terminal"
+      what_remains:
+        - "Operator creates wave with execution_mode: operational"
+        - "Operator runs wave collect to reconcile completion"
+    operator_relay:
+      status: operational
+      scope: "All non-operational dispatches (execution_mode: code, interactive)"
+      description: >
+        Non-operational dispatches still require operator relay. The operator
+        reads dispatch from control terminal, switches context, initiates work,
+        and carries receipt back. This is the default for code/git dispatches.
 
   operator_relay_ceremony:
     description: >
-      Current ceremony for operator-mediated dispatch. Operator acts as explicit
-      courier rather than implicit join table.
+      Current ceremony for operator-mediated dispatch. Applies to non-operational
+      (code/interactive) dispatches only. Operational dispatches bypass this
+      ceremony via mailroom transport.
 
     steps:
       - "Control terminal creates dispatch envelope (explicit work_scope, target_node)"
@@ -363,13 +392,13 @@ current_posture:
 
   future_automation:
     description: >
-      As infrastructure matures, transport_mode can shift from operator_relay
-      to mailroom or git without changing envelope schema or routing semantics.
+      Mailroom transport is now operational for headless execution. Remaining
+      automation path focuses on interactive transport and multi-node dispatch.
 
     automation_path:
-      - "Phase 1 (current): operator_relay with explicit envelopes"
-      - "Phase 2 (operational mode): mailroom transport for headless execution"
-      - "Phase 3 (multi-node): git or network transport for distributed dispatch"
+      - "Phase 1 (complete): operator_relay with explicit envelopes"
+      - "Phase 2 (operational): mailroom transport for headless execution — ACTIVE"
+      - "Phase 3 (planned): git or network transport for distributed dispatch"
 
 # ── Non-Activation Boundary ──────────────────────────────────────────────────
 
