@@ -352,7 +352,7 @@ Every agent that starts a Claude Code session in this repo is automatically enro
 - Dynamic governance brief: delivers current governance context
 - Proposal queue gating: alerts if >5 pending proposals
 
-This is the **first line of agent governance**. Current first-string and archive-boundary authority stays in this contract and [SPINE_V3_FINALIZATION_PROGRAM_20260330.md](/Users/ronnyworks/code/agentic-spine/docs/governance/SPINE_V3_FINALIZATION_PROGRAM_20260330.md).
+This is the **first line of agent governance**. Current first-string and archive-boundary authority stays in this contract and [SPINE_V3_FINALIZATION_PROGRAM_20260330.md](docs/governance/SPINE_V3_FINALIZATION_PROGRAM_20260330.md).
 
 ### D399: Live External-State Enforcement
 **Path**: `surfaces/verify/d399-microsoft-mint-customer-mailbox-canonical-lock.sh` (560 lines)
