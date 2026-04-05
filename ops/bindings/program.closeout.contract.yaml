@@ -1,0 +1,103 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-04-05
+scope: program-closeout-framework
+version: 1
+updated_at: 2026-04-05
+contract: PROGRAM_CLOSEOUT_CONTRACT_V1
+
+problem_statement: >
+  Burn-down and closure efforts previously relied on narrative judgment alone,
+  which allowed residue to linger in ambiguous warn-only or "investigate later"
+  states. This contract makes program closeout mechanically auditable.
+
+terminal_states:
+  allowed:
+    - fixed
+    - retired
+    - explicit_hold
+    - reclassified
+  semantics:
+    fixed: >
+      The finding is resolved to green on its live surface and carries landed
+      commit plus verification evidence.
+    retired: >
+      The finding no longer describes a live surface. Retirement must cite the
+      governing truth that proves the surface is intentionally no longer live.
+    explicit_hold: >
+      The finding is intentionally not fixed today, but the reason is governed:
+      dated rationale, exact blocker, owner, and follow-up truth are all explicit.
+    reclassified: >
+      The finding is real, but the original reporting surface was wrong. The
+      new layer or surface must be named explicitly with rationale.
+
+artifact_shape:
+  top_level_required:
+    - status
+    - owner
+    - scope
+    - program
+    - findings
+  program_required:
+    - id
+    - title
+    - as_of
+    - closure_status
+    - scope_statement
+    - companion_narrative
+    - in_scope_gate_ids
+    - no_silent_warn_only_residue
+  finding_common_required:
+    - gate_id
+    - terminal_state
+    - as_of
+    - summary
+  closure_status_allowed:
+    - open
+    - closed
+  finding_state_requirements:
+    fixed:
+      required:
+        - evidence.commits
+        - evidence.verification
+    retired:
+      required:
+        - rationale
+        - governing_truth
+    explicit_hold:
+      required:
+        - rationale
+        - blocker
+        - owner
+        - follow_up_truth
+    reclassified:
+      required:
+        - original_surface
+        - new_surface
+        - rationale
+
+closed_program_requirements:
+  closure_status_must_equal: closed
+  all_in_scope_gate_ids_must_have_findings: true
+  no_duplicate_gate_entries: true
+  no_silent_warn_only_residue_must_be_true: true
+  findings_must_use_allowed_terminal_states: true
+
+operator_workflow:
+  create_or_update_machine_artifact:
+    description: >
+      Record the program scope and every in-scope non-green finding in a machine
+      artifact at ops/bindings/program.closeout.<program-id>.yaml.
+  validate_before_closing:
+    command: >
+      python3 ./ops/plugins/core/lifecycle/bin/program-closeout-validate
+      --artifact ops/bindings/program.closeout.<program-id>.yaml --brief
+  narrative_companion:
+    description: >
+      A human-readable closure doc may accompany the machine artifact, but it
+      does not replace the machine ledger for terminal-state coverage.
+  closure_rule:
+    description: >
+      "Program closed" means every in-scope non-green finding is represented in
+      the artifact and has exactly one terminal state.

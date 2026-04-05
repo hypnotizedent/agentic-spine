@@ -58,6 +58,27 @@ OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "..."
 6. **Shared root-lane mutation is blocking contention.** Multiple terminals are independent only when they do not share the same root checkout, git index, or protected hotspot surfaces. Separate managed worktrees are the normal parallel model.
 7. **Verify after mutations.** After committing, run `./bin/ops cap run verify.run -- fast` to confirm no gates broke.
 
+## Program Closeout
+
+Burn-down efforts and closure programs must use the governed program closeout
+framework. A program is only closed when every in-scope non-green finding has
+exactly one machine-declared terminal state: `fixed`, `retired`,
+`explicit_hold`, or `reclassified`.
+
+Machine artifact:
+
+`ops/bindings/program.closeout.<program-id>.yaml`
+
+Validation command:
+
+```bash
+python3 ./ops/plugins/core/lifecycle/bin/program-closeout-validate \
+  --artifact ops/bindings/program.closeout.<program-id>.yaml --brief
+```
+
+Narrative closeout docs remain useful, but they are companions to the machine
+ledger and do not replace it for terminal-state coverage.
+
 ## V3 Operating Model (2026-03-27)
 
 ### Rule 1: Root Main Role

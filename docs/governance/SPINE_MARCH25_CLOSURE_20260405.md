@@ -11,6 +11,10 @@ as_of: "2026-04-05"
 
 As of `2026-04-05`, the March 25 post-V3 spine closure program is closed to governed truth.
 
+Machine-readable closeout ledger:
+
+- `ops/bindings/program.closeout.march25-post-v3.yaml`
+
 The operator reporting boundary is now explicit:
 
 - `L1_engine` is clean.
