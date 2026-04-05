@@ -8,7 +8,7 @@ source_triangulation:
   - NORTH_STAR.md
   - docs/governance/SPINE.md
   - ops/bindings/governed.change.lifecycle.contract.yaml
-  - ops/bindings/spine.surface.metabolism.registry.yaml
+  - ops/archive/pre-2026-04-01-spine/ops/bindings/spine.surface.metabolism.registry.yaml
   - ops/capabilities.yaml
   - .runtime/spine/state/domain-state/spine/execution-packets-20260326/CAPABILITY_RECONCILIATION_AGAINST_LIVE_SURFACES_TRANCHE1_STATUS_20260328.md
   - .runtime/spine/state/domain-state/spine/execution-packets-20260326/CAPABILITY_RECONCILIATION_AGAINST_LIVE_SURFACES_TRANCHE8_STATUS_20260328.md
@@ -31,7 +31,7 @@ layer truth that future passes must use.
 - [`NORTH_STAR.md`](../../NORTH_STAR.md) defines what the spine is for.
 - [`SPINE.md`](SPINE.md) defines how work lands.
 - [`governed.change.lifecycle.contract.yaml`](../../ops/bindings/governed.change.lifecycle.contract.yaml) defines how new governed truth is created.
-- [`spine.surface.metabolism.registry.yaml`](../../ops/bindings/spine.surface.metabolism.registry.yaml) defines what areas are live, stale, or only partially enforced.
+- [`spine.surface.metabolism.registry.yaml`](../../ops/archive/pre-2026-04-01-spine/ops/bindings/spine.surface.metabolism.registry.yaml) defines what areas are live, stale, or only partially enforced.
 
 This document answers a different question:
 
