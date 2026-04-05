@@ -5,7 +5,7 @@
 # Fixed: removed declare -A to avoid set -u issues
 # Updated: 2026-02-17 - canonical authority moved to spine; workbench script is shim-only
 
-set -eo pipefail
+set -euo pipefail
 
 # Resolve SPINE_ROOT to an absolute path at script entry and export it
 # so subshells (command substitutions, pipes) inherit a stable value.
@@ -174,13 +174,26 @@ break_glass_reason_env_var() {
   enforcement_contract_value '.break_glass.reason_required_env_var' 'SPINE_SECRETS_BREAK_GLASS_REASON'
 }
 
+read_indirect_env_var() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || {
+    printf '%s' ""
+    return 0
+  }
+  if [[ -n "${!name+x}" ]]; then
+    printf '%s' "${!name}"
+  else
+    printf '%s' ""
+  fi
+}
+
 is_break_glass_enabled() {
   local env_var required current reason_var reason
   env_var="$(break_glass_env_var)"
   required="$(break_glass_required_value)"
   reason_var="$(break_glass_reason_env_var)"
-  current="${!env_var:-}"
-  reason="${!reason_var:-}"
+  current="$(read_indirect_env_var "$env_var")"
+  reason="$(read_indirect_env_var "$reason_var")"
   if [[ "$current" == "$required" ]]; then
     if [[ -n "$reason" ]]; then
       echo "TELEMETRY: secrets_break_glass=1 reason=${reason}" >&2
