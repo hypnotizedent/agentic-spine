@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""
+Receipt Aggregation Status
+
+Implements mechanical completion determination for delegated and multi-lane work
+based on role.runtime.control.contract.yaml aggregation schemas.
+
+Reads receipt index and linkage artifacts to produce authoritative completion verdicts.
+
+Usage:
+  receipt-aggregation-status --parent-run-key <CAP-*|S-*>
+  receipt-aggregation-status --wave-id <WAVE-*>
+  receipt-aggregation-status --loop-id <LOOP-*>
+  receipt-aggregation-status --list-delegated
+"""
+
+import argparse
+import datetime as dt
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional
+
+# ── Path Bootstrap ───────────────────────────────────────────────────────────
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = SCRIPT_DIR.parents[5]
+
+import os
+
+def get_paths():
+    """Get spine paths, respecting environment overrides"""
+    # Check environment first (for testing)
+    if os.getenv("SPINE_STATE"):
+        spine_state = Path(os.getenv("SPINE_STATE"))
+        spine_evidence_root = Path(os.getenv("SPINE_EVIDENCE_ROOT", str(Path.home() / "code/.evidence/spine")))
+        spine_verify_root = Path(os.getenv("SPINE_VERIFY_ROOT", str(spine_evidence_root / "reports/verify")))
+    else:
+        # Try runtime_paths_py
+        sys.path.insert(0, str(ROOT / "ops/lib"))
+        try:
+            from runtime_paths_py import spine_runtime_resolve_paths
+            paths = spine_runtime_resolve_paths()
+            spine_state = Path(paths["SPINE_STATE"])
+            spine_evidence_root = Path(paths["SPINE_EVIDENCE_ROOT"])
+            spine_verify_root = Path(paths["SPINE_VERIFY_ROOT"])
+        except ImportError:
+            # Fallback if runtime_paths_py not available
+            spine_state = Path.home() / "code/.runtime/spine/state"
+            spine_evidence_root = Path.home() / "code/.evidence/spine"
+            spine_verify_root = spine_evidence_root / "reports/verify"
+
+    return {
+        "SPINE_STATE": spine_state,
+        "SPINE_EVIDENCE_ROOT": spine_evidence_root,
+        "SPINE_VERIFY_ROOT": spine_verify_root,
+    }
+
+
+# Initialize paths - will be overridden in main() if needed
+_paths = get_paths()
+SPINE_STATE = _paths["SPINE_STATE"]
+SPINE_EVIDENCE_ROOT = _paths["SPINE_EVIDENCE_ROOT"]
+SPINE_VERIFY_ROOT = _paths["SPINE_VERIFY_ROOT"]
+
+RECEIPT_INDEX_FILE = SPINE_VERIFY_ROOT / "indexes/receipt-index.yaml"
+DISPATCH_LINKAGE_DIR = SPINE_STATE / "dispatch/linkage"
+DISPATCH_COMPLETION_DIR = SPINE_STATE / "dispatch/completion"
+DISPATCH_AGGREGATION_DIR = SPINE_STATE / "dispatch/aggregation"
+
+# ── YAML/JSON Helpers ────────────────────────────────────────────────────────
+
+def load_yaml(path: Path) -> dict:
+    """Load YAML file via yq and return as dict"""
+    if not path.exists():
+        return {}
+    try:
+        raw = subprocess.check_output(
+            ["yq", "-o=json", ".", str(path)],
+            text=True,
+            stderr=subprocess.DEVNULL
+        )
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+def save_yaml(path: Path, data: dict):
+    """Save dict as YAML via yq"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    json_str = json.dumps(data, indent=2)
+    subprocess.run(
+        ["yq", "-P", "."],
+        input=json_str,
+        text=True,
+        stdout=open(path, "w"),
+        check=True
+    )
+
+
+# ── Receipt Index ────────────────────────────────────────────────────────────
+
+def load_receipt_index(receipt_index_file: Path = None) -> List[dict]:
+    """Load receipt index entries"""
+    index_file = receipt_index_file or RECEIPT_INDEX_FILE
+    if not index_file.exists():
+        return []
+    index_data = load_yaml(index_file)
+    return index_data.get("entries", [])
+
+
+def find_receipt_by_run_key(run_key: str, receipt_index_file: Path = None) -> Optional[dict]:
+    """Find receipt entry by run_key in index"""
+    entries = load_receipt_index(receipt_index_file)
+    for entry in entries:
+        if entry.get("run_id") == run_key:
+            return entry
+    return None
+
+
+# ── Completion Determination ─────────────────────────────────────────────────
+
+def determine_completion_status(
+    parent_run_key: str,
+    child_run_keys_expected: List[str],
+    timeout_utc: Optional[str] = None,
+    receipt_index_file: Path = None
+) -> dict:
+    """
+    Determine completion status for delegated work.
+
+    Returns dict with:
+      - completion_status: complete | awaiting_delegated_receipt | blocked_delegated | timeout_delegated
+      - child_run_keys_actual: list of child run keys found in receipt index
+      - child_run_keys_missing: list of expected but not found
+      - completion_determined_at_utc: ISO8601 timestamp
+      - timeout_exceeded: bool
+    """
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    now_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Find actual child receipts
+    child_run_keys_actual = []
+    child_run_keys_missing = []
+    child_statuses = {}
+
+    for expected_key in child_run_keys_expected:
+        receipt = find_receipt_by_run_key(expected_key, receipt_index_file)
+        if receipt:
+            child_run_keys_actual.append(expected_key)
+            child_statuses[expected_key] = receipt.get("status", "unknown")
+        else:
+            child_run_keys_missing.append(expected_key)
+
+    # Check timeout
+    timeout_exceeded = False
+    if timeout_utc:
+        try:
+            timeout_dt = dt.datetime.fromisoformat(timeout_utc.replace("Z", "+00:00"))
+            timeout_exceeded = now_utc > timeout_dt
+        except Exception:
+            pass
+
+    # Determine status based on criteria from role.runtime.control.contract.yaml
+    if len(child_run_keys_missing) == 0:
+        # All child receipts received
+        # Check if any failed
+        failed_children = [k for k, status in child_statuses.items() if status != "done"]
+        if failed_children:
+            completion_status = "blocked_delegated"
+        else:
+            completion_status = "complete"
+    elif timeout_exceeded:
+        completion_status = "timeout_delegated"
+    else:
+        completion_status = "awaiting_delegated_receipt"
+
+    return {
+        "parent_run_key": parent_run_key,
+        "completion_status": completion_status,
+        "child_run_keys_expected_count": len(child_run_keys_expected),
+        "child_run_keys_actual_count": len(child_run_keys_actual),
+        "child_run_keys_missing_count": len(child_run_keys_missing),
+        "child_run_keys_actual": child_run_keys_actual,
+        "child_run_keys_missing": child_run_keys_missing,
+        "child_statuses": child_statuses,
+        "timeout_exceeded": timeout_exceeded,
+        "completion_determined_at_utc": now_iso,
+    }
+
+
+# ── Linkage Management ───────────────────────────────────────────────────────
+
+def load_linkage(parent_run_key: str, linkage_dir: Path = None) -> Optional[dict]:
+    """Load linkage artifact for parent run key"""
+    link_dir = linkage_dir or DISPATCH_LINKAGE_DIR
+    linkage_file = link_dir / f"{parent_run_key}.linkage.yaml"
+    return load_yaml(linkage_file) if linkage_file.exists() else None
+
+
+def save_linkage(linkage_data: dict, linkage_dir: Path = None):
+    """Save linkage artifact"""
+    link_dir = linkage_dir or DISPATCH_LINKAGE_DIR
+    parent_run_key = linkage_data["parent_run_key"]
+    linkage_file = link_dir / f"{parent_run_key}.linkage.yaml"
+    save_yaml(linkage_file, linkage_data)
+
+
+def save_completion(completion_data: dict, completion_dir: Path = None):
+    """Save completion artifact"""
+    comp_dir = completion_dir or DISPATCH_COMPLETION_DIR
+    parent_run_key = completion_data["parent_run_key"]
+    completion_file = comp_dir / f"{parent_run_key}.completion.yaml"
+    save_yaml(completion_file, completion_data)
+
+
+# ── Query Commands ───────────────────────────────────────────────────────────
+
+def query_parent_completion(
+    parent_run_key: str,
+    json_output: bool = False,
+    receipt_index_file: Path = None,
+    linkage_dir: Path = None,
+    completion_dir: Path = None
+) -> dict:
+    """Query completion status for a parent run key"""
+    linkage = load_linkage(parent_run_key, linkage_dir)
+
+    if not linkage:
+        # No linkage artifact means this is not delegated work or linkage not yet created
+        result = {
+            "parent_run_key": parent_run_key,
+            "linkage_found": False,
+            "completion_status": "unknown",
+            "message": "No linkage artifact found. Either work is not delegated or linkage not yet created.",
+        }
+    else:
+        child_run_keys_expected = linkage.get("child_run_keys_expected", [])
+        timeout_utc = linkage.get("timeout_utc")
+
+        completion = determine_completion_status(
+            parent_run_key,
+            child_run_keys_expected,
+            timeout_utc,
+            receipt_index_file
+        )
+
+        # Save completion artifact
+        save_completion(completion, completion_dir)
+
+        result = {
+            "parent_run_key": parent_run_key,
+            "linkage_found": True,
+            **completion
+        }
+
+    if json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"parent_run_key: {result['parent_run_key']}")
+        print(f"linkage_found: {result['linkage_found']}")
+        if result["linkage_found"]:
+            print(f"completion_status: {result['completion_status']}")
+            print(f"child_run_keys_expected: {result['child_run_keys_expected_count']}")
+            print(f"child_run_keys_actual: {result['child_run_keys_actual_count']}")
+            print(f"child_run_keys_missing: {result['child_run_keys_missing_count']}")
+            if result["child_run_keys_missing"]:
+                print("missing_keys:")
+                for key in result["child_run_keys_missing"]:
+                    print(f"  - {key}")
+            if result.get("child_statuses"):
+                print("child_statuses:")
+                for key, status in result["child_statuses"].items():
+                    print(f"  - {key}: {status}")
+        else:
+            print(f"message: {result['message']}")
+
+    return result
+
+
+def list_delegated_work(
+    json_output: bool = False,
+    receipt_index_file: Path = None,
+    linkage_dir: Path = None
+):
+    """List all linkage artifacts (delegated work)"""
+    link_dir = linkage_dir or DISPATCH_LINKAGE_DIR
+    if not link_dir.exists():
+        if json_output:
+            print(json.dumps({"delegated_work": []}))
+        else:
+            print("No delegated work found (no linkage directory)")
+        return
+
+    linkage_files = list(link_dir.glob("*.linkage.yaml"))
+
+    results = []
+    for linkage_file in sorted(linkage_files):
+        linkage = load_yaml(linkage_file)
+        parent_run_key = linkage.get("parent_run_key", linkage_file.stem.replace(".linkage", ""))
+
+        child_run_keys_expected = linkage.get("child_run_keys_expected", [])
+        timeout_utc = linkage.get("timeout_utc")
+
+        completion = determine_completion_status(
+            parent_run_key,
+            child_run_keys_expected,
+            timeout_utc,
+            receipt_index_file
+        )
+
+        results.append({
+            "parent_run_key": parent_run_key,
+            "completion_status": completion["completion_status"],
+            "child_count_expected": len(child_run_keys_expected),
+            "child_count_actual": completion["child_run_keys_actual_count"],
+            "child_count_missing": completion["child_run_keys_missing_count"],
+        })
+
+    if json_output:
+        print(json.dumps({"delegated_work": results}, indent=2))
+    else:
+        print(f"Delegated work items: {len(results)}")
+        print()
+        for item in results:
+            print(f"parent_run_key: {item['parent_run_key']}")
+            print(f"  completion_status: {item['completion_status']}")
+            print(f"  children: {item['child_count_actual']}/{item['child_count_expected']} (missing: {item['child_count_missing']})")
+            print()
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    global SPINE_STATE, SPINE_EVIDENCE_ROOT, SPINE_VERIFY_ROOT
+    global RECEIPT_INDEX_FILE, DISPATCH_LINKAGE_DIR, DISPATCH_COMPLETION_DIR, DISPATCH_AGGREGATION_DIR
+
+    # Refresh paths to pick up environment overrides
+    _paths = get_paths()
+    SPINE_STATE = _paths["SPINE_STATE"]
+    SPINE_EVIDENCE_ROOT = _paths["SPINE_EVIDENCE_ROOT"]
+    SPINE_VERIFY_ROOT = _paths["SPINE_VERIFY_ROOT"]
+
+    RECEIPT_INDEX_FILE = SPINE_VERIFY_ROOT / "indexes/receipt-index.yaml"
+    DISPATCH_LINKAGE_DIR = SPINE_STATE / "dispatch/linkage"
+    DISPATCH_COMPLETION_DIR = SPINE_STATE / "dispatch/completion"
+    DISPATCH_AGGREGATION_DIR = SPINE_STATE / "dispatch/aggregation"
+
+    parser = argparse.ArgumentParser(
+        description="Receipt aggregation status - mechanical completion determination for delegated work"
+    )
+    parser.add_argument("--parent-run-key", help="Query completion status for parent run key (CAP-* or S-*)")
+    parser.add_argument("--wave-id", help="Query aggregation status for wave (NOT IMPLEMENTED YET)")
+    parser.add_argument("--loop-id", help="Query aggregation status for loop (NOT IMPLEMENTED YET)")
+    parser.add_argument("--list-delegated", action="store_true", help="List all delegated work items")
+    parser.add_argument("--json", action="store_true", help="Output JSON format")
+    parser.add_argument("--receipt-index", help="Override receipt index path (for testing)")
+    parser.add_argument("--linkage-dir", help="Override linkage directory path (for testing)")
+    parser.add_argument("--completion-dir", help="Override completion directory path (for testing)")
+
+    args = parser.parse_args()
+
+    # Apply overrides if provided (for testing)
+    if args.receipt_index:
+        RECEIPT_INDEX_FILE = Path(args.receipt_index)
+    if args.linkage_dir:
+        DISPATCH_LINKAGE_DIR = Path(args.linkage_dir)
+    if args.completion_dir:
+        DISPATCH_COMPLETION_DIR = Path(args.completion_dir)
+
+    if not any([args.parent_run_key, args.wave_id, args.loop_id, args.list_delegated]):
+        parser.print_help()
+        sys.exit(1)
+
+    if args.list_delegated:
+        list_delegated_work(args.json, RECEIPT_INDEX_FILE, DISPATCH_LINKAGE_DIR)
+        return
+
+    if args.parent_run_key:
+        query_parent_completion(
+            args.parent_run_key,
+            args.json,
+            RECEIPT_INDEX_FILE,
+            DISPATCH_LINKAGE_DIR,
+            DISPATCH_COMPLETION_DIR
+        )
+        return
+
+    if args.wave_id or args.loop_id:
+        print("ERROR: Wave and loop aggregation not yet implemented", file=sys.stderr)
+        print("Current scope: delegated completion determination only", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
