@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
 TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
+BACKUP_POSTURE="$ROOT/ops/bindings/domains/backup/backup.posture.snapshot.yaml"
 DRIFT_GATE="$ROOT/surfaces/verify/drift-gate.sh"
 
 PASS=0
@@ -40,11 +41,19 @@ fi
 d19_mode="$(yq e -r '.gates[] | select(.id == "D19") | .mode' "$REGISTRY")"
 d19_warn="$(yq e -r '.gates[] | select(.id == "D19") | (.warn_only // false | tostring)' "$REGISTRY")"
 d19_posture="$(yq e -r '.gates[] | select(.id == "D19") | .enforcement_decision.posture // ""' "$REGISTRY")"
-d19_as_of="$(yq e -r '.gates[] | select(.id == "D19") | .enforcement_decision.as_of // ""' "$REGISTRY")"
-if [[ "$d19_mode" == "report" && "$d19_warn" == "true" && "$d19_posture" == "hold_report_only" && "$d19_as_of" == "2026-04-05" ]]; then
-  pass "D19 hold posture is explicit and dated"
+if [[ "$d19_mode" == "enforce" && "$d19_warn" == "false" && -z "$d19_posture" ]]; then
+  pass "D19 is restored to enforce mode"
 else
-  fail "D19 hold posture is explicit and dated"
+  fail "D19 is restored to enforce mode"
+fi
+
+d19_lane_errors="$(yq e -r '.summary.lane_collect_errors_total // ""' "$BACKUP_POSTURE")"
+d19_tombstone_state="$(yq e -r '.lane_budgets.rows[] | select(.lane_id == "nas-legacy-tombstones") | .budget_state // ""' "$BACKUP_POSTURE")"
+d19_tombstone_class="$(yq e -r '.lane_budgets.rows[] | select(.lane_id == "nas-legacy-tombstones") | .telemetry_class // ""' "$BACKUP_POSTURE")"
+if [[ "$d19_lane_errors" == "0" && "$d19_tombstone_state" == "non_canonical_residue" && "$d19_tombstone_class" == "non_canonical_quarantine_residue" ]]; then
+  pass "backup posture excludes tombstone lane from active telemetry"
+else
+  fail "backup posture excludes tombstone lane from active telemetry"
 fi
 
 d107_retired="$(yq e -r '.gates[] | select(.id == "D107") | (.retired // false | tostring)' "$REGISTRY")"
@@ -56,11 +65,17 @@ else
 fi
 
 d62_layer="$(yq e -r '.gates[] | select(.id == "D62") | .layer // ""' "$REGISTRY")"
+d62_posture="$(yq e -r '.gates[] | select(.id == "D62") | .advisory_decision.posture // ""' "$REGISTRY")"
 d91_layer="$(yq e -r '.gates[] | select(.id == "D91") | .layer // ""' "$REGISTRY")"
 if [[ "$d62_layer" == "L2_shared_infrastructure" ]]; then
   pass "D62 is reclassified to L2"
 else
   fail "D62 is reclassified to L2"
+fi
+if [[ "$d62_posture" == "publication_only_advisory" ]]; then
+  pass "D62 publication-only advisory is explicit"
+else
+  fail "D62 publication-only advisory is explicit"
 fi
 if [[ "$d91_layer" == "L3_product_runtime" ]]; then
   pass "D91 is reclassified to L3"
@@ -118,10 +133,10 @@ else
   fi
   require_regex "$drift_out" '^LAYER SUMMARY:' "drift-gate prints layer summary header"
   require_regex "$drift_out" 'L1_engine: CLEAN' "drift-gate reports L1 clean"
-  require_regex "$drift_out" 'L2_shared_infrastructure: RESIDUE \(warn: D19(, D62)?\)|L2_shared_infrastructure: RESIDUE \(warn: D62, D19\)' "drift-gate reports L2 residue separately"
+  require_regex "$drift_out" 'L2_shared_infrastructure: CLEAN' "drift-gate reports L2 clean"
   require_regex "$drift_out" 'L3_product_runtime: CLEAN' "drift-gate reports L3 clean"
   require_regex "$drift_out" 'D107 Media NFS mount lock... SKIP \(retired\)' "drift-gate skips retired D107"
-  require_regex "$drift_out" 'governed hold as_of=2026-04-05' "drift-gate prints explicit governed hold rationale"
+  require_regex "$drift_out" 'publication-only advisory' "drift-gate prints D62 publication-only advisory"
 fi
 
 echo "────────────────────────────────────────"

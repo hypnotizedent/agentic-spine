@@ -33,9 +33,7 @@ resolve_family_lib_path() {
   printf '%s\n' "$(dirname "$(dirname "$script_path")")/lib/$lib_name"
 }
 
-SNAPSHOT_SURFACE_LIB="$(resolve_family_lib_path "snapshot.projection.apply" "./ops/plugins/core/kernel/snapshot/bin/snapshot-projection-apply" "snapshot-surface-common.sh")"
-source "$SNAPSHOT_SURFACE_LIB"
-POSTURE_FILE="$(snapshot_surface_resolve_source_path "$ROOT" "ops/bindings/domains/backup/backup.posture.snapshot.yaml")"
+POSTURE_FILE="$ROOT/ops/bindings/domains/backup/backup.posture.snapshot.yaml"
 
 fail(){ echo "D19 FAIL: $*" >&2; exit 1; }
 

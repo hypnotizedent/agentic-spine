@@ -314,33 +314,38 @@ for lane_id, lane in dest_lanes.items():
 
     max_total_gb = lane.get("max_total_gb")
     max_file_count = lane.get("max_file_count")
+    telemetry_class = str(lane.get("telemetry_class") or "canonical_active")
 
     lane_bytes = 0
     lane_files = 0
     host_probes = []
     lane_state = "ok"
 
-    for host_id in hosts:
-        cfg = dict(ssh_defaults)
-        cfg.update(ssh_index.get(host_id, {}))
-        probe = ssh_probe(cfg, base_path)
-        probe_row = {
-            "host": host_id,
-            "probe_state": probe["status"],
-            "reason": probe["reason"],
-            "bytes": probe["bytes"],
-            "files": probe["files"],
-        }
-        host_probes.append(probe_row)
-        if probe["status"] in {"error", "path_missing"}:
-            lane_state = "collect_error"
-            collect_errors += 1
-        elif probe["status"] == "context_blocked" and lane_state == "ok":
-            lane_state = "context_blocked"
-        lane_bytes += int(probe["bytes"])
-        lane_files += int(probe["files"])
+    if telemetry_class == "non_canonical_quarantine_residue":
+        lane_state = "non_canonical_residue"
 
-    if lane_state == "ok":
+    if telemetry_class == "canonical_active":
+        for host_id in hosts:
+            cfg = dict(ssh_defaults)
+            cfg.update(ssh_index.get(host_id, {}))
+            probe = ssh_probe(cfg, base_path)
+            probe_row = {
+                "host": host_id,
+                "probe_state": probe["status"],
+                "reason": probe["reason"],
+                "bytes": probe["bytes"],
+                "files": probe["files"],
+            }
+            host_probes.append(probe_row)
+            if probe["status"] in {"error", "path_missing"}:
+                lane_state = "collect_error"
+                collect_errors += 1
+            elif probe["status"] == "context_blocked" and lane_state == "ok":
+                lane_state = "context_blocked"
+            lane_bytes += int(probe["bytes"])
+            lane_files += int(probe["files"])
+
+    if telemetry_class == "canonical_active" and lane_state == "ok":
         if isinstance(max_total_gb, (int, float)) and lane_bytes > int(max_total_gb * 1024 * 1024 * 1024):
             lane_state = "over_budget"
         if isinstance(max_file_count, int) and lane_files > max_file_count:
@@ -355,6 +360,7 @@ for lane_id, lane in dest_lanes.items():
             "hosts": hosts,
             "budget_max_total_gb": max_total_gb,
             "budget_max_file_count": max_file_count,
+            "telemetry_class": telemetry_class,
             "current_total_gb": round(lane_bytes / (1024 * 1024 * 1024), 2),
             "current_file_count": lane_files,
             "budget_state": lane_state,

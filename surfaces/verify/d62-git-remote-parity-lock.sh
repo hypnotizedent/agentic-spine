@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Canonical push is origin only. Repair github mirror only during explicit release publishing.
+# TRIAGE: Canonical push is origin only. GitHub drift is publication-only advisory; repair it only through explicit publication flow or GitHub admin mirror maintenance.
 # D62: Git remote authority lock (Gitea canonical, GitHub mirror-only)
 #
 # Purpose:
@@ -50,7 +50,7 @@ if git remote get-url github >/dev/null 2>&1; then
   if [[ -z "${g_sha:-}" ]]; then
     warn "github mirror ref missing: $g_ref (fetch failed or remote misconfigured)"
   elif [[ "$o_sha" != "$g_sha" ]]; then
-    warn "github mirror drift: ${o_ref}=${o_sha} != ${g_ref}=${g_sha} (repair mirror; canonical is origin)"
+    warn "github mirror drift: ${o_ref}=${o_sha} != ${g_ref}=${g_sha} (publication-only advisory; canonical is origin, repair only via publication flow or GitHub admin mirror maintenance)"
   fi
 fi
 

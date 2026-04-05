@@ -83,6 +83,14 @@ trim_gate_ids() {
   printf '%s\n' "${values// /, }"
 }
 
+resolve_gate_class() {
+  local gate_id="$1"
+  if [[ ! -f "$REGISTRY" ]] || ! command -v yq >/dev/null 2>&1; then
+    return 0
+  fi
+  yq e -r ".gates[] | select(.id == \"$gate_id\") | .gate_class // \"\"" "$REGISTRY" 2>/dev/null || true
+}
+
 resolve_gate_layer() {
   local gate_id="$1"
   local layer="" primary_domain=""
@@ -116,9 +124,13 @@ resolve_gate_layer() {
 record_gate_result() {
   local gate_id="$1"
   local severity="$2"
-  local layer fail_var warn_var fail_ids
+  local gate_class layer fail_var warn_var fail_ids
 
   [[ -n "$gate_id" ]] || return 0
+  gate_class="$(resolve_gate_class "$gate_id")"
+  if [[ "$severity" == "warn" && "$gate_class" == "advisory" ]]; then
+    return 0
+  fi
   layer="$(resolve_gate_layer "$gate_id")"
   case "$layer" in
     L1_engine)
