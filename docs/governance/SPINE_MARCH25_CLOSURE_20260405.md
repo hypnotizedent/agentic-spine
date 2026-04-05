@@ -14,7 +14,7 @@ As of `2026-04-05`, the March 25 post-V3 spine closure program is closed to gove
 The operator reporting boundary is now explicit:
 
 - `L1_engine` is clean.
-- `L2_shared_infrastructure` carries the remaining explicit operational residue.
+- `L2_shared_infrastructure` is clean on the operational drift surface.
 - `L3_product_runtime` is clean on the active drift surface.
 
 No remaining March 25 residue is left in silent warn-only limbo.
@@ -36,13 +36,13 @@ Layer-aware drift reporting now classifies remaining residue by governed layer i
 Authoritative layer outcomes on `2026-04-05`:
 
 - `L1_engine`: clean
-- `L2_shared_infrastructure`: residue present
+- `L2_shared_infrastructure`: clean on the operational drift surface
 - `L3_product_runtime`: clean
 
 Specific reclassifications:
 
 - `D62` is classified as `L2_shared_infrastructure`
-  - rationale: GitHub mirror drift is publication/infrastructure advisory, not engine-integrity failure
+  - rationale: GitHub mirror drift is publication-only advisory, not engine-integrity failure or live operational residue
 - `D91` is classified as `L3_product_runtime`
   - rationale: AOF product foundation is product-runtime truth, not spine engine truth
 
@@ -59,6 +59,9 @@ Specific reclassifications:
   - HA Z2M snapshot helper now promotes tracked output to `ops/bindings/domains/ha/z2m.devices.yaml`
 - `D101` fixed to green
   - HA add-on snapshot helper now promotes tracked output to `ops/bindings/domains/ha/ha.addons.yaml`
+- `D19` fixed to green
+  - `nas-legacy-tombstones` is now modeled as `non_canonical_quarantine_residue`
+  - backup posture telemetry no longer counts that quarantine lane as live budget error, and `D19` is restored to enforce mode
 
 ## Gates Retired In This Closure Pass
 
@@ -69,16 +72,13 @@ Specific reclassifications:
     - `ops/bindings/services.health.yaml`
     - `ops/bindings/domains/media/media.services.yaml`
 
-## Explicit Holds That Remain
+## Accepted Publication Advisories
 
-- `D19` remains on explicit governed hold as of `2026-04-05`
-  - posture: `hold_report_only`
-  - exact blocker: `backup.posture.snapshot.build` now resolves canonical domain paths and `D19`'s stale false positives are removed, but `lane_collect_errors_total=1` remains because `nas-legacy-tombstones` is still probed as an active destination lane even though the inventory describes it as non-canonical quarantine residue
-  - governed follow-up truth:
-    - `ops/bindings/domains/backup/backup.inventory.yaml`
-    - `ops/bindings/domains/backup/backup.posture.snapshot.yaml`
-    - `ops/plugins/infra/backup/bin/backup-posture-snapshot-build`
-    - `ops/plugins/infra/backup/bin/backup-status`
+- `D62` remains an accepted publication-only advisory as of `2026-04-05`
+  - exact decision: keep `origin/main` as operational truth and do not reopen spine work over GitHub mirror drift
+  - attempted mirror action: `git push --force-with-lease github origin/main:refs/heads/main`
+  - result: rejected by GitHub protected branch policy (`GH006: Cannot force-push to this branch`)
+  - operator action: no spine remediation required during operational work; repair only through explicit publication flow or GitHub admin mirror maintenance
 
 ## Receipts And Runs
 
@@ -100,7 +100,8 @@ Closure chain in landing order:
 1. `8dd9300b9b7309f1bb6338bd8ddeffb650a78458` — `D67` / `D127`
 2. `0eb7f6395b5535ec668a3874658be737a53871c9` — `D213` / `D225` / infisical hardening
 3. `33296bf5a5859efb76c2a1369a3f4aa55aa038c2` — `D75`
-4. `b09405e446a356ece3755c60d1ca5017237a5ad2` — layer-aware drift reporting, Cluster A fixes, Cluster B closure truth
+4. `b09405e41c130a85017a899278f514ec9ea545ba` — layer-aware drift reporting, Cluster A fixes, Cluster B closure truth
+5. `22531253017a90d7c1c76870139ace763d52c383` — clear `D19` residue and codify `D62` publication-only advisory
 
 ## Final Operator Read
 
@@ -109,5 +110,9 @@ If `drift-gate` is non-green after this closure, it should no longer be read as 
 Read it this way:
 
 - `L1_engine`: clean
-- `L2_shared_infrastructure`: explicit residue only (`D19` governed hold, `D62` publication mirror advisory)
+- `L2_shared_infrastructure`: clean on the operational drift surface
 - `L3_product_runtime`: clean
+
+Publication advisory:
+
+- `D62`: GitHub mirror drift remains visible, but it is outside operational spine health and requires publication/admin flow rather than spine remediation
