@@ -39,12 +39,75 @@ REQUIRED_TRAILERS=()
 while IFS= read -r trailer; do
   [[ -n "$trailer" ]] && REQUIRED_TRAILERS+=("$trailer")
 done < <(yq e -r '.gap_projection_enforcement.required_trailers[] // ""' "$CONTRACT_FILE" 2>/dev/null || true)
+HISTORICAL_EXEMPTIONS_JSON="$(yq e -o=json '.gap_projection_enforcement.historical_exemptions // []' "$CONTRACT_FILE" 2>/dev/null || printf '[]')"
 
 [[ -n "$GAPS_FILE_REL" ]] || fail "gap projection path missing in contract"
 [[ -n "$WINDOW" ]] || fail "gap projection window missing in contract"
 [[ -n "$ENFORCEMENT_SHA" ]] || fail "gap projection enforcement SHA missing in contract"
 [[ "${#REQUIRED_TRAILERS[@]}" -gt 0 ]] || fail "required D75 trailers missing in contract"
 [[ -f "$GAPS_FILE" ]] || fail "gap registry not found: $GAPS_FILE"
+
+HISTORICAL_EXEMPTIONS_RAW="$(
+  EXPECTED_PATH="$GAPS_FILE_REL" \
+    python3 -c '
+import json
+import os
+import re
+import sys
+
+expected_path = os.environ["EXPECTED_PATH"]
+
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"historical_exemptions must be valid JSON: {exc}")
+
+if not isinstance(data, list):
+    raise SystemExit("historical_exemptions must be a list")
+
+seen = set()
+for idx, item in enumerate(data):
+    if not isinstance(item, dict):
+        raise SystemExit(f"historical_exemptions[{idx}] must be a map")
+
+    commit = str(item.get("commit", "")).strip()
+    as_of = str(item.get("as_of", "")).strip()
+    rationale = str(item.get("rationale", "")).strip()
+    path = str(item.get("path", "")).strip()
+
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise SystemExit(
+            f"historical_exemptions[{idx}].commit must be a full 40-char SHA"
+        )
+    if path != expected_path:
+        raise SystemExit(
+            f"historical_exemptions[{idx}].path must equal {expected_path}"
+        )
+    if not as_of:
+        raise SystemExit(f"historical_exemptions[{idx}].as_of is required")
+    if not rationale:
+        raise SystemExit(f"historical_exemptions[{idx}].rationale is required")
+    if commit in seen:
+        raise SystemExit(f"historical_exemptions duplicate commit: {commit}")
+
+    seen.add(commit)
+    print(commit)
+' <<< "$HISTORICAL_EXEMPTIONS_JSON"
+)" || fail "invalid historical_exemptions block in $CONTRACT_FILE"
+
+HISTORICAL_EXEMPTIONS=()
+while IFS= read -r sha; do
+  [[ -n "$sha" ]] && HISTORICAL_EXEMPTIONS+=("$sha")
+done <<< "$HISTORICAL_EXEMPTIONS_RAW"
+
+is_historical_exempt_commit() {
+  local sha="${1:-}"
+  local exempt
+  for exempt in "${HISTORICAL_EXEMPTIONS[@]}"; do
+    [[ "$sha" == "$exempt" ]] && return 0
+  done
+  return 1
+}
 
 # ── Check 1: No uncommitted changes to gap registry ──
 if ! git -C "$ROOT" diff --quiet -- "$GAPS_FILE_REL" 2>/dev/null; then
@@ -84,6 +147,7 @@ if ! git -C "$ROOT" merge-base --is-ancestor "$ENFORCEMENT_SHA" HEAD 2>/dev/null
 fi
 
 VIOLATIONS=()
+EXEMPTED_VIOLATIONS=0
 
 while IFS= read -r sha; do
   [[ -z "$sha" ]] && continue
@@ -99,6 +163,10 @@ while IFS= read -r sha; do
   done
 
   if [[ ${#missing[@]} -gt 0 ]]; then
+    if is_historical_exempt_commit "$sha"; then
+      EXEMPTED_VIOLATIONS=$((EXEMPTED_VIOLATIONS + 1))
+      continue
+    fi
     short="$(git -C "$ROOT" log -1 --format="%h %s" "$sha")"
     VIOLATIONS+=("$short (missing: ${missing[*]})")
   fi
@@ -109,4 +177,4 @@ if [[ ${#VIOLATIONS[@]} -gt 0 ]]; then
 $(printf '  - %s\n' "${VIOLATIONS[@]}")"
 fi
 
-echo "D75 PASS: gap registry mutation lock (dirty=clean, writers=authority-only, parity=valid, trailers=valid)"
+echo "D75 PASS: gap registry mutation lock (dirty=clean, writers=authority-only, parity=valid, trailers=valid, historical_exemptions=$EXEMPTED_VIOLATIONS)"
