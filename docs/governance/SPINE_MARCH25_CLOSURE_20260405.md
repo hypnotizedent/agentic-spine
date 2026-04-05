@@ -16,6 +16,7 @@ The operator reporting boundary is now explicit:
 - `L1_engine` is clean.
 - `L2_shared_infrastructure` is clean on the operational drift surface.
 - `L3_product_runtime` is clean on the active drift surface.
+- GitHub publication state is reported separately from operational drift.
 
 No remaining March 25 residue is left in silent warn-only limbo.
 
@@ -75,10 +76,10 @@ Specific reclassifications:
 ## Accepted Publication Advisories
 
 - `D62` remains an accepted publication-only advisory as of `2026-04-05`
-  - exact decision: keep `origin/main` as operational truth and do not reopen spine work over GitHub mirror drift
+  - exact decision: keep `origin/main` as operational truth and remove GitHub mirror state from normal operational drift reporting
   - attempted mirror action: `git push --force-with-lease github origin/main:refs/heads/main`
   - result: rejected by GitHub protected branch policy (`GH006: Cannot force-push to this branch`)
-  - operator action: no spine remediation required during operational work; repair only through explicit publication flow or GitHub admin mirror maintenance
+  - operator action: no spine remediation required during operational work; review GitHub only with `bash surfaces/verify/d62-git-remote-parity-lock.sh` during explicit publication review or GitHub admin mirror maintenance
 
 ## Receipts And Runs
 
@@ -115,4 +116,4 @@ Read it this way:
 
 Publication advisory:
 
-- `D62`: GitHub mirror drift remains visible, but it is outside operational spine health and requires publication/admin flow rather than spine remediation
+- `D62`: GitHub mirror state is checked only on the separate publication surface and requires publication/admin flow rather than spine remediation

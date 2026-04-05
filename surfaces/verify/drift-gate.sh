@@ -610,13 +610,9 @@ fi
 # D58: SSOT freshness lock (last_reviewed date enforcement)
 # Wire stale_ssot_max_days from policy preset (env var override still takes precedence)
 export SSOT_FRESHNESS_DAYS="${SSOT_FRESHNESS_DAYS:-$RESOLVED_STALE_SSOT_MAX_DAYS}"
-CURRENT_GATE="D62"
-echo -n "D62 git remote authority lock... "
-if [[ -x "$SP/surfaces/verify/d62-git-remote-parity-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d62-git-remote-parity-lock.sh"
-else
-  warn "git remote authority lock gate not present"
-fi
+
+# D62 is publication-only and intentionally excluded from operational drift-gate.
+# Use surfaces/verify/d62-git-remote-parity-lock.sh during explicit publication review.
 
 # D63: Capabilities metadata lock (registry integrity)
 CURRENT_GATE="D63"

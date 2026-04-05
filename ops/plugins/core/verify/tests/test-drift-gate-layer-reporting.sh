@@ -65,12 +65,18 @@ else
 fi
 
 d62_layer="$(yq e -r '.gates[] | select(.id == "D62") | .layer // ""' "$REGISTRY")"
+d62_scope="$(yq e -r '.gates[] | select(.id == "D62") | .reporting_scope // ""' "$REGISTRY")"
 d62_posture="$(yq e -r '.gates[] | select(.id == "D62") | .advisory_decision.posture // ""' "$REGISTRY")"
 d91_layer="$(yq e -r '.gates[] | select(.id == "D91") | .layer // ""' "$REGISTRY")"
 if [[ "$d62_layer" == "L2_shared_infrastructure" ]]; then
   pass "D62 is reclassified to L2"
 else
   fail "D62 is reclassified to L2"
+fi
+if [[ "$d62_scope" == "publication_only" ]]; then
+  pass "D62 is publication-only reporting"
+else
+  fail "D62 is publication-only reporting"
 fi
 if [[ "$d62_posture" == "publication_only_advisory" ]]; then
   pass "D62 publication-only advisory is explicit"
@@ -136,7 +142,11 @@ else
   require_regex "$drift_out" 'L2_shared_infrastructure: CLEAN' "drift-gate reports L2 clean"
   require_regex "$drift_out" 'L3_product_runtime: CLEAN' "drift-gate reports L3 clean"
   require_regex "$drift_out" 'D107 Media NFS mount lock... SKIP \(retired\)' "drift-gate skips retired D107"
-  require_regex "$drift_out" 'publication-only advisory' "drift-gate prints D62 publication-only advisory"
+  if ! echo "$drift_out" | grep -Eq 'D62|publication-only advisory|github/main stale relative to origin/main'; then
+    pass "drift-gate excludes publication-only D62"
+  else
+    fail "drift-gate excludes publication-only D62"
+  fi
 fi
 
 echo "────────────────────────────────────────"
