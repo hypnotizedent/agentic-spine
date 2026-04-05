@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""
+Extraction Layer Query
+Query the extraction truth classification (L1/L2/L3) for capabilities and domains.
+
+Scope: domain + capability extraction truth only.
+Service and VM extraction are explicitly deferred (not implemented).
+
+Usage:
+  extraction-layer-query --capability <cap-id>
+  extraction-layer-query --domain <domain-id>
+  extraction-layer-query --summary
+"""
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+TOPOLOGY_FILE = ROOT / "ops/bindings/gate.execution.topology.yaml"
+CAP_FILE = ROOT / "ops/capabilities.yaml"
+SVC_FILE = ROOT / "docs/governance/SERVICE_REGISTRY.yaml"
+VM_FILE = ROOT / "ops/bindings/vm.lifecycle.yaml"
+CONTRACT_FILE = ROOT / "ops/bindings/extraction.truth.contract.yaml"
+
+
+def load_yaml(path: Path) -> dict:
+    """Load YAML file and return as dict"""
+    raw = subprocess.run(
+        ["yq", "-o=json", ".", str(path)],
+        capture_output=True, text=True, check=False,
+    )
+    if raw.returncode != 0:
+        print(f"Error loading {path}: {raw.stderr}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        return json.loads(raw.stdout)
+    except json.JSONDecodeError as e:
+        print(f"Error parsing {path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def get_domain_layer(domain_id: str, topology: dict) -> str | None:
+    """Get layer for a domain"""
+    for domain in topology.get("domain_metadata", []):
+        if domain.get("domain_id") == domain_id:
+            return domain.get("layer")
+    return None
+
+
+def get_capability_layer(cap_id: str, caps: dict, topology: dict) -> str | None:
+    """Get layer for a capability"""
+    cap = caps.get("capabilities", {}).get(cap_id)
+    if not cap:
+        return None
+
+    # domain=none capabilities have explicit layer
+    if cap.get("domain") == "none":
+        return cap.get("layer")
+
+    # Other capabilities inherit from domain
+    domain = cap.get("domain")
+    if domain:
+        return get_domain_layer(domain, topology)
+
+    return None
+
+
+def print_summary(topology: dict, caps: dict):
+    """Print summary of extraction truth classification"""
+    # Domain summary
+    domain_layers = {}
+    for domain in topology.get("domain_metadata", []):
+        domain_id = domain.get("domain_id")
+        layer = domain.get("layer")
+        if layer not in domain_layers:
+            domain_layers[layer] = []
+        domain_layers[layer].append(domain_id)
+
+    print("DOMAIN LAYER CLASSIFICATION")
+    print("=" * 60)
+    for layer in ["L1_engine", "L2_shared_infrastructure", "L3_product_runtime"]:
+        domains = domain_layers.get(layer, [])
+        print(f"{layer}: {len(domains)}")
+        for domain in sorted(domains):
+            print(f"  - {domain}")
+
+    # Capability summary (domain=none only)
+    cap_layers = {"L1_engine": 0, "L2_shared_infrastructure": 0, "L3_product_runtime": 0}
+    for cap_id, cap in caps.get("capabilities", {}).items():
+        if cap.get("domain") == "none":
+            layer = cap.get("layer")
+            if layer in cap_layers:
+                cap_layers[layer] += 1
+
+    print("\nDOMAIN=NONE CAPABILITY LAYER CLASSIFICATION")
+    print("=" * 60)
+    total = sum(cap_layers.values())
+    for layer in ["L1_engine", "L2_shared_infrastructure", "L3_product_runtime"]:
+        count = cap_layers[layer]
+        pct = (count / total * 100) if total > 0 else 0
+        print(f"{layer}: {count} ({pct:.1f}%)")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Query extraction layer classification (domain + capability only)")
+    parser.add_argument("--capability", help="Query capability by ID")
+    parser.add_argument("--domain", help="Query domain by ID")
+    parser.add_argument("--summary", action="store_true", help="Show classification summary")
+
+    args = parser.parse_args()
+
+    if not any([args.capability, args.domain, args.summary]):
+        parser.print_help()
+        sys.exit(1)
+
+    # Load data
+    topology = load_yaml(TOPOLOGY_FILE)
+    caps = load_yaml(CAP_FILE)
+
+    if args.summary:
+        print_summary(topology, caps)
+        return
+
+    if args.domain:
+        layer = get_domain_layer(args.domain, topology)
+        if layer:
+            print(f"domain={args.domain} layer={layer}")
+        else:
+            print(f"Error: domain '{args.domain}' not found", file=sys.stderr)
+            sys.exit(1)
+
+    if args.capability:
+        layer = get_capability_layer(args.capability, caps, topology)
+        if layer:
+            cap = caps.get("capabilities", {}).get(args.capability, {})
+            domain = cap.get("domain", "unknown")
+            source = "explicit" if domain == "none" else f"inherited from domain={domain}"
+            print(f"capability={args.capability} layer={layer} ({source})")
+        else:
+            print(f"Error: capability '{args.capability}' not found", file=sys.stderr)
+            sys.exit(1)
+
+
+
+if __name__ == "__main__":
+    main()

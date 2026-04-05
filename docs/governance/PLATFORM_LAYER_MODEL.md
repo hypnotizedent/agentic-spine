@@ -31,6 +31,7 @@ layer truth that future passes must use.
 - [`NORTH_STAR.md`](../../NORTH_STAR.md) defines what the spine is for.
 - [`SPINE.md`](SPINE.md) defines how work lands.
 - [`governed.change.lifecycle.contract.yaml`](../../ops/bindings/governed.change.lifecycle.contract.yaml) defines how new governed truth is created.
+- [`extraction.truth.contract.yaml`](../../ops/bindings/extraction.truth.contract.yaml) defines the machine-enforced extraction truth model and classification rules.
 - [`spine.surface.metabolism.registry.yaml`](../../ops/archive/pre-2026-04-01-spine/ops/bindings/spine.surface.metabolism.registry.yaml) defines what areas are live, stale, or only partially enforced.
 
 This document answers a different question:
@@ -446,18 +447,22 @@ Current capability metadata already uses:
 - `domain`
 - `plane`
 - `lifecycle`
+- `layer` (for domain=none capabilities)
 
-That is not enough for layer-aware reasoning.
+### Layer Field Implementation
 
-### Recommended Future Field
+**Status**: Implemented (2026-04-05)
 
-When elected, add:
-- `layer`
-
-Suggested semantics:
+The `layer` field is now part of the governed schema:
 - `L1_engine`
 - `L2_shared_infrastructure`
 - `L3_product_runtime`
+
+**Scope**: domain=none capabilities only. Non-domain-none capabilities inherit layer from their domain classification in `gate.execution.topology.yaml`.
+
+**Enforcement**: D426 (capability layer classification lock) and D428 (extraction truth parity).
+
+**Machine truth**: `ops/bindings/extraction.truth.contract.yaml` is the authoritative extraction truth contract.
 
 Interpretation:
 - `domain` answers ownership
