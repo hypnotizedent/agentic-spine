@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-27
+last_verified: 2026-04-05
 scope: spine-minimal-operating-contract
 ---
 
@@ -57,6 +57,7 @@ OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "..."
 5. **`OPS_GOVERNED_MAIN_OVERRIDE=1` is not a D48 bypass.** It authorizes intentional main commits only. D48, D150, and the rest of the hook/verify gates still enforce.
 6. **Shared root-lane mutation is blocking contention.** Multiple terminals are independent only when they do not share the same root checkout, git index, or protected hotspot surfaces. Separate managed worktrees are the normal parallel model.
 7. **Verify after mutations.** After committing, run `./bin/ops cap run verify.run -- fast` to confirm no gates broke.
+8. **Run git/worktree hygiene as an explicit maintenance pass.** Inventory with `python3 ./ops/plugins/core/lifecycle/bin/git-worktree-hygiene --brief`. Safe prune remains dry-run by default and only applies with `--apply`. Policy and operator notes live in `docs/governance/GIT_WORKTREE_HYGIENE.md`.
 
 ## Program Closeout
 

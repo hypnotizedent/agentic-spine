@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import os
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def expand(raw: str | Path) -> Path:
+    return Path(os.path.expanduser(os.path.expandvars(str(raw)))).resolve()
+
+
+def git_top_level(start: Path) -> Path | None:
+    probe = start if start.is_dir() else start.parent
+    proc = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    return Path(stdout).resolve() if stdout else None
+
+
+def resolve_root(explicit: str | None = None) -> Path:
+    if explicit:
+        return expand(explicit)
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+    script_root = git_top_level(Path(__file__).resolve())
+    if script_root is not None:
+        return script_root
+    return expand(Path(__file__).resolve().parents[5])
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="git-worktree-hygiene")
+    parser.add_argument("--root", help="Target checkout root.")
+    parser.add_argument("--policy", help="Policy file path.")
+    parser.add_argument("--apply", action="store_true", help="Apply safe prune actions.")
+    parser.add_argument(
+        "--maintenance",
+        action="store_true",
+        help="Run explicit git maintenance after prune when paired with --apply.",
+    )
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--brief", action="store_true")
+    return parser.parse_args()
+
+
+def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(
+        ["git", "-C", str(root), *args],
+        text=True,
+        capture_output=True,
+    )
+    if check and proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip() or "git command failed"
+        raise RuntimeError(detail)
+    return proc
+
+
+def git_output(root: Path, *args: str) -> str:
+    return git(root, *args).stdout.strip()
+
+
+def parse_worktrees(root: Path) -> list[dict[str, Any]]:
+    raw = git_output(root, "worktree", "list", "--porcelain")
+    rows: list[dict[str, Any]] = []
+    current: dict[str, Any] = {}
+    for line in raw.splitlines():
+        if not line.strip():
+            if current:
+                rows.append(current)
+                current = {}
+            continue
+        key, _, value = line.partition(" ")
+        if key == "worktree":
+            current["path"] = value.strip()
+        elif key == "HEAD":
+            current["head"] = value.strip()
+        elif key == "branch":
+            current["branch_ref"] = value.strip()
+        else:
+            current[key] = value.strip() if value else True
+    if current:
+        rows.append(current)
+    return rows
+
+
+def status_clean(path: Path) -> bool:
+    proc = subprocess.run(
+        ["git", "-C", str(path), "status", "--porcelain", "--untracked-files=all"],
+        text=True,
+        capture_output=True,
+    )
+    return proc.returncode == 0 and proc.stdout.strip() == ""
+
+
+def ref_exists(root: Path, ref: str) -> bool:
+    proc = git(root, "rev-parse", "--verify", "--quiet", ref, check=False)
+    return proc.returncode == 0 and proc.stdout.strip() != ""
+
+
+def ancestor_of(root: Path, older: str, newer: str) -> bool:
+    proc = git(root, "merge-base", "--is-ancestor", older, newer, check=False)
+    return proc.returncode == 0
+
+
+def unique_commit_count(root: Path, ref: str, canonical_ref: str) -> int | None:
+    proc = git(root, "rev-list", "--count", ref, "--not", canonical_ref, check=False)
+    if proc.returncode != 0:
+        return None
+    text = proc.stdout.strip()
+    return int(text) if text.isdigit() else None
+
+
+def count_objects(root: Path) -> dict[str, str]:
+    proc = git(root, "count-objects", "-v", check=False)
+    result: dict[str, str] = {}
+    for line in (proc.stdout or "").splitlines():
+        key, _, value = line.partition(":")
+        if key and value:
+            result[key.strip()] = value.strip()
+    return result
+
+
+def run_maintenance(root: Path, commands: list[str]) -> tuple[bool, str]:
+    for command in commands:
+        proc = subprocess.run(
+            command.split(),
+            cwd=str(root),
+            text=True,
+            capture_output=True,
+        )
+        if proc.returncode == 0:
+            detail = (proc.stdout or proc.stderr or "").strip() or command
+            return True, f"{command}: {detail}"
+    return False, "all maintenance commands failed"
+
+
+def matches_any(value: str, patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatch(value, pattern) for pattern in patterns)
+
+
+def main() -> None:
+    args = parse_args()
+    root = resolve_root(args.root)
+    policy_path = expand(args.policy) if args.policy else root / "ops/bindings/git.worktree.hygiene.policy.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))["policy"]
+
+    canonical_main_ref = policy["canonical_main_ref"]
+    canonical_remote = policy["canonical_remote"]
+    protected_local_branches = set(policy.get("protected_local_branches") or [])
+    ephemeral_prefixes = list(policy.get("ephemeral_branch_namespace_prefixes") or [])
+    preserve_patterns = list(policy.get("preserve_branch_patterns") or [])
+    maintenance_commands = list(policy["maintenance"]["apply_command_preference"])
+
+    errors: list[str] = []
+    apply_actions: list[str] = []
+    any_mutation = False
+
+    if not ref_exists(root, canonical_main_ref):
+        errors.append(f"missing canonical main ref: {canonical_main_ref}")
+
+    worktree_rows = parse_worktrees(root)
+    worktrees: list[dict[str, Any]] = []
+
+    for row in worktree_rows:
+        path = Path(row["path"]).resolve()
+        branch_ref = row.get("branch_ref")
+        branch = branch_ref.removeprefix("refs/heads/") if branch_ref else None
+        current_root = path == root.resolve()
+        clean = status_clean(path)
+        preserve = bool(branch and matches_any(branch, preserve_patterns))
+        protected = bool(branch and branch in protected_local_branches)
+        ephemeral = bool(branch and any(branch.startswith(prefix) for prefix in ephemeral_prefixes))
+        merged = bool(branch_ref and ref_exists(root, branch_ref) and ancestor_of(root, branch_ref, canonical_main_ref))
+        unique = unique_commit_count(root, branch_ref, canonical_main_ref) if branch_ref else None
+
+        if preserve:
+            classification = "preserve"
+        elif current_root or protected:
+            classification = "active"
+        elif branch_ref and not ephemeral:
+            classification = "unknown"
+        elif branch_ref and clean and merged and unique == 0:
+            classification = "prunable_landed"
+        elif branch_ref:
+            classification = "active"
+        else:
+            classification = "unknown"
+
+        worktrees.append(
+            {
+                "path": str(path),
+                "branch": branch,
+                "branch_ref": branch_ref,
+                "head": row.get("head"),
+                "current_root": current_root,
+                "clean": clean,
+                "classification": classification,
+                "proof": {
+                    "merged_into_canonical_main": merged,
+                    "unique_commits_vs_canonical_main": unique,
+                    "ephemeral_namespace_match": ephemeral,
+                    "preserve_pattern_match": preserve,
+                    "protected_local_branch": protected,
+                },
+                "pruned": False,
+            }
+        )
+
+    remote_prefixes = [f"refs/remotes/{canonical_remote}/{prefix}" for prefix in ephemeral_prefixes]
+    remote_refs = sorted(
+        git_output(root, "for-each-ref", "--format=%(refname)", f"refs/remotes/{canonical_remote}")
+        .splitlines()
+    )
+
+    remote_branches: list[dict[str, Any]] = []
+    for ref in remote_refs:
+        if not any(ref.startswith(prefix) for prefix in remote_prefixes):
+            continue
+        short = ref.removeprefix(f"refs/remotes/{canonical_remote}/")
+        preserve = matches_any(short, preserve_patterns)
+        merged = ancestor_of(root, ref, canonical_main_ref)
+        unique = unique_commit_count(root, ref, canonical_main_ref)
+        attached_worktrees = [wt["path"] for wt in worktrees if wt["branch"] == short]
+        blocking_worktrees = [
+            wt["path"]
+            for wt in worktrees
+            if wt["branch"] == short and wt["classification"] != "prunable_landed"
+        ]
+
+        if preserve:
+            classification = "preserve"
+        elif blocking_worktrees:
+            classification = "active"
+        elif merged and unique == 0:
+            classification = "prunable_landed"
+        else:
+            classification = "unknown"
+
+        remote_branches.append(
+            {
+                "ref": ref,
+                "branch": short,
+                "classification": classification,
+                "proof": {
+                    "merged_into_canonical_main": merged,
+                    "unique_commits_vs_canonical_main": unique,
+                    "preserve_pattern_match": preserve,
+                    "attached_worktrees": attached_worktrees,
+                    "blocking_worktrees": blocking_worktrees,
+                },
+                "pruned": False,
+            }
+        )
+
+    maintenance_before = count_objects(root)
+    maintenance_after: dict[str, str] | None = None
+    maintenance_detail = "not requested"
+
+    if args.apply and not errors:
+        for worktree in worktrees:
+            if worktree["classification"] != "prunable_landed":
+                continue
+            try:
+                git(root, "worktree", "remove", worktree["path"])
+                worktree["pruned"] = True
+                any_mutation = True
+                apply_actions.append(f"removed_worktree={worktree['path']}")
+                branch = worktree["branch"]
+                if branch and ref_exists(root, f"refs/heads/{branch}"):
+                    git(root, "branch", "-D", branch)
+                    apply_actions.append(f"deleted_local_branch={branch}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"worktree prune failed for {worktree['path']}: {exc}")
+
+        for branch in remote_branches:
+            if branch["classification"] != "prunable_landed":
+                continue
+            try:
+                git(root, "push", canonical_remote, "--delete", branch["branch"])
+                branch["pruned"] = True
+                any_mutation = True
+                apply_actions.append(f"deleted_remote_branch={branch['branch']}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"remote prune failed for {branch['branch']}: {exc}")
+
+        if any(branch["pruned"] for branch in remote_branches):
+            git(root, "fetch", canonical_remote, "--prune", check=False)
+
+        if args.maintenance:
+            ok, maintenance_detail = run_maintenance(root, maintenance_commands)
+            if ok:
+                any_mutation = True
+                maintenance_after = count_objects(root)
+            else:
+                errors.append(maintenance_detail)
+        elif args.maintenance and not any_mutation:
+            maintenance_detail = "maintenance requested but no prune action applied"
+    elif args.maintenance:
+        maintenance_detail = "maintenance is explicit-only; pair --maintenance with --apply"
+
+    summary = {
+        "worktrees": {
+            "total": len(worktrees),
+            "active": sum(1 for item in worktrees if item["classification"] == "active"),
+            "prunable_landed": sum(1 for item in worktrees if item["classification"] == "prunable_landed"),
+            "preserve": sum(1 for item in worktrees if item["classification"] == "preserve"),
+            "unknown": sum(1 for item in worktrees if item["classification"] == "unknown"),
+            "pruned": sum(1 for item in worktrees if item["pruned"]),
+        },
+        "remote_branches": {
+            "total": len(remote_branches),
+            "active": sum(1 for item in remote_branches if item["classification"] == "active"),
+            "prunable_landed": sum(1 for item in remote_branches if item["classification"] == "prunable_landed"),
+            "preserve": sum(1 for item in remote_branches if item["classification"] == "preserve"),
+            "unknown": sum(1 for item in remote_branches if item["classification"] == "unknown"),
+            "pruned": sum(1 for item in remote_branches if item["pruned"]),
+        },
+        "maintenance": {
+            "requested": args.maintenance,
+            "ran": bool(args.apply and args.maintenance and maintenance_after is not None),
+            "before": maintenance_before,
+            "after": maintenance_after,
+            "detail": maintenance_detail,
+        },
+    }
+
+    payload = {
+        "status": "fail" if errors else "pass",
+        "mode": "apply" if args.apply else "dry_run",
+        "root": str(root),
+        "policy": str(policy_path),
+        "summary": summary,
+        "worktrees": worktrees,
+        "remote_branches": remote_branches,
+        "actions": apply_actions,
+        "errors": errors,
+    }
+
+    exit_code = 1 if errors else 0
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=False))
+        raise SystemExit(exit_code)
+
+    if args.brief:
+        print(
+            f"{payload['status'].upper()} mode={payload['mode']} "
+            f"worktrees={summary['worktrees']['total']} remote={summary['remote_branches']['total']} "
+            f"prunable={summary['worktrees']['prunable_landed'] + summary['remote_branches']['prunable_landed']} "
+            f"preserve={summary['worktrees']['preserve'] + summary['remote_branches']['preserve']} "
+            f"unknown={summary['worktrees']['unknown'] + summary['remote_branches']['unknown']} "
+            f"pruned={summary['worktrees']['pruned'] + summary['remote_branches']['pruned']}"
+        )
+        raise SystemExit(exit_code)
+
+    print("git-worktree-hygiene")
+    print(f"status: {payload['status'].upper()}")
+    print(f"mode: {payload['mode']}")
+    print(f"root: {root}")
+    print("worktrees:")
+    for item in worktrees:
+        branch = item["branch"] or "<detached>"
+        print(f"  - {item['classification']}: {item['path']} ({branch})")
+    print("remote_ephemeral_branches:")
+    for item in remote_branches:
+        print(f"  - {item['classification']}: {item['branch']}")
+    print(f"maintenance: {maintenance_detail}")
+    if apply_actions:
+        print("actions:")
+        for action in apply_actions:
+            print(f"  - {action}")
+    if errors:
+        print("errors:")
+        for error in errors:
+            print(f"  - {error}")
+    raise SystemExit(exit_code)
+
+
+if __name__ == "__main__":
+    main()
