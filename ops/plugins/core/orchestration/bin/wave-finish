@@ -41,7 +41,7 @@ Disposition = landed requires --completion-level.
                    Skips worktree cleanup and heavy residue checks. Requires:
                    - Clean working tree
                    - Closed orchestration manifest (if exists)
-                   - No active worktree cleanup pending
+                   Warns (non-blocking) if worktree cleanup candidates exist.
 
 --check-eligibility: Check if wave is eligible for controller-only mode without
                      closing. Reports blockers and remediation if ineligible.
@@ -371,15 +371,49 @@ if [[ "$CHECK_ELIGIBILITY" -eq 1 ]]; then
     echo "✓ Orchestration manifest: n/a (single-worker loop)"
   fi
 
-  # Check 3: Projection parity
-  # Simplified check: look for recent projection receipts
-  recent_projection=$(find "$SPINE_STATE/../.evidence/spine/sessions" -type f -name "receipt.md" -mtime -1 2>/dev/null \
-    | xargs grep -l "gaps.projection.commit\|state.shared.reconcile" 2>/dev/null \
-    | head -1 || true)
-  if [[ -n "$recent_projection" ]]; then
-    echo "✓ Projection parity: recent projection found"
+  # Check 3: Projection parity (same SQLite parity model as real close path)
+  elig_parity_result="$(python3 - "$GAPS_SQL_LIB" "$ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+lib_dir = Path(sys.argv[1])
+sys.path.insert(0, str(lib_dir))
+import gaps_sql_authority as gsa
+
+root = Path(sys.argv[2])
+db_path, gaps_yaml = gsa.resolve_paths(root)
+conn = gsa.connect(db_path)
+gsa.ensure_schema(conn)
+gsa.bootstrap_from_yaml(conn, gaps_yaml)
+parity = gsa.db_parity_snapshot(conn, gaps_yaml)
+conn.close()
+print(json.dumps(parity))
+PY
+  )" 2>/dev/null || true
+
+  if [[ -n "$elig_parity_result" ]]; then
+    elig_parity_match="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print('1' if d.get('match') else '0')" "$elig_parity_result" 2>/dev/null || echo "0")"
+    if [[ "$elig_parity_match" == "1" ]]; then
+      elig_parity_note="$(python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+ar=d.get('archive_ref','')
+if ar:
+    print('YAML and SQLite aligned (active=%s archived=%s split=%s)' % (d.get('db_count',0),d.get('archived_in_db',0),ar))
+else:
+    print('YAML and SQLite aligned (db=%s yaml=%s)' % (d.get('db_count',0),d.get('yaml_count',0)))
+" "$elig_parity_result" 2>/dev/null || echo "aligned")"
+      echo "✓ Projection parity: $elig_parity_note"
+    else
+      ELIGIBLE=0
+      elig_db_only="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('in_db_not_yaml',[])))" "$elig_parity_result" 2>/dev/null || echo "?")"
+      elig_yaml_only="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('in_yaml_not_db',[])))" "$elig_parity_result" 2>/dev/null || echo "?")"
+      BLOCKERS+=("projection mismatch (db_only=$elig_db_only yaml_only=$elig_yaml_only)")
+      echo "❌ Projection parity: mismatch (db_only=$elig_db_only yaml_only=$elig_yaml_only; run: gaps.projection.commit)"
+    fi
   else
-    echo "⚠️  Projection parity: no recent projection (consider running gaps.projection.commit)"
+    echo "⚠️  Projection parity: unable to query SQLite authority (consider running gaps.projection.commit)"
   fi
 
   # Check 4: Worktree cleanup pending

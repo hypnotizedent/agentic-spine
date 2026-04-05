@@ -282,3 +282,99 @@ wait_for_friction_capability \
   "gaps.close.partial_state"
 
 echo "PASS: gaps.close syncs lifecycle surfaces and partial-state exits file automatic friction"
+
+echo ""
+echo "== gaps.close split-brain prevention: pre-existing staged changes =="
+
+STAGED_CHECKOUT="$tmpdir/staged-checkout"
+STAGED_RUNTIME="$tmpdir/staged-runtime"
+STAGED_STATE="$STAGED_RUNTIME/state"
+STAGED_GAPS="$STAGED_CHECKOUT/ops/bindings/operational.gaps.yaml"
+STAGED_DB="$STAGED_STATE/shared_authority.db"
+STAGED_LOOP="LOOP-TEST-GAPS-CLOSE-STAGED-20260403"
+STAGED_GAP="GAP-TEST-GAPS-CLOSE-STAGED-0001"
+
+make_checkout "$STAGED_CHECKOUT"
+mkdir -p "$STAGED_STATE" "$STAGED_RUNTIME"
+write_loop_scope "$STAGED_STATE" "$STAGED_LOOP"
+write_gaps_yaml "$STAGED_GAPS" "$STAGED_LOOP" "$STAGED_GAP"
+commit_fixture_state "$STAGED_CHECKOUT" "ops/bindings/operational.gaps.yaml"
+
+# Create a pre-existing staged (but unrelated) change
+printf 'unrelated staged content\n' > "$STAGED_CHECKOUT/ops/bindings/unrelated-file.yaml"
+git -C "$STAGED_CHECKOUT" add "ops/bindings/unrelated-file.yaml"
+
+set +e
+staged_output="$(
+  cd "$STAGED_CHECKOUT" && \
+  env \
+    SPINE_STATE="$STAGED_STATE" \
+    SPINE_RUNTIME_ROOT="$STAGED_RUNTIME" \
+    GAPS_DB_PATH="$STAGED_DB" \
+    GAPS_YAML_PATH="$STAGED_GAPS" \
+    SPINE_GAPS_FILE="$STAGED_GAPS" \
+    OPS_TERMINAL_ROLE="SPINE-CONTROL-01" \
+    SPINE_CAP_RUN_KEY="CAP-20260403-TEST__gaps.close__Rstaged01" \
+    ops/plugins/core/loops/bin/gaps-close --id "$STAGED_GAP" --status fixed 2>&1
+)"
+staged_rc=$?
+set -e
+
+if [[ "$staged_rc" -ne 0 ]]; then
+  echo "PASS: gaps.close fails when pre-existing staged changes detected"
+else
+  echo "FAIL: gaps.close should fail when pre-existing staged changes detected" >&2
+  echo "$staged_output" >&2
+  exit 1
+fi
+
+if [[ "$staged_output" == *"pre-existing staged changes"* ]]; then
+  echo "PASS: gaps.close reports pre-existing staged changes in failure message"
+else
+  echo "FAIL: gaps.close should mention pre-existing staged changes" >&2
+  echo "$staged_output" >&2
+  exit 1
+fi
+
+if [[ "$staged_output" == *"split-brain"* ]]; then
+  echo "PASS: gaps.close explains split-brain risk in failure message"
+else
+  echo "FAIL: gaps.close should explain split-brain risk" >&2
+  echo "$staged_output" >&2
+  exit 1
+fi
+
+# Verify SQLite was NOT mutated (gap should remain open since we failed pre-mutation)
+staged_gap_status="$(
+  cd "$STAGED_CHECKOUT" && \
+  env \
+    SPINE_STATE="$STAGED_STATE" \
+    SPINE_RUNTIME_ROOT="$STAGED_RUNTIME" \
+    GAPS_DB_PATH="$STAGED_DB" \
+    GAPS_YAML_PATH="$STAGED_GAPS" \
+    SPINE_GAPS_FILE="$STAGED_GAPS" \
+    python3 -c "
+import sys
+sys.path.insert(0, 'ops/plugins/core/lifecycle/lib')
+import gaps_sql_authority as gsa
+from pathlib import Path
+db_path, gaps_yaml = gsa.resolve_paths(Path('.'))
+db_path = Path('$STAGED_DB')
+conn = gsa.connect(db_path)
+gsa.ensure_schema(conn)
+gsa.bootstrap_from_yaml(conn, gaps_yaml)
+gaps = gsa.fetch_gaps(conn)
+conn.close()
+for g in gaps:
+    if g['id'] == '$STAGED_GAP':
+        print(g['status'])
+        break
+" 2>/dev/null || echo "unknown"
+)"
+
+if [[ "$staged_gap_status" == "open" ]]; then
+  echo "PASS: gaps.close preflight failure prevents authority mutation (gap remains open)"
+else
+  echo "FAIL: gap should remain open after preflight failure (got: $staged_gap_status)" >&2
+  exit 1
+fi

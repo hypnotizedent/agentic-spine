@@ -1291,6 +1291,232 @@ git -C "$T5_REPO" show --pretty=format: --name-status HEAD > "$T5_ROOT/show.txt"
 assert_file_contains "$T5_ROOT/show.txt" $'D\tops/plugins/core/conflicts/README.md' "wave-execute land commit records deleted file only"
 
 echo ""
+echo "── T6: check-eligibility uses SQLite parity for projection check ──"
+T6_ROOT="$(make_tmpdir)"
+T6_REPO="$T6_ROOT/repo"
+T6_STATE="$T6_REPO/state"
+mkdir -p \
+  "$T6_REPO/ops/plugins/core/orchestration/bin" \
+  "$T6_REPO/ops/plugins/core/loops/bin" \
+  "$T6_REPO/ops/plugins/core/lifecycle/bin" \
+  "$T6_REPO/ops/plugins/core/lifecycle/lib" \
+  "$T6_REPO/ops/bindings" \
+  "$T6_STATE/loop-scopes"
+copy_runtime_libs "$T6_REPO"
+cp "$ROOT/ops/plugins/core/orchestration/bin/wave-finish" "$T6_REPO/ops/plugins/core/orchestration/bin/"
+chmod +x "$T6_REPO/ops/plugins/core/orchestration/bin/wave-finish"
+
+cat > "$T6_REPO/ops/plugins/core/lifecycle/bin/gaps-authority-bridge" <<'EOF'
+#!/usr/bin/env python3
+print("ok")
+EOF
+chmod +x "$T6_REPO/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
+
+# Stub that reports a parity mismatch
+cat > "$T6_REPO/ops/plugins/core/lifecycle/lib/gaps_sql_authority.py" <<'EOF'
+from pathlib import Path
+
+
+class Conn:
+    def close(self):
+        pass
+
+
+def resolve_paths(root):
+    root = Path(root)
+    return root / "state" / "shared_authority.db", root / "ops" / "bindings" / "operational.gaps.yaml"
+
+
+def connect(db):
+    return Conn()
+
+
+def ensure_schema(conn):
+    return None
+
+
+def bootstrap_from_yaml(conn, gaps_yaml):
+    return None
+
+
+def fetch_gaps(conn):
+    return []
+
+
+def gap_count(conn):
+    return 3
+
+
+def db_parity_snapshot(conn, gaps_yaml):
+    return {
+        "match": False,
+        "db_count": 3,
+        "yaml_count": 1,
+        "in_db_not_yaml": ["GAP-DB-ONLY-1", "GAP-DB-ONLY-2"],
+        "in_yaml_not_db": [],
+    }
+
+
+def load_yaml(path):
+    return {"gaps": [{"id": "only-one"}]}
+EOF
+
+cat > "$T6_REPO/ops/bindings/operational.gaps.yaml" <<'EOF'
+gaps:
+  - id: only-one
+EOF
+
+cat > "$T6_STATE/loop-scopes/LOOP-T-ELIG.scope.md" <<'EOF'
+---
+loop_id: LOOP-T-ELIG
+status: active
+owner: '@test'
+execution_mode: single_worker
+execution_readiness: runnable
+objective: eligibility check fixture
+---
+EOF
+
+init_fixture_repo "$T6_REPO"
+
+# Run check-eligibility; it should detect mismatch from SQLite parity (not receipt heuristic)
+T6_OUT="$T6_ROOT/elig.out"
+(
+  cd "$T6_REPO"
+  env SPINE_ROOT="$T6_REPO" SPINE_STATE="$T6_STATE" \
+    bash "$T6_REPO/ops/plugins/core/orchestration/bin/wave-finish" \
+      --loop-id LOOP-T-ELIG --check-eligibility > "$T6_OUT" 2>&1
+) || true
+
+assert_file_contains "$T6_OUT" "Projection parity: mismatch" "check-eligibility detects SQLite projection mismatch"
+assert_file_contains "$T6_OUT" "db_only=2" "check-eligibility reports db_only count from SQLite parity"
+assert_file_contains "$T6_OUT" "requires full ceremony" "check-eligibility blocks when projection mismatched"
+
+# Verify the heuristic receipt path is not used
+if rg -Fq -- "receipt.md" "$T6_REPO/ops/plugins/core/orchestration/bin/wave-finish"; then
+  fail "check-eligibility no longer uses receipt.md heuristic"
+else
+  pass "check-eligibility no longer uses receipt.md heuristic"
+fi
+
+echo ""
+echo "── T6b: check-eligibility reports PASS when SQLite parity matches ──"
+T6B_ROOT="$(make_tmpdir)"
+T6B_REPO="$T6B_ROOT/repo"
+T6B_STATE="$T6B_REPO/state"
+mkdir -p \
+  "$T6B_REPO/ops/plugins/core/orchestration/bin" \
+  "$T6B_REPO/ops/plugins/core/loops/bin" \
+  "$T6B_REPO/ops/plugins/core/lifecycle/bin" \
+  "$T6B_REPO/ops/plugins/core/lifecycle/lib" \
+  "$T6B_REPO/ops/bindings" \
+  "$T6B_STATE/loop-scopes"
+copy_runtime_libs "$T6B_REPO"
+cp "$ROOT/ops/plugins/core/orchestration/bin/wave-finish" "$T6B_REPO/ops/plugins/core/orchestration/bin/"
+chmod +x "$T6B_REPO/ops/plugins/core/orchestration/bin/wave-finish"
+
+cat > "$T6B_REPO/ops/plugins/core/lifecycle/bin/gaps-authority-bridge" <<'EOF'
+#!/usr/bin/env python3
+print("ok")
+EOF
+chmod +x "$T6B_REPO/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
+
+# Stub that reports parity match
+cat > "$T6B_REPO/ops/plugins/core/lifecycle/lib/gaps_sql_authority.py" <<'EOF'
+from pathlib import Path
+
+
+class Conn:
+    def close(self):
+        pass
+
+
+def resolve_paths(root):
+    root = Path(root)
+    return root / "state" / "shared_authority.db", root / "ops" / "bindings" / "operational.gaps.yaml"
+
+
+def connect(db):
+    return Conn()
+
+
+def ensure_schema(conn):
+    return None
+
+
+def bootstrap_from_yaml(conn, gaps_yaml):
+    return None
+
+
+def fetch_gaps(conn):
+    return []
+
+
+def gap_count(conn):
+    return 2
+
+
+def db_parity_snapshot(conn, gaps_yaml):
+    return {
+        "match": True,
+        "db_count": 2,
+        "yaml_count": 2,
+        "in_db_not_yaml": [],
+        "in_yaml_not_db": [],
+    }
+
+
+def load_yaml(path):
+    return {"gaps": [{"id": "g1"}, {"id": "g2"}]}
+EOF
+
+cat > "$T6B_REPO/ops/bindings/operational.gaps.yaml" <<'EOF'
+gaps:
+  - id: g1
+  - id: g2
+EOF
+
+cat > "$T6B_STATE/loop-scopes/LOOP-T-ELIG-OK.scope.md" <<'EOF'
+---
+loop_id: LOOP-T-ELIG-OK
+status: active
+owner: '@test'
+execution_mode: single_worker
+execution_readiness: runnable
+objective: eligibility check pass fixture
+---
+EOF
+
+init_fixture_repo "$T6B_REPO"
+
+T6B_OUT="$T6B_ROOT/elig-ok.out"
+(
+  cd "$T6B_REPO"
+  env SPINE_ROOT="$T6B_REPO" SPINE_STATE="$T6B_STATE" \
+    bash "$T6B_REPO/ops/plugins/core/orchestration/bin/wave-finish" \
+      --loop-id LOOP-T-ELIG-OK --check-eligibility > "$T6B_OUT" 2>&1
+) || true
+
+assert_file_contains "$T6B_OUT" "Projection parity: YAML and SQLite aligned" "check-eligibility reports PASS when SQLite parity matches"
+assert_file_contains "$T6B_OUT" "controller-only eligible" "check-eligibility declares eligible when all checks pass"
+
+echo ""
+echo "── T7: controller-only usage text matches runtime behavior on worktree cleanup ──"
+# Verify usage text says worktree cleanup is advisory (warns), not a hard requirement
+T7_USAGE="$(bash "$ROOT/ops/plugins/core/orchestration/bin/wave-finish" --help 2>&1 || true)"
+if echo "$T7_USAGE" | rg -Fq "Warns (non-blocking) if worktree cleanup candidates exist"; then
+  pass "controller-only usage text documents worktree cleanup as advisory"
+else
+  fail "controller-only usage text documents worktree cleanup as advisory"
+fi
+# Verify the old hard-gate wording is removed
+if echo "$T7_USAGE" | rg -Fq "No active worktree cleanup pending"; then
+  fail "controller-only usage text no longer claims worktree cleanup is required"
+else
+  pass "controller-only usage text no longer claims worktree cleanup is required"
+fi
+
+echo ""
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"
 exit "$FAIL"
