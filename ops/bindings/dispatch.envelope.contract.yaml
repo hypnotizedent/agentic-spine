@@ -1,0 +1,394 @@
+---
+status: authoritative
+owner: "@ronny"
+version: "1.0"
+updated_at: "2026-04-05"
+scope: node-to-node-dispatch-coordination
+subordinate_to: ops/bindings/root.authority.contract.yaml
+decision_context: >
+  Implements node-to-node dispatch truth to replace operator-as-implicit-join-table
+  (GAP-OP-1657). Makes coordination explicit and queryable without requiring
+  multi-node infrastructure rollout. Models current operator relay step honestly
+  as transport_mode: operator_relay.
+
+related_contracts:
+  - contract: ops/bindings/session.admission.contract.yaml
+    relationship: "Defines work admission rules and rejection semantics for target nodes"
+  - contract: ops/bindings/role.runtime.control.contract.yaml
+    relationship: "Defines delegated receipt linkage and completion determination"
+  - contract: ops/bindings/communication.protocol.contract.yaml
+    relationship: "Operator->Translator->Controller pathway; this contract formalizes Controller->Execution dispatch"
+  - contract: ops/bindings/node.role.contract.yaml
+    relationship: "Physical node types; this contract adds logical dispatch semantics"
+  - contract: ops/bindings/governed.task.envelope.contract.yaml
+    relationship: "Incubating envelope format; this contract is authoritative coordination truth"
+
+description: >
+  Node-to-Node Dispatch Envelope Contract.
+
+  Defines the authoritative coordination model for delegated work dispatch between
+  nodes (physical or logical). Makes operator relay explicit rather than implicit.
+
+  Scope: dispatch envelope structure, transport modes, routing semantics, and
+  admission/rejection contract. Does NOT activate multi-node infrastructure rollout.
+
+  Current reality: transport_mode is operator_relay (human carries envelopes between
+  terminals). Future: mailroom queue or git-based transport as infrastructure matures.
+
+# ── Envelope Schema ──────────────────────────────────────────────────────────
+
+envelope_schema:
+  required_fields:
+    envelope_id:
+      type: string
+      format: "ENV-YYYYMMDD-HHMMSS-<hash>"
+      description: "Unique dispatch envelope identifier"
+
+    sender_node:
+      type: string
+      description: "Node/terminal/role sending work (e.g., control, operator_console, translator)"
+      examples: [control, operator_console, execution, translator]
+
+    target_node:
+      type: string
+      description: "Node/terminal/role receiving work (e.g., execution, audit, watcher)"
+      examples: [execution, audit, watcher]
+
+    work_scope:
+      type: object
+      required_fields: [work_type, domain, capability_id, loop_id, safety_level]
+      description: "What work is being delegated"
+      schema:
+        work_type:
+          enum: [capability_execution, verification, observation, loop_management, wave_orchestration]
+        domain: string
+        capability_id: string
+        loop_id: string
+        wave_id: string  # optional
+        gap_ids: list    # optional
+        safety_level:
+          enum: [read-only, mutating, destructive]
+        execution_mode:
+          enum: [single_worker, operational, orchestrator_subagents]
+          default: single_worker
+
+    transport_mode:
+      type: string
+      enum: [operator_relay, mailroom, git]
+      description: "How envelope is delivered to target node"
+
+    receipt_expectation:
+      type: object
+      required_fields: [expected_receipt_type, completion_criteria]
+      description: "What constitutes work completion"
+      schema:
+        expected_receipt_type:
+          enum: [run_key, commit_sha, status_artifact, delegated_aggregate]
+        completion_criteria:
+          description: "When sender considers work done"
+          enum: [single_receipt, all_child_receipts, timeout_or_receipt]
+        timeout_utc: string  # ISO8601, optional
+
+    created_at_utc:
+      type: string
+      format: ISO8601
+      description: "When envelope was created"
+
+  optional_fields:
+    parent_envelope_id:
+      type: string
+      description: "For delegated work chains (child work points to parent envelope)"
+
+    admitted_scope:
+      type: object
+      description: "Target node's accepted subset of work_scope (may be narrower than requested)"
+
+    rejection_reason:
+      type: string
+      description: "If target rejects envelope, reason code from rejection_semantics"
+
+    rejection_details:
+      type: string
+      description: "Human-readable rejection explanation"
+
+    delegation_context:
+      type: object
+      description: "Additional context for delegated work (parameters, constraints, references)"
+
+# ── Transport Modes ──────────────────────────────────────────────────────────
+
+transport_modes:
+  operator_relay:
+    description: >
+      Operator manually carries envelope between nodes. This is the current
+      operational reality. The operator reads work from one terminal, switches
+      context, and initiates it in another terminal.
+    delivery_mechanism: "Human copy-paste, terminal switch, or verbal handoff"
+    acknowledgment: "Target node operator confirms receipt (implicit or explicit)"
+    status: operational
+    examples:
+      - "Operator reads wave dispatch from control terminal, switches to execution terminal, runs capability"
+      - "Operator copies receipt from execution terminal, switches to translator, provides for rendering"
+    explicit_modeling_rationale: >
+      By modeling operator_relay as a governed transport mode, the coordination
+      step becomes explicit and queryable. This prevents the operator from being
+      an invisible join table and enables future automation without protocol change.
+
+  mailroom:
+    description: >
+      Mailroom task queue. Envelope written to $SPINE_STATE/mailroom/tasks/,
+      target node claims it via mailroom.task.claim, executes, and writes receipt.
+    delivery_mechanism: "$SPINE_STATE/mailroom/tasks/<envelope_id>.yaml"
+    acknowledgment: "mailroom.task.claim creates claim record with claiming terminal ID"
+    status: operational
+    scope: "execution_mode: operational only (headless autonomous execution)"
+    examples:
+      - "Control node writes envelope to mailroom, execution terminal claims via scheduled worker"
+
+  git:
+    description: >
+      Git commit/branch contains work directive. Target node discovers work
+      via checkout, worktree sync, or branch metadata inspection.
+    delivery_mechanism: "Commit message, branch metadata, or repo artifact reference"
+    acknowledgment: "Target node checkout or worktree sync confirms delivery"
+    status: planned
+    deferred_rationale: >
+      Git-based dispatch requires worktree coordination and branch-as-transport
+      semantics that are not yet fully governed. Deferred until worktree lifecycle
+      and multi-node git coordination are machine-enforced.
+
+# ── Routing Semantics ────────────────────────────────────────────────────────
+
+routing:
+  principle: >
+    Routing determines which target_node can accept which work_type. This prevents
+    misdirected work (e.g., execution sent to audit lane, or verification sent to
+    execution lane).
+
+  routing_authority: ops/bindings/session.admission.contract.yaml
+
+  by_lane:
+    control:
+      description: "Orchestration and control-plane coordination"
+      accepts_work_types:
+        - loop_management
+        - wave_orchestration
+        - authority_resolution
+      rejects_work_types:
+        - capability_execution
+        - verification
+      accepts_domains: [core, loop_gap, spine]
+      accepts_safety: [read-only, mutating]
+      rationale: "Control lane brokers work but does not execute capabilities or judge outcomes"
+
+    execution:
+      description: "Capability execution and domain work"
+      accepts_work_types:
+        - capability_execution
+      rejects_work_types:
+        - loop_management
+        - verification
+        - wave_orchestration
+      accepts_domains: [core, loop_gap, spine, media, mint, finance, ha, taxlegal, aof]
+      accepts_safety: [read-only, mutating, destructive]
+      rationale: "Execution lane runs governed capabilities but does not orchestrate or verify"
+
+    audit:
+      description: "Verification and gate evaluation"
+      accepts_work_types:
+        - verification
+      rejects_work_types:
+        - capability_execution
+        - loop_management
+      accepts_domains: [core, spine]
+      accepts_safety: [read-only]
+      rationale: "Audit lane judges outcomes but never mutates or executes"
+
+    watcher:
+      description: "Monitoring and observation"
+      accepts_work_types:
+        - observation
+      rejects_work_types:
+        - capability_execution
+        - verification
+        - loop_management
+      accepts_domains: [core, spine]
+      accepts_safety: [read-only]
+      rationale: "Watcher lane observes and emits signals but never acts"
+
+# ── Admission and Rejection ──────────────────────────────────────────────────
+
+admission:
+  admission_contract: ops/bindings/session.admission.contract.yaml
+
+  admission_flow:
+    - step: "Sender creates envelope with work_scope and target_node"
+    - step: "Envelope delivered via transport_mode"
+    - step: "Target node evaluates work_scope against admission rules"
+    - step: "Target accepts (possibly with narrowed admitted_scope) or rejects with rejection_reason"
+    - step: "If accepted, target executes and produces receipt"
+    - step: "If rejected, envelope returned to sender or escalated to control"
+
+  rejection_handling:
+    return_to_sender:
+      description: "Envelope returned to sender with rejection_reason and rejection_details"
+      transport: "Same transport_mode in reverse, or escalate via operator_relay"
+
+    escalate_to_control:
+      description: "Control lane determines alternate routing or disposition"
+      when: "Target cannot reject directly (e.g., wrong lane assignment)"
+
+# ── Receipt Linkage ──────────────────────────────────────────────────────────
+
+receipt_linkage:
+  receipt_contract: ops/bindings/role.runtime.control.contract.yaml
+
+  parent_child_linkage:
+    description: >
+      When work is delegated (parent envelope spawns child envelopes), receipts
+      must link back to parent. Parent closeout waits for all child receipts or
+      explicitly documents incomplete delegation.
+
+    schema:
+      parent_envelope_id: "Envelope that delegated work"
+      parent_run_key: "Run key from parent capability execution"
+      child_envelope_ids: "List of child envelopes created by delegation"
+      child_run_keys: "List of run keys from child execution"
+
+    completion_determination:
+      complete:
+        description: "All expected child receipts received and validated"
+        criteria:
+          - all child_run_keys present in evidence
+          - no awaiting_delegated_receipt flag
+
+      awaiting_delegated_receipt:
+        description: "Parent work delegated to child, waiting for completion"
+        criteria:
+          - delegation recorded via child_envelope_ids
+          - child_run_keys list incomplete
+          - timeout not exceeded
+
+      blocked_delegated:
+        description: "Child execution blocked or failed, parent cannot complete"
+        criteria:
+          - child rejection received
+          - or child timeout exceeded
+          - or child reported failure
+
+# ── Envelope Lifecycle ───────────────────────────────────────────────────────
+
+envelope_lifecycle:
+  states:
+    created:
+      description: "Envelope created by sender"
+      next_states: [in_transit, rejected]
+
+    in_transit:
+      description: "Envelope being delivered via transport_mode"
+      next_states: [delivered, lost]
+
+    delivered:
+      description: "Envelope received by target node"
+      next_states: [admitted, rejected]
+
+    admitted:
+      description: "Target node accepted work (possibly with narrowed scope)"
+      next_states: [executing, blocked]
+
+    executing:
+      description: "Target node executing admitted work"
+      next_states: [complete, failed, awaiting_delegated_receipt]
+
+    complete:
+      description: "Work finished, receipt produced"
+      next_states: []
+
+    awaiting_delegated_receipt:
+      description: "Work delegated to child, waiting for child receipts"
+      next_states: [complete, blocked_delegated]
+
+    rejected:
+      description: "Target node rejected work with rejection_reason"
+      next_states: [escalated, abandoned]
+
+    failed:
+      description: "Execution failed, error receipt produced"
+      next_states: []
+
+    blocked:
+      description: "Execution blocked by policy, dependency, or external condition"
+      next_states: [executing, failed, abandoned]
+
+    blocked_delegated:
+      description: "Child execution blocked/failed, parent cannot complete"
+      next_states: [abandoned]
+
+    lost:
+      description: "Envelope lost in transit (timeout without acknowledgment)"
+      next_states: [escalated]
+
+    escalated:
+      description: "Envelope escalated to control for alternate routing or disposition"
+      next_states: [in_transit, abandoned]
+
+    abandoned:
+      description: "Work abandoned, no further action"
+      next_states: []
+
+# ── Current Operational Posture ──────────────────────────────────────────────
+
+current_posture:
+  transport_mode: operator_relay
+
+  operator_relay_ceremony:
+    description: >
+      Current ceremony for operator-mediated dispatch. Operator acts as explicit
+      courier rather than implicit join table.
+
+    steps:
+      - "Control terminal creates dispatch envelope (explicit work_scope, target_node)"
+      - "Operator reads envelope from control terminal"
+      - "Operator switches to target terminal (execution, audit, watcher)"
+      - "Operator initiates work in target terminal with envelope context"
+      - "Target terminal executes and produces receipt"
+      - "Operator carries receipt back to control terminal"
+      - "Control terminal records receipt linkage and updates state"
+
+    improvement_over_implicit:
+      - "Envelope is explicit, queryable artifact (not human memory)"
+      - "Work scope is bounded in envelope (not reinterpreted by operator)"
+      - "Receipt linkage is recorded (not operator join-table)"
+      - "Coordination is auditable (envelope + receipt trail exists)"
+
+  future_automation:
+    description: >
+      As infrastructure matures, transport_mode can shift from operator_relay
+      to mailroom or git without changing envelope schema or routing semantics.
+
+    automation_path:
+      - "Phase 1 (current): operator_relay with explicit envelopes"
+      - "Phase 2 (operational mode): mailroom transport for headless execution"
+      - "Phase 3 (multi-node): git or network transport for distributed dispatch"
+
+# ── Non-Activation Boundary ──────────────────────────────────────────────────
+
+non_activation:
+  statement: >
+    This contract defines dispatch coordination truth but does NOT activate:
+    - multi-node infrastructure rollout
+    - translator node deployment (VM 207)
+    - autonomous dispatch without operator relay
+    - service/VM placement or migration
+
+  what_is_activated:
+    - explicit envelope schema for all dispatch
+    - transport_mode: operator_relay as current reality
+    - admission and rejection semantics
+    - receipt linkage and completion determination
+
+  what_remains_deferred:
+    - physical multi-node deployment
+    - autonomous mailroom worker dispatch (operational mode only)
+    - git-based transport (planned)
+    - translator node as standalone dispatch surface

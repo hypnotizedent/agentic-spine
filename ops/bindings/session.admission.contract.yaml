@@ -7,11 +7,14 @@
 # This contract does not duplicate profile definitions — it describes
 # admission delivery and parity truth per lane.
 
-version: 1
-updated_at: "2026-03-28"
+version: 1.1
+updated_at: "2026-04-05"
 owner: "@ronny"
 scope: session-admission-and-parity
 subordinate_to: governance.profile.contract.yaml
+related_contracts:
+  - contract: ops/bindings/dispatch.envelope.contract.yaml
+    relationship: "Dispatch envelope contract uses work_admission_rules for routing and rejection"
 
 lanes:
   claude_code:
@@ -80,3 +83,180 @@ resolution:
   default_lane: claude_code
   fallback_parity_status: degraded
   note: "When lane resolution fails, assume degraded posture. Do not claim parity."
+
+# ── Work Admission Rules ─────────────────────────────────────────────────────
+# Added 2026-04-05: Defines what delegated work each lane accepts or rejects.
+# Used by dispatch.envelope.contract.yaml for routing and admission validation.
+
+work_admission_rules:
+  description: >
+    Defines what work each lane/terminal accepts when receiving a dispatch envelope.
+    Lanes may reject work that is out-of-scope, wrong safety level, or incompatible
+    with governance profile.
+
+  by_lane:
+    claude_code:
+      accepts_work_types: [capability_execution, verification, loop_management]
+      accepts_domains: [core, loop_gap, spine, media, mint, finance, ha, taxlegal, aof]
+      accepts_safety: [read-only, mutating, destructive]
+      accepts_execution_modes: [single_worker, operational]
+      rejects_work_types: []
+      rejection_reasons:
+        - out_of_domain_scope
+        - blocked_by_policy
+        - insufficient_governance_profile
+
+    codex:
+      accepts_work_types: [capability_execution, verification]
+      accepts_domains: [core, loop_gap, spine]
+      accepts_safety: [read-only, mutating]
+      accepts_execution_modes: [single_worker]
+      rejects_work_types: [loop_management]
+      rejection_reasons:
+        - degraded_governance_posture
+        - destructive_work_not_permitted
+        - operational_mode_not_supported
+        - domain_not_in_scope
+
+    opencode:
+      accepts_work_types: []
+      accepts_domains: []
+      accepts_safety: []
+      accepts_execution_modes: []
+      rejects_work_types: [capability_execution, verification, loop_management]
+      rejection_reasons:
+        - no_governed_mutation
+        - handoff_only_posture
+        - degraded_governance
+
+    bridge_capable:
+      accepts_work_types: []
+      accepts_domains: []
+      accepts_safety: []
+      accepts_execution_modes: []
+      rejects_work_types: [capability_execution, verification, loop_management]
+      rejection_reasons:
+        - no_governed_mutation
+        - handoff_only_posture
+        - remote_bridge_limitation
+
+    offline:
+      accepts_work_types: []
+      accepts_domains: []
+      accepts_safety: []
+      accepts_execution_modes: []
+      rejects_work_types: [capability_execution, verification, loop_management]
+      rejection_reasons:
+        - no_governed_mutation
+        - offline_posture
+        - handoff_only
+
+  by_logical_lane_note: >
+    Logical lanes (control, execution, audit, watcher) from
+    role.runtime.control.contract.yaml have distinct admission rules beyond
+    physical lane assignment.
+
+  by_logical_lane:
+    control:
+      accepts_work_types: [loop_management, wave_orchestration, authority_resolution]
+      rejects_work_types: [capability_execution, verification]
+      accepts_domains: [core, loop_gap, spine]
+      accepts_safety: [read-only, mutating]
+      rejection_reasons:
+        - execution_belongs_in_execution_lane
+        - verification_belongs_in_audit_lane
+
+    execution:
+      accepts_work_types: [capability_execution]
+      rejects_work_types: [loop_management, wave_orchestration, verification]
+      accepts_domains: [core, loop_gap, spine, media, mint, finance, ha, taxlegal, aof]
+      accepts_safety: [read-only, mutating, destructive]
+      rejection_reasons:
+        - orchestration_belongs_in_control_lane
+        - verification_belongs_in_audit_lane
+
+    audit:
+      accepts_work_types: [verification]
+      rejects_work_types: [capability_execution, loop_management]
+      accepts_domains: [core, spine]
+      accepts_safety: [read-only]
+      rejection_reasons:
+        - execution_not_permitted_in_audit
+        - mutation_not_permitted_in_audit
+        - orchestration_belongs_in_control_lane
+
+    watcher:
+      accepts_work_types: [observation]
+      rejects_work_types: [capability_execution, verification, loop_management]
+      accepts_domains: [core, spine]
+      accepts_safety: [read-only]
+      rejection_reasons:
+        - execution_not_permitted_in_watcher
+        - mutation_not_permitted_in_watcher
+        - watcher_observes_only
+
+# ── Rejection Semantics ──────────────────────────────────────────────────────
+
+rejection_semantics:
+  description: >
+    When a lane/terminal receives a dispatch envelope but cannot accept the work,
+    it must reject with a structured rejection_reason. This prevents silent
+    work loss and enables operator or control-lane triage.
+
+  rejection_types:
+    out_of_domain_scope:
+      description: "Work domain is not in lane's accepts_domains list"
+      example: "claude_code lane receives work for domain=infra (not in accepted list)"
+      handling: return_to_sender
+
+    wrong_lane:
+      description: "Work type belongs to different logical lane"
+      example: "execution lane receives loop_management work (belongs in control)"
+      handling: escalate_to_control
+
+    blocked_by_policy:
+      description: "Lane policy forbids this work type or safety level"
+      example: "audit lane receives destructive work (only read-only permitted)"
+      handling: return_to_sender
+
+    insufficient_authority:
+      description: "Lane lacks necessary permissions for work"
+      example: "codex lane receives destructive work (only mutating permitted)"
+      handling: return_to_sender
+
+    governance_profile_mismatch:
+      description: "Work requires higher governance profile than lane provides"
+      example: "opencode lane receives governed mutation work (degraded profile, handoff only)"
+      handling: return_to_sender
+
+    execution_mode_mismatch:
+      description: "Work execution_mode not supported by lane"
+      example: "codex lane receives operational mode work (only single_worker supported)"
+      handling: return_to_sender
+
+    no_governed_mutation:
+      description: "Lane has no_governed_mutation posture, cannot accept mutating work"
+      example: "opencode/bridge_capable/offline lanes receive capability_execution"
+      handling: return_to_sender
+
+  rejection_handling_modes:
+    return_to_sender:
+      description: "Envelope returned to sender with rejection_reason and rejection_details"
+      transport: "Same transport_mode in reverse, or escalate via operator_relay if unavailable"
+      sender_action: "Sender determines alternate routing or abandons work"
+
+    escalate_to_control:
+      description: "Control lane determines alternate routing or disposition"
+      when: "Wrong lane assignment (work sent to audit instead of execution)"
+      control_action: "Control re-routes to correct lane or rejects as invalid dispatch"
+
+  rejection_artifact:
+    description: "When rejecting, lane must produce rejection artifact with structured fields"
+    required_fields:
+      - envelope_id
+      - rejected_by_lane
+      - rejected_at_utc
+      - rejection_reason
+      - rejection_details
+      - suggested_alternate_lane  # optional, if known
+    storage: "$SPINE_STATE/dispatch/rejections/<envelope_id>.rejection.yaml"
