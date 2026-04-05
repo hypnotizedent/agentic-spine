@@ -264,11 +264,11 @@ BAD="$(find . -type f -name "*.sh" \
 if [[ -z "$BAD" ]]; then pass; else scoped_fail D7 "out-of-bounds: $(echo "$BAD" | wc -l | tr -d ' ')"; fi
 else echo "D7 executables bounded... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
-# D8: No backup clutter
+# D8: No backup clutter (recursive — .bak and fix_bak anywhere in live surfaces)
 if ! is_retired D8; then
 echo -n "D8 no backup clutter... "
-BK="$(find bin ops -maxdepth 1 -type f 2>/dev/null | rg '\.bak|fix_bak' || true)"
-if [[ -z "$BK" ]]; then pass; else fail "backup files"; fi
+BK="$(find bin ops -type f 2>/dev/null | rg '\.bak$|fix_bak' || true)"
+if [[ -z "$BK" ]]; then pass; else fail "backup files in live surfaces: $(echo "$BK" | tr '\n' ' ')"; fi
 else echo "D8 no backup clutter... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D10: No spurious top-level logs (must be under mailroom/)

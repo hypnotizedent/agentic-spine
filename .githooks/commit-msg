@@ -13,6 +13,23 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 [[ -n "${ROOT:-}" ]] || exit 0
 cd "$ROOT"
 
+# ── WIP / fixup / squash subject rejection ──
+# Governed landings must not have WIP-style subjects. These indicate
+# unfinished work that should not pass commit ceremony silently.
+msg_subject="$(head -n1 "$MSG_FILE" | sed 's/^[[:space:]]*//')"
+wip_pattern='^(WIP[: ]|wip[: ]|fixup[!]|squash[!]|FIXUP[!]|SQUASH[!]|[Ww]ork[ -][Ii]n[ -][Pp]rogress)'
+if [[ "$msg_subject" =~ $wip_pattern ]]; then
+  echo "BLOCKED: WIP-style commit subject rejected by governed landing policy." >&2
+  echo "  Subject: $msg_subject" >&2
+  echo "  Remediation: rewrite the commit message with a governed subject." >&2
+  echo "  If intentional (interactive rebase), use: SPINE_ALLOW_WIP=1 git commit ..." >&2
+  if [[ "${SPINE_ALLOW_WIP:-}" == "1" ]]; then
+    echo "NOTICE: SPINE_ALLOW_WIP=1 override accepted. WIP subject allowed." >&2
+  else
+    exit 1
+  fi
+fi
+
 TARGET_FILES=(
   "ops/bindings/gate.registry.yaml"
   "ops/bindings/gate.execution.topology.yaml"
