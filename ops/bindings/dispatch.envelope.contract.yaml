@@ -371,33 +371,60 @@ current_posture:
 
   operator_relay_ceremony:
     description: >
-      Current ceremony for operator-mediated dispatch. Applies to non-operational
-      (code/interactive) dispatches only. Operational dispatches bypass this
-      ceremony via mailroom transport.
+      Admitted ceremony for operator-mediated dispatch. Applies to non-operational
+      (code/interactive) dispatches. The operator carries a portable dispatch artifact
+      with pre-computed commands instead of reconstructing context from memory.
 
-    steps:
-      - "Control terminal creates dispatch envelope (explicit work_scope, target_node)"
-      - "Operator reads envelope from control terminal"
-      - "Operator switches to target terminal (execution, audit, watcher)"
-      - "Operator initiates work in target terminal with envelope context"
-      - "Target terminal executes and produces receipt"
-      - "Operator carries receipt back to control terminal"
-      - "Control terminal records receipt linkage and updates state"
+    admitted_path:
+      activation_surface: "session.interactive.dispatch / session.interactive.complete"
+      activated_at: "2026-04-05"
+      steps:
+        - "Control: ./bin/ops cap run session.interactive.dispatch -- --summary '...' --loop LOOP-XX --role worker --first-command '...'"
+        - "Control output: dispatch artifact + operator carry instructions (attach command, first command, complete command)"
+        - "Operator carries printed commands to target terminal (copy-paste, not memory)"
+        - "Target: pastes attach command (session.v3.attach with pre-filled flags)"
+        - "Target: executes first command"
+        - "Target or control: ./bin/ops cap run session.interactive.complete -- --dispatch-id ENV-XX --run-key CAP-XX"
+      what_disappears:
+        - "Operator reconstructing loop_id, role, first_command from memory"
+        - "Implicit join between dispatch and receipt (now linked via envelope_id)"
+        - "Untracked operator relay (dispatch artifact is queryable)"
+      what_remains:
+        - "Operator switches between terminals"
+        - "Operator pastes commands (explicit, bounded)"
+        - "Operator carries run_key back for completion"
+
+    legacy_ceremony:
+      description: >
+        Prior to admitted interactive dispatch, the operator carried context
+        in human memory between terminals. This path still works but produces
+        no queryable dispatch artifact and no receipt linkage.
+      steps:
+        - "Control terminal creates dispatch envelope (explicit work_scope, target_node)"
+        - "Operator reads envelope from control terminal"
+        - "Operator switches to target terminal (execution, audit, watcher)"
+        - "Operator initiates work in target terminal with envelope context"
+        - "Target terminal executes and produces receipt"
+        - "Operator carries receipt back to control terminal"
+        - "Control terminal records receipt linkage and updates state"
 
     improvement_over_implicit:
       - "Envelope is explicit, queryable artifact (not human memory)"
       - "Work scope is bounded in envelope (not reinterpreted by operator)"
       - "Receipt linkage is recorded (not operator join-table)"
       - "Coordination is auditable (envelope + receipt trail exists)"
+      - "Operator carry is copy-paste, not context reconstruction"
 
   future_automation:
     description: >
-      Mailroom transport is now operational for headless execution. Remaining
-      automation path focuses on interactive transport and multi-node dispatch.
+      Mailroom transport is operational for headless execution. Admitted interactive
+      transport is operational for code/governance work via operator relay. Remaining
+      automation path focuses on reducing manual operator steps and multi-node dispatch.
 
     automation_path:
       - "Phase 1 (complete): operator_relay with explicit envelopes"
       - "Phase 2 (operational): mailroom transport for headless execution — ACTIVE"
+      - "Phase 2b (operational): admitted interactive transport via session.interactive.dispatch — ACTIVE"
       - "Phase 3 (planned): git or network transport for distributed dispatch"
 
 # ── Non-Activation Boundary ──────────────────────────────────────────────────

@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# session-interactive-dispatch
+#
+# Creates an admitted interactive dispatch from control to a target terminal.
+# Produces a portable dispatch artifact and operator carry instructions.
+#
+# This is the admitted front door for interactive/code work.
+# Instead of carrying context in human memory, the operator carries
+# a dispatch artifact with pre-computed commands.
+#
+# Contract: ops/bindings/dispatch.envelope.contract.yaml (transport_mode: operator_relay)
+# Gate: front-door enforcement hook checks admission in target terminal
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+SPINE_CODE="${SPINE_CODE:-$ROOT}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+SUMMARY=""
+LOOP_ID=""
+ROLE="worker"
+SAFETY="mutating"
+DOMAIN="core"
+FIRST_COMMAND=""
+TARGET="execution"
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+session-interactive-dispatch
+
+Creates an admitted interactive dispatch for operator relay transport.
+Produces a dispatch artifact + operator carry instructions.
+
+Usage:
+  session-interactive-dispatch --summary "..." [options]
+
+Required:
+  --summary "..."         What work is being dispatched
+
+Options:
+  --loop <LOOP-ID>        Loop context (default: none/adhoc)
+  --role <role>           Target runtime role (default: worker)
+  --safety <level>        Safety level: read-only|mutating|destructive (default: mutating)
+  --domain <domain>       Work domain (default: core)
+  --first-command "..."   First capability command for target terminal
+  --target <lane>         Target lane: execution|audit|watcher (default: execution)
+  --json                  Emit JSON output instead of human-readable
+
+Example:
+  session-interactive-dispatch \
+    --summary "Fix D75 trailer breach for f0a1c4d9" \
+    --loop LOOP-SPINE-POST-V3-ENGINE-COHERENCE-20260403 \
+    --role worker \
+    --safety mutating \
+    --first-command "ops cap run gaps.file -- --id auto ..."
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --summary) SUMMARY="$2"; shift 2 ;;
+    --loop|--loop-id) LOOP_ID="$2"; shift 2 ;;
+    --role) ROLE="$2"; shift 2 ;;
+    --safety) SAFETY="$2"; shift 2 ;;
+    --domain) DOMAIN="$2"; shift 2 ;;
+    --first-command) FIRST_COMMAND="$2"; shift 2 ;;
+    --target) TARGET="$2"; shift 2 ;;
+    --json) JSON_MODE=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    --) shift; break ;;
+    *) echo "ERROR: unknown flag: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$SUMMARY" ]]; then
+  echo "ERROR: --summary is required" >&2
+  usage >&2
+  exit 1
+fi
+
+# ── Generate envelope identity ──
+NOW_UTC=$(TZ=UTC date "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u "+%Y-%m-%dT%H:%M:%SZ")
+TS_COMPACT=$(echo "$NOW_UTC" | sed 's/[-T:]//g' | cut -c1-15)
+HASH_INPUT="${LOOP_ID:-adhoc}-${TARGET}-${NOW_UTC}-$$"
+ENVELOPE_HASH=$(printf '%s' "$HASH_INPUT" | shasum -a 256 | cut -c1-8)
+ENVELOPE_ID="ENV-${TS_COMPACT}-${ENVELOPE_HASH}"
+
+# ── Resolve work type from target lane ──
+case "$TARGET" in
+  execution) WORK_TYPE="capability_execution" ;;
+  audit)     WORK_TYPE="verification" ;;
+  watcher)   WORK_TYPE="observation" ;;
+  *)         WORK_TYPE="capability_execution" ;;
+esac
+
+# ── Build attach command for target terminal ──
+ATTACH_CMD="./bin/ops cap run session.v3.attach --"
+if [[ -n "$LOOP_ID" ]]; then
+  ATTACH_CMD="$ATTACH_CMD --loop $LOOP_ID"
+else
+  ATTACH_CMD="$ATTACH_CMD --allow-no-loop"
+fi
+ATTACH_CMD="$ATTACH_CMD --role $ROLE"
+
+# ── Write dispatch artifact ──
+DISPATCH_DIR="$SPINE_STATE/dispatch/interactive"
+mkdir -p "$DISPATCH_DIR"
+DISPATCH_FILE="$DISPATCH_DIR/${ENVELOPE_ID}.dispatch.yaml"
+
+cat > "$DISPATCH_FILE" <<DISPATCH_YAML
+kind: interactive_dispatch
+version: "1.0"
+envelope_id: "${ENVELOPE_ID}"
+created_at_utc: "${NOW_UTC}"
+transport_mode: operator_relay
+
+sender_node: control
+target_node: ${TARGET}
+
+work_scope:
+  summary: "${SUMMARY}"
+  work_type: ${WORK_TYPE}
+  domain: ${DOMAIN}
+  loop_id: "${LOOP_ID}"
+  safety_level: ${SAFETY}
+  execution_mode: code
+
+target_terminal:
+  role: ${ROLE}
+  attach_command: "${ATTACH_CMD}"
+  first_command: "${FIRST_COMMAND}"
+
+receipt_expectation:
+  expected_receipt_type: run_key
+  completion_criteria: single_receipt
+  complete_command: "./bin/ops cap run session.interactive.complete -- --dispatch-id ${ENVELOPE_ID} --run-key <RUN_KEY>"
+DISPATCH_YAML
+
+# ── Output ──
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  python3 -c "
+import json, sys
+print(json.dumps({
+    'envelope_id': '${ENVELOPE_ID}',
+    'dispatch_file': '${DISPATCH_FILE}',
+    'transport_mode': 'operator_relay',
+    'target_node': '${TARGET}',
+    'attach_command': '${ATTACH_CMD}',
+    'first_command': '${FIRST_COMMAND}',
+    'complete_command': './bin/ops cap run session.interactive.complete -- --dispatch-id ${ENVELOPE_ID} --run-key <RUN_KEY>',
+}, indent=2))
+"
+else
+  echo "════════════════════════════════════════"
+  echo "INTERACTIVE DISPATCH CREATED"
+  echo "════════════════════════════════════════"
+  echo ""
+  echo "Envelope:  ${ENVELOPE_ID}"
+  echo "Dispatch:  ${DISPATCH_FILE}"
+  echo "Target:    ${TARGET} (${ROLE})"
+  echo "Safety:    ${SAFETY}"
+  echo "Summary:   ${SUMMARY}"
+  if [[ -n "$LOOP_ID" ]]; then
+    echo "Loop:      ${LOOP_ID}"
+  fi
+  echo ""
+  echo "────────────────────────────────────────"
+  echo "OPERATOR CARRY — paste in target terminal"
+  echo "────────────────────────────────────────"
+  echo ""
+  echo "# 1. Attach with governed admission:"
+  echo "  ${ATTACH_CMD}"
+  echo ""
+  if [[ -n "$FIRST_COMMAND" ]]; then
+    echo "# 2. Run first command:"
+    echo "  ./bin/ops cap run ${FIRST_COMMAND}"
+    echo ""
+  fi
+  echo "# 3. Return receipt to control (paste run_key):"
+  echo "  ./bin/ops cap run session.interactive.complete -- --dispatch-id ${ENVELOPE_ID} --run-key <RUN_KEY>"
+  echo ""
+  echo "════════════════════════════════════════"
+fi

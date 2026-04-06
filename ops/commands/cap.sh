@@ -378,7 +378,7 @@ run_cap() {
     # worktree, no attach packet, or a read-only role.  These are
     # idempotent/additive governance operations — NOT product-domain
     # mutations.  Keep mutation-guard and approval checks intact.
-    local _maintenance_allowlist="gaps.file,gaps.close,gaps.claim,gaps.status,gaps.aging,gaps.batch.close,gaps.auto.close,gaps.quick,friction.ingest,friction.reconcile,friction.close.resolved,friction.queue.status,friction.baseline.capture,friction.baseline.verify,loop.closeout.finalize,state.shared.reconcile,loops.authority.bridge,loops.auto.close,loops.progress,lifecycle.health,lifecycle.tombstone.expire,lifecycle.residue.scan,lifecycle.restore.capsule.verify,capability.map.projection.build,planning.plans.reconcile"
+    local _maintenance_allowlist="gaps.file,gaps.close,gaps.claim,gaps.status,gaps.aging,gaps.batch.close,gaps.auto.close,gaps.quick,friction.ingest,friction.reconcile,friction.close.resolved,friction.queue.status,friction.baseline.capture,friction.baseline.verify,loop.closeout.finalize,state.shared.reconcile,loops.authority.bridge,loops.auto.close,loops.progress,lifecycle.health,lifecycle.tombstone.expire,lifecycle.residue.scan,lifecycle.restore.capsule.verify,capability.map.projection.build,planning.plans.reconcile,session.interactive.dispatch,session.interactive.complete"
 
     # Helper: returns 0 if $1 is in the maintenance allowlist.
     _is_maintenance_cap() {
