@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-04-05
+last_verified: 2026-04-06
 scope: spine-minimal-operating-contract
 ---
 
@@ -47,6 +47,38 @@ cd ~/code/agentic-spine
 git add <exact-files>
 OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "..."
 ```
+
+## Adopted Interactive Repo Mutation Workflow
+
+For controller-issued work packets that send a secondary terminal to mutate
+governed spine repo paths under `ops/`, `bin/`, or `surfaces/`, the default
+repo-local ceremony is:
+
+```bash
+./bin/ops cap run session.interactive.dispatch -- \
+  --governed-repo-mutation \
+  --summary "..." \
+  --loop <LOOP-ID> \
+  --governed-path ops/... \
+  --first-command "..."
+```
+
+The target terminal pastes the emitted export lines and attach command, runs the
+first command, then completes with:
+
+```bash
+./bin/ops cap run session.interactive.complete -- --run-key <RUN_KEY>
+```
+
+Missing completion is checked with:
+
+```bash
+./bin/ops cap run session.interactive.status -- --list-pending --governed-repo-mutations-only
+```
+
+This adoption is honest about scope. It does not force single-terminal work,
+external editors, arbitrary Bash, machine-wide terminal behavior, domain files
+outside governed paths, or autonomous transport into this ceremony.
 
 ## Execution Discipline
 

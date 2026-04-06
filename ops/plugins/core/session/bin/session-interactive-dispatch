@@ -26,6 +26,12 @@ DOMAIN="core"
 FIRST_COMMAND=""
 TARGET="execution"
 JSON_MODE=0
+GOVERNED_REPO_MUTATION=0
+declare -a GOVERNED_PATHS=()
+
+WORKFLOW_RULE_ID="interactive_governed_repo_mutation_default"
+WORKFLOW_TASK_CLASS="controller-issued secondary-terminal governed spine repo mutation"
+WORKFLOW_TASK_CLASS_ID="controller_secondary_terminal_governed_repo_mutation"
 
 usage() {
   cat <<'USAGE'
@@ -47,16 +53,45 @@ Options:
   --domain <domain>       Work domain (default: core)
   --first-command "..."   First capability command for target terminal
   --target <lane>         Target lane: execution|audit|watcher (default: execution)
+  --governed-repo-mutation
+                          Adopted workflow for controller-issued secondary-terminal
+                          mutations to governed spine repo paths (ops/, bin/, surfaces/)
+  --governed-path <path>  Governed repo path in scope for --governed-repo-mutation.
+                          Repeatable. Accepts repo-relative or absolute repo paths.
   --json                  Emit JSON output instead of human-readable
 
 Example:
   session-interactive-dispatch \
     --summary "Fix D75 trailer breach for f0a1c4d9" \
     --loop LOOP-SPINE-POST-V3-ENGINE-COHERENCE-20260403 \
-    --role worker \
-    --safety mutating \
-    --first-command "ops cap run gaps.file -- --id auto ..."
+    --governed-repo-mutation \
+    --governed-path ops/bindings/session.admission.contract.yaml \
+    --first-command "verify.fast -- --brief"
 USAGE
+}
+
+normalize_governed_path() {
+  local raw="$1"
+  local rel="$raw"
+
+  if [[ "$rel" == "$SPINE_CODE" ]]; then
+    rel="."
+  elif [[ "$rel" == "$SPINE_CODE/"* ]]; then
+    rel="${rel#"$SPINE_CODE"/}"
+  fi
+
+  rel="${rel#./}"
+  rel="${rel#/}"
+
+  case "$rel" in
+    ops/*|bin/*|surfaces/*)
+      printf '%s\n' "$rel"
+      ;;
+    *)
+      echo "ERROR: governed repo mutation paths must stay under ops/, bin/, or surfaces/ (got: $raw)" >&2
+      exit 1
+      ;;
+  esac
 }
 
 while [[ $# -gt 0 ]]; do
@@ -68,6 +103,8 @@ while [[ $# -gt 0 ]]; do
     --domain) DOMAIN="$2"; shift 2 ;;
     --first-command) FIRST_COMMAND="$2"; shift 2 ;;
     --target) TARGET="$2"; shift 2 ;;
+    --governed-repo-mutation) GOVERNED_REPO_MUTATION=1; shift ;;
+    --governed-path|--path) GOVERNED_PATHS+=("$2"); shift 2 ;;
     --json) JSON_MODE=1; shift ;;
     --help|-h) usage; exit 0 ;;
     --) shift; break ;;
@@ -79,6 +116,36 @@ if [[ -z "$SUMMARY" ]]; then
   echo "ERROR: --summary is required" >&2
   usage >&2
   exit 1
+fi
+
+if [[ "$GOVERNED_REPO_MUTATION" -eq 0 && "${#GOVERNED_PATHS[@]}" -gt 0 ]]; then
+  echo "ERROR: --governed-path requires --governed-repo-mutation" >&2
+  exit 1
+fi
+
+if [[ "$GOVERNED_REPO_MUTATION" -eq 1 ]]; then
+  if [[ -z "$FIRST_COMMAND" ]]; then
+    echo "ERROR: --first-command is required for --governed-repo-mutation" >&2
+    exit 1
+  fi
+  if [[ "${#GOVERNED_PATHS[@]}" -eq 0 ]]; then
+    echo "ERROR: --governed-repo-mutation requires at least one --governed-path" >&2
+    exit 1
+  fi
+fi
+
+NORMALIZED_GOVERNED_PATHS=()
+if [[ "${#GOVERNED_PATHS[@]}" -gt 0 ]]; then
+  for raw_path in "${GOVERNED_PATHS[@]}"; do
+    NORMALIZED_GOVERNED_PATHS+=("$(normalize_governed_path "$raw_path")")
+  done
+fi
+
+if [[ "$GOVERNED_REPO_MUTATION" -eq 1 ]]; then
+  ROLE="worker"
+  TARGET="execution"
+  SAFETY="mutating"
+  DOMAIN="spine"
 fi
 
 # ── Generate envelope identity ──
@@ -96,6 +163,11 @@ case "$TARGET" in
   *)         WORK_TYPE="capability_execution" ;;
 esac
 
+FIRST_CAPABILITY="${FIRST_COMMAND%% *}"
+TARGET_COMPLETE_COMMAND="./bin/ops cap run session.interactive.complete -- --run-key <RUN_KEY>"
+CONTROL_COMPLETE_COMMAND="./bin/ops cap run session.interactive.complete -- --dispatch-id ${ENVELOPE_ID} --run-key <RUN_KEY>"
+STATUS_COMMAND="./bin/ops cap run session.interactive.status -- --dispatch-id ${ENVELOPE_ID}"
+
 # ── Build attach command for target terminal ──
 ATTACH_CMD="./bin/ops cap run session.v3.attach --"
 if [[ -n "$LOOP_ID" ]]; then
@@ -105,14 +177,30 @@ else
 fi
 ATTACH_CMD="$ATTACH_CMD --role $ROLE"
 
+TARGET_EXPORTS=()
+if [[ "$GOVERNED_REPO_MUTATION" -eq 1 ]]; then
+  TARGET_EXPORTS+=("export SPINE_INTERACTIVE_DISPATCH_ID=${ENVELOPE_ID}")
+  TARGET_EXPORTS+=("export SPINE_INTERACTIVE_WORKFLOW_CLASS=${WORKFLOW_TASK_CLASS_ID}")
+fi
+
+GOVERNED_PATHS_BLOB=""
+TARGET_EXPORTS_BLOB=""
+if [[ "${#NORMALIZED_GOVERNED_PATHS[@]}" -gt 0 ]]; then
+  GOVERNED_PATHS_BLOB=$(printf '%s\n' "${NORMALIZED_GOVERNED_PATHS[@]}")
+fi
+if [[ "${#TARGET_EXPORTS[@]}" -gt 0 ]]; then
+  TARGET_EXPORTS_BLOB=$(printf '%s\n' "${TARGET_EXPORTS[@]}")
+fi
+
 # ── Write dispatch artifact ──
 DISPATCH_DIR="$SPINE_STATE/dispatch/interactive"
 mkdir -p "$DISPATCH_DIR"
 DISPATCH_FILE="$DISPATCH_DIR/${ENVELOPE_ID}.dispatch.yaml"
 
-cat > "$DISPATCH_FILE" <<DISPATCH_YAML
+{
+  cat <<DISPATCH_YAML
 kind: interactive_dispatch
-version: "1.0"
+version: "1.1"
 envelope_id: "${ENVELOPE_ID}"
 created_at_utc: "${NOW_UTC}"
 transport_mode: operator_relay
@@ -123,6 +211,7 @@ target_node: ${TARGET}
 work_scope:
   summary: "${SUMMARY}"
   work_type: ${WORK_TYPE}
+  capability_id: "${FIRST_CAPABILITY}"
   domain: ${DOMAIN}
   loop_id: "${LOOP_ID}"
   safety_level: ${SAFETY}
@@ -136,23 +225,65 @@ target_terminal:
 receipt_expectation:
   expected_receipt_type: run_key
   completion_criteria: single_receipt
-  complete_command: "./bin/ops cap run session.interactive.complete -- --dispatch-id ${ENVELOPE_ID} --run-key <RUN_KEY>"
+  complete_command: "${CONTROL_COMPLETE_COMMAND}"
+  target_terminal_complete_command: "${TARGET_COMPLETE_COMMAND}"
+  status_command: "${STATUS_COMMAND}"
 DISPATCH_YAML
+
+  if [[ "$GOVERNED_REPO_MUTATION" -eq 1 ]]; then
+    echo ""
+    echo "delegation_context:"
+    echo "  target_terminal_exports:"
+    for export_line in "${TARGET_EXPORTS[@]}"; do
+      echo "    - \"${export_line}\""
+    done
+    echo ""
+    echo "workflow_adoption:"
+    echo "  rule_id: ${WORKFLOW_RULE_ID}"
+    echo "  task_class_id: ${WORKFLOW_TASK_CLASS_ID}"
+    echo "  task_class: \"${WORKFLOW_TASK_CLASS}\""
+    echo "  repo_local_only: true"
+    echo "  completion_required: true"
+    echo "  governed_repo_paths:"
+    for governed_path in "${NORMALIZED_GOVERNED_PATHS[@]}"; do
+      echo "    - \"${governed_path}\""
+    done
+    echo "  out_of_scope:"
+    echo "    - \"single-terminal admitted work\""
+    echo "    - \"domain files outside governed paths\""
+    echo "    - \"machine-wide terminal behavior\""
+    echo "    - \"non-Claude/Codex external tools\""
+    echo "    - \"autonomous transport\""
+  fi
+} > "$DISPATCH_FILE"
 
 # ── Output ──
 if [[ "$JSON_MODE" -eq 1 ]]; then
-  python3 -c "
-import json, sys
-print(json.dumps({
-    'envelope_id': '${ENVELOPE_ID}',
-    'dispatch_file': '${DISPATCH_FILE}',
-    'transport_mode': 'operator_relay',
-    'target_node': '${TARGET}',
-    'attach_command': '${ATTACH_CMD}',
-    'first_command': '${FIRST_COMMAND}',
-    'complete_command': './bin/ops cap run session.interactive.complete -- --dispatch-id ${ENVELOPE_ID} --run-key <RUN_KEY>',
-}, indent=2))
-"
+  python3 - <<PY
+import json
+governed_paths = [line for line in """${GOVERNED_PATHS_BLOB}""".splitlines() if line]
+target_exports = [line for line in """${TARGET_EXPORTS_BLOB}""".splitlines() if line]
+payload = {
+    "envelope_id": "${ENVELOPE_ID}",
+    "dispatch_file": "${DISPATCH_FILE}",
+    "transport_mode": "operator_relay",
+    "target_node": "${TARGET}",
+    "attach_command": "${ATTACH_CMD}",
+    "first_command": "${FIRST_COMMAND}",
+    "complete_command": "${CONTROL_COMPLETE_COMMAND}",
+    "target_terminal_complete_command": "${TARGET_COMPLETE_COMMAND}",
+    "status_command": "${STATUS_COMMAND}",
+}
+if ${GOVERNED_REPO_MUTATION}:
+    payload["workflow_adoption"] = {
+        "rule_id": "${WORKFLOW_RULE_ID}",
+        "task_class_id": "${WORKFLOW_TASK_CLASS_ID}",
+        "task_class": "${WORKFLOW_TASK_CLASS}",
+        "governed_repo_paths": governed_paths,
+    }
+    payload["target_terminal_exports"] = target_exports
+print(json.dumps(payload, indent=2))
+PY
 else
   echo "════════════════════════════════════════"
   echo "INTERACTIVE DISPATCH CREATED"
@@ -166,21 +297,55 @@ else
   if [[ -n "$LOOP_ID" ]]; then
     echo "Loop:      ${LOOP_ID}"
   fi
+  if [[ "$GOVERNED_REPO_MUTATION" -eq 1 ]]; then
+    echo "Workflow:  ${WORKFLOW_TASK_CLASS}"
+  fi
   echo ""
+  if [[ "$GOVERNED_REPO_MUTATION" -eq 1 ]]; then
+    echo "────────────────────────────────────────"
+    echo "ADOPTED TASK CLASS"
+    echo "────────────────────────────────────────"
+    echo "Controller-issued secondary-terminal mutations to governed spine repo paths"
+    for governed_path in "${NORMALIZED_GOVERNED_PATHS[@]}"; do
+      echo "  - ${governed_path}"
+    done
+    echo ""
+  fi
   echo "────────────────────────────────────────"
   echo "OPERATOR CARRY — paste in target terminal"
   echo "────────────────────────────────────────"
   echo ""
-  echo "# 1. Attach with governed admission:"
+  if [[ "${#TARGET_EXPORTS[@]}" -gt 0 ]]; then
+    echo "# 1. Seed target-terminal completion context:"
+    for export_line in "${TARGET_EXPORTS[@]}"; do
+      echo "  ${export_line}"
+    done
+    echo ""
+    echo "# 2. Attach with governed admission:"
+  else
+    echo "# 1. Attach with governed admission:"
+  fi
   echo "  ${ATTACH_CMD}"
   echo ""
   if [[ -n "$FIRST_COMMAND" ]]; then
-    echo "# 2. Run first command:"
+    if [[ "${#TARGET_EXPORTS[@]}" -gt 0 ]]; then
+      echo "# 3. Run first command:"
+    else
+      echo "# 2. Run first command:"
+    fi
     echo "  ./bin/ops cap run ${FIRST_COMMAND}"
     echo ""
   fi
-  echo "# 3. Return receipt to control (paste run_key):"
-  echo "  ./bin/ops cap run session.interactive.complete -- --dispatch-id ${ENVELOPE_ID} --run-key <RUN_KEY>"
+  if [[ "${#TARGET_EXPORTS[@]}" -gt 0 ]]; then
+    echo "# 4. Complete in target terminal (dispatch id comes from env):"
+    echo "  ${TARGET_COMPLETE_COMMAND}"
+    echo ""
+  fi
+  echo "# Control-terminal fallback completion:"
+  echo "  ${CONTROL_COMPLETE_COMMAND}"
+  echo ""
+  echo "# Missing-completion check:"
+  echo "  ${STATUS_COMMAND}"
   echo ""
   echo "════════════════════════════════════════"
 fi

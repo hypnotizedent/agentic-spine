@@ -135,6 +135,16 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# ── Test 9b: Block includes interactive dispatch adoption cue ──
+TOTAL=$((TOTAL + 1))
+if echo "$BLOCK_REASON" | grep -q "session.interactive.dispatch"; then
+  echo "PASS: Block message includes interactive dispatch adoption cue"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: Block message missing interactive dispatch adoption cue"
+  FAIL=$((FAIL + 1))
+fi
+
 # ── Test 10: Write to governed path WITHOUT admission is blocked ──
 TOTAL=$((TOTAL + 1))
 WRITE_BLOCK=$(

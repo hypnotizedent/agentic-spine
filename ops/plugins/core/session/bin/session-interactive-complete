@@ -27,19 +27,18 @@ session-interactive-complete
 Records completion for an interactive dispatch with receipt linkage.
 
 Usage:
-  session-interactive-complete --dispatch-id ENV-... --run-key CAP-...
+  session-interactive-complete --run-key CAP-... [--dispatch-id ENV-...]
 
 Required:
-  --dispatch-id <ENV-ID>  The dispatch envelope ID
   --run-key <CAP-ID>      The run key from capability execution
 
 Options:
+  --dispatch-id <ENV-ID>  The dispatch envelope ID (defaults from SPINE_INTERACTIVE_DISPATCH_ID)
   --evidence-path <path>  Path to receipt/evidence (auto-detected if omitted)
   --json                  Emit JSON output
 
 Example:
   session-interactive-complete \
-    --dispatch-id ENV-20260405-201500-a1b2c3d4 \
     --run-key CAP-20260405-201600__gaps.file__Rabc12345
 USAGE
 }
@@ -56,8 +55,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "$DISPATCH_ID" && -n "${SPINE_INTERACTIVE_DISPATCH_ID:-}" ]]; then
+  DISPATCH_ID="$SPINE_INTERACTIVE_DISPATCH_ID"
+fi
+
 if [[ -z "$DISPATCH_ID" ]]; then
-  echo "ERROR: --dispatch-id is required" >&2
+  echo "ERROR: --dispatch-id is required (or set SPINE_INTERACTIVE_DISPATCH_ID)" >&2
   exit 1
 fi
 if [[ -z "$RUN_KEY" ]]; then
@@ -88,9 +91,11 @@ fi
 # ── Read dispatch metadata ──
 WAVE_ID=""
 LOOP_ID=""
+WORKFLOW_TASK_CLASS=""
 if command -v yq >/dev/null 2>&1; then
   WAVE_ID=$(yq e -r '.work_scope.wave_id // ""' "$DISPATCH_FILE" 2>/dev/null || true)
   LOOP_ID=$(yq e -r '.work_scope.loop_id // ""' "$DISPATCH_FILE" 2>/dev/null || true)
+  WORKFLOW_TASK_CLASS=$(yq e -r '.workflow_adoption.task_class // ""' "$DISPATCH_FILE" 2>/dev/null || true)
 fi
 
 # ── Write completion artifact ──
@@ -132,6 +137,9 @@ else
   fi
   if [[ -n "$LOOP_ID" ]]; then
     echo "Loop:       ${LOOP_ID}"
+  fi
+  if [[ -n "$WORKFLOW_TASK_CLASS" ]]; then
+    echo "Workflow:   ${WORKFLOW_TASK_CLASS}"
   fi
   echo "Transport:  operator_relay"
   echo "Status:     complete"

@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""session-interactive-status
+
+Read-only status surface for interactive dispatch envelopes.
+
+Focused on the admitted interactive path and the adopted governed repo mutation
+workflow. Reports whether a dispatch has linked completion and can list pending
+interactive envelopes for follow-up.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+WORKFLOW_RULE_ID = "interactive_governed_repo_mutation_default"
+
+
+def resolve_state_root() -> Path:
+    if os.getenv("SPINE_STATE"):
+        return Path(os.environ["SPINE_STATE"])
+    sys.path.insert(0, str(ROOT / "ops/lib"))
+    try:
+        from runtime_paths_py import spine_runtime_resolve_paths
+
+        return Path(spine_runtime_resolve_paths()["SPINE_STATE"])
+    except Exception:
+        return Path.home() / "code/.runtime/spine/state"
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle)
+    return data or {}
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def dispatch_paths(state_root: Path, dispatch_id: str) -> tuple[Path, Path]:
+    dispatch_file = state_root / "dispatch" / "interactive" / f"{dispatch_id}.dispatch.yaml"
+    completion_file = state_root / "dispatch" / "completion" / f"{dispatch_id}.completion.json"
+    return dispatch_file, completion_file
+
+
+def summarize_dispatch(dispatch_id: str, dispatch_data: dict[str, Any], completion_data: dict[str, Any]) -> dict[str, Any]:
+    workflow = dispatch_data.get("workflow_adoption") if isinstance(dispatch_data.get("workflow_adoption"), dict) else {}
+    receipt_expectation = dispatch_data.get("receipt_expectation") if isinstance(dispatch_data.get("receipt_expectation"), dict) else {}
+    work_scope = dispatch_data.get("work_scope") if isinstance(dispatch_data.get("work_scope"), dict) else {}
+
+    completion_status = "complete" if completion_data else "awaiting_completion"
+    governed_paths = workflow.get("governed_repo_paths") or []
+
+    return {
+        "dispatch_id": dispatch_id,
+        "status": completion_status,
+        "transport_mode": dispatch_data.get("transport_mode", ""),
+        "summary": work_scope.get("summary", ""),
+        "loop_id": work_scope.get("loop_id", ""),
+        "workflow_rule_id": workflow.get("rule_id", ""),
+        "task_class": workflow.get("task_class", ""),
+        "completion_required": bool(workflow.get("completion_required")),
+        "governed_repo_paths": governed_paths,
+        "complete_command": receipt_expectation.get("complete_command", ""),
+        "target_terminal_complete_command": receipt_expectation.get("target_terminal_complete_command", ""),
+        "run_key": completion_data.get("run_key", ""),
+        "evidence_path": completion_data.get("evidence_path", ""),
+    }
+
+
+def load_dispatch_summary(state_root: Path, dispatch_id: str) -> dict[str, Any]:
+    dispatch_file, completion_file = dispatch_paths(state_root, dispatch_id)
+    if not dispatch_file.exists():
+        raise FileNotFoundError(str(dispatch_file))
+    dispatch_data = load_yaml(dispatch_file)
+    completion_data = load_json(completion_file)
+    return summarize_dispatch(dispatch_id, dispatch_data, completion_data)
+
+
+def list_pending_dispatches(state_root: Path, governed_repo_mutations_only: bool) -> list[dict[str, Any]]:
+    dispatch_dir = state_root / "dispatch" / "interactive"
+    completion_dir = state_root / "dispatch" / "completion"
+    if not dispatch_dir.exists():
+        return []
+
+    results: list[dict[str, Any]] = []
+    for dispatch_file in sorted(dispatch_dir.glob("*.dispatch.yaml")):
+        dispatch_id = dispatch_file.name.replace(".dispatch.yaml", "")
+        completion_file = completion_dir / f"{dispatch_id}.completion.json"
+        if completion_file.exists():
+            continue
+        dispatch_data = load_yaml(dispatch_file)
+        summary = summarize_dispatch(dispatch_id, dispatch_data, {})
+        if governed_repo_mutations_only and summary.get("workflow_rule_id") != WORKFLOW_RULE_ID:
+            continue
+        results.append(summary)
+    return results
+
+
+def print_single(summary: dict[str, Any]) -> None:
+    print(f"dispatch_id: {summary['dispatch_id']}")
+    print(f"status: {summary['status']}")
+    print(f"transport_mode: {summary['transport_mode']}")
+    if summary.get("summary"):
+        print(f"summary: {summary['summary']}")
+    if summary.get("loop_id"):
+        print(f"loop_id: {summary['loop_id']}")
+    if summary.get("workflow_rule_id"):
+        print(f"workflow_rule_id: {summary['workflow_rule_id']}")
+    if summary.get("task_class"):
+        print(f"task_class: {summary['task_class']}")
+    if summary.get("completion_required"):
+        print("completion_required: true")
+    governed_paths = summary.get("governed_repo_paths") or []
+    if governed_paths:
+        print("governed_repo_paths:")
+        for path in governed_paths:
+            print(f"  - {path}")
+    if summary.get("run_key"):
+        print(f"run_key: {summary['run_key']}")
+    if summary.get("evidence_path"):
+        print(f"evidence_path: {summary['evidence_path']}")
+    if summary.get("target_terminal_complete_command"):
+        print(f"target_terminal_complete_command: {summary['target_terminal_complete_command']}")
+    if summary.get("complete_command"):
+        print(f"complete_command: {summary['complete_command']}")
+
+
+def print_pending(items: list[dict[str, Any]]) -> None:
+    print(f"pending_dispatches: {len(items)}")
+    print()
+    for item in items:
+        print(f"dispatch_id: {item['dispatch_id']}")
+        print(f"  status: {item['status']}")
+        if item.get("workflow_rule_id"):
+            print(f"  workflow_rule_id: {item['workflow_rule_id']}")
+        if item.get("task_class"):
+            print(f"  task_class: {item['task_class']}")
+        governed_paths = item.get("governed_repo_paths") or []
+        if governed_paths:
+            print("  governed_repo_paths:")
+            for path in governed_paths:
+                print(f"    - {path}")
+        print()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Inspect interactive dispatch completion state for the admitted operator-relay path."
+    )
+    parser.add_argument("--dispatch-id", help="Specific ENV-* dispatch to inspect")
+    parser.add_argument("--current", action="store_true", help="Use SPINE_INTERACTIVE_DISPATCH_ID from the current shell")
+    parser.add_argument("--list-pending", action="store_true", help="List pending interactive dispatches")
+    parser.add_argument(
+        "--governed-repo-mutations-only",
+        action="store_true",
+        help="Filter pending results to the adopted governed spine repo mutation workflow",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    parser.add_argument("--state-dir", help="Override SPINE_STATE (testing)")
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if not any([args.dispatch_id, args.current, args.list_pending]):
+        parser.print_help()
+        return 1
+
+    state_root = Path(args.state_dir) if args.state_dir else resolve_state_root()
+
+    if args.current:
+        args.dispatch_id = args.dispatch_id or os.getenv("SPINE_INTERACTIVE_DISPATCH_ID", "")
+        if not args.dispatch_id:
+            print("ERROR: --current requires SPINE_INTERACTIVE_DISPATCH_ID to be set", file=sys.stderr)
+            return 2
+
+    if args.dispatch_id:
+        try:
+            result = load_dispatch_summary(state_root, args.dispatch_id)
+        except FileNotFoundError as exc:
+            print(f"ERROR: dispatch not found: {exc}", file=sys.stderr)
+            return 3
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print_single(result)
+        return 0
+
+    pending = list_pending_dispatches(state_root, args.governed_repo_mutations_only)
+    if args.json:
+        print(json.dumps({"pending_dispatches": pending}, indent=2))
+    else:
+        print_pending(pending)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

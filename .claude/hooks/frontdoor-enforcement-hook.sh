@@ -76,6 +76,11 @@ Remediation — run session.v3.attach to establish admission:
 
 After attach, governed mutations will be allowed for 4 hours.
 
+Adopted repo-local workflow for controller-issued secondary-terminal mutations to
+\`ops/\`, \`bin/\`, or \`surfaces/\`:
+
+  ./bin/ops cap run session.interactive.dispatch -- --governed-repo-mutation --summary '...' --governed-path ops/... --first-command '...'
+
 This enforcement exists because governed spine work must enter through the front door, not bypass the engine. See: ops/bindings/session.admission.contract.yaml"
 
 jq -n --arg reason "$REASON" '{"decision": "block", "reason": $reason}'
