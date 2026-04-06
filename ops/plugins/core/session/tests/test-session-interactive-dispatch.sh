@@ -85,6 +85,14 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# ── Test: Rollout summary starts active before first eligible use ──
+INITIAL_SUMMARY=$("$STATUS_BIN" --governed-repo-mutation-summary 2>&1)
+assert_contains "initial summary marks next eligible requirement active" "$INITIAL_SUMMARY" "next_eligible_requirement: active"
+assert_contains "initial summary has zero starts" "$INITIAL_SUMMARY" "governed_repo_mutation_starts: 0"
+assert_contains "initial summary has zero completions" "$INITIAL_SUMMARY" "governed_repo_mutation_completions: 0"
+assert_contains "initial summary has three tasks remaining" "$INITIAL_SUMMARY" "remeasure_tasks_remaining: 3"
+assert_contains "initial summary is not yet due" "$INITIAL_SUMMARY" "remeasure_due: false"
+
 # ── Test: Adopted governed repo mutation dispatch ──
 ADOPTED_OUTPUT=$("$DISPATCH_BIN" \
   --summary "Adopt governed repo mutation path for session workflow" \
@@ -99,6 +107,7 @@ assert_contains "adopted dispatch output shows adopted task class" "$ADOPTED_OUT
 assert_contains "adopted dispatch output exports dispatch id" "$ADOPTED_OUTPUT" "export SPINE_INTERACTIVE_DISPATCH_ID=ENV-"
 assert_contains "adopted dispatch output shows target completion command" "$ADOPTED_OUTPUT" "session.interactive.complete -- --run-key <RUN_KEY>"
 assert_contains "adopted dispatch output has governed path" "$ADOPTED_OUTPUT" "ops/bindings/session.admission.contract.yaml"
+assert_contains "adopted dispatch output has rollout summary command" "$ADOPTED_OUTPUT" "session.interactive.status -- --governed-repo-mutation-summary"
 
 ENVELOPE_ID=$(echo "$ADOPTED_OUTPUT" | awk '/^Envelope:/ {print $2}')
 DISPATCH_FILE=$(echo "$ADOPTED_OUTPUT" | awk '/^Dispatch:/ {print $2}')
@@ -134,6 +143,12 @@ assert_contains "status reports workflow rule" "$STATUS_PENDING" "workflow_rule_
 
 FILTERED_PENDING=$("$STATUS_BIN" --list-pending --governed-repo-mutations-only 2>&1)
 assert_contains "pending list includes adopted envelope" "$FILTERED_PENDING" "$ENVELOPE_ID"
+
+ROLLout_PENDING=$("$STATUS_BIN" --governed-repo-mutation-summary 2>&1)
+assert_contains "rollout summary flips next eligible requirement to satisfied" "$ROLLout_PENDING" "next_eligible_requirement: satisfied"
+assert_contains "rollout summary counts one start after adopted dispatch" "$ROLLout_PENDING" "governed_repo_mutation_starts: 1"
+assert_contains "rollout summary counts one pending after adopted dispatch" "$ROLLout_PENDING" "governed_repo_mutation_pending: 1"
+assert_contains "rollout summary has two tasks remaining after first start" "$ROLLout_PENDING" "remeasure_tasks_remaining: 2"
 
 # ── Test: Generic interactive dispatch stays out of adopted filter ──
 GENERIC_OUTPUT=$("$DISPATCH_BIN" \
@@ -210,6 +225,41 @@ assert_contains "status reports run key after completion" "$STATUS_COMPLETE" "$F
 
 FILTERED_PENDING_AFTER_COMPLETE=$("$STATUS_BIN" --list-pending --governed-repo-mutations-only 2>&1)
 assert_contains "governed filter empty after completion" "$FILTERED_PENDING_AFTER_COMPLETE" "pending_dispatches: 0"
+
+ROLLOUT_COMPLETE=$("$STATUS_BIN" --governed-repo-mutation-summary 2>&1)
+assert_contains "rollout summary counts one completion after complete" "$ROLLOUT_COMPLETE" "governed_repo_mutation_completions: 1"
+assert_contains "rollout summary counts zero pending after complete" "$ROLLOUT_COMPLETE" "governed_repo_mutation_pending: 0"
+
+TIMEBOX_DUE=$(
+  env SPINE_INTERACTIVE_STATUS_NOW_UTC="2026-04-13T16:43:54Z" \
+    "$STATUS_BIN" --governed-repo-mutation-summary 2>&1
+)
+assert_contains "rollout summary can signal timebox due" "$TIMEBOX_DUE" "remeasure_due: true"
+assert_contains "rollout summary timebox due reason is explicit" "$TIMEBOX_DUE" "remeasure_due_reason: timebox"
+
+# ── Test: Task-threshold trigger becomes queryable at 3 starts ──
+SECOND_OUTPUT=$("$DISPATCH_BIN" \
+  --summary "Second governed repo mutation" \
+  --loop LOOP-TEST-INTERACTIVE \
+  --governed-repo-mutation \
+  --governed-path bin/ops \
+  --first-command "verify.fast -- --brief" 2>&1)
+SECOND_ENVELOPE=$(echo "$SECOND_OUTPUT" | awk '/^Envelope:/ {print $2}')
+
+THIRD_OUTPUT=$("$DISPATCH_BIN" \
+  --summary "Third governed repo mutation" \
+  --loop LOOP-TEST-INTERACTIVE \
+  --governed-repo-mutation \
+  --governed-path surfaces/verify/d75-gap-registry-mutation-lock.sh \
+  --first-command "verify.fast -- --brief" 2>&1)
+THIRD_ENVELOPE=$(echo "$THIRD_OUTPUT" | awk '/^Envelope:/ {print $2}')
+
+THRESHOLD_SUMMARY=$("$STATUS_BIN" --governed-repo-mutation-summary 2>&1)
+assert_contains "threshold summary counts three starts" "$THRESHOLD_SUMMARY" "governed_repo_mutation_starts: 3"
+assert_contains "threshold summary is due" "$THRESHOLD_SUMMARY" "remeasure_due: true"
+assert_contains "threshold summary due reason is task threshold" "$THRESHOLD_SUMMARY" "remeasure_due_reason: task_threshold"
+assert_contains "threshold summary lists pending envelopes" "$THRESHOLD_SUMMARY" "$SECOND_ENVELOPE"
+assert_contains "threshold summary lists third envelope" "$THRESHOLD_SUMMARY" "$THIRD_ENVELOPE"
 
 # ── Test: Invalid governed path is rejected ──
 TOTAL=$((TOTAL + 1))

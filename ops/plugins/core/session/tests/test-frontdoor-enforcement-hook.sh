@@ -145,6 +145,24 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+TOTAL=$((TOTAL + 1))
+if echo "$BLOCK_REASON" | grep -q "next eligible controller-issued secondary-terminal mutation"; then
+  echo "PASS: Block message includes next-eligible requirement cue"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: Block message missing next-eligible requirement cue"
+  FAIL=$((FAIL + 1))
+fi
+
+TOTAL=$((TOTAL + 1))
+if echo "$BLOCK_REASON" | grep -q "governed-repo-mutation-summary"; then
+  echo "PASS: Block message includes rollout status cue"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: Block message missing rollout status cue"
+  FAIL=$((FAIL + 1))
+fi
+
 # ── Test 10: Write to governed path WITHOUT admission is blocked ──
 TOTAL=$((TOTAL + 1))
 WRITE_BLOCK=$(

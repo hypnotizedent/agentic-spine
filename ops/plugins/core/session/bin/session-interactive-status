@@ -4,13 +4,14 @@
 Read-only status surface for interactive dispatch envelopes.
 
 Focused on the admitted interactive path and the adopted governed repo mutation
-workflow. Reports whether a dispatch has linked completion and can list pending
-interactive envelopes for follow-up.
+workflow. Reports per-dispatch completion state, pending interactive envelopes,
+and rollout summary for the current 3-task-or-7-day re-measure window.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import sys
@@ -22,6 +23,14 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[5]
 WORKFLOW_RULE_ID = "interactive_governed_repo_mutation_default"
+ADMISSION_CONTRACT_PATH = ROOT / "ops/bindings/session.admission.contract.yaml"
+DEFAULT_MEASUREMENT_WINDOW_START_UTC = "2026-04-06T16:43:53Z"
+DEFAULT_MEASUREMENT_ANCHOR_COMMIT = "de857c59c971603a725215e880e9f08696919cfd"
+DEFAULT_REMEASURE_TASK_THRESHOLD = 3
+DEFAULT_REMEASURE_TIMEBOX_DAYS = 7
+DEFAULT_STATUS_SURFACE = (
+    "./bin/ops cap run session.interactive.status -- --governed-repo-mutation-summary"
+)
 
 
 def resolve_state_root() -> Path:
@@ -51,15 +60,104 @@ def load_json(path: Path) -> dict[str, Any]:
         return json.load(handle)
 
 
+def parse_utc(raw: str | None) -> dt.datetime | None:
+    if not raw:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(dt.timezone.utc)
+    except Exception:
+        return None
+
+
+def format_utc(value: dt.datetime | None) -> str:
+    if value is None:
+        return ""
+    return value.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def utc_now() -> dt.datetime:
+    override = parse_utc(os.getenv("SPINE_INTERACTIVE_STATUS_NOW_UTC", ""))
+    return override or dt.datetime.now(dt.timezone.utc)
+
+
+def parse_int(value: Any, default: int) -> int:
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
 def dispatch_paths(state_root: Path, dispatch_id: str) -> tuple[Path, Path]:
     dispatch_file = state_root / "dispatch" / "interactive" / f"{dispatch_id}.dispatch.yaml"
     completion_file = state_root / "dispatch" / "completion" / f"{dispatch_id}.completion.json"
     return dispatch_file, completion_file
 
 
-def summarize_dispatch(dispatch_id: str, dispatch_data: dict[str, Any], completion_data: dict[str, Any]) -> dict[str, Any]:
-    workflow = dispatch_data.get("workflow_adoption") if isinstance(dispatch_data.get("workflow_adoption"), dict) else {}
-    receipt_expectation = dispatch_data.get("receipt_expectation") if isinstance(dispatch_data.get("receipt_expectation"), dict) else {}
+def load_rollout_policy() -> dict[str, Any]:
+    contract = load_yaml(ADMISSION_CONTRACT_PATH)
+    adoption = (
+        contract.get("interactive_workflow_adoption")
+        if isinstance(contract.get("interactive_workflow_adoption"), dict)
+        else {}
+    )
+    next_requirement = (
+        adoption.get("next_eligible_requirement")
+        if isinstance(adoption.get("next_eligible_requirement"), dict)
+        else {}
+    )
+    remeasure = (
+        adoption.get("remeasure_trigger")
+        if isinstance(adoption.get("remeasure_trigger"), dict)
+        else {}
+    )
+
+    measurement_start = (
+        parse_utc(str(remeasure.get("measurement_window_start_utc", "")).strip())
+        or parse_utc(str(adoption.get("activated_at", "")).strip())
+        or parse_utc(DEFAULT_MEASUREMENT_WINDOW_START_UTC)
+    )
+    task_threshold = parse_int(remeasure.get("task_threshold"), DEFAULT_REMEASURE_TASK_THRESHOLD)
+    timebox_days = parse_int(remeasure.get("timebox_days"), DEFAULT_REMEASURE_TIMEBOX_DAYS)
+    deadline = (
+        parse_utc(str(remeasure.get("deadline_utc", "")).strip())
+        or (measurement_start + dt.timedelta(days=timebox_days) if measurement_start else None)
+    )
+
+    return {
+        "rule_id": str(adoption.get("rule_id", WORKFLOW_RULE_ID)).strip() or WORKFLOW_RULE_ID,
+        "task_class": str(adoption.get("task_class", "")).strip(),
+        "activated_at": str(adoption.get("activated_at", "")).strip(),
+        "measurement_window_start_utc": format_utc(measurement_start),
+        "measurement_start_dt": measurement_start,
+        "measurement_anchor_commit": (
+            str(remeasure.get("anchor_commit", "")).strip() or DEFAULT_MEASUREMENT_ANCHOR_COMMIT
+        ),
+        "next_eligible_rule": str(next_requirement.get("requirement", "")).strip(),
+        "task_threshold": task_threshold,
+        "timebox_days": timebox_days,
+        "deadline_utc": format_utc(deadline),
+        "deadline_dt": deadline,
+        "condition": str(remeasure.get("condition", "whichever_first")).strip() or "whichever_first",
+        "status_surface": str(remeasure.get("status_surface", DEFAULT_STATUS_SURFACE)).strip()
+        or DEFAULT_STATUS_SURFACE,
+    }
+
+
+def summarize_dispatch(
+    dispatch_id: str,
+    dispatch_data: dict[str, Any],
+    completion_data: dict[str, Any],
+) -> dict[str, Any]:
+    workflow = (
+        dispatch_data.get("workflow_adoption")
+        if isinstance(dispatch_data.get("workflow_adoption"), dict)
+        else {}
+    )
+    receipt_expectation = (
+        dispatch_data.get("receipt_expectation")
+        if isinstance(dispatch_data.get("receipt_expectation"), dict)
+        else {}
+    )
     work_scope = dispatch_data.get("work_scope") if isinstance(dispatch_data.get("work_scope"), dict) else {}
 
     completion_status = "complete" if completion_data else "awaiting_completion"
@@ -71,6 +169,8 @@ def summarize_dispatch(dispatch_id: str, dispatch_data: dict[str, Any], completi
         "transport_mode": dispatch_data.get("transport_mode", ""),
         "summary": work_scope.get("summary", ""),
         "loop_id": work_scope.get("loop_id", ""),
+        "created_at_utc": dispatch_data.get("created_at_utc", ""),
+        "completed_at_utc": completion_data.get("completed_at_utc", ""),
         "workflow_rule_id": workflow.get("rule_id", ""),
         "task_class": workflow.get("task_class", ""),
         "completion_required": bool(workflow.get("completion_required")),
@@ -91,7 +191,13 @@ def load_dispatch_summary(state_root: Path, dispatch_id: str) -> dict[str, Any]:
     return summarize_dispatch(dispatch_id, dispatch_data, completion_data)
 
 
-def list_pending_dispatches(state_root: Path, governed_repo_mutations_only: bool) -> list[dict[str, Any]]:
+def list_dispatch_summaries(
+    state_root: Path,
+    *,
+    governed_repo_mutations_only: bool = False,
+    pending_only: bool = False,
+    measurement_start: dt.datetime | None = None,
+) -> list[dict[str, Any]]:
     dispatch_dir = state_root / "dispatch" / "interactive"
     completion_dir = state_root / "dispatch" / "completion"
     if not dispatch_dir.exists():
@@ -101,14 +207,72 @@ def list_pending_dispatches(state_root: Path, governed_repo_mutations_only: bool
     for dispatch_file in sorted(dispatch_dir.glob("*.dispatch.yaml")):
         dispatch_id = dispatch_file.name.replace(".dispatch.yaml", "")
         completion_file = completion_dir / f"{dispatch_id}.completion.json"
-        if completion_file.exists():
-            continue
         dispatch_data = load_yaml(dispatch_file)
-        summary = summarize_dispatch(dispatch_id, dispatch_data, {})
+        completion_data = load_json(completion_file)
+        summary = summarize_dispatch(dispatch_id, dispatch_data, completion_data)
+        created_at = parse_utc(summary.get("created_at_utc", ""))
+        if measurement_start and created_at and created_at < measurement_start:
+            continue
         if governed_repo_mutations_only and summary.get("workflow_rule_id") != WORKFLOW_RULE_ID:
+            continue
+        if pending_only and completion_file.exists():
             continue
         results.append(summary)
     return results
+
+
+def list_pending_dispatches(state_root: Path, governed_repo_mutations_only: bool) -> list[dict[str, Any]]:
+    return list_dispatch_summaries(
+        state_root,
+        governed_repo_mutations_only=governed_repo_mutations_only,
+        pending_only=True,
+    )
+
+
+def governed_repo_mutation_rollout_summary(state_root: Path) -> dict[str, Any]:
+    policy = load_rollout_policy()
+    measurement_start = policy.get("measurement_start_dt")
+    now = utc_now()
+
+    dispatches = list_dispatch_summaries(
+        state_root,
+        governed_repo_mutations_only=True,
+        measurement_start=measurement_start,
+    )
+    starts = len(dispatches)
+    completions = sum(1 for item in dispatches if item.get("status") == "complete")
+    pending_items = [item for item in dispatches if item.get("status") != "complete"]
+    threshold_reached = starts >= policy["task_threshold"]
+    timebox_reached = bool(policy.get("deadline_dt") and now >= policy["deadline_dt"])
+    remeasure_due = threshold_reached or timebox_reached
+    if threshold_reached:
+        due_reason = "task_threshold"
+    elif timebox_reached:
+        due_reason = "timebox"
+    else:
+        due_reason = "not_due"
+
+    return {
+        "workflow_rule_id": policy["rule_id"],
+        "task_class": policy["task_class"],
+        "measurement_anchor_commit": policy["measurement_anchor_commit"],
+        "measurement_window_start_utc": policy["measurement_window_start_utc"],
+        "measurement_now_utc": format_utc(now),
+        "next_eligible_requirement": "active" if starts == 0 else "satisfied",
+        "next_eligible_rule": policy["next_eligible_rule"],
+        "governed_repo_mutation_starts": starts,
+        "governed_repo_mutation_completions": completions,
+        "governed_repo_mutation_pending": len(pending_items),
+        "pending_dispatch_ids": [item["dispatch_id"] for item in pending_items],
+        "remeasure_task_threshold": policy["task_threshold"],
+        "remeasure_tasks_remaining": max(policy["task_threshold"] - starts, 0),
+        "remeasure_timebox_days": policy["timebox_days"],
+        "remeasure_deadline_utc": policy["deadline_utc"],
+        "remeasure_condition": policy["condition"],
+        "remeasure_due": remeasure_due,
+        "remeasure_due_reason": due_reason,
+        "status_surface": policy["status_surface"],
+    }
 
 
 def print_single(summary: dict[str, Any]) -> None:
@@ -119,6 +283,10 @@ def print_single(summary: dict[str, Any]) -> None:
         print(f"summary: {summary['summary']}")
     if summary.get("loop_id"):
         print(f"loop_id: {summary['loop_id']}")
+    if summary.get("created_at_utc"):
+        print(f"created_at_utc: {summary['created_at_utc']}")
+    if summary.get("completed_at_utc"):
+        print(f"completed_at_utc: {summary['completed_at_utc']}")
     if summary.get("workflow_rule_id"):
         print(f"workflow_rule_id: {summary['workflow_rule_id']}")
     if summary.get("task_class"):
@@ -158,13 +326,46 @@ def print_pending(items: list[dict[str, Any]]) -> None:
         print()
 
 
+def print_rollout_summary(summary: dict[str, Any]) -> None:
+    print(f"workflow_rule_id: {summary['workflow_rule_id']}")
+    print(f"task_class: {summary['task_class']}")
+    print(f"measurement_anchor_commit: {summary['measurement_anchor_commit']}")
+    print(f"measurement_window_start_utc: {summary['measurement_window_start_utc']}")
+    print(f"measurement_now_utc: {summary['measurement_now_utc']}")
+    print(f"next_eligible_requirement: {summary['next_eligible_requirement']}")
+    if summary.get("next_eligible_rule"):
+        print(f"next_eligible_rule: {summary['next_eligible_rule']}")
+    print(f"governed_repo_mutation_starts: {summary['governed_repo_mutation_starts']}")
+    print(f"governed_repo_mutation_completions: {summary['governed_repo_mutation_completions']}")
+    print(f"governed_repo_mutation_pending: {summary['governed_repo_mutation_pending']}")
+    print(f"remeasure_task_threshold: {summary['remeasure_task_threshold']}")
+    print(f"remeasure_tasks_remaining: {summary['remeasure_tasks_remaining']}")
+    print(f"remeasure_timebox_days: {summary['remeasure_timebox_days']}")
+    print(f"remeasure_deadline_utc: {summary['remeasure_deadline_utc']}")
+    print(f"remeasure_condition: {summary['remeasure_condition']}")
+    print(f"remeasure_due: {'true' if summary['remeasure_due'] else 'false'}")
+    print(f"remeasure_due_reason: {summary['remeasure_due_reason']}")
+    print(f"status_surface: {summary['status_surface']}")
+    pending_dispatch_ids = summary.get("pending_dispatch_ids") or []
+    if pending_dispatch_ids:
+        print("pending_dispatch_ids:")
+        for dispatch_id in pending_dispatch_ids:
+            print(f"  - {dispatch_id}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Inspect interactive dispatch completion state for the admitted operator-relay path."
     )
-    parser.add_argument("--dispatch-id", help="Specific ENV-* dispatch to inspect")
-    parser.add_argument("--current", action="store_true", help="Use SPINE_INTERACTIVE_DISPATCH_ID from the current shell")
-    parser.add_argument("--list-pending", action="store_true", help="List pending interactive dispatches")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dispatch-id", help="Specific ENV-* dispatch to inspect")
+    mode.add_argument("--current", action="store_true", help="Use SPINE_INTERACTIVE_DISPATCH_ID from the current shell")
+    mode.add_argument("--list-pending", action="store_true", help="List pending interactive dispatches")
+    mode.add_argument(
+        "--governed-repo-mutation-summary",
+        action="store_true",
+        help="Show rollout counts and the 3-task-or-7-day re-measure trigger for the governed repo mutation workflow",
+    )
     parser.add_argument(
         "--governed-repo-mutations-only",
         action="store_true",
@@ -179,17 +380,14 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    if not any([args.dispatch_id, args.current, args.list_pending]):
-        parser.print_help()
-        return 1
-
     state_root = Path(args.state_dir) if args.state_dir else resolve_state_root()
 
     if args.current:
-        args.dispatch_id = args.dispatch_id or os.getenv("SPINE_INTERACTIVE_DISPATCH_ID", "")
-        if not args.dispatch_id:
+        dispatch_id = os.getenv("SPINE_INTERACTIVE_DISPATCH_ID", "")
+        if not dispatch_id:
             print("ERROR: --current requires SPINE_INTERACTIVE_DISPATCH_ID to be set", file=sys.stderr)
             return 2
+        args.dispatch_id = dispatch_id
 
     if args.dispatch_id:
         try:
@@ -203,11 +401,19 @@ def main() -> int:
             print_single(result)
         return 0
 
-    pending = list_pending_dispatches(state_root, args.governed_repo_mutations_only)
+    if args.list_pending:
+        pending = list_pending_dispatches(state_root, args.governed_repo_mutations_only)
+        if args.json:
+            print(json.dumps({"pending_dispatches": pending}, indent=2))
+        else:
+            print_pending(pending)
+        return 0
+
+    rollout_summary = governed_repo_mutation_rollout_summary(state_root)
     if args.json:
-        print(json.dumps({"pending_dispatches": pending}, indent=2))
+        print(json.dumps(rollout_summary, indent=2))
     else:
-        print_pending(pending)
+        print_rollout_summary(rollout_summary)
     return 0
 
 

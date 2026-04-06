@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-04-06
+last_verified: 2026-04-07
 scope: spine-minimal-operating-contract
 ---
 
@@ -75,6 +75,16 @@ Missing completion is checked with:
 ```bash
 ./bin/ops cap run session.interactive.status -- --list-pending --governed-repo-mutations-only
 ```
+
+Until the rollout has real signal, the next eligible task in this class must
+use this ceremony. Re-measure with:
+
+```bash
+./bin/ops cap run session.interactive.status -- --governed-repo-mutation-summary
+```
+
+Re-measure is due after `3` real in-scope starts or `7` days from the rollout
+anchor, whichever comes first.
 
 This adoption is honest about scope. It does not force single-terminal work,
 external editors, arbitrary Bash, machine-wide terminal behavior, domain files
