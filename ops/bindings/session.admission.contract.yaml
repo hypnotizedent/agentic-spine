@@ -84,6 +84,38 @@ resolution:
   fallback_parity_status: degraded
   note: "When lane resolution fails, assume degraded posture. Do not claim parity."
 
+# ── Toolchain Front-Door Enforcement ──────────────────────────────────────────
+# Added 2026-04-05: Makes governed mutation through the Claude Code toolchain
+# require session admission. Enforced via PreToolUse hook on Edit/Write tools.
+
+toolchain_enforcement:
+  status: active
+  activated_at: "2026-04-05"
+  enforcement_point: ".claude/hooks/frontdoor-enforcement-hook.sh"
+  hook_type: PreToolUse
+  intercepted_tools: [Edit, Write]
+  governed_paths: ["ops/", "bin/", "surfaces/"]
+  admission_check:
+    - source: env
+      var: SPINE_ENTRY_PACKET_PATH
+      condition: "set and file exists"
+    - source: filesystem
+      path: "$SPINE_STATE/entry-packets/*.entry.packet.yaml"
+      condition: "any file modified within 240 minutes (4h session TTL)"
+  remediation: "./bin/ops cap run session.v3.attach -- --allow-no-loop"
+  what_is_enforced: >
+    Edit/Write on governed spine paths (ops/, bin/, surfaces/) through the
+    Claude Code toolchain requires session admission. Without a valid entry
+    packet, mutations are blocked with clear remediation.
+  what_is_not_enforced: >
+    Bash tool (arbitrary shell commands), external editors, git operations
+    (handled by pre-commit hooks), and files outside governed paths. This
+    enforcement covers the toolchain, not the shell.
+  relationship_to_cap_sh: >
+    cap.sh Layer 1 (attach admission guard) enforces the same rule for
+    governed capability execution. This hook extends the same admission
+    model to direct file mutations through the Claude Code toolchain.
+
 # ── Work Admission Rules ─────────────────────────────────────────────────────
 # Added 2026-04-05: Defines what delegated work each lane accepts or rejects.
 # Used by dispatch.envelope.contract.yaml for routing and admission validation.
