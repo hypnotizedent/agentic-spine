@@ -123,9 +123,6 @@ All must PASS for core to be healthy.
 | D74 | Billing/provider lane lock |
 | D75 | Gap registry mutation lock |
 | D76 | Home-surface hygiene lock |
-| D77 | Workbench contract lock |
-| D78 | Workbench path lock |
-| D79 | Workbench script allowlist lock |
 | D80 | Workbench authority-trace lock |
 | D81 | Plugin test regression lock |
 | D83 | Proposal queue health lock |

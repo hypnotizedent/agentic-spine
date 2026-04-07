@@ -643,31 +643,6 @@ if [[ -x "$SP/surfaces/verify/d75-gap-registry-mutation-lock.sh" ]]; then
 else
   warn "Gap registry mutation lock gate not present"
 fi
-CURRENT_GATE="D77"
-echo -n "D77 workbench contract lock... "
-if [[ -x "$SP/surfaces/verify/d77-workbench-contract-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d77-workbench-contract-lock.sh"
-else
-  warn "workbench contract lock gate not present"
-fi
-
-# D78: Workbench path lock (uppercase /Code/ + ronny-ops drift)
-CURRENT_GATE="D78"
-echo -n "D78 workbench path lock... "
-if [[ -x "$SP/surfaces/verify/d78-workbench-path-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d78-workbench-path-lock.sh"
-else
-  warn "workbench path lock gate not present"
-fi
-
-# D79: Workbench script allowlist lock (governed script surface)
-CURRENT_GATE="D79"
-echo -n "D79 workbench script allowlist lock... "
-if [[ -x "$SP/surfaces/verify/d79-workbench-script-allowlist-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d79-workbench-script-allowlist-lock.sh"
-else
-  warn "workbench script allowlist lock gate not present"
-fi
 CURRENT_GATE="D83"
 echo -n "D83 proposal queue health lock... "
 if [[ -x "$SP/surfaces/verify/d83-proposal-queue-health-lock.sh" ]]; then

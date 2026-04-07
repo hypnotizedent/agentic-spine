@@ -4,7 +4,7 @@ authority_state: projection
 projection_of:
   - ops/bindings/terminal.worker.catalog.yaml
 owner: "@ronny"
-last_verified: 2026-03-24
+last_verified: 2026-04-07
 scope: worker-usage-domain-finance-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -24,7 +24,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ## Capabilities (1)
 - `finance.stack.status`
 
-## Gates (21)
+## Gates (20)
 - `D124`
 - `D125`
 - `D126`
@@ -41,7 +41,6 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D62`
 - `D63`
 - `D67`
-- `D79`
 - `D80`
 - `D81`
 - `D84`
