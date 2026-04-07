@@ -40,7 +40,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `switch.health.status`
 - `uptime.kuma.monitors.sync`
 
-## Gates (23)
+## Gates (20)
 - `D124`
 - `D126`
 - `D127`
@@ -53,14 +53,11 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D406`
 - `D410`
 - `D411`
-- `D415`
 - `D416`
-- `D418`
 - `D422`
 - `D423`
 - `D425`
 - `D426`
-- `D427`
 - `D62`
 - `D63`
 - `D67`
