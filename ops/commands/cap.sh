@@ -2,12 +2,13 @@
 set -euo pipefail
 
 SCRIPT_CODE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CAP_FILE_REL="ops/capabilities.runtime.yaml"
 ACTIVE_REPO_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
 ACTIVE_CODE_ROOT=""
 VALID_AMBIENT_TARGET_REPO=""
 AMBIENT_TARGET_GIT_ROOT=""
 
-if [[ -n "$ACTIVE_REPO_ROOT" && -f "$ACTIVE_REPO_ROOT/ops/capabilities.yaml" ]]; then
+if [[ -n "$ACTIVE_REPO_ROOT" && -f "$ACTIVE_REPO_ROOT/$CAP_FILE_REL" ]]; then
     ACTIVE_CODE_ROOT="$ACTIVE_REPO_ROOT"
 fi
 
@@ -15,7 +16,7 @@ if [[ -n "${SPINE_TARGET_REPO:-}" ]]; then
     AMBIENT_TARGET_GIT_ROOT="$(git -C "$SPINE_TARGET_REPO" rev-parse --show-toplevel 2>/dev/null || true)"
     if [[ -n "$AMBIENT_TARGET_GIT_ROOT" ]]; then
         VALID_AMBIENT_TARGET_REPO="$AMBIENT_TARGET_GIT_ROOT"
-    elif [[ -f "$SPINE_TARGET_REPO/ops/capabilities.yaml" ]]; then
+    elif [[ -f "$SPINE_TARGET_REPO/$CAP_FILE_REL" ]]; then
         VALID_AMBIENT_TARGET_REPO="$SPINE_TARGET_REPO"
     fi
 fi
@@ -37,7 +38,7 @@ spine_runtime_resolve_paths
 export SPINE_INBOX SPINE_OUTBOX SPINE_STATE SPINE_LOCKS SPINE_LOGS SPINE_RECEIPTS SPINE_VERIFY_ROOT SPINE_DOMAIN_STATE SPINE_TARGET_REPO
 
 STATE_DIR="$SPINE_STATE"
-CAP_FILE="$SPINE_CODE/ops/capabilities.yaml"
+CAP_FILE="$SPINE_CODE/$CAP_FILE_REL"
 RECEIPTS="$SPINE_RECEIPTS"
 LEDGER="$STATE_DIR/ledger.csv"
 LEDGER_HEADER="run_id,created_at,started_at,finished_at,status,prompt_file,result_file,error,context_used"
@@ -64,104 +65,13 @@ ensure_state_dir() {
     fi
 }
 
-# Bootstrap runtime directories/files that may be absent in fresh worktrees.
-ensure_runtime_scaffold() {
-    local proposals_dir="$SPINE_OUTBOX/proposals"
-    local loop_scopes_dir="$SPINE_STATE/loop-scopes"
-    local sessions_dir="$SPINE_STATE/sessions"
-    local orchestration_dir="$SPINE_STATE/orchestration"
-    local calendar_dir="$SPINE_OUTBOX/calendar"
-    local calendar_external_dir="$calendar_dir/external"
-    local evidence_index_dir="$SPINE_VERIFY_ROOT/indexes"
-    local receipt_index="$evidence_index_dir/receipt-index.yaml"
-    local verify_history_dir="$SPINE_VERIFY_HISTORY_DIR"
-    local verify_history_file="$SPINE_VERIFY_FAILURE_HISTORY_FILE"
-    local verify_state_dir="$SPINE_VERIFY_STATE_ROOT"
-    local verify_pass_streak_file="$SPINE_VERIFY_PASS_STREAK_FILE"
-    local context_dir="$SPINE_AGENT_CONTEXT_ROOT"
-
-    mkdir -p \
-        "$RECEIPTS" \
-        "$proposals_dir" \
-        "$loop_scopes_dir" \
-        "$sessions_dir" \
-        "$orchestration_dir" \
-        "$calendar_dir" \
-        "$calendar_external_dir" \
-        "$evidence_index_dir" \
-        "$verify_history_dir" \
-        "$verify_state_dir" \
-        "$context_dir" \
-        "$SPINE_LOCKS" \
-        "$SPINE_LOGS" \
-        "$SPINE_TMP"
-
-    if [[ ! -f "$receipt_index" ]]; then
-        cat > "$receipt_index" <<EOF
-updated_at_utc: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-source_root: "$RECEIPTS"
-entries: []
-EOF
-    fi
-
-    if [[ ! -f "$verify_history_file" ]]; then
-        : > "$verify_history_file"
-    fi
-
-    if [[ ! -f "$verify_pass_streak_file" ]]; then
-        echo '{}' > "$verify_pass_streak_file"
-    fi
-}
-
-maybe_rotate_receipts() {
-    local cap_name="${1:-}"
-    [[ -z "${OPS_CAP_STACK:-}" ]] || return 0
-    [[ "$cap_name" != "receipts.rotate" ]] || return 0
-
-    local rotate_every="${SPINE_RECEIPTS_ROTATE_EVERY:-100}"
-    local retention_days="${SPINE_RECEIPTS_ROTATE_DAYS:-30}"
-    local counter_file="$STATE_DIR/cap-run-counter"
-    local rotate_bin="$SPINE_CODE/ops/plugins/core/evidence/bin/receipts-rotate"
-    local counter=0
-
-    [[ "$rotate_every" =~ ^[0-9]+$ ]] || rotate_every=100
-    (( rotate_every > 0 )) || rotate_every=100
-    [[ "$retention_days" =~ ^[0-9]+$ ]] || retention_days=30
-
-    if [[ -f "$counter_file" ]]; then
-      counter="$(tr -dc '0-9' < "$counter_file" 2>/dev/null || echo 0)"
-      [[ "$counter" =~ ^[0-9]+$ ]] || counter=0
-    fi
-    counter=$((counter + 1))
-    printf '%s\n' "$counter" > "$counter_file"
-
-    if (( counter % rotate_every != 0 )); then
-      return 0
-    fi
-    [[ -x "$rotate_bin" ]] || return 0
-
-    local rotate_json
-    rotate_json="$("$rotate_bin" --days "$retention_days" --execute --json 2>/dev/null || true)"
-    if [[ -n "$rotate_json" ]] && command -v jq >/dev/null 2>&1; then
-      local deleted candidates
-      deleted="$(printf '%s' "$rotate_json" | jq -r '.deleted // 0' 2>/dev/null || echo 0)"
-      candidates="$(printf '%s' "$rotate_json" | jq -r '.candidates // 0' 2>/dev/null || echo 0)"
-      spine_log_event \
-        --event-type "receipts.rotate" \
-        --domain "core" \
-        --status "done" \
-        --message "auto-rotation completed (candidates=$candidates deleted=$deleted days=$retention_days)" \
-        --meta-json "$rotate_json" || true
-    fi
-}
-
 usage() {
     cat <<'EOF'
-ops cap - Execute governed capabilities
+ops cap - Execute runtime capabilities
 
 Usage:
   ops cap list                    List available capabilities
-  ops cap run <name> [args...]    Execute a capability with receipt
+  ops cap run <name> [args...]    Execute a capability
   ops cap show <name>             Show capability details
 
 Examples:
@@ -221,9 +131,8 @@ run_cap() {
     cleanup_cap() { [[ -n "$_cap_tmp" ]] && rm -f "$_cap_tmp" 2>/dev/null || true; }
     trap cleanup_cap EXIT INT TERM
 
-    # Ensure runtime state is bootstrapped before executing anything.
+    # Ensure runtime state exists before executing anything.
     ensure_state_dir
-    ensure_runtime_scaffold
 
     # ── Resolve active policy preset ──
     source "$SPINE_CODE/ops/lib/resolve-policy.sh"
@@ -1708,8 +1617,6 @@ EOF
       --run-key "$run_key" \
       --source "ops/commands/cap.sh" \
       --meta-json "{\"capability\":\"$name\",\"receipt_status\":\"$receipt_status\",\"exit_code\":$exit_code}" || true
-
-    maybe_rotate_receipts "$name" || true
 
     echo ""
     echo "════════════════════════════════════════"
