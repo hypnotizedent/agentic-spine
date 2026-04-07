@@ -18,9 +18,8 @@ VM_LIFECYCLE_PATH = ROOT / "ops/bindings/vm.lifecycle.yaml"
 VM_PROFILE_PATH = ROOT / "ops/bindings/vm.operating.profile.yaml"
 PLACEMENT_PATH = ROOT / "ops/bindings/infra.storage.placement.policy.yaml"
 BACKUP_PATH = ROOT / "ops/bindings/domains/backup/backup.inventory.yaml"
-SERVICE_REGISTRY_PATH = ROOT / "docs/governance/SERVICE_REGISTRY.yaml"
 SERVICES_HEALTH_PATH = ROOT / "ops/bindings/services.health.yaml"
-ROUTING_PATH = ROOT / "ops/bindings/domain.routing.registry.yaml"
+SHOP_INGRESS_PATH = ROOT / "ops/bindings/shop.ingress.map.yaml"
 MEDIA_PRESSURE_PATH = ROOT / "ops/bindings/shop.media.pressure.authority.yaml"
 LIFECYCLE_REGISTRY_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
 STORAGE_SCAFFOLD_PATH = ROOT / "ops/bindings/storage.scaffold.authority.yaml"
@@ -122,7 +121,8 @@ def route_is_live(route: dict[str, Any]) -> bool:
 
 
 def normalize_service_name(name: str) -> str:
-    return re.sub(r"-vm\d+$", "", (name or "").strip())
+    value = re.sub(r"-vm\d+$", "", (name or "").strip())
+    return re.sub(r"-v\d+$", "", value)
 
 
 def parse_pool_from_source(source: str) -> str | None:
@@ -477,10 +477,9 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
     vm_profiles = load_yaml(VM_PROFILE_PATH)
     placement = load_yaml(PLACEMENT_PATH)
     backup = load_yaml(BACKUP_PATH)
-    services = load_yaml(SERVICE_REGISTRY_PATH)
     health = load_yaml(SERVICES_HEALTH_PATH)
-    routing = load_yaml(ROUTING_PATH)
-    media_pressure = load_yaml(MEDIA_PRESSURE_PATH)
+    shop_ingress = load_yaml(SHOP_INGRESS_PATH)
+    media_pressure = load_yaml(MEDIA_PRESSURE_PATH) if MEDIA_PRESSURE_PATH.is_file() else {}
     lifecycle = load_yaml(LIFECYCLE_REGISTRY_PATH)
     storage_scaffold = load_yaml(STORAGE_SCAFFOLD_PATH)
 
@@ -490,13 +489,13 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
         rel(VM_PROFILE_PATH),
         rel(PLACEMENT_PATH),
         rel(BACKUP_PATH),
-        rel(SERVICE_REGISTRY_PATH),
         rel(SERVICES_HEALTH_PATH),
-        rel(ROUTING_PATH),
-        rel(MEDIA_PRESSURE_PATH),
+        rel(SHOP_INGRESS_PATH),
         rel(LIFECYCLE_REGISTRY_PATH),
         rel(STORAGE_SCAFFOLD_PATH),
     ]
+    if MEDIA_PRESSURE_PATH.is_file():
+        source_surfaces.append(rel(MEDIA_PRESSURE_PATH))
     shop_scaffold = scaffold_rows_for_device(storage_scaffold, "pve")
 
     machines = {str(row.get("machine_id") or ""): row for row in hardware.get("machines") or [] if isinstance(row, dict)}
@@ -535,14 +534,20 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
     }
 
     active_services_by_host: dict[str, list[str]] = defaultdict(list)
-    for service_name, row in (services.get("services") or {}).items():
+    service_host_lookup: dict[str, str] = {}
+    for row in health.get("endpoints") or []:
         if not isinstance(row, dict):
             continue
-        if not service_status_is_active(row):
+        if row.get("enabled", True) is False:
             continue
         host = str(row.get("host") or "").strip()
-        if host:
-            active_services_by_host[host].append(str(service_name))
+        endpoint_id = str(row.get("id") or "").strip()
+        if host and endpoint_id:
+            normalized = normalize_service_name(endpoint_id)
+            active_services_by_host[host].append(normalized or endpoint_id)
+            service_host_lookup[endpoint_id] = host
+            if normalized and normalized not in service_host_lookup:
+                service_host_lookup[normalized] = host
 
     probes_by_host: dict[str, list[str]] = defaultdict(list)
     for row in health.get("endpoints") or []:
@@ -556,37 +561,20 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
             probes_by_host[host].append(endpoint_id)
 
     route_rows_by_host: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    service_host_lookup: dict[str, str] = {}
-    for service_name, row in (services.get("services") or {}).items():
-        if not isinstance(row, dict):
+    for route in shop_ingress.get("public_routes") or []:
+        if not isinstance(route, dict) or not route_is_live(route):
             continue
-        host = str(row.get("host") or "")
-        service_host_lookup[str(service_name)] = host
-        normalized_name = normalize_service_name(str(service_name))
-        if normalized_name and normalized_name not in service_host_lookup:
-            service_host_lookup[normalized_name] = host
-        container_name = str(row.get("container") or "").strip()
-        if container_name and container_name not in service_host_lookup:
-            service_host_lookup[container_name] = host
-
-    for zone in routing.get("zones") or []:
-        if not isinstance(zone, dict):
+        service_name = str(route.get("service") or "")
+        host = service_host_lookup.get(service_name, "") or service_host_lookup.get(normalize_service_name(service_name), "")
+        if not host:
             continue
-        zone_name = str(zone.get("zone") or "")
-        for route in zone.get("hostnames") or []:
-            if not isinstance(route, dict) or not route_is_live(route):
-                continue
-            service_name = str(route.get("service") or "")
-            host = service_host_lookup.get(service_name, "") or service_host_lookup.get(normalize_service_name(service_name), "")
-            if not host:
-                continue
-            route_rows_by_host[host].append(
-                {
-                    "hostname": str(route.get("hostname") or ""),
-                    "routing_layer": str(route.get("routing_layer") or ""),
-                    "zone": zone_name,
-                }
-            )
+        route_rows_by_host[host].append(
+            {
+                "hostname": str(route.get("hostname") or ""),
+                "routing_layer": str(route.get("routing_layer") or ""),
+                "zone": str(route.get("zone") or ""),
+            }
+        )
 
     shop_vms = [
         row
@@ -1101,7 +1089,7 @@ def render_scorecard(storage_map: dict[str, Any]) -> str:
             "| --- | --- | --- |",
             "| Hypervisor | `ops/bindings/hardware.inventory.yaml` | `pve` is the only shop hypervisor. |",
             f"| Storage map | `{rel(OUTPUT_BINDING_PATH)}` | Runtime, backup, and tombstone storage truth are projected from authoritative bindings. |",
-            "| Ingress | `docs/governance/SERVICE_REGISTRY.yaml` + `ops/bindings/domain.routing.registry.yaml` | Public reachability is derived from live service and route registry surfaces. |",
+            "| Ingress | `ops/bindings/shop.ingress.map.yaml` + `ops/bindings/services.health.yaml` | Public reachability is derived from the runtime ingress authority plus active health surfaces. |",
             "",
             "## Storage Tiers",
             "",

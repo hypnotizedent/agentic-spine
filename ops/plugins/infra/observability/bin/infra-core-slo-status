@@ -78,12 +78,9 @@ need_cmd curl
 need_file "$CONTRACT"
 
 SERVICES_HEALTH_REL="$(yq -r '.source_bindings.services_health // "ops/bindings/services.health.yaml"' "$CONTRACT")"
-SERVICE_REGISTRY_REL="$(yq -r '.source_bindings.service_registry // "docs/governance/SERVICE_REGISTRY.yaml"' "$CONTRACT")"
 SERVICES_HEALTH="$ROOT/$SERVICES_HEALTH_REL"
-SERVICE_REGISTRY="$ROOT/$SERVICE_REGISTRY_REL"
 
 need_file "$SERVICES_HEALTH"
-need_file "$SERVICE_REGISTRY"
 
 TARGET_HOST="$(yq -r '.target.host // "infra-core"' "$CONTRACT")"
 CONNECT_TIMEOUT_SEC="$(yq -r '.timeouts.connect_timeout_sec // 3' "$CONTRACT")"
@@ -200,19 +197,10 @@ for service_id in "${REQUIRED_IDS[@]}"; do
   svc_note=""
   svc_latency="-"
 
-  registry_host="$(yq -r ".services.\"$service_id\".host // \"\"" "$SERVICE_REGISTRY")"
-  if [[ -z "$registry_host" || "$registry_host" == "null" ]]; then
-    svc_status="FAIL"
-    svc_note="missing_in_service_registry"
-  elif [[ "$registry_host" != "$TARGET_HOST" ]]; then
-    svc_status="FAIL"
-    svc_note="registry_host=$registry_host expected=$TARGET_HOST"
-  fi
-
   endpoint_row="$(yq -r ".endpoints[] | select(.id == \"$service_id\") | [(.host // \"\"), ((.enabled // true)|tostring), (.url // \"\"), ((.expect // 200)|tostring)] | @tsv" "$SERVICES_HEALTH" | head -n1 || true)"
   if [[ -z "$endpoint_row" ]]; then
     svc_status="FAIL"
-    svc_note="${svc_note:+$svc_note; }missing_in_services_health"
+    svc_note="missing_in_services_health"
   else
     IFS=$'\t' read -r endpoint_host endpoint_enabled endpoint_url endpoint_expect <<< "$endpoint_row"
     if [[ "$endpoint_host" != "$TARGET_HOST" ]]; then
@@ -262,19 +250,10 @@ for service_id in "${OPTIONAL_IDS[@]}"; do
   svc_latency="-"
   can_probe=1
 
-  registry_host="$(yq -r ".services.\"$service_id\".host // \"\"" "$SERVICE_REGISTRY")"
-  if [[ -z "$registry_host" || "$registry_host" == "null" ]]; then
-    svc_status="WARN"
-    svc_note="missing_in_service_registry"
-  elif [[ "$registry_host" != "$TARGET_HOST" ]]; then
-    svc_status="WARN"
-    svc_note="registry_host=$registry_host expected=$TARGET_HOST"
-  fi
-
   endpoint_row="$(yq -r ".endpoints[] | select(.id == \"$service_id\") | [(.host // \"\"), ((.enabled // true)|tostring), (.url // \"\"), ((.expect // 200)|tostring)] | @tsv" "$SERVICES_HEALTH" | head -n1 || true)"
   if [[ -z "$endpoint_row" ]]; then
     svc_status="WARN"
-    svc_note="${svc_note:+$svc_note; }missing_in_services_health"
+    svc_note="missing_in_services_health"
     can_probe=0
   else
     IFS=$'\t' read -r endpoint_host endpoint_enabled endpoint_url endpoint_expect <<< "$endpoint_row"

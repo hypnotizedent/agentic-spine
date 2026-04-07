@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# cloudflare-service-publish — governed Cloudflare publish transaction:
-# DNS upsert + tunnel ingress set + registry parity checks.
+# cloudflare-service-publish — Cloudflare publish transaction:
+# DNS upsert + tunnel ingress set + runtime ingress parity checks.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../../../" && pwd)"
 SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
 CF_LIB="$ROOT/ops/plugins/providers/cloudflare/lib/cloudflare-api.sh"
 BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
-REGISTRY_FILE="$ROOT/ops/bindings/domain.routing.registry.yaml"
+SHOP_INGRESS_FILE="$ROOT/ops/bindings/shop.ingress.map.yaml"
+HOME_INGRESS_FILE="$ROOT/ops/bindings/home.ingress.map.yaml"
 
 DNS_SET_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-dns-record-set"
 INGRESS_SET_SCRIPT="$ROOT/ops/plugins/providers/cloudflare/bin/cloudflare-tunnel-ingress-set"
@@ -52,11 +53,11 @@ Usage: cloudflare-service-publish --hostname HOST --service-name NAME --service-
 
 Required:
   --hostname HOST             Public hostname to publish (e.g., homarr.ronny.works)
-  --service-name NAME         Logical service name for registry parity (e.g., homarr)
+  --service-name NAME         Logical service name for ingress parity (e.g., homarr)
   --service-url URL           Tunnel backend target URL (e.g., http://100.123.207.64:7575)
 
 Backward-compatible:
-  --service URL               Alias: sets --service-url only (registry parity uses hostname prefix)
+  --service URL               Alias: sets --service-url only (ingress parity uses hostname prefix)
 
 Optional:
   --zone-id ID                Cloudflare zone ID
@@ -66,7 +67,7 @@ Optional:
   --proxied                   Enable Cloudflare proxy (default behavior)
   --no-proxy                  Disable proxy (DNS-only)
   --tunnel NAME               Tunnel name (default: homelab-tunnel)
-  --allow-unregistered        Skip domain.routing.registry parity precheck
+  --allow-unregistered        Skip ingress-map parity precheck
   --json                      Emit JSON output
   --dry-run                   Preview transaction only
 EOF
@@ -120,8 +121,8 @@ if [[ ! -f "$BINDING_FILE" ]]; then
   echo "STOP: binding file missing: $BINDING_FILE" >&2
   exit 2
 fi
-if [[ ! -f "$REGISTRY_FILE" ]]; then
-  echo "STOP: registry file missing: $REGISTRY_FILE" >&2
+if [[ ! -f "$SHOP_INGRESS_FILE" || ! -f "$HOME_INGRESS_FILE" ]]; then
+  echo "STOP: ingress map missing: $SHOP_INGRESS_FILE or $HOME_INGRESS_FILE" >&2
   exit 2
 fi
 
@@ -149,14 +150,14 @@ fi
 [[ -n "$ZONE_ID" ]] || { echo "STOP: unable to resolve zone id for hostname=$HOSTNAME zone=${ZONE_NAME:-unset}" >&2; exit 2; }
 
 if [[ "$ALLOW_UNREGISTERED" -eq 0 ]]; then
-  parity="$(python3 - "$REGISTRY_FILE" "$HOSTNAME" "$SERVICE_NAME" <<'PY'
+  parity="$(python3 - "$SHOP_INGRESS_FILE" "$HOME_INGRESS_FILE" "$HOSTNAME" "$SERVICE_NAME" <<'PY'
 import sys, yaml
-path, hostname, service_name = sys.argv[1], sys.argv[2].strip().lower(), sys.argv[3].strip()
-with open(path, "r", encoding="utf-8") as f:
-    doc = yaml.safe_load(f) or {}
+shop_path, home_path, hostname, service_name = sys.argv[1], sys.argv[2], sys.argv[3].strip().lower(), sys.argv[4].strip()
 matches = []
-for zone in doc.get("zones", []) or []:
-    for row in zone.get("hostnames", []) or []:
+for path in (shop_path, home_path):
+    with open(path, "r", encoding="utf-8") as f:
+        doc = yaml.safe_load(f) or {}
+    for row in doc.get("public_routes", []) or []:
         h = str(row.get("hostname", "")).strip().lower()
         if h == hostname:
             matches.append(row)
@@ -177,19 +178,19 @@ PY
   case "$parity" in
     ok) ;;
     missing)
-      echo "STOP: hostname '$HOSTNAME' missing from domain.routing.registry (use --allow-unregistered to bypass)." >&2
+      echo "STOP: hostname '$HOSTNAME' missing from runtime ingress maps (use --allow-unregistered to bypass)." >&2
       exit 3
       ;;
     bad_layer:*)
-      echo "STOP: domain.routing.registry routing_layer mismatch for '$HOSTNAME' (${parity#bad_layer:})." >&2
+      echo "STOP: runtime ingress map routing_layer mismatch for '$HOSTNAME' (${parity#bad_layer:})." >&2
       exit 3
       ;;
     service_mismatch:*)
-      echo "STOP: domain.routing.registry service mismatch for '$HOSTNAME' (expected '${parity#service_mismatch:}', got '$SERVICE_NAME')." >&2
+      echo "STOP: runtime ingress map service mismatch for '$HOSTNAME' (expected '${parity#service_mismatch:}', got '$SERVICE_NAME')." >&2
       exit 3
       ;;
     *)
-      echo "STOP: registry parity check failed for '$HOSTNAME' ($parity)." >&2
+      echo "STOP: ingress parity check failed for '$HOSTNAME' ($parity)." >&2
       exit 3
       ;;
   esac

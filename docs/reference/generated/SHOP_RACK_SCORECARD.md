@@ -1,18 +1,18 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-23
+last_verified: 2026-04-07
 scope: shop-rack-scorecard
 source_binding: ops/bindings/shop.storage.map.yaml
 ---
 
 # Shop Rack Scorecard
 
-- Generated: `2026-03-23T21:53:44Z`
+- Generated: `2026-04-07T21:37:45Z`
 - Rebuild: `./bin/ops cap run infra.shop.storage.authority.build`
 - Active runtimes: `12`
 - Tombstones: `1`
-- Public runtimes: `7`
+- Public runtimes: `8`
 
 ## Substrate
 
@@ -20,7 +20,7 @@ source_binding: ops/bindings/shop.storage.map.yaml
 | --- | --- | --- |
 | Hypervisor | `ops/bindings/hardware.inventory.yaml` | `pve` is the only shop hypervisor. |
 | Storage map | `ops/bindings/shop.storage.map.yaml` | Runtime, backup, and tombstone storage truth are projected from authoritative bindings. |
-| Ingress | `docs/governance/SERVICE_REGISTRY.yaml` + `ops/bindings/domain.routing.registry.yaml` | Public reachability is derived from live service and route registry surfaces. |
+| Ingress | `ops/bindings/shop.ingress.map.yaml` + `ops/bindings/services.health.yaml` | Public reachability is derived from the runtime ingress authority plus active health surfaces. |
 
 ## Storage Tiers
 
@@ -32,42 +32,29 @@ source_binding: ops/bindings/shop.storage.map.yaml
 
 ## Media Pressure
 
-- Observed: `2026-03-21T05:25:47Z`
-- media: `25.1T used`, `4.1T free`, `86%`
-- md1400: `7.30T used`, `36.3T free`, `16%`
+- Observed: `unknown`
+- media: `unknown used`, `unknown free`, `unknown%`
+- md1400: `unknown used`, `unknown free`, `unknown%`
 - Canonical payload: `unknown`
 - Regenerable runtime pressure: `unknown`
-- View truth: The client-visible /media export accounts for payload residue on the deprecated shop pool. Host-local paths /media/movies, /media/tv, and /media/music are empty child datasets, and /media/movies-archive is masked by md1400/media-cold/movies-archive. NFS consumers still observe parent payload at those paths, so host-local du/zfs output alone is not storage truth. This is evacuation accounting, not active media truth.
-
+- View truth: none
 
 | Path | Surface Class | Reclaim Class | Usage | Purpose |
 | --- | --- | --- | --- | --- |
-| /mnt/media/movies | evacuation_residue | payload | 10.1T | Movie payload residue on deprecated shop pool. Canonical active movie library is on home Synology /volume1/media-staging/movies via media-home VM 106. |
-| /mnt/media/tv | evacuation_residue | payload | 5.7T | TV payload residue on deprecated shop pool. Canonical active TV library is on home Synology via media-home VM 106. |
-| /mnt/media/downloads | evacuation_residue | regenerable | 108G | Downloads residue on deprecated shop pool. Active downloads now land on home Synology via SABnzbd on media-home. |
-| /mnt/media/music | evacuation_residue | payload | 686G | Music payload residue on deprecated shop pool. Canonical active music library is on home Synology via media-home VM 106. |
-| /mnt/media/movies-archive | archive | archive | 214G | Radarr archive root on deprecated shop pool. Not active playback surface. |
-| /mnt/media/backups | compatibility-hold | archive | 6.7M | Legacy warm-lane media-stack tarballs drained to md1400. Not canonical backup truth. |
 
 | Lane | Status | Target | Current Size | Rationale |
 | --- | --- | --- | --- | --- |
-| media-stack-legacy-backups-drain | done | /media/backups | 0 | Canonical media config backups already live under /md1400/backup-cold/apps/media-config. These warm-lane tarballs are legacy archive residue and now live on md1400, not on media.
- |
-| media-forensic-snapshot-hold | blocked | media@forensic-20260226-2325 | 278G | Retained forensic snapshot from the copy-first utilization upgrade. Deleting it in this wave would discard restore evidence; keeping it means deleted media blocks are not reclaimed immediately.
- |
-| media-downloads-reclaim | done | /mnt/media/downloads | 108G | Downloads cleanup executed 2026-03-12 to 2026-03-21: 2.7TB → 108GB (2.6TB reclaimed). Remaining 108GB is active/recent downloads. Further selective cleanup available if needed.
- |
 
 ## Active Runtime Units
 
 | VMID | Runtime | Kind | Startup | Tier | Durable State | Backup Lane | Ingress | Monitoring |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 202 | automation-stack | vm | auto | data-vms | data-vms:pve:data/vms/vm-202-disk-0 (ZFS zvol, 100G), /home/automation/backups/n8n-workflows, /home/automation/stacks | pve-vzdump-primary, r730xd-infra-core-backups | chat.ronny.works, n8n.ronny.works | 4 probes |
-| 203 | immich | vm | auto | tank-docker | tank:tank/immich | pve-vzdump-primary | private-only | 2 probes |
+| 203 | immich | vm | auto | tank-docker | tank:tank/immich | pve-vzdump-primary | photos.ronny.works | 2 probes |
 | 204 | infra-core | vm | auto | boot-only | boot-disk:infra-core boot disk (50G), boot-disk:/opt/stacks | pve-vzdump-primary, r730xd-infra-core-backups | auth.ronny.works, pihole.ronny.works, vault.ronny.works | 6 probes |
 | 205 | observability | vm | auto | boot-only | boot-disk:observability boot disk (50G), boot-disk:/opt/stacks | pve-vzdump-primary | dash.ronny.works, grafana.ronny.works | 6 probes, node-exporter |
 | 206 | dev-tools | vm | auto | boot-only | boot-disk:dev-tools boot disk (50G), boot-disk:/opt/stacks/gitea | pve-vzdump-primary, r730xd-dev-tools-backups | git.ronny.works | 1 probes |
-| 207 | ai-consolidation | vm | auto | boot-only | boot-disk:ai-consolidation boot disk (200G), boot-disk:/opt/stacks/ai-consolidation | pve-vzdump-primary | private-only | 2 probes |
+| 207 | ai-consolidation | vm | auto | boot-only | boot-disk:ai-consolidation boot disk (200G), boot-disk:/opt/stacks/ai-consolidation, boot-disk:/opt/stacks/spine-workers | pve-vzdump-primary | private-only | 2 probes |
 | 211 | finance-stack | vm | auto | boot-only | boot-disk:finance-stack boot disk (96G), boot-disk:/opt/stacks/finance | pve-vzdump-primary, r730xd-finance-backups | docs.mintprints.com, docs.ronny.works, finances.mintprints.com, finances.ronny.works, firefly.ronny.works, investments.mintprints.com, investments.ronny.works | 4 probes |
 | 212 | mint-data | vm | auto | data-vms | data-vms:pve:data/vms/vm-212-disk-0 (ZFS zvol, 320G) mounted at /mnt/data; DockerRootDir=/mnt/data/docker, /opt/stacks/mint-data | pve-vzdump-primary, r730xd-mint-backups | private-only | 1 probes |
 | 213 | mint-apps | vm | auto | boot-only | boot-disk:mint-apps boot disk (50G), boot-disk:/opt/stacks/mint-apps | pve-vzdump-primary | suppliers.mintprints.co, api.mintprints.com, customer.mintprints.co, customer.mintprints.com, estimator.mintprints.co, mintprints-app.ronny.works, mintprints.com, pricing.mintprints.co, pricing.mintprints.com, shipping.mintprints.co, shipping.mintprints.com, www.mintprints.com | 13 probes |
@@ -88,4 +75,3 @@ source_binding: ops/bindings/shop.storage.map.yaml
 - `dev-tools`: 14% boot usage (6.3GB/48GB). Volumes 183MB. Gitea repos + PostgreSQL small at current scale. Log rotation added. Re-evaluate if usage exceeds 60%. (ops/bindings/infra.storage.placement.policy.yaml)
 - `ai-consolidation`: 5% boot usage (8.1GB/193GB). 200GB boot has massive headroom. Qdrant vectors + AnythingLLM small. Log rotation added. Re-evaluate if usage exceeds 40%. (ops/bindings/infra.storage.placement.policy.yaml)
 - `finance-stack`: 12% boot usage (11GB/92GB) after truncating 59GB firefly-cron crash log. Actual data only 531MB. Fixed cron binary (crond→cron). Log rotation added. Re-evaluate if usage exceeds 60%. (ops/bindings/infra.storage.placement.policy.yaml)
-- `media`: The SHOP pve:/media pool is at 86% usage. This is NOT the home canonical plane. NFS-visible payload residue accounts for about 16.4TiB (movies/tv/music plus movies-archive), downloads cleaned to 108GiB of regenerable pressure. Legacy warm-lane tarballs are offloaded to md1400; retained forensic snapshot at 278G. The canonical active family media runtime is HOME (Synology, 20T, ~35% used, 14T free). (ops/bindings/shop.media.pressure.authority.yaml)
