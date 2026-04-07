@@ -714,8 +714,8 @@ def command_facts(args: argparse.Namespace) -> None:
                     "answer": answer,
                     "result_text": answer,
                     "sources": [
-                        "ops/bindings/communications.providers.contract.yaml",
-                        "ops/bindings/mint.customer.mailbox.standard.contract.yaml",
+                        "ops/bindings/domains/communications/communications.providers.contract.yaml",
+                        "ops/bindings/domains/mint/mint.customer.mailbox.standard.contract.yaml",
                     ],
                 },
             }

@@ -23,34 +23,19 @@ else
   err "binding contract missing: ops/bindings/domains/taxlegal/taxlegal.paperless.binding.contract.yaml"
 fi
 
-# ── Check 2: Ingest capability registered in capabilities.yaml ───────────
-CAP_FILE="$ROOT/ops/capabilities.yaml"
+# ── Check 2: Ingest capability registered in runtime capabilities ────────
+CAP_FILE="$ROOT/ops/capabilities.runtime.yaml"
 if [[ -f "$CAP_FILE" ]] && grep -q 'taxlegal\.source\.ingest:' "$CAP_FILE" 2>/dev/null; then
   pass
 else
-  err "taxlegal.source.ingest not found in ops/capabilities.yaml"
+  err "taxlegal.source.ingest not found in ops/capabilities.runtime.yaml"
 fi
 
-# ── Check 3: Recall capability registered in capabilities.yaml ───────────
+# ── Check 3: Recall capability registered in runtime capabilities ────────
 if [[ -f "$CAP_FILE" ]] && grep -q 'taxlegal\.source\.recall:' "$CAP_FILE" 2>/dev/null; then
   pass
 else
-  err "taxlegal.source.recall not found in ops/capabilities.yaml"
-fi
-
-# ── Check 4: Ingest capability registered in capability_map.yaml ─────────
-MAP_FILE="$ROOT/ops/bindings/capability_map.yaml"
-if [[ -f "$MAP_FILE" ]] && grep -q 'taxlegal\.source\.ingest:' "$MAP_FILE" 2>/dev/null; then
-  pass
-else
-  err "taxlegal.source.ingest not found in ops/bindings/capability_map.yaml"
-fi
-
-# ── Check 5: Recall capability registered in capability_map.yaml ─────────
-if [[ -f "$MAP_FILE" ]] && grep -q 'taxlegal\.source\.recall:' "$MAP_FILE" 2>/dev/null; then
-  pass
-else
-  err "taxlegal.source.recall not found in ops/bindings/capability_map.yaml"
+  err "taxlegal.source.recall not found in ops/capabilities.runtime.yaml"
 fi
 
 # ── Check 6: Ingest script exists and is executable ──────────────────────
@@ -114,19 +99,6 @@ if [[ -f "$CONTRACT" ]] && command -v yq &>/dev/null; then
   fi
 else
   pass
-fi
-
-# ── Check 10: Agent registry lists both capabilities ─────────────────────
-AGENT_REG="$ROOT/ops/bindings/agents.registry.yaml"
-if [[ -f "$AGENT_REG" ]]; then
-  if grep -q 'taxlegal\.source\.ingest' "$AGENT_REG" 2>/dev/null && \
-     grep -q 'taxlegal\.source\.recall' "$AGENT_REG" 2>/dev/null; then
-    pass
-  else
-    err "agent registry missing taxlegal.source.ingest or taxlegal.source.recall"
-  fi
-else
-  err "agents.registry.yaml not found"
 fi
 
 # ── Result ───────────────────────────────────────────────────────────────

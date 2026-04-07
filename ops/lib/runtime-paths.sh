@@ -97,8 +97,7 @@ _spine_canonicalize_repoish_path() {
 _spine_has_capability_registry() {
   local root="${1:-}"
   [[ -n "$root" ]] || return 1
-  [[ -f "$root/ops/capabilities.yaml" ]] && return 0
-  [[ -f "$root/ops/bindings/mailroom.runtime.contract.yaml" ]] && return 0
+  [[ -f "$root/ops/capabilities.runtime.yaml" ]] && return 0
   return 1
 }
 
@@ -253,7 +252,7 @@ spine_runtime_resolve_paths() {
   SPINE_TARGET_REPO="$target_repo"
   SPINE_REPO="$target_repo"
 
-  local contract_file="$SPINE_CODE/ops/bindings/mailroom.runtime.contract.yaml"
+  local contract_file=""
   local workspace_root="${SPINE_WORKSPACE_ROOT:-}"
   local runtime_root="${SPINE_RUNTIME_ROOT:-}"
   local mailroom_root="${SPINE_MAILROOM_ROOT:-}"

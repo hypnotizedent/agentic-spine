@@ -7,7 +7,7 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 HA_CONTRACT="$ROOT/ops/bindings/domains/calendar/calendar.ha.ingest.contract.yaml"
 HOME_CONTRACT="$ROOT/ops/bindings/domains/calendar/calendar.home.contract.yaml"
 SYNC_CONTRACT="$ROOT/ops/bindings/domains/calendar/calendar.sync.contract.yaml"
-CAPS="$ROOT/ops/capabilities.yaml"
+CAPS="$ROOT/ops/capabilities.runtime.yaml"
 
 fail() {
   echo "D206 FAIL: $*" >&2

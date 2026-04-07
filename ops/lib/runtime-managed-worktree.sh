@@ -15,7 +15,7 @@ spine_runtime_resolve_control_root() {
   local probe=""
 
   cwd_root="$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || true)"
-  if [[ -n "$cwd_root" && -f "$cwd_root/ops/capabilities.yaml" ]]; then
+  if [[ -n "$cwd_root" && -f "$cwd_root/ops/capabilities.runtime.yaml" ]]; then
     printf '%s\n' "$cwd_root"
     return 0
   fi
@@ -27,7 +27,7 @@ spine_runtime_resolve_control_root() {
       probe="$(dirname "$script_path")"
     fi
     script_root="$(git -C "$probe" rev-parse --show-toplevel 2>/dev/null || true)"
-    if [[ -n "$script_root" && -f "$script_root/ops/capabilities.yaml" ]]; then
+    if [[ -n "$script_root" && -f "$script_root/ops/capabilities.runtime.yaml" ]]; then
       printf '%s\n' "$script_root"
       return 0
     fi
@@ -39,7 +39,7 @@ spine_runtime_resolve_control_root() {
       continue
     fi
     if value="$(cd "$value" 2>/dev/null && pwd -P)"; then
-      if [[ -f "$value/ops/capabilities.yaml" ]]; then
+      if [[ -f "$value/ops/capabilities.runtime.yaml" ]]; then
         printf '%s\n' "$value"
         return 0
       fi

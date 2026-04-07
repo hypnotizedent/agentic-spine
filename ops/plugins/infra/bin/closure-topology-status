@@ -7,7 +7,7 @@
 #
 # Contract:
 # - Validates topology.closure.graph.yaml service_endpoints against
-#   SERVICE_REGISTRY.yaml and ssh.targets.yaml
+#   runtime endpoint and ssh target surfaces
 # - Reports endpoint resolution coverage
 # - Detects hardcoded IP drift in downstream surfaces
 # - Reports dependency edge completeness
@@ -22,13 +22,11 @@ else
 fi
 
 GRAPH="$ROOT/ops/bindings/topology.closure.graph.yaml"
-SERVICE_REG="$ROOT/docs/governance/SERVICE_REGISTRY.yaml"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
-AGENTS_REG="$ROOT/ops/bindings/agents.registry.yaml"
 SECRETS_BUNDLE="$ROOT/ops/bindings/secrets.bundle.contract.yaml"
 RELOCATION_CONTRACT="$ROOT/ops/bindings/relocation.closure.contract.yaml"
 LIFECYCLE_CONTRACT="$ROOT/ops/bindings/lifecycle.closure.contract.yaml"
-BACKUP_LOCALITY="$ROOT/ops/bindings/backup.locality.contract.yaml"
+BACKUP_LOCALITY="$ROOT/ops/bindings/domains/backup/backup.locality.contract.yaml"
 
 OUTPUT_JSON=false
 [[ "${1:-}" == "--json" ]] && OUTPUT_JSON=true
@@ -83,36 +81,6 @@ else
   check "host_ref_resolution" "FAIL" "$unresolved host_refs have no ssh target"
 fi
 
-# ─── Check 3b: Graph host_refs match service registry hosts where both exist ───
-mismatched_hosts=0
-while IFS='|' read -r service_id host_ref registry_host; do
-  [[ -z "$service_id" ]] && continue
-  [[ "$registry_host" == "null" || -z "$registry_host" ]] && continue
-  if [[ "$host_ref" != "$registry_host" ]]; then
-    mismatched_hosts=$((mismatched_hosts + 1))
-  fi
-done < <(
-  python3 - <<'PY' "$GRAPH" "$SERVICE_REG"
-import sys
-from pathlib import Path
-import yaml
-
-graph = yaml.safe_load(Path(sys.argv[1]).read_text())
-registry = yaml.safe_load(Path(sys.argv[2]).read_text())
-services = registry.get("services", {}) if isinstance(registry, dict) else {}
-
-for service_id, endpoint in (graph.get("service_endpoints") or {}).items():
-    registry_row = services.get(service_id) or {}
-    print(f"{service_id}|{endpoint.get('host_ref','')}|{registry_row.get('host','')}")
-PY
-)
-
-if [[ "$mismatched_hosts" -eq 0 ]]; then
-  check "service_registry_host_alignment" "PASS" "Graph host_refs match SERVICE_REGISTRY hosts"
-else
-  check "service_registry_host_alignment" "FAIL" "$mismatched_hosts graph host_refs disagree with SERVICE_REGISTRY"
-fi
-
 # ─── Check 4: Dependency edges reference valid services ───
 invalid_deps=0
 while IFS= read -r svc; do
@@ -146,16 +114,7 @@ else
   check "endpoint_resolver" "FAIL" "endpoint-resolve.sh library missing"
 fi
 
-# ─── Check 7: Hardcoded IP count in agents registry ───
-agent_ips="$(grep -cE 'url:.*http://100\.' "$AGENTS_REG" 2>/dev/null || true)"
-[[ "$agent_ips" =~ ^[0-9]+$ ]] || agent_ips=0
-if [[ "$agent_ips" -eq 0 ]]; then
-  check "agent_hardcoded_ips" "PASS" "No hardcoded IPs in agents registry"
-else
-  check "agent_hardcoded_ips" "WARN" "$agent_ips hardcoded Tailscale IPs in agents registry (promote to endpoint-resolve)"
-fi
-
-# ─── Check 8: Hardcoded IP count in secrets bundle ───
+# ─── Check 7: Hardcoded IP count in secrets bundle ───
 secret_ips="$(grep -cE 'url:.*http://100\.' "$SECRETS_BUNDLE" 2>/dev/null || true)"
 [[ "$secret_ips" =~ ^[0-9]+$ ]] || secret_ips=0
 if [[ "$secret_ips" -eq 0 ]]; then
@@ -164,7 +123,7 @@ else
   check "secret_hardcoded_ips" "WARN" "$secret_ips hardcoded Tailscale IPs in secrets bundle (promote to endpoint-resolve)"
 fi
 
-# ─── Check 9: Active relocations have no blocking gaps ───
+# ─── Check 8: Active relocations have no blocking gaps ───
 active_relocs=$(yq -r '[.historical_relocations[] | select(.status == "in_progress")] | length' "$RELOCATION_CONTRACT" 2>/dev/null || echo "0")
 if [[ "$active_relocs" -eq 0 ]]; then
   check "active_relocations" "PASS" "No active relocations with open closure gaps"
@@ -172,7 +131,7 @@ else
   check "active_relocations" "WARN" "$active_relocs active relocations with open closure gaps"
 fi
 
-# ─── Check 10: Lifecycle violations ───
+# ─── Check 9: Lifecycle violations ───
 violations=$(yq -r '.estate_snapshot.lifecycle_violations | length' "$LIFECYCLE_CONTRACT" 2>/dev/null || echo "0")
 if [[ "$violations" -eq 0 ]]; then
   check "lifecycle_violations" "PASS" "No lifecycle state violations"

@@ -7,7 +7,7 @@
 -- modules MUST conform to these table shapes. No agent may execute CREATE TABLE
 -- outside of governed schema migrations referencing this file.
 --
--- Aligned with: ops/bindings/mint.order.truth.authority.yaml
+-- Aligned with: ops/bindings/domains/mint/mint.order.truth.authority.yaml
 -- Dialect: SQLite-compatible reference DDL (PostgreSQL runtime adds native UUID,
 --          JSONB, and timestamp types — shape and constraints remain identical)
 -- ============================================================================

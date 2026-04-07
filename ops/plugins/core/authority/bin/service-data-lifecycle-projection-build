@@ -13,9 +13,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[5]
 REGISTRY_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
-SERVICE_REGISTRY_PATH = ROOT / "docs/governance/SERVICE_REGISTRY.yaml"
-BACKUP_INVENTORY_PATH = ROOT / "ops/bindings/backup.inventory.yaml"
-BACKUP_LOCALITY_PATH = ROOT / "ops/bindings/backup.locality.contract.yaml"
+SERVICES_HEALTH_PATH = ROOT / "ops/bindings/services.health.yaml"
+BACKUP_INVENTORY_PATH = ROOT / "ops/bindings/domains/backup/backup.inventory.yaml"
+BACKUP_LOCALITY_PATH = ROOT / "ops/bindings/domains/backup/backup.locality.contract.yaml"
 VM_LIFECYCLE_PATH = ROOT / "ops/bindings/vm.lifecycle.yaml"
 OUTPUT_PATH = ROOT / "ops/bindings/service.data.lifecycle.projected.yaml"
 
@@ -150,6 +150,19 @@ def existing_generated_at() -> str | None:
     return generated_at or None
 
 
+def services_health_hosts(services_health: dict[str, Any]) -> set[str]:
+    hosts: set[str] = set()
+    for row in ensure_list(services_health.get("endpoints")):
+        host = str(ensure_dict(row).get("host") or "").strip()
+        if host:
+            hosts.add(host)
+    for row in ensure_list(services_health.get("lifecycle_bindings")):
+        host = str(ensure_dict(row).get("host") or "").strip()
+        if host:
+            hosts.add(host)
+    return hosts
+
+
 def build_projection(registry: dict[str, Any], source_sha: str, generated_at_utc: str) -> str:
     services_out: list[dict[str, Any]] = []
     for service_id, raw_service in sorted(ensure_dict(registry.get("services")).items()):
@@ -208,11 +221,11 @@ def build_projection(registry: dict[str, Any], source_sha: str, generated_at_utc
 
 
 def verify(registry: dict[str, Any]) -> None:
-    service_registry = load_yaml(SERVICE_REGISTRY_PATH)
+    services_health = load_yaml(SERVICES_HEALTH_PATH)
     backup_inventory = load_yaml(BACKUP_INVENTORY_PATH)
     backup_locality = load_yaml(BACKUP_LOCALITY_PATH)
     vm_lifecycle = load_yaml(VM_LIFECYCLE_PATH)
-    service_hosts = set(ensure_dict(service_registry.get("hosts")).keys())
+    service_hosts = services_health_hosts(services_health)
     runtime_units = {
         str(row.get("unit_id") or "")
         for row in ensure_list(backup_inventory.get("runtime_units"))
@@ -274,7 +287,7 @@ def verify(registry: dict[str, Any]) -> None:
         refs = ensure_dict(service.get("binding_refs"))
         for host in ensure_list(refs.get("services_health_hosts")):
             if str(host) not in service_hosts:
-                errors.append(f"{service_id}: services_health host missing from SERVICE_REGISTRY hosts: {host}")
+                errors.append(f"{service_id}: services_health host missing from services.health hosts: {host}")
         for unit_id in ensure_list(refs.get("backup_runtime_units")):
             if str(unit_id) not in runtime_units:
                 errors.append(f"{service_id}: backup_runtime_unit missing from backup.inventory.yaml: {unit_id}")

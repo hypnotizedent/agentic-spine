@@ -82,8 +82,7 @@ state_root = Path(sys.argv[4])
 inbox_dir = Path(sys.argv[5])
 outbox_dir = Path(sys.argv[6])
 
-orch_dir = state_root / "orchestration"
-gaps_file = spine / "ops" / "bindings" / "operational.gaps.yaml"
+shared_db_path = state_root / "shared_authority.db"
 loop_heartbeat_dir = state_root / "loop-heartbeats"
 gaps_lib_dir = spine / "ops" / "plugins" / "core" / "lifecycle" / "lib"
 
@@ -177,59 +176,6 @@ if loops_authority is not None:
 else:
     anomalies.append(f"LOOP AUTHORITY DEGRADED: loops_sql_authority import failed: {loops_authority_import_error or 'unknown'}")
 
-# ── Parse orchestration manifests (bridge to scope-only view) ────────────
-# Orchestration loops may exist without a scope file in loop-scopes/.
-# Scan manifests and merge any open loops not already seen from scopes.
-
-scope_loop_ids = {e["loop_id"] for e in all_scopes}
-
-if orch_dir.is_dir():
-    for manifest_path in sorted(orch_dir.glob("*/manifest.yaml")):
-        try:
-            text = manifest_path.read_text()
-        except OSError:
-            continue
-        # Simple YAML parse for manifest fields
-        mf = {}
-        for line in text.splitlines():
-            if ":" in line and not line.startswith(" ") and not line.startswith("#"):
-                key, _, val = line.partition(":")
-                mf[key.strip()] = val.strip().strip('"').strip("'")
-
-        loop_id = mf.get("loop_id", "")
-        orch_status = mf.get("status", "")
-        if not loop_id:
-            continue
-
-        # Skip if already tracked via scope file
-        if loop_id in scope_loop_ids:
-            continue
-
-        entry = {
-            "loop_id": loop_id,
-            "status": orch_status,
-            "severity": "-",
-            "owner": mf.get("apply_owner", "unassigned"),
-            "execution_mode": "",
-            "active_terminal": "",
-            "blocked_by": "",
-            "operator_note": "",
-            "last_heartbeat_utc": "",
-            "heartbeat_ttl_minutes": "",
-            "heartbeat_source": "",
-            "title": loop_id,
-            "file": display_path(manifest_path),
-            "source": "orchestration",
-        }
-
-        if orch_status in ("active", "open"):
-            open_loops.append(entry)
-            # Flag missing scope file as anomaly
-            anomaly_msg = f"ORCH-DB MISMATCH: {loop_id} has orchestration manifest but no SQLite entry"
-            anomalies.append(anomaly_msg)
-        elif orch_status == "closed":
-            closed_loops.append(entry)
-
 # ── Overlay runtime loop heartbeat state ──────────────────────────────────
 
 def parse_kv_yaml(path):
@@ -292,10 +238,9 @@ def normalize_gap_entry(gap):
 def collect_gap_state():
     state = {
         "status": "degraded",
-        "source": "gaps_sql_authority",
+        "source": "sqlite",
         "message": "",
         "db_path": "",
-        "gaps_yaml": str(gaps_file),
         "open_gaps": [],
         "linked_gaps": [],
         "unlinked_gaps": [],
@@ -309,24 +254,11 @@ def collect_gap_state():
     conn = None
     try:
         os.environ["SPINE_STATE"] = str(state_root)
-        db_path, resolved_gaps_yaml = gaps_authority.resolve_paths(spine)
+        db_path = shared_db_path
         state["db_path"] = str(db_path)
-        state["gaps_yaml"] = str(resolved_gaps_yaml)
 
         conn = gaps_authority.connect(db_path)
         gaps_authority.ensure_schema(conn)
-        gaps_authority.bootstrap_from_yaml(conn, resolved_gaps_yaml)
-        total_rows = gaps_authority.gap_count(conn)
-        if total_rows == 0:
-            if resolved_gaps_yaml.exists():
-                doc = gaps_authority.load_yaml(resolved_gaps_yaml)
-                if not isinstance(doc, dict) or not isinstance(doc.get("gaps"), list):
-                    raise RuntimeError(f"gaps projection is unreadable or malformed: {resolved_gaps_yaml}")
-            else:
-                raise RuntimeError(
-                    f"gaps authority unavailable: no SQLite rows and no projection at {resolved_gaps_yaml}"
-                )
-
         gap_rows = gaps_authority.fetch_gaps(conn, status="open")
     except Exception as exc:
         state["message"] = str(exc)
@@ -382,36 +314,8 @@ inbox_lanes = count_lane_files(inbox_dir)
 inbox_active = inbox_lanes.get("queued", 0) + inbox_lanes.get("running", 0)
 inbox_total = sum(inbox_lanes.values())
 
-# ── Parse proposals queue ─────────────────────────────────────────────────
-
-proposals_dir = outbox_dir / "proposals"
 proposal_counts = Counter()
-
-if proposals_dir.is_dir():
-    for cp_dir in sorted(proposals_dir.iterdir()):
-        if not cp_dir.is_dir() or not cp_dir.name.startswith("CP-"):
-            continue
-        manifest = cp_dir / "manifest.yaml"
-        applied_marker = cp_dir / ".applied"
-
-        if applied_marker.exists():
-            proposal_counts["applied"] += 1
-            continue
-
-        if not manifest.exists():
-            proposal_counts["malformed"] += 1
-            continue
-
-        status = "pending"
-        text = manifest.read_text()
-        for line in text.splitlines():
-            if line.startswith("status:"):
-                status = line.split(":", 1)[1].strip().strip('"').strip("'")
-                break
-
-        proposal_counts[status] += 1
-
-proposal_total = sum(proposal_counts.values())
+proposal_total = 0
 
 # ── Communications queue health ──────────────────────────────────────────
 import subprocess as _sp
@@ -521,7 +425,6 @@ if mode == "--json":
             "source": gap_state.get("source", "unknown"),
             "message": gap_state.get("message", ""),
             "db_path": gap_state.get("db_path", ""),
-            "gaps_yaml": gap_state.get("gaps_yaml", ""),
             "open_count": open_gap_count,
             "linked_count": linked_gap_count,
             "unlinked_count": unlinked_gap_count,
@@ -529,7 +432,6 @@ if mode == "--json":
         "inbox_lanes": inbox_lanes,
         "inbox_active": inbox_active,
         "inbox_total": inbox_total,
-        "proposals": dict(proposal_counts),
         "anomalies": anomalies,
         "comms_queue": {
             "slo_status": comms_slo_status,
@@ -552,7 +454,6 @@ if mode == "--json":
             "unlinked_gaps": unlinked_gap_count,
             "inbox_active": inbox_active,
             "inbox_total": inbox_total,
-            "proposals_total": proposal_total,
             "anomalies": len(anomalies),
         }
     }, indent=2))
@@ -584,7 +485,6 @@ if mode == "--brief":
         parts.append(f"Gaps: {open_gap_count} open ({unlinked_gap_count} unlinked)")
     else:
         parts.append("Gaps: unknown (authority degraded)")
-    parts.append(f"Proposals: {proposal_counts.get('pending', 0)} pending / {proposal_counts.get('draft_hold', 0)} held")
     parts.append(f"Inbox: {inbox_active} active / {inbox_total} total")
     if comms_oneliner:
         parts.append(comms_oneliner)
@@ -703,16 +603,6 @@ if comms_oneliner:
     print(f"  {comms_oneliner}")
     print()
 
-# ── Proposals Queue ──
-if proposal_total > 0:
-    print(f"PROPOSALS ({proposal_total})")
-    print("-" * 72)
-    for status_name in ["pending", "draft_hold", "applied", "superseded", "draft", "read-only", "invalid", "malformed"]:
-        count = proposal_counts.get(status_name, 0)
-        if count > 0:
-            print(f"  {status_name:15s} {count}")
-    print()
-
 # ── Anomalies ──
 if anomalies:
     print(f"ANOMALIES ({len(anomalies)})")
@@ -732,9 +622,6 @@ elif not gaps_available:
     parts.append("gaps unknown")
 if stale_background_count:
     parts.append(f"{stale_background_count} stale background")
-pending_count = proposal_counts.get("pending", 0)
-if pending_count:
-    parts.append(f"{pending_count} pending proposals")
 if inbox_active:
     parts.append(f"{inbox_active} inbox active")
 if anomalies:
