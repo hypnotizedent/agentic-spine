@@ -67,6 +67,10 @@ SPINE_POSTURE_OVERRIDE_REASON="<reason>" ./bin/ops cap run gaps.file -- ...
 
 Posture is visible in the session admission block and propagates through dispatch envelopes via the `execution_posture` field. See `ops/bindings/execution.posture.contract.yaml` for the full contract.
 
+### Governance Freeze
+
+Until `2026-05-07`, do not create new gates, contracts, registries, bindings, governance docs, or loops unless the change removes more artifacts than it adds. Choose deletion, consolidation, or reuse before introducing new control-plane surfaces.
+
 ### Session steps
 
 1. **Start the session**

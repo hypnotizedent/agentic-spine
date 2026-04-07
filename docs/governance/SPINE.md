@@ -17,6 +17,10 @@ cd ~/code/agentic-spine
 ./bin/ops cap run session.v3.attach -- --allow-no-loop
 ```
 
+## Governance Freeze
+
+Until `2026-05-07`, no new gates, contracts, registries, bindings, governance docs, or loops may be created unless the change clearly removes more artifacts than it adds. Default to deletion, collapse, reuse, and direct execution over new control-plane surfaces.
+
 **What session.v3.attach does:**
 1. Cleans leaked ambient env vars (SPINE_ROOT, SPINE_CODE) from previous sessions
 2. Runs context-aware main checkout healing (auto-restore generated drift, cleanup stale stashes, fast-forward main)
@@ -418,7 +422,7 @@ Every agent that starts a Claude Code session in this repo is automatically enro
 - Dynamic governance brief: delivers current governance context
 - Proposal queue gating: alerts if >5 pending proposals
 
-This is the **first line of agent governance**. Current first-string and archive-boundary authority stays in this contract and [SPINE_V3_FINALIZATION_PROGRAM_20260330.md](docs/governance/SPINE_V3_FINALIZATION_PROGRAM_20260330.md).
+This is the **first line of agent governance**. Daily operating authority stays in this contract; V3 finalization and March 25 closeout narratives remain repo-tracked history, not daily startup surfaces.
 
 ### D399: Live External-State Enforcement
 **Path**: `surfaces/verify/d399-microsoft-mint-customer-mailbox-canonical-lock.sh` (560 lines)

@@ -11,7 +11,6 @@ source_triangulation:
   - docs/governance/LOCAL_CONTROL_PLANE_CONTRACT.md (control-plane placement and entry surface)
   - ops/bindings/node.role.contract.yaml (live physical-node taxonomy and role semantics)
   - ops/bindings/translator.authority.contract.yaml (machine-evaluable boundary)
-  - docs/governance/SPINE_V3_FINALIZATION_PROGRAM_20260330.md (first-string boundary and archive rule)
 enforcement:
   gate: D422 (translator-authority-isolation-lock)
   contract: ops/bindings/translator.authority.contract.yaml
@@ -295,7 +294,7 @@ This preserves the separation: **translator is the membrane, wave.execute is the
 |----------|-------------|
 | `SPINE.md` | Parent operating contract. This doctrine inherits controller-lane, closure, and verification discipline from the spine operating contract. |
 | `SESSION_PROTOCOL.md` | Defines loop anchorage and floating-WIP requirements referenced in this doctrine. |
-| `SPINE_V3_FINALIZATION_PROGRAM_20260330.md` | Current first-string boundary and archive rule for the spine execution surface. |
+| `SPINE_V3_COMPLETION_DECLARATION_20260403.md` | Historical V3 completion marker. Useful for closure context, not part of the daily operating stack. |
 | `LOCAL_CONTROL_PLANE_CONTRACT.md` | Current control-plane placement and workstation entry-surface authority. |
 | `ops/bindings/node.role.contract.yaml` | Current node taxonomy and role-semantics authority. |
 | `EXECUTION_NODE_SPEC.md` | Archived historical draft only. Not part of the live authority stack. |

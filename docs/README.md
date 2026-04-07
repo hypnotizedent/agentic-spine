@@ -12,7 +12,6 @@ Minimal landing page for live docs after the lean reset.
 ## Read First
 
 - [governance/SPINE.md](governance/SPINE.md) - single canonical governance contract
-- [governance/SPINE_V3_FINALIZATION_PROGRAM_20260330.md](governance/SPINE_V3_FINALIZATION_PROGRAM_20260330.md) - current first-string boundary, archive rule, and close condition
 - [governance/SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) - session entry and closeout rules
 - [core/SPINE_STATE.md](core/SPINE_STATE.md) - what belongs in the repo and what does not
 
