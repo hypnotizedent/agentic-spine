@@ -923,8 +923,8 @@ run_cap() {
       elif [[ "$caller_branch" == "main" ]]; then
         if [[ "$governed_override_active" -eq 1 ]]; then
           echo "MAIN MUTATION OVERRIDE: OPS_GOVERNED_MAIN_OVERRIDE=1"
-          if [[ -f "$ROOT/ops/lib/passive-friction-capture.sh" ]]; then
-            source "$ROOT/ops/lib/passive-friction-capture.sh"
+          if [[ -f "$SPINE_CODE/ops/lib/passive-friction-capture.sh" ]]; then
+            source "$SPINE_CODE/ops/lib/passive-friction-capture.sh"
             auto_file_ceremony_override "main_mutation" "$name on $caller_branch with OPS_GOVERNED_MAIN_OVERRIDE=1" || true
           fi
         elif [[ -n "$main_override_ref" && -n "$main_override_reason" ]]; then
@@ -960,8 +960,8 @@ run_cap() {
         if [[ "$governed_override_active" -eq 1 ]]; then
           echo "WORKTREE ISOLATION OVERRIDE: OPS_GOVERNED_MAIN_OVERRIDE=1"
           # Auto-file passive friction for ceremony override usage
-          if [[ -f "$ROOT/ops/lib/passive-friction-capture.sh" ]]; then
-            source "$ROOT/ops/lib/passive-friction-capture.sh"
+          if [[ -f "$SPINE_CODE/ops/lib/passive-friction-capture.sh" ]]; then
+            source "$SPINE_CODE/ops/lib/passive-friction-capture.sh"
             auto_file_ceremony_override "main_mutation" "$name on $caller_branch with OPS_GOVERNED_MAIN_OVERRIDE=1" || true
           fi
         elif [[ "$wt_bypass_lc" == "1" || "$wt_bypass_lc" == "true" || "$wt_bypass_lc" == "yes" ]]; then

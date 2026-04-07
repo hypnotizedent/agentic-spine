@@ -151,6 +151,21 @@ site = sys.argv[2].strip()
 action = sys.argv[3].strip()
 
 text = seq_path.read_text(encoding="utf-8")
+doc = yaml.safe_load(text) or {}
+
+# Lifecycle blocks are the authoritative runtime source for startup/shutdown order.
+lifecycle_key = f"{site}_vm_lifecycle"
+lifecycle = doc.get(lifecycle_key) if isinstance(doc, dict) else None
+if isinstance(lifecycle, dict):
+    order_key = f"{action}_order"
+    values = lifecycle.get(order_key) if isinstance(lifecycle.get(order_key), list) else []
+    for value in values:
+        if str(value).isdigit():
+            print(value)
+    if values:
+        raise SystemExit(0)
+
+# Backward-compatible fallback for older sequencing bindings.
 pattern = re.compile(rf"^#\s*{re.escape(site)}_{re.escape(action)}_order:\s*\[([^\]]*)\]", re.MULTILINE)
 match = pattern.search(text)
 if match:
@@ -160,7 +175,6 @@ if match:
             print(value)
     raise SystemExit(0)
 
-doc = yaml.safe_load(text) or {}
 phases = doc.get("phases") if isinstance(doc.get("phases"), list) else []
 rows = []
 for row in phases:
