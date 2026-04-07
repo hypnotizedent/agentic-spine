@@ -1,0 +1,125 @@
+# Execution Posture Contract
+#
+# Canonical vocabulary and enforcement semantics for session execution posture.
+# Posture controls whether a session may expand the open set (gaps, loops,
+# proposals) or is restricted to shrinking/clarifying existing backlog.
+#
+# Enforcement points:
+#   - gaps-authority-bridge (upsert guard)
+#   - loops-authority-bridge (upsert guard)
+#   - gaps-file (early shell rejection)
+#   - loops-create (early shell rejection)
+#   - session.v3.attach (--posture flag, env export)
+#   - session-entry-hook (admission display)
+
+version: "1.0"
+updated_at: "2026-04-06"
+owner: "@ronny"
+scope: execution-posture-enforcement
+subordinate_to: ops/bindings/root.authority.contract.yaml
+related_contracts:
+  - contract: ops/bindings/session.admission.contract.yaml
+    relationship: "Posture is part of session admission state"
+  - contract: ops/bindings/dispatch.envelope.contract.yaml
+    relationship: "Posture propagates through dispatch envelopes"
+
+# ── Posture Vocabulary ────────────────────────────────────────────────────────
+
+postures:
+  discover:
+    description: >
+      Normal operating posture. Registry growth is allowed. New gaps, loops,
+      and proposals may be created through governed mutation paths.
+    registry_growth: allowed
+    registry_shrink: allowed
+    default_for: [claude_code, codex]
+
+  converge:
+    description: >
+      Closure-only posture. The open set must shrink or become more explicit.
+      New gaps, loops, and proposals are blocked unless an explicit override
+      is provided with a reason. Allowed directions: close, defer, supersede,
+      merge, narrow, reparent, convert to blocked/manual backlog.
+    registry_growth: blocked
+    registry_shrink: allowed
+    default_for: []
+
+  degraded:
+    description: >
+      Truthful fallback posture for lanes that cannot enforce governance.
+      Does not silently claim parity with discover or converge. No mutations
+      are expected or enforced.
+    registry_growth: not_applicable
+    registry_shrink: not_applicable
+    default_for: [opencode, bridge_capable, offline]
+
+# ── Mutation Policy By Posture ────────────────────────────────────────────────
+
+mutation_policy:
+  discover:
+    allowed:
+      - gaps.file (new gap creation)
+      - loops.create (new loop creation)
+      - gaps.close (close/fix existing gap)
+      - gaps.reparent (reparent existing gap)
+      - loops.close (close existing loop)
+      - loops.continuity (update loop state)
+    blocked: []
+
+  converge:
+    allowed:
+      - gaps.close (close/fix existing gap)
+      - gaps.reparent (reparent existing gap)
+      - loops.close (close existing loop)
+      - loops.continuity (update loop state)
+    blocked:
+      - gaps.file (new gap creation)
+      - gaps.authority.bridge.upsert (new gap via bridge)
+      - loops.create (new loop creation)
+      - loops.authority.bridge.upsert (new loop via bridge)
+    rejection:
+      message: >
+        POSTURE BLOCKED: Active execution posture is 'converge'. Registry
+        growth (new gaps/loops) is denied. Record observations in the session
+        receipt instead, or rerun with posture=discover or provide an explicit
+        override via SPINE_POSTURE_OVERRIDE_REASON.
+      exit_code: 1
+
+  degraded:
+    allowed: []
+    blocked: []
+    note: "No enforcement — degraded lanes do not perform governed mutations."
+
+# ── Default Posture ───────────────────────────────────────────────────────────
+
+defaults:
+  posture: discover
+  env_var: SPINE_EXECUTION_POSTURE
+  note: >
+    If no explicit posture is declared, sessions default to 'discover'.
+    Converge must always be explicitly requested.
+
+# ── Override Mechanism ────────────────────────────────────────────────────────
+
+override:
+  env_var: SPINE_POSTURE_OVERRIDE_REASON
+  description: >
+    When SPINE_EXECUTION_POSTURE=converge and a growth mutation is truly
+    needed, set SPINE_POSTURE_OVERRIDE_REASON to a non-empty string
+    explaining why the override is necessary. The override reason is
+    captured in command output and should be recorded in the session receipt.
+  behavior:
+    - Override is per-command, not per-session (env must be set at call time)
+    - Override reason is printed to stderr for audit trail
+    - Override does not change the session posture, only bypasses the guard
+    - Intended for rare, justified use — not default operation
+
+# ── Non-Degraded Lane Behavior ────────────────────────────────────────────────
+
+non_degraded_lanes:
+  rule: >
+    Non-degraded lanes (claude_code, codex) must not silently downgrade
+    posture. If a session declares converge, the enforcement surfaces must
+    reject growth mutations with a structured error. Silent fallback to
+    discover is a contract violation.
+  enforcement: "Authority bridge posture guard (Python + shell)"

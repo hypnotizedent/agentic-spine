@@ -47,6 +47,26 @@ Full spine access. Follow all sections below in order.
 2. Read `docs/governance/SPINE.md` for the minimal operating contract. This file carries the session-entry and environment-specific behavior.
 3. For cross-repo parallel work, declare write ownership and repo sequence in the active loop scope before mutation.
 
+### Execution Posture
+
+Sessions operate in one of two postures:
+
+- **`discover`** (default): Normal operation. New gaps, loops, and proposals may be created.
+- **`converge`**: Closure-only mode. New gaps and loops are **mechanically blocked** at the authority bridge level. Allowed actions: close, defer, merge, narrow, reparent, supersede. Newly discovered issues go in the session receipt as observations, not in the registry.
+
+To start a converge session:
+```
+./bin/ops cap run session.v3.attach -- --posture converge --allow-no-loop
+```
+Or export before attach: `export SPINE_EXECUTION_POSTURE=converge`
+
+Break-glass override (per-command, not per-session):
+```
+SPINE_POSTURE_OVERRIDE_REASON="<reason>" ./bin/ops cap run gaps.file -- ...
+```
+
+Posture is visible in the session admission block and propagates through dispatch envelopes via the `execution_posture` field. See `ops/bindings/execution.posture.contract.yaml` for the full contract.
+
 ### Session steps
 
 1. **Start the session**

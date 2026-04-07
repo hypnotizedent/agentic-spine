@@ -556,9 +556,10 @@ IDENTITY_BLOCK="### Platform Identity
 The spine is a production-grade agentic execution system and governance-first control plane for repeatable, unattended, recoverable work across models, tools, terminals, and nodes.
 **Not:** a homelab/domain workload manager; infrastructure, media, Home Assistant, finance, and similar systems are workloads the platform runs, not the platform identity."
 
+SESSION_POSTURE="${SPINE_EXECUTION_POSTURE:-discover}"
 ADMISSION_BLOCK="### Session Admission
 **Lane:** \`${GOVERNANCE_PROFILE_LANE}\` | **Profile:** \`${CURRENT_GOVERNANCE_PROFILE}\` | **Parity:** \`${SA_PARITY_STATUS:-degraded}\`
-**Admission:** \`${SA_ADMISSION_DELIVERY:-none}\` | **Mutation:** \`${SA_MUTATION_POSTURE:-no_governed_mutation}\`
+**Admission:** \`${SA_ADMISSION_DELIVERY:-none}\` | **Mutation:** \`${SA_MUTATION_POSTURE:-no_governed_mutation}\` | **Posture:** \`${SESSION_POSTURE}\`
 **Resolution:** ${GOVERNANCE_PROFILE_RESOLUTION}
 Cowork remains out-of-scope for governed mutation until a governed adapter exists."
 
