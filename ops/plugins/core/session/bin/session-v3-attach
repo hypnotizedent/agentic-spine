@@ -758,6 +758,121 @@ def compile_entry_packet(args: argparse.Namespace, entry_script: Path, loop_id: 
     return payload
 
 
+# ── Boot-Time Source Selection (GAP-OP-1704) ─────────────────────────────────
+
+
+def resolve_loop_source(state_root: Path, lane: str) -> dict[str, Any]:
+    """Resolve loop truth source with ordered fallback: MCP -> bridge -> files -> degraded.
+
+    Returns dict with keys: source, degraded, open_loops, authority_path, diagnostics
+    """
+    diagnostics: list[str] = []
+
+    # Step 1: Try MCP — check if MCP config exists (MCP tools are agent-side, not script-side)
+    mcp_config = Path.home() / ".claude" / "mcp.json"
+    # Also check project-level MCP
+    project_mcp = ROOT / ".mcp.json"
+    mcp_available = mcp_config.exists() or project_mcp.exists()
+    if mcp_available:
+        # MCP tools are available to the agent at runtime, not callable from this script.
+        # We verify config exists and mark source as available for the boot snapshot.
+        # The agent will use get_latest_loop MCP tool for live queries during the session.
+        diagnostics.append("mcp_config_found")
+    else:
+        diagnostics.append("mcp_config_absent")
+
+    # Step 2: Try HTTP bridge
+    bridge_reachable = False
+    try:
+        import urllib.request
+
+        req = urllib.request.Request("http://localhost:8799/health", method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            if resp.status == 200:
+                bridge_reachable = True
+                diagnostics.append("bridge_reachable")
+    except Exception:
+        diagnostics.append("bridge_unreachable")
+
+    # Step 3: Try direct file read from loop-scopes
+    scopes_dir = state_root / "loop-scopes"
+    scope_files = sorted(scopes_dir.glob("*.scope.md")) if scopes_dir.is_dir() else []
+    open_loops: list[dict[str, Any]] = []
+
+    if scope_files:
+        for sf in scope_files:
+            try:
+                content = sf.read_text(encoding="utf-8")
+                parts = content.split("---", 2)
+                if len(parts) >= 3:
+                    fm = yaml.safe_load(parts[1].strip())
+                    if isinstance(fm, dict):
+                        status = str(fm.get("status", "")).strip().lower()
+                        if status in ("active", "open", "draft"):
+                            open_loops.append({
+                                "loop_id": fm.get("loop_id", ""),
+                                "status": status,
+                                "owner": fm.get("owner", ""),
+                                "scope": fm.get("scope", ""),
+                                "priority": fm.get("priority", ""),
+                                "objective": fm.get("objective", ""),
+                            })
+            except Exception:
+                continue
+        diagnostics.append(f"scope_files_found={len(scope_files)}")
+    else:
+        diagnostics.append("scope_files_absent")
+
+    # Determine source (highest available)
+    if mcp_available:
+        source = "mcp"
+    elif bridge_reachable:
+        source = "bridge"
+    elif scope_files:
+        source = "files"
+    else:
+        source = "degraded"
+
+    degraded = source == "degraded"
+
+    # Loud failure for non-degraded lanes
+    if degraded and lane in ("claude_code", "codex"):
+        diagnostics.append("loud_failure_non_degraded_lane")
+
+    return {
+        "source": source,
+        "degraded": degraded,
+        "open_loops": open_loops,
+        "loop_count": len(open_loops),
+        "authority_path": str(scopes_dir),
+        "diagnostics": diagnostics,
+    }
+
+
+def write_boot_snapshot(
+    session_id: str, state_root: Path, source_info: dict[str, Any]
+) -> str:
+    """Write boot snapshot to $SPINE_STATE/sessions/$SESSION_ID/boot-snapshot.json"""
+    if not session_id:
+        return ""
+    snapshot_dir = state_root / "sessions" / session_id
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_path = snapshot_dir / "boot-snapshot.json"
+    snapshot = {
+        "schema_version": "1.0",
+        "generated_at_utc": utc_now(),
+        "session_id": session_id,
+        "source": source_info.get("source", "unknown"),
+        "degraded": source_info.get("degraded", True),
+        "open_loops": source_info.get("open_loops", []),
+        "loop_count": source_info.get("loop_count", 0),
+        "authority_path": source_info.get("authority_path", ""),
+        "diagnostics": source_info.get("diagnostics", []),
+    }
+    snapshot_path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+    return str(snapshot_path)
+
+
 def main() -> int:
     args = build_parser().parse_args()
 
@@ -788,6 +903,10 @@ def main() -> int:
         if (not args.runtime_role or args.runtime_role == "unknown") and startup_exports.get("SPINE_RUNTIME_ROLE"):
             args.runtime_role = str(startup_exports.get("SPINE_RUNTIME_ROLE", ""))
         preflight = collect_attach_preflight()
+
+        # Boot-time source selection (GAP-OP-1704)
+        lane_for_source = args.lane or preflight.get("current_lane_type", "") or "claude_code"
+        loop_source = resolve_loop_source(state_root, lane_for_source)
         loop_id, loop_resolution, latest_payload = resolve_loop_id(args, broker_script)
         sanitize_payload, sanitized_output_path = maybe_sanitize(args, state_root, sanitize_script, loop_id)
         prompt_library = ensure_runtime_prompt_context(str(args.role).strip().lower(), state_root)
@@ -881,6 +1000,12 @@ def main() -> int:
             "SPINE_HEARTBEAT_FILE": str(heartbeat.get("heartbeat_file", "")),
             "SPINE_LOOP_HEARTBEAT_FILE": str(heartbeat.get("loop_heartbeat_file", "")),
         }
+        # Boot snapshot export (GAP-OP-1704)
+        session_id = startup_exports.get("SPINE_SESSION_ID", "")
+        boot_snapshot_path = write_boot_snapshot(session_id, state_root, loop_source)
+        exports["SPINE_LOOP_TRUTH_SOURCE"] = loop_source.get("source", "unknown")
+        exports["SPINE_BOOT_SNAPSHOT_PATH"] = boot_snapshot_path
+
         prompt_context = packet.get("prompt_context") if isinstance(packet.get("prompt_context"), dict) else {}
         if prompt_context:
             exports.update(
@@ -908,6 +1033,8 @@ def main() -> int:
                     "SPINE_V3_SANITIZED_OUTPUT_PATH": sanitized_output_path,
                     "SPINE_HEARTBEAT_FILE": str(heartbeat.get("heartbeat_file", "")),
                     "SPINE_LOOP_HEARTBEAT_FILE": str(heartbeat.get("loop_heartbeat_file", "")),
+                    "SPINE_LOOP_TRUTH_SOURCE": loop_source.get("source", "unknown"),
+                    "SPINE_BOOT_SNAPSHOT_PATH": boot_snapshot_path,
                 },
             )
         payload = {
@@ -933,6 +1060,8 @@ def main() -> int:
                     "entry_packet": entry_data,
                     "heartbeat": heartbeat,
                     "heartbeat_refresh_stamp_file": heartbeat_stamp_file,
+                    "loop_source": loop_source,
+                    "boot_snapshot_path": boot_snapshot_path,
                     "exports": exports,
                     "next_step": packet.get("first_command", ""),
                 },
@@ -982,6 +1111,9 @@ def main() -> int:
     print(f"packet_hash: {entry_data.get('packet_hash', '')}")
     print(f"execution_mode: {packet.get('execution_mode', '')}")
     print(f"execution_posture: {args.posture or 'discover'}")
+    print(f"loop_truth_source: {loop_source.get('source', 'unknown')}")
+    if loop_source.get('degraded'):
+        print("WARNING: loop truth source is degraded — no MCP, bridge, or scope files available")
     print(f"transport: {packet.get('transport', '')}")
     print(f"heartbeat_file: {payload['data']['heartbeat'].get('heartbeat_file', '')}")
     print(f"loop_heartbeat_file: {payload['data']['heartbeat'].get('loop_heartbeat_file', 'none') or 'none'}")
@@ -1110,6 +1242,8 @@ def main() -> int:
     print(f"packet_hash: {entry_data.get('packet_hash', '')}")
     print(f"execution_mode: {packet.get('execution_mode', '')}")
     print(f"execution_posture: {args.posture or 'discover'}")
+    print(f"loop_truth_source: {loop_source.get('source', 'unknown')}")
+    print(f"boot_snapshot_path: {boot_snapshot_path or 'none'}")
     print(f"transport: {packet.get('transport', '')}")
     print(f"heartbeat_file: {payload['data']['heartbeat'].get('heartbeat_file', '')}")
     print(f"loop_heartbeat_file: {payload['data']['heartbeat'].get('loop_heartbeat_file', 'none') or 'none'}")
