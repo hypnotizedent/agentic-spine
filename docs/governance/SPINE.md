@@ -106,27 +106,6 @@ outside governed paths, or autonomous transport into this ceremony.
 7. **Verify after mutations.** After committing, run `./bin/ops cap run verify.run -- fast` to confirm no gates broke.
 8. **Run git/worktree hygiene as an explicit maintenance pass.** Inventory with `python3 ./ops/plugins/core/lifecycle/bin/git-worktree-hygiene --brief`. Safe prune remains dry-run by default and only applies with `--apply`. Policy and operator notes live in `docs/governance/GIT_WORKTREE_HYGIENE.md`.
 
-## Program Closeout
-
-Burn-down efforts and closure programs must use the governed program closeout
-framework. A program is only closed when every in-scope non-green finding has
-exactly one machine-declared terminal state: `fixed`, `retired`,
-`explicit_hold`, or `reclassified`.
-
-Machine artifact:
-
-`ops/bindings/program.closeout.<program-id>.yaml`
-
-Validation command:
-
-```bash
-python3 ./ops/plugins/core/lifecycle/bin/program-closeout-validate \
-  --artifact ops/bindings/program.closeout.<program-id>.yaml --brief
-```
-
-Narrative closeout docs remain useful, but they are companions to the machine
-ledger and do not replace it for terminal-state coverage.
-
 ## V3 Operating Model (2026-03-27)
 
 ### Rule 1: Root Main Role
