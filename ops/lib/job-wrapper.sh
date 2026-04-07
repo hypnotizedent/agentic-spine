@@ -24,12 +24,9 @@ spine_job_wrapper_ps_comm() {
 
 spine_export_autonomous_scheduler_context() {
   local source_script="${1:-}"
-  local registry_path="${SPINE_ROOT}/ops/bindings/launchd.scheduler.registry.yaml"
-  local source_basename label state mode template_source parent_comm
+  local source_basename label parent_comm
 
   [[ -n "$source_script" ]] || return 0
-  [[ -f "$registry_path" ]] || return 0
-  command -v yq >/dev/null 2>&1 || return 0
 
   parent_comm="$(spine_job_wrapper_ps_comm "${PPID:-}" || true)"
   [[ "$parent_comm" == "launchd" ]] || return 0
@@ -39,18 +36,12 @@ spine_export_autonomous_scheduler_context() {
   [[ -n "$source_basename" ]] || return 0
   label="com.ronny.${source_basename}"
 
-  state="$(yq e -r ".labels[]? | select(.label == \"$label\") | .state" "$registry_path" 2>/dev/null | head -n1 || true)"
-  mode="$(yq e -r ".labels[]? | select(.label == \"$label\") | .mode" "$registry_path" 2>/dev/null | head -n1 || true)"
-  template_source="$(yq e -r ".labels[]? | select(.label == \"$label\") | .template_source" "$registry_path" 2>/dev/null | head -n1 || true)"
-
-  if [[ "$state" == "active" && "$mode" == "scheduled" && "$template_source" == "spine" ]]; then
-    export SPINE_AUTONOMOUS_EXECUTION_CONTEXT="${SPINE_AUTONOMOUS_EXECUTION_CONTEXT:-launchd_scheduler}"
-    export SPINE_AUTONOMOUS_SOURCE="${SPINE_AUTONOMOUS_SOURCE:-governed_job_wrapper}"
-    export SPINE_AUTONOMOUS_PARENT_PROCESS="${SPINE_AUTONOMOUS_PARENT_PROCESS:-launchd}"
-    export SPINE_AUTONOMOUS_ANCESTRY_CONFIRMED="${SPINE_AUTONOMOUS_ANCESTRY_CONFIRMED:-true}"
-    export SPINE_AUTONOMOUS_SOURCE_SCRIPT="${SPINE_AUTONOMOUS_SOURCE_SCRIPT:-$source_script}"
-    export SPINE_SCHEDULER_LABEL="${SPINE_SCHEDULER_LABEL:-$label}"
-  fi
+  export SPINE_AUTONOMOUS_EXECUTION_CONTEXT="${SPINE_AUTONOMOUS_EXECUTION_CONTEXT:-launchd_scheduler}"
+  export SPINE_AUTONOMOUS_SOURCE="${SPINE_AUTONOMOUS_SOURCE:-runtime_job_wrapper}"
+  export SPINE_AUTONOMOUS_PARENT_PROCESS="${SPINE_AUTONOMOUS_PARENT_PROCESS:-launchd}"
+  export SPINE_AUTONOMOUS_ANCESTRY_CONFIRMED="${SPINE_AUTONOMOUS_ANCESTRY_CONFIRMED:-true}"
+  export SPINE_AUTONOMOUS_SOURCE_SCRIPT="${SPINE_AUTONOMOUS_SOURCE_SCRIPT:-$source_script}"
+  export SPINE_SCHEDULER_LABEL="${SPINE_SCHEDULER_LABEL:-$label}"
 }
 
 spine_export_autonomous_scheduler_context "${BASH_SOURCE[1]:-${0:-}}"

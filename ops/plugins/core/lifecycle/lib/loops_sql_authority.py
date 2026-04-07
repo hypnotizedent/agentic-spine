@@ -79,36 +79,19 @@ def dump_yaml(data: Any) -> str:
 # -- Path resolution ----------------------------------------------------------
 
 
+def _default_state_root(root: Path) -> Path:
+    workspace_root = root.parent if root.parent.name == "code" else Path.home() / "code"
+    return workspace_root / ".runtime" / "spine" / "state"
+
+
 def resolve_paths(root: Path) -> tuple[Path, Path]:
-    """Return (db_path, scopes_dir) resolved from contract or env.
+    """Return (db_path, scopes_dir) resolved from runtime env.
 
     The DB is the SAME shared_authority.db used by gaps. The scopes_dir
     is the runtime loop-scopes directory under $SPINE_STATE.
     """
-    contract_path = root / "ops/bindings/mailroom.runtime.contract.yaml"
     state_root_str = os.environ.get("SPINE_STATE") or ""
-    if not state_root_str or not str(state_root_str).strip():
-        contract = load_yaml(contract_path)
-        if not isinstance(contract, dict):
-            raise RuntimeError("SPINE_STATE must be set — run via ./bin/ops cap run")
-
-        state_root_text = str(contract.get("state_root") or "").strip()
-        if state_root_text:
-            state_root = Path(os.path.expanduser(state_root_text))
-            if not state_root.is_absolute():
-                state_root = root / state_root
-        else:
-            runtime_root = str(contract.get("runtime_root") or "").strip()
-            roots = contract.get("roots") if isinstance(contract.get("roots"), dict) else {}
-            state_dir = str(roots.get("state") or "").strip() if isinstance(roots, dict) else ""
-            if not runtime_root:
-                raise RuntimeError("SPINE_STATE must be set — run via ./bin/ops cap run")
-            runtime_root_path = Path(os.path.expanduser(runtime_root))
-            if not runtime_root_path.is_absolute():
-                runtime_root_path = root / runtime_root_path
-            state_root = runtime_root_path / (state_dir or "state")
-    else:
-        state_root = Path(state_root_str).expanduser()
+    state_root = Path(state_root_str).expanduser() if state_root_str and str(state_root_str).strip() else _default_state_root(root)
 
     db_path = Path(
         os.environ.get(ENV_DB_PATH, str(state_root / "shared_authority.db"))
