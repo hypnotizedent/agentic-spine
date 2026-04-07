@@ -2,12 +2,13 @@
 set -euo pipefail
 
 SCRIPT_CODE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CAP_FILE_REL="ops/capabilities.runtime.yaml"
 ACTIVE_REPO_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
 ACTIVE_CODE_ROOT=""
 VALID_AMBIENT_TARGET_REPO=""
 AMBIENT_TARGET_GIT_ROOT=""
 
-if [[ -n "$ACTIVE_REPO_ROOT" && -f "$ACTIVE_REPO_ROOT/ops/capabilities.yaml" ]]; then
+if [[ -n "$ACTIVE_REPO_ROOT" && -f "$ACTIVE_REPO_ROOT/$CAP_FILE_REL" ]]; then
     ACTIVE_CODE_ROOT="$ACTIVE_REPO_ROOT"
 fi
 
@@ -15,7 +16,7 @@ if [[ -n "${SPINE_TARGET_REPO:-}" ]]; then
     AMBIENT_TARGET_GIT_ROOT="$(git -C "$SPINE_TARGET_REPO" rev-parse --show-toplevel 2>/dev/null || true)"
     if [[ -n "$AMBIENT_TARGET_GIT_ROOT" ]]; then
         VALID_AMBIENT_TARGET_REPO="$AMBIENT_TARGET_GIT_ROOT"
-    elif [[ -f "$SPINE_TARGET_REPO/ops/capabilities.yaml" ]]; then
+    elif [[ -f "$SPINE_TARGET_REPO/$CAP_FILE_REL" ]]; then
         VALID_AMBIENT_TARGET_REPO="$SPINE_TARGET_REPO"
     fi
 fi
@@ -32,136 +33,18 @@ _SP_LIB_DIR="${BASH_SOURCE%/*}"
 [[ "$_SP_LIB_DIR" == "${BASH_SOURCE}" ]] && _SP_LIB_DIR="$(pwd)"
 source "$_SP_LIB_DIR/../lib/yaml.sh"
 source "$_SP_LIB_DIR/../lib/runtime-paths.sh"
-source "$_SP_LIB_DIR/../lib/spine-log.sh"
 spine_runtime_resolve_paths
 export SPINE_INBOX SPINE_OUTBOX SPINE_STATE SPINE_LOCKS SPINE_LOGS SPINE_RECEIPTS SPINE_VERIFY_ROOT SPINE_DOMAIN_STATE SPINE_TARGET_REPO
 
-STATE_DIR="$SPINE_STATE"
-CAP_FILE="$SPINE_CODE/ops/capabilities.yaml"
-RECEIPTS="$SPINE_RECEIPTS"
-LEDGER="$STATE_DIR/ledger.csv"
-LEDGER_HEADER="run_id,created_at,started_at,finished_at,status,prompt_file,result_file,error,context_used"
-
-# Ensure state directory exists before any writes
-ensure_state_dir() {
-    mkdir -p "$STATE_DIR"
-
-    # Initialize ledger header for fresh clones / new worktrees.
-    # ledger.csv is append-only runtime state; it must be parseable by loops tooling.
-    if [[ ! -f "$LEDGER" || ! -s "$LEDGER" ]]; then
-        echo "$LEDGER_HEADER" > "$LEDGER"
-        return
-    fi
-
-    if ! head -n 1 "$LEDGER" | grep -q '^run_id,'; then
-        local tmp
-        tmp="$(mktemp "/tmp/spine-ledger.XXXXXX")"
-        {
-            echo "$LEDGER_HEADER"
-            cat "$LEDGER"
-        } > "$tmp"
-        mv "$tmp" "$LEDGER"
-    fi
-}
-
-# Bootstrap runtime directories/files that may be absent in fresh worktrees.
-ensure_runtime_scaffold() {
-    local proposals_dir="$SPINE_OUTBOX/proposals"
-    local loop_scopes_dir="$SPINE_STATE/loop-scopes"
-    local sessions_dir="$SPINE_STATE/sessions"
-    local orchestration_dir="$SPINE_STATE/orchestration"
-    local calendar_dir="$SPINE_OUTBOX/calendar"
-    local calendar_external_dir="$calendar_dir/external"
-    local evidence_index_dir="$SPINE_VERIFY_ROOT/indexes"
-    local receipt_index="$evidence_index_dir/receipt-index.yaml"
-    local verify_history_dir="$SPINE_VERIFY_HISTORY_DIR"
-    local verify_history_file="$SPINE_VERIFY_FAILURE_HISTORY_FILE"
-    local verify_state_dir="$SPINE_VERIFY_STATE_ROOT"
-    local verify_pass_streak_file="$SPINE_VERIFY_PASS_STREAK_FILE"
-    local context_dir="$SPINE_AGENT_CONTEXT_ROOT"
-
-    mkdir -p \
-        "$RECEIPTS" \
-        "$proposals_dir" \
-        "$loop_scopes_dir" \
-        "$sessions_dir" \
-        "$orchestration_dir" \
-        "$calendar_dir" \
-        "$calendar_external_dir" \
-        "$evidence_index_dir" \
-        "$verify_history_dir" \
-        "$verify_state_dir" \
-        "$context_dir" \
-        "$SPINE_LOCKS" \
-        "$SPINE_LOGS" \
-        "$SPINE_TMP"
-
-    if [[ ! -f "$receipt_index" ]]; then
-        cat > "$receipt_index" <<EOF
-updated_at_utc: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-source_root: "$RECEIPTS"
-entries: []
-EOF
-    fi
-
-    if [[ ! -f "$verify_history_file" ]]; then
-        : > "$verify_history_file"
-    fi
-
-    if [[ ! -f "$verify_pass_streak_file" ]]; then
-        echo '{}' > "$verify_pass_streak_file"
-    fi
-}
-
-maybe_rotate_receipts() {
-    local cap_name="${1:-}"
-    [[ -z "${OPS_CAP_STACK:-}" ]] || return 0
-    [[ "$cap_name" != "receipts.rotate" ]] || return 0
-
-    local rotate_every="${SPINE_RECEIPTS_ROTATE_EVERY:-100}"
-    local retention_days="${SPINE_RECEIPTS_ROTATE_DAYS:-30}"
-    local counter_file="$STATE_DIR/cap-run-counter"
-    local rotate_bin="$SPINE_CODE/ops/plugins/core/evidence/bin/receipts-rotate"
-    local counter=0
-
-    [[ "$rotate_every" =~ ^[0-9]+$ ]] || rotate_every=100
-    (( rotate_every > 0 )) || rotate_every=100
-    [[ "$retention_days" =~ ^[0-9]+$ ]] || retention_days=30
-
-    if [[ -f "$counter_file" ]]; then
-      counter="$(tr -dc '0-9' < "$counter_file" 2>/dev/null || echo 0)"
-      [[ "$counter" =~ ^[0-9]+$ ]] || counter=0
-    fi
-    counter=$((counter + 1))
-    printf '%s\n' "$counter" > "$counter_file"
-
-    if (( counter % rotate_every != 0 )); then
-      return 0
-    fi
-    [[ -x "$rotate_bin" ]] || return 0
-
-    local rotate_json
-    rotate_json="$("$rotate_bin" --days "$retention_days" --execute --json 2>/dev/null || true)"
-    if [[ -n "$rotate_json" ]] && command -v jq >/dev/null 2>&1; then
-      local deleted candidates
-      deleted="$(printf '%s' "$rotate_json" | jq -r '.deleted // 0' 2>/dev/null || echo 0)"
-      candidates="$(printf '%s' "$rotate_json" | jq -r '.candidates // 0' 2>/dev/null || echo 0)"
-      spine_log_event \
-        --event-type "receipts.rotate" \
-        --domain "core" \
-        --status "done" \
-        --message "auto-rotation completed (candidates=$candidates deleted=$deleted days=$retention_days)" \
-        --meta-json "$rotate_json" || true
-    fi
-}
+CAP_FILE="$SPINE_CODE/$CAP_FILE_REL"
 
 usage() {
     cat <<'EOF'
-ops cap - Execute governed capabilities
+ops cap - Execute runtime capabilities
 
 Usage:
   ops cap list                    List available capabilities
-  ops cap run <name> [args...]    Execute a capability with receipt
+  ops cap run <name> [args...]    Execute a capability
   ops cap show <name>             Show capability details
 
 Examples:
@@ -178,11 +61,18 @@ check_deps() {
         echo "Install: brew install yq"
         exit 1
     fi
-    if ! command -v jq >/dev/null 2>&1; then
-        echo "ERROR: jq required for JSON processing"
-        echo "Install: brew install jq"
-        exit 1
-    fi
+}
+
+ensure_runtime_dirs() {
+    mkdir -p \
+        "$SPINE_STATE" \
+        "$SPINE_TMP" \
+        "$SPINE_LOGS" \
+        "$SPINE_LOCKS" \
+        "$SPINE_INBOX" \
+        "$SPINE_OUTBOX" \
+        "$SPINE_VERIFY_ROOT" \
+        "$SPINE_DOMAIN_STATE"
 }
 
 list_caps() {
@@ -210,58 +100,93 @@ show_cap() {
     yq e ".capabilities.\"$name\"" "$CAP_FILE"
 }
 
+append_telemetry() {
+    local name="$1"
+    local safety="$2"
+    local exit_code="$3"
+    local telemetry_dir="$SPINE_STATE/telemetry"
+
+    mkdir -p "$telemetry_dir" 2>/dev/null || true
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      "$name" \
+      "$safety" \
+      "$exit_code" \
+      "${SPINE_SESSION_ID:-nosession}" \
+      >> "$telemetry_dir/cap-usage.tsv" 2>/dev/null || true
+}
+
+build_command_string() {
+    local base="$1"
+    shift || true
+    local full="$base"
+    local arg
+
+    for arg in "$@"; do
+        full+=" $(printf '%q' "$arg")"
+    done
+
+    printf '%s\n' "$full"
+}
+
+execute_command() {
+    local command_string="$1"
+    local cwd="$2"
+    local run_key="$3"
+
+    (
+        cd "$cwd"
+        export SPINE_TARGET_REPO="$SPINE_TARGET_REPO"
+        export SPINE_REPO="$SPINE_REPO"
+        export SPINE_CODE="$SPINE_CODE"
+        export SPINE_ROOT="$SPINE_CODE"
+        export SPINE_CAP_RUN_KEY="$run_key"
+        bash -lc "$command_string"
+    )
+}
+
 run_cap() {
     local name="$1"
-    shift
+    shift || true
 
     local args=("$@")
+    if [[ "${#args[@]}" -gt 0 && "${args[0]}" == "--" ]]; then
+        args=("${args[@]:1}")
+    fi
 
-    # ── Temp file cleanup trap ──
-    _cap_tmp=""
-    cleanup_cap() { [[ -n "$_cap_tmp" ]] && rm -f "$_cap_tmp" 2>/dev/null || true; }
-    trap cleanup_cap EXIT INT TERM
+    ensure_runtime_dirs
 
-    # Ensure runtime state is bootstrapped before executing anything.
-    ensure_state_dir
-    ensure_runtime_scaffold
-
-    # ── Resolve active policy preset ──
-    source "$SPINE_CODE/ops/lib/resolve-policy.sh"
-    resolve_policy_knobs
-
-    # ── Config extraction & validation ──
     if ! yaml_query -e "$CAP_FILE" ".capabilities.\"$name\"" 2>/dev/null; then
         echo "ERROR: Unknown capability: $name"
         echo "Run 'ops cap list' to see available capabilities."
         exit 1
     fi
 
-    # ── Load capability configuration from YAML ──
     local requires_list=()
     while IFS= read -r req; do
         [[ -z "${req:-}" || "${req:-}" == "null" ]] && continue
         requires_list+=("$req")
-    done < <(yq e ".capabilities.\"$name\".requires[]?" "$CAP_FILE" 2>/dev/null || true)
+    done < <(yq e -r ".capabilities.\"$name\".requires[]?" "$CAP_FILE" 2>/dev/null || true)
 
     local cmd
     cmd="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".command")"
     local cwd
     cwd="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".cwd")"
     [[ -z "$cwd" || "$cwd" == "null" ]] && cwd="$HOME"
+    cwd="$(eval echo "$cwd")"
+
     local safety
     safety="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".safety")"
     local approval
     approval="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".approval")"
     local desc
     desc="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".description")"
-    local cap_domain
-    cap_domain="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".domain" 2>/dev/null || echo none)"
-    [[ -n "$cap_domain" && "$cap_domain" != "null" ]] || cap_domain="none"
     local arg_protocol
     arg_protocol="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".arg_protocol")"
-    if [[ -z "$arg_protocol" || "$arg_protocol" == "null" ]]; then
-      arg_protocol="passthrough"
-    fi
+    [[ -n "$arg_protocol" && "$arg_protocol" != "null" ]] || arg_protocol="passthrough"
+    local post_action
+    post_action="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".post_action")"
+
     case "$arg_protocol" in
       passthrough|argparse|positional|none) ;;
       *)
@@ -269,338 +194,27 @@ run_cap() {
         exit 1
         ;;
     esac
-    # Separator normalization is deterministic and protocol-aware: only a single
-    # leading separator token is stripped by the dispatcher.
-    if [[ "${#args[@]}" -gt 0 && "${args[0]}" == "--" ]]; then
-      args=("${args[@]:1}")
-    fi
+
     if [[ "$arg_protocol" == "none" && "${#args[@]}" -gt 0 ]]; then
-      echo "ERROR: capability '$name' declares arg_protocol=none but received args: ${args[*]}"
-      exit 2
+        echo "ERROR: capability '$name' declares arg_protocol=none but received args: ${args[*]}"
+        exit 2
     fi
+
     if [[ "$arg_protocol" == "positional" ]]; then
-      local _arg
-      for _arg in "${args[@]:-}"; do
-        if [[ "$_arg" == -* ]]; then
-          echo "ERROR: capability '$name' declares arg_protocol=positional and does not accept flag arg '$_arg'"
-          exit 2
-        fi
-      done
-    fi
-    local post_action
-    post_action="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".post_action")"
-    local prompt_registry="$SPINE_CODE/ops/bindings/prompt.registry.yaml"
-    local prompt_lineage_set="unregistered"
-    local prompt_lineage_version="none"
-    local prompt_lineage_hash="none"
-    local prompt_lineage_resolution="missing_registry"
-    local prompt_lineage_registry_rel="ops/bindings/prompt.registry.yaml"
-    local prompt_lineage_source_refs_csv=""
-    local prompt_lineage_source_hashes_csv=""
-    declare -a prompt_lineage_source_refs=()
-    declare -a prompt_lineage_source_hash_lines=()
-    declare -a prompt_lineage_source_hash_pairs=()
-
-    if command -v yq >/dev/null 2>&1 && [[ -f "$prompt_registry" ]]; then
-      local prompt_override_exists
-      prompt_override_exists="$(yq e -r ".capability_overrides.\"$name\" != null" "$prompt_registry" 2>/dev/null || echo "false")"
-      if [[ "$prompt_override_exists" == "true" ]]; then
-        prompt_lineage_resolution="capability_override"
-      else
-        prompt_lineage_resolution="defaults"
-      fi
-
-      prompt_lineage_set="$(yq e -r ".capability_overrides.\"$name\".prompt_set_id // .defaults.prompt_set_id // \"unregistered\"" "$prompt_registry" 2>/dev/null || echo "unregistered")"
-      prompt_lineage_version="$(yq e -r ".capability_overrides.\"$name\".version // .defaults.version // \"none\"" "$prompt_registry" 2>/dev/null || echo "none")"
-
-      while IFS= read -r prompt_ref; do
-        [[ -z "${prompt_ref:-}" || "${prompt_ref:-}" == "null" ]] && continue
-        prompt_lineage_source_refs+=("$prompt_ref")
-        local prompt_abs prompt_ref_hash
-        prompt_abs="$SPINE_CODE/$prompt_ref"
-        if [[ -f "$prompt_abs" ]]; then
-          prompt_ref_hash="$(shasum -a 256 "$prompt_abs" | awk '{print $1}')"
-          prompt_lineage_source_hash_lines+=("$prompt_ref:$prompt_ref_hash")
-          prompt_lineage_source_hash_pairs+=("$prompt_ref=$prompt_ref_hash")
-        else
-          prompt_lineage_source_hash_lines+=("$prompt_ref:missing")
-          prompt_lineage_source_hash_pairs+=("$prompt_ref=missing")
-        fi
-      done < <(yq e -r "(.capability_overrides.\"$name\".source_refs // .defaults.source_refs // [])[]?" "$prompt_registry" 2>/dev/null || true)
-
-      if (( ${#prompt_lineage_source_hash_lines[@]} > 0 )); then
-        prompt_lineage_hash="$(printf '%s\n' "${prompt_lineage_source_hash_lines[@]}" | shasum -a 256 | awk '{print $1}')"
-      fi
-      if (( ${#prompt_lineage_source_refs[@]} > 0 )); then
-        prompt_lineage_source_refs_csv="$(IFS=,; echo "${prompt_lineage_source_refs[*]}")"
-      fi
-      if (( ${#prompt_lineage_source_hash_pairs[@]} > 0 )); then
-        prompt_lineage_source_hashes_csv="$(IFS=,; echo "${prompt_lineage_source_hash_pairs[*]}")"
-      fi
-    fi
-    local role_runtime_contract="$SPINE_CODE/ops/bindings/role.runtime.control.contract.yaml"
-    local terminal_role_contract="$SPINE_CODE/ops/bindings/terminal.role.contract.yaml"
-    local launchd_runtime_contract="$SPINE_CODE/ops/bindings/launchd.runtime.contract.yaml"
-    local runtime_role="${SPINE_RUNTIME_ROLE:-}"
-    local role_policy_enforced="false"
-    local role_policy_override_used="false"
-    local role_policy_override_ref="${SPINE_ROLE_POLICY_OVERRIDE_REF:-}"
-    local role_policy_override_reason="${SPINE_ROLE_POLICY_OVERRIDE_REASON:-}"
-    # Auto-derive reason from ref when ref is self-evident (LOOP-* or LANE-* pattern)
-    if [[ -n "$role_policy_override_ref" && -z "$role_policy_override_reason" ]]; then
-      if [[ "$role_policy_override_ref" =~ ^LOOP- || "$role_policy_override_ref" =~ ^LANE- ]]; then
-        role_policy_override_reason="Governed execution for $role_policy_override_ref"
-      fi
-    fi
-    local governed_override="${OPS_GOVERNED_MAIN_OVERRIDE:-}"
-    local governed_override_lc governed_override_active
-    governed_override_lc="$(printf '%s' "$governed_override" | tr '[:upper:]' '[:lower:]')"
-    governed_override_active=0
-    if [[ "$governed_override_lc" == "1" || "$governed_override_lc" == "true" || "$governed_override_lc" == "yes" ]]; then
-      governed_override_active=1
-    fi
-    local role_override_cache_filename="role-override.env"
-    local role_override_cache_ttl_seconds="14400"
-    local role_override_cache_session_env="SPINE_SESSION_ID"
-    local role_override_cache_terminal_env="OPS_TERMINAL_ROLE"
-    local role_override_require_session_binding="true"
-    local role_override_require_terminal_binding="true"
-    if command -v yq >/dev/null 2>&1 && [[ -f "$role_runtime_contract" ]]; then
-      role_override_cache_filename="$(yq e -r '.runtime_roles.session_role_override_cache.cache_filename // "role-override.env"' "$role_runtime_contract" 2>/dev/null || echo "$role_override_cache_filename")"
-      role_override_cache_ttl_seconds="$(yq e -r '.runtime_roles.session_role_override_cache.ttl_seconds // 14400' "$role_runtime_contract" 2>/dev/null || echo "$role_override_cache_ttl_seconds")"
-      role_override_cache_session_env="$(yq e -r '.runtime_roles.session_role_override_cache.session_env_var // "SPINE_SESSION_ID"' "$role_runtime_contract" 2>/dev/null || echo "$role_override_cache_session_env")"
-      role_override_cache_terminal_env="$(yq e -r '.runtime_roles.session_role_override_cache.terminal_role_env_var // "OPS_TERMINAL_ROLE"' "$role_runtime_contract" 2>/dev/null || echo "$role_override_cache_terminal_env")"
-      role_override_require_session_binding="$(yq e -r '.runtime_roles.session_role_override_cache.require_session_binding // true' "$role_runtime_contract" 2>/dev/null || echo "$role_override_require_session_binding")"
-      role_override_require_terminal_binding="$(yq e -r '.runtime_roles.session_role_override_cache.require_terminal_role_binding // true' "$role_runtime_contract" 2>/dev/null || echo "$role_override_require_terminal_binding")"
-    fi
-    # ── Maintenance allowlist (GAP-1673) ──────────────────────────
-    # Spine-internal housekeeping verbs that must work even with a dirty
-    # worktree, no attach packet, or a read-only role.  These are
-    # idempotent/additive governance operations — NOT product-domain
-    # mutations.  Keep mutation-guard and approval checks intact.
-    local _maintenance_allowlist="gaps.file,gaps.close,gaps.claim,gaps.status,gaps.aging,gaps.batch.close,gaps.auto.close,gaps.quick,friction.ingest,friction.reconcile,friction.close.resolved,friction.queue.status,friction.baseline.capture,friction.baseline.verify,loop.closeout.finalize,state.shared.reconcile,loops.authority.bridge,loops.auto.close,loops.progress,lifecycle.health,lifecycle.tombstone.expire,lifecycle.residue.scan,lifecycle.restore.capsule.verify,capability.map.projection.build,planning.plans.reconcile,session.interactive.dispatch,session.interactive.complete"
-
-    # Helper: returns 0 if $1 is in the maintenance allowlist.
-    _is_maintenance_cap() {
-      local _cap="$1"
-      local _entry
-      IFS=',' read -r -a _maint_arr <<< "$_maintenance_allowlist"
-      for _entry in "${_maint_arr[@]}"; do
-        [[ "$_entry" == "$_cap" ]] && return 0
-      done
-      return 1
-    }
-
-    _is_noninteractive_governed_maintenance_context() {
-      local _cap="$1"
-      local _runtime_role="${SPINE_RUNTIME_ROLE:-}"
-      local _terminal_binding="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-}}}}"
-      _is_maintenance_cap "$_cap" || return 1
-      [[ -t 0 ]] && return 1
-      [[ -n "$_runtime_role" ]] || return 1
-      [[ -n "$_terminal_binding" ]] || return 1
-      return 0
-    }
-
-    local attach_admission_enabled="true"
-    local attach_admission_required_safety_csv="mutating,destructive"
-    local attach_admission_required_env_csv="SPINE_ENTRY_PACKET_PATH,SPINE_ENTRY_PACKET_HASH"
-    local attach_admission_exempt_csv="session.start,session.v3.attach,session.role.override,aof.contract.acknowledge,friction.ingest,friction.reconcile,friction.baseline.capture,worktree.lifecycle.rehydrate,worktree.lifecycle.managed.sync,session.execution.lane.bootstrap,session.execution.lane.closeout,session.execution.lane.scan"
-    local autonomous_scheduler_enabled="false"
-    local autonomous_context_env="SPINE_AUTONOMOUS_EXECUTION_CONTEXT"
-    local autonomous_source_env="SPINE_AUTONOMOUS_SOURCE"
-    local autonomous_label_env="SPINE_SCHEDULER_LABEL"
-    local autonomous_parent_process_env="SPINE_AUTONOMOUS_PARENT_PROCESS"
-    local autonomous_ancestry_confirmed_env="SPINE_AUTONOMOUS_ANCESTRY_CONFIRMED"
-    local autonomous_required_context="launchd_scheduler"
-    local autonomous_required_source="governed_job_wrapper"
-    local autonomous_required_parent_process="launchd"
-    local autonomous_require_launchd_ancestry="true"
-    local autonomous_launchd_ancestry_depth="3"
-    local autonomous_required_registry_state="active"
-    local autonomous_required_registry_mode="scheduled"
-    local autonomous_required_template_source="spine"
-    local autonomous_require_scheduler_execution_membership="true"
-    local autonomous_scheduler_registry="$SPINE_CODE/ops/bindings/launchd.scheduler.registry.yaml"
-    local autonomous_ancestry_confirmed_lc=""
-    local autonomous_require_launchd_ancestry_lc
-    local autonomous_require_scheduler_execution_membership_lc
-    if command -v yq >/dev/null 2>&1 && [[ -f "$role_runtime_contract" ]]; then
-      attach_admission_enabled="$(yq e -r '.attach_admission.enforce_top_level // true' "$role_runtime_contract" 2>/dev/null || echo true)"
-      attach_admission_required_safety_csv="$(yq e -r '.attach_admission.required_safety[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
-      attach_admission_required_env_csv="$(yq e -r '.attach_admission.required_env[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
-      attach_admission_exempt_csv="$(yq e -r '.attach_admission.exempt_capabilities[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
-    fi
-    if command -v yq >/dev/null 2>&1 && [[ -f "$launchd_runtime_contract" ]]; then
-      autonomous_scheduler_enabled="$(yq e -r '.autonomous_admission.enabled // false' "$launchd_runtime_contract" 2>/dev/null || echo false)"
-      autonomous_context_env="$(yq e -r '.autonomous_admission.marker_env.context // "SPINE_AUTONOMOUS_EXECUTION_CONTEXT"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_context_env")"
-      autonomous_source_env="$(yq e -r '.autonomous_admission.marker_env.source // "SPINE_AUTONOMOUS_SOURCE"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_source_env")"
-      autonomous_label_env="$(yq e -r '.autonomous_admission.marker_env.label // "SPINE_SCHEDULER_LABEL"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_label_env")"
-      autonomous_parent_process_env="$(yq e -r '.autonomous_admission.marker_env.parent_process // "SPINE_AUTONOMOUS_PARENT_PROCESS"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_parent_process_env")"
-      autonomous_ancestry_confirmed_env="$(yq e -r '.autonomous_admission.marker_env.ancestry_confirmed // "SPINE_AUTONOMOUS_ANCESTRY_CONFIRMED"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_ancestry_confirmed_env")"
-      autonomous_required_context="$(yq e -r '.autonomous_admission.required_context // "launchd_scheduler"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_required_context")"
-      autonomous_required_source="$(yq e -r '.autonomous_admission.required_source // "governed_job_wrapper"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_required_source")"
-      autonomous_required_parent_process="$(yq e -r '.autonomous_admission.required_parent_process // "launchd"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_required_parent_process")"
-      autonomous_require_launchd_ancestry="$(yq e -r '.autonomous_admission.validation.require_launchd_ancestry // true' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_require_launchd_ancestry")"
-      autonomous_launchd_ancestry_depth="$(yq e -r '.autonomous_admission.validation.launchd_ancestry_depth // 3' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_launchd_ancestry_depth")"
-      autonomous_required_registry_state="$(yq e -r '.autonomous_admission.validation.required_registry_state // "active"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_required_registry_state")"
-      autonomous_required_registry_mode="$(yq e -r '.autonomous_admission.validation.required_registry_mode // "scheduled"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_required_registry_mode")"
-      autonomous_required_template_source="$(yq e -r '.autonomous_admission.validation.required_template_source // "spine"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_required_template_source")"
-      autonomous_require_scheduler_execution_membership="$(yq e -r '.autonomous_admission.validation.require_scheduler_execution_membership // true' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_require_scheduler_execution_membership")"
-      autonomous_scheduler_registry="$(yq e -r '.paths.scheduler_registry // "ops/bindings/launchd.scheduler.registry.yaml"' "$launchd_runtime_contract" 2>/dev/null || echo "$autonomous_scheduler_registry")"
-    fi
-    if [[ "$autonomous_scheduler_registry" != /* ]]; then
-      autonomous_scheduler_registry="$SPINE_CODE/$autonomous_scheduler_registry"
-    fi
-    [[ -n "$attach_admission_required_safety_csv" ]] || attach_admission_required_safety_csv="read-only,mutating,destructive"
-    [[ -n "$attach_admission_required_env_csv" ]] || attach_admission_required_env_csv="SPINE_ENTRY_PACKET_PATH,SPINE_ENTRY_PACKET_HASH"
-    [[ "$autonomous_launchd_ancestry_depth" =~ ^[0-9]+$ ]] || autonomous_launchd_ancestry_depth="3"
-    autonomous_require_launchd_ancestry_lc="$(printf '%s' "$autonomous_require_launchd_ancestry" | tr '[:upper:]' '[:lower:]')"
-    autonomous_require_scheduler_execution_membership_lc="$(printf '%s' "$autonomous_require_scheduler_execution_membership" | tr '[:upper:]' '[:lower:]')"
-    _cap_proc_comm_for_pid() {
-      local _pid="${1:-}"
-      [[ -n "$_pid" ]] || return 1
-      ps -o comm= -p "$_pid" 2>/dev/null | awk 'NR==1 {print $1}' | xargs basename
-    }
-    _cap_launchd_ancestry_valid() {
-      local _depth="${1:-3}"
-      local _pid="${PPID:-}"
-      local _ppid _comm
-      local _hop=0
-      while [[ "$_hop" -lt "$_depth" && "$_pid" =~ ^[0-9]+$ && "$_pid" -gt 1 ]]; do
-        _comm="$(_cap_proc_comm_for_pid "$_pid" || true)"
-        if [[ "$_comm" == "launchd" ]]; then
-          return 0
-        fi
-        _ppid="$(ps -o ppid= -p "$_pid" 2>/dev/null | tr -d '[:space:]' || true)"
-        [[ -n "$_ppid" ]] || break
-        _pid="$_ppid"
-        _hop=$((_hop + 1))
-      done
-      return 1
-    }
-    # Merge entry gate bypass binding (pre-session diagnostic capabilities)
-    local _entry_gate_bypass_file="$SPINE_CODE/ops/bindings/entry.gate.bypass.yaml"
-    if command -v yq >/dev/null 2>&1 && [[ -f "$_entry_gate_bypass_file" ]]; then
-      local _bypass_csv
-      _bypass_csv="$(yq e -r '.entry_gate_bypass.capabilities[]?' "$_entry_gate_bypass_file" 2>/dev/null | paste -sd, -)"
-      if [[ -n "$_bypass_csv" ]]; then
-        attach_admission_exempt_csv="${attach_admission_exempt_csv:+${attach_admission_exempt_csv},}${_bypass_csv}"
-      fi
-    fi
-    [[ "$role_override_cache_ttl_seconds" =~ ^[0-9]+$ ]] || role_override_cache_ttl_seconds="14400"
-    local _role_override_cache="$STATE_DIR/$role_override_cache_filename"
-
-    # Session-scoped override cache: fallback when env vars are not set.
-    # Cache entries are TTL-bound and session/terminal-bound by contract.
-    if [[ -z "$role_policy_override_ref" && -f "$_role_override_cache" ]]; then
-      local _cached_ref _cached_reason _cached_created_epoch _cached_expires_epoch _cached_session_id _cached_terminal_role
-      local _cache_valid=1
-      local _cache_invalid_reason=""
-      local _now_epoch
-      _now_epoch="$(date +%s)"
-      _cached_ref="$(sed -n 's/^ref=//p' "$_role_override_cache" | head -1)"
-      _cached_reason="$(sed -n 's/^reason=//p' "$_role_override_cache" | head -1)"
-      _cached_created_epoch="$(sed -n 's/^created_epoch=//p' "$_role_override_cache" | head -1)"
-      _cached_expires_epoch="$(sed -n 's/^expires_epoch=//p' "$_role_override_cache" | head -1)"
-      _cached_session_id="$(sed -n 's/^session_id=//p' "$_role_override_cache" | head -1)"
-      _cached_terminal_role="$(sed -n 's/^terminal_role=//p' "$_role_override_cache" | head -1)"
-
-      if [[ -n "$_cached_expires_epoch" && "$_cached_expires_epoch" =~ ^[0-9]+$ ]]; then
-        if (( _now_epoch > _cached_expires_epoch )); then
-          _cache_valid=0
-          _cache_invalid_reason="expired"
-        fi
-      elif [[ -n "$_cached_created_epoch" && "$_cached_created_epoch" =~ ^[0-9]+$ ]]; then
-        if (( _now_epoch - _cached_created_epoch > role_override_cache_ttl_seconds )); then
-          _cache_valid=0
-          _cache_invalid_reason="ttl_elapsed"
-        fi
-      fi
-
-      local _current_session_id="${!role_override_cache_session_env:-}"
-      local _current_terminal_role="${!role_override_cache_terminal_env:-}"
-      if [[ -z "$_current_terminal_role" ]]; then
-        _current_terminal_role="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-}}}}"
-      fi
-
-      if [[ "$role_override_require_session_binding" == "true" ]]; then
-        if [[ -z "$_current_session_id" || -z "$_cached_session_id" || "$_current_session_id" != "$_cached_session_id" ]]; then
-          _cache_valid=0
-          _cache_invalid_reason="session_mismatch"
-        fi
-      fi
-      if [[ "$role_override_require_terminal_binding" == "true" ]]; then
-        if [[ -z "$_current_terminal_role" || -z "$_cached_terminal_role" || "$_current_terminal_role" != "$_cached_terminal_role" ]]; then
-          _cache_valid=0
-          _cache_invalid_reason="terminal_mismatch"
-        fi
-      fi
-
-      if [[ "$_cache_valid" -eq 1 && -n "$_cached_ref" && -n "$_cached_reason" ]]; then
-        role_policy_override_ref="$_cached_ref"
-        role_policy_override_reason="$_cached_reason"
-      else
-        rm -f "$_role_override_cache" 2>/dev/null || true
-        if [[ -n "$_cache_invalid_reason" ]]; then
-          echo "RUNTIME ROLE OVERRIDE CACHE CLEARED: $_cache_invalid_reason"
-        fi
-      fi
-    fi
-    local effective_multi_agent_writes="${RESOLVED_MULTI_AGENT_WRITES:-direct}"
-    local active_session_count=0
-    local friction_ingest_script="$SPINE_CODE/ops/plugins/core/lifecycle/bin/friction-ingest"
-    local friction_autocapture="${OPS_CAP_FRICTION_AUTOCAPTURE:-1}"
-
-    count_active_sessions() {
-      local sessions_dir="$SPINE_STATE/sessions"
-      local count=0
-      [[ -d "$sessions_dir" ]] || {
-        echo 0
-        return 0
-      }
-
-      for session_dir in "$sessions_dir"/SES-*; do
-        [[ -d "$session_dir" ]] || continue
-        local manifest="$session_dir/session.yaml"
-        [[ -f "$manifest" ]] || continue
-        local pid
-        pid="$(sed -n 's/^pid:[[:space:]]*//p' "$manifest" | head -1)"
-        [[ -n "${pid:-}" ]] || continue
-        if kill -0 "$pid" 2>/dev/null; then
-          count=$((count + 1))
-        fi
-      done
-
-      echo "$count"
-    }
-
-    # ── Apply approval_default from policy preset ──
-    # Top-level cap runs: strict preset forces manual approval
-    # Precondition runs (OPS_CAP_STACK non-empty): per-capability setting respected
-    if [[ -z "${OPS_CAP_STACK:-}" ]] && [[ "$RESOLVED_APPROVAL_DEFAULT" == "manual" ]]; then
-      approval="manual"
+        local positional_arg
+        for positional_arg in "${args[@]:-}"; do
+            if [[ "$positional_arg" == -* ]]; then
+                echo "ERROR: capability '$name' declares arg_protocol=positional and does not accept flag arg '$positional_arg'"
+                exit 2
+            fi
+        done
     fi
 
-    # ── Multi-session write posture ──
-    # Balanced mode keeps direct writes for single-session work, but forces
-    # proposal-only writes while multiple active sessions exist.
-    active_session_count="$(count_active_sessions)"
-    if [[ "${active_session_count:-0}" -gt 1 ]]; then
-      effective_multi_agent_writes="${RESOLVED_MULTI_AGENT_WRITES_WHEN_MULTI_SESSION:-proposal-only}"
-    fi
-
-    # ── Expand environment variables ──
-    cwd="$(eval echo "$cwd")"
-
-    # ── Generate collision-proof run key ──
-    local ts
+    local ts rand run_key
     ts="$(date +%Y%m%d-%H%M%S)"
-    local rand
     rand="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 4 || echo "$$")"
-    local run_key="CAP-${ts}__${name}__R${rand}"
+    run_key="CAP-${ts}__${name}__R${rand}"
 
-    # ── Display execution banner ──
     echo "════════════════════════════════════════"
     echo "CAPABILITY: $name"
     echo "════════════════════════════════════════"
@@ -609,929 +223,59 @@ run_cap() {
     echo "Approval:    $approval"
     echo "Arg Protocol:$arg_protocol"
     echo "Run Key:     $run_key"
-    echo "Policy:      $RESOLVED_POLICY_PRESET (approval_default=$RESOLVED_APPROVAL_DEFAULT, multi_agent_writes=$effective_multi_agent_writes, active_sessions=$active_session_count)"
     echo "Command:     $cmd ${args[*]:-}"
     echo "CWD:         $cwd"
     echo ""
 
-    # ── Prepare capture (receipt should exist even if preconditions fail) ──
-    local start_time
-    start_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    local output_file="/tmp/cap_${run_key}_output.txt"
-    _cap_tmp="$output_file"
-    local exit_code=0
-    local blocked_reason=""
+    local previous_stack="${OPS_CAP_STACK:-}"
+    local cycle_stack=",${previous_stack},${name},"
+    local req rc
 
-    # ── Attach admission guard (V3 canonical ingress) ──
-    # Top-level mutating/destructive capability runs must originate from a
-    # governed attach unless explicitly allowlisted as bootstrap/control-plane
-    # infrastructure. This keeps entry-packet truth on the hot path instead of
-    # relying on ambient operator memory.
-    if [[ -z "$blocked_reason" && -z "${OPS_CAP_STACK:-}" && "$attach_admission_enabled" == "true" ]]; then
-      local attach_guard_applies=0
-      local attach_guard_exempt=0
-      local attach_key attach_value attach_entry_packet_path attach_entry_packet_hash attach_actual_hash
-      local autonomous_context autonomous_source autonomous_label autonomous_parent_process
-      local autonomous_ancestry_confirmed
-      local autonomous_marker_present=0
-      local autonomous_marker_valid=0
-      local autonomous_invalid_reason=""
-      local -a attach_required_env=()
-      local -a attach_missing_env=()
-
-      IFS=',' read -r -a attach_required_env <<< "${attach_admission_required_env_csv:-}"
-      IFS=',' read -r -a _attach_safety <<< "${attach_admission_required_safety_csv:-}"
-      for attach_key in "${_attach_safety[@]:-}"; do
-        attach_key="$(printf '%s' "$attach_key" | xargs)"
-        [[ -n "$attach_key" ]] || continue
-        if [[ "$safety" == "$attach_key" ]]; then
-          attach_guard_applies=1
-          break
-        fi
-      done
-
-      if [[ "$attach_guard_applies" -eq 1 ]]; then
-        # Check maintenance allowlist first (GAP-1673)
-        if _is_maintenance_cap "$name"; then
-          attach_guard_exempt=1
-        fi
-        IFS=',' read -r -a _attach_exempt_caps <<< "${attach_admission_exempt_csv:-}"
-        for attach_key in "${_attach_exempt_caps[@]:-}"; do
-          attach_key="$(printf '%s' "$attach_key" | xargs)"
-          [[ -n "$attach_key" ]] || continue
-          if [[ "$name" == "$attach_key" ]]; then
-            attach_guard_exempt=1
-            break
-          fi
-        done
-
-        if [[ "$attach_guard_exempt" -eq 1 ]]; then
-          echo "ATTACH ADMISSION: allowlisted bootstrap/control-plane capability '$name'"
-        else
-          for attach_key in "${attach_required_env[@]:-}"; do
-            attach_key="$(printf '%s' "$attach_key" | xargs)"
-            [[ -n "$attach_key" ]] || continue
-            attach_value="${!attach_key:-}"
-            [[ -n "$attach_value" ]] || attach_missing_env+=("$attach_key")
-          done
-
-          attach_entry_packet_path="${SPINE_ENTRY_PACKET_PATH:-}"
-          attach_entry_packet_hash="${SPINE_ENTRY_PACKET_HASH:-}"
-          autonomous_context="${!autonomous_context_env:-}"
-          autonomous_source="${!autonomous_source_env:-}"
-          autonomous_label="${!autonomous_label_env:-}"
-          autonomous_parent_process="${!autonomous_parent_process_env:-}"
-          autonomous_ancestry_confirmed="${!autonomous_ancestry_confirmed_env:-}"
-          autonomous_ancestry_confirmed_lc="$(printf '%s' "$autonomous_ancestry_confirmed" | tr '[:upper:]' '[:lower:]')"
-
-          if (( ${#attach_missing_env[@]} > 0 )); then
-            if [[ "$autonomous_scheduler_enabled" == "true" && ( -n "$autonomous_context" || -n "$autonomous_source" || -n "$autonomous_label" || -n "$autonomous_parent_process" ) ]]; then
-              autonomous_marker_present=1
-              if [[ "$autonomous_context" != "$autonomous_required_context" ]]; then
-                autonomous_invalid_reason="autonomous_context_mismatch"
-              elif [[ "$autonomous_source" != "$autonomous_required_source" ]]; then
-                autonomous_invalid_reason="autonomous_source_mismatch"
-              elif [[ -z "$autonomous_label" ]]; then
-                autonomous_invalid_reason="scheduler_label_missing"
-              elif [[ "$autonomous_parent_process" != "$autonomous_required_parent_process" ]]; then
-                autonomous_invalid_reason="autonomous_parent_process_mismatch"
-              elif [[ ! -f "$autonomous_scheduler_registry" ]]; then
-                autonomous_invalid_reason="scheduler_registry_missing"
-              elif [[ "$autonomous_require_launchd_ancestry_lc" == "1" || "$autonomous_require_launchd_ancestry_lc" == "true" || "$autonomous_require_launchd_ancestry_lc" == "yes" ]] && [[ "$autonomous_ancestry_confirmed_lc" != "1" && "$autonomous_ancestry_confirmed_lc" != "true" && "$autonomous_ancestry_confirmed_lc" != "yes" ]] && ! _cap_launchd_ancestry_valid "$autonomous_launchd_ancestry_depth"; then
-                autonomous_invalid_reason="launchd_ancestry_missing"
-              else
-                local autonomous_registry_state autonomous_registry_mode autonomous_registry_template_source
-                local autonomous_scheduler_member
-                autonomous_registry_state="$(yq e -r ".labels[]? | select(.label == \"$autonomous_label\") | .state" "$autonomous_scheduler_registry" 2>/dev/null | head -n1 || true)"
-                autonomous_registry_mode="$(yq e -r ".labels[]? | select(.label == \"$autonomous_label\") | .mode" "$autonomous_scheduler_registry" 2>/dev/null | head -n1 || true)"
-                autonomous_registry_template_source="$(yq e -r ".labels[]? | select(.label == \"$autonomous_label\") | .template_source" "$autonomous_scheduler_registry" 2>/dev/null | head -n1 || true)"
-                autonomous_scheduler_member="$(yq e -r ".scheduler_execution.labels[]? | select(. == \"$autonomous_label\")" "$launchd_runtime_contract" 2>/dev/null | head -n1 || true)"
-                if [[ "$autonomous_registry_state" != "$autonomous_required_registry_state" ]]; then
-                  autonomous_invalid_reason="scheduler_registry_state_mismatch"
-                elif [[ "$autonomous_registry_mode" != "$autonomous_required_registry_mode" ]]; then
-                  autonomous_invalid_reason="scheduler_registry_mode_mismatch"
-                elif [[ "$autonomous_registry_template_source" != "$autonomous_required_template_source" ]]; then
-                  autonomous_invalid_reason="scheduler_registry_template_source_mismatch"
-                elif [[ ( "$autonomous_require_scheduler_execution_membership_lc" == "1" || "$autonomous_require_scheduler_execution_membership_lc" == "true" || "$autonomous_require_scheduler_execution_membership_lc" == "yes" ) && "$autonomous_scheduler_member" != "$autonomous_label" ]]; then
-                  autonomous_invalid_reason="scheduler_execution_membership_missing"
-                else
-                  autonomous_marker_valid=1
-                fi
-              fi
-            fi
-
-            if [[ "$autonomous_marker_valid" -eq 1 ]]; then
-              echo "ATTACH ADMISSION: governed autonomous scheduler label '$autonomous_label' validated"
-            elif [[ "$autonomous_marker_present" -eq 1 ]]; then
-              echo "BLOCKED: autonomous scheduler admission invalid"
-              echo "Capability: $name ($safety)"
-              echo "Scheduler label: ${autonomous_label:-missing}"
-              echo "Reason: ${autonomous_invalid_reason:-unknown}"
-              echo ""
-              echo "Remediation:"
-              echo "  Use the governed LaunchAgent wrapper path for scheduled execution."
-              echo "  For terminal execution, attach first: ./bin/ops cap run session.v3.attach -- --allow-no-loop"
-              blocked_reason="autonomous_scheduler_admission_invalid:${name}"
-              exit_code=7
-            else
-              echo "BLOCKED: attach admission required"
-              echo "Capability: $name ($safety)"
-              echo "Reason: top-level mutating/destructive execution requires a V3 attach packet in the current terminal."
-              echo "Missing env: ${attach_missing_env[*]}"
-              echo ""
-              echo "Remediation:"
-              echo "  ./bin/ops cap run session.v3.attach -- --allow-no-loop"
-              echo "  # Or use the governed terminal-launch wrapper, which resolves into session.v3.attach automatically."
-              blocked_reason="attach_admission_required:${name}"
-              exit_code=7
-            fi
-          elif [[ ! -f "$attach_entry_packet_path" ]]; then
-            echo "BLOCKED: attach admission packet missing"
-            echo "Capability: $name ($safety)"
-            echo "Entry packet path: $attach_entry_packet_path"
-            echo ""
-            echo "Remediation:"
-            echo "  ./bin/ops cap run session.v3.attach -- --allow-no-loop"
-            blocked_reason="attach_admission_packet_missing:${name}"
-            exit_code=7
-          else
-            attach_actual_hash="$(shasum -a 256 "$attach_entry_packet_path" 2>/dev/null | awk '{print $1}')"
-            if [[ -z "$attach_actual_hash" ]]; then
-              echo "BLOCKED: attach admission packet unreadable"
-              echo "Capability: $name ($safety)"
-              echo "Entry packet path: $attach_entry_packet_path"
-              echo ""
-              echo "Remediation:"
-              echo "  ./bin/ops cap run session.v3.attach -- --allow-no-loop"
-              blocked_reason="attach_admission_packet_unreadable:${name}"
-              exit_code=7
-            elif [[ "$attach_actual_hash" != "$attach_entry_packet_hash" ]]; then
-              # Packet file changed since attach — common after commit/push
-              # or concurrent re-attach in the same terminal.  If the on-disk
-              # packet is still a valid entry packet (YAML with session_id),
-              # accept the refreshed hash and proceed.  This prevents routine
-              # commit/push churn from stranding the terminal while preserving
-              # the block for truly invalid or missing packets.
-              if head -1 "$attach_entry_packet_path" 2>/dev/null | grep -q '^schema_version:' \
-                 && grep -q 'generated_at_utc:' "$attach_entry_packet_path" 2>/dev/null; then
-                echo "ATTACH ADMISSION: packet hash refreshed (file changed since attach)"
-                echo "  Previous: ${attach_entry_packet_hash}"
-                echo "  Current:  ${attach_actual_hash}"
-                attach_entry_packet_hash="$attach_actual_hash"
-                export SPINE_ENTRY_PACKET_HASH="$attach_actual_hash"
-              else
-                echo "BLOCKED: attach admission packet hash mismatch (invalid packet)"
-                echo "Capability: $name ($safety)"
-                echo "Entry packet path: $attach_entry_packet_path"
-                echo "Expected hash: ${attach_entry_packet_hash:-missing}"
-                echo "Actual hash: ${attach_actual_hash:-missing}"
-                echo ""
-                echo "Remediation:"
-                echo "  ./bin/ops cap run session.v3.attach -- --allow-no-loop"
-                blocked_reason="attach_admission_packet_hash_mismatch:${name}"
-                exit_code=7
-              fi
-            fi
-          fi
-        fi
-      fi
-    fi
-
-    # ── Approval gate (manual safety level) ──
-    if [[ -z "$blocked_reason" && "$approval" == "manual" ]]; then
-        local auto_approve="${OPS_CAP_AUTO_APPROVE:-${SPINE_CAP_AUTO_APPROVE:-}}"
-        case "$(printf '%s' "$auto_approve" | tr '[:upper:]' '[:lower:]')" in
-          1|y|yes|true|auto|always)
-            echo "MANUAL APPROVAL: auto-approved via OPS_CAP_AUTO_APPROVE/SPINE_CAP_AUTO_APPROVE"
-            ;;
-          *)
-            # Active session role override implies governed execution context — auto-approve
-            if [[ -n "$role_policy_override_ref" && -n "${role_policy_override_reason:-}" ]]; then
-              echo "MANUAL APPROVAL: auto-approved via active role override (ref=$role_policy_override_ref)"
-            elif _is_noninteractive_governed_maintenance_context "$name"; then
-              echo "MANUAL APPROVAL: auto-approved for maintenance capability in non-interactive governed context"
-            elif [[ "$governed_override_active" -eq 1 ]]; then
-              echo "MANUAL APPROVAL: auto-approved via OPS_GOVERNED_MAIN_OVERRIDE=1"
-            else
-              echo "⚠️  This capability requires manual approval."
-              if [[ -t 0 ]]; then
-                read -r -p "Type 'yes' to proceed: " confirm
-              else
-                # Keep non-interactive compatibility: `echo yes | ./bin/ops cap run ...`
-                read -r confirm || confirm=""
-              fi
-              if [[ "$confirm" != "yes" ]]; then
-                  echo "ABORTED"
-                  echo "Hint: pipe 'yes' or set OPS_CAP_AUTO_APPROVE=yes for agent-mode batches."
-                  exit 1
-              fi
-            fi
-            ;;
-        esac
-    fi
-
-    # ── Policy enforcement: proposal_required + multi_agent_writes ──
-    # Skip enforcement for precondition runs, read-only caps, and governed
-    # bootstrap/friction/repair surfaces that exist to make policy-visible debt
-    # capturable without requiring another override ceremony.
-    # Governance-repair caps (friction.reconcile, gaps.*, capability.map.projection.build)
-    # are first-class repair operations that should not require ad hoc ceremony.
-    if [[ -z "${OPS_CAP_STACK:-}" && "$safety" == "mutating" ]]; then
-      local policy_guard_exempt=0
-      case "$name" in
-        session.start|session.v3.attach|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate|worktree.lifecycle.managed.sync|session.execution.lane.bootstrap|session.execution.lane.closeout|session.execution.lane.scan|friction.ingest|friction.reconcile|friction.close.resolved|capability.map.projection.build|gaps.file|gaps.close|gaps.claim|gaps.status|planning.plans.reconcile)
-          policy_guard_exempt=1
-          ;;
-      esac
-      # Maintenance allowlist fallback (GAP-1673)
-      if [[ "$policy_guard_exempt" -eq 0 ]] && _is_maintenance_cap "$name"; then
-        policy_guard_exempt=1
-      fi
-
-      # proposal_required: strict preset forces proposal flow for mutating caps
-      if [[ "$policy_guard_exempt" -eq 1 ]]; then
-        echo "POLICY GUARD: allowlisted bootstrap/governance capability '$name'"
-      elif [[ "${RESOLVED_PROPOSAL_REQUIRED:-false}" == "true" ]]; then
-        if [[ "$governed_override_active" -eq 1 ]]; then
-          echo "POLICY OVERRIDE: proposal_required bypassed via OPS_GOVERNED_MAIN_OVERRIDE=1"
-        else
-          echo "BLOCKED: proposal_required=true (policy: $RESOLVED_POLICY_PRESET)"
-          echo "Mutating capability '$name' requires proposal flow under current policy."
-          echo ""
-          echo "Remediation:"
-          echo "  ./bin/ops cap run proposals.submit \"$name: $desc\""
-          blocked_reason="proposal_required_block:${name}"
-          exit_code=1
-        fi
-      fi
-      # multi_agent_writes: proposal-only blocks direct mutating caps
-      if [[ -z "$blocked_reason" && "$effective_multi_agent_writes" == "proposal-only" ]]; then
-        if [[ "$governed_override_active" -eq 1 ]]; then
-          echo "POLICY OVERRIDE: multi_agent_writes=proposal-only bypassed via OPS_GOVERNED_MAIN_OVERRIDE=1"
-        else
-          echo "BLOCKED: multi_agent_writes=proposal-only (policy: $RESOLVED_POLICY_PRESET, active_sessions=$active_session_count)"
-          echo "Direct mutating capability '$name' blocked. Use proposal flow."
-          echo ""
-          echo "Remediation:"
-          echo "  ./bin/ops cap run proposals.submit \"$name: $desc\""
-          blocked_reason="multi_agent_writes_proposal_only:${name}"
-          exit_code=1
-        fi
-      fi
-    fi
-
-    # ── Hard-default mutation context guard (main + isolation) ──
-    # Fail closed for mutating/destructive capabilities unless the execution
-    # context is explicitly governed.
-    #
-    # Allowlist has two classes:
-    #   1. Bootstrap/control-plane: session.*, orchestration.*, worktree.lifecycle.*
-    #   2. Governance-repair: friction.*, gaps.*, capability.map.projection.build
-    #
-    # Governance-repair caps are idempotent/additive operations that maintain
-    # the system's own health. They must not require the same ceremony as
-    # product-domain mutations.
-    if [[ -z "$blocked_reason" && -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
-      local caller_branch
-      local main_override_ref main_override_reason
-      local wt_bypass wt_bypass_ref wt_bypass_friction_ref wt_bypass_reason wt_bypass_lc
-      local context_guard_exempt=0
-
-      main_override_ref="${OPS_MAIN_MUTATION_OVERRIDE_REF:-}"
-      main_override_reason="${OPS_MAIN_MUTATION_OVERRIDE_REASON:-}"
-      wt_bypass="${OPS_WORKTREE_ISOLATION_BYPASS:-}"
-      wt_bypass_ref="${OPS_WORKTREE_ISOLATION_BYPASS_REF:-}"
-      wt_bypass_friction_ref="${OPS_WORKTREE_ISOLATION_BYPASS_FRICTION_REF:-}"
-      wt_bypass_reason="${OPS_WORKTREE_ISOLATION_BYPASS_REASON:-}"
-      wt_bypass_lc="$(printf '%s' "$wt_bypass" | tr '[:upper:]' '[:lower:]')"
-
-      case "$name" in
-        session.start|session.v3.attach|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.launcher.claim|orchestration.terminal.entry|worktree.lifecycle.rehydrate|worktree.lifecycle.managed.sync|session.execution.lane.bootstrap|session.execution.lane.closeout|session.execution.lane.scan|friction.ingest|friction.reconcile|friction.close.resolved|capability.map.projection.build|gaps.file|gaps.close|gaps.claim|gaps.status|planning.plans.reconcile)
-          context_guard_exempt=1
-          ;;
-      esac
-      # Maintenance allowlist fallback (GAP-1673)
-      if [[ "$context_guard_exempt" -eq 0 ]] && _is_maintenance_cap "$name"; then
-        context_guard_exempt=1
-      fi
-
-      caller_branch="$(git -C "$PWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-      [[ -n "$caller_branch" ]] || caller_branch="unknown"
-
-      if [[ "$context_guard_exempt" -eq 1 ]]; then
-        echo "MUTATION CONTEXT GUARD: allowlisted bootstrap/control-plane capability '$name'"
-      elif [[ "$caller_branch" == "main" ]]; then
-        if [[ "$governed_override_active" -eq 1 ]]; then
-          echo "MAIN MUTATION NOTE: OPS_GOVERNED_MAIN_OVERRIDE=1"
-          if [[ -f "$SPINE_CODE/ops/lib/passive-friction-capture.sh" ]]; then
-            source "$SPINE_CODE/ops/lib/passive-friction-capture.sh"
-            auto_file_ceremony_override "main_mutation" "$name on $caller_branch with OPS_GOVERNED_MAIN_OVERRIDE=1" || true
-          fi
-        elif [[ -n "$main_override_ref" && -n "$main_override_reason" ]]; then
-          echo "MAIN MUTATION NOTE: ref=$main_override_ref reason=$main_override_reason"
-        elif [[ -n "$main_override_ref" || -n "$main_override_reason" ]]; then
-          echo "MAIN MUTATION NOTE: incomplete explicit override metadata ignored on main"
-        else
-          echo "MAIN MUTATION: allowed on main"
-        fi
-      else
-        if [[ "$governed_override_active" -eq 1 ]]; then
-          echo "WORKTREE ISOLATION OVERRIDE: OPS_GOVERNED_MAIN_OVERRIDE=1"
-          # Auto-file passive friction for ceremony override usage
-          if [[ -f "$SPINE_CODE/ops/lib/passive-friction-capture.sh" ]]; then
-            source "$SPINE_CODE/ops/lib/passive-friction-capture.sh"
-            auto_file_ceremony_override "main_mutation" "$name on $caller_branch with OPS_GOVERNED_MAIN_OVERRIDE=1" || true
-          fi
-        elif [[ "$wt_bypass_lc" == "1" || "$wt_bypass_lc" == "true" || "$wt_bypass_lc" == "yes" ]]; then
-          if [[ -z "$wt_bypass_ref" && -z "$wt_bypass_friction_ref" && -z "$wt_bypass_reason" ]]; then
-            echo "BLOCKED: worktree isolation bypass missing packet ref, friction ref, and reason"
-            echo "Capability: $name"
-            echo "Branch: $caller_branch"
-            echo "Provide: OPS_WORKTREE_ISOLATION_BYPASS_REF, OPS_WORKTREE_ISOLATION_BYPASS_FRICTION_REF, and OPS_WORKTREE_ISOLATION_BYPASS_REASON"
-            blocked_reason="worktree_isolation_bypass_packet_friction_reason_missing:${caller_branch}"
-            exit_code=6
-          elif [[ -z "$wt_bypass_ref" ]]; then
-            echo "BLOCKED: worktree isolation bypass missing packet evidence reference"
-            echo "Capability: $name"
-            echo "Branch: $caller_branch"
-            echo "Provide: OPS_WORKTREE_ISOLATION_BYPASS_REF"
-            blocked_reason="worktree_isolation_bypass_packet_ref_missing:${caller_branch}"
-            exit_code=6
-          elif [[ -z "$wt_bypass_friction_ref" ]]; then
-            echo "BLOCKED: worktree isolation bypass missing friction linkage"
-            echo "Capability: $name"
-            echo "Branch: $caller_branch"
-            echo "Provide: OPS_WORKTREE_ISOLATION_BYPASS_FRICTION_REF"
-            blocked_reason="worktree_isolation_bypass_friction_ref_missing:${caller_branch}"
-            exit_code=6
-          elif [[ -z "$wt_bypass_reason" ]]; then
-            echo "BLOCKED: worktree isolation bypass missing reason"
-            echo "Capability: $name"
-            echo "Branch: $caller_branch"
-            echo "Provide: OPS_WORKTREE_ISOLATION_BYPASS_REASON"
-            blocked_reason="worktree_isolation_bypass_reason_missing:${caller_branch}"
-            exit_code=6
-          else
-            echo "WARNING: WORKTREE ISOLATION BYPASS ACTIVE (packet_ref=$wt_bypass_ref friction_ref=$wt_bypass_friction_ref reason=$wt_bypass_reason)"
-          fi
-        fi
-
-      fi
-    fi
-
-    # ── Runtime role execution policy (read-only roles cannot mutate) ──
-    # Enforce in the cap execution path so role policy blocks before command execution.
-    if [[ -z "$blocked_reason" && -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
-      local role_policy_enabled override_env_key override_reason_env_key
-      local read_only_roles_csv mutating_roles_csv role_from_terminal
-      local role_capability_allowlist_csv role_capability_allowlisted
-
-      role_policy_enabled="true"
-      override_env_key="SPINE_ROLE_POLICY_OVERRIDE_REF"
-      override_reason_env_key="SPINE_ROLE_POLICY_OVERRIDE_REASON"
-      read_only_roles_csv=""
-      mutating_roles_csv=""
-      role_capability_allowlist_csv=""
-      role_capability_allowlisted="false"
-
-      if command -v yq >/dev/null 2>&1 && [[ -f "$role_runtime_contract" ]]; then
-        role_policy_enabled="$(yq e -r '.runtime_roles.execution_policy.enforce_read_only_mutation_block // true' "$role_runtime_contract" 2>/dev/null || echo true)"
-        override_env_key="$(yq e -r '.runtime_roles.execution_policy.override_env // "SPINE_ROLE_POLICY_OVERRIDE_REF"' "$role_runtime_contract" 2>/dev/null || echo SPINE_ROLE_POLICY_OVERRIDE_REF)"
-        override_reason_env_key="$(yq e -r '.runtime_roles.execution_policy.override_reason_env // "SPINE_ROLE_POLICY_OVERRIDE_REASON"' "$role_runtime_contract" 2>/dev/null || echo SPINE_ROLE_POLICY_OVERRIDE_REASON)"
-        read_only_roles_csv="$(yq e -r '.runtime_roles.read_only_roles[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
-        mutating_roles_csv="$(yq e -r '.runtime_roles.mutating_roles[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
-        [[ -n "$runtime_role" ]] || runtime_role="$(yq e -r '.runtime_roles.default_role // ""' "$role_runtime_contract" 2>/dev/null || true)"
-      fi
-
-      if [[ -z "$runtime_role" && -n "${OPS_TERMINAL_ROLE:-}" ]] && command -v yq >/dev/null 2>&1 && [[ -f "$terminal_role_contract" ]]; then
-        runtime_role="$(yq e -r ".runtime_role_defaults.by_terminal_id.\"${OPS_TERMINAL_ROLE}\" // \"\"" "$terminal_role_contract" 2>/dev/null || true)"
-        if [[ -z "$runtime_role" || "$runtime_role" == "null" ]]; then
-          role_from_terminal="$(yq e -r ".roles[]? | select(.id == \"${OPS_TERMINAL_ROLE}\") | .type" "$terminal_role_contract" 2>/dev/null | head -n1 || true)"
-          if [[ -n "$role_from_terminal" && "$role_from_terminal" != "null" ]]; then
-            runtime_role="$(yq e -r ".runtime_role_defaults.by_terminal_type.\"$role_from_terminal\" // \"\"" "$terminal_role_contract" 2>/dev/null || true)"
-          fi
-        fi
-      fi
-      [[ -n "$runtime_role" && "$runtime_role" != "null" ]] || runtime_role="researcher"
-
-      if [[ -z "$role_policy_override_ref" && -n "$override_env_key" ]]; then
-        role_policy_override_ref="${!override_env_key:-}"
-      fi
-      if [[ -z "$role_policy_override_reason" && -n "$override_reason_env_key" ]]; then
-        role_policy_override_reason="${!override_reason_env_key:-}"
-      fi
-
-      if [[ "$role_policy_enabled" == "true" ]]; then
-        role_policy_enforced="true"
-        local role_is_read_only=0
-        local role_is_mutating=0
-        local rr
-
-        IFS=',' read -r -a _rrs <<< "${read_only_roles_csv:-}"
-        for rr in "${_rrs[@]:-}"; do
-          [[ -n "$rr" ]] || continue
-          if [[ "$runtime_role" == "$rr" ]]; then
-            role_is_read_only=1
-            break
-          fi
-        done
-        IFS=',' read -r -a _mrs <<< "${mutating_roles_csv:-}"
-        for rr in "${_mrs[@]:-}"; do
-          [[ -n "$rr" ]] || continue
-          if [[ "$runtime_role" == "$rr" ]]; then
-            role_is_mutating=1
-            break
-          fi
-        done
-
-        if command -v yq >/dev/null 2>&1 && [[ -f "$role_runtime_contract" ]]; then
-          role_capability_allowlist_csv="$(yq e -r ".runtime_roles.mutating_capability_allowlist_by_role.\"$runtime_role\"[]?" "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
-        fi
-        IFS=',' read -r -a _macr <<< "${role_capability_allowlist_csv:-}"
-        for rr in "${_macr[@]:-}"; do
-          [[ -n "$rr" ]] || continue
-          if [[ "$name" == "$rr" ]]; then
-            role_capability_allowlisted="true"
-            role_is_mutating=1
-            break
-          fi
-        done
-        # Maintenance allowlist fallback (GAP-1673)
-        if [[ "$role_capability_allowlisted" != "true" ]] && _is_maintenance_cap "$name"; then
-          role_capability_allowlisted="true"
-          role_is_mutating=1
-        fi
-        if [[ "$role_capability_allowlisted" == "true" ]]; then
-          echo "RUNTIME ROLE ALLOWLIST: role=$runtime_role capability=$name"
-        fi
-
-        if [[ "$role_is_mutating" -eq 0 ]]; then
-          if [[ "$governed_override_active" -eq 1 ]]; then
-            role_policy_override_used="true"
-            echo "RUNTIME ROLE OVERRIDE: role=$runtime_role via OPS_GOVERNED_MAIN_OVERRIDE=1"
-          elif [[ -z "$role_policy_override_ref" ]]; then
-            echo "BLOCKED: runtime role execution policy"
-            echo "Capability: $name ($safety)"
-            echo "Runtime role: $runtime_role"
-            echo "Mutating/destructive execution requires role in mutating_roles or governed override."
-            echo "Provide: OPS_GOVERNED_MAIN_OVERRIDE=1"
-            echo "Legacy explicit override: $override_env_key and $override_reason_env_key"
-            blocked_reason="runtime_role_policy_block:$runtime_role"
-            exit_code=4
-          elif [[ -z "$role_policy_override_reason" ]]; then
-            echo "BLOCKED: runtime role execution policy override missing reason"
-            echo "Capability: $name ($safety)"
-            echo "Runtime role: $runtime_role"
-            echo "Override ref provided ($override_env_key), but reason missing ($override_reason_env_key)."
-            blocked_reason="runtime_role_policy_override_reason_missing:$runtime_role"
-            exit_code=4
-          else
-            role_policy_override_used="true"
-            echo "RUNTIME ROLE OVERRIDE: role=$runtime_role ref=$role_policy_override_ref"
-          fi
-        fi
-      fi
-    fi
-
-    # ── Proactive mutation guard (critical domains, snapshot-driven) ──
-    # ── Orchestrator-subagent fail-closed guard (loop lock evidence) ──
-    if [[ -z "$blocked_reason" && -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
-      if [[ "$governed_override_active" -eq 1 ]]; then
-        echo "ORCHESTRATOR GUARD OVERRIDE: OPS_GOVERNED_MAIN_OVERRIDE=1"
-      else
-      local orchestrator_loop_id orchestrator_scope_file orchestrator_mode orchestrator_scope_status
-      local orchestrator_lock_dir orchestrator_lock_match
-      local caller_worktree caller_branch
-      local orch_bypass orch_bypass_ref orch_bypass_friction_ref orch_bypass_reason
-      local scope_frontmatter
-
-      orchestrator_loop_id="${SPINE_LOOP_ID:-${SPINE_ORCH_LOOP_ID:-}}"
-      if [[ -z "$orchestrator_loop_id" && "${role_policy_override_ref:-}" =~ ^LOOP-[A-Za-z0-9._-]+$ ]]; then
-        orchestrator_loop_id="$role_policy_override_ref"
-      fi
-
-      # Allow bootstrap and orchestration control-plane capabilities to bypass
-      # lock evidence checks when they are establishing lock claims.
-      # Maintenance allowlist (GAP-1673) also bypasses orchestrator lock evidence.
-      case "$name" in
-        orchestration.launcher.claim|orchestration.terminal.entry|orchestration.wave.kickoff|orchestration.wave.start|orchestration.wave.dispatch|orchestration.wave.ack|orchestration.wave.close|loops.create|session.start|session.v3.attach|aof.contract.acknowledge|session.role.override|state.shared.reconcile|worktree.lifecycle.managed.sync|friction.ingest) orchestrator_loop_id="" ;;
-      esac
-      if [[ -n "$orchestrator_loop_id" ]] && _is_maintenance_cap "$name"; then
-        orchestrator_loop_id=""
-      fi
-
-      if [[ -n "$orchestrator_loop_id" ]]; then
-        orchestrator_scope_file="$SPINE_STATE/loop-scopes/${orchestrator_loop_id}.scope.md"
-        if [[ ! -f "$orchestrator_scope_file" ]]; then
-          echo "BLOCKED: orchestrator mutation guard"
-          echo "Capability: $name"
-          echo "Loop: $orchestrator_loop_id"
-          echo "Reason: loop scope not found at $orchestrator_scope_file"
-          echo ""
-          echo "Remediation:"
-          echo "  Create loop scope first (with execution_mode) or set SPINE_LOOP_ID to a valid loop."
-          blocked_reason="orchestrator_guard_scope_missing:$orchestrator_loop_id"
-          exit_code=5
-        else
-          scope_frontmatter="$(sed -n '/^---$/,/^---$/p' "$orchestrator_scope_file" 2>/dev/null || true)"
-          orchestrator_scope_status="$(printf '%s\n' "$scope_frontmatter" | sed -n 's/^status:[[:space:]]*//p' | head -1 | tr -d '[:space:]')"
-          orchestrator_mode="$(printf '%s\n' "$scope_frontmatter" | sed -n 's/^execution_mode:[[:space:]]*//p' | head -1 | tr -d '[:space:]')"
-          if [[ "$orchestrator_scope_status" == "active" || "$orchestrator_scope_status" == "open" || "$orchestrator_scope_status" == "draft" ]]; then
-            if [[ -z "$orchestrator_mode" ]]; then
-              echo "BLOCKED: orchestrator mutation guard"
-              echo "Capability: $name"
-              echo "Loop: $orchestrator_loop_id"
-              echo "Reason: loop scope missing execution_mode"
-              echo ""
-              echo "Remediation:"
-              echo "  Add 'execution_mode: single_worker|orchestrator_subagents' to:"
-              echo "  $orchestrator_scope_file"
-              blocked_reason="orchestrator_guard_execution_mode_missing:$orchestrator_loop_id"
-              exit_code=5
-            elif [[ "$orchestrator_mode" == "orchestrator_subagents" ]]; then
-            orch_bypass="${SPINE_ORCH_MUTATION_GUARD_BYPASS:-}"
-            orch_bypass_ref="${SPINE_ORCH_MUTATION_GUARD_BYPASS_REF:-}"
-            orch_bypass_friction_ref="${SPINE_ORCH_MUTATION_GUARD_BYPASS_FRICTION_REF:-}"
-            orch_bypass_reason="${SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON:-}"
-
-            local _orch_bypass_lc; _orch_bypass_lc="$(printf '%s' "$orch_bypass" | tr '[:upper:]' '[:lower:]')"
-            if [[ "$_orch_bypass_lc" == "1" || "$_orch_bypass_lc" == "true" || "$_orch_bypass_lc" == "yes" ]]; then
-              if [[ -z "$orch_bypass_ref" && -z "$orch_bypass_friction_ref" && -z "$orch_bypass_reason" ]]; then
-                echo "BLOCKED: orchestrator mutation guard bypass missing packet ref, friction ref, and reason"
-                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_REF, SPINE_ORCH_MUTATION_GUARD_BYPASS_FRICTION_REF, and SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON with governed evidence."
-                blocked_reason="orchestrator_guard_bypass_packet_friction_reason_missing:$orchestrator_loop_id"
-                exit_code=5
-              elif [[ -z "$orch_bypass_ref" ]]; then
-                echo "BLOCKED: orchestrator mutation guard bypass missing packet evidence reference"
-                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_REF with a governed packet evidence reference."
-                blocked_reason="orchestrator_guard_bypass_packet_ref_missing:$orchestrator_loop_id"
-                exit_code=5
-              elif [[ -z "$orch_bypass_friction_ref" ]]; then
-                echo "BLOCKED: orchestrator mutation guard bypass missing friction linkage"
-                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_FRICTION_REF with a governed friction entry reference."
-                blocked_reason="orchestrator_guard_bypass_friction_ref_missing:$orchestrator_loop_id"
-                exit_code=5
-              elif [[ -z "$orch_bypass_reason" ]]; then
-                echo "BLOCKED: orchestrator mutation guard bypass missing reason"
-                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON with a governed explanation."
-                blocked_reason="orchestrator_guard_bypass_reason_missing:$orchestrator_loop_id"
-                exit_code=5
-              else
-                echo "WARNING: ORCHESTRATOR MUTATION GUARD BYPASSED (loop=$orchestrator_loop_id packet_ref=$orch_bypass_ref friction_ref=$orch_bypass_friction_ref reason=$orch_bypass_reason)"
-              fi
-            else
-              caller_worktree="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
-              caller_branch="$(git -C "$PWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-              orchestrator_lock_dir="$SPINE_STATE/orchestration/${orchestrator_loop_id}/locks"
-              orchestrator_lock_match=""
-
-              if [[ -n "$caller_worktree" && -n "$caller_branch" && -d "$orchestrator_lock_dir" ]]; then
-                while IFS= read -r lock_file; do
-                  [[ -f "$lock_file" ]] || continue
-                  lock_loop="$(sed -n 's/^loop_id:[[:space:]]*//p' "$lock_file" | head -1)"
-                  lock_status="$(sed -n 's/^status:[[:space:]]*//p' "$lock_file" | head -1)"
-                  lock_worktree="$(sed -n 's/^worktree:[[:space:]]*//p' "$lock_file" | head -1)"
-                  lock_branch="$(sed -n 's/^branch:[[:space:]]*//p' "$lock_file" | head -1)"
-                  lock_mode="$(sed -n 's/^mode:[[:space:]]*//p' "$lock_file" | head -1)"
-                  [[ "$lock_loop" == "$orchestrator_loop_id" ]] || continue
-                  [[ "$lock_status" == "active" ]] || continue
-                  [[ "$lock_mode" == "capability" || "$lock_mode" == "kickoff" ]] || continue
-                  [[ "$lock_worktree" == "$caller_worktree" ]] || continue
-                  [[ "$lock_branch" == "$caller_branch" ]] || continue
-                  orchestrator_lock_match="$lock_file"
-                  break
-                done < <(find "$orchestrator_lock_dir" -maxdepth 1 -type f -name '*.lock' 2>/dev/null | LC_ALL=C sort)
-              fi
-
-              if [[ -z "$orchestrator_lock_match" ]]; then
-                echo "BLOCKED: orchestrator mutation guard"
-                echo "Capability: $name"
-                echo "Loop: $orchestrator_loop_id (execution_mode=orchestrator_subagents)"
-                echo "Current branch/worktree: ${caller_branch:-unknown} @ ${caller_worktree:-unknown}"
-                echo "Required: active lock evidence from orchestration.terminal.entry contract"
-                echo ""
-                echo "Remediation:"
-                echo "  ./bin/ops cap run orchestration.wave.kickoff -- --loop-id $orchestrator_loop_id --lanes A,B,C"
-                echo "  ./bin/ops cap run orchestration.terminal.entry -- --loop-id $orchestrator_loop_id --role worker --lane <LANE> --session-id <SESSION_ID> --worktree ${caller_worktree:-<worktree>} --branch ${caller_branch:-<branch>}"
-                echo "Emergency bypass (warn-only, governed):"
-                echo "  SPINE_ORCH_MUTATION_GUARD_BYPASS=1 SPINE_ORCH_MUTATION_GUARD_BYPASS_REF='<packet-ref>' SPINE_ORCH_MUTATION_GUARD_BYPASS_FRICTION_REF='<friction-id>' SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON='<reason>' ./bin/ops cap run $name ..."
-                blocked_reason="orchestrator_guard_lock_missing:$orchestrator_loop_id:${caller_branch:-unknown}"
-                exit_code=5
-              fi
-            fi
-            fi
-          fi
-        fi
-      fi
-      fi
-    fi
-
-    # ── Proactive mutation guard (critical domains, snapshot-driven) ──
-    if [[ -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
-      if _is_maintenance_cap "$name"; then
-        echo "PROACTIVE GUARD: maintenance allowlist bypass for '$name'"
-      elif [[ "$governed_override_active" -eq 1 ]]; then
-        echo "PROACTIVE GUARD OVERRIDE: OPS_GOVERNED_MAIN_OVERRIDE=1"
-      else
-      local guard_policy="$SPINE_CODE/ops/bindings/proactive.guard.policy.yaml"
-      if [[ -f "$guard_policy" ]]; then
-        local guard_enabled
-        guard_enabled="$(yaml_query "$guard_policy" '.enabled' 2>/dev/null || echo false)"
-        if [[ "$guard_enabled" == "true" ]]; then
-          [[ "$cap_domain" == "null" ]] && cap_domain="none"
-
-          # Fallback domain resolution from topology capability prefixes.
-          if [[ -z "$cap_domain" || "$cap_domain" == "none" ]]; then
-            cap_domain="$(yq e -r "
-              .domain_metadata[]
-              | select((.capability_prefixes // []) | any(. as \$p | \"$name\" | startswith(\$p)))
-              | .domain_id
-            " "$SPINE_CODE/ops/bindings/gate.execution.topology.yaml" 2>/dev/null | head -n1 || true)"
-          fi
-
-          if [[ -n "${cap_domain:-}" && "$cap_domain" != "none" && "$cap_domain" != "null" ]]; then
-            local critical_domains_only critical_domain
-            critical_domains_only="$(yaml_query "$guard_policy" '.critical_domains_only' 2>/dev/null || echo true)"
-            critical_domain="$(yaml_query "$guard_policy" ".domain_to_critical_domain.\"$cap_domain\"" 2>/dev/null || true)"
-
-            if [[ -z "$critical_domain" && "$critical_domains_only" != "true" ]]; then
-              critical_domain="$cap_domain"
-            fi
-
-            if [[ -n "$critical_domain" ]]; then
-              local allowlisted=0
-              while IFS= read -r allowed_cap; do
-                [[ -z "$allowed_cap" || "$allowed_cap" == "null" ]] && continue
-                if [[ "$allowed_cap" == "$name" ]]; then
-                  allowlisted=1
-                  break
-                fi
-              done < <(yq e -r ".recovery_allowlist_by_domain.\"$critical_domain\"[]?" "$guard_policy" 2>/dev/null || true)
-
-              if [[ "$allowlisted" -eq 0 ]]; then
-                local snapshot_capability snapshot_ttl trigger_statuses
-                snapshot_capability="$(yaml_query "$guard_policy" '.snapshot_capability' 2>/dev/null || echo "stability.control.snapshot")"
-                snapshot_ttl="$(yaml_query "$guard_policy" '.snapshot_ttl_minutes' 2>/dev/null || echo 15)"
-                trigger_statuses="$(yq e -r '.trigger_statuses[]?' "$guard_policy" 2>/dev/null | tr '\n' ' ' || true)"
-
-                local snapshot_dir="" snapshot_run_key="" snapshot_generated="" snapshot_age_min=999999
-                local candidate latest_mtime
-                latest_mtime=0
-                while IFS= read -r -d '' candidate; do
-                  [[ -f "$candidate/receipt.md" ]] || continue
-                  if ! grep -Fq "| Capability | \`$snapshot_capability\` |" "$candidate/receipt.md"; then
-                    continue
-                  fi
-                  local mtime
-                  mtime="$(stat -f '%m' "$candidate" 2>/dev/null || echo 0)"
-                  if [[ "$mtime" -gt "$latest_mtime" ]]; then
-                    latest_mtime="$mtime"
-                    snapshot_dir="$candidate"
-                  fi
-                done < <(find "$RECEIPTS" -maxdepth 1 -type d -name 'R*' -print0 2>/dev/null)
-
-                if [[ -n "$snapshot_dir" ]]; then
-                  snapshot_run_key="$(sed -nE 's/^[|] Run ID [|] `([^`]+)` [|]/\1/p' "$snapshot_dir/receipt.md" | head -n1 || true)"
-                  snapshot_generated="$(sed -nE 's/^[|] Generated [|] ([^|]+) [|]/\1/p' "$snapshot_dir/receipt.md" | head -n1 || true)"
-                  if [[ -n "$snapshot_generated" ]]; then
-                    snapshot_age_min="$(
-                      python3 - "$snapshot_generated" <<'PY'
-from datetime import datetime, timezone
-import sys
-raw = sys.argv[1].strip()
-try:
-    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-except Exception:
-    print(999999)
-    raise SystemExit(0)
-now = datetime.now(timezone.utc)
-delta = now - dt.astimezone(timezone.utc)
-print(max(0, int(delta.total_seconds() // 60)))
-PY
-                    )"
-                  fi
-                fi
-
-                local reconcile_tmpl reconcile_cmd
-                reconcile_tmpl="$(yaml_query "$guard_policy" '.required_reconcile_command_template' 2>/dev/null || echo "./bin/ops cap run stability.control.reconcile --domain {{critical_domain}}")"
-                reconcile_cmd="${reconcile_tmpl//\{\{critical_domain\}\}/$critical_domain}"
-
-                if [[ -z "$snapshot_dir" || "$snapshot_age_min" -gt "$snapshot_ttl" ]]; then
-                  echo "BLOCKED: proactive mutation guard"
-                  echo "Capability: $name"
-                  echo "Blocking domain: $critical_domain (mapped from capability domain: $cap_domain)"
-                  if [[ -n "$snapshot_run_key" ]]; then
-                    echo "Latest snapshot run key: $snapshot_run_key (stale: ${snapshot_age_min}m > ttl ${snapshot_ttl}m)"
-                  else
-                    echo "Latest snapshot run key: none"
-                  fi
-                  echo "Required reconcile command: $reconcile_cmd"
-                  echo "Unblock criteria: run fresh snapshot and clear warn/incident for target domain."
-                  blocked_reason="proactive_guard_snapshot_missing_or_stale:$critical_domain"
-                  exit_code=3
-                else
-                  local snapshot_output domain_status
-                  snapshot_output="$snapshot_dir/output.txt"
-                  domain_status=""
-                  if [[ -f "$snapshot_output" ]]; then
-                    # Prefer JSON payload when available in output.
-                    local json_payload
-                    json_payload="$(sed -n '/^{/,$p' "$snapshot_output" 2>/dev/null || true)"
-                    if [[ -n "$json_payload" ]] && printf '%s\n' "$json_payload" | jq -e '.' >/dev/null 2>&1; then
-                      domain_status="$(printf '%s\n' "$json_payload" | jq -r --arg d "$critical_domain" '.domains[]? | select(.id == $d) | .status' | head -n1 || true)"
-                    fi
-                    if [[ -z "$domain_status" || "$domain_status" == "null" ]]; then
-                      domain_status="$(awk -v d="$critical_domain" '$1==d {print tolower($2); exit}' "$snapshot_output" 2>/dev/null || true)"
-                    fi
-                  fi
-
-                  domain_status="$(echo "${domain_status:-unknown}" | tr '[:upper:]' '[:lower:]' | xargs)"
-                  local should_block=0
-                  local t
-                  for t in $trigger_statuses; do
-                    t="$(echo "$t" | tr '[:upper:]' '[:lower:]')"
-                    if [[ "$domain_status" == "$t" ]]; then
-                      should_block=1
-                      break
-                    fi
-                  done
-
-                  if [[ "$should_block" -eq 1 ]]; then
-                    echo "BLOCKED: proactive mutation guard"
-                    echo "Capability: $name"
-                    echo "Blocking domain: $critical_domain (mapped from capability domain: $cap_domain)"
-                    echo "Triggering snapshot run key: ${snapshot_run_key:-unknown}"
-                    echo "Snapshot domain status: $domain_status"
-                    echo "Required reconcile command: $reconcile_cmd"
-                    echo "Unblock criteria: snapshot for target domain must be outside trigger statuses [$trigger_statuses]."
-                    blocked_reason="proactive_guard_domain_blocked:$critical_domain:$domain_status:${snapshot_run_key:-none}"
-                    exit_code=3
-                  fi
-                fi
-              fi
-            fi
-          fi
-        fi
-      fi
-      fi
-    fi
-
-    # ── AOF contract acknowledgment (v0.3) ──
-    # When .environment.yaml exists, enforce daily contract read acknowledgment
-    # before allowing mutating/destructive capabilities.
-    # Auto-acknowledge when a session role override is active (operator already proved engagement).
-    if [[ -z "$blocked_reason" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]] && [[ "$name" != "aof.contract.acknowledge" && "$name" != "session.v3.attach" && "$name" != "friction.ingest" ]] && ! _is_maintenance_cap "$name"; then
-      local env_contract="${cwd}/.environment.yaml"
-      if [[ -f "$env_contract" ]]; then
-        local ack_check
-        set +e
-        ack_check="$(CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/core/kernel/aof/bin/contract-read-check.sh" 2>&1)"
-        local ack_rc=$?
-        set -e
-        if [[ "$ack_rc" -eq 2 ]]; then
-          # Auto-acknowledge when a governed role override is active.
-          if [[ "$governed_override_active" -eq 1 ]]; then
-            CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/core/kernel/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
-            echo "AOF auto-acknowledged via OPS_GOVERNED_MAIN_OVERRIDE=1"
-          elif [[ -n "$role_policy_override_ref" && -n "$role_policy_override_reason" ]]; then
-            CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/core/kernel/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
-            echo "AOF auto-acknowledged (governed role override active: ref=$role_policy_override_ref)"
-          else
-            echo "BLOCKED: AOF contract acknowledgment required"
-            echo "Environment contract exists at: $env_contract"
-            echo ""
-            echo "Remediation:"
-            echo "  ./bin/ops cap run aof.contract.status    # view current state"
-            echo "  ./bin/ops cap run aof.contract.acknowledge"
-            echo "  # Or set a session override first: ./bin/ops cap run session.role.override -- --ref <ref> --reason <reason>"
-            blocked_reason="aof_contract_ack_required"
-            exit_code=2
-          fi
-        fi
-      fi
-    fi
-
-    # ── Execute preconditions (dependency chain, cycle guard) ──
-    local precond_failed=0
-    local precond_rc=0
-    local precond_name=""
-    if [[ -n "$blocked_reason" ]]; then
-        echo "$blocked_reason" > "$output_file"
-    elif (( ${#requires_list[@]} > 0 )); then
-        local stack="${OPS_CAP_STACK:-}"
-        stack=",$stack,$name,"
-        export OPS_CAP_STACK="${stack}"
+    if (( ${#requires_list[@]} > 0 )); then
+        export OPS_CAP_STACK="${previous_stack:+$previous_stack,}$name"
         for req in "${requires_list[@]}"; do
-            if [[ "${stack}" == *",${req},"* ]]; then
+            if [[ "$cycle_stack" == *",${req},"* ]]; then
+                export OPS_CAP_STACK="$previous_stack"
                 echo "ERROR: requires cycle detected: ${name} -> ${req}"
-                precond_failed=1
-                precond_rc=1
-                precond_name="$req"
-                break
+                exit 1
             fi
-            echo ""
+
             echo "== PRECONDITION: ${req} =="
             set +e
-            SPINE_TARGET_REPO="$SPINE_TARGET_REPO" SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" "$SPINE_CODE/bin/ops" cap run "${req}"
+            "$SPINE_CODE/bin/ops" cap run "$req"
             rc=$?
             set -e
             if [[ "$rc" -ne 0 ]]; then
-                precond_failed=1
-                precond_rc="$rc"
-                precond_name="$req"
-                break
+                export OPS_CAP_STACK="$previous_stack"
+                echo "STOP: precondition failed: ${req} (exit=$rc)"
+                append_telemetry "$name" "$safety" "$rc"
+                return "$rc"
             fi
+            echo ""
         done
-        if [[ "$precond_failed" -eq 0 ]]; then
-            echo ""
-            echo "== PRECONDITIONS OK =="
-            echo ""
-        fi
+        export OPS_CAP_STACK="$previous_stack"
     fi
 
-    if [[ -n "$blocked_reason" ]]; then
-        : # already blocked — skip execution
-    elif [[ "$precond_failed" -eq 1 ]]; then
-        echo "STOP: precondition failed: ${precond_name} (exit=$precond_rc)" | tee "$output_file" >/dev/null
-        exit_code="$precond_rc"
-    else
-        # ── Capability usage telemetry (append-only TSV log) ──
-        local _tel_dir="${SPINE_STATE}/telemetry"
-        mkdir -p "$_tel_dir" 2>/dev/null || true
-        printf '%s\t%s\t%s\t%s\n' \
-          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-          "$name" \
-          "$safety" \
-          "${SPINE_SESSION_ID:-nosession}" \
-          >> "$_tel_dir/cap-usage.tsv" 2>/dev/null || true
+    local command_string
+    command_string="$(build_command_string "$cmd" "${args[@]}")"
 
-        echo "Executing..."
-        echo "────────────────────────────────────────"
+    echo "Executing..."
+    echo "────────────────────────────────────────"
+    set +e
+    execute_command "$command_string" "$cwd" "$run_key"
+    rc=$?
+    set -e
+    echo "────────────────────────────────────────"
 
-        # ── Execute capability command, capture output ──
-        # Force code root for scripts that rely on SPINE_ROOT, while keeping runtime root stable.
-        if (( ${#args[@]} > 0 )); then
-            if (cd "$cwd" && SPINE_TARGET_REPO="$SPINE_TARGET_REPO" SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" SPINE_ROOT="$SPINE_CODE" SPINE_CAP_RUN_KEY="$run_key" $cmd "${args[@]}" 2>&1 | tee "$output_file"); then
-                exit_code=0
-            else
-                exit_code=$?
-            fi
-        else
-            if (cd "$cwd" && SPINE_TARGET_REPO="$SPINE_TARGET_REPO" SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" SPINE_ROOT="$SPINE_CODE" SPINE_CAP_RUN_KEY="$run_key" $cmd 2>&1 | tee "$output_file"); then
-                exit_code=0
-            else
-                exit_code=$?
-            fi
-        fi
-        echo "────────────────────────────────────────"
-    fi
-
-    # ── Passive friction capture for failed top-level capability runs ──
-    # Capture is automatic at the cap-run surface so operators do not need
-    # to remember manual closeout prompts for common execution friction.
-    if [[ "$exit_code" -ne 0 && -z "${OPS_CAP_STACK:-}" ]]; then
-        case "$(printf '%s' "$friction_autocapture" | tr '[:upper:]' '[:lower:]')" in
-          0|false|no|off) ;;
-          *)
-            # Only auto-capture from interactive/operator terminals by default.
-            # This avoids scheduler/background noise; force with
-            # OPS_CAP_FRICTION_AUTOCAPTURE_FORCE=1 when needed.
-            if [[ ! -t 0 && ! -t 1 && "${OPS_CAP_FRICTION_AUTOCAPTURE_FORCE:-0}" != "1" ]]; then
-                :
-            elif [[ -x "$friction_ingest_script" ]]; then
-                case "$name" in
-                  friction.ingest|friction.reconcile|friction.queue.status) ;;
-                  *)
-                    local first_error_line actual expected severity
-                    first_error_line="$(grep -E '^(ERROR:|STOP:|FAIL:|BLOCKED:|D[0-9]+ FAIL:|ops: command )' "$output_file" 2>/dev/null | head -1 || true)"
-                    [[ -z "$first_error_line" ]] && first_error_line="$(tail -n 1 "$output_file" 2>/dev/null || true)"
-                    first_error_line="$(echo "${first_error_line:-unknown_error}" | tr '\r\n' ' ' | sed 's/[[:space:]]\+/ /g' | cut -c1-500)"
-
-                    expected="Capability '$name' should complete successfully (exit 0)."
-                    actual="cap.run failed (exit=$exit_code); ${first_error_line}"
-                    severity="medium"
-                    [[ "$safety" == "destructive" ]] && severity="high"
-
-                    "$friction_ingest_script" \
-                      --source cap-run-auto \
-                      --capability "$name" \
-                      --expected "$expected" \
-                      --actual "$actual" \
-                      --severity "$severity" \
-                      >/dev/null 2>&1 || true
-                    ;;
-                esac
-            fi
-            ;;
-        esac
-    fi
-
-    # ── Execute post_action if defined and main cap succeeded ──
-    if [[ "$exit_code" -eq 0 && -n "${post_action:-}" && "$post_action" != "null" ]]; then
+    if [[ "$rc" -eq 0 && -n "${post_action:-}" && "$post_action" != "null" ]]; then
         echo ""
         echo "== POST-ACTION: ${post_action} =="
         echo "────────────────────────────────────────"
-        if SPINE_TARGET_REPO="$SPINE_TARGET_REPO" SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" SPINE_ROOT="$SPINE_CODE" "$SPINE_CODE/bin/ops" cap run "${post_action}" 2>&1 | tee -a "$output_file"; then
+        set +e
+        "$SPINE_CODE/bin/ops" cap run "$post_action"
+        local post_rc=$?
+        set -e
+        if [[ "$post_rc" -eq 0 ]]; then
             echo "POST-ACTION OK: ${post_action}"
         else
             echo "POST-ACTION WARN: ${post_action} failed (non-blocking)"
@@ -1539,212 +283,50 @@ PY
         echo "────────────────────────────────────────"
     fi
 
-    local end_time
-    end_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-    # ── Write receipt (markdown + SHA256) ──
-    local receipt_dir="$RECEIPTS/R${run_key}"
-    mkdir -p "$receipt_dir"
-
-    local output_hash
-    output_hash="$(shasum -a 256 "$output_file" 2>/dev/null | cut -d' ' -f1 || echo "n/a")"
-    local receipt_status
-    if [[ -n "$blocked_reason" ]]; then
-      receipt_status="blocked"
-    elif [[ "$exit_code" -eq 0 ]]; then
-      receipt_status="done"
-    else
-      receipt_status="failed"
-    fi
-
-    cat > "$receipt_dir/receipt.md" <<EOF
-# Receipt: $run_key
-
-| Field | Value |
-|-------|-------|
-| Run ID | \`$run_key\` |
-| Capability | \`$name\` |
-| Status | $receipt_status |
-| Exit Code | $exit_code |
-| Generated | $end_time |
-| Model | local (capability) |
-| Context | $safety |
-| Blocker Reason | ${blocked_reason:-none} |
-| Runtime Role | ${runtime_role:-unknown} |
-| Role Policy Enforced | $role_policy_enforced |
-| Role Policy Override Used | $role_policy_override_used |
-| Role Policy Override Ref | ${role_policy_override_ref:-none} |
-| Role Policy Override Reason | ${role_policy_override_reason:-none} |
-| Prompt Set ID | ${prompt_lineage_set:-unregistered} |
-| Prompt Version | ${prompt_lineage_version:-none} |
-| Prompt Source Hash | ${prompt_lineage_hash:-none} |
-| Prompt Resolution | ${prompt_lineage_resolution:-missing_registry} |
-| Prompt Registry | ${prompt_lineage_registry_rel:-none} |
-
-## Inputs
-
-| Field | Value |
-|-------|-------|
-| Command | \`$cmd ${args[*]:-}\` |
-| CWD | \`$cwd\` |
-| Args | \`${args[*]:-none}\` |
-| Prompt Sources | \`${prompt_lineage_source_refs_csv:-none}\` |
-
-## Outputs
-
-| File | Hash |
-|------|------|
-| output.txt | \`$output_hash\` |
-
-## Timestamps
-
-| Event | Time |
-|-------|------|
-| Start | $start_time |
-| End | $end_time |
-
----
-
-_Receipt written by ops cap_
-EOF
-
-    # Copy output to receipt dir, then clean temp.
-    cp "$output_file" "$receipt_dir/output.txt"
-    rm -f "$output_file"
-    _cap_tmp=""
-
-    # Emit schema-compatible JSON sidecar for first-class evidence consumers.
-    # Keep markdown receipt as legacy-compatible canonical surface.
-    local exec_receipt_status="failed"
-    local exec_receipt_blockers=""
-    local exec_receipt_ready="false"
-    local exec_receipt_blocker_class="deterministic"
-    if [[ -n "$blocked_reason" ]]; then
-      exec_receipt_status="blocked"
-      exec_receipt_blockers="$blocked_reason"
-      exec_receipt_blocker_class="policy"
-    elif [[ "$exit_code" -eq 0 ]]; then
-      exec_receipt_status="done"
-      exec_receipt_ready="true"
-      exec_receipt_blocker_class="none"
-    elif [[ "$precond_failed" -eq 1 ]]; then
-      exec_receipt_status="blocked"
-      exec_receipt_blockers="precondition:${precond_name}"
-      exec_receipt_blocker_class="dependency"
-    fi
-
-    local terminal_id lane_id
-    terminal_id="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-unknown-terminal}}}"
-    lane_id="${SPINE_LANE:-execution}"
-    case "$lane_id" in
-      control|execution|audit|watcher) ;;
-      *) lane_id="execution" ;;
-    esac
-
-    local execution_host execution_mode governance_version entry_packet_path entry_packet_hash
-    execution_host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)"
-    execution_mode="${SPINE_EXECUTION_MODE:-capability}"
-    governance_version="SPINE.md@unknown"
-    if [[ -f "$SPINE_CODE/docs/governance/SPINE.md" ]]; then
-      local governance_last_verified
-      governance_last_verified="$(awk '/^last_verified:/{print $2; exit}' "$SPINE_CODE/docs/governance/SPINE.md" 2>/dev/null | tr -d '"')"
-      if [[ -n "$governance_last_verified" ]]; then
-        governance_version="SPINE.md@${governance_last_verified}"
-      fi
-    fi
-    entry_packet_path="${SPINE_ENTRY_PACKET_PATH:-}"
-    entry_packet_hash="${SPINE_ENTRY_PACKET_HASH:-none}"
-
-    if [[ -x "$SPINE_CODE/ops/plugins/core/evidence/bin/receipts-exec-emit" ]]; then
-      "$SPINE_CODE/ops/plugins/core/evidence/bin/receipts-exec-emit" \
-        --task-id "$name" \
-        --terminal-id "$terminal_id" \
-        --lane "$lane_id" \
-        --status "$exec_receipt_status" \
-        --files-changed "$receipt_dir/receipt.md,$receipt_dir/output.txt" \
-        --run-keys "$run_key" \
-        --ready-for-verify "$exec_receipt_ready" \
-        --timestamp-utc "$end_time" \
-        --wave-id "${SPINE_WAVE_ID:-}" \
-        --loop-id "${SPINE_LOOP_ID:-}" \
-        --evidence-files "$receipt_dir/receipt.md,$receipt_dir/output.txt" \
-        --blockers "$exec_receipt_blockers" \
-        --blocker-class "$exec_receipt_blocker_class" \
-        --request-id "$run_key" \
-        --execution-host "$execution_host" \
-        --execution-mode "$execution_mode" \
-        --runtime-role "${runtime_role:-unknown}" \
-        --governance-version "$governance_version" \
-        --entry-packet-path "$entry_packet_path" \
-        --entry-packet-hash "$entry_packet_hash" \
-        --prompt-set-id "${prompt_lineage_set:-unregistered}" \
-        --prompt-version "${prompt_lineage_version:-none}" \
-        --prompt-source-refs "${prompt_lineage_source_refs_csv:-}" \
-        --prompt-source-hash "${prompt_lineage_hash:-none}" \
-        --prompt-source-hashes "${prompt_lineage_source_hashes_csv:-}" \
-        --prompt-registry-path "${prompt_lineage_registry_rel:-ops/bindings/prompt.registry.yaml}" \
-        --prompt-resolution "${prompt_lineage_resolution:-missing_registry}" \
-        --attestation-json-out "$receipt_dir/receipt.attestation.json" \
-        --json-out "$receipt_dir/receipt.exec.json" \
-        >/dev/null 2>&1 || echo "WARN: receipt.exec sidecar emit failed for $run_key"
-    else
-      echo "WARN: receipts-exec-emit missing; skipping JSON sidecar for $run_key"
-    fi
-
-    # ── Append ledger entry (CSV) ──
-    ensure_state_dir
-    echo "$run_key,$end_time,$start_time,$end_time,$([ $exit_code -eq 0 ] && echo "done" || echo "failed"),$name,receipt.md,,capability" >> "$LEDGER"
-
-    # ── Structured telemetry + automatic receipt retention sweep ──
-    local cap_status="failed"
-    [[ "$receipt_status" == "done" ]] && cap_status="done"
-    [[ "$receipt_status" == "blocked" ]] && cap_status="blocked"
-    spine_log_event \
-      --event-type "cap.run" \
-      --domain "$cap_domain" \
-      --gate-id "" \
-      --status "$cap_status" \
-      --message "capability=$name exit_code=$exit_code blocker=${blocked_reason:-none}" \
-      --run-key "$run_key" \
-      --source "ops/commands/cap.sh" \
-      --meta-json "{\"capability\":\"$name\",\"receipt_status\":\"$receipt_status\",\"exit_code\":$exit_code}" || true
-
-    maybe_rotate_receipts "$name" || true
+    append_telemetry "$name" "$safety" "$rc"
 
     echo ""
     echo "════════════════════════════════════════"
-    echo "DONE"
+    if [[ "$rc" -eq 0 ]]; then
+        echo "DONE"
+    else
+        echo "FAILED"
+    fi
     echo "════════════════════════════════════════"
     echo "Run Key:  $run_key"
-    echo "Status:   $receipt_status"
-    echo "Receipt:  $receipt_dir/receipt.md"
-    echo "Output:   $receipt_dir/output.txt"
+    echo "Exit:     $rc"
 
-    exit $exit_code
+    return "$rc"
 }
 
-# Main
-check_deps
+main() {
+    check_deps
 
-case "${1:-}" in
-    list)
-        list_caps
-        ;;
-    show)
-        [[ -z "${2:-}" ]] && { echo "Usage: ops cap show <name>"; exit 1; }
-        show_cap "$2"
-        ;;
-    run)
-        [[ -z "${2:-}" ]] && { echo "Usage: ops cap run <name> [args...]"; exit 1; }
-        shift  # remove 'run'
-        run_cap "$@"
-        ;;
-    -h|--help|"")
-        usage
-        ;;
-    *)
-        echo "Unknown subcommand: $1"
-        usage
-        exit 1
-        ;;
-esac
+    case "${1:-}" in
+        list)
+            shift
+            list_caps "$@"
+            ;;
+        run)
+            shift
+            [[ $# -ge 1 ]] || { usage >&2; exit 2; }
+            run_cap "$@"
+            ;;
+        show)
+            shift
+            [[ $# -ge 1 ]] || { usage >&2; exit 2; }
+            show_cap "$1"
+            ;;
+        -h|--help|"")
+            usage
+            ;;
+        *)
+            echo "ops cap: unknown subcommand '${1:-}'" >&2
+            echo >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+}
+
+main "$@"

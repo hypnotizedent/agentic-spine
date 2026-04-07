@@ -8,8 +8,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
 BACKUP_SCHEDULE="$ROOT/ops/bindings/domains/backup/backup.schedule.yaml"
-CAPABILITIES="$ROOT/ops/capabilities.yaml"
-CAP_MAP="$ROOT/ops/bindings/capability_map.yaml"
+CAPABILITIES="$ROOT/ops/capabilities.runtime.yaml"
 
 ERRORS=0
 err() {
@@ -29,7 +28,6 @@ need_cmd yq
 need_cmd python3
 need_file "$BACKUP_SCHEDULE"
 need_file "$CAPABILITIES"
-need_file "$CAP_MAP"
 
 if [[ "$ERRORS" -gt 0 ]]; then
   echo "D386 FAIL: $ERRORS precondition error(s)"
@@ -41,10 +39,7 @@ expected_receipt_glob="mailroom/outbox/reports/restore-drills/backup-shopvm-rest
 expected_freshness_days=35  # Monthly cadence + buffer
 
 cap_exists="$(yq -r ".capabilities.\"$expected_capability\".command // \"\"" "$CAPABILITIES")"
-[[ -n "$cap_exists" && "$cap_exists" != "null" ]] || err "capabilities.yaml missing $expected_capability"
-
-cap_map_script="$(yq -r ".capabilities.\"$expected_capability\".script // \"\"" "$CAP_MAP")"
-[[ "$cap_map_script" == "backup-shopvm-restore-drill" ]] || err "capability_map missing backup-shopvm-restore-drill mapping"
+[[ -n "$cap_exists" && "$cap_exists" != "null" ]] || err "capabilities.runtime.yaml missing $expected_capability"
 
 schedule_enabled="$(yq -r '.jobs[] | select(.id == "backup-shopvm-restore-drill-monthly") | (.enabled // false) | tostring' "$BACKUP_SCHEDULE")"
 [[ "$schedule_enabled" == "true" ]] || err "backup-shopvm-restore-drill-monthly is not enabled"

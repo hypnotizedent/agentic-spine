@@ -1,41 +1,24 @@
 #!/usr/bin/env bash
 # TRIAGE: D257 media-capacity-guard-lock
-# Report-only capacity governance check for the active home media plane.
+# Capacity health check for the active home media plane.
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 POLICY_FILE="$ROOT/ops/bindings/infra.capacity.guard.policy.yaml"
-GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 
-resolve_capability_script_path() {
-  local capability_id="$1"
-  local fallback_rel="$2"
-  local script_rel=""
-  if [[ -f "$ROOT/ops/capabilities.yaml" ]]; then
-    script_rel="$(
-      awk -v cap="$capability_id" '
-        $0 == "  " cap ":" { in_cap=1; next }
-        in_cap && $0 ~ /^  [^[:space:]][^:]*:/ { exit }
-        in_cap && $1 == "script_path:" { print $2; exit }
-      ' "$ROOT/ops/capabilities.yaml"
-    )"
+resolve_snapshot_source_path() {
+  local tracked_rel="$1"
+  local tracked_path="$ROOT/${tracked_rel#./}"
+  local runtime_path="${SPINE_DOMAIN_STATE%/}/snapshots/$(basename "$tracked_rel")"
+
+  if [[ -f "$runtime_path" ]]; then
+    printf '%s\n' "$runtime_path"
+  else
+    printf '%s\n' "$tracked_path"
   fi
-  [[ -n "$script_rel" && "$script_rel" != "null" ]] || script_rel="$fallback_rel"
-  script_rel="${script_rel#./}"
-  printf '%s\n' "$ROOT/$script_rel"
 }
-
-resolve_family_lib_path() {
-  local capability_id="$1"
-  local fallback_script_rel="$2"
-  local lib_name="$3"
-  local script_path
-  script_path="$(resolve_capability_script_path "$capability_id" "$fallback_script_rel")"
-  printf '%s\n' "$(dirname "$(dirname "$script_path")")/lib/$lib_name"
-}
-
-SNAPSHOT_SURFACE_LIB="$(resolve_family_lib_path "snapshot.projection.apply" "./ops/plugins/core/kernel/snapshot/bin/snapshot-projection-apply" "snapshot-surface-common.sh")"
-source "$SNAPSHOT_SURFACE_LIB"
 
 POLICY_MODE="report"
 
@@ -65,10 +48,9 @@ done
 command -v yq >/dev/null 2>&1 || { echo "D257 FAIL: yq missing"; [[ "$POLICY_MODE" == "enforce" ]] && exit 1 || exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "D257 FAIL: python3 missing"; [[ "$POLICY_MODE" == "enforce" ]] && exit 1 || exit 0; }
 [[ -f "$POLICY_FILE" ]] || { echo "D257 FAIL: missing $POLICY_FILE"; [[ "$POLICY_MODE" == "enforce" ]] && exit 1 || exit 0; }
-[[ -f "$GAPS_FILE" ]] || { echo "D257 FAIL: missing $GAPS_FILE"; [[ "$POLICY_MODE" == "enforce" ]] && exit 1 || exit 0; }
 
 SNAPSHOT_REL="$(yq -r '.runway.snapshot_path // "ops/bindings/domains/media/media.capacity.snapshot.yaml"' "$POLICY_FILE" 2>/dev/null || echo "ops/bindings/domains/media/media.capacity.snapshot.yaml")"
-SNAPSHOT_PATH="$(snapshot_surface_resolve_source_path "$ROOT" "$SNAPSHOT_REL")"
+SNAPSHOT_PATH="$(resolve_snapshot_source_path "$SNAPSHOT_REL")"
 STORAGE_HOST_ID="$(yq -r '.target.storage_host_id // "pve"' "$POLICY_FILE" 2>/dev/null || echo pve)"
 USE_SNAPSHOT_ONLY=0
 
@@ -80,7 +62,6 @@ fi
 WARN_PCT="$(yq -r '.thresholds.media_warn_pct // 80' "$POLICY_FILE" 2>/dev/null || echo 80)"
 FAIL_PCT="$(yq -r '.thresholds.media_fail_pct // 85' "$POLICY_FILE" 2>/dev/null || echo 85)"
 STALE_DAYS="$(yq -r '.thresholds.stale_days // 7' "$POLICY_FILE" 2>/dev/null || echo 7)"
-OWNING_LOOP_PREFIX="$(yq -r '.ownership.owning_loop_prefix // "LOOP-INFRA-MEDIA-CAPACITY-GUARD-"' "$POLICY_FILE" 2>/dev/null || echo 'LOOP-INFRA-MEDIA-CAPACITY-GUARD-')"
 
 if [[ ! -f "$SNAPSHOT_PATH" ]]; then
   echo "D257 media-capacity-guard-lock"
@@ -148,37 +129,6 @@ PY
   )"
 fi
 
-readarray -t GAP_FIELDS < <(python3 - "$GAPS_FILE" "$OWNING_LOOP_PREFIX" <<'PY'
-import sys
-import yaml
-
-path, prefix = sys.argv[1], sys.argv[2]
-doc = yaml.safe_load(open(path, "r", encoding="utf-8")) or {}
-best = ("", "", "", "")
-for row in doc.get("gaps", []):
-    if not isinstance(row, dict):
-        continue
-    if str(row.get("status") or "").strip() != "open":
-        continue
-    gap_id = str(row.get("id") or "").strip()
-    parent_loop = str(row.get("parent_loop") or "").strip()
-    desc = str(row.get("description") or "").lower()
-    title = str(row.get("title") or "").lower()
-    discovered = str(row.get("discovered_at") or "").strip()
-    if not gap_id:
-        continue
-    if parent_loop.startswith(prefix) or ("media" in desc and "capacity" in desc) or ("media" in title and "capacity" in title):
-        if not best[0] or discovered < best[0]:
-            best = (discovered, gap_id, parent_loop, str(row.get("severity") or "high"))
-for field in best:
-    print(field)
-PY
-)
-
-GAP_DISCOVERED="${GAP_FIELDS[0]:-}"
-GAP_ID="${GAP_FIELDS[1]:-}"
-GAP_PARENT_LOOP="${GAP_FIELDS[2]:-}"
-
 echo "D257 media-capacity-guard-lock"
 echo "policy_mode: $POLICY_MODE"
 echo "snapshot_path: $SNAPSHOT_PATH"
@@ -191,8 +141,7 @@ echo "runway_status: $RUNWAY_STATUS"
 echo "days_to_fail: ${DAYS_TO_FAIL:-unknown}"
 echo "slope_bytes_per_day: ${SLOPE_BPD:-unknown}"
 echo "sample_count: ${SAMPLE_COUNT:-0}"
-echo "gap_id: ${GAP_ID:-none}"
-echo "gap_parent_loop: ${GAP_PARENT_LOOP:-none}"
+echo "storage_usage_pct: ${MD_PCT:-unknown}"
 
 FAIL_REASONS=0
 
@@ -204,13 +153,6 @@ fi
 if (( USAGE_PCT >= WARN_PCT )); then
   echo "threshold_breach: media=${USAGE_PCT}% >= warn=${WARN_PCT}%"
   FAIL_REASONS=$((FAIL_REASONS + 1))
-  if [[ -z "$GAP_ID" ]]; then
-    echo "stale_unowned: media above warn threshold with no open owning gap"
-    FAIL_REASONS=$((FAIL_REASONS + 1))
-  elif [[ -n "$GAP_PARENT_LOOP" && "$GAP_PARENT_LOOP" != "$OWNING_LOOP_PREFIX"* ]]; then
-    echo "ownership_mismatch: open gap ${GAP_ID} is not attached to ${OWNING_LOOP_PREFIX}*"
-    FAIL_REASONS=$((FAIL_REASONS + 1))
-  fi
 fi
 
 python3 - "$AGE_DAYS" "$STALE_DAYS" "$SLOPE_BPD" "$USAGE_PCT" "$WARN_PCT" <<'PY'

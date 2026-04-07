@@ -6,8 +6,7 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
 SCHEDULE="$ROOT/ops/bindings/domains/backup/backup.schedule.yaml"
-CAPABILITIES="$ROOT/ops/capabilities.yaml"
-CAP_MAP="$ROOT/ops/bindings/capability_map.yaml"
+CAPABILITIES="$ROOT/ops/capabilities.runtime.yaml"
 INVENTORY="$ROOT/ops/bindings/domains/backup/backup.inventory.yaml"
 
 ERRORS=0
@@ -28,7 +27,6 @@ need_cmd yq
 need_cmd python3
 need_file "$SCHEDULE"
 need_file "$CAPABILITIES"
-need_file "$CAP_MAP"
 need_file "$INVENTORY"
 
 if [[ "$ERRORS" -gt 0 ]]; then
@@ -41,10 +39,7 @@ expected_receipt_glob="mailroom/outbox/reports/restore-drills/backup-home-restor
 expected_freshness_days=95
 
 cap_exists="$(yq -r ".capabilities.\"$expected_capability\".command // \"\"" "$CAPABILITIES")"
-[[ -n "$cap_exists" && "$cap_exists" != "null" ]] || err "capabilities.yaml missing $expected_capability"
-
-cap_map_script="$(yq -r ".capabilities.\"$expected_capability\".script // \"\"" "$CAP_MAP")"
-[[ "$cap_map_script" == "backup-home-restore-drill" ]] || err "capability_map missing backup-home-restore-drill mapping"
+[[ -n "$cap_exists" && "$cap_exists" != "null" ]] || err "capabilities.runtime.yaml missing $expected_capability"
 
 schedule_enabled="$(yq -r '.jobs[] | select(.id == "home-restore-drill-quarterly") | (.enabled // false) | tostring' "$SCHEDULE")"
 [[ "$schedule_enabled" == "true" ]] || err "home-restore-drill-quarterly is not enabled"

@@ -4,14 +4,14 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
-CAPS_FILE="$ROOT/ops/capabilities.yaml"
-GLOBAL_BINDING="$ROOT/ops/bindings/calendar.global.yaml"
-GLOBAL_SCHEMA="$ROOT/ops/bindings/calendar.global.schema.yaml"
-SYNC_CONTRACT="$ROOT/ops/bindings/calendar.sync.contract.yaml"
-BACKUP_BINDING="$ROOT/ops/bindings/backup.calendar.yaml"
+CAPS_FILE="$ROOT/ops/capabilities.runtime.yaml"
+GLOBAL_BINDING="$ROOT/ops/bindings/domains/calendar/calendar.global.yaml"
+GLOBAL_SCHEMA="$ROOT/ops/bindings/domains/calendar/calendar.global.schema.yaml"
+SYNC_CONTRACT="$ROOT/ops/bindings/domains/calendar/calendar.sync.contract.yaml"
+BACKUP_BINDING="$ROOT/ops/bindings/domains/backup/backup.calendar.yaml"
 CAL_OUT_DIR="$(spine_resolve_mailroom_path 'mailroom/outbox/calendar')"
 BACKUP_OUT_DIR="$(spine_resolve_mailroom_path 'mailroom/outbox/backup-calendar')"
-REPORT_DIR="$(spine_resolve_mailroom_path 'evidence/verify/governance')"
+REPORT_DIR="$(spine_resolve_mailroom_path 'evidence/verify/runtime')"
 REPORT_FILE="$REPORT_DIR/CALENDAR_SURFACE_AUDIT_$(date +%Y%m%d).md"
 
 JSON_MODE=0
@@ -138,7 +138,7 @@ expect_capability() {
   fi
 }
 
-# 1) Required capability matrix (calendar + microsoft + backup + AOF control-plane surfaces)
+# 1) Required capability matrix (calendar + microsoft + backup runtime surfaces)
 if [[ ! -f "$CAPS_FILE" ]]; then
   record_fail "missing capabilities registry: ${CAPS_FILE#$ROOT/}"
 else
@@ -152,11 +152,6 @@ else
   expect_capability "microsoft.calendar.update" "mutating" "manual"
   expect_capability "microsoft.calendar.rsvp" "mutating" "manual"
   expect_capability "backup.calendar.generate" "read-only" "auto"
-  expect_capability "spine.briefing" "mutating" "auto"
-  expect_capability "spine.control.tick" "read-only" "auto"
-  expect_capability "spine.control.plan" "read-only" "auto"
-  expect_capability "spine.control.execute" "mutating" "manual"
-  expect_capability "spine.control.cycle" "mutating" "manual"
 fi
 
 # 2) Canonical bindings/contracts
@@ -195,8 +190,6 @@ require_exec "$ROOT/ops/plugins/domains/calendar/bin/calendar-status" "calendar 
 require_exec "$ROOT/ops/plugins/domains/calendar/bin/calendar-sync-plan" "calendar sync planner"
 require_exec "$ROOT/ops/plugins/domains/calendar/bin/calendar-sync-execute" "calendar sync executor"
 require_exec "$ROOT/ops/plugins/infra/backup/bin/backup-calendar-generate" "backup calendar generator"
-require_exec "$ROOT/ops/plugins/core/briefing/bin/briefing-section-calendar" "briefing calendar section"
-require_exec "$ROOT/ops/plugins/core/evidence/bin/spine-control" "AOF spine-control runtime"
 
 # 4) Required calendar tests
 for test_file in \
@@ -213,14 +206,14 @@ do
 done
 
 # 5) Runtime artifact and planner checks
-if SPINE_REPO="$SPINE_RUNTIME_ROOT" "$ROOT/ops/plugins/domains/calendar/bin/calendar-generate" >/tmp/calendar_surface_generate.out 2>/tmp/calendar_surface_generate.err; then
+if SPINE_REPO="$SPINE_RUNTIME_ROOT" "$ROOT/ops/plugins/domains/calendar/bin/calendar-generate" --binding "$GLOBAL_BINDING" >/tmp/calendar_surface_generate.out 2>/tmp/calendar_surface_generate.err; then
   record_pass "calendar.generate execution pass"
 else
   detail="$(sed -n '1,3p' /tmp/calendar_surface_generate.err | tr '\n' ' ' | xargs || true)"
   record_fail "calendar.generate failed (${detail:-unknown error})"
 fi
 
-if SPINE_REPO="$SPINE_RUNTIME_ROOT" "$ROOT/ops/plugins/infra/backup/bin/backup-calendar-generate" >/tmp/calendar_surface_backup_generate.out 2>/tmp/calendar_surface_backup_generate.err; then
+if SPINE_REPO="$SPINE_RUNTIME_ROOT" BACKUP_CALENDAR_BINDING="$BACKUP_BINDING" "$ROOT/ops/plugins/infra/backup/bin/backup-calendar-generate" >/tmp/calendar_surface_backup_generate.out 2>/tmp/calendar_surface_backup_generate.err; then
   record_pass "backup.calendar.generate execution pass"
 else
   detail="$(sed -n '1,3p' /tmp/calendar_surface_backup_generate.err | tr '\n' ' ' | xargs || true)"
@@ -228,7 +221,7 @@ else
 fi
 
 calendar_status_json="$(mktemp)"
-if SPINE_REPO="$SPINE_RUNTIME_ROOT" "$ROOT/ops/plugins/domains/calendar/bin/calendar-status" --json --max-age-minutes "$MAX_AGE_MINUTES" >"$calendar_status_json" 2>/tmp/calendar_surface_status.err; then
+if SPINE_REPO="$SPINE_RUNTIME_ROOT" "$ROOT/ops/plugins/domains/calendar/bin/calendar-status" --binding "$GLOBAL_BINDING" --json --max-age-minutes "$MAX_AGE_MINUTES" >"$calendar_status_json" 2>/tmp/calendar_surface_status.err; then
   cal_status="$(jq -r '.status // ""' "$calendar_status_json" 2>/dev/null || true)"
   if [[ "$cal_status" == "ok" ]]; then
     record_pass "calendar.status reports OK"
@@ -240,25 +233,11 @@ else
   record_fail "calendar.status execution failed (${detail:-unknown error})"
 fi
 
-if "$ROOT/ops/plugins/domains/calendar/bin/calendar-sync-plan" >/tmp/calendar_surface_sync_plan.out 2>/tmp/calendar_surface_sync_plan.err; then
+if "$ROOT/ops/plugins/domains/calendar/bin/calendar-sync-plan" --binding "$GLOBAL_BINDING" >/tmp/calendar_surface_sync_plan.out 2>/tmp/calendar_surface_sync_plan.err; then
   record_pass "calendar.sync.plan execution pass"
 else
   detail="$(sed -n '1,3p' /tmp/calendar_surface_sync_plan.err | tr '\n' ' ' | xargs || true)"
   record_fail "calendar.sync.plan failed (${detail:-unknown error})"
-fi
-
-if "$ROOT/ops/plugins/core/evidence/bin/spine-control" tick >/tmp/calendar_surface_tick.out 2>/tmp/calendar_surface_tick.err; then
-  record_pass "spine.control.tick execution pass"
-else
-  detail="$(sed -n '1,3p' /tmp/calendar_surface_tick.err | tr '\n' ' ' | xargs || true)"
-  record_fail "spine.control.tick failed (${detail:-unknown error})"
-fi
-
-if "$ROOT/ops/plugins/core/evidence/bin/spine-control" plan >/tmp/calendar_surface_plan.out 2>/tmp/calendar_surface_plan.err; then
-  record_pass "spine.control.plan execution pass"
-else
-  detail="$(sed -n '1,3p' /tmp/calendar_surface_plan.err | tr '\n' ' ' | xargs || true)"
-  record_fail "spine.control.plan failed (${detail:-unknown error})"
 fi
 
 if [[ -f "$CAL_OUT_DIR/calendar-index.json" ]]; then
@@ -317,7 +296,6 @@ if [[ "$CHECK_ONLY" -eq 0 ]]; then
     echo "## Scope"
     echo "- Calendar SSOT contracts (global/sync/schema/backup)"
     echo "- Calendar + Microsoft + Backup capability matrix"
-    echo "- AOF control-plane calendar integration surfaces"
     echo "- Generated artifacts and planner/runtime checks"
     echo
     echo "## Failures"
@@ -372,9 +350,7 @@ rm -f "$calendar_status_json" \
   /tmp/calendar_surface_generate.out /tmp/calendar_surface_generate.err \
   /tmp/calendar_surface_backup_generate.out /tmp/calendar_surface_backup_generate.err \
   /tmp/calendar_surface_status.err \
-  /tmp/calendar_surface_sync_plan.out /tmp/calendar_surface_sync_plan.err \
-  /tmp/calendar_surface_tick.out /tmp/calendar_surface_tick.err \
-  /tmp/calendar_surface_plan.out /tmp/calendar_surface_plan.err >/dev/null 2>&1 || true
+  /tmp/calendar_surface_sync_plan.out /tmp/calendar_surface_sync_plan.err >/dev/null 2>&1 || true
 
 if (( ${#failures[@]} > 0 )); then
   exit 1

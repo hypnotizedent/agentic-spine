@@ -8,7 +8,7 @@ spine_paths_init
 source "${ARCHIVE_OPERATOR_CONTROL_ROOT}/ops/lib/runtime-paths.sh"
 TARGET_REPO="$(spine_resolve_target_repo)"
 CURRENT_ROOT="$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || true)"
-if [[ -n "$CURRENT_ROOT" && -f "$CURRENT_ROOT/ops/capabilities.yaml" ]]; then
+if [[ -n "$CURRENT_ROOT" && -f "$CURRENT_ROOT/ops/capabilities.runtime.yaml" ]]; then
   ARCHIVE_OPERATOR_CONTROL_ROOT="$CURRENT_ROOT"
 else
   ARCHIVE_OPERATOR_CONTROL_ROOT="$(spine_resolve_control_root "$TARGET_REPO")"

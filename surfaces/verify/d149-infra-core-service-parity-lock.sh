@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Align infra-core service contracts (SERVICE_REGISTRY/services.health/infra.core.slo/stability.control) and keep infra.core.slo.status wired as canonical probe.
+# TRIAGE: Align infra-core service contracts (services.health/infra.core.slo/stability.control) and keep infra.core.slo.status wired as canonical probe.
 # D149: infra-core service parity lock
 set -euo pipefail
 
@@ -7,9 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SLO_CONTRACT="$ROOT/ops/bindings/infra.core.slo.yaml"
 STABILITY_CONTRACT="$ROOT/ops/bindings/stability.control.contract.yaml"
 SERVICES_HEALTH="$ROOT/ops/bindings/services.health.yaml"
-SERVICE_REGISTRY="$ROOT/docs/governance/SERVICE_REGISTRY.yaml"
-CAPABILITIES="$ROOT/ops/capabilities.yaml"
-CAPABILITY_MAP="$ROOT/ops/bindings/capability_map.yaml"
+CAPABILITIES="$ROOT/ops/capabilities.runtime.yaml"
 MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
 
 ERRORS=0
@@ -30,9 +28,7 @@ need_cmd yq
 need_file "$SLO_CONTRACT"
 need_file "$STABILITY_CONTRACT"
 need_file "$SERVICES_HEALTH"
-need_file "$SERVICE_REGISTRY"
 need_file "$CAPABILITIES"
-need_file "$CAPABILITY_MAP"
 need_file "$MANIFEST"
 
 if [[ "$ERRORS" -gt 0 ]]; then
@@ -55,13 +51,6 @@ fi
 
 for service_id in "${required_ids[@]}"; do
   [[ -n "$service_id" ]] || continue
-
-  registry_host="$(yq -r ".services.\"$service_id\".host // \"\"" "$SERVICE_REGISTRY")"
-  if [[ -z "$registry_host" || "$registry_host" == "null" ]]; then
-    err "service '$service_id' missing from SERVICE_REGISTRY"
-  elif [[ "$registry_host" != "$TARGET_HOST" ]]; then
-    err "SERVICE_REGISTRY host mismatch for '$service_id': $registry_host (expected $TARGET_HOST)"
-  fi
 
   endpoint_row="$(yq -r ".endpoints[] | select(.id == \"$service_id\") | [(.host // \"\"), ((.enabled // true)|tostring), (.url // \"\"), ((.expect // 200)|tostring)] | @tsv" "$SERVICES_HEALTH" | head -n1 || true)"
   if [[ -z "$endpoint_row" ]]; then
@@ -100,13 +89,7 @@ fi
 
 cap_command="$(yq -r '.capabilities."infra.core.slo.status".command // ""' "$CAPABILITIES")"
 if [[ "$cap_command" != "./ops/plugins/infra/observability/bin/infra-core-slo-status" ]]; then
-  err "ops/capabilities.yaml infra.core.slo.status command mismatch"
-fi
-
-map_plugin="$(yq -r '.capabilities."infra.core.slo.status".plugin // ""' "$CAPABILITY_MAP")"
-map_script="$(yq -r '.capabilities."infra.core.slo.status".script // ""' "$CAPABILITY_MAP")"
-if [[ "$map_plugin" != "observability" || "$map_script" != "infra-core-slo-status" ]]; then
-  err "capability_map infra.core.slo.status must map to observability/infra-core-slo-status"
+  err "ops/capabilities.runtime.yaml infra.core.slo.status command mismatch"
 fi
 
 manifest_scripts="$(yq -r '.plugins[] | select(.name == "observability") | .scripts[]' "$MANIFEST" || true)"

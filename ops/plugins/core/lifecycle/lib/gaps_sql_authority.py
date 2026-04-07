@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared SQLite authority helpers for operational.gaps lifecycle surfaces.
+"""Shared SQLite authority helpers for runtime gap authority surfaces.
 
 Follows the same pattern as plans_sql_authority.py:
   connect() → ensure_schema() → bootstrap_from_yaml() → upsert/close
@@ -8,7 +8,7 @@ YAML projection is decoupled from the mutation path. Mutations write to
 SQLite only. The YAML projection is refreshed on demand via project_to_yaml().
 
 Authority: SQLite (WAL mode, shared_authority.db)
-Projection: operational.gaps.yaml (on-demand, not auto-generated on mutation)
+Projection: optional runtime YAML snapshot (on demand, not auto-generated on mutation)
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import yaml
 SCHEMA_MIGRATION_ID = "20260323_gaps_authority_v3_friction"
 ENV_DB_PATH = "GAPS_DB_PATH"
 ENV_GAPS_YAML = "GAPS_YAML_PATH"
-DEFAULT_GAPS_YAML_REL = "ops/bindings/operational.gaps.yaml"
+DEFAULT_GAPS_PROJECTION_NAME = "operational-gaps.runtime.yaml"
 
 
 def utc_now() -> datetime:
@@ -62,27 +62,22 @@ def dump_yaml(data: Any) -> str:
 # ── Path resolution ──────────────────────────────────────────────
 
 
+def _default_state_root(root: Path) -> Path:
+    workspace_root = root.parent if root.parent.name == "code" else Path.home() / "code"
+    return workspace_root / ".runtime" / "spine" / "state"
+
+
 def resolve_paths(root: Path) -> tuple[Path, Path]:
-    """Return (db_path, gaps_yaml_path) resolved from contract or env."""
-    contract_path = root / "ops/bindings/mailroom.runtime.contract.yaml"
+    """Return (db_path, gaps_yaml_path) resolved from runtime env."""
     state_root_str = os.environ.get("SPINE_STATE") or ""
-    state_root = Path(state_root_str).expanduser() if str(state_root_str).strip() else None
-    contract = load_yaml(contract_path)
-    if isinstance(contract, dict):
-        runtime_root = str(contract.get("runtime_root") or "").strip()
-        roots = contract.get("roots") if isinstance(contract.get("roots"), dict) else {}
-        state_dir = str(roots.get("state") or "").strip() if isinstance(roots, dict) else ""
-        if runtime_root:
-            runtime_root_path = Path(os.path.expanduser(runtime_root))
-            if not runtime_root_path.is_absolute():
-                runtime_root_path = root / runtime_root_path
-            state_root = runtime_root_path / (state_dir or "state")
-    if state_root is None:
-        raise RuntimeError(
-            "Unable to resolve SPINE_STATE from env or mailroom.runtime.contract.yaml"
-        )
+    state_root = Path(state_root_str).expanduser() if str(state_root_str).strip() else _default_state_root(root)
     db_path = Path(os.environ.get(ENV_DB_PATH, str(state_root / "shared_authority.db"))).expanduser()
-    gaps_yaml = Path(os.environ.get(ENV_GAPS_YAML, str(root / DEFAULT_GAPS_YAML_REL))).expanduser()
+    gaps_yaml = Path(
+        os.environ.get(
+            ENV_GAPS_YAML,
+            str(state_root / "projections" / DEFAULT_GAPS_PROJECTION_NAME),
+        )
+    ).expanduser()
     return db_path, gaps_yaml
 
 

@@ -3,8 +3,7 @@
 #
 # Usage: ripple-check <hostname>
 #
-# Reads naming.policy.yaml surface_authority_order to prioritize results.
-# Searches bindings, governance docs, and brain for host references.
+# Searches runtime bindings for host references.
 set -euo pipefail
 
 SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
@@ -65,53 +64,9 @@ else
 fi
 echo
 
-# Surface 5: SERVICE_REGISTRY.yaml
-echo "--- SERVICE_REGISTRY.yaml ---"
-SR="$SP/docs/governance/SERVICE_REGISTRY.yaml"
-if [[ -f "$SR" ]] && grep -q "$HOST" "$SR"; then
-  grep -n "$HOST" "$SR" | head -5
-  HITS=$((HITS + 1))
-else
-  echo "  (not found)"
-fi
-echo
-
-# Surface 6: DEVICE_IDENTITY_SSOT.md
-echo "--- DEVICE_IDENTITY_SSOT.md ---"
-DI="$SP/docs/governance/DEVICE_IDENTITY_SSOT.md"
-if [[ -f "$DI" ]] && grep -q "$HOST" "$DI"; then
-  grep -n "$HOST" "$DI" | head -5
-  HITS=$((HITS + 1))
-else
-  echo "  (not found)"
-fi
-echo
-
-# Surface 7: SHOP_SERVER_SSOT.md
-echo "--- SHOP_SERVER_SSOT.md ---"
-SS="$SP/docs/governance/SHOP_SERVER_SSOT.md"
-if [[ -f "$SS" ]] && grep -q "$HOST" "$SS"; then
-  grep -n "$HOST" "$SS" | head -5
-  HITS=$((HITS + 1))
-else
-  echo "  (not found)"
-fi
-echo
-
-# Surface 8: STACK_REGISTRY.yaml
-echo "--- STACK_REGISTRY.yaml ---"
-SK="$SP/docs/governance/STACK_REGISTRY.yaml"
-if [[ -f "$SK" ]] && grep -q "$HOST" "$SK"; then
-  grep -n "$HOST" "$SK" | head -5
-  HITS=$((HITS + 1))
-else
-  echo "  (not found)"
-fi
-echo
-
-# Surface 9: backup.calendar.yaml
+# Surface 5: backup.calendar.yaml
 echo "--- backup.calendar.yaml ---"
-BC="$SP/ops/bindings/backup.calendar.yaml"
+BC="$SP/ops/bindings/domains/backup/backup.calendar.yaml"
 if [[ -f "$BC" ]] && grep -q "$HOST" "$BC"; then
   grep -n "$HOST" "$BC" | head -5
   HITS=$((HITS + 1))
@@ -120,9 +75,9 @@ else
 fi
 echo
 
-# Surface 10: backup.inventory.yaml
+# Surface 6: backup.inventory.yaml
 echo "--- backup.inventory.yaml ---"
-BI="$SP/ops/bindings/backup.inventory.yaml"
+BI="$SP/ops/bindings/domains/backup/backup.inventory.yaml"
 if [[ -f "$BI" ]] && grep -q "$HOST" "$BI"; then
   grep -n "$HOST" "$BI" | head -5
   HITS=$((HITS + 1))
@@ -131,7 +86,7 @@ else
 fi
 echo
 
-# Surface 11: services.health.yaml
+# Surface 7: services.health.yaml
 echo "--- services.health.yaml ---"
 SH="$SP/ops/bindings/services.health.yaml"
 if [[ -f "$SH" ]] && grep -q "$HOST" "$SH"; then
@@ -142,14 +97,14 @@ else
 fi
 echo
 
-# Broad search: any other files referencing this host
+# Broad search: any other bindings referencing this host
 echo "--- Other references (rg scan) ---"
 OTHER=$(cd "$SP" && rg --files-with-matches --fixed-strings "$HOST" \
   --glob='!.archive/**' --glob='!.worktrees/**' --glob='!evidence/**' \
   --glob='!mailroom/state/ledger.csv' --glob='!mailroom/outbox/**' \
   --glob='!node_modules/**' --glob='!.git/**' \
-  docs/ ops/bindings/ 2>/dev/null | \
-  grep -v -E '(naming.policy|ssh.targets|docker.compose.targets|infra.placement|SERVICE_REGISTRY|DEVICE_IDENTITY|SHOP_SERVER|STACK_REGISTRY|backup.calendar|backup.inventory|services.health|operational.gaps)' || true)
+  ops/bindings/ 2>/dev/null | \
+  grep -v -E '(naming.policy|ssh.targets|docker.compose.targets|infra.placement|backup.calendar|backup.inventory|services.health|operational.gaps)' || true)
 
 if [[ -n "$OTHER" ]]; then
   echo "$OTHER"

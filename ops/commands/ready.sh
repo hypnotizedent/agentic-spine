@@ -11,16 +11,12 @@ Usage: ops ready
 Run all pre-flight readiness checks for this terminal session.
 
 Checks performed:
-  1. ops preflight      - Remote authority + worktree hygiene
-  2. agent.session.closeout - Loop/receipt truth coherence (D61 freshness)
-  3. verify.drift_gates.certify - Scan-first drift gate inventory and domain brief
-  4. spine.verify       - Canonical V3 verification baseline
-  5. spine.replay       - Receipt replay verification
-  6. spine.status       - Unified work status
-  7. secrets.binding    - Secrets binding check
-  8. secrets.auth.load  - Load Infisical auth
-  9. secrets.auth.status - Verify auth is hydrated
-  10. secrets.projects.status - Project-level secrets check
+  1. ops status --brief - SQLite/runtime status surface
+  2. spine.verify       - Runtime workload/infra verification baseline
+  3. secrets.binding    - Secrets binding check
+  4. secrets.auth.load  - Load Infisical auth
+  5. secrets.auth.status - Verify auth is hydrated
+  6. secrets.projects.status - Project-level secrets check
 
 On success: terminal is cleared for API-touching capabilities.
 On failure: follow printed remediation steps.
@@ -45,21 +41,13 @@ echo "========================================"
 echo "SPINE READY CHECK (operator convenience)"
 echo "========================================"
 
-# Preflight is the fastest remote-authority and worktree-hygiene detector.
 echo
 echo "────────────────────────────────────────"
-echo "READY CHECK: ops preflight"
+echo "READY CHECK: ops status --brief"
 echo "────────────────────────────────────────"
-./bin/ops preflight
-
-# Session closeout keeps loop/receipt truth coherent (D61 freshness).
-run_cap agent.session.closeout
-
-run_cap verify.drift_gates.certify --brief
+./bin/ops status --brief
 
 run_cap spine.verify
-run_cap spine.replay
-run_cap spine.status
 
 run_cap secrets.binding
 run_cap secrets.auth.load

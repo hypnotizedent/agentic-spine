@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# cloudflare.domain_routing.diff — diff Cloudflare tunnel ingress hostnames vs DOMAIN_ROUTING_REGISTRY
+# cloudflare.domain_routing.diff — diff Cloudflare tunnel ingress hostnames vs runtime ingress maps
 # Read-only. Exits non-zero on diff (audit/gate friendly).
 
 ROOT="$(cd "$(dirname "$0")/../../../../../" && pwd)"
 SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
 BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
-REGISTRY_FILE="$ROOT/ops/bindings/domain.routing.registry.yaml"
+SHOP_INGRESS_FILE="$ROOT/ops/bindings/shop.ingress.map.yaml"
+HOME_INGRESS_FILE="$ROOT/ops/bindings/home.ingress.map.yaml"
 CF_LIB="$ROOT/ops/plugins/providers/cloudflare/lib/cloudflare-api.sh"
 
 TUNNEL_NAME_DEFAULT="homelab-tunnel"
@@ -23,7 +24,7 @@ Usage:
 
 Behavior:
   - Fetch tunnel ingress hostnames from Cloudflare API
-  - Extract registry hostnames where routing_layer == cloudflare_tunnel
+  - Extract declared hostnames from runtime ingress maps where routing_layer == cloudflare_tunnel
   - Print missing/extra hostnames
   - Exit 1 if any diffs exist
 EOF
@@ -48,7 +49,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -f "$REGISTRY_FILE" ]] || { echo "STOP: missing registry: $REGISTRY_FILE" >&2; exit 2; }
+[[ -f "$SHOP_INGRESS_FILE" ]] || { echo "STOP: missing ingress map: $SHOP_INGRESS_FILE" >&2; exit 2; }
+[[ -f "$HOME_INGRESS_FILE" ]] || { echo "STOP: missing ingress map: $HOME_INGRESS_FILE" >&2; exit 2; }
 command -v yq >/dev/null 2>&1 || { echo "STOP: missing dependency: yq" >&2; exit 2; }
 
 # Re-exec ourselves under secrets injection (single capability receipt; no nested caps)
@@ -123,7 +125,7 @@ for h in sorted(hostnames):
     print(h)
 ' >"$TMP_CF"
 
-yq -r '.zones[].hostnames[] | select(.routing_layer == "cloudflare_tunnel") | .hostname' "$REGISTRY_FILE" \
+yq -r '.public_routes[]? | select(.routing_layer == "cloudflare_tunnel") | .hostname' "$SHOP_INGRESS_FILE" "$HOME_INGRESS_FILE" \
   | sort -u >"$TMP_REG"
 sort -u -o "$TMP_CF" "$TMP_CF"
 
@@ -132,9 +134,9 @@ extra_in_tunnel="$(comm -13 "$TMP_REG" "$TMP_CF" || true)"
 
 echo "cloudflare.domain_routing.diff"
 echo "tunnel: $TUNNEL_NAME"
-echo "registry: $REGISTRY_FILE"
+echo "ingress_maps: $SHOP_INGRESS_FILE,$HOME_INGRESS_FILE"
 echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
-echo "registry_hostnames: $(wc -l <"$TMP_REG" | tr -d ' ')"
+echo "declared_hostnames: $(wc -l <"$TMP_REG" | tr -d ' ')"
 echo "tunnel_hostnames: $(wc -l <"$TMP_CF" | tr -d ' ')"
 echo
 

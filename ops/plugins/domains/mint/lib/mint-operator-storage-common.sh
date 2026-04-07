@@ -8,7 +8,7 @@ spine_paths_init
 source "${MINT_OPERATOR_STORAGE_CONTROL_ROOT}/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 
-MINT_OPERATOR_STORAGE_CONTRACT="${MINT_OPERATOR_STORAGE_CONTRACT:-$MINT_OPERATOR_STORAGE_CONTROL_ROOT/ops/bindings/mint.operator.storage.contract.yaml}"
+MINT_OPERATOR_STORAGE_CONTRACT="${MINT_OPERATOR_STORAGE_CONTRACT:-$MINT_OPERATOR_STORAGE_CONTROL_ROOT/ops/bindings/domains/mint/mint.operator.storage.contract.yaml}"
 MINT_OPERATOR_RCLONE_BIN="${MINT_OPERATOR_RCLONE_BIN:-${RCLONE_BIN:-rclone}}"
 MINT_OPERATOR_JQ_BIN="${MINT_OPERATOR_JQ_BIN:-jq}"
 

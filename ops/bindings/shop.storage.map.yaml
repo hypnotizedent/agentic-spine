@@ -6,7 +6,7 @@
 # Do not edit manually — rebuild with: ./bin/ops cap run infra.shop.storage.authority.build
 version: 1
 authority_state: projection
-generated_at_utc: '2026-03-23T21:53:44Z'
+generated_at_utc: '2026-04-07T21:37:45Z'
 site: shop
 generated_by:
   capability: infra.shop.storage.authority.build
@@ -16,11 +16,9 @@ source_surfaces:
 - ops/bindings/vm.lifecycle.yaml
 - ops/bindings/vm.operating.profile.yaml
 - ops/bindings/infra.storage.placement.policy.yaml
-- ops/bindings/backup.inventory.yaml
-- docs/governance/SERVICE_REGISTRY.yaml
+- ops/bindings/domains/backup/backup.inventory.yaml
 - ops/bindings/services.health.yaml
-- ops/bindings/domain.routing.registry.yaml
-- ops/bindings/shop.media.pressure.authority.yaml
+- ops/bindings/shop.ingress.map.yaml
 - ops/bindings/service.data.lifecycle.registry.yaml
 - ops/bindings/storage.scaffold.authority.yaml
 storage_scaffold_ref: ops/bindings/storage.scaffold.authority.yaml
@@ -31,8 +29,10 @@ storage_scaffold_status:
   authority_state: canonical_live
   retention_state: active
   canonicality: canonical
-  detail: Canonical shop cold archive plane, including the live-share datasets exported
-    by archive-smb.
+  detail: "Canonical shop archive plane. Final home for: email archive (VM 214 Stalwart\
+    \ + mail-archiver), Paperless-NGX documents (VM 214), surveillance recordings\
+    \ (VM 215), media library (movies/TV/music \u2014 only copy), and live-share datasets\
+    \ exported by archive-smb."
   blockers: ''
   source_refs:
   - docs/governance/LOCAL_CONTROL_PLANE_CONTRACT.md
@@ -243,162 +243,11 @@ machine_summary:
       drive_family: Seagate ST4000NM0063 (Constellation ES.3)
     last_verified: '2026-03-01'
 media_pressure:
-  pool_state:
-    observed_at_utc: '2026-03-21T05:25:47Z'
-    media:
-      total_bytes: 32006096289792
-      used_bytes: 27598970830848
-      free_bytes: 4407125458944
-      usage_pct: 86
-      total_display: 29.1T
-      used_display: 25.1T
-      free_display: 4.1T
-    md1400:
-      total_bytes: 48000554500096
-      used_bytes: 8030321017344
-      free_bytes: 39970233482752
-      usage_pct: 16
-      total_display: 43.7T
-      used_display: 7.30T
-      free_display: 36.3T
-  nfs_export_truth:
-    export_host: pve
-    export_path: /media
-    status: deprecated
-    note: 'These NFS exports are legacy shop infrastructure. The canonical active
-      media runtime is HOME (Synology /volume1/media-staging via media-home VM 106).
-      download-stack and streaming-stack are parked residue, not active consumers.
-
-      '
-    consumers:
-    - host: download-stack
-      mount_path: /mnt/media
-      mode: rw
-      status: parked
-    - host: streaming-stack
-      mount_path: /mnt/media
-      mode: ro
-      status: parked
-    local_view_drift:
-      status: accepted
-      summary: 'The client-visible /media export accounts for payload residue on the
-        deprecated shop pool. Host-local paths /media/movies, /media/tv, and /media/music
-        are empty child datasets, and /media/movies-archive is masked by md1400/media-cold/movies-archive.
-        NFS consumers still observe parent payload at those paths, so host-local du/zfs
-        output alone is not storage truth. This is evacuation accounting, not active
-        media truth.
-
-        '
-      affected_paths:
-      - /media/movies
-      - /media/tv
-      - /media/music
-      - /media/movies-archive
-  payload_by_path:
-  - path: /mnt/media/movies
-    surface_class: evacuation_residue
-    reclaim_class: payload
-    owner: legacy_nfs_residue
-    purpose: Movie payload residue on deprecated shop pool. Canonical active movie
-      library is on home Synology /volume1/media-staging/movies via media-home VM
-      106.
-    used_bytes: 10876177733125
-    used_display: 10.1T
-  - path: /mnt/media/tv
-    surface_class: evacuation_residue
-    reclaim_class: payload
-    owner: legacy_nfs_residue
-    purpose: TV payload residue on deprecated shop pool. Canonical active TV library
-      is on home Synology via media-home VM 106.
-    used_bytes: 6183208820213
-    used_display: 5.7T
-  - path: /mnt/media/downloads
-    surface_class: evacuation_residue
-    reclaim_class: regenerable
-    owner: legacy_nfs_residue
-    purpose: Downloads residue on deprecated shop pool. Active downloads now land
-      on home Synology via SABnzbd on media-home.
-    used_bytes: 116698405125
-    used_display: 108G
-  - path: /mnt/media/music
-    surface_class: evacuation_residue
-    reclaim_class: payload
-    owner: legacy_nfs_residue
-    purpose: Music payload residue on deprecated shop pool. Canonical active music
-      library is on home Synology via media-home VM 106.
-    used_bytes: 736408065826
-    used_display: 686G
-  - path: /mnt/media/movies-archive
-    surface_class: archive
-    reclaim_class: archive
-    owner: legacy_nfs_residue
-    purpose: Radarr archive root on deprecated shop pool. Not active playback surface.
-    used_bytes: 230161189327
-    used_display: 214G
-  - path: /mnt/media/backups
-    surface_class: compatibility-hold
-    reclaim_class: archive
-    owner: pve
-    purpose: Legacy warm-lane media-stack tarballs drained to md1400. Not canonical
-      backup truth.
-    used_bytes: 6971392
-    used_display: 6.7M
-  reclaim_lanes:
-  - lane_id: media-stack-legacy-backups-drain
-    surface_class: compatibility-hold
-    reclaim_class: archive
-    status: done
-    source_path: /media/backups
-    source_glob: media-stack-2026-*.tar.gz
-    source_remaining_count: 0
-    source_remaining_bytes: 0
-    source_remaining_display: '0'
-    destination_path: /md1400/media-cold/legacy-media-stack-backups
-    destination_present_count: 25
-    destination_present_bytes: 182284270592
-    destination_present_display: 169.8G
-    rationale: 'Canonical media config backups already live under /md1400/backup-cold/apps/media-config.
-      These warm-lane tarballs are legacy archive residue and now live on md1400,
-      not on media.
-
-      '
-  - lane_id: media-forensic-snapshot-hold
-    surface_class: archive
-    reclaim_class: blocked
-    status: blocked
-    snapshot: media@forensic-20260226-2325
-    used_bytes: 298500227072
-    used_display: 278G
-    referenced_display: 14.9T
-    rationale: 'Retained forensic snapshot from the copy-first utilization upgrade.
-      Deleting it in this wave would discard restore evidence; keeping it means deleted
-      media blocks are not reclaimed immediately.
-
-      '
-  - lane_id: media-downloads-reclaim
-    surface_class: runtime
-    reclaim_class: regenerable
-    status: done
-    path: /mnt/media/downloads
-    used_bytes: 116698405125
-    used_display: 108G
-    rationale: "Downloads cleanup executed 2026-03-12 to 2026-03-21: 2.7TB \u2192\
-      \ 108GB (2.6TB reclaimed). Remaining 108GB is active/recent downloads. Further\
-      \ selective cleanup available if needed.\n"
-  summary:
-    shop_pool_residue_bytes: 18026955808491
-    shop_pool_residue_display: 16.4TiB
-    regenerable_residue_bytes: 116698405125
-    regenerable_residue_display: 108GiB
-    blocking_summary: 'The SHOP pve:/media pool is at 86% usage. This is NOT the home
-      canonical plane. NFS-visible payload residue accounts for about 16.4TiB (movies/tv/music
-      plus movies-archive), downloads cleaned to 108GiB of regenerable pressure. Legacy
-      warm-lane tarballs are offloaded to md1400; retained forensic snapshot at 278G.
-      The canonical active family media runtime is HOME (Synology, 20T, ~35% used,
-      14T free).
-
-      '
-    safe_to_change_drives: blocked
+  pool_state: {}
+  nfs_export_truth: {}
+  payload_by_path: []
+  reclaim_lanes: []
+  summary: {}
 service_lifecycle:
 - service_id: backups
   display_name: Backups
@@ -550,7 +399,7 @@ service_lifecycle:
       retention byte model.
 - service_id: surveillance
   display_name: Surveillance
-  criticality: tier1
+  criticality: tier3
   data_class: time_series_video
   runtime_hosts:
   - surveillance-stack
@@ -561,8 +410,8 @@ service_lifecycle:
   canonical_live_roots:
   - surveillance-stack:/srv/config/surveillance (Canonical live compose/config authority
     proved by the 2026-03-19 normalization wave.)
-  - surveillance-stack:/srv/data/surveillance (Canonical durable appstate, recordings,
-    clips, and snapshots surface.)
+  - surveillance-stack:/srv/data/surveillance (Rolling retention surface for active
+    recordings/clips/snapshots. Final archive home is md1400.)
   - surveillance-stack:/srv/runtime/surveillance (Canonical runtime cache surface
     for tmpfs-backed transient state.)
   allowed_secondary_roots:
@@ -608,8 +457,6 @@ runtime_storage:
   owner: '@ronny'
   purpose: Workflow automation + MCP gateway.
   active_services:
-  - automation-postgres
-  - automation-redis
   - mcpjungle
   - n8n
   - ollama
@@ -686,15 +533,16 @@ runtime_storage:
   purpose: 135K+ assets, 3TB library. 8 CPU cores (host passthrough), 100GB boot.
     LAN IP 192.168.1.203 (static). Not in docker.compose.targets.yaml (known exemption).
   active_services:
-  - immich-ml
-  - immich-postgres
-  - immich-redis
+  - immich
   - immich-server
   health_probe_ids:
   - immich
   - immich-server
-  public_routes: []
-  public_route_count: 0
+  public_routes:
+  - hostname: photos.ronny.works
+    routing_layer: cloudflare_tunnel
+    zone: ronny.works
+  public_route_count: 1
   backup_profiles:
   - vm-covered
   - vm-primary
@@ -895,8 +743,6 @@ runtime_storage:
   purpose: Git forge. Authentik SSO. CF tunnel for git.ronny.works.
   active_services:
   - gitea
-  - gitea-postgres
-  - gitea-runner
   health_probe_ids:
   - gitea
   public_routes:
@@ -974,7 +820,9 @@ runtime_storage:
   - vm-primary
   durability_classes:
   - large_state
+  - small_state
   restore_classes:
+  - app-dry-run-monthly
   - vm-dry-run-quarterly
   storage_objects:
   - kind: guest_boot_disk
@@ -986,6 +834,11 @@ runtime_storage:
       surfaces.
   - kind: path
     object: /opt/stacks/ai-consolidation
+    purpose: Guest-level durable path
+    durability_role: supplemental_runtime
+    pool: boot-disk
+  - kind: path
+    object: /opt/stacks/spine-workers
     purpose: Guest-level durable path
     durability_role: supplemental_runtime
     pool: boot-disk
@@ -1020,14 +873,10 @@ runtime_storage:
     \ Mail-archiver is migration_source \u2014 canonical runtime now on communications-stack\
     \ VM 214."
   active_services:
-  - finance-postgres-vm211
-  - finance-redis-vm211
-  - firefly-cron-vm211
-  - firefly-iii-vm211
-  - firefly-importer-vm211
-  - ghostfolio-vm211
-  - paperless-ngx-vm211
-  - vouchervault
+  - firefly-iii
+  - ghostfolio
+  - paperless-ngx
+  - vouchervault-health
   health_probe_ids:
   - firefly-iii-vm211
   - ghostfolio-vm211
@@ -1139,8 +988,6 @@ runtime_storage:
   purpose: Mint fresh-slate data plane. PostgreSQL 16 + MinIO + Redis.
   active_services:
   - mint-modules-minio
-  - mint-modules-postgres
-  - mint-modules-redis
   health_probe_ids:
   - mint-modules-minio
   public_routes: []
@@ -1324,8 +1171,7 @@ runtime_storage:
   purpose: Stalwart self-hosted mail + mail-archiver. Spine communications stack (GAP-OP-820).
     Mail-archiver canonical runtime (LOOP-MAIL-ARCHIVER-COMMS-MIGRATION-20260225).
   active_services:
-  - mail-archiver-db-vm214
-  - mail-archiver-vm214
+  - mail-archiver
   - stalwart-mail
   health_probe_ids:
   - mail-archiver-vm214
@@ -1564,19 +1410,9 @@ current_risks:
   detail: "12% boot usage (11GB/92GB) after truncating 59GB firefly-cron crash log.\
     \ Actual data only 531MB. Fixed cron binary (crond\u2192cron). Log rotation added.\
     \ Re-evaluate if usage exceeds 60%."
-- risk_id: shop-media-pressure
-  severity: high
-  runtime: media
-  source: ops/bindings/shop.media.pressure.authority.yaml
-  detail: The SHOP pve:/media pool is at 86% usage. This is NOT the home canonical
-    plane. NFS-visible payload residue accounts for about 16.4TiB (movies/tv/music
-    plus movies-archive), downloads cleaned to 108GiB of regenerable pressure. Legacy
-    warm-lane tarballs are offloaded to md1400; retained forensic snapshot at 278G.
-    The canonical active family media runtime is HOME (Synology, 20T, ~35% used, 14T
-    free).
 summary:
   active_runtime_count: 12
   tombstone_count: 1
   lifecycle_service_count: 4
-  public_runtime_count: 7
-  private_only_runtime_count: 5
+  public_runtime_count: 8
+  private_only_runtime_count: 4

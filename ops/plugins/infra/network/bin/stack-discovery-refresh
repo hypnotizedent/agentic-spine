@@ -19,7 +19,7 @@ DB_DIR="$STACK_DISCOVERY_ROOT"
 DB_PATH="$DB_DIR/stack-discovery.db"
 SOURCES_FILE="$SPINE_ROOT/ops/bindings/stack.discovery.sources.yaml"
 STAGING_DIR="$STACK_DISCOVERY_ROOT/staging"
-SERVICE_REGISTRY="$SPINE_ROOT/docs/governance/SERVICE_REGISTRY.yaml"
+SERVICES_HEALTH="$SPINE_ROOT/ops/bindings/services.health.yaml"
 FETCH_TIMEOUT=30
 REFRESH_TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
@@ -289,31 +289,30 @@ for idx in $(seq 0 $((SOURCE_COUNT - 1))); do
       log_refresh "$SRC_ID" "ok" "$TOOLS_THIS" ""
       ;;
 
-    # ── Local file (SERVICE_REGISTRY cross-reference) ──────────────────────
+    # ── Local file (services.health cross-reference) ───────────────────────
     local_file)
-      if [[ ! -f "$SERVICE_REGISTRY" ]]; then
-        echo "   WARN: SERVICE_REGISTRY not found at $SERVICE_REGISTRY, skipping"
+      if [[ ! -f "$SERVICES_HEALTH" ]]; then
+        echo "   WARN: services.health not found at $SERVICES_HEALTH, skipping"
         SOURCES_FAILED=$((SOURCES_FAILED + 1))
-        log_refresh "$SRC_ID" "failed" 0 "SERVICE_REGISTRY not found"
+        log_refresh "$SRC_ID" "failed" 0 "services.health not found"
         echo
         continue
       fi
 
-      # Extract services from the registry YAML
-      # The registry has services with name, vm, status, domain, health_url
+      # Extract deployed services from services.health.
       set +e
-      SVC_COUNT="$(yq '.services | length' "$SERVICE_REGISTRY" 2>/dev/null || echo 0)"
+      SVC_COUNT="$(yq '.endpoints | length' "$SERVICES_HEALTH" 2>/dev/null || echo 0)"
       set -e
 
       if [[ "$SVC_COUNT" -gt 0 ]]; then
         for sidx in $(seq 0 $((SVC_COUNT - 1))); do
-          SVC_NAME="$(yq ".services[$sidx].name" "$SERVICE_REGISTRY" 2>/dev/null || true)"
-          SVC_STATUS="$(yq ".services[$sidx].status // \"unknown\"" "$SERVICE_REGISTRY" 2>/dev/null || true)"
-          SVC_DOMAIN="$(yq ".services[$sidx].domain // \"unknown\"" "$SERVICE_REGISTRY" 2>/dev/null || true)"
-          SVC_URL="$(yq ".services[$sidx].health_url // \"\"" "$SERVICE_REGISTRY" 2>/dev/null || true)"
+          SVC_NAME="$(yq ".endpoints[$sidx].id // \"\"" "$SERVICES_HEALTH" 2>/dev/null || true)"
+          SVC_HOST="$(yq ".endpoints[$sidx].host // \"unknown\"" "$SERVICES_HEALTH" 2>/dev/null || true)"
+          SVC_ENABLED="$(yq ".endpoints[$sidx].enabled // true" "$SERVICES_HEALTH" 2>/dev/null || true)"
+          SVC_URL="$(yq ".endpoints[$sidx].url // \"\"" "$SERVICES_HEALTH" 2>/dev/null || true)"
 
           [[ -z "$SVC_NAME" || "$SVC_NAME" == "null" ]] && continue
-          insert_tool "$SVC_NAME" "status=$SVC_STATUS domain=$SVC_DOMAIN (deployed)" "$SVC_DOMAIN" "$SRC_ID" "$SVC_URL"
+          insert_tool "$SVC_NAME" "host=$SVC_HOST enabled=$SVC_ENABLED (local health endpoint)" "$SVC_HOST" "$SRC_ID" "$SVC_URL"
         done
       fi
 

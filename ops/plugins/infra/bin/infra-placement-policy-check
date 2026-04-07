@@ -12,7 +12,7 @@ set -euo pipefail
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 MANIFEST="${INFRA_RELOCATION_MANIFEST:-$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml}"
 POLICY="${INFRA_PLACEMENT_POLICY:-$SPINE_REPO/ops/bindings/infra.placement.policy.yaml}"
-SERVICE_REG="${INFRA_SERVICE_REGISTRY:-$SPINE_REPO/docs/governance/SERVICE_REGISTRY.yaml}"
+SERVICES_HEALTH="${INFRA_SERVICES_HEALTH:-$SPINE_REPO/ops/bindings/services.health.yaml}"
 
 CHECK_MODE="all"
 TARGET=""
@@ -35,7 +35,7 @@ Usage:
 Options:
   --manifest <path>          Override relocation manifest path
   --policy <path>            Override placement policy path
-  --service-registry <path>  Override service registry path
+  --services-health <path>   Override services.health path
   --check <mode>             all (default), vm-target, service
   --target <name>            VM target hostname (vm-target mode)
   --vm-id <id>               VM ID (vm-target mode)
@@ -54,7 +54,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --manifest) MANIFEST="${2:-}"; shift 2 ;;
         --policy) POLICY="${2:-}"; shift 2 ;;
-        --service-registry) SERVICE_REG="${2:-}"; shift 2 ;;
+        --services-health) SERVICES_HEALTH="${2:-}"; shift 2 ;;
         --check) CHECK_MODE="${2:-}"; shift 2 ;;
         --target) TARGET="${2:-}"; shift 2 ;;
         --vm-id) VM_ID="${2:-}"; shift 2 ;;
@@ -260,18 +260,18 @@ check_service_target() {
     fi
 }
 
-check_registry_host_for_service() {
+check_runtime_host_for_service() {
     local service="$1"
     local status="$2"
     local to_host="$3"
     local rollback_host="$4"
 
-    [[ -f "$SERVICE_REG" ]] || { note_fail "service registry not found: $SERVICE_REG"; return; }
+    [[ -f "$SERVICES_HEALTH" ]] || { note_fail "services.health not found: $SERVICES_HEALTH"; return; }
 
-    local reg_host expected
-    reg_host="$(yq e ".services.\"$service\".host // \"\"" "$SERVICE_REG" 2>/dev/null || echo "")"
-    if [[ -z "$reg_host" || "$reg_host" == "null" ]]; then
-        note_fail "service '$service' missing in service registry"
+    local runtime_hosts expected
+    runtime_hosts="$(yq e -r ".endpoints[] | select(.id == \"$service\" or .id == \"${service}-v1\" or .id == \"${service}-v2\" or .id == \"${service}-v3\") | .host // \"\"" "$SERVICES_HEALTH" 2>/dev/null | sort -u | sed '/^$/d' || true)"
+    if [[ -z "$runtime_hosts" ]]; then
+        note_fail "service '$service' missing in services.health"
         return
     fi
 
@@ -280,10 +280,10 @@ check_registry_host_for_service() {
         expected="$rollback_host"
     fi
 
-    if [[ "$reg_host" != "$expected" ]]; then
-        note_fail "service '$service' registry host '$reg_host' != expected '$expected' for status '$status'"
+    if ! printf '%s\n' "$runtime_hosts" | grep -Fxq "$expected"; then
+        note_fail "service '$service' runtime host(s) '$(printf '%s\n' "$runtime_hosts" | paste -sd, -)' != expected '$expected' for status '$status'"
     else
-        note_pass "service '$service' registry host matches expected '$expected'"
+        note_pass "service '$service' runtime host matches expected '$expected'"
     fi
 }
 
@@ -318,7 +318,7 @@ check_all() {
 
         check_service_target "$svc" "$svc_to" "$svc_rb" "$svc_status"
         if [[ "$svc_status" != "planned" ]]; then
-            check_registry_host_for_service "$svc" "$svc_status" "$svc_to" "$svc_rb"
+            check_runtime_host_for_service "$svc" "$svc_status" "$svc_to" "$svc_rb"
         fi
         echo ""
     done < <(yq e '.services[].service' "$MANIFEST")

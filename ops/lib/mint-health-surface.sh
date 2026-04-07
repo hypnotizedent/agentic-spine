@@ -12,7 +12,7 @@
 
 _MINT_HEALTH_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 _MINT_HEALTH_BINDING="${_MINT_HEALTH_ROOT}/ops/bindings/services.health.yaml"
-_MINT_PROBE_BINDING="${_MINT_HEALTH_ROOT}/ops/bindings/mint.probe.targets.yaml"
+_MINT_PROBE_BINDING="${_MINT_HEALTH_ROOT}/ops/bindings/domains/mint/mint.probe.targets.yaml"
 _MINT_HEALTH_SSH_BINDING="${_MINT_HEALTH_ROOT}/ops/bindings/ssh.targets.yaml"
 
 mint_probe_target_id() {

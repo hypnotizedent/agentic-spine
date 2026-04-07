@@ -13,15 +13,13 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[4]
 
-BACKUP_PATH = ROOT / "ops/bindings/backup.inventory.yaml"
-DOMAIN_ROUTING_PATH = ROOT / "ops/bindings/domain.routing.registry.yaml"
+BACKUP_PATH = ROOT / "ops/bindings/domains/backup/backup.inventory.yaml"
 ESTATE_AUTHORITY_PATH = ROOT / "ops/bindings/estate.boringness.authority.yaml"
 HOME_AUTHORITY_PATH = ROOT / "ops/bindings/home.authority.contract.yaml"
 HOME_HARDWARE_PATH = ROOT / "ops/bindings/home.hardware.inventory.yaml"
 HOME_PROXMOX_PATH = ROOT / "ops/bindings/home.proxmox.inventory.yaml"
 HOME_UNIFI_PATH = ROOT / "ops/bindings/home.unifi.network.inventory.yaml"
 NETWORK_DNS_LOCAL_PATH = ROOT / "ops/bindings/network.dns.local.registry.yaml"
-SERVICE_REGISTRY_PATH = ROOT / "docs/governance/SERVICE_REGISTRY.yaml"
 LIFECYCLE_REGISTRY_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
 STORAGE_SCAFFOLD_PATH = ROOT / "ops/bindings/storage.scaffold.authority.yaml"
 SHOP_STORAGE_MAP_PATH = ROOT / "ops/bindings/shop.storage.map.yaml"
@@ -383,10 +381,9 @@ def build_ingress_map(
             "script": rel(Path(__file__)),
         },
         "source_surfaces": [
-            rel(DOMAIN_ROUTING_PATH),
+            rel(SHOP_INGRESS_MAP_PATH if site == "shop" else HOME_INGRESS_MAP_PATH),
             rel(NETWORK_DNS_LOCAL_PATH),
             rel(SSH_TARGETS_PATH),
-            rel(SERVICE_REGISTRY_PATH),
             rel(ESTATE_AUTHORITY_PATH),
         ],
         "public_routes": sorted(public_routes, key=lambda row: row["hostname"]),
@@ -1061,39 +1058,21 @@ def main() -> int:
     args = parse_args()
 
     backup = load_yaml(BACKUP_PATH)
-    domain_routing = load_yaml(DOMAIN_ROUTING_PATH)
     estate_authority = load_yaml(ESTATE_AUTHORITY_PATH)
     home_hardware = load_yaml(HOME_HARDWARE_PATH)
     home_proxmox = load_yaml(HOME_PROXMOX_PATH)
     home_unifi = load_yaml(HOME_UNIFI_PATH)
     network_dns_local = load_yaml(NETWORK_DNS_LOCAL_PATH)
-    service_registry = load_yaml(SERVICE_REGISTRY_PATH)
     lifecycle_registry = load_yaml(LIFECYCLE_REGISTRY_PATH)
     storage_scaffold = load_yaml(STORAGE_SCAFFOLD_PATH)
     shop_storage_map = load_yaml(SHOP_STORAGE_MAP_PATH)
     ssh_targets = load_yaml(SSH_TARGETS_PATH)
     synology = load_yaml(SYNOLOGY_STORAGE_PATH)
     vm_lifecycle = load_yaml(VM_LIFECYCLE_PATH)
+    shop_ingress_map = load_yaml(SHOP_INGRESS_MAP_PATH)
+    home_ingress_map = load_yaml(HOME_INGRESS_MAP_PATH)
 
     target_by_id, ip_to_site = build_target_maps(ssh_targets)
-    service_host_map = build_service_host_map(service_registry)
-    routes = flatten_routes(domain_routing)
-    for route in routes:
-        route["lifecycle_class"] = classify_route(route)
-        route["resolved_site"] = infer_route_site(route, service_host_map, target_by_id, ip_to_site)
-
-    shop_ingress_map = build_ingress_map(
-        site="shop",
-        routes=routes,
-        local_dns_entries=flatten_local_dns_entries(network_dns_local, "shop_entries"),
-        target_by_id=target_by_id,
-    )
-    home_ingress_map = build_ingress_map(
-        site="home",
-        routes=routes,
-        local_dns_entries=flatten_local_dns_entries(network_dns_local, "home_entries"),
-        target_by_id=target_by_id,
-    )
     home_storage_map = build_home_storage_map(
         backup=backup,
         estate_authority=estate_authority,

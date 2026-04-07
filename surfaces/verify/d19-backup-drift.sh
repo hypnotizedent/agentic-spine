@@ -5,34 +5,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CAP_SCRIPT="$ROOT/ops/plugins/infra/backup/bin/backup-status"
 BINDING_FILE="$ROOT/ops/bindings/domains/backup/backup.inventory.yaml"
-
-resolve_capability_script_path() {
-  local capability_id="$1"
-  local fallback_rel="$2"
-  local script_rel=""
-  if [[ -f "$ROOT/ops/capabilities.yaml" ]]; then
-    script_rel="$(
-      awk -v cap="$capability_id" '
-        $0 == "  " cap ":" { in_cap=1; next }
-        in_cap && $0 ~ /^  [^[:space:]][^:]*:/ { exit }
-        in_cap && $1 == "script_path:" { print $2; exit }
-      ' "$ROOT/ops/capabilities.yaml"
-    )"
-  fi
-  [[ -n "$script_rel" && "$script_rel" != "null" ]] || script_rel="$fallback_rel"
-  script_rel="${script_rel#./}"
-  printf '%s\n' "$ROOT/$script_rel"
-}
-
-resolve_family_lib_path() {
-  local capability_id="$1"
-  local fallback_script_rel="$2"
-  local lib_name="$3"
-  local script_path
-  script_path="$(resolve_capability_script_path "$capability_id" "$fallback_script_rel")"
-  printf '%s\n' "$(dirname "$(dirname "$script_path")")/lib/$lib_name"
-}
-
 POSTURE_FILE="$ROOT/ops/bindings/domains/backup/backup.posture.snapshot.yaml"
 
 fail(){ echo "D19 FAIL: $*" >&2; exit 1; }
