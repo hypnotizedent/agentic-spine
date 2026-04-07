@@ -14,6 +14,40 @@ EMAIL_INTENT_DIR="${VERIFY_RESPONSE_EMAIL_INTENT_DIR:-$SPINE_OUTBOX/alerts/email
 DEFAULT_PARENT_LOOP="${VERIFY_RESPONSE_PARENT_LOOP:-LOOP-SPINE-SELF-HEALING-E2E-20260301}"
 RECOVERY_DISPATCH_BIN="${VERIFY_RECOVERY_DISPATCH_BIN:-$SPINE_ROOT/ops/plugins/core/recovery/bin/recovery-dispatch}"
 
+# ── Intake policy: gate auto-file allowlist ──────────────────────────
+# Only gates on this list auto-file gaps on deterministic failure.
+# All other deterministic failures are logged as observations, not gaps.
+# To add a gate: append its ID to the allowlist file (one per line).
+# To auto-file everything (legacy behavior): set VERIFY_AUTOFILE_ALL=1.
+AUTOFILE_ALLOWLIST_FILE="${VERIFY_AUTOFILE_ALLOWLIST:-$SPINE_ROOT/ops/bindings/verify.autofile.allowlist}"
+OBSERVATION_LOG="${VERIFY_OBSERVATION_LOG:-$SPINE_STATE/verify-observations.ndjson}"
+AUTOFILE_ALL="${VERIFY_AUTOFILE_ALL:-0}"
+
+gate_on_autofile_allowlist() {
+  local gate_id="$1"
+  [[ "$AUTOFILE_ALL" == "1" ]] && return 0
+  [[ -f "$AUTOFILE_ALLOWLIST_FILE" ]] || return 1
+  grep -qxF "$gate_id" "$AUTOFILE_ALLOWLIST_FILE" 2>/dev/null
+}
+
+log_observation() {
+  local gate_id="$1"
+  local failure_class="$2"
+  local run_key="$3"
+  local scope="$4"
+  local timestamp_utc="$5"
+  mkdir -p "$(dirname "$OBSERVATION_LOG")"
+  jq -cn \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg gate_id "$gate_id" \
+    --arg failure_class "$failure_class" \
+    --arg run_key "$run_key" \
+    --arg scope "$scope" \
+    --arg source_ts "$timestamp_utc" \
+    '{observed_at:$ts,gate_id:$gate_id,failure_class:$failure_class,run_key:$run_key,scope:$scope,source_timestamp:$source_ts,disposition:"observation_not_filed"}' \
+    >> "$OBSERVATION_LOG"
+}
+
 fail() {
   echo "verify.response.loop FAIL: $*" >&2
   exit 1
@@ -107,7 +141,7 @@ command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
 latest_line="$(tail -n 1 "$HISTORY_FILE" 2>/dev/null || true)"
 if [[ -z "$latest_line" ]]; then
   echo "verify.response.loop: no history entries"
-  echo "0 freshness auto-reconciled, 0 gaps opened, 0 gate bugs flagged"
+  echo "0 freshness auto-reconciled, 0 gaps opened, 0 observations logged, 0 gate bugs flagged, 0 escalations notified"
   exit 0
 fi
 
@@ -119,7 +153,7 @@ fingerprint="$(jq -r '[.timestamp_utc // "", .run_key // "", .scope // ""] | joi
 last_fingerprint="$(cat "$CURSOR_FILE" 2>/dev/null || true)"
 if [[ -n "$last_fingerprint" && "$last_fingerprint" == "$fingerprint" ]]; then
   echo "verify.response.loop: already processed latest run ($fingerprint)"
-  echo "0 freshness auto-reconciled, 0 gaps opened, 0 gate bugs flagged"
+  echo "0 freshness auto-reconciled, 0 gaps opened, 0 observations logged, 0 gate bugs flagged, 0 escalations notified"
   exit 0
 fi
 
@@ -165,6 +199,7 @@ if ((${#freshness_ids[@]} > 0)); then
   fi
 fi
 
+observations_logged=0
 if ((${#deterministic_ids[@]} > 0)); then
   for gid in "${deterministic_ids[@]}"; do
     [[ -n "$gid" ]] || continue
@@ -186,8 +221,15 @@ if ((${#deterministic_ids[@]} > 0)); then
         "run_key=${run_key} scope=${scope} gate_id=${gid} action_id=${action_id} action_type=${action_type} message=${recovery_message}"
       escalations_notified=$((escalations_notified + 1))
     fi
-    queue_gap_candidate "$gid" "deterministic" "$gap_candidates_file"
-    gap_candidates=$((gap_candidates + 1))
+    # Intake policy: only auto-file gaps for allowlisted gates.
+    # All other failures are logged as observations, not gaps.
+    if gate_on_autofile_allowlist "$gid"; then
+      queue_gap_candidate "$gid" "deterministic" "$gap_candidates_file"
+      gap_candidates=$((gap_candidates + 1))
+    else
+      log_observation "$gid" "deterministic" "$run_key" "$scope" "$timestamp_utc"
+      observations_logged=$((observations_logged + 1))
+    fi
   done
 fi
 
@@ -276,4 +318,4 @@ fi
 "$CAP_RUNNER" cap run gaps.auto.close >/dev/null 2>&1 || true
 
 printf '%s\n' "$fingerprint" > "$CURSOR_FILE"
-echo "${freshness_reconciled} freshness auto-reconciled, ${gaps_opened} gaps opened, ${gate_bugs_flagged} gate bugs flagged, ${escalations_notified} escalations notified"
+echo "${freshness_reconciled} freshness auto-reconciled, ${gaps_opened} gaps opened, ${observations_logged} observations logged, ${gate_bugs_flagged} gate bugs flagged, ${escalations_notified} escalations notified"

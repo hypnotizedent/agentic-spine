@@ -208,6 +208,8 @@ def main() -> int:
     ap.add_argument("--dedupe-threshold", type=float, default=0.85)
     ap.add_argument("--lane-safe", action="store_true", help="Queue governed gap mutations instead of requiring direct git mutation in the current lane")
     ap.add_argument("--lane-safe-loop-id", help="Explicit parent loop for lane-safe gap requests (falls back to --loop-id/SPINE_LOOP_ID)")
+    ap.add_argument("--auto-file", action="store_true",
+                    help="Auto-file unmatched friction as gaps (legacy behavior). Without this flag, unmatched items become 'observed' and stay in the queue for explicit operator escalation.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
@@ -306,6 +308,20 @@ def main() -> int:
         filed_ids: list[str] = []
         filed_request_paths: list[str] = []
         skipped_duplicate_ids: list[str] = []
+        observed_count = 0
+
+        # Without --auto-file, unmatched friction becomes 'observed' (visible
+        # but not promoted to gap). Operator can escalate later with --auto-file.
+        if pending_batch and not args.auto_file and not args.dry_run:
+            for row_index in pending_indices:
+                rows[row_index]["status"] = "observed"
+                rows[row_index]["observed_at_utc"] = now
+                rows[row_index]["updated_at_utc"] = now
+                sqlite_status_updates.append(rows[row_index])
+                observed_count += 1
+            pending_batch = []
+            pending_indices = []
+
         if pending_batch and not args.dry_run:
             with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as tmp:
                 tmp.write(build_batch_yaml(pending_batch))
@@ -414,9 +430,11 @@ def main() -> int:
         "authority": authority,
         "queue": str(queue_path),
         "loop_id": loop_id,
+        "auto_file": args.auto_file,
         "queued_before": len(queued_items),
         "matched": matched_count,
         "filed": filed_count,
+        "observed": observed_count,
         "filing_mode": filing_mode,
         "fallback_used": fallback_used,
         "dry_run": args.dry_run,
