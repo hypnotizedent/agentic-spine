@@ -40,34 +40,29 @@ def resolve_state_root(root: Path) -> Path:
     )
 
 
-def read_active_loops(state_root: Path) -> list[dict]:
-    scopes_dir = state_root / "loop-scopes"
+def read_active_loops(root: Path) -> list[dict]:
+    """Read active loops from SQLite authority."""
+    import loops_sql_authority as lsa
+
+    db_path, _ = lsa.resolve_paths(root)
+    conn = lsa.connect(db_path)
+    lsa.ensure_schema(conn)
+    all_loops = lsa.list_loops(conn, status="all")
+    conn.close()
     loops = []
-    if not scopes_dir.is_dir():
-        return loops
-    for scope_file in sorted(scopes_dir.glob("*.scope.md")):
-        try:
-            text = scope_file.read_text(encoding="utf-8")
-            parts = text.split("---", 2)
-            if len(parts) < 3:
-                continue
-            fm = yaml.safe_load(parts[1].strip())
-            if not isinstance(fm, dict):
-                continue
-            status = str(fm.get("status", "")).strip().lower()
-            if status not in ("active", "open"):
-                continue
-            loops.append({
-                "loop_id": fm.get("loop_id", scope_file.stem),
-                "status": status,
-                "owner": fm.get("owner", ""),
-                "scope": fm.get("scope", ""),
-                "priority": fm.get("priority", ""),
-                "objective": str(fm.get("objective", ""))[:120],
-                "next_action": str(fm.get("next_action", ""))[:120] or None,
-            })
-        except Exception:
+    for loop in all_loops:
+        status = str(loop.get("status") or "").lower()
+        if status not in ("active", "open"):
             continue
+        loops.append({
+            "loop_id": loop.get("loop_id", ""),
+            "status": status,
+            "owner": loop.get("owner", ""),
+            "scope": loop.get("scope", ""),
+            "priority": loop.get("priority", ""),
+            "objective": str(loop.get("objective") or "")[:120],
+            "next_action": str(loop.get("next_action") or "")[:120] or None,
+        })
     return loops
 
 
@@ -101,7 +96,7 @@ def main() -> int:
     state_root = resolve_state_root(root)
     posture = os.environ.get("SPINE_EXECUTION_POSTURE", "discover")
 
-    loops = read_active_loops(state_root)
+    loops = read_active_loops(root)
     gaps = read_open_gaps(root)
 
     snapshot = {

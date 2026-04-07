@@ -13,7 +13,6 @@ CAPABILITIES="$ROOT/ops/capabilities.yaml"
 CAP_MAP="$ROOT/ops/bindings/capability_map.yaml"
 DISPATCH="$ROOT/ops/bindings/routing.dispatch.yaml"
 MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
-LOOP_SCOPE="$SPINE_STATE/loop-scopes/LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302.scope.md"
 
 ERRORS=0
 err() {
@@ -39,7 +38,6 @@ need_file "$CAPABILITIES"
 need_file "$CAP_MAP"
 need_file "$DISPATCH"
 need_file "$MANIFEST"
-need_file "$LOOP_SCOPE"
 
 if [[ "$ERRORS" -gt 0 ]]; then
   echo "D351 FAIL: $ERRORS precondition error(s)"
@@ -77,7 +75,7 @@ for script in surveillance-stack-status surveillance-event-query ha-surveillance
 done
 
 # ── Check 5: No forbidden required references in governance docs ──
-for doc in "$SSOT" "$ROLES" "$LOOP_SCOPE"; do
+for doc in "$SSOT" "$ROLES"; do
   docname="$(basename "$doc")"
   # shop-ha as required (negating references are allowed)
   if grep -qiP 'shop-ha.*(?:must|required|depends|prerequisite)' "$doc" 2>/dev/null; then

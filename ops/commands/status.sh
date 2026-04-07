@@ -82,7 +82,6 @@ state_root = Path(sys.argv[4])
 inbox_dir = Path(sys.argv[5])
 outbox_dir = Path(sys.argv[6])
 
-scopes_dir = state_root / "loop-scopes"
 orch_dir = state_root / "orchestration"
 gaps_file = spine / "ops" / "bindings" / "operational.gaps.yaml"
 loop_heartbeat_dir = state_root / "loop-heartbeats"
@@ -98,7 +97,12 @@ try:
 except Exception as exc:  # pragma: no cover - exercised via degraded status surface
     gaps_authority_import_error = exc
 
-FM_RE = re.compile(r"^---\s*$")
+loops_authority = None
+loops_authority_import_error = None
+try:
+    import loops_sql_authority as loops_authority
+except Exception as exc:  # pragma: no cover - exercised via degraded status surface
+    loops_authority_import_error = exc
 
 def display_path(path: Path) -> str:
     try:
@@ -106,40 +110,7 @@ def display_path(path: Path) -> str:
     except ValueError:
         return str(path)
 
-# ── Parse scope files ─────────────────────────────────────────────────────
-
-def parse_scope(path):
-    """Extract YAML frontmatter fields from a scope file."""
-    lines = path.read_text().splitlines()
-    in_fm = False
-    fm = {}
-    for line in lines:
-        if FM_RE.match(line):
-            if in_fm:
-                break
-            in_fm = True
-            continue
-        if in_fm and ":" in line:
-            key, _, val = line.partition(":")
-            fm[key.strip()] = val.strip().strip('"')
-
-    # Extract title from first heading after frontmatter
-    past_fm = False
-    fm_count = 0
-    for line in lines:
-        if FM_RE.match(line):
-            fm_count += 1
-            if fm_count >= 2:
-                past_fm = True
-            continue
-        if past_fm and line.startswith("#"):
-            title = re.sub(r"^#+\s*", "", line)
-            title = re.sub(r"^Loop Scope:\s*", "", title)
-            fm["_title"] = title
-            break
-
-    return fm
-
+# ── Collect loops from SQLite authority ───────────────────────────────────
 
 open_loops = []
 closed_loops = []
@@ -147,37 +118,64 @@ planned_loops = []
 all_scopes = []
 anomalies = []
 
-if scopes_dir.is_dir():
-    for f in sorted(scopes_dir.glob("*.scope.md")):
-        fm = parse_scope(f)
-        status = fm.get("status", "")
-        if status not in ("active", "draft", "open", "closed", "planned"):
+if loops_authority is not None:
+    _prior_spine_state = os.environ.get("SPINE_STATE")
+    _loops_conn = None
+    try:
+        os.environ["SPINE_STATE"] = str(state_root)
+        _db_path, _ = loops_authority.resolve_paths(spine)
+        _loops_conn = loops_authority.connect(_db_path)
+        loops_authority.ensure_schema(_loops_conn)
+        _all_db_loops = loops_authority.list_loops(_loops_conn, status="all")
+    except Exception as _exc:
+        _all_db_loops = []
+        anomalies.append(f"LOOP AUTHORITY DEGRADED: {_exc}")
+    finally:
+        if _loops_conn is not None:
+            _loops_conn.close()
+        if _prior_spine_state is None:
+            os.environ.pop("SPINE_STATE", None)
+        else:
+            os.environ["SPINE_STATE"] = _prior_spine_state
+
+    for _loop in _all_db_loops:
+        _st = str(_loop.get("status") or "").lower()
+        if _st not in ("active", "draft", "open", "closed", "planned",
+                        "completed", "deferred", "superseded", "abandoned", "landed"):
             continue
 
+        _blocked_raw = _loop.get("blocked_by")
+        if isinstance(_blocked_raw, list):
+            _blocked_text = ", ".join(str(b) for b in _blocked_raw if b)
+        else:
+            _blocked_text = str(_blocked_raw or "")
+
         entry = {
-            "loop_id": fm.get("loop_id", f.stem),
-            "status": status,
-            "severity": fm.get("severity", "-"),
-            "owner": fm.get("owner", "unassigned"),
-            "execution_mode": fm.get("execution_mode", ""),
-            "active_terminal": fm.get("active_terminal", ""),
-            "blocked_by": fm.get("blocked_by", ""),
-            "operator_note": fm.get("operator_note", ""),
-            "last_heartbeat_utc": fm.get("last_heartbeat_utc", ""),
-            "heartbeat_ttl_minutes": fm.get("heartbeat_ttl_minutes", ""),
-            "heartbeat_source": "scope",
-            "horizon": fm.get("horizon", "now"),
-            "execution_readiness": fm.get("execution_readiness", "runnable"),
-            "title": fm.get("_title", f.stem),
-            "file": display_path(f),
+            "loop_id": str(_loop.get("loop_id") or ""),
+            "status": _st,
+            "severity": str(_loop.get("priority") or "-"),
+            "owner": str(_loop.get("owner") or "unassigned"),
+            "execution_mode": str(_loop.get("execution_mode") or ""),
+            "active_terminal": "",
+            "blocked_by": _blocked_text,
+            "operator_note": "",
+            "last_heartbeat_utc": "",
+            "heartbeat_ttl_minutes": "",
+            "heartbeat_source": "",
+            "horizon": str(_loop.get("horizon") or "now"),
+            "execution_readiness": str(_loop.get("execution_readiness") or "runnable"),
+            "title": str(_loop.get("objective") or _loop.get("loop_id") or ""),
+            "file": "sqlite",
         }
         all_scopes.append(entry)
-        if status == "planned":
+        if _st == "planned":
             planned_loops.append(entry)
-        elif status in ("active", "draft", "open"):
+        elif _st in ("active", "draft", "open"):
             open_loops.append(entry)
-        else:
+        elif _st in ("closed", "completed", "deferred", "superseded", "abandoned", "landed"):
             closed_loops.append(entry)
+else:
+    anomalies.append(f"LOOP AUTHORITY DEGRADED: loops_sql_authority import failed: {loops_authority_import_error or 'unknown'}")
 
 # ── Parse orchestration manifests (bridge to scope-only view) ────────────
 # Orchestration loops may exist without a scope file in loop-scopes/.
@@ -227,7 +225,7 @@ if orch_dir.is_dir():
         if orch_status in ("active", "open"):
             open_loops.append(entry)
             # Flag missing scope file as anomaly
-            anomaly_msg = f"ORCH-SCOPE MISMATCH: {loop_id} has orchestration manifest but no scope file in loop-scopes/"
+            anomaly_msg = f"ORCH-DB MISMATCH: {loop_id} has orchestration manifest but no SQLite entry"
             anomalies.append(anomaly_msg)
         elif orch_status == "closed":
             closed_loops.append(entry)
