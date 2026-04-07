@@ -354,7 +354,7 @@ cat <<'SCAFFOLD_EOF'
 # ────────────────────────────────────────────────────────────────
 # 11) WORK RULES
 # ────────────────────────────────────────────────────────────────
-# - NO OPEN LOOPS = NO WORK → ./bin/ops loops list --open
+# - NO OPEN WORK = NO WORK → ./bin/ops status
 # - If uncertain: next step is READ-ONLY evidence command, not guesses
 # - One objective per session
 # - Always end with closeout: what changed + which receipts prove it

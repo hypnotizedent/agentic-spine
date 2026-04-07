@@ -13,6 +13,22 @@ make_checkout() {
   git -C "$path" config user.email "test@example.com"
 }
 
+run_capture() {
+  local __outvar="$1"
+  local __rcvar="$2"
+  shift 2
+
+  local _out
+  local _rc
+  set +e
+  _out="$("$@" 2>&1)"
+  _rc=$?
+  set -e
+
+  printf -v "$__outvar" '%s' "$_out"
+  printf -v "$__rcvar" '%s' "$_rc"
+}
+
 checkout="$tmpdir/front-door-clone"
 make_checkout "$checkout"
 
@@ -73,10 +89,16 @@ truth_env=(
   GAPS_YAML_PATH="$tmpdir/gaps.truth.yaml"
 )
 
-status_brief="$(
-  cd "$checkout" && \
-  env "${truth_env[@]}" "$OPS_BIN" status --brief 2>&1 || true
-)"
+pushd "$checkout" >/dev/null
+run_capture status_brief status_brief_rc env "${truth_env[@]}" "$OPS_BIN" status --brief
+run_capture status_brief_strict status_brief_strict_rc env "${truth_env[@]}" "$OPS_BIN" status --strict --brief
+popd >/dev/null
+
+if [[ "$status_brief_rc" -ne 0 ]]; then
+  echo "FAIL: ops status --brief should succeed by default when anomalies exist" >&2
+  echo "$status_brief" >&2
+  exit 1
+fi
 
 if [[ "$status_brief" != *"Gaps: 2 open (1 unlinked)"* ]]; then
   echo "FAIL: ops status --brief did not surface authoritative nonzero gaps" >&2
@@ -89,10 +111,21 @@ if [[ "$status_brief" == *"Gaps: 0 open"* ]]; then
   exit 1
 fi
 
-status_full="$(
-  cd "$checkout" && \
-  env "${truth_env[@]}" "$OPS_BIN" status 2>&1 || true
-)"
+if [[ "$status_brief_strict_rc" -ne 1 ]]; then
+  echo "FAIL: ops status --strict --brief should fail when anomalies exist" >&2
+  echo "$status_brief_strict" >&2
+  exit 1
+fi
+
+pushd "$checkout" >/dev/null
+run_capture status_full status_full_rc env "${truth_env[@]}" "$OPS_BIN" status
+popd >/dev/null
+
+if [[ "$status_full_rc" -ne 0 ]]; then
+  echo "FAIL: ops status full view should succeed by default when anomalies exist" >&2
+  echo "$status_full" >&2
+  exit 1
+fi
 
 if [[ "$status_full" != *"OPEN GAPS (2)"* ]]; then
   echo "FAIL: ops status full view did not show authoritative gap count" >&2
@@ -280,10 +313,16 @@ degraded_env=(
   GAPS_YAML_PATH="$tmpdir/missing.gaps.yaml"
 )
 
-degraded_status_brief="$(
-  cd "$checkout" && \
-  env "${degraded_env[@]}" "$OPS_BIN" status --brief 2>&1 || true
-)"
+pushd "$checkout" >/dev/null
+run_capture degraded_status_brief degraded_status_brief_rc env "${degraded_env[@]}" "$OPS_BIN" status --brief
+run_capture degraded_status_brief_strict degraded_status_brief_strict_rc env "${degraded_env[@]}" "$OPS_BIN" status --strict --brief
+popd >/dev/null
+
+if [[ "$degraded_status_brief_rc" -ne 0 ]]; then
+  echo "FAIL: ops status --brief should succeed by default when authority is degraded" >&2
+  echo "$degraded_status_brief" >&2
+  exit 1
+fi
 
 if [[ "$degraded_status_brief" != *"Gaps: unknown (authority degraded)"* ]]; then
   echo "FAIL: ops status --brief did not report degraded gap authority" >&2
@@ -296,10 +335,21 @@ if [[ "$degraded_status_brief" == *"Gaps: 0 open"* ]]; then
   exit 1
 fi
 
-degraded_status_full="$(
-  cd "$checkout" && \
-  env "${degraded_env[@]}" "$OPS_BIN" status 2>&1 || true
-)"
+if [[ "$degraded_status_brief_strict_rc" -ne 1 ]]; then
+  echo "FAIL: ops status --strict --brief should fail when authority is degraded" >&2
+  echo "$degraded_status_brief_strict" >&2
+  exit 1
+fi
+
+pushd "$checkout" >/dev/null
+run_capture degraded_status_full degraded_status_full_rc env "${degraded_env[@]}" "$OPS_BIN" status
+popd >/dev/null
+
+if [[ "$degraded_status_full_rc" -ne 0 ]]; then
+  echo "FAIL: ops status full view should succeed by default when authority is degraded" >&2
+  echo "$degraded_status_full" >&2
+  exit 1
+fi
 
 if [[ "$degraded_status_full" != *"OPEN GAPS (unknown)"* ]] || [[ "$degraded_status_full" != *"GAP STATE DEGRADED:"* ]]; then
   echo "FAIL: ops status full view did not expose degraded gap authority" >&2

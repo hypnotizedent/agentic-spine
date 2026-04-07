@@ -4,7 +4,7 @@
 > **Last verified:** 2026-02-15
 
 ```
-1. NO OPEN LOOPS = NO WORK  → ./bin/ops loops list --open
+1. NO OPEN WORK = NO WORK   → ./bin/ops status
 2. NO GUESSING = CAPABILITY-FIRST RAG  → run rag.anythingllm.ask, MCP optional, then rg fallback
 3. NO INVENTING             → match existing patterns
 4. FIX ONE THING            → verify before next
@@ -14,7 +14,8 @@
 ## Commands
 
 ```bash
-./bin/ops loops list --open  # See open work
+./bin/ops status             # Canonical open-work view
+./bin/ops status --json      # Machine-readable current work
 ./bin/ops cap list           # Discover available capabilities
 ./bin/ops cap run <name>     # Run governed capability
 ./bin/ops cap show <name>    # Show capability details

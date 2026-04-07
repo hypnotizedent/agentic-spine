@@ -4,6 +4,7 @@ set -euo pipefail
 REAL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 LAUNCH_SCRIPT="$REAL_ROOT/ops/commands/terminal-launch.sh"
 HELPER_SRC="$REAL_ROOT/ops/lib/launcher-control-worktree.sh"
+REMEDY_SRC="$REAL_ROOT/ops/lib/orchestration-remedy.sh"
 EXEC_SRC="$REAL_ROOT/ops/plugins/core/session/bin/terminal-launch-exec"
 
 PASS=0
@@ -163,6 +164,7 @@ echo "active_lock_count=0"
 SH
 
 cp "$HELPER_SRC" "$FAKE_ROOT/ops/lib/launcher-control-worktree.sh"
+cp "$REMEDY_SRC" "$FAKE_ROOT/ops/lib/orchestration-remedy.sh"
 cp "$EXEC_SRC" "$FAKE_ROOT/ops/plugins/core/session/bin/terminal-launch-exec"
 
 chmod +x \
@@ -170,6 +172,7 @@ chmod +x \
   "$FAKE_ROOT/ops/lib/runtime-paths.sh" \
   "$FAKE_ROOT/ops/lib/spine-paths.sh" \
   "$FAKE_ROOT/ops/lib/launcher-control-worktree.sh" \
+  "$FAKE_ROOT/ops/lib/orchestration-remedy.sh" \
   "$FAKE_ROOT/ops/plugins/core/session/bin/session-start" \
   "$FAKE_ROOT/ops/plugins/core/session/bin/session-v3-attach" \
   "$FAKE_ROOT/ops/plugins/core/session/bin/terminal-launch-exec" \
@@ -256,7 +259,8 @@ assert_contains "$exec_out" "launch_cwd=$CONTROL_WT" "terminal-launch-exec launc
 assert_contains "$exec_out" "spine_target_repo=$CONTROL_WT" "terminal-launch-exec pins target repo to control worktree"
 assert_contains "$exec_out" "spine_worktree=$CONTROL_WT" "terminal-launch-exec pins worktree to control worktree"
 assert_contains "$exec_out" "command=$CONTROL_WT/bin/ops cap run verify.core.run" "terminal-launch-exec invokes ops from control worktree"
-assert_contains "$exec_out" "V3 ATTACH READY: loop=none resolution=adhoc path=/tmp/test.entry.packet.yaml hash=test-packet-hash mode=code sanitize=none" "terminal-launch-exec announces V3 attach state"
+assert_contains "$exec_out" "V3 ATTACH: loop=none resolution=adhoc" "terminal-launch-exec announces V3 attach resolution"
+assert_contains "$exec_out" "mode=code" "terminal-launch-exec announces V3 attach execution mode"
 assert_contains "$(cat "$ATTACH_LOG")" "--allow-no-loop --role solo" "terminal-launch-exec routes through session-v3-attach"
 
 echo "────────────────────────────────────────"

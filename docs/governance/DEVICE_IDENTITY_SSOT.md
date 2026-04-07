@@ -395,9 +395,9 @@ than reviving the retired runtime.
 
 This SSOT does **not** track loop status (it drifts too easily).
 
-Use the loop ledger instead:
-- `./bin/ops loops list --open`
-- `$SPINE_STATE/loop-scopes/*.scope.md`
+Use the canonical work tracker instead:
+- `./bin/ops status`
+- `$SPINE_STATE/loop-scopes/*.scope.md` for raw scope drill-down only
 
 ---
 

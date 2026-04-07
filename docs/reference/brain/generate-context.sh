@@ -81,11 +81,11 @@ mkdir -p "$(dirname "$OUT")"
     echo ""
   fi
 
-  # ── Section 3: Open Loops ──
-  echo "## Open Loops"
+  # ── Section 3: Current Work ──
+  echo "## Current Work"
   echo ""
   if [[ -x "$SP/bin/ops" ]]; then
-    "$SP/bin/ops" loops list --open 2>/dev/null || echo "(could not fetch loops)"
+    "$SP/bin/ops" status 2>/dev/null || echo "(could not fetch unified status)"
   else
     echo "(ops not available)"
   fi

@@ -19,9 +19,9 @@ Manage multi-step work through the Open Loop Engine.
 
 ## Actions
 
-### List open loops:
+### List current work:
 ```
-./bin/ops loops list --open
+./bin/ops status
 ```
 
 ### Create a new loop:

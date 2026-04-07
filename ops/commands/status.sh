@@ -10,6 +10,7 @@
 #   ops status              Full status view
 #   ops status --json       Machine-readable JSON output
 #   ops status --brief      Counts only (for hooks/banners)
+#   ops status --strict     Exit nonzero when anomalies exist
 #
 # See: LOOP-MAILROOM-CONSOLIDATION-20260210
 # ═══════════════════════════════════════════════════════════════════════════
@@ -18,9 +19,54 @@ set -euo pipefail
 SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 source "$SPINE_REPO/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
-MODE="${1:-}"
 
-exec python3 - "$SPINE_REPO" "$MODE" "$SPINE_STATE" "$SPINE_INBOX" "$SPINE_OUTBOX" <<'PYTHON'
+usage() {
+  cat <<'EOF'
+ops status
+
+Canonical cold-start read surface for current spine work.
+
+Usage:
+  ops status [--brief|--json] [--strict]
+
+Flags:
+  --brief   Counts-only output for hooks/banners
+  --json    Machine-readable output
+  --strict  Exit nonzero when anomalies exist
+  -h, --help  Show this help
+
+Default behavior:
+  Human-facing output succeeds even when anomalies exist.
+  Use --strict when you explicitly want anomaly-sensitive exit codes.
+EOF
+}
+
+MODE=""
+STRICT="0"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --brief|--json)
+      MODE="$1"
+      shift
+      ;;
+    --strict)
+      STRICT="1"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ops status: unknown argument '$1'" >&2
+      echo >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+exec python3 - "$SPINE_REPO" "$MODE" "$STRICT" "$SPINE_STATE" "$SPINE_INBOX" "$SPINE_OUTBOX" <<'PYTHON'
 import json
 import os
 import re
@@ -31,9 +77,10 @@ from pathlib import Path
 
 spine = Path(sys.argv[1])
 mode = sys.argv[2] if len(sys.argv) > 2 else ""
-state_root = Path(sys.argv[3])
-inbox_dir = Path(sys.argv[4])
-outbox_dir = Path(sys.argv[5])
+strict_mode = (sys.argv[3] if len(sys.argv) > 3 else "0") == "1"
+state_root = Path(sys.argv[4])
+inbox_dir = Path(sys.argv[5])
+outbox_dir = Path(sys.argv[6])
 
 scopes_dir = state_root / "loop-scopes"
 orch_dir = state_root / "orchestration"
@@ -466,6 +513,8 @@ for loop in open_loops:
 
 if mode == "--json":
     print(json.dumps({
+        "mode": "json",
+        "strict": strict_mode,
         "open_loops": open_loops,
         "planned_loops": planned_loops,
         "open_gaps": open_gaps,
@@ -509,7 +558,7 @@ if mode == "--json":
             "anomalies": len(anomalies),
         }
     }, indent=2))
-    sys.exit(0)
+    sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
 
 if mode == "--brief":
     background_open = sum(1 for loop in open_loops if loop.get("execution_mode") == "background")
@@ -543,7 +592,7 @@ if mode == "--brief":
         parts.append(comms_oneliner)
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))
-    sys.exit(0 if len(anomalies) == 0 else 1)
+    sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
 
 # Full output
 print("=" * 72)
@@ -695,6 +744,7 @@ if anomalies:
 print(f"  {' | '.join(parts)}")
 print("=" * 72)
 
-# Exit code: 0 if clean, 1 if anomalies exist
-sys.exit(0 if len(anomalies) == 0 else 1)
+# Default human-facing status succeeds even when anomalies exist.
+# Use --strict when anomaly-sensitive exit codes are required.
+sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
 PYTHON

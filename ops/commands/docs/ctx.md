@@ -16,8 +16,7 @@ Load canonical session context for the current run.
 3. Read `docs/governance/HOST_DRIFT_POLICY.md` for drift policy.
 4. Show current git branch and recent commits.
 5. Run `./bin/ops status` for unified work status.
-6. Run `./bin/ops loops list --open` to check open loops.
-7. Check RAG availability: call `rag_health` (spine-rag MCP). Report "RAG: available" or "RAG: unavailable".
+6. Check RAG availability: call `rag_health` (spine-rag MCP). Report "RAG: available" or "RAG: unavailable".
 
 ## Output
 

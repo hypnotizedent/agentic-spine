@@ -12,7 +12,7 @@ List actionable governance/runtime gaps from canonical spine sources.
 ## Actions
 
 1. Run `./bin/ops cap run gaps.status` for gap-loop reconciliation.
-2. Review open loops with `./bin/ops loops list --open`.
+2. Review current work with `./bin/ops status`.
 3. Cross-check current gate status with `./bin/ops cap run spine.verify`.
 4. Report only unresolved gaps that are evidence-backed.
 

@@ -10,8 +10,10 @@
 #   ops loops summary                         Show loop counts by status/severity
 #   ops loops collect                         (deprecated) Legacy receipt scanner
 #
-# Canonical: loop-scopes/*.scope.md are the SSOT for open work; closed scope
-# history drains to archive/closed-loop-scopes/.
+# Canonical operator-facing current-work surface is `ops status`. This command
+# remains the raw loop-scope view for loop surgery and archival inspection.
+# Scope files remain the SSOT for loop state; closed scope history drains to
+# archive/closed-loop-scopes/.
 # See: LOOP-MAILROOM-CONSOLIDATION-20260210 for the migration rationale.
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -34,7 +36,7 @@ usage() {
 ops loops - Open Loop Engine (scope-file backed)
 
 Usage:
-  ops loops list [--open|--closed|--all]   List loops (default: open only)
+  ops loops list [--open|--closed|--all]   Raw loop-scope listing (default: open only)
   ops loops close <loop_id> --disposition <state> [--close-summary "<text>"]
                                            Mark loop as closed
   ops loops show <loop_id>                  Show loop scope file
@@ -44,6 +46,7 @@ Deprecated:
   ops loops collect                         Legacy receipt scanner (writes JSONL)
 
 Canonical source:
+  - operator front door: ./bin/ops status
   - live: .runtime/spine/state/loop-scopes/*.scope.md
   - archived closed: .runtime/spine/state/archive/closed-loop-scopes/*.scope.md
 EOF
@@ -183,6 +186,10 @@ list_loops() {
     local label="OPEN LOOPS"
     [[ "$filter" == "--closed" ]] && label="CLOSED LOOPS"
     [[ "$filter" == "--all" ]] && label="ALL LOOPS"
+
+    if [[ "$filter" == "--open" && -t 1 ]]; then
+        echo "DEPRECATED: operator-facing open-work view is 'ops status'; 'ops loops list --open' is raw loop-scope output." >&2
+    fi
 
     echo "=== $label ==="
     echo ""
@@ -607,7 +614,7 @@ collect_loops() {
     echo "Canonical tracking: $SCOPES_DIR/*.scope.md"
     echo ""
     echo "To see open work:  ops status"
-    echo "To list loops:     ops loops list --open"
+    echo "To inspect raw loop scopes: ops loops list --open"
     echo "To create a loop:  create a scope file in $SCOPES_DIR/"
 }
 

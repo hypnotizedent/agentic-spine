@@ -30,6 +30,6 @@ Canonical CLI: `./bin/ops`
 2) `./bin/ops start loop <ID>`   → legacy worktree bootstrap pattern
 3) `./bin/ops cap run <cap>`     → execute one governed capability (receipted)
 4) `./bin/ops run --inline "..."`→ enqueue work into the mailroom (watcher processes)
-5) `./bin/ops loops list --open` → show current work (no silent TODOs)
+5) `./bin/ops status`            → show current work (no silent TODOs)
 
 Everything else is a plugin.
