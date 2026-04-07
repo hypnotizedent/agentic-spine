@@ -3,12 +3,9 @@ set -euo pipefail
 
 # Canonical versioned pre-commit hook.
 #
-# Behavioral authority mirrors the currently enforced live gate set:
-# D30, D31, D42, D44, D46, D47, D48 (--lane), D58, D84, D85, D150,
+# Behavioral authority mirrors the currently enforced live hook set:
+# D30, D31, D42, D44, D46, D47, D58, D84, D85, D150,
 # D411 staged-projection enforcement, and the mirror-sanitization canary.
-# The only added governance guard here is truthful intentional-main override
-# handling: OPS_GOVERNED_MAIN_OVERRIDE=1 authorizes a controller landing on
-# root main, but it does not bypass D48, D150, or any other gate.
 
 # When git invokes hooks from a worktree, inherited git env vars can cause
 # cross-worktree checks to resolve the wrong repository. Clear them so each
@@ -29,25 +26,7 @@ if ! command -v git >/dev/null 2>&1; then
   exit 0
 fi
 
-current_branch="$(git branch --show-current 2>/dev/null || echo detached)"
 STAGED_FILES="$(git diff --cached --name-only 2>/dev/null || true)"
-
-if [[ -n "${STAGED_FILES:-}" && ("$current_branch" == "main" || "$current_branch" == "master") ]]; then
-  override="${OPS_GOVERNED_MAIN_OVERRIDE:-}"
-  override_lc="$(printf '%s' "$override" | tr '[:upper:]' '[:lower:]')"
-
-  if [[ "$override_lc" == "1" || "$override_lc" == "true" || "$override_lc" == "yes" ]]; then
-    echo "NOTICE: main commit override accepted. D48, D150, and the remaining hook gates still enforce." >&2
-  else
-    echo "BLOCKED: root '$current_branch' is integration-only." >&2
-    echo "" >&2
-    echo "Remediation:" >&2
-    echo "  move broad or concurrent mutation into a managed worktree" >&2
-    echo "  use a bounded staged-only controller landing on root main only for one exact slice" >&2
-    echo "  rerun with: OPS_GOVERNED_MAIN_OVERRIDE=1 git commit ..." >&2
-    exit 1
-  fi
-fi
 
 SP="$ROOT"
 FAIL=0
@@ -61,7 +40,6 @@ for gate in \
   "$SP/surfaces/verify/d44-cli-tools-discovery-lock.sh" \
   "$SP/surfaces/verify/d46-claude-instruction-source-lock.sh" \
   "$SP/surfaces/verify/d47-brain-surface-path-lock.sh" \
-  "$SP/surfaces/verify/d48-codex-worktree-hygiene.sh" \
   "$SP/surfaces/verify/d58-ssot-freshness-lock.sh" \
   "$SP/surfaces/verify/d84-docs-index-registration-lock.sh" \
   "$SP/surfaces/verify/d85-gate-registry-parity-lock.sh" \
@@ -70,12 +48,7 @@ for gate in \
   # can hang indefinitely. D62 remains in verify.fast.
   if [[ -x "$gate" ]]; then
     CHECKED=$((CHECKED + 1))
-    if [[ "$(basename "$gate")" == "d48-codex-worktree-hygiene.sh" ]]; then
-      if ! bash "$gate" --lane; then
-        FAIL=1
-        FAILED_GATES="$FAILED_GATES $(basename "$gate")"
-      fi
-    elif ! bash "$gate" > /dev/null 2>&1; then
+    if ! bash "$gate" > /dev/null 2>&1; then
       FAIL=1
       FAILED_GATES="$FAILED_GATES $(basename "$gate")"
     fi

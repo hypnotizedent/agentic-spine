@@ -32,10 +32,10 @@ Until `2026-05-07`, no new gates, contracts, registries, bindings, governance do
 ## Daily Workflow
 
 ```bash
-# Root main stays clean and integration-only.
+# Root main stays usable and bounded.
 ./bin/ops cap run session.v3.attach -- --allow-no-loop
 
-# Broad or concurrent mutation belongs in a managed worktree.
+# Use a managed worktree when isolation helps.
 ./bin/ops cap run session.execution.lane.bootstrap \
   --type fix \
   --branch <branch-name> \
@@ -100,9 +100,8 @@ outside governed paths, or autonomous transport into this ceremony.
 
 1. **Use governed capabilities, not raw shell.** If `./bin/ops cap list` shows a capability, use it. Raw bash/git/ssh is a last resort.
 2. **Mutating work requires a loop.** No loop active for non-trivial changes? Create one with `loops.create` first. No floating WIP.
-3. **Root `main` is integration-only.** Root `main` is not a general mutation lane. Broad or concurrent work belongs in managed worktrees.
-4. **Bounded controller landing is the only root-main exception.** The only allowed dirty state on root `main` is a governed controller-owned `staged_only` landing window for one exact slice.
-5. **`OPS_GOVERNED_MAIN_OVERRIDE=1` is not a D48 bypass.** It authorizes intentional main commits only. D48, D150, and the rest of the hook/verify gates still enforce.
+3. **Keep mutations bounded.** Use exact-slice landing on `main` when that is enough; use a worktree when you need isolation.
+4. **Use scoped landing when helpful.** `git.stage.commit.scoped` remains the safest path for exact-slice landings on `main`.
 6. **Shared root-lane mutation is blocking contention.** Multiple terminals are independent only when they do not share the same root checkout, git index, or protected hotspot surfaces. Separate managed worktrees are the normal parallel model.
 7. **Verify after mutations.** After committing, run `./bin/ops cap run verify.run -- fast` to confirm no gates broke.
 8. **Run git/worktree hygiene as an explicit maintenance pass.** Inventory with `python3 ./ops/plugins/core/lifecycle/bin/git-worktree-hygiene --brief`. Safe prune remains dry-run by default and only applies with `--apply`. Policy and operator notes live in `docs/governance/GIT_WORKTREE_HYGIENE.md`.
@@ -137,7 +136,7 @@ Root `main` is the controller-owned integration lane. It is for attach, review, 
 Broad work, concurrent work, and anything that cannot be landed as one exact controller slice belong in managed worktrees. Separate managed worktrees are the normal parallel work model.
 
 ### Rule 3: Bounded Controller Landing
-The only allowed dirty state on root `main` is a governed controller-owned `staged_only` landing window for one exact slice. Enter from a clean root checkout, stage only the intended slice, land it, and return root `main` to clean state.
+Prefer exact-slice landings on `main` when you want bounded mutation with explicit staging. Use a worktree when it materially helps.
 
 ### Rule 4: Blocking Shared-Lane Contention
 Multiple terminals are independent only when they do not share the same root checkout, git index, or protected hotspot surfaces. Shared root-checkout or shared-index mutation is blocking contention, not parallel work.
@@ -163,7 +162,7 @@ Workers execute in managed worktrees or on remote systems with a declared, disjo
 Work is done when runtime, control plane, bindings/projections, and residue all agree. Missing propagation must fail loudly (gate failure, verify failure, session attach block) instead of relying on operator memory.
 
 ### Rule 9: Root Main Cleanliness At Attach
-`session.v3.attach` is the only entry. It can auto-heal governed generated drift, stale cleanup-candidate stashes, fast-forward-safe main drift, and floating worktree residue. That startup behavior does not turn root `main` into a general mutation lane.
+`session.v3.attach` is the only entry. It can auto-heal governed generated drift, stale cleanup-candidate stashes, fast-forward-safe main drift, and floating worktree residue.
 
 **Auto-healed on attach:**
 - Governed generated drift (docs projections, gate metadata) → restored from HEAD
@@ -219,7 +218,7 @@ which collapses ceremony to attach → do → receipt without loop/gap/dispositi
 **Hotspot guard**: If a fast-lane commit touches any Rule 7 surface, the commit is
 rejected and the session must be re-attached with full ceremony (loop required).
 
-Fast-lane reduces loop/gap ceremony. It does not make root `main` a general mutation lane, it does not make worktrees optional for broad or concurrent work, and it does not bypass D48 or D150.
+Fast-lane reduces loop/gap ceremony. Use worktrees when they help; use exact-slice landing when they do not.
 
 ## Execution Lane Bootstrap (Phase 2)
 
@@ -339,7 +338,7 @@ Loop closeout ceremony:
 1. One doc per concern: add sections to an existing canonical doc before creating a new file.
 2. One script per concern: extend existing scripts with flags/subcommands instead of creating near-duplicates.
 3. Delete legacy: `.legacy` copies are migration debt and must be removed once active scripts are in place.
-4. One override path: use `OPS_GOVERNED_MAIN_OVERRIDE=1` for intentional controller landings on `main`; it is not a D48 or D150 bypass.
+4. Use `git.stage.commit.scoped` for exact-slice landings when you want bounded staging and push in one flow.
 5. One daily remote: `origin` (Gitea) is canonical operational truth; `github` is publication-only.
 
 ## Consolidated Authority Notes

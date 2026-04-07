@@ -96,14 +96,14 @@ mailroom/outbox/proposals/
 ## Manifest Format Example
 
 ```yaml
-proposal: CP-20260210-220000__fix-d48-bug
+proposal: CP-20260210-220000__fix-example-bug
 agent: claude-cowork
 created: 2026-02-10T22:00:00Z
-loop_id: LOOP-D48
+loop_id: LOOP-EXAMPLE
 changes:
   - action: create
     path: ops/plugins/example/bin/fix.sh
-    reason: "Add fix for d48 bug in provisioning"
+    reason: "Add fix for provisioning bug"
   - action: modify
     path: ops/capabilities.yaml
     reason: "Register new fix capability"

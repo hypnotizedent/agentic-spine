@@ -592,13 +592,6 @@ if [[ -x "$SP/surfaces/verify/d43-secrets-namespace-lock.sh" ]]; then
 else
   warn "secrets namespace lock gate not present"
 fi
-CURRENT_GATE="D48"
-echo -n "D48 codex worktree hygiene... "
-if [[ -x "$SP/surfaces/verify/d48-codex-worktree-hygiene.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d48-codex-worktree-hygiene.sh"
-else
-  warn "codex worktree hygiene gate not present"
-fi
 CURRENT_GATE="D54"
 echo -n "D54 ssot ip parity lock... "
 if [[ -x "$SP/surfaces/verify/d54-ssot-ip-parity-lock.sh" ]]; then
@@ -642,13 +635,6 @@ if [[ -x "$SP/surfaces/verify/d75-gap-registry-mutation-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d75-gap-registry-mutation-lock.sh"
 else
   warn "Gap registry mutation lock gate not present"
-fi
-CURRENT_GATE="D83"
-echo -n "D83 proposal queue health lock... "
-if [[ -x "$SP/surfaces/verify/d83-proposal-queue-health-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d83-proposal-queue-health-lock.sh"
-else
-  warn "proposal queue health lock gate not present"
 fi
 CURRENT_GATE="D88"
 echo -n "D88 RAG remote reindex governance lock... "

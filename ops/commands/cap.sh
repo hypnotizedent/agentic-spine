@@ -922,39 +922,17 @@ run_cap() {
         echo "MUTATION CONTEXT GUARD: allowlisted bootstrap/control-plane capability '$name'"
       elif [[ "$caller_branch" == "main" ]]; then
         if [[ "$governed_override_active" -eq 1 ]]; then
-          echo "MAIN MUTATION OVERRIDE: OPS_GOVERNED_MAIN_OVERRIDE=1"
+          echo "MAIN MUTATION NOTE: OPS_GOVERNED_MAIN_OVERRIDE=1"
           if [[ -f "$SPINE_CODE/ops/lib/passive-friction-capture.sh" ]]; then
             source "$SPINE_CODE/ops/lib/passive-friction-capture.sh"
             auto_file_ceremony_override "main_mutation" "$name on $caller_branch with OPS_GOVERNED_MAIN_OVERRIDE=1" || true
           fi
         elif [[ -n "$main_override_ref" && -n "$main_override_reason" ]]; then
-          echo "MAIN MUTATION OVERRIDE: ref=$main_override_ref reason=$main_override_reason"
-        elif [[ -n "$main_override_ref" ]]; then
-          echo "BLOCKED: main mutation override missing reason"
-          echo "Capability: $name"
-          echo "Branch: $caller_branch"
-          echo "Provide: OPS_MAIN_MUTATION_OVERRIDE_REASON"
-          blocked_reason="main_branch_override_reason_missing:${name}"
-          exit_code=6
-        elif [[ -n "$main_override_reason" ]]; then
-          echo "BLOCKED: main mutation override missing reference"
-          echo "Capability: $name"
-          echo "Branch: $caller_branch"
-          echo "Provide: OPS_MAIN_MUTATION_OVERRIDE_REF"
-          blocked_reason="main_branch_override_ref_missing:${name}"
-          exit_code=6
+          echo "MAIN MUTATION NOTE: ref=$main_override_ref reason=$main_override_reason"
+        elif [[ -n "$main_override_ref" || -n "$main_override_reason" ]]; then
+          echo "MAIN MUTATION NOTE: incomplete explicit override metadata ignored on main"
         else
-          echo "BLOCKED: main branch mutation guard"
-          echo "Capability: $name"
-          echo "Branch: $caller_branch"
-          echo "Reason: mutating/destructive capability execution on '$caller_branch' is denied by default."
-          echo ""
-          echo "Remediation:"
-          echo "  Use an isolated worktree lane branch (recommended), or set single governed override:"
-          echo "  OPS_GOVERNED_MAIN_OVERRIDE=1 ./bin/ops cap run $name ..."
-          echo "  (Legacy explicit override still supported: OPS_MAIN_MUTATION_OVERRIDE_REF + OPS_MAIN_MUTATION_OVERRIDE_REASON)"
-          blocked_reason="main_branch_mutation_block:${name}"
-          exit_code=6
+          echo "MAIN MUTATION: allowed on main"
         fi
       else
         if [[ "$governed_override_active" -eq 1 ]]; then

@@ -36,7 +36,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `mint.operator.storage.status`
 - `mint.seeds.query`
 
-## Gates (45)
+## Gates (44)
 - `D124`
 - `D125`
 - `D126`
@@ -73,7 +73,6 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D31`
 - `D42`
 - `D44`
-- `D48`
 - `D58`
 - `D62`
 - `D63`

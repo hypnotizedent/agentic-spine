@@ -31,7 +31,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `immich.reconcile.scan`
 - `immich.status`
 
-## Gates (18)
+## Gates (17)
 - `D124`
 - `D125`
 - `D126`
@@ -41,7 +41,6 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D31`
 - `D42`
 - `D44`
-- `D48`
 - `D58`
 - `D62`
 - `D63`

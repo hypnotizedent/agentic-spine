@@ -85,7 +85,7 @@ Until `2026-05-07`, do not create new gates, contracts, registries, bindings, go
      - objective (single sentence)
      - done check (how completion will be verified)
      - first command (deterministic first execution step)
-   - If the task mutates tracked repo surfaces, bootstrap or enter a managed worktree unless this is a bounded controller landing of one exact slice on root `main`.
+   - If the task mutates tracked repo surfaces, use a worktree when it helps isolation or use `git.stage.commit.scoped` for an exact slice on `main`.
    - If capability syntax is uncertain, run `./bin/ops cap show <capability>` before execution. Do not guess.
    - Discover capabilities with `./bin/ops cap list` when needed. Do not invent commands.
 3. **Trace truth**
@@ -96,9 +96,7 @@ Until `2026-05-07`, do not create new gates, contracts, registries, bindings, go
 4. **Operate through the spine**
    - Every mutating command must go through `./bin/ops cap run <capability>` so receipts land in `~/code/.evidence/spine/sessions/`.
    - **Spine is the runtime environment.** Workbench file edits are allowed when a spine loop requires it.
-   - **Root `main` is integration-only.** Root `main` is not a general mutation lane. Normal mutation belongs in managed worktrees.
-   - **Bounded controller landing is the only root-main exception.** The only governed dirty root-main state is an explicit controller-owned `staged_only` landing window for one exact slice.
-   - **`OPS_GOVERNED_MAIN_OVERRIDE=1` is only intentional-main override.** It does not bypass D48 or D150.
+   - **Keep mutations bounded.** Use exact-slice landing on `main` when that is enough; use a worktree when you need isolation.
    - **Shared root-lane mutation is blocking contention.** Multiple terminals are independent only when they do not share the same root checkout, git index, or protected hotspot surfaces. Separate managed worktrees are the normal parallel model.
    - **Git authority:** Gitea (`origin`) is canonical operational truth; GitHub is publication-only.
    - **Downstream runtime extraction remains future work.** It is unrelated to this workflow rule.
@@ -318,7 +316,6 @@ All loop scope files in `$SPINE_STATE/loop-scopes/` (externalized runtime) MUST 
 - **Receipts + ledger:** `~/code/.evidence/spine/sessions/**/receipt.md` are the primary proof trail. The runtime ledger at `~/code/.runtime/spine/state/ledger.csv` is the canonical run-history index (externalized per `mailroom.runtime.contract.yaml`).
 - **Drift gates (enforced by `spine.verify`):**
   - D42 code-path case lock (keeps `~/code/...` canonical, blocks drift like `~/Code/...`).
-  - D48 worktree/root-lane hygiene (enforces managed-worktree default, integration-only root `main`, and lifecycle-aware cleanup/classification).
   - D34 loop ledger integrity (catches loop state inconsistencies).
   - D10/D31 logs/output sink locks (keeps output under mailroom, prevents home-root sinks).
   - D61 session-loop traceability freshness (forces periodic closeout discipline via `agent.session.closeout`).
@@ -334,7 +331,7 @@ Change proposals (`mailroom/outbox/proposals/CP-*`) follow the governed lifecycl
 
 **When to supersede:** Run `proposals.supersede <CP> --reason "why"` when a proposal's changes are obsolete, already applied via another path, or replaced by later work.
 
-**When to archive:** Run `proposals.archive` periodically (D83 tracks queue health). Applied proposals are archived after 3 days, superseded after 3 days.
+**When to archive:** Run `proposals.archive` periodically. Applied proposals are archived after 3 days, superseded after 3 days.
 
 **Queue ownership:** Terminal C control plane owns queue hygiene. `proposals.status` shows health + SLA breaches.
 
@@ -353,7 +350,7 @@ Every open gap in `operational.gaps.yaml` must be linked to an active loop (`par
 
 ## Common Causes Of "Non-Uniform Workflow"
 
-- Work started without any loop anchor or managed worktree. Root `main` is integration-only, so normal mutation belongs in managed worktrees and every non-trivial change should still have a loop scope for traceability. Without one you get floating WIP: no scope anchor, no session log, and no governed mutation lane.
+- Work started without any loop anchor or bounded mutation plan. Without one you get floating WIP: no scope anchor, no session log, and no clear cutline for what changed.
 - Multiple terminals touched the same root checkout, git index, or protected hotspot surfaces. That is blocking contention, not parallel work. Separate managed worktrees are fine; shared root-lane mutation is not.
 - Optional GitHub drift (`origin` vs `github`) during non-release work. Canonical operational authority remains `origin`; GitHub drift is tolerated and repaired only for explicit publication.
 - Loop closeout not consistently done. Without updating the loop scope with receipts and closing it, the next agent can't tell what's already proven and repeats work. D61 + `agent.session.closeout` is the mechanism meant to prevent this.
@@ -366,10 +363,10 @@ When using managed worktrees:
 1. **Create** — default lane flow is `ops wave start <WAVE_ID> --objective "..."` with auto workspace provisioning (`~/code/.runtime/spine/tmp/worktrees/<repo>/<WAVE_ID>`, branch `codex/<WAVE_ID>`). Manual `git worktree add` is fallback only.
 2. **Base** — branch from `origin/main` (fetch first) when provisioning manual branches; never stack codex branches without explicit base intent.
 3. **Classify before cleanup** — run `./bin/ops cap run worktree.lifecycle.reconcile -- --json` to see owner/state (`wave`, `loop`, `none`) and stale candidates.
-4. **Retire explicitly** — lifecycle closeout first (`ops wave close`, `ops loops close`), then optional git cleanup. D48 now enforces lifecycle violations plus the integration-only root-main rule.
+4. **Retire explicitly** — lifecycle closeout first (`ops wave close`, `ops loops close`), then optional git cleanup.
 5. **Cleanup in phases** — run `worktree.lifecycle.cleanup` in strict order: `report-only` -> `archive-only` -> `delete` (token-gated).
 6. **Auto-rehydrate missing paths** — if a lane worktree path is missing but branch exists, run `worktree.lifecycle.rehydrate` instead of creating ad-hoc roots.
-7. **Land on root main only as an exception** — the controller may use root `main` only for one exact `staged_only` landing slice from a clean checkout. `OPS_GOVERNED_MAIN_OVERRIDE=1` marks intent; it does not bypass D48 or D150.
+7. **Land exact slices directly when useful** — use `git.stage.commit.scoped` when you want bounded staging on `main`; use a worktree when you need isolation.
 
 ---
 
@@ -379,7 +376,7 @@ When using managed worktrees:
 - [ ] In spine repo
 - [ ] Secrets gating verified
 - [ ] Session bundle reviewed (`SESSION_PROTOCOL`, `brain/README`, `GOVERNANCE_INDEX`)
-- [ ] Managed worktrees reconciled; root `main` clean unless in an explicit controller landing window
+- [ ] Managed worktrees reconciled when used
 - [ ] Open loops recorded
 - [ ] Receipts generated for work
 

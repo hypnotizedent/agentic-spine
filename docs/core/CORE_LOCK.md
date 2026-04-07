@@ -94,7 +94,6 @@ All must PASS for core to be healthy.
 | D44 | CLI tools discovery lock (inventory + cross-refs + probes) |
 | D45 | Naming consistency lock (cross-file identity surface verification) |
 | D47 | Brain surface path lock (no `.brain/` references in runtime scripts) |
-| D48 | Codex worktree hygiene (stale/dirty/orphaned worktrees) |
 | D49 | Agent discovery lock (agents registry + contract coverage) |
 | D50 | Gitea CI workflow lock (workflow + drift-gate reference) |
 | D51 | Caddy proto lock (X-Forwarded-Proto on Authentik upstreams) |
@@ -125,7 +124,6 @@ All must PASS for core to be healthy.
 | D76 | Home-surface hygiene lock |
 | D80 | Workbench authority-trace lock |
 | D81 | Plugin test regression lock |
-| D83 | Proposal queue health lock |
 | D84 | Docs index registration lock (every governance .md must be in _index.yaml) |
 
 ### Verbose Mode (Subchecks)

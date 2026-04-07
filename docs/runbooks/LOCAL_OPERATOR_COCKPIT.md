@@ -7,7 +7,7 @@ scope: local-operator-daily-standard
 
 # Local Operator Cockpit
 
-How to operate from the Mac day-to-day without turning root `main` into a general mutation lane.
+How to operate from the Mac day-to-day without unnecessary ceremony.
 
 ## Start of Day
 
@@ -25,7 +25,7 @@ git checkout main
 git pull --ff-only origin main
 ```
 
-Root `main` is integration-only. It should not accumulate normal work-in-progress.
+Keep `main` bounded. Use exact-slice landing for small changes and worktrees when isolation helps.
 
 ## Parallel Work Model
 
@@ -64,7 +64,7 @@ Root `main` may be dirty only during an explicit controller-owned `staged_only` 
   --push
 ```
 
-`git.stage.commit.scoped` is the governed controller landing path for one exact slice on root `main`. It does not bypass D48 or D150, and it does not make root `main` a normal mutation lane.
+`git.stage.commit.scoped` is the exact-slice landing path when you want bounded staging on `main`.
 
 ## Snapshot Drift
 
@@ -96,7 +96,7 @@ git checkout -- ops/bindings/*.snapshot.yaml
 
 | Trap | Fix |
 |------|-----|
-| Treating root `main` as a normal work lane | Move broad or concurrent mutation into a managed worktree |
+| Broad or concurrent mutation | Use a managed worktree when isolation is actually helpful |
 | Multiple terminals touching the same root checkout/index | Stop and separate the work into managed worktrees or one controller landing lane |
 | Recovery state dirs in git status | Add `ops/plugins/core/recovery/state/` to `.gitignore` |
 | Merged worktrees accumulating | Prune after confirming clean + merged |

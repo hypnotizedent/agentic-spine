@@ -4,7 +4,7 @@ authority_state: projection
 projection_of:
   - ops/bindings/terminal.worker.catalog.yaml
 owner: "@ronny"
-last_verified: 2026-03-29
+last_verified: 2026-04-07
 scope: worker-usage-spine-control-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -41,7 +41,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `verify.core.run`
 - `verify.domain.run`
 
-## Gates (24)
+## Gates (23)
 - `D124`
 - `D126`
 - `D127`
@@ -62,7 +62,6 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D425`
 - `D426`
 - `D427`
-- `D48`
 - `D62`
 - `D63`
 - `D67`

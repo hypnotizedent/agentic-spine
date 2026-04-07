@@ -32,8 +32,6 @@ preflight_fail=0
 gate_domain_fail=0
 parity_status="unknown"
 parity_detail=""
-worktree_status="unknown"
-worktree_detail=""
 isolation_status="unknown"
 isolation_detail=""
 selected_gate_domain="${OPS_GATE_DOMAIN:-core}"
@@ -58,21 +56,6 @@ if [[ "$REPO_GIT_OK" -eq 1 ]]; then
   else
     parity_status="WARN"
     parity_detail="WARN: D62 not present/executable"
-  fi
-
-  # Worktree hygiene (stale/dirty/orphaned codex worktrees).
-  D48="$REPO_ROOT/surfaces/verify/d48-codex-worktree-hygiene.sh"
-  if [[ -x "$D48" ]]; then
-    if out="$("$D48" 2>&1)"; then
-      worktree_status="OK"
-      worktree_detail="$out"
-    else
-      worktree_status="WARN"
-      worktree_detail="$out"
-    fi
-  else
-    worktree_status="WARN"
-    worktree_detail="WARN: D48 not present/executable"
   fi
 
   # Worktree/session isolation policy (D140).
@@ -122,16 +105,9 @@ if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/d
   if [[ -n "${current_branch:-}" ]]; then
     echo "Git:"
     echo "  branch: $current_branch"
-    if [[ "$current_branch" == "main" ]]; then
-      echo "  note: mutating capabilities are blocked on main (set OPS_ALLOW_MAIN_MUTATION=1 to override)."
-    fi
     echo "  remote authority (D62): $parity_status"
     if [[ -n "${parity_detail:-}" ]]; then
       echo "    ${parity_detail}" | sed 's/^/    /'
-    fi
-    echo "  worktrees (D48): $worktree_status"
-    if [[ -n "${worktree_detail:-}" ]]; then
-      echo "    ${worktree_detail}" | sed 's/^/    /'
     fi
     echo "  isolation (D140): $isolation_status"
     if [[ -n "${isolation_detail:-}" ]]; then

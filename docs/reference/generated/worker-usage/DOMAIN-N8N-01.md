@@ -35,7 +35,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `n8n.workflows.snapshot.status`
 - `n8n.workflows.update`
 
-## Gates (22)
+## Gates (21)
 - `D124`
 - `D125`
 - `D126`
@@ -48,7 +48,6 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D31`
 - `D42`
 - `D44`
-- `D48`
 - `D58`
 - `D62`
 - `D63`

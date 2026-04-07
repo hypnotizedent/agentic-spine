@@ -51,10 +51,8 @@ The repo contains the **governance kernel**. Runtime state is externalized so th
 
 ### Workflow Lanes
 
-- Root `main` is integration-only. It is not the normal mutation lane.
 - Broad or concurrent work belongs in managed worktrees.
-- The only allowed dirty state on root `main` is an explicit controller-owned `staged_only` landing window for one exact slice.
-- `OPS_GOVERNED_MAIN_OVERRIDE=1` is only intentional-main override. It does not bypass D48 or D150.
+- Use `git.stage.commit.scoped` when you want an exact-slice landing on `main`.
 - Multiple terminals sharing the same root checkout, git index, or protected hotspot surfaces are blocking contention, not parallel work.
 - Separate managed worktrees are the normal parallel model.
 - Downstream runtime extraction remains future work and does not change this workflow rule.
@@ -84,7 +82,7 @@ This is the **mandatory entry point** for every terminal session. It:
 5. Emits session exports (`SPINE_SESSION_ID`, etc.)
 
 The `--allow-no-loop` flag permits adhoc work without a governing loop. For production use, every session should be bound to a loop.
-Session attach does not make direct mutation on root `main` the default path; it bootstraps the governed context that decides whether you stay on the clean integration checkout or move into a managed worktree.
+Session attach bootstraps governed context. Use a worktree when you want isolation; use scoped landing on `main` when you do not.
 
 ## 4. Run Verification
 
@@ -245,18 +243,18 @@ Secrets are injected at runtime through `secrets.exec`, which reads from your co
 # Run verification
 ./bin/ops cap run verify.run -- fast
 
-# Controller-only exception on root main: one exact staged landing slice
+# Exact-slice landing on main
 ./bin/ops cap run git.stage.commit.scoped -- \
   --path <exact-file> \
   --message "feat(domain): description" \
   --push
 ```
 
-`git.stage.commit.scoped` is the standard controller root-main landing helper. It enforces exact-slice staging, fails on unrelated dirt, and can push in the same flow. It is not a D48 bypass and it is not the standard path for day-to-day mutation.
+`git.stage.commit.scoped` is the standard exact-slice landing helper. It enforces explicit staging, fails on unrelated dirt, and can push in the same flow.
 
 ## Next Steps
 
-- Read [SPINE.md](governance/SPINE.md) — the minimal operating contract for the integration-only root-main workflow
+- Read [SPINE.md](governance/SPINE.md) — the minimal operating contract for bounded mutation flow
 - Explore `ops/bindings/` — the machine-evaluable contract surface
 - Run `./bin/ops cap list` — discover the full capability inventory
 - Check `surfaces/verify/` — understand the gate verification system

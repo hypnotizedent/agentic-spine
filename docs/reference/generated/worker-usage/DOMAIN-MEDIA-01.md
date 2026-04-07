@@ -31,7 +31,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `media.stack.restart`
 - `media.status`
 
-## Gates (34)
+## Gates (33)
 - `D106`
 - `D107`
 - `D108`
@@ -57,7 +57,6 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D31`
 - `D42`
 - `D44`
-- `D48`
 - `D58`
 - `D62`
 - `D63`

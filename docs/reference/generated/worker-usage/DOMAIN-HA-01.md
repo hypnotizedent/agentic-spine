@@ -4,7 +4,7 @@ authority_state: projection
 projection_of:
   - ops/bindings/terminal.worker.catalog.yaml
 owner: "@ronny"
-last_verified: 2026-03-24
+last_verified: 2026-04-07
 scope: worker-usage-domain-ha-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -37,7 +37,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `ha.sync.status`
 - `ha.sync.stop`
 
-## Gates (25)
+## Gates (24)
 - `D101`
 - `D102`
 - `D104`
@@ -52,7 +52,6 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D31`
 - `D42`
 - `D44`
-- `D48`
 - `D58`
 - `D62`
 - `D63`
