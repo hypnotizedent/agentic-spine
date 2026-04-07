@@ -58,11 +58,13 @@ git branch -d <branch>
 Root `main` may be dirty only during an explicit controller-owned `staged_only` landing window for one exact slice:
 
 ```bash
-git add <exact-files>
-OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "type(scope): message"
+./bin/ops cap run git.stage.commit.scoped -- \
+  --path <exact-file> \
+  --message "type(scope): message" \
+  --push
 ```
 
-`OPS_GOVERNED_MAIN_OVERRIDE=1` marks intentional main landing only. It does not bypass D48 or D150, and it does not make root `main` a normal mutation lane.
+`git.stage.commit.scoped` is the governed controller landing path for one exact slice on root `main`. It does not bypass D48 or D150, and it does not make root `main` a normal mutation lane.
 
 ## Snapshot Drift
 
@@ -70,8 +72,9 @@ Automated snapshot files (`backup.posture.snapshot.yaml`, `home.dhcp.audit.yaml`
 
 ```bash
 # Land one exact refresh slice
-git add ops/bindings/*.snapshot.yaml
-OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "sync: weekly baseline refresh"
+./bin/ops cap run git.stage.commit.scoped -- \
+  --path ops/bindings/backup.posture.snapshot.yaml \
+  --message "sync: weekly baseline refresh"
 
 # Or discard if the refresh is not intended
 git checkout -- ops/bindings/*.snapshot.yaml

@@ -41,6 +41,21 @@ create_repo() {
   git -C "$repo" branch -M main >/dev/null
 }
 
+create_repo_with_origin() {
+  local bare="$1" repo="$2"
+  git init --bare "$bare" >/dev/null
+  git clone "$bare" "$repo" >/dev/null 2>&1
+  git -C "$repo" config user.name "Test User"
+  git -C "$repo" config user.email "test@example.com"
+  printf 'base-a\n' > "$repo/a.txt"
+  printf 'base-b\n' > "$repo/b.txt"
+  printf 'base-c\n' > "$repo/c.txt"
+  git -C "$repo" add a.txt b.txt c.txt
+  git -C "$repo" commit -m "base" >/dev/null
+  git -C "$repo" branch -M main >/dev/null
+  git -C "$repo" push -u origin main >/dev/null 2>&1
+}
+
 TMPDIR_BASE="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BASE"' EXIT
 
@@ -80,6 +95,19 @@ assert_eq "$(git -C "$REPO2" stash list | wc -l | tr -d ' ')" "1" "T2.7: source 
 assert_contains "$(git -C "$REPO2" stash list)" "slice source" "T2.8: source stash identity is preserved"
 assert_eq "$(git -C "$REPO2" show --pretty=format: --name-only HEAD | tr -d '\n')" "a.txt" "T2.9: commit lands only the allowlisted slice"
 assert_eq "$(tail -n 1 "$REPO2/c.txt")" "base-c" "T2.10: non-allowlisted file is not extracted from source treeish"
+
+echo ""
+echo "── T3: exact-slice landing can push end-to-end ──"
+BARE3="$TMPDIR_BASE/repo-push-origin.git"
+REPO3="$TMPDIR_BASE/repo-push"
+create_repo_with_origin "$BARE3" "$REPO3"
+printf 'slice-a\n' >> "$REPO3/a.txt"
+T3_OUT="$(env SPINE_ROOT="$REPO3" "$SCRIPT" --path a.txt --message "push slice" --push 2>&1)"
+assert_contains "$T3_OUT" "status: pushed" "T3.1: push flow reports pushed status"
+assert_contains "$T3_OUT" "push_status: pushed" "T3.2: receipt reports push success"
+assert_contains "$T3_OUT" "push_remote: origin" "T3.3: receipt reports push remote"
+assert_contains "$T3_OUT" "push_ref: main" "T3.4: receipt reports pushed ref"
+assert_eq "$(git -C "$REPO3" rev-parse HEAD)" "$(git -C "$BARE3" rev-parse refs/heads/main)" "T3.5: remote main matches committed HEAD"
 
 echo ""
 echo "───────────────────────────────"

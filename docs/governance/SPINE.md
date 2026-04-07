@@ -38,14 +38,16 @@ cd ~/code/agentic-spine
   --parent-loop <LOOP-ID>
 
 # Controller-only exception on root main: clean-entry exact landing.
-./ops/plugins/core/lifecycle/bin/git-stage-commit-scoped \
+./bin/ops cap run git.stage.commit.scoped -- \
   --source-treeish <treeish-or-stash-ref> \
   --path <exact-file> \
   --message "..."
 
-# Local exact-slice landing is still allowed only from a clean-entry root-main flow.
-git add <exact-files>
-OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "..."
+# Optional end-to-end exact-slice landing with push.
+./bin/ops cap run git.stage.commit.scoped -- \
+  --path <exact-file> \
+  --message "..." \
+  --push
 ```
 
 ## Adopted Interactive Repo Mutation Workflow

@@ -246,11 +246,13 @@ Secrets are injected at runtime through `secrets.exec`, which reads from your co
 ./bin/ops cap run verify.run -- fast
 
 # Controller-only exception on root main: one exact staged landing slice
-git add <exact-files>
-OPS_GOVERNED_MAIN_OVERRIDE=1 git commit -m "feat(domain): description"
+./bin/ops cap run git.stage.commit.scoped -- \
+  --path <exact-file> \
+  --message "feat(domain): description" \
+  --push
 ```
 
-`OPS_GOVERNED_MAIN_OVERRIDE=1` marks intentional controller landing on `main`. It is not a D48 bypass and it is not the standard path for day-to-day mutation.
+`git.stage.commit.scoped` is the standard controller root-main landing helper. It enforces exact-slice staging, fails on unrelated dirt, and can push in the same flow. It is not a D48 bypass and it is not the standard path for day-to-day mutation.
 
 ## Next Steps
 

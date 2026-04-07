@@ -10,15 +10,16 @@ git-stage-commit-scoped
 
 Usage:
   git-stage-commit-scoped --path <file> [--path <file> ...] \
-    --message "commit subject" [--body "line"] [--source-treeish <treeish>] [--dry-run]
+    --message "commit subject" [--body "line"] [--source-treeish <treeish>] [--push] [--remote <name>] [--dry-run]
 
   git-stage-commit-scoped --allowlist-file /path/to/list.txt \
-    --message "commit subject" [--body "line"] [--source-treeish <treeish>] [--dry-run]
+    --message "commit subject" [--body "line"] [--source-treeish <treeish>] [--push] [--remote <name>] [--dry-run]
 
 Rules:
   - stages only the explicit allowlist paths
   - hard-fails when any staged file is outside allowlist
   - immutable-source landing (`--source-treeish`) is root-main-only and requires clean entry
+  - optional `--push` pushes the just-created commit to the selected remote
 USAGE
 }
 
@@ -118,6 +119,10 @@ print_receipt() {
   local staged_mode="$4"
   local source_treeish="${5:-}"
   local recovery_guidance="${6:-}"
+  local commit_sha="${7:-none}"
+  local push_status="${8:-skipped}"
+  local push_remote="${9:-}"
+  local push_ref="${10:-}"
 
   echo "git.stage.commit.scoped"
   echo "status: $status"
@@ -127,6 +132,10 @@ print_receipt() {
   echo "post_lifecycle_state: $post_state"
   echo "landing_window_state: $staged_mode"
   echo "staged_count: ${#STAGED[@]}"
+  echo "commit_sha: $commit_sha"
+  echo "push_status: $push_status"
+  echo "push_remote: ${push_remote:-none}"
+  echo "push_ref: ${push_ref:-none}"
   echo "staged_files:"
   printf '  - %s\n' "${STAGED[@]}"
   echo "recovery_guidance: $recovery_guidance"
@@ -176,6 +185,8 @@ MESSAGE=""
 BODY=""
 DRY_RUN=false
 SOURCE_TREEISH=""
+PUSH_AFTER=false
+PUSH_REMOTE="origin"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -202,6 +213,15 @@ while [[ $# -gt 0 ]]; do
     --source-treeish)
       [[ $# -ge 2 ]] || fail "--source-treeish requires value"
       SOURCE_TREEISH="$2"
+      shift 2
+      ;;
+    --push)
+      PUSH_AFTER=true
+      shift
+      ;;
+    --remote)
+      [[ $# -ge 2 ]] || fail "--remote requires value"
+      PUSH_REMOTE="$2"
       shift 2
       ;;
     --dry-run)
@@ -325,7 +345,11 @@ fi
 RECOVERY_GUIDANCE="If interrupted before commit, inspect 'git diff --cached --name-only'. Finish the commit, or return to clean state with 'git restore --staged --worktree --source=HEAD -- <paths>'."
 
 if [[ "$DRY_RUN" == "true" ]]; then
-  print_receipt "dry-run" "$PRE_STATE" "$STAGED_STATE" "$STAGED_STATE" "$SOURCE_TREEISH" "$RECOVERY_GUIDANCE"
+  DRY_RUN_PUSH_STATUS="skipped"
+  if [[ "$PUSH_AFTER" == "true" ]]; then
+    DRY_RUN_PUSH_STATUS="planned"
+  fi
+  print_receipt "dry-run" "$PRE_STATE" "$STAGED_STATE" "$STAGED_STATE" "$SOURCE_TREEISH" "$RECOVERY_GUIDANCE" "none" "$DRY_RUN_PUSH_STATUS" "$PUSH_REMOTE" "$BRANCH"
   exit 0
 fi
 
@@ -344,4 +368,16 @@ else
 fi
 
 POST_STATE="$(git_status_mode)"
-print_receipt "committed" "$PRE_STATE" "$POST_STATE" "$STAGED_STATE" "$SOURCE_TREEISH" "$RECOVERY_GUIDANCE"
+COMMIT_SHA="$(git rev-parse HEAD)"
+
+if [[ "$PUSH_AFTER" == "true" ]]; then
+  git remote get-url "$PUSH_REMOTE" >/dev/null 2>&1 || fail "remote not found: $PUSH_REMOTE"
+  if git push -u "$PUSH_REMOTE" "$BRANCH"; then
+    print_receipt "pushed" "$PRE_STATE" "$POST_STATE" "$STAGED_STATE" "$SOURCE_TREEISH" "$RECOVERY_GUIDANCE" "$COMMIT_SHA" "pushed" "$PUSH_REMOTE" "$BRANCH"
+    exit 0
+  fi
+  print_receipt "push-failed" "$PRE_STATE" "$POST_STATE" "$STAGED_STATE" "$SOURCE_TREEISH" "$RECOVERY_GUIDANCE" "$COMMIT_SHA" "failed" "$PUSH_REMOTE" "$BRANCH"
+  exit 1
+fi
+
+print_receipt "committed" "$PRE_STATE" "$POST_STATE" "$STAGED_STATE" "$SOURCE_TREEISH" "$RECOVERY_GUIDANCE" "$COMMIT_SHA"
