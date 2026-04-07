@@ -43,6 +43,16 @@ Codex lane admission per `session.admission.contract.yaml`:
 - **Parity:** `partial` — real but not equivalent to the full-governance lane
 - Cowork remains an external out-of-scope posture, not a governance-profile lane
 
+## Governance Freeze
+
+Until **2026-05-07**, operate in subtraction mode.
+
+- Do not propose or normalize prompts that create new governance artifacts under `ops/bindings/`, `docs/governance/`, `docs/contracts/`, or `surfaces/verify/`.
+- Do not open new loops or file new gaps unless the user explicitly insists and the work cannot proceed without them.
+- Any prompt or change that adds governance/control-plane files must be rejected unless it clearly removes more files/artifacts than it adds.
+- Prefer deleting, collapsing, reusing, or directly executing against existing surfaces over creating new controller prompts, contracts, registries, doctrine docs, or receipts.
+- If Ronny asks for "cleanup", "leaner", "less ceremony", or "make it just work", interpret that as subtraction by default, not analysis or artifact generation.
+
 ## What You Own
 
 Translation and routing. Nothing else.
