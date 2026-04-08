@@ -21,10 +21,9 @@ authority:
   order_truth: ops/bindings/domains/mint/mint.order.truth.authority.yaml
   module_lifecycle: ops/bindings/domains/mint/mint.module.lifecycle.authority.yaml
   schema_truth_supersession: >
-    The "NO SEPARATE QUOTES TABLE" decision in docs/ARCHITECTURE/SCHEMA_TRUTH.md
-    and DATABASE_OWNERSHIP.md rule R7 are superseded by the approved order-truth
-    authority (v2, 2026-04-07) which requires quotes as their own immutable
-    entity. quotes/SPEC.md already conforms to the correct model.
+    SCHEMA_TRUTH.md and DATABASE_OWNERSHIP.md are aligned with the approved
+    order-truth authority (v2). Quotes are documented as their own immutable
+    entity with separate tables. No outstanding doc supersession remains.
 
 deployment:
   vm: 213
@@ -343,6 +342,13 @@ endpoints:
       optional:
         assignment: { type: string }
         operator_working_notes: { type: string }
+        active_quote_id:
+          type: uuid
+          nullable: true
+          rule: >
+            managed by the quotes module. set when a quote becomes the
+            active quote for the order, or cleared when superseded or
+            withdrawn after payment reconciliation.
         customer_id:
           type: uuid
           rule: >
@@ -361,6 +367,9 @@ endpoints:
         with field_name, old_value, new_value, actor, changed_at
       - customer_id resolution also updates customer_identity_state
         from provisional to resolved
+      - active_quote_id may be set or cleared by the quotes module via this
+        PATCH surface when a quote becomes active, superseded, or cleared
+        after payment reconciliation
 
 # ─── COMPATIBILITY FACADE ───────────────────────────────────────────────
 #
@@ -399,7 +408,8 @@ compatibility:
 
     - path: PATCH /api/v2/jobs/{id}
       action: PRESERVED (update)
-      mapping: delegates to PATCH /api/v3/orders/:order_id (mutable fields only)
+      mapping: delegates to PATCH /api/v3/orders/:order_id (mutable fields,
+        including active_quote_id)
 
     - path: DELETE /api/v2/jobs/{id}
       action: REMOVED
@@ -700,7 +710,8 @@ schema_truth_updates:
 downstream:
   quotes_module:
     consumes: order_id, order_revision_id (via API, not direct DB)
-    provides: active_quote_id updates back to order
+    provides: active_quote_id updates back to order via
+      PATCH /api/v3/orders/:order_id
     contract: quotes/SPEC.md already conforms
   production_module:
     consumes: order_id, current_revision_id, lifecycle_state, payment_state
