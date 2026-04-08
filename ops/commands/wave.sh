@@ -134,8 +134,11 @@ wave_require_valid_lane() {
 resolve_wave_claimed_paths() {
   local terminal_id="${1:-}"
   [[ -n "$terminal_id" ]] || return 0
-  # Lean entry retired the old terminal-role authority; wave claimed-path hints now
-  # degrade cleanly to empty until a slimmer runtime source exists.
+  # Known controller terminals get a sensible default claimed path so wave start
+  # does not require explicit --claimed-paths for single-terminal local dispatch.
+  case "$terminal_id" in
+    SPINE-CONTROL-*) printf 'ops\n'; return 0 ;;
+  esac
   return 0
 }
 
@@ -1363,9 +1366,14 @@ errors = []
 execution_mode = str(packet.get("execution_mode") or state.get("execution_mode") or "").strip().lower()
 transport = str(packet.get("transport") or state.get("transport") or "").strip().lower()
 
-if execution_mode == "operational" or transport == "mailroom":
-    resolved_execution_mode = execution_mode or "code"
-    resolved_transport = transport or ("mailroom" if resolved_execution_mode == "operational" else "git")
+workspace_enabled = workspace.get("enabled")
+if isinstance(workspace_enabled, str):
+    workspace_enabled = workspace_enabled.lower() == "true"
+workspace_disabled = not workspace_enabled
+
+if workspace_disabled or execution_mode == "operational" or transport == "mailroom":
+    resolved_execution_mode = execution_mode or ("local" if workspace_disabled else "code")
+    resolved_transport = transport or ("local" if workspace_disabled else ("mailroom" if resolved_execution_mode == "operational" else "git"))
     push_gate = {
         "status": "PASS",
         "checked_at_utc": now,
@@ -1394,10 +1402,11 @@ if execution_mode == "operational" or transport == "mailroom":
         json.dump(state, f, indent=2)
         f.write("\n")
 
+    skip_reason = "workspace_disabled" if workspace_disabled else "operational_or_mailroom_transport"
     print(
         "dispatch pushability preflight: PASS "
         f"lane={lane} execution_mode={resolved_execution_mode} transport={resolved_transport} "
-        "(git pushability skipped)"
+        f"(git pushability skipped: {skip_reason})"
     )
     raise SystemExit(0)
 
