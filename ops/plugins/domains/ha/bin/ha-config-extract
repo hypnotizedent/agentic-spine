@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ha.config.extract - Extract HA config files to workbench for version control
+# ha.config.extract - Extract HA config files for inspection without polluting tracked workbench files
 # Requires: SSH access to hassio@ha
-# Safety: read-only (reads from HA, writes to workbench — no HA mutations)
+# Safety: read-only on HA (reads from HA, writes locally)
+# Default target: machine-local runtime under ~/code/.runtime/workbench/state/homeassistant/config-extract
+# Opt-in tracked target: --tracked writes to workbench/infra/homeassistant/config
 # Excludes: secrets.yaml (contains actual secrets)
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
 source "$ROOT/ops/plugins/infra/lib/workbench-paths.sh"
 WORKBENCH_ROOT="$(workbench_repo_root)"
-TARGET_DIR="$WORKBENCH_ROOT/infra/homeassistant/config"
+TRACKED_TARGET_DIR="$WORKBENCH_ROOT/infra/homeassistant/config"
+RUNTIME_TARGET_DIR="${HA_CONFIG_EXTRACT_RUNTIME_DIR:-$HOME/code/.runtime/workbench/state/homeassistant/config-extract}"
+TARGET_DIR="$RUNTIME_TARGET_DIR"
 HA_SSH="hassio@ha"
+MODE="runtime"
 
 # Files to extract (secrets.yaml intentionally excluded)
 CONFIG_FILES=(
@@ -21,6 +26,48 @@ CONFIG_FILES=(
   customize_hidden_entities.yaml
   groups.yaml
 )
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ha-config-extract [--tracked] [--target-dir <path>]
+
+Default behavior writes live HA config copies to machine-local runtime state so
+Home Assistant churn does not dirty the tracked workbench repo.
+
+Options:
+  --tracked            overwrite tracked workbench config files intentionally
+  --target-dir <path>  write extracted files to a custom directory
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tracked)
+      MODE="tracked"
+      TARGET_DIR="$TRACKED_TARGET_DIR"
+      shift
+      ;;
+    --target-dir)
+      [[ $# -ge 2 ]] || {
+        echo "ERROR: --target-dir requires a path" >&2
+        exit 2
+      }
+      MODE="custom"
+      TARGET_DIR="$2"
+      shift 2
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
 
 echo "ha.config.extract"
 echo
@@ -68,6 +115,7 @@ echo "status: OK"
 echo "extracted: $EXTRACTED"
 echo "failed: $FAILED"
 echo "target: $TARGET_DIR"
+echo "mode: $MODE"
 echo "checksums:"
 printf "$CHECKSUMS"
 
