@@ -263,7 +263,7 @@ run_cap() {
     fi
 
     local command_string
-    command_string="$(build_command_string "$cmd" "${args[@]}")"
+    command_string="$(build_command_string "$cmd" "${args[@]:-}")"
 
     echo "Executing..."
     echo "────────────────────────────────────────"
