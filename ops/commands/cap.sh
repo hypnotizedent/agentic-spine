@@ -105,6 +105,12 @@ append_telemetry() {
     local safety="$2"
     local exit_code="$3"
     local telemetry_dir="$SPINE_STATE/telemetry"
+    local session_boundary="${SPINE_SESSION_ID:-}"
+
+    if [[ -z "$session_boundary" && "$safety" == "mutating" ]]; then
+        session_boundary="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-}}}"
+    fi
+    [[ -n "$session_boundary" ]] || session_boundary="nosession"
 
     mkdir -p "$telemetry_dir" 2>/dev/null || true
     printf '%s\t%s\t%s\t%s\t%s\n' \
@@ -112,7 +118,7 @@ append_telemetry() {
       "$name" \
       "$safety" \
       "$exit_code" \
-      "${SPINE_SESSION_ID:-nosession}" \
+      "$session_boundary" \
       >> "$telemetry_dir/cap-usage.tsv" 2>/dev/null || true
 }
 
