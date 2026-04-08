@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_CODE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CAP_FILE_REL="ops/capabilities.runtime.yaml"
+CAP_FILE_REL="ops/capabilities.yaml"
 ACTIVE_REPO_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
 ACTIVE_CODE_ROOT=""
 VALID_AMBIENT_TARGET_REPO=""

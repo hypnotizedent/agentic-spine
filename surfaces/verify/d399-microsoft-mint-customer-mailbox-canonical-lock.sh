@@ -8,7 +8,7 @@ TOKEN_EXEC="$ROOT/ops/plugins/providers/microsoft/bin/microsoft-token-exec"
 PROVIDERS_CONTRACT="$ROOT/ops/bindings/domains/communications/communications.providers.contract.yaml"
 MAILBOX_CONTRACT="$ROOT/ops/bindings/domains/mint/mint.customer.mailbox.standard.contract.yaml"
 CAP_EXEC="$ROOT/ops/plugins/providers/microsoft/bin/microsoft-cap-exec"
-CAPABILITIES_CONTRACT="$ROOT/ops/capabilities.runtime.yaml"
+CAPABILITIES_CONTRACT="$ROOT/ops/capabilities.yaml"
 
 fail() {
   echo "D399 FAIL: $*" >&2

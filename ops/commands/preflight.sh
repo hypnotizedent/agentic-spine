@@ -29,7 +29,7 @@ else
 fi
 
 # Map hash: sha256 of capability registry
-_cap_file="$REPO_ROOT/ops/capabilities.runtime.yaml"
+_cap_file="$REPO_ROOT/ops/capabilities.yaml"
 if [[ -f "$_cap_file" ]]; then
   MAP_HASH="$(shasum -a 256 "$_cap_file" | cut -c1-8)"
 else

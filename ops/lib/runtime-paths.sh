@@ -97,7 +97,7 @@ _spine_canonicalize_repoish_path() {
 _spine_has_capability_registry() {
   local root="${1:-}"
   [[ -n "$root" ]] || return 1
-  [[ -f "$root/ops/capabilities.runtime.yaml" ]] && return 0
+  [[ -f "$root/ops/capabilities.yaml" ]] && return 0
   return 1
 }
 

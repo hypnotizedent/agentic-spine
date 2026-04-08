@@ -65,6 +65,7 @@ FAILING_IDS=()
 WARNING_IDS=()
 SYNTHETIC_WAVE_ID=""
 SYNTHETIC_EVIDENCE_DIR=""
+SYNTHETIC_LOOP_ID="${SPINE_LOOP_ID:-LOOP-SPINE-WORKFLOW-DISCIPLINE-RESUME-20260408}"
 CLEANUP_NEEDED=0
 
 # ── Check helpers ─────────────────────────────────────────────────────────
@@ -186,7 +187,9 @@ check H1 "capability resolution (verify.engine.run resolves and executes)" bash 
 # ── H2/H3/H4: Dispatch round-trip + wave lifecycle + telemetry ──────────
 # These three gates share one synthetic dispatch because they test the same
 # end-to-end path. Running three separate dispatches would be wasteful.
-SYNTHETIC_WAVE_ID="WAVE-HONESTY-TEST-$(TZ=UTC date '+%Y%m%d-%H%M%S' 2>/dev/null || date -u '+%Y%m%d-%H%M%S')"
+_honesty_ts="$(TZ=UTC date '+%Y%m%d-%H%M%S' 2>/dev/null || date -u '+%Y%m%d-%H%M%S')"
+_honesty_rand="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6 || echo "$$")"
+SYNTHETIC_WAVE_ID="WAVE-HONESTY-TEST-${_honesty_ts}-${_honesty_rand}"
 SYNTHETIC_EVIDENCE_DIR="$(mktemp -d)"
 CANARY_TOKEN="HONESTY-CANARY-$(date +%s)"
 CLEANUP_NEEDED=1
@@ -195,15 +198,20 @@ CLEANUP_NEEDED=1
 _dispatch_output=""
 _dispatch_rc=0
 _synthetic_precondition_blocker=""
+if [[ -z "$SYNTHETIC_LOOP_ID" ]]; then
+    _synthetic_precondition_blocker="synthetic dispatch precondition failed: no loop_id resolved for honesty probe"
+fi
 set +e
-_dispatch_output="$(bash "$DISPATCH_CMD" local \
-    --loop-id LOOP-SPINE-ENGINE-HONESTY-GATES-20260408 \
-    --objective "synthetic engine honesty proof" \
-    --wave-id "$SYNTHETIC_WAVE_ID" \
-    --evidence-dir "$SYNTHETIC_EVIDENCE_DIR" \
-    --lane "canary:echo $CANARY_TOKEN" \
-    2>&1)"
-_dispatch_rc=$?
+if [[ -z "$_synthetic_precondition_blocker" ]]; then
+    _dispatch_output="$(bash "$DISPATCH_CMD" local \
+        --loop-id "$SYNTHETIC_LOOP_ID" \
+        --objective "synthetic engine honesty proof" \
+        --wave-id "$SYNTHETIC_WAVE_ID" \
+        --evidence-dir "$SYNTHETIC_EVIDENCE_DIR" \
+        --lane "canary:echo $CANARY_TOKEN" \
+        2>&1)"
+    _dispatch_rc=$?
+fi
 set -e
 
 _claim_contention=0

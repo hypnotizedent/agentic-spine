@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 OPS="$ROOT/bin/ops"
-CAPS="$ROOT/ops/capabilities.runtime.yaml"
+CAPS="$ROOT/ops/capabilities.yaml"
 
 [[ -x "$OPS" ]] || {
   echo "G17 FAIL: missing executable: $OPS" >&2

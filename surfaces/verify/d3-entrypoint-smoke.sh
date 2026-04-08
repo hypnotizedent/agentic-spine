@@ -9,8 +9,8 @@ if [[ ! -x "$ROOT/bin/ops" ]]; then
   exit 1
 fi
 
-[[ -f "$ROOT/ops/capabilities.runtime.yaml" ]] || {
-  echo "D3 FAIL: missing capabilities registry at $ROOT/ops/capabilities.runtime.yaml" >&2
+[[ -f "$ROOT/ops/capabilities.yaml" ]] || {
+  echo "D3 FAIL: missing capabilities registry at $ROOT/ops/capabilities.yaml" >&2
   exit 1
 }
 
