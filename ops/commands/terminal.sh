@@ -152,7 +152,7 @@ build_entry_cmd() {
 
     case "$tool" in
         claude)  parts+=("claude --dangerously-skip-permissions") ;;
-        codex)   parts+=("codex --full-auto") ;;
+        codex)   parts+=("codex --dangerously-bypass-approvals-and-sandbox") ;;
         opencode) parts+=("opencode") ;;
         verify)  parts+=("./bin/ops cap run verify.run -- fast") ;;
         *)       fail "unknown tool '$tool' (expected: claude|codex|opencode|verify)" ;;
