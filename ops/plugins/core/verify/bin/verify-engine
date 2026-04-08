@@ -94,11 +94,14 @@ check E2 "ops status --json" bash -c "
     '$ROOT/bin/ops' status --json >/dev/null 2>&1
 "
 
-# E3: SQLite authority readable + active-state counts resolve
-check E3 "SQLite authority readable" bash -c "
-    db='$ROOT/ops/spine.db'
-    [[ -f \"\$db\" ]] || exit 0  # SQLite is optional; pass if absent
-    sqlite3 \"\$db\" 'SELECT count(*) FROM sqlite_master;' >/dev/null 2>&1
+# E3: SQLite shared authority readable + active-state counts resolve
+SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+AUTHORITY_DB="$SPINE_STATE/shared_authority.db"
+check E3 "SQLite shared authority readable" bash -c "
+    db='$AUTHORITY_DB'
+    [[ -f \"\$db\" ]] || { echo 'shared_authority.db not found at $AUTHORITY_DB'; exit 1; }
+    count=\$(sqlite3 \"\$db\" 'SELECT count(*) FROM sqlite_master;' 2>&1) || { echo 'sqlite3 query failed'; exit 1; }
+    [[ \"\$count\" -gt 0 ]] || { echo 'shared_authority.db has no tables'; exit 1; }
 "
 
 # E4: capabilities.runtime.yaml parseable and non-empty
