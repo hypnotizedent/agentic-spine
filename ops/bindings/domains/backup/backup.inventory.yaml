@@ -3,7 +3,7 @@
 # NOTE: enabled=false by default; flip true intentionally per target.
 # Classifications: critical (26h), important (48h), rebuildable (168h)
 # Status: authoritative
-# Last verified: 2026-03-22
+# Last verified: 2026-04-07
 # yq selectors for gate authoring:
 #   .targets[]              → array of target objects (NOT map-keyed)
 #   .targets[].name         → target identifier (.name NOT .id)
@@ -35,7 +35,7 @@ model:
     daily-primary-est:
       cron: "0 1 * * *"
       timezone: "America/New_York"
-      note: "Shop daily-primary cadence. Exact windows are authoritative in ops/bindings/backup.calendar.yaml."
+      note: "Shop daily-primary backups run in staged windows. Exact job times are authoritative in ops/bindings/backup.calendar.yaml."
     daily-home-primary-est:
       cron: "0 3 * * *"
       timezone: "America/New_York"
@@ -66,84 +66,65 @@ model:
     tier1-small-state-dry-run-quarterly:
       mode: dry_run
       cadence: quarterly
-  # ═══════════════════════════════════════════════════════════════
-  # V3 vzdump schedule policy — derived, not hardcoded
-  # ═══════════════════════════════════════════════════════════════
-  # The Spine derives which VMs get daily vs weekly vzdump from
-  # mechanical criteria applied to each VM's properties. Service
-  # names are NEVER the selection key — criteria are.
   vzdump_schedule_policy:
-    version: 3
-    updated_at: "2026-03-23"
+    version: 4
+    updated_at: "2026-04-07"
     canonical_cold_plane: "/md1400/backup-cold/vzdump/pve"
     generator_surface: "/data/backups/vzdump/dump"
-    generator_transition:
-      note: "Generator transitioning from /tank/backups to /data/backups. Cold-sync reads from tank until data has full coverage."
-      tank_drain_target: "2026-03-25"
-    schedule_tiers:
-      minimal_hot:
-        vzdump_cadence: daily
-        stale_threshold_hours: 26
-        cold_promotion: daily
-        description: "Daily vzdump for VMs that meet ALL qualification criteria."
-        qualification_criteria:
-          - id: irreplaceable_small_state
-            description: "Primary data is user-created and cannot be regenerated from version control, automation, or upstream sources."
-          - id: artifact_fits_daily_window
-            description: "Compressed vzdump artifact < 50G, completing in the nightly window without contention."
-          - id: high_loss_impact
-            description: "Loss causes immediate estate-wide operational impact (auth/secrets outage) or compliance gap (financial/legal data)."
-      canonical_cold:
-        vzdump_cadence: daily
-        stale_threshold_hours: 26
-        cold_promotion: daily
-        description: "Default tier for all active VMs. Daily vzdump with cold promotion. Phase 2: cadence drops to weekly for VMs with app-level daily protection."
-        note: "Phase 1 keeps daily for all VMs to avoid regression. Phase 2 introduces weekly for canonical_cold VMs after app-level backup coverage is proven."
+    cold_copy_mode: "Direct mirror from generator surface to canonical cold plane."
+    retention_buckets:
+      daily_keep_two:
+        retention: keep-last=2
+        description: "Daily vzdump with two retained copies."
+      daily_keep_one:
+        retention: keep-last=1
+        description: "Daily vzdump with one retained copy."
+      no_recurring_vzdump:
+        retention: none
+        description: "No recurring vzdump retention; VM is treated as rebuildable."
       decommission_capsule:
-        vzdump_cadence: none
-        stale_threshold_hours: null
-        cold_promotion: none
-        description: "No recurring backup. Last-known-good cold artifact retained for 30-day hold."
-        hold_period_days: 30
+        retention: retained_capsule
+        description: "No recurring backup. Last-known-good cold artifact retained for hold/review."
     derived_assignments:
-      minimal_hot:
+      daily_keep_two:
         - vm_id: 204
           hostname: infra-core
-          rationale: "Infisical secrets + Vaultwarden passwords + Authentik SSO. Loss = estate-wide auth/secrets outage. Artifact ~5G."
+          rationale: "Small footprint, high-value secrets and auth state."
         - vm_id: 211
           hostname: finance-stack
-          rationale: "Firefly III transactions + Paperless docs + Ghostfolio. Loss = financial compliance gap. Artifact ~35G."
-      canonical_cold:
-        - vm_id: 202
-          hostname: automation-stack
-          rationale: "Spine runtime. Rebuildable from git. No irreplaceable user data. Artifact ~19G."
-        - vm_id: 203
-          hostname: immich
-          rationale: "Photo library — irreplaceable but artifact ~60G exceeds daily threshold. ZFS snapshots provide point-in-time protection."
-        - vm_id: 205
-          hostname: observability
-          rationale: "Telemetry data regenerable over time. Artifact ~8G."
-        - vm_id: 206
-          hostname: dev-tools
-          rationale: "Gitea repos mirrored to external. Artifact ~10G."
-        - vm_id: 207
-          hostname: ai-consolidation
-          rationale: "Qdrant vectors regenerable from source documents. Artifact ~6G."
+          rationale: "Financial records justify two retained copies."
         - vm_id: 212
           hostname: mint-data
-          rationale: "Business data — irreplaceable but artifact ~202G. Has daily pgdump (app-level protection). Artifact exceeds threshold."
+          rationale: "Primary Mint data plane. Data loss is unacceptable."
+      daily_keep_one:
+        - vm_id: 202
+          hostname: automation-stack
+          rationale: "State matters, but one retained copy is sufficient."
+        - vm_id: 203
+          hostname: immich
+          rationale: "Immich metadata matters, but originals live elsewhere."
         - vm_id: 213
           hostname: mint-apps
-          rationale: "Stateless containers. No persistent user data. Artifact ~10G."
+          rationale: "App plane only. Primary state lives on mint-data."
         - vm_id: 214
           hostname: communications-stack
-          rationale: "Email — irreplaceable but artifact ~971G. Has daily app-level backup (mail-archiver pgdump + uploads). Artifact vastly exceeds threshold."
-        - vm_id: 215
-          hostname: surveillance-stack
-          rationale: "Security footage with short retention. Artifact ~103G."
+          rationale: "Huge artifact; one retained VM copy plus app-level backups is the chosen tradeoff."
         - vm_id: 220
           hostname: archive-smb
-          rationale: "Stateless Samba proxy to md1400. ZFS snapshot protection for underlying datasets. Artifact ~1G."
+          rationale: "Small LXC rootfs; authoritative payload already lives on md1400 datasets."
+      no_recurring_vzdump:
+        - vm_id: 205
+          hostname: observability
+          rationale: "Rebuildable monitoring stack."
+        - vm_id: 206
+          hostname: dev-tools
+          rationale: "Rebuildable dev environment with separate app-level Gitea backup."
+        - vm_id: 207
+          hostname: ai-consolidation
+          rationale: "Rebuildable AI tooling and vector workloads."
+        - vm_id: 215
+          hostname: surveillance-stack
+          rationale: "Bulky footage workload with acceptable loss profile."
       decommission_capsule:
         - vm_id: 200
           hostname: docker-host
@@ -254,16 +235,12 @@ runtime_units:
       - vm-202-primary
       - vm-203-primary
       - vm-204-infra-core-primary
-      - vm-205-observability-primary
-      - vm-206-dev-tools-primary
-      - vm-207-ai-consolidation-primary
       # vm-209-download-stack-primary — REMOVED 2026-03-23 (decommissioned)
       # vm-210-streaming-stack-primary — REMOVED 2026-03-23 (decommissioned)
       - vm-211-finance-stack-primary
       - vm-212-mint-data-primary
       - vm-213-mint-apps-primary
       - vm-214-communications-stack-primary
-      - vm-215-surveillance-stack-primary
       - lxc-220-archive-smb-primary
     backup_admission_state: production_ready
   - unit_id: machine-proxmox-home
@@ -355,7 +332,7 @@ runtime_units:
   - unit_id: vm-205-observability
     kind: vm
     hostname: observability
-    backup_profile: vm-primary
+    backup_profile: vm-rebuildable
     data_class: small_state
     include_paths:
       - vm-disk
@@ -364,13 +341,13 @@ runtime_units:
     destination_lane: pve-vzdump-primary
     schedule_class: daily-primary-est
     restore_class: vm-dry-run-quarterly
-    inventory_targets:
-      - vm-205-observability-primary
+    inventory_targets: []
     backup_admission_state: production_ready
+    description: "Rebuildable monitoring stack. No recurring VM-level vzdump retention."
   - unit_id: vm-206-dev-tools
     kind: vm
     hostname: dev-tools
-    backup_profile: vm-primary
+    backup_profile: vm-rebuildable
     data_class: small_state
     include_paths:
       - vm-disk
@@ -380,13 +357,13 @@ runtime_units:
     schedule_class: daily-primary-est
     restore_class: app-dry-run-monthly
     inventory_targets:
-      - vm-206-dev-tools-primary
       - app-gitea
     backup_admission_state: production_ready
+    description: "Rebuildable dev environment. VM-level vzdump retired; app-level Gitea backup remains."
   - unit_id: vm-207-ai-consolidation
     kind: vm
     hostname: ai-consolidation
-    backup_profile: vm-primary
+    backup_profile: vm-rebuildable
     data_class: large_state
     include_paths:
       - vm-disk
@@ -395,9 +372,9 @@ runtime_units:
     destination_lane: pve-vzdump-primary
     schedule_class: daily-primary-est
     restore_class: vm-dry-run-quarterly
-    inventory_targets:
-      - vm-207-ai-consolidation-primary
+    inventory_targets: []
     backup_admission_state: production_ready
+    description: "Rebuildable AI tooling VM. No recurring VM-level vzdump retention."
   - unit_id: vm-211-finance-stack
     kind: vm
     hostname: finance-stack
@@ -470,7 +447,7 @@ runtime_units:
   - unit_id: vm-215-surveillance-stack
     kind: vm
     hostname: surveillance-stack
-    backup_profile: vm-primary
+    backup_profile: vm-rebuildable
     data_class: large_state
     include_paths:
       - vm-disk
@@ -479,10 +456,9 @@ runtime_units:
     destination_lane: pve-vzdump-primary
     schedule_class: daily-primary-est
     restore_class: vm-dry-run-quarterly
-    inventory_targets:
-      - vm-215-surveillance-stack-primary
+    inventory_targets: []
     backup_admission_state: planned
-    description: "Surveillance VM 215 remains active, but the primary VM artifact was stale in the 2026-03-18 census. Backup admission stays planned until freshness is restored."
+    description: "Surveillance VM 215 remains active, but recurring VM-level vzdump retention is intentionally disabled."
   - unit_id: vm-100-homeassistant
     kind: vm
     hostname: homeassistant
@@ -633,8 +609,7 @@ runtime_units:
     destination_lane: pve-vzdump-primary
     schedule_class: daily-primary-est
     restore_class: vm-dry-run-quarterly
-    inventory_targets:
-      - vm-207-ai-consolidation-primary
+    inventory_targets: []
     backup_admission_state: production_ready
   - unit_id: spine-workers-state
     kind: app-state
@@ -649,8 +624,7 @@ runtime_units:
     destination_lane: pve-vzdump-primary
     schedule_class: daily-primary-est
     restore_class: app-dry-run-monthly
-    inventory_targets:
-      - vm-207-ai-consolidation-primary
+    inventory_targets: []
     backup_admission_state: production_ready
   - unit_id: container-fleet-observability
     kind: container-fleet
@@ -664,8 +638,7 @@ runtime_units:
     destination_lane: pve-vzdump-primary
     schedule_class: daily-primary-est
     restore_class: vm-dry-run-quarterly
-    inventory_targets:
-      - vm-205-observability-primary
+    inventory_targets: []
     backup_admission_state: production_ready
   - unit_id: container-fleet-dev-tools
     kind: container-fleet
@@ -681,7 +654,6 @@ runtime_units:
     schedule_class: daily-primary-est
     restore_class: app-dry-run-monthly
     inventory_targets:
-      - vm-206-dev-tools-primary
       - app-gitea
     backup_admission_state: production_ready
   - unit_id: container-fleet-automation-stack
@@ -779,9 +751,9 @@ runtime_units:
     backup_admission_state: production_ready
 targets:
   # =============================================================================
-  # VM/LXC BACKUPS - CANONICAL COLD COPIES (md1400) - sourced from vzdump jobs
-  # Primary generation still occurs on local hypervisor storage, but the governed
-  # restore plane is md1400 cold storage.
+  # VM/LXC BACKUPS - PRIMARY VZDUMP ARTIFACTS (pve generator surface)
+  # The verify surface answers whether fresh vzdump artifacts exist on pve.
+  # The md1400 mirror remains a secondary copy, not the freshness authority.
   # =============================================================================
   - name: vm-200-docker-host-primary
     enabled: false
@@ -798,42 +770,47 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/data/backups/vzdump/dump"
     glob: "vzdump-qemu-202-*.vma.zst"
     stale_after_hours: 26
     classification: critical
+    description: "Automation stack daily vzdump artifact on pve. md1400 mirror is secondary."
   - name: vm-204-infra-core-primary
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/data/backups/vzdump/dump"
     glob: "vzdump-qemu-204-*.vma.zst"
     stale_after_hours: 26
     classification: critical
+    description: "Infra-core daily vzdump artifact on pve. md1400 mirror is secondary."
   - name: vm-205-observability-primary
-    enabled: true
+    enabled: false
     kind: file_glob
     host: pve
     base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-205-*.vma.zst"
     stale_after_hours: 26
-    classification: important
+    classification: rebuildable
+    description: "Observability VM backup retired from recurring retention on 2026-04-07. Existing residue may remain until storage cleanup completes."
   - name: vm-206-dev-tools-primary
-    enabled: true
+    enabled: false
     kind: file_glob
     host: pve
     base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-206-*.vma.zst"
     stale_after_hours: 26
-    classification: important
+    classification: rebuildable
+    description: "Dev-tools VM backup retired from recurring retention on 2026-04-07. App-level Gitea backup remains canonical."
   - name: vm-203-primary
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/data/backups/vzdump/dump"
     glob: "vzdump-qemu-203-*.vma.zst"
     stale_after_hours: 26
     classification: important
+    description: "Immich daily vzdump artifact on pve. md1400 mirror is secondary."
   - name: vm-209-download-stack-primary
     enabled: false
     kind: file_glob
@@ -857,67 +834,68 @@ targets:
     decommissioned_at: "2026-03-23"
     decommission_reason: "VM 210 tombstoned. No recurring backups. Cold residue retained on md1400 for 30-day hold."
   - name: vm-207-ai-consolidation-primary
-    enabled: true
+    enabled: false
     kind: file_glob
     host: pve
     base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-207-*.vma.zst"
     stale_after_hours: 26
-    classification: critical
+    classification: rebuildable
+    description: "AI-consolidation VM backup retired from recurring retention on 2026-04-07."
   - name: vm-211-finance-stack-primary
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/data/backups/vzdump/dump"
     glob: "vzdump-qemu-211-*.vma.zst"
     stale_after_hours: 26
     classification: critical
-    description: "Finance VM 211 cold-copy artifact on md1400. Source generation remains local vzdump on pve; canonical recovery copy is synced to /md1400/backup-cold/vzdump/pve."
+    description: "Finance VM 211 daily vzdump artifact on pve. md1400 mirror is secondary."
   - name: vm-212-mint-data-primary
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/data/backups/vzdump/dump"
     glob: "vzdump-qemu-212-*.vma.zst"
     stale_after_hours: 26
     classification: critical
-    description: "Mint data plane cold-copy artifact on md1400. Source generation remains local vzdump on pve; canonical recovery copy is synced to /md1400/backup-cold/vzdump/pve."
+    description: "Mint data plane daily vzdump artifact on pve. md1400 mirror is secondary."
   - name: vm-213-mint-apps-primary
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/data/backups/vzdump/dump"
     glob: "vzdump-qemu-213-*.vma.zst"
     stale_after_hours: 26
     classification: important
-    description: "Mint app plane cold-copy artifact on md1400. Source generation remains local vzdump on pve; canonical recovery copy is synced to /md1400/backup-cold/vzdump/pve."
+    description: "Mint app plane daily vzdump artifact on pve. md1400 mirror is secondary."
   - name: vm-214-communications-stack-primary
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/data/backups/vzdump/dump"
     glob: "vzdump-qemu-214-*.vma.zst"
     stale_after_hours: 26
     classification: important
-    description: "Communications stack VM 214 cold-copy artifact on md1400. Source generation remains local vzdump on pve; canonical recovery copy is synced to /md1400/backup-cold/vzdump/pve."
+    description: "Communications stack VM 214 daily vzdump artifact on pve. md1400 mirror is secondary."
   - name: vm-215-surveillance-stack-primary
-    enabled: true
+    enabled: false
     kind: file_glob
     host: pve
     base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-215-*.vma.zst"
     stale_after_hours: 26
-    classification: important
-    description: "Surveillance stack VM 215 cold-copy artifact on md1400. Source generation remains local vzdump on pve; canonical recovery copy is synced to /md1400/backup-cold/vzdump/pve."
+    classification: rebuildable
+    description: "Surveillance stack VM 215 backup retired from recurring retention on 2026-04-07."
   - name: lxc-220-archive-smb-primary
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/data/backups/vzdump/dump"
     glob: "vzdump-lxc-220-*.tar.zst"
     stale_after_hours: 26
     classification: critical
-    description: "archive-smb LXC 220 cold-copy artifact on md1400. Rootfs backup is synced to the md1400 canonical cold plane; authoritative live-share payload remains protected by snapshot manifests."
+    description: "archive-smb LXC 220 daily vzdump artifact on pve. md1400 mirror is secondary; authoritative live-share payload remains protected by snapshot manifests."
   - name: app-mail-archiver
     enabled: true
     kind: file_glob
