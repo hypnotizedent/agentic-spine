@@ -133,11 +133,10 @@ wave_require_valid_lane() {
 
 resolve_wave_claimed_paths() {
   local terminal_id="${1:-}"
-  local contract="$SPINE_REPO/ops/bindings/terminal.role.contract.yaml"
   [[ -n "$terminal_id" ]] || return 0
-  command -v yq >/dev/null 2>&1 || return 0
-  [[ -f "$contract" ]] || return 0
-  yq e -r ".roles[]? | select(.id == \"${terminal_id}\") | .write_scope[]?" "$contract" 2>/dev/null | paste -sd, -
+  # Lean entry retired the old terminal-role authority; wave claimed-path hints now
+  # degrade cleanly to empty until a slimmer runtime source exists.
+  return 0
 }
 
 wave_start_reset_cleanup_state() {
@@ -3028,7 +3027,7 @@ cmd_ack() {
   wave_lock_guard "$wave_id" "ack" "$lock_override_reason"
   local sf
   sf="$(wave_state_file "$wave_id")"
-  local terminal_role_contract="$SPINE_REPO/ops/bindings/terminal.role.contract.yaml"
+  local terminal_role_contract=""
   local ack_terminal_role="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-}}}}"
   local ack_runtime_role="${SPINE_RUNTIME_ROLE:-}"
 

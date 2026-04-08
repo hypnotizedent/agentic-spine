@@ -64,7 +64,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D99`
 
 ## Workflow
-- Canonical session entry: `./bin/ops cap run session.v3.attach -- --allow-no-loop`
+- Startup: read `NORTH_STAR.md`, `docs/governance/SPINE.md`, and `docs/governance/SESSION_PROTOCOL.md`; then run `./bin/ops status --json`, `./bin/ops verify --core-only`, and `./bin/ops cap list`.
 
 ## Boundaries
 - Runtime surface is generated from registration and role contracts.

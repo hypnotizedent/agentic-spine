@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Behavioral authority mirrors the currently enforced live hook set:
 # D30, D31, D42, D44, D46, D47, D58, D84, D85, D150,
-# D411 staged-projection enforcement, and the mirror-sanitization canary.
+# and the mirror-sanitization canary.
 
 # When git invokes hooks from a worktree, inherited git env vars can cause
 # cross-worktree checks to resolve the wrong repository. Clear them so each
@@ -59,41 +59,6 @@ if [[ "$FAIL" -eq 1 ]]; then
   echo "pre-commit: $CHECKED gates checked, FAILED:$FAILED_GATES"
   echo "Fix the issue, then commit again."
   exit 1
-fi
-
-# D411 projection enforcement: if any D411 input is staged, require the
-# governed projections to be regenerated in the same commit.
-D411_INPUTS=(
-  "ops/capabilities.yaml"
-  "ops/bindings/capability_map.yaml"
-  "ops/bindings/agents.registry.yaml"
-  "ops/bindings/terminal.role.contract.yaml"
-  "ops/bindings/gate.domain.profiles.yaml"
-  "ops/bindings/gate.agent.profiles.yaml"
-  "ops/bindings/service.endpoint.catalog.yaml"
-  "ops/plugins/core/ops/bin/gen-terminal-worker-runtime-v2.py"
-)
-
-D411_INPUT_STAGED=0
-for input_file in "${D411_INPUTS[@]}"; do
-  if printf '%s\n' "$STAGED_FILES" | grep -Fxq "$input_file"; then
-    D411_INPUT_STAGED=1
-    break
-  fi
-done
-
-if [[ "$D411_INPUT_STAGED" -eq 1 ]]; then
-  CHECKED=$((CHECKED + 1))
-  if ! bash "$SP/surfaces/verify/d411-terminal-worker-projection-lock.sh" > /dev/null 2>&1; then
-    echo "pre-commit: D411 input file staged but governed projections are stale."
-    echo "  Run these to regenerate, then stage the output files:"
-    echo "    bash ops/plugins/core/ops/bin/gen-worker-catalog.sh --apply"
-    echo "    bash ops/plugins/core/ops/bin/gen-routing-dispatch.sh --apply"
-    echo "    bash ops/plugins/core/ops/bin/gen-launcher-view.sh --apply"
-    echo "    bash ops/plugins/core/ops/bin/gen-worker-usage-docs.sh --apply"
-    echo "  Then: git add ops/bindings/terminal.worker.catalog.yaml ops/bindings/routing.dispatch.yaml ops/bindings/terminal.launcher.view.yaml docs/reference/generated/worker-usage/"
-    exit 1
-  fi
 fi
 
 # Mirror-sanitization canary: reject redaction placeholders from the mirror
