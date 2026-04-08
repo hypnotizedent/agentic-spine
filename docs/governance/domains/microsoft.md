@@ -4,7 +4,7 @@ Canonical domain policy for `microsoft`.
 
 - Authority: `docs/governance/SPINE.md`
 - Runtime contracts: `ops/bindings/domains/microsoft.bundle.yaml`
-- Mint customer mailbox operating contract: `ops/bindings/mint.customer.mailbox.standard.contract.yaml`
+- Mint customer mailbox operating contract: `ops/bindings/domains/mint/mint.customer.mailbox.standard.contract.yaml`
 - Mint tenant boringness contract: `ops/bindings/microsoft.tenant.boring.contract.yaml`
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain microsoft`
 
