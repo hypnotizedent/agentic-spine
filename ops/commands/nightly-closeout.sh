@@ -593,19 +593,15 @@ set +e
 echo "$?" > "$ARTIFACT_DIR/loops_status.rc"
 "$ROOT/ops/plugins/core/loops/bin/gaps-status" > "$ARTIFACT_DIR/gaps_status.log" 2>&1
 echo "$?" > "$ARTIFACT_DIR/gaps_status.rc"
-bash "$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile" --json > "$ARTIFACT_DIR/worktree_lifecycle.log" 2>&1
-echo "$?" > "$ARTIFACT_DIR/worktree_lifecycle.rc"
 set -e
 
 if [[ "$JSON_MODE" -eq 0 ]]; then
   cat "$ARTIFACT_DIR/loops_status.log"
   cat "$ARTIFACT_DIR/gaps_status.log"
-  cat "$ARTIFACT_DIR/worktree_lifecycle.log"
 fi
 
 LOOPS_RUN_KEY="direct:ops/plugins/core/loops/bin/loops-status"
 GAPS_RUN_KEY="direct:ops/plugins/core/loops/bin/gaps-status"
-WORKTREE_RECONCILE_RUN_KEY="direct:ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile --json"
 
 LOOPS_OPEN="$(awk '/By Status:/{f=1;next} f&&$1=="Open:"{print $2; exit}' "$ARTIFACT_DIR/loops_status.log" 2>/dev/null || true)"
 GAPS_OPEN="$(sed -nE 's/^Gaps:[^|]*\|[[:space:]]*([0-9]+)[[:space:]]+open.*/\1/p' "$ARTIFACT_DIR/gaps_status.log" | head -1)"
@@ -641,7 +637,6 @@ GITHUB_CODEX_COUNT_AFTER="$(git -C "$ROOT" for-each-ref refs/remotes/github/code
   echo "- snapshot_refs_inventory: ${SNAPSHOT_REFS:-none}"
   echo "- run_key_loops_status: ${LOOPS_RUN_KEY:-none}"
   echo "- run_key_gaps_status: ${GAPS_RUN_KEY:-none}"
-  echo "- run_key_worktree_lifecycle: ${WORKTREE_RECONCILE_RUN_KEY:-none}"
   echo ""
   echo "## Actions"
   echo "- local_branches_pruned: ${#ACTION_BRANCHES_PRUNED[@]}"
@@ -671,7 +666,6 @@ GITHUB_CODEX_COUNT_AFTER="$(git -C "$ROOT" for-each-ref refs/remotes/github/code
   echo "snapshot_refs=${SNAPSHOT_REFS:-none}"
   echo "run_key_loops_status=${LOOPS_RUN_KEY:-none}"
   echo "run_key_gaps_status=${GAPS_RUN_KEY:-none}"
-  echo "run_key_worktree_lifecycle=${WORKTREE_RECONCILE_RUN_KEY:-none}"
   echo "loops_open=$LOOPS_OPEN"
   echo "gaps_open=$GAPS_OPEN"
   echo "orphaned_gaps=$ORPHANED_GAPS"
@@ -709,7 +703,6 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --arg summary_env "$SUMMARY_ENV" \
     --arg loops_run_key "${LOOPS_RUN_KEY:-none}" \
     --arg gaps_run_key "${GAPS_RUN_KEY:-none}" \
-    --arg worktree_reconcile_run_key "${WORKTREE_RECONCILE_RUN_KEY:-none}" \
     --arg snapshot_bundle "${SNAPSHOT_BUNDLE:-none}" \
     --arg snapshot_refs "${SNAPSHOT_REFS:-none}" \
     --arg loops_open "$LOOPS_OPEN" \
@@ -743,8 +736,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       },
       run_keys: {
         loops_status: $loops_run_key,
-        gaps_status: $gaps_run_key,
-        worktree_lifecycle_reconcile: $worktree_reconcile_run_key
+        gaps_status: $gaps_run_key
       },
       snapshot: {
         bundle: $snapshot_bundle,
@@ -779,7 +771,6 @@ else
   echo "artifact.summary_env=$SUMMARY_ENV"
   echo "run_key.loops_status=${LOOPS_RUN_KEY:-none}"
   echo "run_key.gaps_status=${GAPS_RUN_KEY:-none}"
-  echo "run_key.worktree_lifecycle=${WORKTREE_RECONCILE_RUN_KEY:-none}"
   echo "snapshot.bundle=${SNAPSHOT_BUNDLE:-none}"
   echo "snapshot.refs=${SNAPSHOT_REFS:-none}"
 fi
