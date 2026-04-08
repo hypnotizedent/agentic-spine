@@ -1,0 +1,517 @@
+# Mint Quotes Module API Contract
+# Status: draft
+# Created: 2026-04-08
+# Scope: quotes-module-api-surface
+#
+# This contract defines the executable API surface for the quotes module.
+# It derives from and must conform to the approved order-truth authority:
+#   ops/bindings/domains/mint/mint.order.truth.authority.yaml (v2, approved)
+#
+# Design principle: quotes are immutable commercial offers derived FROM orders.
+# A quote references a specific order_revision_id + pricing_snapshot_id.
+# Customer acceptance of a quote transitions the parent order to approved.
+# Quotes do NOT create orders. Orders must exist before a quote can be issued.
+#
+# The legacy /v2/quotes/* facade remains for backward compatibility where
+# possible. Endpoints that assume quotes-create-orders are removed (410).
+
+version: 1
+updated_at: "2026-04-08"
+owner: "@ronny"
+status: draft
+scope: quotes-module-api-surface
+
+authority:
+  order_truth: ops/bindings/domains/mint/mint.order.truth.authority.yaml
+  quote_packet: ops/bindings/domains/mint/mint.quote.packet.authority.yaml
+  line_item_normalization: ops/bindings/domains/mint/mint.quote.line_item.normalization.contract.yaml
+  payment_bridge: ops/bindings/domains/mint/mint.quote.payment_bridge.authority.yaml
+  module_lifecycle: ops/bindings/domains/mint/mint.module.lifecycle.authority.yaml
+
+deployment:
+  vm: 213
+  port: 4600
+  database: mint_modules (PostgreSQL 16 on VM 212)
+  env_key: QUOTES_DATABASE_URL
+  persistence: >
+    Current store.ts uses in-memory Maps with seed data. The reconciliation
+    replaces this with PostgreSQL-backed persistence using the canonical schema.
+
+# ─── CANONICAL ENTITY MODEL ───────────────────────────────────────────
+#
+# From the order-truth authority v2:
+#   quote_id          UUID, primary key
+#   order_id          UUID FK → orders.order_id (via API, not direct DB FK)
+#   order_revision_id UUID (the specific revision this quote prices)
+#   pricing_snapshot_id UUID (the exact pricing calculation)
+#   quote_state       enum: draft, sent, accepted, rejected, expired, superseded
+#   quote_number      TEXT, unique, format QT-YYMMDD-XXXX
+#   public_hash       TEXT, unique (for customer-facing links)
+#   issued_at         TIMESTAMPTZ (set when quote_state transitions to sent)
+#   accepted_at       TIMESTAMPTZ (set when customer accepts)
+#   expires_at        TIMESTAMPTZ (optional, for auto-expiry)
+#   superseded_by     UUID (FK → quotes.quote_id, set on supersession)
+#   customer_id       UUID
+#   notes             TEXT (operator-facing)
+#   created_at        TIMESTAMPTZ
+#   updated_at        TIMESTAMPTZ
+#
+# Quote line items mirror the order_revision's line items at the time of
+# quoting, with pricing applied. They are immutable after issuance (sent).
+#
+#   quote_line_item_id  UUID, primary key
+#   quote_id            UUID FK → quotes.quote_id
+#   order_line_item_id  UUID (reference to source line item)
+#   product             TEXT
+#   description         TEXT
+#   quantity            INTEGER
+#   unit_price_cents    INTEGER
+#   line_total_cents    INTEGER (quantity × unit_price_cents)
+#   decoration_type     TEXT
+#   metadata            JSONB (size_breakdown, colors, placement, etc.)
+#   created_at          TIMESTAMPTZ
+#
+# Quote state transitions are audited:
+#
+#   quote_transition_id UUID, primary key
+#   quote_id            UUID FK → quotes.quote_id
+#   from_state          TEXT
+#   to_state            TEXT
+#   actor               TEXT
+#   reason              TEXT
+#   created_at          TIMESTAMPTZ
+#
+# Quote templates (standalone, not order-linked):
+#
+#   Unchanged from scaffolded schema. Templates are a UI/comms concern,
+#   not part of the order truth model.
+
+# ─── STATE MACHINE ────────────────────────────────────────────────────
+#
+# From order-truth authority v2, state_models.quote_state:
+
+state_machine:
+  allowed_states:
+    - draft
+    - sent
+    - accepted
+    - rejected
+    - expired
+    - superseded
+  terminal_states:
+    - superseded
+  transitions:
+    draft:
+      - sent
+      - superseded
+    sent:
+      - accepted
+      - rejected
+      - expired
+      - superseded
+    accepted:
+      - superseded
+    rejected:
+      - superseded
+    expired:
+      - superseded
+    superseded: []
+  transition_actors:
+    send: requireStaff
+    supersede: requireStaff
+    reject: requireCustomer (explicit decline)
+    expire: system (scheduled or manual)
+    accepted: system-only (projected by reconcile_payment, not a direct API action)
+  side_effects:
+    accepted: >
+      Acceptance is projected by mint.quote.reconcile_payment when the
+      payment module confirms successful customer payment. The reconciliation
+      advances the parent order's lifecycle_state from quoted → approved
+      and marks the quote accepted. This is NOT triggered by a direct
+      customer API call — it is a system-level projection from payment truth.
+      If the order transition fails, the quote acceptance is rolled back.
+
+# ─── REMOVED STATUS ──────────────────────────────────────────────────
+#
+# "converted" is NOT a valid quote state. The scaffolded code has a
+# convertQuote() function and "converted" status that assume quotes
+# create orders. The authority says the opposite: orders exist first.
+# The convert endpoint is removed (410).
+
+removed_status:
+  converted: >
+    Removed. The old model assumed quotes "convert" into orders. The
+    canonical model says orders exist first, quotes are issued against
+    them. Customer acceptance of a quote transitions the parent order
+    to approved — it does not create a new order.
+
+# ─── CANONICAL V3 ENDPOINTS ──────────────────────────────────────────
+#
+# These endpoints implement the order-truth authority's quote entity
+# model. They are the production truth surface. New consumers use these.
+
+endpoints:
+
+  issue_quote:
+    method: POST
+    path: /api/v3/quotes
+    purpose: >
+      Issue a new quote against a specific order + order_revision +
+      pricing_snapshot. The quote is created in draft state. The order
+      must exist (verified via orders module API).
+    auth: requireStaff
+    request_body:
+      required:
+        - order_id
+        - order_revision_id
+        - pricing_snapshot_id
+        - customer_id
+      optional:
+        - notes
+        - expires_at
+        - line_items  # if omitted, copied from pricing snapshot
+    response: "201 { quote }"
+    errors:
+      400: missing required fields
+      404: order not found (verified via orders API)
+      409: active non-superseded quote already exists for this revision
+
+  get_quote:
+    method: GET
+    path: /api/v3/quotes/:quote_id
+    purpose: >
+      Retrieve full quote with line items and transition history.
+    auth: requireStaff
+    response: "200 { quote, line_items, transitions }"
+    errors:
+      404: quote not found
+
+  get_quote_customer_view:
+    method: GET
+    path: /api/v3/quotes/:quote_id/customer-view
+    purpose: >
+      Customer-scoped read. Returns quote details without internal
+      notes or transition history.
+    auth: requireCustomer
+    response: "200 { quote, line_items }"
+    errors:
+      404: quote not found or not owned by customer
+
+  transition_quote:
+    method: POST
+    path: /api/v3/quotes/:quote_id/transitions
+    purpose: >
+      Advance quote state per the state machine. Validates transition
+      is allowed. Staff can send and supersede. Customers can reject.
+      System can expire. Acceptance is NOT available through this
+      endpoint — it is projected by reconcile_payment when payment
+      succeeds (see payment bridge authority).
+    auth: requireStaff (send, supersede), requireCustomer (reject), system (expire)
+    request_body:
+      required:
+        - to_state
+      optional:
+        - reason
+        - superseded_by  # required when to_state is superseded
+    disallowed_transitions_via_api:
+      accepted: >
+        Cannot be set directly. Acceptance is projected by
+        mint.quote.reconcile_payment when payment succeeds.
+    response: "200 { quote, transition }"
+    errors:
+      400: invalid transition or disallowed via API
+      404: quote not found
+      409: transition not allowed from current state
+
+  supersede_quote:
+    method: POST
+    path: /api/v3/quotes/:quote_id/supersede
+    purpose: >
+      Supersede this quote with a new one. Creates the replacement
+      quote in draft state and marks this one as superseded.
+      Shorthand for: issue new quote + transition old to superseded.
+    auth: requireStaff
+    request_body:
+      required:
+        - order_revision_id  # may be same or different revision
+        - pricing_snapshot_id
+      optional:
+        - notes
+        - expires_at
+        - line_items
+    response: "201 { old_quote, new_quote }"
+    errors:
+      404: quote not found
+      409: quote already in terminal state
+
+  list_order_quotes:
+    method: GET
+    path: /api/v3/orders/:order_id/quotes
+    purpose: >
+      List all quotes for a given order, ordered by created_at desc.
+      Returns summary-level quote data (no line items).
+    auth: requireStaff
+    response: "200 { quotes, total }"
+
+  get_quote_history:
+    method: GET
+    path: /api/v3/quotes/:quote_id/history
+    purpose: >
+      Full transition history for a quote.
+    auth: requireStaff
+    response: "200 { transitions }"
+
+# ─── V2 FACADE (COMPATIBILITY) ──────────────────────────────────────
+#
+# Preserved v2 endpoints delegate to the canonical store.
+# They return legacy-shaped responses for existing consumers.
+
+v2_facade:
+
+  preserved:
+    # --- reads (5) ---
+    list_quotes:
+      method: GET
+      path: /api/v2/quotes
+      auth: requireStaff
+      facade_behavior: >
+        Delegates to canonical store. Maps quote_state to legacy status
+        names. Includes line items inline (legacy shape).
+
+    get_quote:
+      method: GET
+      path: /api/v2/quotes/:id
+      auth: requireStaff
+      facade_behavior: Maps canonical quote to legacy shape.
+
+    customer_quotes:
+      method: GET
+      path: /api/customer/quotes
+      auth: requireCustomer
+      facade_behavior: Returns customer-scoped legacy-shaped quotes.
+
+    public_quote:
+      method: GET
+      path: /api/quotes/public/:hash
+      auth: none
+      facade_behavior: Returns public-facing quote via hash lookup.
+
+    list_templates:
+      method: GET
+      path: /api/quote-templates
+      auth: requireStaff
+      facade_behavior: Unchanged. Templates are not order-linked.
+
+    # --- updates (2) ---
+    update_quote:
+      method: PUT
+      path: /api/v2/quotes/:id
+      auth: requireStaff
+      facade_behavior: >
+        Updates mutable fields (notes, customer_name) on draft quotes only.
+        Immutable after issuance.
+
+    send_quote:
+      method: POST
+      path: /api/v2/quotes/:id/send
+      auth: requireStaff
+      facade_behavior: >
+        Delegates to canonical transition (draft → sent). Sets issued_at.
+
+    # --- writes (3) ---
+    create_template:
+      method: POST
+      path: /api/quote-templates
+      auth: requireStaff
+      facade_behavior: Unchanged. Templates are standalone.
+
+    update_template:
+      method: PUT
+      path: /api/quote-templates/:id
+      auth: requireStaff
+      facade_behavior: Unchanged.
+
+    delete_template:
+      method: DELETE
+      path: /api/quote-templates/:id
+      auth: requireStaff
+      facade_behavior: Unchanged.
+
+  # --- total preserved: 10 (5 read + 2 update + 3 template) ---
+
+  removed:
+    # These endpoints assume the old model where quotes create orders.
+
+    create_quote:
+      method: POST
+      path: /api/v2/quotes
+      returns: 410
+      migration_message: >
+        Quotes are now issued against existing orders via
+        POST /api/v3/quotes. Use the canonical endpoint with
+        order_id, order_revision_id, and pricing_snapshot_id.
+
+    convert_quote:
+      method: POST
+      path: /api/v2/quotes/:id/convert
+      returns: 410
+      migration_message: >
+        Quote conversion is removed. Quotes do not create orders.
+        Canonical flow is: POST /api/v3/quotes to issue draft quote →
+        generate payment link in spine runtime → POST /api/v3/quotes/:id/transitions
+        with to_state=sent → payment reconciliation projects accepted and
+        advances the parent order to approved.
+
+    add_line_item:
+      method: POST
+      path: /api/v2/quotes/:id/line-items
+      returns: 410
+      migration_message: >
+        Line items are set at quote issuance time from the pricing
+        snapshot. Use POST /api/v3/quotes to issue a quote with
+        line items, or POST /api/v3/quotes/:id/supersede to create
+        a new quote with different line items.
+
+    update_line_item:
+      method: PUT
+      path: /api/v2/quotes/:id/line-items/:lineItemId
+      returns: 410
+      migration_message: >
+        Quote line items are immutable after issuance. Create a new
+        quote via supersession to change line items.
+
+    remove_line_item:
+      method: DELETE
+      path: /api/v2/quotes/:id/line-items/:lineItemId
+      returns: 410
+      migration_message: >
+        Quote line items are immutable after issuance. Create a new
+        quote via supersession to change line items.
+
+    generate_from_request:
+      method: POST
+      path: /api/quote-requests/:id/generate-quote
+      returns: 410
+      migration_message: >
+        Quote requests are replaced by the intake → order → quote
+        pipeline. Create an order first via the orders module, then
+        issue a quote against it.
+
+  # --- total removed: 6 ---
+
+# ─── ENDPOINT SUMMARY ────────────────────────────────────────────────
+
+summary:
+  v3_canonical: 7
+  v2_preserved: 10
+  v2_removed: 6
+  total_v2_surface: 16  # matches scaffolded API.md (16 endpoints)
+  total_endpoints: 23
+
+# ─── DATABASE SCHEMA ─────────────────────────────────────────────────
+
+database:
+  migration: quotes/migrations/0002_canonical_quotes.sql
+  tables:
+    quotes:
+      columns:
+        - quote_id (UUID PK)
+        - quote_number (TEXT UNIQUE, format QT-YYMMDD-XXXX)
+        - order_id (UUID, NOT NULL)
+        - order_revision_id (UUID, NOT NULL)
+        - pricing_snapshot_id (UUID, NOT NULL)
+        - customer_id (UUID, NOT NULL)
+        - quote_state (TEXT, NOT NULL, default draft)
+        - public_hash (TEXT UNIQUE)
+        - notes (TEXT)
+        - issued_at (TIMESTAMPTZ, set on send)
+        - accepted_at (TIMESTAMPTZ, set on accept)
+        - expires_at (TIMESTAMPTZ, optional)
+        - superseded_by (UUID, FK → quotes.quote_id)
+        - created_at (TIMESTAMPTZ)
+        - updated_at (TIMESTAMPTZ)
+      notes: >
+        order_id and order_revision_id are logical references verified
+        via the orders module API at creation time, not database FKs.
+        The quotes module does not share a database with orders.
+
+    quote_line_items:
+      columns:
+        - quote_line_item_id (UUID PK)
+        - quote_id (UUID FK → quotes.quote_id)
+        - order_line_item_id (UUID, reference only)
+        - product (TEXT)
+        - description (TEXT)
+        - quantity (INTEGER)
+        - unit_price_cents (INTEGER)
+        - line_total_cents (INTEGER)
+        - decoration_type (TEXT)
+        - metadata (JSONB)
+        - created_at (TIMESTAMPTZ)
+
+    quote_transitions:
+      columns:
+        - quote_transition_id (UUID PK)
+        - quote_id (UUID FK → quotes.quote_id)
+        - from_state (TEXT)
+        - to_state (TEXT)
+        - actor (TEXT)
+        - reason (TEXT)
+        - created_at (TIMESTAMPTZ)
+
+    quote_templates:
+      note: >
+        Unchanged from 0001_init.sql. Templates are a UI/comms concern
+        and are not part of the order truth model.
+
+  supersession:
+    old_tables:
+      quotes: >
+        Scaffolded quotes table lacks order_id, order_revision_id,
+        pricing_snapshot_id, superseded_by, and uses "converted" status.
+        Migration renames to quotes_legacy_precanonical, backfills any
+        existing rows into canonical schema where possible.
+      quote_line_items: >
+        Scaffolded line items lack order_line_item_id, line_total_cents,
+        decoration_type, metadata. Renamed and backfilled.
+    preserved_tables:
+      quote_templates: >
+        No schema change. Templates are preserved as-is.
+
+# ─── DOWNSTREAM CONTRACTS ────────────────────────────────────────────
+
+downstream:
+  orders_module:
+    consumes_from_orders: order_id, order_revision_id, lifecycle_state
+    provides_to_orders:
+      active_quote_id: >
+        The orders contract comment (line 329) lists active_quote_id as a
+        mutable field "managed by quotes module", but the PATCH endpoint
+        only exposes assignment, operator_working_notes, and customer_id.
+        PENDING: orders contract amendment to add active_quote_id to the
+        PATCH allowed fields. Until then, the quotes module tracks
+        active_quote_id locally and the orders module does not receive it.
+    transition_side_effect: >
+      Quote acceptance (projected by reconcile_payment) triggers
+      POST /api/v3/orders/:order_id/transitions with to_state=approved.
+      This path exists in the approved orders contract.
+    contract: quotes consumes orders via API, never direct DB access
+
+  pricing_module:
+    consumes: pricing_snapshot_id (opaque reference)
+    provides: line item pricing data at quote issuance time
+    note: >
+      Pricing snapshots are immutable. The quotes module stores a copy
+      of the line item pricing at issuance time. It does not re-query
+      the pricing module after issuance.
+
+  payment_module:
+    note: >
+      Payment bridge (mint.quote.payment_bridge.authority.yaml) defines
+      the quote → payment link generation boundary. Payment links are
+      generated for DRAFT quotes BEFORE send (not after acceptance).
+      The flow is: draft → generate payment link → send with link →
+      customer pays → reconcile_payment projects accepted + approved.
+      Payment link generation is a spine runtime capability
+      (mint.quote.generate_payment_link), not a quotes module endpoint.
+      This is not part of the initial reconciliation.
