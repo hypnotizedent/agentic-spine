@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-proxmox-power-control — Out-of-band power control via iDRAC
+# Mutating. Power on/off/cycle the physical host via IPMI.
+#
+# Usage:
+#   infra-proxmox-power-control on [--execute]
+#   infra-proxmox-power-control off [--execute]
+#   infra-proxmox-power-control cycle [--execute]
+#   infra-proxmox-power-control status
+#
+# Dry-run by default. Pass --execute to actually send the IPMI command.
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+IDRAC_IP="192.168.1.250"
+JUMP_HOST_ID="pve"
+
+usage() {
+    cat <<'EOF'
+infra-proxmox-power-control — iDRAC power control
+
+Usage:
+  infra-proxmox-power-control status
+  infra-proxmox-power-control on [--execute]
+  infra-proxmox-power-control off [--execute]
+  infra-proxmox-power-control cycle [--execute]
+
+Dry-run by default. Pass --execute to send the IPMI command.
+Uses iDRAC at 192.168.1.250 via PVE as jump host.
+For power-on when host is off, uses Tailscale path to PVE if reachable,
+otherwise requires LAN access to iDRAC directly.
+EOF
+}
+
+ACTION="${1:-}"
+shift || true
+EXECUTE=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --execute) EXECUTE=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) shift ;;
+    esac
+done
+
+[[ -n "$ACTION" ]] || { usage >&2; exit 2; }
+
+case "$ACTION" in
+    on|off|cycle|status) ;;
+    *) echo "FAIL: unknown action '$ACTION' (expected on|off|cycle|status)" >&2; exit 2 ;;
+esac
+
+# Resolve credentials
+CREDS_SCRIPT="$SPINE_ROOT/ops/lib/infisical-agent.sh"
+IDRAC_USER=""
+IDRAC_PASS=""
+
+if [[ -f "$CREDS_SCRIPT" ]]; then
+    source "$CREDS_SCRIPT" 2>/dev/null || true
+    IDRAC_USER="${IDRAC_ADMIN_USER:-}"
+    IDRAC_PASS="${IDRAC_ADMIN_PASSWORD:-}"
+fi
+
+if [[ -z "$IDRAC_USER" || -z "$IDRAC_PASS" ]]; then
+    echo "WARN: iDRAC credentials not available from Infisical. Trying environment." >&2
+    IDRAC_USER="${IDRAC_USER:-${IDRAC_ADMIN_USER:-root}}"
+    IDRAC_PASS="${IDRAC_PASS:-${IDRAC_ADMIN_PASSWORD:-}}"
+fi
+
+if [[ -z "$IDRAC_PASS" ]]; then
+    echo "FAIL: iDRAC password not available. Set IDRAC_ADMIN_PASSWORD or configure Infisical." >&2
+    exit 1
+fi
+
+# Try to use PVE as jump host for IPMI (iDRAC is LAN-only)
+SSH_HOST="$(ssh_resolve_ssh_host_with_fallback "$JUMP_HOST_ID" 2>/dev/null | awk '{print $1}' || true)"
+SSH_USER="$(ssh_resolve_user "$JUMP_HOST_ID" 2>/dev/null || echo root)"
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+run_ipmi() {
+    local ipmi_cmd="$1"
+    if [[ -n "$SSH_HOST" && "$SSH_HOST" != "unreachable" ]]; then
+        # Via PVE jump host
+        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+            "ipmitool -I lanplus -H $IDRAC_IP -U $(printf '%q' "$IDRAC_USER") -P $(printf '%q' "$IDRAC_PASS") $ipmi_cmd" 2>&1
+    else
+        # Direct (must be on LAN)
+        ipmitool -I lanplus -H "$IDRAC_IP" -U "$IDRAC_USER" -P "$IDRAC_PASS" $ipmi_cmd 2>&1
+    fi
+}
+
+echo "=== PVE POWER CONTROL ==="
+echo "iDRAC: $IDRAC_IP"
+echo "Jump host: ${SSH_HOST:-direct}"
+echo ""
+
+case "$ACTION" in
+    status)
+        echo "-- Power Status --"
+        run_ipmi "power status" || echo "FAIL: IPMI unreachable"
+        ;;
+    on)
+        if [[ "$EXECUTE" -eq 0 ]]; then
+            echo "DRY RUN: would send 'power on' via IPMI"
+            echo "Pass --execute to actually power on."
+        else
+            echo "Sending power on..."
+            run_ipmi "power on"
+        fi
+        ;;
+    off)
+        if [[ "$EXECUTE" -eq 0 ]]; then
+            echo "DRY RUN: would send 'power off' via IPMI"
+            echo "Pass --execute to actually power off."
+            echo "WARNING: This is a hard power off. Use host.control for graceful shutdown."
+        else
+            echo "Sending power off..."
+            run_ipmi "power off"
+        fi
+        ;;
+    cycle)
+        if [[ "$EXECUTE" -eq 0 ]]; then
+            echo "DRY RUN: would send 'power cycle' via IPMI"
+            echo "Pass --execute to actually power cycle."
+        else
+            echo "Sending power cycle..."
+            run_ipmi "power cycle"
+        fi
+        ;;
+esac

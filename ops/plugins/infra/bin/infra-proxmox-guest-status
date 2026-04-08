@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-proxmox-guest-status — Show PVE guest state (VMs + containers)
+# Read-only. Reports running/stopped/template counts and per-guest detail.
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+HOST_ID="${1:-pve}"
+FORMAT="text"
+[[ "${2:-}" == "--json" ]] && FORMAT="json"
+
+SSH_HOST="$(ssh_resolve_ssh_host_with_fallback "$HOST_ID" 2>/dev/null | awk '{print $1}')"
+SSH_USER="$(ssh_resolve_user "$HOST_ID")"
+
+if [[ -z "$SSH_HOST" || "$SSH_HOST" == "unreachable" ]]; then
+    echo "FAIL: cannot reach $HOST_ID" >&2
+    exit 1
+fi
+
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+remote() {
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" "$@"
+}
+
+echo "=== PVE GUEST STATUS ($HOST_ID) ==="
+echo ""
+
+echo "-- KVM VMs --"
+remote 'qm list 2>/dev/null' || echo "  (qm list failed)"
+echo ""
+
+echo "-- LXC Containers --"
+remote 'pct list 2>/dev/null' || echo "  (pct list failed)"
+echo ""
+
+# Summary counts
+remote 'bash -s' <<'REMOTE'
+set -uo pipefail
+vm_running=0; vm_stopped=0; ct_running=0; ct_stopped=0
+while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*[0-9] ]] || continue
+    status=$(echo "$line" | awk '{print $3}')
+    case "$status" in running) vm_running=$((vm_running + 1));; *) vm_stopped=$((vm_stopped + 1));; esac
+done < <(qm list 2>/dev/null | tail -n+2)
+while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*[0-9] ]] || continue
+    status=$(echo "$line" | awk '{print $2}')
+    case "$status" in running) ct_running=$((ct_running + 1));; *) ct_stopped=$((ct_stopped + 1));; esac
+done < <(pct list 2>/dev/null | tail -n+2)
+echo "Summary: VMs=${vm_running} running/${vm_stopped} stopped, CTs=${ct_running} running/${ct_stopped} stopped"
+REMOTE

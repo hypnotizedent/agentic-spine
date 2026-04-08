@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-proxmox-host-control — Canonical PVE host shutdown/startup
+# Mutating. Wraps the existing infra-proxmox-maintenance script.
+#
+# Usage:
+#   infra-proxmox-host-control shutdown [--host-id pve] [--execute] [--poweroff]
+#       [--allow-oob-loss] [--ack-token TOKEN]
+#   infra-proxmox-host-control startup [--host-id pve] [--execute]
+#
+# This is the canonical operator-facing command. The underlying
+# infra-proxmox-maintenance script does the actual work.
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+MAINTENANCE_SCRIPT="$SPINE_ROOT/ops/plugins/infra/bin/infra-proxmox-maintenance"
+
+if [[ ! -f "$MAINTENANCE_SCRIPT" ]]; then
+    echo "FAIL: infra-proxmox-maintenance not found at $MAINTENANCE_SCRIPT" >&2
+    exit 1
+fi
+
+usage() {
+    cat <<'EOF'
+infra-proxmox-host-control — PVE host shutdown and startup
+
+Usage:
+  infra-proxmox-host-control shutdown [options]
+  infra-proxmox-host-control startup [options]
+
+Shutdown options:
+  --host-id <id>       Target host (default: pve)
+  --execute            Actually perform the shutdown (dry-run without this)
+  --poweroff           Power off the host after guest shutdown
+  --allow-oob-loss     Allow shutdown when OOB guard fails
+  --ack-token <token>  Acknowledgment token for OOB loss
+  --shutdown-timeout-sec <sec>  Guest shutdown timeout (default: 180)
+
+Startup options:
+  --host-id <id>       Target host (default: pve)
+  --execute            Actually start guests (dry-run without this)
+EOF
+}
+
+ACTION="${1:-}"
+shift || true
+
+case "$ACTION" in
+    shutdown|startup) ;;
+    -h|--help|"") usage; exit 0 ;;
+    *) echo "FAIL: unknown action '$ACTION' (expected shutdown|startup)" >&2; exit 2 ;;
+esac
+
+exec bash "$MAINTENANCE_SCRIPT" --mode "$ACTION" "$@"

@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-proxmox-storage-bootpair-status — Rear boot pair health check
+# Read-only. The boring answer to "are my rear boot drives correct?"
+#
+# Reports: which drives form the boot pair, serials, SSD/HDD, EFI mount,
+# PV/LV placement, BootCurrent/BootOrder, stale staging disk detection.
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+HOST_ID="${1:-pve}"
+
+SSH_HOST="$(ssh_resolve_ssh_host_with_fallback "$HOST_ID" 2>/dev/null | awk '{print $1}')"
+SSH_USER="$(ssh_resolve_user "$HOST_ID")"
+
+if [[ -z "$SSH_HOST" || "$SSH_HOST" == "unreachable" ]]; then
+    echo "FAIL: cannot reach $HOST_ID" >&2
+    exit 1
+fi
+
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+remote() {
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" "$@"
+}
+
+echo "=== BOOT PAIR STATUS ($HOST_ID) ==="
+echo ""
+
+remote 'bash -s' <<'BOOT_CHECK'
+set -euo pipefail
+
+fail_count=0
+
+# Find PVs in VG pve — these are the boot pair members
+echo "-- Boot Pair Members (VG pve) --"
+pv_devs=()
+while IFS= read -r line; do
+    pv="$(echo "$line" | awk '{print $1}')"
+    size="$(echo "$line" | awk '{print $2}')"
+    used="$(echo "$line" | awk '{print $5}')"
+    free="$(echo "$line" | awk '{print $6}')"
+    [[ -n "$pv" ]] || continue
+    # Get the parent disk (strip partition number)
+    disk="${pv%%[0-9]*}"
+    disk="${disk%p}"  # handle nvme style too
+    [[ "$disk" == /dev/* ]] || disk="/dev/$disk"
+    # Resolve actual disk from partition
+    parent_disk="$(lsblk -ndp -o PKNAME "$pv" 2>/dev/null | head -1 || echo "$disk")"
+    [[ -n "$parent_disk" ]] || parent_disk="$disk"
+    model="$(lsblk -dn -o MODEL "$parent_disk" 2>/dev/null | xargs || echo 'unknown')"
+    serial="$(lsblk -dn -o SERIAL "$parent_disk" 2>/dev/null | xargs || echo 'unknown')"
+    rota="$(lsblk -dn -o ROTA "$parent_disk" 2>/dev/null | xargs || echo '?')"
+    if [[ "$rota" == "0" ]]; then
+        type_label="SSD"
+    elif [[ "$rota" == "1" ]]; then
+        type_label="HDD"
+        echo "  WARNING: $pv on $parent_disk is HDD, not SSD"
+        fail_count=$((fail_count + 1))
+    else
+        type_label="unknown"
+    fi
+    printf "  PV: %-12s  size=%-8s  disk=%-10s  model=%-15s  serial=%-15s  type=%s\n" \
+        "$pv" "$size" "$parent_disk" "$model" "$serial" "$type_label"
+    pv_devs+=("$parent_disk")
+done < <(pvs --noheadings -o pv_name,pv_size,pv_fmt,pv_attr,pv_used,pv_free --select vg_name=pve 2>/dev/null)
+
+echo ""
+
+# EFI mount
+echo "-- EFI --"
+efi_dev="$(mount | grep '/boot/efi' | awk '{print $1}' || echo 'not mounted')"
+echo "  /boot/efi mounted from: $efi_dev"
+if [[ "$efi_dev" != "not mounted" ]]; then
+    efi_parent="$(lsblk -ndp -o PKNAME "$efi_dev" 2>/dev/null | head -1 || echo 'unknown')"
+    efi_serial="$(lsblk -dn -o SERIAL "$efi_parent" 2>/dev/null | xargs || echo 'unknown')"
+    echo "  EFI disk: $efi_parent (serial: $efi_serial)"
+fi
+echo ""
+
+# Boot entries
+echo "-- Boot Order --"
+efibootmgr 2>/dev/null | grep -E '^Boot(Current|Order|[0-9]{4}\*)' | head -8 || echo "  efibootmgr unavailable"
+echo ""
+
+# LV placement
+echo "-- LV Placement --"
+lvs -a -o lv_name,lv_size,devices --noheadings --select vg_name=pve 2>/dev/null \
+    | grep -v '^\s*$' \
+    | while IFS= read -r line; do
+        printf "  %s\n" "$line"
+    done
+echo ""
+
+# Stale/dead disk detection
+echo "-- Anomalies --"
+anomalies=0
+while IFS= read -r line; do
+    name="$(echo "$line" | awk '{print $1}')"
+    size="$(echo "$line" | awk '{print $2}')"
+    model="$(echo "$line" | awk '{print $3}')"
+    serial="$(echo "$line" | awk '{print $4}')"
+    if [[ "$size" == "0B" || "$size" == "0" ]]; then
+        echo "  ANOMALY: /dev/$name shows ${size} — dead or unresponsive (model=$model serial=$serial)"
+        anomalies=$((anomalies + 1))
+    fi
+done < <(lsblk -dn -o NAME,SIZE,MODEL,SERIAL 2>/dev/null | grep -E '^sd')
+
+if [[ "$anomalies" -eq 0 && "$fail_count" -eq 0 ]]; then
+    echo "  None detected"
+fi
+
+echo ""
+if [[ "$fail_count" -eq 0 ]]; then
+    echo "BOOT PAIR: HEALTHY"
+else
+    echo "BOOT PAIR: $fail_count WARNING(S)"
+fi
+BOOT_CHECK
