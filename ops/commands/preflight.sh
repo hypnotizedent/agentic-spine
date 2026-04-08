@@ -15,13 +15,33 @@ if [[ -x "$BRAIN_DIR/generate-context.sh" ]]; then
   "$BRAIN_DIR/generate-context.sh" >/dev/null 2>&1 || true
 fi
 
-source "$LIB_DIR/governance.sh"
-source "$LIB_DIR/registry.sh"
+# governance.sh and registry.sh were removed during spine-lite L1 cleanup.
+# Preflight computes these inline now — no external lib dependency.
 
-GOV_HASH="$(compute_governance_hash)"
-MAP_HASH="$(compute_map_hash)"
-SEC_STATUS="$(check_secrets_cache)"
-DOC_COUNT="$(count_governance_docs)"
+# Governance hash: sha256 of all governance markdown docs
+_gov_files="$(find "$REPO_ROOT/docs/governance" -name '*.md' -type f 2>/dev/null | LC_ALL=C sort)"
+if [[ -n "$_gov_files" ]]; then
+  GOV_HASH="$(echo "$_gov_files" | xargs cat 2>/dev/null | shasum -a 256 | cut -c1-8)"
+  DOC_COUNT="$(echo "$_gov_files" | wc -l | tr -d ' ')"
+else
+  GOV_HASH="none"
+  DOC_COUNT="0"
+fi
+
+# Map hash: sha256 of capability registry
+_cap_file="$REPO_ROOT/ops/capabilities.runtime.yaml"
+if [[ -f "$_cap_file" ]]; then
+  MAP_HASH="$(shasum -a 256 "$_cap_file" | cut -c1-8)"
+else
+  MAP_HASH="none"
+fi
+
+# Secrets cache status: check if infisical auth vars are set
+if [[ -n "${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-}" || -n "${INFISICAL_TOKEN:-}" ]]; then
+  SEC_STATUS="OK"
+else
+  SEC_STATUS="WARN(no-auth)"
+fi
 
 REPO_GIT_OK=0
 if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
@@ -88,11 +108,8 @@ if [[ -n "${CURRENT_ISSUE:-}" ]]; then
   echo "📁 Worktree: ${CURRENT_WORKTREE:-main}"
 fi
 
-echo "Services:"
-API_URL="$(get_service_health_url mint-os-api 2>/dev/null || echo 'unknown')"
-MINIO_URL="$(get_service_health_url minio 2>/dev/null || echo 'unknown')"
-[ -n "$API_URL" ] && echo "  mint-os-api → $API_URL"
-[ -n "$MINIO_URL" ] && echo "  minio → $MINIO_URL"
+# Service health URLs were provided by registry.sh (now retired).
+# Preflight no longer probes individual service endpoints — that's verify's job.
 
 echo
 export GOV_LOADED=1
