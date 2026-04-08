@@ -37,6 +37,8 @@ mint_service_canonical_id() {
     suppliers|suppliers-v2) printf '%s\n' "suppliers-v2" ;;
     shipping|shipping-v2) printf '%s\n' "shipping-v2" ;;
     payment|payment-v2) printf '%s\n' "payment-v2" ;;
+    orders|orders-v1) printf '%s\n' "orders-v1" ;;
+    public-ingress|public-ingress-v1) printf '%s\n' "public-ingress-v1" ;;
     minio|mint-modules-minio) printf '%s\n' "mint-modules-minio" ;;
     *) printf '%s\n' "$component" ;;
   esac
@@ -154,6 +156,8 @@ pricing	app_plane
 suppliers	app_plane
 shipping	app_plane
 payment	app_plane
+orders	app_plane
+public-ingress	app_plane
 minio	data_plane
 EOF
 }
