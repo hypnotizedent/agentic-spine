@@ -1,125 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ha.config.extract - Extract HA config files for inspection without polluting tracked workbench files
-# Requires: SSH access to hassio@ha
-# Safety: read-only on HA (reads from HA, writes locally)
-# Default target: machine-local runtime under ~/code/.runtime/workbench/state/homeassistant/config-extract
-# Opt-in tracked target: --tracked writes to workbench/infra/homeassistant/config
-# Excludes: secrets.yaml (contains actual secrets)
+# ha-config-extract — SHIM: delegates to workbench canonical implementation
+# Canonical: workbench/agents/home-assistant/tools/spine-plugin-ha/bin/ha-config-extract
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
-source "$ROOT/ops/plugins/infra/lib/workbench-paths.sh"
-WORKBENCH_ROOT="$(workbench_repo_root)"
-TRACKED_TARGET_DIR="$WORKBENCH_ROOT/infra/homeassistant/config"
-RUNTIME_TARGET_DIR="${HA_CONFIG_EXTRACT_RUNTIME_DIR:-$HOME/code/.runtime/workbench/state/homeassistant/config-extract}"
-TARGET_DIR="$RUNTIME_TARGET_DIR"
-HA_SSH="hassio@ha"
-MODE="runtime"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONTROL_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
+source "$CONTROL_ROOT/ops/lib/spine-paths.sh"
+spine_paths_init >/dev/null 2>&1 || true
+WORKBENCH_ROOT="$(spine_resolve_peer_repo workbench)"
 
-# Files to extract (secrets.yaml intentionally excluded)
-CONFIG_FILES=(
-  configuration.yaml
-  automations.yaml
-  scripts.yaml
-  scenes.yaml
-  customize_hidden_entities.yaml
-  groups.yaml
-)
-
-usage() {
-  cat <<'USAGE'
-Usage:
-  ha-config-extract [--tracked] [--target-dir <path>]
-
-Default behavior writes live HA config copies to machine-local runtime state so
-Home Assistant churn does not dirty the tracked workbench repo.
-
-Options:
-  --tracked            overwrite tracked workbench config files intentionally
-  --target-dir <path>  write extracted files to a custom directory
-USAGE
-}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --tracked)
-      MODE="tracked"
-      TARGET_DIR="$TRACKED_TARGET_DIR"
-      shift
-      ;;
-    --target-dir)
-      [[ $# -ge 2 ]] || {
-        echo "ERROR: --target-dir requires a path" >&2
-        exit 2
-      }
-      MODE="custom"
-      TARGET_DIR="$2"
-      shift 2
-      ;;
-    -h|--help|help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "ERROR: unknown argument: $1" >&2
-      usage >&2
-      exit 2
-      ;;
-  esac
-done
-
-echo "ha.config.extract"
-echo
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PRECONDITIONS
-# ─────────────────────────────────────────────────────────────────────────────
-
-if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$HA_SSH" "echo ok" >/dev/null 2>&1; then
-  echo "status: STOP"
-  echo "reason: ha_ssh_unreachable"
-  echo "fix: check Tailscale connectivity and SSH key for hassio@ha"
-  exit 2
-fi
-
-mkdir -p "$TARGET_DIR"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# EXTRACT
-# ─────────────────────────────────────────────────────────────────────────────
-
-EXTRACTED=0
-FAILED=0
-CHECKSUMS=""
-
-for file in "${CONFIG_FILES[@]}"; do
-  if ssh "$HA_SSH" "sudo test -f /config/$file" 2>/dev/null; then
-    if ssh "$HA_SSH" "sudo cat /config/$file" > "$TARGET_DIR/$file" 2>/dev/null; then
-      lines=$(wc -l < "$TARGET_DIR/$file" | tr -d ' ')
-      sha=$(shasum -a 256 "$TARGET_DIR/$file" | cut -c1-12)
-      echo "  extracted: $file ($lines lines, sha256:$sha...)"
-      CHECKSUMS="${CHECKSUMS}  $file: $sha\n"
-      EXTRACTED=$((EXTRACTED + 1))
-    else
-      echo "  FAIL: $file (SSH cat failed)"
-      FAILED=$((FAILED + 1))
-    fi
-  else
-    echo "  skip: $file (not found on HA)"
-  fi
-done
-
-echo
-echo "status: OK"
-echo "extracted: $EXTRACTED"
-echo "failed: $FAILED"
-echo "target: $TARGET_DIR"
-echo "mode: $MODE"
-echo "checksums:"
-printf "$CHECKSUMS"
-
-if [[ "$FAILED" -gt 0 ]]; then
+CANONICAL="$WORKBENCH_ROOT/agents/home-assistant/tools/spine-plugin-ha/bin/ha-config-extract"
+if [[ ! -x "$CANONICAL" ]]; then
+  echo "FAIL: canonical script not found: $CANONICAL" >&2
   exit 1
 fi
-exit 0
+
+exec "$CANONICAL" "$@"
