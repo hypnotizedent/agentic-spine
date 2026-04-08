@@ -57,6 +57,7 @@ EVIDENCE_ROOT="$(jq_val '.paths.receipts_root' 'unknown')"
 OPEN_LOOPS="$(jq_val '.summary.open_loops' '?')"
 OPEN_GAPS="$(jq_val '.summary.open_gaps' '?')"
 ACTIVE_WAVES="$(jq_val '.summary.active_waves' '?')"
+ORPHANED_WAVES="$(jq_val '.summary.orphaned_waves' '?')"
 VERIFY_STATUS="$(jq_val '.summary.latest_fast_verify_status' 'unknown')"
 GAP_AUTHORITY="$(jq_val '.summary.gap_authority_status' 'unknown')"
 GAP_MATCH="$(jq_val '.summary.gap_projection_match' 'unknown')"
@@ -71,6 +72,7 @@ if [[ -n "$JOINED_ERR" ]]; then
 elif [[ "$COHERENCE" == "true" ]]; then
   W_PARTS=()
   [[ "$ACTIVE_WAVES" == "0" || "$ACTIVE_WAVES" == "?" ]] || W_PARTS+=("${ACTIVE_WAVES} active waves")
+  [[ "$ORPHANED_WAVES" == "0" || "$ORPHANED_WAVES" == "?" ]] || W_PARTS+=("${ORPHANED_WAVES} orphaned waves")
   [[ "$GAP_MATCH" == "true" || "$GAP_MATCH" == "unknown" ]] || W_PARTS+=("gap projection mismatch")
   [[ "$FORCE_CLOSES" == "0" || "$FORCE_CLOSES" == "?" ]] || W_PARTS+=("${FORCE_CLOSES} recent force-closes")
   [[ "$DOD_OVERRIDES" == "0" || "$DOD_OVERRIDES" == "?" ]] || W_PARTS+=("${DOD_OVERRIDES} recent DoD overrides")
@@ -92,6 +94,7 @@ echo "─── open work ──────────────────
 printf "  open loops:     %s\n" "$OPEN_LOOPS"
 printf "  open gaps:      %s\n" "$OPEN_GAPS"
 printf "  active waves:   %s\n" "$ACTIVE_WAVES"
+printf "  orphaned waves: %s\n" "$ORPHANED_WAVES"
 echo "─── verify / coherence ─────────────────────────────"
 printf "  fast verify:    %s\n" "$VERIFY_STATUS"
 printf "  gap authority:  %s\n" "$GAP_AUTHORITY"

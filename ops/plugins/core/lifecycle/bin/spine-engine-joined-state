@@ -487,10 +487,40 @@ def collect_main_override_signals(paths: dict[str, Path]) -> list[dict[str, Any]
     return rows[:20]
 
 
+def _parse_verify_text(text: str) -> dict[str, Any]:
+    """Parse the plain-text verify output format emitted by verify-run."""
+    result: dict[str, Any] = {"scope": "", "wrapper": {}, "blocking_fail_ids": [], "warning_gate_ids": []}
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("scope:"):
+            result["scope"] = line.split(":", 1)[1].strip()
+        elif line.startswith("wrapper:"):
+            for pair in line.split(":", 1)[1].strip().split():
+                if "=" in pair:
+                    key, val = pair.split("=", 1)
+                    try:
+                        result["wrapper"][key.strip()] = int(val.strip())
+                    except ValueError:
+                        result["wrapper"][key.strip()] = val.strip()
+        elif line.startswith("blocking_fail_gate_ids:"):
+            raw = line.split(":", 1)[1].strip()
+            result["blocking_fail_ids"] = [s.strip() for s in raw.split(",") if s.strip() and s.strip() != "none"] if raw else []
+        elif line.startswith("warning_gate_ids:"):
+            raw = line.split(":", 1)[1].strip()
+            result["warning_gate_ids"] = [s.strip() for s in raw.split(",") if s.strip() and s.strip() != "none"] if raw else []
+    return result
+
+
 def parse_verify_output(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8", errors="replace").strip()
-    payload = json.loads(text)
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        payload = _parse_verify_text(text)
     wrapper = payload.get("wrapper", {}) if isinstance(payload.get("wrapper"), dict) else {}
+    # Flat JSON schema (verify.fast): total/pass/fail/warn at top level, no wrapper
+    if not wrapper and isinstance(payload.get("total"), int):
+        wrapper = {k: payload[k] for k in ("total", "pass", "fail", "warn") if k in payload}
     blocking = payload.get("blocking_fail_ids", []) if isinstance(payload.get("blocking_fail_ids"), list) else []
     status = "unknown"
     if int(wrapper.get("fail", 0) or 0) == 0 and not blocking:
@@ -511,10 +541,23 @@ def parse_verify_output(path: Path) -> dict[str, Any]:
     }
 
 
+VERIFY_RECEIPT_PATTERNS = ("__verify.run__", "__verify.fast__")
+
+
+def _verify_receipt_dirs(paths: dict[str, Path]) -> list[Path]:
+    """Scan for verify receipts directly, bypassing the general receipt cap."""
+    root = paths["receipts_root"]
+    if not root.exists():
+        return []
+    candidates: list[Path] = []
+    for pat in VERIFY_RECEIPT_PATTERNS:
+        candidates.extend(p for p in root.glob(f"RCAP-*{pat}*") if p.is_dir())
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[:50]
+
+
 def collect_latest_fast_verify(paths: dict[str, Path]) -> dict[str, Any]:
-    for receipt_dir in receipt_dirs(paths):
-        if "__verify.run__" not in receipt_dir.name:
-            continue
+    for receipt_dir in _verify_receipt_dirs(paths):
         output_path = receipt_dir / "output.txt"
         exec_path = receipt_dir / "receipt.exec.json"
         receipt_path = receipt_dir / "receipt.md"
@@ -524,7 +567,11 @@ def collect_latest_fast_verify(paths: dict[str, Path]) -> dict[str, Any]:
             summary = parse_verify_output(output_path)
         except Exception:
             continue
-        if summary.get("scope") != "fast":
+        # Infer scope from receipt name when output lacks it
+        scope = summary.get("scope") or ""
+        if not scope and "__verify.fast__" in receipt_dir.name:
+            scope = "fast"
+        if scope != "fast":
             continue
         exec_payload = load_json(exec_path, {}) if exec_path.exists() else {}
         run_keys = exec_payload.get("run_keys", []) if isinstance(exec_payload, dict) else []
@@ -561,9 +608,11 @@ def build_engine_coherence_summary(
     override_signals: dict[str, list[dict[str, Any]]],
     main_override_signals: list[dict[str, Any]],
     gap_state: dict[str, Any],
+    orphaned_waves: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     signal_rows = [row for row in open_gaps if row.get("id") in ENGINE_COHERENCE_GAP_IDS]
     gap_authority_status = str(gap_state.get("status") or "degraded").strip().lower()
+    orphaned_wave_count = len(orphaned_waves) if orphaned_waves else 0
     return {
         "signal_gap_ids": sorted(ENGINE_COHERENCE_GAP_IDS),
         "open_gap_signals": signal_rows,
@@ -573,11 +622,13 @@ def build_engine_coherence_summary(
         "recent_force_close_count": len(override_signals.get("force_close", [])),
         "recent_dod_override_count": len(override_signals.get("dod_override", [])),
         "recent_main_override_count": len(main_override_signals),
+        "orphaned_wave_count": orphaned_wave_count,
         "needs_attention": bool(
             gap_authority_status != "ok"
             or signal_rows
             or override_signals.get("force_close")
             or override_signals.get("dod_override")
+            or orphaned_wave_count > 0
         ),
     }
 
@@ -652,9 +703,19 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
     handoffs = collect_handoffs(paths)
     worktrees = collect_worktree_state(paths)
     active_waves, override_signals = collect_wave_state(paths)
+    orphaned_waves: list[dict[str, Any]] = []
+    for wave in active_waves:
+        parent_loop = wave.get("loop_id", "")
+        if not parent_loop:
+            continue
+        parent_status = loop_status_index.get(parent_loop, "")
+        if parent_status in TERMINAL_LOOP_STATUSES or (parent_loop and not parent_status):
+            orphan = dict(wave)
+            orphan["parent_loop_status"] = parent_status or "absent"
+            orphaned_waves.append(orphan)
     main_override_signals = collect_main_override_signals(paths)
     latest_fast_verify = collect_latest_fast_verify(paths)
-    engine_coherence = build_engine_coherence_summary(open_gaps, override_signals, main_override_signals, gap_state)
+    engine_coherence = build_engine_coherence_summary(open_gaps, override_signals, main_override_signals, gap_state, orphaned_waves)
 
     payload: dict[str, Any] = {
         "schema_version": "1.0",
@@ -676,6 +737,7 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             "active_handoffs": len(handoffs),
             "blocked_worktrees": len(worktrees.get("blocked", [])),
             "active_waves": len(active_waves),
+            "orphaned_waves": len(orphaned_waves),
             "recent_force_closes": len(override_signals.get("force_close", [])),
             "recent_dod_overrides": len(override_signals.get("dod_override", [])),
             "recent_main_overrides": len(main_override_signals),
@@ -700,7 +762,7 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             "summary": worktrees.get("summary", {}),
             "blocked": worktrees.get("blocked", []),
         },
-        "waves": {"active": active_waves},
+        "waves": {"active": active_waves, "orphaned": orphaned_waves},
         "override_signals": {
             "recent_window_hours": RECENT_SIGNAL_WINDOW_HOURS,
             "force_close": override_signals.get("force_close", []),
@@ -760,6 +822,7 @@ def main() -> int:
     print(f"orphaned_gaps: {orphaned_gaps}")
     print(f"blocked_worktrees: {summary.get('blocked_worktrees', 0)}")
     print(f"active_waves: {summary.get('active_waves', 0)}")
+    print(f"orphaned_waves: {summary.get('orphaned_waves', 0)}")
     print(f"recent_force_closes: {summary.get('recent_force_closes', 0)}")
     print(f"recent_dod_overrides: {summary.get('recent_dod_overrides', 0)}")
     print(f"recent_main_overrides: {summary.get('recent_main_overrides', 0)}")
