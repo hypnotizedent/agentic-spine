@@ -7,7 +7,8 @@ consumers:
   - .claude/skills/claude-ai-skill/SKILL.md
   - ~/.codex/skills/ronny-interpreter/SKILL.md
 related:
-  - ops/bindings/session.admission.contract.yaml
+  - ops/bindings/runtime.bootstrap.contract.yaml
+  - ops/bindings/role.runtime.control.contract.yaml
 ---
 
 # Ronny Session Skill Core
@@ -41,35 +42,33 @@ platform properties now.
 |---|---|
 | Minimal operating contract | `docs/governance/SPINE.md` |
 | Session protocol | `docs/governance/SESSION_PROTOCOL.md` |
-| Governance profiles | `ops/bindings/governance.profile.contract.yaml` |
+| Runtime control | `ops/bindings/role.runtime.control.contract.yaml` |
+| Bootstrap sequence | `ops/bindings/runtime.bootstrap.contract.yaml` |
 | Translator doctrine | `docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md` |
 | Output contracts | `docs/governance/SESSION_PROTOCOL.md` + machine contracts under `ops/bindings/` |
 
-## Governance Profiles
+## Runtime Posture
 
-Profile contract: `ops/bindings/governance.profile.contract.yaml`
+Live terminal behavior is governed by:
 
-- `full_governance` — live governed hook/attach context with dynamic runtime injection and enforced mutation discipline
-- `minimal_governance` — governed attach first, then a thin authoritative adapter with bounded scope and on-demand canonical reads
-- `lightweight_degraded` — truthful read/draft-only posture without full or minimal governance parity
+- `ops/bindings/runtime.bootstrap.contract.yaml` — canonical boot sequence
+- `ops/bindings/terminal.role.contract.yaml` — terminal-scoped authority
+- `ops/bindings/role.runtime.control.contract.yaml` — runtime role, promotion, and close discipline
 
-Cowork is not a governance-profile lane in this pass. It remains
-`out_of_scope_until_governed_adapter_exists`.
+Cowork remains `out_of_scope_until_governed_adapter_exists`.
 
 ## Session Entry
 
 ```bash
 cd ~/code/agentic-spine
-./bin/ops cap run session.v3.attach -- --allow-no-loop
+./bin/ops terminal launch --tool codex --terminal $TERMINAL_ID
 ```
 
-What `session.v3.attach` does:
-1. Cleans leaked ambient env vars from previous sessions
-2. Runs context-aware main checkout healing
-3. Cleans up stale/floating worktrees
-4. Resolves current loop context (or allows adhoc with `--allow-no-loop`)
-5. Compiles entry packet with friction snapshot
-6. Emits session exports (`SPINE_SESSION_ID`, `SPINE_LOOP_ID`, etc.)
+What terminal launch owns now:
+1. Resolves terminal-scoped identity
+2. Exports runtime role and optional loop attachment
+3. Launches the selected tool inside the governed terminal boundary
+4. Leaves loop attach and work orchestration to the active controller flow
 
 ## Non-Negotiable Rules
 
