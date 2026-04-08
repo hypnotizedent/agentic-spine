@@ -60,7 +60,7 @@ ACTIVE_WAVES="$(jq_val '.summary.active_waves' '?')"
 ORPHANED_WAVES="$(jq_val '.summary.orphaned_waves' '?')"
 VERIFY_STATUS="$(jq_val '.summary.latest_fast_verify_status' 'unknown')"
 GAP_AUTHORITY="$(jq_val '.summary.gap_authority_status' 'unknown')"
-GAP_MATCH="$(jq_val '.summary.gap_projection_match' 'unknown')"
+GAP_MATCH="$(jq_val '.summary.gap_projection_match' 'null')"
 COHERENCE="$(jq_val '.summary.engine_coherence_needs_attention' 'unknown')"
 FORCE_CLOSES="$(jq_val '.summary.recent_force_closes' '?')"
 DOD_OVERRIDES="$(jq_val '.summary.recent_dod_overrides' '?')"
@@ -73,7 +73,7 @@ elif [[ "$COHERENCE" == "true" ]]; then
   W_PARTS=()
   [[ "$ACTIVE_WAVES" == "0" || "$ACTIVE_WAVES" == "?" ]] || W_PARTS+=("${ACTIVE_WAVES} active waves")
   [[ "$ORPHANED_WAVES" == "0" || "$ORPHANED_WAVES" == "?" ]] || W_PARTS+=("${ORPHANED_WAVES} orphaned waves")
-  [[ "$GAP_MATCH" == "true" || "$GAP_MATCH" == "unknown" ]] || W_PARTS+=("gap projection mismatch")
+  [[ "$GAP_MATCH" == "true" || "$GAP_MATCH" == "unknown" || "$GAP_MATCH" == "null" ]] || W_PARTS+=("gap projection mismatch")
   [[ "$FORCE_CLOSES" == "0" || "$FORCE_CLOSES" == "?" ]] || W_PARTS+=("${FORCE_CLOSES} recent force-closes")
   [[ "$DOD_OVERRIDES" == "0" || "$DOD_OVERRIDES" == "?" ]] || W_PARTS+=("${DOD_OVERRIDES} recent DoD overrides")
   if [[ ${#W_PARTS[@]} -gt 0 ]]; then
@@ -98,7 +98,7 @@ printf "  orphaned waves: %s\n" "$ORPHANED_WAVES"
 echo "─── verify / coherence ─────────────────────────────"
 printf "  fast verify:    %s\n" "$VERIFY_STATUS"
 printf "  gap authority:  %s\n" "$GAP_AUTHORITY"
-printf "  gap parity:     %s\n" "$(case "$GAP_MATCH" in true) echo "match";; false) echo "MISMATCH";; *) echo "unknown";; esac)"
+printf "  gap parity:     %s\n" "$(case "$GAP_MATCH" in true) echo "match";; false) echo "MISMATCH";; null) echo "n/a (db only)";; *) echo "unknown";; esac)"
 printf "  coherence:      %s\n" "$([ "$COHERENCE" == "true" ] && echo "NEEDS ATTENTION" || echo "ok")"
 if [[ -n "$WARNINGS" ]]; then
   echo "─── warning ────────────────────────────────────────"

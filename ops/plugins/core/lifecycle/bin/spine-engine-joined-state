@@ -406,7 +406,7 @@ def collect_wave_state(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], di
             "controller_precheck_path": str(state_path.parent / "controller-close-precheck.json"),
         }
 
-        if row["status"] != "closed":
+        if row["status"] not in ("closed", "superseded"):
             active_rows.append(row)
 
         age_ok = True
@@ -694,6 +694,22 @@ def loop_focus_context(
     }
 
 
+def _gap_projection_match(gap_state: dict[str, Any]) -> bool | None:
+    """Interpret gap projection parity.
+
+    When the YAML projection file does not exist (yaml_count=0) and SQLite is
+    the sole authority, parity is not applicable — return None instead of False.
+    """
+    parity = gap_state.get("projection_parity", {})
+    if not parity:
+        return None
+    yaml_count = parity.get("yaml_count", 0)
+    db_count = parity.get("db_count", 0)
+    if yaml_count == 0 and db_count > 0:
+        return None  # YAML projection retired, SQLite is sole authority
+    return parity.get("match")
+
+
 def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str, Any]:
     paths = resolve_paths(root)
     open_loops, loop_status_index = collect_loop_rows(paths)
@@ -744,7 +760,7 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             "latest_fast_verify_status": latest_fast_verify.get("status", "unknown"),
             "engine_coherence_needs_attention": engine_coherence.get("needs_attention", False),
             "gap_authority_status": gap_state.get("status", "degraded"),
-            "gap_projection_match": gap_state.get("projection_parity", {}).get("match"),
+            "gap_projection_match": _gap_projection_match(gap_state),
         },
         "loops": {"open": open_loops},
         "gaps": {
