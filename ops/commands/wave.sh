@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# ops wave - Wave orchestration with lane-aware dispatch
+# ops wave - Manual wave lifecycle (surgery / explicit low-level control)
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# Coordinates multi-terminal work across lanes with non-blocking preflight,
-# background watcher for long checks, and unified status view.
+# Low-level manual wave lifecycle for surgery, inspection, and explicit
+# multi-terminal orchestration. Not the default operator work-start path.
+#
+# For bounded local work, use the canonical work-start surface:
+#   ops dispatch local --loop-id <LOOP_ID> --objective "<text>" --lane "<name>:<cmd>"
 #
 # Usage:
 #   ops wave start <WAVE_ID> --objective "<text>" [--loop-id <LOOP_ID>] [--deadline-utc <ISO8601>] [--horizon now|later|future] [--execution-readiness runnable|blocked] [--claimed-paths "a,b"] [--worktree auto|off] [--repo <path>]
