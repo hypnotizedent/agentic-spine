@@ -6,6 +6,7 @@ set -euo pipefail
 
 _D235_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"; source "$_D235_ROOT/surfaces/verify/lib/tailscale-guard.sh"
 require_tailscale_for "mint-data"
+source "$_D235_ROOT/ops/lib/ssh-resolve.sh"
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
@@ -57,14 +58,16 @@ fi
 
 check_host() {
   local host="$1"
-  local ssh_host ssh_user target_tier root_dev docker_root docker_dev
+  local ssh_host ssh_user target_tier root_dev docker_root docker_dev resolved path_used
 
-  ssh_host="$(yq -r ".ssh.targets[] | select(.id == \"$host\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || true)"
-  ssh_user="$(yq -r ".ssh.targets[] | select(.id == \"$host\") | .user // \"ubuntu\"" "$SSH_BINDING" 2>/dev/null || echo ubuntu)"
+  resolved="$(ssh_resolve_ssh_host_with_fallback "$host" 8 2>/dev/null || true)"
+  ssh_host="$(awk '{print $1}' <<<"$resolved")"
+  path_used="$(awk '{print $2}' <<<"$resolved")"
+  ssh_user="$(ssh_resolve_user "$host" "ubuntu")"
   target_tier="$(yq -r ".vm_storage.\"$host\".target_storage_tier // \"\"" "$STORAGE_POLICY" 2>/dev/null || true)"
 
-  if [[ -z "$ssh_host" ]]; then
-    finding "HIGH" "$host: missing ssh target binding"
+  if [[ -z "$ssh_host" || "$path_used" == "unreachable" ]]; then
+    finding "HIGH" "$host: ssh unreachable"
     return
   fi
   if [[ -z "$target_tier" ]]; then
