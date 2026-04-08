@@ -8,6 +8,8 @@
 #   - OPS_TERMINAL_ROLE     (terminal character name)
 #   - SPINE_RUNTIME_ROLE    (mutation policy role from contract)
 #   - SPINE_LOOP_ID         (only if explicitly requested)
+#   - Claude launcher preserves legacy bypass-permissions behavior for
+#     picker-launched interactive terminals
 #
 # Stale old-model env vars are explicitly unset so there is only one
 # startup model.
@@ -146,7 +148,7 @@ build_entry_cmd() {
     fi
 
     case "$tool" in
-        claude)  parts+=("claude") ;;
+        claude)  parts+=("claude --dangerously-skip-permissions") ;;
         codex)   parts+=("codex") ;;
         opencode) parts+=("opencode") ;;
         verify)  parts+=("./bin/ops cap run verify.run -- fast") ;;
