@@ -1,115 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ha.addons.snapshot — Extract HA Supervisor add-on inventory to YAML binding
-# Queries Supervisor API via SSH + bash -l (SUPERVISOR_TOKEN injected by HA environment).
+# ha.addons.snapshot — SHIM: delegates to workbench canonical implementation
+# Canonical: workbench/agents/home-assistant/tools/snapshots/ha-addons-snapshot
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../lib/ha-snapshot-common.sh"
-SSH_TARGET="hassio@ha"
-SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
-TMPDIR_WORK=$(mktemp -d)
-trap 'rm -rf "$TMPDIR_WORK"' EXIT
+CONTROL_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
+source "$CONTROL_ROOT/ops/lib/spine-paths.sh"
+spine_paths_init >/dev/null 2>&1 || true
+WORKBENCH_ROOT="$(spine_resolve_peer_repo workbench)"
 
-usage() {
-  cat <<'USAGE'
-ha-addons-snapshot
-
-Usage:
-  ./bin/ops cap run ha.addons.snapshot
-  ./bin/ops cap run ha.addons.snapshot -- --apply
-
-Flags:
-  --apply               Write tracked projection binding.
-  --check               Read-only mode (default): write runtime state only.
-  --state-path <path>   Override output path (defaults to runtime state path).
-USAGE
-}
-
-ha_snapshot_init "ha.addons.yaml" "$@"
-OUTPUT="$HA_SNAPSHOT_OUTPUT"
-STAGED_OUTPUT="$TMPDIR_WORK/ha.addons.yaml"
-
-echo "ha.addons.snapshot"
-echo
-
-# Check SSH connectivity
-if ! ssh $SSH_OPTS "$SSH_TARGET" "echo ok" >/dev/null 2>&1; then
-  echo "STOP (2): cannot reach $SSH_TARGET via SSH"
-  exit 2
+CANONICAL="$WORKBENCH_ROOT/agents/home-assistant/tools/snapshots/ha-addons-snapshot"
+if [[ ! -x "$CANONICAL" ]]; then
+  echo "FAIL: canonical script not found: $CANONICAL" >&2
+  exit 1
 fi
 
-# Query Supervisor API via SSH (bash -l loads SUPERVISOR_TOKEN)
-ssh $SSH_OPTS "$SSH_TARGET" \
-  'bash -l -c '"'"'curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/addons'"'"'' \
-  > "$TMPDIR_WORK/addons.json" 2>/dev/null
-
-if [[ ! -s "$TMPDIR_WORK/addons.json" ]]; then
-  echo "STOP (2): Supervisor API returned empty response"
-  exit 2
-fi
-
-# Parse JSON into YAML binding
-python3 - "$TMPDIR_WORK/addons.json" "$STAGED_OUTPUT" << 'PYEOF'
-import json, sys, datetime
-
-try:
-    import yaml
-except ImportError:
-    print("STOP (2): PyYAML not installed", file=sys.stderr)
-    sys.exit(2)
-
-json_path, out_path = sys.argv[1], sys.argv[2]
-
-with open(json_path, 'r') as f:
-    data = json.load(f)
-
-if 'data' not in data or 'addons' not in data['data']:
-    print("FAIL: unexpected Supervisor API response format", file=sys.stderr)
-    sys.exit(1)
-
-addons = data['data']['addons']
-
-binding = {
-    'schema_version': '1.0',
-    'generated': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-    'source': 'ha.addons.snapshot',
-    'slug_format_note': 'Core add-ons use core_* prefix. Community (a0d7b954 repo) use a0d7b954_* prefix. Third-party use repo-specific prefixes.',
-    'addon_count': len(addons),
-    'addons': []
-}
-
-for a in sorted(addons, key=lambda x: x.get('name', '')):
-    entry = {
-        'name': a.get('name', 'unknown'),
-        'slug': a.get('slug', ''),
-        'version': a.get('version', 'unknown'),
-        'version_latest': a.get('version_latest', 'unknown'),
-        'update_available': a.get('update_available', False),
-        'state': a.get('state', 'unknown'),
-        'stage': a.get('stage', 'unknown'),
-        'repository': a.get('repository', ''),
-        'description': a.get('description', ''),
-    }
-    binding['addons'].append(entry)
-
-with open(out_path, 'w') as f:
-    yaml.dump(binding, f, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120)
-
-started = sum(1 for a in addons if a.get('state') == 'started')
-updates = sum(1 for a in addons if a.get('update_available'))
-errors = sum(1 for a in addons if a.get('state') == 'error')
-
-print(f"Wrote {out_path}")
-print(f"  {len(addons)} add-ons ({started} started, {errors} errors, {updates} updates available)")
-PYEOF
-
-ha_snapshot_finalize "$STAGED_OUTPUT"
-ha_snapshot_assert_tracked_unchanged_in_check_mode
-
-echo "output: $OUTPUT"
-if [[ "${HA_SNAPSHOT_FINAL_ACTION:-wrote}" == "semantic-noop" ]]; then
-  echo "result: semantic no-op (ignored volatile timestamp fields)"
-fi
-echo "mode: $HA_SNAPSHOT_MODE"
-echo "tracked_binding: $HA_SNAPSHOT_TRACKED_OUTPUT"
+exec "$CANONICAL" "$@"
