@@ -147,6 +147,9 @@ build_entry_cmd() {
         parts+=("export OPS_WORKTREE_IDENTITY=$(printf '%q' "$loop_id")")
     fi
 
+    # Show L1 context at terminal birth (best-effort, never blocks)
+    parts+=("{ ./bin/ops context || true; }")
+
     case "$tool" in
         claude)  parts+=("claude --dangerously-skip-permissions") ;;
         codex)   parts+=("codex") ;;
