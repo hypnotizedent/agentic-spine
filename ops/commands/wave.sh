@@ -903,7 +903,9 @@ PYDEADLINE
 )"
   [[ -n "$claimed_paths_raw" ]] || claimed_paths_raw="$(resolve_wave_claimed_paths "$owner_terminal")"
   if [[ -z "$claimed_paths_raw" ]]; then
-    echo "Wave '$wave_id' start blocked: claimed paths unresolved for terminal '$owner_terminal'. Set a contract-managed terminal role or pass --claimed-paths explicitly." >&2
+    echo "FAIL: not in a governed terminal (OPS_TERMINAL_ROLE='$owner_terminal' has no claimed paths)." >&2
+    echo "  Run: ops cap run session.v3.attach" >&2
+    echo "  Or pass --claimed-paths explicitly." >&2
     exit 1
   fi
 
@@ -1082,7 +1084,7 @@ try:
 except Exception:
     path_claims_ttl_minutes = 180
 path_claims_non_overlap = (sys.argv[23].lower() == "true") if len(sys.argv) > 23 else True
-single_terminal_mode = str(owner_terminal or "").strip() == "SPINE-CONTROL-01"
+single_terminal_mode = str(owner_terminal or "").strip().startswith("SPINE-CONTROL-")
 
 packet = {
     "schema_version": "1.0",
@@ -3224,7 +3226,7 @@ try:
 
     single_terminal_mode = bool(packet.get("single_terminal_mode"))
     if not single_terminal_mode:
-        single_terminal_mode = str(packet.get("owner_terminal", "")).strip() == "SPINE-CONTROL-01"
+        single_terminal_mode = str(packet.get("owner_terminal", "")).strip().startswith("SPINE-CONTROL-")
     lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
     lane_owner_terminal = ""
     for row in lane_outcomes:
@@ -3240,8 +3242,8 @@ try:
 
     control_lane_override = (
         single_terminal_mode
-        and ack_terminal_role == "SPINE-CONTROL-01"
-        and lane_owner_terminal == "SPINE-CONTROL-01"
+        and ack_terminal_role.startswith("SPINE-CONTROL-")
+        and lane_owner_terminal.startswith("SPINE-CONTROL-")
     )
 
     if not control_lane_override and effective_runtime_role not in allowed_roles:

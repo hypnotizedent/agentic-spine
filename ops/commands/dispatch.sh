@@ -140,6 +140,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+[[ -n "${OPS_TERMINAL_ROLE:-}" ]] || fail "not in a governed terminal (OPS_TERMINAL_ROLE is not set). Run: ops cap run session.v3.attach"
 [[ -n "$LOOP_ID" ]] || fail "missing --loop-id (or set SPINE_LOOP_ID)"
 [[ -n "$OBJECTIVE" ]] || fail "missing --objective"
 [[ ${#LANES[@]} -gt 0 ]] || fail "at least one --lane required"
