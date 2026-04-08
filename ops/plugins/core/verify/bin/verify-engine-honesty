@@ -112,6 +112,28 @@ warn_check() {
     fi
 }
 
+record_fail() {
+    local id="$1" name="$2" detail="${3:-}"
+    TOTAL=$((TOTAL + 1))
+    FAIL=$((FAIL + 1))
+    FAILING_IDS+=("$id")
+    if [[ "$json_mode" -eq 0 ]]; then
+        echo "  FAIL  $id  $name"
+        [[ -n "$detail" ]] && echo "        ${detail:0:300}"
+    fi
+}
+
+record_warn() {
+    local id="$1" name="$2" detail="${3:-}"
+    TOTAL=$((TOTAL + 1))
+    WARN=$((WARN + 1))
+    WARNING_IDS+=("$id")
+    if [[ "$json_mode" -eq 0 ]]; then
+        echo "  WARN  $id  $name"
+        [[ -n "$detail" ]] && echo "        ${detail:0:300}"
+    fi
+}
+
 # ── Cleanup ───────────────────────────────────────────────────────────────
 cleanup_synthetic_wave() {
     if [[ "$CLEANUP_NEEDED" -eq 1 && -n "$SYNTHETIC_WAVE_ID" ]]; then
@@ -172,6 +194,7 @@ CLEANUP_NEEDED=1
 # Run the synthetic dispatch
 _dispatch_output=""
 _dispatch_rc=0
+_synthetic_precondition_blocker=""
 set +e
 _dispatch_output="$(bash "$DISPATCH_CMD" local \
     --loop-id LOOP-SPINE-ENGINE-HONESTY-GATES-20260408 \
@@ -183,64 +206,94 @@ _dispatch_output="$(bash "$DISPATCH_CMD" local \
 _dispatch_rc=$?
 set -e
 
+if [[ "$_dispatch_rc" -ne 0 ]]; then
+    if grep -q 'path claim collision detected' <<<"$_dispatch_output"; then
+        _collision_summary="$(printf '%s\n' "$_dispatch_output" | awk '
+            /path claim collision detected/ {capture=1}
+            capture && NF {print}
+        ' | head -n 3 | tr '\n' ' ' | sed 's/  */ /g; s/[[:space:]]*$//')"
+        _synthetic_precondition_blocker="synthetic wave start blocked by active path claim contention: ${_collision_summary}"
+    else
+        _dispatch_head="$(printf '%s\n' "$_dispatch_output" | awk 'NF {print; exit}')"
+        [[ -n "$_dispatch_head" ]] || _dispatch_head="dispatch bridge failed before synthetic wave state/evidence creation"
+        _synthetic_precondition_blocker="synthetic dispatch precondition failed: ${_dispatch_head}"
+    fi
+fi
+
 # H2: dispatch round-trip — canary token should appear in evidence
-check H2 "dispatch round-trip (synthetic lane routes and returns canary)" bash -c "
-    evidence_file='$SYNTHETIC_EVIDENCE_DIR/lane-canary.txt'
-    [[ -f \"\$evidence_file\" ]] || { echo 'evidence file missing'; exit 1; }
-    grep -q '$CANARY_TOKEN' \"\$evidence_file\" || { echo 'canary token not found in evidence'; exit 1; }
-    grep -q 'Exit code: 0' \"\$evidence_file\" || { echo 'lane did not exit 0'; exit 1; }
-"
+if [[ -n "$_synthetic_precondition_blocker" ]]; then
+    record_fail H2 "dispatch round-trip (synthetic lane routes and returns canary)" "$_synthetic_precondition_blocker"
+else
+    check H2 "dispatch round-trip (synthetic lane routes and returns canary)" bash -c "
+        evidence_file='$SYNTHETIC_EVIDENCE_DIR/lane-canary.txt'
+        [[ -f \"\$evidence_file\" ]] || { echo 'evidence file missing'; exit 1; }
+        grep -q '$CANARY_TOKEN' \"\$evidence_file\" || { echo 'canary token not found in evidence'; exit 1; }
+        grep -q 'Exit code: 0' \"\$evidence_file\" || { echo 'lane did not exit 0'; exit 1; }
+    "
+fi
 
 # H3: wave lifecycle — wave started, dispatches exist and are done, collect ran
-check H3 "wave lifecycle (start → dispatch → ack → collect)" bash -c "
-    wave_state='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/state.json'
-    [[ -f \"\$wave_state\" ]] || { echo 'wave state.json missing'; exit 1; }
-    status=\"\$(jq -r '.status' \"\$wave_state\" 2>/dev/null)\"
-    [[ \"\$status\" == 'active' || \"\$status\" == 'closed' ]] || { echo \"unexpected state: \$status\"; exit 1; }
-    dispatches=\"\$(jq '.dispatches | length' \"\$wave_state\" 2>/dev/null)\"
-    [[ \"\$dispatches\" -ge 1 ]] || { echo 'no dispatches in wave state'; exit 1; }
-    # All dispatches should be done (acked)
-    done_count=\"\$(jq '[.dispatches[] | select(.status == \"done\")] | length' \"\$wave_state\" 2>/dev/null)\"
-    [[ \"\$done_count\" == \"\$dispatches\" ]] || { echo \"not all dispatches done: \$done_count/\$dispatches\"; exit 1; }
-    # Collect summary should exist
-    collect_file='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/collect-summary.json'
-    [[ -f \"\$collect_file\" ]] || { echo 'collect-summary.json missing — collect did not run'; exit 1; }
-"
+if [[ -n "$_synthetic_precondition_blocker" ]]; then
+    record_fail H3 "wave lifecycle (start → dispatch → ack → collect)" "$_synthetic_precondition_blocker"
+else
+    check H3 "wave lifecycle (start → dispatch → ack → collect)" bash -c "
+        wave_state='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/state.json'
+        [[ -f \"\$wave_state\" ]] || { echo 'wave state.json missing'; exit 1; }
+        status=\"\$(jq -r '.status' \"\$wave_state\" 2>/dev/null)\"
+        [[ \"\$status\" == 'active' || \"\$status\" == 'closed' ]] || { echo \"unexpected state: \$status\"; exit 1; }
+        dispatches=\"\$(jq '.dispatches | length' \"\$wave_state\" 2>/dev/null)\"
+        [[ \"\$dispatches\" -ge 1 ]] || { echo 'no dispatches in wave state'; exit 1; }
+        # All dispatches should be done (acked)
+        done_count=\"\$(jq '[.dispatches[] | select(.status == \"done\")] | length' \"\$wave_state\" 2>/dev/null)\"
+        [[ \"\$done_count\" == \"\$dispatches\" ]] || { echo \"not all dispatches done: \$done_count/\$dispatches\"; exit 1; }
+        # Collect summary should exist
+        collect_file='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/collect-summary.json'
+        [[ -f \"\$collect_file\" ]] || { echo 'collect-summary.json missing — collect did not run'; exit 1; }
+    "
+fi
 
 # H4: telemetry chain — evidence directory has expected artifacts
-check H4 "telemetry chain (evidence files written and queryable)" bash -c "
-    [[ -d '$SYNTHETIC_EVIDENCE_DIR' ]] || { echo 'evidence dir missing'; exit 1; }
-    [[ -f '$SYNTHETIC_EVIDENCE_DIR/lane-canary.txt' ]] || { echo 'lane evidence missing'; exit 1; }
-    wave_dir='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID'
-    [[ -f \"\$wave_dir/state.json\" ]] || { echo 'wave state.json missing'; exit 1; }
-    [[ -f \"\$wave_dir/collect-summary.json\" ]] || { echo 'collect-summary.json missing'; exit 1; }
-"
+if [[ -n "$_synthetic_precondition_blocker" ]]; then
+    record_fail H4 "telemetry chain (evidence files written and queryable)" "$_synthetic_precondition_blocker"
+else
+    check H4 "telemetry chain (evidence files written and queryable)" bash -c "
+        [[ -d '$SYNTHETIC_EVIDENCE_DIR' ]] || { echo 'evidence dir missing'; exit 1; }
+        [[ -f '$SYNTHETIC_EVIDENCE_DIR/lane-canary.txt' ]] || { echo 'lane evidence missing'; exit 1; }
+        wave_dir='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID'
+        [[ -f \"\$wave_dir/state.json\" ]] || { echo 'wave state.json missing'; exit 1; }
+        [[ -f \"\$wave_dir/collect-summary.json\" ]] || { echo 'collect-summary.json missing'; exit 1; }
+    "
+fi
 
 # ── H7: Honest close semantics (run BEFORE H5/H6 so cleanup state is clean) ──
 # This gate tries to close the synthetic wave without force/DoD.
 # If it needs force/DoD, the gate WARNS — the engine is working but
 # close semantics need attention.
-warn_check H7 "honest close (synthetic wave closes without force/DoD)" bash -c "
-    wave_state='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/state.json'
-    [[ -f \"\$wave_state\" ]] || { echo 'wave state.json missing — cannot test close'; exit 1; }
+if [[ -n "$_synthetic_precondition_blocker" ]]; then
+    record_warn H7 "honest close (synthetic wave closes without force/DoD)" "$_synthetic_precondition_blocker — cannot test close"
+else
+    warn_check H7 "honest close (synthetic wave closes without force/DoD)" bash -c "
+        wave_state='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/state.json'
+        [[ -f \"\$wave_state\" ]] || { echo 'wave state.json missing — cannot test close'; exit 1; }
 
-    current_status=\"\$(jq -r '.status' \"\$wave_state\" 2>/dev/null)\"
-    if [[ \"\$current_status\" == 'closed' ]]; then
-        echo 'already closed'
-        exit 0
-    fi
+        current_status=\"\$(jq -r '.status' \"\$wave_state\" 2>/dev/null)\"
+        if [[ \"\$current_status\" == 'closed' ]]; then
+            echo 'already closed'
+            exit 0
+        fi
 
-    # Attempt nominal close (no --force, no --dod-override)
-    close_output=\"\$(bash '$WAVE_CMD' close '$SYNTHETIC_WAVE_ID' --disposition landed 2>&1)\"
-    close_rc=\$?
+        # Attempt nominal close (no --force, no --dod-override)
+        close_output=\"\$(bash '$WAVE_CMD' close '$SYNTHETIC_WAVE_ID' --disposition landed 2>&1)\"
+        close_rc=\$?
 
-    if [[ \$close_rc -eq 0 ]]; then
-        exit 0
-    else
-        echo \"close blocked (exit \$close_rc): \${close_output:0:200}\"
-        exit 1
-    fi
-"
+        if [[ \$close_rc -eq 0 ]]; then
+            exit 0
+        else
+            echo \"close blocked (exit \$close_rc): \${close_output:0:200}\"
+            exit 1
+        fi
+    "
+fi
 
 # Force-close the synthetic wave if H7 didn't close it, so H5/H6 measure clean state
 _wave_sf="$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/state.json"
