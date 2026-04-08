@@ -13,7 +13,7 @@ Agent entry is doc-first and CLI-first.
 ```bash
 cd ~/code/agentic-spine
 ./bin/ops status --json
-./bin/ops verify --core-only
+./bin/ops verify
 ./bin/ops cap list
 ```
 

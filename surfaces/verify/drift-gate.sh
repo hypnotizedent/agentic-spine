@@ -356,7 +356,7 @@ if [[ ! -d runs ]]; then pass; else scoped_fail D2 "runs/ exists"; fi
 else echo "D2 one trace (no runs/)... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D3: Entrypoint smoke
-# TRIAGE: bin/ops preflight must succeed. Check bin/ops exists and is executable.
+# TRIAGE: bin/ops entrypoint smoke. Check bin/ops exists and is executable.
 CURRENT_GATE="D3"
 echo -n "D3 entrypoint smoke... "
 if [[ -x "$SP/surfaces/verify/d3-entrypoint-smoke.sh" ]]; then

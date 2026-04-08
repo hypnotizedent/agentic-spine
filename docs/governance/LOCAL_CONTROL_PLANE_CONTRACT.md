@@ -23,7 +23,7 @@ Everything the operator touches lives here or under `~/.codex`.
 | `ronny-products/` | Product repos | Main checkout stays on `main`. |
 | `agentic-foundation/` | Reusable implementation source | Main checkout stays on `main`. |
 
-**Rule**: `agentic-spine` primary checkout must be on `main` and clean for daily operation. All wave/feature work happens in managed worktrees, and agent startup is doc-first plus CLI-first: read `NORTH_STAR.md`, `docs/governance/SPINE.md`, `docs/governance/SESSION_PROTOCOL.md`, then run `./bin/ops status --json`, `./bin/ops verify --core-only`, and `./bin/ops cap list`.
+**Rule**: `agentic-spine` primary checkout must be on `main` and clean for daily operation. All wave/feature work happens in managed worktrees, and agent startup is doc-first plus CLI-first: read `NORTH_STAR.md`, `docs/governance/SPINE.md`, `docs/governance/SESSION_PROTOCOL.md`, then run `./bin/ops status --json`, `./bin/ops verify`, and `./bin/ops cap list`.
 
 ### Non-Source Roots
 
@@ -104,7 +104,7 @@ Naming: directory name matches the branch name with `/` replaced by `-`.
 ```bash
 cd ~/code/agentic-spine
 ./bin/ops status --json
-./bin/ops verify --core-only
+./bin/ops verify
 ./bin/ops cap list
 ```
 

@@ -14,7 +14,7 @@ The spine is a tool. Agent entry is doc-first and CLI-first.
 ```bash
 cd ~/code/agentic-spine
 ./bin/ops status --json
-./bin/ops verify --core-only
+./bin/ops verify
 ./bin/ops cap list
 ```
 
@@ -23,7 +23,7 @@ cd ~/code/agentic-spine
 - Read [NORTH_STAR.md](/Users/ronnyworks/code/agentic-spine/NORTH_STAR.md) for platform identity.
 - Read [SESSION_PROTOCOL.md](/Users/ronnyworks/code/agentic-spine/docs/governance/SESSION_PROTOCOL.md) for environment behavior.
 - Use `./bin/ops cap run <capability> -- ...` when a capability exists.
-- Keep changes bounded and re-run `./bin/ops verify --core-only` after meaningful mutations.
+- Keep changes bounded and re-run `./bin/ops verify` after meaningful mutations.
 
 ## Principle
 

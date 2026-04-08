@@ -16,7 +16,7 @@ Agent entry is simple:
 ```bash
 cd ~/code/agentic-spine
 ./bin/ops status --json
-./bin/ops verify --core-only
+./bin/ops verify
 ./bin/ops cap list
 ```
 
@@ -27,7 +27,7 @@ cd ~/code/agentic-spine
 - Use the CLI directly.
 - Read only the files needed for the current task.
 - Prefer `ops cap run` over ad hoc shell when a capability exists.
-- Re-run `./bin/ops verify --core-only` after meaningful mutations.
+- Re-run `./bin/ops verify` after meaningful mutations.
 
 ## Remote Or Mobile
 

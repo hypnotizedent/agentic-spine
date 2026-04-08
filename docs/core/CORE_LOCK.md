@@ -45,7 +45,7 @@ This key is used everywhere:
 |-------|------|---------|
 | CLI | `bin/ops` | Canonical operator and agent entrypoint |
 | Startup status | `./bin/ops status --json` | Canonical state snapshot at session start |
-| Startup verify | `./bin/ops verify --core-only` | Canonical infrastructure health snapshot at session start |
+| Startup verify | `./bin/ops verify` | Canonical infrastructure health snapshot at session start |
 | Capability surface | `./bin/ops cap list` | Canonical capability discovery surface |
 | Verify | `./bin/ops cap run verify.run -- fast` | Canonical drift gate entrypoint |
 | Worktree lifecycle | `ops/plugins/core/lifecycle/bin/worktree-lifecycle-*` | Workspace/worktree control surfaces |
@@ -59,7 +59,7 @@ All must PASS for core to be healthy.
 |------|----------|
 | D1 | Top-level dirs bounded (allowlist enforced) |
 | D2 | No `runs/` directory |
-| D3 | Entrypoint smoke (`bin/ops preflight`) |
+| D3 | Entrypoint smoke (`bin/ops` + `cap list`) |
 | D4 | Watcher running (warn only) |
 | D5 | No legacy coupling (`~/agent`, `ronny-ops`) |
 | D6 | Receipts exist for recent sessions |
