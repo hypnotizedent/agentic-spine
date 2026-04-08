@@ -9,6 +9,7 @@ ROOT="$_VR_COMPUTED"
 
 VERIFY_TOPOLOGY="$ROOT/ops/plugins/core/verify/bin/verify-topology"
 VERIFY_ENGINE="$ROOT/ops/plugins/core/verify/bin/verify-engine"
+VERIFY_ENGINE_HONESTY="$ROOT/ops/plugins/core/verify/bin/verify-engine-honesty"
 
 fail() {
   echo "verify.run FAIL: $*" >&2
@@ -17,6 +18,7 @@ fail() {
 
 [[ -x "$VERIFY_TOPOLOGY" ]] || fail "missing verify runtime: $VERIFY_TOPOLOGY"
 [[ -x "$VERIFY_ENGINE" ]] || fail "missing engine verify: $VERIFY_ENGINE"
+[[ -x "$VERIFY_ENGINE_HONESTY" ]] || fail "missing engine honesty verify: $VERIFY_ENGINE_HONESTY"
 
 usage() {
   cat <<'USAGE'
@@ -24,13 +26,15 @@ verify.run
 
 Usage:
   verify-run engine [--json]                  Fast platform engine smoke (seconds)
+  verify-run honesty [--json]                 Engine orchestration proof (dispatch, wave, telemetry)
   verify-run fast [--json] [--shadow]         17-gate infrastructure baseline
   verify-run infra [--json] [--shadow]        Alias for fast (infrastructure gates)
   verify-run domain <domain_id> [--json]      Domain-scoped infrastructure gates
   verify-run release [--json] [--shadow]      Full infrastructure gate set
 
 Scopes:
-  engine  => platform execution system health (bin/ops, caps, SQLite, entry)
+  engine  => platform engine smoke test (bin/ops, caps, SQLite, entry)
+  honesty => engine orchestration proof (cap dispatch, wave lifecycle, telemetry, close)
   fast    => 17-gate infrastructure workload baseline (alias: infra)
   infra   => same as fast
   domain  => infrastructure gates for one domain
@@ -53,9 +57,9 @@ scope="${1:-}"
 shift || true
 
 case "$scope" in
-  engine|fast|infra|domain|release) ;;
+  engine|honesty|fast|infra|domain|release) ;;
   -h|--help|"") usage; exit 0 ;;
-  *) fail "unknown scope '$scope' (expected engine|fast|infra|domain|release)" ;;
+  *) fail "unknown scope '$scope' (expected engine|honesty|fast|infra|domain|release)" ;;
 esac
 
 # Normalize infra → fast (they are the same surface)
@@ -122,6 +126,13 @@ case "$scope" in
       run_and_wrap_json "engine" "$VERIFY_ENGINE" --json
     else
       exec "$VERIFY_ENGINE"
+    fi
+    ;;
+  honesty)
+    if [[ "$json_mode" -eq 1 ]]; then
+      run_and_wrap_json "honesty" "$VERIFY_ENGINE_HONESTY" --json
+    else
+      exec "$VERIFY_ENGINE_HONESTY"
     fi
     ;;
   fast)
