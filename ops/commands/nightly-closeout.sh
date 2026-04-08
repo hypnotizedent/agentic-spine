@@ -593,7 +593,7 @@ set +e
 echo "$?" > "$ARTIFACT_DIR/loops_status.rc"
 "$ROOT/ops/plugins/core/loops/bin/gaps-status" > "$ARTIFACT_DIR/gaps_status.log" 2>&1
 echo "$?" > "$ARTIFACT_DIR/gaps_status.rc"
-"$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile" --json > "$ARTIFACT_DIR/worktree_lifecycle.log" 2>&1
+bash "$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile" --json > "$ARTIFACT_DIR/worktree_lifecycle.log" 2>&1
 echo "$?" > "$ARTIFACT_DIR/worktree_lifecycle.rc"
 set -e
 
