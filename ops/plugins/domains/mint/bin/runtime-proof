@@ -11,6 +11,7 @@
 #   - suppliers search + stock parity
 #   - artwork upload/prepare parity
 #   - payment health
+#   - quotes health
 
 set -euo pipefail
 
@@ -79,6 +80,7 @@ require_value() {
 
 PRICING_HEALTH_URL="$(service_url pricing)"
 PAYMENT_HEALTH_URL="$(service_url payment)"
+QUOTES_HEALTH_URL="$(service_url quotes)"
 SHIPPING_BASE="$(service_base_url shipping)"
 SUPPLIERS_BASE="$(service_base_url suppliers)"
 FILES_BASE="$(service_base_url files-api)"
@@ -94,6 +96,7 @@ ARTWORK_PREPARE_PATH="$(proof_route artwork_upload_prepare_path)"
 
 require_value "$PRICING_HEALTH_URL" "pricing health url"
 require_value "$PAYMENT_HEALTH_URL" "payment health url"
+require_value "$QUOTES_HEALTH_URL" "quotes health url"
 require_value "$SHIPPING_BASE" "shipping base url"
 require_value "$SUPPLIERS_BASE" "suppliers base url"
 require_value "$FILES_BASE" "files-api base url"
@@ -422,6 +425,18 @@ else
       -H "x-api-key: $payment_key" \
       -H "stripe-signature: invalid"
   fi
+fi
+
+# 6) Quotes health
+if [[ -z "$QUOTES_HEALTH_URL" ]]; then
+  emit_row "quotes.health" "FAIL" "target=$APP_TARGET_ID unreachable"
+  fail=1
+else
+  http_json_check \
+    "quotes.health" \
+    "$QUOTES_HEALTH_URL" \
+    '.status == "ok" and ((.service // .name // "") | test("quotes"; "i"))' \
+    "quotes health json ok via=${MINT_APPS_PROBE_PATH:-direct}"
 fi
 
 echo

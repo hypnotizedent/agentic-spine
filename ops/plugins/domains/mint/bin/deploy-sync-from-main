@@ -114,6 +114,9 @@ module_requires() {
     finance-adapter)
       echo "DATABASE_URL FINANCE_ADAPTER_API_KEY FIREFLY_API_URL FIREFLY_PAT PAPERLESS_BASE_URL PAPERLESS_API_TOKEN"
       ;;
+    quotes)
+      echo "QUOTES_API_KEY QUOTES_DATABASE_URL ORDERS_API_KEY PAYMENT_API_KEY FILES_API_KEY CUSTOMER_JWT_SECRET"
+      ;;
     *)
       echo ""
       ;;
@@ -135,6 +138,11 @@ if [[ "${#missing_env[@]}" -gt 0 ]]; then
 fi
 
 echo "[1/3] Sync tracked files to mint-apps host..."
+echo "  - clean remote module subtree: ${REMOTE_STACK_ROOT}/${MODULE}"
+ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+  "rm -rf '${REMOTE_STACK_ROOT}/${MODULE}' && mkdir -p '${REMOTE_STACK_ROOT}/${MODULE}'" \
+  || stop "remote module subtree cleanup failed for $MODULE"
+
 git -C "$MINT_REPO" archive --format=tar "$REF" \
   | ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "cd '${REMOTE_STACK_ROOT}' && tar -xf -" \
   || stop "archive sync failed"
@@ -148,7 +156,7 @@ case "$MODULE" in
       "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build files-api" \
       || stop "deploy failed for artwork/files-api"
     ;;
-  quote-page|order-intake|finance-adapter)
+  quote-page|order-intake|finance-adapter|quotes)
     echo "  - deploy $MODULE (root mint-apps compose, --no-deps --build)"
     ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
       "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build $MODULE" \
