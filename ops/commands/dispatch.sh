@@ -55,7 +55,7 @@ Example:
     --loop-id LOOP-RESEARCH-20260408 \
     --objective "Domain binding inventory" \
     --lane "immich:find ops/bindings/domains/immich -type f" \
-    --lane "ha:find ops/bindings/domains/ha -type f" \
+    --lane "ha:find ../workbench/agents/home-assistant/bindings -type f" \
     --lane "media:find ops/bindings/domains/media -type f"
 
   # Parallel execution:
@@ -63,7 +63,7 @@ Example:
     --loop-id LOOP-RESEARCH-20260408 \
     --objective "Domain binding inventory" \
     --lane "immich:find ops/bindings/domains/immich -type f" \
-    --lane "ha:find ops/bindings/domains/ha -type f" \
+    --lane "ha:find ../workbench/agents/home-assistant/bindings -type f" \
     --lane "media:find ops/bindings/domains/media -type f"
 EOF
 }

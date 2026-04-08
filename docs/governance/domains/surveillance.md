@@ -12,7 +12,6 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 
 | Capability |
 |---|
-| `ha.surveillance.status` |
 | `surveillance.event.query` |
 | `surveillance.stack.status` |
 <!-- DOMAIN_CAPABILITY_CATALOG_END -->

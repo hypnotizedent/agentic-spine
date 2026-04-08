@@ -49,9 +49,6 @@ Primary dependencies:
   - query events by camera/label/time range
   - return counts + latest matches
 
-- `ha.surveillance.status` (read-only)
-  - home HA integration health for surveillance entities/automations
-
 ## Storage & Retention Policy
 
 - Storage tier: `tank-vms` (ZFS zvol, dedicated non-boot disk)
@@ -69,7 +66,6 @@ Primary dependencies:
 - Automations: person/vehicle/after-hours detection in home HA
 - Dashboard: Frigate card in home HA Lovelace
 - Ring doorbell live-view entity is present as `camera.ring_doorbell_live_view` and may be `idle` when no active stream is open.
-- Capability: `ha.surveillance.status` reports integration health
 - Authority: `ops/bindings/surveillance.topology.contract.yaml`
 
 ## Non-Blocking Future Enhancements
