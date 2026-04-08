@@ -6898,11 +6898,132 @@ capabilities:
     domain: network
     implementation_repo: workbench
     implementation_path: docs/infrastructure/domains/network/
-  infra.proxmox.maintenance.precheck:
-    description: 'Read-only: capture guest state + MD1400/PM8072 evidence on a Proxmox
-      host.'
+  infra.proxmox.host.status:
+    description: Canonical PVE host summary — reachability, boot/EFI, LVM, ZFS pools,
+      guest counts, anomalies. The single command for host state.
     tags:
     - infra
+    - pve
+    command: "./ops/plugins/infra/bin/infra-proxmox-host-status"
+    script_path: "./ops/plugins/infra/bin/infra-proxmox-host-status"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    plane: fabric
+    domain: infra
+  infra.proxmox.host.control:
+    description: Canonical PVE host shutdown and guest startup. Wraps governed
+      maintenance script with explicit action selection.
+    tags:
+    - infra
+    - pve
+    command: "./ops/plugins/infra/bin/infra-proxmox-host-control"
+    script_path: "./ops/plugins/infra/bin/infra-proxmox-host-control"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    plane: fabric
+    domain: infra
+  infra.proxmox.power.status:
+    description: Out-of-band power and hardware health via iDRAC Redfish/IPMI.
+    tags:
+    - infra
+    - pve
+    - idrac
+    command: "./ops/plugins/infra/bin/infra-proxmox-power-status"
+    script_path: "./ops/plugins/infra/bin/infra-proxmox-power-status"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    plane: fabric
+    domain: infra
+  infra.proxmox.power.control:
+    description: Out-of-band power on/off/cycle via iDRAC IPMI. Dry-run by default.
+    tags:
+    - infra
+    - pve
+    - idrac
+    command: "./ops/plugins/infra/bin/infra-proxmox-power-control"
+    script_path: "./ops/plugins/infra/bin/infra-proxmox-power-control"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    plane: fabric
+    domain: infra
+  infra.proxmox.guest.status:
+    description: PVE guest state — all VMs and containers with running/stopped counts.
+    tags:
+    - infra
+    - pve
+    command: "./ops/plugins/infra/bin/infra-proxmox-guest-status"
+    script_path: "./ops/plugins/infra/bin/infra-proxmox-guest-status"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    plane: fabric
+    domain: infra
+  infra.proxmox.guest.control:
+    description: Single PVE guest start/shutdown/stop. Supports both KVM and LXC.
+    tags:
+    - infra
+    - pve
+    command: "./ops/plugins/infra/bin/infra-proxmox-guest-control"
+    script_path: "./ops/plugins/infra/bin/infra-proxmox-guest-control"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    plane: fabric
+    domain: infra
+  infra.proxmox.storage.bootpair.status:
+    description: Rear boot pair health — drive serials, SSD/HDD type, EFI mount,
+      LV placement, boot order, anomaly detection.
+    tags:
+    - infra
+    - pve
+    - storage
+    command: "./ops/plugins/infra/bin/infra-proxmox-storage-bootpair-status"
+    script_path: "./ops/plugins/infra/bin/infra-proxmox-storage-bootpair-status"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    plane: fabric
+    domain: infra
+  infra.proxmox.storage.slot.inventory:
+    description: Disk inventory with controller/path context. Serial, model, size,
+      role, SSD/HDD flags. Marks uncertain slot mappings explicitly.
+    tags:
+    - infra
+    - pve
+    - storage
+    command: "./ops/plugins/infra/bin/infra-proxmox-storage-slot-inventory"
+    script_path: "./ops/plugins/infra/bin/infra-proxmox-storage-slot-inventory"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    plane: fabric
+    domain: infra
+  infra.proxmox.maintenance.precheck:
+    description: 'Compatibility alias — prefer infra.proxmox.host.status. Legacy
+      precheck via maintenance script.'
+    tags:
+    - infra
+    - compat
     command: "./ops/plugins/infra/bin/infra-proxmox-maintenance --mode precheck"
     script_path: "./ops/plugins/infra/bin/infra-proxmox-maintenance"
     cwd: "$SPINE_CODE"
@@ -6924,8 +7045,8 @@ capabilities:
     examples:
     - "./bin/ops cap run infra.proxmox.maintenance.precheck -- --host-id pve"
   infra.proxmox.maintenance.shutdown:
-    description: 'Mutating: guarded shutdown of all running guests on a Proxmox host
-      (optional host poweroff).'
+    description: 'Compatibility alias — prefer infra.proxmox.host.control shutdown.
+      Legacy guarded shutdown.'
     tags:
     - infra
     command: "./ops/plugins/infra/bin/infra-proxmox-maintenance --mode shutdown"
@@ -6953,8 +7074,8 @@ capabilities:
     - "./bin/ops cap run infra.proxmox.maintenance.shutdown -- --host-id pve --execute
       --poweroff"
   infra.proxmox.maintenance.startup:
-    description: 'Mutating: start key guests on a Proxmox host, then print postcheck
-      commands.'
+    description: 'Compatibility alias — prefer infra.proxmox.host.control startup.
+      Legacy guest startup.'
     tags:
     - infra
     command: "./ops/plugins/infra/bin/infra-proxmox-maintenance --mode startup"
@@ -9059,7 +9180,8 @@ capabilities:
     - secrets.binding
     - secrets.auth.status
   idrac.health.status:
-    description: Dell iDRAC health via PVE jump host — Redfish API with IPMI fallback.
+    description: 'Compatibility alias — prefer infra.proxmox.power.status. Dell iDRAC
+      health via PVE jump host.'
     tags:
     - observability
     - idrac
