@@ -28,8 +28,9 @@ EOF
 
 hooks_path="$(git -C "$REPO_ROOT" config --get core.hooksPath 2>/dev/null || true)"
 pre_hook="$REPO_ROOT/.githooks/pre-commit"
-pre_push_hook="$REPO_ROOT/.githooks/pre-push"
-commit_msg_hook="$REPO_ROOT/.githooks/commit-msg"
+# pre-push and commit-msg hooks were never implemented.
+# D128 trailers are enforced via pre-commit gates.
+# Declaring them as required was overclaiming — retired 2026-04-08.
 
 case "$cmd" in
   status)
@@ -44,27 +45,13 @@ case "$cmd" in
     else
       echo "pre-commit: WARN ($pre_hook missing or not executable)"
     fi
-    if [[ -x "$pre_push_hook" ]]; then
-      echo "pre-push: OK ($pre_push_hook executable)"
-    else
-      echo "pre-push: WARN ($pre_push_hook missing or not executable)"
-    fi
-    if [[ -x "$commit_msg_hook" ]]; then
-      echo "commit-msg: OK ($commit_msg_hook executable)"
-    else
-      echo "commit-msg: WARN ($commit_msg_hook missing or not executable)"
-    fi
+    echo "pre-push: not implemented (enforcement via verify, not hook)"
+    echo "commit-msg: not implemented (D128 trailers via pre-commit gates)"
     ;;
   install)
     mkdir -p "$REPO_ROOT/.githooks"
     if [[ -f "$pre_hook" ]]; then
       chmod +x "$pre_hook" || true
-    fi
-    if [[ -f "$pre_push_hook" ]]; then
-      chmod +x "$pre_push_hook" || true
-    fi
-    if [[ -f "$commit_msg_hook" ]]; then
-      chmod +x "$commit_msg_hook" || true
     fi
     git -C "$REPO_ROOT" config core.hooksPath .githooks
     echo "Installed: core.hooksPath=.githooks"
@@ -74,18 +61,8 @@ case "$cmd" in
       echo "pre-commit: WARN (missing or not executable): $pre_hook"
       exit 1
     fi
-    if [[ -x "$pre_push_hook" ]]; then
-      echo "pre-push: OK"
-    else
-      echo "pre-push: WARN (missing or not executable): $pre_push_hook"
-      exit 1
-    fi
-    if [[ -x "$commit_msg_hook" ]]; then
-      echo "commit-msg: OK"
-    else
-      echo "commit-msg: WARN (missing or not executable): $commit_msg_hook"
-      exit 1
-    fi
+    echo "pre-push: not implemented (enforcement via verify, not hook)"
+    echo "commit-msg: not implemented (D128 trailers via pre-commit gates)"
     ;;
   -h|--help|"")
     usage

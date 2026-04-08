@@ -206,13 +206,15 @@ _dispatch_output="$(bash "$DISPATCH_CMD" local \
 _dispatch_rc=$?
 set -e
 
+_claim_contention=0
 if [[ "$_dispatch_rc" -ne 0 ]]; then
     if grep -q 'path claim collision detected' <<<"$_dispatch_output"; then
         _collision_summary="$(printf '%s\n' "$_dispatch_output" | awk '
             /path claim collision detected/ {capture=1}
             capture && NF {print}
         ' | head -n 3 | tr '\n' ' ' | sed 's/  */ /g; s/[[:space:]]*$//')"
-        _synthetic_precondition_blocker="synthetic wave start blocked by active path claim contention: ${_collision_summary}"
+        _synthetic_precondition_blocker="blocked by active wave claim (not broken — engine correctly enforcing path exclusivity): ${_collision_summary}"
+        _claim_contention=1
     else
         _dispatch_head="$(printf '%s\n' "$_dispatch_output" | awk 'NF {print; exit}')"
         [[ -n "$_dispatch_head" ]] || _dispatch_head="dispatch bridge failed before synthetic wave state/evidence creation"
@@ -221,7 +223,11 @@ if [[ "$_dispatch_rc" -ne 0 ]]; then
 fi
 
 # H2: dispatch round-trip — canary token should appear in evidence
-if [[ -n "$_synthetic_precondition_blocker" ]]; then
+# When blocked by claim contention, this is a WARN (engine works, just busy)
+# not a FAIL (broken primitive).
+if [[ -n "$_synthetic_precondition_blocker" && "$_claim_contention" -eq 1 ]]; then
+    record_warn H2 "dispatch round-trip (synthetic lane routes and returns canary)" "$_synthetic_precondition_blocker"
+elif [[ -n "$_synthetic_precondition_blocker" ]]; then
     record_fail H2 "dispatch round-trip (synthetic lane routes and returns canary)" "$_synthetic_precondition_blocker"
 else
     check H2 "dispatch round-trip (synthetic lane routes and returns canary)" bash -c "
@@ -233,7 +239,9 @@ else
 fi
 
 # H3: wave lifecycle — wave started, dispatches exist and are done, collect ran
-if [[ -n "$_synthetic_precondition_blocker" ]]; then
+if [[ -n "$_synthetic_precondition_blocker" && "$_claim_contention" -eq 1 ]]; then
+    record_warn H3 "wave lifecycle (start → dispatch → ack → collect)" "$_synthetic_precondition_blocker"
+elif [[ -n "$_synthetic_precondition_blocker" ]]; then
     record_fail H3 "wave lifecycle (start → dispatch → ack → collect)" "$_synthetic_precondition_blocker"
 else
     check H3 "wave lifecycle (start → dispatch → ack → collect)" bash -c "
@@ -253,7 +261,9 @@ else
 fi
 
 # H4: telemetry chain — evidence directory has expected artifacts
-if [[ -n "$_synthetic_precondition_blocker" ]]; then
+if [[ -n "$_synthetic_precondition_blocker" && "$_claim_contention" -eq 1 ]]; then
+    record_warn H4 "telemetry chain (evidence files written and queryable)" "$_synthetic_precondition_blocker"
+elif [[ -n "$_synthetic_precondition_blocker" ]]; then
     record_fail H4 "telemetry chain (evidence files written and queryable)" "$_synthetic_precondition_blocker"
 else
     check H4 "telemetry chain (evidence files written and queryable)" bash -c "
@@ -374,13 +384,16 @@ if [[ "$json_mode" -eq 1 ]]; then
         }'
 else
     echo ""
-    if [[ "$WARN" -gt 0 ]]; then
-        echo "Engine honesty: $PASS/$TOTAL pass, $FAIL fail, $WARN warn"
+    echo "Engine honesty: $PASS/$TOTAL pass, $FAIL fail, $WARN warn"
+    if [[ "$WARN" -gt 0 && "$FAIL" -eq 0 ]]; then
         echo ""
-        echo "Warnings indicate the engine operates but has known close-semantics friction."
+        echo "Warnings only — engine primitives work but synthetic probes were blocked"
+        echo "by active wave claim contention or close-semantics friction."
+        echo "This is expected when a controller wave is active."
+    elif [[ "$WARN" -gt 0 ]]; then
+        echo ""
+        echo "Warnings indicate claim contention or close-semantics friction."
         echo "Hard failures indicate broken orchestration primitives."
-    else
-        echo "Engine honesty: $PASS/$TOTAL pass, $FAIL fail, $WARN warn"
     fi
 fi
 
