@@ -27,12 +27,13 @@ ops status
 Canonical cold-start read surface for current spine work.
 
 Usage:
-  ops status [--brief|--json] [--strict]
+  ops status [--brief|--json|--context] [--strict]
 
 Flags:
-  --brief   Counts-only output for hooks/banners
-  --json    Machine-readable output
-  --strict  Exit nonzero when anomalies exist
+  --brief     Counts-only output for hooks/banners
+  --json      Machine-readable output
+  --context   L1 visibility view (terminal identity, runtime paths, coherence)
+  --strict    Exit nonzero when anomalies exist
   -h, --help  Show this help
 
 Default behavior:
@@ -45,7 +46,7 @@ MODE=""
 STRICT="0"
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --brief|--json)
+    --brief|--json|--context)
       MODE="$1"
       shift
       ;;
@@ -65,6 +66,94 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# ── Context mode (L1 visibility surface) ─────────────────────────────────
+# Replaces the former standalone `ops context` command.
+if [[ "$MODE" == "--context" ]]; then
+  JOINED_STATE_BIN="$SPINE_REPO/ops/plugins/core/lifecycle/bin/spine-engine-joined-state"
+
+  TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-<none>}"
+  RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-<none>}"
+  LOOP_ID="${SPINE_LOOP_ID:-<none>}"
+
+  JOINED_JSON=""
+  JOINED_ERR=""
+  if [[ -x "$JOINED_STATE_BIN" ]] || [[ -f "$JOINED_STATE_BIN" ]]; then
+    JOINED_JSON="$(python3 "$JOINED_STATE_BIN" --json --no-write 2>/dev/null)" || {
+      JOINED_ERR="joined-state failed (exit $?)"
+      JOINED_JSON=""
+    }
+  else
+    JOINED_ERR="joined-state binary not found"
+  fi
+
+  jq_val() {
+    local expr="$1"
+    local default="${2:-}"
+    if [[ -n "$JOINED_JSON" ]] && command -v jq >/dev/null 2>&1; then
+      local val
+      val="$(printf '%s' "$JOINED_JSON" | jq -r "if $expr == null then \"__null__\" else ($expr | tostring) end" 2>/dev/null || true)"
+      if [[ -n "$val" && "$val" != "__null__" ]]; then
+        printf '%s' "$val"
+        return
+      fi
+    fi
+    printf '%s' "$default"
+  }
+
+  STATE_ROOT_VAL="$(jq_val '.paths.state_root' 'unknown')"
+  EVIDENCE_ROOT="$(jq_val '.paths.receipts_root' 'unknown')"
+  OPEN_LOOPS="$(jq_val '.summary.open_loops' '?')"
+  OPEN_GAPS="$(jq_val '.summary.open_gaps' '?')"
+  ACTIVE_WAVES="$(jq_val '.summary.active_waves' '?')"
+  ORPHANED_WAVES="$(jq_val '.summary.orphaned_waves' '?')"
+  VERIFY_STATUS="$(jq_val '.summary.latest_fast_verify_status' 'unknown')"
+  GAP_AUTHORITY="$(jq_val '.summary.gap_authority_status' 'unknown')"
+  GAP_MATCH="$(jq_val '.summary.gap_projection_match' 'null')"
+  COHERENCE="$(jq_val '.summary.engine_coherence_needs_attention' 'unknown')"
+  FORCE_CLOSES="$(jq_val '.summary.recent_force_closes' '?')"
+  DOD_OVERRIDES="$(jq_val '.summary.recent_dod_overrides' '?')"
+
+  WARNINGS=""
+  if [[ -n "$JOINED_ERR" ]]; then
+    WARNINGS="$JOINED_ERR"
+  elif [[ "$COHERENCE" == "true" ]]; then
+    W_PARTS=()
+    [[ "$ACTIVE_WAVES" == "0" || "$ACTIVE_WAVES" == "?" ]] || W_PARTS+=("${ACTIVE_WAVES} active waves")
+    [[ "$ORPHANED_WAVES" == "0" || "$ORPHANED_WAVES" == "?" ]] || W_PARTS+=("${ORPHANED_WAVES} orphaned waves")
+    [[ "$GAP_MATCH" == "true" || "$GAP_MATCH" == "unknown" || "$GAP_MATCH" == "null" ]] || W_PARTS+=("gap projection mismatch")
+    [[ "$FORCE_CLOSES" == "0" || "$FORCE_CLOSES" == "?" ]] || W_PARTS+=("${FORCE_CLOSES} recent force-closes")
+    [[ "$DOD_OVERRIDES" == "0" || "$DOD_OVERRIDES" == "?" ]] || W_PARTS+=("${DOD_OVERRIDES} recent DoD overrides")
+    if [[ ${#W_PARTS[@]} -gt 0 ]]; then
+      WARNINGS="$(printf '%s' "${W_PARTS[0]}"; for w in "${W_PARTS[@]:1}"; do printf ', %s' "$w"; done)"
+    else
+      WARNINGS="engine coherence needs attention"
+    fi
+  fi
+
+  echo "─── spine context ───────────────────────────────────"
+  printf "  terminal:       %s\n" "$TERMINAL_ROLE"
+  printf "  runtime role:   %s\n" "$RUNTIME_ROLE"
+  printf "  loop:           %s\n" "$LOOP_ID"
+  printf "  state root:     %s\n" "$STATE_ROOT_VAL"
+  printf "  evidence root:  %s\n" "$EVIDENCE_ROOT"
+  echo "─── open work ──────────────────────────────────────"
+  printf "  open loops:     %s\n" "$OPEN_LOOPS"
+  printf "  open gaps:      %s\n" "$OPEN_GAPS"
+  printf "  active waves:   %s\n" "$ACTIVE_WAVES"
+  printf "  orphaned waves: %s\n" "$ORPHANED_WAVES"
+  echo "─── verify / coherence ─────────────────────────────"
+  printf "  fast verify:    %s\n" "$VERIFY_STATUS"
+  printf "  gap authority:  %s\n" "$GAP_AUTHORITY"
+  printf "  gap parity:     %s\n" "$(case "$GAP_MATCH" in true) echo "match";; false) echo "MISMATCH";; null) echo "n/a (db only)";; *) echo "unknown";; esac)"
+  printf "  coherence:      %s\n" "$([ "$COHERENCE" == "true" ] && echo "NEEDS ATTENTION" || echo "ok")"
+  if [[ -n "$WARNINGS" ]]; then
+    echo "─── warning ────────────────────────────────────────"
+    printf "  %s\n" "$WARNINGS"
+  fi
+  echo "─────────────────────────────────────────────────────"
+  exit 0
+fi
 
 exec python3 - "$SPINE_REPO" "$MODE" "$STRICT" "$SPINE_STATE" "$SPINE_INBOX" "$SPINE_OUTBOX" <<'PYTHON'
 import json
