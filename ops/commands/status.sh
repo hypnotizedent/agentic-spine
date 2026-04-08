@@ -345,6 +345,42 @@ if comms_status_bin.exists() and os.access(str(comms_status_bin), os.X_OK):
     except Exception:
         pass
 
+# ── Joined-state coherence summary ───────────────────────────────────────
+
+joined_state_summary = {
+    "source": "local_fallback",
+    "open_loops": len(open_loops),
+    "open_gaps": open_gap_count,
+    "active_waves": None,
+    "orphaned_waves": None,
+    "fast_verify_status": "unknown",
+    "coherence_attention": False,
+}
+
+joined_state_bin = spine / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "spine-engine-joined-state"
+if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
+    try:
+        _proc = _sp.run(
+            [str(joined_state_bin), "--json"],
+            capture_output=True, text=True, timeout=20,
+            cwd=str(spine),
+        )
+        if _proc.returncode == 0 and _proc.stdout.strip():
+            _jdata = json.loads(_proc.stdout)
+            _summary = _jdata.get("summary", {})
+            if isinstance(_summary, dict):
+                joined_state_summary = {
+                    "source": "joined_state",
+                    "open_loops": _summary.get("open_loops", len(open_loops)),
+                    "open_gaps": _summary.get("open_gaps", open_gap_count),
+                    "active_waves": _summary.get("active_waves"),
+                    "orphaned_waves": _summary.get("orphaned_waves"),
+                    "fast_verify_status": _summary.get("latest_fast_verify_status", "unknown"),
+                    "coherence_attention": bool(_summary.get("engine_coherence_needs_attention", False)),
+                }
+    except Exception:
+        pass
+
 # ── Anomaly detection ─────────────────────────────────────────────────────
 
 # Check for unlinked gaps
@@ -367,6 +403,14 @@ if comms_slo_status == "incident":
     anomalies.append(f"COMMS QUEUE INCIDENT: pending={comms_pending} oldest={comms_oldest}s escalations={comms_escalations}")
 elif comms_slo_status == "warn":
     anomalies.append(f"COMMS QUEUE WARN: pending={comms_pending} oldest={comms_oldest}s")
+
+if joined_state_summary.get("coherence_attention"):
+    anomalies.append(
+        "ENGINE COHERENCE: attention required"
+        f" (active_waves={joined_state_summary.get('active_waves', '?')},"
+        f" orphaned_waves={joined_state_summary.get('orphaned_waves', '?')},"
+        f" fast_verify={joined_state_summary.get('fast_verify_status', 'unknown')})"
+    )
 
 # Check background loop heartbeat freshness
 now_utc = datetime.now(timezone.utc)
@@ -440,6 +484,7 @@ if mode == "--json":
             "escalations": comms_escalations,
             "oneliner": comms_oneliner,
         },
+        "coherence_summary": joined_state_summary,
         "counts": {
             "open_loops": len(open_loops),
             "background_loops": sum(1 for loop in open_loops if loop.get("execution_mode") == "background"),
@@ -452,6 +497,10 @@ if mode == "--json":
             "open_gaps": open_gap_count,
             "linked_gaps": linked_gap_count,
             "unlinked_gaps": unlinked_gap_count,
+            "active_waves": joined_state_summary.get("active_waves"),
+            "orphaned_waves": joined_state_summary.get("orphaned_waves"),
+            "fast_verify_status": joined_state_summary.get("fast_verify_status", "unknown"),
+            "coherence_attention": joined_state_summary.get("coherence_attention", False),
             "inbox_active": inbox_active,
             "inbox_total": inbox_total,
             "anomalies": len(anomalies),
@@ -485,6 +534,13 @@ if mode == "--brief":
         parts.append(f"Gaps: {open_gap_count} open ({unlinked_gap_count} unlinked)")
     else:
         parts.append("Gaps: unknown (authority degraded)")
+    if joined_state_summary.get("active_waves") is not None:
+        parts.append(
+            f"Waves: {joined_state_summary.get('active_waves', 0)} active / {joined_state_summary.get('orphaned_waves', 0)} orphaned"
+        )
+    parts.append(f"Verify: {joined_state_summary.get('fast_verify_status', 'unknown')}")
+    if joined_state_summary.get("coherence_attention"):
+        parts.append("Coherence: attention")
     parts.append(f"Inbox: {inbox_active} active / {inbox_total} total")
     if comms_oneliner:
         parts.append(comms_oneliner)
@@ -496,6 +552,16 @@ if mode == "--brief":
 print("=" * 72)
 print("  SPINE STATUS")
 print("=" * 72)
+print()
+
+print("COHERENCE SUMMARY")
+print("-" * 72)
+print(f"  open loops:         {joined_state_summary.get('open_loops', len(open_loops))}")
+print(f"  open gaps:          {joined_state_summary.get('open_gaps', open_gap_count)}")
+print(f"  active waves:       {joined_state_summary.get('active_waves', '?')}")
+print(f"  orphaned waves:     {joined_state_summary.get('orphaned_waves', '?')}")
+print(f"  fast verify:        {joined_state_summary.get('fast_verify_status', 'unknown')}")
+print(f"  coherence attention:{' yes' if joined_state_summary.get('coherence_attention') else ' no'}")
 print()
 
 # ── Open Loops ──
