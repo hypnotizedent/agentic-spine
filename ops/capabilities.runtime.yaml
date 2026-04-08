@@ -905,16 +905,16 @@ capabilities:
     - stdout
     domain: infra
     plane: fabric
-  verify.core.run:
-    description: Run the runtime infrastructure verification surface (17 composite
-      gates across reachability, storage, backup, services, network, secrets, and
-      smoke health).
+  verify.engine.run:
+    description: Fast platform engine smoke test — validates bin/ops entrypoint,
+      ops status, capability registry, SQLite authority, and no dead entry references.
+      Runs in seconds.
     tags:
     - verify
-    - fast
+    - engine
     - session-start
-    command: "./ops/plugins/core/verify/bin/verify-topology core"
-    script_path: "./ops/plugins/core/verify/bin/verify-topology"
+    command: "./ops/plugins/core/verify/bin/verify-engine"
+    script_path: "./ops/plugins/core/verify/bin/verify-engine"
     cwd: "$SPINE_CODE"
     safety: read-only
     approval: auto
@@ -924,12 +924,30 @@ capabilities:
     - stdout
     domain: core
     plane: fabric
-  verify.fast:
-    description: Alias for verify.core.run — the default 17-gate infrastructure
-      verify surface.
+  verify.infra.run:
+    description: Run the 17-gate infrastructure verification surface (reachability,
+      storage, backup, services, network, secrets, smoke health). This is the
+      infrastructure workload layer, not the platform engine.
     tags:
     - verify
-    - fast
+    - infra
+    command: "./ops/plugins/core/verify/bin/verify-topology core"
+    script_path: "./ops/plugins/core/verify/bin/verify-topology"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+    - stdout
+    domain: infra
+    plane: fabric
+  verify.core.run:
+    description: 'Compatibility alias for verify.infra.run — runs the 17-gate
+      infrastructure verification surface. Prefer verify.infra.run for clarity.'
+    tags:
+    - verify
+    - infra
     - session-start
     command: "./ops/plugins/core/verify/bin/verify-topology core"
     script_path: "./ops/plugins/core/verify/bin/verify-topology"
@@ -940,7 +958,25 @@ capabilities:
     lifecycle: ready
     outputs:
     - stdout
-    domain: core
+    domain: infra
+    plane: fabric
+  verify.fast:
+    description: 'Compatibility alias for verify.infra.run — the default 17-gate
+      infrastructure verify surface.'
+    tags:
+    - verify
+    - infra
+    - session-start
+    command: "./ops/plugins/core/verify/bin/verify-topology core"
+    script_path: "./ops/plugins/core/verify/bin/verify-topology"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+    - stdout
+    domain: infra
     plane: fabric
   verify.domain.run:
     description: Run a domain-scoped subset of the infrastructure verification surface.
@@ -1036,8 +1072,8 @@ capabilities:
     domain: core
     plane: fabric
   verify.run:
-    description: 'Canonical verify wrapper for the runtime infrastructure gate surface.
-      Scope profiles: fast, domain, release. Supports shadow parity mode.'
+    description: 'Canonical verify wrapper. Scope profiles: engine (platform smoke),
+      fast/infra (17 infrastructure gates), domain <id>, release (full gate set).'
     tags:
     - verify
     command: "./ops/plugins/core/verify/bin/verify-run"
@@ -1053,7 +1089,7 @@ capabilities:
     domain: core
     plane: fabric
     flags:
-    - fast | domain <domain_id> | release
+    - engine | fast | infra | domain <domain_id> | release
     - "--shadow"
     - "--json"
     examples:

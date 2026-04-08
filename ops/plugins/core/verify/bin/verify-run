@@ -8,6 +8,7 @@ fi
 ROOT="$_VR_COMPUTED"
 
 VERIFY_TOPOLOGY="$ROOT/ops/plugins/core/verify/bin/verify-topology"
+VERIFY_ENGINE="$ROOT/ops/plugins/core/verify/bin/verify-engine"
 
 fail() {
   echo "verify.run FAIL: $*" >&2
@@ -15,20 +16,25 @@ fail() {
 }
 
 [[ -x "$VERIFY_TOPOLOGY" ]] || fail "missing verify runtime: $VERIFY_TOPOLOGY"
+[[ -x "$VERIFY_ENGINE" ]] || fail "missing engine verify: $VERIFY_ENGINE"
 
 usage() {
   cat <<'USAGE'
 verify.run
 
 Usage:
-  verify-run fast [--json] [--shadow]
-  verify-run domain <domain_id> [--json] [--shadow]
-  verify-run release [--json] [--shadow]
+  verify-run engine [--json]                  Fast platform engine smoke (seconds)
+  verify-run fast [--json] [--shadow]         17-gate infrastructure baseline
+  verify-run infra [--json] [--shadow]        Alias for fast (infrastructure gates)
+  verify-run domain <domain_id> [--json]      Domain-scoped infrastructure gates
+  verify-run release [--json] [--shadow]      Full infrastructure gate set
 
 Scopes:
-  fast    => runtime workload/infra gate baseline
-  domain  => runtime workload/infra gates for one domain
-  release => full runtime workload/infra gate set
+  engine  => platform execution system health (bin/ops, caps, SQLite, entry)
+  fast    => 17-gate infrastructure workload baseline (alias: infra)
+  infra   => same as fast
+  domain  => infrastructure gates for one domain
+  release => full infrastructure gate set
 
 Flags:
   --shadow   accepted for compatibility and ignored by spine-lite
@@ -47,10 +53,13 @@ scope="${1:-}"
 shift || true
 
 case "$scope" in
-  fast|domain|release) ;;
+  engine|fast|infra|domain|release) ;;
   -h|--help|"") usage; exit 0 ;;
-  *) fail "unknown scope '$scope' (expected fast|domain|release)" ;;
+  *) fail "unknown scope '$scope' (expected engine|fast|infra|domain|release)" ;;
 esac
+
+# Normalize infra → fast (they are the same surface)
+[[ "$scope" != "infra" ]] || scope="fast"
 
 target_domain=""
 if [[ "$scope" == "domain" ]]; then
@@ -108,6 +117,13 @@ run_and_wrap_json() {
 }
 
 case "$scope" in
+  engine)
+    if [[ "$json_mode" -eq 1 ]]; then
+      run_and_wrap_json "engine" "$VERIFY_ENGINE" --json
+    else
+      exec "$VERIFY_ENGINE"
+    fi
+    ;;
   fast)
     if [[ "$json_mode" -eq 1 ]]; then
       run_and_wrap_json "fast" "$VERIFY_TOPOLOGY" core --json

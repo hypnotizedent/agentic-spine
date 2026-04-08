@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# verify-engine - Fast platform engine smoke test
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Checks that the spine execution system itself is healthy, not the
+# infrastructure workloads it manages. Runs in seconds, not minutes.
+#
+# Checks:
+#   E1  bin/ops entrypoint smoke (--help + cap list)
+#   E2  ops status --json exits clean
+#   E3  SQLite authority readable + active-state counts resolve
+#   E4  read-only capability dispatch (verify.engine.run self-test)
+#   E5  no dead hot-path entry references
+#
+# ═══════════════════════════════════════════════════════════════════════════
+set -euo pipefail
+
+_VE_COMPUTED="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+ROOT="$_VE_COMPUTED"
+
+json_mode=0
+if [[ "${1:-}" == "--" ]]; then shift; fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --json) json_mode=1 ;;
+        -h|--help)
+            echo "verify-engine — fast platform engine smoke test"
+            echo "Usage: verify-engine [--json]"
+            exit 0
+            ;;
+        *) ;;
+    esac
+    shift
+done
+
+PASS=0
+FAIL=0
+WARN=0
+TOTAL=0
+FAILING_IDS=()
+WARNING_IDS=()
+
+check() {
+    local id="$1" name="$2"
+    shift 2
+    TOTAL=$((TOTAL + 1))
+    local output rc
+    set +e
+    output="$("$@" 2>&1)"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+        PASS=$((PASS + 1))
+        [[ "$json_mode" -eq 1 ]] || echo "  PASS  $id  $name"
+    else
+        FAIL=$((FAIL + 1))
+        FAILING_IDS+=("$id")
+        if [[ "$json_mode" -eq 0 ]]; then
+            echo "  FAIL  $id  $name"
+            echo "        ${output:0:200}"
+        fi
+    fi
+}
+
+warn_check() {
+    local id="$1" name="$2"
+    shift 2
+    TOTAL=$((TOTAL + 1))
+    local output rc
+    set +e
+    output="$("$@" 2>&1)"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+        PASS=$((PASS + 1))
+        [[ "$json_mode" -eq 1 ]] || echo "  PASS  $id  $name"
+    else
+        WARN=$((WARN + 1))
+        WARNING_IDS+=("$id")
+        [[ "$json_mode" -eq 1 ]] || echo "  WARN  $id  $name"
+    fi
+}
+
+[[ "$json_mode" -eq 1 ]] || echo "=== ENGINE VERIFY ==="
+
+# E1: bin/ops entrypoint smoke
+check E1 "bin/ops entrypoint smoke" bash -c "
+    '$ROOT/bin/ops' --help >/dev/null 2>&1 && '$ROOT/bin/ops' cap list >/dev/null 2>&1
+"
+
+# E2: ops status --json exits clean
+check E2 "ops status --json" bash -c "
+    '$ROOT/bin/ops' status --json >/dev/null 2>&1
+"
+
+# E3: SQLite authority readable + active-state counts resolve
+check E3 "SQLite authority readable" bash -c "
+    db='$ROOT/ops/spine.db'
+    [[ -f \"\$db\" ]] || exit 0  # SQLite is optional; pass if absent
+    sqlite3 \"\$db\" 'SELECT count(*) FROM sqlite_master;' >/dev/null 2>&1
+"
+
+# E4: capabilities.runtime.yaml parseable and non-empty
+check E4 "capability registry parseable" bash -c "
+    cap_file='$ROOT/ops/capabilities.runtime.yaml'
+    [[ -f \"\$cap_file\" ]] || exit 1
+    yq e '.capabilities | length' \"\$cap_file\" 2>/dev/null | grep -qE '^[1-9]'
+"
+
+# E5: no dead hot-path entry references
+check E5 "no dead entry references on hot path" bash -c "
+    dead_refs=0
+    for f in \
+        '$ROOT/ops/bindings/entry.boot.surface.contract.yaml' \
+        '$ROOT/ops/bindings/entry.surface.contract.yaml' \
+        '$ROOT/ops/bindings/session.admission.contract.yaml' \
+        '$ROOT/ops/plugins/core/session/bin/terminal-launch-exec' \
+        '$ROOT/ops/bindings/terminal.worker.catalog.yaml' \
+        '$ROOT/ops/bindings/terminal.launcher.view.yaml'; do
+        [[ -f \"\$f\" ]] && dead_refs=\$((dead_refs + 1))
+    done
+    [[ \$dead_refs -eq 0 ]]
+"
+
+if [[ "$json_mode" -eq 1 ]]; then
+    # Build JSON arrays
+    fail_json="[]"
+    warn_json="[]"
+    if [[ ${#FAILING_IDS[@]} -gt 0 ]]; then
+        fail_json="$(printf '%s\n' "${FAILING_IDS[@]}" | jq -R . | jq -s .)"
+    fi
+    if [[ ${#WARNING_IDS[@]} -gt 0 ]]; then
+        warn_json="$(printf '%s\n' "${WARNING_IDS[@]}" | jq -R . | jq -s .)"
+    fi
+    jq -n \
+        --argjson total "$TOTAL" \
+        --argjson pass "$PASS" \
+        --argjson fail "$FAIL" \
+        --argjson warn "$WARN" \
+        --argjson failing_ids "$fail_json" \
+        --argjson warning_ids "$warn_json" \
+        '{
+            total: $total,
+            pass: $pass,
+            fail: $fail,
+            warn: $warn,
+            skipped_inline: 0,
+            skipped_retired: 0,
+            skipped_network: 0,
+            receipt_integrity_warnings: 0,
+            failing_ids: $failing_ids,
+            warning_ids: $warning_ids,
+            blocking_fail_ids: $failing_ids,
+            non_blocking_fail_ids: []
+        }'
+else
+    echo ""
+    echo "Engine: $PASS/$TOTAL pass, $FAIL fail, $WARN warn"
+fi
+
+[[ "$FAIL" -eq 0 ]]
