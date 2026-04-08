@@ -19,11 +19,6 @@ runtime_roles:
   mutating_roles: [worker]
   mutating_capability_allowlist_by_role:
     researcher:
-      # Session bootstrap — session.v3.attach is the public entry gate for every
-      # governed session. session.start remains allowlisted only as the internal
-      # bootstrap/diagnostic subroutine behind attach and recovery paths.
-      - session.start
-      - session.v3.attach
       # Friction ingestion — core researcher function
       - friction.ingest
       - friction.reconcile
@@ -40,22 +35,11 @@ runtime_roles:
       - gaps.claim
       - loops.create
       - loops.continuity.update
-      # Session override — allows researcher to set session-scoped role override
-      # without needing env vars on the first call (bootstrap problem).
-      - session.role.override
       # Interactive secret setter — inherently manual-gated (read -s prompt).
       # Researchers need to provision secrets during discovery without full worker
       # promotion. The interactive nature provides equivalent approval gating.
       # Justified by GAP-OP-1281.
       - secrets.set.interactive
-      # Execution lane control-plane — bootstrap/closeout/scan are governance
-      # primitives for lane lifecycle. They don't mutate repo content (only create
-      # worktrees and write external state). Researchers need these to create
-      # clean execution lanes for routine work without override ceremony.
-      # Justified by Phase 2.2 (agent-execution-lane-phase2-2 wave).
-      - session.execution.lane.bootstrap
-      - session.execution.lane.closeout
-      - session.execution.lane.scan
       # Managed infrastructure worktree sync — governed control-plane mutation
       # for runtime scheduler parity. It only fast-forwards contract-managed
       # worktrees and fails closed on dirty/non-FF state.
@@ -82,53 +66,7 @@ runtime_roles:
     require_session_binding: true
     require_terminal_role_binding: true
 
-attach_admission:
-  enforce_top_level: true
-  required_safety: [read-only, mutating, destructive]
-  autonomous_scheduler_contract: ops/bindings/launchd.runtime.contract.yaml
-  entry_gate_bypass_binding: ops/bindings/entry.gate.bypass.yaml
-  required_env:
-    - SPINE_ENTRY_PACKET_PATH
-    - SPINE_ENTRY_PACKET_HASH
-  exempt_capabilities:
-    - session.start
-    - session.v3.attach
-    - session.role.override
-    - aof.contract.acknowledge
-    - friction.ingest
-    - friction.reconcile
-    - friction.baseline.capture
-    - worktree.lifecycle.rehydrate
-    - worktree.lifecycle.managed.sync
-    - session.execution.lane.bootstrap
-    - session.execution.lane.closeout
-    - session.execution.lane.scan
-    - loops.continuity.update
-    - mailroom.task.claim
-    - mailroom.task.complete
-    - mailroom.task.fail
-    - mailroom.task.heartbeat
-    - orchestration.wave.collect
-    # Autonomous control cycle — execution terminal runs headless from
-    # canonical root main, so no interactive attach packet is available.
-    - spine.control.cycle
-    # Launchd-scheduled caps — no interactive attach session available.
-    # These run unattended via macOS LaunchAgents on a fixed cadence.
-    - operator.storage.surface.sync
-    - mailroom.task.worker.start
-    - mailroom.task.worker.stop
-    # Recovery restart is invoked by launchd-health-check without an interactive attach.
-    - recovery.launchd.restart
-    # Nightly/session closeout — must run headless for state hygiene.
-    - nightly.closeout
-    - agent.session.closeout
-    # Media queue reconciliation — scheduled headless to prevent cyclical queue buildup.
-    - media.queue.reconcile
-    - media.queue.reconcile.sonarr
-    - media.queue.reconcile.lidarr
-
 lane_role_compatibility:
-  lane_source_contract: ops/bindings/terminal.launcher.view.yaml
   allowed_runtime_roles_by_lane:
     control: [worker]
     execution: [worker]

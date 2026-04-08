@@ -744,14 +744,11 @@ def handle_tools_call(msg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def bootstrap_session() -> None:
-    """Run session.v3.attach at MCP server startup to establish entry packet context."""
-    attach_cmd = [
-        OPS_BIN, "cap", "run", "session.v3.attach", "--",
-        "--allow-no-loop", "--emit-exports",
-    ]
+    """Warm the runtime by confirming the core CLI surfaces are reachable."""
+    status_cmd = [OPS_BIN, "status", "--json"]
     try:
         result = subprocess.run(
-            attach_cmd,
+            status_cmd,
             cwd=SPINE_ROOT,
             capture_output=True,
             text=True,
@@ -760,39 +757,20 @@ def bootstrap_session() -> None:
         )
         if result.returncode != 0:
             print(
-                f"[spine-mcp-serve] session.v3.attach failed (rc={result.returncode}): "
+                f"[spine-mcp-serve] ops status failed (rc={result.returncode}): "
                 f"{(result.stderr or result.stdout or 'unknown error').strip()[:200]}",
                 file=sys.stderr,
             )
             RUNTIME_ENV["SPINE_MCP_SESSION"] = "degraded"
             return
-
-        # Parse export lines: export KEY='VALUE' or export KEY=VALUE
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line.startswith("export "):
-                continue
-            rest = line[len("export "):]
-            if "=" not in rest:
-                continue
-            key, value = rest.split("=", 1)
-            key = key.strip()
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-                value = value[1:-1]
-            if key and value:
-                RUNTIME_ENV[key] = value
-
-        packet_path = RUNTIME_ENV.get("SPINE_ENTRY_PACKET_PATH", "")
-        session_id = RUNTIME_ENV.get("SPINE_SESSION_ID", "")
+        RUNTIME_ENV["SPINE_MCP_SESSION"] = "ready"
         print(
-            f"[spine-mcp-serve] session bootstrapped: "
-            f"session={session_id or 'none'} packet={'yes' if packet_path else 'none'}",
+            "[spine-mcp-serve] runtime warmup complete: ops status reachable",
             file=sys.stderr,
         )
     except Exception as exc:
         print(
-            f"[spine-mcp-serve] session bootstrap error: {exc}",
+            f"[spine-mcp-serve] runtime warmup error: {exc}",
             file=sys.stderr,
         )
         RUNTIME_ENV["SPINE_MCP_SESSION"] = "degraded"

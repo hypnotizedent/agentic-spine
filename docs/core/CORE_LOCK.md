@@ -44,8 +44,9 @@ This key is used everywhere:
 | Entry | Path | Purpose |
 |-------|------|---------|
 | CLI | `bin/ops` | Canonical operator and agent entrypoint |
-| Terminal entry | `./bin/ops cap run session.v3.attach -- --allow-no-loop` | Canonical public terminal startup |
-| Session start (internal) | `./bin/ops cap run session.start` | Bootstrap subroutine; not public entry |
+| Startup status | `./bin/ops status --json` | Canonical state snapshot at session start |
+| Startup verify | `./bin/ops verify --core-only` | Canonical infrastructure health snapshot at session start |
+| Capability surface | `./bin/ops cap list` | Canonical capability discovery surface |
 | Verify | `./bin/ops cap run verify.run -- fast` | Canonical drift gate entrypoint |
 | Worktree lifecycle | `ops/plugins/core/lifecycle/bin/worktree-lifecycle-*` | Workspace/worktree control surfaces |
 | Repo bootstrap | `ops/plugins/core/authority/bin/project-governance-bootstrap` | API-first Gitea repo ensure + remote alignment |

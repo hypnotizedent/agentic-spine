@@ -243,13 +243,13 @@ The most critical error in Spine V3 is **floating WIP**: starting ad-hoc work, r
 - No completion criteria — "done" has no definition without a loop objective
 - Drift compounds — each ungoverned change makes the next session's context harder to resolve
 
-**The rule**: If work is non-trivial (any file mutation, any state change, any infrastructure action), it MUST have a loop scope. If no loop exists, the first action is to create one or attach to an existing one. `session.v3.attach -- --allow-no-loop` exists for genuine ad-hoc inspection, not as a permanent bypass.
+**The rule**: If work is non-trivial (any file mutation, any state change, any infrastructure action), the first action is to establish current state from the live platform: read the startup docs, run `./bin/ops status --json`, run `./bin/ops verify --core-only`, and confirm the capability surface with `./bin/ops cap list`.
 
 ### Part 4: The ONE Universal Gate
 
 Every session, every agent, every operator interaction must begin with this question:
 
-> **"What is the specific Loop objective, gap ID, or execution runway you want us to tackle for this session, and have you verified that `./bin/ops cap run session.v3.attach -- --allow-no-loop` has run successfully?"**
+> **"What is the specific infrastructure or workload objective for this session, and have you read the startup docs and checked current state with `./bin/ops status --json` and `./bin/ops verify --core-only`?"**
 
 This is not a formality. This question enforces:
 
