@@ -23,6 +23,23 @@
 _SSH_RESOLVE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 _SSH_RESOLVE_BINDING="${_SSH_RESOLVE_ROOT}/ops/bindings/ssh.targets.yaml"
 
+# ── Network location detection (cached per shell session) ──
+# Determines whether this machine has a direct route to the shop LAN (192.168.1.0/24).
+# If not, lan_first targets should skip the LAN attempt and go straight to Tailscale.
+# This avoids 3-5 second timeouts per target when running from outside the shop.
+_SSH_RESOLVE_ON_SHOP_LAN=""
+_ssh_resolve_is_on_shop_lan() {
+  if [[ -z "$_SSH_RESOLVE_ON_SHOP_LAN" ]]; then
+    if ifconfig 2>/dev/null | grep -q 'inet 192\.168\.1\.' || \
+       ip -4 addr show 2>/dev/null | grep -q 'inet 192\.168\.1\.'; then
+      _SSH_RESOLVE_ON_SHOP_LAN="yes"
+    else
+      _SSH_RESOLVE_ON_SHOP_LAN="no"
+    fi
+  fi
+  [[ "$_SSH_RESOLVE_ON_SHOP_LAN" == "yes" ]]
+}
+
 ssh_resolve_host() {
   local target_id="$1"
   yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .host // \"\"" \
@@ -133,13 +150,22 @@ ssh_resolve_host_with_fallback() {
   esac
 
   # LAN-first: try LAN, fall back to Tailscale
-  if [[ -n "$host" ]] && ping -c 1 -W "$timeout" "$host" >/dev/null 2>&1; then
-    printf '%s lan\n' "$host"
-    return 0
+  # Optimization: if we're not on the shop LAN, skip LAN attempt entirely
+  if _ssh_resolve_is_on_shop_lan; then
+    if [[ -n "$host" ]] && ping -c 1 -W "$timeout" "$host" >/dev/null 2>&1; then
+      printf '%s lan\n' "$host"
+      return 0
+    fi
   fi
 
   if [[ -n "$ts_ip" && "$ts_ip" != "$host" ]] && ping -c 1 -W "$timeout" "$ts_ip" >/dev/null 2>&1; then
     printf '%s tailscale\n' "$ts_ip"
+    return 0
+  fi
+
+  # On-LAN but Tailscale failed too, try LAN as last resort
+  if ! _ssh_resolve_is_on_shop_lan && [[ -n "$host" ]] && ping -c 1 -W "$timeout" "$host" >/dev/null 2>&1; then
+    printf '%s lan\n' "$host"
     return 0
   fi
 
@@ -194,12 +220,20 @@ ssh_resolve_ssh_host_with_fallback() {
       return 1
       ;;
     lan_first|"")
-      if [[ -n "$host" && "$host" != "null" ]] && ssh_tcp_port_open "$host" 22 "$timeout"; then
-        printf '%s lan\n' "$host"
-        return 0
+      # Optimization: if not on shop LAN, skip the LAN TCP probe (saves 3-5s per target)
+      if _ssh_resolve_is_on_shop_lan; then
+        if [[ -n "$host" && "$host" != "null" ]] && ssh_tcp_port_open "$host" 22 "$timeout"; then
+          printf '%s lan\n' "$host"
+          return 0
+        fi
       fi
       if [[ -n "$ts_ip" && "$ts_ip" != "$host" ]] && ssh_tcp_port_open "$ts_ip" 22 "$timeout"; then
         printf '%s tailscale\n' "$ts_ip"
+        return 0
+      fi
+      # Last resort: try LAN even if not detected on-LAN (maybe routing changed)
+      if ! _ssh_resolve_is_on_shop_lan && [[ -n "$host" && "$host" != "null" ]] && ssh_tcp_port_open "$host" 22 "$timeout"; then
+        printf '%s lan\n' "$host"
         return 0
       fi
       printf '%s unreachable\n' "${host:-$ts_ip}"
