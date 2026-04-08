@@ -5185,6 +5185,7 @@ try:
     controller_context = {
         "requested": controller_only,
         "eligible": False,
+        "minimal_shell": False,
         "fixed_in": "",
         "verify_run_key": "",
         "verify_receipt_path": "",
@@ -5196,6 +5197,21 @@ try:
         "controller_dod_violations": [],
     }
     workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
+    workspace_enabled = workspace.get("enabled")
+    if isinstance(workspace_enabled, str):
+        workspace_enabled = workspace_enabled.strip().lower() == "true"
+    workspace_enabled = bool(workspace_enabled)
+    results = state.get("results") if isinstance(state.get("results"), list) else []
+
+    minimal_controller_shell = (
+        controller_only
+        and not dispatches
+        and not checks
+        and not workspace_enabled
+        and not results
+        and not pf
+    )
+    controller_context["minimal_shell"] = minimal_controller_shell
 
     if controller_only:
         if dispatches:
@@ -5203,51 +5219,54 @@ try:
                 "controller-only close requires zero dispatches"
             )
 
-        push_receipt_path = os.path.join(sd, "push.receipt.json")
-        push_receipt = _load_json(push_receipt_path) if os.path.exists(push_receipt_path) else {}
-        fixed_commit = fixed_in or str(push_receipt.get("commit_sha", "")).strip()
-        controller_context["fixed_in"] = fixed_commit
-
-        if push_receipt and str(push_receipt.get("push_result", "")).strip() not in {"", "success"}:
-            controller_context["controller_infra_violations"].append(
-                f"controller-only push receipt is not successful: {push_receipt.get('push_result')}"
-            )
-
-        if not fixed_commit:
-            controller_context["controller_dod_violations"].append(
-                "controller-only close requires landed commit proof (--fixed-in or push.receipt.json)"
-            )
-        elif not _commit_on_main(fixed_commit):
-            controller_context["controller_infra_violations"].append(
-                f"controller-only fixed commit not present on main: {fixed_commit}"
-            )
-
-        verify_info, verify_error = _validate_verify_receipt(controller_verify_receipt)
-        if verify_error:
-            controller_context["controller_dod_violations"].append(verify_error)
-        else:
-            controller_context["verify_run_key"] = verify_info["run_key"]
-            controller_context["verify_receipt_path"] = verify_info["receipt_path"]
-
-        cleanup_check = _worktree_cleanup_blockers(state.get("wave_id", ""), workspace)
-        controller_context["cleanup_error"] = cleanup_check.get("error", "")
-        controller_context["cleanup_blocking_rows"] = cleanup_check.get("blocking_rows", [])
-        controller_context["cleanup_global_blocked_count"] = cleanup_check.get("global_blocked_count", 0)
-        if cleanup_check.get("error"):
-            controller_context["controller_infra_violations"].append(
-                f"controller-only cleanup classifier failed: {cleanup_check['error']}"
-            )
-        elif cleanup_check.get("blocking_rows"):
-            details = []
-            for row in cleanup_check.get("blocking_rows", []):
-                issue_text = ",".join(row.get("issues", []))
-                label = row.get("path") or row.get("branch") or row.get("category") or "unknown"
-                details.append(f"{label} [{issue_text}]")
-            controller_context["controller_dod_violations"].append(
-                "controller-only cleanup residue unresolved: " + "; ".join(details)
-            )
-        else:
+        if minimal_controller_shell:
             controller_context["cleanup_ref"] = controller_precheck_path
+        else:
+            push_receipt_path = os.path.join(sd, "push.receipt.json")
+            push_receipt = _load_json(push_receipt_path) if os.path.exists(push_receipt_path) else {}
+            fixed_commit = fixed_in or str(push_receipt.get("commit_sha", "")).strip()
+            controller_context["fixed_in"] = fixed_commit
+
+            if push_receipt and str(push_receipt.get("push_result", "")).strip() not in {"", "success"}:
+                controller_context["controller_infra_violations"].append(
+                    f"controller-only push receipt is not successful: {push_receipt.get('push_result')}"
+                )
+
+            if not fixed_commit:
+                controller_context["controller_dod_violations"].append(
+                    "controller-only close requires landed commit proof (--fixed-in or push.receipt.json)"
+                )
+            elif not _commit_on_main(fixed_commit):
+                controller_context["controller_infra_violations"].append(
+                    f"controller-only fixed commit not present on main: {fixed_commit}"
+                )
+
+            verify_info, verify_error = _validate_verify_receipt(controller_verify_receipt)
+            if verify_error:
+                controller_context["controller_dod_violations"].append(verify_error)
+            else:
+                controller_context["verify_run_key"] = verify_info["run_key"]
+                controller_context["verify_receipt_path"] = verify_info["receipt_path"]
+
+            cleanup_check = _worktree_cleanup_blockers(state.get("wave_id", ""), workspace)
+            controller_context["cleanup_error"] = cleanup_check.get("error", "")
+            controller_context["cleanup_blocking_rows"] = cleanup_check.get("blocking_rows", [])
+            controller_context["cleanup_global_blocked_count"] = cleanup_check.get("global_blocked_count", 0)
+            if cleanup_check.get("error"):
+                controller_context["controller_infra_violations"].append(
+                    f"controller-only cleanup classifier failed: {cleanup_check['error']}"
+                )
+            elif cleanup_check.get("blocking_rows"):
+                details = []
+                for row in cleanup_check.get("blocking_rows", []):
+                    issue_text = ",".join(row.get("issues", []))
+                    label = row.get("path") or row.get("branch") or row.get("category") or "unknown"
+                    details.append(f"{label} [{issue_text}]")
+                controller_context["controller_dod_violations"].append(
+                    "controller-only cleanup residue unresolved: " + "; ".join(details)
+                )
+            else:
+                controller_context["cleanup_ref"] = controller_precheck_path
 
         controller_context["eligible"] = not controller_context["controller_infra_violations"] and not controller_context["controller_dod_violations"]
         with open(controller_precheck_path, "w", encoding="utf-8") as handle:
@@ -5257,6 +5276,7 @@ try:
                     "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "mode": "controller_only_close_precheck",
                     "eligible": controller_context["eligible"],
+                    "minimal_shell": controller_context["minimal_shell"],
                     "fixed_in": controller_context["fixed_in"],
                     "verify_receipt_path": controller_context["verify_receipt_path"],
                     "verify_run_key": controller_context["verify_run_key"],
@@ -5506,7 +5526,7 @@ try:
                 verify_results.append(rk)
     if controller_context.get("verify_run_key"):
         verify_results.append(controller_context["verify_run_key"])
-    if not verify_results:
+    if not verify_results and not controller_context.get("minimal_shell"):
         dod_violations.append("DoD missing verify results (no run keys in watcher checks or receipts)")
 
     blocker_classes = []
@@ -5553,7 +5573,7 @@ try:
     elif not blocker_classes:
         blocker_classes.append("none")
 
-    if not cleanup_proof:
+    if not cleanup_proof and not controller_context.get("minimal_shell"):
         dod_violations.append("DoD missing cleanup proof (no cleanup refs in evidence/output refs)")
 
     if linkage_errors:
@@ -5573,7 +5593,7 @@ try:
     lifecycle_state = str(state.get(state_field, state.get("lifecycle_state", "active"))).strip() or "active"
     if lifecycle_state not in state_transitions:
         infra_violations.append(f"state machine unknown state '{lifecycle_state}'")
-    elif not controller_context["eligible"]:
+    elif not controller_context["eligible"] and not controller_context.get("minimal_shell"):
         allowed = state_transitions.get(lifecycle_state, set())
         if "closed" not in allowed:
             infra_violations.append(f"state machine blocked: {lifecycle_state} -> closed not allowed")
@@ -5607,7 +5627,7 @@ try:
             "run_key": authoritative_close.get("run_key"),
         }
         state["role_flow"] = role_flow
-    if close_aliases and current_role and current_role not in close_aliases and not controller_context["eligible"]:
+    if close_aliases and current_role and current_role not in close_aliases and not controller_context["eligible"] and not controller_context.get("minimal_shell"):
         infra_violations.append(
             f"role flow blocked close: current_role={current_role} expected one of {sorted(close_aliases)}"
         )
