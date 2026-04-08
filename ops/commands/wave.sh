@@ -742,7 +742,7 @@ EOF
 
 usage() {
   cat <<'EOF'
-ops wave - Wave orchestration with lane-aware dispatch
+ops wave - Manual wave lifecycle with lane-aware dispatch
 
 Usage:
   ops wave start <WAVE_ID> --objective "<text>" [--loop-id <LOOP_ID>] [--deadline-utc <ISO8601>] [--horizon now|later|future] [--execution-readiness runnable|blocked] [--claimed-paths "a,b"] [--worktree auto|off] [--repo <path>]
@@ -757,6 +757,11 @@ Usage:
   ops wave preflight <domain>                        Fast non-blocking preflight
   ops wave receipt-validate <path>                   Validate EXEC_RECEIPT JSON
 
+Ownership:
+  ops wave manages the manual wave lifecycle.
+  For the convenience wrapper that creates and runs a local dispatch wave, use:
+    ops dispatch local --loop-id <LOOP_ID> --objective "<text>" --lane "<name>:<shell_command>"
+
 Wave IDs: use WAVE-YYYYMMDD-NN format (e.g. WAVE-20260222-01)
 
 EXEC_RECEIPT Artifacts:
@@ -768,6 +773,18 @@ Background Watcher:
   verify.core.run, verify.pack.run) and tracks them without blocking.
   Results appear in 'ops wave status' when complete.
 EOF
+}
+
+wave_start_usage() {
+  echo "Usage: ops wave start <WAVE_ID> --objective \"<text>\" [--loop-id <LOOP_ID>] [--deadline-utc <ISO8601>] [--horizon now|later|future] [--execution-readiness runnable|blocked] [--claimed-paths \"a,b\"] [--worktree auto|off] [--repo <path>]" >&2
+}
+
+wave_start_fail_legacy_loop_flag() {
+  local bad_flag="$1"
+  echo "Unknown flag: $bad_flag" >&2
+  echo "Hint: ops wave start requires a positional <WAVE_ID> and uses canonical --loop-id." >&2
+  echo "Example: ops wave start WAVE-20260408-03 --objective \"demo\" --loop-id LOOP-EXAMPLE" >&2
+  exit 1
 }
 
 cmd_start() {
@@ -802,6 +819,7 @@ cmd_start() {
       --) shift ;;
       --objective) objective="${2:-}"; shift 2 ;;
       --loop-id) loop_id="${2:-}"; shift 2 ;;
+      --loop) wave_start_fail_legacy_loop_flag "$1" ;;
       --deadline-utc) deadline_utc="${2:-}"; shift 2 ;;
       --horizon) horizon="${2:-}"; shift 2 ;;
       --execution-readiness) execution_readiness="${2:-}"; shift 2 ;;
@@ -817,7 +835,7 @@ cmd_start() {
   done
 
   if [[ -z "$wave_id" ]]; then
-    echo "Usage: ops wave start <WAVE_ID> --objective \"<text>\" [--loop-id <LOOP_ID>] [--deadline-utc <ISO8601>] [--horizon now|later|future] [--execution-readiness runnable|blocked] [--claimed-paths \"a,b\"] [--worktree auto|off] [--repo <path>]" >&2
+    wave_start_usage
     exit 1
   fi
   if [[ "$worktree_mode" != "auto" && "$worktree_mode" != "off" ]]; then

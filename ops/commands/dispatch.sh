@@ -27,15 +27,21 @@ set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 WAVE_CMD="$SPINE_REPO/ops/commands/wave.sh"
+RUNTIME_PATHS_LIB="$SPINE_REPO/ops/lib/runtime-paths.sh"
 
 [[ -f "$WAVE_CMD" ]] || { echo "FATAL: wave.sh not found at $WAVE_CMD" >&2; exit 1; }
+[[ -f "$RUNTIME_PATHS_LIB" ]] || { echo "FATAL: runtime-paths.sh not found at $RUNTIME_PATHS_LIB" >&2; exit 1; }
+source "$RUNTIME_PATHS_LIB"
+spine_runtime_resolve_paths
+RUNTIME_ROOT="$SPINE_RUNTIME_ROOT"
+EVIDENCE_ROOT="${SPINE_EVIDENCE_ROOT:-/Users/ronnyworks/code/.evidence/spine}"
 
 usage() {
   cat <<'EOF'
 ops dispatch - Local multi-lane dispatch bridge
 
 Subcommands:
-  local    Run bounded local research dispatch via wave/packet
+  local    Convenience wrapper that creates and runs a local multi-lane dispatch wave
 
 Usage:
   ops dispatch local --loop-id <LOOP_ID> --objective "<text>" \
@@ -49,6 +55,10 @@ Options:
   --evidence-dir <path>   Override evidence output directory
   --parallel              Execute lanes in parallel (default: serial)
   --dry-run               Show plan without executing
+
+Ownership:
+  ops dispatch local creates and owns the local wrapper wave lifecycle.
+  If you already created a wave manually, use `ops wave dispatch` instead.
 
 Example:
   ops dispatch local \
@@ -69,6 +79,30 @@ EOF
 }
 
 fail() { echo "ops dispatch: $*" >&2; exit 1; }
+
+fail_with_usage() {
+  local message="$1"
+  echo "ops dispatch: $message" >&2
+  echo >&2
+  usage >&2
+  exit 1
+}
+
+fail_stale_lane_flag() {
+  local bad_flag="$1"
+  fail_with_usage "unknown flag '$bad_flag'
+Hint: use repeated --lane \"<name>:<shell_command>\" entries, not lane-specific flags like --lane-a/--lane-b.
+Example:
+  ops dispatch local --loop-id LOOP-EXAMPLE --objective \"demo\" --lane \"a:echo hi\" --lane \"b:echo bye\""
+}
+
+fail_existing_wave_id() {
+  local wave_id="$1"
+  fail_with_usage "wave '$wave_id' already exists
+Hint: ops dispatch local is the convenience wrapper that creates and runs the local dispatch wave.
+  Omit --wave-id to auto-create a new wrapper wave.
+  If you already created the wave manually, use: ops wave dispatch $wave_id --lane <lane> --task \"...\""
+}
 
 SUBCMD="${1:-}"
 shift || true
@@ -91,6 +125,7 @@ LANES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -h|--help) usage; exit 0 ;;
     --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
     --objective) OBJECTIVE="${2:-}"; shift 2 ;;
     --wave-id) WAVE_ID="${2:-}"; shift 2 ;;
@@ -99,6 +134,7 @@ while [[ $# -gt 0 ]]; do
     --parallel) PARALLEL=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --) shift; break ;;
+    --lane-*) fail_stale_lane_flag "$1" ;;
     -*) fail "unknown flag '$1'" ;;
     *) shift ;;
   esac
@@ -114,10 +150,14 @@ if [[ -z "$WAVE_ID" ]]; then
   WAVE_ID="WAVE-LOCAL-$(TZ=UTC date '+%Y%m%d-%H%M%S' 2>/dev/null || date -u '+%Y%m%d-%H%M%S')"
 fi
 
+if [[ -f "$RUNTIME_ROOT/waves/$WAVE_ID/state.json" ]]; then
+  fail_existing_wave_id "$WAVE_ID"
+fi
+
 # ── Evidence directory ────────────────────────────────────────────────────
 
 if [[ -z "$EVIDENCE_DIR" ]]; then
-  EVIDENCE_DIR="/Users/ronnyworks/code/.evidence/spine/sessions/$WAVE_ID"
+  EVIDENCE_DIR="$EVIDENCE_ROOT/sessions/$WAVE_ID"
 fi
 mkdir -p "$EVIDENCE_DIR"
 
