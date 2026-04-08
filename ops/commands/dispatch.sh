@@ -263,6 +263,12 @@ _build_result_summary() {
   fi
 }
 
+# Helper: parse dispatch ID from wave.sh output
+_parse_dispatch_id() {
+  local dispatch_output="${1:-}"
+  echo "$dispatch_output" | (grep -o 'Dispatch ID: D[0-9]*' || true) | head -1 | sed 's/Dispatch ID: //'
+}
+
 # Helper: write evidence file for a lane
 _write_lane_evidence() {
   local local_name="$1"
@@ -278,6 +284,63 @@ _write_lane_evidence() {
     echo "---"
     cat
   } > "$lane_evidence"
+}
+
+_prepare_local_wrapper_closeout() {
+  local cleanup_ref="$EVIDENCE_DIR/local-wrapper-cleanup.md"
+  local closeout_ref="$EVIDENCE_DIR/local-wrapper-closeout.md"
+  local verify_output=""
+  local verify_run_key=""
+  local generated_at
+  generated_at="$(TZ=UTC date '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+  verify_output="$("$SPINE_REPO/bin/ops" cap run verify.engine.run 2>&1)" || {
+    printf '%s\n' "$verify_output" >&2
+    fail "local wrapper closeout verify failed for wave '$WAVE_ID'"
+  }
+  verify_run_key="$(printf '%s\n' "$verify_output" | sed -n 's/^Run Key:[[:space:]]*//p' | tail -n 1)"
+  [[ -n "$verify_run_key" ]] || fail "could not parse verify run key for wrapper wave '$WAVE_ID'"
+
+  cat > "$cleanup_ref" <<EOF
+# Local Wrapper Cleanup
+
+- wave_id: $WAVE_ID
+- generated_at_utc: $generated_at
+- mode: local_dispatch_wrapper
+- evidence_dir: $EVIDENCE_DIR
+- lane_count: ${#LANE_NAMES[@]}
+- cleanup_status: no transient wrapper residue beyond lane evidence files under this evidence directory
+EOF
+
+  cat > "$closeout_ref" <<EOF
+# Local Wrapper Closeout
+
+- wave_id: $WAVE_ID
+- generated_at_utc: $generated_at
+- objective: $OBJECTIVE
+- loop_id: $LOOP_ID
+- verify_run_key: $verify_run_key
+- closeout_status: wrapper dispatch bookkeeping complete
+- cleanup_ref: $cleanup_ref
+EOF
+
+  local dispatch_output close_dispatch_id
+  dispatch_output="$(bash "$WAVE_CMD" dispatch "$WAVE_ID" \
+    --lane control \
+    --task "[local-dispatch:closeout] finalize wrapper wave close readiness" \
+    --input-refs "verify_ref=$verify_run_key" \
+    --output-refs "verify_ref=$verify_run_key,cleanup_ref=$cleanup_ref,closeout_ref=$closeout_ref")"
+  echo "$dispatch_output"
+
+  close_dispatch_id="$(_parse_dispatch_id "$dispatch_output")"
+  [[ -n "$close_dispatch_id" ]] || fail "could not parse closeout dispatch ID for wrapper wave '$WAVE_ID'"
+
+  bash "$WAVE_CMD" ack "$WAVE_ID" \
+    --dispatch "$close_dispatch_id" \
+    --result "OK wrapper closeout prepared. verify_ref=$verify_run_key cleanup_ref=$cleanup_ref closeout_ref=$closeout_ref"
+  echo ""
+
+  bash "$WAVE_CMD" collect "$WAVE_ID"
 }
 
 ANY_FAILED=0
@@ -398,6 +461,12 @@ fi
 echo "── collect ─────────────────────────────────────────────────────────"
 bash "$WAVE_CMD" collect "$WAVE_ID"
 echo ""
+
+if [[ "$ANY_FAILED" -eq 0 ]]; then
+  echo "── closeout prep ───────────────────────────────────────────────────"
+  _prepare_local_wrapper_closeout
+  echo ""
+fi
 
 echo "════════════════════════════════════════════════════════════════════════"
 echo "  LOCAL DISPATCH COMPLETE: $WAVE_ID"
