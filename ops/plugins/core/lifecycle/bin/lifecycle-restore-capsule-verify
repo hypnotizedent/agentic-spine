@@ -15,7 +15,7 @@ source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
 
 REGISTRY="$ROOT/ops/bindings/service.data.lifecycle.registry.yaml"
-BACKUP_INV="$ROOT/ops/bindings/backup.inventory.yaml"
+BACKUP_INV="$ROOT/ops/bindings/domains/backup/backup.inventory.yaml"
 
 if [[ ! -f "$REGISTRY" ]]; then
   echo "ERROR: lifecycle registry not found at $REGISTRY"
@@ -59,6 +59,9 @@ services = registry.get("services", {})
 targets = backup_inv.get("targets", [])
 backup_policy = backup_inv.get("backup_policy", {})
 derived = backup_policy.get("derived_assignments", {}) if backup_policy else {}
+
+def target_name(target):
+    return str(target.get("name") or target.get("target_id") or "").strip()
 
 # Build lookup: hostname -> list of backup targets
 targets_by_host = {}
@@ -106,7 +109,7 @@ for svc_id, svc in services.items():
     for bt in backup_targets:
         matched = False
         for t in targets:
-            if t.get("target_id", "") == bt:
+            if target_name(t) == bt:
                 matched = True
                 status = t.get("status", "unknown")
                 if status in ("tombstoned", "disabled", "retired"):
@@ -173,7 +176,7 @@ if decom_capsules:
         if capsule_targets:
             for ct in capsule_targets:
                 status = ct.get("status", "unknown")
-                target_id = ct.get("target_id", "unknown")
+                target_id = target_name(ct) or "unknown"
                 print(f"  OK: VM {vm_id} ({hostname}) — capsule target {target_id} (status={status})")
                 verified.append({
                     "service": f"decom-vm-{vm_id}",
