@@ -7,27 +7,23 @@ set -euo pipefail
 #   - allowed layer values are exactly the three elected values
 #   - no capability uses 'mixed' as a layer value
 #   - all elected domain=none residue capabilities carry a layer field
-#   - capability_map.yaml mirrors layer for capabilities that have it in authority
 #
 # Exit: 0 = PASS, 1 = FAIL
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CAP_FILE="$ROOT/ops/capabilities.yaml"
-MAP_FILE="$ROOT/ops/bindings/capability_map.yaml"
 
 fail() { echo "D426 FAIL: $*" >&2; exit 1; }
 
 [[ -f "$CAP_FILE" ]] || fail "missing: $CAP_FILE"
-[[ -f "$MAP_FILE" ]] || fail "missing: $MAP_FILE"
 command -v python3 >/dev/null 2>&1 || fail "required tool missing: python3"
 
-python3 - "$CAP_FILE" "$MAP_FILE" <<'PY'
+python3 - "$CAP_FILE" <<'PY'
 import json
 import subprocess
 import sys
 
 cap_file = sys.argv[1]
-map_file = sys.argv[2]
 
 ALLOWED_LAYERS = {"L1_engine", "L2_shared_infrastructure", "L3_product_runtime"}
 
@@ -51,7 +47,6 @@ def load_yaml(path: str) -> dict:
 
 
 auth = load_yaml(cap_file)
-proj = load_yaml(map_file)
 
 # 1. layer is declared in schema optional_fields
 schema = auth.get("schema", {})
@@ -65,7 +60,6 @@ if layer_enum != ALLOWED_LAYERS:
     fail(f"layer enum mismatch: expected {sorted(ALLOWED_LAYERS)}, got {sorted(layer_enum)}")
 
 caps = auth.get("capabilities", {})
-proj_caps = proj.get("capabilities", {})
 
 # 3. no capability uses 'mixed'
 mixed = [k for k, v in caps.items() if v.get("layer") == "mixed"]
@@ -89,18 +83,6 @@ if invalid_layer:
 leakage = [k for k, v in caps.items() if v.get("domain") != "none" and "layer" in v]
 if leakage:
     fail(f"{len(leakage)} non-domain-none capabilities have layer (boundary violation): {sorted(leakage)[:5]}")
-
-# 6. projection parity: capability_map.yaml mirrors layer for caps that have it
-parity_errors = []
-for k, v in caps.items():
-    auth_layer = v.get("layer")
-    proj_entry = proj_caps.get(k, {})
-    proj_layer = proj_entry.get("layer")
-    if auth_layer != proj_layer:
-        parity_errors.append(k)
-
-if parity_errors:
-    fail(f"{len(parity_errors)} layer parity mismatches between authority and projection: {sorted(parity_errors)[:5]}")
 
 from collections import Counter
 dist = Counter(v.get("layer") for v in none_caps.values())

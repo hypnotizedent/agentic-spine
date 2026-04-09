@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
 CAPABILITIES="$ROOT/ops/capabilities.yaml"
-CAPABILITY_MAP="$ROOT/ops/bindings/capability_map.yaml"
 
 usage() {
   cat <<'USAGE'
@@ -33,9 +32,7 @@ fail() {
 
 command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
 [[ -f "$CAPABILITIES" ]] || fail "missing capabilities authority: $CAPABILITIES"
-[[ -f "$CAPABILITY_MAP" ]] || fail "missing capability map: $CAPABILITY_MAP"
 yq e '.' "$CAPABILITIES" >/dev/null 2>&1 || fail "invalid YAML: $CAPABILITIES"
-yq e '.' "$CAPABILITY_MAP" >/dev/null 2>&1 || fail "invalid YAML: $CAPABILITY_MAP"
 
 CAPABILITY=""
 MUTATION="capability"
@@ -60,10 +57,10 @@ infer_capability_from_staged() {
   staged_files="$(git -C "$ROOT" diff --cached --name-only 2>/dev/null || true)"
   local has_registry=0
   local has_topology=0
-  if echo "$staged_files" | grep -q "ops/bindings/gate\\.registry\\.yaml"; then
+  if echo "$staged_files" | grep -q "ops/bindings/gate\.registry\.yaml"; then
     has_registry=1
   fi
-  if echo "$staged_files" | grep -q "ops/bindings/gate\\.execution\\.topology\\.yaml"; then
+  if echo "$staged_files" | grep -q "ops/bindings/gate\.execution\.topology\.yaml"; then
     has_topology=1
   fi
 
@@ -78,27 +75,11 @@ infer_capability_from_staged() {
   echo ""
 }
 
-script_allowed_for_d128() {
-  case "$1" in
-    gate-registry-add|gate-registry-update|gate-topology-assign|gate-topology-validate|domain-onboard-new|projection-reconcile)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
 capability_allowed() {
   local capability="$1"
   local cap_type=""
   cap_type="$(yq e -r ".capabilities.\"$capability\" | type" "$CAPABILITIES" 2>/dev/null || true)"
   [[ "$cap_type" == "!!map" ]] || return 1
-
-  local map_type=""
-  map_type="$(yq e -r ".capabilities.\"$capability\" | type" "$CAPABILITY_MAP" 2>/dev/null || true)"
-  [[ "$map_type" == "!!map" ]] || return 1
-
   return 0
 }
 
@@ -112,7 +93,7 @@ fi
 [[ -n "$RUN_KEY" ]] || fail "--run-key requires a value"
 
 if ! capability_allowed "$CAPABILITY"; then
-  fail "capability '$CAPABILITY' is not allowed by live routing/capability authorities"
+  fail "capability '$CAPABILITY' is not allowed by capabilities authority"
 fi
 
 if [[ "$JSON_MODE" == "true" ]]; then

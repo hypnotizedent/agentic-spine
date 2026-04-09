@@ -615,13 +615,6 @@ if [[ -x "$SP/surfaces/verify/d63-capabilities-metadata-lock.sh" ]]; then
 else
   warn "capabilities metadata lock gate not present"
 fi
-CURRENT_GATE="D67"
-echo -n "D67 capability map lock... "
-if [[ -x "$SP/surfaces/verify/d67-capability-map-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d67-capability-map-lock.sh"
-else
-  warn "capability map lock not present"
-fi
 CURRENT_GATE="D69"
 echo -n "D69 VM creation governance lock... "
 if [[ -x "$SP/surfaces/verify/d69-vm-creation-governance-lock.sh" ]]; then

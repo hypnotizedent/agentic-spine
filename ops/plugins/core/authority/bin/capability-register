@@ -3,14 +3,12 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
 CAP_FILE="$ROOT/ops/capabilities.yaml"
-MAP_FILE="$ROOT/ops/bindings/capability_map.yaml"
 MANIFEST_FILE="$ROOT/ops/plugins/MANIFEST.yaml"
 source "$ROOT/ops/lib/git-lock.sh"
 source "$ROOT/ops/lib/governed-write-transaction.sh"
 
 LOCK_HELD=0
 tmp_cap_entry=""
-tmp_map_entry=""
 
 CAP_ID=""
 DESCRIPTION=""
@@ -45,7 +43,6 @@ Options:
   --outputs <csv>                   Default: stdout
   --tags <csv>                      Optional
   --arg-protocol <passthrough|argparse|positional|none>
-  --note <text>                     Optional capability_map note
   --dry-run
   --lane-safe                       Queue shared-authority mutation instead of mutating files
   --loop-id <LOOP-ID>               Required with --lane-safe when SPINE_LOOP_ID is not set
@@ -62,7 +59,7 @@ cleanup() {
     release_git_lock || true
   fi
   spine_tx_cleanup
-  rm -f "${tmp_cap_entry:-}" "${tmp_map_entry:-}"
+  rm -f "${tmp_cap_entry:-}"
   return 0
 }
 
@@ -94,7 +91,6 @@ done
 
 command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
 [[ -f "$CAP_FILE" ]] || fail "missing capabilities registry: $CAP_FILE"
-[[ -f "$MAP_FILE" ]] || fail "missing capability map: $MAP_FILE"
 [[ -f "$MANIFEST_FILE" ]] || fail "missing plugin manifest: $MANIFEST_FILE"
 
 [[ -n "$CAP_ID" ]] || fail "--id is required"
@@ -168,7 +164,6 @@ if ! yq e -e ".plugins[] | select(.name == \"$PLUGIN\")" "$MANIFEST_FILE" >/dev/
 fi
 
 tmp_cap_entry="$(mktemp)"
-tmp_map_entry="$(mktemp)"
 trap cleanup EXIT INT TERM
 
 {
@@ -199,23 +194,11 @@ trap cleanup EXIT INT TERM
   fi
 } > "$tmp_cap_entry"
 
-{
-  echo "plugin: $PLUGIN"
-  echo "script: $SCRIPT"
-  echo "safety: $SAFETY"
-  if [[ -n "$ARG_PROTOCOL" ]]; then
-    echo "arg_protocol: $ARG_PROTOCOL"
-  fi
-  if [[ -n "$NOTE" ]]; then
-    echo "note: \"${NOTE//\"/\\\"}\""
-  fi
-} > "$tmp_map_entry"
-
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "capability.register"
   echo "status: DRY_RUN"
   echo "would_add: $CAP_ID"
-  echo "files: ops/capabilities.yaml, ops/bindings/capability_map.yaml, ops/plugins/MANIFEST.yaml"
+  echo "files: ops/capabilities.yaml, ops/plugins/MANIFEST.yaml"
   exit 0
 fi
 
@@ -226,30 +209,25 @@ if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
 fi
 spine_tx_init
 spine_tx_track "$CAP_FILE"
-spine_tx_track "$MAP_FILE"
 spine_tx_track "$MANIFEST_FILE"
 
 if ! {
   yq e -i ".capabilities.\"$CAP_ID\" = load(\"$tmp_cap_entry\")" "$CAP_FILE"
-  yq e -i ".capabilities.\"$CAP_ID\" = load(\"$tmp_map_entry\")" "$MAP_FILE"
   yq e -i "(.plugins[] | select(.name == \"$PLUGIN\") | .scripts) |= ((. + [\"bin/$SCRIPT\"]) | unique)" "$MANIFEST_FILE"
   yq e -i "(.plugins[] | select(.name == \"$PLUGIN\") | .capabilities) |= ((. + [\"$CAP_ID\"]) | unique)" "$MANIFEST_FILE"
   yq e '.' "$CAP_FILE" >/dev/null
-  yq e '.' "$MAP_FILE" >/dev/null
   yq e '.' "$MANIFEST_FILE" >/dev/null
 }; then
   spine_tx_rollback
-  fail "transaction rolled back (capability triad update failed)"
+  fail "transaction rolled back (capability update failed)"
 fi
 
 count_cap="$(yq e '.capabilities | length' "$CAP_FILE")"
-count_map="$(yq e '.capabilities | length' "$MAP_FILE")"
 
 echo "capability.register"
 echo "status: PASS"
 echo "capability: $CAP_ID"
 echo "plugin: $PLUGIN"
-echo "counts: capabilities=$count_cap capability_map=$count_map"
+echo "counts: capabilities=$count_cap"
 echo "updated: ops/capabilities.yaml"
-echo "updated: ops/bindings/capability_map.yaml"
 echo "updated: ops/plugins/MANIFEST.yaml"
