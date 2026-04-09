@@ -404,6 +404,7 @@ def collect_wave_state(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], di
             "state_path": str(state_path),
             "controller_only_candidate": len(payload.get("dispatches", []) or []) == 0,
             "controller_precheck_path": str(state_path.parent / "controller-close-precheck.json"),
+            "wave_kind": str(payload.get("wave_kind") or packet.get("wave_kind") or "production").strip(),
         }
 
         if row["status"] not in ("closed", "superseded"):
@@ -718,7 +719,10 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
     orphaned_gaps = gap_state.get("orphaned", []) if gap_state.get("status") == "ok" else []
     handoffs = collect_handoffs(paths)
     worktrees = collect_worktree_state(paths)
-    active_waves, override_signals = collect_wave_state(paths)
+    all_active_waves, override_signals = collect_wave_state(paths)
+    # Separate synthetic/test waves from production waves for accounting
+    active_waves = [w for w in all_active_waves if w.get("wave_kind", "production") != "synthetic"]
+    synthetic_waves = [w for w in all_active_waves if w.get("wave_kind", "production") == "synthetic"]
     orphaned_waves: list[dict[str, Any]] = []
     for wave in active_waves:
         parent_loop = wave.get("loop_id", "")
@@ -753,6 +757,7 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             "active_handoffs": len(handoffs),
             "blocked_worktrees": len(worktrees.get("blocked", [])),
             "active_waves": len(active_waves),
+            "synthetic_waves": len(synthetic_waves),
             "orphaned_waves": len(orphaned_waves),
             "recent_force_closes": len(override_signals.get("force_close", [])),
             "recent_dod_overrides": len(override_signals.get("dod_override", [])),
@@ -778,7 +783,7 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             "summary": worktrees.get("summary", {}),
             "blocked": worktrees.get("blocked", []),
         },
-        "waves": {"active": active_waves, "orphaned": orphaned_waves},
+        "waves": {"active": active_waves, "synthetic": synthetic_waves, "orphaned": orphaned_waves},
         "override_signals": {
             "recent_window_hours": RECENT_SIGNAL_WINDOW_HOURS,
             "force_close": override_signals.get("force_close", []),
@@ -838,6 +843,9 @@ def main() -> int:
     print(f"orphaned_gaps: {orphaned_gaps}")
     print(f"blocked_worktrees: {summary.get('blocked_worktrees', 0)}")
     print(f"active_waves: {summary.get('active_waves', 0)}")
+    synthetic_count = summary.get('synthetic_waves', 0)
+    if synthetic_count:
+        print(f"synthetic_waves: {synthetic_count}")
     print(f"orphaned_waves: {summary.get('orphaned_waves', 0)}")
     print(f"recent_force_closes: {summary.get('recent_force_closes', 0)}")
     print(f"recent_dod_overrides: {summary.get('recent_dod_overrides', 0)}")

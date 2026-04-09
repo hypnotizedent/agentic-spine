@@ -215,6 +215,7 @@ fi
 set +e
 if [[ -z "$_synthetic_precondition_blocker" ]]; then
     _dispatch_output="$(bash "$DISPATCH_CMD" local \
+        --synthetic \
         --loop-id "$SYNTHETIC_LOOP_ID" \
         --objective "synthetic engine honesty proof" \
         --wave-id "$SYNTHETIC_WAVE_ID" \
@@ -304,6 +305,10 @@ else
     warn_check H7 "honest close (synthetic wave closes without force/DoD)" bash -c "
         wave_state='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/state.json'
         [[ -f \"\$wave_state\" ]] || { echo 'wave state.json missing — cannot test close'; exit 1; }
+
+        # Verify wave_kind is explicitly 'synthetic' in state (first-class contract)
+        wave_kind=\"\$(jq -r '.wave_kind // \"production\"' \"\$wave_state\" 2>/dev/null)\"
+        [[ \"\$wave_kind\" == 'synthetic' ]] || { echo \"wave_kind not synthetic: \$wave_kind\"; exit 1; }
 
         current_status=\"\$(jq -r '.status' \"\$wave_state\" 2>/dev/null)\"
         if [[ \"\$current_status\" == 'closed' ]]; then

@@ -815,6 +815,7 @@ cmd_start() {
   local default_next_role="worker"
   local current_role_explicit=0
   local next_role_explicit=0
+  local wave_kind="production"
   load_runtime_role_control
 
   while [[ $# -gt 0 ]]; do
@@ -832,6 +833,7 @@ cmd_start() {
       --next-role) default_next_role="${2:-}"; next_role_explicit=1; shift 2 ;;
       --worktree) worktree_mode="${2:-}"; shift 2 ;;
       --repo) workspace_repo="${2:-}"; shift 2 ;;
+      --synthetic) wave_kind="synthetic"; shift ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
       *) wave_id="$1"; shift ;;
     esac
@@ -1052,7 +1054,7 @@ print(json.dumps(items))
 PYCLAIMS
 )"
 
-  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" "$packet_allowed_roles" "$PATH_CLAIMS_FILE" "$PATH_CLAIMS_TTL_MINUTES" "$PATH_CLAIMS_NON_OVERLAP" <<'PYSTART'
+  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" "$packet_allowed_roles" "$PATH_CLAIMS_FILE" "$PATH_CLAIMS_TTL_MINUTES" "$PATH_CLAIMS_NON_OVERLAP" "$wave_kind" <<'PYSTART'
 import json, sys
 import os
 import fcntl
@@ -1087,11 +1089,13 @@ try:
 except Exception:
     path_claims_ttl_minutes = 180
 path_claims_non_overlap = (sys.argv[23].lower() == "true") if len(sys.argv) > 23 else True
+wave_kind = (sys.argv[24].strip() if len(sys.argv) > 24 and sys.argv[24].strip() else "production")
 single_terminal_mode = str(owner_terminal or "").strip().startswith("SPINE-CONTROL-")
 
 packet = {
     "schema_version": "1.0",
     "wave_id": wave_id,
+    "wave_kind": wave_kind,
     "loop_id": loop_id,
     "owner_terminal": owner_terminal,
     "current_role": default_role,
@@ -1280,6 +1284,7 @@ if path_claims_lock_fd is not None:
 
 state = {
     "wave_id": wave_id,
+    "wave_kind": wave_kind,
     "status": "active",
     "lifecycle_state": "active",
     "objective": objective,
@@ -1315,6 +1320,8 @@ print(f"Wave '{wave_id}' created.")
 if objective:
     print(f"  Objective: {objective}")
 print(f"  Status: active")
+if wave_kind != "production":
+    print(f"  Kind: {wave_kind}")
 print(f"  Packet loop_id: {packet['loop_id']}")
 print(f"  Packet role: {packet['current_role']} -> {packet['next_role']}")
 print(f"  Packet deadline: {packet['deadline_utc']}")
@@ -3390,20 +3397,26 @@ try:
         print(f"Wave '{state['wave_id']}' is already closed.")
         sys.exit(0)
 
+    # ── Synthetic wave fast-close ──
+    _wave_kind = str(state.get("wave_kind") or "production").strip()
+    _is_synthetic = _wave_kind == "synthetic"
+
     # ── Contract enforcement (wave.lifecycle.yaml) ──
     # Close requires: all watcher checks done/failed, preflight run at least once
+    # Synthetic/test waves skip preflight and watcher requirements.
     checks = state.get("watcher_checks", [])
     pf = state.get("preflight")
     contract_violations = []
 
-    running = [c for c in checks if c["status"] in ("queued", "running")]
-    if running:
-        statuses = "/".join(sorted(set(c["status"] for c in running)))
-        contract_violations.append(f"{len(running)} watcher check(s) still {statuses}")
+    if not _is_synthetic:
+        running = [c for c in checks if c["status"] in ("queued", "running")]
+        if running:
+            statuses = "/".join(sorted(set(c["status"] for c in running)))
+            contract_violations.append(f"{len(running)} watcher check(s) still {statuses}")
 
-    # Preflight is always required, not just when watcher checks exist
-    if not pf:
-        contract_violations.append("Preflight has not been run (required by wave.lifecycle contract)")
+        # Preflight is always required, not just when watcher checks exist
+        if not pf:
+            contract_violations.append("Preflight has not been run (required by wave.lifecycle contract)")
 
     dispatches = state.get("dispatches", []) if isinstance(state.get("dispatches"), list) else []
     pending_dispatches = [
@@ -5180,6 +5193,10 @@ try:
         print(f"Wave '{state['wave_id']}' is already closed.")
         sys.exit(0)
 
+    # ── Synthetic wave fast-close ──
+    _wave_kind = str(state.get("wave_kind") or "production").strip()
+    _is_synthetic = _wave_kind == "synthetic"
+
     # ── Contract enforcement (enhanced) ──
     checks = state.get("watcher_checks", [])
     pf = state.get("preflight")
@@ -5295,14 +5312,15 @@ try:
             )
             handle.write("\n")
 
-    # 1. Watcher checks must be done/failed
-    running = [c for c in checks if c["status"] in ("queued", "running")]
-    if running:
-        statuses = "/".join(sorted(set(c["status"] for c in running)))
-        infra_violations.append(f"{len(running)} watcher check(s) still {statuses}")
+    # 1. Watcher checks must be done/failed (synthetic waves skip)
+    if not _is_synthetic:
+        running = [c for c in checks if c["status"] in ("queued", "running")]
+        if running:
+            statuses = "/".join(sorted(set(c["status"] for c in running)))
+            infra_violations.append(f"{len(running)} watcher check(s) still {statuses}")
 
-    # 2. Preflight required
-    if not pf and not controller_context["eligible"]:
+    # 2. Preflight required (synthetic waves skip)
+    if not _is_synthetic and not pf and not controller_context["eligible"]:
         infra_violations.append("Preflight has not been run (required by wave.lifecycle contract)")
 
     # 3. Pending dispatch force-close guard.
@@ -5640,6 +5658,32 @@ try:
     if controller_only and not controller_context["eligible"]:
         infra_violations.extend(controller_context.get("controller_infra_violations", []))
         dod_violations.extend(controller_context.get("controller_dod_violations", []))
+
+    # ── Synthetic wave fast-close: clear DoD/receipt/state-machine violations ──
+    # Synthetic waves still respect pending-dispatch guards (step 3) and packet
+    # presence (step 4), but skip heavyweight DoD evidence, receipt validation,
+    # state machine progression, and role-flow enforcement.
+    if _is_synthetic:
+        dod_violations.clear()
+        # Clear infra violations that are ceremony-only for synthetic waves
+        infra_violations = [
+            v for v in infra_violations
+            if not any(skip in v for skip in [
+                "state machine", "role flow blocked", "Preflight has not been run",
+                "watcher check", "receipt",
+            ])
+        ]
+        if "dod" not in state or not state.get("dod"):
+            state["dod"] = {
+                "verify_results": [],
+                "blocker_classification": ["none"],
+                "cleanup_proof": ["synthetic_fast_close"],
+                "linkage": {
+                    "packet_loop_id": str(packet.get("loop_id", "")).strip(),
+                    "valid_receipts": 0,
+                    "errors": [],
+                },
+            }
 
     # ── Gate decision ──
     infra_blocked = bool(infra_violations) and not force

@@ -121,6 +121,7 @@ WAVE_ID=""
 EVIDENCE_DIR=""
 DRY_RUN=0
 PARALLEL=0
+SYNTHETIC=0
 LANES=()
 
 while [[ $# -gt 0 ]]; do
@@ -132,6 +133,7 @@ while [[ $# -gt 0 ]]; do
     --lane) LANES+=("${2:-}"); shift 2 ;;
     --evidence-dir) EVIDENCE_DIR="${2:-}"; shift 2 ;;
     --parallel) PARALLEL=1; shift ;;
+    --synthetic) SYNTHETIC=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --) shift; break ;;
     --lane-*) fail_stale_lane_flag "$1" ;;
@@ -217,10 +219,11 @@ echo ""
 # ── Step 1: Wave start ───────────────────────────────────────────────────
 
 echo "── wave start ──────────────────────────────────────────────────────"
-bash "$WAVE_CMD" start "$WAVE_ID" \
-  --loop-id "$LOOP_ID" \
-  --objective "$OBJECTIVE" \
-  --worktree off
+WAVE_START_FLAGS=(--loop-id "$LOOP_ID" --objective "$OBJECTIVE" --worktree off)
+if [[ "$SYNTHETIC" -eq 1 ]]; then
+  WAVE_START_FLAGS+=(--synthetic)
+fi
+bash "$WAVE_CMD" start "$WAVE_ID" "${WAVE_START_FLAGS[@]}"
 echo ""
 
 # ── Step 2: Dispatch lanes and capture real dispatch IDs ─────────────────
@@ -463,9 +466,12 @@ echo "── collect ───────────────────�
 bash "$WAVE_CMD" collect "$WAVE_ID"
 echo ""
 
-if [[ "$ANY_FAILED" -eq 0 ]]; then
+if [[ "$ANY_FAILED" -eq 0 && "$SYNTHETIC" -eq 0 ]]; then
   echo "── closeout prep ───────────────────────────────────────────────────"
   _prepare_local_wrapper_closeout
+  echo ""
+elif [[ "$ANY_FAILED" -eq 0 && "$SYNTHETIC" -eq 1 ]]; then
+  echo "── synthetic wave: skipping heavyweight closeout prep ──────────────"
   echo ""
 fi
 
