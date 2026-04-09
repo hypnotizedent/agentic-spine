@@ -224,7 +224,14 @@ echo ""
 # ── Step 1: Wave start ───────────────────────────────────────────────────
 
 echo "── wave start ──────────────────────────────────────────────────────"
-WAVE_START_FLAGS=(--loop-id "$LOOP_ID" --objective "$OBJECTIVE" --worktree off)
+WORKTREE_MODE="off"
+if [[ "$SYNTHETIC" -eq 1 ]]; then
+  # Synthetic honesty probes should stay runnable while a real engineering
+  # wave holds the primary checkout claim. Isolate them in an auto worktree
+  # instead of degrading honesty to a claim-contention warning.
+  WORKTREE_MODE="auto"
+fi
+WAVE_START_FLAGS=(--loop-id "$LOOP_ID" --objective "$OBJECTIVE" --worktree "$WORKTREE_MODE")
 if [[ "$SYNTHETIC" -eq 1 ]]; then
   WAVE_START_FLAGS+=(--synthetic)
 elif [[ -n "$WAVE_KIND" ]]; then

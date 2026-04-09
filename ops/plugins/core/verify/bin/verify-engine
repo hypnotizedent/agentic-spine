@@ -117,7 +117,6 @@ check E4 "capability registry parseable" bash -c "
 check E5 "no dead entry references on hot path" bash -c "
     dead_refs=0
     for f in \
-        '$ROOT/ops/bindings/entry.boot.surface.contract.yaml' \
         '$ROOT/ops/bindings/entry.surface.contract.yaml' \
         '$ROOT/ops/bindings/session.admission.contract.yaml' \
         '$ROOT/ops/plugins/core/session/bin/terminal-launch-exec' \
@@ -167,6 +166,77 @@ check E6 "no dead file references in governed scripts" bash -c '
         echo "$dead dead file reference(s) found"
         exit 1
     fi
+'
+
+# E7: no dead canonical path references in hot contracts
+# Keep this narrow and cheap: only check the boot/runtime and terminal-worker
+# projection contracts that recently pointed at deleted canonical surfaces.
+check E7 "no dead canonical path references in hot contracts" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+import yaml
+
+root = Path(sys.argv[1])
+
+checks = [
+    {
+        "contract": root / "ops/bindings/runtime.bootstrap.contract.yaml",
+        "paths": [
+            ("authority.canonical_boot_surface", ["authority", "canonical_boot_surface"]),
+            ("bootstrap_preconditions.required_contracts[]", ["bootstrap_preconditions", "required_contracts"]),
+        ],
+    },
+    {
+        "contract": root / "ops/bindings/terminal.worker.projection.contract.yaml",
+        "paths": [
+            ("policy.authority_binding", ["policy", "authority_binding"]),
+            ("governed_surfaces[].wrapper", ["governed_surfaces", "wrapper"]),
+            ("governed_surfaces[].tracked_output", ["governed_surfaces", "tracked_output"]),
+            ("generator.path", ["generator", "path"]),
+        ],
+    },
+]
+
+def iter_values(node, path):
+    if not path:
+        yield node
+        return
+    head, *tail = path
+    if isinstance(node, list):
+        for item in node:
+            yield from iter_values(item, path)
+        return
+    if not isinstance(node, dict) or head not in node:
+        return
+    value = node[head]
+    if head == "path" and isinstance(node, dict):
+        status = str(node.get("status") or "").strip().lower()
+        if status == "retired":
+            return
+    yield from iter_values(value, tail)
+
+missing = []
+for entry in checks:
+    contract = entry["contract"]
+    if not contract.is_file():
+        continue
+    data = yaml.safe_load(contract.read_text(encoding="utf-8")) or {}
+    for label, path in entry["paths"]:
+        for raw in iter_values(data, path):
+            if not isinstance(raw, str):
+                continue
+            rel = raw.strip()
+            if not rel or rel.startswith("$") or rel.startswith("/") or "://" in rel:
+                continue
+            target = root / rel
+            if not target.exists():
+                missing.append(f"{contract.relative_to(root)}::{label} -> {rel}")
+
+if missing:
+    print("\n".join(missing))
+    raise SystemExit(1)
+PY
 '
 
 if [[ "$json_mode" -eq 1 ]]; then

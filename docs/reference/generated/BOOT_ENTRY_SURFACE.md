@@ -1,30 +1,28 @@
 # BOOT ENTRY SURFACE (generated)
 authority_state: projection
-projection_of: docs/governance/SESSION_PROTOCOL.md
-source_contract: docs/governance/SESSION_PROTOCOL.md
-contract_updated: 2026-04-07
-startup_command_count: 2
-post_work_verify_count: 2
-release_certification_count: 1
+projection_of: ops/bindings/entry.boot.surface.contract.yaml
+source_contract: ops/bindings/entry.boot.surface.contract.yaml
+contract_updated: 2026-04-09
 
-## Mandatory Startup Block
+## Boot Model
 
-```bash
-cd ~/code/agentic-spine
-cat NORTH_STAR.md docs/governance/SPINE.md docs/governance/SESSION_PROTOCOL.md
-./bin/ops status --json
-./bin/ops verify --core-only
-./bin/ops cap list
-```
+- mode: injected
 
-## Post-Work Verify
+## Injection Surfaces
 
-```bash
-./bin/ops verify --core-only
-```
+- claude_code
+  - mechanism: hook
+  - path: .claude/hooks/session-entry-hook.sh
+  - trigger: UserPromptSubmit
+- codex
+  - mechanism: governed-attach
+  - path: ops/plugins/core/lifecycle/bin/session-v3-attach
+- opencode
+  - mechanism: governed-attach
+  - path: ops/plugins/core/lifecycle/bin/session-v3-attach
 
-## Release Certification
+## Pointer-Only Entry Surfaces
 
-```bash
-./bin/ops verify --core-only
-```
+- AGENTS.md
+- CLAUDE.md
+

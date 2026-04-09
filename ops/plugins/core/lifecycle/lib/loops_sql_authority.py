@@ -422,6 +422,34 @@ def repair_live_scope_residue(
         if isinstance(fm, dict):
             frontmatter_ok, frontmatter_reason = _validate_scope_frontmatter(fm, scope_path)
             if frontmatter_ok:
+                loop_id = str(fm.get("loop_id") or _scope_name_to_loop_id(scope_path)).strip()
+                db_loop = get_loop(conn, loop_id) if loop_id else None
+                db_status = str((db_loop or {}).get("status") or "").strip().lower()
+                if db_loop is not None and is_live_scope_status(db_status):
+                    continue
+
+                summary["detected"] += 1
+                archive_target = archive_dir / scope_path.name
+                if db_loop is None:
+                    archive_text = text
+                    classification = "archive_projection_missing_from_db"
+                    reason = "loop missing from shared_authority.db; removed from live projections"
+                else:
+                    archive_text = _render_preserved_body_scope(db_loop, text)
+                    classification = "archive_projection_non_live_db_status"
+                    reason = f"shared_authority.db status is {db_status or 'unknown'}, not live"
+                archive_target.write_text(archive_text, encoding="utf-8")
+                scope_path.unlink()
+                summary["repaired_archived"] += 1
+                summary["items"].append(
+                    {
+                        "file": scope_path.name,
+                        "loop_id": loop_id,
+                        "classification": classification,
+                        "reason": reason,
+                        "target_path": str(archive_target),
+                    }
+                )
                 continue
             summary["detected"] += 1
             quarantine_target = quarantine_dir / scope_path.name
