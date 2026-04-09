@@ -4895,6 +4895,13 @@ cmd_close_v2() {
 import json, sys, os, re, fcntl, subprocess
 from datetime import datetime, timezone
 
+# ── Add lifecycle lib to path for wave_close_validator ──
+_lifecycle_lib = os.path.join(os.path.abspath(sys.argv[4]), "ops", "plugins", "core", "lifecycle", "lib") if len(sys.argv) > 4 and sys.argv[4] else ""
+if _lifecycle_lib and os.path.isdir(_lifecycle_lib):
+    sys.path.insert(0, _lifecycle_lib)
+
+import wave_close_validator as wcv
+
 sf = sys.argv[1]
 sd = sys.argv[2]
 force = sys.argv[3] == "true"
@@ -4916,36 +4923,79 @@ lock_file = sf + ".lock"
 receipts_dir = os.path.join(sd, "receipts")
 controller_precheck_path = os.path.join(sd, "controller-close-precheck.json")
 
-run_key_patterns_text = [r"^(CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"]
-commit_ref_pattern = r"^[0-9a-f]{7,40}$"
-allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
-required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]
-state_field = "lifecycle_state"
-VERIFY_PASS_STATUSES = {"done", "pass", "passed", "ok", "healthy", "success"}
-state_transitions = {
-    "active": {"implemented"},
-    "implemented": {"validated"},
-    "validated": {"closed"},
-    "closed": set(),
-}
-close_aliases = {"close", "librarian"}
+# ── Build config from defaults + role-runtime contract overrides ──
+run_key_patterns_text = list(wcv.DEFAULT_RUN_KEY_PATTERNS)
+commit_ref_pattern = wcv.DEFAULT_COMMIT_REF_PATTERN
+allowed_blocker_classes = set(wcv.DEFAULT_ALLOWED_BLOCKER_CLASSES)
+required_evidence_fields = list(wcv.DEFAULT_REQUIRED_EVIDENCE_FIELDS)
+state_field = wcv.DEFAULT_STATE_FIELD
+state_transitions = dict(wcv.DEFAULT_STATE_TRANSITIONS)
+close_aliases = set(wcv.DEFAULT_CLOSE_ALIASES)
 
-def _compile_run_key_patterns(patterns_text):
-    compiled = []
-    for pattern_text in patterns_text:
-        try:
-            compiled.append(re.compile(str(pattern_text)))
-        except re.error as exc:
-            raise RuntimeError(f"invalid run key regex '{pattern_text}': {exc}")
-    if not compiled:
-        compiled = [re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")]
-    return compiled
+if role_runtime_contract and os.path.exists(role_runtime_contract):
+    try:
+        import yaml
+        contract = yaml.safe_load(open(role_runtime_contract, "r", encoding="utf-8")) or {}
+        evidence = contract.get("evidence") if isinstance(contract, dict) else {}
+        if isinstance(evidence, dict):
+            run_key_regexes = evidence.get("run_key_regexes")
+            if isinstance(run_key_regexes, list) and run_key_regexes:
+                parsed = [str(x).strip() for x in run_key_regexes if str(x).strip()]
+                if parsed:
+                    run_key_patterns_text = parsed
+            elif evidence.get("run_key_regex"):
+                run_key_patterns_text = [str(evidence.get("run_key_regex")).strip()]
+            commit_ref_pattern = str(evidence.get("commit_ref_regex", commit_ref_pattern))
+            blockers = evidence.get("blocker_classes")
+            if isinstance(blockers, list) and blockers:
+                allowed_blocker_classes = {str(x).strip() for x in blockers if str(x).strip()} or allowed_blocker_classes
+            required = evidence.get("required_ref_fields")
+            if isinstance(required, list) and required:
+                required_evidence_fields = [str(x).strip() for x in required if str(x).strip()] or required_evidence_fields
+        runtime_roles = contract.get("runtime_roles") if isinstance(contract, dict) else {}
+        if isinstance(runtime_roles, dict):
+            aliases = runtime_roles.get("close_role_aliases")
+            if isinstance(aliases, list) and aliases:
+                close_aliases = {str(x).strip() for x in aliases if str(x).strip()} or close_aliases
+        sm = contract.get("closeout_state_machine") if isinstance(contract, dict) else {}
+        if isinstance(sm, dict):
+            state_field = str(sm.get("state_field", state_field)).strip() or state_field
+            states = sm.get("states")
+            if isinstance(states, dict) and states:
+                parsed = {}
+                for st, meta in states.items():
+                    if not isinstance(meta, dict):
+                        continue
+                    parsed[str(st).strip()] = {
+                        str(x).strip() for x in (meta.get("transitions") or []) if str(x).strip()
+                    }
+                if parsed:
+                    state_transitions = parsed
+    except Exception:
+        pass
 
-run_key_patterns = _compile_run_key_patterns(run_key_patterns_text)
+try:
+    config = wcv.CloseConfig(
+        run_key_patterns_text=run_key_patterns_text,
+        commit_ref_pattern=commit_ref_pattern,
+        allowed_blocker_classes=allowed_blocker_classes,
+        required_evidence_fields=required_evidence_fields,
+        state_field=state_field,
+        state_transitions=state_transitions,
+        close_aliases=close_aliases,
+        allowed_lanes=allowed_lanes,
+    )
+except RuntimeError as exc:
+    print(f"FAIL: {exc}")
+    sys.exit(1)
 
-def _run_key_matches(value):
-    return any(pat.match(value) for pat in run_key_patterns)
+# ── Disposition validation (via module) ──
+disp_err = wcv.validate_disposition(disposition, allowed_dispositions)
+if disp_err:
+    print(disp_err)
+    sys.exit(1)
 
+# ── Side-effectful helpers (stay inline: subprocess, filesystem) ──
 
 def _resolve_ref_path(value: str) -> str:
     text = str(value or "").strip()
@@ -4998,7 +5048,7 @@ def _validate_verify_receipt(path_value: str):
     receipt_exec = _load_json(exec_path)
     if str(receipt_exec.get("task_id", "")).strip() != "verify.run":
         return None, f"controller-only verify receipt is not verify.run: {resolved}"
-    if str(receipt_exec.get("status", "")).strip().lower() not in VERIFY_PASS_STATUSES:
+    if str(receipt_exec.get("status", "")).strip().lower() not in wcv.VERIFY_PASS_STATUSES:
         return None, f"controller-only verify receipt not done: {resolved}"
     if not os.path.exists(output_path):
         return None, f"controller-only verify output missing: {output_path}"
@@ -5021,7 +5071,7 @@ def _validate_verify_receipt(path_value: str):
     run_key = ""
     for value in run_keys:
         candidate = str(value or "").strip()
-        if candidate and _run_key_matches(candidate):
+        if candidate and config.matches_run_key(candidate):
             run_key = candidate
             break
     if not run_key:
@@ -5128,61 +5178,17 @@ def _worktree_cleanup_blockers(wave_id: str, workspace: dict):
         "raw_summary": payload.get("summary", {}) if isinstance(payload, dict) else {},
     }
 
-if role_runtime_contract and os.path.exists(role_runtime_contract):
-    try:
-        import yaml
-        contract = yaml.safe_load(open(role_runtime_contract, "r", encoding="utf-8")) or {}
-        evidence = contract.get("evidence") if isinstance(contract, dict) else {}
-        if isinstance(evidence, dict):
-            run_key_regexes = evidence.get("run_key_regexes")
-            if isinstance(run_key_regexes, list) and run_key_regexes:
-                parsed = [str(x).strip() for x in run_key_regexes if str(x).strip()]
-                if parsed:
-                    run_key_patterns_text = parsed
-            elif evidence.get("run_key_regex"):
-                run_key_patterns_text = [str(evidence.get("run_key_regex")).strip()]
-            commit_ref_pattern = str(evidence.get("commit_ref_regex", commit_ref_pattern))
-            blockers = evidence.get("blocker_classes")
-            if isinstance(blockers, list) and blockers:
-                allowed_blocker_classes = {str(x).strip() for x in blockers if str(x).strip()} or allowed_blocker_classes
-            required = evidence.get("required_ref_fields")
-            if isinstance(required, list) and required:
-                required_evidence_fields = [str(x).strip() for x in required if str(x).strip()] or required_evidence_fields
-        runtime_roles = contract.get("runtime_roles") if isinstance(contract, dict) else {}
-        if isinstance(runtime_roles, dict):
-            aliases = runtime_roles.get("close_role_aliases")
-            if isinstance(aliases, list) and aliases:
-                close_aliases = {str(x).strip() for x in aliases if str(x).strip()} or close_aliases
-        sm = contract.get("closeout_state_machine") if isinstance(contract, dict) else {}
-        if isinstance(sm, dict):
-            state_field = str(sm.get("state_field", state_field)).strip() or state_field
-            states = sm.get("states")
-            if isinstance(states, dict) and states:
-                parsed = {}
-                for st, meta in states.items():
-                    if not isinstance(meta, dict):
-                        continue
-                    parsed[str(st).strip()] = {
-                        str(x).strip() for x in (meta.get("transitions") or []) if str(x).strip()
-                    }
-                if parsed:
-                    state_transitions = parsed
-    except Exception:
-        pass
+def _stub_exists(ref: str) -> bool:
+    text = str(ref or "").strip()
+    if not text:
+        return False
+    if os.path.isabs(text):
+        return os.path.exists(text)
+    if spine_repo:
+        return os.path.exists(os.path.join(spine_repo, text))
+    return os.path.exists(text)
 
-try:
-    run_key_patterns = _compile_run_key_patterns(run_key_patterns_text)
-except RuntimeError as exc:
-    print(f"FAIL: {exc}")
-    sys.exit(1)
-
-if not disposition:
-    print("FAIL: missing required close disposition")
-    sys.exit(1)
-if allowed_dispositions and disposition not in allowed_dispositions:
-    print(f"FAIL: invalid disposition '{disposition}'")
-    sys.exit(1)
-
+# ── Lock state file and load ──
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
 try:
     fcntl.flock(fd, fcntl.LOCK_EX)
@@ -5193,17 +5199,11 @@ try:
         print(f"Wave '{state['wave_id']}' is already closed.")
         sys.exit(0)
 
-    # ── Synthetic wave fast-close ──
-    _wave_kind = str(state.get("wave_kind") or "production").strip()
-    _is_synthetic = _wave_kind == "synthetic"
-
-    # ── Contract enforcement (enhanced) ──
+    # ── Controller-only precheck (side-effectful: filesystem + subprocess) ──
     checks = state.get("watcher_checks", [])
     pf = state.get("preflight")
     dispatches = state.get("dispatches", [])
     packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
-    infra_violations = []
-    dod_violations = []
     controller_context = {
         "requested": controller_only,
         "eligible": False,
@@ -5312,189 +5312,10 @@ try:
             )
             handle.write("\n")
 
-    # 1. Watcher checks must be done/failed (synthetic waves skip)
-    if not _is_synthetic:
-        running = [c for c in checks if c["status"] in ("queued", "running")]
-        if running:
-            statuses = "/".join(sorted(set(c["status"] for c in running)))
-            infra_violations.append(f"{len(running)} watcher check(s) still {statuses}")
-
-    # 2. Preflight required (synthetic waves skip)
-    if not _is_synthetic and not pf and not controller_context["eligible"]:
-        infra_violations.append("Preflight has not been run (required by wave.lifecycle contract)")
-
-    # 3. Pending dispatch force-close guard.
-    # Force-close is only allowed with explicit BLOCKED lane_outcomes + valid stub evidence.
-    lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
-
-    def _stub_exists(ref: str) -> bool:
-        text = str(ref or "").strip()
-        if not text:
-            return False
-        if os.path.isabs(text):
-            return os.path.exists(text)
-        if spine_repo:
-            return os.path.exists(os.path.join(spine_repo, text))
-        return os.path.exists(text)
-
-    def _lane_outcome(lane_id: str) -> dict:
-        for row in lane_outcomes:
-            if not isinstance(row, dict):
-                continue
-            if str(row.get("lane_id", "")).strip() == lane_id:
-                return row
-        return {}
-
-    pending_dispatches = [
-        d for d in dispatches
-        if isinstance(d, dict) and str(d.get("status", "")).strip() in {"dispatched", "running"}
-    ]
-    pending_without_stub = []
-    for d in pending_dispatches:
-        lane = str(d.get("lane", "")).strip()
-        outcome = _lane_outcome(lane)
-        lane_status = str(outcome.get("lane_status", "")).strip().lower()
-        stub_ref = str(outcome.get("stub_evidence_ref", "")).strip()
-        blocked_with_stub = lane_status in {"blocked", "stubbed_blocked", "blocked_stubbed"} and _stub_exists(stub_ref)
-        if not blocked_with_stub:
-            pending_without_stub.append(lane or "unknown")
-
-    if pending_without_stub:
-        pending_msg = (
-            "dispatch pending without explicit blocked+stub evidence for lane(s): "
-            + ", ".join(sorted(set(pending_without_stub)))
-        )
-        if force:
-            print("BLOCKED: force-close denied while dispatches are pending without stub evidence.")
-            print(f"  - {pending_msg}")
-            print("Remediation: mark lane_outcomes as BLOCKED with valid stub_evidence_ref before retrying --force.")
-            sys.exit(1)
-        infra_violations.append(pending_msg)
-
-    # 4. Canonical packet presence required at close as DoD source-of-truth
-    packet_required = [
-        "wave_id",
-        "loop_id",
-        "owner_terminal",
-        "current_role",
-        "next_role",
-        "deadline_utc",
-        "horizon",
-        "execution_readiness",
-        "claimed_paths",
-    ]
-    packet_missing = [k for k in packet_required if packet.get(k) in (None, "", [])]
-    if packet_missing:
-        infra_violations.append(f"wave packet missing required field(s): {', '.join(packet_missing)}")
-
-    # 5. Receipt validation: all receipt files must satisfy EXEC_RECEIPT contract
-    schema_path = os.path.join(spine_repo, "ops", "bindings", "orchestration.exec_receipt.schema.json")
+    # ── Receipt validation (via module) ──
     invalid_receipts = []
     valid_receipt_count = 0
     valid_receipts = []
-
-    def _validate_receipt_close(receipt):
-        errors = []
-        required_fields = ["task_id", "terminal_id", "lane", "status", "files_changed",
-                           "run_keys", "blockers", "ready_for_verify", "timestamp_utc"]
-        for field in required_fields:
-            if field not in receipt:
-                errors.append(f"missing {field}")
-
-        str_fields = ["task_id", "terminal_id", "lane", "status", "timestamp_utc"]
-        for f in str_fields:
-            if f in receipt and not isinstance(receipt[f], str):
-                errors.append(f"{f} not string")
-
-        arr_fields = ["files_changed", "run_keys", "blockers"]
-        for f in arr_fields:
-            if f in receipt and not isinstance(receipt[f], list):
-                errors.append(f"{f} not array")
-
-        if "ready_for_verify" in receipt and not isinstance(receipt["ready_for_verify"], bool):
-            errors.append("ready_for_verify not bool")
-
-        if receipt.get("lane") and receipt["lane"] not in allowed_lanes:
-            errors.append(f"bad lane: {receipt['lane']}")
-
-        if receipt.get("status") and receipt["status"] not in ("done", "failed", "blocked"):
-            errors.append(f"bad status: {receipt['status']}")
-
-        ts = receipt.get("timestamp_utc", "")
-        if ts and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts):
-            errors.append("bad timestamp format")
-
-        for rk in receipt.get("run_keys", []):
-            if not isinstance(rk, str):
-                errors.append("run_key not string")
-            elif not _run_key_matches(rk):
-                errors.append(f"bad run_key: {rk}")
-
-        if receipt.get("status") == "blocked" and not receipt.get("blockers"):
-            errors.append("blocked needs blockers[]")
-
-        if "wave_id" in receipt:
-            wid = receipt["wave_id"]
-            if not isinstance(wid, str) or not re.match(r"^WAVE-\d{8}-\d{2}$", wid):
-                errors.append(f"bad wave_id: {wid}")
-
-        if "commit_hashes" in receipt:
-            if not isinstance(receipt["commit_hashes"], list):
-                errors.append("commit_hashes not array")
-            else:
-                commit_pat = re.compile(commit_ref_pattern)
-                for h in receipt["commit_hashes"]:
-                    if not isinstance(h, str) or not commit_pat.match(h):
-                        errors.append(f"bad commit_hash: {h}")
-
-        if "evidence_refs" not in receipt:
-            errors.append("missing evidence_refs")
-        else:
-            evidence_refs = receipt["evidence_refs"]
-            if not isinstance(evidence_refs, dict):
-                errors.append("evidence_refs not object")
-            else:
-                for key in required_evidence_fields:
-                    if key not in evidence_refs:
-                        errors.append(f"evidence_refs missing {key}")
-                run_key_refs = evidence_refs.get("run_key_refs", [])
-                file_refs = evidence_refs.get("file_refs", [])
-                commit_refs = evidence_refs.get("commit_refs", [])
-                blocker_class = str(evidence_refs.get("blocker_class", "")).strip()
-
-                if not isinstance(run_key_refs, list):
-                    errors.append("evidence_refs.run_key_refs not array")
-                else:
-                    for rk in run_key_refs:
-                        if not isinstance(rk, str) or not _run_key_matches(rk):
-                            errors.append(f"bad evidence run_key_ref: {rk}")
-
-                if not isinstance(file_refs, list):
-                    errors.append("evidence_refs.file_refs not array")
-                else:
-                    for ref in file_refs:
-                        if not isinstance(ref, str) or not ref.strip():
-                            errors.append("bad evidence file_ref")
-
-                commit_pat = re.compile(commit_ref_pattern)
-                if not isinstance(commit_refs, list):
-                    errors.append("evidence_refs.commit_refs not array")
-                else:
-                    for ref in commit_refs:
-                        if not isinstance(ref, str) or not commit_pat.match(ref):
-                            errors.append(f"bad evidence commit_ref: {ref}")
-
-                if not blocker_class:
-                    errors.append("evidence_refs.blocker_class missing")
-                elif blocker_class not in allowed_blocker_classes:
-                    errors.append(f"bad evidence blocker_class: {blocker_class}")
-
-        allowed = set(required_fields + ["wave_id", "commit_hashes", "loop_id", "gap_ids", "evidence_refs", "completion_level", "prompt_lineage"])
-        for key in receipt.keys():
-            if key not in allowed:
-                errors.append(f"unknown field: {key}")
-
-        return errors
 
     receipts_dir = os.path.join(sd, "evidence")
     if os.path.isdir(receipts_dir):
@@ -5505,7 +5326,7 @@ try:
             try:
                 with open(fp) as rf:
                     r = json.load(rf)
-                errs = _validate_receipt_close(r)
+                errs = wcv.validate_receipt(r, config)
                 if errs:
                     invalid_receipts.append(f"{fn}: {'; '.join(errs)}")
                 else:
@@ -5514,190 +5335,46 @@ try:
             except json.JSONDecodeError as e:
                 invalid_receipts.append(f"{fn}: invalid JSON ({e})")
 
-    if invalid_receipts:
-        infra_violations.append(f"{len(invalid_receipts)} invalid receipt(s) in wave evidence/")
+    # ── Inject validated receipts into state for module access ──
+    state["_valid_receipts"] = valid_receipts
+    state["_invalid_receipt_details"] = invalid_receipts
 
-    # 6. Verify/preflight checks present
-    done_checks = [c for c in checks if c["status"] == "done"]
-    if checks and not done_checks:
-        infra_violations.append("No watcher checks completed successfully")
+    # ── Full close validation pipeline (via module) ──
+    violations, dod, hard_blocked = wcv.validate_close(
+        state=state,
+        force=force,
+        disposition=disposition,
+        allowed_dispositions=allowed_dispositions,
+        dod_override_reason=dod_override_reason,
+        controller_context=controller_context,
+        config=config,
+        stub_exists_fn=_stub_exists,
+    )
 
-    # 7. DoD guard completeness
-    verify_results = []
-    for c in checks:
-        rk = c.get("run_key")
-        if isinstance(rk, str) and rk:
-            verify_results.append(rk)
-    for r in valid_receipts:
-        for rk in r.get("run_keys", []):
-            if isinstance(rk, str) and rk:
-                verify_results.append(rk)
-        evidence_refs = r.get("evidence_refs") if isinstance(r.get("evidence_refs"), dict) else {}
-        for rk in evidence_refs.get("run_key_refs", []) if isinstance(evidence_refs.get("run_key_refs"), list) else []:
-            if isinstance(rk, str) and rk:
-                verify_results.append(rk)
-    for d in dispatches:
-        if not isinstance(d, dict):
-            continue
-        expected = d.get("expected_output_refs") if isinstance(d.get("expected_output_refs"), dict) else {}
-        verify_ref = str(expected.get("verify_ref", "")).strip() if expected else ""
-        if verify_ref and _run_key_matches(verify_ref):
-            verify_results.append(verify_ref)
-        if str(d.get("lane", "")).strip() == "audit":
-            rk = d.get("run_key")
-            if isinstance(rk, str) and rk and _run_key_matches(rk):
-                verify_results.append(rk)
-    if controller_context.get("verify_run_key"):
-        verify_results.append(controller_context["verify_run_key"])
-    if not verify_results and not controller_context.get("minimal_shell"):
-        dod_violations.append("DoD missing verify results (no run keys in watcher checks or receipts)")
+    # Clean up internal keys
+    state.pop("_valid_receipts", None)
+    state.pop("_invalid_receipt_details", None)
 
-    blocker_classes = []
-    cleanup_proof = []
-    linkage_errors = []
-    packet_loop_id = str(packet.get("loop_id", "")).strip()
-    blocked_or_failed = [d for d in dispatches if d.get("status") in ("blocked", "failed")]
+    if hard_blocked:
+        print("BLOCKED: force-close denied while dispatches are pending without stub evidence.")
+        pending_msg = [v for v in violations.infra if "dispatch pending" in v]
+        for msg in pending_msg:
+            print(f"  - {msg}")
+        print("Remediation: mark lane_outcomes as BLOCKED with valid stub_evidence_ref before retrying --force.")
+        sys.exit(1)
 
-    if packet_loop_id and packet_loop_id.lower() == "null":
-        packet_loop_id = ""
-    if not packet_loop_id:
-        linkage_errors.append("packet.loop_id missing")
+    # ── Gate decision (via module) ──
+    gate = wcv.evaluate_gate(violations, force, dod_override_reason)
 
-    for r in valid_receipts:
-        evidence_refs = r.get("evidence_refs") if isinstance(r.get("evidence_refs"), dict) else {}
-        blocker_class = str(evidence_refs.get("blocker_class", "")).strip() if evidence_refs else ""
-        if blocker_class:
-            blocker_classes.append(blocker_class)
-
-        for ref in evidence_refs.get("file_refs", []) if isinstance(evidence_refs.get("file_refs"), list) else []:
-            if isinstance(ref, str) and ref and ("cleanup" in ref.lower() or "clean" in ref.lower()):
-                cleanup_proof.append(ref)
-
-        receipt_loop = str(r.get("loop_id", "")).strip()
-        if packet_loop_id and receipt_loop != packet_loop_id:
-            linkage_errors.append(
-                f"receipt task_id={r.get('task_id', '?')} loop_id mismatch (expected {packet_loop_id}, got {receipt_loop or 'missing'})"
-            )
-
-        for gap_id in r.get("gap_ids", []) if isinstance(r.get("gap_ids"), list) else []:
-            if not isinstance(gap_id, str) or not re.match(r"^GAP-[A-Z0-9-]+$", gap_id):
-                linkage_errors.append(f"receipt task_id={r.get('task_id', '?')} has invalid gap_id '{gap_id}'")
-
-    for d in dispatches:
-        expected = d.get("expected_output_refs") if isinstance(d.get("expected_output_refs"), dict) else {}
-        cleanup_ref = str(expected.get("cleanup_ref", "")).strip() if expected else ""
-        if cleanup_ref:
-            cleanup_proof.append(cleanup_ref)
-    if controller_context.get("cleanup_ref"):
-        cleanup_proof.append(controller_context["cleanup_ref"])
-
-    if blocked_or_failed and not blocker_classes:
-        dod_violations.append("DoD missing blocker classification for blocked/failed dispatches")
-    elif not blocker_classes:
-        blocker_classes.append("none")
-
-    if not cleanup_proof and not controller_context.get("minimal_shell"):
-        dod_violations.append("DoD missing cleanup proof (no cleanup refs in evidence/output refs)")
-
-    if linkage_errors:
-        dod_violations.append("DoD linkage integrity failed: " + "; ".join(linkage_errors))
-
-    state["dod"] = {
-        "verify_results": sorted(set(verify_results)),
-        "blocker_classification": sorted(set(blocker_classes)),
-        "cleanup_proof": sorted(set(cleanup_proof)),
-        "linkage": {
-            "packet_loop_id": packet_loop_id,
-            "valid_receipts": valid_receipt_count,
-            "errors": linkage_errors,
-        },
-    }
-
-    lifecycle_state = str(state.get(state_field, state.get("lifecycle_state", "active"))).strip() or "active"
-    if lifecycle_state not in state_transitions:
-        infra_violations.append(f"state machine unknown state '{lifecycle_state}'")
-    elif not controller_context["eligible"] and not controller_context.get("minimal_shell"):
-        allowed = state_transitions.get(lifecycle_state, set())
-        if "closed" not in allowed:
-            infra_violations.append(f"state machine blocked: {lifecycle_state} -> closed not allowed")
-
-    role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
-    current_role = str(role_flow.get("current_role", "")).strip()
-    completed_close_dispatches = [
-        d for d in dispatches
-        if isinstance(d, dict)
-        and str(d.get("status", "")).strip() == "done"
-        and str(d.get("to_role", "")).strip() in close_aliases
-    ]
-    if completed_close_dispatches and current_role not in close_aliases:
-        def _dispatch_order(dispatch):
-            task_id = str(dispatch.get("task_id", "")).strip()
-            if task_id.startswith("D") and task_id[1:].isdigit():
-                return int(task_id[1:])
-            return 0
-        completed_close_dispatches.sort(
-            key=lambda d: (_dispatch_order(d), str(d.get("completed_at") or d.get("dispatched_at") or ""))
-        )
-        authoritative_close = completed_close_dispatches[-1]
-        current_role = str(authoritative_close.get("to_role", "")).strip()
-        role_flow["current_role"] = current_role
-        role_flow["next_role"] = ""
-        role_flow["last_transition"] = {
-            "task_id": authoritative_close.get("task_id"),
-            "from_role": str(authoritative_close.get("from_role", "")).strip(),
-            "to_role": current_role,
-            "completed_at": authoritative_close.get("completed_at"),
-            "run_key": authoritative_close.get("run_key"),
-        }
-        state["role_flow"] = role_flow
-    if close_aliases and current_role and current_role not in close_aliases and not controller_context["eligible"] and not controller_context.get("minimal_shell"):
-        infra_violations.append(
-            f"role flow blocked close: current_role={current_role} expected one of {sorted(close_aliases)}"
-        )
-
-    if controller_only and not controller_context["eligible"]:
-        infra_violations.extend(controller_context.get("controller_infra_violations", []))
-        dod_violations.extend(controller_context.get("controller_dod_violations", []))
-
-    # ── Synthetic wave fast-close: clear DoD/receipt/state-machine violations ──
-    # Synthetic waves still respect pending-dispatch guards (step 3) and packet
-    # presence (step 4), but skip heavyweight DoD evidence, receipt validation,
-    # state machine progression, and role-flow enforcement.
-    if _is_synthetic:
-        dod_violations.clear()
-        # Clear infra violations that are ceremony-only for synthetic waves
-        infra_violations = [
-            v for v in infra_violations
-            if not any(skip in v for skip in [
-                "state machine", "role flow blocked", "Preflight has not been run",
-                "watcher check", "receipt",
-            ])
-        ]
-        if "dod" not in state or not state.get("dod"):
-            state["dod"] = {
-                "verify_results": [],
-                "blocker_classification": ["none"],
-                "cleanup_proof": ["synthetic_fast_close"],
-                "linkage": {
-                    "packet_loop_id": str(packet.get("loop_id", "")).strip(),
-                    "valid_receipts": 0,
-                    "errors": [],
-                },
-            }
-
-    # ── Gate decision ──
-    infra_blocked = bool(infra_violations) and not force
-    dod_blocked = bool(dod_violations) and not dod_override_reason
-
-    if infra_blocked or dod_blocked:
+    if gate.blocked:
         print("BLOCKED: Wave close contract not met:")
-        if infra_violations:
+        if gate.infra_violations:
             print("Infra violations:")
-            for v in infra_violations:
+            for v in gate.infra_violations:
                 print(f"  - {v}")
-        if dod_violations:
+        if gate.dod_violations:
             print("DoD violations:")
-            for v in dod_violations:
+            for v in gate.dod_violations:
                 print(f"  - {v}")
         if invalid_receipts:
             print()
@@ -5707,40 +5384,43 @@ try:
         print()
         print("Options:")
         print(f"  1. Fix issues, then retry: ops wave close {state['wave_id']}")
-        if infra_violations:
+        if gate.infra_violations:
             print(f"  2. Force close (infra only): ops wave close {state['wave_id']} --force")
-        if dod_violations:
+        if gate.dod_violations:
             print(
                 "  3. Override DoD with explicit reason: "
                 f"ops wave close {state['wave_id']} --dod-override \"<reason>\""
             )
         sys.exit(1)
 
-    if infra_violations and force:
-        print(f"WARNING: Forcing close with {len(infra_violations)} infra violation(s):")
-        for v in infra_violations:
+    if gate.force_used:
+        print(f"WARNING: Forcing close with {len(gate.infra_violations)} infra violation(s):")
+        for v in gate.infra_violations:
             print(f"  - {v}")
         print()
 
-    if dod_violations and dod_override_reason:
-        print(f"WARNING: Overriding {len(dod_violations)} DoD violation(s):")
-        for v in dod_violations:
+    if gate.dod_overridden:
+        print(f"WARNING: Overriding {len(gate.dod_violations)} DoD violation(s):")
+        for v in gate.dod_violations:
             print(f"  - {v}")
         print(f"  DoD override reason: {dod_override_reason}")
         print()
 
+    # ── State mutation (stays inline — side-effectful) ──
+    infra_violations = gate.infra_violations
+    dod_violations = gate.dod_violations
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     state["status"] = "closed"
     state["closed_at"] = now
     state["disposition"] = disposition
-    state["force_closed"] = bool(infra_violations)
-    state["dod_overridden"] = bool(dod_violations)
-    state["dod_override_reason"] = dod_override_reason if dod_violations else ""
+    state["force_closed"] = gate.force_used
+    state["dod_overridden"] = gate.dod_overridden
+    state["dod_override_reason"] = dod_override_reason if gate.dod_overridden else ""
     state["lock_overridden"] = bool(lock_override_reason)
     state["lock_override_reason"] = lock_override_reason
     state["controller_only"] = bool(controller_only)
     state["controller_precheck_path"] = controller_precheck_path if controller_only else ""
-    state[state_field] = "closed"
+    state[config.state_field] = "closed"
     state["lifecycle_state"] = "closed"
     workspace = state.get("workspace")
     if isinstance(workspace, dict) and workspace.get("enabled"):
@@ -5756,61 +5436,36 @@ finally:
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
 
-# ── Generate merge receipt (JSON + markdown) ──
+# ── Generate merge receipt (via module + inline markdown) ──
 done_checks = sum(1 for c in checks if c["status"] == "done")
 failed_checks = sum(1 for c in checks if c["status"] == "failed")
 run_keys = [c["run_key"] for c in checks if c.get("run_key")]
 workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
 
-# Also collect run keys from validated receipt artifacts only
 for r in valid_receipts:
     for rk in r.get("run_keys", []):
         if rk not in run_keys:
             run_keys.append(rk)
 
-residual_blockers = []
-for v in infra_violations:
-    residual_blockers.append(f"Infra violation (force-closed): {v}")
-for v in dod_violations:
-    residual_blockers.append(f"DoD violation (override): {v}")
-for c in checks:
-    if c["status"] == "failed":
-        residual_blockers.append(f"Watcher check failed: {c['cap']} (exit={c.get('exit_code', '?')})")
-if pf and pf.get("verdict") == "no-go":
-    for b in pf.get("blockers", []):
-        residual_blockers.append(f"Preflight blocker: {b}")
+close_receipt = wcv.build_close_receipt(
+    state=state,
+    disposition=disposition,
+    now_utc=now,
+    dispatches=dispatches,
+    checks=checks,
+    valid_receipt_count=valid_receipt_count,
+    invalid_receipt_count=len(invalid_receipts),
+    run_keys=run_keys,
+    gate=gate,
+    controller_only=controller_only,
+    controller_precheck_path=controller_precheck_path,
+    controller_context=controller_context,
+    dod_override_reason=dod_override_reason,
+    lock_override_reason=lock_override_reason,
+)
 
-ready_for_adoption = not residual_blockers
-
-# JSON close receipt
-close_receipt = {
-    "wave_id": state["wave_id"],
-    "objective": state.get("objective", ""),
-    "created_at": state["created_at"],
-    "closed_at": now,
-    "disposition": disposition,
-    "force_closed": bool(infra_violations),
-    "dod_overridden": bool(dod_violations),
-    "dod_override_reason": dod_override_reason if dod_violations else "",
-    "controller_only": bool(controller_only),
-    "controller_precheck_path": controller_precheck_path if controller_only else "",
-    "fixed_in": controller_context.get("fixed_in", ""),
-    "verify_receipt_path": controller_context.get("verify_receipt_path", ""),
-    "lock_overridden": bool(lock_override_reason),
-    "lock_override_reason": lock_override_reason,
-    "dispatches": len(dispatches),
-    "dispatches_done": sum(1 for d in dispatches if d["status"] == "done"),
-    "dispatches_blocked": sum(1 for d in dispatches if d["status"] == "blocked"),
-    "watcher_checks_done": done_checks,
-    "watcher_checks_failed": failed_checks,
-    "valid_receipts": valid_receipt_count,
-    "invalid_receipts": len(invalid_receipts),
-    "run_keys": run_keys,
-    "residual_blockers": residual_blockers,
-    "READY_FOR_ADOPTION": ready_for_adoption,
-    "dod": state.get("dod", {}),
-    "workspace": workspace if workspace else None,
-}
+residual_blockers = close_receipt["residual_blockers"]
+ready_for_adoption = close_receipt["READY_FOR_ADOPTION"]
 
 close_receipt_path = os.path.join(sd, "close-receipt.json")
 with open(close_receipt_path, "w") as f:
