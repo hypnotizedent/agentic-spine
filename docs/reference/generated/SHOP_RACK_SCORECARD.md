@@ -1,14 +1,14 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-04-07
+last_verified: 2026-04-09
 scope: shop-rack-scorecard
 source_binding: ops/bindings/shop.storage.map.yaml
 ---
 
 # Shop Rack Scorecard
 
-- Generated: `2026-04-07T21:37:45Z`
+- Generated: `2026-04-09T14:35:07Z`
 - Rebuild: `./bin/ops cap run infra.shop.storage.authority.build`
 - Active runtimes: `12`
 - Tombstones: `1`
@@ -49,24 +49,24 @@ source_binding: ops/bindings/shop.storage.map.yaml
 
 | VMID | Runtime | Kind | Startup | Tier | Durable State | Backup Lane | Ingress | Monitoring |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 202 | automation-stack | vm | auto | data-vms | data-vms:pve:data/vms/vm-202-disk-0 (ZFS zvol, 100G), /home/automation/backups/n8n-workflows, /home/automation/stacks | pve-vzdump-primary, r730xd-infra-core-backups | chat.ronny.works, n8n.ronny.works | 4 probes |
-| 203 | immich | vm | auto | tank-docker | tank:tank/immich | pve-vzdump-primary | photos.ronny.works | 2 probes |
-| 204 | infra-core | vm | auto | boot-only | boot-disk:infra-core boot disk (50G), boot-disk:/opt/stacks | pve-vzdump-primary, r730xd-infra-core-backups | auth.ronny.works, pihole.ronny.works, vault.ronny.works | 6 probes |
-| 205 | observability | vm | auto | boot-only | boot-disk:observability boot disk (50G), boot-disk:/opt/stacks | pve-vzdump-primary | dash.ronny.works, grafana.ronny.works | 6 probes, node-exporter |
-| 206 | dev-tools | vm | auto | boot-only | boot-disk:dev-tools boot disk (50G), boot-disk:/opt/stacks/gitea | pve-vzdump-primary, r730xd-dev-tools-backups | git.ronny.works | 1 probes |
-| 207 | ai-consolidation | vm | auto | boot-only | boot-disk:ai-consolidation boot disk (200G), boot-disk:/opt/stacks/ai-consolidation, boot-disk:/opt/stacks/spine-workers | pve-vzdump-primary | private-only | 2 probes |
-| 211 | finance-stack | vm | auto | boot-only | boot-disk:finance-stack boot disk (96G), boot-disk:/opt/stacks/finance | pve-vzdump-primary, r730xd-finance-backups | docs.mintprints.com, docs.ronny.works, finances.mintprints.com, finances.ronny.works, firefly.ronny.works, investments.mintprints.com, investments.ronny.works | 4 probes |
-| 212 | mint-data | vm | auto | data-vms | data-vms:pve:data/vms/vm-212-disk-0 (ZFS zvol, 320G) mounted at /mnt/data; DockerRootDir=/mnt/data/docker, /opt/stacks/mint-data | pve-vzdump-primary, r730xd-mint-backups | private-only | 1 probes |
-| 213 | mint-apps | vm | auto | boot-only | boot-disk:mint-apps boot disk (50G), boot-disk:/opt/stacks/mint-apps | pve-vzdump-primary | suppliers.mintprints.co, api.mintprints.com, customer.mintprints.co, customer.mintprints.com, estimator.mintprints.co, mintprints-app.ronny.works, mintprints.com, pricing.mintprints.co, pricing.mintprints.com, shipping.mintprints.co, shipping.mintprints.com, www.mintprints.com | 13 probes |
-| 214 | communications-stack | vm | auto | data-vms | md1400:pve:data/vms/vm-214-disk-0 (ZFS zvol, 1000G), /opt/stacks/communications-stack, /srv/mail-archiver/backups | pve-vzdump-primary, r730xd-communications-backups | mail-archive.ronny.works | 2 probes |
-| 215 | surveillance-stack | vm | auto | md1400-vms | boot-disk:pve:md1400-vms/vm-215-disk-{0,1} (boot 50G + data 100G) | pve-vzdump-primary | private-only | 1 probes |
-| 220 | archive-smb | lxc | auto | data-vms | data-vms:pve:data/vms/subvol-220-disk-0 (rootfs 8G); serves md1400 datasets over Samba., md1400:/md1400/archive/live-share/mint-legacy, md1400:/md1400/archive/live-share/ronny-projects | r730xd-archive-smb-snapshots | private-only | 0 probes |
+| 202 | automation-stack | vm | auto | data-vms | boot-disk:data-vms:vm-202-disk-0, data-vms:pve:data/vms/vm-202-disk-0 (ZFS zvol, 100G), tank:tank-vms:vm-202-disk-0, +2 more | pve-vzdump-primary, r730xd-infra-core-backups | chat.ronny.works, n8n.ronny.works | 4 probes |
+| 203 | immich | vm | auto | tank-docker | tank:tank/immich, tank:pve:tank/immich | pve-vzdump-primary | photos.ronny.works | 2 probes |
+| 204 | infra-core | vm | auto | boot-only | boot-disk:local-lvm:vm-204-disk-0, local-lvm:vm-204-cloudinit, boot-disk:/opt/stacks | pve-vzdump-primary, r730xd-infra-core-backups | auth.ronny.works, pihole.ronny.works, vault.ronny.works | 6 probes |
+| 205 | observability | vm | auto | boot-only | boot-disk:local-lvm:vm-205-disk-0, local-lvm:vm-205-cloudinit, boot-disk:/opt/stacks | pve-vzdump-primary | dash.ronny.works, grafana.ronny.works | 6 probes, node-exporter |
+| 206 | dev-tools | vm | auto | boot-only | boot-disk:local-lvm:vm-206-disk-0, local-lvm:vm-206-cloudinit, boot-disk:/opt/stacks/gitea | pve-vzdump-primary, r730xd-dev-tools-backups | git.ronny.works | 1 probes |
+| 207 | ai-consolidation | vm | auto | boot-only | boot-disk:local-lvm:vm-207-disk-0, local-lvm:vm-207-cloudinit, boot-disk:/opt/stacks/ai-consolidation, +1 more | pve-vzdump-primary | private-only | 2 probes |
+| 211 | finance-stack | vm | auto | boot-only | boot-disk:local-lvm:vm-211-disk-0, local-lvm:vm-211-cloudinit, boot-disk:/opt/stacks/finance | pve-vzdump-primary, r730xd-finance-backups | docs.mintprints.com, docs.ronny.works, finances.mintprints.com, finances.ronny.works, firefly.ronny.works, investments.mintprints.com, investments.ronny.works | 4 probes |
+| 212 | mint-data | vm | auto | data-vms | boot-disk:local-lvm:vm-212-disk-0, data-vms:pve:data/vms/vm-212-disk-0 (ZFS zvol, 320G) mounted at /mnt/data; DockerRootDir=/mnt/data/docker, data-vms:vm-212-disk-0, +3 more | pve-vzdump-primary, r730xd-mint-backups | private-only | 1 probes |
+| 213 | mint-apps | vm | auto | boot-only | boot-disk:local-lvm:vm-213-disk-0, local-lvm:vm-213-cloudinit, boot-disk:/opt/stacks/mint-apps | pve-vzdump-primary | suppliers.mintprints.co, api.mintprints.com, customer.mintprints.co, customer.mintprints.com, estimator.mintprints.co, mintprints-app.ronny.works, mintprints.com, pricing.mintprints.co, pricing.mintprints.com, shipping.mintprints.co, shipping.mintprints.com, www.mintprints.com | 13 probes |
+| 214 | communications-stack | vm | auto | data-vms | boot-disk:local-lvm:vm-214-disk-0, data-vms:pve:data/vms/vm-214-disk-0 (ZFS zvol, 1000G), data-vms:vm-214-disk-0, +4 more | pve-vzdump-primary, r730xd-communications-backups | mail-archive.ronny.works | 2 probes |
+| 215 | surveillance-stack | vm | auto | md1400-vms | md1400:md1400-vms:vm-215-disk-0, boot-disk:pve:md1400-vms/vm-215-disk-{0,1} (boot 50G + data 100G), md1400:md1400-vms:vm-215-disk-1, +3 more | pve-vzdump-primary | private-only | 1 probes |
+| 220 | archive-smb | lxc | auto | data-vms | boot-disk:data-vms:subvol-220-disk-0, data-vms:pve:data/vms/subvol-220-disk-0 (rootfs 8G); serves md1400 datasets over Samba., tank:tank-docker:subvol-220-disk-0, +2 more | r730xd-archive-smb-snapshots | private-only | 0 probes |
 
 ## Tombstones
 
 | VMID | Runtime | Hot Footprint | Cold Capsule | Review | Restore Rule |
 | --- | --- | --- | --- | --- | --- |
-| 200 | docker-host | none | /md1400/backup-cold/vzdump/pve | 2026-09-06 | isolated sandbox only |
+| 200 | docker-host | none | /md1400/backups/vm-images/pve | 2026-09-06 | isolated sandbox only |
 
 ## Current Risks
 

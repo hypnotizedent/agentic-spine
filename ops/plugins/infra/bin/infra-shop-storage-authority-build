@@ -291,15 +291,27 @@ def build_storage_objects(vm: dict[str, Any], placement: dict[str, Any] | None, 
         source = str(placement.get("data_source") or "")
         current_tier = str(placement.get("current_storage_tier") or tier)
         target_tier = str(placement.get("target_storage_tier") or current_tier)
+        boot_ref = str(placement.get("current_boot_ref") or "").strip()
+        runtime_refs = [str(row).strip() for row in (placement.get("current_runtime_refs") or []) if str(row).strip() and str(row).strip().lower() != "none"]
+        aux_refs = [str(row).strip() for row in (placement.get("current_aux_refs") or []) if str(row).strip() and str(row).strip().lower() != "none"]
+        residual_refs = [str(row).strip() for row in (placement.get("residual_config_refs") or []) if str(row).strip() and str(row).strip().lower() != "none"]
+        external_refs = [str(row).strip() for row in (placement.get("current_external_refs") or []) if str(row).strip() and str(row).strip().lower() != "none"]
         if current_tier == "boot-only":
             add_object(
-                kind="guest_boot_disk",
-                pool="boot-disk",
-                obj=f"{hostname} boot disk ({boot_disk_gb}G)",
+                kind="boot_ref" if boot_ref else "guest_boot_disk",
+                pool=parse_pool_from_source(boot_ref) or "boot-disk",
+                obj=boot_ref or f"{hostname} boot disk ({boot_disk_gb}G)",
                 purpose="OS + colocated lightweight durable state",
                 durability_role="runtime_primary",
-                note="Guest boot disk backend is not explicitly declared in current authority surfaces.",
             )
+            for ref in aux_refs:
+                add_object(
+                    kind="aux_config_ref",
+                    pool=parse_pool_from_source(ref),
+                    obj=ref,
+                    purpose="Auxiliary guest config ref",
+                    durability_role="supplemental_runtime",
+                )
         elif "tank/vms/" in source:
             match = re.search(r"pve:(tank/vms/[^ )]+)", source)
             object_name = match.group(1) if match else source
@@ -346,6 +358,14 @@ def build_storage_objects(vm: dict[str, Any], placement: dict[str, Any] | None, 
                 mount_path=str(placement.get("data_mount") or "") or None,
             )
         elif source:
+            if boot_ref and source != boot_ref:
+                add_object(
+                    kind="boot_ref",
+                    pool=parse_pool_from_source(boot_ref) or "boot-disk",
+                    obj=boot_ref,
+                    purpose="Declared boot storage ref",
+                    durability_role="boot_runtime",
+                )
             pool = parse_pool_from_source(source) or target_tier or None
             add_object(
                 kind="declared_path",
@@ -354,6 +374,39 @@ def build_storage_objects(vm: dict[str, Any], placement: dict[str, Any] | None, 
                 purpose="Declared storage path from placement policy",
                 durability_role="runtime_primary",
                 mount_path=str(placement.get("data_mount") or "") or None,
+            )
+            extra_runtime_refs = [ref for ref in runtime_refs if ref not in {boot_ref, source}]
+            for ref in extra_runtime_refs:
+                add_object(
+                    kind="runtime_ref",
+                    pool=parse_pool_from_source(ref),
+                    obj=ref,
+                    purpose="Additional declared runtime storage ref",
+                    durability_role="runtime_primary",
+                )
+            for ref in aux_refs:
+                add_object(
+                    kind="aux_config_ref",
+                    pool=parse_pool_from_source(ref),
+                    obj=ref,
+                    purpose="Auxiliary guest config ref",
+                    durability_role="supplemental_runtime",
+                )
+        for ref in external_refs:
+            add_object(
+                kind="external_runtime_ref",
+                pool=parse_pool_from_source(ref),
+                obj=ref,
+                purpose="Authoritative external runtime root",
+                durability_role="runtime_primary",
+            )
+        for ref in residual_refs:
+            add_object(
+                kind="residual_config_ref",
+                pool=parse_pool_from_source(ref),
+                obj=ref,
+                purpose="Stale config ref pending retirement",
+                durability_role="stale_residue",
             )
 
         for mount in placement.get("nfs_mounts") or []:
@@ -419,7 +472,7 @@ def build_storage_objects(vm: dict[str, Any], placement: dict[str, Any] | None, 
             include_paths.append(path)
 
     for include_path in sorted(set(include_paths)):
-        if include_path.startswith("/md1400/backup-cold/"):
+        if include_path.startswith("/md1400/backups/"):
             continue
         if include_path.startswith("/md1400/"):
             add_object(
@@ -648,19 +701,19 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
             "backed_by_lane": "pve-vzdump-primary",
         },
         {
-            "object_id": "md1400/backup-cold/vzdump/pve",
+            "object_id": "md1400/backups/vm-images/pve",
             "kind": "path_family",
             "pool": "md1400",
             "owner": "pve",
-            "purpose": "Canonical cold restore plane for shop VM/LXC artifacts.",
+            "purpose": "Canonical vm-images restore plane for shop VM/LXC artifacts.",
             "durability_class": "cold_restore_primary",
         },
         {
-            "object_id": "md1400/backup-cold/apps",
+            "object_id": "md1400/backups",
             "kind": "path_family",
             "pool": "md1400",
             "owner": "pve",
-            "purpose": "Canonical app-level cold backup plane for shop services.",
+            "purpose": "Canonical restore-intent backup plane for shop services.",
             "durability_class": "cold_restore_primary",
         },
         {
@@ -688,7 +741,7 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
             "durability_class": "compatibility_hold",
         },
         {
-            "object_id": "md1400/backup-cold/archive-smb/snapshots",
+            "object_id": "md1400/backups/configs/archive-smb-snapshots",
             "kind": "path_family",
             "pool": "md1400",
             "owner": "pve",
@@ -797,6 +850,13 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
                 "placement_notes": str(
                     placement_row.get("description") or placement_row.get("notes") or ""
                 ).strip() if placement_row else "Placement row missing.",
+                "future_storage_tier": str(placement_row.get("future_storage_tier") or "").strip() if placement_row else "",
+                "future_data_source": str(placement_row.get("future_data_source") or "").strip() if placement_row else "",
+                "boot_ref": str(placement_row.get("current_boot_ref") or "").strip() if placement_row else "",
+                "runtime_refs": [str(row).strip() for row in (placement_row.get("current_runtime_refs") or []) if str(row).strip()] if placement_row else [],
+                "aux_refs": [str(row).strip() for row in (placement_row.get("current_aux_refs") or []) if str(row).strip()] if placement_row else [],
+                "external_runtime_refs": [str(row).strip() for row in (placement_row.get("current_external_refs") or []) if str(row).strip()] if placement_row else [],
+                "residual_config_refs": [str(row).strip() for row in (placement_row.get("residual_config_refs") or []) if str(row).strip()] if placement_row else [],
                 "owner": vm.get("owner"),
                 "purpose": str(vm.get("description") or "").strip(),
                 "active_services": active_services,

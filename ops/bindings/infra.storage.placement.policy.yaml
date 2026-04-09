@@ -52,7 +52,13 @@ thresholds:
   boot_usage_critical_pct: 90
 
 # Per-VM storage placement declarations
-# placement_status: current = what IS happening, target = what SHOULD happen
+# placement_status describes the honesty of the live runtime placement today.
+# target_storage_tier describes the accepted current tier.
+# future_storage_tier/future_data_source are optional and describe later convergence.
+# current_boot_ref/current_runtime_refs/current_aux_refs/residual_config_refs are
+# Proxmox-config-visible refs that should appear in qm/pct config today.
+# current_external_refs are authoritative live runtime roots that do not appear
+# in qm/pct config directly (for example a host-backed dataset mounted inside a guest).
 vm_storage:
   docker-host:
     vm_id: 200
@@ -69,6 +75,12 @@ vm_storage:
     boot_disk_gb: 100
     current_storage_tier: data-vms
     target_storage_tier: data-vms
+    current_boot_ref: data-vms:vm-202-disk-0
+    current_runtime_refs:
+      - data-vms:vm-202-disk-0
+    current_aux_refs: []
+    residual_config_refs:
+      - tank-vms:vm-202-disk-0
     data_mount: null
     data_source: "pve:data/vms/vm-202-disk-0 (ZFS zvol, 100G)"
     placement_status: compliant
@@ -79,17 +91,33 @@ vm_storage:
     vm_id: 203
     boot_disk_gb: 100
     current_storage_tier: tank-docker
-    target_storage_tier: data-docker
+    target_storage_tier: tank-docker
+    future_storage_tier: data-docker
+    current_boot_ref: local-lvm:vm-203-disk-0
+    current_runtime_refs:
+      - local-lvm:vm-203-disk-0
+    current_aux_refs:
+      - local-lvm:vm-203-cloudinit
+    current_external_refs:
+      - pve:tank/immich
+    residual_config_refs: []
     data_mount: null
     data_source: "pve:tank/immich (ZFS, 2.6TB)"
     placement_status: compliant
-    description: "Photo library on tank/immich ZFS dataset. Boot disk on local-lvm but data is properly separated. Target: migrate to data/immich."
+    description: "Photo library on tank/immich ZFS dataset. Boot disk on local-lvm but data is properly separated."
+    future_data_source: "pve:data/immich (future landing after NFS retarget)"
 
   infra-core:
     vm_id: 204
     boot_disk_gb: 50
     current_storage_tier: boot-only
     target_storage_tier: boot-only
+    current_boot_ref: local-lvm:vm-204-disk-0
+    current_runtime_refs:
+      - local-lvm:vm-204-disk-0
+    current_aux_refs:
+      - local-lvm:vm-204-cloudinit
+    residual_config_refs: []
     data_mount: null
     data_source: "Docker volumes on boot (250MB total)"
     placement_status: accepted-risk
@@ -101,6 +129,12 @@ vm_storage:
     boot_disk_gb: 50
     current_storage_tier: boot-only
     target_storage_tier: boot-only
+    current_boot_ref: local-lvm:vm-205-disk-0
+    current_runtime_refs:
+      - local-lvm:vm-205-disk-0
+    current_aux_refs:
+      - local-lvm:vm-205-cloudinit
+    residual_config_refs: []
     data_mount: null
     data_source: "Docker volumes on boot (1GB total)"
     placement_status: accepted-risk
@@ -112,6 +146,12 @@ vm_storage:
     boot_disk_gb: 50
     current_storage_tier: boot-only
     target_storage_tier: boot-only
+    current_boot_ref: local-lvm:vm-206-disk-0
+    current_runtime_refs:
+      - local-lvm:vm-206-disk-0
+    current_aux_refs:
+      - local-lvm:vm-206-cloudinit
+    residual_config_refs: []
     data_mount: null
     data_source: "Docker volumes on boot (183MB total)"
     placement_status: accepted-risk
@@ -123,6 +163,12 @@ vm_storage:
     boot_disk_gb: 200
     current_storage_tier: boot-only
     target_storage_tier: boot-only
+    current_boot_ref: local-lvm:vm-207-disk-0
+    current_runtime_refs:
+      - local-lvm:vm-207-disk-0
+    current_aux_refs:
+      - local-lvm:vm-207-cloudinit
+    residual_config_refs: []
     data_mount: null
     data_source: "Docker on boot (3.5GB total, 0 volumes)"
     placement_status: accepted-risk
@@ -155,6 +201,12 @@ vm_storage:
     boot_disk_gb: 96
     current_storage_tier: boot-only
     target_storage_tier: boot-only
+    current_boot_ref: local-lvm:vm-211-disk-0
+    current_runtime_refs:
+      - local-lvm:vm-211-disk-0
+    current_aux_refs:
+      - local-lvm:vm-211-cloudinit
+    residual_config_refs: []
     data_mount: null
     data_source: "/opt/stacks/finance/data/ on boot (531MB)"
     placement_status: accepted-risk
@@ -166,6 +218,14 @@ vm_storage:
     boot_disk_gb: 50
     current_storage_tier: data-vms
     target_storage_tier: data-vms
+    current_boot_ref: local-lvm:vm-212-disk-0
+    current_runtime_refs:
+      - local-lvm:vm-212-disk-0
+      - data-vms:vm-212-disk-0
+    current_aux_refs:
+      - local-lvm:vm-212-cloudinit
+    residual_config_refs:
+      - tank-vms:vm-212-data
     data_mount: /mnt/data
     data_source: "pve:data/vms/vm-212-disk-0 (ZFS zvol, 320G) mounted at /mnt/data; DockerRootDir=/mnt/data/docker"
     placement_status: compliant
@@ -177,6 +237,12 @@ vm_storage:
     boot_disk_gb: 50
     current_storage_tier: boot-only
     target_storage_tier: boot-only
+    current_boot_ref: local-lvm:vm-213-disk-0
+    current_runtime_refs:
+      - local-lvm:vm-213-disk-0
+    current_aux_refs:
+      - local-lvm:vm-213-cloudinit
+    residual_config_refs: []
     data_mount: null
     data_source: "none (stateless containers)"
     placement_status: compliant
@@ -187,32 +253,59 @@ vm_storage:
     vm_id: 214
     boot_disk_gb: 50
     current_storage_tier: data-vms
-    target_storage_tier: md1400
+    target_storage_tier: data-vms
+    future_storage_tier: md1400
+    current_boot_ref: local-lvm:vm-214-disk-0
+    current_runtime_refs:
+      - local-lvm:vm-214-disk-0
+      - data-vms:vm-214-disk-0
+    current_aux_refs:
+      - local-lvm:vm-214-cloudinit
+    residual_config_refs:
+      - tank-vms:vm-214-disk-0
     data_mount: null
     data_source: "pve:data/vms/vm-214-disk-0 (ZFS zvol, 1000G)"
     placement_status: compliant
-    description: "Moved tank-vms→data-vms 2026-03-23 (1T). data-vms is interim; archive payload (email+Paperless) final home is md1400. Old tank zvol+snapshots (4.1T) destroyed."
+    description: "Moved tank-vms→data-vms 2026-03-23 (1T). Archive payload remains on data-vms today. Old tank zvol+snapshots (4.1T) destroyed."
+    future_data_source: "md1400-backed communications archive lane after closure plan is explicit"
     gap: GAP-OP-940
 
   surveillance-stack:
     vm_id: 215
     boot_disk_gb: 50
     current_storage_tier: md1400-vms
-    target_storage_tier: md1400
+    target_storage_tier: md1400-vms
+    future_storage_tier: md1400
+    current_boot_ref: md1400-vms:vm-215-disk-0
+    current_runtime_refs:
+      - md1400-vms:vm-215-disk-0
+      - md1400-vms:vm-215-disk-1
+    current_aux_refs: []
+    residual_config_refs:
+      - tank-vms:vm-215-cloudinit
+      - tank-vms:vm-215-disk-0
+      - tank-vms:vm-215-disk-1
     data_mount: /srv/data/surveillance
     data_source: "pve:md1400-vms/vm-215-disk-{0,1} (boot 50G + data 100G)"
     placement_status: compliant
-    description: "Moved tank-vms→md1400-vms 2026-03-23 (direct to archive tier, not critical). Boot+data disks on md1400. Old tank zvols+snapshots (601G) destroyed."
+    description: "Moved tank-vms→md1400-vms 2026-03-23 (direct to archive tier, not critical). Boot+data disks live on md1400-vms today."
+    future_data_source: "dataset-name normalization later, not a current placement requirement"
 
   archive-smb:
     vm_id: 220
     boot_disk_gb: 8
     current_storage_tier: data-vms
     target_storage_tier: data-vms
+    current_boot_ref: data-vms:subvol-220-disk-0
+    current_runtime_refs:
+      - data-vms:subvol-220-disk-0
+    current_aux_refs: []
+    residual_config_refs:
+      - tank-docker:subvol-220-disk-0
     data_mount: /md1400
     data_source: "pve:data/vms/subvol-220-disk-0 (rootfs 8G); serves md1400 datasets over Samba."
     placement_status: compliant
-    description: "Rootfs moved tank-docker→data-vms 2026-03-23. Serves md1400-backed archive/live-share data over Samba. Old tank subvol+snapshots destroyed."
+    description: "Rootfs moved tank-docker→data-vms 2026-03-23. Serves md1400-backed datasets over Samba."
 
 # Tank → Data migration priority (ordered by size, descending):
 # VMs 204/205/206/207/211/213 stay on boot-only (no migration needed).

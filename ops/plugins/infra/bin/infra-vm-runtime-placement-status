@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# infra-vm-runtime-placement-status
+# Read-only: compares authoritative placement refs against live qm/pct config on pve.
+# Does NOT mutate remote state.
+
+BINDING_FILE="${BINDING_FILE:-ops/bindings/infra.storage.placement.policy.yaml}"
+SSH_TARGETS_FILE="${SSH_TARGETS_FILE:-ops/bindings/ssh.targets.yaml}"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+_need yq
+_need ssh
+
+if [[ ! -f "$BINDING_FILE" ]]; then
+  echo "STOP: missing binding file: $BINDING_FILE" >&2
+  exit 2
+fi
+
+HOST="pve"
+SSH_TARGET="$HOST"
+if [[ -f "$SSH_TARGETS_FILE" ]]; then
+  resolved="$(yq -r ".targets[] | select(.id == \"$HOST\") | .ssh_target // empty" "$SSH_TARGETS_FILE" 2>/dev/null || true)"
+  [[ -n "$resolved" ]] && SSH_TARGET="$resolved"
+fi
+
+echo "=== VM Runtime Placement Status ==="
+echo "Host: $HOST"
+echo "Binding: $BINDING_FILE"
+echo ""
+
+PASS=0
+FAIL=0
+WARN=0
+
+check() {
+  local label="$1" status="$2" detail="$3"
+  if [[ "$status" == "PASS" ]]; then
+    ((PASS++))
+    echo "  PASS  $label  $detail"
+  elif [[ "$status" == "FAIL" ]]; then
+    ((FAIL++))
+    echo "  FAIL  $label  $detail"
+  else
+    ((WARN++))
+    echo "  WARN  $label  $detail"
+  fi
+}
+
+# Get all VM/CT keys from the binding
+vm_keys="$(yq -r '.vm_storage | keys | .[]' "$BINDING_FILE")"
+
+for key in $vm_keys; do
+  vm_id="$(yq -r ".vm_storage.\"$key\".vm_id" "$BINDING_FILE")"
+  boot_ref="$(yq -r ".vm_storage.\"$key\".current_boot_ref // \"\"" "$BINDING_FILE")"
+  placement_status="$(yq -r ".vm_storage.\"$key\".placement_status // \"unknown\"" "$BINDING_FILE")"
+
+  # Skip tombstoned VMs without boot refs
+  if [[ -z "$boot_ref" || "$boot_ref" == "null" ]]; then
+    if [[ "$placement_status" == "tombstoned" || "$placement_status" == "cold-capsule" ]]; then
+      check "VM${vm_id}" "PASS" "$key: tombstoned/capsule, no active refs"
+      continue
+    fi
+  fi
+
+  # Determine if this is a CT or VM
+  is_ct=false
+  current_tier="$(yq -r ".vm_storage.\"$key\".current_storage_tier // \"\"" "$BINDING_FILE")"
+  if [[ "$boot_ref" == *"subvol-"* ]]; then
+    is_ct=true
+  fi
+
+  # Fetch live config
+  if $is_ct; then
+    live_config="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$SSH_TARGET" \
+      "pct config $vm_id 2>/dev/null" 2>/dev/null || echo "UNREACHABLE")"
+  else
+    live_config="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$SSH_TARGET" \
+      "qm config $vm_id 2>/dev/null" 2>/dev/null || echo "UNREACHABLE")"
+  fi
+
+  if [[ "$live_config" == "UNREACHABLE" ]]; then
+    check "VM${vm_id}" "WARN" "$key: could not fetch config"
+    continue
+  fi
+
+  label="VM${vm_id}"
+
+  # --- Check boot ref ---
+  if [[ -n "$boot_ref" && "$boot_ref" != "null" ]]; then
+    # Extract storage:volume from boot ref (strip options after comma)
+    boot_storage="${boot_ref%%,*}"
+    if $is_ct; then
+      live_boot="$(echo "$live_config" | grep '^rootfs:' | sed 's/^rootfs: *//' | cut -d, -f1)"
+    else
+      live_boot="$(echo "$live_config" | grep -E '^scsi0:|^virtio0:' | head -1 | sed 's/^[^:]*: *//' | cut -d, -f1)"
+    fi
+
+    if [[ "$live_boot" == "$boot_storage" ]]; then
+      check "$label-boot" "PASS" "$key: boot=$boot_storage"
+    else
+      check "$label-boot" "FAIL" "$key: boot expected=$boot_storage live=$live_boot"
+    fi
+  fi
+
+  # --- Check runtime refs ---
+  runtime_refs="$(yq -r "(.vm_storage.\"$key\".current_runtime_refs // []) | .[]" "$BINDING_FILE" 2>/dev/null || true)"
+  for ref in $runtime_refs; do
+    ref_storage="${ref%%,*}"
+    if echo "$live_config" | grep -qF "$ref_storage"; then
+      check "$label-runtime" "PASS" "$key: runtime ref $ref_storage present"
+    else
+      check "$label-runtime" "FAIL" "$key: runtime ref $ref_storage missing from live config"
+    fi
+  done
+
+  # --- Check residual refs ---
+  residual_refs="$(yq -r "(.vm_storage.\"$key\".residual_config_refs // []) | .[]" "$BINDING_FILE" 2>/dev/null || true)"
+  for ref in $residual_refs; do
+    ref_storage="${ref%%,*}"
+    if echo "$live_config" | grep -qF "$ref_storage"; then
+      # Present as expected — it's declared residue
+      check "$label-residual" "PASS" "$key: declared residual $ref_storage present (pending retirement)"
+    else
+      # Residual already cleaned — good
+      check "$label-residual" "WARN" "$key: declared residual $ref_storage already removed from live config"
+    fi
+  done
+
+  # --- Check for undeclared unused refs ---
+  if $is_ct; then
+    live_unused="$(echo "$live_config" | grep '^unused[0-9]*:' | sed 's/^unused[0-9]*: *//' | cut -d, -f1 || true)"
+  else
+    live_unused="$(echo "$live_config" | grep '^unused[0-9]*:' | sed 's/^unused[0-9]*: *//' | cut -d, -f1 || true)"
+  fi
+
+  for unused_ref in $live_unused; do
+    declared=false
+    for ref in $residual_refs; do
+      ref_storage="${ref%%,*}"
+      if [[ "$unused_ref" == "$ref_storage" ]]; then
+        declared=true
+        break
+      fi
+    done
+    if ! $declared; then
+      check "$label-undeclared" "FAIL" "$key: undeclared unused ref $unused_ref in live config"
+    fi
+  done
+
+  # --- Check external refs (informational) ---
+  external_refs="$(yq -r "(.vm_storage.\"$key\".current_external_refs // []) | .[]" "$BINDING_FILE" 2>/dev/null || true)"
+  for ref in $external_refs; do
+    check "$label-external" "PASS" "$key: external ref $ref (not config-visible, informational)"
+  done
+done
+
+echo ""
+echo "=== Summary: $PASS pass, $FAIL fail, $WARN warn ==="
+if ((FAIL > 0)); then
+  exit 1
+fi
