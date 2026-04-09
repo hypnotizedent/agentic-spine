@@ -10,6 +10,8 @@
 #            what phase are they in, and what do they host?"
 #
 # Status values: planning | provisioned | registered | active | residual | decommissioned | abandoned
+# Closure classes: optional per-row refinement for decommissioned guests when the
+# status enum must stay stable for existing consumers.
 # Decommission policies: requires_migration_first | requires_final_backup | allow_immediate_destroy
 #
 # Residual: VM is running but its canonical role has migrated elsewhere.
@@ -18,7 +20,7 @@
 #   once the replacement has proven stable.
 
 version: 1
-updated: "2026-03-22"
+updated: "2026-04-09"
 owner: "@ronny"
 
 defaults:
@@ -72,8 +74,9 @@ vms:
     backup_target: vm-200-docker-host-primary
     health_probe_policy: full
     decommission_policy: requires_final_backup
+    closure_class: decommissioned_with_legacy_capsule
     tombstone:
-      class: cold_restore_capsule
+      class: legacy_capsule
       live_runtime_disk: none
       live_runtime_disk_ref: none
       live_runtime_disk_gb: 0
@@ -83,25 +86,24 @@ vms:
       removed_live_runtime_disk_ref: local-lvm:vm-200-disk-0
       removed_live_runtime_disk_gb: 300
       qemu_config_path: /etc/pve/qemu-server/200.conf
+      retained_restore_artifact_format: raw_disk_image_zst
       qemu_config_sha256_before_delete: 3fcc25b6b697139205de70a4f5d93c613f0d2a6ba2d49912c0d0fa703738f095
       qemu_config_sha256_after_delete: 2329aa1b90c440783bac6484a75ab5f83c73d4d3399c58a27b89c2cf84b007d5
       retained_restore_artifact: vm-200-docker-host-primary
-      retained_restore_artifact_path: /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst
-      retained_restore_storage: /md1400/backup-cold/vzdump/pve
-      retained_restore_artifact_size_bytes: 196820427012
-      retained_restore_artifact_mtime: "2026-03-07T08:24:01Z"
-      retained_restore_artifact_sha256: ee8b3844cb58fc7c7cb72433f95fc12df4957171afdfba6d01427551eb1182d4
-      retained_restore_artifact_verified_at: "2026-03-12T04:30:02Z"
+      retained_restore_artifact_path: /md1400/mint-legacy/200-docker-host/vm-200-disk-0.raw.zst
+      retained_restore_storage: /md1400/mint-legacy/200-docker-host
+      retained_restore_artifact_verified_at: "2026-04-09T15:03:00Z"
       retained_restore_count: 1
-      restore_review_by: "2026-09-06"
+      restore_review_by: "2026-06-12"
       restore_name_prefix: vm200-restore-
       restore_requires_isolation: true
       restore_reuse_legacy_identity: false
-      restore_command_example: qmrestore /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst 9200 --storage local-lvm --unique 1
+      restore_command_example: zstd -d /md1400/mint-legacy/200-docker-host/vm-200-disk-0.raw.zst -o /dev/pve/vm-<new-id>-disk-0
     description: >
       TOMBSTONED 2026-03-06 after Mint data/control-plane retirement.
       Live 300G VM disk removed from hot storage on 2026-03-12; keep exactly one cold
-      restore capsule on md1400 and do not return this guest to the runtime plane.
+      restore capsule on md1400 under the Mint legacy hold lane and do not return
+      this guest to the runtime plane.
       Historically hosted mint-os, artwork-module, quote-page, minio, files-api,
       mint-os-postgres, and mint-os-redis on pre-spine Linux Mint. If recovery is needed,
       restore only into an isolated temporary sandbox identity with no legacy DNS/routes.
@@ -352,6 +354,19 @@ vms:
     backup_target: vm-209-download-stack-primary
     health_probe_policy: selective  # tdarr/slskd intentionally stopped
     decommission_policy: requires_migration_first
+    closure_class: decommissioned_with_capsule_and_live_residue
+    tombstone:
+      class: cold_restore_capsule
+      live_runtime_disk: vm-209-disk-0
+      live_runtime_disk_ref: local-lvm:vm-209-disk-0
+      live_runtime_disk_gb: 50
+      live_runtime_disposition: stopped_vm_config_and_boot_disk_still_present
+      retained_restore_artifact: vm-209-download-stack-primary
+      retained_restore_artifact_path: /md1400/backup-cold/vzdump/pve/vzdump-qemu-209-2026_03_23-01_54_45.vma.zst
+      retained_restore_storage: /md1400/backup-cold/vzdump/pve
+      retained_restore_artifact_verified_at: "2026-04-09T15:03:00Z"
+      retained_restore_count: 1
+      restore_review_by: "2026-04-22"
     description: "Download services. Split from media-stack (VM 201). NFS mounts from pve."
 
   - id: 210
@@ -390,6 +405,19 @@ vms:
     backup_target: vm-210-streaming-stack-primary
     health_probe_policy: full
     decommission_policy: requires_migration_first
+    closure_class: decommissioned_with_capsule_and_live_residue
+    tombstone:
+      class: cold_restore_capsule
+      live_runtime_disk: vm-210-disk-0
+      live_runtime_disk_ref: local-lvm:vm-210-disk-0
+      live_runtime_disk_gb: 50
+      live_runtime_disposition: stopped_vm_config_and_boot_disk_still_present
+      retained_restore_artifact: vm-210-streaming-stack-primary
+      retained_restore_artifact_path: /md1400/backup-cold/vzdump/pve/vzdump-qemu-210-2026_03_23-02_05_15.vma.zst
+      retained_restore_storage: /md1400/backup-cold/vzdump/pve
+      retained_restore_artifact_verified_at: "2026-04-09T15:03:00Z"
+      retained_restore_count: 1
+      restore_review_by: "2026-04-22"
     description: "Streaming services. Split from media-stack (VM 201). NFS mounts from pve."
 
   - id: 211
@@ -617,6 +645,9 @@ vms:
     backup_target: null
     health_probe_policy: none
     decommission_policy: requires_migration_first
+    closure_class: deleted
+    deleted_from_runtime_at: "2026-02-12"
+    deletion_evidence: "qm status 201 reports config missing on 2026-04-09."
     description: >
       Destroyed 2026-02-12 (qm destroy --purge + zfs destroy tank/docker/media-stack).
       Services split to VM 209 (download) and VM 210 (streaming).

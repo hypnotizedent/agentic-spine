@@ -1,19 +1,19 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-22
+last_verified: 2026-04-09
 scope: estate-boringness-scorecard
 source_binding: ops/bindings/estate.surface.register.yaml
 ---
 
 # Estate Boringness Scorecard
 
-- Generated: `2026-03-22T15:25:07Z`
+- Generated: `2026-04-09T15:21:05Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
 - Repo surfaces tracked: `2`
 - Ghosts: `10`
 - Compatibility holds: `20`
-- Tombstones: `4`
+- Tombstones: `7`
 - Unknowns: `1`
 
 ## Repo Closure
@@ -77,8 +77,12 @@ source_binding: ops/bindings/estate.surface.register.yaml
 | lxc-103-download-home | home | guest | Historical stopped guest recorded in home.proxmox.inventory.yaml. |
 | vm-101-immich-home | home | guest | Historical stopped guest recorded in home.proxmox.inventory.yaml. |
 | vm-102-vaultwarden | home | vm | Legacy Vaultwarden (superseded by infra-core) |
-| vm-200-docker-host | shop | vm | TOMBSTONED 2026-03-06 after Mint data/control-plane retirement. Live 300G VM disk removed from hot storage on 2026-03-12; keep exactly one cold restore capsule on md1400 and do not return this guest to the runtime plane. Historically hosted mint-os, artwork-module, quote-page, minio, files-api, mint-os-postgres, and mint-os-redis on pre-spine Linux Mint. If recovery is needed, restore only into an isolated temporary sandbox identity with no legacy DNS/routes.
+| vm-200-docker-host | shop | vm | TOMBSTONED 2026-03-06 after Mint data/control-plane retirement. Live 300G VM disk removed from hot storage on 2026-03-12; keep exactly one cold restore capsule on md1400 under the Mint legacy hold lane and do not return this guest to the runtime plane. Historically hosted mint-os, artwork-module, quote-page, minio, files-api, mint-os-postgres, and mint-os-redis on pre-spine Linux Mint. If recovery is needed, restore only into an isolated temporary sandbox identity with no legacy DNS/routes.
  |
+| vm-201-media-stack | shop | vm | Destroyed 2026-02-12 (qm destroy --purge + zfs destroy tank/docker/media-stack). Services split to VM 209 (download) and VM 210 (streaming).
+ |
+| vm-209-download-stack | shop | vm | Download services. Split from media-stack (VM 201). NFS mounts from pve. |
+| vm-210-streaming-stack | shop | vm | Streaming services. Split from media-stack (VM 201). NFS mounts from pve. |
 
 ## Unknowns
 
@@ -91,7 +95,7 @@ source_binding: ops/bindings/estate.surface.register.yaml
 | Decision | Subject | Status | Rationale |
 | --- | --- | --- | --- |
 | safe_to_delete | vm-200-disk-0 on pve local-lvm | done | Cold capsule path/size/SHA-256 and qemu config were captured before delete, then qm disk unlink removed scsi0 and the backing LV on 2026-03-12T04:30:02Z. |
-| safe_to_migrate | legacy media-stack tarballs from /media/backups to /md1400/media-cold/legacy-media-stack-backups | done | Canonical media config backups already live under /md1400/backup-cold/apps/media-config. The historical warm-lane tarballs are now fully parked on md1400 and no longer live on media. |
+| safe_to_migrate | legacy media-stack tarballs from /media/backups to /md1400/media-cold/legacy-media-stack-backups | done | Canonical media config backups already live under /md1400/backups/configs/media-config. The historical warm-lane tarballs are now fully parked on md1400 and no longer live on media. |
 | safe_to_delete | media@forensic-20260226-2325 | blocked | Snapshot still acts as a forensic restore hold for the copy-first utilization wave. Deleting it would change the restore story, not just free space. |
 | safe_to_delete | Synology mint-os legacy residue | candidate | Residue is reviewed, non-canonical, and now tombstoned under /volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue. Delete only in a deliberate cleanup wave. |
 | safe_to_migrate | Synology stale backup lanes into /volume1/backups/_legacy_tombstones | done | Historical shop exact-offsite residue plus stale mint-os, home-assistant, finance, and media backup lanes were renamed into one explicit tombstone subtree on 2026-03-19 so they no longer look canonical. |

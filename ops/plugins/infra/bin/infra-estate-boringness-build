@@ -709,19 +709,22 @@ def build_tombstones(vm_lifecycle: dict[str, Any], home_proxmox: dict[str, Any])
             continue
         if str(vm.get("status") or "") != "decommissioned":
             continue
-        if int(vm.get("id") or 0) != 200:
-            continue
+        closure_class = str(vm.get("closure_class") or "").strip()
         tombstone = ensure_dict(vm.get("tombstone"))
+        if not tombstone and closure_class not in {"deleted"}:
+            continue
+        vm_id = int(vm.get("id") or 0)
+        hostname = str(vm.get("hostname") or "")
         tombstones.append(
             {
-                "id": "vm-200-docker-host",
+                "id": f"vm-{vm_id}-{hostname}",
                 "environment": "shop",
                 "kind": "vm",
-                "name": str(vm.get("hostname") or ""),
-                "status": "decommissioned",
+                "name": hostname,
+                "status": closure_class or "decommissioned",
                 "hot_footprint": str(tombstone.get("live_runtime_disk_ref") or ""),
-                "restore_artifact": str(tombstone.get("retained_restore_artifact") or ""),
-                "restore_storage": str(tombstone.get("retained_restore_storage") or ""),
+                "restore_artifact": str(tombstone.get("retained_restore_artifact") or "none declared"),
+                "restore_storage": str(tombstone.get("retained_restore_storage") or "none declared"),
                 "review_date": str(tombstone.get("restore_review_by") or ""),
                 "note": str(vm.get("description") or ""),
             }

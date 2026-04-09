@@ -1,7 +1,7 @@
 version: 1
 status: authoritative
 owner: "@ronny"
-updated_at: "2026-03-19"
+updated_at: "2026-04-09"
 scope: universal-boringness-closure
 
 purpose: >
@@ -26,17 +26,17 @@ evidence:
   live_reads:
     - environment: shop
       host: pve
-      observed_at_utc: "2026-03-12T04:30:02Z"
+      observed_at_utc: "2026-04-09T15:03:00Z"
       proof:
-        - "zpool list -o name,size,alloc,free,health"
-        - "zfs list -o name,used,avail,mountpoint tank media md1400"
-        - "ls -lh /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst"
-        - "sed -n '1,200p' /etc/pve/qemu-server/200.conf"
-        - "sha256sum /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst"
-        - "sha256sum /etc/pve/qemu-server/200.conf"
-        - "qm disk unlink 200 --idlist scsi0 --force 1"
-        - "grep -n '^scsi0:' /etc/pve/qemu-server/200.conf || true"
-        - "lvs --noheadings -o lv_name,vg_name,lv_size | grep vm-200-disk-0 || true"
+        - "qm status 200"
+        - "qm status 201"
+        - "qm status 209"
+        - "qm status 210"
+        - "qm config 200 | egrep '^(name|boot:|scsi|virtio|ide2|unused)'"
+        - "qm config 209 | egrep '^(name|boot:|scsi|virtio|ide2|unused)'"
+        - "qm config 210 | egrep '^(name|boot:|scsi|virtio|ide2|unused)'"
+        - "find /md1400 -type f \\( -name 'vm-200-disk-0.raw.zst' -o -name 'vzdump-qemu-209-*' -o -name 'vzdump-qemu-210-*' \\) | sort"
+        - "lvs --noheadings -o lv_name,vg_name | egrep 'vm-(200|201|209|210)-disk|vm-(200|201|209|210)-data' || true"
     - environment: shop
       host: pve
       observed_at_utc: "2026-03-12T05:08:17Z"
@@ -91,14 +91,11 @@ evidence:
 live_proof:
   shop:
     vm200:
-      observed_at_utc: "2026-03-12T04:30:02Z"
-      cold_capsule_path: /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst
-      cold_capsule_size_bytes: 196820427012
-      cold_capsule_mtime_utc: "2026-03-07T08:24:01Z"
-      cold_capsule_sha256: ee8b3844cb58fc7c7cb72433f95fc12df4957171afdfba6d01427551eb1182d4
+      observed_at_utc: "2026-04-09T15:03:00Z"
+      canonical_active_cold_plane: /md1400/backups/vm-images/pve
+      cold_capsule_path: /md1400/mint-legacy/200-docker-host/vm-200-disk-0.raw.zst
+      capsule_lane: mint-legacy
       qemu_config_path: /etc/pve/qemu-server/200.conf
-      qemu_config_sha256_before_delete: 3fcc25b6b697139205de70a4f5d93c613f0d2a6ba2d49912c0d0fa703738f095
-      qemu_config_sha256_after_delete: 2329aa1b90c440783bac6484a75ab5f83c73d4d3399c58a27b89c2cf84b007d5
       hot_lv_name: vm-200-disk-0
       hot_lv_vg: pve
       hot_lv_size_gb: 300
@@ -106,8 +103,29 @@ live_proof:
       hot_lv_removed_at_utc: "2026-03-12T04:30:02Z"
       hot_lv_delete_command: qm disk unlink 200 --idlist scsi0 --force 1
       post_delete_scsi0_present: false
-      jobs_cfg_entry_present: false
-      restore_command_example: qmrestore /md1400/backup-cold/vzdump/pve/vzdump-qemu-200-2026_03_07-02_00_03.vma.zst 9200 --storage local-lvm --unique 1
+      config_present: true
+      restore_command_example: zstd -d /md1400/mint-legacy/200-docker-host/vm-200-disk-0.raw.zst -o /dev/pve/vm-<new-id>-disk-0
+    vm209:
+      observed_at_utc: "2026-04-09T15:03:00Z"
+      canonical_active_cold_plane: /md1400/backups/vm-images/pve
+      retained_capsule_path: /md1400/backup-cold/vzdump/pve/vzdump-qemu-209-2026_03_23-01_54_45.vma.zst
+      capsule_lane: legacy_backup_cold
+      live_runtime_disk_ref: local-lvm:vm-209-disk-0
+      config_present: true
+      status: stopped
+    vm210:
+      observed_at_utc: "2026-04-09T15:03:00Z"
+      canonical_active_cold_plane: /md1400/backups/vm-images/pve
+      retained_capsule_path: /md1400/backup-cold/vzdump/pve/vzdump-qemu-210-2026_03_23-02_05_15.vma.zst
+      capsule_lane: legacy_backup_cold
+      live_runtime_disk_ref: local-lvm:vm-210-disk-0
+      config_present: true
+      status: stopped
+    vm201:
+      observed_at_utc: "2026-04-09T15:03:00Z"
+      status: deleted
+      config_present: false
+      note: qm status 201 reports config missing.
     media_pressure:
       observed_at_utc: "2026-03-12T05:08:17Z"
       media_pool_usage_pct: 99
@@ -243,7 +261,7 @@ decisions:
     subject: legacy media-stack tarballs from /media/backups to /md1400/media-cold/legacy-media-stack-backups
     environment: shop
     status: done
-    rationale: Canonical media config backups already live under /md1400/backup-cold/apps/media-config. The historical warm-lane tarballs are now fully parked on md1400 and no longer live on media.
+    rationale: Canonical media config backups already live under /md1400/backups/configs/media-config. The historical warm-lane tarballs are now fully parked on md1400 and no longer live on media.
   - decision_type: safe_to_delete
     subject: media@forensic-20260226-2325
     environment: shop
