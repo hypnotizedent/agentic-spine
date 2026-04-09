@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-POLICY_FILE="$ROOT/ops/bindings/infra.capacity.guard.policy.yaml"
+POLICY_FILE="${MEDIA_CAPACITY_GUARD_POLICY:-$ROOT/ops/bindings/infra.capacity.guard.policy.yaml}"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 
@@ -56,7 +56,7 @@ USE_SNAPSHOT_ONLY=0
 
 if [[ "$STORAGE_HOST_ID" == "media-home" ]]; then
   USE_SNAPSHOT_ONLY=1
-  SNAPSHOT_PATH="$ROOT/ops/bindings/domains/media/media.capacity.snapshot.yaml"
+  SNAPSHOT_PATH="${MEDIA_CAPACITY_SNAPSHOT_PATH:-$ROOT/ops/bindings/domains/media/media.capacity.snapshot.yaml}"
 fi
 
 WARN_PCT="$(yq -r '.thresholds.media_warn_pct // 80' "$POLICY_FILE" 2>/dev/null || echo 80)"

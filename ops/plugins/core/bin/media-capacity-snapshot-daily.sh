@@ -10,8 +10,14 @@ source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
 
 echo "[media-capacity-snapshot-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-spine_job_run \
-  "media-capacity-snapshot-daily:media.capacity.snapshot.build" \
-  "$CAP_RUNNER" cap run media.capacity.snapshot.build
+if [[ -n "${MEDIA_CAPACITY_SNAPSHOT_BUILD_BIN:-}" ]]; then
+  spine_job_run \
+    "media-capacity-snapshot-daily:media.capacity.snapshot.build" \
+    "$MEDIA_CAPACITY_SNAPSHOT_BUILD_BIN"
+else
+  spine_job_run \
+    "media-capacity-snapshot-daily:media.capacity.snapshot.build" \
+    "$CAP_RUNNER" cap run media.capacity.snapshot.build
+fi
 
 echo "[media-capacity-snapshot-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
