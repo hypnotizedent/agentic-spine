@@ -1,156 +1,29 @@
 #!/usr/bin/env python3
 """
-mint.intake.email.parse — Deterministic email-to-order parser.
+mint.intake.email.parse — thin shim.
 
-Extracts customer info, line items, and artwork references from raw email
-payloads into strict JSON with confidence scores. NEVER blocks on uncertainty —
-uncertain fields get low confidence scores and the pipeline proceeds.
-
-Authority:
-  - Order truth: ops/bindings/domains/mint/mint.order.truth.authority.yaml
-  - Schema: ops/plugins/domains/mint/schema/mint.core.schema.sql
-  - Storage: ops/plugins/domains/mint/storage/mint.storage.lifecycle.yaml
+Implementation lives in mint-modules. This shim execs the Mint-owned
+counterpart, preserving args, cwd, and environment.
 """
-from __future__ import annotations
-
-import argparse
-import json
+import os
 import sys
 from pathlib import Path
-from typing import Any
 
-ROOT = Path(__file__).resolve().parents[5]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+SPINE_ROOT = Path(__file__).resolve().parents[5]
 
-from ops.plugins.domains.mint.lib.mint_intake_common import (
-    extract_artwork_refs,
-    extract_line_items_from_body,
-    extract_sender_info,
-    generate_id,
-    now_utc,
-    route_asset_to_hot,
-    score_field,
-)
-from ops.plugins.domains.mint.lib.customer_inbox_common import (
-    mailbox_message_by_id,
-)
+def _mint_modules_root() -> Path:
+    explicit = os.environ.get("MINT_MODULES_ROOT")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    workspace = os.environ.get("WORKSPACE_ROOT")
+    if workspace:
+        candidate = Path(workspace) / "mint-modules"
+        if candidate.is_dir():
+            return candidate.resolve()
+    candidate = SPINE_ROOT.parent / "mint-modules"
+    if candidate.is_dir():
+        return candidate.resolve()
+    return (Path.home() / "code" / "mint-modules").resolve()
 
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Deterministic email-to-order parser with confidence scoring"
-    )
-    parser.add_argument("--message-id", help="Microsoft Graph message ID to fetch and parse")
-    parser.add_argument("--input-file", help="Path to raw email JSON file (alternative to --message-id)")
-    parser.add_argument("--mailbox", default="team@mintprints.com")
-    parser.add_argument("--route-assets", action="store_true",
-                        help="Download attachments and route to Hot storage")
-    parser.add_argument("--provisional-order-id",
-                        help="Pre-assigned order ID for asset routing (generated if omitted)")
-    parser.add_argument("--json", action="store_true", default=True)
-    return parser.parse_args()
-
-
-def load_message(args: argparse.Namespace) -> dict[str, Any]:
-    """Load raw email message from Graph API or local file."""
-    if args.input_file:
-        with open(args.input_file) as f:
-            return json.load(f)
-    if args.message_id:
-        return mailbox_message_by_id(mailbox=args.mailbox, message_id=args.message_id)
-    print("error: provide --message-id or --input-file", file=sys.stderr)
-    raise SystemExit(1)
-
-
-def parse_email(message: dict[str, Any], *, route_assets: bool = False,
-                provisional_order_id: str | None = None) -> dict[str, Any]:
-    """
-    Parse a raw email message into structured intake JSON.
-    Returns complete extraction with confidence scores on every field.
-    """
-    # --- Customer extraction ---
-    customer_info = extract_sender_info(message)
-
-    # --- Body text for line item parsing ---
-    body = (message.get("body") or {}).get("content") or ""
-    body_preview = message.get("bodyPreview") or ""
-    parse_text = body if body else body_preview
-
-    # --- Line item extraction ---
-    line_items = extract_line_items_from_body(parse_text)
-
-    # --- Artwork references ---
-    artwork_refs = extract_artwork_refs(message)
-
-    # --- Asset routing to Hot storage ---
-    order_id = provisional_order_id or generate_id()
-    routed_assets: list[dict[str, Any]] = []
-
-    if route_assets and artwork_refs:
-        for ref in artwork_refs:
-            if ref["type"] != "attachment":
-                continue
-            filename = ref["filename"]["value"]
-            if not filename or not ref["is_artwork"]["value"]:
-                continue
-            artwork_id = generate_id()
-            # Attachment content must be fetched separately via Graph API
-            # For now, record the routing intent with the deterministic path
-            from ops.plugins.domains.mint.lib.mint_intake_common import hot_artwork_path
-            target_path = hot_artwork_path(order_id, artwork_id)
-            routed_assets.append({
-                "artwork_id": artwork_id,
-                "filename": filename,
-                "attachment_id": ref.get("attachment_id", ""),
-                "target_path": str(target_path),
-                "status": "pending_download",
-            })
-
-    # --- Overall confidence ---
-    has_customer = customer_info["email"]["confidence"] > 0
-    has_items = len(line_items) > 0
-    has_artwork = len(artwork_refs) > 0
-
-    if has_customer and has_items and has_artwork:
-        overall = score_field("complete", markers_found=3)
-    elif has_customer and has_items:
-        overall = score_field("partial_no_artwork", markers_found=2)
-    elif has_customer:
-        overall = score_field("customer_only", markers_found=1)
-    else:
-        overall = score_field("minimal", markers_found=0)
-
-    return {
-        "capability": "mint.intake.email.parse",
-        "generated_at": now_utc(),
-        "provisional_order_id": order_id,
-        "source": {
-            "message_id": message.get("id"),
-            "conversation_id": message.get("conversationId"),
-            "received_at": message.get("receivedDateTime"),
-            "subject": score_field(message.get("subject"), explicit=True),
-        },
-        "customer": customer_info,
-        "line_items": line_items,
-        "artwork_refs": artwork_refs,
-        "routed_assets": routed_assets,
-        "extraction_completeness": overall,
-        "next_step": "mint.order.create",
-    }
-
-
-def main() -> int:
-    args = parse_args()
-    message = load_message(args)
-    result = parse_email(
-        message,
-        route_assets=args.route_assets,
-        provisional_order_id=args.provisional_order_id,
-    )
-    print(json.dumps(result, indent=2, default=str))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+target = _mint_modules_root() / "scripts" / "ops" / "mint-intake-email-parse.py"
+os.execvp(sys.executable, [sys.executable, str(target)] + sys.argv[1:])
