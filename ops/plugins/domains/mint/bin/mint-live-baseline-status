@@ -6,7 +6,7 @@
 #   - contract_parity_green: D222 + mint quoteflow guard must pass
 #   - agent_smoke_green: mint.runtime.proof must pass
 #   - queue_marker_green:
-#       mode A (deferred): execution queue must explicitly block EQ-1 by D225
+#       mode A (deferred): execution queue must explicitly block EQ-1 by live-baseline markers
 #       mode B (extracted_complete): queue block markers become N/A-green when EQ-1 is completed
 #
 # Usage:
@@ -47,10 +47,8 @@ QUEUE_FILE="$(yq -r '.queue_contract.file // ""' "$CONTRACT")"
 [[ -f "$QUEUE_FILE" ]] || stop "queue file not found: $QUEUE_FILE"
 
 auth_state="$(yq -r '.auth_module.state // ""' "$CONTRACT")"
-blocked_gate="$(yq -r '.auth_module.blocked_by_gate // ""' "$CONTRACT")"
 accepted_states="$(yq -r '.auth_module.accepted_states[]? // ""' "$CONTRACT" || true)"
 [[ -n "$auth_state" && "$auth_state" != "null" ]] || stop "auth_module.state missing in contract"
-[[ "$blocked_gate" == "D225" ]] || stop "auth_module.blocked_by_gate must be D225 (actual=$blocked_gate)"
 
 if [[ -n "$accepted_states" ]]; then
   if ! printf '%s\n' "$accepted_states" | rg -qx "$auth_state"; then
@@ -63,7 +61,7 @@ else
   esac
 fi
 
-deferred_marker_a="$(yq -r '.auth_module.deferred_markers[0] // .queue_contract.required_markers[0] // "BLOCKED_BY_D225"' "$CONTRACT")"
+deferred_marker_a="$(yq -r '.auth_module.deferred_markers[0] // .queue_contract.required_markers[0] // "BLOCKED_BY_LIVE_BASELINE"' "$CONTRACT")"
 deferred_marker_b="$(yq -r '.auth_module.deferred_markers[1] // .queue_contract.required_markers[1] // "AUTH_DEFERRED_UNTIL_LIVE_BASELINE"' "$CONTRACT")"
 completion_heading="$(yq -r '.auth_module.completion.heading // "### EQ-1: Auth Module"' "$CONTRACT")"
 completion_status_pattern="$(yq -r '.auth_module.completion.status_pattern // "Execution status.*COMPLETED"' "$CONTRACT")"
