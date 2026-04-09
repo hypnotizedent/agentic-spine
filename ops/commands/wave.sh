@@ -921,6 +921,12 @@ PYDEADLINE
     exit 1
   fi
 
+  # Synthetic waves use an isolated claim namespace so honesty probes
+  # never collide with real active waves on the same terminal.
+  if [[ "$wave_kind" == "synthetic" ]]; then
+    claimed_paths_raw="__synthetic__/${wave_id}"
+  fi
+
   reconcile_wave_path_claims "" "quiet"
 
   mkdir -p "$sd"
@@ -5575,36 +5581,6 @@ print(f"  Close receipt: {close_receipt_path}")
 print(f"  Merge receipt: {receipt_path}")
 print(f"  READY_FOR_ADOPTION={'true' if ready_for_adoption else 'false'}")
 PYCLOSE2
-
-  local close_receipt_json="$sd/close-receipt.json"
-  if [[ -f "$close_receipt_json" && -f "$SPINE_REPO/ops/lib/passive-friction-capture.sh" ]]; then
-    source "$SPINE_REPO/ops/lib/passive-friction-capture.sh"
-    local force_closed_signal dod_overridden_signal dod_override_note
-    force_closed_signal="$(python3 - "$close_receipt_json" <<'PYFORCE'
-import json, sys
-payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
-print("1" if payload.get("force_closed") else "0")
-PYFORCE
-)"
-    dod_overridden_signal="$(python3 - "$close_receipt_json" <<'PYDOD'
-import json, sys
-payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
-print("1" if payload.get("dod_overridden") else "0")
-PYDOD
-)"
-    dod_override_note="$(python3 - "$close_receipt_json" <<'PYDODNOTE'
-import json, sys
-payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
-print(str(payload.get("dod_override_reason") or ""))
-PYDODNOTE
-)"
-    if [[ "$force_closed_signal" == "1" ]]; then
-      auto_file_ceremony_override "force_close" "wave.close $wave_id --force disposition=$disposition" || true
-    fi
-    if [[ "$dod_overridden_signal" == "1" ]]; then
-      auto_file_ceremony_override "dod_override" "wave.close $wave_id --dod-override disposition=$disposition reason=${dod_override_note:-unspecified}" || true
-    fi
-  fi
 
   release_wave_path_claims "$wave_id" "released"
   sync_runtime_traffic_index "$sf" "close"

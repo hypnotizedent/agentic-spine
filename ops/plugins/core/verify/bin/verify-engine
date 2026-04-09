@@ -12,6 +12,7 @@
 #   E3  SQLite authority readable + active-state counts resolve
 #   E4  read-only capability dispatch (verify.engine.run self-test)
 #   E5  no dead hot-path entry references
+#   E6  no dead file references in governed scripts
 #
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -126,6 +127,47 @@ check E5 "no dead entry references on hot path" bash -c "
     done
     [[ \$dead_refs -eq 0 ]]
 "
+
+# E6: no dead file references in governed scripts
+# Guards against the dee8c8d5 bug class: deleting a file while live scripts
+# still source/invoke it by repo-relative path.
+check E6 "no dead file references in governed scripts" bash -c '
+    dead=0
+    scan_dirs=(
+        "'"$ROOT"'/ops/commands"
+        "'"$ROOT"'/ops/plugins/core/verify/bin"
+        "'"$ROOT"'/ops/plugins/core/authority/bin"
+        "'"$ROOT"'/ops/plugins/core/lifecycle/bin"
+        "'"$ROOT"'/ops/plugins/core/orchestration/bin"
+        "'"$ROOT"'/ops/plugins/core/session/bin"
+    )
+    for dir in "${scan_dirs[@]}"; do
+        [[ -d "$dir" ]] || continue
+        while IFS= read -r script; do
+            [[ -f "$script" ]] || continue
+            while IFS= read -r line; do
+                ref=""
+                # Skip comment lines and lines inside quoted strings used as examples
+                trimmed="${line#"${line%%[![:space:]]*}"}"
+                [[ "$trimmed" == \#* ]] && continue
+                # Match: source "$ROOT/path" or source "$CONTROL_ROOT/path" etc
+                if [[ "$line" =~ (source|python3|bash)[[:space:]]+[\"\$]*\{?(ROOT|CONTROL_ROOT|SPINE_REPO|_VE_COMPUTED|_VEH_COMPUTED)\}?/([^\"[:space:]\$]+) ]]; then
+                    ref="${BASH_REMATCH[3]}"
+                fi
+                [[ -n "$ref" ]] || continue
+                full="'"$ROOT"'/$ref"
+                if [[ ! -f "$full" && ! -d "$full" ]]; then
+                    echo "DEAD: $(basename "$script") -> $ref"
+                    dead=$((dead + 1))
+                fi
+            done < "$script"
+        done < <(find "$dir" -maxdepth 1 -type f \( -name "*.sh" -o -name "*.py" -o ! -name "*.*" \) 2>/dev/null)
+    done
+    if [[ $dead -gt 0 ]]; then
+        echo "$dead dead file reference(s) found"
+        exit 1
+    fi
+'
 
 if [[ "$json_mode" -eq 1 ]]; then
     # Build JSON arrays
