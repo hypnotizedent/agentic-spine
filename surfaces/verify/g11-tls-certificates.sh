@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-SCRIPT="$ROOT/ops/plugins/domains/communications/bin/communications-tls-status"
+SCRIPT="${COMMUNICATIONS_TLS_STATUS_BIN:-$ROOT/ops/plugins/domains/communications/bin/communications-tls-status}"
 
 [[ -x "$SCRIPT" ]] || {
   echo "G11 FAIL: missing TLS probe: $SCRIPT" >&2

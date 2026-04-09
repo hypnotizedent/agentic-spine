@@ -409,7 +409,7 @@ proposal_total = 0
 # ── Communications queue health ──────────────────────────────────────────
 import subprocess as _sp
 
-comms_status_bin = spine / "ops" / "plugins" / "communications" / "bin" / "communications-alerts-runtime-status"
+comms_status_bin = spine / "ops" / "plugins" / "domains" / "communications" / "bin" / "communications-alerts-runtime-status"
 comms_oneliner = ""
 comms_slo_status = "unknown"
 comms_pending = 0
