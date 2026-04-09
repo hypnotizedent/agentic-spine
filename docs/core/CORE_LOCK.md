@@ -16,7 +16,7 @@
 | Evidence | `~/code/.evidence/spine/` | Receipts, verify history/indexes, cap-run evidence |
 | Data | `~/code/.data/` | Externalized domain/runtime truth |
 | Backups | `~/code/.backups/` | Historical/tombstoned artifacts |
-| Foundation | `~/code/agentic-foundation/` | Extracted implementation source |
+| Foundation | archived to `~/code/.backups/foundation/repo-tombstones/` | Merged into workbench (2026-04-09) |
 
 ## Runtime Model
 

@@ -21,7 +21,7 @@ Everything the operator touches lives here or under `~/.codex`.
 | `workbench/` | Operator tooling | Feature branches OK in primary checkout. |
 | `mint-modules/` | Business service source | Main checkout stays on `main`. |
 | `ronny-products/` | Product repos | Main checkout stays on `main`. |
-| `agentic-foundation/` | Reusable implementation source | Main checkout stays on `main`. |
+| ~~`agentic-foundation/`~~ | Archived — merged into workbench (2026-04-09) | Tombstoned to `.backups/foundation/repo-tombstones/` |
 
 **Rule**: `agentic-spine` primary checkout must be on `main` and clean for daily operation. All wave/feature work happens in managed worktrees, and agent startup is doc-first plus CLI-first: read `NORTH_STAR.md`, `docs/governance/SPINE.md`, `docs/governance/SESSION_PROTOCOL.md`, then run `./bin/ops status --json`, `./bin/ops verify`, and `./bin/ops cap list`.
 
