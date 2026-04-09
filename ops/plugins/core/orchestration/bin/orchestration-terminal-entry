@@ -204,10 +204,14 @@ git -C "$repo" worktree prune >/dev/null 2>&1 || true
 
 occupied_wt="$(find_branch_worktree "$repo" "$target_branch" || true)"
 if [[ -n "$occupied_wt" && "$occupied_wt" != "$target_worktree" ]]; then
-  if [[ "$occupied_wt" == *"/.worktrees/"* || "$occupied_wt" == "$repo" ]]; then
+  # Coordinator (role C) may claim from the primary checkout — it operates at
+  # repo level and does not need lane-style worktree isolation.
+  primary_wt="$(git -C "$repo" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+  if [[ "$ROLE" == "C" && -n "$primary_wt" && "$occupied_wt" == "$primary_wt" ]]; then
+    target_worktree="$occupied_wt"
+  elif [[ "$occupied_wt" == *"/.worktrees/"* || "$occupied_wt" == "$repo" ]]; then
     entry_path_block "branch '$target_branch' already checked out at non-compliant path '$occupied_wt'"
-  fi
-  if [[ "$occupied_wt" == "${ENFORCED_PREFIX}"* ]]; then
+  elif [[ "$occupied_wt" == "${ENFORCED_PREFIX}"* ]]; then
     target_worktree="$occupied_wt"
   elif [[ "$FORCE" -eq 1 ]]; then
     entry_path_block "force cannot reuse non-compliant occupied worktree '$occupied_wt'"
