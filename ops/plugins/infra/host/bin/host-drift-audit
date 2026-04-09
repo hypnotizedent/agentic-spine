@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 BINDING="$ROOT/ops/bindings/host.audit.allowlist.yaml"
-SINK_BINDING="$ROOT/ops/bindings/home.output.sinks.yaml"
 EXCEPTIONS="$ROOT/ops/bindings/legacy.entrypoint.exceptions.yaml"
 
 fail() { echo "host.drift.audit ERROR: $*" >&2; exit 1; }
@@ -18,11 +17,12 @@ require_tool rg
 require_tool awk
 
 [[ -f "$BINDING" ]] || fail "binding missing: $BINDING"
-[[ -f "$SINK_BINDING" ]] || fail "sink binding missing: $SINK_BINDING"
-[[ -f "$EXCEPTIONS" ]] || fail "exceptions binding missing: $EXCEPTIONS"
 yq e '.' "$BINDING" >/dev/null 2>&1 || fail "invalid YAML: $BINDING"
-yq e '.' "$SINK_BINDING" >/dev/null 2>&1 || fail "invalid YAML: $SINK_BINDING"
-yq e '.' "$EXCEPTIONS" >/dev/null 2>&1 || fail "invalid YAML: $EXCEPTIONS"
+EXCEPTIONS_AVAILABLE=0
+if [[ -f "$EXCEPTIONS" ]]; then
+  yq e '.' "$EXCEPTIONS" >/dev/null 2>&1 || fail "invalid YAML: $EXCEPTIONS"
+  EXCEPTIONS_AVAILABLE=1
+fi
 
 TMP_FINDINGS="$(mktemp)"
 trap 'rm -f "$TMP_FINDINGS"' EXIT
@@ -58,6 +58,8 @@ parse_epoch() {
 exception_valid_for_label() {
   local label="$1"
   local payload="$2"
+
+  [[ "$EXCEPTIONS_AVAILABLE" -eq 1 ]] || return 1
 
   local expires
   expires="$(yq e ".exceptions[] | select(.label == \"$label\") | .expires_at" "$EXCEPTIONS" | head -n 1)"
@@ -160,8 +162,9 @@ if command -v launchctl >/dev/null 2>&1; then
 fi
 
 # 4) Home-root sink scan.
-HOST_ROOT="$(yq e '.host_root' "$SINK_BINDING")"
-if [[ -d "$HOST_ROOT" ]]; then
+# Uses host_root from the audit allowlist binding directly.
+HOST_ROOT="$(yq e '.host_root // ""' "$BINDING")"
+if [[ -n "$HOST_ROOT" && -d "$HOST_ROOT" ]]; then
   while IFS= read -r f; do
     [[ -n "${f:-}" ]] || continue
     add_finding "medium" "home_root_sink" "Home-root log artifact detected." "$f"
