@@ -69,7 +69,7 @@ model:
   vzdump_schedule_policy:
     version: 4
     updated_at: "2026-04-07"
-    canonical_cold_plane: "/md1400/backup-cold/vzdump/pve"
+    canonical_cold_plane: "/md1400/backups/vm-images/pve"
     generator_surface: "/data/backups/vzdump/dump"
     cold_copy_mode: "Direct mirror from generator surface to canonical cold plane."
     retention_buckets:
@@ -141,49 +141,49 @@ model:
       base_path: /data/backups/vzdump/dump
       max_total_gb: 4000
       max_file_count: 120
-      description: "Local pve vzdump generation lane only. This is the shop generator surface, not the canonical cold recovery plane. Canonical cold copies are promoted from here into /md1400/backup-cold/vzdump/pve."
+      description: "Local pve vzdump generation lane only. This is the shop generator surface, not the canonical cold recovery plane. Canonical cold copies are promoted from here into /md1400/backups/vm-images/pve."
     pve-vzdump-cold-canonical:
       host: pve
-      base_path: /md1400/backup-cold/vzdump/pve
+      base_path: /md1400/backups/vm-images/pve
       max_total_gb: 6000
       max_file_count: 200
-      description: "Canonical cold recovery lane for shop VM/LXC artifacts on md1400. This is the authoritative restore surface for shop hypervisor backups."
+      description: "Canonical cold recovery lane for shop VM/LXC artifacts on md1400. This is the authoritative vm-images restore surface for shop hypervisor backups."
     r730xd-finance-backups:
       host: pve
-      base_path: /md1400/backup-cold/apps/finance
+      base_path: /md1400/backups
       max_total_gb: 5000
       max_file_count: 10000
-      description: "Canonical 730XD backup plane for Finance domain (Firefly, Ghostfolio, Paperless)"
+      description: "Canonical 730XD backup plane root for Finance domain. Restore-intent class paths under /md1400/backups are authoritative."
     r730xd-mint-backups:
       host: pve
-      base_path: /md1400/backup-cold/apps/mint-data
+      base_path: /md1400/backups
       max_total_gb: 1000
       max_file_count: 1000
-      description: "Canonical 730XD backup plane for Mint data domain (Postgres)"
+      description: "Canonical 730XD backup plane root for Mint data domain. Restore-intent class paths under /md1400/backups are authoritative."
     r730xd-communications-backups:
       host: pve
-      base_path: /md1400/backup-cold/apps/communications
+      base_path: /md1400/backups
       max_total_gb: 10000
       max_file_count: 1000
-      description: "Canonical 730XD backup plane for Communications domain (mail-archiver, Stalwart)"
+      description: "Canonical 730XD backup plane root for Communications domain. Restore-intent class paths under /md1400/backups are authoritative."
     r730xd-infra-core-backups:
       host: pve
-      base_path: /md1400/backup-cold/apps/infra-core
+      base_path: /md1400/backups
       max_total_gb: 500
       max_file_count: 1000
-      description: "Canonical 730XD backup plane for Infra-core domain (Infisical, Vaultwarden)"
+      description: "Canonical 730XD backup plane root for Infra-core domain. Restore-intent class paths under /md1400/backups are authoritative."
     r730xd-dev-tools-backups:
       host: pve
-      base_path: /md1400/backup-cold/apps/dev-tools
+      base_path: /md1400/backups
       max_total_gb: 1000
       max_file_count: 1000
-      description: "Canonical 730XD backup plane for Dev-tools domain (Gitea)"
+      description: "Canonical 730XD backup plane root for Dev-tools domain. Restore-intent class paths under /md1400/backups are authoritative."
     r730xd-media-config-backups:
       host: pve
-      base_path: /md1400/backup-cold/apps/media-config
+      base_path: /md1400/backups/configs/media-config
       max_total_gb: 500
       max_file_count: 1000
-      description: "Secondary/offsite cold copy lane for media-home combined config-state archives. Legacy split-shop VM capsules remain historical restore residue only."
+      description: "Secondary/offsite cold copy lane for media-home combined config-state archives. Restore-intent class path under /md1400/backups/configs is authoritative."
     media-config-backups:
       host: nas
       base_path: /volume1/backups/apps/media-config
@@ -210,11 +210,11 @@ model:
     # nas-app-backups REMOVED 2026-03-08: Fully deprecated, migration complete to 730XD canonical plane.
     r730xd-archive-smb-snapshots:
       host: pve
-      base_path: /md1400/backup-cold/archive-smb/snapshots
+      base_path: /md1400/backups/configs/archive-smb-snapshots
       max_total_gb: 2
       max_file_count: 256
       snapshot_retention_days: 14
-      description: "ZFS snapshot protection for archive-SMB datasets (ronny-projects 11.9G, mint-legacy 127G). Cron-managed daily snapshots via /etc/cron.d/archive-smb-snapshot with 14-day retention."
+      description: "ZFS snapshot protection manifests for archive-SMB datasets. Config-manifest class path under /md1400/backups/configs is authoritative."
   backup_admission_states:
     - planned
     - production_ready
@@ -358,6 +358,7 @@ runtime_units:
     restore_class: app-dry-run-monthly
     inventory_targets:
       - app-gitea
+      - app-gitea-export
     backup_admission_state: production_ready
     description: "Rebuildable dev environment. VM-level vzdump retired; app-level Gitea backup remains."
   - unit_id: vm-207-ai-consolidation
@@ -442,6 +443,12 @@ runtime_units:
     inventory_targets:
       - vm-214-communications-stack-primary
       - app-mail-archiver
+      - app-mail-archiver-offsite
+      - app-mail-archiver-uploads-offsite
+      - app-mail-archiver-manifest-offsite
+      - app-stalwart-offsite
+      - app-stalwart-config-offsite
+      - app-stalwart-manifest-offsite
     backup_admission_state: planned
     description: "Communications VM 214 remains active, but the primary VM artifact was stale in the 2026-03-18 census. App-mail-archiver is current; production-ready backup admission is withheld until the primary lane is fresh again."
   - unit_id: vm-215-surveillance-stack
@@ -549,8 +556,8 @@ runtime_units:
     data_class: tier1_critical
     include_paths:
       - /opt/stacks
-      - /md1400/backup-cold/apps/infra-core/infisical
-      - /md1400/backup-cold/apps/infra-core/vaultwarden
+      - /md1400/backups/db-dumps/infra-core/infisical
+      - /md1400/backups/app-data/infra-core/vaultwarden
     exclude_paths:
       - payload_regenerable
     destination_lane: r730xd-infra-core-backups
@@ -647,7 +654,8 @@ runtime_units:
     data_class: small_state
     include_paths:
       - /opt/stacks/gitea
-      - /md1400/backup-cold/apps/dev-tools/gitea
+      - /md1400/backups/db-dumps/dev-tools/gitea
+      - /md1400/backups/exports/dev-tools/gitea
     exclude_paths:
       - payload_regenerable
     destination_lane: r730xd-dev-tools-backups
@@ -655,6 +663,7 @@ runtime_units:
     restore_class: app-dry-run-monthly
     inventory_targets:
       - app-gitea
+      - app-gitea-export
     backup_admission_state: production_ready
   - unit_id: container-fleet-automation-stack
     kind: container-fleet
@@ -664,7 +673,7 @@ runtime_units:
     include_paths:
       - /home/automation/stacks
       - /home/automation/backups/n8n-workflows
-      - /md1400/backup-cold/apps/infra-core/n8n
+      - /md1400/backups/app-data/infra-core/n8n
     exclude_paths:
       - payload_regenerable
     destination_lane: r730xd-infra-core-backups
@@ -682,9 +691,11 @@ runtime_units:
     data_class: tier1_critical
     include_paths:
       - /opt/stacks/finance
-      - /md1400/backup-cold/apps/finance/firefly
-      - /md1400/backup-cold/apps/finance/ghostfolio
-      - /md1400/backup-cold/apps/finance/paperless
+      - /md1400/backups/db-dumps/finance/firefly
+      - /md1400/backups/db-dumps/finance/ghostfolio
+      - /md1400/backups/db-dumps/finance/paperless
+      - /md1400/backups/exports/finance/paperless
+      - /md1400/backups/configs/finance
     exclude_paths:
       - payload_regenerable
     destination_lane: r730xd-finance-backups
@@ -704,7 +715,8 @@ runtime_units:
     data_class: tier1_critical
     include_paths:
       - /opt/stacks/mint-data
-      - /md1400/backup-cold/apps/mint-data/postgres
+      - /md1400/backups/db-dumps/mint-data/postgres
+      - /md1400/backups/configs/mint-data/postgres
     exclude_paths:
       - payload_regenerable
     destination_lane: r730xd-mint-backups
@@ -747,7 +759,11 @@ runtime_units:
       - vm-214-communications-stack-primary
       - app-mail-archiver
       - app-mail-archiver-offsite
+      - app-mail-archiver-uploads-offsite
+      - app-mail-archiver-manifest-offsite
       - app-stalwart-offsite
+      - app-stalwart-config-offsite
+      - app-stalwart-manifest-offsite
     backup_admission_state: production_ready
 targets:
   # =============================================================================
@@ -759,7 +775,7 @@ targets:
     enabled: false
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/md1400/backups/vm-images/pve"
     glob: "vzdump-qemu-200-*.vma.zst"
     stale_after_hours: 720
     classification: important
@@ -788,7 +804,7 @@ targets:
     enabled: false
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/md1400/backups/vm-images/pve"
     glob: "vzdump-qemu-205-*.vma.zst"
     stale_after_hours: 26
     classification: rebuildable
@@ -797,7 +813,7 @@ targets:
     enabled: false
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/md1400/backups/vm-images/pve"
     glob: "vzdump-qemu-206-*.vma.zst"
     stale_after_hours: 26
     classification: rebuildable
@@ -815,7 +831,7 @@ targets:
     enabled: false
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/md1400/backups/vm-images/pve"
     glob: "vzdump-qemu-209-*.vma.zst"
     stale_after_hours: 26
     classification: decommissioned
@@ -826,7 +842,7 @@ targets:
     enabled: false
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/md1400/backups/vm-images/pve"
     glob: "vzdump-qemu-210-*.vma.zst"
     stale_after_hours: 26
     classification: decommissioned
@@ -837,7 +853,7 @@ targets:
     enabled: false
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/md1400/backups/vm-images/pve"
     glob: "vzdump-qemu-207-*.vma.zst"
     stale_after_hours: 26
     classification: rebuildable
@@ -882,7 +898,7 @@ targets:
     enabled: false
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/vzdump/pve"
+    base_path: "/md1400/backups/vm-images/pve"
     glob: "vzdump-qemu-215-*.vma.zst"
     stale_after_hours: 26
     classification: rebuildable
@@ -909,25 +925,61 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/communications/mail-archiver"
+    base_path: "/md1400/backups/db-dumps/communications/mail-archiver"
     glob: "mail-archiver-db-*.sql.gz"
     stale_after_hours: 26
     classification: important
-    description: "Mail-archiver 730XD offsite backups on the canonical communications plane (DB dump + uploads + manifest under /md1400/backup-cold/apps/communications/mail-archiver)."
+    description: "Mail-archiver database dump on the canonical communications db-dumps plane."
+  - name: app-mail-archiver-uploads-offsite
+    enabled: true
+    kind: file_glob
+    host: pve
+    base_path: "/md1400/backups/app-data/communications/mail-archiver"
+    glob: "mail-archiver-uploads-*.tar.gz"
+    stale_after_hours: 26
+    classification: important
+    description: "Mail-archiver uploads archive on the canonical communications app-data plane."
+  - name: app-mail-archiver-manifest-offsite
+    enabled: true
+    kind: file_glob
+    host: pve
+    base_path: "/md1400/backups/configs/communications/mail-archiver"
+    glob: "mail-archiver-manifest-*.txt"
+    stale_after_hours: 26
+    classification: important
+    description: "Mail-archiver backup manifest on the canonical communications configs plane."
   - name: app-stalwart-offsite
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/communications/stalwart"
+    base_path: "/md1400/backups/app-data/communications/stalwart"
     glob: "stalwart-*.tar.gz"
     stale_after_hours: 26
     classification: important
-    description: "Stalwart 730XD offsite backups (data volume + config). Finance Stack Doctrine v1 compliance. Migrated to 730XD canonical backup plane 2026-03-08."
+    description: "Stalwart data-volume archive on the canonical communications app-data plane."
+  - name: app-stalwart-config-offsite
+    enabled: true
+    kind: file_glob
+    host: pve
+    base_path: "/md1400/backups/configs/communications/stalwart"
+    glob: "stalwart-config-*.tar.gz"
+    stale_after_hours: 26
+    classification: important
+    description: "Stalwart config archive on the canonical communications configs plane."
+  - name: app-stalwart-manifest-offsite
+    enabled: true
+    kind: file_glob
+    host: pve
+    base_path: "/md1400/backups/configs/communications/stalwart"
+    glob: "stalwart-manifest-*.txt"
+    stale_after_hours: 26
+    classification: important
+    description: "Stalwart backup manifest on the canonical communications configs plane."
   - name: app-archive-smb-snapshot-manifest
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/archive-smb/snapshots"
+    base_path: "/md1400/backups/configs/archive-smb-snapshots"
     glob: "archive-smb-snapshot-*.txt"
     stale_after_hours: 26
     classification: critical
@@ -1028,7 +1080,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/infra-core/infisical"
+    base_path: "/md1400/backups/db-dumps/infra-core/infisical"
     glob: "infisical-db-*.sql.gz"
     stale_after_hours: 26
     classification: critical
@@ -1037,7 +1089,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/mint-data/postgres"
+    base_path: "/md1400/backups/db-dumps/mint-data/postgres"
     glob: "*.sql.gz"
     stale_after_hours: 26
     classification: critical
@@ -1046,7 +1098,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/mint-data/postgres"
+    base_path: "/md1400/backups/configs/mint-data/postgres"
     glob: "mint-postgres-manifest-*.txt"
     stale_after_hours: 26
     classification: critical
@@ -1055,16 +1107,25 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/dev-tools/gitea"
+    base_path: "/md1400/backups/db-dumps/dev-tools/gitea"
     glob: "gitea-db-*.sql.gz"
     stale_after_hours: 26
     classification: critical
-    description: "Gitea PostgreSQL backup. Daily 02:55 via /usr/local/bin/gitea-backup.sh on VM 206, pg_dump + gitea dump → 730XD canonical. Runtime script verified 2026-03-08."
+    description: "Gitea PostgreSQL backup on the canonical dev-tools db-dumps plane."
+  - name: app-gitea-export
+    enabled: true
+    kind: file_glob
+    host: pve
+    base_path: "/md1400/backups/exports/dev-tools/gitea"
+    glob: "gitea-dump-*.zip"
+    stale_after_hours: 26
+    classification: critical
+    description: "Gitea application export on the canonical dev-tools exports plane."
   - name: app-vaultwarden
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/infra-core/vaultwarden"
+    base_path: "/md1400/backups/app-data/infra-core/vaultwarden"
     glob: "vaultwarden-data-*.tar.gz"
     stale_after_hours: 26
     classification: critical
@@ -1082,7 +1143,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/finance/firefly"
+    base_path: "/md1400/backups/db-dumps/finance/firefly"
     glob: "firefly-db-*.sql.gz"
     stale_after_hours: 26
     classification: critical
@@ -1091,16 +1152,16 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/finance"
+    base_path: "/md1400/backups/configs/finance"
     glob: "finance-backup-manifest-*.txt"
     stale_after_hours: 26
     classification: critical
-    description: "Finance stack backup manifest on the 730XD canonical finance plane. Produced by finance-stack-backup.sh and used to prove Firefly/Ghostfolio/Paperless bundle completeness."
+    description: "Finance stack backup manifest on the canonical finance configs plane. Produced by finance-stack-backup.sh and used to prove Firefly/Ghostfolio/Paperless bundle completeness."
   - name: app-ghostfolio
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/finance/ghostfolio"
+    base_path: "/md1400/backups/db-dumps/finance/ghostfolio"
     glob: "ghostfolio-db-*.sql.gz"
     stale_after_hours: 26
     classification: important
@@ -1109,7 +1170,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/finance/paperless"
+    base_path: "/md1400/backups/db-dumps/finance/paperless"
     glob: "paperless-db-*.sql.gz"
     stale_after_hours: 26
     classification: critical
@@ -1118,7 +1179,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/finance/paperless"
+    base_path: "/md1400/backups/exports/finance/paperless"
     glob: "paperless-export-*.zip"
     stale_after_hours: 26
     classification: critical
@@ -1136,7 +1197,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/md1400/backup-cold/apps/infra-core/n8n"
+    base_path: "/md1400/backups/app-data/infra-core/n8n"
     glob: "n8n-workflows-*.tar.gz"
     stale_after_hours: 26
     classification: important
