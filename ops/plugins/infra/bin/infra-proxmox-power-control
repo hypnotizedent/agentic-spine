@@ -15,8 +15,10 @@ set -euo pipefail
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
 
-IDRAC_IP="192.168.1.250"
-JUMP_HOST_ID="pve"
+SSH_BINDING="${SPINE_ROOT}/ops/bindings/ssh.targets.yaml"
+IDRAC_IP="$(yq -r '.ssh.targets[] | select(.id == "idrac-shop") | .host // "192.168.1.250"' "$SSH_BINDING" 2>/dev/null | head -n1)"
+JUMP_HOST_ID="$(yq -r '.ssh.targets[] | select(.id == "idrac-shop") | .probe_via // ""' "$SSH_BINDING" 2>/dev/null | head -n1)"
+RECOVERY_ACCESS="$(yq -r '.ssh.targets[] | select(.id == "idrac-shop") | .recovery_access // "direct_lan_only"' "$SSH_BINDING" 2>/dev/null | head -n1)"
 
 usage() {
     cat <<'EOF'
@@ -29,9 +31,9 @@ Usage:
   infra-proxmox-power-control cycle [--execute]
 
 Dry-run by default. Pass --execute to send the IPMI command.
-Uses iDRAC at 192.168.1.250 via PVE as jump host.
-For power-on when host is off, uses Tailscale path to PVE if reachable,
-otherwise requires LAN access to iDRAC directly.
+Recovery access is direct LAN only (192.168.1.250).
+When on shop LAN, uses direct IPMI. When off-LAN and hypervisor
+is up, falls back to probe_via jump host for convenience.
 EOF
 }
 
@@ -76,26 +78,49 @@ if [[ -z "$IDRAC_PASS" ]]; then
     exit 1
 fi
 
-# Try to use PVE as jump host for IPMI (iDRAC is LAN-only)
-SSH_HOST="$(ssh_resolve_ssh_host_with_fallback "$JUMP_HOST_ID" 2>/dev/null | awk '{print $1}' || true)"
-SSH_USER="$(ssh_resolve_user "$JUMP_HOST_ID" 2>/dev/null || echo root)"
+# Resolve access path: direct LAN first (recovery path), jump host fallback (convenience)
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+USE_DIRECT=false
+SSH_HOST=""
+SSH_USER=""
+ACCESS_PATH=""
+
+# Try direct LAN first (the truthful recovery path)
+if ping -c 1 -W 2 "$IDRAC_IP" >/dev/null 2>&1; then
+    USE_DIRECT=true
+    ACCESS_PATH="direct_lan"
+elif [[ -n "$JUMP_HOST_ID" && "$JUMP_HOST_ID" != "null" ]]; then
+    SSH_HOST="$(ssh_resolve_ssh_host_with_fallback "$JUMP_HOST_ID" 2>/dev/null | awk '{print $1}' || true)"
+    SSH_USER="$(ssh_resolve_user "$JUMP_HOST_ID" 2>/dev/null || echo root)"
+    if [[ -n "$SSH_HOST" && "$SSH_HOST" != "unreachable" ]]; then
+        ACCESS_PATH="jump_via_${JUMP_HOST_ID}"
+    else
+        ACCESS_PATH="unreachable"
+    fi
+else
+    ACCESS_PATH="unreachable"
+fi
 
 run_ipmi() {
     local ipmi_cmd="$1"
-    if [[ -n "$SSH_HOST" && "$SSH_HOST" != "unreachable" ]]; then
-        # Via PVE jump host
+    if $USE_DIRECT; then
+        # Direct LAN (recovery path)
+        ipmitool -I lanplus -H "$IDRAC_IP" -U "$IDRAC_USER" -P "$IDRAC_PASS" $ipmi_cmd 2>&1
+    elif [[ -n "$SSH_HOST" && "$SSH_HOST" != "unreachable" ]]; then
+        # Via jump host (convenience path)
         ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
             "ipmitool -I lanplus -H $IDRAC_IP -U $(printf '%q' "$IDRAC_USER") -P $(printf '%q' "$IDRAC_PASS") $ipmi_cmd" 2>&1
     else
-        # Direct (must be on LAN)
-        ipmitool -I lanplus -H "$IDRAC_IP" -U "$IDRAC_USER" -P "$IDRAC_PASS" $ipmi_cmd 2>&1
+        echo "FAIL: iDRAC unreachable — direct LAN failed, no jump host available" >&2
+        return 1
     fi
 }
 
 echo "=== PVE POWER CONTROL ==="
 echo "iDRAC: $IDRAC_IP"
-echo "Jump host: ${SSH_HOST:-direct}"
+echo "access_path: ${ACCESS_PATH}"
+echo "recovery_access: ${RECOVERY_ACCESS}"
 echo ""
 
 case "$ACTION" in

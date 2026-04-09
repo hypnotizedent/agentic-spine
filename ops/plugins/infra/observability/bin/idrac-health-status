@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# idrac-health-status - Read-only health probe for Dell iDRAC (LAN-only via PVE jump host)
+# idrac-health-status - Read-only health probe for Dell iDRAC
 #
-# Probes iDRAC at 192.168.1.250 through PVE SSH tunnel.
+# Probes iDRAC at 192.168.1.250. Tries direct LAN first (recovery path),
+# falls back to PVE SSH tunnel (convenience path when hypervisor is up).
 # Strategy: Redfish API first, IPMI fallback.
 # Credentials: Infisical (infrastructure/prod)
+#
+# Recovery truth: iDRAC recovery access is direct_lan_only.
+# probe_via pve is convenience-only and unavailable when hypervisor is down.
 #
 # Usage:
 #   idrac-health-status
@@ -30,16 +34,39 @@ command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
 [[ -x "$INFISICAL_AGENT" ]] || stop "missing dependency: $INFISICAL_AGENT"
 
-# ── PVE jump host from binding ────────────────────────────────
+# ── Resolve iDRAC access path from binding ────────────────────
+# Recovery truth: direct LAN is the authoritative recovery path.
+# PVE jump is convenience-only (unavailable when hypervisor is down).
+IDRAC_RECOVERY_ACCESS="$(yq -r '.ssh.targets[] | select(.id == "idrac-shop") | .recovery_access // "direct_lan_only"' "$SSH_BINDING" 2>/dev/null | head -n1)"
+PROBE_VIA="$(yq -r '.ssh.targets[] | select(.id == "idrac-shop") | .probe_via // ""' "$SSH_BINDING" 2>/dev/null | head -n1)"
+
 DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$SSH_BINDING" 2>/dev/null || echo "root")"
 DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_BINDING" 2>/dev/null || echo "22")"
-PVE_HOST_IP="$(yq -r '.ssh.targets[] | select(.id == "pve") | .host // ""' "$SSH_BINDING" | head -n1)"
-PVE_USER="$(yq -r '.ssh.targets[] | select(.id == "pve") | .user // ""' "$SSH_BINDING" | head -n1)"
-PVE_PORT="$(yq -r '.ssh.targets[] | select(.id == "pve") | .port // ""' "$SSH_BINDING" | head -n1)"
-[[ -n "$PVE_HOST_IP" && "$PVE_HOST_IP" != "null" ]] || stop "ssh target 'pve' missing host in $SSH_BINDING"
-[[ -n "$PVE_USER" && "$PVE_USER" != "null" ]] || PVE_USER="$DEF_USER"
-[[ -n "$PVE_PORT" && "$PVE_PORT" != "null" ]] || PVE_PORT="$DEF_PORT"
-PVE_HOST="${PVE_USER}@${PVE_HOST_IP}"
+
+# Determine access mode: try direct LAN first, fall back to jump host
+USE_JUMP=false
+JUMP_HOST=""
+ACCESS_PATH="direct_lan"
+
+if curl -sk --connect-timeout 3 --max-time 5 "https://${IDRAC_HOST}/redfish/v1" >/dev/null 2>&1 || \
+   ping -c 1 -W 2 "$IDRAC_HOST" >/dev/null 2>&1; then
+  # Direct LAN reachable — use direct access (recovery path)
+  ACCESS_PATH="direct_lan"
+elif [[ -n "$PROBE_VIA" && "$PROBE_VIA" != "null" ]]; then
+  # Direct unreachable, try convenience jump via probe_via target
+  JUMP_IP="$(yq -r ".ssh.targets[] | select(.id == \"$PROBE_VIA\") | .host // \"\"" "$SSH_BINDING" | head -n1)"
+  JUMP_USER="$(yq -r ".ssh.targets[] | select(.id == \"$PROBE_VIA\") | .user // \"\"" "$SSH_BINDING" | head -n1)"
+  JUMP_PORT="$(yq -r ".ssh.targets[] | select(.id == \"$PROBE_VIA\") | .port // \"\"" "$SSH_BINDING" | head -n1)"
+  [[ -n "$JUMP_IP" && "$JUMP_IP" != "null" ]] || stop "probe_via target '$PROBE_VIA' missing host in $SSH_BINDING"
+  [[ -n "$JUMP_USER" && "$JUMP_USER" != "null" ]] || JUMP_USER="$DEF_USER"
+  [[ -n "$JUMP_PORT" && "$JUMP_PORT" != "null" ]] || JUMP_PORT="$DEF_PORT"
+  JUMP_HOST="${JUMP_USER}@${JUMP_IP}"
+  USE_JUMP=true
+  ACCESS_PATH="jump_via_${PROBE_VIA}"
+else
+  # No jump host configured and direct unreachable
+  stop "iDRAC unreachable: direct LAN failed, no probe_via jump host configured"
+fi
 
 # ── Credentials ───────────────────────────────────────────────
 IDRAC_USER=$("$INFISICAL_AGENT" get infrastructure prod IDRAC_ADMIN_USER 2>/dev/null) || stop "failed to retrieve IDRAC_ADMIN_USER from Infisical"
@@ -50,16 +77,22 @@ IDRAC_PASS=$("$INFISICAL_AGENT" get infrastructure prod IDRAC_ADMIN_PASSWORD 2>/
 
 # ── Header ────────────────────────────────────────────────────
 echo "idrac.health.status"
-echo "host: idrac-shop (${IDRAC_HOST} via pve)"
+echo "host: idrac-shop (${IDRAC_HOST})"
+echo "access_path: ${ACCESS_PATH}"
+echo "recovery_access: ${IDRAC_RECOVERY_ACCESS}"
 echo
 
-# ── Redfish probe via PVE SSH tunnel ─────────────────────────
+# ── Redfish probe (direct LAN or via jump host) ──────────────
 REDFISH_URL="https://${IDRAC_HOST}/redfish/v1/Systems/System.Embedded.1"
 REDFISH_JSON=""
 REDFISH_OK=false
 
-REDFISH_JSON=$(ssh $SSH_OPTS -p "$PVE_PORT" "$PVE_HOST" \
-  "curl -sk -u '${IDRAC_USER}:${IDRAC_PASS}' --connect-timeout 8 --max-time 15 '${REDFISH_URL}'" 2>/dev/null) || true
+if $USE_JUMP; then
+  REDFISH_JSON=$(ssh $SSH_OPTS -p "$JUMP_PORT" "$JUMP_HOST" \
+    "curl -sk -u '${IDRAC_USER}:${IDRAC_PASS}' --connect-timeout 8 --max-time 15 '${REDFISH_URL}'" 2>/dev/null) || true
+else
+  REDFISH_JSON=$(curl -sk -u "${IDRAC_USER}:${IDRAC_PASS}" --connect-timeout 8 --max-time 15 "${REDFISH_URL}" 2>/dev/null) || true
+fi
 
 # Validate we got real JSON back (not an SSH error or empty response)
 if [[ -n "$REDFISH_JSON" ]] && echo "$REDFISH_JSON" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
@@ -109,8 +142,12 @@ print(f'source:     redfish')
 
   # ── Optional: thermal data via Redfish Thermal endpoint ─────
   THERMAL_URL="https://${IDRAC_HOST}/redfish/v1/Chassis/System.Embedded.1/Thermal"
-  THERMAL_JSON=$(ssh $SSH_OPTS -p "$PVE_PORT" "$PVE_HOST" \
-    "curl -sk -u '${IDRAC_USER}:${IDRAC_PASS}' --connect-timeout 8 --max-time 15 '${THERMAL_URL}'" 2>/dev/null) || true
+  if $USE_JUMP; then
+    THERMAL_JSON=$(ssh $SSH_OPTS -p "$JUMP_PORT" "$JUMP_HOST" \
+      "curl -sk -u '${IDRAC_USER}:${IDRAC_PASS}' --connect-timeout 8 --max-time 15 '${THERMAL_URL}'" 2>/dev/null) || true
+  else
+    THERMAL_JSON=$(curl -sk -u "${IDRAC_USER}:${IDRAC_PASS}" --connect-timeout 8 --max-time 15 "${THERMAL_URL}" 2>/dev/null) || true
+  fi
 
   if [[ -n "$THERMAL_JSON" ]]; then
     TEMPS=$(python3 -c "
@@ -141,13 +178,17 @@ except:
   echo "status:     OK"
 
 else
-  # ── IPMI fallback via PVE SSH tunnel ────────────────────────
+  # ── IPMI fallback ────────────────────────────────────────────
   echo "note: Redfish unavailable, falling back to IPMI"
   echo
 
   IPMI_OUTPUT=""
-  IPMI_OUTPUT=$(ssh $SSH_OPTS -p "$PVE_PORT" "$PVE_HOST" \
-    "ipmitool -I lanplus -H ${IDRAC_HOST} -U '${IDRAC_USER}' -P '${IDRAC_PASS}' sdr type temperature" 2>/dev/null) || true
+  if $USE_JUMP; then
+    IPMI_OUTPUT=$(ssh $SSH_OPTS -p "$JUMP_PORT" "$JUMP_HOST" \
+      "ipmitool -I lanplus -H ${IDRAC_HOST} -U '${IDRAC_USER}' -P '${IDRAC_PASS}' sdr type temperature" 2>/dev/null) || true
+  else
+    IPMI_OUTPUT=$(ipmitool -I lanplus -H "$IDRAC_HOST" -U "$IDRAC_USER" -P "$IDRAC_PASS" sdr type temperature 2>/dev/null) || true
+  fi
 
   if [[ -n "$IPMI_OUTPUT" ]]; then
     echo "temps:"
@@ -160,8 +201,12 @@ else
     done
 
     # Also try power status via IPMI
-    POWER_STATUS=$(ssh $SSH_OPTS -p "$PVE_PORT" "$PVE_HOST" \
-      "ipmitool -I lanplus -H ${IDRAC_HOST} -U '${IDRAC_USER}' -P '${IDRAC_PASS}' power status" 2>/dev/null) || POWER_STATUS="unknown"
+    if $USE_JUMP; then
+      POWER_STATUS=$(ssh $SSH_OPTS -p "$JUMP_PORT" "$JUMP_HOST" \
+        "ipmitool -I lanplus -H ${IDRAC_HOST} -U '${IDRAC_USER}' -P '${IDRAC_PASS}' power status" 2>/dev/null) || POWER_STATUS="unknown"
+    else
+      POWER_STATUS=$(ipmitool -I lanplus -H "$IDRAC_HOST" -U "$IDRAC_USER" -P "$IDRAC_PASS" power status 2>/dev/null) || POWER_STATUS="unknown"
+    fi
     echo
     echo "power:      ${POWER_STATUS}"
     echo "source:     ipmi"
@@ -169,7 +214,11 @@ else
   else
     # ── Both methods failed — try ping as last resort ─────────
     PING_OK=false
-    ssh $SSH_OPTS -p "$PVE_PORT" "$PVE_HOST" "ping -c1 -W2 ${IDRAC_HOST}" >/dev/null 2>&1 && PING_OK=true
+    if $USE_JUMP; then
+      ssh $SSH_OPTS -p "$JUMP_PORT" "$JUMP_HOST" "ping -c1 -W2 ${IDRAC_HOST}" >/dev/null 2>&1 && PING_OK=true
+    else
+      ping -c1 -W2 "$IDRAC_HOST" >/dev/null 2>&1 && PING_OK=true
+    fi
 
     if $PING_OK; then
       echo "reachable:  yes (ping OK)"
@@ -178,7 +227,7 @@ else
       exit 1
     else
       echo "reachable:  no"
-      echo "note:       host unreachable via PVE jump"
+      echo "note:       host unreachable (access_path=${ACCESS_PATH})"
       echo "status:     DOWN"
       exit 2
     fi
