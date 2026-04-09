@@ -834,6 +834,7 @@ cmd_start() {
       --worktree) worktree_mode="${2:-}"; shift 2 ;;
       --repo) workspace_repo="${2:-}"; shift 2 ;;
       --synthetic) wave_kind="synthetic"; shift ;;
+      --wave-kind) wave_kind="${2:-}"; shift 2 ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
       *) wave_id="$1"; shift ;;
     esac
@@ -3400,15 +3401,19 @@ try:
     # ── Synthetic wave fast-close ──
     _wave_kind = str(state.get("wave_kind") or "production").strip()
     _is_synthetic = _wave_kind == "synthetic"
+    _is_engineering = _wave_kind == "engineering"
+    _skip_ceremony = _is_synthetic or _is_engineering
 
     # ── Contract enforcement (wave.lifecycle.yaml) ──
     # Close requires: all watcher checks done/failed, preflight run at least once
     # Synthetic/test waves skip preflight and watcher requirements.
+    # Engineering waves skip ceremony (preflight, watcher, role-flow) but
+    # still enforce dispatch integrity and explicit disposition.
     checks = state.get("watcher_checks", [])
     pf = state.get("preflight")
     contract_violations = []
 
-    if not _is_synthetic:
+    if not _skip_ceremony:
         running = [c for c in checks if c["status"] in ("queued", "running")]
         if running:
             statuses = "/".join(sorted(set(c["status"] for c in running)))

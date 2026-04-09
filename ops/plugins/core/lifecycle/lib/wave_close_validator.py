@@ -564,12 +564,15 @@ def apply_synthetic_fast_close(
     state: dict,
     packet: dict,
 ) -> None:
-    """Clear ceremony-only violations for synthetic waves.
+    """Clear ceremony-only violations for synthetic/engineering waves.
 
     Mutates violations in-place. Sets default DoD if absent.
     """
     if not is_synthetic:
         return
+
+    _wave_kind = str(state.get("wave_kind") or "synthetic").strip()
+    _close_label = f"{_wave_kind}_fast_close"
 
     violations.dod.clear()
     violations.infra[:] = [
@@ -583,7 +586,7 @@ def apply_synthetic_fast_close(
         state["dod"] = {
             "verify_results": [],
             "blocker_classification": ["none"],
-            "cleanup_proof": ["synthetic_fast_close"],
+            "cleanup_proof": [_close_label],
             "linkage": {
                 "packet_loop_id": str(packet.get("loop_id", "")).strip(),
                 "valid_receipts": 0,
@@ -719,7 +722,8 @@ def validate_close(
     """
     violations = CloseViolations()
 
-    is_synthetic = str(state.get("wave_kind") or "production").strip() == "synthetic"
+    _wave_kind = str(state.get("wave_kind") or "production").strip()
+    is_synthetic = _wave_kind in ("synthetic", "engineering")
     checks = state.get("watcher_checks", [])
     pf = state.get("preflight")
     dispatches = state.get("dispatches", [])

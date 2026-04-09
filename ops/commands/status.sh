@@ -145,7 +145,7 @@ if [[ "$MODE" == "--context" ]]; then
   echo "─── verify / coherence ─────────────────────────────"
   printf "  fast verify:    %s\n" "$VERIFY_STATUS"
   printf "  gap authority:  %s\n" "$GAP_AUTHORITY"
-  local _gap_parity
+  _gap_parity=""
   case "$GAP_MATCH" in
     true)  _gap_parity="match" ;;
     false) _gap_parity="MISMATCH" ;;

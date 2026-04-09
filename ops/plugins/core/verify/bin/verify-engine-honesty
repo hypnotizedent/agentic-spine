@@ -11,6 +11,7 @@
 #   H5  Continuity invariants — no orphaned waves after synthetic run
 #   H6  Surface coherence     — status and context agree on wave counts
 #   H7  Honest close          — synthetic wave can close without force/DoD
+#   H8  Kickoff-path honesty  — governed worktree passes, main checkout denied
 #
 # Unlike verify-engine (smoke), this proves the engine OPERATES, not just
 # that its plumbing EXISTS.
@@ -47,8 +48,9 @@ while [[ $# -gt 0 ]]; do
             echo "  H3  Wave lifecycle (start → dispatch → ack → collect)"
             echo "  H4  Telemetry chain (evidence files written)"
             echo "  H5  Continuity invariants (no orphaned waves)"
-            echo "  H6  Surface coherence (status + context agree)"
+            echo "  H6  Surface coherence (status + context agree, exit 0)"
             echo "  H7  Honest close semantics (no force/DoD required)"
+            echo "  H8  Kickoff-path honesty (worktree passes, main checkout denied)"
             exit 0
             ;;
         *) ;;
@@ -356,10 +358,15 @@ check H5 "continuity invariants (no new orphaned waves from synthetic run)" bash
 "
 
 # ── H6: Surface coherence ────────────────────────────────────────────────
-# Checks that status --json and context agree on shared data (loop counts).
+# Checks that status --json and context agree on shared data (loop counts),
+# and that status --context exits 0 when the context is valid.
 check H6 "surface coherence (status + context agree on loop counts)" bash -c "
     status_json=\"\$('$ROOT/bin/ops' status --json 2>&1)\"
-    context_output=\"\$('$ROOT/bin/ops' context 2>&1)\"
+
+    # status --context must exit 0 (not just print valid output)
+    context_output=\"\$('$ROOT/bin/ops' status --context 2>&1)\"
+    ctx_rc=\$?
+    [[ \"\$ctx_rc\" -eq 0 ]] || { echo \"status --context exited \$ctx_rc (expected 0)\"; exit 1; }
 
     # Both surfaces report open loop counts — they must agree
     ctx_loops=\"\$(echo \"\$context_output\" | grep -o 'open loops:.*[0-9]' | grep -o '[0-9]*$')\"
@@ -373,6 +380,64 @@ check H6 "surface coherence (status + context agree on loop counts)" bash -c "
     # Context should report fast verify pass
     echo \"\$context_output\" | grep -q 'fast verify:.*pass' || { echo 'context does not show fast verify pass'; exit 1; }
 "
+
+# ── H8: Kickoff-path honesty ────────────────────────────────────────────
+# Proves the real kickoff binary enforces worktree-only execution:
+#   - From a governed worktree: --dry-run succeeds
+#   - From the main checkout: --dry-run is denied by path policy
+KICKOFF_BIN="$ROOT/ops/plugins/core/orchestration/bin/orchestration-wave-kickoff"
+if [[ ! -f "$KICKOFF_BIN" ]]; then
+    record_fail H8 "kickoff-path honesty (governed worktree passes, main checkout denied)" "kickoff binary not found: $KICKOFF_BIN"
+else
+    # Determine if we are running from a governed worktree
+    _h8_repo_real="$(cd "$ROOT" && pwd -P)"
+    _h8_primary="$(git -C "$ROOT" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+    [[ -n "$_h8_primary" ]] && _h8_primary="$(cd "$_h8_primary" && pwd -P)"
+    _h8_is_worktree=0
+    if [[ -n "$_h8_primary" && "$_h8_repo_real" != "$_h8_primary" ]]; then
+        _h8_is_worktree=1
+    fi
+
+    if [[ "$_h8_is_worktree" -eq 1 ]]; then
+        # Running from a worktree — can test both directions
+        check H8 "kickoff-path honesty (governed worktree passes, main checkout denied)" bash -c "
+            # Worktree dry-run must succeed
+            wt_out=\"\$('$KICKOFF_BIN' --dry-run \
+                --loop-id '$SYNTHETIC_LOOP_ID' \
+                --lanes TEST \
+                --repo '$ROOT' \
+                --owner-terminal '${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}' \
+                --base-branch main 2>&1)\"
+            wt_rc=\$?
+            [[ \$wt_rc -eq 0 ]] || { echo \"worktree dry-run failed (exit \$wt_rc): \${wt_out:0:200}\"; exit 1; }
+            echo \"\$wt_out\" | grep -q 'DRY_RUN_OK' || { echo 'worktree dry-run did not report DRY_RUN_OK'; exit 1; }
+
+            # Main checkout dry-run must fail with path policy block
+            main_out=\"\$('$KICKOFF_BIN' --dry-run \
+                --loop-id '$SYNTHETIC_LOOP_ID' \
+                --lanes TEST \
+                --repo '$_h8_primary' \
+                --owner-terminal '${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}' \
+                --base-branch main 2>&1)\"
+            main_rc=\$?
+            [[ \$main_rc -ne 0 ]] || { echo 'main checkout dry-run should have been denied but succeeded'; exit 1; }
+            echo \"\$main_out\" | grep -q 'WORKTREE PATH POLICY BLOCK' || { echo 'denial did not report WORKTREE PATH POLICY BLOCK'; exit 1; }
+        "
+    else
+        # Running from main checkout — can only test denial direction
+        check H8 "kickoff-path honesty (governed worktree passes, main checkout denied)" bash -c "
+            main_out=\"\$('$KICKOFF_BIN' --dry-run \
+                --loop-id '$SYNTHETIC_LOOP_ID' \
+                --lanes TEST \
+                --repo '$ROOT' \
+                --owner-terminal '${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}' \
+                --base-branch main 2>&1)\"
+            main_rc=\$?
+            [[ \$main_rc -ne 0 ]] || { echo 'main checkout dry-run should have been denied but succeeded'; exit 1; }
+            echo \"\$main_out\" | grep -q 'WORKTREE PATH POLICY BLOCK' || { echo 'denial did not report WORKTREE PATH POLICY BLOCK'; exit 1; }
+        "
+    fi
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 
