@@ -19,5 +19,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-python3 "$ROOT/ops/plugins/core/authority/bin/content-family-placement-projection-build" --root "$ROOT" --check --verify
-python3 "$ROOT/ops/plugins/infra/bin/content-family-placement-audit" --root "$ROOT" --brief --strict
+PROJECTION_BUILD_BIN="${CONTENT_FAMILY_PLACEMENT_PROJECTION_BUILD_BIN:-$ROOT/ops/plugins/core/authority/bin/content-family-placement-projection-build}"
+AUDIT_BIN="${CONTENT_FAMILY_PLACEMENT_AUDIT_BIN:-$ROOT/ops/plugins/infra/bin/content-family-placement-audit}"
+
+python3 "$PROJECTION_BUILD_BIN" --root "$ROOT" --check --verify
+python3 "$AUDIT_BIN" --root "$ROOT" --brief --strict

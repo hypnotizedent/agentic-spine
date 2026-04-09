@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-CONTRACT="$ROOT/ops/bindings/domains/media/media.pipeline.contract.yaml"
+CONTRACT="${MEDIA_PIPELINE_CONTRACT:-$ROOT/ops/bindings/domains/media/media.pipeline.contract.yaml}"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 source "$ROOT/ops/lib/ssh-resolve.sh"
 
