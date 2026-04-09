@@ -145,7 +145,14 @@ if [[ "$MODE" == "--context" ]]; then
   echo "─── verify / coherence ─────────────────────────────"
   printf "  fast verify:    %s\n" "$VERIFY_STATUS"
   printf "  gap authority:  %s\n" "$GAP_AUTHORITY"
-  printf "  gap parity:     %s\n" "$(case "$GAP_MATCH" in true) echo "match";; false) echo "MISMATCH";; null) echo "n/a (db only)";; *) echo "unknown";; esac)"
+  local _gap_parity
+  case "$GAP_MATCH" in
+    true)  _gap_parity="match" ;;
+    false) _gap_parity="MISMATCH" ;;
+    null)  _gap_parity="n/a (db only)" ;;
+    *)     _gap_parity="unknown" ;;
+  esac
+  printf "  gap parity:     %s\n" "$_gap_parity"
   printf "  coherence:      %s\n" "$([ "$COHERENCE" == "true" ] && echo "NEEDS ATTENTION" || echo "ok")"
   if [[ -n "$WARNINGS" ]]; then
     echo "─── warning ────────────────────────────────────────"

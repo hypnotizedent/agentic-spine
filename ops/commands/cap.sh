@@ -147,7 +147,7 @@ execute_command() {
         export SPINE_CODE="$SPINE_CODE"
         export SPINE_ROOT="$SPINE_CODE"
         export SPINE_CAP_RUN_KEY="$run_key"
-        bash -lc "$command_string"
+        eval "$command_string"
     )
 }
 
