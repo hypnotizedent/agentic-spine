@@ -15,6 +15,7 @@ Health surfaces:
   ops verify --core-only       Same as default (compatibility alias)
   ops verify --engine-smoke    Engine plumbing smoke test
   ops verify --engine-honesty  Engine orchestration proof (dispatch, wave, telemetry)
+  ops verify --binding-coherence  Capability references in bindings vs registry
   ops verify --full            Readiness: status + infra baseline + secrets
   ops verify --preflight       Governance banner + git health + gate domains
   ops verify --all             All checks combined
@@ -364,6 +365,12 @@ case "${1:-}" in
     echo
     echo "Engine verify: platform plumbing smoke test"
     exec "$VERIFY_RUN" engine
+    ;;
+  --binding-coherence)
+    echo "SPINE_ROOT=$SPINE_ROOT"
+    echo "VERIFY_MODE=binding-coherence"
+    echo
+    exec "$SPINE_ROOT/ops/plugins/core/verify/bin/verify-binding-coherence"
     ;;
   --full)
     _verify_full

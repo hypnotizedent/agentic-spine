@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# verify-binding-coherence — check that capability references in binding
+# contracts resolve to entries in ops/capabilities.yaml
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+CAP_FILE="$ROOT/ops/capabilities.yaml"
+BINDINGS_DIR="$ROOT/ops/bindings"
+
+[[ -f "$CAP_FILE" ]] || { echo "FAIL: missing capabilities registry: $CAP_FILE" >&2; exit 1; }
+
+# Extract all capability keys from the registry
+cap_keys="$(yq e '.capabilities | keys | .[]' "$CAP_FILE" 2>/dev/null)" || {
+  echo "FAIL: unable to parse capabilities.yaml" >&2; exit 1
+}
+
+cap_set="$(echo "$cap_keys" | sort -u)"
+
+pass=0
+fail=0
+checked=0
+failing_refs=()
+
+while IFS= read -r binding_file; do
+  [[ -f "$binding_file" ]] || continue
+  rel="${binding_file#"$ROOT/"}"
+
+  # Extract values from keys containing "capability" (capability:, generator_capability:, flush_capability:, etc.)
+  refs="$(rg -oN '[a-z_]*capability:\s*(.+)' "$binding_file" 2>/dev/null | sed 's/.*capability:[[:space:]]*//' | sed 's/#.*//' | tr -d "\"'" | sed '/^$/d' || true)"
+  [[ -n "$refs" ]] || continue
+
+  while IFS= read -r ref; do
+    ref="$(echo "$ref" | xargs)"
+    [[ -n "$ref" && "$ref" != "null" && "$ref" != "~" ]] || continue
+    checked=$((checked + 1))
+
+    if echo "$cap_set" | grep -qxF "$ref"; then
+      pass=$((pass + 1))
+    else
+      fail=$((fail + 1))
+      failing_refs+=("$rel: $ref")
+    fi
+  done <<< "$refs"
+done < <(find "$BINDINGS_DIR" -name '*.yaml' -type f 2>/dev/null | LC_ALL=C sort)
+
+echo "=== BINDING-CAPABILITY COHERENCE ==="
+echo "Checked: $checked capability references across binding contracts"
+echo "  PASS: $pass"
+echo "  FAIL: $fail"
+
+if [[ ${#failing_refs[@]} -gt 0 ]]; then
+  echo
+  echo "Unresolved capability references:"
+  for r in "${failing_refs[@]}"; do
+    echo "  - $r"
+  done
+fi
+
+echo
+if [[ $fail -eq 0 ]]; then
+  echo "Binding-capability coherence: PASS"
+  exit 0
+else
+  echo "Binding-capability coherence: FAIL ($fail unresolved)"
+  exit 1
+fi
