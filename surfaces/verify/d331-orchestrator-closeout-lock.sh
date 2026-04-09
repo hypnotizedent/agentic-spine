@@ -9,7 +9,6 @@ PACKET_CONTRACT="$ROOT/ops/bindings/orchestration.packet.contract.yaml"
 ORCH_DIR="$SPINE_STATE/orchestration"
 CAPS="$ROOT/ops/capabilities.yaml"
 MAP="$ROOT/ops/bindings/capability_map.yaml"
-DISPATCH="$ROOT/ops/bindings/routing.dispatch.yaml"
 MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
 CLOSEOUT_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-lane-closeout"
 CLOSEOUT_CAP="coordinator.lane.closeout"
@@ -24,7 +23,6 @@ fail() {
 [[ -f "$PACKET_CONTRACT" ]] || fail "missing contract: ops/bindings/orchestration.packet.contract.yaml"
 [[ -f "$CAPS" ]] || fail "missing capabilities registry: $CAPS"
 [[ -f "$MAP" ]] || fail "missing capability map: $MAP"
-[[ -f "$DISPATCH" ]] || fail "missing routing dispatch: $DISPATCH"
 [[ -f "$MANIFEST" ]] || fail "missing plugin manifest: $MANIFEST"
 [[ -x "$CLOSEOUT_SCRIPT" ]] || fail "missing closeout script: $CLOSEOUT_SCRIPT"
 [[ -f "$WAVE_CMD" ]] || fail "missing wave command: $WAVE_CMD"
@@ -36,7 +34,6 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 # Coordinator closeout capability wiring must stay in parity.
 rg -n "^[[:space:]]*${CLOSEOUT_CAP}:" "$CAPS" >/dev/null 2>&1 || fail "capabilities.yaml missing $CLOSEOUT_CAP"
 rg -n "^[[:space:]]*${CLOSEOUT_CAP}:" "$MAP" >/dev/null 2>&1 || fail "capability_map.yaml missing $CLOSEOUT_CAP"
-rg -n "^[[:space:]]*${CLOSEOUT_CAP}:" "$DISPATCH" >/dev/null 2>&1 || fail "routing.dispatch.yaml missing $CLOSEOUT_CAP"
 rg -n "${CLOSEOUT_CAP}" "$MANIFEST" >/dev/null 2>&1 || fail "plugins manifest missing $CLOSEOUT_CAP"
 
 # Closeout chain markers remain deterministic/idempotent.

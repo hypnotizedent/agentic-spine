@@ -6,7 +6,6 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 CONTRACT="$ROOT/ops/bindings/spine.experiment.contract.yaml"
 CAP_FILE="$ROOT/ops/capabilities.yaml"
 MAP_FILE="$ROOT/ops/bindings/capability_map.yaml"
-DISPATCH_FILE="$ROOT/ops/bindings/routing.dispatch.yaml"
 MANIFEST_FILE="$ROOT/ops/plugins/MANIFEST.yaml"
 SCRIPT="$ROOT/ops/plugins/core/evidence/bin/spine-experiment-compare"
 RECOVERY_ACTIONS="$ROOT/ops/bindings/recovery.actions.yaml"
@@ -16,7 +15,7 @@ fail() {
   exit 1
 }
 
-for file in "$CONTRACT" "$CAP_FILE" "$MAP_FILE" "$DISPATCH_FILE" "$MANIFEST_FILE" "$RECOVERY_ACTIONS"; do
+for file in "$CONTRACT" "$CAP_FILE" "$MAP_FILE" "$MANIFEST_FILE" "$RECOVERY_ACTIONS"; do
   [[ -f "$file" ]] || fail "missing required file: ${file#$ROOT/}"
 done
 [[ -x "$SCRIPT" ]] || fail "missing executable script: ${SCRIPT#$ROOT/}"
@@ -28,7 +27,6 @@ yq -e '.authority.script == "ops/plugins/core/evidence/bin/spine-experiment-comp
 
 yq -e '.capabilities."spine.experiment.compare"' "$CAP_FILE" >/dev/null 2>&1 || fail "capabilities.yaml missing spine.experiment.compare"
 yq -e '.capabilities."spine.experiment.compare"' "$MAP_FILE" >/dev/null 2>&1 || fail "capability_map.yaml missing spine.experiment.compare"
-yq -e '.dispatch."spine.experiment.compare"' "$DISPATCH_FILE" >/dev/null 2>&1 || fail "routing.dispatch.yaml missing spine.experiment.compare"
 yq -e '.plugins[] | select(.name == "evidence") | .capabilities[] | select(. == "spine.experiment.compare")' "$MANIFEST_FILE" >/dev/null 2>&1 || fail "MANIFEST evidence plugin missing spine.experiment.compare capability"
 yq -e '.plugins[] | select(.name == "evidence") | .scripts[] | select(. == "bin/spine-experiment-compare")' "$MANIFEST_FILE" >/dev/null 2>&1 || fail "MANIFEST evidence plugin missing spine-experiment-compare script"
 

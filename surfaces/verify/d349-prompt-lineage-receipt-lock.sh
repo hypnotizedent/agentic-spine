@@ -6,7 +6,6 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 PROMPT_REGISTRY="$ROOT/ops/bindings/prompt.registry.yaml"
 CAP_FILE="$ROOT/ops/capabilities.yaml"
 MAP_FILE="$ROOT/ops/bindings/capability_map.yaml"
-DISPATCH_FILE="$ROOT/ops/bindings/routing.dispatch.yaml"
 MANIFEST_FILE="$ROOT/ops/plugins/MANIFEST.yaml"
 EMITTER="$ROOT/ops/plugins/core/evidence/bin/receipts-exec-emit"
 PROMPT_STATUS="$ROOT/ops/plugins/core/evidence/bin/prompt-registry-status"
@@ -17,7 +16,7 @@ fail() {
   exit 1
 }
 
-for file in "$PROMPT_REGISTRY" "$CAP_FILE" "$MAP_FILE" "$DISPATCH_FILE" "$MANIFEST_FILE" "$SCHEMA"; do
+for file in "$PROMPT_REGISTRY" "$CAP_FILE" "$MAP_FILE" "$MANIFEST_FILE" "$SCHEMA"; do
   [[ -f "$file" ]] || fail "missing required file: ${file#$ROOT/}"
 done
 [[ -x "$EMITTER" ]] || fail "missing emitter executable: ${EMITTER#$ROOT/}"
@@ -32,7 +31,6 @@ yq -e '.defaults.source_refs | length > 0' "$PROMPT_REGISTRY" >/dev/null 2>&1 ||
 
 yq -e '.capabilities."prompt.registry.status"' "$CAP_FILE" >/dev/null 2>&1 || fail "capabilities.yaml missing prompt.registry.status"
 yq -e '.capabilities."prompt.registry.status"' "$MAP_FILE" >/dev/null 2>&1 || fail "capability_map.yaml missing prompt.registry.status"
-yq -e '.dispatch."prompt.registry.status"' "$DISPATCH_FILE" >/dev/null 2>&1 || fail "routing.dispatch.yaml missing prompt.registry.status"
 yq -e '.plugins[] | select(.name == "evidence") | .capabilities[] | select(. == "prompt.registry.status")' "$MANIFEST_FILE" >/dev/null 2>&1 || fail "MANIFEST evidence plugin missing prompt.registry.status capability"
 yq -e '.plugins[] | select(.name == "evidence") | .scripts[] | select(. == "bin/prompt-registry-status")' "$MANIFEST_FILE" >/dev/null 2>&1 || fail "MANIFEST evidence plugin missing prompt-registry-status script"
 
