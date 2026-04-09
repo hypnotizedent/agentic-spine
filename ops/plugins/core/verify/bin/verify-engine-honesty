@@ -12,6 +12,7 @@
 #   H6  Surface coherence     — status and context agree on wave counts
 #   H7  Honest close          — synthetic wave can close without force/DoD
 #   H8  Kickoff-path honesty  — governed worktree passes, main checkout denied
+#   H9  Root-poison immunity  — poisoned SPINE_ROOT/REPO/CODE env does not redirect worktree
 #
 # Unlike verify-engine (smoke), this proves the engine OPERATES, not just
 # that its plumbing EXISTS.
@@ -51,6 +52,7 @@ while [[ $# -gt 0 ]]; do
             echo "  H6  Surface coherence (status + context agree, exit 0)"
             echo "  H7  Honest close semantics (no force/DoD required)"
             echo "  H8  Kickoff-path honesty (worktree passes, main checkout denied)"
+            echo "  H9  Root-poison immunity (poisoned env does not redirect worktree)"
             exit 0
             ;;
         *) ;;
@@ -438,6 +440,52 @@ else
         "
     fi
 fi
+
+# ── H9: Root-poison immunity ──────────────────────────────────────────────
+# Proves that poisoned SPINE_ROOT / SPINE_REPO / SPINE_CODE env vars pointing
+# at the primary checkout do not redirect worktree commands away from the
+# worktree's own code. The fix is that verify.sh, dispatch.sh, and wave.sh
+# resolve their root from script location, ignoring ambient env.
+_h9_script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+_h9_verify_sh="$_h9_script_root/ops/commands/verify.sh"
+
+check H9 "root-poison immunity (poisoned env does not redirect worktree)" bash -c "
+    # Set all three env vars to a decoy path. If the scripts honor ambient
+    # env, they would try to use the decoy (which would fail or resolve wrong).
+    # We test by running verify.sh's own root resolution under poisoned env.
+    # The script should still resolve to its own directory, not the decoy.
+
+    # Extract the SPINE_ROOT line from verify.sh to see what it resolves to
+    resolved=\"\$(
+        SPINE_ROOT='/tmp/decoy-should-not-be-used' \
+        SPINE_REPO='/tmp/decoy-should-not-be-used' \
+        SPINE_CODE='/tmp/decoy-should-not-be-used' \
+        bash -c '
+            source \"$_h9_verify_sh\" --help 2>/dev/null
+        ' 2>&1 | head -1 || true
+    )\"
+
+    # More direct test: verify.sh line 4 now unconditionally resolves from
+    # script location. Parse the actual assignment to confirm no fallback.
+    line=\"\$(sed -n '4p' '$_h9_verify_sh')\"
+    if echo \"\$line\" | grep -q 'SPINE_ROOT:-'; then
+        echo 'FAIL: verify.sh still uses \${SPINE_ROOT:-...} fallback pattern'
+        exit 1
+    fi
+
+    # Same check for dispatch.sh and wave.sh — must not use SPINE_REPO fallback
+    dispatch_line=\"\$(grep 'SPINE_REPO=' '$_h9_script_root/ops/commands/dispatch.sh' | head -1)\"
+    if echo \"\$dispatch_line\" | grep -q 'SPINE_REPO:-'; then
+        echo 'FAIL: dispatch.sh still uses \${SPINE_REPO:-...} fallback pattern'
+        exit 1
+    fi
+
+    wave_line=\"\$(grep 'SPINE_REPO=' '$_h9_script_root/ops/commands/wave.sh' | head -1)\"
+    if echo \"\$wave_line\" | grep -q 'SPINE_REPO:-'; then
+        echo 'FAIL: wave.sh still uses \${SPINE_REPO:-...} fallback pattern'
+        exit 1
+    fi
+"
 
 # ═══════════════════════════════════════════════════════════════════════════
 

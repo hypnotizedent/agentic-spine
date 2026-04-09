@@ -23,7 +23,9 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# Always resolve from script location — ignore ambient SPINE_REPO to prevent
+# poisoned env vars from redirecting worktree execution to the primary checkout.
+SPINE_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_PATHS_LIB="$SPINE_REPO/ops/lib/runtime-paths.sh"
 [[ -f "$RUNTIME_PATHS_LIB" ]] || { echo "FATAL: runtime-paths.sh not found at $RUNTIME_PATHS_LIB" >&2; exit 1; }
 source "$RUNTIME_PATHS_LIB"
@@ -131,6 +133,10 @@ wave_require_valid_lane() {
   done
 
   echo "FAIL: invalid wave lane '$lane' (allowed: $(wave_allowed_lanes_display))" >&2
+  echo "" >&2
+  echo "  'ops wave dispatch' uses fixed governance lanes ($(wave_allowed_lanes_display))." >&2
+  echo "  For arbitrary named lanes like '$lane', use:" >&2
+  echo "    ops dispatch local --lane \"$lane:<shell_command>\" ..." >&2
   exit 1
 }
 
@@ -1958,7 +1964,12 @@ cmd_dispatch() {
   done
 
   if [[ -z "$wave_id" || -z "$lane" || -z "$task" ]]; then
-    echo "Usage: ops wave dispatch <WAVE_ID> --lane <lane> --task \"<text>\" [--from-role <role>] [--to-role <role>] [--input-refs \"k=v,...\"] [--output-refs \"k=v,...\"] [--lock-override \"<reason>\"]" >&2
+    echo "Usage: ops wave dispatch <WAVE_ID> --lane <lane> --task \"<text>\" [OPTIONS]" >&2
+    echo "" >&2
+    echo "  Lanes must be one of: $(wave_allowed_lanes_display)" >&2
+    echo "  For arbitrary named lanes, use: ops dispatch local --lane \"name:command\" ..." >&2
+    echo "" >&2
+    echo "  Options: --from-role, --to-role, --input-refs, --output-refs, --lock-override" >&2
     exit 1
   fi
 
@@ -3055,11 +3066,29 @@ cmd_ack() {
   done
 
   if [[ -z "$wave_id" ]]; then
-    echo "Usage: ops wave ack <WAVE_ID> --lane <lane> [--dispatch D<N>] --result \"<text>\" [--run-key <key>] [--lock-override \"<reason>\"]" >&2
+    cat >&2 <<'ACKUSAGE'
+Usage: ops wave ack <WAVE_ID> --lane <lane> --result "<text>" [OPTIONS]
+
+Required:
+  <WAVE_ID>              The wave to acknowledge
+  --lane <lane>          Lane of the dispatch to ack (e.g., execution, control)
+  --result "<text>"      Result description
+
+Options:
+  --dispatch D<N>        Ack by dispatch index instead of lane (e.g., D1, D2)
+  --run-key <key>        Attach a run key to the ack
+  --lock-override "<reason>"  Override wave lock
+
+Examples:
+  ops wave ack WAVE-20260409-01 --lane execution --result "done: all tests pass"
+  ops wave ack WAVE-20260409-01 --dispatch D1 --result "done" --run-key CAP-20260409-run1
+ACKUSAGE
     exit 1
   fi
   if [[ -z "$lane" && -z "$dispatch_id" ]]; then
-    echo "Must specify --lane <lane> or --dispatch D<N> to identify the task" >&2
+    echo "Must specify --lane <lane> or --dispatch D<N> to identify the task." >&2
+    echo "  Example: ops wave ack $wave_id --lane execution --result \"done\"" >&2
+    echo "  Example: ops wave ack $wave_id --dispatch D1 --result \"done\"" >&2
     exit 1
   fi
 
@@ -3354,31 +3383,12 @@ PYACK
   sync_runtime_traffic_index "$sf" "ack"
 }
 
-cmd_close() {
-  local wave_id=""
-  local force=false
+# cmd_close() removed — dead code superseded by cmd_close_v2.
+# The dispatch table at the bottom routes close) → cmd_close_v2 directly.
+# Keeping this marker so git blame shows the removal context.
 
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --) shift ;;
-      --force) force=true; shift ;;
-      -*) echo "Unknown flag: $1" >&2; exit 1 ;;
-      *) wave_id="$1"; shift ;;
-    esac
-  done
-
-  if [[ -z "$wave_id" ]]; then
-    echo "Usage: ops wave close <WAVE_ID> [--force] [--dod-override \"<reason>\"]" >&2
-    exit 1
-  fi
-
-  ensure_wave_exists "$wave_id"
-  local sf
-  sf="$(wave_state_file "$wave_id")"
-  local sd
-  sd="$(wave_state_dir "$wave_id")"
-
-  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" <<'PYCLOSE'
+_cmd_close_was_here() { :; }
+: <<'PYCLOSE'
 import json, sys, os, fcntl
 from datetime import datetime, timezone
 
@@ -3605,7 +3615,6 @@ if residual_blockers:
 print(f"  Merge receipt: {receipt_path}")
 print(f"  READY_FOR_ADOPTION={'true' if not residual_blockers else 'false'}")
 PYCLOSE
-}
 
 cmd_preflight() {
   local domain=""

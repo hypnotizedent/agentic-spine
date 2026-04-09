@@ -890,6 +890,7 @@ def close_loop(
             "disposition": disposition,
         },
     )
+    conn.commit()
     return loop
 
 

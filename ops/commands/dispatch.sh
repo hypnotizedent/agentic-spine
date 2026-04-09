@@ -25,7 +25,9 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# Always resolve from script location — ignore ambient SPINE_REPO to prevent
+# poisoned env vars from redirecting worktree execution to the primary checkout.
+SPINE_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WAVE_CMD="$SPINE_REPO/ops/commands/wave.sh"
 RUNTIME_PATHS_LIB="$SPINE_REPO/ops/lib/runtime-paths.sh"
 
@@ -54,6 +56,7 @@ Options:
   --wave-id <id>          Override wave ID (default: auto-generated)
   --evidence-dir <path>   Override evidence output directory
   --parallel              Execute lanes in parallel (default: serial)
+  --wave-kind <kind>      Wave kind: engineering (default), production, synthetic
   --dry-run               Show plan without executing
 
 Ownership:
@@ -122,6 +125,7 @@ EVIDENCE_DIR=""
 DRY_RUN=0
 PARALLEL=0
 SYNTHETIC=0
+WAVE_KIND="engineering"
 LANES=()
 
 while [[ $# -gt 0 ]]; do
@@ -134,6 +138,7 @@ while [[ $# -gt 0 ]]; do
     --evidence-dir) EVIDENCE_DIR="${2:-}"; shift 2 ;;
     --parallel) PARALLEL=1; shift ;;
     --synthetic) SYNTHETIC=1; shift ;;
+    --wave-kind) WAVE_KIND="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --) shift; break ;;
     --lane-*) fail_stale_lane_flag "$1" ;;
@@ -222,6 +227,8 @@ echo "── wave start ──────────────────�
 WAVE_START_FLAGS=(--loop-id "$LOOP_ID" --objective "$OBJECTIVE" --worktree off)
 if [[ "$SYNTHETIC" -eq 1 ]]; then
   WAVE_START_FLAGS+=(--synthetic)
+elif [[ -n "$WAVE_KIND" ]]; then
+  WAVE_START_FLAGS+=(--wave-kind "$WAVE_KIND")
 fi
 bash "$WAVE_CMD" start "$WAVE_ID" "${WAVE_START_FLAGS[@]}"
 echo ""
@@ -466,12 +473,12 @@ echo "── collect ───────────────────�
 bash "$WAVE_CMD" collect "$WAVE_ID"
 echo ""
 
-if [[ "$ANY_FAILED" -eq 0 && "$SYNTHETIC" -eq 0 ]]; then
+if [[ "$ANY_FAILED" -eq 0 && "$SYNTHETIC" -eq 0 && "$WAVE_KIND" == "production" ]]; then
   echo "── closeout prep ───────────────────────────────────────────────────"
   _prepare_local_wrapper_closeout
   echo ""
-elif [[ "$ANY_FAILED" -eq 0 && "$SYNTHETIC" -eq 1 ]]; then
-  echo "── synthetic wave: skipping heavyweight closeout prep ──────────────"
+elif [[ "$ANY_FAILED" -eq 0 && ( "$SYNTHETIC" -eq 1 || "$WAVE_KIND" != "production" ) ]]; then
+  echo "── ${WAVE_KIND:-engineering} wave: skipping heavyweight closeout prep ──"
   echo ""
 fi
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# Always resolve from script location — ignore ambient SPINE_ROOT to prevent
+# poisoned env vars from redirecting worktree execution to the primary checkout.
+SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VERIFY_RUN="$SPINE_ROOT/ops/plugins/core/verify/bin/verify-run"
 
 usage() {
