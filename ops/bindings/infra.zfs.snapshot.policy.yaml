@@ -1,0 +1,119 @@
+---
+# infra.zfs.snapshot.policy.yaml
+# Authority: authoritative
+# Scope:     pve ZFS snapshot policy truth (sanoid-managed)
+# Updated:   2026-04-09
+#
+# This binding makes ZFS snapshot policy explicit so agents can answer
+# snapshot origin, retention, burden, and disable/retire semantics
+# without inspecting /etc/sanoid/sanoid.conf directly.
+
+engine: sanoid
+engine_version: "2.2.0"
+scheduler: sanoid.timer
+scheduler_interval: "every 15 minutes"
+policy_source: /etc/sanoid/sanoid.conf
+host: pve
+
+# Default template applied recursively to pool roots
+default_template:
+  name: lean
+  frequently: 0
+  hourly: 0
+  daily: 7
+  weekly: 2
+  monthly: 1
+  yearly: 0
+  autosnap: true
+  autoprune: true
+
+# Pool roots — recursive autosnap via default template
+pool_roots:
+  - dataset: tank
+    recursive: true
+    template: lean
+    note: "Primary SSD pool. Recursive autosnap covers tank/docker, tank/immich/*, tank/vms/*."
+
+  - dataset: media
+    recursive: true
+    template: lean
+    note: "NFS media pool. Recursive autosnap covers media datasets."
+
+  - dataset: md1400
+    recursive: true
+    template: lean
+    note: "HDD cold-storage pool. Recursive autosnap covers md1400/media-cold, md1400/mint-legacy, md1400/vms."
+
+# Explicit overrides — datasets that must NOT inherit default recursive autosnap
+overrides:
+  - dataset: tank/backups
+    autosnap: false
+    autoprune: true
+    reason: "Backup staging area must not be snapshotted. Fixed 2026-03-22 after 9.13T wasted on backup snapshot bloat."
+    added: "2026-03-22"
+
+  - dataset: tank/vms/vm-215-disk-1
+    autosnap: true
+    autoprune: true
+    daily: 3
+    weekly: 1
+    monthly: 1
+    reason: "Surveillance disk has ~100% daily churn. Reduced retention to prevent snapshot bloat."
+    added: "2026-03-22"
+
+  - dataset: md1400/backups
+    autosnap: false
+    autoprune: true
+    reason: "Backup dataset must never inherit md1400 recursive snapshots. Backups are write-only restore artifacts."
+    added: "2026-03-22"
+
+  - dataset: md1400/backup-cold
+    autosnap: false
+    autoprune: true
+    reason: "Retired backup identity must not be repinned by autosnap. Dataset is draining; snapshots would hold blocks."
+    added: "2026-03-22"
+
+# Datasets that inherit recursive policy and that is correct (no override needed)
+inherited_correct:
+  - dataset: tank/docker
+    effective_template: lean
+    note: "Docker runtime on SSD. Default retention is appropriate."
+  - dataset: tank/immich
+    effective_template: lean
+    note: "Immich photo library. Recursive covers tank/immich/db and tank/immich/photos."
+  - dataset: tank/vms
+    effective_template: lean
+    note: "VM zvols on SSD. Default retention is appropriate."
+  - dataset: md1400/media-cold
+    effective_template: lean
+    note: "Cold media archive. Low churn, default retention is appropriate."
+  - dataset: md1400/mint-legacy
+    effective_template: lean
+    note: "Mint-era cold VM capsule data. Default retention is appropriate."
+  - dataset: md1400/vms
+    effective_template: lean
+    note: "VM disks on HDD. Default retention is appropriate."
+
+# Invariants agents must enforce
+invariants:
+  - rule: "Backup datasets must never have autosnap=yes"
+    datasets:
+      - tank/backups
+      - md1400/backups
+      - md1400/backup-cold
+    check: "autosnap must be false"
+
+  - rule: "Retired identities must not accumulate new snapshots"
+    datasets:
+      - md1400/backup-cold
+    check: "autosnap must be false, autoprune must be true"
+
+  - rule: "High-churn datasets must have reduced retention"
+    datasets:
+      - tank/vms/vm-215-disk-1
+    check: "daily <= 3"
+
+burden_visibility:
+  how_to_inspect: "ssh pve 'sudo zfs list -t snapshot -o name,used,creation -s used -r {dataset}'"
+  how_to_total: "ssh pve 'sudo zfs list -o name,usedbysnapshots -r {pool} -d 1'"
+  note: "Snapshot burden is the sum of usedbysnapshots across all datasets in a pool."
