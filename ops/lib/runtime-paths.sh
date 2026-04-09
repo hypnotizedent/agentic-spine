@@ -408,7 +408,7 @@ spine_runtime_resolve_paths() {
   [[ -n "$backups_root" ]] || backups_root="$workspace_root/.backups"
   backups_root="$(_spine_expand_home_token "$backups_root")"
 
-  [[ -n "$foundation_root" ]] || foundation_root="$workspace_root/agentic-foundation"
+  [[ -n "$foundation_root" ]] || foundation_root="$workspace_root/workbench"
   foundation_root="$(_spine_expand_home_token "$foundation_root")"
 
   if [[ -z "$domain_state" ]]; then
