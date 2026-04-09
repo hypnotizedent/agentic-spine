@@ -4,7 +4,7 @@ authority_state: projection
 projection_of:
   - ops/bindings/terminal.worker.catalog.yaml
 owner: "@ronny"
-last_verified: 2026-04-07
+last_verified: 2026-04-09
 scope: worker-usage-domain-comms-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -14,68 +14,38 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Terminal ID: `DOMAIN-COMMS-01`
 - Terminal Type: `domain-runtime`
 - Status: `active`
-- Domain: `communications`
-- Agent ID: `communications-agent`
-- Verify Command: `./bin/ops cap run verify.pack.run communications`
+- Domain: `comms`
+- Agent ID: `none`
+- Verify Command: `./bin/ops cap run verify.core.run`
 
 ## Write Scope
-- `ops/plugins/domains/communications/`
-- `../agentic-foundation/docs/agents/communications-agent.contract.md`
+- (none)
 
-## Capabilities (14)
-- `communications.delivery.anomaly.dispatch`
-- `communications.delivery.anomaly.status`
-- `communications.delivery.log`
-- `communications.mail.search`
-- `communications.mail.send.test`
-- `communications.mailarchiver.import.monitor`
-- `communications.mailarchiver.import.status`
-- `communications.mailboxes.list`
-- `communications.policy.status`
-- `communications.provider.status`
-- `communications.send.execute`
-- `communications.send.preview`
-- `communications.stack.status`
-- `communications.templates.list`
+## Capabilities (0)
+- (none)
 
-## Gates (34)
+## Gates (18)
 - `D124`
-- `D125`
 - `D126`
-- `D147`
+- `D127`
 - `D148`
-- `D16`
-- `D17`
-- `D225`
-- `D233`
-- `D252`
-- `D253`
-- `D256`
-- `D258`
-- `D259`
-- `D260`
-- `D261`
-- `D262`
-- `D268`
-- `D269`
-- `D270`
-- `D271`
-- `D272`
-- `D273`
-- `D292`
-- `D31`
-- `D42`
-- `D44`
-- `D58`
+- `D150`
+- `D153`
+- `D3`
+- `D389`
+- `D391`
+- `D406`
+- `D410`
+- `D416`
+- `D422`
+- `D423`
+- `D425`
+- `D426`
 - `D62`
 - `D63`
-- `D67`
-- `D81`
-- `D84`
-- `D85`
 
 ## Workflow
-- Startup: read `NORTH_STAR.md`, `docs/governance/SPINE.md`, and `docs/governance/SESSION_PROTOCOL.md`; then run `./bin/ops status --json`, `./bin/ops verify --core-only`, and `./bin/ops cap list`.
+- Canonical session entry: `./bin/ops cap run session.v3.attach -- --allow-no-loop`
 
 ## Boundaries
 - Runtime surface is generated from registration and role contracts.

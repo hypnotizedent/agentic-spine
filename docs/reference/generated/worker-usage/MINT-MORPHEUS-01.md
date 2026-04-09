@@ -4,7 +4,7 @@ authority_state: projection
 projection_of:
   - ops/bindings/terminal.worker.catalog.yaml
 owner: "@ronny"
-last_verified: 2026-04-07
+last_verified: 2026-04-09
 scope: worker-usage-mint-morpheus-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -14,76 +14,38 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Terminal ID: `MINT-MORPHEUS-01`
 - Terminal Type: `domain-runtime`
 - Status: `active`
-- Domain: `mint`
-- Agent ID: `mint-agent`
-- Verify Command: `./bin/ops cap run verify.pack.run mint`
+- Domain: `morpheus`
+- Agent ID: `none`
+- Verify Command: `./bin/ops cap run verify.core.run`
 
 ## Write Scope
-- `../agentic-foundation/docs/agents/mint-agent.contract.md`
+- (none)
 
-## Capabilities (13)
-- `MINT-MORPHEUS-01.launch`
-- `mint.artwork.place`
-- `mint.customer.artwork.revision.prepare`
-- `mint.customer.forwarded.attachment.resolve`
-- `mint.customer.inbox.triage`
-- `mint.customer.inbox.work_items`
-- `mint.customer.reorder.resolve`
-- `mint.customer.reply.draft`
-- `mint.intake.validate`
-- `mint.modules.health`
-- `mint.operator.drop.assist`
-- `mint.operator.storage.status`
-- `mint.seeds.query`
+## Capabilities (0)
+- (none)
 
-## Gates (44)
+## Gates (18)
 - `D124`
-- `D125`
 - `D126`
+- `D127`
 - `D148`
-- `D16`
-- `D17`
-- `D18`
-- `D22`
-- `D23`
-- `D235`
-- `D236`
-- `D237`
-- `D238`
-- `D239`
-- `D241`
-- `D242`
-- `D243`
-- `D244`
-- `D245`
-- `D246`
-- `D247`
-- `D248`
-- `D249`
-- `D250`
-- `D252`
-- `D253`
-- `D254`
-- `D256`
-- `D258`
-- `D259`
-- `D260`
-- `D261`
-- `D262`
-- `D31`
-- `D42`
-- `D44`
-- `D58`
+- `D150`
+- `D153`
+- `D3`
+- `D389`
+- `D391`
+- `D406`
+- `D410`
+- `D416`
+- `D422`
+- `D423`
+- `D425`
+- `D426`
 - `D62`
 - `D63`
-- `D67`
-- `D80`
-- `D81`
-- `D84`
-- `D85`
 
 ## Workflow
-- Startup: read `NORTH_STAR.md`, `docs/governance/SPINE.md`, and `docs/governance/SESSION_PROTOCOL.md`; then run `./bin/ops status --json`, `./bin/ops verify --core-only`, and `./bin/ops cap list`.
+- Canonical session entry: `./bin/ops cap run session.v3.attach -- --allow-no-loop`
 
 ## Boundaries
 - Runtime surface is generated from registration and role contracts.

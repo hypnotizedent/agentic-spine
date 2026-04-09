@@ -4,7 +4,7 @@ authority_state: projection
 projection_of:
   - ops/bindings/terminal.worker.catalog.yaml
 owner: "@ronny"
-last_verified: 2026-04-07
+last_verified: 2026-04-09
 scope: worker-usage-domain-media-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -15,59 +15,37 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Terminal Type: `domain-runtime`
 - Status: `active`
 - Domain: `media`
-- Agent ID: `media-agent`
+- Agent ID: `none`
 - Verify Command: `./bin/ops cap run verify.pack.run media`
 
 ## Write Scope
-- `ops/plugins/domains/media/`
-- `../agentic-foundation/docs/agents/media-agent.contract.md`
+- (none)
 
-## Capabilities (7)
-- `media.backup.create`
-- `media.health.check`
-- `media.metrics.today`
-- `media.nfs.verify`
-- `media.service.status`
-- `media.stack.restart`
-- `media.status`
+## Capabilities (0)
+- (none)
 
-## Gates (33)
-- `D106`
-- `D107`
-- `D108`
-- `D109`
-- `D110`
+## Gates (18)
 - `D124`
-- `D125`
 - `D126`
+- `D127`
 - `D148`
-- `D16`
-- `D17`
-- `D223`
-- `D224`
-- `D228`
-- `D229`
-- `D230`
-- `D231`
-- `D232`
-- `D240`
-- `D257`
-- `D303`
-- `D304`
-- `D31`
-- `D42`
-- `D44`
-- `D58`
+- `D150`
+- `D153`
+- `D3`
+- `D389`
+- `D391`
+- `D406`
+- `D410`
+- `D416`
+- `D422`
+- `D423`
+- `D425`
+- `D426`
 - `D62`
 - `D63`
-- `D67`
-- `D80`
-- `D81`
-- `D84`
-- `D85`
 
 ## Workflow
-- Startup: read `NORTH_STAR.md`, `docs/governance/SPINE.md`, and `docs/governance/SESSION_PROTOCOL.md`; then run `./bin/ops status --json`, `./bin/ops verify --core-only`, and `./bin/ops cap list`.
+- Canonical session entry: `./bin/ops cap run session.v3.attach -- --allow-no-loop`
 
 ## Boundaries
 - Runtime surface is generated from registration and role contracts.

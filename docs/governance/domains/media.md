@@ -24,7 +24,6 @@ Parent loop: `LOOP-MEDIA-SPLIT-AUTHORITY-CANONICALIZATION-20260322`
 ## Spine Engine-Facing Surfaces (retained)
 
 - Capability registrations: `ops/capabilities.yaml` (all `media.*` IDs)
-- Routing: `ops/bindings/routing.dispatch.yaml`
 - Compatibility projections: `ops/bindings/domains/media/` (23 files, marked do-not-edit-here)
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain media`
 
@@ -41,13 +40,11 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 | Capability |
 |---|
 | `homarr.config.generate` |
-| `media.api.resolve` |
 | `media.backup.create` |
 | `media.backup.restore` |
 | `media.capacity.runway.status` |
 | `media.capacity.snapshot.build` |
 | `media.config.restore.drill` |
-| `media.content.snapshot.refresh` |
 | `media.download.canary.check` |
 | `media.downloads.bloat.status` |
 | `media.duplicate.scan` |

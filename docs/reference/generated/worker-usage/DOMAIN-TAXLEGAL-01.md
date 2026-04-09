@@ -4,7 +4,7 @@ authority_state: projection
 projection_of:
   - ops/bindings/terminal.worker.catalog.yaml
 owner: "@ronny"
-last_verified: 2026-04-07
+last_verified: 2026-04-09
 scope: worker-usage-domain-taxlegal-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -14,26 +14,17 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Terminal ID: `DOMAIN-TAXLEGAL-01`
 - Terminal Type: `domain-runtime`
 - Status: `active`
-- Domain: `tax-legal`
-- Agent ID: `tax-legal-agent`
+- Domain: `taxlegal`
+- Agent ID: `none`
 - Verify Command: `./bin/ops cap run verify.core.run`
 
 ## Write Scope
-- `ops/plugins/domains/taxlegal/`
-- `../agentic-foundation/docs/agents/tax-legal-agent.contract.md`
-- `runtime/domain-state/taxlegal/cases/`
+- (none)
 
-## Capabilities (8)
-- `taxlegal.case.intake`
-- `taxlegal.case.status`
-- `taxlegal.deadlines.refresh`
-- `taxlegal.deadlines.status`
-- `taxlegal.packet.generate`
-- `taxlegal.research.answer`
-- `taxlegal.source.ingest`
-- `taxlegal.source.recall`
+## Capabilities (0)
+- (none)
 
-## Gates (20)
+## Gates (18)
 - `D124`
 - `D126`
 - `D127`
@@ -52,10 +43,9 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D426`
 - `D62`
 - `D63`
-- `D67`
 
 ## Workflow
-- Startup: read `NORTH_STAR.md`, `docs/governance/SPINE.md`, and `docs/governance/SESSION_PROTOCOL.md`; then run `./bin/ops status --json`, `./bin/ops verify --core-only`, and `./bin/ops cap list`.
+- Canonical session entry: `./bin/ops cap run session.v3.attach -- --allow-no-loop`
 
 ## Boundaries
 - Runtime surface is generated from registration and role contracts.
