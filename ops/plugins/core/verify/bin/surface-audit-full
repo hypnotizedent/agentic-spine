@@ -76,50 +76,55 @@ else
   record "2. Launcher/Entry Parity" "FAIL" "missing spine launcher surface or active workbench source still references retired launcher compatibility paths${launcher_err:+; $launcher_err}"
 fi
 
-# 3) Capability triad parity
-if bash "$ROOT/surfaces/verify/d67-capability-map-lock.sh" >/tmp/surface_audit_capmap.out 2>/tmp/surface_audit_capmap.err; then
-  # Manifest coverage check for critical spine-control capabilities.
-  required_manifest_caps=(
-    verify.core.run
-    verify.domain.run
-    verify.release.run
-    verify.route.recommend
-    verify.pack.list
-    verify.pack.run
-    verify.pack.explain
-    gate.topology.validate
-    gate.topology.assign
-    gate.registry.add
-    gate.registry.update
-    domain.onboard.new
-    surface.audit.full
-    stability.control.snapshot
-    stability.control.reconcile
-    mcp.runtime.status
-  )
+# 3) Capability authority parity
+required_manifest_caps=(
+  verify.core.run
+  verify.domain.run
+  verify.release.run
+  verify.route.recommend
+  verify.pack.list
+  verify.pack.run
+  verify.pack.explain
+  gate.topology.validate
+  gate.topology.assign
+  gate.registry.add
+  gate.registry.update
+  domain.onboard.new
+  surface.audit.full
+  stability.control.snapshot
+  stability.control.reconcile
+  mcp.runtime.status
+)
 
-  mapfile -t manifest_caps < <(yq e -r '.plugins[].capabilities[]?' "$ROOT/ops/plugins/MANIFEST.yaml")
+mapfile -t authority_caps < <(yq e -r '.capabilities | keys | .[]' "$ROOT/ops/capabilities.yaml")
+mapfile -t manifest_caps < <(yq e -r '.plugins[].capabilities[]?' "$ROOT/ops/plugins/MANIFEST.yaml")
 
-  declare -A manifest_index=()
-  for cap in "${manifest_caps[@]}"; do
-    [[ -n "$cap" ]] && manifest_index["$cap"]=1
-  done
+declare -A authority_index=()
+for cap in "${authority_caps[@]}"; do
+  [[ -n "$cap" ]] && authority_index["$cap"]=1
+done
 
-  missing_manifest=0
-  for cap in "${required_manifest_caps[@]}"; do
-    [[ -n "$cap" ]] || continue
-    if [[ -z "${manifest_index[$cap]:-}" ]]; then
-      missing_manifest=$((missing_manifest + 1))
-    fi
-  done
+declare -A manifest_index=()
+for cap in "${manifest_caps[@]}"; do
+  [[ -n "$cap" ]] && manifest_index["$cap"]=1
+done
 
-  if [[ "$missing_manifest" -eq 0 ]]; then
-    record "3. Capability Triad Parity" "PASS" "capabilities.yaml, capability_map.yaml, MANIFEST.yaml in parity"
-  else
-    record "3. Capability Triad Parity" "FAIL" "$missing_manifest required control-lane capabilities missing from plugin MANIFEST.yaml"
+missing_authority=0
+missing_manifest=0
+for cap in "${required_manifest_caps[@]}"; do
+  [[ -n "$cap" ]] || continue
+  if [[ -z "${authority_index[$cap]:-}" ]]; then
+    missing_authority=$((missing_authority + 1))
   fi
+  if [[ -z "${manifest_index[$cap]:-}" ]]; then
+    missing_manifest=$((missing_manifest + 1))
+  fi
+done
+
+if [[ "$missing_authority" -eq 0 && "$missing_manifest" -eq 0 ]]; then
+  record "3. Capability Authority Parity" "PASS" "capabilities.yaml and MANIFEST.yaml cover required control-lane capabilities"
 else
-  record "3. Capability Triad Parity" "FAIL" "D67 capability map lock failed"
+  record "3. Capability Authority Parity" "FAIL" "$missing_authority required capabilities missing from authority; $missing_manifest missing from plugin MANIFEST.yaml"
 fi
 
 # 4) Gate topology parity
