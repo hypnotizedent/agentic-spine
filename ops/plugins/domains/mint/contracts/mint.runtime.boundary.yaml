@@ -1,90 +1,13 @@
 ---
-status: authoritative
+status: compatibility-seam
 owner: "@ronny"
 scope: mint-runtime-isolation
 created: "2026-03-25"
-loop_id: LOOP-MINT-OS-FOUNDATION-20260325
+shimmed: "2026-04-08"
+canonical_location: mint-modules/contracts/mint.runtime.boundary.yaml
+loop_id: LOOP-ONE-WAY-20260408
 ---
 
+# Compatibility seam — canonical authority lives in mint-modules.
+# See: mint-modules/contracts/mint.runtime.boundary.yaml
 contract_id: MINT_RUNTIME_BOUNDARY_V1
-
-purpose: >
-  Physically isolate Mint OS business data from Spine infrastructure state.
-  All order transactions, customer history, quoted prices, artwork assets,
-  and production state live exclusively in the Mint runtime boundary.
-  Spine directories are forbidden for domain payload storage.
-
-runtime_root:
-  env_var: MINT_RUNTIME_ROOT
-  default: ~/.runtime/mint
-  structure:
-    state: order lifecycle, customer state, production tracking
-    evidence: receipts, audit trails, reconciliation proofs
-    locks: domain-scoped operational locks
-    hot: active WIP job assets (rapid local IO)
-
-spine_runtime_root:
-  path: ~/.runtime/spine/state
-  mint_data_allowed: false
-  explanation: >
-    Spine state holds governance artifacts (gate metadata, loop state,
-    execution receipts, session state). Domain payload data — orders,
-    customers, prices, artwork, mockups — is forbidden here.
-
-boundary_rules:
-  mint_owns:
-    - order_state: $MINT_RUNTIME_ROOT/state/orders/
-    - customer_history: $MINT_RUNTIME_ROOT/state/customers/
-    - quoted_prices: $MINT_RUNTIME_ROOT/state/quotes/
-    - artwork_registry: MinIO bucket artwork-registry (via rclone mintfiles:)
-    - artwork_intake: MinIO bucket artwork-intake (via rclone mintfiles:)
-    - artwork_output: MinIO bucket artwork-output (via rclone mintfiles:)
-    - production_packages: $MINT_RUNTIME_ROOT/state/production/
-    - mockup_drafts: $MINT_RUNTIME_ROOT/hot/mockups/
-    - client_assets: MinIO bucket client-assets (via rclone mintfiles:)
-    - database: PostgreSQL (mint-modules-postgres container, /mnt/data/mint-data/)
-
-  spine_owns:
-    - gate_metadata: $SPINE_STATE/gate-registry/
-    - loop_state: $SPINE_STATE/loops/
-    - execution_receipts: $SPINE_STATE/
-    - session_state: $SPINE_STATE/sessions/
-    - friction_queue: $SPINE_STATE/friction-queue.ndjson
-    - verify_results: $SPINE_STATE/verify/
-
-  forbidden_writes:
-    - target: $SPINE_STATE/**
-      by: mint domain capabilities
-      payload: order, customer, quote, artwork, mockup, garment, decoration, production
-      exception: none
-    - target: $MINT_RUNTIME_ROOT/**
-      by: spine core capabilities (verify, friction, session, loop)
-      payload: any
-      exception: lock files for cross-domain coordination only
-
-existing_state_migration:
-  note: >
-    Existing mint-related locks in $SPINE_STATE (e.g., mint-customer-lifecycle-resolutions.lock)
-    are legacy placement. New domain locks must use $MINT_RUNTIME_ROOT/locks/. Legacy locks
-    will be migrated in a future remediation wave.
-  legacy_locks_in_spine_state:
-    - mint-customer-lifecycle-resolutions.lock
-    - mint-customer-inbox-work-items.lock
-    - mint-customer-voice-callbacks.lock
-
-database_boundary:
-  primary: PostgreSQL (mint-modules-postgres)
-  schema_authority: ops/plugins/domains/mint/schema/mint.schema.authority.yaml
-  canonical_ddl: ops/plugins/domains/mint/schema/mint.core.schema.sql
-  rule: >
-    All table definitions must originate from the canonical DDL. No agent,
-    module, or script may execute CREATE TABLE outside of a governed schema
-    migration that references this authority.
-
-agent_guidance:
-  read_first: ops/plugins/domains/mint/contracts/mint.runtime.boundary.yaml
-  rule: >
-    Before writing any Mint domain data, resolve the target path against this
-    boundary contract. If your write target resolves to a Spine directory,
-    STOP and file a friction item. Domain payload in Spine state is a
-    governance violation.
