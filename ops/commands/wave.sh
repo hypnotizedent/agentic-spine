@@ -1224,19 +1224,31 @@ claims = claims_doc.get("claims") if isinstance(claims_doc.get("claims"), list) 
 normalized_claims = []
 conflicts = []
 
+# Explicit pre-pass: reap any claim whose TTL has elapsed before running the
+# collision check, so expired claims can never block a new wave start. This is
+# defensive duplication of reconcile_wave_path_claims (called earlier in the
+# shell wrapper) -- no new subsystem, just an in-place status flip.
+for claim in claims:
+    if not isinstance(claim, dict):
+        continue
+    if str(claim.get("status", "active")).strip() != "active":
+        continue
+    expires_at_raw = str(claim.get("expires_at", "")).strip()
+    if not expires_at_raw:
+        continue
+    try:
+        if datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00")) <= now_dt:
+            claim["status"] = "expired"
+            claim["expired_at"] = now
+            claim["reconciled_at"] = now
+            claim["reconciled_reason"] = "ttl_expired_at_wave_start"
+    except Exception:
+        pass
+
 for claim in claims:
     if not isinstance(claim, dict):
         continue
     status = str(claim.get("status", "active")).strip() or "active"
-    expires_at = str(claim.get("expires_at", "")).strip()
-    if status == "active" and expires_at:
-        try:
-            if datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= now_dt:
-                status = "expired"
-                claim["status"] = "expired"
-                claim["expired_at"] = now
-        except Exception:
-            pass
     if status == "active" and path_claims_non_overlap and str(claim.get("wave_id", "")).strip() != wave_id:
         # Waves sharing the same loop_id are co-located lanes of the same
         # orchestrated work -- allow path overlap within the same loop
