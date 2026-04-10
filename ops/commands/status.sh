@@ -113,8 +113,10 @@ if [[ "$MODE" == "--context" ]]; then
   COHERENCE="$(jq_val '.summary.engine_coherence_needs_attention' 'unknown')"
   FORCE_CLOSES="$(jq_val '.summary.recent_force_closes' '?')"
   DOD_OVERRIDES="$(jq_val '.summary.recent_dod_overrides' '?')"
+  HISTORICAL_OVERRIDE_ONLY="$(jq_val '.engine_coherence.historical_override_only' 'false')"
 
   WARNINGS=""
+  HISTORY_NOTE=""
   if [[ -n "$JOINED_ERR" ]]; then
     WARNINGS="$JOINED_ERR"
   elif [[ "$COHERENCE" == "true" ]]; then
@@ -128,6 +130,13 @@ if [[ "$MODE" == "--context" ]]; then
       WARNINGS="$(printf '%s' "${W_PARTS[0]}"; for w in "${W_PARTS[@]:1}"; do printf ', %s' "$w"; done)"
     else
       WARNINGS="engine coherence needs attention"
+    fi
+  elif [[ "$HISTORICAL_OVERRIDE_ONLY" == "true" ]]; then
+    H_PARTS=()
+    [[ "$FORCE_CLOSES" == "0" || "$FORCE_CLOSES" == "?" ]] || H_PARTS+=("${FORCE_CLOSES} recent force-closes")
+    [[ "$DOD_OVERRIDES" == "0" || "$DOD_OVERRIDES" == "?" ]] || H_PARTS+=("${DOD_OVERRIDES} recent DoD overrides")
+    if [[ ${#H_PARTS[@]} -gt 0 ]]; then
+      HISTORY_NOTE="$(printf '%s' "${H_PARTS[0]}"; for h in "${H_PARTS[@]:1}"; do printf ', %s' "$h"; done)"
     fi
   fi
 
@@ -157,6 +166,9 @@ if [[ "$MODE" == "--context" ]]; then
   if [[ -n "$WARNINGS" ]]; then
     echo "─── warning ────────────────────────────────────────"
     printf "  %s\n" "$WARNINGS"
+  elif [[ -n "$HISTORY_NOTE" ]]; then
+    echo "─── history ────────────────────────────────────────"
+    printf "  %s\n" "$HISTORY_NOTE"
   fi
   echo "─────────────────────────────────────────────────────"
   exit 0

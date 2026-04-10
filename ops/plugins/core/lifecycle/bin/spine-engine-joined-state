@@ -27,6 +27,13 @@ try:
 except Exception as exc:  # pragma: no cover - exercised via degraded authority fixtures
     gaps_authority_import_error = exc
 
+loops_authority = None
+loops_authority_import_error = None
+try:
+    import loops_sql_authority as loops_authority
+except Exception as exc:  # pragma: no cover - exercised via degraded authority fixtures
+    loops_authority_import_error = exc
+
 
 OPEN_LOOP_STATUSES = {"active", "open", "draft"}
 TERMINAL_LOOP_STATUSES = {"closed", "superseded", "abandoned", "deferred"}
@@ -164,36 +171,81 @@ def resolve_paths(root: Path) -> dict[str, Path]:
 
 
 def collect_loop_rows(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    rows: list[dict[str, Any]] = []
+    rows_by_id: dict[str, dict[str, Any]] = {}
     status_index: dict[str, str] = {}
     scopes_dir = paths["scopes_dir"]
-    if not scopes_dir.exists():
-        return rows, status_index
+    if loops_authority is not None:
+        previous_spine_state = os.environ.get("SPINE_STATE")
+        conn = None
+        try:
+            os.environ["SPINE_STATE"] = str(paths["state_root"])
+            db_path, _ = loops_authority.resolve_paths(paths["root"])
+            conn = loops_authority.connect(db_path)
+            loops_authority.ensure_schema(conn)
+            for loop in loops_authority.list_loops(conn, status="all"):
+                loop_id = str(loop.get("loop_id") or "").strip()
+                if not loop_id.startswith("LOOP-"):
+                    continue
+                status = str(loop.get("status") or "unknown").strip().lower()
+                status_index[loop_id] = status
+                if status not in OPEN_LOOP_STATUSES:
+                    continue
+                rows_by_id[loop_id] = {
+                    "loop_id": loop_id,
+                    "status": status,
+                    "owner": str(loop.get("owner") or "").strip(),
+                    "scope": "",
+                    "priority": str(loop.get("priority") or "").strip(),
+                    "objective": str(loop.get("objective") or "").strip(),
+                    "next_action": str(loop.get("next_action") or "").strip(),
+                    "execution_readiness": str(loop.get("execution_readiness") or "").strip(),
+                    "horizon": str(loop.get("horizon") or "").strip(),
+                    "created_at_utc": "",
+                    "updated_at_utc": "",
+                    "path": "",
+                }
+        except Exception:
+            pass
+        finally:
+            if conn is not None:
+                conn.close()
+            if previous_spine_state is None:
+                os.environ.pop("SPINE_STATE", None)
+            else:
+                os.environ["SPINE_STATE"] = previous_spine_state
 
-    for path in sorted(scopes_dir.glob("*.scope.md")):
-        front = parse_frontmatter(path)
-        loop_id = str(front.get("loop_id") or path.stem.replace(".scope", "")).strip()
-        if not loop_id.startswith("LOOP-"):
-            continue
-        status = str(front.get("status") or "unknown").strip().lower()
-        created_dt = parse_iso(front.get("created")) or dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
-        row = {
-            "loop_id": loop_id,
-            "status": status,
-            "owner": str(front.get("owner") or "").strip(),
-            "scope": str(front.get("scope") or "").strip(),
-            "priority": str(front.get("priority") or "").strip(),
-            "objective": str(front.get("objective") or "").strip(),
-            "next_action": str(front.get("next_action") or "").strip(),
-            "created_at_utc": render_dt(created_dt),
-            "updated_at_utc": render_dt(dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)),
-            "path": str(path),
-        }
-        status_index[loop_id] = status
-        if status in OPEN_LOOP_STATUSES:
-            rows.append(row)
+    if scopes_dir.exists():
+        for path in sorted(scopes_dir.glob("*.scope.md")):
+            front = parse_frontmatter(path)
+            loop_id = str(front.get("loop_id") or path.stem.replace(".scope", "")).strip()
+            if not loop_id.startswith("LOOP-"):
+                continue
+            status = str(front.get("status") or status_index.get(loop_id) or "unknown").strip().lower()
+            created_dt = parse_iso(front.get("created")) or dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
+            row = {
+                "loop_id": loop_id,
+                "status": status,
+                "owner": str(front.get("owner") or "").strip(),
+                "scope": str(front.get("scope") or "").strip(),
+                "priority": str(front.get("priority") or "").strip(),
+                "objective": str(front.get("objective") or "").strip(),
+                "next_action": str(front.get("next_action") or "").strip(),
+                "execution_readiness": str(front.get("execution_readiness") or "").strip(),
+                "horizon": str(front.get("horizon") or "").strip(),
+                "created_at_utc": render_dt(created_dt),
+                "updated_at_utc": render_dt(dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)),
+                "path": str(path),
+            }
+            status_index[loop_id] = status
+            if status in OPEN_LOOP_STATUSES:
+                existing = rows_by_id.get(loop_id, {})
+                merged = dict(existing)
+                merged.update({k: v for k, v in row.items() if v})
+                rows_by_id[loop_id] = merged
+            elif loop_id in rows_by_id:
+                rows_by_id.pop(loop_id, None)
 
-    rows.sort(key=lambda row: (row.get("created_at_utc", ""), row.get("loop_id", "")), reverse=True)
+    rows = sorted(rows_by_id.values(), key=lambda row: (row.get("created_at_utc", ""), row.get("loop_id", "")), reverse=True)
     return rows, status_index
 
 
@@ -605,30 +657,48 @@ def collect_latest_fast_verify(paths: dict[str, Path]) -> dict[str, Any]:
 
 
 def build_engine_coherence_summary(
+    open_loops: list[dict[str, Any]],
     open_gaps: list[dict[str, Any]],
     override_signals: dict[str, list[dict[str, Any]]],
     main_override_signals: list[dict[str, Any]],
     gap_state: dict[str, Any],
     orphaned_waves: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    signal_rows = [row for row in open_gaps if row.get("id") in ENGINE_COHERENCE_GAP_IDS]
+    monitoring_loop_ids = {
+        str(row.get("loop_id") or "").strip()
+        for row in open_loops
+        if str(row.get("execution_readiness") or "").strip().lower() == "monitoring"
+    }
+    signal_rows = [
+        row
+        for row in open_gaps
+        if row.get("id") in ENGINE_COHERENCE_GAP_IDS and row.get("parent_loop") not in monitoring_loop_ids
+    ]
     gap_authority_status = str(gap_state.get("status") or "degraded").strip().lower()
     orphaned_wave_count = len(orphaned_waves) if orphaned_waves else 0
+    force_close_count = len(override_signals.get("force_close", []))
+    dod_override_count = len(override_signals.get("dod_override", []))
+    historical_override_only = bool(
+        gap_authority_status == "ok"
+        and not signal_rows
+        and orphaned_wave_count == 0
+        and (force_close_count > 0 or dod_override_count > 0)
+    )
     return {
         "signal_gap_ids": sorted(ENGINE_COHERENCE_GAP_IDS),
         "open_gap_signals": signal_rows,
         "open_gap_signal_ids": [row.get("id", "") for row in signal_rows],
+        "monitoring_loop_ids": sorted(loop_id for loop_id in monitoring_loop_ids if loop_id),
         "gap_authority_status": gap_authority_status,
         "gap_projection_parity": gap_state.get("projection_parity", {}),
-        "recent_force_close_count": len(override_signals.get("force_close", [])),
-        "recent_dod_override_count": len(override_signals.get("dod_override", [])),
+        "recent_force_close_count": force_close_count,
+        "recent_dod_override_count": dod_override_count,
         "recent_main_override_count": len(main_override_signals),
         "orphaned_wave_count": orphaned_wave_count,
+        "historical_override_only": historical_override_only,
         "needs_attention": bool(
             gap_authority_status != "ok"
             or signal_rows
-            or override_signals.get("force_close")
-            or override_signals.get("dod_override")
             or orphaned_wave_count > 0
         ),
     }
@@ -735,7 +805,7 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             orphaned_waves.append(orphan)
     main_override_signals = collect_main_override_signals(paths)
     latest_fast_verify = collect_latest_fast_verify(paths)
-    engine_coherence = build_engine_coherence_summary(open_gaps, override_signals, main_override_signals, gap_state, orphaned_waves)
+    engine_coherence = build_engine_coherence_summary(open_loops, open_gaps, override_signals, main_override_signals, gap_state, orphaned_waves)
 
     payload: dict[str, Any] = {
         "schema_version": "1.0",

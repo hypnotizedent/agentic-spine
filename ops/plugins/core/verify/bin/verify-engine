@@ -13,6 +13,8 @@
 #   E4  read-only capability dispatch (verify.engine.run self-test)
 #   E5  no dead hot-path entry references
 #   E6  no dead file references in governed scripts
+#   E7  no dead canonical path references in hot contracts
+#   E8  MANIFEST script entries resolve on disk
 #
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -232,6 +234,38 @@ for entry in checks:
             target = root / rel
             if not target.exists():
                 missing.append(f"{contract.relative_to(root)}::{label} -> {rel}")
+
+if missing:
+    print("\n".join(missing))
+    raise SystemExit(1)
+PY
+'
+
+# E8: every MANIFEST script entry must resolve on disk.
+# Keep this narrow to the canonical plugin script registry; do not validate
+# broader plugin schema or capability parity here.
+check E8 "MANIFEST script parity" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+import yaml
+
+root = Path(sys.argv[1])
+manifest_path = root / "ops/plugins/MANIFEST.yaml"
+data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+
+missing = []
+for plugin in data.get("plugins") or []:
+    if not isinstance(plugin, dict):
+        continue
+    base = root / str(plugin.get("path") or "").strip()
+    for rel in plugin.get("scripts") or []:
+        script_rel = str(rel or "").strip()
+        if not script_rel:
+            continue
+        candidate = base / script_rel
+        if not candidate.exists():
+            missing.append(str(candidate.relative_to(root)))
 
 if missing:
     print("\n".join(missing))
