@@ -577,6 +577,8 @@ daemons_summary = {
     "loaded": 0,
     "missing": 0,
     "missing_labels": [],
+    "non_local_deferred": [],
+    "local_role": "",
 }
 
 try:
@@ -585,6 +587,27 @@ try:
         import yaml as _yaml_daemons  # type: ignore
         _ld = _yaml_daemons.safe_load(launchd_contract.read_text(encoding="utf-8")) or {}
         _required = [str(x) for x in (_ld.get("required_labels") or []) if x]
+
+        # Role-aware filter: labels whose intended_node_role (from the
+        # scheduler registry) does not match the local host's role are
+        # deferred, not missing. Matches verify-engine E10 exactly so
+        # status and E10 agree on required-label truth per host.
+        local_role = (os.environ.get("SPINE_LOCAL_ROLE", "").strip() or "operator_console")
+        role_by_label = {}
+        _registry = spine / "ops" / "bindings" / "launchd.scheduler.registry.yaml"
+        if _registry.is_file():
+            _reg = _yaml_daemons.safe_load(_registry.read_text(encoding="utf-8")) or {}
+            for _entry in (_reg.get("labels") or []):
+                _lbl = str((_entry or {}).get("label", "")).strip()
+                _role = str((_entry or {}).get("intended_node_role", "")).strip()
+                if _lbl:
+                    role_by_label[_lbl] = _role
+        local_required = [
+            lbl for lbl in _required
+            if role_by_label.get(lbl, local_role) == local_role
+        ]
+        non_local = [lbl for lbl in _required if lbl not in local_required]
+
         loaded_labels = set()
         try:
             _lp = _sp.run(["launchctl", "list"], capture_output=True, text=True, timeout=10)
@@ -595,16 +618,18 @@ try:
                         loaded_labels.add(parts[2])
         except Exception:
             pass
-        missing = [lbl for lbl in _required if lbl not in loaded_labels]
+        missing = [lbl for lbl in local_required if lbl not in loaded_labels]
         daemons_summary = {
-            "required_total": len(_required),
-            "loaded": len(_required) - len(missing),
+            "required_total": len(local_required),
+            "loaded": len(local_required) - len(missing),
             "missing": len(missing),
             "missing_labels": missing,
+            "non_local_deferred": non_local,
+            "local_role": local_role,
         }
         if missing:
             anomalies.append(
-                f"LAUNCHD REQUIRED LABEL(S) NOT LOADED: {', '.join(missing)}"
+                f"LAUNCHD REQUIRED LABEL(S) NOT LOADED ({local_role}): {', '.join(missing)}"
             )
 except Exception:
     pass
