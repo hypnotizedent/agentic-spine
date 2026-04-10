@@ -5704,6 +5704,8 @@ try:
         "disposition_target": disposition,
         "evidence_refs": _packet_evidence_refs,
         "closed_at_utc": now,
+        "final_stage": "closed",
+        "workspace_lifecycle_state": str((state.get("workspace") or {}).get("lifecycle_state", "")),
     }
 
     _spine_state = os.environ.get("SPINE_STATE", "") or os.path.join(
@@ -5727,7 +5729,7 @@ print(f"  Dispatches: {len(dispatches)} ({sum(1 for d in dispatches if d['status
 print(f"  Checks: {done_checks} done, {failed_checks} failed")
 print(f"  Receipts: {valid_receipt_count} valid, {len(invalid_receipts)} invalid")
 if workspace.get("enabled"):
-    print(f"  Workspace lifecycle: pending_close ({workspace.get('worktree')})")
+    print(f"  Workspace lifecycle: {workspace.get('lifecycle_state', '?')} ({workspace.get('worktree')})")
 if run_keys:
     print(f"  Run keys: {len(run_keys)}")
 if residual_blockers:
