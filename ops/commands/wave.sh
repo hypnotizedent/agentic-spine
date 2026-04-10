@@ -765,6 +765,8 @@ Usage:
   ops wave close <WAVE_ID> --disposition <state> [--force] [--dod-override "<reason>"] [--lock-override "<reason>"]  Close a wave
   ops wave preflight <domain>                        Fast non-blocking preflight
   ops wave receipt-validate <path>                   Validate EXEC_RECEIPT JSON
+  ops wave emit-agent-receipt <WAVE_ID> --lane <L>|--dispatch D<N> --result "<text>" [--file-read <p>]... [--task-id <id>]
+                                                    Bridge: emit worker-class EXEC_RECEIPT JSON for an in-band Agent-tool subagent result
 
 Ownership:
   ops wave manages the manual wave lifecycle.
@@ -5631,6 +5633,166 @@ PYLEASEUPDATE
   fi
 }
 
+# ── Agent-result -> EXEC_RECEIPT bridge ────────────────────────────────
+# Controller boundary: converts an in-band Agent-tool subagent result into a
+# worker-class EXEC_RECEIPT JSON artifact under waves/<WAVE_ID>/evidence/.
+# Preserves the single receipt model so `ops wave receipt-validate` remains
+# authoritative for every dispatch, regardless of whether the worker was a
+# shell lane or an Agent-tool subagent.
+cmd_emit_agent_receipt() {
+  local wave_id=""
+  local lane=""
+  local dispatch_id=""
+  local result=""
+  local task_id_override=""
+  local -a file_reads=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --) shift ;;
+      --lane) lane="${2:-}"; shift 2 ;;
+      --dispatch) dispatch_id="${2:-}"; shift 2 ;;
+      --result) result="${2:-}"; shift 2 ;;
+      --file-read) file_reads+=("${2:-}"); shift 2 ;;
+      --task-id) task_id_override="${2:-}"; shift 2 ;;
+      -*) echo "Unknown flag: $1" >&2; exit 1 ;;
+      *) wave_id="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$wave_id" ]]; then
+    cat >&2 <<'EAREMITUSAGE'
+Usage: ops wave emit-agent-receipt <WAVE_ID> --lane <lane>|--dispatch D<N> --result "<text>" [--file-read <path>]... [--task-id <id>]
+
+Bridge: controller-side emit of a worker-class EXEC_RECEIPT JSON for an
+in-band Agent-tool subagent result. Writes to:
+  <WAVES_DIR>/<WAVE_ID>/evidence/<task_id>.exec_receipt.json
+Then invokes receipt-validate and reports.
+EAREMITUSAGE
+    exit 1
+  fi
+  if [[ -z "$lane" && -z "$dispatch_id" ]]; then
+    echo "ERROR: --lane <lane> or --dispatch D<N> is required." >&2
+    exit 1
+  fi
+
+  ensure_wave_exists "$wave_id"
+  local sf wdir evidence_dir
+  sf="$(wave_state_file "$wave_id")"
+  wdir="$(wave_state_dir "$wave_id")"
+  evidence_dir="$wdir/evidence"
+  mkdir -p "$evidence_dir"
+
+  local emit_terminal="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-SPINE-CONTROL-01}}}}"
+
+  local files_read_csv=""
+  if [[ ${#file_reads[@]} -gt 0 ]]; then
+    local IFS_SAVED="$IFS"
+    IFS='|'
+    files_read_csv="${file_reads[*]}"
+    IFS="$IFS_SAVED"
+  fi
+
+  local receipt_path
+  receipt_path="$(
+    python3 - "$sf" "$wave_id" "$lane" "$dispatch_id" "$result" "$task_id_override" "$emit_terminal" "$evidence_dir" "$files_read_csv" <<'PYEMIT'
+import json, os, sys
+from datetime import datetime, timezone
+
+sf = sys.argv[1]
+wave_id = sys.argv[2]
+lane_in = sys.argv[3]
+dispatch_id_in = sys.argv[4]
+result = sys.argv[5]
+task_id_override = sys.argv[6]
+terminal_id = sys.argv[7] or "SPINE-CONTROL-01"
+evidence_dir = sys.argv[8]
+files_read_csv = sys.argv[9]
+
+with open(sf) as f:
+    state = json.load(f)
+
+dispatches = state.get("dispatches", [])
+if not isinstance(dispatches, list) or not dispatches:
+    print("ERROR: wave has no dispatches", file=sys.stderr)
+    sys.exit(1)
+
+selected = None
+if dispatch_id_in and dispatch_id_in.startswith("D"):
+    try:
+        idx = int(dispatch_id_in[1:]) - 1
+        if 0 <= idx < len(dispatches):
+            selected = dispatches[idx]
+    except ValueError:
+        pass
+    if selected is None:
+        print(f"ERROR: dispatch {dispatch_id_in} not found", file=sys.stderr)
+        sys.exit(1)
+elif lane_in:
+    for d in dispatches:
+        if d.get("lane") == lane_in:
+            selected = d
+    if selected is None:
+        print(f"ERROR: no dispatch found on lane '{lane_in}'", file=sys.stderr)
+        sys.exit(1)
+else:
+    print("ERROR: --lane or --dispatch required", file=sys.stderr)
+    sys.exit(1)
+
+task_id = task_id_override.strip() or str(selected.get("task_id") or "").strip()
+if not task_id:
+    print("ERROR: unable to resolve task_id from dispatch; pass --task-id", file=sys.stderr)
+    sys.exit(1)
+
+selected_lane = str(selected.get("lane") or lane_in or "execution").strip()
+
+file_refs = []
+if files_read_csv:
+    file_refs = [p for p in files_read_csv.split("|") if p.strip()]
+
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+# Minimal worker-class EXEC_RECEIPT for an in-band Agent-tool subagent result.
+# No fabricated run keys. No fabricated commits. No fabricated files_changed.
+# blocker_class=none because the bridge only runs on successful in-band return.
+receipt = {
+    "task_id": task_id,
+    "terminal_id": terminal_id,
+    "lane": selected_lane,
+    "status": "done",
+    "files_changed": [],
+    "run_keys": [],
+    "blockers": [],
+    "ready_for_verify": True,
+    "timestamp_utc": now,
+    "wave_id": wave_id,
+    "evidence_refs": {
+        "run_key_refs": [],
+        "file_refs": file_refs,
+        "commit_refs": [],
+        "blocker_class": "none",
+    },
+}
+
+out_path = os.path.join(evidence_dir, f"{task_id}.exec_receipt.json")
+with open(out_path, "w") as f:
+    json.dump(receipt, f, indent=2)
+    f.write("\n")
+
+print(out_path)
+PYEMIT
+  )" || { echo "FAIL: receipt emit failed" >&2; exit 1; }
+
+  if [[ -z "$receipt_path" || ! -f "$receipt_path" ]]; then
+    echo "FAIL: receipt path not produced" >&2
+    exit 1
+  fi
+
+  echo "Emitted agent-bridged EXEC_RECEIPT: $receipt_path"
+  echo "Validating..."
+  cmd_receipt_validate "$receipt_path"
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -5643,6 +5805,7 @@ case "${1:-}" in
   close)              shift; cmd_close_v2 "$@" ;;
   preflight)          shift; cmd_preflight "$@" ;;
   receipt-validate)   shift; cmd_receipt_validate "$@" ;;
+  emit-agent-receipt) shift; cmd_emit_agent_receipt "$@" ;;
   -h|--help)          usage ;;
   "")                 usage ;;
   *)
