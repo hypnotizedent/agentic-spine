@@ -459,8 +459,8 @@ joined_state_summary = {
     "source": "local_fallback",
     "open_loops": len(open_loops),
     "open_gaps": open_gap_count,
-    "active_waves": None,
-    "orphaned_waves": None,
+    "active_waves": 0,
+    "orphaned_waves": 0,
     "fast_verify_status": "unknown",
     "coherence_attention": False,
 }
@@ -477,12 +477,14 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
             _jdata = json.loads(_proc.stdout)
             _summary = _jdata.get("summary", {})
             if isinstance(_summary, dict):
+                _aw = _summary.get("active_waves")
+                _ow = _summary.get("orphaned_waves")
                 joined_state_summary = {
                     "source": "joined_state",
                     "open_loops": _summary.get("open_loops", len(open_loops)),
                     "open_gaps": _summary.get("open_gaps", open_gap_count),
-                    "active_waves": _summary.get("active_waves"),
-                    "orphaned_waves": _summary.get("orphaned_waves"),
+                    "active_waves": int(_aw) if isinstance(_aw, (int, float)) else 0,
+                    "orphaned_waves": int(_ow) if isinstance(_ow, (int, float)) else 0,
                     "fast_verify_status": _summary.get("latest_fast_verify_status", "unknown"),
                     "coherence_attention": bool(_summary.get("engine_coherence_needs_attention", False)),
                 }
@@ -563,6 +565,50 @@ for loop in open_loops:
             f"LOOP BACKGROUND STALE: {loop_id} heartbeat age={age_minutes:.1f}m ttl={ttl_minutes}m"
         )
 
+# ── Daemon load truth ─────────────────────────────────────────────────────
+#
+# Cross-check `required_labels` from launchd.runtime.contract.yaml against
+# actual `launchctl list` output, so ops status reports daemon load truth
+# (not just configured intent). Any missing required label is also emitted
+# as an anomaly so agents and operators see it in the default text surface.
+
+daemons_summary = {
+    "required_total": 0,
+    "loaded": 0,
+    "missing": 0,
+    "missing_labels": [],
+}
+
+try:
+    launchd_contract = spine / "ops" / "bindings" / "launchd.runtime.contract.yaml"
+    if launchd_contract.is_file():
+        import yaml as _yaml_daemons  # type: ignore
+        _ld = _yaml_daemons.safe_load(launchd_contract.read_text(encoding="utf-8")) or {}
+        _required = [str(x) for x in (_ld.get("required_labels") or []) if x]
+        loaded_labels = set()
+        try:
+            _lp = _sp.run(["launchctl", "list"], capture_output=True, text=True, timeout=10)
+            if _lp.returncode == 0:
+                for _line in _lp.stdout.splitlines():
+                    parts = _line.split()
+                    if len(parts) >= 3:
+                        loaded_labels.add(parts[2])
+        except Exception:
+            pass
+        missing = [lbl for lbl in _required if lbl not in loaded_labels]
+        daemons_summary = {
+            "required_total": len(_required),
+            "loaded": len(_required) - len(missing),
+            "missing": len(missing),
+            "missing_labels": missing,
+        }
+        if missing:
+            anomalies.append(
+                f"LAUNCHD REQUIRED LABEL(S) NOT LOADED: {', '.join(missing)}"
+            )
+except Exception:
+    pass
+
 # ── Output ────────────────────────────────────────────────────────────────
 
 if mode == "--json":
@@ -593,6 +639,7 @@ if mode == "--json":
             "oneliner": comms_oneliner,
         },
         "coherence_summary": joined_state_summary,
+        "daemons": daemons_summary,
         "counts": {
             "open_loops": len(open_loops),
             "background_loops": sum(1 for loop in open_loops if loop.get("execution_mode") == "background"),
@@ -605,10 +652,10 @@ if mode == "--json":
             "open_gaps": open_gap_count,
             "linked_gaps": linked_gap_count,
             "unlinked_gaps": unlinked_gap_count,
-            "active_waves": joined_state_summary.get("active_waves"),
-            "orphaned_waves": joined_state_summary.get("orphaned_waves"),
+            "active_waves": int(joined_state_summary.get("active_waves") or 0),
+            "orphaned_waves": int(joined_state_summary.get("orphaned_waves") or 0),
             "fast_verify_status": joined_state_summary.get("fast_verify_status", "unknown"),
-            "coherence_attention": joined_state_summary.get("coherence_attention", False),
+            "coherence_attention": bool(joined_state_summary.get("coherence_attention", False)),
             "inbox_active": inbox_active,
             "inbox_total": inbox_total,
             "anomalies": len(anomalies),

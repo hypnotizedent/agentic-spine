@@ -55,9 +55,18 @@ plist_label() {
   plutil -convert json -o - "$plist_path" 2>/dev/null | jq -r '.Label // ""'
 }
 
+_launchctl_label_loaded() {
+  # Truth check: a label is "loaded" iff it appears in `launchctl list`.
+  # `launchctl print` can lie (returns 0 on stale residual state even after
+  # a failed bootstrap), so list is the authoritative surface.
+  local label="$1"
+  launchctl list 2>/dev/null | awk -v l="$label" '$3 == l { found=1 } END { exit found ? 0 : 1 }'
+}
+
 reload_label() {
   local label="$1"
   local dst_plist="$2"
+  local bootstrap_out bootstrap_rc
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "WOULD RELOAD: $label"
@@ -65,10 +74,21 @@ reload_label() {
   fi
 
   launchctl bootout "gui/${UID_VAL}/${label}" 2>/dev/null || true
-  launchctl bootstrap "gui/${UID_VAL}" "$dst_plist"
 
-  if ! launchctl print "gui/${UID_VAL}/${label}" >/dev/null 2>&1; then
-    echo "FAIL: launchctl did not load $label after bootstrap" >&2
+  set +e
+  bootstrap_out="$(launchctl bootstrap "gui/${UID_VAL}" "$dst_plist" 2>&1)"
+  bootstrap_rc=$?
+  set -e
+
+  if [[ "$bootstrap_rc" -ne 0 ]]; then
+    echo "LOAD_FAILED: $label (bootstrap exit=$bootstrap_rc)"
+    [[ -n "$bootstrap_out" ]] && echo "  ${bootstrap_out}" >&2
+    return 1
+  fi
+
+  if ! _launchctl_label_loaded "$label"; then
+    echo "LOAD_DROPPED: $label (bootstrap reported success but label not in launchctl list)"
+    [[ -n "$bootstrap_out" ]] && echo "  ${bootstrap_out}" >&2
     return 1
   fi
 

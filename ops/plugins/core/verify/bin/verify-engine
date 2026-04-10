@@ -14,7 +14,9 @@
 #   E5  no dead hot-path entry references
 #   E6  no dead file references in governed scripts
 #   E7  no dead canonical path references in hot contracts
-#   E8  MANIFEST script entries resolve on disk
+#   E8  MANIFEST script entries resolve on disk + narrow capability parity
+#   E9  live launchd plist ProgramArguments resolve on disk (warn: pre-existing dee8c8d5 drift)
+#   E10 launchd required_labels truth (warn): every required_label loaded in live launchctl state
 #
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -141,6 +143,10 @@ check E6 "no dead file references in governed scripts" bash -c '
         "'"$ROOT"'/ops/plugins/core/lifecycle/bin"
         "'"$ROOT"'/ops/plugins/core/orchestration/bin"
         "'"$ROOT"'/ops/plugins/core/session/bin"
+        "'"$ROOT"'/ops/plugins/core/bin"
+        "'"$ROOT"'/ops/plugins/core/alerting/bin"
+        "'"$ROOT"'/ops/plugins/core/alerting/lib"
+        "'"$ROOT"'/ops/plugins/infra/host/bin"
     )
     for dir in "${scan_dirs[@]}"; do
         [[ -d "$dir" ]] || continue
@@ -181,21 +187,31 @@ import yaml
 
 root = Path(sys.argv[1])
 
+STRICT_SUFFIXES = (".yaml", ".yml", ".sh", ".py", ".json", ".md")
+
 checks = [
     {
         "contract": root / "ops/bindings/runtime.bootstrap.contract.yaml",
         "paths": [
-            ("authority.canonical_boot_surface", ["authority", "canonical_boot_surface"]),
-            ("bootstrap_preconditions.required_contracts[]", ["bootstrap_preconditions", "required_contracts"]),
+            ("authority.canonical_boot_surface", ["authority", "canonical_boot_surface"], False),
+            ("bootstrap_preconditions.required_contracts[]", ["bootstrap_preconditions", "required_contracts"], False),
         ],
     },
     {
         "contract": root / "ops/bindings/terminal.worker.projection.contract.yaml",
         "paths": [
-            ("policy.authority_binding", ["policy", "authority_binding"]),
-            ("governed_surfaces[].wrapper", ["governed_surfaces", "wrapper"]),
-            ("governed_surfaces[].tracked_output", ["governed_surfaces", "tracked_output"]),
-            ("generator.path", ["generator", "path"]),
+            ("policy.authority_binding", ["policy", "authority_binding"], False),
+            ("governed_surfaces[].wrapper", ["governed_surfaces", "wrapper"], False),
+            ("governed_surfaces[].tracked_output", ["governed_surfaces", "tracked_output"], False),
+            ("generator.path", ["generator", "path"], False),
+        ],
+    },
+    {
+        "contract": root / "ops/bindings/gate.execution.topology.yaml",
+        "paths": [
+            # path_triggers mixes real paths with prefix-matchers (e.g. surfaces/verify/d140-);
+            # only hard-check entries that end in a concrete file suffix.
+            ("domain_metadata[].path_triggers[]", ["domain_metadata", "path_triggers"], True),
         ],
     },
 ]
@@ -224,12 +240,14 @@ for entry in checks:
     if not contract.is_file():
         continue
     data = yaml.safe_load(contract.read_text(encoding="utf-8")) or {}
-    for label, path in entry["paths"]:
+    for label, path, suffix_only in entry["paths"]:
         for raw in iter_values(data, path):
             if not isinstance(raw, str):
                 continue
             rel = raw.strip()
             if not rel or rel.startswith("$") or rel.startswith("/") or "://" in rel:
+                continue
+            if suffix_only and not rel.lower().endswith(STRICT_SUFFIXES):
                 continue
             target = root / rel
             if not target.exists():
@@ -241,10 +259,13 @@ if missing:
 PY
 '
 
-# E8: every MANIFEST script entry must resolve on disk.
-# Keep this narrow to the canonical plugin script registry; do not validate
-# broader plugin schema or capability parity here.
-check E8 "MANIFEST script parity" bash -c '
+# E8: every MANIFEST script entry must resolve on disk. Narrow per-plugin
+# capability parity: for the allowlisted plugins below, every advertised
+# capability name must resolve in ops/capabilities.yaml. The allowlist is
+# intentionally small because the broader MANIFEST currently carries
+# hundreds of unresolved capability names (pre-existing drift); this check
+# guards against regressions for plugins that have been cleaned up.
+check E8 "MANIFEST script parity + narrow capability parity" bash -c '
     python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
 from pathlib import Path
 import sys
@@ -254,10 +275,25 @@ root = Path(sys.argv[1])
 manifest_path = root / "ops/plugins/MANIFEST.yaml"
 data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
 
-missing = []
+# Plugins whose capability advertising MUST stay truthful.
+CAP_PARITY_ALLOWLIST = {"alerting"}
+
+cap_registry_path = root / "ops/capabilities.yaml"
+known_caps = set()
+if cap_registry_path.is_file():
+    reg = yaml.safe_load(cap_registry_path.read_text(encoding="utf-8")) or {}
+    for cap in reg.get("capabilities") or []:
+        if isinstance(cap, dict):
+            name = str(cap.get("id") or cap.get("name") or "").strip()
+            if name:
+                known_caps.add(name)
+
+missing_scripts = []
+missing_caps = []
 for plugin in data.get("plugins") or []:
     if not isinstance(plugin, dict):
         continue
+    plugin_name = str(plugin.get("name") or plugin.get("id") or "").strip()
     base = root / str(plugin.get("path") or "").strip()
     for rel in plugin.get("scripts") or []:
         script_rel = str(rel or "").strip()
@@ -265,10 +301,116 @@ for plugin in data.get("plugins") or []:
             continue
         candidate = base / script_rel
         if not candidate.exists():
-            missing.append(str(candidate.relative_to(root)))
+            missing_scripts.append(str(candidate.relative_to(root)))
+    if plugin_name in CAP_PARITY_ALLOWLIST:
+        for cap_name in plugin.get("capabilities") or []:
+            cn = str(cap_name or "").strip()
+            if not cn:
+                continue
+            if cn not in known_caps:
+                missing_caps.append(f"{plugin_name}::{cn}")
+
+errs = []
+if missing_scripts:
+    errs.append("MISSING SCRIPTS:\n" + "\n".join(missing_scripts))
+if missing_caps:
+    errs.append("UNRESOLVED CAPABILITIES (allowlisted plugins):\n" + "\n".join(missing_caps))
+
+if errs:
+    print("\n\n".join(errs))
+    raise SystemExit(1)
+PY
+'
+
+# E9: every live scheduled launchd plist in ops/plugins/infra/host/launchd/
+# must resolve its ProgramArguments script target on disk. Guards against
+# the dee8c8d5 bug class where a scheduled wrapper gets deleted but its
+# plist stays installed (producer silently dead).
+# WARN level: dee8c8d5 left ~17 plists pointing at deleted wrappers;
+# surface them honestly but do not block engine smoke until they are
+# triaged (either wrappers restored or plists retired).
+warn_check E9 "launchd plist wrappers resolve on disk (warn)" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+from pathlib import Path
+import json
+import subprocess
+import sys
+
+root = Path(sys.argv[1])
+plist_dir = root / "ops/plugins/infra/host/launchd"
+if not plist_dir.is_dir():
+    sys.exit(0)
+
+missing = []
+for plist in sorted(plist_dir.glob("*.plist")):
+    try:
+        out = subprocess.run(
+            ["plutil", "-convert", "json", "-o", "-", str(plist)],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout
+        data = json.loads(out) if out.strip() else {}
+    except Exception as exc:
+        missing.append(f"{plist.name}: parse error: {exc}")
+        continue
+    args = data.get("ProgramArguments") or []
+    label = data.get("Label") or plist.stem
+    # Walk args: any arg that looks like an absolute path to a file under
+    # SPINE_ROOT or that ends in .sh/.py/.rb must resolve on disk.
+    for arg in args:
+        if not isinstance(arg, str):
+            continue
+        if not arg.startswith("/"):
+            continue
+        p = Path(arg)
+        # Skip shell interpreters (/bin/bash etc)
+        if str(p).startswith(("/bin/", "/usr/bin/", "/usr/local/bin/")):
+            continue
+        if not p.exists():
+            missing.append(f"{label}: missing {arg}")
 
 if missing:
     print("\n".join(missing))
+    raise SystemExit(1)
+PY
+'
+
+# E10: launchd required_labels truth. WARN level — spine documents
+# required_labels but some may be intentionally held out (e.g. dispatcher
+# under audit). Surfaces the drift honestly without failing engine smoke.
+warn_check E10 "launchd required_labels loaded (warn)" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+from pathlib import Path
+import subprocess
+import sys
+import yaml
+
+root = Path(sys.argv[1])
+contract = root / "ops/bindings/launchd.runtime.contract.yaml"
+if not contract.is_file():
+    sys.exit(0)
+
+data = yaml.safe_load(contract.read_text(encoding="utf-8")) or {}
+required = [str(x).strip() for x in (data.get("required_labels") or []) if str(x).strip()]
+if not required:
+    sys.exit(0)
+
+loaded = set()
+try:
+    out = subprocess.run(
+        ["launchctl", "list"], capture_output=True, text=True, timeout=10
+    )
+    if out.returncode == 0:
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 3:
+                loaded.add(parts[2])
+except Exception as exc:
+    print(f"launchctl list failed: {exc}")
+    raise SystemExit(1)
+
+missing = [lbl for lbl in required if lbl not in loaded]
+if missing:
+    print(f"{len(missing)}/{len(required)} required_labels not loaded: {', '.join(missing)}")
     raise SystemExit(1)
 PY
 '

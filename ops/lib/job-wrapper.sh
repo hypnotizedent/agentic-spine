@@ -60,6 +60,29 @@ RUNTIME_JOB_LOG="${SPINE_RUNTIME_JOB_LOG:-${SPINE_LOGS:-$HOME/code/.runtime/spin
 RUNTIME_JOB_LOG_KEEP_DAYS="${SPINE_RUNTIME_JOB_LOG_KEEP_DAYS:-14}"
 EMAIL_INTENT_DIR="${SPINE_OUTBOX:-$HOME/code/.runtime/spine/mailroom/outbox}/alerts/email-intents"
 
+_spine_intent_sanitize() {
+  # Strip YAML-incompatible control bytes and ANSI escape sequences so the
+  # downstream dispatcher (which parses with yq) cannot be head-of-line
+  # blocked by captured terminal color codes or raw command output bytes.
+  # Preserves meaningful whitespace (\t \n \r), strips 0x00-0x08, 0x0b, 0x0c,
+  # 0x0e-0x1f, 0x7f, and CSI/OSC ANSI escape sequences.
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import re, sys
+raw = sys.stdin.read()
+raw = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", raw)   # CSI
+raw = re.sub(r"\x1b\][^\x07]*\x07", "", raw)          # OSC
+raw = re.sub(r"\x1b[@-Z\\-_]", "", raw)               # 2-byte C1 introducer
+raw = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", raw)
+sys.stdout.write(raw)
+'
+  else
+    # Fallback: minimal control-byte strip via tr (loses multi-byte safety
+    # but keeps the function honest when python3 is unavailable).
+    tr -d '\000-\010\013\014\016-\037\177'
+  fi
+}
+
 spine_enqueue_email_intent() {
   local domain_id="$1"
   local severity="$2"
@@ -67,6 +90,13 @@ spine_enqueue_email_intent() {
   local summary="$4"
   local source_alert="${5:-runtime-job-wrapper}"
   local intent_id created_at intent_file
+  local safe_domain safe_severity safe_title safe_summary safe_source
+
+  safe_domain="$(printf '%s' "${domain_id}" | _spine_intent_sanitize)"
+  safe_severity="$(printf '%s' "${severity}" | _spine_intent_sanitize)"
+  safe_title="$(printf '%s' "${title}" | _spine_intent_sanitize)"
+  safe_summary="$(printf '%s' "${summary}" | _spine_intent_sanitize)"
+  safe_source="$(printf '%s' "${source_alert}" | _spine_intent_sanitize)"
 
   intent_id="email-intent-$(date -u +%Y%m%dT%H%M%SZ)-${RANDOM}"
   created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -76,13 +106,13 @@ spine_enqueue_email_intent() {
   cat >"${intent_file}" <<INTENT
 intent_id: "${intent_id}"
 created_at: "${created_at}"
-domain_id: "${domain_id}"
-severity: "${severity}"
-title: "${title}"
+domain_id: "${safe_domain}"
+severity: "${safe_severity}"
+title: "${safe_title}"
 summary: |-
-$(printf '%s\n' "${summary}" | sed 's/^/  /')
+$(printf '%s\n' "${safe_summary}" | sed 's/^/  /')
 suggested_recipient: "alerts@spine.ronny.works"
-source_alert: "${source_alert}"
+source_alert: "${safe_source}"
 flush_status: pending
 INTENT
 }
