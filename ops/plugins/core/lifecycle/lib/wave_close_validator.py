@@ -558,6 +558,77 @@ def check_role_flow(
 
 # ── Synthetic fast-close filter ──────────────────────────────────────
 
+ZERO_WORK_DISPOSITIONS = frozenset({"abandoned", "superseded"})
+
+
+def detect_zero_work(state: dict) -> bool:
+    """Return True when a wave carried no real work.
+
+    Zero-work means:
+      - no dispatches created
+      - no watcher checks enqueued
+      - no results recorded
+      - no preflight run
+      - no valid receipts
+
+    Used to gate the lightweight close path that skips ceremony
+    meant to certify real work landing.
+    """
+    if state.get("dispatches"):
+        return False
+    if state.get("watcher_checks"):
+        return False
+    results = state.get("results")
+    if isinstance(results, list) and results:
+        return False
+    if state.get("preflight"):
+        return False
+    valid_receipts = state.get("_valid_receipts")
+    if isinstance(valid_receipts, list) and valid_receipts:
+        return False
+    return True
+
+
+def apply_zero_work_fast_close(
+    is_zero_work: bool,
+    violations: CloseViolations,
+    state: dict,
+    packet: dict,
+) -> None:
+    """Clear ceremony-only violations for zero-work abandoned/superseded closes.
+
+    A wave that never dispatched any work does not need DoD, preflight,
+    state-machine, or role-flow ceremony to close honestly. The honest
+    outcome is "abandoned with no work", not "forced past guards".
+
+    Mirrors apply_synthetic_fast_close but stamps a distinct close label
+    so the receipt records why ceremony was waived.
+    """
+    if not is_zero_work:
+        return
+
+    violations.dod.clear()
+    violations.infra[:] = [
+        v for v in violations.infra
+        if not any(skip in v for skip in [
+            "state machine", "role flow blocked", "Preflight has not been run",
+            "watcher check", "receipt", "DoD",
+        ])
+    ]
+    state["zero_work_fast_close"] = True
+    if "dod" not in state or not state.get("dod"):
+        state["dod"] = {
+            "verify_results": [],
+            "blocker_classification": ["none"],
+            "cleanup_proof": ["zero_work_fast_close"],
+            "linkage": {
+                "packet_loop_id": str(packet.get("loop_id", "")).strip(),
+                "valid_receipts": 0,
+                "errors": [],
+            },
+        }
+
+
 def apply_synthetic_fast_close(
     is_synthetic: bool,
     violations: CloseViolations,
@@ -777,5 +848,16 @@ def validate_close(
 
     # Synthetic fast-close
     apply_synthetic_fast_close(is_synthetic, violations, state, packet)
+
+    # Zero-work fast-close: a wave that never dispatched any work can
+    # close lightly with abandoned/superseded, without --force or
+    # --dod-override ceremony. Gated on disposition so that real waves
+    # still go through the full close contract.
+    is_zero_work = (
+        disposition in ZERO_WORK_DISPOSITIONS
+        and not is_synthetic
+        and detect_zero_work(state)
+    )
+    apply_zero_work_fast_close(is_zero_work, violations, state, packet)
 
     return violations, dod, False

@@ -666,7 +666,9 @@ if mode == "--json":
         "coherence_summary": joined_state_summary,
         "daemons": daemons_summary,
         "counts": {
-            "open_loops": len(open_loops),
+            # Use joined-state as authoritative source so status --json and
+            # status --context agree on the same open-loop count (H6 coherence).
+            "open_loops": int(joined_state_summary.get("open_loops", len(open_loops))),
             "background_loops": sum(1 for loop in open_loops if loop.get("execution_mode") == "background"),
             "stale_background_loops": stale_background_count,
             "planned_loops": len(planned_loops),

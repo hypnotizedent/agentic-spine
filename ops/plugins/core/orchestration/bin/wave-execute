@@ -151,12 +151,35 @@ _has_passthrough_flag() {
   return 1
 }
 
+_preferred_checkout_dir() {
+  # Prefer the caller's PWD when it's inside a governed sibling worktree
+  # of SP (same git-common-dir). Otherwise fall back to SP so we keep the
+  # current root-safe behavior for ad-hoc invocations from unrelated dirs.
+  local pwd_top sp_common pwd_common
+  pwd_top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -z "$pwd_top" || "$pwd_top" == "$SP" ]]; then
+    printf '%s\n' "$SP"
+    return
+  fi
+  sp_common="$(cd "$SP" && git rev-parse --git-common-dir 2>/dev/null | xargs -I{} bash -c 'cd "{}" && pwd -P' 2>/dev/null || true)"
+  pwd_common="$(cd "$pwd_top" && git rev-parse --git-common-dir 2>/dev/null | xargs -I{} bash -c 'cd "{}" && pwd -P' 2>/dev/null || true)"
+  if [[ -n "$sp_common" && "$sp_common" == "$pwd_common" ]]; then
+    printf '%s\n' "$pwd_top"
+  else
+    printf '%s\n' "$SP"
+  fi
+}
+
 _current_checkout_repo() {
-  git -C "$SP" rev-parse --show-toplevel 2>/dev/null || true
+  local target
+  target="$(_preferred_checkout_dir)"
+  git -C "$target" rev-parse --show-toplevel 2>/dev/null || true
 }
 
 _current_checkout_branch() {
-  git -C "$SP" rev-parse --abbrev-ref HEAD 2>/dev/null || true
+  local target
+  target="$(_preferred_checkout_dir)"
+  git -C "$target" rev-parse --abbrev-ref HEAD 2>/dev/null || true
 }
 
 _current_checkout_worktree() {
