@@ -17,6 +17,7 @@
 #   E8  MANIFEST script entries resolve on disk + narrow capability parity
 #   E9  live launchd plist ProgramArguments resolve on disk (warn: pre-existing dee8c8d5 drift)
 #   E10 launchd required_labels truth (warn): every required_label loaded in live launchctl state
+#   E11 retired snapshot residue class absent (fail): network.inventory.snapshot / -build
 #
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -380,6 +381,7 @@ PY
 warn_check E10 "launchd required_labels loaded (warn)" bash -c '
     python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
 from pathlib import Path
+import os
 import subprocess
 import sys
 import yaml
@@ -392,6 +394,34 @@ if not contract.is_file():
 data = yaml.safe_load(contract.read_text(encoding="utf-8")) or {}
 required = [str(x).strip() for x in (data.get("required_labels") or []) if str(x).strip()]
 if not required:
+    sys.exit(0)
+
+# Role-aware filtering. Required labels whose intended_node_role does not
+# match the local role must not be counted as "missing on this laptop".
+# Matches the LOCAL_ROLE convention used by host-launchagents-sync.
+local_role = os.environ.get("SPINE_LOCAL_ROLE", "").strip() or "operator_console"
+
+registry_path = root / "ops/bindings/launchd.scheduler.registry.yaml"
+role_by_label = {}
+if registry_path.is_file():
+    reg = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
+    for entry in (reg.get("labels") or []):
+        lbl = str((entry or {}).get("label", "")).strip()
+        role = str((entry or {}).get("intended_node_role", "")).strip()
+        if lbl:
+            role_by_label[lbl] = role
+
+# Labels missing from registry default to local (fail-safe).
+local_required = [
+    lbl for lbl in required
+    if role_by_label.get(lbl, local_role) == local_role
+]
+non_local = [lbl for lbl in required if lbl not in local_required]
+if non_local:
+    _nl = ", ".join(non_local)
+    print(f"non_local_deferred ({local_role}): {_nl}")
+
+if not local_required:
     sys.exit(0)
 
 loaded = set()
@@ -408,9 +438,77 @@ except Exception as exc:
     print(f"launchctl list failed: {exc}")
     raise SystemExit(1)
 
-missing = [lbl for lbl in required if lbl not in loaded]
+missing = [lbl for lbl in local_required if lbl not in loaded]
 if missing:
-    print(f"{len(missing)}/{len(required)} required_labels not loaded: {', '.join(missing)}")
+    _ms = ", ".join(missing)
+    print(f"{len(missing)}/{len(local_required)} required_labels not loaded on {local_role}: {_ms}")
+    raise SystemExit(1)
+PY
+'
+
+# E11: retirement-propagation hardening. Hard-fails if the retired
+# network.inventory.snapshot / network-inventory-snapshot-build residue
+# class is reintroduced anywhere in the governed surface. Lines containing
+# "RETIRED:" or "retirement sentinel" are allowlisted so the retirement
+# records themselves do not trip the check.
+check E11 "retired snapshot residue class absent (fail)" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+self_path = (root / "ops/plugins/core/verify/bin/verify-engine").resolve()
+tokens = ["network.inventory.snapshot", "network-inventory-snapshot-build"]
+
+globs = [
+    "ops/bindings/**/*.yaml",
+    "ops/bindings/**/*.yml",
+    "ops/plugins/**/*.sh",
+    "ops/plugins/**/*.py",
+    "ops/plugins/**/*.yaml",
+    "ops/plugins/**/*.yml",
+    "ops/commands/*.sh",
+    "AGENTS.md",
+    "NORTH_STAR.md",
+]
+
+seen = set()
+candidates = []
+for g in globs:
+    for p in root.glob(g):
+        if not p.is_file():
+            continue
+        rp = p.resolve()
+        if rp == self_path or rp in seen:
+            continue
+        seen.add(rp)
+        candidates.append(p)
+
+for p in root.glob("ops/plugins/**/bin/*"):
+    if not p.is_file():
+        continue
+    rp = p.resolve()
+    if rp == self_path or rp in seen:
+        continue
+    seen.add(rp)
+    candidates.append(p)
+
+hits = []
+for p in sorted(candidates):
+    try:
+        text = p.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        continue
+    for i, line in enumerate(text.splitlines(), 1):
+        if "RETIRED:" in line or "retirement sentinel" in line:
+            continue
+        if any(tok in line for tok in tokens):
+            rel = p.relative_to(root)
+            hits.append(f"{rel}:{i}")
+
+if hits:
+    for h in hits:
+        print(h)
     raise SystemExit(1)
 PY
 '
