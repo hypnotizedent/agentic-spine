@@ -27,14 +27,15 @@ ops status
 Canonical cold-start read surface for current spine work.
 
 Usage:
-  ops status [--brief|--json|--context] [--strict]
+  ops status [--brief|--json|--context|--control-loop] [--strict]
 
 Flags:
-  --brief     Counts-only output for hooks/banners
-  --json      Machine-readable output
-  --context   L1 visibility view (terminal identity, runtime paths, coherence)
-  --strict    Exit nonzero when anomalies exist
-  -h, --help  Show this help
+  --brief        Counts-only output for hooks/banners
+  --json         Machine-readable output
+  --context      L1 visibility view (terminal identity, runtime paths, coherence)
+  --control-loop Bounded local-only probe for agent control-loop polling
+  --strict       Exit nonzero when anomalies exist
+  -h, --help     Show this help
 
 Default behavior:
   Human-facing output succeeds even when anomalies exist.
@@ -46,7 +47,7 @@ MODE=""
 STRICT="0"
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --brief|--json|--context)
+    --brief|--json|--context|--control-loop)
       MODE="$1"
       shift
       ;;
@@ -66,6 +67,32 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# ── Control-loop mode (bounded local probe) ──────────────────────────────
+# Distinct from --json (full status), --brief (counts), --context (L1 view),
+# and per-wave cmd_status in wave.sh. Local-only, bounded, sub-second.
+# Contract: ops/plugins/core/lifecycle/lib/control_loop_status.py
+if [[ "$MODE" == "--control-loop" ]]; then
+  exec python3 - "$SPINE_REPO" "${SPINE_RUNTIME_ROOT:-}" "${SPINE_STATE:-}" <<'PYTHON'
+import json
+import os
+import sys
+
+spine_repo = sys.argv[1]
+runtime_root = sys.argv[2]
+state_root = sys.argv[3]
+
+lib_dir = os.path.join(spine_repo, "ops", "plugins", "core", "lifecycle", "lib")
+if lib_dir not in sys.path:
+    sys.path.insert(0, lib_dir)
+
+from control_loop_status import collect_control_loop_status
+
+result = collect_control_loop_status(runtime_root, state_root)
+print(json.dumps(result, separators=(",", ":"), sort_keys=True))
+sys.exit(0)
+PYTHON
+fi
 
 # ── Context mode (L1 visibility surface) ─────────────────────────────────
 # Replaces the former standalone `ops context` command.
