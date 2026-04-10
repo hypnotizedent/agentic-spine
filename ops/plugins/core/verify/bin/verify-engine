@@ -15,8 +15,8 @@
 #   E6  no dead file references in governed scripts
 #   E7  no dead canonical path references in hot contracts
 #   E8  MANIFEST script entries resolve on disk + narrow capability parity
-#   E9  live launchd plist ProgramArguments resolve on disk (warn: pre-existing dee8c8d5 drift)
-#   E10 launchd required_labels truth (warn): every required_label loaded in live launchctl state
+#   E9  live launchd plist ProgramArguments resolve on disk (fail)
+#   E10 launchd required_labels truth (fail): every required_label loaded in live launchctl state
 #   E11 retired snapshot residue class absent (fail): network.inventory.snapshot / -build
 #
 # ═══════════════════════════════════════════════════════════════════════════
@@ -326,11 +326,10 @@ PY
 # E9: every live scheduled launchd plist in ops/plugins/infra/host/launchd/
 # must resolve its ProgramArguments script target on disk. Guards against
 # the dee8c8d5 bug class where a scheduled wrapper gets deleted but its
-# plist stays installed (producer silently dead).
-# WARN level: dee8c8d5 left ~17 plists pointing at deleted wrappers;
-# surface them honestly but do not block engine smoke until they are
-# triaged (either wrappers restored or plists retired).
-warn_check E9 "launchd plist wrappers resolve on disk (warn)" bash -c '
+# plist stays installed (producer silently dead). Promoted to fail-level
+# once the pre-existing dee8c8d5 residue was cleaned up; new drift must
+# now block engine smoke rather than warn.
+check E9 "launchd plist wrappers resolve on disk" bash -c '
     python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
 from pathlib import Path
 import json
@@ -375,10 +374,12 @@ if missing:
 PY
 '
 
-# E10: launchd required_labels truth. WARN level — spine documents
-# required_labels but some may be intentionally held out (e.g. dispatcher
-# under audit). Surfaces the drift honestly without failing engine smoke.
-warn_check E10 "launchd required_labels loaded (warn)" bash -c '
+# E10: launchd required_labels truth. Promoted to fail-level: the
+# contract is authoritative, so any required_label not loaded in live
+# launchctl state must block engine smoke. Non-local labels remain
+# informational via the non_local_deferred line but do not contribute
+# to the missing-count that triggers the failure.
+check E10 "launchd required_labels loaded" bash -c '
     python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
 from pathlib import Path
 import os

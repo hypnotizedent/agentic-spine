@@ -210,10 +210,14 @@ check H1 "capability resolution (verify.engine.run resolves and executes)" bash 
 # ── H2/H3/H4: Dispatch round-trip + wave lifecycle + telemetry ──────────
 # These three gates share one synthetic dispatch because they test the same
 # end-to-end path. Running three separate dispatches would be wasteful.
-_honesty_ts="$(TZ=UTC date '+%Y%m%d-%H%M%S' 2>/dev/null || date -u '+%Y%m%d-%H%M%S')"
-_honesty_date="${_honesty_ts%%-*}"
-_honesty_seq="$(TZ=UTC date '+%S' 2>/dev/null || date -u '+%S')"
-SYNTHETIC_WAVE_ID="WAVE-${_honesty_date}-${_honesty_seq}"
+#
+# Probe wave IDs use a reserved WAVE-HONESTY-PROBE-<epoch>-<pid> namespace
+# so synthetic honesty runs never collide with real WAVE-YYYYMMDD-NN waves
+# allocated by production dispatch. The claim-path side is already isolated
+# via the synthetic wave_kind (__synthetic__/<wave_id>); this isolates the
+# ID side so repeated honesty runs within the same day are stable.
+_honesty_epoch="$(date -u '+%s' 2>/dev/null || date '+%s')"
+SYNTHETIC_WAVE_ID="WAVE-HONESTY-PROBE-${_honesty_epoch}-$$"
 SYNTHETIC_EVIDENCE_DIR="$(mktemp -d)"
 CANARY_TOKEN="HONESTY-CANARY-$(date +%s)"
 CLEANUP_NEEDED=1
