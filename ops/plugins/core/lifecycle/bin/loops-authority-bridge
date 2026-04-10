@@ -45,6 +45,11 @@ def main() -> int:
     p_close = sub.add_parser("close")
     p_close.add_argument("--id", required=True)
     p_close.add_argument("--status", default="closed")
+    p_close.add_argument("--disposition", default=None)
+    p_close.add_argument("--completion-level", default=None)
+    p_close.add_argument("--actor", default="bridge")
+    p_close.add_argument("--reason", default=None)
+    p_close.add_argument("--ungoverned-override", action="store_true", default=False)
 
     p_cont = sub.add_parser("continuity")
     p_cont.add_argument("--id", required=True)
@@ -86,7 +91,18 @@ def main() -> int:
             if not row:
                 print(f"FAIL: loop not found: {loop_id}", file=sys.stderr)
                 return 1
-            lsa.close_loop(conn, loop_id, status=args.status, actor="bridge")
+            mutation_source = "governed" if os.environ.get("SPINE_CAP_RUN_KEY", "").strip() else ("override" if args.ungoverned_override else "legacy")
+            lsa.close_loop(
+                conn,
+                loop_id,
+                status=args.status,
+                completion_level=args.completion_level,
+                disposition=args.disposition,
+                actor=args.actor,
+                reason=args.reason,
+                run_key=os.environ.get("SPINE_CAP_RUN_KEY", "").strip() or None,
+                mutation_source=mutation_source,
+            )
             scopes_dir = Path(os.environ.get("LOOPS_SCOPES_DIR", str(state_root / lsa.DEFAULT_SCOPES_DIR_REL)))
             lsa.project_to_scope_files(conn, scopes_dir)
             print(f"OK: closed {loop_id} with status={args.status}")
