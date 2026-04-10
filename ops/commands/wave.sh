@@ -771,6 +771,7 @@ Usage:
   ops wave receipt-validate <path>                   Validate EXEC_RECEIPT JSON
   ops wave emit-agent-receipt <WAVE_ID> --lane <L>|--dispatch D<N> --result "<text>" [--file-read <p>]... [--task-id <id>]
                                                     Bridge: emit worker-class EXEC_RECEIPT JSON for an in-band Agent-tool subagent result
+  ops wave residue [--sweep] [--json]                Canonical wave-owned residue surface (report-only by default; --sweep is bounded)
 
 Ownership:
   ops wave manages the manual wave lifecycle.
@@ -5950,6 +5951,115 @@ PYEMIT
   cmd_receipt_validate "$receipt_path"
 }
 
+cmd_residue() {
+  # Canonical wave-owned residue surface.
+  # Default: report-only (read-only).
+  # --sweep: bounded destructive sweep of safe_to_sweep items only.
+  # --json:  raw JSON (collector or sweep result).
+  local sweep=0
+  local json_out=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --sweep) sweep=1; shift ;;
+      --json)  json_out=1; shift ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: ops wave residue [--sweep] [--json]
+
+Canonical wave-owned residue surface. Reports and (optionally) sweeps
+stale wave worktrees, stale codex/WAVE-* branches, and waves whose
+workspace was marked cleaned but still have residue.
+
+Default mode is read-only. --sweep only touches items classified as
+safe_to_sweep (closed wave, not HEAD, not dirty, inside canonical
+worktrees prefix). Ambiguous items are reported and never touched.
+EOF
+        return 0 ;;
+      *) echo "Unknown ops wave residue arg: $1" >&2; return 2 ;;
+    esac
+  done
+
+  local sweep_flag="0"; [[ "$sweep" -eq 1 ]] && sweep_flag="1"
+
+  local residue_json
+  residue_json="$(python3 - "$SPINE_REPO" "$RUNTIME_ROOT" "$sweep_flag" <<'PYRESIDUE'
+import json, sys
+spine_repo, runtime_root, sweep = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+sys.path.insert(0, f"{spine_repo}/ops/plugins/core/lifecycle/lib")
+from wave_residue import collect_residue, sweep_residue
+report = collect_residue(runtime_root, spine_repo)
+if sweep:
+    sweep_result = sweep_residue(runtime_root, spine_repo, report=report)
+    # Re-collect after sweep for the post-state view.
+    post = collect_residue(runtime_root, spine_repo)
+    out = {"mode": "sweep", "pre": report, "sweep": sweep_result, "post": post}
+else:
+    out = {"mode": "report", "report": report}
+print(json.dumps(out))
+PYRESIDUE
+  )" || { echo "FAIL: residue scan failed" >&2; return 1; }
+
+  if [[ "$json_out" -eq 1 ]]; then
+    printf '%s\n' "$residue_json" | python3 -m json.tool
+    return 0
+  fi
+
+  python3 - "$residue_json" "$sweep_flag" <<'PYRENDER'
+import json, sys
+data = json.loads(sys.argv[1])
+sweep = sys.argv[2] == "1"
+
+def render_report(r, title):
+    items = r.get("items") or []
+    counts = r.get("counts") or {}
+    print(f"── {title} ──")
+    print(f"  scanned_repo:   {r.get('repo_path')}")
+    print(f"  runtime_root:   {r.get('runtime_root')}")
+    print(f"  total:          {counts.get('total', 0)}")
+    print(f"  safe_to_sweep:  {counts.get('safe_to_sweep', 0)}")
+    print(f"  ambiguous:      {counts.get('ambiguous', 0)}")
+    by_class = counts.get("by_class") or {}
+    if by_class:
+        print("  by_class:")
+        for k in sorted(by_class):
+            print(f"    {k}: {by_class[k]}")
+    if not items:
+        print("  (no residue)")
+        return
+    safe = [i for i in items if i.get("safe_to_sweep")]
+    amb  = [i for i in items if not i.get("safe_to_sweep")]
+    if safe:
+        print("  safe-to-sweep:")
+        for i in safe:
+            print(f"    [{i.get('class')}] {i.get('identity')} "
+                  f"(wave={i.get('wave_id')}, ws_lifecycle={i.get('workspace_lifecycle_state')})")
+    if amb:
+        print("  ambiguous (report-only):")
+        for i in amb:
+            print(f"    [{i.get('class')}] {i.get('identity')}  → {i.get('ambiguous_reason')}")
+
+if data.get("mode") == "report":
+    render_report(data.get("report") or {}, "wave residue (report)")
+else:
+    render_report(data.get("pre") or {}, "wave residue (pre-sweep)")
+    sw = data.get("sweep") or {}
+    swept = sw.get("swept") or []
+    skipped = sw.get("skipped_ambiguous") or []
+    errs = sw.get("errors") or []
+    print("── sweep ──")
+    print(f"  swept:            {len(swept)}")
+    print(f"  skipped_ambiguous:{len(skipped)}")
+    print(f"  errors:           {len(errs)}")
+    for s in swept:
+        print(f"    SWEPT    [{s.get('class')}] {s.get('identity')}  action={s.get('action_taken')}")
+    for s in skipped:
+        print(f"    SKIPPED  [{s.get('class')}] {s.get('identity')}  reason={s.get('reason')}")
+    for s in errs:
+        print(f"    ERROR    [{s.get('class')}] {s.get('identity')}  error={s.get('error')}")
+    render_report(data.get("post") or {}, "wave residue (post-sweep)")
+PYRENDER
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -5963,6 +6073,7 @@ case "${1:-}" in
   preflight)          shift; cmd_preflight "$@" ;;
   receipt-validate)   shift; cmd_receipt_validate "$@" ;;
   emit-agent-receipt) shift; cmd_emit_agent_receipt "$@" ;;
+  residue)            shift; cmd_residue "$@" ;;
   -h|--help)          usage ;;
   "")                 usage ;;
   *)
