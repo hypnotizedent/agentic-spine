@@ -386,6 +386,11 @@ if [[ "$PARALLEL" -eq 1 ]]; then
 
     (
       set +e
+      export WAVE_ID="$WAVE_ID"
+      export DISPATCH_ID="$dispatch_id"
+      export TASK_ID="$dispatch_id"
+      export LANE="$local_name"
+      export TERMINAL_ID="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-SPINE-CONTROL-01}}"
       lane_output="$(cd "$SPINE_REPO" && eval "$local_cmd" 2>&1)"
       lane_exit=$?
       set -e
@@ -454,7 +459,14 @@ else
     echo "  [$dispatch_id] ${local_name}: executing..."
 
     set +e
-    lane_output="$(cd "$SPINE_REPO" && eval "$local_cmd" 2>&1)"
+    lane_output="$(
+      export WAVE_ID="$WAVE_ID"
+      export DISPATCH_ID="$dispatch_id"
+      export TASK_ID="$dispatch_id"
+      export LANE="$local_name"
+      export TERMINAL_ID="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-SPINE-CONTROL-01}}"
+      cd "$SPINE_REPO" && eval "$local_cmd" 2>&1
+    )"
     lane_exit=$?
     set -e
 
