@@ -23,6 +23,10 @@ set -euo pipefail
 SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROLE_CONTRACT="$SPINE_ROOT/ops/bindings/terminal.role.contract.yaml"
 
+POSTURE_HELPER="$SPINE_ROOT/ops/plugins/core/lifecycle/lib/session_posture.sh"
+# shellcheck source=/dev/null
+[[ -f "$POSTURE_HELPER" ]] && . "$POSTURE_HELPER"
+
 usage() {
     cat <<'EOF'
 ops terminal - Terminal launcher with runtime identity
@@ -34,12 +38,14 @@ Options:
   --tool <tool>         Tool to run (claude|codex|opencode|verify)
   --terminal <name>     Terminal character name (sets OPS_TERMINAL_ROLE)
   --loop <loop_id>      Explicitly attach a loop (sets SPINE_LOOP_ID)
+  --session-posture <controller|membrane|worker|translator>  Explicit session posture (validated by node type)
   --dry-run             Print the command without opening iTerm
 
 Runtime identity:
   OPS_TERMINAL_ROLE   = terminal character name (from --terminal)
   SPINE_RUNTIME_ROLE  = mutation policy role (resolved from contract by terminal type)
   SPINE_LOOP_ID       = active loop (only when --loop is passed)
+  SPINE_NODE_TYPE, SPINE_SESSION_POSTURE (resolved at birth from terminal type / explicit flag)
 
 Examples:
   ops terminal launch --tool claude --terminal SPINE-CONTROL-01
@@ -63,6 +69,7 @@ esac
 TOOL=""
 TERMINAL_NAME=""
 LOOP_ID=""
+SESSION_POSTURE=""
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
@@ -70,6 +77,7 @@ while [[ $# -gt 0 ]]; do
         --tool) TOOL="${2:-}"; shift 2 ;;
         --terminal) TERMINAL_NAME="${2:-}"; shift 2 ;;
         --loop) LOOP_ID="${2:-}"; shift 2 ;;
+        --session-posture) SESSION_POSTURE="${2:-}"; shift 2 ;;
         --role) shift 2 ;;  # Accepted for compat, ignored (role comes from contract)
         --dry-run) DRY_RUN=1; shift ;;
         --) shift; break ;;
@@ -121,12 +129,20 @@ resolve_runtime_role() {
 
 RUNTIME_ROLE="$(resolve_runtime_role "$TERMINAL_NAME")"
 
+# ── Resolve session posture (node type + posture + source) ───────────────
+if command -v session_posture_resolve >/dev/null 2>&1; then
+    if ! session_posture_resolve "$TERMINAL_NAME" "$SESSION_POSTURE"; then
+        fail "session posture resolution failed (see message above)"
+    fi
+fi
+
 # ── Build the in-terminal command ────────────────────────────────────────
 build_entry_cmd() {
     local tool="$1"
     local terminal_name="${2:-}"
     local runtime_role="${3:-researcher}"
     local loop_id="${4:-}"
+    local posture_exports="${5:-}"
     local spine="$SPINE_ROOT"
     local parts=()
 
@@ -140,6 +156,17 @@ build_entry_cmd() {
         parts+=("export OPS_TERMINAL_ROLE=$(printf '%q' "$terminal_name")")
     fi
     parts+=("export SPINE_RUNTIME_ROLE=$(printf '%q' "$runtime_role")")
+
+    # Session posture exports (one export line per part, verbatim)
+    if [[ -n "$posture_exports" ]]; then
+        local line
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            parts+=("$line")
+        done <<POSTURE_EOF
+$posture_exports
+POSTURE_EOF
+    fi
 
     # Explicit loop attachment only
     if [[ -n "$loop_id" ]]; then
@@ -166,11 +193,18 @@ build_entry_cmd() {
     echo "$result"
 }
 
-ENTRY_CMD="$(build_entry_cmd "$TOOL" "$TERMINAL_NAME" "$RUNTIME_ROLE" "$LOOP_ID")"
+POSTURE_EXPORTS=""
+if command -v session_posture_emit_env >/dev/null 2>&1; then
+    POSTURE_EXPORTS="$(session_posture_emit_env)"
+fi
+
+ENTRY_CMD="$(build_entry_cmd "$TOOL" "$TERMINAL_NAME" "$RUNTIME_ROLE" "$LOOP_ID" "$POSTURE_EXPORTS")"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "# Terminal: ${TERMINAL_NAME:-ad-hoc}"
     echo "# Runtime role: $RUNTIME_ROLE"
+    echo "# Node type: ${__SP_NODE_TYPE:-unknown}"
+    echo "# Session posture: ${__SP_POSTURE:-unknown} (source: ${__SP_SOURCE:-unknown})"
     [[ -z "$LOOP_ID" ]] || echo "# Loop: $LOOP_ID"
     echo "$ENTRY_CMD"
     exit 0

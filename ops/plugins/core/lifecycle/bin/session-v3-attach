@@ -21,6 +21,34 @@ set -euo pipefail
 
 SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 
+# ── Flag parsing (bounded, forward-compatible) ─────────────────────────────
+EMIT_ENV=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --emit-env)
+            EMIT_ENV=1
+            shift
+            ;;
+        --allow-no-loop)
+            # accepted and ignored (packet proof compatibility)
+            shift
+            ;;
+        -h|--help)
+            echo "usage: session-v3-attach [--emit-env] [--allow-no-loop] [-h|--help]"
+            exit 0
+            ;;
+        *)
+            # unknown flags: accept and ignore (forward compat)
+            shift
+            ;;
+    esac
+done
+
+# ── Source posture helper (best-effort) ────────────────────────────────────
+POSTURE_HELPER="$SPINE_ROOT/ops/plugins/core/lifecycle/lib/session_posture.sh"
+# shellcheck source=/dev/null
+[[ -f "$POSTURE_HELPER" ]] && . "$POSTURE_HELPER" 2>/dev/null || true
+
 # ── Context banner ─────────────────────────────────────────────────────────
 # Best-effort: never block terminal birth
 "$SPINE_ROOT/bin/ops" status --context 2>/dev/null || true
@@ -29,3 +57,31 @@ SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 echo ""
 "$SPINE_ROOT/bin/ops" status --brief 2>/dev/null || true
 echo ""
+
+# ── Session posture (best-effort, non-blocking) ────────────────────────────
+POSTURE_OK=0
+if command -v session_posture_resolve >/dev/null 2>&1; then
+    if session_posture_resolve "${OPS_TERMINAL_ROLE:-}" "" 2>/dev/null; then
+        POSTURE_OK=1
+        echo "── session posture ─────────────────────────────────────────────"
+        echo "  node type:       ${__SP_NODE_TYPE:-unknown}"
+        echo "  session posture: ${__SP_POSTURE:-unknown}"
+        echo "  posture source:  ${__SP_SOURCE:-unknown}"
+        echo "  runtime role:    ${SPINE_RUNTIME_ROLE:-unset}"
+        echo "  verify cmd:      ./bin/ops verify --spine-lite"
+        echo "  control loop:    ./bin/ops status --control-loop"
+        echo ""
+    fi
+fi
+
+# ── --emit-env handling ────────────────────────────────────────────────────
+if [[ "$EMIT_ENV" -eq 1 ]]; then
+    if [[ "$POSTURE_OK" -eq 1 ]] && command -v session_posture_emit_env >/dev/null 2>&1; then
+        echo "# posture env exports"
+        session_posture_emit_env 2>/dev/null || true
+    else
+        echo "# posture env unavailable"
+    fi
+fi
+
+exit 0
