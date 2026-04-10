@@ -5259,6 +5259,19 @@ try:
     workspace_enabled = bool(workspace_enabled)
     results = state.get("results") if isinstance(state.get("results"), list) else []
 
+    zero_work_fast_close = (
+        not controller_only
+        and disposition in {"abandoned", "superseded"}
+        and not dispatches
+        and not checks
+        and not results
+        and not pf
+    )
+    if zero_work_fast_close:
+        controller_context["minimal_shell"] = True
+        controller_context["eligible"] = True
+        controller_context["cleanup_ref"] = controller_precheck_path
+
     minimal_controller_shell = (
         controller_only
         and not dispatches
@@ -5351,39 +5364,63 @@ try:
     valid_receipt_count = 0
     valid_receipts = []
 
-    receipts_dir = os.path.join(sd, "evidence")
-    if os.path.isdir(receipts_dir):
-        for fn in sorted(os.listdir(receipts_dir)):
-            if not fn.endswith(".json"):
-                continue
-            fp = os.path.join(receipts_dir, fn)
-            try:
-                with open(fp) as rf:
-                    r = json.load(rf)
-                errs = wcv.validate_receipt(r, config)
-                if errs:
-                    invalid_receipts.append(f"{fn}: {'; '.join(errs)}")
-                else:
-                    valid_receipt_count += 1
-                    valid_receipts.append(r)
-            except json.JSONDecodeError as e:
-                invalid_receipts.append(f"{fn}: invalid JSON ({e})")
+    if zero_work_fast_close:
+        print(
+            "ZERO-WORK FAST CLOSE: no dispatches, checks, results, or preflight; "
+            "skipping heavy DoD ceremony."
+        )
+        state["zero_work_fast_close"] = True
+        if not isinstance(state.get("dod"), dict) or not state.get("dod"):
+            state["dod"] = {
+                "verify_results": [],
+                "blocker_classification": ["none"],
+                "cleanup_proof": ["zero_work_fast_close"],
+                "linkage": {
+                    "packet_loop_id": str(packet.get("loop_id", "")).strip(),
+                    "valid_receipts": 0,
+                    "errors": [],
+                },
+            }
+    else:
+        receipts_dir = os.path.join(sd, "evidence")
+        if os.path.isdir(receipts_dir):
+            for fn in sorted(os.listdir(receipts_dir)):
+                if not fn.endswith(".json"):
+                    continue
+                fp = os.path.join(receipts_dir, fn)
+                try:
+                    with open(fp) as rf:
+                        r = json.load(rf)
+                    errs = wcv.validate_receipt(r, config)
+                    if errs:
+                        invalid_receipts.append(f"{fn}: {'; '.join(errs)}")
+                    else:
+                        valid_receipt_count += 1
+                        valid_receipts.append(r)
+                except json.JSONDecodeError as e:
+                    invalid_receipts.append(f"{fn}: invalid JSON ({e})")
 
     # ── Inject validated receipts into state for module access ──
     state["_valid_receipts"] = valid_receipts
     state["_invalid_receipt_details"] = invalid_receipts
 
     # ── Full close validation pipeline (via module) ──
-    violations, dod, hard_blocked = wcv.validate_close(
-        state=state,
-        force=force,
-        disposition=disposition,
-        allowed_dispositions=allowed_dispositions,
-        dod_override_reason=dod_override_reason,
-        controller_context=controller_context,
-        config=config,
-        stub_exists_fn=_stub_exists,
-    )
+    if zero_work_fast_close:
+        violations = wcv.CloseViolations()
+        dod = {}
+        hard_blocked = False
+        gate = wcv.evaluate_gate(violations, force, dod_override_reason)
+    else:
+        violations, dod, hard_blocked = wcv.validate_close(
+            state=state,
+            force=force,
+            disposition=disposition,
+            allowed_dispositions=allowed_dispositions,
+            dod_override_reason=dod_override_reason,
+            controller_context=controller_context,
+            config=config,
+            stub_exists_fn=_stub_exists,
+        )
 
     # Clean up internal keys
     state.pop("_valid_receipts", None)
@@ -5398,7 +5435,8 @@ try:
         sys.exit(1)
 
     # ── Gate decision (via module) ──
-    gate = wcv.evaluate_gate(violations, force, dod_override_reason)
+    if not zero_work_fast_close:
+        gate = wcv.evaluate_gate(violations, force, dod_override_reason)
 
     if gate.blocked:
         print("BLOCKED: Wave close contract not met:")

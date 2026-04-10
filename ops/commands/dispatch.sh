@@ -37,6 +37,18 @@ source "$RUNTIME_PATHS_LIB"
 spine_runtime_resolve_paths
 RUNTIME_ROOT="$SPINE_RUNTIME_ROOT"
 EVIDENCE_ROOT="${SPINE_EVIDENCE_ROOT:-/Users/ronnyworks/code/.evidence/spine}"
+INVOCATION_CWD="$(pwd -P)"
+
+dispatch_lane_cwd() {
+  if git -C "$INVOCATION_CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf '%s\n' "$INVOCATION_CWD"
+    return 0
+  fi
+
+  printf '%s\n' "$SPINE_REPO"
+}
+
+DISPATCH_LANE_CWD="$(dispatch_lane_cwd)"
 
 usage() {
   cat <<'EOF'
@@ -391,7 +403,7 @@ if [[ "$PARALLEL" -eq 1 ]]; then
       export TASK_ID="$dispatch_id"
       export LANE="$local_name"
       export TERMINAL_ID="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-SPINE-CONTROL-01}}"
-      lane_output="$(cd "$SPINE_REPO" && eval "$local_cmd" 2>&1)"
+      lane_output="$(cd "$DISPATCH_LANE_CWD" && eval "$local_cmd" 2>&1)"
       lane_exit=$?
       set -e
       echo "$lane_output" | _write_lane_evidence "$local_name" "$local_cmd" "$lane_exit" "$lane_evidence"
@@ -465,7 +477,7 @@ else
       export TASK_ID="$dispatch_id"
       export LANE="$local_name"
       export TERMINAL_ID="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-SPINE-CONTROL-01}}"
-      cd "$SPINE_REPO" && eval "$local_cmd" 2>&1
+      cd "$DISPATCH_LANE_CWD" && eval "$local_cmd" 2>&1
     )"
     lane_exit=$?
     set -e
