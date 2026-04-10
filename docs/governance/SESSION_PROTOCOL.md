@@ -10,8 +10,15 @@ scope: session-protocol
 Agent entry is simple:
 
 1. Open the repo.
-2. Read [NORTH_STAR.md](/Users/ronnyworks/code/agentic-spine/NORTH_STAR.md), [SPINE.md](/Users/ronnyworks/code/agentic-spine/docs/governance/SPINE.md), and this file.
-3. Run:
+2. Read [AGENTS.md](/Users/ronnyworks/code/agentic-spine/AGENTS.md) first, then [NORTH_STAR.md](/Users/ronnyworks/code/agentic-spine/NORTH_STAR.md), [SPINE.md](/Users/ronnyworks/code/agentic-spine/docs/governance/SPINE.md), and this file.
+3. If terminal birth did not already do it, run:
+
+```bash
+cd ~/code/agentic-spine
+./bin/ops cap run session.v3.attach
+```
+
+4. Run:
 
 ```bash
 cd ~/code/agentic-spine
@@ -20,7 +27,7 @@ cd ~/code/agentic-spine
 ./bin/ops cap list
 ```
 
-4. Work through `./bin/ops cap run <capability> -- ...`
+5. Work through `./bin/ops cap run <capability> -- ...`
 
 ## Desktop
 
