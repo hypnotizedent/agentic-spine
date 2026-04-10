@@ -1075,6 +1075,12 @@ print(json.dumps(items))
 PYCLAIMS
 )"
 
+  # Capture spine repo HEAD at wave-open time so Packet 1 hidden packet
+  # receipt writer has an honest starting_head at close time.
+  local wave_starting_head=""
+  wave_starting_head="$(git -C "$SPINE_REPO" rev-parse HEAD 2>/dev/null || echo "")"
+
+  WAVE_STARTING_HEAD="$wave_starting_head" \
   python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$prior_wave_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" "$packet_allowed_roles" "$PATH_CLAIMS_FILE" "$PATH_CLAIMS_TTL_MINUTES" "$PATH_CLAIMS_NON_OVERLAP" "$wave_kind" <<'PYSTART'
 import json, sys
 import os
@@ -1324,6 +1330,7 @@ state = {
     "lifecycle_state": "active",
     "objective": objective,
     "created_at": now,
+    "starting_head": os.environ.get("WAVE_STARTING_HEAD", ""),
     "closed_at": None,
     "dispatches": [],
     "watcher_checks": [],
@@ -5644,6 +5651,75 @@ with open(receipt_path, "w") as rf:
     rf.write("\n")
 
     rf.write(f"---\nREADY_FOR_ADOPTION={'true' if ready_for_adoption else 'false'}\n")
+
+# ── Packet 1: inaugural hidden packet receipt emission ──────────────────
+# Wave close is the first caller of the packet_receipt_writer helper.
+# Writes a hidden packet-level YAML EXEC_RECEIPT alongside (not replacing)
+# the wave-scoped close-receipt.json and receipt.md artifacts above.
+packet_receipt_path = ""
+packet_receipt_error = ""
+try:
+    import packet_receipt_writer as prw
+
+    _ending_head_proc = subprocess.run(
+        ["git", "-C", spine_repo, "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    _ending_head = _ending_head_proc.stdout.strip() if _ending_head_proc.returncode == 0 else ""
+    _starting_head = str(state.get("starting_head", "")).strip() or _ending_head
+
+    _packet_lanes = [
+        {
+            "name": d.get("lane", ""),
+            "status": d.get("status", ""),
+            "task": d.get("task", ""),
+            "run_key": d.get("run_key", ""),
+        }
+        for d in dispatches
+    ]
+    _dod_for_packet = state.get("dod", {}) if isinstance(state.get("dod"), dict) else {}
+    _packet_final_verify = {
+        "run_keys": list(run_keys),
+        "verify_results": _dod_for_packet.get("verify_results", []) if isinstance(_dod_for_packet.get("verify_results"), list) else [],
+        "checks_done": done_checks,
+        "checks_failed": failed_checks,
+    }
+
+    _packet_evidence_refs = [close_receipt_path, receipt_path]
+    if os.path.isdir(receipts_dir):
+        for _fn in sorted(os.listdir(receipts_dir)):
+            if _fn.endswith(".json"):
+                _packet_evidence_refs.append(os.path.join(receipts_dir, _fn))
+
+    _packet_fields = {
+        "wave_id": state["wave_id"],
+        "starting_head": _starting_head,
+        "ending_head": _ending_head,
+        "lanes": _packet_lanes,
+        "final_verify": _packet_final_verify,
+        "blockers": list(residual_blockers),
+        "parent_loop_id": str((state.get("packet") or {}).get("loop_id", "")),
+        "disposition_target": disposition,
+        "evidence_refs": _packet_evidence_refs,
+        "closed_at_utc": now,
+    }
+
+    _spine_state = os.environ.get("SPINE_STATE", "") or os.path.join(
+        os.environ.get("HOME", ""), "code", ".runtime", "spine", "state"
+    )
+    _packet_dest_dir = os.path.join(_spine_state, "domain-state")
+    _utc_date = datetime.now(timezone.utc).strftime("%Y%m%d")
+    packet_receipt_path = os.path.join(
+        _packet_dest_dir,
+        f"EXEC_RECEIPT-WAVE-CLOSE-{state['wave_id']}-{_utc_date}.yaml",
+    )
+
+    prw.write_packet_receipt(packet_receipt_path, _packet_fields, spine_repo)
+except Exception as _exc:
+    packet_receipt_error = f"{type(_exc).__name__}: {_exc}"
+    packet_receipt_path = ""
 
 print(f"Wave '{state['wave_id']}' closed.")
 print(f"  Disposition: {disposition}")
