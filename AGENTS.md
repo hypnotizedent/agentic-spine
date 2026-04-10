@@ -4,7 +4,7 @@ owner: "@ronny"
 scope: agent-runtime-contract
 ---
 
-# AGENTS.md — Codex Entry Stub
+# AGENTS.md — Canonical Agent Entry
 
 Read this file first.
 
@@ -43,11 +43,14 @@ Do not create new homes, folders, or doctrine surfaces unless Ronny explicitly s
 If a task falls outside the current aperture, refuse and name which aperture rule it violates.
 
 Governance is loaded at session attach. This file is the canonical entry surface
-for current operator rules, and a thin pointer for deeper doctrine.
+for current operator rules and the first read for any agent session.
 
-- Shared governance core: [`ops/archive/pre-2026-04-01-spine/docs/governance/RONNY_SESSION_SKILL_CORE.md`](ops/archive/pre-2026-04-01-spine/docs/governance/RONNY_SESSION_SKILL_CORE.md)
+- Current aperture and authority: this file
+- Platform identity: [`NORTH_STAR.md`](NORTH_STAR.md)
 - Operating contract: [`docs/governance/SPINE.md`](docs/governance/SPINE.md)
 - Translator doctrine: [`docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`](docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md)
 - Root authority: [`ops/bindings/root.authority.contract.yaml`](ops/bindings/root.authority.contract.yaml)
+
+Do not treat archived or historical docs as first-read entry authority.
 
 Session attach: `./bin/ops cap run session.v3.attach`

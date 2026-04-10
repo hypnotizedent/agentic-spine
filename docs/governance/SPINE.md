@@ -16,6 +16,7 @@ current aperture and operator entry rules.
 
 ```bash
 cd ~/code/agentic-spine
+./bin/ops cap run session.v3.attach
 ./bin/ops status --json
 ./bin/ops verify
 ./bin/ops cap list
