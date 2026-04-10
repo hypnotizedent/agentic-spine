@@ -10,6 +10,7 @@ ROOT="$_VR_COMPUTED"
 VERIFY_TOPOLOGY="$ROOT/ops/plugins/core/verify/bin/verify-topology"
 VERIFY_ENGINE="$ROOT/ops/plugins/core/verify/bin/verify-engine"
 VERIFY_ENGINE_HONESTY="$ROOT/ops/plugins/core/verify/bin/verify-engine-honesty"
+RECOVERY_DISPATCH="$ROOT/ops/plugins/core/recovery/bin/recovery-dispatch"
 
 fail() {
   echo "verify.run FAIL: $*" >&2
@@ -42,12 +43,14 @@ Scopes:
 
 Flags:
   --shadow   accepted for compatibility and ignored by spine-lite
+  --recover  on fail, execute matching recovery-dispatch for D### failures when available
   --json     emit machine-readable JSON output
 USAGE
 }
 
 json_mode=0
 shadow_mode=0
+recover_mode=0
 
 if [[ "${1:-}" == "--" ]]; then
   shift
@@ -76,10 +79,30 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --json) json_mode=1 ;;
     --shadow) shadow_mode=1 ;;
+    --recover) recover_mode=1 ;;
     *) fail "unknown argument: $1" ;;
   esac
   shift
 done
+
+surface_recovery() {
+  local scope_name="$1"
+  local result_json="$2"
+  local fail_id=""
+  local failure_class="deterministic"
+
+  fail_id="$(jq -r '.blocking_fail_ids[0] // .failing_ids[0] // empty' <<<"$result_json" 2>/dev/null || true)"
+  [[ "$fail_id" == D* ]] || {
+    echo "recovery.dispatch hint: scope=$scope_name fail_id=${fail_id:-none} (no D### match on this verify surface)" >&2
+    return 0
+  }
+
+  echo "recovery.dispatch hint: ops cap run recovery.dispatch -- --gate-id $fail_id --failure-class $failure_class" >&2
+  [[ "$recover_mode" -eq 1 ]] || return 0
+  [[ -x "$RECOVERY_DISPATCH" ]] || fail "missing recovery dispatch: $RECOVERY_DISPATCH"
+  echo "recovery.dispatch: scope=$scope_name gate_id=$fail_id failure_class=$failure_class" >&2
+  "$RECOVERY_DISPATCH" --gate-id "$fail_id" --failure-class "$failure_class"
+}
 
 run_and_wrap_json() {
   local mode="$1"
@@ -120,43 +143,47 @@ run_and_wrap_json() {
   return "$rc"
 }
 
+run_scope() {
+  local mode="$1"
+  shift
+  local result="" rc=0
+
+  if [[ "$json_mode" -eq 1 ]]; then
+    set +e
+    result="$(run_and_wrap_json "$mode" "$@" --json)"
+    rc=$?
+    set -e
+    [[ "$rc" -eq 0 ]] || surface_recovery "$mode" "$result"
+    printf '%s\n' "$result"
+    return "$rc"
+  fi
+
+  set +e
+  "$@"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    set +e
+    result="$(run_and_wrap_json "$mode" "$@" --json)"
+    set -e
+    surface_recovery "$mode" "$result"
+  fi
+  return "$rc"
+}
+
 case "$scope" in
-  engine)
-    if [[ "$json_mode" -eq 1 ]]; then
-      run_and_wrap_json "engine" "$VERIFY_ENGINE" --json
-    else
-      exec "$VERIFY_ENGINE"
-    fi
-    ;;
-  honesty)
-    if [[ "$json_mode" -eq 1 ]]; then
-      run_and_wrap_json "honesty" "$VERIFY_ENGINE_HONESTY" --json
-    else
-      exec "$VERIFY_ENGINE_HONESTY"
-    fi
-    ;;
+  engine)  run_scope "engine" "$VERIFY_ENGINE" ;;
+  honesty) run_scope "honesty" "$VERIFY_ENGINE_HONESTY" ;;
   fast)
-    if [[ "$json_mode" -eq 1 ]]; then
-      run_and_wrap_json "fast" "$VERIFY_TOPOLOGY" core --json
-    else
-      [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
-      exec "$VERIFY_TOPOLOGY" core
-    fi
+    [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
+    run_scope "fast" "$VERIFY_TOPOLOGY" core
     ;;
   domain)
-    if [[ "$json_mode" -eq 1 ]]; then
-      run_and_wrap_json "domain:$target_domain" "$VERIFY_TOPOLOGY" domain "$target_domain" --json
-    else
-      [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
-      exec "$VERIFY_TOPOLOGY" domain "$target_domain"
-    fi
+    [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
+    run_scope "domain:$target_domain" "$VERIFY_TOPOLOGY" domain "$target_domain"
     ;;
   release)
-    if [[ "$json_mode" -eq 1 ]]; then
-      run_and_wrap_json "release" "$VERIFY_TOPOLOGY" release --json
-    else
-      [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
-      exec "$VERIFY_TOPOLOGY" release
-    fi
+    [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
+    run_scope "release" "$VERIFY_TOPOLOGY" release
     ;;
 esac

@@ -15,6 +15,7 @@ Health surfaces:
   ops verify --core-only       Same as default (compatibility alias)
   ops verify --engine-smoke    Engine plumbing smoke test
   ops verify --engine-honesty  Engine orchestration proof (dispatch, wave, telemetry)
+  ops verify --spine-lite      Engine smoke + honesty union
   ops verify --binding-coherence  Capability references in bindings vs registry
   ops verify --full            Readiness: status + infra baseline + secrets
   ops verify --preflight       Governance banner + git health + gate domains
@@ -365,6 +366,17 @@ case "${1:-}" in
     echo
     echo "Engine verify: platform plumbing smoke test"
     exec "$VERIFY_RUN" engine
+    ;;
+  --spine-lite)
+    rc=0
+    echo "SPINE_ROOT=$SPINE_ROOT"
+    echo "VERIFY_MODE=spine-lite"
+    echo
+    echo "Engine verify: smoke + honesty union"
+    "$VERIFY_RUN" engine || rc=1
+    echo
+    "$VERIFY_RUN" honesty || rc=1
+    exit "$rc"
     ;;
   --binding-coherence)
     echo "SPINE_ROOT=$SPINE_ROOT"

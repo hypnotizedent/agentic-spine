@@ -105,14 +105,35 @@ append_telemetry() {
     local safety="$2"
     local exit_code="$3"
     local telemetry_dir="$SPINE_STATE/telemetry"
+    local terminals_dir="$SPINE_STATE/terminals"
     local session_boundary="${SPINE_SESSION_ID:-}"
+    local terminal_id="${TERMINAL_ID:-${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-}}}}"
 
     if [[ -z "$session_boundary" && "$safety" == "mutating" ]]; then
         session_boundary="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-}}}"
     fi
     [[ -n "$session_boundary" ]] || session_boundary="nosession"
 
+    if [[ -z "$terminal_id" ]]; then
+        local host_part pid_part
+        host_part="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)"
+        host_part="$(printf '%s' "$host_part" | tr '[:space:]/' '__')"
+        pid_part="$$"
+        terminal_id="attach-${OPS_TERMINAL_ROLE:-unset}-${host_part}-${pid_part}"
+    fi
+
+    terminal_id="$(printf '%s' "$terminal_id" | tr '[:space:]/' '__')"
+
     mkdir -p "$telemetry_dir" 2>/dev/null || true
+    mkdir -p "$terminals_dir" 2>/dev/null || true
+    {
+        printf 'terminal_id: %s\n' "$terminal_id"
+        printf 'last_heartbeat_utc: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'last_capability: %s\n' "$name"
+        printf 'last_exit_code: %s\n' "$exit_code"
+        printf 'source: cap.run\n'
+    } > "$terminals_dir/$terminal_id.heartbeat" 2>/dev/null || \
+        echo "WARN: failed to write terminal heartbeat for $terminal_id" >&2
     printf '%s\t%s\t%s\t%s\t%s\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       "$name" \

@@ -165,6 +165,37 @@ if [[ -d "$SPINE_STATE/loop-scopes" ]]; then
   done < <(find "$SPINE_STATE/loop-scopes" -maxdepth 1 -type f -name 'LOOP-*.scope.md' | sort)
 fi
 
+OVERDUE_WAVES=()
+if [[ -d "$SPINE_RUNTIME_ROOT/waves" ]]; then
+  while IFS='|' read -r wave_id deadline_utc overdue_minutes owner_terminal loop_id; do
+    [[ -n "$wave_id" ]] || continue
+    OVERDUE_WAVES+=("$wave_id|$deadline_utc|$overdue_minutes|$owner_terminal|$loop_id")
+  done < <(python3 - "$SPINE_RUNTIME_ROOT/waves" "$RUN_UTC" <<'PY'
+import glob, json, os, sys; from datetime import datetime
+waves_root, now = sys.argv[1], datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00"))
+for state_path in sorted(glob.glob(os.path.join(waves_root, "*", "state.json"))):
+    try:
+        state = json.load(open(state_path))
+    except Exception: continue
+    if str(state.get("status", "")).strip().lower() != "active":
+        continue
+    packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+    deadline_utc = str(packet.get("deadline_utc") or state.get("deadline_utc") or "").strip()
+    if not deadline_utc:
+        continue
+    try:
+        deadline = datetime.fromisoformat(deadline_utc.replace("Z", "+00:00"))
+    except Exception: continue
+    if now <= deadline:
+        continue
+    overdue_minutes = max(0, int((now - deadline).total_seconds() // 60))
+    owner_terminal = str(state.get("owner_terminal") or packet.get("owner_terminal") or "").strip()
+    loop_id = str(packet.get("loop_id") or state.get("loop_id") or "").strip()
+    print(f"{state.get('wave_id', '')}|{deadline_utc}|{overdue_minutes}|{owner_terminal}|{loop_id}")
+PY
+  )
+fi
+
 PROTECTED_TOKENS=()
 for item in "${PROTECTED_LOOPS[@]}" "${PROTECTED_GAPS[@]}" "${PROTECTED_RUNTIME_LANES[@]}"; do
   [[ -n "$item" ]] && PROTECTED_TOKENS+=("$item")
@@ -651,6 +682,13 @@ GITHUB_CODEX_COUNT_AFTER="$(git -C "$ROOT" for-each-ref refs/remotes/github/code
   for row in "${ACTION_REMOTE_GITHUB_PRUNED[@]}"; do echo "  - $row"; done
   echo "- skipped_items: ${#ACTION_SKIPPED[@]}"
   for row in "${ACTION_SKIPPED[@]}"; do echo "  - $row"; done
+  if [[ "${#OVERDUE_WAVES[@]}" -gt 0 ]]; then
+    echo "## Overdue waves"
+    for row in "${OVERDUE_WAVES[@]}"; do
+      IFS='|' read -r wave_id deadline_utc overdue_minutes owner_terminal loop_id <<<"$row"
+      echo "- $wave_id (deadline $deadline_utc, ${overdue_minutes}m overdue, owner=${owner_terminal:-unknown}, loop=${loop_id:-unknown})"
+    done
+  fi
 } > "$SUMMARY_MD"
 
 {

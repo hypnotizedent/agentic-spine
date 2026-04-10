@@ -83,6 +83,10 @@ resolve_wave_owner_terminal() {
   printf '%s\n' "${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-${USER:-unknown}}}}}"
 }
 
+resolve_wave_terminal_identity() {
+  printf '%s\n' "${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-unknown}}}}"
+}
+
 resolve_wave_worktree_prefix() {
   local repo_path="${1:-$SPINE_REPO}"
   local lifecycle_contract="$SPINE_REPO/ops/bindings/worktree.lifecycle.contract.yaml"
@@ -787,7 +791,7 @@ EOF
 }
 
 wave_start_usage() {
-  echo "Usage: ops wave start <WAVE_ID> --objective \"<text>\" [--loop-id <LOOP_ID>] [--deadline-utc <ISO8601>] [--horizon now|later|future] [--execution-readiness runnable|blocked] [--claimed-paths \"a,b\"] [--worktree auto|off] [--repo <path>]" >&2
+  echo "Usage: ops wave start <WAVE_ID> --objective \"<text>\" [--loop-id <LOOP_ID>] [--prior-wave <WAVE_ID>] [--deadline-utc <ISO8601>] [--horizon now|later|future] [--execution-readiness runnable|blocked] [--claimed-paths \"a,b\"] [--worktree auto|off] [--repo <path>]" >&2
 }
 
 wave_start_fail_legacy_loop_flag() {
@@ -802,6 +806,7 @@ cmd_start() {
   local wave_id=""
   local objective=""
   local loop_id=""
+  local prior_wave_id=""
   local deadline_utc=""
   local horizon="now"
   local execution_readiness="runnable"
@@ -831,6 +836,7 @@ cmd_start() {
       --) shift ;;
       --objective) objective="${2:-}"; shift 2 ;;
       --loop-id) loop_id="${2:-}"; shift 2 ;;
+      --prior-wave) prior_wave_id="${2:-}"; shift 2 ;;
       --loop) wave_start_fail_legacy_loop_flag "$1" ;;
       --deadline-utc) deadline_utc="${2:-}"; shift 2 ;;
       --horizon) horizon="${2:-}"; shift 2 ;;
@@ -1069,7 +1075,7 @@ print(json.dumps(items))
 PYCLAIMS
 )"
 
-  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" "$packet_allowed_roles" "$PATH_CLAIMS_FILE" "$PATH_CLAIMS_TTL_MINUTES" "$PATH_CLAIMS_NON_OVERLAP" "$wave_kind" <<'PYSTART'
+  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$prior_wave_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" "$packet_allowed_roles" "$PATH_CLAIMS_FILE" "$PATH_CLAIMS_TTL_MINUTES" "$PATH_CLAIMS_NON_OVERLAP" "$wave_kind" <<'PYSTART'
 import json, sys
 import os
 import fcntl
@@ -1086,25 +1092,26 @@ workspace_note = sys.argv[8] if len(sys.argv) > 8 else ""
 default_role = sys.argv[9] if len(sys.argv) > 9 and sys.argv[9] else "researcher"
 default_next_role = sys.argv[10] if len(sys.argv) > 10 and sys.argv[10] else "worker"
 loop_id = sys.argv[11] if len(sys.argv) > 11 else ""
-deadline_utc = sys.argv[12] if len(sys.argv) > 12 else ""
-horizon = sys.argv[13] if len(sys.argv) > 13 else ""
-execution_readiness = sys.argv[14] if len(sys.argv) > 14 else ""
-owner_terminal = sys.argv[15] if len(sys.argv) > 15 else ""
-claimed_paths = json.loads(sys.argv[16]) if len(sys.argv) > 16 and sys.argv[16] else []
-required_fields = [x.strip() for x in (sys.argv[17] if len(sys.argv) > 17 else "").split(",") if x.strip()]
-allowed_horizon = {x.strip() for x in (sys.argv[18] if len(sys.argv) > 18 else "now,later,future").split(",") if x.strip()}
-allowed_readiness = {x.strip() for x in (sys.argv[19] if len(sys.argv) > 19 else "runnable,blocked").split(",") if x.strip()}
+prior_wave_id = sys.argv[12] if len(sys.argv) > 12 else ""
+deadline_utc = sys.argv[13] if len(sys.argv) > 13 else ""
+horizon = sys.argv[14] if len(sys.argv) > 14 else ""
+execution_readiness = sys.argv[15] if len(sys.argv) > 15 else ""
+owner_terminal = sys.argv[16] if len(sys.argv) > 16 else ""
+claimed_paths = json.loads(sys.argv[17]) if len(sys.argv) > 17 and sys.argv[17] else []
+required_fields = [x.strip() for x in (sys.argv[18] if len(sys.argv) > 18 else "").split(",") if x.strip()]
+allowed_horizon = {x.strip() for x in (sys.argv[19] if len(sys.argv) > 19 else "now,later,future").split(",") if x.strip()}
+allowed_readiness = {x.strip() for x in (sys.argv[20] if len(sys.argv) > 20 else "runnable,blocked").split(",") if x.strip()}
 allowed_roles = {
-    x.strip() for x in (sys.argv[20] if len(sys.argv) > 20 else "researcher,worker,qc,close,librarian").split(",") if x.strip()
+    x.strip() for x in (sys.argv[21] if len(sys.argv) > 21 else "researcher,worker,qc,close,librarian").split(",") if x.strip()
 }
-path_claims_file = sys.argv[21] if len(sys.argv) > 21 else ""
+path_claims_file = sys.argv[22] if len(sys.argv) > 22 else ""
 path_claims_ttl_minutes = 180
 try:
-    path_claims_ttl_minutes = int(sys.argv[22]) if len(sys.argv) > 22 else 180
+    path_claims_ttl_minutes = int(sys.argv[23]) if len(sys.argv) > 23 else 180
 except Exception:
     path_claims_ttl_minutes = 180
-path_claims_non_overlap = (sys.argv[23].lower() == "true") if len(sys.argv) > 23 else True
-wave_kind = (sys.argv[24].strip() if len(sys.argv) > 24 and sys.argv[24].strip() else "production")
+path_claims_non_overlap = (sys.argv[24].lower() == "true") if len(sys.argv) > 24 else True
+wave_kind = (sys.argv[25].strip() if len(sys.argv) > 25 and sys.argv[25].strip() else "production")
 single_terminal_mode = str(owner_terminal or "").strip().startswith("SPINE-CONTROL-")
 
 packet = {
@@ -1112,6 +1119,7 @@ packet = {
     "wave_id": wave_id,
     "wave_kind": wave_kind,
     "loop_id": loop_id,
+    "prior_wave_id": prior_wave_id,
     "owner_terminal": owner_terminal,
     "current_role": default_role,
     "next_role": default_next_role,
@@ -2002,6 +2010,8 @@ cmd_dispatch() {
   local sd
   sd="$(wave_state_dir "$wave_id")"
   dispatch_pushability_preflight "$sf" "$lane"
+  local dispatch_terminal_identity
+  dispatch_terminal_identity="$(resolve_wave_terminal_identity)"
 
   if [[ -f "$ROLE_RUNTIME_CONTRACT" ]]; then
     python3 - "$sf" "$ROLE_RUNTIME_CONTRACT" <<'PYPACKETDISPATCH'
@@ -2462,7 +2472,7 @@ PYDISPATCHMODE
     return
   fi
 
-  python3 - "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json" <<'PYDISP'
+  python3 - "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json" "$dispatch_terminal_identity" <<'PYDISP'
 import json, sys, fcntl, os
 from datetime import datetime, timezone
 
@@ -2474,6 +2484,7 @@ to_role = sys.argv[5] if len(sys.argv) > 5 else ""
 transition_gate = sys.argv[6] if len(sys.argv) > 6 else ""
 input_refs = json.loads(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] else {}
 expected_output_refs = json.loads(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8] else {}
+dispatched_by_terminal = sys.argv[9] if len(sys.argv) > 9 else ""
 lock_file = sf + ".lock"
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
@@ -2497,6 +2508,7 @@ try:
         "expected_output_refs": expected_output_refs,
         "status": "dispatched",
         "dispatched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "dispatched_by_terminal": dispatched_by_terminal,
         "completed_at": None,
         "result": None,
         "run_key": None,
@@ -3119,8 +3131,10 @@ ACKUSAGE
   local terminal_role_contract=""
   local ack_terminal_role="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-}}}}"
   local ack_runtime_role="${SPINE_RUNTIME_ROLE:-}"
+  local ack_terminal_identity
+  ack_terminal_identity="$(resolve_wave_terminal_identity)"
 
-  python3 - "$sf" "$lane" "$result" "$run_key" "$dispatch_id" "$ROLE_RUNTIME_CONTRACT" "$terminal_role_contract" "$ack_terminal_role" "$ack_runtime_role" <<'PYACK'
+  python3 - "$sf" "$lane" "$result" "$run_key" "$dispatch_id" "$ROLE_RUNTIME_CONTRACT" "$terminal_role_contract" "$ack_terminal_role" "$ack_runtime_role" "$ack_terminal_identity" <<'PYACK'
 import json, sys, fcntl, os
 from datetime import datetime, timezone
 
@@ -3133,6 +3147,7 @@ role_contract = sys.argv[6] if len(sys.argv) > 6 else ""
 terminal_role_contract = sys.argv[7] if len(sys.argv) > 7 else ""
 ack_terminal_role = (sys.argv[8] if len(sys.argv) > 8 else "").strip()
 ack_runtime_role = (sys.argv[9] if len(sys.argv) > 9 else "").strip()
+acked_by_terminal = sys.argv[10] if len(sys.argv) > 10 else ""
 lock_file = sf + ".lock"
 
 
@@ -3322,6 +3337,7 @@ try:
     d["completed_at"] = now
     d["result"] = result
     d["run_key"] = run_key
+    d["acked_by_terminal"] = acked_by_terminal
 
     lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
     lane_updated = False
