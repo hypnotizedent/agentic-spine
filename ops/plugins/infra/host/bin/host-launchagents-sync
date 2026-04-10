@@ -5,8 +5,19 @@
 # Source templates: ops/plugins/infra/host/launchd/*.plist
 # Install target:   ~/Library/LaunchAgents/
 #
+# Role-awareness (L1):
+#   Each label has an `intended_node_role` declared in
+#   ops/bindings/launchd.scheduler.registry.yaml. This script only
+#   materializes labels whose `intended_node_role` matches the local
+#   machine role (default: operator_console). Labels with a different
+#   role are explicitly skipped with SKIPPED_ROLE_MISMATCH output — they
+#   are NOT copied, reloaded, or silently installed. This script does
+#   NOT assign hosts and does NOT decide which non-local machine should
+#   run any label; it only prevents the operator console from absorbing
+#   the entire scheduler surface.
+#
 # Usage:
-#   host-launchagents-sync [--dry-run] [--no-reload] [--label <com.ronny.foo> ...]
+#   host-launchagents-sync [--dry-run] [--no-reload] [--label <com.ronny.foo> ...] [--local-role <role>]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
@@ -23,10 +34,12 @@ SPINE_TARGET_REPO="$TARGET_REPO"
 SPINE_REPO="$TARGET_REPO"
 SOURCE_DIR="${ROOT}/ops/plugins/infra/host/launchd"
 DEST_DIR="${HOME}/Library/LaunchAgents"
+REGISTRY_PATH="${ROOT}/ops/bindings/launchd.scheduler.registry.yaml"
 UID_VAL="$(id -u)"
 
 DRY_RUN=0
 NO_RELOAD=0
+LOCAL_ROLE="operator_console"
 declare -a REQUESTED_LABELS=()
 
 usage() {
@@ -34,12 +47,14 @@ usage() {
 host-launchagents-sync
 
 Usage:
-  host-launchagents-sync [--dry-run] [--no-reload] [--label <com.ronny.foo> ...]
+  host-launchagents-sync [--dry-run] [--no-reload] [--label <com.ronny.foo> ...] [--local-role <role>]
 
 Options:
-  --dry-run      Show actions without mutating files or launchctl state.
-  --no-reload    Sync plist files only; do not bootout/bootstrap labels.
-  --label        Restrict to one label (repeatable). Default: all com.ronny.* templates.
+  --dry-run       Show actions without mutating files or launchctl state.
+  --no-reload     Sync plist files only; do not bootout/bootstrap labels.
+  --label         Restrict to one label (repeatable). Default: all com.ronny.* templates.
+  --local-role    L1 role of this host (default: operator_console). Labels whose
+                  intended_node_role differs are skipped with SKIPPED_ROLE_MISMATCH.
 USAGE
 }
 
@@ -109,6 +124,10 @@ while [[ $# -gt 0 ]]; do
       REQUESTED_LABELS+=("${2:?--label requires value}")
       shift 2
       ;;
+    --local-role)
+      LOCAL_ROLE="${2:?--local-role requires value}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -124,13 +143,32 @@ done
 need_cmd jq
 need_cmd plutil
 need_cmd launchctl
+need_cmd yq
 
 [[ -d "$SOURCE_DIR" ]] || {
   echo "FAIL: missing source dir: $SOURCE_DIR" >&2
   exit 1
 }
 
+[[ -f "$REGISTRY_PATH" ]] || {
+  echo "FAIL: missing scheduler registry: $REGISTRY_PATH" >&2
+  exit 1
+}
+
 mkdir -p "$DEST_DIR"
+
+# Cache registry role truth into a tmp file (label<TAB>intended_node_role).
+REGISTRY_CACHE="$(mktemp -t host-launchagents-sync.roles.XXXXXX)"
+trap 'rm -f "$REGISTRY_CACHE"' EXIT
+if ! yq -o=tsv '.labels[] | [.label, .intended_node_role]' "$REGISTRY_PATH" > "$REGISTRY_CACHE" 2>/dev/null; then
+  echo "FAIL: unable to extract intended_node_role rows from $REGISTRY_PATH" >&2
+  exit 1
+fi
+
+registry_role_for() {
+  local label="$1"
+  awk -v l="$label" 'BEGIN{FS="\t"} $1 == l { print $2; found=1; exit } END { if (!found) exit 2 }' "$REGISTRY_CACHE"
+}
 
 declare -a LABELS=()
 if [[ "${#REQUESTED_LABELS[@]}" -gt 0 ]]; then
@@ -152,11 +190,14 @@ fi
 copied=0
 unchanged=0
 reloaded=0
+skipped_role_mismatch=0
 errors=0
 
 echo "host.launchagents.sync"
 echo "source: $SOURCE_DIR"
 echo "target: $DEST_DIR"
+echo "registry: $REGISTRY_PATH"
+echo "local_role: $LOCAL_ROLE"
 echo "dry_run: $DRY_RUN"
 echo "no_reload: $NO_RELOAD"
 echo
@@ -168,6 +209,25 @@ for label in "${LABELS[@]}"; do
   if [[ ! -f "$src_plist" ]]; then
     echo "FAIL: missing source plist for $label: $src_plist" >&2
     errors=$((errors + 1))
+    continue
+  fi
+
+  # L1 role gate: resolve intended_node_role from registry. If the label
+  # has no registry row, that is an honest error — the registry is the
+  # single role-truth surface.
+  set +e
+  label_role="$(registry_role_for "$label")"
+  role_rc=$?
+  set -e
+  if [[ "$role_rc" -ne 0 || -z "$label_role" ]]; then
+    echo "FAIL: no registry row for $label (registry=$REGISTRY_PATH)" >&2
+    errors=$((errors + 1))
+    continue
+  fi
+
+  if [[ "$label_role" != "$LOCAL_ROLE" ]]; then
+    echo "SKIPPED_ROLE_MISMATCH: $label intended_node_role=$label_role local_role=$LOCAL_ROLE"
+    skipped_role_mismatch=$((skipped_role_mismatch + 1))
     continue
   fi
 
@@ -202,5 +262,5 @@ for label in "${LABELS[@]}"; do
 done
 
 echo
-echo "summary: labels=${#LABELS[@]} copied=$copied unchanged=$unchanged reloaded=$reloaded errors=$errors"
+echo "summary: labels=${#LABELS[@]} copied=$copied unchanged=$unchanged reloaded=$reloaded skipped_role_mismatch=$skipped_role_mismatch errors=$errors"
 [[ "$errors" -eq 0 ]]
