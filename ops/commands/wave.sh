@@ -5512,9 +5512,22 @@ try:
     state["lifecycle_state"] = "closed"
     workspace = state.get("workspace")
     if isinstance(workspace, dict) and workspace.get("enabled"):
-        workspace["lifecycle_state"] = "pending_close"
+        worktree_path = str(workspace.get("worktree", "")).strip()
+        branch_name = str(workspace.get("branch", "")).strip()
+        if not worktree_path or not branch_name:
+            print("ERROR: wave workspace metadata missing worktree or branch for atomic cleanup", file=sys.stderr)
+            sys.exit(1)
+        for args, label in (
+            (["worktree", "remove", "--force", worktree_path], f"worktree remove failed for {worktree_path}"),
+            (["branch", "-D", branch_name], f"branch delete failed for {branch_name}"),
+        ):
+            proc = subprocess.run(["git", "-C", spine_repo] + args, text=True, capture_output=True, check=False)
+            if proc.returncode != 0:
+                detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+                print(f"ERROR: wave close teardown failed: {label}: {detail}", file=sys.stderr)
+                sys.exit(proc.returncode or 1)
         workspace["closed_at"] = now
-        workspace["close_action"] = "explicit_cleanup_required"
+        workspace["lifecycle_state"] = "cleaned"
         state["workspace"] = workspace
 
     with open(sf, "w") as f:
