@@ -63,6 +63,66 @@ capabilities:
     domain: backup
     implementation_repo: workbench
     implementation_path: docs/infrastructure/domains/backup/
+  backup.posture.snapshot.build:
+    description: 'Read-only by default: generate unified backup posture projection to runtime/domain-state/snapshots/backup.posture.snapshot.yaml; tracked promotion requires --apply.'
+    tags:
+    - backup
+    - posture
+    - projection
+    command: ./ops/plugins/infra/backup/bin/backup-posture-snapshot-build
+    script_path: ./ops/plugins/infra/backup/bin/backup-posture-snapshot-build
+    cwd: $SPINE_CODE
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+    - stdout
+    - ops/bindings/domains/backup/backup.posture.snapshot.yaml
+    plane: domain_external
+    domain: backup
+    implementation_repo: workbench
+    implementation_path: docs/infrastructure/domains/backup/
+  content.family.decommission.readiness.build:
+    description: Generate the derived decommission-readiness projection for residual content-family service planes from family authority, lifecycle roots, closure surfaces, and VM preconditions.
+    tags:
+    - governance
+    - storage
+    - decommission
+    command: python3 ./ops/plugins/core/authority/bin/content-family-decommission-readiness-build
+    script_path: ./ops/plugins/core/authority/bin/content-family-decommission-readiness-build
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: argparse
+    lifecycle: ready
+    outputs:
+    - stdout
+    - ops/bindings/domains/media/content.family.decommission.readiness.projected.yaml
+    - docs/reference/generated/CONTENT_FAMILY_DECOMMISSION_READINESS.md
+    domain: infra
+    plane: fabric
+  content.family.placement.projection.build:
+    description: Generate or verify content-family placement truth from the canonical family policy, emitting the projected YAML and operator matrix.
+    tags:
+    - content
+    - placement
+    - lifecycle
+    - projection
+    - governance
+    command: python3 ./ops/plugins/core/authority/bin/content-family-placement-projection-build
+    script_path: ./ops/plugins/core/authority/bin/content-family-placement-projection-build
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: argparse
+    lifecycle: ready
+    outputs:
+    - stdout
+    - ops/bindings/domains/media/content.family.placement.projected.yaml
+    - docs/reference/generated/CONTENT_FAMILY_PLACEMENT_MATRIX.md
+    domain: infra
+    plane: fabric
   cloudflare.inventory.sync:
     description: Verify cloudflare.inventory metadata matches live zones/tunnels.
     tags:
@@ -172,6 +232,94 @@ capabilities:
     - stdout
     domain: infra
     plane: fabric
+  infra.shop.storage.authority.build:
+    description: Build the generated shop storage authority binding and rack scorecard from canonical hardware, runtime, backup, monitoring, and ingress surfaces.
+    tags:
+    - infra
+    - shop
+    - storage
+    - projection
+    - scorecard
+    command: ./ops/plugins/infra/bin/infra-shop-storage-authority-build
+    script_path: ./ops/plugins/infra/bin/infra-shop-storage-authority-build
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+    - stdout
+    - ops/bindings/shop.storage.map.yaml
+    - docs/reference/generated/SHOP_RACK_SCORECARD.md
+    domain: infra
+    plane: fabric
+  infra.estate.boringness.build:
+    description: Build generated home storage and ingress projections plus estate boringness register and scorecards.
+    tags:
+    - infra
+    - estate
+    - home
+    - shop
+    - storage
+    - ingress
+    - projection
+    - scorecard
+    command: ./ops/plugins/infra/bin/infra-estate-boringness-build
+    script_path: ./ops/plugins/infra/bin/infra-estate-boringness-build
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+    - stdout
+    - ops/bindings/home.storage.map.yaml
+    - ops/bindings/shop.ingress.map.yaml
+    - ops/bindings/home.ingress.map.yaml
+    - ops/bindings/estate.surface.register.yaml
+    - docs/reference/generated/HOME_RACK_SCORECARD.md
+    - docs/reference/generated/ESTATE_BORINGNESS_SCORECARD.md
+    domain: infra
+    plane: fabric
+  internet.asset.registry.build:
+    description: 'Read-only: build projected view of internet.asset.registry from canonical sources with freshness metadata.'
+    tags:
+    - infra
+    - inventory
+    - asset
+    - projection
+    command: ./ops/plugins/infra/bin/internet-asset-registry-build
+    script_path: ./ops/plugins/infra/bin/internet-asset-registry-build
+    cwd: $SPINE_CODE
+    safety: read-only
+    approval: auto
+    arg_protocol: none
+    lifecycle: ready
+    outputs:
+    - stdout
+    - ops/bindings/internet.asset.registry.projected.yaml
+    domain: infra
+    plane: fabric
+  mint.module.status.projection.build:
+    description: Refresh the governed Mint module status projection and emit a canonical intake envelope for runtime/session captures.
+    tags:
+    - mint
+    - projection
+    - intake
+    - authority
+    command: ./ops/plugins/domains/mint/bin/module-status-projection-build
+    script_path: ./ops/plugins/domains/mint/bin/module-status-projection-build
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    plane: domain_external
+    domain: mint
+    implementation_repo: workbench
+    implementation_path: agents/flying-dutchman/
+    outputs:
+    - stdout
   infra.proxmox.guest.control:
     description: Single PVE guest start/shutdown/stop. Supports both KVM and LXC.
     tags:
@@ -838,6 +986,48 @@ capabilities:
     domain: infra
     plane: fabric
     automation_only: true
+  service.data.lifecycle.projection.build:
+    description: Build or verify service.data.lifecycle.projected.yaml from ops/bindings/service.data.lifecycle.registry.yaml.
+    tags:
+    - authority
+    - governance
+    - lifecycle
+    - retention
+    - projection
+    - generator
+    command: python3 ./ops/plugins/core/authority/bin/service-data-lifecycle-projection-build
+    script_path: ./ops/plugins/core/authority/bin/service-data-lifecycle-projection-build
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+    - stdout
+    - ops/bindings/service.data.lifecycle.projected.yaml
+    domain: infra
+    plane: fabric
+  service.registry.projection.build:
+    description: Build or verify services.health.yaml and docker.compose.targets.yaml from docs/governance/SERVICE_REGISTRY.yaml.
+    tags:
+    - authority
+    - infra
+    - services
+    - compose
+    - projection
+    command: python3 ./ops/plugins/core/authority/bin/service-registry-projection-build
+    script_path: ./ops/plugins/core/authority/bin/service-registry-projection-build
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+    - stdout
+    - ops/bindings/services.health.yaml
+    - ops/bindings/docker.compose.targets.yaml
+    domain: infra
+    plane: fabric
   session.v3.attach:
     description: Canonical session entry — prints context banner and work summary. Called by terminal launch at birth.
     tags:
@@ -855,6 +1045,55 @@ capabilities:
     - stdout
     domain: core
     plane: fabric
+  spine.doctor:
+    description: 'Read-only bootstrap diagnostics: preconditions, tenant/environment validation, contract acknowledgement state, and optional fast verify.'
+    tags:
+    - spine
+    - bootstrap
+    - diagnostics
+    - portability
+    command: ./ops/plugins/core/session/bin/spine-doctor
+    script_path: ./ops/plugins/core/session/bin/spine-doctor
+    cwd: $SPINE_CODE
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+    - stdout
+    domain: core
+    plane: fabric
+  spine.init:
+    description: 'Canonical bootstrap entrypoint: validates tenant profile, bootstraps environment/identity contracts, acknowledges AOF contract, and optionally runs fast verify.'
+    tags:
+    - spine
+    - bootstrap
+    - portability
+    command: ./ops/plugins/core/session/bin/spine-init
+    script_path: ./ops/plugins/core/session/bin/spine-init
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: manual
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+    - stdout
+    - .environment.yaml
+    - .identity.yaml
+    domain: core
+    plane: fabric
+    args:
+    - --environment-name <name> (optional; defaults from runtime context)
+    - --profile <minimal|product|production> (default: product)
+    - --force (rebuild environment/identity contracts)
+    - --dry-run (no mutations)
+    - --skip-verify (skip verify.run fast)
+    - --skip-ack (skip AOF contract acknowledgement)
+    - --json
+    examples:
+    - ./bin/ops cap run spine.init
+    - ./bin/ops cap run spine.init -- --environment-name spine-lab --profile minimal
+    - ./bin/ops cap run spine.init -- --dry-run --json
   spine.surface.inbound.resolve:
     description: Read-only joining reader — for one repo-relative path, resolves inferred class, inbound refs, contradictions, and a cautious delete/relabel posture by joining existing L1 authority/projection/closeout surfaces (literal-substring scan v1).
     tags:
@@ -941,6 +1180,31 @@ capabilities:
     domain: core
     plane: fabric
     automation_only: true
+  state.shared.reconcile:
+    description: Run SQLite shared-authority integrity + projection self-heal loop with snapshot rollback.
+    tags:
+    - lifecycle
+    - loops
+    - planning
+    - automation
+    command: ./ops/plugins/core/lifecycle/bin/state-shared-reconcile
+    script_path: ./ops/plugins/core/lifecycle/bin/state-shared-reconcile
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+    - stdout
+    - $SPINE_STATE/plans/_snapshots/
+    - $SPINE_STATE/plans/review-sweep/latest.yaml
+    domain: core
+    plane: fabric
+    flags:
+    - --check (default)
+    - --fix
+    - --json
+    - --max-attempts N
   tailscale.acl.validate:
     description: Validate local Tailscale ACL policy file syntax and run against Tailscale API validation endpoint.
     tags:
@@ -958,6 +1222,23 @@ capabilities:
     outputs:
     - stdout
     domain: infra
+    plane: fabric
+  taxlegal.source.ingest:
+    description: Ingest a document into Paperless-NGX and record in case source-registry.lock.yaml.
+    tags:
+    - taxlegal
+    - paperless
+    - ingest
+    command: ./ops/plugins/domains/taxlegal/bin/taxlegal-source-ingest
+    script_path: ./ops/plugins/domains/taxlegal/bin/taxlegal-source-ingest
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: manual
+    arg_protocol: passthrough
+    lifecycle: experimental
+    outputs:
+    - stdout
+    domain: tax-legal
     plane: fabric
   verify.core.run:
     description: Compatibility alias — prefer verify.infra.run. 17-gate infrastructure verification surface.
