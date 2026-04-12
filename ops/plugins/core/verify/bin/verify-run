@@ -10,6 +10,7 @@ ROOT="$_VR_COMPUTED"
 VERIFY_TOPOLOGY="$ROOT/ops/plugins/core/verify/bin/verify-topology"
 VERIFY_ENGINE="$ROOT/ops/plugins/core/verify/bin/verify-engine"
 VERIFY_ENGINE_HONESTY="$ROOT/ops/plugins/core/verify/bin/verify-engine-honesty"
+VERIFY_SPINE_SCOPE_HELPER="$ROOT/ops/plugins/core/verify/lib/spine_scope_gate_set.py"
 RECOVERY_DISPATCH="$ROOT/ops/plugins/core/recovery/bin/recovery-dispatch"
 
 fail() {
@@ -28,6 +29,7 @@ verify.run
 Usage:
   verify-run engine [--json]                  Fast platform engine smoke (seconds)
   verify-run honesty [--json]                 Engine orchestration proof (dispatch, wave, telemetry)
+  verify-run spine [--json]                   Honest spine-only verify scope (curated executable core set)
   verify-run fast [--json] [--shadow]         17-gate infrastructure baseline
   verify-run infra [--json] [--shadow]        Alias for fast (infrastructure gates)
   verify-run domain <domain_id> [--json]      Domain-scoped infrastructure gates
@@ -36,6 +38,7 @@ Usage:
 Scopes:
   engine  => platform engine smoke test (bin/ops, caps, SQLite, entry)
   honesty => engine orchestration proof (cap dispatch, wave lifecycle, telemetry, close)
+  spine   => curated spine-only executable set + engine/honesty surfaces
   fast    => 17-gate infrastructure workload baseline (alias: infra)
   infra   => same as fast
   domain  => infrastructure gates for one domain
@@ -60,9 +63,9 @@ scope="${1:-}"
 shift || true
 
 case "$scope" in
-  engine|honesty|fast|infra|domain|release) ;;
+  engine|honesty|spine|fast|infra|domain|release) ;;
   -h|--help|"") usage; exit 0 ;;
-  *) fail "unknown scope '$scope' (expected engine|honesty|fast|infra|domain|release)" ;;
+  *) fail "unknown scope '$scope' (expected engine|honesty|spine|fast|infra|domain|release)" ;;
 esac
 
 # Normalize infra → fast (they are the same surface)
@@ -171,9 +174,132 @@ run_scope() {
   return "$rc"
 }
 
+load_spine_helper_json() {
+  [[ -f "$VERIFY_SPINE_SCOPE_HELPER" ]] || fail "missing spine scope helper: $VERIFY_SPINE_SCOPE_HELPER"
+
+  local output rc
+  set +e
+  output="$(python3 "$VERIFY_SPINE_SCOPE_HELPER" --json 2>&1)"
+  rc=$?
+  set -e
+
+  [[ "$rc" -eq 0 ]] || fail "spine scope helper failed (exit $rc): ${output:0:400}"
+  jq -e . >/dev/null 2>&1 <<<"$output" || fail "spine scope helper did not emit valid JSON"
+  printf '%s\n' "$output"
+}
+
+run_spine_scope() {
+  local helper_json declared_json executed_json already_json missing_json stale_json out_json helper_exec_paths_json component_json
+  local overall_rc=0
+  local engine_rc=0 honesty_rc=0 gate_rc=0
+
+  helper_json="$(load_spine_helper_json)"
+  declared_json="$(jq -c '.declared_core_gate_ids' <<<"$helper_json")"
+  executed_json="$(jq -c '.executable_now_gate_ids' <<<"$helper_json")"
+  already_json="$(jq -c '.already_covered_gate_ids' <<<"$helper_json")"
+  missing_json="$(jq -c '.missing_implementation_gate_ids' <<<"$helper_json")"
+  stale_json="$(jq -c '.stale_target_gate_ids' <<<"$helper_json")"
+  out_json="$(jq -c '.out_of_spine_scope_gate_ids' <<<"$helper_json")"
+  helper_exec_paths_json="$(jq -c --arg root "$ROOT" '[.executable_surfaces[] | (.path // .check_script // .surface_id) | if startswith("/") then . else ($root + "/" + .) end]' <<<"$helper_json")"
+  component_json="$(jq -n \
+    --argjson helper_exec "$helper_exec_paths_json" \
+    --arg engine "$VERIFY_ENGINE" \
+    --arg honesty "$VERIFY_ENGINE_HONESTY" \
+    '$helper_exec + [$engine, $honesty]')"
+
+  if [[ "$json_mode" -eq 1 ]]; then
+    set +e
+    "$VERIFY_ENGINE" --json >/dev/null 2>&1
+    engine_rc=$?
+    set -e
+
+    set +e
+    "$VERIFY_ENGINE_HONESTY" --json >/dev/null 2>&1
+    honesty_rc=$?
+    set -e
+  else
+    echo "verify.run spine"
+    echo "  curated spine-only verify scope"
+    echo "  engine: $VERIFY_ENGINE"
+    echo "  honesty: $VERIFY_ENGINE_HONESTY"
+    echo "  executable surfaces:"
+    echo "$component_json" | jq -r '.[]' | sed 's/^/    - /'
+
+    set +e
+    "$VERIFY_ENGINE"
+    engine_rc=$?
+    set -e
+
+    set +e
+    "$VERIFY_ENGINE_HONESTY"
+    honesty_rc=$?
+    set -e
+  fi
+
+  [[ "$engine_rc" -eq 0 ]] || overall_rc=1
+  [[ "$honesty_rc" -eq 0 ]] || overall_rc=1
+
+  while IFS= read -r surface; do
+    [[ -n "$surface" ]] || continue
+    if [[ ! -x "$surface" ]]; then
+      echo "verify.run spine FAIL: non-executable surface: $surface" >&2
+      overall_rc=1
+      continue
+    fi
+
+    if [[ "$json_mode" -eq 1 ]]; then
+      set +e
+      "$surface" >/dev/null 2>&1
+      gate_rc=$?
+      set -e
+    else
+      set +e
+      "$surface"
+      gate_rc=$?
+      set -e
+    fi
+
+    [[ "$gate_rc" -eq 0 ]] || overall_rc=1
+  done < <(jq -r '.[]' <<<"$helper_exec_paths_json")
+
+  if [[ "$json_mode" -eq 1 ]]; then
+    jq -n \
+      --arg mode "spine" \
+      --argjson declared_core_gate_ids "$declared_json" \
+      --argjson executed_gate_ids "$executed_json" \
+      --argjson already_covered_gate_ids "$already_json" \
+      --argjson missing_implementation_gate_ids "$missing_json" \
+      --argjson stale_target_gate_ids "$stale_json" \
+      --argjson out_of_spine_scope_gate_ids "$out_json" \
+      --argjson component_surfaces_run "$component_json" \
+      '{
+        mode: $mode,
+        declared_core_gate_ids: $declared_core_gate_ids,
+        executed_gate_ids: $executed_gate_ids,
+        already_covered_gate_ids: $already_covered_gate_ids,
+        missing_implementation_gate_ids: $missing_implementation_gate_ids,
+        stale_target_gate_ids: $stale_target_gate_ids,
+        out_of_spine_scope_gate_ids: $out_of_spine_scope_gate_ids,
+        component_surfaces_run: $component_surfaces_run
+      }'
+  else
+    echo
+    echo "Spine classification:"
+    echo "  declared: $(jq -r '.declared_core_gate_ids | length' <<<"$helper_json")"
+    echo "  executable-now: $(jq -r '.executable_now_gate_ids | length' <<<"$helper_json")"
+    echo "  already-covered: $(jq -r '.already_covered_gate_ids | length' <<<"$helper_json")"
+    echo "  missing-implementation: $(jq -r '.missing_implementation_gate_ids | length' <<<"$helper_json")"
+    echo "  stale-target: $(jq -r '.stale_target_gate_ids | length' <<<"$helper_json")"
+    echo "  out-of-spine-scope: $(jq -r '.out_of_spine_scope_gate_ids | length' <<<"$helper_json")"
+  fi
+
+  return "$overall_rc"
+}
+
 case "$scope" in
   engine)  run_scope "engine" "$VERIFY_ENGINE" ;;
   honesty) run_scope "honesty" "$VERIFY_ENGINE_HONESTY" ;;
+  spine)   run_spine_scope ;;
   fast)
     [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
     run_scope "fast" "$VERIFY_TOPOLOGY" core

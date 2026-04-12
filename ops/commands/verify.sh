@@ -15,6 +15,7 @@ Health surfaces:
   ops verify --core-only       Same as default (compatibility alias)
   ops verify --engine-smoke    Engine plumbing smoke test
   ops verify --engine-honesty  Engine orchestration proof (dispatch, wave, telemetry)
+  ops verify --spine          Curated spine-only executable verify scope
   ops verify --spine-lite      Engine smoke + honesty union
   ops verify --binding-coherence  Capability references in bindings vs registry
   ops verify --full            Readiness: status + infra baseline + secrets
@@ -23,7 +24,7 @@ Health surfaces:
 
 Runtime backbone (for scripts and automation):
   ops cap run verify.run -- <scope>
-  Scopes: fast | infra | engine | honesty | domain <id> | release
+  Scopes: fast | infra | engine | honesty | spine | domain <id> | release
 EOF
 }
 
@@ -366,6 +367,13 @@ case "${1:-}" in
     echo
     echo "Engine verify: platform plumbing smoke test"
     exec "$VERIFY_RUN" engine
+    ;;
+  --spine)
+    echo "SPINE_ROOT=$SPINE_ROOT"
+    echo "VERIFY_MODE=spine"
+    echo
+    echo "Spine verify: curated spine-only executable verify scope"
+    exec "$VERIFY_RUN" spine
     ;;
   --spine-lite)
     rc=0

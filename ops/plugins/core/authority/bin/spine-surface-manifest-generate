@@ -17,6 +17,8 @@ import yaml
 MANIFEST_ID = "SPINE_SURFACE_MANIFEST"
 GENERATOR_SURFACE_ID = "spine_surface_manifest_generate"
 VERIFY_SET_ID = "spine_scope"
+VERIFY_COMMAND_SURFACE_ID = "verify_command"
+SPINE_SCOPE_GATE_SET_SURFACE_ID = "spine_scope_gate_set"
 REQUIRED_FAMILIES = [
     "mailroom_item",
     "plan",
@@ -388,7 +390,9 @@ def build_surfaces(root: Path, state: Path, runtime: Path, evidence: Path) -> li
         surface_row(surface_id="session_v3_attach", path=root / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "session-v3-attach", surface_kind="runtime_surface", authority_class="supporting", lifecycle_state="live", materialization_class="hand_authored", scope_class="spine_runtime", entry_role="session_attach", contract=root / "ops" / "bindings" / "runtime.bootstrap.contract.yaml", depends_on=["bin_ops", "capabilities_registry"], verify_scope_refs=[VERIFY_SET_ID], notes="Current attach surface called at terminal birth."),
         surface_row(surface_id="spine_surface_inbound_resolve", path=root / "ops" / "plugins" / "core" / "authority" / "bin" / "spine-surface-inbound-resolve", surface_kind="runtime_surface", authority_class="supporting", lifecycle_state="live", materialization_class="hand_authored", scope_class="spine_runtime", entry_role="non_entry", contract=root / "ops" / "bindings" / "authority.concerns.yaml", depends_on=["authority_concerns_contract", "master_inventory_registry", "domain_projection_contract"], verify_scope_refs=[VERIFY_SET_ID], notes="Path-scoped joining reader for inbound surface classification."),
         surface_row(surface_id=GENERATOR_SURFACE_ID, path=root / "ops" / "plugins" / "core" / "authority" / "bin" / "spine-surface-manifest-generate", surface_kind="runtime_surface", authority_class="supporting", lifecycle_state="live", materialization_class="hand_authored", scope_class="spine_runtime", entry_role="non_entry", contract=root / "ops" / "bindings" / "root.authority.contract.yaml", depends_on=["agents_md", "capabilities_registry", "mailroom_inventory_contract", "plans_lifecycle_contract", "gap_schema_contract", "orchestration_packet_contract", "loop_closeout_contract", "wave_closeout_contract"], verify_scope_refs=[VERIFY_SET_ID], notes="Generates the canonical spine-only surface manifest and human projection."),
-        surface_row(surface_id="verify_run", path=root / "ops" / "plugins" / "core" / "verify" / "bin" / "verify-run", surface_kind="command", authority_class="authoritative", lifecycle_state="live", materialization_class="hand_authored", scope_class="spine_runtime", entry_role="runtime_read", depends_on=["verify_engine", "verify_engine_honesty"], verify_scope_refs=[VERIFY_SET_ID], notes="Canonical verify wrapper; spine-only truth routes through engine and honesty scopes here."),
+        surface_row(surface_id="verify_run", path=root / "ops" / "plugins" / "core" / "verify" / "bin" / "verify-run", surface_kind="command", authority_class="authoritative", lifecycle_state="live", materialization_class="hand_authored", scope_class="spine_runtime", entry_role="runtime_read", depends_on=["verify_engine", "verify_engine_honesty", SPINE_SCOPE_GATE_SET_SURFACE_ID], verify_scope_refs=[VERIFY_SET_ID], notes="Canonical verify wrapper; spine-only truth routes through engine, honesty, and classification-backed spine scope here."),
+        surface_row(surface_id=VERIFY_COMMAND_SURFACE_ID, path=root / "ops" / "commands" / "verify.sh", surface_kind="command", authority_class="authoritative", lifecycle_state="live", materialization_class="hand_authored", scope_class="spine_runtime", entry_role="operator_only", depends_on=["verify_run"], verify_scope_refs=[VERIFY_SET_ID], notes="Front-door wrapper for spine-only verify; routes to the runtime backbone command."),
+        surface_row(surface_id=SPINE_SCOPE_GATE_SET_SURFACE_ID, path=root / "ops" / "plugins" / "core" / "verify" / "lib" / "spine_scope_gate_set.py", surface_kind="runtime_surface", authority_class="supporting", lifecycle_state="live", materialization_class="hand_authored", scope_class="spine_runtime", entry_role="non_entry", verify_scope_refs=[VERIFY_SET_ID], notes="Classification helper that buckets declared core gates into honest spine-only verify status."),
         surface_row(surface_id="verify_engine", path=root / "ops" / "plugins" / "core" / "verify" / "bin" / "verify-engine", surface_kind="runtime_surface", authority_class="supporting", lifecycle_state="live", materialization_class="hand_authored", scope_class="spine_runtime", entry_role="non_entry", depends_on=["bin_ops", "capabilities_registry", "state_shared_authority_db"], verify_scope_refs=[VERIFY_SET_ID], notes="Fast spine engine smoke surface."),
         surface_row(surface_id="verify_engine_honesty", path=root / "ops" / "plugins" / "core" / "verify" / "bin" / "verify-engine-honesty", surface_kind="runtime_surface", authority_class="supporting", lifecycle_state="live", materialization_class="hand_authored", scope_class="spine_runtime", entry_role="non_entry", depends_on=["verify_engine", "state_shared_authority_db", "state_domain_state_root"], verify_scope_refs=[VERIFY_SET_ID], notes="End-to-end engine honesty proof surface."),
         surface_row(surface_id="verify_pack", path=root / "ops" / "plugins" / "core" / "verify" / "bin" / "verify-pack", surface_kind="runtime_surface", authority_class="supporting", lifecycle_state="live", materialization_class="hand_authored", scope_class="spine_runtime", entry_role="non_entry", verify_scope_refs=[VERIFY_SET_ID], notes="Specialized verify-pack dispatcher; supportive, not the authoritative spine-only set."),
@@ -420,13 +424,13 @@ def build_verify_sets(root: Path) -> list[dict[str, Any]]:
         "verify_set_id": VERIFY_SET_ID,
         "scope": "spine_only",
         "authoritative": True,
-        "canonical_commands": ["./bin/ops cap run verify.run -- engine", "./bin/ops cap run verify.run -- honesty"],
-        "covers_family_ids": ["plan", "loop", "wave", "friction", "gap", "packet", "receipt", "evidence", "verify_invocation"],
-        "covers_surface_ids": ["agents_md", "spine_md", "session_protocol_md", "bin_ops", "session_v3_attach", "verify_run", "verify_engine", "verify_engine_honesty", "state_shared_authority_db", "spine_surface_manifest_yaml"],
-        "excludes": ["verify.infra.run", "verify.fast", "verify.core.run", "spine.verify", "verify.pack.run domain packs"],
+        "canonical_commands": ["./bin/ops verify --spine", "./bin/ops cap run verify.run -- spine"],
+        "covers_family_ids": ["loop", "wave", "packet", "receipt", "evidence", "verify_invocation"],
+        "covers_surface_ids": ["agents_md", "spine_md", "session_protocol_md", "bin_ops", "session_v3_attach", "verify_command", "verify_run", "spine_scope_gate_set", "verify_engine", "verify_engine_honesty", "state_shared_authority_db", "spine_surface_manifest_yaml"],
+        "excludes": ["verify-topology", "G1-G17", "estate/domain/placement gates", "missing_implementation", "stale_target", "out_of_spine_scope"],
         "source_of_truth": str(root / "ops" / "plugins" / "core" / "verify" / "bin" / "verify-run"),
-        "success_contract": "Spine-only verify truth is the canonical verify.run wrapper in engine and honesty scopes.",
-        "notes": "Exactly one authoritative verify set exists for scope=spine_only.",
+        "success_contract": "Spine-only verify truth is the canonical verify front door plus verify.run spine backbone, backed by a curated classification helper and an explicit exclusion list.",
+        "notes": "Exactly one authoritative verify set exists for scope=spine_only and it is classification-backed, not a dump of all declared gates.",
     }]
 
 
@@ -455,6 +459,8 @@ def build_relations() -> list[dict[str, str]]:
         {"from": "packet", "relation": "governed_by", "to": "orchestration_packet_contract"},
         {"from": "receipt", "relation": "governed_by", "to": "loop_closeout_contract"},
         {"from": "wave", "relation": "governed_by", "to": "wave_closeout_contract"},
+        {"from": VERIFY_COMMAND_SURFACE_ID, "relation": "projects_to", "to": "verify_run"},
+        {"from": "verify_run", "relation": "depends_on", "to": SPINE_SCOPE_GATE_SET_SURFACE_ID},
         {"from": "loop", "relation": "verified_by", "to": "verify_run"},
         {"from": "packet", "relation": "verified_by", "to": "verify_run"},
         {"from": "spine_surface_manifest_yaml", "relation": "verified_by", "to": "verify_run"},
@@ -511,6 +517,7 @@ def validate_manifest(data: dict[str, Any]) -> dict[str, Any]:
         "unique_surface_ids": "pass" if len(surface_ids) == len(set(surface_ids)) else "fail",
         "required_family_ids_present": "pass" if not missing_families else "fail",
         "authoritative_spine_verify_set": "pass" if len(verify_matches) == 1 else "fail",
+        "spine_verify_commands_present": "pass" if any(cmd == "./bin/ops verify --spine" for row in verify_sets for cmd in row["canonical_commands"]) and any(cmd == "./bin/ops cap run verify.run -- spine" for row in verify_sets for cmd in row["canonical_commands"]) else "fail",
         "entry_chain_live_only": "pass" if all(entry_lookup.get(sid, {}).get("authority_class") not in {"historical", "residue"} for sid in entry_chain) else "fail",
         "generated_surfaces_regenerable": "pass" if not [row for row in surfaces if (row["surface_id"] == "spine_surface_manifest_yaml" or (row["authority_class"] in {"authoritative", "supporting"} and row["surface_kind"] == "generated_projection")) and not (row["regenerated_by"]["surface_id"] or row["regenerated_by"]["command"])] else "fail",
         "gap_friction_not_work_container": "pass" if family_map.get("gap", {}).get("container_role") != "work_container" and family_map.get("friction", {}).get("container_role") != "work_container" else "fail",
@@ -527,7 +534,7 @@ def validate_manifest(data: dict[str, Any]) -> dict[str, Any]:
         "relation_count": len(data["relations"]),
         "issues": issues,
         "coverage_mode": "curated_spine_core_v1",
-        "coverage_note": "This manifest is spine-scope only and intentionally excludes domain workload surfaces outside current packet scope.",
+        "coverage_note": "This manifest is spine-scope only and intentionally excludes domain workload surfaces outside current packet scope. Spine-only verify is curated and classification-backed.",
     }
 
 
@@ -551,7 +558,9 @@ def build_markdown(data: dict[str, Any]) -> str:
     lines.extend(["", "## Verify Sets"])
     for row in data["verify_sets"]:
         cmd_text = ", ".join(f"`{cmd}`" for cmd in row["canonical_commands"])
-        lines.append(f"- `{row['verify_set_id']}`: authoritative=`{str(row['authoritative']).lower()}` commands={cmd_text}")
+        excludes_text = ", ".join(f"`{item}`" for item in row["excludes"])
+        lines.append(f"- `{row['verify_set_id']}`: authoritative=`{str(row['authoritative']).lower()}` source=`{row['source_of_truth']}` commands={cmd_text}")
+        lines.append(f"  - excludes: {excludes_text}")
     lines.extend(["", "## Surface Inventory"])
     for row in data["surfaces"]:
         lines.append(f"- `{row['surface_id']}`: `{row['authority_class']}` / `{row['surface_kind']}` / `{row['lifecycle_state']}` / `{row['path']}`")
