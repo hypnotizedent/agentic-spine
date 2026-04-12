@@ -564,11 +564,49 @@ def build_markdown(data: dict[str, Any]) -> str:
     lines.extend(["", "## Surface Inventory"])
     for row in data["surfaces"]:
         lines.append(f"- `{row['surface_id']}`: `{row['authority_class']}` / `{row['surface_kind']}` / `{row['lifecycle_state']}` / `{row['path']}`")
+    parity = data.get("parity_surfaces", {})
+    if parity:
+        lines.extend(["", "## Parity Surfaces"])
+        xref = parity.get("capability_gate_cross_reference", {})
+        if xref:
+            lines.append(f"- capability_gate_cross_reference: `{xref.get('authority_home', '')}` field=`{xref.get('field_name', '')}`")
+        vocab = parity.get("capability_domain_vocabulary", {})
+        if vocab:
+            lines.append(f"- capability_domain_vocabulary: `{vocab.get('authority_home', '')}` enforcement=`{vocab.get('enforcement_surface', '')}`")
+        coherence = parity.get("binding_coherence_surfaces", {})
+        if coherence:
+            lines.append(f"- binding_coherence: `{coherence.get('primary', '')}`")
+            for v in coherence.get("validates", []):
+                lines.append(f"  - validates: {v}")
     validation = data["validation"]
     lines.extend(["", "## Validation", f"- Status: `{validation['status']}`", f"- Surface count: `{validation['surface_count']}`", f"- Workflow family count: `{validation['workflow_family_count']}`", f"- Relation count: `{validation['relation_count']}`"])
     for issue in validation["issues"]:
         lines.append(f"- Issue: {issue}")
     return "\n".join(lines) + "\n"
+
+
+def build_parity_surfaces() -> dict[str, Any]:
+    """Capability-gate parity and domain vocabulary cross-reference surfaces."""
+    return {
+        "capability_gate_cross_reference": {
+            "authority_home": "ops/bindings/gate.registry.yaml",
+            "field_name": "capability_refs",
+            "meaning": "capability IDs that directly enforce, own, or implement the gate concern",
+            "reciprocal_in_capabilities": False,
+        },
+        "capability_domain_vocabulary": {
+            "authority_home": "ops/bindings/capability.domain.catalog.yaml",
+            "enforcement_surface": "ops/plugins/core/authority/bin/capability-register",
+        },
+        "binding_coherence_surfaces": {
+            "primary": "ops/plugins/core/verify/bin/verify-binding-coherence",
+            "validates": [
+                "binding contract capability refs against capabilities.yaml",
+                "gate capability_refs against capabilities.yaml",
+                "capability domain normalization against capability.domain.catalog.yaml",
+            ],
+        },
+    }
 
 
 def build_manifest(root: Path, *, generated_at_utc: str) -> dict[str, Any]:
@@ -588,6 +626,7 @@ def build_manifest(root: Path, *, generated_at_utc: str) -> dict[str, Any]:
         "surfaces": build_surfaces(root, state, runtime, evidence),
         "verify_sets": build_verify_sets(root),
         "relations": build_relations(),
+        "parity_surfaces": build_parity_surfaces(),
         "validation": {},
     }
     manifest["validation"] = validate_manifest(manifest)

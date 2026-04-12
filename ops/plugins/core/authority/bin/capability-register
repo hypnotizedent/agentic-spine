@@ -120,6 +120,19 @@ if [[ -n "$ARG_PROTOCOL" ]]; then
   esac
 fi
 
+# --- domain catalog validation ---
+DOMAIN_CATALOG="$ROOT/ops/bindings/capability.domain.catalog.yaml"
+if [[ "$DOMAIN" != "none" ]]; then
+  [[ -f "$DOMAIN_CATALOG" ]] || fail "missing domain catalog: $DOMAIN_CATALOG"
+  valid_domains="$(yq e '.domains[].domain_id' "$DOMAIN_CATALOG" 2>/dev/null)" || fail "unable to parse domain catalog"
+  if ! echo "$valid_domains" | grep -qxF "$DOMAIN"; then
+    echo "capability.register FAIL: unknown domain '$DOMAIN'" >&2
+    echo "Valid domains:" >&2
+    echo "$valid_domains" | sed 's/^/  - /' >&2
+    exit 1
+  fi
+fi
+
 if [[ "$LANE_SAFE" -eq 1 ]]; then
   [[ -n "$LOOP_ID" ]] || fail "--lane-safe requires --loop-id or SPINE_LOOP_ID context"
   source "$ROOT/ops/lib/runtime-paths.sh"
