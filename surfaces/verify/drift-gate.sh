@@ -735,12 +735,40 @@ if [[ -x "$SP/surfaces/verify/d127-domain-assignment-drift-lock.sh" ]]; then
 else
   warn "domain assignment drift lock gate not present"
 fi
+CURRENT_GATE="D148"
+echo -n "D148 MCP agent runtime binding lock... "
+if [[ -x "$SP/surfaces/verify/d148-mcp-agent-runtime-binding-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d148-mcp-agent-runtime-binding-lock.sh" "D148"
+else
+  warn "MCP agent runtime binding lock gate not present"
+fi
+CURRENT_GATE="D153"
+echo -n "D153 Project attach parity... "
+if [[ -x "$SP/surfaces/verify/d153-project-attach-parity.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d153-project-attach-parity.sh" "D153"
+else
+  warn "project attach parity gate not present"
+fi
 CURRENT_GATE="D398"
 echo -n "D398 Repo-local evidence write target lock... "
 if [[ -x "$SP/surfaces/verify/d398-repo-local-evidence-write-target-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d398-repo-local-evidence-write-target-lock.sh" "D398"
 else
   warn "repo-local evidence write target lock gate not present"
+fi
+CURRENT_GATE="D416"
+echo -n "D416 Launchd topology integrity lock... "
+if [[ -x "$SP/surfaces/verify/d416-launchd-topology-integrity-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d416-launchd-topology-integrity-lock.sh" "D416"
+else
+  warn "launchd topology integrity lock gate not present"
+fi
+CURRENT_GATE="D428"
+echo -n "D428 Extraction truth parity... "
+if [[ -x "$SP/surfaces/verify/d428-extraction-truth-parity.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d428-extraction-truth-parity.sh" "D428"
+else
+  warn "extraction truth parity gate not present"
 fi
 
 echo
