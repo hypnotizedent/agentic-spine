@@ -8,7 +8,6 @@ DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
 VALIDATE="$ROOT/ops/plugins/core/verify/bin/gate-topology-validate"
 LOCK_HELD=0
 TMP_TOPOLOGY=""
-TMP_PROFILES=""
 
 source "$ROOT/ops/lib/git-lock.sh"
 source "$ROOT/ops/lib/governed-write-transaction.sh"
@@ -32,7 +31,7 @@ cleanup() {
     release_git_lock || true
   fi
   spine_tx_cleanup
-  rm -f "${TMP_TOPOLOGY:-}" "${TMP_PROFILES:-}"
+  rm -f "${TMP_TOPOLOGY:-}"
   return 0
 }
 
@@ -111,10 +110,9 @@ if [[ -n "$SECONDARY_DOMAINS" ]]; then
 fi
 
 TMP_TOPOLOGY="$(mktemp)"
-TMP_PROFILES="$(mktemp)"
 STAMP="$(date +%Y-%m-%d)"
 
-python3 - "$TOPOLOGY" "$DOMAIN_PROFILES" "$TMP_TOPOLOGY" "$TMP_PROFILES" "$GATE_ID" "$PRIMARY_DOMAIN" "$SECONDARY_JSON" "$FAMILY" "$STAMP" <<'PY'
+python3 - "$TOPOLOGY" "$TMP_TOPOLOGY" "$GATE_ID" "$PRIMARY_DOMAIN" "$SECONDARY_JSON" "$FAMILY" "$STAMP" <<'PY'
 from __future__ import annotations
 
 import collections
@@ -126,14 +124,12 @@ import yaml
 
 
 topology_path = Path(sys.argv[1])
-profiles_path = Path(sys.argv[2])
-topology_out = Path(sys.argv[3])
-profiles_out = Path(sys.argv[4])
-gate_id = sys.argv[5]
-primary_domain = sys.argv[6]
-secondary_domains = json.loads(sys.argv[7])
-family = sys.argv[8]
-stamp = sys.argv[9]
+topology_out = Path(sys.argv[2])
+gate_id = sys.argv[3]
+primary_domain = sys.argv[4]
+secondary_domains = json.loads(sys.argv[5])
+family = sys.argv[6]
+stamp = sys.argv[7]
 
 
 def load_yaml(path: Path) -> dict:
@@ -151,16 +147,12 @@ def gate_sort_key(value: str) -> tuple[int, str]:
 
 
 topology = load_yaml(topology_path)
-profiles = load_yaml(profiles_path)
 
 domain_metadata = topology.get("domain_metadata") or []
-profile_domains = profiles.get("domains") or {}
 
 valid_domains = {row.get("domain_id") for row in domain_metadata if isinstance(row, dict)}
 if primary_domain not in valid_domains:
     raise SystemExit(f"unknown topology domain: {primary_domain}")
-if primary_domain not in profile_domains:
-    raise SystemExit(f"unknown profile domain: {primary_domain}")
 
 normalized_secondaries = []
 seen = set()
@@ -211,19 +203,7 @@ for row in domain_metadata:
     domain_id = row.get("domain_id")
     row["gate_count"] = int(primary_counts.get(domain_id, 0))
 
-for domain_id, domain_cfg in profile_domains.items():
-    if not isinstance(domain_cfg, dict):
-        continue
-    gate_ids = [str(item) for item in (domain_cfg.get("gate_ids") or []) if str(item).strip() and str(item) != gate_id]
-    if domain_id == primary_domain:
-        gate_ids.append(gate_id)
-    gate_ids = sorted(set(gate_ids), key=gate_sort_key)
-    domain_cfg["gate_ids"] = gate_ids
-
-profiles["updated_at"] = f"{stamp}T00:00:00Z"
-
 topology_out.write_text(yaml.safe_dump(topology, sort_keys=False, allow_unicode=False), encoding="utf-8")
-profiles_out.write_text(yaml.safe_dump(profiles, sort_keys=False, allow_unicode=False), encoding="utf-8")
 PY
 
 if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
@@ -238,7 +218,7 @@ spine_tx_track "$DOMAIN_PROFILES"
 
 if ! {
   cp "$TMP_TOPOLOGY" "$TOPOLOGY"
-  cp "$TMP_PROFILES" "$DOMAIN_PROFILES"
+  python3 "$ROOT/ops/plugins/core/authority/bin/gate-topology-projection-build"
   "$VALIDATE" >/dev/null
 }; then
   spine_tx_rollback

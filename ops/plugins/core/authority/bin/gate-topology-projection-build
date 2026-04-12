@@ -34,6 +34,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[5]
 REGISTRY_PATH = ROOT / "ops/bindings/gate.registry.yaml"
 TOPOLOGY_PATH = ROOT / "ops/bindings/gate.execution.topology.yaml"
+PROFILES_PATH = ROOT / "ops/bindings/gate.domain.profiles.yaml"
 
 # Category-to-domain heuristic for gates that have no existing assignment.
 # Derived from established patterns in the existing topology.
@@ -221,6 +222,49 @@ def prune_core_gate_ids(
     return [gid for gid in core_gate_ids if gid in active_gates]
 
 
+def project_profile_gate_ids(
+    assignments: list[dict[str, Any]],
+    profiles: dict[str, Any],
+) -> dict[str, Any]:
+    """Compute projected gate_ids for each domain profile from topology assignments.
+
+    For each domain, collect all gate_ids where the domain is primary or secondary.
+    Sort numerically (D-prefix natural sort). Replace the domain's gate_ids list.
+    Preserve all other profile fields.
+    """
+    result = copy.deepcopy(profiles)
+    domains = result.get("domains")
+    if not isinstance(domains, dict):
+        return result
+
+    # Build domain -> set of gate_ids from assignments
+    domain_gates: dict[str, set[str]] = {}
+    for entry in assignments:
+        gid = str(entry.get("gate_id") or "")
+        if not gid:
+            continue
+        primary = str(entry.get("primary_domain") or "")
+        if primary:
+            domain_gates.setdefault(primary, set()).add(gid)
+        for sec in ensure_list(entry.get("secondary_domains")):
+            sec = str(sec).strip()
+            if sec:
+                domain_gates.setdefault(sec, set()).add(gid)
+
+    for domain_id, domain_cfg in domains.items():
+        if not isinstance(domain_cfg, dict):
+            continue
+        projected = sorted(domain_gates.get(domain_id, set()), key=gate_sort_key)
+        domain_cfg["gate_ids"] = projected
+
+    result["updated_at"] = now_utc_iso()
+    return result
+
+
+def render_profiles(data: dict[str, Any]) -> str:
+    return yaml_dump(data)
+
+
 def build_topology(
     topology: dict[str, Any],
     registry: dict[str, Any],
@@ -285,10 +329,10 @@ def render_topology(data: dict[str, Any]) -> str:
 
 def check_matches(path: Path, expected: str) -> None:
     if not path.is_file():
-        fail(f"missing topology: {rel(path)}")
+        fail(f"missing file: {rel(path)}")
     actual = path.read_text(encoding="utf-8")
     if actual != expected:
-        fail(f"topology drift: {rel(path)} (run gate.topology.projection.build to update)")
+        fail(f"projection drift: {rel(path)} (run gate.topology.projection.build to update)")
 
 
 def write_text(path: Path, text: str) -> None:
@@ -299,9 +343,15 @@ def main() -> None:
     args = parse_args()
     registry = load_yaml(REGISTRY_PATH)
     topology = load_yaml(TOPOLOGY_PATH)
+    profiles = load_yaml(PROFILES_PATH)
 
     projected = build_topology(topology, registry)
     rendered = render_topology(projected)
+
+    projected_profiles = project_profile_gate_ids(
+        projected["gate_assignments"], profiles
+    )
+    rendered_profiles = render_profiles(projected_profiles)
 
     active_gates = build_active_gate_set(registry)
     existing_assignments = build_existing_assignments(topology)
@@ -318,13 +368,16 @@ def main() -> None:
 
     if args.check:
         check_matches(TOPOLOGY_PATH, rendered)
+        check_matches(PROFILES_PATH, rendered_profiles)
         print("gate.topology.projection.build --check PASS (no drift)")
     else:
         write_text(TOPOLOGY_PATH, rendered)
+        write_text(PROFILES_PATH, rendered_profiles)
         print("gate.topology.projection.build")
         print("status: OK")
         print(f"authority: {rel(REGISTRY_PATH)}")
         print(f"projected: {rel(TOPOLOGY_PATH)}")
+        print(f"projected: {rel(PROFILES_PATH)}")
 
     print(f"active_gates: {len(active_gates)}")
     print(f"assigned_gates: {len(projected['gate_assignments'])}")

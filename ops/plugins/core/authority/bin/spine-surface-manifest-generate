@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import importlib.util
 import os
 import subprocess
 import sys
@@ -15,6 +16,7 @@ import yaml
 
 
 MANIFEST_ID = "SPINE_SURFACE_MANIFEST"
+VTM_MANIFEST_ID = "SPINE_VERIFY_TARGET_MANIFEST"
 GENERATOR_SURFACE_ID = "spine_surface_manifest_generate"
 VERIFY_SET_ID = "spine_scope"
 VERIFY_COMMAND_SURFACE_ID = "verify_command"
@@ -609,10 +611,115 @@ def build_parity_surfaces() -> dict[str, Any]:
     }
 
 
+def _load_verify_target_helper(root: Path) -> Any | None:
+    """Import the verify target manifest helper if available."""
+    helper_path = root / "ops/plugins/core/verify/lib/spine_verify_target_manifest.py"
+    if not helper_path.is_file():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "spine_verify_target_manifest", str(helper_path),
+        )
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+def build_verify_target_data(root: Path) -> dict[str, Any] | None:
+    """Build verify target manifest data using the helper, or None if unavailable."""
+    mod = _load_verify_target_helper(root)
+    if mod is None:
+        return None
+    try:
+        return mod.build_manifest()  # type: ignore[no-any-return]
+    except Exception:
+        return None
+
+
+def build_verify_target_markdown(data: dict[str, Any]) -> str:
+    """Render the verify target manifest as human-readable markdown."""
+    lines = [
+        f"# {VTM_MANIFEST_ID}",
+        "",
+        f"- Scope: `{data.get('scope', '')}`",
+        f"- Status: `{data.get('status', '')}`",
+        f"- Generated: `{data.get('generated_at_utc', '')}`",
+        f"- Commit: `{data.get('authoritative_as_of_commit', '')}`",
+        f"- Generator surface: `{data.get('generator_surface', '')}`",
+    ]
+
+    targets = data.get("targets")
+    if isinstance(targets, list):
+        lines.extend(["", "## Targets"])
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+            tid = target.get("target_id", "unknown")
+            lines.append(f"")
+            lines.append(f"### {tid}")
+            lines.append(f"- coverage_status: `{target.get('coverage_status', '')}`")
+            lines.append(f"- gate_ids: `{target.get('gate_ids', [])}`")
+            lines.append(f"- capability_ids: `{target.get('capability_ids', [])}`")
+            notes = target.get("coverage_notes", "")
+            if notes:
+                lines.append(f"- coverage_notes: {notes}")
+    elif isinstance(targets, dict):
+        lines.extend(["", "## Targets"])
+        for target_id, target_info in targets.items():
+            lines.append(f"")
+            lines.append(f"### {target_id}")
+            if isinstance(target_info, dict):
+                for key, value in target_info.items():
+                    lines.append(f"- {key}: `{value}`")
+
+    coverage = data.get("coverage_summary")
+    if isinstance(coverage, dict):
+        lines.extend(["", "## Coverage Summary"])
+        for key, value in coverage.items():
+            lines.append(f"- {key}: `{value}`")
+
+    executable = data.get("executable_spine_gate_ids")
+    if isinstance(executable, list) and executable:
+        lines.extend(["", "## Executable Spine Gate IDs"])
+        for gate_id in executable:
+            lines.append(f"- `{gate_id}`")
+
+    already_covered = data.get("already_covered_gate_ids")
+    if isinstance(already_covered, list) and already_covered:
+        lines.extend(["", "## Already Covered Gate IDs"])
+        for gate_id in already_covered:
+            lines.append(f"- `{gate_id}`")
+
+    unmapped_gates = data.get("unmapped_gate_ids")
+    if isinstance(unmapped_gates, list) and unmapped_gates:
+        lines.extend(["", "## Unmapped Gate IDs"])
+        for gate_id in unmapped_gates:
+            lines.append(f"- `{gate_id}`")
+
+    unmapped_caps = data.get("unmapped_capability_refs")
+    if isinstance(unmapped_caps, list) and unmapped_caps:
+        lines.extend(["", "## Unmapped Capability Refs"])
+        for cap_ref in unmapped_caps:
+            lines.append(f"- `{cap_ref}`")
+
+    issues = data.get("issues")
+    if isinstance(issues, list) and issues:
+        lines.extend(["", "## Issues"])
+        for issue in issues:
+            lines.append(f"- {issue}")
+
+    return "\n".join(lines) + "\n"
+
+
 def build_manifest(root: Path, *, generated_at_utc: str) -> dict[str, Any]:
     state = state_root(root)
     runtime = runtime_root(root)
     evidence = evidence_root(root)
+    domain_state = state / "domain-state"
     manifest = {
         "manifest_id": MANIFEST_ID,
         "scope": "spine_only",
@@ -627,6 +734,12 @@ def build_manifest(root: Path, *, generated_at_utc: str) -> dict[str, Any]:
         "verify_sets": build_verify_sets(root),
         "relations": build_relations(),
         "parity_surfaces": build_parity_surfaces(),
+        "verify_target_manifest": {
+            "yaml": str(domain_state / "SPINE_VERIFY_TARGET_MANIFEST.yaml"),
+            "markdown": str(domain_state / "SPINE_VERIFY_TARGET_MANIFEST.md"),
+            "generator_relationship": "emitted by spine.surface.manifest.generate",
+            "status": "authoritative_generated",
+        },
         "validation": {},
     }
     manifest["validation"] = validate_manifest(manifest)
@@ -643,22 +756,59 @@ def main() -> int:
     domain_state = state / "domain-state"
     manifest_path = domain_state / "SPINE_SURFACE_MANIFEST.yaml"
     projection_path = domain_state / "SPINE_SURFACE_MANIFEST.md"
+    vtm_yaml_path = domain_state / "SPINE_VERIFY_TARGET_MANIFEST.yaml"
+    vtm_md_path = domain_state / "SPINE_VERIFY_TARGET_MANIFEST.md"
 
-    manifest = build_manifest(root, generated_at_utc=existing_generated_at(manifest_path) or utc_now() if args.check else utc_now())
+    generated_at = existing_generated_at(manifest_path) or utc_now() if args.check else utc_now()
+    manifest = build_manifest(root, generated_at_utc=generated_at)
     yaml_out = yaml_text(manifest)
     md_out = build_markdown(manifest)
 
+    # Build verify target manifest (graceful skip if helper unavailable)
+    vtm_data = build_verify_target_data(root)
+    vtm_yaml_out: str | None = None
+    vtm_md_out: str | None = None
+    if vtm_data is not None:
+        vtm_data.pop("_hard_fail", None)
+        vtm_manifest: dict[str, Any] = {
+            "manifest_id": VTM_MANIFEST_ID,
+            "scope": "spine_only",
+            "status": "authoritative_generated",
+            "generated_at_utc": generated_at,
+            "authoritative_as_of_commit": repo_anchor(root),
+            "generator_surface": GENERATOR_SURFACE_ID,
+            **vtm_data,
+        }
+        vtm_yaml_out = yaml_text(vtm_manifest)
+        vtm_md_out = build_verify_target_markdown(vtm_manifest)
+
     if args.check:
+        fail = False
         if read_text(manifest_path) != yaml_out or read_text(projection_path) != md_out:
             print("spine.surface.manifest.generate FAIL: manifest drift", file=sys.stderr)
+            fail = True
+        if vtm_yaml_out is not None and vtm_md_out is not None:
+            if read_text(vtm_yaml_path) != vtm_yaml_out or read_text(vtm_md_path) != vtm_md_out:
+                print("spine.surface.manifest.generate FAIL: verify target manifest drift", file=sys.stderr)
+                fail = True
+        if fail:
             return 1
         print(f"spine.surface.manifest.generate PASS: {manifest_path}")
+        if vtm_yaml_out is not None:
+            print(f"spine.surface.manifest.generate PASS: {vtm_yaml_path}")
         return 0
 
     atomic_write(manifest_path, yaml_out)
     atomic_write(projection_path, md_out)
     print(f"spine.surface.manifest.generate PASS: {manifest_path}")
     print(f"spine.surface.manifest.generate PASS: {projection_path}")
+
+    if vtm_yaml_out is not None and vtm_md_out is not None:
+        atomic_write(vtm_yaml_path, vtm_yaml_out)
+        atomic_write(vtm_md_path, vtm_md_out)
+        print(f"spine.surface.manifest.generate PASS: {vtm_yaml_path}")
+        print(f"spine.surface.manifest.generate PASS: {vtm_md_path}")
+
     return 0
 
 
