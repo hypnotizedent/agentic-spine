@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Bridge an in-band agent result into a wave EXEC_RECEIPT artifact."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[5]
+
+
+def _state_paths(root: Path, wave_id: str) -> tuple[Path, Path]:
+    state_root = Path(os.environ.get("SPINE_STATE", root.parent / ".runtime" / "spine" / "state"))
+    waves_root = Path(os.environ.get("SPINE_RUNTIME_ROOT", state_root.parent / "runtime")).joinpath("waves")
+    wave_dir = waves_root / wave_id
+    return wave_dir / "state.json", wave_dir / "evidence"
+
+
+def _usage() -> str:
+    return (
+        "Usage: wave-emit-agent-receipt <WAVE_ID> --lane <lane>|--dispatch D<N> --result \"<text>\" "
+        "[--file-read <path>]... [--task-id <id>]"
+    )
+
+
+def _parse_args(argv: list[str]) -> tuple[str, str, str, str, list[str], str]:
+    wave_id = ""
+    lane = ""
+    dispatch_id = ""
+    result = ""
+    task_id_override = ""
+    file_reads: list[str] = []
+    args = list(argv[1:])
+    while args:
+        token = args.pop(0)
+        if token == "--lane":
+            lane = args.pop(0)
+        elif token == "--dispatch":
+            dispatch_id = args.pop(0)
+        elif token == "--result":
+            result = args.pop(0)
+        elif token == "--file-read":
+            file_reads.append(args.pop(0))
+        elif token == "--task-id":
+            task_id_override = args.pop(0)
+        elif token.startswith("-"):
+            raise SystemExit(f"Unknown flag: {token}")
+        elif not wave_id:
+            wave_id = token
+        else:
+            raise SystemExit(f"Unexpected extra argument: {token}")
+    if not wave_id:
+        raise SystemExit(_usage())
+    if not lane and not dispatch_id:
+        raise SystemExit("ERROR: --lane <lane> or --dispatch D<N> is required.")
+    return wave_id, lane, dispatch_id, result, file_reads, task_id_override
+
+
+def main(argv: list[str]) -> int:
+    try:
+        wave_id, lane, dispatch_id, result, file_reads, task_id_override = _parse_args(argv)
+    except IndexError:
+        print("ERROR: missing value for flag", file=sys.stderr)
+        return 1
+    except SystemExit as exc:
+        message = str(exc)
+        print(message, file=sys.stderr)
+        return 1
+
+    root = _repo_root()
+    state_file, evidence_dir = _state_paths(root, wave_id)
+    if not state_file.is_file():
+        print(f"Wave '{wave_id}' does not exist. Create with: ops wave start {wave_id} --objective \"...\"", file=sys.stderr)
+        return 1
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    dispatches = state.get("dispatches", [])
+    if not isinstance(dispatches, list) or not dispatches:
+        print("ERROR: wave has no dispatches", file=sys.stderr)
+        return 1
+
+    selected = None
+    if dispatch_id and dispatch_id.startswith("D"):
+        try:
+            index = int(dispatch_id[1:]) - 1
+        except ValueError:
+            index = -1
+        if 0 <= index < len(dispatches):
+            selected = dispatches[index]
+    elif lane:
+        for dispatch in dispatches:
+            if dispatch.get("lane") == lane:
+                selected = dispatch
+        if selected is None:
+            print(f"ERROR: no dispatch found on lane '{lane}'", file=sys.stderr)
+            return 1
+
+    if selected is None:
+        print(f"ERROR: dispatch {dispatch_id} not found", file=sys.stderr)
+        return 1
+
+    task_id = task_id_override.strip() or str(selected.get("task_id") or "").strip()
+    if not task_id:
+        print("ERROR: unable to resolve task_id from dispatch; pass --task-id", file=sys.stderr)
+        return 1
+
+    selected_lane = str(selected.get("lane") or lane or "execution").strip()
+    terminal_id = (
+        os.environ.get("OPS_TERMINAL_ROLE")
+        or os.environ.get("SPINE_TERMINAL_ROLE")
+        or os.environ.get("SPINE_TERMINAL_NAME")
+        or os.environ.get("SPINE_TERMINAL_ID")
+        or "SPINE-CONTROL-01"
+    )
+    receipt = {
+        "task_id": task_id,
+        "terminal_id": terminal_id,
+        "lane": selected_lane,
+        "status": "done",
+        "files_changed": [],
+        "run_keys": [],
+        "blockers": [],
+        "ready_for_verify": True,
+        "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "wave_id": wave_id,
+        "evidence_refs": {
+            "run_key_refs": [],
+            "file_refs": [path for path in file_reads if path.strip()],
+            "commit_refs": [],
+            "blocker_class": "none",
+        },
+    }
+
+    receipt_path = evidence_dir / f"{task_id}.exec_receipt.json"
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+
+    validator = root / "ops" / "plugins" / "core" / "orchestration" / "bin" / "wave-receipt-validate"
+    subprocess.run([str(validator), str(receipt_path)], check=True)
+
+    print(f"Emitted agent-bridged EXEC_RECEIPT: {receipt_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
