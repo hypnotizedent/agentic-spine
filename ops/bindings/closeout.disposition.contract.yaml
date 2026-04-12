@@ -1,0 +1,80 @@
+# Closeout Disposition Contract
+# Status: authoritative
+# Last verified: 2026-04-12
+# Scope: terminal closeout outcomes for loops and waves
+
+version: "1.1"
+updated: "2026-04-12"
+owner: "@ronny"
+scope: closeout-disposition
+
+terminal_dispositions:
+  allowed:
+    - landed
+    - deferred
+    - superseded
+    - abandoned
+
+enforcement:
+  require_on_loop_close: true
+  require_on_wave_close: true
+  fail_worktree_reconcile_when_closed_owner_missing_disposition: true
+  fail_worktree_reconcile_when_closed_owner_invalid_disposition: true
+
+messages:
+  missing: "Closed work must declare disposition: landed|deferred|superseded|abandoned."
+  invalid: "Disposition must be one of: landed|deferred|superseded|abandoned."
+
+semantics:
+  landed: "Changes became shared truth and runtime, control plane, bindings/projections, and residue retirement all agree. If any propagation surface is incomplete, use deferred with a note, not landed."
+  deferred: "Work was intentionally parked to a future loop, wave, or backlog item."
+  superseded: "This unit of work was replaced by a newer canonical path."
+  abandoned: "Work was intentionally stopped and should not be resumed without a new loop or wave."
+
+propagation_guidance:
+  landed_requires:
+    - "Runtime reflects the change (services, containers, hosts)"
+    - "Control plane reflects the change (bindings, contracts, SSOT docs)"
+    - "Projections reflect the change (docs, dashboards, gate registry)"
+    - "Residue is retired (stale branches, worktrees, exports, mounts)"
+  rule: "If code changed but runtime or control plane did not, the disposition is deferred, not landed."
+
+completion_levels:
+  allowed:
+    - slice_complete
+    - loop_complete
+    - domain_complete
+    - estate_complete
+    - readiness_complete
+
+  definitions:
+    slice_complete:
+      meaning: "One bounded execution slice landed and its claimed proof passed."
+      what_it_is_not: "Does not mean the owning loop, domain, or estate is complete."
+    loop_complete:
+      meaning: "The owning loop's planned slices are complete and its linked drift is resolved or explicitly dispositioned."
+      what_it_is_not: "Does not mean the whole domain or estate is complete."
+    domain_complete:
+      meaning: "All known work in one domain agrees across runtime, control plane, and projections."
+      what_it_is_not: "Does not mean other domains or the estate are complete."
+    estate_complete:
+      meaning: "Cross-domain control plane, runtime, and projection truth are aligned for the whole estate slice being claimed."
+      what_it_is_not: "Does not mean the estate is ready for the next irreversible action."
+    readiness_complete:
+      meaning: "A readiness claim is proven for the next irreversible step or declared steady state."
+      what_it_is_not: "Does not allow a slice proof to over-claim estate readiness."
+
+  enforcement:
+    require_on_landed: true
+    require_on_deferred: false
+    require_on_superseded: false
+    require_on_abandoned: false
+    fail_closeout_when_missing: true
+    message: "disposition: landed requires completion_level. Declare: slice_complete|loop_complete|domain_complete|estate_complete|readiness_complete"
+
+plan_transition_mapping:
+  landed: completed
+  deferred: pending
+  superseded: completed
+  abandoned: blocked
+  rule: "plan_transition status must reflect close disposition semantics instead of collapsing every non-landed close to blocked."

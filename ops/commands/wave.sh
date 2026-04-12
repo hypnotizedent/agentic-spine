@@ -14,7 +14,7 @@
 #   ops wave dispatch <WAVE_ID> --lane <lane> --task "<text>" [--from-role <role>] [--to-role <role>] [--input-refs "k=v,..."] [--output-refs "k=v,..."]
 #   ops wave collect <WAVE_ID>
 #   ops wave status [WAVE_ID]
-#   ops wave close <WAVE_ID> --disposition <state>
+#   ops wave close <WAVE_ID> --disposition <state> [--completion-level <level>]
 #   ops wave preflight <domain>
 #   ops wave receipt-validate <path>
 #
@@ -247,6 +247,53 @@ require_close_disposition() {
 
   echo "ERROR: $invalid_msg" >&2
   exit 1
+}
+
+close_completion_levels_csv() {
+  local accum=""
+  local level=""
+
+  if command -v yq >/dev/null 2>&1 && [[ -f "$DISPOSITION_CONTRACT" ]]; then
+    while IFS= read -r level; do
+      [[ -n "$level" && "$level" != "null" ]] || continue
+      if [[ -n "$accum" ]]; then
+        accum+=",$level"
+      else
+        accum="$level"
+      fi
+    done < <(yq e -r '.completion_levels.allowed[]?' "$DISPOSITION_CONTRACT" 2>/dev/null || true)
+  fi
+
+  printf '%s\n' "$accum"
+}
+
+require_close_completion_level() {
+  local disposition="${1:-}"
+  local completion_level="${2:-}"
+  local allowed_csv="${3:-$(close_completion_levels_csv)}"
+  local require_on_landed="false"
+  local message="disposition: landed requires completion_level."
+  local item=""
+
+  if command -v yq >/dev/null 2>&1 && [[ -f "$DISPOSITION_CONTRACT" ]]; then
+    require_on_landed="$(yq e -r '.completion_levels.enforcement.require_on_landed // false' "$DISPOSITION_CONTRACT" 2>/dev/null || echo false)"
+    message="$(yq e -r '.completion_levels.enforcement.message // ""' "$DISPOSITION_CONTRACT" 2>/dev/null || echo "$message")"
+    [[ -n "$message" && "$message" != "null" ]] || message="disposition: landed requires completion_level."
+  fi
+
+  if [[ "$disposition" == "landed" && "$require_on_landed" == "true" && -z "$completion_level" ]]; then
+    echo "ERROR: $message" >&2
+    exit 1
+  fi
+
+  if [[ -n "$completion_level" && -n "$allowed_csv" ]]; then
+    IFS=',' read -r -a _allowed_levels <<< "$allowed_csv"
+    for item in "${_allowed_levels[@]}"; do
+      [[ "$completion_level" == "$item" ]] && return 0
+    done
+    echo "ERROR: completion_level must be one of: ${allowed_csv//,/|}." >&2
+    exit 1
+  fi
 }
 
 sync_runtime_traffic_index() {
@@ -766,7 +813,7 @@ Usage:
   ops wave status [WAVE_ID]                          Show wave status (or all)
   ops wave claims-reconcile [--wave-id <WAVE_ID>] [--json]
                                                     Reconcile stale path claims against TTL and live wave state
-  ops wave close <WAVE_ID> --disposition <state> [--force] [--dod-override "<reason>"] [--lock-override "<reason>"]  Close a wave
+  ops wave close <WAVE_ID> --disposition <state> [--completion-level <level>] [--force] [--dod-override "<reason>"] [--lock-override "<reason>"]  Close a wave
   ops wave preflight <domain>                        Fast non-blocking preflight
   ops wave receipt-validate <path>                   Validate EXEC_RECEIPT JSON
   ops wave emit-agent-receipt <WAVE_ID> --lane <L>|--dispatch D<N> --result "<text>" [--file-read <p>]... [--task-id <id>]
@@ -4877,7 +4924,9 @@ cmd_close_v2() {
   local dod_override_reason=""
   local lock_override_reason=""
   local disposition=""
+  local completion_level=""
   local allowed_dispositions_csv=""
+  local allowed_completion_levels_csv=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -4911,6 +4960,14 @@ cmd_close_v2() {
         disposition="${2:-}"
         shift 2
         ;;
+      --completion-level)
+        if [[ $# -lt 2 || -z "${2:-}" ]]; then
+          echo "ERROR: --completion-level requires a non-empty value" >&2
+          exit 1
+        fi
+        completion_level="${2:-}"
+        shift 2
+        ;;
       --dod-override)
         if [[ $# -lt 2 || -z "${2:-}" ]]; then
           echo "ERROR: --dod-override requires a non-empty reason" >&2
@@ -4933,11 +4990,13 @@ cmd_close_v2() {
   done
 
   if [[ -z "$wave_id" ]]; then
-    echo "Usage: ops wave close <WAVE_ID> --disposition <state> [--force] [--controller-only --verify-receipt <receipt> --fixed-in <sha>] [--dod-override \"<reason>\"] [--lock-override \"<reason>\"]" >&2
+    echo "Usage: ops wave close <WAVE_ID> --disposition <state> [--completion-level <level>] [--force] [--controller-only --verify-receipt <receipt> --fixed-in <sha>] [--dod-override \"<reason>\"] [--lock-override \"<reason>\"]" >&2
     exit 1
   fi
   allowed_dispositions_csv="$(close_dispositions_csv)"
+  allowed_completion_levels_csv="$(close_completion_levels_csv)"
   require_close_disposition "$disposition" "$allowed_dispositions_csv"
+  require_close_completion_level "$disposition" "$completion_level" "$allowed_completion_levels_csv"
 
   ensure_wave_exists "$wave_id"
   wave_lock_guard "$wave_id" "close" "$lock_override_reason"
@@ -4949,7 +5008,7 @@ cmd_close_v2() {
   WAVE_CLOSE_CONTROLLER_ONLY="$controller_only" \
   WAVE_CLOSE_VERIFY_RECEIPT="$controller_verify_receipt" \
   WAVE_CLOSE_FIXED_IN="$fixed_in" \
-  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" "$dod_override_reason" "$lock_override_reason" "$disposition" "$allowed_dispositions_csv" "$(wave_allowed_lanes_csv)" <<'PYCLOSE2'
+  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" "$dod_override_reason" "$lock_override_reason" "$disposition" "$allowed_dispositions_csv" "$(wave_allowed_lanes_csv)" "$DISPOSITION_CONTRACT" "$completion_level" <<'PYCLOSE2'
 import json, sys, os, re, fcntl, subprocess
 from datetime import datetime, timezone
 
@@ -4959,6 +5018,10 @@ if _lifecycle_lib and os.path.isdir(_lifecycle_lib):
     sys.path.insert(0, _lifecycle_lib)
 
 import wave_close_validator as wcv
+try:
+    import yaml
+except Exception:
+    yaml = None
 
 sf = sys.argv[1]
 sd = sys.argv[2]
@@ -4974,6 +5037,8 @@ allowed_lanes = {
     for item in (sys.argv[10] if len(sys.argv) > 10 else "control,execution,audit,watcher").split(",")
     if item.strip()
 } or {"control", "execution", "audit", "watcher"}
+disposition_contract_path = sys.argv[11] if len(sys.argv) > 11 else ""
+completion_level = (sys.argv[12] if len(sys.argv) > 12 else "").strip()
 controller_only = os.environ.get("WAVE_CLOSE_CONTROLLER_ONLY", "").strip().lower() == "true"
 controller_verify_receipt = os.environ.get("WAVE_CLOSE_VERIFY_RECEIPT", "").strip()
 fixed_in = os.environ.get("WAVE_CLOSE_FIXED_IN", "").strip()
@@ -5146,6 +5211,26 @@ def _validate_verify_receipt(path_value: str):
             "warn": int(wrapper.get("warn", 0) or 0),
         },
     }, None
+
+
+def _plan_transition_status(disposition_value: str) -> str:
+    mapping = {
+        "landed": "completed",
+        "deferred": "pending",
+        "superseded": "completed",
+        "abandoned": "blocked",
+    }
+    if yaml is not None and disposition_contract_path and os.path.exists(disposition_contract_path):
+        try:
+            contract = yaml.safe_load(open(disposition_contract_path, "r", encoding="utf-8")) or {}
+            scoped = contract.get("plan_transition_mapping") if isinstance(contract, dict) else {}
+            if isinstance(scoped, dict):
+                candidate = str(scoped.get(disposition_value, "")).strip()
+                if candidate in {"pending", "completed", "blocked"}:
+                    return candidate
+        except Exception:
+            pass
+    return mapping.get(disposition_value, "blocked")
 
 
 def _worktree_cleanup_blockers(wave_id: str, workspace: dict):
@@ -5509,6 +5594,8 @@ try:
     state["status"] = "closed"
     state["closed_at"] = now
     state["disposition"] = disposition
+    if completion_level:
+        state["completion_level"] = completion_level
     state["force_closed"] = gate.force_used
     state["dod_overridden"] = gate.dod_overridden
     state["dod_override_reason"] = dod_override_reason if gate.dod_overridden else ""
@@ -5788,11 +5875,14 @@ try:
 
             # Derive plan_transition
             _plan_tx = {
-                "status": "completed" if disposition == "landed" else "blocked",
+                "status": _plan_transition_status(disposition),
                 "updated_at_utc": now,
                 "run_key": run_keys[0] if run_keys else "",
                 "evidence_ref": close_receipt_path,
+                "disposition": disposition,
             }
+            if completion_level:
+                _plan_tx["completion_level"] = completion_level
 
             # Derive lane_outcomes upgrade
             _lane_outcomes = []

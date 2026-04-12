@@ -5,7 +5,7 @@
 #
 # Usage:
 #   ops loops list [--open|--closed|--all]   List loops from scope files
-#   ops loops close <loop_id> --disposition <state>  Mark loop as closed (updates scope)
+#   ops loops close <loop_id> --disposition <state> [--completion-level <level>]  Mark loop as closed (updates scope)
 #   ops loops show <loop_id>                  Show loop scope file
 #   ops loops summary                         Show loop counts by status/severity
 #   ops loops collect                         (deprecated) Legacy receipt scanner
@@ -37,7 +37,7 @@ ops loops - Open Loop Engine (scope-file backed)
 
 Usage:
   ops loops list [--open|--closed|--all]   Raw loop-scope listing (default: open only)
-  ops loops close <loop_id> --disposition <state> [--close-summary "<text>"]
+  ops loops close <loop_id> --disposition <state> [--completion-level <level>] [--close-summary "<text>"]
                                            Mark loop as closed
   ops loops show <loop_id>                  Show loop scope file
   ops loops summary                         Show loop counts by status/severity
@@ -98,6 +98,54 @@ _require_close_disposition() {
 
     echo "ERROR: $invalid_msg" >&2
     exit 1
+}
+
+_completion_levels_csv() {
+    local csv=""
+    local accum=""
+    local level=""
+
+    if command -v yq >/dev/null 2>&1 && [[ -f "$DISPOSITION_CONTRACT" ]]; then
+        while IFS= read -r level; do
+            [[ -n "$level" && "$level" != "null" ]] || continue
+            if [[ -n "$accum" ]]; then
+                accum+=",$level"
+            else
+                accum="$level"
+            fi
+        done < <(yq e -r '.completion_levels.allowed[]?' "$DISPOSITION_CONTRACT" 2>/dev/null || true)
+    fi
+
+    printf '%s\n' "$accum"
+}
+
+_require_completion_level_if_needed() {
+    local disposition="${1:-}"
+    local completion_level="${2:-}"
+    local allowed_csv="${3:-$(_completion_levels_csv)}"
+    local require_on_landed="false"
+    local message="disposition: landed requires completion_level."
+    local item=""
+
+    if command -v yq >/dev/null 2>&1 && [[ -f "$DISPOSITION_CONTRACT" ]]; then
+        require_on_landed="$(yq e -r '.completion_levels.enforcement.require_on_landed // false' "$DISPOSITION_CONTRACT" 2>/dev/null || echo false)"
+        message="$(yq e -r '.completion_levels.enforcement.message // ""' "$DISPOSITION_CONTRACT" 2>/dev/null || echo "$message")"
+        [[ -n "$message" && "$message" != "null" ]] || message="disposition: landed requires completion_level."
+    fi
+
+    if [[ "$disposition" == "landed" && "$require_on_landed" == "true" && -z "$completion_level" ]]; then
+        echo "ERROR: $message" >&2
+        exit 1
+    fi
+
+    if [[ -n "$completion_level" && -n "$allowed_csv" ]]; then
+        IFS=',' read -r -a _allowed_levels <<< "$allowed_csv"
+        for item in "${_allowed_levels[@]}"; do
+            [[ "$completion_level" == "$item" ]] && return 0
+        done
+        echo "ERROR: completion_level must be one of: ${allowed_csv//,/|}." >&2
+        exit 1
+    fi
 }
 
 # ── Frontmatter helpers ───────────────────────────────────────────────────
@@ -354,6 +402,7 @@ show_loop() {
 close_loop() {
     local loop_id=""
     local disposition=""
+    local completion_level=""
     local close_summary=""
     local scope_file=""
     local tmp_file=""
@@ -367,6 +416,10 @@ close_loop() {
                 ;;
             --disposition)
                 disposition="${2:-}"
+                shift 2
+                ;;
+            --completion-level)
+                completion_level="${2:-}"
                 shift 2
                 ;;
             --close-summary)
@@ -389,9 +442,10 @@ close_loop() {
         esac
     done
 
-    [[ -n "$loop_id" ]] || { echo "Usage: ops loops close <loop_id> --disposition <state> [--close-summary \"<text>\"]" >&2; exit 1; }
+    [[ -n "$loop_id" ]] || { echo "Usage: ops loops close <loop_id> --disposition <state> [--completion-level <level>] [--close-summary \"<text>\"]" >&2; exit 1; }
     dispositions_csv="$(_close_dispositions_csv)"
     _require_close_disposition "$disposition" "$dispositions_csv"
+    _require_completion_level_if_needed "$disposition" "$completion_level"
 
     scope_file="$SCOPES_DIR/${loop_id}.scope.md"
     local archived_scope_file="$SCOPES_ARCHIVE_DIR/${loop_id}.scope.md"
@@ -434,6 +488,9 @@ close_loop() {
         "--actor" "loops.close"
         "--reason" "$bridge_reason"
     )
+    if [[ -n "$completion_level" ]]; then
+        bridge_close_args+=("--completion-level" "$completion_level")
+    fi
     if [[ -z "${SPINE_CAP_RUN_KEY:-}" ]]; then
         bridge_close_args+=("--ungoverned-override")
     fi
