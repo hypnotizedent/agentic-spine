@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Append-only mid-packet amendment writer for orchestration packet truth."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+sys.path.insert(0, str(LIB_DIR))
+
+try:
+    import yaml  # type: ignore
+except Exception:  # pragma: no cover
+    yaml = None
+
+import packet_closeout as packet_yaml_fallback
+
+
+ALLOWED_FIELDS = {
+    "wave_plan",
+    "subagent_allocation",
+    "worktree_mapping",
+    "integration_order",
+    "verification_sequence",
+    "cross_repo_pushability_gate",
+    "lane_outcomes",
+    "stub_matrix",
+    "plan_transition",
+}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def resolve_packet_path(loop_id: str, packet_path: str | None) -> Path:
+    if packet_path:
+        return Path(packet_path).expanduser().resolve()
+    state_root = Path(
+        os.environ.get("SPINE_STATE", "")
+        or Path.home() / "code" / ".runtime" / "spine" / "state"
+    )
+    return state_root / "orchestration" / loop_id / "packet.yaml"
+
+
+def load_packet(path: Path) -> dict[str, Any]:
+    if yaml is not None:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(f"packet is not a YAML object: {path}")
+        return data
+    return packet_yaml_fallback._load_yaml_simple(str(path))
+
+
+def dump_packet(path: Path, packet: dict[str, Any]) -> None:
+    if yaml is not None:
+        rendered = yaml.safe_dump(packet, sort_keys=False, allow_unicode=False)
+    else:
+        rendered = packet_yaml_fallback._dump_yaml_simple(packet)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(rendered)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def parse_set_json(values: list[str]) -> list[tuple[str, Any]]:
+    parsed: list[tuple[str, Any]] = []
+    for raw in values:
+        if "=" not in raw:
+            raise ValueError(f"--set-json requires FIELD=JSON, got: {raw}")
+        field, payload = raw.split("=", 1)
+        field = field.strip()
+        if field not in ALLOWED_FIELDS:
+            raise ValueError(f"field not amendable: {field}")
+        parsed.append((field, json.loads(payload)))
+    return parsed
+
+
+def normalize_evidence_refs(values: list[str]) -> list[str]:
+    refs = [str(v).strip() for v in values if str(v).strip()]
+    if not refs:
+        raise ValueError("at least one non-empty --evidence-ref is required")
+    return refs
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Append honest amendment entries to packet.yaml")
+    ap.add_argument("--loop-id", required=True)
+    ap.add_argument("--packet-path")
+    ap.add_argument("--reason", required=True)
+    ap.add_argument("--actor", default=os.environ.get("OPS_TERMINAL_ROLE") or os.environ.get("USER") or "unknown")
+    ap.add_argument("--evidence-ref", action="append", default=[])
+    ap.add_argument("--set-json", action="append", default=[])
+    args = ap.parse_args()
+
+    changes = parse_set_json(args.set_json)
+    if not changes:
+        raise ValueError("at least one --set-json FIELD=JSON change is required")
+    evidence_refs = normalize_evidence_refs(args.evidence_ref)
+
+    packet_path = resolve_packet_path(args.loop_id, args.packet_path)
+    if not packet_path.is_file():
+        raise FileNotFoundError(f"packet not found: {packet_path}")
+
+    packet = load_packet(packet_path)
+    loop_id = str(packet.get("loop_id", "")).strip()
+    if loop_id != args.loop_id:
+        raise ValueError(f"packet loop_id mismatch: expected {args.loop_id}, got {loop_id}")
+
+    history = packet.get("amendment_history")
+    if history is None:
+        history = []
+    if not isinstance(history, list):
+        raise ValueError("packet amendment_history is not a list")
+
+    changed_fields: list[str] = []
+    for field, value in changes:
+        packet[field] = value
+        changed_fields.append(field)
+
+    amendment_entry = {
+        "amendment_id": f"AMEND-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
+        "amended_at_utc": utc_now(),
+        "actor": args.actor,
+        "reason": args.reason,
+        "fields_changed": changed_fields,
+        "evidence_refs": evidence_refs,
+        "run_key": os.environ.get("SPINE_CAP_RUN_KEY", "").strip(),
+    }
+    history.append(amendment_entry)
+    packet["amendment_history"] = history
+
+    dump_packet(packet_path, packet)
+
+    print(f"packet: {packet_path}")
+    print(f"amendment_id: {amendment_entry['amendment_id']}")
+    print(f"fields_changed: {', '.join(changed_fields)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
