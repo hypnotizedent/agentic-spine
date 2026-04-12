@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/plugins/infra/mailroom-bridge/lib/task-common.sh"
+
+CAPABILITY="mailroom.task.claim"
+JSON=0
+DRY_RUN=0
+TASK_ID=""
+WORKER="${USER:-unknown}@$(hostname -s 2>/dev/null || hostname)"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task-id) TASK_ID="${2:?--task-id requires value}"; shift 2 ;;
+    --worker) WORKER="${2:?--worker requires value}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) exit 0 ;;
+    *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+mailroom_task_require jq
+mailroom_task_require yq
+[[ -n "$TASK_ID" ]] || { echo "FAIL: --task-id required" >&2; exit 2; }
+
+queued_file="$MAILROOM_TASK_QUEUED/$TASK_ID.yaml"
+running_file="$MAILROOM_TASK_RUNNING/$TASK_ID.yaml"
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  mailroom_task_init_dirs
+  [[ -f "$queued_file" ]] || { echo "FAIL: queued task not found: $TASK_ID" >&2; exit 1; }
+  mv "$queued_file" "$running_file"
+  now="$(mailroom_task_now)"
+  yq e -i ".status = \"running\" | .claimed_by = \"$WORKER\" | .claimed_at = \"$now\" | .heartbeat_at = \"$now\" | .updated_at = \"$now\"" "$running_file"
+fi
+
+data="$(jq -n --arg task_id "$TASK_ID" --arg worker "$WORKER" --arg state "running" --arg file "$running_file" --arg dry_run "$( [[ "$DRY_RUN" -eq 1 ]] && echo true || echo false )" '{task_id:$task_id,state:$state,file:$file,worker:$worker,dry_run:($dry_run=="true")}')"
+if [[ "$JSON" -eq 1 ]]; then
+  status="claimed"; [[ "$DRY_RUN" -eq 1 ]] && status="dry-run"
+  mailroom_task_emit_json "$CAPABILITY" "$status" "$data"
+else
+  echo "$CAPABILITY"
+  echo "task_id: $TASK_ID"
+  echo "state: running"
+  echo "worker: $WORKER"
+  [[ "$DRY_RUN" -eq 1 ]] && echo "dry_run: true"
+fi

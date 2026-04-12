@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+
+import yaml
+
+
+TERMINAL_ALIASES = {
+    "executed": "applied",
+    "completed": "applied",
+    "done": "applied",
+    "finished": "applied",
+}
+
+
+def proposals_root() -> Path:
+    return Path(os.environ.get("SPINE_OUTBOX", str(Path.home() / "code" / ".runtime" / "spine" / "mailroom" / "outbox"))) / "proposals"
+
+
+def iter_manifests(root: Path):
+    if not root.exists():
+        return []
+    return sorted(p for p in root.rglob("manifest.yaml") if ".archived" not in p.parts and "/files/" not in str(p))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--check-linkage", action="store_true")
+    parser.add_argument("--normalize-status", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    root = proposals_root()
+    issues = []
+    normalized = 0
+    checked = 0
+    for manifest in iter_manifests(root):
+        checked += 1
+        data = yaml.safe_load(manifest.read_text()) or {}
+        status = str(data.get("status", "pending")).lower()
+        if args.normalize_status and status in TERMINAL_ALIASES:
+            data["status"] = TERMINAL_ALIASES[status]
+            manifest.write_text(yaml.safe_dump(data, sort_keys=False))
+            normalized += 1
+            status = data["status"]
+        if args.check_linkage:
+            if not data.get("proposal"):
+                issues.append({"manifest": str(manifest), "issue": "missing proposal id"})
+            if not data.get("created"):
+                issues.append({"manifest": str(manifest), "issue": "missing created timestamp"})
+            if status == "pending" and not data.get("changes"):
+                issues.append({"manifest": str(manifest), "issue": "pending proposal missing changes"})
+
+    payload = {
+        "capability": "proposals.reconcile",
+        "status": "ok" if not issues else "fail",
+        "checked": checked,
+        "normalized": normalized,
+        "issues": issues,
+    }
+    print(json.dumps(payload, indent=2) if args.json or True else payload)
+    return 0 if not issues else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
