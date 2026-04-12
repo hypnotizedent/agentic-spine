@@ -74,6 +74,60 @@ if command -v session_posture_resolve >/dev/null 2>&1; then
     fi
 fi
 
+# ── Workflow routing (best-effort, non-blocking) ─────────────────────────
+ROUTER_HELPER="$SPINE_ROOT/ops/plugins/core/lifecycle/lib/post_attach_router.py"
+ROUTING_JSON=""
+if [[ -f "$ROUTER_HELPER" ]]; then
+    ROUTING_JSON=$(python3 "$ROUTER_HELPER" \
+        --runtime-root "${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine}" \
+        --state-root "${SPINE_STATE:-$HOME/code/.runtime/spine/state}" \
+        2>/dev/null) || true
+fi
+
+if [[ -n "$ROUTING_JSON" ]]; then
+    # Extract fields via python3 (jq may not be available)
+    eval "$(python3 -c "
+import json, sys, shlex
+d = json.loads(sys.stdin.read())
+print(f'_RT_STATE={shlex.quote(d.get(\"routing_state\", \"unknown\"))}')
+print(f'_RT_ACTION={shlex.quote(d.get(\"recommended_next_action\", \"\"))}')
+print(f'_RT_CMD={shlex.quote(d.get(\"recommended_command\", \"\") or \"\")}')
+print(f'_RT_CONTAINER={shlex.quote(d.get(\"recommended_container\", \"\"))}')
+print(f'_RT_WHY={shlex.quote(d.get(\"why\", \"\"))}')
+print(f'_RT_RULES={shlex.quote(d.get(\"container_rules_summary\", \"\"))}')
+# candidates
+cands = d.get(\"open_loop_candidates\", [])[:3]
+for i, c in enumerate(cands):
+    print(f'_RT_CAND{i}_ID={shlex.quote(c.get(\"loop_id\", \"\"))}')
+    print(f'_RT_CAND{i}_OBJ={shlex.quote(c.get(\"objective\", \"\")[:80])}')
+print(f'_RT_CAND_COUNT={len(cands)}')
+" <<< "$ROUTING_JSON" 2>/dev/null)" || true
+
+    if [[ -n "${_RT_STATE:-}" ]]; then
+        echo "── workflow routing ────────────────────────────────────────────"
+        echo "  routing state:   ${_RT_STATE}"
+        echo "  next action:     ${_RT_ACTION}"
+        if [[ -n "${_RT_CMD}" ]]; then
+            echo "  suggested cmd:   ${_RT_CMD}"
+        fi
+        echo "  container:       ${_RT_CONTAINER}"
+        echo "  why:             ${_RT_WHY}"
+        # Show loop candidates if any
+        if [[ "${_RT_CAND_COUNT:-0}" -gt 0 ]]; then
+            echo ""
+            echo "  open loop candidates:"
+            for i in $(seq 0 $((_RT_CAND_COUNT - 1))); do
+                eval "_id=\${_RT_CAND${i}_ID:-}"
+                eval "_obj=\${_RT_CAND${i}_OBJ:-}"
+                echo "    - ${_id}: ${_obj}"
+            done
+        fi
+        echo ""
+        echo "  container rules: ${_RT_RULES}"
+        echo ""
+    fi
+fi
+
 # ── --emit-env handling ────────────────────────────────────────────────────
 if [[ "$EMIT_ENV" -eq 1 ]]; then
     if [[ "$POSTURE_OK" -eq 1 ]] && command -v session_posture_emit_env >/dev/null 2>&1; then
