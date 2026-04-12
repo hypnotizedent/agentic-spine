@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import yaml
+
+
+def state_dir() -> Path:
+    return Path(os.environ.get("SPINE_STATE", str(Path.home() / "code" / ".runtime" / "spine" / "state"))) / "handoffs"
+
+
+def handoff_files():
+    path = state_dir()
+    path.mkdir(parents=True, exist_ok=True)
+    return sorted(path.glob("HO-*.yaml"))
+
+
+def cmd_create(args: argparse.Namespace) -> int:
+    now = datetime.now(timezone.utc)
+    hid = f"HO-{now.strftime('%Y%m%d-%H%M%S')}"
+    payload = {
+        "version": "1.2",
+        "id": hid,
+        "kind": "session",
+        "state": "active",
+        "owner": os.environ.get("USER", "unknown"),
+        "summary": args.summary,
+        "created_at_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "expires_at_utc": (now + timedelta(hours=args.ttl_hours)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "loops": args.loops,
+        "actions": [],
+        "from_role": args.from_role,
+        "to_role": args.to_role,
+        "transition_gate": args.transition_gate,
+        "input_refs": {},
+        "output_refs": {},
+        "notes": args.note,
+    }
+    path = state_dir() / f"{hid}.yaml"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False))
+    print(json.dumps({"capability": "session.handoff.create", "status": "ok", "handoff_id": hid, "path": str(path)}, indent=2))
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    rows = []
+    for path in handoff_files():
+        data = yaml.safe_load(path.read_text()) or {}
+        if args.state and str(data.get("state", "")).lower() != args.state:
+            continue
+        rows.append({
+            "id": data.get("id", path.stem),
+            "state": data.get("state", ""),
+            "summary": data.get("summary", ""),
+            "loops": data.get("loops", []),
+        })
+    print(json.dumps({"capability": "session.handoff.list", "status": "ok", "count": len(rows), "items": rows}, indent=2))
+    return 0
+
+
+def cmd_status() -> int:
+    counts = {}
+    for path in handoff_files():
+        data = yaml.safe_load(path.read_text()) or {}
+        state = str(data.get("state", "unknown")).lower()
+        counts[state] = counts.get(state, 0) + 1
+    print(json.dumps({"capability": "session.handoff.status", "status": "ok", "counts": counts}, indent=2))
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p_create = sub.add_parser("create")
+    p_create.add_argument("--summary", required=True)
+    p_create.add_argument("--loops", nargs="*", default=[])
+    p_create.add_argument("--ttl-hours", type=int, default=72)
+    p_create.add_argument("--from-role", default="")
+    p_create.add_argument("--to-role", default="")
+    p_create.add_argument("--transition-gate", default="")
+    p_create.add_argument("--note", action="append", default=[])
+    p_list = sub.add_parser("list")
+    p_list.add_argument("--state", default="")
+    sub.add_parser("status")
+    args = parser.parse_args()
+    if args.cmd == "create":
+        return cmd_create(args)
+    if args.cmd == "list":
+        return cmd_list(args)
+    return cmd_status()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

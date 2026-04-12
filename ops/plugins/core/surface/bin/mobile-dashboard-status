@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+
+def run_json(cmd: list[str]) -> dict:
+    proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    try:
+        return json.loads(proc.stdout) if proc.stdout.strip() else {"status": "fail", "error": proc.stderr.strip()}
+    except Exception:
+        return {"status": "fail", "stdout": proc.stdout.strip(), "stderr": proc.stderr.strip()}
+
+
+def main() -> int:
+    root = Path(__file__).resolve().parents[5]
+    payload = {
+        "capability": "surface.mobile.dashboard.status",
+        "spine": run_json([f"{root}/bin/ops", "status", "--json"]),
+        "loops": run_json([f"{root}/ops/plugins/core/loops/bin/loops-status", "--json"]),
+        "gaps": run_json([f"{root}/ops/plugins/core/loops/bin/gaps-status", "--json"]),
+        "proposals": run_json([f"{root}/ops/plugins/core/proposals/bin/proposals-status", "--json"]),
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

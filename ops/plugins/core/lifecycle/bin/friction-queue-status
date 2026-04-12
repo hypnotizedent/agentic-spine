@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+import yaml
+
+
+def main() -> int:
+    state_root = Path(os.environ.get("SPINE_STATE", str(Path.home() / "code" / ".runtime" / "spine" / "state")))
+    path = state_root / "friction.queue.yaml"
+    data = {"version": 1, "items": []}
+    if path.exists():
+        data = yaml.safe_load(path.read_text()) or data
+    items = data.get("items", [])
+    open_items = [item for item in items if str(item.get("status", "open")).lower() not in {"closed", "resolved"}]
+    payload = {
+        "capability": "friction.queue.status",
+        "status": "ok",
+        "queue_path": str(path),
+        "total": len(items),
+        "open": len(open_items),
+    }
+    print(json.dumps(payload, indent=2) if len(sys.argv) > 1 and sys.argv[1] == "--json" else "\n".join([
+        "friction.queue.status",
+        "status: ok",
+        f"total: {payload['total']}",
+        f"open: {payload['open']}",
+        f"queue_path: {path}",
+    ]))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

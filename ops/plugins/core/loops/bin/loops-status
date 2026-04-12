@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+
+MODE="summary"
+if [[ "${1:-}" == "--json" ]]; then
+  MODE="json"
+fi
+
+if [[ "$MODE" == "json" ]]; then
+  python3 - "$ROOT" <<'PY'
+import json
+import subprocess
+import sys
+
+root = sys.argv[1]
+proc = subprocess.run(
+    [f"{root}/bin/ops", "loops", "list", "--open"],
+    text=True,
+    capture_output=True,
+    check=False,
+)
+count = 0
+for line in proc.stdout.splitlines():
+    if line.startswith("Open loops:"):
+        try:
+            count = int(line.split(":", 1)[1].strip())
+        except ValueError:
+            count = 0
+payload = {
+    "capability": "loops.status",
+    "status": "ok" if proc.returncode == 0 else "fail",
+    "open_loops": count,
+}
+print(json.dumps(payload, indent=2))
+sys.exit(0 if proc.returncode == 0 else proc.returncode)
+PY
+  exit $?
+fi
+
+exec "$ROOT/bin/ops" loops summary

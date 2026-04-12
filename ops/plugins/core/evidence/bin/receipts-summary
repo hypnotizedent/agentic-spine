@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--domain", default="none")
+    parser.add_argument("--days", type=int, default=7)
+    args = parser.parse_args()
+    receipts_root = Path(os.environ.get("SPINE_RECEIPTS", str(Path.home() / "code" / ".runtime" / "spine" / "receipts")))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
+    recent = []
+    if receipts_root.exists():
+        for path in sorted(receipts_root.iterdir(), reverse=True):
+            try:
+                dt = datetime.strptime(path.name.split("__", 1)[0].replace("RCAP-", ""), "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if dt >= cutoff:
+                recent.append(path.name)
+    print(json.dumps({"capability": "receipts.summary", "status": "ok", "domain": args.domain, "days": args.days, "count": len(recent), "recent": recent[:20]}, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
