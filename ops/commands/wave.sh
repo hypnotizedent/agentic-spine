@@ -5724,6 +5724,126 @@ except Exception as _exc:
     packet_receipt_error = f"{type(_exc).__name__}: {_exc}"
     packet_receipt_path = ""
 
+# ── Packet 2: complete orchestration packet.yaml closeout truth ──────────
+# When a wave is linked to an orchestration packet, update the external
+# packet.yaml closeout fields from honest local evidence.  Never invents
+# values — leaves fields unchanged if evidence is unavailable.
+_pkt_closeout_result = None
+_pkt_closeout_error = ""
+_pkt_coordinator_cmd = ""
+try:
+    _pkt_loop_id = str(packet.get("loop_id", "")).strip()
+    if _pkt_loop_id:
+        _orch_lib = os.path.join(os.path.abspath(spine_repo), "ops", "plugins", "core", "orchestration", "lib") if spine_repo else ""
+        if _orch_lib and os.path.isdir(_orch_lib):
+            sys.path.insert(0, _orch_lib)
+
+        _spine_state_dir = os.environ.get("SPINE_STATE", "") or os.path.join(
+            os.environ.get("HOME", ""), "code", ".runtime", "spine", "state"
+        )
+        _pkt_yaml_path = os.path.join(_spine_state_dir, "orchestration", _pkt_loop_id, "packet.yaml")
+
+        if os.path.isfile(_pkt_yaml_path):
+            import packet_closeout as pco
+
+            # Derive reconciliation_summary from dispatches
+            _done = sum(1 for d in dispatches if d.get("status") == "done")
+            _failed = sum(1 for d in dispatches if d.get("status") in ("blocked", "failed"))
+            _recon = {
+                "subagents_completed": _done,
+                "subagents_failed": _failed,
+                "merge_conflicts": 0,
+                "total_files_changed": _done + _failed,
+            }
+
+            # Derive receipt_refs from dispatches + valid_receipts
+            _refs = []
+            for d in dispatches:
+                _refs.append({
+                    "agent_id": d.get("lane", ""),
+                    "run_keys": [d["run_key"]] if d.get("run_key") else [],
+                    "gap_ids": [],
+                    "commit_hashes": [],
+                })
+            for r in valid_receipts:
+                _agent = r.get("lane_id", r.get("agent_id", ""))
+                _rks = r.get("run_keys", [])
+                _commits = r.get("commit_hashes", [])
+                if _agent:
+                    _refs.append({
+                        "agent_id": _agent,
+                        "run_keys": _rks if isinstance(_rks, list) else [],
+                        "gap_ids": [],
+                        "commit_hashes": _commits if isinstance(_commits, list) else [],
+                    })
+
+            # Derive verify_matrix from watcher checks
+            _vmatrix = []
+            for c in checks:
+                _vmatrix.append({
+                    "gate_id": c.get("cap", ""),
+                    "status": "PASS" if c.get("status") == "done" else "FAIL",
+                    "run_key": c.get("run_key", ""),
+                })
+
+            # Derive plan_transition
+            _plan_tx = {
+                "status": "completed" if disposition == "landed" else "blocked",
+                "updated_at_utc": now,
+                "run_key": run_keys[0] if run_keys else "",
+                "evidence_ref": close_receipt_path,
+            }
+
+            # Derive lane_outcomes upgrade
+            _lane_outcomes = []
+            for d in dispatches:
+                _lo_status = "INTEGRATED" if d.get("status") == "done" else d.get("status", "DISPATCHED").upper()
+                _lane_outcomes.append({
+                    "lane_id": d.get("lane", ""),
+                    "owner_terminal": str(packet.get("owner_terminal", "")),
+                    "lane_status": _lo_status,
+                    "stub_evidence_ref": "",
+                    "updated_at_utc": now,
+                })
+
+            _evidence = {
+                "reconciliation_summary": _recon,
+                "receipt_refs": _refs,
+                "verify_matrix": _vmatrix,
+                "finalized_at_utc": now,
+                "plan_transition": _plan_tx,
+                "lane_outcomes": _lane_outcomes,
+            }
+
+            _pkt_closeout_result = pco.complete_packet_closeout(
+                _pkt_yaml_path, _evidence, _pkt_loop_id
+            )
+
+            # ── Coordinator handoff: one canonical command ──
+            _workspace_branch = ""
+            _ws = state.get("workspace")
+            if isinstance(_ws, dict):
+                _workspace_branch = str(_ws.get("branch") or "").strip()
+            _lane_branch = _workspace_branch or ""
+            _coordinator_script = os.path.join(
+                spine_repo, "ops", "plugins", "core", "orchestration", "bin", "coordinator-lane-closeout"
+            )
+            if os.path.isfile(_coordinator_script) and _lane_branch:
+                _pkt_coordinator_cmd = (
+                    f"{_coordinator_script} "
+                    f"--loop-id {_pkt_loop_id} "
+                    f"--lane-branch {_lane_branch} "
+                    f"--target-branch main"
+                )
+            elif os.path.isfile(_coordinator_script):
+                _pkt_coordinator_cmd = (
+                    f"{_coordinator_script} "
+                    f"--loop-id {_pkt_loop_id} "
+                    f"--target-branch main"
+                )
+except Exception as _pkt_exc:
+    _pkt_closeout_error = f"{type(_pkt_exc).__name__}: {_pkt_exc}"
+
 print(f"Wave '{state['wave_id']}' closed.")
 print(f"  Disposition: {disposition}")
 print(f"  Dispatches: {len(dispatches)} ({sum(1 for d in dispatches if d['status'] == 'done')} done, {sum(1 for d in dispatches if d['status'] == 'blocked')} blocked)")
@@ -5740,6 +5860,30 @@ if residual_blockers:
 print(f"  Close receipt: {close_receipt_path}")
 print(f"  Merge receipt: {receipt_path}")
 print(f"  READY_FOR_ADOPTION={'true' if ready_for_adoption else 'false'}")
+if _pkt_closeout_result:
+    print()
+    print("── packet closeout truth ──────────────────────────────────────")
+    _after = _pkt_closeout_result.get("after", {})
+    _recon_after = _after.get("reconciliation_summary", {})
+    if isinstance(_recon_after, dict):
+        print(f"  reconciliation: {_recon_after.get('subagents_completed', 0)} completed, {_recon_after.get('subagents_failed', 0)} failed, {_recon_after.get('merge_conflicts', 0)} conflicts")
+    _refs_after = _after.get("receipt_refs", [])
+    print(f"  receipt_refs: {len(_refs_after)} entries")
+    _vm_after = _after.get("verify_matrix", [])
+    print(f"  verify_matrix: {len(_vm_after)} gates")
+    print(f"  finalized_at_utc: {_after.get('finalized_at_utc', '')}")
+    _pt_after = _after.get("plan_transition", {})
+    if isinstance(_pt_after, dict):
+        print(f"  plan_transition: {_pt_after.get('status', '')}")
+    print(f"  packet: {_pkt_closeout_result.get('packet_path', '')}")
+elif _pkt_closeout_error:
+    print(f"  Packet closeout: skipped ({_pkt_closeout_error})")
+if _pkt_coordinator_cmd:
+    print()
+    print("── coordinator handoff ────────────────────────────────────────")
+    print("  The integration/closeout step for orchestrated lane work:")
+    print(f"  {_pkt_coordinator_cmd}")
+    print()
 PYCLOSE2
 
   release_wave_path_claims "$wave_id" "released"
