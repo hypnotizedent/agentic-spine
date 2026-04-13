@@ -461,6 +461,10 @@ comms_slo_status = "unknown"
 comms_pending = 0
 comms_oldest = 0
 comms_escalations = 0
+comms_delivery_recent = 0
+comms_delivery_recent_failed = 0
+comms_sent_total = 0
+comms_drain_state = "unknown"
 
 if comms_status_bin.exists() and os.access(str(comms_status_bin), os.X_OK):
     try:
@@ -477,8 +481,24 @@ if comms_status_bin.exists() and os.access(str(comms_status_bin), os.X_OK):
             comms_pending = int(_cd.get("queue_pending_count", 0))
             comms_oldest = int(_cd.get("queue_oldest_age_seconds", 0))
             comms_escalations = int(_cd.get("pending_escalation_task_count", 0))
+            comms_delivery_recent = int(_cd.get("delivery_recent_count", 0))
+            comms_delivery_recent_failed = int(_cd.get("delivery_recent_failed", 0))
+            comms_sent_total = int(_cd.get("queue_sent_count", 0))
     except Exception:
         pass
+
+# Derive drain_state from existing evidence
+if comms_pending > 0:
+    if comms_delivery_recent > 0 and comms_delivery_recent_failed < comms_delivery_recent:
+        comms_drain_state = "draining"
+    elif comms_delivery_recent == 0:
+        comms_drain_state = "blocked"
+    elif comms_delivery_recent_failed >= comms_delivery_recent:
+        comms_drain_state = "blocked"
+    else:
+        comms_drain_state = "unknown"
+elif comms_slo_status == "ok":
+    comms_drain_state = "idle"
 
 # ── Joined-state coherence summary ───────────────────────────────────────
 
@@ -537,7 +557,7 @@ if failed_count > 0:
 
 # Check communications queue health
 if comms_slo_status == "incident":
-    anomalies.append(f"COMMS QUEUE INCIDENT: pending={comms_pending} oldest={comms_oldest}s escalations={comms_escalations}")
+    anomalies.append(f"COMMS QUEUE INCIDENT ({comms_drain_state}): pending={comms_pending} oldest={comms_oldest}s escalations={comms_escalations}")
 elif comms_slo_status == "warn":
     anomalies.append(f"COMMS QUEUE WARN: pending={comms_pending} oldest={comms_oldest}s")
 
@@ -709,9 +729,13 @@ if mode == "--json":
         "anomalies": anomalies,
         "comms_queue": {
             "slo_status": comms_slo_status,
+            "drain_state": comms_drain_state,
             "pending": comms_pending,
             "oldest_age_seconds": comms_oldest,
             "escalations": comms_escalations,
+            "delivery_recent": comms_delivery_recent,
+            "delivery_recent_failed": comms_delivery_recent_failed,
+            "sent_total": comms_sent_total,
             "oneliner": comms_oneliner,
         },
         "coherence_summary": joined_state_summary,

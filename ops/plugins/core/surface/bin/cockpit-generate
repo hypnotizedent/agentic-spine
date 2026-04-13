@@ -328,6 +328,57 @@ def execution_host_section(roles: dict) -> str:
     </details>"""
 
 
+def comms_incident_card(status: dict | None) -> str:
+    """Render a compact comms queue incident card with blocked/draining state."""
+    if not status:
+        return ""
+    cq = status.get("comms_queue", {})
+    slo = cq.get("slo_status", "ok")
+    if slo == "ok":
+        return ""
+
+    drain_state = cq.get("drain_state", "unknown")
+    pending = cq.get("pending", 0)
+    oldest = cq.get("oldest_age_seconds", 0)
+    delivery_recent = cq.get("delivery_recent", 0)
+    sent_total = cq.get("sent_total", 0)
+
+    # Format oldest age as human-readable
+    if oldest >= 86400:
+        age_str = f"{oldest // 86400}d {(oldest % 86400) // 3600}h"
+    elif oldest >= 3600:
+        age_str = f"{oldest // 3600}h {(oldest % 3600) // 60}m"
+    else:
+        age_str = f"{oldest // 60}m"
+
+    # Color by drain state
+    if drain_state == "draining":
+        state_css = "ylw"
+        state_label = "draining"
+    elif drain_state == "blocked":
+        state_css = "red"
+        state_label = "blocked"
+    else:
+        state_css = "red"
+        state_label = "unknown"
+
+    # Evidence line
+    evidence_parts = [f"{pending} pending", f"oldest {age_str}"]
+    if delivery_recent > 0:
+        evidence_parts.append(f"{delivery_recent} recent deliveries")
+    if sent_total > 0:
+        evidence_parts.append(f"{sent_total} sent total")
+
+    return f"""
+    <div class="cq cq-{state_css}">
+      <div class="cq-head">
+        <span class="cq-title">Comms Queue</span>
+        <span class="cq-state cq-s-{state_css}">{_h(slo)} · {_h(state_label)}</span>
+      </div>
+      <div class="cq-evidence">{_h(' · '.join(evidence_parts))}</div>
+    </div>"""
+
+
 def attention_section(status: dict | None, refs: dict) -> str:
     items = []
     if status:
@@ -721,6 +772,16 @@ details[open] summary::after{transform:rotate(90deg)}
 .eh-other{color:var(--t);opacity:.6}
 .eh-access{font-family:var(--m);font-size:.5rem;color:var(--t);opacity:.5;padding-bottom:.35rem;border-bottom:1px solid var(--b);margin-bottom:.25rem}
 
+.cq{padding:.65rem 1rem;border-radius:10px;margin-bottom:.75rem}
+.cq-ylw{background:var(--ylw2);border:1px solid rgba(251,191,36,.2)}
+.cq-red{background:var(--red2);border:1px solid rgba(248,113,113,.2)}
+.cq-head{display:flex;justify-content:space-between;align-items:center}
+.cq-title{font-size:.65rem;font-weight:600;color:var(--tb)}
+.cq-state{font-family:var(--m);font-size:.6rem;font-weight:600;padding:.15rem .5rem;border-radius:4px}
+.cq-s-ylw{color:var(--ylw);background:rgba(251,191,36,.12)}
+.cq-s-red{color:var(--red);background:rgba(248,113,113,.12)}
+.cq-evidence{font-family:var(--m);font-size:.55rem;color:var(--tm);margin-top:.3rem}
+
 .foot{font-size:.5rem;color:var(--t);opacity:.25;text-align:center;margin-top:2rem;line-height:1.6}
 """
 
@@ -776,6 +837,7 @@ def generate() -> str:
   {engine_posture(status, refs)}
   {node_role_card(roles)}
   {execution_host_section(roles)}
+  {comms_incident_card(status)}
   {attention_section(status, refs)}
   {timeline_section(log)}
   {capability_atlas(caps_data, invocation_counts)}
