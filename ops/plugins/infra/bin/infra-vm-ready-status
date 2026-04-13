@@ -80,8 +80,12 @@ fi
 proxmox_host="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .proxmox_host // \"pve\"" "$MANIFEST")"
 proxmox_user="$(yq e '.defaults.proxmox_user // "root"' "$PROFILES")"
 
-ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$TARGET\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")"
-ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$TARGET\") | .user // .ssh.defaults.user // \"root\"" "$SSH_BINDING" 2>/dev/null || echo "root")"
+# D321: resolve SSH host via canonical resolver with LAN→Tailscale fallback
+SPINE_ROOT="${SPINE_REPO}" source "${SPINE_REPO}/ops/lib/ssh-resolve.sh"
+_resolve_result="$(ssh_resolve_ssh_host_with_fallback "$TARGET" 5 2>/dev/null)" || _resolve_result=""
+ssh_host="$(echo "$_resolve_result" | awk '{print $1}')"
+ssh_path="$(echo "$_resolve_result" | awk '{print $2}')"
+ssh_user="$(ssh_resolve_user "$TARGET" "root")"
 
 require_running="$(yq e ".profiles.\"$PROFILE\".readiness.require_running // true" "$PROFILES")"
 require_ssh_target_binding="$(yq e ".profiles.\"$PROFILE\".readiness.require_ssh_target_binding // true" "$PROFILES")"
@@ -125,8 +129,10 @@ if [[ "$require_running" == "true" ]]; then
 fi
 
 if [[ "$require_ssh_target_binding" == "true" ]]; then
-    if [[ -n "$ssh_host" && "$ssh_host" != "null" ]]; then
-        check_pass "ssh_target_binding" "$TARGET -> $ssh_user@$ssh_host"
+    if [[ -n "$ssh_host" && "$ssh_host" != "null" && "$ssh_path" != "unreachable" ]]; then
+        check_pass "ssh_target_binding" "$TARGET -> $ssh_user@$ssh_host (${ssh_path:-direct})"
+    elif [[ -n "$ssh_host" && "$ssh_path" == "unreachable" ]]; then
+        check_fail "ssh_target_binding" "$TARGET resolved $ssh_host but unreachable via SSH"
     else
         check_fail "ssh_target_binding" "$TARGET missing in ssh.targets.yaml"
     fi
