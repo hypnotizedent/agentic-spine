@@ -1,0 +1,737 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -lt 10 ]]; then
+  echo "Usage: wave-collect <state.json> <wave_dir> <receipts_dir> <mailroom_task_root> <schema_path> <sync_roadmap:true|false> <spine_repo> <role_runtime_contract> <allowed_lanes_csv> <traffic_index_file>" >&2
+  exit 2
+fi
+
+sf="$1"
+sd="$2"
+receipts_dir="$3"
+mailroom_task_root="$4"
+schema_path="$5"
+sync_roadmap="$6"
+spine_repo="$7"
+role_runtime_contract="$8"
+allowed_lanes_csv="$9"
+traffic_index_file="${10}"
+
+python3 - "$sf" "$sd" "$receipts_dir" "$mailroom_task_root" "$schema_path" "$sync_roadmap" "$spine_repo" "$role_runtime_contract" "$allowed_lanes_csv" <<'PYCOLLECT2'
+import json, sys, os, re, glob, fcntl, yaml
+from datetime import datetime, timezone
+
+run_key_patterns_text = [r"^(CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"]
+commit_ref_pattern = r"^[0-9a-f]{7,40}$"
+allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
+required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]
+close_aliases = {"close", "librarian"}
+allowed_lanes = {
+    item.strip()
+    for item in (sys.argv[9] if len(sys.argv) > 9 else "control,execution,audit,watcher").split(",")
+    if item.strip()
+} or {"control", "execution", "audit", "watcher"}
+
+def _compile_run_key_patterns(patterns_text):
+    compiled = []
+    for pattern_text in patterns_text:
+        try:
+            compiled.append(re.compile(str(pattern_text)))
+        except re.error as exc:
+            raise RuntimeError(f"invalid run key regex '{pattern_text}': {exc}")
+    if not compiled:
+        compiled = [re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")]
+    return compiled
+
+def _run_key_matches(value, patterns):
+    return any(pat.match(value) for pat in patterns)
+
+run_key_patterns = _compile_run_key_patterns(run_key_patterns_text)
+
+def _validate_receipt(receipt):
+    errors = []
+    required = ["task_id", "terminal_id", "lane", "status", "files_changed",
+                "run_keys", "blockers", "ready_for_verify", "timestamp_utc"]
+    for field in required:
+        if field not in receipt:
+            errors.append(f"Missing: {field}")
+    str_fields = ["task_id", "terminal_id", "lane", "status", "timestamp_utc"]
+    for f in str_fields:
+        if f in receipt and not isinstance(receipt[f], str):
+            errors.append(f"{f} not string")
+    arr_fields = ["files_changed", "run_keys", "blockers"]
+    for f in arr_fields:
+        if f in receipt and not isinstance(receipt[f], list):
+            errors.append(f"{f} not array")
+    if "ready_for_verify" in receipt and not isinstance(receipt["ready_for_verify"], bool):
+        errors.append("ready_for_verify not bool")
+    if receipt.get("lane") and receipt["lane"] not in allowed_lanes:
+        errors.append(f"bad lane: {receipt['lane']}")
+    if receipt.get("status") and receipt["status"] not in ("done", "failed", "blocked"):
+        errors.append(f"bad status: {receipt['status']}")
+    ts = receipt.get("timestamp_utc", "")
+    if ts and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts):
+        errors.append("bad timestamp format")
+    for rk in receipt.get("run_keys", []):
+        if isinstance(rk, str) and not _run_key_matches(rk, run_key_patterns):
+            errors.append(f"bad run_key: {rk}")
+    if receipt.get("status") == "blocked" and not receipt.get("blockers"):
+        errors.append("blocked needs blockers[]")
+
+    if "evidence_refs" not in receipt:
+        errors.append("missing evidence_refs")
+    else:
+        evidence_refs = receipt["evidence_refs"]
+        if not isinstance(evidence_refs, dict):
+            errors.append("evidence_refs not object")
+        else:
+            for key in required_evidence_fields:
+                if key not in evidence_refs:
+                    errors.append(f"evidence_refs missing {key}")
+            run_key_refs = evidence_refs.get("run_key_refs", [])
+            file_refs = evidence_refs.get("file_refs", [])
+            commit_refs = evidence_refs.get("commit_refs", [])
+            blocker_class = str(evidence_refs.get("blocker_class", "")).strip()
+
+            if not isinstance(run_key_refs, list):
+                errors.append("evidence_refs.run_key_refs not array")
+            else:
+                for rk in run_key_refs:
+                    if not isinstance(rk, str) or not _run_key_matches(rk, run_key_patterns):
+                        errors.append(f"bad evidence run_key_ref: {rk}")
+
+            if not isinstance(file_refs, list):
+                errors.append("evidence_refs.file_refs not array")
+            else:
+                for ref in file_refs:
+                    if not isinstance(ref, str) or not ref.strip():
+                        errors.append("bad evidence file_ref")
+
+            commit_pat = re.compile(commit_ref_pattern)
+            if not isinstance(commit_refs, list):
+                errors.append("evidence_refs.commit_refs not array")
+            else:
+                for ref in commit_refs:
+                    if not isinstance(ref, str) or not commit_pat.match(ref):
+                        errors.append(f"bad evidence commit_ref: {ref}")
+
+            if not blocker_class:
+                errors.append("evidence_refs.blocker_class missing")
+            elif blocker_class not in allowed_blocker_classes:
+                errors.append(f"bad evidence blocker_class: {blocker_class}")
+
+    allowed = set(required + ["wave_id", "commit_hashes", "loop_id", "gap_ids", "evidence_refs", "completion_level", "prompt_lineage"])
+    for k in receipt.keys():
+        if k not in allowed:
+            errors.append(f"unknown field: {k}")
+    return errors
+
+sf = sys.argv[1]
+sd = sys.argv[2]
+receipts_dir = sys.argv[3]
+mailroom_task_root = sys.argv[4]
+schema_path = sys.argv[5]
+sync_roadmap = sys.argv[6] == "true"
+spine_repo = sys.argv[7]
+role_runtime_contract = sys.argv[8] if len(sys.argv) > 8 else ""
+lock_file = sf + ".lock"
+promotion_next_by_role = {}
+
+if role_runtime_contract and os.path.exists(role_runtime_contract):
+    try:
+        contract = yaml.safe_load(open(role_runtime_contract, "r", encoding="utf-8")) or {}
+        evidence = contract.get("evidence") if isinstance(contract, dict) else {}
+        if isinstance(evidence, dict):
+            run_key_regexes = evidence.get("run_key_regexes")
+            if isinstance(run_key_regexes, list) and run_key_regexes:
+                parsed = [str(x).strip() for x in run_key_regexes if str(x).strip()]
+                if parsed:
+                    run_key_patterns_text = parsed
+            elif evidence.get("run_key_regex"):
+                run_key_patterns_text = [str(evidence.get("run_key_regex")).strip()]
+            commit_ref_pattern = str(evidence.get("commit_ref_regex", commit_ref_pattern))
+            blockers = evidence.get("blocker_classes")
+            if isinstance(blockers, list) and blockers:
+                allowed_blocker_classes = {str(x).strip() for x in blockers if str(x).strip()} or allowed_blocker_classes
+            required = evidence.get("required_ref_fields")
+            if isinstance(required, list) and required:
+                required_evidence_fields = [str(x).strip() for x in required if str(x).strip()] or required_evidence_fields
+        runtime_roles = contract.get("runtime_roles") if isinstance(contract, dict) else {}
+        if isinstance(runtime_roles, dict):
+            aliases = runtime_roles.get("close_role_aliases")
+            if isinstance(aliases, list) and aliases:
+                close_aliases = {str(x).strip() for x in aliases if str(x).strip()} or close_aliases
+        transitions = contract.get("promotion_gates", {}).get("transitions", [])
+        if isinstance(transitions, list):
+            for row in transitions:
+                if not isinstance(row, dict):
+                    continue
+                from_role = str(row.get("from", "")).strip()
+                to_role = str(row.get("to", "")).strip()
+                if from_role and to_role and from_role not in promotion_next_by_role:
+                    promotion_next_by_role[from_role] = to_role
+    except Exception:
+        pass
+
+try:
+    run_key_patterns = _compile_run_key_patterns(run_key_patterns_text)
+except RuntimeError as exc:
+    print(f"FAIL: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    with open(sf) as f:
+        state = json.load(f)
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+wave_id = state["wave_id"]
+print("=" * 72)
+print(f"  WAVE COLLECT: {wave_id}")
+print("=" * 72)
+print()
+
+packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
+
+def _extract_run_key_from_text(text):
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"run_key=([^\s]+)", raw)
+    if match:
+        candidate = match.group(1).strip()
+        if _run_key_matches(candidate, run_key_patterns):
+            return candidate
+    for token in re.split(r"\s+", raw):
+        if _run_key_matches(token, run_key_patterns):
+            return token
+    return ""
+
+def _extract_receipt_from_text(text):
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"receipt=([^\s]+)", raw)
+    return match.group(1).strip() if match else ""
+
+def _upsert_lane_outcome(dispatch, lane_status, *, completed_at="", run_key="", blocker=""):
+    lane_id = str(dispatch.get("lane", "")).strip()
+    if not lane_id:
+        return
+    owner_terminal = str(dispatch.get("owner_terminal") or packet.get("owner_terminal") or "").strip()
+    for row in lane_outcomes:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("lane_id", "")).strip() != lane_id:
+            continue
+        row["lane_status"] = lane_status
+        if owner_terminal:
+            row["owner_terminal"] = owner_terminal
+        row["updated_at_utc"] = completed_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        row["dispatch_transport"] = str(dispatch.get("dispatch_transport") or row.get("dispatch_transport") or "").strip()
+        if dispatch.get("task_id"):
+            row["dispatch_task_id"] = dispatch.get("task_id")
+        if dispatch.get("mailroom_task_id"):
+            row["mailroom_task_id"] = dispatch.get("mailroom_task_id")
+        if run_key:
+            row["run_key"] = run_key
+        if blocker:
+            row["blocker"] = blocker
+        elif "blocker" in row:
+            row.pop("blocker", None)
+        return
+
+    entry = {
+        "lane_id": lane_id,
+        "lane_status": lane_status,
+        "owner_terminal": owner_terminal,
+        "updated_at_utc": completed_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if dispatch.get("dispatch_transport"):
+        entry["dispatch_transport"] = dispatch.get("dispatch_transport")
+    if dispatch.get("task_id"):
+        entry["dispatch_task_id"] = dispatch.get("task_id")
+    if dispatch.get("mailroom_task_id"):
+        entry["mailroom_task_id"] = dispatch.get("mailroom_task_id")
+    if run_key:
+        entry["run_key"] = run_key
+    if blocker:
+        entry["blocker"] = blocker
+    lane_outcomes.append(entry)
+
+receipt_files = []
+valid_receipts = []
+invalid_receipts = []
+
+if os.path.isdir(receipts_dir):
+    for fn in sorted(os.listdir(receipts_dir)):
+        if fn.endswith(".json"):
+            fp = os.path.join(receipts_dir, fn)
+            receipt_files.append(fp)
+
+            try:
+                with open(fp) as rf:
+                    receipt = json.load(rf)
+            except json.JSONDecodeError as e:
+                invalid_receipts.append((fn, f"Invalid JSON: {e}"))
+                continue
+
+            errs = _validate_receipt(receipt)
+            if errs:
+                invalid_receipts.append((fn, "; ".join(errs)))
+            else:
+                valid_receipts.append((fn, receipt))
+
+print(f"RECEIPT ARTIFACTS ({len(receipt_files)} found, {len(valid_receipts)} valid, {len(invalid_receipts)} invalid)")
+print("-" * 72)
+
+if invalid_receipts:
+    for fn, reason in invalid_receipts:
+        print(f"  XX {fn}: {reason}")
+
+for fn, receipt in valid_receipts:
+    print(f"  OK {fn}: task={receipt['task_id']} status={receipt['status']} lane={receipt['lane']}")
+print()
+
+mailroom_task_files = []
+mailroom_tasks = {}
+for bucket in ("done", "failed"):
+    bucket_dir = os.path.join(mailroom_task_root, bucket)
+    if not os.path.isdir(bucket_dir):
+        continue
+    for fp in sorted(glob.glob(os.path.join(bucket_dir, "*.yaml"))):
+        mailroom_task_files.append(fp)
+        try:
+            task_doc = yaml.safe_load(open(fp, "r", encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(task_doc, dict):
+            continue
+        task_id = str(task_doc.get("task_id") or os.path.splitext(os.path.basename(fp))[0]).strip()
+        status = str(task_doc.get("status") or bucket).strip()
+        if not task_id or status not in {"done", "failed"}:
+            continue
+        updated_at = str(task_doc.get("updated_at") or task_doc.get("completed_at") or task_doc.get("failed_at") or "").strip()
+        mailroom_tasks[task_id] = {
+            "task_id": task_id,
+            "status": status,
+            "file": fp,
+            "updated_at": updated_at,
+            "completed_at": str(task_doc.get("completed_at") or task_doc.get("failed_at") or updated_at).strip(),
+            "result": str(task_doc.get("result") or "").strip(),
+            "failure_reason": str(task_doc.get("failure_reason") or "").strip(),
+        }
+
+print(f"MAILROOM TASKS ({len(mailroom_task_files)} found, {len(mailroom_tasks)} terminal states)")
+print("-" * 72)
+for task_id, task_doc in sorted(mailroom_tasks.items()):
+    print(f"  {task_doc['status'].upper():4s} {task_id}: {os.path.basename(task_doc['file'])}")
+print()
+
+dispatches = state.get("dispatches", [])
+matched = 0
+receipt_map = {r["task_id"]: r for _, r in valid_receipts}
+mailroom_matched = 0
+
+for i, d in enumerate(dispatches):
+    task_id = d.get("task_id", d.get("task", f"D{i+1}"))
+    if task_id in receipt_map:
+        r = receipt_map[task_id]
+        d["status"] = r["status"]
+        d["completed_at"] = r["timestamp_utc"]
+        d["run_key"] = r["run_keys"][0] if r.get("run_keys") else d.get("run_key")
+        d["result"] = f"Receipt: {r['status']}"
+        if r.get("blockers"):
+            d["result"] += f" (blockers: {', '.join(r['blockers'])})"
+        d["receipt_file"] = os.path.basename(receipt_map[task_id].get("_source", ""))
+        d["receipt_validated"] = True
+        matched += 1
+
+    if str(d.get("dispatch_transport", "")).strip() != "mailroom":
+        continue
+
+    mailroom_task_id = str(d.get("mailroom_task_id") or "").strip()
+    if not mailroom_task_id or mailroom_task_id not in mailroom_tasks:
+        continue
+
+    task_doc = mailroom_tasks[mailroom_task_id]
+    task_status = str(task_doc.get("status") or "").strip()
+    task_completed_at = str(task_doc.get("completed_at") or task_doc.get("updated_at") or "").strip()
+    task_result = str(task_doc.get("result") or "").strip()
+    task_failure = str(task_doc.get("failure_reason") or "").strip()
+    task_run_key = _extract_run_key_from_text(task_result)
+    task_receipt = _extract_receipt_from_text(task_result)
+
+    d["mailroom_task_state"] = task_status
+    d["mailroom_task_file"] = task_doc.get("file")
+    d["mailroom_task_updated_at"] = str(task_doc.get("updated_at") or "")
+    if task_receipt:
+        d["mailroom_receipt_path"] = task_receipt
+
+    if task_status == "done":
+        d["status"] = "done"
+        d["completed_at"] = task_completed_at
+        d["result"] = f"Mailroom: {task_result}" if task_result else "Mailroom: done"
+        if task_run_key:
+            d["run_key"] = task_run_key
+        _upsert_lane_outcome(d, "DONE", completed_at=task_completed_at, run_key=task_run_key)
+        matched += 1
+        mailroom_matched += 1
+        _envelope_id = str(d.get("envelope_id") or "").strip()
+        if _envelope_id:
+            _spine_state = os.environ.get("SPINE_STATE", "")
+            if _spine_state:
+                _comp_dir = os.path.join(_spine_state, "dispatch", "completion")
+                os.makedirs(_comp_dir, exist_ok=True)
+                _comp = {
+                    "envelope_id": _envelope_id,
+                    "completion_status": "complete",
+                    "wave_id": str(state.get("wave_id") or ""),
+                    "run_key": task_run_key or "",
+                    "mailroom_task_id": mailroom_task_id,
+                    "completed_at_utc": task_completed_at,
+                    "transport_mode": "mailroom",
+                }
+                _comp_file = os.path.join(_comp_dir, f"{_envelope_id}.completion.json")
+                with open(_comp_file, "w", encoding="utf-8") as _cf:
+                    json.dump(_comp, _cf, indent=2)
+                    _cf.write("\n")
+    elif task_status == "failed":
+        blocker = task_failure or "mailroom task failed"
+        d["status"] = "failed"
+        d["completed_at"] = task_completed_at
+        d["result"] = f"Mailroom failed: {blocker}"
+        _upsert_lane_outcome(d, "BLOCKED", completed_at=task_completed_at, blocker=blocker)
+        matched += 1
+        mailroom_matched += 1
+        _envelope_id = str(d.get("envelope_id") or "").strip()
+        if _envelope_id:
+            _spine_state = os.environ.get("SPINE_STATE", "")
+            if _spine_state:
+                _comp_dir = os.path.join(_spine_state, "dispatch", "completion")
+                os.makedirs(_comp_dir, exist_ok=True)
+                _comp = {
+                    "envelope_id": _envelope_id,
+                    "completion_status": "blocked_delegated",
+                    "wave_id": str(state.get("wave_id") or ""),
+                    "run_key": "",
+                    "mailroom_task_id": mailroom_task_id,
+                    "completed_at_utc": task_completed_at,
+                    "transport_mode": "mailroom",
+                    "failure_reason": blocker,
+                }
+                _comp_file = os.path.join(_comp_dir, f"{_envelope_id}.completion.json")
+                with open(_comp_file, "w", encoding="utf-8") as _cf:
+                    json.dump(_comp, _cf, indent=2)
+                    _cf.write("\n")
+
+role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
+lifecycle_state = str(state.get("lifecycle_state", "active")).strip() or "active"
+completed = [d for d in dispatches if isinstance(d, dict) and str(d.get("status", "")).strip() == "done"]
+if completed:
+    def _dispatch_order(dispatch):
+        task_id = str(dispatch.get("task_id", "")).strip()
+        if task_id.startswith("D") and task_id[1:].isdigit():
+            return int(task_id[1:])
+        return 0
+    completed.sort(key=lambda d: (_dispatch_order(d), str(d.get("completed_at") or d.get("dispatched_at") or "")))
+    last_done = completed[-1]
+    close_done = [
+        d for d in completed
+        if str(d.get("to_role", "")).strip() in close_aliases
+    ]
+    if close_done:
+        close_done.sort(key=lambda d: (_dispatch_order(d), str(d.get("completed_at") or d.get("dispatched_at") or "")))
+        last_done = close_done[-1]
+    last_to_role = str(last_done.get("to_role", "")).strip()
+    last_from_role = str(last_done.get("from_role", "")).strip()
+    promotion_next = promotion_next_by_role.get(last_to_role, "")
+    if last_to_role:
+        role_flow["current_role"] = last_to_role
+    elif last_from_role and not role_flow.get("current_role"):
+        role_flow["current_role"] = last_from_role
+    if promotion_next:
+        role_flow["next_role"] = promotion_next
+    elif last_to_role in close_aliases:
+        role_flow["next_role"] = ""
+    elif last_to_role:
+        role_flow["next_role"] = last_to_role
+    role_flow["last_transition"] = {
+        "task_id": last_done.get("task_id"),
+        "from_role": last_from_role,
+        "to_role": last_to_role,
+        "completed_at": last_done.get("completed_at"),
+        "run_key": last_done.get("run_key"),
+    }
+    role_flow.pop("pending_transition", None)
+
+for d in completed:
+    to_role = str(d.get("to_role", "")).strip()
+    if to_role == "worker" and lifecycle_state == "active":
+        lifecycle_state = "implemented"
+    elif to_role == "qc" and lifecycle_state == "active":
+        lifecycle_state = "implemented"
+    elif to_role in close_aliases and lifecycle_state in {"active", "implemented"}:
+        lifecycle_state = "validated"
+
+resolved_dispatch_ids = {
+    str(d.get("task_id", "")).strip()
+    for d in dispatches
+    if isinstance(d, dict) and str(d.get("status", "")).strip() in {"done", "failed", "blocked"}
+}
+pending_transition = role_flow.get("pending_transition") if isinstance(role_flow.get("pending_transition"), dict) else {}
+pending_transition_task_id = str(pending_transition.get("task_id", "")).strip()
+if pending_transition_task_id and pending_transition_task_id in resolved_dispatch_ids:
+    role_flow.pop("pending_transition", None)
+
+pending_transitions = [
+    d for d in dispatches if isinstance(d, dict) and str(d.get("status", "")).strip() == "dispatched" and str(d.get("to_role", "")).strip()
+]
+if pending_transitions:
+    pending_transitions.sort(key=lambda d: str(d.get("dispatched_at") or ""))
+    role_flow["next_role"] = str(pending_transitions[0].get("to_role", "")).strip()
+elif str(role_flow.get("current_role", "")).strip() in close_aliases:
+    role_flow["next_role"] = ""
+
+packet["lane_outcomes"] = lane_outcomes
+state["packet"] = packet
+state["wave_packet"] = packet
+state["role_flow"] = role_flow
+state["lifecycle_state"] = lifecycle_state
+
+all_run_keys = []
+for _, r in valid_receipts:
+    all_run_keys.extend(r.get("run_keys", []))
+
+existing_rks = set()
+for r in state.get("results", []):
+    if r.get("run_key"):
+        existing_rks.add(r["run_key"])
+
+for rk in all_run_keys:
+    if rk not in existing_rks:
+        state.setdefault("results", []).append({"run_key": rk, "source": "receipt"})
+        existing_rks.add(rk)
+
+state["last_collect"] = {
+    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "receipts_scanned": len(receipt_files),
+    "receipts_valid": len(valid_receipts),
+    "receipts_invalid": len(invalid_receipts),
+    "mailroom_tasks_scanned": len(mailroom_task_files),
+    "mailroom_tasks_matched": mailroom_matched,
+    "dispatches_matched": matched
+}
+
+print(f"DISPATCHES ({len(dispatches)})")
+print("-" * 72)
+for i, d in enumerate(dispatches, 1):
+    status_icon = {"dispatched": "->", "done": "OK", "failed": "XX", "blocked": "!!", "running": "~~"}.get(d["status"], "??")
+    receipt_tag = " [receipt]" if d.get("receipt_validated") else ""
+    print(f"  {status_icon} #{i} [{d.get('lane', '?'):10s}] {d['status']:12s} {d.get('task', '')[:45]}{receipt_tag}")
+    if d.get("run_key"):
+        print(f"     run_key: {d['run_key']}")
+print()
+
+checks = state.get("watcher_checks", [])
+if checks:
+    done_count = sum(1 for c in checks if c["status"] == "done")
+    fail_count = sum(1 for c in checks if c["status"] == "failed")
+    running_count = sum(1 for c in checks if c["status"] == "running")
+    queued_count = sum(1 for c in checks if c["status"] == "queued")
+
+    print(f"WATCHER CHECKS ({len(checks)}: {done_count} done, {fail_count} failed, {running_count} running, {queued_count} queued)")
+    print("-" * 72)
+    for c in checks:
+        rk = f" run_key={c['run_key']}" if c.get("run_key") else ""
+        ec = f" exit={c['exit_code']}" if c.get("exit_code") is not None else ""
+        print(f"  [{c['status']:8s}] {c['cap']}{ec}{rk}")
+    print()
+
+pf = state.get("preflight")
+if pf:
+    print("PREFLIGHT")
+    print("-" * 72)
+    print(f"  Domain: {pf.get('domain', '?')}")
+    print(f"  Verdict: {pf.get('verdict', '?')}")
+    if pf.get("blockers"):
+        for b in pf["blockers"]:
+            print(f"    - {b}")
+    print()
+
+summary = {
+    "wave_id": wave_id,
+    "collected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "receipts": {
+        "scanned": len(receipt_files),
+        "valid": len(valid_receipts),
+        "invalid": len(invalid_receipts),
+        "invalid_details": [{"file": fn, "reason": r} for fn, r in invalid_receipts]
+    },
+    "dispatches": {
+        "total": len(dispatches),
+        "done": sum(1 for d in dispatches if d["status"] == "done"),
+        "failed": sum(1 for d in dispatches if d["status"] == "failed"),
+        "blocked": sum(1 for d in dispatches if d["status"] == "blocked"),
+        "pending": sum(1 for d in dispatches if d["status"] == "dispatched")
+    },
+    "run_keys": list(existing_rks),
+    "ready_for_close": all(
+        d["status"] in ("done", "blocked") for d in dispatches
+    ) and len(invalid_receipts) == 0 if dispatches else False
+}
+
+summary_path = os.path.join(sd, "collect-summary.json")
+with open(summary_path, "w") as f:
+    json.dump(summary, f, indent=2)
+    f.write("\n")
+
+fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    with open(sf, "w") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+if sync_roadmap:
+    print("ROADMAP SYNC")
+    print("-" * 72)
+    updates = []
+    for _, r in valid_receipts:
+        entry = {
+            "task_id": r["task_id"],
+            "status": r["status"],
+            "run_keys": r.get("run_keys", []),
+            "blockers": r.get("blockers", [])
+        }
+        if r.get("loop_id"):
+            entry["loop_id"] = r["loop_id"]
+        if r.get("gap_ids"):
+            entry["gap_ids"] = r["gap_ids"]
+        updates.append(entry)
+
+    roadmap_patch_path = os.path.join(sd, "roadmap-patch.json")
+    with open(roadmap_patch_path, "w") as f:
+        json.dump({
+            "wave_id": wave_id,
+            "patched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "updates": updates
+        }, f, indent=2)
+        f.write("\n")
+    print(f"  Wrote {len(updates)} update(s) to {roadmap_patch_path}")
+    for u in updates:
+        loop_tag = f" loop={u['loop_id']}" if u.get("loop_id") else ""
+        gap_tag = f" gaps={','.join(u['gap_ids'])}" if u.get("gap_ids") else ""
+        print(f"  - {u['task_id']}: {u['status']}{loop_tag}{gap_tag}")
+    print()
+
+print("=" * 72)
+close_ready = summary["ready_for_close"]
+if close_ready:
+    print(f"  All dispatches resolved, receipts valid. Ready: ops wave close {wave_id}")
+elif invalid_receipts:
+    print(f"  {len(invalid_receipts)} invalid receipt(s). Fix before close.")
+else:
+    pending = summary["dispatches"]["pending"]
+    if pending:
+        print(f"  {pending} dispatch(es) still pending. Awaiting receipts.")
+    else:
+        print(f"  Collection complete. Review before close: ops wave close {wave_id} --disposition landed")
+print(f"  Summary: {summary_path}")
+print("=" * 72)
+PYCOLLECT2
+
+python3 - "$sf" "$traffic_index_file" "collect" <<'PYTRAFFIC'
+import json
+import os
+import sys
+import fcntl
+from datetime import datetime, timezone
+
+state_file = sys.argv[1]
+index_file = sys.argv[2]
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+with open(state_file, "r", encoding="utf-8") as f:
+    state = json.load(f)
+
+packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
+next_role = str(role_flow.get("next_role") or packet.get("next_role") or "").strip()
+
+entry = {
+    "wave_id": str(state.get("wave_id", "")).strip(),
+    "owner_terminal": str(packet.get("owner_terminal", "")).strip(),
+    "current_role": str(role_flow.get("current_role") or packet.get("current_role") or "").strip(),
+    "next_role": next_role,
+    "deadline": str(packet.get("deadline_utc", "")).strip(),
+    "status": str(state.get("status", "active")).strip() or "active",
+    "claimed_paths": packet.get("claimed_paths") if isinstance(packet.get("claimed_paths"), list) else [],
+    "blockers": [],
+    "lifecycle_state": str(state.get("lifecycle_state", "")).strip(),
+    "updated_at": now,
+}
+
+for dispatch in state.get("dispatches", []) if isinstance(state.get("dispatches"), list) else []:
+    if not isinstance(dispatch, dict):
+        continue
+    status = str(dispatch.get("status", "")).strip()
+    if status in {"blocked", "failed"}:
+        entry["blockers"].append(
+            {
+                "dispatch_id": str(dispatch.get("task_id", "")).strip(),
+                "status": status,
+            }
+        )
+
+pf = state.get("preflight") if isinstance(state.get("preflight"), dict) else {}
+if str(pf.get("verdict", "")).strip() == "no-go":
+    for b in pf.get("blockers", []) if isinstance(pf.get("blockers"), list) else []:
+        entry["blockers"].append({"source": "preflight", "status": "no-go", "detail": str(b)})
+
+lock_file = f"{index_file}.lock"
+os.makedirs(os.path.dirname(lock_file), exist_ok=True)
+fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o644)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    if os.path.exists(index_file):
+        raw = open(index_file, "r", encoding="utf-8").read().strip()
+        if raw:
+            try:
+                doc = json.loads(raw)
+            except Exception:
+                try:
+                    import yaml
+                    doc = yaml.safe_load(raw) or {}
+                except Exception:
+                    doc = {}
+        else:
+            doc = {}
+    else:
+        doc = {}
+
+    if not isinstance(doc, dict):
+        doc = {}
+
+    waves = doc.get("waves")
+    if not isinstance(waves, list):
+        waves = []
+    waves = [row for row in waves if str(row.get("wave_id", "")).strip() != entry["wave_id"]]
+    waves.append(entry)
+    doc["schema_version"] = str(doc.get("schema_version") or "1.0")
+    doc["updated_at"] = now
+    doc["waves"] = sorted(waves, key=lambda row: str(row.get("wave_id", "")))
+    with open(index_file, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2)
+        f.write("\n")
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+PYTRAFFIC
