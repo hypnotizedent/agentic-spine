@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 
+# L2 provider adapter for Home Assistant service calls.
+source "$ROOT/ops/plugins/providers/homeassistant/lib/ha-service-call.sh"
+
 alert_now_epoch() {
   date +%s
 }
@@ -38,28 +41,10 @@ alert_channel_bridge_push() {
 
 alert_channel_ha() {
   local alert_file="$1"
-  local ha_url_var ha_token_var ha_url ha_token service_path url title message
-
-  ha_url_var="$(yq -r '.channels.ha.endpoint_env // "ALERTING_HA_URL"' "$ROOT/ops/bindings/alerting.rules.yaml")"
-  ha_token_var="$(yq -r '.channels.ha.token_env // "ALERTING_HA_TOKEN"' "$ROOT/ops/bindings/alerting.rules.yaml")"
-  service_path="$(yq -r '.channels.ha.service_path // "/api/services/persistent_notification/create"' "$ROOT/ops/bindings/alerting.rules.yaml")"
-
-  ha_url="${!ha_url_var:-}"
-  ha_token="${!ha_token_var:-}"
-
-  if [[ -z "$ha_url" || -z "$ha_token" ]]; then
-    echo "WARN alerting.dispatch: HA channel skipped (missing ${ha_url_var}/${ha_token_var})" >&2
-    return 1
-  fi
-
+  local title message
   title="$(alert_yaml '.title' "$alert_file")"
   message="$(alert_yaml '.summary' "$alert_file")"
-  url="${ha_url%/}${service_path}"
-
-  curl -fsS -X POST "$url" \
-    -H "Authorization: Bearer $ha_token" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg t "$title" --arg m "$message" '{title:$t, message:$m}')" >/dev/null
+  ha_service_call "ha" "$title" "$message"
 }
 
 alert_channel_email_intent() {
@@ -93,35 +78,19 @@ INTENT
 
 alert_channel_mobile_push() {
   local alert_file="$1"
-  local alert_status ha_url_var ha_token_var ha_url ha_token service_path url title message
 
-  # Incident-only gate: mobile-push is scoped to operator-critical-interrupt.
+  # L1 policy gate: mobile-push is scoped to operator-critical-interrupt.
   # Skip silently for non-incident alerts.
+  local alert_status
   alert_status="$(alert_yaml '.status' "$alert_file")"
   if [[ "$alert_status" != "incident" ]]; then
     return 0
   fi
 
-  ha_url_var="$(yq -r '.channels."mobile-push".endpoint_env // "ALERTING_HA_URL"' "$ROOT/ops/bindings/alerting.rules.yaml")"
-  ha_token_var="$(yq -r '.channels."mobile-push".token_env // "ALERTING_HA_TOKEN"' "$ROOT/ops/bindings/alerting.rules.yaml")"
-  service_path="$(yq -r '.channels."mobile-push".service_path // "/api/services/notify/mobile_app_ronnys_iphone"' "$ROOT/ops/bindings/alerting.rules.yaml")"
-
-  ha_url="${!ha_url_var:-}"
-  ha_token="${!ha_token_var:-}"
-
-  if [[ -z "$ha_url" || -z "$ha_token" ]]; then
-    echo "WARN alerting.dispatch: mobile-push channel skipped (missing ${ha_url_var}/${ha_token_var})" >&2
-    return 1
-  fi
-
+  local title message
   title="$(alert_yaml '.title' "$alert_file")"
   message="$(alert_yaml '.summary' "$alert_file")"
-  url="${ha_url%/}${service_path}"
-
-  curl -fsS -X POST "$url" \
-    -H "Authorization: Bearer $ha_token" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg t "$title" --arg m "$message" '{title:$t, message:$m}')" >/dev/null
+  ha_service_call "mobile-push" "$title" "$message"
 }
 
 alert_dispatch_channel() {
