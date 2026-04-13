@@ -8,7 +8,6 @@ UID_VAL="$(id -u)"
 LABELS=(
   "com.ronny.backup-monitor-hourly"
   "com.ronny.infra-core-smoke"
-  "com.ronny.launchd-health-check"
 )
 
 command -v launchctl >/dev/null 2>&1 || {
