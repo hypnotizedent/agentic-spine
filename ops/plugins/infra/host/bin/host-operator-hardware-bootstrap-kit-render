@@ -9,6 +9,7 @@ SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
 INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
 CONTRACT="${SPINE_REPO}/ops/bindings/operator.hardware.bootstrap.handoff.contract.yaml"
+CONNECTIVITY_PREFLIGHT_CAP="${SPINE_REPO}/ops/plugins/infra/host/bin/host-operator-hardware-connectivity-preflight"
 
 usage() {
     cat <<'EOF'
@@ -25,6 +26,15 @@ Options:
   --ssh-public-key-ref <path>          SSH public key reference (default: ~/.ssh/id_ed25519.pub)
   --tailscale-enrollment-mode <mode>   manual | auth_key (default: manual)
   --bootstrap-method <method>          usb_autoinstall | pxe | iventoy | manual_console_install
+  --boot-medium <medium>               usb | external_ssd | pxe | iventoy
+  --console-path <path>                built_in_screen_keyboard | external_console
+  --network-method <method>            rtl8153_ethernet | known_good_usb_nic | approved_usb_tether_fallback | built_in_wifi_primary | arbitrary_dock_nic
+  --fallback-network-method <method>   Optional fallback method
+  --linux-expected <true|false>        Whether the chosen path is Linux-expected
+  --dhcp-expected <true|false>         Whether DHCP is expected on the chosen path
+  --dns-expected <true|false>          Whether DNS is expected on the chosen path
+  --internet-before-claim <true|false> Whether upstream internet is required before claim
+  --declare-prereq <id>                Repeatable Stage 0 operator declaration satisfied for preflight
   --target-distro <name>               Linux distribution (default: ubuntu)
   --target-distro-version <version>    Distribution version (default: 24.04)
   --disk-partition-shape <shape>       Partition shape (default: single-root-swapfile)
@@ -46,12 +56,21 @@ OPERATOR_USER="ronnyworks"
 SSH_PUBLIC_KEY_REF="${HOME}/.ssh/id_ed25519.pub"
 TAILSCALE_MODE="manual"
 BOOTSTRAP_METHOD=""
+BOOT_MEDIUM=""
+CONSOLE_PATH=""
+NETWORK_METHOD=""
+FALLBACK_NETWORK_METHOD=""
+LINUX_EXPECTED=""
+DHCP_EXPECTED=""
+DNS_EXPECTED=""
+INTERNET_BEFORE_CLAIM=""
 TARGET_DISTRO="ubuntu"
 TARGET_DISTRO_VERSION="24.04"
 DISK_PARTITION_SHAPE="single-root-swapfile"
 PACKAGE_BASELINE=""
 OUTPUT_DIR=""
 JSON_MODE=false
+declare -a DECLARED_PREREQS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -62,6 +81,15 @@ while [[ $# -gt 0 ]]; do
         --ssh-public-key-ref) SSH_PUBLIC_KEY_REF="${2:-}"; shift 2 ;;
         --tailscale-enrollment-mode) TAILSCALE_MODE="${2:-}"; shift 2 ;;
         --bootstrap-method) BOOTSTRAP_METHOD="${2:-}"; shift 2 ;;
+        --boot-medium) BOOT_MEDIUM="${2:-}"; shift 2 ;;
+        --console-path) CONSOLE_PATH="${2:-}"; shift 2 ;;
+        --network-method) NETWORK_METHOD="${2:-}"; shift 2 ;;
+        --fallback-network-method) FALLBACK_NETWORK_METHOD="${2:-}"; shift 2 ;;
+        --linux-expected) LINUX_EXPECTED="${2:-}"; shift 2 ;;
+        --dhcp-expected) DHCP_EXPECTED="${2:-}"; shift 2 ;;
+        --dns-expected) DNS_EXPECTED="${2:-}"; shift 2 ;;
+        --internet-before-claim) INTERNET_BEFORE_CLAIM="${2:-}"; shift 2 ;;
+        --declare-prereq) DECLARED_PREREQS+=("${2:-}"); shift 2 ;;
         --target-distro) TARGET_DISTRO="${2:-}"; shift 2 ;;
         --target-distro-version) TARGET_DISTRO_VERSION="${2:-}"; shift 2 ;;
         --disk-partition-shape) DISK_PARTITION_SHAPE="${2:-}"; shift 2 ;;
@@ -81,6 +109,7 @@ need jq
 
 [[ -f "$INVENTORY" ]] || fail "inventory not found: $INVENTORY"
 [[ -f "$CONTRACT" ]] || fail "handoff contract not found: $CONTRACT"
+[[ -x "$CONNECTIVITY_PREFLIGHT_CAP" ]] || fail "connectivity preflight capability not found: $CONNECTIVITY_PREFLIGHT_CAP"
 
 device_json=$(yq e -o=json ".machines[] | select(.device_id == \"$DEVICE\")" "$INVENTORY" 2>/dev/null)
 [[ -n "$device_json" && "$device_json" != "null" ]] || fail "device not found in inventory: $DEVICE"
@@ -109,6 +138,35 @@ if [[ -z "$BOOTSTRAP_METHOD" ]]; then
     esac
 fi
 
+if [[ -z "$BOOT_MEDIUM" ]]; then
+    case "$BOOTSTRAP_METHOD" in
+        usb_autoinstall|manual_console_install) BOOT_MEDIUM="usb" ;;
+        pxe) BOOT_MEDIUM="pxe" ;;
+        iventoy) BOOT_MEDIUM="iventoy" ;;
+    esac
+fi
+
+declare -a inferred_prereqs=(
+    bootstrap_console_path_known
+    firmware_boot_path_known
+    installer_media_path_known
+    bootstrap_network_method_selected
+    bootstrap_network_device_class_known
+    bootstrap_network_expectation_known
+    operator_user_plan
+    ssh_public_key_selected
+    tailscale_enrollment_plan
+    package_tool_baseline
+    remote_access_plan
+    bootstrap_transport_handoff_plan
+)
+
+for prereq in "${inferred_prereqs[@]}"; do
+    if ! printf '%s\n' "${DECLARED_PREREQS[@]:-}" | rg -qx "$prereq" >/dev/null 2>&1; then
+        DECLARED_PREREQS+=("$prereq")
+    fi
+done
+
 case "$BOOTSTRAP_METHOD" in
     usb_autoinstall|pxe|iventoy|manual_console_install) ;;
     *) fail "invalid bootstrap method: $BOOTSTRAP_METHOD" ;;
@@ -129,6 +187,39 @@ fi
 IFS=',' read -r -a package_array <<<"$PACKAGE_BASELINE"
 package_json=$(printf '%s\n' "${package_array[@]}" | awk 'NF {print}' | jq -R -s 'split("\n") | map(select(length > 0))')
 
+declare -a PREFLIGHT_CMD=(
+    "$CONNECTIVITY_PREFLIGHT_CAP"
+    --device "$DEVICE"
+    --target-platform "$TARGET_PLATFORM"
+    --boot-medium "$BOOT_MEDIUM"
+    --json
+)
+
+[[ -n "$CONSOLE_PATH" ]] && PREFLIGHT_CMD+=(--console-path "$CONSOLE_PATH")
+[[ -n "$NETWORK_METHOD" ]] && PREFLIGHT_CMD+=(--network-method "$NETWORK_METHOD")
+[[ -n "$FALLBACK_NETWORK_METHOD" ]] && PREFLIGHT_CMD+=(--fallback-network-method "$FALLBACK_NETWORK_METHOD")
+[[ -n "$LINUX_EXPECTED" ]] && PREFLIGHT_CMD+=(--linux-expected "$LINUX_EXPECTED")
+[[ -n "$DHCP_EXPECTED" ]] && PREFLIGHT_CMD+=(--dhcp-expected "$DHCP_EXPECTED")
+[[ -n "$DNS_EXPECTED" ]] && PREFLIGHT_CMD+=(--dns-expected "$DNS_EXPECTED")
+[[ -n "$INTERNET_BEFORE_CLAIM" ]] && PREFLIGHT_CMD+=(--internet-before-claim "$INTERNET_BEFORE_CLAIM")
+for prereq in "${DECLARED_PREREQS[@]}"; do
+    PREFLIGHT_CMD+=(--declare-prereq "$prereq")
+done
+
+prefight_json="$("${PREFLIGHT_CMD[@]}")"
+preflight_result=$(echo "$prefight_json" | jq -r '.result')
+device_class=$(echo "$prefight_json" | jq -r '.device_class')
+chosen_network_method=$(echo "$prefight_json" | jq -r '.chosen_first_network_method // empty')
+connectivity_gate_status=$(echo "$prefight_json" | jq -r '.gates.connectivity_gate.status')
+missing_prereqs_json=$(echo "$prefight_json" | jq -c '.missing_prerequisites')
+
+if [[ "$device_class" == "salvage_laptop" || "$device_class" == "old_intel_macbook" ]]; then
+    [[ -n "$chosen_network_method" ]] || fail "connectivity preflight failed: salvage-laptop Stage 0 requires a declared approved network method"
+fi
+if [[ "$preflight_result" != "ready_for_reprovision" ]]; then
+    fail "connectivity preflight failed: result=$preflight_result connectivity_gate=$connectivity_gate_status missing=$(echo "$missing_prereqs_json" | jq -r 'join(",")')"
+fi
+
 if [[ -z "$OUTPUT_DIR" ]]; then
     OUTPUT_DIR="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${DEVICE}"
 fi
@@ -141,15 +232,32 @@ if [[ "$BOOTSTRAP_METHOD" == "pxe" || "$BOOTSTRAP_METHOD" == "iventoy" ]]; then
     local_hands_required=false
 fi
 
-case "$source_platform" in
-    mac)
-        local_hands_steps_json='["Attach USB installer","Use Apple boot picker (Option key) to select installer","Complete first boot with local console if required"]'
+case "$device_class" in
+    old_intel_macbook)
+        case "$chosen_network_method" in
+            rtl8153_ethernet|known_good_usb_nic)
+                local_hands_steps_json='["Use the laptop built-in screen and keyboard only","Attach the reusable Ubuntu USB installer","Attach the approved wired NIC and upstream ethernet before boot","Power on while holding Option","Select EFI/Ubuntu installer from the Apple boot picker","Keep the single wired network path attached through first boot and claim"]'
+                ;;
+            approved_usb_tether_fallback)
+                local_hands_steps_json='["Use the laptop built-in screen and keyboard only","Attach the reusable Ubuntu USB installer","Attach the approved USB tether fallback directly to the laptop","Power on while holding Option","Select EFI/Ubuntu installer from the Apple boot picker","Keep the single tether path attached through first boot and claim"]'
+                ;;
+            *)
+                local_hands_steps_json='["Use the laptop built-in screen and keyboard only","Attach the reusable Ubuntu USB installer","Power on while holding Option","Select EFI/Ubuntu installer from the Apple boot picker","Keep the declared single first-boot network path attached through claim"]'
+                ;;
+        esac
         ;;
-    windows)
-        local_hands_steps_json='["Attach installer media or select netboot path","Use BIOS/UEFI boot menu to select installer","Complete first boot with local console if required"]'
+    salvage_laptop)
+        local_hands_steps_json='["Use the device built-in screen and keyboard for first touch","Attach the reusable installer medium","Attach the declared single approved first-boot network path","Use the firmware boot menu to select the installer medium","Keep the same network path attached through first boot and claim"]'
         ;;
     *)
-        local_hands_steps_json='["Ensure target boot path is selected","Complete first boot with local console if required"]'
+        case "$source_platform" in
+            windows)
+                local_hands_steps_json='["Attach installer media or select netboot path","Use BIOS/UEFI boot menu to select installer","Complete first boot with local console if required"]'
+                ;;
+            *)
+                local_hands_steps_json='["Ensure target boot path is selected","Complete first boot with local console if required"]'
+                ;;
+        esac
         ;;
 esac
 
@@ -158,6 +266,7 @@ kit_summary_path="${OUTPUT_DIR}/bootstrap-kit.${DEVICE}.summary.txt"
 
 jq -n \
     --arg device_id "$DEVICE" \
+    --arg device_class "$device_class" \
     --arg source_platform "$source_platform" \
     --arg target_platform "$TARGET_PLATFORM" \
     --arg hostname "$HOSTNAME" \
@@ -168,16 +277,23 @@ jq -n \
     --arg target_distro "$TARGET_DISTRO" \
     --arg target_distro_version "$TARGET_DISTRO_VERSION" \
     --arg disk_partition_shape "$DISK_PARTITION_SHAPE" \
+    --arg boot_medium "$BOOT_MEDIUM" \
+    --arg console_path "$CONSOLE_PATH" \
+    --arg chosen_network_method "$chosen_network_method" \
+    --arg fallback_network_method "$FALLBACK_NETWORK_METHOD" \
     --arg model "$model" \
     --arg year "$year" \
     --arg created_at "$created_at" \
     --arg contract_ref "ops/bindings/operator.hardware.bootstrap.handoff.contract.yaml" \
     --arg inventory_ref "ops/bindings/operator.hardware.inventory.yaml" \
+    --arg connectivity_preflight_ref "host.operator-hardware.connectivity-preflight" \
     --argjson package_baseline "$package_json" \
+    --argjson connectivity_preflight "$prefight_json" \
     --argjson local_hands_required "$local_hands_required" \
     --argjson local_hands_steps "$local_hands_steps_json" \
     '{
         device_id: $device_id,
+        device_class: $device_class,
         source_platform: $source_platform,
         target_platform: $target_platform,
         hostname: $hostname,
@@ -186,9 +302,13 @@ jq -n \
         tailscale_enrollment_mode: $tailscale_enrollment_mode,
         package_baseline: $package_baseline,
         bootstrap_method: $bootstrap_method,
+        boot_medium: $boot_medium,
         target_distro: $target_distro,
         target_distro_version: $target_distro_version,
         disk_partition_shape: $disk_partition_shape,
+        console_path: (if $console_path == "" then null else $console_path end),
+        chosen_network_method: (if $chosen_network_method == "" then null else $chosen_network_method end),
+        fallback_network_method: (if $fallback_network_method == "" then null else $fallback_network_method end),
         device_fixture: {
             model: $model,
             year: (if $year == "" then null else ($year | tonumber? // $year) end)
@@ -196,8 +316,10 @@ jq -n \
         provenance: {
             rendered_at: $created_at,
             contract_ref: $contract_ref,
-            inventory_ref: $inventory_ref
+            inventory_ref: $inventory_ref,
+            connectivity_preflight_ref: $connectivity_preflight_ref
         },
+        connectivity_preflight: $connectivity_preflight,
         local_hands_required: $local_hands_required,
         local_hands_steps: $local_hands_steps
     }' >"$kit_manifest_path"
@@ -208,6 +330,9 @@ source_platform: $source_platform
 target_platform: $TARGET_PLATFORM
 hostname: $HOSTNAME
 bootstrap_method: $BOOTSTRAP_METHOD
+device_class: $device_class
+boot_medium: $BOOT_MEDIUM
+network_method: ${chosen_network_method:-not declared}
 target_distro: $TARGET_DISTRO $TARGET_DISTRO_VERSION
 output: $kit_manifest_path
 EOF
@@ -222,6 +347,8 @@ if $JSON_MODE; then
         --arg bootstrap_method "$BOOTSTRAP_METHOD" \
         --arg hostname "$HOSTNAME" \
         --arg target_platform "$TARGET_PLATFORM" \
+        --arg device_class "$device_class" \
+        --arg network_method "$chosen_network_method" \
         --arg target_distro "$TARGET_DISTRO" \
         --arg target_distro_version "$TARGET_DISTRO_VERSION" \
         --argjson local_hands_required "$local_hands_required" \
@@ -230,8 +357,10 @@ if $JSON_MODE; then
             capability: $capability,
             device: $device,
             target_platform: $target_platform,
+            device_class: $device_class,
             hostname: $hostname,
             bootstrap_method: $bootstrap_method,
+            chosen_first_network_method: (if $network_method == "" then null else $network_method end),
             target_distro: $target_distro,
             target_distro_version: $target_distro_version,
             local_hands_required: $local_hands_required,

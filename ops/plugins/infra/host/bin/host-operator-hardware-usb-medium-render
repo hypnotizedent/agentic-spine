@@ -99,19 +99,46 @@ kit_json="$(cat "$KIT_PATH")"
 hostname=$(echo "$kit_json" | jq -r '.hostname')
 target_platform=$(echo "$kit_json" | jq -r '.target_platform')
 bootstrap_method=$(echo "$kit_json" | jq -r '.bootstrap_method')
+boot_medium=$(echo "$kit_json" | jq -r '.boot_medium // empty')
 target_distro=$(echo "$kit_json" | jq -r '.target_distro')
 target_distro_version=$(echo "$kit_json" | jq -r '.target_distro_version')
 operator_user=$(echo "$kit_json" | jq -r '.operator_user')
 local_hands_required=$(echo "$kit_json" | jq -r '.local_hands_required')
+device_class_from_kit=$(echo "$kit_json" | jq -r '.device_class // empty')
+chosen_network_method=$(echo "$kit_json" | jq -r '.chosen_network_method // empty')
+fallback_network_method=$(echo "$kit_json" | jq -r '.fallback_network_method // empty')
+connectivity_preflight_result=$(echo "$kit_json" | jq -r '.connectivity_preflight.result // empty')
 
 write_strategy="stock_iso_raw_write"
 iso_library_ref=$(yq e -r '.artifact_shelf.iso_library_ref // ""' "$SHELF_CONTRACT")
 
 device_class="salvage_laptop"
+if [[ -n "$device_class_from_kit" && "$device_class_from_kit" != "null" ]]; then
+    device_class="$device_class_from_kit"
+elif [[ "$source_platform" == "mac" ]]; then
+    device_class="old_intel_macbook"
+fi
+
+if [[ "$device_class" == "salvage_laptop" || "$device_class" == "old_intel_macbook" ]]; then
+    [[ -n "$chosen_network_method" ]] || fail "salvage-laptop medium render requires a declared approved network method from bootstrap-kit.render"
+    [[ "$connectivity_preflight_result" == "ready_for_reprovision" ]] || fail "salvage-laptop medium render requires connectivity preflight result ready_for_reprovision"
+fi
+
 boot_ritual='["Insert reusable medium","Select the installer medium in firmware/boot picker","Let Linux installer start","After first boot, run Stage 0 claim"]'
-if [[ "$source_platform" == "mac" ]]; then
-    device_class="old_macbook"
-    boot_ritual='["Insert reusable USB/SSD","Power on while holding Option","Select EFI/Ubuntu installer from Apple boot picker","Let Linux installer start","After first boot, run Stage 0 claim"]'
+if [[ "$device_class" == "old_intel_macbook" ]]; then
+    case "$chosen_network_method" in
+        rtl8153_ethernet|known_good_usb_nic)
+            boot_ritual='["Use the laptop built-in screen and keyboard only","Attach the approved wired NIC before power-on","Insert the reusable Ubuntu USB/SSD","Power on while holding Option","Select EFI/Ubuntu installer from the Apple boot picker","Keep the single wired network path attached through first boot and claim"]'
+            ;;
+        approved_usb_tether_fallback)
+            boot_ritual='["Use the laptop built-in screen and keyboard only","Attach the approved USB tether directly to the laptop","Insert the reusable Ubuntu USB/SSD","Power on while holding Option","Select EFI/Ubuntu installer from the Apple boot picker","Keep the single tether path attached through first boot and claim"]'
+            ;;
+        *)
+            boot_ritual='["Use the laptop built-in screen and keyboard only","Insert the reusable Ubuntu USB/SSD","Power on while holding Option","Select EFI/Ubuntu installer from the Apple boot picker","Keep the declared single first-boot network path attached through claim"]'
+            ;;
+    esac
+elif [[ "$device_class" == "salvage_laptop" ]]; then
+    boot_ritual='["Use the device built-in screen and keyboard only","Attach the declared approved first-boot network path","Insert the reusable installer medium","Select the installer medium in the firmware boot picker","Keep the same network path attached through first boot and claim"]'
 fi
 
 iso_resolution_status="artifact_reference_only"
@@ -137,6 +164,7 @@ jq -n \
     --arg operator_user "$operator_user" \
     --arg medium_type "$MEDIUM_TYPE" \
     --arg write_strategy "$write_strategy" \
+    --arg boot_medium "$boot_medium" \
     --arg iso_source "${ISO_PATH:-$iso_library_ref}" \
     --arg iso_resolution_status "$iso_resolution_status" \
     --arg iso_library_ref "$iso_library_ref" \
@@ -146,6 +174,9 @@ jq -n \
     --arg device_notes_path "$device_notes" \
     --arg claim_handoff_ref "$claim_handoff_ref" \
     --arg bootstrap_method "$bootstrap_method" \
+    --arg chosen_network_method "$chosen_network_method" \
+    --arg fallback_network_method "$fallback_network_method" \
+    --arg connectivity_preflight_result "$connectivity_preflight_result" \
     --arg target_distro "$target_distro" \
     --arg target_distro_version "$target_distro_version" \
     --arg tailscale_identity "$tailscale_identity" \
@@ -161,6 +192,7 @@ jq -n \
         operator_user: $operator_user,
         medium_type: $medium_type,
         write_strategy: $write_strategy,
+        boot_medium: (if $boot_medium == "" then null else $boot_medium end),
         iso_source: $iso_source,
         iso_resolution_status: $iso_resolution_status,
         iso_library_ref: (if $iso_library_ref == "" then null else $iso_library_ref end),
@@ -170,6 +202,9 @@ jq -n \
         device_notes_path: $device_notes_path,
         claim_handoff_ref: $claim_handoff_ref,
         bootstrap_method: $bootstrap_method,
+        chosen_network_method: (if $chosen_network_method == "" then null else $chosen_network_method end),
+        fallback_network_method: (if $fallback_network_method == "" then null else $fallback_network_method end),
+        connectivity_preflight_result: (if $connectivity_preflight_result == "" then null else $connectivity_preflight_result end),
         target_distro: $target_distro,
         target_distro_version: $target_distro_version,
         tailscale_identity: (if $tailscale_identity == "" then null else $tailscale_identity end),
@@ -187,6 +222,8 @@ cat >"$summary_path" <<EOF
 device_id: $DEVICE
 medium_type: $MEDIUM_TYPE
 write_strategy: $write_strategy
+device_class: $device_class
+network_method: ${chosen_network_method:-not declared}
 iso_source: ${ISO_PATH:-$iso_library_ref}
 iso_resolution_status: $iso_resolution_status
 kit_manifest_path: $KIT_PATH
@@ -201,12 +238,16 @@ if $JSON_MODE; then
         --arg medium_type "$MEDIUM_TYPE" \
         --arg plan_path "$plan_path" \
         --arg summary_path "$summary_path" \
+        --arg device_class "$device_class" \
+        --arg network_method "$chosen_network_method" \
         --arg iso_source "${ISO_PATH:-$iso_library_ref}" \
         --arg iso_resolution_status "$iso_resolution_status" \
         '{
             capability: $capability,
             device: $device,
             medium_type: $medium_type,
+            device_class: $device_class,
+            chosen_first_network_method: (if $network_method == "" then null else $network_method end),
             iso_source: $iso_source,
             iso_resolution_status: $iso_resolution_status,
             generated_artifacts: [$plan_path, $summary_path],
