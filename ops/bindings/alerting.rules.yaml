@@ -1,10 +1,10 @@
 # Alerting Rules Contract
 # Status: authoritative
-# Last verified: 2026-02-22
+# Last verified: 2026-04-13
 # Scope: alerting dispatch thresholds and channels
 
-version: "1.1"
-updated_at: "2026-02-22"
+version: "1.2"
+updated_at: "2026-04-13"
 owner: "@ronny"
 scope: alerting-rules
 
@@ -84,3 +84,61 @@ rules:
     trigger_statuses: [warn, incident]
     cooldown_seconds: 900
     channels: [ha, bridge-push, email]
+
+# ──────────────────────────────────────────────────────────────────────
+# Autonomous Operator Interrupt Contract (v1)
+# Formalized: 2026-04-13
+# Loop: LOOP-SPINE-AUTONOMOUS-OPERATOR-COMMS-V1-CONTRACT-20260413
+#
+# This section governs autonomous outbound communication to the operator.
+# It is a governed actuator class — not general alerting, not reporting.
+#
+# Doctrine:
+#   - Autonomous operator communication is authorized as a governed actuator
+#   - Audience: Ronny (operator/steward)
+#   - Purpose: critical operator interruption only
+#   - Silence is better than noise
+#
+# Non-goals (v1):
+#   - warnings
+#   - summaries
+#   - chatter
+#   - proposal traffic
+#   - general workflow notifications
+# ──────────────────────────────────────────────────────────────────────
+
+operator_interrupt:
+  version: 1
+  formalized_at: "2026-04-13"
+  audience: operator
+  operator_identity: "@ronny"
+  purpose: critical-operator-interruption
+  actuator_class: governed
+
+  # Channel hierarchy for operator interruption
+  channels:
+    primary_interrupt: ha
+    supporting_artifact: bridge-push
+    email_disposition: manual-fallback-only
+
+  # Operator response surface (not a delivery channel)
+  response_surface: termux_ssh
+
+  # Calm read surface (not an interrupt channel)
+  read_surface: cockpit
+
+  # Only incident-class events may fire the operator interrupt
+  trigger_threshold: incident
+
+  # Domains authorized for operator interrupt in v1
+  # These are engine-critical domains matching "engine combustion" class truth
+  allowed_domain_ids:
+    - infra-core-stack
+    - mcp-runtime-anti-drift
+
+  # Pacing: reuse existing cooldown mechanics with severe posture
+  cooldown_seconds: 1800
+  dedupe_by: domain_fingerprint
+
+  # Dispatch is formalized but not resumed in this contract
+  dispatch_state: formalized-not-resumed
