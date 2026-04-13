@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-operator-hardware-connectivity-preflight
+# Read-only: assess whether a specific operator-owned machine has a deterministic
+# Stage 0 first-touch console/network/control path before reprovision proceeds.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
+PROFILES="${SPINE_REPO}/ops/bindings/operator.hardware.readiness.profiles.yaml"
+
+usage() {
+    cat <<'EOF'
+host-operator-hardware-connectivity-preflight - Stage 0 connectivity/control preflight
+
+Usage:
+  host-operator-hardware-connectivity-preflight --device <device_id> [options] [--json]
+
+Options:
+  --device <device_id>                 Device ID from operator.hardware.inventory.yaml
+  --target-platform <platform>         Target platform after reprovision (default: linux)
+  --device-class <class>               Override inferred device class (for example old_intel_macbook)
+  --boot-medium <medium>               usb | external_ssd | pxe | iventoy
+  --console-path <path>                built_in_screen_keyboard | external_console
+  --network-method <method>            rtl8153_ethernet | known_good_usb_nic | approved_usb_tether_fallback | built_in_wifi_primary | arbitrary_dock_nic
+  --fallback-network-method <method>   Optional fallback method
+  --linux-expected <true|false>        Whether the chosen network path is expected to appear in Linux
+  --dhcp-expected <true|false>         Whether DHCP is expected on the chosen path
+  --dns-expected <true|false>          Whether DNS is expected on the chosen path
+  --internet-before-claim <true|false> Whether upstream internet is required before claim
+  --declare-prereq <id>                Repeatable operator declaration prerequisite that is satisfied
+  --json                               Machine-readable JSON output
+
+This capability is READ-ONLY. It does not wipe, reimage, change networking, or mutate any device.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+DEVICE=""
+TARGET_PLATFORM="linux"
+DEVICE_CLASS=""
+BOOT_MEDIUM=""
+CONSOLE_PATH=""
+NETWORK_METHOD=""
+FALLBACK_NETWORK_METHOD=""
+LINUX_EXPECTED=""
+DHCP_EXPECTED=""
+DNS_EXPECTED=""
+INTERNET_BEFORE_CLAIM=""
+JSON_MODE=false
+declare -a DECLARED_PREREQS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device) DEVICE="${2:-}"; shift 2 ;;
+        --target-platform) TARGET_PLATFORM="${2:-}"; shift 2 ;;
+        --device-class) DEVICE_CLASS="${2:-}"; shift 2 ;;
+        --boot-medium) BOOT_MEDIUM="${2:-}"; shift 2 ;;
+        --console-path) CONSOLE_PATH="${2:-}"; shift 2 ;;
+        --network-method) NETWORK_METHOD="${2:-}"; shift 2 ;;
+        --fallback-network-method) FALLBACK_NETWORK_METHOD="${2:-}"; shift 2 ;;
+        --linux-expected) LINUX_EXPECTED="${2:-}"; shift 2 ;;
+        --dhcp-expected) DHCP_EXPECTED="${2:-}"; shift 2 ;;
+        --dns-expected) DNS_EXPECTED="${2:-}"; shift 2 ;;
+        --internet-before-claim) INTERNET_BEFORE_CLAIM="${2:-}"; shift 2 ;;
+        --declare-prereq) DECLARED_PREREQS+=("${2:-}"); shift 2 ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$DEVICE" ]] || fail "--device is required"
+
+need yq
+need jq
+
+[[ -f "$INVENTORY" ]] || fail "inventory not found: $INVENTORY"
+[[ -f "$PROFILES" ]] || fail "profiles not found: $PROFILES"
+
+device_json=$(yq e -o=json ".machines[] | select(.device_id == \"$DEVICE\")" "$INVENTORY" 2>/dev/null)
+[[ -n "$device_json" && "$device_json" != "null" ]] || fail "device not found in inventory: $DEVICE"
+
+source_platform=$(echo "$device_json" | jq -r '.platform')
+model=$(echo "$device_json" | jq -r '.model // "unknown"')
+year=$(echo "$device_json" | jq -r '.year // 0')
+
+if [[ -z "$DEVICE_CLASS" ]]; then
+    if [[ "$source_platform" == "mac" && "$model" == *"MacBook"* && "$year" != "0" && "$year" -le 2019 ]]; then
+        DEVICE_CLASS="old_intel_macbook"
+    elif [[ "$model" == *"MacBook"* || "$model" == *"ThinkPad"* || "$model" == *"Latitude"* || "$model" == *"Laptop"* ]]; then
+        DEVICE_CLASS="salvage_laptop"
+    else
+        DEVICE_CLASS="unknown"
+    fi
+fi
+
+approved_primary_methods_json=$(yq e -o=json '.stage0_bootstrap_stance.salvage_laptop.approved_primary_network_methods' "$PROFILES")
+approved_fallback_methods_json=$(yq e -o=json '.stage0_bootstrap_stance.salvage_laptop.approved_fallback_network_methods' "$PROFILES")
+disallowed_methods_json=$(yq e -o=json '.stage0_bootstrap_stance.salvage_laptop.disallowed_defaults' "$PROFILES")
+
+device_class_profile_json=$(yq e -o=json ".stage0_bootstrap_stance.device_classes.${DEVICE_CLASS} // {}" "$PROFILES")
+device_class_exists=$(echo "$device_class_profile_json" | jq 'type == "object" and length > 0')
+if [[ "$device_class_exists" == "true" ]]; then
+    class_wifi_primary_allowed=$(echo "$device_class_profile_json" | jq -r '.wifi_primary_allowed // "null"')
+    class_internet_required=$(echo "$device_class_profile_json" | jq -r '.internet_required_before_claim // "null"')
+    class_dhcp_expected=$(echo "$device_class_profile_json" | jq -r '.dhcp_expected // "null"')
+    class_dns_expected=$(echo "$device_class_profile_json" | jq -r '.dns_expected // "null"')
+else
+    class_wifi_primary_allowed="null"
+    class_internet_required="null"
+    class_dhcp_expected="null"
+    class_dns_expected="null"
+fi
+
+if [[ -z "$INTERNET_BEFORE_CLAIM" && "$class_internet_required" != "null" ]]; then
+    INTERNET_BEFORE_CLAIM="$class_internet_required"
+fi
+if [[ -z "$DHCP_EXPECTED" && "$class_dhcp_expected" != "null" ]]; then
+    DHCP_EXPECTED="$class_dhcp_expected"
+fi
+if [[ -z "$DNS_EXPECTED" && "$class_dns_expected" != "null" ]]; then
+    DNS_EXPECTED="$class_dns_expected"
+fi
+if [[ -z "$LINUX_EXPECTED" && -n "$NETWORK_METHOD" ]]; then
+    case "$NETWORK_METHOD" in
+        rtl8153_ethernet|known_good_usb_nic|approved_usb_tether_fallback) LINUX_EXPECTED="true" ;;
+        built_in_wifi_primary|arbitrary_dock_nic) LINUX_EXPECTED="false" ;;
+    esac
+fi
+
+declared_prereqs_json=$(printf '%s\n' "${DECLARED_PREREQS[@]:-}" | jq -R -s 'split("\n") | map(select(length > 0))')
+
+has_declared_prereq() {
+    local prereq="$1"
+    echo "$declared_prereqs_json" | jq -e --arg prereq "$prereq" 'index($prereq) != null' >/dev/null
+}
+
+gate_prereqs_json() {
+    local gate="$1"
+    yq e -o=json ".stage0_gate_model.${gate}.required_prerequisites" "$PROFILES"
+}
+
+collect_missing_prereqs() {
+    local gate="$1"
+    local gate_prereqs
+    gate_prereqs="$(gate_prereqs_json "$gate")"
+    local missing="[]"
+    local count
+    count=$(echo "$gate_prereqs" | jq 'length')
+    if [[ "$count" -eq 0 ]]; then
+        echo "[]"
+        return
+    fi
+    for i in $(seq 0 $((count - 1))); do
+        local prereq
+        prereq=$(echo "$gate_prereqs" | jq -r ".[$i]")
+        if ! has_declared_prereq "$prereq"; then
+            missing=$(echo "$missing" | jq --arg prereq "$prereq" '. + [$prereq]')
+        fi
+    done
+    echo "$missing"
+}
+
+build_gate_json() {
+    local gate="$1"
+    local status="$2"
+    local reason="$3"
+    local missing_json="$4"
+    jq -n \
+        --arg gate "$gate" \
+        --arg status "$status" \
+        --arg reason "$reason" \
+        --argjson missing_prerequisites "$missing_json" \
+        '{gate: $gate, status: $status, reason: $reason, missing_prerequisites: $missing_prerequisites}'
+}
+
+hardware_missing="$(collect_missing_prereqs hardware_preflight_gate)"
+connectivity_missing="$(collect_missing_prereqs connectivity_gate)"
+bootstrap_missing="$(collect_missing_prereqs bootstrap_gate)"
+claim_missing="$(collect_missing_prereqs claim_gate)"
+
+hardware_status="ready"
+hardware_reason="built-in first-touch console and installer medium have been declared"
+if echo "$hardware_missing" | jq -e 'length > 0' >/dev/null; then
+    hardware_status="needs_operator_intervention"
+    hardware_reason="missing hardware preflight declarations"
+fi
+if [[ "$DEVICE_CLASS" == "old_intel_macbook" && -n "$CONSOLE_PATH" && "$CONSOLE_PATH" != "built_in_screen_keyboard" ]]; then
+    hardware_status="blocked"
+    hardware_reason="old Intel MacBooks require built-in screen/keyboard for first touch"
+fi
+if [[ "$DEVICE_CLASS" == "old_intel_macbook" && -z "$BOOT_MEDIUM" ]]; then
+    if [[ "$hardware_status" != "blocked" ]]; then
+        hardware_status="needs_operator_intervention"
+        hardware_reason="boot medium not declared"
+    fi
+fi
+
+connectivity_status="ready"
+connectivity_reason="network method and expectations are declared"
+if echo "$connectivity_missing" | jq -e 'length > 0' >/dev/null; then
+    connectivity_status="needs_operator_intervention"
+    connectivity_reason="missing connectivity preflight declarations"
+fi
+if [[ -z "$NETWORK_METHOD" ]]; then
+    connectivity_status="needs_operator_intervention"
+    connectivity_reason="no first-network method declared"
+fi
+if [[ -n "$NETWORK_METHOD" ]] && echo "$disallowed_methods_json" | jq -e --arg method "$NETWORK_METHOD" 'index($method) != null' >/dev/null; then
+    connectivity_status="blocked"
+    connectivity_reason="chosen network method is explicitly disallowed for salvage-laptop Stage 0"
+fi
+if [[ "$DEVICE_CLASS" == "old_intel_macbook" && "$NETWORK_METHOD" == "built_in_wifi_primary" && "$class_wifi_primary_allowed" == "false" ]]; then
+    connectivity_status="blocked"
+    connectivity_reason="built-in Wi-Fi is not trusted as the primary Stage 0 path for old Intel MacBooks"
+fi
+if [[ -n "$NETWORK_METHOD" ]] \
+    && ! echo "$approved_primary_methods_json" | jq -e --arg method "$NETWORK_METHOD" 'index($method) != null' >/dev/null \
+    && ! echo "$approved_fallback_methods_json" | jq -e --arg method "$NETWORK_METHOD" 'index($method) != null' >/dev/null \
+    && [[ "$connectivity_status" != "blocked" ]]; then
+    connectivity_status="needs_operator_intervention"
+    connectivity_reason="chosen network method is not in the approved salvage-laptop Stage 0 set"
+fi
+if [[ -n "$LINUX_EXPECTED" && "$LINUX_EXPECTED" != "true" && "$connectivity_status" != "blocked" ]]; then
+    connectivity_status="needs_operator_intervention"
+    connectivity_reason="chosen path is not declared Linux-expected"
+fi
+
+bootstrap_status="ready"
+bootstrap_reason="bootstrap delivery plan is declared"
+if echo "$bootstrap_missing" | jq -e 'length > 0' >/dev/null; then
+    bootstrap_status="needs_operator_intervention"
+    bootstrap_reason="missing bootstrap declarations"
+fi
+
+claim_status="ready"
+claim_reason="claim handoff plan is declared"
+if echo "$claim_missing" | jq -e 'length > 0' >/dev/null; then
+    claim_status="needs_operator_intervention"
+    claim_reason="missing claim handoff declarations"
+fi
+if [[ -n "$INTERNET_BEFORE_CLAIM" && "$INTERNET_BEFORE_CLAIM" != "true" ]]; then
+    claim_status="needs_operator_intervention"
+    claim_reason="claim path does not declare upstream internet before claim"
+fi
+
+hardware_gate_json="$(build_gate_json hardware_preflight_gate "$hardware_status" "$hardware_reason" "$hardware_missing")"
+connectivity_gate_json="$(build_gate_json connectivity_gate "$connectivity_status" "$connectivity_reason" "$connectivity_missing")"
+bootstrap_gate_json="$(build_gate_json bootstrap_gate "$bootstrap_status" "$bootstrap_reason" "$bootstrap_missing")"
+claim_gate_json="$(build_gate_json claim_gate "$claim_status" "$claim_reason" "$claim_missing")"
+
+overall="ready_for_reprovision"
+if printf '%s\n' "$hardware_status" "$connectivity_status" "$bootstrap_status" "$claim_status" | rg -qx 'blocked'; then
+    overall="blocked"
+elif printf '%s\n' "$hardware_status" "$connectivity_status" "$bootstrap_status" "$claim_status" | rg -qx 'needs_operator_intervention'; then
+    overall="needs_operator_intervention"
+fi
+
+missing_prereqs_json="$(echo "$hardware_missing" "$connectivity_missing" "$bootstrap_missing" "$claim_missing" | jq -s 'add | unique')"
+
+if $JSON_MODE; then
+    jq -n \
+        --arg capability "host.operator-hardware.connectivity-preflight" \
+        --arg device "$DEVICE" \
+        --arg source_platform "$source_platform" \
+        --arg target_platform "$TARGET_PLATFORM" \
+        --arg device_class "$DEVICE_CLASS" \
+        --arg model "$model" \
+        --arg boot_medium "$BOOT_MEDIUM" \
+        --arg console_path "$CONSOLE_PATH" \
+        --arg network_method "$NETWORK_METHOD" \
+        --arg fallback_network_method "$FALLBACK_NETWORK_METHOD" \
+        --arg linux_expected "$LINUX_EXPECTED" \
+        --arg dhcp_expected "$DHCP_EXPECTED" \
+        --arg dns_expected "$DNS_EXPECTED" \
+        --arg internet_before_claim "$INTERNET_BEFORE_CLAIM" \
+        --arg result "$overall" \
+        --argjson declared_prerequisites "$declared_prereqs_json" \
+        --argjson hardware_preflight_gate "$hardware_gate_json" \
+        --argjson connectivity_gate "$connectivity_gate_json" \
+        --argjson bootstrap_gate "$bootstrap_gate_json" \
+        --argjson claim_gate "$claim_gate_json" \
+        --argjson missing_prerequisites "$missing_prereqs_json" \
+        '{
+            capability: $capability,
+            device: $device,
+            source_platform: $source_platform,
+            target_platform: $target_platform,
+            device_class: $device_class,
+            model: $model,
+            chosen_first_network_method: (if $network_method == "" then null else $network_method end),
+            boot_medium: (if $boot_medium == "" then null else $boot_medium end),
+            console_path: (if $console_path == "" then null else $console_path end),
+            fallback_network_method: (if $fallback_network_method == "" then null else $fallback_network_method end),
+            expectations: {
+                linux_expected: (if $linux_expected == "" then null else ($linux_expected == "true") end),
+                dhcp_expected: (if $dhcp_expected == "" then null else ($dhcp_expected == "true") end),
+                dns_expected: (if $dns_expected == "" then null else ($dns_expected == "true") end),
+                internet_required_before_claim: (if $internet_before_claim == "" then null else ($internet_before_claim == "true") end)
+            },
+            declared_prerequisites: $declared_prerequisites,
+            gates: {
+                hardware_preflight_gate: $hardware_preflight_gate,
+                connectivity_gate: $connectivity_gate,
+                bootstrap_gate: $bootstrap_gate,
+                claim_gate: $claim_gate
+            },
+            result: $result,
+            missing_prerequisites: $missing_prerequisites,
+            note: "Read-only Stage 0 connectivity/control-path preflight. No device mutation occurred."
+        }'
+else
+    echo "host.operator-hardware.connectivity-preflight"
+    echo "========================================"
+    echo "device:                $DEVICE"
+    echo "source platform:       $source_platform"
+    echo "target platform:       $TARGET_PLATFORM"
+    echo "device class:          $DEVICE_CLASS"
+    echo "boot medium:           ${BOOT_MEDIUM:-not declared}"
+    echo "console path:          ${CONSOLE_PATH:-not declared}"
+    echo "network method:        ${NETWORK_METHOD:-not declared}"
+    echo "fallback network:      ${FALLBACK_NETWORK_METHOD:-not declared}"
+    echo "result:                $overall"
+    echo
+    printf '%s\n' "$hardware_gate_json" "$connectivity_gate_json" "$bootstrap_gate_json" "$claim_gate_json" | \
+        jq -r '"  \(.gate): [\(.status)] \(.reason)"'
+    echo
+    echo "missing prerequisites:"
+    echo "$missing_prereqs_json" | jq -r '.[] | "  - \(.)"'
+    echo
+    echo "IMPORTANT: No device mutation occurred."
+fi

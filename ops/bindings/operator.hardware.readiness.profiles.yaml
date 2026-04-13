@@ -63,6 +63,9 @@ shared_prerequisites:
 
 pre_bootstrap_prerequisites:
   shared:
+    - id: bootstrap_console_path_known
+      description: "Console path for first touch is decided (built-in screen/keyboard for salvage laptops unless explicitly proven otherwise)."
+      evidence_type: operator_declaration
     - id: data_retention_decision
       description: "Operator has recorded what data to keep, migrate, or discard from the prior OS."
       evidence_type: operator_declaration
@@ -74,6 +77,15 @@ pre_bootstrap_prerequisites:
       evidence_type: operator_declaration
     - id: installer_media_path_known
       description: "Installation media (USB, netboot, PXE) is prepared and tested."
+      evidence_type: operator_declaration
+    - id: bootstrap_network_method_selected
+      description: "Exactly one first-boot network method is selected and treated as the intended bootstrap path."
+      evidence_type: operator_declaration
+    - id: bootstrap_network_device_class_known
+      description: "The intended first-boot network adapter or tether class is known to be Linux-expected for this device class."
+      evidence_type: operator_declaration
+    - id: bootstrap_transport_handoff_plan
+      description: "The operator-reachable handoff path after first boot is decided (for example SSH over LAN or Tailscale enrollment then SSH)."
       evidence_type: operator_declaration
     - id: operator_user_plan
       description: "Target OS username, sudo policy, and initial credentials plan are decided."
@@ -99,6 +111,9 @@ pre_bootstrap_prerequisites:
       - id: disk_partition_plan
         description: "Disk partitioning scheme is decided (e.g., single root, separate /home)."
         evidence_type: operator_declaration
+      - id: bootstrap_network_expectation_known
+        description: "Expected first-boot network behavior is decided (DHCP, DNS, and internet requirement before claim)."
+        evidence_type: operator_declaration
     mac:
       - id: macos_target_version
         description: "Target macOS version is chosen and compatible with hardware."
@@ -112,6 +127,66 @@ pre_bootstrap_prerequisites:
         evidence_type: operator_declaration
 
 # ── Mac readiness profile ───────────────────────────────────────────────────
+
+stage0_gate_model:
+  hardware_preflight_gate:
+    description: "The operator has a usable first-touch console and trusted installer medium before reprovision."
+    required_prerequisites:
+      - bootstrap_console_path_known
+      - firmware_boot_path_known
+      - installer_media_path_known
+
+  connectivity_gate:
+    description: "Exactly one deterministic first-boot network path is chosen and validated for the device class."
+    required_prerequisites:
+      - bootstrap_network_method_selected
+      - bootstrap_network_device_class_known
+      - bootstrap_network_expectation_known
+
+  bootstrap_gate:
+    description: "The bootstrap delivery plan is complete enough to seed access and identity after first boot."
+    required_prerequisites:
+      - operator_user_plan
+      - ssh_public_key_selected
+      - tailscale_enrollment_plan
+      - package_tool_baseline
+
+  claim_gate:
+    description: "The post-bootstrap handoff plan is explicit before reprovision begins."
+    required_prerequisites:
+      - remote_access_plan
+      - bootstrap_transport_handoff_plan
+
+stage0_bootstrap_stance:
+  salvage_laptop:
+    description: "Boring first-touch posture for salvage laptops. Minimize entropy by constraining console and network assumptions."
+    built_in_console_required: true
+    preferred_installer_medium: reusable_ubuntu_usb
+    approved_primary_network_methods:
+      - rtl8153_ethernet
+      - known_good_usb_nic
+    approved_fallback_network_methods:
+      - approved_usb_tether_fallback
+    disallowed_defaults:
+      - arbitrary_dock_nic
+      - built_in_wifi_primary
+      - multi_transport_stage0
+    notes:
+      - "Use the laptop's built-in screen and keyboard for first touch."
+      - "Do not assume a random dock NIC or monitor path is Linux-expected."
+      - "Use exactly one first-boot network path at a time."
+
+  device_classes:
+    old_intel_macbook:
+      stance: salvage_laptop
+      platform: mac
+      wifi_primary_allowed: false
+      internet_required_before_claim: true
+      dhcp_expected: true
+      dns_expected: true
+      notes:
+        - "Old Intel MacBooks should not trust built-in Wi-Fi as the primary Stage 0 path."
+        - "A known-good wired NIC is preferred; approved USB tether is fallback."
 
 profiles:
   mac:
