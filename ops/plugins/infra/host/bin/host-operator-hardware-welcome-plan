@@ -77,6 +77,7 @@ platform=$(echo "$device_json" | jq -r '.platform')
 model=$(echo "$device_json" | jq -r '.model // "unknown"')
 ts_ip=$(echo "$device_json" | jq -r '.tailscale_ip // empty')
 ts_id=$(echo "$device_json" | jq -r '.tailscale_identity // empty')
+inventory_platform="$platform"
 claim_consumed=false
 claim_summary="not provided"
 
@@ -156,6 +157,11 @@ if [[ -z "$SSH_PROOF" ]]; then
     blockers+=("SSH proof not provided. Use --ssh-proof <ip_or_hostname> to provide SSH endpoint.")
 elif ! $ssh_reachable; then
     blockers+=("SSH proof failed: $ssh_proof_detail")
+fi
+
+# Pre-reprovision inventory entries must hand off through a Stage 0 claim object.
+if [[ "$inventory_platform" != "linux" && "$claim_consumed" != "true" ]]; then
+    blockers+=("Stage 0 claim object is required before welcome planning for device $DEVICE because inventory platform is still '$inventory_platform'. Run host.operator-hardware.firstboot.claim after trusted Linux bootstrap.")
 fi
 
 # Plan inventory delta

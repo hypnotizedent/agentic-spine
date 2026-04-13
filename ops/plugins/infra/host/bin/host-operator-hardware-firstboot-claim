@@ -21,7 +21,7 @@ Options:
   --hostname <name>                    Booted host hostname
   --operator-user <user>               Operator user on target (default: ronnyworks)
   --ssh-public-key-ref <path>          SSH public key reference (default: ~/.ssh/id_ed25519.pub)
-  --ssh-proof-endpoint <host>          Hostname or IP to prove TCP/22 reachability
+  --ssh-proof-endpoint <host>          Hostname or IP for non-interactive SSH proof
   --source-platform <platform>         Override source platform from inventory
   --target-platform <linux>            Target platform truth (default: linux)
   --tailscale-identity <id>            Tailscale identity if present
@@ -104,6 +104,7 @@ done
 need yq
 need jq
 need timeout
+need ssh
 
 [[ -f "$INVENTORY" ]] || fail "inventory not found: $INVENTORY"
 [[ -f "$CONTRACT" ]] || fail "handoff contract not found: $CONTRACT"
@@ -141,9 +142,77 @@ if [[ -z "$INSTALLER_PROVENANCE" ]]; then
     INSTALLER_PROVENANCE="operator-declared:${BOOTSTRAP_METHOD}:${TARGET_DISTRO}-${TARGET_DISTRO_VERSION}"
 fi
 
-if ! timeout 5 bash -c "echo >/dev/tcp/$SSH_PROOF_ENDPOINT/22" 2>/dev/null; then
-    fail "ssh proof failed: port 22 not reachable at $SSH_PROOF_ENDPOINT"
+# Require actual non-interactive SSH access, not just an open TCP/22 port.
+remote_probe="$(
+    timeout 10 ssh \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=accept-new \
+        -o ConnectTimeout=5 \
+        "${OPERATOR_USER}@${SSH_PROOF_ENDPOINT}" \
+        "sh -lc '
+            uname -s 2>/dev/null || echo unknown
+            hostname 2>/dev/null || echo unknown
+            if [ -f /etc/os-release ]; then
+                . /etc/os-release
+                printf \"%s\n\" \"\${ID:-}\"
+                printf \"%s\n\" \"\${VERSION_ID:-}\"
+            else
+                printf \"\n\n\"
+            fi
+            if [ -f /etc/spine/operator-hardware-device-id ]; then
+                cat /etc/spine/operator-hardware-device-id
+            else
+                printf \"\n\"
+            fi
+            if [ -f /etc/spine/bootstrap-method ]; then
+                cat /etc/spine/bootstrap-method
+            else
+                printf \"\n\"
+            fi
+            if [ -f /etc/spine/bootstrap-target-distro ]; then
+                cat /etc/spine/bootstrap-target-distro
+            else
+                printf \"\n\"
+            fi
+        '" 2>/dev/null
+)" || true
+
+[[ -n "$remote_probe" ]] || fail "ssh proof failed: non-interactive SSH did not succeed for ${OPERATOR_USER}@${SSH_PROOF_ENDPOINT}"
+
+mapfile -t remote_probe_lines <<<"$remote_probe"
+remote_uname="${remote_probe_lines[0]:-unknown}"
+remote_hostname="${remote_probe_lines[1]:-unknown}"
+remote_os_id="${remote_probe_lines[2]:-}"
+remote_os_version="${remote_probe_lines[3]:-}"
+remote_device_marker="${remote_probe_lines[4]:-}"
+remote_bootstrap_method="${remote_probe_lines[5]:-}"
+remote_bootstrap_target_distro="${remote_probe_lines[6]:-}"
+
+if [[ "$TARGET_PLATFORM" == "linux" && "$remote_uname" != "Linux" ]]; then
+    fail "ssh proof failed: remote host at $SSH_PROOF_ENDPOINT reports uname=$remote_uname, expected Linux"
 fi
+
+if [[ "$remote_hostname" != "$HOSTNAME" ]]; then
+    fail "ssh proof failed: remote hostname '$remote_hostname' does not match expected '$HOSTNAME'"
+fi
+
+[[ -n "$remote_device_marker" ]] || fail "ssh proof failed: missing /etc/spine/operator-hardware-device-id on $SSH_PROOF_ENDPOINT"
+[[ "$remote_device_marker" == "$DEVICE" ]] || fail "ssh proof failed: remote bootstrap marker '$remote_device_marker' does not match device '$DEVICE'"
+
+[[ -n "$remote_bootstrap_method" ]] || fail "ssh proof failed: missing /etc/spine/bootstrap-method on $SSH_PROOF_ENDPOINT"
+[[ -n "$remote_bootstrap_target_distro" ]] || fail "ssh proof failed: missing /etc/spine/bootstrap-target-distro on $SSH_PROOF_ENDPOINT"
+
+if [[ "$BOOTSTRAP_METHOD" != "manual_console_install" && "$remote_bootstrap_method" != "$BOOTSTRAP_METHOD" ]]; then
+    fail "ssh proof failed: remote bootstrap method '$remote_bootstrap_method' does not match expected '$BOOTSTRAP_METHOD'"
+fi
+
+expected_target_distro="${TARGET_DISTRO} ${TARGET_DISTRO_VERSION}"
+if [[ "$remote_bootstrap_target_distro" != "$expected_target_distro" ]]; then
+    fail "ssh proof failed: remote bootstrap target distro '$remote_bootstrap_target_distro' does not match expected '$expected_target_distro'"
+fi
+
+# Successful non-interactive SSH proves the operator key is already usable.
+KEY_SEEDING_STATUS="seeded"
 
 if [[ -z "$PACKAGE_BASELINE" ]]; then
     PACKAGE_BASELINE="openssh-server,curl,git,jq,yq,python3,ripgrep,rsync,tailscale"
@@ -168,7 +237,7 @@ jq -n \
     --arg hostname "$HOSTNAME" \
     --arg operator_user "$OPERATOR_USER" \
     --arg ssh_public_key_ref "$SSH_PUBLIC_KEY_REF" \
-    --arg ssh_proof_status "reachable" \
+    --arg ssh_proof_status "key_verified" \
     --arg ssh_proof_endpoint "$SSH_PROOF_ENDPOINT" \
     --arg tailscale_identity "$TAILSCALE_IDENTITY" \
     --arg tailscale_ip "$TAILSCALE_IP" \
@@ -181,6 +250,11 @@ jq -n \
     --arg target_distro_version "$TARGET_DISTRO_VERSION" \
     --arg disk_partition_shape "$DISK_PARTITION_SHAPE" \
     --arg bootstrap_completed_at "$completed_at" \
+    --arg remote_uname "$remote_uname" \
+    --arg remote_os_id "$remote_os_id" \
+    --arg remote_os_version "$remote_os_version" \
+    --arg remote_bootstrap_method "$remote_bootstrap_method" \
+    --arg remote_bootstrap_target_distro "$remote_bootstrap_target_distro" \
     --argjson package_baseline "$package_json" \
     --argjson entropy_markers "$entropy_json" \
     '{
@@ -205,7 +279,14 @@ jq -n \
         target_distro_version: $target_distro_version,
         disk_partition_shape: $disk_partition_shape,
         bootstrap_completed_at: $bootstrap_completed_at,
-        entropy_markers: $entropy_markers
+        entropy_markers: $entropy_markers,
+        bootstrap_notes: [
+            ("remote_uname=" + $remote_uname),
+            ("remote_os_id=" + (if $remote_os_id == "" then "unknown" else $remote_os_id end)),
+            ("remote_os_version=" + (if $remote_os_version == "" then "unknown" else $remote_os_version end)),
+            ("remote_bootstrap_method=" + (if $remote_bootstrap_method == "" then "unknown" else $remote_bootstrap_method end)),
+            ("remote_bootstrap_target_distro=" + (if $remote_bootstrap_target_distro == "" then "unknown" else $remote_bootstrap_target_distro end))
+        ]
     }' >"$OUTPUT_PATH"
 
 if $JSON_MODE; then
@@ -226,7 +307,7 @@ if $JSON_MODE; then
             hostname: $hostname,
             target_platform_truth: $target_platform,
             ssh_proof: {
-                status: "reachable",
+                status: "key_verified",
                 endpoint: $ssh_endpoint
             },
             package_baseline_status: $package_baseline_status,
