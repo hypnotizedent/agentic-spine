@@ -74,6 +74,17 @@ def collect_refs() -> dict:
     commit_count, _ = _run(["git", "rev-list", "--count", "HEAD"])
     dirty_out, _ = _run(["git", "status", "--porcelain"])
     is_dirty = bool(dirty_out.strip())
+    # Extract baseline from AGENTS.md authority
+    baseline = "unavailable"
+    agents_path = REPO / "AGENTS.md"
+    try:
+        import re
+        text = agents_path.read_text(encoding="utf-8")
+        m = re.search(r"baseline is commit `([0-9a-f]+)`", text)
+        if m:
+            baseline = m.group(1)[:8]
+    except Exception:
+        pass
     return {
         "local_head": local_head,
         "local_full": local_full,
@@ -84,6 +95,7 @@ def collect_refs() -> dict:
         "commit_count": commit_count or "0",
         "is_dirty": is_dirty,
         "dirty_files": dirty_out.strip() if is_dirty else "",
+        "baseline": baseline,
     }
 
 
@@ -247,9 +259,9 @@ def capability_atlas(caps_data: dict) -> str:
     domains = sorted(set(c.get("domain", "unknown") for c in caps.values()))
 
     # Domain filter buttons
-    filters = ['<button class="cap-f active" onclick="filterCaps(\'all\')">all</button>']
+    filters = ['<button class="cap-f active" onclick="filterCaps(event,\'all\')">all</button>']
     for d in domains:
-        filters.append(f'<button class="cap-f" onclick="filterCaps(\'{_h(d)}\')">{_h(d)}</button>')
+        filters.append(f'<button class="cap-f" onclick="filterCaps(event,\'{_h(d)}\')">{_h(d)}</button>')
 
     # Capability rows
     rows = []
@@ -347,7 +359,7 @@ def authority_explorer(manifest: dict) -> str:
     # Group surfaces by kind
     by_kind: dict[str, list[dict]] = {}
     for s in surfaces:
-        k = s.get("kind", "unknown")
+        k = s.get("surface_kind", "unknown")
         by_kind.setdefault(k, []).append(s)
 
     # Also include workflow families as a group
@@ -355,16 +367,17 @@ def authority_explorer(manifest: dict) -> str:
     for kind in sorted(by_kind.keys()):
         items = by_kind[kind]
         rows.append(f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;border-top:1px solid var(--b);margin-top:.25rem">{_h(kind)} ({len(items)})</div>')
-        for s in sorted(items, key=lambda x: x.get("id", "")):
-            sid = s.get("id", "unknown")
+        for s in sorted(items, key=lambda x: x.get("surface_id", "")):
+            sid = s.get("surface_id", "unknown")
             auth_cls = s.get("authority_class", "")
-            lifecycle = s.get("lifecycle", "")
-            source = s.get("source", s.get("authority_path", s.get("path", "")))
+            lifecycle = s.get("lifecycle_state", "")
+            source = s.get("path", "")
             purpose = ""
             knowledge = s.get("knowledge", {})
             if isinstance(knowledge, dict):
-                purpose = knowledge.get("human_purpose", knowledge.get("purpose", ""))
-            gen_surface = s.get("generator_surface", s.get("regenerate_command", ""))
+                purpose = knowledge.get("what_it_does", "")
+            regen = s.get("regenerated_by", {}) or {}
+            gen_surface = regen.get("command", "") or regen.get("surface_id", "") or ""
 
             tag_cls = "surf-auth" if auth_cls == "authoritative" else ("surf-supp" if auth_cls == "supporting" else "surf-hist")
             tag_label = auth_cls[:4].upper() if auth_cls else "—"
@@ -465,7 +478,7 @@ def release_posture(refs: dict) -> str:
       <div class="rel-c"><div class="rel-l">GitHub</div><div class="rel-v"><span class="sdot {github_dot}"></span>{_h(github_parity)}</div></div>
       <div class="rel-c"><div class="rel-l">Tree</div><div class="rel-v"><span class="sdot {dirty_dot}"></span>{"dirty" if refs["is_dirty"] else "clean"}</div></div>
     </div>
-    <div style="font-size:.5rem;color:var(--t);opacity:.4">Commits: {_h(refs['commit_count'])} · Baseline: {_h(refs['local_head'])}</div>"""
+    <div style="font-size:.5rem;color:var(--t);opacity:.4">Commits: {_h(refs['commit_count'])} · Baseline: {_h(refs['baseline'])} (from AGENTS.md)</div>"""
 
 
 # ---------------------------------------------------------------------------
@@ -575,11 +588,11 @@ details[open] summary::after{transform:rotate(90deg)}
 """
 
 JS = r"""
-function filterCaps(domain) {
+function filterCaps(e, domain) {
   var rows = document.querySelectorAll('.cap[data-domain]');
   var btns = document.querySelectorAll('.cap-f');
   btns.forEach(function(b) { b.classList.remove('active'); });
-  event.target.classList.add('active');
+  e.currentTarget.classList.add('active');
   rows.forEach(function(r) {
     r.style.display = (domain === 'all' || r.dataset.domain === domain) ? '' : 'none';
   });
