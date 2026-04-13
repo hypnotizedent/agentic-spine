@@ -3,7 +3,7 @@
 # Last verified: 2026-04-13
 # Scope: alerting dispatch thresholds and channels
 
-version: "1.2"
+version: "1.3"
 updated_at: "2026-04-13"
 owner: "@ronny"
 scope: alerting-rules
@@ -85,13 +85,16 @@ rules:
     cooldown_seconds: 900
     channels: [ha, bridge-push, email]
 
-# ──────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
 # Autonomous Operator Interrupt Contract (v1)
 # Formalized: 2026-04-13
-# Loop: LOOP-SPINE-AUTONOMOUS-OPERATOR-COMMS-V1-CONTRACT-20260413
+# Amended: 2026-04-13 (authority reconciliation)
+# Loops:
+#   - LOOP-SPINE-AUTONOMOUS-OPERATOR-COMMS-V1-CONTRACT-20260413
+#   - LOOP-SPINE-OPERATOR-INTERRUPT-AUTHORITY-RECONCILE-20260413
 #
 # This section governs autonomous outbound communication to the operator.
-# It is a governed actuator class — not general alerting, not reporting.
+# It is a governed actuator class -- not general alerting, not reporting.
 #
 # Doctrine:
 #   - Autonomous operator communication is authorized as a governed actuator
@@ -105,21 +108,61 @@ rules:
 #   - chatter
 #   - proposal traffic
 #   - general workflow notifications
-# ──────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
 
 operator_interrupt:
-  version: 1
+  version: 2
   formalized_at: "2026-04-13"
+  amended_at: "2026-04-13"
   audience: operator
   operator_identity: "@ronny"
   purpose: critical-operator-interruption
   actuator_class: governed
+  actuator_subclass: operator-critical-interrupt
 
-  # Channel hierarchy for operator interruption
+  # -- Channel hierarchy and validation ------------------------------------
+  #
+  # ha channel as currently wired uses /api/services/persistent_notification/create.
+  # This is a Home Assistant dashboard inbox notification, NOT a mobile push surface.
+  #
+  # A proven mobile push path EXISTS in the estate:
+  #   service: notify.mobile_app_ronnys_iphone (HA Companion, Apple APNS)
+  #   evidence: 5 active automations in workbench/infra/homeassistant/config/automations.yaml
+  #   integration: entry_id 01JVG2HT0ZZ6W6ER3SBN65NTJ9 in ha.integrations.yaml
+  #
+  # But it is NOT wired into spine alerting. The gap is the service_path, not the provider.
   channels:
-    primary_interrupt: ha
+    best_available: ha
+    best_available_validation_status: inbox-surface-only
+    best_available_service_path: /api/services/persistent_notification/create
+    best_available_honest_characterization: >
+      Dashboard persistent notification. Visible in HA web UI.
+      Not delivered to phone unless HA Companion app is open.
+      Not a proven wake-the-operator interrupt.
     supporting_artifact: bridge-push
     email_disposition: manual-fallback-only
+
+  mobile_interrupt_gap:
+    status: open
+    finding: >
+      notify.mobile_app_ronnys_iphone is live and proven for HA automations
+      but not wired into spine alerting. Wiring it requires changing
+      service_path in the ha channel definition or adding a new channel.
+      This packet does not activate that change.
+    proven_mobile_path: notify.mobile_app_ronnys_iphone
+    proven_mobile_provider: ha_companion_apns
+    activation_status: not-activated-in-this-packet
+
+  # -- Authority -----------------------------------------------------------
+  #
+  # execution_host.external_escalation is forbidden in base authority.
+  # Escalation authority derives from a scoped exception in node.role.contract.yaml.
+  escalation_authority:
+    base_role: execution_host
+    base_external_escalation: forbidden
+    exception_source: node.role.contract.yaml#authority_exceptions.execution_host_operator_critical_interrupt
+    exception_scope: operator-critical-interrupt-only
+    sunset_condition: "Expires when watcher_node is realized."
 
   # Operator response surface (not a delivery channel)
   response_surface: termux_ssh
