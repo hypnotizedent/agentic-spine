@@ -19,6 +19,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[5]
 RUNTIME_STATE = Path(os.environ.get("SPINE_STATE", Path.home() / "code" / ".runtime" / "spine" / "state"))
+EVIDENCE_ROOT = Path(os.environ.get("SPINE_EVIDENCE_ROOT", Path.home() / "code" / ".evidence" / "spine"))
 OUTPUT = RUNTIME_STATE / "domain-state" / "SPINE_COCKPIT.html"
 
 # ---------------------------------------------------------------------------
@@ -162,6 +163,48 @@ def collect_manifest() -> dict:
     }
 
 
+def collect_node_roles(status: dict | None) -> dict:
+    """Derive node role and execution_host visibility from ops status data."""
+    result = {
+        "local_role": "",
+        "execution_host_target": "",
+        "execution_host_access": "",
+        "execution_host_workload_count": 0,
+        "execution_host_workload_labels": [],
+        "non_local_deferred": [],
+        "non_local_count": 0,
+    }
+    if not status:
+        return result
+    daemons = status.get("daemons", {})
+    result["local_role"] = daemons.get("local_role", "")
+    result["non_local_deferred"] = daemons.get("non_local_deferred", [])
+    result["non_local_count"] = len(result["non_local_deferred"])
+    exec_host = daemons.get("execution_host", {})
+    if isinstance(exec_host, dict):
+        result["execution_host_target"] = exec_host.get("target", "")
+        result["execution_host_access"] = exec_host.get("target_access", "")
+        result["execution_host_workload_count"] = exec_host.get("workload_count", 0)
+        result["execution_host_workload_labels"] = exec_host.get("workload_labels", [])
+    return result
+
+
+def collect_invocation_counts() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    sessions_root = EVIDENCE_ROOT / "sessions"
+    if not sessions_root.exists():
+        return counts
+    for path in sessions_root.iterdir():
+        if not path.is_dir():
+            continue
+        parts = path.name.split("__")
+        if len(parts) < 3:
+            continue
+        cap_name = parts[1]
+        counts[cap_name] = counts.get(cap_name, 0) + 1
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # HTML generation
 # ---------------------------------------------------------------------------
@@ -202,6 +245,87 @@ def engine_posture(status: dict | None, refs: dict) -> str:
         <div class="p-sub">{_h(' · '.join(reasons))}</div>
       </div>
     </div>"""
+
+
+def node_role_card(roles: dict) -> str:
+    """Render a compact identity card showing M4 ↔ VM207 role split."""
+    local_role = roles.get("local_role") or "unknown"
+    exec_target = roles.get("execution_host_target") or ""
+    exec_count = roles.get("execution_host_workload_count", 0)
+    non_local_count = roles.get("non_local_count", 0)
+
+    local_label = local_role.replace("_", " ")
+
+    exec_html = ""
+    if exec_target:
+        exec_html = (
+            f'<div class="nr-row">'
+            f'<div class="nr-label">execution host</div>'
+            f'<div class="nr-value">{_h(exec_target)}'
+            f'<span class="nr-sub">{exec_count} workload{"s" if exec_count != 1 else ""}</span>'
+            f'</div></div>'
+        )
+    elif non_local_count > 0:
+        exec_html = (
+            f'<div class="nr-row">'
+            f'<div class="nr-label">execution host</div>'
+            f'<div class="nr-value">unknown target'
+            f'<span class="nr-sub">{non_local_count} deferred label{"s" if non_local_count != 1 else ""}</span>'
+            f'</div></div>'
+        )
+
+    return f"""
+    <div class="nr">
+      <div class="nr-row">
+        <div class="nr-label">this machine</div>
+        <div class="nr-value">{_h(local_label)}</div>
+      </div>
+      {exec_html}
+    </div>"""
+
+
+def execution_host_section(roles: dict) -> str:
+    """Render execution_host workload visibility section."""
+    exec_target = roles.get("execution_host_target") or ""
+    if not exec_target:
+        return ""
+
+    exec_count = roles.get("execution_host_workload_count", 0)
+    exec_labels = roles.get("execution_host_workload_labels", [])
+    exec_access = roles.get("execution_host_access") or ""
+    non_local = roles.get("non_local_deferred", [])
+
+    # Workload labels for execution_host
+    workload_rows = ""
+    for lbl in sorted(exec_labels):
+        short = lbl.replace("com.ronny.", "")
+        workload_rows += f'<div class="eh-lbl">{_h(short)}</div>'
+
+    # Other deferred labels (not in execution_host set)
+    other_deferred = [lbl for lbl in non_local if lbl not in exec_labels]
+    other_rows = ""
+    if other_deferred:
+        for lbl in sorted(other_deferred):
+            short = lbl.replace("com.ronny.", "")
+            other_rows += f'<div class="eh-lbl eh-other">{_h(short)}</div>'
+        other_rows = (
+            f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;'
+            f'border-top:1px solid var(--b);margin-top:.25rem">other deferred ({len(other_deferred)})</div>'
+            + other_rows
+        )
+
+    access_line = f'<div class="eh-access">{_h(exec_access)}</div>' if exec_access else ""
+
+    return f"""
+    <div class="sh">Execution Host</div>
+    <details open>
+      <summary>{_h(exec_target)} <span class="det-count">{exec_count} workloads · {len(non_local)} total deferred</span></summary>
+      <div class="det-body">
+        {access_line}
+        {workload_rows}
+        {other_rows}
+      </div>
+    </details>"""
 
 
 def attention_section(status: dict | None, refs: dict) -> str:
@@ -250,7 +374,7 @@ def timeline_section(log: list[dict]) -> str:
     </details>"""
 
 
-def capability_atlas(caps_data: dict) -> str:
+def capability_atlas(caps_data: dict, invocation_counts: dict[str, int]) -> str:
     caps = caps_data["caps"]
     if not caps:
         return '<div class="sh">Capability Atlas</div><p style="font-size:.6rem;color:var(--t)">unavailable</p>'
@@ -270,11 +394,12 @@ def capability_atlas(caps_data: dict) -> str:
         safety = c.get("safety", "unknown")
         domain = c.get("domain", "unknown")
         desc = c.get("description", "")
+        invocation_count = invocation_counts.get(name, 0)
         safety_cls = "cap-ro" if safety == "read-only" else "cap-mut"
         safety_label = "RO" if safety == "read-only" else "MUT"
         rows.append(
             f'<div class="cap" data-domain="{_h(domain)}">'
-            f'<span class="cap-name">{_h(name)}</span>'
+            f'<span class="cap-name">{_h(name)}<span class="cap-count">{invocation_count}</span></span>'
             f'<span class="cap-desc">{_h(desc)}</span>'
             f'<span class="cap-tag {safety_cls}">{safety_label}</span>'
             f'</div>'
@@ -548,7 +673,8 @@ details[open] summary::after{transform:rotate(90deg)}
 
 .cap{display:flex;align-items:baseline;gap:.4rem;padding:.3rem 0;border-bottom:1px solid rgba(26,35,50,.5)}
 .cap:last-child{border:none}
-.cap-name{font-family:var(--m);font-size:.55rem;color:var(--tb);flex-shrink:0;min-width:220px}
+.cap-name{font-family:var(--m);font-size:.55rem;color:var(--tb);flex-shrink:0;min-width:220px;display:flex;align-items:center;gap:.35rem}
+.cap-count{font-size:.45rem;font-weight:600;letter-spacing:.02em;padding:.08rem .3rem;border-radius:999px;background:rgba(42,52,68,.75);color:var(--tm)}
 .cap-desc{font-size:.55rem;color:var(--tm);flex:1}
 .cap-tag{font-size:.45rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em;padding:.1rem .35rem;border-radius:3px;flex-shrink:0}
 .cap-ro{background:var(--grn2);color:var(--grn)}
@@ -584,6 +710,17 @@ details[open] summary::after{transform:rotate(90deg)}
 .sdot.y{background:var(--ylw);box-shadow:0 0 3px rgba(251,191,36,.4)}
 .sdot.r{background:var(--red);box-shadow:0 0 3px rgba(248,113,113,.4)}
 
+.nr{display:flex;gap:.5rem;margin-bottom:.75rem}
+.nr-row{flex:1;background:var(--s);border:1px solid var(--b);border-radius:10px;padding:.65rem .85rem}
+.nr-label{font-size:.45rem;text-transform:uppercase;letter-spacing:.07em;color:var(--t);opacity:.5}
+.nr-value{font-family:var(--m);font-size:.7rem;font-weight:600;color:var(--tb);margin-top:.15rem;display:flex;align-items:center;gap:.5rem}
+.nr-sub{font-size:.5rem;font-weight:400;color:var(--t)}
+
+.eh-lbl{font-family:var(--m);font-size:.55rem;color:var(--tm);padding:.2rem 0;border-bottom:1px solid rgba(26,35,50,.5)}
+.eh-lbl:last-child{border:none}
+.eh-other{color:var(--t);opacity:.6}
+.eh-access{font-family:var(--m);font-size:.5rem;color:var(--t);opacity:.5;padding-bottom:.35rem;border-bottom:1px solid var(--b);margin-bottom:.25rem}
+
 .foot{font-size:.5rem;color:var(--t);opacity:.25;text-align:center;margin-top:2rem;line-height:1.6}
 """
 
@@ -605,8 +742,10 @@ def generate() -> str:
 
     refs = collect_refs()
     status = collect_status()
+    roles = collect_node_roles(status)
     log = collect_git_log(30)
     caps_data = collect_capabilities()
+    invocation_counts = collect_invocation_counts()
     gates = collect_gates()
     manifest = collect_manifest()
 
@@ -635,9 +774,11 @@ def generate() -> str:
   </div>
 
   {engine_posture(status, refs)}
+  {node_role_card(roles)}
+  {execution_host_section(roles)}
   {attention_section(status, refs)}
   {timeline_section(log)}
-  {capability_atlas(caps_data)}
+  {capability_atlas(caps_data, invocation_counts)}
   {gate_watch(gates)}
   {authority_explorer(manifest)}
   {work_state(status)}

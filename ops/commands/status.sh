@@ -646,6 +646,24 @@ try:
         except Exception:
             pass
         missing = [lbl for lbl in local_required if lbl not in loaded_labels]
+        # Derive execution_host target and workload labels from full scheduler registry
+        exec_host_labels = [lbl for lbl, role in role_by_label.items() if role == "execution_host"]
+        exec_host_target = ""
+        exec_host_target_access = ""
+        # Read activation receipt for canonical execution_host target
+        _domain_state = Path(str(state_root)) / "domain-state"
+        if _domain_state.is_dir():
+            for _receipt_path in sorted(_domain_state.glob("EXEC_RECEIPT-SPINE-EXECUTION-HOST-ACTIVATION-*.yaml"), reverse=True):
+                try:
+                    _receipt = _yaml_daemons.safe_load(_receipt_path.read_text(encoding="utf-8")) or {}
+                    _target = str(_receipt.get("final_live_execution_host") or _receipt.get("target_host") or "").strip()
+                    if _target:
+                        exec_host_target = _target
+                        exec_host_target_access = str(_receipt.get("target_access_path") or "").strip()
+                        break
+                except Exception:
+                    pass
+
         daemons_summary = {
             "required_total": len(local_required),
             "loaded": len(local_required) - len(missing),
@@ -653,6 +671,12 @@ try:
             "missing_labels": missing,
             "non_local_deferred": non_local,
             "local_role": local_role,
+            "execution_host": {
+                "target": exec_host_target,
+                "target_access": exec_host_target_access,
+                "workload_count": len(exec_host_labels),
+                "workload_labels": exec_host_labels,
+            },
         }
         if missing:
             anomalies.append(
