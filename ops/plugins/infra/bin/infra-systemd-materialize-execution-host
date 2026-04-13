@@ -1,0 +1,416 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Execution Host Systemd Materializer (dry-run only)
+#
+# Generates systemd .service and .timer unit files for the current
+# execution_host workload set resolved from the live scheduler registry.
+#
+# Outputs generated units to a runtime path for inspection.
+# Does NOT install, activate, or transfer units to any host.
+#
+# Loop: LOOP-SPINE-EXECUTION-HOST-MATERIALIZATION-READINESS-20260413
+
+ROOT="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+OUTPUT_DIR=""
+JSON_OUTPUT=false
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--output-dir DIR] [--json]
+
+Options:
+  --output-dir DIR   Write generated units here (default: \$SPINE_STATE/domain-state/generated/systemd/execution_host)
+  --json             Emit summary as JSON to stdout
+  -h|--help          Show this help
+EOF
+  exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
+    --json) JSON_OUTPUT=true; shift ;;
+    -h|--help) usage ;;
+    --) shift; break ;;
+    *) echo "ERROR: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+# Resolve output directory
+if [[ -z "$OUTPUT_DIR" ]]; then
+  source "$ROOT/ops/lib/runtime-paths.sh"
+  spine_runtime_resolve_paths
+  OUTPUT_DIR="${SPINE_STATE}/domain-state/generated/systemd/execution_host"
+fi
+mkdir -p "$OUTPUT_DIR"
+
+REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
+LAUNCHD_DIR="$ROOT/ops/plugins/infra/host/launchd"
+
+[[ -f "$REGISTRY" ]] || { echo "ERROR: registry not found: $REGISTRY" >&2; exit 1; }
+
+# Resolve execution_host labels from live registry
+mapfile -t LABELS < <(yq -r '.labels[] | select(.intended_node_role == "execution_host" and .state == "active") | .label' "$REGISTRY")
+
+TOTAL=${#LABELS[@]}
+if [[ $TOTAL -eq 0 ]]; then
+  echo "ERROR: no active execution_host labels found in registry" >&2
+  exit 1
+fi
+
+SERVICES_GENERATED=0
+TIMERS_GENERATED=0
+GAPS=()
+RESULTS=()
+
+# Convert a launchd plist label to a systemd unit name
+label_to_unit() {
+  local label="$1"
+  # Strip com.ronny. or com.ronnyworks. prefix, replace dots with hyphens
+  local name="${label#com.ronny.}"
+  name="${name#com.ronnyworks.}"
+  echo "spine-${name}"
+}
+
+# Extract ProgramArguments from plist as a single ExecStart line
+extract_exec_start() {
+  local plist="$1"
+  # Use python3 to parse plist (reliable on macOS and Linux)
+  python3 - "$plist" <<'PY'
+import plistlib
+import sys
+import shlex
+
+with open(sys.argv[1], "rb") as f:
+    d = plistlib.load(f)
+
+args = d.get("ProgramArguments", [])
+if not args:
+    sys.exit(1)
+
+# Print each arg, one per line, for the caller to reassemble
+for a in args:
+    print(a)
+PY
+}
+
+# Extract EnvironmentVariables from plist
+extract_env_vars() {
+  local plist="$1"
+  python3 - "$plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as f:
+    d = plistlib.load(f)
+
+env = d.get("EnvironmentVariables", {})
+for k, v in sorted(env.items()):
+    print(f"{k}={v}")
+PY
+}
+
+# Extract WorkingDirectory from plist
+extract_working_dir() {
+  local plist="$1"
+  python3 -c "
+import plistlib, sys
+with open(sys.argv[1], 'rb') as f:
+    d = plistlib.load(f)
+print(d.get('WorkingDirectory', ''))
+" "$plist"
+}
+
+# Detect schedule type and extract parameters
+extract_schedule() {
+  local plist="$1"
+  python3 - "$plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as f:
+    d = plistlib.load(f)
+
+if d.get("KeepAlive") is True or (isinstance(d.get("KeepAlive"), dict)):
+    print("daemon")
+    sys.exit(0)
+
+if "StartCalendarInterval" in d:
+    ci = d["StartCalendarInterval"]
+    # Build OnCalendar= spec
+    # launchd uses Day, Hour, Minute, Month, Weekday
+    parts = []
+    weekday = ci.get("Weekday")
+    month = ci.get("Month")
+    day = ci.get("Day")
+    hour = ci.get("Hour")
+    minute = ci.get("Minute")
+
+    # systemd OnCalendar format: DOW YYYY-MM-DD HH:MM:SS
+    dow = "*" if weekday is None else str(weekday)
+    m = f"{month:02d}" if month is not None else "*"
+    dd = f"{day:02d}" if day is not None else "*"
+    hh = f"{hour:02d}" if hour is not None else "*"
+    mm = f"{minute:02d}" if minute is not None else "00"
+
+    if weekday is not None:
+        # Map launchd weekday (0=Sunday) to systemd abbreviation
+        day_map = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat"}
+        dow = day_map.get(weekday, str(weekday))
+        print(f"calendar:{dow} *-{m}-{dd} {hh}:{mm}:00")
+    else:
+        print(f"calendar:*-{m}-{dd} {hh}:{mm}:00")
+    sys.exit(0)
+
+if "StartInterval" in d:
+    interval = d["StartInterval"]
+    print(f"interval:{interval}")
+    sys.exit(0)
+
+print("unknown")
+PY
+}
+
+# Check for macOS-specific path dependencies
+check_path_portability() {
+  local plist="$1"
+  local gaps=""
+  python3 - "$plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as f:
+    d = plistlib.load(f)
+
+issues = []
+args = d.get("ProgramArguments", [])
+env = d.get("EnvironmentVariables", {})
+wdir = d.get("WorkingDirectory", "")
+
+# Check for macOS-only paths in args
+for a in args:
+    if "/opt/homebrew" in a:
+        issues.append(f"homebrew_path_in_args:{a}")
+
+# Check PATH for macOS-only entries
+path_val = env.get("PATH", "")
+if "/opt/homebrew" in path_val:
+    issues.append("homebrew_in_PATH")
+
+# Check for workbench paths (may not exist on Linux target)
+for a in args:
+    if "/workbench/" in a:
+        issues.append(f"workbench_path_in_args:{a}")
+if "/workbench" in wdir:
+    issues.append(f"workbench_working_dir:{wdir}")
+
+for i in issues:
+    print(i)
+PY
+}
+
+for label in "${LABELS[@]}"; do
+  unit_name="$(label_to_unit "$label")"
+  plist_file="$LAUNCHD_DIR/${label}.plist"
+
+  if [[ ! -f "$plist_file" ]]; then
+    GAPS+=("${label}:plist_not_found")
+    RESULTS+=("{\"label\":\"$label\",\"unit\":\"$unit_name\",\"status\":\"blocked\",\"reason\":\"plist template not found\"}")
+    continue
+  fi
+
+  # Extract schedule type
+  schedule_raw="$(extract_schedule "$plist_file")"
+  schedule_type="${schedule_raw%%:*}"
+  schedule_value="${schedule_raw#*:}"
+
+  # Extract invocation
+  mapfile -t exec_args < <(extract_exec_start "$plist_file")
+  if [[ ${#exec_args[@]} -eq 0 ]]; then
+    GAPS+=("${label}:no_program_arguments")
+    RESULTS+=("{\"label\":\"$label\",\"unit\":\"$unit_name\",\"status\":\"blocked\",\"reason\":\"no ProgramArguments in plist\"}")
+    continue
+  fi
+
+  # Build ExecStart line
+  exec_start=""
+  for arg in "${exec_args[@]}"; do
+    if [[ -z "$exec_start" ]]; then
+      exec_start="$arg"
+    else
+      exec_start="$exec_start $arg"
+    fi
+  done
+
+  # Extract environment
+  mapfile -t env_lines < <(extract_env_vars "$plist_file")
+
+  # Extract working directory
+  working_dir="$(extract_working_dir "$plist_file")"
+
+  # Check portability
+  mapfile -t port_issues < <(check_path_portability "$plist_file")
+
+  # Determine translation notes
+  notes=""
+  status="translated"
+
+  if [[ ${#port_issues[@]} -gt 0 ]]; then
+    for issue in "${port_issues[@]}"; do
+      [[ -z "$issue" ]] && continue
+      if [[ -z "$notes" ]]; then
+        notes="$issue"
+      else
+        notes="$notes; $issue"
+      fi
+    done
+    if [[ -n "$notes" ]]; then
+      status="translated_with_notes"
+    fi
+  fi
+
+  # --- Generate .service file ---
+  service_file="$OUTPUT_DIR/${unit_name}.service"
+  {
+    echo "[Unit]"
+    echo "Description=Spine execution_host workload: ${label}"
+    echo "# Source label: ${label}"
+    echo "# Generated by: infra.systemd.materialize.execution_host (dry-run)"
+    echo "# Plist source: ${plist_file##*/}"
+    echo ""
+    echo "[Service]"
+    echo "Type=$(if [[ "$schedule_type" == "daemon" ]]; then echo "simple"; else echo "oneshot"; fi)"
+    echo "ExecStart=${exec_start}"
+
+    if [[ -n "$working_dir" ]]; then
+      echo "WorkingDirectory=${working_dir}"
+    fi
+
+    # Environment lines
+    for env_line in "${env_lines[@]}"; do
+      [[ -z "$env_line" ]] && continue
+      # Skip PATH — handle separately for Linux
+      if [[ "$env_line" == PATH=* ]]; then
+        # Translate PATH: remove /opt/homebrew/bin, keep the rest
+        linux_path="${env_line#PATH=}"
+        linux_path="${linux_path//\/opt\/homebrew\/bin:/}"
+        linux_path="${linux_path//\/opt\/homebrew\/bin/}"
+        echo "Environment=\"PATH=${linux_path}\""
+        echo "# translation_gap: PATH stripped of /opt/homebrew/bin (macOS-only). Verify Linux equivalents are on PATH."
+      else
+        echo "Environment=\"${env_line}\""
+      fi
+    done
+
+    # Daemon-specific
+    if [[ "$schedule_type" == "daemon" ]]; then
+      echo "Restart=always"
+      echo "RestartSec=5"
+    fi
+
+    # Logging — systemd journal is default, but note the original paths
+    echo ""
+    echo "# Original launchd log paths (systemd uses journal by default):"
+    echo "# StandardOutPath was configured in plist"
+    echo "# StandardErrorPath was configured in plist"
+    echo "# To replicate: StandardOutput=append:/var/log/spine/<name>.out"
+
+    echo ""
+    echo "[Install]"
+    if [[ "$schedule_type" == "daemon" ]]; then
+      echo "WantedBy=multi-user.target"
+    else
+      echo "WantedBy=multi-user.target"
+    fi
+
+    # Translation gap notes
+    if [[ -n "$notes" ]]; then
+      echo ""
+      echo "# translation_gaps: ${notes}"
+    fi
+  } > "$service_file"
+  SERVICES_GENERATED=$((SERVICES_GENERATED + 1))
+
+  # --- Generate .timer file for scheduled workloads ---
+  if [[ "$schedule_type" != "daemon" ]]; then
+    timer_file="$OUTPUT_DIR/${unit_name}.timer"
+    {
+      echo "[Unit]"
+      echo "Description=Timer for spine execution_host workload: ${label}"
+      echo "# Source label: ${label}"
+      echo ""
+      echo "[Timer]"
+      if [[ "$schedule_type" == "calendar" ]]; then
+        echo "OnCalendar=${schedule_value}"
+        echo "# Original launchd: StartCalendarInterval"
+      elif [[ "$schedule_type" == "interval" ]]; then
+        echo "OnBootSec=${schedule_value}s"
+        echo "OnUnitActiveSec=${schedule_value}s"
+        echo "# Original launchd: StartInterval=${schedule_value}s"
+      fi
+      echo "Persistent=true"
+      echo ""
+      echo "[Install]"
+      echo "WantedBy=timers.target"
+    } > "$timer_file"
+    TIMERS_GENERATED=$((TIMERS_GENERATED + 1))
+  fi
+
+  # Record result
+  timer_note=""
+  if [[ "$schedule_type" != "daemon" ]]; then
+    timer_note=", timer: ${unit_name}.timer"
+  fi
+  RESULTS+=("{\"label\":\"$label\",\"unit\":\"${unit_name}.service${timer_note}\",\"status\":\"${status}\",\"schedule_type\":\"${schedule_type}\",\"notes\":\"${notes}\"}")
+done
+
+# --- Summary ---
+echo ""
+echo "════════════════════════════════════════"
+echo "EXECUTION HOST SYSTEMD MATERIALIZATION"
+echo "════════════════════════════════════════"
+echo "Output directory: $OUTPUT_DIR"
+echo "Labels resolved:  $TOTAL"
+echo "Services generated: $SERVICES_GENERATED"
+echo "Timers generated:   $TIMERS_GENERATED"
+echo "Translation gaps:   ${#GAPS[@]}"
+echo ""
+
+if [[ ${#GAPS[@]} -gt 0 ]]; then
+  echo "Gaps:"
+  for gap in "${GAPS[@]}"; do
+    echo "  - $gap"
+  done
+  echo ""
+fi
+
+echo "Per-label results:"
+for r in "${RESULTS[@]}"; do
+  echo "  $r"
+done
+echo ""
+echo "STATUS: dry-run complete. No units installed or activated."
+
+if $JSON_OUTPUT; then
+  echo ""
+  echo "--- JSON SUMMARY ---"
+  jq -n \
+    --argjson total "$TOTAL" \
+    --argjson services "$SERVICES_GENERATED" \
+    --argjson timers "$TIMERS_GENERATED" \
+    --argjson gap_count "${#GAPS[@]}" \
+    --arg output_dir "$OUTPUT_DIR" \
+    --arg mode "dry-run" \
+    '{
+      mode: $mode,
+      output_dir: $output_dir,
+      labels_resolved: $total,
+      services_generated: $services,
+      timers_generated: $timers,
+      translation_gaps: $gap_count,
+      installed: false,
+      activated: false
+    }'
+fi
