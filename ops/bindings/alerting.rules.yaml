@@ -28,6 +28,13 @@ channels:
   bridge-push:
     enabled: true
     outbox_file: $SPINE_OUTBOX/alerts/bridge-push.log
+  mobile-push:
+    enabled: true
+    endpoint_env: ALERTING_HA_URL
+    token_env: ALERTING_HA_TOKEN
+    service_path: /api/services/notify/mobile_app_ronnys_iphone
+    scope: operator-critical-interrupt-only
+    trigger_gate: incident
   email:
     enabled: true
     mode: intent-flush
@@ -63,7 +70,7 @@ rules:
   - domain_id: infra-core-stack
     trigger_statuses: [warn, incident]
     cooldown_seconds: 900
-    channels: [ha, bridge-push, email]
+    channels: [ha, bridge-push, email, mobile-push]
 
   - domain_id: observability-stack
     trigger_statuses: [warn, incident]
@@ -83,7 +90,7 @@ rules:
   - domain_id: mcp-runtime-anti-drift
     trigger_statuses: [warn, incident]
     cooldown_seconds: 900
-    channels: [ha, bridge-push, email]
+    channels: [ha, bridge-push, email, mobile-push]
 
 # ----------------------------------------------------------------------
 # Autonomous Operator Interrupt Contract (v1)
@@ -122,20 +129,23 @@ operator_interrupt:
 
   # -- Channel hierarchy and validation ------------------------------------
   #
-  # ha channel as currently wired uses /api/services/persistent_notification/create.
+  # ha channel uses /api/services/persistent_notification/create.
   # This is a Home Assistant dashboard inbox notification, NOT a mobile push surface.
   #
-  # A proven mobile push path EXISTS in the estate:
-  #   service: notify.mobile_app_ronnys_iphone (HA Companion, Apple APNS)
+  # mobile-push channel uses /api/services/notify/mobile_app_ronnys_iphone.
+  # This is a proven Apple APNS push via HA Companion.
   #   evidence: 5 active automations in workbench/infra/homeassistant/config/automations.yaml
   #   integration: entry_id 01JVG2HT0ZZ6W6ER3SBN65NTJ9 in ha.integrations.yaml
   #
-  # But it is NOT wired into spine alerting. The gap is the service_path, not the provider.
+  # mobile-push is the operator-critical interrupt delivery surface.
+  # ha remains the inbox/dashboard surface — correctly classified.
   channels:
-    best_available: ha
-    best_available_validation_status: inbox-surface-only
-    best_available_service_path: /api/services/persistent_notification/create
-    best_available_honest_characterization: >
+    operator_interrupt_delivery: mobile-push
+    operator_interrupt_service_path: /api/services/notify/mobile_app_ronnys_iphone
+    operator_interrupt_provider: ha_companion_apns
+    inbox_surface: ha
+    inbox_service_path: /api/services/persistent_notification/create
+    inbox_honest_characterization: >
       Dashboard persistent notification. Visible in HA web UI.
       Not delivered to phone unless HA Companion app is open.
       Not a proven wake-the-operator interrupt.
@@ -143,15 +153,15 @@ operator_interrupt:
     email_disposition: manual-fallback-only
 
   mobile_interrupt_gap:
-    status: open
+    status: closed
+    closed_at: "2026-04-13"
+    closed_by: LOOP-SPINE-COMMS-INCIDENT-CLOSEOUT-20260413
     finding: >
-      notify.mobile_app_ronnys_iphone is live and proven for HA automations
-      but not wired into spine alerting. Wiring it requires changing
-      service_path in the ha channel definition or adding a new channel.
-      This packet does not activate that change.
+      notify.mobile_app_ronnys_iphone is now wired into spine alerting
+      as the mobile-push channel for operator-critical-interrupt dispatch.
     proven_mobile_path: notify.mobile_app_ronnys_iphone
     proven_mobile_provider: ha_companion_apns
-    activation_status: not-activated-in-this-packet
+    activation_status: active
 
   # -- Authority -----------------------------------------------------------
   #
@@ -183,5 +193,6 @@ operator_interrupt:
   cooldown_seconds: 1800
   dedupe_by: domain_fingerprint
 
-  # Dispatch is formalized but not resumed in this contract
-  dispatch_state: formalized-not-resumed
+  # Dispatch state reconciled to match active runtime truth
+  # Loop: LOOP-SPINE-COMMS-INCIDENT-CLOSEOUT-20260413
+  dispatch_state: active
