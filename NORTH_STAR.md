@@ -70,6 +70,18 @@ materializing only the work legal for that role.
 
 The plumbing must work out of the box for the next new computer or node.
 
+## Distribution Authority
+
+The canonical repository is self-hosted Gitea at `git.ronny.works`.
+All development, all commits, and all branch authority flow from Gitea.
+
+GitHub (`github.com/hypnotizedent/agentic-spine`) is a read-only
+distribution mirror. It receives pushes from the canonical repo.
+It does not receive direct commits, merges, or pull requests.
+
+Issues, discussions, and contributions should reference the canonical
+Gitea instance. GitHub is a window, not a door.
+
 ## What It Is Not
 
 - Not a special-laptop control plane
