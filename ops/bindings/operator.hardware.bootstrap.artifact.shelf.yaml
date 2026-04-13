@@ -1,0 +1,85 @@
+---
+status: authoritative
+owner: "@ronny"
+scope: operator-hardware-bootstrap-artifact-shelf
+version: 1
+updated_at: "2026-04-13"
+last_verified: "2026-04-13"
+
+# Operator Hardware Bootstrap Artifact Shelf
+#
+# Canonical artifact custody surface for Stage 0 operator-hardware bootstrap
+# assets. This shelf stores bootstrap artifacts; it does not control first-touch
+# boot on target devices.
+#
+# Scope:
+# - Linux ISO/library references
+# - rendered bootstrap kit manifests
+# - rendered autoinstall payloads
+# - checksum/provenance metadata
+# - claim examples/templates and receipts
+#
+# This surface does NOT:
+# - perform PXE/OOB boot orchestration
+# - wipe or reimage any device
+# - imply remote boot control
+# - assign any role or host
+
+subordinate_to: ops/bindings/root.authority.contract.yaml
+
+related_contracts:
+  - contract: ops/bindings/shop.storage.map.yaml
+    relationship: "Canonical md1400 live-share/archive authority."
+  - contract: ops/bindings/infra.storage.placement.policy.yaml
+    relationship: "Declares archive-smb as the file-plane serving md1400 datasets."
+  - contract: ops/bindings/ssh.targets.yaml
+    relationship: "Canonical remote write path for pve custody host."
+  - contract: ops/bindings/operator.hardware.bootstrap.handoff.contract.yaml
+    relationship: "Stage 0 -> Stage 1 handoff object contract."
+
+artifact_shelf:
+  custody_host_ref: pve
+  serving_host_ref: archive-smb
+  storage_plane_ref: md1400/archive/live-share/ronny-projects
+  canonical_root: /md1400/archive/live-share/ronny-projects/spine/bootstrap
+  canonical_transport: ssh_to_pve_then_md1400_path
+  iso_library_ref: /md1400/archive/games
+  served_surface_note: >
+    Artifacts are stored on the md1400-backed live-share path and may be served
+    through archive-smb. The shelf is artifact custody only, not device boot control.
+
+generated_runtime_staging:
+  root: $SPINE_STATE/domain-state/generated/operator_hardware/bootstrap
+  purpose: "Local/generated staging before publish to canonical shelf."
+
+expected_layout:
+  iso_library: iso/
+  kits: kits/<device_id>/
+  autoinstall: autoinstall/<device_id>/
+  claims: claims/<device_id>/
+  receipts: receipts/<device_id>/
+  manifests: manifests/<device_id>/
+
+required_metadata:
+  - device_id
+  - target_platform
+  - bootstrap_method
+  - target_distro
+  - target_distro_version
+  - provenance
+  - rendered_at
+  - checksum_sha256
+  - shelf_publish_mode
+
+truth_boundary:
+  artifact_store_responsibilities:
+    - retain canonical bootstrap artifacts
+    - retain provenance and checksums
+    - expose a stable shelf path for retrieval
+  first_touch_boot_responsibilities:
+    - operator local-hands or separate PXE/OOB rail selects the boot path
+  not_implied:
+    - remote BIOS control
+    - remote wipe
+    - remote USB insertion
+    - automatic machine boot
