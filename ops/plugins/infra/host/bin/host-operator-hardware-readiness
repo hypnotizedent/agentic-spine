@@ -1,0 +1,434 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-operator-hardware-readiness
+# Read-only: assess readiness of a specific operator-owned machine
+# against its platform readiness profile.
+#
+# Does NOT modify inventory, assign roles, or activate anything.
+# Does NOT perform remote probing — only evaluates local evidence
+# when run on the candidate itself, or reports what evidence is needed.
+#
+# Authority sources:
+#   - ops/bindings/operator.hardware.inventory.yaml
+#   - ops/bindings/operator.hardware.readiness.profiles.yaml
+#   - ops/bindings/tailscale.tailnet.snapshot.yaml
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
+PROFILES="${SPINE_REPO}/ops/bindings/operator.hardware.readiness.profiles.yaml"
+TAILNET="${SPINE_REPO}/ops/bindings/tailscale.tailnet.snapshot.yaml"
+
+usage() {
+    cat <<'EOF'
+host-operator-hardware-readiness - Assess readiness of operator-owned hardware
+
+Usage:
+  host-operator-hardware-readiness --device <device_id> [--local-probe] [--json]
+
+Options:
+  --device <device_id>  Device ID from operator.hardware.inventory.yaml
+  --local-probe         Run local evidence collection (only valid on the
+                        candidate machine itself)
+  --json                Machine-readable JSON output
+
+This capability is READ-ONLY. No inventory modifications. No role assignments.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+DEVICE=""
+LOCAL_PROBE=false
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device) DEVICE="${2:-}"; shift 2 ;;
+        --local-probe) LOCAL_PROBE=true; shift ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$DEVICE" ]] || fail "--device is required"
+
+need yq
+need jq
+
+for f in "$INVENTORY" "$PROFILES" "$TAILNET"; do
+    [[ -f "$f" ]] || fail "authority surface not found: $f"
+done
+
+# Look up device in inventory
+device_json=$(yq e -o=json ".machines[] | select(.device_id == \"$DEVICE\")" "$INVENTORY" 2>/dev/null)
+[[ -n "$device_json" && "$device_json" != "null" ]] || fail "device not found in inventory: $DEVICE"
+
+platform=$(echo "$device_json" | jq -r '.platform')
+model=$(echo "$device_json" | jq -r '.model // "unknown"')
+ts_ip=$(echo "$device_json" | jq -r '.tailscale_ip // empty')
+eligibility=$(echo "$device_json" | jq -r '.eligibility_state')
+
+# Validate platform has a profile
+profile_exists=$(yq e ".profiles.$platform // \"\"" "$PROFILES" 2>/dev/null)
+[[ -n "$profile_exists" && "$profile_exists" != "null" ]] || fail "no readiness profile for platform: $platform"
+
+checks=()
+pass_count=0
+fail_count=0
+unknown_count=0
+
+add_check() {
+    local name="$1" status="$2" detail="$3"
+    checks+=("$(jq -n --arg n "$name" --arg s "$status" --arg d "$detail" \
+        '{check: $n, status: $s, detail: $d}')")
+    case "$status" in
+        pass) pass_count=$((pass_count + 1)) ;;
+        fail) fail_count=$((fail_count + 1)) ;;
+        *) unknown_count=$((unknown_count + 1)) ;;
+    esac
+}
+
+# ── Identity checks ────────────────────────────────────────────────────────
+
+if [[ -n "$ts_ip" && "$ts_ip" != "null" ]]; then
+    add_check "tailscale_enrolled" "pass" "tailscale_ip=$ts_ip"
+else
+    add_check "tailscale_enrolled" "fail" "no tailscale_ip in inventory"
+fi
+
+if [[ "$model" != "null" && "$model" != "unknown" ]]; then
+    add_check "hardware_model_known" "pass" "model=$model"
+else
+    add_check "hardware_model_known" "unknown" "model not yet recorded in inventory"
+fi
+
+# ── Local probe (only if --local-probe and running on the candidate) ──────
+
+if $LOCAL_PROBE; then
+    local_os=$(uname -s 2>/dev/null || echo "unknown")
+
+    if [[ "$platform" == "mac" && "$local_os" == "Darwin" ]]; then
+        # macOS local probes
+        macos_ver=$(sw_vers -productVersion 2>/dev/null || echo "unknown")
+        add_check "macos_version" "pass" "version=$macos_ver"
+
+        if command -v brew >/dev/null 2>&1; then
+            add_check "homebrew_installed" "pass" "$(brew --prefix 2>/dev/null)"
+        else
+            add_check "homebrew_installed" "fail" "homebrew not found"
+        fi
+
+        # Tool prerequisites
+        tool_missing=()
+        for tool in bash git jq yq python3 rg; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+                tool_missing+=("$tool")
+            fi
+        done
+        if [[ ${#tool_missing[@]} -eq 0 ]]; then
+            add_check "tool_prerequisites" "pass" "all required tools present"
+        else
+            add_check "tool_prerequisites" "fail" "missing: ${tool_missing[*]}"
+        fi
+
+        # Battery health (if applicable)
+        if system_profiler SPPowerDataType >/dev/null 2>&1; then
+            battery_info=$(system_profiler SPPowerDataType 2>/dev/null || true)
+            cycle_count=$(echo "$battery_info" | grep -i "Cycle Count" | awk '{print $NF}' || echo "unknown")
+            max_capacity=$(echo "$battery_info" | grep -i "Maximum Capacity" | awk '{print $NF}' || echo "unknown")
+            add_check "battery_health" "unknown" "cycles=$cycle_count, max_capacity=$max_capacity (manual review needed)"
+        else
+            add_check "battery_health" "unknown" "no battery data (may be desktop Mac)"
+        fi
+
+        # Storage health
+        root_free=$(df -g / 2>/dev/null | tail -1 | awk '{print $4}' || echo "unknown")
+        if [[ "$root_free" != "unknown" && "$root_free" -ge 20 ]]; then
+            add_check "storage_health" "pass" "root volume ${root_free}GB free"
+        elif [[ "$root_free" != "unknown" ]]; then
+            add_check "storage_health" "fail" "root volume ${root_free}GB free (below 20GB minimum)"
+        else
+            add_check "storage_health" "unknown" "could not determine free space"
+        fi
+
+        # Always-on posture
+        sleep_setting=$(pmset -g 2>/dev/null | grep " sleep " | awk '{print $NF}' || echo "unknown")
+        if [[ "$sleep_setting" == "0" ]]; then
+            add_check "always_on_posture" "pass" "sleep disabled (sleep=0)"
+        elif [[ "$sleep_setting" != "unknown" ]]; then
+            add_check "always_on_posture" "fail" "sleep=$sleep_setting (should be 0 for dedicated node)"
+        else
+            add_check "always_on_posture" "unknown" "could not read pmset"
+        fi
+
+        # SSH
+        ssh_status=$(systemsetup -getremotelogin 2>/dev/null | awk '{print $NF}' || echo "unknown")
+        if [[ "$ssh_status" == "On" ]]; then
+            add_check "ssh_enabled" "pass" "Remote Login: On"
+        elif [[ "$ssh_status" == "Off" ]]; then
+            add_check "ssh_enabled" "fail" "Remote Login: Off"
+        else
+            add_check "ssh_enabled" "unknown" "could not determine SSH status"
+        fi
+
+    elif [[ "$platform" == "linux" && "$local_os" == "Linux" ]]; then
+        # ── Linux local probes ────────────────────────────────────────────
+
+        # A. Identity
+        distro="unknown"; distro_ver="unknown"
+        if command -v lsb_release >/dev/null 2>&1; then
+            distro=$(lsb_release -si 2>/dev/null || echo "unknown")
+            distro_ver=$(lsb_release -sr 2>/dev/null || echo "unknown")
+        elif [[ -f /etc/os-release ]]; then
+            distro=$(. /etc/os-release && echo "${NAME:-unknown}")
+            distro_ver=$(. /etc/os-release && echo "${VERSION_ID:-unknown}")
+        fi
+        kernel_ver=$(uname -r 2>/dev/null || echo "unknown")
+        arch=$(uname -m 2>/dev/null || echo "unknown")
+        hostname_val=$(hostname 2>/dev/null || echo "unknown")
+        machine_id="unknown"
+        [[ -f /etc/machine-id ]] && machine_id=$(cat /etc/machine-id 2>/dev/null || echo "unknown")
+        add_check "identity" "pass" "hostname=$hostname_val, distro=$distro $distro_ver, kernel=$kernel_ver, arch=$arch, machine_id=$machine_id"
+
+        # B. Topology
+        access_method="local"
+        if [[ -n "${SSH_CONNECTION:-}" ]]; then
+            access_method="ssh"
+        fi
+        net_class="unknown"
+        ts_up=false
+        if command -v tailscale >/dev/null 2>&1; then
+            ts_self=$(tailscale status --self --json 2>/dev/null || echo "{}")
+            ts_ip_local=$(echo "$ts_self" | jq -r '.Self.TailscaleIPs[0] // empty' 2>/dev/null || true)
+            if [[ -n "$ts_ip_local" ]]; then
+                ts_up=true
+                # Check if relay or direct
+                relay_hint="unknown"
+                net_class="tailnet"
+            fi
+        fi
+        eth_or_wifi="unknown"
+        if command -v ip >/dev/null 2>&1; then
+            has_eth=$(ip link show 2>/dev/null | grep -E "^[0-9]+: (eth|en)" || true)
+            has_wifi=$(ip link show 2>/dev/null | grep -E "^[0-9]+: (wl)" || true)
+            if [[ -n "$has_eth" ]]; then eth_or_wifi="ethernet"; fi
+            if [[ -n "$has_wifi" ]]; then
+                if [[ "$eth_or_wifi" == "ethernet" ]]; then eth_or_wifi="ethernet+wifi"; else eth_or_wifi="wifi"; fi
+            fi
+        fi
+        add_check "topology" "pass" "access=$access_method, network_class=$net_class, interface=$eth_or_wifi"
+
+        # C. Entropy — battery (if laptop)
+        if command -v upower >/dev/null 2>&1 && upower -i /org/freedesktop/UPower/devices/battery_BAT0 >/dev/null 2>&1; then
+            bat_info=$(upower -i /org/freedesktop/UPower/devices/battery_BAT0 2>/dev/null || true)
+            bat_pct=$(echo "$bat_info" | grep -i "percentage" | awk '{print $NF}' || echo "unknown")
+            bat_health=$(echo "$bat_info" | grep -i "capacity" | awk '{print $NF}' || echo "unknown")
+            add_check "battery_health" "unknown" "percentage=$bat_pct, capacity=$bat_health (manual review needed)"
+        else
+            add_check "battery_health" "unknown" "no battery detected or upower not available (may be desktop)"
+        fi
+
+        # C. Entropy — thermal
+        if command -v sensors >/dev/null 2>&1; then
+            thermal_out=$(sensors 2>/dev/null | head -20 || true)
+            add_check "thermal_posture" "unknown" "sensors available — manual review needed"
+        else
+            add_check "thermal_posture" "unknown" "lm-sensors not installed or no thermal data"
+        fi
+
+        # C. Entropy — storage
+        root_free_kb=$(df / 2>/dev/null | tail -1 | awk '{print $4}' || echo "0")
+        root_free_gb=$((root_free_kb / 1048576))
+        if [[ $root_free_gb -ge 20 ]]; then
+            add_check "storage_health" "pass" "root volume ${root_free_gb}GB free"
+        elif [[ $root_free_gb -gt 0 ]]; then
+            add_check "storage_health" "fail" "root volume ${root_free_gb}GB free (below 20GB minimum)"
+        else
+            add_check "storage_health" "unknown" "could not determine free space"
+        fi
+
+        # C. Entropy — update/package drift
+        pending_updates="unknown"
+        if command -v apt >/dev/null 2>&1; then
+            pending_count=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || echo "0")
+            pending_updates="$pending_count packages upgradable"
+        fi
+        add_check "package_hygiene" "unknown" "$pending_updates (manual review needed)"
+
+        # C. Entropy — trust trajectory
+        add_check "trust_trajectory" "unknown" "insufficient_evidence — newly provisioned, needs observation period"
+
+        # D. Metabolism — CPU/RAM
+        cpu_model="unknown"; cpu_cores="unknown"
+        if command -v lscpu >/dev/null 2>&1; then
+            cpu_model=$(lscpu 2>/dev/null | grep "Model name" | sed 's/.*:\s*//' || echo "unknown")
+            cpu_cores=$(lscpu 2>/dev/null | grep "^CPU(s):" | awk '{print $2}' || echo "unknown")
+        fi
+        total_mem="unknown"
+        if command -v free >/dev/null 2>&1; then
+            total_mem=$(free -h 2>/dev/null | grep "^Mem:" | awk '{print $2}' || echo "unknown")
+        fi
+        add_check "cpu_ram_class" "pass" "cpu=$cpu_model, cores=$cpu_cores, ram=$total_mem"
+
+        # D. Metabolism — I/O posture
+        add_check "io_posture" "unknown" "no sustained I/O baseline collected yet"
+
+        # D. Metabolism — workload envelope hint
+        add_check "workload_envelope" "unknown" "no workload history — hints only after observation period"
+
+        # Tool prerequisites (Linux-specific: includes rsync, curl, openssh-server)
+        tool_missing=()
+        for tool in bash git jq yq python3 rg rsync curl; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+                tool_missing+=("$tool")
+            fi
+        done
+        # Check openssh-server via sshd
+        if ! command -v sshd >/dev/null 2>&1 && ! systemctl is-active sshd >/dev/null 2>&1 && ! systemctl is-active ssh >/dev/null 2>&1; then
+            tool_missing+=("openssh-server")
+        fi
+        if [[ ${#tool_missing[@]} -eq 0 ]]; then
+            add_check "tool_prerequisites" "pass" "all required tools present (including openssh-server)"
+        else
+            add_check "tool_prerequisites" "fail" "missing: ${tool_missing[*]}"
+        fi
+
+        # Tailscale
+        if $ts_up; then
+            add_check "tailscale_connected" "pass" "tailscale_ip=$ts_ip_local"
+        else
+            add_check "tailscale_connected" "fail" "tailscale not connected or not installed"
+        fi
+
+        # SSH daemon
+        ssh_active=false
+        if systemctl is-active sshd >/dev/null 2>&1 || systemctl is-active ssh >/dev/null 2>&1; then
+            ssh_active=true
+            add_check "ssh_enabled" "pass" "sshd is active"
+        else
+            add_check "ssh_enabled" "fail" "sshd is not active"
+        fi
+
+        # Always-on posture (check if sleep/suspend is masked)
+        sleep_masked=false
+        if systemctl is-masked sleep.target >/dev/null 2>&1 && systemctl is-masked suspend.target >/dev/null 2>&1; then
+            sleep_masked=true
+            add_check "always_on_posture" "pass" "sleep.target and suspend.target are masked"
+        else
+            add_check "always_on_posture" "unknown" "sleep/suspend targets may not be masked — review for always-on duty"
+        fi
+
+    elif [[ "$platform" == "windows" && "$local_os" == "MINGW"* || "$local_os" == "MSYS"* || "$local_os" == "CYGWIN"* ]]; then
+        add_check "windows_local_probe" "unknown" "Windows local probing via bash is limited. Use PowerShell for full assessment."
+        # Basic tool check
+        tool_missing=()
+        for tool in bash git jq yq python3 rg; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+                tool_missing+=("$tool")
+            fi
+        done
+        if [[ ${#tool_missing[@]} -eq 0 ]]; then
+            add_check "tool_prerequisites" "pass" "all required tools present"
+        else
+            add_check "tool_prerequisites" "fail" "missing: ${tool_missing[*]}"
+        fi
+    else
+        add_check "local_probe_mismatch" "fail" "local OS ($local_os) does not match inventory platform ($platform)"
+    fi
+else
+    # No local probe — report what evidence would be needed
+    if [[ "$platform" == "mac" ]]; then
+        add_check "macos_version" "unknown" "run with --local-probe on the candidate"
+        add_check "homebrew_installed" "unknown" "run with --local-probe on the candidate"
+        add_check "tool_prerequisites" "unknown" "run with --local-probe on the candidate"
+        add_check "battery_health" "unknown" "run with --local-probe on the candidate"
+        add_check "storage_health" "unknown" "run with --local-probe on the candidate"
+        add_check "always_on_posture" "unknown" "run with --local-probe on the candidate"
+        add_check "ssh_enabled" "unknown" "run with --local-probe on the candidate"
+    elif [[ "$platform" == "linux" ]]; then
+        add_check "identity" "unknown" "run with --local-probe on the candidate"
+        add_check "topology" "unknown" "run with --local-probe on the candidate"
+        add_check "battery_health" "unknown" "run with --local-probe on the candidate"
+        add_check "thermal_posture" "unknown" "run with --local-probe on the candidate"
+        add_check "storage_health" "unknown" "run with --local-probe on the candidate"
+        add_check "package_hygiene" "unknown" "run with --local-probe on the candidate"
+        add_check "trust_trajectory" "unknown" "insufficient_evidence"
+        add_check "cpu_ram_class" "unknown" "run with --local-probe on the candidate"
+        add_check "io_posture" "unknown" "run with --local-probe on the candidate"
+        add_check "workload_envelope" "unknown" "run with --local-probe on the candidate"
+        add_check "tool_prerequisites" "unknown" "run with --local-probe on the candidate"
+        add_check "tailscale_connected" "unknown" "run with --local-probe on the candidate"
+        add_check "ssh_enabled" "unknown" "run with --local-probe on the candidate"
+        add_check "always_on_posture" "unknown" "run with --local-probe on the candidate"
+    elif [[ "$platform" == "windows" ]]; then
+        add_check "windows_version" "unknown" "run with --local-probe on the candidate or use PowerShell"
+        add_check "tool_prerequisites" "unknown" "run with --local-probe on the candidate"
+        add_check "storage_health" "unknown" "run with --local-probe on the candidate"
+        add_check "always_on_posture" "unknown" "run with --local-probe on the candidate"
+        add_check "remote_access" "unknown" "run with --local-probe on the candidate"
+    fi
+fi
+
+# ── Determine overall readiness ────────────────────────────────────────────
+
+if [[ $fail_count -gt 0 ]]; then
+    overall="not_ready"
+elif [[ $unknown_count -gt 0 ]]; then
+    overall="insufficient_evidence"
+else
+    overall="ready"
+fi
+
+# ── Output ──────────────────────────────────────────────────────────────────
+
+checks_json="["
+for idx in "${!checks[@]}"; do
+    [[ $idx -gt 0 ]] && checks_json+=","
+    checks_json+="${checks[$idx]}"
+done
+checks_json+="]"
+
+if $JSON_MODE; then
+    jq -n \
+        --arg device "$DEVICE" \
+        --arg platform "$platform" \
+        --arg model "$model" \
+        --arg eligibility "$eligibility" \
+        --arg overall "$overall" \
+        --argjson pass "$pass_count" \
+        --argjson fail "$fail_count" \
+        --argjson unknown "$unknown_count" \
+        --argjson checks "$checks_json" \
+        --argjson local_probe "$LOCAL_PROBE" \
+        '{
+            device: $device,
+            platform: $platform,
+            model: $model,
+            current_eligibility: $eligibility,
+            overall_readiness: $overall,
+            summary: {pass: $pass, fail: $fail, unknown: $unknown},
+            local_probe: $local_probe,
+            checks: $checks,
+            note: "Read-only readiness assessment. No inventory modifications. No role assignments."
+        }'
+else
+    echo "host.operator-hardware.readiness"
+    echo "================================="
+    echo "device:      $DEVICE"
+    echo "platform:    $platform"
+    echo "model:       $model"
+    echo "eligibility: $eligibility"
+    echo "readiness:   $overall"
+    echo
+    echo "CHECKS: ($pass_count pass, $fail_count fail, $unknown_count unknown)"
+    echo "$checks_json" | jq -r '.[] | "  [\(.status)] \(.check): \(.detail)"'
+    echo
+    if ! $LOCAL_PROBE; then
+        echo "TIP: Run with --local-probe on the candidate machine for full evidence."
+    fi
+    echo "NOTE: Read-only assessment. No inventory modifications. No role assignments."
+fi

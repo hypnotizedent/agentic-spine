@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-operator-hardware-discover
+# Read-only: enumerate operator-owned hardware from the inventory
+# and cross-reference Tailscale enrollment status.
+#
+# Does NOT modify inventory, assign roles, or activate anything.
+#
+# Authority sources:
+#   - ops/bindings/operator.hardware.inventory.yaml
+#   - ops/bindings/tailscale.tailnet.snapshot.yaml
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
+TAILNET="${SPINE_REPO}/ops/bindings/tailscale.tailnet.snapshot.yaml"
+
+usage() {
+    cat <<'EOF'
+host-operator-hardware-discover - Discover operator-owned hardware inventory
+
+Usage:
+  host-operator-hardware-discover [--platform <mac|windows|linux>] [--json]
+
+Options:
+  --platform <mac|windows|linux>  Filter by platform (default: all)
+  --json                    Machine-readable JSON output
+
+This capability is READ-ONLY. No inventory modifications. No role assignments.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+PLATFORM_FILTER=""
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --platform) PLATFORM_FILTER="${2:-}"; shift 2 ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+need yq
+need jq
+
+[[ -f "$INVENTORY" ]] || fail "inventory not found: $INVENTORY"
+[[ -f "$TAILNET" ]] || fail "tailnet snapshot not found: $TAILNET"
+
+if [[ -n "$PLATFORM_FILTER" ]]; then
+    case "$PLATFORM_FILTER" in
+        mac|windows|linux) ;;
+        *) fail "invalid platform: $PLATFORM_FILTER (must be mac or windows)" ;;
+    esac
+fi
+
+# Extract machines from inventory
+if [[ -n "$PLATFORM_FILTER" ]]; then
+    machines_json=$(yq e -o=json "[.machines[] | select(.platform == \"$PLATFORM_FILTER\")]" "$INVENTORY")
+else
+    machines_json=$(yq e -o=json '.machines' "$INVENTORY")
+fi
+
+total=$(echo "$machines_json" | jq 'length')
+enrolled=$(echo "$machines_json" | jq '[.[] | select(.tailscale_ip != null)] | length')
+not_enrolled=$(echo "$machines_json" | jq '[.[] | select(.tailscale_ip == null)] | length')
+mac_count=$(echo "$machines_json" | jq '[.[] | select(.platform == "mac")] | length')
+windows_count=$(echo "$machines_json" | jq '[.[] | select(.platform == "windows")] | length')
+linux_count=$(echo "$machines_json" | jq '[.[] | select(.platform == "linux")] | length')
+
+# Check live tailnet enrollment for each device
+results=()
+for i in $(seq 0 $((total - 1))); do
+    device_id=$(echo "$machines_json" | jq -r ".[$i].device_id")
+    platform=$(echo "$machines_json" | jq -r ".[$i].platform")
+    ts_id=$(echo "$machines_json" | jq -r ".[$i].tailscale_identity // empty")
+    ts_ip=$(echo "$machines_json" | jq -r ".[$i].tailscale_ip // empty")
+    model=$(echo "$machines_json" | jq -r ".[$i].model // \"unknown\"")
+    state=$(echo "$machines_json" | jq -r ".[$i].eligibility_state")
+
+    # Cross-reference tailnet snapshot
+    tailnet_status="not_enrolled"
+    if [[ -n "$ts_id" && "$ts_id" != "null" ]]; then
+        snapshot_ip=$(yq e ".devices[] | select(.id == \"$ts_id\") | .tailscale_ip // \"\"" "$TAILNET" 2>/dev/null || true)
+        if [[ -n "$snapshot_ip" && "$snapshot_ip" != "null" ]]; then
+            tailnet_status="enrolled"
+        else
+            tailnet_status="identity_claimed_not_in_snapshot"
+        fi
+    fi
+
+    if $JSON_MODE; then
+        results+=("$(jq -n \
+            --arg device_id "$device_id" \
+            --arg platform "$platform" \
+            --arg model "$model" \
+            --arg tailscale_identity "$ts_id" \
+            --arg tailscale_ip "$ts_ip" \
+            --arg tailnet_status "$tailnet_status" \
+            --arg eligibility_state "$state" \
+            '{device_id: $device_id, platform: $platform, model: $model, tailscale_identity: $tailscale_identity, tailscale_ip: $tailscale_ip, tailnet_status: $tailnet_status, eligibility_state: $eligibility_state}')")
+    else
+        echo "  ${device_id}"
+        echo "    platform:     ${platform}"
+        echo "    model:        ${model}"
+        echo "    tailscale:    ${tailnet_status} (${ts_ip:-none})"
+        echo "    eligibility:  ${state}"
+        echo
+    fi
+done
+
+if $JSON_MODE; then
+    combined="["
+    for idx in "${!results[@]}"; do
+        [[ $idx -gt 0 ]] && combined+=","
+        combined+="${results[$idx]}"
+    done
+    combined+="]"
+
+    jq -n \
+        --argjson machines "$combined" \
+        --argjson total "$total" \
+        --argjson enrolled "$enrolled" \
+        --argjson not_enrolled "$not_enrolled" \
+        --argjson mac_count "$mac_count" \
+        --argjson windows_count "$windows_count" \
+        --argjson linux_count "$linux_count" \
+        --arg platform_filter "${PLATFORM_FILTER:-all}" \
+        '{
+            summary: {
+                total: $total,
+                tailscale_enrolled: $enrolled,
+                tailscale_not_enrolled: $not_enrolled,
+                mac: $mac_count,
+                windows: $windows_count,
+                linux: $linux_count,
+                platform_filter: $platform_filter
+            },
+            machines: $machines,
+            note: "Read-only discovery. No inventory modifications. No role assignments."
+        }'
+else
+    echo "host.operator-hardware.discover"
+    echo "================================"
+    echo "platform filter: ${PLATFORM_FILTER:-all}"
+    echo "total:           ${total}"
+    echo "enrolled:        ${enrolled}"
+    echo "not enrolled:    ${not_enrolled}"
+    echo "mac:             ${mac_count}"
+    echo "windows:         ${windows_count}"
+    echo "linux:           ${linux_count}"
+    echo
+    echo "MACHINES:"
+    # Already printed above in the loop
+    echo "NOTE: Read-only discovery. No inventory modifications."
+fi

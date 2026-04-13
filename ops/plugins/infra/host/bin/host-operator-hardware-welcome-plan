@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-operator-hardware-welcome-plan
+# Read-only: once a device has been reprovisioned and SSH proof exists,
+# output the exact governed join actions required to welcome it into
+# the spine.
+#
+# This capability does NOT mutate repo truth, assign roles, or
+# activate anything. It is planning output only.
+#
+# Authority sources:
+#   - ops/bindings/operator.hardware.inventory.yaml
+#   - ops/bindings/operator.hardware.readiness.profiles.yaml
+#   - ops/bindings/ssh.targets.yaml
+#   - ops/bindings/tailscale.tailnet.snapshot.yaml
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
+PROFILES="${SPINE_REPO}/ops/bindings/operator.hardware.readiness.profiles.yaml"
+SSH_TARGETS="${SPINE_REPO}/ops/bindings/ssh.targets.yaml"
+TAILNET="${SPINE_REPO}/ops/bindings/tailscale.tailnet.snapshot.yaml"
+
+usage() {
+    cat <<'EOF'
+host-operator-hardware-welcome-plan - Welcome planning for reprovisioned hardware
+
+Usage:
+  host-operator-hardware-welcome-plan --device <device_id> [--ssh-proof <ip_or_hostname>] [--json]
+
+Options:
+  --device <device_id>             Device ID from operator.hardware.inventory.yaml
+  --ssh-proof <ip_or_hostname>     SSH endpoint to verify reachability (Tailscale IP or hostname)
+  --json                           Machine-readable JSON output
+
+This capability is READ-ONLY planning only. No repo mutations. No role assignments.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+DEVICE=""
+SSH_PROOF=""
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device) DEVICE="${2:-}"; shift 2 ;;
+        --ssh-proof) SSH_PROOF="${2:-}"; shift 2 ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$DEVICE" ]] || fail "--device is required"
+
+need yq
+need jq
+
+[[ -f "$INVENTORY" ]] || fail "inventory not found: $INVENTORY"
+[[ -f "$PROFILES" ]] || fail "profiles not found: $PROFILES"
+
+# Look up device in inventory
+device_json=$(yq e -o=json ".machines[] | select(.device_id == \"$DEVICE\")" "$INVENTORY" 2>/dev/null)
+[[ -n "$device_json" && "$device_json" != "null" ]] || fail "device not found in inventory: $DEVICE"
+
+platform=$(echo "$device_json" | jq -r '.platform')
+model=$(echo "$device_json" | jq -r '.model // "unknown"')
+ts_ip=$(echo "$device_json" | jq -r '.tailscale_ip // empty')
+ts_id=$(echo "$device_json" | jq -r '.tailscale_identity // empty')
+
+# Check if device already has an SSH target binding
+ssh_target_exists=false
+if [[ -f "$SSH_TARGETS" ]]; then
+    ssh_match=$(yq e -o=json ".targets[] | select(.device_id == \"$DEVICE\")" "$SSH_TARGETS" 2>/dev/null || true)
+    if [[ -n "$ssh_match" && "$ssh_match" != "null" ]]; then
+        ssh_target_exists=true
+    fi
+fi
+
+# Check Tailscale enrollment
+tailnet_enrolled=false
+if [[ -f "$TAILNET" && -n "$ts_id" && "$ts_id" != "null" ]]; then
+    tailnet_match=$(yq e ".devices[] | select(.id == \"$ts_id\") | .tailscale_ip" "$TAILNET" 2>/dev/null || true)
+    if [[ -n "$tailnet_match" && "$tailnet_match" != "null" ]]; then
+        tailnet_enrolled=true
+    fi
+fi
+
+# Check SSH proof if provided
+ssh_reachable=false
+ssh_proof_detail="not provided"
+if [[ -n "$SSH_PROOF" ]]; then
+    # Try SSH connection test (timeout 5 seconds, no auth needed — just TCP)
+    if timeout 5 bash -c "echo >/dev/tcp/$SSH_PROOF/22" 2>/dev/null; then
+        ssh_reachable=true
+        ssh_proof_detail="port 22 reachable at $SSH_PROOF"
+    else
+        ssh_proof_detail="port 22 NOT reachable at $SSH_PROOF"
+    fi
+fi
+
+# Determine readiness profile
+profile_name="$platform"
+profile_exists=$(yq e ".profiles.$platform // \"\"" "$PROFILES" 2>/dev/null)
+if [[ -z "$profile_exists" || "$profile_exists" == "null" ]]; then
+    profile_name="none"
+fi
+
+# Build welcome plan actions
+actions=()
+blockers=()
+
+# SSH proof is the hard gate
+if [[ -z "$SSH_PROOF" ]]; then
+    blockers+=("SSH proof not provided. Use --ssh-proof <ip_or_hostname> to provide SSH endpoint.")
+elif ! $ssh_reachable; then
+    blockers+=("SSH proof failed: $ssh_proof_detail")
+fi
+
+# Plan inventory delta
+inventory_needs_update=false
+inv_actions=()
+if [[ "$model" == "null" || "$model" == "unknown" ]]; then
+    inventory_needs_update=true
+    inv_actions+=("Record hardware model in inventory")
+fi
+year=$(echo "$device_json" | jq -r '.year // empty')
+if [[ -z "$year" || "$year" == "null" ]]; then
+    inventory_needs_update=true
+    inv_actions+=("Record hardware year in inventory")
+fi
+site=$(echo "$device_json" | jq -r '.site // empty')
+if [[ -z "$site" || "$site" == "null" ]]; then
+    inventory_needs_update=true
+    inv_actions+=("Record site/location in inventory")
+fi
+if [[ -z "$ts_ip" || "$ts_ip" == "null" ]]; then
+    inventory_needs_update=true
+    inv_actions+=("Record Tailscale IP in inventory")
+fi
+
+# Plan actions
+if $inventory_needs_update; then
+    for a in "${inv_actions[@]}"; do
+        actions+=("$(jq -n --arg a "$a" --arg t "inventory" '{action: $a, type: $t}')")
+    done
+fi
+
+if ! $ssh_target_exists; then
+    actions+=("$(jq -n '{action: "Add SSH target binding for this device", type: "ssh_targets"}')")
+fi
+
+if ! $tailnet_enrolled; then
+    actions+=("$(jq -n '{action: "Verify Tailscale enrollment and update tailnet snapshot", type: "tailnet"}')")
+fi
+
+# Readiness commands to run
+readiness_cmds=()
+readiness_cmds+=("host-operator-hardware-readiness --device $DEVICE --json")
+readiness_cmds+=("host-operator-hardware-readiness --device $DEVICE --local-probe --json")
+
+# Expected evidence categories
+evidence_categories=("identity" "topology" "entropy" "metabolism" "tool_prerequisites" "tailscale" "ssh" "always_on_posture")
+
+# Build output
+actions_json="["
+for idx in "${!actions[@]}"; do
+    [[ $idx -gt 0 ]] && actions_json+=","
+    actions_json+="${actions[$idx]}"
+done
+actions_json+="]"
+
+blockers_json=$(printf '%s\n' "${blockers[@]:-}" | jq -R -s 'split("\n") | map(select(length > 0))')
+
+cmds_json=$(printf '%s\n' "${readiness_cmds[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')
+evidence_json=$(printf '%s\n' "${evidence_categories[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')
+
+if [[ ${#blockers[@]} -gt 0 && -n "${blockers[0]}" ]]; then
+    plan_status="blocked"
+else
+    plan_status="ready_to_execute"
+fi
+
+if $JSON_MODE; then
+    jq -n \
+        --arg device "$DEVICE" \
+        --arg platform "$platform" \
+        --arg model "$model" \
+        --arg plan_status "$plan_status" \
+        --argjson ssh_proof_provided "$([ -n "$SSH_PROOF" ] && echo true || echo false)" \
+        --argjson ssh_reachable "$ssh_reachable" \
+        --arg ssh_proof_detail "$ssh_proof_detail" \
+        --argjson ssh_target_exists "$ssh_target_exists" \
+        --argjson tailnet_enrolled "$tailnet_enrolled" \
+        --arg readiness_profile "$profile_name" \
+        --argjson actions "$actions_json" \
+        --argjson blockers "$blockers_json" \
+        --argjson readiness_commands "$cmds_json" \
+        --argjson expected_evidence_categories "$evidence_json" \
+        '{
+            device: $device,
+            platform: $platform,
+            model: $model,
+            plan_status: $plan_status,
+            ssh_proof: {
+                provided: $ssh_proof_provided,
+                reachable: $ssh_reachable,
+                detail: $ssh_proof_detail
+            },
+            ssh_target_binding_exists: $ssh_target_exists,
+            tailnet_enrolled: $tailnet_enrolled,
+            readiness_profile: $readiness_profile,
+            actions: $actions,
+            blockers: $blockers,
+            readiness_commands: $readiness_commands,
+            expected_evidence_categories: $expected_evidence_categories,
+            note: "Planning only. No repo mutations were performed. No roles were assigned."
+        }'
+else
+    echo "host.operator-hardware.welcome-plan"
+    echo "====================================="
+    echo "device:             $DEVICE"
+    echo "platform:           $platform"
+    echo "model:              $model"
+    echo "plan status:        $plan_status"
+    echo
+    echo "SSH PROOF:"
+    echo "  provided:         $([ -n "$SSH_PROOF" ] && echo "yes" || echo "no")"
+    echo "  reachable:        $ssh_reachable"
+    echo "  detail:           $ssh_proof_detail"
+    echo
+    echo "CURRENT STATE:"
+    echo "  ssh target:       $(if $ssh_target_exists; then echo "exists"; else echo "needs binding"; fi)"
+    echo "  tailnet:          $(if $tailnet_enrolled; then echo "enrolled"; else echo "not in snapshot"; fi)"
+    echo "  readiness profile: $profile_name"
+    echo
+
+    if [[ ${#blockers[@]} -gt 0 && -n "${blockers[0]}" ]]; then
+        echo "BLOCKERS:"
+        for b in "${blockers[@]}"; do
+            echo "  - $b"
+        done
+        echo
+        echo "STOP: Resolve blockers before proceeding with welcome plan."
+    else
+        echo "ACTIONS NEEDED:"
+        echo "$actions_json" | jq -r '.[] | "  [\(.type)] \(.action)"'
+        echo
+        echo "READINESS COMMANDS:"
+        for cmd in "${readiness_cmds[@]}"; do
+            echo "  $cmd"
+        done
+        echo
+        echo "EXPECTED EVIDENCE CATEGORIES:"
+        for cat in "${evidence_categories[@]}"; do
+            echo "  - $cat"
+        done
+    fi
+    echo
+    echo "NOTE: Planning only. No repo mutations. No role assignments."
+fi
