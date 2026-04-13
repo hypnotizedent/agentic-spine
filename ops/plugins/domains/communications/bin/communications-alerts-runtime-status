@@ -24,6 +24,57 @@ ESCALATION_DIR="$SPINE_OUTBOX/alerts/communications/escalations"
 
 JSON=0
 
+resolve_execution_host_dispatcher_access() {
+  local registry="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
+  local state_root="${SPINE_STATE:-}"
+  local domain_state receipt target_host target_access dispatcher_role access_token local_host
+
+  [[ -f "$registry" ]] || return 1
+  dispatcher_role="$(yq -r '.labels[] | select(.label == "com.ronny.communications-alerts-dispatcher") | .intended_node_role // ""' "$registry" 2>/dev/null || true)"
+  [[ "$dispatcher_role" == "execution_host" ]] || return 1
+
+  [[ -n "$state_root" ]] || return 1
+  domain_state="$state_root/domain-state"
+  [[ -d "$domain_state" ]] || return 1
+
+  receipt="$(find "$domain_state" -maxdepth 1 -name 'EXEC_RECEIPT-SPINE-EXECUTION-HOST-ACTIVATION-*.yaml' -type f 2>/dev/null | sort -r | head -1 || true)"
+  [[ -n "$receipt" ]] || return 1
+
+  target_host="$(yq -r '.final_live_execution_host // .target_host // ""' "$receipt" 2>/dev/null || true)"
+  target_access="$(yq -r '.target_access_path // ""' "$receipt" 2>/dev/null || true)"
+  access_token="$(printf '%s\n' "$target_access" | awk '{print $1}')"
+  [[ -n "$access_token" ]] || return 1
+
+  local_host="$(hostname -s 2>/dev/null || true)"
+  if [[ -n "$target_host" && "$local_host" == "$target_host" ]]; then
+    return 1
+  fi
+
+  printf '%s\n' "$access_token"
+}
+
+maybe_emit_remote_runtime_status() {
+  local access_token="$1"
+  [[ -n "$access_token" ]] || return 1
+  command -v ssh >/dev/null 2>&1 || return 1
+
+  local remote_cmd='
+set -euo pipefail
+for repo in "$HOME/code/agentic-spine" "/home/ubuntu/code/agentic-spine"; do
+  if [[ -x "$repo/ops/plugins/domains/communications/bin/communications-alerts-runtime-status" ]]; then
+    cd "$repo"
+    COMMUNICATIONS_ALERTS_RUNTIME_LOCAL_ONLY=1 \
+      "$repo/ops/plugins/domains/communications/bin/communications-alerts-runtime-status" --json
+    exit 0
+  fi
+done
+exit 1
+'
+
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    "$access_token" "bash -lc $(printf '%q' "$remote_cmd")" 2>/dev/null
+}
+
 usage() {
   cat <<'USAGE'
 Usage: communications-alerts-runtime-status [--json]
@@ -56,6 +107,36 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "${COMMUNICATIONS_ALERTS_RUNTIME_LOCAL_ONLY:-0}" != "1" ]]; then
+  remote_access="$(resolve_execution_host_dispatcher_access || true)"
+  if [[ -n "$remote_access" ]]; then
+    remote_json="$(maybe_emit_remote_runtime_status "$remote_access" || true)"
+    if [[ -n "$remote_json" ]] && echo "$remote_json" | jq -e '.' >/dev/null 2>&1; then
+      if [[ "$JSON" -eq 1 ]]; then
+        printf '%s\n' "$remote_json"
+        exit 0
+      fi
+
+      remote_status="$(echo "$remote_json" | jq -r '.status // "unknown"')"
+      remote_generated_at="$(echo "$remote_json" | jq -r '.generated_at // ""')"
+      remote_oneliner="$(echo "$remote_json" | jq -r '.data.oneliner // ""')"
+      echo "communications.alerts.runtime.status"
+      echo "status: $remote_status"
+      echo "generated_at: $remote_generated_at"
+      echo ""
+      [[ -n "$remote_oneliner" ]] && echo "$remote_oneliner"
+      echo ""
+      echo "source: execution_host"
+      printf '%s\n' "$remote_json" | jq -r '
+        .data
+        | to_entries[]
+        | select(.key != "oneliner")
+        | "\(.key): \(.value)"'
+      exit 0
+    fi
+  fi
+fi
 
 command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
 
