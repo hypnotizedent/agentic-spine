@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# node-workload-resolve
+# Read-only: given a node role, return the workload set currently intended
+# for that role from the live scheduler registry.
+#
+# Does NOT reinterpret the registry into a new platform-neutral model.
+# Does NOT create or imply scheduler.registry.yaml.
+# Does NOT mutate any surface.
+#
+# Authority sources:
+#   - launchd.scheduler.registry.yaml
+#   - launchd.runtime.contract.yaml (explanatory context only)
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SCHEDULER_REGISTRY="${SPINE_REPO}/ops/bindings/launchd.scheduler.registry.yaml"
+RUNTIME_CONTRACT="${SPINE_REPO}/ops/bindings/launchd.runtime.contract.yaml"
+NODE_CONTRACT="${SPINE_REPO}/ops/bindings/node.role.contract.yaml"
+
+usage() {
+    cat <<'EOF'
+node-workload-resolve - Resolve workload set for a node role
+
+Usage:
+  node-workload-resolve --role <role> [--json]
+
+Arguments:
+  --role <role>    Node role from node.role.contract.yaml
+  --json           Machine-readable JSON output
+
+This capability is READ-ONLY. It resolves from existing authority only.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+ROLE=""
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --role) ROLE="${2:-}"; shift 2 ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$ROLE" ]] || fail "--role is required"
+
+need yq
+need jq
+
+[[ -f "$SCHEDULER_REGISTRY" ]] || fail "scheduler registry not found: $SCHEDULER_REGISTRY"
+[[ -f "$NODE_CONTRACT" ]] || fail "node contract not found: $NODE_CONTRACT"
+
+# Validate role exists
+valid_roles=$(yq e '.node_types | keys | .[]' "$NODE_CONTRACT" 2>/dev/null)
+role_found=false
+for r in $valid_roles; do
+    [[ "$r" == "$ROLE" ]] && role_found=true
+done
+$role_found || fail "unknown role: $ROLE (valid: $valid_roles)"
+
+# Extract labels for the requested role
+if $JSON_MODE; then
+    labels_json=$(yq e -o=json ".labels[] | select(.intended_node_role == \"$ROLE\")" "$SCHEDULER_REGISTRY" 2>/dev/null | jq -s '.')
+
+    total=$(echo "$labels_json" | jq 'length')
+    active=$(echo "$labels_json" | jq '[.[] | select(.state == "active")] | length')
+    daemon=$(echo "$labels_json" | jq '[.[] | select(.mode == "daemon")] | length')
+    scheduled=$(echo "$labels_json" | jq '[.[] | select(.mode == "scheduled")] | length')
+    contract_required=$(echo "$labels_json" | jq '[.[] | select(.contract_required == true)] | length')
+    has_escalation=$(echo "$labels_json" | jq '[.[] | select(.escalation_authority_exception == true)] | length')
+
+    jq -n \
+        --arg role "$ROLE" \
+        --arg registry_source "launchd.scheduler.registry.yaml" \
+        --argjson labels "$labels_json" \
+        --argjson total "$total" \
+        --argjson active "$active" \
+        --argjson daemon "$daemon" \
+        --argjson scheduled "$scheduled" \
+        --argjson contract_required "$contract_required" \
+        --argjson has_escalation_exception "$has_escalation" \
+        '{
+            role: $role,
+            registry_source: $registry_source,
+            labels: $labels,
+            summary: {
+                total: $total,
+                active: $active,
+                daemon: $daemon,
+                scheduled: $scheduled,
+                contract_required: $contract_required,
+                has_escalation_exception: $has_escalation_exception
+            },
+            note: "Read-only resolver over current launchd scheduler registry. No platform translation applied."
+        }'
+else
+    echo "node.workload.resolve"
+    echo "====================="
+    echo "role:     $ROLE"
+    echo "source:   launchd.scheduler.registry.yaml"
+    echo
+
+    labels_json=$(yq e -o=json ".labels[] | select(.intended_node_role == \"$ROLE\")" "$SCHEDULER_REGISTRY" 2>/dev/null | jq -s '.')
+    count=$(echo "$labels_json" | jq 'length')
+
+    printf "%-45s %-10s %-9s %-8s %s\n" "LABEL" "STATE" "MODE" "CONTRACT" "NOTES"
+
+    for i in $(seq 0 $((count - 1))); do
+        label=$(echo "$labels_json" | jq -r ".[$i].label")
+        state=$(echo "$labels_json" | jq -r ".[$i].state")
+        mode=$(echo "$labels_json" | jq -r ".[$i].mode")
+        contract=$(echo "$labels_json" | jq -r ".[$i].contract_required")
+        escalation=$(echo "$labels_json" | jq -r ".[$i].escalation_authority_exception // false")
+        notes=""
+        if [[ "$escalation" == "true" ]]; then
+            esc_scope=$(echo "$labels_json" | jq -r ".[$i].escalation_scope // \"\"")
+            notes="escalation_exception: $esc_scope"
+        fi
+        printf "%-45s %-10s %-9s %-8s %s\n" "$label" "$state" "$mode" "$contract" "$notes"
+    done
+
+    echo
+    echo "total: $count label(s) mapped to $ROLE"
+    echo
+    echo "NOTE: Read-only resolver over current launchd scheduler registry."
+    echo "      No platform translation applied."
+fi
