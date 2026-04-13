@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-operator-hardware-usb-medium-write
+# Explicit destructive writer for reusable USB/SSD installer media.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+
+usage() {
+    cat <<'EOF'
+host-operator-hardware-usb-medium-write - Write a stock installer ISO to reusable USB/SSD media
+
+Usage:
+  host-operator-hardware-usb-medium-write --plan <usb-medium-plan.json> --disk <disk> [--apply] [--json]
+
+Options:
+  --plan <path>      Medium plan from host.operator-hardware.usb-medium.render
+  --disk <disk>      Target whole-disk identifier, for example /dev/disk4
+  --apply            Perform the destructive write (default: dry-run only)
+  --json             Machine-readable JSON output
+
+This capability mutates the selected medium when --apply is provided.
+It does not mutate the target salvage device.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+PLAN_PATH=""
+DISK=""
+APPLY=false
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --plan) PLAN_PATH="${2:-}"; shift 2 ;;
+        --disk) DISK="${2:-}"; shift 2 ;;
+        --apply) APPLY=true; shift ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$PLAN_PATH" ]] || fail "--plan is required"
+[[ -f "$PLAN_PATH" ]] || fail "plan not found: $PLAN_PATH"
+[[ -n "$DISK" ]] || fail "--disk is required"
+
+need jq
+
+iso_source=$(jq -r '.iso_source // ""' "$PLAN_PATH")
+iso_resolution_status=$(jq -r '.iso_resolution_status // ""' "$PLAN_PATH")
+device_id=$(jq -r '.device_id' "$PLAN_PATH")
+medium_type=$(jq -r '.medium_type' "$PLAN_PATH")
+write_strategy=$(jq -r '.write_strategy' "$PLAN_PATH")
+
+[[ "$write_strategy" == "stock_iso_raw_write" ]] || fail "unsupported write strategy: $write_strategy"
+[[ -n "$iso_source" ]] || fail "plan missing iso_source"
+[[ "$iso_resolution_status" == "local_path_resolved" ]] || fail "plan does not have a resolved local ISO path"
+[[ -f "$iso_source" ]] || fail "local ISO path not found: $iso_source"
+
+raw_disk="$DISK"
+if [[ "$DISK" =~ ^/dev/disk[0-9]+$ ]] && [[ "$(uname -s)" == "Darwin" ]]; then
+    raw_disk="/dev/r${DISK#/dev/}"
+fi
+
+commands_json=$(jq -n \
+    --arg unmount "diskutil unmountDisk $DISK" \
+    --arg write "sudo dd if='$iso_source' of='$raw_disk' bs=4m status=progress conv=sync" \
+    --arg eject "diskutil eject $DISK" \
+    '[$unmount, $write, $eject]')
+
+write_performed=false
+if $APPLY; then
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        fail "--apply is currently implemented for macOS diskutil/dd path only"
+    fi
+    diskutil unmountDisk "$DISK" >/dev/null
+    sudo dd if="$iso_source" of="$raw_disk" bs=4m status=progress conv=sync
+    sync
+    diskutil eject "$DISK" >/dev/null || true
+    write_performed=true
+fi
+
+if $JSON_MODE; then
+    jq -n \
+        --arg capability "host.operator-hardware.usb-medium.write" \
+        --arg device "$device_id" \
+        --arg medium_type "$medium_type" \
+        --arg disk "$DISK" \
+        --arg raw_disk "$raw_disk" \
+        --arg iso_source "$iso_source" \
+        --argjson apply_requested "$APPLY" \
+        --argjson write_performed "$write_performed" \
+        --argjson commands "$commands_json" \
+        '{
+            capability: $capability,
+            device: $device,
+            medium_type: $medium_type,
+            disk: $disk,
+            raw_disk: $raw_disk,
+            iso_source: $iso_source,
+            apply_requested: $apply_requested,
+            write_performed: $write_performed,
+            commands: $commands,
+            note: "Writes stock installer ISO to reusable medium only. Target salvage device is untouched."
+        }'
+else
+    echo "host.operator-hardware.usb-medium.write"
+    echo "======================================"
+    echo "device:              $device_id"
+    echo "medium type:         $medium_type"
+    echo "disk:                $DISK"
+    echo "raw disk:            $raw_disk"
+    echo "iso source:          $iso_source"
+    echo "apply requested:     $APPLY"
+    echo "write performed:     $write_performed"
+    echo
+    echo "NOTE: Writes stock installer ISO to reusable medium only."
+fi
