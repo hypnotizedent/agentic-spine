@@ -12,27 +12,27 @@ This is the canonical agent entry surface for the current aperture.
 
 ## Current Aperture
 
-As of 2026-04-10, the spine is in `L1 hardening` aperture.
+As of 2026-04-13, the spine is in `post-stabilization operator surfaces` aperture.
+
+Spine-core stabilization is complete. The engine stays conservative; change is limited to provable bug fixes unless Ronny explicitly widens scope.
+The baseline is commit `f0a74693` (manifest knowledge layer, 2026-04-12).
 
 Legal work:
-- role truth
-- role-aware materialization
-- retirement propagation
-- canonical read truth
-- telemetry discoverability
-- status and verify honesty
-- host-agnostic join behavior
-- machine coordination kernel primitives
+- read-heavy operator product surfaces (cockpit, dashboards, status views) that consume existing authority without mutating it
+- classification of operator vision artifacts into existing governed intake posture, without authority promotion or new mutation-path creation
+- parking operator notes with explicit promotion conditions; no authority promotion under this aperture
+- release and distribution hygiene
+- verify, status, and reconcile operations
+- bug fixes to existing spine-core surfaces when provably broken
 
 Illegal work until Ronny lifts this aperture:
-- net-new governance surfaces, unless directly restoring an already-referenced missing L1 surface
+- net-new governance surfaces, doctrine shelves, or surface type vocabulary
+- broad architecture reopening (node topology, plane restructuring, fleet ontology)
+- authority promotion of parked intake artifacts; classification is legal, promotion is not
 - host assignments
-- watcher-placement debates
-- communications resume
-- L3 domain changes
-- repo archaeology
-- worldview reconstruction
-- prompts that re-litigate what the spine is
+- L3 domain creation or extraction
+- worldview reconstruction or re-litigation of what the spine is
+- new governed mutation paths unless explicitly scoped, narrowly bounded, and approved by Ronny
 
 Only Ronny may invoke, change, or lift this aperture.
 
