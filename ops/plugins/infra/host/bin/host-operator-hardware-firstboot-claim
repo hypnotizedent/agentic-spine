@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-operator-hardware-firstboot-claim
+# Emit a Stage 0 handoff object after first boot and trustworthy SSH proof.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
+CONTRACT="${SPINE_REPO}/ops/bindings/operator.hardware.bootstrap.handoff.contract.yaml"
+
+usage() {
+    cat <<'EOF'
+host-operator-hardware-firstboot-claim - Emit a Stage 0 bootstrap handoff object
+
+Usage:
+  host-operator-hardware-firstboot-claim --device <device_id> --hostname <name> --ssh-proof-endpoint <host> [options] [--json]
+
+Options:
+  --device <device_id>                 Device ID from operator.hardware.inventory.yaml
+  --hostname <name>                    Booted host hostname
+  --operator-user <user>               Operator user on target (default: ronnyworks)
+  --ssh-public-key-ref <path>          SSH public key reference (default: ~/.ssh/id_ed25519.pub)
+  --ssh-proof-endpoint <host>          Hostname or IP to prove TCP/22 reachability
+  --source-platform <platform>         Override source platform from inventory
+  --target-platform <linux>            Target platform truth (default: linux)
+  --tailscale-identity <id>            Tailscale identity if present
+  --tailscale-ip <ip>                  Tailscale IP if present
+  --tailscale-status <status>          enrolled | pending | absent (default: pending)
+  --package-baseline-status <status>   present | partial | unknown (default: unknown)
+  --package-baseline <csv>             Comma-separated package baseline
+  --key-seeding-status <status>        seeded | pending | unknown (default: unknown)
+  --bootstrap-method <method>          usb_autoinstall | pxe | iventoy | manual_console_install
+  --installer-provenance <value>       Provenance string from installer rendering
+  --target-distro <name>               Target distro (default: ubuntu)
+  --target-distro-version <version>    Target distro version (default: 24.04)
+  --disk-partition-shape <shape>       Partition shape (default: single-root-swapfile)
+  --entropy-marker <value>             Repeatable entropy marker
+  --output <path>                      Output path for claim object
+  --json                               Machine-readable JSON output
+
+This capability does not mutate any device. It writes a handoff object only after honest SSH proof.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+DEVICE=""
+HOSTNAME=""
+OPERATOR_USER="ronnyworks"
+SSH_PUBLIC_KEY_REF="${HOME}/.ssh/id_ed25519.pub"
+SSH_PROOF_ENDPOINT=""
+SOURCE_PLATFORM=""
+TARGET_PLATFORM="linux"
+TAILSCALE_IDENTITY=""
+TAILSCALE_IP=""
+TAILSCALE_STATUS="pending"
+PACKAGE_BASELINE_STATUS="unknown"
+PACKAGE_BASELINE=""
+KEY_SEEDING_STATUS="unknown"
+BOOTSTRAP_METHOD="manual_console_install"
+INSTALLER_PROVENANCE=""
+TARGET_DISTRO="ubuntu"
+TARGET_DISTRO_VERSION="24.04"
+DISK_PARTITION_SHAPE="single-root-swapfile"
+OUTPUT_PATH=""
+JSON_MODE=false
+declare -a ENTROPY_MARKERS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device) DEVICE="${2:-}"; shift 2 ;;
+        --hostname) HOSTNAME="${2:-}"; shift 2 ;;
+        --operator-user) OPERATOR_USER="${2:-}"; shift 2 ;;
+        --ssh-public-key-ref) SSH_PUBLIC_KEY_REF="${2:-}"; shift 2 ;;
+        --ssh-proof-endpoint) SSH_PROOF_ENDPOINT="${2:-}"; shift 2 ;;
+        --source-platform) SOURCE_PLATFORM="${2:-}"; shift 2 ;;
+        --target-platform) TARGET_PLATFORM="${2:-}"; shift 2 ;;
+        --tailscale-identity) TAILSCALE_IDENTITY="${2:-}"; shift 2 ;;
+        --tailscale-ip) TAILSCALE_IP="${2:-}"; shift 2 ;;
+        --tailscale-status) TAILSCALE_STATUS="${2:-}"; shift 2 ;;
+        --package-baseline-status) PACKAGE_BASELINE_STATUS="${2:-}"; shift 2 ;;
+        --package-baseline) PACKAGE_BASELINE="${2:-}"; shift 2 ;;
+        --key-seeding-status) KEY_SEEDING_STATUS="${2:-}"; shift 2 ;;
+        --bootstrap-method) BOOTSTRAP_METHOD="${2:-}"; shift 2 ;;
+        --installer-provenance) INSTALLER_PROVENANCE="${2:-}"; shift 2 ;;
+        --target-distro) TARGET_DISTRO="${2:-}"; shift 2 ;;
+        --target-distro-version) TARGET_DISTRO_VERSION="${2:-}"; shift 2 ;;
+        --disk-partition-shape) DISK_PARTITION_SHAPE="${2:-}"; shift 2 ;;
+        --entropy-marker) ENTROPY_MARKERS+=("${2:-}"); shift 2 ;;
+        --output) OUTPUT_PATH="${2:-}"; shift 2 ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$DEVICE" ]] || fail "--device is required"
+[[ -n "$HOSTNAME" ]] || fail "--hostname is required"
+[[ -n "$SSH_PROOF_ENDPOINT" ]] || fail "--ssh-proof-endpoint is required"
+
+need yq
+need jq
+need timeout
+
+[[ -f "$INVENTORY" ]] || fail "inventory not found: $INVENTORY"
+[[ -f "$CONTRACT" ]] || fail "handoff contract not found: $CONTRACT"
+
+device_json=$(yq e -o=json ".machines[] | select(.device_id == \"$DEVICE\")" "$INVENTORY" 2>/dev/null)
+[[ -n "$device_json" && "$device_json" != "null" ]] || fail "device not found in inventory: $DEVICE"
+
+if [[ -z "$SOURCE_PLATFORM" ]]; then
+    SOURCE_PLATFORM=$(echo "$device_json" | jq -r '.platform')
+fi
+
+[[ "$TARGET_PLATFORM" == "linux" ]] || fail "target platform must currently be linux"
+
+case "$TAILSCALE_STATUS" in
+    enrolled|pending|absent) ;;
+    *) fail "invalid tailscale status: $TAILSCALE_STATUS" ;;
+esac
+
+case "$PACKAGE_BASELINE_STATUS" in
+    present|partial|unknown) ;;
+    *) fail "invalid package baseline status: $PACKAGE_BASELINE_STATUS" ;;
+esac
+
+case "$KEY_SEEDING_STATUS" in
+    seeded|pending|unknown) ;;
+    *) fail "invalid key seeding status: $KEY_SEEDING_STATUS" ;;
+esac
+
+case "$BOOTSTRAP_METHOD" in
+    usb_autoinstall|pxe|iventoy|manual_console_install) ;;
+    *) fail "invalid bootstrap method: $BOOTSTRAP_METHOD" ;;
+esac
+
+if [[ -z "$INSTALLER_PROVENANCE" ]]; then
+    INSTALLER_PROVENANCE="operator-declared:${BOOTSTRAP_METHOD}:${TARGET_DISTRO}-${TARGET_DISTRO_VERSION}"
+fi
+
+if ! timeout 5 bash -c "echo >/dev/tcp/$SSH_PROOF_ENDPOINT/22" 2>/dev/null; then
+    fail "ssh proof failed: port 22 not reachable at $SSH_PROOF_ENDPOINT"
+fi
+
+if [[ -z "$PACKAGE_BASELINE" ]]; then
+    PACKAGE_BASELINE="openssh-server,curl,git,jq,yq,python3,ripgrep,rsync,tailscale"
+fi
+
+IFS=',' read -r -a package_array <<<"$PACKAGE_BASELINE"
+package_json=$(printf '%s\n' "${package_array[@]}" | awk 'NF {print}' | jq -R -s 'split("\n") | map(select(length > 0))')
+entropy_json=$(printf '%s\n' "${ENTROPY_MARKERS[@]:-}" | jq -R -s 'split("\n") | map(select(length > 0))')
+
+if [[ -z "$OUTPUT_PATH" ]]; then
+    OUTPUT_PATH="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${DEVICE}/firstboot-claim.${DEVICE}.json"
+fi
+mkdir -p "$(dirname "$OUTPUT_PATH")"
+
+completed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+jq -n \
+    --arg contract_ref "ops/bindings/operator.hardware.bootstrap.handoff.contract.yaml" \
+    --arg device_id "$DEVICE" \
+    --arg source_platform "$SOURCE_PLATFORM" \
+    --arg target_platform_truth "$TARGET_PLATFORM" \
+    --arg hostname "$HOSTNAME" \
+    --arg operator_user "$OPERATOR_USER" \
+    --arg ssh_public_key_ref "$SSH_PUBLIC_KEY_REF" \
+    --arg ssh_proof_status "reachable" \
+    --arg ssh_proof_endpoint "$SSH_PROOF_ENDPOINT" \
+    --arg tailscale_identity "$TAILSCALE_IDENTITY" \
+    --arg tailscale_ip "$TAILSCALE_IP" \
+    --arg tailscale_status "$TAILSCALE_STATUS" \
+    --arg package_baseline_status "$PACKAGE_BASELINE_STATUS" \
+    --arg key_seeding_status "$KEY_SEEDING_STATUS" \
+    --arg bootstrap_method "$BOOTSTRAP_METHOD" \
+    --arg installer_provenance "$INSTALLER_PROVENANCE" \
+    --arg target_distro "$TARGET_DISTRO" \
+    --arg target_distro_version "$TARGET_DISTRO_VERSION" \
+    --arg disk_partition_shape "$DISK_PARTITION_SHAPE" \
+    --arg bootstrap_completed_at "$completed_at" \
+    --argjson package_baseline "$package_json" \
+    --argjson entropy_markers "$entropy_json" \
+    '{
+        contract_ref: $contract_ref,
+        device_id: $device_id,
+        source_platform: $source_platform,
+        target_platform_truth: $target_platform_truth,
+        hostname: $hostname,
+        operator_user: $operator_user,
+        ssh_public_key_ref: $ssh_public_key_ref,
+        ssh_proof_status: $ssh_proof_status,
+        ssh_proof_endpoint: $ssh_proof_endpoint,
+        tailscale_identity: (if $tailscale_identity == "" then null else $tailscale_identity end),
+        tailscale_ip: (if $tailscale_ip == "" then null else $tailscale_ip end),
+        tailscale_status: $tailscale_status,
+        package_baseline_status: $package_baseline_status,
+        package_baseline: $package_baseline,
+        key_seeding_status: $key_seeding_status,
+        bootstrap_method: $bootstrap_method,
+        installer_provenance: $installer_provenance,
+        target_distro: $target_distro,
+        target_distro_version: $target_distro_version,
+        disk_partition_shape: $disk_partition_shape,
+        bootstrap_completed_at: $bootstrap_completed_at,
+        entropy_markers: $entropy_markers
+    }' >"$OUTPUT_PATH"
+
+if $JSON_MODE; then
+    jq -n \
+        --arg capability "host.operator-hardware.firstboot.claim" \
+        --arg device "$DEVICE" \
+        --arg output_path "$OUTPUT_PATH" \
+        --arg ssh_endpoint "$SSH_PROOF_ENDPOINT" \
+        --arg hostname "$HOSTNAME" \
+        --arg target_platform "$TARGET_PLATFORM" \
+        --arg package_baseline_status "$PACKAGE_BASELINE_STATUS" \
+        --arg key_seeding_status "$KEY_SEEDING_STATUS" \
+        --arg installer_provenance "$INSTALLER_PROVENANCE" \
+        --argjson entropy_markers "$entropy_json" \
+        '{
+            capability: $capability,
+            device: $device,
+            hostname: $hostname,
+            target_platform_truth: $target_platform,
+            ssh_proof: {
+                status: "reachable",
+                endpoint: $ssh_endpoint
+            },
+            package_baseline_status: $package_baseline_status,
+            key_seeding_status: $key_seeding_status,
+            installer_provenance: $installer_provenance,
+            entropy_markers: $entropy_markers,
+            claim_object_path: $output_path,
+            note: "Stage 0 handoff object only. No role or host assignment performed."
+        }'
+else
+    echo "host.operator-hardware.firstboot.claim"
+    echo "====================================="
+    echo "device:                 $DEVICE"
+    echo "hostname:               $HOSTNAME"
+    echo "target platform truth:  $TARGET_PLATFORM"
+    echo "ssh proof endpoint:     $SSH_PROOF_ENDPOINT"
+    echo "claim object:           $OUTPUT_PATH"
+    echo
+    echo "NOTE: Stage 0 handoff object only. No role or host assignment performed."
+fi

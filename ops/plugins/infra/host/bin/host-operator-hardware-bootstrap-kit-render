@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-operator-hardware-bootstrap-kit-render
+# Render a Stage 0 bootstrap kit manifest for operator-owned hardware.
+# This is artifact generation only. No device mutation is performed.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
+CONTRACT="${SPINE_REPO}/ops/bindings/operator.hardware.bootstrap.handoff.contract.yaml"
+
+usage() {
+    cat <<'EOF'
+host-operator-hardware-bootstrap-kit-render - Render a Stage 0 bootstrap kit manifest
+
+Usage:
+  host-operator-hardware-bootstrap-kit-render --device <device_id> [options] [--json]
+
+Options:
+  --device <device_id>                 Device ID from operator.hardware.inventory.yaml
+  --target-platform <linux>            Target platform after reprovision (default: linux)
+  --hostname <name>                    Target hostname (default: inferred from inventory/tailscale)
+  --operator-user <user>               Target operator user (default: ronnyworks)
+  --ssh-public-key-ref <path>          SSH public key reference (default: ~/.ssh/id_ed25519.pub)
+  --tailscale-enrollment-mode <mode>   manual | auth_key (default: manual)
+  --bootstrap-method <method>          usb_autoinstall | pxe | iventoy | manual_console_install
+  --target-distro <name>               Linux distribution (default: ubuntu)
+  --target-distro-version <version>    Distribution version (default: 24.04)
+  --disk-partition-shape <shape>       Partition shape (default: single-root-swapfile)
+  --package-baseline <csv>             Comma-separated package baseline
+  --output-dir <dir>                   Output directory for generated kit artifacts
+  --json                               Machine-readable JSON output
+
+This capability renders bootstrap artifacts only. No device is modified.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+DEVICE=""
+TARGET_PLATFORM="linux"
+HOSTNAME=""
+OPERATOR_USER="ronnyworks"
+SSH_PUBLIC_KEY_REF="${HOME}/.ssh/id_ed25519.pub"
+TAILSCALE_MODE="manual"
+BOOTSTRAP_METHOD=""
+TARGET_DISTRO="ubuntu"
+TARGET_DISTRO_VERSION="24.04"
+DISK_PARTITION_SHAPE="single-root-swapfile"
+PACKAGE_BASELINE=""
+OUTPUT_DIR=""
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device) DEVICE="${2:-}"; shift 2 ;;
+        --target-platform) TARGET_PLATFORM="${2:-}"; shift 2 ;;
+        --hostname) HOSTNAME="${2:-}"; shift 2 ;;
+        --operator-user) OPERATOR_USER="${2:-}"; shift 2 ;;
+        --ssh-public-key-ref) SSH_PUBLIC_KEY_REF="${2:-}"; shift 2 ;;
+        --tailscale-enrollment-mode) TAILSCALE_MODE="${2:-}"; shift 2 ;;
+        --bootstrap-method) BOOTSTRAP_METHOD="${2:-}"; shift 2 ;;
+        --target-distro) TARGET_DISTRO="${2:-}"; shift 2 ;;
+        --target-distro-version) TARGET_DISTRO_VERSION="${2:-}"; shift 2 ;;
+        --disk-partition-shape) DISK_PARTITION_SHAPE="${2:-}"; shift 2 ;;
+        --package-baseline) PACKAGE_BASELINE="${2:-}"; shift 2 ;;
+        --output-dir) OUTPUT_DIR="${2:-}"; shift 2 ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$DEVICE" ]] || fail "--device is required"
+
+need yq
+need jq
+
+[[ -f "$INVENTORY" ]] || fail "inventory not found: $INVENTORY"
+[[ -f "$CONTRACT" ]] || fail "handoff contract not found: $CONTRACT"
+
+device_json=$(yq e -o=json ".machines[] | select(.device_id == \"$DEVICE\")" "$INVENTORY" 2>/dev/null)
+[[ -n "$device_json" && "$device_json" != "null" ]] || fail "device not found in inventory: $DEVICE"
+
+source_platform=$(echo "$device_json" | jq -r '.platform')
+model=$(echo "$device_json" | jq -r '.model // "unknown"')
+year=$(echo "$device_json" | jq -r '.year // empty')
+ts_identity=$(echo "$device_json" | jq -r '.tailscale_identity // empty')
+
+case "$TARGET_PLATFORM" in
+    linux) ;;
+    *) fail "target platform must currently be linux" ;;
+esac
+
+case "$TAILSCALE_MODE" in
+    manual|auth_key) ;;
+    *) fail "invalid tailscale enrollment mode: $TAILSCALE_MODE" ;;
+esac
+
+if [[ -z "$BOOTSTRAP_METHOD" ]]; then
+    case "$source_platform" in
+        mac) BOOTSTRAP_METHOD="usb_autoinstall" ;;
+        windows) BOOTSTRAP_METHOD="usb_autoinstall" ;;
+        linux) BOOTSTRAP_METHOD="manual_console_install" ;;
+        *) BOOTSTRAP_METHOD="usb_autoinstall" ;;
+    esac
+fi
+
+case "$BOOTSTRAP_METHOD" in
+    usb_autoinstall|pxe|iventoy|manual_console_install) ;;
+    *) fail "invalid bootstrap method: $BOOTSTRAP_METHOD" ;;
+esac
+
+if [[ -z "$HOSTNAME" ]]; then
+    if [[ -n "$ts_identity" && "$ts_identity" != "null" ]]; then
+        HOSTNAME="$ts_identity"
+    else
+        HOSTNAME="$DEVICE"
+    fi
+fi
+
+if [[ -z "$PACKAGE_BASELINE" ]]; then
+    PACKAGE_BASELINE="openssh-server,curl,git,jq,yq,python3,ripgrep,rsync,tailscale"
+fi
+
+IFS=',' read -r -a package_array <<<"$PACKAGE_BASELINE"
+package_json=$(printf '%s\n' "${package_array[@]}" | awk 'NF {print}' | jq -R -s 'split("\n") | map(select(length > 0))')
+
+if [[ -z "$OUTPUT_DIR" ]]; then
+    OUTPUT_DIR="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${DEVICE}"
+fi
+mkdir -p "$OUTPUT_DIR"
+
+created_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+local_hands_required=true
+if [[ "$BOOTSTRAP_METHOD" == "pxe" || "$BOOTSTRAP_METHOD" == "iventoy" ]]; then
+    local_hands_required=false
+fi
+
+case "$source_platform" in
+    mac)
+        local_hands_steps_json='["Attach USB installer","Use Apple boot picker (Option key) to select installer","Complete first boot with local console if required"]'
+        ;;
+    windows)
+        local_hands_steps_json='["Attach installer media or select netboot path","Use BIOS/UEFI boot menu to select installer","Complete first boot with local console if required"]'
+        ;;
+    *)
+        local_hands_steps_json='["Ensure target boot path is selected","Complete first boot with local console if required"]'
+        ;;
+esac
+
+kit_manifest_path="${OUTPUT_DIR}/bootstrap-kit.${DEVICE}.json"
+kit_summary_path="${OUTPUT_DIR}/bootstrap-kit.${DEVICE}.summary.txt"
+
+jq -n \
+    --arg device_id "$DEVICE" \
+    --arg source_platform "$source_platform" \
+    --arg target_platform "$TARGET_PLATFORM" \
+    --arg hostname "$HOSTNAME" \
+    --arg operator_user "$OPERATOR_USER" \
+    --arg ssh_public_key_ref "$SSH_PUBLIC_KEY_REF" \
+    --arg tailscale_enrollment_mode "$TAILSCALE_MODE" \
+    --arg bootstrap_method "$BOOTSTRAP_METHOD" \
+    --arg target_distro "$TARGET_DISTRO" \
+    --arg target_distro_version "$TARGET_DISTRO_VERSION" \
+    --arg disk_partition_shape "$DISK_PARTITION_SHAPE" \
+    --arg model "$model" \
+    --arg year "$year" \
+    --arg created_at "$created_at" \
+    --arg contract_ref "ops/bindings/operator.hardware.bootstrap.handoff.contract.yaml" \
+    --arg inventory_ref "ops/bindings/operator.hardware.inventory.yaml" \
+    --argjson package_baseline "$package_json" \
+    --argjson local_hands_required "$local_hands_required" \
+    --argjson local_hands_steps "$local_hands_steps_json" \
+    '{
+        device_id: $device_id,
+        source_platform: $source_platform,
+        target_platform: $target_platform,
+        hostname: $hostname,
+        operator_user: $operator_user,
+        ssh_public_key_ref: $ssh_public_key_ref,
+        tailscale_enrollment_mode: $tailscale_enrollment_mode,
+        package_baseline: $package_baseline,
+        bootstrap_method: $bootstrap_method,
+        target_distro: $target_distro,
+        target_distro_version: $target_distro_version,
+        disk_partition_shape: $disk_partition_shape,
+        device_fixture: {
+            model: $model,
+            year: (if $year == "" then null else ($year | tonumber? // $year) end)
+        },
+        provenance: {
+            rendered_at: $created_at,
+            contract_ref: $contract_ref,
+            inventory_ref: $inventory_ref
+        },
+        local_hands_required: $local_hands_required,
+        local_hands_steps: $local_hands_steps
+    }' >"$kit_manifest_path"
+
+cat >"$kit_summary_path" <<EOF
+device_id: $DEVICE
+source_platform: $source_platform
+target_platform: $TARGET_PLATFORM
+hostname: $HOSTNAME
+bootstrap_method: $BOOTSTRAP_METHOD
+target_distro: $TARGET_DISTRO $TARGET_DISTRO_VERSION
+output: $kit_manifest_path
+EOF
+
+if $JSON_MODE; then
+    jq -n \
+        --arg capability "host.operator-hardware.bootstrap-kit.render" \
+        --arg device "$DEVICE" \
+        --arg output_dir "$OUTPUT_DIR" \
+        --arg manifest_path "$kit_manifest_path" \
+        --arg summary_path "$kit_summary_path" \
+        --arg bootstrap_method "$BOOTSTRAP_METHOD" \
+        --arg hostname "$HOSTNAME" \
+        --arg target_platform "$TARGET_PLATFORM" \
+        --arg target_distro "$TARGET_DISTRO" \
+        --arg target_distro_version "$TARGET_DISTRO_VERSION" \
+        --argjson local_hands_required "$local_hands_required" \
+        --argjson package_baseline "$package_json" \
+        '{
+            capability: $capability,
+            device: $device,
+            target_platform: $target_platform,
+            hostname: $hostname,
+            bootstrap_method: $bootstrap_method,
+            target_distro: $target_distro,
+            target_distro_version: $target_distro_version,
+            local_hands_required: $local_hands_required,
+            package_baseline: $package_baseline,
+            generated_artifacts: [
+                $manifest_path,
+                $summary_path
+            ],
+            output_dir: $output_dir,
+            note: "Artifact generation only. No device mutation performed."
+        }'
+else
+    echo "host.operator-hardware.bootstrap-kit.render"
+    echo "=========================================="
+    echo "device:             $DEVICE"
+    echo "source platform:    $source_platform"
+    echo "target platform:    $TARGET_PLATFORM"
+    echo "hostname:           $HOSTNAME"
+    echo "bootstrap method:   $BOOTSTRAP_METHOD"
+    echo "target distro:      $TARGET_DISTRO $TARGET_DISTRO_VERSION"
+    echo "output dir:         $OUTPUT_DIR"
+    echo "manifest:           $kit_manifest_path"
+    echo
+    echo "NOTE: Artifact generation only. No device mutation performed."
+fi
