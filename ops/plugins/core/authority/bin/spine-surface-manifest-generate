@@ -163,7 +163,7 @@ def surface_row(
     verify_scope_refs: list[str] | None = None,
     notes: str = "",
 ) -> dict[str, Any]:
-    return {
+    row = {
         "surface_id": surface_id,
         "path": str(path),
         "surface_kind": surface_kind,
@@ -188,6 +188,103 @@ def surface_row(
         },
         "verify_scope_refs": verify_scope_refs or [],
         "notes": notes,
+    }
+    row["knowledge"] = infer_surface_knowledge(row)
+    return row
+
+
+def infer_surface_knowledge(row: dict[str, Any]) -> dict[str, Any]:
+    surface_kind = str(row.get("surface_kind") or "").strip()
+    authority_class = str(row.get("authority_class") or "").strip()
+    lifecycle_state = str(row.get("lifecycle_state") or "").strip()
+    entry_role = str(row.get("entry_role") or "").strip()
+    notes = str(row.get("notes") or "").strip()
+    family = str((row.get("governed_by") or {}).get("family") or "").strip()
+    path = str(row.get("path") or "").strip()
+    generated_from = row.get("generated_from") if isinstance(row.get("generated_from"), list) else []
+    depends_on = row.get("depends_on") if isinstance(row.get("depends_on"), list) else []
+    regenerated_by = row.get("regenerated_by") if isinstance(row.get("regenerated_by"), dict) else {}
+    regenerated_by_surface = str(regenerated_by.get("surface_id") or "").strip()
+    regenerated_by_command = str(regenerated_by.get("command") or "").strip()
+
+    does = notes
+    if not does:
+        if surface_kind == "entry_surface":
+            does = "Defines a canonical entry or runtime-read surface for spine operation."
+        elif surface_kind == "binding_contract":
+            does = "Defines governed contract truth for a spine runtime concern."
+        elif surface_kind == "command":
+            does = "Acts as an operator-facing command surface for governed spine work."
+        elif surface_kind == "runtime_surface":
+            does = "Implements a runtime helper or governed execution seam inside spine scope."
+        elif surface_kind == "state_authority":
+            does = "Stores live authoritative runtime state for a spine concern."
+        elif surface_kind == "generated_projection":
+            does = "Projects readable state from an authoritative spine surface."
+        elif surface_kind == "archive_surface":
+            does = "Retains archived historical material for continuity only."
+        else:
+            does = "Participates in the spine-only authority graph."
+
+    answers: list[str] = []
+    if entry_role == "canonical_first_read":
+        answers.append("Which surface must be read first before any spine work begins.")
+    elif entry_role == "session_attach":
+        answers.append("Which runtime attach surface is used at terminal birth.")
+    elif entry_role == "runtime_read":
+        answers.append("Which live surface should be read directly for current spine truth.")
+    elif entry_role == "operator_only":
+        answers.append("Which operator-facing projection or wrapper to use for this concern.")
+
+    if family:
+        answers.append(f"Which `{family}` family or lifecycle concern this surface governs or serves.")
+    elif surface_kind == "binding_contract":
+        answers.append("Which contract path is authoritative for this spine concern.")
+    elif surface_kind == "state_authority":
+        answers.append("Where the live authoritative state for this concern is stored.")
+    elif surface_kind == "generated_projection":
+        answers.append("Where the readable derived state for this concern is projected.")
+    elif surface_kind in {"command", "runtime_surface"}:
+        answers.append("Which command or runtime surface handles this spine concern.")
+    else:
+        answers.append("How this surface fits into the spine-only authority graph.")
+
+    if generated_from:
+        answers.append(f"Which source surfaces materially feed this surface: {', '.join(generated_from)}.")
+    elif depends_on:
+        answers.append(f"Which supporting surfaces this surface depends on: {', '.join(depends_on)}.")
+
+    lacks: list[str] = []
+    if authority_class != "authoritative":
+        lacks.append("It is not authoritative by itself; read its upstream authoritative surface for final truth.")
+    if surface_kind == "generated_projection":
+        lacks.append("It does not replace its source authority and may lag until regeneration runs.")
+    elif surface_kind == "command":
+        lacks.append("It does not prove success on its own without receipts, state mutation, or verify output.")
+    elif surface_kind == "runtime_surface":
+        lacks.append("It does not define policy by itself; its governing contract or caller still owns policy truth.")
+    elif surface_kind == "state_authority":
+        lacks.append("It does not explain operator workflow on its own without the governing contract or entry surface.")
+    elif surface_kind in {"archive_surface", "historical_reference"}:
+        lacks.append("It is not live authority and must not be treated as first-read truth.")
+
+    lacks.append("It does not answer domain or L3 workload truth outside the current spine-only aperture.")
+
+    if lifecycle_state in {"archived", "retired"}:
+        obsoletes_when = "Already historical; retained only until archive policy or explicit retirement cleanup removes it."
+    elif regenerated_by_command or regenerated_by_surface:
+        source = regenerated_by_command or regenerated_by_surface
+        obsoletes_when = f"When `{source}` regenerates or supersedes this surface with newer authoritative output."
+    elif authority_class == "authoritative":
+        obsoletes_when = "When a governed successor authoritative surface explicitly supersedes this path and the manifest relations are updated."
+    else:
+        obsoletes_when = "When its upstream authoritative surface or governed wrapper supersedes its current role."
+
+    return {
+        "what_it_does": does,
+        "what_it_answers": answers,
+        "what_it_lacks": lacks,
+        "obsoletes_when": obsoletes_when,
     }
 
 
@@ -507,6 +604,23 @@ def validate_manifest(data: dict[str, Any]) -> dict[str, Any]:
         if requires_regeneration and not (row["regenerated_by"]["surface_id"] or row["regenerated_by"]["command"]):
             issues.append(f"generated/projected surface missing regeneration story: {row['surface_id']}")
 
+    missing_knowledge = []
+    for row in surfaces:
+        live_authoritative = row["authority_class"] == "authoritative" and row["lifecycle_state"] in {"live", "generated_live"}
+        if not live_authoritative:
+            continue
+        knowledge = row.get("knowledge") if isinstance(row.get("knowledge"), dict) else {}
+        does = str(knowledge.get("what_it_does") or "").strip()
+        answers = knowledge.get("what_it_answers") if isinstance(knowledge.get("what_it_answers"), list) else []
+        lacks = knowledge.get("what_it_lacks") if isinstance(knowledge.get("what_it_lacks"), list) else []
+        obsoletes_when = str(knowledge.get("obsoletes_when") or "").strip()
+        if not does or not answers or not lacks or not obsoletes_when:
+            missing_knowledge.append(row["surface_id"])
+    if missing_knowledge:
+        issues.append(
+            "live authoritative surfaces missing knowledge fields: " + ", ".join(sorted(missing_knowledge))
+        )
+
     family_map = {row["family_id"]: row for row in families}
     if family_map.get("gap", {}).get("container_role") == "work_container":
         issues.append("gap must never be marked as a primary work container")
@@ -522,6 +636,7 @@ def validate_manifest(data: dict[str, Any]) -> dict[str, Any]:
         "spine_verify_commands_present": "pass" if any(cmd == "./bin/ops verify --spine" for row in verify_sets for cmd in row["canonical_commands"]) and any(cmd == "./bin/ops cap run verify.run -- spine" for row in verify_sets for cmd in row["canonical_commands"]) else "fail",
         "entry_chain_live_only": "pass" if all(entry_lookup.get(sid, {}).get("authority_class") not in {"historical", "residue"} for sid in entry_chain) else "fail",
         "generated_surfaces_regenerable": "pass" if not [row for row in surfaces if (row["surface_id"] == "spine_surface_manifest_yaml" or (row["authority_class"] in {"authoritative", "supporting"} and row["surface_kind"] == "generated_projection")) and not (row["regenerated_by"]["surface_id"] or row["regenerated_by"]["command"])] else "fail",
+        "live_authoritative_surfaces_have_knowledge": "pass" if not missing_knowledge else "fail",
         "gap_friction_not_work_container": "pass" if family_map.get("gap", {}).get("container_role") != "work_container" and family_map.get("friction", {}).get("container_role") != "work_container" else "fail",
         "idea_not_family": "pass" if "idea" not in family_ids else "fail",
     }
@@ -566,6 +681,25 @@ def build_markdown(data: dict[str, Any]) -> str:
     lines.extend(["", "## Surface Inventory"])
     for row in data["surfaces"]:
         lines.append(f"- `{row['surface_id']}`: `{row['authority_class']}` / `{row['surface_kind']}` / `{row['lifecycle_state']}` / `{row['path']}`")
+        knowledge = row.get("knowledge") if isinstance(row.get("knowledge"), dict) else {}
+        does = str(knowledge.get("what_it_does") or "").strip()
+        answers = knowledge.get("what_it_answers") if isinstance(knowledge.get("what_it_answers"), list) else []
+        lacks = knowledge.get("what_it_lacks") if isinstance(knowledge.get("what_it_lacks"), list) else []
+        obsoletes_when = str(knowledge.get("obsoletes_when") or "").strip()
+        if does:
+            lines.append(f"  - does: {does}")
+        if answers:
+            lines.append(f"  - answers: {answers[0]}")
+        if len(answers) > 1:
+            for item in answers[1:]:
+                lines.append(f"    - {item}")
+        if lacks:
+            lines.append(f"  - lacks: {lacks[0]}")
+        if len(lacks) > 1:
+            for item in lacks[1:]:
+                lines.append(f"    - {item}")
+        if obsoletes_when:
+            lines.append(f"  - obsoletes_when: {obsoletes_when}")
     parity = data.get("parity_surfaces", {})
     if parity:
         lines.extend(["", "## Parity Surfaces"])
