@@ -41,6 +41,17 @@ Delivery is promotion.
 
 The spine grows by promoting node roles through evidence-backed stages, not by naming more machines.
 
+## Supporting Doctrine
+
+The promotion ladder does not stand alone.
+
+It depends on two supporting truths:
+
+1. taxonomy is necessary but insufficient
+2. delivered nodes must remain honest over space and time
+
+These supporting truths are doctrine inside the ladder. They are not separate governance products.
+
 ## The Promotion Ladder
 
 The canonical promotion ladder for a node is:
@@ -155,6 +166,67 @@ Not every named node becomes a machine.
 
 The taxonomy is the vocabulary of possible node functions.
 The promotion ladder is the mechanism that decides which of those functions become real nodes.
+
+## Taxonomy Is Necessary But Insufficient
+
+Taxonomy gives the spine a vocabulary.
+
+Taxonomy alone does not make nodes real.
+
+Every serious node promotion decision must also survive adjacent models:
+
+- `identity`
+  Which specific instance is this, and what does it supersede or replace?
+- `placement`
+  Where can this role live, and what placements are anti-patterns?
+- `contracts`
+  What is the role allowed, required, and forbidden to do?
+- `realization`
+  How does this abstract role become a real runtime on a real host?
+- `verification`
+  How will the spine prove the node is actually behaving as claimed?
+- `lifecycle`
+  How does the role enter service, degrade, retire, or get replaced?
+- `dependency`
+  What other roles, paths, or services must exist for this role to stay honest?
+- `economics`
+  What is the real cost of dedicating hardware or preserving separation here?
+- `failure`
+  What breaks when this role fails, and what must remain separate from it?
+- `authority`
+  What truth does this role own, and what truth must it never own?
+
+If a role has a name but cannot answer these questions, it is still vocabulary, not delivery.
+
+## Nodes Need Physics, Not Just Names
+
+A delivered node can still become dishonest over time even when its initial promotion looked correct.
+
+Three supporting models act as the "physics" next to taxonomy:
+
+- `topology`
+  Spatial truth. Where the node lives, what it is near, what it must be separated from, and how distance or locality affects it.
+- `entropy`
+  Decay truth. What is drifting, rotting, fragmenting, or becoming unreliable even when the node still looks green.
+- `metabolism`
+  Flow and transformation truth. What inputs, outputs, jobs, and state transitions move through the node over time.
+
+These are not extra promotion stages.
+
+They are decision filters that strengthen the existing stages, especially:
+
+- `contracted`
+- `workload-backed`
+- `materialized`
+- `delivered`
+
+If a node is promoted without topology truth, placement becomes accidental.
+
+If a node is promoted without entropy truth, temporary exceptions harden into silent rot.
+
+If a node is promoted without metabolism truth, runtime flow and transformation become illegible.
+
+The spine must use these models to keep delivered nodes honest, not just to justify new names.
 
 ## VM Supersession Rule
 
