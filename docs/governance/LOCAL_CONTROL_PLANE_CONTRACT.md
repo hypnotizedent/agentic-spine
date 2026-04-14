@@ -179,8 +179,8 @@ The authoritative machine-readable projection for these classes is `ops/bindings
 - Canonical examples:
   - `pve:/tank/docker/download-stack` -> `download-stack` VM
   - `pve:/tank/docker/streaming-stack` -> `streaming-stack` VM
-  - `pve:/md1400/archive/live-share/ronny-projects` -> `archive-smb` LXC
-  - `pve:/md1400/archive/live-share/mint-legacy` -> `archive-smb` LXC
+  - `pve:/md1400/archive/live-share/ronny-projects` -> direct pve access (archive-smb LXC export retired 2026-04-14)
+  - `pve:/md1400/archive/live-share/mint-legacy` -> direct pve access (archive-smb LXC export retired 2026-04-14)
   - `synology918:/volume1/media-staging` -> `media-home` VM
 
 ### Machine-Specific Canonical Roots
