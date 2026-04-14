@@ -31,17 +31,20 @@ run_remote() {
   local target_id="$1"
   local user_default="$2"
   local command="$3"
-  local resolved resolved_host ssh_user
+  local resolved resolved_host ssh_user identity_opts
 
   resolved="$(ssh_resolve_ssh_host_with_fallback "$target_id" 5 2>/dev/null || true)"
   resolved_host="$(awk '{print $1}' <<<"$resolved")"
   [[ -n "$resolved_host" ]] || return 1
   ssh_user="$(ssh_resolve_user "$target_id" "$user_default")"
+  identity_opts="$(ssh_resolve_machine_identity_opts "$target_id" 2>/dev/null)" || true
+  # shellcheck disable=SC2086
   ssh -n \
     -o ConnectTimeout=8 \
     -o BatchMode=yes \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
+    $identity_opts \
     "${ssh_user}@${resolved_host}" \
     "$command" 2>/dev/null
 }

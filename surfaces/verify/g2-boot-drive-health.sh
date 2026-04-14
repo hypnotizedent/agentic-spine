@@ -50,12 +50,15 @@ while IFS=$'\t' read -r hostname ssh_target ssh_user; do
 
   checked=$((checked + 1))
   ssh_user="$(ssh_resolve_user "$ssh_target" "${ssh_user:-ubuntu}")"
+  identity_opts="$(ssh_resolve_machine_identity_opts "$ssh_target" 2>/dev/null)" || true
   boot_pct="$(
+    # shellcheck disable=SC2086
     ssh -n \
       -o ConnectTimeout=8 \
       -o BatchMode=yes \
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null \
+      $identity_opts \
       "${ssh_user}@${resolved_host}" \
       "df -P / 2>/dev/null | tail -1 | awk '{print \$5}' | tr -d ' %'" \
       2>/dev/null || true

@@ -42,12 +42,15 @@ while IFS=$'\t' read -r hostname ssh_target ssh_user; do
 
   checked=$((checked + 1))
   ssh_user="$(ssh_resolve_user "$ssh_target" "${ssh_user:-ubuntu}")"
+  identity_opts="$(ssh_resolve_machine_identity_opts "$ssh_target" 2>/dev/null)" || true
   remote_output="$(
+    # shellcheck disable=SC2086
     ssh -n \
       -o ConnectTimeout=8 \
       -o BatchMode=yes \
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null \
+      $identity_opts \
       "${ssh_user}@${resolved_host}" \
       "if command -v docker >/dev/null 2>&1; then docker ps -a --format '{{.Names}}|{{.Status}}'; elif command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then sudo -n docker ps -a --format '{{.Names}}|{{.Status}}'; else echo '__NO_DOCKER__'; fi" \
       2>/dev/null || true

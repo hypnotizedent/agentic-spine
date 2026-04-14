@@ -77,6 +77,10 @@ check_host() {
 
   local ref="$ssh_user@$ssh_host"
   local opts=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+  local id_opts
+  id_opts="$(ssh_resolve_machine_identity_opts "$host" 2>/dev/null)" || true
+  # shellcheck disable=SC2206
+  [[ -n "$id_opts" ]] && opts+=($id_opts)
 
   if ! ssh "${opts[@]}" "$ref" "true" >/dev/null 2>&1; then
     finding "HIGH" "$host: ssh unreachable ($ref)"

@@ -33,6 +33,7 @@ fi
 
 SSH_REF="${COMMS_USER}@${COMMS_IP}"
 SSH_OPTS="-o ConnectTimeout=10 -o BatchMode=yes"
+IDENTITY_OPTS="$(ssh_resolve_machine_identity_opts "communications-stack" 2>/dev/null)" || true
 NONBOOT_ROOT="$(yq -r '.mail_archiver.storage_invariants.nonboot_root // "/srv/mail-archiver"' "$COMMS_CONTRACT" 2>/dev/null || echo "/srv/mail-archiver")"
 
 mapfile -t REQUIRED_MOUNTS < <(yq -r '.mail_archiver.storage_invariants.required_bind_mounts[]? | [.container, .destination, .source_prefix] | @tsv' "$COMMS_CONTRACT" 2>/dev/null || true)
@@ -45,7 +46,8 @@ if [[ "${#REQUIRED_MOUNTS[@]}" -eq 0 ]]; then
 fi
 
 ssh_cmd() {
-  ssh $SSH_OPTS "$SSH_REF" "$@" 2>/dev/null
+  # shellcheck disable=SC2086
+  ssh $SSH_OPTS $IDENTITY_OPTS "$SSH_REF" "$@" 2>/dev/null
 }
 
 if ! ssh_cmd "true" >/dev/null; then

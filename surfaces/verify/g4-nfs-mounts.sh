@@ -41,6 +41,7 @@ while IFS=$'\t' read -r host source_path mount_path expected_mode; do
   resolved_host="$(awk '{print $1}' <<<"$resolved")"
   path_used="$(awk '{print $2}' <<<"$resolved")"
   ssh_user="$(ssh_resolve_user "$host" ubuntu)"
+  identity_opts="$(ssh_resolve_machine_identity_opts "$host" 2>/dev/null)" || true
 
   if [[ -z "$resolved_host" || "$path_used" == "unreachable" ]]; then
     printf "%-18s %-8s %-12s %s\n" "$host" "FAIL" "$expected_mode" "unreachable"
@@ -49,11 +50,13 @@ while IFS=$'\t' read -r host source_path mount_path expected_mode; do
   fi
 
   mount_row="$(
+    # shellcheck disable=SC2086
     ssh -n \
       -o ConnectTimeout=8 \
       -o BatchMode=yes \
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null \
+      $identity_opts \
       "${ssh_user}@${resolved_host}" \
       "findmnt -rn -T '$mount_path' -t nfs,nfs4 -o SOURCE,OPTIONS" \
       2>/dev/null || true
