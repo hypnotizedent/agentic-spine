@@ -619,17 +619,25 @@ for root in (scopes_dir, archive_dir):
             continue
         seen_loop_ids.add(loop_id)
 
+        # Archived scope files are historical evidence only. Even if an archived
+        # file retains a stale active/open frontmatter status, it must not affect
+        # the current open-loop operator count.
+        is_archive_root = root == archive_dir
+        effective_status = status
+        if is_archive_root and status in ("active", "draft", "open", "planned"):
+            effective_status = "closed"
+
         total += 1
         severity = fm.get("severity", "unknown")
         owner = fm.get("owner", "unassigned")
 
-        if status in ("active", "draft", "open"):
+        if effective_status in ("active", "draft", "open"):
             open_count += 1
             severity_counts[severity] += 1
             owner_counts[owner] += 1
             if fm.get("execution_mode", "") == "background":
                 background_open.append(loop_id)
-        elif status == "planned":
+        elif effective_status == "planned":
             planned_count += 1
         else:
             closed_count += 1
