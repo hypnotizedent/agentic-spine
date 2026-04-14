@@ -10,6 +10,8 @@ source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 MAPFILE_COMPAT="$ROOT/ops/plugins/core/verify/bin/bash-mapfile-compat.sh"
 VERIFY_BASH_BIN="${SPINE_VERIFY_BASH_BIN:-}"
+GATE_REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
+VERIFY_RING_POLICY="$ROOT/ops/bindings/verify.ring.policy.yaml"
 
 if [[ -z "$VERIFY_BASH_BIN" ]]; then
   if [[ -x /opt/homebrew/bin/bash ]]; then
@@ -37,6 +39,7 @@ need_cmd() {
 }
 
 need_cmd jq
+need_cmd yq
 [[ -x "$VERIFY_BASH_BIN" ]] || fail "missing bash runtime: $VERIFY_BASH_BIN"
 
 usage() {
@@ -55,32 +58,56 @@ Usage:
   verify-topology pack-run [<agent_id|domain>] [--json]
 
 Notes:
-  - Runtime topology is inline to keep workload verify independent of governance registries.
+  - Fast-ring lifecycle truth is loaded from gate.registry.yaml and verify.ring.policy.yaml.
   - Domain checks use the spine-lite workload/infra gate catalog only.
   - --force and --ring are accepted for compatibility and ignored by the runtime-only runner.
 USAGE
 }
 
-runtime_gate_catalog() {
+runtime_domain_hints() {
   cat <<'EOF'
-G1|surfaces/verify/g1-vm-reachability.sh|infra|backup,communications,finance,home,media,mint,observability,surveillance
-G2|surfaces/verify/g2-boot-drive-health.sh|infra|
-G3|surfaces/verify/g3-storage-pools.sh|infra|backup,home,media
-G4|surfaces/verify/g4-nfs-mounts.sh|media|home,infra
-G5|surfaces/verify/g5-storage-placement.sh|infra|communications,media,mint
-G6|surfaces/verify/g6-backup-currency.sh|backup|communications,finance,home,infra,media,mint
-G7|surfaces/verify/g7-restore-drills.sh|backup|communications,home,infra,media
-G8|surfaces/verify/g8-service-health.sh|infra|communications,finance,home,media,mint,observability
-G9|surfaces/verify/g9-docker-containers.sh|infra|communications,finance,home,media,mint,observability
-G10|surfaces/verify/g10-dns-resolution.sh|communications|infra,network
-G11|surfaces/verify/g11-tls-certificates.sh|communications|infra
-G12|surfaces/verify/g12-vlan-topology.sh|infra|network
-G13|surfaces/verify/g13-firewall-baseline.sh|infra|network
-G14|surfaces/verify/g14-secrets-availability.sh|secrets|communications,home,infra,media,mint,network
-G15|surfaces/verify/g15-launchagent-health.sh|infra|observability
-G16|surfaces/verify/g16-git-repo-integrity.sh|infra|
-G17|surfaces/verify/g17-smoke-test.sh|observability|infra
+G1|infra|backup,communications,finance,home,media,mint,observability,surveillance
+G2|infra|
+G3|infra|backup,home,media
+G4|media|home,infra
+G5|infra|communications,media,mint
+G6|backup|communications,finance,home,infra,media,mint
+G7|backup|communications,home,infra,media
+G8|infra|communications,finance,home,media,mint,observability
+G9|infra|communications,finance,home,media,mint,observability
+G10|communications|infra,network
+G11|communications|infra
+G12|infra|network
+G13|infra|network
+G14|secrets|communications,home,infra,media,mint,network
+G15|infra|observability
+G16|infra|
+G17|observability|infra
 EOF
+}
+
+verify_ring_names() {
+  [[ -f "$VERIFY_RING_POLICY" ]] || fail "missing verify ring policy: $VERIFY_RING_POLICY"
+  yq e -r '.rings[]?' "$VERIFY_RING_POLICY" 2>/dev/null | awk 'NF'
+}
+
+governed_fast_gate_rows() {
+  [[ -f "$GATE_REGISTRY" ]] || fail "missing gate registry: $GATE_REGISTRY"
+
+  local allowed_rings_json
+  allowed_rings_json="$(verify_ring_names | jq -R -s 'split("\n") | map(select(length > 0))')"
+
+  yq e -o=json '.gates' "$GATE_REGISTRY" 2>/dev/null \
+    | jq -r --argjson allowed_rings "$allowed_rings_json" '
+        map(select(type == "object"))
+        | map(select((.id // "") | tostring | startswith("G")))
+        | map(select((.retired // false) | not))
+        | map(select(((.superseded_by // "") | tostring | length) == 0))
+        | map(select(((.ring // "") | tostring) as $ring | any($allowed_rings[]; . == $ring)))
+        | sort_by((.id | ltrimstr("G") | tonumber))
+        | .[]
+        | [(.id // ""), (.check_script // ""), (.ring // "")] | @tsv
+      '
 }
 
 normalize_domain() {
@@ -95,10 +122,10 @@ normalize_domain() {
 }
 
 known_domains() {
-  runtime_gate_catalog | awk -F'|' '
+  runtime_domain_hints | awk -F'|' '
     {
-      if ($3 != "") print $3
-      split($4, extra, ",")
+      if ($2 != "") print $2
+      split($3, extra, ",")
       for (i in extra) {
         if (extra[i] != "") print extra[i]
       }
@@ -111,16 +138,16 @@ unique_lines() {
 }
 
 all_gate_ids() {
-  runtime_gate_catalog | awk -F'|' '{print $1}' | unique_lines
+  governed_fast_gate_rows | awk -F'\t' '{print $1}' | unique_lines
 }
 
 domain_gate_ids() {
   local domain
   domain="$(normalize_domain "${1:-}")"
-  runtime_gate_catalog | awk -F'|' -v domain="$domain" '
+  runtime_domain_hints | awk -F'|' -v domain="$domain" '
     {
-      split($4, extra, ",")
-      if ($3 == domain) {
+      split($3, extra, ",")
+      if ($2 == domain) {
         print $1
         next
       }
@@ -131,12 +158,17 @@ domain_gate_ids() {
         }
       }
     }
-  ' | unique_lines
+  ' | while IFS= read -r gate_id; do
+        [[ -n "$gate_id" ]] || continue
+        if all_gate_ids | grep -Fxq "$gate_id"; then
+          printf '%s\n' "$gate_id"
+        fi
+      done | unique_lines
 }
 
 gate_script_rel() {
   local gate_id="$1"
-  runtime_gate_catalog | awk -F'|' -v gate_id="$gate_id" '$1 == gate_id {print $2; exit}'
+  governed_fast_gate_rows | awk -F'\t' -v gate_id="$gate_id" '$1 == gate_id {print $2; exit}'
 }
 
 domain_exists() {
