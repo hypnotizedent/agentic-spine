@@ -1,0 +1,154 @@
+---
+status: authoritative
+owner: "@ronny"
+scope: translator-workload-contract
+version: 1
+updated_at: "2026-04-14"
+decision_loop_id: LOOP-SPINE-TRANSLATOR-WORKLOAD-CONTRACT-FORMALIZATION-20260415
+subordinate_to: ops/bindings/translator.authority.contract.yaml
+
+description: >
+  Machine-readable minimum workload contract for translator_node.
+  Formalizes workload truth only for W1/W2/W3.
+  Does not deliver translator runtime, assign a host, or widen translator authority.
+
+authority_source:
+  boundary_contract: ops/bindings/translator.authority.contract.yaml
+  doctrine_source: docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md
+  promotion_reference: docs/governance/NODE_PROMOTION_LADDER.md
+  prep_artifacts:
+    - /Users/ronnyworks/code/.runtime/spine/state/domain-state/SYNTHESIS-TRANSLATOR-NODE-WORKLOAD-BACKED-PREP-20260414.md
+    - /Users/ronnyworks/code/.runtime/spine/state/domain-state/EXEC_RECEIPT-SPINE-TRANSLATOR-NODE-WORKLOAD-BACKED-PREP-20260414.yaml
+
+workload_backed_definition:
+  node_role: translator_node
+  promotion_stage: workload-backed
+  counts_as_workload_backed_when:
+    - W1_W2_W3_are_present_as_machine_readable_contract_truth
+    - each_workload_has_bounded_inputs_outputs_and_forbidden_actions
+    - W3_explicitly_sets_execution_dispatched_false
+    - evidence_expectations_are_stated_for_each_workload
+  does_not_require:
+    - runtime_activation
+    - host_assignment
+    - materialized_runtime
+    - live_service_ports
+  note: >
+    Workload-backed means intended workloads with defined runtime responsibilities,
+    not runtime delivery proof.
+
+explicit_non_proof_list:
+  - "AnythingLLM presence alone"
+  - "Qdrant presence alone"
+  - "VM 207 substrate alone"
+  - "Session surrogate behavior alone"
+
+global_exclusions:
+  forbidden_work_types:
+    - domain_investigation
+    - verification_judgment
+    - git_mutation
+    - execution_dispatch
+    - scope_authorization
+  note: >
+    These are excluded from translator workload truth even if they appear adjacent
+    to membrane behavior in operator sessions.
+
+workloads:
+  - id: W1
+    name: ingest_classify
+    purpose: "Receive unstructured input and classify it against the canonical concern vocabulary."
+    allowed_inputs:
+      - raw_text
+      - source_surface
+    allowed_outputs:
+      - request_id
+      - concern_class
+      - confidence
+    allowed_actions:
+      - input_ingestion
+      - classification
+    forbidden_actions:
+      - capability_resolution
+      - loop_state_reads
+      - execution_targeting
+      - domain_investigation
+      - verification_judgment
+      - git_mutation
+      - execution_dispatch
+      - scope_authorization
+    authority_boundary:
+      execution_dispatched: false
+      state_mutation: forbidden
+      git_mutation: forbidden
+      verification_authority: forbidden
+    evidence_expectations:
+      - "request_id emitted"
+      - "concern_class emitted from canonical class vocabulary"
+      - "confidence emitted without verdict language"
+
+  - id: W2
+    name: normalize
+    purpose: "Transform classified input into a structured spine request."
+    allowed_inputs:
+      - request_id
+      - concern_class
+      - confidence
+    allowed_outputs:
+      - request_id
+      - concern_class
+      - routing_target
+      - extracted_params
+    allowed_actions:
+      - normalization
+    forbidden_actions:
+      - state_mutation
+      - capability_id_resolution
+      - execution_dispatch
+      - domain_investigation
+      - verification_judgment
+      - git_mutation
+      - scope_authorization
+    authority_boundary:
+      execution_dispatched: false
+      state_mutation: forbidden
+      git_mutation: forbidden
+      verification_authority: forbidden
+    evidence_expectations:
+      - "structured request fields emitted"
+      - "routing_target emitted as advisory only"
+      - "no governed state mutation implied by normalization output"
+
+  - id: W3
+    name: route_emit
+    purpose: "Emit a routing decision and payload without ever executing it."
+    allowed_inputs:
+      - request_id
+      - concern_class
+      - routing_target
+      - extracted_params
+    allowed_outputs:
+      - request_id
+      - routing_target
+      - suggested_capability_id
+      - envelope_payload
+      - execution_dispatched
+    allowed_actions:
+      - routing
+    forbidden_actions:
+      - execution_dispatch
+      - capability_execution
+      - domain_investigation
+      - verification_judgment
+      - git_mutation
+      - scope_authorization
+    authority_boundary:
+      execution_dispatched: false
+      state_mutation: forbidden
+      git_mutation: forbidden
+      verification_authority: forbidden
+    evidence_expectations:
+      - "routing_target emitted"
+      - "envelope_payload emitted"
+      - "execution_dispatched=false on every output"
+      - "output remains advisory until consumed by a non-translator authority surface"
