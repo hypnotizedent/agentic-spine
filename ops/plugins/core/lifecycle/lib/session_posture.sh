@@ -207,15 +207,21 @@ __sp_probe_execution_host_state() {
         return 0
     fi
 
-    local host tailscale_ip user probe_host
-    host="$(yq -r ".ssh.targets[] | select(.id == \"$__SP_EXECUTION_HOST_TARGET_ID\") | .host" "$__SP_SSH_TARGETS_PATH" 2>/dev/null | head -n 1)"
-    tailscale_ip="$(yq -r ".ssh.targets[] | select(.id == \"$__SP_EXECUTION_HOST_TARGET_ID\") | .tailscale_ip" "$__SP_SSH_TARGETS_PATH" 2>/dev/null | head -n 1)"
-    user="$(yq -r ".ssh.targets[] | select(.id == \"$__SP_EXECUTION_HOST_TARGET_ID\") | .user" "$__SP_SSH_TARGETS_PATH" 2>/dev/null | head -n 1)"
+    # Source resolver lazily (not at file top) to avoid init-time overhead
+    local _sp_resolver="${SPINE_ROOT:-/Users/ronnyworks/code/agentic-spine}/ops/lib/ssh-resolve.sh"
+    if [ -f "$_sp_resolver" ]; then
+        # shellcheck source=ops/lib/ssh-resolve.sh
+        . "$_sp_resolver"
+    else
+        printf 'resolver_missing'
+        return 0
+    fi
 
-    [ "$host" = "null" ] && host=""
-    [ "$tailscale_ip" = "null" ] && tailscale_ip=""
-    [ "$user" = "null" ] && user=""
-    [ -n "$user" ] || user="ubuntu"
+    local host tailscale_ip user probe_host identity_opts
+    host="$(ssh_resolve_host "$__SP_EXECUTION_HOST_TARGET_ID")"
+    tailscale_ip="$(ssh_resolve_tailscale_ip "$__SP_EXECUTION_HOST_TARGET_ID")"
+    user="$(ssh_resolve_user "$__SP_EXECUTION_HOST_TARGET_ID" "ubuntu")"
+    identity_opts="$(ssh_resolve_machine_identity_opts "$__SP_EXECUTION_HOST_TARGET_ID" 2>/dev/null)" || true
 
     case "$__SP_OPERATOR_SITE" in
         shop)
@@ -234,7 +240,9 @@ __sp_probe_execution_host_state() {
         return 0
     fi
 
+    # shellcheck disable=SC2086
     if ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        $identity_opts \
         "${user}@${probe_host}" \
         "test -r '$__SP_EXECUTION_HOST_STATE_ROOT/shared_authority.db' && test -d '$__SP_EXECUTION_HOST_STATE_ROOT/loop-scopes'" \
         >/dev/null 2>&1; then
