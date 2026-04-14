@@ -57,6 +57,8 @@ done
 need yq
 need ssh
 
+source "$SPINE_REPO/ops/lib/ssh-resolve.sh"
+
 [[ -f "$MANIFEST" ]] || fail "manifest not found: $MANIFEST"
 [[ -f "$PROFILES" ]] || fail "profile binding not found: $PROFILES"
 [[ -f "$SSH_BINDING" ]] || fail "ssh binding not found: $SSH_BINDING"
@@ -76,8 +78,8 @@ fi
 profile_exists="$(yq e ".profiles.\"$PROFILE\" | type" "$PROFILES" 2>/dev/null || echo "null")"
 [[ "$profile_exists" == "!!map" ]] || fail "profile '$PROFILE' not found in $PROFILES"
 
-ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$TARGET\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")"
-ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$TARGET\") | .user // .ssh.defaults.user // \"root\"" "$SSH_BINDING" 2>/dev/null || echo "root")"
+ssh_host="$(ssh_resolve_host "$TARGET")"
+ssh_user="$(ssh_resolve_user "$TARGET" "root")"
 ssh_target_missing=0
 if [[ -z "$ssh_host" || "$ssh_host" == "null" ]]; then
     ssh_target_missing=1
@@ -237,7 +239,10 @@ if [[ -n "$ts_auth_secret_path" && -n "$ts_auth_secret_key" ]]; then
     fi
 fi
 
+identity_opts="$(ssh_resolve_machine_identity_opts "$TARGET" 2>/dev/null)" || true
+# shellcheck disable=SC2206
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+[[ -n "$identity_opts" ]] && ssh_opts+=($identity_opts)
 ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
     "bash -lc $(printf "%q" "$remote_bootstrap") -- $(printf "%q" "$packages") $(printf "%q" "$services") $(printf "%q" "$require_tailscale") $(printf "%q" "$require_qemu") $(printf "%q" "$require_docker") $(printf "%q" "$require_cron") $(printf "%q" "$ts_auth_key") $(printf "%q" "$TARGET")"
 

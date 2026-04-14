@@ -71,15 +71,20 @@ TO_NODE="${TO_NODE:-$HOST_ID}"
 need yq
 need ssh
 
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
 [[ -f "$SSH_BINDING" ]] || fail "ssh binding not found: $SSH_BINDING"
 yq e '.' "$SSH_BINDING" >/dev/null 2>&1 || fail "invalid YAML: $SSH_BINDING"
 
-ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$HOST_ID\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")"
-ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$HOST_ID\") | .user // .ssh.defaults.user // \"root\"" "$SSH_BINDING" 2>/dev/null || echo "root")"
+ssh_host="$(ssh_resolve_host "$HOST_ID")"
+ssh_user="$(ssh_resolve_user "$HOST_ID" "root")"
 
 [[ -n "$ssh_host" && "$ssh_host" != "null" ]] || fail "missing ssh.targets host for id '$HOST_ID'"
 
+identity_opts="$(ssh_resolve_machine_identity_opts "$HOST_ID" 2>/dev/null)" || true
+# shellcheck disable=SC2206
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+[[ -n "$identity_opts" ]] && ssh_opts+=($identity_opts)
 
 echo "=== PROXMOX NODE PATH MIGRATION ==="
 echo "Host ID:    $HOST_ID (${ssh_user}@${ssh_host})"

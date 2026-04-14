@@ -100,12 +100,15 @@ done
 command -v yq >/dev/null 2>&1 || fail "yq is required but not found"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required but not found"
 
-TARGET_HOST="$(yq -r ".ssh.targets[] | select(.id==\"$HOST_ID\") | .host" "$SSH_BINDING" 2>/dev/null || true)"
-TARGET_USER="$(yq -r ".ssh.targets[] | select(.id==\"$HOST_ID\") | .user // \"root\"" "$SSH_BINDING" 2>/dev/null || true)"
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+TARGET_HOST="$(ssh_resolve_host "$HOST_ID")"
+TARGET_USER="$(ssh_resolve_user "$HOST_ID" "root")"
 TARGET_PORT="$(yq -r ".ssh.targets[] | select(.id==\"$HOST_ID\") | .port // 22" "$SSH_BINDING" 2>/dev/null || true)"
 TIMEOUT="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING" 2>/dev/null || echo '5')"
 STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_BINDING" 2>/dev/null || echo 'no')"
 KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_BINDING" 2>/dev/null || echo '/dev/null')"
+IDENTITY_OPTS="$(ssh_resolve_machine_identity_opts "$HOST_ID" 2>/dev/null)" || true
 
 if [[ -z "${TARGET_HOST:-}" || "${TARGET_HOST:-}" == "null" ]]; then
   fail "unknown host-id or missing host binding: $HOST_ID"
@@ -129,6 +132,8 @@ ssh_opts=(
   -o "LogLevel=ERROR"
   -o "BatchMode=yes"
 )
+# shellcheck disable=SC2206
+[[ -n "$IDENTITY_OPTS" ]] && ssh_opts+=($IDENTITY_OPTS)
 
 ssh_pve() {
   ssh "${ssh_opts[@]}" -p "$TARGET_PORT" "${TARGET_USER}@${TARGET_HOST}" "$@"

@@ -58,6 +58,8 @@ fi
 need yq
 need ssh
 
+source "$SPINE_REPO/ops/lib/ssh-resolve.sh"
+
 [[ -f "$POLICY" ]] || fail "placement policy not found: $POLICY"
 [[ -f "$SSH_BINDING" ]] || fail "ssh binding not found: $SSH_BINDING"
 
@@ -67,11 +69,14 @@ yq e '.' "$SSH_BINDING" >/dev/null 2>&1 || fail "invalid YAML: $SSH_BINDING"
 host_kind="$(yq e ".hosts.\"$HOST_ID\".kind // \"\"" "$POLICY")"
 [[ "$host_kind" == "proxmox" ]] || fail "host '$HOST_ID' is kind '$host_kind' (expected proxmox)"
 
-ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$HOST_ID\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")"
-ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$HOST_ID\") | .user // .ssh.defaults.user // \"root\"" "$SSH_BINDING" 2>/dev/null || echo "root")"
+ssh_host="$(ssh_resolve_host "$HOST_ID")"
+ssh_user="$(ssh_resolve_user "$HOST_ID" "root")"
 [[ -n "$ssh_host" && "$ssh_host" != "null" ]] || fail "missing ssh target for host id '$HOST_ID'"
 
+identity_opts="$(ssh_resolve_machine_identity_opts "$HOST_ID" 2>/dev/null)" || true
+# shellcheck disable=SC2206
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+[[ -n "$identity_opts" ]] && ssh_opts+=($identity_opts)
 
 probe_remote() {
     ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \

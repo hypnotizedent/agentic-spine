@@ -54,6 +54,8 @@ done
 need yq
 need ssh
 
+source "$SPINE_REPO/ops/lib/ssh-resolve.sh"
+
 [[ -f "$POLICY" ]] || fail "placement policy not found: $POLICY"
 [[ -f "$SSH_BINDING" ]] || fail "ssh binding not found: $SSH_BINDING"
 
@@ -109,8 +111,8 @@ echo
 for host_id in "${PROXMOX_IDS[@]}"; do
     [[ -n "$host_id" ]] || continue
 
-    ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$host_id\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")"
-    ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$host_id\") | .user // .ssh.defaults.user // \"root\"" "$SSH_BINDING" 2>/dev/null || echo "root")"
+    ssh_host="$(ssh_resolve_host "$host_id")"
+    ssh_user="$(ssh_resolve_user "$host_id" "root")"
     policy_site="$(yq e ".hosts.\"$host_id\".site // \"\"" "$POLICY" 2>/dev/null || echo "")"
 
     echo "Host ID: $host_id (site=${policy_site:-unknown})"
@@ -123,7 +125,10 @@ for host_id in "${PROXMOX_IDS[@]}"; do
     fi
 
     # Avoid ControlMaster/ControlPath mux sockets from ~/.ssh/config (can fail under sandboxed runners).
+    local_id_opts="$(ssh_resolve_machine_identity_opts "$host_id" 2>/dev/null)" || true
+    # shellcheck disable=SC2206
     ssh_opts=(-o BatchMode=yes -o ConnectTimeout=6 -o ControlMaster=no -o ControlPersist=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+    [[ -n "$local_id_opts" ]] && ssh_opts+=($local_id_opts)
     remote_cmd='set -euo pipefail; hn="$(hostname 2>/dev/null || uname -n)"; fq="$(hostname -f 2>/dev/null || echo "$hn")"; mid="$(cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null || echo unknown)"; echo "__HN__:$hn"; echo "__FQDN__:$fq"; echo "__MID__:$mid"'
 
     set +e
