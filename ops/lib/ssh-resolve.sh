@@ -82,6 +82,102 @@ ssh_resolve_access_policy() {
     "$_SSH_RESOLVE_BINDING" 2>/dev/null || echo "lan_first"
 }
 
+# ── Machine auth-origin identity resolution ──
+# Resolves governed machine identity parallel to route resolution.
+
+# Returns: explicit | ambient
+ssh_resolve_machine_auth_origin() {
+  local target_id="$1"
+  local per_target default_origin
+  per_target="$(yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .machine_auth_origin // \"\"" \
+    "$_SSH_RESOLVE_BINDING" 2>/dev/null || true)"
+  if [[ -n "$per_target" ]]; then
+    printf '%s\n' "$per_target"
+    return
+  fi
+  default_origin="$(yq -r '.ssh.defaults.machine_auth_origin // "explicit"' \
+    "$_SSH_RESOLVE_BINDING" 2>/dev/null || true)"
+  printf '%s\n' "${default_origin:-explicit}"
+}
+
+# Returns the identity file path (expanded ~ if present).
+ssh_resolve_machine_identity_file() {
+  local target_id="$1"
+  local per_target default_file resolved
+  per_target="$(yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .machine_identity_file // \"\"" \
+    "$_SSH_RESOLVE_BINDING" 2>/dev/null || true)"
+  if [[ -n "$per_target" ]]; then
+    resolved="${per_target/#\~/$HOME}"
+    printf '%s\n' "$resolved"
+    return
+  fi
+  default_file="$(yq -r '.ssh.defaults.machine_identity_file // ""' \
+    "$_SSH_RESOLVE_BINDING" 2>/dev/null || true)"
+  resolved="${default_file/#\~/$HOME}"
+  printf '%s\n' "$resolved"
+}
+
+# Returns: "mode ref" (space-separated)
+#   mode: explicit | defaulted | ambient
+#   ref: identity file path (or "none" if ambient)
+# "explicit" means per-target override, "defaulted" means inherited from defaults.
+ssh_resolve_machine_auth_origin_detail() {
+  local target_id="$1"
+  local per_target_origin per_target_file default_origin identity_file
+  per_target_origin="$(yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .machine_auth_origin // \"\"" \
+    "$_SSH_RESOLVE_BINDING" 2>/dev/null || true)"
+  per_target_file="$(yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .machine_identity_file // \"\"" \
+    "$_SSH_RESOLVE_BINDING" 2>/dev/null || true)"
+
+  if [[ "$per_target_origin" == "ambient" ]]; then
+    printf 'ambient none\n'
+    return
+  fi
+
+  if [[ -n "$per_target_origin" ]]; then
+    identity_file="$(ssh_resolve_machine_identity_file "$target_id")"
+    printf 'explicit %s\n' "${identity_file:-none}"
+    return
+  fi
+
+  # Inherited from defaults
+  default_origin="$(yq -r '.ssh.defaults.machine_auth_origin // "explicit"' \
+    "$_SSH_RESOLVE_BINDING" 2>/dev/null || true)"
+  if [[ "${default_origin:-explicit}" == "ambient" ]]; then
+    printf 'ambient none\n'
+    return
+  fi
+
+  identity_file="$(ssh_resolve_machine_identity_file "$target_id")"
+  printf 'defaulted %s\n' "${identity_file:-none}"
+}
+
+# Returns the OpenSSH flags needed for governed machine identity.
+# For explicit/defaulted: "-i /path/to/key -o IdentitiesOnly=yes"
+# For ambient: "" (empty, OpenSSH default discovery)
+# If the identity file does not exist, returns the flags but sets exit code 2.
+ssh_resolve_machine_identity_opts() {
+  local target_id="$1"
+  local detail mode ref
+  detail="$(ssh_resolve_machine_auth_origin_detail "$target_id")"
+  mode="$(echo "$detail" | awk '{print $1}')"
+  ref="$(echo "$detail" | awk '{print $2}')"
+
+  if [[ "$mode" == "ambient" ]]; then
+    return 0
+  fi
+
+  if [[ -z "$ref" || "$ref" == "none" ]]; then
+    return 2
+  fi
+
+  printf -- '-i %s -o IdentitiesOnly=yes' "$ref"
+  if [[ ! -f "$ref" ]]; then
+    return 2
+  fi
+  return 0
+}
+
 ssh_tcp_port_open() {
   local host="$1"
   local port="${2:-22}"
@@ -316,6 +412,15 @@ ssh_build_cmd_with_fallback() {
   extra_opts="$(ssh_resolve_extra_opts "$target_id")"
 
   local -a cmd=(ssh "${SSH_BATCH_OPTS[@]}")
+
+  # Apply governed machine identity if auth-origin is explicit/defaulted
+  local identity_opts
+  identity_opts="$(ssh_resolve_machine_identity_opts "$target_id" 2>/dev/null)" || true
+  if [[ -n "$identity_opts" ]]; then
+    # shellcheck disable=SC2206
+    cmd+=($identity_opts)
+  fi
+
   if [[ -n "$extra_opts" ]]; then
     # shellcheck disable=SC2206
     cmd+=($extra_opts)

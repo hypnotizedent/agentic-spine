@@ -26,6 +26,13 @@ ssh:
     # Avoid HOME drift (no known_hosts writes):
     strict_host_key_checking: "no"
     user_known_hosts_file: "/dev/null"
+    # Machine auth-origin authority (D-SSH-IDENTITY):
+    # Controls whether machine SSH surfaces use a governed identity or ambient discovery.
+    # Values: explicit (governed key, IdentitiesOnly=yes), ambient (local agent/discovery)
+    machine_auth_origin: "explicit"
+    # Default identity file for machine SSH execution.
+    # Only used when machine_auth_origin is explicit.
+    machine_identity_file: "~/.ssh/spine_machine_ed25519"
 
   targets:
     # ─── Shop VMs (LAN-first: host=lan_ip) ───
@@ -156,6 +163,14 @@ ssh:
       description: "Archive SMB LXC 220 serving md1400 live-share datasets over Samba. Remote administration from non-shop networks uses ProxyJump via pve; the guest itself does not run Tailscale."
       tags: ["storage", "archive", "shop", "lxc"]
 
+    - id: "shop-files"
+      host: "192.168.1.221"
+      user: "root"
+      access_policy: lan_first
+      probe_via: pve
+      description: "MintPrints Live L3 file server LXC 221 serving /data/shop/ via Samba on tank (hot runtime). Design library for DFS, ScreenPRO, Brother GTX, and VersaWorks workflows."
+      tags: ["mint", "files", "shop", "lxc", "production"]
+
     # ─── Cross-site targets (Tailscale required) ───
 
     - id: "pve"
@@ -165,7 +180,7 @@ ssh:
       user: "root"
       access_policy: tailscale_required
       aliases: ["pve-shop"]
-      description: "Proxmox VE - shop location. LAN IP 192.168.1.184 (from hardware.inventory.yaml). OOB recovery via idrac-shop (192.168.1.250, LAN-only, access unproven — BMC cold reset required)."
+      description: "Proxmox VE - shop location. LAN IP 192.168.1.184 (from hardware.inventory.yaml). OOB recovery via idrac-shop (192.168.1.250, LAN-only, proved 2026-04-14)."
       tags: ["proxmox", "hypervisor", "core", "shop"]
       site: shop
       recovery_target_id: "idrac-shop"
@@ -213,9 +228,10 @@ ssh:
       host: "10.0.0.216"
       tailscale_ip: "100.104.29.78"
       user: "ubuntu"
+      optional: true
       access_policy: lan_first
-      description: "Operator-owned MacBook Pro (15-inch, 2016) reprovisioned to Ubuntu 24.04. Bound from Stage 0 claim and proven on home LAN plus Tailscale SSH."
-      tags: ["operator-hardware", "macbook", "linux", "home"]
+      description: "Demoted operator-owned MacBook Pro (15-inch, 2016). Bootstrap incomplete, stranded recovery posture, and not a live watcher carrier or architectural anchor. Retained only as an offline-unrecoverable target until deliberate hardening proves stable non-tether network plus at least one remote recovery plane."
+      tags: ["operator-hardware", "macbook", "linux", "home", "demoted", "offline-unrecoverable"]
 
     # ─── Direct Tailscale targets ───
 
@@ -262,9 +278,9 @@ ssh:
       access_policy: lan_only
       probe_via: pve
       recovery_access: direct_lan_only
-      recovery_status: address_known_access_unproven
-      physical_action_required: "BMC cold reset — ARP failing at 192.168.1.250, re-IP via IPMI attempted and failed"
-      description: "Dell R730XD iDRAC — shop. Recovery access is direct LAN only (192.168.1.250); probe_via pve is convenience-only and unavailable when hypervisor is down. Re-IP via IPMI attempted, ARP failed, needs BMC cold reset."
+      recovery_status: proved
+      proved_at: "2026-04-14"
+      description: "Dell R730XD iDRAC — shop. Recovery access is direct LAN only (192.168.1.250). Redfish API, power status, and web console proved 2026-04-14."
       tags: ["management", "shop", "lan-only", "oob", "recovery"]
 
     - id: "nvr-shop"
@@ -308,4 +324,15 @@ ssh:
       probe_via: pve
       description: "Windows 11 DFS laptop — serves designs to Barudan via port 8000."
       tags: ["dfs", "mint", "shop", "windows", "production"]
+      site: shop
+
+    - id: "screenpro-lenovo"
+      host: "192.168.1.95"
+      tailscale_ip: "100.73.70.75"
+      mac: "e8:62:be:9a:db:93"
+      user: "Administrator"
+      access_policy: lan_first
+      probe_via: pve
+      description: "ScreenPRO 600 RIP workstation (Lenovo) — PrintProduction + PCS6 color management. Wi-Fi connected."
+      tags: ["screenpro", "rip", "mint", "shop", "windows", "production"]
       site: shop

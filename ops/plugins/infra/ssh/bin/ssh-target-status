@@ -23,6 +23,11 @@
 #   2) Tailscale host (if declared)
 #   3) ProxyJump via probe_via (if declared)
 #
+# Path contract (lan_only + probe_via targets):
+#   1) Direct LAN (works when operator is on-site)
+#   2) ProxyJump via probe_via host
+#   lan_only targets WITHOUT probe_via are still skipped (network.lan.device.status).
+#
 # Triple-failure handling:
 #   - Each path is retried N attempts (default 3)
 #   - Success on a fallback path after a failed primary path is surfaced as DEGRADED_FALLBACK
@@ -33,6 +38,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
 BINDING_FILE="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+SHOP_DEVICE_REGISTRY_FILE="$SPINE_ROOT/ops/bindings/shop.device.registry.yaml"
+OPERATOR_HARDWARE_FILE="$SPINE_ROOT/ops/bindings/operator.hardware.inventory.yaml"
 
 # STOP=2 for preconditions
 if [[ ! -f "$BINDING_FILE" ]]; then
@@ -133,6 +140,10 @@ if [[ "$COUNT" == "0" ]]; then
   exit 2
 fi
 
+# Source ssh-resolve for identity resolution helpers
+source "${SPINE_ROOT}/ops/lib/ssh-resolve.sh"
+SOURCE_RUNTIME="$(hostname 2>/dev/null || echo 'unknown')"
+
 declare -a TARGET_RESULTS=()
 fail=0
 checked=0
@@ -169,6 +180,30 @@ classify_reason() {
   echo "unknown"
 }
 
+resolve_probe_family() {
+  local id="$1"
+  local shop_os=""
+  local operator_platform=""
+
+  if [[ -f "$SHOP_DEVICE_REGISTRY_FILE" ]]; then
+    shop_os="$(yq -r ".devices[] | select(.id == \"$id\") | .os // \"\"" "$SHOP_DEVICE_REGISTRY_FILE" 2>/dev/null | head -1)"
+    case "${shop_os,,}" in
+      windows*) echo "windows"; return ;;
+      linux*|mac*) echo "unix"; return ;;
+    esac
+  fi
+
+  if [[ -f "$OPERATOR_HARDWARE_FILE" ]]; then
+    operator_platform="$(yq -r ".machines[] | select(.device_id == \"$id\") | .platform // \"\"" "$OPERATOR_HARDWARE_FILE" 2>/dev/null | head -1)"
+    case "${operator_platform,,}" in
+      windows) echo "windows"; return ;;
+      linux|mac) echo "unix"; return ;;
+    esac
+  fi
+
+  echo "unix"
+}
+
 probe_path() {
   local id="$1"
   local user="$2"
@@ -177,9 +212,15 @@ probe_path() {
   local timeout_s="$5"
   local path_label="$6"
   local jump_spec="$7"
+  local probe_family="${8:-unix}"
 
   local cmd
-  cmd='echo "__OK__"; hostname 2>/dev/null || uname -n 2>/dev/null || echo "unknown"'
+  if [[ "$probe_family" == "windows" ]]; then
+    # Windows OpenSSH defaults to cmd.exe unless explicitly reconfigured.
+    cmd='cmd /c "echo __OK__ && hostname"'
+  else
+    cmd='echo "__OK__"; hostname 2>/dev/null || uname -n 2>/dev/null || echo "unknown"'
+  fi
 
   local ssh_opts=()
   ssh_opts+=(
@@ -193,7 +234,7 @@ probe_path() {
     ssh_opts+=(-o "BatchMode=yes")
   fi
 
-  local out ssh_exit start_ms end_ms dur_ms reason remote_name
+  local out normalized_out ssh_exit start_ms end_ms dur_ms reason remote_name
   local attempt=0
   local attempts_json='[]'
 
@@ -213,8 +254,10 @@ probe_path() {
     end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
     dur_ms=$((end_ms - start_ms))
 
-    if echo "$out" | grep -q '^__OK__$'; then
-      remote_name="$(echo "$out" | grep -A1 '^__OK__$' | tail -1 | tr -d '\r')"
+    normalized_out="$(printf '%s' "$out" | tr -d '\r')"
+
+    if echo "$normalized_out" | grep -q '^__OK__[[:space:]]*$'; then
+      remote_name="$(echo "$normalized_out" | grep -A1 '^__OK__[[:space:]]*$' | tail -1)"
       [[ -z "$remote_name" || "$remote_name" == "__OK__" ]] && remote_name="unknown"
 
       attempts_json="$(jq -cn --argjson base "$attempts_json" --argjson idx "$attempt" --arg result "ok" --argjson duration_ms "$dur_ms" --arg path "$path_label" '$base + [{attempt:$idx,path:$path,result:$result,duration_ms:$duration_ms}]')"
@@ -228,7 +271,7 @@ probe_path() {
       return 0
     fi
 
-    reason="$(classify_reason "$out" "$dur_ms" "$timeout_s")"
+    reason="$(classify_reason "$normalized_out" "$dur_ms" "$timeout_s")"
     attempts_json="$(jq -cn --argjson base "$attempts_json" --argjson idx "$attempt" --arg result "fail" --arg reason "$reason" --argjson duration_ms "$dur_ms" --arg path "$path_label" '$base + [{attempt:$idx,path:$path,result:$result,reason:$reason,duration_ms:$duration_ms}]')"
 
     if (( attempt < ATTEMPTS )); then
@@ -248,6 +291,7 @@ probe_path() {
 if [[ "$JSON_MODE" -eq 0 ]]; then
   echo "ssh.target.status"
   echo "binding: $BINDING_FILE"
+  echo "source_runtime: $SOURCE_RUNTIME"
   echo "targets: $COUNT"
   echo "attempts_per_path: $ATTEMPTS"
   echo
@@ -265,17 +309,44 @@ for i in $(seq 0 $((COUNT-1))); do
   tailscale_ip="$(yq -r ".ssh.targets[$i].tailscale_ip // \"\"" "$BINDING_FILE")"
   probe_via="$(yq -r ".ssh.targets[$i].probe_via // \"\"" "$BINDING_FILE")"
 
+  # Resolve auth-origin telemetry
+  auth_origin_detail="$(ssh_resolve_machine_auth_origin_detail "$id" 2>/dev/null)" || auth_origin_detail="ambient none"
+  auth_origin_mode="$(echo "$auth_origin_detail" | awk '{print $1}')"
+  auth_origin_ref="$(echo "$auth_origin_detail" | awk '{print $2}')"
+  auth_origin_identity_exists="false"
+  auth_origin_fingerprint=""
+  auth_origin_missing_reason=""
+  if [[ "$auth_origin_mode" != "ambient" && "$auth_origin_ref" != "none" ]]; then
+    if [[ -f "$auth_origin_ref" ]]; then
+      auth_origin_identity_exists="true"
+      auth_origin_fingerprint="$(ssh-keygen -lf "$auth_origin_ref" 2>/dev/null | awk '{print $2}' || true)"
+    else
+      auth_origin_missing_reason="identity_file_not_found"
+    fi
+  elif [[ "$auth_origin_mode" == "ambient" ]]; then
+    auth_origin_missing_reason="deliberately_ambient"
+  fi
+  probe_via_changes_route_only="false"
+  if [[ -n "$probe_via" && "$probe_via" != "null" ]]; then
+    probe_via_changes_route_only="true"
+  fi
+
   # Filter if specific target requested
   if [[ -n "$TARGET_FILTER" && "$id" != "$TARGET_FILTER" ]]; then
     continue
   fi
   TARGET_FILTER_FOUND=1
 
-  # Skip LAN-only devices (handled by network.lan.device.status)
+  # LAN-only devices: skip unless probe_via is declared.
+  # When probe_via exists, evaluate via ProxyJump instead of blind skip.
+  # Targets without probe_via are still deferred to network.lan.device.status.
   if [[ "$access_method" == "lan_only" ]]; then
-    [[ "$JSON_MODE" -eq 0 ]] && echo "- id: $id host: $host user: $user -> SKIP_LAN_ONLY (use network.lan.device.status)"
-    TARGET_RESULTS+=("$(jq -cn --arg id "$id" --arg host "$host" --arg user "$user" '{id:$id,host:$host,user:$user,status:"skip_lan_only",contract_state:"n/a"}')")
-    continue
+    if [[ -z "$probe_via" || "$probe_via" == "null" ]]; then
+      [[ "$JSON_MODE" -eq 0 ]] && echo "- id: $id host: $host user: $user -> SKIP_LAN_ONLY (use network.lan.device.status)"
+      TARGET_RESULTS+=("$(jq -cn --arg id "$id" --arg host "$host" --arg user "$user" '{id:$id,host:$host,user:$user,status:"skip_lan_only",contract_state:"n/a"}')")
+      continue
+    fi
+    # lan_only + probe_via: fall through to candidate evaluation below
   fi
 
   if [[ "$id" == "null" ]]; then
@@ -297,8 +368,26 @@ for i in $(seq 0 $((COUNT-1))); do
   declare -a candidate_labels=()
   declare -a candidate_hosts=()
   declare -a candidate_jumps=()
+  probe_family="$(resolve_probe_family "$id")"
 
-  if [[ "$access_policy" == "lan_first" ]]; then
+  if [[ "$access_policy" == "lan_only" && -n "$probe_via" && "$probe_via" != "null" ]]; then
+    # lan_only + probe_via: ProxyJump is the only viable SSH path.
+    # Direct LAN is attempted first (works when operator is on-site).
+    candidate_labels+=("lan")
+    candidate_hosts+=("$host")
+    candidate_jumps+=("")
+
+    if [[ "$ENABLE_PROXYJUMP" -eq 1 ]]; then
+      jump_host="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .host // \"\"" "$BINDING_FILE")"
+      jump_user="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .user // \"$DEF_USER\"" "$BINDING_FILE")"
+      jump_port="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .port // $DEF_PORT" "$BINDING_FILE")"
+      if [[ -n "$jump_host" && "$jump_host" != "null" ]]; then
+        candidate_labels+=("proxyjump")
+        candidate_hosts+=("$host")
+        candidate_jumps+=("${jump_user}@${jump_host}:${jump_port}")
+      fi
+    fi
+  elif [[ "$access_policy" == "lan_first" ]]; then
     candidate_labels+=("lan")
     candidate_hosts+=("$host")
     candidate_jumps+=("")
@@ -348,7 +437,7 @@ for i in $(seq 0 $((COUNT-1))); do
     cand_host="${candidate_hosts[$idx]}"
     jump_spec="${candidate_jumps[$idx]}"
 
-    probe_path "$id" "$user" "$cand_host" "$port" "$timeout" "$label" "$jump_spec" || true
+    probe_path "$id" "$user" "$cand_host" "$port" "$timeout" "$label" "$jump_spec" "$probe_family" || true
 
     total_attempts=$((total_attempts + PROBE_ATTEMPTS_USED))
     attempts_trace="$(jq -cn --argjson base "$attempts_trace" --argjson add "$PROBE_ATTEMPTS_JSON" '$base + $add')"
@@ -385,12 +474,16 @@ for i in $(seq 0 $((COUNT-1))); do
   fi
 
   if [[ "$JSON_MODE" -eq 0 ]]; then
+    local auth_tag="auth=${auth_origin_mode}"
+    if [[ "$auth_origin_mode" != "ambient" && "$auth_origin_identity_exists" == "false" ]]; then
+      auth_tag="auth=${auth_origin_mode}(MISSING)"
+    fi
     if [[ "$target_status" == "ok" ]]; then
-      echo "- id: $id host: $effective_host user: $user -> OK (attempts=${total_attempts}) name: ${remote_name} path=${path_used} contract=${path_contract_state}"
+      echo "- id: $id host: $effective_host user: $user -> OK (attempts=${total_attempts}) name: ${remote_name} path=${path_used} contract=${path_contract_state} ${auth_tag}"
     elif [[ "$target_status" == "warn" && -n "$path_used" ]]; then
-      echo "- id: $id host: $effective_host user: $user -> WARN (attempts=${total_attempts}) name: ${remote_name} path=${path_used} contract=${path_contract_state}"
+      echo "- id: $id host: $effective_host user: $user -> WARN (attempts=${total_attempts}) name: ${remote_name} path=${path_used} contract=${path_contract_state} ${auth_tag}"
     else
-      echo "- id: $id host: $host user: $user -> $(echo "$target_status" | tr '[:lower:]' '[:upper:]') (attempts=${total_attempts}) reason=${final_reason} contract=${path_contract_state}"
+      echo "- id: $id host: $host user: $user -> $(echo "$target_status" | tr '[:lower:]' '[:upper:]') (attempts=${total_attempts}) reason=${final_reason} contract=${path_contract_state} ${auth_tag}"
     fi
   fi
 
@@ -409,6 +502,13 @@ for i in $(seq 0 $((COUNT-1))); do
     --argjson attempts_per_path "$ATTEMPTS" \
     --argjson primary_path_failures "$primary_path_failures" \
     --argjson attempts_trace "$attempts_trace" \
+    --arg source_runtime "$SOURCE_RUNTIME" \
+    --arg auth_origin_mode "$auth_origin_mode" \
+    --arg auth_origin_ref "$auth_origin_ref" \
+    --argjson auth_origin_identity_exists "$auth_origin_identity_exists" \
+    --arg auth_origin_fingerprint "$auth_origin_fingerprint" \
+    --arg auth_origin_missing_reason "$auth_origin_missing_reason" \
+    --argjson probe_via_changes_route_only "$probe_via_changes_route_only" \
     '{
       id:$id,
       user:$user,
@@ -423,7 +523,16 @@ for i in $(seq 0 $((COUNT-1))); do
       attempts_total:$attempts_total,
       attempts_per_path:$attempts_per_path,
       primary_path_failures:$primary_path_failures,
-      attempts_trace:$attempts_trace
+      attempts_trace:$attempts_trace,
+      source_runtime:$source_runtime,
+      auth_origin: {
+        mode:$auth_origin_mode,
+        ref:$auth_origin_ref,
+        identity_exists:$auth_origin_identity_exists,
+        fingerprint:($auth_origin_fingerprint // ""),
+        missing_reason:($auth_origin_missing_reason // ""),
+        probe_via_changes_route_only:$probe_via_changes_route_only
+      }
     }')")
 done
 
@@ -446,6 +555,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg binding "$BINDING_FILE" \
     --arg status "$overall" \
+    --arg source_runtime "$SOURCE_RUNTIME" \
     --argjson configured_targets "$COUNT" \
     --argjson checked_targets "$checked" \
     --argjson pending_targets "$pending" \
@@ -457,6 +567,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       capability:$capability,
       generated_at:$generated_at,
       binding:$binding,
+      source_runtime:$source_runtime,
       status:$status,
       configured_targets:$configured_targets,
       checked_targets:$checked_targets,

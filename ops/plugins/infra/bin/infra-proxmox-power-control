@@ -56,21 +56,22 @@ case "$ACTION" in
     *) echo "FAIL: unknown action '$ACTION' (expected on|off|cycle|status)" >&2; exit 2 ;;
 esac
 
-# Resolve credentials
-CREDS_SCRIPT="$SPINE_ROOT/ops/lib/infisical-agent.sh"
+# Resolve credentials via Infisical agent (same pattern as idrac-health-status)
+INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
 IDRAC_USER=""
 IDRAC_PASS=""
 
-if [[ -f "$CREDS_SCRIPT" ]]; then
-    source "$CREDS_SCRIPT" 2>/dev/null || true
-    IDRAC_USER="${IDRAC_ADMIN_USER:-}"
-    IDRAC_PASS="${IDRAC_ADMIN_PASSWORD:-}"
+if [[ -x "$INFISICAL_AGENT" ]]; then
+    IDRAC_USER=$("$INFISICAL_AGENT" get infrastructure prod IDRAC_ADMIN_USER 2>/dev/null) || true
+    IDRAC_PASS=$("$INFISICAL_AGENT" get infrastructure prod IDRAC_ADMIN_PASSWORD 2>/dev/null) || true
 fi
 
-if [[ -z "$IDRAC_USER" || -z "$IDRAC_PASS" ]]; then
-    echo "WARN: iDRAC credentials not available from Infisical. Trying environment." >&2
-    IDRAC_USER="${IDRAC_USER:-${IDRAC_ADMIN_USER:-root}}"
-    IDRAC_PASS="${IDRAC_PASS:-${IDRAC_ADMIN_PASSWORD:-}}"
+# Fallback to environment
+if [[ -z "$IDRAC_USER" ]]; then
+    IDRAC_USER="${IDRAC_ADMIN_USER:-root}"
+fi
+if [[ -z "$IDRAC_PASS" ]]; then
+    IDRAC_PASS="${IDRAC_ADMIN_PASSWORD:-}"
 fi
 
 if [[ -z "$IDRAC_PASS" ]]; then
@@ -102,6 +103,23 @@ else
     ACCESS_PATH="unreachable"
 fi
 
+run_redfish_power_status() {
+    # Redfish power status — works without ipmitool
+    local url="https://${IDRAC_IP}/redfish/v1/Systems/System.Embedded.1"
+    local json
+    if $USE_DIRECT; then
+        json=$(curl -sk -u "${IDRAC_USER}:${IDRAC_PASS}" --connect-timeout 8 --max-time 15 "$url" 2>/dev/null) || return 1
+    elif [[ -n "$SSH_HOST" && "$SSH_HOST" != "unreachable" ]]; then
+        json=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+            "curl -sk -u '${IDRAC_USER}:${IDRAC_PASS}' --connect-timeout 8 --max-time 15 '$url'" 2>/dev/null) || return 1
+    else
+        return 1
+    fi
+    local power_state
+    power_state=$(echo "$json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('PowerState','unknown'))" 2>/dev/null) || return 1
+    echo "Chassis Power is ${power_state}"
+}
+
 run_ipmi() {
     local ipmi_cmd="$1"
     if $USE_DIRECT; then
@@ -126,7 +144,11 @@ echo ""
 case "$ACTION" in
     status)
         echo "-- Power Status --"
-        run_ipmi "power status" || echo "FAIL: IPMI unreachable"
+        if command -v ipmitool >/dev/null 2>&1; then
+            run_ipmi "power status" || echo "FAIL: IPMI unreachable"
+        else
+            run_redfish_power_status || echo "FAIL: Redfish power status unreachable"
+        fi
         ;;
     on)
         if [[ "$EXECUTE" -eq 0 ]]; then
