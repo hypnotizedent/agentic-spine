@@ -692,13 +692,8 @@ else
   warn "Media port collision lock gate not present"
 fi
 
-CURRENT_GATE="D107"
-echo -n "D107 Media NFS mount lock... "
-if [[ -x "$SP/surfaces/verify/d107-media-nfs-mount-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d107-media-nfs-mount-lock.sh"
-else
-  warn "Media NFS mount lock gate not present"
-fi
+# D107 removed — gate retired (download-stack/streaming-stack VMs decommissioned 2026-03-23).
+# Registry: gate.registry.yaml retired: true. Script deleted.
 CURRENT_GATE="D116"
 echo -n "D116 Mailroom bridge consumers registry... "
 if [[ -x "$SP/surfaces/verify/d116-mailroom-bridge-consumers-registry-lock.sh" ]]; then
