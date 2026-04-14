@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+# Scaffold a governed intake envelope for an external artifact.
+# Default mode is dry-run; pass --execute to write.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+MASTER_REGISTRY="$ROOT/ops/bindings/master.inventory.registry.yaml"
+ENQUEUE_SCRIPT="$ROOT/ops/plugins/infra/mailroom-bridge/bin/mailroom-task-enqueue"
+
+CAPABILITY="intake.scaffold"
+
+# Governed runtime paths — not repo-local
+SPINE_OUTBOX="${SPINE_OUTBOX:-${SPINE_MAILROOM_ROOT:-$HOME/code/.runtime/spine/mailroom}/outbox}"
+INTAKE_DIR="$SPINE_OUTBOX/intake"
+EVIDENCE_ROOT="${SPINE_EVIDENCE_ROOT:-$HOME/code/.evidence/spine}"
+
+EXECUTE=0
+JSON=0
+QUEUE_REVIEW=0
+ARTIFACT_PATH=""
+DOMAIN_ID=""
+CONCERN_ID=""
+AUTHORITY_PATH=""
+MASTER_ROW_ID=""
+REQUESTED_BY="@ronny"
+OWNER_AGENT=""
+
+usage() {
+  cat <<'USAGE'
+intake.scaffold - scaffold a governed intake envelope for an external artifact.
+
+Usage:
+  intake-scaffold --artifact-path <path> --domain-id <id> --concern-id <slug> \
+    --authority-path <repo-relative-path> [options] [--execute]
+
+Required:
+  --artifact-path <path>           path to external artifact (file or directory)
+  --domain-id <id>                 owning domain of the authority being compared
+  --concern-id <slug>              review class / concern slug
+  --authority-path <repo-path>     repo-relative path to authority surface
+
+Options:
+  --master-row-id <id>             master registry row id (auto-resolved if omitted)
+  --requested-by <@owner>          default: @ronny
+  --owner-agent <name>             agent owning this intake
+  --queue-review                   enqueue a review task after intake
+  --execute                        apply changes (default: dry-run)
+  --json                           machine-readable output
+
+Notes:
+  - Dry-run attempts to auto-resolve --master-row-id from authority_path.
+  - Execute fails if master_row_id is unresolved or ambiguous.
+  - authority-path must be repo-relative (e.g. ops/bindings/foo.yaml), not absolute.
+  - intake_mode is always governed_yaml_envelope.
+USAGE
+}
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --artifact-path) ARTIFACT_PATH="${2:?--artifact-path requires value}"; shift 2 ;;
+    --domain-id) DOMAIN_ID="${2:?--domain-id requires value}"; shift 2 ;;
+    --concern-id) CONCERN_ID="${2:?--concern-id requires value}"; shift 2 ;;
+    --authority-path) AUTHORITY_PATH="${2:?--authority-path requires value}"; shift 2 ;;
+    --master-row-id) MASTER_ROW_ID="${2:?--master-row-id requires value}"; shift 2 ;;
+    --requested-by) REQUESTED_BY="${2:?--requested-by requires value}"; shift 2 ;;
+    --owner-agent) OWNER_AGENT="${2:?--owner-agent requires value}"; shift 2 ;;
+    --queue-review) QUEUE_REVIEW=1; shift ;;
+    --execute) EXECUTE=1; shift ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown arg: $1" ;;
+  esac
+done
+
+# --- Validate required args ---
+[[ -n "$ARTIFACT_PATH" ]] || fail "--artifact-path required"
+[[ -n "$DOMAIN_ID" ]] || fail "--domain-id required"
+[[ -n "$CONCERN_ID" ]] || fail "--concern-id required"
+[[ -n "$AUTHORITY_PATH" ]] || fail "--authority-path required"
+
+# Artifact must exist
+[[ -e "$ARTIFACT_PATH" ]] || fail "artifact not found: $ARTIFACT_PATH"
+
+# Authority path must be repo-relative (not absolute)
+[[ "$AUTHORITY_PATH" != /* ]] || fail "--authority-path must be repo-relative, not absolute"
+
+# Authority file must exist in repo
+[[ -e "$ROOT/$AUTHORITY_PATH" ]] || fail "authority not found in repo: $AUTHORITY_PATH"
+
+# Dependencies
+for dep in yq jq; do
+  command -v "$dep" >/dev/null 2>&1 || fail "missing dependency: $dep"
+done
+
+[[ -f "$MASTER_REGISTRY" ]] || fail "missing master registry: $MASTER_REGISTRY"
+
+# --- Resolve master_row_id ---
+RESOLVED_ROW_ID="$MASTER_ROW_ID"
+ROW_RESOLUTION="supplied"
+
+if [[ -z "$RESOLVED_ROW_ID" ]]; then
+  ROW_RESOLUTION="auto"
+  matches="$(yq e -r ".rows[] | select(.authority.path == \"$AUTHORITY_PATH\") | .id" "$MASTER_REGISTRY" 2>/dev/null || true)"
+  if [[ -z "$matches" ]]; then
+    match_count=0
+  else
+    match_count="$(echo "$matches" | wc -l | tr -d ' ')"
+  fi
+
+  if [[ "$match_count" -eq 1 ]]; then
+    RESOLVED_ROW_ID="$(echo "$matches" | head -n1)"
+  elif [[ "$match_count" -gt 1 ]]; then
+    ROW_RESOLUTION="ambiguous"
+  else
+    ROW_RESOLUTION="unresolved"
+  fi
+fi
+
+# --- Compute paths ---
+NOW_UTC="$(TZ=UTC date -u +%Y%m%dT%H%M%SZ)"
+DATE_STAMP="$(TZ=UTC date -u +%Y%m%d)"
+TIME_NONCE="$(TZ=UTC date -u +%H%M%S)"
+SLUG="$(echo "$CONCERN_ID" | tr '_' '-')"
+ITK_ID="ITK-${DATE_STAMP}-${SLUG}-${TIME_NONCE}"
+ITK_FILE="$INTAKE_DIR/${ITK_ID}.yaml"
+
+EVIDENCE_DEST="$EVIDENCE_ROOT/intake/${SLUG}-${NOW_UTC}"
+RECEIPT_PATH="$EVIDENCE_DEST/capture-receipt.yaml"
+
+# Artifact name for display
+if [[ -d "$ARTIFACT_PATH" ]]; then
+  ARTIFACT_TYPE="directory"
+  ARTIFACT_ABS="$(cd "$ARTIFACT_PATH" && pwd)"
+else
+  ARTIFACT_TYPE="file"
+  ARTIFACT_ABS="$(cd "$(dirname "$ARTIFACT_PATH")" && pwd)/$(basename "$ARTIFACT_PATH")"
+fi
+
+# --- Dry-run ---
+if [[ "$EXECUTE" -eq 0 ]]; then
+  if [[ "$JSON" -eq 1 ]]; then
+    jq -n \
+      --arg capability "$CAPABILITY" \
+      --arg mode "dry-run" \
+      --arg itk_id "$ITK_ID" \
+      --arg itk_file "$ITK_FILE" \
+      --arg evidence_dest "$EVIDENCE_DEST" \
+      --arg artifact_path "$ARTIFACT_ABS" \
+      --arg artifact_type "$ARTIFACT_TYPE" \
+      --arg authority_path "$AUTHORITY_PATH" \
+      --arg domain_id "$DOMAIN_ID" \
+      --arg concern_id "$CONCERN_ID" \
+      --arg master_row_id "${RESOLVED_ROW_ID:-}" \
+      --arg row_resolution "$ROW_RESOLUTION" \
+      --argjson queue_review "$QUEUE_REVIEW" \
+      '{capability:$capability,mode:$mode,itk_id:$itk_id,itk_file:$itk_file,evidence_dest:$evidence_dest,artifact_path:$artifact_path,artifact_type:$artifact_type,authority_path:$authority_path,domain_id:$domain_id,concern_id:$concern_id,master_row_id:$master_row_id,row_resolution:$row_resolution,queue_review:($queue_review==1)}'
+  else
+    echo "$CAPABILITY"
+    echo "mode: dry-run"
+    echo "itk_id: $ITK_ID"
+    echo "itk_file: $ITK_FILE"
+    echo "evidence_dest: $EVIDENCE_DEST"
+    echo "artifact_path: $ARTIFACT_ABS"
+    echo "artifact_type: $ARTIFACT_TYPE"
+    echo "authority_path: $AUTHORITY_PATH"
+    echo "domain_id: $DOMAIN_ID"
+    echo "concern_id: $CONCERN_ID"
+    echo "master_row_id: ${RESOLVED_ROW_ID:-(unresolved)}"
+    echo "row_resolution: $ROW_RESOLUTION"
+    echo "queue_review: $( [[ "$QUEUE_REVIEW" -eq 1 ]] && echo yes || echo no )"
+    if [[ "$ROW_RESOLUTION" == "unresolved" ]]; then
+      echo "warning: no master_row_id found for authority_path=$AUTHORITY_PATH — execute will fail"
+    elif [[ "$ROW_RESOLUTION" == "ambiguous" ]]; then
+      echo "warning: multiple master rows match authority_path=$AUTHORITY_PATH — supply --master-row-id explicitly"
+    fi
+    echo "apply: rerun with --execute"
+  fi
+  exit 0
+fi
+
+# --- Execute gate: master_row_id must be resolved ---
+if [[ -z "$RESOLVED_ROW_ID" ]]; then
+  if [[ "$ROW_RESOLUTION" == "ambiguous" ]]; then
+    fail "master_row_id ambiguous for authority_path=$AUTHORITY_PATH — supply --master-row-id explicitly"
+  else
+    fail "master_row_id unresolved for authority_path=$AUTHORITY_PATH — supply --master-row-id or register the authority in master.inventory.registry.yaml"
+  fi
+fi
+
+# --- Step 1: Evidence capture ---
+mkdir -p "$EVIDENCE_DEST"
+
+if [[ -d "$ARTIFACT_PATH" ]]; then
+  cp -r "$ARTIFACT_ABS" "$EVIDENCE_DEST/artifact"
+  CAPTURED_PATH="$EVIDENCE_DEST/artifact"
+else
+  cp "$ARTIFACT_ABS" "$EVIDENCE_DEST/$(basename "$ARTIFACT_ABS")"
+  CAPTURED_PATH="$EVIDENCE_DEST/$(basename "$ARTIFACT_ABS")"
+fi
+
+# File count and basic stats for receipt
+if [[ -d "$CAPTURED_PATH" ]]; then
+  FILE_COUNT="$(find "$CAPTURED_PATH" -type f | wc -l | tr -d ' ')"
+else
+  FILE_COUNT=1
+fi
+
+# Emit capture receipt
+NOW_ISO="$(TZ=UTC date -u +%Y-%m-%dT%H:%M:%SZ)"
+cat >"$RECEIPT_PATH" <<RECEIPT
+source_path: '$ARTIFACT_ABS'
+captured_path: '$CAPTURED_PATH'
+artifact_type: $ARTIFACT_TYPE
+file_count: $FILE_COUNT
+captured_at: '$NOW_ISO'
+captured_by: $CAPABILITY
+RECEIPT
+
+# --- Step 2: Emit intake envelope ---
+mkdir -p "$INTAKE_DIR"
+
+# Avoid overwriting an existing envelope
+[[ ! -f "$ITK_FILE" ]] || fail "intake envelope already exists: $ITK_FILE"
+
+ITK_ID_ENV="$ITK_ID" \
+DOMAIN_ID_ENV="$DOMAIN_ID" \
+CONCERN_ID_ENV="$CONCERN_ID" \
+AUTHORITY_PATH_ENV="$AUTHORITY_PATH" \
+MASTER_ROW_ID_ENV="$RESOLVED_ROW_ID" \
+CAPTURED_PATH_ENV="$CAPTURED_PATH" \
+RECEIPT_PATH_ENV="$RECEIPT_PATH" \
+REQUESTED_BY_ENV="$REQUESTED_BY" \
+OWNER_AGENT_ENV="${OWNER_AGENT:-}" \
+NOW_ENV="$NOW_ISO" \
+ARTIFACT_ABS_ENV="$ARTIFACT_ABS" \
+yq e -n '
+  .intake_id = strenv(ITK_ID_ENV) |
+  .chain_step = "intake" |
+  .domain_id = strenv(DOMAIN_ID_ENV) |
+  .concern_id = strenv(CONCERN_ID_ENV) |
+  .authority_path = strenv(AUTHORITY_PATH_ENV) |
+  .master_row_id = strenv(MASTER_ROW_ID_ENV) |
+  .intake_mode = "governed_yaml_envelope" |
+  .evidence_refs = [strenv(CAPTURED_PATH_ENV), strenv(RECEIPT_PATH_ENV)] |
+  .requested_by = strenv(REQUESTED_BY_ENV) |
+  .owner_agent = strenv(OWNER_AGENT_ENV) |
+  .created_at = strenv(NOW_ENV) |
+  .updated_at = strenv(NOW_ENV) |
+  .summary.source_surface = "external_folder_artifact" |
+  .summary.source_location = strenv(ARTIFACT_ABS_ENV) |
+  .summary.intended_action = "review_diff_against_repo"
+' >"$ITK_FILE"
+
+# --- Step 3: Optional review task ---
+TASK_ID=""
+if [[ "$QUEUE_REVIEW" -eq 1 ]]; then
+  if [[ ! -x "$ENQUEUE_SCRIPT" ]]; then
+    echo "WARN: --queue-review requested but enqueue script not found: $ENQUEUE_SCRIPT" >&2
+  else
+    review_summary="Review external artifact against $AUTHORITY_PATH (intake: $ITK_ID)"
+    review_payload="$(jq -n --arg itk "$ITK_FILE" --arg auth "$AUTHORITY_PATH" '{itk_envelope:$itk,authority_path:$auth}')"
+    enqueue_out="$("$ENQUEUE_SCRIPT" \
+      --summary "$review_summary" \
+      --route-target agent_tool \
+      --payload "$review_payload" \
+      --json)"
+    TASK_ID="$(echo "$enqueue_out" | jq -r '.data.task_id // empty' 2>/dev/null || true)"
+  fi
+fi
+
+# --- Output ---
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "$CAPABILITY" \
+    --arg mode "execute" \
+    --arg itk_id "$ITK_ID" \
+    --arg itk_file "$ITK_FILE" \
+    --arg evidence_dest "$EVIDENCE_DEST" \
+    --arg receipt "$RECEIPT_PATH" \
+    --arg master_row_id "$RESOLVED_ROW_ID" \
+    --arg row_resolution "$ROW_RESOLUTION" \
+    --arg task_id "${TASK_ID:-}" \
+    '{capability:$capability,mode:$mode,itk_id:$itk_id,itk_file:$itk_file,evidence_dest:$evidence_dest,receipt:$receipt,master_row_id:$master_row_id,row_resolution:$row_resolution,review_task_id:$task_id,status:"OK"}'
+else
+  echo "$CAPABILITY"
+  echo "mode: execute"
+  echo "itk_id: $ITK_ID"
+  echo "itk_file: $ITK_FILE"
+  echo "evidence_dest: $EVIDENCE_DEST"
+  echo "receipt: $RECEIPT_PATH"
+  echo "master_row_id: $RESOLVED_ROW_ID"
+  echo "row_resolution: $ROW_RESOLUTION"
+  [[ -z "$TASK_ID" ]] || echo "review_task_id: $TASK_ID"
+  echo "status: OK"
+fi
