@@ -61,8 +61,19 @@ done
 need yq
 need jq
 
+SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+
 [[ -f "$INVENTORY" ]] || fail "inventory not found: $INVENTORY"
 [[ -f "$PROFILES" ]] || fail "profiles not found: $PROFILES"
+
+# Auto-discover claim file from default runtime path if not explicitly provided
+if [[ -z "$CLAIM_FILE" ]]; then
+    auto_claim_path="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${DEVICE}/firstboot-claim.${DEVICE}.json"
+    if [[ -f "$auto_claim_path" ]]; then
+        CLAIM_FILE="$auto_claim_path"
+    fi
+fi
+
 if [[ -n "$CLAIM_FILE" ]]; then
     [[ -f "$CLAIM_FILE" ]] || fail "claim file not found: $CLAIM_FILE"
 fi
@@ -79,33 +90,65 @@ inventory_platform="$platform"
 claim_consumed=false
 claim_summary="not provided"
 
+claim_parse_error=""
+drift_hostname=""
+drift_operator_user=""
+drift_items='[]'
+
 if [[ -n "$CLAIM_FILE" ]]; then
-    claim_device=$(jq -r '.device_id // empty' "$CLAIM_FILE")
-    [[ "$claim_device" == "$DEVICE" ]] || fail "claim file device_id does not match --device"
+    # Validate the claim is parseable JSON before proceeding
+    if ! jq empty "$CLAIM_FILE" 2>/dev/null; then
+        claim_parse_error="Claim file exists but is not valid JSON: $CLAIM_FILE"
+    else
+        claim_device=$(jq -r '.device_id // empty' "$CLAIM_FILE")
+        [[ "$claim_device" == "$DEVICE" ]] || fail "claim file device_id does not match --device"
 
-    claim_target_platform=$(jq -r '.target_platform_truth // empty' "$CLAIM_FILE")
-    if [[ -n "$claim_target_platform" && "$claim_target_platform" != "null" ]]; then
-        platform="$claim_target_platform"
-    fi
-
-    claim_ts_id=$(jq -r '.tailscale_identity // empty' "$CLAIM_FILE")
-    claim_ts_ip=$(jq -r '.tailscale_ip // empty' "$CLAIM_FILE")
-    if [[ -n "$claim_ts_id" ]]; then
-        ts_id="$claim_ts_id"
-    fi
-    if [[ -n "$claim_ts_ip" ]]; then
-        ts_ip="$claim_ts_ip"
-    fi
-
-    if [[ -z "$SSH_PROOF" ]]; then
-        claim_ssh_endpoint=$(jq -r '.ssh_proof_endpoint // empty' "$CLAIM_FILE")
-        if [[ -n "$claim_ssh_endpoint" ]]; then
-            SSH_PROOF="$claim_ssh_endpoint"
+        claim_target_platform=$(jq -r '.target_platform_truth // empty' "$CLAIM_FILE")
+        if [[ -n "$claim_target_platform" && "$claim_target_platform" != "null" ]]; then
+            platform="$claim_target_platform"
         fi
-    fi
 
-    claim_consumed=true
-    claim_summary=$(jq -c '{hostname, ssh_proof_status, ssh_proof_endpoint, package_baseline_status, key_seeding_status, installer_provenance}' "$CLAIM_FILE")
+        claim_ts_id=$(jq -r '.tailscale_identity // empty' "$CLAIM_FILE")
+        claim_ts_ip=$(jq -r '.tailscale_ip // empty' "$CLAIM_FILE")
+        if [[ -n "$claim_ts_id" ]]; then
+            ts_id="$claim_ts_id"
+        fi
+        if [[ -n "$claim_ts_ip" ]]; then
+            ts_ip="$claim_ts_ip"
+        fi
+
+        if [[ -z "$SSH_PROOF" ]]; then
+            claim_ssh_endpoint=$(jq -r '.ssh_proof_endpoint // empty' "$CLAIM_FILE")
+            if [[ -n "$claim_ssh_endpoint" ]]; then
+                SSH_PROOF="$claim_ssh_endpoint"
+            fi
+        fi
+
+        claim_consumed=true
+        claim_summary=$(jq -c '{hostname, ssh_proof_status, ssh_proof_endpoint, package_baseline_status, key_seeding_status, installer_provenance}' "$CLAIM_FILE")
+
+        # Drift detection: compare claim values against inventory/expected values
+        claim_hostname=$(jq -r '.hostname // empty' "$CLAIM_FILE")
+        claim_operator_user=$(jq -r '.operator_user // empty' "$CLAIM_FILE")
+        expected_hostname="${ts_id:-$DEVICE}"
+        expected_operator_user="ronnyworks"
+
+        if [[ -n "$claim_hostname" && "$claim_hostname" != "$expected_hostname" ]]; then
+            drift_hostname="claim says '${claim_hostname}', inventory/identity says '${expected_hostname}'"
+        fi
+        if [[ -n "$claim_operator_user" && "$claim_operator_user" != "$expected_operator_user" ]]; then
+            drift_operator_user="claim says '${claim_operator_user}', expected '${expected_operator_user}'"
+        fi
+
+        # Build drift JSON
+        drift_items=$(jq -n \
+            --arg dh "$drift_hostname" \
+            --arg du "$drift_operator_user" \
+            '[
+                (if ($dh | length) > 0 then {field: "hostname", detail: $dh} else empty end),
+                (if ($du | length) > 0 then {field: "operator_user", detail: $du} else empty end)
+            ]')
+    fi
 fi
 
 # Check if device already has an SSH target binding
@@ -157,6 +200,19 @@ fi
 # Pre-reprovision inventory entries must hand off through a Stage 0 claim object.
 if [[ "$inventory_platform" != "linux" && "$claim_consumed" != "true" ]]; then
     blockers+=("Stage 0 claim object is required before welcome planning for device $DEVICE because inventory platform is still '$inventory_platform'. Run host.operator-hardware.firstboot.claim after trusted Linux bootstrap.")
+fi
+
+# Claim parse failure is a blocker — do not silently ignore an available claim
+if [[ -n "$claim_parse_error" ]]; then
+    blockers+=("$claim_parse_error")
+fi
+
+# Drift between claim and inventory/expected values is a blocker
+if [[ -n "$drift_hostname" ]]; then
+    blockers+=("Hostname drift: $drift_hostname")
+fi
+if [[ -n "$drift_operator_user" ]]; then
+    blockers+=("Operator user drift: $drift_operator_user")
 fi
 
 # Plan inventory delta
@@ -241,6 +297,7 @@ if $JSON_MODE; then
         --argjson blockers "$blockers_json" \
         --argjson readiness_commands "$cmds_json" \
         --argjson expected_evidence_categories "$evidence_json" \
+        --argjson drift_items "$drift_items" \
         '{
             device: $device,
             platform: $platform,
@@ -262,6 +319,7 @@ if $JSON_MODE; then
             blockers: $blockers,
             readiness_commands: $readiness_commands,
             expected_evidence_categories: $expected_evidence_categories,
+            drift_detected: (if ($drift_items | length) > 0 then {present: true, items: $drift_items} else {present: false, items: []} end),
             note: "Planning only. No repo mutations were performed. No roles were assigned."
         }'
 else
@@ -283,6 +341,13 @@ else
     echo "  tailnet:          $(if $tailnet_enrolled; then echo "enrolled"; else echo "not in snapshot"; fi)"
     echo "  readiness profile: $profile_name"
     echo
+
+    drift_count=$(echo "$drift_items" | jq 'length')
+    if [[ "$drift_count" -gt 0 ]]; then
+        echo "DRIFT DETECTED:"
+        echo "$drift_items" | jq -r '.[] | "  - \(.field): \(.detail)"'
+        echo
+    fi
 
     if [[ ${#blockers[@]} -gt 0 && -n "${blockers[0]}" ]]; then
         echo "BLOCKERS:"
