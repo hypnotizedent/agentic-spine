@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 NAS_STATUS="$ROOT/ops/plugins/infra/observability/bin/nas-health-status"
+SHOP_STORAGE_MAP="$ROOT/ops/bindings/shop.storage.map.yaml"
 source "$ROOT/ops/lib/ssh-resolve.sh"
 
 need_cmd() {
@@ -13,9 +14,14 @@ need_cmd() {
 }
 
 need_cmd ssh
+need_cmd yq
 
 [[ -x "$NAS_STATUS" ]] || {
   echo "G3 FAIL: missing NAS health probe: $NAS_STATUS" >&2
+  exit 2
+}
+[[ -f "$SHOP_STORAGE_MAP" ]] || {
+  echo "G3 FAIL: missing shop storage authority: $SHOP_STORAGE_MAP" >&2
   exit 2
 }
 
@@ -38,6 +44,19 @@ run_remote() {
     -o UserKnownHostsFile=/dev/null \
     "${ssh_user}@${resolved_host}" \
     "$command" 2>/dev/null
+}
+
+# /md1400 authority moved to pve-owned storage truth. Derive the hosts that
+# should satisfy a guest-visible /md1400 mount from governed storage authority
+# rather than carrying a stale private peer list in this gate.
+resolve_md1400_mount_targets() {
+  yq e -r '
+    .storage_scaffold_status[]
+    | select((.path // "") == "/md1400" or ((.path // "") | test("^/md1400/")))
+    | .device
+  ' "$SHOP_STORAGE_MAP" \
+    | sed '/^null$/d;/^$/d' \
+    | LC_ALL=C sort -u
 }
 
 echo "==> pve zpool health"
@@ -65,7 +84,12 @@ fi
 
 echo
 echo "==> md1400 mounts"
-for target_id in pve archive-smb; do
+mapfile -t md1400_targets < <(resolve_md1400_mount_targets)
+if [[ "${#md1400_targets[@]}" -eq 0 ]]; then
+  echo "G3 FAIL: no governed /md1400 mount targets found in $SHOP_STORAGE_MAP" >&2
+  exit 2
+fi
+for target_id in "${md1400_targets[@]}"; do
   resolved="$(ssh_resolve_ssh_host_with_fallback "$target_id" 5 2>/dev/null || true)"
   resolved_host="$(awk '{print $1}' <<<"$resolved")"
   resolved_path="$(awk '{print $2}' <<<"$resolved")"
