@@ -6,6 +6,7 @@ CONTRACT_DEFAULT="$ROOT/ops/bindings/stability.control.contract.yaml"
 
 CONTRACT="$CONTRACT_DEFAULT"
 JSON_MODE=0
+DOMAIN_FILTER=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -17,12 +18,20 @@ while [[ $# -gt 0 ]]; do
       JSON_MODE=1
       shift
       ;;
+    --domains)
+      DOMAIN_FILTER="${2:-}"
+      [[ -n "$DOMAIN_FILTER" ]] || { echo "STOP: --domains requires a comma-separated list" >&2; exit 2; }
+      shift 2
+      ;;
     -h|--help)
       cat <<'EOF'
 stability-control-snapshot - Runtime reliability + predictive snapshot
 
 Usage:
-  stability-control-snapshot [--contract <path>] [--json]
+  stability-control-snapshot [--contract <path>] [--json] [--domains <list>]
+
+Options:
+  --domains <list>  Comma-separated domain IDs to probe (default: all critical_domains).
 
 Behavior:
   - Runs configured probe capabilities for critical domains.
@@ -447,6 +456,25 @@ mapfile -t DOMAINS < <(yq -r '.critical_domains[].id' "$CONTRACT")
 if [[ "${#DOMAINS[@]}" -eq 0 ]]; then
   echo "STOP: no critical domains configured in contract" >&2
   exit 2
+fi
+
+# Apply --domains filter when specified.
+if [[ -n "$DOMAIN_FILTER" ]]; then
+  IFS=',' read -r -a _allowed_domains <<< "$DOMAIN_FILTER"
+  _filtered_domains=()
+  for _d in "${DOMAINS[@]}"; do
+    for _a in "${_allowed_domains[@]}"; do
+      if [[ "$_d" == "$_a" ]]; then
+        _filtered_domains+=("$_d")
+        break
+      fi
+    done
+  done
+  if [[ "${#_filtered_domains[@]}" -eq 0 ]]; then
+    echo "STOP: --domains filter matched zero critical domains" >&2
+    exit 2
+  fi
+  DOMAINS=("${_filtered_domains[@]}")
 fi
 
 generated_at_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"

@@ -3,6 +3,10 @@ set -euo pipefail
 
 # Scheduled runner: alerting probe + dispatch every 15 minutes
 # LaunchAgent: com.ronny.alerting-probe-cycle
+# Node role: watcher_node
+#
+# Watcher v1 scope: probes only domains in the scoped external-escalation path.
+# Domain filter is governed by stability.control.contract.yaml#watcher_v1_scope.
 #
 # Restored after spine-lite governance-layer removal deleted the prior
 # wrapper and the `alerting.probe` / `alerting.dispatch` capability forms.
@@ -15,6 +19,10 @@ PROBE_BIN="${SPINE_ROOT}/ops/plugins/core/alerting/bin/alerting-probe"
 DISPATCH_BIN="${SPINE_ROOT}/ops/plugins/core/alerting/bin/alerting-dispatch"
 SNAPSHOT_FILE="/tmp/spine-alerting-probe-latest.json"
 RECOVERY_DISPATCH_BIN="${SPINE_ROOT}/ops/plugins/core/recovery/bin/recovery-dispatch"
+
+# Watcher v1 scope: only probe domains in the scoped external-escalation path.
+# Authority: stability.control.contract.yaml#watcher_v1_scope
+WATCHER_V1_DOMAINS="infra-core-stack"
 
 source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
 
@@ -44,7 +52,7 @@ hydrate_ha_alerting_secrets
 [[ -x "${PROBE_BIN}" ]] || { echo "[alerting-probe-cycle] FAIL: missing probe bin: ${PROBE_BIN}" >&2; exit 1; }
 [[ -x "${DISPATCH_BIN}" ]] || { echo "[alerting-probe-cycle] FAIL: missing dispatch bin: ${DISPATCH_BIN}" >&2; exit 1; }
 
-if ! spine_job_run "alerting-probe-cycle:alerting.probe" "${PROBE_BIN}" --out "${SNAPSHOT_FILE}"; then
+if ! spine_job_run "alerting-probe-cycle:alerting.probe" "${PROBE_BIN}" --out "${SNAPSHOT_FILE}" --domains "${WATCHER_V1_DOMAINS}"; then
   spine_enqueue_email_intent \
     "control-plane-alerting" \
     "incident" \

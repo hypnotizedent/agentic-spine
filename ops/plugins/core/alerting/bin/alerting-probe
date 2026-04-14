@@ -3,13 +3,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 OUT_FILE="/tmp/spine-alerting-probe-latest.json"
+DOMAIN_FILTER=""
 
 usage() {
   cat <<'USAGE'
 alerting-probe
 
 Usage:
-  alerting-probe [--out <path>]
+  alerting-probe [--out <path>] [--domains <list>]
+
+Options:
+  --domains <list>  Comma-separated domain IDs to probe (passed through to snapshot).
 
 Runs stability.control.snapshot in JSON mode and stages output for dispatch.
 USAGE
@@ -20,6 +24,11 @@ while [[ $# -gt 0 ]]; do
     --out)
       OUT_FILE="${2:-}"
       [[ -n "$OUT_FILE" ]] || { echo "FAIL: --out requires a value" >&2; exit 2; }
+      shift 2
+      ;;
+    --domains)
+      DOMAIN_FILTER="${2:-}"
+      [[ -n "$DOMAIN_FILTER" ]] || { echo "FAIL: --domains requires a value" >&2; exit 2; }
       shift 2
       ;;
     -h|--help)
@@ -36,8 +45,13 @@ done
 mkdir -p "$(dirname "$OUT_FILE")"
 tmp_file="$(mktemp)"
 
+snapshot_args=(--json)
+if [[ -n "$DOMAIN_FILTER" ]]; then
+  snapshot_args+=(--domains "$DOMAIN_FILTER")
+fi
+
 set +e
-"$ROOT/ops/plugins/infra/observability/bin/stability-control-snapshot" --json >"$tmp_file"
+"$ROOT/ops/plugins/infra/observability/bin/stability-control-snapshot" "${snapshot_args[@]}" >"$tmp_file"
 probe_rc=$?
 set -e
 
