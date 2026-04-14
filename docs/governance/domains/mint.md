@@ -8,22 +8,23 @@ Spine-side Mint surfaces are shared infrastructure only (SSH targets, secrets, v
 - Authority: `docs/governance/SPINE.md`
 - Runtime contracts: `ops/bindings/domains/mint.bundle.yaml`
 - Public ingress contract: `ops/bindings/domains/mint/mint.public.ingress.contract.yaml`
-- **Status authority**: `ops/bindings/domains/mint/mint.module.status.projected.yaml` (read via `mint.module.status.show`)
+- **Status authority**: `ops/bindings/domains/mint/mint.module.status.projected.yaml` (read via `mint.module.status.projection.build`)
 - **Order business truth authority**: `ops/bindings/domains/mint/mint.order.truth.authority.yaml`
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain mint`
-- Public deploy closeout: `mint.modules.health` -> `mint.runtime.proof` -> `mint.public.ingress.proof` -> `mint.quote.edge.reconcile` -> `mint.public.canary`
 
-## Status Consumption
+## Registered Capabilities (2 of 2)
 
-**Default status read**: `./bin/ops cap run mint.module.status.show`
-- Fast, read-only
-- Consumes governed projection at `ops/bindings/domains/mint/mint.module.status.projected.yaml`
-- Does NOT re-run expensive proof by default
+Only two Mint capabilities are registered in `ops/capabilities.yaml`:
+- `mint.module.status.projection.build` — refresh governed status projection
+- `mint.modules.health` — read-only health summary via mint-modules shim
 
-**Advanced status checks**:
-- Explicit baseline: `mint.live.baseline.status`
-- Deep runtime proof: `mint.runtime.proof`
-- Refresh projection: `mint.module.status.projection.build`
+## Residue Notice
+
+Older schema (`ops/plugins/domains/mint/schema/`), runtime state (36 subdirs under
+`/Users/ronnyworks/code/.runtime/spine/state/mint/`), unregistered bins (51 scripts in
+`ops/plugins/domains/mint/bin/`), and lib files (10 in `ops/plugins/domains/mint/lib/`)
+remain parked in spine pending a fresh aperture lift and fresh loop.
+This doc does not authorize migration.
 
 ## Order Truth
 
