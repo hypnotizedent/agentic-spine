@@ -47,6 +47,22 @@ hydrate_ha_alerting_secrets() {
 
 echo "[alerting-probe-cycle] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+# Source host-local watcher secret file if present, BEFORE Infisical hydration.
+# This decouples the watcher interrupt path from infra-core-stack:
+# if ALERTING_HA_URL and ALERTING_HA_TOKEN are already set from this file,
+# the Infisical call (which depends on secrets.ronny.works on infra-core-stack)
+# is never made.
+#
+# Mac path:  $HOME/.config/spine/watcher-alerting.env
+# Linux path: /etc/spine/watcher-secrets.env
+WATCHER_SECRET_FILE="${WATCHER_SECRET_FILE:-${HOME}/.config/spine/watcher-alerting.env}"
+if [[ -f "$WATCHER_SECRET_FILE" ]]; then
+  # shellcheck source=/dev/null
+  set -a
+  source "$WATCHER_SECRET_FILE"
+  set +a
+fi
+
 hydrate_ha_alerting_secrets
 
 [[ -x "${PROBE_BIN}" ]] || { echo "[alerting-probe-cycle] FAIL: missing probe bin: ${PROBE_BIN}" >&2; exit 1; }
