@@ -667,6 +667,13 @@ try:
             pass
         missing = [lbl for lbl in local_required if lbl not in loaded_labels]
         # Derive execution_host target and workload labels from full scheduler registry
+        # Include purpose text for cockpit rendering
+        purpose_by_label = {}
+        for _entry in (_reg.get("labels") or []):
+            _lbl = str((_entry or {}).get("label", "")).strip()
+            _purpose = str((_entry or {}).get("purpose", "")).strip()
+            if _lbl and _purpose:
+                purpose_by_label[_lbl] = _purpose
         exec_host_labels = [lbl for lbl, role in role_by_label.items() if role == "execution_host"]
         exec_host_target = ""
         exec_host_target_access = ""
@@ -696,6 +703,7 @@ try:
                 "target_access": exec_host_target_access,
                 "workload_count": len(exec_host_labels),
                 "workload_labels": exec_host_labels,
+                "workload_purposes": {lbl: purpose_by_label.get(lbl, "") for lbl in exec_host_labels},
             },
         }
         if missing:

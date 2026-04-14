@@ -1,8 +1,8 @@
 status: authoritative
 owner: '@ronny'
-last_verified: 2026-04-10
+last_verified: 2026-04-14
 scope: launchd-scheduler-registry
-updated_at: 2026-04-10
+updated_at: 2026-04-14
 schedule_timezone: America/New_York
 subordinate_to: ops/bindings/launchd.runtime.contract.yaml
 paths:
@@ -19,6 +19,7 @@ labels:
   contract_required: true
   monitor: true
   intended_node_role: watcher_node
+  purpose: "Infra health monitoring and incident dispatch (15m cycle)"
 - label: com.ronny.backup-monitor-hourly
   state: parked
   mode: scheduled
@@ -27,23 +28,37 @@ labels:
   contract_required: true
   monitor: true
   intended_node_role: watcher_node
+  purpose: "Hourly backup system health probe"
   note: "Parked from watcher v1 on 2026-04-14. Snapshot/backup branch is retired from current watcher scope."
 - label: com.ronny.cc-benefits-refresh-daily
-  state: active
+  state: parked
   mode: scheduled
   template_source: spine
   template_path: ops/plugins/infra/host/launchd/com.ronny.cc-benefits-refresh-daily.plist
   contract_required: false
   monitor: true
   intended_node_role: execution_host
+  purpose: "Daily CC benefits status refresh"
+  note: "Parked 2026-04-14. Operator value uncertain; re-promote with real demand."
+  cross_repo_dependency:
+    repo: ronny-products
+    resolver: RONNY_PRODUCTS_ROOT
+    invoked_path: cc-benefits-tracker/scripts/run-tracker.sh
+    note: Script and schema live in ronny-products repo. Requires ronny-products checkout on execution host at RONNY_PRODUCTS_ROOT.
 - label: com.ronny.cc-benefits-reminder-dispatch-daily
-  state: active
+  state: parked
   mode: scheduled
   template_source: spine
   template_path: ops/plugins/infra/host/launchd/com.ronny.cc-benefits-reminder-dispatch-daily.plist
   contract_required: false
   monitor: true
   intended_node_role: execution_host
+  purpose: "Daily CC benefits reminder dispatch"
+  note: "Parked 2026-04-14. Operator value uncertain; re-promote with real demand."
+  state_dependency:
+    depends_on_label: com.ronny.cc-benefits-refresh-daily
+    dependency_type: state-coupled
+    note: Reads reminder-queue.json produced by cc-benefits-refresh-daily. Cannot run meaningfully without prior refresh.
 - label: com.ronny.communications-alerts-dispatcher
   state: active
   mode: daemon
@@ -52,10 +67,16 @@ labels:
   contract_required: true
   monitor: false
   intended_node_role: execution_host
+  purpose: "Autonomous alert email dispatcher (60s poll)"
   escalation_authority_exception: true
   escalation_scope: operator-critical-interrupt-only
   escalation_exception_source: node.role.contract.yaml#authority_exceptions.execution_host_operator_critical_interrupt
   escalation_note: "Detection and enqueue authority is base execution_host. External escalation authority derives from a scoped exception, not from the base role. Sunset when watcher_node is realized."
+  cross_repo_dependency:
+    repo: workbench
+    resolver: SPINE_FOUNDATION_ROOT
+    invoked_path: agents/communications/tools/spine-plugin-communications/bin/communications-alerts-flush
+    note: Worker shim dispatches to communications-alerts-flush in workbench repo. Requires workbench checkout on execution host at SPINE_FOUNDATION_ROOT.
 - label: com.ronny.docker-tunnel
   state: active
   mode: daemon
@@ -64,6 +85,7 @@ labels:
   contract_required: false
   monitor: false
   intended_node_role: operator_console
+  purpose: "Persistent Docker daemon tunnel (192.168.1.200)"
 - label: com.ronny.domain-inventory-refresh-daily
   state: active
   mode: scheduled
@@ -72,6 +94,7 @@ labels:
   contract_required: true
   monitor: true
   intended_node_role: execution_host
+  purpose: "Daily domain inventory refresh and autonomy check"
 - label: com.ronny.finance-backup-weekly
   state: active
   mode: scheduled
@@ -80,6 +103,7 @@ labels:
   contract_required: true
   monitor: true
   intended_node_role: storage_evidence_node
+  purpose: "Weekly Firefly + Paperless backup (30-day retention)"
 - label: com.ronny.infra-core-smoke
   state: active
   mode: scheduled
@@ -88,6 +112,7 @@ labels:
   contract_required: true
   monitor: true
   intended_node_role: verification_node
+  purpose: "Daily infra smoke test (Cloudflare, Vaultwarden, Infisical)"
 - label: com.ronny.log-rotation-daily
   state: active
   mode: scheduled
@@ -96,6 +121,7 @@ labels:
   contract_required: false
   monitor: true
   intended_node_role: execution_host
+  purpose: "Daily log rotation (max 5MB/file, keep 3)"
   classified_beyond_audit_scope: true
   classified_beyond_audit_justification: Recurring headless log rotation is an L1 execution_host maintenance job.
 - label: com.ronny.media-capacity-snapshot-daily
@@ -106,6 +132,7 @@ labels:
   contract_required: true
   monitor: true
   intended_node_role: verification_node
+  purpose: "Daily media capacity snapshot and runway projection"
 - label: com.ronny.operator-hygiene-daily
   state: active
   mode: scheduled
@@ -114,6 +141,7 @@ labels:
   contract_required: true
   monitor: true
   intended_node_role: operator_console
+  purpose: "Daily operator environment hygiene check"
 - label: com.ronny.operator-storage-surface-sync
   state: active
   mode: scheduled
@@ -122,8 +150,22 @@ labels:
   contract_required: false
   monitor: true
   intended_node_role: execution_host
+  purpose: "Operator storage drop-folder watch and sync (60s)"
   classified_beyond_audit_scope: true
   classified_beyond_audit_justification: Recurring headless storage-surface sync is an L1 execution_host maintenance job.
+  cross_repo_dependency:
+    repo: workbench
+    resolver: SPINE_FOUNDATION_ROOT
+    invoked_path: scripts/root/operator/install-client-storage-surfaces.sh
+    note: Mount scripts and installer live in workbench repo. Requires workbench checkout for initial setup; runtime sync uses rclone remotes.
+  operator_console_dependency:
+    watched_paths:
+      - "~/Operator Sync/Mint/operator-drop/"
+      - "~/Operator Sync/Archives/"
+    note: Watches operator-console drop-folder paths. On execution_host, these paths must exist and be writable. Workload is honest as execution_host only when drop-folders are accessible from the execution surface.
+  runtime_dependencies:
+    - rclone
+    - jq
 - label: com.ronny.simplefin-daily-sync
   state: active
   mode: scheduled
@@ -132,19 +174,22 @@ labels:
   contract_required: true
   monitor: true
   intended_node_role: execution_host
+  purpose: "Daily SimpleFIN to Firefly transaction sync"
   cross_repo_dependency:
     repo: workbench
     resolver: SPINE_FOUNDATION_ROOT
     invoked_path: infra/compose/finance/scripts/simplefin-daily-sync.sh
     note: Script lives in workbench repo. Requires workbench checkout on execution host at SPINE_FOUNDATION_ROOT.
 - label: com.ronny.verify-gate-review-consumer-daily
-  state: active
+  state: parked
   mode: scheduled
   template_source: spine
   template_path: ops/plugins/infra/host/launchd/com.ronny.verify-gate-review-consumer-daily.plist
   contract_required: true
   monitor: true
   intended_node_role: verification_node
+  purpose: "Daily verify gate review queue digest"
+  note: "Parked 2026-04-14. Operator value uncertain; re-promote with real demand."
 - label: com.ronnyworks.archives.mount
   state: active
   mode: daemon
@@ -153,6 +198,7 @@ labels:
   contract_required: false
   monitor: false
   intended_node_role: operator_console
+  purpose: "Archives SMB mount supervisor (3 families, 30s health)"
 - label: com.ronnyworks.mintfiles.mount
   state: active
   mode: daemon
@@ -161,3 +207,4 @@ labels:
   contract_required: false
   monitor: false
   intended_node_role: operator_console
+  purpose: "MinIO mount supervisor (4 buckets, 15s health)"
