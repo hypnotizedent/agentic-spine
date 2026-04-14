@@ -73,7 +73,6 @@ The following files WILL need updates by the end of REGISTER phase:
 | `ops/bindings/backup.inventory.yaml` | Backup target entry |
 | `ops/bindings/infra.storage.placement.policy.yaml` | Storage tier declaration for this VM |
 | `ops/bindings/secrets.namespace.policy.yaml` | Secret paths (if services need secrets) |
-| `ops/bindings/tailscale.tailnet.snapshot.yaml` | Tailnet device entry with IPs and access_policy |
 
 ---
 
@@ -165,7 +164,6 @@ The order below minimizes drift window:
 | 8 | `./bin/ops cap run service.registry.projection.build` | Rebuild `docker.compose.targets.yaml` + `services.health.yaml` from SERVICE_REGISTRY | generated projections |
 | 9 | `ops/bindings/backup.inventory.yaml` | Backup target entry for vzdump artifacts | backup coverage |
 | 10 | `ops/bindings/secrets.namespace.policy.yaml` | Secret key paths (if services need Infisical) | secrets |
-| 11 | `ops/bindings/tailscale.tailnet.snapshot.yaml` | Tailnet device entry (IPs, access_policy, FQDN) | tailscale |
 
 ### Validation Gate
 

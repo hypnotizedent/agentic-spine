@@ -9,7 +9,7 @@ set -euo pipefail
 #
 # Authority sources:
 #   - ops/bindings/operator.hardware.inventory.yaml
-#   - ops/bindings/tailscale.tailnet.snapshot.yaml
+#   - ops/bindings/tailscale.tailnet.snapshot.yaml (optional historical/manual residue only)
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
@@ -50,7 +50,6 @@ need yq
 need jq
 
 [[ -f "$INVENTORY" ]] || fail "inventory not found: $INVENTORY"
-[[ -f "$TAILNET" ]] || fail "tailnet snapshot not found: $TAILNET"
 
 if [[ -n "$PLATFORM_FILTER" ]]; then
     case "$PLATFORM_FILTER" in
@@ -83,14 +82,18 @@ for i in $(seq 0 $((total - 1))); do
     model=$(echo "$machines_json" | jq -r ".[$i].model // \"unknown\"")
     state=$(echo "$machines_json" | jq -r ".[$i].eligibility_state")
 
-    # Cross-reference tailnet snapshot
+    # Cross-reference the historical/manual tailnet residue if it exists.
     tailnet_status="not_enrolled"
     if [[ -n "$ts_id" && "$ts_id" != "null" ]]; then
-        snapshot_ip=$(yq e ".devices[] | select(.id == \"$ts_id\") | .tailscale_ip // \"\"" "$TAILNET" 2>/dev/null || true)
-        if [[ -n "$snapshot_ip" && "$snapshot_ip" != "null" ]]; then
-            tailnet_status="enrolled"
+        if [[ -f "$TAILNET" ]]; then
+            snapshot_ip=$(yq e ".devices[] | select(.id == \"$ts_id\") | .tailscale_ip // \"\"" "$TAILNET" 2>/dev/null || true)
+            if [[ -n "$snapshot_ip" && "$snapshot_ip" != "null" ]]; then
+                tailnet_status="enrolled"
+            else
+                tailnet_status="identity_claimed_not_in_snapshot"
+            fi
         else
-            tailnet_status="identity_claimed_not_in_snapshot"
+            tailnet_status="identity_claimed_snapshot_absent"
         fi
     fi
 

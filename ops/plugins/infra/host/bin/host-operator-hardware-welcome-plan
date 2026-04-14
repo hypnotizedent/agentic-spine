@@ -13,13 +13,11 @@ set -euo pipefail
 #   - ops/bindings/operator.hardware.inventory.yaml
 #   - ops/bindings/operator.hardware.readiness.profiles.yaml
 #   - ops/bindings/ssh.targets.yaml
-#   - ops/bindings/tailscale.tailnet.snapshot.yaml
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
 PROFILES="${SPINE_REPO}/ops/bindings/operator.hardware.readiness.profiles.yaml"
 SSH_TARGETS="${SPINE_REPO}/ops/bindings/ssh.targets.yaml"
-TAILNET="${SPINE_REPO}/ops/bindings/tailscale.tailnet.snapshot.yaml"
 
 usage() {
     cat <<'EOF'
@@ -119,13 +117,10 @@ if [[ -f "$SSH_TARGETS" ]]; then
     fi
 fi
 
-# Check Tailscale enrollment
+# Treat inventory identity/IP evidence as sufficient for welcome planning.
 tailnet_enrolled=false
-if [[ -f "$TAILNET" && -n "$ts_id" && "$ts_id" != "null" ]]; then
-    tailnet_match=$(yq e ".devices[] | select(.id == \"$ts_id\") | .tailscale_ip" "$TAILNET" 2>/dev/null || true)
-    if [[ -n "$tailnet_match" && "$tailnet_match" != "null" ]]; then
-        tailnet_enrolled=true
-    fi
+if [[ -n "$ts_id" && "$ts_id" != "null" ]] || [[ -n "$ts_ip" && "$ts_ip" != "null" ]]; then
+    tailnet_enrolled=true
 fi
 
 # Check SSH proof if provided
