@@ -9,6 +9,7 @@ SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
 INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
 CONTRACT="${SPINE_REPO}/ops/bindings/operator.hardware.bootstrap.handoff.contract.yaml"
+PROFILES="${SPINE_REPO}/ops/bindings/operator.hardware.readiness.profiles.yaml"
 CONNECTIVITY_PREFLIGHT_CAP="${SPINE_REPO}/ops/plugins/infra/host/bin/host-operator-hardware-connectivity-preflight"
 
 usage() {
@@ -25,6 +26,8 @@ Options:
   --operator-user <user>               Target operator user (default: ronnyworks)
   --ssh-public-key-ref <path>          SSH public key reference (default: ~/.ssh/id_ed25519.pub)
   --tailscale-enrollment-mode <mode>   manual | auth_key (default: manual)
+  --enrollment-policy <policy>         ssh_first_tailscale_later | tailscale_installed_login_manual | tailscale_auto_enroll_authkey
+  --tailscale-authkey <key>            Tailscale auth key (required for tailscale_auto_enroll_authkey policy)
   --bootstrap-method <method>          usb_autoinstall | pxe | iventoy | manual_console_install
   --boot-medium <medium>               usb | external_ssd | pxe | iventoy
   --console-path <path>                built_in_screen_keyboard | external_console
@@ -55,6 +58,8 @@ HOSTNAME=""
 OPERATOR_USER="ronnyworks"
 SSH_PUBLIC_KEY_REF="${HOME}/.ssh/id_ed25519.pub"
 TAILSCALE_MODE="manual"
+ENROLLMENT_POLICY=""
+TAILSCALE_AUTHKEY=""
 BOOTSTRAP_METHOD=""
 BOOT_MEDIUM=""
 CONSOLE_PATH=""
@@ -80,6 +85,8 @@ while [[ $# -gt 0 ]]; do
         --operator-user) OPERATOR_USER="${2:-}"; shift 2 ;;
         --ssh-public-key-ref) SSH_PUBLIC_KEY_REF="${2:-}"; shift 2 ;;
         --tailscale-enrollment-mode) TAILSCALE_MODE="${2:-}"; shift 2 ;;
+        --enrollment-policy) ENROLLMENT_POLICY="${2:-}"; shift 2 ;;
+        --tailscale-authkey) TAILSCALE_AUTHKEY="${2:-}"; shift 2 ;;
         --bootstrap-method) BOOTSTRAP_METHOD="${2:-}"; shift 2 ;;
         --boot-medium) BOOT_MEDIUM="${2:-}"; shift 2 ;;
         --console-path) CONSOLE_PATH="${2:-}"; shift 2 ;;
@@ -128,6 +135,18 @@ case "$TAILSCALE_MODE" in
     manual|auth_key) ;;
     *) fail "invalid tailscale enrollment mode: $TAILSCALE_MODE" ;;
 esac
+
+# Enrollment policy validation and defaulting
+if [[ -n "$ENROLLMENT_POLICY" ]]; then
+    case "$ENROLLMENT_POLICY" in
+        ssh_first_tailscale_later|tailscale_installed_login_manual|tailscale_auto_enroll_authkey) ;;
+        *) fail "invalid enrollment policy: $ENROLLMENT_POLICY (valid: ssh_first_tailscale_later, tailscale_installed_login_manual, tailscale_auto_enroll_authkey)" ;;
+    esac
+fi
+
+if [[ "$ENROLLMENT_POLICY" == "tailscale_auto_enroll_authkey" && -z "$TAILSCALE_AUTHKEY" ]]; then
+    fail "enrollment policy tailscale_auto_enroll_authkey requires --tailscale-authkey"
+fi
 
 if [[ -z "$BOOTSTRAP_METHOD" ]]; then
     case "$source_platform" in
@@ -220,6 +239,22 @@ if [[ "$preflight_result" != "ready_for_reprovision" ]]; then
     fail "connectivity preflight failed: result=$preflight_result connectivity_gate=$connectivity_gate_status missing=$(echo "$missing_prereqs_json" | jq -r 'join(",")')"
 fi
 
+# Default enrollment policy from device class profile if not specified
+if [[ -z "$ENROLLMENT_POLICY" ]]; then
+    class_default_policy=$(yq e -r ".stage0_bootstrap_stance.device_classes.${device_class}.default_enrollment_policy // \"\"" "$PROFILES" 2>/dev/null || true)
+    if [[ -n "$class_default_policy" && "$class_default_policy" != "null" ]]; then
+        ENROLLMENT_POLICY="$class_default_policy"
+    else
+        ENROLLMENT_POLICY="ssh_first_tailscale_later"
+    fi
+fi
+
+# Build enrollment policy lineage
+enrollment_policy_lineage="policy=${ENROLLMENT_POLICY}"
+if [[ "$ENROLLMENT_POLICY" == "tailscale_auto_enroll_authkey" ]]; then
+    enrollment_policy_lineage="${enrollment_policy_lineage}:trust_material=authkey_supplied"
+fi
+
 if [[ -z "$OUTPUT_DIR" ]]; then
     OUTPUT_DIR="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${DEVICE}"
 fi
@@ -273,6 +308,9 @@ jq -n \
     --arg operator_user "$OPERATOR_USER" \
     --arg ssh_public_key_ref "$SSH_PUBLIC_KEY_REF" \
     --arg tailscale_enrollment_mode "$TAILSCALE_MODE" \
+    --arg enrollment_policy "$ENROLLMENT_POLICY" \
+    --arg enrollment_policy_lineage "$enrollment_policy_lineage" \
+    --arg tailscale_authkey "$TAILSCALE_AUTHKEY" \
     --arg bootstrap_method "$BOOTSTRAP_METHOD" \
     --arg target_distro "$TARGET_DISTRO" \
     --arg target_distro_version "$TARGET_DISTRO_VERSION" \
@@ -300,6 +338,9 @@ jq -n \
         operator_user: $operator_user,
         ssh_public_key_ref: $ssh_public_key_ref,
         tailscale_enrollment_mode: $tailscale_enrollment_mode,
+        enrollment_policy: $enrollment_policy,
+        enrollment_policy_lineage: $enrollment_policy_lineage,
+        tailscale_authkey_present: (if $tailscale_authkey == "" then false else true end),
         package_baseline: $package_baseline,
         bootstrap_method: $bootstrap_method,
         boot_medium: $boot_medium,
@@ -330,6 +371,7 @@ source_platform: $source_platform
 target_platform: $TARGET_PLATFORM
 hostname: $HOSTNAME
 bootstrap_method: $BOOTSTRAP_METHOD
+enrollment_policy: $ENROLLMENT_POLICY
 device_class: $device_class
 boot_medium: $BOOT_MEDIUM
 network_method: ${chosen_network_method:-not declared}
@@ -349,6 +391,7 @@ if $JSON_MODE; then
         --arg target_platform "$TARGET_PLATFORM" \
         --arg device_class "$device_class" \
         --arg network_method "$chosen_network_method" \
+        --arg enrollment_policy "$ENROLLMENT_POLICY" \
         --arg target_distro "$TARGET_DISTRO" \
         --arg target_distro_version "$TARGET_DISTRO_VERSION" \
         --argjson local_hands_required "$local_hands_required" \
@@ -360,6 +403,7 @@ if $JSON_MODE; then
             device_class: $device_class,
             hostname: $hostname,
             bootstrap_method: $bootstrap_method,
+            enrollment_policy: $enrollment_policy,
             chosen_first_network_method: (if $network_method == "" then null else $network_method end),
             target_distro: $target_distro,
             target_distro_version: $target_distro_version,

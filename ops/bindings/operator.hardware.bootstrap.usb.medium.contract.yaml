@@ -37,6 +37,23 @@ medium_contract:
 
   supported_write_strategies:
     - stock_iso_raw_write
+    - iso_plus_cidata_partition
+
+  write_strategy_details:
+    stock_iso_raw_write:
+      description: "Raw dd of installer ISO to medium. No payload embedding."
+      mechanism: "dd if=<iso> of=<raw_disk>"
+      payload_embedded: false
+    iso_plus_cidata_partition:
+      description: >
+        Raw dd of installer ISO followed by creation of a small FAT partition
+        labeled CIDATA containing rendered autoinstall user-data and meta-data.
+        Ubuntu installer detects the CIDATA volume via the NoCloud datasource
+        and applies autoinstall automatically on first boot.
+      mechanism: "dd ISO then diskutil/mkfs.fat CIDATA partition"
+      payload_embedded: true
+      embedding_standard: "cloud-init NoCloud datasource (labeled CIDATA volume)"
+      platform_note: "macOS write path uses diskutil for partition management."
 
   preferred_strategy_by_class:
     old_macbook: usb
@@ -64,5 +81,6 @@ medium_contract:
       - zero_touch_on_old_macbooks
 
   current_limitations:
-    - "Current write strategy produces a reusable stock installer medium."
-    - "Autoinstall payload remains a sidecar artifact set until a later image-customization lane lands."
+    - "Old MacBooks still require local boot selection via Apple boot picker."
+    - "CIDATA partition creation requires free space beyond the ISO on the medium."
+    - "Autoinstall via CIDATA is Ubuntu-specific (NoCloud datasource)."

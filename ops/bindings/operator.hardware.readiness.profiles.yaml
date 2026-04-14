@@ -184,9 +184,92 @@ stage0_bootstrap_stance:
       internet_required_before_claim: true
       dhcp_expected: true
       dns_expected: true
+      default_enrollment_policy: ssh_first_tailscale_later
+      allowed_enrollment_policies:
+        - ssh_first_tailscale_later
+        - tailscale_installed_login_manual
+        - tailscale_auto_enroll_authkey
       notes:
         - "Old Intel MacBooks should not trust built-in Wi-Fi as the primary Stage 0 path."
         - "A known-good wired NIC is preferred; approved USB tether is fallback."
+
+# ── First-boot enrollment policies ──────────────────────────────────────────
+#
+# Governs the first-boot enrollment stance after a Stage 0 medium boots.
+# Each policy defines what remote-control path is available at first boot
+# and what trust material is required at medium-render time.
+#
+# These policies are chosen per-device at bootstrap-kit.render time and
+# threaded through autoinstall rendering and medium embedding.
+
+enrollment_policies:
+  ssh_first_tailscale_later:
+    purpose: >
+      Minimal first-boot remote access. SSH is the only remote-control path.
+      Tailscale is intentionally absent from the first-boot payload.
+      Operator enrolls Tailscale manually after first SSH claim.
+    first_boot_behavior:
+      ssh_server: installed_and_enabled
+      tailscale_package: absent
+      tailscale_login: not_applicable
+      remote_claim_path: lan_ssh
+    required_trust_material: []
+    admissible_use_cases:
+      - "Salvage laptop where Tailscale enrollment is a post-claim operator step."
+      - "Device where operator wants to inspect first boot before Tailscale join."
+      - "Minimal-trust baseline with no secrets baked into the medium."
+    must_not_infer:
+      - "Tailscale is deferred, not forgotten. Operator must enroll manually."
+      - "LAN SSH is the only first-boot control path. No Tailscale SSH."
+
+  tailscale_installed_login_manual:
+    purpose: >
+      Tailscale package is installed and ready during first boot, but login
+      is deferred to explicit operator action. SSH is available immediately.
+      The machine is prepared for operator-approved 'tailscale up'.
+    first_boot_behavior:
+      ssh_server: installed_and_enabled
+      tailscale_package: installed
+      tailscale_login: deferred_to_operator
+      remote_claim_path: lan_ssh
+    required_trust_material: []
+    admissible_use_cases:
+      - "Operator wants Tailscale ready but controls the exact enrollment moment."
+      - "Device where LAN SSH is sufficient for first claim."
+    must_not_infer:
+      - "Tailscale is installed but NOT logged in. No hidden login assumptions."
+      - "Operator must run 'tailscale up' explicitly after first SSH access."
+
+  tailscale_auto_enroll_authkey:
+    purpose: >
+      Tailscale package is installed and automatically enrolled using an
+      operator-supplied auth key during first boot. SSH is also available.
+      This is the most turnkey policy but requires trust-sensitive material.
+    first_boot_behavior:
+      ssh_server: installed_and_enabled
+      tailscale_package: installed
+      tailscale_login: automatic_via_authkey
+      remote_claim_path: lan_ssh_or_tailscale_ssh
+    required_trust_material:
+      - tailscale_authkey
+    trust_material_handling:
+      tailscale_authkey:
+        sensitivity: trust_sensitive
+        lineage_required: true
+        must_be_ephemeral: true
+        description: >
+          A Tailscale auth key (preferably ephemeral, single-use) supplied
+          at medium-render time. Baked into the autoinstall payload.
+          Lineage must record that trust-sensitive enrollment was used.
+        must_not_infer:
+          - "Auth key reuse across devices."
+          - "Long-lived auth keys without explicit operator decision."
+    admissible_use_cases:
+      - "Operator wants first boot to be immediately reachable via Tailscale."
+      - "Device where LAN access may not be available after physical setup."
+    must_not_infer:
+      - "Auth key presence does not imply the device is trusted or activated."
+      - "Enrollment is network join only, not role or host assignment."
 
 profiles:
   mac:

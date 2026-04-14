@@ -18,6 +18,8 @@ Usage:
 Options:
   --kit <path>               Bootstrap kit manifest from bootstrap-kit.render
   --method <method>          Override method: usb_autoinstall | pxe | iventoy | manual_console_install
+  --enrollment-policy <p>   Override enrollment policy from kit manifest
+  --tailscale-authkey <key>  Tailscale auth key (for tailscale_auto_enroll_authkey policy)
   --output-dir <dir>         Output directory for generated installer artifacts
   --json                     Machine-readable JSON output
 
@@ -30,6 +32,8 @@ need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
 
 KIT_PATH=""
 METHOD_OVERRIDE=""
+ENROLLMENT_POLICY_OVERRIDE=""
+TAILSCALE_AUTHKEY=""
 OUTPUT_DIR=""
 JSON_MODE=false
 
@@ -37,6 +41,8 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --kit) KIT_PATH="${2:-}"; shift 2 ;;
         --method) METHOD_OVERRIDE="${2:-}"; shift 2 ;;
+        --enrollment-policy) ENROLLMENT_POLICY_OVERRIDE="${2:-}"; shift 2 ;;
+        --tailscale-authkey) TAILSCALE_AUTHKEY="${2:-}"; shift 2 ;;
         --output-dir) OUTPUT_DIR="${2:-}"; shift 2 ;;
         --json) JSON_MODE=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -61,7 +67,31 @@ target_distro=$(jq -r '.target_distro' "$KIT_PATH")
 target_distro_version=$(jq -r '.target_distro_version' "$KIT_PATH")
 disk_partition_shape=$(jq -r '.disk_partition_shape' "$KIT_PATH")
 tailscale_mode=$(jq -r '.tailscale_enrollment_mode' "$KIT_PATH")
+enrollment_policy=$(jq -r '.enrollment_policy // "ssh_first_tailscale_later"' "$KIT_PATH")
+kit_authkey_present=$(jq -r '.tailscale_authkey_present // false' "$KIT_PATH")
 package_baseline_json=$(jq -c '.package_baseline' "$KIT_PATH")
+
+# Allow override from command line
+if [[ -n "$ENROLLMENT_POLICY_OVERRIDE" ]]; then
+    enrollment_policy="$ENROLLMENT_POLICY_OVERRIDE"
+fi
+
+# Validate enrollment policy
+case "$enrollment_policy" in
+    ssh_first_tailscale_later|tailscale_installed_login_manual|tailscale_auto_enroll_authkey) ;;
+    *) fail "invalid enrollment policy: $enrollment_policy" ;;
+esac
+
+# Gate: tailscale_auto_enroll_authkey requires auth key
+if [[ "$enrollment_policy" == "tailscale_auto_enroll_authkey" && -z "$TAILSCALE_AUTHKEY" && "$kit_authkey_present" != "true" ]]; then
+    fail "enrollment policy tailscale_auto_enroll_authkey requires --tailscale-authkey or authkey in kit manifest"
+fi
+
+# Adjust package baseline based on enrollment policy
+if [[ "$enrollment_policy" == "ssh_first_tailscale_later" ]]; then
+    # Remove tailscale from packages — intentionally absent at first boot
+    package_baseline_json=$(echo "$package_baseline_json" | jq '[.[] | select(. != "tailscale")]')
+fi
 
 [[ "$target_platform" == "linux" ]] || fail "autoinstall renderer currently supports linux target only"
 
@@ -115,7 +145,34 @@ ${package_yaml}
     - curtin in-target --target=/target bash -lc "printf '%s\n' '${bootstrap_method}' > /etc/spine/bootstrap-method"
     - curtin in-target --target=/target bash -lc "printf '%s\n' '${target_distro} ${target_distro_version}' > /etc/spine/bootstrap-target-distro"
     - curtin in-target --target=/target bash -lc "printf '%s\n' '${tailscale_mode}' > /etc/spine/tailscale-enrollment-mode"
+    - curtin in-target --target=/target bash -lc "printf '%s\n' '${enrollment_policy}' > /etc/spine/enrollment-policy"
 EOF
+
+# Enrollment-policy-specific late-commands
+if [[ "$enrollment_policy" == "tailscale_installed_login_manual" || "$enrollment_policy" == "tailscale_auto_enroll_authkey" ]]; then
+    cat >>"$autoinstall_path" <<'TAILSCALE_REPO_EOF'
+    - curtin in-target --target=/target bash -lc "curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null"
+    - curtin in-target --target=/target bash -lc "curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list >/dev/null"
+    - curtin in-target --target=/target bash -lc "apt-get update && apt-get install -y tailscale"
+    - curtin in-target --target=/target bash -lc "systemctl enable tailscaled"
+TAILSCALE_REPO_EOF
+fi
+
+if [[ "$enrollment_policy" == "tailscale_auto_enroll_authkey" && -n "$TAILSCALE_AUTHKEY" ]]; then
+    # Trust-sensitive: bake auth key into first-boot enrollment
+    cat >>"$autoinstall_path" <<AUTHKEY_EOF
+    - curtin in-target --target=/target bash -lc "printf '%s\n' 'trust_material=authkey_supplied' > /etc/spine/enrollment-policy-lineage"
+    - curtin in-target --target=/target bash -lc "tailscale up --authkey='${TAILSCALE_AUTHKEY}'"
+AUTHKEY_EOF
+elif [[ "$enrollment_policy" == "tailscale_installed_login_manual" ]]; then
+    cat >>"$autoinstall_path" <<MANUAL_EOF
+    - curtin in-target --target=/target bash -lc "printf '%s\n' 'tailscale_installed_not_enrolled' > /etc/spine/enrollment-policy-lineage"
+MANUAL_EOF
+else
+    cat >>"$autoinstall_path" <<SSHONLY_EOF
+    - curtin in-target --target=/target bash -lc "printf '%s\n' 'ssh_only_no_tailscale' > /etc/spine/enrollment-policy-lineage"
+SSHONLY_EOF
+fi
 
 cat >"$meta_data_path" <<EOF
 instance-id: ${device_id}-${generated_at}
@@ -172,6 +229,7 @@ if $JSON_MODE; then
         --arg capability "host.operator-hardware.autoinstall.render" \
         --arg device "$device_id" \
         --arg method "$bootstrap_method" \
+        --arg enrollment_policy "$enrollment_policy" \
         --arg target_platform "$target_platform" \
         --arg installer_provenance "rendered:${bootstrap_method}:${target_distro}-${target_distro_version}:${generated_at}" \
         --arg output_dir "$OUTPUT_DIR" \
@@ -183,6 +241,7 @@ if $JSON_MODE; then
             device: $device,
             target_platform: $target_platform,
             bootstrap_method: $method,
+            enrollment_policy: $enrollment_policy,
             installer_provenance: $installer_provenance,
             generated_artifacts: $generated_artifacts,
             output_dir: $output_dir,
