@@ -222,9 +222,7 @@ capabilities:
     domain: infra
     plane: fabric
   host.operator-hardware.readiness:
-    description: Read-only readiness assessment of a specific operator-owned machine against
-      its platform readiness profile (mac, windows, or linux). Supports local evidence collection
-      with identity, topology, entropy, and metabolism evidence for Linux.
+    description: Underlying primitive for node.recovery.status on operator-owned hardware. Read-only readiness assessment of a specific operator-owned machine against its platform readiness profile (mac, windows, or linux). Supports local evidence collection with identity, topology, entropy, and metabolism evidence for Linux.
     tags:
     - host
     - inventory
@@ -243,9 +241,7 @@ capabilities:
     domain: infra
     plane: fabric
   host.operator-hardware.bootstrap-prereq:
-    description: Read-only pre-bootstrap prerequisite check for operator-owned hardware.
-      Assesses whether a machine is ready for reprovision/bootstrap. Does not wipe or
-      reimage anything.
+    description: Underlying primitive for node.recovery.status on operator-owned hardware. Read-only pre-bootstrap prerequisite check for reprovision/bootstrap. Does not wipe or reimage anything.
     tags:
     - host
     - inventory
@@ -672,8 +668,7 @@ capabilities:
     plane: fabric
     domain: infra
   infra.proxmox.host.status:
-    description: Canonical PVE host summary — reachability, boot/EFI, LVM, ZFS pools, guest counts, anomalies. The single
-      command for host state.
+    description: Underlying primitive for node.recovery.status on pve. Canonical PVE host summary — reachability, boot/EFI, LVM, ZFS pools, guest counts, anomalies.
     tags:
     - infra
     - pve
@@ -814,7 +809,7 @@ capabilities:
     plane: fabric
     domain: infra
   infra.proxmox.power.control:
-    description: Out-of-band power on/off/cycle via iDRAC IPMI. Dry-run by default. Recovery access is direct LAN only.
+    description: Underlying recovery control primitive for node.recovery.status/invoke on pve. Out-of-band power on/off/cycle via iDRAC IPMI. Dry-run by default. Recovery access is direct LAN only.
     tags:
     - infra
     - pve
@@ -830,7 +825,7 @@ capabilities:
     plane: fabric
     domain: infra
   infra.proxmox.power.status:
-    description: Out-of-band power and hardware health via iDRAC Redfish/IPMI.
+    description: Underlying OOB recovery-status primitive for node.recovery.status on pve. Out-of-band power and hardware health via iDRAC Redfish/IPMI.
     tags:
     - infra
     - pve
@@ -1272,6 +1267,23 @@ capabilities:
     implementation_repo: workbench
     implementation_path: docs/infrastructure/domains/network/
     automation_only: true
+  network.lan.device.status:
+    description: Underlying LAN-only reachability primitive for node.recovery.status. Read-only ping status for LAN-only devices via their governed probe_via path.
+    tags:
+    - network
+    - recovery
+    - lan
+    command: ./ops/plugins/infra/network/bin/network-lan-device-status
+    script_path: ./ops/plugins/infra/network/bin/network-lan-device-status
+    cwd: $SPINE_CODE
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+    - stdout
+    domain: infra
+    plane: fabric
   nodes.status:
     description: Compatibility alias — prefer ssh.target.status. Node/VM reachability across Tier 1-3 estate.
     compat_alias: true
@@ -1571,11 +1583,29 @@ capabilities:
     domain: core
     plane: fabric
   ssh.target.status:
-    description: Connectivity status for declared SSH targets (read-only, no prompts, no known_hosts writes).
+    description: Underlying reachability primitive for node.recovery.status. Connectivity status for declared SSH targets (read-only, no prompts, no known_hosts writes).
     tags:
     - ssh
+    - recovery
     command: ./ops/plugins/infra/ssh/bin/ssh-target-status
     script_path: ./ops/plugins/infra/ssh/bin/ssh-target-status
+    cwd: $SPINE_CODE
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+    - stdout
+    domain: infra
+    plane: fabric
+  node.recovery.status:
+    description: First-class control-plane recovery truth for a node. Derives reachable vs recoverable vs safe_to_mutate from governed surfaces and exposes underlying recovery primitives.
+    tags:
+    - recovery
+    - control-plane
+    - infra
+    command: ./ops/plugins/infra/bin/node-recovery-status
+    script_path: ./ops/plugins/infra/bin/node-recovery-status
     cwd: $SPINE_CODE
     safety: read-only
     approval: auto

@@ -1,0 +1,321 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# node-recovery-status
+#
+# First-class control-plane recovery truth for a node.
+# Read-only. Derives recovery posture from governed surfaces and
+# exposes the existing status/control primitives that can operate on
+# the node without pretending those primitives are themselves the
+# recovery truth surface.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+HW_BINDING="$SPINE_ROOT/ops/bindings/hardware.inventory.yaml"
+OP_HW_BINDING="$SPINE_ROOT/ops/bindings/operator.hardware.inventory.yaml"
+SESSION_POSTURE_LIB="$SPINE_ROOT/ops/plugins/core/lifecycle/lib/session_posture.sh"
+
+usage() {
+  cat <<'EOF'
+node-recovery-status - First-class recovery truth for a node
+
+Usage:
+  node-recovery-status --node <id> [--json]
+  node-recovery-status --list
+
+Options:
+  --node <id>   Node/carrier ID from ssh.targets, hardware.inventory, or
+                operator.hardware.inventory
+  --json        Machine-readable JSON output
+  --list        List known candidate node IDs
+
+This capability is READ-ONLY.
+It reports recovery truth and underlying primitives; it does not invoke recovery.
+EOF
+}
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+NODE_ID=""
+JSON_MODE=false
+LIST_MODE=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --node) NODE_ID="${2:-}"; shift 2 ;;
+    --json) JSON_MODE=true; shift ;;
+    --list) LIST_MODE=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+need yq
+need jq
+
+for f in "$SSH_BINDING" "$HW_BINDING" "$OP_HW_BINDING" "$SESSION_POSTURE_LIB"; do
+  [[ -f "$f" ]] || fail "missing required surface: $f"
+done
+
+if $LIST_MODE; then
+  {
+    yq -r '.ssh.targets[].id' "$SSH_BINDING" 2>/dev/null || true
+    yq -r '.machines[].machine_id' "$HW_BINDING" 2>/dev/null || true
+    yq -r '.machines[].device_id' "$OP_HW_BINDING" 2>/dev/null || true
+  } | awk 'NF' | sort -u
+  exit 0
+fi
+
+[[ -n "$NODE_ID" ]] || fail "--node is required"
+
+# shellcheck disable=SC1090
+source "$SESSION_POSTURE_LIB"
+session_recovery_posture_resolve
+
+ssh_json="$(yq e -o=json ".ssh.targets[] | select(.id == \"$NODE_ID\")" "$SSH_BINDING" 2>/dev/null || true)"
+hw_json="$(yq e -o=json ".machines[] | select(.machine_id == \"$NODE_ID\")" "$HW_BINDING" 2>/dev/null || true)"
+op_hw_json="$(yq e -o=json ".machines[] | select(.device_id == \"$NODE_ID\")" "$OP_HW_BINDING" 2>/dev/null || true)"
+
+[[ -n "$ssh_json" && "$ssh_json" != "null" ]] || ssh_json='{}'
+[[ -n "$hw_json" && "$hw_json" != "null" ]] || hw_json='{}'
+[[ -n "$op_hw_json" && "$op_hw_json" != "null" ]] || op_hw_json='{}'
+
+if [[ "$ssh_json" == "{}" && "$hw_json" == "{}" && "$op_hw_json" == "{}" ]]; then
+  fail "node not found in governed recovery surfaces: $NODE_ID"
+fi
+
+node_kind="ssh_target_only"
+if [[ "$hw_json" != "{}" ]]; then
+  node_kind="infra_machine"
+elif [[ "$op_hw_json" != "{}" ]]; then
+  node_kind="operator_hardware"
+fi
+
+node_site="$(jq -r '.site // empty' <<<"$hw_json")"
+[[ -n "$node_site" ]] || node_site="$(jq -r '.site // empty' <<<"$op_hw_json")"
+[[ -n "$node_site" ]] || node_site="$(jq -r '.site // empty' <<<"$ssh_json")"
+[[ -n "$node_site" ]] || node_site="unknown"
+
+primary_host="$(jq -r '.host // empty' <<<"$ssh_json")"
+primary_user="$(jq -r '.user // empty' <<<"$ssh_json")"
+primary_access_policy="$(jq -r '.access_policy // empty' <<<"$ssh_json")"
+primary_access_method="$(jq -r '.access_method // "ssh"' <<<"$ssh_json")"
+primary_tailscale_ip="$(jq -r '.tailscale_ip // empty' <<<"$ssh_json")"
+primary_lan_ip="$(jq -r '.lan_ip // empty' <<<"$ssh_json")"
+primary_description="$(jq -r '.description // empty' <<<"$ssh_json")"
+
+recovery_target_id="$(jq -r '.recovery_target_id // empty' <<<"$ssh_json")"
+recovery_target_json='{}'
+if [[ -n "$recovery_target_id" ]]; then
+  recovery_target_json="$(yq e -o=json ".ssh.targets[] | select(.id == \"$recovery_target_id\")" "$SSH_BINDING" 2>/dev/null || true)"
+  [[ -n "$recovery_target_json" && "$recovery_target_json" != "null" ]] || recovery_target_json='{}'
+fi
+
+recovery_status="$(jq -r '.recovery_status // empty' <<<"$recovery_target_json")"
+[[ -n "$recovery_status" ]] || recovery_status="$(jq -r '.recovery_substrate.status // empty' <<<"$hw_json")"
+[[ -n "$recovery_status" ]] || recovery_status="unproven"
+
+physical_action_required="$(jq -r '.physical_action_required // empty' <<<"$recovery_target_json")"
+[[ -n "$physical_action_required" ]] || physical_action_required="$(jq -r '.recovery_substrate.blocker // empty' <<<"$hw_json")"
+
+cross_site_recovery="$(jq -r '.recovery_substrate.cross_site_recovery // empty' <<<"$hw_json")"
+[[ -n "$cross_site_recovery" ]] || cross_site_recovery="false"
+
+power_plane="missing"
+console_plane="missing"
+network_plane="missing"
+identity_plane="unproven"
+
+if [[ -n "$primary_host" ]]; then
+  case "$primary_access_method" in
+    lan_only) network_plane="lan_only_declared" ;;
+    *) network_plane="ssh_path_declared" ;;
+  esac
+fi
+
+if [[ "$recovery_target_json" != "{}" || "$(jq -r '.recovery_substrate.type // empty' <<<"$hw_json")" != "" ]]; then
+  power_plane="$recovery_status"
+  console_plane="$recovery_status"
+fi
+
+if [[ -n "$primary_user" ]]; then
+  identity_plane="ssh_identity_declared"
+fi
+
+reachable_truth="declared_path_only"
+if [[ "$network_plane" == "missing" ]]; then
+  reachable_truth="unknown"
+fi
+
+recoverable_truth="$recovery_status"
+
+site_mutation_posture="false"
+site_mutation_basis=""
+if [[ "$__SP_OPERATOR_SITE" == "$node_site" ]]; then
+  if [[ "$recoverable_truth" == "known_and_reachable" ]]; then
+    site_mutation_posture="true"
+    site_mutation_basis="same_site_plus_recovery_proved"
+  else
+    site_mutation_posture="site_local_only"
+    site_mutation_basis="same_site_but_recovery_not_fully_proved"
+  fi
+elif [[ "$cross_site_recovery" == "true" && "$recoverable_truth" == "known_and_reachable" ]]; then
+  site_mutation_posture="true"
+  site_mutation_basis="cross_site_recovery_proved"
+else
+  site_mutation_posture="false"
+  site_mutation_basis="cross_site_recovery_missing_or_unproven"
+fi
+
+status_primitives='[]'
+invoke_primitives='[]'
+
+append_json_item() {
+  local base="$1"
+  local cap="$2"
+  local mode="$3"
+  jq -cn --argjson base "$base" --arg capability "$cap" --arg mode "$mode" \
+    '$base + [{capability:$capability, mode:$mode}]'
+}
+
+if [[ "$NODE_ID" == "pve" ]]; then
+  status_primitives="$(append_json_item "$status_primitives" "ssh.target.status" "reachability")"
+  status_primitives="$(append_json_item "$status_primitives" "infra.proxmox.host.status" "host_state")"
+  status_primitives="$(append_json_item "$status_primitives" "infra.proxmox.power.status" "oob_power_console")"
+  invoke_primitives="$(append_json_item "$invoke_primitives" "infra.proxmox.host.control" "graceful_host_shutdown_startup")"
+  invoke_primitives="$(append_json_item "$invoke_primitives" "infra.proxmox.power.control" "oob_power_control")"
+elif [[ "$node_kind" == "operator_hardware" ]]; then
+  if [[ "$ssh_json" != "{}" ]]; then
+    status_primitives="$(append_json_item "$status_primitives" "ssh.target.status" "reachability")"
+  fi
+  status_primitives="$(append_json_item "$status_primitives" "host.operator-hardware.readiness" "readiness")"
+  status_primitives="$(append_json_item "$status_primitives" "host.operator-hardware.bootstrap-prereq" "bootstrap_prereq")"
+elif [[ "$primary_access_method" == "lan_only" ]]; then
+  status_primitives="$(append_json_item "$status_primitives" "network.lan.device.status" "lan_reachability")"
+else
+  status_primitives="$(append_json_item "$status_primitives" "ssh.target.status" "reachability")"
+fi
+
+result_json="$(jq -n \
+  --arg node_id "$NODE_ID" \
+  --arg node_kind "$node_kind" \
+  --arg node_site "$node_site" \
+  --arg operator_site "${__SP_OPERATOR_SITE:-unknown}" \
+  --arg recovery_posture "${__SP_RECOVERY_POSTURE:-unknown}" \
+  --arg safe_to_mutate_global "${__SP_SAFE_TO_MUTATE:-false}" \
+  --arg site_detection_basis "${__SP_SITE_DETECTION_BASIS:-unavailable}" \
+  --arg primary_host "$primary_host" \
+  --arg primary_user "$primary_user" \
+  --arg primary_access_policy "$primary_access_policy" \
+  --arg primary_access_method "$primary_access_method" \
+  --arg primary_tailscale_ip "$primary_tailscale_ip" \
+  --arg primary_lan_ip "$primary_lan_ip" \
+  --arg primary_description "$primary_description" \
+  --arg recovery_target_id "$recovery_target_id" \
+  --arg reachable_truth "$reachable_truth" \
+  --arg recoverable_truth "$recoverable_truth" \
+  --arg node_safe_to_mutate "$site_mutation_posture" \
+  --arg node_safe_to_mutate_basis "$site_mutation_basis" \
+  --arg identity_plane "$identity_plane" \
+  --arg power_plane "$power_plane" \
+  --arg console_plane "$console_plane" \
+  --arg network_plane "$network_plane" \
+  --arg physical_action_required "$physical_action_required" \
+  --argjson ssh_target "$ssh_json" \
+  --argjson recovery_target "$recovery_target_json" \
+  --argjson hardware_machine "$hw_json" \
+  --argjson operator_hardware "$op_hw_json" \
+  --argjson status_primitives "$status_primitives" \
+  --argjson invoke_primitives "$invoke_primitives" \
+  '{
+    node_id:$node_id,
+    node_kind:$node_kind,
+    node_site:$node_site,
+    operator_context:{
+      operator_site:$operator_site,
+      recovery_posture:$recovery_posture,
+      safe_to_mutate_global:$safe_to_mutate_global,
+      site_detection_basis:$site_detection_basis
+    },
+    control_plane_truth:{
+      reachable:$reachable_truth,
+      recoverable:$recoverable_truth,
+      safe_to_mutate:$node_safe_to_mutate,
+      safe_to_mutate_basis:$node_safe_to_mutate_basis
+    },
+    recovery_planes:{
+      identity:$identity_plane,
+      network:$network_plane,
+      power:$power_plane,
+      console:$console_plane
+    },
+    primary_access:{
+      host:$primary_host,
+      user:$primary_user,
+      access_policy:$primary_access_policy,
+      access_method:$primary_access_method,
+      tailscale_ip:$primary_tailscale_ip,
+      lan_ip:$primary_lan_ip,
+      description:$primary_description
+    },
+    recovery_links:{
+      recovery_target_id:$recovery_target_id,
+      physical_action_required:$physical_action_required
+    },
+    source_surfaces:{
+      ssh_target:$ssh_target,
+      recovery_target:$recovery_target,
+      hardware_machine:$hardware_machine,
+      operator_hardware:$operator_hardware
+    },
+    status_primitives:$status_primitives,
+    invoke_primitives:$invoke_primitives,
+    note:"First-class recovery truth surface. Underlying primitives remain available but are not the control-plane entrypoint."
+  }')"
+
+if $JSON_MODE; then
+  printf '%s\n' "$result_json"
+  exit 0
+fi
+
+echo "node.recovery.status"
+echo "node_id: $NODE_ID"
+echo "node_kind: $node_kind"
+echo "node_site: $node_site"
+echo "operator_site: ${__SP_OPERATOR_SITE:-unknown}"
+echo "recovery_posture: ${__SP_RECOVERY_POSTURE:-unknown}"
+echo "safe_to_mutate_global: ${__SP_SAFE_TO_MUTATE:-false}"
+echo "site_detection_basis: ${__SP_SITE_DETECTION_BASIS:-unavailable}"
+echo
+echo "control_plane_truth:"
+echo "  reachable: $reachable_truth"
+echo "  recoverable: $recoverable_truth"
+echo "  safe_to_mutate: $site_mutation_posture"
+echo "  safe_to_mutate_basis: $site_mutation_basis"
+echo
+echo "recovery_planes:"
+echo "  identity: $identity_plane"
+echo "  network: $network_plane"
+echo "  power: $power_plane"
+echo "  console: $console_plane"
+echo
+echo "primary_access:"
+echo "  host: ${primary_host:-none}"
+echo "  user: ${primary_user:-none}"
+echo "  access_policy: ${primary_access_policy:-none}"
+echo "  access_method: ${primary_access_method:-none}"
+[[ -n "$primary_tailscale_ip" ]] && echo "  tailscale_ip: $primary_tailscale_ip"
+[[ -n "$primary_lan_ip" ]] && echo "  lan_ip: $primary_lan_ip"
+[[ -n "$primary_description" ]] && echo "  description: $primary_description"
+echo
+echo "recovery_links:"
+echo "  recovery_target_id: ${recovery_target_id:-none}"
+echo "  physical_action_required: ${physical_action_required:-none}"
+echo
+echo "status_primitives:"
+jq -r '.[] | "  - \(.capability) [\(.mode)]"' <<<"$status_primitives"
+echo "invoke_primitives:"
+jq -r '.[] | "  - \(.capability) [\(.mode)]"' <<<"$invoke_primitives"
