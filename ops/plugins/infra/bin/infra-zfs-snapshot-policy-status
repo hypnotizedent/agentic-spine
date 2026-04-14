@@ -11,6 +11,9 @@ _need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $
 _need yq
 _need ssh
 
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
 if [[ ! -f "$BINDING_FILE" ]]; then
   echo "STOP: missing binding file: $BINDING_FILE" >&2
   exit 2
@@ -19,12 +22,11 @@ fi
 HOST="$(yq -r '.host' "$BINDING_FILE")"
 POLICY_SOURCE="$(yq -r '.policy_source' "$BINDING_FILE")"
 
-# Resolve SSH target
-SSH_TARGET="$HOST"
-if [[ -f "$SSH_TARGETS_FILE" ]]; then
-  resolved="$(yq -r ".targets[] | select(.id == \"$HOST\") | .ssh_target // empty" "$SSH_TARGETS_FILE" 2>/dev/null || true)"
-  [[ -n "$resolved" ]] && SSH_TARGET="$resolved"
-fi
+# Resolve SSH target via governed resolver
+SSH_HOST="$(ssh_resolve_host "$HOST")"
+SSH_USER="$(ssh_resolve_user "$HOST" "root")"
+IDENTITY_OPTS="$(ssh_resolve_machine_identity_opts "$HOST" 2>/dev/null)" || true
+SSH_TARGET="${SSH_USER}@${SSH_HOST}"
 
 echo "=== ZFS Snapshot Policy Status ==="
 echo "Host: $HOST"
@@ -50,8 +52,9 @@ check() {
   fi
 }
 
+# shellcheck disable=SC2086
 # --- Check 1: sanoid.timer active ---
-timer_status="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$SSH_TARGET" \
+timer_status="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new $IDENTITY_OPTS "$SSH_TARGET" \
   'systemctl is-active sanoid.timer 2>/dev/null' 2>/dev/null || echo "unknown")"
 
 if [[ "$timer_status" == "active" ]]; then
@@ -61,7 +64,8 @@ else
 fi
 
 # --- Check 2: sanoid.conf exists ---
-conf_exists="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$SSH_TARGET" \
+# shellcheck disable=SC2086
+conf_exists="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new $IDENTITY_OPTS "$SSH_TARGET" \
   "test -f '$POLICY_SOURCE' && echo yes || echo no" 2>/dev/null || echo "unknown")"
 
 if [[ "$conf_exists" == "yes" ]]; then
@@ -75,7 +79,8 @@ fi
 
 # --- Check 3: compare override datasets ---
 # Pull live sanoid.conf stanzas with autosnap setting
-live_overrides="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$SSH_TARGET" \
+# shellcheck disable=SC2086
+live_overrides="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new $IDENTITY_OPTS "$SSH_TARGET" \
   "sudo grep -E '^\[|autosnap' '$POLICY_SOURCE'" 2>/dev/null || true)"
 
 override_count="$(yq -r '.overrides | length' "$BINDING_FILE")"
@@ -108,7 +113,8 @@ done
 # --- Check 4: snapshot burden summary ---
 echo ""
 echo "--- Snapshot Burden (usedbysnapshots) ---"
-ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$SSH_TARGET" \
+# shellcheck disable=SC2086
+ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new $IDENTITY_OPTS "$SSH_TARGET" \
   'sudo zfs list -o name,usedbysnapshots -r tank -d 1 2>/dev/null; echo "---"; sudo zfs list -o name,usedbysnapshots -r md1400 -d 1 2>/dev/null; echo "---"; sudo zfs list -o name,usedbysnapshots -r media -d 1 2>/dev/null' 2>/dev/null || check "S4" "WARN" "could not retrieve burden data"
 
 echo ""

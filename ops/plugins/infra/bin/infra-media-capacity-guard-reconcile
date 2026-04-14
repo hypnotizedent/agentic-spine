@@ -54,6 +54,8 @@ command -v yq >/dev/null 2>&1 || { echo "infra.media.capacity.guard.reconcile FA
 command -v python3 >/dev/null 2>&1 || { echo "infra.media.capacity.guard.reconcile FAIL: python3 missing" >&2; exit 1; }
 command -v ssh >/dev/null 2>&1 || { echo "infra.media.capacity.guard.reconcile FAIL: ssh missing" >&2; exit 1; }
 
+source "$ROOT/ops/lib/ssh-resolve.sh"
+
 WARN_PCT="$(yq -r '.thresholds.media_warn_pct // 80' "$POLICY_FILE")"
 FAIL_PCT="$(yq -r '.thresholds.media_fail_pct // 85' "$POLICY_FILE")"
 STORAGE_HOST_ID="$(yq -r '.target.storage_host_id // "pve"' "$POLICY_FILE")"
@@ -74,11 +76,14 @@ if [[ "$STORAGE_HOST_ID" == "media-home" ]]; then
   USE_SNAPSHOT_ONLY=1
 fi
 
-ssh_host="$(yq -r ".ssh.targets[] | select(.id == \"$STORAGE_HOST_ID\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || true)"
-ssh_user="$(yq -r ".ssh.targets[] | select(.id == \"$STORAGE_HOST_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" 2>/dev/null || echo ubuntu)"
+ssh_host="$(ssh_resolve_host "$STORAGE_HOST_ID")"
+ssh_user="$(ssh_resolve_user "$STORAGE_HOST_ID" "ubuntu")"
 [[ -n "$ssh_host" ]] || { echo "infra.media.capacity.guard.reconcile FAIL: missing ssh target id='$STORAGE_HOST_ID'" >&2; exit 1; }
 REF="$ssh_user@$ssh_host"
+identity_opts="$(ssh_resolve_machine_identity_opts "$STORAGE_HOST_ID" 2>/dev/null)" || true
+# shellcheck disable=SC2206
 SSH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+[[ -n "$identity_opts" ]] && SSH_OPTS+=($identity_opts)
 
 get_pool_pct() {
   local pool="$1"

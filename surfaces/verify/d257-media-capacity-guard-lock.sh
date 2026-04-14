@@ -115,11 +115,15 @@ SAMPLE_COUNT="${SNAPSHOT_FIELDS[6]:-0}"
 if [[ "$USE_SNAPSHOT_ONLY" -eq 1 ]]; then
   MD_PCT="n/a"
 else
-  ssh_host="$(yq -r ".ssh.targets[] | select(.id == \"$STORAGE_HOST_ID\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || true)"
-  ssh_user="$(yq -r ".ssh.targets[] | select(.id == \"$STORAGE_HOST_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" 2>/dev/null || echo ubuntu)"
+  source "$ROOT/ops/lib/ssh-resolve.sh"
+  ssh_host="$(ssh_resolve_host "$STORAGE_HOST_ID")"
+  ssh_user="$(ssh_resolve_user "$STORAGE_HOST_ID" "ubuntu")"
   [[ -n "$ssh_host" ]] || { echo "D257 FAIL: missing ssh target id='$STORAGE_HOST_ID'"; [[ "$POLICY_MODE" == "enforce" ]] && exit 1 || exit 0; }
   REF="$ssh_user@$ssh_host"
+  identity_opts="$(ssh_resolve_machine_identity_opts "$STORAGE_HOST_ID" 2>/dev/null)" || true
+  # shellcheck disable=SC2206
   SSH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+  [[ -n "$identity_opts" ]] && SSH_OPTS+=($identity_opts)
   raw_md="$(ssh "${SSH_OPTS[@]}" "$REF" "zpool list -Hp -o capacity 'md1400' 2>/dev/null | head -1" 2>/dev/null || true)"
   MD_PCT="$(python3 - "$raw_md" <<'PY'
 import re, sys

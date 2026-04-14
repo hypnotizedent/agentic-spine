@@ -29,6 +29,8 @@ done
 command -v yq >/dev/null 2>&1 || { echo "infra.storage.audit.snapshot FAIL: yq missing" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "infra.storage.audit.snapshot FAIL: python3 missing" >&2; exit 1; }
 [[ -f "$SSH_BINDING" ]] || { echo "infra.storage.audit.snapshot FAIL: missing $SSH_BINDING" >&2; exit 1; }
+
+source "$ROOT/ops/lib/ssh-resolve.sh"
 [[ -f "$STOR_MAP" ]] || { echo "infra.storage.audit.snapshot FAIL: missing $STOR_MAP" >&2; exit 1; }
 [[ -f "$GUARD_POLICY" ]] || { echo "infra.storage.audit.snapshot FAIL: missing $GUARD_POLICY" >&2; exit 1; }
 
@@ -63,11 +65,14 @@ ge() {
 
 host_metric() {
   local id="$1"
-  local ssh_host ssh_user ref opts root_pct docker_root summary images_sz build_sz volumes_sz
-  ssh_host="$(yq -r ".ssh.targets[] | select(.id == \"$id\") | .host // \"\"" "$SSH_BINDING")"
-  ssh_user="$(yq -r ".ssh.targets[] | select(.id == \"$id\") | .user // \"ubuntu\"" "$SSH_BINDING")"
+  local ssh_host ssh_user ref opts id_opts root_pct docker_root summary images_sz build_sz volumes_sz
+  ssh_host="$(ssh_resolve_host "$id")"
+  ssh_user="$(ssh_resolve_user "$id" "ubuntu")"
   ref="$ssh_user@$ssh_host"
+  id_opts="$(ssh_resolve_machine_identity_opts "$id" 2>/dev/null)" || true
+  # shellcheck disable=SC2206
   opts=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+  [[ -n "$id_opts" ]] && opts+=($id_opts)
 
   root_pct="$(ssh "${opts[@]}" "$ref" "df --output=pcent / | tail -1 | tr -d ' %'" 2>/dev/null || echo "")"
   docker_root="$(ssh "${opts[@]}" "$ref" "docker info 2>/dev/null | awk -F': ' '/Docker Root Dir/ {print \$2}'" 2>/dev/null || echo "")"
@@ -90,26 +95,33 @@ md_volumes_gb="$(to_gb "$md_volumes_sz")"
 ma_images_gb="$(to_gb "$ma_images_sz")"
 ma_build_gb="$(to_gb "$ma_build_sz")"
 
-md_ref="$(yq -r '.ssh.targets[] | select(.id == "mint-data") | (.user // "ubuntu") + "@" + .host' "$SSH_BINDING")"
-ma_ref="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | (.user // "ubuntu") + "@" + .host' "$SSH_BINDING")"
-opts=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+md_ref="$(ssh_resolve_user "mint-data" "ubuntu")@$(ssh_resolve_host "mint-data")"
+ma_ref="$(ssh_resolve_user "mint-apps" "ubuntu")@$(ssh_resolve_host "mint-apps")"
+md_id_opts="$(ssh_resolve_machine_identity_opts "mint-data" 2>/dev/null)" || true
+ma_id_opts="$(ssh_resolve_machine_identity_opts "mint-apps" 2>/dev/null)" || true
+# shellcheck disable=SC2206
+md_opts=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+[[ -n "$md_id_opts" ]] && md_opts+=($md_id_opts)
+# shellcheck disable=SC2206
+ma_opts=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+[[ -n "$ma_id_opts" ]] && ma_opts+=($ma_id_opts)
 
-md_root_dev="$(ssh "${opts[@]}" "$md_ref" "findmnt -n -o SOURCE --target /" 2>/dev/null || true)"
-ma_root_dev="$(ssh "${opts[@]}" "$ma_ref" "findmnt -n -o SOURCE --target /" 2>/dev/null || true)"
-md_docker_dev="$(ssh "${opts[@]}" "$md_ref" "findmnt -n -o SOURCE --target '${md_docker_root:-/var/lib/docker}'" 2>/dev/null || true)"
-ma_docker_dev="$(ssh "${opts[@]}" "$ma_ref" "findmnt -n -o SOURCE --target '${ma_docker_root:-/var/lib/docker}'" 2>/dev/null || true)"
+md_root_dev="$(ssh "${md_opts[@]}" "$md_ref" "findmnt -n -o SOURCE --target /" 2>/dev/null || true)"
+ma_root_dev="$(ssh "${ma_opts[@]}" "$ma_ref" "findmnt -n -o SOURCE --target /" 2>/dev/null || true)"
+md_docker_dev="$(ssh "${md_opts[@]}" "$md_ref" "findmnt -n -o SOURCE --target '${md_docker_root:-/var/lib/docker}'" 2>/dev/null || true)"
+ma_docker_dev="$(ssh "${ma_opts[@]}" "$ma_ref" "findmnt -n -o SOURCE --target '${ma_docker_root:-/var/lib/docker}'" 2>/dev/null || true)"
 
-redis_container="$(ssh "${opts[@]}" "$md_ref" "docker ps --format '{{.Names}}' | grep -E 'redis' | head -1" 2>/dev/null || true)"
+redis_container="$(ssh "${md_opts[@]}" "$md_ref" "docker ps --format '{{.Names}}' | grep -E 'redis' | head -1" 2>/dev/null || true)"
 redis_appendonly=""
 redis_source=""
 if [[ -n "$redis_container" ]]; then
-  redis_appendonly="$(ssh "${opts[@]}" "$md_ref" "docker exec '$redis_container' redis-cli CONFIG GET appendonly | tail -n1" 2>/dev/null | tr -d '\r' | xargs || true)"
-  redis_source="$(ssh "${opts[@]}" "$md_ref" "docker inspect --format '{{range .Mounts}}{{if eq .Destination \"/data\"}}{{.Source}}{{end}}{{end}}' '$redis_container'" 2>/dev/null | tr -d '\r' | xargs || true)"
+  redis_appendonly="$(ssh "${md_opts[@]}" "$md_ref" "docker exec '$redis_container' redis-cli CONFIG GET appendonly | tail -n1" 2>/dev/null | tr -d '\r' | xargs || true)"
+  redis_source="$(ssh "${md_opts[@]}" "$md_ref" "docker inspect --format '{{range .Mounts}}{{if eq .Destination \"/data\"}}{{.Source}}{{end}}{{end}}' '$redis_container'" 2>/dev/null | tr -d '\r' | xargs || true)"
 fi
 
-host_tmp_large="$(ssh "${opts[@]}" "$ma_ref" "find /tmp -maxdepth 2 -type f -size +${tmp_mb}M 2>/dev/null | head -n1" 2>/dev/null || true)"
-quote_upload_tmp="$(ssh "${opts[@]}" "$ma_ref" "docker exec quote-page sh -lc 'find /tmp -maxdepth 2 -type d 2>/dev/null | grep -Ei \"quote-page-uploads|upload|uploads\" | head -n1 || true'" 2>/dev/null || true)"
-quote_mount_dests="$(ssh "${opts[@]}" "$ma_ref" "docker inspect --format '{{range .Mounts}}{{.Destination}}{{\"\\n\"}}{{end}}' quote-page 2>/dev/null" 2>/dev/null || true)"
+host_tmp_large="$(ssh "${ma_opts[@]}" "$ma_ref" "find /tmp -maxdepth 2 -type f -size +${tmp_mb}M 2>/dev/null | head -n1" 2>/dev/null || true)"
+quote_upload_tmp="$(ssh "${ma_opts[@]}" "$ma_ref" "docker exec quote-page sh -lc 'find /tmp -maxdepth 2 -type d 2>/dev/null | grep -Ei \"quote-page-uploads|upload|uploads\" | head -n1 || true'" 2>/dev/null || true)"
+quote_mount_dests="$(ssh "${ma_opts[@]}" "$ma_ref" "docker inspect --format '{{range .Mounts}}{{.Destination}}{{\"\\n\"}}{{end}}' quote-page 2>/dev/null" 2>/dev/null || true)"
 
 stor001=0
 stor002=0
