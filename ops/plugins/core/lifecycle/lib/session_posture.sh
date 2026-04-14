@@ -111,6 +111,72 @@ session_posture_resolve() {
     return 0
 }
 
+# ── Recovery posture resolution ──────────────────────────────────────
+# Detects operator_site from local network interfaces and derives
+# recovery_posture + safe_to_mutate. Called after session_posture_resolve.
+# Sets: __SP_OPERATOR_SITE, __SP_RECOVERY_POSTURE, __SP_SAFE_TO_MUTATE,
+#        __SP_SITE_DETECTION_BASIS
+#
+# Site CIDRs from topology.sites.yaml:
+#   shop: 192.168.1.0/24
+#   home: 10.0.0.0/24
+# Tailscale CGNAT: 100.64.0.0/10
+
+session_recovery_posture_resolve() {
+    local iface_output=""
+    iface_output="$(ifconfig 2>/dev/null || ip -4 addr show 2>/dev/null || true)"
+
+    local has_shop_lan=0
+    local has_home_lan=0
+    local has_tailscale=0
+
+    if printf '%s' "$iface_output" | grep -q 'inet 192\.168\.1\.'; then
+        has_shop_lan=1
+    fi
+    if printf '%s' "$iface_output" | grep -q 'inet 10\.0\.0\.'; then
+        has_home_lan=1
+    fi
+    if printf '%s' "$iface_output" | grep -q 'inet 100\.'; then
+        has_tailscale=1
+    fi
+
+    # Site detection
+    if [ "$has_shop_lan" -eq 1 ] && [ "$has_home_lan" -eq 0 ]; then
+        __SP_OPERATOR_SITE="shop"
+        __SP_SITE_DETECTION_BASIS="interface:shop_lan"
+    elif [ "$has_home_lan" -eq 1 ] && [ "$has_shop_lan" -eq 0 ]; then
+        __SP_OPERATOR_SITE="home"
+        __SP_SITE_DETECTION_BASIS="interface:home_lan"
+    elif [ "$has_shop_lan" -eq 1 ] && [ "$has_home_lan" -eq 1 ]; then
+        __SP_OPERATOR_SITE="unknown"
+        __SP_SITE_DETECTION_BASIS="interface:ambiguous"
+    elif [ "$has_tailscale" -eq 1 ]; then
+        __SP_OPERATOR_SITE="mobile"
+        __SP_SITE_DETECTION_BASIS="interface:tailscale_only"
+    else
+        __SP_OPERATOR_SITE="unknown"
+        __SP_SITE_DETECTION_BASIS="interface:no_match"
+    fi
+
+    # Recovery posture derivation
+    case "$__SP_OPERATOR_SITE" in
+        shop)   __SP_RECOVERY_POSTURE="full" ;;
+        home)   __SP_RECOVERY_POSTURE="partial" ;;
+        mobile) __SP_RECOVERY_POSTURE="remote" ;;
+        *)      __SP_RECOVERY_POSTURE="unknown" ;;
+    esac
+
+    # safe_to_mutate derivation
+    case "$__SP_RECOVERY_POSTURE" in
+        full)    __SP_SAFE_TO_MUTATE="true" ;;
+        partial) __SP_SAFE_TO_MUTATE="site_local_only" ;;
+        remote)  __SP_SAFE_TO_MUTATE="tailscale_reachable_only" ;;
+        *)       __SP_SAFE_TO_MUTATE="false" ;;
+    esac
+
+    return 0
+}
+
 session_posture_emit_env() {
     printf 'export SPINE_NODE_TYPE=%q\n' "${__SP_NODE_TYPE:-}"
     printf 'export SPINE_SESSION_POSTURE=%q\n' "${__SP_POSTURE:-}"
@@ -146,6 +212,11 @@ session_posture_emit_env() {
             printf 'export SPINE_POSTURE_BROKER_ACCESS=isolated\n'
             ;;
     esac
+
+    printf 'export SPINE_OPERATOR_SITE=%q\n' "${__SP_OPERATOR_SITE:-unknown}"
+    printf 'export SPINE_RECOVERY_POSTURE=%q\n' "${__SP_RECOVERY_POSTURE:-unknown}"
+    printf 'export SPINE_SAFE_TO_MUTATE=%q\n' "${__SP_SAFE_TO_MUTATE:-false}"
+    printf 'export SPINE_SITE_DETECTION_BASIS=%q\n' "${__SP_SITE_DETECTION_BASIS:-unavailable}"
 
     printf 'export SPINE_DEFAULT_VERIFY_CMD=%q\n' "./bin/ops verify --spine-lite"
     printf 'export SPINE_DEFAULT_CONTROL_LOOP_CMD=%q\n' "./bin/ops status --control-loop"
