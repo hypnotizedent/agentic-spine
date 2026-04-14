@@ -27,6 +27,7 @@ cd ~/code/agentic-spine
 - Read [AGENTS.md](/Users/ronnyworks/code/agentic-spine/AGENTS.md) first for the current aperture.
 - Read [NORTH_STAR.md](/Users/ronnyworks/code/agentic-spine/NORTH_STAR.md) for platform identity.
 - Read [SESSION_PROTOCOL.md](/Users/ronnyworks/code/agentic-spine/docs/governance/SESSION_PROTOCOL.md) for environment behavior.
+- Read [NODE_PROMOTION_LADDER.md](/Users/ronnyworks/code/agentic-spine/docs/governance/NODE_PROMOTION_LADDER.md) when the question is how node roles become real.
 - Use `./bin/ops cap run <capability> -- ...` when a capability exists.
 - Keep changes bounded and re-run `./bin/ops verify` after meaningful mutations.
 
