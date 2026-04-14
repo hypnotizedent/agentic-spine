@@ -57,48 +57,39 @@ if [[ -z "$TARGET_ID" ]]; then
 fi
 [[ -n "$TARGET_ID" && "$TARGET_ID" != "null" ]] || fail "target id not found"
 
-DEF_USER="$(yq e -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
+source "$ROOT/ops/lib/ssh-resolve.sh"
+
 DEF_PORT="$(yq e -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
 DEF_TO="$(yq e -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
 
-TARGET_HOST="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_BINDING")"
-TARGET_USER="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"$DEF_USER\"" "$SSH_BINDING")"
+TARGET_HOST="$(ssh_resolve_host "$TARGET_ID")"
+TARGET_USER="$(ssh_resolve_user "$TARGET_ID" "root")"
 TARGET_PORT="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port // $DEF_PORT" "$SSH_BINDING")"
-TARGET_TAILSCALE="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .tailscale_ip // \"\"" "$SSH_BINDING")"
 [[ -n "$TARGET_HOST" && "$TARGET_HOST" != "null" ]] || fail "ssh target '$TARGET_ID' missing host"
+INFRA_IDENTITY_OPTS="$(ssh_resolve_machine_identity_opts "$TARGET_ID" 2>/dev/null)" || true
 SSH_OPTS="-p $TARGET_PORT -o ConnectTimeout=${DEF_TO} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+[[ -n "$INFRA_IDENTITY_OPTS" ]] && SSH_OPTS="$SSH_OPTS $INFRA_IDENTITY_OPTS"
 
 PVE_TARGET_ID="$(yq e -r '.model.destination_lanes."r730xd-shop-backups".host // "pve"' "$BACKUP_INVENTORY")"
-PVE_TARGET_HOST="$(yq e -r ".ssh.targets[] | select(.id == \"$PVE_TARGET_ID\") | .host // \"\"" "$SSH_BINDING")"
-PVE_TARGET_USER="$(yq e -r ".ssh.targets[] | select(.id == \"$PVE_TARGET_ID\") | .user // \"$DEF_USER\"" "$SSH_BINDING")"
+PVE_TARGET_HOST="$(ssh_resolve_host "$PVE_TARGET_ID")"
+PVE_TARGET_USER="$(ssh_resolve_user "$PVE_TARGET_ID" "root")"
 PVE_TARGET_PORT="$(yq e -r ".ssh.targets[] | select(.id == \"$PVE_TARGET_ID\") | .port // $DEF_PORT" "$SSH_BINDING")"
-PVE_TARGET_TAILSCALE="$(yq e -r ".ssh.targets[] | select(.id == \"$PVE_TARGET_ID\") | .tailscale_ip // \"\"" "$SSH_BINDING")"
 [[ -n "$PVE_TARGET_HOST" && "$PVE_TARGET_HOST" != "null" ]] || fail "ssh target '$PVE_TARGET_ID' missing host"
+PVE_IDENTITY_OPTS="$(ssh_resolve_machine_identity_opts "$PVE_TARGET_ID" 2>/dev/null)" || true
 PVE_SSH_OPTS="-p $PVE_TARGET_PORT -o ConnectTimeout=${DEF_TO} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+[[ -n "$PVE_IDENTITY_OPTS" ]] && PVE_SSH_OPTS="$PVE_SSH_OPTS $PVE_IDENTITY_OPTS"
 OFFSITE_BASE="/md1400/backup-cold/apps/infra-core/infisical"
 
-resolve_ssh_ref() {
-  local id="$1"
-  local user="$2"
-  local host="$3"
-  local tailscale="$4"
-  local opts="$5"
-  local -a candidates=("${id}" "${user}@${host}")
-  if [[ -n "$tailscale" && "$tailscale" != "null" && "$tailscale" != "$host" ]]; then
-    candidates+=("${user}@${tailscale}")
-  fi
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    if ssh $opts "$candidate" "true" >/dev/null 2>&1; then
-      echo "$candidate"
-      return 0
-    fi
-  done
-  echo "${user}@${host}"
-}
+# Resolve connection targets via governed fallback (replaces custom resolve_ssh_ref)
+infra_resolved="$(ssh_resolve_ssh_host_with_fallback "$TARGET_ID" 6 2>/dev/null)" || true
+infra_resolved_host="$(echo "$infra_resolved" | awk '{print $1}')"
+[[ -n "$infra_resolved_host" ]] || infra_resolved_host="$TARGET_HOST"
+infra_ssh_ref="${TARGET_USER}@${infra_resolved_host}"
 
-infra_ssh_ref="$(resolve_ssh_ref "$TARGET_ID" "$TARGET_USER" "$TARGET_HOST" "$TARGET_TAILSCALE" "$SSH_OPTS")"
-pve_ssh_ref="$(resolve_ssh_ref "$PVE_TARGET_ID" "$PVE_TARGET_USER" "$PVE_TARGET_HOST" "$PVE_TARGET_TAILSCALE" "$PVE_SSH_OPTS")"
+pve_resolved="$(ssh_resolve_ssh_host_with_fallback "$PVE_TARGET_ID" 6 2>/dev/null)" || true
+pve_resolved_host="$(echo "$pve_resolved" | awk '{print $1}')"
+[[ -n "$pve_resolved_host" ]] || pve_resolved_host="$PVE_TARGET_HOST"
+pve_ssh_ref="${PVE_TARGET_USER}@${pve_resolved_host}"
 
 infra_ssh() { ssh $SSH_OPTS "$infra_ssh_ref" "$@"; }
 pve_ssh() { ssh $PVE_SSH_OPTS "$pve_ssh_ref" "$@"; }

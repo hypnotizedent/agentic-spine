@@ -54,6 +54,8 @@ need ssh
 [[ -f "$SSH_BINDING" ]] || fail "ssh binding not found: $SSH_BINDING"
 yq e '.' "$SSH_BINDING" >/dev/null 2>&1 || fail "invalid YAML: $SSH_BINDING"
 
+source "$SPINE_REPO/ops/lib/ssh-resolve.sh"
+
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 
 # ── Build target list ──
@@ -82,8 +84,9 @@ printf "%-25s %-12s %-30s %-5s %-10s\n" "----" "----" "----------" "---" "------
 for target_id in "${TARGET_IDS[@]}"; do
     total=$((total + 1))
 
-    ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$target_id\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")"
-    ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$target_id\") | .user // \"root\"" "$SSH_BINDING" 2>/dev/null || echo "root")"
+    ssh_host="$(ssh_resolve_host "$target_id")"
+    ssh_user="$(ssh_resolve_user "$target_id" "root")"
+    identity_opts="$(ssh_resolve_machine_identity_opts "$target_id" 2>/dev/null)" || true
 
     if [[ -z "$ssh_host" || "$ssh_host" == "null" ]]; then
         printf "%-25s %-12s %-30s %-5s %-10s\n" "$target_id" "-" "-" "-" "NO_TARGET"
@@ -93,7 +96,8 @@ for target_id in "${TARGET_IDS[@]}"; do
 
     # Probe current timezone + NTP
     set +e
-    probe_out="$(ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
+    # shellcheck disable=SC2086
+    probe_out="$(ssh "${ssh_opts[@]}" $identity_opts "${ssh_user}@${ssh_host}" \
         'tz="$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo unknown)"; ntp="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo unknown)"; echo "${tz}|${ntp}"' 2>&1)"
     probe_rc=$?
     set -e
@@ -123,7 +127,8 @@ for target_id in "${TARGET_IDS[@]}"; do
     local_sudo=""
     [[ "$ssh_user" != "root" ]] && local_sudo="sudo"
     set +e
-    exec_out="$(ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
+    # shellcheck disable=SC2086
+    exec_out="$(ssh "${ssh_opts[@]}" $identity_opts "${ssh_user}@${ssh_host}" \
         "set -euo pipefail; $local_sudo timedatectl set-timezone '$TIMEZONE' 2>&1; $local_sudo timedatectl set-ntp true 2>&1; echo OK" 2>&1)"
     exec_rc=$?
     set -e
@@ -137,7 +142,8 @@ for target_id in "${TARGET_IDS[@]}"; do
 
     # Verify
     set +e
-    verify_out="$(ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
+    # shellcheck disable=SC2086
+    verify_out="$(ssh "${ssh_opts[@]}" $identity_opts "${ssh_user}@${ssh_host}" \
         'tz="$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo unknown)"; ntp="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo unknown)"; echo "${tz}|${ntp}"' 2>&1)"
     set -e
 

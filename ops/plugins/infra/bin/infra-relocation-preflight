@@ -24,6 +24,8 @@ note_ok() { echo "  [OK] $*"; }
 command -v yq >/dev/null 2>&1 || fail "yq required"
 command -v ssh >/dev/null 2>&1 || fail "ssh required"
 
+source "$SPINE_REPO/ops/lib/ssh-resolve.sh"
+
 [[ -f "$MANIFEST" ]] || fail "manifest not found: $MANIFEST"
 [[ -f "$POLICY" ]] || fail "placement policy binding not found: $POLICY"
 [[ -f "$SSH_TARGETS" ]] || fail "ssh targets binding not found: $SSH_TARGETS"
@@ -121,8 +123,9 @@ else
     for host in "${HOSTS[@]}"; do
         required="${HOST_REQUIRED[$host]}"
         reasons="${HOST_REASON[$host]}"
-        ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$host\") | .host // \"\"" "$SSH_TARGETS" 2>/dev/null || echo "")"
-        ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$host\") | .user // .ssh.defaults.user // \"root\"" "$SSH_TARGETS" 2>/dev/null || echo "root")"
+        ssh_host="$(ssh_resolve_host "$host")"
+        ssh_user="$(ssh_resolve_user "$host" "root")"
+        identity_opts="$(ssh_resolve_machine_identity_opts "$host" 2>/dev/null)" || true
 
         if [[ -z "$ssh_host" || "$ssh_host" == "null" ]]; then
             if [[ "$required" -eq 1 ]]; then
@@ -133,7 +136,8 @@ else
             continue
         fi
 
-        if ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" "echo __OK__" >/dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        if ssh "${ssh_opts[@]}" $identity_opts "${ssh_user}@${ssh_host}" "echo __OK__" >/dev/null 2>&1; then
             note_ok "$host ($ssh_user@$ssh_host): REACHABLE (required=$required, reasons=$reasons)"
         else
             if [[ "$required" -eq 1 ]]; then
