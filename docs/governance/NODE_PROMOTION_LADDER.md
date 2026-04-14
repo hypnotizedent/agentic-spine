@@ -117,7 +117,7 @@ Current delivery posture:
 
 - `operator_console`: live
 - `execution_host`: live
-- `watcher_node`: proved candidate, not yet delivered
+- `watcher_node`: delivered
 - `verification_node`: defined, not yet delivered
 - `storage_evidence_node`: defined, not yet delivered
 - `translator_node`: explicitly later, not part of the current MVP
