@@ -82,9 +82,11 @@ case "$enrollment_policy" in
     *) fail "invalid enrollment policy: $enrollment_policy" ;;
 esac
 
-# Gate: tailscale_auto_enroll_authkey requires auth key
-if [[ "$enrollment_policy" == "tailscale_auto_enroll_authkey" && -z "$TAILSCALE_AUTHKEY" && "$kit_authkey_present" != "true" ]]; then
-    fail "enrollment policy tailscale_auto_enroll_authkey requires --tailscale-authkey or authkey in kit manifest"
+# Gate: tailscale_auto_enroll_authkey requires the actual auth key at render time.
+# Checking kit_authkey_present alone is not sufficient — the renderer must have
+# the secret value to produce a payload that actually auto-enrolls.
+if [[ "$enrollment_policy" == "tailscale_auto_enroll_authkey" && -z "$TAILSCALE_AUTHKEY" ]]; then
+    fail "enrollment policy tailscale_auto_enroll_authkey requires --tailscale-authkey with the actual secret value at render time"
 fi
 
 # Adjust package baseline based on enrollment policy
@@ -120,9 +122,7 @@ if [[ -f "$ssh_public_key_ref" ]]; then
     ssh_key_contents=$(<"$ssh_public_key_ref")
 fi
 
-if [[ -z "$ssh_key_contents" ]]; then
-    ssh_key_contents="__FILL_IN_PUBLIC_KEY__"
-fi
+[[ -n "$ssh_key_contents" ]] || fail "SSH public key is empty or missing at: $ssh_public_key_ref — first-touch medium requires a real operator key"
 
 cat >"$autoinstall_path" <<EOF
 #cloud-config
@@ -159,10 +159,28 @@ TAILSCALE_REPO_EOF
 fi
 
 if [[ "$enrollment_policy" == "tailscale_auto_enroll_authkey" && -n "$TAILSCALE_AUTHKEY" ]]; then
-    # Trust-sensitive: bake auth key into first-boot enrollment
+    # Trust-sensitive: write auth key to a file and create a first-boot systemd
+    # oneshot that runs tailscale up AFTER the real OS boots (not in the installer
+    # chroot where tailscaled cannot run and network may not be ready).
     cat >>"$autoinstall_path" <<AUTHKEY_EOF
     - curtin in-target --target=/target bash -lc "printf '%s\n' 'trust_material=authkey_supplied' > /etc/spine/enrollment-policy-lineage"
-    - curtin in-target --target=/target bash -lc "tailscale up --authkey='${TAILSCALE_AUTHKEY}'"
+    - curtin in-target --target=/target bash -lc "printf '%s\n' '${TAILSCALE_AUTHKEY}' > /etc/spine/tailscale-authkey && chmod 600 /etc/spine/tailscale-authkey"
+    - curtin in-target --target=/target bash -lc "cat > /etc/systemd/system/spine-tailscale-enroll.service <<'UNIT'
+[Unit]
+Description=Spine first-boot Tailscale enrollment
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+ConditionPathExists=/etc/spine/tailscale-authkey
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'tailscale up --authkey=\$(cat /etc/spine/tailscale-authkey) && rm -f /etc/spine/tailscale-authkey && systemctl disable spine-tailscale-enroll.service'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT"
+    - curtin in-target --target=/target bash -lc "systemctl enable spine-tailscale-enroll.service"
 AUTHKEY_EOF
 elif [[ "$enrollment_policy" == "tailscale_installed_login_manual" ]]; then
     cat >>"$autoinstall_path" <<MANUAL_EOF

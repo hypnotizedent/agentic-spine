@@ -117,22 +117,18 @@ if $APPLY; then
     # Step 2: Add CIDATA partition if using embedded strategy
     if [[ "$write_strategy" == "iso_plus_cidata_partition" ]]; then
         sleep 2  # let the disk settle after dd
-        # Add a small CIDATA partition in the free space after the ISO
-        if diskutil addPartition "$DISK" MS-DOS CIDATA 100M 2>/dev/null; then
-            # Copy autoinstall payload files
-            if [[ -d "/Volumes/CIDATA" ]]; then
-                cp "$autoinstall_payload_path" /Volumes/CIDATA/user-data
-                if [[ -n "$autoinstall_meta_data_path" && -f "$autoinstall_meta_data_path" ]]; then
-                    cp "$autoinstall_meta_data_path" /Volumes/CIDATA/meta-data
-                fi
-                cidata_created=true
-                diskutil unmount /Volumes/CIDATA 2>/dev/null || true
-            else
-                echo "WARNING: CIDATA partition created but not mounted at /Volumes/CIDATA" >&2
-            fi
-        else
-            echo "WARNING: failed to add CIDATA partition — medium has ISO only (stock_iso_raw_write equivalent)" >&2
+        # Add a small CIDATA partition in the free space after the ISO.
+        # This MUST succeed — no silent downgrade to stock ISO.
+        diskutil addPartition "$DISK" MS-DOS CIDATA 100M \
+            || fail "CIDATA partition creation failed on $DISK — medium is not embedded. Re-run with stock_iso_raw_write or use a larger medium."
+        [[ -d "/Volumes/CIDATA" ]] \
+            || fail "CIDATA partition created but not mounted at /Volumes/CIDATA — cannot copy autoinstall payload"
+        cp "$autoinstall_payload_path" /Volumes/CIDATA/user-data
+        if [[ -n "$autoinstall_meta_data_path" && -f "$autoinstall_meta_data_path" ]]; then
+            cp "$autoinstall_meta_data_path" /Volumes/CIDATA/meta-data
         fi
+        cidata_created=true
+        diskutil unmount /Volumes/CIDATA 2>/dev/null || true
     fi
 
     diskutil eject "$DISK" >/dev/null || true

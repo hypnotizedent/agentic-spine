@@ -111,11 +111,12 @@ connectivity_preflight_result=$(echo "$kit_json" | jq -r '.connectivity_prefligh
 
 iso_library_ref=$(yq e -r '.artifact_shelf.iso_library_ref // ""' "$SHELF_CONTRACT")
 
-# Determine write strategy: if autoinstall payload exists, use embedded CIDATA
+# Determine write strategy: require both user-data AND meta-data for embedded CIDATA
 enrollment_policy=$(echo "$kit_json" | jq -r '.enrollment_policy // "ssh_first_tailscale_later"')
 enrollment_policy_lineage=$(echo "$kit_json" | jq -r '.enrollment_policy_lineage // ""')
 autoinstall_user_data_check="${AUTOINSTALL_DIR}/autoinstall.user-data.yaml"
-if [[ -f "$autoinstall_user_data_check" ]]; then
+autoinstall_meta_data_check="${AUTOINSTALL_DIR}/autoinstall.meta-data"
+if [[ -f "$autoinstall_user_data_check" && -f "$autoinstall_meta_data_check" ]]; then
     write_strategy="iso_plus_cidata_partition"
 else
     write_strategy="stock_iso_raw_write"
@@ -225,10 +226,14 @@ jq -n \
         local_operator_steps: $local_operator_steps,
         embedding: (if $write_strategy == "iso_plus_cidata_partition" then {
             mechanism: "cloud-init NoCloud datasource via labeled CIDATA partition",
-            cidata_contents: ["user-data (autoinstall)", "meta-data"],
-            payload_embedded: true
+            cidata_contents: (
+                ["user-data (autoinstall)"]
+                + (if ($autoinstall_meta_data_path | length) > 0 then ["meta-data"] else [] end)
+            ),
+            payload_embedded: true,
+            note: "Embedding is planned. Actual success depends on medium write — if CIDATA partition creation fails, the write will fail hard."
         } else {
-            mechanism: "stock ISO only — autoinstall payload is a sidecar artifact",
+            mechanism: "stock ISO only — autoinstall payload is a sidecar artifact (user-data or meta-data missing)",
             payload_embedded: false
         } end),
         current_limitations: [
