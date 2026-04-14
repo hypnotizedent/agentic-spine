@@ -82,6 +82,13 @@ SERVICES_HEALTH="$ROOT/$SERVICES_HEALTH_REL"
 
 need_file "$SERVICES_HEALTH"
 
+# ── Spine-native target identity resolution ──
+# Resolves canonical target identity through ssh-resolve.sh, which provides
+# LAN→Tailscale fallback based on access_policy and network location.
+# This transforms endpoint URLs from services.health.yaml (which embed LAN IPs)
+# into topology-aware URLs reachable from the probe's actual network location.
+source "$ROOT/ops/lib/ssh-resolve.sh"
+
 TARGET_HOST="$(yq -r '.target.host // "infra-core"' "$CONTRACT")"
 CONNECT_TIMEOUT_SEC="$(yq -r '.timeouts.connect_timeout_sec // 3' "$CONTRACT")"
 MAX_TIME_SEC="$(yq -r '.timeouts.max_time_sec // 8' "$CONTRACT")"
@@ -184,10 +191,45 @@ probe_endpoint() {
   fi
 }
 
+# Resolve target host through spine-native transport.
+# Watcher probes must not assume LAN reachability — resolve the canonical
+# target identity to a reachable IP via access_policy + network location.
+TARGET_LAN_IP="$(ssh_resolve_host "$TARGET_HOST")"
+_resolve_result="$(ssh_resolve_host_with_fallback "$TARGET_HOST" "$CONNECT_TIMEOUT_SEC")" || true
+RESOLVED_IP="$(printf '%s' "$_resolve_result" | awk '{print $1}')"
+TRANSPORT_PATH="$(printf '%s' "$_resolve_result" | awk '{print $2}')"
+
+if [[ -z "$RESOLVED_IP" || "$TRANSPORT_PATH" == "unreachable" ]]; then
+  echo "infra.core.slo.status"
+  echo "contract: $CONTRACT"
+  echo "host: $TARGET_HOST"
+  echo "schema_version: $SCHEMA_VERSION"
+  echo "canonical_target: $TARGET_HOST"
+  echo "topology_context: source=$(hostname -s) transport_path=unreachable"
+  echo "evidence_validity: none"
+  echo
+  echo "status: FAIL"
+  echo "summary: FAIL target_unreachable canonical_target=$TARGET_HOST"
+  exit 0
+fi
+
+# Evidence validity based on transport path
+case "$TRANSPORT_PATH" in
+  lan)         EVIDENCE_VALIDITY="site_local_only" ;;
+  tailscale)   EVIDENCE_VALIDITY="cross_site_valid" ;;
+  direct)      EVIDENCE_VALIDITY="cross_site_valid" ;;
+  *)           EVIDENCE_VALIDITY="unknown" ;;
+esac
+
 echo "infra.core.slo.status"
 echo "contract: $CONTRACT"
 echo "host: $TARGET_HOST"
 echo "schema_version: $SCHEMA_VERSION"
+echo "canonical_target: $TARGET_HOST"
+echo "resolved_ip: $RESOLVED_IP"
+echo "transport_path: $TRANSPORT_PATH"
+echo "topology_context: source=$(hostname -s)"
+echo "evidence_validity: $EVIDENCE_VALIDITY"
 echo
 printf "%-14s %-9s %-8s %-8s %s\n" "SERVICE" "SCOPE" "STATUS" "LATENCY" "NOTE"
 
@@ -217,6 +259,10 @@ for service_id in "${REQUIRED_IDS[@]}"; do
     fi
 
     if [[ "$svc_status" != "FAIL" ]]; then
+      # Resolve endpoint URL through spine-native transport
+      if [[ -n "$TARGET_LAN_IP" && -n "$RESOLVED_IP" && "$TARGET_LAN_IP" != "$RESOLVED_IP" ]]; then
+        endpoint_url="${endpoint_url//$TARGET_LAN_IP/$RESOLVED_IP}"
+      fi
       probe_endpoint "$endpoint_url" "$endpoint_expect" "$CONNECT_TIMEOUT_SEC" "$MAX_TIME_SEC"
       svc_latency="${probe_latency_ms}ms"
       if [[ "$probe_state" != "OK" ]]; then
@@ -274,6 +320,10 @@ for service_id in "${OPTIONAL_IDS[@]}"; do
     fi
 
     if [[ "$can_probe" -eq 1 ]]; then
+      # Resolve endpoint URL through spine-native transport
+      if [[ -n "$TARGET_LAN_IP" && -n "$RESOLVED_IP" && "$TARGET_LAN_IP" != "$RESOLVED_IP" ]]; then
+        endpoint_url="${endpoint_url//$TARGET_LAN_IP/$RESOLVED_IP}"
+      fi
       probe_endpoint "$endpoint_url" "$endpoint_expect" "$OPTIONAL_CONNECT_TIMEOUT_SEC" "$OPTIONAL_MAX_TIME_SEC"
       svc_latency="${probe_latency_ms}ms"
       if [[ "$probe_state" != "OK" ]]; then
@@ -316,6 +366,6 @@ if [[ "$OPTIONAL_WARN_PROMOTES_STATUS" == "true" && "$optional_warn" -ge "$OPTIO
 fi
 
 echo
-echo "summary: $overall_status required_ok=${required_ok}/${required_total} required_warn=$required_warn required_fail=$required_fail optional_ok=${optional_ok}/${optional_total} optional_info=$optional_info optional_warn=$optional_warn optional_warn_promotes_status=$OPTIONAL_WARN_PROMOTES_STATUS"
+echo "summary: $overall_status required_ok=${required_ok}/${required_total} required_warn=$required_warn required_fail=$required_fail optional_ok=${optional_ok}/${optional_total} optional_info=$optional_info optional_warn=$optional_warn optional_warn_promotes_status=$OPTIONAL_WARN_PROMOTES_STATUS evidence_validity=$EVIDENCE_VALIDITY transport_path=$TRANSPORT_PATH"
 echo "status: $overall_status"
 exit 0

@@ -159,6 +159,17 @@ PROBE_DETAIL=""
 PROBE_DURATION_MS=0
 PROBE_OUTPUT=""
 PROBE_INVOCATION=""
+PROBE_OBSERVED_NODE_ID=""
+PROBE_TRANSPORT_PATH=""
+PROBE_EVIDENCE_VALIDITY=""
+PROBE_TOPOLOGY_CONTEXT=""
+PROBE_FIDELITY_STATUS=""
+
+extract_probe_field() {
+  local label="$1"
+  local text="$2"
+  printf '%s\n' "$text" | sed -nE "s/^${label}:[[:space:]]*(.*)\$/\\1/p" | head -n1
+}
 
 run_probe() {
   local probe_spec="$1"
@@ -175,10 +186,20 @@ run_probe() {
     PROBE_DURATION_MS=0
     PROBE_OUTPUT=""
     PROBE_INVOCATION="$probe_spec"
+    PROBE_OBSERVED_NODE_ID=""
+    PROBE_TRANSPORT_PATH=""
+    PROBE_EVIDENCE_VALIDITY=""
+    PROBE_TOPOLOGY_CONTEXT=""
+    PROBE_FIDELITY_STATUS="degraded"
     rm -f "$tmp_file"
     return
   fi
   PROBE_INVOCATION="$probe_spec"
+  PROBE_OBSERVED_NODE_ID=""
+  PROBE_TRANSPORT_PATH=""
+  PROBE_EVIDENCE_VALIDITY=""
+  PROBE_TOPOLOGY_CONTEXT=""
+  PROBE_FIDELITY_STATUS=""
 
   start_ms="$(now_ms)"
   set +e
@@ -197,12 +218,26 @@ run_probe() {
     PROBE_DETAIL="exit_code=$PROBE_RC"
   fi
   PROBE_OUTPUT="$(cat "$tmp_file")"
+  PROBE_OBSERVED_NODE_ID="$(extract_probe_field "canonical_target" "$PROBE_OUTPUT")"
+  PROBE_TRANSPORT_PATH="$(extract_probe_field "transport_path" "$PROBE_OUTPUT")"
+  PROBE_EVIDENCE_VALIDITY="$(extract_probe_field "evidence_validity" "$PROBE_OUTPUT")"
+  PROBE_TOPOLOGY_CONTEXT="$(extract_probe_field "topology_context" "$PROBE_OUTPUT")"
+  if [[ -n "$PROBE_OBSERVED_NODE_ID" && -n "$PROBE_TRANSPORT_PATH" && -n "$PROBE_EVIDENCE_VALIDITY" && -n "$PROBE_TOPOLOGY_CONTEXT" ]]; then
+    PROBE_FIDELITY_STATUS="aligned"
+  else
+    PROBE_FIDELITY_STATUS="degraded"
+  fi
 
   rm -f "$tmp_file"
 }
 
 VM_PROBE_STATUS="pass"
 VM_PROBE_DETAIL="ok"
+VM_PROBE_OBSERVED_NODE_ID=""
+VM_PROBE_TRANSPORT_PATH=""
+VM_PROBE_EVIDENCE_VALIDITY=""
+VM_PROBE_TOPOLOGY_CONTEXT=""
+VM_PROBE_FIDELITY_STATUS=""
 
 run_vm_predictive_probe() {
   local vm_hostname="$1"
@@ -213,6 +248,11 @@ run_vm_predictive_probe() {
 
   VM_PROBE_STATUS="pass"
   VM_PROBE_DETAIL="ok"
+  VM_PROBE_OBSERVED_NODE_ID=""
+  VM_PROBE_TRANSPORT_PATH=""
+  VM_PROBE_EVIDENCE_VALIDITY=""
+  VM_PROBE_TOPOLOGY_CONTEXT=""
+  VM_PROBE_FIDELITY_STATUS=""
 
   local vm_row
   vm_row="$(yq -r ".vms[] | select(.hostname == \"$vm_hostname\") | [(.status // \"\"), (.ssh_target // \"\"), (.ssh_user // \"\"), (.os // \"\")] | @tsv" "$VM_LIFECYCLE" | head -n1 || true)"
@@ -235,21 +275,26 @@ run_vm_predictive_probe() {
     return
   fi
 
-  local ssh_row
-  ssh_row="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target\") | [(.host // \"\"), (.user // \"\"), ((.port // \"\")|tostring), ((.connect_timeout_sec // \"\")|tostring)] | @tsv" "$SSH_TARGETS" | head -n1 || true)"
-  if [[ -z "$ssh_row" ]]; then
+  # Resolve SSH host through spine-native target identity resolution.
+  # This uses ssh-resolve.sh which handles LAN→Tailscale fallback based
+  # on access_policy and network location detection. The watcher does not
+  # hardwire LAN IPs — it observes governed target identity and lets the
+  # resolution layer pick the reachable transport path.
+  local ssh_resolve_result ssh_host ssh_path_used
+  ssh_resolve_result="$(ssh_resolve_ssh_host_with_fallback "$ssh_target" "$SSH_DEF_TIMEOUT")" || true
+  ssh_host="$(echo "$ssh_resolve_result" | awk '{print $1}')"
+  ssh_path_used="$(echo "$ssh_resolve_result" | awk '{print $2}')"
+
+  if [[ -z "$ssh_host" || "$ssh_path_used" == "unreachable" ]]; then
     VM_PROBE_STATUS="incident"
-    VM_PROBE_DETAIL="missing_ssh_binding_for_target=$ssh_target"
+    VM_PROBE_DETAIL="ssh_target_unreachable(target=$ssh_target,path=$ssh_path_used)"
     return
   fi
-  IFS=$'\t' read -r ssh_host ssh_user ssh_port ssh_timeout <<< "$ssh_row"
 
-  [[ -n "$ssh_host" && "$ssh_host" != "null" ]] || {
-    VM_PROBE_STATUS="incident"
-    VM_PROBE_DETAIL="ssh_binding_missing_host_for_target=$ssh_target"
-    return
-  }
-  [[ -n "$ssh_user" && "$ssh_user" != "null" ]] || ssh_user="$SSH_DEF_USER"
+  local ssh_user ssh_port ssh_timeout
+  ssh_user="$(ssh_resolve_user "$ssh_target" "$SSH_DEF_USER")"
+  ssh_port="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target\") | ((.port // \"\")|tostring)" "$SSH_TARGETS" | head -n1 || true)"
+  ssh_timeout="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target\") | ((.connect_timeout_sec // \"\")|tostring)" "$SSH_TARGETS" | head -n1 || true)"
   [[ -n "$ssh_port" && "$ssh_port" != "null" ]] || ssh_port="$SSH_DEF_PORT"
   [[ -n "$ssh_timeout" && "$ssh_timeout" != "null" ]] || ssh_timeout="$SSH_DEF_TIMEOUT"
 
@@ -408,8 +453,27 @@ EOF
   fi
   detail_notes="$detail_notes; metrics(disk_free_gb=$disk_free_gb,disk_free_pct=$disk_free_pct,mem_headroom_pct=$mem_headroom_pct,load_per_core=$load_per_core,apt_pending=$apt_pending,apt_lists_age_days=$apt_lists_age_days)"
 
+  # Evidence validity based on transport path used for SSH resolution
+  local vm_evidence_validity
+  case "$ssh_path_used" in
+    lan)       vm_evidence_validity="site_local_only" ;;
+    tailscale) vm_evidence_validity="cross_site_valid" ;;
+    direct)    vm_evidence_validity="cross_site_valid" ;;
+    *)         vm_evidence_validity="unknown" ;;
+  esac
+  detail_notes="$detail_notes; transport_path=$ssh_path_used evidence_validity=$vm_evidence_validity"
+
   VM_PROBE_STATUS="$local_status"
   VM_PROBE_DETAIL="$detail_notes"
+  VM_PROBE_OBSERVED_NODE_ID="$vm_hostname"
+  VM_PROBE_TRANSPORT_PATH="$ssh_path_used"
+  VM_PROBE_EVIDENCE_VALIDITY="$vm_evidence_validity"
+  VM_PROBE_TOPOLOGY_CONTEXT="source=$(hostname -s)"
+  if [[ -n "$VM_PROBE_OBSERVED_NODE_ID" && -n "$VM_PROBE_TRANSPORT_PATH" && -n "$VM_PROBE_EVIDENCE_VALIDITY" && -n "$VM_PROBE_TOPOLOGY_CONTEXT" ]]; then
+    VM_PROBE_FIDELITY_STATUS="aligned"
+  else
+    VM_PROBE_FIDELITY_STATUS="degraded"
+  fi
 
   rm -f "$out_file" "$err_file"
 }
@@ -420,6 +484,12 @@ need_cmd ssh
 need_cmd awk
 need_cmd date
 need_file "$CONTRACT"
+
+# Spine-native SSH target resolution: identity-first, path second.
+# Watcher and cross-site probes resolve governed target identity through
+# ssh-resolve.sh, which provides LAN→Tailscale fallback based on access
+# policy and network location detection.
+source "$ROOT/ops/lib/ssh-resolve.sh"
 
 VM_LIFECYCLE_REL="$(yq -r '.sources.vm_lifecycle // "ops/bindings/vm.lifecycle.yaml"' "$CONTRACT")"
 VM_CONTRACT_REL="$(yq -r '.sources.vm_lifecycle_contract // "ops/bindings/vm.lifecycle.contract.yaml"' "$CONTRACT")"
@@ -529,7 +599,7 @@ for domain in "${DOMAINS[@]}"; do
   if [[ "${#probes[@]}" -eq 0 ]]; then
     domain_severity="incident"
     domain_note="contract missing probe_capabilities entry"
-    PROBE_ROWS+=("$domain"$'\t'"-"$'\t'"incident"$'\t'"-"$'\t'"$domain_note")
+    PROBE_ROWS+=("$domain"$'\t'"-"$'\t'"incident"$'\t'"-"$'\t'"$domain_note"$'\t'"-"$'\t'"-"$'\t'"-"$'\t'"-"$'\t'"degraded")
   fi
 
   for cap in "${probes[@]}"; do
@@ -603,7 +673,7 @@ for domain in "${DOMAINS[@]}"; do
     fi
 
     domain_severity="$(promote_severity "$domain_severity" "$probe_status")"
-    PROBE_ROWS+=("$domain"$'\t'"$cap"$'\t'"$probe_status"$'\t'"$PROBE_RUN_KEY"$'\t'"$(sanitize_detail "$probe_detail")")
+    PROBE_ROWS+=("$domain"$'\t'"$cap"$'\t'"$probe_status"$'\t'"$PROBE_RUN_KEY"$'\t'"$(sanitize_detail "$probe_detail")"$'\t'"$(sanitize_detail "$PROBE_OBSERVED_NODE_ID")"$'\t'"$(sanitize_detail "$PROBE_TRANSPORT_PATH")"$'\t'"$(sanitize_detail "$PROBE_EVIDENCE_VALIDITY")"$'\t'"$(sanitize_detail "$PROBE_TOPOLOGY_CONTEXT")"$'\t'"$(sanitize_detail "$PROBE_FIDELITY_STATUS")")
   done
 
   # Apply per-domain threshold overrides if configured.
@@ -622,7 +692,7 @@ for domain in "${DOMAINS[@]}"; do
   if [[ "$VM_PROBE_STATUS" == "incident" ]]; then
     domain_vm_incident=1
   fi
-  PROBE_ROWS+=("$domain"$'\t'"vm.predictive.headroom"$'\t'"$VM_PROBE_STATUS"$'\t'"-"$'\t'"$(sanitize_detail "$VM_PROBE_DETAIL")")
+  PROBE_ROWS+=("$domain"$'\t'"vm.predictive.headroom"$'\t'"$VM_PROBE_STATUS"$'\t'"-"$'\t'"$(sanitize_detail "$VM_PROBE_DETAIL")"$'\t'"$(sanitize_detail "$VM_PROBE_OBSERVED_NODE_ID")"$'\t'"$(sanitize_detail "$VM_PROBE_TRANSPORT_PATH")"$'\t'"$(sanitize_detail "$VM_PROBE_EVIDENCE_VALIDITY")"$'\t'"$(sanitize_detail "$VM_PROBE_TOPOLOGY_CONTEXT")"$'\t'"$(sanitize_detail "$VM_PROBE_FIDELITY_STATUS")")
 
   domain_status="healthy"
   if [[ "$domain_severity" == "incident" ]]; then
@@ -701,7 +771,12 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
           capability: .[1],
           status: .[2],
           run_key: .[3],
-          detail: .[4]
+          detail: .[4],
+          observed_node_id: .[5],
+          transport_path: .[6],
+          evidence_validity: .[7],
+          topology_context: .[8],
+          fidelity_status: .[9]
         })
     '
   )"
@@ -794,7 +869,7 @@ else
   printf "%-18s %-30s %-9s %-44s %s\n" "domain" "probe" "state" "run_key" "detail"
   printf "%-18s %-30s %-9s %-44s %s\n" "------------------" "------------------------------" "---------" "--------------------------------------------" "------------------------------"
   for row in "${PROBE_ROWS[@]}"; do
-    IFS=$'\t' read -r domain cap state run_key detail <<< "$row"
+    IFS=$'\t' read -r domain cap state run_key detail _observed _transport _evidence _topology _fidelity <<< "$row"
     printf "%-18s %-30s %-9s %-44s %s\n" "$domain" "$cap" "$state" "${run_key:--}" "$detail"
   done
 

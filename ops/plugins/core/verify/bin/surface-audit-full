@@ -176,10 +176,32 @@ run_with_timeout "$ROOT/ops/plugins/infra/observability/bin/stability-control-sn
 snapshot_rc=$?
 set -e
 if jq -e '.capability == "stability.control.snapshot" and (.domains | length) > 0' "$snapshot_json_tmp" >/dev/null 2>&1; then
-  if [[ "$snapshot_rc" -eq 0 ]]; then
-    record "9. Predictive Control Readiness" "PASS" "snapshot capability healthy + structured output"
+  watcher_fidelity_ok=0
+  if jq -e '
+    ([.probes[]
+      | select(.domain == "infra-core-stack")
+      | select(.capability == "infra.core.slo.status" or .capability == "vm.predictive.headroom")] | length) >= 2
+    and
+    ([.probes[]
+      | select(.domain == "infra-core-stack")
+      | select(.capability == "infra.core.slo.status" or .capability == "vm.predictive.headroom")
+      | (.observed_node_id != null and .observed_node_id != "" and
+         .transport_path != null and .transport_path != "" and
+         .evidence_validity != null and .evidence_validity != "" and
+         .topology_context != null and .topology_context != "" and
+         .fidelity_status == "aligned")] | all)
+  ' "$snapshot_json_tmp" >/dev/null 2>&1; then
+    watcher_fidelity_ok=1
+  fi
+
+  if [[ "$snapshot_rc" -eq 0 && "$watcher_fidelity_ok" -eq 1 ]]; then
+    record "9. Predictive Control Readiness" "PASS" "snapshot capability healthy + structured output + watcher probe fidelity metadata present"
+  elif [[ "$snapshot_rc" -eq 0 ]]; then
+    record "9. Predictive Control Readiness" "WARN" "snapshot capability healthy, but watcher probe fidelity metadata is incomplete"
+  elif [[ "$watcher_fidelity_ok" -eq 1 ]]; then
+    record "9. Predictive Control Readiness" "WARN" "snapshot output valid with watcher probe fidelity metadata; runtime currently degraded (rc=$snapshot_rc)"
   else
-    record "9. Predictive Control Readiness" "WARN" "snapshot output valid; runtime currently degraded (rc=$snapshot_rc)"
+    record "9. Predictive Control Readiness" "WARN" "snapshot output valid, but runtime degraded and watcher probe fidelity metadata is incomplete (rc=$snapshot_rc)"
   fi
 else
   snapshot_err="$(sed -n '1,3p' /tmp/surface_audit_snapshot.err | tr '\n' ' ' | xargs || true)"
