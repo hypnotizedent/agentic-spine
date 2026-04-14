@@ -4,12 +4,39 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
 
 def state_root() -> Path:
-    return Path(os.environ.get("SPINE_STATE", str(Path.home() / "code" / ".runtime" / "spine" / "state")))
+    env = os.environ.get("SPINE_STATE", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+
+    root = Path(__file__).resolve().parents[5]
+    runtime_paths = root / "ops" / "lib" / "runtime-paths.sh"
+    if runtime_paths.exists():
+        proc = subprocess.run(
+            [
+                "bash",
+                "-lc",
+                (
+                    f"source {runtime_paths!s} >/dev/null 2>&1 && "
+                    "spine_runtime_resolve_paths >/dev/null 2>&1 && "
+                    "printf '%s' \"$SPINE_STATE\""
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=os.environ.copy(),
+        )
+        resolved = proc.stdout.strip()
+        if proc.returncode == 0 and resolved:
+            return Path(resolved).expanduser().resolve()
+
+    return root.parent / ".runtime" / "spine" / "state"
 
 
 def main() -> int:

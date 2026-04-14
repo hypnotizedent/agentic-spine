@@ -19,6 +19,9 @@
 #   session_posture_emit_env
 
 __SP_CONTRACT_PATH="/Users/ronnyworks/code/agentic-spine/ops/bindings/terminal.role.contract.yaml"
+__SP_SSH_TARGETS_PATH="/Users/ronnyworks/code/agentic-spine/ops/bindings/ssh.targets.yaml"
+__SP_EXECUTION_HOST_TARGET_ID="ai-consolidation"
+__SP_EXECUTION_HOST_STATE_ROOT="/opt/spine-state"
 
 __sp_is_valid_posture() {
     case "$1" in
@@ -167,14 +170,78 @@ session_recovery_posture_resolve() {
     esac
 
     # safe_to_mutate derivation
-    case "$__SP_RECOVERY_POSTURE" in
-        full)    __SP_SAFE_TO_MUTATE="true" ;;
-        partial) __SP_SAFE_TO_MUTATE="site_local_only" ;;
-        remote)  __SP_SAFE_TO_MUTATE="tailscale_reachable_only" ;;
-        *)       __SP_SAFE_TO_MUTATE="false" ;;
+    local execution_host_state_status=""
+    execution_host_state_status="$(__sp_probe_execution_host_state)"
+    case "$execution_host_state_status" in
+        ready)
+            __SP_SAFE_TO_MUTATE="true"
+            __SP_SITE_DETECTION_BASIS="${__SP_SITE_DETECTION_BASIS}+execution_host_state:ready"
+            ;;
+        *)
+            case "$__SP_RECOVERY_POSTURE" in
+                full)    __SP_SAFE_TO_MUTATE="true" ;;
+                partial) __SP_SAFE_TO_MUTATE="site_local_only" ;;
+                remote)  __SP_SAFE_TO_MUTATE="tailscale_reachable_only" ;;
+                *)       __SP_SAFE_TO_MUTATE="false" ;;
+            esac
+            if [ -n "$execution_host_state_status" ]; then
+                __SP_SITE_DETECTION_BASIS="${__SP_SITE_DETECTION_BASIS}+execution_host_state:${execution_host_state_status}"
+            fi
+            ;;
     esac
 
     return 0
+}
+
+__sp_probe_execution_host_state() {
+    if ! command -v ssh >/dev/null 2>&1; then
+        printf 'ssh_unavailable'
+        return 0
+    fi
+    if ! command -v yq >/dev/null 2>&1; then
+        printf 'binding_unreadable'
+        return 0
+    fi
+    if [ ! -f "$__SP_SSH_TARGETS_PATH" ]; then
+        printf 'binding_missing'
+        return 0
+    fi
+
+    local host tailscale_ip user probe_host
+    host="$(yq -r ".ssh.targets[] | select(.id == \"$__SP_EXECUTION_HOST_TARGET_ID\") | .host" "$__SP_SSH_TARGETS_PATH" 2>/dev/null | head -n 1)"
+    tailscale_ip="$(yq -r ".ssh.targets[] | select(.id == \"$__SP_EXECUTION_HOST_TARGET_ID\") | .tailscale_ip" "$__SP_SSH_TARGETS_PATH" 2>/dev/null | head -n 1)"
+    user="$(yq -r ".ssh.targets[] | select(.id == \"$__SP_EXECUTION_HOST_TARGET_ID\") | .user" "$__SP_SSH_TARGETS_PATH" 2>/dev/null | head -n 1)"
+
+    [ "$host" = "null" ] && host=""
+    [ "$tailscale_ip" = "null" ] && tailscale_ip=""
+    [ "$user" = "null" ] && user=""
+    [ -n "$user" ] || user="ubuntu"
+
+    case "$__SP_OPERATOR_SITE" in
+        shop)
+            probe_host="$host"
+            ;;
+        home|mobile|unknown)
+            probe_host="${tailscale_ip:-$host}"
+            ;;
+        *)
+            probe_host="${tailscale_ip:-$host}"
+            ;;
+    esac
+
+    if [ -z "$probe_host" ]; then
+        printf 'target_missing'
+        return 0
+    fi
+
+    if ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        "${user}@${probe_host}" \
+        "test -r '$__SP_EXECUTION_HOST_STATE_ROOT/shared_authority.db' && test -d '$__SP_EXECUTION_HOST_STATE_ROOT/loop-scopes'" \
+        >/dev/null 2>&1; then
+        printf 'ready'
+    else
+        printf 'unreachable'
+    fi
 }
 
 session_posture_emit_env() {
