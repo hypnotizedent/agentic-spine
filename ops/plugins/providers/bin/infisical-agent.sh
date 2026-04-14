@@ -26,12 +26,26 @@ SECRETS_NAMESPACE_POLICY="${SPINE_REPO}/ops/bindings/secrets.namespace.policy.ya
 SECRETS_INVENTORY="${SPINE_REPO}/ops/bindings/secrets.inventory.yaml"
 SECRETS_ENFORCEMENT_CONTRACT="${SPINE_REPO}/ops/bindings/secrets.enforcement.contract.yaml"
 
-# Prefer internal_api_url from binding (bypasses Authentik forward auth),
-# fall back to env var, then public URL.
+# Prefer the direct internal API only when it is actually reachable from this
+# runtime. Otherwise fall back to the governed public API so namespace/route
+# checks fail on real policy truth, not dead transport.
 if [[ -f "$SECRETS_BINDING" ]] && command -v yq >/dev/null 2>&1; then
-  _binding_url="$(yq -r '.infisical.internal_api_url // .infisical.api_url // ""' "$SECRETS_BINDING" 2>/dev/null || true)"
-  INFISICAL_API_URL="${_binding_url:-${INFISICAL_API_URL:-https://secrets.ronny.works}}"
-  unset _binding_url
+  _binding_internal_url="$(yq -r '.infisical.internal_api_url // ""' "$SECRETS_BINDING" 2>/dev/null || true)"
+  _binding_public_url="$(yq -r '.infisical.api_url // ""' "$SECRETS_BINDING" 2>/dev/null || true)"
+
+  if [[ -n "$_binding_internal_url" && "$_binding_internal_url" != "null" ]] &&
+     command -v curl >/dev/null 2>&1 &&
+     curl -fsS --connect-timeout 3 --max-time 5 "${_binding_internal_url%/}/api/status" >/dev/null 2>&1; then
+    INFISICAL_API_URL="$_binding_internal_url"
+  elif [[ -n "$_binding_public_url" && "$_binding_public_url" != "null" ]]; then
+    INFISICAL_API_URL="$_binding_public_url"
+  elif [[ -n "$_binding_internal_url" && "$_binding_internal_url" != "null" ]]; then
+    INFISICAL_API_URL="$_binding_internal_url"
+  else
+    INFISICAL_API_URL="${INFISICAL_API_URL:-https://secrets.ronny.works}"
+  fi
+
+  unset _binding_internal_url _binding_public_url
 else
   INFISICAL_API_URL="${INFISICAL_API_URL:-https://secrets.ronny.works}"
 fi
