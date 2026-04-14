@@ -74,7 +74,7 @@ boring_onboarding_checklist:
     description: "How do you verify the service is healthy?"
     examples:
       - "curl http://surveillance-stack:5000/api/version"
-      - "./bin/ops cap run surveillance.stack.status"
+      - "./bin/ops cap run services.health.status -- --host surveillance-stack"
       - "ssh surveillance-stack docker ps | grep frigate"
     authority: "ops/bindings/services.health.yaml (HTTP probes) OR capability script"
 
@@ -132,11 +132,11 @@ exemplar_surveillance_frigate:
     - "NVR_ADMIN_PASSWORD"
   consumer_path: "secrets-exec (via docker-compose .env file sourced from Infisical)"
   sanctioned_admin_url: "http://surveillance-stack:5000"
-  sanctioned_admin_url_note: "Internal-only by design per ops/bindings/surveillance.topology.contract.yaml. No public URL."
+  sanctioned_admin_url_note: "Internal-only by design. No public URL."
   vaultwarden_entry_required: false
   vaultwarden_rationale: "Frigate has no admin login UI — it uses MQTT/API integration with Home Assistant. NVR credentials are machine secrets (Infisical), not human credentials (Vaultwarden)."
-  smoke_check_command: "./bin/ops cap run surveillance.stack.status"
-  smoke_check_note: "Capability probes Frigate API health, camera stats, disk usage, go2rtc bundled API."
+  smoke_check_command: "curl -sf http://surveillance-stack:5000/api/version"
+  smoke_check_note: "HTTP health probe against Frigate API. Returns version JSON when healthy."
 
 exemplar_surveillance_go2rtc:
   service_id: "go2rtc"
@@ -149,8 +149,8 @@ exemplar_surveillance_go2rtc:
   sanctioned_admin_url_note: "No separate admin URL. Bundled inside Frigate; API proxied at http://surveillance-stack:5000/api/go2rtc/"
   vaultwarden_entry_required: false
   vaultwarden_rationale: "go2rtc has no admin login. It is a low-latency RTSP/WebRTC proxy with no authentication surface."
-  smoke_check_command: "./bin/ops cap run surveillance.stack.status"
-  smoke_check_note: "Capability includes go2rtc health check (Frigate-proxied API or standalone fallback)."
+  smoke_check_command: "curl -sf http://surveillance-stack:5000/api/go2rtc/api/streams"
+  smoke_check_note: "HTTP health probe against go2rtc API (Frigate-proxied)."
 
 # ═══════════════════════════════════════════════════════════════
 # LEGACY AMBIGUITY CLEANUP
@@ -168,9 +168,9 @@ legacy_ambiguity_cleaned:
 # ═══════════════════════════════════════════════════════════════
 
 design_constraints:
-  no_new_gates: "This contract does NOT introduce new drift gates. Existing gates (D351, D112, etc.) enforce patterns."
+  no_new_gates: "This contract does NOT introduce new drift gates. Existing gates (D112, etc.) enforce patterns."
   no_new_loops: "This contract does NOT require loop creation. It is a reference contract for agents."
   no_broad_rewrite: "This contract does NOT trigger a mass service migration. It defines the standard for NEW services."
   no_framework: "This contract does NOT build a provisioning engine. It documents the boring transaction."
-  no_matrix_sprawl: "This contract does NOT enumerate all existing services. Surveillance is the exemplar; other services follow on-demand."
-  no_follow_on_proof: "This contract does NOT require follow-on validation waves. The exemplar (surveillance/Frigate) is sufficient proof."
+  no_matrix_sprawl: "This contract does NOT enumerate all existing services. The surveillance/Frigate exemplar below is historical (L3 authority moved to workbench 2026-04-14); other services follow on-demand."
+  no_follow_on_proof: "This contract does NOT require follow-on validation waves. The exemplar pattern is sufficient proof."
