@@ -313,13 +313,27 @@ if $LOCAL_PROBE; then
             add_check "ssh_enabled" "fail" "sshd is not active"
         fi
 
-        # Always-on posture (check if sleep/suspend is masked)
+        # Always-on posture
         sleep_masked=false
-        if systemctl is-masked sleep.target >/dev/null 2>&1 && systemctl is-masked suspend.target >/dev/null 2>&1; then
+        lid_ignored=false
+        if [[ "$(systemctl is-enabled sleep.target 2>/dev/null || true)" == "masked" ]] \
+            && [[ "$(systemctl is-enabled suspend.target 2>/dev/null || true)" == "masked" ]] \
+            && [[ "$(systemctl is-enabled hibernate.target 2>/dev/null || true)" == "masked" ]] \
+            && [[ "$(systemctl is-enabled hybrid-sleep.target 2>/dev/null || true)" == "masked" ]]; then
             sleep_masked=true
-            add_check "always_on_posture" "pass" "sleep.target and suspend.target are masked"
+        fi
+        if grep -Rqs '^HandleLidSwitch=ignore$' /etc/systemd/logind.conf /etc/systemd/logind.conf.d 2>/dev/null \
+            && grep -Rqs '^HandleLidSwitchExternalPower=ignore$' /etc/systemd/logind.conf /etc/systemd/logind.conf.d 2>/dev/null \
+            && grep -Rqs '^HandleLidSwitchDocked=ignore$' /etc/systemd/logind.conf /etc/systemd/logind.conf.d 2>/dev/null \
+            && grep -Rqs '^IdleAction=ignore$' /etc/systemd/logind.conf /etc/systemd/logind.conf.d 2>/dev/null; then
+            lid_ignored=true
+        fi
+        if $sleep_masked && $lid_ignored; then
+            add_check "always_on_posture" "pass" "sleep/suspend/hibernate targets are masked and logind lid/idle actions are ignored"
+        elif $sleep_masked; then
+            add_check "always_on_posture" "unknown" "sleep family is masked, but lid/idle logind posture is not fully ignored"
         else
-            add_check "always_on_posture" "unknown" "sleep/suspend targets may not be masked — review for always-on duty"
+            add_check "always_on_posture" "unknown" "sleep family may not be fully masked — review for always-on duty"
         fi
 
     elif [[ "$platform" == "windows" && "$local_os" == "MINGW"* || "$local_os" == "MSYS"* || "$local_os" == "CYGWIN"* ]]; then
