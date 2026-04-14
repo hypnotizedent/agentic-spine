@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-04
+last_verified: 2026-04-14
 scope: surveillance-platform
 ---
 
@@ -12,11 +12,11 @@ scope: surveillance-platform
 This document is the canonical surveillance-platform design surface for shop deployment under spine governance.
 
 Primary dependencies:
-- `docs/governance/CAMERA_SSOT.md`
 - `ops/bindings/vm.lifecycle.yaml`
 - `ops/bindings/infra.placement.policy.yaml`
 - `ops/bindings/infra.storage.placement.policy.yaml`
-- `ops/bindings/surveillance.topology.contract.yaml`
+- `ops/bindings/domains/surveillance/surveillance.topology.contract.yaml`
+- `ops/bindings/domains/surveillance/surveillance.operating.model.contract.yaml`
 
 ## Canonical Decisions
 
@@ -37,34 +37,39 @@ Primary dependencies:
 - Drives surveillance automations/notifications
 - Hosts dashboard surfaces
 
-## Capability Targets (to register)
+## Capabilities
 
-- `surveillance.stack.status` (read-only)
-  - Frigate process health
+- `surveillance.stack.status` (read-only) — **REGISTERED AND LIVE**
+  - Frigate process health, recording/detect/mqtt enabled state
   - camera online/offline counts
   - detector pipeline status (cpu)
   - recording disk pressure
+  - NVR reachability, disk state, alarm state
+  - MQTT integration state
 
-- `surveillance.event.query` (read-only)
+- `surveillance.event.query` (read-only) — **PARKED** (no detection events while detect.enabled=false)
   - query events by camera/label/time range
   - return counts + latest matches
 
 ## Storage & Retention Policy
 
 - Storage tier: `tank-vms` (ZFS zvol, dedicated non-boot disk)
-- Data mount: `/mnt/data`
-- Recordings: 14-day retention, auto-cleanup at 85% threshold
-- Clips/Snapshots: 30-day retention
+- Data mount: `/srv/data/surveillance` (normalized from `/mnt/data` in 2026-03-19 wave)
+- **Live posture (2026-04-14)**: watch-only minimal — recording disabled, recordings dir empty, retention claims are zero
+- **Target after recording enabled** (100GB disk): ~1 day motion recordings, 14 day clips
+- **Target after 2TB remediation**: 7 day motion recordings, 14 day clips
+- Snapshots: disabled
 - Frigate DB + recordings on dedicated data disk, never on boot volume.
-- Authority: `ops/bindings/surveillance.topology.contract.yaml`
+- Authority: `ops/bindings/domains/surveillance/surveillance.topology.contract.yaml`
 
 ## HA Integration Authority
 
 - Single HA instance: existing home HA (VM 100, proxmox-home)
 - Direct Tailscale path: HA `100.67.120.1` -> Frigate `100.89.1.111:5000`
-- Integration method: Frigate MQTT via home HA broker at `100.67.120.1:1883`
-- Automations: person/vehicle/after-hours detection in home HA
-- Dashboard: Frigate card in home HA Lovelace
+- **Live state (2026-04-14)**: INACTIVE — `mqtt.enabled=false` on Frigate, MQTT event pipeline not running
+- **Target integration**: Frigate MQTT via home HA broker at `100.67.120.1:1883` (requires operator to enable mqtt.enabled + record.enabled)
+- Automations: person/vehicle/after-hours detection in home HA (TARGET, not live — depends on detection + MQTT)
+- Dashboard: `shop-surveillance` exists in HA but is effectively empty; Frigate UI is the current primary surface
 - Ring doorbell live-view entity is present as `camera.ring_doorbell_live_view` and may be `idle` when no active stream is open.
 - Authority: `ops/bindings/surveillance.topology.contract.yaml`
 

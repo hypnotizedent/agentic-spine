@@ -7,7 +7,7 @@ version: "1.0"
 status: active
 owner: "@ronny"
 created: "2026-03-04"
-last_verified: "2026-03-05"
+last_verified: "2026-04-14"
 parent_loop: LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302
 
 # ─── Canonical Decisions ─────────────────────────────────────────────
@@ -49,7 +49,8 @@ runtime:
           api: 1984
           rtsp: 8554
           webrtc: 8555
-        note: "Bundled inside Frigate 0.17+. No standalone container. go2rtc API proxied through Frigate nginx at /api/go2rtc/."
+        live_note: "Standalone go2rtc container is STILL RUNNING on surveillance-stack (as of 2026-04-14). Frigate 0.17+ also bundles go2rtc internally. Both coexist."
+        target_note: "Target is bundled-only inside Frigate (standalone container to be removed in workbench normalization wave)."
 
   home_assistant:
     hostname: homeassistant
@@ -58,7 +59,8 @@ runtime:
     lan_ip: "10.0.0.100"
     tailscale_ip: "100.67.120.1"
     integration_type: frigate_mqtt
-    integration_note: "Frigate integration is direct over Tailscale. MQTT broker on home HA is reached at 100.67.120.1:1883 and Frigate integration URL is http://100.89.1.111:5000."
+    integration_live_state: INACTIVE  # mqtt.enabled=false on Frigate as of 2026-04-14
+    integration_note: "Target integration is Frigate MQTT over Tailscale. Currently inactive because mqtt.enabled=false on surveillance-stack. HA can reach Frigate URL but MQTT event pipeline is not running."
     mqtt_broker_host: "100.67.120.1"
     mqtt_broker_port: 1883
     frigate_integration_url: "http://100.89.1.111:5000"
@@ -76,9 +78,10 @@ camera_source:
   nvr_ip: "192.168.1.216"
   nvr_ssh_target: nvr-shop
   channels_configured: 12
-  channels_online: 8
-  channels_offline: 4
-  channels_offline_ids: [2, 3, 4, 5]
+  channels_online: 10
+  channels_offline: 2
+  channels_offline_ids: [2, 5]  # ALLY WAY, alleyway exit — awaiting physical cable install
+  channels_online_note: "Truth-converged 2026-04-14: 10 cameras confirmed live via Frigate API"
   rtsp_port: 554
   credential_path: "infrastructure/prod:/spine/shop/nvr/*"
 
@@ -88,18 +91,42 @@ storage:
   tier_note: "ZFS zvol attached as virtio disk. Recordings and Frigate DB on dedicated non-boot storage."
   boot_disk_gb: 50
   data_disk_gb: 100
-  data_mount: /mnt/data
-  frigate_db_path: /mnt/data/frigate/frigate.db
-  recordings_path: /mnt/data/frigate/recordings
-  clips_path: /mnt/data/frigate/clips
-  snapshots_path: /mnt/data/frigate/snapshots
+  data_disk_target_gb: 2000  # pending 2TB remediation wave
+  config_root: /srv/config/surveillance
+  data_root: /srv/data/surveillance
+  runtime_root: /srv/runtime/surveillance
+  frigate_db_path: /srv/data/surveillance/frigate.db
+  recordings_path: /srv/data/surveillance/recordings
+  clips_path: /srv/data/surveillance/clips
+  snapshots_path: /srv/data/surveillance/snapshots
+  export_path: /srv/data/surveillance/clips/export
+  normalization_note: "Paths normalized from /mnt/data/frigate/* to /srv/* in 2026-03-19 normalization wave."
 
 retention:
-  recordings_days: 14
-  clips_days: 30
-  snapshots_days: 30
+  # Current honest live state: watch-only minimal (2026-04-14)
+  live:
+    recordings_days: 0  # record.enabled: false, recordings dir empty
+    clips_days: 0  # detect.enabled: false, no clips generated
+    snapshots_days: 0  # snapshots disabled
+    continuous_recording: false
+    record_enabled: false
+    detect_enabled: false
+    mqtt_enabled: false
+    honest_capacity_note: "Watch-only minimal posture. No active writer. Retention claims are zero."
+  # Target after recording enabled on current 100GB disk
+  target_recording_enabled:
+    recordings_days: 1  # 100GB disk at 198GB/day = ~1 day honest capacity
+    clips_days: 14
+    snapshots_days: 0
+    precondition: "operator_enables_record_enabled_true"
+  # Target after 2TB remediation wave
+  target_2tb:
+    recordings_days: 7
+    clips_days: 14
+    snapshots_days: 0
+    precondition: "disk_expansion_100gb_to_2tb"
   cleanup_policy: automatic
-  cleanup_note: "Frigate built-in retention management. Oldest recordings auto-deleted when storage threshold reached."
+  cleanup_note: "Frigate built-in retention management. Oldest recordings auto-deleted when storage threshold reached. Currently inactive (no recordings)."
   storage_warning_threshold_pct: 85
 
 # ─── Capabilities ───────────────────────────────────────────────────

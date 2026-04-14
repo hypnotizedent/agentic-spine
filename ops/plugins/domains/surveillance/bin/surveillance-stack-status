@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# surveillance.stack.status — Read-only health probe for the surveillance stack.
+# No mutations on NVR, Frigate, HA, or storage.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+source "$SPINE_ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+JSON_MODE=0
+if [[ "${1:-}" == "--json" ]]; then
+  JSON_MODE=1
+fi
+
+# ── NVR credential resolution (infisical-agent.sh get-cached) ──
+INFISICAL_AGENT="$SPINE_ROOT/ops/plugins/providers/bin/infisical-agent.sh"
+NVR_USER="${NVR_ADMIN_USER:-}"
+NVR_PASS="${NVR_ADMIN_PASSWORD:-}"
+if [[ -z "$NVR_USER" || -z "$NVR_PASS" ]]; then
+  if [[ -x "$INFISICAL_AGENT" ]]; then
+    NVR_USER="$("$INFISICAL_AGENT" get-cached infrastructure prod NVR_ADMIN_USER 2>/dev/null || true)"
+    NVR_PASS="$("$INFISICAL_AGENT" get-cached infrastructure prod NVR_ADMIN_PASSWORD 2>/dev/null || true)"
+  fi
+fi
+NVR_CREDS_AVAILABLE=false
+if [[ -n "$NVR_USER" && -n "$NVR_PASS" ]]; then
+  NVR_CREDS_AVAILABLE=true
+fi
+
+# ── Constants ──
+FRIGATE_TARGET="surveillance-stack"
+NVR_TARGET="nvr-shop"
+DISK_WARN_PCT=85
+DISK_CRITICAL_PCT=92
+
+# ── Expected camera count from authority ──
+TOPOLOGY_CONTRACT="$SPINE_ROOT/ops/bindings/domains/surveillance/surveillance.topology.contract.yaml"
+if command -v yq >/dev/null 2>&1 && [[ -f "$TOPOLOGY_CONTRACT" ]]; then
+  EXPECTED_CAMERAS="$(yq '.camera_source.channels_online' "$TOPOLOGY_CONTRACT" 2>/dev/null || echo 10)"
+else
+  EXPECTED_CAMERAS=10  # fallback if yq unavailable or contract missing
+fi
+
+# ── Resolve hosts ──
+FRIGATE_RESULT="$(ssh_resolve_host_with_fallback "$FRIGATE_TARGET" 3)" || true
+FRIGATE_IP="$(echo "$FRIGATE_RESULT" | awk '{print $1}')"
+FRIGATE_PATH="$(echo "$FRIGATE_RESULT" | awk '{print $2}')"
+
+FRIGATE_BASE="http://${FRIGATE_IP}:5000"
+
+# ── Severity tracking ──
+OVERALL_SEVERITY="info"
+declare -a CHECKS=()
+
+severity_escalate() {
+  local new="$1"
+  case "$OVERALL_SEVERITY" in
+    info)    OVERALL_SEVERITY="$new" ;;
+    warn)    if [[ "$new" == "incident" ]]; then OVERALL_SEVERITY="incident"; fi ;;
+    incident) ;;
+  esac
+}
+
+add_check() {
+  local id="$1" severity="$2" status="$3" detail="$4"
+  CHECKS+=("${id}|${severity}|${status}|${detail}")
+  if [[ "$status" != "ok" ]]; then
+    severity_escalate "$severity"
+  fi
+}
+
+http_get() {
+  local url="$1" timeout="${2:-5}"
+  curl -sf --connect-timeout "$timeout" --max-time "$timeout" "$url" 2>/dev/null
+}
+
+# ── Check: Frigate API health ──
+check_frigate_api() {
+  local resp
+  if resp="$(http_get "${FRIGATE_BASE}/api/version")"; then
+    add_check "frigate_api" "incident" "ok" "version=${resp}"
+  else
+    add_check "frigate_api" "incident" "fail" "Frigate API unreachable at ${FRIGATE_BASE}"
+  fi
+}
+
+# ── Check: Frigate stats + config-driven recording/detect/mqtt state ──
+FRIGATE_STATS=""
+FRIGATE_CONFIG=""
+fetch_frigate_data() {
+  local resp
+  if resp="$(http_get "${FRIGATE_BASE}/api/stats")"; then
+    FRIGATE_STATS="$resp"
+  fi
+  if resp="$(http_get "${FRIGATE_BASE}/api/config")"; then
+    FRIGATE_CONFIG="$resp"
+  fi
+}
+
+check_frigate_recording() {
+  if [[ -z "$FRIGATE_CONFIG" ]]; then
+    add_check "frigate_recording" "incident" "fail" "config API unreachable"
+    return
+  fi
+  local record_enabled
+  record_enabled="$(echo "$FRIGATE_CONFIG" | jq -r '.record.enabled // false' 2>/dev/null || echo "false")"
+  if [[ "$record_enabled" == "true" ]]; then
+    add_check "frigate_recording" "incident" "ok" "record.enabled=true"
+  else
+    add_check "frigate_recording" "warn" "warn" "record.enabled=false (watch-only posture)"
+  fi
+}
+
+check_frigate_detect() {
+  if [[ -z "$FRIGATE_CONFIG" ]]; then
+    add_check "frigate_detect" "info" "fail" "config API unreachable"
+    return
+  fi
+  local detect_enabled
+  detect_enabled="$(echo "$FRIGATE_CONFIG" | jq -r '.detect.enabled // false' 2>/dev/null || echo "false")"
+  if [[ "$detect_enabled" == "true" ]]; then
+    add_check "frigate_detect" "info" "ok" "detect.enabled=true"
+  else
+    add_check "frigate_detect" "info" "info" "detect.enabled=false (no Coral TPU)"
+  fi
+}
+
+# ── Check: Disk pressure ──
+check_disk_pressure() {
+  if [[ "$FRIGATE_PATH" == "unreachable" ]]; then
+    add_check "disk_pressure" "incident" "fail" "host unreachable, cannot check disk"
+    return
+  fi
+  local ssh_ref disk_line usage_pct
+  ssh_ref="$(ssh_resolve_ref "$FRIGATE_TARGET")" || true
+  if [[ -z "$ssh_ref" ]]; then
+    add_check "disk_pressure" "incident" "fail" "cannot resolve SSH ref"
+    return
+  fi
+  disk_line="$(ssh "${SSH_BATCH_OPTS[@]}" "$ssh_ref" "df -h /srv/data/surveillance 2>/dev/null | tail -1" 2>/dev/null)" || true
+  if [[ -z "$disk_line" ]]; then
+    add_check "disk_pressure" "incident" "fail" "SSH disk check failed"
+    return
+  fi
+  usage_pct="$(echo "$disk_line" | awk '{gsub(/%/,""); print $5}')"
+  if [[ "$usage_pct" -ge "$DISK_CRITICAL_PCT" ]]; then
+    add_check "disk_pressure" "incident" "fail" "disk at ${usage_pct}% (critical >= ${DISK_CRITICAL_PCT}%)"
+  elif [[ "$usage_pct" -ge "$DISK_WARN_PCT" ]]; then
+    add_check "disk_pressure" "warn" "warn" "disk at ${usage_pct}% (warn >= ${DISK_WARN_PCT}%)"
+  else
+    add_check "disk_pressure" "warn" "ok" "disk at ${usage_pct}%"
+  fi
+}
+
+# ── Check: go2rtc health ──
+check_go2rtc() {
+  local resp
+  if resp="$(http_get "${FRIGATE_BASE}/api/go2rtc/api/streams")"; then
+    local stream_count
+    stream_count="$(echo "$resp" | jq 'length' 2>/dev/null || echo "?")"
+    add_check "go2rtc" "incident" "ok" "${stream_count} streams"
+  else
+    add_check "go2rtc" "incident" "fail" "go2rtc API unreachable"
+  fi
+}
+
+# ── Check: Camera parity ──
+check_camera_parity() {
+  if [[ -z "$FRIGATE_STATS" ]]; then
+    add_check "camera_parity" "warn" "fail" "no stats available"
+    return
+  fi
+  local camera_count
+  camera_count="$(echo "$FRIGATE_STATS" | jq '[.cameras | keys[]] | length' 2>/dev/null || echo 0)"
+  if [[ "$camera_count" -ge "$EXPECTED_CAMERAS" ]]; then
+    add_check "camera_parity" "warn" "ok" "${camera_count}/${EXPECTED_CAMERAS} cameras"
+  elif [[ "$camera_count" -ge $((EXPECTED_CAMERAS - 2)) ]]; then
+    add_check "camera_parity" "warn" "warn" "${camera_count}/${EXPECTED_CAMERAS} cameras (minor drift)"
+  else
+    add_check "camera_parity" "incident" "fail" "${camera_count}/${EXPECTED_CAMERAS} cameras (significant loss)"
+  fi
+}
+
+# ── Check: NVR reachability ──
+check_nvr_reachable() {
+  local nvr_ip
+  nvr_ip="$(ssh_resolve_host "$NVR_TARGET")"
+  local probe_via
+  probe_via="$(ssh_resolve_probe_via "$NVR_TARGET")"
+  if [[ -n "$probe_via" && "$probe_via" != "null" ]]; then
+    # Probe NVR port 80 via pve
+    local proxy_ref
+    proxy_ref="$(ssh_resolve_ref "$probe_via")" || true
+    if [[ -n "$proxy_ref" ]]; then
+      local result
+      # Use TCP probe on port 80 (ISAPI without digest auth returns login HTML, not an error)
+      if ssh "${SSH_BATCH_OPTS[@]}" "$proxy_ref" "curl -sf --connect-timeout 3 --max-time 5 -o /dev/null -w '%{http_code}' http://${nvr_ip}/ 2>/dev/null" >/dev/null 2>&1; then
+        add_check "nvr_reachable" "warn" "ok" "NVR HTTP responding via ${probe_via}"
+      else
+        add_check "nvr_reachable" "warn" "warn" "NVR unreachable via ${probe_via} (stream-only: non-blocking)"
+      fi
+      return
+    fi
+  fi
+  # Direct probe fallback (won't work from operator console for lan_only)
+  add_check "nvr_reachable" "warn" "warn" "NVR probe skipped (lan_only, no probe_via path available)"
+}
+
+# ── Check: NVR disk state ──
+check_nvr_disk() {
+  local nvr_ip
+  nvr_ip="$(ssh_resolve_host "$NVR_TARGET")"
+  local probe_via
+  probe_via="$(ssh_resolve_probe_via "$NVR_TARGET")"
+  if [[ -z "$probe_via" || "$probe_via" == "null" ]]; then
+    add_check "nvr_disk" "warn" "warn" "NVR disk check skipped (no probe_via)"
+    return
+  fi
+  local proxy_ref
+  proxy_ref="$(ssh_resolve_ref "$probe_via")" || true
+  if [[ -z "$proxy_ref" ]]; then
+    add_check "nvr_disk" "warn" "warn" "cannot resolve probe_via ref"
+    return
+  fi
+  if [[ "$NVR_CREDS_AVAILABLE" != "true" ]]; then
+    add_check "nvr_disk" "info" "skip" "NVR credentials not resolvable (infisical-agent or env)"
+    return
+  fi
+  local resp
+  if resp="$(ssh "${SSH_BATCH_OPTS[@]}" "$proxy_ref" "curl -sf --digest -u '${NVR_USER}:${NVR_PASS}' --connect-timeout 3 --max-time 5 'http://${nvr_ip}/ISAPI/ContentMgmt/Storage/hdd'" 2>/dev/null)"; then
+    if echo "$resp" | grep -qi 'error\|abnormal'; then
+      add_check "nvr_disk" "warn" "warn" "NVR HDD reports error (non-blocking in stream-only mode)"
+    else
+      add_check "nvr_disk" "warn" "ok" "NVR HDD responding"
+    fi
+  else
+    add_check "nvr_disk" "warn" "warn" "NVR HDD check failed (non-blocking)"
+  fi
+}
+
+# ── Check: NVR alarm/buzzer state ──
+check_nvr_alarm() {
+  local nvr_ip
+  nvr_ip="$(ssh_resolve_host "$NVR_TARGET")"
+  local probe_via
+  probe_via="$(ssh_resolve_probe_via "$NVR_TARGET")"
+  if [[ -z "$probe_via" || "$probe_via" == "null" ]]; then
+    add_check "nvr_alarm" "info" "skip" "NVR alarm check skipped (no probe_via)"
+    return
+  fi
+  if [[ "$NVR_CREDS_AVAILABLE" != "true" ]]; then
+    add_check "nvr_alarm" "info" "skip" "NVR credentials not resolvable (infisical-agent or env)"
+    return
+  fi
+  local proxy_ref
+  proxy_ref="$(ssh_resolve_ref "$probe_via")" || true
+  if [[ -z "$proxy_ref" ]]; then
+    add_check "nvr_alarm" "info" "skip" "cannot resolve probe_via ref"
+    return
+  fi
+  local resp
+  if resp="$(ssh "${SSH_BATCH_OPTS[@]}" "$proxy_ref" "curl -sf --digest -u '${NVR_USER}:${NVR_PASS}' --connect-timeout 3 --max-time 5 'http://${nvr_ip}/ISAPI/Event/triggers'" 2>/dev/null)"; then
+    if echo "$resp" | grep -qi 'eventType'; then
+      # Count active triggers
+      local active_count
+      active_count="$(echo "$resp" | grep -ci '<eventType>' || true)"
+      add_check "nvr_alarm" "info" "ok" "${active_count} event trigger(s) configured"
+    else
+      add_check "nvr_alarm" "info" "ok" "ISAPI Event/triggers responded (no active alarms parsed)"
+    fi
+  else
+    add_check "nvr_alarm" "info" "warn" "NVR alarm check failed (info-only, non-blocking)"
+  fi
+}
+
+# ── Check: MQTT / HA integration ──
+check_mqtt() {
+  if [[ -z "$FRIGATE_CONFIG" ]]; then
+    add_check "mqtt_connected" "warn" "fail" "config API unreachable"
+    return
+  fi
+  local mqtt_enabled
+  mqtt_enabled="$(echo "$FRIGATE_CONFIG" | jq -r '.mqtt.enabled // false' 2>/dev/null || echo "false")"
+  if [[ "$mqtt_enabled" == "true" ]]; then
+    add_check "mqtt_connected" "warn" "ok" "mqtt.enabled=true"
+  else
+    add_check "mqtt_connected" "warn" "warn" "mqtt.enabled=false (HA integration inactive)"
+  fi
+}
+
+# ── Run all checks ──
+check_frigate_api
+fetch_frigate_data
+check_frigate_recording
+check_frigate_detect
+check_disk_pressure
+check_go2rtc
+check_camera_parity
+check_nvr_reachable
+check_nvr_disk
+check_nvr_alarm
+check_mqtt
+
+# ── Output ──
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  command -v jq >/dev/null 2>&1 || { echo "surveillance.stack.status FAIL: jq required for --json" >&2; exit 1; }
+  checks_json="["
+  first=true
+  for entry in "${CHECKS[@]}"; do
+    IFS='|' read -r id severity status detail <<< "$entry"
+    $first || checks_json+=","
+    first=false
+    checks_json+="$(jq -cn --arg id "$id" --arg severity "$severity" --arg status "$status" --arg detail "$detail" \
+      '{id:$id,severity:$severity,status:$status,detail:$detail}')"
+  done
+  checks_json+="]"
+  jq -cn \
+    --arg overall_severity "$OVERALL_SEVERITY" \
+    --arg frigate_host "$FRIGATE_IP" \
+    --arg frigate_path "$FRIGATE_PATH" \
+    --arg timestamp "$(TZ=UTC date '+%Y-%m-%dT%H:%M:%SZ')" \
+    --argjson checks "$checks_json" \
+    '{timestamp:$timestamp,overall_severity:$overall_severity,frigate_host:$frigate_host,network_path:$frigate_path,checks:$checks}'
+  exit 0
+fi
+
+# Human-readable output
+echo "surveillance.stack.status"
+echo "════════════════════════════════════════"
+echo "  host:      ${FRIGATE_IP} (${FRIGATE_PATH})"
+echo "  severity:  ${OVERALL_SEVERITY}"
+echo "  timestamp: $(TZ=UTC date '+%Y-%m-%dT%H:%M:%SZ')"
+echo ""
+printf "  %-22s %-10s %-8s %s\n" "CHECK" "SEVERITY" "STATUS" "DETAIL"
+printf "  %-22s %-10s %-8s %s\n" "─────" "────────" "──────" "──────"
+for entry in "${CHECKS[@]}"; do
+  IFS='|' read -r id severity status detail <<< "$entry"
+  printf "  %-22s %-10s %-8s %s\n" "$id" "$severity" "$status" "$detail"
+done
+echo ""
+echo "  overall: ${OVERALL_SEVERITY}"

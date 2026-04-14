@@ -19,22 +19,41 @@ classification:
     useful recent playback for incident review - NOT a giant passive footage
     archive for forensic search or compliance retention.
 
-# Current Operational Mode (Post Lean-Freeze 2026-03-19)
+# Recording Posture
+recording_posture:
+  posture: frigate_authoritative_nvr_stream_only
+  authoritative_recorder: frigate
+  nvr_records: false
+  nvr_role: stream_source_only
+  nvr_local_disk_authoritative: false
+  rationale: |
+    NVR is stream source only. All 12 Hikvision record tracks report
+    <Enable>false</Enable>. Frigate is the sole recorder. NVR HDD health
+    is non-blocking for recording continuity.
+
+# Current Operational Mode
+# Truth-converged 2026-04-14 via LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302
 operational_mode:
-  current_mode: lean_foundation_frozen
+  current_mode: watch_only_minimal
   mode_description: |
-    Surveillance in intentional lean foundation mode:
-    - Live view + motion recording active
-    - AI detection explicitly disabled (awaiting hardware acceleration)
-    - Smart monitoring features deferred until Coral TPU added
-    - Clean expansion path documented and bounded
+    Surveillance is in watch-only minimal mode:
+    - Live view active for all 10 cameras via Frigate UI and go2rtc streams
+    - Recording DISABLED (record.enabled: false, recordings dir empty)
+    - Detection DISABLED (detect.enabled: false, no Coral TPU)
+    - MQTT DISABLED (mqtt.enabled: false, HA integration inactive)
+    - NVR is stream source only; NVR HDD error is non-blocking
+    - System is a private camera viewer, not an active recorder
 
   active_features:
     - live_view_all_cameras
-    - motion_based_recording
-    - 7_day_retention
-    - manual_export_workflow
-    - mqtt_integration_enabled
+    - go2rtc_stream_proxy
+    - manual_frigate_ui_access
+
+  inactive_features_live:
+    - motion_based_recording    # record.enabled: false
+    - mqtt_integration          # mqtt.enabled: false
+    - manual_export_workflow    # no recordings to export
+    - 7_day_retention           # no active writer
 
   deferred_features:
     - ai_object_detection  # Awaiting Coral TPU
@@ -42,13 +61,15 @@ operational_mode:
     - zone_configuration  # Depends on detection
     - hardware_acceleration  # Awaiting Intel QSV or GPU passthrough
     - per_camera_tuning  # Depends on detection + zones
-    - home_assistant_automation  # Depends on detection events
+    - home_assistant_automation  # Depends on detection + MQTT
 
-  expansion_trigger: user_requests_notifications_or_alerts
-  expansion_prerequisites:
-    - coral_tpu_usb_added
-    - zone_configuration_complete
-    - notification_infrastructure_setup
+  # Target posture: lean_monitoring_recorder (requires operator decision to enable)
+  target_mode: lean_monitoring_recorder
+  target_mode_prerequisites:
+    - operator_enables_record_enabled_true
+    - operator_enables_mqtt_enabled_true
+    - disk_capacity_sufficient_for_retention  # 100GB supports ~1 day at 198GB/day
+    - coral_tpu_usb_added  # for detection features only
 
   deferred_boundary_document: .evidence/spine/verify/SURVEILLANCE_DEFERRED_EXPANSION_BOUNDARY_20260319.md
 
@@ -56,9 +77,9 @@ operational_mode:
 purpose:
   primary:
     - Remote live camera access from anywhere (phone, browser, Home Assistant)
-    - Smart shop monitoring via AI detections (person, vehicle activity)
-    - Recent incident review (7-day playback window for investigation)
-    - Manual export workflow for important incidents (customer disputes, security events)
+    - Smart shop monitoring via AI detections (person, vehicle activity)  # TARGET, not live
+    - Recent incident review (playback window for investigation)  # TARGET, requires recording enabled
+    - Manual export workflow for important incidents (customer disputes, security events)  # TARGET, requires recording enabled
 
   secondary:
     - Home Assistant integration (camera state, MQTT motion/detection events)
@@ -361,15 +382,15 @@ boringness:
 
   criteria:
     - id: config_matches_reality
-      description: Config says 7-day retention → 7 days of recordings actually exist
-      check_method: find /mnt/data/frigate/recordings -maxdepth 1 -type d -name "2026-*" | wc -l
-      expected_result: 7
+      description: Declared posture matches live runtime (record/detect/mqtt enabled states)
+      check_method: "curl -sf http://surveillance-stack:5000/api/config | jq '{record:.record.enabled, detect:.detect.enabled, mqtt:.mqtt.enabled}'"
+      expected_result: matches declared operational_mode
       status: ready
 
     - id: disk_usage_stable
-      description: Disk usage stable 70-80% (not oscillating 77-92% due to emergency purges)
-      check_method: df -h /mnt/data | awk '{print $5}' | tail -1
-      expected_result: 70-80%
+      description: Disk usage stable and not oscillating due to emergency purges
+      check_method: df -h /srv/data/surveillance | awk '{print $5}' | tail -1
+      expected_result: stable (currently ~24% in watch-only mode)
       status: ready
 
     - id: zero_emergency_purges
@@ -379,9 +400,9 @@ boringness:
       status: ready
 
     - id: operator_trust
-      description: Operator can review incidents from past week without guessing if footage exists
+      description: Operator can view live cameras and trust the declared posture
       check_method: manual_operator_verification
-      expected_result: playback_reliable_for_7d_window
+      expected_result: live_view_reliable_for_all_cameras
       status: ready
 
     - id: export_workflow_clear
@@ -396,23 +417,23 @@ boringness:
       expected_result: this_contract_file
       status: ready
 
-    - id: health_check_green
-      description: surveillance.stack.status returns HEALTHY
+    - id: health_check_honest
+      description: surveillance.stack.status runs clean and matches declared posture
       check_method: ./bin/ops cap run surveillance.stack.status
-      expected_result: all_checks_pass
+      expected_result: overall_warn_in_watch_only_posture (recording/mqtt warn are expected, not failures)
       status: ready
 
-    - id: ha_integration_healthy
-      description: Home Assistant sees 10 cameras (detection disabled in lean-freeze)
+    - id: ha_integration_target
+      description: Home Assistant can reach Frigate over Tailscale (MQTT integration inactive until mqtt.enabled=true)
       check_method: manual_ha_verification
-      expected_result: 10_cameras_visible_mqtt_connected_no_events
-      status: ready
+      expected_result: frigate_url_reachable_from_ha (mqtt integration is a target, not live)
+      status: parked_until_mqtt_enabled
 
 # Health Checks (Automated Monitoring)
 health_checks:
   - name: disk_usage_under_85pct
     check_method: df_usage_percent
-    path: /mnt/data
+    path: /srv/data/surveillance
     threshold: 85
     frequency: every_5_minutes
     action: ntfy_alert_ops_channel
@@ -426,14 +447,16 @@ health_checks:
     frequency: hourly
     action: ntfy_alert_frigate_emergency_purge_detected
 
-  - name: retention_reality_check_7d
+  - name: retention_reality_check
     check_method: count_recording_directories
-    path: /mnt/data/frigate/recordings
+    path: /srv/data/surveillance/recordings
     pattern: "2026-*"
-    expected: 7
-    threshold_min: 6  # Allow 1 day variance (Day 6-7 accumulation)
+    expected: 0  # watch-only posture: no recordings expected
+    expected_when_recording_enabled: 7  # after 2TB + record.enabled=true
+    threshold_min: 0
     frequency: daily
     action: ntfy_alert_retention_collapsed
+    note: "In watch-only posture, expected=0 (empty dir). Revert to expected=7 when recording is enabled with 2TB disk."
 
   - name: config_vs_capacity_drift
     check_method: capacity_math
@@ -527,14 +550,14 @@ related_docs:
 
 # Implementation Status
 implementation_status:
-  current_state: lean_foundation_frozen
+  current_state: watch_only_minimal
   current_state_description: |
-    Lean-freeze remediation complete (2026-03-19):
-    - AI detection disabled (detector idle, zero events)
-    - Retention aligned with contract (7d motion, 14d detections)
-    - All 10 cameras visible and recording
-    - Config matches lean foundation mode
-    - Smart monitoring features explicitly deferred
+    Watch-only minimal posture (truth-converged 2026-04-14):
+    - Recording DISABLED (record.enabled: false, recordings dir empty)
+    - Detection DISABLED (detect.enabled: false, no Coral TPU)
+    - MQTT DISABLED (mqtt.enabled: false)
+    - All 10 cameras visible via live view
+    - System is a private camera viewer, not an active recorder
 
   previous_state: blackhole
   previous_state_resolved: 2026-03-19
@@ -560,11 +583,12 @@ implementation_status:
 
   verification_gates:
     - frigate_service_healthy: ✅ PASS
-    - recordings_exist_7d: ⏳ IN PROGRESS (purge in progress, will stabilize in 7d)
-    - disk_usage_stable: ✅ PASS (23% current, will stabilize at ~73% after purge)
-    - zero_emergency_purges: ✅ PASS (7d retention fits in 48GB available)
-    - config_matches_reality: ✅ PASS (7d/14d retention, detection disabled)
-    - detection_disabled_verified: ✅ PASS (zero events, detector idle)
+    - recording_disabled_confirmed: ✅ PASS (record.enabled: false, recordings dir empty)
+    - disk_usage_stable: ✅ PASS (24% in watch-only mode)
+    - zero_emergency_purges: ✅ PASS (no active writer)
+    - config_matches_reality: ✅ PASS (watch_only_minimal matches live runtime)
+    - detection_disabled_verified: ✅ PASS (detect.enabled: false)
+    - mqtt_disabled_verified: ✅ PASS (mqtt.enabled: false)
     - all_cameras_visible: ✅ PASS (10 of 10 active cameras working)
 
   related_evidence:
