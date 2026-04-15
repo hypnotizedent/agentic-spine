@@ -2,7 +2,7 @@
 authority_state: projection
 projection_of: ops/bindings/entry.boot.surface.contract.yaml
 source_contract: ops/bindings/entry.boot.surface.contract.yaml
-contract_updated: 2026-04-09
+contract_updated: 2026-04-15
 
 ## Boot Model
 
@@ -10,10 +10,6 @@ contract_updated: 2026-04-09
 
 ## Injection Surfaces
 
-- claude_code
-  - mechanism: hook
-  - path: .claude/hooks/session-entry-hook.sh
-  - trigger: UserPromptSubmit
 - codex
   - mechanism: governed-attach
   - path: ops/plugins/core/lifecycle/bin/session-v3-attach
