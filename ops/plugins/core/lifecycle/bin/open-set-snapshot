@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """open-set-snapshot — Generate a single-file view of the current open set.
 
-Reads active/open loops from scope files and open gaps from SQLite authority.
+Reads active/open loops from the joined runtime loop view when available,
+falling back to SQLite-only loop authority, and reads open gaps from SQLite
+authority.
 Writes a YAML snapshot to $SPINE_STATE/open-set-snapshot.yaml and prints it.
 
 This is a read-only diagnostic. It creates no new obligations.
@@ -11,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,7 +44,7 @@ def resolve_state_root(root: Path) -> Path:
 
 
 def read_active_loops(root: Path) -> list[dict]:
-    """Read active loops from SQLite authority."""
+    """Read active loops from SQLite authority only."""
     import loops_sql_authority as lsa
 
     db_path, _ = lsa.resolve_paths(root)
@@ -62,6 +65,52 @@ def read_active_loops(root: Path) -> list[dict]:
             "priority": loop.get("priority", ""),
             "objective": str(loop.get("objective") or "")[:120],
             "next_action": str(loop.get("next_action") or "")[:120] or None,
+        })
+    return loops
+
+
+def read_joined_active_loops(root: Path) -> list[dict] | None:
+    """Read active loops from the canonical joined runtime view."""
+    joined_bin = root / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "spine-engine-joined-state"
+    if not joined_bin.exists():
+        return None
+    try:
+        proc = subprocess.run(
+            [str(joined_bin), "--json", "--no-write"],
+            cwd=str(root),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+
+    raw_loops = ((payload.get("loops") or {}).get("open")) or []
+    if not isinstance(raw_loops, list):
+        return None
+
+    loops = []
+    for row in raw_loops:
+        if not isinstance(row, dict):
+            continue
+        loop_id = str(row.get("loop_id") or "").strip()
+        if not loop_id:
+            continue
+        loops.append({
+            "loop_id": loop_id,
+            "status": str(row.get("status") or "").strip().lower(),
+            "owner": str(row.get("owner") or "").strip(),
+            "scope": str(row.get("scope") or "").strip(),
+            "priority": str(row.get("priority") or "").strip(),
+            "objective": str(row.get("objective") or "")[:120],
+            "next_action": str(row.get("next_action") or "")[:120] or None,
         })
     return loops
 
@@ -96,7 +145,7 @@ def main() -> int:
     state_root = resolve_state_root(root)
     posture = os.environ.get("SPINE_EXECUTION_POSTURE", "discover")
 
-    loops = read_active_loops(root)
+    loops = read_joined_active_loops(root) or read_active_loops(root)
     gaps = read_open_gaps(root)
 
     snapshot = {

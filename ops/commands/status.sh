@@ -535,6 +535,61 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
                     "fast_verify_status": _summary.get("latest_fast_verify_status", "unknown"),
                     "coherence_attention": bool(_summary.get("engine_coherence_needs_attention", False)),
                 }
+            _joined_open_rows = ((_jdata.get("loops") or {}).get("open")) or []
+            if isinstance(_joined_open_rows, list) and _joined_open_rows:
+                _current_loops_by_id = {
+                    str(_loop.get("loop_id") or "").strip(): dict(_loop)
+                    for _loop in open_loops
+                    if str(_loop.get("loop_id") or "").strip()
+                }
+                _merged_open_loops = []
+                for _row in _joined_open_rows:
+                    if not isinstance(_row, dict):
+                        continue
+                    _loop_id = str(_row.get("loop_id") or "").strip()
+                    if not _loop_id:
+                        continue
+                    _merged = dict(_current_loops_by_id.get(_loop_id) or {})
+                    _priority = str(_row.get("priority") or _row.get("severity") or "").strip()
+                    if not _merged:
+                        _merged = {
+                            "loop_id": _loop_id,
+                            "status": str(_row.get("status") or "active").strip().lower(),
+                            "severity": _priority or "-",
+                            "owner": str(_row.get("owner") or "unassigned").strip() or "unassigned",
+                            "execution_mode": str(_row.get("execution_mode") or "").strip(),
+                            "active_terminal": "",
+                            "blocked_by": str(_row.get("blocked_by") or "").strip(),
+                            "operator_note": "",
+                            "last_heartbeat_utc": "",
+                            "heartbeat_ttl_minutes": "",
+                            "heartbeat_source": "",
+                            "horizon": str(_row.get("horizon") or "now").strip() or "now",
+                            "execution_readiness": str(_row.get("execution_readiness") or "runnable").strip() or "runnable",
+                            "title": str(_row.get("objective") or _row.get("title") or _loop_id).strip(),
+                            "file": str(_row.get("path") or "joined_state").strip() or "joined_state",
+                        }
+                    else:
+                        if _priority:
+                            _merged["severity"] = _priority
+                        _owner = str(_row.get("owner") or "").strip()
+                        if _owner:
+                            _merged["owner"] = _owner
+                        _horizon = str(_row.get("horizon") or "").strip()
+                        if _horizon:
+                            _merged["horizon"] = _horizon
+                        _readiness = str(_row.get("execution_readiness") or "").strip()
+                        if _readiness:
+                            _merged["execution_readiness"] = _readiness
+                        _objective = str(_row.get("objective") or _row.get("title") or "").strip()
+                        if _objective:
+                            _merged["title"] = _objective
+                        _path = str(_row.get("path") or "").strip()
+                        if _path:
+                            _merged["file"] = _path
+                    _merged_open_loops.append(_merged)
+                if _merged_open_loops:
+                    open_loops = _merged_open_loops
     except Exception:
         pass
 
