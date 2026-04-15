@@ -1,0 +1,143 @@
+---
+status: authoritative
+owner: "@ronny"
+scope: fleet-admission-classification-runtime
+version: 1
+updated_at: "2026-04-15"
+last_verified: "2026-04-15"
+
+# Fleet Admission Classification (Runtime)
+#
+# Maps current fleet members to their first-touch state as defined in
+# fleet.admission.contract.yaml. Records exceptions for hardware that
+# predates the contract.
+#
+# This is a runtime artifact — it changes as fleet state changes.
+# The contract (policy) is stable; this surface is not.
+#
+# Related:
+#   - ops/bindings/fleet.admission.contract.yaml (policy authority)
+#   - ops/bindings/hardware.inventory.yaml (infrastructure machines)
+#   - ops/bindings/operator.hardware.inventory.yaml (operator-owned machines)
+#   - ops/bindings/node.role.contract.yaml (post-admission node roles)
+
+subordinate_to: ops/bindings/fleet.admission.contract.yaml
+
+# ---------------------------------------------------------------------------
+# Current fleet classification
+# ---------------------------------------------------------------------------
+fleet:
+
+  pve:
+    machine_id: pve
+    model: "Dell PowerEdge R730XD"
+    site: shop
+    first_touch_state: FT-BMC
+    admission_status: admitted
+    proof:
+      bmc_type: idrac
+      bmc_reachable: true
+      bmc_credentials_known: true
+      bmc_proof_date: "2026-04-14"
+      bmc_proof_ref: "iDRAC Redfish, power status, web console all proven live"
+      os_install_method: manual_pre_contract
+      first_boot_claim: retrospective
+    notes: >
+      pve was provisioned before the fleet admission contract existed.
+      iDRAC access was proved live on 2026-04-14 (Redfish + power + web console).
+      Retrospectively classified as FT-BMC compliant.
+
+  proxmox-home:
+    machine_id: proxmox-home
+    site: home
+    first_touch_state: FT-BMC
+    admission_status: admitted
+    proof:
+      bmc_type: unknown
+      bmc_reachable: unverified
+      bmc_credentials_known: unverified
+      os_install_method: manual_pre_contract
+      first_boot_claim: retrospective
+    notes: >
+      Pre-contract hardware. BMC state needs verification.
+      Retrospectively classified as FT-BMC (expected lane for server hardware).
+
+  ai-consolidation:
+    machine_id: ai-consolidation
+    site: shop
+    first_touch_state: FT-SSH
+    admission_status: admitted
+    proof:
+      ssh_access_proved: true
+      bootstrap_completed: true
+      identity_enrolled: true
+      runtime_posture_verified: true
+      proof_ref: "execution_host LIVE, 7 workloads via systemd (2026-04-13)"
+    notes: >
+      Pre-contract hardware, already in governed service as execution_host.
+      Retrospectively classified as FT-SSH compliant.
+
+  macbook-2016-pro:
+    machine_id: macbook-2016-pro
+    site: home
+    first_touch_state: FT-SSH
+    admission_status: admitted
+    proof:
+      ssh_access_proved: true
+      bootstrap_completed: partial
+      identity_enrolled: true
+      runtime_posture_verified: partial
+    notes: >
+      Successful bootstrap, NOT finished node. Needs stable network,
+      tether removal, always-on posture, receipt. Pre-contract.
+      Retrospectively classified as FT-SSH.
+
+  pi-nodes:
+    machine_id: pi-fleet
+    site: mixed
+    first_touch_state: FT-MEDIA
+    admission_status: admitted
+    proof:
+      image_provenance: governed
+      media_delivered: true
+      first_boot_claim: retrospective
+    notes: >
+      Pi nodes use prebuilt boot media. Pre-contract hardware.
+      Retrospectively classified as FT-MEDIA compliant.
+
+  dfs-laptop:
+    machine_id: dfs-laptop
+    site: shop
+    first_touch_state: none
+    admission_status: excluded
+    exclusion_reason: preserved_appliance
+    notes: >
+      Frozen as preserved_appliance by operator election (2026-04-14).
+      Outside fleet admission scope entirely. Not a fleet member.
+
+# ---------------------------------------------------------------------------
+# Pre-contract exceptions
+# ---------------------------------------------------------------------------
+exceptions:
+
+  r620_unknown_bmc:
+    machine_id: r620
+    exception_date: "2026-04-15"
+    contract_ref: ops/bindings/fleet.admission.contract.yaml
+    violation: >
+      R620 arrived with unknown iDRAC credentials. Does not meet FT-BMC
+      required proof (bmc_credentials_known).
+    classification: non_compliant_intake
+    treatment: one_time_manual_recovery
+    rationale: >
+      Hardware predates the fleet admission contract. One-time manual
+      recovery is permitted under the contract exception policy.
+      After recovery, the machine must be brought into FT-BMC compliance
+      (known BMC credentials, proved first-boot claim) before formal
+      admission.
+    standing: false
+    post_recovery_target_state: FT-BMC
+    provenance: >
+      Exception recorded 2026-04-15 as part of fleet admission contract
+      establishment. This is not a standing exception — it expires after
+      the one-time recovery is complete and the machine reaches compliance.

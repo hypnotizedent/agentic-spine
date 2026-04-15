@@ -1,0 +1,193 @@
+---
+status: authoritative
+owner: "@ronny"
+scope: fleet-admission-policy
+version: 1
+updated_at: "2026-04-15"
+last_verified: "2026-04-15"
+
+# Fleet Admission Contract
+#
+# Defines the approved first-touch states for fleet hardware and the
+# proof requirements before any machine is admitted to governed service.
+#
+# Scope: policy only.
+# This surface does NOT:
+#   - classify current fleet members
+#   - assign node roles
+#   - activate any machine
+#   - record exceptions
+#
+# Fleet state, device classification, and exception provenance
+# belong in separate runtime artifacts.
+#
+# Related contracts:
+#   - ops/bindings/node.role.contract.yaml (node taxonomy — post-admission)
+#   - ops/bindings/hardware.inventory.yaml (infrastructure machine inventory)
+#   - ops/bindings/operator.hardware.inventory.yaml (operator-owned machine inventory)
+#   - ops/bindings/operator.hardware.bootstrap.handoff.contract.yaml (Stage 0 handoff)
+#   - ops/bindings/operator.hardware.bootstrap.usb.medium.contract.yaml (boot media)
+#   - ops/bindings/runtime.bootstrap.contract.yaml (governed bootstrap entry)
+
+subordinate_to: ops/bindings/root.authority.contract.yaml
+
+# ---------------------------------------------------------------------------
+# Hard rule
+# ---------------------------------------------------------------------------
+admission_rule:
+  statement: >
+    No machine is fleet hardware unless it arrives in one of the approved
+    first-touch states listed below. Hardware that does not meet any
+    approved state is non-compliant intake and must not be admitted.
+  enforcement: mandatory
+  exceptions_allowed: true
+  exception_policy: >
+    One-time manual recovery is permitted for hardware that predates this
+    contract. Each exception must be recorded as a separate provenance
+    receipt outside this policy surface. No standing exceptions.
+
+# ---------------------------------------------------------------------------
+# Approved first-touch states
+# ---------------------------------------------------------------------------
+first_touch_states:
+
+  known_bmc:
+    id: FT-BMC
+    description: >
+      Machine has a known, authenticated baseboard management controller
+      (iDRAC, iLO, IPMI, Redfish) reachable from the operator network.
+    best_for:
+      - dell_servers
+      - rack_gear
+      - enterprise_hardware
+    flow:
+      - discover_bmc
+      - authenticate_bmc
+      - mount_installer_or_set_oneshot_boot
+      - install_os_remotely
+      - first_boot_claim
+      - admit_host
+    required_proof:
+      - bmc_reachable: "BMC endpoint responds to authenticated request"
+      - bmc_credentials_known: "Credentials are in governed secrets or operator possession"
+      - os_install_completed: "Installer ran to completion via BMC-mounted media or PXE"
+      - first_boot_claim: "Host phones home or operator SSH proves identity"
+    future_capability_lanes:
+      - baremetal.bmc.discover
+      - baremetal.bmc.first_touch
+
+  managed_pxe:
+    id: FT-PXE
+    description: >
+      Machine network-boots via PXE/iPXE from a managed boot server,
+      identifies itself, and runs an unattended installer.
+    best_for:
+      - homogeneous_fleet
+      - on_site_racks
+      - repeat_server_installs
+      - mini_pcs_with_reliable_nic_boot
+    flow:
+      - power_on
+      - pxe_ipxe_boot
+      - machine_identifies_self
+      - unattended_installer_runs
+      - first_boot_claim
+      - admit_host
+    required_proof:
+      - pxe_server_reachable: "Managed PXE/iPXE server is live and serving profiles"
+      - machine_identity_registered: "MAC or serial pre-registered in PXE profile"
+      - unattended_install_completed: "Installer finished without manual intervention"
+      - first_boot_claim: "Host phones home or operator SSH proves identity"
+    future_capability_lanes:
+      - boot.pxe.profile.render
+
+  prebuilt_boot_media:
+    id: FT-MEDIA
+    description: >
+      Boot image is prepared centrally, written to physical media, and
+      shipped with the device. Local hands insert power and media only.
+    best_for:
+      - raspberry_pi
+      - remote_hands_deployments
+      - devices_in_other_locations
+      - devices_without_bmc_or_pxe
+    flow:
+      - image_prepared_centrally
+      - media_shipped_with_device
+      - local_hands_insert_power_and_media
+      - first_boot_phones_home
+      - claim
+      - admit_host
+    required_proof:
+      - image_provenance: "Image built from governed pipeline with known hash"
+      - media_delivered: "Physical media confirmed present with device"
+      - first_boot_claim: "Host phones home or operator SSH proves identity"
+    future_capability_lanes:
+      - boot.media.render
+      - boot.media.publish
+
+  existing_os_ssh_bootstrap:
+    id: FT-SSH
+    description: >
+      Machine already runs an OS with SSH access. Bootstrap agent is
+      delivered over SSH, installs runtime posture, and enrolls identity.
+    best_for:
+      - macbooks
+      - laptops
+      - machines_already_in_service
+      - rescue_paths
+    flow:
+      - ssh_access_established
+      - bootstrap_agent_delivered
+      - runtime_posture_installed
+      - identity_enrolled
+      - admit_host
+    required_proof:
+      - ssh_access_proved: "Operator or automation can SSH to the host"
+      - bootstrap_completed: "Bootstrap agent ran to completion"
+      - identity_enrolled: "Tailscale or equivalent identity is active and visible"
+      - runtime_posture_verified: "Minimum governed runtime is present"
+    future_capability_lanes: []
+
+# ---------------------------------------------------------------------------
+# Non-compliance
+# ---------------------------------------------------------------------------
+non_compliance:
+  definition: >
+    Any machine that does not arrive in one of the four approved
+    first-touch states above.
+  examples:
+    - "Used server with unknown BMC credentials"
+    - "MacBook with no first-touch path"
+    - "Pi without predeclared media or bootstrap path"
+    - "Any device where the operator cannot establish identity remotely"
+  treatment: >
+    Non-compliant hardware is not ready for fleet entry. It must be
+    brought into one of the approved first-touch states before admission.
+    Do not treat non-compliance as an agent or spine failure — treat it
+    as a procurement or preparation gap.
+
+# ---------------------------------------------------------------------------
+# Common post-admission proof (all lanes)
+# ---------------------------------------------------------------------------
+post_admission_proof:
+  host_firstboot_claim:
+    description: "Host identity is claimed and recorded in governed inventory"
+    future_capability_lane: host.firstboot.claim
+  host_admit:
+    description: "Host is formally admitted to governed fleet with provenance receipt"
+    future_capability_lane: host.admit
+
+# ---------------------------------------------------------------------------
+# Non-activation
+# ---------------------------------------------------------------------------
+non_activation:
+  statement: >
+    This contract defines admission policy only. It does not activate
+    provisioning, assign node roles, or trigger any capability.
+  does_not_activate:
+    - provisioning
+    - node_role_assignment
+    - capability_execution
+    - identity_enrollment
+    - boot_media_rendering

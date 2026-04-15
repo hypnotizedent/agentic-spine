@@ -1,0 +1,179 @@
+---
+status: authoritative
+owner: "@ronny"
+scope: fleet-procurement-intake-standard
+version: 1
+updated_at: "2026-04-15"
+last_verified: "2026-04-15"
+
+# Fleet Procurement / Intake Standard
+#
+# Defines the pre-purchase and pre-intake requirements that ensure
+# hardware arrives in an admissible first-touch state.
+#
+# This is the layer people skip. It prevents the problem before it
+# reaches the admission contract.
+#
+# Core principle:
+#   Remote provisioning is not mainly a software problem.
+#   It is a control-of-first-boot problem.
+#   If you do not control first boot, console, and identity,
+#   then "remote provisioning" is fantasy.
+#
+# Scope:
+#   - Procurement qualification criteria per hardware class
+#   - Intake checklist (must-pass before fleet entry)
+#   - Inadmissible states
+#
+# This surface does NOT:
+#   - Activate provisioning
+#   - Assign node roles
+#   - Execute first-touch flows
+#
+# Related:
+#   - ops/bindings/fleet.admission.contract.yaml (admission policy authority)
+#   - ops/bindings/fleet.admission.classification.yaml (runtime fleet state)
+#   - ops/bindings/hardware.inventory.yaml (infrastructure machines)
+#   - ops/bindings/operator.hardware.inventory.yaml (operator-owned machines)
+
+subordinate_to: ops/bindings/fleet.admission.contract.yaml
+
+# ---------------------------------------------------------------------------
+# Framing rule
+# ---------------------------------------------------------------------------
+procurement_rule:
+  statement: >
+    Stop buying machines as "hardware." Start buying them as
+    admission packages. Every purchase or intake must answer the
+    admission questions before the machine is considered fleet-eligible.
+  enforcement: mandatory
+
+# ---------------------------------------------------------------------------
+# Per-class intake requirements
+# ---------------------------------------------------------------------------
+hardware_classes:
+
+  servers:
+    target_first_touch: FT-BMC
+    fallback_first_touch: FT-PXE
+    admission_rule: >
+      No used server enters the fleet without verified BMC access or
+      confirmed PXE capability.
+    procurement_checklist:
+      - question: "Does it have a working BMC (iDRAC, iLO, IPMI)?"
+        required: true
+        blocker_if_no: true
+      - question: "Is the BMC factory-reset or are credentials known?"
+        required: true
+        blocker_if_no: true
+      - question: "Can you verify BMC access remotely before shipping?"
+        required: true
+        blocker_if_no: true
+      - question: "Does it support virtual media or one-time boot via BMC?"
+        required: true
+        blocker_if_no: false
+        note: "If no, PXE fallback must be confirmed instead"
+      - question: "Can it PXE boot into your controlled installer path?"
+        required: false
+        note: "Fallback lane if BMC is unavailable"
+
+  raspberry_pi:
+    target_first_touch: FT-MEDIA
+    admission_rule: >
+      No Pi is remote-ready unless the SD card image is already
+      prepared and first boot phones home.
+    procurement_checklist:
+      - question: "Is the boot image prepared centrally with known hash?"
+        required: true
+        blocker_if_no: true
+      - question: "Does the media travel with the device?"
+        required: true
+        blocker_if_no: true
+      - question: "Does first boot phone home without manual intervention?"
+        required: true
+        blocker_if_no: true
+
+  mini_pcs:
+    target_first_touch: FT-PXE
+    fallback_first_touch: FT-MEDIA
+    admission_rule: >
+      PXE if NIC boot is reliable. Otherwise, prebuilt SSD/USB media
+      must be shipped with the device.
+    procurement_checklist:
+      - question: "Does it support reliable NIC PXE boot?"
+        required: false
+        note: "If yes, use FT-PXE. If no, fall back to FT-MEDIA."
+      - question: "If no PXE: is a prebuilt SSD/USB prepared and shipped?"
+        required: true
+        blocker_if_no: true
+        condition: "Only when PXE is unavailable"
+      - question: "Does first boot phone home or is SSH pre-configured?"
+        required: true
+        blocker_if_no: true
+
+  macbooks_laptops:
+    target_first_touch: FT-SSH
+    admission_rule: >
+      If no SSH path exists, the machine is not remote-fleet-ready.
+    procurement_checklist:
+      - question: "Is there an existing OS with SSH access?"
+        required: true
+        blocker_if_no: true
+      - question: "Can the operator or automation SSH to the host?"
+        required: true
+        blocker_if_no: true
+      - question: "Can bootstrap agent be delivered over SSH?"
+        required: true
+        blocker_if_no: true
+
+# ---------------------------------------------------------------------------
+# Inadmissible intake states
+# ---------------------------------------------------------------------------
+inadmissible_states:
+  - state: "Unknown BMC credentials, no reset confirmed"
+    hardware_class: servers
+    reason: "Cannot control first boot remotely"
+  - state: "No SSH path, no physical access planned"
+    hardware_class: macbooks_laptops
+    reason: "No first-touch vector exists"
+  - state: "No prepared boot media, no PXE, no BMC"
+    hardware_class: mini_pcs
+    reason: "No governed first-touch path"
+  - state: "Pi shipped without prepared SD card"
+    hardware_class: raspberry_pi
+    reason: "First boot is uncontrolled"
+  - state: "Seller cannot confirm BMC reset or provide credentials"
+    hardware_class: servers
+    reason: "Admissibility cannot be verified before purchase"
+
+# ---------------------------------------------------------------------------
+# Seller / facility qualification questions
+# ---------------------------------------------------------------------------
+seller_qualification:
+  description: >
+    For remote or used hardware, these questions must be answered
+    before the machine is accepted into fleet intake.
+  questions:
+    - "Can you factory-reset the BMC before shipping?"
+    - "Can I verify BMC access remotely before the machine ships?"
+    - "Can remote hands at your facility insert my boot media and power on?"
+    - "Is the machine set to PXE boot by default?"
+    - "Is there an existing OS with known SSH credentials?"
+  rule: >
+    If the answer to all applicable questions is no, the machine
+    is not ready for the remote-fleet lane. Classify it as
+    local-recovery-only or reject.
+
+# ---------------------------------------------------------------------------
+# Non-activation
+# ---------------------------------------------------------------------------
+non_activation:
+  statement: >
+    This standard defines procurement and intake requirements only.
+    It does not activate provisioning, trigger capabilities, or
+    admit machines.
+  does_not_activate:
+    - provisioning
+    - capability_execution
+    - fleet_admission
+    - node_role_assignment
