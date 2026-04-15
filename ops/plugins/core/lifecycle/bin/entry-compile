@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""entry-compile — Compile current assignment from existing runtime truth.
+
+Reads three source surfaces:
+  1. Loop scope file ($SPINE_STATE/loop-scopes/*.scope.md)
+  2. Execution tracker ($SPINE_STATE/controller-prompts/_intake-artifacts/*PACKET-EXECUTION*.md)
+  3. Active packet prompt ($SPINE_STATE/controller-prompts/MAILROOM-CONTROLLER-PACKET-<NN>-*.md)
+
+Emits a JSON compiled assignment object to stdout containing:
+  loop_id, packet_id, context_sources, active_artifacts,
+  stop_condition, mutation_ground, handoff_target
+
+Read-only. Never mutates state.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+
+# ── Constants ────────────────────────────────────────────────────────────
+
+_OPEN_STATUSES = frozenset({"open", "active", "draft"})
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+def _parse_frontmatter(text: str) -> dict:
+    """Extract key: value pairs and lists from YAML frontmatter."""
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return {}
+    result: dict = {}
+    current_list_key: str | None = None
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            break
+        # List item under a key
+        if stripped.startswith("- ") and current_list_key is not None:
+            val = stripped[2:].strip().strip('"').strip("'")
+            result.setdefault(current_list_key, []).append(val)
+            continue
+        # Key: value
+        colon = stripped.find(":")
+        if colon < 1:
+            current_list_key = None
+            continue
+        key = stripped[:colon].strip()
+        val = stripped[colon + 1 :].strip().strip('"').strip("'")
+        current_list_key = None
+        if val:
+            result[key] = val
+        else:
+            # Empty value — might be a list key
+            current_list_key = key
+    return result
+
+
+def _find_active_loop(state_root: str) -> dict | None:
+    """Find the active loop from scope files. Returns frontmatter dict or None."""
+    scopes_dir = os.path.join(state_root, "loop-scopes")
+    if not os.path.isdir(scopes_dir):
+        return None
+
+    candidates = []
+    try:
+        entries = sorted(os.listdir(scopes_dir))
+    except OSError:
+        return None
+
+    for name in entries:
+        if not name.endswith(".scope.md"):
+            continue
+        path = os.path.join(scopes_dir, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read(16384)
+        except OSError:
+            continue
+        fm = _parse_frontmatter(text)
+        status = fm.get("status", "").lower()
+        if status in _OPEN_STATUSES:
+            fm["_path"] = path
+            candidates.append(fm)
+
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        # Multiple loops — return None with candidates stored
+        return {"_ambiguous": True, "_candidates": candidates}
+    return None
+
+
+def _find_execution_tracker(state_root: str) -> dict | None:
+    """Find the execution tracker and extract structured fields."""
+    artifacts_dir = os.path.join(state_root, "controller-prompts", "_intake-artifacts")
+    if not os.path.isdir(artifacts_dir):
+        return None
+
+    tracker_path = None
+    try:
+        for name in sorted(os.listdir(artifacts_dir), reverse=True):
+            if "PACKET-EXECUTION" in name and name.endswith(".md"):
+                tracker_path = os.path.join(artifacts_dir, name)
+                break
+    except OSError:
+        return None
+
+    if not tracker_path:
+        return None
+
+    try:
+        with open(tracker_path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+
+    fm = _parse_frontmatter(text)
+    result = {"_path": tracker_path}
+
+    # Parse the Current State section for structured fields
+    state_section = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped == "## Current State":
+            state_section = True
+            continue
+        if state_section and stripped.startswith("## "):
+            break
+        if state_section and stripped.startswith("- "):
+            # Parse "- key: value" lines
+            m = re.match(r"^-\s+(\w+):\s+(.+)$", stripped)
+            if m:
+                result[m.group(1)] = m.group(2).strip()
+
+    return result
+
+
+def _find_packet_prompt(state_root: str, packet_id: str) -> dict | None:
+    """Find and parse the packet prompt for context_sources and stop_condition."""
+    prompts_dir = os.path.join(state_root, "controller-prompts")
+    if not os.path.isdir(prompts_dir):
+        return None
+
+    # Derive filename pattern from packet_id like PACKET-23-CLOSURE-PROPAGATION
+    # → MAILROOM-CONTROLLER-PACKET-23-CLOSURE-PROPAGATION-20260415.md
+    packet_num_match = re.match(r"PACKET-(\d+)-(.+)", packet_id)
+    if not packet_num_match:
+        return None
+
+    packet_num = packet_num_match.group(1)
+    packet_suffix = packet_num_match.group(2)
+
+    prompt_path = None
+    try:
+        for name in sorted(os.listdir(prompts_dir)):
+            if not name.endswith(".md"):
+                continue
+            # Match pattern: *PACKET-<num>-<suffix>*
+            if f"PACKET-{packet_num}-{packet_suffix}" in name:
+                prompt_path = os.path.join(prompts_dir, name)
+                break
+    except OSError:
+        return None
+
+    if not prompt_path:
+        return None
+
+    try:
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+
+    fm = _parse_frontmatter(text)
+    result = {"_path": prompt_path, "frontmatter": fm}
+
+    # Extract "Load before synthesis" section → context_sources
+    context_sources = []
+    in_load_section = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if "load before synthesis" in stripped.lower():
+            in_load_section = True
+            continue
+        if in_load_section and stripped.startswith("#"):
+            break
+        if in_load_section and stripped.startswith("- "):
+            # Extract path from bullet: "- `/path/to/file`" or "- /path/to/file"
+            val = stripped[2:].strip().strip("`").strip('"').strip("'")
+            if val and ("/" in val or val.startswith("$")):
+                context_sources.append(val)
+
+    result["context_sources"] = context_sources
+
+    # Extract "Artifact produced" section → stop_condition
+    stop_lines = []
+    in_artifact_section = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if "artifact produced" in stripped.lower():
+            in_artifact_section = True
+            continue
+        if in_artifact_section and stripped.startswith("#"):
+            break
+        if in_artifact_section and stripped.startswith("- "):
+            stop_lines.append(stripped[2:].strip())
+
+    result["stop_condition_lines"] = stop_lines
+
+    # Extract "Out of scope" section (optional)
+    out_of_scope = []
+    in_oos_section = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if "out of scope" in stripped.lower():
+            in_oos_section = True
+            continue
+        if in_oos_section and stripped.startswith("#"):
+            break
+        if in_oos_section and stripped.startswith("- "):
+            out_of_scope.append(stripped[2:].strip())
+
+    result["out_of_scope"] = out_of_scope
+
+    return result
+
+
+# ── Main ─────────────────────────────────────────────────────────────────
+
+def compile_assignment(state_root: str) -> dict:
+    """Compile the assignment object from runtime truth."""
+    assignment: dict = {
+        "version": "0.1",
+        "type": "entry.assignment.compiled",
+        "compilation_state": "unknown",
+    }
+
+    # Step 1: Find active loop
+    loop_result = _find_active_loop(state_root)
+
+    if loop_result is None:
+        assignment["compilation_state"] = "clean_start"
+        assignment["loop_id"] = None
+        assignment["packet_id"] = None
+        assignment["context_sources"] = None
+        assignment["active_artifacts"] = None
+        assignment["stop_condition"] = None
+        assignment["mutation_ground"] = None
+        assignment["handoff_target"] = None
+        return assignment
+
+    if loop_result.get("_ambiguous"):
+        cands = loop_result.get("_candidates", [])
+        assignment["compilation_state"] = "ambiguous"
+        assignment["loop_candidates"] = [
+            {"loop_id": c.get("loop_id", "unknown"), "objective": c.get("objective")}
+            for c in cands
+        ]
+        assignment["loop_id"] = None
+        assignment["packet_id"] = None
+        assignment["context_sources"] = None
+        assignment["active_artifacts"] = None
+        assignment["stop_condition"] = None
+        assignment["mutation_ground"] = None
+        assignment["handoff_target"] = None
+        return assignment
+
+    # Single active loop
+    loop_id = loop_result.get("loop_id", "unknown")
+    assignment["loop_id"] = loop_id
+    assignment["loop_objective"] = loop_result.get("objective")
+    assignment["loop_priority"] = loop_result.get("priority")
+    assignment["loop_evidence_refs"] = loop_result.get("evidence_refs")
+    assignment["loop_exclusions"] = loop_result.get("exclusions")
+
+    # Step 2: Find execution tracker
+    tracker = _find_execution_tracker(state_root)
+
+    if not tracker:
+        assignment["compilation_state"] = "loop_only"
+        assignment["packet_id"] = None
+        assignment["context_sources"] = loop_result.get("evidence_refs")
+        assignment["active_artifacts"] = None
+        assignment["stop_condition"] = None
+        assignment["mutation_ground"] = {
+            "mutation_permitted": loop_result.get("mutation_permitted", "false").lower() == "true",
+            "runtime_role": os.environ.get("SPINE_RUNTIME_ROLE"),
+        }
+        assignment["handoff_target"] = None
+        return assignment
+
+    # Step 3: Extract packet from tracker
+    active_packet = tracker.get("active_packet")
+    assignment["packet_id"] = active_packet
+    assignment["active_artifacts"] = [tracker.get("artifact_path")] if tracker.get("artifact_path") else None
+    assignment["handoff_target"] = tracker.get("next_packet")
+
+    # Step 4: Load packet prompt for context_sources and stop_condition
+    if active_packet:
+        packet_prompt = _find_packet_prompt(state_root, active_packet)
+        if packet_prompt:
+            assignment["context_sources"] = packet_prompt.get("context_sources") or loop_result.get("evidence_refs")
+            stop_lines = packet_prompt.get("stop_condition_lines", [])
+            assignment["stop_condition"] = stop_lines[0] if len(stop_lines) == 1 else (stop_lines or None)
+            fm = packet_prompt.get("frontmatter", {})
+            assignment["mutation_ground"] = {
+                "mutation_permitted": fm.get("mutation_permitted", "false").lower() == "true",
+                "runtime_role": os.environ.get("SPINE_RUNTIME_ROLE"),
+            }
+            assignment["compilation_state"] = "compiled"
+        else:
+            assignment["context_sources"] = loop_result.get("evidence_refs")
+            assignment["stop_condition"] = None
+            assignment["mutation_ground"] = {
+                "mutation_permitted": False,
+                "runtime_role": os.environ.get("SPINE_RUNTIME_ROLE"),
+            }
+            assignment["compilation_state"] = "partial"
+    else:
+        assignment["context_sources"] = loop_result.get("evidence_refs")
+        assignment["stop_condition"] = None
+        assignment["mutation_ground"] = None
+        assignment["compilation_state"] = "partial"
+
+    return assignment
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Compile current assignment from loop scope, execution tracker, and packet prompt."
+    )
+    parser.add_argument(
+        "--state-root",
+        default=os.environ.get("SPINE_STATE", ""),
+        help="Path to $SPINE_STATE (default: from env)",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["json", "summary"],
+        default="json",
+        help="Output format (default: json)",
+    )
+    # Accept and ignore unknown flags for forward compat
+    args, _ = parser.parse_known_args()
+
+    state_root = args.state_root
+    if not state_root:
+        print(json.dumps({"error": "SPINE_STATE not set and --state-root not provided"}))
+        sys.exit(1)
+
+    assignment = compile_assignment(state_root)
+
+    if args.format == "summary":
+        cs = assignment.get("compilation_state", "unknown")
+        print(f"compilation: {cs}")
+        print(f"loop:        {assignment.get('loop_id') or '<none>'}")
+        print(f"packet:      {assignment.get('packet_id') or '<none>'}")
+        sources = assignment.get("context_sources") or []
+        print(f"sources:     {len(sources)} file(s)")
+        print(f"stop:        {assignment.get('stop_condition') or '<none>'}")
+        mg = assignment.get("mutation_ground") or {}
+        print(f"mutation:    permitted={mg.get('mutation_permitted', '?')} role={mg.get('runtime_role', '?')}")
+        print(f"handoff:     {assignment.get('handoff_target') or '<none>'}")
+    else:
+        print(json.dumps(assignment, indent=2))
+
+
+if __name__ == "__main__":
+    main()

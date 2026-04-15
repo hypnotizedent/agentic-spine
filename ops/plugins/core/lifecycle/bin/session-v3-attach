@@ -29,10 +29,15 @@ fi
 
 # ── Flag parsing (bounded, forward-compatible) ─────────────────────────────
 EMIT_ENV=0
+EMIT_ASSIGNMENT=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --emit-env)
             EMIT_ENV=1
+            shift
+            ;;
+        --emit-assignment)
+            EMIT_ASSIGNMENT=1
             shift
             ;;
         --allow-no-loop)
@@ -40,7 +45,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "usage: session-v3-attach [--emit-env] [--allow-no-loop] [-h|--help]"
+            echo "usage: session-v3-attach [--emit-env] [--emit-assignment] [--allow-no-loop] [-h|--help]"
             exit 0
             ;;
         *)
@@ -239,6 +244,178 @@ if [[ "$EMIT_ENV" -eq 1 ]]; then
     else
         echo "# posture env unavailable"
     fi
+fi
+
+# ── --emit-assignment handling ────────────────────────────────────────────
+# Emits a JSON compiled partial assignment object from already-computed
+# attach-time truth. No new computation — just structured capture of what
+# the banner already knows. Packet-level fields remain null (operator judgment).
+if [[ "$EMIT_ASSIGNMENT" -eq 1 ]]; then
+    echo "── compiled assignment (partial) ────────────────────────────────"
+    SPINE_ROOT_EXPORT="$SPINE_ROOT" python3 - \
+        "${OPS_TERMINAL_ROLE:-}" \
+        "${SPINE_RUNTIME_ROLE:-}" \
+        "${WORKTREE_STATUS_BRIEF:-}" \
+        "${__SP_SAFE_TO_MUTATE:-false}" \
+        "${CONT_ACTIVE_HANDOFFS:-0}" \
+        "${CONT_LATEST_HANDOFF_ID:-}" \
+        "${CONT_LATEST_HANDOFF_SUMMARY:-}" \
+        "${CONT_LATEST_HANDOFF_LOOPS:-}" \
+        "${_RT_STATE:-}" \
+        "${_RT_ACTION:-}" \
+        "${SPINE_STATE:-}" \
+        "${ROUTING_JSON:-}" \
+        <<'PYASSIGN' 2>/dev/null || true
+import json
+import os
+import sys
+import re
+
+args = sys.argv[1:]
+terminal_id       = args[0] or None
+runtime_role      = args[1] or None
+hygiene_brief     = args[2] or None
+safe_to_mutate    = args[3]
+active_handoffs   = int(args[4]) if args[4] else 0
+latest_handoff_id = args[5] or None
+latest_handoff_summary = args[6] or None
+latest_handoff_loops   = args[7] or None
+routing_state     = args[8] or None
+routing_action    = args[9] or None
+state_root        = args[10] or ""
+routing_json_raw  = args[11] or ""
+
+# Resolve terminal type and tool from contract (best-effort)
+terminal_type = None
+tool = None
+contract_path = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else ".",
+    "../../../../..", "ops", "bindings", "terminal.role.contract.yaml"
+)
+# __file__ is not set in heredoc mode; use SPINE_ROOT-relative path
+spine_root = os.environ.get("SPINE_ROOT_EXPORT", "")
+if not spine_root:
+    spine_root = os.getcwd()
+contract_path = os.path.join(spine_root, "ops", "bindings", "terminal.role.contract.yaml")
+
+if terminal_id and os.path.isfile(contract_path):
+    try:
+        with open(contract_path, "r") as f:
+            text = f.read()
+        # Minimal YAML parse for roles — avoid yq dependency
+        in_role = False
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("- id:") and terminal_id in stripped:
+                in_role = True
+            elif in_role and stripped.startswith("- id:"):
+                break
+            elif in_role and stripped.startswith("type:"):
+                terminal_type = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+            elif in_role and stripped.startswith("default_tool:"):
+                tool = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+
+# Resolve loop from routing candidates (best-effort)
+loop_id = None
+loop_objective = None
+loop_priority = None
+loop_evidence_refs = []
+loop_exclusions = []
+
+if routing_json_raw:
+    try:
+        rd = json.loads(routing_json_raw)
+        cands = rd.get("open_loop_candidates", [])
+        if len(cands) == 1:
+            loop_id = cands[0].get("loop_id")
+            loop_priority = cands[0].get("priority")
+    except Exception:
+        pass
+
+# If we have a loop_id and state_root, read the scope file for full details
+if loop_id and state_root:
+    scope_dir = os.path.join(state_root, "loop-scopes")
+    for name in sorted(os.listdir(scope_dir)) if os.path.isdir(scope_dir) else []:
+        if not name.endswith(".scope.md"):
+            continue
+        path = os.path.join(scope_dir, name)
+        try:
+            with open(path, "r") as f:
+                text = f.read(16384)
+        except OSError:
+            continue
+        if loop_id not in text:
+            continue
+        # Parse frontmatter
+        lines = text.split("\n")
+        if not lines or lines[0].strip() != "---":
+            continue
+        in_fm = True
+        current_list_key = None
+        for line in lines[1:]:
+            stripped = line.strip()
+            if stripped == "---":
+                break
+            # List item under a key
+            if stripped.startswith("- ") and current_list_key:
+                val = stripped[2:].strip().strip('"').strip("'")
+                if current_list_key == "evidence_refs":
+                    loop_evidence_refs.append(val)
+                elif current_list_key == "exclusions":
+                    loop_exclusions.append(val)
+                continue
+            # Key: value
+            colon = stripped.find(":")
+            if colon < 1:
+                current_list_key = None
+                continue
+            key = stripped[:colon].strip()
+            val = stripped[colon+1:].strip().strip('"').strip("'")
+            current_list_key = None
+            if key == "objective" and val:
+                loop_objective = val
+            elif key == "priority" and val:
+                loop_priority = val
+            elif key == "evidence_refs":
+                current_list_key = "evidence_refs"
+            elif key == "exclusions":
+                current_list_key = "exclusions"
+        break
+
+# Compose the assignment object
+assignment = {
+    "version": "0.1",
+    "type": "entry.assignment.partial",
+    "terminal_id": terminal_id,
+    "terminal_type": terminal_type,
+    "tool": tool,
+    "runtime_role": runtime_role,
+    "loop_id": loop_id,
+    "loop_objective": loop_objective,
+    "loop_priority": loop_priority,
+    "loop_evidence_refs": loop_evidence_refs or None,
+    "loop_exclusions": loop_exclusions or None,
+    "active_handoffs": active_handoffs,
+    "latest_handoff_id": latest_handoff_id,
+    "latest_handoff_summary": latest_handoff_summary,
+    "latest_handoff_loops": latest_handoff_loops,
+    "repo_hygiene": hygiene_brief,
+    "safe_to_mutate": safe_to_mutate.lower() == "true",
+    "routing_state": routing_state,
+    "recommended_action": routing_action,
+    # Fields requiring operator judgment — explicitly null
+    "packet_id": None,
+    "stop_condition": None,
+    "context_bundle": None,
+    "forbidden_actions": None,
+    "first_action": None,
+    "handoff_target": None,
+}
+
+print(json.dumps(assignment, indent=2))
+PYASSIGN
 fi
 
 exit 0
