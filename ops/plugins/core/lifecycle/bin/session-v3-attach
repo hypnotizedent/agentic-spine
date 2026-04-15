@@ -64,6 +64,77 @@ echo ""
 "$SPINE_ROOT/bin/ops" status --brief 2>/dev/null || true
 echo ""
 
+# ── Continuity snapshot (best-effort, non-blocking) ───────────────────────
+HANDOFF_BIN="$SPINE_ROOT/ops/plugins/core/session/bin/session-handoff"
+RECEIPTS_BIN="$SPINE_ROOT/ops/plugins/core/evidence/bin/receipts-summary"
+CONTINUITY_VARS=""
+
+if [[ -f "$HANDOFF_BIN" && -f "$RECEIPTS_BIN" ]]; then
+    HANDOFF_STATUS_JSON="$(python3 "$HANDOFF_BIN" status 2>/dev/null || true)"
+    HANDOFF_LIST_JSON="$(python3 "$HANDOFF_BIN" list --state active 2>/dev/null || true)"
+    RECEIPTS_JSON="$(python3 "$RECEIPTS_BIN" --domain none --days 7 2>/dev/null || true)"
+
+    CONTINUITY_VARS="$(
+        HANDOFF_STATUS_JSON="$HANDOFF_STATUS_JSON" \
+        HANDOFF_LIST_JSON="$HANDOFF_LIST_JSON" \
+        RECEIPTS_JSON="$RECEIPTS_JSON" \
+        python3 - <<'PY'
+import json
+import os
+import shlex
+
+
+def load_env_json(name: str) -> dict:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+status = load_env_json("HANDOFF_STATUS_JSON")
+listing = load_env_json("HANDOFF_LIST_JSON")
+receipts = load_env_json("RECEIPTS_JSON")
+
+active_handoffs = int(((status.get("counts") or {}).get("active")) or 0)
+recent_receipts = int(receipts.get("count") or 0)
+items = listing.get("items") or []
+first = items[-1] if items else {}
+
+loop_refs = [str(loop).strip() for loop in (first.get("loops") or []) if str(loop).strip()]
+latest_loop = ", ".join(loop_refs)
+latest_summary = str(first.get("summary") or "").strip()
+latest_id = str(first.get("id") or "").strip()
+
+print(f"CONT_ACTIVE_HANDOFFS={shlex.quote(str(active_handoffs))}")
+print(f"CONT_RECENT_RECEIPTS={shlex.quote(str(recent_receipts))}")
+print(f"CONT_LATEST_HANDOFF_ID={shlex.quote(latest_id)}")
+print(f"CONT_LATEST_HANDOFF_SUMMARY={shlex.quote(latest_summary)}")
+print(f"CONT_LATEST_HANDOFF_LOOPS={shlex.quote(latest_loop)}")
+PY
+    )" || true
+fi
+
+if [[ -n "$CONTINUITY_VARS" ]]; then
+    eval "$CONTINUITY_VARS"
+    echo "── continuity ──────────────────────────────────────────────────"
+    echo "  active handoffs: ${CONT_ACTIVE_HANDOFFS:-0}"
+    echo "  recent receipts: ${CONT_RECENT_RECEIPTS:-0}"
+    if [[ -n "${CONT_LATEST_HANDOFF_ID:-}" ]]; then
+        echo "  latest handoff:  ${CONT_LATEST_HANDOFF_ID}: ${CONT_LATEST_HANDOFF_SUMMARY:-}"
+        if [[ -n "${CONT_LATEST_HANDOFF_LOOPS:-}" ]]; then
+            echo "  loops:           ${CONT_LATEST_HANDOFF_LOOPS}"
+        fi
+    fi
+    if [[ "${CONT_RECENT_RECEIPTS:-0}" == "0" && "${CONT_ACTIVE_HANDOFFS:-0}" != "0" ]]; then
+        echo "  note:            recent receipts are empty; active handoffs are the live continuity surface"
+    fi
+    echo ""
+fi
+
 # ── Session posture (best-effort, non-blocking) ────────────────────────────
 POSTURE_OK=0
 if command -v session_posture_resolve >/dev/null 2>&1; then
