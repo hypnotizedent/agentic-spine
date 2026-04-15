@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 import yaml
@@ -32,13 +33,16 @@ def spine_code() -> Path:
 def scan_dirs() -> list[Path]:
     """Directories to scan for parked items."""
     dirs = [spine_state() / "domain-state"]
+    # Repo planning docs may also contain parked items.
     repo_planning = spine_code() / "docs" / "planning"
     if repo_planning.is_dir():
         dirs.append(repo_planning)
     return [d for d in dirs if d.is_dir()]
 
 
-_YAML_FENCE = re.compile(r"```ya?ml\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_YAML_FENCE = re.compile(
+    r"```ya?ml\s*\n(.*?)```", re.DOTALL | re.IGNORECASE
+)
 
 
 def extract_lifecycle_from_yaml(data: object) -> dict | None:
@@ -75,7 +79,7 @@ def extract_lifecycle(path: Path) -> dict | None:
     except OSError:
         return None
 
-    if path.suffix in (".yaml", ".yml"):
+    if path.suffix == ".yaml" or path.suffix == ".yml":
         try:
             data = yaml.safe_load(text)
         except yaml.YAMLError:
@@ -89,10 +93,12 @@ def extract_lifecycle(path: Path) -> dict | None:
 
 
 def item_name(path: Path) -> str:
+    """Derive a short human name from the file path."""
     return path.stem
 
 
 def item_location(path: Path) -> str:
+    """Classify where the item lives."""
     s = str(path)
     if "/domain-state/spine/" in s:
         return "runtime/spine"
@@ -111,7 +117,11 @@ def scan_all() -> list[dict]:
     seen = set()
     for base in scan_dirs():
         for path in sorted(base.rglob("*")):
-            if path.is_dir() or path.suffix not in (".yaml", ".yml", ".md") or path in seen:
+            if path.is_dir():
+                continue
+            if path.suffix not in (".yaml", ".yml", ".md"):
+                continue
+            if path in seen:
                 continue
             seen.add(path)
             lc = extract_lifecycle(path)
@@ -120,38 +130,31 @@ def scan_all() -> list[dict]:
             triggers = lc.get("activation_trigger", [])
             if isinstance(triggers, str):
                 triggers = [triggers]
-            items.append(
-                {
-                    "name": item_name(path),
-                    "path": str(path),
-                    "location": item_location(path),
-                    "status": lc.get("status", "parked"),
-                    "parked_reason": lc.get("parked_reason", ""),
-                    "activation_trigger": triggers,
-                    "trigger_count": len(triggers),
-                    "next_review": lc.get("next_review"),
-                    "activation_destination": lc.get("activation_destination", ""),
-                    "retire_if": lc.get("retire_if", ""),
-                    "superseded_by": lc.get("superseded_by", []),
-                }
-            )
+            items.append({
+                "name": item_name(path),
+                "path": str(path),
+                "location": item_location(path),
+                "status": lc.get("status", "parked"),
+                "parked_reason": lc.get("parked_reason", ""),
+                "activation_trigger": triggers,
+                "trigger_count": len(triggers),
+                "next_review": lc.get("next_review"),
+                "activation_destination": lc.get("activation_destination", ""),
+                "retire_if": lc.get("retire_if", ""),
+                "superseded_by": lc.get("superseded_by", []),
+            })
     return items
 
 
 def cmd_list(args: argparse.Namespace) -> int:
     items = scan_all()
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "capability": "parked.list",
-                    "status": "ok",
-                    "count": len(items),
-                    "items": items,
-                },
-                indent=2,
-            )
-        )
+        print(json.dumps({
+            "capability": "parked.list",
+            "status": "ok",
+            "count": len(items),
+            "items": items,
+        }, indent=2))
     else:
         if not items:
             print("No parked items with parked_lifecycle found.")

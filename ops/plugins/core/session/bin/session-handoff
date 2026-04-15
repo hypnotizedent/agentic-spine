@@ -20,9 +20,28 @@ def handoff_files():
     return sorted(path.glob("HO-*.yaml"))
 
 
+def parse_ref_args(items: list[str]) -> dict[str, str]:
+    refs: dict[str, str] = {}
+    for raw in items:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if "=" not in text:
+            raise ValueError(f"invalid ref '{text}': expected KEY=VALUE")
+        key, value = text.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            raise ValueError(f"invalid ref '{text}': expected KEY=VALUE")
+        refs[key] = value
+    return refs
+
+
 def cmd_create(args: argparse.Namespace) -> int:
     now = datetime.now(timezone.utc)
     hid = f"HO-{now.strftime('%Y%m%d-%H%M%S')}"
+    input_refs = parse_ref_args(args.input_ref)
+    output_refs = parse_ref_args(args.output_ref)
     payload = {
         "version": "1.2",
         "id": hid,
@@ -37,8 +56,8 @@ def cmd_create(args: argparse.Namespace) -> int:
         "from_role": args.from_role,
         "to_role": args.to_role,
         "transition_gate": args.transition_gate,
-        "input_refs": {},
-        "output_refs": {},
+        "input_refs": input_refs,
+        "output_refs": output_refs,
         "notes": args.note,
     }
     path = state_dir() / f"{hid}.yaml"
@@ -83,6 +102,8 @@ def main() -> int:
     p_create.add_argument("--from-role", default="")
     p_create.add_argument("--to-role", default="")
     p_create.add_argument("--transition-gate", default="")
+    p_create.add_argument("--input-ref", action="append", default=[])
+    p_create.add_argument("--output-ref", action="append", default=[])
     p_create.add_argument("--note", action="append", default=[])
     p_list = sub.add_parser("list")
     p_list.add_argument("--state", default="")

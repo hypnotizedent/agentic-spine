@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+TRACKER_GLOB = "MAILROOM-CONTROLLER-PACKET-EXECUTION-*.md"
+INDEX_GLOB = "MAILROOM-CONTROLLER-PACKET-SET-*.md"
+PROMPT_GLOB = "MAILROOM-CONTROLLER-PACKET-[0-9][0-9]-*.md"
+
+
+def state_root() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_STATE",
+            str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+        )
+    )
+
+
+def controller_prompts_dir() -> Path:
+    return state_root() / "controller-prompts"
+
+
+def intake_artifacts_dir() -> Path:
+    return controller_prompts_dir() / "_intake-artifacts"
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def parse_frontmatter(path: Path) -> dict:
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        return {}
+    parts = text.split("\n---\n", 1)
+    if len(parts) != 2:
+        return {}
+    data = yaml.safe_load(parts[0][4:]) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def parse_tracker_fields(path: Path) -> dict:
+    fields: dict[str, str] = {}
+    pattern = re.compile(r"^- ([a-z_]+):\s*(.*)$")
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = pattern.match(line.rstrip())
+        if not match:
+            continue
+        key = match.group(1).strip()
+        value = match.group(2).strip()
+        fields[key] = value
+    return fields
+
+
+def latest_matching(directory: Path, pattern: str) -> Path:
+    matches = sorted(directory.glob(pattern))
+    if not matches:
+        raise FileNotFoundError(f"no files matching {pattern} under {directory}")
+    return matches[-1]
+
+
+def resolve_path(raw: str, *, base: Path) -> Path:
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else (base / path).resolve()
+
+
+def find_prompt_path(packet_id: str, prompts_dir: Path) -> Path:
+    for path in sorted(prompts_dir.glob(PROMPT_GLOB)):
+        frontmatter = parse_frontmatter(path)
+        if str(frontmatter.get("packet_id") or "").strip() == packet_id:
+            return path
+    raise FileNotFoundError(f"unable to resolve prompt path for packet_id={packet_id}")
+
+
+def derive_packet_number(packet_id: str) -> str:
+    match = re.match(r"^PACKET-(\d+)-", packet_id.strip())
+    if not match:
+        raise ValueError(f"packet_id does not contain numeric prefix: {packet_id}")
+    return match.group(1).zfill(2)
+
+
+def build_checkpoint_payload(
+    *,
+    tracker_path: Path,
+    packet_index_path: Path,
+    prompt_path: Path,
+    tracker_frontmatter: dict,
+    tracker_fields: dict,
+    source_execution_ref: str,
+    recorded_at_utc: str,
+) -> dict:
+    packet_id = str(tracker_fields.get("active_packet") or "").strip()
+    if not packet_id:
+        raise ValueError(f"tracker missing active_packet: {tracker_path}")
+
+    packet_family = str(tracker_frontmatter.get("packet_family") or "").strip()
+    loop_id = str(tracker_frontmatter.get("loop_id") or "").strip()
+    artifact_path_raw = str(tracker_fields.get("artifact_path") or "").strip()
+    artifact_path = resolve_path(artifact_path_raw, base=state_root()) if artifact_path_raw else None
+
+    packet_index_text = packet_index_path.read_text(encoding="utf-8")
+    prompt_path_text = str(prompt_path)
+
+    packet_prompt_frontmatter = parse_frontmatter(prompt_path)
+    prompt_loop_id = str(packet_prompt_frontmatter.get("loop_id") or "").strip()
+    if loop_id and prompt_loop_id and loop_id != prompt_loop_id:
+        raise ValueError(
+            f"loop mismatch between tracker ({loop_id}) and prompt ({prompt_loop_id})"
+        )
+
+    packet_number = derive_packet_number(packet_id)
+
+    payload = {
+        "version": "1.0",
+        "type": "packet-start-provenance-checkpoint",
+        "recorded_at_utc": recorded_at_utc,
+        "loop_id": loop_id or prompt_loop_id,
+        "packet_family": packet_family,
+        "packet_id": packet_id,
+        "packet_number": packet_number,
+        "packet_status": str(tracker_fields.get("packet_status") or "").strip(),
+        "prompt_path": prompt_path_text,
+        "prompt_sha256": sha256_file(prompt_path),
+        "packet_index_path": str(packet_index_path),
+        "packet_index_sha256": sha256_file(packet_index_path),
+        "packet_index_contains_prompt_path": prompt_path_text in packet_index_text,
+        "execution_tracker_path": str(tracker_path),
+        "execution_tracker_sha256": sha256_file(tracker_path),
+        "artifact_path": str(artifact_path) if artifact_path else "",
+        "artifact_exists": bool(artifact_path and artifact_path.exists()),
+        "source_execution_ref": source_execution_ref,
+    }
+    if artifact_path and artifact_path.exists():
+        payload["artifact_sha256"] = sha256_file(artifact_path)
+    return payload
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tracker-path", default="")
+    parser.add_argument("--packet-index-path", default="")
+    parser.add_argument("--prompt-path", default="")
+    parser.add_argument("--artifact-path", default="")
+    parser.add_argument("--source-execution-ref", default="")
+    parser.add_argument("--recorded-at-utc", default="")
+    args = parser.parse_args()
+
+    prompts_dir = controller_prompts_dir()
+    artifacts_dir = intake_artifacts_dir()
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    tracker_path = (
+        Path(args.tracker_path).expanduser()
+        if args.tracker_path
+        else latest_matching(artifacts_dir, TRACKER_GLOB)
+    )
+    packet_index_path = (
+        Path(args.packet_index_path).expanduser()
+        if args.packet_index_path
+        else latest_matching(prompts_dir, INDEX_GLOB)
+    )
+
+    tracker_frontmatter = parse_frontmatter(tracker_path)
+    tracker_fields = parse_tracker_fields(tracker_path)
+    packet_id = str(tracker_fields.get("active_packet") or "").strip()
+    if not packet_id:
+        raise SystemExit(f"tracker has no active_packet: {tracker_path}")
+
+    prompt_path = (
+        Path(args.prompt_path).expanduser()
+        if args.prompt_path
+        else find_prompt_path(packet_id, prompts_dir)
+    )
+
+    if args.artifact_path:
+        tracker_fields["artifact_path"] = args.artifact_path
+
+    source_execution_ref = (
+        args.source_execution_ref.strip()
+        or os.environ.get("SPINE_CAP_RUN_KEY", "").strip()
+    )
+    if not source_execution_ref:
+        raise SystemExit(
+            "--source-execution-ref is required when SPINE_CAP_RUN_KEY is unavailable"
+        )
+
+    recorded_at_utc = args.recorded_at_utc.strip() or datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    checkpoint_id = f"PPC-{ts}"
+    checkpoint_name = f"PACKET-START-PROVENANCE-CHECKPOINT-{packet_id}-{ts}.yaml"
+    checkpoint_path = artifacts_dir / checkpoint_name
+
+    payload = build_checkpoint_payload(
+        tracker_path=tracker_path,
+        packet_index_path=packet_index_path,
+        prompt_path=prompt_path,
+        tracker_frontmatter=tracker_frontmatter,
+        tracker_fields=tracker_fields,
+        source_execution_ref=source_execution_ref,
+        recorded_at_utc=recorded_at_utc,
+    )
+    payload["checkpoint_id"] = checkpoint_id
+
+    checkpoint_path.write_text(
+        yaml.safe_dump(payload, sort_keys=False, allow_unicode=False),
+        encoding="utf-8",
+    )
+
+    print(
+        json.dumps(
+            {
+                "capability": "session.packet.provenance.capture",
+                "status": "ok",
+                "checkpoint_id": checkpoint_id,
+                "path": str(checkpoint_path),
+                "packet_id": payload["packet_id"],
+                "loop_id": payload["loop_id"],
+                "source_execution_ref": payload["source_execution_ref"],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
