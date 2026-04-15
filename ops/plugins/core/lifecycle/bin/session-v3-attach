@@ -154,6 +154,43 @@ if [[ -n "$CONTINUITY_VARS" ]]; then
     echo ""
 fi
 
+# ── Provenance checkpoint (best-effort, non-blocking) ─────────────────────
+PROV_CHECKPOINT_ID=""
+PROV_CHECKPOINT_PACKET=""
+PROV_CHECKPOINT_RECORDED=""
+PROV_CHECKPOINT_PATH=""
+
+PROV_ARTIFACTS_DIR="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/controller-prompts/_intake-artifacts"
+if [[ -d "$PROV_ARTIFACTS_DIR" ]]; then
+    PROV_LATEST="$(ls -1 "$PROV_ARTIFACTS_DIR"/PACKET-START-PROVENANCE-CHECKPOINT-*.yaml 2>/dev/null | sort | tail -1 || true)"
+    if [[ -n "$PROV_LATEST" && -f "$PROV_LATEST" ]]; then
+        PROV_CHECKPOINT_PATH="$PROV_LATEST"
+        eval "$(python3 - "$PROV_LATEST" <<'PYPROV' 2>/dev/null || true
+import sys, shlex
+try:
+    import yaml
+    data = yaml.safe_load(open(sys.argv[1]))
+    print(f"PROV_CHECKPOINT_ID={shlex.quote(str(data.get('checkpoint_id', '')))}")
+    print(f"PROV_CHECKPOINT_PACKET={shlex.quote(str(data.get('packet_id', '')))}")
+    print(f"PROV_CHECKPOINT_RECORDED={shlex.quote(str(data.get('recorded_at_utc', '')))}")
+except Exception:
+    pass
+PYPROV
+        )"
+    fi
+fi
+
+echo "── provenance ──────────────────────────────────────────────────"
+if [[ -n "$PROV_CHECKPOINT_ID" ]]; then
+    echo "  checkpoint:      ${PROV_CHECKPOINT_ID}"
+    echo "  packet:          ${PROV_CHECKPOINT_PACKET}"
+    echo "  recorded:        ${PROV_CHECKPOINT_RECORDED}"
+else
+    echo "  checkpoint:      none"
+    echo "  action:          ops cap run session.packet.provenance.capture"
+fi
+echo ""
+
 # ── Session posture (best-effort, non-blocking) ────────────────────────────
 POSTURE_OK=0
 if command -v session_posture_resolve >/dev/null 2>&1; then
@@ -265,6 +302,9 @@ if [[ "$EMIT_ASSIGNMENT" -eq 1 ]]; then
         "${_RT_ACTION:-}" \
         "${SPINE_STATE:-}" \
         "${ROUTING_JSON:-}" \
+        "${PROV_CHECKPOINT_ID:-}" \
+        "${PROV_CHECKPOINT_PACKET:-}" \
+        "${PROV_CHECKPOINT_RECORDED:-}" \
         <<'PYASSIGN' 2>/dev/null || true
 import json
 import os
@@ -284,6 +324,9 @@ routing_state     = args[8] or None
 routing_action    = args[9] or None
 state_root        = args[10] or ""
 routing_json_raw  = args[11] or ""
+prov_checkpoint_id = args[12] or None
+prov_checkpoint_packet = args[13] or None
+prov_checkpoint_recorded = args[14] or None
 
 # Resolve terminal type and tool from contract (best-effort)
 terminal_type = None
@@ -405,6 +448,10 @@ assignment = {
     "safe_to_mutate": safe_to_mutate.lower() == "true",
     "routing_state": routing_state,
     "recommended_action": routing_action,
+    # Provenance checkpoint (latest at attach time)
+    "provenance_checkpoint_id": prov_checkpoint_id,
+    "provenance_checkpoint_packet": prov_checkpoint_packet,
+    "provenance_checkpoint_recorded": prov_checkpoint_recorded,
     # Fields requiring operator judgment — explicitly null
     "packet_id": None,
     "stop_condition": None,
