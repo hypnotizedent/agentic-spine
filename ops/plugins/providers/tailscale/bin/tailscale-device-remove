@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+TAILNET="${TAILSCALE_TAILNET:-taile9480.ts.net}"
+API_BASE="https://api.tailscale.com/api/v2"
+
+if [[ -z "${TAILSCALE_OAUTH_CLIENT_ID:-}" ]] || [[ -z "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]]; then
+  echo "STOP: TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET required" >&2
+  exit 2
+fi
+
+SELECTOR=""
+MODE="dry-run"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --device)
+      SELECTOR="${2:-}"
+      shift 2
+      ;;
+    --apply)
+      MODE="apply"
+      shift
+      ;;
+    --help|-h)
+      cat <<'EOF'
+usage: tailscale-device-remove --device <id|nodeId|exact-name|hostname-prefix> [--apply]
+
+Operator-co-signed stale-device removal surface.
+Default mode is dry-run. Use --apply to execute DELETE against the selected device.
+EOF
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      echo "unknown_arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$SELECTOR" ]]; then
+  echo "STOP: --device <selector> required" >&2
+  exit 2
+fi
+
+echo "tailscale.device.remove"
+echo "tailnet: $TAILNET"
+echo "mode: $MODE"
+echo "selector: $SELECTOR"
+
+token_response=$(curl -fsS \
+  -X POST \
+  -u "${TAILSCALE_OAUTH_CLIENT_ID}:${TAILSCALE_OAUTH_CLIENT_SECRET}" \
+  -d "grant_type=client_credentials" \
+  "https://api.tailscale.com/api/v2/oauth/token")
+
+BEARER=$(echo "$token_response" | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])") || {
+  echo "oauth: FAIL (no access_token)"
+  exit 1
+}
+echo "oauth: OK"
+
+devices_json=$(curl -fsS \
+  -H "Authorization: Bearer $BEARER" \
+  -H "Accept: application/json" \
+  "${API_BASE}/tailnet/${TAILNET}/devices")
+
+export SPINE_TS_REMOVE_PAYLOAD="$devices_json"
+export SPINE_TS_REMOVE_SELECTOR="$SELECTOR"
+
+selection_json=$(python3 <<'PYEOF'
+import json
+import os
+import sys
+
+payload = json.loads(os.environ["SPINE_TS_REMOVE_PAYLOAD"])
+selector = os.environ["SPINE_TS_REMOVE_SELECTOR"]
+devices = payload.get("devices", [])
+
+exact = []
+prefix = []
+for dev in devices:
+    name = dev.get("name") or ""
+    hostname = dev.get("hostname") or ""
+    if selector in {dev.get("id"), dev.get("nodeId"), name, hostname}:
+        exact.append(dev)
+        continue
+    if name.split(".")[0] == selector or hostname == selector:
+        prefix.append(dev)
+
+matches = exact if exact else prefix
+def user_login(value):
+    if isinstance(value, dict):
+        return value.get("loginName") or value.get("name")
+    if isinstance(value, str):
+        return value
+    return None
+
+if len(matches) == 0:
+    print(json.dumps({"status": "not_found", "selector": selector}))
+    sys.exit(0)
+if len(matches) > 1:
+    print(json.dumps({
+        "status": "ambiguous",
+        "selector": selector,
+        "matches": [
+            {
+                "id": dev.get("id"),
+                "nodeId": dev.get("nodeId"),
+                "name": dev.get("name"),
+                "hostname": dev.get("hostname"),
+            }
+            for dev in matches
+        ],
+    }))
+    sys.exit(0)
+
+dev = matches[0]
+print(json.dumps({
+    "status": "selected",
+    "device": {
+        "id": dev.get("id"),
+        "nodeId": dev.get("nodeId"),
+        "name": dev.get("name"),
+        "hostname": dev.get("hostname"),
+        "user": user_login(dev.get("user")),
+        "addresses": dev.get("addresses") or [],
+        "tags": dev.get("tags") or [],
+    }
+}))
+PYEOF
+)
+
+export SPINE_TS_REMOVE_SELECTION="$selection_json"
+selection_status=$(python3 -c 'import json,os; print(json.loads(os.environ["SPINE_TS_REMOVE_SELECTION"])["status"])')
+
+case "$selection_status" in
+  not_found)
+    python3 -c 'import json,os; data=json.loads(os.environ["SPINE_TS_REMOVE_SELECTION"]); print(f"match: none selector={data['selector']}")'
+    exit 1
+    ;;
+  ambiguous)
+    python3 - <<'PYEOF'
+import json, os
+data = json.loads(os.environ["SPINE_TS_REMOVE_SELECTION"])
+print(f"match: ambiguous selector={data['selector']}")
+for dev in data["matches"]:
+    print(f"candidate: id={dev['id']} nodeId={dev['nodeId']} name={dev['name']} hostname={dev['hostname']}")
+PYEOF
+    exit 1
+    ;;
+  selected)
+    python3 - <<'PYEOF'
+import json, os
+data = json.loads(os.environ["SPINE_TS_REMOVE_SELECTION"])["device"]
+print(
+    f"match: selected id={data['id']} nodeId={data['nodeId']} "
+    f"name={data['name']} hostname={data['hostname']} user={data['user'] or '-'} "
+    f"addrs={','.join(data['addresses'][:2]) if data['addresses'] else '-'} "
+    f"tags={','.join(data['tags']) if data['tags'] else '-'}"
+)
+PYEOF
+    ;;
+esac
+
+if [[ "$MODE" != "apply" ]]; then
+  echo "dry_run: true"
+  echo "next_step: rerun with --apply after operator confirmation"
+  exit 0
+fi
+
+DEVICE_ID=$(python3 -c 'import json,os; print(json.loads(os.environ["SPINE_TS_REMOVE_SELECTION"])["device"]["id"])')
+http_code=$(curl -sS -o /dev/null -w "%{http_code}" \
+  -X DELETE \
+  -H "Authorization: Bearer $BEARER" \
+  "${API_BASE}/device/${DEVICE_ID}")
+
+echo "delete_http: $http_code"
+if [[ "$http_code" =~ ^2 ]]; then
+  echo "delete: OK"
+else
+  echo "delete: FAIL"
+  exit 1
+fi

@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+TAILNET="${TAILSCALE_TAILNET:-taile9480.ts.net}"
+API_BASE="https://api.tailscale.com/api/v2"
+
+if [[ -z "${TAILSCALE_API_KEY:-}" ]]; then
+  echo "STOP: TAILSCALE_API_KEY missing" >&2
+  exit 2
+fi
+
+NAME_FILTER=""
+FORMAT="human"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --name)
+      NAME_FILTER="${2:-}"
+      shift 2
+      ;;
+    --json)
+      FORMAT="json"
+      shift
+      ;;
+    --help|-h)
+      cat <<'EOF'
+usage: tailscale-device-list [--name <substring>] [--json]
+
+Read-only Tailscale device inventory.
+  --name <substring>  Filter devices by case-insensitive name match
+  --json              Emit filtered JSON instead of human-readable summary
+EOF
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      echo "unknown_arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+echo "tailscale.device.list"
+echo "tailnet: $TAILNET"
+echo "format: $FORMAT"
+[[ -n "$NAME_FILTER" ]] && echo "name_filter: $NAME_FILTER"
+
+devices_json=$(curl -fsS \
+  -u "${TAILSCALE_API_KEY}:" \
+  -H "Accept: application/json" \
+  "${API_BASE}/tailnet/${TAILNET}/devices")
+
+export SPINE_TS_DEVICE_LIST_JSON="$devices_json"
+export SPINE_TS_DEVICE_LIST_FILTER="$NAME_FILTER"
+export SPINE_TS_DEVICE_LIST_FORMAT="$FORMAT"
+
+python3 <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+payload = json.loads(os.environ["SPINE_TS_DEVICE_LIST_JSON"])
+needle = os.environ.get("SPINE_TS_DEVICE_LIST_FILTER", "").lower().strip()
+fmt = os.environ.get("SPINE_TS_DEVICE_LIST_FORMAT", "human")
+devices = payload.get("devices", [])
+
+def user_login(value):
+    if isinstance(value, dict):
+        return value.get("loginName") or value.get("name")
+    if isinstance(value, str):
+        return value
+    return None
+
+def iso_to_days(value: str):
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        return int((now - dt).total_seconds() // 86400)
+    except Exception:
+        return None
+
+filtered = []
+for dev in devices:
+    name = dev.get("name") or ""
+    if needle and needle not in name.lower():
+        continue
+    client_version = dev.get("clientVersion") or dev.get("os") or "unknown"
+    addresses = dev.get("addresses") or []
+    tags = dev.get("tags") or []
+    last_seen = dev.get("lastSeen") or dev.get("created")
+    filtered.append(
+        {
+            "id": dev.get("id"),
+            "nodeId": dev.get("nodeId"),
+            "name": name,
+            "hostname": dev.get("hostname"),
+            "machineKey": dev.get("machineKey"),
+            "nodeKey": dev.get("nodeKey"),
+            "user": user_login(dev.get("user")),
+            "os": dev.get("os"),
+            "clientVersion": client_version,
+            "addresses": addresses,
+            "tags": tags,
+            "authorized": dev.get("authorized"),
+            "expired": dev.get("expired"),
+            "isExternal": dev.get("isExternal"),
+            "lastSeen": last_seen,
+            "lastSeenDaysAgo": iso_to_days(last_seen),
+        }
+    )
+
+if fmt == "json":
+    print(json.dumps({"tailnet": payload.get("tailnet"), "count": len(filtered), "devices": filtered}, indent=2))
+    sys.exit(0)
+
+print(f"device_count: {len(filtered)}")
+if not filtered:
+    sys.exit(0)
+
+for dev in filtered:
+    addresses = ",".join(dev["addresses"][:2]) if dev["addresses"] else "-"
+    tags = ",".join(dev["tags"]) if dev["tags"] else "-"
+    last_seen = dev["lastSeenDaysAgo"]
+    last_seen_display = f"{last_seen}d" if last_seen is not None else "unknown"
+    print(
+        "device:"
+        f" id={dev['id']}"
+        f" nodeId={dev['nodeId']}"
+        f" name={dev['name'] or '-'}"
+        f" hostname={dev['hostname'] or '-'}"
+        f" user={dev['user'] or '-'}"
+        f" os={dev['os'] or '-'}"
+        f" authorized={dev['authorized']}"
+        f" expired={dev['expired']}"
+        f" last_seen={last_seen_display}"
+        f" addrs={addresses}"
+        f" tags={tags}"
+    )
+PYEOF
