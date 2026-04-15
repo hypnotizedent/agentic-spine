@@ -1019,3 +1019,121 @@ This packet is the canonical repo anchor for continued discussion of:
 
 It is intentionally forensic.
 It does not propose remediation.
+
+## Runtime Packet Family State (2026-04-15)
+
+The translation-gap forensic loop now has a runtime packet family under the
+mailroom/state surface rather than the repo. This is intentional.
+
+- the repo holds the forensic authority
+- the runtime state holds the controller-ingestable packet set
+
+As of 2026-04-15, the mailroom packet loop contains fifteen packet seams:
+
+- workflow forensics
+- steward interface
+- mailroom boringness
+- node translation
+- bootstrap ladder
+- identity and SSH truth
+- verify role compliance
+- receipt visibility
+- projection honesty
+- aperture friction
+- topology and site legibility
+- capability alignment
+- runtime hygiene
+- friction telemetry
+- autonomous dispatch
+
+This matters because the runtime packet family is now broad enough to cover the
+translation gap, the node-canonical boringness path, the membrane workflow
+seam, and the final autonomy bridge without collapsing them into one giant
+mutation prompt.
+
+## Capability Registry Facts
+
+The capability registry is more weakly classified than the surrounding audit
+language suggests.
+
+Verified directly from `ops/capabilities.yaml` on 2026-04-15:
+
+- total capabilities: `145`
+- populated `layer` field count: `0`
+- populated `node_role` field count: `0`
+- populated `zone` field count: `0`
+- populated `functional_class` field count: `0`
+- `mutating + approval:auto` capabilities: `36`
+
+This means the L1/L2/L3 classification exists as doctrine and audit language,
+but not yet as enforced metadata in the registry controllers actually query.
+
+It also means the registry does not currently encode the membrane/controller
+reflection boundary in a way that prevents name-driven capability choice.
+
+## Runtime Hygiene Facts
+
+The runtime residue problem is not hypothetical.
+
+Verified directly from live state on 2026-04-15:
+
+- `17` runtime `WAVE-HONESTY-PROBE` worktrees remain under
+  `.runtime/spine/tmp/worktrees/`
+- `6` `.claude/worktrees/agent-*` entries are marked prunable
+- `1` non-prunable `.claude/worktrees/l3-promotion-spine-followon` worktree
+  remains live on commit `bbf7dc6d`
+- dead gap-claim files exist for `GAP-OP-1540`, `1542`, `1694`, `1705`,
+  `1706`, `1707`, `1708`, `1709`
+- an unexecuted lifecycle hygiene controller packet remains in `domain-state`
+- overdue plan artifacts remain under `.runtime/spine/state/plans/`
+
+The system is therefore carrying hidden open state across worktrees, gap
+claims, plans, and runtime sediment.
+
+## Friction Telemetry Facts
+
+The friction queue is large enough to be a first-class diagnostic surface even
+before recurrence normalization is complete.
+
+Verified directly from `friction-queue.ndjson` on 2026-04-15:
+
+- total friction entries: `1213`
+- `filed`: `987`
+- `closed`: `161`
+- `open`: `36`
+- `observed`: `21`
+- `matched`: `5`
+- `queued`: `3`
+
+One earlier read incorrectly described `1052` items as open. That was wrong.
+The queue distinguishes `filed` from `open`, and the verified values above are
+the authoritative current counts.
+
+What remains unverified at this time is the precise gate-recurrence breakdown,
+because the current queue entries do not expose a clean normalized top-level
+gate identifier in every row. That normalization gap is itself part of the
+forensic problem.
+
+## Autonomous Dispatch Gap
+
+The autonomy bridge is now narrow enough to name precisely.
+
+The spine already has:
+
+- packet substrate
+- loop substrate
+- receipt and linkage surfaces
+- SSH target authority
+- launchd and node-role-aware scheduler surfaces
+- watcher-driven completion notification
+
+What is not yet proven to exist is a generic first-class capability that takes
+a bounded packet, dispatches it to a headless agent process on a target node,
+supervises execution there, and returns a governed receipt without operator
+prompt injection.
+
+That is why autonomous dispatch is now a distinct forensic packet seam.
+The question is no longer "how do we build autonomy in general."
+The question is whether the path from packet-in-runtime-state to receipt-on-node
+has any hidden operator dependencies left after node enrollment and workflow
+forensics are proven.

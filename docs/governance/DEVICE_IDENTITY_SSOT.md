@@ -10,9 +10,11 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 
 # DEVICE IDENTITY SSOT
 
-> **This is the SINGLE SOURCE OF TRUTH for device naming, identity, and verification.**
+> **This is the authoritative high-level naming and network summary for kept devices.**
 >
-> Before referencing hostnames, device roles, or Tailscale/LAN IPs → CHECK THIS DOCUMENT.
+> For current operator-owned machine identity and eligibility → CHECK `ops/bindings/operator.hardware.inventory.yaml`.
+> For current SSH/access-path truth → CHECK `ops/bindings/ssh.targets.yaml`.
+> Do not use this document alone to infer live device roles or current node realization.
 > For service endpoints/ports/health routes → CHECK `docs/governance/SERVICE_REGISTRY.yaml`.
 > Before creating ANY new device/VM/service → FOLLOW THESE RULES.
 >
@@ -25,11 +27,13 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 This document establishes:
 
 1. **Naming Rules** - How hosts, VMs, and services MUST be named
-2. **Device Registry** - Canonical list of all devices with roles, IPs, verification
+2. **High-Level Device and Network Summary** - Canonical naming and current high-level network placement
 3. **Verification Commands** - How to prove each device is healthy
 4. **Retired Surface Notes** - Which historical operator surfaces are no longer governed authority
 
 **Related Documents:**
+- `ops/bindings/operator.hardware.inventory.yaml` - Current operator-owned machine identity and eligibility truth
+- `ops/bindings/ssh.targets.yaml` - Current SSH/access-path truth
 - `docs/governance/SERVICE_REGISTRY.yaml` - Service-level endpoints and health checks
 - `docs/governance/SPINE.md` - Daily authority chain and operator workflow
 
@@ -136,6 +140,8 @@ ssh pve "qm list"
 This SSOT is intentionally small: **names + identity + high-level network**.
 Deep, mutable infra detail lives in the surviving live summaries:
 
+- `ops/bindings/operator.hardware.inventory.yaml` - Operator-owned machine identity and candidacy
+- `ops/bindings/ssh.targets.yaml` - Access-path truth and current SSH routing
 - [MINILAB_SSOT.md](MINILAB_SSOT.md) - Home minilab baseline
 - [STACK_REGISTRY.yaml](STACK_REGISTRY.yaml) - Stack-to-host inventory
 - [SERVICE_REGISTRY.yaml](SERVICE_REGISTRY.yaml) - Service endpoints and health routes
@@ -304,7 +310,7 @@ curl -s https://n8n.ronny.works/healthz
 |--------|-------------------|--------------|------|-------|
 | iPhone | `iphone` | 100.73.199.85 | Mobile | Personal |
 | Firestick | `firestick` | 100.68.235.100 | Streaming | Often offline |
-| windows-mint | `windows-mint` | 100.65.199.32 | Shop Windows | Exit node |
+| windows-mint | `windows-mint` | 100.65.199.32 | Windows PC (192.168.12.x, site unconfirmed) | Candidate only — no remote admin plane, no exit node |
 | windows-parents | `windows-parents` | 100.102.167.111 | Support PC | Remote support |
 
 ---
