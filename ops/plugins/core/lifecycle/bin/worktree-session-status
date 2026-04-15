@@ -24,9 +24,12 @@ done
 
 enabled=true
 main_branch="main"
+main_upstream_ref="origin/main"
 managed_prefix="/Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine/"
 require_non_main_in_managed=true
 require_identity=true
+require_clean_main=false
+require_main_not_behind_upstream=false
 identity_env_var="OPS_WORKTREE_IDENTITY"
 bypass_env_var="OPS_WORKTREE_ISOLATION_BYPASS"
 bypass_allowed_value="1"
@@ -43,9 +46,12 @@ if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   contract_loaded=true
   enabled="$(yq e -r '.policy.enabled // true' "$CONTRACT" 2>/dev/null || echo true)"
   main_branch="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo main)"
+  main_upstream_ref="$(yq e -r '.policy.main_upstream_ref // "origin/main"' "$CONTRACT" 2>/dev/null || echo origin/main)"
   managed_prefix="$(yq e -r '.policy.managed_worktree_prefix // "/Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine/"' "$CONTRACT" 2>/dev/null || echo '/Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine/')"
   require_non_main_in_managed="$(yq e -r '.policy.require_non_main_in_managed_worktree // true' "$CONTRACT" 2>/dev/null || echo true)"
   require_identity="$(yq e -r '.policy.require_explicit_identity_on_non_main // true' "$CONTRACT" 2>/dev/null || echo true)"
+  require_clean_main="$(yq e -r '.policy.require_clean_main // false' "$CONTRACT" 2>/dev/null || echo false)"
+  require_main_not_behind_upstream="$(yq e -r '.policy.require_main_not_behind_upstream // false' "$CONTRACT" 2>/dev/null || echo false)"
   identity_env_var="$(yq e -r '.policy.identity_env_var // "OPS_WORKTREE_IDENTITY"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_IDENTITY)"
   bypass_env_var="$(yq e -r '.policy.bypass_env_var // "OPS_WORKTREE_ISOLATION_BYPASS"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS)"
   bypass_allowed_value="$(yq e -r '.policy.bypass_allowed_value // "1"' "$CONTRACT" 2>/dev/null || echo 1)"
@@ -74,6 +80,9 @@ managed_prefix="${managed_prefix%/}/"
 
 repo_root="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")"
 branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+main_dirty_paths="unknown"
+main_behind="unknown"
+main_ahead="unknown"
 
 bypass_value="${!bypass_env_var-}"
 bypass_ref_value="${!bypass_ref_env_var-}"
@@ -90,6 +99,38 @@ fi
 
 if [[ "$branch" == "HEAD" && "$allow_detached" != "true" ]]; then
   issues+=("detached HEAD is not allowed by isolation policy")
+fi
+
+if [[ "$enabled" == "true" && "$branch" == "$main_branch" ]]; then
+  if [[ "$require_clean_main" == "true" ]]; then
+    if status_lines="$(git -C "$ROOT" status --porcelain --untracked-files=all 2>/dev/null)"; then
+      if [[ -n "$status_lines" ]]; then
+        main_dirty_paths="$(printf '%s\n' "$status_lines" | sed '/^$/d' | wc -l | tr -d ' ')"
+        issues+=("main branch is dirty ($main_dirty_paths paths); mutate from a clean main or managed worktree")
+      else
+        main_dirty_paths="0"
+      fi
+    else
+      issues+=("unable to determine main branch cleanliness")
+    fi
+  fi
+
+  if [[ "$require_main_not_behind_upstream" == "true" ]]; then
+    if git -C "$ROOT" rev-parse --verify "$main_upstream_ref" >/dev/null 2>&1; then
+      counts="$(git -C "$ROOT" rev-list --left-right --count "${main_upstream_ref}...HEAD" 2>/dev/null || true)"
+      if [[ -n "$counts" ]]; then
+        main_behind="${counts%%$'\t'*}"
+        main_ahead="${counts##*$'\t'}"
+        if [[ "$main_behind" =~ ^[0-9]+$ ]] && (( main_behind > 0 )); then
+          issues+=("main branch is behind '$main_upstream_ref' by $main_behind commits; integrate before mutating")
+        fi
+      else
+        issues+=("unable to compare main branch to '$main_upstream_ref'")
+      fi
+    else
+      issues+=("main upstream ref '$main_upstream_ref' is missing")
+    fi
+  fi
 fi
 
 if [[ "$enabled" == "true" && "$branch" != "$main_branch" && "$branch" != "unknown" ]]; then
@@ -145,6 +186,10 @@ fi
 echo "worktree.session.status"
 echo "repo: $repo_root"
 echo "branch: $branch"
+echo "main_upstream_ref: $main_upstream_ref"
+echo "main_dirty_paths: $main_dirty_paths"
+echo "main_behind: $main_behind"
+echo "main_ahead: $main_ahead"
 echo "contract: $CONTRACT"
 if [[ "$contract_loaded" == "true" ]]; then
   echo "contract_loaded: yes"
