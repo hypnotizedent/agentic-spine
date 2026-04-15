@@ -13,13 +13,11 @@ Minimal landing page for live docs after the lean reset.
 
 - [governance/SPINE.md](governance/SPINE.md) - single canonical governance contract
 - [governance/SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) - session entry and closeout rules
-- [core/SPINE_STATE.md](core/SPINE_STATE.md) - what belongs in the repo and what does not
 
 ## Canonical Governance
 
 - [governance/LOCAL_CONTROL_PLANE_CONTRACT.md](governance/LOCAL_CONTROL_PLANE_CONTRACT.md)
 - [governance/STACK_REGISTRY.yaml](governance/STACK_REGISTRY.yaml)
-- [governance/SERVICE_REGISTRY.yaml](governance/SERVICE_REGISTRY.yaml)
 - [governance/DEVICE_IDENTITY_SSOT.md](governance/DEVICE_IDENTITY_SSOT.md)
 - [governance/MINILAB_SSOT.md](governance/MINILAB_SSOT.md)
 
@@ -30,13 +28,8 @@ Keep additions there instead of creating new governance roots.
 
 ## Supporting Surfaces
 
-- [reference/brain/README.md](reference/brain/README.md) - context-loading and memory rules
+- [reference/brain/memory.md](reference/brain/memory.md) - context-loading and memory rules
 - [contracts/](contracts/) - stable contract/policy docs that are still human-read
-- [reference/README.md](reference/README.md) - low-authority indexes, audits, and validation notes
-- [core/AGENTIC_GAP_MAP.md](core/AGENTIC_GAP_MAP.md) - extraction and boundary tracking
-- [core/STACK_ALIGNMENT.md](core/STACK_ALIGNMENT.md) - stack inventory alignment notes
-- [CONTRIBUTING.md](CONTRIBUTING.md) - doc placement and minimality rules
-- `../agentic-foundation/docs/product/` - extracted product and operator-heavy contracts that no longer live in the spine repo
 
 ## Directory Map
 
@@ -49,6 +42,4 @@ Keep additions there instead of creating new governance roots.
 - `docs/reference/brain/` - agent context helpers
 - `docs/reference/mint/` - retained Mint reference packets and audits
 - `docs/reference/media/` - retained media migration reference packets
-- `docs/reference/pillars/` - retained domain extraction packets that are still useful as reference
-- `docs/reference/legacy/` - quarantined historical reference
 - `docs/runbooks/` - operational runbooks
