@@ -42,6 +42,20 @@ bypass_warning="Emergency bypass only: export OPS_WORKTREE_ISOLATION_BYPASS=1"
 identity_patterns=()
 contract_loaded=false
 
+identity_matches_patterns() {
+  local candidate="${1:-}"
+  if [[ ${#identity_patterns[@]} -eq 0 ]]; then
+    return 0
+  fi
+  local pat
+  for pat in "${identity_patterns[@]}"; do
+    if [[ "$candidate" =~ $pat ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   contract_loaded=true
   enabled="$(yq e -r '.policy.enabled // true' "$CONTRACT" 2>/dev/null || echo true)"
@@ -81,14 +95,21 @@ managed_prefix="${managed_prefix%/}/"
 repo_root="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")"
 branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 main_dirty_paths="unknown"
+main_dirty_path_list=""
 main_behind="unknown"
 main_ahead="unknown"
+branch_identity_hint=""
 
 bypass_value="${!bypass_env_var-}"
 bypass_ref_value="${!bypass_ref_env_var-}"
 bypass_friction_ref_value="${!bypass_friction_ref_env_var-}"
 bypass_reason_value="${!bypass_reason_env_var-}"
 identity_value="${!identity_env_var-}"
+
+branch_leaf="${branch##*/}"
+if [[ -n "$branch_leaf" ]] && identity_matches_patterns "$branch_leaf"; then
+  branch_identity_hint="$branch_leaf"
+fi
 
 issues=()
 warnings=()
@@ -106,7 +127,8 @@ if [[ "$enabled" == "true" && "$branch" == "$main_branch" ]]; then
     if status_lines="$(git -C "$ROOT" status --porcelain --untracked-files=all 2>/dev/null)"; then
       if [[ -n "$status_lines" ]]; then
         main_dirty_paths="$(printf '%s\n' "$status_lines" | sed '/^$/d' | wc -l | tr -d ' ')"
-        issues+=("main branch is dirty ($main_dirty_paths paths); mutate from a clean main or managed worktree")
+        main_dirty_path_list="$(printf '%s\n' "$status_lines" | sed '/^$/d' | sed -E 's/^.. //' | paste -sd ',' -)"
+        issues+=("main branch is dirty ($main_dirty_paths paths: $main_dirty_path_list); mutate from a clean main or managed worktree")
       else
         main_dirty_paths="0"
       fi
@@ -155,16 +177,15 @@ if [[ "$enabled" == "true" && "$branch" != "$main_branch" && "$branch" != "unkno
 
     if [[ "$require_identity" == "true" ]]; then
       if [[ -z "$identity_value" ]]; then
-        issues+=("non-main branch '$branch' requires explicit identity env '$identity_env_var'")
-      elif [[ ${#identity_patterns[@]} -gt 0 ]]; then
-        identity_ok=false
-        for pat in "${identity_patterns[@]}"; do
-          if [[ "$identity_value" =~ $pat ]]; then
-            identity_ok=true
-            break
-          fi
-        done
-        if [[ "$identity_ok" != "true" ]]; then
+        if [[ -n "$branch_identity_hint" ]]; then
+          issues+=("non-main branch '$branch' requires explicit identity env '$identity_env_var' (suggested: export $identity_env_var=$branch_identity_hint)")
+        else
+          issues+=("non-main branch '$branch' requires explicit identity env '$identity_env_var'")
+        fi
+      elif [[ ${#identity_patterns[@]} -gt 0 ]] && ! identity_matches_patterns "$identity_value"; then
+        if [[ -n "$branch_identity_hint" ]]; then
+          issues+=("$identity_env_var='$identity_value' does not match allowed identity_patterns (branch-derived allowed value: $branch_identity_hint)")
+        else
           issues+=("$identity_env_var='$identity_value' does not match allowed identity_patterns")
         fi
       fi
