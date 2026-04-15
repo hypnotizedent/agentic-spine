@@ -53,4 +53,8 @@ for current operator rules and the first read for any agent session.
 
 Do not treat archived or historical docs as first-read entry authority.
 
+Non-promoted work, synthesis artifacts, and parked material belong in
+`.runtime/spine/state/`, not in the repo. New repo docs require deliberate
+promotion and Ronny co-sign.
+
 Session attach: `./bin/ops cap run session.v3.attach`
