@@ -10,7 +10,11 @@ Read this file first.
 
 This is the canonical agent entry surface for the current aperture.
 
+<!-- Section: STRUCTURAL ENTRY CONTRACT — stable across apertures -->
+
 ## Current Aperture
+
+<!-- Section: VOLATILE — operator-controlled, changes when Ronny lifts or narrows aperture -->
 
 As of 2026-04-13, the spine is in `post-stabilization operator surfaces` aperture.
 
@@ -42,6 +46,12 @@ Do not create new homes, folders, or doctrine surfaces unless Ronny explicitly s
 
 If a task falls outside the current aperture, refuse and name which aperture rule it violates.
 
+<!-- End section: VOLATILE -->
+
+## Authority Surface
+
+<!-- Section: STRUCTURAL ENTRY CONTRACT (continued) — stable across apertures -->
+
 Governance is loaded at session attach. This file is the canonical entry surface
 for current operator rules and the first read for any agent session.
 
@@ -51,10 +61,17 @@ for current operator rules and the first read for any agent session.
 - Translator doctrine: [`docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`](docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md)
 - Root authority: [`ops/bindings/root.authority.contract.yaml`](ops/bindings/root.authority.contract.yaml)
 
+## Session Rules
+
+<!-- Section: DERIVATIVE — reinforcement only; authority lives in SESSION_PROTOCOL.md and SPINE.md -->
+
 Do not treat archived or historical docs as first-read entry authority.
+(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md), [`SPINE.md`](docs/governance/SPINE.md))
 
 Non-promoted work, synthesis artifacts, and parked material belong in
 `.runtime/spine/state/`, not in the repo. New repo docs require deliberate
 promotion and Ronny co-sign.
+(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
 Session attach: `./bin/ops cap run session.v3.attach`
+(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
