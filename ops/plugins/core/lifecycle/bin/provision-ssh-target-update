@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Update fields on an existing ssh.targets.yaml entry. Dry-run by default;
+--execute to mutate.
+
+Mutable fields: description, mac, tags, access_policy, optional.
+Never touches: id, host, tailscale_ip, user, port, access_method,
+               probe_via, site, recovery_*.
+
+Usage:
+  ./bin/ops cap run provision.ssh-target.update -- --target-id macbook-2016-pro \
+      --description "Updated description" --mac "00:05:1b:8d:9c:69"
+
+  ./bin/ops cap run provision.ssh-target.update -- --target-id macbook-2016-pro \
+      --tags "operator-hardware,macbook,linux,home" --execute
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+def spine_state() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_STATE",
+            str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+        )
+    )
+
+
+def spine_code() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_CODE",
+            str(Path.home() / "code" / "agentic-spine"),
+        )
+    )
+
+
+IMMUTABLE_FIELDS = {"id", "host", "tailscale_ip", "user", "port", "access_method",
+                    "probe_via", "site", "recovery_target_id", "recovery_access",
+                    "recovery_status", "proved_at", "lan_ip", "connect_timeout_sec",
+                    "ssh_extra_opts", "aliases"}
+
+
+def load_ssh_targets(path: Path) -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def find_target(data: dict, target_id: str) -> dict | None:
+    for t in data.get("ssh", {}).get("targets", []):
+        if t.get("id") == target_id:
+            return t
+    return None
+
+
+def compute_changes(target: dict, args) -> list[dict]:
+    changes = []
+
+    if args.description is not None:
+        old = target.get("description", "")
+        if args.description != old:
+            changes.append({
+                "field": "description",
+                "before": old,
+                "after": args.description,
+            })
+
+    if args.mac is not None:
+        old = target.get("mac")
+        if args.mac != old:
+            changes.append({
+                "field": "mac",
+                "before": old,
+                "after": args.mac,
+            })
+
+    if args.tags is not None:
+        tag_list = [t.strip() for t in args.tags.split(",")]
+        old = target.get("tags", [])
+        if tag_list != old:
+            changes.append({
+                "field": "tags",
+                "before": old,
+                "after": tag_list,
+            })
+
+    if args.access_policy is not None:
+        old = target.get("access_policy")
+        if args.access_policy != old:
+            changes.append({
+                "field": "access_policy",
+                "before": old,
+                "after": args.access_policy,
+            })
+
+    if args.optional is not None:
+        old = target.get("optional")
+        val = args.optional.lower() in ("true", "1", "yes")
+        if val != old:
+            changes.append({
+                "field": "optional",
+                "before": old,
+                "after": val,
+            })
+
+    return changes
+
+
+def apply_changes(target: dict, changes: list[dict]) -> None:
+    for c in changes:
+        target[c["field"]] = c["after"]
+
+
+def write_receipt(args, changes: list[dict], receipt_dir: Path) -> Path:
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    receipt_path = receipt_dir / f"ssh-target-update-{args.target_id}-{ts}.yaml"
+    receipt = {
+        "capability": "provision.ssh-target.update",
+        "target_id": args.target_id,
+        "timestamp": ts,
+        "mode": "execute",
+        "changes": changes,
+    }
+    with open(receipt_path, "w") as f:
+        yaml.dump(receipt, f, default_flow_style=False, sort_keys=False)
+    return receipt_path
+
+
+def dump_yaml_preserving(data: dict, path: Path) -> None:
+    with open(path, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Update existing SSH target entry")
+    parser.add_argument("--target-id", required=True, help="Target ID to update")
+    parser.add_argument("--description", help="New description text")
+    parser.add_argument("--mac", help="MAC address to set")
+    parser.add_argument("--tags", help="Replacement tag list (comma-separated)")
+    parser.add_argument("--access-policy", help="Access policy value")
+    parser.add_argument("--optional", help="Optional flag (true/false)")
+    parser.add_argument("--execute", action="store_true", help="Actually mutate (default: dry-run)")
+    parser.add_argument("--json", action="store_true", help="JSON output")
+    args, _ = parser.parse_known_args()
+
+    # Require at least one field
+    if all(v is None for v in [args.description, args.mac, args.tags, args.access_policy, args.optional]):
+        print("ERROR: at least one of --description, --mac, --tags, --access-policy, --optional required",
+              file=sys.stderr)
+        return 1
+
+    ssh_path = spine_code() / "ops" / "bindings" / "ssh.targets.yaml"
+    data = load_ssh_targets(ssh_path)
+    target = find_target(data, args.target_id)
+
+    if target is None:
+        print(f"ERROR: target_id '{args.target_id}' not found in ssh.targets.yaml "
+              f"(use provision.ssh-target.create for new entries)", file=sys.stderr)
+        return 1
+
+    changes = compute_changes(target, args)
+
+    if not changes:
+        if args.json:
+            print(json.dumps({"status": "no_changes", "target_id": args.target_id}))
+        else:
+            print(f"provision.ssh-target.update: {args.target_id} — no changes needed")
+        return 0
+
+    mode = "execute" if args.execute else "dry-run"
+
+    if args.json:
+        result = {
+            "capability": "provision.ssh-target.update",
+            "target_id": args.target_id,
+            "mode": mode,
+            "changes": changes,
+        }
+        if args.execute:
+            apply_changes(target, changes)
+            dump_yaml_preserving(data, ssh_path)
+            receipt_path = write_receipt(args, changes, spine_state() / "provision-receipts")
+            result["receipt"] = str(receipt_path)
+            result["status"] = "applied"
+        else:
+            result["status"] = "dry_run"
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(f"provision.ssh-target.update: {args.target_id}  [{mode}]")
+        print("─" * 60)
+        for c in changes:
+            print(f"  {c['field']}:")
+            print(f"    before: {c['before']}")
+            print(f"    after:  {c['after']}")
+
+        if args.execute:
+            apply_changes(target, changes)
+            dump_yaml_preserving(data, ssh_path)
+            receipt_path = write_receipt(args, changes, spine_state() / "provision-receipts")
+            print(f"\n✓ Applied. Receipt: {receipt_path}")
+        else:
+            print(f"\n  (dry-run — add --execute to apply)")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

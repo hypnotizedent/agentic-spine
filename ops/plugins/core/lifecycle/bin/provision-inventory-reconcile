@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""Reconcile a single device entry in operator.hardware.inventory.yaml
+from explicit CLI inputs. Updates eligibility_state, evidence, constraints,
+last_assessed, and Tailscale fields. Dry-run by default; --execute to mutate.
+
+Never touches: device_id, owner, platform, model, year, site, role_candidacy, notes.
+
+Usage:
+  ./bin/ops cap run provision.inventory.reconcile -- --device-id macbook-2016-pro \
+      --eligibility-state conditionally_eligible \
+      --evidence-source /path/to/assessment.md \
+      --constraints "constraint 1" --constraints "constraint 2"
+
+  ./bin/ops cap run provision.inventory.reconcile -- --device-id macbook-2016-pro \
+      --eligibility-state conditionally_eligible \
+      --evidence-source /path/to/assessment.md \
+      --constraints "constraint 1" \
+      --execute
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+def spine_state() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_STATE",
+            str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+        )
+    )
+
+
+def spine_code() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_CODE",
+            str(Path.home() / "code" / "agentic-spine"),
+        )
+    )
+
+
+VALID_ELIGIBILITY = {"unknown", "candidate", "conditionally_eligible", "eligible", "ineligible"}
+IMMUTABLE_FIELDS = {"device_id", "owner", "platform", "model", "year", "site", "role_candidacy"}
+
+
+def load_inventory(path: Path) -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def find_device(data: dict, device_id: str) -> dict | None:
+    for m in data.get("machines", []):
+        if m.get("device_id") == device_id:
+            return m
+    return None
+
+
+def compute_changes(machine: dict, args) -> list[dict]:
+    changes = []
+
+    # eligibility_state
+    old_elig = machine.get("eligibility_state")
+    if args.eligibility_state and args.eligibility_state != old_elig:
+        changes.append({
+            "field": "eligibility_state",
+            "before": old_elig,
+            "after": args.eligibility_state,
+        })
+
+    # known_constraints
+    if args.constraints is not None:
+        old_constraints = machine.get("known_constraints", [])
+        if args.constraints != old_constraints:
+            changes.append({
+                "field": "known_constraints",
+                "before": old_constraints,
+                "after": args.constraints,
+            })
+
+    # evidence (append, never remove)
+    if args.evidence_source:
+        old_evidence = machine.get("evidence", [])
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        entry = f"{ts}: reconciled from {args.evidence_source}"
+        if entry not in old_evidence:
+            changes.append({
+                "field": "evidence",
+                "action": "append",
+                "entry": entry,
+            })
+
+    # last_assessed
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    old_assessed = machine.get("last_assessed")
+    if old_assessed != today:
+        changes.append({
+            "field": "last_assessed",
+            "before": old_assessed,
+            "after": today,
+        })
+
+    # tailscale fields
+    if args.tailscale_identity:
+        old_ts = machine.get("tailscale_identity")
+        if args.tailscale_identity != old_ts:
+            changes.append({
+                "field": "tailscale_identity",
+                "before": old_ts,
+                "after": args.tailscale_identity,
+            })
+
+    if args.tailscale_ip:
+        old_ip = machine.get("tailscale_ip")
+        if args.tailscale_ip != old_ip:
+            changes.append({
+                "field": "tailscale_ip",
+                "before": old_ip,
+                "after": args.tailscale_ip,
+            })
+
+    return changes
+
+
+def apply_changes(machine: dict, changes: list[dict]) -> None:
+    for c in changes:
+        field = c["field"]
+        if field == "evidence":
+            if "evidence" not in machine or machine["evidence"] is None:
+                machine["evidence"] = []
+            machine["evidence"].append(c["entry"])
+        elif field in ("eligibility_state", "last_assessed", "tailscale_identity", "tailscale_ip"):
+            machine[field] = c["after"]
+        elif field == "known_constraints":
+            machine["known_constraints"] = c["after"]
+
+
+def write_receipt(args, changes: list[dict], receipt_dir: Path) -> Path:
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    receipt_path = receipt_dir / f"inventory-reconcile-{args.device_id}-{ts}.yaml"
+    receipt = {
+        "capability": "provision.inventory.reconcile",
+        "device_id": args.device_id,
+        "timestamp": ts,
+        "mode": "execute",
+        "evidence_source": args.evidence_source,
+        "changes": changes,
+    }
+    with open(receipt_path, "w") as f:
+        yaml.dump(receipt, f, default_flow_style=False, sort_keys=False)
+    return receipt_path
+
+
+def dump_yaml_preserving(data: dict, path: Path) -> None:
+    """Write YAML back, preserving comments is not feasible with pyyaml,
+    but we keep the structure clean."""
+    with open(path, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Reconcile inventory entry from evidence")
+    parser.add_argument("--device-id", required=True, help="Device ID to reconcile")
+    parser.add_argument("--eligibility-state", choices=sorted(VALID_ELIGIBILITY),
+                        help="New eligibility state")
+    parser.add_argument("--evidence-source", help="Path to assessment artifact")
+    parser.add_argument("--constraints", action="append", default=None,
+                        help="Replacement constraints (repeat for multiple)")
+    parser.add_argument("--tailscale-identity", help="Tailscale hostname")
+    parser.add_argument("--tailscale-ip", help="Tailscale IP")
+    parser.add_argument("--execute", action="store_true", help="Actually mutate (default: dry-run)")
+    parser.add_argument("--json", action="store_true", help="JSON output")
+    args, _ = parser.parse_known_args()
+
+    inv_path = spine_code() / "ops" / "bindings" / "operator.hardware.inventory.yaml"
+    data = load_inventory(inv_path)
+    machine = find_device(data, args.device_id)
+
+    if machine is None:
+        print(f"ERROR: device_id '{args.device_id}' not found in inventory", file=sys.stderr)
+        return 1
+
+    changes = compute_changes(machine, args)
+
+    if not changes:
+        if args.json:
+            print(json.dumps({"status": "no_changes", "device_id": args.device_id}))
+        else:
+            print(f"provision.inventory.reconcile: {args.device_id} — no changes needed")
+        return 0
+
+    mode = "execute" if args.execute else "dry-run"
+
+    if args.json:
+        result = {
+            "capability": "provision.inventory.reconcile",
+            "device_id": args.device_id,
+            "mode": mode,
+            "changes": changes,
+        }
+        if args.execute:
+            apply_changes(machine, changes)
+            dump_yaml_preserving(data, inv_path)
+            receipt_path = write_receipt(args, changes, spine_state() / "provision-receipts")
+            result["receipt"] = str(receipt_path)
+            result["status"] = "applied"
+        else:
+            result["status"] = "dry_run"
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(f"provision.inventory.reconcile: {args.device_id}  [{mode}]")
+        print("─" * 60)
+        for c in changes:
+            if c["field"] == "evidence":
+                print(f"  evidence: +append \"{c['entry']}\"")
+            elif c["field"] == "known_constraints":
+                print(f"  known_constraints:")
+                print(f"    before: {c['before']}")
+                print(f"    after:  {c['after']}")
+            else:
+                print(f"  {c['field']}: {c.get('before', '?')} → {c.get('after', '?')}")
+
+        if args.execute:
+            apply_changes(machine, changes)
+            dump_yaml_preserving(data, inv_path)
+            receipt_path = write_receipt(args, changes, spine_state() / "provision-receipts")
+            print(f"\n✓ Applied. Receipt: {receipt_path}")
+        else:
+            print(f"\n  (dry-run — add --execute to apply)")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
