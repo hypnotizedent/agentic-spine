@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""representation-audit-summary - Read-only summary of the latest representation audit."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+
+
+AUDIT_GLOB = "REPRESENTATION-AUDIT-*.md"
+DEFAULT_AUDIT_DIR = Path("/Users/ronnyworks/code/.runtime/spine/state/domain-state/spine")
+ROW_RE = re.compile(r"^#### Row \d+: (?P<title>.+)$", re.MULTILINE)
+TABLE_ROW_RE = re.compile(r"^\| (?P<field>[^|]+?) \| (?P<value>.+?) \|$")
+FOLLOW_ON_RE = re.compile(r"^\*\*Follow-on seam\*\*: (?P<value>.+)$", re.MULTILINE)
+ORIGINAL_AUDIT_RE = re.compile(r"^original_audit_ref:\s*(?P<value>.+)$", re.MULTILINE)
+
+
+def find_latest_audit(override: str | None) -> Path:
+    if override:
+        path = Path(override)
+        if not path.is_file():
+            raise FileNotFoundError(f"audit artifact not found: {path}")
+        return path
+
+    matches = sorted(
+        DEFAULT_AUDIT_DIR.glob(AUDIT_GLOB),
+        key=lambda p: (p.stat().st_mtime, p.name),
+        reverse=True,
+    )
+    if not matches:
+        raise FileNotFoundError(f"no audit artifacts found under {DEFAULT_AUDIT_DIR}")
+    return matches[0]
+
+
+def parse_bool(value: str) -> bool:
+    return value.strip().lower() in {"true", "yes", "1"}
+
+
+def parse_rows(text: str) -> list[dict[str, object]]:
+    matches = list(ROW_RE.finditer(text))
+    rows: list[dict[str, object]] = []
+    for idx, match in enumerate(matches):
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        block = text[start:end]
+        row: dict[str, object] = {"row_title": match.group("title").strip()}
+        for line in block.splitlines():
+            table_match = TABLE_ROW_RE.match(line.strip())
+            if not table_match:
+                continue
+            field = table_match.group("field").strip()
+            value = table_match.group("value").strip()
+            if field == "on_entry_path":
+                row[field] = parse_bool(value)
+            else:
+                row[field] = value
+        follow_on = FOLLOW_ON_RE.search(block)
+        if follow_on:
+            row["follow_on_seam"] = follow_on.group("value").strip()
+        rows.append(row)
+    return rows
+
+
+def resolve_rows_source(audit_path: Path, text: str) -> Path:
+    rows = parse_rows(text)
+    if rows:
+        return audit_path
+    original_match = ORIGINAL_AUDIT_RE.search(text)
+    if not original_match:
+        raise ValueError(f"no audit rows parsed from {audit_path}")
+    original_name = original_match.group("value").strip()
+    original_path = audit_path.parent / original_name
+    if not original_path.is_file():
+        raise FileNotFoundError(f"original audit artifact not found: {original_path}")
+    return original_path
+
+
+def build_summary(rows: list[dict[str, object]], audit_path: Path, rows_source: Path) -> dict[str, object]:
+    counts = Counter(str(row.get("classification", "unknown")).strip() for row in rows)
+    follow_on_seams = []
+    overloaded = []
+    non_clean = []
+    for row in rows:
+        classification = str(row.get("classification", "")).strip()
+        name = str(row.get("declared_name") or row.get("row_title") or "").strip()
+        if seam := row.get("follow_on_seam"):
+            follow_on_seams.append({"name": name, "seam": seam})
+        if classification == "overloaded":
+            overloaded.append(
+                {
+                    "name": name,
+                    "source": row.get("declared_authority_source", ""),
+                    "consequence": row.get("consequence", ""),
+                }
+            )
+        if classification in {"duplicated", "drift", "orphaned"}:
+            non_clean.append(
+                {
+                    "name": name,
+                    "classification": classification,
+                    "consequence": row.get("consequence", ""),
+                }
+            )
+    entry_path_non_clean = [
+        {
+            "name": str(row.get("declared_name") or row.get("row_title") or "").strip(),
+            "classification": str(row.get("classification", "")).strip(),
+            "consequence": row.get("consequence", ""),
+        }
+        for row in rows
+        if row.get("on_entry_path") is True and str(row.get("classification", "")).strip() != "clean"
+    ]
+    return {
+        "artifact_path": str(audit_path),
+        "rows_source_path": str(rows_source),
+        "row_count": len(rows),
+        "count_by_classification": dict(sorted(counts.items())),
+        "overloaded_nouns": overloaded,
+        "duplicated_drift_or_orphaned": non_clean,
+        "entry_path_non_clean": entry_path_non_clean,
+        "follow_on_seams": follow_on_seams,
+        "rows": rows,
+    }
+
+
+def render_human(summary: dict[str, object]) -> str:
+    counts = summary["count_by_classification"]
+    lines = [
+        "=== REPRESENTATION AUDIT SUMMARY ===",
+        f"artifact: {summary['artifact_path']}",
+        f"rows_source: {summary['rows_source_path']}",
+        f"rows: {summary['row_count']}",
+        "counts:",
+    ]
+    for key, value in counts.items():
+        lines.append(f"  {key}: {value}")
+
+    overloaded = summary["overloaded_nouns"]
+    lines.append("")
+    lines.append(f"overloaded nouns: {len(overloaded)}")
+    for item in overloaded:
+        lines.append(f"  - {item['name']}: {item['consequence']}")
+
+    non_clean = summary["duplicated_drift_or_orphaned"]
+    lines.append("")
+    lines.append(f"duplicated/drift/orphaned nouns: {len(non_clean)}")
+    for item in non_clean:
+        lines.append(f"  - {item['classification']}: {item['name']} — {item['consequence']}")
+
+    entry_path = summary["entry_path_non_clean"]
+    lines.append("")
+    lines.append(f"entry-path non-clean nouns: {len(entry_path)}")
+    for item in entry_path:
+        lines.append(f"  - {item['classification']}: {item['name']}")
+
+    seams = summary["follow_on_seams"]
+    lines.append("")
+    lines.append(f"follow-on seams: {len(seams)}")
+    for item in seams:
+        lines.append(f"  - {item['name']}: {item['seam']}")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="representation-audit-summary",
+        description="Summarize the latest representation audit artifact.",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of human text.")
+    parser.add_argument("--artifact", help="Override audit artifact path.")
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Validate that the latest artifact can be parsed and summarized.",
+    )
+    args = parser.parse_args()
+
+    try:
+        audit_path = find_latest_audit(args.artifact)
+        text = audit_path.read_text(encoding="utf-8")
+        rows_source = resolve_rows_source(audit_path, text)
+        rows_text = rows_source.read_text(encoding="utf-8")
+        rows = parse_rows(rows_text)
+        if not rows:
+            raise ValueError(f"no audit rows parsed from {rows_source}")
+        summary = build_summary(rows, audit_path, rows_source)
+    except Exception as exc:
+        print(f"representation.audit.summary FAIL: {exc}", file=sys.stderr)
+        return 1
+
+    if args.self_check:
+        print("representation.audit.summary self-check PASS")
+        return 0
+
+    if args.json:
+        print(json.dumps(summary, indent=2))
+    else:
+        print(render_human(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
