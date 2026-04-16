@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+"""network.home.dhcp.reservation.status — Per-device DHCP reservation truth.
+
+Read-only: queries home UniFi API via proxmox-home SSH proxy to answer
+whether a specific device has the expected DHCP reservation on UDR7.
+
+Looks up the device from home.device.registry.yaml or
+operator.hardware.inventory.yaml, then cross-references against UniFi
+configured-client data (rest/user endpoint).
+
+Output: expected_ip, observed reservation state, source, pass/fail/unknown, reason.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml
+except ImportError:
+    print("STOP (2): PyYAML not installed", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def expand(raw: str | Path) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
+
+
+def git_top_level(start: Path) -> Path | None:
+    probe = start if start.is_dir() else start.parent
+    proc = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+        text=True, capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    return Path(stdout).resolve() if stdout else None
+
+
+def resolve_root() -> Path:
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+    script_root = git_top_level(Path(__file__).resolve())
+    if script_root is not None:
+        return script_root
+    for env_name in ("SPINE_TARGET_REPO", "SPINE_ROOT", "SPINE_REPO", "SPINE_CODE"):
+        value = os.environ.get(env_name)
+        if value:
+            return expand(value)
+    return expand(Path(__file__).resolve().parents[4])
+
+
+ROOT = resolve_root()
+SSH_BINDING = ROOT / "ops/bindings/ssh.targets.yaml"
+HOME_REGISTRY = ROOT / "ops/bindings/home.device.registry.yaml"
+OPERATOR_INVENTORY = ROOT / "ops/bindings/operator.hardware.inventory.yaml"
+INFISICAL_AGENT = ROOT / "ops/plugins/providers/bin/infisical-agent.sh"
+
+
+def fail(message: str, code: int = 1) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+# ── Device lookup ──────────────────────────────────────────────────────────
+
+
+def _load_ssh_target(device_id: str | None, mac: str | None) -> dict[str, Any]:
+    """Find matching SSH target entry by id or MAC for IP/MAC enrichment."""
+    data = load_yaml(SSH_BINDING)
+    ssh_cfg = data.get("ssh", {}) if isinstance(data, dict) else {}
+    targets = ssh_cfg.get("targets", []) if isinstance(ssh_cfg, dict) else []
+    for t in targets:
+        if not isinstance(t, dict):
+            continue
+        if device_id and t.get("id") == device_id:
+            return t
+        if mac and (t.get("mac") or "").lower() == mac.lower():
+            return t
+    return {}
+
+
+def lookup_device(device_id: str | None, mac: str | None) -> dict[str, Any] | None:
+    """Find device in home registry, operator inventory, or SSH targets by id or MAC."""
+    sources: list[tuple[str, Path, str, str]] = [
+        ("home.device.registry", HOME_REGISTRY, "devices", "id"),
+        ("operator.hardware.inventory", OPERATOR_INVENTORY, "machines", "device_id"),
+    ]
+    for source_name, path, list_key, id_key in sources:
+        data = load_yaml(path)
+        items = data.get(list_key, [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if device_id and item.get(id_key) == device_id:
+                result = {**item, "_source": source_name, "_id_key": id_key}
+                # Enrich from SSH targets if registry lacks ip or mac
+                ssh_t = _load_ssh_target(device_id, mac or item.get("mac"))
+                if not result.get("ip") and ssh_t.get("host"):
+                    result["_ssh_ip"] = ssh_t["host"]
+                if not result.get("mac") and ssh_t.get("mac"):
+                    result["_ssh_mac"] = ssh_t["mac"]
+                return result
+            if mac and (item.get("mac") or "").lower() == mac.lower():
+                result = {**item, "_source": source_name, "_id_key": id_key}
+                ssh_t = _load_ssh_target(item.get(id_key), mac)
+                if not result.get("ip") and ssh_t.get("host"):
+                    result["_ssh_ip"] = ssh_t["host"]
+                return result
+    # Fall back to SSH target as source if device not in any registry
+    ssh_t = _load_ssh_target(device_id, mac)
+    if ssh_t:
+        return {
+            **ssh_t,
+            "_source": "ssh.targets",
+            "_id_key": "id",
+            "ip": ssh_t.get("host"),
+        }
+    return None
+
+
+def device_expected_ip(device: dict[str, Any]) -> str | None:
+    """Extract expected IP from device record."""
+    ip = device.get("ip")
+    if ip and ip != "dynamic":
+        return str(ip)
+    # Check SSH-enriched IP
+    ssh_ip = device.get("_ssh_ip")
+    if ssh_ip:
+        return str(ssh_ip)
+    return None
+
+
+def device_mac(device: dict[str, Any]) -> str | None:
+    """Extract MAC from device record. Operator inventory may not have it directly."""
+    mac_val = device.get("mac")
+    if mac_val:
+        return str(mac_val).lower()
+    ssh_mac = device.get("_ssh_mac")
+    if ssh_mac:
+        return str(ssh_mac).lower()
+    return None
+
+
+def device_needs_reservation(device: dict[str, Any]) -> bool:
+    """Determine if device category implies reservation is expected."""
+    category = device.get("category", "")
+    if category in ("infrastructure", "coordinator", "iot"):
+        return True
+    # Operator inventory machines always need reservations if they have a site
+    source = device.get("_source", "")
+    if source == "operator.hardware.inventory":
+        site = device.get("site")
+        return site is not None and site != ""
+    return category not in ("personal",)
+
+
+# ── SSH / API ──────────────────────────────────────────────────────────────
+
+
+def resolve_ssh_targets() -> tuple[str, str, str]:
+    payload = load_yaml(SSH_BINDING)
+    ssh_cfg = payload.get("ssh", {}) if isinstance(payload, dict) else {}
+    targets = ssh_cfg.get("targets", []) if isinstance(ssh_cfg, dict) else []
+
+    udr = next((t for t in targets if isinstance(t, dict) and t.get("id") == "udr-home"), {})
+    proxy = next((t for t in targets if isinstance(t, dict) and t.get("id") == "proxmox-home"), {})
+
+    udr_host = str(udr.get("host", "")).strip()
+    proxy_host = str(proxy.get("host", "")).strip()
+    proxy_user = str(proxy.get("user", "root") or "root").strip()
+
+    if not udr_host:
+        fail("STOP (2): udr-home not found in ssh.targets.yaml", 2)
+    if not proxy_host:
+        fail("STOP (2): proxmox-home not found in ssh.targets.yaml", 2)
+    return udr_host, proxy_host, proxy_user
+
+
+def resolve_api_key() -> str:
+    explicit = os.environ.get("UNIFI_HOME_API_KEY", "").strip()
+    if explicit:
+        return explicit
+    if not INFISICAL_AGENT.is_file():
+        fail("STOP (2): UNIFI_HOME_API_KEY not available and infisical agent missing", 2)
+    env = os.environ.copy()
+    env["SPINE_ROOT"] = str(ROOT)
+    env["SPINE_REPO"] = str(ROOT)
+    env["SPINE_CODE"] = str(ROOT)
+    proc = subprocess.run(
+        [str(INFISICAL_AGENT), "get-cached", "infrastructure", "prod", "UNIFI_HOME_API_KEY"],
+        text=True, capture_output=True, env=env,
+    )
+    value = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not value:
+        fail("STOP (2): UNIFI_HOME_API_KEY not available (check Infisical infrastructure/prod)", 2)
+    return value
+
+
+def query_configured_clients() -> dict[str, dict[str, Any]]:
+    """Query UniFi rest/user endpoint for configured clients with reservation data."""
+    udr_host, proxy_host, proxy_user = resolve_ssh_targets()
+    api_key = resolve_api_key()
+
+    ssh_args = [
+        "ssh",
+        "-o", "ConnectTimeout=10",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "BatchMode=yes",
+        "-o", "LogLevel=ERROR",
+        f"{proxy_user}@{proxy_host}",
+        "bash", "-s",
+    ]
+    script = (
+        f'curl -sk "https://{udr_host}/proxy/network/api/s/default/rest/user" '
+        f'-H "X-API-KEY: {api_key}" '
+        '-H "Accept: application/json" 2>/dev/null'
+    )
+    proc = subprocess.run(ssh_args, input=script, text=True, capture_output=True)
+    if proc.returncode != 0:
+        fail(f"FAIL: could not reach UniFi API via proxmox-home\n{proc.stderr.strip()}".rstrip())
+
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        fail("FAIL: could not parse UniFi API response")
+
+    data = payload.get("data", [])
+    if not isinstance(data, list):
+        fail("FAIL: unexpected UniFi API response structure")
+
+    return {
+        str(c.get("mac", "")).lower(): c
+        for c in data
+        if isinstance(c, dict) and c.get("mac")
+    }
+
+
+# ── Main ──────────────────────────────────────────────────────────────────
+
+
+def check_reservation(device_id: str | None, mac_arg: str | None, json_mode: bool) -> int:
+    # Step 1: Find device
+    device = lookup_device(device_id, mac_arg)
+    if device is None:
+        label = device_id or mac_arg or "(none)"
+        result = {
+            "device": label,
+            "status": "fail",
+            "reason": f"device not found in home.device.registry or operator.hardware.inventory",
+            "source_queried": "none",
+        }
+        if json_mode:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"FAIL: {label} — not found in any registry")
+        return 1
+
+    dev_id = device.get(device.get("_id_key", "id"), "unknown")
+    dev_mac = device_mac(device)
+    expected_ip = device_expected_ip(device)
+    source = device.get("_source", "unknown")
+    needs = device_needs_reservation(device)
+
+    if not dev_mac:
+        result = {
+            "device": dev_id,
+            "source_registry": source,
+            "status": "unknown",
+            "reason": "no MAC address in registry — cannot query UniFi",
+            "source_queried": "none",
+        }
+        if json_mode:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"UNKNOWN: {dev_id} — no MAC in registry, cannot query UniFi")
+        return 0
+
+    if not expected_ip:
+        result = {
+            "device": dev_id,
+            "mac": dev_mac,
+            "source_registry": source,
+            "status": "info",
+            "reason": "no expected IP in registry (dynamic or unset)",
+            "source_queried": "none",
+        }
+        if json_mode:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"INFO: {dev_id} ({dev_mac}) — no expected IP in registry (dynamic or unset)")
+        return 0
+
+    # Step 2: Query UniFi
+    print(f"network.home.dhcp.reservation.status", file=sys.stderr)
+    print(f"querying UDR7 via proxmox-home for {dev_id} ({dev_mac})...", file=sys.stderr)
+
+    clients = query_configured_clients()
+    client = clients.get(dev_mac)
+
+    if client is None:
+        status = "fail" if needs else "info"
+        reason = "device MAC not found in UniFi configured-client list"
+        result = {
+            "device": dev_id,
+            "mac": dev_mac,
+            "expected_ip": expected_ip,
+            "reservation_present": False,
+            "reserved_ip": None,
+            "match": False,
+            "status": status,
+            "reason": reason,
+            "source_registry": source,
+            "source_queried": "unifi_rest_user_via_proxmox_home",
+            "needs_reservation": needs,
+        }
+        if json_mode:
+            print(json.dumps(result, indent=2))
+        else:
+            label = "FAIL" if needs else "INFO"
+            print(f"{label}: {dev_id} ({dev_mac}) — {reason}")
+        return 1 if needs else 0
+
+    # Step 3: Check reservation
+    has_reservation = bool(client.get("use_fixedip", False))
+    fixed_ip = str(client.get("fixed_ip", "") or "")
+    observed_ip = str(client.get("ip") or client.get("last_ip") or "")
+    unifi_name = str(client.get("name") or client.get("hostname") or "")
+
+    if has_reservation and fixed_ip == expected_ip:
+        status = "pass"
+        reason = f"DHCP reservation matches: {fixed_ip}"
+    elif has_reservation and fixed_ip != expected_ip:
+        status = "fail"
+        reason = f"DHCP reservation mismatch: expected={expected_ip}, reserved={fixed_ip}"
+    elif needs:
+        status = "fail"
+        reason = f"no DHCP reservation (expected {expected_ip}, will drift on reboot)"
+    else:
+        status = "info"
+        reason = f"no reservation (dynamic/{device.get('category', 'unknown')} — expected)"
+
+    result = {
+        "device": dev_id,
+        "mac": dev_mac,
+        "expected_ip": expected_ip,
+        "reservation_present": has_reservation,
+        "reserved_ip": fixed_ip if has_reservation else None,
+        "observed_ip": observed_ip,
+        "unifi_name": unifi_name,
+        "match": has_reservation and fixed_ip == expected_ip,
+        "status": status,
+        "reason": reason,
+        "source_registry": source,
+        "source_queried": "unifi_rest_user_via_proxmox_home",
+        "needs_reservation": needs,
+    }
+
+    if json_mode:
+        print(json.dumps(result, indent=2))
+    else:
+        label = status.upper()
+        lines = [
+            f"{label}: {dev_id}",
+            f"  mac:            {dev_mac}",
+            f"  expected_ip:    {expected_ip}",
+            f"  reservation:    {'yes' if has_reservation else 'no'}",
+        ]
+        if has_reservation:
+            lines.append(f"  reserved_ip:    {fixed_ip}")
+        if observed_ip:
+            lines.append(f"  observed_ip:    {observed_ip}")
+        if unifi_name:
+            lines.append(f"  unifi_name:     {unifi_name}")
+        lines.append(f"  source:         UDR7 rest/user via proxmox-home")
+        lines.append(f"  registry:       {source}")
+        lines.append(f"  reason:         {reason}")
+        print("\n".join(lines))
+
+    return 0 if status in ("pass", "info") else 1
+
+
+def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Per-device home DHCP reservation status check via UniFi API"
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--device-id", help="Device ID from home registry or operator inventory")
+    group.add_argument("--mac", help="Device MAC address (any case, colon-separated)")
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
+    parser.add_argument("--", dest="ignored", nargs="*", help=argparse.SUPPRESS)
+
+    args = parser.parse_args()
+    return check_reservation(args.device_id, args.mac, args.json)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
