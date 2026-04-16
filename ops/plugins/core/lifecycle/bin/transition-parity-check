@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -105,6 +106,62 @@ def read_status_json(repo_root: Path) -> dict[str, Any] | None:
 
 LIVE_STATUSES = {"active", "open", "draft", "planned"}
 CLOSED_STATUSES = {"closed", "completed", "deferred", "superseded", "abandoned", "landed"}
+RECEIPT_DISCIPLINE_EPOCH_UTC = "2026-04-14T00:00:00Z"
+
+
+def _parse_utc_timestamp(raw: str | None) -> datetime | None:
+    """Parse spine timestamp strings into UTC-aware datetimes."""
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            try:
+                parsed = datetime.strptime(text, "%Y-%m-%d")
+            except ValueError:
+                return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+RECEIPT_DISCIPLINE_EPOCH = _parse_utc_timestamp(RECEIPT_DISCIPLINE_EPOCH_UTC)
+LOOP_ID_DATE_RE = re.compile(r"-(\d{8}|\d{4}-\d{2}-\d{2})$")
+
+
+def _loop_id_epoch_hint(loop_id: str | None) -> datetime | None:
+    if not loop_id:
+        return None
+    match = LOOP_ID_DATE_RE.search(str(loop_id).strip())
+    if not match:
+        return None
+    raw = match.group(1)
+    if len(raw) == 8:
+        raw = f"{raw[0:4]}-{raw[4:6]}-{raw[6:8]}"
+    return _parse_utc_timestamp(raw)
+
+
+def _receipt_expected(loop: dict[str, Any]) -> bool:
+    """Only require loop closeout receipts after the modern discipline epoch."""
+    if RECEIPT_DISCIPLINE_EPOCH is None:
+        return True
+    closed_at = _parse_utc_timestamp(
+        loop.get("closed_at")
+        or loop.get("created")
+        or _loop_id_epoch_hint(loop.get("loop_id"))
+        or loop.get("updated_at_utc")
+        or loop.get("created_at_utc")
+    )
+    if closed_at is None:
+        return True
+    return closed_at >= RECEIPT_DISCIPLINE_EPOCH
 
 
 def check_c1_scope_vs_sqlite(
@@ -330,6 +387,8 @@ def check_warnings(
         status = (loop.get("status") or "").lower()
         lid = loop.get("loop_id", "")
         if status in CLOSED_STATUSES and lid:
+            if not _receipt_expected(loop):
+                continue
             receipt_path = evidence_dir / f"{lid}.closeout.md"
             if not receipt_path.exists():
                 warnings.append({
