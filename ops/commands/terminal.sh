@@ -23,6 +23,11 @@ set -euo pipefail
 SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROLE_CONTRACT="$SPINE_ROOT/ops/bindings/terminal.role.contract.yaml"
 
+# Resolve runtime paths canonically before any path usage
+RUNTIME_PATHS_LIB="$SPINE_ROOT/ops/lib/runtime-paths.sh"
+# shellcheck source=/dev/null
+[[ -f "$RUNTIME_PATHS_LIB" ]] && . "$RUNTIME_PATHS_LIB" && spine_runtime_resolve_paths
+
 POSTURE_HELPER="$SPINE_ROOT/ops/plugins/core/lifecycle/lib/session_posture.sh"
 # shellcheck source=/dev/null
 [[ -f "$POSTURE_HELPER" ]] && . "$POSTURE_HELPER"
@@ -146,7 +151,7 @@ fi
 #   - entry-compile failure → keep empty (degraded truth, no silent attach)
 if [[ -z "$LOOP_ID" ]]; then
     ENTRY_COMPILE_BIN="$SPINE_ROOT/ops/plugins/core/lifecycle/bin/entry-compile"
-    _STATE_ROOT="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+    _STATE_ROOT="$SPINE_STATE"
     if [[ -f "$ENTRY_COMPILE_BIN" && -d "$_STATE_ROOT/loop-scopes" ]]; then
         AUTO_LOOP="$(python3 "$ENTRY_COMPILE_BIN" --state-root "$_STATE_ROOT" 2>/dev/null \
             | python3 -c "

@@ -17,6 +17,7 @@ snapshot_surface_init() {
   local runtime_paths="$SNAPSHOT_SURFACE_ROOT/ops/lib/runtime-paths.sh"
   if [[ -f "$runtime_paths" ]]; then
     source "$runtime_paths"
+    spine_runtime_resolve_paths
   fi
 
   while [[ $# -gt 0 ]]; do

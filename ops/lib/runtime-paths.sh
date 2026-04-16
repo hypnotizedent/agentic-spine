@@ -602,7 +602,7 @@ spine_resolve_mailroom_path() {
 }
 
 spine_contract_ack_dir() {
-  local state="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+  local state="${SPINE_STATE:?spine_contract_ack_dir requires SPINE_STATE (call spine_runtime_resolve_paths first)}"
   printf '%s\n' "$state/bootstrap/contract-read"
 }
 
@@ -614,7 +614,7 @@ spine_contract_ack_file() {
 
 spine_resolve_domain_state() {
   local subpath="${1:-}"
-  local domain_state="${SPINE_DOMAIN_STATE:-$HOME/code/.data}"
+  local domain_state="${SPINE_DOMAIN_STATE:?spine_resolve_domain_state requires SPINE_DOMAIN_STATE (call spine_runtime_resolve_paths first)}"
   local full_path="$domain_state"
   [[ -z "$subpath" ]] || full_path="$domain_state/$subpath"
   mkdir -p "$(dirname "$full_path")" 2>/dev/null || true
