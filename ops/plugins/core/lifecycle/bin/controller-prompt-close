@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""controller-prompt-close — CLI for controller_prompt.close capability.
+
+Closes a controller-prompt packet with governed receipt via packet_receipt_writer.
+Two write targets only: packet frontmatter + EXEC_RECEIPT YAML.
+
+Exit codes:
+  0  success (or already closed)
+  1  close failed
+  2  invalid arguments
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import controller_prompt_close as cpc
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="controller-prompt-close",
+        description="Close a controller-prompt packet with governed receipt.",
+    )
+    parser.add_argument(
+        "--packet", required=True,
+        help="Path to controller-prompt packet file",
+    )
+    parser.add_argument(
+        "--disposition", required=True,
+        choices=sorted(cpc.LEGAL_DISPOSITIONS),
+        help="Close disposition",
+    )
+    parser.add_argument(
+        "--summary", required=True,
+        help="Operator summary of what the packet accomplished",
+    )
+    parser.add_argument(
+        "--starting-head", default="",
+        help="Git SHA at packet open (optional; defaults to ending-head)",
+    )
+    parser.add_argument(
+        "--evidence-refs", nargs="*", default=None,
+        help="Paths to receipts/artifacts produced during execution",
+    )
+    parser.add_argument(
+        "--verify-result", default="",
+        choices=["pass", "fail", "skip", ""],
+        help="Last verify result (optional)",
+    )
+    parser.add_argument(
+        "--blockers", nargs="*", default=None,
+        help="Residual blockers (optional)",
+    )
+    parser.add_argument(
+        "--completion-level", default="",
+        help="Completion level (optional)",
+    )
+    parser.add_argument(
+        "--handoff-refs", nargs="*", default=None,
+        help="Handoff IDs emitted during execution (optional)",
+    )
+    parser.add_argument(
+        "--json", action="store_true", dest="json_output",
+        help="Emit JSON output",
+    )
+    parser.add_argument(
+        "--self-check", action="store_true",
+        help="Verify dependencies and exit",
+    )
+
+    # Handle --self-check before full parse (required args not needed)
+    if "--self-check" in sys.argv:
+        try:
+            import packet_receipt_writer  # noqa: F401
+            import yaml  # noqa: F401
+            print("controller_prompt.close self-check PASS")
+            return 0
+        except ImportError as exc:
+            print(f"controller_prompt.close self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+
+    args = parser.parse_args()
+
+    if args.self_check:
+        try:
+            import packet_receipt_writer  # noqa: F401
+            import yaml  # noqa: F401
+            print("controller_prompt.close self-check PASS")
+            return 0
+        except ImportError as exc:
+            print(f"controller_prompt.close self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+
+    spine_repo = str(ROOT)
+
+    try:
+        result = cpc.close_packet(
+            packet_path=args.packet,
+            disposition=args.disposition,
+            operator_summary=args.summary,
+            spine_repo=spine_repo,
+            starting_head=args.starting_head,
+            evidence_refs=args.evidence_refs,
+            verify_result=args.verify_result,
+            blockers=args.blockers,
+            completion_level=args.completion_level,
+            handoff_refs=args.handoff_refs,
+        )
+    except cpc.ControllerPromptCloseError as exc:
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            print(f"controller_prompt.close FAIL: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        status = result.get("status", "unknown")
+        packet_id = result.get("packet_id", "")
+        receipt_path = result.get("receipt_path", "")
+        message = result.get("message", "")
+
+        if status == "already_closed":
+            print(f"OK: {packet_id} already closed")
+        elif status == "closed":
+            print(f"CLOSED: {packet_id}")
+            print(f"  receipt: {receipt_path}")
+            print(f"  disposition: {result.get('disposition', '')}")
+        elif status == "partial_failure":
+            print(f"PARTIAL: {packet_id}")
+            print(f"  receipt: {receipt_path} (written)")
+            print(f"  frontmatter: FAILED — {result.get('frontmatter_error', '')}")
+            print(f"  {message}")
+            return 1
+        else:
+            print(f"{status}: {message}")
+
+    return 0 if result.get("status") in ("closed", "already_closed") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
