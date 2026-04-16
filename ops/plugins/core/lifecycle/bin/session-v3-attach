@@ -273,6 +273,81 @@ print(f'_RT_CAND_COUNT={len(cands)}')
     fi
 fi
 
+# ── Compiled entry (best-effort, non-blocking) ───────────────────────────
+# Calls entry.compile to surface the current assignment from loop scope,
+# execution tracker, and packet prompt. This makes compiled assignment
+# visible at every session birth without operator habit.
+ENTRY_COMPILE_BIN="$SPINE_ROOT/ops/plugins/core/lifecycle/bin/entry-compile"
+ENTRY_COMPILE_STATE=""
+ENTRY_COMPILE_LOOP=""
+ENTRY_COMPILE_PACKET=""
+ENTRY_COMPILE_SOURCES=""
+ENTRY_COMPILE_STOP=""
+ENTRY_COMPILE_MUTATION=""
+ENTRY_COMPILE_HANDOFF=""
+
+if [[ -f "$ENTRY_COMPILE_BIN" ]]; then
+    ENTRY_COMPILE_JSON="$(python3 "$ENTRY_COMPILE_BIN" --state-root "${SPINE_STATE:-}" 2>/dev/null || true)"
+    if [[ -n "$ENTRY_COMPILE_JSON" ]]; then
+        eval "$(python3 -c "
+import json, sys, shlex
+d = json.loads(sys.stdin.read())
+print(f'ENTRY_COMPILE_STATE={shlex.quote(str(d.get(\"compilation_state\", \"unknown\")))}')
+print(f'ENTRY_COMPILE_LOOP={shlex.quote(str(d.get(\"loop_id\") or \"<none>\"))}')
+pid = d.get('packet_id')
+pid_display = '<none>' if (not pid or str(pid).lower() == 'none') else str(pid)
+print(f'ENTRY_COMPILE_PACKET={shlex.quote(pid_display)}')
+sources = d.get('context_sources') or []
+print(f'ENTRY_COMPILE_SOURCES={shlex.quote(str(len(sources)) + \" file(s)\")}')
+stop = d.get('stop_condition')
+if isinstance(stop, list):
+    stop = '; '.join(stop)
+print(f'ENTRY_COMPILE_STOP={shlex.quote(str(stop or \"<none>\"))}')
+mg = d.get('mutation_ground') or {}
+mut_str = f'permitted={mg.get(\"mutation_permitted\", \"?\")} role={mg.get(\"runtime_role\", \"?\")}'
+print(f'ENTRY_COMPILE_MUTATION={shlex.quote(mut_str)}')
+print(f'ENTRY_COMPILE_HANDOFF={shlex.quote(str(d.get(\"handoff_target\") or \"<none>\"))}')
+# Ambiguous case: list candidates
+cands = d.get('loop_candidates') or []
+for i, c in enumerate(cands[:5]):
+    print(f'ENTRY_COMPILE_CAND{i}_ID={shlex.quote(str(c.get(\"loop_id\", \"\")))}')
+    print(f'ENTRY_COMPILE_CAND{i}_OBJ={shlex.quote(str(c.get(\"objective\", \"\"))[:80])}')
+print(f'ENTRY_COMPILE_CAND_COUNT={len(cands)}')
+" <<< "$ENTRY_COMPILE_JSON" 2>/dev/null)" || true
+    fi
+fi
+
+if [[ -n "$ENTRY_COMPILE_STATE" ]]; then
+    echo "── compiled entry ──────────────────────────────────────────────"
+    echo "  compilation:     ${ENTRY_COMPILE_STATE}"
+    echo "  loop:            ${ENTRY_COMPILE_LOOP}"
+    echo "  packet:          ${ENTRY_COMPILE_PACKET}"
+    echo "  context:         ${ENTRY_COMPILE_SOURCES}"
+    echo "  stop:            ${ENTRY_COMPILE_STOP}"
+    echo "  mutation:        ${ENTRY_COMPILE_MUTATION}"
+    echo "  handoff:         ${ENTRY_COMPILE_HANDOFF}"
+    # Show candidates if ambiguous
+    if [[ "$ENTRY_COMPILE_STATE" == "ambiguous" && "${ENTRY_COMPILE_CAND_COUNT:-0}" -gt 0 ]]; then
+        echo ""
+        echo "  active loop candidates (operator must select):"
+        for i in $(seq 0 $(("${ENTRY_COMPILE_CAND_COUNT}" - 1))); do
+            eval "_cid=\${ENTRY_COMPILE_CAND${i}_ID:-}"
+            eval "_cobj=\${ENTRY_COMPILE_CAND${i}_OBJ:-}"
+            echo "    - ${_cid}: ${_cobj}"
+        done
+    fi
+    # Suggest provenance capture when a packet is identified
+    if [[ "${ENTRY_COMPILE_PACKET}" != "<none>" && "${ENTRY_COMPILE_PACKET}" != "none" ]]; then
+        # Check if provenance checkpoint is stale (different packet or missing)
+        if [[ "${PROV_CHECKPOINT_PACKET:-}" != "${ENTRY_COMPILE_PACKET}" ]]; then
+            echo ""
+            echo "  provenance:      stale or missing for current packet"
+            echo "  action:          ops cap run session.packet.provenance.capture"
+        fi
+    fi
+    echo ""
+fi
+
 # ── --emit-env handling ────────────────────────────────────────────────────
 if [[ "$EMIT_ENV" -eq 1 ]]; then
     if [[ "$POSTURE_OK" -eq 1 ]] && command -v session_posture_emit_env >/dev/null 2>&1; then
@@ -289,7 +364,7 @@ fi
 # the banner already knows. Packet-level fields remain null (operator judgment).
 if [[ "$EMIT_ASSIGNMENT" -eq 1 ]]; then
     echo "── compiled assignment (partial) ────────────────────────────────"
-    SPINE_ROOT_EXPORT="$SPINE_ROOT" python3 - \
+    SPINE_ROOT_EXPORT="$SPINE_ROOT" ENTRY_COMPILE_JSON="${ENTRY_COMPILE_JSON:-}" python3 - \
         "${OPS_TERMINAL_ROLE:-}" \
         "${SPINE_RUNTIME_ROLE:-}" \
         "${WORKTREE_STATUS_BRIEF:-}" \
@@ -452,7 +527,7 @@ assignment = {
     "provenance_checkpoint_id": prov_checkpoint_id,
     "provenance_checkpoint_packet": prov_checkpoint_packet,
     "provenance_checkpoint_recorded": prov_checkpoint_recorded,
-    # Fields requiring operator judgment — explicitly null
+    # Fields from compiled entry (populated when entry.compile produced a result)
     "packet_id": None,
     "stop_condition": None,
     "context_bundle": None,
@@ -460,6 +535,25 @@ assignment = {
     "first_action": None,
     "handoff_target": None,
 }
+
+# Merge compiled entry fields when available
+entry_compile_json = os.environ.get("ENTRY_COMPILE_JSON", "").strip()
+if entry_compile_json:
+    try:
+        ec = json.loads(entry_compile_json)
+        cs = ec.get("compilation_state", "")
+        if cs in ("compiled", "partial", "loop_only"):
+            if ec.get("packet_id"):
+                assignment["packet_id"] = ec["packet_id"]
+            if ec.get("stop_condition"):
+                assignment["stop_condition"] = ec["stop_condition"]
+            if ec.get("context_sources"):
+                assignment["context_bundle"] = ec["context_sources"]
+            if ec.get("handoff_target"):
+                assignment["handoff_target"] = ec["handoff_target"]
+            assignment["compilation_state"] = cs
+    except Exception:
+        pass
 
 print(json.dumps(assignment, indent=2))
 PYASSIGN
