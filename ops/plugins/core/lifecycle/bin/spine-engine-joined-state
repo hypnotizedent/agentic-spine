@@ -71,26 +71,38 @@ def resolve_root() -> Path:
 def load_yaml(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
-    with path.open("r", encoding="utf-8") as handle:
-        loaded = yaml.safe_load(handle)
-    return default if loaded is None else loaded
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            loaded = yaml.safe_load(handle)
+        return default if loaded is None else loaded
+    except (yaml.YAMLError, OSError):
+        return default
 
 
 def load_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return default
 
 
 def parse_frontmatter(path: Path) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
     if not text.startswith("---\n"):
         return {}
     parts = text.split("---", 2)
     if len(parts) < 3:
         return {}
-    payload = yaml.safe_load(parts[1]) or {}
+    try:
+        payload = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        return {}
     return payload if isinstance(payload, dict) else {}
 
 
