@@ -11,11 +11,12 @@ usage() {
 Usage: ops verify [OPTION]
 
 Health surfaces:
-  ops verify                   Infrastructure baseline (17 gates) [default]
-  ops verify --core-only       Same as default (compatibility alias)
+  ops verify                   Spine coherence front-door authority [default]
+  ops verify --infra           Infrastructure baseline (17 gates)
+  ops verify --core-only       Same as --infra (compatibility alias)
   ops verify --engine-smoke    Engine plumbing smoke test
   ops verify --engine-honesty  Engine orchestration proof (dispatch, wave, telemetry)
-  ops verify --spine          Curated spine-only executable verify scope
+  ops verify --spine           Same as default (explicit alias)
   ops verify --spine-lite      Engine smoke + honesty union
   ops verify --binding-coherence  Capability references in bindings vs registry
   ops verify --full            Readiness: status + infra baseline + secrets
@@ -48,7 +49,7 @@ _verify_full() {
   "$SPINE_ROOT/bin/ops" status --brief || rc=1
 
   _section "READY CHECK: spine.verify"
-  "$VERIFY_RUN" fast || rc=1
+  "$VERIFY_RUN" spine || rc=1
 
   _section "READY CHECK: secrets.binding"
   "$SPINE_ROOT/bin/ops" cap run secrets.binding || rc=1
@@ -347,7 +348,14 @@ case "${1:-}" in
     usage
     exit 0
     ;;
-  --core-only|"")
+  --spine|"")
+    echo "SPINE_ROOT=$SPINE_ROOT"
+    echo "VERIFY_MODE=spine"
+    echo
+    echo "Spine verify: coherence front-door authority"
+    exec "$VERIFY_RUN" spine
+    ;;
+  --infra|--core-only)
     echo "SPINE_ROOT=$SPINE_ROOT"
     echo "VERIFY_MODE=runtime-workload-gates"
     echo
@@ -367,13 +375,6 @@ case "${1:-}" in
     echo
     echo "Engine verify: platform plumbing smoke test"
     exec "$VERIFY_RUN" engine
-    ;;
-  --spine)
-    echo "SPINE_ROOT=$SPINE_ROOT"
-    echo "VERIFY_MODE=spine"
-    echo
-    echo "Spine verify: curated spine-only executable verify scope"
-    exec "$VERIFY_RUN" spine
     ;;
   --spine-lite)
     rc=0

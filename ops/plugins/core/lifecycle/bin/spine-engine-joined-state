@@ -596,6 +596,9 @@ def parse_verify_output(path: Path) -> dict[str, Any]:
 
 VERIFY_RECEIPT_PATTERNS = ("__verify.run__", "__verify.fast__")
 
+# Front-door verify headline: prefer spine-scoped receipts, fall back to fast.
+FRONT_DOOR_VERIFY_SCOPES = ("spine", "fast")
+
 
 def _verify_receipt_dirs(paths: dict[str, Path]) -> list[Path]:
     """Scan for verify receipts directly, bypassing the general receipt cap."""
@@ -609,40 +612,32 @@ def _verify_receipt_dirs(paths: dict[str, Path]) -> list[Path]:
     return candidates[:50]
 
 
-def collect_latest_fast_verify(paths: dict[str, Path]) -> dict[str, Any]:
-    for receipt_dir in _verify_receipt_dirs(paths):
-        output_path = receipt_dir / "output.txt"
-        exec_path = receipt_dir / "receipt.exec.json"
-        receipt_path = receipt_dir / "receipt.md"
-        if not output_path.exists():
-            continue
-        try:
-            summary = parse_verify_output(output_path)
-        except Exception:
-            continue
-        # Infer scope from receipt name when output lacks it
-        scope = summary.get("scope") or ""
-        if not scope and "__verify.fast__" in receipt_dir.name:
-            scope = "fast"
-        if scope != "fast":
-            continue
-        exec_payload = load_json(exec_path, {}) if exec_path.exists() else {}
-        run_keys = exec_payload.get("run_keys", []) if isinstance(exec_payload, dict) else []
-        return {
-            "status": summary.get("status", "unknown"),
-            "generated_at_utc": render_dt(dt.datetime.fromtimestamp(output_path.stat().st_mtime, tz=dt.timezone.utc)),
-            "receipt_path": str(receipt_path),
-            "output_path": str(output_path),
-            "run_key": str(run_keys[0]).strip() if run_keys else "",
-            "wrapper_total": summary.get("wrapper_total", 0),
-            "wrapper_pass": summary.get("wrapper_pass", 0),
-            "wrapper_fail": summary.get("wrapper_fail", 0),
-            "wrapper_warn": summary.get("wrapper_warn", 0),
-            "blocking_fail_ids": summary.get("blocking_fail_ids", []),
-            "warning_ids": summary.get("warning_ids", []),
-        }
+def _build_verify_result(receipt_dir: Path, summary: dict[str, Any], scope: str) -> dict[str, Any]:
+    output_path = receipt_dir / "output.txt"
+    exec_path = receipt_dir / "receipt.exec.json"
+    receipt_path = receipt_dir / "receipt.md"
+    exec_payload = load_json(exec_path, {}) if exec_path.exists() else {}
+    run_keys = exec_payload.get("run_keys", []) if isinstance(exec_payload, dict) else []
+    return {
+        "status": summary.get("status", "unknown"),
+        "scope": scope,
+        "generated_at_utc": render_dt(dt.datetime.fromtimestamp(output_path.stat().st_mtime, tz=dt.timezone.utc)),
+        "receipt_path": str(receipt_path),
+        "output_path": str(output_path),
+        "run_key": str(run_keys[0]).strip() if run_keys else "",
+        "wrapper_total": summary.get("wrapper_total", 0),
+        "wrapper_pass": summary.get("wrapper_pass", 0),
+        "wrapper_fail": summary.get("wrapper_fail", 0),
+        "wrapper_warn": summary.get("wrapper_warn", 0),
+        "blocking_fail_ids": summary.get("blocking_fail_ids", []),
+        "warning_ids": summary.get("warning_ids", []),
+    }
+
+
+def _empty_verify_result() -> dict[str, Any]:
     return {
         "status": "unknown",
+        "scope": "",
         "generated_at_utc": "",
         "receipt_path": "",
         "output_path": "",
@@ -654,6 +649,34 @@ def collect_latest_fast_verify(paths: dict[str, Path]) -> dict[str, Any]:
         "blocking_fail_ids": [],
         "warning_ids": [],
     }
+
+
+def collect_latest_front_door_verify(paths: dict[str, Path]) -> dict[str, Any]:
+    """Collect the most recent front-door verify receipt.
+
+    Prefers spine-scoped receipts (the front-door authority surface) and falls
+    back to fast-scoped receipts for backward compatibility.
+    """
+    for target_scope in FRONT_DOOR_VERIFY_SCOPES:
+        for receipt_dir in _verify_receipt_dirs(paths):
+            output_path = receipt_dir / "output.txt"
+            if not output_path.exists():
+                continue
+            try:
+                summary = parse_verify_output(output_path)
+            except Exception:
+                continue
+            scope = summary.get("scope") or ""
+            if not scope and "__verify.fast__" in receipt_dir.name:
+                scope = "fast"
+            if scope != target_scope:
+                continue
+            return _build_verify_result(receipt_dir, summary, scope)
+    return _empty_verify_result()
+
+
+# Backward-compatible alias
+collect_latest_fast_verify = collect_latest_front_door_verify
 
 
 def build_engine_coherence_summary(
@@ -832,6 +855,8 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             "recent_force_closes": len(override_signals.get("force_close", [])),
             "recent_dod_overrides": len(override_signals.get("dod_override", [])),
             "recent_main_overrides": len(main_override_signals),
+            "latest_verify_status": latest_fast_verify.get("status", "unknown"),
+            "latest_verify_scope": latest_fast_verify.get("scope", ""),
             "latest_fast_verify_status": latest_fast_verify.get("status", "unknown"),
             "engine_coherence_needs_attention": engine_coherence.get("needs_attention", False),
             "gap_authority_status": gap_state.get("status", "degraded"),
@@ -920,7 +945,8 @@ def main() -> int:
     print(f"recent_force_closes: {summary.get('recent_force_closes', 0)}")
     print(f"recent_dod_overrides: {summary.get('recent_dod_overrides', 0)}")
     print(f"recent_main_overrides: {summary.get('recent_main_overrides', 0)}")
-    print(f"latest_fast_verify_status: {summary.get('latest_fast_verify_status', 'unknown')}")
+    verify_scope = summary.get('latest_verify_scope') or 'fast'
+    print(f"latest_verify_status: {summary.get('latest_verify_status', 'unknown')} (scope={verify_scope})")
     return 0
 
 
