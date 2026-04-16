@@ -672,10 +672,11 @@ for loop in open_loops:
 
 # ── Daemon load truth ─────────────────────────────────────────────────────
 #
-# Cross-check `required_labels` from launchd.runtime.contract.yaml against
-# actual `launchctl list` output, so ops status reports daemon load truth
-# (not just configured intent). Any missing required label is also emitted
-# as an anomaly so agents and operators see it in the default text surface.
+# required_labels in launchd.runtime.contract.yaml is ESTATE-WIDE scheduler
+# truth — labels that must be scheduled somewhere, not labels that must be
+# loaded on THIS host. Each label's actual host comes from intended_node_role
+# in the scheduler registry. This code role-filters accordingly and reports
+# non-local labels as non_local_deferred, not missing.
 
 daemons_summary = {
     "required_total": 0,
@@ -691,7 +692,12 @@ try:
     if launchd_contract.is_file():
         import yaml as _yaml_daemons  # type: ignore
         _ld = _yaml_daemons.safe_load(launchd_contract.read_text(encoding="utf-8")) or {}
-        _required = [str(x) for x in (_ld.get("required_labels") or []) if x]
+        # required_labels may be a dict with .labels list (annotated form)
+        # or a plain list (legacy). Handle both.
+        _rl_raw = _ld.get("required_labels") or []
+        if isinstance(_rl_raw, dict):
+            _rl_raw = _rl_raw.get("labels") or []
+        _required = [str(x) for x in _rl_raw if x]
 
         # Role-aware filter: labels whose intended_node_role (from the
         # scheduler registry) does not match the local host's role are
