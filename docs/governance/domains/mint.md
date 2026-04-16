@@ -12,11 +12,14 @@ Spine-side Mint surfaces are shared infrastructure only (SSH targets, secrets, v
 - **Order business truth authority**: `ops/bindings/domains/mint/mint.order.truth.authority.yaml`
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain mint`
 
-## Registered Capabilities (2 of 2)
+## Registered Capabilities (5 of 5)
 
-Only two Mint capabilities are registered in `ops/capabilities.yaml`:
+Mint status/proof capability registration is now complete for the governed read surfaces:
+- `mint.deploy.status` — read-only Docker/container status via mint-modules shim
+- `mint.live.baseline.status` — read-only live baseline status surface
 - `mint.module.status.projection.build` — refresh governed status projection
 - `mint.modules.health` — read-only health summary via mint-modules shim
+- `mint.runtime.proof` — read-only deep runtime proof via mint-modules shim
 
 ## Residue Notice
 
@@ -43,6 +46,9 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 
 | Capability |
 |---|
+| `mint.deploy.status` |
+| `mint.live.baseline.status` |
 | `mint.module.status.projection.build` |
 | `mint.modules.health` |
+| `mint.runtime.proof` |
 <!-- DOMAIN_CAPABILITY_CATALOG_END -->
