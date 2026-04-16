@@ -106,11 +106,27 @@ def parse_frontmatter(path: Path) -> dict[str, Any]:
     parts = text.split("---", 2)
     if len(parts) < 3:
         return {}
+    raw = parts[1]
     try:
-        payload = yaml.safe_load(parts[1]) or {}
+        payload = yaml.safe_load(raw) or {}
     except yaml.YAMLError:
-        return {}
+        payload = _frontmatter_regex_fallback(raw)
     return payload if isinstance(payload, dict) else {}
+
+
+def _frontmatter_regex_fallback(raw: str) -> dict[str, Any]:
+    """Extract key frontmatter fields via regex when YAML parsing fails.
+
+    Handles scope files with unquoted colons in values (e.g. objective fields).
+    """
+    result: dict[str, Any] = {}
+    for key in ("loop_id", "status", "owner", "scope", "priority",
+                "disposition", "created", "closed", "objective",
+                "execution_readiness", "horizon"):
+        match = re.search(rf"^{key}:\s*(.+)$", raw, re.MULTILINE)
+        if match:
+            result[key] = match.group(1).strip().strip('"').strip("'")
+    return result
 
 
 def parse_iso(value: Any) -> dt.datetime | None:
