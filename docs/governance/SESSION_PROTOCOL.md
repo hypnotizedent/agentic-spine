@@ -110,6 +110,24 @@ When work is done, follow this sequence:
 5. **Handoff** — if session ending: `session.handoff.create --summary "..." --loops LOOP-ID`
 6. **Git hygiene** — `git-worktree-hygiene --apply --brief` and `wave.residue` for stale wave branches
 
+## Receipt Classes
+
+The word "receipt" appears across the spine but names five distinct object
+classes with different write paths, governance levels, and authority roles.
+They are not interchangeable.
+
+| Class | Location Pattern | Writer | Governed | Authority Role |
+|---|---|---|---|---|
+| **Capability receipt** | `.evidence/spine/sessions/RCAP-*/receipt.md` | `cap.sh` (automatic) | yes — every cap run emits one | Execution evidence: proves a capability ran, its exit code, role policy, and prompt provenance. Canonical per run key. |
+| **Wave-close EXEC_RECEIPT** | `.runtime/spine/state/domain-state/EXEC_RECEIPT-WAVE-CLOSE-*.yaml` | `packet_receipt_writer.py` via `wave.finish` | yes — fingerprinted YAML, git-truth validated | Delivery evidence: proves a wave closed with head ancestry, lane outcomes, verify results, and disposition. Canonical per wave. |
+| **Controller-prompt EXEC_RECEIPT** | `.runtime/spine/state/domain-state/EXEC_RECEIPT-CONTROLLER-PROMPT-*.yaml` | `packet_receipt_writer.py` via `controller_prompt.close` | yes — same fingerprinted writer as wave-close | Packet-close evidence: proves a controller-prompt packet reached a terminal disposition with operator summary. Canonical per packet. |
+| **Loop closeout receipt** | `.evidence/spine/loop-closeouts/LOOP-*.closeout.md` | `loop-closeout-finalize` (manual trigger) | partial — governed script, markdown output | Lifecycle evidence: proves a loop closed with disposition, completion level, and scope archive ref. One per loop. |
+| **Narrative receipt** | `.runtime/spine/state/domain-state/spine/*-RECEIPT-*.md` | Agent (convention) | no — convention only, no governed writer | Session evidence: human-readable summary of a slice (what changed, what was proved, what is next). Not canonical authority — if it disagrees with a governed receipt, the governed receipt wins. |
+
+When you see "receipt" in the spine, determine which class is meant before
+acting on it. The governed classes (capability, wave-close, controller-prompt,
+loop closeout) are authoritative. Narrative receipts are session memory only.
+
 ## Known Absent Seams
 
 These seams are missing or manual today. They are named here so agents know,
