@@ -247,9 +247,8 @@ fi
 } >> "$SCOPE_FILE"
 
 # ── SQLite authority bridge: upsert loop into shared_authority.db ──
-# The scope file is the projection surface. The bridge writes to SQLite
-# as the authoritative mutation. Failures are non-fatal during transition;
-# the scope file already exists on disk as the fallback authority.
+# Birth parity contract (B1+B2): both scope file and SQLite row must exist
+# after creation. If either surface cannot be established, birth fails closed.
 LOOP_STATUS="active"
 [[ "$HORIZON" == "now" ]] || LOOP_STATUS="planned"
 
@@ -269,16 +268,78 @@ print(json.dumps({
 }))
 " "$LOOP_ID" "$(date -u +%Y-%m-%d)" "$LOOP_STATUS" "$SCOPE" "$PRIORITY" "$HORIZON" "$READINESS" "$EXEC_MODE" "$OBJECTIVE")"
 
+SQLITE_OK=0
 if [[ -x "$LOOPS_BRIDGE" ]]; then
-  if python3 "$LOOPS_BRIDGE" upsert --json "$LOOP_JSON" --actor "loops.create" 2>/dev/null; then
-    echo "loops-authority-bridge: upserted $LOOP_ID into shared_authority.db" >&2
-  else
-    echo "loops-authority-bridge: upsert failed (non-fatal, scope file is primary)" >&2
+  if python3 "$LOOPS_BRIDGE" upsert --json "$LOOP_JSON" --actor "loops.create" >&2; then
+    SQLITE_OK=1
+  fi
+else
+  echo "FAIL: loops-authority-bridge not found or not executable at $LOOPS_BRIDGE" >&2
+fi
+
+if [[ "$SQLITE_OK" -eq 0 ]]; then
+  echo "FAIL: birth parity — SQLite upsert failed for $LOOP_ID" >&2
+  echo "  Cleaning up scope file to prevent scope-only birth..." >&2
+  rm -f "$SCOPE_FILE"
+  echo "  Scope file removed: $SCOPE_FILE" >&2
+  echo "  No split-authority loop was left behind." >&2
+  exit 1
+fi
+
+# ── Post-birth verification: B1 (scope exists) + B2 (SQLite row exists) ──
+BIRTH_VERIFIED=1
+
+# B1: scope file exists with expected loop_id and status
+if [[ ! -f "$SCOPE_FILE" ]]; then
+  echo "FAIL: birth verification B1 — scope file missing after write: $SCOPE_FILE" >&2
+  BIRTH_VERIFIED=0
+else
+  SCOPE_LID="$(awk '/^loop_id:/{print $2; exit}' "$SCOPE_FILE" | tr -d '"' || true)"
+  if [[ "$SCOPE_LID" != "$LOOP_ID" ]]; then
+    echo "FAIL: birth verification B1 — scope file loop_id mismatch: expected $LOOP_ID, got $SCOPE_LID" >&2
+    BIRTH_VERIFIED=0
   fi
 fi
 
+# B2: SQLite row exists with matching loop_id and status
+SQLITE_ROW="$(python3 "$LOOPS_BRIDGE" query --id "$LOOP_ID" 2>/dev/null || true)"
+if [[ -z "$SQLITE_ROW" ]]; then
+  echo "FAIL: birth verification B2 — no SQLite row for $LOOP_ID after upsert" >&2
+  BIRTH_VERIFIED=0
+else
+  SQLITE_STATUS="$(echo "$SQLITE_ROW" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || true)"
+  if [[ "$SQLITE_STATUS" != "$LOOP_STATUS" ]]; then
+    echo "FAIL: birth verification B2 — SQLite status mismatch: expected $LOOP_STATUS, got $SQLITE_STATUS" >&2
+    BIRTH_VERIFIED=0
+  fi
+fi
+
+if [[ "$BIRTH_VERIFIED" -eq 0 ]]; then
+  echo "FAIL: birth parity verification failed for $LOOP_ID — cleaning up" >&2
+  rm -f "$SCOPE_FILE"
+  # Best-effort SQLite cleanup — delete the row entirely so no residue remains
+  if [[ -n "$SQLITE_ROW" ]]; then
+    LIB_DIR="$(dirname "$LOOPS_BRIDGE")/../lib"
+    python3 -c "
+import sys, os
+sys.path.insert(0, sys.argv[1])
+import loops_sql_authority as lsa
+from pathlib import Path
+state = os.environ.get('SPINE_STATE') or str(Path.home() / 'code' / '.runtime' / 'spine' / 'state')
+db_path = Path(state) / 'shared_authority.db'
+conn = lsa.connect(db_path)
+lsa.ensure_schema(conn)
+lsa.delete_loop(conn, sys.argv[2])
+conn.commit()
+conn.close()
+" "$LIB_DIR" "$LOOP_ID" 2>/dev/null || true
+  fi
+  echo "  No split-authority loop was left behind." >&2
+  exit 1
+fi
+
 if [[ "$JSON_OUTPUT" -eq 1 ]]; then
-  printf '{"loop_id":"%s","scope_file":"%s"}\n' "$LOOP_ID" "$SCOPE_FILE"
+  printf '{"loop_id":"%s","scope_file":"%s","birth_parity":"pass"}\n' "$LOOP_ID" "$SCOPE_FILE"
 else
   echo "CREATED: $LOOP_ID"
   echo "File: $SCOPE_FILE"
