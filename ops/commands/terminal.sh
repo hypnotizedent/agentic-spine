@@ -136,6 +136,38 @@ if command -v session_posture_resolve >/dev/null 2>&1; then
     fi
 fi
 
+# ── Auto-resolve loop when none explicitly passed ────────────────────────
+# Reuses entry-compile (existing truth) to find the active loop.
+# Rules:
+#   - Explicit --loop takes absolute precedence
+#   - Exactly one active loop → auto-attach
+#   - Zero active loops → keep empty (clean start)
+#   - Multiple active loops → keep empty (ambiguous, do not guess)
+#   - entry-compile failure → keep empty (degraded truth, no silent attach)
+if [[ -z "$LOOP_ID" ]]; then
+    ENTRY_COMPILE_BIN="$SPINE_ROOT/ops/plugins/core/lifecycle/bin/entry-compile"
+    _STATE_ROOT="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+    if [[ -f "$ENTRY_COMPILE_BIN" && -d "$_STATE_ROOT/loop-scopes" ]]; then
+        AUTO_LOOP="$(python3 "$ENTRY_COMPILE_BIN" --state-root "$_STATE_ROOT" 2>/dev/null \
+            | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    cs = d.get('compilation_state', '')
+    if cs in ('compiled', 'partial', 'loop_only'):
+        lid = d.get('loop_id')
+        if lid and lid != 'None':
+            print(lid)
+except Exception:
+    pass
+" 2>/dev/null)" || true
+        if [[ -n "$AUTO_LOOP" ]]; then
+            LOOP_ID="$AUTO_LOOP"
+        fi
+    fi
+    unset _STATE_ROOT
+fi
+
 # ── Build the in-terminal command ────────────────────────────────────────
 build_entry_cmd() {
     local tool="$1"
