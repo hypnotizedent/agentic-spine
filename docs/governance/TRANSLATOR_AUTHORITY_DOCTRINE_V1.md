@@ -110,6 +110,7 @@ Spine V3 decomposes operational authority into seven distinct node types. Each n
 - **Purpose**: broker, routing, loop/request state, packet compilation, attestation authority
 - **Properties**: stable, always-on, infrastructure-grade, not dependent on a user login session
 - **NOT here**: capability execution, verification, natural-language translation, operator console, domain decisions, storage/archive, git write authority
+- **Binding status**: Not in `node.role.contract.yaml`. Control Node has not been promoted past taxonomy — its functions are currently carried by `operator_console`. When promoted, it will get its own binding entry. See `NODE_PROMOTION_LADDER.md` for the L1 MVP kit (6 types, no control_node).
 
 ### 4. Execution Nodes
 
