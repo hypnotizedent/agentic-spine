@@ -156,6 +156,23 @@ def _git(args):
         check=False,
     )
 
+def _worktree_exists(worktree_path: str) -> bool:
+    proc = _git(["worktree", "list", "--porcelain"])
+    if proc.returncode != 0:
+        return False
+    wanted = os.path.abspath(worktree_path)
+    for line in proc.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        listed = os.path.abspath(line.split(" ", 1)[1].strip())
+        if listed == wanted:
+            return True
+    return False
+
+def _branch_exists(branch_name: str) -> bool:
+    proc = _git(["show-ref", "--verify", f"refs/heads/{branch_name}"])
+    return proc.returncode == 0
+
 def _commit_on_main(commit_sha: str) -> bool:
     commit = str(commit_sha or "").strip()
     if not commit or not spine_repo:
@@ -610,14 +627,17 @@ try:
         if not worktree_path or not branch_name:
             print("ERROR: wave workspace metadata missing worktree or branch for atomic cleanup", file=sys.stderr)
             sys.exit(1)
-        for args, label in (
-            (["worktree", "remove", "--force", worktree_path], f"worktree remove failed for {worktree_path}"),
-            (["branch", "-D", branch_name], f"branch delete failed for {branch_name}"),
-        ):
-            proc = subprocess.run(["git", "-C", spine_repo] + args, text=True, capture_output=True, check=False)
+        if _worktree_exists(worktree_path):
+            proc = _git(["worktree", "remove", "--force", worktree_path])
             if proc.returncode != 0:
                 detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
-                print(f"ERROR: wave close teardown failed: {label}: {detail}", file=sys.stderr)
+                print(f"ERROR: wave close teardown failed: worktree remove failed for {worktree_path}: {detail}", file=sys.stderr)
+                sys.exit(proc.returncode or 1)
+        if _branch_exists(branch_name):
+            proc = _git(["branch", "-D", branch_name])
+            if proc.returncode != 0:
+                detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+                print(f"ERROR: wave close teardown failed: branch delete failed for {branch_name}: {detail}", file=sys.stderr)
                 sys.exit(proc.returncode or 1)
         workspace["closed_at"] = now
         workspace["lifecycle_state"] = "cleaned"
