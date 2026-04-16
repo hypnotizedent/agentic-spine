@@ -79,6 +79,7 @@ if [[ -z "$SYNTHETIC_LOOP_ID" ]]; then
     SYNTHETIC_LOOP_ID="LOOP-HONESTY-PROBE"
 fi
 CLEANUP_NEEDED=0
+SYNTHETIC_COMPLETION_LEVEL="slice_complete"
 
 # ── Check helpers ─────────────────────────────────────────────────────────
 check() {
@@ -158,6 +159,7 @@ cleanup_synthetic_wave() {
                 # Force close to avoid orphan — this is cleanup, not the test
                 bash "$WAVE_CMD" close "$SYNTHETIC_WAVE_ID" \
                     --disposition landed \
+                    --completion-level "$SYNTHETIC_COMPLETION_LEVEL" \
                     --force \
                     --dod-override "synthetic honesty test cleanup" \
                     >/dev/null 2>&1 || true
@@ -333,8 +335,10 @@ else
             exit 0
         fi
 
-        # Attempt nominal close (no --force, no --dod-override)
-        close_output=\"\$(bash '$WAVE_CMD' close '$SYNTHETIC_WAVE_ID' --disposition landed 2>&1)\"
+        # Attempt nominal close (no --force, no --dod-override).
+        # Synthetic probe closes still need an explicit completion level when
+        # disposition is landed, otherwise teardown never reaches worktree cleanup.
+        close_output=\"\$(bash '$WAVE_CMD' close '$SYNTHETIC_WAVE_ID' --disposition landed --completion-level '$SYNTHETIC_COMPLETION_LEVEL' 2>&1)\"
         close_rc=\$?
 
         if [[ \$close_rc -eq 0 ]]; then
@@ -352,7 +356,9 @@ if [[ -f "$_wave_sf" ]]; then
     _cur_status="$(jq -r '.status // "unknown"' "$_wave_sf" 2>/dev/null || echo "unknown")"
     if [[ "$_cur_status" != "closed" ]]; then
         bash "$WAVE_CMD" close "$SYNTHETIC_WAVE_ID" \
-            --disposition landed --force \
+            --disposition landed \
+            --completion-level "$SYNTHETIC_COMPLETION_LEVEL" \
+            --force \
             --dod-override "honesty test cleanup for H5/H6 checks" \
             >/dev/null 2>&1 || true
         CLEANUP_NEEDED=0  # Already cleaned up
