@@ -50,7 +50,7 @@ load, what artifact to produce, and what is out of scope. A loop contains one
 or many packets. A packet's frontmatter carries `loop_id`.
 
 - Orchestration packets: `.runtime/spine/state/orchestration/{LOOP_ID}/packet.yaml` — governed create/amend/close
-- Controller-prompt packets: `.runtime/spine/state/controller-prompts/` — manually authored, **no governed close ceremony today**
+- Controller-prompt packets: `.runtime/spine/state/controller-prompts/` — governed create (`controller_prompt.create`) and governed close (`controller_prompt.close`); packet frontmatter/identity/path binding is governed at birth and death, packet body remains operator-authored; historical packets (pre-governed-create) are valid legacy, not drift
 
 ### Wave
 
@@ -89,12 +89,12 @@ stay on `main` and clean. All wave/feature work happens in managed worktrees.
 ```
 operator intent
   → loop opened or attached                  [governed: loops.create]
-    → packet scoped inside loop              [manual: operator authors or kickoff generates]
+    → packet scoped inside loop              [governed: controller_prompt.create, or operator authors directly for orchestration/kickoff]
       → worktree opened for mutation         [governed: kickoff allocates, or agent bootstraps]
         → wave dispatched                    [governed: wave.execute]
         → wave finished with receipt         [governed: wave.finish]
       → worktree merged, then pruned         [manual: agent pushes/merges, runs hygiene]
-    → packet closed with artifact            [partial: orchestration governed, prompts manual]
+    → packet closed with artifact            [governed: orchestration via wave.finish, prompts via controller_prompt.close]
   → loop closed with acceptance              [governed: loop-closeout-finalize]
   → handoff emitted at session boundary      [manual: close-session.sh or session.handoff.create]
 ```
@@ -135,7 +135,7 @@ not as a fix list.
 
 - **Loop auto-attach at session start** — terminal birth (`ops terminal launch`) auto-attaches the active loop when exactly one exists; standalone `session.v3.attach` remains read-only and does not bind loop context into the caller's environment
 - **Membrane-to-controller handoff** — no governed artifact between what the membrane understood and what the controller executes
-- **Controller-prompt packet close** — orchestration packets have governed close; controller-prompt packets do not
+- **Controller-prompt packet amend/checkpoint** — no governed mid-packet surface between birth (`controller_prompt.create`) and death (`controller_prompt.close`); the execution phase is ungoverned by design
 
 ## Desktop
 
