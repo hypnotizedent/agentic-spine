@@ -527,6 +527,7 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
             if isinstance(_summary, dict):
                 _aw = _summary.get("active_waves")
                 _ow = _summary.get("orphaned_waves")
+                _cs = _summary.get("completion_state")
                 joined_state_summary = {
                     "source": "joined_state",
                     "open_loops": _summary.get("open_loops", len(open_loops)),
@@ -535,6 +536,7 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
                     "orphaned_waves": int(_ow) if isinstance(_ow, (int, float)) else 0,
                     "verify_status": _summary.get("latest_verify_status", _summary.get("latest_fast_verify_status", "unknown")),
                     "coherence_attention": bool(_summary.get("engine_coherence_needs_attention", False)),
+                    "completion_state": _cs if isinstance(_cs, dict) else None,
                 }
             _joined_open_rows = ((_jdata.get("loops") or {}).get("open")) or []
             if isinstance(_joined_open_rows, list) and _joined_open_rows:
@@ -825,6 +827,7 @@ if mode == "--json":
             "inbox_active": inbox_active,
             "inbox_total": inbox_total,
             "anomalies": len(anomalies),
+            "completion_state": joined_state_summary.get("completion_state"),
         }
     }, indent=2))
     sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
@@ -883,6 +886,15 @@ print(f"  active waves:       {joined_state_summary.get('active_waves', '?')}")
 print(f"  orphaned waves:     {joined_state_summary.get('orphaned_waves', '?')}")
 print(f"  spine verify:       {joined_state_summary.get('verify_status', 'unknown')}")
 print(f"  coherence attention:{' yes' if joined_state_summary.get('coherence_attention') else ' no'}")
+_cs = joined_state_summary.get("completion_state")
+if isinstance(_cs, dict):
+    _cs_parts = []
+    for _sn in ("open", "parked", "landed_local", "owned_elsewhere", "orphaned", "ambiguous"):
+        _sv = _cs.get(_sn, 0)
+        if _sv:
+            _cs_parts.append(f"{_sn}={_sv}")
+    _cs_live = _cs.get("live_specimens", 0)
+    print(f"  completion state:   {_cs_live} live ({', '.join(_cs_parts) if _cs_parts else 'all clear'})")
 print()
 
 # ── Open Loops ──

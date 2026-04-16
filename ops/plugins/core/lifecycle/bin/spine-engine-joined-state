@@ -34,6 +34,13 @@ try:
 except Exception as exc:  # pragma: no cover - exercised via degraded authority fixtures
     loops_authority_import_error = exc
 
+completion_reconciler = None
+completion_reconciler_import_error = None
+try:
+    import completion_state_reconciler as completion_reconciler
+except Exception as exc:  # pragma: no cover - graceful degradation
+    completion_reconciler_import_error = exc
+
 
 OPEN_LOOP_STATUSES = {"active", "open", "draft"}
 TERMINAL_LOOP_STATUSES = {"closed", "superseded", "abandoned", "deferred"}
@@ -842,6 +849,32 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
     latest_fast_verify = collect_latest_fast_verify(paths)
     engine_coherence = build_engine_coherence_summary(open_loops, open_gaps, override_signals, main_override_signals, gap_state, orphaned_waves)
 
+    # Completion-state reconciler (graceful degradation if import failed)
+    # Uses git common dir to resolve the real repo root (worktree-safe)
+    completion_summary: dict[str, Any] | None = None
+    if completion_reconciler is not None:
+        try:
+            _real_root = paths["root"]
+            _real_state = paths["state_root"]
+            try:
+                _rc, _common, _ = run_cmd(
+                    ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                    cwd=paths["root"],
+                )
+                if _rc == 0 and _common.strip():
+                    _real_root = Path(_common.strip()).parent
+                    if not os.environ.get("SPINE_STATE"):
+                        _real_state = _real_root.parent / ".runtime" / "spine" / "state"
+            except Exception:
+                pass
+            reconciliation = completion_reconciler.reconcile(
+                str(_real_root),
+                str(_real_state),
+            )
+            completion_summary = completion_reconciler.summary_for_joined_state(reconciliation)
+        except Exception:
+            pass
+
     payload: dict[str, Any] = {
         "schema_version": "1.0",
         "generated_at_utc": utc_now(),
@@ -873,6 +906,7 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             "engine_coherence_needs_attention": engine_coherence.get("needs_attention", False),
             "gap_authority_status": gap_state.get("status", "degraded"),
             "gap_projection_match": _gap_projection_match(gap_state),
+            "completion_state": completion_summary,
         },
         "loops": {"open": open_loops},
         "gaps": {
@@ -959,6 +993,15 @@ def main() -> int:
     print(f"recent_main_overrides: {summary.get('recent_main_overrides', 0)}")
     verify_scope = summary.get('latest_verify_scope') or 'fast'
     print(f"latest_verify_status: {summary.get('latest_verify_status', 'unknown')} (scope={verify_scope})")
+    cs = summary.get("completion_state")
+    if cs and isinstance(cs, dict):
+        parts = []
+        for state_name in ("open", "parked", "landed_local", "owned_elsewhere", "orphaned", "ambiguous"):
+            count = cs.get(state_name, 0)
+            if count:
+                parts.append(f"{state_name}={count}")
+        live = cs.get("live_specimens", 0)
+        print(f"completion_state: {live} live ({', '.join(parts) if parts else 'all clear'})")
     return 0
 
 
