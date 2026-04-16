@@ -415,10 +415,20 @@ if registry_path.is_file():
         if lbl:
             role_by_label[lbl] = role
 
+# Labels explicitly marked operator_console_launchd_loaded: false are not
+# expected locally even if their intended_node_role matches.
+locally_unloaded = set()
+if registry_path.is_file():
+    for entry in (reg.get("labels") or []):
+        lbl = str((entry or {}).get("label", "")).strip()
+        if lbl and (entry or {}).get("operator_console_launchd_loaded") is False:
+            locally_unloaded.add(lbl)
+
 # Labels missing from registry default to local (fail-safe).
 local_required = [
     lbl for lbl in required
     if role_by_label.get(lbl, local_role) == local_role
+    and lbl not in locally_unloaded
 ]
 non_local = [lbl for lbl in required if lbl not in local_required]
 if non_local:

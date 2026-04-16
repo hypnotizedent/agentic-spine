@@ -707,9 +707,16 @@ try:
                 _role = str((_entry or {}).get("intended_node_role", "")).strip()
                 if _lbl:
                     role_by_label[_lbl] = _role
+        # Also read operator_console_launchd_loaded flag per label
+        _locally_unloaded = set()
+        for _entry in (_reg.get("labels") or []):
+            _lbl = str((_entry or {}).get("label", "")).strip()
+            if _lbl and (_entry or {}).get("operator_console_launchd_loaded") is False:
+                _locally_unloaded.add(_lbl)
         local_required = [
             lbl for lbl in _required
             if role_by_label.get(lbl, local_role) == local_role
+            and lbl not in _locally_unloaded
         ]
         non_local = [lbl for lbl in _required if lbl not in local_required]
 
