@@ -128,6 +128,26 @@ When you see "receipt" in the spine, determine which class is meant before
 acting on it. The governed classes (capability, wave-close, controller-prompt,
 loop closeout) are authoritative. Narrative receipts are session memory only.
 
+## Parked Classes
+
+The word "parked" appears across six different object classes. They share a
+broad "deferred, not dead" meaning but have different lifecycle rules, unpark
+mechanisms, and aging behavior. They are not interchangeable.
+
+| Class | Surface | Parked Means | Unpark By | Ages/Expires |
+|---|---|---|---|---|
+| **Scheduler label** | `launchd.scheduler.registry.yaml` (`state: parked`) | Workload disabled — not scheduled on any host | Operator sets `state: active` and assigns a host | No expiry |
+| **Inbox item** | `mailroom/inbox/` (joined-state `inbox_lanes.parked`) | Intake envelope deferred — not being processed | Operator reopens or retires | No expiry |
+| **Completion-state specimen** | `completion.state.reconcile` output | Work item classified as paused by the reconciler | Depends on item class (loop reopen, branch resume, stash pop) | No expiry |
+| **Git branch** | `parked/*` branch namespace | Code snapshot preserved but not being merged | Operator resumes work or deletes branch | No expiry |
+| **Git stash** | `PARKED:` prefix in stash message | Dirty-state snapshot preserved for later | Operator `git stash pop` or drops | No expiry |
+| **Runtime artifact** | `domain-state/` with `parked_lifecycle` block, visible via `parked.list` | Research or planning deferred with explicit triggers, review cadence, and retirement conditions | Trigger conditions met, then operator promotes | Optional `next_review` field |
+
+When you see "parked" in the spine, determine which class is meant. Only
+runtime artifacts (class 6) carry structured lifecycle fields today. The
+`parked.list` capability enumerates class 6 only. For the other five classes,
+query the relevant surface directly.
+
 ## Known Absent Seams
 
 These seams are missing or manual today. They are named here so agents know,
