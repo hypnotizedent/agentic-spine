@@ -17,6 +17,7 @@ ROW_RE = re.compile(r"^#### Row \d+: (?P<title>.+)$", re.MULTILINE)
 TABLE_ROW_RE = re.compile(r"^\| (?P<field>[^|]+?) \| (?P<value>.+?) \|$")
 FOLLOW_ON_RE = re.compile(r"^\*\*Follow-on seam\*\*: (?P<value>.+)$", re.MULTILINE)
 ORIGINAL_AUDIT_RE = re.compile(r"^original_audit_ref:\s*(?P<value>.+)$", re.MULTILINE)
+PREDECESSOR_RE = re.compile(r"^predecessor:\s*(?P<value>.+)$", re.MULTILINE)
 
 
 def find_latest_audit(override: str | None) -> Path:
@@ -65,18 +66,35 @@ def parse_rows(text: str) -> list[dict[str, object]]:
     return rows
 
 
-def resolve_rows_source(audit_path: Path, text: str) -> Path:
+def _resolve_linked_artifact(audit_path: Path, text: str) -> Path | None:
+    for pattern in (ORIGINAL_AUDIT_RE, PREDECESSOR_RE):
+        match = pattern.search(text)
+        if not match:
+            continue
+        linked_name = match.group("value").strip()
+        linked_path = audit_path.parent / linked_name
+        if not linked_path.is_file():
+            raise FileNotFoundError(f"linked audit artifact not found: {linked_path}")
+        return linked_path
+    return None
+
+
+def resolve_rows_source(audit_path: Path, text: str, visited: set[Path] | None = None) -> Path:
+    visited = visited or set()
+    if audit_path in visited:
+        raise ValueError(f"audit artifact chain cycles at {audit_path}")
+    visited.add(audit_path)
+
     rows = parse_rows(text)
     if rows:
         return audit_path
-    original_match = ORIGINAL_AUDIT_RE.search(text)
-    if not original_match:
+
+    linked_path = _resolve_linked_artifact(audit_path, text)
+    if not linked_path:
         raise ValueError(f"no audit rows parsed from {audit_path}")
-    original_name = original_match.group("value").strip()
-    original_path = audit_path.parent / original_name
-    if not original_path.is_file():
-        raise FileNotFoundError(f"original audit artifact not found: {original_path}")
-    return original_path
+
+    linked_text = linked_path.read_text(encoding="utf-8")
+    return resolve_rows_source(linked_path, linked_text, visited)
 
 
 def build_summary(rows: list[dict[str, object]], audit_path: Path, rows_source: Path) -> dict[str, object]:
