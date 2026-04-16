@@ -134,7 +134,8 @@ if [[ "$MODE" == "--context" ]]; then
   OPEN_GAPS="$(jq_val '.summary.open_gaps' '?')"
   ACTIVE_WAVES="$(jq_val '.summary.active_waves' '?')"
   ORPHANED_WAVES="$(jq_val '.summary.orphaned_waves' '?')"
-  VERIFY_STATUS="$(jq_val '.summary.latest_fast_verify_status' 'unknown')"
+  VERIFY_STATUS="$(jq_val '.summary.latest_verify_status' 'unknown')"
+  VERIFY_SCOPE="$(jq_val '.summary.latest_verify_scope' '')"
   GAP_AUTHORITY="$(jq_val '.summary.gap_authority_status' 'unknown')"
   GAP_MATCH="$(jq_val '.summary.gap_projection_match' 'null')"
   COHERENCE="$(jq_val '.summary.engine_coherence_needs_attention' 'unknown')"
@@ -179,7 +180,7 @@ if [[ "$MODE" == "--context" ]]; then
   printf "  active waves:   %s\n" "$ACTIVE_WAVES"
   printf "  orphaned waves: %s\n" "$ORPHANED_WAVES"
   echo "─── verify / coherence ─────────────────────────────"
-  printf "  fast verify:    %s\n" "$VERIFY_STATUS"
+  printf "  spine verify:   %s\n" "$VERIFY_STATUS"
   printf "  gap authority:  %s\n" "$GAP_AUTHORITY"
   _gap_parity=""
   case "$GAP_MATCH" in
@@ -508,7 +509,7 @@ joined_state_summary = {
     "open_gaps": open_gap_count,
     "active_waves": 0,
     "orphaned_waves": 0,
-    "fast_verify_status": "unknown",
+    "verify_status": "unknown",
     "coherence_attention": False,
 }
 
@@ -532,7 +533,7 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
                     "open_gaps": _summary.get("open_gaps", open_gap_count),
                     "active_waves": int(_aw) if isinstance(_aw, (int, float)) else 0,
                     "orphaned_waves": int(_ow) if isinstance(_ow, (int, float)) else 0,
-                    "fast_verify_status": _summary.get("latest_fast_verify_status", "unknown"),
+                    "verify_status": _summary.get("latest_verify_status", _summary.get("latest_fast_verify_status", "unknown")),
                     "coherence_attention": bool(_summary.get("engine_coherence_needs_attention", False)),
                 }
             _joined_open_rows = ((_jdata.get("loops") or {}).get("open")) or []
@@ -621,7 +622,7 @@ if joined_state_summary.get("coherence_attention"):
         "ENGINE COHERENCE: attention required"
         f" (active_waves={joined_state_summary.get('active_waves', '?')},"
         f" orphaned_waves={joined_state_summary.get('orphaned_waves', '?')},"
-        f" fast_verify={joined_state_summary.get('fast_verify_status', 'unknown')})"
+        f" verify={joined_state_summary.get('verify_status', 'unknown')})"
     )
 
 # Check background loop heartbeat freshness
@@ -819,7 +820,7 @@ if mode == "--json":
             "unlinked_gaps": unlinked_gap_count,
             "active_waves": int(joined_state_summary.get("active_waves") or 0),
             "orphaned_waves": int(joined_state_summary.get("orphaned_waves") or 0),
-            "fast_verify_status": joined_state_summary.get("fast_verify_status", "unknown"),
+            "verify_status": joined_state_summary.get("verify_status", "unknown"),
             "coherence_attention": bool(joined_state_summary.get("coherence_attention", False)),
             "inbox_active": inbox_active,
             "inbox_total": inbox_total,
@@ -858,7 +859,7 @@ if mode == "--brief":
         parts.append(
             f"Waves: {joined_state_summary.get('active_waves', 0)} active / {joined_state_summary.get('orphaned_waves', 0)} orphaned"
         )
-    parts.append(f"Verify: {joined_state_summary.get('fast_verify_status', 'unknown')}")
+    parts.append(f"Verify: {joined_state_summary.get('verify_status', 'unknown')}")
     if joined_state_summary.get("coherence_attention"):
         parts.append("Coherence: attention")
     parts.append(f"Inbox: {inbox_active} active / {inbox_total} total")
@@ -880,7 +881,7 @@ print(f"  open loops:         {joined_state_summary.get('open_loops', len(open_l
 print(f"  open gaps:          {joined_state_summary.get('open_gaps', open_gap_count)}")
 print(f"  active waves:       {joined_state_summary.get('active_waves', '?')}")
 print(f"  orphaned waves:     {joined_state_summary.get('orphaned_waves', '?')}")
-print(f"  fast verify:        {joined_state_summary.get('fast_verify_status', 'unknown')}")
+print(f"  spine verify:       {joined_state_summary.get('verify_status', 'unknown')}")
 print(f"  coherence attention:{' yes' if joined_state_summary.get('coherence_attention') else ' no'}")
 print()
 
