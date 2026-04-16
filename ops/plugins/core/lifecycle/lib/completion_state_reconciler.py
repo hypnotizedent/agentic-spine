@@ -1,9 +1,9 @@
 """Completion-state reconciler — read-side classification engine.
 
 Classifies work items (loops, worktrees, stashes, parked branches, unpushed
-commit sets) into one of six states: open, parked, landed_local, delivered,
-owned_elsewhere, orphaned. When evidence is insufficient, emits 'ambiguous'
-with a named reason instead of guessing.
+commit sets, controller-prompt packets) into one of six states: open, parked,
+landed_local, delivered, owned_elsewhere, orphaned. When evidence is
+insufficient, emits 'ambiguous' with a named reason instead of guessing.
 
 Design authority: PACKET-38 COMPLETION-STATE-RECONCILER-DESIGN-20260416.md
 
@@ -13,7 +13,7 @@ Public API:
 Contract:
   - Pure read-side. No mutations.
   - Uses subprocess for git commands only.
-  - Uses filesystem reads for loop scopes and handoffs.
+  - Uses filesystem reads for loop scopes, handoffs, and controller-prompts.
   - Never raises on missing state; degrades to empty classifications.
 """
 
@@ -58,6 +58,10 @@ APPLICABILITY = {
     "unpushed_commit_set": {
         "open": False, "parked": False, "landed_local": True,
         "delivered": True, "owned_elsewhere": False, "orphaned": False,
+    },
+    "controller_prompt_packet": {
+        "open": False, "parked": True, "landed_local": False,
+        "delivered": True, "owned_elsewhere": False, "orphaned": True,
     },
 }
 
@@ -335,6 +339,48 @@ def _collect_unpushed(repo_root: str) -> list[dict[str, Any]]:
     }]
 
 
+def _collect_controller_prompt_packets(state_root: str) -> list[dict[str, Any]]:
+    """Collect controller-prompt packet specimens from runtime state.
+
+    Reads packet frontmatter from controller-prompts/ directory and checks
+    for matching governed EXEC_RECEIPT in domain-state/.
+    """
+    items: list[dict[str, Any]] = []
+    prompts_dir = Path(state_root) / "controller-prompts"
+    receipts_dir = Path(state_root) / "domain-state"
+
+    if not prompts_dir.is_dir():
+        return items
+
+    for path in sorted(prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md")):
+        front = _parse_frontmatter(path)
+        packet_id = str(front.get("packet_id") or "").strip()
+        status = str(front.get("status") or "unknown").strip().lower()
+        loop_id = str(front.get("loop_id") or "").strip()
+        disposition = str(front.get("disposition") or "").strip().lower()
+        pkt_type = str(front.get("type") or "").strip().lower()
+
+        # Check for governed EXEC_RECEIPT
+        has_receipt = False
+        if packet_id and receipts_dir.is_dir():
+            safe_id = re.sub(r"[^a-zA-Z0-9_-]", "-", packet_id)
+            has_receipt = any(receipts_dir.glob(f"EXEC_RECEIPT-CONTROLLER-PROMPT-{safe_id}-*.yaml"))
+
+        items.append({
+            "object_class": "controller_prompt_packet",
+            "identity": packet_id or path.stem,
+            "status": status,
+            "disposition": disposition,
+            "loop_id": loop_id,
+            "packet_type": pkt_type,
+            "has_packet_id": bool(packet_id),
+            "has_governed_receipt": has_receipt,
+            "path": str(path),
+        })
+
+    return items
+
+
 # ── Handoff scanner (for ownership evidence) ────────────────────────
 
 def _scan_active_handoffs(state_root: str) -> list[dict[str, Any]]:
@@ -591,6 +637,86 @@ def _classify_unpushed(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _classify_controller_prompt_packet(item: dict[str, Any]) -> dict[str, Any]:
+    """Classify a controller-prompt packet.
+
+    Rules:
+      - closed + governed receipt → delivered (non-live: work is done)
+      - retired → non-live (excluded from classification)
+      - draft + no packet_id (index file) → parked with honest reason
+      - draft + governed receipt absent → ambiguous
+    """
+    status = item.get("status", "unknown")
+    has_receipt = item.get("has_governed_receipt", False)
+    has_pid = item.get("has_packet_id", False)
+    disposition = item.get("disposition", "")
+    pkt_type = item.get("packet_type", "")
+
+    # Retired packets are done — exclude from live classification
+    if status == "retired":
+        return {
+            "computed_state": None,
+            "is_live": False,
+            "confidence": "definitive",
+            "evidence": "status=retired",
+            "rule": "P5",
+            "note": "retired packet — excluded from live classification",
+        }
+
+    # Closed with governed receipt → delivered
+    if status == "closed" and has_receipt:
+        return {
+            "computed_state": "delivered",
+            "is_live": True,
+            "confidence": "definitive",
+            "evidence": f"status=closed, disposition={disposition}, governed EXEC_RECEIPT present",
+            "rule": "P5",
+        }
+
+    # Closed without receipt — still delivered but with lower confidence
+    if status == "closed":
+        return {
+            "computed_state": "delivered",
+            "is_live": True,
+            "confidence": "probable",
+            "evidence": f"status=closed, disposition={disposition}, no governed EXEC_RECEIPT",
+            "rule": "P5",
+            "note": "closed packet without governed receipt",
+        }
+
+    # Draft: index file without packet_id → parked (honest structural reason)
+    if status == "draft" and not has_pid:
+        return {
+            "computed_state": "parked",
+            "is_live": True,
+            "confidence": "definitive",
+            "evidence": "status=draft, no packet_id (index/meta-document)",
+            "rule": "P5",
+            "note": f"packet_type={pkt_type}; cannot use governed close without packet_id",
+        }
+
+    # Draft with packet_id but no receipt → ambiguous
+    if status == "draft":
+        return {
+            "computed_state": "ambiguous",
+            "is_live": True,
+            "confidence": "probable",
+            "evidence": "status=draft, no governed close or receipt",
+            "rule": "P5+P7",
+            "ambiguity_reason": "draft packet with no governed close — may be abandoned or pending",
+        }
+
+    # Unknown status
+    return {
+        "computed_state": "orphaned",
+        "is_live": True,
+        "confidence": "probable",
+        "evidence": f"unexpected packet status '{status}'",
+        "rule": "P5+P7",
+        "ambiguity_reason": f"unrecognized status: {status}",
+    }
+
+
 # ── Public API ───────────────────────────────────────────────────────
 
 def reconcile(
@@ -618,6 +744,7 @@ def reconcile(
     stashes = _collect_stashes(repo_root)
     parked_branches = _collect_parked_branches(repo_root)
     unpushed = _collect_unpushed(repo_root)
+    packets = _collect_controller_prompt_packets(state_root)
     handoffs = _scan_active_handoffs(state_root)
 
     # Classify each specimen
@@ -653,6 +780,13 @@ def reconcile(
 
     for item in unpushed:
         result = _classify_unpushed(item)
+        classifications.append({
+            **item,
+            **result,
+        })
+
+    for item in packets:
+        result = _classify_controller_prompt_packet(item)
         classifications.append({
             **item,
             **result,
