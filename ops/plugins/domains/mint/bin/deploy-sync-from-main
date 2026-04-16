@@ -87,6 +87,99 @@ git -C "$MINT_REPO" fetch origin --prune >/dev/null 2>&1 || true
 git -C "$MINT_REPO" rev-parse --verify "$REF" >/dev/null 2>&1 || stop "git ref not found: $REF"
 resolved_ref="$(git -C "$MINT_REPO" rev-parse --short "$REF")"
 echo "resolved_ref: $resolved_ref"
+SOURCE_SYNC_TAG="source-sync-${resolved_ref}"
+echo "source_sync_tag: $SOURCE_SYNC_TAG"
+
+REMOTE_COMPOSE_DIR="$REMOTE_STACK_ROOT"
+COMPOSE_SERVICE=""
+TAG_VAR=""
+case "$MODULE" in
+  artwork)
+    COMPOSE_SERVICE="files-api"
+    TAG_VAR="ARTWORK_TAG"
+    ;;
+  quote-page)
+    COMPOSE_SERVICE="quote-page"
+    TAG_VAR="QUOTE_PAGE_TAG"
+    ;;
+  order-intake)
+    COMPOSE_SERVICE="order-intake"
+    TAG_VAR="ORDER_INTAKE_TAG"
+    ;;
+  finance-adapter)
+    COMPOSE_SERVICE="finance-adapter"
+    TAG_VAR="FINANCE_ADAPTER_TAG"
+    ;;
+  quotes)
+    COMPOSE_SERVICE="quotes"
+    TAG_VAR="QUOTES_TAG"
+    ;;
+  pricing)
+    COMPOSE_SERVICE="pricing"
+    TAG_VAR="PRICING_TAG"
+    REMOTE_COMPOSE_DIR="${REMOTE_STACK_ROOT}/pricing"
+    ;;
+  suppliers)
+    COMPOSE_SERVICE="suppliers"
+    TAG_VAR="SUPPLIERS_TAG"
+    REMOTE_COMPOSE_DIR="${REMOTE_STACK_ROOT}/suppliers"
+    ;;
+  shipping)
+    COMPOSE_SERVICE="shipping"
+    TAG_VAR="SHIPPING_TAG"
+    REMOTE_COMPOSE_DIR="${REMOTE_STACK_ROOT}/shipping"
+    ;;
+  payment)
+    COMPOSE_SERVICE="payment"
+    TAG_VAR="PAYMENT_TAG"
+    REMOTE_COMPOSE_DIR="${REMOTE_STACK_ROOT}/payment"
+    ;;
+  *)
+    stop "unsupported module name: $MODULE"
+    ;;
+esac
+
+get_remote_tag() {
+  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+    "bash -s -- $(printf "%q" "$REMOTE_ENV_FILE") $(printf "%q" "$TAG_VAR")" <<'EOS'
+env_file="$1"
+key="$2"
+awk -F= -v k="$key" '$1==k{print substr($0, index($0, "=") + 1); exit}' "$env_file"
+EOS
+}
+
+set_remote_tag() {
+  local value="$1"
+  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+    "bash -s -- $(printf "%q" "$REMOTE_ENV_FILE") $(printf "%q" "$TAG_VAR") $(printf "%q" "$value")" <<'EOS'
+env_file="$1"
+key="$2"
+value="$3"
+tmp="${env_file}.tmp.$$"
+awk -F= -v k="$key" -v v="$value" 'BEGIN{done=0} $1==k{print k "=" v; done=1; next} {print} END{if(!done) print k "=" v}' "$env_file" > "$tmp"
+mv "$tmp" "$env_file"
+EOS
+}
+
+delete_remote_tag() {
+  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+    "bash -s -- $(printf "%q" "$REMOTE_ENV_FILE") $(printf "%q" "$TAG_VAR")" <<'EOS'
+env_file="$1"
+key="$2"
+tmp="${env_file}.tmp.$$"
+awk -F= -v k="$key" '$1!=k{print}' "$env_file" > "$tmp"
+mv "$tmp" "$env_file"
+EOS
+}
+
+restore_remote_tag() {
+  local value="$1"
+  if [[ -n "$value" ]]; then
+    set_remote_tag "$value"
+  else
+    delete_remote_tag
+  fi
+}
 
 echo "[0/3] Remote env preflight..."
 ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "test -f '${REMOTE_ENV_FILE}'" \
@@ -147,31 +240,34 @@ git -C "$MINT_REPO" archive --format=tar "$REF" \
   | ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "cd '${REMOTE_STACK_ROOT}' && tar -xf -" \
   || stop "archive sync failed"
 
+OLD_TAG="$(get_remote_tag)"
+
 echo "[2/3] Deploy module service (single-service build)..."
+echo "  - stamp runtime tag: ${TAG_VAR}=${SOURCE_SYNC_TAG}"
+set_remote_tag "$SOURCE_SYNC_TAG"
+
+deploy_cmd=""
 
 case "$MODULE" in
   artwork)
     echo "  - deploy files-api (root mint-apps compose, --no-deps --build)"
-    ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
-      "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build files-api" \
-      || stop "deploy failed for artwork/files-api"
+    deploy_cmd="cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build files-api"
     ;;
   quote-page|order-intake|finance-adapter|quotes)
     echo "  - deploy $MODULE (root mint-apps compose, --no-deps --build)"
-    ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
-      "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build $MODULE" \
-      || stop "deploy failed for $MODULE"
+    deploy_cmd="cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build $MODULE"
     ;;
   pricing|suppliers|shipping|payment)
     echo "  - deploy $MODULE (sub-stack compose, --no-deps --build)"
-    ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
-      "cd '${REMOTE_STACK_ROOT}/$MODULE' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build $MODULE" \
-      || stop "deploy failed for $MODULE"
-    ;;
-  *)
-    stop "unsupported module name: $MODULE"
+    deploy_cmd="cd '${REMOTE_STACK_ROOT}/$MODULE' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build $MODULE"
     ;;
 esac
+
+if ! ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "$deploy_cmd"; then
+  echo "warn: deploy failed for ${MODULE}; restoring previous tag value" >&2
+  restore_remote_tag "$OLD_TAG"
+  stop "deploy failed for $MODULE"
+fi
 
 echo "[3/3] Post-deploy status checks..."
 "$SPINE_ROOT/ops/plugins/domains/mint/bin/deploy-status" || true
@@ -182,5 +278,5 @@ fi
 
 echo
 echo "status: OK"
-echo "note: deployed_ref=$resolved_ref module=$MODULE"
+echo "note: deployed_ref=$resolved_ref module=$MODULE runtime_tag=$SOURCE_SYNC_TAG deploy_origin=source-sync-host-build"
 exit 0
