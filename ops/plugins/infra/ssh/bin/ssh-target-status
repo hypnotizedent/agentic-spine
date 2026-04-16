@@ -234,6 +234,20 @@ probe_path() {
     ssh_opts+=(-o "BatchMode=yes")
   fi
 
+  # Probes must honor the governed machine identity contract just like the
+  # rest of the SSH-based infra surfaces, or status diverges from real access.
+  local identity_opts extra_opts
+  identity_opts="$(ssh_resolve_machine_identity_opts "$id" 2>/dev/null)" || true
+  extra_opts="$(ssh_resolve_extra_opts "$id")"
+  if [[ -n "$identity_opts" ]]; then
+    # shellcheck disable=SC2206
+    ssh_opts+=($identity_opts)
+  fi
+  if [[ -n "$extra_opts" ]]; then
+    # shellcheck disable=SC2206
+    ssh_opts+=($extra_opts)
+  fi
+
   local out normalized_out ssh_exit start_ms end_ms dur_ms reason remote_name
   local attempt=0
   local attempts_json='[]'
