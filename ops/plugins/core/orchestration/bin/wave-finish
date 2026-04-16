@@ -945,6 +945,55 @@ else
   fi
 fi
 
+# ── Step 4d: Transition parity gate ────────────────────────────
+
+PARITY_CHECK_BIN="$ROOT/ops/plugins/core/lifecycle/bin/transition-parity-check"
+parity_result="pass"
+parity_exit=0
+
+if [[ -x "$PARITY_CHECK_BIN" ]]; then
+  echo "Running transition.parity.check..."
+  parity_output="$("$PARITY_CHECK_BIN" --json 2>&1)" || parity_exit=$?
+
+  if [[ "$parity_exit" -eq 0 ]]; then
+    parity_result="pass"
+    echo "  Transition parity: PASS"
+  elif [[ "$parity_exit" -eq 2 ]]; then
+    parity_result="degraded"
+    echo "  Transition parity: DEGRADED (authority surface unavailable)" >&2
+    echo "$parity_output" >&2
+  else
+    parity_result="fail"
+    echo "  Transition parity: FAIL" >&2
+    # Extract and display failure details
+    if command -v python3 >/dev/null 2>&1; then
+      python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    for c in d.get('checks', []):
+        if c.get('result') == 'fail':
+            print(f\"    [{c['check']}] {c['name']}:\", file=sys.stderr)
+            for f in c.get('failures', []):
+                print(f'      {f}', file=sys.stderr)
+except Exception:
+    pass
+" "$parity_output" 2>&1 >&2 || true
+    fi
+  fi
+  echo ""
+else
+  echo "  Transition parity: SKIPPED (transition-parity-check not found)"
+  echo ""
+fi
+
+if [[ "$parity_result" != "pass" ]]; then
+  echo "wave.finish FAIL: transition parity $parity_result after closeout" >&2
+  echo "The canonical mutation has landed, but derived projection surfaces do not agree." >&2
+  echo "Run: transition.parity.check for details. Do NOT re-close the loop." >&2
+  exit 1
+fi
+
 # ── Step 5: Emit summary ────────────────────────────────────────
 
 echo "================================================================="
