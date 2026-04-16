@@ -115,7 +115,7 @@ When work is done, follow this sequence:
 These seams are missing or manual today. They are named here so agents know,
 not as a fix list.
 
-- **Loop auto-attach at session start** — `session.v3.attach` does not auto-attach active loops; agents see `loop: <none>` even when loops exist
+- **Loop auto-attach at session start** — terminal birth (`ops terminal launch`) auto-attaches the active loop when exactly one exists; standalone `session.v3.attach` remains read-only and does not bind loop context into the caller's environment
 - **Membrane-to-controller handoff** — no governed artifact between what the membrane understood and what the controller executes
 - **Controller-prompt packet close** — orchestration packets have governed close; controller-prompt packets do not
 

@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# loop-auto-attach-proof — Controlled proof for loop auto-attach semantics
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Exercises all six cases against terminal.sh --dry-run:
+#   1. Zero active loops → loop: <none>
+#   2. Single active loop → auto-attached
+#   3. Multiple active loops → ambiguous, no auto-attach
+#   4. Explicit --loop precedence
+#   5. Degraded truth (unreadable dir) → no silent attach
+#   6. Worktree identity alignment when auto-attach fires
+#
+# Uses a temporary SPINE_STATE with controlled loop-scope fixtures.
+# Never touches live state. Non-destructive.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+set -euo pipefail
+
+SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+TERMINAL_SH="$SPINE_ROOT/ops/commands/terminal.sh"
+ENTRY_COMPILE="$SPINE_ROOT/ops/plugins/core/lifecycle/bin/entry-compile"
+
+PASS=0
+FAIL=0
+TOTAL=0
+
+proof() {
+    local name="$1"
+    local expected="$2"
+    local actual="$3"
+    TOTAL=$((TOTAL + 1))
+    if [[ "$actual" == "$expected" ]]; then
+        echo "  PASS: $name (got: $actual)"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL: $name (expected: $expected, got: $actual)"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# Create temp state root
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
+mkdir -p "$TMPDIR/loop-scopes"
+mkdir -p "$TMPDIR/controller-prompts/_intake-artifacts"
+
+write_scope() {
+    local id="$1"
+    local status="$2"
+    cat > "$TMPDIR/loop-scopes/${id}.scope.md" <<SCOPE
+---
+loop_id: $id
+created: 2026-04-16
+status: $status
+owner: "@ronny"
+scope: test
+priority: high
+horizon: now
+execution_readiness: runnable
+execution_mode: single_worker
+objective: Test loop for proof
+---
+# $id
+SCOPE
+}
+
+# Helper: extract SPINE_LOOP_ID from dry-run output
+extract_loop_id() {
+    local output="$1"
+    # dry-run output has "# Loop: LOOP-ID" when a loop is attached
+    local loop_line
+    loop_line="$(echo "$output" | grep '^# Loop:' || true)"
+    if [[ -n "$loop_line" ]]; then
+        echo "${loop_line#*: }"
+    else
+        echo "<none>"
+    fi
+}
+
+# Helper: extract SPINE_LOOP_ID from the export commands in the entry cmd
+extract_loop_export() {
+    local output="$1"
+    local cmd_line
+    cmd_line="$(echo "$output" | grep -v '^#' | head -1)"
+    if echo "$cmd_line" | grep -q 'SPINE_LOOP_ID'; then
+        echo "$cmd_line" | grep -o "SPINE_LOOP_ID=[^ ]*" | head -1 | cut -d= -f2 | tr -d "'"
+    else
+        echo "<none>"
+    fi
+}
+
+# Helper: extract OPS_WORKTREE_IDENTITY from the export commands
+extract_worktree_identity() {
+    local output="$1"
+    local cmd_line
+    cmd_line="$(echo "$output" | grep -v '^#' | head -1)"
+    if echo "$cmd_line" | grep -q 'OPS_WORKTREE_IDENTITY'; then
+        echo "$cmd_line" | grep -o "OPS_WORKTREE_IDENTITY=[^ ]*" | head -1 | cut -d= -f2 | tr -d "'"
+    else
+        echo "<none>"
+    fi
+}
+
+echo "═══════════════════════════════════════════════════════════════"
+echo "Loop Auto-Attach Proof"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+
+# ── Case 1: Zero active loops ─────────────────────────────────────────
+echo "── Case 1: Zero active loops"
+# Empty loop-scopes dir
+rm -f "$TMPDIR/loop-scopes/"*.scope.md 2>/dev/null || true
+OUTPUT="$(SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool claude --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
+LOOP="$(extract_loop_id "$OUTPUT")"
+proof "no loop attached" "<none>" "$LOOP"
+echo ""
+
+# ── Case 2: Single active loop ────────────────────────────────────────
+echo "── Case 2: Single active loop"
+rm -f "$TMPDIR/loop-scopes/"*.scope.md 2>/dev/null || true
+write_scope "LOOP-TEST-SINGLE-20260416" "active"
+OUTPUT="$(SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool claude --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
+LOOP="$(extract_loop_id "$OUTPUT")"
+proof "single loop auto-attached" "LOOP-TEST-SINGLE-20260416" "$LOOP"
+LOOP_EXPORT="$(extract_loop_export "$OUTPUT")"
+proof "SPINE_LOOP_ID in exports" "LOOP-TEST-SINGLE-20260416" "$LOOP_EXPORT"
+echo ""
+
+# ── Case 3: Multiple active loops ─────────────────────────────────────
+echo "── Case 3: Multiple active loops (ambiguous)"
+rm -f "$TMPDIR/loop-scopes/"*.scope.md 2>/dev/null || true
+write_scope "LOOP-TEST-ALPHA-20260416" "active"
+write_scope "LOOP-TEST-BETA-20260416" "active"
+OUTPUT="$(SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool claude --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
+LOOP="$(extract_loop_id "$OUTPUT")"
+proof "no loop attached (ambiguous)" "<none>" "$LOOP"
+echo ""
+
+# ── Case 4: Explicit --loop precedence ────────────────────────────────
+echo "── Case 4: Explicit --loop takes precedence"
+rm -f "$TMPDIR/loop-scopes/"*.scope.md 2>/dev/null || true
+write_scope "LOOP-TEST-SINGLE-20260416" "active"
+OUTPUT="$(SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool claude --terminal SPINE-CONTROL-01 --loop LOOP-EXPLICIT-OVERRIDE --dry-run 2>/dev/null)" || true
+LOOP="$(extract_loop_id "$OUTPUT")"
+proof "explicit loop preserved" "LOOP-EXPLICIT-OVERRIDE" "$LOOP"
+LOOP_EXPORT="$(extract_loop_export "$OUTPUT")"
+proof "explicit SPINE_LOOP_ID in exports" "LOOP-EXPLICIT-OVERRIDE" "$LOOP_EXPORT"
+echo ""
+
+# ── Case 5: Degraded truth ────────────────────────────────────────────
+echo "── Case 5: Degraded truth (unreadable loop-scopes)"
+rm -f "$TMPDIR/loop-scopes/"*.scope.md 2>/dev/null || true
+write_scope "LOOP-TEST-SINGLE-20260416" "active"
+chmod 000 "$TMPDIR/loop-scopes" 2>/dev/null || true
+OUTPUT="$(SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool claude --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
+chmod 755 "$TMPDIR/loop-scopes" 2>/dev/null || true
+LOOP="$(extract_loop_id "$OUTPUT")"
+proof "no loop attached (degraded)" "<none>" "$LOOP"
+echo ""
+
+# ── Case 6: Worktree identity alignment ──────────────────────────────
+echo "── Case 6: Worktree identity alignment"
+rm -f "$TMPDIR/loop-scopes/"*.scope.md 2>/dev/null || true
+write_scope "LOOP-TEST-IDENTITY-20260416" "active"
+OUTPUT="$(SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool claude --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
+LOOP_EXPORT="$(extract_loop_export "$OUTPUT")"
+WT_IDENTITY="$(extract_worktree_identity "$OUTPUT")"
+proof "SPINE_LOOP_ID set" "LOOP-TEST-IDENTITY-20260416" "$LOOP_EXPORT"
+proof "OPS_WORKTREE_IDENTITY matches" "LOOP-TEST-IDENTITY-20260416" "$WT_IDENTITY"
+echo ""
+
+# ── Summary ───────────────────────────────────────────────────────────
+echo "═══════════════════════════════════════════════════════════════"
+echo "Results: $PASS/$TOTAL passed, $FAIL failed"
+echo "═══════════════════════════════════════════════════════════════"
+
+if [[ "$FAIL" -gt 0 ]]; then
+    exit 1
+fi
+exit 0
