@@ -74,24 +74,28 @@ SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile
 # ── Query UniFi API for all configured clients ──
 api_b64="$(printf '%s' "$API_KEY" | base64)"
 
-ssh $SSH_OPTS "${PROXY_USER}@${PROXY_HOST}" "bash -s" <<SSHEOF > "$TMPDIR_WORK/clients.json" 2>/dev/null
+ssh $SSH_OPTS "${PROXY_USER}@${PROXY_HOST}" "bash -s" <<SSHEOF > "$TMPDIR_WORK/clients_raw.json" 2>/dev/null
 set -euo pipefail
 api_key="\$(echo '$api_b64' | base64 -d)"
 curl -sk "https://${UDR_HOST}/proxy/network/api/s/default/rest/user" \
-  -H "X-API-KEY: \${api_key}" | jq -r '.data'
+  -H "X-API-KEY: \${api_key}" \
+  -H "Accept: application/json" 2>/dev/null
 SSHEOF
 
-[[ -s "$TMPDIR_WORK/clients.json" ]] || { echo "STOP (2): UniFi API query failed or returned empty"; exit 2; }
+[[ -s "$TMPDIR_WORK/clients_raw.json" ]] || { echo "STOP (2): UniFi API query failed or returned empty"; exit 2; }
+
+jq -r '.data' "$TMPDIR_WORK/clients_raw.json" > "$TMPDIR_WORK/clients.json"
+[[ -s "$TMPDIR_WORK/clients.json" ]] || { echo "STOP (2): UniFi API response missing .data field"; exit 2; }
 
 # ── Extract DHCP reservations (clients with fixed_ip) ──
-jq -r '.[] | select(.fixed_ip != null) | {
+jq '[.[] | select(.fixed_ip != null) | {
   mac: .mac,
   ip: .fixed_ip,
   hostname: (.hostname // .name // "unknown"),
   use_fixedip: (.use_fixedip // false)
-}' "$TMPDIR_WORK/clients.json" > "$TMPDIR_WORK/reservations.json"
+}]' "$TMPDIR_WORK/clients.json" > "$TMPDIR_WORK/reservations.json"
 
-RESERVATION_COUNT=$(jq -s 'length' "$TMPDIR_WORK/reservations.json")
+RESERVATION_COUNT=$(jq 'length' "$TMPDIR_WORK/reservations.json")
 
 echo "Found $RESERVATION_COUNT DHCP reservations on shop UDR6"
 echo
