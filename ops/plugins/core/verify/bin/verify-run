@@ -30,8 +30,8 @@ Usage:
   verify-run engine [--json]                  Fast platform engine smoke (spine truth)
   verify-run honesty [--json]                 Engine orchestration proof (spine truth)
   verify-run spine [--json]                   Honest spine-only verify scope (spine truth)
-  verify-run fast [--json] [--shadow]         17-gate infrastructure baseline (estate health)
-  verify-run infra [--json] [--shadow]        Alias for fast (estate health)
+  verify-run fast [--json] [--shadow]         Deprecated alias for infra (estate health)
+  verify-run infra [--json] [--shadow]        Preferred estate/workload health scope
   verify-run domain <domain_id> [--json]      Domain-scoped infrastructure gates (estate health)
   verify-run release [--json] [--shadow]      Full infrastructure gate set (estate health)
 
@@ -39,12 +39,13 @@ Scopes:
   engine  => platform engine smoke test; answers spine/object truth
   honesty => engine orchestration proof; answers spine/object truth
   spine   => curated spine-only executable set + engine/honesty surfaces
-  fast    => infrastructure workload baseline; answers estate/workload health only
-  infra   => same as fast
+  fast    => deprecated compatibility alias for infra
+  infra   => infrastructure workload baseline; answers estate/workload health only
   domain  => estate/workload health gates for one domain
   release => full estate/workload health gate set
 
 Flags:
+  --alias-source <name>  internal compatibility marker for deprecated alias surfaces
   --shadow   accepted for compatibility and ignored by spine-lite
   --recover  on fail, execute matching recovery-dispatch for D### failures when available
   --json     emit machine-readable JSON output
@@ -54,6 +55,7 @@ USAGE
 json_mode=0
 shadow_mode=0
 recover_mode=0
+alias_source=""
 
 if [[ "${1:-}" == "--" ]]; then
   shift
@@ -68,9 +70,6 @@ case "$scope" in
   *) fail "unknown scope '$scope' (expected engine|honesty|spine|fast|infra|domain|release)" ;;
 esac
 
-# Normalize infra → fast (they are the same surface)
-[[ "$scope" != "infra" ]] || scope="fast"
-
 target_domain=""
 if [[ "$scope" == "domain" ]]; then
   [[ $# -ge 1 ]] || fail "domain scope requires <domain_id>"
@@ -80,6 +79,11 @@ fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --alias-source)
+      alias_source="${2:-}"
+      [[ -n "$alias_source" ]] || fail "--alias-source requires <name>"
+      shift 2
+      ;;
     --json) json_mode=1 ;;
     --shadow) shadow_mode=1 ;;
     --recover) recover_mode=1 ;;
@@ -87,6 +91,11 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ "$scope" == "fast" ]]; then
+  [[ -n "$alias_source" ]] || alias_source="fast"
+  scope="infra"
+fi
 
 surface_recovery() {
   local scope_name="$1"
@@ -111,7 +120,7 @@ scope_truth_plane() {
   local mode="$1"
   case "$mode" in
     engine|honesty|spine) echo "spine_truth" ;;
-    fast|release|domain:*) echo "estate_health" ;;
+    infra|release|domain:*) echo "estate_health" ;;
     *) echo "unknown" ;;
   esac
 }
@@ -122,7 +131,7 @@ scope_reading() {
     engine|honesty|spine)
       echo "Spine/object truth surface. Reads engine, governance, entry, orchestration, and spine-only execution truth."
       ;;
-    fast|release|domain:*)
+    infra|release|domain:*)
       echo "Estate/workload health surface. Reads runtime host, workload, service, backup, and network state; does not answer packet, loop, or governance truth."
       ;;
     *)
@@ -135,9 +144,27 @@ scope_may_block_spine_truth() {
   local mode="$1"
   case "$mode" in
     engine|honesty|spine) echo true ;;
-    fast|release|domain:*) echo false ;;
+    infra|release|domain:*) echo false ;;
     *) echo false ;;
   esac
+}
+
+preferred_scope_for_alias() {
+  local source="$1"
+  [[ -n "$source" ]] || return 0
+  echo "infra"
+}
+
+preferred_capability_for_alias() {
+  local source="$1"
+  [[ -n "$source" ]] || return 0
+  echo "verify.infra.run"
+}
+
+emit_alias_deprecation_note() {
+  local source="$1"
+  [[ -n "$source" ]] || return 0
+  echo "verify.run deprecation: '$source' is a compatibility alias for estate/workload health. Prefer 'infra' or 'verify.infra.run'." >&2
 }
 
 emit_scope_note() {
@@ -146,7 +173,7 @@ emit_scope_note() {
     engine|honesty|spine)
       echo "verify.run note: $mode answers spine/object truth." >&2
       ;;
-    fast|release|domain:*)
+    infra|release|domain:*)
       echo "verify.run note: $mode answers estate/workload health only; do not treat it as packet/loop/governance truth." >&2
       ;;
   esac
@@ -155,10 +182,12 @@ emit_scope_note() {
 run_and_wrap_json() {
   local mode="$1"
   shift
-  local output rc truth_plane reading may_block_spine_truth
+  local output rc truth_plane reading may_block_spine_truth preferred_scope preferred_capability
   truth_plane="$(scope_truth_plane "$mode")"
   reading="$(scope_reading "$mode")"
   may_block_spine_truth="$(scope_may_block_spine_truth "$mode")"
+  preferred_scope="$(preferred_scope_for_alias "$alias_source")"
+  preferred_capability="$(preferred_capability_for_alias "$alias_source")"
 
   set +e
   output="$("$@" 2>/dev/null)"
@@ -174,6 +203,9 @@ run_and_wrap_json() {
     --arg mode "$mode" \
     --arg truth_plane "$truth_plane" \
     --arg scope_reading "$reading" \
+    --arg alias_source "$alias_source" \
+    --arg preferred_scope "$preferred_scope" \
+    --arg preferred_capability "$preferred_capability" \
     --argjson may_block_spine_truth "$may_block_spine_truth" \
     --argjson shadow_mode "$shadow_mode" \
     --argjson result "$output" \
@@ -181,6 +213,10 @@ run_and_wrap_json() {
       mode: $mode,
       truth_plane: $truth_plane,
       scope_reading: $scope_reading,
+      alias_source: (if $alias_source == "" then null else $alias_source end),
+      deprecated_alias_used: ($alias_source != ""),
+      preferred_scope: (if $preferred_scope == "" then null else $preferred_scope end),
+      preferred_capability: (if $preferred_capability == "" then null else $preferred_capability end),
       may_block_spine_truth: $may_block_spine_truth,
       shadow_mode_ignored: ($shadow_mode == 1),
       total: ($result.total // 0),
@@ -215,6 +251,7 @@ run_scope() {
     return "$rc"
   fi
 
+  emit_alias_deprecation_note "$alias_source"
   emit_scope_note "$mode"
   set +e
   "$@"
@@ -362,9 +399,9 @@ case "$scope" in
   engine)  run_scope "engine" "$VERIFY_ENGINE" ;;
   honesty) run_scope "honesty" "$VERIFY_ENGINE_HONESTY" ;;
   spine)   run_spine_scope ;;
-  fast)
+  infra)
     [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
-    run_scope "fast" "$VERIFY_TOPOLOGY" core
+    run_scope "infra" "$VERIFY_TOPOLOGY" core
     ;;
   domain)
     [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
