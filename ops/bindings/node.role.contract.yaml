@@ -230,6 +230,28 @@ authority_exceptions:
       option_a_move_to_watcher: "SELECTED. Watcher v1 complete. Exception retired."
       option_c_split_detection_escalation: "No longer needed — watcher_node holds full authority."
 
+  # Scoped exception: execution_host interactive_session_attach for emergency governance
+  # T2: Minimum Survivable Control Plane — emergency session entry
+  # Design ref: STATE-REACHABILITY-FROM-AI-CONSOLIDATION-DESIGN-20260416.md
+  # Parent design: MINIMUM-SURVIVABLE-CONTROL-PLANE-DESIGN-20260416.md
+  # Operator decision: 2026-04-16 (narrow approval for emergency session exception)
+  #
+  # Base authority: execution_host.interactive_session_attach = forbidden
+  # This exception does NOT change the base authority matrix.
+  # It grants a narrow, traceable override for emergency operator sessions
+  # when the primary operator_console is unavailable.
+  execution_host_emergency_session_attach:
+    status: active
+    activated_at: "2026-04-16"
+    base_field: interactive_session_attach
+    base_value: forbidden
+    exception_value: allowed
+    scope: emergency-operator-console-unavailable
+    trigger_condition: "Primary operator_console is unreachable or unavailable"
+    constraint: "Read-only governance inspection and bounded session work only. This is NOT a daily-driver session surface."
+    depends_on: "T1 state sync must be active (execution-host pull from MBP via systemd timer)"
+    sunset_condition: "Expires when a permanent secondary operator_console is designated or state authority migrates off MBP (T5)."
+
 authority_constraints:
   execution_host:
     git_mutation: "Only under governed-main-override and existing git guardrails."
@@ -313,13 +335,15 @@ connectivity_requirements:
 failure_model:
   operator_console_loss:
     degraded_capabilities:
-      - interactive_session_attach
       - manual_override
       - prompt_driven_operator_work
+    mitigated_capabilities:
+      - interactive_session_attach: "Emergency session attach on execution_host via authority exception (T2). Degraded but available."
     hard_stop_capabilities: []
-    expected_escalation_behavior: "Operator reconnect or replacement console attach. Autonomous execution may continue when execution_host is separate."
+    expected_escalation_behavior: "Operator SSHs to execution_host for emergency governed session. T1 state sync provides read-only governance projection. Autonomous execution continues independently."
     replacement_possible_without_state_movement: yes
     replacement_depends_on_future_replication_work: no
+    t1_state_sync: "Active. 10-minute rsync pull from execution_host to Root 1. Pre-positioned stale data survives MBP loss."
 
   execution_host_loss:
     degraded_capabilities:
