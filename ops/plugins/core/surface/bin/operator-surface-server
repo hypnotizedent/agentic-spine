@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""operator-surface-server — tiny static server for operator read surfaces.
+
+Serves precomputed cockpit HTML and mobile JSON from a static directory.
+No dynamic rendering. No mutation endpoints. Read-only projection only.
+
+Regeneration is handled by a separate timer, not by this server.
+
+Usage:
+    python3 operator-surface-server [--port 8900] [--dir /path/to/served]
+
+Default served directory: $SPINE_STATE/operator-surface/
+Default port: 8900
+"""
+from __future__ import annotations
+
+import argparse
+import os
+from functools import partial
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+
+
+STATE_ROOT = Path(
+    os.environ.get(
+        "SPINE_STATE",
+        str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+    )
+)
+DEFAULT_DIR = STATE_ROOT / "operator-surface"
+DEFAULT_PORT = 8900
+
+
+class QuietHandler(SimpleHTTPRequestHandler):
+    """Serve files without excessive logging."""
+
+    def log_message(self, format, *args):
+        # Only log errors, not every request
+        if args and isinstance(args[0], str) and args[0].startswith("4") or args[0].startswith("5"):
+            super().log_message(format, *args)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Static operator surface server")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--dir", type=str, default=str(DEFAULT_DIR))
+    args = parser.parse_args()
+
+    serve_dir = Path(args.dir)
+    serve_dir.mkdir(parents=True, exist_ok=True)
+
+    handler = partial(QuietHandler, directory=str(serve_dir))
+    server = HTTPServer(("0.0.0.0", args.port), handler)
+    print(f"operator-surface-server listening on :{args.port} serving {serve_dir}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

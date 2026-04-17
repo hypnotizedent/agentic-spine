@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+"""operator-overview-payload — shared root for all operator read surfaces.
+
+One compiled operator-state payload. Both the desktop cockpit and the mobile
+supervision surface consume this as their single source of truth.
+
+Same roots, same truth, same timestamps, same attention ordering.
+Different density and interaction happen downstream in the leaves.
+
+Usage:
+    python3 operator-overview-payload              # full JSON to stdout
+    python3 operator-overview-payload --compact    # phone-priority subset
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+REPO = Path(__file__).resolve().parents[5]
+STATE_ROOT = Path(
+    os.environ.get(
+        "SPINE_STATE",
+        str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+    )
+)
+EVIDENCE_ROOT = Path(
+    os.environ.get(
+        "SPINE_EVIDENCE_ROOT",
+        str(Path.home() / "code" / ".evidence" / "spine"),
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _run(cmd: list[str]) -> tuple[str, bool]:
+    try:
+        proc = subprocess.run(
+            cmd, text=True, capture_output=True, check=False,
+            cwd=str(REPO), timeout=30,
+        )
+        return proc.stdout.strip(), proc.returncode == 0
+    except Exception as e:
+        return str(e), False
+
+
+def _run_json(cmd: list[str]) -> dict:
+    out, ok = _run(cmd)
+    if not ok:
+        return {"status": "fail", "error": out}
+    try:
+        return json.loads(out) if out else {"status": "fail", "error": "empty output"}
+    except Exception:
+        return {"status": "fail", "stdout": out}
+
+
+def _yaml_load(path: Path) -> dict | list | None:
+    try:
+        import yaml
+        with open(path) as f:
+            return yaml.safe_load(f)
+    except Exception:
+        return None
+
+
+def utcnow() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# Shared root sections
+# ---------------------------------------------------------------------------
+
+def classify_freshness(age_seconds: float) -> str:
+    if age_seconds < 0:
+        return "unknown"
+    if age_seconds < 300:
+        return "current"
+    if age_seconds < 1800:
+        return "aging"
+    return "stale"
+
+
+def collect_projection_freshness() -> dict:
+    now = time.time()
+    db_path = STATE_ROOT / "shared_authority.db"
+    sync_marker = STATE_ROOT / ".last_sync_utc"
+
+    result: dict = {
+        "source": "unknown",
+        "age_seconds": -1,
+        "freshness": "unknown",
+        "sync_marker_utc": None,
+        "state_db_mtime_utc": None,
+    }
+
+    if sync_marker.is_file():
+        try:
+            marker_text = sync_marker.read_text().strip()
+            result["sync_marker_utc"] = marker_text
+            marker_dt = datetime.fromisoformat(marker_text.replace("Z", "+00:00"))
+            age = now - marker_dt.timestamp()
+            result["age_seconds"] = int(age)
+            result["freshness"] = classify_freshness(age)
+            result["source"] = "sync_marker"
+        except Exception:
+            pass
+
+    if db_path.is_file():
+        try:
+            mtime = db_path.stat().st_mtime
+            mtime_utc = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            result["state_db_mtime_utc"] = mtime_utc
+            if result["source"] == "unknown":
+                age = now - mtime
+                result["age_seconds"] = int(age)
+                result["freshness"] = classify_freshness(age)
+                result["source"] = "db_mtime"
+        except Exception:
+            pass
+
+    return result
+
+
+def collect_spine_now(status: dict) -> dict:
+    counts = status.get("counts", {})
+    return {
+        "verify_status": counts.get("verify_status", "unknown"),
+        "anomaly_count": counts.get("anomalies", 0),
+        "open_loop_count": counts.get("open_loops", 0),
+        "open_gap_count": counts.get("open_gaps", 0),
+        "active_wave_count": counts.get("active_waves", 0),
+        "orphaned_wave_count": counts.get("orphaned_waves", 0),
+        "coherence_ok": not counts.get("coherence_attention", False),
+    }
+
+
+def collect_attention(status: dict, refs: dict) -> list[dict]:
+    items: list[dict] = []
+
+    for anomaly in status.get("anomalies", []):
+        text = str(anomaly) if isinstance(anomaly, str) else anomaly.get("message", str(anomaly))
+        items.append({"type": "anomaly", "summary": text, "priority": "high"})
+
+    for gap in status.get("open_gaps", []):
+        items.append({
+            "type": "gap",
+            "id": gap.get("gap_id", ""),
+            "summary": gap.get("description", ""),
+            "priority": gap.get("severity", "medium"),
+        })
+
+    for loop in status.get("open_loops", []):
+        if loop.get("blocked_by"):
+            items.append({
+                "type": "blocked_loop",
+                "id": loop.get("loop_id", ""),
+                "summary": f"Blocked: {loop.get('blocked_by', '')}",
+                "priority": "high",
+            })
+
+    counts = status.get("counts", {})
+    if counts.get("orphaned_waves", 0) > 0:
+        items.append({
+            "type": "orphaned_waves",
+            "summary": f"{counts['orphaned_waves']} orphaned wave(s)",
+            "priority": "medium",
+        })
+
+    if not refs.get("github_ok", True):
+        items.append({"type": "mirror_diverged", "summary": "GitHub mirror diverged/unavailable", "priority": "low"})
+
+    if refs.get("is_dirty", False):
+        items.append({"type": "repo_dirty", "summary": "Repo has uncommitted changes", "priority": "low"})
+
+    return items[:10]
+
+
+def collect_active_loops(status: dict) -> dict:
+    open_loops = status.get("open_loops", [])
+    return {
+        "count": len(open_loops),
+        "items": [
+            {
+                "id": loop.get("loop_id", ""),
+                "title": loop.get("title", "")[:120],
+                "status": loop.get("status", ""),
+                "horizon": loop.get("horizon", ""),
+                "readiness": loop.get("execution_readiness", ""),
+                "severity": loop.get("severity", ""),
+            }
+            for loop in open_loops[:10]
+        ],
+    }
+
+
+def collect_active_handoffs() -> dict:
+    handoff_script = REPO / "ops" / "plugins" / "core" / "session" / "bin" / "session-handoff"
+    if not handoff_script.is_file():
+        return {"count": 0, "items": []}
+
+    proc = subprocess.run(
+        ["python3", str(handoff_script), "list", "--state", "active"],
+        text=True, capture_output=True, check=False,
+    )
+    try:
+        data = json.loads(proc.stdout)
+    except Exception:
+        return {"count": 0, "items": [], "error": "handoff list failed"}
+
+    items = data.get("items", [])
+    return {
+        "count": data.get("count", len(items)),
+        "items": [
+            {
+                "id": h.get("id", ""),
+                "summary": h.get("summary", "")[:120],
+                "loops": h.get("loops", []),
+            }
+            for h in items[-5:]
+        ],
+    }
+
+
+def collect_git_refs() -> dict:
+    local_head, _ = _run(["git", "rev-parse", "--short=8", "HEAD"])
+    local_full, _ = _run(["git", "rev-parse", "HEAD"])
+    origin_head, _ = _run(["git", "rev-parse", "--short=8", "origin/main"])
+    origin_full, _ = _run(["git", "rev-parse", "origin/main"])
+    github_out, github_ok = _run(["git", "ls-remote", "github", "refs/heads/main"])
+    github_head = ""
+    if github_ok and github_out:
+        github_head = github_out.split()[0][:8] if github_out.split() else ""
+    commit_count, _ = _run(["git", "rev-list", "--count", "HEAD"])
+    dirty_out, _ = _run(["git", "status", "--porcelain"])
+    is_dirty = bool(dirty_out.strip())
+
+    baseline = "unavailable"
+    agents_path = REPO / "AGENTS.md"
+    try:
+        import re
+        text = agents_path.read_text(encoding="utf-8")
+        m = re.search(r"baseline is commit `([0-9a-f]+)`", text)
+        if m:
+            baseline = m.group(1)[:8]
+    except Exception:
+        pass
+
+    return {
+        "local_head": local_head,
+        "local_full": local_full,
+        "origin_head": origin_head,
+        "origin_full": origin_full,
+        "github_head": github_head or "unavailable",
+        "github_ok": github_ok and bool(github_head),
+        "commit_count": commit_count or "0",
+        "is_dirty": is_dirty,
+        "dirty_files": dirty_out.strip() if is_dirty else "",
+        "baseline": baseline,
+    }
+
+
+def collect_work_state(status: dict) -> dict:
+    counts = status.get("counts", {})
+    completion = counts.get("completion_state", {})
+    return {
+        "open_loops": counts.get("open_loops", 0),
+        "closed_loops": counts.get("closed_loops", 0),
+        "open_gaps": counts.get("open_gaps", 0),
+        "active_waves": counts.get("active_waves", 0),
+        "orphaned_waves": counts.get("orphaned_waves", 0),
+        "inbox_active": status.get("inbox_active", 0),
+        "inbox_total": status.get("inbox_total", 0),
+        "inbox_lanes": status.get("inbox_lanes", {}),
+        "completion_state": {
+            "total_specimens": completion.get("total_specimens", 0),
+            "delivered": completion.get("delivered", 0),
+            "open": completion.get("open", 0),
+            "parked": completion.get("parked", 0),
+            "landed_local": completion.get("landed_local", 0),
+            "ambiguous": completion.get("ambiguous", 0),
+        },
+        "comms_queue": {
+            "pending": status.get("comms_queue", {}).get("pending", 0),
+            "slo_status": status.get("comms_queue", {}).get("slo_status", "unknown"),
+            "drain_state": status.get("comms_queue", {}).get("drain_state", "unknown"),
+            "oldest_age_seconds": status.get("comms_queue", {}).get("oldest_age_seconds", 0),
+        },
+    }
+
+
+def collect_node_roles(status: dict) -> dict:
+    daemons = status.get("daemons", {})
+    exec_host = daemons.get("execution_host", {})
+    return {
+        "local_role": daemons.get("local_role", ""),
+        "execution_host_target": exec_host.get("target", "") if isinstance(exec_host, dict) else "",
+        "execution_host_access": exec_host.get("target_access", "") if isinstance(exec_host, dict) else "",
+        "execution_host_workload_count": exec_host.get("workload_count", 0) if isinstance(exec_host, dict) else 0,
+        "execution_host_workload_labels": exec_host.get("workload_labels", []) if isinstance(exec_host, dict) else [],
+        "execution_host_workload_purposes": exec_host.get("workload_purposes", {}) if isinstance(exec_host, dict) else {},
+        "non_local_deferred": daemons.get("non_local_deferred", []),
+    }
+
+
+def collect_proposals() -> dict:
+    data = _run_json([
+        str(REPO / "ops" / "plugins" / "core" / "proposals" / "bin" / "proposals-status"),
+        "--json",
+    ])
+    return {
+        "pending": data.get("pending", 0),
+        "total": data.get("total", 0),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Desktop-only extensions (not in compact mode)
+# ---------------------------------------------------------------------------
+
+def collect_git_log(n: int = 30) -> list[dict]:
+    out, ok = _run(["git", "log", "--oneline", f"-n{n}", "--format=%H|%h|%ai|%s"])
+    if not ok:
+        return []
+    entries = []
+    for line in out.splitlines():
+        parts = line.split("|", 3)
+        if len(parts) == 4:
+            entries.append({"full": parts[0], "short": parts[1], "date": parts[2][:10], "subject": parts[3]})
+    return entries
+
+
+def collect_capabilities() -> dict:
+    data = _yaml_load(REPO / "ops" / "capabilities.yaml")
+    if not data or "capabilities" not in data:
+        return {"caps": {}, "count": 0}
+    caps = data["capabilities"]
+    return {"caps": caps, "count": len(caps)}
+
+
+def collect_gates() -> dict:
+    reg = _yaml_load(REPO / "ops" / "bindings" / "gate.registry.yaml")
+    topo = _yaml_load(REPO / "ops" / "bindings" / "gate.execution.topology.yaml")
+    result = {
+        "total": 0, "active": 0, "retired": 0,
+        "blocking": 0, "report": 0,
+        "core_ids": [], "gates": [], "categories": [],
+    }
+    if reg:
+        gc = reg.get("gate_count", {})
+        result["total"] = gc.get("total", 0)
+        result["active"] = gc.get("active", 0)
+        result["retired"] = gc.get("retired", 0)
+        result["blocking"] = gc.get("active_blocking", 0)
+        result["report"] = gc.get("active_report", 0)
+        result["categories"] = reg.get("categories", [])
+        result["gates"] = reg.get("gates", [])
+    if topo:
+        cm = topo.get("core_mode", {})
+        result["core_ids"] = cm.get("core_gate_ids", [])
+    return result
+
+
+def collect_manifest() -> dict:
+    data = _yaml_load(STATE_ROOT / "domain-state" / "SPINE_SURFACE_MANIFEST.yaml")
+    if not data:
+        return {"surfaces": [], "count": 0, "families": [], "available": False}
+    surfaces = data.get("surfaces", [])
+    families = data.get("workflow_families", [])
+    return {
+        "surfaces": surfaces,
+        "count": len(surfaces),
+        "families": families,
+        "entry_chain": data.get("entry_chain", []),
+        "generated_at": data.get("generated_at_utc", ""),
+        "available": True,
+    }
+
+
+def collect_invocation_counts() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    sessions_root = EVIDENCE_ROOT / "sessions"
+    if not sessions_root.exists():
+        return counts
+    for path in sessions_root.iterdir():
+        if not path.is_dir():
+            continue
+        parts = path.name.split("__")
+        if len(parts) < 3:
+            continue
+        counts[parts[1]] = counts.get(parts[1], 0) + 1
+    return counts
+
+
+# ---------------------------------------------------------------------------
+# Payload assembly
+# ---------------------------------------------------------------------------
+
+def build_payload(compact: bool = False) -> dict:
+    """Build the shared operator overview payload.
+
+    compact=False: full payload for desktop cockpit (includes git log, caps, gates, manifest)
+    compact=True:  phone-priority subset (spine_now through read_only_posture only)
+    """
+    status = _run_json([str(REPO / "bin" / "ops"), "status", "--json"])
+    refs = collect_git_refs()
+
+    payload: dict = {
+        "version": 2,
+        "generated_utc": utcnow(),
+        "spine_now": collect_spine_now(status),
+        "projection_freshness": collect_projection_freshness(),
+        "attention": collect_attention(status, refs),
+        "active_loops": collect_active_loops(status),
+        "active_handoffs": collect_active_handoffs(),
+        "work_state": collect_work_state(status),
+        "git_refs": refs,
+        "node_roles": collect_node_roles(status),
+        "proposals": collect_proposals(),
+    }
+
+    if not compact:
+        payload["git_log"] = collect_git_log(30)
+        payload["capabilities"] = collect_capabilities()
+        payload["gates"] = collect_gates()
+        payload["manifest"] = collect_manifest()
+        payload["invocation_counts"] = collect_invocation_counts()
+
+    return payload
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Shared operator overview payload")
+    parser.add_argument("--compact", action="store_true", help="Phone-priority compact subset")
+    parser.add_argument("--output", type=str, default="", help="Write to file instead of stdout")
+    args = parser.parse_args()
+
+    payload = build_payload(compact=args.compact)
+
+    output = json.dumps(payload, indent=2)
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(output)
+        print(f"payload written → {args.output}")
+    else:
+        print(output)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
