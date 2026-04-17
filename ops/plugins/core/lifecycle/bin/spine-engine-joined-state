@@ -609,27 +609,30 @@ def parse_verify_output(path: Path) -> dict[str, Any]:
     # Flat JSON schema (verify.infra.run / legacy verify.fast): total/pass/fail/warn at top level, no wrapper
     if not wrapper and isinstance(payload.get("total"), int):
         wrapper = {k: payload[k] for k in ("total", "pass", "fail", "warn") if k in payload}
+    scope = str(payload.get("scope") or payload.get("mode") or "").strip()
     blocking = payload.get("blocking_fail_ids", []) if isinstance(payload.get("blocking_fail_ids"), list) else []
+    warning_ids = payload.get("warning_gate_ids", []) if isinstance(payload.get("warning_gate_ids"), list) else []
+    has_summary = bool(wrapper) or bool(blocking) or bool(warning_ids)
     status = "unknown"
-    if int(wrapper.get("fail", 0) or 0) == 0 and not blocking:
+    if has_summary and int(wrapper.get("fail", 0) or 0) == 0 and not blocking:
         status = "pass"
-    elif not blocking and int(wrapper.get("warn", 0) or 0) > 0:
+    elif has_summary and not blocking and int(wrapper.get("warn", 0) or 0) > 0:
         status = "warn"
     elif blocking:
         status = "failed"
     return {
         "status": status,
-        "scope": str(payload.get("scope") or "").strip(),
+        "scope": scope,
         "wrapper_total": int(wrapper.get("total", 0) or 0),
         "wrapper_pass": int(wrapper.get("pass", 0) or 0),
         "wrapper_fail": int(wrapper.get("fail", 0) or 0),
         "wrapper_warn": int(wrapper.get("warn", 0) or 0),
         "blocking_fail_ids": blocking,
-        "warning_ids": payload.get("warning_gate_ids", []) if isinstance(payload.get("warning_gate_ids"), list) else [],
+        "warning_ids": warning_ids,
     }
 
 
-VERIFY_RECEIPT_PATTERNS = ("__verify.run__", "__verify.infra.run__", "__verify.fast__")
+VERIFY_RECEIPT_PATTERNS = ("__spine.verify__", "__verify.run__", "__verify.infra.run__", "__verify.fast__")
 
 # Front-door verify headline: prefer spine-scoped receipts, then infra, then fast.
 FRONT_DOOR_VERIFY_SCOPES = ("spine", "infra", "fast")
@@ -653,8 +656,15 @@ def _build_verify_result(receipt_dir: Path, summary: dict[str, Any], scope: str)
     receipt_path = receipt_dir / "receipt.md"
     exec_payload = load_json(exec_path, {}) if exec_path.exists() else {}
     run_keys = exec_payload.get("run_keys", []) if isinstance(exec_payload, dict) else []
+    status = str(summary.get("status") or "unknown").strip().lower()
+    if status == "unknown" and isinstance(exec_payload, dict):
+        exec_status = str(exec_payload.get("status") or "").strip().lower()
+        if exec_status in VERIFY_PASS_STATUSES:
+            status = "pass"
+        elif exec_status in {"failed", "fail", "error"}:
+            status = "failed"
     return {
-        "status": summary.get("status", "unknown"),
+        "status": status,
         "scope": scope,
         "generated_at_utc": render_dt(dt.datetime.fromtimestamp(output_path.stat().st_mtime, tz=dt.timezone.utc)),
         "receipt_path": str(receipt_path),
@@ -703,6 +713,8 @@ def collect_latest_front_door_verify(paths: dict[str, Path]) -> dict[str, Any]:
             except Exception:
                 continue
             scope = summary.get("scope") or ""
+            if not scope and "__spine.verify__" in receipt_dir.name:
+                scope = "spine"
             if not scope and "__verify.infra.run__" in receipt_dir.name:
                 scope = "infra"
             if not scope and "__verify.fast__" in receipt_dir.name:

@@ -719,6 +719,12 @@ daemons_summary = {
     "missing": 0,
     "missing_labels": [],
     "non_local_deferred": [],
+    "non_local_breakdown": {
+        "active_elsewhere": [],
+        "parked_required": [],
+        "locality_exempt": [],
+        "other": [],
+    },
     "local_role": "",
 }
 
@@ -740,14 +746,17 @@ try:
         # status and E10 agree on required-label truth per host.
         local_role = (os.environ.get("SPINE_LOCAL_ROLE", "").strip() or "operator_console")
         role_by_label = {}
+        state_by_label = {}
         _registry = spine / "ops" / "bindings" / "launchd.scheduler.registry.yaml"
         if _registry.is_file():
             _reg = _yaml_daemons.safe_load(_registry.read_text(encoding="utf-8")) or {}
             for _entry in (_reg.get("labels") or []):
                 _lbl = str((_entry or {}).get("label", "")).strip()
                 _role = str((_entry or {}).get("intended_node_role", "")).strip()
+                _state = str((_entry or {}).get("state", "")).strip().lower()
                 if _lbl:
                     role_by_label[_lbl] = _role
+                    state_by_label[_lbl] = _state
         # Also read operator_console_launchd_loaded flag per label
         _locally_unloaded = set()
         for _entry in (_reg.get("labels") or []):
@@ -760,6 +769,21 @@ try:
             and lbl not in _locally_unloaded
         ]
         non_local = [lbl for lbl in _required if lbl not in local_required]
+        active_elsewhere = []
+        parked_required = []
+        locality_exempt = []
+        other_non_local = []
+        for lbl in non_local:
+            _role = role_by_label.get(lbl, "")
+            _state = state_by_label.get(lbl, "")
+            if lbl in _locally_unloaded and _role == local_role:
+                locality_exempt.append(lbl)
+            elif _state == "parked":
+                parked_required.append(lbl)
+            elif _role and _role != local_role:
+                active_elsewhere.append(lbl)
+            else:
+                other_non_local.append(lbl)
 
         loaded_labels = set()
         try:
@@ -803,6 +827,12 @@ try:
             "missing": len(missing),
             "missing_labels": missing,
             "non_local_deferred": non_local,
+            "non_local_breakdown": {
+                "active_elsewhere": active_elsewhere,
+                "parked_required": parked_required,
+                "locality_exempt": locality_exempt,
+                "other": other_non_local,
+            },
             "local_role": local_role,
             "execution_host": {
                 "target": exec_host_target,

@@ -308,6 +308,7 @@ def collect_node_roles(status: dict) -> dict:
         "execution_host_workload_labels": exec_host.get("workload_labels", []) if isinstance(exec_host, dict) else [],
         "execution_host_workload_purposes": exec_host.get("workload_purposes", {}) if isinstance(exec_host, dict) else {},
         "non_local_deferred": daemons.get("non_local_deferred", []),
+        "non_local_breakdown": daemons.get("non_local_breakdown", {}),
     }
 
 
@@ -357,6 +358,45 @@ def collect_operator_vision() -> dict:
         batch_id = batch_dir.name  # e.g. operator-vision-20260413
         batches.append({"batch_id": batch_id, "file_count": len(files), "files": files})
         total_raw += len(files)
+
+    # --- Live operator ingress ------------------------------------------------
+    recent_ingress: list[dict] = []
+    pending_ingress = 0
+    ingress_dir = inputs_root / "operator-ingress"
+    if ingress_dir.is_dir():
+        for path in sorted(ingress_dir.glob("OI-*.yaml"), reverse=True)[:10]:
+            doc = _yaml_load(path)
+            if not isinstance(doc, dict):
+                continue
+            lifecycle_state = str(doc.get("lifecycle_state", "submitted"))
+            disposition = str(doc.get("disposition", "awaiting_classification"))
+            disposition_detail = str(
+                doc.get(
+                    "disposition_detail",
+                    "Raw input preserved; awaiting membrane classification.",
+                )
+            )
+            item = {
+                "ingress_id": str(doc.get("ingress_id", path.stem)),
+                "submitted_at": str(doc.get("submitted_at", "")),
+                "content_type": str(doc.get("content_type", "")),
+                "operator_hint": str(doc.get("operator_hint", "")),
+                "lifecycle_state": lifecycle_state,
+                "disposition": disposition,
+                "disposition_detail": disposition_detail,
+                "source_device": str(doc.get("source_device", "")),
+                "source_app": str(doc.get("source_app", "")),
+            }
+            recent_ingress.append(item)
+            if disposition == "awaiting_classification" or lifecycle_state in {
+                "submitted",
+                "preserved",
+                "classified",
+                "reconciled",
+            }:
+                pending_ingress += 1
+
+    total_raw += len(recent_ingress)
 
     # --- Known reading briefs -------------------------------------------------
     briefs: list[str] = []
@@ -517,6 +557,8 @@ def collect_operator_vision() -> dict:
     return {
         "my_human_work_now": {
             "total_raw_inputs": total_raw,
+            "recent_ingress": len(recent_ingress),
+            "pending_ingress": pending_ingress,
             "advanced_to_contract": advanced_to_contract,
             "adjacent_evidence": adjacent_evidence,
             "parked_prep": parked_prep,
@@ -529,6 +571,7 @@ def collect_operator_vision() -> dict:
             "derived_conclusions": len(derived),
         },
         "batches": batches,
+        "recent_ingress": recent_ingress,
         "what_became_of_my_input": input_traces,
         "what_my_ideas_built": {
             "contracts": contracts,
@@ -541,9 +584,18 @@ def collect_operator_vision() -> dict:
         "what_is_waiting_on_me": {
             "parked_without_lifecycle": parked_no_lifecycle,
             "floating_items": floating,
+            "pending_ingress": pending_ingress,
             "items": [
                 t for t in input_traces
                 if t["disposition"] in ("parked_no_lifecycle",)
+            ] + [
+                {
+                    "file": item["ingress_id"],
+                    "detail": item["disposition_detail"],
+                    "disposition": item["disposition"],
+                }
+                for item in recent_ingress
+                if item["disposition"] == "awaiting_classification"
             ],
         },
         "chain_status": {

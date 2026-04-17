@@ -150,6 +150,10 @@ def execution_host_section(roles: dict) -> str:
     exec_access = roles.get("execution_host_access") or ""
     exec_purposes = roles.get("execution_host_workload_purposes", {})
     non_local = roles.get("non_local_deferred", [])
+    breakdown = roles.get("non_local_breakdown", {}) or {}
+    parked = breakdown.get("parked_required", []) if isinstance(breakdown, dict) else []
+    locality_exempt = breakdown.get("locality_exempt", []) if isinstance(breakdown, dict) else []
+    active_elsewhere = breakdown.get("active_elsewhere", []) if isinstance(breakdown, dict) else non_local
 
     workload_rows = ""
     for lbl in sorted(exec_labels):
@@ -158,24 +162,51 @@ def execution_host_section(roles: dict) -> str:
         purpose_html = f'<div class="eh-purpose">{_h(purpose)}</div>' if purpose else ""
         workload_rows += f'<div class="eh-lbl">{_h(short)}{purpose_html}</div>'
 
-    other_deferred = [lbl for lbl in non_local if lbl not in exec_labels]
     other_rows = ""
-    if other_deferred:
-        for lbl in sorted(other_deferred):
+    if active_elsewhere:
+        for lbl in sorted(active_elsewhere):
             short = lbl.replace("com.ronny.", "")
             other_rows += f'<div class="eh-lbl eh-other">{_h(short)}</div>'
         other_rows = (
             f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;'
-            f'border-top:1px solid var(--b);margin-top:.25rem">other deferred ({len(other_deferred)})</div>'
+            f'border-top:1px solid var(--b);margin-top:.25rem">active elsewhere ({len(active_elsewhere)})</div>'
             + other_rows
+        )
+    if parked:
+        parked_rows = ""
+        for lbl in sorted(parked):
+            short = lbl.replace("com.ronny.", "")
+            parked_rows += f'<div class="eh-lbl eh-other">{_h(short)}</div>'
+        other_rows += (
+            f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;'
+            f'border-top:1px solid var(--b);margin-top:.25rem">parked required ({len(parked)})</div>'
+            + parked_rows
+        )
+    if locality_exempt:
+        exempt_rows = ""
+        for lbl in sorted(locality_exempt):
+            short = lbl.replace("com.ronny.", "")
+            exempt_rows += f'<div class="eh-lbl eh-other">{_h(short)}</div>'
+        other_rows += (
+            f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;'
+            f'border-top:1px solid var(--b);margin-top:.25rem">locality exempt ({len(locality_exempt)})</div>'
+            + exempt_rows
         )
 
     access_line = f'<div class="eh-access">{_h(exec_access)}</div>' if exec_access else ""
+    detail_bits = [f"{exec_count} workloads"]
+    if active_elsewhere:
+        detail_bits.append(f"{len(active_elsewhere)} elsewhere")
+    if parked:
+        detail_bits.append(f"{len(parked)} parked")
+    if locality_exempt:
+        detail_bits.append(f"{len(locality_exempt)} locality-exempt")
+    detail_summary = " · ".join(detail_bits)
 
     return f"""
     <div class="sh">Execution Host</div>
     <details open>
-      <summary>{_h(exec_target)} <span class="det-count">{exec_count} workloads · {len(non_local)} total deferred</span></summary>
+      <summary>{_h(exec_target)} <span class="det-count">{_h(detail_summary)}</span></summary>
       <div class="det-body">
         {access_line}
         {workload_rows}
@@ -608,9 +639,12 @@ def operator_vision_section(ov: dict) -> str:
     traces = ov.get("what_became_of_my_input", [])
     built = ov.get("what_my_ideas_built", {})
     waiting = ov.get("what_is_waiting_on_me", {})
+    recent = ov.get("recent_ingress", [])
 
     # Summary stats
     total = mhw.get("total_raw_inputs", 0)
+    recent_count = mhw.get("recent_ingress", 0)
+    pending_ingress = mhw.get("pending_ingress", 0)
     advanced = mhw.get("advanced_to_contract", 0)
     adj_ev = mhw.get("adjacent_evidence", 0)
     parked_p = mhw.get("parked_prep", 0)
@@ -629,10 +663,11 @@ def operator_vision_section(ov: dict) -> str:
       <div class="stat"><div class="stat-v">{parked_p}</div><div class="stat-l">Parked</div><div class="stat-sub">prep stubs</div></div>
       <div class="stat"><div class="stat-v">{oos}</div><div class="stat-l">Out of Spine</div><div class="stat-sub">correctly excluded</div></div>
     </div>
-    <div class="stats" style="grid-template-columns:repeat(4,1fr);margin-top:.25rem">
+    <div class="stats" style="grid-template-columns:repeat(5,1fr);margin-top:.25rem">
+      <div class="stat"><div class="stat-v">{recent_count}</div><div class="stat-l">Recent Ingress</div><div class="stat-sub">live submissions</div></div>
+      <div class="stat"><div class="stat-v">{pending_ingress}</div><div class="stat-l">Pending</div><div class="stat-sub">awaiting membrane</div></div>
       <div class="stat"><div class="stat-v">{delivered}</div><div class="stat-l">Delivered</div><div class="stat-sub">packets</div></div>
       <div class="stat"><div class="stat-v">{contracts}</div><div class="stat-l">Contracts</div><div class="stat-sub">live</div></div>
-      <div class="stat"><div class="stat-v">{derived}</div><div class="stat-l">Derived</div><div class="stat-sub">conclusions</div></div>
       <div class="stat{'  style=\"border-color:var(--ylw)\"' if floats > 0 else ''}"><div class="stat-v" style="{'color:var(--ylw)' if floats > 0 else ''}">{floats}</div><div class="stat-l">Float Risk</div><div class="stat-sub">needs lifecycle</div></div>
     </div>"""
 
@@ -667,6 +702,31 @@ def operator_vision_section(ov: dict) -> str:
     <details open>
       <summary>Contribution Chain <span class="det-count">5-step operator → spine</span></summary>
       <div class="det-body">{chain_rows}</div>
+    </details>"""
+
+    recent_rows = ""
+    for item in recent:
+        hint = item.get("operator_hint", "")
+        detail = item.get("disposition_detail", "")
+        ts = item.get("submitted_at", "")
+        ctype = item.get("content_type", "")
+        recent_rows += (
+            f'<div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">'
+            f'<div style="display:flex;align-items:baseline;gap:.4rem">'
+            f'<span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(item["ingress_id"])}</span>'
+            f'<span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;border-radius:3px;'
+            f'background:rgba(42,52,68,.75);color:var(--ylw)">{_h(item.get("lifecycle_state", "submitted"))}</span>'
+            f'</div>'
+            f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(ctype)} · {_h(ts)}</div>'
+            f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(hint or detail)}</div>'
+            f'</div>'
+        )
+    if not recent_rows:
+        recent_rows = '<div style="font-size:.6rem;color:var(--t)">no live operator ingress objects yet</div>'
+    recent_html = f"""
+    <details open>
+      <summary>Recent Ingress <span class="det-count">{len(recent)} visible</span></summary>
+      <div class="det-body">{recent_rows}</div>
     </details>"""
 
     # Per-input lineage
@@ -739,18 +799,20 @@ def operator_vision_section(ov: dict) -> str:
     # What is waiting on me
     waiting_html = ""
     wait_items = waiting.get("items", [])
-    if wait_items or floats > 0:
+    waiting_total = floats + pending_ingress
+    if wait_items or waiting_total > 0:
         wait_rows = ""
         for w in wait_items:
+            dot_cls = "y" if w.get("disposition") == "awaiting_classification" else "y"
             wait_rows += (
-                f'<div class="attn-item"><div class="attn-dot y"></div>'
+                f'<div class="attn-item"><div class="attn-dot {dot_cls}"></div>'
                 f'{_h(w["file"])} — {_h(w["detail"])}</div>'
             )
         if not wait_rows:
-            wait_rows = f'<div style="font-size:.6rem;color:var(--t)">{floats} item(s) parked without lifecycle fields</div>'
+            wait_rows = f'<div style="font-size:.6rem;color:var(--t)">{waiting_total} waiting item(s)</div>'
         waiting_html = f"""
     <details open>
-      <summary>Waiting on Operator <span class="det-count">{floats} floating</span></summary>
+      <summary>Waiting on Operator <span class="det-count">{waiting_total} waiting</span></summary>
       <div class="det-body">{wait_rows}</div>
     </details>"""
 
@@ -758,6 +820,7 @@ def operator_vision_section(ov: dict) -> str:
     <div class="sh" style="color:var(--cyn)">My Human Work → Spine</div>
     {stats}
     {chain_html}
+    {recent_html}
     {trace_html}
     {built_html}
     {waiting_html}"""
