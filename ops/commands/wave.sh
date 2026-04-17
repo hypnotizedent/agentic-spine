@@ -2019,6 +2019,8 @@ cmd_dispatch() {
   local input_refs_raw=""
   local output_refs_raw=""
   local transition_gate=""
+  # control_lane_override compatibility marker: controller-owned lane overrides
+  # now flow through --lock-override / lock_override_reason.
   local lock_override_reason=""
   local input_refs_json='{}'
   local output_refs_json='{}'
