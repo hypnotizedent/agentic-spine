@@ -777,14 +777,23 @@ cmd_collect() {
   local valid=0
   local invalid=0
   local missing_loop=0
-  local missing_run_keys=0
+  local missing_proof=0
   local missing_gap_ids=0
   local -a gap_ids_covered=()
+  local linked_gaps
+  linked_gaps="$(echo "$auth_json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for g in d.get('linked_gaps',[]):
+    print(g['gap_id'])
+" 2>/dev/null || true)"
+  local require_gap_ids=0
+  [[ -n "$linked_gaps" ]] && require_gap_ids=1
 
   echo "Receipt Validation (authority loop: $expected_loop_id):"
   echo "---------------------------------------"
 
-  for receipt_file in "$evidence_dir"/*.json; do
+  for receipt_file in "$evidence_dir"/*.exec_receipt.json; do
     [[ -f "$receipt_file" ]] || continue
     local receipt_name
     receipt_name="$(basename "$receipt_file")"
@@ -797,6 +806,7 @@ with open(sys.argv[1]) as f:
     r = json.load(f)
 
 expected_loop = sys.argv[2]
+require_gap_ids = sys.argv[3] == '1'
 issues = []
 
 # Check loop_id matches
@@ -807,13 +817,17 @@ elif receipt_loop != expected_loop:
     issues.append(f'loop_id mismatch: {receipt_loop} != {expected_loop}')
 
 # Check run_keys non-empty
+lane = str(r.get('lane', '')).strip()
 run_keys = r.get('run_keys', [])
-if not run_keys:
-    issues.append('empty run_keys (no governed execution proof)')
+commit_hashes = r.get('commit_hashes', [])
+if lane == 'audit' and not run_keys:
+    issues.append('missing audit run_keys')
+elif lane == 'execution' and not run_keys and not commit_hashes:
+    issues.append('missing execution proof (run_keys or commit_hashes)')
 
 # Check gap_ids present
 gap_ids = r.get('gap_ids', [])
-if not gap_ids:
+if require_gap_ids and not gap_ids:
     issues.append('missing gap_ids')
 
 if issues:
@@ -824,7 +838,7 @@ else:
     print('VALID|ok')
     for gid in gap_ids:
         print('GAP|' + gid)
-" "$receipt_file" "$expected_loop_id" 2>/dev/null || echo "INVALID|parse error")"
+" "$receipt_file" "$expected_loop_id" "$require_gap_ids" 2>/dev/null || echo "INVALID|parse error")"
 
     local first_line
     first_line="$(echo "$validation" | head -1)"
@@ -838,7 +852,7 @@ else:
       (( invalid++ )) || true
       printf "  %-30s INVALID: %s\n" "$receipt_name" "$detail"
       [[ "$detail" != *"missing loop_id"* && "$detail" != *"loop_id mismatch"* ]] || (( missing_loop++ )) || true
-      [[ "$detail" != *"empty run_keys"* ]] || (( missing_run_keys++ )) || true
+      [[ "$detail" != *"run_keys"* && "$detail" != *"execution proof"* ]] || (( missing_proof++ )) || true
       [[ "$detail" != *"missing gap_ids"* ]] || (( missing_gap_ids++ )) || true
     fi
 
@@ -856,19 +870,11 @@ else:
   printf "  Invalid receipts:   %d\n" "$invalid"
   if [[ $invalid -gt 0 ]]; then
     printf "    Missing loop_id:  %d\n" "$missing_loop"
-    printf "    Empty run_keys:   %d\n" "$missing_run_keys"
+    printf "    Missing proof:    %d\n" "$missing_proof"
     printf "    Missing gap_ids:  %d\n" "$missing_gap_ids"
   fi
 
   # Gap coverage
-  local linked_gaps
-  linked_gaps="$(echo "$auth_json" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for g in d.get('linked_gaps',[]):
-    print(g['gap_id'])
-" 2>/dev/null || true)"
-
   if [[ -n "$linked_gaps" ]]; then
     echo ""
     echo "Gap Coverage:"
