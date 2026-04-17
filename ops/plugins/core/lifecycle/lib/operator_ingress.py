@@ -4,6 +4,11 @@ Writes raw operator-originated ingress objects into the existing runtime inputs
 lane and supports lifecycle transitions (classification + routing) without
 inventing new homes or authority surfaces.
 
+Directional boundary:
+  - this lane is Ronny/operator -> agents/system only
+  - agents must not write return traffic back into operator ingress
+  - return traffic belongs to existing handoff, attention, and receipt surfaces
+
 Write target:
   $SPINE_STATE/inputs/operator-ingress/OI-*.yaml
 
@@ -124,6 +129,8 @@ def create_operator_ingress(
 
     Returns a result dict with ingress_id, path, lifecycle_state, and
     disposition.
+
+    This is a one-way operator submission object, not a bidirectional mailbox.
     """
     _validate_inputs(raw_content, content_type, state_root)
 

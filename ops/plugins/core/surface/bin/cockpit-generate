@@ -629,7 +629,7 @@ function filterCaps(e, domain) {
 """
 
 
-def operator_vision_section(ov: dict) -> str:
+def operator_vision_section(ov: dict, directional_boundary: dict) -> str:
     """Build the operator-vision contribution surface — the lead story."""
     if not ov:
         return ""
@@ -640,6 +640,8 @@ def operator_vision_section(ov: dict) -> str:
     built = ov.get("what_my_ideas_built", {})
     waiting = ov.get("what_is_waiting_on_me", {})
     recent = ov.get("recent_ingress", [])
+    op_to_agents = directional_boundary.get("operator_to_agents", {})
+    agents_to_operator = directional_boundary.get("agents_to_operator", {})
 
     # Summary stats
     total = mhw.get("total_raw_inputs", 0)
@@ -670,6 +672,29 @@ def operator_vision_section(ov: dict) -> str:
       <div class="stat"><div class="stat-v">{contracts}</div><div class="stat-l">Contracts</div><div class="stat-sub">live</div></div>
       <div class="stat{'  style=\"border-color:var(--ylw)\"' if floats > 0 else ''}"><div class="stat-v" style="{'color:var(--ylw)' if floats > 0 else ''}">{floats}</div><div class="stat-l">Float Risk</div><div class="stat-sub">needs lifecycle</div></div>
     </div>"""
+
+    split_html = f"""
+    <details open>
+      <summary>Traffic Split <span class="det-count">two one-way lanes</span></summary>
+      <div class="det-body">
+        <div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(op_to_agents.get("label", "Ronny -> agents"))}</span>
+            <span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;border-radius:3px;background:rgba(42,52,68,.75);color:var(--cyn)">{_h(op_to_agents.get("surface", "recent_ingress"))}</span>
+          </div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{op_to_agents.get("count", 0)} visible submissions · {op_to_agents.get("pending_classification", 0)} pending classification</div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(op_to_agents.get("rule", ""))}</div>
+        </div>
+        <div style="padding:.35rem 0">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(agents_to_operator.get("label", "Agents -> Ronny"))}</span>
+            <span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;border-radius:3px;background:rgba(42,52,68,.75);color:var(--ylw)">{_h(" + ".join(agents_to_operator.get("surfaces", [])) or "handoffs + attention")}</span>
+          </div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{agents_to_operator.get("handoff_count", 0)} active handoff(s) · {agents_to_operator.get("attention_count", 0)} surfaced attention item(s)</div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(agents_to_operator.get("rule", ""))}</div>
+        </div>
+      </div>
+    </details>"""
 
     # Chain status
     chain_rows = ""
@@ -850,8 +875,9 @@ def operator_vision_section(ov: dict) -> str:
     </details>"""
 
     return f"""
-    <div class="sh" style="color:var(--cyn)">My Human Work → Spine</div>
+    <div class="sh" style="color:var(--cyn)">Ronny ↔ Agents</div>
     {stats}
+    {split_html}
     {chain_html}
     {recent_html}
     {trace_html}
@@ -879,7 +905,10 @@ def generate() -> str:
     ]
 
     # Lead story: operator vision contribution
-    sec_vision = operator_vision_section(p.get("operator_vision", {}))
+    sec_vision = operator_vision_section(
+        p.get("operator_vision", {}),
+        p.get("directional_boundary", {}),
+    )
     sec_posture = engine_posture(p)
     sec_fresh = freshness_card(p)
     sec_roles = node_role_card(p["node_roles"])

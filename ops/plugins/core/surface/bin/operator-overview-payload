@@ -230,6 +230,31 @@ def collect_active_handoffs() -> dict:
     }
 
 
+def collect_directional_boundary(
+    operator_vision: dict,
+    active_handoffs: dict,
+    attention: list[dict],
+) -> dict:
+    mhw = operator_vision.get("my_human_work_now", {})
+    recent_ingress = operator_vision.get("recent_ingress", [])
+    return {
+        "operator_to_agents": {
+            "label": "Ronny -> agents",
+            "surface": "recent_ingress",
+            "count": len(recent_ingress),
+            "pending_classification": mhw.get("pending_ingress", 0),
+            "rule": "Ingress is raw operator submission only. Agents do not write back into operator ingress.",
+        },
+        "agents_to_operator": {
+            "label": "Agents -> Ronny",
+            "surfaces": ["active_handoffs", "attention", "receipts"],
+            "handoff_count": active_handoffs.get("count", 0),
+            "attention_count": len(attention),
+            "rule": "Agents and the system return asks, blockers, and status through handoffs, surfaced attention, and receipts, not the ingress lane.",
+        },
+    }
+
+
 def collect_git_refs() -> dict:
     local_head, _ = _run(["git", "rev-parse", "--short=8", "HEAD"])
     local_full, _ = _run(["git", "rev-parse", "HEAD"])
@@ -718,20 +743,26 @@ def build_payload(compact: bool = False) -> dict:
     """
     status = _run_json([str(REPO / "bin" / "ops"), "status", "--json"])
     refs = collect_git_refs()
+    operator_vision = collect_operator_vision()
+    attention = collect_attention(status, refs)
+    active_handoffs = collect_active_handoffs()
 
     payload: dict = {
         "version": 3,
         "generated_utc": utcnow(),
-        "operator_vision": collect_operator_vision(),
+        "operator_vision": operator_vision,
         "spine_now": collect_spine_now(status),
         "projection_freshness": collect_projection_freshness(),
-        "attention": collect_attention(status, refs),
+        "attention": attention,
         "active_loops": collect_active_loops(status),
-        "active_handoffs": collect_active_handoffs(),
+        "active_handoffs": active_handoffs,
         "work_state": collect_work_state(status),
         "git_refs": refs,
         "node_roles": collect_node_roles(status),
         "proposals": collect_proposals(),
+        "directional_boundary": collect_directional_boundary(
+            operator_vision, active_handoffs, attention
+        ),
     }
 
     if not compact:
