@@ -1201,6 +1201,12 @@ for p in pending:
   # Step 4: Delegate to wave.sh close
   local close_head=""
   local effective_fixed_in=""
+  local workspace_repo_root="" workspace_worktree="" workspace_branch="" workspace_head=""
+  IFS='|' read -r workspace_repo_root workspace_worktree workspace_branch workspace_head <<< "$(_wave_workspace_snapshot "$state_file")"
+  local finish_repo_root_seed=""
+  finish_repo_root_seed="${workspace_repo_root:-$(_current_checkout_repo)}"
+  local checkout_branch_before_close=""
+  checkout_branch_before_close="$(_current_checkout_branch)"
   if [[ -n "$disposition" || -n "$fixed_in" ]]; then
     close_head="$(_resolve_close_head "$state_file" "$fixed_in")"
     [[ -n "$close_head" ]] || _fail "unable to resolve canonical close head"
@@ -1246,7 +1252,7 @@ for p in pending:
   # Step 5: Propagate closure with wave.finish unless explicitly deferred.
   if [[ -n "$disposition" ]]; then
     local finish_main_override=""
-    if [[ "$controller_only" -eq 1 && "$(_current_checkout_branch)" == "main" ]]; then
+    if [[ "$controller_only" -eq 1 && "$checkout_branch_before_close" == "main" ]]; then
       finish_main_override="OPS_GOVERNED_MAIN_OVERRIDE=1 "
     fi
 
@@ -1294,8 +1300,7 @@ for p in pending:
 
       echo "Running wave.finish..."
       local finish_repo_root=""
-      finish_repo_root="$(_current_checkout_repo)"
-      [[ -n "$finish_repo_root" ]] || finish_repo_root="$(_state_field "$state_file" "workspace.repo")"
+      finish_repo_root="$finish_repo_root_seed"
       [[ -n "$finish_repo_root" ]] || _fail "unable to resolve canonical repo root for wave.finish"
       local finish_runner=""
       finish_runner="$(_provision_finish_runner_worktree "$finish_repo_root" "$wave_id" "${close_head:-HEAD}")"
