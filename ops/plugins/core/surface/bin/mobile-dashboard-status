@@ -1,9 +1,24 @@
 #!/usr/bin/env python3
+"""T3 Mobile Read Surface — phone-facing operator supervision dashboard.
+
+Answers 5 questions in under 30 seconds:
+  1. Is the spine alive?
+  2. Is the state projection fresh enough to trust?
+  3. What currently needs operator attention?
+  4. What loop or handoff should be opened next?
+  5. Is this read-only, or am I being tempted into laptop work?
+
+Payload is ordered for phone readability:
+  spine_now → projection_freshness → attention_now → active_loops →
+  active_handoffs → read_only_posture → _secondary
+"""
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -15,178 +30,202 @@ def run_json(cmd: list[str]) -> dict:
         return {"status": "fail", "stdout": proc.stdout.strip(), "stderr": proc.stderr.strip()}
 
 
-def visible_files(root: Path) -> list[Path]:
-    files: list[Path] = []
-    if not root.is_dir():
-        return files
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
+def utcnow() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def classify_freshness(age_seconds: float) -> str:
+    if age_seconds < 0:
+        return "unknown"
+    if age_seconds < 300:
+        return "current"
+    if age_seconds < 1800:
+        return "aging"
+    return "stale"
+
+
+def collect_spine_now(spine_json: dict) -> dict:
+    counts = spine_json.get("counts", {})
+    return {
+        "verify_status": counts.get("verify_status", "unknown"),
+        "anomaly_count": counts.get("anomalies", 0),
+        "open_loop_count": counts.get("open_loops", 0),
+        "open_gap_count": counts.get("open_gaps", 0),
+        "active_wave_count": counts.get("active_waves", 0),
+        "coherence_ok": not counts.get("coherence_attention", False),
+    }
+
+
+def collect_projection_freshness(state_root: Path) -> dict:
+    now = time.time()
+    db_path = state_root / "shared_authority.db"
+    sync_marker = state_root / ".last_sync_utc"
+
+    result: dict = {
+        "source": "unknown",
+        "age_seconds": -1,
+        "freshness": "unknown",
+        "sync_marker_utc": None,
+        "state_db_mtime_utc": None,
+    }
+
+    if sync_marker.is_file():
         try:
-            rel_parts = path.relative_to(root).parts
-        except ValueError:
-            rel_parts = path.parts
-        if any(part.startswith(".") for part in rel_parts):
-            continue
-        files.append(path)
-    return files
+            marker_text = sync_marker.read_text().strip()
+            result["sync_marker_utc"] = marker_text
+            marker_dt = datetime.fromisoformat(marker_text.replace("Z", "+00:00"))
+            age = now - marker_dt.timestamp()
+            result["age_seconds"] = int(age)
+            result["freshness"] = classify_freshness(age)
+            result["source"] = "sync_marker"
+        except Exception:
+            pass
+
+    if db_path.is_file():
+        try:
+            mtime = db_path.stat().st_mtime
+            mtime_utc = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            result["state_db_mtime_utc"] = mtime_utc
+            if result["source"] == "unknown":
+                age = now - mtime
+                result["age_seconds"] = int(age)
+                result["freshness"] = classify_freshness(age)
+                result["source"] = "db_mtime"
+        except Exception:
+            pass
+
+    return result
 
 
-def collect_runtime_inputs(state_root: Path) -> dict:
-    inputs_root = state_root / "inputs"
-    if not inputs_root.is_dir():
-        return {
-            "status": "missing",
-            "path": str(inputs_root),
-            "batch_count": 0,
-            "file_count": 0,
-            "batches": [],
-        }
+def collect_attention_now(spine_json: dict) -> list[dict]:
+    items: list[dict] = []
 
-    batches = []
-    root_files = 0
-    for child in sorted(inputs_root.iterdir()):
-        if child.name.startswith("."):
-            continue
-        if child.is_dir():
-            files = visible_files(child)
-            batches.append({"name": child.name, "file_count": len(files)})
-        elif child.is_file():
-            root_files += 1
+    for anomaly in spine_json.get("anomalies", []):
+        items.append({
+            "type": "anomaly",
+            "summary": str(anomaly) if isinstance(anomaly, str) else anomaly.get("message", str(anomaly)),
+            "priority": "high",
+        })
 
-    total_files = root_files + sum(batch["file_count"] for batch in batches)
+    for gap in spine_json.get("open_gaps", []):
+        items.append({
+            "type": "gap",
+            "id": gap.get("gap_id", ""),
+            "summary": gap.get("description", ""),
+            "priority": gap.get("severity", "medium"),
+        })
+
+    for loop in spine_json.get("open_loops", []):
+        if loop.get("blocked_by"):
+            items.append({
+                "type": "blocked_loop",
+                "id": loop.get("loop_id", ""),
+                "summary": f"Blocked: {loop.get('blocked_by', '')}",
+                "priority": "high",
+            })
+
+    counts = spine_json.get("counts", {})
+    if counts.get("orphaned_waves", 0) > 0:
+        items.append({
+            "type": "orphaned_waves",
+            "summary": f"{counts['orphaned_waves']} orphaned wave(s)",
+            "priority": "medium",
+        })
+
+    return items[:5]
+
+
+def collect_active_loops(spine_json: dict) -> dict:
+    open_loops = spine_json.get("open_loops", [])
     return {
-        "status": "ok",
-        "path": str(inputs_root),
-        "batch_count": len(batches),
-        "file_count": total_files,
-        "batches": batches[-5:],
-        "latest_batch": batches[-1]["name"] if batches else "",
-    }
-
-
-def collect_mailroom_intake(state_root: Path) -> dict:
-    outbox_root = Path(
-        os.environ.get(
-            "SPINE_OUTBOX",
-            str(state_root.parent / "mailroom" / "outbox"),
-        )
-    )
-    intake_root = outbox_root / "intake"
-    if not intake_root.is_dir():
-        return {
-            "status": "missing",
-            "path": str(intake_root),
-            "manifest_count": 0,
-            "latest_manifest": "",
-            "items": [],
-        }
-
-    manifests = [
-        path
-        for path in sorted(intake_root.iterdir())
-        if path.is_file() and not path.name.startswith(".") and path.name != "README.md"
-    ]
-    return {
-        "status": "ok",
-        "path": str(intake_root),
-        "manifest_count": len(manifests),
-        "latest_manifest": manifests[-1].name if manifests else "",
-        "items": [path.name for path in manifests[-5:]],
-    }
-
-
-def collect_parked(root: Path) -> dict:
-    script = root / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "parked"
-    if not script.is_file():
-        return {
-            "status": "unavailable",
-            "transported": False,
-            "structured_count": 0,
-            "reason": "parked.list is not present in this checkout",
-            "items": [],
-        }
-
-    proc = subprocess.run(
-        ["python3", str(script), "list", "--json"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        return {
-            "status": "fail",
-            "transported": True,
-            "structured_count": 0,
-            "reason": proc.stderr.strip() or proc.stdout.strip(),
-            "items": [],
-        }
-
-    try:
-        payload = json.loads(proc.stdout)
-    except Exception:
-        return {
-            "status": "fail",
-            "transported": True,
-            "structured_count": 0,
-            "reason": "parked.list returned non-JSON output",
-            "items": [],
-        }
-
-    items = payload.get("items", []) if isinstance(payload, dict) else []
-    return {
-        "status": "ok",
-        "transported": True,
-        "structured_only": True,
-        "structured_count": payload.get("count", len(items)),
+        "count": len(open_loops),
         "items": [
             {
-                "name": item.get("name", ""),
-                "location": item.get("location", ""),
-                "status": item.get("status", ""),
-                "trigger_count": item.get("trigger_count", 0),
-                "next_review": item.get("next_review"),
+                "id": loop.get("loop_id", ""),
+                "title": loop.get("title", "")[:120],
+                "status": loop.get("status", ""),
+                "horizon": loop.get("horizon", ""),
+                "readiness": loop.get("execution_readiness", ""),
             }
-            for item in items[:5]
+            for loop in open_loops[:5]
         ],
     }
 
 
-def collect_visibility(root: Path) -> dict:
+def collect_active_handoffs(root: Path) -> dict:
+    handoff_script = root / "ops" / "plugins" / "core" / "session" / "bin" / "session-handoff"
+    if not handoff_script.is_file():
+        return {"count": 0, "items": []}
+
+    proc = subprocess.run(
+        ["python3", str(handoff_script), "list", "--state", "active"],
+        text=True, capture_output=True, check=False,
+    )
+    try:
+        data = json.loads(proc.stdout)
+    except Exception:
+        return {"count": 0, "items": [], "error": "handoff list failed"}
+
+    items = data.get("items", [])
+    return {
+        "count": data.get("count", len(items)),
+        "items": [
+            {
+                "id": h.get("id", ""),
+                "summary": h.get("summary", "")[:120],
+                "loops": h.get("loops", []),
+            }
+            for h in items[-3:]
+        ],
+    }
+
+
+def collect_secondary(root: Path, spine_json: dict) -> dict:
+    proposals = run_json([f"{root}/bin/ops", "cap", "run", "proposals.status", "--", "--json"])
+    counts = spine_json.get("counts", {})
+    completion = counts.get("completion_state", {})
+    return {
+        "proposals": {
+            "pending": proposals.get("pending", 0),
+            "total": proposals.get("total", 0),
+        },
+        "completion_state": {
+            "total_specimens": completion.get("total_specimens", 0),
+            "delivered": completion.get("delivered", 0),
+            "open": completion.get("open", 0),
+            "parked": completion.get("parked", 0),
+        },
+        "inbox_active": spine_json.get("inbox_active", 0),
+        "comms_queue_pending": spine_json.get("comms_queue", {}).get("pending", 0),
+    }
+
+
+def main() -> int:
+    root = Path(__file__).resolve().parents[5]
     state_root = Path(
         os.environ.get(
             "SPINE_STATE",
             str(Path.home() / "code" / ".runtime" / "spine" / "state"),
         )
     )
-    runtime_inputs = collect_runtime_inputs(state_root)
-    mailroom_intake = collect_mailroom_intake(state_root)
-    parked = collect_parked(root)
-    return {
-        "status": "ok",
-        "intake": {
-            "runtime_inputs": runtime_inputs,
-            "mailroom_intake": mailroom_intake,
-        },
-        "parked": parked,
-        "minimum_queue_concepts": {
-            "staged_input_files": runtime_inputs.get("file_count", 0),
-            "intake_manifests": mailroom_intake.get("manifest_count", 0),
-            "structured_parked_items": parked.get("structured_count", 0),
-        },
-        "note": "Desktop and Downloads residue remain out of scope for this bounded read surface; this view shows governed staged intake and structured parked items.",
-    }
 
+    spine_json = run_json([f"{root}/bin/ops", "status", "--json"])
 
-def main() -> int:
-    root = Path(__file__).resolve().parents[5]
     payload = {
         "capability": "surface.mobile.dashboard.status",
-        "spine": run_json([f"{root}/bin/ops", "status", "--json"]),
-        "loops": run_json([f"{root}/ops/plugins/core/loops/bin/loops-status", "--json"]),
-        "gaps": run_json([f"{root}/ops/plugins/core/loops/bin/gaps-status", "--json"]),
-        "proposals": run_json([f"{root}/ops/plugins/core/proposals/bin/proposals-status", "--json"]),
-        "visibility": collect_visibility(root),
+        "version": 2,
+        "generated_utc": utcnow(),
+        "spine_now": collect_spine_now(spine_json),
+        "projection_freshness": collect_projection_freshness(state_root),
+        "attention_now": collect_attention_now(spine_json),
+        "active_loops": collect_active_loops(spine_json),
+        "active_handoffs": collect_active_handoffs(root),
+        "read_only_posture": {
+            "surface_type": "supervision",
+            "mutation_allowed": False,
+            "guidance": "Read-only phone surface. Use MBP or SSH terminal for mutations.",
+        },
+        "_secondary": collect_secondary(root, spine_json),
     }
     print(json.dumps(payload, indent=2))
     return 0
