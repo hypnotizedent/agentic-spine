@@ -7,7 +7,7 @@ WINDOW_DAYS_DEFAULT=7
 REPORT_DIR_SUFFIX="policy-autotune/reports"
 STATE_PATH_SUFFIX="policy-autotune/state.json"
 GUARDRAILS_JSON='{"no_touch_gate_ids":["D3","D62","D63","D124","D126","D127","D140"],"max_recommendations_per_week":2,"require_human_apply":true}'
-THRESHOLDS_JSON='{"soak_minutes_by_cap":{"verify.core.run":180,"stability.control.snapshot":120},"rerun_per_commit_ratio":4.0,"release_fail_rate_pct":20.0,"queue_pending_warn":8,"queue_pending_critical":12,"pending_age_days_warn":7,"pending_age_days_critical":14}'
+THRESHOLDS_JSON='{"soak_minutes_by_cap":{"verify.infra.run":180,"stability.control.snapshot":120},"rerun_per_commit_ratio":4.0,"release_fail_rate_pct":20.0,"queue_pending_warn":8,"queue_pending_critical":12,"pending_age_days_warn":7,"pending_age_days_critical":14}'
 
 JSON_OUT=0
 WINDOW_DAYS_OVERRIDE=""
@@ -190,8 +190,14 @@ no_touch = set(guardrails.get("no_touch_gate_ids", []))
 max_recs = int(guardrails.get("max_recommendations_per_week", 2))
 
 recommendations = []
-core_soak = by_cap.get("verify.core.run", {}).get("soak_minutes", 0.0)
-core_soak_threshold = float(thresholds.get("soak_minutes_by_cap", {}).get("verify.core.run", 180))
+infra_verify_metrics = by_cap.get("verify.infra.run") or by_cap.get("verify.core.run") or {}
+core_soak = infra_verify_metrics.get("soak_minutes", 0.0)
+core_soak_threshold = float(
+    thresholds.get("soak_minutes_by_cap", {}).get(
+        "verify.infra.run",
+        thresholds.get("soak_minutes_by_cap", {}).get("verify.core.run", 180),
+    )
+)
 rerun_threshold = float(thresholds.get("rerun_per_commit_ratio", 4.0))
 release_threshold = float(thresholds.get("release_fail_rate_pct", 20.0))
 queue_warn = int(thresholds.get("queue_pending_warn", 8))
@@ -298,7 +304,7 @@ md_lines = [
 ]
 
 for cap in sorted(by_cap.keys()):
-    if cap in {"stability.control.snapshot", "verify.core.run", "verify.domain.run", "verify.release.run", "spine.verify"}:
+    if cap in {"stability.control.snapshot", "verify.infra.run", "verify.core.run", "verify.domain.run", "verify.release.run", "spine.verify"}:
         md_lines.append(f"- {cap}: {by_cap[cap]['soak_minutes']}m ({by_cap[cap]['count']} runs)")
 
 md_lines.extend(["", "## Recommendations"])

@@ -606,7 +606,7 @@ def parse_verify_output(path: Path) -> dict[str, Any]:
     except (json.JSONDecodeError, ValueError):
         payload = _parse_verify_text(text)
     wrapper = payload.get("wrapper", {}) if isinstance(payload.get("wrapper"), dict) else {}
-    # Flat JSON schema (verify.fast): total/pass/fail/warn at top level, no wrapper
+    # Flat JSON schema (verify.infra.run / legacy verify.fast): total/pass/fail/warn at top level, no wrapper
     if not wrapper and isinstance(payload.get("total"), int):
         wrapper = {k: payload[k] for k in ("total", "pass", "fail", "warn") if k in payload}
     blocking = payload.get("blocking_fail_ids", []) if isinstance(payload.get("blocking_fail_ids"), list) else []
@@ -629,10 +629,10 @@ def parse_verify_output(path: Path) -> dict[str, Any]:
     }
 
 
-VERIFY_RECEIPT_PATTERNS = ("__verify.run__", "__verify.fast__")
+VERIFY_RECEIPT_PATTERNS = ("__verify.run__", "__verify.infra.run__", "__verify.fast__")
 
-# Front-door verify headline: prefer spine-scoped receipts, fall back to fast.
-FRONT_DOOR_VERIFY_SCOPES = ("spine", "fast")
+# Front-door verify headline: prefer spine-scoped receipts, then infra, then fast.
+FRONT_DOOR_VERIFY_SCOPES = ("spine", "infra", "fast")
 
 
 def _verify_receipt_dirs(paths: dict[str, Path]) -> list[Path]:
@@ -689,8 +689,9 @@ def _empty_verify_result() -> dict[str, Any]:
 def collect_latest_front_door_verify(paths: dict[str, Path]) -> dict[str, Any]:
     """Collect the most recent front-door verify receipt.
 
-    Prefers spine-scoped receipts (the front-door authority surface) and falls
-    back to fast-scoped receipts for backward compatibility.
+    Prefers spine-scoped receipts (the front-door authority surface), then
+    infra-scoped receipts, and falls back to fast-scoped receipts for backward
+    compatibility.
     """
     for target_scope in FRONT_DOOR_VERIFY_SCOPES:
         for receipt_dir in _verify_receipt_dirs(paths):
@@ -702,6 +703,8 @@ def collect_latest_front_door_verify(paths: dict[str, Path]) -> dict[str, Any]:
             except Exception:
                 continue
             scope = summary.get("scope") or ""
+            if not scope and "__verify.infra.run__" in receipt_dir.name:
+                scope = "infra"
             if not scope and "__verify.fast__" in receipt_dir.name:
                 scope = "fast"
             if scope != target_scope:

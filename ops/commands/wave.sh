@@ -833,7 +833,7 @@ EXEC_RECEIPT Artifacts:
 
 Background Watcher:
   The watcher lane auto-enqueues long checks (stability.control.snapshot,
-  verify.core.run, verify.pack.run) and tracks them without blocking.
+  verify.infra.run, verify.pack.run) and tracks them without blocking.
   Results appear in 'ops wave status' when complete.
 EOF
 }
@@ -2641,7 +2641,7 @@ _dispatch_watcher() {
   local task_desc="$4"
 
   # Default checks for the watcher (core-8 only, no duplicate pack run)
-  local checks=("stability.control.snapshot" "verify.core.run")
+  local checks=("stability.control.snapshot" "verify.infra.run")
 
   python3 - "$sf" "$task_desc" <<'PYWATCHER_INIT'
 import json, sys, fcntl, os
@@ -2659,7 +2659,7 @@ try:
 
     checks = [
         {"cap": "stability.control.snapshot", "status": "queued", "run_key": None, "pid": None, "exit_code": None},
-        {"cap": "verify.core.run", "status": "queued", "run_key": None, "pid": None, "exit_code": None}
+        {"cap": "verify.infra.run", "status": "queued", "run_key": None, "pid": None, "exit_code": None}
     ]
 
     state["watcher_checks"] = checks
