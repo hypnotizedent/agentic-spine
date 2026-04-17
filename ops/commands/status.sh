@@ -138,6 +138,9 @@ if [[ "$MODE" == "--context" ]]; then
   ORPHANED_WAVES="$(jq_val '.summary.orphaned_waves' '?')"
   VERIFY_STATUS="$(jq_val '.summary.latest_verify_status' 'unknown')"
   VERIFY_SCOPE="$(jq_val '.summary.latest_verify_scope' '')"
+  VERIFY_TEMPORAL_CLASS="$(jq_val '.summary.latest_verify_temporal_class' '')"
+  VERIFY_KNOWN_SINCE="$(jq_val '.summary.latest_verify_known_since_utc' '')"
+  VERIFY_STANDING_COUNT="$(jq_val '.summary.latest_verify_standing_evidence_count' '0')"
   GAP_AUTHORITY="$(jq_val '.summary.gap_authority_status' 'unknown')"
   GAP_MATCH="$(jq_val '.summary.gap_projection_match' 'null')"
   COHERENCE="$(jq_val '.summary.engine_coherence_needs_attention' 'unknown')"
@@ -214,6 +217,16 @@ PY
   printf "  orphaned waves: %s\n" "$ORPHANED_WAVES"
   echo "─── verify / coherence ─────────────────────────────"
   printf "  spine verify:   %s\n" "$VERIFY_STATUS"
+  if [[ -n "$VERIFY_TEMPORAL_CLASS" ]]; then
+    _verify_temporal_line="$VERIFY_TEMPORAL_CLASS"
+    if [[ -n "$VERIFY_KNOWN_SINCE" ]]; then
+      _verify_temporal_line+=" since $VERIFY_KNOWN_SINCE"
+    fi
+    if [[ "$VERIFY_STANDING_COUNT" =~ ^[0-9]+$ ]] && [[ "$VERIFY_STANDING_COUNT" != "0" ]]; then
+      _verify_temporal_line+=" (${VERIFY_STANDING_COUNT} corroborating receipt(s))"
+    fi
+    printf "  verify standing:%s\n" "   $_verify_temporal_line"
+  fi
   printf "  gap authority:  %s\n" "$GAP_AUTHORITY"
   _gap_parity=""
   case "$GAP_MATCH" in
@@ -271,6 +284,13 @@ try:
     import loops_sql_authority as loops_authority
 except Exception as exc:  # pragma: no cover - exercised via degraded status surface
     loops_authority_import_error = exc
+
+temporal_truth = None
+temporal_truth_import_error = None
+try:
+    import temporal_truth
+except Exception as exc:  # pragma: no cover - exercised via degraded status surface
+    temporal_truth_import_error = exc
 
 def display_path(path: Path) -> str:
     try:
@@ -548,6 +568,8 @@ joined_state_summary = {
     "verify_status": "unknown",
     "coherence_attention": False,
 }
+joined_state_verify_temporal = {}
+joined_state_verify_payload = {}
 
 joined_state_bin = spine / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "spine-engine-joined-state"
 if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
@@ -560,6 +582,12 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
         if _proc.returncode == 0 and _proc.stdout.strip():
             _jdata = json.loads(_proc.stdout)
             _summary = _jdata.get("summary", {})
+            _verify_payload = ((_jdata.get("verify") or {}).get("latest_fast")) or {}
+            _verify_temporal = ((_jdata.get("temporal_truth") or {}).get("verify")) or {}
+            if isinstance(_verify_payload, dict):
+                joined_state_verify_payload = _verify_payload
+            if isinstance(_verify_temporal, dict):
+                joined_state_verify_temporal = _verify_temporal
             if isinstance(_summary, dict):
                 _aw = _summary.get("active_waves")
                 _ow = _summary.get("orphaned_waves")
@@ -571,6 +599,9 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
                     "active_waves": int(_aw) if isinstance(_aw, (int, float)) else 0,
                     "orphaned_waves": int(_ow) if isinstance(_ow, (int, float)) else 0,
                     "verify_status": _summary.get("latest_verify_status", _summary.get("latest_fast_verify_status", "unknown")),
+                    "verify_temporal_class": _summary.get("latest_verify_temporal_class", ""),
+                    "verify_known_since_utc": _summary.get("latest_verify_known_since_utc", ""),
+                    "verify_standing_evidence_count": _summary.get("latest_verify_standing_evidence_count", 0),
                     "coherence_attention": bool(_summary.get("engine_coherence_needs_attention", False)),
                     "completion_state": _cs if isinstance(_cs, dict) else None,
                 }
@@ -650,9 +681,11 @@ if inbox_failed > 0:
 
 # Check communications queue health
 if comms_slo_status == "incident":
-    anomalies.append(f"COMMS QUEUE SIDE-SURFACE INCIDENT ({comms_drain_state}): pending={comms_pending} oldest={comms_oldest}s escalations={comms_escalations}")
+    if comms_pending > 0 or comms_oldest > 0 or comms_escalations > 0:
+        anomalies.append(f"COMMS QUEUE SIDE-SURFACE INCIDENT ({comms_drain_state}): pending={comms_pending} oldest={comms_oldest}s escalations={comms_escalations}")
 elif comms_slo_status == "warn":
-    anomalies.append(f"COMMS QUEUE SIDE-SURFACE WARN: pending={comms_pending} oldest={comms_oldest}s")
+    if comms_pending > 0 or comms_oldest > 0 or comms_escalations > 0:
+        anomalies.append(f"COMMS QUEUE SIDE-SURFACE WARN: pending={comms_pending} oldest={comms_oldest}s")
 
 if joined_state_summary.get("coherence_attention"):
     anomalies.append(
@@ -849,6 +882,45 @@ try:
 except Exception:
     pass
 
+temporal_truth_payload = {
+    "verify": joined_state_verify_temporal,
+    "comms_queue": {},
+    "daemons": {},
+}
+
+if temporal_truth is not None:
+    try:
+        if not temporal_truth_payload["verify"] and isinstance(joined_state_verify_payload, dict):
+            temporal_truth_payload["verify"] = temporal_truth.classify_spine_verify(
+                spine,
+                Path(os.environ.get("SPINE_RECEIPTS") or (Path.home() / "code/.evidence/spine/sessions")),
+                joined_state_verify_payload,
+            )
+    except Exception:
+        temporal_truth_payload["verify"] = {}
+    try:
+        temporal_truth_payload["comms_queue"] = temporal_truth.classify_comms_queue(
+            spine,
+            {
+                "controller_todo": False,
+                "slo_status": comms_slo_status,
+                "drain_state": comms_drain_state,
+                "pending": comms_pending,
+                "oldest_age_seconds": comms_oldest,
+                "escalations": comms_escalations,
+                "delivery_recent": comms_delivery_recent,
+                "delivery_recent_failed": comms_delivery_recent_failed,
+                "sent_total": comms_sent_total,
+                "oneliner": comms_oneliner,
+            },
+        )
+    except Exception:
+        temporal_truth_payload["comms_queue"] = {}
+    try:
+        temporal_truth_payload["daemons"] = temporal_truth.classify_daemons(spine, daemons_summary)
+    except Exception:
+        temporal_truth_payload["daemons"] = {}
+
 # ── Output ────────────────────────────────────────────────────────────────
 
 if mode == "--json":
@@ -887,6 +959,7 @@ if mode == "--json":
         },
         "coherence_summary": joined_state_summary,
         "daemons": daemons_summary,
+        "temporal_truth": temporal_truth_payload,
         "counts": {
             # Use joined-state as authoritative source so status --json and
             # status --context agree on the same open-loop count (H6 coherence).
@@ -968,6 +1041,15 @@ print(f"  open gaps:          {joined_state_summary.get('open_gaps', open_gap_co
 print(f"  active waves:       {joined_state_summary.get('active_waves', '?')}")
 print(f"  orphaned waves:     {joined_state_summary.get('orphaned_waves', '?')}")
 print(f"  spine verify:       {joined_state_summary.get('verify_status', 'unknown')}")
+_verify_temporal = temporal_truth_payload.get("verify") or {}
+if _verify_temporal.get("temporal_class"):
+    _verify_line = str(_verify_temporal.get("temporal_class") or "")
+    if _verify_temporal.get("known_since_utc"):
+        _verify_line += f" since {_verify_temporal['known_since_utc']}"
+    _standing_count = int(_verify_temporal.get("standing_evidence_count", 0) or 0)
+    if _standing_count:
+        _verify_line += f" ({_standing_count} corroborating receipt(s))"
+    print(f"  verify standing:    {_verify_line}")
 print(f"  coherence attention:{' yes' if joined_state_summary.get('coherence_attention') else ' no'}")
 _cs = joined_state_summary.get("completion_state")
 if isinstance(_cs, dict):
@@ -1088,11 +1170,37 @@ if inbox_history_total > 0:
             print(f"  {lane_name:12s} {count}")
     print()
 
+# ── Daemon load truth ──
+_daemon_temporal = temporal_truth_payload.get("daemons") or {}
+if daemons_summary.get("missing") or daemons_summary.get("non_local_deferred"):
+    print("DAEMON LOAD (ESTATE-WIDE)")
+    print("-" * 72)
+    print(f"  local role:        {daemons_summary.get('local_role', 'unknown')}")
+    print(f"  local missing:     {daemons_summary.get('missing', 0)}")
+    print(f"  non-local deferred:{len(daemons_summary.get('non_local_deferred', []))}")
+    if _daemon_temporal.get("temporal_class"):
+        print(f"  temporal class:    {_daemon_temporal.get('temporal_class', '')}")
+    _breakdown = daemons_summary.get("non_local_breakdown", {}) if isinstance(daemons_summary.get("non_local_breakdown"), dict) else {}
+    print(
+        "  breakdown:         "
+        f"elsewhere={len(_breakdown.get('active_elsewhere', []))} "
+        f"parked={len(_breakdown.get('parked_required', []))} "
+        f"locality_exempt={len(_breakdown.get('locality_exempt', []))}"
+    )
+    if _daemon_temporal.get("operator_treatment"):
+        print(f"  read:              {_daemon_temporal.get('operator_treatment', '')}")
+    print()
+
 # ── Communications Queue ──
 if comms_oneliner:
     print("COMMS QUEUE (SIDE SURFACE)")
     print("-" * 72)
     print("  not controller todo; communications drain state only")
+    _comms_temporal = temporal_truth_payload.get("comms_queue") or {}
+    if _comms_temporal.get("temporal_class"):
+        print(f"  temporal class: {str(_comms_temporal.get('temporal_class') or '')}")
+    if _comms_temporal.get("operator_treatment"):
+        print(f"  read:           {str(_comms_temporal.get('operator_treatment') or '')}")
     print(f"  {comms_oneliner}")
     print()
 
