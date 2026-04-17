@@ -507,7 +507,7 @@ if comms_status_bin.exists() and os.access(str(comms_status_bin), os.X_OK):
     try:
         _proc = _sp.run(
             [str(comms_status_bin), "--json"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=25,
             cwd=str(spine),
         )
         if _proc.returncode == 0 and _proc.stdout.strip():
