@@ -172,17 +172,16 @@ if [[ "$MODE" == "--context" ]]; then
 
   if [[ -n "$JOINED_JSON" && "$LOOP_ID" != "<none>" ]]; then
     _session_loop_suffix="$(
-      SESSION_LOOP_ID="$LOOP_ID" python3 - <<'PY' <<<"$JOINED_JSON" 2>/dev/null || true
+      SESSION_LOOP_ID="$LOOP_ID" JOINED_JSON_INPUT="$JOINED_JSON" python3 - <<'PY' 2>/dev/null || true
 import json
 import os
-import sys
 
 session_loop_id = (os.environ.get("SESSION_LOOP_ID") or "").strip()
 if not session_loop_id:
     raise SystemExit(0)
 
 try:
-    data = json.loads(sys.stdin.read())
+    data = json.loads(os.environ.get("JOINED_JSON_INPUT") or "")
 except Exception:
     raise SystemExit(0)
 
