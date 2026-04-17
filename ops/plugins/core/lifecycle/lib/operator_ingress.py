@@ -244,10 +244,14 @@ def _find_ingress_file(state_root: str, ingress_id: str) -> Path:
     ingress_dir = _ingress_dir(state_root)
     # Strip .yaml suffix if caller included it
     bare_id = ingress_id.removesuffix(".yaml")
-    # Only accept bare OI-* identifiers, not arbitrary paths
+    # Only accept bare OI-* identifiers, not arbitrary paths or names
     if os.sep in bare_id or "/" in bare_id:
         raise OperatorIngressError(
             f"ingress_id must be a bare OI identifier, not a path: {ingress_id}"
+        )
+    if not bare_id.startswith("OI-"):
+        raise OperatorIngressError(
+            f"ingress_id must start with 'OI-': {ingress_id}"
         )
     candidate = ingress_dir / f"{bare_id}.yaml"
     # Resolve and verify the file is actually inside the ingress directory
@@ -296,6 +300,13 @@ def metabolize_operator_ingress(
         allowed = ", ".join(sorted(ALLOWED_DISPOSITIONS))
         raise OperatorIngressError(
             f"disposition invalid: '{disposition}' (allowed: {allowed})"
+        )
+    # Route-bearing dispositions require route data
+    _ROUTED_DISPOSITIONS = {"attached", "packet_candidate"}
+    has_route = bool(next_stage or downstream_refs)
+    if disposition in _ROUTED_DISPOSITIONS and not has_route:
+        raise OperatorIngressError(
+            f"disposition '{disposition}' requires --next-stage or --downstream-refs"
         )
 
     path = _find_ingress_file(state_root, ingress_id)
