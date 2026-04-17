@@ -16,57 +16,38 @@ This is the canonical agent entry surface for the current aperture.
 
 <!-- Section: VOLATILE — operator-controlled, changes when Ronny lifts or narrows aperture -->
 
-As of 2026-04-16, the spine is in `verify truth-plane separation` aperture.
+As of 2026-04-16, the spine is in `post-stabilization operator surfaces`
+aperture.
 
-Spine-core stabilization remains complete. Scope is widened only enough to
-separate spine/object truth from estate/workload health across verify surfaces,
-agent read paths, and block semantics. The baseline is commit `f0a74693`
-(manifest knowledge layer, 2026-04-12).
-
-The immediate specimen for this aperture is verify itself:
-`verify.run`, `verify.topology`, the G-gate registry/ring surfaces, and the
-agent/operator surfaces that currently read `fast`/`infra`/`domain`/`release`
-results as if they were spine truth. Do not widen into L3 host, VM, or service
-repair unless Ronny says so.
-
-Deepest standard for this aperture:
-- distinguish object truth from role truth
-- do not let workload-role or host-health failures falsify packet, loop, or
-  governance truth
-- prefer shapes that teach truthful, repeatable environment habits over shapes
-  that reward reading estate noise as spine truth
+The bounded `verify truth-plane separation` lane is closed. Its resulting
+distinctions remain canonical read doctrine, but that lane is no longer the
+active aperture. Spine-core stabilization remains complete. The engine stays
+conservative; change is limited to provable bug fixes unless Ronny explicitly
+widen scope. The baseline is commit `f0a74693` (manifest knowledge layer,
+2026-04-12).
 
 Legal work:
-- audit existing verify surfaces, packs, outputs, and block semantics to
-  determine which ones answer spine truth vs estate/workload health
-- land read-side clarification in existing canonical homes so every agent sees
-  the verify boundary before acting
-- bug-fix existing verify surfaces when they conflate planes or emit misleading
-  scope, truth, or blocking signals
-- narrow changes to existing verify wrappers, metadata, and outputs when needed
-  to encode truth plane and decision semantics honestly
 - read-heavy operator product surfaces (cockpit, dashboards, status views) that
   consume existing authority without mutating it
 - classification of operator vision artifacts into existing governed intake
-  posture, without authority promotion outside the bounded verify lane
-- parking operator notes with explicit promotion conditions
+  posture, without authority promotion or new mutation-path creation
+- parking operator notes with explicit promotion conditions; no authority
+  promotion under this aperture
 - release and distribution hygiene
 - verify, status, and reconcile operations
 - bug fixes to existing spine-core surfaces when provably broken
 
 Illegal work until Ronny lifts this aperture:
-- L3 domain, VM, service, or host remediation under the banner of verify work
 - net-new governance surfaces, doctrine shelves, or surface type vocabulary
-  outside existing canonical homes
-- broad architecture reopening beyond verify truth-plane separation
-- host assignments, workload placement, or role promotion unrelated to making
-  verify truthful
+- broad architecture reopening (node topology, plane restructuring, fleet
+  ontology)
+- authority promotion of parked intake artifacts; classification is legal,
+  promotion is not
+- host assignments
 - L3 domain creation or extraction
-- worldview reconstruction or re-litigation of what the spine is outside the
-  verify lane
-- generic multi-family provisioning or recovery expansion
-- promotion of parked artifacts unrelated to verify truth-plane separation
-- new governed mutation paths unrelated to verify truth-plane separation
+- worldview reconstruction or re-litigation of what the spine is
+- new governed mutation paths unless explicitly scoped, narrowly bounded, and
+  approved by Ronny
 
 Only Ronny may invoke, change, or lift this aperture.
 
