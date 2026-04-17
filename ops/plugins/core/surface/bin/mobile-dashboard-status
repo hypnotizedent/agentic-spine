@@ -1,196 +1,67 @@
 #!/usr/bin/env python3
+"""T3 Mobile Read Surface — phone-facing compact leaf of the operator overview.
+
+This is a LEAF, not a root. It consumes the shared operator-overview-payload
+and renders a phone-priority compact view. Same truth, same timestamps,
+same attention ordering as the desktop cockpit — different density.
+
+Answers 5 questions in under 30 seconds:
+  1. Is the spine alive?           → spine_now
+  2. Is the projection fresh?      → projection_freshness
+  3. What needs attention?         → attention_now
+  4. What's active?                → active_loops + active_handoffs
+  5. Is this read-only?            → read_only_posture
+"""
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
-import os
-import subprocess
+import sys
 from pathlib import Path
 
-
-def run_json(cmd: list[str]) -> dict:
-    proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
-    try:
-        return json.loads(proc.stdout) if proc.stdout.strip() else {"status": "fail", "error": proc.stderr.strip()}
-    except Exception:
-        return {"status": "fail", "stdout": proc.stdout.strip(), "stderr": proc.stderr.strip()}
-
-
-def visible_files(root: Path) -> list[Path]:
-    files: list[Path] = []
-    if not root.is_dir():
-        return files
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        try:
-            rel_parts = path.relative_to(root).parts
-        except ValueError:
-            rel_parts = path.parts
-        if any(part.startswith(".") for part in rel_parts):
-            continue
-        files.append(path)
-    return files
-
-
-def collect_runtime_inputs(state_root: Path) -> dict:
-    inputs_root = state_root / "inputs"
-    if not inputs_root.is_dir():
-        return {
-            "status": "missing",
-            "path": str(inputs_root),
-            "batch_count": 0,
-            "file_count": 0,
-            "batches": [],
-        }
-
-    batches = []
-    root_files = 0
-    for child in sorted(inputs_root.iterdir()):
-        if child.name.startswith("."):
-            continue
-        if child.is_dir():
-            files = visible_files(child)
-            batches.append({"name": child.name, "file_count": len(files)})
-        elif child.is_file():
-            root_files += 1
-
-    total_files = root_files + sum(batch["file_count"] for batch in batches)
-    return {
-        "status": "ok",
-        "path": str(inputs_root),
-        "batch_count": len(batches),
-        "file_count": total_files,
-        "batches": batches[-5:],
-        "latest_batch": batches[-1]["name"] if batches else "",
-    }
-
-
-def collect_mailroom_intake(state_root: Path) -> dict:
-    outbox_root = Path(
-        os.environ.get(
-            "SPINE_OUTBOX",
-            str(state_root.parent / "mailroom" / "outbox"),
-        )
-    )
-    intake_root = outbox_root / "intake"
-    if not intake_root.is_dir():
-        return {
-            "status": "missing",
-            "path": str(intake_root),
-            "manifest_count": 0,
-            "latest_manifest": "",
-            "items": [],
-        }
-
-    manifests = [
-        path
-        for path in sorted(intake_root.iterdir())
-        if path.is_file() and not path.name.startswith(".") and path.name != "README.md"
-    ]
-    return {
-        "status": "ok",
-        "path": str(intake_root),
-        "manifest_count": len(manifests),
-        "latest_manifest": manifests[-1].name if manifests else "",
-        "items": [path.name for path in manifests[-5:]],
-    }
-
-
-def collect_parked(root: Path) -> dict:
-    script = root / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "parked"
-    if not script.is_file():
-        return {
-            "status": "unavailable",
-            "transported": False,
-            "structured_count": 0,
-            "reason": "parked.list is not present in this checkout",
-            "items": [],
-        }
-
-    proc = subprocess.run(
-        ["python3", str(script), "list", "--json"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        return {
-            "status": "fail",
-            "transported": True,
-            "structured_count": 0,
-            "reason": proc.stderr.strip() or proc.stdout.strip(),
-            "items": [],
-        }
-
-    try:
-        payload = json.loads(proc.stdout)
-    except Exception:
-        return {
-            "status": "fail",
-            "transported": True,
-            "structured_count": 0,
-            "reason": "parked.list returned non-JSON output",
-            "items": [],
-        }
-
-    items = payload.get("items", []) if isinstance(payload, dict) else []
-    return {
-        "status": "ok",
-        "transported": True,
-        "structured_only": True,
-        "structured_count": payload.get("count", len(items)),
-        "items": [
-            {
-                "name": item.get("name", ""),
-                "location": item.get("location", ""),
-                "status": item.get("status", ""),
-                "trigger_count": item.get("trigger_count", 0),
-                "next_review": item.get("next_review"),
-            }
-            for item in items[:5]
-        ],
-    }
-
-
-def collect_visibility(root: Path) -> dict:
-    state_root = Path(
-        os.environ.get(
-            "SPINE_STATE",
-            str(Path.home() / "code" / ".runtime" / "spine" / "state"),
-        )
-    )
-    runtime_inputs = collect_runtime_inputs(state_root)
-    mailroom_intake = collect_mailroom_intake(state_root)
-    parked = collect_parked(root)
-    return {
-        "status": "ok",
-        "intake": {
-            "runtime_inputs": runtime_inputs,
-            "mailroom_intake": mailroom_intake,
-        },
-        "parked": parked,
-        "minimum_queue_concepts": {
-            "staged_input_files": runtime_inputs.get("file_count", 0),
-            "intake_manifests": mailroom_intake.get("manifest_count", 0),
-            "structured_parked_items": parked.get("structured_count", 0),
-        },
-        "note": "Desktop and Downloads residue remain out of scope for this bounded read surface; this view shows governed staged intake and structured parked items.",
-    }
+# Import the shared payload generator (no .py extension)
+_payload_path = Path(__file__).resolve().parent / "operator-overview-payload"
+_loader = importlib.machinery.SourceFileLoader("operator_overview_payload", str(_payload_path))
+_spec = importlib.util.spec_from_loader("operator_overview_payload", _loader)
+_mod = importlib.util.module_from_spec(_spec)
+_loader.exec_module(_mod)
+build_payload = _mod.build_payload
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[5]
+    root = build_payload(compact=True)
+
     payload = {
         "capability": "surface.mobile.dashboard.status",
-        "spine": run_json([f"{root}/bin/ops", "status", "--json"]),
-        "loops": run_json([f"{root}/ops/plugins/core/loops/bin/loops-status", "--json"]),
-        "gaps": run_json([f"{root}/ops/plugins/core/loops/bin/gaps-status", "--json"]),
-        "proposals": run_json([f"{root}/ops/plugins/core/proposals/bin/proposals-status", "--json"]),
-        "visibility": collect_visibility(root),
+        "version": root["version"],
+        "generated_utc": root["generated_utc"],
+        "spine_now": root["spine_now"],
+        "projection_freshness": root["projection_freshness"],
+        "attention_now": root["attention"][:5],
+        "active_loops": {
+            "count": root["active_loops"]["count"],
+            "items": root["active_loops"]["items"][:5],
+        },
+        "active_handoffs": {
+            "count": root["active_handoffs"]["count"],
+            "items": root["active_handoffs"]["items"][:3],
+        },
+        "read_only_posture": {
+            "surface_type": "supervision",
+            "mutation_allowed": False,
+            "guidance": "Read-only phone surface. Use MBP or SSH terminal for mutations.",
+        },
+        "_secondary": {
+            "proposals": root["proposals"],
+            "completion_state": root["work_state"]["completion_state"],
+            "inbox_active": root["work_state"]["inbox_active"],
+            "comms_queue_pending": root["work_state"]["comms_queue"]["pending"],
+        },
     }
     print(json.dumps(payload, indent=2))
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

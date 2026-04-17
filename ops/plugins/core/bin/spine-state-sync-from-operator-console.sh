@@ -83,4 +83,7 @@ CLOSED_LOOPS=$(sqlite3 "${LOCAL_STATE_ROOT}/shared_authority.db" "SELECT COUNT(*
 SCOPE_COUNT=$(find "${LOCAL_STATE_ROOT}/loop-scopes" -name "*.scope.md" 2>/dev/null | wc -l | tr -d ' ')
 HANDOFF_COUNT=$(find "${LOCAL_STATE_ROOT}/handoffs" -name "*.yaml" 2>/dev/null | wc -l | tr -d ' ')
 
+# --- Step 6: Write sync freshness marker for T3 mobile surface ---
+date -u +%Y-%m-%dT%H:%M:%SZ > "${LOCAL_STATE_ROOT}/.last_sync_utc"
+
 log "Sync complete. closed_loops=${CLOSED_LOOPS} scopes=${SCOPE_COUNT} handoffs=${HANDOFF_COUNT}"

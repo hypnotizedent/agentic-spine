@@ -1,57 +1,37 @@
 #!/usr/bin/env python3
-"""cockpit.generate — read-only operator cockpit HTML generator.
+"""cockpit.generate — desktop-facing dense leaf of the operator overview.
 
-Consumes existing spine authority sources and produces a static HTML snapshot
-at $SPINE_STATE/domain-state/SPINE_COCKPIT.html. No mutation, no server,
-no auto-refresh. Manual regeneration only via:
+This is a LEAF, not a root. It consumes the shared operator-overview-payload
+and renders a desktop-first dense HTML cockpit with drilldown. Same truth,
+same timestamps, same attention ordering as the mobile surface — different
+density and interaction.
+
+Produces a static HTML snapshot at $SPINE_STATE/domain-state/SPINE_COCKPIT.html.
+No mutation, no server, no auto-refresh.
 
     ./bin/ops cap run cockpit.generate
 """
 from __future__ import annotations
 
 import html
+import importlib.machinery
+import importlib.util
 import json
 import os
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[5]
+# Import the shared payload generator (no .py extension)
+_payload_path = Path(__file__).resolve().parent / "operator-overview-payload"
+_loader = importlib.machinery.SourceFileLoader("operator_overview_payload", str(_payload_path))
+_spec = importlib.util.spec_from_loader("operator_overview_payload", _loader)
+_mod = importlib.util.module_from_spec(_spec)
+_loader.exec_module(_mod)
+build_payload = _mod.build_payload
+
 RUNTIME_STATE = Path(os.environ.get("SPINE_STATE", Path.home() / "code" / ".runtime" / "spine" / "state"))
-EVIDENCE_ROOT = Path(os.environ.get("SPINE_EVIDENCE_ROOT", Path.home() / "code" / ".evidence" / "spine"))
 OUTPUT = RUNTIME_STATE / "domain-state" / "SPINE_COCKPIT.html"
-
-# ---------------------------------------------------------------------------
-# Data collection helpers
-# ---------------------------------------------------------------------------
-
-def _run(cmd: list[str], cwd: str | None = None) -> tuple[str, bool]:
-    try:
-        proc = subprocess.run(cmd, text=True, capture_output=True, check=False,
-                              cwd=cwd or str(REPO), timeout=30)
-        return proc.stdout.strip(), proc.returncode == 0
-    except Exception as e:
-        return str(e), False
-
-
-def _run_json(cmd: list[str]) -> dict | None:
-    out, ok = _run(cmd)
-    if not ok:
-        return None
-    try:
-        return json.loads(out)
-    except Exception:
-        return None
-
-
-def _yaml_load(path: Path) -> dict | list | None:
-    try:
-        import yaml  # noqa: delayed import — yaml may not always be needed
-        with open(path) as f:
-            return yaml.safe_load(f)
-    except Exception:
-        return None
 
 
 def _h(s: str) -> str:
@@ -59,178 +39,29 @@ def _h(s: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Section builders
+# Section builders — consume the shared payload
 # ---------------------------------------------------------------------------
 
-def collect_refs() -> dict:
-    """Collect all git/spine refs."""
-    local_head, _ = _run(["git", "rev-parse", "--short=8", "HEAD"])
-    local_full, _ = _run(["git", "rev-parse", "HEAD"])
-    origin_head, _ = _run(["git", "rev-parse", "--short=8", "origin/main"])
-    origin_full, _ = _run(["git", "rev-parse", "origin/main"])
-    github_out, github_ok = _run(["git", "ls-remote", "github", "refs/heads/main"])
-    github_head = ""
-    if github_ok and github_out:
-        github_head = github_out.split()[0][:8] if github_out.split() else ""
-    commit_count, _ = _run(["git", "rev-list", "--count", "HEAD"])
-    dirty_out, _ = _run(["git", "status", "--porcelain"])
-    is_dirty = bool(dirty_out.strip())
-    # Extract baseline from AGENTS.md authority
-    baseline = "unavailable"
-    agents_path = REPO / "AGENTS.md"
-    try:
-        import re
-        text = agents_path.read_text(encoding="utf-8")
-        m = re.search(r"baseline is commit `([0-9a-f]+)`", text)
-        if m:
-            baseline = m.group(1)[:8]
-    except Exception:
-        pass
-    return {
-        "local_head": local_head,
-        "local_full": local_full,
-        "origin_head": origin_head,
-        "origin_full": origin_full,
-        "github_head": github_head or "unavailable",
-        "github_ok": github_ok and bool(github_head),
-        "commit_count": commit_count or "0",
-        "is_dirty": is_dirty,
-        "dirty_files": dirty_out.strip() if is_dirty else "",
-        "baseline": baseline,
-    }
+def engine_posture(payload: dict) -> str:
+    spine = payload["spine_now"]
+    refs = payload["git_refs"]
+    attention = payload["attention"]
 
+    verify = spine["verify_status"]
+    has_anomalies = spine["anomaly_count"] > 0
 
-def collect_status() -> dict | None:
-    return _run_json([str(REPO / "bin" / "ops"), "status", "--json"])
-
-
-def collect_git_log(n: int = 30) -> list[dict]:
-    out, ok = _run(["git", "log", f"--oneline", f"-n{n}", "--format=%H|%h|%ai|%s"])
-    if not ok:
-        return []
-    entries = []
-    for line in out.splitlines():
-        parts = line.split("|", 3)
-        if len(parts) == 4:
-            entries.append({"full": parts[0], "short": parts[1], "date": parts[2][:10], "subject": parts[3]})
-    return entries
-
-
-def collect_capabilities() -> dict:
-    data = _yaml_load(REPO / "ops" / "capabilities.yaml")
-    if not data or "capabilities" not in data:
-        return {"caps": {}, "count": 0}
-    caps = data["capabilities"]
-    return {"caps": caps, "count": len(caps)}
-
-
-def collect_gates() -> dict:
-    reg = _yaml_load(REPO / "ops" / "bindings" / "gate.registry.yaml")
-    topo = _yaml_load(REPO / "ops" / "bindings" / "gate.execution.topology.yaml")
-    result = {
-        "total": 0, "active": 0, "retired": 0,
-        "blocking": 0, "report": 0,
-        "core_ids": [], "gates": [], "categories": [],
-    }
-    if reg:
-        gc = reg.get("gate_count", {})
-        result["total"] = gc.get("total", 0)
-        result["active"] = gc.get("active", 0)
-        result["retired"] = gc.get("retired", 0)
-        result["blocking"] = gc.get("active_blocking", 0)
-        result["report"] = gc.get("active_report", 0)
-        result["categories"] = reg.get("categories", [])
-        result["gates"] = reg.get("gates", [])
-    if topo:
-        cm = topo.get("core_mode", {})
-        result["core_ids"] = cm.get("core_gate_ids", [])
-    return result
-
-
-def collect_manifest() -> dict:
-    data = _yaml_load(RUNTIME_STATE / "domain-state" / "SPINE_SURFACE_MANIFEST.yaml")
-    if not data:
-        return {"surfaces": [], "count": 0, "families": [], "available": False}
-    surfaces = data.get("surfaces", [])
-    families = data.get("workflow_families", [])
-    return {
-        "surfaces": surfaces,
-        "count": len(surfaces),
-        "families": families,
-        "entry_chain": data.get("entry_chain", []),
-        "generated_at": data.get("generated_at_utc", ""),
-        "available": True,
-    }
-
-
-def collect_node_roles(status: dict | None) -> dict:
-    """Derive node role and execution_host visibility from ops status data."""
-    result = {
-        "local_role": "",
-        "execution_host_target": "",
-        "execution_host_access": "",
-        "execution_host_workload_count": 0,
-        "execution_host_workload_labels": [],
-        "non_local_deferred": [],
-        "non_local_count": 0,
-    }
-    if not status:
-        return result
-    daemons = status.get("daemons", {})
-    result["local_role"] = daemons.get("local_role", "")
-    result["non_local_deferred"] = daemons.get("non_local_deferred", [])
-    result["non_local_count"] = len(result["non_local_deferred"])
-    exec_host = daemons.get("execution_host", {})
-    if isinstance(exec_host, dict):
-        result["execution_host_target"] = exec_host.get("target", "")
-        result["execution_host_access"] = exec_host.get("target_access", "")
-        result["execution_host_workload_count"] = exec_host.get("workload_count", 0)
-        result["execution_host_workload_labels"] = exec_host.get("workload_labels", [])
-        result["execution_host_workload_purposes"] = exec_host.get("workload_purposes", {})
-    return result
-
-
-def collect_invocation_counts() -> dict[str, int]:
-    counts: dict[str, int] = {}
-    sessions_root = EVIDENCE_ROOT / "sessions"
-    if not sessions_root.exists():
-        return counts
-    for path in sessions_root.iterdir():
-        if not path.is_dir():
-            continue
-        parts = path.name.split("__")
-        if len(parts) < 3:
-            continue
-        cap_name = parts[1]
-        counts[cap_name] = counts.get(cap_name, 0) + 1
-    return counts
-
-
-# ---------------------------------------------------------------------------
-# HTML generation
-# ---------------------------------------------------------------------------
-
-def engine_posture(status: dict | None, refs: dict) -> str:
-    """Derive posture from real signals."""
-    fast_verify = "unknown"
-    anomalies = []
-    if status:
-        cs = status.get("coherence_summary", {})
-        fast_verify = cs.get("fast_verify_status", "unknown")
-        anomalies = status.get("anomalies", [])
-
-    if fast_verify != "pass" or status is None:
+    if verify != "pass":
         color, label, css = "red", "Degraded", "red"
-    elif anomalies or not refs["github_ok"] or refs["is_dirty"]:
+    elif has_anomalies or not refs["github_ok"] or refs["is_dirty"]:
         color, label, css = "yellow", "Mixed", "ylw"
     else:
         color, label, css = "green", "Healthy", "grn"
 
     reasons = []
-    if fast_verify != "pass":
-        reasons.append(f"fast_verify: {fast_verify}")
-    if anomalies:
-        reasons.append(f"{len(anomalies)} anomal{'y' if len(anomalies)==1 else 'ies'}")
+    if verify != "pass":
+        reasons.append(f"verify: {verify}")
+    if has_anomalies:
+        reasons.append(f"{spine['anomaly_count']} anomal{'y' if spine['anomaly_count']==1 else 'ies'}")
     if not refs["github_ok"]:
         reasons.append("github mirror diverged/unavailable")
     if refs["is_dirty"]:
@@ -248,13 +79,45 @@ def engine_posture(status: dict | None, refs: dict) -> str:
     </div>"""
 
 
+def freshness_card(payload: dict) -> str:
+    f = payload["projection_freshness"]
+    freshness = f["freshness"]
+    age = f["age_seconds"]
+    source = f["source"]
+
+    if freshness == "current":
+        css = "grn"
+    elif freshness == "aging":
+        css = "ylw"
+    elif freshness == "stale":
+        css = "red"
+    else:
+        css = "ylw"
+
+    if age >= 0:
+        if age < 60:
+            age_str = f"{age}s ago"
+        elif age < 3600:
+            age_str = f"{age // 60}m ago"
+        else:
+            age_str = f"{age // 3600}h {(age % 3600) // 60}m ago"
+    else:
+        age_str = "unknown"
+
+    return f"""
+    <div class="posture {css}" style="padding:.6rem .9rem;margin-bottom:.25rem">
+      <div class="p-dot"></div>
+      <div>
+        <div class="p-text" style="font-size:.65rem">Projection: {_h(freshness)}</div>
+        <div class="p-sub">{_h(age_str)} · source: {_h(source)}</div>
+      </div>
+    </div>"""
+
+
 def node_role_card(roles: dict) -> str:
-    """Render a compact identity card showing M4 ↔ VM207 role split."""
     local_role = roles.get("local_role") or "unknown"
     exec_target = roles.get("execution_host_target") or ""
     exec_count = roles.get("execution_host_workload_count", 0)
-    non_local_count = roles.get("non_local_count", 0)
-
     local_label = local_role.replace("_", " ")
 
     exec_html = ""
@@ -264,14 +127,6 @@ def node_role_card(roles: dict) -> str:
             f'<div class="nr-label">execution host</div>'
             f'<div class="nr-value">{_h(exec_target)}'
             f'<span class="nr-sub">{exec_count} workload{"s" if exec_count != 1 else ""}</span>'
-            f'</div></div>'
-        )
-    elif non_local_count > 0:
-        exec_html = (
-            f'<div class="nr-row">'
-            f'<div class="nr-label">execution host</div>'
-            f'<div class="nr-value">unknown target'
-            f'<span class="nr-sub">{non_local_count} deferred label{"s" if non_local_count != 1 else ""}</span>'
             f'</div></div>'
         )
 
@@ -286,7 +141,6 @@ def node_role_card(roles: dict) -> str:
 
 
 def execution_host_section(roles: dict) -> str:
-    """Render execution_host workload visibility section."""
     exec_target = roles.get("execution_host_target") or ""
     if not exec_target:
         return ""
@@ -297,7 +151,6 @@ def execution_host_section(roles: dict) -> str:
     exec_purposes = roles.get("execution_host_workload_purposes", {})
     non_local = roles.get("non_local_deferred", [])
 
-    # Workload labels for execution_host with purpose text
     workload_rows = ""
     for lbl in sorted(exec_labels):
         short = lbl.replace("com.ronny.", "")
@@ -305,7 +158,6 @@ def execution_host_section(roles: dict) -> str:
         purpose_html = f'<div class="eh-purpose">{_h(purpose)}</div>' if purpose else ""
         workload_rows += f'<div class="eh-lbl">{_h(short)}{purpose_html}</div>'
 
-    # Other deferred labels (not in execution_host set)
     other_deferred = [lbl for lbl in non_local if lbl not in exec_labels]
     other_rows = ""
     if other_deferred:
@@ -332,11 +184,7 @@ def execution_host_section(roles: dict) -> str:
     </details>"""
 
 
-def comms_incident_card(status: dict | None) -> str:
-    """Render a compact comms queue incident card with blocked/draining state."""
-    if not status:
-        return ""
-    cq = status.get("comms_queue", {})
+def comms_incident_card(cq: dict) -> str:
     slo = cq.get("slo_status", "ok")
     if slo == "ok":
         return ""
@@ -344,10 +192,7 @@ def comms_incident_card(status: dict | None) -> str:
     drain_state = cq.get("drain_state", "unknown")
     pending = cq.get("pending", 0)
     oldest = cq.get("oldest_age_seconds", 0)
-    delivery_recent = cq.get("delivery_recent", 0)
-    sent_total = cq.get("sent_total", 0)
 
-    # Format oldest age as human-readable
     if oldest >= 86400:
         age_str = f"{oldest // 86400}d {(oldest % 86400) // 3600}h"
     elif oldest >= 3600:
@@ -355,23 +200,8 @@ def comms_incident_card(status: dict | None) -> str:
     else:
         age_str = f"{oldest // 60}m"
 
-    # Color by drain state
-    if drain_state == "draining":
-        state_css = "ylw"
-        state_label = "draining"
-    elif drain_state == "blocked":
-        state_css = "red"
-        state_label = "blocked"
-    else:
-        state_css = "red"
-        state_label = "unknown"
-
-    # Evidence line
-    evidence_parts = [f"{pending} pending", f"oldest {age_str}"]
-    if delivery_recent > 0:
-        evidence_parts.append(f"{delivery_recent} recent deliveries")
-    if sent_total > 0:
-        evidence_parts.append(f"{sent_total} sent total")
+    state_css = "ylw" if drain_state == "draining" else "red"
+    state_label = drain_state if drain_state in ("draining", "blocked") else "unknown"
 
     return f"""
     <div class="cq cq-{state_css}">
@@ -379,32 +209,24 @@ def comms_incident_card(status: dict | None) -> str:
         <span class="cq-title">Comms Queue</span>
         <span class="cq-state cq-s-{state_css}">{_h(slo)} · {_h(state_label)}</span>
       </div>
-      <div class="cq-evidence">{_h(' · '.join(evidence_parts))}</div>
+      <div class="cq-evidence">{pending} pending · oldest {_h(age_str)}</div>
     </div>"""
 
 
-def attention_section(status: dict | None, refs: dict) -> str:
-    items = []
-    if status:
-        for a in status.get("anomalies", []):
-            items.append(("r" if "INCIDENT" in a.upper() else "y", a))
-    if not refs["github_ok"]:
-        items.append(("y", f"GitHub mirror: {refs['github_head']}"))
-    if refs["is_dirty"]:
-        items.append(("y", f"Repo has uncommitted changes"))
-    if not items:
+def attention_section(attention: list[dict]) -> str:
+    if not attention:
         return ""
-    rows = "\n".join(
-        f'<div class="attn-item"><div class="attn-dot {c}"></div>{_h(t)}</div>'
-        for c, t in items
-    )
-    return f'<div class="attn">{rows}</div>'
+    rows = []
+    for item in attention:
+        color = "r" if item.get("priority") == "high" else "y"
+        text = item.get("summary", "")
+        rows.append(f'<div class="attn-item"><div class="attn-dot {color}"></div>{_h(text)}</div>')
+    return f'<div class="attn">{"".join(rows)}</div>'
 
 
 def timeline_section(log: list[dict]) -> str:
     if not log:
         return '<div class="sh">Recent Timeline</div><p style="font-size:.6rem;color:var(--t)">unavailable</p>'
-    # Group by day
     days: dict[str, list[dict]] = {}
     for entry in log:
         d = entry["date"]
@@ -434,27 +256,23 @@ def capability_atlas(caps_data: dict, invocation_counts: dict[str, int]) -> str:
     if not caps:
         return '<div class="sh">Capability Atlas</div><p style="font-size:.6rem;color:var(--t)">unavailable</p>'
 
-    # Collect domains
     domains = sorted(set(c.get("domain", "unknown") for c in caps.values()))
-
-    # Domain filter buttons
     filters = ['<button class="cap-f active" onclick="filterCaps(event,\'all\')">all</button>']
     for d in domains:
         filters.append(f'<button class="cap-f" onclick="filterCaps(event,\'{_h(d)}\')">{_h(d)}</button>')
 
-    # Capability rows
     rows = []
     for name in sorted(caps.keys()):
         c = caps[name]
         safety = c.get("safety", "unknown")
         domain = c.get("domain", "unknown")
         desc = c.get("description", "")
-        invocation_count = invocation_counts.get(name, 0)
+        inv_count = invocation_counts.get(name, 0)
         safety_cls = "cap-ro" if safety == "read-only" else "cap-mut"
         safety_label = "RO" if safety == "read-only" else "MUT"
         rows.append(
             f'<div class="cap" data-domain="{_h(domain)}">'
-            f'<span class="cap-name">{_h(name)}<span class="cap-count">{invocation_count}</span></span>'
+            f'<span class="cap-name">{_h(name)}<span class="cap-count">{inv_count}</span></span>'
             f'<span class="cap-desc">{_h(desc)}</span>'
             f'<span class="cap-tag {safety_cls}">{safety_label}</span>'
             f'</div>'
@@ -475,7 +293,6 @@ def capability_atlas(caps_data: dict, invocation_counts: dict[str, int]) -> str:
 
 
 def gate_watch(gates: dict) -> str:
-    # Summary stats
     stats = f"""
     <div class="stats" style="grid-template-columns:repeat(5,1fr)">
       <div class="stat"><div class="stat-v">{gates['total']}</div><div class="stat-l">Total</div></div>
@@ -485,7 +302,6 @@ def gate_watch(gates: dict) -> str:
       <div class="stat"><div class="stat-v">{gates['report']}</div><div class="stat-l">Report</div></div>
     </div>"""
 
-    # Core gates — cross-reference IDs against registry
     core_ids = set(gates.get("core_ids", []))
     gate_map = {g["id"]: g for g in gates.get("gates", []) if "id" in g}
 
@@ -493,7 +309,6 @@ def gate_watch(gates: dict) -> str:
     for gid in sorted(core_ids):
         g = gate_map.get(gid, {})
         name = g.get("name", "unknown")
-        cat = g.get("category", "")
         core_rows.append(
             f'<div class="gate">'
             f'<span class="gate-id">{_h(gid)}</span>'
@@ -504,7 +319,6 @@ def gate_watch(gates: dict) -> str:
 
     core_body = "".join(core_rows) if core_rows else '<div style="font-size:.6rem;color:var(--t)">no core gates found</div>'
 
-    # Category summary
     cat_counts: dict[str, int] = {}
     for g in gates.get("gates", []):
         if not g.get("retired", False):
@@ -514,7 +328,6 @@ def gate_watch(gates: dict) -> str:
     cat_rows = []
     for cat, cnt in sorted(cat_counts.items()):
         cat_rows.append(f'<div class="attn-item"><div class="attn-dot y"></div>{_h(cat)}: {cnt} active</div>')
-    cat_body = "".join(cat_rows)
 
     return f"""
     <div class="sh">Gate Watch</div>
@@ -525,7 +338,7 @@ def gate_watch(gates: dict) -> str:
     </details>
     <details>
       <summary>Category Summary <span class="det-count">{len(cat_counts)} categories</span></summary>
-      <div class="det-body">{cat_body}</div>
+      <div class="det-body">{"".join(cat_rows)}</div>
     </details>"""
 
 
@@ -536,13 +349,11 @@ def authority_explorer(manifest: dict) -> str:
     surfaces = manifest["surfaces"]
     families = manifest.get("families", [])
 
-    # Group surfaces by kind
     by_kind: dict[str, list[dict]] = {}
     for s in surfaces:
         k = s.get("surface_kind", "unknown")
         by_kind.setdefault(k, []).append(s)
 
-    # Also include workflow families as a group
     rows = []
     for kind in sorted(by_kind.keys()):
         items = by_kind[kind]
@@ -550,7 +361,6 @@ def authority_explorer(manifest: dict) -> str:
         for s in sorted(items, key=lambda x: x.get("surface_id", "")):
             sid = s.get("surface_id", "unknown")
             auth_cls = s.get("authority_class", "")
-            lifecycle = s.get("lifecycle_state", "")
             source = s.get("path", "")
             purpose = ""
             knowledge = s.get("knowledge", {})
@@ -560,7 +370,7 @@ def authority_explorer(manifest: dict) -> str:
             gen_surface = regen.get("command", "") or regen.get("surface_id", "") or ""
 
             tag_cls = "surf-auth" if auth_cls == "authoritative" else ("surf-supp" if auth_cls == "supporting" else "surf-hist")
-            tag_label = auth_cls[:4].upper() if auth_cls else "—"
+            tag_label = auth_cls[:4].upper() if auth_cls else "\u2014"
 
             meta_parts = []
             if source:
@@ -579,7 +389,6 @@ def authority_explorer(manifest: dict) -> str:
                 f'</div>'
             )
 
-    # Workflow families
     if families:
         rows.append(f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;border-top:1px solid var(--b);margin-top:.25rem">workflow_families ({len(families)})</div>')
         for fam in families:
@@ -599,7 +408,6 @@ def authority_explorer(manifest: dict) -> str:
             )
 
     body = "".join(rows)
-    total = len(surfaces) + len(families)
     return f"""
     <div class="sh">Authority Explorer</div>
     <details>
@@ -608,28 +416,15 @@ def authority_explorer(manifest: dict) -> str:
     </details>"""
 
 
-def work_state(status: dict | None) -> str:
-    if not status:
-        return '<div class="sh">Work State</div><p style="font-size:.6rem;color:var(--t)">status unavailable</p>'
-
-    counts = status.get("counts", {})
-    open_loops = counts.get("open_loops", 0)
-    open_gaps = counts.get("open_gaps", 0)
-    inbox_active = status.get("inbox_active", 0)
-    inbox_lanes = status.get("inbox_lanes", {})
-    inbox_parked = inbox_lanes.get("parked", 0)
-    inbox_done = inbox_lanes.get("done", 0)
-    active_waves = counts.get("active_waves", 0)
-    orphaned_waves = counts.get("orphaned_waves", 0)
-
+def work_state_section(ws: dict) -> str:
     items = [
-        ("Loops", str(open_loops), "open"),
-        ("Gaps", str(open_gaps), "open"),
-        ("Waves", str(active_waves), f"active · {orphaned_waves} orphaned"),
-        ("Inbox", str(inbox_parked), f"parked · {inbox_done} done"),
+        ("Loops", str(ws["open_loops"]), "open"),
+        ("Gaps", str(ws["open_gaps"]), "open"),
+        ("Waves", str(ws["active_waves"]), f"active · {ws['orphaned_waves']} orphaned"),
+        ("Inbox", str(ws.get("inbox_lanes", {}).get("parked", 0)), f"parked · {ws.get('inbox_lanes', {}).get('done', 0)} done"),
     ]
-    if inbox_active > 0:
-        items.append(("Active", str(inbox_active), "inbox active"))
+    if ws["inbox_active"] > 0:
+        items.append(("Active", str(ws["inbox_active"]), "inbox active"))
 
     stat_cards = ""
     for label, val, sub in items:
@@ -804,25 +599,37 @@ function filterCaps(e, domain) {
 
 
 def generate() -> str:
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    p = build_payload(compact=False)
 
-    refs = collect_refs()
-    status = collect_status()
-    roles = collect_node_roles(status)
-    log = collect_git_log(30)
-    caps_data = collect_capabilities()
-    invocation_counts = collect_invocation_counts()
-    gates = collect_gates()
-    manifest = collect_manifest()
+    caps_data = p.get("capabilities", {"caps": {}, "count": 0})
+    inv_counts = p.get("invocation_counts", {})
+    gates_data = p.get("gates", {})
+    manifest_data = p.get("manifest", {"available": False, "surfaces": [], "count": 0, "families": []})
+    git_log = p.get("git_log", [])
 
     source_stamps = [
-        f"ops status --json: {'ok' if status else 'fail'}",
-        f"git log: {len(log)} entries",
-        f"capabilities.yaml: {caps_data['count']} caps",
-        f"gate.registry.yaml: {gates['total']} gates",
-        f"SPINE_SURFACE_MANIFEST: {'ok' if manifest['available'] else 'unavailable'} ({manifest['count']} surfaces)",
-        f"github remote: {'ok' if refs['github_ok'] else 'unavailable'}",
+        f"shared payload v{p['version']}",
+        f"git log: {len(git_log)} entries",
+        f"capabilities: {caps_data.get('count', 0)} caps",
+        f"gates: {gates_data.get('total', 0)} gates",
+        f"manifest: {'ok' if manifest_data.get('available') else 'unavailable'}",
+        f"github: {'ok' if p['git_refs']['github_ok'] else 'unavailable'}",
+        f"freshness: {p['projection_freshness']['freshness']}",
     ]
+
+    sec_posture = engine_posture(p)
+    sec_fresh = freshness_card(p)
+    sec_roles = node_role_card(p["node_roles"])
+    sec_exec = execution_host_section(p["node_roles"])
+    sec_comms = comms_incident_card(p["work_state"]["comms_queue"])
+    sec_attn = attention_section(p["attention"])
+    sec_timeline = timeline_section(git_log)
+    sec_caps = capability_atlas(caps_data, inv_counts)
+    sec_gates = gate_watch(gates_data)
+    sec_auth = authority_explorer(manifest_data)
+    sec_work = work_state_section(p["work_state"])
+    sec_release = release_posture(p["git_refs"])
+    stamps_str = _h(" · ".join(source_stamps))
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -836,24 +643,25 @@ def generate() -> str:
 <div class="c">
   <div class="top">
     <h1>Spine Cockpit</h1>
-    <span>generated {_h(now)}</span>
+    <span>generated {_h(p['generated_utc'])}</span>
   </div>
 
-  {engine_posture(status, refs)}
-  {node_role_card(roles)}
-  {execution_host_section(roles)}
-  {comms_incident_card(status)}
-  {attention_section(status, refs)}
-  {timeline_section(log)}
-  {capability_atlas(caps_data, invocation_counts)}
-  {gate_watch(gates)}
-  {authority_explorer(manifest)}
-  {work_state(status)}
-  {release_posture(refs)}
+  {sec_posture}
+  {sec_fresh}
+  {sec_roles}
+  {sec_exec}
+  {sec_comms}
+  {sec_attn}
+  {sec_timeline}
+  {sec_caps}
+  {sec_gates}
+  {sec_auth}
+  {sec_work}
+  {sec_release}
 
   <div class="foot">
-    cockpit.generate v1 · static snapshot · manual refresh<br>
-    sources: {_h(' · '.join(source_stamps))}
+    cockpit.generate v2 · shared operator-overview-payload · static snapshot<br>
+    sources: {stamps_str}
   </div>
 </div>
 <script>{JS}</script>
