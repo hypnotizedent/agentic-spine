@@ -25,17 +25,34 @@ def _state_paths(root: Path, wave_id: str) -> tuple[Path, Path]:
 def _usage() -> str:
     return (
         "Usage: wave-emit-agent-receipt <WAVE_ID> --lane <lane>|--dispatch D<N> --result \"<text>\" "
-        "[--file-read <path>]... [--task-id <id>]"
+        "[--file-read <path>]... [--run-key <key>]... [--commit-ref <sha>]... "
+        "[--loop-id <LOOP_ID>] [--completion-level <level>] [--task-id <id>]"
     )
 
 
-def _parse_args(argv: list[str]) -> tuple[str, str, str, str, list[str], str]:
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        ordered.append(text)
+    return ordered
+
+
+def _parse_args(argv: list[str]) -> tuple[str, str, str, str, list[str], list[str], list[str], str, str, str]:
     wave_id = ""
     lane = ""
     dispatch_id = ""
     result = ""
     task_id_override = ""
     file_reads: list[str] = []
+    run_keys: list[str] = []
+    commit_refs: list[str] = []
+    loop_id_override = ""
+    completion_level = ""
     args = list(argv[1:])
     while args:
         token = args.pop(0)
@@ -47,6 +64,14 @@ def _parse_args(argv: list[str]) -> tuple[str, str, str, str, list[str], str]:
             result = args.pop(0)
         elif token == "--file-read":
             file_reads.append(args.pop(0))
+        elif token == "--run-key":
+            run_keys.append(args.pop(0))
+        elif token == "--commit-ref":
+            commit_refs.append(args.pop(0))
+        elif token == "--loop-id":
+            loop_id_override = args.pop(0)
+        elif token == "--completion-level":
+            completion_level = args.pop(0)
         elif token == "--task-id":
             task_id_override = args.pop(0)
         elif token.startswith("-"):
@@ -59,12 +84,34 @@ def _parse_args(argv: list[str]) -> tuple[str, str, str, str, list[str], str]:
         raise SystemExit(_usage())
     if not lane and not dispatch_id:
         raise SystemExit("ERROR: --lane <lane> or --dispatch D<N> is required.")
-    return wave_id, lane, dispatch_id, result, file_reads, task_id_override
+    return (
+        wave_id,
+        lane,
+        dispatch_id,
+        result,
+        _dedupe(file_reads),
+        _dedupe(run_keys),
+        _dedupe(commit_refs),
+        loop_id_override.strip(),
+        completion_level.strip(),
+        task_id_override,
+    )
 
 
 def main(argv: list[str]) -> int:
     try:
-        wave_id, lane, dispatch_id, result, file_reads, task_id_override = _parse_args(argv)
+        (
+            wave_id,
+            lane,
+            dispatch_id,
+            result,
+            file_reads,
+            run_keys,
+            commit_refs,
+            loop_id_override,
+            completion_level,
+            task_id_override,
+        ) = _parse_args(argv)
     except IndexError:
         print("ERROR: missing value for flag", file=sys.stderr)
         return 1
@@ -81,6 +128,7 @@ def main(argv: list[str]) -> int:
     evidence_dir.mkdir(parents=True, exist_ok=True)
 
     state = json.loads(state_file.read_text(encoding="utf-8"))
+    packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
     dispatches = state.get("dispatches", [])
     if not isinstance(dispatches, list) or not dispatches:
         print("ERROR: wave has no dispatches", file=sys.stderr)
@@ -112,6 +160,11 @@ def main(argv: list[str]) -> int:
         return 1
 
     selected_lane = str(selected.get("lane") or lane or "execution").strip()
+    resolved_loop_id = loop_id_override or str(packet.get("loop_id") or "").strip()
+    resolved_run_keys = list(run_keys)
+    selected_run_key = str(selected.get("run_key") or "").strip()
+    if not resolved_run_keys and selected_run_key:
+        resolved_run_keys = [selected_run_key]
     terminal_id = (
         os.environ.get("OPS_TERMINAL_ROLE")
         or os.environ.get("SPINE_TERMINAL_ROLE")
@@ -125,18 +178,23 @@ def main(argv: list[str]) -> int:
         "lane": selected_lane,
         "status": "done",
         "files_changed": [],
-        "run_keys": [],
+        "run_keys": resolved_run_keys,
         "blockers": [],
         "ready_for_verify": True,
         "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "wave_id": wave_id,
+        "commit_hashes": commit_refs,
         "evidence_refs": {
-            "run_key_refs": [],
-            "file_refs": [path for path in file_reads if path.strip()],
-            "commit_refs": [],
+            "run_key_refs": resolved_run_keys,
+            "file_refs": file_reads,
+            "commit_refs": commit_refs,
             "blocker_class": "none",
         },
     }
+    if resolved_loop_id:
+        receipt["loop_id"] = resolved_loop_id
+    if completion_level:
+        receipt["completion_level"] = completion_level
 
     receipt_path = evidence_dir / f"{task_id}.exec_receipt.json"
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")

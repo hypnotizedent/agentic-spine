@@ -989,7 +989,7 @@ Usage:
   ops wave close <WAVE_ID> --disposition <state> [--completion-level <level>] [--force] [--dod-override "<reason>"] [--lock-override "<reason>"]  Close a wave
   ops wave preflight <domain>                        Fast non-blocking preflight
   ops wave receipt-validate <path>                   Validate EXEC_RECEIPT JSON
-  ops wave emit-agent-receipt <WAVE_ID> --lane <L>|--dispatch D<N> --result "<text>" [--file-read <p>]... [--task-id <id>]
+  ops wave emit-agent-receipt <WAVE_ID> --lane <L>|--dispatch D<N> --result "<text>" [--file-read <p>]... [--run-key <key>]... [--commit-ref <sha>]... [--loop-id <LOOP_ID>] [--completion-level <level>] [--task-id <id>]
                                                     Bridge: emit worker-class EXEC_RECEIPT JSON for an in-band Agent-tool subagent result
   ops wave residue [--sweep] [--json]                Canonical wave-owned residue surface (report-only by default; --sweep is bounded)
 
