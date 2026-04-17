@@ -35,6 +35,49 @@ OPEN_LOOP_STATUSES = frozenset({"active", "open", "draft"})
 CLOSED_LOOP_STATUSES = frozenset(
     {"closed", "superseded", "abandoned", "deferred", "completed", "landed"}
 )
+LIVE_LOOP_STATUSES = OPEN_LOOP_STATUSES | frozenset({"parked"})
+
+HANDOFF_NON_LIVE_STATES = frozenset({"closed", "expired", "archived"})
+HANDOFF_RESOLVED_PATTERNS = (
+    r"\bdelivered\b",
+    r"\bclosed\b",
+    r"\barchived\b",
+    r"\blanded\b",
+    r"\bcomplete(?:d)?\b",
+    r"\bdone\b",
+    r"\bresolved\b",
+    r"\bretired\b",
+    r"\bmerged to main\b",
+    r"\bcheckpoint satisfied\b",
+    r"\bno further\b",
+)
+HANDOFF_CONTINUING_PATTERNS = (
+    r"\bblocker\b",
+    r"\bblocked\b",
+    r"\bawait(?:ing)?\b",
+    r"\bpending\b",
+    r"\bneeds?\b",
+    r"\brequires?\b",
+    r"\bdecision\b",
+    r"\bapproval\b",
+    r"\bunresolved\b",
+    r"\bremaining\b",
+    r"\bremains\b",
+    r"\blive\b",
+    r"\bgap remains bounded and live\b",
+    r"\bfollow-?up\b",
+    r"\bnext move\b",
+    r"\bnext action\b",
+)
+HANDOFF_SEPARATE_FOLLOWON_PATTERNS = (
+    r"\boptional\b",
+    r"\bseparate slice\b",
+    r"\bseparate follow-?on\b",
+    r"\bnext frontier\b",
+    r"\bfuture work\b",
+    r"\boutside this slice\b",
+    r"\bas separate slice\b",
+)
 
 # Object-class × state applicability matrix (from PACKET-38 design §4)
 # True = legal, False = illegal for this combination
@@ -139,6 +182,213 @@ def _has_structural_parked_evidence(message: str) -> tuple[bool, str]:
         return False, "vague reference, not a concrete artifact path"
 
     return False, "PARKED: prefix present but no structural evidence reference"
+
+
+def _matches_any_pattern(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
+
+def _normalize_text_fragment(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def _collect_handoff_text(payload: dict[str, Any]) -> str:
+    fragments: list[str] = [
+        payload.get("summary", ""),
+        payload.get("close_note", ""),
+    ]
+    for key in ("notes", "actions"):
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            fragments.extend(str(item or "") for item in raw)
+        elif raw:
+            fragments.append(str(raw))
+    return " ".join(
+        fragment for fragment in (_normalize_text_fragment(item) for item in fragments)
+        if fragment
+    )
+
+
+def _runtime_reference_paths(state_root: str, tokens: list[str]) -> list[str]:
+    """Find concrete runtime artifacts that reference any given token."""
+    search_tokens = [str(token).strip() for token in tokens if str(token).strip()]
+    if not search_tokens:
+        return []
+
+    state_path = Path(state_root)
+    search_roots: list[Path] = [
+        state_path / "controller-prompts" / "_intake-artifacts",
+        state_path / "domain-state",
+        state_path / "handoffs",
+        state_path / "path.claims.yaml",
+        state_path / "traffic.index.yaml",
+    ]
+    matches: list[str] = []
+    seen_paths: set[str] = set()
+    for root in search_roots:
+        if not root.exists():
+            continue
+        candidate_paths = [root] if root.is_file() else sorted(root.rglob("*"))
+        for path in candidate_paths:
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if any(token in text for token in search_tokens):
+                rel_path = str(path.relative_to(state_path))
+                if rel_path not in seen_paths:
+                    seen_paths.add(rel_path)
+                    matches.append(rel_path)
+    return matches
+
+
+def build_loop_state_index(state_root: str) -> dict[str, dict[str, str]]:
+    """Build a loop-id -> status/location index from active + archived scope files."""
+    state_path = Path(state_root)
+    items: dict[str, dict[str, str]] = {}
+    scan_roots = (
+        ("active", state_path / "loop-scopes"),
+        ("archive", state_path / "archive" / "closed-loop-scopes"),
+    )
+    for location, root in scan_roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("*.scope.md")):
+            front = _parse_frontmatter(path)
+            loop_id = str(front.get("loop_id") or path.stem.replace(".scope", "")).strip()
+            if not loop_id.startswith("LOOP-"):
+                continue
+            status = str(front.get("status") or "unknown").strip().lower()
+            items[loop_id] = {
+                "status": status,
+                "location": location,
+                "path": str(path),
+            }
+    return items
+
+
+def classify_handoff_continuity(
+    payload: dict[str, Any],
+    loop_index: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Classify whether a handoff is still live continuity or historical residue."""
+    loop_index = loop_index or {}
+    raw_state = str(payload.get("state") or "unknown").strip().lower()
+    loop_refs = [
+        str(loop).strip()
+        for loop in (payload.get("loops") or [])
+        if str(loop).strip()
+    ]
+    loop_states: list[str] = []
+    live_loop_refs: list[str] = []
+    missing_loop_refs: list[str] = []
+    for loop_id in loop_refs:
+        info = loop_index.get(loop_id)
+        if not info:
+            loop_states.append(f"{loop_id}=missing")
+            missing_loop_refs.append(loop_id)
+            continue
+        status = str(info.get("status") or "unknown").strip().lower()
+        location = str(info.get("location") or "unknown").strip().lower()
+        loop_states.append(f"{loop_id}={status}@{location}")
+        if status in LIVE_LOOP_STATUSES and location != "archive":
+            live_loop_refs.append(loop_id)
+
+    text_blob = _collect_handoff_text(payload)
+    resolved = _matches_any_pattern(text_blob, HANDOFF_RESOLVED_PATTERNS)
+    continuing = _matches_any_pattern(text_blob, HANDOFF_CONTINUING_PATTERNS)
+    separate_follow_on = _matches_any_pattern(text_blob, HANDOFF_SEPARATE_FOLLOWON_PATTERNS)
+
+    if raw_state in HANDOFF_NON_LIVE_STATES:
+        return {
+            "raw_state": raw_state,
+            "effective_state": raw_state,
+            "continuity_live": False,
+            "confidence": "definitive",
+            "reason": f"state={raw_state}",
+            "loop_states": loop_states,
+        }
+
+    if raw_state != "active":
+        return {
+            "raw_state": raw_state,
+            "effective_state": "ambiguous",
+            "continuity_live": False,
+            "confidence": "probable",
+            "reason": f"unrecognized handoff state '{raw_state}'",
+            "loop_states": loop_states,
+        }
+
+    all_loops_non_live = bool(loop_refs) and not live_loop_refs and not missing_loop_refs
+    if all_loops_non_live:
+        if continuing:
+            return {
+                "raw_state": raw_state,
+                "effective_state": "ambiguous",
+                "continuity_live": False,
+                "confidence": "probable",
+                "reason": "active handoff points only at closed/archived loops but still reads unresolved",
+                "loop_states": loop_states,
+            }
+        return {
+            "raw_state": raw_state,
+            "effective_state": "historical",
+            "continuity_live": False,
+            "confidence": "definitive",
+            "reason": "active handoff points only at closed/archived loops",
+            "loop_states": loop_states,
+        }
+
+    if resolved and separate_follow_on and not continuing:
+        return {
+            "raw_state": raw_state,
+            "effective_state": "historical",
+            "continuity_live": False,
+            "confidence": "definitive",
+            "reason": "delivered handoff only names optional/separate follow-on work",
+            "loop_states": loop_states,
+        }
+
+    if resolved and not continuing:
+        return {
+            "raw_state": raw_state,
+            "effective_state": "historical",
+            "continuity_live": False,
+            "confidence": "definitive",
+            "reason": "delivery/close language with no unresolved continuity markers",
+            "loop_states": loop_states,
+        }
+
+    if continuing:
+        return {
+            "raw_state": raw_state,
+            "effective_state": "active",
+            "continuity_live": True,
+            "confidence": "definitive" if live_loop_refs or not loop_refs else "probable",
+            "reason": "unresolved blocker/approval/live-work markers remain",
+            "loop_states": loop_states,
+        }
+
+    if live_loop_refs:
+        return {
+            "raw_state": raw_state,
+            "effective_state": "active",
+            "continuity_live": True,
+            "confidence": "probable",
+            "reason": "raw state active and referenced loop remains live",
+            "loop_states": loop_states,
+        }
+
+    return {
+        "raw_state": raw_state,
+        "effective_state": "ambiguous",
+        "continuity_live": False,
+        "confidence": "probable",
+        "reason": "raw state active but continuity could not be proven live",
+        "loop_states": loop_states,
+    }
 
 
 # ── Collectors ───────────────────────────────────────────────────────
@@ -389,6 +639,7 @@ def _scan_active_handoffs(state_root: str) -> list[dict[str, Any]]:
     if not handoffs_dir.is_dir():
         return []
 
+    loop_index = build_loop_state_index(state_root)
     results: list[dict[str, Any]] = []
     for path in sorted(handoffs_dir.glob("HO-*.yaml")):
         try:
@@ -398,13 +649,16 @@ def _scan_active_handoffs(state_root: str) -> list[dict[str, Any]]:
             continue
         if not isinstance(payload, dict):
             continue
-        state = str(payload.get("state") or "").strip().lower()
-        if state != "active":
+        continuity = classify_handoff_continuity(payload, loop_index)
+        if continuity.get("effective_state") != "active":
             continue
         results.append({
             "id": path.stem,
             "summary": str(payload.get("summary") or "").strip(),
             "loops": payload.get("loops", []) if isinstance(payload.get("loops"), list) else [],
+            "effective_state": continuity.get("effective_state"),
+            "continuity_reason": continuity.get("reason", ""),
+            "loop_states": continuity.get("loop_states", []),
         })
 
     return results
@@ -565,6 +819,7 @@ def _classify_parked_branch(
     item: dict[str, Any],
     stashes: list[dict[str, Any]],
     handoffs: list[dict[str, Any]],
+    state_root: str,
 ) -> dict[str, Any]:
     """Classify a parked branch."""
     branch = item.get("identity", "")
@@ -602,6 +857,30 @@ def _classify_parked_branch(
             "is_live": True,
             "confidence": "definitive",
             "evidence": f"unmerged, {', '.join(evidence_parts)}",
+            "rule": "P4",
+        }
+
+    branch_text = " ".join(
+        [
+            str(item.get("identity") or ""),
+            str(item.get("commit_message") or ""),
+        ]
+    )
+    wave_tokens = sorted(set(re.findall(r"WAVE-\d{8}-\d+", branch_text)))
+    runtime_refs = _runtime_reference_paths(state_root, wave_tokens)
+    if runtime_refs:
+        preview = ", ".join(runtime_refs[:2])
+        if len(runtime_refs) > 2:
+            preview += f", +{len(runtime_refs) - 2} more"
+        evidence = "referenced by runtime artifacts"
+        if wave_tokens:
+            evidence += f" for {', '.join(wave_tokens)}"
+        evidence += f" ({preview})"
+        return {
+            "computed_state": "parked",
+            "is_live": True,
+            "confidence": "definitive",
+            "evidence": f"unmerged, {evidence}",
             "rule": "P4",
         }
 
@@ -772,7 +1051,7 @@ def reconcile(
         })
 
     for item in parked_branches:
-        result = _classify_parked_branch(item, stashes, handoffs)
+        result = _classify_parked_branch(item, stashes, handoffs, state_root)
         classifications.append({
             **item,
             **result,

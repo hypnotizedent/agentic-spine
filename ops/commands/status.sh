@@ -3,7 +3,8 @@
 # ops status - Unified work tracker for the agentic spine
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# Shows a single view of all open work: loops, gaps, inbox items, anomalies.
+# Shows current spine work first, with inbox/comms side surfaces rendered
+# separately so historical residue does not read as controller todo.
 # This is the canonical agent entry point — replaces `ops loops list --open`.
 #
 # Usage:
@@ -102,6 +103,7 @@ if [[ "$MODE" == "--context" ]]; then
   TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-<none>}"
   RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-<none>}"
   LOOP_ID="${SPINE_LOOP_ID:-<none>}"
+  SESSION_LOOP_DISPLAY="$LOOP_ID"
 
   JOINED_JSON=""
   JOINED_ERR=""
@@ -168,10 +170,42 @@ if [[ "$MODE" == "--context" ]]; then
     fi
   fi
 
+  if [[ -n "$JOINED_JSON" && "$LOOP_ID" != "<none>" ]]; then
+    _session_loop_suffix="$(
+      SESSION_LOOP_ID="$LOOP_ID" python3 - <<'PY' <<<"$JOINED_JSON" 2>/dev/null || true
+import json
+import os
+import sys
+
+session_loop_id = (os.environ.get("SESSION_LOOP_ID") or "").strip()
+if not session_loop_id:
+    raise SystemExit(0)
+
+try:
+    data = json.loads(sys.stdin.read())
+except Exception:
+    raise SystemExit(0)
+
+open_rows = ((data.get("loops") or {}).get("open")) or []
+open_loop_ids = {
+    str(row.get("loop_id") or "").strip()
+    for row in open_rows
+    if isinstance(row, dict) and str(row.get("loop_id") or "").strip()
+}
+
+if open_loop_ids and session_loop_id not in open_loop_ids:
+    print(" (historical env; not in current open loops)")
+PY
+    )"
+    if [[ -n "$_session_loop_suffix" ]]; then
+      SESSION_LOOP_DISPLAY="${LOOP_ID}${_session_loop_suffix}"
+    fi
+  fi
+
   echo "─── spine context ───────────────────────────────────"
   printf "  terminal:       %s\n" "$TERMINAL_ROLE"
   printf "  runtime role:   %s\n" "$RUNTIME_ROLE"
-  printf "  loop:           %s\n" "$LOOP_ID"
+  printf "  session loop:   %s\n" "$SESSION_LOOP_DISPLAY"
   printf "  state root:     %s\n" "$STATE_ROOT_VAL"
   printf "  evidence root:  %s\n" "$EVIDENCE_ROOT"
   echo "─── open work ──────────────────────────────────────"
@@ -449,6 +483,9 @@ def count_lane_files(base_dir):
 inbox_lanes = count_lane_files(inbox_dir)
 inbox_active = inbox_lanes.get("queued", 0) + inbox_lanes.get("running", 0)
 inbox_total = sum(inbox_lanes.values())
+inbox_failed = inbox_lanes.get("failed", 0)
+inbox_actionable = inbox_active + inbox_failed
+inbox_history_total = max(0, inbox_total - inbox_actionable)
 
 proposal_counts = Counter()
 proposal_total = 0
@@ -609,15 +646,14 @@ else:
 if inbox_active > 0:
     anomalies.append(f"INBOX: {inbox_active} active item(s) in queue — {inbox_lanes.get('queued', 0)} queued, {inbox_lanes.get('running', 0)} running")
 
-failed_count = inbox_lanes.get("failed", 0)
-if failed_count > 0:
-    anomalies.append(f"INBOX: {failed_count} failed item(s) — investigate or archive")
+if inbox_failed > 0:
+    anomalies.append(f"INBOX: {inbox_failed} failed item(s) — investigate or archive")
 
 # Check communications queue health
 if comms_slo_status == "incident":
-    anomalies.append(f"COMMS QUEUE INCIDENT ({comms_drain_state}): pending={comms_pending} oldest={comms_oldest}s escalations={comms_escalations}")
+    anomalies.append(f"COMMS QUEUE SIDE-SURFACE INCIDENT ({comms_drain_state}): pending={comms_pending} oldest={comms_oldest}s escalations={comms_escalations}")
 elif comms_slo_status == "warn":
-    anomalies.append(f"COMMS QUEUE WARN: pending={comms_pending} oldest={comms_oldest}s")
+    anomalies.append(f"COMMS QUEUE SIDE-SURFACE WARN: pending={comms_pending} oldest={comms_oldest}s")
 
 if joined_state_summary.get("coherence_attention"):
     anomalies.append(
@@ -805,8 +841,11 @@ if mode == "--json":
         "inbox_lanes": inbox_lanes,
         "inbox_active": inbox_active,
         "inbox_total": inbox_total,
+        "inbox_actionable": inbox_actionable,
+        "inbox_history_total": inbox_history_total,
         "anomalies": anomalies,
         "comms_queue": {
+            "controller_todo": False,
             "slo_status": comms_slo_status,
             "drain_state": comms_drain_state,
             "pending": comms_pending,
@@ -839,6 +878,8 @@ if mode == "--json":
             "coherence_attention": bool(joined_state_summary.get("coherence_attention", False)),
             "inbox_active": inbox_active,
             "inbox_total": inbox_total,
+            "inbox_actionable": inbox_actionable,
+            "inbox_history_total": inbox_history_total,
             "anomalies": len(anomalies),
             "completion_state": joined_state_summary.get("completion_state"),
         }
@@ -850,7 +891,8 @@ if mode == "--brief":
     now_runnable = sum(1 for loop in open_loops if loop.get("horizon", "now") == "now" and loop.get("execution_readiness", "runnable") == "runnable")
     later_count = sum(1 for loop in open_loops if loop.get("horizon", "now") == "later")
     future_count = sum(1 for loop in open_loops if loop.get("horizon", "now") == "future")
-    loop_part = f"Loops: {len(open_loops)} open"
+    joined_open_loops = int(joined_state_summary.get("open_loops", len(open_loops)) or len(open_loops))
+    loop_part = f"Loops: {joined_open_loops} open"
     if background_open:
         loop_part += f" ({background_open} background"
         if stale_background_count:
@@ -878,9 +920,8 @@ if mode == "--brief":
     parts.append(f"Verify: {joined_state_summary.get('verify_status', 'unknown')}")
     if joined_state_summary.get("coherence_attention"):
         parts.append("Coherence: attention")
-    parts.append(f"Inbox: {inbox_active} active / {inbox_total} total")
-    if comms_oneliner:
-        parts.append(comms_oneliner)
+    if inbox_actionable:
+        parts.append(f"Inbox: {inbox_actionable} actionable")
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))
     sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
@@ -997,21 +1038,32 @@ else:
         print(f"  [{gap['severity']:8s}] {gap['id']:12s}{parent}")
 print()
 
-# ── Inbox Lanes ──
-if inbox_total > 0:
-    print(f"INBOX LANES ({inbox_total} total)")
+# ── Inbox actionable state ──
+if inbox_actionable > 0:
+    print(f"INBOX ACTIONABLE ({inbox_actionable})")
     print("-" * 72)
-    for lane_name in ["queued", "running", "failed", "parked", "done", "archived"]:
+    for lane_name in ["queued", "running", "failed"]:
         count = inbox_lanes.get(lane_name, 0)
         if count > 0:
-            marker = " !" if lane_name in ("queued", "running", "failed") else ""
+            marker = " !"
             print(f"  {lane_name:12s} {count}{marker}")
+    print()
+
+# ── Inbox history ──
+if inbox_history_total > 0:
+    print(f"INBOX HISTORY ({inbox_history_total})")
+    print("-" * 72)
+    for lane_name in ["parked", "done", "archived"]:
+        count = inbox_lanes.get(lane_name, 0)
+        if count > 0:
+            print(f"  {lane_name:12s} {count}")
     print()
 
 # ── Communications Queue ──
 if comms_oneliner:
-    print("COMMS QUEUE")
+    print("COMMS QUEUE (SIDE SURFACE)")
     print("-" * 72)
+    print("  not controller todo; communications drain state only")
     print(f"  {comms_oneliner}")
     print()
 
@@ -1034,8 +1086,8 @@ elif not gaps_available:
     parts.append("gaps unknown")
 if stale_background_count:
     parts.append(f"{stale_background_count} stale background")
-if inbox_active:
-    parts.append(f"{inbox_active} inbox active")
+if inbox_actionable:
+    parts.append(f"{inbox_actionable} inbox actionable")
 if anomalies:
     parts.append(f"{len(anomalies)} anomalies")
 print(f"  {' | '.join(parts)}")

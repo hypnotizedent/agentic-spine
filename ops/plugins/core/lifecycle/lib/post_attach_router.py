@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from typing import Any
 
 from control_loop_status import collect_control_loop_status
@@ -106,10 +107,99 @@ def _collect_loop_candidates(state_root: str) -> tuple[list[dict[str, Any]], lis
             "horizon": fm.get("horizon", "").strip() or None,
         })
 
-    # Sort by priority (critical < high < medium < low < unknown).
-    raw.sort(key=lambda c: _PRIORITY_ORDER.get(c.get("priority") or "", 99))
+    return _sort_candidates(raw), warnings
 
-    return raw[:_MAX_CANDIDATES], warnings
+
+def _sort_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        candidates,
+        key=lambda c: (
+            _PRIORITY_ORDER.get(c.get("priority") or "", 99),
+            str(c.get("loop_id") or ""),
+        ),
+    )
+
+
+def _resolve_loops_db_path(state_root: str, env: dict[str, Any]) -> str:
+    override = str(env.get("LOOPS_DB_PATH") or "").strip()
+    if override:
+        return os.path.expanduser(override)
+    return os.path.join(state_root, "shared_authority.db")
+
+
+def _read_live_loop_candidates(
+    state_root: str,
+    env: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, list[str]]:
+    db_path = _resolve_loops_db_path(state_root, env)
+    if not db_path or not os.path.isfile(db_path):
+        return None, [f"loop authority missing: {db_path or 'unset'}"]
+
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro",
+            uri=True,
+            timeout=0.5,
+        )
+        conn.row_factory = sqlite3.Row
+        table_row = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='loops'"
+        ).fetchone()
+        if table_row is None:
+            return None, ["loop authority schema unavailable"]
+
+        placeholders = ",".join("?" for _ in _OPEN_LOOP_STATUSES)
+        rows = conn.execute(
+            f"SELECT loop_id, status, objective, priority, horizon "
+            f"FROM loops WHERE LOWER(status) IN ({placeholders}) "
+            "ORDER BY updated_at_utc DESC, loop_id DESC",
+            tuple(_OPEN_LOOP_STATUSES),
+        ).fetchall()
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        return None, [f"loop authority read failed: {exc.__class__.__name__}"]
+    finally:
+        if conn is not None:
+            conn.close()
+
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        loop_id = str(row["loop_id"] or "").strip()
+        if not loop_id:
+            continue
+        candidates.append({
+            "loop_id": loop_id,
+            "objective": str(row["objective"] or "").strip() or None,
+            "priority": str(row["priority"] or "").strip().lower() or None,
+            "horizon": str(row["horizon"] or "").strip() or None,
+        })
+    return _sort_candidates(candidates), []
+
+
+def _merge_live_candidates(
+    live_candidates: list[dict[str, Any]],
+    scope_candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    scope_by_id = {
+        str(candidate.get("loop_id") or "").strip(): candidate
+        for candidate in scope_candidates
+        if str(candidate.get("loop_id") or "").strip()
+    }
+    live_ids = {str(candidate.get("loop_id") or "").strip() for candidate in live_candidates}
+
+    merged: list[dict[str, Any]] = []
+    for live_candidate in live_candidates:
+        loop_id = str(live_candidate.get("loop_id") or "").strip()
+        overlay = scope_by_id.get(loop_id, {})
+        candidate = dict(live_candidate)
+        for key in ("objective", "priority", "horizon"):
+            if overlay.get(key):
+                candidate[key] = overlay[key]
+        merged.append(candidate)
+
+    stale_scope_ids = sorted(loop_id for loop_id in scope_by_id if loop_id not in live_ids)
+    return _sort_candidates(merged), stale_scope_ids
 
 
 # ── Public API ───────────────────────────────────────────────────────
@@ -140,9 +230,17 @@ def compute_routing(
 
     open_loops_count: int = summary.get("open_loops", 0)
 
-    # Gather candidate details from scope files.
-    candidates, cand_warnings = _collect_loop_candidates(state_root)
+    # Gather candidate details from live authority first, then enrich from scope files.
+    scope_candidates, cand_warnings = _collect_loop_candidates(state_root)
+    live_candidates, live_warnings = _read_live_loop_candidates(state_root, env)
     warnings.extend(cand_warnings)
+    warnings.extend(live_warnings)
+
+    stale_scope_ids: list[str] = []
+    if live_candidates is not None:
+        candidates, stale_scope_ids = _merge_live_candidates(live_candidates, scope_candidates)
+    else:
+        candidates = scope_candidates
 
     # ── Routing decision ──
 
@@ -158,14 +256,37 @@ def compute_routing(
             open_loop_candidates=candidates,
         )
 
-    # Rule 4 check: ambiguous — warnings suggest degraded truth AND
-    # both counts are zero due to errors, not genuinely empty.
-    degraded_loops = any("unavailable" in w for w in warnings if "loop" in w.lower())
+    # Rule 2a: loop authority degraded — preserve ambiguity and surface
+    # scope-file candidates only as provisional read-side hints.
+    if live_candidates is None:
+        warning_summary = "; ".join(sorted(set(warnings))) if warnings else "unknown"
+        first_id = candidates[0]["loop_id"] if candidates else ""
+        if candidates:
+            why = (
+                f"Live loop authority unavailable; scope projection shows "
+                f"{len(candidates)} possible loop(s)"
+            )
+        else:
+            why = "Live loop authority unavailable; no confirmed loop truth"
+        return _result(
+            routing_state="ambiguous",
+            recommended_next_action=(
+                "Inspect provisional loop candidates carefully, or file friction "
+                "if loop truth matters before acting"
+            ),
+            recommended_command=f"./bin/ops loops show {first_id}" if first_id else None,
+            recommended_container="friction",
+            why=f"{why}: {warning_summary}",
+            open_loop_candidates=candidates[:_MAX_CANDIDATES],
+        )
+
+    # Rule 4 check: ambiguous — warnings suggest degraded non-loop truth AND
+    # loop authority has no confirmed live loops to route against.
     degraded_waves = any(
         w in ("waves dir missing", "waves dir unreadable", "runtime_root not provided")
         for w in warnings
     )
-    if degraded_loops and degraded_waves and open_loops_count == 0:
+    if degraded_waves and open_loops_count == 0 and not candidates:
         warning_summary = "; ".join(sorted(set(warnings))) if warnings else "unknown"
         return _result(
             routing_state="ambiguous",
@@ -178,20 +299,26 @@ def compute_routing(
             open_loop_candidates=candidates,
         )
 
-    # Rule 2: open loops available
+    # Rule 2: confirmed live loops available
     effective_count = max(open_loops_count, len(candidates))
     if effective_count >= 1:
         first_id = candidates[0]["loop_id"] if candidates else "unknown"
+        why = f"{effective_count} live loop(s) available"
+        if stale_scope_ids:
+            why += f"; ignored {len(stale_scope_ids)} scope-only stale projection(s)"
         return _result(
             routing_state="open_loop_available",
             recommended_next_action="Inspect and claim an open loop",
             recommended_command=f"./bin/ops loops show {first_id}",
             recommended_container="loop",
-            why=f"{effective_count} open loop(s) available",
-            open_loop_candidates=candidates,
+            why=why,
+            open_loop_candidates=candidates[:_MAX_CANDIDATES],
         )
 
     # Rule 3: clean start
+    why = "No live loops found in authority"
+    if stale_scope_ids:
+        why += f"; ignored {len(stale_scope_ids)} scope-only stale projection(s)"
     return _result(
         routing_state="clean_start",
         recommended_next_action=(
@@ -200,7 +327,7 @@ def compute_routing(
         ),
         recommended_command=None,
         recommended_container="loop",
-        why="No active work found — estate is clean",
+        why=why,
         open_loop_candidates=[],
     )
 

@@ -83,75 +83,22 @@ if [[ -x "$WORKTREE_STATUS_BIN" ]]; then
     fi
 fi
 
-# ── Continuity snapshot (best-effort, non-blocking) ───────────────────────
+# ── Handoff continuity inputs (best-effort, non-blocking) ─────────────────
 HANDOFF_BIN="$SPINE_ROOT/ops/plugins/core/session/bin/session-handoff"
-RECEIPTS_BIN="$SPINE_ROOT/ops/plugins/core/evidence/bin/receipts-summary"
-CONTINUITY_VARS=""
+HANDOFF_STATUS_JSON=""
+HANDOFF_LIST_JSON=""
+CONT_ACTIVE_HANDOFFS=0
+CONT_LIVE_HANDOFFS=0
+CONT_OTHER_HANDOFFS=0
+CONT_PRIMARY_HANDOFF_ID=""
+CONT_PRIMARY_HANDOFF_SUMMARY=""
+CONT_PRIMARY_HANDOFF_LOOPS=""
+CONT_LIVE_LOOP_SET=""
+CONT_MATCH_COUNT=0
 
-if [[ -f "$HANDOFF_BIN" && -f "$RECEIPTS_BIN" ]]; then
+if [[ -f "$HANDOFF_BIN" ]]; then
     HANDOFF_STATUS_JSON="$(python3 "$HANDOFF_BIN" status 2>/dev/null || true)"
     HANDOFF_LIST_JSON="$(python3 "$HANDOFF_BIN" list --state active 2>/dev/null || true)"
-    RECEIPTS_JSON="$(python3 "$RECEIPTS_BIN" --domain none --days 7 2>/dev/null || true)"
-
-    CONTINUITY_VARS="$(
-        HANDOFF_STATUS_JSON="$HANDOFF_STATUS_JSON" \
-        HANDOFF_LIST_JSON="$HANDOFF_LIST_JSON" \
-        RECEIPTS_JSON="$RECEIPTS_JSON" \
-        python3 - <<'PY'
-import json
-import os
-import shlex
-
-
-def load_env_json(name: str) -> dict:
-    raw = (os.environ.get(name) or "").strip()
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-status = load_env_json("HANDOFF_STATUS_JSON")
-listing = load_env_json("HANDOFF_LIST_JSON")
-receipts = load_env_json("RECEIPTS_JSON")
-
-active_handoffs = int(((status.get("counts") or {}).get("active")) or 0)
-recent_receipts = int(receipts.get("count") or 0)
-items = listing.get("items") or []
-first = items[-1] if items else {}
-
-loop_refs = [str(loop).strip() for loop in (first.get("loops") or []) if str(loop).strip()]
-latest_loop = ", ".join(loop_refs)
-latest_summary = str(first.get("summary") or "").strip()
-latest_id = str(first.get("id") or "").strip()
-
-print(f"CONT_ACTIVE_HANDOFFS={shlex.quote(str(active_handoffs))}")
-print(f"CONT_RECENT_RECEIPTS={shlex.quote(str(recent_receipts))}")
-print(f"CONT_LATEST_HANDOFF_ID={shlex.quote(latest_id)}")
-print(f"CONT_LATEST_HANDOFF_SUMMARY={shlex.quote(latest_summary)}")
-print(f"CONT_LATEST_HANDOFF_LOOPS={shlex.quote(latest_loop)}")
-PY
-    )" || true
-fi
-
-if [[ -n "$CONTINUITY_VARS" ]]; then
-    eval "$CONTINUITY_VARS"
-    echo "── continuity ──────────────────────────────────────────────────"
-    echo "  active handoffs: ${CONT_ACTIVE_HANDOFFS:-0}"
-    echo "  recent receipts: ${CONT_RECENT_RECEIPTS:-0}"
-    if [[ -n "${CONT_LATEST_HANDOFF_ID:-}" ]]; then
-        echo "  latest handoff:  ${CONT_LATEST_HANDOFF_ID}: ${CONT_LATEST_HANDOFF_SUMMARY:-}"
-        if [[ -n "${CONT_LATEST_HANDOFF_LOOPS:-}" ]]; then
-            echo "  loops:           ${CONT_LATEST_HANDOFF_LOOPS}"
-        fi
-    fi
-    if [[ "${CONT_RECENT_RECEIPTS:-0}" == "0" && "${CONT_ACTIVE_HANDOFFS:-0}" != "0" ]]; then
-        echo "  note:            recent receipts are empty; active handoffs are the live continuity surface"
-    fi
-    echo ""
 fi
 
 # ── Provenance checkpoint (best-effort, non-blocking) ─────────────────────
@@ -348,6 +295,125 @@ if [[ -n "$ENTRY_COMPILE_STATE" ]]; then
     echo ""
 fi
 
+# ── Handoff continuity snapshot (best-effort, non-blocking) ───────────────
+CONTINUITY_VARS="$(
+    HANDOFF_STATUS_JSON="$HANDOFF_STATUS_JSON" \
+    HANDOFF_LIST_JSON="$HANDOFF_LIST_JSON" \
+    ROUTING_JSON="${ROUTING_JSON:-}" \
+    ENTRY_COMPILE_JSON="${ENTRY_COMPILE_JSON:-}" \
+    python3 - <<'PY'
+import json
+import os
+import shlex
+
+
+def load_env_json(name: str) -> dict:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def add_live_loop(loop_id: str, seen: set[str], ordered: list[str]) -> None:
+    loop_text = str(loop_id or "").strip()
+    if not loop_text or loop_text.lower() in {"none", "<none>"} or loop_text in seen:
+        return
+    seen.add(loop_text)
+    ordered.append(loop_text)
+
+
+status = load_env_json("HANDOFF_STATUS_JSON")
+listing = load_env_json("HANDOFF_LIST_JSON")
+routing = load_env_json("ROUTING_JSON")
+entry_compile = load_env_json("ENTRY_COMPILE_JSON")
+
+active_handoffs = int(((status.get("counts") or {}).get("active")) or 0)
+items = listing.get("items") or []
+
+live_loop_ids = []
+live_loop_seen = set()
+for candidate in routing.get("open_loop_candidates") or []:
+    if isinstance(candidate, dict):
+        add_live_loop(candidate.get("loop_id"), live_loop_seen, live_loop_ids)
+add_live_loop(entry_compile.get("loop_id"), live_loop_seen, live_loop_ids)
+
+live_items = []
+other_items = []
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    loop_refs = [
+        str(loop).strip()
+        for loop in (item.get("loops") or [])
+        if str(loop).strip()
+    ]
+    rendered = {
+        "id": str(item.get("id") or "").strip(),
+        "summary": str(item.get("summary") or "").strip(),
+        "loops": ", ".join(loop_refs),
+    }
+    if live_loop_seen and any(loop in live_loop_seen for loop in loop_refs):
+        live_items.append(rendered)
+    else:
+        other_items.append(rendered)
+
+primary = live_items[0] if len(live_items) == 1 else {}
+
+print(f"CONT_ACTIVE_HANDOFFS={shlex.quote(str(active_handoffs))}")
+print(f"CONT_LIVE_HANDOFFS={shlex.quote(str(len(live_items)))}")
+print(f"CONT_OTHER_HANDOFFS={shlex.quote(str(max(0, active_handoffs - len(live_items))))}")
+print(f"CONT_LIVE_LOOP_SET={shlex.quote(', '.join(live_loop_ids))}")
+print(f"CONT_PRIMARY_HANDOFF_ID={shlex.quote(str(primary.get('id') or ''))}")
+print(f"CONT_PRIMARY_HANDOFF_SUMMARY={shlex.quote(str(primary.get('summary') or ''))}")
+print(f"CONT_PRIMARY_HANDOFF_LOOPS={shlex.quote(str(primary.get('loops') or ''))}")
+print(f"CONT_MATCH_COUNT={shlex.quote(str(len(live_items)))}")
+for i, item in enumerate(live_items[:3]):
+    print(f"CONT_MATCH{i}_ID={shlex.quote(str(item.get('id') or ''))}")
+    print(f"CONT_MATCH{i}_SUMMARY={shlex.quote(str(item.get('summary') or ''))}")
+    print(f"CONT_MATCH{i}_LOOPS={shlex.quote(str(item.get('loops') or ''))}")
+PY
+)" || true
+
+if [[ -n "$CONTINUITY_VARS" ]]; then
+    eval "$CONTINUITY_VARS"
+fi
+
+if [[ "${CONT_ACTIVE_HANDOFFS:-0}" != "0" ]]; then
+    echo "── handoff continuity ──────────────────────────────────────────"
+    echo "  active handoffs: ${CONT_ACTIVE_HANDOFFS:-0} total"
+    if [[ -n "${CONT_LIVE_LOOP_SET:-}" ]]; then
+        echo "  live loops:      ${CONT_LIVE_LOOP_SET}"
+    fi
+    echo "  live overlap:    ${CONT_LIVE_HANDOFFS:-0}"
+    if [[ "${CONT_OTHER_HANDOFFS:-0}" != "0" ]]; then
+        echo "  other-loop hist: ${CONT_OTHER_HANDOFFS}"
+    fi
+    if [[ "${CONT_MATCH_COUNT:-0}" -eq 1 && -n "${CONT_PRIMARY_HANDOFF_ID:-}" ]]; then
+        echo "  live handoff:    ${CONT_PRIMARY_HANDOFF_ID}: ${CONT_PRIMARY_HANDOFF_SUMMARY:-}"
+        if [[ -n "${CONT_PRIMARY_HANDOFF_LOOPS:-}" ]]; then
+            echo "  loops:           ${CONT_PRIMARY_HANDOFF_LOOPS}"
+        fi
+    elif [[ "${CONT_MATCH_COUNT:-0}" -gt 1 ]]; then
+        echo "  note:            multiple live-loop handoffs remain; keep loop selection ambiguous"
+        for i in $(seq 0 $((CONT_MATCH_COUNT < 3 ? CONT_MATCH_COUNT - 1 : 2))); do
+            eval "_match_id=\${CONT_MATCH${i}_ID:-}"
+            eval "_match_summary=\${CONT_MATCH${i}_SUMMARY:-}"
+            eval "_match_loops=\${CONT_MATCH${i}_LOOPS:-}"
+            echo "  match:           ${_match_id}: ${_match_summary}"
+            if [[ -n "$_match_loops" ]]; then
+                echo "  loops:           ${_match_loops}"
+            fi
+        done
+    else
+        echo "  note:            handoffs are continuity context only; current controller todo comes from live loop routing above"
+    fi
+    echo ""
+fi
+
 # ── --emit-env handling ────────────────────────────────────────────────────
 if [[ "$EMIT_ENV" -eq 1 ]]; then
     if [[ "$POSTURE_OK" -eq 1 ]] && command -v session_posture_emit_env >/dev/null 2>&1; then
@@ -370,9 +436,12 @@ if [[ "$EMIT_ASSIGNMENT" -eq 1 ]]; then
         "${WORKTREE_STATUS_BRIEF:-}" \
         "${__SP_SAFE_TO_MUTATE:-false}" \
         "${CONT_ACTIVE_HANDOFFS:-0}" \
-        "${CONT_LATEST_HANDOFF_ID:-}" \
-        "${CONT_LATEST_HANDOFF_SUMMARY:-}" \
-        "${CONT_LATEST_HANDOFF_LOOPS:-}" \
+        "${CONT_PRIMARY_HANDOFF_ID:-}" \
+        "${CONT_PRIMARY_HANDOFF_SUMMARY:-}" \
+        "${CONT_PRIMARY_HANDOFF_LOOPS:-}" \
+        "${CONT_LIVE_HANDOFFS:-0}" \
+        "${CONT_OTHER_HANDOFFS:-0}" \
+        "${CONT_LIVE_LOOP_SET:-}" \
         "${_RT_STATE:-}" \
         "${_RT_ACTION:-}" \
         "${SPINE_STATE:-}" \
@@ -395,13 +464,16 @@ active_handoffs   = int(args[4]) if args[4] else 0
 latest_handoff_id = args[5] or None
 latest_handoff_summary = args[6] or None
 latest_handoff_loops   = args[7] or None
-routing_state     = args[8] or None
-routing_action    = args[9] or None
-state_root        = args[10] or ""
-routing_json_raw  = args[11] or ""
-prov_checkpoint_id = args[12] or None
-prov_checkpoint_packet = args[13] or None
-prov_checkpoint_recorded = args[14] or None
+continuity_live_handoffs = int(args[8]) if args[8] else 0
+continuity_other_handoffs = int(args[9]) if args[9] else 0
+continuity_live_loops = args[10] or None
+routing_state     = args[11] or None
+routing_action    = args[12] or None
+state_root        = args[13] or ""
+routing_json_raw  = args[14] or ""
+prov_checkpoint_id = args[15] or None
+prov_checkpoint_packet = args[16] or None
+prov_checkpoint_recorded = args[17] or None
 
 # Resolve terminal type and tool from contract (best-effort)
 terminal_type = None
@@ -519,6 +591,9 @@ assignment = {
     "latest_handoff_id": latest_handoff_id,
     "latest_handoff_summary": latest_handoff_summary,
     "latest_handoff_loops": latest_handoff_loops,
+    "continuity_live_handoffs": continuity_live_handoffs,
+    "continuity_other_handoffs": continuity_other_handoffs,
+    "continuity_live_loops": continuity_live_loops,
     "repo_hygiene": hygiene_brief,
     "safe_to_mutate": safe_to_mutate.lower() == "true",
     "routing_state": routing_state,

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # node-recovery-invoke — First-class bounded recovery invoke surface (v1)
 #
-# V1 scope: pve only. Three modes: power_status, host_shutdown, host_startup.
+# V1 scope: admitted specimen nodes only. Default posture: refusal.
 # Default posture: REFUSAL. Only explicitly admitted node+mode pairs pass.
 # Dry-run by default. Pass --execute to mutate.
 #
@@ -16,7 +16,7 @@ set -euo pipefail
 #   R2: mode not in allowlist for node
 #   R3: recovery substrate unproven (warn for read-only, info for SSH modes)
 #   R4: physical prerequisite blocking (warn for OOB modes)
-#   R5: OOB path unreachable at runtime (warn for power_status)
+#   R5: OOB path unreachable at runtime (warn for OOB modes)
 #   R6: site mismatch without cross-site recovery
 #   G1: dry-run default (no --execute)
 
@@ -28,8 +28,21 @@ HOST_CONTROL="$SPINE_ROOT/ops/plugins/infra/bin/infra-proxmox-host-control"
 
 # ─── V1 Allowlist ───────────────────────────────────────────────────────
 # This is intentionally small. Widen only by explicit admission.
-V1_NODES="pve"
-V1_MODES_pve="power_status host_shutdown host_startup"
+V1_NODES="pve pve-r620"
+
+allowed_modes_for_node() {
+  case "$1" in
+    pve)
+      printf '%s\n' "power_status power_on power_off power_cycle host_shutdown host_startup"
+      ;;
+    pve-r620)
+      printf '%s\n' "power_status power_on power_cycle"
+      ;;
+    *)
+      printf '%s\n' ""
+      ;;
+  esac
+}
 
 usage() {
   cat <<'EOF'
@@ -40,15 +53,15 @@ Usage:
   node-recovery-invoke --list-modes
 
 Options:
-  --node <id>      Target node (v1: pve only)
-  --mode <mode>    Recovery mode (v1: power_status, host_shutdown, host_startup)
+  --node <id>      Target node (v1: admitted specimen nodes only)
+  --mode <mode>    Recovery mode for the admitted node
   --execute        Actually perform the action (dry-run without this)
   --json           Machine-readable JSON output
   --list-modes     Show admitted node/mode pairs
 
 V1 scope:
-  - 1 node: pve
-  - 3 modes: power_status, host_shutdown, host_startup
+  - pve: power_status, power_on, power_off, power_cycle, host_shutdown, host_startup
+  - pve-r620: power_status, power_on, power_cycle
   - Default: refusal + dry-run
   - All other node/mode pairs are explicitly refused
 
@@ -87,8 +100,16 @@ if $LIST_MODE; then
   echo ""
   echo "  pve:"
   echo "    - power_status   (read-only IPMI power query via infra.proxmox.power.control)"
+  echo "    - power_on       (OOB iDRAC power on via infra.proxmox.power.control)"
+  echo "    - power_off      (OOB iDRAC hard power off via infra.proxmox.power.control)"
+  echo "    - power_cycle    (OOB iDRAC power cycle via infra.proxmox.power.control)"
   echo "    - host_shutdown  (graceful PVE shutdown via infra.proxmox.host.control)"
   echo "    - host_startup   (PVE guest startup via infra.proxmox.host.control)"
+  echo ""
+  echo "  pve-r620:"
+  echo "    - power_status   (read-only IPMI power query via infra.proxmox.power.control)"
+  echo "    - power_on       (OOB iDRAC power on via infra.proxmox.power.control)"
+  echo "    - power_cycle    (OOB iDRAC power cycle via infra.proxmox.power.control)"
   echo ""
   echo "All other node/mode pairs are refused."
   exit 0
@@ -117,8 +138,7 @@ fi
 
 # ─── R2: Mode not in allowlist ──────────────────────────────────────────
 mode_admitted=false
-allowed_var="V1_MODES_${NODE_ID}"
-allowed_modes="${!allowed_var:-}"
+allowed_modes="$(allowed_modes_for_node "$NODE_ID")"
 
 for m in $allowed_modes; do
   [[ "$m" == "$MODE" ]] && mode_admitted=true
@@ -157,7 +177,7 @@ operator_site="$(jq -r '.operator_context.operator_site // "unknown"' <<<"$recov
 mode_needs_oob=false
 mode_needs_ssh=false
 case "$MODE" in
-  power_status) mode_needs_oob=true ;;
+  power_status|power_on|power_off|power_cycle) mode_needs_oob=true ;;
   host_shutdown|host_startup) mode_needs_ssh=true ;;
 esac
 
@@ -204,16 +224,46 @@ case "$MODE" in
     underlying_capability="infra.proxmox.power.control"
     underlying_action="status"
     underlying_script="$POWER_CONTROL"
-    underlying_args="status"
+    underlying_args="status --host-id $NODE_ID"
+    ;;
+  power_on)
+    underlying_capability="infra.proxmox.power.control"
+    underlying_action="on"
+    underlying_script="$POWER_CONTROL"
+    if $EXECUTE; then
+      underlying_args="on --host-id $NODE_ID --execute"
+    else
+      underlying_args="on --host-id $NODE_ID"
+    fi
+    ;;
+  power_off)
+    underlying_capability="infra.proxmox.power.control"
+    underlying_action="off"
+    underlying_script="$POWER_CONTROL"
+    if $EXECUTE; then
+      underlying_args="off --host-id $NODE_ID --execute"
+    else
+      underlying_args="off --host-id $NODE_ID"
+    fi
+    ;;
+  power_cycle)
+    underlying_capability="infra.proxmox.power.control"
+    underlying_action="cycle"
+    underlying_script="$POWER_CONTROL"
+    if $EXECUTE; then
+      underlying_args="cycle --host-id $NODE_ID --execute"
+    else
+      underlying_args="cycle --host-id $NODE_ID"
+    fi
     ;;
   host_shutdown)
     underlying_capability="infra.proxmox.host.control"
     underlying_action="shutdown"
     underlying_script="$HOST_CONTROL"
     if $EXECUTE; then
-      underlying_args="shutdown --execute"
+      underlying_args="shutdown --host-id $NODE_ID --execute"
     else
-      underlying_args="shutdown"
+      underlying_args="shutdown --host-id $NODE_ID"
     fi
     ;;
   host_startup)
@@ -221,9 +271,9 @@ case "$MODE" in
     underlying_action="startup"
     underlying_script="$HOST_CONTROL"
     if $EXECUTE; then
-      underlying_args="startup --execute"
+      underlying_args="startup --host-id $NODE_ID --execute"
     else
-      underlying_args="startup"
+      underlying_args="startup --host-id $NODE_ID"
     fi
     ;;
 esac
@@ -238,6 +288,7 @@ if [[ "$MODE" == "power_status" ]]; then
   executed=true
 elif $EXECUTE; then
   dry_run=false
+  executed=true
 fi
 
 # ─── Output ─────────────────────────────────────────────────────────────
