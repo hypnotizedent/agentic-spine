@@ -1149,7 +1149,11 @@ cmd_close() {
 
   # Step 2: Run collect first (ensure all receipts are ingested)
   echo "Running collect before close..."
-  bash "$WAVE_SH" collect "$wave_id" 2>/dev/null || true
+  (
+    cd "$SP"
+    env -u SPINE_ROOT -u SPINE_REPO -u SPINE_TARGET_REPO -u OPS_WORKTREE_IDENTITY \
+      bash "$WAVE_SH" collect "$wave_id"
+  ) 2>/dev/null || true
   echo ""
 
   # Step 3: Validate dispatches have receipts or explicit blockers
@@ -1229,7 +1233,12 @@ for p in pending:
   fi
 
   echo "Closing wave $wave_id..."
-  env "WAVE_CLOSE_CLEANUP_REF=$cleanup_ref" bash "$WAVE_SH" close "${close_args[@]}" || {
+  (
+    cd "$SP"
+    env -u SPINE_ROOT -u SPINE_REPO -u SPINE_TARGET_REPO -u OPS_WORKTREE_IDENTITY \
+      "WAVE_CLOSE_CLEANUP_REF=$cleanup_ref" \
+      bash "$WAVE_SH" close "${close_args[@]}"
+  ) || {
     _fail "wave.sh close failed"
   }
   echo ""
