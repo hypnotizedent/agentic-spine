@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
-"""operator-surface-server — tiny static server for operator read surfaces.
+"""operator-surface-server — tiny operator surface server.
 
-Serves precomputed cockpit HTML and mobile JSON from a static directory.
-No dynamic rendering. No mutation endpoints. Read-only projection only.
+Serves precomputed cockpit HTML and mobile JSON from a static directory, plus a
+single bounded operator ingress form/POST endpoint.
 
-Regeneration is handled by a separate timer, not by this server.
-
-Usage:
-    python3 operator-surface-server [--port 8900] [--dir /path/to/served]
-
-Default served directory: $SPINE_STATE/operator-surface/
-Default port: 8900
+Dynamic paths:
+  GET  /submit   → render operator ingress form
+  POST /submit   → create non-authoritative operator ingress object, then
+                   regenerate operator-surface payload/leaves
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import subprocess
+import sys
 from functools import partial
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
+from urllib.parse import parse_qs
 
 
 STATE_ROOT = Path(
@@ -29,15 +30,220 @@ STATE_ROOT = Path(
 )
 DEFAULT_DIR = STATE_ROOT / "operator-surface"
 DEFAULT_PORT = 8900
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import operator_ingress as oi
+
+
+def _render_page(title: str, body: str) -> str:
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    :root {{
+      --bg:#070b12; --s:#0f1622; --b:#223047; --t:#d8e2ee; --m:#9aabc0;
+      --c:#22d3ee; --g:#34d399; --y:#fbbf24; --r:#f87171;
+    }}
+    * {{ box-sizing:border-box; }}
+    body {{ margin:0; font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;
+      background:var(--bg); color:var(--t); padding:1rem; }}
+    .wrap {{ max-width:760px; margin:0 auto; }}
+    .card {{ background:var(--s); border:1px solid var(--b); border-radius:14px; padding:1rem; }}
+    h1 {{ margin:0 0 .5rem; font-size:1rem; }}
+    p {{ color:var(--m); line-height:1.45; }}
+    .meta {{ font-size:.8rem; color:var(--m); margin-bottom:1rem; }}
+    label {{ display:block; font-size:.85rem; font-weight:600; margin:.8rem 0 .35rem; }}
+    input, select, textarea {{
+      width:100%; background:#0a111b; color:var(--t); border:1px solid var(--b);
+      border-radius:10px; padding:.75rem; font:inherit;
+    }}
+    textarea {{ min-height:220px; resize:vertical; }}
+    .row {{ display:grid; grid-template-columns:1fr 1fr; gap:.75rem; }}
+    .btn {{
+      display:inline-block; background:var(--c); color:#001017; border:none; border-radius:10px;
+      padding:.8rem 1rem; font-weight:700; cursor:pointer; margin-top:1rem;
+    }}
+    .note {{ margin-top:1rem; font-size:.8rem; color:var(--m); }}
+    .ok {{ border-color:rgba(52,211,153,.35); }}
+    .err {{ border-color:rgba(248,113,113,.35); }}
+    .flash {{
+      border:1px solid var(--b); border-radius:10px; padding:.75rem; margin-bottom:1rem;
+      background:#0a111b;
+    }}
+    .flash.ok {{ border-color:rgba(52,211,153,.35); color:var(--g); }}
+    .flash.err {{ border-color:rgba(248,113,113,.35); color:var(--r); }}
+    a {{ color:var(--c); }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    {body}
+  </div>
+</body>
+</html>"""
+
+
+def _submit_form_html(error: str = "", values: dict[str, str] | None = None) -> str:
+    values = values or {}
+    error_html = f'<div class="flash err">{error}</div>' if error else ""
+    content_type = values.get("content_type", "note")
+    hint = values.get("operator_hint", "")
+    raw_content = values.get("raw_content", "")
+    source_app = values.get("source_app", "browser")
+    body = f"""
+    <div class="card {'err' if error else ''}">
+      <h1>Operator Vision Submit</h1>
+      <p class="meta">Creates a non-authoritative operator ingress object in runtime. This preserves raw input and provenance. It does not execute, mutate, or create packets.</p>
+      {error_html}
+      <form method="post" action="/submit">
+        <div class="row">
+          <div>
+            <label for="content_type">Content Type</label>
+            <select name="content_type" id="content_type">
+              <option value="note" {'selected' if content_type == 'note' else ''}>note</option>
+              <option value="conversation" {'selected' if content_type == 'conversation' else ''}>conversation</option>
+              <option value="url" {'selected' if content_type == 'url' else ''}>url</option>
+              <option value="voice_transcript" {'selected' if content_type == 'voice_transcript' else ''}>voice_transcript</option>
+            </select>
+          </div>
+          <div>
+            <label for="source_app">Source App</label>
+            <input type="text" name="source_app" id="source_app" value="{source_app}">
+          </div>
+        </div>
+        <label for="operator_hint">Operator Hint (optional)</label>
+        <input type="text" name="operator_hint" id="operator_hint" value="{hint}" placeholder="One-line intent signal">
+        <label for="raw_content">Raw Content</label>
+        <textarea name="raw_content" id="raw_content" placeholder="Paste thought, note, conversation, transcript, or URL here.">{raw_content}</textarea>
+        <button class="btn" type="submit">Submit To Spine</button>
+      </form>
+      <div class="note">
+        After submit, the object is preserved in runtime and should appear in the contribution surface immediately.
+        Use <a href="/">cockpit</a> or <a href="/mobile.json">mobile.json</a> to confirm readback.
+      </div>
+    </div>
+    """
+    return _render_page("Operator Vision Submit", body)
+
+
+def _confirmation_html(result: dict, regenerate_note: str = "") -> str:
+    note_html = f'<div class="flash err">{regenerate_note}</div>' if regenerate_note else ""
+    body = f"""
+    <div class="card ok">
+      <h1>Submitted</h1>
+      <p class="meta">Raw operator input was preserved in runtime. No authority was granted.</p>
+      <div class="flash ok">
+        <strong>{result['ingress_id']}</strong><br>
+        {result['lifecycle_state']} · {result['disposition']}<br>
+        {result['disposition_detail']}
+      </div>
+      {note_html}
+      <p><strong>Path:</strong> {result['path']}</p>
+      <p><strong>Hint:</strong> {result.get('operator_hint') or '(none)'}</p>
+      <p><a href="/">Open cockpit</a> · <a href="/mobile.json">Open mobile JSON</a> · <a href="/submit">Submit another</a></p>
+    </div>
+    """
+    return _render_page("Ingress Submitted", body)
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
-    """Serve files without excessive logging."""
+    """Serve static operator surfaces plus bounded operator ingress submit."""
 
     def log_message(self, format, *args):
         # Only log errors, not every request
-        if args and isinstance(args[0], str) and args[0].startswith("4") or args[0].startswith("5"):
+        if args and isinstance(args[0], str) and (args[0].startswith("4") or args[0].startswith("5")):
             super().log_message(format, *args)
+
+    def _send_html(self, status: int, html: str) -> None:
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _parse_submit_body(self) -> dict[str, str]:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            raise oi.OperatorIngressError("request body is empty")
+        if length > 200_000:
+            raise oi.OperatorIngressError("request body too large")
+        raw = self.rfile.read(length)
+        ctype = self.headers.get("Content-Type", "")
+        if "application/json" in ctype:
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except Exception as exc:
+                raise oi.OperatorIngressError(f"invalid JSON body: {exc}") from exc
+            if not isinstance(data, dict):
+                raise oi.OperatorIngressError("JSON body must be an object")
+            return {
+                "content_type": str(data.get("content_type", "note")),
+                "operator_hint": str(data.get("operator_hint", "")),
+                "raw_content": str(data.get("raw_content", "")),
+                "source_app": str(data.get("source_app", "browser")),
+            }
+
+        fields = parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+        return {
+            "content_type": fields.get("content_type", ["note"])[0],
+            "operator_hint": fields.get("operator_hint", [""])[0],
+            "raw_content": fields.get("raw_content", [""])[0],
+            "source_app": fields.get("source_app", ["browser"])[0],
+        }
+
+    def _regenerate_surfaces(self) -> str:
+        try:
+            proc = subprocess.run(
+                ["python3", str(ROOT / "ops" / "plugins" / "core" / "surface" / "bin" / "operator-surface-regenerate")],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=90,
+                env=os.environ.copy(),
+            )
+        except Exception as exc:
+            return f"warning: surface regenerate failed: {exc}"
+        if proc.returncode != 0:
+            err = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+            return f"warning: ingress saved but surface regenerate failed: {err}"
+        return ""
+
+    def do_GET(self):
+        if self.path.rstrip("/") == "/submit":
+            self._send_html(200, _submit_form_html())
+            return
+        return super().do_GET()
+
+    def do_POST(self):
+        if self.path.rstrip("/") != "/submit":
+            self.send_error(404, "Not Found")
+            return
+
+        try:
+            payload = self._parse_submit_body()
+            result = oi.create_operator_ingress(
+                state_root=str(STATE_ROOT),
+                raw_content=payload["raw_content"],
+                content_type=payload["content_type"],
+                operator_hint=payload["operator_hint"],
+                operator_id="ronny",
+                source_device="phone",
+                source_app=payload.get("source_app", "browser") or "browser",
+                access_identity=self.headers.get("Cf-Access-Authenticated-User-Email", ""),
+                source_ip=(self.headers.get("CF-Connecting-IP") or self.client_address[0]),
+                submitted_via="operator_surface_submit",
+            )
+        except oi.OperatorIngressError as exc:
+            self._send_html(400, _submit_form_html(str(exc), payload if 'payload' in locals() else None))
+            return
+
+        regenerate_note = self._regenerate_surfaces()
+        self._send_html(200, _confirmation_html(result, regenerate_note))
 
 
 def main() -> int:

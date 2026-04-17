@@ -705,20 +705,53 @@ def operator_vision_section(ov: dict) -> str:
     </details>"""
 
     recent_rows = ""
+    state_colors = {
+        "submitted": "var(--ylw)",
+        "classified": "var(--blu)",
+        "routed": "var(--grn)",
+    }
     for item in recent:
         hint = item.get("operator_hint", "")
         detail = item.get("disposition_detail", "")
         ts = item.get("submitted_at", "")
         ctype = item.get("content_type", "")
+        lstate = item.get("lifecycle_state", "submitted")
+        lcolor = state_colors.get(lstate, "var(--ylw)")
+        classification = item.get("classification", "")
+        next_stage = item.get("next_stage", "")
+        downstream = item.get("downstream_refs", [])
+        activation = item.get("activation_conditions", "")
+
+        # Metabolization detail line
+        meta_parts = []
+        if classification:
+            meta_parts.append(classification)
+        if next_stage:
+            meta_parts.append(f"→ {next_stage}")
+        meta_line = ""
+        if meta_parts:
+            meta_line = (
+                f'<div style="font-family:var(--m);font-size:.45rem;color:var(--cyn);margin-top:.1rem">'
+                f'{_h(" · ".join(meta_parts))}</div>'
+            )
+        downstream_line = ""
+        if downstream:
+            ds_items = " → ".join(_h(str(d)) for d in downstream)
+            downstream_line = f'<div style="font-family:var(--m);font-size:.45rem;color:var(--cyn);margin-top:.1rem;opacity:.7">↳ {ds_items}</div>'
+        activation_line = ""
+        if activation:
+            activation_line = f'<div style="font-size:.45rem;color:var(--prp);margin-top:.1rem">⏳ {_h(activation)}</div>'
+
         recent_rows += (
             f'<div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">'
             f'<div style="display:flex;align-items:baseline;gap:.4rem">'
             f'<span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(item["ingress_id"])}</span>'
             f'<span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;border-radius:3px;'
-            f'background:rgba(42,52,68,.75);color:var(--ylw)">{_h(item.get("lifecycle_state", "submitted"))}</span>'
+            f'background:rgba(42,52,68,.75);color:{lcolor}">{_h(lstate)}</span>'
             f'</div>'
             f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(ctype)} · {_h(ts)}</div>'
             f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(hint or detail)}</div>'
+            f'{meta_line}{downstream_line}{activation_line}'
             f'</div>'
         )
     if not recent_rows:

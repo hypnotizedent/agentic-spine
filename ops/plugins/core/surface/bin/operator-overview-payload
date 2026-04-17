@@ -387,12 +387,23 @@ def collect_operator_vision() -> dict:
                 "source_device": str(doc.get("source_device", "")),
                 "source_app": str(doc.get("source_app", "")),
             }
+            # Include metabolization fields when present
+            if "classification" in doc:
+                item["classification"] = str(doc["classification"])
+            if "next_stage" in doc:
+                item["next_stage"] = str(doc["next_stage"])
+            if "downstream_refs" in doc:
+                item["downstream_refs"] = doc["downstream_refs"]
+            if "activation_conditions" in doc:
+                item["activation_conditions"] = str(doc["activation_conditions"])
+            if "classified_at" in doc:
+                item["classified_at"] = str(doc["classified_at"])
+            if "routed_at" in doc:
+                item["routed_at"] = str(doc["routed_at"])
             recent_ingress.append(item)
             if disposition == "awaiting_classification" or lifecycle_state in {
                 "submitted",
                 "preserved",
-                "classified",
-                "reconciled",
             }:
                 pending_ingress += 1
 
@@ -602,8 +613,14 @@ def collect_operator_vision() -> dict:
             "ronny_drops": "standing",
             "translated_to_machine": "standing",
             "organized_sorted": "standing",
-            "moved_to_next_stage": "partial",
-            "visible_trace": "partial",
+            "moved_to_next_stage": "standing" if any(
+                i.get("lifecycle_state") in ("classified", "routed")
+                for i in recent_ingress
+            ) else "partial",
+            "visible_trace": "standing" if any(
+                i.get("lifecycle_state") == "routed"
+                for i in recent_ingress
+            ) else "partial",
             "readback_surface": "this_surface",
         },
         "state_map_exists": state_map_exists,

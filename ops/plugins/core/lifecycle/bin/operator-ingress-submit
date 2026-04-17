@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""operator-ingress-submit — CLI for operator_ingress.submit capability."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import operator_ingress as oi
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="operator-ingress-submit",
+        description="Create a non-authoritative operator ingress object.",
+    )
+    parser.add_argument(
+        "--content-type",
+        required=True,
+        choices=sorted(oi.ALLOWED_CONTENT_TYPES),
+        help="Ingress content type.",
+    )
+    parser.add_argument(
+        "--raw-content",
+        default="",
+        help="Raw operator content. Use --stdin for multiline input.",
+    )
+    parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="Read raw content from stdin.",
+    )
+    parser.add_argument(
+        "--hint",
+        default="",
+        help="Optional one-line operator hint.",
+    )
+    parser.add_argument(
+        "--source-device",
+        default="desktop",
+        help="Source device label (default: desktop).",
+    )
+    parser.add_argument(
+        "--source-app",
+        default="manual",
+        help="Source app label (default: manual).",
+    )
+    parser.add_argument(
+        "--operator-id",
+        default="ronny",
+        help="Operator ID (default: ronny).",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit JSON output.",
+    )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Verify dependencies and exit.",
+    )
+
+    if "--self-check" in sys.argv:
+        try:
+            import yaml  # noqa: F401
+            print("operator.ingress.submit self-check PASS")
+            return 0
+        except ImportError as exc:
+            print(f"operator.ingress.submit self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+
+    args = parser.parse_args()
+
+    state_root = os.environ.get("SPINE_STATE", "")
+    if not state_root:
+        msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": msg}, indent=2))
+        else:
+            print(f"operator.ingress.submit FAIL: {msg}", file=sys.stderr)
+        return 1
+
+    raw_content = sys.stdin.read() if args.stdin else args.raw_content
+
+    try:
+        result = oi.create_operator_ingress(
+            state_root=state_root,
+            raw_content=raw_content,
+            content_type=args.content_type,
+            operator_hint=args.hint,
+            operator_id=args.operator_id,
+            source_device=args.source_device,
+            source_app=args.source_app,
+            submitted_via="operator_ingress.submit",
+        )
+    except oi.OperatorIngressError as exc:
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            print(f"operator.ingress.submit FAIL: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"CREATED: {result['ingress_id']}")
+        print(f"  path: {result['path']}")
+        print(f"  state: {result['lifecycle_state']}")
+        print(f"  disposition: {result['disposition']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
