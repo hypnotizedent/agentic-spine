@@ -218,7 +218,7 @@ POSTURE_EOF
         claude)  parts+=("claude --dangerously-skip-permissions") ;;
         codex)   parts+=("codex --dangerously-bypass-approvals-and-sandbox") ;;
         opencode) parts+=("opencode") ;;
-        verify)  parts+=("./bin/ops cap run verify.run -- fast") ;;
+        verify)  parts+=("./bin/ops cap run spine.verify") ;;
         *)       fail "unknown tool '$tool' (expected: claude|codex|opencode|verify)" ;;
     esac
 

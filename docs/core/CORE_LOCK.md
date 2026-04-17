@@ -45,9 +45,10 @@ This key is used everywhere:
 |-------|------|---------|
 | CLI | `bin/ops` | Canonical operator and agent entrypoint |
 | Startup status | `./bin/ops status --json` | Canonical state snapshot at session start |
-| Startup verify | `./bin/ops verify` | Canonical infrastructure health snapshot at session start |
+| Startup verify | `./bin/ops verify` | Canonical spine/object truth snapshot at session start |
 | Capability surface | `./bin/ops cap list` | Canonical capability discovery surface |
-| Verify | `./bin/ops cap run verify.run -- fast` | Canonical drift gate entrypoint |
+| Spine verify | `./bin/ops cap run spine.verify` | Canonical spine/object truth verify entrypoint |
+| Estate verify | `./bin/ops cap run verify.infra.run` | Canonical estate/workload health verify entrypoint |
 | Worktree lifecycle | `ops/plugins/core/lifecycle/bin/worktree-lifecycle-*` | Workspace/worktree control surfaces |
 | Repo bootstrap | `ops/plugins/core/authority/bin/project-governance-bootstrap` | API-first Gitea repo ensure + remote alignment |
 

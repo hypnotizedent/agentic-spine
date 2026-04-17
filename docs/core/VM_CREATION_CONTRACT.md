@@ -172,7 +172,7 @@ After all updates:
 ./bin/ops cap run service.registry.projection.build
 ./bin/ops cap run spine.verify
 ```
-All drift gates (D34, D35, D37, D54, D59) must pass. If they don't, the registration is incomplete.
+All relevant spine/object-truth drift gates (D34, D35, D37, D54, D59) must pass. If they don't, the registration is incomplete. Estate/workload health is validated in Phase 4.
 
 ---
 
@@ -191,13 +191,15 @@ All drift gates (D34, D35, D37, D54, D59) must pass. If they don't, the registra
 | Health probes | `./bin/ops cap run services.health.status` | All new endpoints OK |
 | Compose status | `./bin/ops cap run docker.compose.status` | New stack shows ok |
 | Backup binding | `./bin/ops cap run backup.status` | New target present |
-| Full verify | `./bin/ops cap run spine.verify` | ALL PASS |
+| Spine verify | `./bin/ops cap run spine.verify` | Spine/object truth passes |
+| Estate verify | `./bin/ops cap run verify.infra.run` | Estate/workload health passes |
 
 ### Required Artifacts
 
 | Artifact | Description |
 |----------|-------------|
-| Validation receipt | `spine.verify` receipt showing all gates pass |
+| Spine validation receipt | `spine.verify` receipt showing spine/object truth passes |
+| Estate validation receipt | `verify.infra.run` receipt showing estate/workload health passes |
 | Health status output | `services.health.status` receipt |
 | Compose status output | `docker.compose.status` receipt |
 
@@ -219,13 +221,14 @@ Update `vm.lifecycle.yaml` status to `active`.
 | Backup freshness | `backup.status` capability + D58 SSOT freshness gate |
 | Compose parity | `docker.compose.status` capability |
 | SSH reachable | `ssh.targets.yaml` binding + connectivity checks |
-| Drift gates green | `spine.verify` (all gates) |
+| Spine truth green | `spine.verify` |
+| Estate health green | `verify.infra.run` |
 | SSOT freshness | `last_reviewed` dates within D58 threshold (14 days) |
 
 ### Change Management During Operate
 
-- **Adding services:** Update `SERVICE_REGISTRY.yaml`, rebuild `service.registry.projection.build`, then run `spine.verify`
-- **Removing services:** Update `SERVICE_REGISTRY.yaml`, rebuild projections, then run `spine.verify`
+- **Adding services:** Update `SERVICE_REGISTRY.yaml`, rebuild `service.registry.projection.build`, then run `spine.verify` and `verify.infra.run`
+- **Removing services:** Update `SERVICE_REGISTRY.yaml`, rebuild projections, then run `spine.verify` and `verify.infra.run`
 - **Resizing VM:** Update `vm.lifecycle.yaml` resources + SHOP_SERVER_SSOT VM inventory
 - **Relocating services:** Follow INFRA_RELOCATION_PROTOCOL.md
 
@@ -254,7 +257,7 @@ Update `vm.lifecycle.yaml` status to `active`.
 | 5 | Clean ZFS dataset | `zfs destroy <dataset>` (if dedicated dataset exists) |
 | 6 | Remove from all SSOTs | Reverse of REGISTER phase — all 10 files |
 | 7 | Update lifecycle binding | Set `status: decommissioned`, add `decommissioned_at` |
-| 8 | Run spine.verify | Confirm all gates pass without the VM |
+| 8 | Run spine + estate verify | `./bin/ops cap run spine.verify && ./bin/ops cap run verify.infra.run` |
 | 9 | Close loop | `./bin/ops close loop <LOOP_ID>` |
 
 ### Decommission Policies
@@ -271,7 +274,7 @@ Defined per-VM in `vm.lifecycle.yaml`:
 
 | Evidence | Location |
 |----------|----------|
-| Decommission receipt | `~/code/.evidence/spine/sessions/` from spine.verify |
+| Decommission receipts | `~/code/.evidence/spine/sessions/` from spine.verify + verify.infra.run |
 | Migration receipts | Referenced from loop scope (if services were migrated) |
 | Backup artifact | vzdump file on backup storage (if required by policy) |
 | Ripple check output | Zero live references to decommissioned hostname |

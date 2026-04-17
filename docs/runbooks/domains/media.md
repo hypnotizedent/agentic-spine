@@ -16,9 +16,9 @@ Primary recovery flow for domain `media`.
 ## Recover
 1. Apply the minimal fix in the owning plugin/contract.
 2. Re-run targeted domain verify.
-3. Re-run `verify.run -- fast`.
+3. Re-run `verify.infra.run`.
 
 ## Exit Criteria
 - Domain verify has zero blocking failures.
-- Fast verify has zero blocking failures.
+- Estate verify has zero blocking failures.
 - Failure cause and remediation are reflected in commit and receipt evidence.

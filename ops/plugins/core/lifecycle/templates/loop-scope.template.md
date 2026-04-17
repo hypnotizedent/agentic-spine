@@ -27,7 +27,7 @@ supersedes: []
 ## Guard Commands
 
 <!-- Machine-readable: agents use these to resume/verify without rediscovery -->
-- **Verify**: `./bin/ops cap run verify.run -- fast`
+- **Verify**: `./bin/ops cap run spine.verify`
 - **Handoff**: `./bin/ops cap run session.handoff.create --summary "checkpoint" --loops {{LOOP_ID}}`
 - **Friction**: `./bin/ops cap run friction.ingest -- --loop-id {{LOOP_ID}} --capability <capability> --expected "..." --actual "..." --severity <low|medium|high> --auto-reconcile`
 
