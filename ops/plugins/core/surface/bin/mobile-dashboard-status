@@ -5,12 +5,14 @@ This is a LEAF, not a root. It consumes the shared operator-overview-payload
 and renders a phone-priority compact view. Same truth, same timestamps,
 same attention ordering as the desktop cockpit — different density.
 
-Answers 5 questions in under 30 seconds:
-  1. Is the spine alive?           → spine_now
-  2. Is the projection fresh?      → projection_freshness
-  3. What needs attention?         → attention_now
-  4. What's active?                → active_loops + active_handoffs
-  5. Is this read-only?            → read_only_posture
+Answers 7 questions in under 30 seconds:
+  1. What did my ideas become?     → my_human_work_now
+  2. What became of each input?    → what_became_of_my_input
+  3. What did my ideas build?      → what_my_ideas_built
+  4. What is waiting on me?        → what_is_waiting_on_me
+  5. Is the spine alive?           → spine_now
+  6. Is the projection fresh?      → projection_freshness
+  7. What needs attention?         → attention_now
 """
 from __future__ import annotations
 
@@ -32,10 +34,49 @@ build_payload = _mod.build_payload
 def main() -> int:
     root = build_payload(compact=True)
 
+    # Operator vision contribution is the primary section
+    ov = root.get("operator_vision", {})
+    mhw = ov.get("my_human_work_now", {})
+    chain = ov.get("chain_status", {})
+    waiting = ov.get("what_is_waiting_on_me", {})
+
+    # Compact per-input traces for phone: just file, batch, disposition, detail
+    traces = ov.get("what_became_of_my_input", [])
+    compact_traces = [
+        {"file": t["file"], "batch": t["batch"], "disposition": t["disposition"],
+         "detail": t["detail"][:100]}
+        for t in traces
+    ]
+
+    # What my ideas built — compact for phone
+    built = ov.get("what_my_ideas_built", {})
+
     payload = {
         "capability": "surface.mobile.dashboard.status",
         "version": root["version"],
         "generated_utc": root["generated_utc"],
+        "my_human_work_now": {
+            "total_raw_inputs": mhw.get("total_raw_inputs", 0),
+            "advanced_to_contract": mhw.get("advanced_to_contract", 0),
+            "adjacent_evidence": mhw.get("adjacent_evidence", 0),
+            "parked_prep": mhw.get("parked_prep", 0),
+            "parked_no_lifecycle": mhw.get("parked_no_lifecycle", 0),
+            "out_of_spine": mhw.get("out_of_spine", 0),
+            "float_risk_count": mhw.get("float_risk_count", 0),
+            "delivered_packets": mhw.get("delivered_packets", 0),
+            "contracts": mhw.get("contracts", 0),
+        },
+        "chain_status": chain,
+        "what_became_of_my_input": compact_traces,
+        "what_my_ideas_built": {
+            "contracts": built.get("contracts", []),
+            "delivered_packets": built.get("delivered_packets", []),
+            "derived_conclusions": built.get("derived_conclusions", []),
+        },
+        "what_is_waiting_on_me": {
+            "parked_without_lifecycle": waiting.get("parked_without_lifecycle", 0),
+            "floating_items": waiting.get("floating_items", 0),
+        },
         "spine_now": root["spine_now"],
         "projection_freshness": root["projection_freshness"],
         "attention_now": root["attention"][:5],
