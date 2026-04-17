@@ -172,10 +172,19 @@ _preferred_checkout_dir() {
   fi
 }
 
-_current_checkout_repo() {
-  local target
+_current_checkout_common_root() {
+  local target common_dir
   target="$(_preferred_checkout_dir)"
+  common_dir="$(cd "$target" && git rev-parse --git-common-dir 2>/dev/null | xargs -I{} bash -c 'cd "{}" && pwd -P' 2>/dev/null || true)"
+  if [[ -n "$common_dir" && "$(basename "$common_dir")" == ".git" ]]; then
+    cd "$common_dir/.." && pwd -P
+    return
+  fi
   git -C "$target" rev-parse --show-toplevel 2>/dev/null || true
+}
+
+_current_checkout_repo() {
+  _current_checkout_common_root
 }
 
 _current_checkout_branch() {
@@ -185,7 +194,9 @@ _current_checkout_branch() {
 }
 
 _current_checkout_worktree() {
-  _current_checkout_repo
+  local target
+  target="$(_preferred_checkout_dir)"
+  git -C "$target" rev-parse --show-toplevel 2>/dev/null || true
 }
 
 _ensure_wave_branch() {
