@@ -34,6 +34,7 @@ CAP_SH="$SP/ops/commands/cap.sh"
 AUTHORITY_RESOLVE="$SP/ops/plugins/core/orchestration/bin/authority-resolve"
 WAVE_FINISH="$SP/ops/plugins/core/orchestration/bin/wave-finish"
 WORKTREE_REHYDRATE="$SP/ops/plugins/core/lifecycle/bin/worktree-lifecycle-rehydrate"
+WORKTREE_LIFECYCLE_CONTRACT="$SP/ops/bindings/worktree.lifecycle.contract.yaml"
 
 mkdir -p "$WAVES_DIR"
 
@@ -197,6 +198,206 @@ _current_checkout_worktree() {
   local target
   target="$(_preferred_checkout_dir)"
   git -C "$target" rev-parse --show-toplevel 2>/dev/null || true
+}
+
+_state_field() {
+  local state_file="${1:?state file required}"
+  local dotted_path="${2:?state field path required}"
+  python3 - "$state_file" "$dotted_path" <<'PYSTATEFIELD'
+import json
+import sys
+
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+value = state
+for segment in sys.argv[2].split("."):
+    if isinstance(value, dict):
+        value = value.get(segment, "")
+    else:
+        value = ""
+        break
+if value is None:
+    value = ""
+print(value)
+PYSTATEFIELD
+}
+
+_resolve_commitish() {
+  local repo_root="${1:-}"
+  local ref="${2:-}"
+  [[ -n "$ref" ]] || return 0
+  if [[ -n "$repo_root" ]]; then
+    git -C "$repo_root" rev-parse --verify "${ref}^{commit}" 2>/dev/null || printf '%s\n' "$ref"
+    return 0
+  fi
+  printf '%s\n' "$ref"
+}
+
+_wave_workspace_snapshot() {
+  local state_file="${1:?state file required}"
+  local repo_root="" worktree="" branch="" head=""
+
+  repo_root="$(_state_field "$state_file" "workspace.repo")"
+  worktree="$(_state_field "$state_file" "workspace.worktree")"
+  branch="$(_state_field "$state_file" "workspace.branch")"
+
+  if [[ -n "$worktree" && -d "$worktree" ]]; then
+    head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+    if [[ -z "$branch" || "$branch" == "HEAD" ]]; then
+      branch="$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    fi
+    if [[ -z "$repo_root" ]]; then
+      repo_root="$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null || true)"
+    fi
+  fi
+
+  if [[ -z "$head" && -n "$repo_root" && -n "$branch" ]]; then
+    head="$(git -C "$repo_root" rev-parse --verify "${branch}^{commit}" 2>/dev/null || true)"
+  fi
+
+  printf '%s|%s|%s|%s\n' "$repo_root" "$worktree" "$branch" "$head"
+}
+
+_resolve_close_head() {
+  local state_file="${1:?state file required}"
+  local explicit_fixed_in="${2:-}"
+  local repo_root="" worktree="" branch="" head=""
+
+  IFS='|' read -r repo_root worktree branch head <<< "$(_wave_workspace_snapshot "$state_file")"
+  if [[ -n "$explicit_fixed_in" ]]; then
+    _resolve_commitish "${repo_root:-$(_current_checkout_repo)}" "$explicit_fixed_in"
+    return 0
+  fi
+
+  if [[ -n "$head" ]]; then
+    printf '%s\n' "$head"
+    return 0
+  fi
+
+  local checkout_repo
+  checkout_repo="$(_current_checkout_repo)"
+  if [[ -n "$checkout_repo" ]]; then
+    git -C "$checkout_repo" rev-parse HEAD 2>/dev/null || true
+  fi
+}
+
+_resolve_canonical_worktree_prefix() {
+  local repo_root="${1:?repo root required}"
+  local canonical_root="/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"
+  if command -v yq >/dev/null 2>&1 && [[ -f "$WORKTREE_LIFECYCLE_CONTRACT" ]]; then
+    canonical_root="$(yq e -r '.policy.canonical_worktree_root // "/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"' "$WORKTREE_LIFECYCLE_CONTRACT" 2>/dev/null || echo "$canonical_root")"
+  fi
+  if [[ "$canonical_root" == "~/"* ]]; then
+    canonical_root="$HOME/${canonical_root#~/}"
+  fi
+  printf '%s/%s\n' "${canonical_root%/}" "$(basename "$repo_root")"
+}
+
+_write_cleanup_proof() {
+  local wave_id="${1:?wave id required}"
+  local loop_id="${2:-}"
+  local state_file="${3:?state file required}"
+  local fixed_head="${4:-}"
+
+  local repo_root="" worktree="" branch="" workspace_head=""
+  IFS='|' read -r repo_root worktree branch workspace_head <<< "$(_wave_workspace_snapshot "$state_file")"
+  [[ -n "$repo_root" ]] || repo_root="$(_current_checkout_repo)"
+  [[ -n "$worktree" ]] || worktree="$(_state_field "$state_file" "workspace.worktree")"
+  [[ -n "$branch" ]] || branch="$(_state_field "$state_file" "workspace.branch")"
+  if [[ -n "$fixed_head" ]]; then
+    workspace_head="$fixed_head"
+  fi
+
+  local evidence_dir="$WAVES_DIR/$wave_id/evidence"
+  local cleanup_ref="$evidence_dir/${wave_id}-cleanup-proof.md"
+  local generated_at
+  generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  mkdir -p "$evidence_dir"
+
+  local -a worktree_status_lines=()
+  local -a worktree_binding_lines=()
+  local cleanup_classifier_status="unavailable"
+  local cleanup_classifier_note="final wrapper cleanup proof generated before wave-close teardown so the landed head and workspace binding survive close-time cleanup"
+
+  if [[ -n "$worktree" && -d "$worktree" ]]; then
+    while IFS= read -r line; do
+      worktree_status_lines+=("$line")
+    done < <(git -C "$worktree" status --short --branch 2>/dev/null || true)
+
+    local binding_head="" binding_branch=""
+    binding_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+    binding_branch="$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    [[ -n "$binding_head" ]] && worktree_binding_lines+=("HEAD ${binding_head}")
+    if [[ -n "$binding_branch" ]]; then
+      worktree_binding_lines+=("branch refs/heads/${binding_branch}")
+    elif [[ -n "$branch" ]]; then
+      worktree_binding_lines+=("branch refs/heads/${branch}")
+    fi
+  fi
+
+  if [[ -n "$worktree" ]]; then
+    worktree_binding_lines=("worktree ${worktree}" "${worktree_binding_lines[@]}")
+  fi
+
+  {
+    printf 'wave_id: %s\n' "$wave_id"
+    printf 'loop_id: %s\n' "$loop_id"
+    printf 'generated_at_utc: %s\n' "$generated_at"
+    printf 'workspace_repo: %s\n' "$repo_root"
+    printf 'workspace_worktree: %s\n' "$worktree"
+    printf 'workspace_branch: %s\n' "$branch"
+    printf 'workspace_head: %s\n' "$workspace_head"
+    printf 'cleanup_classifier_status: %s\n' "$cleanup_classifier_status"
+    printf 'cleanup_classifier_note: %s\n' "$cleanup_classifier_note"
+    printf 'worktree_status:\n'
+    if [[ ${#worktree_status_lines[@]} -eq 0 ]]; then
+      printf '  - "%s"\n' "<unavailable>"
+    else
+      local line=""
+      for line in "${worktree_status_lines[@]}"; do
+        line="${line//\\/\\\\}"
+        line="${line//\"/\\\"}"
+        printf '  - "%s"\n' "$line"
+      done
+    fi
+    printf 'worktree_binding:\n'
+    if [[ ${#worktree_binding_lines[@]} -eq 0 ]]; then
+      printf '  - "%s"\n' "<unavailable>"
+    else
+      local binding=""
+      for binding in "${worktree_binding_lines[@]}"; do
+        binding="${binding//\\/\\\\}"
+        binding="${binding//\"/\\\"}"
+        printf '  - "%s"\n' "$binding"
+      done
+    fi
+  } > "$cleanup_ref"
+
+  printf '%s\n' "$cleanup_ref"
+}
+
+_provision_finish_runner_worktree() {
+  local repo_root="${1:?repo root required}"
+  local wave_id="${2:?wave id required}"
+  local commit_ref="${3:?commit ref required}"
+  local canonical_prefix="" temp_dir=""
+
+  canonical_prefix="$(_resolve_canonical_worktree_prefix "$repo_root")"
+  mkdir -p "$canonical_prefix"
+  temp_dir="$(mktemp -d "$canonical_prefix/FINISH-${wave_id}.XXXXXX")"
+  rmdir "$temp_dir"
+  git -C "$repo_root" worktree add --detach "$temp_dir" "$commit_ref" >/dev/null 2>&1 || {
+    rm -rf "$temp_dir" >/dev/null 2>&1 || true
+    _fail "unable to provision detached finish runner at $commit_ref"
+  }
+
+  printf '%s\n' "$temp_dir"
+}
+
+_remove_temp_worktree() {
+  local repo_root="${1:-}"
+  local worktree_path="${2:-}"
+  [[ -n "$repo_root" && -n "$worktree_path" ]] || return 0
+  git -C "$repo_root" worktree remove --force "$worktree_path" >/dev/null 2>&1 || rm -rf "$worktree_path" >/dev/null 2>&1 || true
 }
 
 _ensure_wave_branch() {
@@ -994,6 +1195,19 @@ for p in pending:
   fi
 
   # Step 4: Delegate to wave.sh close
+  local close_head=""
+  local effective_fixed_in=""
+  if [[ -n "$disposition" || -n "$fixed_in" ]]; then
+    close_head="$(_resolve_close_head "$state_file" "$fixed_in")"
+    [[ -n "$close_head" ]] || _fail "unable to resolve canonical close head"
+  fi
+  if [[ "$disposition" == "landed" || -n "$fixed_in" ]]; then
+    effective_fixed_in="$close_head"
+  fi
+
+  local cleanup_ref=""
+  cleanup_ref="$(_write_cleanup_proof "$wave_id" "$loop_id" "$state_file" "$close_head")"
+
   local close_args=("$wave_id")
   if [[ -n "$disposition" ]]; then
     close_args+=(--disposition "$disposition")
@@ -1001,8 +1215,8 @@ for p in pending:
   if [[ -n "$completion_level" ]]; then
     close_args+=(--completion-level "$completion_level")
   fi
-  if [[ -n "$fixed_in" ]]; then
-    close_args+=(--fixed-in "$fixed_in")
+  if [[ -n "$effective_fixed_in" ]]; then
+    close_args+=(--fixed-in "$effective_fixed_in")
   fi
   if [[ -n "$verify_receipt" ]]; then
     close_args+=(--verify-receipt "$verify_receipt")
@@ -1015,7 +1229,7 @@ for p in pending:
   fi
 
   echo "Closing wave $wave_id..."
-  bash "$WAVE_SH" close "${close_args[@]}" || {
+  env "WAVE_CLOSE_CLEANUP_REF=$cleanup_ref" bash "$WAVE_SH" close "${close_args[@]}" || {
     _fail "wave.sh close failed"
   }
   echo ""
@@ -1033,8 +1247,8 @@ for p in pending:
     if [[ -n "$completion_level" ]]; then
       finish_cmd+=" \\\\\n    --completion-level $completion_level"
     fi
-    if [[ -n "$fixed_in" ]]; then
-      finish_cmd+=" \\\\\n    --fixed-in $fixed_in"
+    if [[ -n "$effective_fixed_in" ]]; then
+      finish_cmd+=" \\\\\n    --fixed-in $effective_fixed_in"
     fi
     if [[ "$controller_only" -eq 1 ]]; then
       finish_cmd+=" \\\\\n    --controller-only"
@@ -1059,8 +1273,8 @@ for p in pending:
       if [[ -n "$completion_level" ]]; then
         finish_args+=(--completion-level "$completion_level")
       fi
-      if [[ -n "$fixed_in" ]]; then
-        finish_args+=(--fixed-in "$fixed_in")
+      if [[ -n "$effective_fixed_in" ]]; then
+        finish_args+=(--fixed-in "$effective_fixed_in")
       fi
       if [[ "$controller_only" -eq 1 ]]; then
         finish_args+=(--controller-only)
@@ -1070,17 +1284,31 @@ for p in pending:
       fi
 
       echo "Running wave.finish..."
-      local -a finish_env=("SPINE_TARGET_REPO=$SP" "OPS_CAP_AUTO_APPROVE=yes")
+      local finish_repo_root=""
+      finish_repo_root="$(_current_checkout_repo)"
+      [[ -n "$finish_repo_root" ]] || finish_repo_root="$(_state_field "$state_file" "workspace.repo")"
+      [[ -n "$finish_repo_root" ]] || _fail "unable to resolve canonical repo root for wave.finish"
+      local finish_runner=""
+      finish_runner="$(_provision_finish_runner_worktree "$finish_repo_root" "$wave_id" "${close_head:-HEAD}")"
+      local finish_bin="$finish_runner/ops/plugins/core/orchestration/bin/wave-finish"
+      [[ -x "$finish_bin" ]] || {
+        _remove_temp_worktree "$finish_repo_root" "$finish_runner"
+        _fail "wave.finish missing from detached finish runner: $finish_bin"
+      }
+      local -a finish_env=("OPS_CAP_AUTO_APPROVE=yes")
       if [[ -n "$finish_main_override" ]]; then
         finish_env+=("OPS_GOVERNED_MAIN_OVERRIDE=1")
       fi
       (
-        cd "$SP"
-        env "${finish_env[@]}" \
-          bash "$WAVE_FINISH" "${finish_args[@]}"
+        cd "$finish_runner"
+        env -u SPINE_ROOT -u SPINE_REPO -u SPINE_TARGET_REPO -u OPS_WORKTREE_IDENTITY \
+          "${finish_env[@]}" \
+          bash "$finish_bin" "${finish_args[@]}"
       ) || {
+        _remove_temp_worktree "$finish_repo_root" "$finish_runner"
         _fail "wave.finish failed"
       }
+      _remove_temp_worktree "$finish_repo_root" "$finish_runner"
     fi
   fi
   echo ""

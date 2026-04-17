@@ -24,6 +24,7 @@ controller_only="${15}"
 
 controller_verify_receipt="${WAVE_CLOSE_VERIFY_RECEIPT:-}"
 fixed_in="${WAVE_CLOSE_FIXED_IN:-}"
+cleanup_ref="${WAVE_CLOSE_CLEANUP_REF:-}"
 
 python3 - "$sf" "$sd" "$force" "$spine_repo" "$role_runtime_contract" "$dod_override_reason" "$lock_override_reason" "$disposition" "$allowed_dispositions_csv" "$allowed_lanes_csv" "$disposition_contract" "$completion_level" "$controller_only" "$controller_verify_receipt" "$fixed_in" <<'PYCLOSE2'
 import json, sys, os, re, fcntl, subprocess, tempfile
@@ -58,6 +59,7 @@ completion_level = (sys.argv[12] if len(sys.argv) > 12 else "").strip()
 controller_only = (sys.argv[13] if len(sys.argv) > 13 else "").strip().lower() == "true"
 controller_verify_receipt = (sys.argv[14] if len(sys.argv) > 14 else "").strip()
 fixed_in = (sys.argv[15] if len(sys.argv) > 15 else "").strip()
+cleanup_ref = os.environ.get("WAVE_CLOSE_CLEANUP_REF", "").strip()
 lock_file = sf + ".lock"
 receipts_dir = os.path.join(sd, "receipts")
 controller_precheck_path = os.path.join(sd, "controller-close-precheck.json")
@@ -420,10 +422,10 @@ try:
         "requested": controller_only,
         "eligible": False,
         "minimal_shell": False,
-        "fixed_in": "",
+        "fixed_in": fixed_in,
         "verify_run_key": "",
-        "verify_receipt_path": "",
-        "cleanup_ref": "",
+        "verify_receipt_path": _resolve_ref_path(controller_verify_receipt) if controller_verify_receipt else "",
+        "cleanup_ref": _resolve_ref_path(cleanup_ref) if cleanup_ref else "",
         "cleanup_error": "",
         "cleanup_blocking_rows": [],
         "cleanup_global_blocked_count": 0,
