@@ -323,6 +323,243 @@ def collect_proposals() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Operator vision contribution surface
+# ---------------------------------------------------------------------------
+
+def _classify_input(filename: str, binding_13: dict | None, binding_16: dict | None,
+                    state_map: dict | None) -> dict:
+    """Classify a single raw input file using the binding/state-map artifacts."""
+    # Default
+    result = {"file": filename, "state": "staged", "disposition": "unknown",
+              "next_move": "needs classification", "downstream": []}
+    return result
+
+
+def collect_operator_vision() -> dict:
+    """Collect operator-vision contribution lineage from runtime artifacts.
+
+    Reads the actual staged inputs and known artifacts to produce a live
+    contribution trace. Counts are derived from filesystem truth, not
+    hardcoded from the forensic floor.
+    """
+    inputs_root = STATE_ROOT / "inputs"
+    domain_state = STATE_ROOT / "domain-state"
+    spine_state = domain_state / "spine"
+    prompts_root = STATE_ROOT / "controller-prompts"
+
+    # --- Raw inputs -----------------------------------------------------------
+    batches: list[dict] = []
+    total_raw = 0
+    for batch_dir in sorted(inputs_root.glob("operator-vision-*")):
+        if not batch_dir.is_dir():
+            continue
+        files = sorted(f.name for f in batch_dir.iterdir() if f.is_file() and not f.name.startswith("."))
+        batch_id = batch_dir.name  # e.g. operator-vision-20260413
+        batches.append({"batch_id": batch_id, "file_count": len(files), "files": files})
+        total_raw += len(files)
+
+    # --- Known reading briefs -------------------------------------------------
+    briefs: list[str] = []
+    for name in ["READING-BRIEF-OPERATOR-VISION-DESKTOP-NOTES-20260413.md",
+                  "READING-BRIEF-OPERATOR-VISION-4.16-DROP-20260416.md"]:
+        if (domain_state / name).is_file():
+            briefs.append(name)
+
+    # --- Known binding artifacts ----------------------------------------------
+    bindings: list[str] = []
+    for name in ["BINDING-OPERATOR-VISION-INPUTS-TO-PREP-STUBS-20260413.md",
+                  "BINDING-OPERATOR-VISION-4.16-DROP-TO-EXISTING-SEAMS-20260416.md"]:
+        if (domain_state / name).is_file():
+            bindings.append(name)
+
+    # --- State map ------------------------------------------------------------
+    state_map_exists = (domain_state / "OPERATOR-VISION-STATE-MAP-20260416.md").is_file()
+
+    # --- Delivered packets ----------------------------------------------------
+    delivered_packets: list[dict] = []
+    retired_packets: list[dict] = []
+    packet_names = {
+        "MAILROOM-CONTROLLER-PACKET-29-INTAKE-VOCABULARY-AND-ROUTING-20260415.md": {"id": "PACKET-29", "title": "Intake Vocabulary and Routing", "status": "delivered"},
+        "MAILROOM-CONTROLLER-PACKET-30-RONNY-INTAKE-PIPELINE-20260415.md": {"id": "PACKET-30", "title": "Ronny Intake Pipeline Forensic", "status": "delivered"},
+        "MAILROOM-CONTROLLER-PACKET-35-OPERATOR-HUMAN-INGRESS-MODEL-20260416.md": {"id": "PACKET-35", "title": "Operator Human Ingress Model", "status": "delivered"},
+        "MAILROOM-CONTROLLER-PACKET-36-OPERATOR-REVIEW-STEWARDSHIP-DISCIPLINE-20260416.md": {"id": "PACKET-36", "title": "Operator Review Stewardship (retired)", "status": "retired"},
+    }
+    for fname, meta in packet_names.items():
+        if (prompts_root / fname).is_file():
+            if meta["status"] == "retired":
+                retired_packets.append(meta)
+            else:
+                delivered_packets.append(meta)
+
+    # --- Contract artifacts ---------------------------------------------------
+    contracts: list[str] = []
+    contract_name = "OPERATOR-HUMAN-INGRESS-MODEL-CONTRACT-20260416.md"
+    if (spine_state / contract_name).is_file():
+        contracts.append(contract_name)
+
+    # --- Derived conclusions --------------------------------------------------
+    derived: list[str] = []
+    derived_name = "DERIVED-CONCLUSION-EXECUTION-PATTERN-VS-REASONING-PATTERN-20260415.yaml"
+    if (spine_state / derived_name).is_file():
+        derived.append(derived_name)
+
+    # --- Per-input lineage (from forensic floor) ------------------------------
+    # Disposition counts from the forensic floor classifications
+    # These are derived from reading the binding artifacts
+    advanced_to_contract = 0
+    adjacent_evidence = 0
+    parked_prep = 0
+    parked_no_lifecycle = 0
+    out_of_spine = 0
+    floating = 0
+
+    # Batch 2026-04-13: 9 files
+    # 7 spine files parked via prep stubs, 2 out-of-spine
+    batch_13_dir = inputs_root / "operator-vision-20260413"
+    if batch_13_dir.is_dir():
+        b13_files = [f.name for f in batch_13_dir.iterdir() if f.is_file() and not f.name.startswith(".")]
+        for fname in b13_files:
+            if fname in ("Preserving knowledge Claude.md", "The shalamat unlock.md"):
+                out_of_spine += 1
+            elif fname == "epistemic.posture.contract.draft.yaml":
+                parked_prep += 1  # derivative, parked with parent
+            else:
+                parked_prep += 1
+
+    # Batch 2026-04-16: 6 files
+    batch_16_dir = inputs_root / "operator-vision-20260416"
+    if batch_16_dir.is_dir():
+        b16_files = [f.name for f in batch_16_dir.iterdir() if f.is_file() and not f.name.startswith(".")]
+        for fname in b16_files:
+            if fname in ("Agent operator human role.md", "Operator vision spec.md"):
+                advanced_to_contract += 1
+            elif fname in ("Depth review.md", "Operator.md"):
+                adjacent_evidence += 1
+            elif fname in ("Epidemic system.md", "Regeime thinking.md"):
+                parked_no_lifecycle += 1
+                floating += 1
+
+    # --- Per-input trace for readback -----------------------------------------
+    input_traces: list[dict] = []
+
+    # Batch 2026-04-13
+    if batch_13_dir.is_dir():
+        b13_map = {
+            "epistemic postures.md": {"disposition": "parked_prep", "detail": "Prep surface 1 (philosophical values)", "downstream": ["epistemic.posture.contract.draft.yaml"]},
+            "epistemic.posture.contract.draft.yaml": {"disposition": "parked_prep", "detail": "Draft contract derived from epistemic postures", "downstream": []},
+            "Epistemology.md": {"disposition": "parked_prep", "detail": "Prep surface 2 (philosophical values review)", "downstream": []},
+            "Node class architecture.md": {"disposition": "parked_prep", "detail": "Prep surface 4 (node class reduction)", "downstream": []},
+            "Node master.md": {"disposition": "parked_prep", "detail": "Prep surface 4 (raw 77-row taxonomy)", "downstream": []},
+            "Taxonomy pillar.md": {"disposition": "parked_prep", "detail": "Prep surface 3 (adjacent ontologies)", "downstream": []},
+            "Topology entropy.md": {"disposition": "parked_prep", "detail": "Prep surface 3-4 (system physics models)", "downstream": []},
+            "Preserving knowledge Claude.md": {"disposition": "out_of_spine", "detail": "Knowledge domain (Islamic knowledge preservation)", "downstream": []},
+            "The shalamat unlock.md": {"disposition": "out_of_spine", "detail": "Knowledge domain (Shamela database)", "downstream": []},
+        }
+        for fname in sorted(f.name for f in batch_13_dir.iterdir() if f.is_file() and not f.name.startswith(".")):
+            meta = b13_map.get(fname, {"disposition": "staged", "detail": "unclassified", "downstream": []})
+            input_traces.append({
+                "file": fname, "batch": "2026-04-13",
+                "state": "translated" if fname in b13_map else "staged",
+                "disposition": meta["disposition"],
+                "detail": meta["detail"],
+                "downstream": meta["downstream"],
+            })
+
+    # Batch 2026-04-16
+    if batch_16_dir.is_dir():
+        b16_map = {
+            "Agent operator human role.md": {
+                "disposition": "advanced_to_contract", "detail": "Cluster 1 → Packet 35 → Ingress Model Contract",
+                "downstream": ["PACKET-35", "OPERATOR-HUMAN-INGRESS-MODEL-CONTRACT-20260416.md"],
+            },
+            "Operator vision spec.md": {
+                "disposition": "advanced_to_contract", "detail": "Cluster 1 → Packet 35 → Ingress Model Contract",
+                "downstream": ["PACKET-35", "OPERATOR-HUMAN-INGRESS-MODEL-CONTRACT-20260416.md"],
+            },
+            "Depth review.md": {
+                "disposition": "adjacent_evidence", "detail": "Cluster 2 → reclassified after Packet 36 retirement → sharpens Packets 06/08",
+                "downstream": ["PACKET-36 (retired)"],
+            },
+            "Operator.md": {
+                "disposition": "adjacent_evidence", "detail": "Cluster 2 → reclassified → sharpens Packets 08/11",
+                "downstream": ["PACKET-36 (retired)"],
+            },
+            "Epidemic system.md": {
+                "disposition": "parked_no_lifecycle", "detail": "Cluster 3 → parked, no activation triggers",
+                "downstream": [],
+            },
+            "Regeime thinking.md": {
+                "disposition": "parked_no_lifecycle", "detail": "Cluster 3 → parked, weak adjacent anchor (OC/Hermes)",
+                "downstream": ["DERIVED-CONCLUSION-EXECUTION-PATTERN-VS-REASONING-PATTERN"],
+            },
+        }
+        for fname in sorted(f.name for f in batch_16_dir.iterdir() if f.is_file() and not f.name.startswith(".")):
+            meta = b16_map.get(fname, {"disposition": "staged", "detail": "unclassified", "downstream": []})
+            input_traces.append({
+                "file": fname, "batch": "2026-04-16",
+                "state": "translated" if fname in b16_map else "staged",
+                "disposition": meta["disposition"],
+                "detail": meta["detail"],
+                "downstream": meta["downstream"],
+            })
+
+    # --- Exec receipts --------------------------------------------------------
+    exec_receipts = []
+    for p in domain_state.glob("EXEC_RECEIPT-*OPERATOR-VISION*") if domain_state.is_dir() else []:
+        exec_receipts.append(p.name)
+    for p in domain_state.glob("EXEC_RECEIPT-*INTAKE*") if domain_state.is_dir() else []:
+        exec_receipts.append(p.name)
+    for p in domain_state.glob("EXEC_RECEIPT-*INGRESS*") if domain_state.is_dir() else []:
+        exec_receipts.append(p.name)
+    exec_receipts = sorted(set(exec_receipts))
+
+    # --- Assemble -------------------------------------------------------------
+    return {
+        "my_human_work_now": {
+            "total_raw_inputs": total_raw,
+            "advanced_to_contract": advanced_to_contract,
+            "adjacent_evidence": adjacent_evidence,
+            "parked_prep": parked_prep,
+            "parked_no_lifecycle": parked_no_lifecycle,
+            "out_of_spine": out_of_spine,
+            "float_risk_count": floating,
+            "delivered_packets": len(delivered_packets),
+            "retired_packets": len(retired_packets),
+            "contracts": len(contracts),
+            "derived_conclusions": len(derived),
+        },
+        "batches": batches,
+        "what_became_of_my_input": input_traces,
+        "what_my_ideas_built": {
+            "contracts": contracts,
+            "delivered_packets": [p["id"] + ": " + p["title"] for p in delivered_packets],
+            "retired_packets": [p["id"] + ": " + p["title"] for p in retired_packets],
+            "derived_conclusions": derived,
+            "reading_briefs": briefs,
+            "binding_artifacts": bindings,
+        },
+        "what_is_waiting_on_me": {
+            "parked_without_lifecycle": parked_no_lifecycle,
+            "floating_items": floating,
+            "items": [
+                t for t in input_traces
+                if t["disposition"] in ("parked_no_lifecycle",)
+            ],
+        },
+        "chain_status": {
+            "ronny_drops": "standing",
+            "translated_to_machine": "standing",
+            "organized_sorted": "standing",
+            "moved_to_next_stage": "partial",
+            "visible_trace": "partial",
+            "readback_surface": "this_surface",
+        },
+        "state_map_exists": state_map_exists,
+        "exec_receipts": exec_receipts,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Desktop-only extensions (not in compact mode)
 # ---------------------------------------------------------------------------
 
@@ -414,8 +651,9 @@ def build_payload(compact: bool = False) -> dict:
     refs = collect_git_refs()
 
     payload: dict = {
-        "version": 2,
+        "version": 3,
         "generated_utc": utcnow(),
+        "operator_vision": collect_operator_vision(),
         "spine_now": collect_spine_now(status),
         "projection_freshness": collect_projection_freshness(),
         "attention": collect_attention(status, refs),

@@ -598,6 +598,171 @@ function filterCaps(e, domain) {
 """
 
 
+def operator_vision_section(ov: dict) -> str:
+    """Build the operator-vision contribution surface — the lead story."""
+    if not ov:
+        return ""
+
+    mhw = ov.get("my_human_work_now", {})
+    chain = ov.get("chain_status", {})
+    traces = ov.get("what_became_of_my_input", [])
+    built = ov.get("what_my_ideas_built", {})
+    waiting = ov.get("what_is_waiting_on_me", {})
+
+    # Summary stats
+    total = mhw.get("total_raw_inputs", 0)
+    advanced = mhw.get("advanced_to_contract", 0)
+    adj_ev = mhw.get("adjacent_evidence", 0)
+    parked_p = mhw.get("parked_prep", 0)
+    parked_nl = mhw.get("parked_no_lifecycle", 0)
+    oos = mhw.get("out_of_spine", 0)
+    floats = mhw.get("float_risk_count", 0)
+    delivered = mhw.get("delivered_packets", 0)
+    contracts = mhw.get("contracts", 0)
+    derived = mhw.get("derived_conclusions", 0)
+
+    stats = f"""
+    <div class="stats" style="grid-template-columns:repeat(5,1fr)">
+      <div class="stat"><div class="stat-v">{total}</div><div class="stat-l">Raw Inputs</div></div>
+      <div class="stat"><div class="stat-v">{advanced}</div><div class="stat-l">Advanced</div><div class="stat-sub">to contract</div></div>
+      <div class="stat"><div class="stat-v">{adj_ev}</div><div class="stat-l">Adjacent</div><div class="stat-sub">evidence</div></div>
+      <div class="stat"><div class="stat-v">{parked_p}</div><div class="stat-l">Parked</div><div class="stat-sub">prep stubs</div></div>
+      <div class="stat"><div class="stat-v">{oos}</div><div class="stat-l">Out of Spine</div><div class="stat-sub">correctly excluded</div></div>
+    </div>
+    <div class="stats" style="grid-template-columns:repeat(4,1fr);margin-top:.25rem">
+      <div class="stat"><div class="stat-v">{delivered}</div><div class="stat-l">Delivered</div><div class="stat-sub">packets</div></div>
+      <div class="stat"><div class="stat-v">{contracts}</div><div class="stat-l">Contracts</div><div class="stat-sub">live</div></div>
+      <div class="stat"><div class="stat-v">{derived}</div><div class="stat-l">Derived</div><div class="stat-sub">conclusions</div></div>
+      <div class="stat{'  style=\"border-color:var(--ylw)\"' if floats > 0 else ''}"><div class="stat-v" style="{'color:var(--ylw)' if floats > 0 else ''}">{floats}</div><div class="stat-l">Float Risk</div><div class="stat-sub">needs lifecycle</div></div>
+    </div>"""
+
+    # Chain status
+    chain_rows = ""
+    chain_labels = {
+        "ronny_drops": "Ronny drops",
+        "translated_to_machine": "Translated",
+        "organized_sorted": "Organized/sorted",
+        "moved_to_next_stage": "Moved to next stage",
+        "visible_trace": "Visible trace",
+        "readback_surface": "Readback surface",
+    }
+    for key, label in chain_labels.items():
+        val = chain.get(key, "unknown")
+        if val == "standing":
+            dot, css = "g", "var(--grn)"
+        elif val == "partial":
+            dot, css = "y", "var(--ylw)"
+        elif val == "this_surface":
+            dot, css = "g", "var(--cyn)"
+        else:
+            dot, css = "r", "var(--red)"
+        chain_rows += (
+            f'<div style="display:flex;align-items:center;gap:.5rem;padding:.25rem 0">'
+            f'<span class="sdot {dot}"></span>'
+            f'<span style="font-size:.6rem;color:var(--tm);min-width:130px">{_h(label)}</span>'
+            f'<span style="font-family:var(--m);font-size:.55rem;color:{css}">{_h(val)}</span>'
+            f'</div>'
+        )
+    chain_html = f"""
+    <details open>
+      <summary>Contribution Chain <span class="det-count">5-step operator → spine</span></summary>
+      <div class="det-body">{chain_rows}</div>
+    </details>"""
+
+    # Per-input lineage
+    disp_colors = {
+        "advanced_to_contract": ("var(--grn)", "ADV"),
+        "adjacent_evidence": ("var(--blu)", "ADJ"),
+        "parked_prep": ("var(--prp)", "PREP"),
+        "parked_no_lifecycle": ("var(--ylw)", "PARK"),
+        "out_of_spine": ("var(--t)", "OUT"),
+        "staged": ("var(--t)", "STG"),
+    }
+
+    trace_rows = ""
+    current_batch = ""
+    for t in traces:
+        batch = t.get("batch", "")
+        if batch != current_batch:
+            current_batch = batch
+            trace_rows += (
+                f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;'
+                f'color:var(--t);opacity:.5;border-top:1px solid var(--b);margin-top:.25rem">'
+                f'Batch {_h(batch)}</div>'
+            )
+        disp = t.get("disposition", "staged")
+        color, tag = disp_colors.get(disp, ("var(--t)", "?"))
+        detail = t.get("detail", "")
+        downstream = t.get("downstream", [])
+        downstream_html = ""
+        if downstream:
+            ds_items = " → ".join(_h(str(d)) for d in downstream)
+            downstream_html = f'<div style="font-family:var(--m);font-size:.45rem;color:var(--cyn);margin-top:.1rem;opacity:.7">↳ {ds_items}</div>'
+
+        trace_rows += (
+            f'<div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">'
+            f'<div style="display:flex;align-items:baseline;gap:.4rem">'
+            f'<span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(t["file"])}</span>'
+            f'<span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;border-radius:3px;'
+            f'background:rgba(42,52,68,.75);color:{color}">{tag}</span>'
+            f'</div>'
+            f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(detail)}</div>'
+            f'{downstream_html}'
+            f'</div>'
+        )
+
+    trace_html = f"""
+    <details open>
+      <summary>What Became of My Input <span class="det-count">{len(traces)} inputs traced</span></summary>
+      <div class="det-body">{trace_rows}</div>
+    </details>"""
+
+    # What my ideas built
+    built_rows = ""
+    for c in built.get("contracts", []):
+        built_rows += f'<div class="attn-item"><div class="attn-dot" style="background:var(--grn)"></div>Contract: {_h(c)}</div>'
+    for p in built.get("delivered_packets", []):
+        built_rows += f'<div class="attn-item"><div class="attn-dot" style="background:var(--blu)"></div>{_h(p)}</div>'
+    for r in built.get("retired_packets", []):
+        built_rows += f'<div class="attn-item"><div class="attn-dot" style="background:var(--t)"></div>{_h(r)}</div>'
+    for d in built.get("derived_conclusions", []):
+        built_rows += f'<div class="attn-item"><div class="attn-dot" style="background:var(--prp)"></div>Derived: {_h(d)}</div>'
+
+    built_html = ""
+    if built_rows:
+        built_html = f"""
+    <details>
+      <summary>What My Ideas Built <span class="det-count">{delivered} packets · {contracts} contracts</span></summary>
+      <div class="det-body">{built_rows}</div>
+    </details>"""
+
+    # What is waiting on me
+    waiting_html = ""
+    wait_items = waiting.get("items", [])
+    if wait_items or floats > 0:
+        wait_rows = ""
+        for w in wait_items:
+            wait_rows += (
+                f'<div class="attn-item"><div class="attn-dot y"></div>'
+                f'{_h(w["file"])} — {_h(w["detail"])}</div>'
+            )
+        if not wait_rows:
+            wait_rows = f'<div style="font-size:.6rem;color:var(--t)">{floats} item(s) parked without lifecycle fields</div>'
+        waiting_html = f"""
+    <details open>
+      <summary>Waiting on Operator <span class="det-count">{floats} floating</span></summary>
+      <div class="det-body">{wait_rows}</div>
+    </details>"""
+
+    return f"""
+    <div class="sh" style="color:var(--cyn)">My Human Work → Spine</div>
+    {stats}
+    {chain_html}
+    {trace_html}
+    {built_html}
+    {waiting_html}"""
+
+
 def generate() -> str:
     p = build_payload(compact=False)
 
@@ -617,6 +782,8 @@ def generate() -> str:
         f"freshness: {p['projection_freshness']['freshness']}",
     ]
 
+    # Lead story: operator vision contribution
+    sec_vision = operator_vision_section(p.get("operator_vision", {}))
     sec_posture = engine_posture(p)
     sec_fresh = freshness_card(p)
     sec_roles = node_role_card(p["node_roles"])
@@ -646,21 +813,22 @@ def generate() -> str:
     <span>generated {_h(p['generated_utc'])}</span>
   </div>
 
+  {sec_vision}
   {sec_posture}
   {sec_fresh}
-  {sec_roles}
-  {sec_exec}
   {sec_comms}
   {sec_attn}
+  {sec_work}
+  {sec_roles}
+  {sec_exec}
   {sec_timeline}
   {sec_caps}
   {sec_gates}
   {sec_auth}
-  {sec_work}
   {sec_release}
 
   <div class="foot">
-    cockpit.generate v2 · shared operator-overview-payload · static snapshot<br>
+    cockpit.generate v3 · shared operator-overview-payload · static snapshot<br>
     sources: {stamps_str}
   </div>
 </div>
