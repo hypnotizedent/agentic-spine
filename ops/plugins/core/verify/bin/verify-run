@@ -27,22 +27,22 @@ usage() {
 verify.run
 
 Usage:
-  verify-run engine [--json]                  Fast platform engine smoke (seconds)
-  verify-run honesty [--json]                 Engine orchestration proof (dispatch, wave, telemetry)
-  verify-run spine [--json]                   Honest spine-only verify scope (curated executable core set)
-  verify-run fast [--json] [--shadow]         17-gate infrastructure baseline
-  verify-run infra [--json] [--shadow]        Alias for fast (infrastructure gates)
-  verify-run domain <domain_id> [--json]      Domain-scoped infrastructure gates
-  verify-run release [--json] [--shadow]      Full infrastructure gate set
+  verify-run engine [--json]                  Fast platform engine smoke (spine truth)
+  verify-run honesty [--json]                 Engine orchestration proof (spine truth)
+  verify-run spine [--json]                   Honest spine-only verify scope (spine truth)
+  verify-run fast [--json] [--shadow]         17-gate infrastructure baseline (estate health)
+  verify-run infra [--json] [--shadow]        Alias for fast (estate health)
+  verify-run domain <domain_id> [--json]      Domain-scoped infrastructure gates (estate health)
+  verify-run release [--json] [--shadow]      Full infrastructure gate set (estate health)
 
 Scopes:
-  engine  => platform engine smoke test (bin/ops, caps, SQLite, entry)
-  honesty => engine orchestration proof (cap dispatch, wave lifecycle, telemetry, close)
+  engine  => platform engine smoke test; answers spine/object truth
+  honesty => engine orchestration proof; answers spine/object truth
   spine   => curated spine-only executable set + engine/honesty surfaces
-  fast    => 17-gate infrastructure workload baseline (alias: infra)
+  fast    => infrastructure workload baseline; answers estate/workload health only
   infra   => same as fast
-  domain  => infrastructure gates for one domain
-  release => full infrastructure gate set
+  domain  => estate/workload health gates for one domain
+  release => full estate/workload health gate set
 
 Flags:
   --shadow   accepted for compatibility and ignored by spine-lite
@@ -107,10 +107,58 @@ surface_recovery() {
   "$RECOVERY_DISPATCH" --gate-id "$fail_id" --failure-class "$failure_class"
 }
 
+scope_truth_plane() {
+  local mode="$1"
+  case "$mode" in
+    engine|honesty|spine) echo "spine_truth" ;;
+    fast|release|domain:*) echo "estate_health" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+scope_reading() {
+  local mode="$1"
+  case "$mode" in
+    engine|honesty|spine)
+      echo "Spine/object truth surface. Reads engine, governance, entry, orchestration, and spine-only execution truth."
+      ;;
+    fast|release|domain:*)
+      echo "Estate/workload health surface. Reads runtime host, workload, service, backup, and network state; does not answer packet, loop, or governance truth."
+      ;;
+    *)
+      echo "Unknown scope reading."
+      ;;
+  esac
+}
+
+scope_may_block_spine_truth() {
+  local mode="$1"
+  case "$mode" in
+    engine|honesty|spine) echo true ;;
+    fast|release|domain:*) echo false ;;
+    *) echo false ;;
+  esac
+}
+
+emit_scope_note() {
+  local mode="$1"
+  case "$mode" in
+    engine|honesty|spine)
+      echo "verify.run note: $mode answers spine/object truth." >&2
+      ;;
+    fast|release|domain:*)
+      echo "verify.run note: $mode answers estate/workload health only; do not treat it as packet/loop/governance truth." >&2
+      ;;
+  esac
+}
+
 run_and_wrap_json() {
   local mode="$1"
   shift
-  local output rc
+  local output rc truth_plane reading may_block_spine_truth
+  truth_plane="$(scope_truth_plane "$mode")"
+  reading="$(scope_reading "$mode")"
+  may_block_spine_truth="$(scope_may_block_spine_truth "$mode")"
 
   set +e
   output="$("$@" 2>/dev/null)"
@@ -124,10 +172,16 @@ run_and_wrap_json() {
 
   jq -n \
     --arg mode "$mode" \
+    --arg truth_plane "$truth_plane" \
+    --arg scope_reading "$reading" \
+    --argjson may_block_spine_truth "$may_block_spine_truth" \
     --argjson shadow_mode "$shadow_mode" \
     --argjson result "$output" \
     '{
       mode: $mode,
+      truth_plane: $truth_plane,
+      scope_reading: $scope_reading,
+      may_block_spine_truth: $may_block_spine_truth,
       shadow_mode_ignored: ($shadow_mode == 1),
       total: ($result.total // 0),
       pass: ($result.pass // 0),
@@ -161,6 +215,7 @@ run_scope() {
     return "$rc"
   fi
 
+  emit_scope_note "$mode"
   set +e
   "$@"
   rc=$?
@@ -220,6 +275,7 @@ run_spine_scope() {
   else
     echo "verify.run spine"
     echo "  curated spine-only verify scope"
+    echo "  note: spine answers spine/object truth and excludes estate/workload health gates"
     echo "  engine: $VERIFY_ENGINE"
     echo "  honesty: $VERIFY_ENGINE_HONESTY"
     echo "  executable surfaces:"
@@ -265,6 +321,9 @@ run_spine_scope() {
   if [[ "$json_mode" -eq 1 ]]; then
     jq -n \
       --arg mode "spine" \
+      --arg truth_plane "spine_truth" \
+      --arg scope_reading "Spine/object truth surface. Excludes estate/workload health gates unless separately routed." \
+      --argjson may_block_spine_truth true \
       --argjson declared_core_gate_ids "$declared_json" \
       --argjson executed_gate_ids "$executed_json" \
       --argjson already_covered_gate_ids "$already_json" \
@@ -274,6 +333,9 @@ run_spine_scope() {
       --argjson component_surfaces_run "$component_json" \
       '{
         mode: $mode,
+        truth_plane: $truth_plane,
+        scope_reading: $scope_reading,
+        may_block_spine_truth: $may_block_spine_truth,
         declared_core_gate_ids: $declared_core_gate_ids,
         executed_gate_ids: $executed_gate_ids,
         already_covered_gate_ids: $already_covered_gate_ids,

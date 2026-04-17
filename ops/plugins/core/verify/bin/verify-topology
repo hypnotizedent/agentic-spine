@@ -59,6 +59,8 @@ Usage:
 
 Notes:
   - Fast-ring lifecycle truth is loaded from gate.registry.yaml and verify.ring.policy.yaml.
+  - This runner is an estate/workload health surface, not a spine/object truth surface.
+  - `core` here means the fast estate gate pack, not spine core.
   - Domain checks use the spine-lite workload/infra gate catalog only.
   - --force and --ring are accepted for compatibility and ignored by the runtime-only runner.
 USAGE
@@ -231,7 +233,11 @@ run_gate_ids() {
     fi
 
     set +e
-    "$VERIFY_BASH_BIN" "$script_path"
+    if [[ "$json_mode" -eq 1 ]]; then
+      "$VERIFY_BASH_BIN" "$script_path" >/dev/null 2>&1
+    else
+      "$VERIFY_BASH_BIN" "$script_path"
+    fi
     rc=$?
     set -e
 
@@ -251,6 +257,9 @@ run_gate_ids() {
   if [[ "$json_mode" -eq 1 ]]; then
     jq -n \
       --arg mode "$mode" \
+      --arg truth_plane "estate_health" \
+      --arg scope_reading "Estate/workload health gate pack. Does not answer packet, loop, or governance truth." \
+      --argjson may_block_spine_truth false \
       --argjson failing_ids "$(json_array "${failing_ids[@]}")" \
       --argjson warning_ids "$(json_array "${warning_ids[@]}")" \
       --argjson blocking_fail_ids "$(json_array "${blocking_fail_ids[@]}")" \
@@ -261,6 +270,9 @@ run_gate_ids() {
       --argjson warn "$warning_count" \
       '{
         mode: $mode,
+        truth_plane: $truth_plane,
+        scope_reading: $scope_reading,
+        may_block_spine_truth: $may_block_spine_truth,
         total: $total,
         pass: $pass,
         fail: $fail,
@@ -277,6 +289,8 @@ run_gate_ids() {
   else
     echo "verify.topology"
     echo "mode: $mode"
+    echo "truth_plane: estate_health"
+    echo "scope_reading: estate/workload health only; not packet/loop/governance truth"
     echo "total: ${#unique_gate_ids[@]}"
     echo "pass: $pass_count"
     echo "fail: $fail_count"

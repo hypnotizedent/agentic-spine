@@ -35,7 +35,7 @@ rg -n "${CLOSEOUT_CAP}" "$MANIFEST" >/dev/null 2>&1 || fail "plugins manifest mi
 
 # Closeout chain markers remain deterministic/idempotent.
 for marker in \
-  "verify_fast" \
+  "verify_spine" \
   "friction_reconcile" \
   "loops_status" \
   "gaps_status" \
@@ -43,7 +43,7 @@ for marker in \
   "friction_queue_status" \
   "worktree_cleanup" \
   "friction.reconcile -- --loop-id" \
-  "verify.run -- fast" \
+  "spine.verify" \
   "worktree.lifecycle.cleanup -- --mode"; do
   grep -qF "$marker" "$CLOSEOUT_SCRIPT" || fail "closeout script missing required chain marker: $marker"
 done
