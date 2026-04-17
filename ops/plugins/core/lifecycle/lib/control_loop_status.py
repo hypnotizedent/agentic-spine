@@ -186,6 +186,74 @@ def _count_open_loops_scope_fallback(state_root: str) -> int | None:
     return count
 
 
+def _is_live_loop_sqlite(db_path: str, loop_id: str) -> bool | None:
+    """Return whether loop_id is live in SQLite authority, or None on error."""
+    if not db_path or not loop_id or not os.path.isfile(db_path):
+        return None
+
+    conn: sqlite3.Connection | None = None
+    try:
+        uri = f"file:{db_path}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=0.5)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='loops'"
+        )
+        if cur.fetchone() is None:
+            return None
+        cur.execute(
+            "SELECT 1 FROM loops "
+            "WHERE loop_id = ? AND LOWER(status) IN ('open','active','draft') "
+            "LIMIT 1",
+            (loop_id,),
+        )
+        return cur.fetchone() is not None
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def _is_live_loop_scope_fallback(state_root: str, loop_id: str) -> bool | None:
+    """Return whether loop_id is live via scope files, or None when unavailable."""
+    if not state_root or not loop_id:
+        return None
+
+    scopes_dir = os.path.join(state_root, "loop-scopes")
+    if not os.path.isdir(scopes_dir):
+        return None
+
+    scope_path = os.path.join(scopes_dir, f"{loop_id}.scope.md")
+    if not os.path.isfile(scope_path):
+        return False
+
+    closed_markers = (
+        os.path.join(scopes_dir, f"{loop_id}.closed"),
+        os.path.join(scopes_dir, f"{loop_id}.closed.md"),
+        os.path.join(scopes_dir, f"{loop_id}.scope.closed"),
+        os.path.join(scopes_dir, f"{loop_id}.scope.closed.md"),
+    )
+    if any(os.path.exists(marker) for marker in closed_markers):
+        return False
+
+    try:
+        with open(scope_path, "r", encoding="utf-8") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if line.startswith("status:"):
+                    status = line.split(":", 1)[1].strip().lower()
+                    return status in {"open", "active", "draft"}
+    except OSError:
+        return None
+
+    return True
+
+
 # ── Wave scanning ────────────────────────────────────────────────────
 
 def _scan_waves(
@@ -290,6 +358,24 @@ def collect_control_loop_status(
         else:
             warnings.append("loops: used scope-file fallback")
             open_loops = fallback
+
+    env_loop_id = terminal.get("loop_id")
+    if isinstance(env_loop_id, str) and env_loop_id not in {"", "unknown"}:
+        loop_live = _is_live_loop_sqlite(db_path, env_loop_id) if db_path else None
+        if loop_live is None:
+            loop_live = (
+                _is_live_loop_scope_fallback(state_root, env_loop_id)
+                if state_root
+                else None
+            )
+            if loop_live:
+                warnings.append("terminal loop: validated via scope-file fallback")
+            else:
+                warnings.append(f"terminal loop env omitted: {env_loop_id}")
+                terminal["loop_id"] = None
+        elif not loop_live:
+            warnings.append(f"terminal loop env stale: {env_loop_id}")
+            terminal["loop_id"] = None
 
     # ── Waves ──
     if runtime_root:

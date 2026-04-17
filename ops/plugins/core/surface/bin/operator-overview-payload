@@ -205,8 +205,22 @@ def collect_projection_freshness() -> dict:
 
 def collect_spine_now(status: dict) -> dict:
     counts = status.get("counts", {})
+    temporal_verify = (
+        status.get("temporal_truth", {}).get("verify", {})
+        if isinstance(status.get("temporal_truth"), dict)
+        else {}
+    )
+    verify_status_raw = counts.get("verify_status", "unknown")
+    verify_temporal_class = str(temporal_verify.get("temporal_class", "") or "")
+    verify_status = verify_status_raw
+    if verify_temporal_class == "inherited_still_current" and str(verify_status_raw).lower() not in {
+        "done", "pass", "passed", "ok", "healthy", "success",
+    }:
+        verify_status = f"standing debt ({verify_status_raw})"
     return {
-        "verify_status": counts.get("verify_status", "unknown"),
+        "verify_status": verify_status,
+        "verify_status_raw": verify_status_raw,
+        "verify_temporal_class": verify_temporal_class,
         "anomaly_count": counts.get("anomalies", 0),
         "open_loop_count": counts.get("open_loops", 0),
         "open_gap_count": counts.get("open_gaps", 0),

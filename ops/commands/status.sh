@@ -104,6 +104,7 @@ if [[ "$MODE" == "--context" ]]; then
   RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-<none>}"
   LOOP_ID="${SPINE_LOOP_ID:-<none>}"
   SESSION_LOOP_DISPLAY="$LOOP_ID"
+  SESSION_LOOP_RESIDUE=""
 
   JOINED_JSON=""
   JOINED_ERR=""
@@ -141,6 +142,10 @@ if [[ "$MODE" == "--context" ]]; then
   VERIFY_TEMPORAL_CLASS="$(jq_val '.summary.latest_verify_temporal_class' '')"
   VERIFY_KNOWN_SINCE="$(jq_val '.summary.latest_verify_known_since_utc' '')"
   VERIFY_STANDING_COUNT="$(jq_val '.summary.latest_verify_standing_evidence_count' '0')"
+  VERIFY_STATUS_DISPLAY="$VERIFY_STATUS"
+  if [[ "$VERIFY_TEMPORAL_CLASS" == "inherited_still_current" && "$VERIFY_STATUS" != "unknown" ]]; then
+    VERIFY_STATUS_DISPLAY="standing debt ($VERIFY_STATUS)"
+  fi
   GAP_AUTHORITY="$(jq_val '.summary.gap_authority_status' 'unknown')"
   GAP_MATCH="$(jq_val '.summary.gap_projection_match' 'null')"
   COHERENCE="$(jq_val '.summary.engine_coherence_needs_attention' 'unknown')"
@@ -174,7 +179,7 @@ if [[ "$MODE" == "--context" ]]; then
   fi
 
   if [[ -n "$JOINED_JSON" && "$LOOP_ID" != "<none>" ]]; then
-    _session_loop_suffix="$(
+    _session_loop_state="$(
       SESSION_LOOP_ID="$LOOP_ID" JOINED_JSON_INPUT="$JOINED_JSON" python3 - <<'PY' 2>/dev/null || true
 import json
 import os
@@ -195,12 +200,15 @@ open_loop_ids = {
     if isinstance(row, dict) and str(row.get("loop_id") or "").strip()
 }
 
-if open_loop_ids and session_loop_id not in open_loop_ids:
-    print(" (historical env; not in current open loops)")
+if session_loop_id in open_loop_ids:
+    print("live")
+elif session_loop_id:
+    print("stale")
 PY
     )"
-    if [[ -n "$_session_loop_suffix" ]]; then
-      SESSION_LOOP_DISPLAY="${LOOP_ID}${_session_loop_suffix}"
+    if [[ "$_session_loop_state" == "stale" ]]; then
+      SESSION_LOOP_DISPLAY="<none>"
+      SESSION_LOOP_RESIDUE="$LOOP_ID (historical env; not in current open loops)"
     fi
   fi
 
@@ -208,6 +216,9 @@ PY
   printf "  terminal:       %s\n" "$TERMINAL_ROLE"
   printf "  runtime role:   %s\n" "$RUNTIME_ROLE"
   printf "  session loop:   %s\n" "$SESSION_LOOP_DISPLAY"
+  if [[ -n "$SESSION_LOOP_RESIDUE" ]]; then
+    printf "  loop residue:   %s\n" "$SESSION_LOOP_RESIDUE"
+  fi
   printf "  state root:     %s\n" "$STATE_ROOT_VAL"
   printf "  evidence root:  %s\n" "$EVIDENCE_ROOT"
   echo "─── open work ──────────────────────────────────────"
@@ -216,7 +227,7 @@ PY
   printf "  active waves:   %s\n" "$ACTIVE_WAVES"
   printf "  orphaned waves: %s\n" "$ORPHANED_WAVES"
   echo "─── verify / coherence ─────────────────────────────"
-  printf "  spine verify:   %s\n" "$VERIFY_STATUS"
+  printf "  spine verify:   %s\n" "$VERIFY_STATUS_DISPLAY"
   if [[ -n "$VERIFY_TEMPORAL_CLASS" ]]; then
     _verify_temporal_line="$VERIFY_TEMPORAL_CLASS"
     if [[ -n "$VERIFY_KNOWN_SINCE" ]]; then
@@ -297,6 +308,19 @@ def display_path(path: Path) -> str:
         return str(path.relative_to(spine))
     except ValueError:
         return str(path)
+
+
+VERIFY_PASS_STATUSES = {"done", "pass", "passed", "ok", "healthy", "success"}
+
+
+def render_verify_status(summary: dict, temporal: dict | None = None) -> str:
+    status = str(summary.get("verify_status") or "unknown")
+    temporal_class = str(summary.get("verify_temporal_class") or "").strip()
+    if not temporal_class and isinstance(temporal, dict):
+        temporal_class = str(temporal.get("temporal_class") or "").strip()
+    if temporal_class == "inherited_still_current" and status.lower() not in VERIFY_PASS_STATUSES:
+        return f"standing debt ({status})"
+    return status
 
 # ── Collect loops from SQLite authority ───────────────────────────────────
 
@@ -927,6 +951,11 @@ if temporal_truth is not None:
     except Exception:
         temporal_truth_payload["daemons"] = {}
 
+joined_state_summary["verify_status_display"] = render_verify_status(
+    joined_state_summary,
+    temporal_truth_payload.get("verify") if isinstance(temporal_truth_payload, dict) else None,
+)
+
 # ── Output ────────────────────────────────────────────────────────────────
 
 if mode == "--json":
@@ -983,6 +1012,7 @@ if mode == "--json":
             "active_waves": int(joined_state_summary.get("active_waves") or 0),
             "orphaned_waves": int(joined_state_summary.get("orphaned_waves") or 0),
             "verify_status": joined_state_summary.get("verify_status", "unknown"),
+            "verify_status_display": joined_state_summary.get("verify_status_display", joined_state_summary.get("verify_status", "unknown")),
             "coherence_attention": bool(joined_state_summary.get("coherence_attention", False)),
             "inbox_active": inbox_active,
             "inbox_total": inbox_total,

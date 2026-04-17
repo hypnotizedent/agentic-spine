@@ -185,8 +185,8 @@ build_entry_cmd() {
 
     parts+=("cd $(printf '%q' "$spine")")
 
-    # Unset stale old-model env so there is only one startup model
-    parts+=("unset SPINE_ENTRY_PACKET_PATH SPINE_ENTRY_PACKET_HASH SPINE_POLICY_PRESET SPINE_TERMINAL_NAME 2>/dev/null; true")
+    # Unset stale old-model env and inherited loop identity so birth state is explicit.
+    parts+=("unset SPINE_ENTRY_PACKET_PATH SPINE_ENTRY_PACKET_HASH SPINE_POLICY_PRESET SPINE_TERMINAL_NAME SPINE_LOOP_ID OPS_WORKTREE_IDENTITY 2>/dev/null; true")
 
     # Set terminal birth identity
     if [[ -n "$terminal_name" ]]; then
