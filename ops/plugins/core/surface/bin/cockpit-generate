@@ -140,6 +140,86 @@ def node_role_card(roles: dict) -> str:
     </div>"""
 
 
+def temporal_truth_section(payload: dict) -> str:
+    temporal = payload.get("temporal_truth", {})
+    verify = temporal.get("verify", {}) if isinstance(temporal, dict) else {}
+    comms = temporal.get("comms_queue", {}) if isinstance(temporal, dict) else {}
+    daemons = temporal.get("daemons", {}) if isinstance(temporal, dict) else {}
+    cards: list[str] = []
+
+    verify_class = str(verify.get("temporal_class") or "")
+    if verify_class:
+        verify_css = "ylw" if verify_class == "inherited_still_current" else ("grn" if verify.get("status") == "pass" else "red")
+        gates = list(verify.get("current_blocking_fail_ids") or [])
+        gate_text = ", ".join(gates[:4])
+        if len(gates) > 4:
+            gate_text += ", ..."
+        verify_bits = [verify_class]
+        if verify.get("known_since_utc"):
+            verify_bits.append(f"since {verify['known_since_utc']}")
+        standing = int(verify.get("standing_evidence_count", 0) or 0)
+        if standing:
+            verify_bits.append(f"{standing} corroborating receipt(s)")
+        if gate_text:
+            verify_bits.append(gate_text)
+        cards.append(
+            f"""
+    <div class="posture {verify_css}" style="padding:.6rem .9rem;margin-bottom:.25rem">
+      <div class="p-dot"></div>
+      <div>
+        <div class="p-text" style="font-size:.65rem">Verify Standing</div>
+        <div class="p-sub">{_h(' · '.join(verify_bits))}</div>
+      </div>
+    </div>"""
+        )
+
+    comms_class = str(comms.get("temporal_class") or "")
+    if comms_class:
+        evidence = comms.get("evidence", {}) if isinstance(comms.get("evidence"), dict) else {}
+        comms_bits = [
+            comms_class,
+            f"pending={int(evidence.get('pending', 0) or 0)}",
+            f"oldest={int(evidence.get('oldest_age_seconds', 0) or 0)}s",
+        ]
+        if comms.get("operator_treatment"):
+            comms_bits.append(str(comms.get("operator_treatment")))
+        cards.append(
+            f"""
+    <div class="posture grn" style="padding:.6rem .9rem;margin-bottom:.25rem">
+      <div class="p-dot"></div>
+      <div>
+        <div class="p-text" style="font-size:.65rem">Comms Queue Side Surface</div>
+        <div class="p-sub">{_h(' · '.join(comms_bits))}</div>
+      </div>
+    </div>"""
+        )
+
+    daemon_class = str(daemons.get("temporal_class") or "")
+    if daemon_class:
+        evidence = daemons.get("evidence", {}) if isinstance(daemons.get("evidence"), dict) else {}
+        daemon_bits = [
+            daemon_class,
+            f"non_local={int(evidence.get('non_local_deferred', 0) or 0)}",
+            f"elsewhere={int(evidence.get('active_elsewhere', 0) or 0)}",
+            f"parked={int(evidence.get('parked_required', 0) or 0)}",
+            f"exempt={int(evidence.get('locality_exempt', 0) or 0)}",
+        ]
+        if daemons.get("operator_treatment"):
+            daemon_bits.append(str(daemons.get("operator_treatment")))
+        cards.append(
+            f"""
+    <div class="posture grn" style="padding:.6rem .9rem;margin-bottom:.25rem">
+      <div class="p-dot"></div>
+      <div>
+        <div class="p-text" style="font-size:.65rem">Daemon Locality</div>
+        <div class="p-sub">{_h(' · '.join(daemon_bits))}</div>
+      </div>
+    </div>"""
+        )
+
+    return "".join(cards)
+
+
 def execution_host_section(roles: dict) -> str:
     exec_target = roles.get("execution_host_target") or ""
     if not exec_target:
@@ -217,12 +297,13 @@ def execution_host_section(roles: dict) -> str:
 
 def comms_incident_card(cq: dict) -> str:
     slo = cq.get("slo_status", "ok")
-    if slo == "ok":
+    pending = int(cq.get("pending", 0) or 0)
+    oldest = int(cq.get("oldest_age_seconds", 0) or 0)
+    escalations = int(cq.get("escalations", 0) or 0)
+    if slo == "ok" or (pending == 0 and oldest == 0 and escalations == 0):
         return ""
 
     drain_state = cq.get("drain_state", "unknown")
-    pending = cq.get("pending", 0)
-    oldest = cq.get("oldest_age_seconds", 0)
 
     if oldest >= 86400:
         age_str = f"{oldest // 86400}d {(oldest % 86400) // 3600}h"
@@ -910,6 +991,7 @@ def generate() -> str:
         p.get("directional_boundary", {}),
     )
     sec_posture = engine_posture(p)
+    sec_temporal = temporal_truth_section(p)
     sec_fresh = freshness_card(p)
     sec_roles = node_role_card(p["node_roles"])
     sec_exec = execution_host_section(p["node_roles"])
@@ -940,6 +1022,7 @@ def generate() -> str:
 
   {sec_vision}
   {sec_posture}
+  {sec_temporal}
   {sec_fresh}
   {sec_comms}
   {sec_attn}

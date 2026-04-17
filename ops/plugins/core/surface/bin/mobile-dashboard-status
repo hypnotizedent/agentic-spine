@@ -34,6 +34,10 @@ build_payload = _mod.build_payload
 
 def main() -> int:
     root = build_payload(compact=True)
+    temporal_truth = root.get("temporal_truth", {})
+    verify_temporal = temporal_truth.get("verify", {}) if isinstance(temporal_truth, dict) else {}
+    comms_temporal = temporal_truth.get("comms_queue", {}) if isinstance(temporal_truth, dict) else {}
+    daemon_temporal = temporal_truth.get("daemons", {}) if isinstance(temporal_truth, dict) else {}
 
     # Operator vision contribution is the primary section
     ov = root.get("operator_vision", {})
@@ -59,6 +63,8 @@ def main() -> int:
         "local_role": node_roles.get("local_role", ""),
         "actionable_local_missing": 0,
         "execution_host": node_roles.get("execution_host_target", ""),
+        "temporal_class": daemon_temporal.get("temporal_class", ""),
+        "operator_treatment": daemon_temporal.get("operator_treatment", ""),
         "summary": {
             "active_elsewhere": len(breakdown.get("active_elsewhere", [])),
             "parked_required": len(breakdown.get("parked_required", [])),
@@ -66,6 +72,10 @@ def main() -> int:
             "other": len(breakdown.get("other", [])),
         },
     }
+    spine_now = dict(root["spine_now"])
+    spine_now["verify_temporal_class"] = verify_temporal.get("temporal_class", "")
+    spine_now["verify_known_since_utc"] = verify_temporal.get("known_since_utc", "")
+    spine_now["verify_standing_evidence_count"] = verify_temporal.get("standing_evidence_count", 0)
 
     payload = {
         "capability": "surface.mobile.dashboard.status",
@@ -98,7 +108,8 @@ def main() -> int:
             "floating_items": waiting.get("floating_items", 0),
             "pending_ingress": waiting.get("pending_ingress", 0),
         },
-        "spine_now": root["spine_now"],
+        "spine_now": spine_now,
+        "temporal_truth": temporal_truth,
         "projection_freshness": root["projection_freshness"],
         "attention_now": root["attention"][:5],
         "active_loops": {
@@ -120,6 +131,8 @@ def main() -> int:
             "completion_state": root["work_state"]["completion_state"],
             "inbox_active": root["work_state"]["inbox_active"],
             "comms_queue_pending": root["work_state"]["comms_queue"]["pending"],
+            "comms_queue_temporal_class": comms_temporal.get("temporal_class", ""),
+            "daemon_temporal_class": daemon_temporal.get("temporal_class", ""),
         },
     }
     print(json.dumps(payload, indent=2))
