@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -35,6 +36,11 @@ EVIDENCE_ROOT = Path(
         str(Path.home() / "code" / ".evidence" / "spine"),
     )
 )
+
+TEMPORAL_NOW_SECONDS = 6 * 60 * 60
+TEMPORAL_RECENT_SECONDS = 72 * 60 * 60
+TEMPORAL_REVIEW_SOON_SECONDS = 7 * 24 * 60 * 60
+_YAML_FENCE = re.compile(r"```ya?ml\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +79,67 @@ def _yaml_load(path: Path) -> dict | list | None:
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_utc(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed
+
+
+def _seconds_since(value: object, now_dt: datetime) -> int | None:
+    parsed = _parse_utc(value)
+    if parsed is None:
+        return None
+    return int((now_dt - parsed).total_seconds())
+
+
+def _seconds_until(value: object, now_dt: datetime) -> int | None:
+    parsed = _parse_utc(value)
+    if parsed is None:
+        return None
+    return int((parsed - now_dt).total_seconds())
+
+
+def classify_temporal_age(age_seconds: int | None) -> str:
+    if age_seconds is None or age_seconds < 0:
+        return "unknown"
+    if age_seconds < TEMPORAL_NOW_SECONDS:
+        return "now"
+    if age_seconds < TEMPORAL_RECENT_SECONDS:
+        return "recent"
+    return "stale"
+
+
+def classify_due_window(seconds_until: int | None) -> str:
+    if seconds_until is None:
+        return "unknown"
+    if seconds_until < 0:
+        return "stale"
+    if seconds_until < 24 * 60 * 60:
+        return "now"
+    if seconds_until < TEMPORAL_REVIEW_SOON_SECONDS:
+        return "recent"
+    return "recent"
+
+
+def summarize_temporal_states(items: list[dict], field: str = "temporal_state") -> dict[str, int]:
+    summary = {"now": 0, "recent": 0, "stale": 0, "parked": 0, "closed": 0, "unknown": 0}
+    for item in items:
+        state = str(item.get(field, "unknown") or "unknown")
+        if state not in summary:
+            state = "unknown"
+        summary[state] += 1
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +194,12 @@ def collect_projection_freshness() -> dict:
         except Exception:
             pass
 
+    freshness_map = {
+        "current": "now",
+        "aging": "recent",
+        "stale": "stale",
+    }
+    result["temporal_state"] = freshness_map.get(result["freshness"], "unknown")
     return result
 
 
@@ -214,30 +287,31 @@ def collect_active_loops(status: dict) -> dict:
 
 
 def collect_active_handoffs() -> dict:
-    handoff_script = REPO / "ops" / "plugins" / "core" / "session" / "bin" / "session-handoff"
-    if not handoff_script.is_file():
+    handoff_dir = STATE_ROOT / "handoffs"
+    if not handoff_dir.is_dir():
         return {"count": 0, "items": []}
-
-    proc = subprocess.run(
-        ["python3", str(handoff_script), "list", "--state", "active"],
-        text=True, capture_output=True, check=False,
-    )
-    try:
-        data = json.loads(proc.stdout)
-    except Exception:
-        return {"count": 0, "items": [], "error": "handoff list failed"}
-
-    items = data.get("items", [])
-    return {
-        "count": data.get("count", len(items)),
-        "items": [
+    items = []
+    for path in sorted(handoff_dir.glob("HO-*.yaml")):
+        data = _yaml_load(path)
+        if not isinstance(data, dict):
+            continue
+        if str(data.get("state", "")).lower() != "active":
+            continue
+        items.append(
             {
-                "id": h.get("id", ""),
-                "summary": h.get("summary", "")[:120],
-                "loops": h.get("loops", []),
+                "id": data.get("id", path.stem),
+                "state": data.get("state", ""),
+                "summary": str(data.get("summary", ""))[:120],
+                "loops": data.get("loops", []),
+                "created_at_utc": str(data.get("created_at_utc", "")),
+                "expires_at_utc": str(data.get("expires_at_utc", "")),
+                "from_role": str(data.get("from_role", "")),
+                "to_role": str(data.get("to_role", "")),
             }
-            for h in items[-5:]
-        ],
+        )
+    return {
+        "count": len(items),
+        "items": items[-5:],
     }
 
 
@@ -317,6 +391,7 @@ def collect_work_state(status: dict) -> dict:
         "inbox_total": status.get("inbox_total", 0),
         "inbox_lanes": status.get("inbox_lanes", {}),
         "completion_state": {
+            "snapshot_timestamp": completion.get("snapshot_timestamp", ""),
             "total_specimens": completion.get("total_specimens", 0),
             "delivered": completion.get("delivered", 0),
             "open": completion.get("open", 0),
@@ -664,6 +739,283 @@ def collect_operator_vision() -> dict:
     }
 
 
+def _iter_yaml_docs(path: Path) -> list[dict]:
+    import yaml
+
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return []
+
+    docs: list[dict] = []
+    if path.suffix in (".yaml", ".yml"):
+        try:
+            parsed = yaml.safe_load(text)
+        except Exception:
+            return []
+        if isinstance(parsed, dict):
+            docs.append(parsed)
+        return docs
+
+    if path.suffix != ".md":
+        return []
+
+    for match in _YAML_FENCE.finditer(text):
+        try:
+            parsed = yaml.safe_load(match.group(1))
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            docs.append(parsed)
+    return docs
+
+
+def _find_parked_containers(data: object) -> list[tuple[dict, dict]]:
+    found: list[tuple[dict, dict]] = []
+    if isinstance(data, dict):
+        lifecycle = data.get("parked_lifecycle")
+        if isinstance(lifecycle, dict):
+            found.append((data, lifecycle))
+        for value in data.values():
+            found.extend(_find_parked_containers(value))
+    elif isinstance(data, list):
+        for value in data:
+            found.extend(_find_parked_containers(value))
+    return found
+
+
+def _parked_item_name(path: Path, container: dict, root_doc: dict) -> str:
+    candidates: list[object] = []
+    for source in (container, root_doc):
+        if not isinstance(source, dict):
+            continue
+        candidates.extend(
+            [
+                source.get("title"),
+                source.get("name"),
+                source.get("id"),
+                source.get("source_file"),
+            ]
+        )
+        artifact = source.get("artifact")
+        if isinstance(artifact, dict):
+            candidates.extend(
+                [
+                    artifact.get("title"),
+                    artifact.get("name"),
+                    artifact.get("id"),
+                    artifact.get("source_file"),
+                ]
+            )
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return path.stem
+
+
+def _parked_location(path: Path) -> str:
+    text = str(path)
+    if "/domain-state/spine/" in text:
+        return "runtime/spine"
+    if "/domain-state/" in text:
+        return "runtime/domain-state"
+    return "other"
+
+
+def collect_parked_inventory(now_dt: datetime) -> dict:
+    items: list[dict] = []
+    domain_state = STATE_ROOT / "domain-state"
+    if not domain_state.is_dir():
+        return {"count": 0, "review_summary": summarize_temporal_states([], "review_state"), "items": []}
+
+    seen: set[tuple[str, str]] = set()
+    for path in sorted(domain_state.rglob("*")):
+        if path.is_dir() or path.suffix not in (".yaml", ".yml", ".md"):
+            continue
+        for parsed in _iter_yaml_docs(path):
+            for container, lifecycle in _find_parked_containers(parsed):
+                status = str(lifecycle.get("status", "parked") or "parked").lower()
+                if status != "parked":
+                    continue
+                name = _parked_item_name(path, container, parsed)
+                dedupe_key = (str(path), name)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+
+                next_review = lifecycle.get("next_review")
+                due_seconds = _seconds_until(next_review, now_dt)
+                review_state = classify_due_window(due_seconds)
+                evidence_field = "next_review" if next_review else ""
+                evidence_at = str(next_review) if next_review else ""
+
+                if not evidence_field:
+                    for field in (
+                        "parked_at",
+                        "entered_at",
+                        "created_at_utc",
+                        "created_at",
+                        "created",
+                        "reviewed_at",
+                        "closed_at",
+                        "superseded_at",
+                    ):
+                        value = lifecycle.get(field)
+                        if value:
+                            evidence_field = field
+                            evidence_at = str(value)
+                            review_state = classify_temporal_age(_seconds_since(value, now_dt))
+                            due_seconds = None
+                            break
+
+                if not evidence_field:
+                    artifact = container.get("artifact") if isinstance(container.get("artifact"), dict) else {}
+                    created_value = artifact.get("created") if isinstance(artifact, dict) else ""
+                    if created_value:
+                        evidence_field = "created"
+                        evidence_at = str(created_value)
+                        review_state = classify_temporal_age(_seconds_since(created_value, now_dt))
+
+                item = {
+                    "name": name,
+                    "path": str(path),
+                    "location": _parked_location(path),
+                    "temporal_state": "parked",
+                    "review_state": review_state,
+                    "next_review": str(next_review) if next_review else None,
+                    "time_evidence_field": evidence_field or "unknown",
+                    "time_evidence_at": evidence_at or None,
+                    "due_in_seconds": due_seconds,
+                    "parked_reason": str(lifecycle.get("parked_reason", "")),
+                }
+                items.append(item)
+
+    items.sort(key=lambda item: (item["review_state"], item["name"].lower()))
+    review_summary = summarize_temporal_states(items, "review_state")
+    return {
+        "count": len(items),
+        "review_summary": review_summary,
+        "items": items,
+    }
+
+
+def collect_temporal_standing(
+    generated_utc: str,
+    projection_freshness: dict,
+    operator_vision: dict,
+    active_handoffs: dict,
+    work_state: dict,
+) -> dict:
+    now_dt = _parse_utc(generated_utc) or datetime.now(timezone.utc)
+
+    ingress_items = []
+    for item in operator_vision.get("recent_ingress", []):
+        evidence_field = ""
+        evidence_at = ""
+        for field in ("routed_at", "classified_at", "submitted_at"):
+            if item.get(field):
+                evidence_field = field
+                evidence_at = str(item.get(field, ""))
+                break
+        age_seconds = _seconds_since(evidence_at, now_dt)
+        temporal_state = classify_temporal_age(age_seconds)
+        enriched = dict(item)
+        enriched["temporal_state"] = temporal_state
+        enriched["time_evidence_field"] = evidence_field or "unknown"
+        enriched["time_evidence_at"] = evidence_at or None
+        enriched["time_age_seconds"] = age_seconds
+        ingress_items.append(enriched)
+    operator_vision["recent_ingress"] = ingress_items
+    ingress_summary = summarize_temporal_states(ingress_items)
+
+    handoff_items = []
+    for item in active_handoffs.get("items", []):
+        created_age = _seconds_since(item.get("created_at_utc"), now_dt)
+        expires_in = _seconds_until(item.get("expires_at_utc"), now_dt)
+        temporal_state = classify_temporal_age(created_age)
+        evidence_field = "created_at_utc"
+        evidence_at = item.get("created_at_utc")
+        if expires_in is not None and expires_in < 0:
+            temporal_state = "stale"
+            evidence_field = "expires_at_utc"
+            evidence_at = item.get("expires_at_utc")
+        enriched = dict(item)
+        enriched["temporal_state"] = temporal_state
+        enriched["time_evidence_field"] = evidence_field
+        enriched["time_evidence_at"] = evidence_at or None
+        enriched["time_age_seconds"] = created_age
+        enriched["expires_in_seconds"] = expires_in
+        handoff_items.append(enriched)
+    active_handoffs["items"] = handoff_items
+    handoff_summary = summarize_temporal_states(handoff_items)
+
+    parked_inventory = collect_parked_inventory(now_dt)
+
+    completion = work_state.get("completion_state", {})
+    snapshot_timestamp = completion.get("snapshot_timestamp")
+    snapshot_age_seconds = _seconds_since(snapshot_timestamp, now_dt)
+    completion_snapshot = {
+        "temporal_state": classify_temporal_age(snapshot_age_seconds),
+        "snapshot_timestamp": str(snapshot_timestamp or ""),
+        "snapshot_age_seconds": snapshot_age_seconds,
+        "closed_count": int(completion.get("delivered", 0) or 0),
+        "parked_count": int(completion.get("parked", 0) or 0),
+        "open_count": int(completion.get("open", 0) or 0),
+        "ambiguous_count": int(completion.get("ambiguous", 0) or 0),
+    }
+
+    summary = {"now": 0, "recent": 0, "stale": 0, "parked": parked_inventory["count"], "closed": completion_snapshot["closed_count"], "unknown": 0}
+    for state in ("now", "recent", "stale", "unknown"):
+        summary[state] += ingress_summary.get(state, 0)
+        summary[state] += handoff_summary.get(state, 0)
+    projection_state = str(projection_freshness.get("temporal_state", "unknown"))
+    if projection_state in summary:
+        summary[projection_state] += 1
+    else:
+        summary["unknown"] += 1
+    snapshot_state = completion_snapshot["temporal_state"]
+    if snapshot_state in summary:
+        summary[snapshot_state] += 1
+    else:
+        summary["unknown"] += 1
+    summary["unknown"] += parked_inventory["review_summary"].get("unknown", 0)
+
+    return {
+        "generated_utc": generated_utc,
+        "model": {
+            "states": ["now", "recent", "stale", "parked", "closed"],
+            "unknown_state": "unknown",
+            "thresholds": {
+                "now_hours": TEMPORAL_NOW_SECONDS // 3600,
+                "recent_hours": TEMPORAL_RECENT_SECONDS // 3600,
+                "review_due_soon_days": TEMPORAL_REVIEW_SOON_SECONDS // (24 * 3600),
+            },
+            "rule": "Read-side only. Derived from existing timestamps and lifecycle fields already present in runtime evidence. Missing evidence stays unknown.",
+        },
+        "summary": summary,
+        "projection": {
+            "temporal_state": projection_state,
+            "source": projection_freshness.get("source", "unknown"),
+            "evidence_at": projection_freshness.get("sync_marker_utc")
+            or projection_freshness.get("state_db_mtime_utc"),
+            "age_seconds": projection_freshness.get("age_seconds"),
+        },
+        "operator_to_agents": {
+            "count": len(ingress_items),
+            "summary": ingress_summary,
+            "items": ingress_items,
+        },
+        "agents_to_operator": {
+            "count": len(handoff_items),
+            "summary": handoff_summary,
+            "items": handoff_items,
+        },
+        "parked_inventory": parked_inventory,
+        "completion_snapshot": completion_snapshot,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Desktop-only extensions (not in compact mode)
 # ---------------------------------------------------------------------------
@@ -754,27 +1106,38 @@ def build_payload(compact: bool = False) -> dict:
     """
     status = _run_json([str(REPO / "bin" / "ops"), "status", "--json"])
     refs = collect_git_refs()
+    generated_utc = utcnow()
     operator_vision = collect_operator_vision()
+    projection_freshness = collect_projection_freshness()
     attention = collect_attention(status, refs)
     active_handoffs = collect_active_handoffs()
+    work_state = collect_work_state(status)
+    temporal_standing = collect_temporal_standing(
+        generated_utc,
+        projection_freshness,
+        operator_vision,
+        active_handoffs,
+        work_state,
+    )
 
     payload: dict = {
         "version": 3,
-        "generated_utc": utcnow(),
+        "generated_utc": generated_utc,
         "operator_vision": operator_vision,
         "spine_now": collect_spine_now(status),
         "temporal_truth": collect_temporal_truth(status),
-        "projection_freshness": collect_projection_freshness(),
+        "projection_freshness": projection_freshness,
         "attention": attention,
         "active_loops": collect_active_loops(status),
         "active_handoffs": active_handoffs,
-        "work_state": collect_work_state(status),
+        "work_state": work_state,
         "git_refs": refs,
         "node_roles": collect_node_roles(status),
         "proposals": collect_proposals(),
         "directional_boundary": collect_directional_boundary(
             operator_vision, active_handoffs, attention
         ),
+        "temporal_standing": temporal_standing,
     }
 
     if not compact:

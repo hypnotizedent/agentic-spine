@@ -38,6 +38,34 @@ def _h(s: str) -> str:
     return html.escape(str(s)) if s else ""
 
 
+def _age_label(seconds: int | None) -> str:
+    if seconds is None or seconds < 0:
+        return "unknown"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h {(seconds % 3600) // 60}m ago"
+    return f"{seconds // 86400}d {(seconds % 86400) // 3600}h ago"
+
+
+def _temporal_badge(state: str) -> str:
+    palette = {
+        "now": ("var(--grn)", "NOW"),
+        "recent": ("var(--cyn)", "RECENT"),
+        "stale": ("var(--red)", "STALE"),
+        "parked": ("var(--prp)", "PARKED"),
+        "closed": ("var(--tb)", "CLOSED"),
+        "unknown": ("var(--ylw)", "UNKNOWN"),
+    }
+    color, label = palette.get(state, palette["unknown"])
+    return (
+        f'<span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;'
+        f'border-radius:3px;background:rgba(42,52,68,.75);color:{color}">{label}</span>'
+    )
+
+
 # ---------------------------------------------------------------------------
 # Section builders — consume the shared payload
 # ---------------------------------------------------------------------------
@@ -710,7 +738,7 @@ function filterCaps(e, domain) {
 """
 
 
-def operator_vision_section(ov: dict, directional_boundary: dict) -> str:
+def operator_vision_section(ov: dict, directional_boundary: dict, temporal_standing: dict) -> str:
     """Build the operator-vision contribution surface — the lead story."""
     if not ov:
         return ""
@@ -723,6 +751,12 @@ def operator_vision_section(ov: dict, directional_boundary: dict) -> str:
     recent = ov.get("recent_ingress", [])
     op_to_agents = directional_boundary.get("operator_to_agents", {})
     agents_to_operator = directional_boundary.get("agents_to_operator", {})
+    temporal_summary = temporal_standing.get("summary", {})
+    temporal_projection = temporal_standing.get("projection", {})
+    temporal_ingress = temporal_standing.get("operator_to_agents", {})
+    temporal_handoffs = temporal_standing.get("agents_to_operator", {})
+    temporal_parked = temporal_standing.get("parked_inventory", {})
+    temporal_completion = temporal_standing.get("completion_snapshot", {})
 
     # Summary stats
     total = mhw.get("total_raw_inputs", 0)
@@ -773,6 +807,91 @@ def operator_vision_section(ov: dict, directional_boundary: dict) -> str:
           </div>
           <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{agents_to_operator.get("handoff_count", 0)} active handoff(s) · {agents_to_operator.get("attention_count", 0)} surfaced attention item(s)</div>
           <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(agents_to_operator.get("rule", ""))}</div>
+        </div>
+      </div>
+    </details>"""
+
+    parked_review = temporal_parked.get("review_summary", {})
+    parked_items = temporal_parked.get("items", [])[:5]
+    parked_rows = ""
+    for item in parked_items:
+        review_state = item.get("review_state", "unknown")
+        due = item.get("next_review") or item.get("time_evidence_at") or "unscheduled"
+        parked_rows += (
+            f'<div style="padding:.3rem 0;border-bottom:1px solid rgba(26,35,50,.35)">'
+            f'<div style="display:flex;align-items:baseline;gap:.4rem">'
+            f'<span style="font-family:var(--m);font-size:.52rem;color:var(--tb);flex:1">{_h(item.get("name", ""))}</span>'
+            f'{_temporal_badge(review_state)}'
+            f'</div>'
+            f'<div style="font-size:.48rem;color:var(--tm);margin-top:.1rem">{_h(due)}</div>'
+            f'</div>'
+        )
+    if not parked_rows:
+        parked_rows = '<div style="font-size:.55rem;color:var(--tm)">no parked runtime items found</div>'
+
+    handoff_rows = ""
+    for item in temporal_handoffs.get("items", [])[:3]:
+        created_age = _age_label(item.get("time_age_seconds"))
+        handoff_rows += (
+            f'<div style="padding:.3rem 0;border-bottom:1px solid rgba(26,35,50,.35)">'
+            f'<div style="display:flex;align-items:baseline;gap:.4rem">'
+            f'<span style="font-family:var(--m);font-size:.52rem;color:var(--tb);flex:1">{_h(item.get("id", ""))}</span>'
+            f'{_temporal_badge(item.get("temporal_state", "unknown"))}'
+            f'</div>'
+            f'<div style="font-size:.48rem;color:var(--tm);margin-top:.1rem">{_h(item.get("summary", ""))}</div>'
+            f'<div style="font-size:.48rem;color:var(--tm);margin-top:.1rem">{_h(str(item.get("created_at_utc", "") or created_age))}</div>'
+            f'</div>'
+        )
+    if not handoff_rows:
+        handoff_rows = '<div style="font-size:.55rem;color:var(--tm)">no active handoffs</div>'
+
+    temporal_html = f"""
+    <details open>
+      <summary>Temporal Standing <span class="det-count">same root across cockpit + mobile</span></summary>
+      <div class="det-body">
+        <div class="stats" style="grid-template-columns:repeat(6,1fr);margin-bottom:.35rem">
+          <div class="stat"><div class="stat-v">{temporal_summary.get("now", 0)}</div><div class="stat-l">Now</div></div>
+          <div class="stat"><div class="stat-v">{temporal_summary.get("recent", 0)}</div><div class="stat-l">Recent</div></div>
+          <div class="stat"><div class="stat-v">{temporal_summary.get("stale", 0)}</div><div class="stat-l">Stale</div></div>
+          <div class="stat"><div class="stat-v">{temporal_summary.get("parked", 0)}</div><div class="stat-l">Parked</div></div>
+          <div class="stat"><div class="stat-v">{temporal_summary.get("closed", 0)}</div><div class="stat-l">Closed</div></div>
+          <div class="stat"><div class="stat-v">{temporal_summary.get("unknown", 0)}</div><div class="stat-l">Unknown</div></div>
+        </div>
+        <div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">Projection freshness</span>
+            {_temporal_badge(temporal_projection.get("temporal_state", "unknown"))}
+          </div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(temporal_projection.get("source", "unknown"))} · {_h(_age_label(temporal_projection.get("age_seconds")))}</div>
+        </div>
+        <div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">Ronny -&gt; agents</span>
+            <span style="font-size:.48rem;color:var(--tm)">{temporal_ingress.get("summary", {}).get("now", 0)} now · {temporal_ingress.get("summary", {}).get("recent", 0)} recent · {temporal_ingress.get("summary", {}).get("stale", 0)} stale</span>
+          </div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{temporal_ingress.get("summary", {}).get("unknown", 0)} unknown timestamps</div>
+        </div>
+        <div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">Agents -&gt; Ronny</span>
+            <span style="font-size:.48rem;color:var(--tm)">{temporal_handoffs.get("summary", {}).get("now", 0)} now · {temporal_handoffs.get("summary", {}).get("recent", 0)} recent · {temporal_handoffs.get("summary", {}).get("stale", 0)} stale</span>
+          </div>
+          <div style="margin-top:.15rem">{handoff_rows}</div>
+        </div>
+        <div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">Parked runtime inventory</span>
+            <span style="font-size:.48rem;color:var(--tm)">{temporal_parked.get("count", 0)} parked · {parked_review.get("stale", 0)} overdue · {parked_review.get("unknown", 0)} unscheduled</span>
+          </div>
+          <div style="margin-top:.15rem">{parked_rows}</div>
+        </div>
+        <div style="padding:.35rem 0">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">Completion snapshot</span>
+            {_temporal_badge(temporal_completion.get("temporal_state", "unknown"))}
+          </div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{temporal_completion.get("closed_count", 0)} closed · {temporal_completion.get("open_count", 0)} open · {temporal_completion.get("parked_count", 0)} parked</div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(temporal_completion.get("snapshot_timestamp", "") or "unknown snapshot")} · {_h(_age_label(temporal_completion.get("snapshot_age_seconds")))}</div>
         </div>
       </div>
     </details>"""
@@ -852,6 +971,7 @@ def operator_vision_section(ov: dict, directional_boundary: dict) -> str:
             f'<div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">'
             f'<div style="display:flex;align-items:baseline;gap:.4rem">'
             f'<span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(item["ingress_id"])}</span>'
+            f'{_temporal_badge(item.get("temporal_state", "unknown"))}'
             f'<span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;border-radius:3px;'
             f'background:rgba(42,52,68,.75);color:{lcolor}">{_h(lstate)}</span>'
             f'</div>'
@@ -959,6 +1079,7 @@ def operator_vision_section(ov: dict, directional_boundary: dict) -> str:
     <div class="sh" style="color:var(--cyn)">Ronny ↔ Agents</div>
     {stats}
     {split_html}
+    {temporal_html}
     {chain_html}
     {recent_html}
     {trace_html}
@@ -989,6 +1110,7 @@ def generate() -> str:
     sec_vision = operator_vision_section(
         p.get("operator_vision", {}),
         p.get("directional_boundary", {}),
+        p.get("temporal_standing", {}),
     )
     sec_posture = engine_posture(p)
     sec_temporal = temporal_truth_section(p)
