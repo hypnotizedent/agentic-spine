@@ -69,22 +69,30 @@ FAILING_IDS=()
 WARNING_IDS=()
 SYNTHETIC_WAVE_ID=""
 SYNTHETIC_EVIDENCE_DIR=""
+SYNTHETIC_SCOPE_FILE=""
+SYNTHETIC_SCOPE_CREATED=0
 SYNTHETIC_LOOP_ID="${SPINE_LOOP_ID:-}"
-if [[ -n "$SYNTHETIC_LOOP_ID" ]]; then
-    # Historical shell env must not poison the honesty probe; only keep the
-    # explicit loop id if its live scope file still exists.
-    synthetic_scope_file="${SPINE_STATE}/loop-scopes/${SYNTHETIC_LOOP_ID}.scope.md"
-    if [[ ! -f "$synthetic_scope_file" ]]; then
-        SYNTHETIC_LOOP_ID=""
-    fi
-fi
 if [[ -z "$SYNTHETIC_LOOP_ID" ]]; then
-    # Resolve the first open loop from authority rather than hardcoding a stale ID
+    # Prefer a live orchestrator_subagents loop for kickoff-path honesty.
     SYNTHETIC_LOOP_ID="$(sqlite3 "${SPINE_STATE}/shared_authority.db" \
-        "SELECT loop_id FROM loops WHERE status='active' ORDER BY rowid LIMIT 1" 2>/dev/null || true)"
+        "SELECT loop_id FROM loops WHERE status='active' AND execution_mode='orchestrator_subagents' ORDER BY rowid LIMIT 1" 2>/dev/null || true)"
 fi
 if [[ -z "$SYNTHETIC_LOOP_ID" ]]; then
-    SYNTHETIC_LOOP_ID="LOOP-HONESTY-PROBE"
+    # No live orchestrator_subagents loop is available. Mint a synthetic scope
+    # just for the honesty probe so kickoff-path checks do not depend on the
+    # operator having an orchestrator lane open already.
+    SYNTHETIC_LOOP_ID="LOOP-HONESTY-KICKOFF-PROBE-$$"
+    SYNTHETIC_SCOPE_FILE="${SPINE_STATE}/loop-scopes/${SYNTHETIC_LOOP_ID}.scope.md"
+    cat >"$SYNTHETIC_SCOPE_FILE" <<EOF
+---
+loop_id: ${SYNTHETIC_LOOP_ID}
+status: active
+owner: @spine
+execution_mode: orchestrator_subagents
+title: Synthetic honesty kickoff probe
+---
+EOF
+    SYNTHETIC_SCOPE_CREATED=1
 fi
 CLEANUP_NEEDED=0
 SYNTHETIC_COMPLETION_LEVEL="slice_complete"
@@ -177,6 +185,9 @@ cleanup_synthetic_wave() {
     # Remove synthetic evidence dir
     if [[ -n "$SYNTHETIC_EVIDENCE_DIR" && -d "$SYNTHETIC_EVIDENCE_DIR" ]]; then
         rm -rf "$SYNTHETIC_EVIDENCE_DIR"
+    fi
+    if [[ "$SYNTHETIC_SCOPE_CREATED" -eq 1 && -n "$SYNTHETIC_SCOPE_FILE" && -f "$SYNTHETIC_SCOPE_FILE" ]]; then
+        rm -f "$SYNTHETIC_SCOPE_FILE"
     fi
 }
 trap cleanup_synthetic_wave EXIT
