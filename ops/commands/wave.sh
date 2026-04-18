@@ -956,6 +956,16 @@ cmd_start() {
       exit 1
     fi
   fi
+
+  # Gate: refuse to attach a wave to a closed loop
+  local _loop_scope_file="$SPINE_STATE/loop-scopes/${loop_id}.scope.md"
+  local _loop_archive_file="$SPINE_STATE/archive/closed-loop-scopes/${loop_id}.scope.md"
+  if [[ ! -f "$_loop_scope_file" && -f "$_loop_archive_file" ]]; then
+    echo "FAIL: loop '$loop_id' is closed (archived). Cannot attach a new wave to a closed loop." >&2
+    echo "  → Create a new loop: ./bin/ops cap run loops.create -- --name \"...\" --objective \"...\"" >&2
+    exit 1
+  fi
+
   [[ -n "$deadline_utc" ]] || deadline_utc="$(python3 - "$packet_default_deadline_hours" <<'PYDEADLINE'
 import datetime as dt
 import sys
