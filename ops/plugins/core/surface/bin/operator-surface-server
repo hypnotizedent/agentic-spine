@@ -21,7 +21,7 @@ import threading
 from functools import partial
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse, quote
 
 
 STATE_ROOT = Path(
@@ -203,12 +203,39 @@ def _submit_form_html(error: str = "", values: dict[str, str] | None = None) -> 
     (function(){{
       var form=document.getElementById('submitForm');
       var btn=document.getElementById('submitBtn');
-      var submitted=false;
-      form.addEventListener('submit',function(event){{
-        if(submitted){{ event.preventDefault(); return; }}
-        submitted=true;
+      form.addEventListener('submit',function(e){{
+        e.preventDefault();
+        if(btn.disabled) return;
         btn.disabled=true;
         btn.textContent='Submitting\u2026';
+        var body=new URLSearchParams(new FormData(form)).toString();
+        var ctrl=new AbortController();
+        var timer=setTimeout(function(){{ ctrl.abort(); }},15000);
+        fetch('/submit',{{
+          method:'POST',
+          headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
+          body:body,
+          signal:ctrl.signal
+        }}).then(function(r){{
+          clearTimeout(timer);
+          if(r.redirected){{ window.location.href=r.url; return; }}
+          if(r.ok||r.status===303){{
+            var loc=r.headers.get('Location');
+            if(loc){{ window.location.href=loc; return; }}
+          }}
+          return r.text().then(function(t){{ throw new Error('Server error ('+r.status+')'); }});
+        }}).catch(function(err){{
+          clearTimeout(timer);
+          btn.disabled=false;
+          btn.textContent='Submit To Spine';
+          var msg=err.name==='AbortError'?'Request timed out. Tap to retry.':err.message||'Network error. Tap to retry.';
+          var flash=document.createElement('div');
+          flash.className='flash err';
+          flash.textContent=msg;
+          var old=form.parentNode.querySelector('.flash.err');
+          if(old) old.remove();
+          form.parentNode.insertBefore(flash,form);
+        }});
       }});
     }})();
     </script>
@@ -216,33 +243,15 @@ def _submit_form_html(error: str = "", values: dict[str, str] | None = None) -> 
     return _render_page("Operator Vision Submit", body)
 
 
-def _confirmation_html(result: dict) -> str:
-    body = f"""
-    <div class="nav">
-      <a href="/submit">Submit Another</a>
-      <a href="/ingress"><strong>My Submissions</strong></a>
-      <a href="/">Cockpit</a>
-    </div>
-    <div class="card ok">
-      <h1>Submitted</h1>
-      <p class="meta">Raw operator input preserved in runtime. No authority granted.</p>
-      <div class="flash ok">
-        <strong>{_H(result['ingress_id'])}</strong><br>
-        {_H(result['lifecycle_state'])} &middot; {_H(result['disposition'])}<br>
-        {_H(result['disposition_detail'])}
-      </div>
-      <p><strong>Hint:</strong> {_H(result.get('operator_hint') or '(none)')}</p>
-      <p style="font-size:.85rem"><a href="/ingress">View all submissions</a> &middot; <a href="/submit">Submit another</a></p>
-    </div>
-    """
-    return _render_page("Ingress Submitted", body)
-
-
-def _ingress_readback_html(state_root: str) -> str:
+def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
     """Phone-readable readback of recent operator ingress objects."""
     data = oi.list_operator_ingress(state_root=state_root, limit=20)
     items = data.get("items", [])
     count = data.get("count", 0)
+
+    success_html = ""
+    if submitted_id:
+        success_html = f'<div class="flash ok">Submitted <strong>{_H(submitted_id)}</strong> — preserved in runtime, awaiting classification.</div>'
 
     rows = ""
     for item in items:
@@ -279,6 +288,7 @@ def _ingress_readback_html(state_root: str) -> str:
     <div class="card">
       <h1>Recent Submissions</h1>
       <p class="meta">{count} ingress object{"s" if count != 1 else ""} in runtime. Newest first.</p>
+      {success_html}
       {rows}
     </div>
     """
@@ -336,12 +346,15 @@ class QuietHandler(SimpleHTTPRequestHandler):
         _request_surface_regenerate_background()
 
     def do_GET(self):
-        clean = self.path.split("?")[0].rstrip("/")
+        parsed = urlparse(self.path)
+        clean = parsed.path.rstrip("/")
         if clean == "/submit":
             self._send_html(200, _submit_form_html())
             return
         if clean == "/ingress":
-            self._send_html(200, _ingress_readback_html(str(STATE_ROOT)))
+            qs = parse_qs(parsed.query)
+            submitted_id = qs.get("submitted", [""])[0]
+            self._send_html(200, _ingress_readback_html(str(STATE_ROOT), submitted_id=submitted_id))
             return
         return super().do_GET()
 
@@ -369,7 +382,11 @@ class QuietHandler(SimpleHTTPRequestHandler):
             return
 
         self._regenerate_surfaces_background()
-        self._send_html(200, _confirmation_html(result))
+        ingress_id = quote(result["ingress_id"])
+        self.send_response(303)
+        self.send_header("Location", f"/ingress?submitted={ingress_id}")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 def main() -> int:
