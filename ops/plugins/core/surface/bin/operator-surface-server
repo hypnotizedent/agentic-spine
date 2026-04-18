@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """operator-surface-server — tiny operator surface server.
 
-Serves precomputed cockpit HTML and mobile JSON from a static directory, plus a
-single bounded operator ingress form/POST endpoint.
+Serves precomputed cockpit HTML and mobile JSON from a static directory, plus
+bounded operator ingress form/POST and a phone-readable ingress readback page.
 
 Dynamic paths:
   GET  /submit   → render operator ingress form
-  POST /submit   → create non-authoritative operator ingress object, then
-                   regenerate operator-surface payload/leaves
+  POST /submit   → create non-authoritative operator ingress object
+  GET  /ingress  → phone-readable readback of recent ingress objects
 """
 from __future__ import annotations
 
 import argparse
+import html as html_mod
 import json
 import os
 import subprocess
 import sys
+import threading
 from functools import partial
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
@@ -34,6 +36,57 @@ ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 
 import operator_ingress as oi
+
+_H = html_mod.escape
+_REGEN_LOCK = threading.Lock()
+_REGEN_THREAD: threading.Thread | None = None
+_REGEN_PENDING = False
+
+
+def _run_surface_regenerate() -> None:
+    try:
+        proc = subprocess.run(
+            ["python3", str(ROOT / "ops" / "plugins" / "core" / "surface" / "bin" / "operator-surface-regenerate")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=90,
+            env=os.environ.copy(),
+        )
+    except Exception as exc:
+        print(f"warning: operator-surface-regenerate exception: {exc}", file=sys.stderr)
+        return
+
+    if proc.returncode != 0:
+        err = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        print(f"warning: operator-surface-regenerate failed: {err}", file=sys.stderr)
+
+
+def _surface_regenerate_worker() -> None:
+    global _REGEN_PENDING, _REGEN_THREAD
+
+    while True:
+        with _REGEN_LOCK:
+            if not _REGEN_PENDING:
+                _REGEN_THREAD = None
+                return
+            _REGEN_PENDING = False
+
+        _run_surface_regenerate()
+
+
+def _request_surface_regenerate_background() -> None:
+    global _REGEN_PENDING, _REGEN_THREAD
+
+    with _REGEN_LOCK:
+        _REGEN_PENDING = True
+        if _REGEN_THREAD is not None and _REGEN_THREAD.is_alive():
+            return
+        _REGEN_THREAD = threading.Thread(
+            target=_surface_regenerate_worker,
+            daemon=True,
+        )
+        _REGEN_THREAD.start()
 
 
 def _render_page(title: str, body: str) -> str:
@@ -59,14 +112,17 @@ def _render_page(title: str, body: str) -> str:
     label {{ display:block; font-size:.85rem; font-weight:600; margin:.8rem 0 .35rem; }}
     input, select, textarea {{
       width:100%; background:#0a111b; color:var(--t); border:1px solid var(--b);
-      border-radius:10px; padding:.75rem; font:inherit;
+      border-radius:10px; padding:.75rem; font:inherit; font-size:16px;
     }}
     textarea {{ min-height:220px; resize:vertical; }}
     .row {{ display:grid; grid-template-columns:1fr 1fr; gap:.75rem; }}
+    @media (max-width:500px) {{ .row {{ grid-template-columns:1fr; }} }}
     .btn {{
-      display:inline-block; background:var(--c); color:#001017; border:none; border-radius:10px;
-      padding:.8rem 1rem; font-weight:700; cursor:pointer; margin-top:1rem;
+      display:block; width:100%; background:var(--c); color:#001017; border:none;
+      border-radius:10px; padding:.9rem 1rem; font-weight:700; font-size:1rem;
+      cursor:pointer; margin-top:1rem; -webkit-appearance:none;
     }}
+    .btn:disabled {{ opacity:.5; cursor:not-allowed; }}
     .note {{ margin-top:1rem; font-size:.8rem; color:var(--m); }}
     .ok {{ border-color:rgba(52,211,153,.35); }}
     .err {{ border-color:rgba(248,113,113,.35); }}
@@ -77,6 +133,19 @@ def _render_page(title: str, body: str) -> str:
     .flash.ok {{ border-color:rgba(52,211,153,.35); color:var(--g); }}
     .flash.err {{ border-color:rgba(248,113,113,.35); color:var(--r); }}
     a {{ color:var(--c); }}
+    .nav {{ display:flex; gap:1rem; margin-bottom:1rem; font-size:.85rem; }}
+    .item {{ background:var(--s); border:1px solid var(--b); border-radius:12px;
+      padding:.75rem; margin-bottom:.6rem; }}
+    .item-id {{ font-family:ui-monospace,monospace; font-size:.75rem; color:var(--c); }}
+    .item-hint {{ font-size:.85rem; margin:.3rem 0; }}
+    .item-meta {{ font-size:.75rem; color:var(--m); }}
+    .badge {{
+      display:inline-block; font-size:.65rem; font-weight:700; padding:.15rem .4rem;
+      border-radius:5px; vertical-align:middle;
+    }}
+    .badge-submitted {{ background:rgba(251,191,36,.15); color:var(--y); }}
+    .badge-classified {{ background:rgba(34,211,238,.15); color:var(--c); }}
+    .badge-routed {{ background:rgba(52,211,153,.15); color:var(--g); }}
   </style>
 </head>
 <body>
@@ -89,17 +158,22 @@ def _render_page(title: str, body: str) -> str:
 
 def _submit_form_html(error: str = "", values: dict[str, str] | None = None) -> str:
     values = values or {}
-    error_html = f'<div class="flash err">{error}</div>' if error else ""
+    error_html = f'<div class="flash err">{_H(error)}</div>' if error else ""
     content_type = values.get("content_type", "note")
-    hint = values.get("operator_hint", "")
-    raw_content = values.get("raw_content", "")
-    source_app = values.get("source_app", "browser")
+    hint = _H(values.get("operator_hint", ""))
+    raw_content = _H(values.get("raw_content", ""))
+    source_app = _H(values.get("source_app", "browser"))
     body = f"""
+    <div class="nav">
+      <a href="/submit"><strong>Submit</strong></a>
+      <a href="/ingress">My Submissions</a>
+      <a href="/">Cockpit</a>
+    </div>
     <div class="card {'err' if error else ''}">
       <h1>Operator Vision Submit</h1>
-      <p class="meta">Creates a non-authoritative operator ingress object in runtime. This preserves raw input and provenance. It does not execute, mutate, or create packets.</p>
+      <p class="meta">Non-authoritative ingress. Preserves raw input. Does not execute or create packets.</p>
       {error_html}
-      <form method="post" action="/submit">
+      <form method="post" action="/submit" id="submitForm">
         <div class="row">
           <div>
             <label for="content_type">Content Type</label>
@@ -119,35 +193,96 @@ def _submit_form_html(error: str = "", values: dict[str, str] | None = None) -> 
         <input type="text" name="operator_hint" id="operator_hint" value="{hint}" placeholder="One-line intent signal">
         <label for="raw_content">Raw Content</label>
         <textarea name="raw_content" id="raw_content" placeholder="Paste thought, note, conversation, transcript, or URL here.">{raw_content}</textarea>
-        <button class="btn" type="submit">Submit To Spine</button>
+        <button class="btn" type="submit" id="submitBtn">Submit To Spine</button>
       </form>
       <div class="note">
-        After submit, the object is preserved in runtime and should appear in the contribution surface immediately.
-        Use <a href="/">cockpit</a> or <a href="/mobile.json">mobile.json</a> to confirm readback.
+        After submit, view <a href="/ingress">your submissions</a> to confirm readback.
       </div>
     </div>
+    <script>
+    (function(){{
+      var form=document.getElementById('submitForm');
+      var btn=document.getElementById('submitBtn');
+      var submitted=false;
+      form.addEventListener('submit',function(event){{
+        if(submitted){{ event.preventDefault(); return; }}
+        submitted=true;
+        btn.disabled=true;
+        btn.textContent='Submitting\u2026';
+      }});
+    }})();
+    </script>
     """
     return _render_page("Operator Vision Submit", body)
 
 
-def _confirmation_html(result: dict, regenerate_note: str = "") -> str:
-    note_html = f'<div class="flash err">{regenerate_note}</div>' if regenerate_note else ""
+def _confirmation_html(result: dict) -> str:
     body = f"""
+    <div class="nav">
+      <a href="/submit">Submit Another</a>
+      <a href="/ingress"><strong>My Submissions</strong></a>
+      <a href="/">Cockpit</a>
+    </div>
     <div class="card ok">
       <h1>Submitted</h1>
-      <p class="meta">Raw operator input was preserved in runtime. No authority was granted.</p>
+      <p class="meta">Raw operator input preserved in runtime. No authority granted.</p>
       <div class="flash ok">
-        <strong>{result['ingress_id']}</strong><br>
-        {result['lifecycle_state']} · {result['disposition']}<br>
-        {result['disposition_detail']}
+        <strong>{_H(result['ingress_id'])}</strong><br>
+        {_H(result['lifecycle_state'])} &middot; {_H(result['disposition'])}<br>
+        {_H(result['disposition_detail'])}
       </div>
-      {note_html}
-      <p><strong>Path:</strong> {result['path']}</p>
-      <p><strong>Hint:</strong> {result.get('operator_hint') or '(none)'}</p>
-      <p><a href="/">Open cockpit</a> · <a href="/mobile.json">Open mobile JSON</a> · <a href="/submit">Submit another</a></p>
+      <p><strong>Hint:</strong> {_H(result.get('operator_hint') or '(none)')}</p>
+      <p style="font-size:.85rem"><a href="/ingress">View all submissions</a> &middot; <a href="/submit">Submit another</a></p>
     </div>
     """
     return _render_page("Ingress Submitted", body)
+
+
+def _ingress_readback_html(state_root: str) -> str:
+    """Phone-readable readback of recent operator ingress objects."""
+    data = oi.list_operator_ingress(state_root=state_root, limit=20)
+    items = data.get("items", [])
+    count = data.get("count", 0)
+
+    rows = ""
+    for item in items:
+        iid = _H(str(item.get("ingress_id", "")))
+        state = str(item.get("lifecycle_state", "submitted"))
+        disposition = _H(str(item.get("disposition", "")))
+        detail = _H(str(item.get("disposition_detail", "")))
+        hint = _H(str(item.get("operator_hint", "")))
+        ctype = _H(str(item.get("content_type", "")))
+        submitted = _H(str(item.get("submitted_at", "")))
+        device = _H(str(item.get("source_device", "")))
+        app = _H(str(item.get("source_app", "")))
+        badge_cls = f"badge-{state}" if state in ("submitted", "classified", "routed") else ""
+        rows += f"""
+        <div class="item">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.3rem">
+            <span class="item-id">{iid}</span>
+            <span class="badge {badge_cls}">{_H(state)}</span>
+          </div>
+          {"<div class='item-hint'>" + hint + "</div>" if hint else ""}
+          <div class="item-meta">{ctype} &middot; {device}/{app} &middot; {submitted}</div>
+          <div class="item-meta">{disposition}: {detail}</div>
+        </div>
+        """
+    if not rows:
+        rows = '<div class="item"><div class="item-meta">No submissions yet.</div></div>'
+
+    body = f"""
+    <div class="nav">
+      <a href="/submit">Submit</a>
+      <a href="/ingress"><strong>My Submissions</strong></a>
+      <a href="/">Cockpit</a>
+    </div>
+    <div class="card">
+      <h1>Recent Submissions</h1>
+      <p class="meta">{count} ingress object{"s" if count != 1 else ""} in runtime. Newest first.</p>
+      {rows}
+    </div>
+    """
+    return _render_page("Operator Ingress", body)
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
@@ -196,26 +331,17 @@ class QuietHandler(SimpleHTTPRequestHandler):
             "source_app": fields.get("source_app", ["browser"])[0],
         }
 
-    def _regenerate_surfaces(self) -> str:
-        try:
-            proc = subprocess.run(
-                ["python3", str(ROOT / "ops" / "plugins" / "core" / "surface" / "bin" / "operator-surface-regenerate")],
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=90,
-                env=os.environ.copy(),
-            )
-        except Exception as exc:
-            return f"warning: surface regenerate failed: {exc}"
-        if proc.returncode != 0:
-            err = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
-            return f"warning: ingress saved but surface regenerate failed: {err}"
-        return ""
+    def _regenerate_surfaces_background(self) -> None:
+        """Queue a coalesced background regenerate without overlapping writers."""
+        _request_surface_regenerate_background()
 
     def do_GET(self):
-        if self.path.rstrip("/") == "/submit":
+        clean = self.path.split("?")[0].rstrip("/")
+        if clean == "/submit":
             self._send_html(200, _submit_form_html())
+            return
+        if clean == "/ingress":
+            self._send_html(200, _ingress_readback_html(str(STATE_ROOT)))
             return
         return super().do_GET()
 
@@ -242,8 +368,8 @@ class QuietHandler(SimpleHTTPRequestHandler):
             self._send_html(400, _submit_form_html(str(exc), payload if 'payload' in locals() else None))
             return
 
-        regenerate_note = self._regenerate_surfaces()
-        self._send_html(200, _confirmation_html(result, regenerate_note))
+        self._regenerate_surfaces_background()
+        self._send_html(200, _confirmation_html(result))
 
 
 def main() -> int:
