@@ -287,16 +287,20 @@ repo = str(workspace.get("repo") or "").strip()
 worktree = str(workspace.get("worktree") or "").strip()
 branch = str(workspace.get("branch") or "").strip()
 lifecycle_state = str(workspace.get("lifecycle_state") or "").strip()
+force_workspace_refresh = "wrapper-managed worktree rehydrate" in workspace_note
 
-if not repo and fallback_repo:
+def missing_path(value: str) -> bool:
+    return not value or not Path(value).exists()
+
+if fallback_repo and (not repo or missing_path(repo) or force_workspace_refresh):
     workspace["repo"] = fallback_repo
     repo = fallback_repo
     changed = True
-if not worktree and fallback_worktree:
+if fallback_worktree and (not worktree or missing_path(worktree) or force_workspace_refresh):
     workspace["worktree"] = fallback_worktree
     worktree = fallback_worktree
     changed = True
-if not branch and fallback_branch:
+if fallback_branch and (not branch or force_workspace_refresh):
     workspace["branch"] = fallback_branch
     branch = fallback_branch
     changed = True
@@ -332,10 +336,12 @@ if not str(state.get("transport") or "").strip() and transport:
 
 gate = packet.get("cross_repo_pushability_gate")
 if isinstance(gate, dict):
-    if repo and not str(gate.get("repo") or "").strip():
+    gate_repo = str(gate.get("repo") or "").strip()
+    gate_branch = str(gate.get("branch") or "").strip()
+    if repo and (not gate_repo or force_workspace_refresh or missing_path(gate_repo)):
         gate["repo"] = repo
         changed = True
-    if branch and not str(gate.get("branch") or "").strip():
+    if branch and (not gate_branch or force_workspace_refresh):
         gate["branch"] = branch
         changed = True
     packet["cross_repo_pushability_gate"] = gate

@@ -4,8 +4,8 @@
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
-source "$(orchestration_root)/ops/lib/runtime-paths.sh"
-spine_runtime_resolve_paths
+source "$(orchestration_root)/ops/lib/spine-paths.sh"
+spine_paths_init
 
 usage() {
   cat <<'USAGE'
@@ -36,7 +36,9 @@ USAGE
 }
 
 ROOT="$(orchestration_root)"
-ENFORCED_PREFIX="/Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine/"
+CANONICAL_ROOT="$(spine_canonical_worktree_root "$ROOT")"
+CANONICAL_ROOT="${CANONICAL_ROOT%/}/"
+ENFORCED_PREFIX="$(spine_canonical_worktree_prefix "$ROOT")"
 LOOP_ID=""
 LANES_CSV=""
 REPO_PATH="$ROOT"
@@ -93,7 +95,7 @@ if [[ -n "$primary_checkout" ]]; then
   primary_checkout="$(cd "$primary_checkout" && pwd -P)"
   [[ "$repo_real" != "$primary_checkout" ]] || kickoff_path_block "main checkout path denied: $repo_real"
 fi
-[[ "$repo_real" == "${ENFORCED_PREFIX}"* ]] || kickoff_path_block "repo path '$repo_real' is outside enforced prefix '$ENFORCED_PREFIX'"
+[[ "$repo_real" == "${CANONICAL_ROOT}"* ]] || kickoff_path_block "repo path '$repo_real' is outside governed worktree root '$CANONICAL_ROOT'"
 wave_leaf="$(basename "$repo_real")"
 [[ "$wave_leaf" =~ ^WAVE-[A-Z0-9._-]+$ ]] || kickoff_path_block "repo path leaf '$wave_leaf' must be explicit WAVE_ID (WAVE-...)"
 

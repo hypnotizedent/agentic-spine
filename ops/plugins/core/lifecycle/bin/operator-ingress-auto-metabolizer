@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""operator-ingress-auto-metabolizer — autonomous W1/W2/W3 ingress worker."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import operator_ingress as oi
+
+
+def _regenerate_surfaces() -> None:
+    subprocess.run(
+        [
+            "python3",
+            str(ROOT / "ops" / "plugins" / "core" / "surface" / "bin" / "operator-surface-regenerate"),
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _run_once(
+    *,
+    state_root: str,
+    worker_id: str,
+    poll_seconds: int,
+    batch_limit: int,
+    regenerate_surfaces: bool,
+    mode: str,
+) -> dict:
+    result = oi.process_pending_operator_ingress(
+        state_root=state_root,
+        batch_limit=batch_limit,
+    )
+    oi.write_operator_ingress_auto_metabolizer_heartbeat(
+        state_root=state_root,
+        worker_id=worker_id,
+        mode=mode,
+        poll_seconds=poll_seconds,
+        batch_limit=batch_limit,
+        last_result=result,
+    )
+    if regenerate_surfaces and int(result.get("processed_count", 0) or 0) > 0:
+        _regenerate_surfaces()
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="operator-ingress-auto-metabolizer",
+        description="Autonomously classify submitted operator ingress objects.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run one bounded processing pass and exit.",
+    )
+    parser.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run as a long-lived polling worker.",
+    )
+    parser.add_argument(
+        "--worker-id",
+        default="operator-ingress-auto-metabolizer",
+        help="Worker identity for heartbeat metadata.",
+    )
+    parser.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=60,
+        help="Foreground poll interval in seconds (default: 60).",
+    )
+    parser.add_argument(
+        "--batch-limit",
+        type=int,
+        default=10,
+        help="Maximum pending ingress objects to process per pass (default: 10).",
+    )
+    parser.add_argument(
+        "--no-regenerate",
+        action="store_true",
+        help="Skip operator surface regeneration after a successful pass.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit JSON output.",
+    )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Verify dependencies and exit.",
+    )
+
+    if "--self-check" in sys.argv:
+        try:
+            import yaml  # noqa: F401
+            print("operator.ingress.auto_metabolize.worker.once self-check PASS")
+            return 0
+        except ImportError as exc:
+            print(
+                f"operator.ingress.auto_metabolize.worker.once self-check FAIL: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+
+    args = parser.parse_args()
+    state_root = os.environ.get("SPINE_STATE", "")
+    if not state_root:
+        msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": msg}, indent=2))
+        else:
+            print(f"operator.ingress.auto_metabolizer FAIL: {msg}", file=sys.stderr)
+        return 1
+
+    regenerate_surfaces = not args.no_regenerate
+    run_foreground = bool(args.foreground)
+    run_once = bool(args.once or not run_foreground)
+
+    try:
+        if run_foreground:
+            while True:
+                _run_once(
+                    state_root=state_root,
+                    worker_id=args.worker_id,
+                    poll_seconds=args.poll_seconds,
+                    batch_limit=args.batch_limit,
+                    regenerate_surfaces=regenerate_surfaces,
+                    mode="foreground",
+                )
+                time.sleep(max(args.poll_seconds, 1))
+        if run_once:
+            result = _run_once(
+                state_root=state_root,
+                worker_id=args.worker_id,
+                poll_seconds=args.poll_seconds,
+                batch_limit=args.batch_limit,
+                regenerate_surfaces=regenerate_surfaces,
+                mode="once",
+            )
+    except KeyboardInterrupt:
+        oi.clear_operator_ingress_auto_metabolizer_runtime(state_root)
+        return 130
+    except oi.OperatorIngressError as exc:
+        oi.clear_operator_ingress_auto_metabolizer_runtime(state_root)
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            print(f"operator.ingress.auto_metabolizer FAIL: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if run_once and not run_foreground:
+            oi.clear_operator_ingress_auto_metabolizer_runtime(state_root)
+
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"processed: {result['processed_count']}")
+        print(f"skipped: {result['skipped_count']}")
+        print(f"pending: {result['pending_count']}")
+        for item in result["processed"]:
+            print(
+                f"- {item['ingress_id']} {item['classification']} "
+                f"{item['disposition']} {item['lifecycle_state']}"
+            )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

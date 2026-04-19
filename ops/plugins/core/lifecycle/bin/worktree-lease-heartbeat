@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
 CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
 
 LEASE_FILENAME=".spine-lane-lease.yaml"
@@ -14,7 +16,7 @@ if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
   LEASE_TTL_HOURS="$(yq e -r '.policy.lease_ttl_hours_default // 24' "$CONTRACT" 2>/dev/null || echo "$LEASE_TTL_HOURS")"
 fi
 
-REPO_ROOT="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")"
+REPO_ROOT="$(spine_git_common_root "$ROOT")"
 BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 LEASE_PATH="$ROOT/$LEASE_FILENAME"
@@ -38,6 +40,7 @@ heartbeat_at: "$NOW"
 ttl_hours: $LEASE_TTL_HOURS
 ---
 LEASENEW
+  spine_ensure_git_exclude "$ROOT" "$LEASE_FILENAME"
   echo "worktree.lease.heartbeat created lease: $LEASE_PATH"
   exit 0
 fi
@@ -90,5 +93,6 @@ for key in ordered:
 out.append("---")
 lease_path.write_text("\n".join(out) + "\n", encoding="utf-8")
 PY
+spine_ensure_git_exclude "$ROOT" "$LEASE_FILENAME"
 
 echo "worktree.lease.heartbeat updated: $LEASE_PATH"

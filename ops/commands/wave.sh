@@ -26,10 +26,10 @@ set -euo pipefail
 # Always resolve from script location — ignore ambient SPINE_REPO to prevent
 # poisoned env vars from redirecting worktree execution to the primary checkout.
 SPINE_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RUNTIME_PATHS_LIB="$SPINE_REPO/ops/lib/runtime-paths.sh"
-[[ -f "$RUNTIME_PATHS_LIB" ]] || { echo "FATAL: runtime-paths.sh not found at $RUNTIME_PATHS_LIB" >&2; exit 1; }
-source "$RUNTIME_PATHS_LIB"
-spine_runtime_resolve_paths
+SPINE_PATHS_LIB="$SPINE_REPO/ops/lib/spine-paths.sh"
+[[ -f "$SPINE_PATHS_LIB" ]] || { echo "FATAL: spine-paths.sh not found at $SPINE_PATHS_LIB" >&2; exit 1; }
+source "$SPINE_PATHS_LIB"
+spine_paths_init
 RUNTIME_ROOT="$SPINE_RUNTIME_ROOT"
 SPINE_STATE="$SPINE_STATE"
 SPINE_OUTBOX="$SPINE_OUTBOX"
@@ -90,23 +90,7 @@ resolve_wave_terminal_identity() {
 resolve_wave_worktree_prefix() {
   local repo_path="${1:-$SPINE_REPO}"
   local lifecycle_contract="$SPINE_REPO/ops/bindings/worktree.lifecycle.contract.yaml"
-  local canonical_root="/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"
-  local repo_root=""
-  local repo_name=""
-
-  repo_root="$(git -C "$repo_path" rev-parse --show-toplevel 2>/dev/null || true)"
-  [[ -n "$repo_root" ]] || repo_root="$SPINE_REPO"
-  repo_name="$(basename "$repo_root")"
-  [[ -n "$repo_name" ]] || repo_name="agentic-spine"
-
-  if command -v yq >/dev/null 2>&1 && [[ -f "$lifecycle_contract" ]]; then
-    canonical_root="$(yq e -r '.policy.canonical_worktree_root // "/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"' "$lifecycle_contract" 2>/dev/null || echo "$canonical_root")"
-  fi
-  if [[ "$canonical_root" == "~/"* ]]; then
-    canonical_root="$HOME/${canonical_root#~/}"
-  fi
-
-  printf '%s/%s/\n' "${canonical_root%/}" "$repo_name"
+  spine_canonical_worktree_prefix "$repo_path" "$lifecycle_contract"
 }
 
 wave_allowed_lanes_csv() {
@@ -999,7 +983,7 @@ PYDEADLINE
   WAVE_START_CREATED_STATEDIR="$sd"
 
   if [[ "$worktree_mode" == "auto" ]]; then
-    workspace_repo="$(git -C "$workspace_repo" rev-parse --show-toplevel 2>/dev/null || true)"
+    workspace_repo="$(spine_git_common_root "$workspace_repo")"
     if [[ -z "$workspace_repo" ]]; then
       echo "Wave '$wave_id' start blocked: --repo is not a git worktree path." >&2
       exit 1
@@ -1115,6 +1099,7 @@ heartbeat_at: "$(ts_now)"
 ttl_hours: $lease_ttl_hours
 ---
 EOF
+    spine_ensure_git_exclude "$workspace_worktree" "$lease_filename"
     workspace_note="${workspace_note:-existing deterministic wave worktree} + lease refreshed"
 
     if command -v release_git_lock >/dev/null 2>&1; then

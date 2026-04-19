@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
 CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
 
 REPO_PATH="$ROOT"
@@ -12,23 +14,7 @@ FORCE=0
 
 resolve_enforced_prefix() {
   local repo_path="${1:-$ROOT}"
-  local canonical_root="/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"
-  local repo_root=""
-  local repo_name=""
-
-  repo_root="$(git -C "$repo_path" rev-parse --show-toplevel 2>/dev/null || true)"
-  [[ -n "$repo_root" ]] || repo_root="$ROOT"
-  repo_name="$(basename "$repo_root")"
-  [[ -n "$repo_name" ]] || repo_name="agentic-spine"
-
-  if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
-    canonical_root="$(yq e -r '.policy.canonical_worktree_root // "/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"' "$CONTRACT" 2>/dev/null || echo "$canonical_root")"
-  fi
-  if [[ "$canonical_root" == "~/"* ]]; then
-    canonical_root="$HOME/${canonical_root#~/}"
-  fi
-
-  printf '%s/%s/\n' "${canonical_root%/}" "$repo_name"
+  spine_canonical_worktree_prefix "$repo_path" "$CONTRACT"
 }
 
 path_policy_block() {
@@ -77,22 +63,18 @@ if [[ -z "$BRANCH" ]]; then
   exit 2
 fi
 
-REPO_ROOT="$(git -C "$REPO_PATH" rev-parse --show-toplevel 2>/dev/null || true)"
+REPO_ROOT="$(spine_git_common_root "$REPO_PATH")"
 if [[ -z "$REPO_ROOT" ]]; then
   echo "FAIL: --repo is not a git repository path: $REPO_PATH" >&2
   exit 1
 fi
 
-CANONICAL_ROOT="/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"
+CANONICAL_ROOT="$(spine_canonical_worktree_root "$REPO_ROOT" "$CONTRACT")"
 LEASE_FILENAME=".spine-lane-lease.yaml"
 LEASE_TTL_HOURS="24"
 if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
-  CANONICAL_ROOT="$(yq e -r '.policy.canonical_worktree_root // "/Users/ronnyworks/code/.runtime/spine/tmp/worktrees"' "$CONTRACT" 2>/dev/null || echo "$CANONICAL_ROOT")"
   LEASE_FILENAME="$(yq e -r '.policy.lease_filename // ".spine-lane-lease.yaml"' "$CONTRACT" 2>/dev/null || echo "$LEASE_FILENAME")"
   LEASE_TTL_HOURS="$(yq e -r '.policy.lease_ttl_hours_default // 24' "$CONTRACT" 2>/dev/null || echo "$LEASE_TTL_HOURS")"
-fi
-if [[ "$CANONICAL_ROOT" == "~/"* ]]; then
-  CANONICAL_ROOT="$HOME/${CANONICAL_ROOT#~/}"
 fi
 
 if [[ -z "$LANE" ]]; then
@@ -186,6 +168,7 @@ heartbeat_at: "$NOW"
 ttl_hours: $LEASE_TTL_HOURS
 ---
 LEASE
+spine_ensure_git_exclude "$TARGET_WT" "$LEASE_FILENAME"
 
 echo "worktree.lifecycle.rehydrate done"
 echo "repo=$REPO_ROOT"

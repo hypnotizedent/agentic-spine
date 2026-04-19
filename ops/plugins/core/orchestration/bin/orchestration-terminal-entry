@@ -4,9 +4,10 @@
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
+source "$(orchestration_root)/ops/lib/spine-paths.sh"
+spine_paths_init
 source "$(orchestration_root)/ops/lib/git-lock.sh"
 acquire_git_lock orchestration
-ENFORCED_PREFIX="/Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine/"
 
 usage() {
   cat <<'USAGE'
@@ -106,6 +107,9 @@ find_branch_worktree() {
 }
 
 ROOT="$(orchestration_root)"
+CANONICAL_ROOT="$(spine_canonical_worktree_root "$ROOT")"
+CANONICAL_ROOT="${CANONICAL_ROOT%/}/"
+ENFORCED_PREFIX="$(spine_canonical_worktree_prefix "$ROOT")"
 LOOP_ID=""
 ROLE=""
 LANE=""
@@ -154,7 +158,7 @@ fi
 [[ -d "$CALLER_WORKTREE" ]] || orchestration_fail "caller worktree does not exist: $CALLER_WORKTREE"
 caller_real="$(cd "$CALLER_WORKTREE" && pwd -P)"
 [[ "$caller_real" != *"/.worktrees/"* ]] || entry_path_block "legacy .worktrees caller denied: $caller_real"
-[[ "$caller_real" == "${ENFORCED_PREFIX}"* ]] || entry_path_block "caller path '$caller_real' is outside enforced prefix '$ENFORCED_PREFIX'"
+[[ "$caller_real" == "${CANONICAL_ROOT}"* ]] || entry_path_block "caller path '$caller_real' is outside governed worktree root '$CANONICAL_ROOT'"
 caller_wave_id="$(basename "$caller_real")"
 [[ "$caller_wave_id" =~ ^WAVE-[A-Z0-9._-]+$ ]] || entry_path_block "caller path leaf '$caller_wave_id' must be explicit WAVE_ID (WAVE-...)"
 
@@ -211,7 +215,7 @@ if [[ -n "$occupied_wt" && "$occupied_wt" != "$target_worktree" ]]; then
     target_worktree="$occupied_wt"
   elif [[ "$occupied_wt" == *"/.worktrees/"* || "$occupied_wt" == "$repo" ]]; then
     entry_path_block "branch '$target_branch' already checked out at non-compliant path '$occupied_wt'"
-  elif [[ "$occupied_wt" == "${ENFORCED_PREFIX}"* ]]; then
+  elif [[ "$occupied_wt" == "${CANONICAL_ROOT}"* ]]; then
     target_worktree="$occupied_wt"
   elif [[ "$FORCE" -eq 1 ]]; then
     entry_path_block "force cannot reuse non-compliant occupied worktree '$occupied_wt'"

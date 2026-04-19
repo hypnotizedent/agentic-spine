@@ -280,17 +280,21 @@ manifest_path = root / "ops/plugins/MANIFEST.yaml"
 data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
 
 # Plugins whose capability advertising MUST stay truthful.
-CAP_PARITY_ALLOWLIST = {"alerting"}
+CAP_PARITY_ALLOWLIST = {"alerting", "orchestration"}
 
 cap_registry_path = root / "ops/capabilities.yaml"
 known_caps = set()
 if cap_registry_path.is_file():
     reg = yaml.safe_load(cap_registry_path.read_text(encoding="utf-8")) or {}
-    for cap in reg.get("capabilities") or []:
-        if isinstance(cap, dict):
-            name = str(cap.get("id") or cap.get("name") or "").strip()
-            if name:
-                known_caps.add(name)
+    caps = reg.get("capabilities") or {}
+    if isinstance(caps, dict):
+        known_caps.update(str(name).strip() for name in caps.keys() if str(name).strip())
+    else:
+        for cap in caps:
+            if isinstance(cap, dict):
+                name = str(cap.get("id") or cap.get("name") or "").strip()
+                if name:
+                    known_caps.add(name)
 
 missing_scripts = []
 missing_caps = []
