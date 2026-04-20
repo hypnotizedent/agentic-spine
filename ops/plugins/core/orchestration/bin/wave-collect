@@ -18,7 +18,7 @@ allowed_lanes_csv="$9"
 traffic_index_file="${10}"
 
 python3 - "$sf" "$sd" "$receipts_dir" "$mailroom_task_root" "$schema_path" "$sync_roadmap" "$spine_repo" "$role_runtime_contract" "$allowed_lanes_csv" <<'PYCOLLECT2'
-import json, sys, os, re, glob, fcntl, yaml
+import json, sys, os, re, glob, fcntl, yaml, tempfile
 from datetime import datetime, timezone
 
 run_key_patterns_text = [r"^(CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"]
@@ -125,6 +125,34 @@ def _validate_receipt(receipt):
         if k not in allowed:
             errors.append(f"unknown field: {k}")
     return errors
+
+
+def _atomic_write_json(path, payload):
+    dirpath = os.path.dirname(path) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dirpath)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 sf = sys.argv[1]
 sd = sys.argv[2]
@@ -586,16 +614,169 @@ summary = {
 }
 
 summary_path = os.path.join(sd, "collect-summary.json")
-with open(summary_path, "w") as f:
-    json.dump(summary, f, indent=2)
-    f.write("\n")
+_atomic_write_json(summary_path, summary)
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
 try:
     fcntl.flock(fd, fcntl.LOCK_EX)
-    with open(sf, "w") as f:
-        json.dump(state, f, indent=2)
-        f.write("\n")
+    try:
+        with open(sf) as f:
+            current_state = json.load(f)
+    except json.JSONDecodeError:
+        current_state = {}
+    if not isinstance(current_state, dict):
+        current_state = {}
+
+    current_dispatches = current_state.get("dispatches") if isinstance(current_state.get("dispatches"), list) else []
+    updated_dispatches_by_task = {}
+    for row in dispatches:
+        if not isinstance(row, dict):
+            continue
+        task_id = str(row.get("task_id") or row.get("task") or "").strip()
+        if task_id:
+            updated_dispatches_by_task[task_id] = row
+
+    merged_dispatches = []
+    seen_dispatch_ids = set()
+    for row in current_dispatches:
+        if not isinstance(row, dict):
+            merged_dispatches.append(row)
+            continue
+        task_id = str(row.get("task_id") or row.get("task") or "").strip()
+        if task_id and task_id in updated_dispatches_by_task:
+            merged = dict(row)
+            merged.update(updated_dispatches_by_task[task_id])
+            merged_dispatches.append(merged)
+            seen_dispatch_ids.add(task_id)
+        else:
+            merged_dispatches.append(row)
+            if task_id:
+                seen_dispatch_ids.add(task_id)
+    for task_id, row in updated_dispatches_by_task.items():
+        if task_id not in seen_dispatch_ids:
+            merged_dispatches.append(row)
+
+    current_packet = current_state.get("packet") if isinstance(current_state.get("packet"), dict) else {}
+    merged_packet = dict(current_packet)
+    current_lane_outcomes = current_packet.get("lane_outcomes") if isinstance(current_packet.get("lane_outcomes"), list) else []
+    merged_lane_outcomes_by_id = {}
+    for row in current_lane_outcomes:
+        if not isinstance(row, dict):
+            continue
+        lane_id = str(row.get("lane_id", "")).strip()
+        if lane_id:
+            merged_lane_outcomes_by_id[lane_id] = dict(row)
+    for row in lane_outcomes:
+        if not isinstance(row, dict):
+            continue
+        lane_id = str(row.get("lane_id", "")).strip()
+        if not lane_id:
+            continue
+        merged_row = dict(merged_lane_outcomes_by_id.get(lane_id, {}))
+        for key, value in row.items():
+            if key == "stub_evidence_ref" and not value and merged_row.get(key):
+                continue
+            merged_row[key] = value
+        merged_lane_outcomes_by_id[lane_id] = merged_row
+    for key, value in packet.items():
+        if key == "lane_outcomes":
+            continue
+        merged_packet[key] = value
+    merged_packet["lane_outcomes"] = list(merged_lane_outcomes_by_id.values())
+
+    current_results = current_state.get("results") if isinstance(current_state.get("results"), list) else []
+    existing_current_rks = {r["run_key"] for r in current_results if isinstance(r, dict) and r.get("run_key")}
+    for result_row in state.get("results", []) if isinstance(state.get("results"), list) else []:
+        if not isinstance(result_row, dict):
+            continue
+        run_key = str(result_row.get("run_key", "")).strip()
+        if run_key and run_key not in existing_current_rks:
+            current_results.append(result_row)
+            existing_current_rks.add(run_key)
+
+    merged_role_flow = current_state.get("role_flow") if isinstance(current_state.get("role_flow"), dict) else {}
+    completed_merged = [
+        d for d in merged_dispatches
+        if isinstance(d, dict) and str(d.get("status", "")).strip() == "done"
+    ]
+    lifecycle_state = str(current_state.get("lifecycle_state", "active")).strip() or "active"
+    if completed_merged:
+        def _dispatch_order(dispatch):
+            task_id = str(dispatch.get("task_id", "")).strip()
+            if task_id.startswith("D") and task_id[1:].isdigit():
+                return int(task_id[1:])
+            return 0
+        completed_merged.sort(key=lambda d: (_dispatch_order(d), str(d.get("completed_at") or d.get("dispatched_at") or "")))
+        last_done = completed_merged[-1]
+        close_done = [
+            d for d in completed_merged
+            if str(d.get("to_role", "")).strip() in close_aliases
+        ]
+        if close_done:
+            close_done.sort(key=lambda d: (_dispatch_order(d), str(d.get("completed_at") or d.get("dispatched_at") or "")))
+            last_done = close_done[-1]
+        last_to_role = str(last_done.get("to_role", "")).strip()
+        last_from_role = str(last_done.get("from_role", "")).strip()
+        promotion_next = promotion_next_by_role.get(last_to_role, "")
+        if last_to_role:
+            merged_role_flow["current_role"] = last_to_role
+        elif last_from_role and not merged_role_flow.get("current_role"):
+            merged_role_flow["current_role"] = last_from_role
+        if promotion_next:
+            merged_role_flow["next_role"] = promotion_next
+        elif last_to_role in close_aliases:
+            merged_role_flow["next_role"] = ""
+        elif last_to_role:
+            merged_role_flow["next_role"] = last_to_role
+        merged_role_flow["last_transition"] = {
+            "task_id": last_done.get("task_id"),
+            "from_role": last_from_role,
+            "to_role": last_to_role,
+            "completed_at": last_done.get("completed_at"),
+            "run_key": last_done.get("run_key"),
+        }
+        merged_role_flow.pop("pending_transition", None)
+
+        for d in completed_merged:
+            to_role = str(d.get("to_role", "")).strip()
+            if to_role == "worker" and lifecycle_state == "active":
+                lifecycle_state = "implemented"
+            elif to_role == "qc" and lifecycle_state == "active":
+                lifecycle_state = "implemented"
+            elif to_role in close_aliases and lifecycle_state in {"active", "implemented"}:
+                lifecycle_state = "validated"
+
+    resolved_dispatch_ids = {
+        str(d.get("task_id", "")).strip()
+        for d in merged_dispatches
+        if isinstance(d, dict) and str(d.get("status", "")).strip() in {"done", "failed", "blocked"}
+    }
+    pending_transition = merged_role_flow.get("pending_transition") if isinstance(merged_role_flow.get("pending_transition"), dict) else {}
+    pending_transition_task_id = str(pending_transition.get("task_id", "")).strip()
+    if pending_transition_task_id and pending_transition_task_id in resolved_dispatch_ids:
+        merged_role_flow.pop("pending_transition", None)
+
+    pending_transitions = [
+        d for d in merged_dispatches
+        if isinstance(d, dict) and str(d.get("status", "")).strip() == "dispatched" and str(d.get("to_role", "")).strip()
+    ]
+    if pending_transitions:
+        pending_transitions.sort(key=lambda d: str(d.get("dispatched_at") or ""))
+        merged_role_flow["next_role"] = str(pending_transitions[0].get("to_role", "")).strip()
+    elif str(merged_role_flow.get("current_role", "")).strip() in close_aliases:
+        merged_role_flow["next_role"] = ""
+
+    current_state["dispatches"] = merged_dispatches
+    current_state["packet"] = merged_packet
+    current_state["wave_packet"] = merged_packet
+    current_state["role_flow"] = merged_role_flow
+    current_state["lifecycle_state"] = lifecycle_state
+    current_state["last_collect"] = state["last_collect"]
+    current_state["status"] = state.get("status", current_state.get("status", "active"))
+    current_state["wave_id"] = state.get("wave_id", current_state.get("wave_id", ""))
+    current_state["results"] = current_results
+
+    _atomic_write_json(sf, current_state)
 finally:
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)

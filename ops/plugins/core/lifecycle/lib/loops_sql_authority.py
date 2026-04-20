@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sqlite3
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ ENV_SCOPES_DIR = "LOOPS_SCOPES_DIR"
 DEFAULT_SCOPES_DIR_REL = "loop-scopes"
 DEFAULT_SCOPES_ARCHIVE_DIR_REL = "archive/closed-loop-scopes"
 DEFAULT_SCOPES_QUARANTINE_DIR_REL = "quarantine/loop-scopes"
+DEFAULT_SCOPE_PROJECTION_LOCK_NAME = ".loops-scope-projection.lock"
 LIVE_SCOPE_STATUSES = {"active", "planned", "draft", "open"}
 ARCHIVED_SCOPE_STATUSES = {
     "closed",
@@ -108,6 +110,69 @@ def resolve_scope_archive_dir(scopes_dir: Path) -> Path:
 
 def resolve_scope_quarantine_dir(scopes_dir: Path) -> Path:
     return scopes_dir.parent / DEFAULT_SCOPES_QUARANTINE_DIR_REL
+
+
+def resolve_scope_projection_lock_path(scopes_dir: Path) -> Path:
+    return scopes_dir.parent / DEFAULT_SCOPE_PROJECTION_LOCK_NAME
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=str(path.parent),
+        delete=False,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    ) as tmp:
+        tmp.write(text)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = Path(tmp.name)
+    try:
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+class _ProjectionLock:
+    def __init__(self, lock_path: Path):
+        self._lock_path = lock_path
+        self._fh: Any | None = None
+
+    def __enter__(self) -> "_ProjectionLock":
+        import fcntl
+
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = self._lock_path.open("a+", encoding="utf-8")
+        fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        self._fh.seek(0)
+        self._fh.truncate()
+        self._fh.write(f"{os.getpid()}\n")
+        self._fh.flush()
+        os.fsync(self._fh.fileno())
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        import fcntl
+
+        if self._fh is None:
+            return None
+        try:
+            self._fh.seek(0)
+            self._fh.truncate()
+            self._fh.flush()
+            os.fsync(self._fh.fileno())
+        finally:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            self._fh.close()
+            self._fh = None
+        return None
 
 
 def iter_scope_projection_files(scopes_dir: Path) -> list[Path]:
@@ -1291,91 +1356,91 @@ def project_to_scope_files(
     into $SPINE_STATE/archive/closed-loop-scopes/ and are removed from the live
     scope directory so later projections do not resurrect closed residue.
     """
-    residue_repair = repair_live_scope_residue(conn, scopes_dir)
-    all_loops = list_loops(conn)
-    scopes_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = resolve_scope_projection_lock_path(scopes_dir)
+    with _ProjectionLock(lock_path):
+        residue_repair = repair_live_scope_residue(conn, scopes_dir)
+        all_loops = list_loops(conn)
+        scopes_dir.mkdir(parents=True, exist_ok=True)
 
-    projected = 0
-    archived_projected = 0
-    archive_dir = resolve_scope_archive_dir(scopes_dir)
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    for loop in all_loops:
-        loop_id = loop.get("loop_id", "")
-        if not loop_id:
-            continue
+        projected = 0
+        archived_projected = 0
+        archive_dir = resolve_scope_archive_dir(scopes_dir)
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        for loop in all_loops:
+            loop_id = loop.get("loop_id", "")
+            if not loop_id:
+                continue
 
-        scope_path = scopes_dir / f"{loop_id}.scope.md"
-        archive_path = archive_dir / f"{loop_id}.scope.md"
-        status = str(loop.get("status") or "").strip().lower()
-        is_archived = is_archived_scope_status(status)
-        target_path = archive_path if is_archived else scope_path
-        stale_path = scope_path if is_archived else archive_path
+            scope_path = scopes_dir / f"{loop_id}.scope.md"
+            archive_path = archive_dir / f"{loop_id}.scope.md"
+            status = str(loop.get("status") or "").strip().lower()
+            is_archived = is_archived_scope_status(status)
+            target_path = archive_path if is_archived else scope_path
+            stale_path = scope_path if is_archived else archive_path
 
-        existing_text = _select_existing_scope_text([scope_path, archive_path])
-        if existing_text is not None:
-            fm = _parse_scope_frontmatter(existing_text)
-            if fm is not None:
-                # Replace frontmatter, keep body.
-                lines = existing_text.splitlines()
-                end_idx = None
-                for idx in range(1, len(lines)):
-                    if lines[idx].strip() == "---":
-                        end_idx = idx
-                        break
-                if end_idx is not None:
-                    body_lines = lines[end_idx + 1:]
-                    new_fm = loop_to_frontmatter(loop)
-                    for extra_key in ("closed_at", "disposition", "completion_level", "exclusions", "supersedes"):
-                        if extra_key in loop and loop[extra_key] is not None:
-                            new_fm[extra_key] = loop[extra_key]
-                    fm_text = yaml.safe_dump(new_fm, sort_keys=False, allow_unicode=False).rstrip("\n")
-                    synced_body = _sync_current_state_section("\n".join(body_lines), loop)
-                    new_text = "---\n" + fm_text + "\n---\n" + synced_body
-                    if not new_text.endswith("\n"):
-                        new_text += "\n"
-                    target_path.parent.mkdir(parents=True, exist_ok=True)
-                    target_path.write_text(new_text, encoding="utf-8")
-                    if stale_path.exists():
-                        stale_path.unlink()
-                    projected += 1
-                    if is_archived:
-                        archived_projected += 1
-                    continue
+            existing_text = _select_existing_scope_text([scope_path, archive_path])
+            if existing_text is not None:
+                fm = _parse_scope_frontmatter(existing_text)
+                if fm is not None:
+                    # Replace frontmatter, keep body.
+                    lines = existing_text.splitlines()
+                    end_idx = None
+                    for idx in range(1, len(lines)):
+                        if lines[idx].strip() == "---":
+                            end_idx = idx
+                            break
+                    if end_idx is not None:
+                        body_lines = lines[end_idx + 1:]
+                        new_fm = loop_to_frontmatter(loop)
+                        for extra_key in ("closed_at", "disposition", "completion_level", "exclusions", "supersedes"):
+                            if extra_key in loop and loop[extra_key] is not None:
+                                new_fm[extra_key] = loop[extra_key]
+                        fm_text = yaml.safe_dump(new_fm, sort_keys=False, allow_unicode=False).rstrip("\n")
+                        synced_body = _sync_current_state_section("\n".join(body_lines), loop)
+                        new_text = "---\n" + fm_text + "\n---\n" + synced_body
+                        if not new_text.endswith("\n"):
+                            new_text += "\n"
+                        _atomic_write_text(target_path, new_text)
+                        if stale_path.exists():
+                            stale_path.unlink()
+                        projected += 1
+                        if is_archived:
+                            archived_projected += 1
+                        continue
 
-        # For new files (or files without valid frontmatter), render from scratch.
-        rendered = _render_scope_file(loop)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(rendered, encoding="utf-8")
-        if stale_path.exists():
-            stale_path.unlink()
-        projected += 1
-        if is_archived:
-            archived_projected += 1
+            # For new files (or files without valid frontmatter), render from scratch.
+            rendered = _render_scope_file(loop)
+            _atomic_write_text(target_path, rendered)
+            if stale_path.exists():
+                stale_path.unlink()
+            projected += 1
+            if is_archived:
+                archived_projected += 1
 
-    # Compute combined hash for watermark.
-    combined_text = ""
-    for sf in iter_scope_projection_files(scopes_dir):
-        try:
-            combined_text += sf.read_text(encoding="utf-8")
-        except Exception:
-            continue
-    combined_hash = sha256_text(combined_text)
-    update_watermark(conn, "scope_files", combined_hash)
-    conn.commit()
+        # Compute combined hash for the locked on-disk snapshot and update the watermark.
+        combined_text = ""
+        for sf in iter_scope_projection_files(scopes_dir):
+            try:
+                combined_text += sf.read_text(encoding="utf-8")
+            except Exception:
+                continue
+        combined_hash = sha256_text(combined_text)
+        update_watermark(conn, "scope_files", combined_hash)
+        conn.commit()
 
-    active_count = sum(1 for l in all_loops if is_live_scope_status(l.get("status")))
-    closed_count = sum(1 for l in all_loops if is_archived_scope_status(l.get("status")))
+        active_count = sum(1 for l in all_loops if is_live_scope_status(l.get("status")))
+        closed_count = sum(1 for l in all_loops if is_archived_scope_status(l.get("status")))
 
-    return {
-        "total": len(all_loops),
-        "active": active_count,
-        "closed": closed_count,
-        "projected": projected,
-        "archived_projected": archived_projected,
-        "archive_dir": str(archive_dir),
-        "residue_repair": residue_repair,
-        "scope_files_hash": combined_hash,
-    }
+        return {
+            "total": len(all_loops),
+            "active": active_count,
+            "closed": closed_count,
+            "projected": projected,
+            "archived_projected": archived_projected,
+            "archive_dir": str(archive_dir),
+            "residue_repair": residue_repair,
+            "scope_files_hash": combined_hash,
+        }
 
 
 # -- Parity snapshot -----------------------------------------------------------

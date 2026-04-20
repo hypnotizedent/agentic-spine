@@ -888,16 +888,31 @@ try:
             if completion_level:
                 _plan_tx["completion_level"] = completion_level
 
-            _lane_outcomes = []
+            _lane_outcomes_by_id = {}
+            _existing_lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
+            for row in _existing_lane_outcomes:
+                if not isinstance(row, dict):
+                    continue
+                _lane_id = str(row.get("lane_id", "")).strip()
+                if not _lane_id:
+                    continue
+                _lane_outcomes_by_id[_lane_id] = dict(row)
             for d in dispatches:
+                _lane_id = str(d.get("lane", "")).strip()
+                if not _lane_id:
+                    continue
                 _lo_status = "INTEGRATED" if d.get("status") == "done" else d.get("status", "DISPATCHED").upper()
-                _lane_outcomes.append({
-                    "lane_id": d.get("lane", ""),
-                    "owner_terminal": str(packet.get("owner_terminal", "")),
-                    "lane_status": _lo_status,
-                    "stub_evidence_ref": "",
-                    "updated_at_utc": now,
-                })
+                _lane_outcome = dict(_lane_outcomes_by_id.get(_lane_id, {}))
+                _lane_outcome["lane_id"] = _lane_id
+                _lane_outcome["owner_terminal"] = str(
+                    _lane_outcome.get("owner_terminal")
+                    or packet.get("owner_terminal", "")
+                )
+                _lane_outcome["lane_status"] = _lo_status
+                _lane_outcome["stub_evidence_ref"] = str(_lane_outcome.get("stub_evidence_ref", "") or "")
+                _lane_outcome["updated_at_utc"] = now
+                _lane_outcomes_by_id[_lane_id] = _lane_outcome
+            _lane_outcomes = list(_lane_outcomes_by_id.values())
 
             _evidence = {
                 "reconciliation_summary": _recon,

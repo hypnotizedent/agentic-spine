@@ -635,7 +635,7 @@ def apply_synthetic_fast_close(
     state: dict,
     packet: dict,
 ) -> None:
-    """Clear ceremony-only violations for synthetic/engineering waves.
+    """Clear ceremony-only violations for synthetic waves.
 
     Mutates violations in-place. Sets default DoD if absent.
     """
@@ -794,7 +794,7 @@ def validate_close(
     violations = CloseViolations()
 
     _wave_kind = str(state.get("wave_kind") or "production").strip()
-    is_synthetic = _wave_kind in ("synthetic", "engineering")
+    is_synthetic = _wave_kind == "synthetic"
     checks = state.get("watcher_checks", [])
     pf = state.get("preflight")
     dispatches = state.get("dispatches", [])
