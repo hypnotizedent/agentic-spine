@@ -228,6 +228,39 @@ _pending_proposals_for_loop() {
     fi
 }
 
+# Return the canonical loop status from SQLite authority when available.
+# Falls back to an empty string if the authority bridge is missing or unreadable.
+_loop_authority_status() {
+    local loop_id="$1"
+    local LOOPS_BRIDGE="$SPINE_REPO/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
+    local row_json=""
+
+    [[ -x "$LOOPS_BRIDGE" ]] || {
+        echo ""
+        return 0
+    }
+
+    row_json="$(python3 "$LOOPS_BRIDGE" query --id "$loop_id" 2>/dev/null || true)"
+    [[ -n "$row_json" ]] || {
+        echo ""
+        return 0
+    }
+
+    python3 - "$row_json" <<'PY'
+import json
+import sys
+
+try:
+    payload = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(0)
+
+status = str(payload.get("status", "")).strip().lower()
+if status:
+    print(status)
+PY
+}
+
 # ── List loops ────────────────────────────────────────────────────────────
 list_loops() {
     local filter="${1:---open}"
@@ -456,8 +489,11 @@ close_loop() {
     fi
 
     local current_status
-    current_status="$(_fm_field "$scope_file" "status")"
-    if [[ "$current_status" == "closed" ]]; then
+    current_status="$(_loop_authority_status "$loop_id")"
+    if [[ -z "$current_status" ]]; then
+        current_status="$(_fm_field "$scope_file" "status")"
+    fi
+    if _is_closed_status "$current_status"; then
         echo "ALREADY CLOSED: $loop_id"
         return 0
     fi

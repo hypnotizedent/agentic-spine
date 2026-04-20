@@ -40,6 +40,12 @@ DB_PATH="${PLANS_DB_PATH:-$SPINE_STATE/shared_authority.db}"
 SNAPSHOT_DIR="$SPINE_STATE/plans/_snapshots"
 mkdir -p "$SNAPSHOT_DIR"
 
+file_sha256() {
+  local path="${1:-}"
+  [[ -n "$path" && -f "$path" ]] || return 1
+  sha256sum "$path" 2>/dev/null | awk '{print $1}' || return 1
+}
+
 integrity_json="$(python3 - "$ROOT" <<'PY'
 import json
 import sys
@@ -76,10 +82,12 @@ if [[ "$integrity_ok" != "true" ]]; then
 fi
 
 snapshot_file=""
+snapshot_file_hash=""
 if [[ "$MODE" == "fix" && -f "$DB_PATH" ]]; then
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   snapshot_file="$SNAPSHOT_DIR/shared_authority.${ts}.db"
   cp "$DB_PATH" "$snapshot_file"
+  snapshot_file_hash="$(file_sha256 "$snapshot_file" || true)"
 fi
 
 attempt=0
@@ -115,7 +123,12 @@ else
     fix_payload="$(tail -n +2 <<<"$fix_result")"
     if [[ "$fix_rc" -ne 0 ]]; then
       if [[ -n "$snapshot_file" && -f "$snapshot_file" ]]; then
-        cp "$snapshot_file" "$DB_PATH"
+        current_db_hash="$(file_sha256 "$DB_PATH" || true)"
+        if [[ -n "$snapshot_file_hash" && -n "$current_db_hash" && "$current_db_hash" == "$snapshot_file_hash" ]]; then
+          cp "$snapshot_file" "$DB_PATH"
+        else
+          echo "WARN: Skipping snapshot restore because shared authority DB changed during reconcile" >&2
+        fi
       fi
       break
     fi

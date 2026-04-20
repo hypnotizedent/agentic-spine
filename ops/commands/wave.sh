@@ -1127,6 +1127,7 @@ PYCLAIMS
   python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$prior_wave_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" "$packet_allowed_roles" "$PATH_CLAIMS_FILE" "$PATH_CLAIMS_TTL_MINUTES" "$PATH_CLAIMS_NON_OVERLAP" "$wave_kind" <<'PYSTART'
 import json, sys
 import os
+import tempfile
 import fcntl
 from datetime import datetime, timedelta, timezone
 
@@ -1247,6 +1248,35 @@ def _save_doc(path: str, payload: dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
         f.write("\n")
+
+def _atomic_write_json(path: str, payload: dict) -> None:
+    if not path:
+        return
+    dirpath = os.path.dirname(path) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dirpath)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 def _normalize_path(p: str) -> str:
     text = str(p or "").strip()
@@ -1397,9 +1427,7 @@ state = {
     "wave_packet": packet,
 }
 
-with open(sf, "w") as f:
-    json.dump(state, f, indent=2)
-    f.write("\n")
+_atomic_write_json(sf, state)
 
 print(f"Wave '{wave_id}' created.")
 if objective:
@@ -1454,6 +1482,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 sf = sys.argv[1]
@@ -1464,6 +1493,35 @@ now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 def run(cmd):
     proc = subprocess.run(cmd, text=True, capture_output=True)
     return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+
+def _atomic_write_json(path, payload):
+    if not path:
+        return
+    dirpath = os.path.dirname(path) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dirpath)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 state = json.load(open(sf, "r", encoding="utf-8"))
 workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
@@ -1513,9 +1571,7 @@ if workspace_disabled or execution_mode == "operational" or transport == "mailro
     }
     state["packet"] = packet
     state["wave_packet"] = packet
-    with open(sf, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
-        f.write("\n")
+    _atomic_write_json(sf, state)
 
     skip_reason = "workspace_disabled" if workspace_disabled else "operational_or_mailroom_transport"
     print(
@@ -1644,9 +1700,7 @@ if errors:
 
     state["packet"] = packet
     state["wave_packet"] = packet
-    with open(sf, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
-        f.write("\n")
+    _atomic_write_json(sf, state)
 
     print("BLOCKED: dispatch pushability preflight failed")
     for msg in errors:
@@ -1666,9 +1720,7 @@ state["preflight"] = {
     "blockers": [],
     "next_action": "Proceed with dispatch.",
 }
-with open(sf, "w", encoding="utf-8") as f:
-    json.dump(state, f, indent=2)
-    f.write("\n")
+_atomic_write_json(sf, state)
 
 print(f"dispatch pushability preflight: PASS repo={repo} branch={branch} remote={remote}")
 PYPUSHGATE
@@ -1957,9 +2009,7 @@ try:
     }
     state["role_flow"] = role_flow
 
-    with open(sf, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
-        f.write("\n")
+    _atomic_write_json(sf, state)
 finally:
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
@@ -2526,6 +2576,7 @@ PYDISPATCHMODE
 
   python3 - "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json" "$dispatch_terminal_identity" <<'PYDISP'
 import json, sys, fcntl, os
+import tempfile
 from datetime import datetime, timezone
 
 sf = sys.argv[1]
@@ -2538,6 +2589,35 @@ input_refs = json.loads(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] else {
 expected_output_refs = json.loads(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8] else {}
 dispatched_by_terminal = sys.argv[9] if len(sys.argv) > 9 else ""
 lock_file = sf + ".lock"
+
+def _atomic_write_json(path, payload):
+    if not path:
+        return
+    dirpath = os.path.dirname(path) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dirpath)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
 try:
@@ -2609,9 +2689,7 @@ try:
     }
     state["role_flow"] = role_flow
 
-    with open(sf, "w") as f:
-        json.dump(state, f, indent=2)
-        f.write("\n")
+    _atomic_write_json(sf, state)
 finally:
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
@@ -2642,11 +2720,41 @@ _dispatch_watcher() {
 
   python3 - "$sf" "$task_desc" <<'PYWATCHER_INIT'
 import json, sys, fcntl, os
+import tempfile
 from datetime import datetime, timezone
 
 sf = sys.argv[1]
 task_desc = sys.argv[2]
 lock_file = sf + ".lock"
+
+def _atomic_write_json(path, payload):
+    if not path:
+        return
+    dirpath = os.path.dirname(path) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dirpath)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
 try:
@@ -2670,9 +2778,7 @@ try:
         "run_key": None
     })
 
-    with open(sf, "w") as f:
-        json.dump(state, f, indent=2)
-        f.write("\n")
+    _atomic_write_json(sf, state)
 finally:
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
@@ -2714,11 +2820,41 @@ _launch_background_check() {
   # Mark as running (with file lock)
   python3 - "$sf" "$cap_cmd" "$my_pid" <<'PYMARK_RUN'
 import json, sys, fcntl, os
+import tempfile
 
 sf = sys.argv[1]
 cap = sys.argv[2]
 pid = int(sys.argv[3])
 lock_file = sf + ".lock"
+
+def _atomic_write_json(path, payload):
+    if not path:
+        return
+    dirpath = os.path.dirname(path) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dirpath)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
 try:
@@ -2730,9 +2866,7 @@ try:
             c["status"] = "running"
             c["pid"] = pid
             break
-    with open(sf, "w") as f:
-        json.dump(state, f, indent=2)
-        f.write("\n")
+    _atomic_write_json(sf, state)
 finally:
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
@@ -2762,6 +2896,7 @@ PYMARK_RUN
 
   python3 - "$sf" "$cap_cmd" "$final_status" "$exit_code" "$run_key" <<'PYMARK_DONE'
 import json, sys, fcntl, os
+import tempfile
 from datetime import datetime, timezone
 
 sf = sys.argv[1]
@@ -2771,6 +2906,35 @@ exit_code = int(sys.argv[4])
 run_key = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] else None
 now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 lock_file = sf + ".lock"
+
+def _atomic_write_json(path, payload):
+    if not path:
+        return
+    dirpath = os.path.dirname(path) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dirpath)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
 try:
@@ -2784,9 +2948,7 @@ try:
             c["run_key"] = run_key
             c["completed_at"] = now
             break
-    with open(sf, "w") as f:
-        json.dump(state, f, indent=2)
-        f.write("\n")
+    _atomic_write_json(sf, state)
 finally:
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
@@ -2920,6 +3082,7 @@ cmd_ack() {
 _cmd_close_was_here() { :; }
 : <<'PYCLOSE'
 import json, sys, os, fcntl
+import tempfile
 from datetime import datetime, timezone
 
 sf = sys.argv[1]
@@ -2927,6 +3090,35 @@ sd = sys.argv[2]
 force = sys.argv[3] == "true"
 spine_repo = sys.argv[4] if len(sys.argv) > 4 else ""
 lock_file = sf + ".lock"
+
+def _atomic_write_json(path, payload):
+    if not path:
+        return
+    dirpath = os.path.dirname(path) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dirpath)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
 try:
@@ -3041,9 +3233,7 @@ try:
         workspace["close_action"] = "explicit_cleanup_required"
         state["workspace"] = workspace
 
-    with open(sf, "w") as f:
-        json.dump(state, f, indent=2)
-        f.write("\n")
+    _atomic_write_json(sf, state)
 finally:
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
@@ -3421,6 +3611,8 @@ cmd_preflight() {
   if [[ -n "$active_wave_sf" && -f "$active_wave_sf" ]]; then
     python3 -c "
 import json
+import os
+import tempfile
 sf = '$active_wave_sf'
 with open(sf) as f:
     state = json.load(f)
@@ -3438,9 +3630,31 @@ state['preflight'] = {
     'next_action': '$next_action',
     'checked_at': '$(ts_now)'
 }
-with open(sf, 'w') as f:
-    json.dump(state, f, indent=2)
-    f.write('\n')
+dirpath = os.path.dirname(sf) or '.'
+os.makedirs(dirpath, exist_ok=True)
+fd_tmp = None
+tmp_path = None
+try:
+    fd_tmp, tmp_path = tempfile.mkstemp(prefix='.state-', suffix='.tmp', dir=dirpath)
+    with os.fdopen(fd_tmp, 'w', encoding='utf-8') as f:
+        json.dump(state, f, indent=2)
+        f.write('\n')
+        f.flush()
+        os.fsync(f.fileno())
+    fd_tmp = None
+    os.replace(tmp_path, sf)
+    tmp_path = None
+finally:
+    if fd_tmp is not None:
+        try:
+            os.close(fd_tmp)
+        except OSError:
+            pass
+    if tmp_path is not None:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
 " 2>/dev/null || true
     echo
     echo "  Preflight attached to active wave."

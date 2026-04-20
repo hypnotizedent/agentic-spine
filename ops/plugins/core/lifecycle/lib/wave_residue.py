@@ -25,9 +25,6 @@ from typing import Any
 
 # ── Canonical paths ──────────────────────────────────────────────────
 
-WORKTREES_PREFIX = (
-    "/Users/ronnyworks/code/.runtime/spine/tmp/worktrees/agentic-spine/"
-)
 WAVE_DIR_PREFIX = "WAVE-"
 WAVE_BRANCH_PREFIX = "codex/WAVE-"
 
@@ -53,6 +50,111 @@ def _run(
 
 def _git(repo_path: str, *args: str) -> tuple[int, str, str]:
     return _run(["git", "-C", repo_path, *args])
+
+
+def _expand_home(path: str) -> str:
+    if path == "~":
+        return os.path.expanduser("~")
+    if path.startswith("~/"):
+        return os.path.expanduser(path)
+    return path
+
+
+def _contract_value(contract_path: str, query: str) -> str | None:
+    if not os.path.isfile(contract_path):
+        return None
+    if shutil.which("yq") is None:
+        return None
+    rc, out, _err = _run(["yq", "e", "-r", query, contract_path])
+    if rc != 0:
+        return None
+    value = out.strip()
+    if not value or value == "null":
+        return None
+    return value
+
+
+def _git_common_root(repo_path: str) -> str | None:
+    repo_path = os.path.normpath(_expand_home(repo_path))
+    rc, out, _err = _git(
+        repo_path, "rev-parse", "--path-format=absolute", "--git-common-dir"
+    )
+    if rc == 0:
+        common_dir = out.strip()
+        if common_dir:
+            return os.path.normpath(os.path.dirname(common_dir))
+    rc, out, _err = _git(repo_path, "rev-parse", "--show-toplevel")
+    if rc == 0:
+        top = out.strip()
+        if top:
+            return os.path.normpath(top)
+    return None
+
+
+def _workspace_root_from_repo(repo_path: str) -> str:
+    repo_path = os.path.normpath(_expand_home(repo_path))
+    parent = os.path.dirname(repo_path)
+    if os.path.basename(parent) == "code":
+        return parent
+    return os.path.expanduser("~/code")
+
+
+def _canonical_worktree_root(runtime_root: str, repo_path: str) -> str:
+    runtime_root = os.path.normpath(_expand_home(runtime_root))
+    repo_path = os.path.normpath(_expand_home(repo_path))
+    contract_path = os.path.join(
+        repo_path, "ops", "bindings", "worktree.lifecycle.contract.yaml"
+    )
+
+    value = _contract_value(contract_path, '.policy.canonical_worktree_root // ""')
+    if value:
+        return os.path.normpath(_expand_home(value))
+
+    runtime_parent = os.path.dirname(runtime_root)
+    if runtime_parent:
+        candidate = os.path.join(runtime_parent, "tmp", "worktrees")
+        if os.path.isabs(candidate):
+            return os.path.normpath(candidate)
+
+    workspace_root = _workspace_root_from_repo(repo_path)
+    return os.path.normpath(
+        os.path.join(workspace_root, ".runtime", "spine", "tmp", "worktrees")
+    )
+
+
+def _canonical_repo_name(repo_path: str, contract_path: str) -> str:
+    launcher_path = _contract_value(
+        contract_path, '.policy.launcher_control_worktree_path // ""'
+    )
+    if launcher_path:
+        launcher_name = os.path.basename(
+            os.path.normpath(_expand_home(launcher_path))
+        )
+        if launcher_name:
+            return launcher_name
+
+    common_root = _git_common_root(repo_path)
+    if common_root:
+        common_name = os.path.basename(os.path.normpath(common_root))
+        if common_name:
+            return common_name
+
+    fallback_name = os.path.basename(os.path.normpath(repo_path))
+    if fallback_name:
+        return fallback_name
+    return "agentic-spine"
+
+
+def _canonical_worktree_prefix(runtime_root: str, repo_path: str) -> str:
+    contract_path = os.path.join(
+        os.path.normpath(_expand_home(repo_path)),
+        "ops",
+        "bindings",
+        "worktree.lifecycle.contract.yaml",
+    )
+    canonical_root = _canonical_worktree_root(runtime_root, repo_path)
+    repo_name = _canonical_repo_name(repo_path, contract_path)
+    return os.path.join(canonical_root, repo_name) + os.sep
 
 
 # ── Wave state loading ───────────────────────────────────────────────
@@ -98,22 +200,22 @@ def _workspace_lifecycle_state(state: dict[str, Any] | None) -> str | None:
 
 # ── Discovery ────────────────────────────────────────────────────────
 
-def _list_worktree_dirs() -> list[str]:
+def _list_worktree_dirs(worktrees_prefix: str) -> list[str]:
     """List WAVE-* directory names under the canonical worktrees prefix."""
-    if not os.path.isdir(WORKTREES_PREFIX):
+    if not os.path.isdir(worktrees_prefix):
         return []
     try:
-        entries = os.listdir(WORKTREES_PREFIX)
+        entries = os.listdir(worktrees_prefix)
     except OSError:
         return []
     return sorted(
         name for name in entries
         if name.startswith(WAVE_DIR_PREFIX)
-        and os.path.isdir(os.path.join(WORKTREES_PREFIX, name))
+        and os.path.isdir(os.path.join(worktrees_prefix, name))
     )
 
 
-def _registered_worktrees(repo_path: str) -> set[str]:
+def _registered_worktrees(repo_path: str, worktrees_prefix: str) -> set[str]:
     """Return the set of registered worktree paths under our prefix."""
     rc, out, _ = _git(repo_path, "worktree", "list", "--porcelain")
     if rc != 0:
@@ -122,7 +224,7 @@ def _registered_worktrees(repo_path: str) -> set[str]:
     for line in out.splitlines():
         if line.startswith("worktree "):
             p = line[len("worktree "):].strip()
-            if p.startswith(WORKTREES_PREFIX):
+            if p.startswith(worktrees_prefix):
                 paths.add(os.path.normpath(p))
     return paths
 
@@ -237,12 +339,13 @@ def collect_residue(runtime_root: str, repo_path: str) -> dict[str, Any]:
 
     runtime_root = os.path.normpath(runtime_root)
     repo_path = os.path.normpath(repo_path)
+    worktrees_prefix = _canonical_worktree_prefix(runtime_root, repo_path)
 
     current_head_branch = _current_branch(repo_path)
 
     # ── Worktree directories ─────────────────────────────────────────
-    worktree_dirs = _list_worktree_dirs()
-    registered = _registered_worktrees(repo_path)
+    worktree_dirs = _list_worktree_dirs(worktrees_prefix)
+    registered = _registered_worktrees(repo_path, worktrees_prefix)
 
     # Also include any registered worktree paths under our prefix that may
     # not be listed by os.listdir (unlikely, but cross-reference for truth).
@@ -254,7 +357,7 @@ def collect_residue(runtime_root: str, repo_path: str) -> dict[str, Any]:
     worktree_dirs = sorted(set(worktree_dirs) | set(extra_registered_names))
 
     for name in worktree_dirs:
-        full_path = os.path.normpath(os.path.join(WORKTREES_PREFIX, name))
+        full_path = os.path.normpath(os.path.join(worktrees_prefix, name))
         wave_id = _dir_to_wave_id(name)
         wave_state = _load_wave_state(runtime_root, wave_id) if wave_id else None
         wave_status = _wave_status(wave_state)
@@ -262,7 +365,7 @@ def collect_residue(runtime_root: str, repo_path: str) -> dict[str, Any]:
         identity = f"worktree:{full_path}"
 
         # Refuse to consider anything outside the canonical prefix as sweepable.
-        in_canonical = (full_path + "/").startswith(WORKTREES_PREFIX)
+        in_canonical = (full_path + "/").startswith(worktrees_prefix)
         if not in_canonical:
             items.append(_make_item(
                 "stale_worktree",
@@ -468,16 +571,16 @@ def collect_residue(runtime_root: str, repo_path: str) -> dict[str, Any]:
 
 # ── Sweep ────────────────────────────────────────────────────────────
 
-def _in_canonical_worktree_prefix(path: str) -> bool:
+def _in_canonical_worktree_prefix(path: str, worktrees_prefix: str) -> bool:
     norm = os.path.normpath(path)
-    return (norm + "/").startswith(WORKTREES_PREFIX)
+    return (norm + "/").startswith(worktrees_prefix)
 
 
 def _sweep_worktree(
-    repo_path: str, worktree_path: str
+    repo_path: str, worktree_path: str, worktrees_prefix: str
 ) -> tuple[str, str | None]:
     """Remove a worktree directory. Returns (action_taken, error_or_none)."""
-    if not _in_canonical_worktree_prefix(worktree_path):
+    if not _in_canonical_worktree_prefix(worktree_path, worktrees_prefix):
         return ("refused", "path outside canonical worktrees prefix")
     if os.path.normpath(worktree_path) == os.path.normpath(repo_path):
         return ("refused", "path is primary checkout")
@@ -497,7 +600,7 @@ def _sweep_worktree(
     if dirty:
         return ("refused", "fallback aborted: worktree dirty")
 
-    if not _in_canonical_worktree_prefix(worktree_path):
+    if not _in_canonical_worktree_prefix(worktree_path, worktrees_prefix):
         return ("refused", "path outside canonical worktrees prefix")
 
     try:
@@ -537,6 +640,7 @@ def sweep_residue(
     """Sweep only safe-to-sweep residue. Idempotent. Never touches active waves."""
     runtime_root = os.path.normpath(runtime_root)
     repo_path = os.path.normpath(repo_path)
+    worktrees_prefix = _canonical_worktree_prefix(runtime_root, repo_path)
 
     if report is None:
         report = collect_residue(runtime_root, repo_path)
@@ -579,7 +683,9 @@ def sweep_residue(
 
         try:
             if cls in ("stale_worktree", "inconsistent_cleaned_workspace") and item.get("path"):
-                action, err = _sweep_worktree(repo_path, str(item["path"]))
+                action, err = _sweep_worktree(
+                    repo_path, str(item["path"]), worktrees_prefix
+                )
                 if err is not None:
                     errors.append({
                         "class": cls,
