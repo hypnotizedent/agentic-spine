@@ -145,17 +145,15 @@ fi
 [[ -f "$ARCHIVED_SCOPE_FILE" ]] || { echo "loop.closeout.finalize FAIL: archived scope file missing after closeout" >&2; exit 1; }
 
 # Normalize archived scope frontmatter: the live `status:` field must not survive
-# into the archive. Disposition and other metadata are preserved. Any `status:`
-# line inside the leading chain of YAML frontmatter fences is rewritten to
-# `status: closed` so the archived copy never claims live/open/active state.
+# into the archive. Disposition and other metadata are preserved. Only the
+# initial YAML frontmatter block is rewritten, so later body fences are left
+# untouched.
 ARCHIVED_TMP="${ARCHIVED_SCOPE_FILE}.normalize.tmp"
 awk '
-  BEGIN { in_fm = 0; started = 0 }
-  NR == 1 && /^---[[:space:]]*$/ { in_fm = 1; started = 1; print; next }
+  BEGIN { in_fm = 0; saw_frontmatter = 0 }
+  NR == 1 && /^---[[:space:]]*$/ { in_fm = 1; saw_frontmatter = 1; print; next }
   in_fm == 1 && /^---[[:space:]]*$/ { in_fm = 0; print; next }
-  started == 1 && in_fm == 0 && /^---[[:space:]]*$/ { in_fm = 1; print; next }
-  started == 1 && in_fm == 0 && !/^[[:space:]]*$/ { started = 0 }
-  in_fm == 1 && /^status:[[:space:]]/ { print "status: closed"; next }
+  saw_frontmatter == 1 && in_fm == 1 && /^status:[[:space:]]/ { print "status: closed"; next }
   { print }
 ' "$ARCHIVED_SCOPE_FILE" > "$ARCHIVED_TMP" && mv -f "$ARCHIVED_TMP" "$ARCHIVED_SCOPE_FILE"
 

@@ -120,14 +120,24 @@ verify_orchestration_terminal_parity() {
   [[ -f "$manifest" ]] || return 0
 
   local manifest_status
-  manifest_status="$(yq e -r '.status // ""' "$manifest" 2>/dev/null || echo "")"
+  if ! manifest_status="$(yq e -r '.status // ""' "$manifest" 2>/dev/null)"; then
+    echo "unable to read orchestration manifest status from $manifest"
+    return 1
+  fi
+  [[ -n "$manifest_status" && "$manifest_status" != "null" ]] || {
+    echo "unable to read orchestration manifest status from $manifest"
+    return 1
+  }
   [[ "$manifest_status" == "closed" ]] || {
     echo "manifest status is '$manifest_status' (expected closed)"
     return 1
   }
 
   local bad_lane_count
-  bad_lane_count="$(yq e -r '[.lanes[] | select((.status // "open") == "open" or (.status // "open") == "ticket-issued" or (.status // "open") == "entry-ready" or (.status // "open") == "validated")] | length' "$manifest" 2>/dev/null || echo "0")"
+  if ! bad_lane_count="$(yq e -r '[.lanes[] | select((.status // "open") == "open" or (.status // "open") == "ticket-issued" or (.status // "open") == "entry-ready" or (.status // "open") == "validated")] | length' "$manifest" 2>/dev/null)"; then
+    echo "unable to read orchestration manifest lanes from $manifest"
+    return 1
+  fi
   [[ "$bad_lane_count" =~ ^[0-9]+$ ]] || bad_lane_count=0
   if [[ "$bad_lane_count" -gt 0 ]]; then
     echo "$bad_lane_count orchestration lane(s) remain non-terminal in $manifest"
@@ -348,7 +358,7 @@ if [[ "$CHECK_ELIGIBILITY" -eq 1 ]]; then
   declare -a BLOCKERS=()
 
   # Check 1: Working tree clean
-  if ! git diff --quiet || ! git diff --cached --quiet; then
+  if ! git -C "$ROOT" diff --quiet || ! git -C "$ROOT" diff --cached --quiet; then
     ELIGIBLE=0
     BLOCKERS+=("dirty working tree detected")
     echo "❌ Working tree: dirty (staged or unstaged changes present)"
@@ -359,8 +369,15 @@ if [[ "$CHECK_ELIGIBILITY" -eq 1 ]]; then
   # Check 2: Orchestration manifest closed (if exists)
   manifest="$SPINE_STATE/orchestration/$LOOP_ID/manifest.yaml"
   if [[ -f "$manifest" ]]; then
-    manifest_status="$(yq e -r '.status // ""' "$manifest" 2>/dev/null || echo "")"
-    if [[ "$manifest_status" != "closed" ]]; then
+    if ! manifest_status="$(yq e -r '.status // ""' "$manifest" 2>/dev/null)"; then
+      ELIGIBLE=0
+      BLOCKERS+=("orchestration manifest unreadable")
+      echo "❌ Orchestration manifest: unreadable at $manifest"
+    elif [[ -z "$manifest_status" || "$manifest_status" == "null" ]]; then
+      ELIGIBLE=0
+      BLOCKERS+=("orchestration manifest unreadable")
+      echo "❌ Orchestration manifest: unreadable at $manifest"
+    elif [[ "$manifest_status" != "closed" ]]; then
       ELIGIBLE=0
       BLOCKERS+=("orchestration manifest not closed (status=$manifest_status)")
       echo "❌ Orchestration manifest: not closed (status=$manifest_status)"
@@ -372,7 +389,7 @@ if [[ "$CHECK_ELIGIBILITY" -eq 1 ]]; then
   fi
 
   # Check 3: Projection parity (same SQLite parity model as real close path)
-  elig_parity_result="$(python3 - "$GAPS_SQL_LIB" "$ROOT" <<'PY'
+  if ! elig_parity_result="$(python3 - "$GAPS_SQL_LIB" "$ROOT" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -390,11 +407,16 @@ parity = gsa.db_parity_snapshot(conn, gaps_yaml)
 conn.close()
 print(json.dumps(parity))
 PY
-  )" 2>/dev/null || true
-
-  if [[ -n "$elig_parity_result" ]]; then
-    elig_parity_match="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print('1' if d.get('match') else '0')" "$elig_parity_result" 2>/dev/null || echo "0")"
-    if [[ "$elig_parity_match" == "1" ]]; then
+  )" 2>/dev/null; then
+    ELIGIBLE=0
+    BLOCKERS+=("projection parity query unreadable")
+    echo "❌ Projection parity: unable to query SQLite authority"
+  elif [[ -n "$elig_parity_result" ]]; then
+    if ! elig_parity_match="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print('1' if d.get('match') else '0')" "$elig_parity_result" 2>/dev/null)"; then
+      ELIGIBLE=0
+      BLOCKERS+=("projection parity unreadable")
+      echo "❌ Projection parity: unreadable result"
+    elif [[ "$elig_parity_match" == "1" ]]; then
       elig_parity_note="$(python3 -c "
 import json,sys
 d=json.loads(sys.argv[1])
@@ -407,13 +429,19 @@ else:
       echo "✓ Projection parity: $elig_parity_note"
     else
       ELIGIBLE=0
-      elig_db_only="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('in_db_not_yaml',[])))" "$elig_parity_result" 2>/dev/null || echo "?")"
-      elig_yaml_only="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('in_yaml_not_db',[])))" "$elig_parity_result" 2>/dev/null || echo "?")"
+      if ! elig_db_only="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('in_db_not_yaml',[])))" "$elig_parity_result" 2>/dev/null)"; then
+        elig_db_only="?"
+      fi
+      if ! elig_yaml_only="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('in_yaml_not_db',[])))" "$elig_parity_result" 2>/dev/null)"; then
+        elig_yaml_only="?"
+      fi
       BLOCKERS+=("projection mismatch (db_only=$elig_db_only yaml_only=$elig_yaml_only)")
       echo "❌ Projection parity: mismatch (db_only=$elig_db_only yaml_only=$elig_yaml_only; run: gaps.projection.commit)"
     fi
   else
-    echo "⚠️  Projection parity: unable to query SQLite authority (consider running gaps.projection.commit)"
+    ELIGIBLE=0
+    BLOCKERS+=("projection parity unavailable")
+    echo "❌ Projection parity: unreadable result"
   fi
 
   # Check 4: Worktree cleanup pending
@@ -470,7 +498,7 @@ if [[ "$CONTROLLER_ONLY" -eq 1 ]]; then
   fi
 
   # Check 1: No dirty working tree
-  if ! git diff --quiet && ! git diff --cached --quiet; then
+  if ! git -C "$ROOT" diff --quiet || ! git -C "$ROOT" diff --cached --quiet; then
     echo "  ❌ FAIL: dirty working tree detected (controller-only requires clean state)"
     exit 1
   fi
@@ -479,7 +507,14 @@ if [[ "$CONTROLLER_ONLY" -eq 1 ]]; then
   # Check 2: Orchestration manifest closed (if exists)
   manifest="$SPINE_STATE/orchestration/$LOOP_ID/manifest.yaml"
   if [[ -f "$manifest" ]]; then
-    manifest_status="$(yq e -r '.status // ""' "$manifest" 2>/dev/null || echo "")"
+    if ! manifest_status="$(yq e -r '.status // ""' "$manifest" 2>/dev/null)"; then
+      echo "  ❌ FAIL: orchestration manifest unreadable at $manifest"
+      exit 1
+    fi
+    if [[ -z "$manifest_status" || "$manifest_status" == "null" ]]; then
+      echo "  ❌ FAIL: orchestration manifest unreadable at $manifest"
+      exit 1
+    fi
     if [[ "$manifest_status" != "closed" ]]; then
       echo "  ❌ FAIL: orchestration manifest not closed (status=$manifest_status)"
       exit 1
@@ -622,6 +657,7 @@ surface_projection_note=""
 surface_residue="UNCHECKED"
 surface_residue_note=""
 declare -a NON_PASS_SURFACES=()
+declare -a PRE_MUTATION_BLOCKERS=()
 
 # Surface 1: Runtime Agreement
 # Check for open critical/high gaps that won't be closed.
@@ -657,16 +693,25 @@ else
 fi
 
 # Surface 3: Projection Agreement
-if [[ "$parity_match" == "1" ]]; then
-  surface_projection="PASS"
-  if [[ -n "$parity_archive_ref" ]]; then
-    surface_projection_note="YAML and SQLite aligned (active=$parity_db_count archived=$parity_archived_count split=$parity_archive_ref)"
+# If gap closure will mutate SQLite, defer projection parity until after the
+# safe projection point. Otherwise, treat the current parity as pre-mutation.
+projection_preflight_now=0
+if [[ -z "$GAP_CLOSE_STATUS" || "$open_gap_count" -eq 0 ]]; then
+  projection_preflight_now=1
+  if [[ "$parity_match" == "1" ]]; then
+    surface_projection="PASS"
+    if [[ -n "$parity_archive_ref" ]]; then
+      surface_projection_note="YAML and SQLite aligned (active=$parity_db_count archived=$parity_archived_count split=$parity_archive_ref)"
+    else
+      surface_projection_note="YAML and SQLite aligned (db=$parity_db_count yaml=$parity_yaml_count)"
+    fi
   else
-    surface_projection_note="YAML and SQLite aligned (db=$parity_db_count yaml=$parity_yaml_count)"
+    surface_projection="WARN"
+    surface_projection_note="projection mismatch (db_only=$parity_db_only_count yaml_only=$parity_yaml_only_count active_db=$parity_db_count yaml=$parity_yaml_count; run: gaps-authority-bridge project)"
   fi
 else
-  surface_projection="WARN"
-  surface_projection_note="projection mismatch (db_only=$parity_db_only_count yaml_only=$parity_yaml_only_count active_db=$parity_db_count yaml=$parity_yaml_count; run: gaps-authority-bridge project)"
+  surface_projection="DEFERRED"
+  surface_projection_note="will re-evaluate after deferred gap projection"
 fi
 
 # Surface 4: Residue Check
@@ -705,15 +750,25 @@ fi
 for surface_status in \
   "runtime:$surface_runtime" \
   "control-plane:$surface_control" \
-  "projections:$surface_projection" \
   "residue:$surface_residue"
 do
   surface_name="${surface_status%%:*}"
   result="${surface_status#*:}"
   if [[ "$result" != "PASS" ]]; then
-    NON_PASS_SURFACES+=("$surface_name=$result")
+    PRE_MUTATION_BLOCKERS+=("$surface_name=$result")
   fi
 done
+
+orchestration_status_summary="n/a"
+if ! orchestration_status_summary="$(verify_orchestration_terminal_parity "$LOOP_ID" 2>&1)"; then
+  echo "wave.finish FAIL: orchestration terminal parity check failed" >&2
+  echo "  - $orchestration_status_summary" >&2
+  exit 1
+fi
+
+if [[ "$projection_preflight_now" -eq 1 && "$surface_projection" != "PASS" ]]; then
+  PRE_MUTATION_BLOCKERS+=("projections=$surface_projection")
+fi
 
 # Print surface agreement.
 _surface_sym() {
@@ -721,6 +776,7 @@ _surface_sym() {
     PASS) printf "PASS" ;;
     WARN) printf "WARN" ;;
     FAIL) printf "FAIL" ;;
+    DEFERRED) printf "DEFERRED" ;;
     UNCHECKED) printf "UNCHECKED" ;;
   esac
 }
@@ -738,10 +794,14 @@ echo ""
 printf "  Residue:        %s" "$(_surface_sym "$surface_residue")"
 [[ -n "$surface_residue_note" ]] && printf " (%s)" "$surface_residue_note"
 echo ""
+if [[ "$orchestration_status_summary" != "n/a" ]]; then
+  printf "  Orchestration:  %s" "$orchestration_status_summary"
+  echo ""
+fi
 echo ""
 
-if [[ "$DISPOSITION" == "landed" && "${#NON_PASS_SURFACES[@]}" -gt 0 ]]; then
-  non_pass_csv="$(IFS=', '; echo "${NON_PASS_SURFACES[*]}")"
+if [[ "$DISPOSITION" == "landed" && "${#PRE_MUTATION_BLOCKERS[@]}" -gt 0 ]]; then
+  non_pass_csv="$(IFS=', '; echo "${PRE_MUTATION_BLOCKERS[*]}")"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "DRY RUN: landed disposition would be blocked by non-PASS surfaces: $non_pass_csv"
     echo ""
@@ -826,6 +886,7 @@ for g in d['open']:
     bridge_args=("close" "--id" "$gid" "--status" "$GAP_CLOSE_STATUS")
     bridge_args+=("--actor" "wave.finish")
     bridge_args+=("--reason" "Closed by wave.finish: $LOOP_ID disposition=$DISPOSITION")
+    bridge_args+=("--defer-sync")
 
     if [[ -n "$FIXED_IN" ]]; then
       bridge_args+=("--fixed-in" "$FIXED_IN")
@@ -870,6 +931,90 @@ if [[ "$gaps_errored" -gt 0 ]]; then
   exit 1
 fi
 
+if [[ "$gaps_closed" -gt 0 ]]; then
+  echo "Projecting gap authority to YAML after deferred gap closes..."
+  projection_output=""
+  if ! projection_output="$(python3 "$GAPS_BRIDGE" project 2>&1)"; then
+    echo "wave.finish FAIL: gap projection sync failed" >&2
+    echo "$projection_output" >&2
+    exit 1
+  fi
+  echo "$projection_output"
+  echo ""
+
+  if ! gap_projection_refresh="$(python3 - "$GAPS_SQL_LIB" "$ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+lib_dir = Path(sys.argv[1])
+sys.path.insert(0, str(lib_dir))
+import gaps_sql_authority as gsa
+
+root = Path(sys.argv[2])
+db_path, gaps_yaml = gsa.resolve_paths(root)
+conn = gsa.connect(db_path)
+gsa.ensure_schema(conn)
+gsa.bootstrap_from_yaml(conn, gaps_yaml)
+parity = gsa.db_parity_snapshot(conn, gaps_yaml)
+conn.close()
+print(json.dumps(parity))
+PY
+  )" 2>/dev/null; then
+    echo "wave.finish FAIL: unable to re-query projection parity after sync" >&2
+    exit 1
+  fi
+
+  parity_match="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print('1' if d.get('match') else '0')" "$gap_projection_refresh" 2>/dev/null || echo "0")"
+  parity_db_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('db_count', 0))" "$gap_projection_refresh" 2>/dev/null || echo "0")"
+  parity_yaml_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('yaml_count', 0))" "$gap_projection_refresh" 2>/dev/null || echo "0")"
+  parity_db_only_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('in_db_not_yaml', [])))" "$gap_projection_refresh" 2>/dev/null || echo "0")"
+  parity_yaml_only_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('in_yaml_not_db', [])))" "$gap_projection_refresh" 2>/dev/null || echo "0")"
+  parity_archived_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('archived_in_db', 0))" "$gap_projection_refresh" 2>/dev/null || echo "0")"
+  parity_archive_ref="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('archive_ref', ''))" "$gap_projection_refresh" 2>/dev/null || echo "")"
+
+  if [[ "$parity_match" == "1" ]]; then
+    if [[ -n "$parity_archive_ref" ]]; then
+      surface_projection="PASS"
+      surface_projection_note="YAML and SQLite aligned (active=$parity_db_count archived=$parity_archived_count split=$parity_archive_ref)"
+    else
+      surface_projection="PASS"
+      surface_projection_note="YAML and SQLite aligned (db=$parity_db_count yaml=$parity_yaml_count)"
+    fi
+  else
+    surface_projection="WARN"
+    surface_projection_note="projection mismatch (db_only=$parity_db_only_count yaml_only=$parity_yaml_only_count active_db=$parity_db_count yaml=$parity_yaml_count; run: gaps-authority-bridge project)"
+  fi
+fi
+
+declare -a NON_PASS_SURFACES=()
+for surface_status in \
+  "runtime:$surface_runtime" \
+  "control-plane:$surface_control" \
+  "projections:$surface_projection" \
+  "residue:$surface_residue"
+do
+  surface_name="${surface_status%%:*}"
+  result="${surface_status#*:}"
+  if [[ "$result" != "PASS" ]]; then
+    NON_PASS_SURFACES+=("$surface_name=$result")
+  fi
+done
+
+if [[ "$DISPOSITION" == "landed" && "${#NON_PASS_SURFACES[@]}" -gt 0 ]]; then
+  non_pass_csv="$(IFS=', '; echo "${NON_PASS_SURFACES[*]}")"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "DRY RUN: landed disposition would be blocked by non-PASS surfaces: $non_pass_csv"
+    echo ""
+    echo "Use disposition=deferred or repair the reported surfaces before landing."
+    exit 3
+  fi
+  echo "wave.finish FAIL: landed disposition requires PASS on all four surfaces" >&2
+  echo "Non-PASS surfaces: $non_pass_csv" >&2
+  echo "Use disposition=deferred or repair the reported surfaces before landing." >&2
+  exit 1
+fi
+
 # ── 4b: Build acceptance matrix for loop-closeout-finalize ───────
 
 MATRIX_FILE="$(mktemp "${SPINE_TMP:-/tmp}/wave-finish-matrix.XXXXXX.md")"
@@ -898,7 +1043,6 @@ EOF
 # ── 4c: Close loop via loop-closeout-finalize ────────────────────
 
 loop_status_summary="closed ($DISPOSITION, ${COMPLETION_LEVEL:-n/a})"
-orchestration_status_summary="n/a"
 if [[ "$PRESERVE_PARENT_LOOP" -eq 1 ]]; then
   echo "Preserving parent loop continuity: completion_level=slice_complete (loop remains active)"
   echo ""
@@ -934,12 +1078,6 @@ else
 
   echo "$closeout_output"
   echo ""
-
-  if ! orchestration_status_summary="$(verify_orchestration_terminal_parity "$LOOP_ID")"; then
-    echo "wave.finish FAIL: orchestration terminal parity check failed" >&2
-    echo "  - $orchestration_status_summary" >&2
-    exit 1
-  fi
 fi
 
 # ── Step 4d: Transition parity gate ────────────────────────────

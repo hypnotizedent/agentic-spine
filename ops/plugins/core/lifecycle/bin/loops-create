@@ -316,11 +316,10 @@ fi
 
 if [[ "$BIRTH_VERIFIED" -eq 0 ]]; then
   echo "FAIL: birth parity verification failed for $LOOP_ID — cleaning up" >&2
-  rm -f "$SCOPE_FILE"
-  # Best-effort SQLite cleanup — delete the row entirely so no residue remains
   if [[ -n "$SQLITE_ROW" ]]; then
+    # SQLite cleanup must complete before the scope file is removed.
     LIB_DIR="$(dirname "$LOOPS_BRIDGE")/../lib"
-    python3 -c "
+    if python3 -c "
 import sys, os
 sys.path.insert(0, sys.argv[1])
 import loops_sql_authority as lsa
@@ -332,7 +331,14 @@ lsa.ensure_schema(conn)
 lsa.delete_loop(conn, sys.argv[2])
 conn.commit()
 conn.close()
-" "$LIB_DIR" "$LOOP_ID" 2>/dev/null || true
+" "$LIB_DIR" "$LOOP_ID" 2>/dev/null; then
+      rm -f "$SCOPE_FILE"
+    else
+      echo "FAIL: SQLite cleanup failed for $LOOP_ID; scope file retained at $SCOPE_FILE" >&2
+      exit 1
+    fi
+  else
+    rm -f "$SCOPE_FILE"
   fi
   echo "  No split-authority loop was left behind." >&2
   exit 1
