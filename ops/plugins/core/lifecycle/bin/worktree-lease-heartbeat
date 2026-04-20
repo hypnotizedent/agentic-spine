@@ -26,7 +26,8 @@ if [[ ! -f "$LEASE_PATH" ]]; then
   if [[ -z "$LOOP_OR_WAVE" ]]; then
     LOOP_OR_WAVE="$BRANCH"
   fi
-  cat > "$LEASE_PATH" <<LEASENEW
+  TMP_LEASE="$(mktemp "${LEASE_PATH}.tmp.XXXXXX")"
+  cat > "$TMP_LEASE" <<LEASENEW
 ---
 version: 1
 status: active
@@ -40,6 +41,7 @@ heartbeat_at: "$NOW"
 ttl_hours: $LEASE_TTL_HOURS
 ---
 LEASENEW
+  mv "$TMP_LEASE" "$LEASE_PATH"
   spine_ensure_git_exclude "$ROOT" "$LEASE_FILENAME"
   echo "worktree.lease.heartbeat created lease: $LEASE_PATH"
   exit 0
@@ -47,6 +49,7 @@ fi
 
 python3 - "$LEASE_PATH" "$NOW" "$OWNER" "$BRANCH" "$REPO_ROOT" "$ROOT" "$LEASE_TTL_HOURS" "$IDENTITY" <<'PY'
 import sys
+import tempfile
 from pathlib import Path
 
 lease_path = Path(sys.argv[1])
@@ -91,7 +94,24 @@ for key in ordered:
         else:
             out.append(f'{key}: "{val}"')
 out.append("---")
-lease_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+tmp_path = None
+try:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=str(lease_path.parent),
+        prefix=f".{lease_path.name}.tmp.",
+        delete=False,
+    ) as tmp_file:
+        tmp_path = Path(tmp_file.name)
+        tmp_file.write("\n".join(out) + "\n")
+    tmp_path.replace(lease_path)
+finally:
+    if tmp_path is not None and tmp_path.exists():
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
 PY
 spine_ensure_git_exclude "$ROOT" "$LEASE_FILENAME"
 

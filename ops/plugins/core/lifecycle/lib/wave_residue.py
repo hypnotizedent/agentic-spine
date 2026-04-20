@@ -198,6 +198,13 @@ def _workspace_lifecycle_state(state: dict[str, Any] | None) -> str | None:
     return None
 
 
+def _is_inconsistent_cleaned_workspace(
+    workspace_lifecycle_state: str | None,
+) -> bool:
+    """Treat missing workspace lifecycle metadata as an inconsistency."""
+    return workspace_lifecycle_state in (None, "cleaned")
+
+
 # ── Discovery ────────────────────────────────────────────────────────
 
 def _list_worktree_dirs(worktrees_prefix: str) -> list[str]:
@@ -408,8 +415,8 @@ def collect_residue(runtime_root: str, repo_path: str) -> dict[str, Any]:
             ))
             continue
 
-        # Wave is closed. Decide inconsistent_cleaned vs stale_worktree.
-        is_inconsistent_cleaned = (ws_lifecycle == "cleaned")
+        # Wave is closed. Missing lifecycle metadata is also inconsistent.
+        is_inconsistent_cleaned = _is_inconsistent_cleaned_workspace(ws_lifecycle)
 
         dirty, dirty_err = _worktree_is_dirty(full_path)
         if dirty_err is not None:
@@ -520,11 +527,10 @@ def collect_residue(runtime_root: str, repo_path: str) -> dict[str, Any]:
             ))
             continue
 
-        # Classify: inconsistent_cleaned_workspace if workspace said cleaned;
-        # otherwise stale_wave_branch.
+        # Classify: missing or cleaned workspace metadata is inconsistent.
         class_ = (
             "inconsistent_cleaned_workspace"
-            if ws_lifecycle == "cleaned"
+            if _is_inconsistent_cleaned_workspace(ws_lifecycle)
             else "stale_wave_branch"
         )
 
