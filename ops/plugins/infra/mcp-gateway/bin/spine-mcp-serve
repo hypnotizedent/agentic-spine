@@ -45,6 +45,8 @@ def _normalized_runtime_env(repo_root: str) -> Dict[str, str]:
 SPINE_ROOT = _repo_root()
 OPS_BIN = os.path.join(SPINE_ROOT, "bin", "ops")
 CAPABILITIES_FILE = os.path.join(SPINE_ROOT, "ops", "capabilities.runtime.yaml")
+if not os.path.isfile(CAPABILITIES_FILE):
+    CAPABILITIES_FILE = os.path.join(SPINE_ROOT, "ops", "capabilities.yaml")
 SECRETS_EXEC = os.path.join(
     SPINE_ROOT, "ops", "plugins", "infra", "secrets", "bin", "secrets-exec"
 )
@@ -67,11 +69,11 @@ RUNTIME_ENV = _normalized_runtime_env(SPINE_ROOT)
 DEFAULT_CAP_RUN_MAX_CHARS = int(os.environ.get("SPINE_MCP_CAP_RUN_MAX_CHARS", "16000"))
 ROLE_PREFIXES: List[str] = []  # set once in main() from mcp.role.scope.yaml
 
-TOOLS = [
+BASE_TOOLS = [
     {
         "name": "cap_list",
         "description": (
-            "List governed capabilities from ops/capabilities.runtime.yaml. "
+            "List governed capabilities from the active capability registry. "
             "Optional filters: substring match and safety level."
         ),
         "inputSchema": {
@@ -100,7 +102,7 @@ TOOLS = [
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Capability name from ops/capabilities.runtime.yaml"
+                    "description": "Capability name from the active capability registry"
                 },
                 "args": {
                     "description": "Capability arguments as array (preferred) or shell-style string",
@@ -124,60 +126,6 @@ TOOLS = [
             },
             "required": ["name"]
         }
-    },
-    {
-        "name": "agent_list",
-        "description": "List agents from agents.registry.yaml with optional filters.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "filter": {
-                    "type": "string",
-                    "description": "Optional case-insensitive substring filter on agent id/domain/description",
-                },
-                "domain": {
-                    "type": "string",
-                    "description": "Optional exact domain filter",
-                },
-                "status": {
-                    "type": "string",
-                    "description": "Optional exact implementation_status filter",
-                },
-            },
-        },
-    },
-    {
-        "name": "agent_info",
-        "description": "Fetch full machine-readable registry entry for one agent.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string", "description": "Agent ID from agents.registry.yaml"}
-            },
-            "required": ["agent_id"],
-        },
-    },
-    {
-        "name": "agent_tools",
-        "description": "Fetch tool/capability inventory for one agent.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string", "description": "Agent ID from agents.registry.yaml"}
-            },
-            "required": ["agent_id"],
-        },
-    },
-    {
-        "name": "route_resolve",
-        "description": "Resolve input to an agent using agent.route --json envelope contract.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "input": {"type": "string", "description": "Domain or keyword to resolve"},
-            },
-            "required": ["input"],
-        },
     },
     {
         "name": "rag_query",
@@ -258,6 +206,77 @@ TOOLS = [
         }
     }
 ]
+
+AGENT_TOOLS = [
+    {
+        "name": "agent_list",
+        "description": "List agents from agents.registry.yaml with optional filters.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "filter": {
+                    "type": "string",
+                    "description": "Optional case-insensitive substring filter on agent id/domain/description",
+                },
+                "domain": {
+                    "type": "string",
+                    "description": "Optional exact domain filter",
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Optional exact implementation_status filter",
+                },
+            },
+        },
+    },
+    {
+        "name": "agent_info",
+        "description": "Fetch full machine-readable registry entry for one agent.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "Agent ID from agents.registry.yaml"}
+            },
+            "required": ["agent_id"],
+        },
+    },
+    {
+        "name": "agent_tools",
+        "description": "Fetch tool/capability inventory for one agent.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "Agent ID from agents.registry.yaml"}
+            },
+            "required": ["agent_id"],
+        },
+    },
+    {
+        "name": "route_resolve",
+        "description": "Resolve input to an agent using agent.route --json envelope contract.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input": {"type": "string", "description": "Domain or keyword to resolve"},
+            },
+            "required": ["input"],
+        },
+    },
+]
+
+
+def _agent_tools_available() -> bool:
+    if not os.path.isfile(AGENTS_REGISTRY_FILE):
+        return False
+    for path in (AGENT_INFO_BIN, AGENT_TOOLS_BIN, AGENT_ROUTE_BIN):
+        if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+            return False
+    return True
+
+
+AGENT_TOOLS_ENABLED = _agent_tools_available()
+TOOLS = BASE_TOOLS + (AGENT_TOOLS if AGENT_TOOLS_ENABLED else [])
+TOOL_NAMES = {tool["name"] for tool in TOOLS}
 
 
 def read_message() -> Tuple[Optional[Dict[str, Any]], bool]:
@@ -641,6 +660,13 @@ def handle_tools_call(msg: Dict[str, Any]) -> Dict[str, Any]:
     name = msg.get("params", {}).get("name")
     arguments = msg.get("params", {}).get("arguments", {})
 
+    if name not in TOOL_NAMES:
+        return {
+            "jsonrpc": "2.0",
+            "id": msg.get("id"),
+            "error": {"code": -32601, "message": f"Unknown tool: {name}"},
+        }
+
     try:
         if name == "cap_list":
             text = list_capabilities(
@@ -745,7 +771,7 @@ def handle_tools_call(msg: Dict[str, Any]) -> Dict[str, Any]:
 
 def bootstrap_session() -> None:
     """Warm the runtime by confirming the core CLI surfaces are reachable."""
-    status_cmd = [OPS_BIN, "status", "--json"]
+    status_cmd = [OPS_BIN, "cap", "list"]
     try:
         result = subprocess.run(
             status_cmd,
@@ -757,7 +783,7 @@ def bootstrap_session() -> None:
         )
         if result.returncode != 0:
             print(
-                f"[spine-mcp-serve] ops status failed (rc={result.returncode}): "
+                f"[spine-mcp-serve] ops cap list failed (rc={result.returncode}): "
                 f"{(result.stderr or result.stdout or 'unknown error').strip()[:200]}",
                 file=sys.stderr,
             )
@@ -765,7 +791,7 @@ def bootstrap_session() -> None:
             return
         RUNTIME_ENV["SPINE_MCP_SESSION"] = "ready"
         print(
-            "[spine-mcp-serve] runtime warmup complete: ops status reachable",
+            "[spine-mcp-serve] runtime warmup complete: ops cap list reachable",
             file=sys.stderr,
         )
     except Exception as exc:
@@ -800,6 +826,12 @@ def main() -> int:
         + (f" ({', '.join(ROLE_PREFIXES)})" if ROLE_PREFIXES and "*" not in ROLE_PREFIXES else ""),
         file=sys.stderr,
     )
+    if not AGENT_TOOLS_ENABLED:
+        print(
+            "[spine-mcp-serve] agent registry tooling disabled: "
+            "missing agents.registry.yaml or agent-* helper binaries",
+            file=sys.stderr,
+        )
 
     while True:
         msg, eof = read_message()

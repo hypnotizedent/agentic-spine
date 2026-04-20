@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+source "$SPINE_REPO/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+STATE_DIR="${SPINE_STATE}"
+LOG_DIR="${SPINE_LOGS}"
+INBOX_DIR="${SPINE_INBOX}"
+OUTBOX_DIR="${SPINE_OUTBOX}"
+
+PID_FILE="${STATE_DIR}/mailroom-bridge.pid"
+BINDING="${SPINE_REPO}/ops/bindings/mailroom.bridge.yaml"
+LABEL="com.ronny.mailroom-bridge"
+PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+TOKEN_FILE="${STATE_DIR}/mailroom-bridge.token"
+LEGACY_TOKEN_FILE="${SPINE_REPO}/mailroom/state/mailroom-bridge.token"
+
+host="127.0.0.1"
+port="8799"
+if [[ -f "$BINDING" ]] && command -v yq >/dev/null 2>&1; then
+  host="$(yq -r '.listen.host // "127.0.0.1"' "$BINDING" 2>/dev/null || echo "127.0.0.1")"
+  port="$(yq -r '.listen.port // 8799' "$BINDING" 2>/dev/null || echo "8799")"
+fi
+
+echo "MAILROOM_BRIDGE"
+echo "  binding: ${BINDING}"
+echo "  listen:  ${host}:${port}"
+echo "  launchd:"
+echo "    label: ${LABEL}"
+echo "    plist: ${PLIST}"
+echo "  pidfile: ${PID_FILE} (cache)"
+echo "  paths:"
+echo "    inbox: ${INBOX_DIR}"
+echo "    outbox: ${OUTBOX_DIR}"
+echo "    state: ${STATE_DIR}"
+echo "    logs: ${LOG_DIR}"
+echo "  token_authority: ${TOKEN_FILE}"
+if [[ "$LEGACY_TOKEN_FILE" != "$TOKEN_FILE" && -f "$LEGACY_TOKEN_FILE" ]]; then
+  echo "  token_legacy: ${LEGACY_TOKEN_FILE} (STALE — use token_authority)"
+fi
+
+if [[ -f "$TOKEN_FILE" && -f "$PLIST" ]]; then
+  plist_token_file="$(grep -A1 "MAILROOM_BRIDGE_TOKEN_FILE" "$PLIST" 2>/dev/null | grep '<string>' | sed 's/.*<string>//;s/<\/string>.*//' || true)"
+  if [[ -n "$plist_token_file" ]]; then
+    if [[ "$plist_token_file" == "$TOKEN_FILE" ]]; then
+      echo "  token_parity: OK"
+    else
+      echo "  token_parity: DRIFT (token file path mismatch — restart bridge to resync)"
+    fi
+  else
+    file_token="$(tr -d '\r\n' < "$TOKEN_FILE" 2>/dev/null || true)"
+    plist_token="$(grep -A1 "MAILROOM_BRIDGE_TOKEN" "$PLIST" 2>/dev/null | grep '<string>' | sed 's/.*<string>//;s/<\/string>.*//' || true)"
+    if [[ -n "$file_token" && -n "$plist_token" ]]; then
+      if [[ "$file_token" == "$plist_token" ]]; then
+        echo "  token_parity: OK"
+      else
+        echo "  token_parity: DRIFT (file != plist — restart bridge to resync)"
+      fi
+    fi
+  fi
+  if [[ -z "$(tr -d '\r\n' < "$TOKEN_FILE" 2>/dev/null || true)" ]]; then
+    echo "  token_parity: WARN (token file empty)"
+  fi
+fi
+
+echo "  logs:"
+echo "    out: ${LOG_DIR}/mailroom-bridge.out"
+echo "    err: ${LOG_DIR}/mailroom-bridge.err"
+
+svc="$(launchctl list "$LABEL" 2>/dev/null || true)"
+svc_pid="$(printf '%s\n' "$svc" | awk -F' = ' '/"PID"/ {gsub(/[^0-9]/,"",$2); print $2; exit}')"
+if [[ -n "$svc_pid" ]]; then
+  echo "  status: running (pid=${svc_pid})"
+  echo "$svc_pid" >"$PID_FILE" 2>/dev/null || true
+else
+  if [[ -n "$svc" ]]; then
+    echo "  status: loaded but not running"
+  else
+    echo "  status: not loaded"
+  fi
+  exit 0
+fi
+
+if command -v curl >/dev/null 2>&1; then
+  health_url="http://${host}:${port}/health"
+  echo "  health: ${health_url}"
+  set +e
+  curl -fsS "$health_url"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    echo ""
+    echo "  health_status: FAIL (exit=${rc})"
+    exit 2
+  fi
+  echo ""
+  echo "  health_status: OK"
+else
+  echo "  health: SKIP (curl not found)"
+fi

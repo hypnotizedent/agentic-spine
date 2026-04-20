@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import shutil
+import sys
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+CONTRACT = ROOT / "ops" / "bindings" / "mcp.runtime.contract.yaml"
+WORKTREE_CONTRACT = ROOT / "ops" / "bindings" / "worktree.lifecycle.contract.yaml"
+SERVER_KEY_BY_SURFACE = {
+    "claude_desktop": "mcpServers",
+    "codex": "mcpServers",
+    "opencode": "mcp",
+}
+
+
+def fail(message: str) -> "NoReturn":
+    print(f"mcp.config.generate FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_contract() -> dict:
+    if not CONTRACT.is_file():
+        fail(f"missing contract: {CONTRACT}")
+    data = yaml.safe_load(CONTRACT.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        fail(f"invalid contract shape: {CONTRACT}")
+    return data
+
+
+def load_worktree_policy() -> dict:
+    if not WORKTREE_CONTRACT.is_file():
+        return {}
+    data = yaml.safe_load(WORKTREE_CONTRACT.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        return {}
+    policy = data.get("policy", {}) or {}
+    return policy if isinstance(policy, dict) else {}
+
+
+WORKTREE_POLICY = load_worktree_policy()
+CONTROL_ROOT = Path(str(WORKTREE_POLICY.get("launcher_control_worktree_path", ROOT))).expanduser()
+WORKSPACE_ROOT = CONTROL_ROOT.parent
+WORKBENCH_MCP = WORKSPACE_ROOT / "workbench" / ".mcp.json"
+
+
+def load_json(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"invalid JSON in {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"config at {path} must be a JSON object")
+    return data
+
+
+def normalize_json(data: dict) -> str:
+    return json.dumps(data, sort_keys=True, separators=(",", ":"))
+
+
+def existing_servers(surface: str, config: dict) -> dict:
+    key = SERVER_KEY_BY_SURFACE[surface]
+    raw = config.get(key, {})
+    return raw if isinstance(raw, dict) else {}
+
+
+def remap_repo_local_path(raw: str) -> str:
+    path = Path(str(raw)).expanduser()
+    if not path.is_absolute():
+        return str(raw)
+    try:
+        relative = path.relative_to(CONTROL_ROOT)
+    except ValueError:
+        return str(path)
+    return str(ROOT / relative)
+
+
+def resolve_surface_path(surface: str, raw: str) -> Path:
+    path = Path(str(raw)).expanduser()
+    if surface == "codex":
+        return Path(remap_repo_local_path(str(path)))
+    return path
+
+
+def normalize_entry_for_surface(surface: str, entry: dict) -> dict | None:
+    if not isinstance(entry, dict):
+        return None
+
+    if surface == "opencode":
+        command = entry.get("command")
+        args = entry.get("args")
+        if isinstance(command, list):
+            command_list = [remap_repo_local_path(str(part)) for part in command]
+        else:
+            if not command:
+                return None
+            command_list = [remap_repo_local_path(str(command))]
+            if isinstance(args, list):
+                command_list.extend(str(part) for part in args)
+        normalized = {
+            "type": "local",
+            "command": command_list,
+            "enabled": bool(entry.get("enabled", True)),
+        }
+        env = entry.get("env")
+        if isinstance(env, dict) and env:
+            normalized["env"] = env
+        return normalized
+
+    command = entry.get("command")
+    if isinstance(command, list):
+        if not command:
+            return None
+        normalized = {
+            "command": remap_repo_local_path(str(command[0])),
+            "args": [str(part) for part in command[1:]],
+        }
+    else:
+        if not command:
+            return None
+        normalized = {
+            "command": remap_repo_local_path(str(command)),
+            "args": [str(part) for part in (entry.get("args", []) or [])],
+        }
+
+    env = entry.get("env")
+    if isinstance(env, dict) and env:
+        normalized["env"] = env
+    cwd = entry.get("cwd")
+    if cwd:
+        normalized["cwd"] = remap_repo_local_path(str(cwd))
+    entry_type = entry.get("type")
+    if entry_type and entry_type != "local":
+        normalized["type"] = entry_type
+    return normalized
+
+
+def load_server_map(surface: str, path: Path) -> dict[str, dict]:
+    config = load_json(path)
+    servers = existing_servers(surface, config)
+    if not isinstance(servers, dict):
+        return {}
+    normalized: dict[str, dict] = {}
+    for name, entry in servers.items():
+        if isinstance(entry, dict):
+            normalized[str(name)] = entry
+    return normalized
+
+
+def seed_sources(surface: str, live_path: Path, contract: dict) -> list[tuple[str, dict[str, dict]]]:
+    seeds: list[tuple[str, dict[str, dict]]] = []
+
+    surface_paths = contract.get("surface_paths", {}) or {}
+    for other_surface, other_path_value in surface_paths.items():
+        if other_surface in {surface, "claude_desktop_runtime_state"}:
+            continue
+        other_path = resolve_surface_path(other_surface, str(other_path_value))
+        if other_path == live_path or not other_path.is_file():
+            continue
+        server_map = load_server_map(other_surface, other_path)
+        if server_map:
+            seeds.append((f"{other_surface}:{other_path}", server_map))
+
+    if surface == "codex" and WORKBENCH_MCP.is_file() and WORKBENCH_MCP != live_path:
+        server_map = load_server_map("codex", WORKBENCH_MCP)
+        if server_map:
+            seeds.append((f"workbench:{WORKBENCH_MCP}", server_map))
+
+    return seeds
+
+
+def seed_entry_for_surface(surface: str, name: str, seeds: list[tuple[str, dict[str, dict]]]) -> dict | None:
+    for _, server_map in seeds:
+        entry = server_map.get(name)
+        if not isinstance(entry, dict):
+            continue
+        normalized = normalize_entry_for_surface(surface, entry)
+        if normalized is not None:
+            return normalized
+    return None
+
+
+def build_gateway_entry(surface: str, contract: dict) -> dict:
+    gateway = contract.get("gateway", {}) or {}
+    command = remap_repo_local_path(str(gateway.get("command", "") or ""))
+    args = list(gateway.get("args", []) or [])
+    if not command:
+        fail("gateway.command missing from contract")
+    if surface == "opencode":
+        return {
+            "type": "local",
+            "command": [command, *args],
+            "enabled": True,
+        }
+    return {
+        "command": command,
+        "args": args,
+    }
+
+
+def build_supplemental_entry(surface: str, name: str, contract: dict) -> dict | None:
+    supplemental = (contract.get("supplemental_server_definitions", {}) or {}).get(name)
+    if not isinstance(supplemental, dict):
+        return None
+
+    command = remap_repo_local_path(str(supplemental.get("command", "") or ""))
+    args = list(supplemental.get("args", []) or [])
+    env = supplemental.get("env")
+    if not command:
+        return None
+
+    if surface == "opencode":
+        entry = {
+            "type": "local",
+            "command": [command, *args],
+            "enabled": True,
+        }
+        if isinstance(env, dict) and env:
+            entry["env"] = env
+        return entry
+
+    entry = {
+        "command": command,
+        "args": args,
+    }
+    if isinstance(env, dict) and env:
+        entry["env"] = env
+    return entry
+
+
+def resolve_server_entry(
+    surface: str,
+    name: str,
+    contract: dict,
+    existing: dict,
+    seeds: list[tuple[str, dict[str, dict]]],
+) -> tuple[dict | None, str | None]:
+    if isinstance(existing, dict) and existing:
+        return copy.deepcopy(existing), None
+
+    gateway = contract.get("gateway", {}) or {}
+    if name == gateway.get("server_name"):
+        return build_gateway_entry(surface, contract), None
+
+    supplemental = build_supplemental_entry(surface, name, contract)
+    if supplemental is not None:
+        return supplemental, None
+
+    seeded = seed_entry_for_surface(surface, name, seeds)
+    if seeded is not None:
+        return seeded, None
+
+    return None, f"unable to provision server '{name}' from contract"
+
+
+def build_config(surface: str, live_path: Path, contract: dict) -> tuple[dict, list[str]]:
+    config = load_json(live_path)
+    servers = existing_servers(surface, config)
+    seeds = seed_sources(surface, live_path, contract)
+    governed: dict[str, dict] = {}
+    warnings: list[str] = []
+
+    required = list(((contract.get("required_servers_by_surface", {}) or {}).get(surface, [])) or [])
+    optional = list(((contract.get("optional_servers", {}) or {}).get(surface, [])) or [])
+
+    ordered_names: list[str] = []
+    for name in required:
+        if name not in ordered_names:
+            ordered_names.append(name)
+    for name in optional:
+        if name in servers or seed_entry_for_surface(surface, name, seeds) is not None:
+            if name not in ordered_names:
+                ordered_names.append(name)
+            continue
+        supplemental = build_supplemental_entry(surface, name, contract)
+        gateway = contract.get("gateway", {}) or {}
+        if (supplemental is not None or name == gateway.get("server_name")) and name not in ordered_names:
+            ordered_names.append(name)
+
+    for name in ordered_names:
+        entry, warning = resolve_server_entry(surface, name, contract, servers.get(name), seeds)
+        if entry is not None:
+            governed[name] = entry
+        elif name in required:
+            warnings.append(warning or f"missing required server '{name}'")
+
+    config[SERVER_KEY_BY_SURFACE[surface]] = governed
+    return config, warnings
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Generate governed MCP configs from mcp.runtime.contract.yaml")
+    parser.add_argument("--apply", action="store_true", help="write the generated config to the governed path")
+    parser.add_argument("--check", action="store_true", help="compare generated config against the governed path")
+    parser.add_argument(
+        "--config-path",
+        help="override the governed config path for ad hoc verification or self-checks",
+    )
+    parser.add_argument(
+        "--surface",
+        default="claude_desktop",
+        choices=sorted(SERVER_KEY_BY_SURFACE.keys()),
+        help="surface to generate or check",
+    )
+    args = parser.parse_args()
+
+    if args.apply and args.check:
+        fail("choose only one of --apply or --check")
+
+    contract = load_contract()
+    surface_paths = contract.get("surface_paths", {}) or {}
+    live_path_value = surface_paths.get(args.surface)
+    if not live_path_value:
+        fail(f"surface_paths.{args.surface} missing from contract")
+    live_path = Path(str(args.config_path)).expanduser() if args.config_path else resolve_surface_path(args.surface, str(live_path_value))
+
+    generated, warnings = build_config(args.surface, live_path, contract)
+
+    if args.check:
+        if not live_path.is_file():
+            fail(f"live config missing: {live_path}")
+        live = load_json(live_path)
+        if normalize_json(generated) == normalize_json(live):
+            print(f"mcp.config.generate CHECK PASS: {args.surface} matches governed projection")
+            return 0
+        print(f"mcp.config.generate CHECK FAIL: {args.surface} diverges from governed projection", file=sys.stderr)
+        print("--- generated ---", file=sys.stderr)
+        print(json.dumps(generated, indent=2), file=sys.stderr)
+        print("--- live ---", file=sys.stderr)
+        print(json.dumps(live, indent=2), file=sys.stderr)
+        return 1
+
+    if not args.apply:
+        print("mcp.config.generate (dry-run)")
+        print(f"surface: {args.surface}")
+        print(f"live_config: {live_path}")
+        for warning in warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+        print("---")
+        print(json.dumps(generated, indent=2))
+        return 0
+
+    live_path.parent.mkdir(parents=True, exist_ok=True)
+    if live_path.exists():
+        backup = live_path.with_name(f"{live_path.name}.bak")
+        shutil.copy2(live_path, backup)
+        print(f"mcp.config.generate: backed up to {backup}")
+
+    live_path.write_text(json.dumps(generated, indent=2) + "\n", encoding="utf-8")
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    print(f"mcp.config.generate PASS: wrote governed projection to {live_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

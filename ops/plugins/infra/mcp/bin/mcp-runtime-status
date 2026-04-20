@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+CONTRACT = ROOT / "ops" / "bindings" / "mcp.runtime.contract.yaml"
+WORKTREE_CONTRACT = ROOT / "ops" / "bindings" / "worktree.lifecycle.contract.yaml"
+
+
+def fail(message: str) -> "NoReturn":
+    print(f"mcp.runtime.status FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_contract() -> dict:
+    if not CONTRACT.is_file():
+        fail(f"missing contract: {CONTRACT}")
+    data = yaml.safe_load(CONTRACT.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        fail(f"invalid contract shape: {CONTRACT}")
+    return data
+
+
+def load_worktree_policy() -> dict:
+    if not WORKTREE_CONTRACT.is_file():
+        return {}
+    data = yaml.safe_load(WORKTREE_CONTRACT.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        return {}
+    policy = data.get("policy", {}) or {}
+    return policy if isinstance(policy, dict) else {}
+
+
+WORKTREE_POLICY = load_worktree_policy()
+CONTROL_ROOT = Path(str(WORKTREE_POLICY.get("launcher_control_worktree_path", ROOT))).expanduser()
+
+
+def resolve_surface_path(surface: str, raw: str) -> Path:
+    path = Path(str(raw)).expanduser()
+    if surface != "codex":
+        return path
+    try:
+        relative = path.relative_to(CONTROL_ROOT)
+    except ValueError:
+        return path
+    return ROOT / relative
+
+
+def load_json(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"invalid JSON in {path}: {exc}")
+    return data if isinstance(data, dict) else {}
+
+
+def collect_codex(path: Path) -> dict[str, bool]:
+    data = load_json(path)
+    servers = data.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        return {}
+    return {name: True for name in servers}
+
+
+def collect_opencode(path: Path) -> dict[str, bool]:
+    data = load_json(path)
+    servers = data.get("mcp", {})
+    if not isinstance(servers, dict):
+        return {}
+    result: dict[str, bool] = {}
+    for name, config in servers.items():
+        enabled = True
+        if isinstance(config, dict):
+            enabled = bool(config.get("enabled", True))
+        result[str(name)] = enabled
+    return result
+
+
+def collect_claude_desktop(config_path: Path, runtime_path: Path, project_path: str) -> dict[str, bool]:
+    result: dict[str, bool] = {}
+
+    config = load_json(config_path)
+    static_servers = config.get("mcpServers", {})
+    if isinstance(static_servers, dict):
+        for name in static_servers:
+            result[str(name)] = True
+
+    runtime = load_json(runtime_path)
+    runtime_servers = runtime.get("mcpServers", {})
+    if isinstance(runtime_servers, dict):
+        for name in runtime_servers:
+            result[str(name)] = True
+
+    projects = runtime.get("projects", {})
+    if isinstance(projects, dict):
+        project = projects.get(project_path, {})
+        if isinstance(project, dict):
+            project_servers = project.get("mcpServers", {})
+            if isinstance(project_servers, dict):
+                for name in project_servers:
+                    result[str(name)] = True
+            enabled_mcpjson = project.get("enabledMcpjsonServers", [])
+            if isinstance(enabled_mcpjson, list):
+                for name in enabled_mcpjson:
+                    result[str(name)] = True
+
+    return result
+
+
+def main() -> int:
+    contract = load_contract()
+    aliases = contract.get("aliases", {}) or {}
+    required_by_surface = contract.get("required_servers_by_surface", {}) or {}
+    surface_paths = contract.get("surface_paths", {}) or {}
+    claude_project = str(contract.get("claude_project_path", Path.home()))
+
+    errors = 0
+    warnings = 0
+
+    print("mcp.runtime.status")
+    print(f"contract: {CONTRACT}")
+    print("")
+
+    for surface in required_by_surface:
+        config_path_value = surface_paths.get(surface)
+        if not config_path_value:
+            print(f"[{surface}] WARN: no surface path configured")
+            warnings += 1
+            print("")
+            continue
+
+        config_path = resolve_surface_path(surface, str(config_path_value))
+        print(f"[{surface}]")
+        print(f"  config: {config_path}")
+
+        discovered: dict[str, bool]
+        if surface == "codex":
+            discovered = collect_codex(config_path)
+        elif surface == "opencode":
+            discovered = collect_opencode(config_path)
+        elif surface == "claude_desktop":
+            runtime_path = Path(str(surface_paths.get("claude_desktop_runtime_state", ""))).expanduser()
+            print(f"  runtime_state: {runtime_path}")
+            if not runtime_path.is_file():
+                print(f"  WARN: runtime state file missing ({runtime_path})")
+                warnings += 1
+            discovered = collect_claude_desktop(config_path, runtime_path, claude_project)
+        else:
+            discovered = {}
+
+        if not config_path.is_file():
+            print("  FAIL: config file missing")
+            errors += 1
+            print("")
+            continue
+
+        if discovered:
+            print("  discovered:")
+            for name, enabled in sorted(discovered.items()):
+                print(f"    - {name} (enabled={str(enabled).lower()})")
+        else:
+            print("  WARN: no MCP servers discovered")
+            warnings += 1
+
+        for required in required_by_surface.get(surface, []):
+            candidates = [required, *list(aliases.get(required, []) or [])]
+            matches = [(name, enabled) for name, enabled in discovered.items() if name in candidates]
+            if not matches:
+                print(f"  FAIL: required server '{required}' not registered")
+                errors += 1
+                continue
+            if not any(enabled for _, enabled in matches):
+                print(f"  FAIL: required server '{required}' found but disabled")
+                errors += 1
+                continue
+            match_name = next(name for name, enabled in matches if enabled)
+            if match_name == required:
+                print(f"  PASS: required '{required}' registered+enabled")
+            else:
+                print(f"  PASS: required '{required}' resolved via alias '{match_name}'")
+
+        print("")
+
+    print(f"summary: errors={errors} warnings={warnings}")
+    return 0 if errors == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

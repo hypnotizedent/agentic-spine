@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""operator-surface-watchdog — bounded liveness repair for the public surface.
+
+Checks the local operator surface leaf endpoints on :8900. If any fail, restart
+the server service, trigger a regenerate pass, and poll for recovery.
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import time
+from urllib import error, request
+
+
+SERVER_SERVICE = "com.ronny.operator-surface-server.service"
+REGENERATE_SERVICE = "com.ronny.operator-surface-regenerate.service"
+DEFAULT_ENDPOINTS = ("/", "/mobile.json", "/payload.json")
+
+
+def fail(message: str) -> "NoReturn":
+    print(f"operator-surface-watchdog FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def run_systemctl(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["systemctl", "--user", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def probe(host: str, port: int, endpoints: tuple[str, ...], timeout: float) -> tuple[bool, list[str]]:
+    lines: list[str] = []
+    for endpoint in endpoints:
+        url = f"http://{host}:{port}{endpoint}"
+        try:
+            with request.urlopen(url, timeout=timeout) as response:
+                status = int(response.status)
+                content_type = str(response.headers.get("Content-Type", ""))
+        except error.HTTPError as exc:
+            lines.append(f"{endpoint} -> HTTP {exc.code}")
+            return False, lines
+        except Exception as exc:
+            lines.append(f"{endpoint} -> ERROR {exc}")
+            return False, lines
+
+        lines.append(f"{endpoint} -> {status} {content_type}".strip())
+        if status != 200:
+            return False, lines
+    return True, lines
+
+
+def service_state(name: str) -> str:
+    proc = run_systemctl("is-active", name)
+    return (proc.stdout or proc.stderr or "unknown").strip()
+
+
+def restart_services() -> None:
+    restart = run_systemctl("restart", SERVER_SERVICE)
+    if restart.returncode != 0:
+        detail = (restart.stderr or restart.stdout or "unknown error").strip()
+        fail(f"failed to restart {SERVER_SERVICE}: {detail}")
+
+    regenerate = run_systemctl("start", REGENERATE_SERVICE)
+    if regenerate.returncode != 0:
+        detail = (regenerate.stderr or regenerate.stdout or "unknown error").strip()
+        fail(f"failed to start {REGENERATE_SERVICE}: {detail}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Repair operator surface if the public leaf stops serving")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8900)
+    parser.add_argument("--probe-timeout", type=float, default=5.0)
+    parser.add_argument("--repair-wait-seconds", type=float, default=30.0)
+    parser.add_argument("--poll-interval-seconds", type=float, default=2.0)
+    parser.add_argument(
+        "--paths",
+        nargs="*",
+        default=list(DEFAULT_ENDPOINTS),
+        help="endpoints to probe in order",
+    )
+    args = parser.parse_args()
+
+    endpoints = tuple(str(path) for path in args.paths)
+    ok, lines = probe(args.host, args.port, endpoints, args.probe_timeout)
+    print("operator-surface-watchdog")
+    print(f"server_service: {SERVER_SERVICE} ({service_state(SERVER_SERVICE)})")
+    print(f"regenerate_service: {REGENERATE_SERVICE} ({service_state(REGENERATE_SERVICE)})")
+    for line in lines:
+        print(f"probe: {line}")
+
+    if ok:
+        print("status: PASS")
+        return 0
+
+    print("repair: restarting server + triggering regenerate")
+    restart_services()
+
+    deadline = time.time() + args.repair_wait_seconds
+    while time.time() < deadline:
+        time.sleep(args.poll_interval_seconds)
+        ok, lines = probe(args.host, args.port, endpoints, args.probe_timeout)
+        for line in lines:
+            print(f"reprobe: {line}")
+        if ok:
+            print(f"server_service: {SERVER_SERVICE} ({service_state(SERVER_SERVICE)})")
+            print(f"regenerate_service: {REGENERATE_SERVICE} ({service_state(REGENERATE_SERVICE)})")
+            print("status: REPAIRED")
+            return 0
+
+    fail(
+        "surface still unhealthy after repair attempt; "
+        f"{SERVER_SERVICE}={service_state(SERVER_SERVICE)} "
+        f"{REGENERATE_SERVICE}={service_state(REGENERATE_SERVICE)}"
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

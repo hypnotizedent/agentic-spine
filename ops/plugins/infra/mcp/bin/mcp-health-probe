@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import shutil
+import sys
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+CONTRACT = ROOT / "ops" / "bindings" / "mcp.runtime.contract.yaml"
+WORKTREE_CONTRACT = ROOT / "ops" / "bindings" / "worktree.lifecycle.contract.yaml"
+
+
+def fail(message: str) -> "NoReturn":
+    print(f"mcp.health.probe FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_contract() -> dict:
+    if not CONTRACT.is_file():
+        fail(f"missing contract: {CONTRACT}")
+    data = yaml.safe_load(CONTRACT.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        fail(f"invalid contract shape: {CONTRACT}")
+    return data
+
+
+def load_worktree_policy() -> dict:
+    if not WORKTREE_CONTRACT.is_file():
+        return {}
+    data = yaml.safe_load(WORKTREE_CONTRACT.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        return {}
+    policy = data.get("policy", {}) or {}
+    return policy if isinstance(policy, dict) else {}
+
+
+WORKTREE_POLICY = load_worktree_policy()
+CONTROL_ROOT = Path(str(WORKTREE_POLICY.get("launcher_control_worktree_path", ROOT))).expanduser()
+
+
+def remap_repo_local_path(raw: str) -> str:
+    path = Path(str(raw)).expanduser()
+    if not path.is_absolute():
+        return str(raw)
+    try:
+        relative = path.relative_to(CONTROL_ROOT)
+    except ValueError:
+        return str(path)
+    return str(ROOT / relative)
+
+
+def resolve_surface_path(surface: str, raw: str) -> Path:
+    path = Path(str(raw)).expanduser()
+    if surface != "codex":
+        return path
+    return Path(remap_repo_local_path(str(path)))
+
+
+def load_json(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"invalid JSON in {path}: {exc}")
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_command(command: str) -> str | None:
+    command = remap_repo_local_path(str(command))
+    if command.startswith("~/"):
+        command = str(Path.home() / command[2:])
+    resolved = shutil.which(command)
+    if resolved:
+        return resolved
+    path = Path(command)
+    if path.is_file():
+        return str(path)
+    return None
+
+
+def surface_servers(surface: str, path: Path) -> list[tuple[str, str | list[str] | None]]:
+    config = load_json(path)
+    if surface == "opencode":
+        servers = config.get("mcp", {})
+        if not isinstance(servers, dict):
+            return []
+        rows = []
+        for name, entry in servers.items():
+            command = entry.get("command") if isinstance(entry, dict) else None
+            rows.append((str(name), command))
+        return rows
+
+    servers = config.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        return []
+    rows = []
+    for name, entry in servers.items():
+        command = entry.get("command") if isinstance(entry, dict) else None
+        rows.append((str(name), command))
+    return rows
+
+
+def main() -> int:
+    contract = load_contract()
+    total = 0
+    reachable = 0
+    unreachable = 0
+
+    print("mcp.health.probe")
+    print(f"contract: {CONTRACT}")
+    print("")
+
+    gateway = contract.get("gateway", {}) or {}
+    gateway_name = str(gateway.get("server_name", "") or "")
+    gateway_command = str(gateway.get("command", "") or "")
+    if gateway_name and gateway_command:
+        total += 1
+        resolved = resolve_command(gateway_command)
+        if resolved:
+            print(f"  {gateway_name:<30} REACHABLE (binary: {resolved})")
+            reachable += 1
+        else:
+            print(f"  {gateway_name:<30} UNREACHABLE (binary not found: {gateway_command})")
+            unreachable += 1
+
+    for surface, path_value in (contract.get("surface_paths", {}) or {}).items():
+        if surface == "claude_desktop_runtime_state":
+            continue
+        path = resolve_surface_path(surface, str(path_value))
+        print(f"[{surface}]")
+        print(f"  config: {path}")
+        if not path.is_file():
+            print(f"  [{surface}] config missing: {path}")
+            print("")
+            continue
+
+        for name, command in surface_servers(surface, path):
+            total += 1
+            if isinstance(command, list):
+                first = str(command[0]) if command else ""
+            else:
+                first = str(command or "")
+
+            if not first:
+                print(f"  {name:<30} REACHABLE (registered in {surface}, no local command)")
+                reachable += 1
+                continue
+
+            resolved = resolve_command(first)
+            if resolved:
+                print(f"  {name:<30} REACHABLE (binary: {resolved})")
+                reachable += 1
+            else:
+                print(f"  {name:<30} UNREACHABLE (binary not found: {first})")
+                unreachable += 1
+        print("")
+
+    print(f"summary: total={total} reachable={reachable} unreachable={unreachable}")
+    return 0 if unreachable == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
