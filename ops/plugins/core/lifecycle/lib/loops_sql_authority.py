@@ -208,6 +208,27 @@ def _select_existing_scope_text(candidates: list[Path]) -> str | None:
     return None
 
 
+def _split_frontmatter(text: str) -> tuple[list[str] | None, str]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None, text
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            remainder = "\n".join(lines[idx + 1 :])
+            return lines[1:idx], remainder
+    return None, text
+
+
+def _strip_leading_frontmatter(text: str) -> str:
+    remainder = text.lstrip("\n")
+    while remainder:
+        frontmatter, stripped = _split_frontmatter(remainder)
+        if frontmatter is None:
+            break
+        remainder = stripped.lstrip("\n")
+    return remainder.rstrip("\n")
+
+
 def _scope_name_to_loop_id(path: Path) -> str:
     name = path.name
     if name.endswith(".scope.md"):
@@ -383,7 +404,7 @@ def _render_preserved_body_scope(loop: dict[str, Any], body: str) -> str:
         if extra_key in loop and loop[extra_key] is not None:
             fm[extra_key] = loop[extra_key]
     fm_text = yaml.safe_dump(fm, sort_keys=False, allow_unicode=False).rstrip("\n")
-    preserved_body = body.rstrip("\n")
+    preserved_body = _strip_leading_frontmatter(body)
     rendered = f"---\n{fm_text}\n---\n"
     if preserved_body:
         rendered += preserved_body + "\n"
@@ -503,7 +524,7 @@ def repair_live_scope_residue(
                     archive_text = _render_preserved_body_scope(db_loop, text)
                     classification = "archive_projection_non_live_db_status"
                     reason = f"shared_authority.db status is {db_status or 'unknown'}, not live"
-                archive_target.write_text(archive_text, encoding="utf-8")
+                _atomic_write_text(archive_target, archive_text)
                 scope_path.unlink()
                 summary["repaired_archived"] += 1
                 summary["items"].append(
@@ -519,7 +540,7 @@ def repair_live_scope_residue(
             summary["detected"] += 1
             quarantine_target = quarantine_dir / scope_path.name
             quarantine_reason = quarantine_dir / f"{scope_path.name}.reason.yaml"
-            quarantine_target.write_text(text, encoding="utf-8")
+            _atomic_write_text(quarantine_target, text)
             scope_path.unlink()
 
             loop_id = str(fm.get("loop_id") or "").strip()
@@ -533,7 +554,7 @@ def repair_live_scope_residue(
                 "reason": frontmatter_reason,
                 "quarantined_at_utc": utc_now_text(),
             }
-            quarantine_reason.write_text(dump_yaml(reason_payload), encoding="utf-8")
+            _atomic_write_text(quarantine_reason, dump_yaml(reason_payload))
             summary["quarantined"] += 1
             summary["items"].append(
                 {
@@ -551,7 +572,7 @@ def repair_live_scope_residue(
         if repaired_loop is None:
             quarantine_target = quarantine_dir / scope_path.name
             quarantine_reason = quarantine_dir / f"{scope_path.name}.reason.yaml"
-            quarantine_target.write_text(text, encoding="utf-8")
+            _atomic_write_text(quarantine_target, text)
             scope_path.unlink()
             reason_payload = {
                 "classification": "quarantine_manual_review",
@@ -560,7 +581,7 @@ def repair_live_scope_residue(
                 "reason": repair_error,
                 "quarantined_at_utc": utc_now_text(),
             }
-            quarantine_reason.write_text(dump_yaml(reason_payload), encoding="utf-8")
+            _atomic_write_text(quarantine_reason, dump_yaml(reason_payload))
             summary["quarantined"] += 1
             summary["items"].append(
                 {
@@ -577,7 +598,7 @@ def repair_live_scope_residue(
         target_dir = scopes_dir if classification == "repair_active_keep" else archive_dir
         target_path = target_dir / scope_path.name
         target_text = _render_preserved_body_scope(repaired_loop, text)
-        target_path.write_text(target_text, encoding="utf-8")
+        _atomic_write_text(target_path, target_text)
         if target_path != scope_path and scope_path.exists():
             scope_path.unlink()
 
@@ -1396,7 +1417,7 @@ def project_to_scope_files(
                             if extra_key in loop and loop[extra_key] is not None:
                                 new_fm[extra_key] = loop[extra_key]
                         fm_text = yaml.safe_dump(new_fm, sort_keys=False, allow_unicode=False).rstrip("\n")
-                        synced_body = _sync_current_state_section("\n".join(body_lines), loop)
+                        synced_body = _sync_current_state_section(_strip_leading_frontmatter("\n".join(body_lines)), loop)
                         new_text = "---\n" + fm_text + "\n---\n" + synced_body
                         if not new_text.endswith("\n"):
                             new_text += "\n"
