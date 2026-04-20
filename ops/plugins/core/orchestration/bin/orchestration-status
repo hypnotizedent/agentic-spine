@@ -42,10 +42,23 @@ lane_status() {
   fi
 }
 
+manifest_read() {
+  local manifest="$1"
+  local expr="$2"
+  local field="$3"
+  local value
+
+  if ! value="$(yq e -r "$expr" "$manifest")"; then
+    orchestration_fail "unable to read $field from manifest: $manifest"
+  fi
+
+  printf '%s\n' "$value"
+}
+
 manifest_lane_status() {
   local manifest="$1"
   local lane="$2"
-  yq e -r ".lanes.$lane.status // \"\"" "$manifest" 2>/dev/null || echo ""
+  manifest_read "$manifest" ".lanes.\"$lane\".status // \"\"" "lanes.$lane.status"
 }
 
 resolve_validation_state() {
@@ -92,12 +105,12 @@ print_one() {
   [[ -f "$manifest" ]] || return 0
 
   local id base_sha apply_owner loop_status seq_count related_count
-  id="$(yq e -r '.loop_id // "unknown"' "$manifest")"
-  base_sha="$(yq e -r '.base_sha // ""' "$manifest")"
-  apply_owner="$(yq e -r '.apply_owner // ""' "$manifest")"
-  loop_status="$(yq e -r '.status // "open"' "$manifest")"
-  seq_count="$(yq e '.sequence | length' "$manifest")"
-  related_count="$(yq e '.related_repos | length' "$manifest" 2>/dev/null || echo 0)"
+  id="$(manifest_read "$manifest" '.loop_id // "unknown"' 'loop_id')"
+  base_sha="$(manifest_read "$manifest" '.base_sha // ""' 'base_sha')"
+  apply_owner="$(manifest_read "$manifest" '.apply_owner // ""' 'apply_owner')"
+  loop_status="$(manifest_read "$manifest" '.status // "open"' 'status')"
+  seq_count="$(manifest_read "$manifest" '(.sequence // []) | length' 'sequence')"
+  related_count="$(manifest_read "$manifest" '(.related_repos // []) | length' 'related_repos')"
 
   echo "loop_id: $id"
   echo "  status: $loop_status"
@@ -121,9 +134,9 @@ print_one() {
   done < <(yq e -r '.sequence[]?' "$manifest")
 
   if [[ -f "$loop_dir/closed.yaml" ]]; then
-    close_state="$(yq e -r '.status // ""' "$loop_dir/closed.yaml")"
-    close_at="$(yq e -r '.closed_at // ""' "$loop_dir/closed.yaml")"
-    close_by="$(yq e -r '.closed_by // ""' "$loop_dir/closed.yaml")"
+    close_state="$(manifest_read "$loop_dir/closed.yaml" '.status // ""' 'closed.status')"
+    close_at="$(manifest_read "$loop_dir/closed.yaml" '.closed_at // ""' 'closed.closed_at')"
+    close_by="$(manifest_read "$loop_dir/closed.yaml" '.closed_by // ""' 'closed.closed_by')"
     echo "  close: $close_state at $close_at by $close_by"
   fi
 }

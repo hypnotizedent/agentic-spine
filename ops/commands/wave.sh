@@ -894,6 +894,13 @@ cmd_start() {
     echo "Usage: --worktree must be auto or off (got: $worktree_mode)" >&2
     exit 1
   fi
+  case "$wave_kind" in
+    production|synthetic|engineering) ;;
+    *)
+      echo "FAIL: invalid wave kind '$wave_kind' (allowed: production|synthetic|engineering)" >&2
+      exit 1
+      ;;
+  esac
 
   # Track artifacts for rollback on failure (GAP-OP-1491, GAP-OP-1585).
   wave_start_reset_cleanup_state

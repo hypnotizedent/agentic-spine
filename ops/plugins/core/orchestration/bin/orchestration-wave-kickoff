@@ -116,6 +116,33 @@ for lane in "${lanes[@]}"; do
   lane_seen["$lane"]=1
 done
 
+kickoff_validate_manifest_inputs() {
+  local manifest="$1"
+  local expected_owner="$2"
+  local expected_sequence=""
+  local existing_owner=""
+  local existing_sequence_mode=""
+  local existing_sequence=""
+  local requested_lanes=""
+  local manifest_lanes=""
+  expected_sequence="$(printf '%s\n' "${lanes[@]}")"
+
+  existing_owner="$(yq e -r '.apply_owner // ""' "$manifest")"
+  existing_sequence_mode="$(yq e -r '.sequence_mode // ""' "$manifest")"
+  existing_sequence="$(yq e -r '.sequence[]?' "$manifest" | sed '/^$/d')"
+  requested_lanes="$(printf '%s\n' "${lanes[@]}" | sort)"
+  manifest_lanes="$(yq e -r '.lanes | keys | .[]?' "$manifest" | sed '/^$/d' | sort)"
+
+  [[ "$existing_owner" == "$expected_owner" ]] || orchestration_fail \
+    "manifest apply_owner mismatch at $manifest (expected '$expected_owner', found '${existing_owner:-missing}')"
+  [[ "$existing_sequence_mode" == "strict" ]] || orchestration_fail \
+    "manifest sequence_mode must be strict at $manifest (found '${existing_sequence_mode:-missing}')"
+  [[ "$manifest_lanes" == "$requested_lanes" ]] || orchestration_fail \
+    "manifest lane set mismatch at $manifest (requested '${lanes[*]}')"
+  [[ "$existing_sequence" == "$expected_sequence" ]] || orchestration_fail \
+    "manifest sequence mismatch at $manifest (requested '${lanes[*]}')"
+}
+
 # ── Dry-run: validate only, create nothing ──────────────────────────────
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "orchestration.wave.kickoff (dry-run)"
@@ -141,6 +168,7 @@ sequence_csv="$(IFS=,; echo "${lanes[*]}")"
 if [[ -f "$manifest" && "$FORCE" -ne 1 ]]; then
   existing_loop_id="$(yq e -r '.loop_id // ""' "$manifest")"
   [[ "$existing_loop_id" == "$LOOP_ID" ]] || orchestration_fail "manifest loop_id mismatch at $manifest"
+  kickoff_validate_manifest_inputs "$manifest" "$OWNER_TERMINAL"
 else
   open_args=(
     --loop-id "$LOOP_ID"
