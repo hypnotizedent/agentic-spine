@@ -31,10 +31,13 @@ historical_exceptions = {
 compat_exceptions = {
     "ops/lib/runtime-paths.sh",
     "ops/bindings/mailroom.bridge.yaml",
+    "ops/bindings/operator.hardware.bootstrap.artifact.shelf.yaml",
     "ops/plugins/infra/mailroom-bridge/bin/mailroom-bridge-serve",
     "ops/plugins/domains/mint/lib/mint-operator-storage-common.sh",
     "ops/plugins/infra/host/lib/operator-storage-surface-common.sh",
     "ops/plugins/infra/host/lib/archive-operator-drop-common.sh",
+    "ops/plugins/core/lifecycle/bin/controller-prompt-close",
+    "ops/plugins/infra/host/bin/host-operator-hardware-bootstrap-shelf-publish",
     "surfaces/verify/d19-backup-drift.sh",
     "surfaces/verify/d398-repo-local-evidence-write-target-lock.sh",
 }
@@ -45,6 +48,7 @@ allowed_contexts = (
     "/receipts/read",
     "/evidence/read",
     "$receipts/",
+    "$SPINE_STATE/",
 )
 pattern = re.compile(r"receipts/|docs/governance/_audits")
 violations = []

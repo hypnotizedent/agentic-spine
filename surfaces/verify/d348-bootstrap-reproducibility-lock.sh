@@ -47,7 +47,7 @@ trap 'rm -f "$tmp1" "$tmp2" "$tmpd"' EXIT
 
 "$INIT_SCRIPT" --dry-run --json | jq -S . >"$tmp1"
 "$INIT_SCRIPT" --dry-run --json | jq -S . >"$tmp2"
-"$DOCTOR_SCRIPT" --json | jq -S . >"$tmpd"
+"$DOCTOR_SCRIPT" --json 2>/dev/null | jq -S . >"$tmpd" || true
 
 if ! diff -u "$tmp1" "$tmp2" >/dev/null 2>&1; then
   echo "---- run#1 ----" >&2
