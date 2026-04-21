@@ -566,6 +566,9 @@ joined_state_summary = {
     "active_waves": 0,
     "orphaned_waves": 0,
     "verify_status": "unknown",
+    "engine_verify_status": "unknown",
+    "spine_verify_status": "unknown",
+    "secondary_verify_status": "unknown",
     "coherence_attention": False,
 }
 joined_state_verify_temporal = {}
@@ -599,6 +602,9 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
                     "active_waves": int(_aw) if isinstance(_aw, (int, float)) else 0,
                     "orphaned_waves": int(_ow) if isinstance(_ow, (int, float)) else 0,
                     "verify_status": _summary.get("latest_verify_status", _summary.get("latest_fast_verify_status", "unknown")),
+                    "engine_verify_status": _summary.get("engine_verify_status", "unknown"),
+                    "spine_verify_status": _summary.get("spine_verify_status", "unknown"),
+                    "secondary_verify_status": _summary.get("secondary_verify_status", "unknown"),
                     "verify_temporal_class": _summary.get("latest_verify_temporal_class", ""),
                     "verify_known_since_utc": _summary.get("latest_verify_known_since_utc", ""),
                     "verify_standing_evidence_count": _summary.get("latest_verify_standing_evidence_count", 0),
@@ -1019,7 +1025,10 @@ if mode == "--brief":
         parts.append(
             f"Waves: {joined_state_summary.get('active_waves', 0)} active / {joined_state_summary.get('orphaned_waves', 0)} orphaned"
         )
-    parts.append(f"Verify: {joined_state_summary.get('verify_status', 'unknown')}")
+    _engine_vs = joined_state_summary.get("engine_verify_status", "unknown")
+    _spine_vs = joined_state_summary.get("spine_verify_status", "unknown")
+    _secondary_vs = joined_state_summary.get("secondary_verify_status", "unknown")
+    parts.append(f"Engine: {_engine_vs} | Spine: {_spine_vs} | Secondary: {_secondary_vs}")
     if joined_state_summary.get("coherence_attention"):
         parts.append("Coherence: attention")
     if inbox_actionable:
@@ -1040,7 +1049,9 @@ print(f"  open loops:         {joined_state_summary.get('open_loops', len(open_l
 print(f"  open gaps:          {joined_state_summary.get('open_gaps', open_gap_count)}")
 print(f"  active waves:       {joined_state_summary.get('active_waves', '?')}")
 print(f"  orphaned waves:     {joined_state_summary.get('orphaned_waves', '?')}")
-print(f"  spine verify:       {joined_state_summary.get('verify_status', 'unknown')}")
+print(f"  engine verify:      {joined_state_summary.get('engine_verify_status', 'unknown')}")
+print(f"  spine verify:       {joined_state_summary.get('spine_verify_status', 'unknown')}")
+print(f"  secondary verify:   {joined_state_summary.get('secondary_verify_status', 'unknown')}")
 _verify_temporal = temporal_truth_payload.get("verify") or {}
 if _verify_temporal.get("temporal_class"):
     _verify_line = str(_verify_temporal.get("temporal_class") or "")

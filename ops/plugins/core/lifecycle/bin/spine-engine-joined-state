@@ -766,6 +766,54 @@ def collect_latest_front_door_verify(paths: dict[str, Path]) -> dict[str, Any]:
 collect_latest_fast_verify = collect_latest_front_door_verify
 
 
+ENGINE_VERIFY_RECEIPT_PATTERN = "__verify.engine.run__"
+SPINE_VERIFY_RECEIPT_PATTERN = "__spine.verify__"
+
+
+def collect_latest_engine_verify(paths: dict[str, Path]) -> dict[str, Any]:
+    """Collect the most recent verify.engine.run receipt."""
+    root = paths["receipts_root"]
+    if not root.exists():
+        return _empty_verify_result()
+    candidates = sorted(
+        (p for p in root.glob(f"RCAP-*{ENGINE_VERIFY_RECEIPT_PATTERN}*") if p.is_dir()),
+        key=lambda p: p.stat().st_mtime, reverse=True,
+    )
+    for receipt_dir in candidates[:10]:
+        output_path = receipt_dir / "output.txt"
+        if not output_path.exists():
+            continue
+        try:
+            summary = parse_verify_output(output_path)
+        except Exception:
+            continue
+        scope = "engine"
+        return _build_verify_result(receipt_dir, summary, scope)
+    return _empty_verify_result()
+
+
+def collect_latest_spine_verify(paths: dict[str, Path]) -> dict[str, Any]:
+    """Collect the most recent spine.verify receipt."""
+    root = paths["receipts_root"]
+    if not root.exists():
+        return _empty_verify_result()
+    candidates = sorted(
+        (p for p in root.glob(f"RCAP-*{SPINE_VERIFY_RECEIPT_PATTERN}*") if p.is_dir()),
+        key=lambda p: p.stat().st_mtime, reverse=True,
+    )
+    for receipt_dir in candidates[:10]:
+        output_path = receipt_dir / "output.txt"
+        if not output_path.exists():
+            continue
+        try:
+            summary = parse_verify_output(output_path)
+        except Exception:
+            continue
+        scope = "spine"
+        return _build_verify_result(receipt_dir, summary, scope)
+    return _empty_verify_result()
+
+
 def build_engine_coherence_summary(
     open_loops: list[dict[str, Any]],
     open_gaps: list[dict[str, Any]],
@@ -915,6 +963,8 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             orphaned_waves.append(orphan)
     main_override_signals = collect_main_override_signals(paths)
     latest_fast_verify = collect_latest_fast_verify(paths)
+    latest_engine_verify = collect_latest_engine_verify(paths)
+    latest_spine_verify = collect_latest_spine_verify(paths)
     verify_temporal = {}
     if temporal_truth is not None:
         try:
@@ -978,6 +1028,9 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             "recent_force_closes": len(override_signals.get("force_close", [])),
             "recent_dod_overrides": len(override_signals.get("dod_override", [])),
             "recent_main_overrides": len(main_override_signals),
+            "engine_verify_status": latest_engine_verify.get("status", "unknown"),
+            "spine_verify_status": latest_spine_verify.get("status", "unknown"),
+            "secondary_verify_status": latest_fast_verify.get("status", "unknown"),
             "latest_verify_status": latest_fast_verify.get("status", "unknown"),
             "latest_verify_scope": latest_fast_verify.get("scope", ""),
             "latest_fast_verify_status": latest_fast_verify.get("status", "unknown"),
@@ -1012,7 +1065,12 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             "dod_override": override_signals.get("dod_override", []),
             "main_override": main_override_signals,
         },
-        "verify": {"latest_fast": latest_fast_verify},
+        "verify": {
+            "engine": latest_engine_verify,
+            "spine": latest_spine_verify,
+            "secondary": latest_fast_verify,
+            "latest_fast": latest_fast_verify,
+        },
         "temporal_truth": {"verify": verify_temporal},
         "engine_coherence": engine_coherence,
     }
@@ -1073,6 +1131,9 @@ def main() -> int:
     print(f"recent_force_closes: {summary.get('recent_force_closes', 0)}")
     print(f"recent_dod_overrides: {summary.get('recent_dod_overrides', 0)}")
     print(f"recent_main_overrides: {summary.get('recent_main_overrides', 0)}")
+    print(f"engine_verify_status: {summary.get('engine_verify_status', 'unknown')}")
+    print(f"spine_verify_status: {summary.get('spine_verify_status', 'unknown')}")
+    print(f"secondary_verify_status: {summary.get('secondary_verify_status', 'unknown')}")
     verify_scope = summary.get('latest_verify_scope') or 'fast'
     print(f"latest_verify_status: {summary.get('latest_verify_status', 'unknown')} (scope={verify_scope})")
     verify_temporal_class = summary.get("latest_verify_temporal_class") or ""
