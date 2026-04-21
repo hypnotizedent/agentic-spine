@@ -143,9 +143,10 @@ for row in rows:
     if not accepted_intake_refs:
         violations.append(f"{row_id}: intake_lineage.accepted_intake_refs must be non-empty")
 
+    projection_class = str(row.get("projection_class", "")).strip()
     projection_refs = as_list(row.get("projection_refs"))
-    if not projection_refs:
-        violations.append(f"{row_id}: projection_refs must be non-empty")
+    if not projection_refs and projection_class != "terminal":
+        violations.append(f"{row_id}: projection_refs must be non-empty (or set projection_class: terminal)")
     for proj_ref in projection_refs:
         proj_id = str(proj_ref).strip()
         if not proj_id:

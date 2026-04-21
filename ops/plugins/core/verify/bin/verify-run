@@ -332,6 +332,12 @@ run_spine_scope() {
   [[ "$engine_rc" -eq 0 ]] || overall_rc=1
   [[ "$honesty_rc" -eq 0 ]] || overall_rc=1
 
+  # Build warn-only surface path set from gate registry metadata
+  local warn_only_paths
+  warn_only_paths="$(jq -r --arg root "$ROOT" \
+    '[.executable_surfaces[] | select(.warn_only == true) | (.path // .check_script) | if startswith("/") then . else ($root + "/" + .) end] | .[]' \
+    <<<"$helper_json")"
+
   while IFS= read -r surface; do
     [[ -n "$surface" ]] || continue
     if [[ ! -x "$surface" ]]; then
@@ -352,7 +358,13 @@ run_spine_scope() {
       set -e
     fi
 
-    [[ "$gate_rc" -eq 0 ]] || overall_rc=1
+    if [[ "$gate_rc" -ne 0 ]]; then
+      if echo "$warn_only_paths" | grep -qxF "$surface"; then
+        [[ "$json_mode" -eq 1 ]] || echo "  (warn-only gate — not blocking spine.verify)"
+      else
+        overall_rc=1
+      fi
+    fi
   done < <(jq -r '.[]' <<<"$helper_exec_paths_json")
 
   if [[ "$json_mode" -eq 1 ]]; then

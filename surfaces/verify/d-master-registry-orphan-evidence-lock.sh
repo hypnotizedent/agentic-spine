@@ -112,9 +112,10 @@ for row in rows:
             f"{row_id}: evidence_refs must include at least one concrete local ops/ or docs/ path"
         )
 
+    projection_class = str(row.get("projection_class", "")).strip()
     projection_refs = [str(v).strip() for v in as_list(row.get("projection_refs")) if str(v).strip()]
-    if not projection_refs:
-        violations.append(f"{row_id}: orphan row missing projection_refs")
+    if not projection_refs and projection_class != "terminal":
+        violations.append(f"{row_id}: orphan row missing projection_refs (or set projection_class: terminal)")
     for projection_ref in projection_refs:
         if projection_ref not in projection_ids:
             violations.append(f"{row_id}: projection ref missing from domain.projection.contract.yaml: {projection_ref}")

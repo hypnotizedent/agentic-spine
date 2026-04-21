@@ -129,6 +129,8 @@ def classify_core_gates(root: Path | None = None) -> dict[str, Any]:
                     "check_script": script,
                     "category": gate_row.get("category"),
                     "description": gate_row.get("description"),
+                    "mode": gate_row.get("mode", "enforce"),
+                    "warn_only": bool(gate_row.get("warn_only", False)),
                 }
             )
             continue
