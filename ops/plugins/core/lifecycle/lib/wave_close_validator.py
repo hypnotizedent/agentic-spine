@@ -534,6 +534,7 @@ def check_role_flow(
         current_role = str(authoritative_close.get("to_role", "")).strip()
         role_flow["current_role"] = current_role
         role_flow["next_role"] = ""
+        role_flow.pop("pending_transition", None)
         role_flow["last_transition"] = {
             "task_id": authoritative_close.get("task_id"),
             "from_role": str(authoritative_close.get("from_role", "")).strip(),

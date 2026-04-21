@@ -491,6 +491,12 @@ close_loop() {
     local current_status
     current_status="$(_loop_authority_status "$loop_id")"
     if [[ -z "$current_status" ]]; then
+        # SQLite is authority — if bridge returns empty, fail instead of
+        # falling back to scope file (prevents closed-loop resurrection).
+        local LOOPS_BRIDGE_CHECK="$SPINE_REPO/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
+        if [[ -x "$LOOPS_BRIDGE_CHECK" ]]; then
+            echo "WARN: SQLite authority returned empty for $loop_id — bridge available but no row found" >&2
+        fi
         current_status="$(_fm_field "$scope_file" "status")"
     fi
     if _is_closed_status "$current_status"; then

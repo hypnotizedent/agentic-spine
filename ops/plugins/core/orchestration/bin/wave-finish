@@ -120,16 +120,22 @@ parity_snapshot_fields() {
 import json
 import sys
 
-d = json.loads(sys.argv[1])
-print("\t".join([
-    "1" if d.get("match") else "0",
-    str(d.get("db_count", 0)),
-    str(d.get("yaml_count", 0)),
-    str(len(d.get("in_db_not_yaml", []))),
-    str(len(d.get("in_yaml_not_db", []))),
-    str(d.get("archived_in_db", 0)),
-    str(d.get("archive_ref", "")),
-]))
+try:
+    d = json.loads(sys.argv[1])
+    if not isinstance(d, dict):
+        raise ValueError("parity payload is not a dict")
+    print("\t".join([
+        "1" if d.get("match") else "0",
+        str(d.get("db_count", 0)),
+        str(d.get("yaml_count", 0)),
+        str(len(d.get("in_db_not_yaml", []))),
+        str(len(d.get("in_yaml_not_db", []))),
+        str(d.get("archived_in_db", 0)),
+        str(d.get("archive_ref", "")),
+    ]))
+except Exception as e:
+    print(f"PARSE_ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
 PY
 }
 
@@ -139,18 +145,24 @@ parity_snapshot_note() {
 import json
 import sys
 
-d = json.loads(sys.argv[1])
-archive_ref = d.get("archive_ref", "")
-if archive_ref:
-    print(
-        "YAML and SQLite aligned (active=%s archived=%s split=%s)"
-        % (d.get("db_count", 0), d.get("archived_in_db", 0), archive_ref)
-    )
-else:
-    print(
-        "YAML and SQLite aligned (db=%s yaml=%s)"
-        % (d.get("db_count", 0), d.get("yaml_count", 0))
-    )
+try:
+    d = json.loads(sys.argv[1])
+    if not isinstance(d, dict):
+        raise ValueError("parity payload is not a dict")
+    archive_ref = d.get("archive_ref", "")
+    if archive_ref:
+        print(
+            "YAML and SQLite aligned (active=%s archived=%s split=%s)"
+            % (d.get("db_count", 0), d.get("archived_in_db", 0), archive_ref)
+        )
+    else:
+        print(
+            "YAML and SQLite aligned (db=%s yaml=%s)"
+            % (d.get("db_count", 0), d.get("yaml_count", 0))
+        )
+except Exception as e:
+    print(f"PARSE_ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
 PY
 }
 
@@ -639,16 +651,42 @@ PY
   exit 1
 }
 
-# Parse gap query result.
-open_gap_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d['open']))" "$gap_query_result")"
-closed_gap_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d['closed']))" "$gap_query_result")"
-parity_match="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print('1' if d['parity'].get('match') else '0')" "$gap_query_result")"
-parity_db_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['parity'].get('db_count', 0))" "$gap_query_result")"
-parity_yaml_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['parity'].get('yaml_count', 0))" "$gap_query_result")"
-parity_db_only_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d['parity'].get('in_db_not_yaml', [])))" "$gap_query_result")"
-parity_yaml_only_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d['parity'].get('in_yaml_not_db', [])))" "$gap_query_result")"
-parity_archived_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['parity'].get('archived_in_db', 0))" "$gap_query_result")"
-parity_archive_ref="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d['parity'].get('archive_ref', ''))" "$gap_query_result")"
+# Parse gap query result — single validated extraction.
+_gap_parsed="$(python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    if not isinstance(d, dict):
+        raise ValueError('gap query result is not a dict')
+    for key in ('open', 'closed', 'parity'):
+        if key not in d:
+            raise KeyError(f'missing required key: {key}')
+    p = d['parity']
+    print(len(d['open']))
+    print(len(d['closed']))
+    print('1' if p.get('match') else '0')
+    print(p.get('db_count', 0))
+    print(p.get('yaml_count', 0))
+    print(len(p.get('in_db_not_yaml', [])))
+    print(len(p.get('in_yaml_not_db', [])))
+    print(p.get('archived_in_db', 0))
+    print(p.get('archive_ref', ''))
+except Exception as e:
+    print(f'PARSE_ERROR: {e}', file=sys.stderr)
+    sys.exit(1)
+" "$gap_query_result")" || {
+  echo "wave.finish FAIL: gap query result parse failed" >&2
+  exit 1
+}
+open_gap_count="$(sed -n '1p' <<< "$_gap_parsed")"
+closed_gap_count="$(sed -n '2p' <<< "$_gap_parsed")"
+parity_match="$(sed -n '3p' <<< "$_gap_parsed")"
+parity_db_count="$(sed -n '4p' <<< "$_gap_parsed")"
+parity_yaml_count="$(sed -n '5p' <<< "$_gap_parsed")"
+parity_db_only_count="$(sed -n '6p' <<< "$_gap_parsed")"
+parity_yaml_only_count="$(sed -n '7p' <<< "$_gap_parsed")"
+parity_archived_count="$(sed -n '8p' <<< "$_gap_parsed")"
+parity_archive_ref="$(sed -n '9p' <<< "$_gap_parsed")"
 
 # Slice completion means one bounded wave slice is done, not that the parent loop
 # is complete. Preserve loop continuity and leave loop-linked gaps untouched.

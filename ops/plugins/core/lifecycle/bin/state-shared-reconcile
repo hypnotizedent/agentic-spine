@@ -155,7 +155,20 @@ snapshot_file_hash=""
 if [[ "$MODE" == "fix" && -f "$DB_PATH" ]]; then
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   snapshot_file="$SNAPSHOT_DIR/shared_authority.${ts}.db"
-  cp "$DB_PATH" "$snapshot_file"
+  # Acquire shared lock on DB during snapshot to prevent capturing a mid-write state.
+  python3 -c "
+import fcntl, shutil, sys, os
+db_path, snap_path = sys.argv[1], sys.argv[2]
+lock_path = db_path + '.lock'
+os.makedirs(os.path.dirname(lock_path) or '.', exist_ok=True)
+fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    shutil.copy2(db_path, snap_path)
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+" "$DB_PATH" "$snapshot_file"
   snapshot_file_hash="$(file_sha256 "$snapshot_file" || true)"
 fi
 

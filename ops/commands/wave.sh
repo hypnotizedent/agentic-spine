@@ -3176,13 +3176,17 @@ cmd_collect() {
   sd="$(wave_state_dir "$wave_id")"
 
   python3 - "$sf" "$sd" <<'PYCOLLECT'
-import json, sys, os, glob
+import json, sys, os, glob, fcntl
 
 sf = sys.argv[1]
 sd = sys.argv[2]
 
 with open(sf) as f:
-    state = json.load(f)
+    fcntl.flock(f, fcntl.LOCK_SH)
+    try:
+        state = json.load(f)
+    finally:
+        fcntl.flock(f, fcntl.LOCK_UN)
 
 print("=" * 72)
 print(f"  WAVE COLLECT: {state['wave_id']}")
