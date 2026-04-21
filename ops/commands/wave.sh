@@ -52,6 +52,7 @@ WAVE_START_CREATED_BRANCH=""
 WAVE_START_CREATED_WORKTREE=""
 WAVE_START_CREATED_REPO=""
 WAVE_START_CREATED_STATEDIR=""
+WAVE_START_CURRENT_WAVE_ID=""
 
 _repo_abs_path() {
   local p="${1:-}"
@@ -144,6 +145,115 @@ wave_start_reset_cleanup_state() {
   WAVE_START_CREATED_WORKTREE=""
   WAVE_START_CREATED_REPO=""
   WAVE_START_CREATED_STATEDIR=""
+  WAVE_START_CURRENT_WAVE_ID=""
+}
+
+wave_atomic_write_text_file() {
+  local target="${1:?target path required}"
+  local dir base tmp=""
+  dir="$(dirname "$target")"
+  base="$(basename "$target")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "${dir}/.${base}.XXXXXX.tmp")"
+  if ! cat > "$tmp"; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv "$tmp" "$target"; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  tmp=""
+  if [[ -n "$tmp" ]]; then
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+}
+
+wave_start_cleanup_path_claims() {
+  local wave_id="${WAVE_START_CURRENT_WAVE_ID:-}"
+  [[ -n "$wave_id" ]] || return 0
+  [[ -n "${PATH_CLAIMS_FILE:-}" && -f "${PATH_CLAIMS_FILE:-}" ]] || return 0
+
+  python3 - "$PATH_CLAIMS_FILE" "$wave_id" <<'PYCLEANCLAIMS' 2>/dev/null || true
+import json
+import os
+import sys
+import tempfile
+
+try:
+    import yaml
+except Exception:
+    yaml = None
+
+claims_path = sys.argv[1]
+target_wave = sys.argv[2]
+lock_path = claims_path + ".lock"
+
+def _load_doc(path: str):
+    if not path or not os.path.exists(path):
+        return {}
+    raw = open(path, "r", encoding="utf-8").read().strip()
+    if not raw:
+        return {}
+    try:
+        loaded = json.loads(raw)
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        if yaml is None:
+            return {}
+        try:
+            loaded = yaml.safe_load(raw) or {}
+            return loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            return {}
+
+def _atomic_write_json(path: str, payload: dict) -> None:
+    dirpath = os.path.dirname(path) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dirpath)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+
+fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+try:
+    import fcntl
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    doc = _load_doc(claims_path)
+    claims = doc.get("claims") if isinstance(doc.get("claims"), list) else []
+    filtered = [
+        claim for claim in claims
+        if not (isinstance(claim, dict) and str(claim.get("wave_id", "")).strip() == target_wave)
+    ]
+    if len(filtered) != len(claims):
+        doc["claims"] = filtered
+        _atomic_write_json(claims_path, doc)
+finally:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except Exception:
+        pass
+    os.close(fd)
+PYCLEANCLAIMS
 }
 
 wave_start_cleanup_on_exit() {
@@ -158,6 +268,7 @@ wave_start_cleanup_on_exit() {
     if [[ -n "${WAVE_START_CREATED_STATEDIR:-}" && -d "${WAVE_START_CREATED_STATEDIR:-}" ]]; then
       rm -rf "${WAVE_START_CREATED_STATEDIR:-}" 2>/dev/null || true
     fi
+    wave_start_cleanup_path_claims
   fi
 }
 
@@ -290,6 +401,7 @@ import json
 import os
 import sys
 import fcntl
+import tempfile
 from datetime import datetime, timezone
 
 state_file = sys.argv[1]
@@ -394,6 +506,7 @@ import json
 import os
 import sys
 import fcntl
+import tempfile
 from datetime import datetime, timezone
 
 claims_file = sys.argv[1]
@@ -460,6 +573,7 @@ import json
 import os
 import sys
 import fcntl
+import tempfile
 from datetime import datetime, timezone
 
 claims_file = sys.argv[1]
@@ -497,9 +611,35 @@ def _load_doc(path: str) -> dict:
 
 def _save_doc(path: str, payload: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2)
-        fh.write("\n")
+    _atomic_write_json(path, payload)
+
+
+def _atomic_write_json(path: str, payload: dict) -> None:
+    dirpath = os.path.dirname(path) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dirpath)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 
 def _parse_iso(raw: str):
@@ -546,6 +686,52 @@ def _load_wave_state(wave_id: str):
         return json.load(open(state_path, "r", encoding="utf-8"))
     except Exception:
         return None
+
+
+def _sync_wave_claim_state(wave_id: str, state: dict, claim: dict, action: str, reason: str) -> None:
+    if not isinstance(state, dict):
+        return
+    state_path = os.path.join(waves_dir, wave_id, "state.json")
+    if not state_path or not os.path.exists(state_path):
+        return
+
+    packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+    reconciled_paths = claim.get("claimed_paths") if isinstance(claim.get("claimed_paths"), list) else []
+    if action == "resynced":
+        packet["claimed_paths"] = reconciled_paths
+    else:
+        packet["claimed_paths"] = []
+
+    state["packet"] = packet
+    state["wave_packet"] = packet
+
+    claim_state = state.get("path_claims") if isinstance(state.get("path_claims"), dict) else {}
+    claim_state["status"] = "active" if action == "resynced" else action
+    claim_state["claim_id"] = str(claim.get("claim_id", "")).strip()
+    claim_state["claimed_paths"] = packet.get("claimed_paths", [])
+    claim_state["reconciled_at"] = now
+    claim_state["reconciled_reason"] = reason
+    if action == "resynced":
+        claim_state["expires_at"] = str(claim.get("expires_at", "")).strip()
+        claim_state.pop("expired_at", None)
+        claim_state.pop("released_at", None)
+    elif action == "expired":
+        claim_state["expired_at"] = now
+        claim_state.pop("released_at", None)
+    elif action == "released":
+        claim_state["released_at"] = now
+        claim_state.pop("expired_at", None)
+    state["path_claims"] = claim_state
+
+    wave_lock_file = state_path + ".lock"
+    os.makedirs(os.path.dirname(wave_lock_file), exist_ok=True)
+    wave_fd = os.open(wave_lock_file, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(wave_fd, fcntl.LOCK_EX)
+        _atomic_write_json(state_path, state)
+    finally:
+        fcntl.flock(wave_fd, fcntl.LOCK_UN)
+        os.close(wave_fd)
 
 
 summary = {
@@ -633,6 +819,9 @@ try:
         elif action == "resynced":
             claim["claimed_paths"] = wave_paths
             summary["resynced"] += 1
+
+        if isinstance(wave_state, dict):
+            _sync_wave_claim_state(wave_id, wave_state, claim, action, reason)
 
         summary["updated"] += 1
         changes.append(
@@ -890,6 +1079,7 @@ cmd_start() {
     wave_start_usage
     exit 1
   fi
+  WAVE_START_CURRENT_WAVE_ID="$wave_id"
   if [[ "$worktree_mode" != "auto" && "$worktree_mode" != "off" ]]; then
     echo "Usage: --worktree must be auto or off (got: $worktree_mode)" >&2
     exit 1
@@ -1092,7 +1282,7 @@ PYOCCUPIED
 
     # Materialize or refresh lane lease metadata so cleanup can reason about ownership.
     local lease_path="$workspace_worktree/$lease_filename"
-    cat > "$lease_path" <<EOF
+    wave_atomic_write_text_file "$lease_path" <<EOF
 ---
 version: 1
 status: active
@@ -1376,21 +1566,20 @@ if conflicts:
     sys.exit(1)
 
 expires_at = (now_dt + timedelta(minutes=max(1, path_claims_ttl_minutes))).strftime("%Y-%m-%dT%H:%M:%SZ")
-normalized_claims.append(
-    {
-        "claim_id": f"CLM-{wave_id}-{now_dt.strftime('%Y%m%dT%H%M%SZ')}",
-        "wave_id": wave_id,
-        "loop_id": loop_id,
-        "owner_terminal": owner_terminal,
-        "current_role": default_role,
-        "next_role": default_next_role,
-        "status": "active",
-        "claimed_paths": packet["claimed_paths"],
-        "created_at": now,
-        "expires_at": expires_at,
-        "deadline_utc": packet["deadline_utc"],
-    }
-)
+new_claim = {
+    "claim_id": f"CLM-{wave_id}-{now_dt.strftime('%Y%m%dT%H%M%SZ')}",
+    "wave_id": wave_id,
+    "loop_id": loop_id,
+    "owner_terminal": owner_terminal,
+    "current_role": default_role,
+    "next_role": default_next_role,
+    "status": "active",
+    "claimed_paths": packet["claimed_paths"],
+    "created_at": now,
+    "expires_at": expires_at,
+    "deadline_utc": packet["deadline_utc"],
+}
+normalized_claims.append(new_claim)
 claims_payload = {
     "schema_version": "1.0",
     "updated_at": now,
@@ -1428,6 +1617,13 @@ state = {
         "current_role": default_role,
         "next_role": default_next_role,
         "last_transition": None,
+    },
+    "path_claims": {
+        "status": "active",
+        "claim_id": new_claim["claim_id"],
+        "claimed_paths": packet["claimed_paths"],
+        "created_at": now,
+        "expires_at": expires_at,
     },
     "packet": packet,
     # Compatibility alias: governance contracts use wave_packet naming.

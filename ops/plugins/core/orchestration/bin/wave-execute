@@ -264,7 +264,9 @@ _sync_wave_runtime_state() {
 
   python3 - "$state_file" "$fallback_repo" "$fallback_worktree" "$fallback_branch" "$execution_mode" "$transport" "$workspace_note" <<'PYSYNC'
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 state_path = Path(sys.argv[1])
@@ -291,6 +293,32 @@ force_workspace_refresh = "wrapper-managed worktree rehydrate" in workspace_note
 
 def missing_path(value: str) -> bool:
     return not value or not Path(value).exists()
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=str(path.parent))
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 if fallback_repo and (not repo or missing_path(repo) or force_workspace_refresh):
     workspace["repo"] = fallback_repo
@@ -351,7 +379,7 @@ state["packet"] = packet
 state["wave_packet"] = packet
 
 if changed:
-    state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    _atomic_write_json(state_path, state)
 PYSYNC
 }
 
@@ -620,7 +648,7 @@ cmd_dispatch() {
   # Step 4: Log gap_ids binding to wave state
   if [[ -n "$gap_ids" ]]; then
     python3 -c "
-import json, sys, os, fcntl
+import json, sys, os, fcntl, tempfile
 
 state_file = sys.argv[1]
 gap_ids_raw = sys.argv[2]
@@ -653,9 +681,30 @@ try:
         if entry not in state['gap_bindings'][gid]:
             state['gap_bindings'][gid].append(entry)
 
-    with open(state_file, 'w') as f:
-        json.dump(state, f, indent=2)
-        f.write('\n')
+    dirpath = os.path.dirname(state_file) or "."
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dirpath)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, state_file)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 finally:
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)

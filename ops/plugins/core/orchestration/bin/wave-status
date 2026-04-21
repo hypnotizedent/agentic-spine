@@ -18,7 +18,7 @@ def _runtime_root(root: Path) -> Path:
     return Path(os.environ.get("SPINE_RUNTIME_ROOT", workspace_root / ".runtime" / "spine"))
 
 
-def _render_wave_status(state: dict, lanes: dict) -> None:
+def _render_wave_status(state: dict, lanes: dict, lanes_error: str = "") -> None:
     print("=" * 72)
     print(f"  WAVE STATUS: {state['wave_id']}")
     print("=" * 72)
@@ -35,7 +35,10 @@ def _render_wave_status(state: dict, lanes: dict) -> None:
         print(f"  Lifecycle: {workspace.get('lifecycle_state', 'active')}")
     print()
 
-    if lanes:
+    if lanes_error:
+        print(f"LANES: (unavailable: {lanes_error})")
+        print()
+    elif lanes:
         print("LANES")
         print("-" * 72)
         for name, info in sorted(lanes.items()):
@@ -116,11 +119,12 @@ def _render_wave_status(state: dict, lanes: dict) -> None:
 
     print("=" * 72)
     checks_complete = sum(1 for check in checks if check["status"] in ("done", "failed"))
-    print(f"  {len(dispatches)} dispatches | {checks_complete}/{len(checks)} checks complete | {len(lanes)} lanes open")
+    lane_summary = "lanes unavailable" if lanes_error else f"{len(lanes)} lanes open"
+    print(f"  {len(dispatches)} dispatches | {checks_complete}/{len(checks)} checks complete | {lane_summary}")
     print("=" * 72)
 
 
-def _render_all_waves(waves_dir: Path, lanes: dict) -> None:
+def _render_all_waves(waves_dir: Path, lanes: dict, lanes_error: str = "") -> None:
     waves: list[dict] = []
     if waves_dir.is_dir():
         for child in sorted(waves_dir.iterdir()):
@@ -137,7 +141,10 @@ def _render_all_waves(waves_dir: Path, lanes: dict) -> None:
     print("=" * 72)
     print()
 
-    if lanes:
+    if lanes_error:
+        print(f"LANES: (unavailable: {lanes_error})")
+        print()
+    elif lanes:
         print(f"LANES ({len(lanes)})")
         print("-" * 72)
         for name, info in sorted(lanes.items()):
@@ -178,7 +185,8 @@ def _render_all_waves(waves_dir: Path, lanes: dict) -> None:
     active_count = len([wave for wave in waves if wave.get("status") == "active"])
     closed_count = len([wave for wave in waves if wave.get("status") == "closed"])
     print("=" * 72)
-    print(f"  {len(lanes)} lanes | {active_count} active waves | {closed_count} closed")
+    lane_summary = "lanes unavailable" if lanes_error else f"{len(lanes)} lanes"
+    print(f"  {lane_summary} | {active_count} active waves | {closed_count} closed")
     print("=" * 72)
 
 
@@ -214,13 +222,23 @@ def main(argv: list[str]) -> int:
     lanes_file = runtime_root / "lanes" / "state.json"
 
     lanes: dict = {}
+    lanes_error = ""
     try:
-        lanes = json.loads(lanes_file.read_text(encoding="utf-8")).get("lanes", {})
-    except (FileNotFoundError, json.JSONDecodeError):
+        lanes_doc = json.loads(lanes_file.read_text(encoding="utf-8"))
+        parsed_lanes = lanes_doc.get("lanes", {}) if isinstance(lanes_doc, dict) else {}
+        if isinstance(parsed_lanes, dict):
+            lanes = parsed_lanes
+        else:
+            lanes_error = "invalid lanes payload"
+    except FileNotFoundError:
         pass
+    except json.JSONDecodeError as exc:
+        lanes_error = f"invalid JSON ({exc.msg})"
+    except OSError as exc:
+        lanes_error = str(exc)
 
     if not wave_id:
-        _render_all_waves(waves_dir, lanes)
+        _render_all_waves(waves_dir, lanes, lanes_error)
         return 0
 
     state_file = waves_dir / wave_id / "state.json"
@@ -229,7 +247,7 @@ def main(argv: list[str]) -> int:
         return 1
 
     state = json.loads(state_file.read_text(encoding="utf-8"))
-    _render_wave_status(state, lanes)
+    _render_wave_status(state, lanes, lanes_error)
     return 0
 
 
