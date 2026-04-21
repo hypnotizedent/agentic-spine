@@ -16,7 +16,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - Status: `planned`
 - Domain: `mintos`
 - Agent ID: `none`
-- Verify Command: `./bin/ops cap run verify.core.run`
+- Verify Command: `./bin/ops cap run verify.infra.run`
 
 ## Write Scope
 - (none)

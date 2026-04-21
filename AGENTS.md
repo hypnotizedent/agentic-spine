@@ -90,9 +90,13 @@ promotion and Ronny co-sign.
 Session attach: `./bin/ops cap run session.v3.attach`
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
-Verify scope reading for all agent sessions:
-- `verify.run engine`, `honesty`, and `spine` answer spine/object truth
-- `verify.run fast`, `infra`, `domain`, and `release` answer estate/workload
-  health, not packet/loop/governance truth
+Verify hierarchy for all agent sessions:
+- `verify.engine.run` — foundational engine smoke (is the engine alive?)
+- `spine.verify` — canonical local spine truth (is control-plane coherent?)
+- these two are the only foundational verify surfaces
+- `verify.infra.run`, `verify.run domain <id>`, and `verify.run release` answer
+  estate/workload health — they are scoped secondary surfaces, not peers
+- `verify.fast` and `verify.core.run` are deprecated compatibility aliases for
+  `verify.infra.run`; do not use them in new work
 - estate/workload verify surfaces must not be treated as spine closeout truth or
   as packet/loop/governance blockers unless a contract explicitly says so
