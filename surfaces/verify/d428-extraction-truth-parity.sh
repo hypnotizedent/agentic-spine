@@ -31,7 +31,7 @@ topology_path = Path(sys.argv[1])
 capabilities_path = Path(sys.argv[2])
 
 ALLOWED_LAYERS = {"L1_engine", "L2_shared_infrastructure", "L3_product_runtime"}
-EXPECTED_DOMAIN_COUNT = 20
+EXPECTED_DOMAIN_COUNT = 19
 
 
 def fail(msg: str) -> None:
