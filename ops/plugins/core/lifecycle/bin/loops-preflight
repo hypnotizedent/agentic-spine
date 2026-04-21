@@ -19,6 +19,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
 SCOPES_DIR="$SPINE_STATE/loop-scopes"
+ARCHIVE_DIR="$SPINE_STATE/archive/closed-loop-scopes"
 
 LOOP_ID=""
 JSON_OUTPUT=0
@@ -41,6 +42,19 @@ done
 [[ -n "$LOOP_ID" ]] || { echo "FAIL: --loop-id required" >&2; exit 2; }
 
 SCOPE_FILE="$SCOPES_DIR/${LOOP_ID}.scope.md"
+ARCHIVED_SCOPE_FILE="$ARCHIVE_DIR/${LOOP_ID}.scope.md"
+
+# Check 1a: closed-loop archive takes precedence over live absence.
+if [[ -f "$ARCHIVED_SCOPE_FILE" ]]; then
+  if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+    printf '{"loop_id":"%s","available":false,"reason":"loop_closed","status":"closed","archived_scope_file":"%s"}\n' "$LOOP_ID" "$ARCHIVED_SCOPE_FILE"
+  else
+    echo "FAIL: loop is closed (archived): $LOOP_ID"
+    echo "  → Archived scope file found at: $ARCHIVED_SCOPE_FILE"
+    echo "  → Create a new loop instead of reusing a closed identity."
+  fi
+  exit 1
+fi
 
 # Check 1: scope file exists
 if [[ ! -f "$SCOPE_FILE" ]]; then

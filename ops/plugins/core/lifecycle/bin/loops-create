@@ -15,6 +15,7 @@ spine_paths_init
 source "$ROOT/ops/lib/posture-guard.sh"
 source "$ROOT/ops/lib/git-lock.sh"
 SCOPES_DIR="$SPINE_STATE/loop-scopes"
+ARCHIVE_DIR="$SPINE_STATE/archive/closed-loop-scopes"
 
 # Posture enforcement: reject loop creation during converge posture.
 posture_guard_reject_growth "loops.create"
@@ -81,7 +82,11 @@ case "$EXEC_MODE" in
 esac
 
 acquire_git_lock loops || exit 1
-trap 'release_git_lock' EXIT INT TERM
+SCOPE_FILE_TMP=""
+cleanup_birth_artifacts() {
+  [[ -n "$SCOPE_FILE_TMP" ]] && rm -f "$SCOPE_FILE_TMP" 2>/dev/null || true
+}
+trap 'cleanup_birth_artifacts; release_git_lock' EXIT INT TERM
 
 # Boundary model enforcement: active loops must be horizon=now.
 # Deferred work (later/future) creates with status=planned, not active.
@@ -142,6 +147,11 @@ if [[ -f "$SCOPE_FILE" ]]; then
   echo "FAIL: Loop already exists: $SCOPE_FILE" >&2
   exit 1
 fi
+ARCHIVED_SCOPE_FILE="$ARCHIVE_DIR/${LOOP_ID}.scope.md"
+if [[ -f "$ARCHIVED_SCOPE_FILE" ]]; then
+  echo "FAIL: Loop already exists in archive: $ARCHIVED_SCOPE_FILE" >&2
+  exit 1
+fi
 
 # Owner-overlap check: block if active loops share keywords with the new loop name.
 # Use --force to override when the overlap is intentional.
@@ -185,6 +195,8 @@ SCOPE="$(echo "$NORM_NAME" | tr '[:upper:]' '[:lower:]' | cut -d'-' -f1)"
 # Ensure scopes directory exists
 mkdir -p "$SCOPES_DIR"
 
+SCOPE_FILE_TMP="$(mktemp "${SCOPES_DIR}/.${LOOP_ID}.birth.XXXXXX.tmp")"
+
 # Render template via sed substitution
 # Note: horizon/readiness have literal defaults in template, override if non-default
 sed \
@@ -193,19 +205,19 @@ sed \
   -e "s|{{PRIORITY}}|${PRIORITY}|g" \
   -e "s|{{OBJECTIVE}}|${OBJECTIVE}|g" \
   -e "s|{{SCOPE}}|${SCOPE}|g" \
-  "$TEMPLATE" > "$SCOPE_FILE"
+  "$TEMPLATE" > "$SCOPE_FILE_TMP"
 
 # Override horizon/readiness if non-default values specified
 if [[ "$HORIZON" != "now" ]]; then
-  sed -i '' "s/^horizon: now$/horizon: ${HORIZON}/" "$SCOPE_FILE"
+  sed -i '' "s/^horizon: now$/horizon: ${HORIZON}/" "$SCOPE_FILE_TMP"
   # Boundary model: deferred loops get status=planned, not active
-  sed -i '' "s/^status: active$/status: planned/" "$SCOPE_FILE"
+  sed -i '' "s/^status: active$/status: planned/" "$SCOPE_FILE_TMP"
 fi
 if [[ "$READINESS" != "runnable" ]]; then
-  sed -i '' "s/^execution_readiness: runnable$/execution_readiness: ${READINESS}/" "$SCOPE_FILE"
+  sed -i '' "s/^execution_readiness: runnable$/execution_readiness: ${READINESS}/" "$SCOPE_FILE_TMP"
 fi
 if [[ "$EXEC_MODE" != "orchestrator_subagents" ]]; then
-  sed -i '' "s/^execution_mode: orchestrator_subagents$/execution_mode: ${EXEC_MODE}/" "$SCOPE_FILE"
+  sed -i '' "s/^execution_mode: orchestrator_subagents$/execution_mode: ${EXEC_MODE}/" "$SCOPE_FILE_TMP"
 fi
 
 # Append scaffold sections for consistent loop structure
@@ -248,7 +260,7 @@ fi
       echo "- $item"
     done
   fi
-} >> "$SCOPE_FILE"
+} >> "$SCOPE_FILE_TMP"
 
 # ── SQLite authority bridge: upsert loop into shared_authority.db ──
 # Birth parity contract (B1+B2): both scope file and SQLite row must exist
@@ -284,8 +296,8 @@ fi
 if [[ "$SQLITE_OK" -eq 0 ]]; then
   echo "FAIL: birth parity — SQLite upsert failed for $LOOP_ID" >&2
   echo "  Cleaning up scope file to prevent scope-only birth..." >&2
-  rm -f "$SCOPE_FILE"
-  echo "  Scope file removed: $SCOPE_FILE" >&2
+  rm -f "$SCOPE_FILE_TMP"
+  echo "  Scope file removed: $SCOPE_FILE_TMP" >&2
   echo "  No split-authority loop was left behind." >&2
   exit 1
 fi
@@ -294,11 +306,11 @@ fi
 BIRTH_VERIFIED=1
 
 # B1: scope file exists with expected loop_id and status
-if [[ ! -f "$SCOPE_FILE" ]]; then
-  echo "FAIL: birth verification B1 — scope file missing after write: $SCOPE_FILE" >&2
+if [[ ! -f "$SCOPE_FILE_TMP" ]]; then
+  echo "FAIL: birth verification B1 — scope file missing after write: $SCOPE_FILE_TMP" >&2
   BIRTH_VERIFIED=0
 else
-  SCOPE_LID="$(awk '/^loop_id:/{print $2; exit}' "$SCOPE_FILE" | tr -d '"' || true)"
+  SCOPE_LID="$(awk '/^loop_id:/{print $2; exit}' "$SCOPE_FILE_TMP" | tr -d '"' || true)"
   if [[ "$SCOPE_LID" != "$LOOP_ID" ]]; then
     echo "FAIL: birth verification B1 — scope file loop_id mismatch: expected $LOOP_ID, got $SCOPE_LID" >&2
     BIRTH_VERIFIED=0
@@ -336,17 +348,42 @@ lsa.delete_loop(conn, sys.argv[2])
 conn.commit()
 conn.close()
 " "$LIB_DIR" "$LOOP_ID" 2>/dev/null; then
-      rm -f "$SCOPE_FILE"
+      rm -f "$SCOPE_FILE_TMP"
     else
-      echo "FAIL: SQLite cleanup failed for $LOOP_ID; scope file retained at $SCOPE_FILE" >&2
+      echo "FAIL: SQLite cleanup failed for $LOOP_ID; temp scope file retained at $SCOPE_FILE_TMP" >&2
       exit 1
     fi
   else
-    rm -f "$SCOPE_FILE"
+    rm -f "$SCOPE_FILE_TMP"
   fi
   echo "  No split-authority loop was left behind." >&2
   exit 1
 fi
+
+if ! mv -f "$SCOPE_FILE_TMP" "$SCOPE_FILE"; then
+  echo "FAIL: birth parity — unable to publish scope file for $LOOP_ID" >&2
+  LIB_DIR="$(dirname "$LOOPS_BRIDGE")/../lib"
+  if python3 -c "
+import sys, os
+sys.path.insert(0, sys.argv[1])
+import loops_sql_authority as lsa
+from pathlib import Path
+state = os.environ.get('SPINE_STATE') or str(Path.home() / 'code' / '.runtime' / 'spine' / 'state')
+db_path = Path(state) / 'shared_authority.db'
+conn = lsa.connect(db_path)
+lsa.ensure_schema(conn)
+lsa.delete_loop(conn, sys.argv[2])
+conn.commit()
+conn.close()
+" "$LIB_DIR" "$LOOP_ID" 2>/dev/null; then
+    rm -f "$SCOPE_FILE_TMP"
+  else
+    echo "FAIL: SQLite cleanup failed for $LOOP_ID after publish failure; temp scope file retained at $SCOPE_FILE_TMP" >&2
+    exit 1
+  fi
+  exit 1
+fi
+SCOPE_FILE_TMP=""
 
 if [[ "$JSON_OUTPUT" -eq 1 ]]; then
   printf '{"loop_id":"%s","scope_file":"%s","birth_parity":"pass"}\n' "$LOOP_ID" "$SCOPE_FILE"

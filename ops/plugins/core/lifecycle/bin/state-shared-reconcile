@@ -46,6 +46,75 @@ file_sha256() {
   sha256sum "$path" 2>/dev/null | awk '{print $1}' || return 1
 }
 
+restore_snapshot_if_unchanged() {
+  local db_path="${1:-}"
+  local snapshot_path="${2:-}"
+  local snapshot_hash="${3:-}"
+  [[ -n "$db_path" && -n "$snapshot_path" && -n "$snapshot_hash" ]] || return 1
+  python3 - "$db_path" "$snapshot_path" "$snapshot_hash" <<'PY'
+import fcntl
+import hashlib
+import os
+import shutil
+import sys
+import tempfile
+
+db_path = sys.argv[1]
+snapshot_path = sys.argv[2]
+snapshot_hash = sys.argv[3]
+lock_path = db_path + ".lock"
+
+def sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+if not os.path.exists(db_path) or not os.path.exists(snapshot_path):
+    print("skip_missing")
+    sys.exit(1)
+
+lock_dir = os.path.dirname(lock_path) or "."
+os.makedirs(lock_dir, exist_ok=True)
+fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    current_hash = sha256_file(db_path)
+    if current_hash != snapshot_hash:
+        print("skip_changed")
+        sys.exit(1)
+
+    db_dir = os.path.dirname(db_path) or "."
+    fd_tmp = None
+    tmp_path = None
+    try:
+      fd_tmp, tmp_path = tempfile.mkstemp(prefix=".shared-authority-restore-", suffix=".db", dir=db_dir)
+      with os.fdopen(fd_tmp, "wb") as dst, open(snapshot_path, "rb") as src:
+          shutil.copyfileobj(src, dst)
+          dst.flush()
+          os.fsync(dst.fileno())
+      fd_tmp = None
+      os.replace(tmp_path, db_path)
+      tmp_path = None
+    finally:
+      if fd_tmp is not None:
+        try:
+          os.close(fd_tmp)
+        except OSError:
+          pass
+      if tmp_path is not None:
+        try:
+          os.unlink(tmp_path)
+        except FileNotFoundError:
+          pass
+    print("restored")
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+PY
+}
+
 integrity_json="$(python3 - "$ROOT" <<'PY'
 import json
 import sys
@@ -123,9 +192,8 @@ else
     fix_payload="$(tail -n +2 <<<"$fix_result")"
     if [[ "$fix_rc" -ne 0 ]]; then
       if [[ -n "$snapshot_file" && -f "$snapshot_file" ]]; then
-        current_db_hash="$(file_sha256 "$DB_PATH" || true)"
-        if [[ -n "$snapshot_file_hash" && -n "$current_db_hash" && "$current_db_hash" == "$snapshot_file_hash" ]]; then
-          cp "$snapshot_file" "$DB_PATH"
+        if restore_snapshot_if_unchanged "$DB_PATH" "$snapshot_file" "$snapshot_file_hash"; then
+          :
         else
           echo "WARN: Skipping snapshot restore because shared authority DB changed during reconcile" >&2
         fi
