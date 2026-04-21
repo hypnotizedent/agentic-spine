@@ -1503,94 +1503,96 @@ if path_claims_file:
     os.makedirs(os.path.dirname(lock_file), exist_ok=True)
     path_claims_lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o644)
     fcntl.flock(path_claims_lock_fd, fcntl.LOCK_EX)
-claims_doc = _load_doc(path_claims_file) if path_claims_file else {}
-claims = claims_doc.get("claims") if isinstance(claims_doc.get("claims"), list) else []
-normalized_claims = []
-conflicts = []
+try:
+    claims_doc = _load_doc(path_claims_file) if path_claims_file else {}
+    claims = claims_doc.get("claims") if isinstance(claims_doc.get("claims"), list) else []
+    normalized_claims = []
+    conflicts = []
 
-# Explicit pre-pass: reap any claim whose TTL has elapsed before running the
-# collision check, so expired claims can never block a new wave start. This is
-# defensive duplication of reconcile_wave_path_claims (called earlier in the
-# shell wrapper) -- no new subsystem, just an in-place status flip.
-for claim in claims:
-    if not isinstance(claim, dict):
-        continue
-    if str(claim.get("status", "active")).strip() != "active":
-        continue
-    expires_at_raw = str(claim.get("expires_at", "")).strip()
-    if not expires_at_raw:
-        continue
-    try:
-        if datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00")) <= now_dt:
-            claim["status"] = "expired"
-            claim["expired_at"] = now
-            claim["reconciled_at"] = now
-            claim["reconciled_reason"] = "ttl_expired_at_wave_start"
-    except Exception:
-        pass
+    # Explicit pre-pass: reap any claim whose TTL has elapsed before running the
+    # collision check, so expired claims can never block a new wave start. This is
+    # defensive duplication of reconcile_wave_path_claims (called earlier in the
+    # shell wrapper) -- no new subsystem, just an in-place status flip.
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        if str(claim.get("status", "active")).strip() != "active":
+            continue
+        expires_at_raw = str(claim.get("expires_at", "")).strip()
+        if not expires_at_raw:
+            continue
+        try:
+            if datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00")) <= now_dt:
+                claim["status"] = "expired"
+                claim["expired_at"] = now
+                claim["reconciled_at"] = now
+                claim["reconciled_reason"] = "ttl_expired_at_wave_start"
+        except Exception:
+            pass
 
-for claim in claims:
-    if not isinstance(claim, dict):
-        continue
-    status = str(claim.get("status", "active")).strip() or "active"
-    if status == "active" and path_claims_non_overlap and str(claim.get("wave_id", "")).strip() != wave_id:
-        # Waves sharing the same loop_id are co-located lanes of the same
-        # orchestrated work -- allow path overlap within the same loop
-        # (GAP-OP-1486).
-        other_loop_id = str(claim.get("loop_id", "")).strip()
-        if other_loop_id and other_loop_id == loop_id:
-            pass  # same-loop sibling wave; skip overlap check
-        else:
-            other_paths = claim.get("claimed_paths") if isinstance(claim.get("claimed_paths"), list) else []
-            for mine in packet["claimed_paths"]:
-                for other in other_paths:
-                    if _paths_overlap(str(mine), str(other)):
-                        conflicts.append(
-                            {
-                                "wave_id": str(claim.get("wave_id", "")).strip(),
-                                "owner_terminal": str(claim.get("owner_terminal", "")).strip(),
-                                "path_a": str(mine),
-                                "path_b": str(other),
-                            }
-                        )
-    normalized_claims.append(claim)
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        status = str(claim.get("status", "active")).strip() or "active"
+        if status == "active" and path_claims_non_overlap and str(claim.get("wave_id", "")).strip() != wave_id:
+            # Waves sharing the same loop_id are co-located lanes of the same
+            # orchestrated work -- allow path overlap within the same loop
+            # (GAP-OP-1486).
+            other_loop_id = str(claim.get("loop_id", "")).strip()
+            if other_loop_id and other_loop_id == loop_id:
+                pass  # same-loop sibling wave; skip overlap check
+            else:
+                other_paths = claim.get("claimed_paths") if isinstance(claim.get("claimed_paths"), list) else []
+                for mine in packet["claimed_paths"]:
+                    for other in other_paths:
+                        if _paths_overlap(str(mine), str(other)):
+                            conflicts.append(
+                                {
+                                    "wave_id": str(claim.get("wave_id", "")).strip(),
+                                    "owner_terminal": str(claim.get("owner_terminal", "")).strip(),
+                                    "path_a": str(mine),
+                                    "path_b": str(other),
+                                }
+                            )
+        normalized_claims.append(claim)
 
-if conflicts:
-    print("FAIL: path claim collision detected (active overlapping claims)")
-    for c in conflicts:
-        print(
-            "  - "
-            f"wave={c['wave_id']} owner={c['owner_terminal']} "
-            f"path={c['path_a']} overlaps={c['path_b']}"
-        )
-    sys.exit(1)
+    if conflicts:
+        print("FAIL: path claim collision detected (active overlapping claims)")
+        for c in conflicts:
+            print(
+                "  - "
+                f"wave={c['wave_id']} owner={c['owner_terminal']} "
+                f"path={c['path_a']} overlaps={c['path_b']}"
+            )
+        sys.exit(1)
 
-expires_at = (now_dt + timedelta(minutes=max(1, path_claims_ttl_minutes))).strftime("%Y-%m-%dT%H:%M:%SZ")
-new_claim = {
-    "claim_id": f"CLM-{wave_id}-{now_dt.strftime('%Y%m%dT%H%M%SZ')}",
-    "wave_id": wave_id,
-    "loop_id": loop_id,
-    "owner_terminal": owner_terminal,
-    "current_role": default_role,
-    "next_role": default_next_role,
-    "status": "active",
-    "claimed_paths": packet["claimed_paths"],
-    "created_at": now,
-    "expires_at": expires_at,
-    "deadline_utc": packet["deadline_utc"],
-}
-normalized_claims.append(new_claim)
-claims_payload = {
-    "schema_version": "1.0",
-    "updated_at": now,
-    "claims": normalized_claims,
-}
-if path_claims_file:
-    _save_doc(path_claims_file, claims_payload)
-if path_claims_lock_fd is not None:
-    fcntl.flock(path_claims_lock_fd, fcntl.LOCK_UN)
-    os.close(path_claims_lock_fd)
-    path_claims_lock_fd = None
+    expires_at = (now_dt + timedelta(minutes=max(1, path_claims_ttl_minutes))).strftime("%Y-%m-%dT%H:%M:%SZ")
+    new_claim = {
+        "claim_id": f"CLM-{wave_id}-{now_dt.strftime('%Y%m%dT%H%M%SZ')}",
+        "wave_id": wave_id,
+        "loop_id": loop_id,
+        "owner_terminal": owner_terminal,
+        "current_role": default_role,
+        "next_role": default_next_role,
+        "status": "active",
+        "claimed_paths": packet["claimed_paths"],
+        "created_at": now,
+        "expires_at": expires_at,
+        "deadline_utc": packet["deadline_utc"],
+    }
+    normalized_claims.append(new_claim)
+    claims_payload = {
+        "schema_version": "1.0",
+        "updated_at": now,
+        "claims": normalized_claims,
+    }
+    if path_claims_file:
+        _save_doc(path_claims_file, claims_payload)
+finally:
+    if path_claims_lock_fd is not None:
+        fcntl.flock(path_claims_lock_fd, fcntl.LOCK_UN)
+        os.close(path_claims_lock_fd)
+        path_claims_lock_fd = None
 
 state = {
     "wave_id": wave_id,

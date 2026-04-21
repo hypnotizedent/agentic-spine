@@ -834,14 +834,22 @@ import json
 import os
 import sys
 import fcntl
+import tempfile
 from datetime import datetime, timezone
 
 state_file = sys.argv[1]
 index_file = sys.argv[2]
 now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-with open(state_file, "r", encoding="utf-8") as f:
-    state = json.load(f)
+state_lock_file = state_file + ".lock"
+state_fd = os.open(state_lock_file, os.O_CREAT | os.O_RDWR, 0o644)
+try:
+    fcntl.flock(state_fd, fcntl.LOCK_SH)
+    with open(state_file, "r", encoding="utf-8") as f:
+        state = json.load(f)
+finally:
+    fcntl.flock(state_fd, fcntl.LOCK_UN)
+    os.close(state_fd)
 
 packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
 role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}

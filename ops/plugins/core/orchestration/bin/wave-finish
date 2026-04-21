@@ -114,6 +114,46 @@ PY
 RESIDUE_CLEANUP_NOTE=""
 CONTROLLER_PROOF_PATH=""
 
+parity_snapshot_fields() {
+  local payload="${1:-}"
+  python3 - "$payload" <<'PY'
+import json
+import sys
+
+d = json.loads(sys.argv[1])
+print("\t".join([
+    "1" if d.get("match") else "0",
+    str(d.get("db_count", 0)),
+    str(d.get("yaml_count", 0)),
+    str(len(d.get("in_db_not_yaml", []))),
+    str(len(d.get("in_yaml_not_db", []))),
+    str(d.get("archived_in_db", 0)),
+    str(d.get("archive_ref", "")),
+]))
+PY
+}
+
+parity_snapshot_note() {
+  local payload="${1:-}"
+  python3 - "$payload" <<'PY'
+import json
+import sys
+
+d = json.loads(sys.argv[1])
+archive_ref = d.get("archive_ref", "")
+if archive_ref:
+    print(
+        "YAML and SQLite aligned (active=%s archived=%s split=%s)"
+        % (d.get("db_count", 0), d.get("archived_in_db", 0), archive_ref)
+    )
+else:
+    print(
+        "YAML and SQLite aligned (db=%s yaml=%s)"
+        % (d.get("db_count", 0), d.get("yaml_count", 0))
+    )
+PY
+}
+
 verify_orchestration_terminal_parity() {
   local loop_id="$1"
   local manifest="$SPINE_STATE/orchestration/$loop_id/manifest.yaml"
@@ -407,36 +447,33 @@ parity = gsa.db_parity_snapshot(conn, gaps_yaml)
 conn.close()
 print(json.dumps(parity))
 PY
-  )" 2>/dev/null; then
+  )"; then
     ELIGIBLE=0
     BLOCKERS+=("projection parity query unreadable")
     echo "❌ Projection parity: unable to query SQLite authority"
   elif [[ -n "$elig_parity_result" ]]; then
-    if ! elig_parity_match="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print('1' if d.get('match') else '0')" "$elig_parity_result" 2>/dev/null)"; then
+    local elig_parity_db_count="" elig_parity_yaml_count="" elig_parity_db_only="" elig_parity_yaml_only="" elig_parity_archived_count="" elig_parity_archive_ref=""
+    local elig_parity_fields=""
+    if ! elig_parity_fields="$(parity_snapshot_fields "$elig_parity_result")"; then
+      ELIGIBLE=0
+      BLOCKERS+=("projection parity unreadable")
+      echo "❌ Projection parity: unreadable result"
+    elif ! IFS=$'\t' read -r elig_parity_match elig_parity_db_count elig_parity_yaml_count elig_parity_db_only elig_parity_yaml_only elig_parity_archived_count elig_parity_archive_ref <<< "$elig_parity_fields"; then
       ELIGIBLE=0
       BLOCKERS+=("projection parity unreadable")
       echo "❌ Projection parity: unreadable result"
     elif [[ "$elig_parity_match" == "1" ]]; then
-      elig_parity_note="$(python3 -c "
-import json,sys
-d=json.loads(sys.argv[1])
-ar=d.get('archive_ref','')
-if ar:
-    print('YAML and SQLite aligned (active=%s archived=%s split=%s)' % (d.get('db_count',0),d.get('archived_in_db',0),ar))
-else:
-    print('YAML and SQLite aligned (db=%s yaml=%s)' % (d.get('db_count',0),d.get('yaml_count',0)))
-" "$elig_parity_result" 2>/dev/null || echo "aligned")"
-      echo "✓ Projection parity: $elig_parity_note"
+      if ! elig_parity_note="$(parity_snapshot_note "$elig_parity_result")"; then
+        ELIGIBLE=0
+        BLOCKERS+=("projection parity unreadable")
+        echo "❌ Projection parity: unreadable result"
+      else
+        echo "✓ Projection parity: $elig_parity_note"
+      fi
     else
       ELIGIBLE=0
-      if ! elig_db_only="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('in_db_not_yaml',[])))" "$elig_parity_result" 2>/dev/null)"; then
-        elig_db_only="?"
-      fi
-      if ! elig_yaml_only="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('in_yaml_not_db',[])))" "$elig_parity_result" 2>/dev/null)"; then
-        elig_yaml_only="?"
-      fi
-      BLOCKERS+=("projection mismatch (db_only=$elig_db_only yaml_only=$elig_yaml_only)")
-      echo "❌ Projection parity: mismatch (db_only=$elig_db_only yaml_only=$elig_yaml_only; run: gaps.projection.commit)"
+      BLOCKERS+=("projection mismatch (db_only=$elig_parity_db_only yaml_only=$elig_parity_yaml_only)")
+      echo "❌ Projection parity: mismatch (db_only=$elig_parity_db_only yaml_only=$elig_parity_yaml_only; run: gaps.projection.commit)"
     fi
   else
     ELIGIBLE=0
@@ -965,18 +1002,19 @@ parity = gsa.db_parity_snapshot(conn, gaps_yaml)
 conn.close()
 print(json.dumps(parity))
 PY
-  )" 2>/dev/null; then
+  )"; then
     echo "wave.finish FAIL: unable to re-query projection parity after sync" >&2
     exit 1
   fi
 
-  parity_match="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print('1' if d.get('match') else '0')" "$gap_projection_refresh" 2>/dev/null || echo "0")"
-  parity_db_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('db_count', 0))" "$gap_projection_refresh" 2>/dev/null || echo "0")"
-  parity_yaml_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('yaml_count', 0))" "$gap_projection_refresh" 2>/dev/null || echo "0")"
-  parity_db_only_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('in_db_not_yaml', [])))" "$gap_projection_refresh" 2>/dev/null || echo "0")"
-  parity_yaml_only_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(len(d.get('in_yaml_not_db', [])))" "$gap_projection_refresh" 2>/dev/null || echo "0")"
-  parity_archived_count="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('archived_in_db', 0))" "$gap_projection_refresh" 2>/dev/null || echo "0")"
-  parity_archive_ref="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('archive_ref', ''))" "$gap_projection_refresh" 2>/dev/null || echo "")"
+  parity_fields="$(parity_snapshot_fields "$gap_projection_refresh")" || {
+    echo "wave.finish FAIL: unreadable projection parity payload after sync" >&2
+    exit 1
+  }
+  if ! IFS=$'\t' read -r parity_match parity_db_count parity_yaml_count parity_db_only_count parity_yaml_only_count parity_archived_count parity_archive_ref <<< "$parity_fields"; then
+    echo "wave.finish FAIL: unreadable projection parity payload after sync" >&2
+    exit 1
+  fi
 
   if [[ "$parity_match" == "1" ]]; then
     if [[ -n "$parity_archive_ref" ]]; then

@@ -12,6 +12,9 @@ MAPFILE_COMPAT="$ROOT/ops/plugins/core/verify/bin/bash-mapfile-compat.sh"
 VERIFY_BASH_BIN="${SPINE_VERIFY_BASH_BIN:-}"
 GATE_REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
 VERIFY_RING_POLICY="$ROOT/ops/bindings/verify.ring.policy.yaml"
+GATE_REGISTRY_SNAPSHOT=""
+VERIFY_RING_POLICY_SNAPSHOT=""
+GOVERNED_FAST_GATE_ROWS_SNAPSHOT=""
 
 if [[ -z "$VERIFY_BASH_BIN" ]]; then
   if [[ -x /opt/homebrew/bin/bash ]]; then
@@ -88,30 +91,6 @@ G17|observability|infra
 EOF
 }
 
-verify_ring_names() {
-  [[ -f "$VERIFY_RING_POLICY" ]] || fail "missing verify ring policy: $VERIFY_RING_POLICY"
-  yq e -r '.rings[]?' "$VERIFY_RING_POLICY" 2>/dev/null | awk 'NF'
-}
-
-governed_fast_gate_rows() {
-  [[ -f "$GATE_REGISTRY" ]] || fail "missing gate registry: $GATE_REGISTRY"
-
-  local allowed_rings_json
-  allowed_rings_json="$(verify_ring_names | jq -R -s 'split("\n") | map(select(length > 0))')"
-
-  yq e -o=json '.gates' "$GATE_REGISTRY" 2>/dev/null \
-    | jq -r --argjson allowed_rings "$allowed_rings_json" '
-        map(select(type == "object"))
-        | map(select((.id // "") | tostring | startswith("G")))
-        | map(select((.retired // false) | not))
-        | map(select(((.superseded_by // "") | tostring | length) == 0))
-        | map(select(((.ring // "") | tostring) as $ring | any($allowed_rings[]; . == $ring)))
-        | sort_by((.id | ltrimstr("G") | tonumber))
-        | .[]
-        | [(.id // ""), (.check_script // ""), (.ring // "")] | @tsv
-      '
-}
-
 normalize_domain() {
   local raw="${1:-}"
   case "$raw" in
@@ -139,13 +118,63 @@ unique_lines() {
   awk 'NF && !seen[$0]++'
 }
 
+load_gate_registry_snapshot() {
+  [[ -n "$GATE_REGISTRY_SNAPSHOT" ]] && return 0
+  [[ -f "$GATE_REGISTRY" ]] || fail "missing gate registry: $GATE_REGISTRY"
+  GATE_REGISTRY_SNAPSHOT="$(yq e -o=json '.gates' "$GATE_REGISTRY" 2>/dev/null)" \
+    || fail "unable to parse gate registry: $GATE_REGISTRY"
+}
+
+load_verify_ring_policy_snapshot() {
+  [[ -n "$VERIFY_RING_POLICY_SNAPSHOT" ]] && return 0
+  [[ -f "$VERIFY_RING_POLICY" ]] || fail "missing verify ring policy: $VERIFY_RING_POLICY"
+  VERIFY_RING_POLICY_SNAPSHOT="$(yq e -r '.rings[]?' "$VERIFY_RING_POLICY" 2>/dev/null | awk 'NF')" \
+    || fail "unable to parse verify ring policy: $VERIFY_RING_POLICY"
+}
+
+governed_fast_gate_rows() {
+  load_verify_ring_policy_snapshot
+  load_gate_registry_snapshot
+
+  if [[ -n "$GOVERNED_FAST_GATE_ROWS_SNAPSHOT" ]]; then
+    printf '%s\n' "$GOVERNED_FAST_GATE_ROWS_SNAPSHOT"
+    return 0
+  fi
+
+  local allowed_rings_json
+  allowed_rings_json="$(printf '%s\n' "$VERIFY_RING_POLICY_SNAPSHOT" | jq -R -s 'split("\n") | map(select(length > 0))')"
+
+  GOVERNED_FAST_GATE_ROWS_SNAPSHOT="$(
+    printf '%s\n' "$GATE_REGISTRY_SNAPSHOT" \
+    | jq -r --argjson allowed_rings "$allowed_rings_json" '
+        map(select(type == "object"))
+        | map(select((.id // "") | tostring | startswith("G")))
+        | map(select((.retired // false) | not))
+        | map(select(((.superseded_by // "") | tostring | length) == 0))
+        | map(select(((.ring // "") | tostring) as $ring | any($allowed_rings[]; . == $ring)))
+        | sort_by((.id | ltrimstr("G") | tonumber))
+        | .[]
+        | [(.id // ""), (.check_script // ""), (.ring // "")] | @tsv
+      '
+  )"
+
+  printf '%s\n' "$GOVERNED_FAST_GATE_ROWS_SNAPSHOT"
+}
+
 all_gate_ids() {
   governed_fast_gate_rows | awk -F'\t' '{print $1}' | unique_lines
+}
+
+gate_script_rel() {
+  local gate_id="$1"
+  governed_fast_gate_rows | awk -F'\t' -v gate_id="$gate_id" '$1 == gate_id {print $2; exit}'
 }
 
 domain_gate_ids() {
   local domain
   domain="$(normalize_domain "${1:-}")"
+  local all_ids
+  all_ids="$(all_gate_ids | tr '\n' ' ')"
   runtime_domain_hints | awk -F'|' -v domain="$domain" '
     {
       split($3, extra, ",")
@@ -162,15 +191,10 @@ domain_gate_ids() {
     }
   ' | while IFS= read -r gate_id; do
         [[ -n "$gate_id" ]] || continue
-        if all_gate_ids | grep -Fxq "$gate_id"; then
-          printf '%s\n' "$gate_id"
-        fi
+        case " $all_ids " in
+          *" $gate_id "*) printf '%s\n' "$gate_id" ;;
+        esac
       done | unique_lines
-}
-
-gate_script_rel() {
-  local gate_id="$1"
-  governed_fast_gate_rows | awk -F'\t' -v gate_id="$gate_id" '$1 == gate_id {print $2; exit}'
 }
 
 domain_exists() {
@@ -201,6 +225,9 @@ run_gate_ids() {
   local gate_id script_rel script_path rc
   local -a unique_gate_ids=()
   local seen=""
+
+  load_gate_registry_snapshot
+  load_verify_ring_policy_snapshot
 
   for gate_id in "${gate_ids[@]}"; do
     [[ -n "$gate_id" ]] || continue

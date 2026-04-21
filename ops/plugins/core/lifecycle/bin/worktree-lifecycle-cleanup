@@ -7,6 +7,7 @@ export SPINE_CODE="${SPINE_CODE:-$CONTROL_ROOT}"
 export SPINE_REPO="$TARGET_ROOT"
 source "$CONTROL_ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
+source "$CONTROL_ROOT/ops/lib/git-lock.sh"
 CONTRACT="$CONTROL_ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
 CLOSEOUT_CONTRACT="$CONTROL_ROOT/ops/bindings/wave.closeout.contract.yaml"
 RECONCILE_SCRIPT="$CONTROL_ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile"
@@ -107,6 +108,10 @@ if [[ -n "${OPS_WORKTREE_CLEANUP_REQUIRE_CLEAN_WORKTREE_DELETE:-}" ]]; then
 fi
 if [[ -n "${OPS_WORKTREE_CLEANUP_REQUIRE_CLEAN_TEMP_CLONE_DELETE:-}" ]]; then
   REQUIRE_CLEAN_TEMP_CLONE_DELETE="${OPS_WORKTREE_CLEANUP_REQUIRE_CLEAN_TEMP_CLONE_DELETE}"
+fi
+
+if [[ "$MODE" == "delete" ]]; then
+  acquire_git_lock worktree-lifecycle-cleanup || exit 1
 fi
 
 ENV_TOKEN="${!DELETE_TOKEN_ENV-}"
@@ -512,6 +517,31 @@ def current_stash_refs(repo_root: Path):
     return mapping
 
 
+def drop_stash_by_commit(repo_root: Path, commit: str):
+    refs = current_stash_refs(repo_root)
+    ref = refs.get(commit)
+    if not ref:
+        return None, "missing_or_shifted_ref"
+
+    verify = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "--verify", ref],
+        text=True,
+        capture_output=True,
+    )
+    if verify.returncode != 0:
+        return ref, f"ref_resolution_failed|{(verify.stderr or verify.stdout).strip()}"
+
+    resolved = (verify.stdout or "").strip()
+    if resolved != commit:
+        return ref, "stale_or_mismatched_ref"
+
+    drop = subprocess.run(["git", "-C", str(repo_root), "stash", "drop", ref], text=True, capture_output=True)
+    if drop.returncode != 0:
+        return ref, f"drop_failed|{(drop.stderr or drop.stdout).strip()}"
+
+    return ref, None
+
+
 def lease_only_dirty(path: str):
     proc = subprocess.run(
         ["git", "-C", path, "status", "--porcelain", "--untracked-files=all"],
@@ -585,7 +615,6 @@ with actions.open("a", encoding="utf-8") as log:
             continue
         log.write(f"deleted_temp_clone={clone_path}|{item.get('branch') or '<detached>'}\n")
 
-    stash_refs = current_stash_refs(repo)
     for item in report.get("stash_delete_candidates", []):
         commit = str(item.get("commit") or "").strip()
         if not commit:
@@ -594,16 +623,11 @@ with actions.open("a", encoding="utf-8") as log:
         if require_archive and ("stash", commit) not in archived:
             log.write(f"skip_stash={commit}|not_archived\n")
             continue
-        ref = stash_refs.get(commit)
-        if not ref:
-            log.write(f"skip_stash={commit}|missing_or_shifted_ref\n")
-            continue
-        drop = subprocess.run(["git", "-C", str(repo), "stash", "drop", ref], text=True, capture_output=True)
-        if drop.returncode != 0:
-            log.write(f"skip_stash={commit}|drop_failed|{(drop.stderr or drop.stdout).strip()}\n")
+        ref, reason = drop_stash_by_commit(repo, commit)
+        if reason:
+            log.write(f"skip_stash={commit}|{reason}\n")
             continue
         log.write(f"deleted_stash={ref}|{commit}|{item.get('branch') or '<unknown>'}\n")
-        stash_refs = current_stash_refs(repo)
 
     root_action = report.get("root_normalization", {}).get("candidate")
     if root_action:

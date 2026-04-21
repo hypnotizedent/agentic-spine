@@ -13,6 +13,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
 source "$ROOT/ops/lib/posture-guard.sh"
+source "$ROOT/ops/lib/git-lock.sh"
 SCOPES_DIR="$SPINE_STATE/loop-scopes"
 
 # Posture enforcement: reject loop creation during converge posture.
@@ -78,6 +79,9 @@ case "$EXEC_MODE" in
   single_worker|orchestrator_subagents) ;;
   *) echo "FAIL: --execution-mode must be single_worker or orchestrator_subagents (got '$EXEC_MODE')" >&2; exit 2 ;;
 esac
+
+acquire_git_lock loops || exit 1
+trap 'release_git_lock' EXIT INT TERM
 
 # Boundary model enforcement: active loops must be horizon=now.
 # Deferred work (later/future) creates with status=planned, not active.

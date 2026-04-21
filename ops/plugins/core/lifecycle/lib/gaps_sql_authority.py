@@ -518,12 +518,11 @@ def update_watermark(
         """,
         (surface, sha, version, utc_now_text()),
     )
-    if file_size is not None and file_mtime_ns is not None:
-        _ensure_watermark_stat_columns(conn)
-        conn.execute(
-            "UPDATE gaps_projection_watermarks SET file_size = ?, file_mtime_ns = ? WHERE surface = ?",
-            (file_size, file_mtime_ns, surface),
-        )
+    _ensure_watermark_stat_columns(conn)
+    conn.execute(
+        "UPDATE gaps_projection_watermarks SET file_size = ?, file_mtime_ns = ? WHERE surface = ?",
+        (file_size, file_mtime_ns, surface),
+    )
 
 
 # ── Bootstrap (YAML → SQLite) ───────────────────────────────────

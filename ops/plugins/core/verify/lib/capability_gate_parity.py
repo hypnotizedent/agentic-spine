@@ -25,6 +25,7 @@ CAPABILITIES_PATH = ROOT / "ops/capabilities.yaml"
 GATE_REGISTRY_PATH = ROOT / "ops/bindings/gate.registry.yaml"
 TOPOLOGY_PATH = ROOT / "ops/bindings/gate.execution.topology.yaml"
 DOMAIN_CATALOG_PATH = ROOT / "ops/bindings/capability.domain.catalog.yaml"
+SNAPSHOT_RETRIES = 2
 
 # Every relation MUST be one of these types (fail-closed)
 VALID_RELATIONS = frozenset({
@@ -37,19 +38,30 @@ VALID_RELATIONS = frozenset({
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        print(f"FAIL: missing YAML file: {path}", file=sys.stderr)
-        sys.exit(1)
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            data = yaml.safe_load(fh) or {}
-    except Exception as exc:
-        print(f"FAIL: unable to parse YAML {path}: {exc}", file=sys.stderr)
-        sys.exit(1)
-    if not isinstance(data, dict):
-        print(f"FAIL: expected mapping at YAML root: {path}", file=sys.stderr)
-        sys.exit(1)
-    return data
+    for _ in range(SNAPSHOT_RETRIES):
+        if not path.is_file():
+            print(f"FAIL: missing YAML file: {path}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            before = path.stat()
+            with path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            after = path.stat()
+        except Exception as exc:
+            print(f"FAIL: unable to parse YAML {path}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if (
+            before.st_mtime_ns == after.st_mtime_ns
+            and before.st_size == after.st_size
+            and before.st_ino == after.st_ino
+            and before.st_dev == after.st_dev
+        ):
+            if not isinstance(data, dict):
+                print(f"FAIL: expected mapping at YAML root: {path}", file=sys.stderr)
+                sys.exit(1)
+            return data
+    print(f"FAIL: unstable YAML snapshot while reading {path}", file=sys.stderr)
+    sys.exit(1)
 
 
 def ensure_list(value: Any) -> list[Any]:
@@ -58,6 +70,32 @@ def ensure_list(value: Any) -> list[Any]:
 
 def ensure_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _path_signature(path: Path) -> tuple[int, int, int, int]:
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def load_authority_snapshot(paths: list[Path]) -> dict[Path, dict[str, Any]]:
+    """Load multiple authority YAML files under one stable snapshot window."""
+    for _ in range(SNAPSHOT_RETRIES):
+        before: dict[Path, tuple[int, int, int, int]] = {}
+        data: dict[Path, dict[str, Any]] = {}
+        for path in paths:
+            if not path.is_file():
+                print(f"FAIL: missing YAML file: {path}", file=sys.stderr)
+                sys.exit(1)
+            before[path] = _path_signature(path)
+            data[path] = load_yaml(path)
+
+        after = {path: _path_signature(path) for path in paths}
+        if before == after:
+            return data
+
+    changed = ", ".join(str(path) for path in paths)
+    print(f"FAIL: unstable multi-file YAML snapshot while reading: {changed}", file=sys.stderr)
+    sys.exit(1)
 
 
 def build_capability_set(capabilities_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -135,10 +173,17 @@ def classify_relation(
 
 def run_parity_check() -> dict[str, Any]:
     """Execute the full parity check and return structured results."""
-    capabilities_data = load_yaml(CAPABILITIES_PATH)
-    registry_data = load_yaml(GATE_REGISTRY_PATH)
-    topology_data = load_yaml(TOPOLOGY_PATH)
-    catalog_data = load_yaml(DOMAIN_CATALOG_PATH)
+    snapshot = load_authority_snapshot([
+        CAPABILITIES_PATH,
+        GATE_REGISTRY_PATH,
+        TOPOLOGY_PATH,
+        DOMAIN_CATALOG_PATH,
+    ])
+
+    capabilities_data = snapshot[CAPABILITIES_PATH]
+    registry_data = snapshot[GATE_REGISTRY_PATH]
+    topology_data = snapshot[TOPOLOGY_PATH]
+    catalog_data = snapshot[DOMAIN_CATALOG_PATH]
 
     cap_set = build_capability_set(capabilities_data)
     active_gates = build_active_gates(registry_data)
