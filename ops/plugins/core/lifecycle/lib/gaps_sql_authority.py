@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -652,6 +653,31 @@ def project_to_yaml(
     """
     all_gaps = fetch_gaps(conn)
 
+    def _atomic_write_text(path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd: int | None = None
+        tmp_path: str | None = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            fd = None
+            os.replace(tmp_path, path)
+            tmp_path = None
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except FileNotFoundError:
+                    pass
+
     if archive_closed:
         active_gaps = [g for g in all_gaps if g.get("status") not in ARCHIVED_STATUSES]
         archived_gaps = [g for g in all_gaps if g.get("status") in ARCHIVED_STATUSES]
@@ -676,8 +702,7 @@ def project_to_yaml(
             "count": len(archive_entries),
             "gaps": archive_entries,
         }
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-        archive_path.write_text(dump_yaml(archive_payload), encoding="utf-8")
+        _atomic_write_text(archive_path, dump_yaml(archive_payload))
 
         yaml_entries = [gap_to_yaml_entry(g) for g in active_gaps]
         archive_ref: str | None = archive_rel
@@ -696,8 +721,7 @@ def project_to_yaml(
     payload["gaps"] = yaml_entries
 
     yaml_text = dump_yaml(payload)
-    gaps_yaml.parent.mkdir(parents=True, exist_ok=True)
-    gaps_yaml.write_text(yaml_text, encoding="utf-8")
+    _atomic_write_text(gaps_yaml, yaml_text)
 
     yaml_hash = sha256_text(yaml_text)
     try:

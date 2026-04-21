@@ -152,13 +152,54 @@ fi
 # initial YAML frontmatter block is rewritten, so later body fences are left
 # untouched.
 ARCHIVED_TMP="${ARCHIVED_SCOPE_FILE}.normalize.tmp"
-awk '
-  BEGIN { in_fm = 0; saw_frontmatter = 0 }
-  NR == 1 && /^---[[:space:]]*$/ { in_fm = 1; saw_frontmatter = 1; print; next }
-  in_fm == 1 && /^---[[:space:]]*$/ { in_fm = 0; print; next }
-  saw_frontmatter == 1 && in_fm == 1 && /^status:[[:space:]]/ { print "status: closed"; next }
-  { print }
-' "$ARCHIVED_SCOPE_FILE" > "$ARCHIVED_TMP" && mv -f "$ARCHIVED_TMP" "$ARCHIVED_SCOPE_FILE"
+python3 - "$ARCHIVED_SCOPE_FILE" "$ARCHIVED_TMP" <<'PY'
+from pathlib import Path
+import os
+import sys
+import tempfile
+
+import yaml
+
+source = Path(sys.argv[1])
+tmp_target = Path(sys.argv[2])
+
+text = source.read_text(encoding="utf-8")
+lines = text.splitlines(keepends=True)
+if not lines or lines[0].strip() != "---":
+    raise SystemExit(f"loop.closeout.finalize FAIL: missing YAML frontmatter in {source}")
+
+frontmatter_end = None
+for idx in range(1, len(lines)):
+    if lines[idx].strip() == "---":
+        frontmatter_end = idx
+        break
+
+if frontmatter_end is None:
+    raise SystemExit(f"loop.closeout.finalize FAIL: missing YAML frontmatter terminator in {source}")
+
+frontmatter_text = "".join(lines[1:frontmatter_end])
+try:
+    frontmatter = yaml.safe_load(frontmatter_text) or {}
+except yaml.YAMLError as exc:
+    raise SystemExit(f"loop.closeout.finalize FAIL: unable to parse YAML frontmatter in {source}: {exc}")
+
+if not isinstance(frontmatter, dict):
+    raise SystemExit(f"loop.closeout.finalize FAIL: expected mapping frontmatter in {source}")
+
+frontmatter["status"] = "closed"
+rendered_fm = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=False).rstrip("\n")
+body = "".join(lines[frontmatter_end + 1 :])
+result = f"---\n{rendered_fm}\n---\n{body}"
+if not result.endswith("\n"):
+    result += "\n"
+
+tmp_target.parent.mkdir(parents=True, exist_ok=True)
+with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(tmp_target.parent), prefix=tmp_target.name + ".", delete=False) as handle:
+    handle.write(result)
+    staged = Path(handle.name)
+
+os.replace(staged, source)
+PY
 
 if [[ -z "$RECEIPT_PATH" ]]; then
   RECEIPT_DIR="$(yq e -r '.closeout_receipts.directory // ""' "$CONTRACT" 2>/dev/null)"
