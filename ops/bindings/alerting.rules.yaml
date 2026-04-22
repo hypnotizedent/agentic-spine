@@ -16,15 +16,20 @@ defaults:
     - warn
     - incident
   channels:
-    - ha
     - bridge-push
 
 channels:
   ha:
-    enabled: true
+    enabled: false
     endpoint_env: ALERTING_HA_URL
     token_env: ALERTING_HA_TOKEN
     service_path: /api/services/persistent_notification/create
+    retired: true
+    retired_at: "2026-04-22"
+    retirement_reason: >
+      Dashboard persistent notification only — not a proven wake-the-operator
+      interrupt. Replaced by mobile-push for operator-critical and bridge-push
+      for artifact logging. HA URL/token remain provisioned for mobile-push.
   bridge-push:
     enabled: true
     outbox_file: $SPINE_OUTBOX/alerts/bridge-push.log
@@ -50,47 +55,47 @@ rules:
   - domain_id: automation-stack
     trigger_statuses: [warn, incident]
     cooldown_seconds: 900
-    channels: [ha, bridge-push, email]
+    channels: [bridge-push, email]
 
   - domain_id: finance-stack
     trigger_statuses: [warn, incident]
     cooldown_seconds: 900
-    channels: [ha, bridge-push, email]
+    channels: [bridge-push, email]
 
   - domain_id: z2m-bridge
     trigger_statuses: [warn, incident]
     cooldown_seconds: 1800
-    channels: [ha, bridge-push, email]
+    channels: [bridge-push, email]
 
   - domain_id: immich-stack
     trigger_statuses: [incident]
     cooldown_seconds: 1800
-    channels: [ha, bridge-push, email]
+    channels: [bridge-push, email]
 
   - domain_id: infra-core-stack
     trigger_statuses: [warn, incident]
     cooldown_seconds: 900
-    channels: [ha, bridge-push, email, mobile-push]
+    channels: [bridge-push, email, mobile-push]
 
   - domain_id: observability-stack
     trigger_statuses: [warn, incident]
     cooldown_seconds: 1800
-    channels: [ha, bridge-push, email]
+    channels: [bridge-push, email]
 
   - domain_id: dev-tools-stack
     trigger_statuses: [warn, incident]
     cooldown_seconds: 900
-    channels: [ha, bridge-push, email]
+    channels: [bridge-push, email]
 
   - domain_id: mint-stack
     trigger_statuses: [warn, incident]
     cooldown_seconds: 1800
-    channels: [ha, bridge-push, email]
+    channels: [bridge-push, email]
 
   - domain_id: mcp-runtime-anti-drift
     trigger_statuses: [warn, incident]
     cooldown_seconds: 900
-    channels: [ha, bridge-push, email, mobile-push]
+    channels: [bridge-push, email, mobile-push]
 
 # ----------------------------------------------------------------------
 # Autonomous Operator Interrupt Contract (v1)
@@ -129,26 +134,17 @@ operator_interrupt:
 
   # -- Channel hierarchy and validation ------------------------------------
   #
-  # ha channel uses /api/services/persistent_notification/create.
-  # This is a Home Assistant dashboard inbox notification, NOT a mobile push surface.
-  #
   # mobile-push channel uses /api/services/notify/mobile_app_ronnys_iphone.
   # This is a proven Apple APNS push via HA Companion.
   #   evidence: 5 active automations in workbench/infra/homeassistant/config/automations.yaml
   #   integration: entry_id 01JVG2HT0ZZ6W6ER3SBN65NTJ9 in ha.integrations.yaml
   #
   # mobile-push is the operator-critical interrupt delivery surface.
-  # ha remains the inbox/dashboard surface — correctly classified.
+  # ha persistent-notification retired 2026-04-22 (dashboard inbox only, not operator interrupt).
   channels:
     operator_interrupt_delivery: mobile-push
     operator_interrupt_service_path: /api/services/notify/mobile_app_ronnys_iphone
     operator_interrupt_provider: ha_companion_apns
-    inbox_surface: ha
-    inbox_service_path: /api/services/persistent_notification/create
-    inbox_honest_characterization: >
-      Dashboard persistent notification. Visible in HA web UI.
-      Not delivered to phone unless HA Companion app is open.
-      Not a proven wake-the-operator interrupt.
     supporting_artifact: bridge-push
     email_disposition: manual-fallback-only
 
