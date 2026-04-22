@@ -146,35 +146,55 @@ if os.path.isdir(orch_dir):
         packets_checked += 1
         rel = os.path.relpath(packet_path, root)
 
-        for field in required_fields + closeout_fields:
-            value = packet.get(field)
-            if value is None or (isinstance(value, str) and not value.strip()):
-                failures.append(f"{rel}::missing_field::{field}")
+        # Determine packet lifecycle: active packets get relaxed enforcement.
+        # A packet is finalized when its loop has a closed.yaml or when
+        # finalized_at_utc is set to a real timestamp (not PENDING_CLOSEOUT).
+        loop_closed_file = os.path.join(orch_dir, loop_id, "closed.yaml")
+        finalized_at = str(packet.get("finalized_at_utc", "")).strip()
+        is_finalized = (
+            os.path.isfile(loop_closed_file)
+            or (finalized_at and finalized_at != "PENDING_CLOSEOUT")
+        )
 
-        verification_sequence = packet.get("verification_sequence")
-        if not isinstance(verification_sequence, list) or not verification_sequence:
-            failures.append(f"{rel}::verification_sequence_missing")
-        else:
-            for idx, step in enumerate(verification_sequence):
-                if not isinstance(step, dict):
-                    failures.append(f"{rel}::verification_sequence[{idx}] not object")
-                    continue
-                run_key = str(step.get("run_key", "")).strip()
-                if not run_key:
-                    failures.append(f"{rel}::verification_sequence[{idx}] missing run_key")
+        if is_finalized:
+            # Full enforcement for finalized packets.
+            for field in required_fields + closeout_fields:
+                value = packet.get(field)
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    failures.append(f"{rel}::missing_field::{field}")
 
-        lane_outcomes = packet.get("lane_outcomes")
-        if not isinstance(lane_outcomes, list):
-            failures.append(f"{rel}::lane_outcomes must be list")
+            verification_sequence = packet.get("verification_sequence")
+            if not isinstance(verification_sequence, list) or not verification_sequence:
+                failures.append(f"{rel}::verification_sequence_missing")
+            else:
+                for idx, step in enumerate(verification_sequence):
+                    if not isinstance(step, dict):
+                        failures.append(f"{rel}::verification_sequence[{idx}] not object")
+                        continue
+                    run_key = str(step.get("run_key", "")).strip()
+                    if not run_key:
+                        failures.append(f"{rel}::verification_sequence[{idx}] missing run_key")
+
+            lane_outcomes = packet.get("lane_outcomes")
+            if not isinstance(lane_outcomes, list):
+                failures.append(f"{rel}::lane_outcomes must be list")
+            else:
+                for idx, lane_row in enumerate(lane_outcomes):
+                    if not isinstance(lane_row, dict):
+                        failures.append(f"{rel}::lane_outcomes[{idx}] not object")
+                        continue
+                    lane_status = str(lane_row.get("lane_status", "")).strip()
+                    if lane_status == "PENDING_CLOSEOUT":
+                        lane_id = str(lane_row.get("lane_id", f"idx-{idx}")).strip()
+                        failures.append(f"{rel}::lane_outcomes::{lane_id} remains PENDING_CLOSEOUT")
         else:
-            for idx, lane_row in enumerate(lane_outcomes):
-                if not isinstance(lane_row, dict):
-                    failures.append(f"{rel}::lane_outcomes[{idx}] not object")
-                    continue
-                lane_status = str(lane_row.get("lane_status", "")).strip()
-                if lane_status == "PENDING_CLOSEOUT":
-                    lane_id = str(lane_row.get("lane_id", f"idx-{idx}")).strip()
-                    failures.append(f"{rel}::lane_outcomes::{lane_id} remains PENDING_CLOSEOUT")
+            # Active/mid-flight packets: only enforce required_fields (structural).
+            # Closeout fields, verification run_keys, and lane outcome status
+            # are expected to be incomplete until finalization.
+            for field in required_fields:
+                value = packet.get(field)
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    failures.append(f"{rel}::missing_field::{field}")
 
 if failures:
     print(f"D331 FAIL: {len(failures)} orchestrator packet contract violation(s).", file=sys.stderr)
