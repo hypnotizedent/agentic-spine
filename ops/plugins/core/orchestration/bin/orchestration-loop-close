@@ -10,17 +10,25 @@ usage() {
 orchestration-loop-close - Close an orchestration loop when lanes are integrated
 
 Usage:
-  orchestration-loop-close --loop-id <id> [--force]
+  orchestration-loop-close --loop-id <id> [--disposition <state>] [--completion-level <level>] [--close-summary "<text>"] [--force]
+
+Closes both the orchestration manifest AND the loop scope (via ops loops close).
 USAGE
 }
 
 ROOT="$(orchestration_root)"
 LOOP_ID=""
 FORCE=0
+DISPOSITION="landed"
+COMPLETION_LEVEL="slice_complete"
+CLOSE_SUMMARY=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --disposition) DISPOSITION="${2:-}"; shift 2 ;;
+    --completion-level) COMPLETION_LEVEL="${2:-}"; shift 2 ;;
+    --close-summary) CLOSE_SUMMARY="${2:-}"; shift 2 ;;
     --force) FORCE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) orchestration_fail "unknown argument: $1" ;;
@@ -81,9 +89,27 @@ closed_by="$(orchestration_actor)"
 yq e -i '.status = "closed"' "$manifest"
 yq e -i ".updated_at = \"$closed_at\"" "$manifest"
 
+# Chain into loops close to update scope file + SQLite authority.
+loops_close_args=("$LOOP_ID" "--disposition" "$DISPOSITION")
+if [[ -n "$COMPLETION_LEVEL" ]]; then
+  loops_close_args+=("--completion-level" "$COMPLETION_LEVEL")
+fi
+if [[ -n "$CLOSE_SUMMARY" ]]; then
+  loops_close_args+=("--close-summary" "$CLOSE_SUMMARY")
+fi
+loops_close_output=""
+if loops_close_output="$("$ROOT/ops/commands/loops.sh" close "${loops_close_args[@]}" 2>&1)"; then
+  loops_close_status="chained"
+else
+  loops_close_status="chain_failed"
+  echo "WARN: loops close chain failed (orchestration manifest is closed, loop scope may need manual close)" >&2
+  echo "$loops_close_output" >&2
+fi
+
 echo "orchestration.loop.close"
 echo "loop_id: $LOOP_ID"
 echo "closed_file: $closed_file"
+echo "loops_close: $loops_close_status"
 if [[ "$FORCE" -eq 1 ]]; then
   echo "status: CLOSED_FORCED"
 else
