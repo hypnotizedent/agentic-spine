@@ -130,12 +130,14 @@ def main(argv: list[str]) -> int:
     state = json.loads(state_file.read_text(encoding="utf-8"))
     packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
     dispatches = state.get("dispatches", [])
-    if not isinstance(dispatches, list) or not dispatches:
-        print("ERROR: wave has no dispatches", file=sys.stderr)
-        return 1
+    if not isinstance(dispatches, list):
+        dispatches = []
 
     selected = None
     if dispatch_id and dispatch_id.startswith("D"):
+        if not dispatches:
+            print("ERROR: --dispatch requires existing dispatches; use --lane for subagent lanes", file=sys.stderr)
+            return 1
         try:
             index = int(dispatch_id[1:]) - 1
         except ValueError:
@@ -143,12 +145,47 @@ def main(argv: list[str]) -> int:
         if 0 <= index < len(dispatches):
             selected = dispatches[index]
     elif lane:
+        # Look for existing dispatch on this lane first.
         for dispatch in dispatches:
             if dispatch.get("lane") == lane:
                 selected = dispatch
         if selected is None:
-            print(f"ERROR: no dispatch found on lane '{lane}'", file=sys.stderr)
-            return 1
+            # Subagent bridge: no dispatch ceremony occurred. Synthesize a
+            # dispatch entry so the receipt pipeline works. Real evidence
+            # (commit refs, run keys) is still required — this is a bridge,
+            # not a bypass.
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            idx = len(dispatches) + 1
+            synth_task_id = task_id_override.strip() or f"D{idx}"
+            selected = {
+                "task_id": synth_task_id,
+                "lane": lane,
+                "task": f"subagent-bridged lane ({lane})",
+                "from_role": "researcher",
+                "to_role": "worker",
+                "transition_gate": "subagent_bridge",
+                "input_refs": {},
+                "expected_output_refs": {},
+                "status": "done",
+                "dispatched_at": now,
+                "dispatched_by_terminal": os.environ.get(
+                    "OPS_TERMINAL_ROLE",
+                    os.environ.get("SPINE_TERMINAL_ROLE", "SPINE-CONTROL-01"),
+                ),
+                "completed_at": now,
+                "result": "subagent_bridged",
+                "run_key": None,
+                "receipt_validated": False,
+                "synthetic": True,
+            }
+            dispatches.append(selected)
+            state["dispatches"] = dispatches
+            # Persist synthetic dispatch so wave close sees lane evidence.
+            state_file.write_text(
+                json.dumps(state, indent=2, default=str) + "\n",
+                encoding="utf-8",
+            )
+            print(f"Synthesized subagent-bridge dispatch {synth_task_id} on lane '{lane}'", file=sys.stderr)
 
     if selected is None:
         print(f"ERROR: dispatch {dispatch_id} not found", file=sys.stderr)
