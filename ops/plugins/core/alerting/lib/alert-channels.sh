@@ -39,14 +39,6 @@ alert_channel_bridge_push() {
   return 0
 }
 
-alert_channel_ha() {
-  local alert_file="$1"
-  local title message
-  title="$(alert_yaml '.title' "$alert_file")"
-  message="$(alert_yaml '.summary' "$alert_file")"
-  ha_service_call "ha" "$title" "$message"
-}
-
 alert_channel_email_intent() {
   local alert_file="$1"
   local intent_dir="$SPINE_OUTBOX/alerts/email-intents"
@@ -98,9 +90,6 @@ alert_dispatch_channel() {
   local alert_file="$2"
 
   case "$channel" in
-    ha)
-      alert_channel_ha "$alert_file"
-      ;;
     bridge-push)
       alert_channel_bridge_push "$alert_file"
       ;;
