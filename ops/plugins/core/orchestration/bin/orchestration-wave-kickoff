@@ -15,6 +15,7 @@ Usage:
   orchestration-wave-kickoff \
     --loop-id <LOOP_ID> \
     --lanes <A,B,C> \
+    [--lane-task <LANE>:"<task text>"] \
     [--repo <path>] \
     [--owner-terminal <terminal-id>] \
     [--base-branch <branch>] \
@@ -23,8 +24,11 @@ Usage:
     [--dry-run]
 
 Options:
-  --dry-run   Validate flags, repo path, worktree policy, and loop scope
-              without creating any artifacts. Exits 0 on success.
+  --lane-task  Assign task text to a lane prompt. Repeatable.
+               Format: LANE:"task description"
+               Example: --lane-task EXECUTION:"Classify and subtract shims"
+  --dry-run    Validate flags, repo path, worktree policy, and loop scope
+               without creating any artifacts. Exits 0 on success.
 
 Creates/validates:
 - orchestration manifest + lane tickets
@@ -47,6 +51,7 @@ BASE_BRANCH="main"
 SESSION_ID=""
 FORCE=0
 DRY_RUN=0
+declare -A LANE_TASKS=()
 
 kickoff_path_block() {
   local detail="${1:-unknown path policy violation}"
@@ -68,6 +73,13 @@ while [[ $# -gt 0 ]]; do
     --owner-terminal) OWNER_TERMINAL="${2:-}"; shift 2 ;;
     --base-branch) BASE_BRANCH="${2:-}"; shift 2 ;;
     --session-id) SESSION_ID="${2:-}"; shift 2 ;;
+    --lane-task)
+      lt_arg="${2:-}"
+      lt_lane="${lt_arg%%:*}"
+      lt_task="${lt_arg#*:}"
+      lt_lane="$(printf '%s' "$lt_lane" | tr '[:lower:]' '[:upper:]')"
+      LANE_TASKS["$lt_lane"]="$lt_task"
+      shift 2 ;;
     --force) FORCE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -461,6 +473,16 @@ PROMPT
 
 Execute only within this lane worktree/branch. Report receipt run keys and changed file list for integration sequencing.
 PROMPT
+
+  # Append per-lane task text if provided via --lane-task.
+  if [[ -n "${LANE_TASKS[$lane]:-}" ]]; then
+    cat >> "$prompt_file" <<TASK
+
+## Task
+
+${LANE_TASKS[$lane]}
+TASK
+  fi
 done
 
 packet_contract="$ROOT/ops/bindings/orchestration.packet.contract.yaml"
