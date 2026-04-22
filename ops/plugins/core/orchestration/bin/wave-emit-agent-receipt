@@ -13,37 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-def _atomic_write_json_locked(path: Path, payload: dict) -> None:
-    """Write JSON atomically under an exclusive file lock.
-
-    Uses the same lock file convention as wave.sh (wave.lock in the same
-    directory) so concurrent collect/status/close operations are serialised.
-    """
-    dir_path = path.parent
-    lock_path = dir_path / "wave.lock"
-    dir_path.mkdir(parents=True, exist_ok=True)
-    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        fd, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=str(dir_path))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, indent=2, default=str)
-                fh.write("\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp_path, str(path))
-        except BaseException:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
-
-
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[5]
 
@@ -187,36 +156,75 @@ def main(argv: list[str]) -> int:
             # dispatch entry so the receipt pipeline works. Real evidence
             # (commit refs, run keys) is still required — this is a bridge,
             # not a bypass.
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            idx = len(dispatches) + 1
-            synth_task_id = task_id_override.strip() or f"D{idx}"
-            selected = {
-                "task_id": synth_task_id,
-                "lane": lane,
-                "task": f"subagent-bridged lane ({lane})",
-                "from_role": "researcher",
-                "to_role": "worker",
-                "transition_gate": "subagent_bridge",
-                "input_refs": {},
-                "expected_output_refs": {},
-                "status": "done",
-                "dispatched_at": now,
-                "dispatched_by_terminal": os.environ.get(
-                    "OPS_TERMINAL_ROLE",
-                    os.environ.get("SPINE_TERMINAL_ROLE", "SPINE-CONTROL-01"),
-                ),
-                "completed_at": now,
-                "result": "subagent_bridged",
-                "run_key": None,
-                "receipt_validated": False,
-                "synthetic": True,
-            }
-            dispatches.append(selected)
-            state["dispatches"] = dispatches
-            # Persist synthetic dispatch under wave lock + atomic write so
-            # concurrent collect/status/close operations are serialised.
-            _atomic_write_json_locked(state_file, state)
-            print(f"Synthesized subagent-bridge dispatch {synth_task_id} on lane '{lane}'", file=sys.stderr)
+            #
+            # The read-modify-write must happen inside one locked section to
+            # avoid overwriting concurrent mutations from collect/status/close.
+            lock_path = state_file.parent / "wave.lock"
+            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                # Reload state under lock — the pre-lock read may be stale.
+                state = json.loads(state_file.read_text(encoding="utf-8"))
+                packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+                dispatches = state.get("dispatches", [])
+                if not isinstance(dispatches, list):
+                    dispatches = []
+
+                # Re-check: another process may have created the dispatch
+                # for this lane while we waited for the lock.
+                for dispatch in dispatches:
+                    if dispatch.get("lane") == lane:
+                        selected = dispatch
+                        break
+
+                if selected is None:
+                    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    idx = len(dispatches) + 1
+                    synth_task_id = task_id_override.strip() or f"D{idx}"
+                    selected = {
+                        "task_id": synth_task_id,
+                        "lane": lane,
+                        "task": f"subagent-bridged lane ({lane})",
+                        "from_role": "researcher",
+                        "to_role": "worker",
+                        "transition_gate": "subagent_bridge",
+                        "input_refs": {},
+                        "expected_output_refs": {},
+                        "status": "done",
+                        "dispatched_at": now,
+                        "dispatched_by_terminal": os.environ.get(
+                            "OPS_TERMINAL_ROLE",
+                            os.environ.get("SPINE_TERMINAL_ROLE", "SPINE-CONTROL-01"),
+                        ),
+                        "completed_at": now,
+                        "result": "subagent_bridged",
+                        "run_key": None,
+                        "receipt_validated": False,
+                        "synthetic": True,
+                    }
+                    dispatches.append(selected)
+                    state["dispatches"] = dispatches
+                    # Atomic write while still holding the lock.
+                    fd, tmp_path = tempfile.mkstemp(
+                        prefix=".state-", suffix=".tmp", dir=str(state_file.parent),
+                    )
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                            json.dump(state, fh, indent=2, default=str)
+                            fh.write("\n")
+                            fh.flush()
+                            os.fsync(fh.fileno())
+                        os.replace(tmp_path, str(state_file))
+                    except BaseException:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+                        raise
+                    print(f"Synthesized subagent-bridge dispatch {synth_task_id} on lane '{lane}'", file=sys.stderr)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
 
     if selected is None:
         print(f"ERROR: dispatch {dispatch_id} not found", file=sys.stderr)
