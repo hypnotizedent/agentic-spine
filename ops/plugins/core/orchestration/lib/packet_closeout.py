@@ -35,6 +35,29 @@ from typing import Any
 
 # ── YAML helpers (pure stdlib, no PyYAML dependency) ─────────────────
 
+def _parse_flow_sequence(val: str) -> list:
+    """Parse a YAML inline flow sequence like [a, b] or ["a", "b"] into a list."""
+    inner = val[1:-1].strip()
+    if not inner:
+        return []
+    items = []
+    for part in inner.split(","):
+        part = part.strip()
+        if part.startswith('"') and part.endswith('"'):
+            part = part[1:-1]
+        elif part.startswith("'") and part.endswith("'"):
+            part = part[1:-1]
+        items.append(part)
+    return items
+
+
+def _parse_value(val: str) -> Any:
+    """Parse a YAML value, handling flow sequences and scalars."""
+    if val.startswith("[") and val.endswith("]"):
+        return _parse_flow_sequence(val)
+    return _unquote(val)
+
+
 def _load_yaml_simple(path: str) -> dict[str, Any]:
     """Load a flat-ish YAML file into a dict.
 
@@ -78,11 +101,11 @@ def _load_yaml_simple(path: str) -> dict[str, Any]:
             key = key.strip()
             val = val.strip()
 
-            if val == "" or val == "[]":
+            if val == "" or val == "[]" or (val.startswith("[") and val.endswith("]")):
                 # Could be a list or object starting on next line
                 current_key = key
-                if val == "[]":
-                    result[key] = []
+                if val.startswith("[") and val.endswith("]"):
+                    result[key] = _parse_flow_sequence(val)
                     current_key = ""
                 else:
                     # Peek ahead to determine type
@@ -107,7 +130,7 @@ def _load_yaml_simple(path: str) -> dict[str, Any]:
                 # Inline dict item: - key: value  OR  start of multi-line dict
                 item_dict: dict[str, Any] = {}
                 k, _, v = item_text.partition(":")
-                item_dict[k.strip()] = _unquote(v.strip())
+                item_dict[k.strip()] = _parse_value(v.strip())
                 # Read continuation lines at deeper indent
                 while i < len(lines):
                     nline = lines[i]
@@ -123,17 +146,17 @@ def _load_yaml_simple(path: str) -> dict[str, Any]:
                         break
                     if ":" in nlstripped:
                         nk, _, nv = nlstripped.partition(":")
-                        item_dict[nk.strip()] = _unquote(nv.strip())
+                        item_dict[nk.strip()] = _parse_value(nv.strip())
                     i += 1
                 current_list.append(item_dict)
             else:
-                current_list.append(_unquote(item_text))
+                current_list.append(_parse_value(item_text))
             continue
 
         # Nested dict under current_key
         if current_dict is not None and ":" in stripped:
             k, _, v = stripped.strip().partition(":")
-            current_dict[k.strip()] = _unquote(v.strip())
+            current_dict[k.strip()] = _parse_value(v.strip())
             continue
 
     # Flush
