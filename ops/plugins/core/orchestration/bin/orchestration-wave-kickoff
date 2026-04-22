@@ -91,13 +91,38 @@ orchestration_assert_git_repo "$REPO_PATH"
 repo_real="$(cd "$REPO_PATH" && pwd -P)"
 primary_checkout="$(git -C "$REPO_PATH" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
 [[ "$repo_real" != *"/.worktrees/"* ]] || kickoff_path_block "legacy .worktrees path denied: $repo_real"
+controller_from_primary=0
 if [[ -n "$primary_checkout" ]]; then
   primary_checkout="$(cd "$primary_checkout" && pwd -P)"
-  [[ "$repo_real" != "$primary_checkout" ]] || kickoff_path_block "main checkout path denied: $repo_real"
+  if [[ "$repo_real" == "$primary_checkout" ]]; then
+    controller_from_primary=1
+  fi
 fi
-[[ "$repo_real" == "${CANONICAL_ROOT}"* ]] || kickoff_path_block "repo path '$repo_real' is outside governed worktree root '$CANONICAL_ROOT'"
-wave_leaf="$(basename "$repo_real")"
-[[ "$wave_leaf" =~ ^WAVE-[A-Z0-9._-]+$ ]] || kickoff_path_block "repo path leaf '$wave_leaf' must be explicit WAVE_ID (WAVE-...)"
+
+wave_leaf=""
+if [[ "$controller_from_primary" -eq 1 ]]; then
+  # Controller terminal calling from primary checkout.
+  # Resolve wave_leaf from the active wave for this loop.
+  wave_state_dir="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/waves"
+  if [[ -d "$wave_state_dir" ]]; then
+    for sf in "$wave_state_dir"/WAVE-*/state.json; do
+      [[ -f "$sf" ]] || continue
+      sf_status="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('status',''))" "$sf" 2>/dev/null || true)"
+      sf_loop="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('loop_id','') or d.get('packet',{}).get('loop_id',''))" "$sf" 2>/dev/null || true)"
+      if [[ "$sf_status" == "active" && "$sf_loop" == "$LOOP_ID" ]]; then
+        wave_leaf="$(basename "$(dirname "$sf")")"
+        break
+      fi
+    done
+  fi
+  if [[ -z "$wave_leaf" ]]; then
+    kickoff_path_block "called from primary checkout but no active wave found for $LOOP_ID. Start a wave first: ops wave start <WAVE_ID> --loop-id $LOOP_ID"
+  fi
+else
+  [[ "$repo_real" == "${CANONICAL_ROOT}"* ]] || kickoff_path_block "repo path '$repo_real' is outside governed worktree root '$CANONICAL_ROOT'"
+  wave_leaf="$(basename "$repo_real")"
+  [[ "$wave_leaf" =~ ^WAVE-[A-Z0-9._-]+$ ]] || kickoff_path_block "repo path leaf '$wave_leaf' must be explicit WAVE_ID (WAVE-...)"
+fi
 
 scope_file="$SPINE_STATE/loop-scopes/${LOOP_ID}.scope.md"
 [[ -f "$scope_file" ]] || orchestration_fail "loop scope missing: $scope_file"
