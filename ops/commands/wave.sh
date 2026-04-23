@@ -703,7 +703,6 @@ def _sync_wave_claim_state(wave_id: str, state: dict, claim: dict, action: str, 
         packet["claimed_paths"] = []
 
     state["packet"] = packet
-    state["wave_packet"] = packet
 
     claim_state = state.get("path_claims") if isinstance(state.get("path_claims"), dict) else {}
     claim_state["status"] = "active" if action == "resynced" else action
@@ -1628,8 +1627,6 @@ state = {
         "expires_at": expires_at,
     },
     "packet": packet,
-    # Compatibility alias: governance contracts use wave_packet naming.
-    "wave_packet": packet,
 }
 
 _atomic_write_json(sf, state)
@@ -1731,8 +1728,6 @@ def _atomic_write_json(path, payload):
 state = json.load(open(sf, "r", encoding="utf-8"))
 workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
 packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
-if not packet and isinstance(state.get("wave_packet"), dict):
-    packet = state["wave_packet"]
 repo = str(workspace.get("repo") or "").strip()
 branch = str(workspace.get("branch") or "").strip()
 wave_id = str(state.get("wave_id") or "").strip()
@@ -1775,7 +1770,6 @@ if workspace_disabled or execution_mode == "operational" or transport == "mailro
         "next_action": "Proceed with dispatch.",
     }
     state["packet"] = packet
-    state["wave_packet"] = packet
     _atomic_write_json(sf, state)
 
     skip_reason = "workspace_disabled" if workspace_disabled else "operational_or_mailroom_transport"
@@ -1904,7 +1898,6 @@ if errors:
     }
 
     state["packet"] = packet
-    state["wave_packet"] = packet
     _atomic_write_json(sf, state)
 
     print("BLOCKED: dispatch pushability preflight failed")
@@ -1915,7 +1908,6 @@ if errors:
     raise SystemExit(1)
 
 state["packet"] = packet
-state["wave_packet"] = packet
 state["preflight"] = {
     "domain": "dispatch-pushability",
     "started_at": now,
@@ -2196,7 +2188,6 @@ try:
         )
     packet["lane_outcomes"] = lane_outcomes
     state["packet"] = packet
-    state["wave_packet"] = packet
 
     role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
     if from_role and not role_flow.get("current_role"):
@@ -2878,7 +2869,6 @@ try:
         )
     packet["lane_outcomes"] = lane_outcomes
     state["packet"] = packet
-    state["wave_packet"] = packet
 
     role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
     if from_role and not role_flow.get("current_role"):
