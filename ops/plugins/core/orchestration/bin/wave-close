@@ -2,64 +2,44 @@
 set -euo pipefail
 
 # wave-close: internal helper for ops wave close.
+# Single caller: ops/commands/wave.sh cmd_close_v2().
 #
-# New interface (7 args — close-time decisions only):
+# Interface (7 args — close-time decisions only):
 #   wave-close <state.json> <force> <dod_override> <lock_override> \
 #              <disposition> <completion_level> <controller_only>
 #
-#   Derivable context is read from environment:
-#     SPINE_REPO, SPINE_STATE,
-#     WAVE_CLOSE_ROLE_RUNTIME_CONTRACT,
-#     WAVE_CLOSE_DISPOSITION_CONTRACT,
-#     WAVE_CLOSE_ALLOWED_DISPOSITIONS_CSV,
-#     WAVE_CLOSE_ALLOWED_LANES_CSV,
-#     WAVE_CLOSE_PATH_CLAIMS_FILE,
-#     WAVE_CLOSE_TRAFFIC_INDEX_FILE,
-#     WAVE_CLOSE_VERIFY_RECEIPT, WAVE_CLOSE_FIXED_IN, WAVE_CLOSE_CLEANUP_REF
-#
-# Legacy interface (15 positional args) still accepted for compatibility.
+# Derivable context is read from environment:
+#   SPINE_REPO, SPINE_STATE,
+#   WAVE_CLOSE_ROLE_RUNTIME_CONTRACT,
+#   WAVE_CLOSE_DISPOSITION_CONTRACT,
+#   WAVE_CLOSE_ALLOWED_DISPOSITIONS_CSV,
+#   WAVE_CLOSE_ALLOWED_LANES_CSV,
+#   WAVE_CLOSE_PATH_CLAIMS_FILE,
+#   WAVE_CLOSE_TRAFFIC_INDEX_FILE,
+#   WAVE_CLOSE_VERIFY_RECEIPT, WAVE_CLOSE_FIXED_IN, WAVE_CLOSE_CLEANUP_REF
 
-if [[ $# -ge 15 ]]; then
-  # Legacy 15-arg mode: callers that haven't migrated yet.
-  sf="$1"
-  sd="$2"
-  force="$3"
-  spine_repo="$4"
-  role_runtime_contract="$5"
-  dod_override_reason="$6"
-  lock_override_reason="$7"
-  disposition="$8"
-  allowed_dispositions_csv="$9"
-  allowed_lanes_csv="${10}"
-  disposition_contract="${11}"
-  completion_level="${12}"
-  path_claims_file="${13}"
-  traffic_index_file="${14}"
-  controller_only="${15}"
-elif [[ $# -ge 7 ]]; then
-  # New 7-arg mode: derive context from env.
-  sf="$1"
-  sd="$(dirname "$sf")"
-  force="$2"
-  dod_override_reason="$3"
-  lock_override_reason="$4"
-  disposition="$5"
-  completion_level="$6"
-  controller_only="$7"
-  spine_repo="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
-  role_runtime_contract="${WAVE_CLOSE_ROLE_RUNTIME_CONTRACT:-$spine_repo/ops/bindings/role.runtime.control.contract.yaml}"
-  disposition_contract="${WAVE_CLOSE_DISPOSITION_CONTRACT:-$spine_repo/ops/bindings/closeout.disposition.contract.yaml}"
-  allowed_dispositions_csv="${WAVE_CLOSE_ALLOWED_DISPOSITIONS_CSV:-landed,deferred,superseded,abandoned}"
-  allowed_lanes_csv="${WAVE_CLOSE_ALLOWED_LANES_CSV:-control,execution,audit,watcher}"
-  _spine_state="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
-  path_claims_file="${WAVE_CLOSE_PATH_CLAIMS_FILE:-$_spine_state/path.claims.yaml}"
-  traffic_index_file="${WAVE_CLOSE_TRAFFIC_INDEX_FILE:-$_spine_state/traffic.index.yaml}"
-else
+if [[ $# -lt 7 ]]; then
   echo "Usage: wave-close <state.json> <force> <dod_override> <lock_override> <disposition> <completion_level> <controller_only>" >&2
   echo "  Derive context via env: SPINE_REPO, SPINE_STATE, WAVE_CLOSE_*" >&2
-  echo "  Legacy: wave-close <sf> <sd> <force> <repo> <contract> <dod> <lock> <disp> <adisp> <alanes> <dcontract> <level> <claims> <traffic> <ctrl>" >&2
   exit 2
 fi
+
+sf="$1"
+sd="$(dirname "$sf")"
+force="$2"
+dod_override_reason="$3"
+lock_override_reason="$4"
+disposition="$5"
+completion_level="$6"
+controller_only="$7"
+spine_repo="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+role_runtime_contract="${WAVE_CLOSE_ROLE_RUNTIME_CONTRACT:-$spine_repo/ops/bindings/role.runtime.control.contract.yaml}"
+disposition_contract="${WAVE_CLOSE_DISPOSITION_CONTRACT:-$spine_repo/ops/bindings/closeout.disposition.contract.yaml}"
+allowed_dispositions_csv="${WAVE_CLOSE_ALLOWED_DISPOSITIONS_CSV:-landed,deferred,superseded,abandoned}"
+allowed_lanes_csv="${WAVE_CLOSE_ALLOWED_LANES_CSV:-control,execution,audit,watcher}"
+_spine_state="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+path_claims_file="${WAVE_CLOSE_PATH_CLAIMS_FILE:-$_spine_state/path.claims.yaml}"
+traffic_index_file="${WAVE_CLOSE_TRAFFIC_INDEX_FILE:-$_spine_state/traffic.index.yaml}"
 
 controller_verify_receipt="${WAVE_CLOSE_VERIFY_RECEIPT:-}"
 fixed_in="${WAVE_CLOSE_FIXED_IN:-}"
