@@ -158,6 +158,41 @@ def _find_execution_tracker(state_root: str) -> dict | None:
     return result
 
 
+def _find_active_wave_kind(state_root: str, loop_id: str) -> str | None:
+    """Find wave_kind from the active wave for this loop, if any."""
+    waves_dir = os.path.join(state_root, "..", "waves")
+    if not os.path.isdir(waves_dir):
+        return None
+
+    try:
+        entries = sorted(os.listdir(waves_dir))
+    except OSError:
+        return None
+
+    for name in entries:
+        if not name.startswith("WAVE-"):
+            continue
+        sf = os.path.join(waves_dir, name, "state.json")
+        if not os.path.isfile(sf):
+            continue
+        try:
+            with open(sf, "r", encoding="utf-8") as f:
+                state = json.loads(f.read())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(state, dict):
+            continue
+        status = str(state.get("status") or "").strip().lower()
+        if status in ("closed", "superseded"):
+            continue
+        pkt = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+        wave_loop = str(pkt.get("loop_id") or "").strip()
+        if wave_loop == loop_id:
+            return str(state.get("wave_kind") or "production").strip()
+
+    return None
+
+
 def _find_packet_prompt(state_root: str, packet_id: str) -> dict | None:
     """Find and parse the packet prompt for context_sources and stop_condition."""
     prompts_dir = os.path.join(state_root, "controller-prompts")
@@ -295,6 +330,11 @@ def compile_assignment(state_root: str) -> dict:
     assignment["loop_priority"] = loop_result.get("priority")
     assignment["loop_evidence_refs"] = loop_result.get("evidence_refs")
     assignment["loop_exclusions"] = loop_result.get("exclusions")
+
+    # Resolve wave_kind from active wave state (if any wave is running for this loop)
+    wave_kind = _find_active_wave_kind(state_root, loop_id)
+    if wave_kind:
+        assignment["wave_kind"] = wave_kind
 
     # Step 2: Find execution tracker
     tracker = _find_execution_tracker(state_root)
