@@ -693,13 +693,13 @@ if inbox_active > 0:
 if inbox_failed > 0:
     anomalies.append(f"INBOX: {inbox_failed} failed item(s) — investigate or archive")
 
-# Check communications queue health
-if comms_slo_status == "incident":
-    if comms_pending > 0 or comms_oldest > 0 or comms_escalations > 0:
-        anomalies.append(f"COMMS QUEUE SIDE-SURFACE INCIDENT ({comms_drain_state}): pending={comms_pending} oldest={comms_oldest}s escalations={comms_escalations}")
-elif comms_slo_status == "warn":
-    if comms_pending > 0 or comms_oldest > 0 or comms_escalations > 0:
-        anomalies.append(f"COMMS QUEUE SIDE-SURFACE WARN: pending={comms_pending} oldest={comms_oldest}s")
+# Communications queue health is rendered in its own scoped section
+# ("COMMS QUEUE (SIDE SURFACE)") with temporal classification and operator
+# treatment notes.  It does NOT promote to the anomalies list because comms
+# queue debt is ambient background, not foundational engine/spine health.
+# Only escalation-bearing incidents (where a human must act NOW to prevent
+# data loss) would warrant anomaly promotion — and that case does not exist
+# in the current contract.
 
 if joined_state_summary.get("coherence_attention"):
     anomalies.append(
