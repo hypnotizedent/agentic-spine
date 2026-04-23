@@ -678,20 +678,19 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
         pass
 
 # ── Anomaly detection ─────────────────────────────────────────────────────
-
-# Check for unlinked gaps
-if gaps_available:
-    for gap in unlinked_gaps:
-        anomalies.append(f"UNLINKED GAP: {gap['id']} ({gap['severity']}) has no parent_loop")
-else:
-    anomalies.append(f"GAP STATE DEGRADED: {gap_state.get('message') or 'shared gaps authority unavailable'}")
-
-# Check for active inbox items (queued or running)
-if inbox_active > 0:
-    anomalies.append(f"INBOX: {inbox_active} active item(s) in queue — {inbox_lanes.get('queued', 0)} queued, {inbox_lanes.get('running', 0)} running")
-
-if inbox_failed > 0:
-    anomalies.append(f"INBOX: {inbox_failed} failed item(s) — investigate or archive")
+#
+# Anomaly promotion policy (277d941c+):
+#   FOUNDATIONAL (promote to anomalies[]): authority failures that break
+#     loop routing, session attach, wave dispatch, or verify — i.e. the
+#     agent cannot operate correctly.
+#   SCOPED (render in own section only): secondary/domain/estate debt
+#     that has its own rendering section and does not block agent operation.
+#
+# Scoped surfaces (already rendered in dedicated sections, NOT promoted):
+#   - Unlinked gaps → OPEN GAPS section shows "(UNLINKED)" per gap
+#   - Gap authority degraded → OPEN GAPS section shows authority/reason
+#   - Inbox active/failed → INBOX ACTIONABLE section shows lane breakdown
+#   - Comms queue incident/warn → COMMS QUEUE (SIDE SURFACE) section
 
 # Communications queue health is rendered in its own scoped section
 # ("COMMS QUEUE (SIDE SURFACE)") with temporal classification and operator
