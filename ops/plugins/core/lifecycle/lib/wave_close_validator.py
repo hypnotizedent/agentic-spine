@@ -795,7 +795,10 @@ def validate_close(
     violations = CloseViolations()
 
     _wave_kind = str(state.get("wave_kind") or "production").strip()
-    is_synthetic = _wave_kind == "synthetic"
+    # Engineering waves get the same ceremony-skip treatment as synthetic:
+    # no preflight, no watcher, no state-machine, no role-flow ceremony.
+    # Dispatch integrity and DoD are still enforced.
+    is_synthetic = _wave_kind in ("synthetic", "engineering")
     checks = state.get("watcher_checks", [])
     pf = state.get("preflight")
     dispatches = state.get("dispatches", [])
