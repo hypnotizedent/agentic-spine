@@ -985,6 +985,43 @@ try:
                 _pkt_yaml_path, _evidence, _pkt_loop_id
             )
 
+            # Auto-materialize integration markers for bridged lanes.
+            # Only fires when packet closeout succeeded AND the dispatch
+            # is synthetic (subagent-bridged) with status done.  This
+            # lets orchestration-loop-close see the lane as integrated
+            # without requiring a separate orchestration-integrate step
+            # (which needs a cherry-pick commit that doesn't exist for
+            # bridged single-branch work).
+            _int_dir = os.path.join(
+                _spine_state_dir, "orchestration", _pkt_loop_id, "integrations"
+            )
+            for _d in dispatches:
+                if not _d.get("synthetic"):
+                    continue
+                if _d.get("status") != "done":
+                    continue
+                _int_lane = str(_d.get("lane", "")).strip()
+                if not _int_lane:
+                    continue
+                _int_file = os.path.join(_int_dir, f"{_int_lane}.yaml")
+                if os.path.isfile(_int_file):
+                    continue
+                os.makedirs(_int_dir, exist_ok=True)
+                _int_commit = ""
+                for _cr in (_d.get("commit_refs") or []):
+                    if _cr:
+                        _int_commit = str(_cr)
+                        break
+                with open(_int_file, "w", encoding="utf-8") as _ifh:
+                    _ifh.write(f"loop_id: {_pkt_loop_id}\n")
+                    _ifh.write(f"lane: {_int_lane}\n")
+                    _ifh.write(f"commit: \"{_int_commit}\"\n")
+                    _ifh.write("status: applied\n")
+                    _ifh.write("mode: bridged_auto\n")
+                    _ifh.write(f"applied_by: \"wave-close\"\n")
+                    _ifh.write(f"applied_at: {now}\n")
+                print(f"  Integration marker: {_int_file}")
+
             _workspace_branch = ""
             _ws = state.get("workspace")
             if isinstance(_ws, dict):
