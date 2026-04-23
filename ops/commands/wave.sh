@@ -4009,7 +4009,13 @@ cmd_close_v2() {
   [[ -x "$close_surface" ]] || { echo "FAIL: wave close helper not found: $close_surface" >&2; exit 1; }
   WAVE_CLOSE_VERIFY_RECEIPT="$controller_verify_receipt" \
   WAVE_CLOSE_FIXED_IN="$fixed_in" \
-  "$close_surface" "$sf" "$sd" "$force" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" "$dod_override_reason" "$lock_override_reason" "$disposition" "$allowed_dispositions_csv" "$(wave_allowed_lanes_csv)" "$DISPOSITION_CONTRACT" "$completion_level" "$PATH_CLAIMS_FILE" "$TRAFFIC_INDEX_FILE" "$controller_only"
+  WAVE_CLOSE_ROLE_RUNTIME_CONTRACT="$ROLE_RUNTIME_CONTRACT" \
+  WAVE_CLOSE_DISPOSITION_CONTRACT="$DISPOSITION_CONTRACT" \
+  WAVE_CLOSE_ALLOWED_DISPOSITIONS_CSV="$allowed_dispositions_csv" \
+  WAVE_CLOSE_ALLOWED_LANES_CSV="$(wave_allowed_lanes_csv)" \
+  WAVE_CLOSE_PATH_CLAIMS_FILE="$PATH_CLAIMS_FILE" \
+  WAVE_CLOSE_TRAFFIC_INDEX_FILE="$TRAFFIC_INDEX_FILE" \
+  "$close_surface" "$sf" "$force" "$dod_override_reason" "$lock_override_reason" "$disposition" "$completion_level" "$controller_only"
 }
 
 # ── Agent-result -> EXEC_RECEIPT bridge ────────────────────────────────
