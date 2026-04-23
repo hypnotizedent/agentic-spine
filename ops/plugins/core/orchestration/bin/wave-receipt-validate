@@ -80,6 +80,7 @@ def validate_receipt(
     commit_ref_pattern: str,
     allowed_blocker_classes: set[str],
     required_evidence_fields: list[str],
+    expected_wave_id: str = "",
 ) -> list[str]:
     errors: list[str] = []
     required = [
@@ -135,6 +136,8 @@ def validate_receipt(
         wave_id = receipt["wave_id"]
         if not isinstance(wave_id, str) or not re.match(r"^WAVE-\d{8}-\d{2}$", wave_id):
             errors.append(f"wave_id must match WAVE-YYYYMMDD-NN pattern, got '{wave_id}'")
+        elif expected_wave_id and wave_id != expected_wave_id:
+            errors.append(f"wave_id mismatch: receipt={wave_id} expected={expected_wave_id}")
 
     commit_pattern = re.compile(commit_ref_pattern)
     if "commit_hashes" in receipt:
@@ -195,11 +198,22 @@ def validate_receipt(
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("Usage: wave-receipt-validate <path-to-receipt.json>", file=sys.stderr)
+    expected_wave_id = ""
+    args = argv[1:]
+    if "--wave-id" in args:
+        idx = args.index("--wave-id")
+        if idx + 1 < len(args):
+            expected_wave_id = args[idx + 1]
+            args = args[:idx] + args[idx + 2:]
+        else:
+            print("FAIL: --wave-id requires a value", file=sys.stderr)
+            return 1
+
+    if len(args) != 1:
+        print("Usage: wave-receipt-validate [--wave-id WAVE-ID] <path-to-receipt.json>", file=sys.stderr)
         return 1
 
-    receipt_path = Path(argv[1])
+    receipt_path = Path(args[0])
     if not receipt_path.is_file():
         print(f"FAIL: File not found: {receipt_path}", file=sys.stderr)
         return 1
@@ -226,6 +240,7 @@ def main(argv: list[str]) -> int:
         commit_ref_pattern=commit_ref_pattern,
         allowed_blocker_classes=allowed_blocker_classes,
         required_evidence_fields=required_evidence_fields,
+        expected_wave_id=expected_wave_id,
     )
 
     if errors:

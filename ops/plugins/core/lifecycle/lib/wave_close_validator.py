@@ -123,6 +123,8 @@ def validate_disposition(disposition: str, allowed: set[str]) -> str | None:
 def validate_receipt(
     receipt: dict[str, Any],
     config: CloseConfig,
+    *,
+    expected_wave_id: str = "",
 ) -> list[str]:
     """Validate a single EXEC_RECEIPT against the close contract.
 
@@ -173,6 +175,8 @@ def validate_receipt(
         wid = receipt["wave_id"]
         if not isinstance(wid, str) or not re.match(r"^WAVE-\d{8}-\d{2}$", wid):
             errors.append(f"bad wave_id: {wid}")
+        elif expected_wave_id and wid != expected_wave_id:
+            errors.append(f"wave_id mismatch: receipt={wid} expected={expected_wave_id}")
 
     if "commit_hashes" in receipt:
         if not isinstance(receipt["commit_hashes"], list):
