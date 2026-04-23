@@ -888,10 +888,13 @@ try:
                 "workload_purposes": {lbl: purpose_by_label.get(lbl, "") for lbl in exec_host_labels},
             },
         }
-        if missing:
-            anomalies.append(
-                f"LAUNCHD REQUIRED LABEL(S) NOT LOADED ({local_role}): {', '.join(missing)}"
-            )
+        # Missing launchd labels are rendered in the DAEMON LOAD section,
+        # not promoted to anomalies. All current required_labels are domain
+        # workloads (alerting, finance, media, comms) — none block loop
+        # routing, session attach, wave dispatch, verify, or authority
+        # coherence.  If a spine-critical daemon is ever added to the
+        # required_labels contract, add a "spine_critical: true" field in
+        # the scheduler registry and promote only those.
 except Exception:
     pass
 
@@ -1194,7 +1197,12 @@ if daemons_summary.get("missing") or daemons_summary.get("non_local_deferred"):
     print("DAEMON LOAD (ESTATE-WIDE)")
     print("-" * 72)
     print(f"  local role:        {daemons_summary.get('local_role', 'unknown')}")
-    print(f"  local missing:     {daemons_summary.get('missing', 0)}")
+    _missing_count = daemons_summary.get('missing', 0)
+    print(f"  local missing:     {_missing_count}")
+    _missing_labels = daemons_summary.get('missing_labels', [])
+    if _missing_labels:
+        for _ml in _missing_labels:
+            print(f"    - {_ml}")
     print(f"  non-local deferred:{len(daemons_summary.get('non_local_deferred', []))}")
     if _daemon_temporal.get("temporal_class"):
         print(f"  temporal class:    {_daemon_temporal.get('temporal_class', '')}")
