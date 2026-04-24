@@ -128,9 +128,20 @@ def _validate_loop_scope(loop_id: str, state_root: str) -> None:
         parts = text.split("---", 2)
         if len(parts) < 3:
             continue
+        raw_frontmatter = parts[1]
         try:
-            fm = yaml.safe_load(parts[1])
-        except yaml.YAMLError:
+            fm = yaml.safe_load(raw_frontmatter)
+        except yaml.YAMLError as exc:
+            raw_loop_id = ""
+            raw_loop_id_match = re.search(
+                r"(?m)^loop_id:\s*(.+?)\s*$", raw_frontmatter
+            )
+            if raw_loop_id_match:
+                raw_loop_id = raw_loop_id_match.group(1).strip().strip("'\"")
+            if raw_loop_id == loop_id or path.name == f"{loop_id}.scope.md":
+                raise ControllerPromptCreateError(
+                    f"malformed YAML frontmatter in scope file '{path.name}': {exc}"
+                )
             continue
         if not isinstance(fm, dict):
             continue

@@ -8,7 +8,7 @@ priority: {{PRIORITY}}
 horizon: now
 execution_readiness: runnable
 execution_mode: orchestrator_subagents
-objective: {{OBJECTIVE}}
+objective: "{{OBJECTIVE}}"
 next_action: ""
 evidence_refs: []
 exclusions: []
